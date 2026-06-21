@@ -12,6 +12,8 @@ import type { WebSocket } from "ws";
 import {
   encode,
   clampDim,
+  encodeFrame,
+  decodeFrame,
   type AccountId,
   type DaemonInfo,
   type DaemonId,
@@ -27,8 +29,6 @@ import {
   type TaskId,
   type Workspace,
   type WorkspaceId,
-  Capability,
-  PROTOCOL_VERSION,
 } from "@coflux/protocol";
 import { createLogger } from "@coflux/core";
 import { Store } from "./store.js";
@@ -91,6 +91,10 @@ export class Hub {
   private sendClient(c: ClientConn, msg: ServerToClient) {
     if (c.ws.readyState === c.ws.OPEN) c.ws.send(encode(msg));
   }
+  /** 数据面：发二进制帧给控制端 */
+  private sendClientFrame(c: ClientConn, frame: Uint8Array) {
+    if (c.ws.readyState === c.ws.OPEN) c.ws.send(frame);
+  }
   private broadcast(accountId: AccountId, msg: ServerToClient) {
     for (const c of this.clients) if (c.subscribed && c.accountId === accountId) this.sendClient(c, msg);
   }
@@ -99,11 +103,6 @@ export class Hub {
   }
   private isDaemonOnline(daemonId: DaemonId): boolean {
     return this.daemons.has(daemonId);
-  }
-  /** 在线 daemon 是否声明了某能力（feature-gate） */
-  private daemonHasCap(daemonId: DaemonId, cap: string): boolean {
-    const d = this.daemons.get(daemonId);
-    return !!d && d.info.capabilities.includes(cap);
   }
   /** 给 client 回一个带它自定 requestId 的失败结果（超时/不支持/掉线等） */
   private relayError(client: ClientConn, kind: RelayKind, clientRequestId: string, message: string) {
@@ -130,7 +129,7 @@ export class Hub {
     for (const dev of this.store.listDevices(accountId)) {
       if (seen.has(dev.id)) continue;
       seen.add(dev.id);
-      list.push({ daemonId: dev.id, name: dev.name, host: dev.host, platform: dev.platform, online: false, protocolVersion: dev.protocolVersion, capabilities: dev.capabilities });
+      list.push({ daemonId: dev.id, name: dev.name, host: dev.host, platform: dev.platform, online: false });
     }
     return list;
   }
@@ -142,6 +141,56 @@ export class Hub {
     if (!d) return false;
     this.sendDaemon(d, msg);
     return true;
+  }
+
+  /* ===================== 数据面（二进制帧）===================== */
+
+  /** daemon → server 的二进制帧：pty.output（转发给控制端）/ pty.replay（取 pending、转 output 并接管控制权） */
+  handleDaemonBinary(conn: DaemonCtx, buf: Buffer): void {
+    const frame = decodeFrame(buf);
+    if (!frame) return;
+    if (frame.type === "pty.output") {
+      const s = this.sessions.get(frame.sessionId);
+      if (!s || s.daemonId !== conn.daemonId || !s.holder) return;
+      if (s.holder.ws.bufferedAmount > config.clientBufferHardLimit) {
+        // 控制端严重落后：断开它（重连后回放 scrollback 自愈），保护服务器内存
+        try {
+          s.holder.ws.close(1013, "client too slow");
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      // 同一帧格式，原始字节直接转发给控制端
+      if (s.holder.ws.readyState === s.holder.ws.OPEN) s.holder.ws.send(buf);
+      return;
+    }
+    if (frame.type === "pty.replay") {
+      const p = this.pendingReplays.get(frame.requestId);
+      if (!p || p.daemonId !== conn.daemonId) return;
+      this.pendingReplays.take(frame.requestId);
+      if (frame.data) this.sendClientFrame(p.client, encodeFrame({ type: "pty.output", sessionId: frame.sessionId, data: frame.data }));
+      // 回放完成后接管控制权（踢掉原控制端）
+      const s = this.sessions.get(frame.sessionId);
+      if (s && !s.closing) this.setHolder(s, p.client);
+      return;
+    }
+    // pty.input 不应从 daemon 上行，忽略
+  }
+
+  /** client → server 的二进制帧：pty.input（校验控制权后转发给会话所属 daemon） */
+  handleClientBinary(client: ClientConn, buf: Buffer): void {
+    const frame = decodeFrame(buf);
+    if (!frame || frame.type !== "pty.input") return;
+    const s = this.sessions.get(frame.sessionId);
+    if (!s || s.accountId !== client.accountId) return;
+    if (s.holder !== client) {
+      this.sendClient(client, { type: "error", message: "无控制权：该任务已被其它客户端接管" });
+      return;
+    }
+    // 同一帧格式，原始字节直接转发给会话所属 daemon
+    const d = this.daemons.get(s.daemonId);
+    if (d && d.ws.readyState === d.ws.OPEN) d.ws.send(buf);
   }
 
   private registerDaemonConn(conn: DaemonCtx, info: DaemonInfo, accountId: AccountId) {
@@ -180,11 +229,10 @@ export class Hub {
         const daemonId = randomUUID();
         const deviceToken = genToken("ck_dev");
         const ts = Date.now();
-        const caps = sanitizeCaps(msg.capabilities);
-        this.store.createDevice({ id: daemonId, accountId, name: msg.name, host: msg.host, platform: msg.platform, tokenHash: hashToken(deviceToken), protocolVersion: msg.protocolVersion, capabilities: caps, createdAt: ts, lastSeenAt: ts, revoked: 0 });
-        log.info("daemon enrolled", { daemonId, name: msg.name, host: msg.host, caps: caps.join(",") });
+        this.store.createDevice({ id: daemonId, accountId, name: msg.name, host: msg.host, platform: msg.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: 0 });
+        log.info("daemon enrolled", { daemonId, name: msg.name, host: msg.host });
         this.sendRaw(conn.ws, { type: "daemon.enrolled", daemonId, deviceToken });
-        this.registerDaemonConn(conn, { daemonId, name: msg.name, host: msg.host, platform: msg.platform, online: true, protocolVersion: msg.protocolVersion, capabilities: caps }, accountId);
+        this.registerDaemonConn(conn, { daemonId, name: msg.name, host: msg.host, platform: msg.platform, online: true }, accountId);
         break;
       }
       case "daemon.auth": {
@@ -194,11 +242,9 @@ export class Hub {
           conn.ws.close(4001, "bad device token");
           return;
         }
-        const caps = sanitizeCaps(msg.capabilities);
-        this.store.setDeviceCaps(device.id, msg.protocolVersion, caps); // daemon 可能已升级
-        log.info("daemon authed", { daemonId: device.id, name: device.name, caps: caps.join(",") });
+        log.info("daemon authed", { daemonId: device.id, name: device.name });
         this.sendRaw(conn.ws, { type: "daemon.authed", daemonId: device.id });
-        this.registerDaemonConn(conn, { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true, protocolVersion: msg.protocolVersion, capabilities: caps }, device.accountId);
+        this.registerDaemonConn(conn, { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true }, device.accountId);
         break;
       }
       case "daemon.resync": {
@@ -260,33 +306,7 @@ export class Hub {
         log.debug("session exit", { sessionId: msg.sessionId, code: msg.exitCode });
         break;
       }
-      case "pty.output": {
-        const s = this.sessions.get(msg.sessionId);
-        if (!s || s.daemonId !== conn.daemonId) return;
-        if (s.holder) {
-          if (s.holder.ws.bufferedAmount > config.clientBufferHardLimit) {
-            // 控制端严重落后：断开它（重连后回放 scrollback 自愈），保护服务器内存
-            try {
-              s.holder.ws.close(1013, "client too slow");
-            } catch {
-              /* ignore */
-            }
-          } else {
-            this.sendClient(s.holder, { type: "pty.output", sessionId: msg.sessionId, data: msg.data });
-          }
-        }
-        break;
-      }
-      case "pty.replay": {
-        const p = this.pendingReplays.get(msg.requestId);
-        if (!p || p.daemonId !== conn.daemonId) return;
-        this.pendingReplays.take(msg.requestId);
-        if (msg.data) this.sendClient(p.client, { type: "pty.output", sessionId: msg.sessionId, data: msg.data });
-        // 回放完成后接管控制权（踢掉原控制端）
-        const s = this.sessions.get(msg.sessionId);
-        if (s && !s.closing) this.setHolder(s, p.client);
-        break;
-      }
+      // pty.output / pty.replay 走二进制数据面（见 handleDaemonBinary）
       case "exec.result":
       case "fs.listed":
       case "fs.read.result": {
@@ -295,20 +315,6 @@ export class Hub {
         if (!p || p.daemonId !== conn.daemonId) return;
         this.pendingRelays.take(msg.requestId);
         this.sendClient(p.client, { ...msg, requestId: p.data.clientRequestId });
-        break;
-      }
-      case "unsupported": {
-        const rel = this.pendingRelays.get(msg.requestId);
-        if (rel && rel.daemonId === conn.daemonId) {
-          this.pendingRelays.take(msg.requestId);
-          this.relayError(rel.client, rel.data.kind, rel.data.clientRequestId, "daemon 不支持该操作");
-          break;
-        }
-        const op = this.pendingOps.get(msg.requestId);
-        if (op && op.daemonId === conn.daemonId) {
-          this.pendingOps.take(msg.requestId);
-          this.sendClient(op.client, { type: "error", message: "daemon 不支持该操作" });
-        }
         break;
       }
     }
@@ -360,7 +366,7 @@ export class Hub {
 
     const device = this.store.getDevice(daemonId);
     if (device && !device.revoked) {
-      this.broadcast(accountId, { type: "daemon.updated", daemon: { daemonId, name: device.name, host: device.host, platform: device.platform, online: false, protocolVersion: device.protocolVersion, capabilities: device.capabilities } });
+      this.broadcast(accountId, { type: "daemon.updated", daemon: { daemonId, name: device.name, host: device.host, platform: device.platform, online: false } });
     } else {
       this.broadcast(accountId, { type: "daemon.removed", daemonId });
     }
@@ -382,7 +388,7 @@ export class Hub {
           return;
         }
         client.accountId = accountId;
-        this.sendClient(client, { type: "auth.ok", accountId, protocolVersion: PROTOCOL_VERSION });
+        this.sendClient(client, { type: "auth.ok", accountId });
         break;
       }
       case "client.subscribe": {
@@ -538,16 +544,7 @@ export class Hub {
         this.broadcast(task.accountId, { type: "task.removed", taskId: task.id });
         break;
       }
-      case "pty.input": {
-        const s = this.sessions.get(msg.sessionId);
-        if (!s || s.accountId !== client.accountId) return;
-        if (s.holder !== client) {
-          this.sendClient(client, { type: "error", message: "无控制权：该任务已被其它客户端接管" });
-          return;
-        }
-        this.routeToSessionDaemon(msg.sessionId, { type: "pty.input", sessionId: msg.sessionId, data: msg.data });
-        break;
-      }
+      // pty.input 走二进制数据面（见 handleClientBinary）
       case "pty.resize": {
         const s = this.sessions.get(msg.sessionId);
         if (!s || s.accountId !== client.accountId || s.holder !== client) return;
@@ -557,7 +554,7 @@ export class Hub {
       case "client.exec": {
         const ws = this.workspaceForClient(client, msg.workspaceId);
         if (!ws) return void this.relayError(client, "exec", msg.requestId, "工作区不存在或不属于本账号");
-        if (!this.daemonHasCap(ws.daemonId, Capability.Exec)) return void this.relayError(client, "exec", msg.requestId, "daemon 不在线或不支持 exec");
+        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "exec", msg.requestId, "daemon 不在线");
         const reqId = randomUUID();
         // exec 可能慢：服务器端钳制命令超时，并让中继超时 = 命令超时 + 宽限，避免命令仍在跑却误报超时
         const execTimeout = Math.min(config.execMaxTimeoutMs, msg.timeoutMs && msg.timeoutMs > 0 ? msg.timeoutMs : config.execDefaultTimeoutMs);
@@ -568,7 +565,7 @@ export class Hub {
       case "client.fs.list": {
         const ws = this.workspaceForClient(client, msg.workspaceId);
         if (!ws) return void this.relayError(client, "fs.list", msg.requestId, "工作区不存在或不属于本账号");
-        if (!this.daemonHasCap(ws.daemonId, Capability.FsList)) return void this.relayError(client, "fs.list", msg.requestId, "daemon 不在线或不支持 fs.list");
+        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.list", msg.requestId, "daemon 不在线");
         const reqId = randomUUID();
         this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: msg.requestId, kind: "fs.list" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
         this.sendDaemon(this.daemons.get(ws.daemonId)!, { type: "fs.list", requestId: reqId, root: ws.path, path: msg.path });
@@ -577,7 +574,7 @@ export class Hub {
       case "client.fs.read": {
         const ws = this.workspaceForClient(client, msg.workspaceId);
         if (!ws) return void this.relayError(client, "fs.read", msg.requestId, "工作区不存在或不属于本账号");
-        if (!this.daemonHasCap(ws.daemonId, Capability.FsRead)) return void this.relayError(client, "fs.read", msg.requestId, "daemon 不在线或不支持 fs.read");
+        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.read", msg.requestId, "daemon 不在线");
         const reqId = randomUUID();
         this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: msg.requestId, kind: "fs.read" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
         this.sendDaemon(this.daemons.get(ws.daemonId)!, { type: "fs.read", requestId: reqId, root: ws.path, path: msg.path });
@@ -700,9 +697,4 @@ export class Hub {
 function basename(p: string): string {
   const parts = p.replace(/[/\\]+$/, "").split(/[/\\]/);
   return parts[parts.length - 1] || p;
-}
-
-/** 入站能力数组去掉非字符串项（与 store.rowToDevice 的过滤对齐） */
-function sanitizeCaps(caps: unknown): string[] {
-  return Array.isArray(caps) ? caps.filter((x): x is string => typeof x === "string") : [];
 }

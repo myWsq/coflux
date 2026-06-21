@@ -8,10 +8,12 @@
 import os from "node:os";
 import { spawn, type IPty } from "node-pty";
 import type { Logger } from "@coflux/core";
-import type { DaemonToServer, SessionId, TaskId } from "@coflux/protocol";
+import { encodeFrame, type DaemonToServer, type SessionId, type TaskId } from "@coflux/protocol";
 
 export interface Sender {
   send(msg: DaemonToServer): void;
+  /** 数据面：发二进制帧（pty.output / pty.replay） */
+  sendFrame(frame: Uint8Array): void;
   bufferedAmount(): number;
   isOpen(): boolean;
 }
@@ -68,7 +70,7 @@ export class SessionManager {
     pty.onData((data) => {
       s.scrollback += data;
       if (s.scrollback.length > this.opts.scrollbackLimit) s.scrollback = s.scrollback.slice(-this.opts.scrollbackLimit);
-      this.sender.send({ type: "pty.output", sessionId, data });
+      this.sender.sendFrame(encodeFrame({ type: "pty.output", sessionId, data }));
       if (this.sender.bufferedAmount() > this.opts.pauseHigh && !s.paused) {
         try {
           s.pty.pause();
@@ -107,7 +109,7 @@ export class SessionManager {
   }
   replay(sessionId: SessionId, requestId: string): void {
     const s = this.sessions.get(sessionId);
-    this.sender.send({ type: "pty.replay", sessionId, requestId, data: s?.scrollback ?? "" });
+    this.sender.sendFrame(encodeFrame({ type: "pty.replay", sessionId, requestId, data: s?.scrollback ?? "" }));
   }
 
   /** 重连后上报仍存活的会话以便服务器重挂 */

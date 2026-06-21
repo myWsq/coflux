@@ -19,6 +19,43 @@ const ROOT = resolve(import.meta.dirname, "..", "..");
 const TSX = join(ROOT, "node_modules", ".bin", "tsx");
 const DEBUG = !!process.env.COFLUX_TEST_DEBUG;
 
+/* 数据面二进制帧编解码（与 packages/protocol 保持一致；harness 用纯 JS 内联一份，
+   刻意不依赖应用内部，符合黑盒定位）。帧体：[kind][sidLen][sessionId][?ridLen][?requestId][payload] */
+const FRAME_KIND = { "pty.output": 1, "pty.input": 2, "pty.replay": 3 };
+const FRAME_TYPE = { 1: "pty.output", 2: "pty.input", 3: "pty.replay" };
+const DATA_PLANE = new Set(["pty.output", "pty.input", "pty.replay"]);
+const _te = new TextEncoder();
+const _td = new TextDecoder();
+function encodeFrame(msg) {
+  const sid = _te.encode(msg.sessionId);
+  const payload = _te.encode(msg.data ?? "");
+  const rid = msg.type === "pty.replay" ? _te.encode(msg.requestId) : null;
+  const out = new Uint8Array(2 + sid.length + (rid ? 1 + rid.length : 0) + payload.length);
+  out[0] = FRAME_KIND[msg.type];
+  out[1] = sid.length;
+  out.set(sid, 2);
+  let off = 2 + sid.length;
+  if (rid) { out[off++] = rid.length; out.set(rid, off); off += rid.length; }
+  out.set(payload, off);
+  return out;
+}
+function decodeFrame(buf) {
+  const u = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  if (u.length < 2) return null;
+  const type = FRAME_TYPE[u[0]];
+  if (!type) return null;
+  const sidLen = u[1];
+  const sessionId = _td.decode(u.subarray(2, 2 + sidLen));
+  let off = 2 + sidLen;
+  if (type === "pty.replay") {
+    const ridLen = u[off++];
+    const requestId = _td.decode(u.subarray(off, off + ridLen));
+    off += ridLen;
+    return { type, sessionId, requestId, data: _td.decode(u.subarray(off)) };
+  }
+  return { type, sessionId, data: _td.decode(u.subarray(off)) };
+}
+
 function spawnApp(rel, env) {
   return spawn(TSX, [join(ROOT, rel)], { env, stdio: DEBUG ? "inherit" : "ignore", detached: true });
 }
@@ -156,13 +193,22 @@ export class Client {
     });
     this.ws.onmessage = (ev) => {
       let m;
-      try { m = JSON.parse(ev.data); } catch { return; }
+      if (typeof ev.data === "string") {
+        try { m = JSON.parse(ev.data); } catch { return; }
+      } else {
+        // 数据面二进制帧 → 还原为 {type,sessionId,data} 以兼容既有 waitFor 断言
+        m = decodeFrame(ev.data);
+        if (!m) return;
+      }
       this.log.push(m);
       this.waiters = this.waiters.filter((w) => !w.try(m));
     };
   }
   send(m) {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    // 数据面 type 自动编码为二进制帧，控制面走 JSON —— 既有调用点无需改动
+    if (DATA_PLANE.has(m.type)) this.ws.send(encodeFrame(m));
+    else this.ws.send(JSON.stringify(m));
   }
   waitFor(pred, label = "?", timeout = 10000) {
     const hit = this.log.find(pred);
