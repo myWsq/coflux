@@ -112,6 +112,8 @@ export type ServerToDaemon =
   | { type: "worktree.add"; requestId: RequestId; repoPath: string; workspaceId: WorkspaceId; name: string; branch: string; createNew: boolean }
   /** fire-and-forget：移除一个 worktree 目录 */
   | { type: "worktree.remove"; repoPath: string; worktreePath: string }
+  /** 热升级：切到某个 worker 版本（仅版本标签，supervisor 在自有注册表里解析；下载+验签是后续步骤）。fire-and-forget */
+  | { type: "worker.upgrade"; version: string }
   | { type: "session.create"; sessionId: SessionId; taskId: TaskId; cwd: string; shell?: string; cols: number; rows: number }
   | { type: "session.close"; sessionId: SessionId }
   | { type: "session.replay"; sessionId: SessionId; requestId: RequestId }
@@ -131,6 +133,8 @@ export type ClientToServer =
   | { type: "client.auth"; clientToken: string }
   | { type: "client.subscribe" }
   | { type: "client.removeDevice"; daemonId: DaemonId }
+  /** 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属） */
+  | { type: "client.upgradeDaemon"; daemonId: DaemonId; version: string }
   /** 导入一个 git 仓库为 project（自动创建主工作区） */
   | { type: "project.import"; daemonId: DaemonId; path: string; name?: string }
   | { type: "project.remove"; projectId: ProjectId }
@@ -270,6 +274,7 @@ const CLIENT_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
   "client.auth": { clientToken: "string" },
   "client.subscribe": {},
   "client.removeDevice": { daemonId: "string" },
+  "client.upgradeDaemon": { daemonId: "string", version: "string" },
   "project.import": { daemonId: "string", path: "string" },
   "project.remove": { projectId: "string" },
   "workspace.create": { projectId: "string", name: "string", branch: "string", createNew: "boolean" },

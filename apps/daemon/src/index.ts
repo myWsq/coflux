@@ -72,6 +72,9 @@ function handleWorkerMsg(m: WorkerToSupervisor): void {
     case "pty.resume":
       sessions.resumeAll();
       return;
+    case "worker.upgrade":
+      switchWorker(m.version);
+      return;
   }
 }
 
@@ -116,33 +119,145 @@ const server = net.createServer((sock) => {
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url)); // apps/daemon/src → 仓库根（用于解析 tsx）
 const WORKER_ENTRY = fileURLToPath(new URL("./worker.ts", import.meta.url));
+
+/** 一个 worker 版本规格 = 怎么把它跑起来（TS-first: node --import tsx <entry>；打包后: 二进制路径） */
+interface WorkerSpec {
+  version: string;
+  cmd: string;
+  args: string[];
+}
+
+/** 内置版本：当前仓库里的 worker */
+const BUILTIN: WorkerSpec = { version: "builtin", cmd: process.execPath, args: ["--import", "tsx", WORKER_ENTRY] };
+
+/**
+ * 已知 worker 版本注册表。将来由"下载 + 验签"步骤填充（验签是硬前置，见 hot-upgrade-design.md）；
+ * 现在 = 内置 + 可经 COFLUX_WORKER_SPECS（JSON: { version: {cmd,args} }）注入，供测试/运维预注册。
+ * 升级只按"版本标签"在此表里解析，绝不执行外部传入的任意路径。
+ */
+const known = new Map<string, WorkerSpec>([[BUILTIN.version, BUILTIN]]);
+try {
+  const raw = process.env.COFLUX_WORKER_SPECS;
+  if (raw) {
+    const obj = JSON.parse(raw) as Record<string, { cmd: string; args: string[] }>;
+    for (const [version, s] of Object.entries(obj)) {
+      if (s && typeof s.cmd === "string" && Array.isArray(s.args)) known.set(version, { version, cmd: s.cmd, args: s.args });
+    }
+  }
+} catch (err) {
+  log.warn("bad COFLUX_WORKER_SPECS", { err: (err as Error).message });
+}
+
+const PROBATION_MS = Number(process.env.COFLUX_WORKER_PROBATION_MS) || 8_000; // 新版本须稳定运行这么久才提交
+const MAX_PENDING_CRASHES = 2; // 观察期内崩溃达此次数 → 回滚
+
+let active: WorkerSpec = BUILTIN; // 当前认定为好的版本
+let pending: WorkerSpec | null = null; // 观察期试用的新版本
 let workerChild: ChildProcess | null = null;
+let runningVersion = active.version; // 当前 workerChild 跑的是哪个版本
 let workerRestarts = 0;
 let workerStartedAt = 0;
+let pendingCrashes = 0;
+let probationTimer: ReturnType<typeof setTimeout> | null = null;
+
+function currentSpec(): WorkerSpec {
+  return pending ?? active;
+}
+
+function writeActiveVersion(): void {
+  try {
+    fs.writeFileSync(path.join(config.home, "worker.active"), active.version);
+  } catch {
+    /* ignore */
+  }
+}
 
 function startWorker(): void {
   if (shuttingDown) return;
+  const spec = currentSpec();
+  runningVersion = spec.version;
   workerStartedAt = Date.now();
-  // TS-first：用 node --import tsx 跑 worker.ts（编译后改为直接跑 .js）
-  workerChild = spawn(process.execPath, ["--import", "tsx", WORKER_ENTRY], {
+  // TS-first：spec 为 node --import tsx <entry>；编译后是二进制路径
+  workerChild = spawn(spec.cmd, spec.args, {
     cwd: ROOT,
     env: { ...process.env, [SUPERVISOR_SOCK_ENV]: sockPath },
     stdio: "inherit",
   });
+  workerChild.on("error", (err) => log.error("worker spawn error", { err: (err as Error).message, version: spec.version }));
   workerChild.on("exit", (code, signal) => {
+    const exitedVersion = runningVersion;
     workerChild = null;
     if (shuttingDown) return;
-    // 运行够久（>10s）视为健康，重置崩溃计数
-    if (Date.now() - workerStartedAt > 10_000) workerRestarts = 0;
-    workerRestarts++;
-    const delay = Math.min(5_000, 200 * workerRestarts); // 崩溃循环保护（验签/回滚的占位，详见 hot-upgrade-design.md）
-    log.warn("worker exited, restarting", { code, signal, delayMs: delay, restarts: workerRestarts });
+    let delay = 200;
+    if (pending && exitedVersion === pending.version) {
+      // 观察期内的新版本崩了 → 计数，超阈值则回滚到 active
+      pendingCrashes++;
+      log.warn("pending worker exited", { version: pending.version, code, signal, crashes: pendingCrashes });
+      if (pendingCrashes >= MAX_PENDING_CRASHES) {
+        log.error("new worker crash-looping, rolling back", { from: pending.version, to: active.version });
+        if (probationTimer) {
+          clearTimeout(probationTimer);
+          probationTimer = null;
+        }
+        pending = null;
+        pendingCrashes = 0;
+      }
+      delay = 300;
+    } else if (pending) {
+      // 旧版本因 switch 被有意杀掉 → 下次 startWorker 用 currentSpec()=pending 拉起新版
+      delay = 200;
+    } else {
+      // 稳定版本崩了：指数退避（运行够久则重置）
+      if (Date.now() - workerStartedAt > 10_000) workerRestarts = 0;
+      workerRestarts++;
+      delay = Math.min(5_000, 200 * workerRestarts);
+      log.warn("worker exited, restarting", { version: active.version, code, signal, delayMs: delay, restarts: workerRestarts });
+    }
     setTimeout(startWorker, delay).unref();
   });
+
+  // 新版本的观察期：稳定运行 PROBATION_MS 则提交为 active
+  if (pending && spec.version === pending.version) {
+    if (probationTimer) clearTimeout(probationTimer);
+    probationTimer = setTimeout(() => {
+      if (!pending) return;
+      log.info("worker upgrade committed", { version: pending.version });
+      active = pending;
+      pending = null;
+      pendingCrashes = 0;
+      workerRestarts = 0;
+      probationTimer = null;
+      writeActiveVersion();
+    }, PROBATION_MS);
+    probationTimer.unref();
+  }
+}
+
+/** 热升级：切到某个已知版本（重启 worker；观察期不过则自动回滚） */
+function switchWorker(version: string): void {
+  const spec = known.get(version);
+  if (!spec) {
+    log.warn("unknown worker version, ignoring upgrade", { version, known: [...known.keys()] });
+    return;
+  }
+  if (spec.version === active.version && !pending) {
+    log.info("already on requested version", { version });
+    return;
+  }
+  log.info("upgrading worker", { from: active.version, to: version });
+  pending = spec;
+  pendingCrashes = 0;
+  // 杀掉当前 worker → exit handler 会用 currentSpec()（=pending）拉起新版
+  try {
+    workerChild?.kill("SIGTERM");
+  } catch {
+    /* ignore */
+  }
 }
 
 server.listen(sockPath, () => {
   log.info("supervisor listening", { sock: sockPath });
+  writeActiveVersion();
   startWorker();
 });
 server.on("error", (err) => {

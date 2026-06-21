@@ -41,6 +41,8 @@ let credentials = creds.load();
 
 /** worker 对存活会话的视图（由 supervisor 事件维护），用于向 server resync */
 const alive = new Map<SessionId, TaskId>();
+/** 是否已拿到 supervisor 的存活快照（resync.list）——两级 resync 必须先有它再向 server resync */
+let supSynced = false;
 
 /* ----------------------------- 发送工具 ----------------------------- */
 function sendServer(m: DaemonToServer): void {
@@ -81,6 +83,7 @@ function connectSupervisor(): void {
   s.on("data", (c) => parser.push(c));
   s.on("close", () => {
     if (sup === s) sup = null;
+    supSynced = false; // 重连 supervisor 后会重新拿快照
     if (shuttingDown) return;
     setTimeout(connectSupervisor, 200);
   });
@@ -100,8 +103,9 @@ function handleSupMsg(m: SupervisorToWorker): void {
     case "resync.list":
       alive.clear();
       for (const x of m.sessions) alive.set(x.sessionId, x.taskId);
+      supSynced = true;
       log.info("supervisor resync", { count: alive.size });
-      // 若已认证（worker 先连上 server、后拿到会话列表的次序），补一次 resync
+      // 已认证则（补）发 server resync —— 这也是先 server 后 supervisor 次序下的唯一一次 resync
       if (authed) sendServer({ type: "daemon.resync", sessions: aliveList() });
       return;
   }
@@ -115,8 +119,13 @@ function aliveList(): { sessionId: SessionId; taskId: TaskId }[] {
 function onAuthed(): void {
   authed = true;
   reconnectAttempts = 0;
-  sendServer({ type: "daemon.resync", sessions: aliveList() });
-  if (alive.size) log.info("resynced sessions to server", { count: alive.size });
+  // 两级 resync 必须有序：先拿到 supervisor 存活快照再向 server resync。
+  // 否则空列表 resync 会让 server 误标任务 exited，随后真 resync 反而触发 session.close 杀掉 PTY。
+  // 若 supervisor 快照尚未到，这里跳过，由 resync.list 到达时补发。
+  if (supSynced) {
+    sendServer({ type: "daemon.resync", sessions: aliveList() });
+    if (alive.size) log.info("resynced sessions to server", { count: alive.size });
+  }
 }
 
 async function route(msg: ServerToDaemon): Promise<void> {
@@ -164,6 +173,10 @@ async function routeAuthed(msg: ServerToDaemon): Promise<void> {
     }
     case "worktree.remove":
       await git.removeWorktree(msg.repoPath, msg.worktreePath);
+      return;
+    case "worker.upgrade":
+      // 转给 supervisor 切版本（会重启本进程）
+      sendSup({ type: "worker.upgrade", version: msg.version });
       return;
     // PTY 相关 → 转给 supervisor
     case "session.create":

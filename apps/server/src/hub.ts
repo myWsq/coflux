@@ -408,6 +408,15 @@ export class Hub {
         this.removeDevice(client, msg.daemonId);
         break;
       }
+      case "client.upgradeDaemon": {
+        const device = this.store.getDevice(msg.daemonId);
+        if (!device || device.accountId !== client.accountId) return;
+        const d = this.daemons.get(msg.daemonId);
+        if (!d) return void this.sendClient(client, { type: "error", message: "daemon 不在线" });
+        this.sendDaemon(d, { type: "worker.upgrade", version: msg.version });
+        log.info("worker upgrade dispatched", { daemonId: msg.daemonId, version: msg.version });
+        break;
+      }
       case "project.import": {
         const d = this.daemons.get(msg.daemonId);
         if (!d || d.accountId !== client.accountId) {
