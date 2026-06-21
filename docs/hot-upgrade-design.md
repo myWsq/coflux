@@ -1,10 +1,11 @@
 # daemon 自动热升级设计（方案 A）
 
-> 状态：方案已定（**A：supervisor 持有 PTY + worker 可升级**），尚未实现。目标：daemon 后台自动升级，且**升级时运行中的 PTY/Agent 会话存活**。
+> 状态：**进程拆分已落地（TS 优先，2026-06）**——supervisor/worker 两进程 + UDS IPC + 两级 resync 跑通并有黑盒测试（杀 worker、PTY 存活、会话重挂）。尚未做：升级投递 / 切换回滚 / 验签 / 打包 / supervisor 的 Rust 端口。目标：daemon 后台自动升级，且**升级时运行中的 PTY/Agent 会话存活**。
 >
 > 关键决策（2026-06 讨论确认）：
 > - **目标基线**：坚持"升级时运行中会话零丢失"，故走方案 A（而非基线方案：launcher + re-exec + agent resume）。
-> - **supervisor 用 Rust**，worker 保持 TS。理由见 [§语言与打包](#语言与打包)。
+> - **supervisor 用 Rust**，worker 保持 TS。理由见 [§语言与打包](#语言与打包)。**落地策略：先用 TS 把进程拆分 + UDS + 两级 resync 验证通过（已完成），Rust 端口作为后续打包优化**——核心 resync 逻辑用现有黑盒测试覆盖，移植时不必重证机制。
+> - **当前实现映射**：supervisor = `apps/daemon/src/index.ts`（持 node-pty + scrollback + 背压）；worker = `apps/daemon/src/worker.ts`（连接/认证/git/exec/fs/编排）；UDS 帧 = `apps/daemon/src/ipc.ts`（长度前缀 + 首字节判别，复用 #1 的 pty 帧）。supervisor `spawn` 并重启 worker，崩溃计数退避（验签/回滚的占位）。
 > - **排序**：先收尾[二进制数据面](ROADMAP.md#1-二进制数据面)，再做 supervisor 拆分——UDS 必然要自己分帧，长度前缀二进制帧是 UDS 与 WS 共用的帧格式，先把它做稳，拆分时 WS 这段不返工。
 > - **签名**：方向定为 ed25519 + supervisor 内置公钥（无现有发布签名体系可复用），但**首版先不做**，列入后续优化项。⚠️ 见 [§安全](#安全)：验签是热升级**真正启用前**的硬前置，未补上前 worker 自动升级不得开启。
 
