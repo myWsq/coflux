@@ -10,7 +10,7 @@
 import { WebSocket } from "ws";
 import { createLogger } from "@coflux/core";
 import os from "node:os";
-import { decode, encode, Capability, PROTOCOL_VERSION, type DaemonToServer, type ServerToDaemon } from "@coflux/protocol";
+import { decode, encode, decodeFrame, type DaemonToServer, type ServerToDaemon } from "@coflux/protocol";
 import { config } from "./config.js";
 import { CredentialStore } from "./creds.js";
 import { GitService } from "./git.js";
@@ -20,8 +20,6 @@ import { listDir, readFileText } from "./fs.js";
 
 const log = createLogger("daemon");
 
-/** 本 daemon 支持的能力。新增原语就在这里加一项，server 会据此 feature-gate。 */
-const CAPABILITIES: string[] = [Capability.Pty, Capability.Exec, Capability.FsList, Capability.FsRead];
 const creds = new CredentialStore(config.credPath, config.home);
 const git = new GitService(config.worktreesDir, log);
 
@@ -34,6 +32,9 @@ let credentials = creds.load();
 const sender: Sender = {
   send: (m: DaemonToServer) => {
     if (socket && socket.readyState === WebSocket.OPEN) socket.send(encode(m));
+  },
+  sendFrame: (frame: Uint8Array) => {
+    if (socket && socket.readyState === WebSocket.OPEN) socket.send(frame);
   },
   bufferedAmount: () => socket?.bufferedAmount ?? 0,
   isOpen: () => !!socket && socket.readyState === WebSocket.OPEN,
@@ -111,9 +112,7 @@ async function routeAuthed(msg: ServerToDaemon): Promise<void> {
     case "session.replay":
       sessions.replay(msg.sessionId, msg.requestId);
       return;
-    case "pty.input":
-      sessions.input(msg.sessionId, msg.data);
-      return;
+    // pty.input 走二进制数据面（见 ws "message" 的 isBinary 分支）
     case "pty.resize":
       sessions.resize(msg.sessionId, msg.cols, msg.rows);
       return;
@@ -135,11 +134,8 @@ async function routeAuthed(msg: ServerToDaemon): Promise<void> {
       sender.send({ type: "fs.read.result", requestId: msg.requestId, ok: r.ok, content: r.content, error: r.error });
       return;
     }
-    default: {
-      // 老 daemon 不认识的、带 requestId 的请求 → 明确 NACK，让 server 优雅失败而非超时
-      const rid = (msg as { requestId?: unknown }).requestId;
-      if (typeof rid === "string") sender.send({ type: "unsupported", requestId: rid, what: (msg as { type?: string }).type ?? "?" });
-    }
+    default:
+      log.warn("unknown message type", { type: (msg as { type?: string }).type });
   }
 }
 
@@ -154,10 +150,10 @@ function connect(): void {
   ws.on("open", () => {
     if (credentials?.deviceToken) {
       log.info("connecting (auth)", { server: config.serverUrl, daemonId: credentials.daemonId });
-      sender.send({ type: "daemon.auth", deviceToken: credentials.deviceToken, protocolVersion: PROTOCOL_VERSION, capabilities: CAPABILITIES });
+      sender.send({ type: "daemon.auth", deviceToken: credentials.deviceToken });
     } else {
       log.info("connecting (enroll)", { server: config.serverUrl, name: config.deviceName });
-      sender.send({ type: "daemon.enroll", enrollmentKey: config.enrollKey, name: config.deviceName, host: os.hostname(), platform: process.platform, protocolVersion: PROTOCOL_VERSION, capabilities: CAPABILITIES });
+      sender.send({ type: "daemon.enroll", enrollmentKey: config.enrollKey, name: config.deviceName, host: os.hostname(), platform: process.platform });
     }
     authDeadline = setTimeout(() => {
       if (!authed) {
@@ -183,7 +179,14 @@ function connect(): void {
   ws.on("pong", () => {
     isAlive = true;
   });
-  ws.on("message", (raw) => {
+  ws.on("message", (raw, isBinary) => {
+    // 数据面：二进制帧（目前仅 pty.input 下行到 daemon）
+    if (isBinary) {
+      if (!authed) return;
+      const frame = decodeFrame(raw as Buffer);
+      if (frame && frame.type === "pty.input") sessions.input(frame.sessionId, frame.data);
+      return;
+    }
     let msg: ServerToDaemon;
     try {
       msg = decode<ServerToDaemon>(raw as Buffer);

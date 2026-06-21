@@ -41,7 +41,7 @@ test("跨 daemon 劫持被拒：resync/session.exit 对他设备的任务无效"
 
   const evil = rawDaemon(PORT);
   await evil.ready;
-  evil.send({ type: "daemon.enroll", enrollmentKey: "dev-enroll", name: "evil", host: "evil", platform: "x", protocolVersion: 5, capabilities: [] });
+  evil.send({ type: "daemon.enroll", enrollmentKey: "dev-enroll", name: "evil", host: "evil", platform: "x" });
   await evil.waitFor((m) => m.type === "daemon.enrolled", "evil enrolled");
   evil.send({ type: "daemon.resync", sessions: [{ sessionId: "evil-sess", taskId }] });
   evil.send({ type: "session.exit", sessionId: victimSession, exitCode: 0 });

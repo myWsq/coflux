@@ -33,8 +33,6 @@ export interface Device {
   host: string;
   platform: string;
   tokenHash: string;
-  protocolVersion: number;
-  capabilities: string[];
   createdAt: number;
   lastSeenAt: number;
   revoked: number;
@@ -73,7 +71,7 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS devices (
         id TEXT PRIMARY KEY, accountId TEXT NOT NULL, name TEXT NOT NULL, host TEXT NOT NULL, platform TEXT NOT NULL,
-        tokenHash TEXT NOT NULL, protocolVersion INTEGER NOT NULL DEFAULT 0, capabilities TEXT NOT NULL DEFAULT '[]',
+        tokenHash TEXT NOT NULL,
         createdAt INTEGER NOT NULL, lastSeenAt INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(accountId);
@@ -99,20 +97,6 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_tasks_project   ON tasks(projectId);
       CREATE INDEX IF NOT EXISTS idx_tasks_session   ON tasks(sessionId);
     `);
-    this.migrate();
-  }
-
-  /** 幂等迁移：给已存在的旧库补新列（CREATE TABLE IF NOT EXISTS 不会改已有表） */
-  private migrate(): void {
-    const add = (sql: string) => {
-      try {
-        this.db.exec(sql);
-      } catch {
-        /* 列已存在，忽略 */
-      }
-    };
-    add("ALTER TABLE devices ADD COLUMN protocolVersion INTEGER NOT NULL DEFAULT 0");
-    add("ALTER TABLE devices ADD COLUMN capabilities TEXT NOT NULL DEFAULT '[]'");
   }
 
   /** 在单个事务里执行 fn（级联删除等多语句操作用它保证原子性） */
@@ -185,8 +169,8 @@ export class Store {
 
   /* ---------------------------- devices ---------------------------- */
   createDevice(d: Device): Device {
-    this.prep("INSERT INTO devices (id, accountId, name, host, platform, tokenHash, protocolVersion, capabilities, createdAt, lastSeenAt, revoked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(d.id, d.accountId, d.name, d.host, d.platform, d.tokenHash, d.protocolVersion, JSON.stringify(d.capabilities), d.createdAt, d.lastSeenAt, d.revoked);
+    this.prep("INSERT INTO devices (id, accountId, name, host, platform, tokenHash, createdAt, lastSeenAt, revoked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(d.id, d.accountId, d.name, d.host, d.platform, d.tokenHash, d.createdAt, d.lastSeenAt, d.revoked);
     return d;
   }
   getDevice(id: DaemonId): Device | undefined {
@@ -206,10 +190,6 @@ export class Store {
   }
   touchDevice(id: DaemonId, ts: number): void {
     this.prep("UPDATE devices SET lastSeenAt = ? WHERE id = ?").run(ts, id);
-  }
-  /** daemon 升级后能力可能变化，认证时刷新 */
-  setDeviceCaps(id: DaemonId, protocolVersion: number, capabilities: string[]): void {
-    this.prep("UPDATE devices SET protocolVersion = ?, capabilities = ? WHERE id = ?").run(protocolVersion, JSON.stringify(capabilities), id);
   }
   revokeDevice(id: DaemonId): void {
     this.prep("UPDATE devices SET revoked = 1 WHERE id = ?").run(id);
@@ -307,13 +287,6 @@ export class Store {
 }
 
 function rowToDevice(row: any): Device {
-  let capabilities: string[] = [];
-  try {
-    const parsed = JSON.parse(row.capabilities ?? "[]");
-    if (Array.isArray(parsed)) capabilities = parsed.filter((x) => typeof x === "string");
-  } catch {
-    /* ignore */
-  }
   return {
     id: row.id,
     accountId: row.accountId,
@@ -321,8 +294,6 @@ function rowToDevice(row: any): Device {
     host: row.host,
     platform: row.platform,
     tokenHash: row.tokenHash,
-    protocolVersion: row.protocolVersion ?? 0,
-    capabilities,
     createdAt: row.createdAt,
     lastSeenAt: row.lastSeenAt,
     revoked: row.revoked,

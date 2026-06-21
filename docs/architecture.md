@@ -56,7 +56,7 @@
   PTY 字节流：pty.input / pty.output / pty.replay，按 sessionId 多路复用
 ```
 
-MVP 中两者复用同一条 WebSocket。概念上分清，便于日后把数据面换成二进制分帧或独立通道（见 OPEN_QUESTIONS B6）。
+两者复用同一条 WebSocket：控制面走 JSON 文本帧，**数据面（`pty.output`/`pty.input`/`pty.replay`）走二进制帧**（长度前缀帧体，见 §6），按 WS 的 `isBinary` 分流。
 
 ## 5. 数据模型
 
@@ -76,23 +76,23 @@ Account      隔离单元（单用户单账号，留多账号位）
 - Task 状态机：`idle`（建好未启动）→ `running`（有存活 session）→ `exited`（session 退出）。对 `exited` 的 task 再 `task.start` 即重跑。
 - 所有 client 可见/可达范围按 `accountId` 过滤。
 
-## 6. 线协议（`packages/protocol`，PROTOCOL_VERSION=2）
+## 6. 线协议（`packages/protocol`）
 
-所有消息 JSON 编码，用 `type` 区分；PTY 数据带 `sessionId` 多路复用。
+控制面消息 JSON 编码、用 `type` 区分；**数据面（`pty.output`/`pty.input`/`pty.replay`）走二进制帧**（`encodeFrame`/`decodeFrame`），按 `sessionId` 多路复用。下方控制面消息清单不含数据面三条。
 
-**Daemon → Server**
-`daemon.enroll {enrollmentKey,name,host,platform}` · `daemon.auth {deviceToken}` · `daemon.resync {sessions:[{sessionId,taskId}]}` · `workspace.validated` · `session.started` · `session.exit` · `pty.output` · `pty.replay {requestId}`
+**Daemon → Server**（控制面）
+`daemon.enroll {enrollmentKey,name,host,platform}` · `daemon.auth {deviceToken}` · `daemon.resync {sessions:[{sessionId,taskId}]}` · `workspace.validated` · `session.started` · `session.exit`
 
-**Server → Daemon**
-`daemon.enrolled {daemonId,deviceToken}` · `daemon.authed {daemonId}` · `daemon.authError {needEnroll}` · `workspace.validate {requestId,path}` · `session.create` · `session.close` · `session.replay {requestId}` · `pty.input` · `pty.resize`
+**Server → Daemon**（控制面）
+`daemon.enrolled {daemonId,deviceToken}` · `daemon.authed {daemonId}` · `daemon.authError {needEnroll}` · `workspace.validate {requestId,path}` · `session.create` · `session.close` · `session.replay {requestId}` · `pty.resize`
 
-**Client → Server**
-`client.auth {clientToken}` · `client.subscribe` · `client.removeDevice` · `workspace.create` · `workspace.remove` · `task.create` · `task.start` · `task.attach` · `task.stop` · `task.remove` · `pty.input` · `pty.resize`
+**Client → Server**（控制面）
+`client.auth {clientToken}` · `client.subscribe` · `client.removeDevice` · `workspace.create` · `workspace.remove` · `task.create` · `task.start` · `task.attach` · `task.stop` · `task.remove` · `pty.resize`
 
-**Server → Client**
-`auth.ok {accountId}` · `auth.error` · `state.snapshot {daemons,workspaces,tasks}` · `daemon.updated` · `daemon.removed` · `workspace.created` · `workspace.removed` · `task.updated` · `task.removed` · `pty.output` · `error`
+**Server → Client**（控制面）
+`auth.ok {accountId}` · `auth.error` · `state.snapshot {daemons,workspaces,tasks}` · `daemon.updated` · `daemon.removed` · `workspace.created` · `workspace.removed` · `task.updated` · `task.removed` · `error`
 
-数据面 `data` 为原始终端文本字符串，由 `JSON.stringify` 转义控制字符。
+**数据面（二进制帧，多路复用按 `sessionId`）**：`pty.output`（daemon→server→client）· `pty.input`（client→server→daemon）· `pty.replay`（daemon→server，scrollback；server 转成 `pty.output` 帧发给 client）。帧体 `[kind][sidLen][sessionId][?ridLen][?requestId][payload]`，payload 为原始终端字节（UTF-8），不再经 JSON 转义。server 中继时只校验归属、原样转发字节。
 
 ## 7. 两个核心流程
 
