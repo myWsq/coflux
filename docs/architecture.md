@@ -132,9 +132,12 @@ coflux/
 │   │   ├── transport.ts       # WS 接入样板：解码/校验/派发 + 心跳 + 认证截止
 │   │   ├── hub.ts             # 领域编排/路由：账号/设备/项目/工作区/任务/会话
 │   │   └── index.ts           # 装配：config→store→hub→transport→心跳→信号
-│   ├── daemon/src/
-│   │   ├── config.ts          # 集中配置
-│   │   └── index.ts           # node-pty + git(worktree) + 外连/认证/重连 + 心跳/背压
+│   ├── daemon/src/            # 拆成 supervisor + worker 两进程（热升级方案 A，TS 优先）
+│   │   ├── index.ts           # supervisor：持 node-pty + scrollback + 背压；监听 UDS；起/管/重启 worker
+│   │   ├── worker.ts          # worker：外连服务器/认证/重连 + git + exec + fs + 编排（纯 JS，PTY 操作转 supervisor）
+│   │   ├── ipc.ts             # worker↔supervisor 本地 UDS 帧（长度前缀 + 复用 #1 的 pty 帧）+ 两级 resync 消息
+│   │   ├── sessions.ts        # SessionManager：PTY 生命周期 + scrollback（活在 supervisor）
+│   │   └── config/creds/git/exec/fs.ts
 │   └── web/src/App.tsx        # 状态驱动 UI：project→workspace→task→终端
 ├── tests/src/                 # 黑盒集成测试（跨重构有效）：harness + *.test.mjs
 ├── scripts/fix-pty-perms.mjs  # postinstall 修复 node-pty prebuild 执行位

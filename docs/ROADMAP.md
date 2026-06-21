@@ -23,7 +23,7 @@
 
 ### 2. 自动热升级（已定 **方案 A：supervisor 持有 PTY + worker 可升级**）
 让 daemon 后台自动升级、且**升级时运行中会话存活**。详见 [hot-upgrade-design.md](hot-upgrade-design.md)。
-- [ ] **supervisor/worker 拆分**：supervisor（Rust）持有 PTY(portable-pty) + scrollback；worker（TS）承载连接/认证/git/fs/协议/编排。本地 UDS IPC，**两级 resync**（复用现有 daemon↔server 模式下沉一层）。
+- [x] **supervisor/worker 拆分（TS 优先，已完成 2026-06）**：supervisor(`index.ts`，持 node-pty+scrollback) + worker(`worker.ts`，连接/认证/git/exec/fs/编排) 两进程，本地 UDS IPC(`ipc.ts`)，**两级 resync** 跑通（worker 重启 → 连 supervisor 取回会话 + 连 server resync）。supervisor 起/管/重启 worker(崩溃计数退避)。黑盒测试覆盖"杀 worker、PTY 存活、会话重挂"。Rust 端口见下方决策，留作后续打包优化。
 - [ ] **升级投递**：server 下发 `worker.upgrade{version, url, sha256, signature}`。
 - [ ] **切换 + 回滚**：新版崩溃循环则自动回滚。
 - [ ] **验签（后续优化项，但为升级启用的硬前置）**：supervisor 内置公钥 ed25519 验签（防中心服务器被攻破 → 全网 RCE）。⚠️ 验签补齐前 supervisor 只跑本地已装 worker、**不接升级下载**。

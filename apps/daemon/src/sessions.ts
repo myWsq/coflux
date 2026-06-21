@@ -1,28 +1,27 @@
 /**
- * SessionManager —— PTY 会话的生命周期管理。
+ * SessionManager —— PTY 会话的生命周期管理（活在 supervisor 进程）。
  *
- * 持有 PTY、scrollback 环形缓冲、背压（按发送缓冲水位 pause/resume PTY）。
- * 通过注入的 Sender 把输出/事件发回服务器，从而与连接层解耦（连接重连时 Sender 自动指向新 socket）。
- * 会话表在此模块内常驻，跨 WS 重连存活 —— 断线续连的根基。
+ * 持有 PTY、scrollback 环形缓冲。输出/事件经注入的 Sender 发给 worker（UDS）。
+ * 背压由 worker 根据其 server WS 缓冲水位驱动（pauseAll/resumeAll）—— 真正的拥塞点在
+ * worker→server 那段，本进程的 UDS 是本地快通道，故这里不自行轮询缓冲。
+ * 会话表常驻 supervisor，跨 worker 重连/升级存活 —— 两级 resync 的根基。
  */
 import os from "node:os";
 import { spawn, type IPty } from "node-pty";
 import type { Logger } from "@coflux/core";
-import { encodeFrame, type DaemonToServer, type SessionId, type TaskId } from "@coflux/protocol";
+import { encodeFrame, type SessionId, type TaskId } from "@coflux/protocol";
+import type { SupervisorToWorker } from "./ipc.js";
 
 export interface Sender {
-  send(msg: DaemonToServer): void;
-  /** 数据面：发二进制帧（pty.output / pty.replay） */
+  /** 控制事件（session.started / session.exit / resync.list） */
+  send(msg: SupervisorToWorker): void;
+  /** pty 数据帧（pty.output / pty.replay） */
   sendFrame(frame: Uint8Array): void;
-  bufferedAmount(): number;
-  isOpen(): boolean;
 }
 
 export interface SessionOptions {
   defaultShell: string;
   scrollbackLimit: number;
-  pauseHigh: number;
-  resumeLow: number;
   maxSessions: number;
 }
 
@@ -35,12 +34,8 @@ interface Live {
 
 export class SessionManager {
   private sessions = new Map<SessionId, Live>();
-  private drainTimer: ReturnType<typeof setInterval>;
 
-  constructor(private sender: Sender, private opts: SessionOptions, private log: Logger) {
-    this.drainTimer = setInterval(() => this.drain(), 100);
-    this.drainTimer.unref();
-  }
+  constructor(private sender: Sender, private opts: SessionOptions, private log: Logger) {}
 
   create(sessionId: SessionId, taskId: TaskId, cwd: string, shell: string, cols: number, rows: number): void {
     if (this.sessions.size >= this.opts.maxSessions) {
@@ -71,14 +66,6 @@ export class SessionManager {
       s.scrollback += data;
       if (s.scrollback.length > this.opts.scrollbackLimit) s.scrollback = s.scrollback.slice(-this.opts.scrollbackLimit);
       this.sender.sendFrame(encodeFrame({ type: "pty.output", sessionId, data }));
-      if (this.sender.bufferedAmount() > this.opts.pauseHigh && !s.paused) {
-        try {
-          s.pty.pause();
-        } catch {
-          /* ignore */
-        }
-        s.paused = true;
-      }
     });
     pty.onExit(({ exitCode }) => {
       this.sessions.delete(sessionId);
@@ -112,14 +99,25 @@ export class SessionManager {
     this.sender.sendFrame(encodeFrame({ type: "pty.replay", sessionId, requestId, data: s?.scrollback ?? "" }));
   }
 
-  /** 重连后上报仍存活的会话以便服务器重挂 */
+  /** worker 重连后上报仍存活的会话以便重挂（两级 resync 的下层） */
   resyncList(): { sessionId: SessionId; taskId: TaskId }[] {
     return [...this.sessions.entries()].map(([sessionId, s]) => ({ sessionId, taskId: s.taskId }));
   }
 
-  /** 发送缓冲降下来后恢复被背压暂停的会话（仅在连接打开时） */
-  private drain(): void {
-    if (!this.sender.isOpen() || this.sender.bufferedAmount() > this.opts.resumeLow) return;
+  /** 背压：暂停全部 PTY（由 worker 在 server WS 缓冲过高时驱动） */
+  pauseAll(): void {
+    for (const s of this.sessions.values()) {
+      if (s.paused) continue;
+      try {
+        s.pty.pause();
+      } catch {
+        /* ignore */
+      }
+      s.paused = true;
+    }
+  }
+  /** 背压：恢复全部 PTY */
+  resumeAll(): void {
     for (const s of this.sessions.values()) {
       if (!s.paused) continue;
       try {
@@ -131,9 +129,8 @@ export class SessionManager {
     }
   }
 
-  /** 优雅关闭：停 drain、杀全部 PTY */
+  /** 优雅关闭：杀全部 PTY */
   shutdown(): void {
-    clearInterval(this.drainTimer);
     for (const s of this.sessions.values()) {
       try {
         s.pty.kill();
