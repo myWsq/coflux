@@ -25,7 +25,9 @@ export type WorkerToSupervisor =
   | { type: "resync.request" }
   /** 背压：worker 的 server WS 缓冲水位驱动 supervisor 暂停/恢复全部 PTY */
   | { type: "pty.pause" }
-  | { type: "pty.resume" };
+  | { type: "pty.resume" }
+  /** 热升级：worker 把 server 下发的版本切换指令转给 supervisor */
+  | { type: "worker.upgrade"; version: string };
 
 /** supervisor → worker 控制消息（JSON） */
 export type SupervisorToWorker =

@@ -111,7 +111,7 @@ export async function startStack(opts = {}) {
   const db = join(dataDir, "coflux.db");
 
   const serverEnv = { ...process.env, COFLUX_PORT: String(port), COFLUX_DB: db, COFLUX_ENROLL_KEY: enrollKey, COFLUX_CLIENT_TOKEN: clientToken };
-  const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`, COFLUX_ENROLL_KEY: enrollKey, COFLUX_HOME: home, COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev" };
+  const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`, COFLUX_ENROLL_KEY: enrollKey, COFLUX_HOME: home, COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev", ...(opts.daemonEnv ?? {}) };
 
   const ref = { server: null, daemon: null };
   ref.server = spawnApp("apps/server/src/index.ts", serverEnv);

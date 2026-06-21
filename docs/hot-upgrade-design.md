@@ -1,6 +1,6 @@
 # daemon 自动热升级设计（方案 A）
 
-> 状态：**进程拆分已落地（TS 优先，2026-06）**——supervisor/worker 两进程 + UDS IPC + 两级 resync 跑通并有黑盒测试（杀 worker、PTY 存活、会话重挂）。尚未做：升级投递 / 切换回滚 / 验签 / 打包 / supervisor 的 Rust 端口。目标：daemon 后台自动升级，且**升级时运行中的 PTY/Agent 会话存活**。
+> 状态：**进程拆分 + 升级投递 + 切换/回滚已落地（TS 优先，2026-06）**——supervisor/worker 两进程 + UDS IPC + 两级 resync + 版本切换 + 观察期回滚,均有黑盒测试(杀 worker 存活、升级提交、坏版本回滚,会话均不丢)。尚未做：**下载 + 验签**(硬前置,故当前只在本地已知版本间切换、不接下载) / 打包 / supervisor 的 Rust 端口。目标：daemon 后台自动升级，且**升级时运行中的 PTY/Agent 会话存活**。
 >
 > 关键决策（2026-06 讨论确认）：
 > - **目标基线**：坚持"升级时运行中会话零丢失"，故走方案 A（而非基线方案：launcher + re-exec + agent resume）。

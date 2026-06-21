@@ -24,9 +24,9 @@
 ### 2. 自动热升级（已定 **方案 A：supervisor 持有 PTY + worker 可升级**）
 让 daemon 后台自动升级、且**升级时运行中会话存活**。详见 [hot-upgrade-design.md](hot-upgrade-design.md)。
 - [x] **supervisor/worker 拆分（TS 优先，已完成 2026-06）**：supervisor(`index.ts`，持 node-pty+scrollback) + worker(`worker.ts`，连接/认证/git/exec/fs/编排) 两进程，本地 UDS IPC(`ipc.ts`)，**两级 resync** 跑通（worker 重启 → 连 supervisor 取回会话 + 连 server resync）。supervisor 起/管/重启 worker(崩溃计数退避)。黑盒测试覆盖"杀 worker、PTY 存活、会话重挂"。Rust 端口见下方决策，留作后续打包优化。
-- [ ] **升级投递**：server 下发 `worker.upgrade{version, url, sha256, signature}`。
-- [ ] **切换 + 回滚**：新版崩溃循环则自动回滚。
-- [ ] **验签（后续优化项，但为升级启用的硬前置）**：supervisor 内置公钥 ed25519 验签（防中心服务器被攻破 → 全网 RCE）。⚠️ 验签补齐前 supervisor 只跑本地已装 worker、**不接升级下载**。
+- [x] **升级投递（已完成 2026-06）**：`client.upgradeDaemon{version}` → server → `worker.upgrade{version}` → worker 转 supervisor。**仅传版本标签**，supervisor 在自有注册表里解析，绝不执行外部传入路径（守住验签前的 RCE 口子）。注册表现为内置 + `COFLUX_WORKER_SPECS` 注入；将来由"下载+验签"填充。`url/sha256/signature` 随下载步骤再加。
+- [x] **切换 + 回滚（已完成 2026-06）**：supervisor `switchWorker(version)` 重启 worker 到新版；**观察期**（`PROBATION_MS`）内稳定运行才提交为 active，崩溃达阈值则自动回滚到上一好版本。会话全程在 supervisor 不受影响。黑盒测试覆盖"升级提交"与"坏版本回滚"，会话均存活。
+- [ ] **验签（后续优化项，但为升级启用的硬前置）**：supervisor 内置公钥 ed25519 验签（防中心服务器被攻破 → 全网 RCE）。⚠️ 验签补齐前 supervisor 只跑本地已装 worker、**不接升级下载**（当前正是如此：只在已知版本间切换）。
 - [ ] **打包 + launcher**：worker 打成可替换产物，supervisor 由 systemd/launchd 拉起。
 
 **已定决策（2026-06 讨论确认，详见 hot-upgrade-design.md）**：
