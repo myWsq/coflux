@@ -1,0 +1,9 @@
+target/
+node_modules/
+**/node_modules/
+**/*.tsbuildinfo
+.git/
+data/
+*.db
+*.db-*
+*.log

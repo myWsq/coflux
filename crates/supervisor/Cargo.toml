@@ -1,0 +1,19 @@
+[package]
+name = "coflux-supervisor"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "coflux-supervisor"
+path = "src/main.rs"
+
+[dependencies]
+coflux-protocol = { path = "../protocol" }
+portable-pty = "0.8"
+serde_json.workspace = true
+signal-hook = "0.3"
+ureq = "2"
+sha2 = "0.10"
+ed25519-dalek = "2"
+hex = "0.4"

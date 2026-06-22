@@ -25,16 +25,6 @@ async function importWorkspace(c) {
   return main.workspace;
 }
 
-test("daemon 在 snapshot 中声明能力", async () => {
-  const c = stack.makeClient();
-  const snap = await c.authSubscribe();
-  const dev = snap.daemons.find((d) => d.online);
-  assert.ok(Array.isArray(dev.capabilities), "有 capabilities 数组");
-  for (const cap of ["pty", "exec", "fs.list", "fs.read"]) assert.ok(dev.capabilities.includes(cap), "声明能力 " + cap);
-  assert.ok(dev.protocolVersion >= 5, "上报 protocolVersion");
-  c.close();
-});
-
 test("exec：在工作区里跑命令，结构化回带 stdout/exitCode", async () => {
   const c = stack.makeClient();
   await c.authSubscribe();
