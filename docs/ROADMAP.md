@@ -27,7 +27,8 @@
 - [x] **升级投递（已完成 2026-06）**：`client.upgradeDaemon{version}` → server → `worker.upgrade{version}` → worker 转 supervisor。**仅传版本标签**，supervisor 在自有注册表里解析，绝不执行外部传入路径（守住验签前的 RCE 口子）。注册表现为内置 + `COFLUX_WORKER_SPECS` 注入；将来由"下载+验签"填充。`url/sha256/signature` 随下载步骤再加。
 - [x] **切换 + 回滚（已完成 2026-06）**：supervisor `switchWorker(version)` 重启 worker 到新版；**观察期**（`PROBATION_MS`）内稳定运行才提交为 active，崩溃达阈值则自动回滚到上一好版本。会话全程在 supervisor 不受影响。黑盒测试覆盖"升级提交"与"坏版本回滚"，会话均存活。
 - [ ] **验签（后续优化项，但为升级启用的硬前置）**：supervisor 内置公钥 ed25519 验签（防中心服务器被攻破 → 全网 RCE）。⚠️ 验签补齐前 supervisor 只跑本地已装 worker、**不接升级下载**（当前正是如此：只在已知版本间切换）。
-- [ ] **打包 + launcher**：worker 打成可替换产物，supervisor 由 systemd/launchd 拉起。
+- [x] **打包 + launcher（已完成 2026-06）**：`cargo build --release` 出两个二进制（supervisor 1M + worker 2M）；`deploy/install.sh` 自动识别 systemd(Linux user service)/launchd(macOS LaunchAgent)，装二进制 + 写 env(600)/wrapper + 单元，崩溃自启。系统只看护 supervisor。
+- [ ] **远程下载产物**：升级投递接上真实下载（配合验签）。当前只在本地已知版本间切换。
 
 **已定决策（2026-06 讨论确认，详见 hot-upgrade-design.md）**：
 - **排序**：先收尾二进制数据面（条目 1），再做 supervisor 拆分——UDS 与 WS 共用长度前缀帧，先做稳不返工。
