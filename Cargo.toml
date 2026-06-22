@@ -1,0 +1,15 @@
+# Rust workspace —— daemon 全 Rust 化（热升级 #2 的打包基础：无 node 运行时依赖）。
+# 渐进式：UDS/WS 都是语言中立线协议，故可一次 Rust 化一个进程，另一个保持 TS，
+# 现有黑盒测试照样端到端验证。先 protocol crate，再 supervisor，再 worker。
+[workspace]
+resolver = "2"
+members = ["crates/protocol"]
+
+[workspace.package]
+edition = "2021"
+version = "0.0.0"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
