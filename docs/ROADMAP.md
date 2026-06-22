@@ -27,7 +27,7 @@
 - [x] **升级投递（已完成 2026-06）**：`client.upgradeDaemon{version}` → server → `worker.upgrade{version}` → worker 转 supervisor。**仅传版本标签**，supervisor 在自有注册表里解析，绝不执行外部传入路径（守住验签前的 RCE 口子）。注册表现为内置 + `COFLUX_WORKER_SPECS` 注入；将来由"下载+验签"填充。`url/sha256/signature` 随下载步骤再加。
 - [x] **切换 + 回滚（已完成 2026-06）**：supervisor `switchWorker(version)` 重启 worker 到新版；**观察期**（`PROBATION_MS`）内稳定运行才提交为 active，崩溃达阈值则自动回滚到上一好版本。会话全程在 supervisor 不受影响。黑盒测试覆盖"升级提交"与"坏版本回滚"，会话均存活。
 - [x] **远程下载 + ed25519 验签（已完成 2026-06）**：`worker.upgrade` 扩 `url/sha256/signature`。带 url → supervisor 起线程 `ureq` 下载 → 校 sha256 → `ed25519-dalek` 验签（公钥 baked-in 占位 / env `COFLUX_WORKER_PUBKEY` 覆盖）→ 落 `HOME/workers/<version>/` → 走观察期切换/回滚。**验签不过一律拒绝、保持当前版本**（防中心服务器被攻破 → 全网 RCE）。黑盒覆盖：正向升级 + **篡改(sha256)被拒** + **签名不符被拒**，会话均不受影响。⚠️ 占位公钥为全 0 → 默认下载升级被拒，发布签名流程建好后换入真公钥。
-- [x] **打包 + launcher（已完成 2026-06）**：`cargo build --release` 出两个二进制（supervisor 1M + worker 2M）；`deploy/install.sh` 自动识别 systemd(Linux user service)/launchd(macOS LaunchAgent)，装二进制 + 写 env(600)/wrapper + 单元，崩溃自启。系统只看护 supervisor。
+- [x] **打包 + 安装 CLI（已完成 2026-06）**：`cargo build --release` 出两个二进制（supervisor 1M + worker 2M）；用户侧 `cofluxd`（npm，零依赖 node CLI）`up/update/status/logs/down/uninstall`——下载预编译二进制（或 `--bin-dir` 用本地产物）→ 写 env(600)/wrapper → 装 systemd(Linux)/launchd(macOS) 服务、崩溃自启。系统只看护 supervisor。
 
 **已定决策（2026-06 讨论确认，详见 hot-upgrade-design.md）**：
 - **排序**：先收尾二进制数据面（条目 1），再做 supervisor 拆分——UDS 与 WS 共用长度前缀帧，先做稳不返工。

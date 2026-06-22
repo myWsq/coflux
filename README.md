@@ -14,8 +14,22 @@
 | `crates/protocol` | Rust 线协议真相源：serde 类型 + 帧 codec + UDS 消息 |
 | `crates/supervisor` | Rust daemon 的 supervisor：portable-pty 起 PTY + scrollback + 起/管 worker（极少升级） |
 | `crates/worker` | Rust daemon 的 worker（tokio）：连服务器/认证/重连 + git/exec/fs + 编排（频繁升级） |
+| `packages/cli` | `cofluxd`：用户侧管理 CLI（npm，零依赖 node）——装/起/停/升级 daemon |
 
 server/web 是 TypeScript（pnpm workspace）；**daemon 全 Rust**（Cargo workspace，零 node 运行时）。daemon 拆成 supervisor + worker 两进程：升级只换 worker，PTY 在 supervisor 里存活（热升级方案 A）。
+
+## 用户侧：安装 daemon
+
+daemon 是预编译的 Rust 二进制，用 `cofluxd`（npm）一键装成系统服务（崩溃/开机自启）。登记密钥从 web「添加设备」获取。
+
+```bash
+npm i -g cofluxd
+cofluxd up --server wss://你的服务器/daemon --enroll-key <KEY>
+cofluxd status      # 看状态     cofluxd logs -f   # 看日志
+cofluxd update      # 升级        cofluxd down      # 停
+```
+
+不碰源码、不装 Rust。发版/签名见 [docs/RELEASING.md](docs/RELEASING.md)。
 
 ## 快速开始
 

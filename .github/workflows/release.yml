@@ -44,7 +44,9 @@ jobs:
         run: |
           mkdir -p dist
           bin="target/${{ matrix.target }}/release"
-          # 原始 worker 二进制：热升级下载+验签的对象（单独发布、签名）
+          # 原始二进制（稳定命名，cofluxd 直接按 /releases/latest/download/<名> 取）：
+          #   worker 还是热升级下载+验签的对象（会被签名）
+          cp "$bin/coflux-supervisor" "dist/coflux-supervisor-${{ matrix.target }}"
           cp "$bin/coflux-worker" "dist/coflux-worker-${{ matrix.target }}"
           # tar.gz：含两个二进制，供人工安装
           tar -C "$bin" -czf "dist/coflux-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" coflux-supervisor coflux-worker

@@ -49,4 +49,4 @@ git push origin v1.2.3
 
 ## 升级 supervisor 自身
 
-supervisor 不走热升级（它持有 PTY）。重装新版二进制并重启服务（`deploy/install.sh` 重跑或 `systemctl --user restart` / `launchctl`）——很罕见。
+supervisor 不走热升级（它持有 PTY）。用 `cofluxd update` 重下二进制并重启服务——很罕见。
