@@ -3,7 +3,7 @@
 # 现有黑盒测试照样端到端验证。先 protocol crate，再 supervisor，再 worker。
 [workspace]
 resolver = "2"
-members = ["crates/protocol"]
+members = ["crates/protocol", "crates/supervisor"]
 
 [workspace.package]
 edition = "2021"
