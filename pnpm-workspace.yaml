@@ -4,4 +4,3 @@ packages:
   - 'tests'
 allowBuilds:
   esbuild: true
-  node-pty: true

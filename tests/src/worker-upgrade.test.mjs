@@ -10,11 +10,11 @@ import { startStack, mkRepo } from "./harness.mjs";
 // supervisor 自有注册表的"已知版本"间切换）。
 const PORT = 8828;
 const ROOT = resolve(import.meta.dirname, "..", "..");
-const WORKER_ENTRY = join(ROOT, "apps", "daemon", "src", "worker.ts");
+const WORKER_BIN = process.env.COFLUX_WORKER_BIN || join(ROOT, "target", "debug", "coflux-worker");
 
 // 注入两个测试版本：good2 = 真 worker 的副本（应升级成功并提交）；bad2 = 立即崩溃（应回滚）
 const SPECS = {
-  good2: { cmd: process.execPath, args: ["--import", "tsx", WORKER_ENTRY] },
+  good2: { cmd: WORKER_BIN, args: [] },
   bad2: { cmd: process.execPath, args: ["-e", "process.exit(1)"] },
 };
 
