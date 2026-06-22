@@ -19,6 +19,8 @@ export const config = {
   username: process.env.COFLUX_USERNAME ?? "admin",
   password: process.env.COFLUX_PASSWORD ?? "admin",
   accountId: "default",
+  /** daemon 连接地址，展示在 web「添加设备」命令里；反代/公网部署时用 COFLUX_DAEMON_URL 覆盖 */
+  daemonUrl: process.env.COFLUX_DAEMON_URL ?? `ws://127.0.0.1:${int("COFLUX_PORT", DEFAULT_PORT)}/daemon`,
 
   maxPayload: int("COFLUX_MAX_PAYLOAD", 4 * 1024 * 1024),
   authDeadlineMs: int("COFLUX_AUTH_DEADLINE_MS", 15_000),

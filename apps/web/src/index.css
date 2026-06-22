@@ -190,6 +190,40 @@ body {
 }
 .device-row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+.enroll-panel {
+  margin: 4px 12px 8px;
+  padding: 10px;
+  background: #16161e;
+  border: 1px solid #2a2b3c;
+  border-radius: 8px;
+}
+.enroll-title {
+  font-size: 11px;
+  color: #787c99;
+  margin-bottom: 6px;
+}
+.enroll-cmd {
+  margin: 0;
+  padding: 8px;
+  background: #0f0f14;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #9ece6a;
+}
+.enroll-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.enroll-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: #565872;
+}
+
 .task {
   display: flex;
   align-items: center;

@@ -33,6 +33,7 @@ export function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [enrollCommand, setEnrollCommand] = useState<string | null>(null);
 
   const send = (msg: ClientToServer) => {
     const ws = wsRef.current;
@@ -215,6 +216,9 @@ export function App() {
           setActiveTaskId(null);
         }
         break;
+      case "enrollmentKey.created":
+        setEnrollCommand(`npm i -g cofluxd && cofluxd up --server ${msg.daemonUrl} --enroll-key ${msg.enrollmentKey}`);
+        break;
       // pty.output 走二进制数据面（见 ws.onmessage 的 ArrayBuffer 分支）
       case "error":
         term.writeln(`\r\n\x1b[31m[错误] ${msg.message}\x1b[0m`);
@@ -274,6 +278,15 @@ export function App() {
   const removeWorkspace = (id: string) => { if (confirm("删除该工作区？（git worktree 会被移除）")) send({ type: "workspace.remove", workspaceId: id }); };
   const removeProject = (id: string) => { if (confirm("删除该项目？（仅移除 coflux 记录与其 worktree，不动你的主仓库）")) send({ type: "project.remove", projectId: id }); };
   const removeDevice = (d: DaemonInfo) => { if (confirm(`移除设备 ${d.name}？将删除其下所有项目/工作区/任务。`)) send({ type: "client.removeDevice", daemonId: d.daemonId }); };
+  const addDevice = () => send({ type: "client.createEnrollmentKey" });
+  const copyEnrollCommand = async () => {
+    if (!enrollCommand) return;
+    try {
+      await navigator.clipboard.writeText(enrollCommand);
+    } catch {
+      window.prompt("复制以下命令：", enrollCommand);
+    }
+  };
 
   const wsOf = (projectId: string) =>
     workspaces.filter((w) => w.projectId === projectId).sort((a, b) => (a.isMain === b.isMain ? a.createdAt - b.createdAt : a.isMain ? -1 : 1));
@@ -343,8 +356,20 @@ export function App() {
 
         <div className="section-head devices-head">
           <span>设备</span>
+          <button className="mini" onClick={addDevice} title="生成登记命令，在新机器上安装 daemon">＋ 添加设备</button>
         </div>
-        {daemons.length === 0 && <div className="empty">无设备</div>}
+        {enrollCommand && (
+          <div className="enroll-panel">
+            <div className="enroll-title">在新机器上运行：</div>
+            <pre className="enroll-cmd">{enrollCommand}</pre>
+            <div className="enroll-actions">
+              <button className="mini" onClick={copyEnrollCommand}>复制</button>
+              <button className="mini" onClick={() => setEnrollCommand(null)}>关闭</button>
+            </div>
+            <p className="enroll-hint">运行后设备会自动出现在列表中</p>
+          </div>
+        )}
+        {daemons.length === 0 && !enrollCommand && <div className="empty">还没有设备，点「添加设备」获取安装命令</div>}
         {daemons.map((d) => (
           <div key={d.daemonId} className="device-row">
             <span className={`dot ${d.online ? "on" : "off"}`} />

@@ -416,6 +416,13 @@ export class Hub {
         });
         break;
       }
+      case "client.createEnrollmentKey": {
+        const enrollmentKey = genToken("cf_enroll");
+        this.store.createEnrollmentKey(hashToken(enrollmentKey), client.accountId!, Date.now());
+        this.sendClient(client, { type: "enrollmentKey.created", enrollmentKey, daemonUrl: config.daemonUrl });
+        log.info("enrollment key created", { accountId: client.accountId });
+        break;
+      }
       case "client.removeDevice": {
         this.removeDevice(client, msg.daemonId);
         break;
