@@ -20,16 +20,17 @@ server/web 是 TypeScript（pnpm workspace）；**daemon 全 Rust**（Cargo work
 
 ## 用户侧：安装 daemon
 
-daemon 是预编译的 Rust 二进制，用 `cofluxd`（npm）一键装成系统服务（崩溃/开机自启）。登记密钥从 web「添加设备」获取。
+daemon 是预编译的 Rust 二进制，用 `cofluxd`（npm）装成系统服务（崩溃/开机自启）。默认连公共服务 `wss://api.coflux.dev/daemon`（自托管用 `--server` 改）。
 
 ```bash
 npm i -g cofluxd
-cofluxd up --server wss://你的服务器/daemon --enroll-key <KEY>
-cofluxd status      # 看状态     cofluxd logs -f   # 看日志
-cofluxd update      # 升级        cofluxd down      # 停
+cofluxd                 # 首次=交互式引导（问服务器/登记密钥/设备名），之后=看状态
+# 或非交互（web「添加设备」给的命令）：
+cofluxd up --enroll-key <KEY>
+cofluxd status / logs -f / update / down / uninstall
 ```
 
-不碰源码、不装 Rust。发版/签名见 [docs/RELEASING.md](docs/RELEASING.md)。
+登记密钥从 web 控制台「添加设备」获取。用户配置存 `~/.coflux/settings.json`（`serverUrl`/`deviceName`/`shell`，改后 `cofluxd reload` 生效）。不碰源码、不装 Rust。发版/签名见 [docs/RELEASING.md](docs/RELEASING.md)。
 
 ## 快速开始
 

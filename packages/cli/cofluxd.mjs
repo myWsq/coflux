@@ -5,15 +5,22 @@
 import { parseArgs } from "node:util";
 import { homedir, hostname, platform, arch } from "node:os";
 import { join, dirname } from "node:path";
+import { createInterface } from "node:readline/promises";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
+
+// 默认中心服务（公共 SaaS）；自托管用 --server 覆盖。
+const DEFAULT_SERVER = "wss://api.coflux.dev/daemon";
+const DEFAULT_WEB = "https://app.coflux.dev";
 
 const REPO = "myWsq/coflux";
 const HOME = process.env.COFLUX_HOME || join(homedir(), ".coflux");
 const BIN_DIR = join(HOME, "bin");
-const ENV_FILE = join(HOME, "daemon.env");
+const SETTINGS = join(HOME, "settings.json"); // 用户可改配置（非密）
+const ENV_FILE = join(HOME, "daemon.env"); // 运行时 env（含一次性登记密钥），wrapper source 它
 const WRAPPER = join(HOME, "run-daemon.sh");
 const LOG_FILE = join(HOME, "daemon.log");
+const CRED = join(HOME, "credentials.json");
 const SUP_BIN = join(BIN_DIR, "coflux-supervisor");
 const WRK_BIN = join(BIN_DIR, "coflux-worker");
 const IS_MAC = platform() === "darwin";
@@ -31,6 +38,9 @@ function rustTarget() {
   die(`不支持的平台: ${p}/${a}（仅 macOS / Linux）`);
 }
 
+function readSettings() {
+  try { return JSON.parse(fs.readFileSync(SETTINGS, "utf8")); } catch { return {}; }
+}
 function readEnv() {
   const out = {};
   try {
@@ -47,7 +57,6 @@ async function download(url, dest) {
   if (!res.ok) die(`下载失败 HTTP ${res.status}: ${url}\n（该版本/平台的 release 资产是否已发布？）`);
   fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()), { mode: 0o755 });
 }
-
 async function ensureBinaries({ version, binDir }) {
   fs.mkdirSync(BIN_DIR, { recursive: true });
   if (binDir) {
@@ -69,18 +78,24 @@ async function ensureBinaries({ version, binDir }) {
   }
 }
 
-function writeConfig({ server, enrollKey, name }) {
+// 写 settings.json（用户偏好，非密）+ daemon.env（运行时，含一次性登记密钥）+ wrapper
+function applyConfig({ serverUrl, enrollKey, deviceName, shell }) {
   fs.mkdirSync(HOME, { recursive: true });
   fs.chmodSync(HOME, 0o700);
+  const settings = { serverUrl, deviceName };
+  if (shell) settings.shell = shell;
+  fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + "\n", { mode: 0o644 });
+
   const old = readEnv();
   const env = {
-    COFLUX_SERVER: server || old.COFLUX_SERVER || "ws://localhost:8787/daemon",
-    COFLUX_ENROLL_KEY: enrollKey ?? old.COFLUX_ENROLL_KEY ?? "",
-    COFLUX_DEVICE_NAME: name || old.COFLUX_DEVICE_NAME || hostname(),
+    COFLUX_SERVER: serverUrl,
+    COFLUX_ENROLL_KEY: enrollKey || old.COFLUX_ENROLL_KEY || "",
+    COFLUX_DEVICE_NAME: deviceName,
     COFLUX_HOME: HOME,
     COFLUX_WORKER_CMD: WRK_BIN,
     COFLUX_WORKER_ARGS: "[]",
   };
+  if (shell) env.COFLUX_SHELL = shell;
   fs.writeFileSync(ENV_FILE, Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n", { mode: 0o600 });
   fs.writeFileSync(WRAPPER, `#!/bin/sh\nset -a\n[ -f "${ENV_FILE}" ] && . "${ENV_FILE}"\nset +a\nexec "${SUP_BIN}"\n`, { mode: 0o700 });
   return env;
@@ -117,7 +132,6 @@ RestartSec=2
 WantedBy=default.target
 `;
 }
-
 function installService(start) {
   if (IS_MAC) {
     fs.mkdirSync(dirname(PLIST), { recursive: true });
@@ -131,7 +145,6 @@ function installService(start) {
     console.log(`✓ systemd: ${UNIT}`);
   } else die("仅支持 macOS / Linux");
 }
-
 function restartService() {
   if (IS_MAC) { run("launchctl", ["unload", PLIST]); run("launchctl", ["load", PLIST]); }
   else if (IS_LINUX) run("systemctl", ["--user", "restart", "coflux-daemon.service"]);
@@ -141,25 +154,60 @@ function stopService() {
   else if (IS_LINUX) run("systemctl", ["--user", "stop", "coflux-daemon.service"]);
 }
 
+async function applyAndStart({ serverUrl, enrollKey, deviceName, shell, version, binDir, noStart }) {
+  await ensureBinaries({ version, binDir });
+  const env = applyConfig({ serverUrl, enrollKey, deviceName, shell });
+  if (!env.COFLUX_ENROLL_KEY && !fs.existsSync(CRED)) {
+    console.warn("⚠ 无登记密钥且未登记：从 web「添加设备」获取后重跑。");
+  }
+  installService(!noStart);
+  console.log(noStart ? "已安装（未启动）。" : `✓ daemon 已启动 → ${serverUrl}`);
+  cmdStatus();
+}
+
 /* ------------------------------ 命令 ------------------------------ */
 
 async function cmdUp(v) {
-  const env0 = readEnv();
-  if (!v.server && !env0.COFLUX_SERVER) die("首次启用需 --server <ws://你的服务器/daemon>");
-  await ensureBinaries({ version: v.version, binDir: v["bin-dir"] });
-  const env = writeConfig({ server: v.server, enrollKey: v["enroll-key"], name: v.name });
-  if (!env.COFLUX_ENROLL_KEY && !fs.existsSync(join(HOME, "credentials.json"))) {
-    console.warn("⚠ 未提供 --enroll-key 且无已存凭证：daemon 将无法登记。从 web「添加设备」获取登记密钥后重跑。");
+  const s = readSettings(), env0 = readEnv();
+  await applyAndStart({
+    serverUrl: v.server || s.serverUrl || env0.COFLUX_SERVER || DEFAULT_SERVER,
+    enrollKey: v["enroll-key"],
+    deviceName: v.name || s.deviceName || env0.COFLUX_DEVICE_NAME || hostname(),
+    shell: v.shell || s.shell,
+    version: v.version, binDir: v["bin-dir"], noStart: v["no-start"],
+  });
+}
+
+async function cmdOnboard(v) {
+  const s = readSettings();
+  console.log("\n  欢迎使用 coflux —— 配置这台设备\n  ──────────────────────────────\n");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const serverUrl = (await rl.question(`服务器地址 [${s.serverUrl || DEFAULT_SERVER}]: `)).trim() || s.serverUrl || DEFAULT_SERVER;
+    const web = serverUrl === DEFAULT_SERVER ? DEFAULT_WEB : "你的 coflux web 控制台";
+    console.log(`\n  → 打开 ${web} 登录 →「添加设备」→ 复制登记密钥\n`);
+    const enrollKey = (await rl.question("登记密钥（已登记可留空）: ")).trim();
+    const deviceName = (await rl.question(`设备名 [${s.deviceName || hostname()}]: `)).trim() || s.deviceName || hostname();
+    rl.close();
+    console.log("");
+    await applyAndStart({ serverUrl, enrollKey, deviceName, shell: s.shell, version: v.version, binDir: v["bin-dir"], noStart: v["no-start"] });
+  } finally {
+    rl.close();
   }
-  installService(!v["no-start"]);
-  console.log(v["no-start"] ? "已安装（未启动）。" : `✓ daemon 已启动，连接 ${env.COFLUX_SERVER}`);
-  console.log(`  状态: cofluxd status   日志: cofluxd logs`);
+}
+
+function cmdReload() {
+  const s = readSettings();
+  if (!s.serverUrl) die("无 settings.json，先 cofluxd up 或 cofluxd onboard");
+  applyConfig({ serverUrl: s.serverUrl, enrollKey: readEnv().COFLUX_ENROLL_KEY, deviceName: s.deviceName || hostname(), shell: s.shell });
+  restartService();
+  console.log("✓ 已按 settings.json 重载并重启");
 }
 
 function cmdDown() { stopService(); console.log("✓ 已停止"); }
 
 async function cmdUpdate(v) {
-  if (!fs.existsSync(ENV_FILE)) die("尚未安装，先 cofluxd up");
+  if (!fs.existsSync(ENV_FILE)) die("尚未安装，先 cofluxd up / onboard");
   await ensureBinaries({ version: v.version, binDir: v["bin-dir"] });
   restartService();
   console.log(`✓ 已更新到 ${v["bin-dir"] ? "本地产物" : v.version} 并重启（supervisor）`);
@@ -167,11 +215,11 @@ async function cmdUpdate(v) {
 }
 
 function cmdStatus() {
-  const env = readEnv();
-  console.log(`服务器: ${env.COFLUX_SERVER || "(未配置)"}`);
-  console.log(`设备名: ${env.COFLUX_DEVICE_NAME || "(默认)"}`);
-  console.log(`凭证:   ${fs.existsSync(join(HOME, "credentials.json")) ? "已登记" : "未登记"}`);
-  let running = false, active = "未知";
+  const s = readSettings();
+  console.log(`服务器: ${s.serverUrl || readEnv().COFLUX_SERVER || "(未配置)"}`);
+  console.log(`设备名: ${s.deviceName || "(默认)"}`);
+  console.log(`凭证:   ${fs.existsSync(CRED) ? "已登记" : "未登记"}`);
+  let running = false, active = "未运行";
   if (IS_MAC) {
     running = run("launchctl", ["list", "com.coflux.daemon"]).status === 0;
     active = running ? "运行中" : "未运行";
@@ -189,9 +237,9 @@ function cmdStatus() {
 function cmdLogs(v) {
   if (IS_MAC) {
     if (!fs.existsSync(LOG_FILE)) die(`暂无日志 ${LOG_FILE}`);
-    run("tail", [v.follow ? "-f" : "-n", v.follow ? LOG_FILE : "100", ...(v.follow ? [] : [LOG_FILE])], { stdio: "inherit" });
+    run("tail", v.follow ? ["-f", LOG_FILE] : ["-n", "100", LOG_FILE], { stdio: "inherit" });
   } else if (IS_LINUX) {
-    run("journalctl", ["--user", "-u", "coflux-daemon.service", v.follow ? "-f" : "-n", v.follow ? "" : "100"].filter(Boolean), { stdio: "inherit" });
+    run("journalctl", ["--user", "-u", "coflux-daemon.service", ...(v.follow ? ["-f"] : ["-n", "100"])], { stdio: "inherit" });
   }
 }
 
@@ -200,20 +248,24 @@ function cmdUninstall(v) {
   for (const f of [IS_MAC ? PLIST : UNIT, WRAPPER, ENV_FILE]) { try { fs.rmSync(f); } catch { /* */ } }
   if (IS_LINUX) run("systemctl", ["--user", "daemon-reload"]);
   if (v.purge) { try { fs.rmSync(HOME, { recursive: true, force: true }); } catch { /* */ } console.log("✓ 已卸载并清除 " + HOME); }
-  else console.log(`✓ 已卸载服务（保留二进制与凭证于 ${HOME}；--purge 可全清）`);
+  else console.log(`✓ 已卸载服务（保留二进制/配置/凭证于 ${HOME}；--purge 可全清）`);
 }
 
 const HELP = `cofluxd —— coflux daemon 管理
 
-  cofluxd up --server <ws://.../daemon> --enroll-key <KEY> [--name <名>]
-                          装/起 daemon（系统服务，崩溃自启）。从 web「添加设备」拿密钥。
-  cofluxd update          更新二进制并重启 supervisor（worker 另可远程热升级）
-  cofluxd status          查看服务器/登记/服务状态
+  cofluxd                 首次=交互式配置(onboard)，已配置=status
+  cofluxd onboard         交互式配置并启用
+  cofluxd up [flags]      非交互装/起（web「添加设备」给的命令用这个）
+  cofluxd reload          按 ~/.coflux/settings.json 重载并重启
+  cofluxd update          更新二进制并重启（worker 另可远程热升级）
+  cofluxd status          服务器/登记/服务状态
   cofluxd logs [-f]       看 daemon 日志
   cofluxd down            停止
-  cofluxd uninstall [--purge]   卸载服务（--purge 连二进制/凭证一并删）
+  cofluxd uninstall [--purge]   卸载（--purge 连二进制/配置/凭证一并删）
 
-通用选项: --version <vX|latest>（默认 latest）  --bin-dir <dir>（用本地 cargo 产物，开发者）  --no-start`;
+up flags: --server <ws://.../daemon>  --enroll-key <KEY>  --name <名>  --shell <路径>
+通用: --version <vX|latest>(默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
+用户配置在 ~/.coflux/settings.json（serverUrl/deviceName/shell），改后 cofluxd reload 生效。`;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -221,6 +273,7 @@ const { values, positionals } = parseArgs({
     server: { type: "string" },
     "enroll-key": { type: "string" },
     name: { type: "string" },
+    shell: { type: "string" },
     version: { type: "string", default: "latest" },
     "bin-dir": { type: "string" },
     "no-start": { type: "boolean", default: false },
@@ -230,10 +283,11 @@ const { values, positionals } = parseArgs({
   },
 });
 
-const cmd = positionals[0];
-if (values.help || !cmd || cmd === "help") { console.log(HELP); process.exit(0); }
+let cmd = positionals[0];
+if (values.help || cmd === "help") { console.log(HELP); process.exit(0); }
+if (!cmd) cmd = fs.existsSync(SETTINGS) ? "status" : "onboard"; // 首次裸跑 → 引导
 
-const handlers = { up: cmdUp, update: cmdUpdate, down: cmdDown, status: cmdStatus, logs: cmdLogs, uninstall: cmdUninstall };
+const handlers = { up: cmdUp, onboard: cmdOnboard, reload: cmdReload, update: cmdUpdate, down: cmdDown, status: cmdStatus, logs: cmdLogs, uninstall: cmdUninstall };
 const h = handlers[cmd];
 if (!h) die(`未知命令: ${cmd}\n\n${HELP}`);
 await h(values);
