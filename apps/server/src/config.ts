@@ -15,7 +15,9 @@ export const config = {
   host: process.env.COFLUX_HOST ?? "127.0.0.1",
   dbPath: process.env.COFLUX_DB ?? join(process.cwd(), "data", "coflux.db"),
   enrollKey: process.env.COFLUX_ENROLL_KEY ?? "dev-enroll",
-  clientToken: process.env.COFLUX_CLIENT_TOKEN ?? "dev-client",
+  // web 登录：用户名 + 密码（单租户）。登录成功签发会话 token 给 web 存用，用户不碰 token。
+  username: process.env.COFLUX_USERNAME ?? "admin",
+  password: process.env.COFLUX_PASSWORD ?? "admin",
   accountId: "default",
 
   maxPayload: int("COFLUX_MAX_PAYLOAD", 4 * 1024 * 1024),
