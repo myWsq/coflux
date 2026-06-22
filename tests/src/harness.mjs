@@ -66,8 +66,11 @@ function spawnApp(rel, env) {
 function spawnDaemon(env) {
   const bin = process.env.COFLUX_SUPERVISOR_BIN;
   if (!bin) return spawnApp("apps/daemon/src/index.ts", env);
-  const workerEntry = join(ROOT, "apps/daemon/src/worker.ts");
-  const env2 = { ...env, COFLUX_WORKER_CMD: process.execPath, COFLUX_WORKER_ARGS: JSON.stringify(["--import", "tsx", workerEntry]) };
+  // worker：默认 TS（node --import tsx worker.ts）；设了 COFLUX_WORKER_BIN 则用 Rust worker 二进制 → 全 Rust daemon
+  const workerBin = process.env.COFLUX_WORKER_BIN;
+  const workerCmd = workerBin || process.execPath;
+  const workerArgs = workerBin ? [] : ["--import", "tsx", join(ROOT, "apps/daemon/src/worker.ts")];
+  const env2 = { ...env, COFLUX_WORKER_CMD: workerCmd, COFLUX_WORKER_ARGS: JSON.stringify(workerArgs) };
   return spawn(bin, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
 }
 function killTree(p) {
