@@ -133,6 +133,8 @@ export type ClientToServer =
   /** 登录：用户名+密码（首次）或会话 clientToken（重连）。服务器登录成功会在 auth.ok 回带会话 token */
   | { type: "client.auth"; username?: string; password?: string; clientToken?: string }
   | { type: "client.subscribe" }
+  /** 为当前账号生成一条新的登记密钥（账号级、可复用），供新机器 daemon 登记 */
+  | { type: "client.createEnrollmentKey" }
   | { type: "client.removeDevice"; daemonId: DaemonId }
   /** 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签 */
   | { type: "client.upgradeDaemon"; daemonId: DaemonId; version: string; url?: string; sha256?: string; signature?: string }
@@ -157,6 +159,8 @@ export type ClientToServer =
 export type ServerToClient =
   | { type: "auth.ok"; accountId: AccountId; clientToken?: string }
   | { type: "auth.error"; message: string }
+  /** 登记密钥已生成（明文仅此一次回传；服务器只存 hash） */
+  | { type: "enrollmentKey.created"; enrollmentKey: string; daemonUrl: string }
   | { type: "state.snapshot"; daemons: DaemonInfo[]; projects: Project[]; workspaces: Workspace[]; tasks: Task[] }
   | { type: "daemon.updated"; daemon: DaemonInfo }
   | { type: "daemon.removed"; daemonId: DaemonId }
@@ -274,6 +278,7 @@ const DAEMON_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
 const CLIENT_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
   "client.auth": {},
   "client.subscribe": {},
+  "client.createEnrollmentKey": {},
   "client.removeDevice": { daemonId: "string" },
   "client.upgradeDaemon": { daemonId: "string", version: "string" },
   "project.import": { daemonId: "string", path: "string" },

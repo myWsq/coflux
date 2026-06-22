@@ -153,6 +153,9 @@ export class Store {
   upsertEnrollmentKey(keyHash: string, accountId: AccountId, createdAt: number): void {
     this.prep("INSERT OR IGNORE INTO enrollment_keys (keyHash, accountId, createdAt, revoked) VALUES (?, ?, ?, 0)").run(keyHash, accountId, createdAt);
   }
+  createEnrollmentKey(keyHash: string, accountId: AccountId, createdAt: number): void {
+    this.prep("INSERT INTO enrollment_keys (keyHash, accountId, createdAt, revoked) VALUES (?, ?, ?, 0)").run(keyHash, accountId, createdAt);
+  }
   accountForEnrollmentKey(keyHash: string): AccountId | undefined {
     const row = this.prep("SELECT accountId FROM enrollment_keys WHERE keyHash = ? AND revoked = 0").get(keyHash) as { accountId: string } | undefined;
     return row?.accountId;

@@ -1,5 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { WebSocket } from "ws";
 import { startStack, mkRepo } from "./harness.mjs";
 
 const PORT = 8821;
@@ -63,5 +64,28 @@ test("主工作区不可删除", async () => {
   const main = await c.waitFor((m) => m.type === "workspace.created" && m.workspace.isMain, "main ws");
   c.send({ type: "workspace.remove", workspaceId: main.workspace.id });
   await c.waitFor((m) => m.type === "error" && m.message.includes("主工作区"), "拒绝删除主工作区");
+  c.close();
+});
+
+test("添加设备：web 生成登记密钥，新 daemon 可用其登记", async () => {
+  const c = stack.makeClient();
+  await c.authSubscribe();
+  c.send({ type: "client.createEnrollmentKey" });
+  const created = await c.waitFor((m) => m.type === "enrollmentKey.created", "enrollmentKey.created");
+  assert.ok(created.enrollmentKey.startsWith("cf_enroll_"), "登记密钥格式");
+  assert.equal(created.daemonUrl, `ws://127.0.0.1:${PORT}/daemon`, "daemonUrl 指向本栈");
+
+  const ws = new WebSocket(`ws://127.0.0.1:${PORT}/daemon`);
+  await new Promise((r) => (ws.onopen = r));
+  ws.send(JSON.stringify({ type: "daemon.enroll", enrollmentKey: created.enrollmentKey, name: "dev2", host: "h2", platform: "test" }));
+  const enrolled = await new Promise((res, rej) => {
+    const t = setTimeout(() => rej(new Error("enroll timeout")), 8000);
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.type === "daemon.enrolled") { clearTimeout(t); res(m); }
+    };
+  });
+  assert.ok(enrolled.daemonId);
+  ws.close();
   c.close();
 });
