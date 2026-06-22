@@ -85,8 +85,8 @@ const heartbeat = setInterval(() => {
 }, config.heartbeatMs);
 heartbeat.unref();
 
-httpServer.listen(config.port, () => {
-  log.info("listening", { port: config.port, db: config.dbPath });
+httpServer.listen(config.port, config.host, () => {
+  log.info("listening", { host: config.host, port: config.port, db: config.dbPath });
 });
 
 /* ----------------------------- 优雅关闭 / 兜底 ----------------------------- */

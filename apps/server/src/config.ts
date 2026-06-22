@@ -11,6 +11,8 @@ function int(name: string, def: number): number {
 
 export const config = {
   port: int("COFLUX_PORT", DEFAULT_PORT),
+  // 默认只绑 localhost：生产由反向代理(Caddy)对外，不直接暴露端口。需对外监听设 COFLUX_HOST=0.0.0.0。
+  host: process.env.COFLUX_HOST ?? "127.0.0.1",
   dbPath: process.env.COFLUX_DB ?? join(process.cwd(), "data", "coflux.db"),
   enrollKey: process.env.COFLUX_ENROLL_KEY ?? "dev-enroll",
   clientToken: process.env.COFLUX_CLIENT_TOKEN ?? "dev-client",
