@@ -59,6 +59,17 @@ function decodeFrame(buf) {
 function spawnApp(rel, env) {
   return spawn(TSX, [join(ROOT, rel)], { env, stdio: DEBUG ? "inherit" : "ignore", detached: true });
 }
+
+// daemon = supervisor + worker。默认拉起 TS supervisor(index.ts)；
+// 若设了 COFLUX_SUPERVISOR_BIN，则拉起 Rust supervisor 二进制，并让它 spawn 现有 TS worker
+// （UDS 协议语言中立 → 同一套黑盒测试验证 Rust supervisor）。
+function spawnDaemon(env) {
+  const bin = process.env.COFLUX_SUPERVISOR_BIN;
+  if (!bin) return spawnApp("apps/daemon/src/index.ts", env);
+  const workerEntry = join(ROOT, "apps/daemon/src/worker.ts");
+  const env2 = { ...env, COFLUX_WORKER_CMD: process.execPath, COFLUX_WORKER_ARGS: JSON.stringify(["--import", "tsx", workerEntry]) };
+  return spawn(bin, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
+}
 function killTree(p) {
   if (!p) return;
   try {
@@ -116,7 +127,7 @@ export async function startStack(opts = {}) {
   const ref = { server: null, daemon: null };
   ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
   await waitHealth(port);
-  ref.daemon = spawnApp("apps/daemon/src/index.ts", daemonEnv);
+  ref.daemon = spawnDaemon(daemonEnv);
 
   const stack = {
     port,
