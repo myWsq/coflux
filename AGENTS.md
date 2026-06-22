@@ -56,7 +56,7 @@ deploy/install.sh --server ... --enroll-key ...     # 把 daemon 装成系统服
 - **进程组清理**：daemon 以 `detached` 起在自己的进程组，`stop()` 用 `kill(-pid)` 杀整组（supervisor + worker + 其 PTY 子进程），再删临时目录。
 - 调试：`COFLUX_TEST_DEBUG=1` 把 server/daemon 的 stdio 直通到终端。
 
-### 签名 + 远程下载的验收设计（待实现）
+### 签名 + 远程下载的验收（已实现，见 `tests/src/signed-upgrade.test.mjs`）
 
 热升级"远程下载 + ed25519 验签"的验收，**头等用例是负向**：被篡改的产物（签名/sha256 不符）必须被拒、supervisor 保持当前版本。本地跑且不污染的隔离办法：
 

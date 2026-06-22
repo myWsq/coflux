@@ -414,8 +414,8 @@ async fn route_authed(msg: ServerToDaemon, cfg: &Arc<Config>, to_server_tx: &Sen
         ServerToDaemon::SessionClose { session_id } => {
             sup_ctrl(to_sup_tx, &WorkerToSupervisor::SessionClose { session_id }).await;
         }
-        ServerToDaemon::WorkerUpgrade { version } => {
-            sup_ctrl(to_sup_tx, &WorkerToSupervisor::WorkerUpgrade { version }).await;
+        ServerToDaemon::WorkerUpgrade { version, url, sha256, signature } => {
+            sup_ctrl(to_sup_tx, &WorkerToSupervisor::WorkerUpgrade { version, url, sha256, signature }).await;
         }
         // exec / fs → 派生任务，结果回带
         ServerToDaemon::ExecRun { request_id, cwd, command, args, env, timeout_ms } => {

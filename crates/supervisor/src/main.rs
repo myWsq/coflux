@@ -8,6 +8,7 @@
 
 mod manager;
 mod sessions;
+mod upgrade;
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -177,6 +178,11 @@ fn dispatch(msg: WorkerToSupervisor, sessions: &Arc<Sessions>, manager: &Arc<Man
         ResyncRequest => sessions.send_resync(),
         PtyPause => sessions.set_pause(true),
         PtyResume => sessions.set_pause(false),
-        WorkerUpgrade { version } => manager.switch_worker(version),
+        WorkerUpgrade { version, url, sha256, signature } => match url {
+            // 带 url：下载 + 验签（线程内），通过才切换
+            Some(url) => manager.install_from_url(version, url, sha256.unwrap_or_default(), signature.unwrap_or_default()),
+            // 不带 url：本地已知版本切换
+            None => manager.switch_worker(version),
+        },
     }
 }

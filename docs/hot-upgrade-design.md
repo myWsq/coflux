@@ -1,6 +1,6 @@
 # daemon 自动热升级设计（方案 A）
 
-> 状态：**全 Rust daemon 已落地（2026-06）**——`crates/supervisor`(portable-pty) + `crates/worker`(tokio) 两进程 + UDS IPC + 两级 resync + 版本切换 + 观察期回滚,零 node 运行时,旧 TS daemon 已删。均有黑盒测试(杀 worker 存活、升级提交、坏版本回滚,会话均不丢)。先 TS 验证机制、再逐进程 Rust 化（UDS/WS 语言中立，一路黑盒验证不返工）。尚未做：**下载 + 验签**(硬前置,故当前只在本地已知版本间切换、不接下载) / 打包产物 + launcher。目标：daemon 后台自动升级，且**升级时运行中的 PTY/Agent 会话存活**。
+> 状态：**全 Rust daemon 已落地（2026-06）**——`crates/supervisor`(portable-pty) + `crates/worker`(tokio) 两进程 + UDS IPC + 两级 resync + 版本切换 + 观察期回滚,零 node 运行时,旧 TS daemon 已删。均有黑盒测试(杀 worker 存活、升级提交、坏版本回滚,会话均不丢)。先 TS 验证机制、再逐进程 Rust 化（UDS/WS 语言中立，一路黑盒验证不返工）。**下载 + ed25519 验签也已实现**(`crates/supervisor/src/upgrade.rs`：ureq 下载 → sha256 → 验签 → 落盘 → 观察期切换;篡改/签名不符一律拒绝并保持当前版本,黑盒覆盖正向+两种负向)、打包 + launcher 已实现。剩余仅：发布时把占位公钥(全 0)换成真公钥。目标：daemon 后台自动升级，且**升级时运行中的 PTY/Agent 会话存活**——已达成。
 >
 > 关键决策（2026-06 讨论确认）：
 > - **目标基线**：坚持"升级时运行中会话零丢失"，故走方案 A（而非基线方案：launcher + re-exec + agent resume）。
