@@ -45,6 +45,20 @@ async function download(url, dest) {
   if (!res.ok) die(`下载失败 HTTP ${res.status}: ${url}\n（该版本/平台的 release 资产是否已发布？）`);
   fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()), { mode: 0o755 });
 }
+// 取最新 release tag（含 prerelease；GitHub 的 /releases/latest 跳转不含 prerelease，故走 API）。
+async function resolveLatestTag() {
+  try {
+    const r = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=1`, {
+      headers: { "user-agent": "cofluxd", accept: "application/vnd.github+json" },
+    });
+    if (!r.ok) return null;
+    const arr = await r.json();
+    return Array.isArray(arr) && arr[0]?.tag_name ? arr[0].tag_name : null;
+  } catch {
+    return null;
+  }
+}
+
 async function ensureBinaries({ version, binDir }) {
   fs.mkdirSync(BIN_DIR, { recursive: true });
   if (binDir) {
@@ -58,7 +72,14 @@ async function ensureBinaries({ version, binDir }) {
     return;
   }
   const t = rustTarget();
-  const base = version === "latest" ? `https://github.com/${REPO}/releases/latest/download` : `https://github.com/${REPO}/releases/download/${version}`;
+  let base;
+  if (version === "latest") {
+    const tag = await resolveLatestTag();
+    if (tag) console.log(`最新版本: ${tag}`);
+    base = tag ? `https://github.com/${REPO}/releases/download/${tag}` : `https://github.com/${REPO}/releases/latest/download`;
+  } else {
+    base = `https://github.com/${REPO}/releases/download/${version}`;
+  }
   for (const b of ["coflux-supervisor", "coflux-worker"]) {
     process.stdout.write(`下载 ${b}-${t} … `);
     await download(`${base}/${b}-${t}`, join(BIN_DIR, b));
