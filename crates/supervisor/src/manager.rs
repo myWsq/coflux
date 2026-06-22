@@ -19,8 +19,9 @@ pub struct WorkerSpec {
 }
 
 struct State {
-    active: WorkerSpec,          // 当前认定为好的版本
-    pending: Option<WorkerSpec>, // 观察期试用的新版本
+    known: HashMap<String, WorkerSpec>, // 已知版本注册表（内置 + 注入 + 下载验签后落库）
+    active: WorkerSpec,                 // 当前认定为好的版本
+    pending: Option<WorkerSpec>,        // 观察期试用的新版本
     child: Option<Child>,
     running_version: String,
     restarts: u32,
@@ -31,7 +32,6 @@ struct State {
 }
 
 pub struct Manager {
-    known: HashMap<String, WorkerSpec>,
     sock_path: String,
     home: String,
     probation: Duration,
@@ -43,11 +43,11 @@ impl Manager {
         known.insert(builtin.version.clone(), builtin.clone());
         let now = Instant::now();
         Arc::new(Self {
-            known,
             sock_path,
             home,
             probation,
             state: Mutex::new(State {
+                known,
                 running_version: builtin.version.clone(),
                 active: builtin,
                 pending: None,
@@ -157,21 +157,44 @@ impl Manager {
         });
     }
 
-    /// 热升级：切到某个已知版本（重启 worker；观察期不过则自动回滚）。
+    /// 热升级：切到某个已知版本（本地注册表；重启 worker；观察期不过则自动回滚）。
     pub fn switch_worker(&self, version: String) {
         let mut st = self.state.lock().unwrap();
-        let spec = match self.known.get(&version) {
+        let spec = match st.known.get(&version) {
             Some(s) => s.clone(),
             None => {
                 eprintln!("[supervisor] unknown worker version {version}; ignoring");
                 return;
             }
         };
+        self.begin_switch(&mut st, spec);
+    }
+
+    /// 把已验签落盘的 spec 登记进注册表并切换过去。
+    pub fn install_and_switch(&self, spec: WorkerSpec) {
+        let mut st = self.state.lock().unwrap();
+        st.known.insert(spec.version.clone(), spec.clone());
+        self.begin_switch(&mut st, spec);
+    }
+
+    /// 远程升级：起线程下载 + 验签 + 落盘，成功才切换（验签不过则只打日志、保持当前版本）。
+    pub fn install_from_url(self: &Arc<Self>, version: String, url: String, sha256: String, signature: String) {
+        let this = Arc::clone(self);
+        thread::spawn(move || match crate::upgrade::download_verify_install(&url, &sha256, &signature, &this.home, &version) {
+            Ok(spec) => {
+                eprintln!("[supervisor] 产物验签通过，切换到 {}", spec.version);
+                this.install_and_switch(spec);
+            }
+            Err(e) => eprintln!("[supervisor] 升级被拒（保持当前版本）: {e}"),
+        });
+    }
+
+    fn begin_switch(&self, st: &mut State, spec: WorkerSpec) {
         if spec.version == st.active.version && st.pending.is_none() {
-            eprintln!("[supervisor] already on version {version}");
+            eprintln!("[supervisor] already on version {}", spec.version);
             return;
         }
-        eprintln!("[supervisor] upgrading worker from={} to={version}", st.active.version);
+        eprintln!("[supervisor] upgrading worker from={} to={}", st.active.version, spec.version);
         st.pending = Some(spec);
         st.pending_crashes = 0;
         if let Some(child) = st.child.as_mut() {

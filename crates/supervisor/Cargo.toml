@@ -13,3 +13,7 @@ coflux-protocol = { path = "../protocol" }
 portable-pty = "0.8"
 serde_json.workspace = true
 signal-hook = "0.3"
+ureq = "2"
+sha2 = "0.10"
+ed25519-dalek = "2"
+hex = "0.4"

@@ -110,7 +110,16 @@ pub enum ServerToDaemon {
     #[serde(rename = "worktree.remove")]
     WorktreeRemove { repo_path: String, worktree_path: String },
     #[serde(rename = "worker.upgrade")]
-    WorkerUpgrade { version: String },
+    WorkerUpgrade {
+        version: String,
+        // 带 url 走"下载 + 验签"；不带则在 supervisor 自有注册表里按版本切换（本地已知版本）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
     #[serde(rename = "session.create")]
     SessionCreate {
         session_id: String,

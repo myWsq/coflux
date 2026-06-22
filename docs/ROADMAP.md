@@ -26,14 +26,13 @@
 - [x] **supervisor/worker 拆分 + 全 Rust 化（已完成 2026-06）**：daemon = `crates/supervisor`(portable-pty + scrollback + UDS server + 起/管/重启 worker) + `crates/worker`(tokio：连接/认证/git/exec/fs/编排)，**零 node 运行时**。本地 UDS IPC，**两级 resync**（worker 重启 → 连 supervisor 取回会话 + 连 server resync，有序门控防空 resync 杀 PTY）。先 TS 验证机制、再逐进程 Rust 化（UDS/WS 语言中立，黑盒测试一路验证不返工），旧 TS daemon 已删。黑盒测试覆盖"杀 worker、PTY 存活、会话重挂"。
 - [x] **升级投递（已完成 2026-06）**：`client.upgradeDaemon{version}` → server → `worker.upgrade{version}` → worker 转 supervisor。**仅传版本标签**，supervisor 在自有注册表里解析，绝不执行外部传入路径（守住验签前的 RCE 口子）。注册表现为内置 + `COFLUX_WORKER_SPECS` 注入；将来由"下载+验签"填充。`url/sha256/signature` 随下载步骤再加。
 - [x] **切换 + 回滚（已完成 2026-06）**：supervisor `switchWorker(version)` 重启 worker 到新版；**观察期**（`PROBATION_MS`）内稳定运行才提交为 active，崩溃达阈值则自动回滚到上一好版本。会话全程在 supervisor 不受影响。黑盒测试覆盖"升级提交"与"坏版本回滚"，会话均存活。
-- [ ] **验签（后续优化项，但为升级启用的硬前置）**：supervisor 内置公钥 ed25519 验签（防中心服务器被攻破 → 全网 RCE）。⚠️ 验签补齐前 supervisor 只跑本地已装 worker、**不接升级下载**（当前正是如此：只在已知版本间切换）。
+- [x] **远程下载 + ed25519 验签（已完成 2026-06）**：`worker.upgrade` 扩 `url/sha256/signature`。带 url → supervisor 起线程 `ureq` 下载 → 校 sha256 → `ed25519-dalek` 验签（公钥 baked-in 占位 / env `COFLUX_WORKER_PUBKEY` 覆盖）→ 落 `HOME/workers/<version>/` → 走观察期切换/回滚。**验签不过一律拒绝、保持当前版本**（防中心服务器被攻破 → 全网 RCE）。黑盒覆盖：正向升级 + **篡改(sha256)被拒** + **签名不符被拒**，会话均不受影响。⚠️ 占位公钥为全 0 → 默认下载升级被拒，发布签名流程建好后换入真公钥。
 - [x] **打包 + launcher（已完成 2026-06）**：`cargo build --release` 出两个二进制（supervisor 1M + worker 2M）；`deploy/install.sh` 自动识别 systemd(Linux user service)/launchd(macOS LaunchAgent)，装二进制 + 写 env(600)/wrapper + 单元，崩溃自启。系统只看护 supervisor。
-- [ ] **远程下载产物**：升级投递接上真实下载（配合验签）。当前只在本地已知版本间切换。
 
 **已定决策（2026-06 讨论确认，详见 hot-upgrade-design.md）**：
 - **排序**：先收尾二进制数据面（条目 1），再做 supervisor 拆分——UDS 与 WS 共用长度前缀帧，先做稳不返工。
 - **语言/打包**：原定"supervisor=Rust、worker=TS"，**实际推进为 supervisor + worker 都 Rust**（全 Rust daemon，零 node 运行时，打包 = 扔两个静态二进制）。protocol 在 `crates/protocol`，web 端 TS 后续可 codegen 生成消除重复。
-- **签名**：方向是 **ed25519 + supervisor 内置公钥**（无现有体系可复用），**首版延后**（列入后续优化项）；前置约束：验签补齐前不启用 worker 自动升级下载。
+- **签名**：**已实现 ed25519 + supervisor 内置公钥**（`crates/supervisor/src/upgrade.rs`）。占位公钥为全 0（默认拒下载升级），发布时换入真公钥；env `COFLUX_WORKER_PUBKEY` 可覆盖（测试/自带密钥部署）。验签防"中心服务器被攻破"，env 覆盖不削弱该威胁（攻破的服务器设不了本地 env）。
 
 ### 3. daemon 原语按需扩展
 - [ ] `fs.write`（IDE 编辑保存）

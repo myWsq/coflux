@@ -413,8 +413,8 @@ export class Hub {
         if (!device || device.accountId !== client.accountId) return;
         const d = this.daemons.get(msg.daemonId);
         if (!d) return void this.sendClient(client, { type: "error", message: "daemon 不在线" });
-        this.sendDaemon(d, { type: "worker.upgrade", version: msg.version });
-        log.info("worker upgrade dispatched", { daemonId: msg.daemonId, version: msg.version });
+        this.sendDaemon(d, { type: "worker.upgrade", version: msg.version, url: msg.url, sha256: msg.sha256, signature: msg.signature });
+        log.info("worker upgrade dispatched", { daemonId: msg.daemonId, version: msg.version, download: !!msg.url });
         break;
       }
       case "project.import": {

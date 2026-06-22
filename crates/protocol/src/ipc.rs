@@ -40,9 +40,17 @@ pub enum WorkerToSupervisor {
     PtyPause,
     #[serde(rename = "pty.resume")]
     PtyResume,
-    /// 热升级：把 server 下发的版本切换转给 supervisor
+    /// 热升级：把 server 下发的版本切换转给 supervisor（带 url 走下载+验签）
     #[serde(rename = "worker.upgrade")]
-    WorkerUpgrade { version: String },
+    WorkerUpgrade {
+        version: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
 }
 
 /// supervisor → worker 控制消息（JSON）
