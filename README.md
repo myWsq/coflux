@@ -30,7 +30,7 @@ cofluxd up --enroll-key <KEY>
 cofluxd status / logs -f / update / down / uninstall
 ```
 
-登记密钥从 web 控制台「添加设备」获取。用户配置存 `~/.coflux/settings.json`（`serverUrl`/`deviceName`/`shell`，改后 `cofluxd reload` 生效）。不碰源码、不装 Rust。发版/签名见 [docs/RELEASING.md](docs/RELEASING.md)。
+登记密钥从 web 控制台「添加设备」获取。**所有配置都在 `~/.coflux/settings.json`**（`serverUrl`/`enrollKey`/`deviceName`/`shell`，含密钥故 600），**daemon 直接读这个文件**；手改后 `cofluxd reload` 生效。不碰源码、不装 Rust。发版/签名见 [docs/RELEASING.md](docs/RELEASING.md)。
 
 ## 快速开始
 

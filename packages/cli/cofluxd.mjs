@@ -16,9 +16,7 @@ const DEFAULT_WEB = "https://app.coflux.dev";
 const REPO = "myWsq/coflux";
 const HOME = process.env.COFLUX_HOME || join(homedir(), ".coflux");
 const BIN_DIR = join(HOME, "bin");
-const SETTINGS = join(HOME, "settings.json"); // 用户可改配置（非密）
-const ENV_FILE = join(HOME, "daemon.env"); // 运行时 env（含一次性登记密钥），wrapper source 它
-const WRAPPER = join(HOME, "run-daemon.sh");
+const SETTINGS = join(HOME, "settings.json"); // 用户配置（含一次性登记密钥）→ daemon 直接读；含密钥故 600
 const LOG_FILE = join(HOME, "daemon.log");
 const CRED = join(HOME, "credentials.json");
 const SUP_BIN = join(BIN_DIR, "coflux-supervisor");
@@ -40,16 +38,6 @@ function rustTarget() {
 
 function readSettings() {
   try { return JSON.parse(fs.readFileSync(SETTINGS, "utf8")); } catch { return {}; }
-}
-function readEnv() {
-  const out = {};
-  try {
-    for (const line of fs.readFileSync(ENV_FILE, "utf8").split("\n")) {
-      const m = line.match(/^([A-Z_0-9]+)=(.*)$/);
-      if (m) out[m[1]] = m[2];
-    }
-  } catch { /* 无配置 */ }
-  return out;
 }
 
 async function download(url, dest) {
@@ -78,27 +66,15 @@ async function ensureBinaries({ version, binDir }) {
   }
 }
 
-// 写 settings.json（用户偏好，非密）+ daemon.env（运行时，含一次性登记密钥）+ wrapper
+// 写 settings.json（daemon 直接读；含一次性登记密钥 → 600）。未提供 enrollKey 时保留旧值。
 function applyConfig({ serverUrl, enrollKey, deviceName, shell }) {
   fs.mkdirSync(HOME, { recursive: true });
   fs.chmodSync(HOME, 0o700);
-  const settings = { serverUrl, deviceName };
+  const old = readSettings();
+  const settings = { serverUrl, deviceName, enrollKey: enrollKey || old.enrollKey || "" };
   if (shell) settings.shell = shell;
-  fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + "\n", { mode: 0o644 });
-
-  const old = readEnv();
-  const env = {
-    COFLUX_SERVER: serverUrl,
-    COFLUX_ENROLL_KEY: enrollKey || old.COFLUX_ENROLL_KEY || "",
-    COFLUX_DEVICE_NAME: deviceName,
-    COFLUX_HOME: HOME,
-    COFLUX_WORKER_CMD: WRK_BIN,
-    COFLUX_WORKER_ARGS: "[]",
-  };
-  if (shell) env.COFLUX_SHELL = shell;
-  fs.writeFileSync(ENV_FILE, Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n", { mode: 0o600 });
-  fs.writeFileSync(WRAPPER, `#!/bin/sh\nset -a\n[ -f "${ENV_FILE}" ] && . "${ENV_FILE}"\nset +a\nexec "${SUP_BIN}"\n`, { mode: 0o700 });
-  return env;
+  fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+  return settings;
 }
 
 function plistXml() {
@@ -108,7 +84,9 @@ function plistXml() {
 <dict>
   <key>Label</key><string>com.coflux.daemon</string>
   <key>ProgramArguments</key>
-  <array><string>${WRAPPER}</string></array>
+  <array><string>${SUP_BIN}</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>COFLUX_HOME</key><string>${HOME}</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${LOG_FILE}</string>
@@ -124,7 +102,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=${WRAPPER}
+Environment=COFLUX_HOME=${HOME}
+ExecStart=${SUP_BIN}
 Restart=always
 RestartSec=2
 
@@ -156,8 +135,8 @@ function stopService() {
 
 async function applyAndStart({ serverUrl, enrollKey, deviceName, shell, version, binDir, noStart }) {
   await ensureBinaries({ version, binDir });
-  const env = applyConfig({ serverUrl, enrollKey, deviceName, shell });
-  if (!env.COFLUX_ENROLL_KEY && !fs.existsSync(CRED)) {
+  const settings = applyConfig({ serverUrl, enrollKey, deviceName, shell });
+  if (!settings.enrollKey && !fs.existsSync(CRED)) {
     console.warn("⚠ 无登记密钥且未登记：从 web「添加设备」获取后重跑。");
   }
   installService(!noStart);
@@ -168,11 +147,11 @@ async function applyAndStart({ serverUrl, enrollKey, deviceName, shell, version,
 /* ------------------------------ 命令 ------------------------------ */
 
 async function cmdUp(v) {
-  const s = readSettings(), env0 = readEnv();
+  const s = readSettings();
   await applyAndStart({
-    serverUrl: v.server || s.serverUrl || env0.COFLUX_SERVER || DEFAULT_SERVER,
+    serverUrl: v.server || s.serverUrl || DEFAULT_SERVER,
     enrollKey: v["enroll-key"],
-    deviceName: v.name || s.deviceName || env0.COFLUX_DEVICE_NAME || hostname(),
+    deviceName: v.name || s.deviceName || hostname(),
     shell: v.shell || s.shell,
     version: v.version, binDir: v["bin-dir"], noStart: v["no-start"],
   });
@@ -197,11 +176,9 @@ async function cmdOnboard(v) {
 }
 
 function cmdReload() {
-  const s = readSettings();
-  if (!s.serverUrl) die("无 settings.json，先 cofluxd up 或 cofluxd onboard");
-  applyConfig({ serverUrl: s.serverUrl, enrollKey: readEnv().COFLUX_ENROLL_KEY, deviceName: s.deviceName || hostname(), shell: s.shell });
-  restartService();
-  console.log("✓ 已按 settings.json 重载并重启");
+  if (!fs.existsSync(SETTINGS)) die("无 settings.json，先 cofluxd up 或 cofluxd onboard");
+  restartService(); // daemon 重启时重新读 settings.json
+  console.log("✓ 已重启（daemon 重新读取 settings.json）");
 }
 
 function cmdDown() { stopService(); console.log("✓ 已停止"); }
@@ -216,7 +193,7 @@ async function cmdUpdate(v) {
 
 function cmdStatus() {
   const s = readSettings();
-  console.log(`服务器: ${s.serverUrl || readEnv().COFLUX_SERVER || "(未配置)"}`);
+  console.log(`服务器: ${s.serverUrl || "(未配置)"}`);
   console.log(`设备名: ${s.deviceName || "(默认)"}`);
   console.log(`凭证:   ${fs.existsSync(CRED) ? "已登记" : "未登记"}`);
   let running = false, active = "未运行";
@@ -245,7 +222,7 @@ function cmdLogs(v) {
 
 function cmdUninstall(v) {
   stopService();
-  for (const f of [IS_MAC ? PLIST : UNIT, WRAPPER, ENV_FILE]) { try { fs.rmSync(f); } catch { /* */ } }
+  try { fs.rmSync(IS_MAC ? PLIST : UNIT); } catch { /* */ }
   if (IS_LINUX) run("systemctl", ["--user", "daemon-reload"]);
   if (v.purge) { try { fs.rmSync(HOME, { recursive: true, force: true }); } catch { /* */ } console.log("✓ 已卸载并清除 " + HOME); }
   else console.log(`✓ 已卸载服务（保留二进制/配置/凭证于 ${HOME}；--purge 可全清）`);
@@ -265,7 +242,7 @@ const HELP = `cofluxd —— coflux daemon 管理
 
 up flags: --server <ws://.../daemon>  --enroll-key <KEY>  --name <名>  --shell <路径>
 通用: --version <vX|latest>(默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
-用户配置在 ~/.coflux/settings.json（serverUrl/deviceName/shell），改后 cofluxd reload 生效。`;
+配置都在 ~/.coflux/settings.json（serverUrl/enrollKey/deviceName/shell，含密钥故 600），daemon 直接读；改后 cofluxd reload 生效。`;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
