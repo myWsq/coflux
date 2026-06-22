@@ -114,13 +114,14 @@ export async function startStack(opts = {}) {
   const port = opts.port;
   if (!port) throw new Error("startStack requires a port");
   const enrollKey = opts.enrollKey ?? "dev-enroll";
-  const clientToken = opts.clientToken ?? "dev-client";
+  const username = opts.username ?? "admin";
+  const password = opts.password ?? "admin";
 
   const dataDir = mkdtempSync(join(tmpdir(), "coflux-test-db-"));
   const home = mkdtempSync(join(tmpdir(), "coflux-test-home-"));
   const db = join(dataDir, "coflux.db");
 
-  const serverEnv = { ...process.env, COFLUX_PORT: String(port), COFLUX_DB: db, COFLUX_ENROLL_KEY: enrollKey, COFLUX_CLIENT_TOKEN: clientToken };
+  const serverEnv = { ...process.env, COFLUX_PORT: String(port), COFLUX_DB: db, COFLUX_ENROLL_KEY: enrollKey, COFLUX_USERNAME: username, COFLUX_PASSWORD: password };
   const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`, COFLUX_ENROLL_KEY: enrollKey, COFLUX_HOME: home, COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev", ...(opts.daemonEnv ?? {}) };
 
   const ref = { server: null, daemon: null };
@@ -130,7 +131,8 @@ export async function startStack(opts = {}) {
 
   const stack = {
     port,
-    clientToken,
+    username,
+    password,
     enrollKey,
     home,
     daemonId: null,
@@ -175,7 +177,7 @@ export async function startStack(opts = {}) {
   for (let i = 0; i < 60 && !dev; i++) {
     const p = stack.makeClient();
     try {
-      const s = await p.authSubscribe(clientToken);
+      const s = await p.authSubscribe(username, password);
       dev = s.daemons.find((d) => d.online);
     } catch {
       /* server 可能还没就绪 */
@@ -228,9 +230,9 @@ export class Client {
       this.waiters.push({ try: (m) => (pred(m) ? (clearTimeout(t), res(m), true) : false) });
     });
   }
-  async authSubscribe(token = "dev-client") {
+  async authSubscribe(username = "admin", password = "admin") {
     await this.ready;
-    this.send({ type: "client.auth", clientToken: token });
+    this.send({ type: "client.auth", username, password });
     await this.waitFor((m) => m.type === "auth.ok", "auth.ok");
     this.send({ type: "client.subscribe" });
     return this.waitFor((m) => m.type === "state.snapshot", "snapshot");

@@ -7,7 +7,7 @@
  * 健壮性（经两轮对抗式审查）：daemon 上行消息按 task.daemonId === conn.daemonId 归属校验；
  *   重启后绝不重复起 PTY；session 生命周期 closing 标志；pending 超时 + 掉线清理；client 越权拦截。
  */
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { WebSocket } from "ws";
 import {
   encode,
@@ -381,14 +381,26 @@ export class Hub {
 
     switch (msg.type) {
       case "client.auth": {
-        const accountId = this.store.accountForClientToken(hashToken(msg.clientToken));
+        let accountId: AccountId | undefined;
+        let issued: string | undefined;
+        if (typeof msg.clientToken === "string" && msg.clientToken) {
+          // 重连：已签发的会话 token
+          accountId = this.store.accountForClientToken(hashToken(msg.clientToken));
+        } else if (typeof msg.username === "string" && typeof msg.password === "string") {
+          // 登录：用户名 + 密码（单租户，对照配置）→ 签发会话 token
+          if (verifyLogin(msg.username, msg.password)) {
+            accountId = config.accountId;
+            issued = genToken("ck_sess");
+            this.store.upsertClientToken(hashToken(issued), accountId, Date.now());
+          }
+        }
         if (!accountId) {
-          this.sendClient(client, { type: "auth.error", message: "登录令牌无效" });
-          client.ws.close(4001, "bad client token");
+          this.sendClient(client, { type: "auth.error", message: "用户名或密码错误" });
+          client.ws.close(4001, "bad credentials");
           return;
         }
         client.accountId = accountId;
-        this.sendClient(client, { type: "auth.ok", accountId });
+        this.sendClient(client, { type: "auth.ok", accountId, clientToken: issued });
         break;
       }
       case "client.subscribe": {
@@ -706,4 +718,15 @@ export class Hub {
 function basename(p: string): string {
   const parts = p.replace(/[/\\]+$/, "").split(/[/\\]/);
   return parts[parts.length - 1] || p;
+}
+
+/** 单租户登录校验：用户名 + 密码对照配置（定时安全比较，避免时序侧信道） */
+function verifyLogin(username: string, password: string): boolean {
+  return timingSafeStrEq(username, config.username) && timingSafeStrEq(password, config.password);
+}
+function timingSafeStrEq(a: string, b: string): boolean {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
 }
