@@ -15,7 +15,7 @@ if (!dir || !version || !repo) {
 }
 const pem = process.env.WORKER_SIGNING_KEY;
 if (!pem) {
-  console.error("缺少 WORKER_SIGNING_KEY（PKCS8 PEM）");
+  console.error("缺少 WORKER_SIGNING_KEY（PKCS8 PEM）—— 发版前先配好签名密钥（见 docs/RELEASING.md）");
   process.exit(1);
 }
 const key = crypto.createPrivateKey(pem);

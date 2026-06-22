@@ -26,7 +26,8 @@ export function App() {
 
   const [status, setStatus] = useState<"connecting" | "connected" | "disconnected">("connecting");
   const [authState, setAuthState] = useState<AuthState>("need-login");
-  const [tokenInput, setTokenInput] = useState(localStorage.getItem(TOKEN_KEY) ?? "dev-client");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [daemons, setDaemons] = useState<DaemonInfo[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -67,8 +68,11 @@ export function App() {
     const onWindowResize = () => fit.fit();
     window.addEventListener("resize", onWindowResize);
 
-    const saved = localStorage.getItem(TOKEN_KEY);
-    if (saved) connect(saved);
+    const saved = localStorage.getItem(TOKEN_KEY); // 已签发的会话 token
+    if (saved) {
+      tokenRef.current = saved;
+      connect({ token: saved });
+    }
 
     return () => {
       window.removeEventListener("resize", onWindowResize);
@@ -79,8 +83,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function connect(token: string) {
-    tokenRef.current = token;
+  function connect(cred: { token: string } | { username: string; password: string }) {
     stopReconnectRef.current = false;
     setAuthState("authenticating");
     setStatus("connecting");
@@ -89,11 +92,13 @@ export function App() {
     wsRef.current = ws;
     ws.onopen = () => {
       setStatus("connected");
-      send({ type: "client.auth", clientToken: token });
+      if ("token" in cred) send({ type: "client.auth", clientToken: cred.token });
+      else send({ type: "client.auth", username: cred.username, password: cred.password });
     };
     ws.onclose = () => {
       setStatus("disconnected");
-      if (!stopReconnectRef.current && shouldRetryRef.current) setTimeout(() => connect(tokenRef.current), 1500);
+      // 重连用已签发的会话 token（不重发密码）
+      if (!stopReconnectRef.current && shouldRetryRef.current && tokenRef.current) setTimeout(() => connect({ token: tokenRef.current }), 1500);
     };
     ws.onmessage = (ev) => {
       // 数据面：二进制帧（pty.output）→ 直接写入终端
@@ -114,12 +119,12 @@ export function App() {
 
   function login(e: React.FormEvent) {
     e.preventDefault();
-    localStorage.setItem(TOKEN_KEY, tokenInput);
-    connect(tokenInput);
+    connect({ username, password });
   }
   function logout() {
     stopReconnectRef.current = true;
     shouldRetryRef.current = false;
+    tokenRef.current = "";
     localStorage.removeItem(TOKEN_KEY);
     wsRef.current?.close();
     setAuthState("need-login");
@@ -136,6 +141,11 @@ export function App() {
       case "auth.ok":
         setAuthState("authed");
         shouldRetryRef.current = true;
+        if (msg.clientToken) {
+          // 登录签发的会话 token：存下来用于重连（密码不落盘）
+          tokenRef.current = msg.clientToken;
+          localStorage.setItem(TOKEN_KEY, msg.clientToken);
+        }
         send({ type: "client.subscribe" });
         break;
       case "auth.error":
@@ -274,11 +284,12 @@ export function App() {
         <div className="login">
           <form className="login-card" onSubmit={login}>
             <div className="brand-lg">coflux</div>
-            <p className="login-hint">输入账号登录令牌（默认 <code>dev-client</code>）</p>
-            <input autoFocus type="password" value={tokenInput} onChange={(e) => setTokenInput(e.target.value)} placeholder="client token" />
+            <p className="login-hint">用用户名 + 密码登录</p>
+            <input autoFocus type="text" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="用户名" autoComplete="username" />
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="密码" autoComplete="current-password" />
             <button type="submit">登录</button>
             {authState === "authenticating" && <div className="login-status">连接中…</div>}
-            {authState === "auth-failed" && <div className="login-status err">登录失败：令牌无效</div>}
+            {authState === "auth-failed" && <div className="login-status err">登录失败：用户名或密码错误</div>}
           </form>
         </div>
       )}

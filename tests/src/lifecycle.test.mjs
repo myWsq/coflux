@@ -9,16 +9,19 @@ const repos = [];
 before(async () => { stack = await startStack({ port: PORT }); });
 after(async () => { await stack?.stop(); repos.forEach((r) => r.cleanup()); });
 
-test("auth: 错误令牌被拒，正确令牌通过并看到在线设备", async () => {
+test("auth: 错误密码被拒，正确用户名密码通过并看到在线设备", async () => {
   const bad = stack.makeClient();
   await bad.ready;
-  bad.send({ type: "client.auth", clientToken: "WRONG" });
+  bad.send({ type: "client.auth", username: "admin", password: "WRONG" });
   await bad.waitFor((m) => m.type === "auth.error", "auth.error");
   bad.close();
 
   const c = stack.makeClient();
-  const snap = await c.authSubscribe();
+  const snap = await c.authSubscribe(); // 默认 admin/admin
   assert.ok(snap.daemons.some((d) => d.online), "有在线设备");
+  // 登录应签发会话 token，供 web 重连用
+  const ok = c.log.find((m) => m.type === "auth.ok");
+  assert.ok(ok && typeof ok.clientToken === "string" && ok.clientToken.length > 0, "auth.ok 回带会话 token");
   c.close();
 });
 

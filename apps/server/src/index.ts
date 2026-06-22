@@ -27,9 +27,9 @@ function bootstrap() {
     log.info("created account", { accountId: config.accountId });
   }
   store.upsertEnrollmentKey(hashToken(config.enrollKey), config.accountId, Date.now());
-  store.upsertClientToken(hashToken(config.clientToken), config.accountId, Date.now());
+  // 不再 seed 静态登录令牌；web 用用户名+密码登录，登录时签发会话 token。
   const masked = (s: string) => (s.length <= 8 ? s : `${s.slice(0, 4)}…${s.slice(-2)}`);
-  log.info("bootstrap ready", { enrollKey: masked(config.enrollKey), clientToken: masked(config.clientToken) });
+  log.info("bootstrap ready", { enrollKey: masked(config.enrollKey), username: config.username });
 }
 
 const httpServer = http.createServer((req, res) => {
@@ -85,8 +85,8 @@ const heartbeat = setInterval(() => {
 }, config.heartbeatMs);
 heartbeat.unref();
 
-httpServer.listen(config.port, () => {
-  log.info("listening", { port: config.port, db: config.dbPath });
+httpServer.listen(config.port, config.host, () => {
+  log.info("listening", { host: config.host, port: config.port, db: config.dbPath });
 });
 
 /* ----------------------------- 优雅关闭 / 兜底 ----------------------------- */
