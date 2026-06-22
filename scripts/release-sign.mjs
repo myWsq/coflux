@@ -13,12 +13,11 @@ if (!dir || !version || !repo) {
   console.error("用法: WORKER_SIGNING_KEY=... GITHUB_REPOSITORY=owner/repo node scripts/release-sign.mjs <dir> <version>");
   process.exit(1);
 }
+// 无 WORKER_SIGNING_KEY 则不签名（manifest signature 留空）。cofluxd 经 HTTPS 下载不验签；
+// 仅"server 推送的 worker 热升级"需要签名（supervisor 内置公钥验）。发布签名前可先发未签名 alpha。
 const pem = process.env.WORKER_SIGNING_KEY;
-if (!pem) {
-  console.error("缺少 WORKER_SIGNING_KEY（PKCS8 PEM）");
-  process.exit(1);
-}
-const key = crypto.createPrivateKey(pem);
+const key = pem ? crypto.createPrivateKey(pem) : null;
+if (!key) console.error("⚠ 无 WORKER_SIGNING_KEY：产物不签名（仅影响 server 推送的热升级）。");
 
 const manifest = { version, worker: {} };
 const sums = [];
@@ -29,8 +28,8 @@ for (const name of readdirSync(dir)) {
   const target = name.slice("coflux-worker-".length);
   const data = readFileSync(join(dir, name));
   const sha256 = crypto.createHash("sha256").update(data).digest("hex");
-  const signature = crypto.sign(null, data, key).toString("hex");
-  writeFileSync(join(dir, `${name}.sig`), signature);
+  const signature = key ? crypto.sign(null, data, key).toString("hex") : "";
+  if (signature) writeFileSync(join(dir, `${name}.sig`), signature);
   sums.push(`${sha256}  ${name}`);
   manifest.worker[target] = {
     url: `https://github.com/${repo}/releases/download/${version}/${name}`,
