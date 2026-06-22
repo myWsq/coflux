@@ -24,7 +24,7 @@ cargo build -p coflux-supervisor -p coflux-worker   # 构建 daemon 二进制
 node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit   # server 类型检查
 node_modules/.bin/tsc -b apps/web/tsconfig.json               # web 类型检查
 pnpm dev:server / dev:web / dev:daemon              # 本地起三端
-deploy/install.sh --server ... --enroll-key ...     # 把 daemon 装成系统服务（systemd/launchd）
+node packages/cli/cofluxd.mjs up --server ... --enroll-key ... --bin-dir target/release   # 用 cofluxd CLI 装/起 daemon（用户侧：npm i -g cofluxd && cofluxd up）
 git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编译 + 签名 worker + GitHub Release（见 docs/RELEASING.md）
 ```
 
@@ -55,7 +55,7 @@ CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（
 
 - **临时 HOME**：`COFLUX_HOME` 指向 `mkdtemp` 临时目录 → 设备凭证、`worker.pid`、下载产物等全落临时目录，不碰真实 `~/.coflux`。
 - **临时 DB + 临时端口**：server 用临时 sqlite 文件 + 各测试文件独占端口（见各 `*.test.mjs` 顶部 `const PORT`，新增测试请选未占用端口）。
-- **直接 spawn 二进制，不跑 launcher**：harness 直接拉起 supervisor 二进制，**从不执行 `deploy/install.sh`** → 不写 `~/.local/bin`、不注册 systemd/launchd、不动真实系统服务。
+- **直接 spawn 二进制，不跑安装器**：harness 直接拉起 supervisor 二进制，**从不执行 `cofluxd`/安装服务** → 不写系统目录、不注册 systemd/launchd、不动真实系统服务。
 - **进程组清理**：daemon 以 `detached` 起在自己的进程组，`stop()` 用 `kill(-pid)` 杀整组（supervisor + worker + 其 PTY 子进程），再删临时目录。
 - 调试：`COFLUX_TEST_DEBUG=1` 把 server/daemon 的 stdio 直通到终端。
 
