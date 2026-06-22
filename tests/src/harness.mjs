@@ -103,7 +103,8 @@ async function waitHealth(port, ms = 12000) {
 /** 造一个临时 git 仓库（一个空提交），返回路径。测试结束由 stack.stop 之外的 rmSync 清理。 */
 export function mkRepo() {
   const dir = mkdtempSync(join(tmpdir(), "coflux-test-repo-"));
-  execFileSync("git", ["init", "-q", dir]);
+  // 显式 -b main：默认分支不依赖宿主/容器的 git 全局配置（否则旧 git 默认 master，断言会跨环境飘）
+  execFileSync("git", ["init", "-q", "-b", "main", dir]);
   execFileSync("git", ["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
   return { dir, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} } };
 }
