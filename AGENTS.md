@@ -25,7 +25,10 @@ node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit   # server 类型检
 node_modules/.bin/tsc -b apps/web/tsconfig.json               # web 类型检查
 pnpm dev:server / dev:web / dev:daemon              # 本地起三端
 deploy/install.sh --server ... --enroll-key ...     # 把 daemon 装成系统服务（systemd/launchd）
+git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编译 + 签名 worker + GitHub Release（见 docs/RELEASING.md）
 ```
+
+CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（tag `v*` 发布）。worker 产物用 ed25519 签名、supervisor 验签，密钥设置见 [docs/RELEASING.md](docs/RELEASING.md)。
 
 前置：Node 22+（server 用 `node:sqlite`）、pnpm、Rust stable（`rustup`）。
 

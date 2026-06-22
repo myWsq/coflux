@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: 类型检查（server + web）
+        run: |
+          node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit
+          node_modules/.bin/tsc -b apps/web/tsconfig.json
+
+      - name: Rust 单元测试（协议帧/serde）
+        run: cargo test -p coflux-protocol
+
+      - name: Rust 构建
+        run: cargo build -p coflux-supervisor -p coflux-worker
+
+      - name: 黑盒集成测试（pretest 构建 daemon，跑全量）
+        run: pnpm -C tests test

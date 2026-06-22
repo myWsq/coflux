@@ -13,8 +13,9 @@ use sha2::{Digest, Sha256};
 
 use crate::manager::WorkerSpec;
 
-/// 占位公钥（全 0，无人持有对应私钥）→ 默认下载升级被拒，直到发布流程换入真公钥或 env 注入。
-const BAKED_IN_PUBKEY_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+/// 编译期内置的发布公钥（来自提交的 `release-pubkey.hex`，公钥非密可提交）。
+/// 占位为全 0（无效点）→ 默认下载升级被拒；发布者用 `scripts/gen-keypair.mjs` 生成后换入并提交。
+const BAKED_IN_PUBKEY_HEX: &str = include_str!("../release-pubkey.hex");
 
 fn verifying_key() -> Option<VerifyingKey> {
     let hexkey = std::env::var("COFLUX_WORKER_PUBKEY").unwrap_or_else(|_| BAKED_IN_PUBKEY_HEX.to_string());
