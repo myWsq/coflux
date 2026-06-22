@@ -19,22 +19,31 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use coflux_protocol::{decode_frame, is_frame, DataFrame, RecordParser, WorkerToSupervisor, SUPERVISOR_SOCK_ENV};
+use coflux_protocol::{decode_frame, is_frame, DataFrame, RecordParser, Settings, WorkerToSupervisor, SUPERVISOR_SOCK_ENV};
 
 use manager::{Manager, WorkerSpec};
 use sessions::{Pause, Sessions};
 
+/// 与 supervisor 二进制同目录的 coflux-worker 路径（cofluxd 把两个二进制装在一起）。
+fn sibling_worker() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("coflux-worker").to_string_lossy().into_owned()))
+        .unwrap_or_default()
+}
+
 fn main() {
     let sock_path = std::env::var(SUPERVISOR_SOCK_ENV).unwrap_or_else(|_| format!("/tmp/coflux-sup-{}.sock", std::process::id()));
     let home = std::env::var("COFLUX_HOME").unwrap_or_else(|_| format!("{}/.coflux", std::env::var("HOME").unwrap_or_default()));
-    let shell = std::env::var("COFLUX_SHELL").ok().or_else(|| std::env::var("SHELL").ok()).unwrap_or_else(|| "/bin/bash".to_string());
+    let settings = Settings::load(&home);
+    let shell = std::env::var("COFLUX_SHELL").ok().filter(|s| !s.is_empty()).or(settings.shell).or_else(|| std::env::var("SHELL").ok()).unwrap_or_else(|| "/bin/bash".to_string());
     let scrollback_limit: usize = 200_000;
     let probation_ms: u64 = std::env::var("COFLUX_WORKER_PROBATION_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(8000);
 
-    // 内置 worker 规格（TS 阶段由 harness/启动器经环境变量给出）
-    let worker_cmd = std::env::var("COFLUX_WORKER_CMD").unwrap_or_default();
+    // 内置 worker 规格：默认用与 supervisor 同目录的 coflux-worker；COFLUX_WORKER_CMD 可覆盖（测试用）。
+    let worker_cmd = std::env::var("COFLUX_WORKER_CMD").ok().filter(|s| !s.is_empty()).unwrap_or_else(sibling_worker);
     if worker_cmd.is_empty() {
-        eprintln!("[supervisor] COFLUX_WORKER_CMD 未设置，无 worker 可运行");
+        eprintln!("[supervisor] 找不到 worker 二进制（同目录无 coflux-worker，且未设 COFLUX_WORKER_CMD）");
         std::process::exit(1);
     }
     let worker_args: Vec<String> = std::env::var("COFLUX_WORKER_ARGS").ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();

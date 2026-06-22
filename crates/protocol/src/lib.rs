@@ -10,7 +10,10 @@
 
 pub mod frame;
 pub mod ipc;
+pub mod settings;
 pub mod wire;
+
+pub use settings::Settings;
 
 pub use frame::{decode_frame, encode_frame, DataFrame, FRAME_INPUT, FRAME_OUTPUT, FRAME_REPLAY};
 pub use ipc::{is_frame, write_record, RecordParser, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV};

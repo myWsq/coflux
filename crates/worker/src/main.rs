@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use coflux_protocol::{
-    is_frame, write_record, DaemonToServer, RecordParser, ServerToDaemon, SessionRef, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
+    is_frame, write_record, DaemonToServer, RecordParser, ServerToDaemon, SessionRef, Settings, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -64,6 +64,15 @@ fn env_or(key: &str, default: String) -> String {
     std::env::var(key).unwrap_or(default)
 }
 
+/// 取值优先级：同名 env（非空）> settings.json > 默认。env 覆盖便于测试/开发。
+fn pick(env_key: &str, from_settings: Option<String>, default: &str) -> String {
+    std::env::var(env_key)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or(from_settings)
+        .unwrap_or_else(|| default.to_string())
+}
+
 fn alive_to_resync(alive: &HashMap<String, String>) -> Vec<SessionRef> {
     alive.iter().map(|(s, t)| SessionRef { session_id: s.clone(), task_id: t.clone() }).collect()
 }
@@ -82,10 +91,11 @@ async fn sup_ctrl(tx: &Sender<Vec<u8>>, msg: &WorkerToSupervisor) {
 #[tokio::main]
 async fn main() {
     let home = env_or("COFLUX_HOME", format!("{}/.coflux", std::env::var("HOME").unwrap_or_default()));
+    let s = Settings::load(&home); // 用户配置，env 同名变量可覆盖
     let cfg = Arc::new(Config {
-        server_url: env_or("COFLUX_SERVER", "ws://localhost:8787/daemon".into()),
-        enroll_key: env_or("COFLUX_ENROLL_KEY", "dev-enroll".into()),
-        device_name: env_or("COFLUX_DEVICE_NAME", env_or("HOSTNAME", "coflux-daemon".into())),
+        server_url: pick("COFLUX_SERVER", s.server_url, "ws://localhost:8787/daemon"),
+        enroll_key: pick("COFLUX_ENROLL_KEY", s.enroll_key, "dev-enroll"),
+        device_name: pick("COFLUX_DEVICE_NAME", s.device_name, &env_or("HOSTNAME", "coflux-daemon".into())),
         host: env_or("HOSTNAME", "localhost".into()),
         platform: std::env::consts::OS.to_string(),
         cred_path: format!("{home}/credentials.json"),
@@ -99,6 +109,8 @@ async fn main() {
         eprintln!("[worker] 缺少 {SUPERVISOR_SOCK_ENV}");
         std::process::exit(1);
     }
+
+    eprintln!("[worker] config server={} device={}", cfg.server_url, cfg.device_name);
 
     // 写 pid 文件（测试/运维定位 worker 进程）
     let _ = std::fs::write(format!("{home}/worker.pid"), std::process::id().to_string());
