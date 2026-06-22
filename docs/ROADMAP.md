@@ -23,7 +23,7 @@
 
 ### 2. 自动热升级（已定 **方案 A：supervisor 持有 PTY + worker 可升级**）
 让 daemon 后台自动升级、且**升级时运行中会话存活**。详见 [hot-upgrade-design.md](hot-upgrade-design.md)。
-- [x] **supervisor/worker 拆分（TS 优先，已完成 2026-06）**：supervisor(`index.ts`，持 node-pty+scrollback) + worker(`worker.ts`，连接/认证/git/exec/fs/编排) 两进程，本地 UDS IPC(`ipc.ts`)，**两级 resync** 跑通（worker 重启 → 连 supervisor 取回会话 + 连 server resync）。supervisor 起/管/重启 worker(崩溃计数退避)。黑盒测试覆盖"杀 worker、PTY 存活、会话重挂"。Rust 端口见下方决策，留作后续打包优化。
+- [x] **supervisor/worker 拆分 + 全 Rust 化（已完成 2026-06）**：daemon = `crates/supervisor`(portable-pty + scrollback + UDS server + 起/管/重启 worker) + `crates/worker`(tokio：连接/认证/git/exec/fs/编排)，**零 node 运行时**。本地 UDS IPC，**两级 resync**（worker 重启 → 连 supervisor 取回会话 + 连 server resync，有序门控防空 resync 杀 PTY）。先 TS 验证机制、再逐进程 Rust 化（UDS/WS 语言中立，黑盒测试一路验证不返工），旧 TS daemon 已删。黑盒测试覆盖"杀 worker、PTY 存活、会话重挂"。
 - [x] **升级投递（已完成 2026-06）**：`client.upgradeDaemon{version}` → server → `worker.upgrade{version}` → worker 转 supervisor。**仅传版本标签**，supervisor 在自有注册表里解析，绝不执行外部传入路径（守住验签前的 RCE 口子）。注册表现为内置 + `COFLUX_WORKER_SPECS` 注入；将来由"下载+验签"填充。`url/sha256/signature` 随下载步骤再加。
 - [x] **切换 + 回滚（已完成 2026-06）**：supervisor `switchWorker(version)` 重启 worker 到新版；**观察期**（`PROBATION_MS`）内稳定运行才提交为 active，崩溃达阈值则自动回滚到上一好版本。会话全程在 supervisor 不受影响。黑盒测试覆盖"升级提交"与"坏版本回滚"，会话均存活。
 - [ ] **验签（后续优化项，但为升级启用的硬前置）**：supervisor 内置公钥 ed25519 验签（防中心服务器被攻破 → 全网 RCE）。⚠️ 验签补齐前 supervisor 只跑本地已装 worker、**不接升级下载**（当前正是如此：只在已知版本间切换）。
@@ -31,7 +31,7 @@
 
 **已定决策（2026-06 讨论确认，详见 hot-upgrade-design.md）**：
 - **排序**：先收尾二进制数据面（条目 1），再做 supervisor 拆分——UDS 与 WS 共用长度前缀帧，先做稳不返工。
-- **语言/打包**：**supervisor 用 Rust 静态二进制**（顺带解决打包：无 node 运行时/原生模块 prebuild，`portable-pty` + `ed25519-dalek`）；**worker 保持 TS**（拆分后 `node-pty` 全留 supervisor，worker 退化纯 JS，保留共享 `@coflux/protocol`）。worker 产物具体形态实现时再定。
+- **语言/打包**：原定"supervisor=Rust、worker=TS"，**实际推进为 supervisor + worker 都 Rust**（全 Rust daemon，零 node 运行时，打包 = 扔两个静态二进制）。protocol 在 `crates/protocol`，web 端 TS 后续可 codegen 生成消除重复。
 - **签名**：方向是 **ed25519 + supervisor 内置公钥**（无现有体系可复用），**首版延后**（列入后续优化项）；前置约束：验签补齐前不启用 worker 自动升级下载。
 
 ### 3. daemon 原语按需扩展

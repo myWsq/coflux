@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "pretest": "cargo build -p coflux-supervisor -p coflux-worker",
     "test": "node --test --test-concurrency=1 src/*.test.mjs"
   },
   "devDependencies": {

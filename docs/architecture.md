@@ -25,7 +25,7 @@
 ┌──────┐          ┌──────┐           ┌──────┐
 │Daemon│          │Daemon│           │Daemon│   跑在用户开发机，可在 NAT 后
 └──────┘          └──────┘           └──────┘
-   │  起 PTY（node-pty），持有进程 + scrollback
+   │  起 PTY（Rust supervisor，portable-pty），持有进程 + scrollback
    └─ 工作目录 = 用户机器上已存在的目录
 ```
 
@@ -120,10 +120,10 @@ server.reconcileDaemonSessions:
 
 ```
 coflux/
-├── packages/
-│   ├── protocol/              # 共享线协议类型 + 运行时校验（三端引用，免构建消费 TS 源）
+├── packages/                  # TS 共享（server/web 用）
+│   ├── protocol/              # 共享线协议类型 + 运行时校验（server/web 引用，免构建消费 TS 源）
 │   └── core/                  # 共享基建：结构化分级日志
-├── apps/
+├── apps/                      # TS：server + web（daemon 已全 Rust 化，见 crates/）
 │   ├── server/src/
 │   │   ├── config.ts          # 集中配置（env + 默认值）
 │   │   ├── store.ts           # sqlite 持久化（预编译缓存 + 事务 + WAL + close）
@@ -132,16 +132,13 @@ coflux/
 │   │   ├── transport.ts       # WS 接入样板：解码/校验/派发 + 心跳 + 认证截止
 │   │   ├── hub.ts             # 领域编排/路由：账号/设备/项目/工作区/任务/会话
 │   │   └── index.ts           # 装配：config→store→hub→transport→心跳→信号
-│   ├── daemon/src/            # 拆成 supervisor + worker 两进程（热升级方案 A，TS 优先）
-│   │   ├── index.ts           # supervisor：持 node-pty + scrollback + 背压；监听 UDS；起/管/重启 worker
-│   │   ├── worker.ts          # worker：外连服务器/认证/重连 + git + exec + fs + 编排（纯 JS，PTY 操作转 supervisor）
-│   │   ├── ipc.ts             # worker↔supervisor 本地 UDS 帧（长度前缀 + 复用 #1 的 pty 帧）+ 两级 resync 消息
-│   │   ├── sessions.ts        # SessionManager：PTY 生命周期 + scrollback（活在 supervisor）
-│   │   └── config/creds/git/exec/fs.ts
 │   └── web/src/App.tsx        # 状态驱动 UI：project→workspace→task→终端
-├── tests/src/                 # 黑盒集成测试（跨重构有效）：harness + *.test.mjs
-├── scripts/fix-pty-perms.mjs  # postinstall 修复 node-pty prebuild 执行位
-└── docs/{architecture,auth-design,OPEN_QUESTIONS}.md
+├── crates/                    # Rust：daemon（supervisor + worker 两进程，零 node 运行时）
+│   ├── protocol/              # 线协议 Rust 真相源：serde 类型 + 帧 codec + UDS 消息（含单测）
+│   ├── supervisor/            # 持 PTY(portable-pty) + scrollback + 背压；UDS server；起/管/重启 worker + 版本切换/回滚
+│   └── worker/                # async(tokio)：连服务器(WS)/认证/重连 + git + exec + fs + 两级 resync（PTY 操作经 UDS 转 supervisor）
+├── tests/src/                 # 黑盒集成测试（跨语言重构有效）：harness + *.test.mjs（默认拉起 Rust daemon）
+└── docs/{architecture,auth-design,OPEN_QUESTIONS,hot-upgrade-design}.md
 ```
 
 ## 9. 已实现 vs 待办

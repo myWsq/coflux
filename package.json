@@ -6,11 +6,11 @@
   "packageManager": "pnpm@11.6.0",
   "scripts": {
     "dev:server": "pnpm --filter @coflux/server dev",
-    "dev:daemon": "pnpm --filter @coflux/daemon dev",
     "dev:web": "pnpm --filter @coflux/web dev",
-    "dev": "pnpm -r --parallel --filter @coflux/server --filter @coflux/daemon --filter @coflux/web dev",
-    "build": "pnpm -r build",
-    "postinstall": "node scripts/fix-pty-perms.mjs"
+    "dev:daemon": "cargo build -p coflux-supervisor -p coflux-worker && COFLUX_WORKER_CMD=\"$PWD/target/debug/coflux-worker\" ./target/debug/coflux-supervisor",
+    "dev": "pnpm -r --parallel --filter @coflux/server --filter @coflux/web dev",
+    "build": "pnpm -r build && cargo build --release",
+    "build:daemon": "cargo build --release -p coflux-supervisor -p coflux-worker"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

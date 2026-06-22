@@ -60,18 +60,13 @@ function spawnApp(rel, env) {
   return spawn(TSX, [join(ROOT, rel)], { env, stdio: DEBUG ? "inherit" : "ignore", detached: true });
 }
 
-// daemon = supervisor + worker。默认拉起 TS supervisor(index.ts)；
-// 若设了 COFLUX_SUPERVISOR_BIN，则拉起 Rust supervisor 二进制，并让它 spawn 现有 TS worker
-// （UDS 协议语言中立 → 同一套黑盒测试验证 Rust supervisor）。
+// daemon = Rust supervisor + Rust worker（两个二进制，零 node 运行时）。
+// 默认用 target/debug 下的产物（pretest 会 cargo build）；可用环境变量覆盖路径。
+const SUPERVISOR_BIN = process.env.COFLUX_SUPERVISOR_BIN || join(ROOT, "target/debug/coflux-supervisor");
+const WORKER_BIN = process.env.COFLUX_WORKER_BIN || join(ROOT, "target/debug/coflux-worker");
 function spawnDaemon(env) {
-  const bin = process.env.COFLUX_SUPERVISOR_BIN;
-  if (!bin) return spawnApp("apps/daemon/src/index.ts", env);
-  // worker：默认 TS（node --import tsx worker.ts）；设了 COFLUX_WORKER_BIN 则用 Rust worker 二进制 → 全 Rust daemon
-  const workerBin = process.env.COFLUX_WORKER_BIN;
-  const workerCmd = workerBin || process.execPath;
-  const workerArgs = workerBin ? [] : ["--import", "tsx", join(ROOT, "apps/daemon/src/worker.ts")];
-  const env2 = { ...env, COFLUX_WORKER_CMD: workerCmd, COFLUX_WORKER_ARGS: JSON.stringify(workerArgs) };
-  return spawn(bin, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
+  const env2 = { ...env, COFLUX_WORKER_CMD: WORKER_BIN, COFLUX_WORKER_ARGS: "[]" };
+  return spawn(SUPERVISOR_BIN, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
 }
 function killTree(p) {
   if (!p) return;
