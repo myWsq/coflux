@@ -4,7 +4,7 @@
   "description": "coflux daemon 管理 CLI：装/起/停/升级 Rust daemon（supervisor + worker）",
   "type": "module",
   "bin": {
-    "cofluxd": "./cofluxd.mjs"
+    "cofluxd": "cofluxd.mjs"
   },
   "files": [
     "cofluxd.mjs",
