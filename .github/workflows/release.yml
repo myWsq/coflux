@@ -1,0 +1,80 @@
+name: release
+
+# 打 tag v* 触发：交叉编译 supervisor + worker → 签名 worker 产物 → 发布 GitHub Release（含 manifest）。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: true }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: true }
+          - { os: macos-latest, target: aarch64-apple-darwin, cross: false }
+          - { os: macos-latest, target: x86_64-apple-darwin, cross: false }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: 构建
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker
+          else
+            cargo build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker
+          fi
+
+      - name: 打包产物
+        run: |
+          mkdir -p dist
+          bin="target/${{ matrix.target }}/release"
+          # 原始 worker 二进制：热升级下载+验签的对象（单独发布、签名）
+          cp "$bin/coflux-worker" "dist/coflux-worker-${{ matrix.target }}"
+          # tar.gz：含两个二进制，供人工安装
+          tar -C "$bin" -czf "dist/coflux-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" coflux-supervisor coflux-worker
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 签名 worker 产物 + 生成 manifest/SHA256SUMS
+        env:
+          WORKER_SIGNING_KEY: ${{ secrets.WORKER_SIGNING_KEY }}
+        run: node scripts/release-sign.mjs artifacts "${{ github.ref_name }}"
+
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
