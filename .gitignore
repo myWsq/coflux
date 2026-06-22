@@ -1,6 +1,7 @@
 node_modules/
 dist/
 data/
+target/
 *.db
 *.db-*
 *.log

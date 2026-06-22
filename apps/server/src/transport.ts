@@ -14,6 +14,8 @@ export interface EndpointOptions<Ctx> {
   /** 入站消息运行时校验（畸形/未知直接丢弃） */
   validate: (msg: unknown) => boolean;
   onMessage: (ctx: Ctx, msg: unknown) => void;
+  /** 入站二进制数据面帧（仅认证后处理；归属校验在 handler 内做） */
+  onBinary?: (ctx: Ctx, buf: Buffer) => void;
   onClose: (ctx: Ctx) => void;
   authDeadlineMs: number;
   logger: Logger;
@@ -36,7 +38,18 @@ export function attachEndpoint<Ctx>(wss: WebSocketServer, opts: EndpointOptions<
       if (!opts.isAuthed(ctx)) ws.close(4008, "auth timeout");
     }, opts.authDeadlineMs);
 
-    ws.on("message", (raw) => {
+    ws.on("message", (raw, isBinary) => {
+      // 数据面：二进制帧，仅认证后处理，归属校验在 handler 内做
+      if (isBinary) {
+        if (!opts.onBinary || !opts.isAuthed(ctx)) return;
+        try {
+          opts.onBinary(ctx, raw as Buffer);
+        } catch (err) {
+          opts.logger.error("binary handler error", { err: (err as Error).message });
+        }
+        return;
+      }
+      // 控制面：JSON 文本帧
       let msg: unknown;
       try {
         msg = decode<unknown>(raw as Buffer);

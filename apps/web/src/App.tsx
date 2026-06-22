@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import type { ClientToServer, ServerToClient, DaemonInfo, Project, Workspace, Task } from "@coflux/protocol";
+import { encodeFrame, decodeFrame, type ClientToServer, type ServerToClient, type DaemonInfo, type Project, type Workspace, type Task } from "@coflux/protocol";
 
 // 默认连同源（由 vite dev server 代理到后端）；可用 VITE_COFLUX_SERVER 覆盖
 const SERVER_URL =
@@ -37,6 +37,11 @@ export function App() {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   };
+  // 数据面：pty.input 以二进制帧发送
+  const sendInput = (sessionId: string, data: string) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(encodeFrame({ type: "pty.input", sessionId, data }));
+  };
 
   useEffect(() => {
     const term = new Terminal({
@@ -53,7 +58,7 @@ export function App() {
     fitRef.current = fit;
 
     term.onData((data) => {
-      if (activeSessionRef.current) send({ type: "pty.input", sessionId: activeSessionRef.current, data });
+      if (activeSessionRef.current) sendInput(activeSessionRef.current, data);
     });
     term.onResize(({ cols, rows }) => {
       if (activeSessionRef.current) send({ type: "pty.resize", sessionId: activeSessionRef.current, cols, rows });
@@ -80,6 +85,7 @@ export function App() {
     setAuthState("authenticating");
     setStatus("connecting");
     const ws = new WebSocket(SERVER_URL);
+    ws.binaryType = "arraybuffer";
     wsRef.current = ws;
     ws.onopen = () => {
       setStatus("connected");
@@ -90,6 +96,12 @@ export function App() {
       if (!stopReconnectRef.current && shouldRetryRef.current) setTimeout(() => connect(tokenRef.current), 1500);
     };
     ws.onmessage = (ev) => {
+      // 数据面：二进制帧（pty.output）→ 直接写入终端
+      if (ev.data instanceof ArrayBuffer) {
+        const frame = decodeFrame(new Uint8Array(ev.data));
+        if (frame && frame.type === "pty.output" && frame.sessionId === activeSessionRef.current) termRef.current?.write(frame.data);
+        return;
+      }
       let msg: ServerToClient;
       try {
         msg = JSON.parse(ev.data);
@@ -193,9 +205,7 @@ export function App() {
           setActiveTaskId(null);
         }
         break;
-      case "pty.output":
-        if (msg.sessionId === activeSessionRef.current) term.write(msg.data);
-        break;
+      // pty.output 走二进制数据面（见 ws.onmessage 的 ArrayBuffer 分支）
       case "error":
         term.writeln(`\r\n\x1b[31m[错误] ${msg.message}\x1b[0m`);
         break;

@@ -19,8 +19,54 @@ const ROOT = resolve(import.meta.dirname, "..", "..");
 const TSX = join(ROOT, "node_modules", ".bin", "tsx");
 const DEBUG = !!process.env.COFLUX_TEST_DEBUG;
 
+/* 数据面二进制帧编解码（与 packages/protocol 保持一致；harness 用纯 JS 内联一份，
+   刻意不依赖应用内部，符合黑盒定位）。帧体：[kind][sidLen][sessionId][?ridLen][?requestId][payload] */
+const FRAME_KIND = { "pty.output": 1, "pty.input": 2, "pty.replay": 3 };
+const FRAME_TYPE = { 1: "pty.output", 2: "pty.input", 3: "pty.replay" };
+const DATA_PLANE = new Set(["pty.output", "pty.input", "pty.replay"]);
+const _te = new TextEncoder();
+const _td = new TextDecoder();
+function encodeFrame(msg) {
+  const sid = _te.encode(msg.sessionId);
+  const payload = _te.encode(msg.data ?? "");
+  const rid = msg.type === "pty.replay" ? _te.encode(msg.requestId) : null;
+  const out = new Uint8Array(2 + sid.length + (rid ? 1 + rid.length : 0) + payload.length);
+  out[0] = FRAME_KIND[msg.type];
+  out[1] = sid.length;
+  out.set(sid, 2);
+  let off = 2 + sid.length;
+  if (rid) { out[off++] = rid.length; out.set(rid, off); off += rid.length; }
+  out.set(payload, off);
+  return out;
+}
+function decodeFrame(buf) {
+  const u = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  if (u.length < 2) return null;
+  const type = FRAME_TYPE[u[0]];
+  if (!type) return null;
+  const sidLen = u[1];
+  const sessionId = _td.decode(u.subarray(2, 2 + sidLen));
+  let off = 2 + sidLen;
+  if (type === "pty.replay") {
+    const ridLen = u[off++];
+    const requestId = _td.decode(u.subarray(off, off + ridLen));
+    off += ridLen;
+    return { type, sessionId, requestId, data: _td.decode(u.subarray(off)) };
+  }
+  return { type, sessionId, data: _td.decode(u.subarray(off)) };
+}
+
 function spawnApp(rel, env) {
   return spawn(TSX, [join(ROOT, rel)], { env, stdio: DEBUG ? "inherit" : "ignore", detached: true });
+}
+
+// daemon = Rust supervisor + Rust worker（两个二进制，零 node 运行时）。
+// 默认用 target/debug 下的产物（pretest 会 cargo build）；可用环境变量覆盖路径。
+const SUPERVISOR_BIN = process.env.COFLUX_SUPERVISOR_BIN || join(ROOT, "target/debug/coflux-supervisor");
+const WORKER_BIN = process.env.COFLUX_WORKER_BIN || join(ROOT, "target/debug/coflux-worker");
+function spawnDaemon(env) {
+  const env2 = { ...env, COFLUX_WORKER_CMD: WORKER_BIN, COFLUX_WORKER_ARGS: "[]" };
+  return spawn(SUPERVISOR_BIN, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
 }
 function killTree(p) {
   if (!p) return;
@@ -57,7 +103,8 @@ async function waitHealth(port, ms = 12000) {
 /** 造一个临时 git 仓库（一个空提交），返回路径。测试结束由 stack.stop 之外的 rmSync 清理。 */
 export function mkRepo() {
   const dir = mkdtempSync(join(tmpdir(), "coflux-test-repo-"));
-  execFileSync("git", ["init", "-q", dir]);
+  // 显式 -b main：默认分支不依赖宿主/容器的 git 全局配置（否则旧 git 默认 master，断言会跨环境飘）
+  execFileSync("git", ["init", "-q", "-b", "main", dir]);
   execFileSync("git", ["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
   return { dir, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} } };
 }
@@ -74,12 +121,12 @@ export async function startStack(opts = {}) {
   const db = join(dataDir, "coflux.db");
 
   const serverEnv = { ...process.env, COFLUX_PORT: String(port), COFLUX_DB: db, COFLUX_ENROLL_KEY: enrollKey, COFLUX_CLIENT_TOKEN: clientToken };
-  const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`, COFLUX_ENROLL_KEY: enrollKey, COFLUX_HOME: home, COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev" };
+  const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`, COFLUX_ENROLL_KEY: enrollKey, COFLUX_HOME: home, COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev", ...(opts.daemonEnv ?? {}) };
 
   const ref = { server: null, daemon: null };
   ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
   await waitHealth(port);
-  ref.daemon = spawnApp("apps/daemon/src/index.ts", daemonEnv);
+  ref.daemon = spawnDaemon(daemonEnv);
 
   const stack = {
     port,
@@ -156,13 +203,22 @@ export class Client {
     });
     this.ws.onmessage = (ev) => {
       let m;
-      try { m = JSON.parse(ev.data); } catch { return; }
+      if (typeof ev.data === "string") {
+        try { m = JSON.parse(ev.data); } catch { return; }
+      } else {
+        // 数据面二进制帧 → 还原为 {type,sessionId,data} 以兼容既有 waitFor 断言
+        m = decodeFrame(ev.data);
+        if (!m) return;
+      }
       this.log.push(m);
       this.waiters = this.waiters.filter((w) => !w.try(m));
     };
   }
   send(m) {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    // 数据面 type 自动编码为二进制帧，控制面走 JSON —— 既有调用点无需改动
+    if (DATA_PLANE.has(m.type)) this.ws.send(encodeFrame(m));
+    else this.ws.send(JSON.stringify(m));
   }
   waitFor(pred, label = "?", timeout = 10000) {
     const hit = this.log.find(pred);

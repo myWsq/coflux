@@ -9,28 +9,32 @@
 - **独占 + handoff**：一个终端同时一个控制端，attach 即接管。
 - **生产化加固**（两轮 + 一轮对抗式审查，共修 30 项确认问题）：WS 心跳、背压/流控、优雅关闭、崩溃兜底、重连指数退避、store 事务/预编译/WAL、级联删除原子化、结构化日志、统一配置。
 - **模块化**：server 拆 config/store/secrets/pending/transport/hub/index；daemon 拆 config/creds/git/sessions/exec/fs/index。
-- **daemon 稳定契约 v1**：能力协商（protocolVersion + capabilities）、`exec` 通用原语、`fs.list`/`fs.read`（root 锚定 + realpath 防穿越）、`unsupported` NACK。让未来功能 90% 只动 server+web。
-- **黑盒集成测试**（`tests/`，跨重构有效）：15 项，覆盖 auth/项目-worktree-任务-PTY/重启恢复/跨 daemon 安全/handoff/health/优雅关闭/exec/fs/路径穿越。
+- **daemon 通用原语**：`exec`、`fs.list`/`fs.read`（root 锚定 + realpath 防穿越）。很多新功能用现有原语即可，只动 server+web。
+- **黑盒集成测试**（`tests/`，跨重构有效）：14 项，覆盖 auth/项目-worktree-任务-PTY/重启恢复/跨 daemon 安全/handoff/health/优雅关闭/exec/fs/路径穿越。
 
 ## 待办
 
-### 1. 二进制数据面（性能，原加固计划最后一项）
-- `pty.output` / `pty.input` / `pty.replay`（及后续 `fs.read`）改**长度前缀二进制帧**，免 JSON 转义、降 CPU/带宽。
-- 控制面保持 JSON；同步改 protocol / daemon / server / web **及测试 harness**（需能解析二进制帧）。
+### 1. 二进制数据面（性能，原加固计划最后一项）✅ 已完成（2026-06）
+- [x] `pty.output` / `pty.input` / `pty.replay` 改**二进制帧**（`encodeFrame`/`decodeFrame` in `packages/protocol`），免 JSON 转义、降 CPU/带宽；控制面（含 `pty.resize`）保持 JSON。
+- [x] 三端 + 测试 harness 全部联动：WS 上按 `isBinary`/`binaryType` 分流文本与二进制；server 对数据面只校验归属后**原样转发字节**（不重新编解码）。
+- [x] 黑盒测试通过（handoff/lifecycle/reconnect 等覆盖 pty 双向流 + scrollback 回放）。
+- 帧体格式 `[kind][sidLen][sessionId][?ridLen][?requestId][payload]`：WS 上一个二进制 message = 一帧；**热升级 UDS 阶段在外层包 4 字节长度前缀即可复用同一帧体**（见 [hot-upgrade-design.md](hot-upgrade-design.md) 排序决策）。
+- 后续可选：`fs.read` 大文件也走二进制帧；node-pty `encoding:null` 直接拿 Buffer 省一次 decode/encode。
 
 ### 2. 自动热升级（已定 **方案 A：supervisor 持有 PTY + worker 可升级**）
 让 daemon 后台自动升级、且**升级时运行中会话存活**。详见 [hot-upgrade-design.md](hot-upgrade-design.md)。
-- [ ] **supervisor/worker 拆分**：supervisor 持有 node-pty + scrollback；worker 承载连接/认证/git/fs/协议/编排。本地 UDS IPC，**两级 resync**（复用现有 daemon↔server 模式下沉一层）。
-- [ ] **升级投递**：server 下发 `worker.upgrade{version, url, sha256, signature}`。
-- [ ] **验签 + 切换 + 回滚**：supervisor 内置公钥验签（防中心服务器被攻破 → 全网 RCE）；新版崩溃循环则自动回滚。
-- [ ] **打包 + launcher**：worker 打成可替换产物，supervisor 由 systemd/launchd 拉起。
+- [x] **supervisor/worker 拆分 + 全 Rust 化（已完成 2026-06）**：daemon = `crates/supervisor`(portable-pty + scrollback + UDS server + 起/管/重启 worker) + `crates/worker`(tokio：连接/认证/git/exec/fs/编排)，**零 node 运行时**。本地 UDS IPC，**两级 resync**（worker 重启 → 连 supervisor 取回会话 + 连 server resync，有序门控防空 resync 杀 PTY）。先 TS 验证机制、再逐进程 Rust 化（UDS/WS 语言中立，黑盒测试一路验证不返工），旧 TS daemon 已删。黑盒测试覆盖"杀 worker、PTY 存活、会话重挂"。
+- [x] **升级投递（已完成 2026-06）**：`client.upgradeDaemon{version}` → server → `worker.upgrade{version}` → worker 转 supervisor。**仅传版本标签**，supervisor 在自有注册表里解析，绝不执行外部传入路径（守住验签前的 RCE 口子）。注册表现为内置 + `COFLUX_WORKER_SPECS` 注入；将来由"下载+验签"填充。`url/sha256/signature` 随下载步骤再加。
+- [x] **切换 + 回滚（已完成 2026-06）**：supervisor `switchWorker(version)` 重启 worker 到新版；**观察期**（`PROBATION_MS`）内稳定运行才提交为 active，崩溃达阈值则自动回滚到上一好版本。会话全程在 supervisor 不受影响。黑盒测试覆盖"升级提交"与"坏版本回滚"，会话均存活。
+- [x] **远程下载 + ed25519 验签（已完成 2026-06）**：`worker.upgrade` 扩 `url/sha256/signature`。带 url → supervisor 起线程 `ureq` 下载 → 校 sha256 → `ed25519-dalek` 验签（公钥 baked-in 占位 / env `COFLUX_WORKER_PUBKEY` 覆盖）→ 落 `HOME/workers/<version>/` → 走观察期切换/回滚。**验签不过一律拒绝、保持当前版本**（防中心服务器被攻破 → 全网 RCE）。黑盒覆盖：正向升级 + **篡改(sha256)被拒** + **签名不符被拒**，会话均不受影响。⚠️ 占位公钥为全 0 → 默认下载升级被拒，发布签名流程建好后换入真公钥。
+- [x] **打包 + 安装 CLI（已完成 2026-06）**：`cargo build --release` 出两个二进制（supervisor 1M + worker 2M）；用户侧 `cofluxd`（npm，零依赖 node CLI）`up/update/status/logs/down/uninstall`——下载预编译二进制（或 `--bin-dir` 用本地产物）→ 写 env(600)/wrapper → 装 systemd(Linux)/launchd(macOS) 服务、崩溃自启。系统只看护 supervisor。
 
-**开工前待定（3 个）**：
-- 排序：先收尾二进制数据面、还是先做 supervisor 拆分？
-- 打包方式：`node --experimental-sea` 单文件 / `bun build --compile` / 带 node 运行时 tarball？
-- 签名密钥：是否已有发布签名体系，还是新设计一套（ed25519，supervisor 内置公钥）？
+**已定决策（2026-06 讨论确认，详见 hot-upgrade-design.md）**：
+- **排序**：先收尾二进制数据面（条目 1），再做 supervisor 拆分——UDS 与 WS 共用长度前缀帧，先做稳不返工。
+- **语言/打包**：原定"supervisor=Rust、worker=TS"，**实际推进为 supervisor + worker 都 Rust**（全 Rust daemon，零 node 运行时，打包 = 扔两个静态二进制）。protocol 在 `crates/protocol`，web 端 TS 后续可 codegen 生成消除重复。
+- **签名**：**已实现 ed25519 + supervisor 内置公钥**（`crates/supervisor/src/upgrade.rs`）。占位公钥为全 0（默认拒下载升级），发布时换入真公钥；env `COFLUX_WORKER_PUBKEY` 可覆盖（测试/自带密钥部署）。验签防"中心服务器被攻破"，env 覆盖不削弱该威胁（攻破的服务器设不了本地 env）。
 
-### 3. daemon 原语按需扩展（走能力协商，不破坏老 daemon）
+### 3. daemon 原语按需扩展
 - [ ] `fs.write`（IDE 编辑保存）
 - [ ] `fs.watch`（文件变更监听，需 daemon 原生 watcher）
 
@@ -43,4 +47,3 @@
 ### 5. 前端（IDE 方向）
 - [ ] 基于 `fs.list`/`fs.read` 的文件树 / 查看器
 - [ ] 基于 `exec` 的命令面板 / git 状态视图
-- [ ] 按 `DaemonInfo.capabilities` 做功能点亮（feature-gate）

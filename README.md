@@ -8,22 +8,41 @@
 
 | 包 | 说明 |
 |----|------|
-| `packages/protocol` | 共享线协议类型（三端引用） |
-| `apps/server` | 中心服务器：账号/设备认证 + 编排路由 + 持久化（node:sqlite） |
-| `apps/daemon` | 跑在开发机：`node-pty` 起 PTY + 登记/认证 + 断线续连 |
-| `apps/web` | Web Client：Vite + React + xterm.js |
+| `packages/protocol` | TS 共享线协议类型（server/web 引用） |
+| `apps/server` | 中心服务器（TS）：账号/设备认证 + 编排路由 + 持久化（node:sqlite） |
+| `apps/web` | Web Client（TS）：Vite + React + xterm.js |
+| `crates/protocol` | Rust 线协议真相源：serde 类型 + 帧 codec + UDS 消息 |
+| `crates/supervisor` | Rust daemon 的 supervisor：portable-pty 起 PTY + scrollback + 起/管 worker（极少升级） |
+| `crates/worker` | Rust daemon 的 worker（tokio）：连服务器/认证/重连 + git/exec/fs + 编排（频繁升级） |
+| `packages/cli` | `cofluxd`：用户侧管理 CLI（npm，零依赖 node）——装/起/停/升级 daemon |
 
-全 TypeScript / Node 生态，pnpm workspace。
+server/web 是 TypeScript（pnpm workspace）；**daemon 全 Rust**（Cargo workspace，零 node 运行时）。daemon 拆成 supervisor + worker 两进程：升级只换 worker，PTY 在 supervisor 里存活（热升级方案 A）。
+
+## 用户侧：安装 daemon
+
+daemon 是预编译的 Rust 二进制，用 `cofluxd`（npm）装成系统服务（崩溃/开机自启）。默认连公共服务 `wss://api.coflux.dev/daemon`（自托管用 `--server` 改）。
+
+```bash
+npm i -g cofluxd
+cofluxd                 # 首次=交互式引导（问服务器/登记密钥/设备名），之后=看状态
+# 或非交互（web「添加设备」给的命令）：
+cofluxd up --enroll-key <KEY>
+cofluxd status / logs -f / update / down / uninstall
+```
+
+登记密钥从 web 控制台「添加设备」获取。**所有配置都在 `~/.coflux/settings.json`**（`serverUrl`/`enrollKey`/`deviceName`/`shell`，含密钥故 600），**daemon 直接读这个文件**；手改后 `cofluxd reload` 生效。不碰源码、不装 Rust。发版/签名见 [docs/RELEASING.md](docs/RELEASING.md)。
 
 ## 快速开始
 
-```bash
-pnpm install          # 安装依赖（postinstall 会修复 node-pty 的执行位）
+前置：Node + pnpm（server/web）、Rust 工具链（daemon，`rustup` 装 stable 即可）。
 
-# 三个终端分别跑，或用根目录的 pnpm dev 一起跑：
+```bash
+pnpm install          # 安装 TS 依赖
+
+# 分终端跑（dev = server + web；daemon 单独，因为它是 Rust 二进制）：
 pnpm dev:server       # 中心服务器，监听 :8787（开发期默认登记密钥 dev-enroll / 登录令牌 dev-client）
-pnpm dev:daemon       # daemon，用 dev-enroll 登记到账号，凭证存 ~/.coflux/credentials.json
 pnpm dev:web          # Web，打开 http://localhost:5173
+pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 spawn worker）；用 dev-enroll 登记，凭证存 ~/.coflux
 ```
 
 1. 打开网页，用登录令牌 `dev-client` 登录（生产改 `COFLUX_CLIENT_TOKEN`）。

@@ -18,19 +18,6 @@
  */
 
 export const DEFAULT_PORT = 8787;
-export const PROTOCOL_VERSION = 5;
-
-/**
- * daemon 能力标识。daemon 在认证时声明自己支持哪些原语；server 据此 feature-gate，
- * 让新功能在老 daemon 上优雅降级，而不必强制升级 daemon。新增原语 = 新增一个能力串。
- */
-export const Capability = {
-  Pty: "pty",
-  Exec: "exec",
-  FsList: "fs.list",
-  FsRead: "fs.read",
-} as const;
-export type Capability = (typeof Capability)[keyof typeof Capability];
 
 export type AccountId = string;
 export type DaemonId = string;
@@ -48,8 +35,6 @@ export interface DaemonInfo {
   host: string;
   platform: string;
   online: boolean;
-  protocolVersion: number;
-  capabilities: string[];
 }
 
 /** fs.list 返回的目录项 */
@@ -105,8 +90,8 @@ export type FsListed = { type: "fs.listed"; requestId: RequestId; ok: boolean; e
 export type FsReadResult = { type: "fs.read.result"; requestId: RequestId; ok: boolean; content: string; error?: string };
 
 export type DaemonToServer =
-  | { type: "daemon.enroll"; enrollmentKey: string; name: string; host: string; platform: string; protocolVersion: number; capabilities: string[] }
-  | { type: "daemon.auth"; deviceToken: string; protocolVersion: number; capabilities: string[] }
+  | { type: "daemon.enroll"; enrollmentKey: string; name: string; host: string; platform: string }
+  | { type: "daemon.auth"; deviceToken: string }
   | { type: "daemon.resync"; sessions: { sessionId: SessionId; taskId: TaskId }[] }
   /** 校验路径是否为（非裸）git 仓库，返回顶层目录与当前分支 */
   | { type: "project.validated"; requestId: RequestId; ok: boolean; repoPath: string; branch: string; error?: string }
@@ -114,13 +99,10 @@ export type DaemonToServer =
   | { type: "worktree.added"; requestId: RequestId; ok: boolean; path: string; branch: string; error?: string }
   | { type: "session.started"; sessionId: SessionId; taskId: TaskId; pid: number }
   | { type: "session.exit"; sessionId: SessionId; exitCode: number }
-  | { type: "pty.output"; sessionId: SessionId; data: string }
-  | { type: "pty.replay"; sessionId: SessionId; requestId: RequestId; data: string }
+  // pty.output / pty.replay 走二进制数据面（见 encodeFrame/decodeFrame），不在 JSON 联合体内
   | ExecResult
   | FsListed
-  | FsReadResult
-  /** 老 daemon 不认识某带 requestId 的请求时回这个，让 server 优雅失败而非超时 */
-  | { type: "unsupported"; requestId: RequestId; what: string };
+  | FsReadResult;
 
 export type ServerToDaemon =
   | { type: "daemon.enrolled"; daemonId: DaemonId; deviceToken: string }
@@ -130,10 +112,12 @@ export type ServerToDaemon =
   | { type: "worktree.add"; requestId: RequestId; repoPath: string; workspaceId: WorkspaceId; name: string; branch: string; createNew: boolean }
   /** fire-and-forget：移除一个 worktree 目录 */
   | { type: "worktree.remove"; repoPath: string; worktreePath: string }
+  /** 热升级：切到某个 worker 版本。带 url 走"下载+验签"；不带则按版本标签在 supervisor 自有注册表里切换。fire-and-forget */
+  | { type: "worker.upgrade"; version: string; url?: string; sha256?: string; signature?: string }
   | { type: "session.create"; sessionId: SessionId; taskId: TaskId; cwd: string; shell?: string; cols: number; rows: number }
   | { type: "session.close"; sessionId: SessionId }
   | { type: "session.replay"; sessionId: SessionId; requestId: RequestId }
-  | { type: "pty.input"; sessionId: SessionId; data: string }
+  // pty.input 走二进制数据面（见 encodeFrame/decodeFrame），不在 JSON 联合体内
   | { type: "pty.resize"; sessionId: SessionId; cols: number; rows: number }
   /** 通用原语：一次性命令 */
   | { type: "exec.run"; requestId: RequestId; cwd: string; command: string; args: string[]; env?: Record<string, string>; timeoutMs?: number }
@@ -149,6 +133,8 @@ export type ClientToServer =
   | { type: "client.auth"; clientToken: string }
   | { type: "client.subscribe" }
   | { type: "client.removeDevice"; daemonId: DaemonId }
+  /** 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签 */
+  | { type: "client.upgradeDaemon"; daemonId: DaemonId; version: string; url?: string; sha256?: string; signature?: string }
   /** 导入一个 git 仓库为 project（自动创建主工作区） */
   | { type: "project.import"; daemonId: DaemonId; path: string; name?: string }
   | { type: "project.remove"; projectId: ProjectId }
@@ -160,7 +146,7 @@ export type ClientToServer =
   | { type: "task.attach"; taskId: TaskId }
   | { type: "task.stop"; taskId: TaskId }
   | { type: "task.remove"; taskId: TaskId }
-  | { type: "pty.input"; sessionId: SessionId; data: string }
+  // pty.input 走二进制数据面（见 encodeFrame/decodeFrame），不在 JSON 联合体内
   | { type: "pty.resize"; sessionId: SessionId; cols: number; rows: number }
   /** 通用原语（IDE/工具用）：在某工作区里跑命令、读/列文件。requestId 由 client 自定，server 原样回带 */
   | { type: "client.exec"; requestId: RequestId; workspaceId: WorkspaceId; command: string; args: string[]; timeoutMs?: number }
@@ -168,7 +154,7 @@ export type ClientToServer =
   | { type: "client.fs.read"; requestId: RequestId; workspaceId: WorkspaceId; path: string };
 
 export type ServerToClient =
-  | { type: "auth.ok"; accountId: AccountId; protocolVersion: number }
+  | { type: "auth.ok"; accountId: AccountId }
   | { type: "auth.error"; message: string }
   | { type: "state.snapshot"; daemons: DaemonInfo[]; projects: Project[]; workspaces: Workspace[]; tasks: Task[] }
   | { type: "daemon.updated"; daemon: DaemonInfo }
@@ -181,7 +167,7 @@ export type ServerToClient =
   | { type: "task.removed"; taskId: TaskId }
   /** 本 client 对该任务的控制权被另一个 client 接管（独占模型） */
   | { type: "task.detached"; taskId: TaskId }
-  | { type: "pty.output"; sessionId: SessionId; data: string }
+  // pty.output 走二进制数据面（见 encodeFrame/decodeFrame），不在 JSON 联合体内
   | ExecResult
   | FsListed
   | FsReadResult
@@ -200,31 +186,95 @@ export function decode<T>(raw: string | Buffer): T {
 }
 
 /* ------------------------------------------------------------------ *
+ * 数据面二进制帧（pty.output / pty.input / pty.replay）
+ *
+ * 控制面仍走 JSON 文本帧；高频数据面改长度前缀二进制帧，免 JSON 转义、降 CPU/带宽。
+ * 帧体布局（不含外层长度前缀）：
+ *   [kind:1][sidLen:1][sessionId:utf8(sidLen)][? ridLen:1][? requestId:utf8(ridLen)][payload:utf8 到帧尾]
+ * - kind: 1=pty.output 2=pty.input 3=pty.replay（仅 replay 带 requestId）。
+ * - 在 WS 上：每个二进制 message 即一帧（WS 自带分帧），payload 取到帧尾。
+ * - 在字节流（UDS，热升级用）上：外层再包 4 字节大端长度前缀分帧，帧体格式不变。
+ * 用 Uint8Array/TextEncoder 实现，Node 与浏览器通用。
+ * ------------------------------------------------------------------ */
+
+export const FrameKind = { Output: 1, Input: 2, Replay: 3 } as const;
+
+export type DataFrame =
+  | { type: "pty.output"; sessionId: SessionId; data: string }
+  | { type: "pty.input"; sessionId: SessionId; data: string }
+  | { type: "pty.replay"; sessionId: SessionId; requestId: RequestId; data: string };
+
+const _te = new TextEncoder();
+const _td = new TextDecoder();
+
+/** 把数据面消息编码为二进制帧。sessionId/requestId 为服务器签发的短 id（< 256 字节）。 */
+export function encodeFrame(msg: DataFrame): Uint8Array {
+  const sid = _te.encode(msg.sessionId);
+  if (sid.length > 255) throw new RangeError("sessionId too long for frame");
+  const payload = _te.encode(msg.data);
+  const rid = msg.type === "pty.replay" ? _te.encode(msg.requestId) : null;
+  if (rid && rid.length > 255) throw new RangeError("requestId too long for frame");
+  const head = 2 + sid.length + (rid ? 1 + rid.length : 0);
+  const out = new Uint8Array(head + payload.length);
+  out[0] = msg.type === "pty.output" ? FrameKind.Output : msg.type === "pty.input" ? FrameKind.Input : FrameKind.Replay;
+  out[1] = sid.length;
+  out.set(sid, 2);
+  let off = 2 + sid.length;
+  if (rid) {
+    out[off++] = rid.length;
+    out.set(rid, off);
+    off += rid.length;
+  }
+  out.set(payload, off);
+  return out;
+}
+
+/** 解码二进制帧；畸形返回 null（调用方丢弃，不崩溃）。 */
+export function decodeFrame(buf: Uint8Array): DataFrame | null {
+  if (buf.length < 2) return null;
+  const kind = buf[0];
+  const sidLen = buf[1];
+  if (buf.length < 2 + sidLen) return null;
+  const sessionId = _td.decode(buf.subarray(2, 2 + sidLen));
+  let off = 2 + sidLen;
+  if (kind === FrameKind.Output || kind === FrameKind.Input) {
+    return { type: kind === FrameKind.Output ? "pty.output" : "pty.input", sessionId, data: _td.decode(buf.subarray(off)) };
+  }
+  if (kind === FrameKind.Replay) {
+    if (buf.length < off + 1) return null;
+    const ridLen = buf[off++];
+    if (buf.length < off + ridLen) return null;
+    const requestId = _td.decode(buf.subarray(off, off + ridLen));
+    off += ridLen;
+    return { type: "pty.replay", sessionId, requestId, data: _td.decode(buf.subarray(off)) };
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ *
  * 入站消息运行时校验（防畸形 wire 数据崩溃 / 类型混淆）
  * ------------------------------------------------------------------ */
 
 type FieldSpec = "string" | "number" | "boolean" | "array";
 
 const DAEMON_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
-  "daemon.enroll": { enrollmentKey: "string", name: "string", host: "string", platform: "string", protocolVersion: "number", capabilities: "array" },
-  "daemon.auth": { deviceToken: "string", protocolVersion: "number", capabilities: "array" },
+  "daemon.enroll": { enrollmentKey: "string", name: "string", host: "string", platform: "string" },
+  "daemon.auth": { deviceToken: "string" },
   "daemon.resync": { sessions: "array" },
   "project.validated": { requestId: "string", ok: "boolean", repoPath: "string", branch: "string" },
   "worktree.added": { requestId: "string", ok: "boolean", path: "string", branch: "string" },
   "session.started": { sessionId: "string", taskId: "string", pid: "number" },
   "session.exit": { sessionId: "string", exitCode: "number" },
-  "pty.output": { sessionId: "string", data: "string" },
-  "pty.replay": { sessionId: "string", requestId: "string", data: "string" },
   "exec.result": { requestId: "string", ok: "boolean", exitCode: "number", stdout: "string", stderr: "string" },
   "fs.listed": { requestId: "string", ok: "boolean", entries: "array" },
   "fs.read.result": { requestId: "string", ok: "boolean", content: "string" },
-  "unsupported": { requestId: "string", what: "string" },
 };
 
 const CLIENT_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
   "client.auth": { clientToken: "string" },
   "client.subscribe": {},
   "client.removeDevice": { daemonId: "string" },
+  "client.upgradeDaemon": { daemonId: "string", version: "string" },
   "project.import": { daemonId: "string", path: "string" },
   "project.remove": { projectId: "string" },
   "workspace.create": { projectId: "string", name: "string", branch: "string", createNew: "boolean" },
@@ -234,7 +284,6 @@ const CLIENT_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
   "task.attach": { taskId: "string" },
   "task.stop": { taskId: "string" },
   "task.remove": { taskId: "string" },
-  "pty.input": { sessionId: "string", data: "string" },
   "pty.resize": { sessionId: "string", cols: "number", rows: "number" },
   "client.exec": { requestId: "string", workspaceId: "string", command: "string", args: "array" },
   "client.fs.list": { requestId: "string", workspaceId: "string", path: "string" },
