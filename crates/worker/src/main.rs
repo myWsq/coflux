@@ -90,6 +90,11 @@ async fn sup_ctrl(tx: &Sender<Vec<u8>>, msg: &WorkerToSupervisor) {
 
 #[tokio::main]
 async fn main() {
+    // rustls 0.23 要求在任何 TLS 握手前选定 process-level CryptoProvider，
+    // 否则连 wss:// 时 panic（"Could not automatically determine the process-level CryptoProvider"）。
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("安装 rustls ring CryptoProvider 失败");
     let home = env_or("COFLUX_HOME", format!("{}/.coflux", std::env::var("HOME").unwrap_or_default()));
     let s = Settings::load(&home); // 用户配置，env 同名变量可覆盖
     let cfg = Arc::new(Config {

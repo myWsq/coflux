@@ -13,5 +13,10 @@ coflux-protocol = { path = "../protocol" }
 serde = { workspace = true }
 serde_json.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "time", "sync", "signal"] }
-tokio-tungstenite = "0.24"
+# 必须开 TLS feature 才能连 wss://（生产/staging 经 Caddy 走 HTTPS）；
+# 默认无 TLS 时连 wss 会抛 "TLS support not compiled in"。用 rustls + 内置根证书：纯 Rust、交叉编译/分发免依赖系统 OpenSSL 与根证书库。
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# 固定 rustls 只用 ring provider，关掉默认 aws-lc-rs：交叉编译（musl）友好、无需 C 工具链；
+# 且避免依赖树里两个 provider 并存时 rustls 无法自动选定而 panic。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 futures-util = "0.3"
