@@ -10,6 +10,12 @@ const SERVER_URL =
   `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/client`;
 const TOKEN_KEY = "coflux_token";
 
+// Supabase 登录：仅当两个 build-time env 都设置时启用（email+password 换 access_token）。
+// 未设时维持现状（用户名+密码直连 server）。不引 supabase-js SDK，只 fetch 一个 token 端点。
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL?.replace(/\/+$/, "");
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const USE_SUPABASE = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
+
 const STATUS_LABEL: Record<Task["status"], string> = { idle: "未启动", running: "运行中", exited: "已结束" };
 type AuthState = "need-login" | "authenticating" | "authed" | "auth-failed";
 
@@ -28,6 +34,7 @@ export function App() {
   const [authState, setAuthState] = useState<AuthState>("need-login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [loginError, setLoginError] = useState<string>("");
   const [daemons, setDaemons] = useState<DaemonInfo[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -84,7 +91,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function connect(cred: { token: string } | { username: string; password: string }) {
+  function connect(cred: { token: string } | { supabaseToken: string } | { username: string; password: string }) {
     stopReconnectRef.current = false;
     setAuthState("authenticating");
     setStatus("connecting");
@@ -93,7 +100,9 @@ export function App() {
     wsRef.current = ws;
     ws.onopen = () => {
       setStatus("connected");
+      // 重连用 coflux 会话 token；首次登录用 supabaseToken 换票（supabase 模式）或用户名+密码（local 模式）。
       if ("token" in cred) send({ type: "client.auth", clientToken: cred.token });
+      else if ("supabaseToken" in cred) send({ type: "client.auth", supabaseToken: cred.supabaseToken });
       else send({ type: "client.auth", username: cred.username, password: cred.password });
     };
     ws.onclose = () => {
@@ -118,9 +127,37 @@ export function App() {
     };
   }
 
-  function login(e: React.FormEvent) {
+  async function login(e: React.FormEvent) {
     e.preventDefault();
-    connect({ username, password });
+    setLoginError("");
+    if (!USE_SUPABASE) {
+      connect({ username, password });
+      return;
+    }
+    // Supabase 模式：email+password 换 access_token（一个 fetch，不引 SDK），再经 WS 换票。
+    setAuthState("authenticating");
+    try {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: { "content-type": "application/json", apikey: SUPABASE_ANON_KEY! },
+        body: JSON.stringify({ email: username, password }),
+      });
+      if (!res.ok) {
+        setLoginError("邮箱或密码错误");
+        setAuthState("auth-failed");
+        return;
+      }
+      const data = await res.json();
+      if (!data?.access_token) {
+        setLoginError("登录失败：未获得访问令牌");
+        setAuthState("auth-failed");
+        return;
+      }
+      connect({ supabaseToken: data.access_token });
+    } catch {
+      setLoginError("网络错误：无法连接认证服务");
+      setAuthState("auth-failed");
+    }
   }
   function logout() {
     stopReconnectRef.current = true;
@@ -143,6 +180,7 @@ export function App() {
     switch (msg.type) {
       case "auth.ok":
         setAuthState("authed");
+        setLoginError("");
         shouldRetryRef.current = true;
         if (msg.clientToken) {
           // 登录签发的会话 token：存下来用于重连（密码不落盘）
@@ -152,9 +190,10 @@ export function App() {
         send({ type: "client.subscribe" });
         break;
       case "auth.error":
-        // token 过期/被撤销（或密码错误）：清掉本地坏 token，避免每次刷新都用死 token 自动重连
+        // token 过期/被撤销（或凭证错误）：清掉本地坏 token，避免每次刷新都用死 token 自动重连
         tokenRef.current = "";
         localStorage.removeItem(TOKEN_KEY);
+        setLoginError(USE_SUPABASE ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误");
         setAuthState("auth-failed");
         shouldRetryRef.current = false;
         break;
@@ -302,12 +341,19 @@ export function App() {
         <div className="login">
           <form className="login-card" onSubmit={login}>
             <div className="brand-lg">coflux</div>
-            <p className="login-hint">用用户名 + 密码登录</p>
-            <input autoFocus type="text" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="用户名" autoComplete="username" />
+            <p className="login-hint">{USE_SUPABASE ? "用邮箱 + 密码登录" : "用用户名 + 密码登录"}</p>
+            <input
+              autoFocus
+              type={USE_SUPABASE ? "email" : "text"}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder={USE_SUPABASE ? "邮箱" : "用户名"}
+              autoComplete={USE_SUPABASE ? "email" : "username"}
+            />
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="密码" autoComplete="current-password" />
             <button type="submit">登录</button>
             {authState === "authenticating" && <div className="login-status">连接中…</div>}
-            {authState === "auth-failed" && <div className="login-status err">登录失败：用户名或密码错误</div>}
+            {authState === "auth-failed" && <div className="login-status err">{loginError || "登录失败"}</div>}
           </form>
         </div>
       )}
