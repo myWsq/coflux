@@ -64,6 +64,8 @@ interface RuntimeSession {
   /** 独占模型：同一时刻只有一个控制端；attach 即接管，原控制端被踢 */
   holder: ClientConn | null;
   closing: boolean;
+  /** session.create 后的启动确认超时；收到 session.started 即清除。超时未确认视为启动失败 */
+  startTimer?: ReturnType<typeof setTimeout>;
 }
 
 type OpData =
@@ -292,6 +294,10 @@ export class Hub {
       case "session.started": {
         const s = this.sessions.get(msg.sessionId);
         if (s && s.daemonId !== conn.daemonId) return;
+        if (s?.startTimer) {
+          clearTimeout(s.startTimer);
+          s.startTimer = undefined; // 已确认启动，撤销启动超时
+        }
         const task = this.store.getTask(msg.taskId);
         if (task && task.daemonId === conn.daemonId && task.sessionId === msg.sessionId && task.status !== "running") {
           const updated = this.store.updateTask(task.id, { status: "running", exitCode: null });
@@ -308,6 +314,7 @@ export class Hub {
           const updated = this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: msg.exitCode });
           if (updated) this.emitTask(updated);
         }
+        if (s?.startTimer) clearTimeout(s.startTimer);
         if (s) this.sessions.delete(msg.sessionId);
         log.debug("session exit", { sessionId: msg.sessionId, code: msg.exitCode });
         break;
@@ -660,10 +667,29 @@ export class Hub {
     if (!ws) return void this.sendClient(client, { type: "error", message: "工作区已不存在" });
 
     const sessionId = randomUUID();
-    this.sessions.set(sessionId, { sessionId, daemonId: task.daemonId, accountId: task.accountId, taskId: task.id, holder: client, closing: false });
+    const session: RuntimeSession = { sessionId, daemonId: task.daemonId, accountId: task.accountId, taskId: task.id, holder: client, closing: false };
+    // 启动确认超时：daemon 收到 session.create 却起 PTY 失败又不回消息时，避免 task 永久卡 running + session 泄漏。
+    const startTimer = setTimeout(() => this.onSessionStartTimeout(sessionId), config.pendingTimeoutMs);
+    (startTimer as { unref?: () => void }).unref?.();
+    session.startTimer = startTimer;
+    this.sessions.set(sessionId, session);
     this.sendDaemon(d, { type: "session.create", sessionId, taskId: task.id, cwd: ws.path, cols: clampDim(cols, 80), rows: clampDim(rows, 24) });
     const updated = this.store.updateTask(task.id, { status: "running", sessionId, exitCode: null });
     if (updated) this.emitTask(updated);
+  }
+
+  /** session.create 超时未确认启动：清运行时 session、标 task exited、通知控制端。 */
+  private onSessionStartTimeout(sessionId: SessionId): void {
+    const s = this.sessions.get(sessionId);
+    if (!s || !s.startTimer) return; // 已确认启动（timer 被清）或已清理
+    this.sessions.delete(sessionId);
+    const task = this.store.getTaskBySession(sessionId);
+    if (task && task.sessionId === sessionId && task.status === "running") {
+      const updated = this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
+      if (updated) this.emitTask(updated);
+    }
+    if (s.holder) this.sendClient(s.holder, { type: "error", message: "会话启动超时" });
+    log.warn("session start timed out", { sessionId });
   }
 
   private attachWithReplay(client: ClientConn, sessionId: SessionId): void {
