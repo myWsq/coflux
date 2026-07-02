@@ -35,6 +35,7 @@ import { Store } from "./store.js";
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
 import { PendingRegistry } from "./pending.js";
+import type { SupabaseVerifier, SupabaseIdentity } from "./auth.js";
 
 const log = createLogger("hub");
 
@@ -83,7 +84,8 @@ export class Hub {
   /** exec/fs 这类"client 发起、daemon 应答、原样回传给 client"的中继 */
   private pendingRelays = new PendingRegistry<ClientConn, { clientRequestId: string; kind: RelayKind }>(config.pendingTimeoutMs);
 
-  constructor(private store: Store) {}
+  /** supabase 模式下的验签器；local 模式为 undefined */
+  constructor(private store: Store, private verifier?: SupabaseVerifier) {}
 
   /* ============================ 发送工具 ============================ */
   private sendDaemon(d: DaemonConn, msg: ServerToDaemon) {
@@ -394,31 +396,9 @@ export class Hub {
 
     switch (msg.type) {
       case "client.auth": {
-        let accountId: AccountId | undefined;
-        let issued: string | undefined;
-        let tokenHash: string | undefined;
-        const now = Date.now();
-        if (typeof msg.clientToken === "string" && msg.clientToken) {
-          // 重连：已签发的会话 token（校验未撤销且未过期）
-          tokenHash = hashToken(msg.clientToken);
-          accountId = this.store.accountForClientToken(tokenHash, now);
-        } else if (typeof msg.username === "string" && typeof msg.password === "string") {
-          // 登录：用户名 + 密码（单租户，对照配置）→ 签发带有效期的会话 token
-          if (verifyLogin(msg.username, msg.password)) {
-            accountId = config.accountId;
-            issued = genToken("ck_sess");
-            tokenHash = hashToken(issued);
-            this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs);
-          }
-        }
-        if (!accountId) {
-          this.sendClient(client, { type: "auth.error", message: "用户名或密码错误" });
-          client.ws.close(4001, "bad credentials");
-          return;
-        }
-        client.accountId = accountId;
-        client.tokenHash = tokenHash;
-        this.sendClient(client, { type: "auth.ok", accountId, clientToken: issued });
+        // supabase 验签是异步（JWKS 本地验签）；auth 是首条消息，连接在完成前未 authed，
+        // 后续消息会被上面的「未认证」分支挡住，故 fire-and-forget 不引入乱序。
+        void this.handleClientAuth(client, msg);
         break;
       }
       case "client.logout": {
@@ -633,6 +613,73 @@ export class Hub {
         break;
       }
     }
+  }
+
+  /**
+   * client.auth：三条互斥路径
+   *   1) clientToken 重连（两模式通用）——coflux 自持会话 token，全程不碰 Supabase。
+   *   2) supabase 换票（仅 supabase 模式）——JWKS 本地验签 → userId → 查/建 membership → 签发会话 token。
+   *   3) env 用户名+密码（仅 local 模式）——单账号 default。
+   * 非 string 的凭证字段自然落空 → auth.error（与既有 clientToken 类型校验一致严格）。
+   */
+  private async handleClientAuth(client: ClientConn, msg: Extract<ClientToServer, { type: "client.auth" }>): Promise<void> {
+    const now = Date.now();
+    let accountId: AccountId | undefined;
+    let issued: string | undefined;
+    let tokenHash: string | undefined;
+    let userId: string | null = null;
+
+    if (typeof msg.clientToken === "string" && msg.clientToken) {
+      // 重连：已签发的会话 token（校验未撤销且未过期）
+      tokenHash = hashToken(msg.clientToken);
+      accountId = this.store.accountForClientToken(tokenHash, now);
+    } else if (config.authProvider === "supabase" && typeof msg.supabaseToken === "string" && msg.supabaseToken) {
+      // 换票：验签 Supabase JWT → userId → 查/建个人账号 → 签发 coflux 会话 token
+      const identity = this.verifier ? await this.verifier.verify(msg.supabaseToken) : null;
+      if (identity) {
+        accountId = this.resolveAccountForUser(identity);
+        userId = identity.userId;
+        issued = genToken("ck_sess");
+        tokenHash = hashToken(issued);
+        this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs, userId);
+      }
+    } else if (config.authProvider === "local" && typeof msg.username === "string" && typeof msg.password === "string") {
+      // 登录：用户名 + 密码（单租户，对照配置）→ 签发带有效期的会话 token
+      if (verifyLogin(msg.username, msg.password)) {
+        accountId = config.accountId;
+        issued = genToken("ck_sess");
+        tokenHash = hashToken(issued);
+        this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs, null);
+      }
+    }
+
+    if (!accountId) {
+      this.sendClient(client, { type: "auth.error", message: "认证失败" });
+      try {
+        client.ws.close(4001, "bad credentials");
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    client.accountId = accountId;
+    client.tokenHash = tokenHash;
+    this.sendClient(client, { type: "auth.ok", accountId, clientToken: issued });
+  }
+
+  /** 验签通过且合法的 Supabase 用户：查已有个人账号，无则 lazy 建号 + owner membership。
+   * 能出示合法 JWT ⇒ 管理员在 Supabase 亲手建的用户，故 lazy provision 安全（见 plans/001）。 */
+  private resolveAccountForUser(identity: SupabaseIdentity): AccountId {
+    const existing = this.store.getMembershipByUser(identity.userId);
+    if (existing) return existing.accountId;
+    const accountId = randomUUID();
+    const now = Date.now();
+    this.store.transaction(() => {
+      this.store.createAccount({ id: accountId, name: identity.email ?? identity.userId, createdAt: now });
+      this.store.createMembership(identity.userId, accountId, "owner", now);
+    });
+    log.info("provisioned account for supabase user", { accountId });
+    return accountId;
   }
 
   private workspaceForClient(client: ClientConn, workspaceId: WorkspaceId): Workspace | undefined {

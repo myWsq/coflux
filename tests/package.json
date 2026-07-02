@@ -8,6 +8,7 @@
     "test": "node --test --test-concurrency=1 src/*.test.mjs"
   },
   "devDependencies": {
+    "jose": "^5.9.6",
     "ws": "^8.18.0"
   }
 }

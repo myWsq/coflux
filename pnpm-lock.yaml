@@ -26,6 +26,9 @@ importers:
       '@coflux/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      jose:
+        specifier: ^5.9.6
+        version: 5.10.0
       ws:
         specifier: ^8.18.0
         version: 8.21.0
@@ -73,6 +76,9 @@ importers:
 
   tests:
     devDependencies:
+      jose:
+        specifier: ^5.9.6
+        version: 5.10.0
       ws:
         specifier: ^8.18.0
         version: 8.21.0
@@ -740,6 +746,9 @@ packages:
     resolution: {integrity: sha512-3hN7NaskYvMDLQY55gnW3NQ+mesEAepTqlg+VEbj7zzqEMBVNhzcGYYeqFo/TlYz6eQiFcp1HcsCZO+nGgS8zg==}
     engines: {node: '>=6.9.0'}
 
+  jose@5.10.0:
+    resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
+
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
 
@@ -1406,6 +1415,8 @@ snapshots:
     optional: true
 
   gensync@1.0.0-beta.2: {}
+
+  jose@5.10.0: {}
 
   js-tokens@4.0.0: {}
 

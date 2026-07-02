@@ -109,6 +109,54 @@ export function mkRepo() {
   return { dir, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} } };
 }
 
+/**
+ * 只起 server（不起 Rust daemon），用于 supabase 模式等需要自定认证/装配的测试。
+ * opts.env 追加/覆盖 server 环境变量（如 COFLUX_AUTH、SUPABASE_URL）。
+ */
+export async function startServer(opts = {}) {
+  const port = opts.port;
+  if (!port) throw new Error("startServer requires a port");
+  const dataDir = mkdtempSync(join(tmpdir(), "coflux-test-db-"));
+  const db = join(dataDir, "coflux.db");
+  const serverEnv = { ...process.env, COFLUX_PORT: String(port), COFLUX_DB: db, ...(opts.env ?? {}) };
+  const ref = { server: spawnApp("apps/server/src/index.ts", serverEnv) };
+  await waitHealth(port);
+  return {
+    port,
+    makeClient: () => new Client(port),
+    rawDaemon: () => rawDaemon(port),
+    async restartServer() {
+      killTree(ref.server);
+      await sleep(600);
+      ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
+      await waitHealth(port);
+    },
+    async stop() {
+      killTree(ref.server);
+      await sleep(150);
+      if (existsSync(dataDir)) try { rmSync(dataDir, { recursive: true, force: true }); } catch {}
+    },
+  };
+}
+
+/** 一个原始 /daemon 连接：直接发 daemon.enroll/daemon.auth，不需要 Rust supervisor。 */
+export function rawDaemon(port) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/daemon`);
+  const log = [];
+  let waiters = [];
+  ws.onmessage = (ev) => { let m; try { m = JSON.parse(ev.data); } catch { return; } log.push(m); waiters = waiters.filter((w) => !w.try(m)); };
+  return {
+    ready: new Promise((res, rej) => { ws.onopen = res; ws.onerror = (e) => rej(new Error("ws error: " + (e.message || "?"))); }),
+    send: (m) => ws.send(JSON.stringify(m)),
+    waitFor: (pred, label = "?", t = 8000) => {
+      const h = log.find(pred);
+      if (h) return Promise.resolve(h);
+      return new Promise((res, rej) => { const tm = setTimeout(() => rej(new Error("timeout " + label)), t); waiters.push({ try: (m) => (pred(m) ? (clearTimeout(tm), res(m), true) : false) }); });
+    },
+    close: () => { try { ws.close(); } catch {} },
+  };
+}
+
 /** 起一套独立栈，返回控制句柄。等到 daemon 在线后才返回。 */
 export async function startStack(opts = {}) {
   const port = opts.port;

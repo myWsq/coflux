@@ -14,24 +14,43 @@ function int(name: string, def: number): number {
 const isDev = process.env.COFLUX_DEV === "1";
 const missingSecrets: string[] = [];
 
-/** 秘密类配置：生产必须由环境变量提供；开发回落到 devDefault（弱值，仅本地用）。 */
-function secret(name: string, devDefault: string): string {
+// 身份提供方：local（默认，env 用户名+密码单账号）| supabase（Supabase Auth 换票多账号）。
+// 见 plans/001。local 模式行为与历史完全一致；supabase 模式只把「你是谁」的认证外包给 Supabase，
+// 会话/数据/授权全部由 coflux 自持（验签得 userId → 查/建 membership → 签发 coflux 会话 token）。
+const authRaw = process.env.COFLUX_AUTH ?? "local";
+if (authRaw !== "local" && authRaw !== "supabase") {
+  console.error(`[config] COFLUX_AUTH 取值非法：${authRaw}（仅支持 local | supabase）。`);
+  process.exit(1);
+}
+const authProvider: "local" | "supabase" = authRaw;
+const isLocal = authProvider === "local";
+
+/** 秘密类配置：生产必须由环境变量提供；开发回落到 devDefault（弱值，仅本地用）。
+ * required=false 的项（如 supabase 模式下的 env 口令/登记密钥）不参与 fail-closed 校验。 */
+function secret(name: string, devDefault: string, required = true): string {
   const v = process.env[name];
   if (v !== undefined && v !== "") return v;
-  if (!isDev) missingSecrets.push(name);
+  if (!isDev && required) missingSecrets.push(name);
   return devDefault;
 }
 
+// supabase 模式必需 SUPABASE_URL（验签的 iss / JWKS 来源）；去掉尾斜杠以稳定拼接。
+const supabaseUrl = (process.env.SUPABASE_URL ?? "").replace(/\/+$/, "");
+if (authProvider === "supabase" && !supabaseUrl) missingSecrets.push("SUPABASE_URL");
+
 export const config = {
+  authProvider,
+  supabaseUrl,
   port: int("COFLUX_PORT", DEFAULT_PORT),
   // 默认只绑 localhost：生产由反向代理(Caddy)对外，不直接暴露端口。需对外监听设 COFLUX_HOST=0.0.0.0。
   host: process.env.COFLUX_HOST ?? "127.0.0.1",
   dbPath: process.env.COFLUX_DB ?? join(process.cwd(), "data", "coflux.db"),
-  enrollKey: secret("COFLUX_ENROLL_KEY", "dev-enroll"),
+  // 登记密钥 / env 口令仅 local 模式必需；supabase 模式下登记密钥走 UI 生成、web 登录走 Supabase。
+  enrollKey: secret("COFLUX_ENROLL_KEY", "dev-enroll", isLocal),
   // web 登录：用户名 + 密码（单租户）。登录成功签发会话 token 给 web 存用，用户不碰 token。
-  // username 非秘密（账号名），保留默认；password 是秘密，生产必须由 env 提供。
+  // username 非秘密（账号名），保留默认；password 是秘密，local 生产必须由 env 提供。
   username: process.env.COFLUX_USERNAME ?? "admin",
-  password: secret("COFLUX_PASSWORD", "admin"),
+  password: secret("COFLUX_PASSWORD", "admin", isLocal),
   accountId: "default",
   /** daemon 连接地址，展示在 web「添加设备」命令里；反代/公网部署时用 COFLUX_DAEMON_URL 覆盖 */
   daemonUrl: process.env.COFLUX_DAEMON_URL ?? `ws://127.0.0.1:${int("COFLUX_PORT", DEFAULT_PORT)}/daemon`,
