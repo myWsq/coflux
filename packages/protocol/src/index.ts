@@ -132,6 +132,8 @@ export type ServerToDaemon =
 export type ClientToServer =
   /** 登录：用户名+密码（首次）或会话 clientToken（重连）。服务器登录成功会在 auth.ok 回带会话 token */
   | { type: "client.auth"; username?: string; password?: string; clientToken?: string }
+  /** 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地） */
+  | { type: "client.logout" }
   | { type: "client.subscribe" }
   /** 为当前账号生成一条新的登记密钥（账号级、可复用），供新机器 daemon 登记 */
   | { type: "client.createEnrollmentKey" }
@@ -256,6 +258,28 @@ export function decodeFrame(buf: Uint8Array): DataFrame | null {
   return null;
 }
 
+/**
+ * 把 replay 帧字节级重组为 output 帧（复制 sessionId 与 payload 的原始字节，去掉 requestId）。
+ * server 转发 replay 给控制端时用它，避免 decode→encode 的 UTF-8 往返破坏 scrollback 里的非法/半截 UTF-8 字节
+ * （实时 output 是原样转发 buf，回放必须与之字节一致）。畸形返回 null。
+ */
+export function replayFrameToOutput(buf: Uint8Array): Uint8Array | null {
+  if (buf.length < 2 || buf[0] !== FrameKind.Replay) return null;
+  const sidLen = buf[1];
+  if (buf.length < 2 + sidLen + 1) return null;
+  let off = 2 + sidLen;
+  const ridLen = buf[off++];
+  off += ridLen;
+  if (buf.length < off) return null;
+  const payload = buf.subarray(off); // 原始字节，不 decode
+  const out = new Uint8Array(2 + sidLen + payload.length);
+  out[0] = FrameKind.Output;
+  out[1] = sidLen;
+  out.set(buf.subarray(2, 2 + sidLen), 2); // sessionId 字节原样复制
+  out.set(payload, 2 + sidLen);
+  return out;
+}
+
 /* ------------------------------------------------------------------ *
  * 入站消息运行时校验（防畸形 wire 数据崩溃 / 类型混淆）
  * ------------------------------------------------------------------ */
@@ -277,6 +301,7 @@ const DAEMON_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
 
 const CLIENT_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
   "client.auth": {},
+  "client.logout": {},
   "client.subscribe": {},
   "client.createEnrollmentKey": {},
   "client.removeDevice": { daemonId: "string" },

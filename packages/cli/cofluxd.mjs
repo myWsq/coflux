@@ -205,7 +205,7 @@ function cmdReload() {
 function cmdDown() { stopService(); console.log("✓ 已停止"); }
 
 async function cmdUpdate(v) {
-  if (!fs.existsSync(ENV_FILE)) die("尚未安装，先 cofluxd up / onboard");
+  if (!fs.existsSync(SETTINGS)) die("尚未安装，先 cofluxd up / onboard");
   await ensureBinaries({ version: v.version, binDir: v["bin-dir"] });
   restartService();
   console.log(`✓ 已更新到 ${v["bin-dir"] ? "本地产物" : v.version} 并重启（supervisor）`);

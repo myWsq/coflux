@@ -125,6 +125,8 @@ export function App() {
   function logout() {
     stopReconnectRef.current = true;
     shouldRetryRef.current = false;
+    // 请服务器撤销该会话 token（不止清本地），撤销后旧 token 无法再重连
+    if (wsRef.current?.readyState === WebSocket.OPEN) send({ type: "client.logout" });
     tokenRef.current = "";
     localStorage.removeItem(TOKEN_KEY);
     wsRef.current?.close();
@@ -150,6 +152,9 @@ export function App() {
         send({ type: "client.subscribe" });
         break;
       case "auth.error":
+        // token 过期/被撤销（或密码错误）：清掉本地坏 token，避免每次刷新都用死 token 自动重连
+        tokenRef.current = "";
+        localStorage.removeItem(TOKEN_KEY);
         setAuthState("auth-failed");
         shouldRetryRef.current = false;
         break;
