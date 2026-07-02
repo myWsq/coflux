@@ -130,8 +130,9 @@ export type ServerToDaemon =
  * ================================================================== */
 
 export type ClientToServer =
-  /** 登录：用户名+密码（首次）或会话 clientToken（重连）。服务器登录成功会在 auth.ok 回带会话 token */
-  | { type: "client.auth"; username?: string; password?: string; clientToken?: string }
+  /** 登录：用户名+密码（local 模式首次）/ supabaseToken（supabase 模式换票）/ 会话 clientToken（重连，两模式通用）。
+   *  服务器认证成功会在 auth.ok 回带 coflux 会话 token；之后重连只用该 token，不再触碰 Supabase。 */
+  | { type: "client.auth"; username?: string; password?: string; clientToken?: string; supabaseToken?: string }
   /** 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地） */
   | { type: "client.logout" }
   | { type: "client.subscribe" }

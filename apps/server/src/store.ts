@@ -68,8 +68,13 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS client_tokens (
         tokenHash TEXT PRIMARY KEY, accountId TEXT NOT NULL, createdAt INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0,
-        expiresAt INTEGER
+        expiresAt INTEGER, userId TEXT
       );
+      CREATE TABLE IF NOT EXISTS memberships (
+        userId TEXT NOT NULL, accountId TEXT NOT NULL, role TEXT NOT NULL, createdAt INTEGER NOT NULL,
+        PRIMARY KEY (userId, accountId)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(userId);
       CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY, value TEXT NOT NULL
       );
@@ -110,6 +115,10 @@ export class Store {
     if (!cols.some((c) => c.name === "expiresAt")) {
       // 旧库既有 token expiresAt 为 NULL（视为不过期），仅新签发的带有效期。
       this.db.exec("ALTER TABLE client_tokens ADD COLUMN expiresAt INTEGER");
+    }
+    // supabase 换票签发的会话 token 记 userId（local 模式签发的存 NULL）。
+    if (!cols.some((c) => c.name === "userId")) {
+      this.db.exec("ALTER TABLE client_tokens ADD COLUMN userId TEXT");
     }
   }
 
@@ -184,9 +193,21 @@ export class Store {
     return row?.accountId;
   }
 
+  /* ------------------------ memberships ---------------------------- */
+  /** 个人账号 1:1：一个 userId 只有一条 membership。返回其账号与角色。 */
+  getMembershipByUser(userId: string): { accountId: AccountId; role: string } | undefined {
+    const row = this.prep("SELECT accountId, role FROM memberships WHERE userId = ? ORDER BY createdAt LIMIT 1").get(userId) as
+      | { accountId: string; role: string }
+      | undefined;
+    return row;
+  }
+  createMembership(userId: string, accountId: AccountId, role: string, createdAt: number): void {
+    this.prep("INSERT OR IGNORE INTO memberships (userId, accountId, role, createdAt) VALUES (?, ?, ?, ?)").run(userId, accountId, role, createdAt);
+  }
+
   /* ------------------------- client tokens ------------------------- */
-  upsertClientToken(tokenHash: string, accountId: AccountId, createdAt: number, expiresAt: number | null): void {
-    this.prep("INSERT OR IGNORE INTO client_tokens (tokenHash, accountId, createdAt, revoked, expiresAt) VALUES (?, ?, ?, 0, ?)").run(tokenHash, accountId, createdAt, expiresAt);
+  upsertClientToken(tokenHash: string, accountId: AccountId, createdAt: number, expiresAt: number | null, userId: string | null = null): void {
+    this.prep("INSERT OR IGNORE INTO client_tokens (tokenHash, accountId, createdAt, revoked, expiresAt, userId) VALUES (?, ?, ?, 0, ?, ?)").run(tokenHash, accountId, createdAt, expiresAt, userId);
   }
   /** 返回未撤销且未过期（expiresAt 为 NULL 视为不过期）的 token 归属账号。 */
   accountForClientToken(tokenHash: string, now: number): AccountId | undefined {
