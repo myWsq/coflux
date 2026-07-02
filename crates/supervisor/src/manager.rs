@@ -86,6 +86,17 @@ impl Manager {
             }
             Err(e) => {
                 eprintln!("[supervisor] worker spawn error: {e}");
+                // pending 版本连启动都失败（如坏架构/损坏产物）也计入崩溃预算，达阈值回滚到 active。
+                // 否则 current_spec 恒为 pending，会每 500ms 无限重试同一坏版本、永不回滚 → daemon 砖化。
+                let is_pending = matches!(&st.pending, Some(p) if p.version == spec.version);
+                if is_pending {
+                    st.pending_crashes += 1;
+                    if st.pending_crashes >= MAX_PENDING_CRASHES {
+                        eprintln!("[supervisor] pending worker 无法启动，回滚 from={} to={}", spec.version, st.active.version);
+                        st.pending = None;
+                        st.pending_crashes = 0;
+                    }
+                }
                 st.next_spawn_at = Instant::now() + Duration::from_millis(500);
             }
         }
