@@ -28,6 +28,18 @@ function bootstrap() {
   }
   store.upsertEnrollmentKey(hashToken(config.enrollKey), config.accountId, Date.now());
   // 不再 seed 静态登录令牌；web 用用户名+密码登录，登录时签发会话 token。
+
+  // 凭证变更检测：用户名/密码改了（改 env 重启）就撤销全部已签发会话 token，
+  // 让改密码能即时使已泄露/在用的旧 token 失效（token 与密码解耦存于表中，否则永久有效）。
+  const credFingerprint = hashToken(`${config.username}\n${config.password}`);
+  if (store.getMeta("credFingerprint") !== credFingerprint) {
+    store.revokeAllClientTokens(config.accountId);
+    store.setMeta("credFingerprint", credFingerprint);
+    log.info("credentials changed since last boot, revoked all client tokens");
+  }
+  // 清理已撤销/过期的会话 token，防 client_tokens 表无界增长。
+  store.pruneClientTokens(Date.now());
+
   const masked = (s: string) => (s.length <= 8 ? s : `${s.slice(0, 4)}…${s.slice(-2)}`);
   log.info("bootstrap ready", { enrollKey: masked(config.enrollKey), username: config.username });
 }

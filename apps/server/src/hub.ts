@@ -12,8 +12,8 @@ import type { WebSocket } from "ws";
 import {
   encode,
   clampDim,
-  encodeFrame,
   decodeFrame,
+  replayFrameToOutput,
   type AccountId,
   type DaemonInfo,
   type DaemonId,
@@ -47,6 +47,8 @@ export interface ClientConn {
   ws: WebSocket;
   accountId: AccountId | null;
   subscribed: boolean;
+  /** 本连接认证所用会话 token 的 hash（登出时按它撤销） */
+  tokenHash?: string;
 }
 export interface DaemonCtx {
   ws: WebSocket;
@@ -62,6 +64,8 @@ interface RuntimeSession {
   /** 独占模型：同一时刻只有一个控制端；attach 即接管，原控制端被踢 */
   holder: ClientConn | null;
   closing: boolean;
+  /** session.create 后的启动确认超时；收到 session.started 即清除。超时未确认视为启动失败 */
+  startTimer?: ReturnType<typeof setTimeout>;
 }
 
 type OpData =
@@ -169,7 +173,11 @@ export class Hub {
       const p = this.pendingReplays.get(frame.requestId);
       if (!p || p.daemonId !== conn.daemonId) return;
       this.pendingReplays.take(frame.requestId);
-      if (frame.data) this.sendClientFrame(p.client, encodeFrame({ type: "pty.output", sessionId: frame.sessionId, data: frame.data }));
+      // 字节级重组为 output 帧转发（保留 scrollback 原始字节，与实时 output 路径一致）
+      if (frame.data) {
+        const outFrame = replayFrameToOutput(buf);
+        if (outFrame) this.sendClientFrame(p.client, outFrame);
+      }
       // 回放完成后接管控制权（踢掉原控制端）
       const s = this.sessions.get(frame.sessionId);
       if (s && !s.closing) this.setHolder(s, p.client);
@@ -286,6 +294,10 @@ export class Hub {
       case "session.started": {
         const s = this.sessions.get(msg.sessionId);
         if (s && s.daemonId !== conn.daemonId) return;
+        if (s?.startTimer) {
+          clearTimeout(s.startTimer);
+          s.startTimer = undefined; // 已确认启动，撤销启动超时
+        }
         const task = this.store.getTask(msg.taskId);
         if (task && task.daemonId === conn.daemonId && task.sessionId === msg.sessionId && task.status !== "running") {
           const updated = this.store.updateTask(task.id, { status: "running", exitCode: null });
@@ -302,6 +314,7 @@ export class Hub {
           const updated = this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: msg.exitCode });
           if (updated) this.emitTask(updated);
         }
+        if (s?.startTimer) clearTimeout(s.startTimer);
         if (s) this.sessions.delete(msg.sessionId);
         log.debug("session exit", { sessionId: msg.sessionId, code: msg.exitCode });
         break;
@@ -383,15 +396,19 @@ export class Hub {
       case "client.auth": {
         let accountId: AccountId | undefined;
         let issued: string | undefined;
+        let tokenHash: string | undefined;
+        const now = Date.now();
         if (typeof msg.clientToken === "string" && msg.clientToken) {
-          // 重连：已签发的会话 token
-          accountId = this.store.accountForClientToken(hashToken(msg.clientToken));
+          // 重连：已签发的会话 token（校验未撤销且未过期）
+          tokenHash = hashToken(msg.clientToken);
+          accountId = this.store.accountForClientToken(tokenHash, now);
         } else if (typeof msg.username === "string" && typeof msg.password === "string") {
-          // 登录：用户名 + 密码（单租户，对照配置）→ 签发会话 token
+          // 登录：用户名 + 密码（单租户，对照配置）→ 签发带有效期的会话 token
           if (verifyLogin(msg.username, msg.password)) {
             accountId = config.accountId;
             issued = genToken("ck_sess");
-            this.store.upsertClientToken(hashToken(issued), accountId, Date.now());
+            tokenHash = hashToken(issued);
+            this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs);
           }
         }
         if (!accountId) {
@@ -400,7 +417,14 @@ export class Hub {
           return;
         }
         client.accountId = accountId;
+        client.tokenHash = tokenHash;
         this.sendClient(client, { type: "auth.ok", accountId, clientToken: issued });
+        break;
+      }
+      case "client.logout": {
+        // 服务器侧撤销本连接的会话 token（不止清本地），撤销后该 token 重连即失败。
+        if (client.tokenHash) this.store.revokeClientToken(client.tokenHash);
+        client.ws.close(4001, "logout");
         break;
       }
       case "client.subscribe": {
@@ -643,10 +667,29 @@ export class Hub {
     if (!ws) return void this.sendClient(client, { type: "error", message: "工作区已不存在" });
 
     const sessionId = randomUUID();
-    this.sessions.set(sessionId, { sessionId, daemonId: task.daemonId, accountId: task.accountId, taskId: task.id, holder: client, closing: false });
+    const session: RuntimeSession = { sessionId, daemonId: task.daemonId, accountId: task.accountId, taskId: task.id, holder: client, closing: false };
+    // 启动确认超时：daemon 收到 session.create 却起 PTY 失败又不回消息时，避免 task 永久卡 running + session 泄漏。
+    const startTimer = setTimeout(() => this.onSessionStartTimeout(sessionId), config.pendingTimeoutMs);
+    (startTimer as { unref?: () => void }).unref?.();
+    session.startTimer = startTimer;
+    this.sessions.set(sessionId, session);
     this.sendDaemon(d, { type: "session.create", sessionId, taskId: task.id, cwd: ws.path, cols: clampDim(cols, 80), rows: clampDim(rows, 24) });
     const updated = this.store.updateTask(task.id, { status: "running", sessionId, exitCode: null });
     if (updated) this.emitTask(updated);
+  }
+
+  /** session.create 超时未确认启动：清运行时 session、标 task exited、通知控制端。 */
+  private onSessionStartTimeout(sessionId: SessionId): void {
+    const s = this.sessions.get(sessionId);
+    if (!s || !s.startTimer) return; // 已确认启动（timer 被清）或已清理
+    this.sessions.delete(sessionId);
+    const task = this.store.getTaskBySession(sessionId);
+    if (task && task.sessionId === sessionId && task.status === "running") {
+      const updated = this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
+      if (updated) this.emitTask(updated);
+    }
+    if (s.holder) this.sendClient(s.holder, { type: "error", message: "会话启动超时" });
+    log.warn("session start timed out", { sessionId });
   }
 
   private attachWithReplay(client: ClientConn, sessionId: SessionId): void {

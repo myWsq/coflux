@@ -67,7 +67,11 @@ export class Store {
         keyHash TEXT PRIMARY KEY, accountId TEXT NOT NULL, createdAt INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS client_tokens (
-        tokenHash TEXT PRIMARY KEY, accountId TEXT NOT NULL, createdAt INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0
+        tokenHash TEXT PRIMARY KEY, accountId TEXT NOT NULL, createdAt INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0,
+        expiresAt INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY, value TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS devices (
         id TEXT PRIMARY KEY, accountId TEXT NOT NULL, name TEXT NOT NULL, host TEXT NOT NULL, platform TEXT NOT NULL,
@@ -97,6 +101,25 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_tasks_project   ON tasks(projectId);
       CREATE INDEX IF NOT EXISTS idx_tasks_session   ON tasks(sessionId);
     `);
+    this.migrate();
+  }
+
+  /** 轻量 migration：给旧库补新增列（CREATE TABLE IF NOT EXISTS 不改已存在表结构）。 */
+  private migrate(): void {
+    const cols = this.db.prepare("PRAGMA table_info(client_tokens)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "expiresAt")) {
+      // 旧库既有 token expiresAt 为 NULL（视为不过期），仅新签发的带有效期。
+      this.db.exec("ALTER TABLE client_tokens ADD COLUMN expiresAt INTEGER");
+    }
+  }
+
+  /* ------------------------------ meta ----------------------------- */
+  getMeta(key: string): string | undefined {
+    const row = this.prep("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
+    return row?.value;
+  }
+  setMeta(key: string, value: string): void {
+    this.prep("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
   }
 
   /** 在单个事务里执行 fn（级联删除等多语句操作用它保证原子性） */
@@ -162,12 +185,23 @@ export class Store {
   }
 
   /* ------------------------- client tokens ------------------------- */
-  upsertClientToken(tokenHash: string, accountId: AccountId, createdAt: number): void {
-    this.prep("INSERT OR IGNORE INTO client_tokens (tokenHash, accountId, createdAt, revoked) VALUES (?, ?, ?, 0)").run(tokenHash, accountId, createdAt);
+  upsertClientToken(tokenHash: string, accountId: AccountId, createdAt: number, expiresAt: number | null): void {
+    this.prep("INSERT OR IGNORE INTO client_tokens (tokenHash, accountId, createdAt, revoked, expiresAt) VALUES (?, ?, ?, 0, ?)").run(tokenHash, accountId, createdAt, expiresAt);
   }
-  accountForClientToken(tokenHash: string): AccountId | undefined {
-    const row = this.prep("SELECT accountId FROM client_tokens WHERE tokenHash = ? AND revoked = 0").get(tokenHash) as { accountId: string } | undefined;
+  /** 返回未撤销且未过期（expiresAt 为 NULL 视为不过期）的 token 归属账号。 */
+  accountForClientToken(tokenHash: string, now: number): AccountId | undefined {
+    const row = this.prep("SELECT accountId FROM client_tokens WHERE tokenHash = ? AND revoked = 0 AND (expiresAt IS NULL OR expiresAt > ?)").get(tokenHash, now) as { accountId: string } | undefined;
     return row?.accountId;
+  }
+  revokeClientToken(tokenHash: string): void {
+    this.prep("UPDATE client_tokens SET revoked = 1 WHERE tokenHash = ?").run(tokenHash);
+  }
+  revokeAllClientTokens(accountId: AccountId): void {
+    this.prep("UPDATE client_tokens SET revoked = 1 WHERE accountId = ?").run(accountId);
+  }
+  /** 清理已撤销 / 已过期的 token，防表无界增长。 */
+  pruneClientTokens(now: number): void {
+    this.prep("DELETE FROM client_tokens WHERE revoked = 1 OR (expiresAt IS NOT NULL AND expiresAt <= ?)").run(now);
   }
 
   /* ---------------------------- devices ---------------------------- */
