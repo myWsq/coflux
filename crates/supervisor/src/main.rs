@@ -140,6 +140,10 @@ fn main() {
             }
         }
         eprintln!("[supervisor] worker connected");
+        // 复位背压闸：pause 仅由 worker 的 PtyPause/PtyResume 翻转，worker 断开/升级时不会自动清零。
+        // 若上一个 worker 崩在 pause=true（背压态），新 worker 从 false 起步、永不主动发 Resume，
+        // PTY 读线程会永久卡在 cvar.wait —— 会话虽存活但全冻结。新连接建立即代表旧 worker 已走，此处复位解冻。
+        sessions.set_pause(false);
         let sessions = sessions.clone();
         let manager = manager.clone();
         let worker_w = worker_w.clone();

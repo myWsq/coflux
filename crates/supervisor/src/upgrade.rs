@@ -24,8 +24,27 @@ fn verifying_key() -> Option<VerifyingKey> {
     VerifyingKey::from_bytes(&arr).ok()
 }
 
+/// 校验 server 下发的 version 可安全用作单一路径成分：防 `../` 穿越出 workers/ 目录，
+/// 防污染注册表内置项。即便攻破的服务器拿到合法签名产物，也无法把它写到任意路径。
+pub fn validate_version(version: &str) -> Result<(), String> {
+    if version.is_empty() {
+        return Err("version 为空".into());
+    }
+    if version == "builtin" {
+        return Err("version 'builtin' 为保留名，拒绝".into());
+    }
+    if version.contains("..") {
+        return Err(format!("version 含非法序列 '..': {version}"));
+    }
+    if !version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        return Err(format!("version 含非法字符（仅允许 A-Za-z0-9._-）: {version}"));
+    }
+    Ok(())
+}
+
 /// 下载 + 验签 + 落盘。任一校验不过返回 Err（调用方据此拒绝升级、保持当前版本）。
 pub fn download_verify_install(url: &str, expected_sha256: &str, signature_hex: &str, home: &str, version: &str) -> Result<WorkerSpec, String> {
+    validate_version(version)?;
     let vk = verifying_key().ok_or("未配置有效的 worker 公钥，拒绝下载升级")?;
 
     // 下载
@@ -33,9 +52,12 @@ pub fn download_verify_install(url: &str, expected_sha256: &str, signature_hex: 
     let mut body = Vec::new();
     resp.into_reader().read_to_end(&mut body).map_err(|e| format!("读取失败: {e}"))?;
 
-    // sha256（完整性，服务器声明的期望值）
+    // sha256（完整性，服务器声明的期望值）：强制提供，空值不再放行（防御纵深，不留跳过口）。
     let got = hex::encode(Sha256::digest(&body));
-    if !expected_sha256.is_empty() && got != expected_sha256.trim().to_lowercase() {
+    if expected_sha256.trim().is_empty() {
+        return Err("缺少 sha256，拒绝升级".to_string());
+    }
+    if got != expected_sha256.trim().to_lowercase() {
         return Err(format!("sha256 不符: 期望 {expected_sha256}, 实得 {got}"));
     }
 

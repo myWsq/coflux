@@ -12,8 +12,8 @@ import type { WebSocket } from "ws";
 import {
   encode,
   clampDim,
-  encodeFrame,
   decodeFrame,
+  replayFrameToOutput,
   type AccountId,
   type DaemonInfo,
   type DaemonId,
@@ -47,6 +47,8 @@ export interface ClientConn {
   ws: WebSocket;
   accountId: AccountId | null;
   subscribed: boolean;
+  /** 本连接认证所用会话 token 的 hash（登出时按它撤销） */
+  tokenHash?: string;
 }
 export interface DaemonCtx {
   ws: WebSocket;
@@ -169,7 +171,11 @@ export class Hub {
       const p = this.pendingReplays.get(frame.requestId);
       if (!p || p.daemonId !== conn.daemonId) return;
       this.pendingReplays.take(frame.requestId);
-      if (frame.data) this.sendClientFrame(p.client, encodeFrame({ type: "pty.output", sessionId: frame.sessionId, data: frame.data }));
+      // 字节级重组为 output 帧转发（保留 scrollback 原始字节，与实时 output 路径一致）
+      if (frame.data) {
+        const outFrame = replayFrameToOutput(buf);
+        if (outFrame) this.sendClientFrame(p.client, outFrame);
+      }
       // 回放完成后接管控制权（踢掉原控制端）
       const s = this.sessions.get(frame.sessionId);
       if (s && !s.closing) this.setHolder(s, p.client);
@@ -383,15 +389,19 @@ export class Hub {
       case "client.auth": {
         let accountId: AccountId | undefined;
         let issued: string | undefined;
+        let tokenHash: string | undefined;
+        const now = Date.now();
         if (typeof msg.clientToken === "string" && msg.clientToken) {
-          // 重连：已签发的会话 token
-          accountId = this.store.accountForClientToken(hashToken(msg.clientToken));
+          // 重连：已签发的会话 token（校验未撤销且未过期）
+          tokenHash = hashToken(msg.clientToken);
+          accountId = this.store.accountForClientToken(tokenHash, now);
         } else if (typeof msg.username === "string" && typeof msg.password === "string") {
-          // 登录：用户名 + 密码（单租户，对照配置）→ 签发会话 token
+          // 登录：用户名 + 密码（单租户，对照配置）→ 签发带有效期的会话 token
           if (verifyLogin(msg.username, msg.password)) {
             accountId = config.accountId;
             issued = genToken("ck_sess");
-            this.store.upsertClientToken(hashToken(issued), accountId, Date.now());
+            tokenHash = hashToken(issued);
+            this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs);
           }
         }
         if (!accountId) {
@@ -400,7 +410,14 @@ export class Hub {
           return;
         }
         client.accountId = accountId;
+        client.tokenHash = tokenHash;
         this.sendClient(client, { type: "auth.ok", accountId, clientToken: issued });
+        break;
+      }
+      case "client.logout": {
+        // 服务器侧撤销本连接的会话 token（不止清本地），撤销后该 token 重连即失败。
+        if (client.tokenHash) this.store.revokeClientToken(client.tokenHash);
+        client.ws.close(4001, "logout");
         break;
       }
       case "client.subscribe": {
