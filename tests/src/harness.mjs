@@ -11,13 +11,50 @@ import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import http from "node:http";
 import { WebSocket } from "ws";
+import postgres from "postgres";
 
 const ROOT = resolve(import.meta.dirname, "..", "..");
 const TSX = join(ROOT, "node_modules", ".bin", "tsx");
 const DEBUG = !!process.env.COFLUX_TEST_DEBUG;
+
+/*
+ * 每个测试栈用一个独立的临时 Postgres 库（而非临时 schema）：
+ * 隔离干净、无需改动任何 SQL，代价只是建/删库的开销（对测试量级可忽略）。
+ * 管理连接（建库/删库用）与 server 自己的连接串一样，走 COFLUX_TEST_PG_URL，
+ * 弱默认值必须与 apps/server/src/config.ts 的 DATABASE_URL 开发默认值保持一致。
+ */
+const ADMIN_PG_URL = process.env.COFLUX_TEST_PG_URL || "postgres://postgres:postgres@127.0.0.1:5432/postgres";
+
+/** 建一个随机命名的临时库，返回 {name, url}（url 指向新库，供 spawn 的 server 用作 DATABASE_URL）。 */
+async function createTestDatabase() {
+  const name = `coflux_test_${randomUUID().replace(/-/g, "")}`;
+  const admin = postgres(ADMIN_PG_URL, { max: 1, ssl: "prefer" });
+  try {
+    await admin.unsafe(`CREATE DATABASE ${name}`);
+  } finally {
+    await admin.end({ timeout: 5 });
+  }
+  const url = new URL(ADMIN_PG_URL);
+  url.pathname = `/${name}`;
+  return { name, url: url.toString() };
+}
+
+/** 删临时库：先踢掉该库上的连接（否则 DROP DATABASE 报 "being accessed by other users"），再删。 */
+async function dropTestDatabase(name) {
+  const admin = postgres(ADMIN_PG_URL, { max: 1, ssl: "prefer" });
+  try {
+    await admin.unsafe(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${name}' AND pid <> pg_backend_pid()`,
+    );
+    await admin.unsafe(`DROP DATABASE IF EXISTS ${name}`);
+  } finally {
+    await admin.end({ timeout: 5 });
+  }
+}
 
 /* 数据面二进制帧编解码（与 packages/protocol 保持一致；harness 用纯 JS 内联一份，
    刻意不依赖应用内部，符合黑盒定位）。帧体：[kind][sidLen][sessionId][?ridLen][?requestId][payload] */
@@ -116,9 +153,8 @@ export function mkRepo() {
 export async function startServer(opts = {}) {
   const port = opts.port;
   if (!port) throw new Error("startServer requires a port");
-  const dataDir = mkdtempSync(join(tmpdir(), "coflux-test-db-"));
-  const db = join(dataDir, "coflux.db");
-  const serverEnv = { ...process.env, COFLUX_PORT: String(port), COFLUX_DB: db, ...(opts.env ?? {}) };
+  const testDb = await createTestDatabase();
+  const serverEnv = { ...process.env, COFLUX_PORT: String(port), DATABASE_URL: testDb.url, ...(opts.env ?? {}) };
   const ref = { server: spawnApp("apps/server/src/index.ts", serverEnv) };
   await waitHealth(port);
   return {
@@ -128,13 +164,14 @@ export async function startServer(opts = {}) {
     async restartServer() {
       killTree(ref.server);
       await sleep(600);
+      // 复用同一个临时库（serverEnv 里的 DATABASE_URL 不变）：数据必须跨重启保留。
       ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
       await waitHealth(port);
     },
     async stop() {
       killTree(ref.server);
       await sleep(150);
-      if (existsSync(dataDir)) try { rmSync(dataDir, { recursive: true, force: true }); } catch {}
+      try { await dropTestDatabase(testDb.name); } catch {}
     },
   };
 }
@@ -165,11 +202,10 @@ export async function startStack(opts = {}) {
   const username = opts.username ?? "admin";
   const password = opts.password ?? "admin";
 
-  const dataDir = mkdtempSync(join(tmpdir(), "coflux-test-db-"));
+  const testDb = await createTestDatabase();
   const home = mkdtempSync(join(tmpdir(), "coflux-test-home-"));
-  const db = join(dataDir, "coflux.db");
 
-  const serverEnv = { ...process.env, COFLUX_PORT: String(port), COFLUX_DB: db, COFLUX_ENROLL_KEY: enrollKey, COFLUX_USERNAME: username, COFLUX_PASSWORD: password };
+  const serverEnv = { ...process.env, COFLUX_PORT: String(port), DATABASE_URL: testDb.url, COFLUX_ENROLL_KEY: enrollKey, COFLUX_USERNAME: username, COFLUX_PASSWORD: password };
   const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`, COFLUX_ENROLL_KEY: enrollKey, COFLUX_HOME: home, COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev", ...(opts.daemonEnv ?? {}) };
 
   const ref = { server: null, daemon: null };
@@ -188,6 +224,7 @@ export async function startStack(opts = {}) {
     async restartServer() {
       killTree(ref.server);
       await sleep(800);
+      // 复用同一个临时库（serverEnv 里的 DATABASE_URL 不变）：数据必须跨重启保留（reconnect.test.mjs 依赖此行为）。
       ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
       await waitHealth(port);
     },
@@ -216,7 +253,8 @@ export async function startStack(opts = {}) {
       killTree(ref.daemon);
       killTree(ref.server);
       await sleep(200);
-      for (const d of [dataDir, home]) if (existsSync(d)) try { rmSync(d, { recursive: true, force: true }); } catch {}
+      if (existsSync(home)) try { rmSync(home, { recursive: true, force: true }); } catch {}
+      try { await dropTestDatabase(testDb.name); } catch {}
     },
   };
 

@@ -6,6 +6,11 @@
  * 认证（Tailscale 式）：daemonId 服务器签发绑定不可冒充；account 隔离。
  * 健壮性（经两轮对抗式审查）：daemon 上行消息按 task.daemonId === conn.daemonId 归属校验；
  *   重启后绝不重复起 PTY；session 生命周期 closing 标志；pending 超时 + 掉线清理；client 越权拦截。
+ *
+ * 存储层是 Postgres（异步）：所有触库路径已 async 化。并发语义靠 DB 约束兜底（主键/唯一约束/
+ * ON CONFLICT）而非应用层锁；级联删除、lazy provision 等多语句操作经 `store.transaction()` 保证
+ * 原子性。单连接内消息处理不做串行队列（同连接消息仍可能交错，见 plans/002 决策）——各 handler
+ * 内部保持"写完再广播"的顺序（await 与其后的同步语句之间不留出让点），确需的跨语句原子性交给事务。
  */
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { WebSocket } from "ws";
@@ -124,7 +129,7 @@ export class Hub {
     s.holder = client;
   }
 
-  private daemonInfoList(accountId: AccountId): DaemonInfo[] {
+  private async daemonInfoList(accountId: AccountId): Promise<DaemonInfo[]> {
     const list: DaemonInfo[] = [];
     const seen = new Set<DaemonId>();
     for (const d of this.daemons.values()) {
@@ -132,7 +137,7 @@ export class Hub {
       list.push({ ...d.info, online: true });
       seen.add(d.info.daemonId);
     }
-    for (const dev of this.store.listDevices(accountId)) {
+    for (const dev of await this.store.listDevices(accountId)) {
       if (seen.has(dev.id)) continue;
       seen.add(dev.id);
       list.push({ daemonId: dev.id, name: dev.name, host: dev.host, platform: dev.platform, online: false });
@@ -203,7 +208,7 @@ export class Hub {
     if (d && d.ws.readyState === d.ws.OPEN) d.ws.send(buf);
   }
 
-  private registerDaemonConn(conn: DaemonCtx, info: DaemonInfo, accountId: AccountId) {
+  private async registerDaemonConn(conn: DaemonCtx, info: DaemonInfo, accountId: AccountId): Promise<void> {
     const prev = this.daemons.get(info.daemonId);
     if (prev && prev.ws !== conn.ws) {
       try {
@@ -215,23 +220,23 @@ export class Hub {
     conn.daemonId = info.daemonId;
     conn.accountId = accountId;
     this.daemons.set(info.daemonId, { ws: conn.ws, info, accountId });
-    this.store.touchDevice(info.daemonId, Date.now());
+    await this.store.touchDevice(info.daemonId, Date.now());
     this.broadcast(accountId, { type: "daemon.updated", daemon: { ...info, online: true } });
   }
 
   /* ============================ Daemon 侧 ============================ */
-  handleDaemonMessage(conn: DaemonCtx, msg: DaemonToServer): void {
+  async handleDaemonMessage(conn: DaemonCtx, msg: DaemonToServer): Promise<void> {
     if (msg.type !== "daemon.enroll" && msg.type !== "daemon.auth" && !conn.daemonId) return;
 
     switch (msg.type) {
       case "daemon.enroll": {
-        const accountId = this.store.accountForEnrollmentKey(hashToken(msg.enrollmentKey));
+        const accountId = await this.store.accountForEnrollmentKey(hashToken(msg.enrollmentKey));
         if (!accountId) {
           this.sendRaw(conn.ws, { type: "daemon.authError", message: "登记密钥无效", needEnroll: false });
           conn.ws.close(4001, "bad enrollment key");
           return;
         }
-        if (this.store.countDevices(accountId) >= config.maxDevicesPerAccount) {
+        if ((await this.store.countDevices(accountId)) >= config.maxDevicesPerAccount) {
           this.sendRaw(conn.ws, { type: "daemon.authError", message: "账号设备数已达上限", needEnroll: false });
           conn.ws.close(4004, "device cap reached");
           return;
@@ -239,14 +244,14 @@ export class Hub {
         const daemonId = randomUUID();
         const deviceToken = genToken("ck_dev");
         const ts = Date.now();
-        this.store.createDevice({ id: daemonId, accountId, name: msg.name, host: msg.host, platform: msg.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: 0 });
+        await this.store.createDevice({ id: daemonId, accountId, name: msg.name, host: msg.host, platform: msg.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: false });
         log.info("daemon enrolled", { daemonId, name: msg.name, host: msg.host });
         this.sendRaw(conn.ws, { type: "daemon.enrolled", daemonId, deviceToken });
-        this.registerDaemonConn(conn, { daemonId, name: msg.name, host: msg.host, platform: msg.platform, online: true }, accountId);
+        await this.registerDaemonConn(conn, { daemonId, name: msg.name, host: msg.host, platform: msg.platform, online: true }, accountId);
         break;
       }
       case "daemon.auth": {
-        const device = this.store.getDeviceByTokenHash(hashToken(msg.deviceToken));
+        const device = await this.store.getDeviceByTokenHash(hashToken(msg.deviceToken));
         if (!device) {
           this.sendRaw(conn.ws, { type: "daemon.authError", message: "设备凭证无效或已撤销", needEnroll: true });
           conn.ws.close(4001, "bad device token");
@@ -254,11 +259,11 @@ export class Hub {
         }
         log.info("daemon authed", { daemonId: device.id, name: device.name });
         this.sendRaw(conn.ws, { type: "daemon.authed", daemonId: device.id });
-        this.registerDaemonConn(conn, { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true }, device.accountId);
+        await this.registerDaemonConn(conn, { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true }, device.accountId);
         break;
       }
       case "daemon.resync": {
-        this.reconcileDaemonSessions(conn.daemonId!, conn.accountId!, msg.sessions);
+        await this.reconcileDaemonSessions(conn.daemonId!, conn.accountId!, msg.sessions);
         break;
       }
       case "project.validated": {
@@ -271,9 +276,9 @@ export class Hub {
         }
         const ts = Date.now();
         const project: Project = { id: randomUUID(), accountId: conn.accountId!, daemonId: conn.daemonId!, name: p.data.name, repoPath: msg.repoPath, defaultBranch: msg.branch, createdAt: ts };
-        this.store.createProject(project);
+        await this.store.createProject(project);
         const main: Workspace = { id: randomUUID(), accountId: project.accountId, daemonId: project.daemonId, projectId: project.id, name: "main", path: msg.repoPath, branch: msg.branch, isMain: true, createdAt: ts };
-        this.store.createWorkspace(main);
+        await this.store.createWorkspace(main);
         log.info("project imported", { projectId: project.id, repoPath: project.repoPath, branch: msg.branch });
         this.broadcast(project.accountId, { type: "project.created", project });
         this.broadcast(project.accountId, { type: "workspace.created", workspace: main });
@@ -288,7 +293,7 @@ export class Hub {
           return;
         }
         const ws: Workspace = { id: p.data.workspaceId, accountId: conn.accountId!, daemonId: conn.daemonId!, projectId: p.data.projectId, name: p.data.name, path: msg.path, branch: msg.branch, isMain: false, createdAt: Date.now() };
-        this.store.createWorkspace(ws);
+        await this.store.createWorkspace(ws);
         log.info("worktree created", { workspaceId: ws.id, path: ws.path, branch: ws.branch });
         this.broadcast(ws.accountId, { type: "workspace.created", workspace: ws });
         break;
@@ -300,9 +305,9 @@ export class Hub {
           clearTimeout(s.startTimer);
           s.startTimer = undefined; // 已确认启动，撤销启动超时
         }
-        const task = this.store.getTask(msg.taskId);
+        const task = await this.store.getTask(msg.taskId);
         if (task && task.daemonId === conn.daemonId && task.sessionId === msg.sessionId && task.status !== "running") {
-          const updated = this.store.updateTask(task.id, { status: "running", exitCode: null });
+          const updated = await this.store.updateTask(task.id, { status: "running", exitCode: null });
           if (updated) this.emitTask(updated);
         }
         log.debug("session started", { sessionId: msg.sessionId, taskId: msg.taskId, pid: msg.pid });
@@ -311,9 +316,9 @@ export class Hub {
       case "session.exit": {
         const s = this.sessions.get(msg.sessionId);
         if (s && s.daemonId !== conn.daemonId) return;
-        const task = this.store.getTaskBySession(msg.sessionId);
+        const task = await this.store.getTaskBySession(msg.sessionId);
         if (task && task.daemonId === conn.daemonId && task.sessionId === msg.sessionId) {
-          const updated = this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: msg.exitCode });
+          const updated = await this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: msg.exitCode });
           if (updated) this.emitTask(updated);
         }
         if (s?.startTimer) clearTimeout(s.startTimer);
@@ -335,14 +340,14 @@ export class Hub {
     }
   }
 
-  private reconcileDaemonSessions(daemonId: DaemonId, accountId: AccountId, alive: { sessionId: SessionId; taskId: TaskId }[]): void {
+  private async reconcileDaemonSessions(daemonId: DaemonId, accountId: AccountId, alive: { sessionId: SessionId; taskId: TaskId }[]): Promise<void> {
     if (!Array.isArray(alive)) return;
     const valid = alive.filter((a) => a && typeof a.sessionId === "string" && typeof a.taskId === "string");
     const aliveIds = new Set(valid.map((a) => a.sessionId));
     const daemon = this.daemons.get(daemonId);
 
     for (const { sessionId, taskId } of valid) {
-      const task = this.store.getTask(taskId);
+      const task = await this.store.getTask(taskId);
       if (!task || task.daemonId !== daemonId || task.status !== "running") {
         if (daemon) this.sendDaemon(daemon, { type: "session.close", sessionId });
         this.sessions.delete(sessionId);
@@ -350,13 +355,13 @@ export class Hub {
       }
       if (!this.sessions.has(sessionId)) this.sessions.set(sessionId, { sessionId, daemonId, accountId, taskId, holder: null, closing: false });
       if (task.sessionId !== sessionId) {
-        const updated = this.store.updateTask(taskId, { status: "running", sessionId, exitCode: null });
+        const updated = await this.store.updateTask(taskId, { status: "running", sessionId, exitCode: null });
         if (updated) this.emitTask(updated);
       }
     }
-    for (const task of this.store.listRunningTasksByDaemon(daemonId)) {
+    for (const task of await this.store.listRunningTasksByDaemon(daemonId)) {
       if (task.sessionId && !aliveIds.has(task.sessionId)) {
-        const updated = this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
+        const updated = await this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
         if (updated) this.emitTask(updated);
         this.sessions.delete(task.sessionId);
       }
@@ -364,7 +369,7 @@ export class Hub {
     log.debug("daemon resync", { daemonId, live: valid.length });
   }
 
-  handleDaemonClose(conn: DaemonCtx): void {
+  async handleDaemonClose(conn: DaemonCtx): Promise<void> {
     const daemonId = conn.daemonId;
     const accountId = conn.accountId;
     if (!daemonId || !accountId) return;
@@ -372,14 +377,14 @@ export class Hub {
     if (!current || current.ws !== conn.ws) return;
 
     this.daemons.delete(daemonId);
-    this.store.touchDevice(daemonId, Date.now());
+    await this.store.touchDevice(daemonId, Date.now());
     log.info("daemon disconnected", { daemonId });
 
     this.pendingOps.removeByDaemon(daemonId, (p) => this.sendClient(p.client, { type: "error", message: "daemon 掉线，操作未完成" }));
     this.pendingReplays.removeByDaemon(daemonId, (p) => this.sendClient(p.client, { type: "error", message: "daemon 掉线，无法回放" }));
     this.pendingRelays.removeByDaemon(daemonId, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "daemon 掉线"));
 
-    const device = this.store.getDevice(daemonId);
+    const device = await this.store.getDevice(daemonId);
     if (device && !device.revoked) {
       this.broadcast(accountId, { type: "daemon.updated", daemon: { daemonId, name: device.name, host: device.host, platform: device.platform, online: false } });
     } else {
@@ -388,7 +393,7 @@ export class Hub {
   }
 
   /* ============================ Client 侧 ============================ */
-  handleClientMessage(client: ClientConn, msg: ClientToServer): void {
+  async handleClientMessage(client: ClientConn, msg: ClientToServer): Promise<void> {
     if (msg.type !== "client.auth" && !client.accountId) {
       this.sendClient(client, { type: "error", message: "未认证" });
       return;
@@ -396,43 +401,43 @@ export class Hub {
 
     switch (msg.type) {
       case "client.auth": {
-        // supabase 验签是异步（JWKS 本地验签）；auth 是首条消息，连接在完成前未 authed，
-        // 后续消息会被上面的「未认证」分支挡住，故 fire-and-forget 不引入乱序。
-        void this.handleClientAuth(client, msg);
+        await this.handleClientAuth(client, msg);
         break;
       }
       case "client.logout": {
         // 服务器侧撤销本连接的会话 token（不止清本地），撤销后该 token 重连即失败。
-        if (client.tokenHash) this.store.revokeClientToken(client.tokenHash);
+        if (client.tokenHash) await this.store.revokeClientToken(client.tokenHash);
         client.ws.close(4001, "logout");
         break;
       }
       case "client.subscribe": {
+        const accountId = client.accountId!;
+        // 先把快照数据查齐，最后才置 subscribed=true 并发送——避免在"已订阅但还没收到
+        // 首个快照"的窗口期收到其它连接触发的广播导致乱序（landmine：广播不能抢在快照前）。
+        const [daemons, projects, workspaces, tasks] = await Promise.all([
+          this.daemonInfoList(accountId),
+          this.store.listProjects(accountId),
+          this.store.listWorkspaces(accountId),
+          this.store.listTasks(accountId),
+        ]);
         client.subscribed = true;
         this.clients.add(client);
-        const accountId = client.accountId!;
-        this.sendClient(client, {
-          type: "state.snapshot",
-          daemons: this.daemonInfoList(accountId),
-          projects: this.store.listProjects(accountId),
-          workspaces: this.store.listWorkspaces(accountId),
-          tasks: this.store.listTasks(accountId),
-        });
+        this.sendClient(client, { type: "state.snapshot", daemons, projects, workspaces, tasks });
         break;
       }
       case "client.createEnrollmentKey": {
         const enrollmentKey = genToken("cf_enroll");
-        this.store.createEnrollmentKey(hashToken(enrollmentKey), client.accountId!, Date.now());
+        await this.store.createEnrollmentKey(hashToken(enrollmentKey), client.accountId!, Date.now());
         this.sendClient(client, { type: "enrollmentKey.created", enrollmentKey, daemonUrl: config.daemonUrl });
         log.info("enrollment key created", { accountId: client.accountId });
         break;
       }
       case "client.removeDevice": {
-        this.removeDevice(client, msg.daemonId);
+        await this.removeDevice(client, msg.daemonId);
         break;
       }
       case "client.upgradeDaemon": {
-        const device = this.store.getDevice(msg.daemonId);
+        const device = await this.store.getDevice(msg.daemonId);
         if (!device || device.accountId !== client.accountId) return;
         const d = this.daemons.get(msg.daemonId);
         if (!d) return void this.sendClient(client, { type: "error", message: "daemon 不在线" });
@@ -455,21 +460,21 @@ export class Hub {
         break;
       }
       case "project.remove": {
-        const project = this.store.getProject(msg.projectId);
+        const project = await this.store.getProject(msg.projectId);
         if (!project || project.accountId !== client.accountId) return;
-        const workspaces = this.store.listWorkspacesByProject(project.id);
+        const workspaces = await this.store.listWorkspacesByProject(project.id);
         const sessionCloses: SessionId[] = [];
         const worktreePaths: string[] = [];
         for (const ws of workspaces) {
-          for (const task of this.store.listTasksByWorkspace(ws.id)) if (task.sessionId) sessionCloses.push(task.sessionId);
+          for (const task of await this.store.listTasksByWorkspace(ws.id)) if (task.sessionId) sessionCloses.push(task.sessionId);
           if (!ws.isMain) worktreePaths.push(ws.path); // 主工作区=仓库本身，不删
         }
         // 级联删除原子化：要么全删，要么不变
         let removedTaskIds: TaskId[] = [];
-        this.store.transaction(() => {
-          for (const ws of workspaces) removedTaskIds.push(...this.store.removeTasksByWorkspace(ws.id));
-          for (const ws of workspaces) this.store.removeWorkspace(ws.id);
-          this.store.removeProject(project.id);
+        await this.store.transaction(async (tx) => {
+          for (const ws of workspaces) removedTaskIds.push(...(await tx.removeTasksByWorkspace(ws.id)));
+          for (const ws of workspaces) await tx.removeWorkspace(ws.id);
+          await tx.removeProject(project.id);
         });
         // 提交后做副作用（关 PTY、删 worktree、广播）
         for (const sid of sessionCloses) {
@@ -484,7 +489,7 @@ export class Hub {
         break;
       }
       case "workspace.create": {
-        const project = this.store.getProject(msg.projectId);
+        const project = await this.store.getProject(msg.projectId);
         if (!project || project.accountId !== client.accountId) {
           this.sendClient(client, { type: "error", message: "项目不存在或不属于本账号" });
           return;
@@ -504,18 +509,18 @@ export class Hub {
         break;
       }
       case "workspace.remove": {
-        const ws = this.store.getWorkspace(msg.workspaceId);
+        const ws = await this.store.getWorkspace(msg.workspaceId);
         if (!ws || ws.accountId !== client.accountId) return;
         if (ws.isMain) {
           this.sendClient(client, { type: "error", message: "主工作区不能删除（删除整个项目即可）" });
           return;
         }
-        const project = this.store.getProject(ws.projectId);
-        const sessionCloses = this.store.listTasksByWorkspace(ws.id).filter((t) => t.sessionId).map((t) => t.sessionId!);
+        const project = await this.store.getProject(ws.projectId);
+        const sessionCloses = (await this.store.listTasksByWorkspace(ws.id)).filter((t) => t.sessionId).map((t) => t.sessionId!);
         let removed: TaskId[] = [];
-        this.store.transaction(() => {
-          removed = this.store.removeTasksByWorkspace(ws.id);
-          this.store.removeWorkspace(ws.id);
+        await this.store.transaction(async (tx) => {
+          removed = await tx.removeTasksByWorkspace(ws.id);
+          await tx.removeWorkspace(ws.id);
         });
         for (const sid of sessionCloses) {
           this.routeToSessionDaemon(sid, { type: "session.close", sessionId: sid });
@@ -528,23 +533,23 @@ export class Hub {
         break;
       }
       case "task.create": {
-        const ws = this.store.getWorkspace(msg.workspaceId);
+        const ws = await this.store.getWorkspace(msg.workspaceId);
         if (!ws || ws.accountId !== client.accountId) {
           this.sendClient(client, { type: "error", message: "工作区不存在或不属于本账号" });
           return;
         }
         const ts = Date.now();
         const task: Task = { id: randomUUID(), accountId: ws.accountId, daemonId: ws.daemonId, projectId: ws.projectId, workspaceId: ws.id, title: msg.title || "未命名任务", status: "idle", sessionId: null, exitCode: null, createdAt: ts, updatedAt: ts };
-        this.store.createTask(task);
+        await this.store.createTask(task);
         this.emitTask(task);
         break;
       }
       case "task.start": {
-        this.startOrAttachTask(client, msg.taskId, msg.cols, msg.rows);
+        await this.startOrAttachTask(client, msg.taskId, msg.cols, msg.rows);
         break;
       }
       case "task.attach": {
-        const task = this.requireTask(client, msg.taskId);
+        const task = await this.requireTask(client, msg.taskId);
         if (!task) return;
         const s = task.sessionId ? this.sessions.get(task.sessionId) : undefined;
         if (task.status === "running" && s && !s.closing) this.attachWithReplay(client, s.sessionId);
@@ -552,7 +557,7 @@ export class Hub {
         break;
       }
       case "task.stop": {
-        const task = this.requireTask(client, msg.taskId);
+        const task = await this.requireTask(client, msg.taskId);
         if (!task) return;
         const s = task.sessionId ? this.sessions.get(task.sessionId) : undefined;
         if (s && this.isDaemonOnline(s.daemonId)) {
@@ -560,19 +565,19 @@ export class Hub {
           this.routeToSessionDaemon(s.sessionId, { type: "session.close", sessionId: s.sessionId });
         } else if (task.status === "running") {
           if (task.sessionId) this.sessions.delete(task.sessionId);
-          const updated = this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
+          const updated = await this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
           if (updated) this.emitTask(updated);
         }
         break;
       }
       case "task.remove": {
-        const task = this.requireTask(client, msg.taskId);
+        const task = await this.requireTask(client, msg.taskId);
         if (!task) return;
         if (task.sessionId) {
           this.routeToSessionDaemon(task.sessionId, { type: "session.close", sessionId: task.sessionId });
           this.sessions.delete(task.sessionId);
         }
-        this.store.removeTask(task.id);
+        await this.store.removeTask(task.id);
         this.broadcast(task.accountId, { type: "task.removed", taskId: task.id });
         break;
       }
@@ -584,7 +589,7 @@ export class Hub {
         break;
       }
       case "client.exec": {
-        const ws = this.workspaceForClient(client, msg.workspaceId);
+        const ws = await this.workspaceForClient(client, msg.workspaceId);
         if (!ws) return void this.relayError(client, "exec", msg.requestId, "工作区不存在或不属于本账号");
         if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "exec", msg.requestId, "daemon 不在线");
         const reqId = randomUUID();
@@ -595,7 +600,7 @@ export class Hub {
         break;
       }
       case "client.fs.list": {
-        const ws = this.workspaceForClient(client, msg.workspaceId);
+        const ws = await this.workspaceForClient(client, msg.workspaceId);
         if (!ws) return void this.relayError(client, "fs.list", msg.requestId, "工作区不存在或不属于本账号");
         if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.list", msg.requestId, "daemon 不在线");
         const reqId = randomUUID();
@@ -604,7 +609,7 @@ export class Hub {
         break;
       }
       case "client.fs.read": {
-        const ws = this.workspaceForClient(client, msg.workspaceId);
+        const ws = await this.workspaceForClient(client, msg.workspaceId);
         if (!ws) return void this.relayError(client, "fs.read", msg.requestId, "工作区不存在或不属于本账号");
         if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.read", msg.requestId, "daemon 不在线");
         const reqId = randomUUID();
@@ -632,16 +637,16 @@ export class Hub {
     if (typeof msg.clientToken === "string" && msg.clientToken) {
       // 重连：已签发的会话 token（校验未撤销且未过期）
       tokenHash = hashToken(msg.clientToken);
-      accountId = this.store.accountForClientToken(tokenHash, now);
+      accountId = await this.store.accountForClientToken(tokenHash, now);
     } else if (config.authProvider === "supabase" && typeof msg.supabaseToken === "string" && msg.supabaseToken) {
       // 换票：验签 Supabase JWT → userId → 查/建个人账号 → 签发 coflux 会话 token
       const identity = this.verifier ? await this.verifier.verify(msg.supabaseToken) : null;
       if (identity) {
-        accountId = this.resolveAccountForUser(identity);
+        accountId = await this.resolveAccountForUser(identity);
         userId = identity.userId;
         issued = genToken("ck_sess");
         tokenHash = hashToken(issued);
-        this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs, userId);
+        await this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs, userId);
       }
     } else if (config.authProvider === "local" && typeof msg.username === "string" && typeof msg.password === "string") {
       // 登录：用户名 + 密码（单租户，对照配置）→ 签发带有效期的会话 token
@@ -649,7 +654,7 @@ export class Hub {
         accountId = config.accountId;
         issued = genToken("ck_sess");
         tokenHash = hashToken(issued);
-        this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs, null);
+        await this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs, null);
       }
     }
 
@@ -669,26 +674,26 @@ export class Hub {
 
   /** 验签通过且合法的 Supabase 用户：查已有个人账号，无则 lazy 建号 + owner membership。
    * 能出示合法 JWT ⇒ 管理员在 Supabase 亲手建的用户，故 lazy provision 安全（见 plans/001）。 */
-  private resolveAccountForUser(identity: SupabaseIdentity): AccountId {
-    const existing = this.store.getMembershipByUser(identity.userId);
+  private async resolveAccountForUser(identity: SupabaseIdentity): Promise<AccountId> {
+    const existing = await this.store.getMembershipByUser(identity.userId);
     if (existing) return existing.accountId;
     const accountId = randomUUID();
     const now = Date.now();
-    this.store.transaction(() => {
-      this.store.createAccount({ id: accountId, name: identity.email ?? identity.userId, createdAt: now });
-      this.store.createMembership(identity.userId, accountId, "owner", now);
+    await this.store.transaction(async (tx) => {
+      await tx.createAccount({ id: accountId, name: identity.email ?? identity.userId, createdAt: now });
+      await tx.createMembership(identity.userId, accountId, "owner", now);
     });
     log.info("provisioned account for supabase user", { accountId });
     return accountId;
   }
 
-  private workspaceForClient(client: ClientConn, workspaceId: WorkspaceId): Workspace | undefined {
-    const ws = this.store.getWorkspace(workspaceId);
+  private async workspaceForClient(client: ClientConn, workspaceId: WorkspaceId): Promise<Workspace | undefined> {
+    const ws = await this.store.getWorkspace(workspaceId);
     return ws && ws.accountId === client.accountId ? ws : undefined;
   }
 
-  private requireTask(client: ClientConn, taskId: TaskId): Task | undefined {
-    const task = this.store.getTask(taskId);
+  private async requireTask(client: ClientConn, taskId: TaskId): Promise<Task | undefined> {
+    const task = await this.store.getTask(taskId);
     if (!task || task.accountId !== client.accountId) {
       this.sendClient(client, { type: "error", message: `任务不存在：${taskId}` });
       return undefined;
@@ -696,8 +701,8 @@ export class Hub {
     return task;
   }
 
-  private startOrAttachTask(client: ClientConn, taskId: TaskId, cols: number, rows: number): void {
-    const task = this.requireTask(client, taskId);
+  private async startOrAttachTask(client: ClientConn, taskId: TaskId, cols: number, rows: number): Promise<void> {
+    const task = await this.requireTask(client, taskId);
     if (!task) return;
 
     if (task.status === "running" && task.sessionId) {
@@ -710,29 +715,29 @@ export class Hub {
 
     const d = this.daemons.get(task.daemonId);
     if (!d) return void this.sendClient(client, { type: "error", message: `daemon 不在线：${task.daemonId}` });
-    const ws = this.store.getWorkspace(task.workspaceId);
+    const ws = await this.store.getWorkspace(task.workspaceId);
     if (!ws) return void this.sendClient(client, { type: "error", message: "工作区已不存在" });
 
     const sessionId = randomUUID();
     const session: RuntimeSession = { sessionId, daemonId: task.daemonId, accountId: task.accountId, taskId: task.id, holder: client, closing: false };
     // 启动确认超时：daemon 收到 session.create 却起 PTY 失败又不回消息时，避免 task 永久卡 running + session 泄漏。
-    const startTimer = setTimeout(() => this.onSessionStartTimeout(sessionId), config.pendingTimeoutMs);
+    const startTimer = setTimeout(() => void this.onSessionStartTimeout(sessionId), config.pendingTimeoutMs);
     (startTimer as { unref?: () => void }).unref?.();
     session.startTimer = startTimer;
     this.sessions.set(sessionId, session);
     this.sendDaemon(d, { type: "session.create", sessionId, taskId: task.id, cwd: ws.path, cols: clampDim(cols, 80), rows: clampDim(rows, 24) });
-    const updated = this.store.updateTask(task.id, { status: "running", sessionId, exitCode: null });
+    const updated = await this.store.updateTask(task.id, { status: "running", sessionId, exitCode: null });
     if (updated) this.emitTask(updated);
   }
 
   /** session.create 超时未确认启动：清运行时 session、标 task exited、通知控制端。 */
-  private onSessionStartTimeout(sessionId: SessionId): void {
+  private async onSessionStartTimeout(sessionId: SessionId): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s || !s.startTimer) return; // 已确认启动（timer 被清）或已清理
     this.sessions.delete(sessionId);
-    const task = this.store.getTaskBySession(sessionId);
+    const task = await this.store.getTaskBySession(sessionId);
     if (task && task.sessionId === sessionId && task.status === "running") {
-      const updated = this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
+      const updated = await this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
       if (updated) this.emitTask(updated);
     }
     if (s.holder) this.sendClient(s.holder, { type: "error", message: "会话启动超时" });
@@ -754,8 +759,8 @@ export class Hub {
     }
   }
 
-  private removeDevice(client: ClientConn, daemonId: DaemonId): void {
-    const device = this.store.getDevice(daemonId);
+  private async removeDevice(client: ClientConn, daemonId: DaemonId): Promise<void> {
+    const device = await this.store.getDevice(daemonId);
     if (!device || device.accountId !== client.accountId) return;
     const accountId = device.accountId;
 
@@ -773,14 +778,14 @@ export class Hub {
     this.pendingReplays.removeByDaemon(daemonId);
     this.pendingRelays.removeByDaemon(daemonId, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "daemon 已移除"));
 
-    const workspaces = this.store.listWorkspacesByDaemon(daemonId);
-    const projects = this.store.listProjectsByDaemon(daemonId);
+    const workspaces = await this.store.listWorkspacesByDaemon(daemonId);
+    const projects = await this.store.listProjectsByDaemon(daemonId);
     let taskIds: TaskId[] = [];
-    this.store.transaction(() => {
-      this.store.revokeDevice(daemonId);
-      taskIds = this.store.removeTasksByDaemon(daemonId);
-      for (const w of workspaces) this.store.removeWorkspace(w.id);
-      for (const p of projects) this.store.removeProject(p.id);
+    await this.store.transaction(async (tx) => {
+      await tx.revokeDevice(daemonId);
+      taskIds = await tx.removeTasksByDaemon(daemonId);
+      for (const w of workspaces) await tx.removeWorkspace(w.id);
+      for (const p of projects) await tx.removeProject(p.id);
     });
     for (const id of taskIds) this.broadcast(accountId, { type: "task.removed", taskId: id });
     for (const w of workspaces) this.broadcast(accountId, { type: "workspace.removed", workspaceId: w.id });

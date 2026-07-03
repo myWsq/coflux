@@ -9,7 +9,7 @@
 | 包 | 说明 |
 |----|------|
 | `packages/protocol` | TS 共享线协议类型（server/web 引用） |
-| `apps/server` | 中心服务器（TS）：账号/设备认证 + 编排路由 + 持久化（node:sqlite） |
+| `apps/server` | 中心服务器（TS）：账号/设备认证 + 编排路由 + 持久化（Postgres） |
 | `apps/web` | Web Client（TS）：Vite + React + xterm.js |
 | `crates/protocol` | Rust 线协议真相源：serde 类型 + 帧 codec + UDS 消息 |
 | `crates/supervisor` | Rust daemon 的 supervisor：portable-pty 起 PTY + scrollback + 起/管 worker（极少升级） |
@@ -34,7 +34,7 @@ cofluxd status / logs -f / update / down / uninstall
 
 ## 快速开始
 
-前置：Node + pnpm（server/web）、Rust 工具链（daemon，`rustup` 装 stable 即可）。
+前置：Node + pnpm（server/web）、Rust 工具链（daemon，`rustup` 装 stable 即可）、**本机可连的 Postgres**（server 持久化用；开发默认接 `postgres://postgres:postgres@127.0.0.1:5432/postgres`，可用 `DATABASE_URL` 覆盖）。
 
 ```bash
 pnpm install          # 安装 TS 依赖
@@ -63,7 +63,7 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 | 变量 | 默认 | 用于 |
 |------|------|------|
 | `COFLUX_PORT` | `8787` | server 监听端口 |
-| `COFLUX_DB` | `./data/coflux.db` | server sqlite 路径 |
+| `DATABASE_URL` | 生产必填；`COFLUX_DEV=1` 时弱默认 `postgres://postgres:postgres@127.0.0.1:5432/postgres` | server 的 Postgres 连接串（含密码，视为秘密） |
 | `COFLUX_ENROLL_KEY` | `dev-enroll` | 账号登记密钥（server 配置，daemon 登记时用） |
 | `COFLUX_CLIENT_TOKEN` | `dev-client` | 账号登录令牌（server 配置，web 登录用） |
 | `COFLUX_SERVER` | `ws://localhost:8787/daemon` | daemon 连接的服务器地址 |

@@ -29,6 +29,9 @@ importers:
       jose:
         specifier: ^5.9.6
         version: 5.10.0
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
       ws:
         specifier: ^8.18.0
         version: 8.21.0
@@ -79,6 +82,9 @@ importers:
       jose:
         specifier: ^5.9.6
         version: 5.10.0
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
       ws:
         specifier: ^8.18.0
         version: 8.21.0
@@ -792,6 +798,10 @@ packages:
     resolution: {integrity: sha512-FfR8sjd4em2T6fb3I2MwAJU7HWVMr9zba+enmQeeWFfCbm+UOC/0X4DS8XtpUTMwWMGbjKYP7xjfNekzyGmB3A==}
     engines: {node: ^10 || ^12 || >=14}
 
+  postgres@3.4.9:
+    resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
+    engines: {node: '>=12'}
+
   react-dom@18.3.1:
     resolution: {integrity: sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw==}
     peerDependencies:
@@ -1447,6 +1457,8 @@ snapshots:
       nanoid: 3.3.13
       picocolors: 1.1.1
       source-map-js: 1.2.1
+
+  postgres@3.4.9: {}
 
   react-dom@18.3.1(react@18.3.1):
     dependencies:

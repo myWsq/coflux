@@ -1,5 +1,4 @@
 /** 服务器配置：所有环境变量集中、带默认值，一处校验。 */
-import { join } from "node:path";
 import { DEFAULT_PORT } from "@coflux/protocol";
 
 function int(name: string, def: number): number {
@@ -44,7 +43,9 @@ export const config = {
   port: int("COFLUX_PORT", DEFAULT_PORT),
   // 默认只绑 localhost：生产由反向代理(Caddy)对外，不直接暴露端口。需对外监听设 COFLUX_HOST=0.0.0.0。
   host: process.env.COFLUX_HOST ?? "127.0.0.1",
-  dbPath: process.env.COFLUX_DB ?? join(process.cwd(), "data", "coflux.db"),
+  // Postgres 连接串（含密码，视为秘密）：生产必须显式提供（Supabase session pooler）；
+  // dev（COFLUX_DEV=1）弱默认落到本机裸 Postgres。见 plans/002。
+  databaseUrl: secret("DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/postgres"),
   // 登记密钥 / env 口令仅 local 模式必需；supabase 模式下登记密钥走 UI 生成、web 登录走 Supabase。
   enrollKey: secret("COFLUX_ENROLL_KEY", "dev-enroll", isLocal),
   // web 登录：用户名 + 密码（单租户）。登录成功签发会话 token 给 web 存用，用户不碰 token。

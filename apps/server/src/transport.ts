@@ -13,10 +13,11 @@ export interface EndpointOptions<Ctx> {
   isAuthed: (ctx: Ctx) => boolean;
   /** 入站消息运行时校验（畸形/未知直接丢弃） */
   validate: (msg: unknown) => boolean;
-  onMessage: (ctx: Ctx, msg: unknown) => void;
+  /** hub 的 handler 已 async 化（触库）；本层负责 await 并兜底捕获拒绝，不阻塞其它连接。 */
+  onMessage: (ctx: Ctx, msg: unknown) => void | Promise<void>;
   /** 入站二进制数据面帧（仅认证后处理；归属校验在 handler 内做） */
-  onBinary?: (ctx: Ctx, buf: Buffer) => void;
-  onClose: (ctx: Ctx) => void;
+  onBinary?: (ctx: Ctx, buf: Buffer) => void | Promise<void>;
+  onClose: (ctx: Ctx) => void | Promise<void>;
   authDeadlineMs: number;
   logger: Logger;
 }
@@ -43,7 +44,8 @@ export function attachEndpoint<Ctx>(wss: WebSocketServer, opts: EndpointOptions<
       if (isBinary) {
         if (!opts.onBinary || !opts.isAuthed(ctx)) return;
         try {
-          opts.onBinary(ctx, raw as Buffer);
+          const r = opts.onBinary(ctx, raw as Buffer);
+          if (r instanceof Promise) r.catch((err) => opts.logger.error("binary handler error", { err: (err as Error).message }));
         } catch (err) {
           opts.logger.error("binary handler error", { err: (err as Error).message });
         }
@@ -58,7 +60,8 @@ export function attachEndpoint<Ctx>(wss: WebSocketServer, opts: EndpointOptions<
       }
       if (!opts.validate(msg)) return;
       try {
-        opts.onMessage(ctx, msg);
+        const r = opts.onMessage(ctx, msg);
+        if (r instanceof Promise) r.catch((err) => opts.logger.error("handler error", { err: (err as Error).message }));
       } catch (err) {
         opts.logger.error("handler error", { err: (err as Error).message });
       }
@@ -66,7 +69,12 @@ export function attachEndpoint<Ctx>(wss: WebSocketServer, opts: EndpointOptions<
 
     ws.on("close", () => {
       clearTimeout(deadline);
-      opts.onClose(ctx);
+      try {
+        const r = opts.onClose(ctx);
+        if (r instanceof Promise) r.catch((err) => opts.logger.error("close handler error", { err: (err as Error).message }));
+      } catch (err) {
+        opts.logger.error("close handler error", { err: (err as Error).message });
+      }
     });
     ws.on("error", (err) => opts.logger.warn("ws error", { err: (err as Error).message }));
   });
