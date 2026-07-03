@@ -8,7 +8,7 @@
 
 | # | 决策 | 理由 | 备选 |
 |---|------|------|------|
-| A1 | 持久化用内置 `node:sqlite` | node 26 免 flag 可用、零原生依赖、真 SQL | JSON 文件 / Postgres |
+| A1 | ~~持久化用内置 `node:sqlite`~~ **已被 plan 002 取代：Supabase Postgres**（2026-07） | SaaS 化后需共享库 + 托管备份 | ——|
 | A2 | scrollback 移到 **daemon 侧**（每会话 200k 字符上限） | 与"daemon 持有会话生命周期"一致，服务器重启不丢 | 服务器侧缓冲（已废弃） |
 | A3 | 重连协议 `daemon.resync { sessionId, taskId }[]` | 即使服务器重启也能把存活 PTY 重挂回 task；已 e2e 验证 | 仅 sessionId（需服务器记忆映射） |
 | A4 | 任务状态机 `idle / running / exited`；对 `exited` 的 task 再 `task.start` = **重跑**（起新 session） | 简单够用 | 显式 restart 语义 / 保留多次运行历史 |
@@ -52,9 +52,9 @@
 - 起任务时**自动拉起** `claude`/`codex` 并喂初始 prompt（人再接管），还是保持"只开 shell、人手动起"？
 - 要不要解析 Agent 的结构化输出（headless 模式）做富 UI？（这会引入"半 PTY 半结构化"的混合通道。）
 
-### B6. 数据面是否需要二进制优化
-大输出（如整段构建日志）走 JSON 字符串会有转义/吞吐开销。何时值得换二进制分帧 / 压缩？取决于你预期的输出量级。
+### B6. 数据面是否需要二进制优化 —— ✅ 已完成（2026-06）
+`pty.output`/`pty.input`/`pty.replay` 已改二进制帧（`packages/protocol` 的 `encodeFrame`/`decodeFrame`），控制面保持 JSON。见 ROADMAP 条目 1。
 
-### B7. 中心服务器部署形态
-- 自己托管单实例，还是要多实例 + 共享状态（则 sqlite 要换 Postgres、运行时状态要外置）？
-- 传输层 TLS（`wss://`）与公网暴露方式？
+### B7. 中心服务器部署形态 —— ✅ 已定（2026-07）
+- 单实例自托管（prod-jp），存储已迁 Supabase Postgres（plan 002），身份层 Supabase Auth 多账号（plan 001）。
+- TLS：`api.coflux.dev` 反代终结 `wss://`。多实例 + 共享状态暂无需求，Postgres 外置后已留扩展位。
