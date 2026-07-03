@@ -12,6 +12,7 @@
     "@coflux/core": "workspace:*",
     "@coflux/protocol": "workspace:*",
     "jose": "^5.9.6",
+    "postgres": "^3.4.9",
     "ws": "^8.18.0"
   },
   "devDependencies": {

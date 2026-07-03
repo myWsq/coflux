@@ -18,42 +18,44 @@ import { SupabaseVerifier } from "./auth.js";
 const log = createLogger("server");
 const startedAt = Date.now();
 
-const store = new Store(config.dbPath);
-bootstrap();
+const store = await Store.connect(config.databaseUrl);
+await bootstrap();
 // supabase 模式启用 JWKS 验签器；local 模式不需要（省去外部依赖）。
 const verifier = config.authProvider === "supabase" ? new SupabaseVerifier(config.supabaseUrl) : undefined;
 const hub = new Hub(store, verifier);
 
-function bootstrap() {
+async function bootstrap() {
   // 以下三项（default 账号 seed / env 登记密钥 seed / credFingerprint 撤销）都是单账号 + env 口令的伴生物，
   // 仅 local 模式执行。supabase 模式下账号按 userId lazy 建、登记密钥走 UI 生成。
   if (config.authProvider === "local") {
-    if (!store.getAccount(config.accountId)) {
-      store.createAccount({ id: config.accountId, name: "default", createdAt: Date.now() });
+    if (!(await store.getAccount(config.accountId))) {
+      await store.createAccount({ id: config.accountId, name: "default", createdAt: Date.now() });
       log.info("created account", { accountId: config.accountId });
     }
-    store.upsertEnrollmentKey(hashToken(config.enrollKey), config.accountId, Date.now());
+    await store.upsertEnrollmentKey(hashToken(config.enrollKey), config.accountId, Date.now());
     // 不再 seed 静态登录令牌；web 用用户名+密码登录，登录时签发会话 token。
 
     // 凭证变更检测：用户名/密码改了（改 env 重启）就撤销全部已签发会话 token，
     // 让改密码能即时使已泄露/在用的旧 token 失效（token 与密码解耦存于表中，否则永久有效）。
     const credFingerprint = hashToken(`${config.username}\n${config.password}`);
-    if (store.getMeta("credFingerprint") !== credFingerprint) {
-      store.revokeAllClientTokens(config.accountId);
-      store.setMeta("credFingerprint", credFingerprint);
+    if ((await store.getMeta("credFingerprint")) !== credFingerprint) {
+      await store.revokeAllClientTokens(config.accountId);
+      await store.setMeta("credFingerprint", credFingerprint);
       log.info("credentials changed since last boot, revoked all client tokens");
     }
   }
   // 清理已撤销/过期的会话 token，防 client_tokens 表无界增长（两模式通用）。
-  store.pruneClientTokens(Date.now());
+  await store.pruneClientTokens(Date.now());
 
   log.info("bootstrap ready", { authProvider: config.authProvider });
 }
 
 const httpServer = http.createServer((req, res) => {
   if (req.url === "/health") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: store.ping(), uptimeMs: Date.now() - startedAt, ...hub.stats() }));
+    store.ping().then((ok) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok, uptimeMs: Date.now() - startedAt, ...hub.stats() }));
+    });
     return;
   }
   res.writeHead(404);
@@ -104,12 +106,13 @@ const heartbeat = setInterval(() => {
 heartbeat.unref();
 
 httpServer.listen(config.port, config.host, () => {
-  log.info("listening", { host: config.host, port: config.port, db: config.dbPath });
+  // 注意：绝不打印 config.databaseUrl（含密码）。
+  log.info("listening", { host: config.host, port: config.port });
 });
 
 /* ----------------------------- 优雅关闭 / 兜底 ----------------------------- */
 let shuttingDown = false;
-function shutdown(reason: string, code = 0) {
+async function shutdown(reason: string, code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   log.info("shutdown", { reason });
@@ -120,14 +123,14 @@ function shutdown(reason: string, code = 0) {
     /* ignore */
   }
   hub.shutdown();
-  store.close();
+  await store.close();
   setTimeout(() => process.exit(code), 300).unref();
 }
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("uncaughtException", (err) => {
   log.error("uncaughtException", { err: err instanceof Error ? err.stack : String(err) });
-  shutdown("uncaughtException", 1);
+  void shutdown("uncaughtException", 1);
 });
 process.on("unhandledRejection", (err) => {
   log.error("unhandledRejection", { err: String(err) });
