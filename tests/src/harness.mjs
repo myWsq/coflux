@@ -43,16 +43,24 @@ async function createTestDatabase() {
   return { name, url: url.toString() };
 }
 
-/** 删临时库：先踢掉该库上的连接（否则 DROP DATABASE 报 "being accessed by other users"），再删。 */
+/** 删临时库：DROP ... WITH (FORCE)（PG 13+）由服务端原子地踢连接并删库。
+ * 不用 pg_terminate_backend + DROP 两步：terminate 发完信号即返回、不等 backend 真正退出，
+ * 紧随的 DROP 仍可能撞上垂死连接报 "being accessed by other users"，造成非确定性泄漏。 */
 async function dropTestDatabase(name) {
   const admin = postgres(ADMIN_PG_URL, { max: 1, ssl: "prefer" });
   try {
-    await admin.unsafe(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${name}' AND pid <> pg_backend_pid()`,
-    );
-    await admin.unsafe(`DROP DATABASE IF EXISTS ${name}`);
+    await admin.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
   } finally {
     await admin.end({ timeout: 5 });
+  }
+}
+
+/** 清理路径共用：删库失败不让绿测试变红，但必须在 stderr 留痕（静默吞掉=泄漏不可见）。 */
+async function dropTestDatabaseLoudly(name) {
+  try {
+    await dropTestDatabase(name);
+  } catch (e) {
+    console.error(`[harness] failed to drop test database ${name}: ${e?.message ?? e}`);
   }
 }
 
@@ -155,8 +163,16 @@ export async function startServer(opts = {}) {
   if (!port) throw new Error("startServer requires a port");
   const testDb = await createTestDatabase();
   const serverEnv = { ...process.env, COFLUX_PORT: String(port), DATABASE_URL: testDb.url, ...(opts.env ?? {}) };
-  const ref = { server: spawnApp("apps/server/src/index.ts", serverEnv) };
-  await waitHealth(port);
+  const ref = {};
+  try {
+    ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
+    await waitHealth(port);
+  } catch (e) {
+    // 建库之后、句柄（含 stop()）交还调用方之前失败：就地清理，别泄漏测试库
+    killTree(ref.server);
+    await dropTestDatabaseLoudly(testDb.name);
+    throw e;
+  }
   return {
     port,
     makeClient: () => new Client(port),
@@ -171,7 +187,7 @@ export async function startServer(opts = {}) {
     async stop() {
       killTree(ref.server);
       await sleep(150);
-      try { await dropTestDatabase(testDb.name); } catch {}
+      await dropTestDatabaseLoudly(testDb.name);
     },
   };
 }
@@ -209,9 +225,18 @@ export async function startStack(opts = {}) {
   const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`, COFLUX_ENROLL_KEY: enrollKey, COFLUX_HOME: home, COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev", ...(opts.daemonEnv ?? {}) };
 
   const ref = { server: null, daemon: null };
-  ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
-  await waitHealth(port);
-  ref.daemon = spawnDaemon(daemonEnv);
+  try {
+    ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
+    await waitHealth(port);
+    ref.daemon = spawnDaemon(daemonEnv);
+  } catch (e) {
+    // 建库之后、stack.stop() 可用之前失败：就地清理，别泄漏测试库/临时目录
+    killTree(ref.daemon);
+    killTree(ref.server);
+    if (existsSync(home)) try { rmSync(home, { recursive: true, force: true }); } catch {}
+    await dropTestDatabaseLoudly(testDb.name);
+    throw e;
+  }
 
   const stack = {
     port,
@@ -254,7 +279,7 @@ export async function startStack(opts = {}) {
       killTree(ref.server);
       await sleep(200);
       if (existsSync(home)) try { rmSync(home, { recursive: true, force: true }); } catch {}
-      try { await dropTestDatabase(testDb.name); } catch {}
+      await dropTestDatabaseLoudly(testDb.name);
     },
   };
 
