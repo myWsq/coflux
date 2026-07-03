@@ -15,6 +15,20 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # 黑盒测试的 server 存储层是 Postgres（plan 002），harness 按
+    # postgres://postgres:postgres@127.0.0.1:5432/postgres 建临时库（见 tests/src/harness.mjs）。
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
