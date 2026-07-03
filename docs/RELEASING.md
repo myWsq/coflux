@@ -23,6 +23,11 @@ node scripts/gen-keypair.mjs
 
 ## 发一个版本
 
+发版前 checklist：
+
+1. **main 的 CI 必须是绿的**（ci.yml 是质量门，黑盒测试依赖其内置的 Postgres service）。
+2. `packages/cli` 若有未发布改动，同批 `npm publish`，让 tag / GitHub Release / npm CLI 三者对齐。
+
 ```sh
 git tag v1.2.3
 git push origin v1.2.3
@@ -50,3 +55,7 @@ git push origin v1.2.3
 ## 升级 supervisor 自身
 
 supervisor 不走热升级（它持有 PTY）。用 `cofluxd update` 重下二进制并重启服务——很罕见。
+
+> **发版后别忘了这步**：热升级只覆盖 worker。若本次发版含 supervisor 侧修复（看
+> `git diff <上个tag>..HEAD -- crates/supervisor`），需在各 daemon 机器跑一次
+> `cofluxd update`，否则修复永远不会到达生产的 supervisor。
