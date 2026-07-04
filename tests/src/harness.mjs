@@ -109,11 +109,11 @@ function spawnApp(rel, env) {
 // 默认用 target/debug 下的产物（pretest 会 cargo build）；可用环境变量覆盖路径。
 const SUPERVISOR_BIN = process.env.COFLUX_SUPERVISOR_BIN || join(ROOT, "target/debug/coflux-supervisor");
 const WORKER_BIN = process.env.COFLUX_WORKER_BIN || join(ROOT, "target/debug/coflux-worker");
-function spawnDaemon(env) {
+export function spawnDaemon(env) {
   const env2 = { ...env, COFLUX_WORKER_CMD: WORKER_BIN, COFLUX_WORKER_ARGS: "[]" };
   return spawn(SUPERVISOR_BIN, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
 }
-function killTree(p) {
+export function killTree(p) {
   if (!p) return;
   try {
     process.kill(-p.pid, "SIGKILL");
