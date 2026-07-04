@@ -92,6 +92,8 @@ export type FsReadResult = { type: "fs.read.result"; requestId: RequestId; ok: b
 export type DaemonToServer =
   | { type: "daemon.enroll"; enrollmentKey: string; name: string; host: string; platform: string }
   | { type: "daemon.auth"; deviceToken: string }
+  /** 未登记且无 enrollmentKey 时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md） */
+  | { type: "daemon.enrollRequest"; name: string; host: string; platform: string }
   | { type: "daemon.resync"; sessions: { sessionId: SessionId; taskId: TaskId }[] }
   /** 校验路径是否为（非裸）git 仓库，返回顶层目录与当前分支 */
   | { type: "project.validated"; requestId: RequestId; ok: boolean; repoPath: string; branch: string; error?: string }
@@ -108,6 +110,8 @@ export type ServerToDaemon =
   | { type: "daemon.enrolled"; daemonId: DaemonId; deviceToken: string }
   | { type: "daemon.authed"; daemonId: DaemonId }
   | { type: "daemon.authError"; message: string; needEnroll: boolean }
+  /** enrollRequest 的回应：一次性授权链接 + 过期时间（ms epoch）。daemon 落盘展示，连接断开即作废 */
+  | { type: "daemon.authorizePending"; url: string; expiresAt: number }
   | { type: "project.validate"; requestId: RequestId; path: string }
   | { type: "worktree.add"; requestId: RequestId; repoPath: string; workspaceId: WorkspaceId; name: string; branch: string; createNew: boolean }
   /** fire-and-forget：移除一个 worktree 目录 */
@@ -139,6 +143,10 @@ export type ClientToServer =
   /** 为当前账号生成一条新的登记密钥（账号级、可复用），供新机器 daemon 登记 */
   | { type: "client.createEnrollmentKey" }
   | { type: "client.removeDevice"; daemonId: DaemonId }
+  /** 查看某授权链接对应的待授权设备信息（不消费 token，供确认页展示 name/host/platform） */
+  | { type: "device.authorizeInfo"; token: string }
+  /** 确认授权：把该 token 对应的设备绑到当前登录账号（一次性，成功后 token 失效） */
+  | { type: "device.authorize"; token: string }
   /** 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签 */
   | { type: "client.upgradeDaemon"; daemonId: DaemonId; version: string; url?: string; sha256?: string; signature?: string }
   /** 导入一个 git 仓库为 project（自动创建主工作区） */
@@ -164,6 +172,10 @@ export type ServerToClient =
   | { type: "auth.error"; message: string }
   /** 登记密钥已生成（明文仅此一次回传；服务器只存 hash） */
   | { type: "enrollmentKey.created"; enrollmentKey: string; daemonUrl: string }
+  /** device.authorizeInfo 的回应：ok 时带设备信息，否则 error 说明原因（无效/已用/已过期） */
+  | { type: "device.authorizeInfo"; ok: boolean; name?: string; host?: string; platform?: string; error?: string }
+  /** 设备授权成功（该连接的 daemon 已收到 daemon.enrolled 并上线） */
+  | { type: "device.authorized" }
   | { type: "state.snapshot"; daemons: DaemonInfo[]; projects: Project[]; workspaces: Workspace[]; tasks: Task[] }
   | { type: "daemon.updated"; daemon: DaemonInfo }
   | { type: "daemon.removed"; daemonId: DaemonId }
@@ -289,6 +301,7 @@ type FieldSpec = "string" | "number" | "boolean" | "array";
 
 const DAEMON_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
   "daemon.enroll": { enrollmentKey: "string", name: "string", host: "string", platform: "string" },
+  "daemon.enrollRequest": { name: "string", host: "string", platform: "string" },
   "daemon.auth": { deviceToken: "string" },
   "daemon.resync": { sessions: "array" },
   "project.validated": { requestId: "string", ok: "boolean", repoPath: "string", branch: "string" },
@@ -306,6 +319,8 @@ const CLIENT_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
   "client.subscribe": {},
   "client.createEnrollmentKey": {},
   "client.removeDevice": { daemonId: "string" },
+  "device.authorizeInfo": { token: "string" },
+  "device.authorize": { token: "string" },
   "client.upgradeDaemon": { daemonId: "string", version: "string" },
   "project.import": { daemonId: "string", path: "string" },
   "project.remove": { projectId: "string" },
