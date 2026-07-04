@@ -11,6 +11,9 @@ export interface EndpointOptions<Ctx> {
   makeCtx: (ws: WebSocket) => Ctx;
   /** 该连接是否已认证（用于认证截止判定） */
   isAuthed: (ctx: Ctx) => boolean;
+  /** 未认证但处于合法等待态（如 daemon 等浏览器授权），deadline 到点豁免不关。
+   * 等待态自身要有界（授权 pending 有 TTL + 断线作废），否则等于给匿名连接开无限白嫖口。 */
+  canWaitAuth?: (ctx: Ctx) => boolean;
   /** 入站消息运行时校验（畸形/未知直接丢弃） */
   validate: (msg: unknown) => boolean;
   /** hub 的 handler 已 async 化（触库）；本层负责 await 并兜底捕获拒绝，不阻塞其它连接。 */
@@ -36,7 +39,7 @@ export function attachEndpoint<Ctx>(wss: WebSocketServer, opts: EndpointOptions<
     ws.on("pong", () => alive.add(ws));
 
     const deadline = setTimeout(() => {
-      if (!opts.isAuthed(ctx)) ws.close(4008, "auth timeout");
+      if (!opts.isAuthed(ctx) && !opts.canWaitAuth?.(ctx)) ws.close(4008, "auth timeout");
     }, opts.authDeadlineMs);
 
     ws.on("message", (raw, isBinary) => {
