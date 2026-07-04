@@ -264,3 +264,36 @@ test("device.authorize 暴力尝试被限速", async () => {
     await limited.stop();
   }
 });
+
+test("等待授权的 daemon 不被 auth deadline 踢；未发 enrollRequest 的裸连接仍会被踢", async () => {
+  // 生产实测踩过的 bug：auth deadline（默认 15s）把等待浏览器授权的 daemon 当未认证连接
+  // 反复踢掉 → 每次重连换发新链接，用户手里的链接永远在变。修复 = 持有 pending 授权的
+  // 连接豁免 deadline（transport 的 canWaitAuth）。此处用 1s deadline 复现两侧行为。
+  const short = await startServer({ port: PORT + 4, env: { ...LOCAL_ENV, COFLUX_AUTH_DEADLINE_MS: "1000" } });
+  try {
+    // 裸连接：什么都不发，到点应被 4008 关闭（deadline 机制本身必须仍然生效）
+    const idle = rawDaemon(short.port);
+    await idle.ready;
+    const idleCode = await Promise.race([idle.closed, sleep(4000).then(() => "not-closed")]);
+    assert.equal(idleCode, 4008, "裸连接应在 deadline 被 4008 关闭");
+
+    // 已申请授权的连接：跨过 deadline 仍存活，且此后仍能完成授权
+    const d = rawDaemon(short.port);
+    await d.ready;
+    d.send({ type: "daemon.enrollRequest", name: "wait-dev", host: "h", platform: "test" });
+    const pending = await d.waitFor((m) => m.type === "daemon.authorizePending", "authorizePending");
+    const survived = await Promise.race([d.closed, sleep(2500).then(() => "alive")]);
+    assert.equal(survived, "alive", "等待授权的连接不应被 deadline 关闭");
+
+    const c = short.makeClient();
+    await c.authSubscribe();
+    c.send({ type: "device.authorize", token: tokenFromUrl(pending.url) });
+    await c.waitFor((m) => m.type === "device.authorized", "authorized after deadline");
+    const enrolled = await d.waitFor((m) => m.type === "daemon.enrolled", "enrolled");
+    assert.ok(enrolled.deviceToken, "跨过 deadline 后授权仍能完成");
+    c.close();
+    d.close();
+  } finally {
+    await short.stop();
+  }
+});

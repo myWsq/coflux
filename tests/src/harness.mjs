@@ -200,6 +200,8 @@ export function rawDaemon(port) {
   ws.onmessage = (ev) => { let m; try { m = JSON.parse(ev.data); } catch { return; } log.push(m); waiters = waiters.filter((w) => !w.try(m)); };
   return {
     ready: new Promise((res, rej) => { ws.onopen = res; ws.onerror = (e) => rej(new Error("ws error: " + (e.message || "?"))); }),
+    /** 服务端主动关连接时解析为 close code（如 4008 auth timeout）；不关则一直 pending，调用方自行 race 超时 */
+    closed: new Promise((res) => { ws.onclose = (e) => res(e.code); }),
     send: (m) => ws.send(JSON.stringify(m)),
     waitFor: (pred, label = "?", t = 8000) => {
       const h = log.find(pred);
