@@ -58,8 +58,8 @@ export const config = {
   /** web 控制台地址：拼进 daemon.authorizePending 下发的授权链接；反代/公网部署时用 COFLUX_WEB_URL 覆盖 */
   webUrl: process.env.COFLUX_WEB_URL ?? "http://127.0.0.1:5273",
 
-  /** 设备授权（Tailscale 式）：一次性授权码 TTL、client 侧对 device.authorize 的限速阈值（见 plan 003） */
-  authorizeTtlMs: int("COFLUX_AUTHORIZE_TTL_MS", 5 * 60 * 1000),
+  /** 设备授权（Tailscale 式）：一次性授权码 TTL（plan 003 定为 10min）、client 侧 device.authorize 的限速阈值 */
+  authorizeTtlMs: int("COFLUX_AUTHORIZE_TTL_MS", 10 * 60 * 1000),
   authorizeMaxFailures: int("COFLUX_AUTHORIZE_MAX_FAILURES", 10),
 
   // web 会话 token 有效期：登录签发后多久过期（重连也用它）。默认 30 天。
