@@ -19,7 +19,15 @@ const USE_SUPABASE = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
 const STATUS_LABEL: Record<Task["status"], string> = { idle: "未启动", running: "运行中", exited: "已结束" };
 type AuthState = "need-login" | "authenticating" | "authed" | "auth-failed";
 
+/** 无路由单页：先按路径分支，再决定渲染哪棵组件树——授权页与主 app 各起各的 WS 连接，
+ * 互不干扰（尤其不能让授权页也触发主 app 的 xterm/自动重连副作用，见 plan 003 landmine）。 */
 export function App() {
+  const m = /^\/authorize\/([^/]+)\/?$/.exec(location.pathname);
+  if (m) return <AuthorizePage token={decodeURIComponent(m[1])} />;
+  return <MainApp />;
+}
+
+function MainApp() {
   const hostRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -440,4 +448,162 @@ function upsert<T>(list: T[], item: T, match: (x: T) => boolean): T[] {
   const next = list.slice();
   next[i] = item;
   return next;
+}
+
+/** /authorize/<token>：Tailscale 式设备授权确认页（plan 003 M4）。
+ * 独立组件树、独立 WS 连接——不碰 MainApp 的 xterm/自动重连/数据面逻辑。
+ * 复用已有登录态（localStorage 里的会话 token）；没有或失效则退回登录表单，
+ * 与 MainApp 用同一套 CSS（login-card/brand-lg/login-hint/login-status）。 */
+type AuthorizeState =
+  | { phase: "need-login" }
+  | { phase: "authenticating" }
+  | { phase: "auth-failed"; message: string }
+  | { phase: "looking-up" }
+  | { phase: "invalid"; message: string }
+  | { phase: "confirm"; name?: string; host?: string; platform?: string }
+  | { phase: "authorizing" }
+  | { phase: "done" }
+  | { phase: "failed"; message: string };
+
+function AuthorizePage({ token }: { token: string }) {
+  const wsRef = useRef<WebSocket | null>(null);
+  const [state, setState] = useState<AuthorizeState>({ phase: "need-login" });
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+
+  const send = (msg: ClientToServer) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+  };
+
+  function connect(cred: { token: string } | { supabaseToken: string } | { username: string; password: string }) {
+    setState({ phase: "authenticating" });
+    const ws = new WebSocket(SERVER_URL);
+    wsRef.current = ws;
+    ws.onopen = () => {
+      if ("token" in cred) send({ type: "client.auth", clientToken: cred.token });
+      else if ("supabaseToken" in cred) send({ type: "client.auth", supabaseToken: cred.supabaseToken });
+      else send({ type: "client.auth", username: cred.username, password: cred.password });
+    };
+    ws.onclose = () => {
+      setState((s) => (s.phase === "done" ? s : { phase: "failed", message: "连接已断开，请刷新页面重试" }));
+    };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data !== "string") return;
+      let msg: ServerToClient;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      switch (msg.type) {
+        case "auth.ok":
+          setState({ phase: "looking-up" });
+          send({ type: "device.authorizeInfo", token });
+          break;
+        case "auth.error":
+          localStorage.removeItem(TOKEN_KEY);
+          setState({ phase: "auth-failed", message: USE_SUPABASE ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误" });
+          break;
+        case "device.authorizeInfo":
+          if (msg.ok) setState({ phase: "confirm", name: msg.name, host: msg.host, platform: msg.platform });
+          else setState({ phase: "invalid", message: msg.error || "授权链接无效或已过期" });
+          break;
+        case "device.authorized":
+          setState({ phase: "done" });
+          break;
+        default:
+          break;
+      }
+    };
+  }
+
+  useEffect(() => {
+    const saved = localStorage.getItem(TOKEN_KEY);
+    if (saved) connect({ token: saved });
+    return () => {
+      wsRef.current?.close();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function login(e: React.FormEvent) {
+    e.preventDefault();
+    if (!USE_SUPABASE) {
+      connect({ username, password });
+      return;
+    }
+    setState({ phase: "authenticating" });
+    try {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: { "content-type": "application/json", apikey: SUPABASE_ANON_KEY! },
+        body: JSON.stringify({ email: username, password }),
+      });
+      if (!res.ok) {
+        setState({ phase: "auth-failed", message: "邮箱或密码错误" });
+        return;
+      }
+      const data = await res.json();
+      if (!data?.access_token) {
+        setState({ phase: "auth-failed", message: "登录失败：未获得访问令牌" });
+        return;
+      }
+      connect({ supabaseToken: data.access_token });
+    } catch {
+      setState({ phase: "auth-failed", message: "网络错误：无法连接认证服务" });
+    }
+  }
+
+  function confirm() {
+    setState({ phase: "authorizing" });
+    send({ type: "device.authorize", token });
+  }
+
+  const showLogin = state.phase === "need-login" || state.phase === "authenticating" || state.phase === "auth-failed";
+
+  return (
+    <div className="app">
+      <div className="login">
+        {showLogin ? (
+          <form className="login-card" onSubmit={login}>
+            <div className="brand-lg">coflux</div>
+            <p className="login-hint">授权新设备 —— 请先登录你的账号</p>
+            <input
+              autoFocus
+              type={USE_SUPABASE ? "email" : "text"}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder={USE_SUPABASE ? "邮箱" : "用户名"}
+              autoComplete={USE_SUPABASE ? "email" : "username"}
+            />
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="密码" autoComplete="current-password" />
+            <button type="submit">登录</button>
+            {state.phase === "authenticating" && <div className="login-status">连接中…</div>}
+            {state.phase === "auth-failed" && <div className="login-status err">{state.message}</div>}
+          </form>
+        ) : (
+          <div className="login-card">
+            <div className="brand-lg">coflux</div>
+            {state.phase === "looking-up" && <p className="login-hint">正在核对授权链接…</p>}
+            {state.phase === "invalid" && <p className="login-status err">{state.message}</p>}
+            {state.phase === "confirm" && (
+              <>
+                <p className="login-hint">授权以下设备接入你的账号：</p>
+                <p>
+                  <b>{state.name || "（未命名设备）"}</b>
+                  <br />
+                  {state.host} · {state.platform}
+                </p>
+                <button onClick={confirm}>授权此设备</button>
+              </>
+            )}
+            {state.phase === "authorizing" && <p className="login-hint">正在授权…</p>}
+            {state.phase === "done" && <p className="login-status">✓ 授权成功，设备已登记。可以关闭此页面了。</p>}
+            {state.phase === "failed" && <p className="login-status err">{state.message}</p>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
