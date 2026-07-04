@@ -1,0 +1,41 @@
+name: npm-publish
+
+# 发布 packages/cli（cofluxd）到 npm。两种触发：
+#   - 打 v* tag 时随 daemon 同批发布（与 RELEASING.md checklist 对齐）
+#   - workflow_dispatch 手动补发（CLI 单独出修复时）
+# 幂等：package.json 的版本已在 npm 上则跳过，不会重复发布/报错。
+# 认证走 npm Trusted Publishing（OIDC，无 token）：npmjs.com 上 cofluxd 包需配置
+# trusted publisher = 本仓库 + 本 workflow 文件名（npm-publish.yml）。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC 换发布凭证用
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Trusted Publishing 需要 npm >= 11.5.1
+      - run: npm install -g npm@latest
+
+      - name: 发布（版本已存在则跳过）
+        working-directory: packages/cli
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "cofluxd@${PKG_VERSION}" version >/dev/null 2>&1; then
+            echo "cofluxd@${PKG_VERSION} 已在 npm 上，跳过"
+            exit 0
+          fi
+          npm publish

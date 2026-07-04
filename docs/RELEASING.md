@@ -26,7 +26,9 @@ node scripts/gen-keypair.mjs
 发版前 checklist：
 
 1. **main 的 CI 必须是绿的**（ci.yml 是质量门，黑盒测试依赖其内置的 Postgres service）。
-2. `packages/cli` 若有未发布改动，同批 `npm publish`，让 tag / GitHub Release / npm CLI 三者对齐。
+2. `packages/cli` 若有改动，**提前 bump `package.json` 版本**——打 tag 时 `npm-publish.yml`
+   会自动把它发到 npm（Trusted Publishing/OIDC，无 token；版本已存在则幂等跳过）。
+   CLI 单独出修复时可在 Actions 页手动 dispatch 该 workflow。
 
 ```sh
 git tag v1.2.3
