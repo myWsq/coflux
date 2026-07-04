@@ -104,7 +104,11 @@ daemon: 清 pending-auth.json、落盘 credentials.json（与 classic enroll 一
 - **一次性**：`device.authorize` 成功后立即从 pending map 摘除，同一 token 二次使用返回
   `device.authorizeInfo{ ok:false }`。
 - **TTL**：默认 10 分钟（`COFLUX_AUTHORIZE_TTL_MS`），到期由 `setTimeout` 主动清理，过期后按
-  "不存在"处理，不区分"过期"与"从未存在"（避免给攻击者额外信息）。
+  "不存在"处理，不区分"过期"与"从未存在"（避免给攻击者额外信息）。server 到期只默默摘除，
+  不通知也不断连；**换新链接由 worker 负责**——它跟踪 `expiresAt`，到期仍未登记就在同一条
+  连接上重发 `daemon.enrollRequest`，收到新的 `daemon.authorizePending` 后覆盖写
+  pending-auth.json，`cofluxd` 的轮询会自然打印新链接。只要 daemon 活着，用户手里的链接
+  永远是新鲜的（旧链接一过期即失效）。
 - **断线作废**：daemon 连接的 `close` 事件里连带清掉其挂着的 pending token，与「一机一次授权
   请求」的直觉一致——重新连接会生成一个新 token。
 - **限速**：`device.authorizeInfo`/`device.authorize` 在同一 client 连接上失败次数计数

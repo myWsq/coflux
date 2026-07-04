@@ -175,6 +175,72 @@ test("daemon 断线后待授权 token 立即作废", async () => {
   c.close();
 });
 
+test("TTL 过期后 worker 自动换新链接：旧 token 作废、新 token 可授权", async () => {
+  // 续期是 worker 的逻辑（裸 WS 模拟覆盖不到），必须起真实 daemon + 短 TTL server。
+  // TTL 2s + worker 1s 粒度的续期检查 → 第二个链接应在 ~3s 内出现。
+  const short = await startServer({ port: PORT + 3, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_TTL_MS: "2000" } });
+  const home = mkdtempSync(join(tmpdir(), "coflux-test-renewhome-"));
+  writeFileSync(join(home, "settings.json"), JSON.stringify({ enrollKey: "" }), { mode: 0o600 });
+  const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${short.port}/daemon`, COFLUX_HOME: home, COFLUX_DEVICE_NAME: "renew-dev" };
+  delete daemonEnv.COFLUX_ENROLL_KEY;
+  const daemonProc = spawnDaemon(daemonEnv);
+
+  try {
+    const pendingPath = join(home, "pending-auth.json");
+    const readUrl = () => {
+      try {
+        return JSON.parse(readFileSync(pendingPath, "utf8"))?.url ?? null;
+      } catch {
+        return null; // 不存在或正在被写
+      }
+    };
+    let firstUrl = null;
+    for (let i = 0; i < 80 && !firstUrl; i++) {
+      firstUrl = readUrl();
+      if (!firstUrl) await sleep(250);
+    }
+    assert.ok(firstUrl, "第一个授权链接落地");
+    const token1 = tokenFromUrl(firstUrl);
+
+    // 先把 client 连好，等新链接一出现就立刻授权（新链接同样只有 2s 有效期）
+    const c = short.makeClient();
+    await c.authSubscribe();
+
+    let secondUrl = null;
+    for (let i = 0; i < 100 && !secondUrl; i++) {
+      const u = readUrl();
+      if (u && u !== firstUrl) secondUrl = u;
+      else await sleep(100);
+    }
+    assert.ok(secondUrl, "TTL 过期后出现第二个授权链接（同一条连接，未重启 daemon）");
+    const token2 = tokenFromUrl(secondUrl);
+    assert.notEqual(token2, token1, "新链接 token 与旧的不同");
+
+    c.send({ type: "device.authorizeInfo", token: token1 });
+    const oldInfo = await c.waitFor((m) => m.type === "device.authorizeInfo", "old token info");
+    assert.equal(oldInfo.ok, false, "旧 token 已失效");
+
+    c.send({ type: "device.authorize", token: token2 });
+    await c.waitFor((m) => m.type === "device.authorized", "authorize with renewed token");
+    const upd = await c.waitFor((m) => m.type === "daemon.updated" && m.daemon.name === "renew-dev", "daemon online", 15000);
+    assert.ok(upd.daemon.online, "用换新后的 token 授权成功，daemon 上线");
+
+    // daemon 侧收尾与常规路径一致
+    for (let i = 0; i < 40 && !existsSync(join(home, "credentials.json")); i++) await sleep(100);
+    assert.ok(existsSync(join(home, "credentials.json")), "credentials.json 落盘");
+    c.close();
+  } finally {
+    killTree(daemonProc);
+    await sleep(200);
+    try {
+      rmSync(home, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+    await short.stop();
+  }
+});
+
 test("device.authorize 暴力尝试被限速", async () => {
   const limited = await startServer({ port: PORT + 2, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_MAX_FAILURES: "3" } });
   try {

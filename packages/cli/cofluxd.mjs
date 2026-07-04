@@ -181,7 +181,7 @@ async function applyAndStart({ serverUrl, enrollKey, deviceName, shell, version,
 // CLI 保持零协议：只读文件，不连 WS；daemon 断线重连会自动重发 enrollRequest、换发新链接。
 async function waitForAuthorization() {
   console.log("\n  等待设备授权 …\n");
-  const maxWaitMs = 11 * 60 * 1000; // 略高于 server 默认 10min TTL，容许一次断线重连换新链接
+  const maxWaitMs = 11 * 60 * 1000; // 只是前台等待的上限；daemon 会持续自动续期授权链接，超时后用 status 看最新链接即可
   const start = Date.now();
   let printedUrl = null;
   while (Date.now() - start < maxWaitMs) {
@@ -199,7 +199,8 @@ async function waitForAuthorization() {
     }
     await sleep(1000);
   }
-  console.log("  仍未完成授权；daemon 已在后台运行，随时可用上面的链接授权，或 `cofluxd status` 查看状态。\n");
+  // 链接会过期换新（daemon 自动续期），别引导用户用"上面的链接"——过期后那是死链
+  console.log("  仍未完成授权；daemon 已在后台运行并会自动更换过期的授权链接，用 `cofluxd status` 查看最新链接。\n");
 }
 
 /* ------------------------------ 命令 ------------------------------ */
