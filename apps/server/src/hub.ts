@@ -55,11 +55,27 @@ export interface ClientConn {
   subscribed: boolean;
   /** 本连接认证所用会话 token 的 hash（登出时按它撤销） */
   tokenHash?: string;
+  /** device.authorize(Info) 猜测失败次数（同连接累计）；达上限后拒绝再试（限速见 plan 003） */
+  authorizeFailures?: number;
 }
 export interface DaemonCtx {
   ws: WebSocket;
   daemonId: DaemonId | null;
   accountId: AccountId | null;
+  /** 已发起 daemon.enrollRequest 且尚未被确认/过期/断线清理时，指向 pendingAuthorizations 里的 token */
+  pendingAuthToken?: string;
+}
+
+/** 一次性设备授权请求（Tailscale 式）：纯内存态，见 docs/OPEN_QUESTIONS.md B7（单实例部署，无需持久化）。
+ * 生命周期三选一了结：TTL 超时 / daemon 断线 / device.authorize 兑现——任一发生即从表里摘除。 */
+interface PendingAuthorization {
+  token: string;
+  conn: DaemonCtx;
+  name: string;
+  host: string;
+  platform: string;
+  createdAt: number;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface RuntimeSession {
@@ -88,6 +104,8 @@ export class Hub {
   private pendingReplays = new PendingRegistry<ClientConn, { sessionId: SessionId }>(config.pendingTimeoutMs);
   /** exec/fs 这类"client 发起、daemon 应答、原样回传给 client"的中继 */
   private pendingRelays = new PendingRegistry<ClientConn, { clientRequestId: string; kind: RelayKind }>(config.pendingTimeoutMs);
+  /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
+  private pendingAuthorizations = new Map<string, PendingAuthorization>();
 
   /** supabase 模式下的验签器；local 模式为 undefined */
   constructor(private store: Store, private verifier?: SupabaseVerifier) {}
@@ -226,9 +244,30 @@ export class Hub {
 
   /* ============================ Daemon 侧 ============================ */
   async handleDaemonMessage(conn: DaemonCtx, msg: DaemonToServer): Promise<void> {
-    if (msg.type !== "daemon.enroll" && msg.type !== "daemon.auth" && !conn.daemonId) return;
+    if (msg.type !== "daemon.enroll" && msg.type !== "daemon.auth" && msg.type !== "daemon.enrollRequest" && !conn.daemonId) return;
 
     switch (msg.type) {
+      case "daemon.enrollRequest": {
+        // 同连接理论上只会有一个 pending（daemon 收到 authorizePending 前不会再发一次）；
+        // 兜底：若已有旧 pending（例如客户端异常重发），先摘掉旧的再建新的，避免 token 泄漏。
+        if (conn.pendingAuthToken) {
+          const old = this.pendingAuthorizations.get(conn.pendingAuthToken);
+          if (old) clearTimeout(old.timer);
+          this.pendingAuthorizations.delete(conn.pendingAuthToken);
+        }
+        const token = genToken("cf_authz");
+        const createdAt = Date.now();
+        const timer = setTimeout(() => {
+          this.pendingAuthorizations.delete(token);
+          if (conn.pendingAuthToken === token) conn.pendingAuthToken = undefined;
+        }, config.authorizeTtlMs);
+        (timer as { unref?: () => void }).unref?.();
+        this.pendingAuthorizations.set(token, { token, conn, name: msg.name, host: msg.host, platform: msg.platform, createdAt, timer });
+        conn.pendingAuthToken = token;
+        this.sendRaw(conn.ws, { type: "daemon.authorizePending", url: `${config.webUrl}/authorize/${token}`, expiresAt: createdAt + config.authorizeTtlMs });
+        log.info("daemon authorize requested", { name: msg.name, host: msg.host });
+        break;
+      }
       case "daemon.enroll": {
         const accountId = await this.store.accountForEnrollmentKey(hashToken(msg.enrollmentKey));
         if (!accountId) {
@@ -370,6 +409,15 @@ export class Hub {
   }
 
   async handleDaemonClose(conn: DaemonCtx): Promise<void> {
+    // 断线即作废：待授权（尚未登记，daemonId 还是 null）的连接也要在这里摘除 pending token +
+    // 清 TTL 定时器，否则该 token 会一直挂在表里直到自然过期，且指向一个已死的 ws（虽然
+    // sendRaw/registerDaemonConn 都会因 ws 非 OPEN 而安全失败，但会平白占用授权名额）。
+    if (conn.pendingAuthToken) {
+      const p = this.pendingAuthorizations.get(conn.pendingAuthToken);
+      if (p) clearTimeout(p.timer);
+      this.pendingAuthorizations.delete(conn.pendingAuthToken);
+      conn.pendingAuthToken = undefined;
+    }
     const daemonId = conn.daemonId;
     const accountId = conn.accountId;
     if (!daemonId || !accountId) return;
@@ -434,6 +482,18 @@ export class Hub {
       }
       case "client.removeDevice": {
         await this.removeDevice(client, msg.daemonId);
+        break;
+      }
+      case "device.authorizeInfo": {
+        const p = this.checkedPendingAuth(client, msg.token);
+        if (!p) break; // helper 已回过 error
+        this.sendClient(client, { type: "device.authorizeInfo", ok: true, name: p.name, host: p.host, platform: p.platform });
+        break;
+      }
+      case "device.authorize": {
+        const p = this.checkedPendingAuth(client, msg.token);
+        if (!p) break; // helper 已回过 error
+        await this.completeDeviceAuthorize(client, p);
         break;
       }
       case "client.upgradeDaemon": {
@@ -759,6 +819,52 @@ export class Hub {
     }
   }
 
+  /** device.authorizeInfo / device.authorize 共用的 token 查找 + 限速门。
+   * 未命中（无效/已过期/已被兑现/daemon 已断线）计入失败次数；命中不消费（由调用方决定是否消费）。 */
+  private checkedPendingAuth(client: ClientConn, token: string): PendingAuthorization | undefined {
+    if ((client.authorizeFailures ?? 0) >= config.authorizeMaxFailures) {
+      this.sendClient(client, { type: "device.authorizeInfo", ok: false, error: "尝试次数过多，请重新申请授权链接" });
+      return undefined;
+    }
+    const p = this.pendingAuthorizations.get(token);
+    if (!p) {
+      client.authorizeFailures = (client.authorizeFailures ?? 0) + 1;
+      this.sendClient(client, { type: "device.authorizeInfo", ok: false, error: "授权链接无效或已过期" });
+      return undefined;
+    }
+    return p;
+  }
+
+  /** 兑现一次授权：摘除 pending（一次性）、把设备绑进当前登录账号、走与 daemon.enroll 完全相同的
+   * createDevice + registerDaemonConn 路径——授权完成后的 daemon 与 enrollmentKey 登记的设备无状态差异。 */
+  private async completeDeviceAuthorize(client: ClientConn, p: PendingAuthorization): Promise<void> {
+    this.pendingAuthorizations.delete(p.token);
+    clearTimeout(p.timer);
+    if (p.conn.pendingAuthToken === p.token) p.conn.pendingAuthToken = undefined;
+
+    const accountId = client.accountId!;
+    if ((await this.store.countDevices(accountId)) >= config.maxDevicesPerAccount) {
+      // 与 daemon.enroll 路径一致：设备数超限是致命错误，daemon 侧直接退出（needEnroll:false）。
+      this.sendRaw(p.conn.ws, { type: "daemon.authError", message: "账号设备数已达上限", needEnroll: false });
+      try {
+        p.conn.ws.close(4004, "device cap reached");
+      } catch {
+        /* ignore */
+      }
+      this.sendClient(client, { type: "device.authorizeInfo", ok: false, error: "账号设备数已达上限" });
+      return;
+    }
+
+    const daemonId = randomUUID();
+    const deviceToken = genToken("ck_dev");
+    const ts = Date.now();
+    await this.store.createDevice({ id: daemonId, accountId, name: p.name, host: p.host, platform: p.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: false });
+    log.info("daemon authorized", { daemonId, name: p.name, host: p.host, accountId });
+    this.sendRaw(p.conn.ws, { type: "daemon.enrolled", daemonId, deviceToken });
+    await this.registerDaemonConn(p.conn, { daemonId, name: p.name, host: p.host, platform: p.platform, online: true }, accountId);
+    this.sendClient(client, { type: "device.authorized" });
+  }
+
   private async removeDevice(client: ClientConn, daemonId: DaemonId): Promise<void> {
     const device = await this.store.getDevice(daemonId);
     if (!device || device.accountId !== client.accountId) return;
@@ -812,6 +918,8 @@ export class Hub {
     this.pendingOps.clear();
     this.pendingReplays.clear();
     this.pendingRelays.clear();
+    for (const p of this.pendingAuthorizations.values()) clearTimeout(p.timer);
+    this.pendingAuthorizations.clear();
     for (const d of this.daemons.values()) try { d.ws.close(1001, "server shutting down"); } catch { /* ignore */ }
     for (const c of this.clients) try { c.ws.close(1001, "server shutting down"); } catch { /* ignore */ }
   }
