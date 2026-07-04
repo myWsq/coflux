@@ -34,6 +34,9 @@ pub enum DaemonToServer {
     DaemonEnroll { enrollment_key: String, name: String, host: String, platform: String },
     #[serde(rename = "daemon.auth")]
     DaemonAuth { device_token: String },
+    /// 未登记且无 enrollmentKey 时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
+    #[serde(rename = "daemon.enrollRequest")]
+    DaemonEnrollRequest { name: String, host: String, platform: String },
     #[serde(rename = "daemon.resync")]
     DaemonResync { sessions: Vec<SessionRef> },
     #[serde(rename = "project.validated")]
@@ -96,6 +99,9 @@ pub enum ServerToDaemon {
     DaemonAuthed { daemon_id: String },
     #[serde(rename = "daemon.authError")]
     DaemonAuthError { message: String, need_enroll: bool },
+    /// enrollRequest 的回应：一次性授权链接 + 过期时间（ms epoch）。daemon 落盘展示，连接断开即作废
+    #[serde(rename = "daemon.authorizePending")]
+    DaemonAuthorizePending { url: String, expires_at: f64 },
     #[serde(rename = "project.validate")]
     ProjectValidate { request_id: String, path: String },
     #[serde(rename = "worktree.add")]
@@ -201,5 +207,34 @@ mod tests {
         let m = DaemonToServer::FsReadResult { request_id: "r".into(), ok: true, content: "hi".into(), error: None };
         let s = serde_json::to_string(&m).unwrap();
         assert!(!s.contains("error"));
+    }
+
+    #[test]
+    fn enroll_request_round_trips() {
+        let m = DaemonToServer::DaemonEnrollRequest {
+            name: "dev".into(),
+            host: "h".into(),
+            platform: "darwin".into(),
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains(r#""type":"daemon.enrollRequest""#));
+        let back: DaemonToServer = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, DaemonToServer::DaemonEnrollRequest { .. }));
+    }
+
+    #[test]
+    fn authorize_pending_round_trips() {
+        let m = ServerToDaemon::DaemonAuthorizePending { url: "https://example/authorize/tok".into(), expires_at: 12345.0 };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains(r#""type":"daemon.authorizePending""#));
+        assert!(s.contains(r#""expiresAt":12345.0"#));
+        let back: ServerToDaemon = serde_json::from_str(&s).unwrap();
+        match back {
+            ServerToDaemon::DaemonAuthorizePending { url, expires_at } => {
+                assert_eq!(url, "https://example/authorize/tok");
+                assert_eq!(expires_at, 12345.0);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }
