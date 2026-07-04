@@ -44,6 +44,9 @@ struct WorkerState {
     sup_synced: bool,
     alive: HashMap<String, String>, // sessionId -> taskId
     credentials: Option<Credentials>,
+    /// 等待授权中的链接过期时刻（server 侧 epoch ms）。到期且连接仍在、仍未登记时，
+    /// 由 run_server_connection 的定时检查重发 daemon.enrollRequest 换新链接。
+    pending_auth_expires_at: Option<f64>,
 }
 
 /// 出站到 server 的消息（WS 区分文本/二进制）
@@ -121,7 +124,7 @@ async fn main() {
     let _ = std::fs::write(format!("{home}/worker.pid"), std::process::id().to_string());
 
     let creds_store = Arc::new(CredStore::new(cfg.cred_path.clone(), cfg.home.clone()));
-    let state = Arc::new(Mutex::new(WorkerState { authed: false, sup_synced: false, alive: HashMap::new(), credentials: creds_store.load() }));
+    let state = Arc::new(Mutex::new(WorkerState { authed: false, sup_synced: false, alive: HashMap::new(), credentials: creds_store.load(), pending_auth_expires_at: None }));
 
     let (to_server_tx, to_server_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
     let (to_sup_tx, to_sup_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2048);
@@ -300,7 +303,11 @@ async fn run_server_connection(
     to_sup_tx: &Sender<Vec<u8>>,
 ) {
     let (mut sink, mut stream) = ws.split();
-    state.lock().unwrap().authed = false;
+    {
+        let mut s = state.lock().unwrap();
+        s.authed = false;
+        s.pending_auth_expires_at = None; // 授权链接与连接同生命周期，新连接从零开始
+    }
 
     // 认证 / 登记：三选一。credentials.json 存在 → daemon.auth 重连；否则看有没有配 enrollKey——
     // 非空走经典 daemon.enroll；空（cofluxd 默认 up 零参数写入的显式 ""，见 pick() 的 env-only
@@ -326,8 +333,43 @@ async fn run_server_connection(
         }
     }
 
+    // 授权链接续期：TTL 到点而用户还没确认时，server 只是默默摘除内存里的 pending token，
+    // 既不通知也不断连——worker 必须自己重发 enrollRequest 换新链接，否则 cofluxd 展示的
+    // 永远是死链。1s 粒度的检查对 10min 级 TTL 足够精细。
+    let mut renew_tick = tokio::time::interval(Duration::from_secs(1));
+    renew_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
+            _ = renew_tick.tick() => {
+                let expired = {
+                    let mut s = state.lock().unwrap();
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as f64)
+                        .unwrap_or(0.0);
+                    // 仅在"仍未登记且确实在等授权"时续期；DaemonEnrolled 会清掉这个字段，
+                    // 保证登记完成后绝不会再误发 enrollRequest。
+                    match s.pending_auth_expires_at {
+                        Some(t) if !s.authed && s.credentials.is_none() && now_ms >= t => {
+                            s.pending_auth_expires_at = None; // 等新的 authorizePending 重新设置，防重复发
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if expired {
+                    eprintln!("[worker] authorization link expired; requesting a new one");
+                    let req = DaemonToServer::DaemonEnrollRequest {
+                        name: cfg.device_name.clone(),
+                        host: cfg.host.clone(),
+                        platform: cfg.platform.clone(),
+                    };
+                    if let Ok(s) = serde_json::to_string(&req) {
+                        if sink.send(Message::text(s)).await.is_err() { break; }
+                    }
+                }
+            }
             out = to_server_rx.recv() => {
                 match out {
                     Some(msg) => if sink.send(msg.into_message()).await.is_err() { break; },
@@ -365,7 +407,11 @@ async fn on_server_text(text: &str, cfg: &Arc<Config>, state: &Arc<Mutex<WorkerS
             let c = Credentials { server_url: cfg.server_url.clone(), daemon_id: daemon_id.clone(), device_token };
             creds_store.save(&c);
             creds_store.clear_pending_auth(); // 无论是经典 enroll 还是 authorize 兑现来的，都不再是 pending 了
-            state.lock().unwrap().credentials = Some(c);
+            {
+                let mut s = state.lock().unwrap();
+                s.credentials = Some(c);
+                s.pending_auth_expires_at = None; // 停掉续期检查：已登记后绝不能再发 enrollRequest
+            }
             eprintln!("[worker] enrolled {daemon_id}");
             on_authed(state, to_server_tx).await;
         }
@@ -378,6 +424,7 @@ async fn on_server_text(text: &str, cfg: &Arc<Config>, state: &Arc<Mutex<WorkerS
             // （见上），不会走 exit(1)——这是与 DaemonAuthError{needEnroll:false} 致命路径的关键区别。
             eprintln!("[worker] waiting for authorization: {url}");
             creds_store.save_pending_auth(&PendingAuth { url, expires_at });
+            state.lock().unwrap().pending_auth_expires_at = Some(expires_at); // 供续期检查用；到期未确认则重发 enrollRequest
         }
         ServerToDaemon::DaemonAuthError { message, need_enroll } => {
             eprintln!("[worker] auth error: {message}");
