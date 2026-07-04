@@ -11,7 +11,6 @@ import { spawnSync } from "node:child_process";
 
 // 默认中心服务（公共 SaaS）；自托管用 --server 覆盖。
 const DEFAULT_SERVER = "wss://api.coflux.dev/daemon";
-const DEFAULT_WEB = "https://app.coflux.dev";
 
 const REPO = "myWsq/coflux";
 const HOME = process.env.COFLUX_HOME || join(homedir(), ".coflux");
@@ -19,6 +18,7 @@ const BIN_DIR = join(HOME, "bin");
 const SETTINGS = join(HOME, "settings.json"); // 用户配置（含一次性登记密钥）→ daemon 直接读；含密钥故 600
 const LOG_FILE = join(HOME, "daemon.log");
 const CRED = join(HOME, "credentials.json");
+const PENDING_AUTH = join(HOME, "pending-auth.json"); // worker 落盘的待授权链接（daemon.authorizePending）
 const SUP_BIN = join(BIN_DIR, "coflux-supervisor");
 const WRK_BIN = join(BIN_DIR, "coflux-worker");
 const IS_MAC = platform() === "darwin";
@@ -39,6 +39,12 @@ function rustTarget() {
 function readSettings() {
   try { return JSON.parse(fs.readFileSync(SETTINGS, "utf8")); } catch { return {}; }
 }
+
+function readPendingAuth() {
+  try { return JSON.parse(fs.readFileSync(PENDING_AUTH, "utf8")); } catch { return null; }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function download(url, dest) {
   const res = await fetch(url, { redirect: "follow" });
@@ -157,12 +163,43 @@ function stopService() {
 async function applyAndStart({ serverUrl, enrollKey, deviceName, shell, version, binDir, noStart }) {
   await ensureBinaries({ version, binDir });
   const settings = applyConfig({ serverUrl, enrollKey, deviceName, shell });
-  if (!settings.enrollKey && !fs.existsSync(CRED)) {
-    console.warn("⚠ 无登记密钥且未登记：从 web「添加设备」获取后重跑。");
+  // 非默认服务器醒目提示：保存值/--server 仍生效（不强制覆盖），但防止 staging 之类残留值静默错连。
+  if (serverUrl !== DEFAULT_SERVER) {
+    console.log(`⚠ 使用非默认服务器: ${serverUrl}`);
   }
   installService(!noStart);
   console.log(noStart ? "已安装（未启动）。" : `✓ daemon 已启动 → ${serverUrl}`);
-  cmdStatus();
+  if (!noStart && !settings.enrollKey && !fs.existsSync(CRED)) {
+    // 默认流程（零参数 up）：无登记密钥、未登记 → 走浏览器授权，轮询 daemon 落盘的链接/凭证文件。
+    await waitForAuthorization();
+  } else {
+    cmdStatus();
+  }
+}
+
+// 轮询 ~/.coflux/pending-auth.json（授权链接）与 credentials.json（登记成功）给出全程反馈。
+// CLI 保持零协议：只读文件，不连 WS；daemon 断线重连会自动重发 enrollRequest、换发新链接。
+async function waitForAuthorization() {
+  console.log("\n  等待设备授权 …\n");
+  const maxWaitMs = 11 * 60 * 1000; // 略高于 server 默认 10min TTL，容许一次断线重连换新链接
+  const start = Date.now();
+  let printedUrl = null;
+  while (Date.now() - start < maxWaitMs) {
+    if (fs.existsSync(CRED)) {
+      console.log("✓ 设备已登记\n");
+      cmdStatus();
+      return;
+    }
+    const pending = readPendingAuth();
+    if (pending?.url && pending.url !== printedUrl) {
+      printedUrl = pending.url;
+      const mins = Number.isFinite(pending.expiresAt) ? Math.max(1, Math.round((pending.expiresAt - Date.now()) / 60000)) : null;
+      console.log(`  在浏览器打开以下链接，用已登录账号授权此设备${mins ? `（约 ${mins} 分钟内有效）` : ""}：\n`);
+      console.log(`    ${pending.url}\n`);
+    }
+    await sleep(1000);
+  }
+  console.log("  仍未完成授权；daemon 已在后台运行，随时可用上面的链接授权，或 `cofluxd status` 查看状态。\n");
 }
 
 /* ------------------------------ 命令 ------------------------------ */
@@ -180,13 +217,15 @@ async function cmdUp(v) {
 
 async function cmdOnboard(v) {
   const s = readSettings();
+  // 服务器地址不再交互询问（用户拍板 2026-07-04）：--server > 已保存值 > 默认公共服务；
+  // 优先级与 cmdUp 一致（见 packages/cli/cofluxd.mjs 里 applyAndStart 的非默认提示）。
+  const serverUrl = v.server || s.serverUrl || DEFAULT_SERVER;
   console.log("\n  欢迎使用 coflux —— 配置这台设备\n  ──────────────────────────────\n");
+  console.log(`  服务器: ${serverUrl}\n`);
+  console.log("  登记方式：留空走浏览器授权（推荐，起服务后打印链接，登录确认即可）；\n  已有登记密钥可直接粘贴。\n");
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const serverUrl = (await rl.question(`服务器地址 [${s.serverUrl || DEFAULT_SERVER}]: `)).trim() || s.serverUrl || DEFAULT_SERVER;
-    const web = serverUrl === DEFAULT_SERVER ? DEFAULT_WEB : "你的 coflux web 控制台";
-    console.log(`\n  → 打开 ${web} 登录 →「添加设备」→ 复制登记密钥\n`);
-    const enrollKey = (await rl.question("登记密钥（已登记可留空）: ")).trim();
+    const enrollKey = (v["enroll-key"] ?? (await rl.question("登记密钥（可留空）: "))).trim();
     const deviceName = (await rl.question(`设备名 [${s.deviceName || hostname()}]: `)).trim() || s.deviceName || hostname();
     rl.close();
     console.log("");
@@ -216,7 +255,17 @@ function cmdStatus() {
   const s = readSettings();
   console.log(`服务器: ${s.serverUrl || "(未配置)"}`);
   console.log(`设备名: ${s.deviceName || "(默认)"}`);
-  console.log(`凭证:   ${fs.existsSync(CRED) ? "已登记" : "未登记"}`);
+  const registered = fs.existsSync(CRED);
+  const pending = !registered ? readPendingAuth() : null;
+  if (registered) {
+    console.log("凭证:   已登记");
+  } else if (pending?.url) {
+    const mins = Number.isFinite(pending.expiresAt) ? Math.max(0, Math.round((pending.expiresAt - Date.now()) / 60000)) : null;
+    console.log(`凭证:   等待授权${mins !== null ? `（约 ${mins} 分钟内有效）` : ""}`);
+    console.log(`        ${pending.url}`);
+  } else {
+    console.log("凭证:   未登记");
+  }
   let running = false, active = "未运行";
   if (IS_MAC) {
     running = run("launchctl", ["list", "com.coflux.daemon"]).status === 0;
@@ -253,15 +302,15 @@ const HELP = `cofluxd —— coflux daemon 管理
 
   cofluxd                 首次=交互式配置(onboard)，已配置=status
   cofluxd onboard         交互式配置并启用
-  cofluxd up [flags]      非交互装/起（web「添加设备」给的命令用这个）
+  cofluxd up [flags]      非交互装/起，零参数即可（不带 --enroll-key 时打印浏览器授权链接）
   cofluxd reload          按 ~/.coflux/settings.json 重载并重启
   cofluxd update          更新二进制并重启（worker 另可远程热升级）
-  cofluxd status          服务器/登记/服务状态
+  cofluxd status          服务器/登记（含"等待授权"）/服务状态
   cofluxd logs [-f]       看 daemon 日志
   cofluxd down            停止
   cofluxd uninstall [--purge]   卸载（--purge 连二进制/配置/凭证一并删）
 
-up flags: --server <ws://.../daemon>  --enroll-key <KEY>  --name <名>  --shell <路径>
+up flags: --server <ws://.../daemon>  --enroll-key <KEY>（留空则走浏览器授权）  --name <名>  --shell <路径>
 通用: --version <vX|latest>(默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
 配置都在 ~/.coflux/settings.json（serverUrl/enrollKey/deviceName/shell，含密钥故 600），daemon 直接读；改后 cofluxd reload 生效。`;
 

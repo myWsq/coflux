@@ -11,10 +11,11 @@ npm i -g cofluxd
 ## 用法
 
 ```sh
-cofluxd                 # 首次=交互式引导（问服务器/登记密钥/设备名），之后=看状态
+cofluxd                 # 首次=交互式引导（问登记密钥/设备名，不问服务器地址），之后=看状态
 cofluxd onboard         # 显式重新走交互式配置
-cofluxd up --enroll-key <KEY>   # 非交互（web「添加设备」给的命令）
-cofluxd status          # 服务器/登记/服务状态
+cofluxd up              # 零参数即可：起服务后打印浏览器授权链接，登录确认即完成登记
+cofluxd up --enroll-key <KEY>   # 走存量登记密钥流程（web「添加设备」给的命令）
+cofluxd status          # 服务器/登记（含"等待授权"）/服务状态
 cofluxd logs -f         # 看 daemon 日志
 cofluxd update          # 更新二进制并重启（worker 另可由 server 远程热升级）
 cofluxd reload          # 改了 settings.json 后重启生效
@@ -22,7 +23,9 @@ cofluxd down            # 停止
 cofluxd uninstall [--purge]   # 卸载（--purge 连二进制/配置/凭证一并删）
 ```
 
-默认连公共服务 `wss://api.coflux.dev/daemon`（自托管用 `--server` 改）。登记密钥从 web 控制台「添加设备」获取。
+默认连公共服务 `wss://api.coflux.dev/daemon`（自托管用 `--server` 改；已保存的地址继续生效，非默认时会有醒目提示）。
+
+不带 `--enroll-key` 时（推荐、默认）：`cofluxd up` 起服务后会打印一个一次性授权链接，在浏览器用已登录的账号打开确认即可，无需先去 web 控制台生成密钥。仍可用 `--enroll-key`（从 web 控制台「添加设备」获取）走无头/脚本化登记。
 
 ## 配置
 
