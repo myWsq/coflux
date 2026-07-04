@@ -22,7 +22,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
-use creds::{CredStore, Credentials};
+use creds::{CredStore, Credentials, PendingAuth};
 
 #[derive(Clone)]
 struct Config {
@@ -302,10 +302,17 @@ async fn run_server_connection(
     let (mut sink, mut stream) = ws.split();
     state.lock().unwrap().authed = false;
 
-    // 认证 / 登记
+    // 认证 / 登记：三选一。credentials.json 存在 → daemon.auth 重连；否则看有没有配 enrollKey——
+    // 非空走经典 daemon.enroll；空（cofluxd 默认 up 零参数写入的显式 ""，见 pick() 的 env-only
+    // filter 语义）走 Tailscale 式 daemon.enrollRequest，等 web 端确认后 server 原地推 daemon.enrolled。
     let creds = state.lock().unwrap().credentials.clone();
     let init = match creds {
         Some(c) => DaemonToServer::DaemonAuth { device_token: c.device_token },
+        None if cfg.enroll_key.is_empty() => DaemonToServer::DaemonEnrollRequest {
+            name: cfg.device_name.clone(),
+            host: cfg.host.clone(),
+            platform: cfg.platform.clone(),
+        },
         None => DaemonToServer::DaemonEnroll {
             enrollment_key: cfg.enroll_key.clone(),
             name: cfg.device_name.clone(),
@@ -343,6 +350,9 @@ async fn run_server_connection(
             }
         }
     }
+    // 断线即作废：无论是否已登记，本连接申请过的授权链接都不再有效——清掉落盘的 pending-auth.json，
+    // 避免 cofluxd 一直展示一个已经失效的链接（server 侧的 pending token 由 handleDaemonClose 摘除）。
+    creds_store.clear_pending_auth();
 }
 
 async fn on_server_text(text: &str, cfg: &Arc<Config>, state: &Arc<Mutex<WorkerState>>, creds_store: &Arc<CredStore>, to_server_tx: &Sender<WsOut>, to_sup_tx: &Sender<Vec<u8>>) {
@@ -354,6 +364,7 @@ async fn on_server_text(text: &str, cfg: &Arc<Config>, state: &Arc<Mutex<WorkerS
         ServerToDaemon::DaemonEnrolled { daemon_id, device_token } => {
             let c = Credentials { server_url: cfg.server_url.clone(), daemon_id: daemon_id.clone(), device_token };
             creds_store.save(&c);
+            creds_store.clear_pending_auth(); // 无论是经典 enroll 还是 authorize 兑现来的，都不再是 pending 了
             state.lock().unwrap().credentials = Some(c);
             eprintln!("[worker] enrolled {daemon_id}");
             on_authed(state, to_server_tx).await;
@@ -361,6 +372,12 @@ async fn on_server_text(text: &str, cfg: &Arc<Config>, state: &Arc<Mutex<WorkerS
         ServerToDaemon::DaemonAuthed { daemon_id } => {
             eprintln!("[worker] authenticated {daemon_id}");
             on_authed(state, to_server_tx).await;
+        }
+        ServerToDaemon::DaemonAuthorizePending { url, expires_at } => {
+            // 等待用户在浏览器确认授权；连接保持打开，server 确认后会在同一连接上直接推 DaemonEnrolled
+            // （见上），不会走 exit(1)——这是与 DaemonAuthError{needEnroll:false} 致命路径的关键区别。
+            eprintln!("[worker] waiting for authorization: {url}");
+            creds_store.save_pending_auth(&PendingAuth { url, expires_at });
         }
         ServerToDaemon::DaemonAuthError { message, need_enroll } => {
             eprintln!("[worker] auth error: {message}");
