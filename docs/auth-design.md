@@ -66,3 +66,53 @@ server: 校验 → 绑定连接 accountId → 可见/可达该账号下所有设
 - `client.hello{token}` → `client.auth{clientToken}`；`hello.ok` → `auth.ok{accountId}` / `auth.error`。
 - `DaemonInfo` 增加 `name`；`Workspace`/`Task` 增加 `accountId`。
 - 新增 `client.removeDevice`、`device.removed`。
+
+## 设备授权流（Tailscale 式，plan 003）
+
+`enrollmentKey` 流仍是唯一的登记密钥机制，未变。这一节加的是**默认路径**：
+`cofluxd up` 零参数时不再要求先有登记密钥，而是让 daemon 以匿名身份连上后
+现场申请一次性授权，由已登录账号的用户在浏览器里确认。两条路径最终都走同一个
+`store.createDevice(...)`，落到同一张 `devices` 表，产物（daemonId/deviceToken）
+与后续认证方式完全一致——对服务器和 daemon 而言无法区分设备是怎么登记进来的。
+
+### 状态只在内存里，连接是唯一的真相来源
+待授权请求不落库、只存在 hub 进程的内存 map（`daemonId` 尚不存在，谈不上持久化
+到哪张表）。这依赖 coflux 是单实例部署（见 `docs/OPEN_QUESTIONS.md` B7）；多实例
+部署要把这段状态挪到共享存储，目前不是目标形态。日常语义上更关键的性质是：
+待授权状态与「那条尚未认证的 daemon WS 连接」强绑定——连接一断，状态立即作废，
+不需要额外的超时兜底逻辑来处理"daemon 消失了但授权还挂着"的悬空情况。
+
+### 流程
+```
+daemon（本地无凭证、enroll key 留空）
+  ──daemon.enrollRequest{ name, host, platform }──▶ server
+server: 生成一次性 token（cf_authz_ 前缀，≥128bit 熵）、记入内存 pending map（含来源连接引用）
+  ──daemon.authorizePending{ url, expiresAt }──▶ daemon（同一条已打开的连接，不需要重连）
+daemon: 把 url 落盘 ~/.coflux/pending-auth.json；cofluxd 轮询该文件，打印链接引导用户打开
+
+用户在浏览器打开 <webUrl>/authorize/<token>（未登录则先登录，走既有 client.auth）
+client ──device.authorizeInfo{ token }──▶ server   （核对 token 有效性，回显待授权设备 name/host/platform）
+client ──device.authorize{ token }──▶ server
+server: 校验一次性 + TTL（默认 10min，COFLUX_AUTHORIZE_TTL_MS 可调）→ 从内存 map 摘除该 token（一次性）
+        → 按发起授权的账号建 Device（与 daemon.enroll 相同的 store.createDevice 调用）
+        ──daemon.enrolled{ daemonId, deviceToken }──▶ daemon（原 pending 连接上直接推，无需重连）
+        ──device.authorized──▶ client
+daemon: 清 pending-auth.json、落盘 credentials.json（与 classic enroll 一致）
+```
+
+### 失效条件（均有黑盒断言，见 `tests/src/authorize.test.mjs`）
+- **一次性**：`device.authorize` 成功后立即从 pending map 摘除，同一 token 二次使用返回
+  `device.authorizeInfo{ ok:false }`。
+- **TTL**：默认 10 分钟（`COFLUX_AUTHORIZE_TTL_MS`），到期由 `setTimeout` 主动清理，过期后按
+  "不存在"处理，不区分"过期"与"从未存在"（避免给攻击者额外信息）。
+- **断线作废**：daemon 连接的 `close` 事件里连带清掉其挂着的 pending token，与「一机一次授权
+  请求」的直觉一致——重新连接会生成一个新 token。
+- **限速**：`device.authorizeInfo`/`device.authorize` 在同一 client 连接上失败次数计数
+  （`COFLUX_AUTHORIZE_MAX_FAILURES`，默认 10），超过后统一回"尝试次数过多"，不再泄漏
+  token 是否存在。因 token 本身是 128bit 随机值、爆破不可行，限速是纵深防御而非主防线。
+
+### Web 侧
+`/authorize/<token>` 是 `apps/web/src/App.tsx` 里的独立组件（`AuthorizePage`），
+不经路由库、在 `App()` 顶层按 `location.pathname` 分支决定渲染哪棵组件树——避免
+主 app 的 xterm 初始化/自动重连副作用在授权页上跑起来。复用已有登录态
+（`localStorage` 会话 token）与登录表单，未登录则退回同一套登录 UI。
