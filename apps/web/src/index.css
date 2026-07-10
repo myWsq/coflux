@@ -1,6 +1,65 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
 :root {
   font-family: ui-sans-serif, system-ui, sans-serif;
   color-scheme: dark;
+  --background: #111214;
+  --foreground: #e7e9ee;
+  --card: #18191c;
+  --card-foreground: #e7e9ee;
+  --popover: #1b1c20;
+  --popover-foreground: #e7e9ee;
+  --primary: #d8e0ff;
+  --primary-foreground: #171922;
+  --secondary: #25272c;
+  --secondary-foreground: #e7e9ee;
+  --muted: #22242a;
+  --muted-foreground: #9297a3;
+  --accent: #292c34;
+  --accent-foreground: #f4f5f7;
+  --destructive: #ef6a78;
+  --destructive-foreground: #fff4f5;
+  --border: #2b2d33;
+  --input: #303239;
+  --ring: #8da2fb;
+  --success: #75c995;
+  --warning: #e8b86d;
+  --sidebar: #151619;
+  --terminal: #111214;
+  --radius: 0.5rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-sidebar: var(--sidebar);
+  --color-terminal: var(--terminal);
+  --radius-sm: calc(var(--radius) - 0.2rem);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 0.2rem);
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
 * {
@@ -9,8 +68,28 @@
 
 body {
   margin: 0;
-  background: #1a1b26;
-  color: #c0caf5;
+  min-width: 1024px;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .app {
