@@ -58,6 +58,19 @@ export const config = {
   /** web 控制台地址：拼进 daemon.authorizePending 下发的授权链接；反代/公网部署时用 COFLUX_WEB_URL 覆盖 */
   webUrl: process.env.COFLUX_WEB_URL ?? "http://127.0.0.1:5273",
 
+  /** 端口转发预览域：Host 形如 `<shortId>.<proxyHost>` 的请求按反代处理（见 plan 006）。
+   *  生产由部署侧配好泛解析 + 泛证书（Caddy）并设此 env；开发零配置落到 p.localhost（无需真 DNS，Host 头模拟）。 */
+  proxyHost: process.env.COFLUX_PROXY_HOST ?? "p.localhost",
+  /** 预览链接 / 门禁回调用的协议：dev 无 https，cookie 不能带 Secure，故随之默认 http；生产默认 https。 */
+  proxyScheme: (process.env.COFLUX_PROXY_SCHEME as "http" | "https" | undefined) ?? (isDev ? "http" : "https"),
+  /** 预览链接展示用端口：生产由 Caddy 在 443/80 终结，公网不带端口；开发直连本服务端口。
+   *  与 scheme 默认端口（80/443）相同时，buildPreviewUrl 会省略之。 */
+  proxyPort: int("COFLUX_PROXY_PORT", int("COFLUX_PORT", DEFAULT_PORT)),
+  /** 门禁 cookie 有效期：一次登录覆盖该账号在本浏览器的所有预览子域名，默认 7 天（≥1 天，量级同会话 token）。 */
+  proxyCookieTtlMs: int("COFLUX_PROXY_COOKIE_TTL_MS", 7 * 24 * 60 * 60 * 1000),
+  /** 一次性授权回调 code 的 TTL：issueAuth 签发到浏览器跳回调之间的窗口，默认 60s。 */
+  proxyAuthCodeTtlMs: int("COFLUX_PROXY_AUTH_CODE_TTL_MS", 60_000),
+
   /** 设备授权（Tailscale 式）：一次性授权码 TTL（plan 003 定为 10min）、client 侧 device.authorize 的限速阈值 */
   authorizeTtlMs: int("COFLUX_AUTHORIZE_TTL_MS", 10 * 60 * 1000),
   authorizeMaxFailures: int("COFLUX_AUTHORIZE_MAX_FAILURES", 10),

@@ -40,6 +40,7 @@ import { Store } from "./store.js";
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
 import { PendingRegistry } from "./pending.js";
+import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
 import type { SupabaseVerifier, SupabaseIdentity } from "./auth.js";
 
 const log = createLogger("hub");
@@ -106,6 +107,21 @@ export class Hub {
   private pendingRelays = new PendingRegistry<ClientConn, { clientRequestId: string; kind: RelayKind }>(config.pendingTimeoutMs);
   /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
+
+  /** 端口转发（plan 006）：路由表 + 门禁（code/cookie）+ 隧道注册表。三者只做机制，
+   * 归属/账号校验都在 hub 这层（下面的 handlePortsUpdate/handleProxyIssueAuth/dropSession）。 */
+  readonly routeTable = new ProxyRouteTable();
+  readonly proxyGate = new ProxyGate();
+  readonly tunnels = new TunnelRegistry({
+    sendControl: (daemonId, msg) => {
+      const d = this.daemons.get(daemonId);
+      if (d) this.sendDaemon(d, msg);
+    },
+    sendFrame: (daemonId, frame) => {
+      const d = this.daemons.get(daemonId);
+      if (d && d.ws.readyState === d.ws.OPEN) d.ws.send(frame);
+    },
+  });
 
   /** supabase 模式下的验签器；local 模式为 undefined */
   constructor(private store: Store, private verifier?: SupabaseVerifier) {}
@@ -206,6 +222,10 @@ export class Hub {
       // 回放完成后接管控制权（踢掉原控制端）
       const s = this.sessions.get(frame.sessionId);
       if (s && !s.closing) this.setHolder(s, p.client);
+      return;
+    }
+    if (frame.type === "proxy.data") {
+      if (conn.daemonId) this.tunnels.handleData(conn.daemonId, frame.connId, frame.data);
       return;
     }
     // pty.input 不应从 daemon 上行，忽略
@@ -361,11 +381,23 @@ export class Hub {
           if (updated) this.emitTask(updated);
         }
         if (s?.startTimer) clearTimeout(s.startTimer);
-        if (s) this.sessions.delete(msg.sessionId);
+        if (s) this.dropSession(msg.sessionId);
         log.debug("session exit", { sessionId: msg.sessionId, code: msg.exitCode });
         break;
       }
-      // pty.output / pty.replay 走二进制数据面（见 handleDaemonBinary）
+      case "ports.update": {
+        await this.handlePortsUpdate(conn, msg.sessions);
+        break;
+      }
+      case "proxy.opened": {
+        if (conn.daemonId) this.tunnels.handleOpened(conn.daemonId, msg.connId, msg.ok, msg.error);
+        break;
+      }
+      case "proxy.closed": {
+        if (conn.daemonId) this.tunnels.handleClosed(conn.daemonId, msg.connId);
+        break;
+      }
+      // pty.output / pty.replay / proxy.data 走二进制数据面（见 handleDaemonBinary）
       case "exec.result":
       case "fs.listed":
       case "fs.read.result": {
@@ -389,7 +421,7 @@ export class Hub {
       const task = await this.store.getTask(taskId);
       if (!task || task.daemonId !== daemonId || task.status !== "running") {
         if (daemon) this.sendDaemon(daemon, { type: "session.close", sessionId });
-        this.sessions.delete(sessionId);
+        this.dropSession(sessionId);
         continue;
       }
       if (!this.sessions.has(sessionId)) this.sessions.set(sessionId, { sessionId, daemonId, accountId, taskId, holder: null, closing: false });
@@ -402,10 +434,72 @@ export class Hub {
       if (task.sessionId && !aliveIds.has(task.sessionId)) {
         const updated = await this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
         if (updated) this.emitTask(updated);
-        this.sessions.delete(task.sessionId);
+        this.dropSession(task.sessionId);
       }
     }
     log.debug("daemon resync", { daemonId, live: valid.length });
+  }
+
+  /** daemon 全量幂等上报每个存活 session 的监听端口：收敛路由表，广播受影响任务的 ports.updated。
+   * 未出现在本次上报里的（该 daemon 名下）session 视为端口已清零（daemon 只报"仍有端口"的 session）。 */
+  private async handlePortsUpdate(conn: DaemonCtx, reported: { sessionId: SessionId; ports: number[] }[]): Promise<void> {
+    if (!conn.daemonId || !conn.accountId) return;
+    const daemonId = conn.daemonId;
+    const accountId = conn.accountId;
+    const changed = new Set<TaskId>();
+    const touched = new Set<SessionId>();
+    for (const entry of reported) {
+      if (!entry || typeof entry.sessionId !== "string" || !Array.isArray(entry.ports)) continue;
+      const s = this.sessions.get(entry.sessionId);
+      if (!s || s.daemonId !== daemonId) continue; // 归属校验：忽略不属于该 daemon 的会话上报
+      touched.add(entry.sessionId);
+      const validPorts = [...new Set(entry.ports.filter((p) => Number.isInteger(p) && p > 0 && p < 65536))];
+      const removedShortIds = this.routeTable.reconcile(entry.sessionId, daemonId, s.accountId, s.taskId, validPorts);
+      for (const shortId of removedShortIds) this.tunnels.closeAllForShortId(shortId);
+      changed.add(s.taskId);
+    }
+    for (const sessionId of this.routeTable.sessionsForDaemon(daemonId)) {
+      if (touched.has(sessionId)) continue;
+      const released = this.routeTable.releaseSession(sessionId);
+      if (!released) continue;
+      for (const shortId of released.shortIds) this.tunnels.closeAllForShortId(shortId);
+      changed.add(released.taskId);
+    }
+    for (const taskId of changed) this.broadcastPorts(accountId, taskId);
+  }
+
+  private broadcastPorts(accountId: AccountId, taskId: TaskId): void {
+    const ports = this.routeTable.portsForTask(taskId).map((r) => ({ port: r.port, url: buildPreviewUrl(r.shortId) }));
+    this.broadcast(accountId, { type: "ports.updated", taskId, ports });
+  }
+
+  private allPorts(accountId: AccountId): { taskId: TaskId; port: number; url: string }[] {
+    return this.routeTable.listForAccount(accountId).map((r) => ({ taskId: r.taskId, port: r.port, url: buildPreviewUrl(r.shortId) }));
+  }
+
+  /** 端口转发版 proxy.issueAuth：校验 redirect 的 host 命中 <shortId>.<proxyHost> 且该 shortId
+   * 当前路由属于本账号（跨账号严拒），签发一次性 code，拼出浏览器要跳转的回调 URL。 */
+  private handleProxyIssueAuth(client: ClientConn, redirect: string): void {
+    const parsed = parseProxyRedirect(redirect);
+    if (!parsed) return void this.sendClient(client, { type: "proxy.auth", ok: false, error: "目标地址无效" });
+    const route = this.routeTable.get(parsed.shortId);
+    if (!route || route.accountId !== client.accountId) {
+      return void this.sendClient(client, { type: "proxy.auth", ok: false, error: "预览链接不存在或不属于当前账号" });
+    }
+    const code = this.proxyGate.issueAuthCode(client.accountId!);
+    const url = buildAuthCallbackUrl(parsed.host, code, parsed.pathAndQuery);
+    this.sendClient(client, { type: "proxy.auth", ok: true, url });
+  }
+
+  /** session 终结的统一出口：除 this.sessions 外，一并摘除端口路由表条目、关闭在途隧道连接、
+   * 广播受影响任务的 ports.updated（原来分散在各调用点的 `this.sessions.delete(x)` 均改走此处）。 */
+  private dropSession(sessionId: SessionId): void {
+    const s = this.sessions.get(sessionId);
+    this.sessions.delete(sessionId);
+    const released = this.routeTable.releaseSession(sessionId);
+    if (!released) return;
+    for (const shortId of released.shortIds) this.tunnels.closeAllForShortId(shortId);
+    if (s) this.broadcastPorts(s.accountId, released.taskId);
   }
 
   async handleDaemonClose(conn: DaemonCtx): Promise<void> {
@@ -425,6 +519,11 @@ export class Hub {
     if (!current || current.ws !== conn.ws) return;
 
     this.daemons.delete(daemonId);
+    // 端口转发：daemon 掉线即所有隧道失联，摘路由表 + 关在途连接（this.sessions 本身按既有设计不动，
+    // 留给 daemon.resync 重连后自愈；shortId 会在重连后 ports.update 时重新签发，见 plan 006）。
+    const releasedRoutes = this.routeTable.releaseDaemon(daemonId);
+    this.tunnels.closeAllForDaemon(daemonId);
+    for (const r of releasedRoutes) this.broadcastPorts(accountId, r.taskId);
     await this.store.touchDevice(daemonId, Date.now());
     log.info("daemon disconnected", { daemonId });
 
@@ -470,7 +569,7 @@ export class Hub {
         ]);
         client.subscribed = true;
         this.clients.add(client);
-        this.sendClient(client, { type: "state.snapshot", daemons, projects, workspaces, tasks });
+        this.sendClient(client, { type: "state.snapshot", daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) });
         break;
       }
       case "client.createEnrollmentKey": {
@@ -494,6 +593,10 @@ export class Hub {
         const p = this.checkedPendingAuth(client, msg.token);
         if (!p) break; // helper 已回过 error
         await this.completeDeviceAuthorize(client, p);
+        break;
+      }
+      case "proxy.issueAuth": {
+        this.handleProxyIssueAuth(client, msg.redirect);
         break;
       }
       case "client.upgradeDaemon": {
@@ -539,7 +642,7 @@ export class Hub {
         // 提交后做副作用（关 PTY、删 worktree、广播）
         for (const sid of sessionCloses) {
           this.routeToSessionDaemon(sid, { type: "session.close", sessionId: sid });
-          this.sessions.delete(sid);
+          this.dropSession(sid);
         }
         const daemon = this.daemons.get(project.daemonId);
         if (daemon) for (const wp of worktreePaths) this.sendDaemon(daemon, { type: "worktree.remove", repoPath: project.repoPath, worktreePath: wp });
@@ -584,7 +687,7 @@ export class Hub {
         });
         for (const sid of sessionCloses) {
           this.routeToSessionDaemon(sid, { type: "session.close", sessionId: sid });
-          this.sessions.delete(sid);
+          this.dropSession(sid);
         }
         const daemon = this.daemons.get(ws.daemonId);
         if (daemon && project) this.sendDaemon(daemon, { type: "worktree.remove", repoPath: project.repoPath, worktreePath: ws.path });
@@ -624,7 +727,7 @@ export class Hub {
           s.closing = true;
           this.routeToSessionDaemon(s.sessionId, { type: "session.close", sessionId: s.sessionId });
         } else if (task.status === "running") {
-          if (task.sessionId) this.sessions.delete(task.sessionId);
+          if (task.sessionId) this.dropSession(task.sessionId);
           const updated = await this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
           if (updated) this.emitTask(updated);
         }
@@ -635,7 +738,7 @@ export class Hub {
         if (!task) return;
         if (task.sessionId) {
           this.routeToSessionDaemon(task.sessionId, { type: "session.close", sessionId: task.sessionId });
-          this.sessions.delete(task.sessionId);
+          this.dropSession(task.sessionId);
         }
         await this.store.removeTask(task.id);
         this.broadcast(task.accountId, { type: "task.removed", taskId: task.id });
@@ -794,7 +897,7 @@ export class Hub {
   private async onSessionStartTimeout(sessionId: SessionId): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s || !s.startTimer) return; // 已确认启动（timer 被清）或已清理
-    this.sessions.delete(sessionId);
+    this.dropSession(sessionId);
     const task = await this.store.getTaskBySession(sessionId);
     if (task && task.sessionId === sessionId && task.status === "running") {
       const updated = await this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
@@ -879,7 +982,7 @@ export class Hub {
       }
       this.daemons.delete(daemonId);
     }
-    for (const [sid, s] of this.sessions) if (s.daemonId === daemonId) this.sessions.delete(sid);
+    for (const [sid, s] of this.sessions) if (s.daemonId === daemonId) this.dropSession(sid);
     this.pendingOps.removeByDaemon(daemonId);
     this.pendingReplays.removeByDaemon(daemonId);
     this.pendingRelays.removeByDaemon(daemonId, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "daemon 已移除"));

@@ -14,6 +14,7 @@ import { Hub, type ClientConn, type DaemonCtx } from "./hub.js";
 import { hashToken } from "./secrets.js";
 import { attachEndpoint } from "./transport.js";
 import { SupabaseVerifier } from "./auth.js";
+import { matchProxyHost, handleProxyRequest, handleProxyUpgrade, type ProxyServerContext } from "./proxy.js";
 
 const log = createLogger("server");
 const startedAt = Date.now();
@@ -23,6 +24,9 @@ await bootstrap();
 // supabase 模式启用 JWKS 验签器；local 模式不需要（省去外部依赖）。
 const verifier = config.authProvider === "supabase" ? new SupabaseVerifier(config.supabaseUrl) : undefined;
 const hub = new Hub(store, verifier);
+// hub 结构性满足 ProxyServerContext（routeTable/proxyGate/tunnels 三个只读字段）；proxy.ts 不反向导入 Hub，
+// 避免 hub.ts ⇄ proxy.ts 循环依赖（见 plan 006 决策：依赖倒置）。
+const proxyCtx: ProxyServerContext = hub;
 
 async function bootstrap() {
   // 以下三项（default 账号 seed / env 登记密钥 seed / credFingerprint 撤销）都是单账号 + env 口令的伴生物，
@@ -51,6 +55,12 @@ async function bootstrap() {
 }
 
 const httpServer = http.createServer((req, res) => {
+  // Host 命中 <shortId>.<proxyHost> 的请求走端口转发反代（登录门禁 + 隧道透传），
+  // 与既有 /health、/daemon、/client 路由完全独立分流，见 plan 006。
+  if (matchProxyHost(req.headers.host)) {
+    void handleProxyRequest(proxyCtx, req, res);
+    return;
+  }
   if (req.url === "/health") {
     store.ping().then((ok) => {
       res.writeHead(200, { "content-type": "application/json" });
@@ -67,6 +77,10 @@ const daemonWss = new WebSocketServer(wssOpts);
 const clientWss = new WebSocketServer(wssOpts);
 
 httpServer.on("upgrade", (req, socket, head) => {
+  if (matchProxyHost(req.headers.host)) {
+    void handleProxyUpgrade(proxyCtx, req, socket, head);
+    return;
+  }
   const { pathname } = new URL(req.url ?? "/", "http://localhost");
   if (pathname === "/daemon") {
     daemonWss.handleUpgrade(req, socket, head, (ws) => daemonWss.emit("connection", ws, req));
