@@ -121,7 +121,7 @@ server.reconcileDaemonSessions:
 ```
 daemon 每 2s 探测 PTY 会话进程树内所有 LISTEN 端口（仅该会话子进程树，见 §10 安全边界）
   ──ports.update{sessions:[{sessionId,ports}]}──▶ server
-server 按 (session,port) 收敛路由表：新端口签发不透明随机 shortId，消失的端口摘除路由
+server 按 (session,port) 收敛路由表：新端口签发可读的确定性 shortId（`<设备名>-<端口>`），消失的端口摘除路由
   ──ports.updated{taskId,ports:[{port,url}]}──▶ client   （url 形如 http(s)://<shortId>.<proxyHost>）
 
 浏览器访问 <shortId>.<proxyHost>（按 Host 头路由，与 client/daemon 的 WS 共用同一端口/监听器）：
@@ -139,7 +139,7 @@ server 按 (session,port) 收敛路由表：新端口签发不透明随机 short
 - **隧道 = socket 对拼**：server 把浏览器侧 TCP socket 与 daemon 侧到本地端口的 TCP 连接首尾相连，`connId`（server 签发）标识一条隧道；数据面靠 `proxy.data` 帧双向搬运原始字节，控制面靠 `proxy.open`/`proxy.opened`/`proxy.close`/`proxy.closed` 管生命周期。
 - **HTTP 首请求强制 `Connection: close`**：接管 socket 后 keep-alive 的后续请求是原始字节透传、Host 已无法再重写，多数开发服务器的 Host 白名单会拒掉第二个请求；代价是每个 HTTP 请求单独一条隧道、响应完 dev server 主动关连接，浏览器下一个请求重新建连（重新走门禁 + Host 重写）。单请求内的流式响应（SSE/大文件）不受影响。WS Upgrade 不在此列——升级后的连接原样透传所有后续帧，含 Connection 头本身。
 - **门禁边界**：一次性 code 命中即失效（无论是否已过期），不可重放；长效 cookie 按账号级隔离（`route.accountId !== session.accountId` 一律当无 cookie 处理，重新走 302，不放行）；`proxy.issueAuth` 的 `redirect` 只接受 `<shortId>.<proxyHost>` 形态的 host，拒绝任意外部地址（防开放重定向，两道防线：issueAuth 入参校验 + 回调 `to` 的同源相对路径校验）。
-- **shortId 不透明**：随机生成，不由 daemonId/端口派生（隐私考量，猜中也无妨——真正的权限边界是账号级门禁 cookie）。同一 (session,port) 复用既有 shortId，直到该端口消失或路由被摘除（daemon 断线 / session 终结）；路由摘除后即使端口以相同号码重新出现，也会换发新的 shortId（链接因此可能变化，客户端需以最新一次 `ports.updated` 为准）。
+- **shortId 可读且确定**：`<设备名（DNS 安全化）>-<端口>`（如 `wsq-mbp-5173`），同一 (设备,端口) 的预览 URL 跨 server 重启 / daemon 重连稳定，可收藏；极端冲突（不同设备安全化后同名同端口、SO_REUSEPORT 共享端口）追加 daemonId/sessionId 前缀消歧。可读性没有安全代价——真正的权限边界是账号级门禁 cookie，URL 可猜也进不来。客户端仍应以最新一次 `ports.updated` 为准。
 
 ## 8. 仓库结构
 

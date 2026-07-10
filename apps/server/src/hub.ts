@@ -446,6 +446,8 @@ export class Hub {
     if (!conn.daemonId || !conn.accountId) return;
     const daemonId = conn.daemonId;
     const accountId = conn.accountId;
+    // 路由标识可读化：用设备名（在线连接必有 daemons 表项；兜底 daemonId 前缀）拼 <设备名>-<端口>
+    const deviceName = this.daemons.get(daemonId)?.info.name ?? daemonId.slice(0, 8);
     const changed = new Set<TaskId>();
     const touched = new Set<SessionId>();
     for (const entry of reported) {
@@ -454,7 +456,7 @@ export class Hub {
       if (!s || s.daemonId !== daemonId) continue; // 归属校验：忽略不属于该 daemon 的会话上报
       touched.add(entry.sessionId);
       const validPorts = [...new Set(entry.ports.filter((p) => Number.isInteger(p) && p > 0 && p < 65536))];
-      const removedShortIds = this.routeTable.reconcile(entry.sessionId, daemonId, s.accountId, s.taskId, validPorts);
+      const removedShortIds = this.routeTable.reconcile(entry.sessionId, daemonId, s.accountId, s.taskId, deviceName, validPorts);
       for (const shortId of removedShortIds) this.tunnels.closeAllForShortId(shortId);
       changed.add(s.taskId);
     }

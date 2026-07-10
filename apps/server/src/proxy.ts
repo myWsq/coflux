@@ -12,7 +12,7 @@
  * proxy.issueAuth 换一次性 code，浏览器带 code 跳回 <shortId>.<proxyHost>/__cf_proxy_auth，
  * 服务器验 code、发 Domain=.<proxyHost> 的长效 cookie（覆盖账号下所有预览子域名）、302 回原路径。
  */
-import { randomUUID, randomBytes } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 // 统一用 Duplex 而非 net.Socket：Node 'upgrade' 事件签名里 socket 声明为 stream.Duplex
 // （运行时实际是 net.Socket），而本模块只用到 Duplex 能力（write/end/destroy/writableLength/事件），
@@ -25,25 +25,30 @@ import { genToken } from "./secrets.js";
 export const PROXY_COOKIE_NAME = "cf_proxy_session";
 export const AUTH_CALLBACK_PATH = "/__cf_proxy_auth";
 
-/* ============================ shortId 与 Host 匹配 ============================ */
+/* ============================ 路由标识（shortId）与 Host 匹配 ============================ */
 
-const SHORTID_LEN = 10;
-const SHORTID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
+/** 把设备名收敛为 DNS label 安全的片段：小写、非 [a-z0-9] 转 '-'、压缩/修剪 '-'、截长。
+ * 截到 40 字符：给 `-<port>`（最长 6）和极端冲突时的 `-<daemonId 前 6 位>` 消歧后缀留足空间，
+ * 保证整个 label ≤ 63（DNS 单级上限）。全被清空（如纯中文设备名）时退回 "device"。 */
+function sanitizeDeviceName(name: string): string {
+  const s = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "");
+  return s || "device";
+}
 
-/** 服务器签发的不透明短 id：随机生成，不由 daemonId/port 派生（隐私考量，见 plan 006 决策）。
- * 猜中他人 shortId 也无妨——真正的权限边界是账号级门禁 cookie（见文件头注释）。 */
-export function genShortId(): string {
-  const bytes = randomBytes(SHORTID_LEN);
-  let out = "";
-  for (let i = 0; i < SHORTID_LEN; i++) out += SHORTID_ALPHABET[bytes[i] % SHORTID_ALPHABET.length];
-  return out;
+/** 可读的确定性路由标识：`<设备名>-<端口>`（如 wsq-mbp-5173）。确定性带来 URL 稳定——server
+ * 重启、daemon 重连后同一 (设备, 端口) 的预览链接不变，可收藏。可读性没有安全代价：真正的
+ * 权限边界是账号级门禁 cookie（见文件头注释），URL 可猜也进不来。
+ * 极端冲突（不同设备 sanitize 后同名且同端口）由调用方追加 daemonId 前缀消歧。 */
+export function routeLabel(deviceName: string, port: number): string {
+  return `${sanitizeDeviceName(deviceName)}-${port}`;
 }
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-const PROXY_HOST_RE = new RegExp(`^([a-z0-9]{6,20})\\.${escapeRegExp(config.proxyHost)}$`, "i");
+// 允许任意合法 DNS label（含 '-'，1..63，首尾字母数字）——路由标识现在含设备名与连字符。
+const PROXY_HOST_RE = new RegExp(`^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\\.${escapeRegExp(config.proxyHost)}$`, "i");
 
 /** Host 头可能带 `:port`；本项目预览域不支持 IPv6 字面量 Host，遇到方括号原样返回兜底。 */
 export function stripPort(hostHeader: string): string {
@@ -87,7 +92,7 @@ export class ProxyRouteTable {
   private bySession = new Map<SessionId, Map<number, string>>();
   private sessionMeta = new Map<SessionId, { daemonId: DaemonId; accountId: AccountId; taskId: TaskId }>();
 
-  private ensure(sessionId: SessionId, daemonId: DaemonId, accountId: AccountId, taskId: TaskId, port: number): string {
+  private ensure(sessionId: SessionId, daemonId: DaemonId, accountId: AccountId, taskId: TaskId, deviceName: string, port: number): string {
     let m = this.bySession.get(sessionId);
     if (!m) {
       m = new Map();
@@ -95,8 +100,11 @@ export class ProxyRouteTable {
     }
     const existing = m.get(port);
     if (existing) return existing;
-    let shortId = genShortId();
-    while (this.byShortId.has(shortId)) shortId = genShortId();
+    // 可读的确定性标识：<设备名>-<端口>。被占用（不同设备 sanitize 后同名同端口，或同机两个
+    // session 用 SO_REUSEPORT 共享端口）时逐级追加 daemonId 前缀消歧，保持 URL 尽量可读。
+    let shortId = routeLabel(deviceName, port);
+    if (this.byShortId.has(shortId)) shortId = `${routeLabel(deviceName, port)}-${daemonId.slice(0, 6)}`;
+    if (this.byShortId.has(shortId)) shortId = `${routeLabel(deviceName, port)}-${sessionId.slice(0, 6)}`;
     this.byShortId.set(shortId, { shortId, daemonId, accountId, taskId, sessionId, port });
     m.set(port, shortId);
     return shortId;
@@ -104,7 +112,7 @@ export class ProxyRouteTable {
 
   /** 把某 session 的端口集合收敛到 `ports`：多退（摘除 route）少补（分配新 shortId）。
    * 返回本次被摘除的 shortId 列表，供调用方顺带关闭对应的在途隧道连接。 */
-  reconcile(sessionId: SessionId, daemonId: DaemonId, accountId: AccountId, taskId: TaskId, ports: number[]): string[] {
+  reconcile(sessionId: SessionId, daemonId: DaemonId, accountId: AccountId, taskId: TaskId, deviceName: string, ports: number[]): string[] {
     const removed: string[] = [];
     const keep = new Set(ports);
     const m = this.bySession.get(sessionId);
@@ -122,7 +130,7 @@ export class ProxyRouteTable {
       return removed;
     }
     this.sessionMeta.set(sessionId, { daemonId, accountId, taskId });
-    for (const port of ports) this.ensure(sessionId, daemonId, accountId, taskId, port);
+    for (const port of ports) this.ensure(sessionId, daemonId, accountId, taskId, deviceName, port);
     return removed;
   }
 
