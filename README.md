@@ -66,6 +66,7 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 | `DATABASE_URL` | 生产必填；`COFLUX_DEV=1` 时弱默认 `postgres://postgres:postgres@127.0.0.1:5432/postgres` | server 的 Postgres 连接串（含密码，视为秘密） |
 | `COFLUX_ENROLL_KEY` | `dev-enroll` | 账号登记密钥（server 配置，daemon 登记时用） |
 | `COFLUX_CLIENT_TOKEN` | `dev-client` | 账号登录令牌（server 配置，web 登录用） |
+| `COFLUX_PROXY_HOST` | `p.localhost` | 端口转发预览域：`<shortId>.<该值>` 按反代路由（Host 头分流，与 client/daemon WS 共用同一端口）；生产需配好泛解析 + 泛证书 |
 | `COFLUX_SERVER` | `ws://localhost:8787/daemon` | daemon 连接的服务器地址 |
 | `COFLUX_DEVICE_NAME` | `<hostname>` | daemon 登记时的设备名 |
 | `COFLUX_HOME` | `~/.coflux` | daemon 凭证存放目录 |
