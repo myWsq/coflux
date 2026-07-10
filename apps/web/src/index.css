@@ -246,6 +246,17 @@ body {
 .task-status.exited { color: #f7768e; }
 .task-status.idle { color: #787c99; }
 .task-actions { display: flex; gap: 2px; }
+.port-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #2d3149;
+  color: #7dcfff;
+  text-decoration: none;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.port-badge:hover { background: #3b3d52; color: #9ece6a; }
 
 .mini {
   background: #2a2b3c;
