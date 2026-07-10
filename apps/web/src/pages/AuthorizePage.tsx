@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { CheckCircle2, LoaderCircle, ShieldCheck, ShieldX } from "lucide-react";
 import type { ClientToServer, ServerToClient } from "@coflux/protocol";
 
+import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
+import { Button } from "@/components/ui/button";
 import { SERVER_URL, TOKEN_KEY, USE_SUPABASE, type AuthCredential } from "@/config";
 import { loginWithSupabase } from "@/lib/auth";
 
@@ -102,54 +105,51 @@ export function AuthorizePage({ token }: { token: string }) {
 
   const showLogin = state.phase === "need-login" || state.phase === "authenticating" || state.phase === "auth-failed";
 
+  if (showLogin) {
+    return (
+      <AuthShell>
+        <CredentialsForm
+          title="授权新设备"
+          description="先登录你的账号，再确认这台设备的信息"
+          username={username}
+          password={password}
+          busy={state.phase === "authenticating"}
+          error={state.phase === "auth-failed" ? state.message : undefined}
+          submitLabel="登录并继续"
+          onUsernameChange={setUsername}
+          onPasswordChange={setPassword}
+          onSubmit={login}
+        />
+      </AuthShell>
+    );
+  }
+
   return (
-    <div className="app">
-      <div className="login">
-        {showLogin ? (
-          <form className="login-card" onSubmit={login}>
-            <div className="brand-lg">coflux</div>
-            <p className="login-hint">授权新设备 —— 请先登录你的账号</p>
-            <input
-              autoFocus
-              type={USE_SUPABASE ? "email" : "text"}
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-              placeholder={USE_SUPABASE ? "邮箱" : "用户名"}
-              autoComplete={USE_SUPABASE ? "email" : "username"}
-            />
-            <input
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="密码"
-              autoComplete="current-password"
-            />
-            <button type="submit">登录</button>
-            {state.phase === "authenticating" && <div className="login-status">连接中…</div>}
-            {state.phase === "auth-failed" && <div className="login-status err">{state.message}</div>}
-          </form>
-        ) : (
-          <div className="login-card">
-            <div className="brand-lg">coflux</div>
-            {state.phase === "looking-up" && <p className="login-hint">正在核对授权链接…</p>}
-            {state.phase === "invalid" && <p className="login-status err">{state.message}</p>}
-            {state.phase === "confirm" && (
-              <>
-                <p className="login-hint">授权以下设备接入你的账号：</p>
-                <p>
-                  <b>{state.name || "（未命名设备）"}</b>
-                  <br />
-                  {state.host} · {state.platform}
-                </p>
-                <button onClick={authorize}>授权此设备</button>
-              </>
-            )}
-            {state.phase === "authorizing" && <p className="login-hint">正在授权…</p>}
-            {state.phase === "done" && <p className="login-status">✓ 授权成功，设备已登记。可以关闭此页面了。</p>}
-            {state.phase === "failed" && <p className="login-status err">{state.message}</p>}
+    <AuthShell>
+      {state.phase === "looking-up" && (
+        <AuthMessage icon={<LoaderCircle className="size-5 animate-spin" />} title="正在核对授权链接" description="这通常只需要几秒钟。" />
+      )}
+      {state.phase === "invalid" && (
+        <AuthMessage icon={<ShieldX className="size-5 text-destructive" />} title="授权链接不可用" description={state.message} />
+      )}
+      {state.phase === "confirm" && (
+        <AuthMessage icon={<ShieldCheck className="size-5 text-primary" />} title="确认设备" description="允许以下设备接入你的账号和工作区。">
+          <div className="rounded-lg border border-border bg-background px-4 py-3 text-left">
+            <div className="text-sm font-medium">{state.name || "未命名设备"}</div>
+            <div className="mt-1 font-mono text-[11px] text-muted-foreground">{state.host || "未知主机"} · {state.platform || "未知平台"}</div>
           </div>
-        )}
-      </div>
-    </div>
+          <Button className="mt-4 w-full" onClick={authorize}>授权此设备</Button>
+        </AuthMessage>
+      )}
+      {state.phase === "authorizing" && (
+        <AuthMessage icon={<LoaderCircle className="size-5 animate-spin" />} title="正在授权设备" description="请保持此页面打开。" />
+      )}
+      {state.phase === "done" && (
+        <AuthMessage icon={<CheckCircle2 className="size-5 text-success" />} title="设备已授权" description="设备已登记到你的账号，可以关闭此页面。" />
+      )}
+      {state.phase === "failed" && (
+        <AuthMessage icon={<ShieldX className="size-5 text-destructive" />} title="授权未完成" description={state.message} />
+      )}
+    </AuthShell>
   );
 }

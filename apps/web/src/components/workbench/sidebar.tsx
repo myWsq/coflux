@@ -1,6 +1,5 @@
 import {
   CirclePlus,
-  Copy,
   FolderGit2,
   GitBranch,
   LogOut,
@@ -25,7 +24,6 @@ type SidebarProps = {
   onRemoveWorkspace: (workspace: Workspace) => void;
   onAddDevice: () => void;
   onRemoveDevice: (daemon: DaemonInfo) => void;
-  onCopyEnrollCommand: () => void;
 };
 
 const STATUS_TEXT = {
@@ -44,7 +42,6 @@ export function Sidebar({
   onRemoveWorkspace,
   onAddDevice,
   onRemoveDevice,
-  onCopyEnrollCommand,
 }: SidebarProps) {
   const workspacesOf = (projectId: string) =>
     client.workspaces
@@ -180,23 +177,7 @@ export function Sidebar({
             </Button>
           </div>
 
-          {client.enrollCommand && (
-            <div className="mb-2 rounded-md border border-border bg-background p-2.5">
-              <div className="mb-2 flex items-center justify-between text-[10px] text-muted-foreground">
-                <span>在新机器上运行</span>
-                <button className="rounded p-1 hover:bg-accent hover:text-foreground" onClick={client.clearEnrollmentCommand} title="关闭">
-                  <X className="size-3" />
-                </button>
-              </div>
-              <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded bg-terminal p-2 font-mono text-[9px] leading-4 text-success">{client.enrollCommand}</pre>
-              <Button className="mt-2 w-full" variant="outline" size="sm" onClick={onCopyEnrollCommand}>
-                <Copy className="size-3.5" />
-                复制命令
-              </Button>
-            </div>
-          )}
-
-          {client.daemons.length === 0 && !client.enrollCommand && (
+          {client.daemons.length === 0 && (
             <button className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-xs text-muted-foreground hover:bg-accent/50" onClick={onAddDevice}>
               <Monitor className="size-4" />
               添加第一台设备

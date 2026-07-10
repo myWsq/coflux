@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { ExternalLink, LoaderCircle, ShieldX } from "lucide-react";
 import type { ClientToServer, ServerToClient } from "@coflux/protocol";
 
+import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
 import { SERVER_URL, TOKEN_KEY, USE_SUPABASE, type AuthCredential } from "@/config";
 import { loginWithSupabase } from "@/lib/auth";
 
@@ -93,45 +95,46 @@ export function ProxyAuthPage() {
 
   const showLogin = state.phase === "need-login" || state.phase === "authenticating" || state.phase === "auth-failed";
 
+  if (state.phase === "invalid") {
+    return (
+      <AuthShell>
+        <AuthMessage icon={<ShieldX className="size-5 text-destructive" />} title="预览链接无效" description="链接缺少跳转目标，请从终端 Tab 的端口入口重新打开。" />
+      </AuthShell>
+    );
+  }
+
+  if (showLogin) {
+    return (
+      <AuthShell>
+        <CredentialsForm
+          title="访问端口预览"
+          description="登录后将安全跳转到该工作区的预览页面"
+          username={username}
+          password={password}
+          busy={state.phase === "authenticating"}
+          error={state.phase === "auth-failed" ? state.message : undefined}
+          submitLabel="登录并访问"
+          onUsernameChange={setUsername}
+          onPasswordChange={setPassword}
+          onSubmit={login}
+        />
+      </AuthShell>
+    );
+  }
+
   return (
-    <div className="app">
-      <div className="login">
-        {state.phase === "invalid" ? (
-          <div className="login-card">
-            <div className="brand-lg">coflux</div>
-            <p className="login-status err">链接无效：缺少跳转目标</p>
+    <AuthShell>
+      {state.phase === "issuing" && (
+        <AuthMessage icon={<LoaderCircle className="size-5 animate-spin" />} title="正在打开预览" description="正在签发一次性访问凭证并跳转。">
+          <div className="flex items-center justify-center gap-1.5 text-[11px] text-muted-foreground">
+            <ExternalLink className="size-3" />
+            即将离开 coflux 工作台
           </div>
-        ) : showLogin ? (
-          <form className="login-card" onSubmit={login}>
-            <div className="brand-lg">coflux</div>
-            <p className="login-hint">访问预览链接 —— 请先登录你的账号</p>
-            <input
-              autoFocus
-              type={USE_SUPABASE ? "email" : "text"}
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-              placeholder={USE_SUPABASE ? "邮箱" : "用户名"}
-              autoComplete={USE_SUPABASE ? "email" : "username"}
-            />
-            <input
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="密码"
-              autoComplete="current-password"
-            />
-            <button type="submit">登录</button>
-            {state.phase === "authenticating" && <div className="login-status">连接中…</div>}
-            {state.phase === "auth-failed" && <div className="login-status err">{state.message}</div>}
-          </form>
-        ) : (
-          <div className="login-card">
-            <div className="brand-lg">coflux</div>
-            {state.phase === "issuing" && <p className="login-hint">正在跳转到预览页…</p>}
-            {state.phase === "failed" && <p className="login-status err">{state.message}</p>}
-          </div>
-        )}
-      </div>
-    </div>
+        </AuthMessage>
+      )}
+      {state.phase === "failed" && (
+        <AuthMessage icon={<ShieldX className="size-5 text-destructive" />} title="无法打开预览" description={state.message} />
+      )}
+    </AuthShell>
   );
 }
