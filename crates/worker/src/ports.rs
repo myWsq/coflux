@@ -77,7 +77,9 @@ mod imp {
         ports
     }
 
-    /// 仅供本模块单测复用:取得某 pid 的父 pid(BSDInfo.pbi_ppid)。
+    /// 仅供本模块单测使用:取得某 pid 的父 pid(BSDInfo.pbi_ppid)。cfg(test) 限定,
+    /// 避免正常构建里出现 dead code 警告。
+    #[cfg(test)]
     pub(crate) fn parent_pid(pid: i32) -> Option<i32> {
         pidinfo::<BSDInfo>(pid, 0).ok().map(|info| info.pbi_ppid as i32)
     }
@@ -199,7 +201,9 @@ mod imp {
         }
     }
 
-    /// 仅供本模块单测复用:取得某 pid 的父 pid。
+    /// 仅供本模块单测使用:取得某 pid 的父 pid。cfg(test) 限定,避免正常构建里出现
+    /// dead code 警告。
+    #[cfg(test)]
     pub(crate) fn parent_pid(pid: i32) -> Option<i32> {
         read_ppid(pid)
     }
@@ -215,9 +219,7 @@ mod imp {
     pub fn listen_ports_for_pids(_pids: &[i32]) -> HashSet<u16> {
         HashSet::new()
     }
-    pub(crate) fn parent_pid(_pid: i32) -> Option<i32> {
-        None
-    }
+    // 不提供 parent_pid:引用它的 tests 模块本就 cfg 限定 macos/linux,此平台上不编译。
 }
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
