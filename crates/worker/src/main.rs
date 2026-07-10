@@ -7,13 +7,16 @@
 mod creds;
 mod git;
 mod ops;
+mod ports;
+mod tunnel;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use coflux_protocol::{
-    is_frame, write_record, DaemonToServer, RecordParser, ServerToDaemon, SessionInfo, SessionRef, Settings, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
+    is_frame, write_record, DaemonToServer, RecordParser, ServerToDaemon, SessionInfo, SessionPorts, SessionRef, Settings, SupervisorToWorker, WorkerToSupervisor, FRAME_PROXY_DATA,
+    SUPERVISOR_SOCK_ENV,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -47,10 +50,12 @@ struct WorkerState {
     /// 等待授权中的链接过期时刻（server 侧 epoch ms）。到期且连接仍在、仍未登记时，
     /// 由 run_server_connection 的定时检查重发 daemon.enrollRequest 换新链接。
     pending_auth_expires_at: Option<f64>,
+    /// 端口探测(005)上一次实际发出的全量快照:变化才发的比较基准，也是重连补发的缓存。
+    last_reported_ports: Vec<SessionPorts>,
 }
 
 /// 出站到 server 的消息（WS 区分文本/二进制）
-enum WsOut {
+pub(crate) enum WsOut {
     Text(String),
     Binary(Vec<u8>),
 }
@@ -80,7 +85,7 @@ fn alive_to_resync(alive: &HashMap<String, (String, i32)>) -> Vec<SessionRef> {
     alive.iter().map(|(s, (t, _pid))| SessionRef { session_id: s.clone(), task_id: t.clone() }).collect()
 }
 
-async fn send_text(tx: &Sender<WsOut>, msg: &DaemonToServer) {
+pub(crate) async fn send_text(tx: &Sender<WsOut>, msg: &DaemonToServer) {
     if let Ok(s) = serde_json::to_string(msg) {
         let _ = tx.send(WsOut::Text(s)).await;
     }
@@ -89,6 +94,59 @@ async fn sup_ctrl(tx: &Sender<Vec<u8>>, msg: &WorkerToSupervisor) {
     if let Ok(bytes) = serde_json::to_vec(msg) {
         let _ = tx.send(write_record(&bytes)).await;
     }
+}
+
+/// 全量计算当前每个存活会话(有监听端口的)的 ports.update payload；按 sessionId 排序，
+/// 保证多次调用在会话/端口集合不变时输出完全一致（供「变化才发」的相等比较使用）。
+fn build_ports_update(alive: &HashMap<String, (String, i32)>) -> Vec<SessionPorts> {
+    let mut sessions: Vec<SessionPorts> = alive
+        .iter()
+        .filter_map(|(session_id, (_task_id, pid))| {
+            let mut ports: Vec<u16> = ports::listening_ports(*pid).into_iter().collect();
+            if ports.is_empty() {
+                return None;
+            }
+            ports.sort_unstable();
+            Some(SessionPorts { session_id: session_id.clone(), ports })
+        })
+        .collect();
+    sessions.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+    sessions
+}
+
+/// 周期(2s)扫描每个存活会话的进程树监听端口；变化才发全量（会话退出/端口关闭在下一轮
+/// 扫描中自然从集合里消失，无需特判）。扫描本身是同步阻塞 IO(/proc 读或 libproc 系统调
+/// 用)，用 spawn_blocking 挪出 async 执行器，避免卡住 tokio 工作线程。
+async fn report_ports_if_changed(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>) {
+    let alive = { state.lock().unwrap().alive.clone() }; // 取快照即释放锁，不跨扫描 await 持锁
+    let sessions = match tokio::task::spawn_blocking(move || build_ports_update(&alive)).await {
+        Ok(s) => s,
+        Err(_) => return, // 扫描任务 panic：静默跳过这一轮，不影响主循环
+    };
+    let changed = {
+        let mut s = state.lock().unwrap();
+        if s.last_reported_ports == sessions {
+            false
+        } else {
+            s.last_reported_ports = sessions.clone();
+            true
+        }
+    };
+    if changed {
+        send_text(to_server_tx, &DaemonToServer::PortsUpdate { sessions }).await;
+    }
+}
+
+/// 重连认证成功后无条件补发一次当前端口全量，防 server 重启丢状态（daemon 侧视角没有
+/// 变化也要发，这与周期任务「变化才发」的逻辑是两回事，故不复用 report_ports_if_changed）。
+async fn force_report_ports(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>) {
+    let alive = { state.lock().unwrap().alive.clone() };
+    let sessions = match tokio::task::spawn_blocking(move || build_ports_update(&alive)).await {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    state.lock().unwrap().last_reported_ports = sessions.clone();
+    send_text(to_server_tx, &DaemonToServer::PortsUpdate { sessions }).await;
 }
 
 #[tokio::main]
@@ -124,7 +182,14 @@ async fn main() {
     let _ = std::fs::write(format!("{home}/worker.pid"), std::process::id().to_string());
 
     let creds_store = Arc::new(CredStore::new(cfg.cred_path.clone(), cfg.home.clone()));
-    let state = Arc::new(Mutex::new(WorkerState { authed: false, sup_synced: false, alive: HashMap::new(), credentials: creds_store.load(), pending_auth_expires_at: None }));
+    let state = Arc::new(Mutex::new(WorkerState {
+        authed: false,
+        sup_synced: false,
+        alive: HashMap::new(),
+        credentials: creds_store.load(),
+        pending_auth_expires_at: None,
+        last_reported_ports: Vec::new(),
+    }));
 
     let (to_server_tx, to_server_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
     let (to_sup_tx, to_sup_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2048);
@@ -156,6 +221,20 @@ async fn main() {
         let state = state.clone();
         let to_server_tx = to_server_tx.clone();
         tokio::spawn(async move { supervisor_loop(cfg, state, to_server_tx, to_sup_rx).await });
+    }
+
+    // 端口探测（005）：周期扫描每个存活 PTY 会话进程树的监听端口，变化才发全量
+    {
+        let state = state.clone();
+        let to_server_tx = to_server_tx.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                report_ports_if_changed(&state, &to_server_tx).await;
+            }
+        });
     }
 
     // 优雅关闭
@@ -311,6 +390,8 @@ async fn run_server_connection(
         s.authed = false;
         s.pending_auth_expires_at = None; // 授权链接与连接同生命周期，新连接从零开始
     }
+    // 隧道状态绑定单次 server 连接生命周期：不跨重连恢复（浏览器侧 TCP 早已断，恢复无意义）
+    let tunnels = tunnel::TunnelSet::new(to_server_tx.clone());
 
     // 认证 / 登记：三选一。credentials.json 存在 → daemon.auth 重连；否则看有没有配 enrollKey——
     // 非空走经典 daemon.enroll；空（cofluxd 默认 up 零参数写入的显式 ""，见 pick() 的 env-only
@@ -381,11 +462,16 @@ async fn run_server_connection(
             }
             inc = stream.next() => {
                 match inc {
-                    Some(Ok(Message::Text(t))) => on_server_text(t.as_str(), cfg, state, creds_store, to_server_tx, to_sup_tx).await,
+                    Some(Ok(Message::Text(t))) => on_server_text(t.as_str(), cfg, state, creds_store, to_server_tx, to_sup_tx, &tunnels).await,
                     Some(Ok(Message::Binary(b))) => {
-                        // pty.input → 原样转给 supervisor（仅认证后）
                         if state.lock().unwrap().authed {
-                            let _ = to_sup_tx.send(write_record(b.as_ref())).await;
+                            if b.first().copied() == Some(FRAME_PROXY_DATA) {
+                                // proxy.data(kind=4) → 隧道模块按 connId 转发到对应 TCP 连接
+                                tunnels.feed_frame(b.as_ref()).await;
+                            } else {
+                                // pty.input（kind 1..=3）→ 原样转给 supervisor
+                                let _ = to_sup_tx.send(write_record(b.as_ref())).await;
+                            }
                         }
                     }
                     Some(Ok(Message::Ping(p))) => { let _ = sink.send(Message::Pong(p)).await; }
@@ -398,9 +484,19 @@ async fn run_server_connection(
     // 断线即作废：无论是否已登记，本连接申请过的授权链接都不再有效——清掉落盘的 pending-auth.json，
     // 避免 cofluxd 一直展示一个已经失效的链接（server 侧的 pending token 由 handleDaemonClose 摘除）。
     creds_store.clear_pending_auth();
+    // WS 断线：全部隧道连接关闭、状态清零（不跨重连恢复，见函数开头注释）
+    tunnels.close_all();
 }
 
-async fn on_server_text(text: &str, cfg: &Arc<Config>, state: &Arc<Mutex<WorkerState>>, creds_store: &Arc<CredStore>, to_server_tx: &Sender<WsOut>, to_sup_tx: &Sender<Vec<u8>>) {
+async fn on_server_text(
+    text: &str,
+    cfg: &Arc<Config>,
+    state: &Arc<Mutex<WorkerState>>,
+    creds_store: &Arc<CredStore>,
+    to_server_tx: &Sender<WsOut>,
+    to_sup_tx: &Sender<Vec<u8>>,
+    tunnels: &tunnel::TunnelSet,
+) {
     let msg: ServerToDaemon = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(_) => return,
@@ -442,7 +538,7 @@ async fn on_server_text(text: &str, cfg: &Arc<Config>, state: &Arc<Mutex<WorkerS
         other => {
             let authed = state.lock().unwrap().authed;
             if authed {
-                route_authed(other, cfg, to_server_tx, to_sup_tx).await;
+                route_authed(other, cfg, to_server_tx, to_sup_tx, tunnels).await;
             }
         }
     }
@@ -461,10 +557,11 @@ async fn on_authed(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>
     // 两级 resync：拿到 supervisor 快照后才向 server resync；否则待 resync.list 到达时补发
     if let Some(sessions) = resync {
         send_text(to_server_tx, &DaemonToServer::DaemonResync { sessions }).await;
+        force_report_ports(state, to_server_tx).await; // 重连补发端口全量，防 server 重启丢状态
     }
 }
 
-async fn route_authed(msg: ServerToDaemon, cfg: &Arc<Config>, to_server_tx: &Sender<WsOut>, to_sup_tx: &Sender<Vec<u8>>) {
+async fn route_authed(msg: ServerToDaemon, cfg: &Arc<Config>, to_server_tx: &Sender<WsOut>, to_sup_tx: &Sender<Vec<u8>>, tunnels: &tunnel::TunnelSet) {
     match msg {
         // git（可能慢）→ 派生任务，结果回带
         ServerToDaemon::ProjectValidate { request_id, path } => {
@@ -500,6 +597,13 @@ async fn route_authed(msg: ServerToDaemon, cfg: &Arc<Config>, to_server_tx: &Sen
         }
         ServerToDaemon::WorkerUpgrade { version, url, sha256, signature } => {
             sup_ctrl(to_sup_tx, &WorkerToSupervisor::WorkerUpgrade { version, url, sha256, signature }).await;
+        }
+        // 隧道 → 连接本地端口 / 关闭，字节走 kind=4 ProxyData 帧（main.rs 的 WS 二进制分支处理）
+        ServerToDaemon::ProxyOpen { conn_id, port } => {
+            tunnels.open(conn_id, port);
+        }
+        ServerToDaemon::ProxyClose { conn_id } => {
+            tunnels.close(&conn_id);
         }
         // exec / fs → 派生任务，结果回带
         ServerToDaemon::ExecRun { request_id, cwd, command, args, env, timeout_ms } => {
