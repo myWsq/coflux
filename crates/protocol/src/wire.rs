@@ -16,6 +16,14 @@ pub struct SessionRef {
     pub task_id: String,
 }
 
+/// ports.update 里单个会话上报的监听端口列表
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPorts {
+    pub session_id: String,
+    pub ports: Vec<u16>,
+}
+
 /// fs.list 返回的目录项
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FsEntry {
@@ -61,6 +69,20 @@ pub enum DaemonToServer {
     SessionStarted { session_id: String, task_id: String, pid: i32 },
     #[serde(rename = "session.exit")]
     SessionExit { session_id: String, exit_code: i32 },
+    /// 全量幂等上报每个（存活）会话监听的端口；仅含有监听端口的 session，daemon 重连/漏报自愈
+    #[serde(rename = "ports.update")]
+    PortsUpdate { sessions: Vec<SessionPorts> },
+    /// server→daemon proxy.open 的回应：隧道连接建立结果
+    #[serde(rename = "proxy.opened")]
+    ProxyOpened {
+        conn_id: String,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// 隧道连接（daemon 侧到本地端口的 TCP 连接）关闭，控制面消息，不走数据面帧
+    #[serde(rename = "proxy.closed")]
+    ProxyClosed { conn_id: String },
     #[serde(rename = "exec.result")]
     ExecResult {
         request_id: String,
@@ -142,6 +164,12 @@ pub enum ServerToDaemon {
     SessionReplay { session_id: String, request_id: String },
     #[serde(rename = "pty.resize")]
     PtyResize { session_id: String, cols: u16, rows: u16 },
+    /// 打开一条隧道连接：daemon 向本地 port 发起 TCP 连接，字节经 proxy.data 帧（kind=4）双向透传
+    #[serde(rename = "proxy.open")]
+    ProxyOpen { conn_id: String, port: u16 },
+    /// 关闭一条隧道连接（server 侧发起，例如浏览器断开）
+    #[serde(rename = "proxy.close")]
+    ProxyClose { conn_id: String },
     #[serde(rename = "exec.run")]
     ExecRun {
         request_id: String,
@@ -220,6 +248,41 @@ mod tests {
         assert!(s.contains(r#""type":"daemon.enrollRequest""#));
         let back: DaemonToServer = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, DaemonToServer::DaemonEnrollRequest { .. }));
+    }
+
+    #[test]
+    fn proxy_conn_id_serializes_camel_case() {
+        // landmine: rename_all_fields = camelCase 把 conn_id 转成 connId；TS 侧字段名必须一致
+        let m = ServerToDaemon::ProxyOpen { conn_id: "c1".into(), port: 3000 };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains(r#""type":"proxy.open""#));
+        assert!(s.contains(r#""connId":"c1""#));
+        assert!(!s.contains("conn_id"));
+        let back: ServerToDaemon = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, ServerToDaemon::ProxyOpen { port: 3000, .. }));
+
+        let opened = DaemonToServer::ProxyOpened { conn_id: "c2".into(), ok: true, error: None };
+        let s2 = serde_json::to_string(&opened).unwrap();
+        assert!(s2.contains(r#""connId":"c2""#));
+        assert!(!s2.contains("error")); // omitted when None
+        let back2: DaemonToServer = serde_json::from_str(&s2).unwrap();
+        assert!(matches!(back2, DaemonToServer::ProxyOpened { ok: true, .. }));
+    }
+
+    #[test]
+    fn ports_update_round_trips() {
+        let m = DaemonToServer::PortsUpdate { sessions: vec![SessionPorts { session_id: "s1".into(), ports: vec![3000, 8080] }] };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains(r#""type":"ports.update""#));
+        assert!(s.contains(r#""sessionId":"s1""#));
+        let back: DaemonToServer = serde_json::from_str(&s).unwrap();
+        match back {
+            DaemonToServer::PortsUpdate { sessions } => {
+                assert_eq!(sessions.len(), 1);
+                assert_eq!(sessions[0].ports, vec![3000, 8080]);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

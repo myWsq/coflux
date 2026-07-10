@@ -101,7 +101,13 @@ export type DaemonToServer =
   | { type: "worktree.added"; requestId: RequestId; ok: boolean; path: string; branch: string; error?: string }
   | { type: "session.started"; sessionId: SessionId; taskId: TaskId; pid: number }
   | { type: "session.exit"; sessionId: SessionId; exitCode: number }
-  // pty.output / pty.replay 走二进制数据面（见 encodeFrame/decodeFrame），不在 JSON 联合体内
+  /** 全量幂等上报每个（存活）会话监听的端口；仅含有监听端口的 session，daemon 重连/漏报自愈 */
+  | { type: "ports.update"; sessions: { sessionId: SessionId; ports: number[] }[] }
+  /** server→daemon proxy.open 的回应：隧道连接建立结果 */
+  | { type: "proxy.opened"; connId: string; ok: boolean; error?: string }
+  /** 隧道连接（daemon 侧到本地端口的 TCP 连接）关闭，控制面消息，不走数据面帧 */
+  | { type: "proxy.closed"; connId: string }
+  // pty.output / pty.replay / proxy.data 走二进制数据面（见 encodeFrame/decodeFrame），不在 JSON 联合体内
   | ExecResult
   | FsListed
   | FsReadResult;
@@ -123,6 +129,10 @@ export type ServerToDaemon =
   | { type: "session.replay"; sessionId: SessionId; requestId: RequestId }
   // pty.input 走二进制数据面（见 encodeFrame/decodeFrame），不在 JSON 联合体内
   | { type: "pty.resize"; sessionId: SessionId; cols: number; rows: number }
+  /** 打开一条隧道连接：daemon 向本地 port 发起 TCP 连接，字节经 proxy.data 帧（kind=4）双向透传 */
+  | { type: "proxy.open"; connId: string; port: number }
+  /** 关闭一条隧道连接（server 侧发起，例如浏览器断开） */
+  | { type: "proxy.close"; connId: string }
   /** 通用原语：一次性命令 */
   | { type: "exec.run"; requestId: RequestId; cwd: string; command: string; args: string[]; env?: Record<string, string>; timeoutMs?: number }
   /** 通用原语：文件系统（root 为锚定根，path 为相对路径，daemon 校验不越界） */
@@ -147,6 +157,9 @@ export type ClientToServer =
   | { type: "device.authorizeInfo"; token: string }
   /** 确认授权：把该 token 对应的设备绑到当前登录账号（一次性，成功后 token 失效） */
   | { type: "device.authorize"; token: string }
+  /** 为端口转发签发一次性代理认证（浏览器经 <shortId>.<proxyHost> 访问前换票）。
+   *  redirect 是换票成功后要跳回的地址；url 白名单校验在 hub（不属于协议层） */
+  | { type: "proxy.issueAuth"; redirect: string }
   /** 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签 */
   | { type: "client.upgradeDaemon"; daemonId: DaemonId; version: string; url?: string; sha256?: string; signature?: string }
   /** 导入一个 git 仓库为 project（自动创建主工作区） */
@@ -176,7 +189,13 @@ export type ServerToClient =
   | { type: "device.authorizeInfo"; ok: boolean; name?: string; host?: string; platform?: string; error?: string }
   /** 设备授权成功（该连接的 daemon 已收到 daemon.enrolled 并上线） */
   | { type: "device.authorized" }
-  | { type: "state.snapshot"; daemons: DaemonInfo[]; projects: Project[]; workspaces: Workspace[]; tasks: Task[] }
+  /** proxy.issueAuth 的回应：ok 时带跳转 url（换票成功，浏览器可直接访问 <shortId>.<proxyHost>） */
+  | { type: "proxy.auth"; ok: boolean; url?: string; error?: string }
+  /** 某任务当前可访问的端口列表变化（daemon ports.update 上报后重新计算得出） */
+  | { type: "ports.updated"; taskId: TaskId; ports: { port: number; url: string }[] }
+  // ports 字段在本 plan（004）只冻结形状，server 尚不产出；006 落地转发后才总是携带，故先设为可选，
+  // 避免 hub.ts 既有 state.snapshot 调用点因新增必填字段而编译失败
+  | { type: "state.snapshot"; daemons: DaemonInfo[]; projects: Project[]; workspaces: Workspace[]; tasks: Task[]; ports?: { taskId: TaskId; port: number; url: string }[] }
   | { type: "daemon.updated"; daemon: DaemonInfo }
   | { type: "daemon.removed"; daemonId: DaemonId }
   | { type: "project.created"; project: Project }
@@ -206,29 +225,45 @@ export function decode<T>(raw: string | Buffer): T {
 }
 
 /* ------------------------------------------------------------------ *
- * 数据面二进制帧（pty.output / pty.input / pty.replay）
+ * 数据面二进制帧（pty.output / pty.input / pty.replay / proxy.data）
  *
  * 控制面仍走 JSON 文本帧；高频数据面改长度前缀二进制帧，免 JSON 转义、降 CPU/带宽。
  * 帧体布局（不含外层长度前缀）：
- *   [kind:1][sidLen:1][sessionId:utf8(sidLen)][? ridLen:1][? requestId:utf8(ridLen)][payload:utf8 到帧尾]
- * - kind: 1=pty.output 2=pty.input 3=pty.replay（仅 replay 带 requestId）。
+ *   [kind:1][idLen:1][id:utf8(idLen)][? ridLen:1][? requestId:utf8(ridLen)][payload 到帧尾]
+ * - kind: 1=pty.output 2=pty.input 3=pty.replay（仅 replay 带 requestId）4=proxy.data。
+ * - id 字段：pty.* 是 sessionId；proxy.data 是 connId（隧道连接 id，< 256 字节，双向复用同一帧种类）。
+ * - pty.* 的 payload 是 node-pty 已解码的文本（string）；proxy.data 的 payload 是任意 TCP
+ *   字节（可能非合法 UTF-8），必须按 Uint8Array 原样透传，不经 TextEncoder/TextDecoder 往返。
  * - 在 WS 上：每个二进制 message 即一帧（WS 自带分帧），payload 取到帧尾。
  * - 在字节流（UDS，热升级用）上：外层再包 4 字节大端长度前缀分帧，帧体格式不变。
  * 用 Uint8Array/TextEncoder 实现，Node 与浏览器通用。
  * ------------------------------------------------------------------ */
 
-export const FrameKind = { Output: 1, Input: 2, Replay: 3 } as const;
+export const FrameKind = { Output: 1, Input: 2, Replay: 3, ProxyData: 4 } as const;
 
 export type DataFrame =
   | { type: "pty.output"; sessionId: SessionId; data: string }
   | { type: "pty.input"; sessionId: SessionId; data: string }
-  | { type: "pty.replay"; sessionId: SessionId; requestId: RequestId; data: string };
+  | { type: "pty.replay"; sessionId: SessionId; requestId: RequestId; data: string }
+  /** 隧道连接的数据面透传（server↔daemon 双向）。data 是原始字节，不做 UTF-8 解码 */
+  | { type: "proxy.data"; connId: string; data: Uint8Array };
 
 const _te = new TextEncoder();
 const _td = new TextDecoder();
 
-/** 把数据面消息编码为二进制帧。sessionId/requestId 为服务器签发的短 id（< 256 字节）。 */
+/** 把数据面消息编码为二进制帧。sessionId/requestId/connId 为服务器签发的短 id（< 256 字节）。 */
 export function encodeFrame(msg: DataFrame): Uint8Array {
+  if (msg.type === "proxy.data") {
+    const cid = _te.encode(msg.connId);
+    if (cid.length > 255) throw new RangeError("connId too long for frame");
+    const head = 2 + cid.length;
+    const out = new Uint8Array(head + msg.data.length);
+    out[0] = FrameKind.ProxyData;
+    out[1] = cid.length;
+    out.set(cid, 2);
+    out.set(msg.data, head);
+    return out;
+  }
   const sid = _te.encode(msg.sessionId);
   if (sid.length > 255) throw new RangeError("sessionId too long for frame");
   const payload = _te.encode(msg.data);
@@ -253,10 +288,14 @@ export function encodeFrame(msg: DataFrame): Uint8Array {
 export function decodeFrame(buf: Uint8Array): DataFrame | null {
   if (buf.length < 2) return null;
   const kind = buf[0];
-  const sidLen = buf[1];
-  if (buf.length < 2 + sidLen) return null;
-  const sessionId = _td.decode(buf.subarray(2, 2 + sidLen));
-  let off = 2 + sidLen;
+  const idLen = buf[1];
+  if (buf.length < 2 + idLen) return null;
+  if (kind === FrameKind.ProxyData) {
+    const connId = _td.decode(buf.subarray(2, 2 + idLen));
+    return { type: "proxy.data", connId, data: buf.subarray(2 + idLen) };
+  }
+  const sessionId = _td.decode(buf.subarray(2, 2 + idLen));
+  let off = 2 + idLen;
   if (kind === FrameKind.Output || kind === FrameKind.Input) {
     return { type: kind === FrameKind.Output ? "pty.output" : "pty.input", sessionId, data: _td.decode(buf.subarray(off)) };
   }
@@ -308,6 +347,9 @@ const DAEMON_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
   "worktree.added": { requestId: "string", ok: "boolean", path: "string", branch: "string" },
   "session.started": { sessionId: "string", taskId: "string", pid: "number" },
   "session.exit": { sessionId: "string", exitCode: "number" },
+  "ports.update": { sessions: "array" },
+  "proxy.opened": { connId: "string", ok: "boolean" },
+  "proxy.closed": { connId: "string" },
   "exec.result": { requestId: "string", ok: "boolean", exitCode: "number", stdout: "string", stderr: "string" },
   "fs.listed": { requestId: "string", ok: "boolean", entries: "array" },
   "fs.read.result": { requestId: "string", ok: "boolean", content: "string" },
@@ -321,6 +363,7 @@ const CLIENT_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
   "client.removeDevice": { daemonId: "string" },
   "device.authorizeInfo": { token: "string" },
   "device.authorize": { token: "string" },
+  "proxy.issueAuth": { redirect: "string" },
   "client.upgradeDaemon": { daemonId: "string", version: "string" },
   "project.import": { daemonId: "string", path: "string" },
   "project.remove": { projectId: "string" },
