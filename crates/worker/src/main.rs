@@ -54,7 +54,8 @@ struct WorkerState {
     last_reported_ports: Vec<SessionPorts>,
 }
 
-/// 出站到 server 的消息（WS 区分文本/二进制）
+/// 出站到 server 的消息（WS 区分文本/二进制）。Debug 供单测断言失败时打印（tunnel.rs）。
+#[derive(Debug)]
 pub(crate) enum WsOut {
     Text(String),
     Binary(Vec<u8>),
