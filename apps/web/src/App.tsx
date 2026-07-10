@@ -19,11 +19,12 @@ const USE_SUPABASE = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
 const STATUS_LABEL: Record<Task["status"], string> = { idle: "未启动", running: "运行中", exited: "已结束" };
 type AuthState = "need-login" | "authenticating" | "authed" | "auth-failed";
 
-/** 无路由单页：先按路径分支，再决定渲染哪棵组件树——授权页与主 app 各起各的 WS 连接，
- * 互不干扰（尤其不能让授权页也触发主 app 的 xterm/自动重连副作用，见 plan 003 landmine）。 */
+/** 无路由单页：先按路径分支，再决定渲染哪棵组件树——授权页/预览门禁页与主 app 各起各的 WS 连接，
+ * 互不干扰（尤其不能让这些页也触发主 app 的 xterm/自动重连副作用，见 plan 003 landmine）。 */
 export function App() {
   const m = /^\/authorize\/([^/]+)\/?$/.exec(location.pathname);
   if (m) return <AuthorizePage token={decodeURIComponent(m[1])} />;
+  if (location.pathname === "/proxy-auth") return <ProxyAuthPage />;
   return <MainApp />;
 }
 
@@ -49,6 +50,8 @@ function MainApp() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [enrollCommand, setEnrollCommand] = useState<string | null>(null);
+  // 端口转发（plan 006）：taskId -> 该任务当前可访问的端口/预览链接列表
+  const [ports, setPorts] = useState<Record<string, { port: number; url: string }[]>>({});
 
   const send = (msg: ClientToServer) => {
     const ws = wsRef.current;
@@ -205,11 +208,14 @@ function MainApp() {
         setAuthState("auth-failed");
         shouldRetryRef.current = false;
         break;
-      case "state.snapshot":
+      case "state.snapshot": {
         setDaemons(msg.daemons);
         setProjects(msg.projects);
         setWorkspaces(msg.workspaces);
         setTasks(msg.tasks);
+        const nextPorts: Record<string, { port: number; url: string }[]> = {};
+        for (const p of msg.ports ?? []) (nextPorts[p.taskId] ??= []).push({ port: p.port, url: p.url });
+        setPorts(nextPorts);
         if (activeTaskRef.current) {
           const t = msg.tasks.find((x) => x.id === activeTaskRef.current);
           if (t && t.status === "running" && t.sessionId) {
@@ -219,6 +225,7 @@ function MainApp() {
           }
         }
         break;
+      }
       case "daemon.updated":
         setDaemons((prev) => upsert(prev, msg.daemon, (d) => d.daemonId === msg.daemon.daemonId));
         break;
@@ -257,7 +264,16 @@ function MainApp() {
       }
       case "task.removed":
         setTasks((prev) => prev.filter((t) => t.id !== msg.taskId));
+        setPorts((prev) => {
+          if (!(msg.taskId in prev)) return prev;
+          const next = { ...prev };
+          delete next[msg.taskId];
+          return next;
+        });
         if (msg.taskId === activeTaskRef.current) clearActive();
+        break;
+      case "ports.updated":
+        setPorts((prev) => ({ ...prev, [msg.taskId]: msg.ports }));
         break;
       case "task.detached":
         // 控制权被其它客户端接管：放弃控制（保留当前画面作为记录），需要时可重新点开夺回
@@ -401,6 +417,19 @@ function MainApp() {
                     <div key={t.id} className={`task ${t.id === activeTaskId ? "active" : ""}`} onClick={() => openTask(t)}>
                       <span className={`task-status ${t.status}`}>{STATUS_LABEL[t.status]}</span>
                       <span className="task-title">{t.title}</span>
+                      {(ports[t.id] ?? []).map((p) => (
+                        <a
+                          key={p.port}
+                          className="port-badge"
+                          href={p.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={`预览端口 ${p.port}：${p.url}`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          :{p.port}
+                        </a>
+                      ))}
                       <span className="task-actions">
                         {t.status === "running" && <button className="mini" title="停止" onClick={(e) => stop(e, t.id)}>■</button>}
                         <button className="mini danger" title="删除" onClick={(e) => removeTask(e, t.id)}>✕</button>
@@ -600,6 +629,147 @@ function AuthorizePage({ token }: { token: string }) {
             )}
             {state.phase === "authorizing" && <p className="login-hint">正在授权…</p>}
             {state.phase === "done" && <p className="login-status">✓ 授权成功，设备已登记。可以关闭此页面了。</p>}
+            {state.phase === "failed" && <p className="login-status err">{state.message}</p>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** /proxy-auth：端口转发预览链接的登录门禁跳转页（plan 006）。
+ * 浏览器访问 `<shortId>.<proxyHost>` 未带门禁 cookie 时被 302 到这里（?to=<原始完整 URL>）；
+ * 本页复用已登录态换一次性回调 URL（WS proxy.issueAuth），再把浏览器整个导航过去（该回调
+ * 落在预览域上，服务器在那里种下 Domain=.<proxyHost> 的 cookie 后再 302 回原路径）。
+ * 与 AuthorizePage 同构：独立组件树、独立 WS 连接，登录表单复用同一套 CSS。 */
+type ProxyAuthState =
+  | { phase: "need-login" }
+  | { phase: "authenticating" }
+  | { phase: "auth-failed"; message: string }
+  | { phase: "invalid" }
+  | { phase: "issuing" }
+  | { phase: "failed"; message: string };
+
+function ProxyAuthPage() {
+  const wsRef = useRef<WebSocket | null>(null);
+  const to = new URLSearchParams(location.search).get("to");
+  const [state, setState] = useState<ProxyAuthState>(to ? { phase: "need-login" } : { phase: "invalid" });
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+
+  const send = (msg: ClientToServer) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+  };
+
+  function connect(cred: { token: string } | { supabaseToken: string } | { username: string; password: string }) {
+    setState({ phase: "authenticating" });
+    const ws = new WebSocket(SERVER_URL);
+    wsRef.current = ws;
+    ws.onopen = () => {
+      if ("token" in cred) send({ type: "client.auth", clientToken: cred.token });
+      else if ("supabaseToken" in cred) send({ type: "client.auth", supabaseToken: cred.supabaseToken });
+      else send({ type: "client.auth", username: cred.username, password: cred.password });
+    };
+    ws.onclose = () => {
+      setState((s) => (s.phase === "issuing" ? s : { phase: "failed", message: "连接已断开，请刷新页面重试" }));
+    };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data !== "string") return;
+      let msg: ServerToClient;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      switch (msg.type) {
+        case "auth.ok":
+          setState({ phase: "issuing" });
+          send({ type: "proxy.issueAuth", redirect: to! });
+          break;
+        case "auth.error":
+          localStorage.removeItem(TOKEN_KEY);
+          setState({ phase: "auth-failed", message: USE_SUPABASE ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误" });
+          break;
+        case "proxy.auth":
+          if (msg.ok && msg.url) location.href = msg.url; // 整页导航到预览域回调，完成后落地回原路径
+          else setState({ phase: "failed", message: msg.error || "无法访问该预览链接" });
+          break;
+        default:
+          break;
+      }
+    };
+  }
+
+  useEffect(() => {
+    if (!to) return;
+    const saved = localStorage.getItem(TOKEN_KEY);
+    if (saved) connect({ token: saved });
+    return () => {
+      wsRef.current?.close();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function login(e: React.FormEvent) {
+    e.preventDefault();
+    if (!USE_SUPABASE) {
+      connect({ username, password });
+      return;
+    }
+    setState({ phase: "authenticating" });
+    try {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: { "content-type": "application/json", apikey: SUPABASE_ANON_KEY! },
+        body: JSON.stringify({ email: username, password }),
+      });
+      if (!res.ok) {
+        setState({ phase: "auth-failed", message: "邮箱或密码错误" });
+        return;
+      }
+      const data = await res.json();
+      if (!data?.access_token) {
+        setState({ phase: "auth-failed", message: "登录失败：未获得访问令牌" });
+        return;
+      }
+      connect({ supabaseToken: data.access_token });
+    } catch {
+      setState({ phase: "auth-failed", message: "网络错误：无法连接认证服务" });
+    }
+  }
+
+  const showLogin = state.phase === "need-login" || state.phase === "authenticating" || state.phase === "auth-failed";
+
+  return (
+    <div className="app">
+      <div className="login">
+        {state.phase === "invalid" ? (
+          <div className="login-card">
+            <div className="brand-lg">coflux</div>
+            <p className="login-status err">链接无效：缺少跳转目标</p>
+          </div>
+        ) : showLogin ? (
+          <form className="login-card" onSubmit={login}>
+            <div className="brand-lg">coflux</div>
+            <p className="login-hint">访问预览链接 —— 请先登录你的账号</p>
+            <input
+              autoFocus
+              type={USE_SUPABASE ? "email" : "text"}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder={USE_SUPABASE ? "邮箱" : "用户名"}
+              autoComplete={USE_SUPABASE ? "email" : "username"}
+            />
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="密码" autoComplete="current-password" />
+            <button type="submit">登录</button>
+            {state.phase === "authenticating" && <div className="login-status">连接中…</div>}
+            {state.phase === "auth-failed" && <div className="login-status err">{state.message}</div>}
+          </form>
+        ) : (
+          <div className="login-card">
+            <div className="brand-lg">coflux</div>
+            {state.phase === "issuing" && <p className="login-hint">正在跳转到预览页…</p>}
             {state.phase === "failed" && <p className="login-status err">{state.message}</p>}
           </div>
         )}
