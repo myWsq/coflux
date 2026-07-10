@@ -38,7 +38,6 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
   const tasksRef = useRef(workspaceTasks);
   const activeTaskIdRef = useRef(activeTaskId);
   const controlStatesRef = useRef(controlStates);
-  const detachedTaskIdsRef = useRef(client.detachedTaskIds);
   const snapshotRevisionRef = useRef(client.snapshotRevision);
   const controllersRef = useRef(new Map<string, TerminalController>());
   const sessionReadyRef = useRef(new Map<string, string>());
@@ -53,7 +52,6 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
   tasksRef.current = workspaceTasks;
   activeTaskIdRef.current = activeTaskId;
   controlStatesRef.current = controlStates;
-  detachedTaskIdsRef.current = client.detachedTaskIds;
   snapshotRevisionRef.current = client.snapshotRevision;
 
   function updateControlState(taskId: string, state: TerminalControlState) {
@@ -98,9 +96,8 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
     const { cols, rows } = controller.dimensions();
     client.startTask(task.id, cols, rows);
     clearAttachTimer(task.id);
-    const sequence = ++attachSequenceRef.current;
+    attachSequenceRef.current += 1;
     const timer = window.setTimeout(() => {
-      if (attachSequenceRef.current < sequence) return;
       if (controlStatesRef.current[task.id] === "attaching") markOwned(task.id, task.sessionId!);
     }, ATTACH_GRACE_MS);
     attachTimersRef.current.set(task.id, timer);

@@ -299,6 +299,8 @@ export function useCofluxClient() {
     send({ type: "client.createEnrollmentKey" });
   }, [send]);
 
+  const clearEnrollmentCommand = useCallback(() => setEnrollCommand(null), []);
+
   return {
     status,
     authState,
@@ -319,7 +321,7 @@ export function useCofluxClient() {
     startTask,
     registerSessionConsumer,
     requestEnrollmentKey,
-    clearEnrollmentCommand: () => setEnrollCommand(null),
+    clearEnrollmentCommand,
   };
 }
 
