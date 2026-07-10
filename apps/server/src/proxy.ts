@@ -252,10 +252,12 @@ function buildSetCookie(token: string): string {
   return attrs.join("; ");
 }
 
-/** 防开放重定向：只接受同源相对路径（单个 `/` 开头、非协议相对 `//`、不含换行），否则退回根路径。 */
+/** 防开放重定向：只接受同源相对路径（单个 `/` 开头、第二个字符不得是 `/` 或 `\`、不含换行），
+ * 否则退回根路径。`\` 也要挡：浏览器会把 Location 里的 `\` 规范化为 `/`，`/\evil.com`
+ * 等价 `//evil.com`（协议相对 URL），仍是跨站跳转。 */
 function safeRelativeTarget(to: string | null): string {
   if (!to) return "/";
-  if (!to.startsWith("/") || to.startsWith("//")) return "/";
+  if (!/^\/(?![/\\])/.test(to)) return "/";
   if (/[\r\n]/.test(to)) return "/";
   return to;
 }
@@ -439,12 +441,19 @@ function drainBody(req: IncomingMessage): Promise<Buffer> {
 /** 把请求头改写为发给 daemon 本地端口的原始请求行+头块：Host 重写为本地端口地址（多数开发服务器
  * 校验 Host，转发原始子域名 Host 会被拒），Transfer-Encoding/Content-Length 剥离后按已排空的
  * body 长度重算精确 Content-Length（Node 收body时已自动解 chunked，若原样转发 chunked 头会与
- * 未分块字节矛盾，破坏下游解析——见 plan 006 landmine）。 */
+ * 未分块字节矛盾，破坏下游解析——见 plan 006 landmine）。
+ *
+ * 强制 Connection: close（剥离原 connection/keep-alive/proxy-connection）：接管 socket 后
+ * keep-alive 的后续请求是原始字节透传，Host 无法再被重写，vite 5+ 等的 Host 白名单会拒掉
+ * 第二个请求（首屏正常、后续资源随机 403）。牺牲连接复用换 Host 一致性——每个 HTTP 请求
+ * 单独一条隧道连接，响应完 dev server 主动关连接，浏览器为下一个请求重新建连、重新走
+ * 门禁 + Host 重写；单请求内的流式响应（SSE/大文件）不受影响，dev 预览场景此代价可忽略。
+ * WS 走 buildRawUpgradeHead，不在此列（Upgrade 语义需要原 Connection 头）。 */
 function buildRawRequestHead(req: IncomingMessage, route: ProxyRoute, bodyLength: number): string {
   const method = req.method ?? "GET";
   const target = req.url ?? "/";
   const originalHost = req.headers.host ?? "";
-  const skip = new Set(["host", "transfer-encoding", "content-length"]);
+  const skip = new Set(["host", "transfer-encoding", "content-length", "connection", "keep-alive", "proxy-connection"]);
   const lines: string[] = [`${method} ${target} HTTP/1.1`];
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === undefined || skip.has(key.toLowerCase())) continue;
@@ -453,6 +462,7 @@ function buildRawRequestHead(req: IncomingMessage, route: ProxyRoute, bodyLength
   }
   lines.push(`Host: 127.0.0.1:${route.port}`);
   lines.push(`Content-Length: ${bodyLength}`);
+  lines.push("Connection: close");
   if (originalHost) lines.push(`X-Forwarded-Host: ${originalHost}`);
   lines.push(`X-Forwarded-Proto: ${config.proxyScheme}`);
   lines.push("", "");
