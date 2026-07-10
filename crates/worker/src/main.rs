@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use coflux_protocol::{
-    is_frame, write_record, DaemonToServer, RecordParser, ServerToDaemon, SessionRef, Settings, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
+    is_frame, write_record, DaemonToServer, RecordParser, ServerToDaemon, SessionInfo, SessionRef, Settings, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -42,7 +42,7 @@ struct Config {
 struct WorkerState {
     authed: bool,
     sup_synced: bool,
-    alive: HashMap<String, String>, // sessionId -> taskId
+    alive: HashMap<String, (String, i32)>, // sessionId -> (taskId, pid)
     credentials: Option<Credentials>,
     /// 等待授权中的链接过期时刻（server 侧 epoch ms）。到期且连接仍在、仍未登记时，
     /// 由 run_server_connection 的定时检查重发 daemon.enrollRequest 换新链接。
@@ -76,8 +76,8 @@ fn pick(env_key: &str, from_settings: Option<String>, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-fn alive_to_resync(alive: &HashMap<String, String>) -> Vec<SessionRef> {
-    alive.iter().map(|(s, t)| SessionRef { session_id: s.clone(), task_id: t.clone() }).collect()
+fn alive_to_resync(alive: &HashMap<String, (String, i32)>) -> Vec<SessionRef> {
+    alive.iter().map(|(s, (t, _pid))| SessionRef { session_id: s.clone(), task_id: t.clone() }).collect()
 }
 
 async fn send_text(tx: &Sender<WsOut>, msg: &DaemonToServer) {
@@ -237,7 +237,7 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
     };
     match msg {
         SupervisorToWorker::SessionStarted { session_id, task_id, pid } => {
-            state.lock().unwrap().alive.insert(session_id.clone(), task_id.clone());
+            state.lock().unwrap().alive.insert(session_id.clone(), (task_id.clone(), pid));
             send_text(to_server_tx, &DaemonToServer::SessionStarted { session_id, task_id, pid }).await;
         }
         SupervisorToWorker::SessionExit { session_id, exit_code } => {
@@ -249,14 +249,17 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
                 let mut s = state.lock().unwrap();
                 s.alive.clear();
                 for r in &sessions {
-                    s.alive.insert(r.session_id.clone(), r.task_id.clone());
+                    s.alive.insert(r.session_id.clone(), (r.task_id.clone(), r.pid));
                 }
                 s.sup_synced = true;
                 s.authed
             };
             eprintln!("[worker] supervisor resync count={}", sessions.len());
             if authed {
-                send_text(to_server_tx, &DaemonToServer::DaemonResync { sessions }).await;
+                // daemon→server 的 daemon.resync 形状已冻结（SessionRef，不含 pid），
+                // pid 只在 UDS 快照(SessionInfo)里供本地端口探测（005）用
+                let resync: Vec<SessionRef> = sessions.into_iter().map(|s: SessionInfo| SessionRef { session_id: s.session_id, task_id: s.task_id }).collect();
+                send_text(to_server_tx, &DaemonToServer::DaemonResync { sessions: resync }).await;
             }
         }
     }

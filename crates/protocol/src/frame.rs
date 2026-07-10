@@ -1,30 +1,36 @@
-//! 数据面二进制帧（pty.output / pty.input / pty.replay）。
+//! 数据面二进制帧（pty.output / pty.input / pty.replay / proxy.data）。
 //!
 //! 与 TS `packages/protocol` 的 encodeFrame/decodeFrame 字节级一致：
-//!   [kind:1][sidLen:1][sessionId:utf8][? ridLen:1][? requestId:utf8][payload 到帧尾]
-//! kind: 1=output 2=input 3=replay（仅 replay 带 requestId）。
+//!   [kind:1][idLen:1][id:utf8][? ridLen:1][? requestId:utf8][payload 到帧尾]
+//! kind: 1=output 2=input 3=replay（仅 replay 带 requestId）4=proxy.data。
+//! proxy.data 的 id 是 connId（隧道连接 id），复用同一头部布局，双向（server↔daemon）透传
+//! 任意 TCP 字节。
 //!
 //! data 用 `Vec<u8>` 而非 String：PTY 输出是原始字节，分块读取可能切断一个多字节
 //! UTF-8 字符；按字节透传、不在边界处解码，避免损坏（TS 侧用 node-pty 已解码的字符串，
-//! 到了 Rust + portable-pty 是裸字节，按字节处理才正确）。
+//! 到了 Rust + portable-pty 是裸字节，按字节处理才正确）。proxy.data 同理，且天然可能
+//! 是非文本二进制协议。
 
 pub const FRAME_OUTPUT: u8 = 1;
 pub const FRAME_INPUT: u8 = 2;
 pub const FRAME_REPLAY: u8 = 3;
+pub const FRAME_PROXY_DATA: u8 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataFrame {
     Output { session_id: String, data: Vec<u8> },
     Input { session_id: String, data: Vec<u8> },
     Replay { session_id: String, request_id: String, data: Vec<u8> },
+    ProxyData { conn_id: String, data: Vec<u8> },
 }
 
-/// 编码为二进制帧。sessionId/requestId 为服务器签发的短 id（< 256 字节）。
+/// 编码为二进制帧。sessionId/requestId/connId 为服务器签发的短 id（< 256 字节）。
 pub fn encode_frame(frame: &DataFrame) -> Vec<u8> {
     let (kind, sid, rid, data): (u8, &str, Option<&str>, &[u8]) = match frame {
         DataFrame::Output { session_id, data } => (FRAME_OUTPUT, session_id, None, data),
         DataFrame::Input { session_id, data } => (FRAME_INPUT, session_id, None, data),
         DataFrame::Replay { session_id, request_id, data } => (FRAME_REPLAY, session_id, Some(request_id), data),
+        DataFrame::ProxyData { conn_id, data } => (FRAME_PROXY_DATA, conn_id, None, data),
     };
     let sid = sid.as_bytes();
     debug_assert!(sid.len() <= 255, "sessionId too long for frame");
@@ -70,6 +76,7 @@ pub fn decode_frame(buf: &[u8]) -> Option<DataFrame> {
             off += rid_len;
             Some(DataFrame::Replay { session_id, request_id, data: buf[off..].to_vec() })
         }
+        FRAME_PROXY_DATA => Some(DataFrame::ProxyData { conn_id: session_id, data: buf[off..].to_vec() }),
         _ => None,
     }
 }
@@ -107,5 +114,20 @@ mod tests {
         assert_eq!(decode_frame(&[FRAME_OUTPUT, 5, b'a']), None); // sidLen=5 但不足
         assert_eq!(decode_frame(&[FRAME_REPLAY, 1, b's']), None); // 缺 ridLen
         assert_eq!(decode_frame(&[9, 0]), None); // 未知 kind
+    }
+
+    #[test]
+    fn proxy_data_roundtrip() {
+        let f = DataFrame::ProxyData { conn_id: "conn-42".into(), data: b"GET / HTTP/1.1\r\n\xff\x00binary".to_vec() };
+        let enc = encode_frame(&f);
+        assert_eq!(enc[0], FRAME_PROXY_DATA);
+        assert_eq!(enc[1] as usize, "conn-42".len());
+        assert_eq!(decode_frame(&enc), Some(f));
+    }
+
+    #[test]
+    fn proxy_data_rejects_truncated() {
+        assert_eq!(decode_frame(&[FRAME_PROXY_DATA]), None);
+        assert_eq!(decode_frame(&[FRAME_PROXY_DATA, 5, b'a']), None); // idLen=5 但不足
     }
 }

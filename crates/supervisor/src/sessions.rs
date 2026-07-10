@@ -8,7 +8,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use coflux_protocol::{encode_frame, write_record, DataFrame, SessionRef, SupervisorToWorker};
+use coflux_protocol::{encode_frame, write_record, DataFrame, SessionInfo, SupervisorToWorker};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 struct Session {
@@ -16,6 +16,7 @@ struct Session {
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
     task_id: String,
+    pid: i32,
     scrollback: Vec<u8>,
 }
 
@@ -82,7 +83,7 @@ impl Sessions {
         let pid = child.process_id().map(|p| p as i32).unwrap_or(-1);
         self.map.lock().unwrap().insert(
             session_id.clone(),
-            Session { master: pair.master, writer, child, task_id: task_id.clone(), scrollback: Vec::new() },
+            Session { master: pair.master, writer, child, task_id: task_id.clone(), pid, scrollback: Vec::new() },
         );
         eprintln!("[supervisor] session started {session_id} pid={pid}");
         self.send_ctrl(&SupervisorToWorker::SessionStarted { session_id: session_id.clone(), task_id, pid });
@@ -160,12 +161,12 @@ impl Sessions {
         self.send_record(write_record(&frame));
     }
     pub fn send_resync(&self) {
-        let sessions: Vec<SessionRef> = self
+        let sessions: Vec<SessionInfo> = self
             .map
             .lock()
             .unwrap()
             .iter()
-            .map(|(id, s)| SessionRef { session_id: id.clone(), task_id: s.task_id.clone() })
+            .map(|(id, s)| SessionInfo { session_id: id.clone(), task_id: s.task_id.clone(), pid: s.pid })
             .collect();
         self.send_ctrl(&SupervisorToWorker::ResyncList { sessions });
     }

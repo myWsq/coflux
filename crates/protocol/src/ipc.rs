@@ -7,10 +7,19 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::wire::SessionRef;
-
 /// supervisor 把 UDS 路径经此环境变量传给 worker 子进程
 pub const SUPERVISOR_SOCK_ENV: &str = "COFLUX_SUPERVISOR_SOCK";
+
+/// resync.list 携带的存活会话快照（含 pid）。与 wire::SessionRef（daemon→server resync，
+/// 不含 pid）是两个独立类型：worker 重启后要靠 pid 找到 PTY 进程树根做端口探测，
+/// 而 daemon→server 的 resync 形状已冻结、不需要 pid。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    pub session_id: String,
+    pub task_id: String,
+    pub pid: i32,
+}
 
 /// worker → supervisor 控制消息（JSON）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +71,7 @@ pub enum SupervisorToWorker {
     #[serde(rename = "session.exit")]
     SessionExit { session_id: String, exit_code: i32 },
     #[serde(rename = "resync.list")]
-    ResyncList { sessions: Vec<SessionRef> },
+    ResyncList { sessions: Vec<SessionInfo> },
 }
 
 /// 写一条带长度前缀的记录（header + payload 一起返回，调用方一次写出）
@@ -145,5 +154,20 @@ mod tests {
         assert!(s.contains(r#""type":"session.started""#));
         assert!(s.contains(r#""sessionId":"s1""#));
         assert!(s.contains(r#""taskId":"t1""#));
+    }
+
+    #[test]
+    fn resync_list_carries_pid() {
+        let m = SupervisorToWorker::ResyncList { sessions: vec![SessionInfo { session_id: "s1".into(), task_id: "t1".into(), pid: 4242 }] };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains(r#""type":"resync.list""#));
+        assert!(s.contains(r#""pid":4242"#));
+        let back: SupervisorToWorker = serde_json::from_str(&s).unwrap();
+        match back {
+            SupervisorToWorker::ResyncList { sessions } => {
+                assert_eq!(sessions, vec![SessionInfo { session_id: "s1".into(), task_id: "t1".into(), pid: 4242 }]);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }
