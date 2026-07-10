@@ -20,3 +20,8 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # 且避免依赖树里两个 provider 并存时 rustls 无法自动选定而 panic。
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 futures-util = "0.3"
+
+# 端口探测（005）仅 macOS 侧需要：同 uid 无特权枚举进程 fd/socket 信息（listpidinfo/pidfdinfo），
+# 不需要 root、不 fork lsof 子进程。Linux 手撸 /proc，其余平台空实现，故只在 macOS target 引入。
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = "0.14"
