@@ -1,7 +1,7 @@
-import { LegacyWorkbench } from "@/components/legacy-workbench";
+import { Workbench } from "@/components/workbench/workbench";
 import { useCofluxClient } from "@/hooks/use-coflux-client";
 
 export function MainPage() {
   const client = useCofluxClient();
-  return <LegacyWorkbench client={client} />;
+  return <Workbench client={client} />;
 }
