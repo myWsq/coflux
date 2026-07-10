@@ -14,7 +14,10 @@
  */
 import { randomUUID, randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Socket } from "node:net";
+// 统一用 Duplex 而非 net.Socket：Node 'upgrade' 事件签名里 socket 声明为 stream.Duplex
+// （运行时实际是 net.Socket），而本模块只用到 Duplex 能力（write/end/destroy/writableLength/事件），
+// 放宽参数类型即可让 req.socket 与 upgrade socket 走同一套隧道代码，无需类型断言。
+import type { Duplex } from "node:stream";
 import { encodeFrame, type AccountId, type DaemonId, type SessionId, type TaskId, type ServerToDaemon } from "@coflux/protocol";
 import { config } from "./config.js";
 import { genToken } from "./secrets.js";
@@ -286,7 +289,7 @@ interface OpenConn {
   connId: string;
   daemonId: DaemonId;
   shortId: string;
-  socket: Socket;
+  socket: Duplex;
   resolveReady?: (ok: boolean, error?: string) => void;
 }
 
@@ -298,7 +301,7 @@ export class TunnelRegistry {
   constructor(private host: TunnelHost) {}
 
   /** 发起打开：立即向 daemon 发 proxy.open，返回 ready promise（daemon 回 proxy.opened 或超时二选一，先到者准）。 */
-  open(route: ProxyRoute, socket: Socket, timeoutMs = 8000): { connId: string; ready: Promise<{ ok: boolean; error?: string }> } {
+  open(route: ProxyRoute, socket: Duplex, timeoutMs = 8000): { connId: string; ready: Promise<{ ok: boolean; error?: string }> } {
     const connId = randomUUID();
     const entry: OpenConn = { connId, daemonId: route.daemonId, shortId: route.shortId, socket };
     this.conns.set(connId, entry);
@@ -490,7 +493,7 @@ function respondPlain(res: ServerResponse, code: number, message: string): void 
   }
 }
 
-function rejectUpgrade(socket: Socket, code: number, message: string): void {
+function rejectUpgrade(socket: Duplex, code: number, message: string): void {
   try {
     if (!socket.destroyed) socket.end(`HTTP/1.1 ${code} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   } catch {
@@ -578,7 +581,7 @@ export async function handleProxyRequest(ctx: ProxyServerContext, req: IncomingM
 /** WebSocket（及其它 Upgrade）入口：门禁逻辑与 handleProxyRequest 一致，通过后把 head 缓冲
  * （Node 在识别出 Upgrade 前已读到的字节）与后续原始字节一并转发。无法在这里做 302（Upgrade
  * 语义没有重定向），未过门禁直接拒绝——预览页首次访问走普通 HTTP 请求触发登录，WS 是后续动作。 */
-export async function handleProxyUpgrade(ctx: ProxyServerContext, req: IncomingMessage, socket: Socket, head: Buffer): Promise<void> {
+export async function handleProxyUpgrade(ctx: ProxyServerContext, req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
   const hostHeader = req.headers.host ?? "";
   const shortId = shortIdFromHostname(stripPort(hostHeader));
   if (!shortId) return rejectUpgrade(socket, 400, "Bad Request");
