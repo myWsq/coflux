@@ -43,7 +43,7 @@
 
 ### 关键不变量
 - **Session（PTY 进程 + scrollback）由 Daemon 拥有**；服务器只持有 `sessionId → {daemonId, taskId, 订阅者}` 的路由表（运行时、不落盘）。
-- 服务器掉电/重启后，靠 daemon 重连时的 `daemon.resync` 把存活会话重新挂回 task —— task 记录在 sqlite 里持久化。
+- 服务器掉电/重启后，靠 daemon 重连时的 `daemon.resync` 把存活会话重新挂回 task —— task 记录在 Postgres 里持久化。
 - "工作区管理在服务器"= 服务器持有**元数据**并**下发指令**；真正的目录/文件系统/Agent 进程都在 Daemon 上。
 
 ## 4. 控制面 / 数据面
@@ -56,7 +56,7 @@
   PTY 字节流：pty.input / pty.output / pty.replay，按 sessionId 多路复用
 ```
 
-两者复用同一条 WebSocket：控制面走 JSON 文本帧，**数据面（`pty.output`/`pty.input`/`pty.replay`）走二进制帧**（长度前缀帧体，见 §6），按 WS 的 `isBinary` 分流。
+两者复用同一条 WebSocket：控制面走 JSON 文本帧，**数据面（`pty.output`/`pty.input`/`pty.replay`/`proxy.data`）走二进制帧**（长度前缀帧体，见 §6），按 WS 的 `isBinary` 分流。`proxy.data`（kind=4）是端口转发反代的隧道字节流，见 §7.3。
 
 ## 5. 数据模型
 
@@ -70,7 +70,7 @@ Account      隔离单元（单用户单账号，留多账号位）
   └─ ClientToken    账号级登录令牌（存 hash）
 ```
 
-- **Account / Device / Workspace / Task / 密钥** 落 sqlite（`store.ts`，`node:sqlite`，零原生依赖）；token 只存 sha256 hash。
+- **Account / Device / Workspace / Task / 密钥** 落 Postgres（`store.ts`，`postgres`/porsager 客户端，独立 `coflux` schema，列名 snake_case 与应用层 camelCase 自动互转）；token 只存 sha256 hash。
 - **Session** 是运行时实体，不落盘；靠重连 resync 恢复。
 - Device 的 `daemonId` 由服务器签发并绑定到设备凭证（不可冒充）；认证模型见 [auth-design.md](auth-design.md)。
 - Task 状态机：`idle`（建好未启动）→ `running`（有存活 session）→ `exited`（session 退出）。对 `exited` 的 task 再 `task.start` 即重跑。
@@ -81,18 +81,18 @@ Account      隔离单元（单用户单账号，留多账号位）
 控制面消息 JSON 编码、用 `type` 区分；**数据面（`pty.output`/`pty.input`/`pty.replay`）走二进制帧**（`encodeFrame`/`decodeFrame`），按 `sessionId` 多路复用。下方控制面消息清单不含数据面三条。
 
 **Daemon → Server**（控制面）
-`daemon.enroll {enrollmentKey,name,host,platform}` · `daemon.auth {deviceToken}` · `daemon.resync {sessions:[{sessionId,taskId}]}` · `workspace.validated` · `session.started` · `session.exit`
+`daemon.enroll {enrollmentKey,name,host,platform}` · `daemon.auth {deviceToken}` · `daemon.enrollRequest` · `daemon.resync {sessions:[{sessionId,taskId}]}` · `project.validated` · `worktree.added` · `session.started` · `session.exit` · `ports.update {sessions:[{sessionId,ports}]}` · `proxy.opened {connId,ok,error?}` · `proxy.closed {connId}`
 
 **Server → Daemon**（控制面）
-`daemon.enrolled {daemonId,deviceToken}` · `daemon.authed {daemonId}` · `daemon.authError {needEnroll}` · `workspace.validate {requestId,path}` · `session.create` · `session.close` · `session.replay {requestId}` · `pty.resize`
+`daemon.enrolled {daemonId,deviceToken}` · `daemon.authed {daemonId}` · `daemon.authError {needEnroll}` · `daemon.authorizePending {url,expiresAt}` · `project.validate {requestId,path}` · `worktree.add` · `worktree.remove` · `worker.upgrade` · `session.create` · `session.close` · `session.replay {requestId}` · `pty.resize` · `proxy.open {connId,port}` · `proxy.close {connId}`
 
 **Client → Server**（控制面）
-`client.auth {clientToken}` · `client.subscribe` · `client.removeDevice` · `workspace.create` · `workspace.remove` · `task.create` · `task.start` · `task.attach` · `task.stop` · `task.remove` · `pty.resize`
+`client.auth {username,password}` / `{clientToken}` / `{supabaseToken}` · `client.subscribe` · `client.removeDevice` · `device.authorizeInfo` · `device.authorize` · `proxy.issueAuth {redirect}` · `project.import` · `project.remove` · `workspace.create` · `workspace.remove` · `task.create` · `task.start` · `task.attach` · `task.stop` · `task.remove` · `pty.resize`
 
 **Server → Client**（控制面）
-`auth.ok {accountId}` · `auth.error` · `state.snapshot {daemons,workspaces,tasks}` · `daemon.updated` · `daemon.removed` · `workspace.created` · `workspace.removed` · `task.updated` · `task.removed` · `error`
+`auth.ok {accountId}` · `auth.error` · `state.snapshot {daemons,projects,workspaces,tasks,ports}` · `daemon.updated` · `daemon.removed` · `project.created` · `project.removed` · `workspace.created` · `workspace.removed` · `task.updated` · `task.removed` · `task.detached` · `proxy.auth {ok,url?,error?}` · `ports.updated {taskId,ports:[{port,url}]}` · `error`
 
-**数据面（二进制帧，多路复用按 `sessionId`）**：`pty.output`（daemon→server→client）· `pty.input`（client→server→daemon）· `pty.replay`（daemon→server，scrollback；server 转成 `pty.output` 帧发给 client）。帧体 `[kind][sidLen][sessionId][?ridLen][?requestId][payload]`，payload 为原始终端字节（UTF-8），不再经 JSON 转义。server 中继时只校验归属、原样转发字节。
+**数据面（二进制帧，多路复用按 `id` 字段）**：`pty.output`（daemon→server→client）· `pty.input`（client→server→daemon）· `pty.replay`（daemon→server，scrollback；server 转成 `pty.output` 帧发给 client）· `proxy.data`（server↔daemon，端口转发隧道的原始字节，见 §7.3）。帧体 `[kind:1][idLen:1][id][?ridLen][?requestId][payload]`：`id` 对 `pty.*` 是 sessionId、对 `proxy.data` 是 connId（服务器签发的隧道连接 id）。`pty.*` 的 payload 是终端文本（UTF-8）；`proxy.data` 的 payload 是任意 TCP 字节（可能非合法 UTF-8），按 `Uint8Array` 原样透传，不经 TextEncoder/TextDecoder 往返。kind 编号：1=Output 2=Input 3=Replay 4=ProxyData。server 中继时只校验归属、原样转发字节。
 
 ## 7. 两个核心流程
 
@@ -116,6 +116,31 @@ server.reconcileDaemonSessions:
 ```
 已通过 e2e：杀掉并重启服务器（同一 DB），daemon 重连后 task 仍 `running`，新 client attach 仍能回放历史。
 
+### 7.3 端口转发反代（预览链接门禁 + 隧道透传）
+
+```
+daemon 每 2s 探测 PTY 会话进程树内所有 LISTEN 端口（仅该会话子进程树，见 §10 安全边界）
+  ──ports.update{sessions:[{sessionId,ports}]}──▶ server
+server 按 (session,port) 收敛路由表：新端口签发不透明随机 shortId，消失的端口摘除路由
+  ──ports.updated{taskId,ports:[{port,url}]}──▶ client   （url 形如 http(s)://<shortId>.<proxyHost>）
+
+浏览器访问 <shortId>.<proxyHost>（按 Host 头路由，与 client/daemon 的 WS 共用同一端口/监听器）：
+  无门禁 cookie ──302──▶ web /proxy-auth?to=<原始完整 URL>
+  web（已登录）──WS proxy.issueAuth{redirect}──▶ server：校验 redirect 的 host 命中某个属于
+       本账号的 shortId，签发一次性 code（默认 60s TTL）──proxy.auth{ok,url}──▶ web
+       （url = http(s)://<shortId>.<proxyHost>/__cf_proxy_auth?code=…&to=…）
+  浏览器跳转 url ──▶ server 一次性消费 code、签发长效 cookie（cf_proxy_session，Domain=.<proxyHost>，
+       默认 7 天，覆盖账号下所有预览子域名）──302──▶ 回原路径
+  带有效 cookie 的请求/Upgrade ──▶ 接管整条 TCP 连接（hijack 底层 socket），经
+       proxy.open/proxy.data(kind=4)/proxy.close 与 daemon 之间的隧道原始字节双向透传到
+       daemon 本地端口，不逐请求重新解析报文
+```
+
+- **隧道 = socket 对拼**：server 把浏览器侧 TCP socket 与 daemon 侧到本地端口的 TCP 连接首尾相连，`connId`（server 签发）标识一条隧道；数据面靠 `proxy.data` 帧双向搬运原始字节，控制面靠 `proxy.open`/`proxy.opened`/`proxy.close`/`proxy.closed` 管生命周期。
+- **HTTP 首请求强制 `Connection: close`**：接管 socket 后 keep-alive 的后续请求是原始字节透传、Host 已无法再重写，多数开发服务器的 Host 白名单会拒掉第二个请求；代价是每个 HTTP 请求单独一条隧道、响应完 dev server 主动关连接，浏览器下一个请求重新建连（重新走门禁 + Host 重写）。单请求内的流式响应（SSE/大文件）不受影响。WS Upgrade 不在此列——升级后的连接原样透传所有后续帧，含 Connection 头本身。
+- **门禁边界**：一次性 code 命中即失效（无论是否已过期），不可重放；长效 cookie 按账号级隔离（`route.accountId !== session.accountId` 一律当无 cookie 处理，重新走 302，不放行）；`proxy.issueAuth` 的 `redirect` 只接受 `<shortId>.<proxyHost>` 形态的 host，拒绝任意外部地址（防开放重定向，两道防线：issueAuth 入参校验 + 回调 `to` 的同源相对路径校验）。
+- **shortId 不透明**：随机生成，不由 daemonId/端口派生（隐私考量，猜中也无妨——真正的权限边界是账号级门禁 cookie）。同一 (session,port) 复用既有 shortId，直到该端口消失或路由被摘除（daemon 断线 / session 终结）；路由摘除后即使端口以相同号码重新出现，也会换发新的 shortId（链接因此可能变化，客户端需以最新一次 `ports.updated` 为准）。
+
 ## 8. 仓库结构
 
 ```
@@ -126,7 +151,7 @@ coflux/
 ├── apps/                      # TS：server + web（daemon 已全 Rust 化，见 crates/）
 │   ├── server/src/
 │   │   ├── config.ts          # 集中配置（env + 默认值）
-│   │   ├── store.ts           # sqlite 持久化（预编译缓存 + 事务 + WAL + close）
+│   │   ├── store.ts           # Postgres 持久化（porsager/postgres，独立 schema，事务）
 │   │   ├── secrets.ts         # token 生成/哈希
 │   │   ├── pending.ts         # 通用请求-响应关联登记表（超时/掉线清理）
 │   │   ├── transport.ts       # WS 接入样板：解码/校验/派发 + 心跳 + 认证截止
@@ -143,7 +168,7 @@ coflux/
 
 ## 9. 已实现 vs 待办
 
-**已实现**：workspace/task 建模 + sqlite 持久化 · PTY 双向流 · daemon 侧 scrollback + 定向回放 · 断线续连 + 服务器重启恢复 · 状态快照 + 增量推送 UI。
+**已实现**：workspace/task 建模 + Postgres 持久化 · PTY 双向流 · daemon 侧 scrollback + 定向回放 · 断线续连 + 服务器重启恢复 · 状态快照 + 增量推送 UI · 端口转发反代（探测 + 登录门禁 + 隧道透传，见 §7.3）。
 
 **已加固**（两轮对抗式审查，共 25 项确认问题全修）：
 - 第一轮（14 项，编排健壮性）：同 daemonId 重连按 ws 身份去重 · 重启后绝不重复起 PTY · stop/start 竞态用 `closing` 标志隔离 · session.exit 仅在 task 仍指向该 session 时改状态 · pending 请求带超时 + daemon 掉线清理 · resync 时清理孤儿 PTY · daemon 上行消息须先注册且按 session 归属校验 · client 只能操作自己订阅的 session。
@@ -158,6 +183,9 @@ coflux/
 - client 用登录令牌认证；快照/广播/路由/各项操作全部按 `accountId` 过滤，跨账号隔离。
 - token 只存 sha256 hash；daemon 凭证落本地 `chmod 600`。
 - 工作区路径仅校验"是目录"（自有机器无需沙箱）。
+- 端口探测严格限定在 PTY 会话的进程树内：daemon 只上报该会话子进程（含子孙）持有的 LISTEN 端口
+  （遍历进程树用 macOS libproc / Linux `/proc`，见 `crates/worker/src/ports.rs`），机器上其它进程
+  监听的端口不会被发现、更不会被上报或代理——已有 Rust 单测覆盖 + 黑盒 e2e 覆盖（`tests/src/proxy.test.mjs`）。
 
 待加固（部署层）：全程 TLS(`wss://`)、生产用强随机登记密钥/登录令牌（env 覆盖）。详见 [auth-design.md](auth-design.md)。
 
