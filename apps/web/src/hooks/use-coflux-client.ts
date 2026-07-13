@@ -46,7 +46,15 @@ export function useCofluxClient() {
   const errorSequenceRef = useRef(0);
 
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [authState, setAuthState] = useState<AuthState>("need-login");
+  // 有本地会话 token 时首屏直接进入 authenticating，避免刷新先闪登录页。
+  const [authState, setAuthState] = useState<AuthState>(() => {
+    const savedToken = localStorage.getItem(TOKEN_KEY);
+    if (savedToken) {
+      tokenRef.current = savedToken;
+      return "authenticating";
+    }
+    return "need-login";
+  });
   const [loginError, setLoginError] = useState("");
   const [daemons, setDaemons] = useState<DaemonInfo[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
