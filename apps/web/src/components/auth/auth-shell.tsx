@@ -9,13 +9,12 @@ import { USE_SUPABASE } from "@/config";
 export function AuthShell({ children }: { children: ReactNode }) {
   return (
     <main className="relative flex min-h-screen min-w-[1024px] items-center justify-center overflow-hidden bg-background px-8 py-12 text-foreground">
-      <div className="pointer-events-none absolute inset-0 opacity-70 [background-image:radial-gradient(circle_at_50%_-10%,rgba(141,162,251,0.15),transparent_40%),linear-gradient(rgba(255,255,255,0.018)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.018)_1px,transparent_1px)] [background-size:auto,32px_32px,32px_32px]" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_50%_0%,rgba(255,255,255,0.04),transparent_55%)]" />
       <div className="relative w-full max-w-[390px]">
-        <div className="mb-7 flex items-center justify-center gap-2.5">
-          <div className="flex size-9 items-center justify-center rounded-lg bg-primary text-sm font-black tracking-tighter text-primary-foreground shadow-[0_0_32px_rgba(141,162,251,0.18)]">co</div>
-          <span className="text-lg font-semibold tracking-tight">coflux</span>
+        <div className="mb-7 flex items-center justify-center">
+          <span className="text-lg font-medium tracking-tight">coflux</span>
         </div>
-        <div className="rounded-xl border border-border bg-card/95 p-6 shadow-2xl backdrop-blur">{children}</div>
+        <div className="rounded-lg border border-border bg-card p-6">{children}</div>
         <div className="mt-5 flex items-center justify-center gap-1.5 text-[10px] text-muted-foreground/70">
           <Network className="size-3" />
           安全连接到你的远程工作区

@@ -2,33 +2,34 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Cursor 式近黑 IDE：低对比分层、中性灰、无彩强调 */
 :root {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color-scheme: dark;
-  --background: #111214;
-  --foreground: #e7e9ee;
-  --card: #18191c;
-  --card-foreground: #e7e9ee;
-  --popover: #1b1c20;
-  --popover-foreground: #e7e9ee;
-  --primary: #d8e0ff;
-  --primary-foreground: #171922;
-  --secondary: #25272c;
-  --secondary-foreground: #e7e9ee;
-  --muted: #22242a;
-  --muted-foreground: #9297a3;
-  --accent: #292c34;
-  --accent-foreground: #f4f5f7;
-  --destructive: #ef6a78;
+  --background: #0a0a0a;
+  --foreground: #e4e4e4;
+  --card: #141414;
+  --card-foreground: #e4e4e4;
+  --popover: #1a1a1a;
+  --popover-foreground: #e4e4e4;
+  --primary: #ececec;
+  --primary-foreground: #0a0a0a;
+  --secondary: #1f1f1f;
+  --secondary-foreground: #e4e4e4;
+  --muted: #1a1a1a;
+  --muted-foreground: #8b8b8b;
+  --accent: #2a2a2a;
+  --accent-foreground: #f0f0f0;
+  --destructive: #e05c6a;
   --destructive-foreground: #fff4f5;
-  --border: #2b2d33;
-  --input: #303239;
-  --ring: #8da2fb;
-  --success: #75c995;
-  --warning: #e8b86d;
-  --sidebar: #151619;
-  --terminal: #111214;
-  --radius: 0.5rem;
+  --border: #1f1f1f;
+  --input: #2a2a2a;
+  --ring: #555555;
+  --success: #4fae6e;
+  --warning: #c9a227;
+  --sidebar: #141414;
+  --terminal: #0a0a0a;
+  --radius: 0.375rem;
 }
 
 @theme inline {
@@ -55,9 +56,9 @@
   --color-warning: var(--warning);
   --color-sidebar: var(--sidebar);
   --color-terminal: var(--terminal);
-  --radius-sm: calc(var(--radius) - 0.2rem);
+  --radius-sm: calc(var(--radius) - 0.125rem);
   --radius-md: var(--radius);
-  --radius-lg: calc(var(--radius) + 0.2rem);
+  --radius-lg: calc(var(--radius) + 0.125rem);
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
@@ -97,7 +98,7 @@ a {
 }
 
 ::selection {
-  background: rgb(96 116 178 / 45%);
+  background: rgb(80 80 80 / 55%);
 }
 
 ::-webkit-scrollbar {
@@ -112,12 +113,12 @@ a {
 ::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
   border-radius: 999px;
-  background: #3a3d45;
+  background: #333333;
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #50545e;
+  background: #4a4a4a;
   background-clip: padding-box;
 }
 
@@ -126,7 +127,7 @@ a {
 }
 
 .xterm .xterm-viewport {
-  scrollbar-color: #3a3d45 transparent;
+  scrollbar-color: #333333 transparent;
   scrollbar-width: thin;
 }
 

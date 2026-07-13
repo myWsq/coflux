@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertCircle, FolderGit2, X } from "lucide-react";
+import { AlertCircle, FolderGit2, LoaderCircle, X } from "lucide-react";
 import type { DaemonInfo, Project, Task, Workspace } from "@coflux/protocol";
 
 import { AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
@@ -112,6 +112,15 @@ export function Workbench({ client }: { client: CofluxClient }) {
     });
   }
 
+  // 恢复会话 / 登录握手中：只显示安静加载，不渲染登录表单（避免刷新闪一下）。
+  if (client.authState === "authenticating") {
+    return (
+      <div className="flex h-screen min-w-[1024px] items-center justify-center bg-background text-muted-foreground">
+        <LoaderCircle className="size-5 animate-spin" />
+      </div>
+    );
+  }
+
   if (client.authState !== "authed") {
     return (
       <AuthShell>
@@ -120,7 +129,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
           description={USE_SUPABASE ? "使用你的邮箱和密码访问远程工作区" : "使用本地账号访问远程工作区"}
           username={username}
           password={password}
-          busy={client.authState === "authenticating"}
+          busy={false}
           error={client.authState === "auth-failed" ? client.loginError || "登录失败" : undefined}
           onUsernameChange={setUsername}
           onPasswordChange={setPassword}
@@ -153,11 +162,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
       ) : (
         <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
           <div className="flex max-w-sm flex-col items-center text-center">
-            <div className="mb-4 flex size-12 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground shadow-sm">
-              <FolderGit2 className="size-6" />
+            <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
+              <FolderGit2 className="size-5" />
             </div>
-            <h1 className="text-sm font-medium">{client.projects.length === 0 ? "从一个项目开始" : "选择一个工作区"}</h1>
-            <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
+            <h1 className="text-[13px] font-medium">{client.projects.length === 0 ? "从一个项目开始" : "选择一个工作区"}</h1>
+            <p className="mt-1.5 text-[12px] leading-5 text-muted-foreground">
               {client.projects.length === 0 ? "导入在线设备上的 git 仓库，主工作区会自动创建。" : "从左侧项目或子工作区进入终端工作台。"}
             </p>
             {client.projects.length === 0 && (
