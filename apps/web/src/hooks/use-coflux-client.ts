@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  decodeFrame,
-  encodeFrame,
-  type ClientToServer,
+  create,
+  encodeClientToServer,
+  decodeServerToClient,
+  ClientToServerSchema,
+  TaskStatus,
+  type ClientToServerPayload,
   type DaemonInfo,
   type Project,
-  type ServerToClient,
   type Task,
   type Workspace,
 } from "@coflux/protocol";
@@ -17,7 +19,7 @@ export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 export type AuthState = "need-login" | "authenticating" | "authed" | "auth-failed";
 export type PortPreview = { port: number; url: string };
 export type ClientError = { id: number; message: string };
-type SessionConsumer = (data: string) => void;
+type SessionConsumer = (data: Uint8Array) => void;
 
 function upsert<T>(list: T[], item: T, match: (value: T) => boolean): T[] {
   const index = list.findIndex(match);
@@ -40,7 +42,7 @@ export function useCofluxClient() {
   const stopReconnectRef = useRef(false);
   const shouldRetryRef = useRef(false);
   const reconnectTimerRef = useRef<number | null>(null);
-  const messageHandlerRef = useRef<(message: ServerToClient) => void>(() => undefined);
+  const messageHandlerRef = useRef<(payload: NonNullable<ReturnType<typeof decodeServerToClient>>["payload"]) => void>(() => undefined);
   const connectRef = useRef<(credential: AuthCredential) => void>(() => undefined);
   const sessionConsumersRef = useRef(new Map<string, Set<SessionConsumer>>());
   const errorSequenceRef = useRef(0);
@@ -66,17 +68,17 @@ export function useCofluxClient() {
   const [lastError, setLastError] = useState<ClientError | null>(null);
   const [snapshotRevision, setSnapshotRevision] = useState(0);
 
-  const send = useCallback((message: ClientToServer) => {
+  const send = useCallback((payload: ClientToServerPayload) => {
     const socket = wsRef.current;
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+    if (socket?.readyState === WebSocket.OPEN) socket.send(encodeClientToServer(create(ClientToServerSchema, { payload })));
   }, []);
 
-  const sendInput = useCallback((sessionId: string, data: string) => {
-    const socket = wsRef.current;
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(encodeFrame({ type: "pty.input", sessionId, data }));
-    }
-  }, []);
+  const sendInput = useCallback(
+    (sessionId: string, data: string) => {
+      send({ case: "ptyInput", value: { sessionId, data: new TextEncoder().encode(data) } });
+    },
+    [send],
+  );
 
   const registerSessionConsumer = useCallback((sessionId: string, consumer: SessionConsumer) => {
     let consumers = sessionConsumersRef.current.get(sessionId);
@@ -109,13 +111,13 @@ export function useCofluxClient() {
     socket.onopen = () => {
       if (wsRef.current !== socket) return;
       setStatus("connected");
-      const message: ClientToServer =
+      const payload: ClientToServerPayload =
         "token" in credential
-          ? { type: "client.auth", clientToken: credential.token }
+          ? { case: "clientAuth", value: { clientToken: credential.token } }
           : "supabaseToken" in credential
-            ? { type: "client.auth", supabaseToken: credential.supabaseToken }
-            : { type: "client.auth", username: credential.username, password: credential.password };
-      socket.send(JSON.stringify(message));
+            ? { case: "clientAuth", value: { supabaseToken: credential.supabaseToken } }
+            : { case: "clientAuth", value: { username: credential.username, password: credential.password } };
+      socket.send(encodeClientToServer(create(ClientToServerSchema, { payload })));
     };
 
     socket.onclose = () => {
@@ -127,114 +129,139 @@ export function useCofluxClient() {
     };
 
     socket.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        const frame = decodeFrame(new Uint8Array(event.data));
-        if (frame?.type === "pty.output") {
-          const consumers = sessionConsumersRef.current.get(frame.sessionId);
-          if (consumers) for (const consumer of consumers) consumer(frame.data);
-        }
-        return;
-      }
-
-      let message: ServerToClient;
-      try {
-        message = JSON.parse(event.data) as ServerToClient;
-      } catch {
-        return;
-      }
-      messageHandlerRef.current(message);
+      if (!(event.data instanceof ArrayBuffer)) return; // 全 binary 协议：非二进制帧一律忽略
+      const message = decodeServerToClient(new Uint8Array(event.data));
+      if (!message) return;
+      messageHandlerRef.current(message.payload);
     };
   }, []);
   connectRef.current = connect;
 
   const handleServerMessage = useCallback(
-    (message: ServerToClient) => {
-      switch (message.type) {
-        case "auth.ok":
+    (payload: NonNullable<ReturnType<typeof decodeServerToClient>>["payload"]) => {
+      switch (payload.case) {
+        case "authOk": {
+          const value = payload.value;
           setAuthState("authed");
           setLoginError("");
           shouldRetryRef.current = true;
-          if (message.clientToken) {
-            tokenRef.current = message.clientToken;
-            localStorage.setItem(TOKEN_KEY, message.clientToken);
+          if (value.clientToken) {
+            tokenRef.current = value.clientToken;
+            localStorage.setItem(TOKEN_KEY, value.clientToken);
           }
-          send({ type: "client.subscribe" });
+          send({ case: "clientSubscribe", value: {} });
           break;
-        case "auth.error":
+        }
+        case "authError": {
           tokenRef.current = "";
           localStorage.removeItem(TOKEN_KEY);
           setLoginError(USE_SUPABASE ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误");
           setAuthState("auth-failed");
           shouldRetryRef.current = false;
           break;
-        case "state.snapshot": {
-          setDaemons(message.daemons);
-          setProjects(message.projects);
-          setWorkspaces(message.workspaces);
-          setTasks(message.tasks);
+        }
+        case "stateSnapshot": {
+          const value = payload.value;
+          setDaemons(value.daemons);
+          setProjects(value.projects);
+          setWorkspaces(value.workspaces);
+          setTasks(value.tasks);
           const nextPorts: Record<string, PortPreview[]> = {};
-          for (const preview of message.ports ?? []) {
-            (nextPorts[preview.taskId] ??= []).push({ port: preview.port, url: preview.url });
+          for (const group of value.ports) {
+            nextPorts[group.taskId] = group.ports.map((preview) => ({ port: preview.port, url: preview.url }));
           }
           setPorts(nextPorts);
-          const taskIds = new Set(message.tasks.map((task) => task.id));
+          const taskIds = new Set(value.tasks.map((task) => task.id));
           setDetachedTaskIds((previous) => new Set([...previous].filter((taskId) => taskIds.has(taskId))));
-          setSnapshotRevision((value) => value + 1);
+          setSnapshotRevision((v) => v + 1);
           break;
         }
-        case "daemon.updated":
-          setDaemons((previous) => upsert(previous, message.daemon, (daemon) => daemon.daemonId === message.daemon.daemonId));
+        case "daemonUpdated": {
+          const daemon = payload.value.daemon;
+          if (!daemon) break; // 内嵌 message 字段在 protobuf-es 里始终是 T | undefined（显式 presence），服务端必填，这里按畸形消息丢弃
+          setDaemons((previous) => upsert(previous, daemon, (item) => item.daemonId === daemon.daemonId));
           break;
-        case "daemon.removed":
-          setDaemons((previous) => previous.filter((daemon) => daemon.daemonId !== message.daemonId));
-          setProjects((previous) => previous.filter((project) => project.daemonId !== message.daemonId));
-          setWorkspaces((previous) => previous.filter((workspace) => workspace.daemonId !== message.daemonId));
-          setTasks((previous) => previous.filter((task) => task.daemonId !== message.daemonId));
+        }
+        case "daemonRemoved": {
+          const value = payload.value;
+          setDaemons((previous) => previous.filter((daemon) => daemon.daemonId !== value.daemonId));
+          setProjects((previous) => previous.filter((project) => project.daemonId !== value.daemonId));
+          setWorkspaces((previous) => previous.filter((workspace) => workspace.daemonId !== value.daemonId));
+          setTasks((previous) => previous.filter((task) => task.daemonId !== value.daemonId));
           break;
-        case "project.created":
-          setProjects((previous) => upsert(previous, message.project, (project) => project.id === message.project.id));
+        }
+        case "projectCreated": {
+          const project = payload.value.project;
+          if (!project) break;
+          setProjects((previous) => upsert(previous, project, (item) => item.id === project.id));
           break;
-        case "project.removed":
-          setProjects((previous) => previous.filter((project) => project.id !== message.projectId));
-          setWorkspaces((previous) => previous.filter((workspace) => workspace.projectId !== message.projectId));
-          setTasks((previous) => previous.filter((task) => task.projectId !== message.projectId));
+        }
+        case "projectRemoved": {
+          const value = payload.value;
+          setProjects((previous) => previous.filter((project) => project.id !== value.projectId));
+          setWorkspaces((previous) => previous.filter((workspace) => workspace.projectId !== value.projectId));
+          setTasks((previous) => previous.filter((task) => task.projectId !== value.projectId));
           break;
-        case "workspace.created":
-          setWorkspaces((previous) => upsert(previous, message.workspace, (workspace) => workspace.id === message.workspace.id));
+        }
+        case "workspaceCreated": {
+          const workspace = payload.value.workspace;
+          if (!workspace) break;
+          setWorkspaces((previous) => upsert(previous, workspace, (item) => item.id === workspace.id));
           break;
-        case "workspace.removed":
-          setWorkspaces((previous) => previous.filter((workspace) => workspace.id !== message.workspaceId));
-          setTasks((previous) => previous.filter((task) => task.workspaceId !== message.workspaceId));
+        }
+        case "workspaceRemoved": {
+          const value = payload.value;
+          setWorkspaces((previous) => previous.filter((workspace) => workspace.id !== value.workspaceId));
+          setTasks((previous) => previous.filter((task) => task.workspaceId !== value.workspaceId));
           break;
-        case "task.updated":
-          setTasks((previous) => upsert(previous, message.task, (task) => task.id === message.task.id));
-          if (message.task.status !== "running") {
-            setDetachedTaskIds((previous) => withoutSetValue(previous, message.task.id));
+        }
+        case "taskUpdated": {
+          const task = payload.value.task;
+          if (!task) break;
+          setTasks((previous) => upsert(previous, task, (item) => item.id === task.id));
+          if (task.status !== TaskStatus.RUNNING) {
+            setDetachedTaskIds((previous) => withoutSetValue(previous, task.id));
           }
           break;
-        case "task.removed":
-          setTasks((previous) => previous.filter((task) => task.id !== message.taskId));
+        }
+        case "taskRemoved": {
+          const value = payload.value;
+          setTasks((previous) => previous.filter((task) => task.id !== value.taskId));
           setPorts((previous) => {
-            if (!(message.taskId in previous)) return previous;
+            if (!(value.taskId in previous)) return previous;
             const next = { ...previous };
-            delete next[message.taskId];
+            delete next[value.taskId];
             return next;
           });
-          setDetachedTaskIds((previous) => withoutSetValue(previous, message.taskId));
+          setDetachedTaskIds((previous) => withoutSetValue(previous, value.taskId));
           break;
-        case "ports.updated":
-          setPorts((previous) => ({ ...previous, [message.taskId]: message.ports }));
+        }
+        case "portsUpdated": {
+          const value = payload.value;
+          setPorts((previous) => ({ ...previous, [value.taskId]: value.ports.map((preview) => ({ port: preview.port, url: preview.url })) }));
           break;
-        case "task.detached":
-          setDetachedTaskIds((previous) => new Set(previous).add(message.taskId));
+        }
+        case "taskDetached": {
+          const value = payload.value;
+          setDetachedTaskIds((previous) => new Set(previous).add(value.taskId));
           break;
-        case "enrollmentKey.created":
-          setEnrollCommand(`npm i -g cofluxd && cofluxd up --server ${message.daemonUrl} --enroll-key ${message.enrollmentKey}`);
+        }
+        case "enrollmentKeyCreated": {
+          const value = payload.value;
+          setEnrollCommand(`npm i -g cofluxd && cofluxd up --server ${value.daemonUrl} --enroll-key ${value.enrollmentKey}`);
           break;
-        case "error":
+        }
+        case "ptyOutput": {
+          const value = payload.value;
+          const consumers = sessionConsumersRef.current.get(value.sessionId);
+          if (consumers) for (const consumer of consumers) consumer(value.data);
+          break;
+        }
+        case "error": {
           errorSequenceRef.current += 1;
-          setLastError({ id: errorSequenceRef.current, message: message.message });
+          setLastError({ id: errorSequenceRef.current, message: payload.value.message });
           break;
+        }
         default:
           break;
       }
@@ -280,7 +307,7 @@ export function useCofluxClient() {
   const logout = useCallback(() => {
     stopReconnectRef.current = true;
     shouldRetryRef.current = false;
-    if (wsRef.current?.readyState === WebSocket.OPEN) send({ type: "client.logout" });
+    if (wsRef.current?.readyState === WebSocket.OPEN) send({ case: "clientLogout", value: {} });
     tokenRef.current = "";
     localStorage.removeItem(TOKEN_KEY);
     wsRef.current?.close();
@@ -297,14 +324,14 @@ export function useCofluxClient() {
   const startTask = useCallback(
     (taskId: string, cols: number, rows: number) => {
       setDetachedTaskIds((previous) => withoutSetValue(previous, taskId));
-      send({ type: "task.start", taskId, cols, rows });
+      send({ case: "taskStart", value: { taskId, cols, rows } });
     },
     [send],
   );
 
   const requestEnrollmentKey = useCallback(() => {
     setEnrollCommand(null);
-    send({ type: "client.createEnrollmentKey" });
+    send({ case: "clientCreateEnrollmentKey", value: {} });
   }, [send]);
 
   const clearEnrollmentCommand = useCallback(() => setEnrollCommand(null), []);

@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "pretest": "cargo build -p coflux-supervisor -p coflux-worker",
-    "test": "node --test --test-concurrency=1 src/*.test.mjs"
+    "test": "node --import tsx --test --test-concurrency=1 src/*.test.mjs"
   },
   "devDependencies": {
+    "@coflux/protocol": "workspace:*",
     "jose": "^5.9.6",
     "postgres": "^3.4.9",
     "ws": "^8.18.0"

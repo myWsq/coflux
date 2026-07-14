@@ -1,0 +1,14 @@
+version: v2
+clean: true
+plugins:
+  # TS：protobuf-es v2（server/web 共用），产物进 packages/protocol/src/gen
+  - remote: buf.build/bufbuild/es:v2.12.1
+    out: ../packages/protocol/src/gen
+    opt: target=ts
+  # Rust：prost（daemon/worker 消费），产物进 crates/protocol/src/gen
+  - remote: buf.build/community/neoeinstein-prost:v0.5.0
+    out: ../crates/protocol/src/gen
+  # Swift：swift-protobuf（macOS 客户端消费）；App 立项前暂存 proto/gen/swift
+  - remote: buf.build/apple/swift:v1.37.0
+    out: gen/swift
+    opt: Visibility=Public

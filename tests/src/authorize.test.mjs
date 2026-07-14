@@ -16,6 +16,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { TaskStatus } from "@coflux/protocol";
 import { startServer, rawDaemon, mkRepo, spawnDaemon, killTree } from "./harness.mjs";
 
 const PORT = 8830;
@@ -68,30 +69,30 @@ test("授权成功端到端：匿名 daemon 拿链接 → client 授权 → daem
     const c = server.makeClient();
     await c.authSubscribe();
 
-    c.send({ type: "device.authorizeInfo", token });
-    const info = await c.waitFor((m) => m.type === "device.authorizeInfo", "authorizeInfo");
+    c.send({ case: "deviceAuthorizeInfo", token });
+    const info = await c.waitFor((m) => m.case === "deviceAuthorizeInfo", "authorizeInfo");
     assert.equal(info.ok, true, "待授权设备信息可查");
     assert.equal(info.name, deviceName);
     assert.ok(info.host);
     assert.ok(info.platform);
 
-    c.send({ type: "device.authorize", token });
-    await c.waitFor((m) => m.type === "device.authorized", "device.authorized");
+    c.send({ case: "deviceAuthorize", token });
+    await c.waitFor((m) => m.case === "deviceAuthorized", "device.authorized");
 
-    const upd = await c.waitFor((m) => m.type === "daemon.updated" && m.daemon.name === deviceName, "daemon.updated", 15000);
+    const upd = await c.waitFor((m) => m.case === "daemonUpdated" && m.daemon.name === deviceName, "daemon.updated", 15000);
     assert.ok(upd.daemon.online, "授权后 daemon 在线");
     const daemonId = upd.daemon.daemonId;
 
     // 与 classic enroll 流无差：能真正导入项目、起任务、走 PTY
-    c.send({ type: "project.import", daemonId, path: repo.dir });
-    const main = await c.waitFor((m) => m.type === "workspace.created" && m.workspace.isMain, "main ws");
-    c.send({ type: "task.create", workspaceId: main.workspace.id, title: "authz-task" });
-    const idle = await c.waitFor((m) => m.type === "task.updated" && m.task.title === "authz-task", "idle");
-    c.send({ type: "task.start", taskId: idle.task.id, cols: 80, rows: 24 });
-    const run = await c.waitFor((m) => m.type === "task.updated" && m.task.id === idle.task.id && m.task.status === "running", "running");
+    c.send({ case: "projectImport", daemonId, path: repo.dir });
+    const main = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main ws");
+    c.send({ case: "taskCreate", workspaceId: main.workspace.id, title: "authz-task" });
+    const idle = await c.waitFor((m) => m.case === "taskUpdated" && m.task.title === "authz-task", "idle");
+    c.send({ case: "taskStart", taskId: idle.task.id, cols: 80, rows: 24 });
+    const run = await c.waitFor((m) => m.case === "taskUpdated" && m.task.id === idle.task.id && m.task.status === TaskStatus.RUNNING, "running");
     assert.ok(run.task.sessionId);
-    c.send({ type: "pty.input", sessionId: run.task.sessionId, data: "echo MARK_$((6*7))\r" });
-    await c.waitFor((m) => m.type === "pty.output" && m.data.includes("MARK_42"), "PTY 回流");
+    c.send({ case: "ptyInput", sessionId: run.task.sessionId, data: "echo MARK_$((6*7))\r" });
+    await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("MARK_42"), "PTY 回流");
 
     // credentials.json 落盘（daemon 端与 classic enroll 一样持久化，重启可重连而非再次授权）
     assert.ok(existsSync(join(home, "credentials.json")), "授权后 daemon 落地 credentials.json");
@@ -115,16 +116,16 @@ test("授权码 TTL 过期后被拒", async () => {
   try {
     const d = rawDaemon(short.port);
     await d.ready;
-    d.send({ type: "daemon.enrollRequest", name: "ttl-dev", host: "h", platform: "test" });
-    const pending = await d.waitFor((m) => m.type === "daemon.authorizePending", "authorizePending");
+    d.send({ case: "daemonEnrollRequest", name: "ttl-dev", host: "h", platform: "test" });
+    const pending = await d.waitFor((m) => m.case === "daemonAuthorizePending", "authorizePending");
     const token = tokenFromUrl(pending.url);
 
     await sleep(500); // 超过 300ms TTL
 
     const c = short.makeClient();
     await c.authSubscribe();
-    c.send({ type: "device.authorizeInfo", token });
-    const info = await c.waitFor((m) => m.type === "device.authorizeInfo", "authorizeInfo expired");
+    c.send({ case: "deviceAuthorizeInfo", token });
+    const info = await c.waitFor((m) => m.case === "deviceAuthorizeInfo", "authorizeInfo expired");
     assert.equal(info.ok, false, "过期 token 应被拒");
     assert.ok(info.error, "带错误说明");
     c.close();
@@ -137,19 +138,19 @@ test("授权码 TTL 过期后被拒", async () => {
 test("授权码只能用一次：二次授权失败", async () => {
   const d = rawDaemon(PORT);
   await d.ready;
-  d.send({ type: "daemon.enrollRequest", name: "once-dev", host: "h", platform: "test" });
-  const pending = await d.waitFor((m) => m.type === "daemon.authorizePending", "authorizePending");
+  d.send({ case: "daemonEnrollRequest", name: "once-dev", host: "h", platform: "test" });
+  const pending = await d.waitFor((m) => m.case === "daemonAuthorizePending", "authorizePending");
   const token = tokenFromUrl(pending.url);
 
   const c = server.makeClient();
   await c.authSubscribe();
-  c.send({ type: "device.authorize", token });
-  await c.waitFor((m) => m.type === "device.authorized", "first authorize ok");
+  c.send({ case: "deviceAuthorize", token });
+  await c.waitFor((m) => m.case === "deviceAuthorized", "first authorize ok");
 
   const c2 = server.makeClient();
   await c2.authSubscribe();
-  c2.send({ type: "device.authorize", token });
-  const second = await c2.waitFor((m) => m.type === "device.authorizeInfo", "second authorize rejected");
+  c2.send({ case: "deviceAuthorize", token });
+  const second = await c2.waitFor((m) => m.case === "deviceAuthorizeInfo", "second authorize rejected");
   assert.equal(second.ok, false, "同一 token 二次授权应被拒");
 
   c.close();
@@ -160,8 +161,8 @@ test("授权码只能用一次：二次授权失败", async () => {
 test("daemon 断线后待授权 token 立即作废", async () => {
   const d = rawDaemon(PORT);
   await d.ready;
-  d.send({ type: "daemon.enrollRequest", name: "disc-dev", host: "h", platform: "test" });
-  const pending = await d.waitFor((m) => m.type === "daemon.authorizePending", "authorizePending");
+  d.send({ case: "daemonEnrollRequest", name: "disc-dev", host: "h", platform: "test" });
+  const pending = await d.waitFor((m) => m.case === "daemonAuthorizePending", "authorizePending");
   const token = tokenFromUrl(pending.url);
 
   d.close();
@@ -169,8 +170,8 @@ test("daemon 断线后待授权 token 立即作废", async () => {
 
   const c = server.makeClient();
   await c.authSubscribe();
-  c.send({ type: "device.authorizeInfo", token });
-  const info = await c.waitFor((m) => m.type === "device.authorizeInfo", "authorizeInfo after disconnect");
+  c.send({ case: "deviceAuthorizeInfo", token });
+  const info = await c.waitFor((m) => m.case === "deviceAuthorizeInfo", "authorizeInfo after disconnect");
   assert.equal(info.ok, false, "daemon 断线后 token 应作废");
   c.close();
 });
@@ -216,13 +217,13 @@ test("TTL 过期后 worker 自动换新链接：旧 token 作废、新 token 可
     const token2 = tokenFromUrl(secondUrl);
     assert.notEqual(token2, token1, "新链接 token 与旧的不同");
 
-    c.send({ type: "device.authorizeInfo", token: token1 });
-    const oldInfo = await c.waitFor((m) => m.type === "device.authorizeInfo", "old token info");
+    c.send({ case: "deviceAuthorizeInfo", token: token1 });
+    const oldInfo = await c.waitFor((m) => m.case === "deviceAuthorizeInfo", "old token info");
     assert.equal(oldInfo.ok, false, "旧 token 已失效");
 
-    c.send({ type: "device.authorize", token: token2 });
-    await c.waitFor((m) => m.type === "device.authorized", "authorize with renewed token");
-    const upd = await c.waitFor((m) => m.type === "daemon.updated" && m.daemon.name === "renew-dev", "daemon online", 15000);
+    c.send({ case: "deviceAuthorize", token: token2 });
+    await c.waitFor((m) => m.case === "deviceAuthorized", "authorize with renewed token");
+    const upd = await c.waitFor((m) => m.case === "daemonUpdated" && m.daemon.name === "renew-dev", "daemon online", 15000);
     assert.ok(upd.daemon.online, "用换新后的 token 授权成功，daemon 上线");
 
     // daemon 侧收尾与常规路径一致
@@ -248,14 +249,14 @@ test("device.authorize 暴力尝试被限速", async () => {
     await c.authSubscribe();
     // 响应不回带请求的 token，靠"到第 n 条 device.authorizeInfo 消息"而非消息内容来对齐请求/响应顺序
     // （单条 WS 连接上服务端按到达顺序处理并回复，顺序有保证）。
-    const nth = (n) => c.waitFor((m) => m.type === "device.authorizeInfo" && c.log.filter((x) => x.type === "device.authorizeInfo").length >= n, `resp#${n}`);
+    const nth = (n) => c.waitFor((m) => m.case === "deviceAuthorizeInfo" && c.log.filter((x) => x.case === "deviceAuthorizeInfo").length >= n, `resp#${n}`);
     for (let i = 1; i <= 3; i++) {
-      c.send({ type: "device.authorizeInfo", token: `garbage-${i}` });
+      c.send({ case: "deviceAuthorizeInfo", token: `garbage-${i}` });
       const r = await nth(i);
       assert.equal(r.ok, false);
       assert.ok(!r.error?.includes("过多"), `第 ${i} 次仍是普通失败，未到限速阈值`);
     }
-    c.send({ type: "device.authorizeInfo", token: "garbage-final" });
+    c.send({ case: "deviceAuthorizeInfo", token: "garbage-final" });
     const limitedResp = await nth(4);
     assert.equal(limitedResp.ok, false, "超过失败次数阈值后应报限速错误");
     assert.ok(limitedResp.error?.includes("过多"), "第 4 次触发限速");
@@ -280,16 +281,16 @@ test("等待授权的 daemon 不被 auth deadline 踢；未发 enrollRequest 的
     // 已申请授权的连接：跨过 deadline 仍存活，且此后仍能完成授权
     const d = rawDaemon(short.port);
     await d.ready;
-    d.send({ type: "daemon.enrollRequest", name: "wait-dev", host: "h", platform: "test" });
-    const pending = await d.waitFor((m) => m.type === "daemon.authorizePending", "authorizePending");
+    d.send({ case: "daemonEnrollRequest", name: "wait-dev", host: "h", platform: "test" });
+    const pending = await d.waitFor((m) => m.case === "daemonAuthorizePending", "authorizePending");
     const survived = await Promise.race([d.closed, sleep(2500).then(() => "alive")]);
     assert.equal(survived, "alive", "等待授权的连接不应被 deadline 关闭");
 
     const c = short.makeClient();
     await c.authSubscribe();
-    c.send({ type: "device.authorize", token: tokenFromUrl(pending.url) });
-    await c.waitFor((m) => m.type === "device.authorized", "authorized after deadline");
-    const enrolled = await d.waitFor((m) => m.type === "daemon.enrolled", "enrolled");
+    c.send({ case: "deviceAuthorize", token: tokenFromUrl(pending.url) });
+    await c.waitFor((m) => m.case === "deviceAuthorized", "authorized after deadline");
+    const enrolled = await d.waitFor((m) => m.case === "daemonEnrolled", "enrolled");
     assert.ok(enrolled.deviceToken, "跨过 deadline 后授权仍能完成");
     c.close();
     d.close();

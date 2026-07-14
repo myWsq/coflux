@@ -32,6 +32,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 协议真相源治理（plan 009）：lint + 破坏性变更拦截 + 生成产物零 diff
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - name: 协议 lint + breaking + 生成产物一致性
+        run: |
+          cd proto
+          buf lint
+          # 只有 main 已存在 proto/ 基线时才做 breaking 拦截（首个提交无基线）
+          git fetch --depth 1 origin main
+          if git cat-file -e "$(git rev-parse FETCH_HEAD)":proto/buf.yaml 2>/dev/null; then
+            buf breaking --against "../.git#ref=$(git rev-parse FETCH_HEAD),subdir=proto"
+          else
+            echo "::notice::main 尚无 proto 基线，跳过 breaking 检查"
+          fi
+          buf generate
+          git diff --exit-code -- ../packages/protocol/src/gen ../crates/protocol/src/gen gen/swift
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 

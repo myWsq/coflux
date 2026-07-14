@@ -7,7 +7,7 @@
 import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { createLogger } from "@coflux/core";
-import { isValidDaemonToServer, isValidClientToServer } from "@coflux/protocol";
+import { decodeDaemonToServer, decodeClientToServer } from "@coflux/protocol";
 import { config } from "./config.js";
 import { Store } from "./store.js";
 import { Hub, type ClientConn, type DaemonCtx } from "./hub.js";
@@ -91,27 +91,25 @@ httpServer.on("upgrade", (req, socket, head) => {
   }
 });
 
-const daemonEp = attachEndpoint<DaemonCtx>(daemonWss, {
-  makeCtx: (ws: WebSocket) => ({ ws, daemonId: null, accountId: null }),
+const daemonEp = attachEndpoint(daemonWss, {
+  makeCtx: (ws: WebSocket): DaemonCtx => ({ ws, daemonId: null, accountId: null }),
   isAuthed: (c) => c.daemonId !== null,
   // 等浏览器授权的 daemon（已发 enrollRequest、持有 pending token）是合法未认证态，
   // 不能被 auth deadline 踢——否则每 15s 断连重连、授权链接无限换新（生产实测踩过）。
   // 存活边界：pending 有 TTL（worker 到期续期）、断线即作废，heartbeat 扫描照常适用。
   canWaitAuth: (c) => !!c.pendingAuthToken,
-  validate: isValidDaemonToServer,
-  onMessage: (c, m) => hub.handleDaemonMessage(c, m as never),
-  onBinary: (c, buf) => hub.handleDaemonBinary(c, buf),
+  decode: decodeDaemonToServer,
+  onMessage: (c, m) => hub.handleDaemonMessage(c, m),
   onClose: (c) => hub.handleDaemonClose(c),
   authDeadlineMs: config.authDeadlineMs,
   logger: log.child({ endpoint: "daemon" }),
 });
 
-const clientEp = attachEndpoint<ClientConn>(clientWss, {
-  makeCtx: (ws: WebSocket) => ({ ws, accountId: null, subscribed: false }),
+const clientEp = attachEndpoint(clientWss, {
+  makeCtx: (ws: WebSocket): ClientConn => ({ ws, accountId: null, subscribed: false }),
   isAuthed: (c) => c.accountId !== null,
-  validate: isValidClientToServer,
-  onMessage: (c, m) => hub.handleClientMessage(c, m as never),
-  onBinary: (c, buf) => hub.handleClientBinary(c, buf),
+  decode: decodeClientToServer,
+  onMessage: (c, m) => hub.handleClientMessage(c, m),
   onClose: (c) => hub.handleClientClose(c),
   authDeadlineMs: config.authDeadlineMs,
   logger: log.child({ endpoint: "client" }),

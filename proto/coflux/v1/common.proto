@@ -1,0 +1,149 @@
+// coflux wire protocol —— 共享实体、复用结果、数据面消息。
+//
+// 本目录（proto/）是协议的唯一真相源：TS(protobuf-es)/Rust(prost)/Swift(swift-protobuf)
+// 三端代码均由 `buf generate` 生成，禁止手写镜像。
+// 模型（项目制）：Account → Device(=Daemon) → Project → Workspace → Task → Session。
+syntax = "proto3";
+
+package coflux.v1;
+
+message DaemonInfo {
+  string daemon_id = 1;
+  string name = 2;
+  string host = 3;
+  string platform = 4;
+  bool online = 5;
+}
+
+message Project {
+  string id = 1;
+  string account_id = 2;
+  string daemon_id = 3;
+  string name = 4;
+  string repo_path = 5;
+  string default_branch = 6;
+  // ms epoch。时间戳统一 double：与旧 JSON 的 JS number 语义一致，
+  // 避免 protobuf-es 的 int64→bigint 在 TS 端产生大面积类型涟漪
+  double created_at = 7;
+}
+
+message Workspace {
+  string id = 1;
+  string account_id = 2;
+  string daemon_id = 3;
+  string project_id = 4;
+  string name = 5;
+  string path = 6;
+  string branch = 7;
+  // 主工作区 = 仓库本身；其它 = git worktree
+  bool is_main = 8;
+  double created_at = 9;
+}
+
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_IDLE = 1;
+  TASK_STATUS_RUNNING = 2;
+  TASK_STATUS_EXITED = 3;
+}
+
+message Task {
+  string id = 1;
+  string account_id = 2;
+  string daemon_id = 3;
+  string project_id = 4;
+  string workspace_id = 5;
+  string title = 6;
+  TaskStatus status = 7;
+  optional string session_id = 8;
+  optional int32 exit_code = 9;
+  double created_at = 10;
+  double updated_at = 11;
+}
+
+enum FsEntryKind {
+  FS_ENTRY_KIND_UNSPECIFIED = 0;
+  FS_ENTRY_KIND_FILE = 1;
+  FS_ENTRY_KIND_DIR = 2;
+  FS_ENTRY_KIND_SYMLINK = 3;
+  FS_ENTRY_KIND_OTHER = 4;
+}
+
+message FsEntry {
+  string name = 1;
+  FsEntryKind kind = 2;
+  // 字节数。double 同上：保持旧 JSON number 语义，2^53 内无损
+  double size = 3;
+}
+
+// resync 上报的存活会话引用
+message SessionRef {
+  string session_id = 1;
+  string task_id = 2;
+}
+
+// ports.update 里单个会话上报的监听端口列表
+message SessionPorts {
+  string session_id = 1;
+  repeated uint32 ports = 2;
+}
+
+message PortPreview {
+  uint32 port = 1;
+  string url = 2;
+}
+
+message TaskPorts {
+  string task_id = 1;
+  repeated PortPreview ports = 2;
+}
+
+// exec/fs 结果 —— 同一形状在 daemon→server 和 server→client 两段复用（server 只换 request_id 转发）
+message ExecResult {
+  string request_id = 1;
+  bool ok = 2;
+  int32 exit_code = 3;
+  string stdout = 4;
+  string stderr = 5;
+  optional string error = 6;
+}
+
+message FsListed {
+  string request_id = 1;
+  bool ok = 2;
+  repeated FsEntry entries = 3;
+  optional string error = 4;
+}
+
+message FsReadResult {
+  string request_id = 1;
+  bool ok = 2;
+  string content = 3;
+  optional string error = 4;
+}
+
+// ===== 数据面（高频）=====
+// 原自定义二进制帧（kind 1..4）收敛进 protobuf binary 信封；payload 一律 bytes，
+// 杜绝 UTF-8 往返破坏 scrollback 的半截字节（原 replayFrameToOutput 的动机自然消失）。
+
+message PtyOutput {
+  string session_id = 1;
+  bytes data = 2;
+}
+
+message PtyInput {
+  string session_id = 1;
+  bytes data = 2;
+}
+
+message PtyReplay {
+  string session_id = 1;
+  string request_id = 2;
+  bytes data = 3;
+}
+
+// 端口转发隧道的原始 TCP 字节（server↔daemon 双向）
+message ProxyData {
+  string conn_id = 1;
+  bytes data = 2;
+}

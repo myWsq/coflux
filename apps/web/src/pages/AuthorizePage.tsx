@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, LoaderCircle, ShieldCheck, ShieldX } from "lucide-react";
-import type { ClientToServer, ServerToClient } from "@coflux/protocol";
+import { create, encodeClientToServer, decodeServerToClient, ClientToServerSchema, type ClientToServerPayload } from "@coflux/protocol";
 
 import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
 import { Button } from "@/components/ui/button";
@@ -25,48 +25,47 @@ export function AuthorizePage({ token }: { token: string }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
-  const send = (message: ClientToServer) => {
+  const send = (payload: ClientToServerPayload) => {
     const socket = wsRef.current;
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+    if (socket?.readyState === WebSocket.OPEN) socket.send(encodeClientToServer(create(ClientToServerSchema, { payload })));
   };
 
   function connect(credential: AuthCredential) {
     setState({ phase: "authenticating" });
     const socket = new WebSocket(SERVER_URL);
+    socket.binaryType = "arraybuffer";
     wsRef.current = socket;
     socket.onopen = () => {
-      if ("token" in credential) send({ type: "client.auth", clientToken: credential.token });
-      else if ("supabaseToken" in credential) send({ type: "client.auth", supabaseToken: credential.supabaseToken });
-      else send({ type: "client.auth", username: credential.username, password: credential.password });
+      if ("token" in credential) send({ case: "clientAuth", value: { clientToken: credential.token } });
+      else if ("supabaseToken" in credential) send({ case: "clientAuth", value: { supabaseToken: credential.supabaseToken } });
+      else send({ case: "clientAuth", value: { username: credential.username, password: credential.password } });
     };
     socket.onclose = () => {
       setState((current) => (current.phase === "done" ? current : { phase: "failed", message: "连接已断开，请刷新页面重试" }));
     };
     socket.onmessage = (event) => {
-      if (typeof event.data !== "string") return;
-      let message: ServerToClient;
-      try {
-        message = JSON.parse(event.data) as ServerToClient;
-      } catch {
-        return;
-      }
-      switch (message.type) {
-        case "auth.ok":
+      if (!(event.data instanceof ArrayBuffer)) return;
+      const message = decodeServerToClient(new Uint8Array(event.data));
+      if (!message) return;
+      switch (message.payload.case) {
+        case "authOk":
           setState({ phase: "looking-up" });
-          send({ type: "device.authorizeInfo", token });
+          send({ case: "deviceAuthorizeInfo", value: { token } });
           break;
-        case "auth.error":
+        case "authError":
           localStorage.removeItem(TOKEN_KEY);
           setState({
             phase: "auth-failed",
             message: USE_SUPABASE ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误",
           });
           break;
-        case "device.authorizeInfo":
-          if (message.ok) setState({ phase: "confirm", name: message.name, host: message.host, platform: message.platform });
-          else setState({ phase: "invalid", message: message.error || "授权链接无效或已过期" });
+        case "deviceAuthorizeInfo": {
+          const value = message.payload.value;
+          if (value.ok) setState({ phase: "confirm", name: value.name, host: value.host, platform: value.platform });
+          else setState({ phase: "invalid", message: value.error || "授权链接无效或已过期" });
           break;
-        case "device.authorized":
+        }
+        case "deviceAuthorized":
           setState({ phase: "done" });
           break;
         default:
@@ -100,7 +99,7 @@ export function AuthorizePage({ token }: { token: string }) {
 
   function authorize() {
     setState({ phase: "authorizing" });
-    send({ type: "device.authorize", token });
+    send({ case: "deviceAuthorize", value: { token } });
   }
 
   const showLogin = state.phase === "need-login" || state.phase === "authenticating" || state.phase === "auth-failed";

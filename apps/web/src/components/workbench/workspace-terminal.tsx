@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink, LoaderCircle, Plus, SquareTerminal, Unplug, X } from "lucide-react";
-import type { Task, Workspace } from "@coflux/protocol";
+import { TaskStatus, type Task, type Workspace } from "@coflux/protocol";
 
 import { Button } from "@/components/ui/button";
 import type { CofluxClient } from "@/hooks/use-coflux-client";
@@ -61,7 +61,7 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
 
   function markOwned(taskId: string, sessionId: string) {
     const task = tasksRef.current.find((item) => item.id === taskId);
-    if (!task || task.status !== "running" || task.sessionId !== sessionId) return;
+    if (!task || task.status !== TaskStatus.RUNNING || task.sessionId !== sessionId) return;
     if (controlStatesRef.current[taskId] === "detached") return;
     clearAttachTimer(taskId);
     updateControlState(taskId, "owned");
@@ -71,12 +71,12 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
       controller.fit();
       controller.focus();
       const { cols, rows } = controller.dimensions();
-      client.send({ type: "pty.resize", sessionId, cols, rows });
+      client.send({ case: "ptyResize", value: { sessionId, cols, rows } });
     }
   }
 
   function beginAttach(task: Task, controller: TerminalController, force = false) {
-    if (task.status !== "running" || !task.sessionId) return;
+    if (task.status !== TaskStatus.RUNNING || !task.sessionId) return;
     if (sessionReadyRef.current.get(task.id) !== task.sessionId) return;
     const attachKey = force
       ? `claim:${++attachSequenceRef.current}:${task.sessionId}`
@@ -102,7 +102,7 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
 
     controller.fit();
     controller.focus();
-    if (task.status === "running" && task.sessionId) {
+    if (task.status === TaskStatus.RUNNING && task.sessionId) {
       if (sessionReadyRef.current.get(taskId) !== task.sessionId) return;
       activationRequestsRef.current.delete(taskId);
       const force = forcedClaimsRef.current.delete(taskId) || controlStatesRef.current[taskId] === "detached";
@@ -113,7 +113,7 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
     activationRequestsRef.current.delete(taskId);
     forcedClaimsRef.current.delete(taskId);
     if (launchingTaskIdsRef.current.has(taskId)) return;
-    if (task.status === "exited") controller.reset();
+    if (task.status === TaskStatus.EXITED) controller.reset();
     launchingTaskIdsRef.current.add(taskId);
     updateControlState(taskId, "attaching");
     const { cols, rows } = controller.dimensions();
@@ -142,7 +142,7 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
   function handleSessionReady(taskId: string, sessionId: string, controller: TerminalController) {
     sessionReadyRef.current.set(taskId, sessionId);
     const task = tasksRef.current.find((item) => item.id === taskId);
-    if (!task || task.sessionId !== sessionId || task.status !== "running") return;
+    if (!task || task.sessionId !== sessionId || task.status !== TaskStatus.RUNNING) return;
 
     if (launchingTaskIdsRef.current.delete(taskId)) {
       attachedKeysRef.current.set(taskId, `${snapshotRevisionRef.current}:${sessionId}`);
@@ -161,7 +161,7 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
     if (pendingCreateRef.current) return;
     pendingCreateRef.current = { knownTaskIds: new Set(tasksRef.current.map((task) => task.id)) };
     setCreating(true);
-    client.send({ type: "task.create", workspaceId: workspace.id, title: `终端 ${tasksRef.current.length + 1}` });
+    client.send({ case: "taskCreate", value: { workspaceId: workspace.id, title: `终端 ${tasksRef.current.length + 1}` } });
   }
 
   useEffect(() => {
@@ -178,7 +178,7 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
     }
 
     for (const task of workspaceTasks) {
-      if (task.status !== "running") {
+      if (task.status !== TaskStatus.RUNNING) {
         attachedKeysRef.current.delete(task.id);
         sessionReadyRef.current.delete(task.id);
         if (!launchingTaskIdsRef.current.has(task.id)) updateControlState(task.id, "stopped");
@@ -220,7 +220,7 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
     const frame = requestAnimationFrame(() => {
       for (const task of tasksRef.current) {
         const controller = controllersRef.current.get(task.id);
-        if (task.status === "running" && task.sessionId && controller && sessionReadyRef.current.get(task.id) === task.sessionId) {
+        if (task.status === TaskStatus.RUNNING && task.sessionId && controller && sessionReadyRef.current.get(task.id) === task.sessionId) {
           beginAttach(task, controller, false);
         }
       }
@@ -249,7 +249,7 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
   );
 
   const activeTask = workspaceTasks.find((task) => task.id === activeTaskId) ?? null;
-  const activeControl = activeTask ? controlStates[activeTask.id] ?? (activeTask.status === "running" ? "attaching" : "stopped") : "stopped";
+  const activeControl = activeTask ? controlStates[activeTask.id] ?? (activeTask.status === TaskStatus.RUNNING ? "attaching" : "stopped") : "stopped";
   const activePorts = activeTask ? client.ports[activeTask.id] ?? [] : [];
 
   return (
@@ -279,7 +279,7 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
       <div className="flex h-9 shrink-0 items-center gap-0.5 overflow-hidden border-b border-border bg-background px-1.5">
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {workspaceTasks.map((task) => {
-            const state = controlStates[task.id] ?? (task.status === "running" ? "attaching" : "stopped");
+            const state = controlStates[task.id] ?? (task.status === TaskStatus.RUNNING ? "attaching" : "stopped");
             const isActive = task.id === activeTaskId;
             return (
               <div
@@ -332,12 +332,12 @@ export function WorkspaceTerminal({ workspace, client, onCloseTask }: WorkspaceT
           <TerminalPane
             key={task.id}
             taskId={task.id}
-            sessionId={task.sessionId}
+            sessionId={task.sessionId ?? null}
             active={task.id === activeTaskId}
-            controlState={controlStates[task.id] ?? (task.status === "running" ? "attaching" : "stopped")}
+            controlState={controlStates[task.id] ?? (task.status === TaskStatus.RUNNING ? "attaching" : "stopped")}
             registerSessionConsumer={client.registerSessionConsumer}
             sendInput={client.sendInput}
-            sendResize={(sessionId, cols, rows) => client.send({ type: "pty.resize", sessionId, cols, rows })}
+            sendResize={(sessionId, cols, rows) => client.send({ case: "ptyResize", value: { sessionId, cols, rows } })}
             onReady={handleTerminalReady}
             onDispose={handleTerminalDispose}
             onSessionReady={handleSessionReady}

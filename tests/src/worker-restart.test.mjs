@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
 
 // supervisor/worker 拆分的核心保证：杀掉 worker，PTY 在 supervisor 存活，
@@ -23,16 +24,16 @@ test("worker 重启：PTY 在 supervisor 存活，两级 resync 重挂会话", a
   repos.push(repo);
   const a = stack.makeClient();
   await a.authSubscribe();
-  a.send({ type: "project.import", daemonId: stack.daemonId, path: repo.dir });
-  const main = await a.waitFor((m) => m.type === "workspace.created" && m.workspace.isMain, "main");
-  a.send({ type: "task.create", workspaceId: main.workspace.id, title: "wr" });
-  const idle = await a.waitFor((m) => m.type === "task.updated" && m.task.title === "wr", "idle");
+  a.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
+  const main = await a.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
+  a.send({ case: "taskCreate", workspaceId: main.workspace.id, title: "wr" });
+  const idle = await a.waitFor((m) => m.case === "taskUpdated" && m.task.title === "wr", "idle");
   const taskId = idle.task.id;
-  a.send({ type: "task.start", taskId, cols: 80, rows: 24 });
-  const run = await a.waitFor((m) => m.type === "task.updated" && m.task.id === taskId && m.task.status === "running", "run");
+  a.send({ case: "taskStart", taskId, cols: 80, rows: 24 });
+  const run = await a.waitFor((m) => m.case === "taskUpdated" && m.task.id === taskId && m.task.status === TaskStatus.RUNNING, "run");
   const sessionId = run.task.sessionId;
-  a.send({ type: "pty.input", sessionId, data: "echo SURVIVE_MARKER\r" });
-  await a.waitFor((m) => m.type === "pty.output" && m.data.includes("SURVIVE_MARKER"), "marker before kill");
+  a.send({ case: "ptyInput", sessionId, data: "echo SURVIVE_MARKER\r" });
+  await a.waitFor((m) => m.case === "ptyOutput" && m.data.includes("SURVIVE_MARKER"), "marker before kill");
   a.close();
 
   // 杀掉 worker（SIGKILL）——supervisor 应自动重启它；PTY 在 supervisor 进程不受影响
@@ -62,14 +63,14 @@ test("worker 重启：PTY 在 supervisor 存活，两级 resync 重挂会话", a
   const c = stack.makeClient();
   const snap = await c.authSubscribe();
   const rec = snap.tasks.find((t) => t.id === taskId);
-  assert.ok(rec && rec.status === "running", "worker 重启后任务仍 running");
+  assert.ok(rec && rec.status === TaskStatus.RUNNING, "worker 重启后任务仍 running");
 
   // attach 回放仍含杀 worker 前的输出 → PTY + scrollback 在 supervisor 存活
-  c.send({ type: "task.attach", taskId });
-  await c.waitFor((m) => m.type === "pty.output" && m.data.includes("SURVIVE_MARKER"), "重启后回放历史存活");
+  c.send({ case: "taskAttach", taskId });
+  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("SURVIVE_MARKER"), "重启后回放历史存活");
 
   // 交互恢复：新输入能拿到新输出 → 完整链路 client→server→worker→supervisor→pty 重新打通
-  c.send({ type: "pty.input", sessionId, data: "echo AFTER_RESTART\r" });
-  await c.waitFor((m) => m.type === "pty.output" && m.data.includes("AFTER_RESTART"), "重启后交互恢复");
+  c.send({ case: "ptyInput", sessionId, data: "echo AFTER_RESTART\r" });
+  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("AFTER_RESTART"), "重启后交互恢复");
   c.close();
 });

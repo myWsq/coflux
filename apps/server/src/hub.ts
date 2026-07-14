@@ -11,23 +11,32 @@
  * ON CONFLICT）而非应用层锁；级联删除、lazy provision 等多语句操作经 `store.transaction()` 保证
  * 原子性。单连接内消息处理不做串行队列（同连接消息仍可能交错，见 plans/002 决策）——各 handler
  * 内部保持"写完再广播"的顺序（await 与其后的同步语句之间不留出让点），确需的跨语句原子性交给事务。
+ *
+ * wire（plan 009）：WS 上只有 binary message，每条 = 一个 protobuf 信封。pty/proxy 数据面不再是
+ * 独立的自定义二进制帧，而是信封 oneof 里的普通 case（pty_output/pty_replay/proxy_data/pty_input），
+ * 与其它控制面消息走同一个 switch —— 旧的 handleDaemonBinary/handleClientBinary 已整体删除。
  */
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { WebSocket } from "ws";
 import {
-  encode,
+  create,
   clampDim,
-  decodeFrame,
-  replayFrameToOutput,
+  encodeServerToDaemon,
+  encodeServerToClient,
+  ServerToDaemonSchema,
+  ServerToClientSchema,
+  ProjectSchema,
+  WorkspaceSchema,
+  TaskSchema,
+  TaskStatus,
   type AccountId,
-  type DaemonInfo,
   type DaemonId,
   type DaemonToServer,
   type ClientToServer,
-  type ServerToDaemon,
-  type ServerToClient,
+  type ServerToDaemonPayload,
+  type ServerToClientPayload,
+  type ClientAuth,
   type SessionId,
-  type RequestId,
   type Project,
   type ProjectId,
   type Task,
@@ -45,8 +54,18 @@ import type { SupabaseVerifier, SupabaseIdentity } from "./auth.js";
 
 const log = createLogger("hub");
 
+/** daemon 展示信息：不用生成的 DaemonInfo 消息类型（无需 $typeName）——它只作为其它信封消息的
+ * 嵌套字段被构造（nested init 接受纯对象），从不单独序列化，用生成类型纯属多余的仪式。 */
+interface DaemonInfoData {
+  daemonId: DaemonId;
+  name: string;
+  host: string;
+  platform: string;
+  online: boolean;
+}
+
 export interface DaemonConn {
-  info: DaemonInfo;
+  info: DaemonInfoData;
   accountId: AccountId;
   ws: WebSocket;
 }
@@ -113,13 +132,9 @@ export class Hub {
   readonly routeTable = new ProxyRouteTable();
   readonly proxyGate = new ProxyGate();
   readonly tunnels = new TunnelRegistry({
-    sendControl: (daemonId, msg) => {
+    sendControl: (daemonId, payload) => {
       const d = this.daemons.get(daemonId);
-      if (d) this.sendDaemon(d, msg);
-    },
-    sendFrame: (daemonId, frame) => {
-      const d = this.daemons.get(daemonId);
-      if (d && d.ws.readyState === d.ws.OPEN) d.ws.send(frame);
+      if (d) this.sendDaemon(d, payload);
     },
   });
 
@@ -127,44 +142,41 @@ export class Hub {
   constructor(private store: Store, private verifier?: SupabaseVerifier) {}
 
   /* ============================ 发送工具 ============================ */
-  private sendDaemon(d: DaemonConn, msg: ServerToDaemon) {
-    if (d.ws.readyState === d.ws.OPEN) d.ws.send(encode(msg));
+  private sendDaemon(d: DaemonConn, payload: ServerToDaemonPayload) {
+    if (d.ws.readyState === d.ws.OPEN) d.ws.send(encodeServerToDaemon(create(ServerToDaemonSchema, { payload })));
   }
-  private sendRaw(ws: WebSocket, msg: ServerToDaemon | ServerToClient) {
-    if (ws.readyState === ws.OPEN) ws.send(encode(msg));
+  /** 认证完成前（daemonId 尚未落地到 this.daemons）直接对 ws 发送 */
+  private sendRaw(ws: WebSocket, payload: ServerToDaemonPayload) {
+    if (ws.readyState === ws.OPEN) ws.send(encodeServerToDaemon(create(ServerToDaemonSchema, { payload })));
   }
-  private sendClient(c: ClientConn, msg: ServerToClient) {
-    if (c.ws.readyState === c.ws.OPEN) c.ws.send(encode(msg));
+  private sendClient(c: ClientConn, payload: ServerToClientPayload) {
+    if (c.ws.readyState === c.ws.OPEN) c.ws.send(encodeServerToClient(create(ServerToClientSchema, { payload })));
   }
-  /** 数据面：发二进制帧给控制端 */
-  private sendClientFrame(c: ClientConn, frame: Uint8Array) {
-    if (c.ws.readyState === c.ws.OPEN) c.ws.send(frame);
-  }
-  private broadcast(accountId: AccountId, msg: ServerToClient) {
-    for (const c of this.clients) if (c.subscribed && c.accountId === accountId) this.sendClient(c, msg);
+  private broadcast(accountId: AccountId, payload: ServerToClientPayload) {
+    for (const c of this.clients) if (c.subscribed && c.accountId === accountId) this.sendClient(c, payload);
   }
   private emitTask(task: Task) {
-    this.broadcast(task.accountId, { type: "task.updated", task });
+    this.broadcast(task.accountId, { case: "taskUpdated", value: { task } });
   }
   private isDaemonOnline(daemonId: DaemonId): boolean {
     return this.daemons.has(daemonId);
   }
   /** 给 client 回一个带它自定 requestId 的失败结果（超时/不支持/掉线等） */
   private relayError(client: ClientConn, kind: RelayKind, clientRequestId: string, message: string) {
-    if (kind === "exec") this.sendClient(client, { type: "exec.result", requestId: clientRequestId, ok: false, exitCode: -1, stdout: "", stderr: "", error: message });
-    else if (kind === "fs.list") this.sendClient(client, { type: "fs.listed", requestId: clientRequestId, ok: false, entries: [], error: message });
-    else this.sendClient(client, { type: "fs.read.result", requestId: clientRequestId, ok: false, content: "", error: message });
+    if (kind === "exec") this.sendClient(client, { case: "execResult", value: { requestId: clientRequestId, ok: false, exitCode: -1, stdout: "", stderr: "", error: message } });
+    else if (kind === "fs.list") this.sendClient(client, { case: "fsListed", value: { requestId: clientRequestId, ok: false, entries: [], error: message } });
+    else this.sendClient(client, { case: "fsReadResult", value: { requestId: clientRequestId, ok: false, content: "", error: message } });
   }
   /** 把 client 设为某会话的控制端；若原控制端是别人，则踢出并通知（handoff 接管） */
   private setHolder(s: RuntimeSession, client: ClientConn) {
     if (s.holder && s.holder !== client) {
-      this.sendClient(s.holder, { type: "task.detached", taskId: s.taskId });
+      this.sendClient(s.holder, { case: "taskDetached", value: { taskId: s.taskId } });
     }
     s.holder = client;
   }
 
-  private async daemonInfoList(accountId: AccountId): Promise<DaemonInfo[]> {
-    const list: DaemonInfo[] = [];
+  private async daemonInfoList(accountId: AccountId): Promise<DaemonInfoData[]> {
+    const list: DaemonInfoData[] = [];
     const seen = new Set<DaemonId>();
     for (const d of this.daemons.values()) {
       if (d.accountId !== accountId) continue;
@@ -179,74 +191,16 @@ export class Hub {
     return list;
   }
 
-  private routeToSessionDaemon(sessionId: SessionId, msg: ServerToDaemon): boolean {
+  private routeToSessionDaemon(sessionId: SessionId, payload: ServerToDaemonPayload): boolean {
     const s = this.sessions.get(sessionId);
     if (!s) return false;
     const d = this.daemons.get(s.daemonId);
     if (!d) return false;
-    this.sendDaemon(d, msg);
+    this.sendDaemon(d, payload);
     return true;
   }
 
-  /* ===================== 数据面（二进制帧）===================== */
-
-  /** daemon → server 的二进制帧：pty.output（转发给控制端）/ pty.replay（取 pending、转 output 并接管控制权） */
-  handleDaemonBinary(conn: DaemonCtx, buf: Buffer): void {
-    const frame = decodeFrame(buf);
-    if (!frame) return;
-    if (frame.type === "pty.output") {
-      const s = this.sessions.get(frame.sessionId);
-      if (!s || s.daemonId !== conn.daemonId || !s.holder) return;
-      if (s.holder.ws.bufferedAmount > config.clientBufferHardLimit) {
-        // 控制端严重落后：断开它（重连后回放 scrollback 自愈），保护服务器内存
-        try {
-          s.holder.ws.close(1013, "client too slow");
-        } catch {
-          /* ignore */
-        }
-        return;
-      }
-      // 同一帧格式，原始字节直接转发给控制端
-      if (s.holder.ws.readyState === s.holder.ws.OPEN) s.holder.ws.send(buf);
-      return;
-    }
-    if (frame.type === "pty.replay") {
-      const p = this.pendingReplays.get(frame.requestId);
-      if (!p || p.daemonId !== conn.daemonId) return;
-      this.pendingReplays.take(frame.requestId);
-      // 字节级重组为 output 帧转发（保留 scrollback 原始字节，与实时 output 路径一致）
-      if (frame.data) {
-        const outFrame = replayFrameToOutput(buf);
-        if (outFrame) this.sendClientFrame(p.client, outFrame);
-      }
-      // 回放完成后接管控制权（踢掉原控制端）
-      const s = this.sessions.get(frame.sessionId);
-      if (s && !s.closing) this.setHolder(s, p.client);
-      return;
-    }
-    if (frame.type === "proxy.data") {
-      if (conn.daemonId) this.tunnels.handleData(conn.daemonId, frame.connId, frame.data);
-      return;
-    }
-    // pty.input 不应从 daemon 上行，忽略
-  }
-
-  /** client → server 的二进制帧：pty.input（校验控制权后转发给会话所属 daemon） */
-  handleClientBinary(client: ClientConn, buf: Buffer): void {
-    const frame = decodeFrame(buf);
-    if (!frame || frame.type !== "pty.input") return;
-    const s = this.sessions.get(frame.sessionId);
-    if (!s || s.accountId !== client.accountId) return;
-    if (s.holder !== client) {
-      this.sendClient(client, { type: "error", message: "无控制权：该任务已被其它客户端接管" });
-      return;
-    }
-    // 同一帧格式，原始字节直接转发给会话所属 daemon
-    const d = this.daemons.get(s.daemonId);
-    if (d && d.ws.readyState === d.ws.OPEN) d.ws.send(buf);
-  }
-
-  private async registerDaemonConn(conn: DaemonCtx, info: DaemonInfo, accountId: AccountId): Promise<void> {
+  private async registerDaemonConn(conn: DaemonCtx, info: DaemonInfoData, accountId: AccountId): Promise<void> {
     const prev = this.daemons.get(info.daemonId);
     if (prev && prev.ws !== conn.ws) {
       try {
@@ -259,15 +213,16 @@ export class Hub {
     conn.accountId = accountId;
     this.daemons.set(info.daemonId, { ws: conn.ws, info, accountId });
     await this.store.touchDevice(info.daemonId, Date.now());
-    this.broadcast(accountId, { type: "daemon.updated", daemon: { ...info, online: true } });
+    this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: { ...info, online: true } } });
   }
 
   /* ============================ Daemon 侧 ============================ */
   async handleDaemonMessage(conn: DaemonCtx, msg: DaemonToServer): Promise<void> {
-    if (msg.type !== "daemon.enroll" && msg.type !== "daemon.auth" && msg.type !== "daemon.enrollRequest" && !conn.daemonId) return;
+    if (msg.payload.case !== "daemonEnroll" && msg.payload.case !== "daemonAuth" && msg.payload.case !== "daemonEnrollRequest" && !conn.daemonId) return;
 
-    switch (msg.type) {
-      case "daemon.enrollRequest": {
+    switch (msg.payload.case) {
+      case "daemonEnrollRequest": {
+        const value = msg.payload.value;
         // 同连接理论上只会有一个 pending（daemon 收到 authorizePending 前不会再发一次）；
         // 兜底：若已有旧 pending（例如客户端异常重发），先摘掉旧的再建新的，避免 token 泄漏。
         if (conn.pendingAuthToken) {
@@ -282,157 +237,214 @@ export class Hub {
           if (conn.pendingAuthToken === token) conn.pendingAuthToken = undefined;
         }, config.authorizeTtlMs);
         (timer as { unref?: () => void }).unref?.();
-        this.pendingAuthorizations.set(token, { token, conn, name: msg.name, host: msg.host, platform: msg.platform, createdAt, timer });
+        this.pendingAuthorizations.set(token, { token, conn, name: value.name, host: value.host, platform: value.platform, createdAt, timer });
         conn.pendingAuthToken = token;
-        this.sendRaw(conn.ws, { type: "daemon.authorizePending", url: `${config.webUrl}/authorize/${token}`, expiresAt: createdAt + config.authorizeTtlMs });
-        log.info("daemon authorize requested", { name: msg.name, host: msg.host });
+        this.sendRaw(conn.ws, { case: "daemonAuthorizePending", value: { url: `${config.webUrl}/authorize/${token}`, expiresAt: createdAt + config.authorizeTtlMs } });
+        log.info("daemon authorize requested", { name: value.name, host: value.host });
         break;
       }
-      case "daemon.enroll": {
-        const accountId = await this.store.accountForEnrollmentKey(hashToken(msg.enrollmentKey));
+      case "daemonEnroll": {
+        const value = msg.payload.value;
+        const accountId = await this.store.accountForEnrollmentKey(hashToken(value.enrollmentKey));
         if (!accountId) {
-          this.sendRaw(conn.ws, { type: "daemon.authError", message: "登记密钥无效", needEnroll: false });
+          this.sendRaw(conn.ws, { case: "daemonAuthError", value: { message: "登记密钥无效", needEnroll: false } });
           conn.ws.close(4001, "bad enrollment key");
           return;
         }
         if ((await this.store.countDevices(accountId)) >= config.maxDevicesPerAccount) {
-          this.sendRaw(conn.ws, { type: "daemon.authError", message: "账号设备数已达上限", needEnroll: false });
+          this.sendRaw(conn.ws, { case: "daemonAuthError", value: { message: "账号设备数已达上限", needEnroll: false } });
           conn.ws.close(4004, "device cap reached");
           return;
         }
         const daemonId = randomUUID();
         const deviceToken = genToken("ck_dev");
         const ts = Date.now();
-        await this.store.createDevice({ id: daemonId, accountId, name: msg.name, host: msg.host, platform: msg.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: false });
-        log.info("daemon enrolled", { daemonId, name: msg.name, host: msg.host });
-        this.sendRaw(conn.ws, { type: "daemon.enrolled", daemonId, deviceToken });
-        await this.registerDaemonConn(conn, { daemonId, name: msg.name, host: msg.host, platform: msg.platform, online: true }, accountId);
+        await this.store.createDevice({ id: daemonId, accountId, name: value.name, host: value.host, platform: value.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: false });
+        log.info("daemon enrolled", { daemonId, name: value.name, host: value.host });
+        this.sendRaw(conn.ws, { case: "daemonEnrolled", value: { daemonId, deviceToken } });
+        await this.registerDaemonConn(conn, { daemonId, name: value.name, host: value.host, platform: value.platform, online: true }, accountId);
         break;
       }
-      case "daemon.auth": {
-        const device = await this.store.getDeviceByTokenHash(hashToken(msg.deviceToken));
+      case "daemonAuth": {
+        const value = msg.payload.value;
+        const device = await this.store.getDeviceByTokenHash(hashToken(value.deviceToken));
         if (!device) {
-          this.sendRaw(conn.ws, { type: "daemon.authError", message: "设备凭证无效或已撤销", needEnroll: true });
+          this.sendRaw(conn.ws, { case: "daemonAuthError", value: { message: "设备凭证无效或已撤销", needEnroll: true } });
           conn.ws.close(4001, "bad device token");
           return;
         }
         log.info("daemon authed", { daemonId: device.id, name: device.name });
-        this.sendRaw(conn.ws, { type: "daemon.authed", daemonId: device.id });
+        this.sendRaw(conn.ws, { case: "daemonAuthed", value: { daemonId: device.id } });
         await this.registerDaemonConn(conn, { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true }, device.accountId);
         break;
       }
-      case "daemon.resync": {
-        await this.reconcileDaemonSessions(conn.daemonId!, conn.accountId!, msg.sessions);
+      case "daemonResync": {
+        const value = msg.payload.value;
+        await this.reconcileDaemonSessions(conn.daemonId!, conn.accountId!, value.sessions);
         break;
       }
-      case "project.validated": {
-        const p = this.pendingOps.get(msg.requestId);
+      case "projectValidated": {
+        const value = msg.payload.value;
+        const p = this.pendingOps.get(value.requestId);
         if (!p || p.data.kind !== "project.import" || p.daemonId !== conn.daemonId) return;
-        this.pendingOps.take(msg.requestId);
-        if (!msg.ok) {
-          this.sendClient(p.client, { type: "error", message: `不是有效的 git 仓库：${msg.error ?? msg.repoPath}` });
+        this.pendingOps.take(value.requestId);
+        if (!value.ok) {
+          this.sendClient(p.client, { case: "error", value: { message: `不是有效的 git 仓库：${value.error ?? value.repoPath}` } });
           return;
         }
         const ts = Date.now();
-        const project: Project = { id: randomUUID(), accountId: conn.accountId!, daemonId: conn.daemonId!, name: p.data.name, repoPath: msg.repoPath, defaultBranch: msg.branch, createdAt: ts };
+        const project: Project = create(ProjectSchema, { id: randomUUID(), accountId: conn.accountId!, daemonId: conn.daemonId!, name: p.data.name, repoPath: value.repoPath, defaultBranch: value.branch, createdAt: ts });
         await this.store.createProject(project);
-        const main: Workspace = { id: randomUUID(), accountId: project.accountId, daemonId: project.daemonId, projectId: project.id, name: "main", path: msg.repoPath, branch: msg.branch, isMain: true, createdAt: ts };
+        const main: Workspace = create(WorkspaceSchema, { id: randomUUID(), accountId: project.accountId, daemonId: project.daemonId, projectId: project.id, name: "main", path: value.repoPath, branch: value.branch, isMain: true, createdAt: ts });
         await this.store.createWorkspace(main);
-        log.info("project imported", { projectId: project.id, repoPath: project.repoPath, branch: msg.branch });
-        this.broadcast(project.accountId, { type: "project.created", project });
-        this.broadcast(project.accountId, { type: "workspace.created", workspace: main });
+        log.info("project imported", { projectId: project.id, repoPath: project.repoPath, branch: value.branch });
+        this.broadcast(project.accountId, { case: "projectCreated", value: { project } });
+        this.broadcast(project.accountId, { case: "workspaceCreated", value: { workspace: main } });
         break;
       }
-      case "worktree.added": {
-        const p = this.pendingOps.get(msg.requestId);
+      case "worktreeAdded": {
+        const value = msg.payload.value;
+        const p = this.pendingOps.get(value.requestId);
         if (!p || p.data.kind !== "worktree.add" || p.daemonId !== conn.daemonId) return;
-        this.pendingOps.take(msg.requestId);
-        if (!msg.ok) {
-          this.sendClient(p.client, { type: "error", message: `创建工作区失败：${msg.error ?? ""}` });
+        this.pendingOps.take(value.requestId);
+        if (!value.ok) {
+          this.sendClient(p.client, { case: "error", value: { message: `创建工作区失败：${value.error ?? ""}` } });
           return;
         }
-        const ws: Workspace = { id: p.data.workspaceId, accountId: conn.accountId!, daemonId: conn.daemonId!, projectId: p.data.projectId, name: p.data.name, path: msg.path, branch: msg.branch, isMain: false, createdAt: Date.now() };
+        const ws: Workspace = create(WorkspaceSchema, { id: p.data.workspaceId, accountId: conn.accountId!, daemonId: conn.daemonId!, projectId: p.data.projectId, name: p.data.name, path: value.path, branch: value.branch, isMain: false, createdAt: Date.now() });
         await this.store.createWorkspace(ws);
         log.info("worktree created", { workspaceId: ws.id, path: ws.path, branch: ws.branch });
-        this.broadcast(ws.accountId, { type: "workspace.created", workspace: ws });
+        this.broadcast(ws.accountId, { case: "workspaceCreated", value: { workspace: ws } });
         break;
       }
-      case "session.started": {
-        const s = this.sessions.get(msg.sessionId);
+      case "sessionStarted": {
+        const value = msg.payload.value;
+        const s = this.sessions.get(value.sessionId);
         if (s && s.daemonId !== conn.daemonId) return;
         if (s?.startTimer) {
           clearTimeout(s.startTimer);
           s.startTimer = undefined; // 已确认启动，撤销启动超时
         }
-        const task = await this.store.getTask(msg.taskId);
-        if (task && task.daemonId === conn.daemonId && task.sessionId === msg.sessionId && task.status !== "running") {
-          const updated = await this.store.updateTask(task.id, { status: "running", exitCode: null });
+        const task = await this.store.getTask(value.taskId);
+        if (task && task.daemonId === conn.daemonId && task.sessionId === value.sessionId && task.status !== TaskStatus.RUNNING) {
+          const updated = await this.store.updateTask(task.id, { status: TaskStatus.RUNNING, exitCode: undefined });
           if (updated) this.emitTask(updated);
         }
-        log.debug("session started", { sessionId: msg.sessionId, taskId: msg.taskId, pid: msg.pid });
+        log.debug("session started", { sessionId: value.sessionId, taskId: value.taskId, pid: value.pid });
         break;
       }
-      case "session.exit": {
-        const s = this.sessions.get(msg.sessionId);
+      case "sessionExit": {
+        const value = msg.payload.value;
+        const s = this.sessions.get(value.sessionId);
         if (s && s.daemonId !== conn.daemonId) return;
-        const task = await this.store.getTaskBySession(msg.sessionId);
-        if (task && task.daemonId === conn.daemonId && task.sessionId === msg.sessionId) {
-          const updated = await this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: msg.exitCode });
+        const task = await this.store.getTaskBySession(value.sessionId);
+        if (task && task.daemonId === conn.daemonId && task.sessionId === value.sessionId) {
+          const updated = await this.store.updateTask(task.id, { status: TaskStatus.EXITED, sessionId: undefined, exitCode: value.exitCode });
           if (updated) this.emitTask(updated);
         }
         if (s?.startTimer) clearTimeout(s.startTimer);
-        if (s) this.dropSession(msg.sessionId);
-        log.debug("session exit", { sessionId: msg.sessionId, code: msg.exitCode });
+        if (s) this.dropSession(value.sessionId);
+        log.debug("session exit", { sessionId: value.sessionId, code: value.exitCode });
         break;
       }
-      case "ports.update": {
-        await this.handlePortsUpdate(conn, msg.sessions);
+      case "portsUpdate": {
+        await this.handlePortsUpdate(conn, msg.payload.value.sessions);
         break;
       }
-      case "proxy.opened": {
-        if (conn.daemonId) this.tunnels.handleOpened(conn.daemonId, msg.connId, msg.ok, msg.error);
+      case "proxyOpened": {
+        const value = msg.payload.value;
+        if (conn.daemonId) this.tunnels.handleOpened(conn.daemonId, value.connId, value.ok, value.error);
         break;
       }
-      case "proxy.closed": {
-        if (conn.daemonId) this.tunnels.handleClosed(conn.daemonId, msg.connId);
+      case "proxyClosed": {
+        const value = msg.payload.value;
+        if (conn.daemonId) this.tunnels.handleClosed(conn.daemonId, value.connId);
         break;
       }
-      // pty.output / pty.replay / proxy.data 走二进制数据面（见 handleDaemonBinary）
-      case "exec.result":
-      case "fs.listed":
-      case "fs.read.result": {
-        // exec/fs 结果：取出中继、把 requestId 换回 client 自定的，原样回传
-        const p = this.pendingRelays.get(msg.requestId);
+      case "proxyData": {
+        const value = msg.payload.value;
+        if (conn.daemonId) this.tunnels.handleData(conn.daemonId, value.connId, value.data);
+        break;
+      }
+      /* ---------------- 数据面（原自定义二进制帧，现为普通 oneof case）---------------- */
+      case "ptyOutput": {
+        const value = msg.payload.value;
+        const s = this.sessions.get(value.sessionId);
+        if (!s || s.daemonId !== conn.daemonId || !s.holder) return;
+        if (s.holder.ws.bufferedAmount > config.clientBufferHardLimit) {
+          // 控制端严重落后：断开它（重连后回放 scrollback 自愈），保护服务器内存
+          try {
+            s.holder.ws.close(1013, "client too slow");
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        this.sendClient(s.holder, { case: "ptyOutput", value });
+        break;
+      }
+      case "ptyReplay": {
+        const value = msg.payload.value;
+        const p = this.pendingReplays.get(value.requestId);
         if (!p || p.daemonId !== conn.daemonId) return;
-        this.pendingRelays.take(msg.requestId);
-        this.sendClient(p.client, { ...msg, requestId: p.data.clientRequestId });
+        this.pendingReplays.take(value.requestId);
+        // 重新包成 pty_output 转发给控制端：bytes 原样复制，无需旧版的字节级重组 hack
+        if (value.data.length > 0) {
+          this.sendClient(p.client, { case: "ptyOutput", value: { sessionId: value.sessionId, data: value.data } });
+        }
+        // 回放完成后接管控制权（踢掉原控制端）
+        const s = this.sessions.get(value.sessionId);
+        if (s && !s.closing) this.setHolder(s, p.client);
+        break;
+      }
+      case "execResult": {
+        const value = msg.payload.value;
+        const p = this.pendingRelays.get(value.requestId);
+        if (!p || p.daemonId !== conn.daemonId) return;
+        this.pendingRelays.take(value.requestId);
+        this.sendClient(p.client, { case: "execResult", value: { ...value, requestId: p.data.clientRequestId } });
+        break;
+      }
+      case "fsListed": {
+        const value = msg.payload.value;
+        const p = this.pendingRelays.get(value.requestId);
+        if (!p || p.daemonId !== conn.daemonId) return;
+        this.pendingRelays.take(value.requestId);
+        this.sendClient(p.client, { case: "fsListed", value: { ...value, requestId: p.data.clientRequestId } });
+        break;
+      }
+      case "fsReadResult": {
+        const value = msg.payload.value;
+        const p = this.pendingRelays.get(value.requestId);
+        if (!p || p.daemonId !== conn.daemonId) return;
+        this.pendingRelays.take(value.requestId);
+        this.sendClient(p.client, { case: "fsReadResult", value: { ...value, requestId: p.data.clientRequestId } });
         break;
       }
     }
   }
 
-  private async reconcileDaemonSessions(daemonId: DaemonId, accountId: AccountId, alive: { sessionId: SessionId; taskId: TaskId }[]): Promise<void> {
-    if (!Array.isArray(alive)) return;
+  private async reconcileDaemonSessions(daemonId: DaemonId, accountId: AccountId, alive: readonly { sessionId: SessionId; taskId: TaskId }[]): Promise<void> {
     const valid = alive.filter((a) => a && typeof a.sessionId === "string" && typeof a.taskId === "string");
     const aliveIds = new Set(valid.map((a) => a.sessionId));
     const daemon = this.daemons.get(daemonId);
 
     for (const { sessionId, taskId } of valid) {
       const task = await this.store.getTask(taskId);
-      if (!task || task.daemonId !== daemonId || task.status !== "running") {
-        if (daemon) this.sendDaemon(daemon, { type: "session.close", sessionId });
+      if (!task || task.daemonId !== daemonId || task.status !== TaskStatus.RUNNING) {
+        if (daemon) this.sendDaemon(daemon, { case: "sessionClose", value: { sessionId } });
         this.dropSession(sessionId);
         continue;
       }
       if (!this.sessions.has(sessionId)) this.sessions.set(sessionId, { sessionId, daemonId, accountId, taskId, holder: null, closing: false });
       if (task.sessionId !== sessionId) {
-        const updated = await this.store.updateTask(taskId, { status: "running", sessionId, exitCode: null });
+        const updated = await this.store.updateTask(taskId, { status: TaskStatus.RUNNING, sessionId, exitCode: undefined });
         if (updated) this.emitTask(updated);
       }
     }
     for (const task of await this.store.listRunningTasksByDaemon(daemonId)) {
       if (task.sessionId && !aliveIds.has(task.sessionId)) {
-        const updated = await this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
+        const updated = await this.store.updateTask(task.id, { status: TaskStatus.EXITED, sessionId: undefined, exitCode: -1 });
         if (updated) this.emitTask(updated);
         this.dropSession(task.sessionId);
       }
@@ -442,7 +454,7 @@ export class Hub {
 
   /** daemon 全量幂等上报每个存活 session 的监听端口：收敛路由表，广播受影响任务的 ports.updated。
    * 未出现在本次上报里的（该 daemon 名下）session 视为端口已清零（daemon 只报"仍有端口"的 session）。 */
-  private async handlePortsUpdate(conn: DaemonCtx, reported: { sessionId: SessionId; ports: number[] }[]): Promise<void> {
+  private async handlePortsUpdate(conn: DaemonCtx, reported: readonly { sessionId: SessionId; ports: readonly number[] }[]): Promise<void> {
     if (!conn.daemonId || !conn.accountId) return;
     const daemonId = conn.daemonId;
     const accountId = conn.accountId;
@@ -472,25 +484,34 @@ export class Hub {
 
   private broadcastPorts(accountId: AccountId, taskId: TaskId): void {
     const ports = this.routeTable.portsForTask(taskId).map((r) => ({ port: r.port, url: buildPreviewUrl(r.shortId) }));
-    this.broadcast(accountId, { type: "ports.updated", taskId, ports });
+    this.broadcast(accountId, { case: "portsUpdated", value: { taskId, ports } });
   }
 
-  private allPorts(accountId: AccountId): { taskId: TaskId; port: number; url: string }[] {
-    return this.routeTable.listForAccount(accountId).map((r) => ({ taskId: r.taskId, port: r.port, url: buildPreviewUrl(r.shortId) }));
+  /** state.snapshot 里的 ports 字段按 taskId 分组（TaskPorts[]），与 ports.updated 的扁平形状不同——
+   * 两者是不同消息（StateSnapshot vs PortsUpdated），语义映射见 client.proto。 */
+  private allPorts(accountId: AccountId): { taskId: TaskId; ports: { port: number; url: string }[] }[] {
+    const byTask = new Map<TaskId, { port: number; url: string }[]>();
+    for (const r of this.routeTable.listForAccount(accountId)) {
+      const entry = { port: r.port, url: buildPreviewUrl(r.shortId) };
+      const list = byTask.get(r.taskId);
+      if (list) list.push(entry);
+      else byTask.set(r.taskId, [entry]);
+    }
+    return [...byTask.entries()].map(([taskId, ports]) => ({ taskId, ports }));
   }
 
   /** 端口转发版 proxy.issueAuth：校验 redirect 的 host 命中 <shortId>.<proxyHost> 且该 shortId
    * 当前路由属于本账号（跨账号严拒），签发一次性 code，拼出浏览器要跳转的回调 URL。 */
   private handleProxyIssueAuth(client: ClientConn, redirect: string): void {
     const parsed = parseProxyRedirect(redirect);
-    if (!parsed) return void this.sendClient(client, { type: "proxy.auth", ok: false, error: "目标地址无效" });
+    if (!parsed) return void this.sendClient(client, { case: "proxyAuth", value: { ok: false, error: "目标地址无效" } });
     const route = this.routeTable.get(parsed.shortId);
     if (!route || route.accountId !== client.accountId) {
-      return void this.sendClient(client, { type: "proxy.auth", ok: false, error: "预览链接不存在或不属于当前账号" });
+      return void this.sendClient(client, { case: "proxyAuth", value: { ok: false, error: "预览链接不存在或不属于当前账号" } });
     }
     const code = this.proxyGate.issueAuthCode(client.accountId!);
     const url = buildAuthCallbackUrl(parsed.host, code, parsed.pathAndQuery);
-    this.sendClient(client, { type: "proxy.auth", ok: true, url });
+    this.sendClient(client, { case: "proxyAuth", value: { ok: true, url } });
   }
 
   /** session 终结的统一出口：除 this.sessions 外，一并摘除端口路由表条目、关闭在途隧道连接、
@@ -529,37 +550,37 @@ export class Hub {
     await this.store.touchDevice(daemonId, Date.now());
     log.info("daemon disconnected", { daemonId });
 
-    this.pendingOps.removeByDaemon(daemonId, (p) => this.sendClient(p.client, { type: "error", message: "daemon 掉线，操作未完成" }));
-    this.pendingReplays.removeByDaemon(daemonId, (p) => this.sendClient(p.client, { type: "error", message: "daemon 掉线，无法回放" }));
+    this.pendingOps.removeByDaemon(daemonId, (p) => this.sendClient(p.client, { case: "error", value: { message: "daemon 掉线，操作未完成" } }));
+    this.pendingReplays.removeByDaemon(daemonId, (p) => this.sendClient(p.client, { case: "error", value: { message: "daemon 掉线，无法回放" } }));
     this.pendingRelays.removeByDaemon(daemonId, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "daemon 掉线"));
 
     const device = await this.store.getDevice(daemonId);
     if (device && !device.revoked) {
-      this.broadcast(accountId, { type: "daemon.updated", daemon: { daemonId, name: device.name, host: device.host, platform: device.platform, online: false } });
+      this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: { daemonId, name: device.name, host: device.host, platform: device.platform, online: false } } });
     } else {
-      this.broadcast(accountId, { type: "daemon.removed", daemonId });
+      this.broadcast(accountId, { case: "daemonRemoved", value: { daemonId } });
     }
   }
 
   /* ============================ Client 侧 ============================ */
   async handleClientMessage(client: ClientConn, msg: ClientToServer): Promise<void> {
-    if (msg.type !== "client.auth" && !client.accountId) {
-      this.sendClient(client, { type: "error", message: "未认证" });
+    if (msg.payload.case !== "clientAuth" && !client.accountId) {
+      this.sendClient(client, { case: "error", value: { message: "未认证" } });
       return;
     }
 
-    switch (msg.type) {
-      case "client.auth": {
-        await this.handleClientAuth(client, msg);
+    switch (msg.payload.case) {
+      case "clientAuth": {
+        await this.handleClientAuth(client, msg.payload.value);
         break;
       }
-      case "client.logout": {
+      case "clientLogout": {
         // 服务器侧撤销本连接的会话 token（不止清本地），撤销后该 token 重连即失败。
         if (client.tokenHash) await this.store.revokeClientToken(client.tokenHash);
         client.ws.close(4001, "logout");
         break;
       }
-      case "client.subscribe": {
+      case "clientSubscribe": {
         const accountId = client.accountId!;
         // 先把快照数据查齐，最后才置 subscribed=true 并发送——避免在"已订阅但还没收到
         // 首个快照"的窗口期收到其它连接触发的广播导致乱序（landmine：广播不能抢在快照前）。
@@ -571,61 +592,63 @@ export class Hub {
         ]);
         client.subscribed = true;
         this.clients.add(client);
-        this.sendClient(client, { type: "state.snapshot", daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) });
+        this.sendClient(client, { case: "stateSnapshot", value: { daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) } });
         break;
       }
-      case "client.createEnrollmentKey": {
+      case "clientCreateEnrollmentKey": {
         const enrollmentKey = genToken("cf_enroll");
         await this.store.createEnrollmentKey(hashToken(enrollmentKey), client.accountId!, Date.now());
-        this.sendClient(client, { type: "enrollmentKey.created", enrollmentKey, daemonUrl: config.daemonUrl });
+        this.sendClient(client, { case: "enrollmentKeyCreated", value: { enrollmentKey, daemonUrl: config.daemonUrl } });
         log.info("enrollment key created", { accountId: client.accountId });
         break;
       }
-      case "client.removeDevice": {
-        await this.removeDevice(client, msg.daemonId);
+      case "clientRemoveDevice": {
+        await this.removeDevice(client, msg.payload.value.daemonId);
         break;
       }
-      case "device.authorizeInfo": {
-        const p = this.checkedPendingAuth(client, msg.token);
+      case "deviceAuthorizeInfo": {
+        const p = this.checkedPendingAuth(client, msg.payload.value.token);
         if (!p) break; // helper 已回过 error
-        this.sendClient(client, { type: "device.authorizeInfo", ok: true, name: p.name, host: p.host, platform: p.platform });
+        this.sendClient(client, { case: "deviceAuthorizeInfo", value: { ok: true, name: p.name, host: p.host, platform: p.platform } });
         break;
       }
-      case "device.authorize": {
-        const p = this.checkedPendingAuth(client, msg.token);
+      case "deviceAuthorize": {
+        const p = this.checkedPendingAuth(client, msg.payload.value.token);
         if (!p) break; // helper 已回过 error
         await this.completeDeviceAuthorize(client, p);
         break;
       }
-      case "proxy.issueAuth": {
-        this.handleProxyIssueAuth(client, msg.redirect);
+      case "proxyIssueAuth": {
+        this.handleProxyIssueAuth(client, msg.payload.value.redirect);
         break;
       }
-      case "client.upgradeDaemon": {
-        const device = await this.store.getDevice(msg.daemonId);
+      case "clientUpgradeDaemon": {
+        const value = msg.payload.value;
+        const device = await this.store.getDevice(value.daemonId);
         if (!device || device.accountId !== client.accountId) return;
-        const d = this.daemons.get(msg.daemonId);
-        if (!d) return void this.sendClient(client, { type: "error", message: "daemon 不在线" });
-        this.sendDaemon(d, { type: "worker.upgrade", version: msg.version, url: msg.url, sha256: msg.sha256, signature: msg.signature });
-        log.info("worker upgrade dispatched", { daemonId: msg.daemonId, version: msg.version, download: !!msg.url });
+        const d = this.daemons.get(value.daemonId);
+        if (!d) return void this.sendClient(client, { case: "error", value: { message: "daemon 不在线" } });
+        this.sendDaemon(d, { case: "workerUpgrade", value: { version: value.version, url: value.url, sha256: value.sha256, signature: value.signature } });
+        log.info("worker upgrade dispatched", { daemonId: value.daemonId, version: value.version, download: !!value.url });
         break;
       }
-      case "project.import": {
-        const d = this.daemons.get(msg.daemonId);
+      case "projectImport": {
+        const value = msg.payload.value;
+        const d = this.daemons.get(value.daemonId);
         if (!d || d.accountId !== client.accountId) {
-          this.sendClient(client, { type: "error", message: "daemon 不在线或不属于本账号" });
+          this.sendClient(client, { case: "error", value: { message: "daemon 不在线或不属于本账号" } });
           return;
         }
-        const name = typeof msg.name === "string" && msg.name.trim() ? msg.name.trim() : basename(msg.path);
+        const name = typeof value.name === "string" && value.name.trim() ? value.name.trim() : basename(value.path);
         const requestId = randomUUID();
-        this.pendingOps.register(requestId, msg.daemonId, client, { kind: "project.import", name }, (p) =>
-          this.sendClient(p.client, { type: "error", message: "导入超时" }),
+        this.pendingOps.register(requestId, value.daemonId, client, { kind: "project.import", name }, (p) =>
+          this.sendClient(p.client, { case: "error", value: { message: "导入超时" } }),
         );
-        this.sendDaemon(d, { type: "project.validate", requestId, path: msg.path });
+        this.sendDaemon(d, { case: "projectValidate", value: { requestId, path: value.path } });
         break;
       }
-      case "project.remove": {
-        const project = await this.store.getProject(msg.projectId);
+      case "projectRemove": {
+        const project = await this.store.getProject(msg.payload.value.projectId);
         if (!project || project.accountId !== client.accountId) return;
         const workspaces = await this.store.listWorkspacesByProject(project.id);
         const sessionCloses: SessionId[] = [];
@@ -643,41 +666,42 @@ export class Hub {
         });
         // 提交后做副作用（关 PTY、删 worktree、广播）
         for (const sid of sessionCloses) {
-          this.routeToSessionDaemon(sid, { type: "session.close", sessionId: sid });
+          this.routeToSessionDaemon(sid, { case: "sessionClose", value: { sessionId: sid } });
           this.dropSession(sid);
         }
         const daemon = this.daemons.get(project.daemonId);
-        if (daemon) for (const wp of worktreePaths) this.sendDaemon(daemon, { type: "worktree.remove", repoPath: project.repoPath, worktreePath: wp });
-        for (const id of removedTaskIds) this.broadcast(project.accountId, { type: "task.removed", taskId: id });
-        for (const ws of workspaces) this.broadcast(project.accountId, { type: "workspace.removed", workspaceId: ws.id });
-        this.broadcast(project.accountId, { type: "project.removed", projectId: project.id });
+        if (daemon) for (const wp of worktreePaths) this.sendDaemon(daemon, { case: "worktreeRemove", value: { repoPath: project.repoPath, worktreePath: wp } });
+        for (const id of removedTaskIds) this.broadcast(project.accountId, { case: "taskRemoved", value: { taskId: id } });
+        for (const ws of workspaces) this.broadcast(project.accountId, { case: "workspaceRemoved", value: { workspaceId: ws.id } });
+        this.broadcast(project.accountId, { case: "projectRemoved", value: { projectId: project.id } });
         break;
       }
-      case "workspace.create": {
-        const project = await this.store.getProject(msg.projectId);
+      case "workspaceCreate": {
+        const value = msg.payload.value;
+        const project = await this.store.getProject(value.projectId);
         if (!project || project.accountId !== client.accountId) {
-          this.sendClient(client, { type: "error", message: "项目不存在或不属于本账号" });
+          this.sendClient(client, { case: "error", value: { message: "项目不存在或不属于本账号" } });
           return;
         }
         const d = this.daemons.get(project.daemonId);
         if (!d) {
-          this.sendClient(client, { type: "error", message: "daemon 不在线" });
+          this.sendClient(client, { case: "error", value: { message: "daemon 不在线" } });
           return;
         }
         const workspaceId = randomUUID();
         const requestId = randomUUID();
-        const name = msg.name.trim() || "工作区";
+        const name = value.name.trim() || "工作区";
         this.pendingOps.register(requestId, project.daemonId, client, { kind: "worktree.add", projectId: project.id, workspaceId, name }, (p) =>
-          this.sendClient(p.client, { type: "error", message: "创建工作区超时" }),
+          this.sendClient(p.client, { case: "error", value: { message: "创建工作区超时" } }),
         );
-        this.sendDaemon(d, { type: "worktree.add", requestId, repoPath: project.repoPath, workspaceId, name, branch: msg.branch, createNew: msg.createNew });
+        this.sendDaemon(d, { case: "worktreeAdd", value: { requestId, repoPath: project.repoPath, workspaceId, name, branch: value.branch, createNew: value.createNew } });
         break;
       }
-      case "workspace.remove": {
-        const ws = await this.store.getWorkspace(msg.workspaceId);
+      case "workspaceRemove": {
+        const ws = await this.store.getWorkspace(msg.payload.value.workspaceId);
         if (!ws || ws.accountId !== client.accountId) return;
         if (ws.isMain) {
-          this.sendClient(client, { type: "error", message: "主工作区不能删除（删除整个项目即可）" });
+          this.sendClient(client, { case: "error", value: { message: "主工作区不能删除（删除整个项目即可）" } });
           return;
         }
         const project = await this.store.getProject(ws.projectId);
@@ -688,98 +712,115 @@ export class Hub {
           await tx.removeWorkspace(ws.id);
         });
         for (const sid of sessionCloses) {
-          this.routeToSessionDaemon(sid, { type: "session.close", sessionId: sid });
+          this.routeToSessionDaemon(sid, { case: "sessionClose", value: { sessionId: sid } });
           this.dropSession(sid);
         }
         const daemon = this.daemons.get(ws.daemonId);
-        if (daemon && project) this.sendDaemon(daemon, { type: "worktree.remove", repoPath: project.repoPath, worktreePath: ws.path });
-        for (const id of removed) this.broadcast(ws.accountId, { type: "task.removed", taskId: id });
-        this.broadcast(ws.accountId, { type: "workspace.removed", workspaceId: ws.id });
+        if (daemon && project) this.sendDaemon(daemon, { case: "worktreeRemove", value: { repoPath: project.repoPath, worktreePath: ws.path } });
+        for (const id of removed) this.broadcast(ws.accountId, { case: "taskRemoved", value: { taskId: id } });
+        this.broadcast(ws.accountId, { case: "workspaceRemoved", value: { workspaceId: ws.id } });
         break;
       }
-      case "task.create": {
-        const ws = await this.store.getWorkspace(msg.workspaceId);
+      case "taskCreate": {
+        const value = msg.payload.value;
+        const ws = await this.store.getWorkspace(value.workspaceId);
         if (!ws || ws.accountId !== client.accountId) {
-          this.sendClient(client, { type: "error", message: "工作区不存在或不属于本账号" });
+          this.sendClient(client, { case: "error", value: { message: "工作区不存在或不属于本账号" } });
           return;
         }
         const ts = Date.now();
-        const task: Task = { id: randomUUID(), accountId: ws.accountId, daemonId: ws.daemonId, projectId: ws.projectId, workspaceId: ws.id, title: msg.title || "未命名任务", status: "idle", sessionId: null, exitCode: null, createdAt: ts, updatedAt: ts };
+        const task: Task = create(TaskSchema, { id: randomUUID(), accountId: ws.accountId, daemonId: ws.daemonId, projectId: ws.projectId, workspaceId: ws.id, title: value.title || "未命名任务", status: TaskStatus.IDLE, createdAt: ts, updatedAt: ts });
         await this.store.createTask(task);
         this.emitTask(task);
         break;
       }
-      case "task.start": {
-        await this.startOrAttachTask(client, msg.taskId, msg.cols, msg.rows);
+      case "taskStart": {
+        const value = msg.payload.value;
+        await this.startOrAttachTask(client, value.taskId, value.cols, value.rows);
         break;
       }
-      case "task.attach": {
-        const task = await this.requireTask(client, msg.taskId);
+      case "taskAttach": {
+        const task = await this.requireTask(client, msg.payload.value.taskId);
         if (!task) return;
         const s = task.sessionId ? this.sessions.get(task.sessionId) : undefined;
-        if (task.status === "running" && s && !s.closing) this.attachWithReplay(client, s.sessionId);
-        else this.sendClient(client, { type: "error", message: "任务未在运行，无法 attach" });
+        if (task.status === TaskStatus.RUNNING && s && !s.closing) this.attachWithReplay(client, s.sessionId);
+        else this.sendClient(client, { case: "error", value: { message: "任务未在运行，无法 attach" } });
         break;
       }
-      case "task.stop": {
-        const task = await this.requireTask(client, msg.taskId);
+      case "taskStop": {
+        const task = await this.requireTask(client, msg.payload.value.taskId);
         if (!task) return;
         const s = task.sessionId ? this.sessions.get(task.sessionId) : undefined;
         if (s && this.isDaemonOnline(s.daemonId)) {
           s.closing = true;
-          this.routeToSessionDaemon(s.sessionId, { type: "session.close", sessionId: s.sessionId });
-        } else if (task.status === "running") {
+          this.routeToSessionDaemon(s.sessionId, { case: "sessionClose", value: { sessionId: s.sessionId } });
+        } else if (task.status === TaskStatus.RUNNING) {
           if (task.sessionId) this.dropSession(task.sessionId);
-          const updated = await this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
+          const updated = await this.store.updateTask(task.id, { status: TaskStatus.EXITED, sessionId: undefined, exitCode: -1 });
           if (updated) this.emitTask(updated);
         }
         break;
       }
-      case "task.remove": {
-        const task = await this.requireTask(client, msg.taskId);
+      case "taskRemove": {
+        const task = await this.requireTask(client, msg.payload.value.taskId);
         if (!task) return;
         if (task.sessionId) {
-          this.routeToSessionDaemon(task.sessionId, { type: "session.close", sessionId: task.sessionId });
+          this.routeToSessionDaemon(task.sessionId, { case: "sessionClose", value: { sessionId: task.sessionId } });
           this.dropSession(task.sessionId);
         }
         await this.store.removeTask(task.id);
-        this.broadcast(task.accountId, { type: "task.removed", taskId: task.id });
+        this.broadcast(task.accountId, { case: "taskRemoved", value: { taskId: task.id } });
         break;
       }
-      // pty.input 走二进制数据面（见 handleClientBinary）
-      case "pty.resize": {
-        const s = this.sessions.get(msg.sessionId);
+      case "ptyResize": {
+        const value = msg.payload.value;
+        const s = this.sessions.get(value.sessionId);
         if (!s || s.accountId !== client.accountId || s.holder !== client) return;
-        this.routeToSessionDaemon(msg.sessionId, { type: "pty.resize", sessionId: msg.sessionId, cols: clampDim(msg.cols, 80), rows: clampDim(msg.rows, 24) });
+        this.routeToSessionDaemon(value.sessionId, { case: "ptyResize", value: { sessionId: value.sessionId, cols: clampDim(value.cols, 80), rows: clampDim(value.rows, 24) } });
         break;
       }
-      case "client.exec": {
-        const ws = await this.workspaceForClient(client, msg.workspaceId);
-        if (!ws) return void this.relayError(client, "exec", msg.requestId, "工作区不存在或不属于本账号");
-        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "exec", msg.requestId, "daemon 不在线");
+      case "ptyInput": {
+        const value = msg.payload.value;
+        const s = this.sessions.get(value.sessionId);
+        if (!s || s.accountId !== client.accountId) return;
+        if (s.holder !== client) {
+          this.sendClient(client, { case: "error", value: { message: "无控制权：该任务已被其它客户端接管" } });
+          return;
+        }
+        const d = this.daemons.get(s.daemonId);
+        if (d) this.sendDaemon(d, { case: "ptyInput", value });
+        break;
+      }
+      case "clientExec": {
+        const value = msg.payload.value;
+        const ws = await this.workspaceForClient(client, value.workspaceId);
+        if (!ws) return void this.relayError(client, "exec", value.requestId, "工作区不存在或不属于本账号");
+        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "exec", value.requestId, "daemon 不在线");
         const reqId = randomUUID();
         // exec 可能慢：服务器端钳制命令超时，并让中继超时 = 命令超时 + 宽限，避免命令仍在跑却误报超时
-        const execTimeout = Math.min(config.execMaxTimeoutMs, msg.timeoutMs && msg.timeoutMs > 0 ? msg.timeoutMs : config.execDefaultTimeoutMs);
-        this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: msg.requestId, kind: "exec" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"), execTimeout + 5_000);
-        this.sendDaemon(this.daemons.get(ws.daemonId)!, { type: "exec.run", requestId: reqId, cwd: ws.path, command: msg.command, args: msg.args, timeoutMs: execTimeout });
+        const execTimeout = Math.min(config.execMaxTimeoutMs, value.timeoutMs && value.timeoutMs > 0 ? value.timeoutMs : config.execDefaultTimeoutMs);
+        this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: value.requestId, kind: "exec" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"), execTimeout + 5_000);
+        this.sendDaemon(this.daemons.get(ws.daemonId)!, { case: "execRun", value: { requestId: reqId, cwd: ws.path, command: value.command, args: value.args, timeoutMs: execTimeout } });
         break;
       }
-      case "client.fs.list": {
-        const ws = await this.workspaceForClient(client, msg.workspaceId);
-        if (!ws) return void this.relayError(client, "fs.list", msg.requestId, "工作区不存在或不属于本账号");
-        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.list", msg.requestId, "daemon 不在线");
+      case "clientFsList": {
+        const value = msg.payload.value;
+        const ws = await this.workspaceForClient(client, value.workspaceId);
+        if (!ws) return void this.relayError(client, "fs.list", value.requestId, "工作区不存在或不属于本账号");
+        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.list", value.requestId, "daemon 不在线");
         const reqId = randomUUID();
-        this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: msg.requestId, kind: "fs.list" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
-        this.sendDaemon(this.daemons.get(ws.daemonId)!, { type: "fs.list", requestId: reqId, root: ws.path, path: msg.path });
+        this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: value.requestId, kind: "fs.list" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
+        this.sendDaemon(this.daemons.get(ws.daemonId)!, { case: "fsList", value: { requestId: reqId, root: ws.path, path: value.path } });
         break;
       }
-      case "client.fs.read": {
-        const ws = await this.workspaceForClient(client, msg.workspaceId);
-        if (!ws) return void this.relayError(client, "fs.read", msg.requestId, "工作区不存在或不属于本账号");
-        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.read", msg.requestId, "daemon 不在线");
+      case "clientFsRead": {
+        const value = msg.payload.value;
+        const ws = await this.workspaceForClient(client, value.workspaceId);
+        if (!ws) return void this.relayError(client, "fs.read", value.requestId, "工作区不存在或不属于本账号");
+        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.read", value.requestId, "daemon 不在线");
         const reqId = randomUUID();
-        this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: msg.requestId, kind: "fs.read" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
-        this.sendDaemon(this.daemons.get(ws.daemonId)!, { type: "fs.read", requestId: reqId, root: ws.path, path: msg.path });
+        this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: value.requestId, kind: "fs.read" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
+        this.sendDaemon(this.daemons.get(ws.daemonId)!, { case: "fsRead", value: { requestId: reqId, root: ws.path, path: value.path } });
         break;
       }
     }
@@ -792,7 +833,7 @@ export class Hub {
    *   3) env 用户名+密码（仅 local 模式）——单账号 default。
    * 非 string 的凭证字段自然落空 → auth.error（与既有 clientToken 类型校验一致严格）。
    */
-  private async handleClientAuth(client: ClientConn, msg: Extract<ClientToServer, { type: "client.auth" }>): Promise<void> {
+  private async handleClientAuth(client: ClientConn, msg: ClientAuth): Promise<void> {
     const now = Date.now();
     let accountId: AccountId | undefined;
     let issued: string | undefined;
@@ -824,7 +865,7 @@ export class Hub {
     }
 
     if (!accountId) {
-      this.sendClient(client, { type: "auth.error", message: "认证失败" });
+      this.sendClient(client, { case: "authError", value: { message: "认证失败" } });
       try {
         client.ws.close(4001, "bad credentials");
       } catch {
@@ -834,7 +875,7 @@ export class Hub {
     }
     client.accountId = accountId;
     client.tokenHash = tokenHash;
-    this.sendClient(client, { type: "auth.ok", accountId, clientToken: issued });
+    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued } });
   }
 
   /** 验签通过且合法的 Supabase 用户：查已有个人账号，无则 lazy 建号 + owner membership。
@@ -860,7 +901,7 @@ export class Hub {
   private async requireTask(client: ClientConn, taskId: TaskId): Promise<Task | undefined> {
     const task = await this.store.getTask(taskId);
     if (!task || task.accountId !== client.accountId) {
-      this.sendClient(client, { type: "error", message: `任务不存在：${taskId}` });
+      this.sendClient(client, { case: "error", value: { message: `任务不存在：${taskId}` } });
       return undefined;
     }
     return task;
@@ -870,18 +911,18 @@ export class Hub {
     const task = await this.requireTask(client, taskId);
     if (!task) return;
 
-    if (task.status === "running" && task.sessionId) {
+    if (task.status === TaskStatus.RUNNING && task.sessionId) {
       const s = this.sessions.get(task.sessionId);
       if (s && !s.closing) return void this.attachWithReplay(client, s.sessionId);
-      if (s && s.closing) return void this.sendClient(client, { type: "error", message: "任务正在停止，请稍候重试" });
-      this.sendClient(client, { type: "error", message: "会话恢复中，请稍候重试" });
+      if (s && s.closing) return void this.sendClient(client, { case: "error", value: { message: "任务正在停止，请稍候重试" } });
+      this.sendClient(client, { case: "error", value: { message: "会话恢复中，请稍候重试" } });
       return;
     }
 
     const d = this.daemons.get(task.daemonId);
-    if (!d) return void this.sendClient(client, { type: "error", message: `daemon 不在线：${task.daemonId}` });
+    if (!d) return void this.sendClient(client, { case: "error", value: { message: `daemon 不在线：${task.daemonId}` } });
     const ws = await this.store.getWorkspace(task.workspaceId);
-    if (!ws) return void this.sendClient(client, { type: "error", message: "工作区已不存在" });
+    if (!ws) return void this.sendClient(client, { case: "error", value: { message: "工作区已不存在" } });
 
     const sessionId = randomUUID();
     const session: RuntimeSession = { sessionId, daemonId: task.daemonId, accountId: task.accountId, taskId: task.id, holder: client, closing: false };
@@ -890,8 +931,8 @@ export class Hub {
     (startTimer as { unref?: () => void }).unref?.();
     session.startTimer = startTimer;
     this.sessions.set(sessionId, session);
-    this.sendDaemon(d, { type: "session.create", sessionId, taskId: task.id, cwd: ws.path, cols: clampDim(cols, 80), rows: clampDim(rows, 24) });
-    const updated = await this.store.updateTask(task.id, { status: "running", sessionId, exitCode: null });
+    this.sendDaemon(d, { case: "sessionCreate", value: { sessionId, taskId: task.id, cwd: ws.path, cols: clampDim(cols, 80), rows: clampDim(rows, 24) } });
+    const updated = await this.store.updateTask(task.id, { status: TaskStatus.RUNNING, sessionId, exitCode: undefined });
     if (updated) this.emitTask(updated);
   }
 
@@ -901,26 +942,26 @@ export class Hub {
     if (!s || !s.startTimer) return; // 已确认启动（timer 被清）或已清理
     this.dropSession(sessionId);
     const task = await this.store.getTaskBySession(sessionId);
-    if (task && task.sessionId === sessionId && task.status === "running") {
-      const updated = await this.store.updateTask(task.id, { status: "exited", sessionId: null, exitCode: -1 });
+    if (task && task.sessionId === sessionId && task.status === TaskStatus.RUNNING) {
+      const updated = await this.store.updateTask(task.id, { status: TaskStatus.EXITED, sessionId: undefined, exitCode: -1 });
       if (updated) this.emitTask(updated);
     }
-    if (s.holder) this.sendClient(s.holder, { type: "error", message: "会话启动超时" });
+    if (s.holder) this.sendClient(s.holder, { case: "error", value: { message: "会话启动超时" } });
     log.warn("session start timed out", { sessionId });
   }
 
   private attachWithReplay(client: ClientConn, sessionId: SessionId): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
-    if (!this.isDaemonOnline(s.daemonId)) return void this.sendClient(client, { type: "error", message: "daemon 离线，无法回放" });
+    if (!this.isDaemonOnline(s.daemonId)) return void this.sendClient(client, { case: "error", value: { message: "daemon 离线，无法回放" } });
     const requestId = randomUUID();
     this.pendingReplays.register(requestId, s.daemonId, client, { sessionId }, (p) =>
-      this.sendClient(p.client, { type: "error", message: "回放超时" }),
+      this.sendClient(p.client, { case: "error", value: { message: "回放超时" } }),
     );
-    const ok = this.routeToSessionDaemon(sessionId, { type: "session.replay", sessionId, requestId });
+    const ok = this.routeToSessionDaemon(sessionId, { case: "sessionReplay", value: { sessionId, requestId } });
     if (!ok) {
       this.pendingReplays.take(requestId);
-      this.sendClient(client, { type: "error", message: "daemon 离线，无法回放" });
+      this.sendClient(client, { case: "error", value: { message: "daemon 离线，无法回放" } });
     }
   }
 
@@ -928,13 +969,13 @@ export class Hub {
    * 未命中（无效/已过期/已被兑现/daemon 已断线）计入失败次数；命中不消费（由调用方决定是否消费）。 */
   private checkedPendingAuth(client: ClientConn, token: string): PendingAuthorization | undefined {
     if ((client.authorizeFailures ?? 0) >= config.authorizeMaxFailures) {
-      this.sendClient(client, { type: "device.authorizeInfo", ok: false, error: "尝试次数过多，请重新申请授权链接" });
+      this.sendClient(client, { case: "deviceAuthorizeInfo", value: { ok: false, error: "尝试次数过多，请重新申请授权链接" } });
       return undefined;
     }
     const p = this.pendingAuthorizations.get(token);
     if (!p) {
       client.authorizeFailures = (client.authorizeFailures ?? 0) + 1;
-      this.sendClient(client, { type: "device.authorizeInfo", ok: false, error: "授权链接无效或已过期" });
+      this.sendClient(client, { case: "deviceAuthorizeInfo", value: { ok: false, error: "授权链接无效或已过期" } });
       return undefined;
     }
     return p;
@@ -950,13 +991,13 @@ export class Hub {
     const accountId = client.accountId!;
     if ((await this.store.countDevices(accountId)) >= config.maxDevicesPerAccount) {
       // 与 daemon.enroll 路径一致：设备数超限是致命错误，daemon 侧直接退出（needEnroll:false）。
-      this.sendRaw(p.conn.ws, { type: "daemon.authError", message: "账号设备数已达上限", needEnroll: false });
+      this.sendRaw(p.conn.ws, { case: "daemonAuthError", value: { message: "账号设备数已达上限", needEnroll: false } });
       try {
         p.conn.ws.close(4004, "device cap reached");
       } catch {
         /* ignore */
       }
-      this.sendClient(client, { type: "device.authorizeInfo", ok: false, error: "账号设备数已达上限" });
+      this.sendClient(client, { case: "deviceAuthorizeInfo", value: { ok: false, error: "账号设备数已达上限" } });
       return;
     }
 
@@ -965,9 +1006,9 @@ export class Hub {
     const ts = Date.now();
     await this.store.createDevice({ id: daemonId, accountId, name: p.name, host: p.host, platform: p.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: false });
     log.info("daemon authorized", { daemonId, name: p.name, host: p.host, accountId });
-    this.sendRaw(p.conn.ws, { type: "daemon.enrolled", daemonId, deviceToken });
+    this.sendRaw(p.conn.ws, { case: "daemonEnrolled", value: { daemonId, deviceToken } });
     await this.registerDaemonConn(p.conn, { daemonId, name: p.name, host: p.host, platform: p.platform, online: true }, accountId);
-    this.sendClient(client, { type: "device.authorized" });
+    this.sendClient(client, { case: "deviceAuthorized", value: {} });
   }
 
   private async removeDevice(client: ClientConn, daemonId: DaemonId): Promise<void> {
@@ -998,10 +1039,10 @@ export class Hub {
       for (const w of workspaces) await tx.removeWorkspace(w.id);
       for (const p of projects) await tx.removeProject(p.id);
     });
-    for (const id of taskIds) this.broadcast(accountId, { type: "task.removed", taskId: id });
-    for (const w of workspaces) this.broadcast(accountId, { type: "workspace.removed", workspaceId: w.id });
-    for (const p of projects) this.broadcast(accountId, { type: "project.removed", projectId: p.id });
-    this.broadcast(accountId, { type: "daemon.removed", daemonId });
+    for (const id of taskIds) this.broadcast(accountId, { case: "taskRemoved", value: { taskId: id } });
+    for (const w of workspaces) this.broadcast(accountId, { case: "workspaceRemoved", value: { workspaceId: w.id } });
+    for (const p of projects) this.broadcast(accountId, { case: "projectRemoved", value: { projectId: p.id } });
+    this.broadcast(accountId, { case: "daemonRemoved", value: { daemonId } });
     log.info("device removed", { daemonId });
   }
 

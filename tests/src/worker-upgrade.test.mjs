@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
 
 // 热升级：升级投递（client.upgradeDaemon → server → worker.upgrade → supervisor）
@@ -65,16 +66,16 @@ async function runTaskWithMarker(marker) {
   repos.push(repo);
   const a = stack.makeClient();
   await a.authSubscribe();
-  a.send({ type: "project.import", daemonId: stack.daemonId, path: repo.dir });
-  const main = await a.waitFor((m) => m.type === "workspace.created" && m.workspace.isMain, "main");
-  a.send({ type: "task.create", workspaceId: main.workspace.id, title: "up" });
-  const idle = await a.waitFor((m) => m.type === "task.updated" && m.task.title === "up", "idle");
+  a.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
+  const main = await a.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
+  a.send({ case: "taskCreate", workspaceId: main.workspace.id, title: "up" });
+  const idle = await a.waitFor((m) => m.case === "taskUpdated" && m.task.title === "up", "idle");
   const taskId = idle.task.id;
-  a.send({ type: "task.start", taskId, cols: 80, rows: 24 });
-  const run = await a.waitFor((m) => m.type === "task.updated" && m.task.id === taskId && m.task.status === "running", "run");
+  a.send({ case: "taskStart", taskId, cols: 80, rows: 24 });
+  const run = await a.waitFor((m) => m.case === "taskUpdated" && m.task.id === taskId && m.task.status === TaskStatus.RUNNING, "run");
   const sessionId = run.task.sessionId;
-  a.send({ type: "pty.input", sessionId, data: `echo ${marker}\r` });
-  await a.waitFor((m) => m.type === "pty.output" && m.data.includes(marker), "marker");
+  a.send({ case: "ptyInput", sessionId, data: `echo ${marker}\r` });
+  await a.waitFor((m) => m.case === "ptyOutput" && m.data.includes(marker), "marker");
   a.close();
   return { taskId, sessionId };
 }
@@ -86,7 +87,7 @@ test("热升级成功：切到 good2、观察期通过提交，会话存活", as
 
   const c = stack.makeClient();
   await c.authSubscribe();
-  c.send({ type: "client.upgradeDaemon", daemonId: stack.daemonId, version: "good2" });
+  c.send({ case: "clientUpgradeDaemon", daemonId: stack.daemonId, version: "good2" });
 
   // 等新 worker 起来且在线（pid 变化）
   const pid2 = await waitNewWorker(pid1);
@@ -100,10 +101,10 @@ test("热升级成功：切到 good2、观察期通过提交，会话存活", as
   assert.ok(committed, "升级提交后 worker.active=good2");
 
   // 会话存活：回放含升级前 marker + 升级后仍可交互
-  c.send({ type: "task.attach", taskId });
-  await c.waitFor((m) => m.type === "pty.output" && m.data.includes("UP_OK_MARK"), "升级后回放历史");
-  c.send({ type: "pty.input", sessionId, data: "echo AFTER_UPGRADE\r" });
-  await c.waitFor((m) => m.type === "pty.output" && m.data.includes("AFTER_UPGRADE"), "升级后交互恢复");
+  c.send({ case: "taskAttach", taskId });
+  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("UP_OK_MARK"), "升级后回放历史");
+  c.send({ case: "ptyInput", sessionId, data: "echo AFTER_UPGRADE\r" });
+  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("AFTER_UPGRADE"), "升级后交互恢复");
   c.close();
 });
 
@@ -114,7 +115,7 @@ test("坏版本回滚：切到 bad2 崩溃循环 → 自动回滚，会话存活
 
   const c = stack.makeClient();
   await c.authSubscribe();
-  c.send({ type: "client.upgradeDaemon", daemonId: stack.daemonId, version: "bad2" });
+  c.send({ case: "clientUpgradeDaemon", daemonId: stack.daemonId, version: "bad2" });
 
   // bad2 立即崩溃 → 达阈值回滚到 activeBefore → 新 good worker 起来（bad2 不写 pid，故 pid 变化=回滚后的好版本）
   assert.ok(await waitNewWorker(pidBefore), "回滚后新 worker 起来且在线");
@@ -122,9 +123,9 @@ test("坏版本回滚：切到 bad2 崩溃循环 → 自动回滚，会话存活
   assert.equal(readActive(), activeBefore, "回滚后 worker.active 仍是升级前版本");
 
   // 会话存活：回放含升级前 marker + 仍可交互
-  c.send({ type: "task.attach", taskId });
-  await c.waitFor((m) => m.type === "pty.output" && m.data.includes("ROLLBACK_MARK"), "回滚后回放历史");
-  c.send({ type: "pty.input", sessionId, data: "echo AFTER_ROLLBACK\r" });
-  await c.waitFor((m) => m.type === "pty.output" && m.data.includes("AFTER_ROLLBACK"), "回滚后交互恢复");
+  c.send({ case: "taskAttach", taskId });
+  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("ROLLBACK_MARK"), "回滚后回放历史");
+  c.send({ case: "ptyInput", sessionId, data: "echo AFTER_ROLLBACK\r" });
+  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("AFTER_ROLLBACK"), "回滚后交互恢复");
   c.close();
 });

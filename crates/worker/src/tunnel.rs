@@ -1,5 +1,6 @@
 //! TCP 隧道桥:把 server 下发的 proxy.open/proxy.close 落实为「daemon → 127.0.0.1:port
-//! 的 TCP 连接」,字节经 kind=4 ProxyData 帧(按 connId 多路复用)与该 TCP 连接双向对拼。
+//! 的 TCP 连接」,字节经 ProxyData payload(按 connId 多路复用,套进 DaemonToServer 信封)
+//! 与该 TCP 连接双向对拼。
 //!
 //! 生命周期完全绑定单次 server WS 连接:[TunnelSet] 由 `run_server_connection` 进入时
 //! new、退出时 `close_all`,不跨重连恢复——浏览器侧的 TCP 早已断,恢复无意义
@@ -20,7 +21,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use coflux_protocol::{decode_frame, encode_frame, DaemonToServer, DataFrame};
+use coflux_protocol::wire::{self, daemon_to_server};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
@@ -28,7 +29,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
-use crate::{send_text, WsOut};
+use crate::{send_d2s, WsOut};
 
 const READ_CHUNK: usize = 64 * 1024;
 
@@ -58,11 +59,11 @@ impl TunnelSet {
             let stream = match connect_local(port).await {
                 Ok(s) => s,
                 Err(error) => {
-                    send_text(&to_server_tx, &DaemonToServer::ProxyOpened { conn_id, ok: false, error: Some(error) }).await;
+                    send_d2s(&to_server_tx, daemon_to_server::Payload::ProxyOpened(wire::ProxyOpened { conn_id, ok: false, error: Some(error) })).await;
                     return;
                 }
             };
-            send_text(&to_server_tx, &DaemonToServer::ProxyOpened { conn_id: conn_id.clone(), ok: true, error: None }).await;
+            send_d2s(&to_server_tx, daemon_to_server::Payload::ProxyOpened(wire::ProxyOpened { conn_id: conn_id.clone(), ok: true, error: None })).await;
 
             let (mut rd, wr) = stream.into_split();
             let writer = Arc::new(AsyncMutex::new(wr));
@@ -76,29 +77,24 @@ impl TunnelSet {
                     match rd.read(&mut buf).await {
                         Ok(0) | Err(_) => break, // 本地 TCP 关闭/出错
                         Ok(n) => {
-                            let frame = encode_frame(&DataFrame::ProxyData { conn_id: reader_conn_id.clone(), data: buf[..n].to_vec() });
-                            if reader_to_server_tx.send(WsOut::Binary(frame)).await.is_err() {
-                                break;
-                            }
+                            let payload = daemon_to_server::Payload::ProxyData(wire::ProxyData { conn_id: reader_conn_id.clone(), data: buf[..n].to_vec() });
+                            send_d2s(&reader_to_server_tx, payload).await;
                         }
                     }
                 }
                 // 统一收尾:TCP 侧关闭/出错才走到这里——proxy.close 显式关闭走 abort，
                 // 根本不会执行到这段代码，因此不会重复发 proxy.closed。
                 reader_conns.lock().unwrap().remove(&reader_conn_id);
-                send_text(&reader_to_server_tx, &DaemonToServer::ProxyClosed { conn_id: reader_conn_id }).await;
+                send_d2s(&reader_to_server_tx, daemon_to_server::Payload::ProxyClosed(wire::ProxyClosed { conn_id: reader_conn_id })).await;
             });
 
             conns.lock().unwrap().insert(conn_id, TunnelHandle { writer, reader_task });
         });
     }
 
-    /// server 下发的 kind=4 ProxyData 帧原始字节:解出 connId,写进对应 TCP 连接。
+    /// server 下发的 ProxyData payload（已从信封解出）:按 connId 写进对应 TCP 连接。
     /// 找不到 connId(本地连接可能已先一步自然关闭,server 还没收到 proxy.closed)静默丢弃。
-    pub async fn feed_frame(&self, frame_bytes: &[u8]) {
-        let Some(DataFrame::ProxyData { conn_id, data }) = decode_frame(frame_bytes) else {
-            return; // 畸形帧，丢弃
-        };
+    pub async fn feed(&self, conn_id: String, data: Vec<u8>) {
         let writer = { self.conns.lock().unwrap().get(&conn_id).map(|h| h.writer.clone()) };
         let Some(writer) = writer else { return };
         let write_ok = {
@@ -110,7 +106,7 @@ impl TunnelSet {
             if let Some(handle) = self.conns.lock().unwrap().remove(&conn_id) {
                 handle.reader_task.abort();
             }
-            send_text(&self.to_server_tx, &DaemonToServer::ProxyClosed { conn_id }).await;
+            send_d2s(&self.to_server_tx, daemon_to_server::Payload::ProxyClosed(wire::ProxyClosed { conn_id })).await;
         }
     }
 
@@ -143,7 +139,13 @@ async fn connect_local(port: u16) -> Result<TcpStream, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prost::Message as _;
     use tokio::net::TcpListener;
+
+    /// 测试专用：解出信封 payload，None/解码失败直接 panic（测试里不该出现，出现即 bug）。
+    fn decode(bytes: &[u8]) -> daemon_to_server::Payload {
+        wire::DaemonToServer::decode(bytes).expect("decode DaemonToServer").payload.expect("payload present")
+    }
 
     /// connId 多路复用下的双向字节透传 + 关闭传播:起两个本地 TcpListener 模拟两个
     /// "dev server",各 open 一条隧道，交替喂两边的 ProxyData 帧，断言互不干扰；
@@ -188,35 +190,24 @@ mod tests {
         // 期望先各收到一条 proxy.opened{ok:true}（顺序不保证，两条都要出现）。
         let mut seen_opened: Vec<String> = Vec::new();
         while seen_opened.len() < 2 {
-            match to_server_rx.recv().await.expect("channel open") {
-                WsOut::Text(s) => {
-                    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-                    if v["type"] == "proxy.opened" {
-                        assert_eq!(v["ok"], true);
-                        seen_opened.push(v["connId"].as_str().unwrap().to_string());
-                    }
-                }
-                WsOut::Binary(_) => panic!("unexpected binary before opened"),
+            let bytes = to_server_rx.recv().await.expect("channel open");
+            if let daemon_to_server::Payload::ProxyOpened(m) = decode(&bytes) {
+                assert!(m.ok);
+                seen_opened.push(m.conn_id);
             }
         }
         seen_opened.sort();
         assert_eq!(seen_opened, vec!["conn-a", "conn-b"]);
 
-        // 喂两条连接的数据帧（交替），驱动 daemon -> 本地端口 -> echo -> daemon -> server 的完整闭环。
-        let frame_a = encode_frame(&DataFrame::ProxyData { conn_id: "conn-a".into(), data: b"hello-a".to_vec() });
-        let frame_b = encode_frame(&DataFrame::ProxyData { conn_id: "conn-b".into(), data: b"hello-b".to_vec() });
-        tunnels.feed_frame(&frame_a).await;
-        tunnels.feed_frame(&frame_b).await;
+        // 喂两条连接的数据（交替），驱动 daemon -> 本地端口 -> echo -> daemon -> server 的完整闭环。
+        tunnels.feed("conn-a".into(), b"hello-a".to_vec()).await;
+        tunnels.feed("conn-b".into(), b"hello-b".to_vec()).await;
 
         let mut got: HashMap<String, Vec<u8>> = HashMap::new();
         while got.len() < 2 {
-            match to_server_rx.recv().await.expect("channel open") {
-                WsOut::Binary(b) => {
-                    if let Some(DataFrame::ProxyData { conn_id, data }) = decode_frame(&b) {
-                        got.insert(conn_id, data);
-                    }
-                }
-                WsOut::Text(_) => {}
+            let bytes = to_server_rx.recv().await.expect("channel open");
+            if let daemon_to_server::Payload::ProxyData(m) = decode(&bytes) {
+                got.insert(m.conn_id, m.data);
             }
         }
         assert_eq!(got.get("conn-a").unwrap(), b"hello-a");
@@ -224,35 +215,24 @@ mod tests {
 
         // conn-a 的本地端触发关闭：echo 收到 "close-me" 后主动断开 -> daemon 侧读泵探测到
         // EOF -> 应该发一条 conn-a 的 proxy.closed，且不影响 conn-b。
-        let close_frame = encode_frame(&DataFrame::ProxyData { conn_id: "conn-a".into(), data: b"close-me".to_vec() });
-        tunnels.feed_frame(&close_frame).await;
+        tunnels.feed("conn-a".into(), b"close-me".to_vec()).await;
 
         let closed = loop {
-            match to_server_rx.recv().await.expect("channel open") {
-                WsOut::Text(s) => {
-                    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-                    if v["type"] == "proxy.closed" {
-                        break v["connId"].as_str().unwrap().to_string();
-                    }
-                }
-                WsOut::Binary(_) => {}
+            let bytes = to_server_rx.recv().await.expect("channel open");
+            if let daemon_to_server::Payload::ProxyClosed(m) = decode(&bytes) {
+                break m.conn_id;
             }
         };
         assert_eq!(closed, "conn-a");
 
-        // conn-b 依旧健在：喂一帧仍能收到回显。
-        let frame_b2 = encode_frame(&DataFrame::ProxyData { conn_id: "conn-b".into(), data: b"still-alive".to_vec() });
-        tunnels.feed_frame(&frame_b2).await;
+        // conn-b 依旧健在：喂一段数据仍能收到回显。
+        tunnels.feed("conn-b".into(), b"still-alive".to_vec()).await;
         let echoed = loop {
-            match to_server_rx.recv().await.expect("channel open") {
-                WsOut::Binary(b) => {
-                    if let Some(DataFrame::ProxyData { conn_id, data }) = decode_frame(&b) {
-                        if conn_id == "conn-b" {
-                            break data;
-                        }
-                    }
+            let bytes = to_server_rx.recv().await.expect("channel open");
+            if let daemon_to_server::Payload::ProxyData(m) = decode(&bytes) {
+                if m.conn_id == "conn-b" {
+                    break m.data;
                 }
-                WsOut::Text(_) => {}
             }
         };
         assert_eq!(echoed, b"still-alive");
@@ -277,11 +257,9 @@ mod tests {
 
         // 等 proxy.opened
         loop {
-            if let WsOut::Text(s) = to_server_rx.recv().await.expect("channel open") {
-                let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-                if v["type"] == "proxy.opened" {
-                    break;
-                }
+            let bytes = to_server_rx.recv().await.expect("channel open");
+            if matches!(decode(&bytes), daemon_to_server::Payload::ProxyOpened(_)) {
+                break;
             }
         }
 
@@ -308,11 +286,9 @@ mod tests {
         tunnels.open("conn-y".into(), port);
 
         loop {
-            if let WsOut::Text(s) = to_server_rx.recv().await.expect("channel open") {
-                let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-                if v["type"] == "proxy.opened" {
-                    break;
-                }
+            let bytes = to_server_rx.recv().await.expect("channel open");
+            if matches!(decode(&bytes), daemon_to_server::Payload::ProxyOpened(_)) {
+                break;
             }
         }
 
@@ -335,12 +311,10 @@ mod tests {
         let tunnels = TunnelSet::new(to_server_tx);
         tunnels.open("conn-z".into(), port);
 
-        let msg = to_server_rx.recv().await.expect("channel open");
-        let WsOut::Text(s) = msg else { panic!("expected text message") };
-        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(v["type"], "proxy.opened");
-        assert_eq!(v["ok"], false);
-        assert!(v.get("error").is_some());
+        let bytes = to_server_rx.recv().await.expect("channel open");
+        let daemon_to_server::Payload::ProxyOpened(m) = decode(&bytes) else { panic!("expected ProxyOpened payload") };
+        assert!(!m.ok);
+        assert!(m.error.is_some());
 
         assert_eq!(tunnels.conns.lock().unwrap().len(), 0);
     }
