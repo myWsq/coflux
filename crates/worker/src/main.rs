@@ -15,10 +15,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use coflux_protocol::{
-    is_frame, write_record, DaemonToServer, RecordParser, ServerToDaemon, SessionInfo, SessionPorts, SessionRef, Settings, SupervisorToWorker, WorkerToSupervisor, FRAME_PROXY_DATA,
-    SUPERVISOR_SOCK_ENV,
+    decode_frame, encode_frame, is_frame, wire, write_record, DataFrame, RecordParser, Settings, SessionInfo, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
 };
+use coflux_protocol::wire::{daemon_to_server, server_to_daemon};
 use futures_util::{SinkExt, StreamExt};
+use prost::Message as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -51,23 +52,13 @@ struct WorkerState {
     /// 由 run_server_connection 的定时检查重发 daemon.enrollRequest 换新链接。
     pending_auth_expires_at: Option<f64>,
     /// 端口探测(005)上一次实际发出的全量快照:变化才发的比较基准，也是重连补发的缓存。
-    last_reported_ports: Vec<SessionPorts>,
+    last_reported_ports: Vec<wire::SessionPorts>,
 }
 
-/// 出站到 server 的消息（WS 区分文本/二进制）。Debug 供单测断言失败时打印（tunnel.rs）。
-#[derive(Debug)]
-pub(crate) enum WsOut {
-    Text(String),
-    Binary(Vec<u8>),
-}
-impl WsOut {
-    fn into_message(self) -> Message {
-        match self {
-            WsOut::Text(s) => Message::text(s),
-            WsOut::Binary(b) => Message::binary(b),
-        }
-    }
-}
+/// 出站到 server 的消息：WS 上只有 binary message，一条 = 一个已编码好的 protobuf 信封字节串
+/// （[wire::DaemonToServer] 编码结果）。不再区分文本/二进制——旧 JSON 控制帧与自定义二进制
+/// 数据帧统一收敛成这一种。
+pub(crate) type WsOut = Vec<u8>;
 
 fn env_or(key: &str, default: String) -> String {
     std::env::var(key).unwrap_or(default)
@@ -82,14 +73,14 @@ fn pick(env_key: &str, from_settings: Option<String>, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-fn alive_to_resync(alive: &HashMap<String, (String, i32)>) -> Vec<SessionRef> {
-    alive.iter().map(|(s, (t, _pid))| SessionRef { session_id: s.clone(), task_id: t.clone() }).collect()
+fn alive_to_resync(alive: &HashMap<String, (String, i32)>) -> Vec<wire::SessionRef> {
+    alive.iter().map(|(s, (t, _pid))| wire::SessionRef { session_id: s.clone(), task_id: t.clone() }).collect()
 }
 
-pub(crate) async fn send_text(tx: &Sender<WsOut>, msg: &DaemonToServer) {
-    if let Ok(s) = serde_json::to_string(msg) {
-        let _ = tx.send(WsOut::Text(s)).await;
-    }
+/// 把一个 DaemonToServer payload 套上信封、prost 编码，送进 to_server 通道（WS binary message）。
+pub(crate) async fn send_d2s(tx: &Sender<WsOut>, payload: daemon_to_server::Payload) {
+    let env = wire::DaemonToServer { payload: Some(payload) };
+    let _ = tx.send(env.encode_to_vec()).await;
 }
 async fn sup_ctrl(tx: &Sender<Vec<u8>>, msg: &WorkerToSupervisor) {
     if let Ok(bytes) = serde_json::to_vec(msg) {
@@ -97,10 +88,15 @@ async fn sup_ctrl(tx: &Sender<Vec<u8>>, msg: &WorkerToSupervisor) {
     }
 }
 
+/// clamp：wire 上 cols/rows/port 是 uint32，内部 PTY/隧道 API 用 u16——收窄时钳位而非截断环绕。
+fn clamp_u16(v: u32) -> u16 {
+    v.min(u16::MAX as u32) as u16
+}
+
 /// 全量计算当前每个存活会话(有监听端口的)的 ports.update payload；按 sessionId 排序，
 /// 保证多次调用在会话/端口集合不变时输出完全一致（供「变化才发」的相等比较使用）。
-fn build_ports_update(alive: &HashMap<String, (String, i32)>) -> Vec<SessionPorts> {
-    let mut sessions: Vec<SessionPorts> = alive
+fn build_ports_update(alive: &HashMap<String, (String, i32)>) -> Vec<wire::SessionPorts> {
+    let mut sessions: Vec<wire::SessionPorts> = alive
         .iter()
         .filter_map(|(session_id, (_task_id, pid))| {
             let mut ports: Vec<u16> = ports::listening_ports(*pid).into_iter().collect();
@@ -108,7 +104,7 @@ fn build_ports_update(alive: &HashMap<String, (String, i32)>) -> Vec<SessionPort
                 return None;
             }
             ports.sort_unstable();
-            Some(SessionPorts { session_id: session_id.clone(), ports })
+            Some(wire::SessionPorts { session_id: session_id.clone(), ports: ports.into_iter().map(u32::from).collect() })
         })
         .collect();
     sessions.sort_by(|a, b| a.session_id.cmp(&b.session_id));
@@ -134,7 +130,7 @@ async fn report_ports_if_changed(state: &Arc<Mutex<WorkerState>>, to_server_tx: 
         }
     };
     if changed {
-        send_text(to_server_tx, &DaemonToServer::PortsUpdate { sessions }).await;
+        send_d2s(to_server_tx, daemon_to_server::Payload::PortsUpdate(wire::PortsUpdate { sessions })).await;
     }
 }
 
@@ -147,7 +143,7 @@ async fn force_report_ports(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Send
         Err(_) => return,
     };
     state.lock().unwrap().last_reported_ports = sessions.clone();
-    send_text(to_server_tx, &DaemonToServer::PortsUpdate { sessions }).await;
+    send_d2s(to_server_tx, daemon_to_server::Payload::PortsUpdate(wire::PortsUpdate { sessions })).await;
 }
 
 #[tokio::main]
@@ -307,8 +303,18 @@ async fn run_sup_connection(stream: UnixStream, state: &Arc<Mutex<WorkerState>>,
 
 async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>) {
     if is_frame(&rec) {
-        // pty.output / pty.replay → 原样作为二进制帧转发给 server
-        let _ = to_server_tx.send(WsOut::Binary(rec)).await;
+        // pty.output / pty.replay：UDS 内部帧格式（frame.rs，未变）解出原始字节，套成
+        // protobuf 信封转发给 server —— WS 侧只认 protobuf binary，不再透传 UDS 自定义帧。
+        match decode_frame(&rec) {
+            Some(DataFrame::Output { session_id, data }) => {
+                send_d2s(to_server_tx, daemon_to_server::Payload::PtyOutput(wire::PtyOutput { session_id, data })).await;
+            }
+            Some(DataFrame::Replay { session_id, request_id, data }) => {
+                send_d2s(to_server_tx, daemon_to_server::Payload::PtyReplay(wire::PtyReplay { session_id, request_id, data })).await;
+            }
+            // Input/ProxyData 不会从 supervisor→worker 方向出现；畸形帧同样丢弃，不 panic。
+            Some(_) | None => eprintln!("[worker] 丢弃来自 supervisor 的未知/畸形数据帧"),
+        }
         return;
     }
     let msg: SupervisorToWorker = match serde_json::from_slice(&rec) {
@@ -318,11 +324,11 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
     match msg {
         SupervisorToWorker::SessionStarted { session_id, task_id, pid } => {
             state.lock().unwrap().alive.insert(session_id.clone(), (task_id.clone(), pid));
-            send_text(to_server_tx, &DaemonToServer::SessionStarted { session_id, task_id, pid }).await;
+            send_d2s(to_server_tx, daemon_to_server::Payload::SessionStarted(wire::SessionStarted { session_id, task_id, pid })).await;
         }
         SupervisorToWorker::SessionExit { session_id, exit_code } => {
             state.lock().unwrap().alive.remove(&session_id);
-            send_text(to_server_tx, &DaemonToServer::SessionExit { session_id, exit_code }).await;
+            send_d2s(to_server_tx, daemon_to_server::Payload::SessionExit(wire::SessionExit { session_id, exit_code })).await;
         }
         SupervisorToWorker::ResyncList { sessions } => {
             let authed = {
@@ -338,8 +344,8 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
             if authed {
                 // daemon→server 的 daemon.resync 形状已冻结（SessionRef，不含 pid），
                 // pid 只在 UDS 快照(SessionInfo)里供本地端口探测（005）用
-                let resync: Vec<SessionRef> = sessions.into_iter().map(|s: SessionInfo| SessionRef { session_id: s.session_id, task_id: s.task_id }).collect();
-                send_text(to_server_tx, &DaemonToServer::DaemonResync { sessions: resync }).await;
+                let resync: Vec<wire::SessionRef> = sessions.into_iter().map(|s: SessionInfo| wire::SessionRef { session_id: s.session_id, task_id: s.task_id }).collect();
+                send_d2s(to_server_tx, daemon_to_server::Payload::DaemonResync(wire::DaemonResync { sessions: resync })).await;
             }
         }
     }
@@ -399,23 +405,22 @@ async fn run_server_connection(
     // filter 语义）走 Tailscale 式 daemon.enrollRequest，等 web 端确认后 server 原地推 daemon.enrolled。
     let creds = state.lock().unwrap().credentials.clone();
     let init = match creds {
-        Some(c) => DaemonToServer::DaemonAuth { device_token: c.device_token },
-        None if cfg.enroll_key.is_empty() => DaemonToServer::DaemonEnrollRequest {
+        Some(c) => daemon_to_server::Payload::DaemonAuth(wire::DaemonAuth { device_token: c.device_token }),
+        None if cfg.enroll_key.is_empty() => daemon_to_server::Payload::DaemonEnrollRequest(wire::DaemonEnrollRequest {
             name: cfg.device_name.clone(),
             host: cfg.host.clone(),
             platform: cfg.platform.clone(),
-        },
-        None => DaemonToServer::DaemonEnroll {
+        }),
+        None => daemon_to_server::Payload::DaemonEnroll(wire::DaemonEnroll {
             enrollment_key: cfg.enroll_key.clone(),
             name: cfg.device_name.clone(),
             host: cfg.host.clone(),
             platform: cfg.platform.clone(),
-        },
+        }),
     };
-    if let Ok(s) = serde_json::to_string(&init) {
-        if sink.send(Message::text(s)).await.is_err() {
-            return;
-        }
+    let init_bytes = (wire::DaemonToServer { payload: Some(init) }).encode_to_vec();
+    if sink.send(Message::binary(init_bytes)).await.is_err() {
+        return;
     }
 
     // 授权链接续期：TTL 到点而用户还没确认时，server 只是默默摘除内存里的 pending token，
@@ -445,36 +450,27 @@ async fn run_server_connection(
                 };
                 if expired {
                     eprintln!("[worker] authorization link expired; requesting a new one");
-                    let req = DaemonToServer::DaemonEnrollRequest {
+                    let req = daemon_to_server::Payload::DaemonEnrollRequest(wire::DaemonEnrollRequest {
                         name: cfg.device_name.clone(),
                         host: cfg.host.clone(),
                         platform: cfg.platform.clone(),
-                    };
-                    if let Ok(s) = serde_json::to_string(&req) {
-                        if sink.send(Message::text(s)).await.is_err() { break; }
-                    }
+                    });
+                    let bytes = (wire::DaemonToServer { payload: Some(req) }).encode_to_vec();
+                    if sink.send(Message::binary(bytes)).await.is_err() { break; }
                 }
             }
             out = to_server_rx.recv() => {
                 match out {
-                    Some(msg) => if sink.send(msg.into_message()).await.is_err() { break; },
+                    Some(bytes) => if sink.send(Message::binary(bytes)).await.is_err() { break; },
                     None => break,
                 }
             }
             inc = stream.next() => {
                 match inc {
-                    Some(Ok(Message::Text(t))) => on_server_text(t.as_str(), cfg, state, creds_store, to_server_tx, to_sup_tx, &tunnels).await,
-                    Some(Ok(Message::Binary(b))) => {
-                        if state.lock().unwrap().authed {
-                            if b.first().copied() == Some(FRAME_PROXY_DATA) {
-                                // proxy.data(kind=4) → 隧道模块按 connId 转发到对应 TCP 连接
-                                tunnels.feed_frame(b.as_ref()).await;
-                            } else {
-                                // pty.input（kind 1..=3）→ 原样转给 supervisor
-                                let _ = to_sup_tx.send(write_record(b.as_ref())).await;
-                            }
-                        }
-                    }
+                    Some(Ok(Message::Binary(b))) => on_server_message(b.as_ref(), cfg, state, creds_store, to_server_tx, to_sup_tx, &tunnels).await,
+                    // WS 上只有 binary message；收到 text/其它帧类型说明对端协议版本不对——
+                    // 丢弃并记日志，不 panic（与解码失败的处理原则一致）。
+                    Some(Ok(Message::Text(_))) => eprintln!("[worker] 忽略非 binary 的 WS 消息（协议已切换为 protobuf binary）"),
                     Some(Ok(Message::Ping(p))) => { let _ = sink.send(Message::Pong(p)).await; }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     _ => {}
@@ -489,8 +485,8 @@ async fn run_server_connection(
     tunnels.close_all();
 }
 
-async fn on_server_text(
-    text: &str,
+async fn on_server_message(
+    bytes: &[u8],
     cfg: &Arc<Config>,
     state: &Arc<Mutex<WorkerState>>,
     creds_store: &Arc<CredStore>,
@@ -498,12 +494,19 @@ async fn on_server_text(
     to_sup_tx: &Sender<Vec<u8>>,
     tunnels: &tunnel::TunnelSet,
 ) {
-    let msg: ServerToDaemon = match serde_json::from_str(text) {
-        Ok(m) => m,
-        Err(_) => return,
+    let envelope = match wire::ServerToDaemon::decode(bytes) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("[worker] 丢弃畸形 ServerToDaemon 信封: {e}");
+            return;
+        }
     };
-    match msg {
-        ServerToDaemon::DaemonEnrolled { daemon_id, device_token } => {
+    let Some(payload) = envelope.payload else {
+        eprintln!("[worker] 丢弃空 payload 的 ServerToDaemon 信封");
+        return;
+    };
+    match payload {
+        server_to_daemon::Payload::DaemonEnrolled(wire::DaemonEnrolled { daemon_id, device_token }) => {
             let c = Credentials { server_url: cfg.server_url.clone(), daemon_id: daemon_id.clone(), device_token };
             creds_store.save(&c);
             creds_store.clear_pending_auth(); // 无论是经典 enroll 还是 authorize 兑现来的，都不再是 pending 了
@@ -515,18 +518,18 @@ async fn on_server_text(
             eprintln!("[worker] enrolled {daemon_id}");
             on_authed(state, to_server_tx).await;
         }
-        ServerToDaemon::DaemonAuthed { daemon_id } => {
+        server_to_daemon::Payload::DaemonAuthed(wire::DaemonAuthed { daemon_id }) => {
             eprintln!("[worker] authenticated {daemon_id}");
             on_authed(state, to_server_tx).await;
         }
-        ServerToDaemon::DaemonAuthorizePending { url, expires_at } => {
+        server_to_daemon::Payload::DaemonAuthorizePending(wire::DaemonAuthorizePending { url, expires_at }) => {
             // 等待用户在浏览器确认授权；连接保持打开，server 确认后会在同一连接上直接推 DaemonEnrolled
             // （见上），不会走 exit(1)——这是与 DaemonAuthError{needEnroll:false} 致命路径的关键区别。
             eprintln!("[worker] waiting for authorization: {url}");
             creds_store.save_pending_auth(&PendingAuth { url, expires_at });
             state.lock().unwrap().pending_auth_expires_at = Some(expires_at); // 供续期检查用；到期未确认则重发 enrollRequest
         }
-        ServerToDaemon::DaemonAuthError { message, need_enroll } => {
+        server_to_daemon::Payload::DaemonAuthError(wire::DaemonAuthError { message, need_enroll }) => {
             eprintln!("[worker] auth error: {message}");
             if need_enroll {
                 creds_store.clear();
@@ -557,76 +560,86 @@ async fn on_authed(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>
     };
     // 两级 resync：拿到 supervisor 快照后才向 server resync；否则待 resync.list 到达时补发
     if let Some(sessions) = resync {
-        send_text(to_server_tx, &DaemonToServer::DaemonResync { sessions }).await;
+        send_d2s(to_server_tx, daemon_to_server::Payload::DaemonResync(wire::DaemonResync { sessions })).await;
         force_report_ports(state, to_server_tx).await; // 重连补发端口全量，防 server 重启丢状态
     }
 }
 
-async fn route_authed(msg: ServerToDaemon, cfg: &Arc<Config>, to_server_tx: &Sender<WsOut>, to_sup_tx: &Sender<Vec<u8>>, tunnels: &tunnel::TunnelSet) {
+async fn route_authed(msg: server_to_daemon::Payload, cfg: &Arc<Config>, to_server_tx: &Sender<WsOut>, to_sup_tx: &Sender<Vec<u8>>, tunnels: &tunnel::TunnelSet) {
     match msg {
         // git（可能慢）→ 派生任务，结果回带
-        ServerToDaemon::ProjectValidate { request_id, path } => {
+        server_to_daemon::Payload::ProjectValidate(wire::ProjectValidate { request_id, path }) => {
             let to_server = to_server_tx.clone();
             tokio::spawn(async move {
                 let r = git::validate_repo(&path).await;
-                send_text(&to_server, &DaemonToServer::ProjectValidated { request_id, ok: r.ok, repo_path: r.repo_path, branch: r.branch, error: r.error }).await;
+                send_d2s(&to_server, daemon_to_server::Payload::ProjectValidated(wire::ProjectValidated { request_id, ok: r.ok, repo_path: r.repo_path, branch: r.branch, error: r.error })).await;
             });
         }
-        ServerToDaemon::WorktreeAdd { request_id, repo_path, workspace_id, name, branch, create_new } => {
+        server_to_daemon::Payload::WorktreeAdd(wire::WorktreeAdd { request_id, repo_path, workspace_id, name, branch, create_new }) => {
             let to_server = to_server_tx.clone();
             let worktrees_dir = cfg.worktrees_dir.clone();
             tokio::spawn(async move {
                 let r = git::add_worktree(&worktrees_dir, &repo_path, &workspace_id, &name, &branch, create_new).await;
-                send_text(&to_server, &DaemonToServer::WorktreeAdded { request_id, ok: r.ok, path: r.path, branch: r.branch, error: r.error }).await;
+                send_d2s(&to_server, daemon_to_server::Payload::WorktreeAdded(wire::WorktreeAdded { request_id, ok: r.ok, path: r.path, branch: r.branch, error: r.error })).await;
             });
         }
-        ServerToDaemon::WorktreeRemove { repo_path, worktree_path } => {
+        server_to_daemon::Payload::WorktreeRemove(wire::WorktreeRemove { repo_path, worktree_path }) => {
             tokio::spawn(async move { git::remove_worktree(&repo_path, &worktree_path).await });
         }
-        // PTY → 转给 supervisor
-        ServerToDaemon::SessionCreate { session_id, task_id, cwd, shell, cols, rows } => {
-            sup_ctrl(to_sup_tx, &WorkerToSupervisor::SessionCreate { session_id, task_id, cwd, shell, cols, rows }).await;
+        // PTY → 转给 supervisor；wire 上 cols/rows 是 uint32，UDS/portable-pty 侧是 u16，钳位收窄。
+        server_to_daemon::Payload::SessionCreate(wire::SessionCreate { session_id, task_id, cwd, shell, cols, rows }) => {
+            sup_ctrl(to_sup_tx, &WorkerToSupervisor::SessionCreate { session_id, task_id, cwd, shell, cols: clamp_u16(cols), rows: clamp_u16(rows) }).await;
         }
-        ServerToDaemon::SessionReplay { session_id, request_id } => {
+        server_to_daemon::Payload::SessionReplay(wire::SessionReplay { session_id, request_id }) => {
             sup_ctrl(to_sup_tx, &WorkerToSupervisor::SessionReplay { session_id, request_id }).await;
         }
-        ServerToDaemon::PtyResize { session_id, cols, rows } => {
-            sup_ctrl(to_sup_tx, &WorkerToSupervisor::PtyResize { session_id, cols, rows }).await;
+        server_to_daemon::Payload::PtyResize(wire::PtyResize { session_id, cols, rows }) => {
+            sup_ctrl(to_sup_tx, &WorkerToSupervisor::PtyResize { session_id, cols: clamp_u16(cols), rows: clamp_u16(rows) }).await;
         }
-        ServerToDaemon::SessionClose { session_id } => {
+        server_to_daemon::Payload::SessionClose(wire::SessionClose { session_id }) => {
             sup_ctrl(to_sup_tx, &WorkerToSupervisor::SessionClose { session_id }).await;
         }
-        ServerToDaemon::WorkerUpgrade { version, url, sha256, signature } => {
+        server_to_daemon::Payload::WorkerUpgrade(wire::WorkerUpgrade { version, url, sha256, signature }) => {
             sup_ctrl(to_sup_tx, &WorkerToSupervisor::WorkerUpgrade { version, url, sha256, signature }).await;
         }
-        // 隧道 → 连接本地端口 / 关闭，字节走 kind=4 ProxyData 帧（main.rs 的 WS 二进制分支处理）
-        ServerToDaemon::ProxyOpen { conn_id, port } => {
-            tunnels.open(conn_id, port);
+        // 隧道 → 连接本地端口 / 关闭，字节走 ProxyData payload（main.rs 的 WS 分派处理）
+        server_to_daemon::Payload::ProxyOpen(wire::ProxyOpen { conn_id, port }) => {
+            tunnels.open(conn_id, clamp_u16(port));
         }
-        ServerToDaemon::ProxyClose { conn_id } => {
+        server_to_daemon::Payload::ProxyClose(wire::ProxyClose { conn_id }) => {
             tunnels.close(&conn_id);
         }
-        // exec / fs → 派生任务，结果回带
-        ServerToDaemon::ExecRun { request_id, cwd, command, args, env, timeout_ms } => {
+        // exec / fs → 派生任务，结果回带；timeout_ms 是 wire 上的 uint32，run_command 内部用 u64
+        server_to_daemon::Payload::ExecRun(wire::ExecRun { request_id, cwd, command, args, env, timeout_ms }) => {
             let to_server = to_server_tx.clone();
             tokio::spawn(async move {
-                let r = ops::run_command(&cwd, &command, &args, env.as_ref(), timeout_ms).await;
-                send_text(&to_server, &DaemonToServer::ExecResult { request_id, ok: r.ok, exit_code: r.exit_code, stdout: r.stdout, stderr: r.stderr, error: r.error }).await;
+                let r = ops::run_command(&cwd, &command, &args, &env, timeout_ms.map(u64::from)).await;
+                send_d2s(&to_server, daemon_to_server::Payload::ExecResult(wire::ExecResult { request_id, ok: r.ok, exit_code: r.exit_code, stdout: r.stdout, stderr: r.stderr, error: r.error })).await;
             });
         }
-        ServerToDaemon::FsList { request_id, root, path } => {
+        server_to_daemon::Payload::FsList(wire::FsList { request_id, root, path }) => {
             let to_server = to_server_tx.clone();
             tokio::spawn(async move {
                 let (ok, entries, error) = ops::list_dir(&root, &path).await;
-                send_text(&to_server, &DaemonToServer::FsListed { request_id, ok, entries, error }).await;
+                send_d2s(&to_server, daemon_to_server::Payload::FsListed(wire::FsListed { request_id, ok, entries, error })).await;
             });
         }
-        ServerToDaemon::FsRead { request_id, root, path } => {
+        server_to_daemon::Payload::FsRead(wire::FsRead { request_id, root, path }) => {
             let to_server = to_server_tx.clone();
             tokio::spawn(async move {
                 let (ok, content, error) = ops::read_file_text(&root, &path).await;
-                send_text(&to_server, &DaemonToServer::FsReadResult { request_id, ok, content, error }).await;
+                send_d2s(&to_server, daemon_to_server::Payload::FsReadResult(wire::FsReadResult { request_id, ok, content, error })).await;
             });
+        }
+        // 数据面（高频）：pty.input → 转给 supervisor（复用 UDS 内部帧格式，frame.rs 未变，
+        // 这条链路本次不动）；proxy.data → 隧道模块按 connId 转发到对应 TCP 连接（不再经过
+        // 任何"帧"编解码，protobuf 信封已经是唯一的 wire 表示）。
+        server_to_daemon::Payload::PtyInput(wire::PtyInput { session_id, data }) => {
+            let frame = encode_frame(&DataFrame::Input { session_id, data });
+            let _ = to_sup_tx.send(write_record(&frame)).await;
+        }
+        server_to_daemon::Payload::ProxyData(wire::ProxyData { conn_id, data }) => {
+            tunnels.feed(conn_id, data).await;
         }
         _ => {}
     }

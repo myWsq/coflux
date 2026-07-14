@@ -1,0 +1,234 @@
+// Daemon ⟷ Server 链路（/daemon WebSocket）。
+// wire：每个 WS binary message = 一个 protobuf 编码的信封（DaemonToServer / ServerToDaemon）。
+// 旧 JSON 控制面 + 自定义二进制帧已收敛为单一 protobuf binary，protojson 仅用于日志调试。
+syntax = "proto3";
+
+package coflux.v1;
+
+import "coflux/v1/common.proto";
+
+// ===== Daemon → Server 载荷 =====
+
+message DaemonEnroll {
+  string enrollment_key = 1;
+  string name = 2;
+  string host = 3;
+  string platform = 4;
+}
+
+message DaemonAuth {
+  string device_token = 1;
+}
+
+// 未登记且无 enrollmentKey 时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
+message DaemonEnrollRequest {
+  string name = 1;
+  string host = 2;
+  string platform = 3;
+}
+
+message DaemonResync {
+  repeated SessionRef sessions = 1;
+}
+
+// 校验路径是否为（非裸）git 仓库的结果
+message ProjectValidated {
+  string request_id = 1;
+  bool ok = 2;
+  string repo_path = 3;
+  string branch = 4;
+  optional string error = 5;
+}
+
+// git worktree add 结果
+message WorktreeAdded {
+  string request_id = 1;
+  bool ok = 2;
+  string path = 3;
+  string branch = 4;
+  optional string error = 5;
+}
+
+message SessionStarted {
+  string session_id = 1;
+  string task_id = 2;
+  int32 pid = 3;
+}
+
+message SessionExit {
+  string session_id = 1;
+  int32 exit_code = 2;
+}
+
+// 全量幂等上报每个（存活）会话监听的端口；仅含有监听端口的 session，daemon 重连/漏报自愈
+message PortsUpdate {
+  repeated SessionPorts sessions = 1;
+}
+
+// server→daemon ProxyOpen 的回应：隧道连接建立结果
+message ProxyOpened {
+  string conn_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+}
+
+// 隧道连接（daemon 侧到本地端口的 TCP 连接）关闭，控制面消息
+message ProxyClosed {
+  string conn_id = 1;
+}
+
+message DaemonToServer {
+  oneof payload {
+    DaemonEnroll daemon_enroll = 1;
+    DaemonAuth daemon_auth = 2;
+    DaemonEnrollRequest daemon_enroll_request = 3;
+    DaemonResync daemon_resync = 4;
+    ProjectValidated project_validated = 5;
+    WorktreeAdded worktree_added = 6;
+    SessionStarted session_started = 7;
+    SessionExit session_exit = 8;
+    PortsUpdate ports_update = 9;
+    ProxyOpened proxy_opened = 10;
+    ProxyClosed proxy_closed = 11;
+    ExecResult exec_result = 12;
+    FsListed fs_listed = 13;
+    FsReadResult fs_read_result = 14;
+    // 数据面（高频）
+    PtyOutput pty_output = 15;
+    PtyReplay pty_replay = 16;
+    ProxyData proxy_data = 17;
+  }
+}
+
+// ===== Server → Daemon 载荷 =====
+
+message DaemonEnrolled {
+  string daemon_id = 1;
+  string device_token = 2;
+}
+
+message DaemonAuthed {
+  string daemon_id = 1;
+}
+
+message DaemonAuthError {
+  string message = 1;
+  bool need_enroll = 2;
+}
+
+// enrollRequest 的回应：一次性授权链接 + 过期时间（ms epoch）。daemon 落盘展示，连接断开即作废
+message DaemonAuthorizePending {
+  string url = 1;
+  double expires_at = 2;
+}
+
+message ProjectValidate {
+  string request_id = 1;
+  string path = 2;
+}
+
+message WorktreeAdd {
+  string request_id = 1;
+  string repo_path = 2;
+  string workspace_id = 3;
+  string name = 4;
+  string branch = 5;
+  bool create_new = 6;
+}
+
+// fire-and-forget：移除一个 worktree 目录
+message WorktreeRemove {
+  string repo_path = 1;
+  string worktree_path = 2;
+}
+
+// 热升级：切到某个 worker 版本。带 url 走"下载+验签"；不带则按版本标签在 supervisor 自有注册表里切换
+message WorkerUpgrade {
+  string version = 1;
+  optional string url = 2;
+  optional string sha256 = 3;
+  optional string signature = 4;
+}
+
+message SessionCreate {
+  string session_id = 1;
+  string task_id = 2;
+  string cwd = 3;
+  optional string shell = 4;
+  uint32 cols = 5;
+  uint32 rows = 6;
+}
+
+message SessionClose {
+  string session_id = 1;
+}
+
+message SessionReplay {
+  string session_id = 1;
+  string request_id = 2;
+}
+
+message PtyResize {
+  string session_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+// 打开一条隧道连接：daemon 向本地 port 发起 TCP 连接，字节经 ProxyData 双向透传
+message ProxyOpen {
+  string conn_id = 1;
+  uint32 port = 2;
+}
+
+// 关闭一条隧道连接（server 侧发起，例如浏览器断开）
+message ProxyClose {
+  string conn_id = 1;
+}
+
+// 通用原语：一次性命令
+message ExecRun {
+  string request_id = 1;
+  string cwd = 2;
+  string command = 3;
+  repeated string args = 4;
+  map<string, string> env = 5;
+  optional uint32 timeout_ms = 6;
+}
+
+// 通用原语：文件系统（root 为锚定根，path 为相对路径，daemon 校验不越界）
+message FsList {
+  string request_id = 1;
+  string root = 2;
+  string path = 3;
+}
+
+message FsRead {
+  string request_id = 1;
+  string root = 2;
+  string path = 3;
+}
+
+message ServerToDaemon {
+  oneof payload {
+    DaemonEnrolled daemon_enrolled = 1;
+    DaemonAuthed daemon_authed = 2;
+    DaemonAuthError daemon_auth_error = 3;
+    DaemonAuthorizePending daemon_authorize_pending = 4;
+    ProjectValidate project_validate = 5;
+    WorktreeAdd worktree_add = 6;
+    WorktreeRemove worktree_remove = 7;
+    WorkerUpgrade worker_upgrade = 8;
+    SessionCreate session_create = 9;
+    SessionClose session_close = 10;
+    SessionReplay session_replay = 11;
+    PtyResize pty_resize = 12;
+    ProxyOpen proxy_open = 13;
+    ProxyClose proxy_close = 14;
+    ExecRun exec_run = 15;
+    FsList fs_list = 16;
+    FsRead fs_read = 17;
+    // 数据面（高频）
+    PtyInput pty_input = 18;
+    ProxyData proxy_data = 19;
+  }
+}

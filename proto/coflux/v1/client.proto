@@ -1,0 +1,271 @@
+// Client ⟷ Server 链路（/client WebSocket）。
+// wire：每个 WS binary message = 一个 protobuf 编码的信封（ClientToServer / ServerToClient）。
+syntax = "proto3";
+
+package coflux.v1;
+
+import "coflux/v1/common.proto";
+import "coflux/v1/daemon.proto";
+
+// ===== Client → Server 载荷 =====
+
+// 登录：用户名+密码（local 模式首次）/ supabase_token（supabase 模式换票）/ 会话 client_token（重连，两模式通用）。
+// 服务器认证成功会在 AuthOk 回带 coflux 会话 token；之后重连只用该 token，不再触碰 Supabase。
+message ClientAuth {
+  optional string username = 1;
+  optional string password = 2;
+  optional string client_token = 3;
+  optional string supabase_token = 4;
+}
+
+// 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地）
+message ClientLogout {}
+
+message ClientSubscribe {}
+
+// 为当前账号生成一条新的登记密钥（账号级、可复用），供新机器 daemon 登记
+message ClientCreateEnrollmentKey {}
+
+message ClientRemoveDevice {
+  string daemon_id = 1;
+}
+
+// 查看某授权链接对应的待授权设备信息（不消费 token，供确认页展示 name/host/platform）
+message DeviceAuthorizeInfoRequest {
+  string token = 1;
+}
+
+// 确认授权：把该 token 对应的设备绑到当前登录账号（一次性，成功后 token 失效）
+message DeviceAuthorize {
+  string token = 1;
+}
+
+// 为端口转发签发一次性代理认证（浏览器经 <shortId>.<proxyHost> 访问前换票）。
+// redirect 是换票成功后要跳回的地址；url 白名单校验在 hub（不属于协议层）
+message ProxyIssueAuth {
+  string redirect = 1;
+}
+
+// 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签
+message ClientUpgradeDaemon {
+  string daemon_id = 1;
+  string version = 2;
+  optional string url = 3;
+  optional string sha256 = 4;
+  optional string signature = 5;
+}
+
+// 导入一个 git 仓库为 project（自动创建主工作区）
+message ProjectImport {
+  string daemon_id = 1;
+  string path = 2;
+  optional string name = 3;
+}
+
+message ProjectRemove {
+  string project_id = 1;
+}
+
+// 在 project 下用 git worktree 新建工作区
+message WorkspaceCreate {
+  string project_id = 1;
+  string name = 2;
+  string branch = 3;
+  bool create_new = 4;
+}
+
+message WorkspaceRemove {
+  string workspace_id = 1;
+}
+
+message TaskCreate {
+  string workspace_id = 1;
+  string title = 2;
+}
+
+message TaskStart {
+  string task_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+message TaskAttach {
+  string task_id = 1;
+}
+
+message TaskStop {
+  string task_id = 1;
+}
+
+message TaskRemove {
+  string task_id = 1;
+}
+
+// 通用原语（IDE/工具用）：在某工作区里跑命令、读/列文件。request_id 由 client 自定，server 原样回带
+message ClientExec {
+  string request_id = 1;
+  string workspace_id = 2;
+  string command = 3;
+  repeated string args = 4;
+  optional uint32 timeout_ms = 5;
+}
+
+message ClientFsList {
+  string request_id = 1;
+  string workspace_id = 2;
+  string path = 3;
+}
+
+message ClientFsRead {
+  string request_id = 1;
+  string workspace_id = 2;
+  string path = 3;
+}
+
+message ClientToServer {
+  oneof payload {
+    ClientAuth client_auth = 1;
+    ClientLogout client_logout = 2;
+    ClientSubscribe client_subscribe = 3;
+    ClientCreateEnrollmentKey client_create_enrollment_key = 4;
+    ClientRemoveDevice client_remove_device = 5;
+    DeviceAuthorizeInfoRequest device_authorize_info = 6;
+    DeviceAuthorize device_authorize = 7;
+    ProxyIssueAuth proxy_issue_auth = 8;
+    ClientUpgradeDaemon client_upgrade_daemon = 9;
+    ProjectImport project_import = 10;
+    ProjectRemove project_remove = 11;
+    WorkspaceCreate workspace_create = 12;
+    WorkspaceRemove workspace_remove = 13;
+    TaskCreate task_create = 14;
+    TaskStart task_start = 15;
+    TaskAttach task_attach = 16;
+    TaskStop task_stop = 17;
+    TaskRemove task_remove = 18;
+    PtyResize pty_resize = 19;
+    ClientExec client_exec = 20;
+    ClientFsList client_fs_list = 21;
+    ClientFsRead client_fs_read = 22;
+    // 数据面（高频）
+    PtyInput pty_input = 23;
+  }
+}
+
+// ===== Server → Client 载荷 =====
+
+message AuthOk {
+  string account_id = 1;
+  optional string client_token = 2;
+}
+
+message AuthError {
+  string message = 1;
+}
+
+// 登记密钥已生成（明文仅此一次回传；服务器只存 hash）
+message EnrollmentKeyCreated {
+  string enrollment_key = 1;
+  string daemon_url = 2;
+}
+
+// DeviceAuthorizeInfoRequest 的回应：ok 时带设备信息，否则 error 说明原因（无效/已用/已过期）
+message DeviceAuthorizeInfoResult {
+  bool ok = 1;
+  optional string name = 2;
+  optional string host = 3;
+  optional string platform = 4;
+  optional string error = 5;
+}
+
+// 设备授权成功（该连接的 daemon 已收到 DaemonEnrolled 并上线）
+message DeviceAuthorized {}
+
+// ProxyIssueAuth 的回应：ok 时带跳转 url（换票成功，浏览器可直接访问 <shortId>.<proxyHost>）
+message ProxyAuth {
+  bool ok = 1;
+  optional string url = 2;
+  optional string error = 3;
+}
+
+// 某任务当前可访问的端口列表变化（daemon PortsUpdate 上报后重新计算得出）
+message PortsUpdated {
+  string task_id = 1;
+  repeated PortPreview ports = 2;
+}
+
+message StateSnapshot {
+  repeated DaemonInfo daemons = 1;
+  repeated Project projects = 2;
+  repeated Workspace workspaces = 3;
+  repeated Task tasks = 4;
+  repeated TaskPorts ports = 5;
+}
+
+message DaemonUpdated {
+  DaemonInfo daemon = 1;
+}
+
+message DaemonRemoved {
+  string daemon_id = 1;
+}
+
+message ProjectCreated {
+  Project project = 1;
+}
+
+message ProjectRemoved {
+  string project_id = 1;
+}
+
+message WorkspaceCreated {
+  Workspace workspace = 1;
+}
+
+message WorkspaceRemoved {
+  string workspace_id = 1;
+}
+
+message TaskUpdated {
+  Task task = 1;
+}
+
+message TaskRemoved {
+  string task_id = 1;
+}
+
+// 本 client 对该任务的控制权被另一个 client 接管（独占模型）
+message TaskDetached {
+  string task_id = 1;
+}
+
+message ServerError {
+  string message = 1;
+}
+
+message ServerToClient {
+  oneof payload {
+    AuthOk auth_ok = 1;
+    AuthError auth_error = 2;
+    EnrollmentKeyCreated enrollment_key_created = 3;
+    DeviceAuthorizeInfoResult device_authorize_info = 4;
+    DeviceAuthorized device_authorized = 5;
+    ProxyAuth proxy_auth = 6;
+    PortsUpdated ports_updated = 7;
+    StateSnapshot state_snapshot = 8;
+    DaemonUpdated daemon_updated = 9;
+    DaemonRemoved daemon_removed = 10;
+    ProjectCreated project_created = 11;
+    ProjectRemoved project_removed = 12;
+    WorkspaceCreated workspace_created = 13;
+    WorkspaceRemoved workspace_removed = 14;
+    TaskUpdated task_updated = 15;
+    TaskRemoved task_removed = 16;
+    TaskDetached task_detached = 17;
+    ExecResult exec_result = 18;
+    FsListed fs_listed = 19;
+    FsReadResult fs_read_result = 20;
+    ServerError error = 21;
+    // 数据面（高频）
+    PtyOutput pty_output = 22;
+  }
+}

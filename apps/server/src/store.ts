@@ -14,18 +14,77 @@
  * 完全无损。
  */
 import postgres from "postgres";
-import type {
-  AccountId,
-  DaemonId,
-  Project,
-  ProjectId,
-  Task,
-  TaskId,
+import {
+  create,
   TaskStatus,
-  Workspace,
-  WorkspaceId,
-  SessionId,
+  ProjectSchema,
+  WorkspaceSchema,
+  TaskSchema,
+  type AccountId,
+  type DaemonId,
+  type Project,
+  type ProjectId,
+  type Task,
+  type TaskId,
+  type Workspace,
+  type WorkspaceId,
+  type SessionId,
 } from "@coflux/protocol";
+
+/** DB 里 tasks.status 列存字符串（可读、迁移友好）；协议侧是 proto enum TaskStatus。
+ * 这一对 helper 是两者唯一的换算点，别处一律用 TaskStatus。 */
+function taskStatusToDb(status: TaskStatus): string {
+  switch (status) {
+    case TaskStatus.RUNNING:
+      return "running";
+    case TaskStatus.EXITED:
+      return "exited";
+    case TaskStatus.IDLE:
+    default:
+      return "idle";
+  }
+}
+function taskStatusFromDb(status: string): TaskStatus {
+  switch (status) {
+    case "running":
+      return TaskStatus.RUNNING;
+    case "exited":
+      return TaskStatus.EXITED;
+    default:
+      return TaskStatus.IDLE;
+  }
+}
+
+/** tasks 表的 DB 行形状（status 是字符串，与 Task 消息的 enum 字段区分开）。 */
+interface TaskRow {
+  id: string;
+  accountId: string;
+  daemonId: string;
+  projectId: string;
+  workspaceId: string;
+  title: string;
+  status: string;
+  sessionId: string | null;
+  exitCode: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+function rowToTask(r: TaskRow): Task {
+  return create(TaskSchema, {
+    id: r.id,
+    accountId: r.accountId,
+    daemonId: r.daemonId,
+    projectId: r.projectId,
+    workspaceId: r.workspaceId,
+    title: r.title,
+    status: taskStatusFromDb(r.status),
+    sessionId: r.sessionId ?? undefined,
+    exitCode: r.exitCode ?? undefined,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  });
+}
 
 export interface Account {
   id: AccountId;
@@ -340,13 +399,15 @@ export class Store {
   }
   async getProject(id: ProjectId): Promise<Project | undefined> {
     const rows = await this.sql<Project[]>`SELECT * FROM projects WHERE id = ${id}`;
-    return rows[0];
+    return rows[0] && create(ProjectSchema, rows[0]);
   }
   async listProjects(accountId: AccountId): Promise<Project[]> {
-    return this.sql<Project[]>`SELECT * FROM projects WHERE account_id = ${accountId} ORDER BY created_at`;
+    const rows = await this.sql<Project[]>`SELECT * FROM projects WHERE account_id = ${accountId} ORDER BY created_at`;
+    return rows.map((r) => create(ProjectSchema, r));
   }
   async listProjectsByDaemon(daemonId: DaemonId): Promise<Project[]> {
-    return this.sql<Project[]>`SELECT * FROM projects WHERE daemon_id = ${daemonId}`;
+    const rows = await this.sql<Project[]>`SELECT * FROM projects WHERE daemon_id = ${daemonId}`;
+    return rows.map((r) => create(ProjectSchema, r));
   }
   async removeProject(id: ProjectId): Promise<void> {
     await this.sql`DELETE FROM projects WHERE id = ${id}`;
@@ -361,16 +422,19 @@ export class Store {
   }
   async getWorkspace(id: WorkspaceId): Promise<Workspace | undefined> {
     const rows = await this.sql<Workspace[]>`SELECT * FROM workspaces WHERE id = ${id}`;
-    return rows[0];
+    return rows[0] && create(WorkspaceSchema, rows[0]);
   }
   async listWorkspaces(accountId: AccountId): Promise<Workspace[]> {
-    return this.sql<Workspace[]>`SELECT * FROM workspaces WHERE account_id = ${accountId} ORDER BY is_main DESC, created_at`;
+    const rows = await this.sql<Workspace[]>`SELECT * FROM workspaces WHERE account_id = ${accountId} ORDER BY is_main DESC, created_at`;
+    return rows.map((r) => create(WorkspaceSchema, r));
   }
   async listWorkspacesByProject(projectId: ProjectId): Promise<Workspace[]> {
-    return this.sql<Workspace[]>`SELECT * FROM workspaces WHERE project_id = ${projectId}`;
+    const rows = await this.sql<Workspace[]>`SELECT * FROM workspaces WHERE project_id = ${projectId}`;
+    return rows.map((r) => create(WorkspaceSchema, r));
   }
   async listWorkspacesByDaemon(daemonId: DaemonId): Promise<Workspace[]> {
-    return this.sql<Workspace[]>`SELECT * FROM workspaces WHERE daemon_id = ${daemonId}`;
+    const rows = await this.sql<Workspace[]>`SELECT * FROM workspaces WHERE daemon_id = ${daemonId}`;
+    return rows.map((r) => create(WorkspaceSchema, r));
   }
   async removeWorkspace(id: WorkspaceId): Promise<void> {
     await this.sql`DELETE FROM workspaces WHERE id = ${id}`;
@@ -378,28 +442,33 @@ export class Store {
 
   /* ----------------------------- tasks ----------------------------- */
   async listTasks(accountId: AccountId): Promise<Task[]> {
-    return this.sql<Task[]>`SELECT * FROM tasks WHERE account_id = ${accountId} ORDER BY created_at`;
+    const rows = await this.sql<TaskRow[]>`SELECT * FROM tasks WHERE account_id = ${accountId} ORDER BY created_at`;
+    return rows.map(rowToTask);
   }
   async getTask(id: TaskId): Promise<Task | undefined> {
-    const rows = await this.sql<Task[]>`SELECT * FROM tasks WHERE id = ${id}`;
-    return rows[0];
+    const rows = await this.sql<TaskRow[]>`SELECT * FROM tasks WHERE id = ${id}`;
+    return rows[0] && rowToTask(rows[0]);
   }
   async getTaskBySession(sessionId: SessionId): Promise<Task | undefined> {
-    const rows = await this.sql<Task[]>`SELECT * FROM tasks WHERE session_id = ${sessionId}`;
-    return rows[0];
+    const rows = await this.sql<TaskRow[]>`SELECT * FROM tasks WHERE session_id = ${sessionId}`;
+    return rows[0] && rowToTask(rows[0]);
   }
   async listTasksByWorkspace(workspaceId: WorkspaceId): Promise<Task[]> {
-    return this.sql<Task[]>`SELECT * FROM tasks WHERE workspace_id = ${workspaceId}`;
+    const rows = await this.sql<TaskRow[]>`SELECT * FROM tasks WHERE workspace_id = ${workspaceId}`;
+    return rows.map(rowToTask);
   }
   async listRunningTasksByDaemon(daemonId: DaemonId): Promise<Task[]> {
-    return this.sql<Task[]>`SELECT * FROM tasks WHERE daemon_id = ${daemonId} AND status = 'running'`;
+    const rows = await this.sql<TaskRow[]>`SELECT * FROM tasks WHERE daemon_id = ${daemonId} AND status = 'running'`;
+    return rows.map(rowToTask);
   }
   async listTasksByDaemon(daemonId: DaemonId): Promise<Task[]> {
-    return this.sql<Task[]>`SELECT * FROM tasks WHERE daemon_id = ${daemonId}`;
+    const rows = await this.sql<TaskRow[]>`SELECT * FROM tasks WHERE daemon_id = ${daemonId}`;
+    return rows.map(rowToTask);
   }
   async createTask(t: Task): Promise<Task> {
+    const row = { id: t.id, accountId: t.accountId, daemonId: t.daemonId, projectId: t.projectId, workspaceId: t.workspaceId, title: t.title, status: taskStatusToDb(t.status), sessionId: t.sessionId ?? null, exitCode: t.exitCode ?? null, createdAt: t.createdAt, updatedAt: t.updatedAt };
     await this.sql`
-      INSERT INTO tasks ${this.sql(t, "id", "accountId", "daemonId", "projectId", "workspaceId", "title", "status", "sessionId", "exitCode", "createdAt", "updatedAt")}
+      INSERT INTO tasks ${this.sql(row, "id", "accountId", "daemonId", "projectId", "workspaceId", "title", "status", "sessionId", "exitCode", "createdAt", "updatedAt")}
     `;
     return t;
   }
@@ -407,8 +476,9 @@ export class Store {
     const existing = await this.getTask(id);
     if (!existing) return undefined;
     const next: Task = { ...existing, ...patch, updatedAt: Date.now() };
+    const row = { status: taskStatusToDb(next.status), sessionId: next.sessionId ?? null, exitCode: next.exitCode ?? null, title: next.title, updatedAt: next.updatedAt };
     await this.sql`
-      UPDATE tasks SET ${this.sql(next, "status", "sessionId", "exitCode", "title", "updatedAt")} WHERE id = ${id}
+      UPDATE tasks SET ${this.sql(row, "status", "sessionId", "exitCode", "title", "updatedAt")} WHERE id = ${id}
     `;
     return next;
   }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink, LoaderCircle, ShieldX } from "lucide-react";
-import type { ClientToServer, ServerToClient } from "@coflux/protocol";
+import { create, encodeClientToServer, decodeServerToClient, ClientToServerSchema, type ClientToServerPayload } from "@coflux/protocol";
 
 import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
 import { SERVER_URL, TOKEN_KEY, USE_SUPABASE, type AuthCredential } from "@/config";
@@ -22,47 +22,46 @@ export function ProxyAuthPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
-  const send = (message: ClientToServer) => {
+  const send = (payload: ClientToServerPayload) => {
     const socket = wsRef.current;
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+    if (socket?.readyState === WebSocket.OPEN) socket.send(encodeClientToServer(create(ClientToServerSchema, { payload })));
   };
 
   function connect(credential: AuthCredential) {
     setState({ phase: "authenticating" });
     const socket = new WebSocket(SERVER_URL);
+    socket.binaryType = "arraybuffer";
     wsRef.current = socket;
     socket.onopen = () => {
-      if ("token" in credential) send({ type: "client.auth", clientToken: credential.token });
-      else if ("supabaseToken" in credential) send({ type: "client.auth", supabaseToken: credential.supabaseToken });
-      else send({ type: "client.auth", username: credential.username, password: credential.password });
+      if ("token" in credential) send({ case: "clientAuth", value: { clientToken: credential.token } });
+      else if ("supabaseToken" in credential) send({ case: "clientAuth", value: { supabaseToken: credential.supabaseToken } });
+      else send({ case: "clientAuth", value: { username: credential.username, password: credential.password } });
     };
     socket.onclose = () => {
       setState((current) => (current.phase === "issuing" ? current : { phase: "failed", message: "连接已断开，请刷新页面重试" }));
     };
     socket.onmessage = (event) => {
-      if (typeof event.data !== "string") return;
-      let message: ServerToClient;
-      try {
-        message = JSON.parse(event.data) as ServerToClient;
-      } catch {
-        return;
-      }
-      switch (message.type) {
-        case "auth.ok":
+      if (!(event.data instanceof ArrayBuffer)) return;
+      const message = decodeServerToClient(new Uint8Array(event.data));
+      if (!message) return;
+      switch (message.payload.case) {
+        case "authOk":
           setState({ phase: "issuing" });
-          send({ type: "proxy.issueAuth", redirect: redirectTarget! });
+          send({ case: "proxyIssueAuth", value: { redirect: redirectTarget! } });
           break;
-        case "auth.error":
+        case "authError":
           localStorage.removeItem(TOKEN_KEY);
           setState({
             phase: "auth-failed",
             message: USE_SUPABASE ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误",
           });
           break;
-        case "proxy.auth":
-          if (message.ok && message.url) location.href = message.url;
-          else setState({ phase: "failed", message: message.error || "无法访问该预览链接" });
+        case "proxyAuth": {
+          const value = message.payload.value;
+          if (value.ok && value.url) location.href = value.url;
+          else setState({ phase: "failed", message: value.error || "无法访问该预览链接" });
           break;
+        }
         default:
           break;
       }

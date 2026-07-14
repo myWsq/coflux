@@ -18,7 +18,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 // （运行时实际是 net.Socket），而本模块只用到 Duplex 能力（write/end/destroy/writableLength/事件），
 // 放宽参数类型即可让 req.socket 与 upgrade socket 走同一套隧道代码，无需类型断言。
 import type { Duplex } from "node:stream";
-import { encodeFrame, type AccountId, type DaemonId, type SessionId, type TaskId, type ServerToDaemon } from "@coflux/protocol";
+import type { AccountId, DaemonId, SessionId, TaskId, ServerToDaemonPayload } from "@coflux/protocol";
 import { config } from "./config.js";
 import { genToken } from "./secrets.js";
 
@@ -291,8 +291,8 @@ export function buildAuthCallbackUrl(host: string, code: string, pathAndQuery: s
 /* ============================ 隧道注册表（socket ↔ daemon 连接对拼） ============================ */
 
 export interface TunnelHost {
-  sendControl: (daemonId: DaemonId, msg: ServerToDaemon) => void;
-  sendFrame: (daemonId: DaemonId, frame: Uint8Array) => void;
+  /** 控制面 + 数据面统一走一个信封 oneof 载荷（proxy_open/proxy_close/proxy_data 均在其列）。 */
+  sendControl: (daemonId: DaemonId, payload: ServerToDaemonPayload) => void;
 }
 
 interface OpenConn {
@@ -326,15 +326,15 @@ export class TunnelRegistry {
         resolve({ ok, error });
       };
     });
-    this.host.sendControl(route.daemonId, { type: "proxy.open", connId, port: route.port });
+    this.host.sendControl(route.daemonId, { case: "proxyOpen", value: { connId, port: route.port } });
     return { connId, ready };
   }
 
-  /** 把浏览器侧原始字节转发给 daemon（数据面 proxy.data 帧）。 */
+  /** 把浏览器侧原始字节转发给 daemon（数据面 proxy_data 载荷）。 */
   write(connId: string, data: Uint8Array): void {
     const e = this.conns.get(connId);
     if (!e) return;
-    this.host.sendFrame(e.daemonId, encodeFrame({ type: "proxy.data", connId, data }));
+    this.host.sendControl(e.daemonId, { case: "proxyData", value: { connId, data } });
   }
 
   /** 浏览器侧关闭（或调用方主动放弃）：通知 daemon 收尾、摘表。幂等（重复调用安全）。 */
@@ -342,7 +342,7 @@ export class TunnelRegistry {
     const e = this.conns.get(connId);
     this.conns.delete(connId);
     if (!e) return;
-    this.host.sendControl(e.daemonId, { type: "proxy.close", connId });
+    this.host.sendControl(e.daemonId, { case: "proxyClose", value: { connId } });
   }
 
   /** daemon → server 数据面 proxy.data：写给对应的浏览器 socket。daemonId 须与建连时一致（防跨 daemon 冒充 connId）。 */
@@ -357,7 +357,7 @@ export class TunnelRegistry {
       } catch {
         /* ignore */
       }
-      this.host.sendControl(daemonId, { type: "proxy.close", connId });
+      this.host.sendControl(daemonId, { case: "proxyClose", value: { connId } });
       return;
     }
     e.socket.write(Buffer.from(data));
@@ -376,7 +376,7 @@ export class TunnelRegistry {
     // 迟到：调用方早已判超时并放弃（浏览器侧可能已收到 502 或已断开）。若迟到的是"成功"，
     // 没人会消费这条连接，主动告知 daemon 关掉，避免其空占一条到本地端口的连接。
     this.conns.delete(connId);
-    if (ok) this.host.sendControl(daemonId, { type: "proxy.close", connId });
+    if (ok) this.host.sendControl(daemonId, { case: "proxyClose", value: { connId } });
   }
 
   /** daemon 侧连接关闭（本地端口那头挂了/daemon 主动关）：销毁浏览器侧 socket。 */
@@ -414,7 +414,7 @@ export class TunnelRegistry {
       } catch {
         /* ignore */
       }
-      this.host.sendControl(e.daemonId, { type: "proxy.close", connId });
+      this.host.sendControl(e.daemonId, { case: "proxyClose", value: { connId } });
     }
   }
 }

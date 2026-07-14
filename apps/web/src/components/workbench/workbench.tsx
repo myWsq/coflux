@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, FolderGit2, LoaderCircle, X } from "lucide-react";
-import type { DaemonInfo, Project, Task, Workspace } from "@coflux/protocol";
+import { TaskStatus, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
 
 import { AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
 import { Button } from "@/components/ui/button";
@@ -60,11 +60,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   function importProject(daemonId: string, path: string) {
-    client.send({ type: "project.import", daemonId, path });
+    client.send({ case: "projectImport", value: { daemonId, path } });
   }
 
   function createWorkspace(projectId: string, name: string, branch: string, createNew: boolean) {
-    client.send({ type: "workspace.create", projectId, name, branch, createNew });
+    client.send({ case: "workspaceCreate", value: { projectId, name, branch, createNew } });
   }
 
   function requestRemoveProject(project: Project) {
@@ -72,7 +72,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       title: `移除项目「${project.name}」？`,
       description: "项目记录和它的子工作区会从 coflux 中移除，主仓库本身不会被改动。此操作无法撤销。",
       confirmLabel: "移除项目",
-      onConfirm: () => client.send({ type: "project.remove", projectId: project.id }),
+      onConfirm: () => client.send({ case: "projectRemove", value: { projectId: project.id } }),
     });
   }
 
@@ -81,7 +81,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       title: `删除工作区「${workspace.name}」？`,
       description: `对应的 git worktree 目录会被移除，分支「${workspace.branch}」不会被自动删除。`,
       confirmLabel: "删除工作区",
-      onConfirm: () => client.send({ type: "workspace.remove", workspaceId: workspace.id }),
+      onConfirm: () => client.send({ case: "workspaceRemove", value: { workspaceId: workspace.id } }),
     });
   }
 
@@ -90,17 +90,17 @@ export function Workbench({ client }: { client: CofluxClient }) {
       title: `移除设备「${daemon.name}」？`,
       description: "这台设备下的所有项目、工作区和终端记录会一并删除。若要再次接入，需要重新登记。",
       confirmLabel: "移除设备",
-      onConfirm: () => client.send({ type: "client.removeDevice", daemonId: daemon.daemonId }),
+      onConfirm: () => client.send({ case: "clientRemoveDevice", value: { daemonId: daemon.daemonId } }),
     });
   }
 
   function closeTaskNow(task: Task) {
-    client.send({ type: "task.stop", taskId: task.id });
-    client.send({ type: "task.remove", taskId: task.id });
+    client.send({ case: "taskStop", value: { taskId: task.id } });
+    client.send({ case: "taskRemove", value: { taskId: task.id } });
   }
 
   function requestCloseTask(task: Task) {
-    if (task.status !== "running") {
+    if (task.status !== TaskStatus.RUNNING) {
       closeTaskNow(task);
       return;
     }

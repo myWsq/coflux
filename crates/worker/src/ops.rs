@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use coflux_protocol::FsEntry;
+use coflux_protocol::{FsEntry, FsEntryKind};
 use tokio::process::Command;
 
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
@@ -19,16 +19,16 @@ pub struct ExecOutcome {
     pub error: Option<String>,
 }
 
-pub async fn run_command(cwd: &str, command: &str, args: &[String], env: Option<&HashMap<String, String>>, timeout_ms: Option<u64>) -> ExecOutcome {
+/// env：wire 上 `ExecRun.env` 是 proto3 map（恒非 null，缺省即空 map），故此处直接收
+/// `&HashMap`，不再需要 `Option` 包一层——空 map 天然等价于旧协议里的「未提供」。
+pub async fn run_command(cwd: &str, command: &str, args: &[String], env: &HashMap<String, String>, timeout_ms: Option<u64>) -> ExecOutcome {
     let mut cmd = Command::new(command);
     cmd.args(args);
     if !cwd.is_empty() {
         cmd.current_dir(cwd);
     }
-    if let Some(env) = env {
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
+    for (k, v) in env {
+        cmd.env(k, v);
     }
     cmd.stdin(Stdio::null()).kill_on_drop(true);
     let timeout = Duration::from_millis(timeout_ms.filter(|&t| t > 0).unwrap_or(DEFAULT_TIMEOUT_MS));
@@ -67,24 +67,34 @@ pub async fn list_dir(root: &str, rel: &str) -> (bool, Vec<FsEntry>, Option<Stri
     match std::fs::read_dir(&target) {
         Err(e) => (false, vec![], Some(e.to_string())),
         Ok(rd) => {
-            let mut entries: Vec<FsEntry> = Vec::new();
+            // (name, kind, size)：kind 先留作内部枚举，排序完再转 protobuf FsEntry（i32 + double）
+            let mut raw: Vec<(String, FsEntryKind, u64)> = Vec::new();
             for d in rd.flatten() {
                 let (kind, size) = match d.path().symlink_metadata() {
                     Ok(m) => {
                         let ft = m.file_type();
-                        let k = if ft.is_dir() { "dir" } else if ft.is_file() { "file" } else if ft.is_symlink() { "symlink" } else { "other" };
+                        let k = if ft.is_dir() {
+                            FsEntryKind::Dir
+                        } else if ft.is_file() {
+                            FsEntryKind::File
+                        } else if ft.is_symlink() {
+                            FsEntryKind::Symlink
+                        } else {
+                            FsEntryKind::Other
+                        };
                         (k, m.len())
                     }
-                    Err(_) => ("other", 0),
+                    Err(_) => (FsEntryKind::Other, 0),
                 };
-                entries.push(FsEntry { name: d.file_name().to_string_lossy().into_owned(), kind: kind.to_string(), size });
+                raw.push((d.file_name().to_string_lossy().into_owned(), kind, size));
             }
             // 目录在前，其余按名排序（确定性全序）
-            entries.sort_by(|a, b| {
-                let ad = a.kind == "dir";
-                let bd = b.kind == "dir";
-                bd.cmp(&ad).then_with(|| a.name.cmp(&b.name))
+            raw.sort_by(|a, b| {
+                let ad = a.1 == FsEntryKind::Dir;
+                let bd = b.1 == FsEntryKind::Dir;
+                bd.cmp(&ad).then_with(|| a.0.cmp(&b.0))
             });
+            let entries = raw.into_iter().map(|(name, kind, size)| FsEntry { name, kind: kind as i32, size: size as f64 }).collect();
             (true, entries, None)
         }
     }

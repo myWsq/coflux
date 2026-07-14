@@ -12,6 +12,8 @@ path = "src/main.rs"
 coflux-protocol = { path = "../protocol" }
 serde = { workspace = true }
 serde_json.workspace = true
+# wire 信封（DaemonToServer/ServerToDaemon）编解码：main.rs / tunnel.rs 直接用 prost::Message。
+prost = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "time", "sync", "signal"] }
 # 必须开 TLS feature 才能连 wss://（生产/staging 经 Caddy 走 HTTPS）；
 # 默认无 TLS 时连 wss 会抛 "TLS support not compiled in"。用 rustls + 内置根证书：纯 Rust、交叉编译/分发免依赖系统 OpenSSL 与根证书库。

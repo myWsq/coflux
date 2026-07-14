@@ -1,7 +1,13 @@
 /**
- * coflux wire protocol.
+ * coflux wire protocol。
  *
- * 一条 WebSocket 上多路复用，所有消息以 JSON 编码、用 `type` 区分。
+ * 真相源是 `proto/`（Buf 管理的 protobuf 定义），本包只装载由 `buf generate` 产出的
+ * TS 绑定（`src/gen/coflux/v1/*_pb.ts`，protobuf-es v2）并在其上加一层薄封装：
+ *   - 信封编解码：每条 WS binary message = 一个 protobuf 编码的信封
+ *     （`/daemon`：DaemonToServer / ServerToDaemon；`/client`：ClientToServer / ServerToClient）。
+ *   - `create()`：从 @bufbuild/protobuf 直接再导出，供调用方构造消息（顶层消息需要
+ *     `$typeName`，用 `create(XxxSchema, {...})`；嵌套字段可直接传纯 init 对象，无需逐层 create）。
+ *
  * 三方两段链路：
  *   Daemon  <-- /daemon -->  Server  <-- /client -->  Client
  *
@@ -15,9 +21,36 @@
  *
  * 认证（Tailscale 式，见 docs/auth-design.md）：daemon 用 EnrollmentKey 登记换取每设备 deviceToken；
  * daemonId 服务器签发绑定不可冒充；client 用 ClientToken 登录账号，账号是隔离单元。
+ *
+ * 运行时校验：protobuf 解码即结构校验，畸形字节直接 fromBinary 抛错——本包的 decode* helpers
+ * 统一 try/catch 兜底为 null，调用方按"丢弃 + 记日志"处理，不再需要手写的 isValid* 校验表。
  */
+import { create, fromBinary, toBinary, type MessageInitShape } from "@bufbuild/protobuf";
+
+export * from "./gen/coflux/v1/common_pb.js";
+export * from "./gen/coflux/v1/client_pb.js";
+export * from "./gen/coflux/v1/daemon_pb.js";
+
+export { create };
+
+import { ClientToServerSchema, ServerToClientSchema, type ClientToServer, type ServerToClient } from "./gen/coflux/v1/client_pb.js";
+import { DaemonToServerSchema, ServerToDaemonSchema, type DaemonToServer, type ServerToDaemon } from "./gen/coflux/v1/daemon_pb.js";
 
 export const DEFAULT_PORT = 8787;
+
+/**
+ * 信封 oneof 载荷的"构造态"类型（供发送方构造消息用）。
+ *
+ * `ServerToClient["payload"]` 等生成类型是 `create()` 之后的运行时形状——每个 oneof 分支的
+ * `value` 都要求满足 `Message`（含 `$typeName`）。而调用方通常是先拼一个 `{case, value}` 字面量
+ * 传给发送 helper（helper 内部再统一 `create(XxxSchema, { payload })`），此时 `value` 只需是
+ * "构造态"（`MessageInitShape`，允许省略 `$typeName` 的纯对象，因为 `create()` 会递归补全）。
+ * 用运行时类型去标注这类字面量参数会被 TS 误判为缺字段，故导出这组独立的 Init 类型。
+ */
+export type ServerToClientPayload = MessageInitShape<typeof ServerToClientSchema>["payload"];
+export type ServerToDaemonPayload = MessageInitShape<typeof ServerToDaemonSchema>["payload"];
+export type ClientToServerPayload = MessageInitShape<typeof ClientToServerSchema>["payload"];
+export type DaemonToServerPayload = MessageInitShape<typeof DaemonToServerSchema>["payload"];
 
 export type AccountId = string;
 export type DaemonId = string;
@@ -27,389 +60,66 @@ export type TaskId = string;
 export type SessionId = string;
 export type RequestId = string;
 
-export type TaskStatus = "idle" | "running" | "exited";
+/* ------------------------------------------------------------------ *
+ * 信封编解码（/client 链路）
+ * ------------------------------------------------------------------ */
 
-export interface DaemonInfo {
-  daemonId: DaemonId;
-  name: string;
-  host: string;
-  platform: string;
-  online: boolean;
+export function encodeClientToServer(msg: ClientToServer): Uint8Array {
+  return toBinary(ClientToServerSchema, msg);
 }
 
-/** fs.list 返回的目录项 */
-export interface FsEntry {
-  name: string;
-  type: "file" | "dir" | "symlink" | "other";
-  size: number;
+/** 解码失败（畸形字节/未知 wire）返回 null，调用方丢弃，不崩溃。 */
+export function decodeClientToServer(buf: Uint8Array): ClientToServer | null {
+  try {
+    return fromBinary(ClientToServerSchema, buf);
+  } catch {
+    return null;
+  }
 }
 
-export interface Project {
-  id: ProjectId;
-  accountId: AccountId;
-  daemonId: DaemonId;
-  name: string;
-  repoPath: string;
-  defaultBranch: string;
-  createdAt: number;
+export function encodeServerToClient(msg: ServerToClient): Uint8Array {
+  return toBinary(ServerToClientSchema, msg);
 }
 
-export interface Workspace {
-  id: WorkspaceId;
-  accountId: AccountId;
-  daemonId: DaemonId;
-  projectId: ProjectId;
-  name: string;
-  path: string;
-  branch: string;
-  isMain: boolean;
-  createdAt: number;
+export function decodeServerToClient(buf: Uint8Array): ServerToClient | null {
+  try {
+    return fromBinary(ServerToClientSchema, buf);
+  } catch {
+    return null;
+  }
 }
 
-export interface Task {
-  id: TaskId;
-  accountId: AccountId;
-  daemonId: DaemonId;
-  projectId: ProjectId;
-  workspaceId: WorkspaceId;
-  title: string;
-  status: TaskStatus;
-  sessionId: SessionId | null;
-  exitCode: number | null;
-  createdAt: number;
-  updatedAt: number;
+/* ------------------------------------------------------------------ *
+ * 信封编解码（/daemon 链路）
+ * ------------------------------------------------------------------ */
+
+export function encodeDaemonToServer(msg: DaemonToServer): Uint8Array {
+  return toBinary(DaemonToServerSchema, msg);
 }
 
-/* ================================================================== *
- * Daemon  <->  Server
- * ================================================================== */
+export function decodeDaemonToServer(buf: Uint8Array): DaemonToServer | null {
+  try {
+    return fromBinary(DaemonToServerSchema, buf);
+  } catch {
+    return null;
+  }
+}
 
-/** exec/fs 结果 —— 同一形状在 daemon→server 和 server→client 两段复用（server 只换 requestId 转发） */
-export type ExecResult = { type: "exec.result"; requestId: RequestId; ok: boolean; exitCode: number; stdout: string; stderr: string; error?: string };
-export type FsListed = { type: "fs.listed"; requestId: RequestId; ok: boolean; entries: FsEntry[]; error?: string };
-export type FsReadResult = { type: "fs.read.result"; requestId: RequestId; ok: boolean; content: string; error?: string };
+export function encodeServerToDaemon(msg: ServerToDaemon): Uint8Array {
+  return toBinary(ServerToDaemonSchema, msg);
+}
 
-export type DaemonToServer =
-  | { type: "daemon.enroll"; enrollmentKey: string; name: string; host: string; platform: string }
-  | { type: "daemon.auth"; deviceToken: string }
-  /** 未登记且无 enrollmentKey 时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md） */
-  | { type: "daemon.enrollRequest"; name: string; host: string; platform: string }
-  | { type: "daemon.resync"; sessions: { sessionId: SessionId; taskId: TaskId }[] }
-  /** 校验路径是否为（非裸）git 仓库，返回顶层目录与当前分支 */
-  | { type: "project.validated"; requestId: RequestId; ok: boolean; repoPath: string; branch: string; error?: string }
-  /** git worktree add 结果 */
-  | { type: "worktree.added"; requestId: RequestId; ok: boolean; path: string; branch: string; error?: string }
-  | { type: "session.started"; sessionId: SessionId; taskId: TaskId; pid: number }
-  | { type: "session.exit"; sessionId: SessionId; exitCode: number }
-  /** 全量幂等上报每个（存活）会话监听的端口；仅含有监听端口的 session，daemon 重连/漏报自愈 */
-  | { type: "ports.update"; sessions: { sessionId: SessionId; ports: number[] }[] }
-  /** server→daemon proxy.open 的回应：隧道连接建立结果 */
-  | { type: "proxy.opened"; connId: string; ok: boolean; error?: string }
-  /** 隧道连接（daemon 侧到本地端口的 TCP 连接）关闭，控制面消息，不走数据面帧 */
-  | { type: "proxy.closed"; connId: string }
-  // pty.output / pty.replay / proxy.data 走二进制数据面（见 encodeFrame/decodeFrame），不在 JSON 联合体内
-  | ExecResult
-  | FsListed
-  | FsReadResult;
+export function decodeServerToDaemon(buf: Uint8Array): ServerToDaemon | null {
+  try {
+    return fromBinary(ServerToDaemonSchema, buf);
+  } catch {
+    return null;
+  }
+}
 
-export type ServerToDaemon =
-  | { type: "daemon.enrolled"; daemonId: DaemonId; deviceToken: string }
-  | { type: "daemon.authed"; daemonId: DaemonId }
-  | { type: "daemon.authError"; message: string; needEnroll: boolean }
-  /** enrollRequest 的回应：一次性授权链接 + 过期时间（ms epoch）。daemon 落盘展示，连接断开即作废 */
-  | { type: "daemon.authorizePending"; url: string; expiresAt: number }
-  | { type: "project.validate"; requestId: RequestId; path: string }
-  | { type: "worktree.add"; requestId: RequestId; repoPath: string; workspaceId: WorkspaceId; name: string; branch: string; createNew: boolean }
-  /** fire-and-forget：移除一个 worktree 目录 */
-  | { type: "worktree.remove"; repoPath: string; worktreePath: string }
-  /** 热升级：切到某个 worker 版本。带 url 走"下载+验签"；不带则按版本标签在 supervisor 自有注册表里切换。fire-and-forget */
-  | { type: "worker.upgrade"; version: string; url?: string; sha256?: string; signature?: string }
-  | { type: "session.create"; sessionId: SessionId; taskId: TaskId; cwd: string; shell?: string; cols: number; rows: number }
-  | { type: "session.close"; sessionId: SessionId }
-  | { type: "session.replay"; sessionId: SessionId; requestId: RequestId }
-  // pty.input 走二进制数据面（见 encodeFrame/decodeFrame），不在 JSON 联合体内
-  | { type: "pty.resize"; sessionId: SessionId; cols: number; rows: number }
-  /** 打开一条隧道连接：daemon 向本地 port 发起 TCP 连接，字节经 proxy.data 帧（kind=4）双向透传 */
-  | { type: "proxy.open"; connId: string; port: number }
-  /** 关闭一条隧道连接（server 侧发起，例如浏览器断开） */
-  | { type: "proxy.close"; connId: string }
-  /** 通用原语：一次性命令 */
-  | { type: "exec.run"; requestId: RequestId; cwd: string; command: string; args: string[]; env?: Record<string, string>; timeoutMs?: number }
-  /** 通用原语：文件系统（root 为锚定根，path 为相对路径，daemon 校验不越界） */
-  | { type: "fs.list"; requestId: RequestId; root: string; path: string }
-  | { type: "fs.read"; requestId: RequestId; root: string; path: string };
-
-/* ================================================================== *
- * Client  <->  Server
- * ================================================================== */
-
-export type ClientToServer =
-  /** 登录：用户名+密码（local 模式首次）/ supabaseToken（supabase 模式换票）/ 会话 clientToken（重连，两模式通用）。
-   *  服务器认证成功会在 auth.ok 回带 coflux 会话 token；之后重连只用该 token，不再触碰 Supabase。 */
-  | { type: "client.auth"; username?: string; password?: string; clientToken?: string; supabaseToken?: string }
-  /** 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地） */
-  | { type: "client.logout" }
-  | { type: "client.subscribe" }
-  /** 为当前账号生成一条新的登记密钥（账号级、可复用），供新机器 daemon 登记 */
-  | { type: "client.createEnrollmentKey" }
-  | { type: "client.removeDevice"; daemonId: DaemonId }
-  /** 查看某授权链接对应的待授权设备信息（不消费 token，供确认页展示 name/host/platform） */
-  | { type: "device.authorizeInfo"; token: string }
-  /** 确认授权：把该 token 对应的设备绑到当前登录账号（一次性，成功后 token 失效） */
-  | { type: "device.authorize"; token: string }
-  /** 为端口转发签发一次性代理认证（浏览器经 <shortId>.<proxyHost> 访问前换票）。
-   *  redirect 是换票成功后要跳回的地址；url 白名单校验在 hub（不属于协议层） */
-  | { type: "proxy.issueAuth"; redirect: string }
-  /** 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签 */
-  | { type: "client.upgradeDaemon"; daemonId: DaemonId; version: string; url?: string; sha256?: string; signature?: string }
-  /** 导入一个 git 仓库为 project（自动创建主工作区） */
-  | { type: "project.import"; daemonId: DaemonId; path: string; name?: string }
-  | { type: "project.remove"; projectId: ProjectId }
-  /** 在 project 下用 git worktree 新建工作区 */
-  | { type: "workspace.create"; projectId: ProjectId; name: string; branch: string; createNew: boolean }
-  | { type: "workspace.remove"; workspaceId: WorkspaceId }
-  | { type: "task.create"; workspaceId: WorkspaceId; title: string }
-  | { type: "task.start"; taskId: TaskId; cols: number; rows: number }
-  | { type: "task.attach"; taskId: TaskId }
-  | { type: "task.stop"; taskId: TaskId }
-  | { type: "task.remove"; taskId: TaskId }
-  // pty.input 走二进制数据面（见 encodeFrame/decodeFrame），不在 JSON 联合体内
-  | { type: "pty.resize"; sessionId: SessionId; cols: number; rows: number }
-  /** 通用原语（IDE/工具用）：在某工作区里跑命令、读/列文件。requestId 由 client 自定，server 原样回带 */
-  | { type: "client.exec"; requestId: RequestId; workspaceId: WorkspaceId; command: string; args: string[]; timeoutMs?: number }
-  | { type: "client.fs.list"; requestId: RequestId; workspaceId: WorkspaceId; path: string }
-  | { type: "client.fs.read"; requestId: RequestId; workspaceId: WorkspaceId; path: string };
-
-export type ServerToClient =
-  | { type: "auth.ok"; accountId: AccountId; clientToken?: string }
-  | { type: "auth.error"; message: string }
-  /** 登记密钥已生成（明文仅此一次回传；服务器只存 hash） */
-  | { type: "enrollmentKey.created"; enrollmentKey: string; daemonUrl: string }
-  /** device.authorizeInfo 的回应：ok 时带设备信息，否则 error 说明原因（无效/已用/已过期） */
-  | { type: "device.authorizeInfo"; ok: boolean; name?: string; host?: string; platform?: string; error?: string }
-  /** 设备授权成功（该连接的 daemon 已收到 daemon.enrolled 并上线） */
-  | { type: "device.authorized" }
-  /** proxy.issueAuth 的回应：ok 时带跳转 url（换票成功，浏览器可直接访问 <shortId>.<proxyHost>） */
-  | { type: "proxy.auth"; ok: boolean; url?: string; error?: string }
-  /** 某任务当前可访问的端口列表变化（daemon ports.update 上报后重新计算得出） */
-  | { type: "ports.updated"; taskId: TaskId; ports: { port: number; url: string }[] }
-  // ports 字段在本 plan（004）只冻结形状，server 尚不产出；006 落地转发后才总是携带，故先设为可选，
-  // 避免 hub.ts 既有 state.snapshot 调用点因新增必填字段而编译失败
-  | { type: "state.snapshot"; daemons: DaemonInfo[]; projects: Project[]; workspaces: Workspace[]; tasks: Task[]; ports?: { taskId: TaskId; port: number; url: string }[] }
-  | { type: "daemon.updated"; daemon: DaemonInfo }
-  | { type: "daemon.removed"; daemonId: DaemonId }
-  | { type: "project.created"; project: Project }
-  | { type: "project.removed"; projectId: ProjectId }
-  | { type: "workspace.created"; workspace: Workspace }
-  | { type: "workspace.removed"; workspaceId: WorkspaceId }
-  | { type: "task.updated"; task: Task }
-  | { type: "task.removed"; taskId: TaskId }
-  /** 本 client 对该任务的控制权被另一个 client 接管（独占模型） */
-  | { type: "task.detached"; taskId: TaskId }
-  // pty.output 走二进制数据面（见 encodeFrame/decodeFrame），不在 JSON 联合体内
-  | ExecResult
-  | FsListed
-  | FsReadResult
-  | { type: "error"; message: string };
-
-/* ================================================================== *
+/* ------------------------------------------------------------------ *
  * 小工具
- * ================================================================== */
-
-export function encode(msg: unknown): string {
-  return JSON.stringify(msg);
-}
-
-export function decode<T>(raw: string | Buffer): T {
-  return JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8")) as T;
-}
-
-/* ------------------------------------------------------------------ *
- * 数据面二进制帧（pty.output / pty.input / pty.replay / proxy.data）
- *
- * 控制面仍走 JSON 文本帧；高频数据面改长度前缀二进制帧，免 JSON 转义、降 CPU/带宽。
- * 帧体布局（不含外层长度前缀）：
- *   [kind:1][idLen:1][id:utf8(idLen)][? ridLen:1][? requestId:utf8(ridLen)][payload 到帧尾]
- * - kind: 1=pty.output 2=pty.input 3=pty.replay（仅 replay 带 requestId）4=proxy.data。
- * - id 字段：pty.* 是 sessionId；proxy.data 是 connId（隧道连接 id，< 256 字节，双向复用同一帧种类）。
- * - pty.* 的 payload 是 node-pty 已解码的文本（string）；proxy.data 的 payload 是任意 TCP
- *   字节（可能非合法 UTF-8），必须按 Uint8Array 原样透传，不经 TextEncoder/TextDecoder 往返。
- * - 在 WS 上：每个二进制 message 即一帧（WS 自带分帧），payload 取到帧尾。
- * - 在字节流（UDS，热升级用）上：外层再包 4 字节大端长度前缀分帧，帧体格式不变。
- * 用 Uint8Array/TextEncoder 实现，Node 与浏览器通用。
  * ------------------------------------------------------------------ */
-
-export const FrameKind = { Output: 1, Input: 2, Replay: 3, ProxyData: 4 } as const;
-
-export type DataFrame =
-  | { type: "pty.output"; sessionId: SessionId; data: string }
-  | { type: "pty.input"; sessionId: SessionId; data: string }
-  | { type: "pty.replay"; sessionId: SessionId; requestId: RequestId; data: string }
-  /** 隧道连接的数据面透传（server↔daemon 双向）。data 是原始字节，不做 UTF-8 解码 */
-  | { type: "proxy.data"; connId: string; data: Uint8Array };
-
-const _te = new TextEncoder();
-const _td = new TextDecoder();
-
-/** 把数据面消息编码为二进制帧。sessionId/requestId/connId 为服务器签发的短 id（< 256 字节）。 */
-export function encodeFrame(msg: DataFrame): Uint8Array {
-  if (msg.type === "proxy.data") {
-    const cid = _te.encode(msg.connId);
-    if (cid.length > 255) throw new RangeError("connId too long for frame");
-    const head = 2 + cid.length;
-    const out = new Uint8Array(head + msg.data.length);
-    out[0] = FrameKind.ProxyData;
-    out[1] = cid.length;
-    out.set(cid, 2);
-    out.set(msg.data, head);
-    return out;
-  }
-  const sid = _te.encode(msg.sessionId);
-  if (sid.length > 255) throw new RangeError("sessionId too long for frame");
-  const payload = _te.encode(msg.data);
-  const rid = msg.type === "pty.replay" ? _te.encode(msg.requestId) : null;
-  if (rid && rid.length > 255) throw new RangeError("requestId too long for frame");
-  const head = 2 + sid.length + (rid ? 1 + rid.length : 0);
-  const out = new Uint8Array(head + payload.length);
-  out[0] = msg.type === "pty.output" ? FrameKind.Output : msg.type === "pty.input" ? FrameKind.Input : FrameKind.Replay;
-  out[1] = sid.length;
-  out.set(sid, 2);
-  let off = 2 + sid.length;
-  if (rid) {
-    out[off++] = rid.length;
-    out.set(rid, off);
-    off += rid.length;
-  }
-  out.set(payload, off);
-  return out;
-}
-
-/** 解码二进制帧；畸形返回 null（调用方丢弃，不崩溃）。 */
-export function decodeFrame(buf: Uint8Array): DataFrame | null {
-  if (buf.length < 2) return null;
-  const kind = buf[0];
-  const idLen = buf[1];
-  if (buf.length < 2 + idLen) return null;
-  if (kind === FrameKind.ProxyData) {
-    const connId = _td.decode(buf.subarray(2, 2 + idLen));
-    return { type: "proxy.data", connId, data: buf.subarray(2 + idLen) };
-  }
-  const sessionId = _td.decode(buf.subarray(2, 2 + idLen));
-  let off = 2 + idLen;
-  if (kind === FrameKind.Output || kind === FrameKind.Input) {
-    return { type: kind === FrameKind.Output ? "pty.output" : "pty.input", sessionId, data: _td.decode(buf.subarray(off)) };
-  }
-  if (kind === FrameKind.Replay) {
-    if (buf.length < off + 1) return null;
-    const ridLen = buf[off++];
-    if (buf.length < off + ridLen) return null;
-    const requestId = _td.decode(buf.subarray(off, off + ridLen));
-    off += ridLen;
-    return { type: "pty.replay", sessionId, requestId, data: _td.decode(buf.subarray(off)) };
-  }
-  return null;
-}
-
-/**
- * 把 replay 帧字节级重组为 output 帧（复制 sessionId 与 payload 的原始字节，去掉 requestId）。
- * server 转发 replay 给控制端时用它，避免 decode→encode 的 UTF-8 往返破坏 scrollback 里的非法/半截 UTF-8 字节
- * （实时 output 是原样转发 buf，回放必须与之字节一致）。畸形返回 null。
- */
-export function replayFrameToOutput(buf: Uint8Array): Uint8Array | null {
-  if (buf.length < 2 || buf[0] !== FrameKind.Replay) return null;
-  const sidLen = buf[1];
-  if (buf.length < 2 + sidLen + 1) return null;
-  let off = 2 + sidLen;
-  const ridLen = buf[off++];
-  off += ridLen;
-  if (buf.length < off) return null;
-  const payload = buf.subarray(off); // 原始字节，不 decode
-  const out = new Uint8Array(2 + sidLen + payload.length);
-  out[0] = FrameKind.Output;
-  out[1] = sidLen;
-  out.set(buf.subarray(2, 2 + sidLen), 2); // sessionId 字节原样复制
-  out.set(payload, 2 + sidLen);
-  return out;
-}
-
-/* ------------------------------------------------------------------ *
- * 入站消息运行时校验（防畸形 wire 数据崩溃 / 类型混淆）
- * ------------------------------------------------------------------ */
-
-type FieldSpec = "string" | "number" | "boolean" | "array";
-
-const DAEMON_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
-  "daemon.enroll": { enrollmentKey: "string", name: "string", host: "string", platform: "string" },
-  "daemon.enrollRequest": { name: "string", host: "string", platform: "string" },
-  "daemon.auth": { deviceToken: "string" },
-  "daemon.resync": { sessions: "array" },
-  "project.validated": { requestId: "string", ok: "boolean", repoPath: "string", branch: "string" },
-  "worktree.added": { requestId: "string", ok: "boolean", path: "string", branch: "string" },
-  "session.started": { sessionId: "string", taskId: "string", pid: "number" },
-  "session.exit": { sessionId: "string", exitCode: "number" },
-  "ports.update": { sessions: "array" },
-  "proxy.opened": { connId: "string", ok: "boolean" },
-  "proxy.closed": { connId: "string" },
-  "exec.result": { requestId: "string", ok: "boolean", exitCode: "number", stdout: "string", stderr: "string" },
-  "fs.listed": { requestId: "string", ok: "boolean", entries: "array" },
-  "fs.read.result": { requestId: "string", ok: "boolean", content: "string" },
-};
-
-const CLIENT_TO_SERVER_FIELDS: Record<string, Record<string, FieldSpec>> = {
-  "client.auth": {},
-  "client.logout": {},
-  "client.subscribe": {},
-  "client.createEnrollmentKey": {},
-  "client.removeDevice": { daemonId: "string" },
-  "device.authorizeInfo": { token: "string" },
-  "device.authorize": { token: "string" },
-  "proxy.issueAuth": { redirect: "string" },
-  "client.upgradeDaemon": { daemonId: "string", version: "string" },
-  "project.import": { daemonId: "string", path: "string" },
-  "project.remove": { projectId: "string" },
-  "workspace.create": { projectId: "string", name: "string", branch: "string", createNew: "boolean" },
-  "workspace.remove": { workspaceId: "string" },
-  "task.create": { workspaceId: "string", title: "string" },
-  "task.start": { taskId: "string", cols: "number", rows: "number" },
-  "task.attach": { taskId: "string" },
-  "task.stop": { taskId: "string" },
-  "task.remove": { taskId: "string" },
-  "pty.resize": { sessionId: "string", cols: "number", rows: "number" },
-  "client.exec": { requestId: "string", workspaceId: "string", command: "string", args: "array" },
-  "client.fs.list": { requestId: "string", workspaceId: "string", path: "string" },
-  "client.fs.read": { requestId: "string", workspaceId: "string", path: "string" },
-};
-
-function checkType(v: unknown, t: FieldSpec): boolean {
-  switch (t) {
-    case "string":
-      return typeof v === "string";
-    case "number":
-      return typeof v === "number" && Number.isFinite(v);
-    case "boolean":
-      return typeof v === "boolean";
-    case "array":
-      return Array.isArray(v);
-  }
-}
-
-function validate(msg: unknown, specs: Record<string, Record<string, FieldSpec>>): boolean {
-  if (!msg || typeof msg !== "object") return false;
-  const m = msg as Record<string, unknown>;
-  if (typeof m.type !== "string") return false;
-  const fields = specs[m.type];
-  if (!fields) return false;
-  for (const [k, t] of Object.entries(fields)) if (!checkType(m[k], t)) return false;
-  return true;
-}
-
-export function isValidDaemonToServer(msg: unknown): msg is DaemonToServer {
-  return validate(msg, DAEMON_TO_SERVER_FIELDS);
-}
-
-export function isValidClientToServer(msg: unknown): msg is ClientToServer {
-  return validate(msg, CLIENT_TO_SERVER_FIELDS);
-}
 
 /** 把任意输入钳制为合法终端尺寸 */
 export function clampDim(n: unknown, fallback: number): number {

@@ -6,6 +6,12 @@
  *
  * 每个测试文件用 startStack() 起一套独立的 server+daemon（独立端口 + 临时 DB + 临时 HOME），
  * after() 里 stop() 清理。
+ *
+ * wire（plan 009）：WS 上只有 binary message，每条 = 一个 protobuf 编码的信封
+ * （/daemon：DaemonToServer/ServerToDaemon；/client：ClientToServer/ServerToClient）。
+ * 本文件 import 生成代码与 `@coflux/protocol` 的信封编解码 helper——它们源自 proto 真相源
+ * （buf generate 产物），而非应用（apps/server、apps/web）的实现逻辑，黑盒性质因此保持
+ * （仍然完全不 import apps/* 的任何代码）。
  */
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
@@ -16,6 +22,17 @@ import { setTimeout as sleep } from "node:timers/promises";
 import http from "node:http";
 import { WebSocket } from "ws";
 import postgres from "postgres";
+import {
+  create,
+  ClientToServerSchema,
+  ServerToClientSchema,
+  DaemonToServerSchema,
+  ServerToDaemonSchema,
+  encodeClientToServer,
+  decodeServerToClient,
+  encodeDaemonToServer,
+  decodeServerToDaemon,
+} from "@coflux/protocol";
 
 const ROOT = resolve(import.meta.dirname, "..", "..");
 const TSX = join(ROOT, "node_modules", ".bin", "tsx");
@@ -64,41 +81,37 @@ async function dropTestDatabaseLoudly(name) {
   }
 }
 
-/* 数据面二进制帧编解码（与 packages/protocol 保持一致；harness 用纯 JS 内联一份，
-   刻意不依赖应用内部，符合黑盒定位）。帧体：[kind][sidLen][sessionId][?ridLen][?requestId][payload] */
-const FRAME_KIND = { "pty.output": 1, "pty.input": 2, "pty.replay": 3 };
-const FRAME_TYPE = { 1: "pty.output", 2: "pty.input", 3: "pty.replay" };
-const DATA_PLANE = new Set(["pty.output", "pty.input", "pty.replay"]);
+/* ------------------------------------------------------------------ *
+ * 信封 <-> 测试端消息的薄映射
+ *
+ * 发送：测试代码写 `{ case: "clientAuth", username, password }`（扁平，"case" 挑一个
+ * oneof 分支，其余字段是该分支消息的 init）；这里拆成 `create(Schema, { payload: {case, value} })`
+ * 再整包编码。字节字段（各消息里统一叫 `data` 的 pty/proxy payload）若传的是 string 自动
+ * UTF-8 编码为 Uint8Array——纯粹是测试断言的人体工学，不影响线上真实字节。
+ *
+ * 接收：解码信封后把 `payload` 拍平成 `{ case, ...value }` 塞进 log/waitFor，`data` 字段
+ * （若是 Uint8Array）配套解码回 string。既有测试的 `m.type === "..."` 判定改成 `m.case === "..."`
+ * 后，字段访问（`m.task`、`m.workspace`、`m.data` 等）基本不用再改。
+ * ------------------------------------------------------------------ */
 const _te = new TextEncoder();
 const _td = new TextDecoder();
-function encodeFrame(msg) {
-  const sid = _te.encode(msg.sessionId);
-  const payload = _te.encode(msg.data ?? "");
-  const rid = msg.type === "pty.replay" ? _te.encode(msg.requestId) : null;
-  const out = new Uint8Array(2 + sid.length + (rid ? 1 + rid.length : 0) + payload.length);
-  out[0] = FRAME_KIND[msg.type];
-  out[1] = sid.length;
-  out.set(sid, 2);
-  let off = 2 + sid.length;
-  if (rid) { out[off++] = rid.length; out.set(rid, off); off += rid.length; }
-  out.set(payload, off);
-  return out;
+
+function toWireValue(fields) {
+  if (typeof fields.data === "string") return { ...fields, data: _te.encode(fields.data) };
+  return fields;
 }
-function decodeFrame(buf) {
-  const u = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  if (u.length < 2) return null;
-  const type = FRAME_TYPE[u[0]];
-  if (!type) return null;
-  const sidLen = u[1];
-  const sessionId = _td.decode(u.subarray(2, 2 + sidLen));
-  let off = 2 + sidLen;
-  if (type === "pty.replay") {
-    const ridLen = u[off++];
-    const requestId = _td.decode(u.subarray(off, off + ridLen));
-    off += ridLen;
-    return { type, sessionId, requestId, data: _td.decode(u.subarray(off)) };
-  }
-  return { type, sessionId, data: _td.decode(u.subarray(off)) };
+
+/** 把 `msg.payload`（`{case, value}`，未命中任何 oneof 分支时 case 为 undefined）拍平为
+ * `{case, ...value}`；未命中/解码失败返回 null，调用方按"丢弃"处理。 */
+function flattenPayload(payload) {
+  if (!payload || payload.case === undefined) return null;
+  const { $typeName, ...rest } = payload.value;
+  if (rest.data instanceof Uint8Array) rest.data = _td.decode(rest.data);
+  return { case: payload.case, ...rest };
+}
+
+function toUint8(data) {
+  return data instanceof Uint8Array ? data : new Uint8Array(data);
 }
 
 function spawnApp(rel, env) {
@@ -192,17 +205,30 @@ export async function startServer(opts = {}) {
   };
 }
 
-/** 一个原始 /daemon 连接：直接发 daemon.enroll/daemon.auth，不需要 Rust supervisor。 */
+/** 一个原始 /daemon 连接：直接发 daemon.enroll/daemon.auth，不需要 Rust supervisor。
+ * send(m) 里 m 形如 `{ case: "daemonEnrollRequest", name, host, platform }`（扁平）；
+ * 收到的消息同样拍平为 `{ case, ...value }` 塞进 log/waitFor。 */
 export function rawDaemon(port) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/daemon`);
   const log = [];
   let waiters = [];
-  ws.onmessage = (ev) => { let m; try { m = JSON.parse(ev.data); } catch { return; } log.push(m); waiters = waiters.filter((w) => !w.try(m)); };
+  ws.onmessage = (ev) => {
+    let env;
+    try { env = decodeServerToDaemon(toUint8(ev.data)); } catch { return; }
+    const m = flattenPayload(env?.payload);
+    if (!m) return;
+    log.push(m);
+    waiters = waiters.filter((w) => !w.try(m));
+  };
   return {
     ready: new Promise((res, rej) => { ws.onopen = res; ws.onerror = (e) => rej(new Error("ws error: " + (e.message || "?"))); }),
     /** 服务端主动关连接时解析为 close code（如 4008 auth timeout）；不关则一直 pending，调用方自行 race 超时 */
     closed: new Promise((res) => { ws.onclose = (e) => res(e.code); }),
-    send: (m) => ws.send(JSON.stringify(m)),
+    log,
+    send: (m) => {
+      const { case: c, ...fields } = m;
+      ws.send(encodeDaemonToServer(create(DaemonToServerSchema, { payload: { case: c, value: toWireValue(fields) } })));
+    },
     waitFor: (pred, label = "?", t = 8000) => {
       const h = log.find(pred);
       if (h) return Promise.resolve(h);
@@ -308,7 +334,9 @@ export async function startStack(opts = {}) {
   return stack;
 }
 
-/** 一个测试用 WebSocket client，带消息日志与 waitFor。 */
+/** 一个测试用 WebSocket client，带消息日志与 waitFor。
+ * send(m)：m 形如 `{ case: "clientAuth", username, password }`（扁平，"case" 选 oneof 分支）。
+ * 收到的消息拍平为 `{ case, ...value }`（`waitFor` 按 `payload.case` 匹配）。 */
 export class Client {
   constructor(port) {
     this.log = [];
@@ -319,23 +347,18 @@ export class Client {
       this.ws.onerror = (e) => rej(new Error("ws error: " + (e.message || "?")));
     });
     this.ws.onmessage = (ev) => {
-      let m;
-      if (typeof ev.data === "string") {
-        try { m = JSON.parse(ev.data); } catch { return; }
-      } else {
-        // 数据面二进制帧 → 还原为 {type,sessionId,data} 以兼容既有 waitFor 断言
-        m = decodeFrame(ev.data);
-        if (!m) return;
-      }
+      let env;
+      try { env = decodeServerToClient(toUint8(ev.data)); } catch { return; }
+      const m = flattenPayload(env?.payload);
+      if (!m) return;
       this.log.push(m);
       this.waiters = this.waiters.filter((w) => !w.try(m));
     };
   }
   send(m) {
     if (this.ws.readyState !== WebSocket.OPEN) return;
-    // 数据面 type 自动编码为二进制帧，控制面走 JSON —— 既有调用点无需改动
-    if (DATA_PLANE.has(m.type)) this.ws.send(encodeFrame(m));
-    else this.ws.send(JSON.stringify(m));
+    const { case: c, ...fields } = m;
+    this.ws.send(encodeClientToServer(create(ClientToServerSchema, { payload: { case: c, value: toWireValue(fields) } })));
   }
   waitFor(pred, label = "?", timeout = 10000) {
     const hit = this.log.find(pred);
@@ -347,10 +370,10 @@ export class Client {
   }
   async authSubscribe(username = "admin", password = "admin") {
     await this.ready;
-    this.send({ type: "client.auth", username, password });
-    await this.waitFor((m) => m.type === "auth.ok", "auth.ok");
-    this.send({ type: "client.subscribe" });
-    return this.waitFor((m) => m.type === "state.snapshot", "snapshot");
+    this.send({ case: "clientAuth", username, password });
+    await this.waitFor((m) => m.case === "authOk", "auth.ok");
+    this.send({ case: "clientSubscribe" });
+    return this.waitFor((m) => m.case === "stateSnapshot", "snapshot");
   }
   close() {
     try { this.ws.close(); } catch {}

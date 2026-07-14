@@ -18,7 +18,7 @@ type TerminalPaneProps = {
   sessionId: string | null;
   active: boolean;
   controlState: TerminalControlState;
-  registerSessionConsumer: (sessionId: string, consumer: (data: string) => void) => () => void;
+  registerSessionConsumer: (sessionId: string, consumer: (data: Uint8Array) => void) => () => void;
   sendInput: (sessionId: string, data: string) => void;
   sendResize: (sessionId: string, cols: number, rows: number) => void;
   onReady: (taskId: string, controller: TerminalController) => void;
