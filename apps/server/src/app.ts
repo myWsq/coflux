@@ -6,16 +6,12 @@
 import { Raven, registerContractRoute } from "@raven.js/core";
 import { storePlugin } from "./plugins/store.plugin.js";
 import { hubPlugin } from "./plugins/hub.plugin.js";
-import { apiAuthPlugin } from "./plugins/api-auth.plugin.js";
 import { GetHealthContract } from "./interface/get-health/get-health.contract.js";
 import { GetHealthHandler } from "./interface/get-health/get-health.handler.js";
-import { GetStateContract } from "./interface/get-state/get-state.contract.js";
-import { GetStateHandler } from "./interface/get-state/get-state.handler.js";
 
 export const app = new Raven();
 
 // load 串行：hub 依赖 store 写入的 StoreState，注册顺序即依赖顺序。
-app.register(storePlugin()).register(hubPlugin()).register(apiAuthPlugin());
+app.register(storePlugin()).register(hubPlugin());
 
 registerContractRoute(app, GetHealthContract, GetHealthHandler);
-registerContractRoute(app, GetStateContract, GetStateHandler);
