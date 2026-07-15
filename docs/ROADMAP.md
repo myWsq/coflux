@@ -23,30 +23,26 @@
 
 ## 待办
 
-### 1. macOS 原生客户端（2026-07-15 立项，最高优先级）
+### 1. Web 客户端产品化（主客户端，2026-07-16 确认）
 
-决策：放弃 Web 作为主客户端，只面向 macOS 做原生客户端。**Web 已冻结：不再更新（不加功能、不做迭代，仅限致命安全修复），且未来会直接下线**——kill 条件 = macOS 客户端跑通日常主路径（登录、加设备、导项目、工作区/任务、终端 attach）；届时裁至仅剩两条天生属于浏览器的流（`/authorize` 设备授权、`/proxy-auth` 预览域门禁）的极简页，其余全部删除。
-
-**技术栈（2026-07 调研定稿）**：Swift 6.2+（Swift 6 语言模式）、SwiftUI-first + AppKit 桥接、`@Observable`、SwiftTerm（`NSViewRepresentable` + headless feed）、`URLSessionWebSocketTask`（actor + AsyncStream）、Swift Testing；分发 = Developer ID 签名 + notarytool 公证 + Sparkle 2 自更新。协议直接消费 `proto/gen/swift`（swift-protobuf，与 TS/Rust 同一真相源）；supabase-swift 仅用于登录换票，之后全程 coflux 会话 token（Keychain 存储）。
-
-- [ ] 工程骨架：Xcode 项目 + SPM 依赖 + `proto/gen/swift` 接入 + CI（构建/测试）
-- [ ] WS 客户端 actor：连接/认证/指数退避重连/信封编解码（语义对齐 web `use-coflux-client`）
-- [ ] 状态层：`stateSnapshot` 首帧 + 增量广播 → `@Observable` store（同通道快照/增量排序保证沿用）
-- [ ] 终端：SwiftTerm 桥接、PTY 双向二进制流、scrollback 回放
-- [ ] attach/独占接管状态机移植（web 侧最复杂点，对齐 `workspace-terminal.tsx` 语义）
-- [ ] 设备/项目/工作区/任务管理界面（含添加设备的登记密钥流）
-- [ ] 登录：supabase-swift 换票 + Keychain 会话管理
-- [ ] 端口预览：唤起系统浏览器走既有门禁 cookie 流
-- [ ] 分发：Developer ID + 公证 + Sparkle appcast
-- [ ] 文件树/查看器、命令面板（原"前端 IDE 方向"迁入此处，基于现有 `fs.list`/`fs.read`/`exec` 原语，按需排期）
-- [ ] **下线 Web**（kill 条件达成即执行）：`apps/web` 裁至 `/authorize` + `/proxy-auth` 极简页，其余删除；prod 撤主站静态资源
+> 2026-07-15 曾立项"弃 Web 转 macOS 原生"，次日复议撤回：web 是当前唯一在用的日常客户端，
+> 先把它做好；macOS 原生降级为后续增强（见条目 4）。产品定位已定：**Agent 指挥中心**——
+> 围绕"在各设备的工作区里跑 claude/codex 任务，人监督、随时接管"组织功能与交互，
+> 终端仍是核心界面，但组织逻辑是任务而非连接。功能/交互细化待产品设计讨论产出。
 
 ### 2. daemon 原语按需扩展
 - [ ] `fs.write`（编辑保存）
 - [ ] `fs.watch`（文件变更监听，需 daemon 原生 watcher）
 
 ### 3. 产品/部署（详见 OPEN_QUESTIONS）
-- [x] 多终端 / 一个工作区多会话（B4）：web 已落地（plan 008）；macOS 客户端对齐
+- [x] 多终端 / 一个工作区多会话（B4）：web 已落地（plan 008）
 - [ ] Agent 集成（B5）：起任务时可选自动拉起 `claude` / `codex` 带 prompt，人随时接管
 - [ ] 中心服务器多实例 + 共享状态（B7 余项；TLS/部署形态已上线）
 - [ ] 退出任务的保留/GC 策略（exited task 长期累积）
+
+### 4. macOS 原生客户端（后续增强，暂缓）
+
+2026-07 调研结论保留备用：Swift 6.2+ / SwiftUI-first + AppKit 桥接 / `@Observable` / SwiftTerm /
+`URLSessionWebSocketTask`（actor + AsyncStream）/ Swift Testing；分发 = Developer ID + notarytool +
+Sparkle 2。协议侧已就绪：`proto/gen/swift`（swift-protobuf）与 TS/Rust 同一真相源，立项即可消费。
+最难移植点预判：attach/独占接管状态机（`workspace-terminal.tsx`）。
