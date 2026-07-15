@@ -1,12 +1,12 @@
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
+import solid from "vite-plugin-solid";
 import tailwindcss from "@tailwindcss/vite";
 
 // 后端中心服务器地址（仅 dev server 内部代理用，不暴露给浏览器）
 const BACKEND = process.env.COFLUX_BACKEND ?? "http://localhost:8787";
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [solid(), tailwindcss()],
   resolve: {
     alias: {
       "@": new URL("./src", import.meta.url).pathname,
