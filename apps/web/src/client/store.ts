@@ -54,7 +54,7 @@ export function createCofluxClient() {
   const [workspaces, setWorkspaces] = createSignal<Workspace[]>([]);
   const [tasks, setTasks] = createSignal<Task[]>([]);
   const [ports, setPorts] = createSignal<Record<string, PortPreview[]>>({});
-  const [detachedTaskIds, setDetachedTaskIds] = createSignal<Set<string>>(new Set());
+  const [detachedTaskIds, setDetachedTaskIds] = createSignal<Set<string>>(new Set<string>());
   const [enrollCommand, setEnrollCommand] = createSignal<string | null>(null);
   const [lastError, setLastError] = createSignal<ClientError | null>(null);
   const [snapshotRevision, setSnapshotRevision] = createSignal(0);
@@ -77,7 +77,7 @@ export function createCofluxClient() {
   function registerSessionConsumer(sessionId: string, consumer: SessionConsumer) {
     let consumers = sessionConsumers.get(sessionId);
     if (!consumers) {
-      consumers = new Set();
+      consumers = new Set<SessionConsumer>();
       sessionConsumers.set(sessionId, consumers);
     }
     consumers.add(consumer);
@@ -263,7 +263,7 @@ export function createCofluxClient() {
       setWorkspaces([]);
       setTasks([]);
       setPorts({});
-      setDetachedTaskIds(new Set());
+      setDetachedTaskIds(new Set<string>());
       setEnrollCommand(null);
     });
   }
