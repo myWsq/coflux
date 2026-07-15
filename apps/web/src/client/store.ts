@@ -1,9 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { batch, createSignal, onCleanup } from "solid-js";
 import {
-  create,
-  encodeClientToServer,
-  decodeServerToClient,
-  ClientToServerSchema,
   TaskStatus,
   type ClientToServerPayload,
   type DaemonInfo,
@@ -14,8 +10,9 @@ import {
 
 import { SERVER_URL, TOKEN_KEY, USE_SUPABASE, type AuthCredential } from "@/config";
 import { loginWithSupabase } from "@/lib/auth";
+import { createConnection, type ConnectionStatus, type ServerPayload } from "@/client/connection";
 
-export type ConnectionStatus = "connecting" | "connected" | "disconnected";
+export type { ConnectionStatus } from "@/client/connection";
 export type AuthState = "need-login" | "authenticating" | "authed" | "auth-failed";
 export type PortPreview = { port: number; url: string };
 export type ClientError = { id: number; message: string };
@@ -36,128 +33,86 @@ function withoutSetValue(values: Set<string>, value: string): Set<string> {
   return next;
 }
 
-export function useCofluxClient() {
-  const wsRef = useRef<WebSocket | null>(null);
-  const tokenRef = useRef("");
-  const stopReconnectRef = useRef(false);
-  const shouldRetryRef = useRef(false);
-  const reconnectTimerRef = useRef<number | null>(null);
-  const messageHandlerRef = useRef<(payload: NonNullable<ReturnType<typeof decodeServerToClient>>["payload"]) => void>(() => undefined);
-  const connectRef = useRef<(credential: AuthCredential) => void>(() => undefined);
-  const sessionConsumersRef = useRef(new Map<string, Set<SessionConsumer>>());
-  const errorSequenceRef = useRef(0);
+/**
+ * 主页面状态 store：signals 只承载控制面（实体集合 / 连接态 / 控制权态）。
+ * PTY 数据流（ptyOutput）绝不进响应式状态——经 consumer 注册表直达 terminal.write。
+ *
+ * 须在组件（reactive owner）内创建：连接生命周期挂在 onCleanup 上。
+ */
+export function createCofluxClient() {
+  let token = localStorage.getItem(TOKEN_KEY) ?? "";
+  let shouldRetry = false;
+  let errorSequence = 0;
+  const sessionConsumers = new Map<string, Set<SessionConsumer>>();
 
-  const [status, setStatus] = useState<ConnectionStatus>("connecting");
+  const [status, setStatus] = createSignal<ConnectionStatus>(token ? "connecting" : "disconnected");
   // 有本地会话 token 时首屏直接进入 authenticating，避免刷新先闪登录页。
-  const [authState, setAuthState] = useState<AuthState>(() => {
-    const savedToken = localStorage.getItem(TOKEN_KEY);
-    if (savedToken) {
-      tokenRef.current = savedToken;
-      return "authenticating";
-    }
-    return "need-login";
+  const [authState, setAuthState] = createSignal<AuthState>(token ? "authenticating" : "need-login");
+  const [loginError, setLoginError] = createSignal("");
+  const [daemons, setDaemons] = createSignal<DaemonInfo[]>([]);
+  const [projects, setProjects] = createSignal<Project[]>([]);
+  const [workspaces, setWorkspaces] = createSignal<Workspace[]>([]);
+  const [tasks, setTasks] = createSignal<Task[]>([]);
+  const [ports, setPorts] = createSignal<Record<string, PortPreview[]>>({});
+  const [detachedTaskIds, setDetachedTaskIds] = createSignal<Set<string>>(new Set());
+  const [enrollCommand, setEnrollCommand] = createSignal<string | null>(null);
+  const [lastError, setLastError] = createSignal<ClientError | null>(null);
+  const [snapshotRevision, setSnapshotRevision] = createSignal(0);
+
+  const connection = createConnection({
+    url: SERVER_URL,
+    onStatus: setStatus,
+    onMessage: handleServerMessage,
+    reconnectCredential: () => (shouldRetry && token ? { token } : null),
   });
-  const [loginError, setLoginError] = useState("");
-  const [daemons, setDaemons] = useState<DaemonInfo[]>([]);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [ports, setPorts] = useState<Record<string, PortPreview[]>>({});
-  const [detachedTaskIds, setDetachedTaskIds] = useState<Set<string>>(() => new Set());
-  const [enrollCommand, setEnrollCommand] = useState<string | null>(null);
-  const [lastError, setLastError] = useState<ClientError | null>(null);
-  const [snapshotRevision, setSnapshotRevision] = useState(0);
 
-  const send = useCallback((payload: ClientToServerPayload) => {
-    const socket = wsRef.current;
-    if (socket?.readyState === WebSocket.OPEN) socket.send(encodeClientToServer(create(ClientToServerSchema, { payload })));
-  }, []);
+  function send(payload: ClientToServerPayload) {
+    connection.send(payload);
+  }
 
-  const sendInput = useCallback(
-    (sessionId: string, data: string) => {
-      send({ case: "ptyInput", value: { sessionId, data: new TextEncoder().encode(data) } });
-    },
-    [send],
-  );
+  function sendInput(sessionId: string, data: string) {
+    send({ case: "ptyInput", value: { sessionId, data: new TextEncoder().encode(data) } });
+  }
 
-  const registerSessionConsumer = useCallback((sessionId: string, consumer: SessionConsumer) => {
-    let consumers = sessionConsumersRef.current.get(sessionId);
+  function registerSessionConsumer(sessionId: string, consumer: SessionConsumer) {
+    let consumers = sessionConsumers.get(sessionId);
     if (!consumers) {
       consumers = new Set();
-      sessionConsumersRef.current.set(sessionId, consumers);
+      sessionConsumers.set(sessionId, consumers);
     }
     consumers.add(consumer);
     return () => {
-      const current = sessionConsumersRef.current.get(sessionId);
+      const current = sessionConsumers.get(sessionId);
       if (!current) return;
       current.delete(consumer);
-      if (current.size === 0) sessionConsumersRef.current.delete(sessionId);
+      if (current.size === 0) sessionConsumers.delete(sessionId);
     };
-  }, []);
+  }
 
-  const connect = useCallback((credential: AuthCredential) => {
-    stopReconnectRef.current = false;
-    setAuthState("authenticating");
-    setStatus("connecting");
-    if (reconnectTimerRef.current !== null) {
-      window.clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-
-    const socket = new WebSocket(SERVER_URL);
-    socket.binaryType = "arraybuffer";
-    wsRef.current = socket;
-
-    socket.onopen = () => {
-      if (wsRef.current !== socket) return;
-      setStatus("connected");
-      const payload: ClientToServerPayload =
-        "token" in credential
-          ? { case: "clientAuth", value: { clientToken: credential.token } }
-          : "supabaseToken" in credential
-            ? { case: "clientAuth", value: { supabaseToken: credential.supabaseToken } }
-            : { case: "clientAuth", value: { username: credential.username, password: credential.password } };
-      socket.send(encodeClientToServer(create(ClientToServerSchema, { payload })));
-    };
-
-    socket.onclose = () => {
-      if (wsRef.current !== socket) return;
-      setStatus("disconnected");
-      if (!stopReconnectRef.current && shouldRetryRef.current && tokenRef.current) {
-        reconnectTimerRef.current = window.setTimeout(() => connectRef.current({ token: tokenRef.current }), 1500);
-      }
-    };
-
-    socket.onmessage = (event) => {
-      if (!(event.data instanceof ArrayBuffer)) return; // 全 binary 协议：非二进制帧一律忽略
-      const message = decodeServerToClient(new Uint8Array(event.data));
-      if (!message) return;
-      messageHandlerRef.current(message.payload);
-    };
-  }, []);
-  connectRef.current = connect;
-
-  const handleServerMessage = useCallback(
-    (payload: NonNullable<ReturnType<typeof decodeServerToClient>>["payload"]) => {
+  // 快照/增量按到达顺序应用（server 保证 stateSnapshot 先于其后的广播），不做乱序缓冲。
+  // batch 让单条消息触发的多个 signal 更新原子提交，effect 只看到一致的最终状态。
+  function handleServerMessage(payload: ServerPayload) {
+    batch(() => {
       switch (payload.case) {
         case "authOk": {
           const value = payload.value;
           setAuthState("authed");
           setLoginError("");
-          shouldRetryRef.current = true;
+          shouldRetry = true;
+          connection.resetBackoff();
           if (value.clientToken) {
-            tokenRef.current = value.clientToken;
+            token = value.clientToken;
             localStorage.setItem(TOKEN_KEY, value.clientToken);
           }
           send({ case: "clientSubscribe", value: {} });
           break;
         }
         case "authError": {
-          tokenRef.current = "";
+          token = "";
           localStorage.removeItem(TOKEN_KEY);
           setLoginError(USE_SUPABASE ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误");
           setAuthState("auth-failed");
-          shouldRetryRef.current = false;
+          shouldRetry = false;
           break;
         }
         case "stateSnapshot": {
@@ -238,7 +193,10 @@ export function useCofluxClient() {
         }
         case "portsUpdated": {
           const value = payload.value;
-          setPorts((previous) => ({ ...previous, [value.taskId]: value.ports.map((preview) => ({ port: preview.port, url: preview.url })) }));
+          setPorts((previous) => ({
+            ...previous,
+            [value.taskId]: value.ports.map((preview) => ({ port: preview.port, url: preview.url })),
+          }));
           break;
         }
         case "taskDetached": {
@@ -252,45 +210,33 @@ export function useCofluxClient() {
           break;
         }
         case "ptyOutput": {
+          // PTY 数据零响应式开销：直达 consumer（terminal.write），不进任何 signal。
           const value = payload.value;
-          const consumers = sessionConsumersRef.current.get(value.sessionId);
+          const consumers = sessionConsumers.get(value.sessionId);
           if (consumers) for (const consumer of consumers) consumer(value.data);
           break;
         }
         case "error": {
-          errorSequenceRef.current += 1;
-          setLastError({ id: errorSequenceRef.current, message: payload.value.message });
+          errorSequence += 1;
+          setLastError({ id: errorSequence, message: payload.value.message });
           break;
         }
         default:
           break;
       }
-    },
-    [send],
-  );
-  messageHandlerRef.current = handleServerMessage;
+    });
+  }
 
-  useEffect(() => {
-    const savedToken = localStorage.getItem(TOKEN_KEY);
-    if (savedToken) {
-      tokenRef.current = savedToken;
-      connectRef.current({ token: savedToken });
-    } else {
-      setStatus("disconnected");
-    }
+  function connect(credential: AuthCredential) {
+    // 重连/重登时若已 authed 则保持：断线期间保留最后快照渲染，由顶部横幅提示，不整页退回 loading。
+    if (authState() !== "authed") setAuthState("authenticating");
+    connection.connect(credential);
+  }
 
-    return () => {
-      stopReconnectRef.current = true;
-      if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
-      wsRef.current?.close();
-      sessionConsumersRef.current.clear();
-    };
-  }, []);
-
-  const login = useCallback(async (username: string, password: string) => {
+  async function login(username: string, password: string) {
     setLoginError("");
     if (!USE_SUPABASE) {
-      connectRef.current({ username, password });
+      connect({ username, password });
       return;
     }
 
@@ -301,40 +247,48 @@ export function useCofluxClient() {
       setAuthState("auth-failed");
       return;
     }
-    connectRef.current({ supabaseToken: result.accessToken });
-  }, []);
+    connect({ supabaseToken: result.accessToken });
+  }
 
-  const logout = useCallback(() => {
-    stopReconnectRef.current = true;
-    shouldRetryRef.current = false;
-    if (wsRef.current?.readyState === WebSocket.OPEN) send({ case: "clientLogout", value: {} });
-    tokenRef.current = "";
+  function logout() {
+    shouldRetry = false;
+    send({ case: "clientLogout", value: {} });
+    token = "";
     localStorage.removeItem(TOKEN_KEY);
-    wsRef.current?.close();
-    setAuthState("need-login");
-    setDaemons([]);
-    setProjects([]);
-    setWorkspaces([]);
-    setTasks([]);
-    setPorts({});
-    setDetachedTaskIds(new Set());
-    setEnrollCommand(null);
-  }, [send]);
+    connection.stop();
+    batch(() => {
+      setAuthState("need-login");
+      setDaemons([]);
+      setProjects([]);
+      setWorkspaces([]);
+      setTasks([]);
+      setPorts({});
+      setDetachedTaskIds(new Set());
+      setEnrollCommand(null);
+    });
+  }
 
-  const startTask = useCallback(
-    (taskId: string, cols: number, rows: number) => {
-      setDetachedTaskIds((previous) => withoutSetValue(previous, taskId));
-      send({ case: "taskStart", value: { taskId, cols, rows } });
-    },
-    [send],
-  );
+  // attach 即 taskStart：对 RUNNING 任务发 taskStart 就是申请接管（server 端 startOrAttachTask 复用语义）。
+  function startTask(taskId: string, cols: number, rows: number) {
+    setDetachedTaskIds((previous) => withoutSetValue(previous, taskId));
+    send({ case: "taskStart", value: { taskId, cols, rows } });
+  }
 
-  const requestEnrollmentKey = useCallback(() => {
+  function requestEnrollmentKey() {
     setEnrollCommand(null);
     send({ case: "clientCreateEnrollmentKey", value: {} });
-  }, [send]);
+  }
 
-  const clearEnrollmentCommand = useCallback(() => setEnrollCommand(null), []);
+  function clearEnrollmentCommand() {
+    setEnrollCommand(null);
+  }
+
+  if (token) connection.connect({ token });
+
+  onCleanup(() => {
+    connection.stop();
+    sessionConsumers.clear();
+  });
 
   return {
     status,
@@ -360,4 +314,4 @@ export function useCofluxClient() {
   };
 }
 
-export type CofluxClient = ReturnType<typeof useCofluxClient>;
+export type CofluxClient = ReturnType<typeof createCofluxClient>;
