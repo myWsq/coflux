@@ -1,8 +1,10 @@
-import { useEffect, useRef } from "react";
+import { createEffect, on, onCleanup, onMount } from "solid-js";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
+/** 控制权四态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。 */
 export type TerminalControlState = "stopped" | "attaching" | "owned" | "detached";
 
 export type TerminalController = {
@@ -27,35 +29,10 @@ type TerminalPaneProps = {
   onOutput: (taskId: string, sessionId: string) => void;
 };
 
-export function TerminalPane({
-  taskId,
-  sessionId,
-  active,
-  controlState,
-  registerSessionConsumer,
-  sendInput,
-  sendResize,
-  onReady,
-  onDispose,
-  onSessionReady,
-  onOutput,
-}: TerminalPaneProps) {
-  const hostRef = useRef<HTMLDivElement>(null);
-  const terminalRef = useRef<Terminal | null>(null);
-  const controllerRef = useRef<TerminalController | null>(null);
-  const activeRef = useRef(active);
-  const controlStateRef = useRef(controlState);
-  const sessionIdRef = useRef(sessionId);
-  const callbacksRef = useRef({ onReady, onDispose, onSessionReady, onOutput });
-  const transportRef = useRef({ sendInput, sendResize });
+export function TerminalPane(props: TerminalPaneProps) {
+  let host!: HTMLDivElement;
 
-  activeRef.current = active;
-  controlStateRef.current = controlState;
-  sessionIdRef.current = sessionId;
-  callbacksRef.current = { onReady, onDispose, onSessionReady, onOutput };
-  transportRef.current = { sendInput, sendResize };
-
-  useEffect(() => {
+  onMount(() => {
     const terminal = new Terminal({
       allowProposedApi: false,
       convertEol: false,
@@ -83,11 +60,20 @@ export function TerminalPane({
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
-    terminal.open(hostRef.current!);
-    terminalRef.current = terminal;
+    terminal.open(host);
+
+    // WebGL 渲染器：context 丢失（息屏/切显卡/驱动重置）时 dispose addon，
+    // xterm 自动回退 DOM 渲染器，避免白屏。加载失败（无硬件加速）同样静默回退。
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      terminal.loadAddon(webgl);
+    } catch {
+      // WebGL 不可用，保持默认 DOM 渲染器。
+    }
 
     const fit = () => {
-      if (!activeRef.current || !hostRef.current?.isConnected) return;
+      if (!props.active || !host.isConnected) return;
       try {
         fitAddon.fit();
       } catch {
@@ -107,61 +93,64 @@ export function TerminalPane({
         terminal.writeln(`\r\n\x1b[${color}m[${message}]\x1b[0m`);
       },
     };
-    controllerRef.current = controller;
-    callbacksRef.current.onReady(taskId, controller);
+    props.onReady(props.taskId, controller);
 
-    const dataDisposable = terminal.onData((data) => {
-      const currentSessionId = sessionIdRef.current;
-      if (activeRef.current && controlStateRef.current === "owned" && currentSessionId) {
-        transportRef.current.sendInput(currentSessionId, data);
-      }
+    // 输入/resize 只在 active && owned 时发送（安全语义，见 TerminalControlState）。
+    terminal.onData((data) => {
+      const sessionId = props.sessionId;
+      if (props.active && props.controlState === "owned" && sessionId) props.sendInput(sessionId, data);
     });
-    const resizeDisposable = terminal.onResize(({ cols, rows }) => {
-      const currentSessionId = sessionIdRef.current;
-      if (activeRef.current && controlStateRef.current === "owned" && currentSessionId) {
-        transportRef.current.sendResize(currentSessionId, cols, rows);
-      }
+    terminal.onResize(({ cols, rows }) => {
+      const sessionId = props.sessionId;
+      if (props.active && props.controlState === "owned" && sessionId) props.sendResize(sessionId, cols, rows);
     });
+
     const observer = new ResizeObserver(() => fit());
-    observer.observe(hostRef.current!);
-    if (activeRef.current) requestAnimationFrame(() => fit());
+    observer.observe(host);
+    if (props.active) requestAnimationFrame(() => fit());
 
-    return () => {
+    // sessionReady 门控：先注册 ptyOutput consumer，再通知上层可以 attach——
+    // 否则 attach 回放的 scrollback 字节会在 consumer 注册前到达而丢失。
+    createEffect(
+      on(
+        () => props.sessionId,
+        (sessionId) => {
+          if (!sessionId) return;
+          const unregister = props.registerSessionConsumer(sessionId, (data) => {
+            terminal.write(data);
+            props.onOutput(props.taskId, sessionId);
+          });
+          props.onSessionReady(props.taskId, sessionId, controller);
+          onCleanup(unregister);
+        },
+      ),
+    );
+
+    createEffect(
+      on(
+        () => props.active,
+        (active) => {
+          if (!active) return;
+          const frame = requestAnimationFrame(() => {
+            controller.fit();
+            controller.focus();
+          });
+          onCleanup(() => cancelAnimationFrame(frame));
+        },
+      ),
+    );
+
+    onCleanup(() => {
       observer.disconnect();
-      dataDisposable.dispose();
-      resizeDisposable.dispose();
-      callbacksRef.current.onDispose(taskId, controller);
-      controllerRef.current = null;
-      terminalRef.current = null;
-      terminal.dispose();
-    };
-  }, [taskId]);
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    const controller = controllerRef.current;
-    if (!sessionId || !terminal || !controller) return;
-    const unregister = registerSessionConsumer(sessionId, (data) => {
-      terminal.write(data);
-      callbacksRef.current.onOutput(taskId, sessionId);
+      props.onDispose(props.taskId, controller);
+      terminal.dispose(); // 一并 dispose 已挂载的 addons（fit/webgl）与输入监听
     });
-    callbacksRef.current.onSessionReady(taskId, sessionId, controller);
-    return unregister;
-  }, [registerSessionConsumer, sessionId, taskId]);
+  });
 
-  useEffect(() => {
-    const controller = controllerRef.current;
-    if (!active || !controller) return;
-    const frame = requestAnimationFrame(() => {
-      controller.fit();
-      controller.focus();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [active]);
-
+  // Tab 切换用 display 隐藏而非卸载：卸载 xterm 会丢 scrollback 与选区。
   return (
-    <div className={active ? "absolute inset-0 block" : "absolute inset-0 hidden"} aria-hidden={!active}>
-      <div ref={hostRef} className="h-full w-full px-3 py-2" />
+    <div class={props.active ? "absolute inset-0 block" : "absolute inset-0 hidden"} aria-hidden={!props.active}>
+      <div ref={host} class="h-full w-full px-3 py-2" />
     </div>
   );
 }
