@@ -25,7 +25,7 @@
 
 ### 1. macOS 原生客户端（2026-07-15 立项，最高优先级）
 
-决策：放弃 Web 作为主客户端，只面向 macOS 做原生客户端；Web 降级为维护模式，仅保留两条必须的浏览器流（`/authorize` 设备授权、`/proxy-auth` 预览域门禁）。
+决策：放弃 Web 作为主客户端，只面向 macOS 做原生客户端。**Web 已冻结：不再更新（不加功能、不做迭代，仅限致命安全修复），且未来会直接下线**——kill 条件 = macOS 客户端跑通日常主路径（登录、加设备、导项目、工作区/任务、终端 attach）；届时裁至仅剩两条天生属于浏览器的流（`/authorize` 设备授权、`/proxy-auth` 预览域门禁）的极简页，其余全部删除。
 
 **技术栈（2026-07 调研定稿）**：Swift 6.2+（Swift 6 语言模式）、SwiftUI-first + AppKit 桥接、`@Observable`、SwiftTerm（`NSViewRepresentable` + headless feed）、`URLSessionWebSocketTask`（actor + AsyncStream）、Swift Testing；分发 = Developer ID 签名 + notarytool 公证 + Sparkle 2 自更新。协议直接消费 `proto/gen/swift`（swift-protobuf，与 TS/Rust 同一真相源）；supabase-swift 仅用于登录换票，之后全程 coflux 会话 token（Keychain 存储）。
 
@@ -39,6 +39,7 @@
 - [ ] 端口预览：唤起系统浏览器走既有门禁 cookie 流
 - [ ] 分发：Developer ID + 公证 + Sparkle appcast
 - [ ] 文件树/查看器、命令面板（原"前端 IDE 方向"迁入此处，基于现有 `fs.list`/`fs.read`/`exec` 原语，按需排期）
+- [ ] **下线 Web**（kill 条件达成即执行）：`apps/web` 裁至 `/authorize` + `/proxy-auth` 极简页，其余删除；prod 撤主站静态资源
 
 ### 2. daemon 原语按需扩展
 - [ ] `fs.write`（编辑保存）
