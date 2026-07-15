@@ -25,15 +25,13 @@
  * 运行时校验：protobuf 解码即结构校验，畸形字节直接 fromBinary 抛错——本包的 decode* helpers
  * 统一 try/catch 兜底为 null，调用方按"丢弃 + 记日志"处理，不再需要手写的 isValid* 校验表。
  */
-import { create, fromBinary, toBinary, toJson, type MessageInitShape } from "@bufbuild/protobuf";
+import { create, fromBinary, toBinary, type MessageInitShape } from "@bufbuild/protobuf";
 
 export * from "./gen/coflux/v1/common_pb.js";
 export * from "./gen/coflux/v1/client_pb.js";
 export * from "./gen/coflux/v1/daemon_pb.js";
 
-// toJson：protojson 规范映射（枚举出名字、bytes 出 base64），供 HTTP 只读接口把
-// proto 真相源的消息投影成人类可读 JSON，避免另立第二套响应形状。
-export { create, toJson };
+export { create };
 
 import { ClientToServerSchema, ServerToClientSchema, type ClientToServer, type ServerToClient } from "./gen/coflux/v1/client_pb.js";
 import { DaemonToServerSchema, ServerToDaemonSchema, type DaemonToServer, type ServerToDaemon } from "./gen/coflux/v1/daemon_pb.js";
