@@ -1,6 +1,5 @@
 import { createEffect, on, onCleanup, onMount } from "solid-js";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
@@ -62,15 +61,24 @@ export function TerminalPane(props: TerminalPaneProps) {
     terminal.loadAddon(fitAddon);
     terminal.open(host);
 
-    // WebGL 渲染器：context 丢失（息屏/切显卡/驱动重置）时 dispose addon，
-    // xterm 自动回退 DOM 渲染器，避免白屏。加载失败（无硬件加速）同样静默回退。
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      terminal.loadAddon(webgl);
-    } catch {
-      // WebGL 不可用，保持默认 DOM 渲染器。
-    }
+    // WebGL 渲染器动态加载（addon 约 247KB，不进首屏主 chunk）：
+    // context 丢失（息屏/切显卡/驱动重置）时 dispose addon，xterm 自动回退
+    // DOM 渲染器，避免白屏；实例化或 chunk 加载失败同样静默回退。
+    let disposed = false;
+    import("@xterm/addon-webgl")
+      .then(({ WebglAddon }) => {
+        if (disposed || !terminal.element) return; // 面板已卸载则不再挂载
+        try {
+          const webgl = new WebglAddon();
+          webgl.onContextLoss(() => webgl.dispose());
+          terminal.loadAddon(webgl);
+        } catch {
+          // WebGL 不可用（无硬件加速/被禁用），保持默认 DOM 渲染器。
+        }
+      })
+      .catch(() => {
+        // chunk 加载失败（离线/网络异常），保持默认 DOM 渲染器。
+      });
 
     const fit = () => {
       if (!props.active || !host.isConnected) return;
@@ -141,6 +149,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     );
 
     onCleanup(() => {
+      disposed = true;
       observer.disconnect();
       props.onDispose(props.taskId, controller);
       terminal.dispose(); // 一并 dispose 已挂载的 addons（fit/webgl）与输入监听
