@@ -64,8 +64,10 @@ export type RequestId = string;
  * 信封编解码（/client 链路）
  * ------------------------------------------------------------------ */
 
-export function encodeClientToServer(msg: ClientToServer): Uint8Array {
-  return toBinary(ClientToServerSchema, msg);
+/** encode 系列统一收敛为 `Uint8Array<ArrayBuffer>`：toBinary 运行时总是分配全新 ArrayBuffer，
+ * 收窄后可直接喂 DOM `WebSocket.send`（其 BufferSource 不接受 SharedArrayBuffer 背衬）。 */
+export function encodeClientToServer(msg: ClientToServer): Uint8Array<ArrayBuffer> {
+  return toBinary(ClientToServerSchema, msg) as Uint8Array<ArrayBuffer>;
 }
 
 /** 解码失败（畸形字节/未知 wire）返回 null，调用方丢弃，不崩溃。 */
@@ -77,8 +79,8 @@ export function decodeClientToServer(buf: Uint8Array): ClientToServer | null {
   }
 }
 
-export function encodeServerToClient(msg: ServerToClient): Uint8Array {
-  return toBinary(ServerToClientSchema, msg);
+export function encodeServerToClient(msg: ServerToClient): Uint8Array<ArrayBuffer> {
+  return toBinary(ServerToClientSchema, msg) as Uint8Array<ArrayBuffer>;
 }
 
 export function decodeServerToClient(buf: Uint8Array): ServerToClient | null {
@@ -93,8 +95,8 @@ export function decodeServerToClient(buf: Uint8Array): ServerToClient | null {
  * 信封编解码（/daemon 链路）
  * ------------------------------------------------------------------ */
 
-export function encodeDaemonToServer(msg: DaemonToServer): Uint8Array {
-  return toBinary(DaemonToServerSchema, msg);
+export function encodeDaemonToServer(msg: DaemonToServer): Uint8Array<ArrayBuffer> {
+  return toBinary(DaemonToServerSchema, msg) as Uint8Array<ArrayBuffer>;
 }
 
 export function decodeDaemonToServer(buf: Uint8Array): DaemonToServer | null {
@@ -105,8 +107,8 @@ export function decodeDaemonToServer(buf: Uint8Array): DaemonToServer | null {
   }
 }
 
-export function encodeServerToDaemon(msg: ServerToDaemon): Uint8Array {
-  return toBinary(ServerToDaemonSchema, msg);
+export function encodeServerToDaemon(msg: ServerToDaemon): Uint8Array<ArrayBuffer> {
+  return toBinary(ServerToDaemonSchema, msg) as Uint8Array<ArrayBuffer>;
 }
 
 export function decodeServerToDaemon(buf: Uint8Array): ServerToDaemon | null {
