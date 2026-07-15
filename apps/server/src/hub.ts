@@ -500,6 +500,18 @@ export class Hub {
     return [...byTask.entries()].map(([taskId, ports]) => ({ taskId, ports }));
   }
 
+  /** 账号级全量状态投影（StateSnapshot 语义）。WS clientSubscribe 与 HTTP GET /api/state
+   * 共用此方法，保证两条读路径永远同源、不出现第二套形状。 */
+  async snapshot(accountId: AccountId) {
+    const [daemons, projects, workspaces, tasks] = await Promise.all([
+      this.daemonInfoList(accountId),
+      this.store.listProjects(accountId),
+      this.store.listWorkspaces(accountId),
+      this.store.listTasks(accountId),
+    ]);
+    return { daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) };
+  }
+
   /** 端口转发版 proxy.issueAuth：校验 redirect 的 host 命中 <shortId>.<proxyHost> 且该 shortId
    * 当前路由属于本账号（跨账号严拒），签发一次性 code，拼出浏览器要跳转的回调 URL。 */
   private handleProxyIssueAuth(client: ClientConn, redirect: string): void {
@@ -584,15 +596,10 @@ export class Hub {
         const accountId = client.accountId!;
         // 先把快照数据查齐，最后才置 subscribed=true 并发送——避免在"已订阅但还没收到
         // 首个快照"的窗口期收到其它连接触发的广播导致乱序（landmine：广播不能抢在快照前）。
-        const [daemons, projects, workspaces, tasks] = await Promise.all([
-          this.daemonInfoList(accountId),
-          this.store.listProjects(accountId),
-          this.store.listWorkspaces(accountId),
-          this.store.listTasks(accountId),
-        ]);
+        const snapshot = await this.snapshot(accountId);
         client.subscribed = true;
         this.clients.add(client);
-        this.sendClient(client, { case: "stateSnapshot", value: { daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) } });
+        this.sendClient(client, { case: "stateSnapshot", value: snapshot });
         break;
       }
       case "clientCreateEnrollmentKey": {
