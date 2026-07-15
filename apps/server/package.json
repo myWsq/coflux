@@ -11,6 +11,9 @@
   "dependencies": {
     "@coflux/core": "workspace:*",
     "@coflux/protocol": "workspace:*",
+    "@hono/node-server": "^2.0.8",
+    "@raven.js/core": "^3.0.0",
+    "hono": "^4.12.30",
     "jose": "^5.9.6",
     "postgres": "^3.4.9",
     "ws": "^8.18.0"
