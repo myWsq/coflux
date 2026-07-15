@@ -1,75 +1,46 @@
 /**
- * coflux 中心服务器装配入口。
+ * coflux 中心服务器 serve 入口。
  *
- * 职责仅限装配：配置 → 持久化 → Hub → HTTP/WS 接入 → 心跳 → 信号/兜底。
- * 连接样板在 transport.ts，领域逻辑在 hub.ts。
+ * HTTP 应用层由 RavenJS 承载（组合根在 app.ts：插件装配 Store/Hub，/health 走契约路由）；
+ * 本文件只负责传输层：ready() → Node http 服务器（预览域反代按 Host 分流）→
+ * WS 升级（/daemon、/client）→ 心跳 → 信号/兜底。
  */
 import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
+import { getRequestListener } from "@hono/node-server";
+import { currentAppStorage } from "@raven.js/core";
 import { createLogger } from "@coflux/core";
 import { decodeDaemonToServer, decodeClientToServer } from "@coflux/protocol";
 import { config } from "./config.js";
-import { Store } from "./store.js";
-import { Hub, type ClientConn, type DaemonCtx } from "./hub.js";
-import { hashToken } from "./secrets.js";
+import { app } from "./app.js";
+import { StoreState } from "./plugins/store.plugin.js";
+import { HubState } from "./plugins/hub.plugin.js";
+import type { ClientConn, DaemonCtx } from "./hub.js";
 import { attachEndpoint } from "./transport.js";
-import { SupabaseVerifier } from "./auth.js";
 import { matchProxyHost, handleProxyRequest, handleProxyUpgrade, type ProxyServerContext } from "./proxy.js";
 
 const log = createLogger("server");
-const startedAt = Date.now();
 
-const store = await Store.connect(config.databaseUrl);
-await bootstrap();
-// supabase 模式启用 JWKS 验签器；local 模式不需要（省去外部依赖）。
-const verifier = config.authProvider === "supabase" ? new SupabaseVerifier(config.supabaseUrl) : undefined;
-const hub = new Hub(store, verifier);
+const fetchHandler = await app.ready();
+// WS 消息/关闭回调与 shutdown 都运行在 HTTP 请求上下文之外（无 ALS 环境），
+// 在 app 上下文里一次性取出实例引用，后续直接闭包消费。
+const { store, hub } = currentAppStorage.run(app, () => ({
+  store: StoreState.getOrFailed(),
+  hub: HubState.getOrFailed(),
+}));
 // hub 结构性满足 ProxyServerContext（routeTable/proxyGate/tunnels 三个只读字段）；proxy.ts 不反向导入 Hub，
 // 避免 hub.ts ⇄ proxy.ts 循环依赖（见 plan 006 决策：依赖倒置）。
 const proxyCtx: ProxyServerContext = hub;
 
-async function bootstrap() {
-  // 以下三项（default 账号 seed / env 登记密钥 seed / credFingerprint 撤销）都是单账号 + env 口令的伴生物，
-  // 仅 local 模式执行。supabase 模式下账号按 userId lazy 建、登记密钥走 UI 生成。
-  if (config.authProvider === "local") {
-    if (!(await store.getAccount(config.accountId))) {
-      await store.createAccount({ id: config.accountId, name: "default", createdAt: Date.now() });
-      log.info("created account", { accountId: config.accountId });
-    }
-    await store.upsertEnrollmentKey(hashToken(config.enrollKey), config.accountId, Date.now());
-    // 不再 seed 静态登录令牌；web 用用户名+密码登录，登录时签发会话 token。
-
-    // 凭证变更检测：用户名/密码改了（改 env 重启）就撤销全部已签发会话 token，
-    // 让改密码能即时使已泄露/在用的旧 token 失效（token 与密码解耦存于表中，否则永久有效）。
-    const credFingerprint = hashToken(`${config.username}\n${config.password}`);
-    if ((await store.getMeta("credFingerprint")) !== credFingerprint) {
-      await store.revokeAllClientTokens(config.accountId);
-      await store.setMeta("credFingerprint", credFingerprint);
-      log.info("credentials changed since last boot, revoked all client tokens");
-    }
-  }
-  // 清理已撤销/过期的会话 token，防 client_tokens 表无界增长（两模式通用）。
-  await store.pruneClientTokens(Date.now());
-
-  log.info("bootstrap ready", { authProvider: config.authProvider });
-}
-
+const listener = getRequestListener(fetchHandler);
 const httpServer = http.createServer((req, res) => {
-  // Host 命中 <shortId>.<proxyHost> 的请求走端口转发反代（登录门禁 + 隧道透传），
-  // 与既有 /health、/daemon、/client 路由完全独立分流，见 plan 006。
+  // Host 命中 <shortId>.<proxyHost> 的请求走端口转发反代（整条 TCP 原始字节级接管，见 proxy.ts），
+  // 必须在进 fetch 适配器之前分流；其余 HTTP 全部交给 Raven 应用层（/health + 默认 404）。
   if (matchProxyHost(req.headers.host)) {
     void handleProxyRequest(proxyCtx, req, res);
     return;
   }
-  if (req.url === "/health") {
-    store.ping().then((ok) => {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok, uptimeMs: Date.now() - startedAt, ...hub.stats() }));
-    });
-    return;
-  }
-  res.writeHead(404);
-  res.end();
+  void listener(req, res);
 });
 
 const wssOpts = { noServer: true as const, maxPayload: config.maxPayload, perMessageDeflate: false };
