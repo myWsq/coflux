@@ -1,4 +1,4 @@
-import { batch, createSignal, onCleanup } from "solid-js";
+import { createStore, type StoreApi } from "zustand/vanilla";
 import {
   TaskStatus,
   type ClientToServerPayload,
@@ -18,6 +18,21 @@ export type PortPreview = { port: number; url: string };
 export type ClientError = { id: number; message: string };
 type SessionConsumer = (data: Uint8Array) => void;
 
+export type CofluxState = {
+  status: ConnectionStatus;
+  authState: AuthState;
+  loginError: string;
+  daemons: DaemonInfo[];
+  projects: Project[];
+  workspaces: Workspace[];
+  tasks: Task[];
+  ports: Record<string, PortPreview[]>;
+  detachedTaskIds: Set<string>;
+  enrollCommand: string | null;
+  lastError: ClientError | null;
+  snapshotRevision: number;
+};
+
 function upsert<T>(list: T[], item: T, match: (value: T) => boolean): T[] {
   const index = list.findIndex(match);
   if (index === -1) return [...list, item];
@@ -34,10 +49,11 @@ function withoutSetValue(values: Set<string>, value: string): Set<string> {
 }
 
 /**
- * 主页面状态 store：signals 只承载控制面（实体集合 / 连接态 / 控制权态）。
- * PTY 数据流（ptyOutput）绝不进响应式状态——经 consumer 注册表直达 terminal.write。
+ * 主页面状态 store：zustand vanilla store 只承载控制面（实体集合 / 连接态 / 控制权态）。
+ * PTY 数据流（ptyOutput）绝不进 store——经 consumer 注册表（普通 Map，非响应式）直达 terminal.write。
  *
- * 须在组件（reactive owner）内创建：连接生命周期挂在 onCleanup 上。
+ * 须在顶层页面组件内只创建一次（如 useState(() => createCofluxClient())[0]）：
+ * 连接生命周期需要与调用方显式配对 disconnect()。
  */
 export function createCofluxClient() {
   let token = localStorage.getItem(TOKEN_KEY) ?? "";
@@ -45,23 +61,25 @@ export function createCofluxClient() {
   let errorSequence = 0;
   const sessionConsumers = new Map<string, Set<SessionConsumer>>();
 
-  const [status, setStatus] = createSignal<ConnectionStatus>(token ? "connecting" : "disconnected");
   // 有本地会话 token 时首屏直接进入 authenticating，避免刷新先闪登录页。
-  const [authState, setAuthState] = createSignal<AuthState>(token ? "authenticating" : "need-login");
-  const [loginError, setLoginError] = createSignal("");
-  const [daemons, setDaemons] = createSignal<DaemonInfo[]>([]);
-  const [projects, setProjects] = createSignal<Project[]>([]);
-  const [workspaces, setWorkspaces] = createSignal<Workspace[]>([]);
-  const [tasks, setTasks] = createSignal<Task[]>([]);
-  const [ports, setPorts] = createSignal<Record<string, PortPreview[]>>({});
-  const [detachedTaskIds, setDetachedTaskIds] = createSignal<Set<string>>(new Set<string>());
-  const [enrollCommand, setEnrollCommand] = createSignal<string | null>(null);
-  const [lastError, setLastError] = createSignal<ClientError | null>(null);
-  const [snapshotRevision, setSnapshotRevision] = createSignal(0);
+  const store: StoreApi<CofluxState> = createStore<CofluxState>(() => ({
+    status: token ? "connecting" : "disconnected",
+    authState: token ? "authenticating" : "need-login",
+    loginError: "",
+    daemons: [],
+    projects: [],
+    workspaces: [],
+    tasks: [],
+    ports: {},
+    detachedTaskIds: new Set<string>(),
+    enrollCommand: null,
+    lastError: null,
+    snapshotRevision: 0,
+  }));
 
   const connection = createConnection({
     url: SERVER_URL,
-    onStatus: setStatus,
+    onStatus: (status) => store.setState({ status }),
     onMessage: handleServerMessage,
     reconnectCredential: () => (shouldRetry && token ? { token } : null),
   });
@@ -90,161 +108,171 @@ export function createCofluxClient() {
   }
 
   // 快照/增量按到达顺序应用（server 保证 stateSnapshot 先于其后的广播），不做乱序缓冲。
-  // batch 让单条消息触发的多个 signal 更新原子提交，effect 只看到一致的最终状态。
+  // 每条消息只调用一次 store.setState：天然原子提交，订阅者只看到一致的最终状态
+  // （不依赖 React 批处理细节，比 Solid 版的 batch(...) 包裹更直接）。
   function handleServerMessage(payload: ServerPayload) {
-    batch(() => {
-      switch (payload.case) {
-        case "authOk": {
-          const value = payload.value;
-          setAuthState("authed");
-          setLoginError("");
-          shouldRetry = true;
-          connection.resetBackoff();
-          if (value.clientToken) {
-            token = value.clientToken;
-            localStorage.setItem(TOKEN_KEY, value.clientToken);
-          }
-          send({ case: "clientSubscribe", value: {} });
-          break;
+    switch (payload.case) {
+      case "authOk": {
+        const value = payload.value;
+        store.setState({ authState: "authed", loginError: "" });
+        shouldRetry = true;
+        connection.resetBackoff();
+        if (value.clientToken) {
+          token = value.clientToken;
+          localStorage.setItem(TOKEN_KEY, value.clientToken);
         }
-        case "authError": {
-          token = "";
-          localStorage.removeItem(TOKEN_KEY);
-          setLoginError(USE_SUPABASE ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误");
-          setAuthState("auth-failed");
-          shouldRetry = false;
-          break;
-        }
-        case "stateSnapshot": {
-          const value = payload.value;
-          setDaemons(value.daemons);
-          setProjects(value.projects);
-          setWorkspaces(value.workspaces);
-          setTasks(value.tasks);
-          const nextPorts: Record<string, PortPreview[]> = {};
-          for (const group of value.ports) {
-            nextPorts[group.taskId] = group.ports.map((preview) => ({ port: preview.port, url: preview.url }));
-          }
-          setPorts(nextPorts);
-          const taskIds = new Set(value.tasks.map((task) => task.id));
-          setDetachedTaskIds((previous) => new Set([...previous].filter((taskId) => taskIds.has(taskId))));
-          setSnapshotRevision((v) => v + 1);
-          break;
-        }
-        case "daemonUpdated": {
-          const daemon = payload.value.daemon;
-          if (!daemon) break; // 内嵌 message 字段在 protobuf-es 里始终是 T | undefined（显式 presence），服务端必填，这里按畸形消息丢弃
-          setDaemons((previous) => upsert(previous, daemon, (item) => item.daemonId === daemon.daemonId));
-          break;
-        }
-        case "daemonRemoved": {
-          const value = payload.value;
-          setDaemons((previous) => previous.filter((daemon) => daemon.daemonId !== value.daemonId));
-          setProjects((previous) => previous.filter((project) => project.daemonId !== value.daemonId));
-          setWorkspaces((previous) => previous.filter((workspace) => workspace.daemonId !== value.daemonId));
-          setTasks((previous) => previous.filter((task) => task.daemonId !== value.daemonId));
-          break;
-        }
-        case "projectCreated": {
-          const project = payload.value.project;
-          if (!project) break;
-          setProjects((previous) => upsert(previous, project, (item) => item.id === project.id));
-          break;
-        }
-        case "projectRemoved": {
-          const value = payload.value;
-          setProjects((previous) => previous.filter((project) => project.id !== value.projectId));
-          setWorkspaces((previous) => previous.filter((workspace) => workspace.projectId !== value.projectId));
-          setTasks((previous) => previous.filter((task) => task.projectId !== value.projectId));
-          break;
-        }
-        case "workspaceCreated": {
-          const workspace = payload.value.workspace;
-          if (!workspace) break;
-          setWorkspaces((previous) => upsert(previous, workspace, (item) => item.id === workspace.id));
-          break;
-        }
-        case "workspaceRemoved": {
-          const value = payload.value;
-          setWorkspaces((previous) => previous.filter((workspace) => workspace.id !== value.workspaceId));
-          setTasks((previous) => previous.filter((task) => task.workspaceId !== value.workspaceId));
-          break;
-        }
-        case "taskUpdated": {
-          const task = payload.value.task;
-          if (!task) break;
-          setTasks((previous) => upsert(previous, task, (item) => item.id === task.id));
-          if (task.status !== TaskStatus.RUNNING) {
-            setDetachedTaskIds((previous) => withoutSetValue(previous, task.id));
-          }
-          break;
-        }
-        case "taskRemoved": {
-          const value = payload.value;
-          setTasks((previous) => previous.filter((task) => task.id !== value.taskId));
-          setPorts((previous) => {
-            if (!(value.taskId in previous)) return previous;
-            const next = { ...previous };
-            delete next[value.taskId];
-            return next;
-          });
-          setDetachedTaskIds((previous) => withoutSetValue(previous, value.taskId));
-          break;
-        }
-        case "portsUpdated": {
-          const value = payload.value;
-          setPorts((previous) => ({
-            ...previous,
-            [value.taskId]: value.ports.map((preview) => ({ port: preview.port, url: preview.url })),
-          }));
-          break;
-        }
-        case "taskDetached": {
-          const value = payload.value;
-          setDetachedTaskIds((previous) => new Set(previous).add(value.taskId));
-          break;
-        }
-        case "enrollmentKeyCreated": {
-          const value = payload.value;
-          setEnrollCommand(`npm i -g cofluxd && cofluxd up --server ${value.daemonUrl} --enroll-key ${value.enrollmentKey}`);
-          break;
-        }
-        case "ptyOutput": {
-          // PTY 数据零响应式开销：直达 consumer（terminal.write），不进任何 signal。
-          const value = payload.value;
-          const consumers = sessionConsumers.get(value.sessionId);
-          if (consumers) for (const consumer of consumers) consumer(value.data);
-          break;
-        }
-        case "error": {
-          errorSequence += 1;
-          setLastError({ id: errorSequence, message: payload.value.message });
-          break;
-        }
-        default:
-          break;
+        send({ case: "clientSubscribe", value: {} });
+        break;
       }
-    });
+      case "authError": {
+        token = "";
+        localStorage.removeItem(TOKEN_KEY);
+        store.setState({
+          loginError: USE_SUPABASE ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误",
+          authState: "auth-failed",
+        });
+        shouldRetry = false;
+        break;
+      }
+      case "stateSnapshot": {
+        const value = payload.value;
+        const nextPorts: Record<string, PortPreview[]> = {};
+        for (const group of value.ports) {
+          nextPorts[group.taskId] = group.ports.map((preview) => ({ port: preview.port, url: preview.url }));
+        }
+        const taskIds = new Set(value.tasks.map((task) => task.id));
+        store.setState((state) => ({
+          daemons: value.daemons,
+          projects: value.projects,
+          workspaces: value.workspaces,
+          tasks: value.tasks,
+          ports: nextPorts,
+          detachedTaskIds: new Set([...state.detachedTaskIds].filter((taskId) => taskIds.has(taskId))),
+          snapshotRevision: state.snapshotRevision + 1,
+        }));
+        break;
+      }
+      case "daemonUpdated": {
+        const daemon = payload.value.daemon;
+        if (!daemon) break; // 内嵌 message 字段在 protobuf-es 里始终是 T | undefined（显式 presence），服务端必填，这里按畸形消息丢弃
+        store.setState((state) => ({ daemons: upsert(state.daemons, daemon, (item) => item.daemonId === daemon.daemonId) }));
+        break;
+      }
+      case "daemonRemoved": {
+        const value = payload.value;
+        store.setState((state) => ({
+          daemons: state.daemons.filter((daemon) => daemon.daemonId !== value.daemonId),
+          projects: state.projects.filter((project) => project.daemonId !== value.daemonId),
+          workspaces: state.workspaces.filter((workspace) => workspace.daemonId !== value.daemonId),
+          tasks: state.tasks.filter((task) => task.daemonId !== value.daemonId),
+        }));
+        break;
+      }
+      case "projectCreated": {
+        const project = payload.value.project;
+        if (!project) break;
+        store.setState((state) => ({ projects: upsert(state.projects, project, (item) => item.id === project.id) }));
+        break;
+      }
+      case "projectRemoved": {
+        const value = payload.value;
+        store.setState((state) => ({
+          projects: state.projects.filter((project) => project.id !== value.projectId),
+          workspaces: state.workspaces.filter((workspace) => workspace.projectId !== value.projectId),
+          tasks: state.tasks.filter((task) => task.projectId !== value.projectId),
+        }));
+        break;
+      }
+      case "workspaceCreated": {
+        const workspace = payload.value.workspace;
+        if (!workspace) break;
+        store.setState((state) => ({ workspaces: upsert(state.workspaces, workspace, (item) => item.id === workspace.id) }));
+        break;
+      }
+      case "workspaceRemoved": {
+        const value = payload.value;
+        store.setState((state) => ({
+          workspaces: state.workspaces.filter((workspace) => workspace.id !== value.workspaceId),
+          tasks: state.tasks.filter((task) => task.workspaceId !== value.workspaceId),
+        }));
+        break;
+      }
+      case "taskUpdated": {
+        const task = payload.value.task;
+        if (!task) break;
+        store.setState((state) => ({
+          tasks: upsert(state.tasks, task, (item) => item.id === task.id),
+          detachedTaskIds: task.status !== TaskStatus.RUNNING ? withoutSetValue(state.detachedTaskIds, task.id) : state.detachedTaskIds,
+        }));
+        break;
+      }
+      case "taskRemoved": {
+        const value = payload.value;
+        store.setState((state) => {
+          let ports = state.ports;
+          if (value.taskId in ports) {
+            ports = { ...ports };
+            delete ports[value.taskId];
+          }
+          return {
+            tasks: state.tasks.filter((task) => task.id !== value.taskId),
+            ports,
+            detachedTaskIds: withoutSetValue(state.detachedTaskIds, value.taskId),
+          };
+        });
+        break;
+      }
+      case "portsUpdated": {
+        const value = payload.value;
+        store.setState((state) => ({
+          ports: { ...state.ports, [value.taskId]: value.ports.map((preview) => ({ port: preview.port, url: preview.url })) },
+        }));
+        break;
+      }
+      case "taskDetached": {
+        const value = payload.value;
+        store.setState((state) => ({ detachedTaskIds: new Set(state.detachedTaskIds).add(value.taskId) }));
+        break;
+      }
+      case "enrollmentKeyCreated": {
+        const value = payload.value;
+        store.setState({ enrollCommand: `npm i -g cofluxd && cofluxd up --server ${value.daemonUrl} --enroll-key ${value.enrollmentKey}` });
+        break;
+      }
+      case "ptyOutput": {
+        // PTY 数据零响应式开销：直达 consumer（terminal.write），不进 store。
+        const value = payload.value;
+        const consumers = sessionConsumers.get(value.sessionId);
+        if (consumers) for (const consumer of consumers) consumer(value.data);
+        break;
+      }
+      case "error": {
+        errorSequence += 1;
+        store.setState({ lastError: { id: errorSequence, message: payload.value.message } });
+        break;
+      }
+      default:
+        break;
+    }
   }
 
   function connect(credential: AuthCredential) {
     // 重连/重登时若已 authed 则保持：断线期间保留最后快照渲染，由顶部横幅提示，不整页退回 loading。
-    if (authState() !== "authed") setAuthState("authenticating");
+    if (store.getState().authState !== "authed") store.setState({ authState: "authenticating" });
     connection.connect(credential);
   }
 
   async function login(username: string, password: string) {
-    setLoginError("");
+    store.setState({ loginError: "" });
     if (!USE_SUPABASE) {
       connect({ username, password });
       return;
     }
 
-    setAuthState("authenticating");
+    store.setState({ authState: "authenticating" });
     const result = await loginWithSupabase(username, password);
     if (!result.ok) {
-      setLoginError(result.message);
-      setAuthState("auth-failed");
+      store.setState({ loginError: result.message, authState: "auth-failed" });
       return;
     }
     connect({ supabaseToken: result.accessToken });
@@ -256,53 +284,42 @@ export function createCofluxClient() {
     token = "";
     localStorage.removeItem(TOKEN_KEY);
     connection.stop();
-    batch(() => {
-      setAuthState("need-login");
-      setDaemons([]);
-      setProjects([]);
-      setWorkspaces([]);
-      setTasks([]);
-      setPorts({});
-      setDetachedTaskIds(new Set<string>());
-      setEnrollCommand(null);
+    store.setState({
+      authState: "need-login",
+      daemons: [],
+      projects: [],
+      workspaces: [],
+      tasks: [],
+      ports: {},
+      detachedTaskIds: new Set<string>(),
+      enrollCommand: null,
     });
   }
 
   // attach 即 taskStart：对 RUNNING 任务发 taskStart 就是申请接管（server 端 startOrAttachTask 复用语义）。
   function startTask(taskId: string, cols: number, rows: number) {
-    setDetachedTaskIds((previous) => withoutSetValue(previous, taskId));
+    store.setState((state) => ({ detachedTaskIds: withoutSetValue(state.detachedTaskIds, taskId) }));
     send({ case: "taskStart", value: { taskId, cols, rows } });
   }
 
   function requestEnrollmentKey() {
-    setEnrollCommand(null);
+    store.setState({ enrollCommand: null });
     send({ case: "clientCreateEnrollmentKey", value: {} });
   }
 
   function clearEnrollmentCommand() {
-    setEnrollCommand(null);
+    store.setState({ enrollCommand: null });
   }
 
   if (token) connection.connect({ token });
 
-  onCleanup(() => {
+  function disconnect() {
     connection.stop();
     sessionConsumers.clear();
-  });
+  }
 
   return {
-    status,
-    authState,
-    loginError,
-    daemons,
-    projects,
-    workspaces,
-    tasks,
-    ports,
-    detachedTaskIds,
-    enrollCommand,
-    lastError,
-    snapshotRevision,
+    store,
     login,
     logout,
     send,
@@ -311,6 +328,7 @@ export function createCofluxClient() {
     registerSessionConsumer,
     requestEnrollmentKey,
     clearEnrollmentCommand,
+    disconnect,
   };
 }
 

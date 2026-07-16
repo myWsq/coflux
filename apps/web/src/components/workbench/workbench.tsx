@@ -1,5 +1,6 @@
-import { Match, Show, Switch, createEffect, createMemo, createSignal, on } from "solid-js";
-import { AlertCircle, FolderGit2, LoaderCircle, X } from "lucide-solid";
+import { useEffect, useState, type FormEvent } from "react";
+import { useStore } from "zustand";
+import { AlertCircle, FolderGit2, LoaderCircle, X } from "lucide-react";
 import { TaskStatus, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
 
 import { AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
@@ -16,47 +17,51 @@ import { WorkspaceTerminal } from "@/components/workbench/workspace-terminal";
 import { WORKSPACE_KEY, USE_SUPABASE } from "@/config";
 import type { CofluxClient } from "@/client/store";
 
-export function Workbench(props: { client: CofluxClient }) {
-  const client = props.client;
-  const [username, setUsername] = createSignal("");
-  const [password, setPassword] = createSignal("");
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = createSignal<string | null>(localStorage.getItem(WORKSPACE_KEY));
-  const [dismissedErrorId, setDismissedErrorId] = createSignal<number | null>(null);
-  const [importOpen, setImportOpen] = createSignal(false);
-  const [workspaceProject, setWorkspaceProject] = createSignal<Project | null>(null);
-  const [enrollmentOpen, setEnrollmentOpen] = createSignal(false);
-  const [confirmAction, setConfirmAction] = createSignal<ConfirmAction | null>(null);
+export function Workbench({ client }: { client: CofluxClient }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(() => localStorage.getItem(WORKSPACE_KEY));
+  const [dismissedErrorId, setDismissedErrorId] = useState<number | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [workspaceProject, setWorkspaceProject] = useState<Project | null>(null);
+  const [enrollmentOpen, setEnrollmentOpen] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
+
+  const authState = useStore(client.store, (state) => state.authState);
+  const loginError = useStore(client.store, (state) => state.loginError);
+  const status = useStore(client.store, (state) => state.status);
+  const projects = useStore(client.store, (state) => state.projects);
+  const workspaces = useStore(client.store, (state) => state.workspaces);
+  const daemons = useStore(client.store, (state) => state.daemons);
+  const lastError = useStore(client.store, (state) => state.lastError);
+  const enrollCommand = useStore(client.store, (state) => state.enrollCommand);
+  const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
 
   // 快照后校准选中工作区：无效选择回退到首项目 main workspace（或任一工作区）。
-  createEffect(
-    on(
-      () => [client.snapshotRevision(), client.projects(), client.workspaces(), selectedWorkspaceId()] as const,
-      ([revision, projects, workspaces, selectedId]) => {
-        if (revision === 0) return;
-        if (selectedId && workspaces.some((workspace) => workspace.id === selectedId)) {
-          localStorage.setItem(WORKSPACE_KEY, selectedId);
-          return;
-        }
+  useEffect(() => {
+    if (snapshotRevision === 0) return;
+    if (selectedWorkspaceId && workspaces.some((workspace) => workspace.id === selectedWorkspaceId)) {
+      localStorage.setItem(WORKSPACE_KEY, selectedWorkspaceId);
+      return;
+    }
 
-        const firstProject = [...projects].sort((left, right) => left.createdAt - right.createdAt)[0];
-        const fallback =
-          (firstProject && workspaces.find((workspace) => workspace.projectId === firstProject.id && workspace.isMain)) ?? workspaces[0];
-        const nextId = fallback?.id ?? null;
-        setSelectedWorkspaceId(nextId);
-        if (nextId) localStorage.setItem(WORKSPACE_KEY, nextId);
-        else localStorage.removeItem(WORKSPACE_KEY);
-      },
-    ),
-  );
+    const firstProject = [...projects].sort((left, right) => left.createdAt - right.createdAt)[0];
+    const fallback =
+      (firstProject && workspaces.find((workspace) => workspace.projectId === firstProject.id && workspace.isMain)) ?? workspaces[0];
+    const nextId = fallback?.id ?? null;
+    setSelectedWorkspaceId(nextId);
+    if (nextId) localStorage.setItem(WORKSPACE_KEY, nextId);
+    else localStorage.removeItem(WORKSPACE_KEY);
+  }, [snapshotRevision, projects, workspaces, selectedWorkspaceId]);
 
   function selectWorkspace(workspaceId: string) {
     setSelectedWorkspaceId(workspaceId);
     localStorage.setItem(WORKSPACE_KEY, workspaceId);
   }
 
-  async function login(event: SubmitEvent) {
+  async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await client.login(username(), password());
+    await client.login(username, password);
   }
 
   function openEnrollment() {
@@ -118,121 +123,110 @@ export function Workbench(props: { client: CofluxClient }) {
     });
   }
 
-  const selectedWorkspace = createMemo(() => client.workspaces().find((workspace) => workspace.id === selectedWorkspaceId()) ?? null);
-  const showError = () => {
-    const error = client.lastError();
-    return error !== null && error.id !== dismissedErrorId();
-  };
-  const displayError = () => client.lastError()?.message.replaceAll("任务", "终端");
+  const selectedWorkspace = workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
+  const showError = lastError !== null && lastError.id !== dismissedErrorId;
+  const displayError = lastError?.message.replaceAll("任务", "终端");
+
+  // 恢复会话 / 登录握手中：只显示安静加载，不渲染登录表单（避免刷新闪一下）。
+  if (authState === "authenticating") {
+    return (
+      <div className="flex h-screen min-w-[1024px] items-center justify-center bg-background text-muted-foreground">
+        <LoaderCircle className="size-5 animate-spin" />
+      </div>
+    );
+  }
+
+  if (authState !== "authed") {
+    return (
+      <AuthShell>
+        <CredentialsForm
+          title="登录到 coflux"
+          description={USE_SUPABASE ? "使用你的邮箱和密码访问远程工作区" : "使用本地账号访问远程工作区"}
+          username={username}
+          password={password}
+          busy={false}
+          error={authState === "auth-failed" ? loginError || "登录失败" : undefined}
+          onUsernameChange={setUsername}
+          onPasswordChange={setPassword}
+          onSubmit={login}
+        />
+      </AuthShell>
+    );
+  }
 
   return (
-    <Switch>
-      {/* 恢复会话 / 登录握手中：只显示安静加载，不渲染登录表单（避免刷新闪一下）。 */}
-      <Match when={client.authState() === "authenticating"}>
-        <div class="flex h-screen min-w-[1024px] items-center justify-center bg-background text-muted-foreground">
-          <LoaderCircle class="size-5 animate-spin" />
-        </div>
-      </Match>
-      <Match when={client.authState() !== "authed"}>
-        <AuthShell>
-          <CredentialsForm
-            title="登录到 coflux"
-            description={USE_SUPABASE ? "使用你的邮箱和密码访问远程工作区" : "使用本地账号访问远程工作区"}
-            username={username()}
-            password={password()}
-            busy={false}
-            error={client.authState() === "auth-failed" ? client.loginError() || "登录失败" : undefined}
-            onUsernameChange={setUsername}
-            onPasswordChange={setPassword}
-            onSubmit={login}
-          />
-        </AuthShell>
-      </Match>
-      <Match when={true}>
-        <div class="flex h-screen min-h-[640px] min-w-[1024px] overflow-hidden bg-background text-foreground">
-          <Sidebar
-            client={client}
-            selectedWorkspaceId={selectedWorkspaceId()}
-            onSelectWorkspace={selectWorkspace}
-            onImportProject={() => setImportOpen(true)}
-            onCreateWorkspace={setWorkspaceProject}
-            onRemoveProject={requestRemoveProject}
-            onRemoveWorkspace={requestRemoveWorkspace}
-            onAddDevice={openEnrollment}
-            onRemoveDevice={requestRemoveDevice}
-          />
+    <div className="flex h-screen min-h-[640px] min-w-[1024px] overflow-hidden bg-background text-foreground">
+      <Sidebar
+        client={client}
+        selectedWorkspaceId={selectedWorkspaceId}
+        onSelectWorkspace={selectWorkspace}
+        onImportProject={() => setImportOpen(true)}
+        onCreateWorkspace={setWorkspaceProject}
+        onRemoveProject={requestRemoveProject}
+        onRemoveWorkspace={requestRemoveWorkspace}
+        onAddDevice={openEnrollment}
+        onRemoveDevice={requestRemoveDevice}
+      />
 
-          <Show
-            when={selectedWorkspace()?.id}
-            keyed
-            fallback={
-              <main class="flex min-w-0 flex-1 items-center justify-center bg-terminal">
-                <div class="flex max-w-sm flex-col items-center text-center">
-                  <div class="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
-                    <FolderGit2 class="size-5" />
-                  </div>
-                  <h1 class="text-[13px] font-medium">{client.projects().length === 0 ? "从一个项目开始" : "选择一个工作区"}</h1>
-                  <p class="mt-1.5 text-[12px] leading-5 text-muted-foreground">
-                    {client.projects().length === 0 ? "导入在线设备上的 git 仓库，主工作区会自动创建。" : "从左侧项目或子工作区进入终端工作台。"}
-                  </p>
-                  <Show when={client.projects().length === 0}>
-                    <Button class="mt-5" size="sm" onClick={() => setImportOpen(true)}>
-                      导入项目
-                    </Button>
-                  </Show>
-                </div>
-              </main>
-            }
+      {selectedWorkspace?.id ? (
+        <WorkspaceTerminal key={selectedWorkspace.id} workspaceId={selectedWorkspace.id} client={client} onCloseTask={requestCloseTask} />
+      ) : (
+        <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
+          <div className="flex max-w-sm flex-col items-center text-center">
+            <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
+              <FolderGit2 className="size-5" />
+            </div>
+            <h1 className="text-[13px] font-medium">{projects.length === 0 ? "从一个项目开始" : "选择一个工作区"}</h1>
+            <p className="mt-1.5 text-[12px] leading-5 text-muted-foreground">
+              {projects.length === 0 ? "导入在线设备上的 git 仓库，主工作区会自动创建。" : "从左侧项目或子工作区进入终端工作台。"}
+            </p>
+            {projects.length === 0 ? (
+              <Button className="mt-5" size="sm" onClick={() => setImportOpen(true)}>
+                导入项目
+              </Button>
+            ) : null}
+          </div>
+        </main>
+      )}
+
+      {/* 断线重连横幅：保留最后快照渲染（乐观 UI），只提示连接状态。 */}
+      {status !== "connected" ? (
+        <div className="fixed inset-x-0 top-0 z-50 flex h-7 items-center justify-center gap-2 border-b border-warning/20 bg-warning/10 text-[11px] text-warning backdrop-blur">
+          <LoaderCircle className="size-3 animate-spin" />
+          连接已断开，正在自动重连…下方显示的是最后一次同步的状态。
+        </div>
+      ) : null}
+
+      {showError ? (
+        <div className="fixed bottom-4 right-4 z-40 flex max-w-md items-start gap-3 rounded-lg border border-destructive/30 bg-popover px-4 py-3 text-sm shadow-2xl">
+          <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
+          <span className="leading-5 text-foreground">{displayError}</span>
+          <button
+            className="ml-2 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            onClick={() => setDismissedErrorId(lastError!.id)}
+            title="关闭"
           >
-            {(workspaceId) => <WorkspaceTerminal workspaceId={workspaceId} client={client} onCloseTask={requestCloseTask} />}
-          </Show>
-
-          {/* 断线重连横幅：保留最后快照渲染（乐观 UI），只提示连接状态。 */}
-          <Show when={client.status() !== "connected"}>
-            <div class="fixed inset-x-0 top-0 z-50 flex h-7 items-center justify-center gap-2 border-b border-warning/20 bg-warning/10 text-[11px] text-warning backdrop-blur">
-              <LoaderCircle class="size-3 animate-spin" />
-              连接已断开，正在自动重连…下方显示的是最后一次同步的状态。
-            </div>
-          </Show>
-
-          <Show when={showError()}>
-            <div class="fixed bottom-4 right-4 z-40 flex max-w-md items-start gap-3 rounded-lg border border-destructive/30 bg-popover px-4 py-3 text-sm shadow-2xl">
-              <AlertCircle class="mt-0.5 size-4 shrink-0 text-destructive" />
-              <span class="leading-5 text-foreground">{displayError()}</span>
-              <button
-                class="ml-2 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-                onClick={() => setDismissedErrorId(client.lastError()!.id)}
-                title="关闭"
-              >
-                <X class="size-3.5" />
-              </button>
-            </div>
-          </Show>
-
-          <ImportProjectDialog
-            open={importOpen()}
-            daemons={client.daemons()}
-            onOpenChange={setImportOpen}
-            onImport={importProject}
-            onAddDevice={openEnrollment}
-          />
-          <CreateWorkspaceDialog
-            project={workspaceProject()}
-            open={Boolean(workspaceProject())}
-            onOpenChange={(open) => !open && setWorkspaceProject(null)}
-            onCreate={createWorkspace}
-          />
-          <EnrollmentDialog
-            open={enrollmentOpen()}
-            command={client.enrollCommand()}
-            lastError={client.lastError()}
-            onOpenChange={setEnrollmentOpen}
-            onRequest={client.requestEnrollmentKey}
-            onClear={client.clearEnrollmentCommand}
-          />
-          <ConfirmActionDialog action={confirmAction()} onCancel={() => setConfirmAction(null)} />
+            <X className="size-3.5" />
+          </button>
         </div>
-      </Match>
-    </Switch>
+      ) : null}
+
+      <ImportProjectDialog open={importOpen} daemons={daemons} onOpenChange={setImportOpen} onImport={importProject} onAddDevice={openEnrollment} />
+      <CreateWorkspaceDialog
+        project={workspaceProject}
+        open={Boolean(workspaceProject)}
+        onOpenChange={(open) => !open && setWorkspaceProject(null)}
+        onCreate={createWorkspace}
+      />
+      <EnrollmentDialog
+        open={enrollmentOpen}
+        command={enrollCommand}
+        lastError={lastError}
+        onOpenChange={setEnrollmentOpen}
+        onRequest={client.requestEnrollmentKey}
+        onClear={client.clearEnrollmentCommand}
+      />
+      <ConfirmActionDialog action={confirmAction} onCancel={() => setConfirmAction(null)} />
+    </div>
   );
 }
