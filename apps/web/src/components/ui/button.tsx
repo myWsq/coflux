@@ -1,4 +1,4 @@
-import { splitProps, type ComponentProps } from "solid-js";
+import type { ComponentProps } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -34,7 +34,6 @@ export type ButtonProps = ComponentProps<"button"> & {
   size?: ButtonSize;
 };
 
-export function Button(props: ButtonProps) {
-  const [local, rest] = splitProps(props, ["class", "variant", "size"]);
-  return <button class={buttonClass({ variant: local.variant, size: local.size, class: local.class })} {...rest} />;
+export function Button({ className, variant, size, ...rest }: ButtonProps) {
+  return <button className={buttonClass({ variant, size, class: className })} {...rest} />;
 }
