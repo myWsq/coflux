@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { lazy, Suspense, useEffect, useState, type FormEvent } from "react";
 import { useStore } from "zustand";
 import { AlertCircle, FolderGit2, LoaderCircle, X } from "lucide-react";
 import { TaskStatus, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
@@ -13,9 +13,15 @@ import {
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
 import { Sidebar } from "@/components/workbench/sidebar";
-import { WorkspaceTerminal } from "@/components/workbench/workspace-terminal";
 import { WORKSPACE_KEY, USE_SUPABASE } from "@/config";
 import type { CofluxClient } from "@/client/store";
+
+// 终端栈（xterm + WorkspaceTerminal/TerminalPane）懒加载，不进首屏主 chunk：
+// 登录页与"未选中工作区"的空状态都不需要它。module 级别声明，保证只 lazy() 一次，
+// 不随 Workbench 重渲染重建（重建会丢已缓存的加载态触发重复 Suspense）。
+const WorkspaceTerminal = lazy(() =>
+  import("@/components/workbench/workspace-terminal").then((module) => ({ default: module.WorkspaceTerminal })),
+);
 
 export function Workbench({ client }: { client: CofluxClient }) {
   const [username, setUsername] = useState("");
@@ -169,7 +175,15 @@ export function Workbench({ client }: { client: CofluxClient }) {
       />
 
       {selectedWorkspace?.id ? (
-        <WorkspaceTerminal key={selectedWorkspace.id} workspaceId={selectedWorkspace.id} client={client} onCloseTask={requestCloseTask} />
+        <Suspense
+          fallback={
+            <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal text-muted-foreground">
+              <LoaderCircle className="size-5 animate-spin" />
+            </main>
+          }
+        >
+          <WorkspaceTerminal key={selectedWorkspace.id} workspaceId={selectedWorkspace.id} client={client} onCloseTask={requestCloseTask} />
+        </Suspense>
       ) : (
         <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
           <div className="flex max-w-sm flex-col items-center text-center">
