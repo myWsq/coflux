@@ -12,6 +12,6 @@
 | 008 | [Web 端交互重塑 —— 工作区多终端 Tab（Cursor 式任务台）](008-web-workspace-tabs-revamp.md) | DONE (0e593e8) | none |
 | 009 | [协议真相源 Protobuf 化 + wire 迁移 protobuf binary](009-protobuf-idl-wire-migration.md) | DONE (0acba35) | none |
 | 010 | [Web 客户端 SolidJS 全量重写（能力等价 + Cursor 风 UI + 性能地板）](010-web-rewrite-solidjs.md) | DONE (8f05046) | none |
-| 011 | [Web 客户端迁移 React 19 + Compiler（生态回归，能力与性能地板等价）](011-web-react19-compiler-migration.md) | TODO | none |
+| 011 | [Web 客户端迁移 React 19 + Compiler（生态回归，能力与性能地板等价）](011-web-react19-compiler-migration.md) | DONE (7a1e583) | none |
 
 执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011。
