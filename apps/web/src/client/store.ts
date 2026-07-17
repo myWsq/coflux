@@ -17,7 +17,7 @@ export type { ConnectionStatus } from "@/client/connection";
 export type AuthState = "need-login" | "authenticating" | "authed" | "auth-failed";
 export type PortPreview = { port: number; url: string };
 export type ClientError = { id: number; message: string };
-export type FsListResult = { ok: boolean; entries: FsEntry[]; error: string };
+export type FsListResult = { ok: boolean; entries: FsEntry[]; error: string; path?: string };
 type SessionConsumer = (data: Uint8Array) => void;
 
 export type CofluxState = {
@@ -90,7 +90,7 @@ export function createCofluxClient() {
       if (status !== "connected" && pendingFsLists.size > 0) {
         const pending = [...pendingFsLists.values()];
         pendingFsLists.clear();
-        for (const resolve of pending) resolve({ ok: false, entries: [], error: "连接已断开" });
+        for (const resolve of pending) resolve({ ok: false, entries: [], error: "连接已断开", path: undefined });
       }
     },
     onMessage: handleServerMessage,
@@ -264,7 +264,7 @@ export function createCofluxClient() {
         const resolve = pendingFsLists.get(value.requestId);
         if (resolve) {
           pendingFsLists.delete(value.requestId);
-          resolve({ ok: value.ok, entries: value.entries, error: value.error ?? "" });
+          resolve({ ok: value.ok, entries: value.entries, error: value.error ?? "", path: value.path });
         }
         break;
       }
@@ -349,7 +349,7 @@ export function createCofluxClient() {
     sessionConsumers.clear();
     const pending = [...pendingFsLists.values()];
     pendingFsLists.clear();
-    for (const resolve of pending) resolve({ ok: false, entries: [], error: "连接已断开" });
+    for (const resolve of pending) resolve({ ok: false, entries: [], error: "连接已断开", path: undefined });
   }
 
   return {

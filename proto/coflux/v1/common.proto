@@ -113,6 +113,8 @@ message FsListed {
   bool ok = 2;
   repeated FsEntry entries = 3;
   optional string error = 4;
+  // 成功时为所列目录的绝对真实路径（canonicalize 后）；设备浏览默认从 HOME 起步时用于 UI 展示/导入。
+  optional string path = 5;
 }
 
 message FsReadResult {

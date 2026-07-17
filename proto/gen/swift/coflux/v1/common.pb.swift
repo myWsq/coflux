@@ -370,11 +370,22 @@ public struct Coflux_V1_FsListed: Sendable {
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
+  /// 成功时为所列目录的绝对真实路径（canonicalize 后）；设备浏览默认从 HOME 起步时用于 UI 展示/导入。
+  public var path: String {
+    get {_path ?? String()}
+    set {_path = newValue}
+  }
+  /// Returns true if `path` has been explicitly set.
+  public var hasPath: Bool {self._path != nil}
+  /// Clears the value of `path`. Subsequent reads from it will return its default value.
+  public mutating func clearPath() {self._path = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _error: String? = nil
+  fileprivate var _path: String? = nil
 }
 
 public struct Coflux_V1_FsReadResult: Sendable {
@@ -980,7 +991,7 @@ extension Coflux_V1_ExecResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Coflux_V1_FsListed: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".FsListed"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}entries\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}entries\0\u{1}error\0\u{1}path\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -992,6 +1003,7 @@ extension Coflux_V1_FsListed: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
       case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
       case 3: try { try decoder.decodeRepeatedMessageField(value: &self.entries) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self._path) }()
       default: break
       }
     }
@@ -1014,6 +1026,9 @@ extension Coflux_V1_FsListed: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
     try { if let v = self._error {
       try visitor.visitSingularStringField(value: v, fieldNumber: 4)
     } }()
+    try { if let v = self._path {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 5)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1022,6 +1037,7 @@ extension Coflux_V1_FsListed: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
     if lhs.ok != rhs.ok {return false}
     if lhs.entries != rhs.entries {return false}
     if lhs._error != rhs._error {return false}
+    if lhs._path != rhs._path {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

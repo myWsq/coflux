@@ -49,7 +49,7 @@ export function DialogFooter({ className, children }: { className?: string; chil
 }
 
 export function DialogTitle({ className, children }: { className?: string; children: ReactNode }) {
-  return <DialogPrimitive.Title className={cn("text-lg font-semibold tracking-tight", className)}>{children}</DialogPrimitive.Title>;
+  return <DialogPrimitive.Title className={cn("text-base font-semibold tracking-tight", className)}>{children}</DialogPrimitive.Title>;
 }
 
 export function DialogDescription({ className, children }: { className?: string; children: ReactNode }) {

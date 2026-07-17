@@ -1,8 +1,8 @@
-// 设备浏览模式（plan 012 导入向导）：clientFsList 带 daemonId，以设备用户 home 为根列目录。
+// 设备浏览模式（plan 012 导入向导）：clientFsList 带 daemonId，root=/，默认 path=~ 从 HOME 起步。
 // 独立 stack + 受控 HOME（临时目录），断言不依赖真机 home 内容。
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FsEntryKind } from "@coflux/protocol";
@@ -11,9 +11,11 @@ import { startStack } from "./harness.mjs";
 const PORT = 8832;
 let stack;
 let fakeHome;
+let homeReal;
 
 before(async () => {
   fakeHome = mkdtempSync(join(tmpdir(), "coflux-fake-home-"));
+  homeReal = realpathSync(fakeHome);
   mkdirSync(join(fakeHome, "Workspace", "proj-a"), { recursive: true });
   mkdirSync(join(fakeHome, "Workspace", "proj-b"), { recursive: true });
   mkdirSync(join(fakeHome, ".hidden-dir"), { recursive: true });
@@ -25,39 +27,43 @@ after(async () => {
   rmSync(fakeHome, { recursive: true, force: true });
 });
 
-test("设备模式列 home：根为设备 HOME，可逐级下钻", async () => {
+test("设备模式默认 ~：列 HOME，并回传绝对 path", async () => {
   const c = stack.makeClient();
   await c.authSubscribe();
 
-  c.send({ case: "clientFsList", requestId: "d1", workspaceId: "", daemonId: stack.daemonId, path: "" });
+  c.send({ case: "clientFsList", requestId: "d1", workspaceId: "", daemonId: stack.daemonId, path: "~" });
   const root = await c.waitFor((m) => m.case === "fsListed" && m.requestId === "d1", "home 列表");
   assert.equal(root.ok, true);
+  assert.equal(root.path, homeReal, "FsListed.path 为 HOME 绝对路径");
   const rootNames = root.entries.map((e) => e.name);
   assert.ok(rootNames.includes("Workspace"), "列出 Workspace 目录");
   assert.ok(rootNames.includes(".hidden-dir"), "协议层不过滤隐藏目录（过滤是 UI 决策）");
   assert.equal(root.entries.find((e) => e.name === "Workspace").kind, FsEntryKind.DIR);
   assert.equal(root.entries.find((e) => e.name === "notes.txt").kind, FsEntryKind.FILE);
 
-  c.send({ case: "clientFsList", requestId: "d2", workspaceId: "", daemonId: stack.daemonId, path: "Workspace" });
+  const workspaceAbs = join(homeReal, "Workspace");
+  c.send({ case: "clientFsList", requestId: "d2", workspaceId: "", daemonId: stack.daemonId, path: workspaceAbs });
   const sub = await c.waitFor((m) => m.case === "fsListed" && m.requestId === "d2", "子目录列表");
   assert.equal(sub.ok, true);
+  assert.equal(sub.path, workspaceAbs, "子目录回传绝对路径");
   assert.deepEqual(sub.entries.map((e) => e.name).sort(), ["proj-a", "proj-b"]);
   c.close();
 });
 
-test("设备模式路径穿越被拒（锚定 home）", async () => {
+test("设备模式可上钻到 /（绝对路径段导航）", async () => {
   const c = stack.makeClient();
   await c.authSubscribe();
-  c.send({ case: "clientFsList", requestId: "d3", workspaceId: "", daemonId: stack.daemonId, path: "../../etc" });
-  const r = await c.waitFor((m) => m.case === "fsListed" && m.requestId === "d3", "越界响应");
-  assert.equal(r.ok, false, "越出 home 被拒");
+  c.send({ case: "clientFsList", requestId: "d3", workspaceId: "", daemonId: stack.daemonId, path: "/" });
+  const r = await c.waitFor((m) => m.case === "fsListed" && m.requestId === "d3", "根目录列表");
+  assert.equal(r.ok, true);
+  assert.equal(r.path, "/");
   c.close();
 });
 
 test("未知 daemonId 被拒（归属校验路径）", async () => {
   const c = stack.makeClient();
   await c.authSubscribe();
-  c.send({ case: "clientFsList", requestId: "d4", workspaceId: "", daemonId: "00000000-0000-0000-0000-000000000000", path: "" });
+  c.send({ case: "clientFsList", requestId: "d4", workspaceId: "", daemonId: "00000000-0000-0000-0000-000000000000", path: "~" });
   const r = await c.waitFor((m) => m.case === "fsListed" && m.requestId === "d4", "拒绝响应");
   assert.equal(r.ok, false);
   assert.match(r.error ?? "", /设备不存在或不属于本账号/);

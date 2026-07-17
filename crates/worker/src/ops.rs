@@ -47,7 +47,6 @@ pub async fn run_command(cwd: &str, command: &str, args: &[String], env: &HashMa
 }
 
 /// "~" / "~/rel" 展开为当前用户 home 下的路径；其它输入原样返回。
-/// 设备浏览与导入向导的共用语义（plan 012）：客户端只知道 home 相对路径。
 pub fn expand_home(path: &str) -> Option<String> {
     if path == "~" {
         std::env::var("HOME").ok()
@@ -58,11 +57,12 @@ pub fn expand_home(path: &str) -> Option<String> {
     }
 }
 
-/// 把 root + 相对路径解析为绝对真实路径，并保证不越出 root（canonicalize 解引用符号链接 + ".."）。
-/// root 为 "~" 时展开为当前用户 home（设备浏览模式的锚定根，plan 012）。
+/// 把 root + 路径解析为绝对真实路径，并保证不越出 root（canonicalize 解引用符号链接 + ".."）。
+/// root / path 均可含 "~"；path 为绝对路径时以该路径为准（仍须落在 root 下）。
 /// 越界/不存在返回 None。
 fn safe_resolve(root: &str, rel: &str) -> Option<PathBuf> {
     let root = expand_home(root)?;
+    let rel = expand_home(rel)?;
     let real_base = std::fs::canonicalize(&root).ok()?;
     let joined = if rel.is_empty() { real_base.clone() } else { real_base.join(rel) };
     let real_target = std::fs::canonicalize(&joined).ok()?;
@@ -73,13 +73,14 @@ fn safe_resolve(root: &str, rel: &str) -> Option<PathBuf> {
     }
 }
 
-pub async fn list_dir(root: &str, rel: &str) -> (bool, Vec<FsEntry>, Option<String>) {
+pub async fn list_dir(root: &str, rel: &str) -> (bool, Vec<FsEntry>, Option<String>, Option<String>) {
     let target = match safe_resolve(root, rel) {
         Some(t) => t,
-        None => return (false, vec![], Some("路径越界或不存在".into())),
+        None => return (false, vec![], Some("路径越界或不存在".into()), None),
     };
+    let path = Some(target.to_string_lossy().into_owned());
     match std::fs::read_dir(&target) {
-        Err(e) => (false, vec![], Some(e.to_string())),
+        Err(e) => (false, vec![], Some(e.to_string()), None),
         Ok(rd) => {
             // (name, kind, size)：kind 先留作内部枚举，排序完再转 protobuf FsEntry（i32 + double）
             let mut raw: Vec<(String, FsEntryKind, u64)> = Vec::new();
@@ -109,7 +110,7 @@ pub async fn list_dir(root: &str, rel: &str) -> (bool, Vec<FsEntry>, Option<Stri
                 bd.cmp(&ad).then_with(|| a.0.cmp(&b.0))
             });
             let entries = raw.into_iter().map(|(name, kind, size)| FsEntry { name, kind: kind as i32, size: size as f64 }).collect();
-            (true, entries, None)
+            (true, entries, None, path)
         }
     }
 }
