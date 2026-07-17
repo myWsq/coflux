@@ -15,7 +15,18 @@
 /* Cursor 式近黑 IDE：低对比分层、暖调灰阶、无彩强调。
  * 三层地面（由深至浅）：terminal(终端纸面) < background(应用底) < sidebar/card(面板)。 */
 :root {
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* 字阶/字体真相源：Tailwind + Astryx + body 共用（IDE 密度，base=13px） */
+  --coflux-font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --coflux-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --coflux-text-2xs: 10px;
+  --coflux-text-xs: 11px;
+  --coflux-text-sm: 12px;
+  --coflux-text-base: 13px;
+  --coflux-text-lg: 15px;
+  --coflux-text-xl: 16px;
+  --coflux-text-2xl: 18px;
+
+  font-family: var(--coflux-font-sans);
   color-scheme: dark;
   --background: #0f0f0f;
   --foreground: #e6e6e3;
@@ -70,20 +81,50 @@
   --radius-sm: calc(var(--radius) - 0.125rem);
   --radius-md: var(--radius);
   --radius-lg: calc(var(--radius) + 0.125rem);
-  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: var(--coflux-font-sans);
+  --font-mono: var(--coflux-font-mono);
   --animate-pulse-alive: pulse-alive 2.6s ease-in-out infinite;
 
-  /* 高密度工具字阶：把 Tailwind 语义档整体下压一号（shadcn 默认 sm=14/base=16
-   * 是普通 Web 应用的尺寸），新代码写 text-sm/base 自动落在工具面密度上。 */
-  --text-xs: 11px;
+  /* Tailwind text-* 对齐真相源（astryx tailwind-theme 走 --font-size-*，此处给 shadcn 遗留类用） */
+  --text-2xs: var(--coflux-text-2xs);
+  --text-2xs--line-height: 1.35;
+  --text-xs: var(--coflux-text-xs);
   --text-xs--line-height: 1.35;
-  --text-sm: 12px;
+  --text-sm: var(--coflux-text-sm);
   --text-sm--line-height: 1.35;
-  --text-base: 13px;
+  --text-base: var(--coflux-text-base);
   --text-base--line-height: 1.4;
-  --text-lg: 15px;
+  --text-lg: var(--coflux-text-lg);
   --text-lg--line-height: 1.4;
+}
+
+/* 覆盖 theme-neutral 的 14px base + Figtree，与 Tailwind 字阶对齐 */
+@layer astryx-theme {
+  @scope ([data-astryx-theme="neutral"]) to ([data-astryx-theme]) {
+    :scope {
+      --font-family-body: var(--coflux-font-sans);
+      --font-family-heading: var(--coflux-font-sans);
+      --font-family-code: var(--coflux-font-mono);
+      --font-size-2xs: var(--coflux-text-2xs);
+      --font-size-xs: var(--coflux-text-xs);
+      --font-size-sm: var(--coflux-text-sm);
+      --font-size-base: var(--coflux-text-base);
+      --font-size-lg: var(--coflux-text-lg);
+      --font-size-xl: var(--coflux-text-xl);
+      --font-size-2xl: var(--coflux-text-2xl);
+      --text-body-size: var(--font-size-base);
+      --text-label-size: var(--font-size-base);
+      --text-code-size: var(--font-size-base);
+      --text-supporting-size: var(--font-size-sm);
+      --text-large-size: var(--font-size-lg);
+      --text-heading-1-size: var(--font-size-2xl);
+      --text-heading-2-size: var(--font-size-xl);
+      --text-heading-3-size: var(--font-size-lg);
+      --text-heading-4-size: var(--font-size-base);
+      --text-heading-5-size: var(--font-size-sm);
+      --text-heading-6-size: var(--font-size-xs);
+    }
+  }
 }
 
 /* signature：「活性」呼吸 —— 在线状态点的缓慢明暗，示意远端是活的系统 */
@@ -112,6 +153,27 @@
   outline-offset: 1px;
 }
 
+/* Astryx 控件自带 focus 边框；全局 outline 会叠在内部 native input 上变成双框 */
+[class*="astryx-"] :is(input, textarea, button, select):focus-visible,
+[class*="astryx-"]:is(input, textarea, button, select):focus-visible {
+  outline: none;
+}
+
+/* Astryx 菜单打开时自动聚焦首项（div[role=menuitem]，不在上面豁免名单里）：
+   全局 ring 会让首项顶着 outline"常亮"。焦点视觉交给背景色（见下）。 */
+[role="menu"] [role="menuitem"]:focus,
+[role="menu"] [role="menuitem"]:focus-visible {
+  outline: none;
+}
+
+/* Astryx 菜单项的 :focus 背景与 hover 同色（.x1c52tdz:focus），右键打开自动聚焦首项时
+   看起来"常亮"。指针模态（:focus 但非 :focus-visible）不显示焦点背景；
+   键盘方向键导航（:focus-visible）保留背景作为焦点指示。!important 用于压过 StyleX 的
+   :not(#\#) 提权。 */
+[role="menu"] [role="menuitem"]:focus:not(:focus-visible):not(:hover) {
+  background-color: transparent !important;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -129,8 +191,8 @@ body {
   overflow: hidden;
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans);
-  font-size: 13px;
+  font-family: var(--coflux-font-sans);
+  font-size: var(--coflux-text-base);
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
@@ -145,6 +207,30 @@ textarea {
 button,
 a {
   -webkit-tap-highlight-color: transparent;
+}
+
+/* Modal 标题略收（Astryx DialogHeader = heading-2 / 原 xl；与正文 base 对齐） */
+dialog h2,
+[role="dialog"] h2,
+[role="alertdialog"] h2 {
+  font-size: var(--coflux-text-base) !important;
+  line-height: 1.35 !important;
+}
+
+/* Modal 右上角关闭按钮：Astryx DialogHeader 内置 Button 无尺寸 prop，默认 md 偏大，整体缩一号 */
+dialog button[aria-label="Close"],
+[role="dialog"] button[aria-label="Close"] {
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  min-height: 28px !important;
+  padding: 0 !important;
+}
+
+dialog button[aria-label="Close"] svg,
+[role="dialog"] button[aria-label="Close"] svg {
+  width: 16px;
+  height: 16px;
 }
 
 ::selection {
@@ -183,4 +269,150 @@ a {
 
 .xterm .xterm-screen canvas {
   image-rendering: auto;
+}
+
+/* 导入项目：路径栏（Cursor 式：段可点可删，尾部输入过滤/补全） */
+.coflux-pathbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 0;
+  min-height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+}
+
+.coflux-pathbar__seg {
+  display: inline-flex;
+  align-items: center;
+  max-width: 140px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: var(--coflux-text-sm, 12px);
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.coflux-pathbar__seg:hover {
+  background: rgb(255 255 255 / 8%);
+}
+
+.coflux-pathbar__sep {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  color: var(--muted-foreground);
+  font-size: var(--coflux-text-sm, 12px);
+  user-select: none;
+}
+
+.coflux-pathbar__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  color: var(--muted-foreground);
+}
+
+.coflux-pathbar__icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.coflux-pathbar__input {
+  flex: 1 1 72px;
+  min-width: 72px;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: var(--coflux-text-sm, 12px);
+  outline: none;
+}
+
+.coflux-pathbar__input::placeholder {
+  color: var(--muted-foreground);
+}
+
+/* 导入项目：设备/文件列表共用（高密度）
+ * LayoutContent 边距 = 搜索框/路径栏外缘。
+ * 内容比该外缘略窄（+2px），hover 背景略宽出血（-2px）。 */
+.coflux-import-row {
+  --import-align: var(--container-padding-inline-start, 16px);
+  position: relative;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 3px calc(var(--import-align) + 2px);
+  border: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.coflux-import-row::before {
+  content: "";
+  position: absolute;
+  inset: 0 calc(var(--import-align) - 2px);
+  border-radius: 4px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.coflux-import-row:hover::before,
+.coflux-import-row.is-active::before {
+  background: rgb(255 255 255 / 8%);
+}
+
+.coflux-import-row:active::before {
+  background: rgb(255 255 255 / 12%);
+}
+
+.coflux-import-row > * {
+  position: relative;
+  z-index: 1;
+}
+
+.coflux-import-row__icon {
+  display: flex;
+  flex: 0 0 14px;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+}
+
+.coflux-import-row__icon svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+.coflux-import-row__name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--coflux-text-sm, 12px);
+}
+
+.coflux-import-list {
+  flex: 1;
+  min-height: 0;
+  margin-inline: calc(-1 * var(--container-padding-inline-start, 0px));
+  width: calc(100% + var(--container-padding-inline-start, 0px) + var(--container-padding-inline-end, 0px));
+  overflow-y: auto;
+  padding: 0;
 }

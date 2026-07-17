@@ -294,8 +294,8 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
     <section className="flex min-w-0 flex-1 flex-col bg-terminal">
       {/* Cursor 式顶栏：工作区信息压成一行，Tab 用间距而非竖线分隔 */}
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-background px-3">
-        <span className="truncate text-[12px] text-foreground">{workspace?.name}</span>
-        <span className="max-w-48 truncate font-mono text-[10px] text-muted-foreground" title={workspace?.branch}>
+        <span className="truncate text-sm text-foreground">{workspace?.name}</span>
+        <span className="max-w-48 truncate font-mono text-2xs text-muted-foreground" title={workspace?.branch}>
           {workspace?.branch}
         </span>
         <div className="ml-auto flex items-center gap-1">
@@ -305,7 +305,7 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
               href={preview.url}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex h-5 items-center gap-1 rounded px-1.5 font-mono text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              className="inline-flex h-5 items-center gap-1 rounded px-1.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
               :{preview.port}
               <ExternalLink className="size-2.5" />
@@ -324,7 +324,7 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
               <div
                 key={task.id}
                 className={cn(
-                  "group flex h-7 max-w-52 shrink-0 items-center rounded-md text-[12px] transition-colors",
+                  "group flex h-7 max-w-52 shrink-0 items-center rounded-md text-sm transition-colors",
                   isActive ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
                 )}
               >
@@ -341,7 +341,7 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
                     <SquareTerminal className={cn("size-3 shrink-0", isActive ? "opacity-90" : "opacity-50")} />
                   )}
                   <span className="truncate">{task.title || "终端"}</span>
-                  {taskPorts.length > 0 ? <span className="ml-0.5 font-mono text-[9px] text-muted-foreground">:{taskPorts[0].port}</span> : null}
+                  {taskPorts.length > 0 ? <span className="ml-0.5 font-mono text-2xs text-muted-foreground">:{taskPorts[0].port}</span> : null}
                 </button>
                 <button
                   className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/50 opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
@@ -389,8 +389,8 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
               <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
                 <SquareTerminal className="size-5" />
               </div>
-              <h2 className="text-[13px] font-medium text-foreground">这个工作区还没有终端</h2>
-              <p className="mt-1.5 text-[12px] leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。</p>
+              <h2 className="text-base font-medium text-foreground">这个工作区还没有终端</h2>
+              <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。</p>
               <Button className="mt-5" size="sm" onClick={createTerminal} disabled={creating}>
                 {creating ? <LoaderCircle className="animate-spin" /> : <Plus />}
                 新建终端
