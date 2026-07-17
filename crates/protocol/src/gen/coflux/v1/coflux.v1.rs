@@ -759,6 +759,10 @@ pub struct ClientFsList {
     pub workspace_id: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub path: ::prost::alloc::string::String,
+    /// 设备浏览模式（plan 012 导入向导）：设置时忽略 workspace_id，
+    /// 以该设备的用户 home 为根浏览（server 校验设备归属后 root 下发 "~"）。
+    #[prost(string, optional, tag="4")]
+    pub daemon_id: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientFsRead {

@@ -46,10 +46,24 @@ pub async fn run_command(cwd: &str, command: &str, args: &[String], env: &HashMa
     }
 }
 
+/// "~" / "~/rel" 展开为当前用户 home 下的路径；其它输入原样返回。
+/// 设备浏览与导入向导的共用语义（plan 012）：客户端只知道 home 相对路径。
+pub fn expand_home(path: &str) -> Option<String> {
+    if path == "~" {
+        std::env::var("HOME").ok()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        std::env::var("HOME").ok().map(|home| format!("{home}/{rest}"))
+    } else {
+        Some(path.to_string())
+    }
+}
+
 /// 把 root + 相对路径解析为绝对真实路径，并保证不越出 root（canonicalize 解引用符号链接 + ".."）。
+/// root 为 "~" 时展开为当前用户 home（设备浏览模式的锚定根，plan 012）。
 /// 越界/不存在返回 None。
 fn safe_resolve(root: &str, rel: &str) -> Option<PathBuf> {
-    let real_base = std::fs::canonicalize(root).ok()?;
+    let root = expand_home(root)?;
+    let real_base = std::fs::canonicalize(&root).ok()?;
     let joined = if rel.is_empty() { real_base.clone() } else { real_base.join(rel) };
     let real_target = std::fs::canonicalize(&joined).ok()?;
     if real_target == real_base || real_target.starts_with(&real_base) {
