@@ -9,9 +9,9 @@ import {
   ConfirmActionDialog,
   CreateWorkspaceDialog,
   EnrollmentDialog,
-  ImportProjectDialog,
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
+import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar } from "@/components/workbench/sidebar";
 import { WORKSPACE_KEY, USE_SUPABASE } from "@/config";
 import type { CofluxClient } from "@/client/store";
@@ -225,7 +225,14 @@ export function Workbench({ client }: { client: CofluxClient }) {
         </div>
       ) : null}
 
-      <ImportProjectDialog open={importOpen} daemons={daemons} onOpenChange={setImportOpen} onImport={importProject} onAddDevice={openEnrollment} />
+      <ImportProjectWizard
+        open={importOpen}
+        daemons={daemons}
+        onOpenChange={setImportOpen}
+        onImport={importProject}
+        onAddDevice={openEnrollment}
+        listDirectory={client.listDeviceDirectory}
+      />
       <CreateWorkspaceDialog
         project={workspaceProject}
         open={Boolean(workspaceProject)}

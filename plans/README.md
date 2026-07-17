@@ -13,6 +13,6 @@
 | 009 | [协议真相源 Protobuf 化 + wire 迁移 protobuf binary](009-protobuf-idl-wire-migration.md) | DONE (0acba35) | none |
 | 010 | [Web 客户端 SolidJS 全量重写（能力等价 + Cursor 风 UI + 性能地板）](010-web-rewrite-solidjs.md) | DONE (8f05046) | none |
 | 011 | [Web 客户端迁移 React 19 + Compiler（生态回归，能力与性能地板等价）](011-web-react19-compiler-migration.md) | DONE (7a1e583) | none |
-| 012 | [导入项目两步向导（设备 → 远程文件树选文件夹）](012-import-project-wizard.md) | TODO | none |
+| 012 | [导入项目两步向导（设备 → 远程文件树选文件夹）](012-import-project-wizard.md) | DONE | none |
 
 执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012。

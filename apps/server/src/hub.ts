@@ -805,12 +805,25 @@ export class Hub {
       }
       case "clientFsList": {
         const value = msg.payload.value;
-        const ws = await this.workspaceForClient(client, value.workspaceId);
-        if (!ws) return void this.relayError(client, "fs.list", value.requestId, "工作区不存在或不属于本账号");
-        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.list", value.requestId, "daemon 不在线");
+        // 两种锚定模式：daemon_id = 设备浏览（root 为设备用户 home，plan 012 导入向导）；
+        // 否则 workspace_id = 工作区内浏览（root 为 worktree 路径，行为不变）。
+        let daemonId: DaemonId;
+        let root: string;
+        if (value.daemonId !== undefined && value.daemonId !== "") {
+          const device = await this.store.getDevice(value.daemonId);
+          if (!device || device.accountId !== client.accountId) return void this.relayError(client, "fs.list", value.requestId, "设备不存在或不属于本账号");
+          daemonId = value.daemonId;
+          root = "~"; // daemon 侧展开为该设备的用户 home
+        } else {
+          const ws = await this.workspaceForClient(client, value.workspaceId);
+          if (!ws) return void this.relayError(client, "fs.list", value.requestId, "工作区不存在或不属于本账号");
+          daemonId = ws.daemonId;
+          root = ws.path;
+        }
+        if (!this.isDaemonOnline(daemonId)) return void this.relayError(client, "fs.list", value.requestId, "daemon 不在线");
         const reqId = randomUUID();
-        this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: value.requestId, kind: "fs.list" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
-        this.sendDaemon(this.daemons.get(ws.daemonId)!, { case: "fsList", value: { requestId: reqId, root: ws.path, path: value.path } });
+        this.pendingRelays.register(reqId, daemonId, client, { clientRequestId: value.requestId, kind: "fs.list" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
+        this.sendDaemon(this.daemons.get(daemonId)!, { case: "fsList", value: { requestId: reqId, root, path: value.path } });
         break;
       }
       case "clientFsRead": {
