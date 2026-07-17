@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "raven-use": {
+      "source": "myWsq/RavenJS",
+      "sourceType": "github",
+      "skillPath": "skills/raven-use/SKILL.md",
+      "computedHash": "57d9603864e1a5af2b4f8621a21878fbdc38d565e72a3694f3d24468f7544b51"
+    }
+  }
+}
