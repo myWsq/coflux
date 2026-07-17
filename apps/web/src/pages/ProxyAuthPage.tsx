@@ -123,7 +123,7 @@ export function ProxyAuthPage() {
       ) : null}
       {inPhase("issuing") ? (
         <AuthMessage icon={<LoaderCircle className="size-5 animate-spin" />} title="正在打开预览" description="正在签发一次性访问凭证并跳转。">
-          <div className="flex items-center justify-center gap-1.5 text-[11px] text-muted-foreground">
+          <div className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
             <ExternalLink className="size-3" />
             即将离开 coflux 工作台
           </div>

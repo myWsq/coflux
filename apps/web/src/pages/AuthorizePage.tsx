@@ -139,7 +139,7 @@ export function AuthorizePage({ token }: { token: string }) {
               <AuthMessage icon={<ShieldCheck className="size-5 text-primary" />} title="确认设备" description="允许以下设备接入你的账号和工作区。">
                 <div className="rounded-lg border border-border bg-background px-4 py-3 text-left">
                   <div className="text-sm font-medium">{confirm.name || "未命名设备"}</div>
-                  <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                  <div className="mt-1 font-mono text-xs text-muted-foreground">
                     {confirm.host || "未知主机"} · {confirm.platform || "未知平台"}
                   </div>
                 </div>

@@ -190,8 +190,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
             <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
               <FolderGit2 className="size-5" />
             </div>
-            <h1 className="text-[13px] font-medium">{projects.length === 0 ? "从一个项目开始" : "选择一个工作区"}</h1>
-            <p className="mt-1.5 text-[12px] leading-5 text-muted-foreground">
+            <h1 className="text-base font-medium">{projects.length === 0 ? "从一个项目开始" : "选择一个工作区"}</h1>
+            <p className="mt-1.5 text-sm leading-5 text-muted-foreground">
               {projects.length === 0 ? "导入在线设备上的 git 仓库，主工作区会自动创建。" : "从左侧项目或子工作区进入终端工作台。"}
             </p>
             {projects.length === 0 ? (
@@ -205,7 +205,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
       {/* 断线重连横幅：保留最后快照渲染（乐观 UI），只提示连接状态。 */}
       {status !== "connected" ? (
-        <div className="fixed inset-x-0 top-0 z-50 flex h-7 items-center justify-center gap-2 border-b border-warning/20 bg-warning/10 text-[11px] text-warning backdrop-blur">
+        <div className="fixed inset-x-0 top-0 z-50 flex h-7 items-center justify-center gap-2 border-b border-warning/20 bg-warning/10 text-xs text-warning backdrop-blur">
           <LoaderCircle className="size-3 animate-spin" />
           连接已断开，正在自动重连…下方显示的是最后一次同步的状态。
         </div>

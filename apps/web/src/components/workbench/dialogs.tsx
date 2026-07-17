@@ -80,7 +80,7 @@ export function ImportProjectDialog(props: ImportProjectDialogProps) {
                 placeholder="/Users/me/Workspace/project"
                 autoComplete="off"
               />
-              <p className="text-[11px] text-muted-foreground">路径由对应设备解析，浏览器不读取你的本地文件系统。</p>
+              <p className="text-xs text-muted-foreground">路径由对应设备解析，浏览器不读取你的本地文件系统。</p>
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => props.onOpenChange(false)}>
@@ -181,7 +181,7 @@ export function CreateWorkspaceDialog(props: CreateWorkspaceDialogProps) {
               value={mode}
               onChange={(value) => setMode(value as "new" | "existing")}
             />
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               {mode === "new" ? `将创建新分支 ${branch.trim() || "…"}` : `将在新 worktree 中检出 ${branch.trim() || "…"}`}
             </p>
           </div>
@@ -278,7 +278,7 @@ export function EnrollmentDialog(props: EnrollmentDialogProps) {
               value={props.command}
               readOnly
               spellCheck={false}
-              className="min-h-28 resize-none font-mono text-[11px] leading-5 text-success"
+              className="min-h-28 resize-none font-mono text-xs leading-5 text-success"
               onFocus={(event) => event.currentTarget.select()}
             />
             {copyState === "manual" ? <p className="text-xs text-warning">浏览器未授予剪贴板权限，命令已选中，请手动复制。</p> : null}
