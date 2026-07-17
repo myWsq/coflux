@@ -145,6 +145,9 @@ pub struct FsListed {
     pub entries: ::prost::alloc::vec::Vec<FsEntry>,
     #[prost(string, optional, tag="4")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
+    /// 成功时为所列目录的绝对真实路径（canonicalize 后）；设备浏览默认从 HOME 起步时用于 UI 展示/导入。
+    #[prost(string, optional, tag="5")]
+    pub path: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FsReadResult {

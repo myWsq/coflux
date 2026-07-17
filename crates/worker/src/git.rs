@@ -49,7 +49,7 @@ pub struct WorktreeResult {
 }
 
 pub async fn validate_repo(path: &str) -> RepoInfo {
-    // 支持 "~/rel" 输入（导入向导发 home 相对路径）；落库路径仍是下方 --show-toplevel 的绝对真实路径。
+    // 兼容 "~/rel"；导入向导现发绝对路径。落库仍取 --show-toplevel 的绝对真实路径。
     let path = &match crate::ops::expand_home(path) {
         Some(p) => p,
         None => path.to_string(),
