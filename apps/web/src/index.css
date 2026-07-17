@@ -1,33 +1,44 @@
-@import "tailwindcss";
+/* Astryx + Tailwind 4 共存：显式声明 cascade layer 顺序（官方 migration 方案）。
+ * astryx-base/astryx-theme 在 Tailwind utilities 之前，工具类可覆盖组件默认样式。 */
+@layer reset, theme, base, astryx-base, astryx-theme, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "@astryxdesign/core/reset.css";
+@import "@astryxdesign/core/astryx.css";
+@import "@astryxdesign/theme-neutral/theme.css";
+@import "@astryxdesign/core/tailwind-theme.css";
+@import "tailwindcss/utilities.css" layer(utilities);
 
 @custom-variant dark (&:is(.dark *));
 
-/* Cursor 式近黑 IDE：低对比分层、中性灰、无彩强调 */
+/* Cursor 式近黑 IDE：低对比分层、暖调灰阶、无彩强调。
+ * 三层地面（由深至浅）：terminal(终端纸面) < background(应用底) < sidebar/card(面板)。 */
 :root {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color-scheme: dark;
-  --background: #0a0a0a;
-  --foreground: #e4e4e4;
-  --card: #141414;
-  --card-foreground: #e4e4e4;
-  --popover: #1a1a1a;
-  --popover-foreground: #e4e4e4;
-  --primary: #ececec;
-  --primary-foreground: #0a0a0a;
-  --secondary: #1f1f1f;
-  --secondary-foreground: #e4e4e4;
-  --muted: #1a1a1a;
-  --muted-foreground: #8b8b8b;
-  --accent: #2a2a2a;
-  --accent-foreground: #f0f0f0;
+  --background: #0f0f0f;
+  --foreground: #e6e6e3;
+  --card: #151514;
+  --card-foreground: #e6e6e3;
+  --popover: #1b1b1a;
+  --popover-foreground: #e6e6e3;
+  --primary: #ececea;
+  --primary-foreground: #0f0f0f;
+  --secondary: #1f1f1e;
+  --secondary-foreground: #e6e6e3;
+  --muted: #1b1b1a;
+  --muted-foreground: #75756d;
+  --accent: #262624;
+  --accent-foreground: #f0f0ee;
   --destructive: #e05c6a;
   --destructive-foreground: #fff4f5;
-  --border: #1f1f1f;
-  --input: #2a2a2a;
-  --ring: #555555;
+  --border: #242422;
+  --input: #2a2a28;
+  --ring: #5c5c55;
   --success: #4fae6e;
   --warning: #c9a227;
-  --sidebar: #141414;
+  --sidebar: #151514;
   --terminal: #0a0a0a;
   --radius: 0.375rem;
 }
@@ -61,6 +72,44 @@
   --radius-lg: calc(var(--radius) + 0.125rem);
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --animate-pulse-alive: pulse-alive 2.6s ease-in-out infinite;
+
+  /* 高密度工具字阶：把 Tailwind 语义档整体下压一号（shadcn 默认 sm=14/base=16
+   * 是普通 Web 应用的尺寸），新代码写 text-sm/base 自动落在工具面密度上。 */
+  --text-xs: 11px;
+  --text-xs--line-height: 1.35;
+  --text-sm: 12px;
+  --text-sm--line-height: 1.35;
+  --text-base: 13px;
+  --text-base--line-height: 1.4;
+  --text-lg: 15px;
+  --text-lg--line-height: 1.4;
+}
+
+/* signature：「活性」呼吸 —— 在线状态点的缓慢明暗，示意远端是活的系统 */
+@keyframes pulse-alive {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+:focus-visible {
+  outline: 1px solid var(--ring);
+  outline-offset: 1px;
 }
 
 * {
@@ -81,6 +130,7 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
+  font-size: 13px;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }

@@ -41,7 +41,10 @@ export function Sidebar(props: SidebarProps) {
       <header className="flex h-11 shrink-0 items-center gap-2 px-3">
         <span className="text-[13px] font-medium tracking-tight text-foreground">coflux</span>
         <span
-          className={cn("size-1.5 rounded-full", status === "connected" ? "bg-success" : status === "connecting" ? "bg-warning" : "bg-destructive")}
+          className={cn(
+            "size-1.5 rounded-full",
+            status === "connected" ? "bg-success animate-pulse-alive" : status === "connecting" ? "bg-warning" : "bg-destructive",
+          )}
           title={STATUS_TEXT[status]}
         />
         <Button className="ml-auto text-muted-foreground" variant="ghost" size="icon-sm" onClick={() => client.logout()} title="退出登录">
@@ -186,7 +189,7 @@ export function Sidebar(props: SidebarProps) {
                 key={daemon.daemonId}
                 className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-[12px] text-muted-foreground hover:bg-accent/70 hover:text-foreground"
               >
-                <span className={cn("size-1.5 rounded-full", daemon.online ? "bg-success" : "bg-muted-foreground/40")} />
+                <span className={cn("size-1.5 rounded-full", daemon.online ? "bg-success animate-pulse-alive" : "bg-muted-foreground/40")} />
                 <Monitor className="size-3.5 opacity-70" />
                 <span className="min-w-0 flex-1 truncate" title={`${daemon.host}/${daemon.platform}`}>
                   {daemon.name}
