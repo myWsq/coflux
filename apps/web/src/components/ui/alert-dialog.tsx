@@ -44,7 +44,7 @@ export function AlertDialogFooter({ className, children }: { className?: string;
 }
 
 export function AlertDialogTitle({ className, children }: { className?: string; children: ReactNode }) {
-  return <AlertDialogPrimitive.Title className={cn("text-base font-semibold", className)}>{children}</AlertDialogPrimitive.Title>;
+  return <AlertDialogPrimitive.Title className={cn("text-lg font-semibold", className)}>{children}</AlertDialogPrimitive.Title>;
 }
 
 export function AlertDialogDescription({ className, children }: { className?: string; children: ReactNode }) {
