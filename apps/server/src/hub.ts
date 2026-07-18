@@ -721,6 +721,15 @@ export class Hub {
         this.broadcast(ws.accountId, { case: "workspaceRemoved", value: { workspaceId: ws.id } });
         break;
       }
+      case "workspaceSetName": {
+        const value = msg.payload.value;
+        const ws = await this.store.getWorkspace(value.workspaceId);
+        if (!ws || ws.accountId !== client.accountId) return;
+        // 空名回落分支名；复用 workspaceCreated 广播（web 侧为 upsert），无需新增下行消息
+        const updated = await this.store.updateWorkspaceName(ws.id, value.name.trim() || ws.branch);
+        if (updated) this.broadcast(updated.accountId, { case: "workspaceCreated", value: { workspace: updated } });
+        break;
+      }
       case "taskCreate": {
         const value = msg.payload.value;
         const ws = await this.store.getWorkspace(value.workspaceId);

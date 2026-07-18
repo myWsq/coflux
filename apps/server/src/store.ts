@@ -436,6 +436,16 @@ export class Store {
     const rows = await this.sql<Workspace[]>`SELECT * FROM workspaces WHERE daemon_id = ${daemonId}`;
     return rows.map((r) => create(WorkspaceSchema, r));
   }
+  async updateWorkspaceName(id: WorkspaceId, name: string): Promise<Workspace | undefined> {
+    const rows = await this.sql<Workspace[]>`UPDATE workspaces SET name = ${name} WHERE id = ${id} RETURNING *`;
+    return rows[0] && create(WorkspaceSchema, rows[0]);
+  }
+  async updateWorkspaceBranch(id: WorkspaceId, branch: string, alsoName: boolean): Promise<Workspace | undefined> {
+    const rows = alsoName
+      ? await this.sql<Workspace[]>`UPDATE workspaces SET branch = ${branch}, name = ${branch} WHERE id = ${id} RETURNING *`
+      : await this.sql<Workspace[]>`UPDATE workspaces SET branch = ${branch} WHERE id = ${id} RETURNING *`;
+    return rows[0] && create(WorkspaceSchema, rows[0]);
+  }
   async removeWorkspace(id: WorkspaceId): Promise<void> {
     await this.sql`DELETE FROM workspaces WHERE id = ${id}`;
   }
