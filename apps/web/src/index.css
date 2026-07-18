@@ -381,6 +381,22 @@ dialog button[aria-label="Close"] svg,
   background: rgb(255 255 255 / 12%);
 }
 
+/* 已被占用的行：可见但不可选（hover/active 无反馈） */
+.coflux-import-row[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.coflux-import-row[aria-disabled="true"]:hover::before,
+.coflux-import-row[aria-disabled="true"]:active::before {
+  background: transparent;
+}
+
+.coflux-import-row__hint {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .coflux-import-row > * {
   position: relative;
   z-index: 1;
