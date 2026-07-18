@@ -9,3 +9,4 @@ target/
 .DS_Store
 .env
 .env.local
+.coflux-dev/
