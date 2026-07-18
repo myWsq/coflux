@@ -357,6 +357,12 @@ export function createCofluxClient() {
     });
   }
 
+  /** 本地失败（exec/checkout 等非服务端错误）汇入同一个全局错误提示通道 */
+  function reportLocalError(message: string) {
+    errorSequence += 1;
+    store.setState({ lastError: { id: errorSequence, message } });
+  }
+
   function requestEnrollmentKey() {
     store.setState({ enrollCommand: null });
     send({ case: "clientCreateEnrollmentKey", value: {} });
@@ -389,6 +395,7 @@ export function createCofluxClient() {
     registerSessionConsumer,
     listDeviceDirectory,
     execInWorkspace,
+    reportLocalError,
     requestEnrollmentKey,
     clearEnrollmentCommand,
     disconnect,
