@@ -18,7 +18,6 @@
     "@xterm/xterm": "^5.5.0",
     "clsx": "^2.1.1",
     "lucide-react": "^1.24.0",
-    "radix-ui": "^1.6.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "tailwind-merge": "^3.6.0",

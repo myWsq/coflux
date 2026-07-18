@@ -3,7 +3,7 @@ import { CheckCircle2, LoaderCircle, ShieldCheck, ShieldX } from "lucide-react";
 import { create, encodeClientToServer, decodeServerToClient, ClientToServerSchema, type ClientToServerPayload } from "@coflux/protocol";
 
 import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
-import { Button } from "@/components/ui/button";
+import { Button } from "@astryxdesign/core/Button";
 import { SERVER_URL, TOKEN_KEY, USE_SUPABASE, type AuthCredential } from "@/config";
 import { loginWithSupabase } from "@/lib/auth";
 
@@ -143,9 +143,7 @@ export function AuthorizePage({ token }: { token: string }) {
                     {confirm.host || "未知主机"} · {confirm.platform || "未知平台"}
                   </div>
                 </div>
-                <Button className="mt-4 w-full" onClick={authorize}>
-                  授权此设备
-                </Button>
+                <Button className="mt-4 w-full" label="授权此设备" variant="primary" onClick={authorize} />
               </AuthMessage>
             ) : null;
           })()}

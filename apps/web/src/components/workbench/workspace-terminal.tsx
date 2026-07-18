@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { ExternalLink, LoaderCircle, Plus, SquareTerminal, Unplug, X } from "lucide-react";
+import { ExternalLink, GitBranch, LoaderCircle, Plus, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@astryxdesign/core/Button";
+import { BranchPickerDialog, type BranchTaken } from "@/components/workbench/dialogs";
 import type { CofluxClient } from "@/client/store";
 import { cn } from "@/lib/utils";
 import { TerminalPane, type TerminalController, type TerminalControlState } from "@/components/workbench/terminal-pane";
@@ -20,6 +21,10 @@ type WorkspaceTerminalProps = {
 
 export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: WorkspaceTerminalProps) {
   const workspace = useStore(client.store, (state) => state.workspaces.find((item) => item.id === workspaceId));
+  const projectWorkspaces = useStore(
+    client.store,
+    useShallow((state) => state.workspaces.filter((item) => item.projectId === workspace?.projectId)),
+  );
   const workspaceTasks = useStore(
     client.store,
     useShallow((state) =>
@@ -32,6 +37,7 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
   const ports = useStore(client.store, (state) => state.ports);
 
   const [activeTaskId, setActiveTaskIdState] = useState<string | null>(null);
+  const [branchPickerOpen, setBranchPickerOpen] = useState(false);
   const [controlStates, setControlStatesState] = useState<Record<string, TerminalControlState>>({});
   const [creating, setCreating] = useState(false);
 
@@ -184,6 +190,30 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
     if (controlStatesRef.current[taskId] === "attaching") markOwned(taskId, sessionId);
   }
 
+  // 分支切换：checkout 在本 worktree 内经 clientExec 完成，成功后同步元数据（workspaceSetBranch）。
+  const takenBranches = new Map<string, BranchTaken>(
+    projectWorkspaces.map((item) =>
+      item.id === workspaceId
+        ? [item.branch, { hint: "当前分支", reason: "已是当前工作区的分支" }]
+        : [item.branch, { hint: "已被检出", reason: `已被工作区「${item.name}」检出，同一分支不能检出到两个 worktree` }],
+    ),
+  );
+
+  async function listBranches() {
+    const result = await client.execInWorkspace(workspaceId, "git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+    if (!result.ok || result.exitCode !== 0) {
+      return { ok: false, branches: [], error: result.error || result.stderr.trim() || "获取分支列表失败" };
+    }
+    return { ok: true, branches: result.stdout.split("\n").map((line) => line.trim()).filter(Boolean), error: "" };
+  }
+
+  async function switchBranch(branch: string, createNew: boolean) {
+    const result = await client.execInWorkspace(workspaceId, "git", createNew ? ["checkout", "-b", branch] : ["checkout", branch]);
+    if (!result.ok || result.exitCode !== 0) return result.error || result.stderr.trim() || "切换分支失败";
+    // 不上报元数据：分支真相源在设备侧，daemon 监视 HEAD 变化后上报（≤3s 内广播刷新）
+    return null;
+  }
+
   // taskCreate 无请求-响应关联：靠"快照增量中新出现的未知 task id"识别自己创建的任务。
   function createTerminal() {
     if (pendingCreateRef.current) return;
@@ -292,29 +322,22 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
 
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-terminal">
-      {/* Cursor 式顶栏：工作区信息压成一行，Tab 用间距而非竖线分隔 */}
+      {/* 单栏顶栏：名称（如有）＋ 可点的分支按钮 │ 终端 Tabs（Tab 用间距而非竖线分隔）＋ 新建/端口 */}
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-background px-3">
-        <span className="truncate text-sm text-foreground">{workspace?.name}</span>
-        <span className="max-w-48 truncate font-mono text-2xs text-muted-foreground" title={workspace?.branch}>
-          {workspace?.branch}
-        </span>
-        <div className="ml-auto flex items-center gap-1">
-          {activePorts.map((preview) => (
-            <a
-              key={preview.port}
-              href={preview.url}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex h-5 items-center gap-1 rounded px-1.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-            >
-              :{preview.port}
-              <ExternalLink className="size-2.5" />
-            </a>
-          ))}
-        </div>
-      </header>
-
-      <div className="flex h-9 shrink-0 items-center gap-0.5 overflow-hidden border-b border-border bg-background px-1.5">
+        {workspace && workspace.name !== workspace.branch ? (
+          <span className="max-w-40 shrink-0 truncate text-sm text-foreground" title={workspace.name}>
+            {workspace.name}
+          </span>
+        ) : null}
+        <button
+          className="flex h-6 max-w-44 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          onClick={() => setBranchPickerOpen(true)}
+          title="切换分支"
+        >
+          <GitBranch className="size-3 shrink-0 opacity-70" />
+          <span className="truncate">{workspace?.branch}</span>
+        </button>
+        <div className="h-4 w-px shrink-0 bg-border" />
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {workspaceTasks.map((task) => {
             const state = stateOf(task);
@@ -362,7 +385,23 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
         >
           {creating ? <LoaderCircle className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
         </button>
-      </div>
+        {activePorts.length > 0 ? (
+          <div className="flex shrink-0 items-center gap-1">
+            {activePorts.map((preview) => (
+              <a
+                key={preview.port}
+                href={preview.url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-5 items-center gap-1 rounded px-1.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                :{preview.port}
+                <ExternalLink className="size-2.5" />
+              </a>
+            ))}
+          </div>
+        ) : null}
+      </header>
 
       <div className="relative min-h-0 flex-1 bg-terminal">
         {/* 面板按 taskId 建立稳定身份（React key）：任务实体更新不重建 xterm（重建会丢 scrollback）。 */}
@@ -391,10 +430,7 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
               </div>
               <h2 className="text-base font-medium text-foreground">这个工作区还没有终端</h2>
               <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。</p>
-              <Button className="mt-5" size="sm" onClick={createTerminal} disabled={creating}>
-                {creating ? <LoaderCircle className="animate-spin" /> : <Plus />}
-                新建终端
-              </Button>
+              <Button className="mt-5" label="新建终端" variant="primary" size="sm" icon={<Plus />} isLoading={creating} onClick={createTerminal} />
             </div>
           </div>
         ) : null}
@@ -405,17 +441,23 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
               <Unplug className="size-3.5" />
               此终端已被其它客户端接管，当前输入已锁定。
             </span>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 border-warning/30 text-warning hover:bg-warning/10"
-              onClick={() => requestActivation(activeTask.id, true)}
-            >
-              重新接管
-            </Button>
+            <Button label="重新接管" variant="secondary" size="sm" onClick={() => requestActivation(activeTask.id, true)} />
           </div>
         ) : null}
       </div>
+
+      <BranchPickerDialog
+        open={branchPickerOpen}
+        title="切换分支"
+        contextLabel={workspace && workspace.name !== workspace.branch ? workspace.name : ""}
+        checkoutVerb="切换到该分支"
+        createVerb="新建并切换"
+        describe={(target, createNew) => (createNew ? `将从当前 HEAD 新建并切换到「${target}」` : `将检出「${target}」`)}
+        onOpenChange={setBranchPickerOpen}
+        listBranches={listBranches}
+        takenBranches={takenBranches}
+        onPick={switchBranch}
+      />
     </section>
   );
 }

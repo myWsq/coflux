@@ -18,6 +18,7 @@ export type AuthState = "need-login" | "authenticating" | "authed" | "auth-faile
 export type PortPreview = { port: number; url: string };
 export type ClientError = { id: number; message: string };
 export type FsListResult = { ok: boolean; entries: FsEntry[]; error: string; path?: string };
+export type ExecResult = { ok: boolean; exitCode: number; stdout: string; stderr: string; error: string };
 type SessionConsumer = (data: Uint8Array) => void;
 
 export type CofluxState = {
@@ -65,6 +66,7 @@ export function createCofluxClient() {
   // fsList 请求-响应关联（一次性数据不进 store）：requestId → resolve。
   // 超时由 server 中继兜底（超时回 ok:false）；断线时本地统一 reject 清空。
   const pendingFsLists = new Map<string, (result: FsListResult) => void>();
+  const pendingExecs = new Map<string, (result: ExecResult) => void>();
 
   // 有本地会话 token 时首屏直接进入 authenticating，避免刷新先闪登录页。
   const store: StoreApi<CofluxState> = createStore<CofluxState>(() => ({
@@ -91,6 +93,11 @@ export function createCofluxClient() {
         const pending = [...pendingFsLists.values()];
         pendingFsLists.clear();
         for (const resolve of pending) resolve({ ok: false, entries: [], error: "连接已断开", path: undefined });
+      }
+      if (status !== "connected" && pendingExecs.size > 0) {
+        const pending = [...pendingExecs.values()];
+        pendingExecs.clear();
+        for (const resolve of pending) resolve({ ok: false, exitCode: -1, stdout: "", stderr: "", error: "连接已断开" });
       }
     },
     onMessage: handleServerMessage,
@@ -268,6 +275,15 @@ export function createCofluxClient() {
         }
         break;
       }
+      case "execResult": {
+        const value = payload.value;
+        const resolve = pendingExecs.get(value.requestId);
+        if (resolve) {
+          pendingExecs.delete(value.requestId);
+          resolve({ ok: value.ok, exitCode: value.exitCode, stdout: value.stdout, stderr: value.stderr, error: value.error ?? "" });
+        }
+        break;
+      }
       case "error": {
         errorSequence += 1;
         store.setState({ lastError: { id: errorSequence, message: payload.value.message } });
@@ -333,6 +349,14 @@ export function createCofluxClient() {
     });
   }
 
+  function execInWorkspace(workspaceId: string, command: string, args: string[]): Promise<ExecResult> {
+    return new Promise((resolve) => {
+      const requestId = crypto.randomUUID();
+      pendingExecs.set(requestId, resolve);
+      send({ case: "clientExec", value: { requestId, workspaceId, command, args } });
+    });
+  }
+
   function requestEnrollmentKey() {
     store.setState({ enrollCommand: null });
     send({ case: "clientCreateEnrollmentKey", value: {} });
@@ -350,6 +374,9 @@ export function createCofluxClient() {
     const pending = [...pendingFsLists.values()];
     pendingFsLists.clear();
     for (const resolve of pending) resolve({ ok: false, entries: [], error: "连接已断开", path: undefined });
+    const pendingExec = [...pendingExecs.values()];
+    pendingExecs.clear();
+    for (const resolve of pendingExec) resolve({ ok: false, exitCode: -1, stdout: "", stderr: "", error: "连接已断开" });
   }
 
   return {
@@ -361,6 +388,7 @@ export function createCofluxClient() {
     startTask,
     registerSessionConsumer,
     listDeviceDirectory,
+    execInWorkspace,
     requestEnrollmentKey,
     clearEnrollmentCommand,
     disconnect,

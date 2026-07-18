@@ -15,6 +15,7 @@ type SidebarProps = {
   onCreateWorkspace: (project: Project) => void;
   onRemoveProject: (project: Project) => void;
   onRemoveWorkspace: (workspace: Workspace) => void;
+  onRenameWorkspace: (workspace: Workspace) => void;
   onAddDevice: () => void;
   onRemoveDevice: (daemon: DaemonInfo) => void;
 };
@@ -122,44 +123,67 @@ export function Sidebar(props: SidebarProps) {
                   {expanded && projectWorkspaces.length > 0 ? (
                     <div className="ml-3 space-y-0.5 border-l border-border pl-1.5">
                       {projectWorkspaces.map((workspace) => (
-                        <div
+                        <ContextMenu
                           key={workspace.id}
-                          className={cn(
-                            "group/workspace relative flex h-7 items-center rounded-md transition-colors",
-                            workspace.id === props.selectedWorkspaceId
-                              ? "bg-accent text-foreground"
-                              : "text-muted-foreground hover:bg-accent/70 hover:text-foreground",
-                          )}
+                          label={`工作区「${workspace.branch}」操作`}
+                          size="sm"
+                          items={[
+                            { label: "重命名", onClick: () => props.onRenameWorkspace(workspace) },
+                            ...(!workspace.isMain
+                              ? [{ type: "divider" } as const, { label: "删除工作区", onClick: () => props.onRemoveWorkspace(workspace) }]
+                              : []),
+                          ]}
                         >
-                          <button
-                            className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left"
-                            onClick={() => props.onSelectWorkspace(workspace.id)}
-                            title={`${workspace.path}\n${workspace.branch}`}
+                          <div
+                            className={cn(
+                              "group/workspace relative flex h-7 items-center rounded-md transition-colors",
+                              workspace.id === props.selectedWorkspaceId
+                                ? "bg-accent text-foreground"
+                                : "text-muted-foreground hover:bg-accent/70 hover:text-foreground",
+                            )}
                           >
-                            <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
-                            <span className="truncate text-base">{workspace.name}</span>
-                            {/* hover 时右端渐变淡出，给绝对定位的删除按钮让位（mask 作用在文字上，无需匹配行背景色） */}
-                            <span
-                              className={cn(
-                                "ml-auto max-w-20 truncate font-mono text-xs text-muted-foreground/70",
-                                !workspace.isMain &&
-                                  "group-hover/workspace:[mask-image:linear-gradient(to_left,transparent_18px,black_44px)]",
-                              )}
-                            >
-                              {workspace.branch}
-                            </span>
-                          </button>
-                          {/* 主工作区不可删除：不渲染删除入口（服务端同样会拒绝，此处是入口层收敛） */}
-                          {!workspace.isMain ? (
                             <button
-                              className="absolute right-1 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground/50 opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/workspace:opacity-100 focus-visible:opacity-100"
-                              onClick={() => props.onRemoveWorkspace(workspace)}
-                              title="删除工作区"
+                              className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left"
+                              onClick={() => props.onSelectWorkspace(workspace.id)}
+                              title={`${workspace.path}\n${workspace.branch}`}
                             >
-                              <X className="size-3" />
+                              <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
+                              <span className="min-w-0 flex-1 truncate text-base">{workspace.branch}</span>
+                              {/* 右端小字：自定义名称（name ≠ branch 时才有）；主工作区未起名时默认叫「主工作区」。
+                                  hover 渐变淡出给删除按钮让位 */}
+                              {(() => {
+                                const label =
+                                  workspace.name && workspace.name !== workspace.branch
+                                    ? workspace.name
+                                    : workspace.isMain
+                                      ? "主工作区"
+                                      : null;
+                                return label ? (
+                                  <span
+                                    className={cn(
+                                      "max-w-24 truncate text-xs text-muted-foreground/70",
+                                      !workspace.isMain &&
+                                        "group-hover/workspace:[mask-image:linear-gradient(to_left,transparent_18px,black_44px)]",
+                                    )}
+                                    title={label}
+                                  >
+                                    {label}
+                                  </span>
+                                ) : null;
+                              })()}
                             </button>
-                          ) : null}
-                        </div>
+                            {/* 主工作区不可删除：不渲染删除入口（服务端同样会拒绝，此处是入口层收敛） */}
+                            {!workspace.isMain ? (
+                              <button
+                                className="absolute right-1 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground/50 opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/workspace:opacity-100 focus-visible:opacity-100"
+                                onClick={() => props.onRemoveWorkspace(workspace)}
+                                title="删除工作区"
+                              >
+                                <X className="size-3" />
+                              </button>
+                            ) : null}
+                          </div>
+                        </ContextMenu>
                       ))}
                     </div>
                   ) : null}
