@@ -363,7 +363,7 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17")]
+    #[prost(oneof="daemon_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -405,7 +405,17 @@ pub mod daemon_to_server {
         PtyReplay(super::PtyReplay),
         #[prost(message, tag="17")]
         ProxyData(super::ProxyData),
+        #[prost(message, tag="18")]
+        WorkspaceBranch(super::WorkspaceBranch),
     }
+}
+/// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkspaceBranch {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub branch: ::prost::alloc::string::String,
 }
 // ===== Server → Daemon 载荷 =====
 
@@ -565,7 +575,7 @@ pub struct FsRead {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -611,7 +621,22 @@ pub mod server_to_daemon {
         PtyInput(super::PtyInput),
         #[prost(message, tag="19")]
         ProxyData(super::ProxyData),
+        #[prost(message, tag="20")]
+        WorkspaceList(super::WorkspaceList),
     }
+}
+/// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkspaceRef {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub path: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WorkspaceList {
+    #[prost(message, repeated, tag="1")]
+    pub workspaces: ::prost::alloc::vec::Vec<WorkspaceRef>,
 }
 // ===== Client → Server 载荷 =====
 
@@ -709,6 +734,14 @@ pub struct WorkspaceRemove {
     #[prost(string, tag="1")]
     pub workspace_id: ::prost::alloc::string::String,
 }
+/// 重命名工作区（name 是自由文本；空则服务端回落为分支名）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkspaceSetName {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TaskCreate {
     #[prost(string, tag="1")]
@@ -778,7 +811,7 @@ pub struct ClientFsRead {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -832,6 +865,8 @@ pub mod client_to_server {
         /// 数据面（高频）
         #[prost(message, tag="23")]
         PtyInput(super::PtyInput),
+        #[prost(message, tag="24")]
+        WorkspaceSetName(super::WorkspaceSetName),
     }
 }
 // ===== Server → Client 载荷 =====

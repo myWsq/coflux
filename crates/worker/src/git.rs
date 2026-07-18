@@ -14,26 +14,6 @@ async fn run_git(args: &[&str]) -> (bool, String, String) {
     }
 }
 
-fn sanitize(s: &str) -> String {
-    let mut out = String::new();
-    let mut prev_dash = false;
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
-            out.push(c);
-            prev_dash = false;
-        } else if !prev_dash {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    let trimmed: String = out.trim_matches('-').chars().take(40).collect();
-    if trimmed.is_empty() {
-        "ws".to_string()
-    } else {
-        trimmed
-    }
-}
-
 pub struct RepoInfo {
     pub ok: bool,
     pub repo_path: String,
@@ -69,9 +49,10 @@ pub async fn validate_repo(path: &str) -> RepoInfo {
     RepoInfo { ok: true, repo_path, branch, error: None }
 }
 
-pub async fn add_worktree(worktrees_dir: &str, repo_path: &str, workspace_id: &str, name: &str, branch: &str, create_new: bool) -> WorktreeResult {
+pub async fn add_worktree(worktrees_dir: &str, repo_path: &str, workspace_id: &str, branch: &str, create_new: bool) -> WorktreeResult {
     let _ = std::fs::create_dir_all(worktrees_dir);
-    let dir = format!("{}/{}-{}", worktrees_dir, sanitize(name), workspace_id);
+    // 目录名只用稳定 id：branch 可被 checkout 换掉、name 是自由文本备注，都不适合当路径身份
+    let dir = format!("{}/{}", worktrees_dir, workspace_id);
     let args: Vec<&str> = if create_new {
         vec!["-C", repo_path, "worktree", "add", "-b", branch, dir.as_str()]
     } else {

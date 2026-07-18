@@ -78,6 +78,12 @@ message WorkspaceRemove {
   string workspace_id = 1;
 }
 
+// 重命名工作区（name 是自由文本；空则服务端回落为分支名）
+message WorkspaceSetName {
+  string workspace_id = 1;
+  string name = 2;
+}
+
 message TaskCreate {
   string workspace_id = 1;
   string title = 2;
@@ -151,6 +157,7 @@ message ClientToServer {
     ClientFsRead client_fs_read = 22;
     // 数据面（高频）
     PtyInput pty_input = 23;
+    WorkspaceSetName workspace_set_name = 24;
   }
 }
 

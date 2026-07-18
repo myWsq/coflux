@@ -97,7 +97,14 @@ message DaemonToServer {
     PtyOutput pty_output = 15;
     PtyReplay pty_replay = 16;
     ProxyData proxy_data = 17;
+    WorkspaceBranch workspace_branch = 18;
   }
+}
+
+// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
+message WorkspaceBranch {
+  string workspace_id = 1;
+  string branch = 2;
 }
 
 // ===== Server → Daemon 载荷 =====
@@ -230,5 +237,16 @@ message ServerToDaemon {
     // 数据面（高频）
     PtyInput pty_input = 18;
     ProxyData proxy_data = 19;
+    WorkspaceList workspace_list = 20;
   }
+}
+
+// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD
+message WorkspaceRef {
+  string workspace_id = 1;
+  string path = 2;
+}
+
+message WorkspaceList {
+  repeated WorkspaceRef workspaces = 1;
 }
