@@ -1,108 +1,244 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Check, Copy, FolderGit2, GitBranch, LoaderCircle, MonitorUp, TerminalSquare, TriangleAlert } from "lucide-react";
-import type { DaemonInfo, Project } from "@coflux/protocol";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { GitBranch, Search, TerminalSquare } from "lucide-react";
+import type { Project, Workspace } from "@coflux/protocol";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button as AstryxButton } from "@astryxdesign/core/Button";
+import { CodeBlock } from "@astryxdesign/core/CodeBlock";
+import { Dialog as AstryxDialog, DialogHeader as AstryxDialogHeader } from "@astryxdesign/core/Dialog";
+import { Icon } from "@astryxdesign/core/Icon";
+import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from "@astryxdesign/core/Layout";
+import { Text } from "@astryxdesign/core/Text";
+import { TextInput } from "@astryxdesign/core/TextInput";
 
-import {
-  AlertDialog,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { SimpleSelect } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
 import type { ClientError } from "@/client/store";
 
-type ImportProjectDialogProps = {
+export type BranchTaken = { hint: string; reason: string };
+
+type BranchPickerDialogProps = {
   open: boolean;
-  daemons: DaemonInfo[];
+  title: string;
+  /** header 右侧角标（项目名/工作区名） */
+  contextLabel: string;
+  /** 底栏主按钮文案 */
+  checkoutVerb: string;
+  createVerb: string;
+  /** 选中分支后的说明句 */
+  describe: (branch: string, createNew: boolean) => string;
   onOpenChange: (open: boolean) => void;
-  onImport: (daemonId: string, path: string) => void;
-  onAddDevice: () => void;
+  listBranches: () => Promise<{ ok: boolean; branches: string[]; error: string }>;
+  /** 不可选分支 → 行内短提示 + 完整原因（git 不允许同一分支检出到两个 worktree / 当前分支） */
+  takenBranches: Map<string, BranchTaken>;
+  /** 返回 null = 成功（弹窗关闭）；返回字符串 = 错误信息（弹窗内展示） */
+  onPick: (branch: string, createNew: boolean) => Promise<string | null>;
 };
 
-export function ImportProjectDialog(props: ImportProjectDialogProps) {
-  const onlineDaemons = props.daemons.filter((daemon) => daemon.online);
-  const [daemonId, setDaemonId] = useState("");
-  const [path, setPath] = useState("");
+/** 与导入向导同款定高：搜索栏/底栏固定，中间列表内部滚动 */
+const BRANCH_PICKER_HEIGHT = 420;
+
+/**
+ * 通用分支选择器（交互对齐导入向导）：输入即搜索，↑↓ 高亮、Enter 确认、hover 联动；
+ * 模式由结果推导——高亮/精确命中已有分支 = 检出，否则 = 从 HEAD 新建。
+ * 供「新建工作区」与终端区「切换分支」复用。
+ */
+export function BranchPickerDialog(props: BranchPickerDialogProps) {
+  const [branch, setBranch] = useState("");
+  /** null = 加载中；加载失败置 [] 并展示 loadError */
+  const [branches, setBranches] = useState<string[] | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [pickError, setPickError] = useState("");
+  const [busy, setBusy] = useState(false);
+  /** -1 = 未进入键盘选择；按 ↓ 才从 0 开始高亮（同导入向导） */
+  const [highlight, setHighlight] = useState(-1);
+  const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!props.open) return;
-    setDaemonId((current) => (onlineDaemons.some((daemon) => daemon.daemonId === current) ? current : (onlineDaemons[0]?.daemonId ?? "")));
-    setPath("");
-    // 与现版语义一致：仅依赖 open/daemons，onlineDaemons 是它们的纯派生值。
+    setBranch("");
+    setBranches(null);
+    setLoadError("");
+    setPickError("");
+    setBusy(false);
+    setHighlight(-1);
+    let cancelled = false;
+    void props.listBranches().then((result) => {
+      if (cancelled) return;
+      setBranches(result.branches);
+      if (!result.ok) setLoadError(result.error);
+    });
+    queueMicrotask(() => inputRef.current?.focus());
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.open, props.daemons]);
+  }, [props.open]);
 
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const normalizedPath = path.trim();
-    if (!daemonId || !normalizedPath) return;
-    props.onImport(daemonId, normalizedPath);
-    props.onOpenChange(false);
+  const trimmed = branch.trim();
+  const query = trimmed.toLowerCase();
+  const matches = (branches ?? []).filter((item) => item.toLowerCase().includes(query));
+  const exactMatch = (branches ?? []).some((item) => item === trimmed);
+  /** 高亮行优先于输入框文本：Enter/按钮以它为准 */
+  const chosen = highlight >= 0 && matches[highlight] ? matches[highlight] : trimmed;
+  const createNew = !(highlight >= 0 && matches[highlight]) && !exactMatch;
+  /** 目标分支不可用：禁用提交并提示（新建分支不受影响） */
+  const chosenTaken = !createNew ? props.takenBranches.get(chosen) : undefined;
+  const canSubmit = Boolean(chosen && branches !== null && chosenTaken === undefined && !busy);
+
+  useEffect(() => {
+    setHighlight(-1);
+  }, [branch, branches]);
+
+  useEffect(() => {
+    if (highlight < 0) return;
+    listRef.current?.querySelector<HTMLElement>(`[data-branch-index="${highlight}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [highlight]);
+
+  function moveHighlight(delta: number) {
+    if (matches.length === 0) return;
+    setHighlight((index) => {
+      let next = index < 0 ? (delta > 0 ? 0 : -1) : index + delta;
+      // 跳过不可选的行
+      while (next >= 0 && next < matches.length && props.takenBranches.has(matches[next]!)) next += delta;
+      if (next < 0) return -1;
+      if (next >= matches.length) return index;
+      return next;
+    });
+  }
+
+  async function submitWith(target: string, targetCreateNew: boolean) {
+    if (!target || busy) return;
+    setBusy(true);
+    setPickError("");
+    const error = await props.onPick(target, targetCreateNew);
+    setBusy(false);
+    if (error) setPickError(error);
+    else props.onOpenChange(false);
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveHighlight(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveHighlight(-1);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (canSubmit) void submitWith(chosen, createNew);
+    }
   }
 
   return (
-    <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <div className="mb-1 flex size-9 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground">
-            <FolderGit2 className="size-4" />
-          </div>
-          <DialogTitle>导入项目</DialogTitle>
-          <DialogDescription>选择仓库所在的在线设备，并填写该设备上的 git 仓库绝对路径。</DialogDescription>
-        </DialogHeader>
+    <AstryxDialog
+      isOpen={props.open}
+      onOpenChange={props.onOpenChange}
+      purpose="form"
+      width={440}
+      maxHeight={BRANCH_PICKER_HEIGHT}
+      style={{ height: BRANCH_PICKER_HEIGHT }}
+    >
+      <Layout
+        header={
+          <AstryxDialogHeader
+            title={props.title}
+            endContent={
+              <Text type="body" color="secondary" size="sm">
+                {props.contextLabel}
+              </Text>
+            }
+            onOpenChange={props.onOpenChange}
+            hasDivider={false}
+          />
+        }
+        content={
+          <LayoutContent>
+            <VStack gap={2} hAlign="stretch" style={{ height: "100%", minHeight: 0 }}>
+              <div className="coflux-pathbar" onClick={() => inputRef.current?.focus()}>
+                <span className="coflux-pathbar__icon" aria-hidden>
+                  <Search />
+                </span>
+                <input
+                  ref={inputRef}
+                  className="coflux-pathbar__input"
+                  value={branch}
+                  onChange={(event) => setBranch(event.target.value)}
+                  onKeyDown={onKeyDown}
+                  placeholder="搜索或输入新分支名"
+                  aria-label="搜索或输入新分支名"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </div>
 
-        {onlineDaemons.length > 0 ? (
-          <form onSubmit={submit} className="space-y-5">
-            <div className="space-y-2">
-              <Label>设备</Label>
-              <SimpleSelect
-                aria-label="设备"
-                options={onlineDaemons.map((daemon) => ({ value: daemon.daemonId, label: `${daemon.name} · ${daemon.host}` }))}
-                value={daemonId}
-                onChange={setDaemonId}
-                placeholder="选择在线设备"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="project-path">仓库路径</Label>
-              <Input
-                id="project-path"
-                autoFocus
-                value={path}
-                onChange={(event) => setPath(event.currentTarget.value)}
-                placeholder="/Users/me/Workspace/project"
-                autoComplete="off"
-              />
-              <p className="text-xs text-muted-foreground">路径由对应设备解析，浏览器不读取你的本地文件系统。</p>
-            </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => props.onOpenChange(false)}>
-                取消
-              </Button>
-              <Button type="submit" disabled={!daemonId || !path.trim()}>
-                导入项目
-              </Button>
-            </DialogFooter>
-          </form>
-        ) : (
-          <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center">
-            <MonitorUp className="mx-auto size-6 text-muted-foreground" />
-            <div className="mt-3 text-sm font-medium">没有在线设备</div>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">添加设备并启动 daemon 后，才能导入这台机器上的仓库。</p>
-            <Button className="mt-4" variant="outline" size="sm" onClick={() => props.onAddDevice()}>
-              添加设备
-            </Button>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
+              {matches.length > 0 ? (
+                <div ref={listRef} role="listbox" aria-label="匹配的分支" className="coflux-import-list">
+                  {matches.map((item, index) => {
+                    const taken = props.takenBranches.get(item);
+                    return (
+                      <button
+                        key={item}
+                        type="button"
+                        role="option"
+                        aria-selected={index === highlight}
+                        aria-disabled={taken !== undefined || undefined}
+                        data-branch-index={index}
+                        className={`coflux-import-row${index === highlight ? " is-active" : ""}`}
+                        title={taken?.reason}
+                        onMouseEnter={taken ? undefined : () => setHighlight(index)}
+                        onClick={taken ? undefined : () => void submitWith(item, false)}
+                      >
+                        <span className="coflux-import-row__icon">
+                          <GitBranch aria-hidden />
+                        </span>
+                        <Text type="body" className="coflux-import-row__name" maxLines={1}>
+                          {item}
+                        </Text>
+                        {taken ? (
+                          <Text type="body" size="sm" color="secondary" className="coflux-import-row__hint">
+                            {taken.hint}
+                          </Text>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <Text type="supporting">{branches === null ? "正在获取分支列表…" : trimmed ? "没有匹配的分支。" : "仓库还没有本地分支。"}</Text>
+              )}
+
+              {loadError ? <Banner status="warning" title={`${loadError}，将按新建分支处理`} container="card" /> : null}
+              {pickError ? <Banner status="error" title={pickError} container="card" /> : null}
+              {trimmed && branches !== null ? (
+                <Text type="supporting">
+                  {chosenTaken !== undefined ? `「${chosen}」${chosenTaken.reason}` : props.describe(chosen, createNew)}
+                </Text>
+              ) : null}
+            </VStack>
+          </LayoutContent>
+        }
+        footer={
+          <LayoutFooter hasDivider={false}>
+            <HStack gap={2} hAlign="between" vAlign="center">
+              <Text type="supporting">↑↓ 选择，Enter 确认</Text>
+              <HStack gap={2}>
+                <AstryxButton label="取消" variant="secondary" isDisabled={busy} onClick={() => props.onOpenChange(false)} />
+                <AstryxButton
+                  label={createNew ? props.createVerb : props.checkoutVerb}
+                  variant="primary"
+                  isDisabled={!canSubmit}
+                  isLoading={busy}
+                  onClick={() => void submitWith(chosen, createNew)}
+                />
+              </HStack>
+            </HStack>
+          </LayoutFooter>
+        }
+      />
+    </AstryxDialog>
   );
 }
 
@@ -111,91 +247,90 @@ type CreateWorkspaceDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreate: (projectId: string, name: string, branch: string, createNew: boolean) => void;
+  listBranches: (project: Project) => Promise<{ ok: boolean; branches: string[]; error: string }>;
+  takenBranches: Map<string, BranchTaken>;
 };
 
 export function CreateWorkspaceDialog(props: CreateWorkspaceDialogProps) {
-  const [name, setName] = useState("feature");
-  const [branch, setBranch] = useState("feature");
-  const [branchEdited, setBranchEdited] = useState(false);
-  const [mode, setMode] = useState<"new" | "existing">("new");
+  const project = props.project;
+  return (
+    <BranchPickerDialog
+      open={props.open && project !== null}
+      title="新建工作区"
+      contextLabel={project?.name ?? ""}
+      checkoutVerb="检出并创建"
+      createVerb="新建分支并创建"
+      describe={(target, createNew) =>
+        createNew ? `没有同名分支，将从当前 HEAD 新建「${target}」` : `将在新 worktree 中检出已有分支「${target}」`
+      }
+      onOpenChange={props.onOpenChange}
+      listBranches={() => (project ? props.listBranches(project) : Promise.resolve({ ok: true, branches: [], error: "" }))}
+      takenBranches={props.takenBranches}
+      onPick={(target, createNew) => {
+        if (project) props.onCreate(project.id, target, target, createNew);
+        return Promise.resolve(null);
+      }}
+    />
+  );
+}
+
+type WorkspaceRenameDialogProps = {
+  workspace: Workspace | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSave: (workspaceId: string, name: string) => void;
+};
+
+/** 重命名工作区（name 是自由文本；清空提交 = 回落分支名） */
+export function WorkspaceRenameDialog(props: WorkspaceRenameDialogProps) {
+  const [name, setName] = useState("");
 
   useEffect(() => {
     if (!props.open) return;
-    setName("feature");
-    setBranch("feature");
-    setBranchEdited(false);
-    setMode("new");
-  }, [props.open, props.project?.id]);
+    const workspace = props.workspace;
+    setName(workspace && workspace.name !== workspace.branch ? workspace.name : "");
+  }, [props.open, props.workspace]);
 
-  function changeName(value: string) {
-    setName(value);
-    if (!branchEdited) setBranch(value);
-  }
-
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const normalizedName = name.trim();
-    const normalizedBranch = branch.trim();
-    if (!props.project || !normalizedName || !normalizedBranch) return;
-    props.onCreate(props.project.id, normalizedName, normalizedBranch, mode === "new");
+  function save() {
+    if (!props.workspace) return;
+    props.onSave(props.workspace.id, name.trim());
     props.onOpenChange(false);
   }
 
   return (
-    <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <div className="mb-1 flex size-9 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground">
-            <GitBranch className="size-4" />
-          </div>
-          <DialogTitle>新建工作区</DialogTitle>
-          <DialogDescription>在项目「{props.project?.name ?? ""}」下创建独立 git worktree。主工作区不会被修改。</DialogDescription>
-        </DialogHeader>
-        <form onSubmit={submit} className="space-y-5">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="workspace-name">名称</Label>
-              <Input id="workspace-name" autoFocus value={name} onChange={(event) => changeName(event.currentTarget.value)} placeholder="feature" />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="workspace-branch">分支</Label>
-              <Input
-                id="workspace-branch"
-                value={branch}
-                onChange={(event) => {
-                  setBranchEdited(true);
-                  setBranch(event.currentTarget.value);
-                }}
-                placeholder="feature/my-change"
-              />
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label>分支方式</Label>
-            <SimpleSelect
-              aria-label="分支方式"
-              options={[
-                { value: "new", label: "从当前 HEAD 新建分支" },
-                { value: "existing", label: "检出已有分支" },
-              ]}
-              value={mode}
-              onChange={(value) => setMode(value as "new" | "existing")}
-            />
-            <p className="text-xs text-muted-foreground">
-              {mode === "new" ? `将创建新分支 ${branch.trim() || "…"}` : `将在新 worktree 中检出 ${branch.trim() || "…"}`}
-            </p>
-          </div>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => props.onOpenChange(false)}>
-              取消
-            </Button>
-            <Button type="submit" disabled={!props.project || !name.trim() || !branch.trim()}>
-              创建工作区
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+    <AstryxDialog isOpen={props.open} onOpenChange={props.onOpenChange} purpose="form" width={400}>
+      <Layout
+        header={
+          <AstryxDialogHeader
+            title="重命名"
+            subtitle={`给「${props.workspace?.branch ?? ""}」记一句这个工作区要干什么。`}
+            onOpenChange={props.onOpenChange}
+            hasDivider={false}
+          />
+        }
+        content={
+          <LayoutContent>
+            <form
+              onSubmit={(event: FormEvent<HTMLFormElement>) => {
+                event.preventDefault();
+                save();
+              }}
+            >
+              <TextInput label="名称" isLabelHidden value={name} onChange={setName} placeholder="比如：重构登录页" hasAutoFocus />
+              <button type="submit" hidden />
+            </form>
+          </LayoutContent>
+        }
+        footer={
+          <LayoutFooter hasDivider={false}>
+            <HStack gap={2} hAlign="end">
+              <AstryxButton label="取消" variant="secondary" onClick={() => props.onOpenChange(false)} />
+              <AstryxButton label="保存" variant="primary" onClick={save} />
+            </HStack>
+          </LayoutFooter>
+        }
+      />
+    </AstryxDialog>
   );
 }
 
@@ -209,16 +344,13 @@ type EnrollmentDialogProps = {
 };
 
 export function EnrollmentDialog(props: EnrollmentDialogProps) {
-  const commandRef = useRef<HTMLTextAreaElement>(null);
   const requestErrorBaseline = useRef<number | null>(null);
   const [requested, setRequested] = useState(false);
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "manual">("idle");
   const [requestError, setRequestError] = useState("");
 
   useEffect(() => {
     if (!props.open) return;
     setRequested(false);
-    setCopyState("idle");
     setRequestError("");
     requestErrorBaseline.current = props.lastError?.id ?? null;
     // 打开时只消费一次当时的 lastError 作为基线，之后的变化交给下面的效果处理。
@@ -243,68 +375,55 @@ export function EnrollmentDialog(props: EnrollmentDialogProps) {
     props.onRequest();
   }
 
-  async function copyCommand() {
-    const command = props.command;
-    if (!command) return;
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopyState("copied");
-    } catch {
-      setCopyState("manual");
-      requestAnimationFrame(() => {
-        commandRef.current?.focus();
-        commandRef.current?.select();
-      });
-    }
-  }
-
   return (
-    <Dialog open={props.open} onOpenChange={changeOpen}>
-      <DialogContent>
-        <DialogHeader>
-          <div className="mb-1 flex size-9 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground">
-            <MonitorUp className="size-4" />
-          </div>
-          <DialogTitle>添加设备</DialogTitle>
-          <DialogDescription>生成一次登记命令，在要接入的机器上执行。设备上线后会自动出现在侧边栏。</DialogDescription>
-        </DialogHeader>
-
-        {props.command ? (
-          <div className="space-y-3">
-            <Label htmlFor="enrollment-command">在新机器的终端中运行</Label>
-            <Textarea
-              ref={commandRef}
-              id="enrollment-command"
-              value={props.command}
-              readOnly
-              spellCheck={false}
-              className="min-h-28 resize-none font-mono text-xs leading-5 text-success"
-              onFocus={(event) => event.currentTarget.select()}
-            />
-            {copyState === "manual" ? <p className="text-xs text-warning">浏览器未授予剪贴板权限，命令已选中，请手动复制。</p> : null}
-            <DialogFooter>
-              <Button variant="outline" onClick={() => changeOpen(false)}>
-                完成
-              </Button>
-              <Button onClick={copyCommand}>
-                {copyState === "copied" ? <Check /> : <Copy />}
-                {copyState === "copied" ? "已复制" : "复制命令"}
-              </Button>
-            </DialogFooter>
-          </div>
-        ) : (
-          <div className="rounded-lg border border-dashed border-border px-5 py-7 text-center">
-            <TerminalSquare className="mx-auto size-7 text-muted-foreground" />
-            <p className="mt-3 text-xs leading-5 text-muted-foreground">命令包含登记凭证，请只在你信任的机器上使用，不要转发或公开。</p>
-            {requestError ? <p className="mt-3 rounded-md bg-destructive/8 px-3 py-2 text-xs text-destructive">{requestError}</p> : null}
-            <Button className="mt-4" onClick={requestCommand} disabled={requested}>
-              {requested ? <LoaderCircle className="animate-spin" /> : null}
-              {requested ? "正在生成…" : "生成登记命令"}
-            </Button>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
+    <AstryxDialog isOpen={props.open} onOpenChange={changeOpen} purpose="form" width={480}>
+      <Layout
+        header={
+          <AstryxDialogHeader
+            title="添加设备"
+            subtitle="生成一次登记命令，在要接入的机器上执行。设备上线后会自动出现在侧边栏。"
+            onOpenChange={changeOpen}
+            hasDivider={false}
+          />
+        }
+        content={
+          <LayoutContent>
+            {props.command ? (
+              <VStack gap={3} hAlign="stretch">
+                <Text type="body" size="sm">
+                  在新机器的终端中运行：
+                </Text>
+                {/* CodeBlock 自带复制按钮；文本可选中，剪贴板权限被拒时可手动复制 */}
+                <CodeBlock code={props.command} language="plaintext" size="sm" isWrapped />
+              </VStack>
+            ) : (
+              <VStack gap={3} hAlign="center">
+                <Icon icon={TerminalSquare} size="md" />
+                <Text type="supporting" justify="center">
+                  命令包含登记凭证，请只在你信任的机器上使用，不要转发或公开。
+                </Text>
+                {requestError ? <Banner status="error" title={requestError} container="card" /> : null}
+                <AstryxButton
+                  label={requested ? "正在生成…" : "生成登记命令"}
+                  variant="primary"
+                  isLoading={requested}
+                  onClick={requestCommand}
+                />
+              </VStack>
+            )}
+          </LayoutContent>
+        }
+        footer={
+          props.command ? (
+            <LayoutFooter hasDivider={false}>
+              <HStack gap={2} hAlign="end">
+                <AstryxButton label="完成" variant="primary" onClick={() => changeOpen(false)} />
+              </HStack>
+            </LayoutFooter>
+          ) : undefined
+        }
+      />
+    </AstryxDialog>
   );
 }
 
@@ -317,30 +436,30 @@ export type ConfirmAction = {
 
 export function ConfirmActionDialog(props: { action: ConfirmAction | null; onCancel: () => void }) {
   return (
-    <AlertDialog open={Boolean(props.action)} onOpenChange={(open) => !open && props.onCancel()}>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <div className="mb-1 flex size-9 items-center justify-center rounded-lg border border-destructive/25 bg-destructive/8 text-destructive">
-            <TriangleAlert className="size-4" />
-          </div>
-          <AlertDialogTitle>{props.action?.title}</AlertDialogTitle>
-          <AlertDialogDescription>{props.action?.description}</AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <Button variant="outline" onClick={() => props.onCancel()}>
-            取消
-          </Button>
-          <Button
-            variant="destructive"
-            onClick={() => {
-              props.action?.onConfirm();
-              props.onCancel();
-            }}
-          >
-            {props.action?.confirmLabel ?? "确认"}
-          </Button>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+    <AstryxDialog isOpen={Boolean(props.action)} onOpenChange={(open) => !open && props.onCancel()} width={400}>
+      <Layout
+        header={<AstryxDialogHeader title={props.action?.title ?? ""} onOpenChange={(open) => !open && props.onCancel()} hasDivider={false} />}
+        content={
+          <LayoutContent>
+            <Text type="body">{props.action?.description}</Text>
+          </LayoutContent>
+        }
+        footer={
+          <LayoutFooter hasDivider={false}>
+            <HStack gap={2} hAlign="end">
+              <AstryxButton label="取消" variant="secondary" onClick={() => props.onCancel()} />
+              <AstryxButton
+                label={props.action?.confirmLabel ?? "确认"}
+                variant="destructive"
+                onClick={() => {
+                  props.action?.onConfirm();
+                  props.onCancel();
+                }}
+              />
+            </HStack>
+          </LayoutFooter>
+        }
+      />
+    </AstryxDialog>
   );
 }

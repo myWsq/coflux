@@ -1,14 +1,15 @@
-import { lazy, Suspense, useEffect, useState, type FormEvent } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from "react";
 import { useStore } from "zustand";
 import { AlertCircle, FolderGit2, LoaderCircle, X } from "lucide-react";
 import { TaskStatus, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
 
 import { AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
-import { Button } from "@/components/ui/button";
+import { Button } from "@astryxdesign/core/Button";
 import {
   ConfirmActionDialog,
   CreateWorkspaceDialog,
   EnrollmentDialog,
+  WorkspaceRenameDialog,
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
@@ -32,6 +33,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [workspaceProject, setWorkspaceProject] = useState<Project | null>(null);
   const [enrollmentOpen, setEnrollmentOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
+  const [renameWorkspace, setRenameWorkspace] = useState<Workspace | null>(null);
 
   const authState = useStore(client.store, (state) => state.authState);
   const loginError = useStore(client.store, (state) => state.loginError);
@@ -80,8 +82,39 @@ export function Workbench({ client }: { client: CofluxClient }) {
     client.send({ case: "projectImport", value: { daemonId, path } });
   }
 
+  // workspaceCreate 无请求-响应关联：记下发起时已知的工作区 id，
+  // 广播中新出现的该项目工作区即本次创建的，自动切换过去（同终端创建的识别模式）。
+  const pendingWorkspaceCreateRef = useRef<{ projectId: string; knownIds: Set<string> } | null>(null);
+
   function createWorkspace(projectId: string, name: string, branch: string, createNew: boolean) {
+    pendingWorkspaceCreateRef.current = { projectId, knownIds: new Set(client.store.getState().workspaces.map((workspace) => workspace.id)) };
     client.send({ case: "workspaceCreate", value: { projectId, name, branch, createNew } });
+  }
+
+  useEffect(() => {
+    const pending = pendingWorkspaceCreateRef.current;
+    if (!pending) return;
+    const created = workspaces.find((workspace) => workspace.projectId === pending.projectId && !pending.knownIds.has(workspace.id));
+    if (created) {
+      pendingWorkspaceCreateRef.current = null;
+      selectWorkspace(created.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaces]);
+
+  // 创建失败（error 广播）时丢弃 pending，避免误认后续他端创建的工作区
+  useEffect(() => {
+    if (lastError) pendingWorkspaceCreateRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastError]);
+
+  // 在项目主工作区里列本地分支（exec 走该项目所在 daemon）
+  async function listProjectBranches(project: Project): Promise<{ ok: boolean; branches: string[]; error: string }> {
+    const main = client.store.getState().workspaces.find((workspace) => workspace.projectId === project.id && workspace.isMain);
+    if (!main) return { ok: false, branches: [], error: "项目主工作区不存在" };
+    const result = await client.execInWorkspace(main.id, "git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+    if (!result.ok) return { ok: false, branches: [], error: result.error || result.stderr || "获取分支列表失败" };
+    return { ok: true, branches: result.stdout.split("\n").map((line) => line.trim()).filter(Boolean), error: "" };
   }
 
   function requestRemoveProject(project: Project) {
@@ -93,9 +126,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
     });
   }
 
+  function saveWorkspaceName(workspaceId: string, name: string) {
+    client.send({ case: "workspaceSetName", value: { workspaceId, name } });
+  }
+
   function requestRemoveWorkspace(workspace: Workspace) {
     setConfirmAction({
-      title: `删除工作区「${workspace.name}」？`,
+      title: `删除工作区「${workspace.branch}」？`,
       description: `对应的 git worktree 目录会被移除，分支「${workspace.branch}」不会被自动删除。`,
       confirmLabel: "删除工作区",
       onConfirm: () => client.send({ case: "workspaceRemove", value: { workspaceId: workspace.id } }),
@@ -170,6 +207,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onCreateWorkspace={setWorkspaceProject}
         onRemoveProject={requestRemoveProject}
         onRemoveWorkspace={requestRemoveWorkspace}
+        onRenameWorkspace={setRenameWorkspace}
         onAddDevice={openEnrollment}
         onRemoveDevice={requestRemoveDevice}
       />
@@ -195,9 +233,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
               {projects.length === 0 ? "导入在线设备上的 git 仓库，主工作区会自动创建。" : "从左侧项目或子工作区进入终端工作台。"}
             </p>
             {projects.length === 0 ? (
-              <Button className="mt-5" size="sm" onClick={() => setImportOpen(true)}>
-                导入项目
-              </Button>
+              <Button className="mt-5" label="导入项目" variant="primary" size="sm" onClick={() => setImportOpen(true)} />
             ) : null}
           </div>
         </main>
@@ -238,6 +274,17 @@ export function Workbench({ client }: { client: CofluxClient }) {
         open={Boolean(workspaceProject)}
         onOpenChange={(open) => !open && setWorkspaceProject(null)}
         onCreate={createWorkspace}
+        listBranches={listProjectBranches}
+        takenBranches={
+          new Map(
+            workspaces
+              .filter((workspace) => workspace.projectId === workspaceProject?.id)
+              .map((workspace) => [
+                workspace.branch,
+                { hint: "已被检出", reason: `已被工作区「${workspace.name}」检出，同一分支不能检出到两个 worktree` },
+              ]),
+          )
+        }
       />
       <EnrollmentDialog
         open={enrollmentOpen}
@@ -246,6 +293,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onOpenChange={setEnrollmentOpen}
         onRequest={client.requestEnrollmentKey}
         onClear={client.clearEnrollmentCommand}
+      />
+      <WorkspaceRenameDialog
+        workspace={renameWorkspace}
+        open={Boolean(renameWorkspace)}
+        onOpenChange={(open) => !open && setRenameWorkspace(null)}
+        onSave={saveWorkspaceName}
       />
       <ConfirmActionDialog action={confirmAction} onCancel={() => setConfirmAction(null)} />
     </div>
