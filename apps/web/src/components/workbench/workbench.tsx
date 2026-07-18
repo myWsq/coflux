@@ -7,7 +7,6 @@ import { AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
 import { Button } from "@astryxdesign/core/Button";
 import {
   ConfirmActionDialog,
-  CreateWorkspaceDialog,
   EnrollmentDialog,
   WorkspaceRenameDialog,
   type ConfirmAction,
@@ -30,7 +29,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(() => localStorage.getItem(WORKSPACE_KEY));
   const [dismissedErrorId, setDismissedErrorId] = useState<number | null>(null);
   const [importOpen, setImportOpen] = useState(false);
-  const [workspaceProject, setWorkspaceProject] = useState<Project | null>(null);
   const [enrollmentOpen, setEnrollmentOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [renameWorkspace, setRenameWorkspace] = useState<Workspace | null>(null);
@@ -86,9 +84,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // 广播中新出现的该项目工作区即本次创建的，自动切换过去（同终端创建的识别模式）。
   const pendingWorkspaceCreateRef = useRef<{ projectId: string; knownIds: Set<string> } | null>(null);
 
-  function createWorkspace(projectId: string, name: string, branch: string, createNew: boolean) {
-    pendingWorkspaceCreateRef.current = { projectId, knownIds: new Set(client.store.getState().workspaces.map((workspace) => workspace.id)) };
-    client.send({ case: "workspaceCreate", value: { projectId, name, branch, createNew } });
+  function createWorkspace(project: Project, branch: string, createNew: boolean) {
+    pendingWorkspaceCreateRef.current = { projectId: project.id, knownIds: new Set(client.store.getState().workspaces.map((workspace) => workspace.id)) };
+    // name = branch（未起名语义）；创建成功后由下面的效果自动切换过去
+    client.send({ case: "workspaceCreate", value: { projectId: project.id, name: branch, branch, createNew } });
   }
 
   useEffect(() => {
@@ -108,14 +107,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastError]);
 
-  // 在项目主工作区里列本地分支（exec 走该项目所在 daemon）
-  async function listProjectBranches(project: Project): Promise<{ ok: boolean; branches: string[]; error: string }> {
-    const main = client.store.getState().workspaces.find((workspace) => workspace.projectId === project.id && workspace.isMain);
-    if (!main) return { ok: false, branches: [], error: "项目主工作区不存在" };
-    const result = await client.execInWorkspace(main.id, "git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
-    if (!result.ok) return { ok: false, branches: [], error: result.error || result.stderr || "获取分支列表失败" };
-    return { ok: true, branches: result.stdout.split("\n").map((line) => line.trim()).filter(Boolean), error: "" };
-  }
 
   function requestRemoveProject(project: Project) {
     setConfirmAction({
@@ -204,7 +195,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         selectedWorkspaceId={selectedWorkspaceId}
         onSelectWorkspace={selectWorkspace}
         onImportProject={() => setImportOpen(true)}
-        onCreateWorkspace={setWorkspaceProject}
+        onCreateWorkspace={createWorkspace}
         onRemoveProject={requestRemoveProject}
         onRemoveWorkspace={requestRemoveWorkspace}
         onRenameWorkspace={setRenameWorkspace}
@@ -268,31 +259,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onImport={importProject}
         onAddDevice={openEnrollment}
         listDirectory={client.listDeviceDirectory}
-      />
-      <CreateWorkspaceDialog
-        project={workspaceProject}
-        open={Boolean(workspaceProject)}
-        onOpenChange={(open) => !open && setWorkspaceProject(null)}
-        onCreate={createWorkspace}
-        listBranches={listProjectBranches}
-        takenBranches={
-          new Map(
-            workspaces
-              .filter((workspace) => workspace.projectId === workspaceProject?.id)
-              .map((workspace) => [
-                workspace.branch,
-                { hint: "已被检出", reason: `已被工作区「${workspace.name}」检出，同一分支不能检出到两个 worktree` },
-              ]),
-          )
-        }
-      />
-      <EnrollmentDialog
-        open={enrollmentOpen}
-        command={enrollCommand}
-        lastError={lastError}
-        onOpenChange={setEnrollmentOpen}
-        onRequest={client.requestEnrollmentKey}
-        onClear={client.clearEnrollmentCommand}
       />
       <WorkspaceRenameDialog
         workspace={renameWorkspace}

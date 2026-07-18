@@ -397,6 +397,23 @@ dialog button[aria-label="Close"] svg,
   flex-shrink: 0;
 }
 
+/* 全局（右键菜单等 Astryx 原生菜单）：进入键盘导航后（存在 focus-visible 的项），
+   抑制其它行的 hover 背景，避免键盘+悬停双高亮。取舍：键盘导航期间鼠标悬停无反馈，
+   直到点击/关闭菜单——组件库不透出受控高亮，纯 CSS 能做到的最优解。 */
+[role="menu"]:has([role="menuitem"]:focus-visible) [role="menuitem"]:hover:not(:focus-visible) {
+  background-color: transparent !important;
+}
+
+/* 分支菜单：行背景只由组件内单一高亮态驱动（键盘/鼠标移动共用），
+   禁掉原生 :hover 背景避免双高亮。!important 压 StyleX 提权，后者规则同特异性靠顺序覆盖。 */
+.coflux-branch-list [role="menuitem"]:hover {
+  background-color: transparent !important;
+}
+
+.coflux-branch-list [role="menuitem"].is-highlighted {
+  background-color: var(--color-overlay-hover) !important;
+}
+
 .coflux-import-row > * {
   position: relative;
   z-index: 1;

@@ -4,6 +4,7 @@ import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { ChevronRight, Folder, FolderOpen, FolderPlus, GitBranch, Monitor, Plus, Trash2, X } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
+import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import type { CofluxClient } from "@/client/store";
 import { cn } from "@/lib/utils";
 
@@ -12,7 +13,7 @@ type SidebarProps = {
   selectedWorkspaceId: string | null;
   onSelectWorkspace: (workspaceId: string) => void;
   onImportProject: () => void;
-  onCreateWorkspace: (project: Project) => void;
+  onCreateWorkspace: (project: Project, branch: string, createNew: boolean) => void;
   onRemoveProject: (project: Project) => void;
   onRemoveWorkspace: (workspace: Workspace) => void;
   onRenameWorkspace: (workspace: Workspace) => void;
@@ -27,6 +28,8 @@ export function Sidebar(props: SidebarProps) {
   const daemons = useStore(client.store, (state) => state.daemons);
   // 默认全部展开，只记折叠集合（新项目出现时自然是展开态）
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
+  /** 新建工作区菜单当前打开的项目（受控：+ 按钮与右键菜单项共用同一个锚点菜单） */
+  const [createMenuProjectId, setCreateMenuProjectId] = useState<string | null>(null);
 
   function toggleProject(projectId: string) {
     setCollapsedIds((prev) => {
@@ -36,6 +39,27 @@ export function Sidebar(props: SidebarProps) {
       return next;
     });
   }
+
+  /** 在项目主工作区里列本地分支（exec 走该项目所在 daemon） */
+  async function listProjectBranches(project: Project) {
+    const main = client.store.getState().workspaces.find((workspace) => workspace.projectId === project.id && workspace.isMain);
+    if (!main) return { ok: false, branches: [], error: "项目主工作区不存在" };
+    const result = await client.execInWorkspace(main.id, "git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+    if (!result.ok || result.exitCode !== 0) {
+      return { ok: false, branches: [], error: result.error || result.stderr.trim() || "获取分支列表失败" };
+    }
+    return { ok: true, branches: result.stdout.split("\n").map((line) => line.trim()).filter(Boolean), error: "" };
+  }
+
+  const takenBranchesOf = (projectId: string): Map<string, BranchTaken> =>
+    new Map(
+      workspaces
+        .filter((workspace) => workspace.projectId === projectId)
+        .map((workspace) => [
+          workspace.branch,
+          { hint: "已被检出", reason: `已被工作区「${workspace.name}」检出，同一分支不能检出到两个 worktree` },
+        ]),
+    );
 
   const workspacesOf = (projectId: string) =>
     workspaces
@@ -79,12 +103,12 @@ export function Sidebar(props: SidebarProps) {
                     label={`项目「${project.name}」操作`}
                     size="sm"
                     items={[
-                      { label: "新建工作区", onClick: () => props.onCreateWorkspace(project) },
+                      { label: "新建工作区", onClick: () => setCreateMenuProjectId(project.id) },
                       { type: "divider" },
                       { label: "移除项目", onClick: () => props.onRemoveProject(project) },
                     ]}
                   >
-                    <div className="group/row flex h-8 items-center rounded-md text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground">
+                    <div className="group/row flex h-8 items-center rounded-md text-secondary-foreground transition-colors hover:bg-accent/70 hover:text-foreground">
                       <button
                         className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left"
                         onClick={() => toggleProject(project.id)}
@@ -108,14 +132,28 @@ export function Sidebar(props: SidebarProps) {
                           />
                         ) : null}
                       </button>
-                      <div className="mr-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100">
-                        <button
-                          className="flex size-5 items-center justify-center rounded text-muted-foreground/50 transition-all hover:bg-muted hover:text-foreground"
-                          onClick={() => props.onCreateWorkspace(project)}
-                          title="新建工作区"
-                        >
-                          <Plus className="size-3" />
-                        </button>
+                      <div
+                        className={cn(
+                          "mr-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100",
+                          createMenuProjectId === project.id && "opacity-100",
+                        )}
+                      >
+                        <BranchMenu
+                          button={{
+                            label: "新建工作区",
+                            icon: <Plus className="size-3" />,
+                            isIconOnly: true,
+                            variant: "ghost",
+                            size: "sm",
+                            tooltip: "新建工作区",
+                            style: { color: "var(--muted-foreground)", height: 20, width: 20, minWidth: 20, paddingInline: 0 },
+                          }}
+                          isOpen={createMenuProjectId === project.id}
+                          onOpenChange={(open) => setCreateMenuProjectId(open ? project.id : null)}
+                          listBranches={() => listProjectBranches(project)}
+                          takenBranches={takenBranchesOf(project.id)}
+                          onPick={(branch, createNew) => props.onCreateWorkspace(project, branch, createNew)}
+                        />
                       </div>
                     </div>
                   </ContextMenu>
@@ -139,7 +177,7 @@ export function Sidebar(props: SidebarProps) {
                               "group/workspace relative flex h-7 items-center rounded-md transition-colors",
                               workspace.id === props.selectedWorkspaceId
                                 ? "bg-accent text-foreground"
-                                : "text-muted-foreground hover:bg-accent/70 hover:text-foreground",
+                                : "text-secondary-foreground hover:bg-accent/70 hover:text-foreground",
                             )}
                           >
                             <button
@@ -161,7 +199,7 @@ export function Sidebar(props: SidebarProps) {
                                 return label ? (
                                   <span
                                     className={cn(
-                                      "max-w-24 truncate text-xs text-muted-foreground/70",
+                                      "max-w-24 truncate text-xs text-muted-foreground",
                                       !workspace.isMain &&
                                         "group-hover/workspace:[mask-image:linear-gradient(to_left,transparent_18px,black_44px)]",
                                     )}
@@ -175,7 +213,7 @@ export function Sidebar(props: SidebarProps) {
                             {/* 主工作区不可删除：不渲染删除入口（服务端同样会拒绝，此处是入口层收敛） */}
                             {!workspace.isMain ? (
                               <button
-                                className="absolute right-1 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground/50 opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/workspace:opacity-100 focus-visible:opacity-100"
+                                className="absolute right-1 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/workspace:opacity-100 focus-visible:opacity-100"
                                 onClick={() => props.onRemoveWorkspace(workspace)}
                                 title="删除工作区"
                               >
@@ -219,7 +257,7 @@ export function Sidebar(props: SidebarProps) {
             {daemons.map((daemon) => (
               <div
                 key={daemon.daemonId}
-                className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-muted-foreground hover:bg-accent/70 hover:text-foreground"
+                className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground"
               >
                 <span className={cn("size-1.5 rounded-full", daemon.online ? "bg-success animate-pulse-alive" : "bg-muted-foreground/40")} />
                 <Monitor className="size-3.5 opacity-70" />
@@ -227,7 +265,7 @@ export function Sidebar(props: SidebarProps) {
                   {daemon.name}
                 </span>
                 <button
-                  className="flex size-5 items-center justify-center rounded text-muted-foreground/50 opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/device:opacity-100 focus-visible:opacity-100"
+                  className="flex size-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/device:opacity-100 focus-visible:opacity-100"
                   onClick={() => props.onRemoveDevice(daemon)}
                   title="移除设备"
                 >
