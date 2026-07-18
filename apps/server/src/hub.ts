@@ -214,6 +214,18 @@ export class Hub {
     this.daemons.set(info.daemonId, { ws: conn.ws, info, accountId });
     await this.store.touchDevice(info.daemonId, Date.now());
     this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: { ...info, online: true } } });
+    await this.pushWorkspaceList(info.daemonId);
+  }
+
+  /** 全量下发某设备的工作区清单（连接时 + 工作区增删时），worker 据此监视各 worktree 的 HEAD 分支 */
+  private async pushWorkspaceList(daemonId: DaemonId): Promise<void> {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) return;
+    const workspaces = await this.store.listWorkspacesByDaemon(daemonId);
+    this.sendDaemon(daemon, {
+      case: "workspaceList",
+      value: { workspaces: workspaces.map((ws) => ({ workspaceId: ws.id, path: ws.path })) },
+    });
   }
 
   /* ============================ Daemon 侧 ============================ */
@@ -300,6 +312,7 @@ export class Hub {
         log.info("project imported", { projectId: project.id, repoPath: project.repoPath, branch: value.branch });
         this.broadcast(project.accountId, { case: "projectCreated", value: { project } });
         this.broadcast(project.accountId, { case: "workspaceCreated", value: { workspace: main } });
+        await this.pushWorkspaceList(project.daemonId);
         break;
       }
       case "worktreeAdded": {
@@ -315,6 +328,19 @@ export class Hub {
         await this.store.createWorkspace(ws);
         log.info("worktree created", { workspaceId: ws.id, path: ws.path, branch: ws.branch });
         this.broadcast(ws.accountId, { case: "workspaceCreated", value: { workspace: ws } });
+        await this.pushWorkspaceList(ws.daemonId);
+        break;
+      }
+      // worker 观测到 worktree HEAD 变化：分支真相源在设备侧，DB 只做镜像 + 广播
+      case "workspaceBranch": {
+        const value = msg.payload.value;
+        const ws = await this.store.getWorkspace(value.workspaceId);
+        if (!ws || ws.daemonId !== conn.daemonId) return;
+        const branch = value.branch.trim();
+        if (!branch || branch === ws.branch) return;
+        // 未起名（name === 旧 branch）时 name 跟随新分支，保持"未命名"语义
+        const updated = await this.store.updateWorkspaceBranch(ws.id, branch, ws.name === ws.branch);
+        if (updated) this.broadcast(updated.accountId, { case: "workspaceCreated", value: { workspace: updated } });
         break;
       }
       case "sessionStarted": {
@@ -674,6 +700,7 @@ export class Hub {
         for (const id of removedTaskIds) this.broadcast(project.accountId, { case: "taskRemoved", value: { taskId: id } });
         for (const ws of workspaces) this.broadcast(project.accountId, { case: "workspaceRemoved", value: { workspaceId: ws.id } });
         this.broadcast(project.accountId, { case: "projectRemoved", value: { projectId: project.id } });
+        await this.pushWorkspaceList(project.daemonId);
         break;
       }
       case "workspaceCreate": {
@@ -719,6 +746,7 @@ export class Hub {
         if (daemon && project) this.sendDaemon(daemon, { case: "worktreeRemove", value: { repoPath: project.repoPath, worktreePath: ws.path } });
         for (const id of removed) this.broadcast(ws.accountId, { case: "taskRemoved", value: { taskId: id } });
         this.broadcast(ws.accountId, { case: "workspaceRemoved", value: { workspaceId: ws.id } });
+        await this.pushWorkspaceList(ws.daemonId);
         break;
       }
       case "workspaceSetName": {

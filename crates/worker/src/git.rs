@@ -14,6 +14,28 @@ async fn run_git(args: &[&str]) -> (bool, String, String) {
     }
 }
 
+/// 读 worktree 当前分支：解析 `.git`(文件) → gitdir 下的 HEAD。
+/// `ref: refs/heads/x` → x；detached → 短 sha。纯文件读取，不起 git 子进程。
+pub fn current_branch(worktree: &str) -> Option<String> {
+    let dotgit = std::path::Path::new(worktree).join(".git");
+    let gitdir = if dotgit.is_file() {
+        let content = std::fs::read_to_string(&dotgit).ok()?;
+        let p = content.trim().strip_prefix("gitdir:")?.trim().to_string();
+        let pb = std::path::PathBuf::from(&p);
+        if pb.is_absolute() { pb } else { std::path::Path::new(worktree).join(pb) }
+    } else {
+        dotgit
+    };
+    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(r) = head.strip_prefix("ref:") {
+        let r = r.trim();
+        Some(r.strip_prefix("refs/heads/").unwrap_or(r).to_string())
+    } else {
+        Some(head.chars().take(7).collect())
+    }
+}
+
 pub struct RepoInfo {
     pub ok: bool,
     pub repo_path: String,
