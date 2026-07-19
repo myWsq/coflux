@@ -135,6 +135,15 @@ message ClientFsRead {
   string path = 3;
 }
 
+// 终端剪贴板贴图（plan 014）：把图片字节上传到该工作区 worktree 内落盘，path 由 client 生成
+// （形如 ".coflux/pastes/paste-<ts>-<rand>.<ext>"），data 为原始（或客户端已压缩过的）图片字节。
+message ClientFsWrite {
+  string request_id = 1;
+  string workspace_id = 2;
+  string path = 3;
+  bytes data = 4;
+}
+
 message ClientToServer {
   oneof payload {
     ClientAuth client_auth = 1;
@@ -159,6 +168,7 @@ message ClientToServer {
     ClientExec client_exec = 20;
     ClientFsList client_fs_list = 21;
     ClientFsRead client_fs_read = 22;
+    ClientFsWrite client_fs_write = 25;
     // 数据面（高频）
     PtyInput pty_input = 23;
     WorkspaceSetName workspace_set_name = 24;
@@ -279,6 +289,7 @@ message ServerToClient {
     FsListed fs_listed = 19;
     FsReadResult fs_read_result = 20;
     ServerError error = 21;
+    FsWriteResult fs_write_result = 23;
     // 数据面（高频）
     PtyOutput pty_output = 22;
   }

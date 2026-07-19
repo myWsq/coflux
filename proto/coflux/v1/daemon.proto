@@ -93,6 +93,7 @@ message DaemonToServer {
     ExecResult exec_result = 12;
     FsListed fs_listed = 13;
     FsReadResult fs_read_result = 14;
+    FsWriteResult fs_write_result = 19;
     // 数据面（高频）
     PtyOutput pty_output = 15;
     PtyReplay pty_replay = 16;
@@ -215,6 +216,14 @@ message FsRead {
   string path = 3;
 }
 
+// 通用原语：写文件（root 为锚定根，path 为相对路径，daemon 校验不越界；父目录不存在则创建）
+message FsWrite {
+  string request_id = 1;
+  string root = 2;
+  string path = 3;
+  bytes data = 4;
+}
+
 message ServerToDaemon {
   oneof payload {
     DaemonEnrolled daemon_enrolled = 1;
@@ -234,6 +243,7 @@ message ServerToDaemon {
     ExecRun exec_run = 15;
     FsList fs_list = 16;
     FsRead fs_read = 17;
+    FsWrite fs_write = 21;
     // 数据面（高频）
     PtyInput pty_input = 18;
     ProxyData proxy_data = 19;
