@@ -42,6 +42,14 @@ public struct Coflux_V1_DaemonEnroll: Sendable {
 
   public var platform: String = String()
 
+  /// 热更新编排（plan 015）：worker/supervisor 当前版本 + CPU 架构（std::env::consts::ARCH）。
+  /// 旧 daemon 不带这三个字段 → server 收到空串，按"不上报"处理（不参与自动推送比对）。
+  public var workerVersion: String = String()
+
+  public var supervisorVersion: String = String()
+
+  public var arch: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -53,6 +61,12 @@ public struct Coflux_V1_DaemonAuth: Sendable {
   // methods supported on all messages.
 
   public var deviceToken: String = String()
+
+  public var workerVersion: String = String()
+
+  public var supervisorVersion: String = String()
+
+  public var arch: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -70,6 +84,12 @@ public struct Coflux_V1_DaemonEnrollRequest: Sendable {
   public var host: String = String()
 
   public var platform: String = String()
+
+  public var workerVersion: String = String()
+
+  public var supervisorVersion: String = String()
+
+  public var arch: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1014,7 +1034,7 @@ fileprivate let _protobuf_package = "coflux.v1"
 
 extension Coflux_V1_DaemonEnroll: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonEnroll"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}enrollment_key\0\u{1}name\0\u{1}host\0\u{1}platform\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}enrollment_key\0\u{1}name\0\u{1}host\0\u{1}platform\0\u{3}worker_version\0\u{3}supervisor_version\0\u{1}arch\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1026,6 +1046,9 @@ extension Coflux_V1_DaemonEnroll: SwiftProtobuf.Message, SwiftProtobuf._MessageI
       case 2: try { try decoder.decodeSingularStringField(value: &self.name) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.host) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.platform) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.workerVersion) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.supervisorVersion) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.arch) }()
       default: break
       }
     }
@@ -1044,6 +1067,15 @@ extension Coflux_V1_DaemonEnroll: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     if !self.platform.isEmpty {
       try visitor.visitSingularStringField(value: self.platform, fieldNumber: 4)
     }
+    if !self.workerVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.workerVersion, fieldNumber: 5)
+    }
+    if !self.supervisorVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.supervisorVersion, fieldNumber: 6)
+    }
+    if !self.arch.isEmpty {
+      try visitor.visitSingularStringField(value: self.arch, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1052,6 +1084,9 @@ extension Coflux_V1_DaemonEnroll: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     if lhs.name != rhs.name {return false}
     if lhs.host != rhs.host {return false}
     if lhs.platform != rhs.platform {return false}
+    if lhs.workerVersion != rhs.workerVersion {return false}
+    if lhs.supervisorVersion != rhs.supervisorVersion {return false}
+    if lhs.arch != rhs.arch {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1059,7 +1094,7 @@ extension Coflux_V1_DaemonEnroll: SwiftProtobuf.Message, SwiftProtobuf._MessageI
 
 extension Coflux_V1_DaemonAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonAuth"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}device_token\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}device_token\0\u{3}worker_version\0\u{3}supervisor_version\0\u{1}arch\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1068,6 +1103,9 @@ extension Coflux_V1_DaemonAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.deviceToken) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.workerVersion) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.supervisorVersion) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.arch) }()
       default: break
       }
     }
@@ -1077,11 +1115,23 @@ extension Coflux_V1_DaemonAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     if !self.deviceToken.isEmpty {
       try visitor.visitSingularStringField(value: self.deviceToken, fieldNumber: 1)
     }
+    if !self.workerVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.workerVersion, fieldNumber: 2)
+    }
+    if !self.supervisorVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.supervisorVersion, fieldNumber: 3)
+    }
+    if !self.arch.isEmpty {
+      try visitor.visitSingularStringField(value: self.arch, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Coflux_V1_DaemonAuth, rhs: Coflux_V1_DaemonAuth) -> Bool {
     if lhs.deviceToken != rhs.deviceToken {return false}
+    if lhs.workerVersion != rhs.workerVersion {return false}
+    if lhs.supervisorVersion != rhs.supervisorVersion {return false}
+    if lhs.arch != rhs.arch {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1089,7 +1139,7 @@ extension Coflux_V1_DaemonAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Coflux_V1_DaemonEnrollRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonEnrollRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}host\0\u{1}platform\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}host\0\u{1}platform\0\u{3}worker_version\0\u{3}supervisor_version\0\u{1}arch\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1100,6 +1150,9 @@ extension Coflux_V1_DaemonEnrollRequest: SwiftProtobuf.Message, SwiftProtobuf._M
       case 1: try { try decoder.decodeSingularStringField(value: &self.name) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.host) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.platform) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.workerVersion) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.supervisorVersion) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.arch) }()
       default: break
       }
     }
@@ -1115,6 +1168,15 @@ extension Coflux_V1_DaemonEnrollRequest: SwiftProtobuf.Message, SwiftProtobuf._M
     if !self.platform.isEmpty {
       try visitor.visitSingularStringField(value: self.platform, fieldNumber: 3)
     }
+    if !self.workerVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.workerVersion, fieldNumber: 4)
+    }
+    if !self.supervisorVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.supervisorVersion, fieldNumber: 5)
+    }
+    if !self.arch.isEmpty {
+      try visitor.visitSingularStringField(value: self.arch, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1122,6 +1184,9 @@ extension Coflux_V1_DaemonEnrollRequest: SwiftProtobuf.Message, SwiftProtobuf._M
     if lhs.name != rhs.name {return false}
     if lhs.host != rhs.host {return false}
     if lhs.platform != rhs.platform {return false}
+    if lhs.workerVersion != rhs.workerVersion {return false}
+    if lhs.supervisorVersion != rhs.supervisorVersion {return false}
+    if lhs.arch != rhs.arch {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -13,6 +13,9 @@ message DaemonInfo {
   string host = 3;
   string platform = 4;
   bool online = 5;
+  // 热更新编排（plan 015）：在线连接的内存态版本，供 web 展示；离线设备无此信息（空串）。
+  string worker_version = 6;
+  string supervisor_version = 7;
 }
 
 message Project {

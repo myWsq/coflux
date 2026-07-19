@@ -63,11 +63,17 @@ interface DaemonInfoData {
   host: string;
   platform: string;
   online: boolean;
+  /** 热更新编排（plan 015）：在线连接握手时上报，供 web 展示 + server 自动升级比对；
+   * 离线设备（来自 devices 表）无此信息——版本不入库，纯在线连接内存态，空串即"未知"。 */
+  workerVersion: string;
+  supervisorVersion: string;
 }
 
 export interface DaemonConn {
   info: DaemonInfoData;
   accountId: AccountId;
+  /** 握手上报的 CPU 架构（std::env::consts::ARCH），仅供自动升级编排做 target 映射，不下发给 web。 */
+  arch: string;
   ws: WebSocket;
 }
 export interface ClientConn {
@@ -95,6 +101,9 @@ interface PendingAuthorization {
   name: string;
   host: string;
   platform: string;
+  workerVersion: string;
+  supervisorVersion: string;
+  arch: string;
   createdAt: number;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -129,6 +138,10 @@ export class Hub {
   private pendingRelays = new PendingRegistry<ClientConn, { clientRequestId: string; kind: RelayKind }>(config.pendingTimeoutMs);
   /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
+
+  /** daemon 握手完成的回调（plan 015 自动更新编排挂载点）：index.ts 在 Hub 与编排单元都构造完后
+   * 赋值，避免 hub.ts 反向 import 编排模块——依赖倒置，同 tunnels 的 sendControl 回调先例。 */
+  onDaemonHandshake?: (daemonId: DaemonId) => void;
 
   /** 端口转发（plan 006）：路由表 + 门禁（code/cookie）+ 隧道注册表。三者只做机制，
    * 归属/账号校验都在 hub 这层（下面的 handlePortsUpdate/handleProxyIssueAuth/dropSession）。 */
@@ -190,7 +203,7 @@ export class Hub {
     for (const dev of await this.store.listDevices(accountId)) {
       if (seen.has(dev.id)) continue;
       seen.add(dev.id);
-      list.push({ daemonId: dev.id, name: dev.name, host: dev.host, platform: dev.platform, online: false });
+      list.push({ daemonId: dev.id, name: dev.name, host: dev.host, platform: dev.platform, online: false, workerVersion: "", supervisorVersion: "" });
     }
     return list;
   }
@@ -204,7 +217,7 @@ export class Hub {
     return true;
   }
 
-  private async registerDaemonConn(conn: DaemonCtx, info: DaemonInfoData, accountId: AccountId): Promise<void> {
+  private async registerDaemonConn(conn: DaemonCtx, info: DaemonInfoData, accountId: AccountId, arch: string): Promise<void> {
     const prev = this.daemons.get(info.daemonId);
     if (prev && prev.ws !== conn.ws) {
       try {
@@ -215,10 +228,12 @@ export class Hub {
     }
     conn.daemonId = info.daemonId;
     conn.accountId = accountId;
-    this.daemons.set(info.daemonId, { ws: conn.ws, info, accountId });
+    this.daemons.set(info.daemonId, { ws: conn.ws, info, accountId, arch });
     await this.store.touchDevice(info.daemonId, Date.now());
     this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: { ...info, online: true } } });
     await this.pushWorkspaceList(info.daemonId);
+    // 握手完成时机（plan 015）：给自动更新编排一个立即比对本台 daemon 的机会，不必等下一次轮询。
+    this.onDaemonHandshake?.(info.daemonId);
   }
 
   /** 全量下发某设备的工作区清单（连接时 + 工作区增删时），worker 据此监视各 worktree 的 HEAD 分支 */
@@ -253,7 +268,7 @@ export class Hub {
           if (conn.pendingAuthToken === token) conn.pendingAuthToken = undefined;
         }, config.authorizeTtlMs);
         (timer as { unref?: () => void }).unref?.();
-        this.pendingAuthorizations.set(token, { token, conn, name: value.name, host: value.host, platform: value.platform, createdAt, timer });
+        this.pendingAuthorizations.set(token, { token, conn, name: value.name, host: value.host, platform: value.platform, workerVersion: value.workerVersion, supervisorVersion: value.supervisorVersion, arch: value.arch, createdAt, timer });
         conn.pendingAuthToken = token;
         this.sendRaw(conn.ws, { case: "daemonAuthorizePending", value: { url: `${config.webUrl}/authorize/${token}`, expiresAt: createdAt + config.authorizeTtlMs } });
         log.info("daemon authorize requested", { name: value.name, host: value.host });
@@ -278,7 +293,7 @@ export class Hub {
         await this.store.createDevice({ id: daemonId, accountId, name: value.name, host: value.host, platform: value.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: false });
         log.info("daemon enrolled", { daemonId, name: value.name, host: value.host });
         this.sendRaw(conn.ws, { case: "daemonEnrolled", value: { daemonId, deviceToken } });
-        await this.registerDaemonConn(conn, { daemonId, name: value.name, host: value.host, platform: value.platform, online: true }, accountId);
+        await this.registerDaemonConn(conn, { daemonId, name: value.name, host: value.host, platform: value.platform, online: true, workerVersion: value.workerVersion, supervisorVersion: value.supervisorVersion }, accountId, value.arch);
         break;
       }
       case "daemonAuth": {
@@ -291,7 +306,7 @@ export class Hub {
         }
         log.info("daemon authed", { daemonId: device.id, name: device.name });
         this.sendRaw(conn.ws, { case: "daemonAuthed", value: { daemonId: device.id } });
-        await this.registerDaemonConn(conn, { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true }, device.accountId);
+        await this.registerDaemonConn(conn, { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true, workerVersion: value.workerVersion, supervisorVersion: value.supervisorVersion }, device.accountId, value.arch);
         break;
       }
       case "daemonResync": {
@@ -609,7 +624,7 @@ export class Hub {
 
     const device = await this.store.getDevice(daemonId);
     if (device && !device.revoked) {
-      this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: { daemonId, name: device.name, host: device.host, platform: device.platform, online: false } } });
+      this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: { daemonId, name: device.name, host: device.host, platform: device.platform, online: false, workerVersion: "", supervisorVersion: "" } } });
     } else {
       this.broadcast(accountId, { case: "daemonRemoved", value: { daemonId } });
     }
@@ -1116,7 +1131,7 @@ export class Hub {
     await this.store.createDevice({ id: daemonId, accountId, name: p.name, host: p.host, platform: p.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: false });
     log.info("daemon authorized", { daemonId, name: p.name, host: p.host, accountId });
     this.sendRaw(p.conn.ws, { case: "daemonEnrolled", value: { daemonId, deviceToken } });
-    await this.registerDaemonConn(p.conn, { daemonId, name: p.name, host: p.host, platform: p.platform, online: true }, accountId);
+    await this.registerDaemonConn(p.conn, { daemonId, name: p.name, host: p.host, platform: p.platform, online: true, workerVersion: p.workerVersion, supervisorVersion: p.supervisorVersion }, accountId, p.arch);
     this.sendClient(client, { case: "deviceAuthorized", value: {} });
   }
 
