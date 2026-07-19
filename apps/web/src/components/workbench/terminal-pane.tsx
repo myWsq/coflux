@@ -165,6 +165,11 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     const fit = () => {
       if (!liveRef.current.active || !host.isConnected) return;
+      // 工作区保活模式下被 display:none 隐藏时尺寸为 0：FitAddon 会把终端钳到 2×1
+      // 并经 onResize 把 2×1 传给远程 PTY（远端 TUI 按 2 列重排，切回闪残影、污染镜像）。
+      // 0 尺寸一律不 fit，切回显示后 WorkspaceTerminal 的 rAF fit 会用真实尺寸补上。
+      const rect = host.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
       try {
         fitAddon.fit();
       } catch {
