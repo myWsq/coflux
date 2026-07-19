@@ -117,7 +117,7 @@ type OpData =
   | { kind: "project.import"; name: string }
   | { kind: "worktree.add"; projectId: ProjectId; workspaceId: WorkspaceId; name: string };
 
-type RelayKind = "exec" | "fs.list" | "fs.read";
+type RelayKind = "exec" | "fs.list" | "fs.read" | "fs.write";
 
 export class Hub {
   private daemons = new Map<DaemonId, DaemonConn>();
@@ -168,7 +168,8 @@ export class Hub {
   private relayError(client: ClientConn, kind: RelayKind, clientRequestId: string, message: string) {
     if (kind === "exec") this.sendClient(client, { case: "execResult", value: { requestId: clientRequestId, ok: false, exitCode: -1, stdout: "", stderr: "", error: message } });
     else if (kind === "fs.list") this.sendClient(client, { case: "fsListed", value: { requestId: clientRequestId, ok: false, entries: [], error: message } });
-    else this.sendClient(client, { case: "fsReadResult", value: { requestId: clientRequestId, ok: false, content: "", error: message } });
+    else if (kind === "fs.read") this.sendClient(client, { case: "fsReadResult", value: { requestId: clientRequestId, ok: false, content: "", error: message } });
+    else this.sendClient(client, { case: "fsWriteResult", value: { requestId: clientRequestId, ok: false, error: message } });
   }
   /** 把 client 设为某会话的控制端；若原控制端是别人，则踢出并通知（handoff 接管） */
   private setHolder(s: RuntimeSession, client: ClientConn) {
@@ -454,6 +455,14 @@ export class Hub {
         if (!p || p.daemonId !== conn.daemonId) return;
         this.pendingRelays.take(value.requestId);
         this.sendClient(p.client, { case: "fsReadResult", value: { ...value, requestId: p.data.clientRequestId } });
+        break;
+      }
+      case "fsWriteResult": {
+        const value = msg.payload.value;
+        const p = this.pendingRelays.get(value.requestId);
+        if (!p || p.daemonId !== conn.daemonId) return;
+        this.pendingRelays.take(value.requestId);
+        this.sendClient(p.client, { case: "fsWriteResult", value: { ...value, requestId: p.data.clientRequestId } });
         break;
       }
     }
@@ -893,6 +902,18 @@ export class Hub {
         const reqId = randomUUID();
         this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: value.requestId, kind: "fs.read" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
         this.sendDaemon(this.daemons.get(ws.daemonId)!, { case: "fsRead", value: { requestId: reqId, root: ws.path, path: value.path } });
+        break;
+      }
+      case "clientFsWrite": {
+        const value = msg.payload.value;
+        // 终端剪贴板贴图（plan 014）：字节经中继落到该工作区 worktree 内，root 恒为 ws.path（与
+        // exec/fs.read/fs.list 同一锚定语义），worker 侧再校验一次防越界（server 这层只做归属/在线校验）。
+        const ws = await this.workspaceForClient(client, value.workspaceId);
+        if (!ws) return void this.relayError(client, "fs.write", value.requestId, "工作区不存在或不属于本账号");
+        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.write", value.requestId, "daemon 不在线");
+        const reqId = randomUUID();
+        this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: value.requestId, kind: "fs.write" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
+        this.sendDaemon(this.daemons.get(ws.daemonId)!, { case: "fsWrite", value: { requestId: reqId, root: ws.path, path: value.path, data: value.data } });
         break;
       }
     }

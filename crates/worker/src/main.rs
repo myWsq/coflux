@@ -678,6 +678,13 @@ async fn route_authed(msg: server_to_daemon::Payload, cfg: &Arc<Config>, to_serv
                 send_d2s(&to_server, daemon_to_server::Payload::FsReadResult(wire::FsReadResult { request_id, ok, content, error })).await;
             });
         }
+        server_to_daemon::Payload::FsWrite(wire::FsWrite { request_id, root, path, data }) => {
+            let to_server = to_server_tx.clone();
+            tokio::spawn(async move {
+                let (ok, written_path, error) = ops::write_file(&root, &path, &data).await;
+                send_d2s(&to_server, daemon_to_server::Payload::FsWriteResult(wire::FsWriteResult { request_id, ok, path: written_path, error })).await;
+            });
+        }
         // 数据面（高频）：pty.input → 转给 supervisor（复用 UDS 内部帧格式，frame.rs 未变，
         // 这条链路本次不动）；proxy.data → 隧道模块按 connId 转发到对应 TCP 连接（不再经过
         // 任何"帧"编解码，protobuf 信封已经是唯一的 wire 表示）。
