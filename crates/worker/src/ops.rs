@@ -117,19 +117,14 @@ fn safe_resolve_write_target(root: &str, rel: &str) -> Option<(PathBuf, String, 
     Some((dir, file_name, clean_rel))
 }
 
-/// 目录自我托管：确保带一个内容为 "*" 的 .gitignore（自我忽略，worktree 场景无 commondir 问题，
-/// 不碰 `.git`）；顺手清理目录内 mtime 超过 7 天的陈旧文件（.gitignore 与刚落盘的文件除外）。
+/// 清理目录内 mtime 超过 7 天的陈旧文件（刚落盘的文件与 just_skip 除外）。
 /// 低频操作，纯尽力而为——任何一步失败都不影响本次写入结果。
-fn housekeep_write_dir(dir: &Path, just_written: &str) {
-    let gitignore = dir.join(".gitignore");
-    if !gitignore.exists() {
-        let _ = std::fs::write(&gitignore, "*\n");
-    }
+fn cleanup_stale_files(dir: &Path, just_written: &str, just_skip: &str) {
     let Some(cutoff) = SystemTime::now().checked_sub(WRITE_DIR_CLEANUP_AGE) else { return };
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for entry in rd.flatten() {
         let name = entry.file_name();
-        if name == ".gitignore" || name.to_string_lossy() == just_written {
+        if name.to_string_lossy() == just_written || (!just_skip.is_empty() && name == just_skip) {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
@@ -142,11 +137,47 @@ fn housekeep_write_dir(dir: &Path, just_written: &str) {
     }
 }
 
-/// 写文件（plan 014 终端贴图上传落盘）：root 锚定 + 防越界 + 父目录按需创建；
-/// 成功回带清洗后的 worktree 相对路径（真相在 worker 侧，client 不自行拼装）。
-pub async fn write_file(root: &str, rel: &str, data: &[u8]) -> (bool, Option<String>, Option<String>) {
+/// root 锚定目录自我托管：确保带一个内容为 "*" 的 .gitignore（自我忽略，worktree 场景无
+/// commondir 问题，不碰 `.git`），再顺手清理陈旧文件。temp 目录（无 git）不需要 .gitignore，
+/// 见 `write_file` 里 temp 分支直接调用 `cleanup_stale_files`。
+fn housekeep_write_dir(dir: &Path, just_written: &str) {
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.exists() {
+        let _ = std::fs::write(&gitignore, "*\n");
+    }
+    cleanup_stale_files(dir, just_written, ".gitignore");
+}
+
+/// temp 模式的落盘目标解析：忽略 root 锚定语义，落到 daemon 侧系统临时目录
+/// `std::env::temp_dir()/coflux-pastes/`（按需创建）；rel 必须是单段文件名——
+/// 拒绝包含 '/' 、为空、为 "." 或 ".." 的输入（防目录穿越、防写到临时目录之外）。
+fn safe_resolve_temp_target(rel: &str) -> Option<(PathBuf, String)> {
+    if rel.is_empty() || rel == "." || rel == ".." || rel.contains('/') {
+        return None;
+    }
+    let base = std::env::temp_dir().join("coflux-pastes");
+    std::fs::create_dir_all(&base).ok()?;
+    let real_base = std::fs::canonicalize(&base).ok()?;
+    Some((real_base, rel.to_string()))
+}
+
+/// 写文件（plan 014 终端贴图上传落盘）。temp=false：root 锚定 + 防越界 + 父目录按需创建，
+/// 成功回带清洗后的 worktree 相对路径。temp=true：落 daemon 侧系统临时目录，rel 须为单段
+/// 文件名，成功回带绝对路径（真相均在 worker 侧，client 不自行拼装）。
+pub async fn write_file(root: &str, rel: &str, data: &[u8], temp: bool) -> (bool, Option<String>, Option<String>) {
     if data.len() as u64 > MAX_WRITE_BYTES {
         return (false, None, Some("文件过大".into()));
+    }
+    if temp {
+        let Some((dir, file_name)) = safe_resolve_temp_target(rel) else {
+            return (false, None, Some("路径越界或非法".into()));
+        };
+        let full = dir.join(&file_name);
+        if let Err(e) = std::fs::write(&full, data) {
+            return (false, None, Some(e.to_string()));
+        }
+        cleanup_stale_files(&dir, &file_name, "");
+        return (true, Some(full.to_string_lossy().into_owned()), None);
     }
     let Some((dir, file_name, clean_rel)) = safe_resolve_write_target(root, rel) else {
         return (false, None, Some("路径越界或非法".into()));
