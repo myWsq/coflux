@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 /// supervisor 把 UDS 路径经此环境变量传给 worker 子进程
 pub const SUPERVISOR_SOCK_ENV: &str = "COFLUX_SUPERVISOR_SOCK";
 
+/// 热更新编排（plan 015）：supervisor spawn worker 时经这两个环境变量传入"当前跑的 worker 版本"
+/// 与"supervisor 自身版本"，worker 握手消息据此上报（worker 完全不知自身版本，纯 supervisor 侧概念）。
+pub const WORKER_VERSION_ENV: &str = "COFLUX_WORKER_VERSION";
+pub const SUPERVISOR_VERSION_ENV: &str = "COFLUX_SUPERVISOR_VERSION";
+
 /// resync.list 携带的存活会话快照（含 pid）。与 wire::SessionRef（daemon→server resync，
 /// 不含 pid）是两个独立类型：worker 重启后要靠 pid 找到 PTY 进程树根做端口探测，
 /// 而 daemon→server 的 resync 形状已冻结、不需要 pid。
