@@ -48,11 +48,13 @@ git push origin v1.2.3
 
 ## 升级是怎么落地的
 
-1. server 读 Release 的 `manifest.json`，按 daemon 平台/arch 选对应条目，下发 `worker.upgrade{version,url,sha256,signature}`。
-2. supervisor 下载 → 校 sha256 → 验签（内置公钥）→ 落 `~/.coflux/workers/<version>/` → 观察期切换；**验签不过则拒绝、保持当前版本**（见 `tests/src/signed-upgrade.test.mjs`）。
-3. worker 换版本，PTY 会话在 supervisor 不受影响（热升级）。
+1. server 轮询 GitHub `/releases/latest`（天然排除 prerelease/draft）+ 该 release 的 `manifest.json`，缓存最新版本号与每 target 的 `url`/`sha256`/`signature`。
+2. 每台在线 daemon 握手时（上报 `workerVersion`/`platform`/`arch`）立即比对一次；轮询到新 release 后再对全部在线 daemon 扫一遍：版本不等（且非空）、按 platform+arch 映射到 manifest 里的 target，就下发 `worker.upgrade{version,url,sha256,signature}`——不做 semver 比较，不等即推。
+3. supervisor 下载 → 校 sha256 → 验签（内置公钥）→ 落 `~/.coflux/workers/<version>/` → 观察期切换；**验签不过则拒绝、保持当前版本**（见 `tests/src/signed-upgrade.test.mjs`）。
+4. worker 换版本，PTY 会话在 supervisor 不受影响（热升级）。
+5. 升级失败会导致 supervisor 回滚、worker 重连并重新上报旧版本；server 按 `(daemonId, version)` 记推送次数做退避（`COFLUX_AUTOUPDATE_MAX_ATTEMPTS`/`COFLUX_AUTOUPDATE_COOLDOWN_MS`），避免"回滚→再推→再失败"无限循环（见 `tests/src/auto-update.test.mjs`）。
 
-> **server 端"读 manifest + 自动决定推送"是后续项**——升级机制 + 手动触发（`client.upgradeDaemon`）已就绪；自动编排需要 daemon 上报 arch（小协议补充）。
+未设 `COFLUX_AUTOUPDATE_REPO` 时该特性整体关闭，行为与现状完全一致；手动触发（`client.upgradeDaemon`）不受影响，仍是灰度/紧急场景的兜底手段。相关 env（均在 `apps/server/src/config.ts`）：`COFLUX_AUTOUPDATE_API_BASE`（默认 `https://api.github.com`）、`COFLUX_AUTOUPDATE_REPO`（`owner/repo`）、`COFLUX_AUTOUPDATE_POLL_MS`（默认 10 分钟）、`COFLUX_AUTOUPDATE_MAX_ATTEMPTS`（默认 3）、`COFLUX_AUTOUPDATE_COOLDOWN_MS`（默认 1 小时）。supervisor 版本随 web 设备 tooltip 一并可见，但**不**自动升级（见下）。
 
 ## 升级 supervisor 自身
 
