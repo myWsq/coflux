@@ -65,7 +65,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       cursorBlink: true,
       cursorStyle: "bar",
       fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
-      fontSize: 13,
+      fontSize: 12, // 等宽字体同 px 视觉大于 UI sans（页面 base 13px），降 1px 找平衡（VS Code 同款配比）
       lineHeight: 1.25,
       scrollback: 10_000,
       theme: {
