@@ -127,7 +127,9 @@ message FsReadResult {
 message FsWriteResult {
   string request_id = 1;
   bool ok = 2;
-  // 成功时为落盘后的 worktree 相对路径（worker 侧确定的真相；client 直接拿它注入 PTY，不自行拼装）
+  // 成功时为落盘路径，worker 侧确定的真相，client 直接拿它注入 PTY，不自行拼装：
+  // root 锚定模式（temp=false）下为 worktree 相对路径；temp 模式（temp=true）下为
+  // daemon 侧系统临时目录的绝对路径。
   optional string path = 3;
   optional string error = 4;
 }

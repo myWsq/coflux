@@ -482,7 +482,9 @@ export type FsWriteResult = Message<"coflux.v1.FsWriteResult"> & {
   ok: boolean;
 
   /**
-   * 成功时为落盘后的 worktree 相对路径（worker 侧确定的真相；client 直接拿它注入 PTY，不自行拼装）
+   * 成功时为落盘路径，worker 侧确定的真相，client 直接拿它注入 PTY，不自行拼装：
+   * root 锚定模式（temp=false）下为 worktree 相对路径；temp 模式（temp=true）下为
+   * daemon 侧系统临时目录的绝对路径。
    *
    * @generated from field: optional string path = 3;
    */
