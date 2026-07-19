@@ -67,6 +67,33 @@ test("主工作区不可删除", async () => {
   c.close();
 });
 
+test("关闭终端：运行中任务 taskStop+taskRemove 连发，删除后不复活", async () => {
+  const repo = mkRepo();
+  repos.push(repo);
+  const c = stack.makeClient();
+  await c.authSubscribe();
+  c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
+  const main = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main ws");
+
+  c.send({ case: "taskCreate", workspaceId: main.workspace.id, title: "rm" });
+  const idle = await c.waitFor((m) => m.case === "taskUpdated" && m.task.title === "rm", "idle");
+  c.send({ case: "taskStart", taskId: idle.task.id, cols: 80, rows: 24 });
+  await c.waitFor((m) => m.case === "taskUpdated" && m.task.id === idle.task.id && m.task.status === TaskStatus.RUNNING, "running");
+
+  // 复刻旧 web 的连发（transport 不串行同连接消息，两个 handler 并发跑）：
+  // 曾触发 updateTask 先读后写把已删行复活广播成僵尸 Tab
+  c.send({ case: "taskStop", taskId: idle.task.id });
+  c.send({ case: "taskRemove", taskId: idle.task.id });
+  await c.waitFor((m) => m.case === "taskRemoved" && m.taskId === idle.task.id, "removed");
+
+  // 留出 daemon sessionExit 回流窗口：removed 之后任何该 task 的 taskUpdated 都是复活 bug
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  const removedAt = c.log.findIndex((m) => m.case === "taskRemoved" && m.taskId === idle.task.id);
+  const resurrected = c.log.slice(removedAt + 1).find((m) => m.case === "taskUpdated" && m.task.id === idle.task.id);
+  assert.equal(resurrected, undefined, "已删除任务不得复活");
+  c.close();
+});
+
 test("添加设备：web 生成登记密钥，新 daemon 可用其登记", async () => {
   const c = stack.makeClient();
   await c.authSubscribe();

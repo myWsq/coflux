@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import type { FsWriteResult } from "@/client/store";
@@ -141,6 +142,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+    terminal.loadAddon(new WebLinksAddon()); // 输出中的 URL 可点击（默认 window.open 新开 Tab）
     terminal.open(host);
     terminalRef.current = terminal;
 
