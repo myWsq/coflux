@@ -327,6 +327,12 @@ public struct Coflux_V1_TaskAttach: Sendable {
 
   public var taskID: String = String()
 
+  /// 客户端终端尺寸：镜像慢路径（replay prime）按此尺寸解析历史字节。
+  /// 缺省（0）时 server 回落 80×24。
+  public var cols: UInt32 = 0
+
+  public var rows: UInt32 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1767,7 +1773,7 @@ extension Coflux_V1_TaskStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
 
 extension Coflux_V1_TaskAttach: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskAttach"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0\u{1}cols\0\u{1}rows\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1776,6 +1782,8 @@ extension Coflux_V1_TaskAttach: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.cols) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.rows) }()
       default: break
       }
     }
@@ -1785,11 +1793,19 @@ extension Coflux_V1_TaskAttach: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     if !self.taskID.isEmpty {
       try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 1)
     }
+    if self.cols != 0 {
+      try visitor.visitSingularUInt32Field(value: self.cols, fieldNumber: 2)
+    }
+    if self.rows != 0 {
+      try visitor.visitSingularUInt32Field(value: self.rows, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Coflux_V1_TaskAttach, rhs: Coflux_V1_TaskAttach) -> Bool {
     if lhs.taskID != rhs.taskID {return false}
+    if lhs.cols != rhs.cols {return false}
+    if lhs.rows != rhs.rows {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

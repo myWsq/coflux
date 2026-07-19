@@ -795,10 +795,11 @@ export class Hub {
         break;
       }
       case "taskAttach": {
-        const task = await this.requireTask(client, msg.payload.value.taskId);
+        const value = msg.payload.value;
+        const task = await this.requireTask(client, value.taskId);
         if (!task) return;
         const s = task.sessionId ? this.sessions.get(task.sessionId) : undefined;
-        if (task.status === TaskStatus.RUNNING && s && !s.closing) this.attachSession(client, s.sessionId, 80, 24); // TaskAttach 无尺寸字段；attach 后 web 会 fit+ptyResize 收敛
+        if (task.status === TaskStatus.RUNNING && s && !s.closing) this.attachSession(client, s.sessionId, value.cols, value.rows);
         else this.sendClient(client, { case: "error", value: { message: "任务未在运行，无法 attach" } });
         break;
       }

@@ -762,6 +762,12 @@ pub struct TaskStart {
 pub struct TaskAttach {
     #[prost(string, tag="1")]
     pub task_id: ::prost::alloc::string::String,
+    /// 客户端终端尺寸：镜像慢路径（replay prime）按此尺寸解析历史字节。
+    /// 缺省（0）时 server 回落 80×24。
+    #[prost(uint32, tag="2")]
+    pub cols: u32,
+    #[prost(uint32, tag="3")]
+    pub rows: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TaskStop {
