@@ -429,11 +429,13 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
             key={task.id}
             taskId={task.id}
             sessionId={task.sessionId ?? null}
+            workspaceId={workspaceId}
             active={task.id === activeTaskId}
             controlState={controlStates[task.id] ?? (task.status === TaskStatus.RUNNING ? "attaching" : "stopped")}
             registerSessionConsumer={client.registerSessionConsumer}
             sendInput={client.sendInput}
             sendResize={(sessionId, cols, rows) => client.send({ case: "ptyResize", value: { sessionId, cols, rows } })}
+            sendFsWrite={client.sendFsWrite}
             onReady={handleTerminalReady}
             onDispose={handleTerminalDispose}
             onSessionReady={handleSessionReady}
