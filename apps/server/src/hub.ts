@@ -50,6 +50,7 @@ import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
 import { PendingRegistry } from "./pending.js";
 import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
+import { SessionMirror } from "./mirror.js";
 import type { SupabaseVerifier, SupabaseIdentity } from "./auth.js";
 
 const log = createLogger("hub");
@@ -108,6 +109,8 @@ interface RuntimeSession {
   closing: boolean;
   /** session.create 后的启动确认超时；收到 session.started 即清除。超时未确认视为启动失败 */
   startTimer?: ReturnType<typeof setTimeout>;
+  /** server 侧终端镜像：primed 时 attach 直接下发快照（daemon 离线也可看）；见 mirror.ts */
+  mirror?: SessionMirror;
 }
 
 type OpData =
@@ -121,7 +124,7 @@ export class Hub {
   private sessions = new Map<SessionId, RuntimeSession>();
   private clients = new Set<ClientConn>();
   private pendingOps = new PendingRegistry<ClientConn, OpData>(config.pendingTimeoutMs);
-  private pendingReplays = new PendingRegistry<ClientConn, { sessionId: SessionId }>(config.pendingTimeoutMs);
+  private pendingReplays = new PendingRegistry<ClientConn, { sessionId: SessionId; cols: number; rows: number }>(config.pendingTimeoutMs);
   /** exec/fs 这类"client 发起、daemon 应答、原样回传给 client"的中继 */
   private pendingRelays = new PendingRegistry<ClientConn, { clientRequestId: string; kind: RelayKind }>(config.pendingTimeoutMs);
   /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
@@ -396,7 +399,9 @@ export class Hub {
       case "ptyOutput": {
         const value = msg.payload.value;
         const s = this.sessions.get(value.sessionId);
-        if (!s || s.daemonId !== conn.daemonId || !s.holder) return;
+        if (!s || s.daemonId !== conn.daemonId) return;
+        s.mirror?.feed(value.data); // 无人观看时也要喂镜像（离线快照的数据来源）
+        if (!s.holder) return;
         if (s.holder.ws.bufferedAmount > config.clientBufferHardLimit) {
           // 控制端严重落后：断开它（重连后回放 scrollback 自愈），保护服务器内存
           try {
@@ -420,7 +425,11 @@ export class Hub {
         }
         // 回放完成后接管控制权（踢掉原控制端）
         const s = this.sessions.get(value.sessionId);
-        if (s && !s.closing) this.setHolder(s, p.client);
+        if (s && !s.closing) {
+          // 全量 scrollback 在手：重建（prime）镜像，此后 attach 走本地快照
+          (s.mirror ??= new SessionMirror(p.data.cols, p.data.rows, false)).prime(p.data.cols, p.data.rows, value.data);
+          this.setHolder(s, p.client);
+        }
         break;
       }
       case "execResult": {
@@ -462,7 +471,15 @@ export class Hub {
         this.dropSession(sessionId);
         continue;
       }
-      if (!this.sessions.has(sessionId)) this.sessions.set(sessionId, { sessionId, daemonId, accountId, taskId, holder: null, closing: false });
+      const existing = this.sessions.get(sessionId);
+      if (existing) {
+        // daemon 闪断重连：掉线窗口的输出已丢（worker 断连期间不缓存），镜像断档作废，
+        // 下次 attach 走 replay 全量重建
+        if (existing.mirror) existing.mirror.primed = false;
+      } else {
+        // server 重启后重建：尺寸未知且无历史，等首次 attach 的 replay 来 prime
+        this.sessions.set(sessionId, { sessionId, daemonId, accountId, taskId, holder: null, closing: false, mirror: new SessionMirror(80, 24, false) });
+      }
       if (task.sessionId !== sessionId) {
         const updated = await this.store.updateTask(taskId, { status: TaskStatus.RUNNING, sessionId, exitCode: undefined });
         if (updated) this.emitTask(updated);
@@ -544,6 +561,7 @@ export class Hub {
    * 广播受影响任务的 ports.updated（原来分散在各调用点的 `this.sessions.delete(x)` 均改走此处）。 */
   private dropSession(sessionId: SessionId): void {
     const s = this.sessions.get(sessionId);
+    s?.mirror?.dispose();
     this.sessions.delete(sessionId);
     const released = this.routeTable.releaseSession(sessionId);
     if (!released) return;
@@ -780,7 +798,7 @@ export class Hub {
         const task = await this.requireTask(client, msg.payload.value.taskId);
         if (!task) return;
         const s = task.sessionId ? this.sessions.get(task.sessionId) : undefined;
-        if (task.status === TaskStatus.RUNNING && s && !s.closing) this.attachWithReplay(client, s.sessionId);
+        if (task.status === TaskStatus.RUNNING && s && !s.closing) this.attachSession(client, s.sessionId, 80, 24); // TaskAttach 无尺寸字段；attach 后 web 会 fit+ptyResize 收敛
         else this.sendClient(client, { case: "error", value: { message: "任务未在运行，无法 attach" } });
         break;
       }
@@ -813,7 +831,10 @@ export class Hub {
         const value = msg.payload.value;
         const s = this.sessions.get(value.sessionId);
         if (!s || s.accountId !== client.accountId || s.holder !== client) return;
-        this.routeToSessionDaemon(value.sessionId, { case: "ptyResize", value: { sessionId: value.sessionId, cols: clampDim(value.cols, 80), rows: clampDim(value.rows, 24) } });
+        const cols = clampDim(value.cols, 80);
+        const rows = clampDim(value.rows, 24);
+        s.mirror?.resize(cols, rows); // 镜像尺寸始终跟随 PTY，否则后续字节解析错位
+        this.routeToSessionDaemon(value.sessionId, { case: "ptyResize", value: { sessionId: value.sessionId, cols, rows } });
         break;
       }
       case "ptyInput": {
@@ -963,7 +984,7 @@ export class Hub {
 
     if (task.status === TaskStatus.RUNNING && task.sessionId) {
       const s = this.sessions.get(task.sessionId);
-      if (s && !s.closing) return void this.attachWithReplay(client, s.sessionId);
+      if (s && !s.closing) return void this.attachSession(client, s.sessionId, cols, rows);
       if (s && s.closing) return void this.sendClient(client, { case: "error", value: { message: "任务正在停止，请稍候重试" } });
       this.sendClient(client, { case: "error", value: { message: "会话恢复中，请稍候重试" } });
       return;
@@ -975,13 +996,16 @@ export class Hub {
     if (!ws) return void this.sendClient(client, { case: "error", value: { message: "工作区已不存在" } });
 
     const sessionId = randomUUID();
-    const session: RuntimeSession = { sessionId, daemonId: task.daemonId, accountId: task.accountId, taskId: task.id, holder: client, closing: false };
+    const c = clampDim(cols, 80);
+    const r = clampDim(rows, 24);
+    // 新会话从第一个字节起就被镜像连续观测 → 天然 primed
+    const session: RuntimeSession = { sessionId, daemonId: task.daemonId, accountId: task.accountId, taskId: task.id, holder: client, closing: false, mirror: new SessionMirror(c, r, true) };
     // 启动确认超时：daemon 收到 session.create 却起 PTY 失败又不回消息时，避免 task 永久卡 running + session 泄漏。
     const startTimer = setTimeout(() => void this.onSessionStartTimeout(sessionId), config.pendingTimeoutMs);
     (startTimer as { unref?: () => void }).unref?.();
     session.startTimer = startTimer;
     this.sessions.set(sessionId, session);
-    this.sendDaemon(d, { case: "sessionCreate", value: { sessionId, taskId: task.id, cwd: ws.path, cols: clampDim(cols, 80), rows: clampDim(rows, 24) } });
+    this.sendDaemon(d, { case: "sessionCreate", value: { sessionId, taskId: task.id, cwd: ws.path, cols: c, rows: r } });
     const updated = await this.store.updateTask(task.id, { status: TaskStatus.RUNNING, sessionId, exitCode: undefined });
     if (updated) this.emitTask(updated);
   }
@@ -1000,12 +1024,24 @@ export class Hub {
     log.warn("session start timed out", { sessionId });
   }
 
-  private attachWithReplay(client: ClientConn, sessionId: SessionId): void {
+  private attachSession(client: ClientConn, sessionId: SessionId, cols: number, rows: number): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    // 快路径：镜像可信 → 本地序列化几 KB 快照，免 daemon 往返；daemon 离线也能看到最后画面。
+    // snapshot 回调是 write 队列排空后的异步点：重取 session 防在途 drop，回调体内同步无出让点。
+    if (s.mirror?.primed) {
+      s.mirror.snapshot((ansi) => {
+        const cur = this.sessions.get(sessionId);
+        if (!cur || cur.closing) return void this.sendClient(client, { case: "error", value: { message: "会话已结束" } });
+        this.sendClient(client, { case: "ptyOutput", value: { sessionId, data: new TextEncoder().encode(ansi) } });
+        this.setHolder(cur, client);
+      });
+      return;
+    }
+    // 慢路径（server 重启 / daemon 闪断后镜像断档）：向 daemon 要全量 scrollback，顺带 prime 镜像
     if (!this.isDaemonOnline(s.daemonId)) return void this.sendClient(client, { case: "error", value: { message: "daemon 离线，无法回放" } });
     const requestId = randomUUID();
-    this.pendingReplays.register(requestId, s.daemonId, client, { sessionId }, (p) =>
+    this.pendingReplays.register(requestId, s.daemonId, client, { sessionId, cols: clampDim(cols, 80), rows: clampDim(rows, 24) }, (p) =>
       this.sendClient(p.client, { case: "error", value: { message: "回放超时" } }),
     );
     const ok = this.routeToSessionDaemon(sessionId, { case: "sessionReplay", value: { sessionId, requestId } });
