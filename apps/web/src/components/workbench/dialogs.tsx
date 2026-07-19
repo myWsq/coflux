@@ -172,14 +172,15 @@ export type ConfirmAction = {
   onConfirm: () => void;
 };
 
-/** 键位展示：物理键位组合，纯展示不做输入解析（解析逻辑见 use-global-shortcuts.ts） */
+/** 键位展示：物理键位组合，纯展示不做输入解析（解析逻辑见 use-global-shortcuts.ts）。
+ * 修饰键顺序遵循 macOS 菜单惯例：⌃⌥⇧⌘。 */
 const SHORTCUT_ROWS: { keys: string[]; description: string }[] = [
-  { keys: ["⌘", "⌃", "T"], description: "新建终端" },
-  { keys: ["⌘", "⌃", "W"], description: "关闭当前终端" },
-  { keys: ["⌘", "⌃", "1-9"], description: "切换到第 N 个终端" },
-  { keys: ["⌘", "⌃", "["], description: "上一个终端" },
-  { keys: ["⌘", "⌃", "]"], description: "下一个终端" },
-  { keys: ["⌘", "⌃", "N"], description: "新建工作区" },
+  { keys: ["⌃", "⌘", "T"], description: "新建终端" },
+  { keys: ["⌃", "⌘", "W"], description: "关闭当前终端" },
+  { keys: ["⌃", "⌘", "1-9"], description: "切换到第 N 个终端" },
+  { keys: ["⌃", "⌘", "["], description: "上一个终端" },
+  { keys: ["⌃", "⌘", "]"], description: "下一个终端" },
+  { keys: ["⌃", "⌘", "N"], description: "新建工作区" },
   { keys: ["⌘", "/"], description: "显示 / 隐藏本面板" },
 ];
 

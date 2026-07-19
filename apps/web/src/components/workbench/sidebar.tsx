@@ -148,7 +148,7 @@ export function Sidebar(props: SidebarProps) {
                             isIconOnly: true,
                             variant: "ghost",
                             size: "sm",
-                            tooltip: "新建工作区",
+                            tooltip: "新建工作区 ⌃⌘N",
                             style: { color: "var(--muted-foreground)", height: 20, width: 20, minWidth: 20, paddingInline: 0 },
                           }}
                           isOpen={createMenuProjectId === project.id}
