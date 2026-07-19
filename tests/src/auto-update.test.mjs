@@ -49,7 +49,7 @@ before(async () => {
   httpServer = http.createServer((req, res) => {
     const url = new URL(req.url, "http://x");
     requestCounts.set(url.pathname, (requestCounts.get(url.pathname) ?? 0) + 1);
-    if (url.pathname === "/releases/latest") {
+    if (url.pathname === `/repos/${REPO}/releases/latest`) {
       const body = JSON.stringify({ tag_name: release.tag, assets: [{ name: "manifest.json", browser_download_url: `${baseUrl}/manifest.json` }] });
       return void res.writeHead(200, { "content-type": "application/json" }).end(body);
     }
