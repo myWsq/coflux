@@ -19,6 +19,9 @@ type SidebarProps = {
   onRenameWorkspace: (workspace: Workspace) => void;
   onAddDevice: () => void;
   onRemoveDevice: (daemon: DaemonInfo) => void;
+  /** 新建工作区菜单当前打开的项目（受控：+ 按钮/右键菜单项/Cmd+Ctrl+N 快捷键共用同一个锚点菜单） */
+  createMenuProjectId: string | null;
+  onCreateMenuProjectIdChange: (projectId: string | null) => void;
 };
 
 export function Sidebar(props: SidebarProps) {
@@ -28,8 +31,8 @@ export function Sidebar(props: SidebarProps) {
   const daemons = useStore(client.store, (state) => state.daemons);
   // 默认全部展开，只记折叠集合（新项目出现时自然是展开态）
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
-  /** 新建工作区菜单当前打开的项目（受控：+ 按钮与右键菜单项共用同一个锚点菜单） */
-  const [createMenuProjectId, setCreateMenuProjectId] = useState<string | null>(null);
+  const createMenuProjectId = props.createMenuProjectId;
+  const setCreateMenuProjectId = props.onCreateMenuProjectIdChange;
 
   function toggleProject(projectId: string) {
     setCollapsedIds((prev) => {

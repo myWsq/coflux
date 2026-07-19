@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { ExternalLink, GitBranch, LoaderCircle, Plus, SquareTerminal, Unplug, X } from "lucide-react";
@@ -21,7 +21,25 @@ type WorkspaceTerminalProps = {
   onCloseTask: (task: Task) => void;
 };
 
-export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask }: WorkspaceTerminalProps) {
+/**
+ * 全局快捷键（plan 015）向 active 实例下发的命令。Workbench 只把 ref 挂在
+ * active===true 的那个实例上（见 workbench.tsx），保活但隐藏的实例永远拿不到这份 ref，
+ * 天然满足"只有 active 实例响应快捷键"的约束。
+ */
+export type WorkspaceTerminalHandle = {
+  createTerminal: () => void;
+  /** 复用 onCloseTask（RUNNING 走既有确认对话框），无 active Tab 时安静忽略 */
+  closeActiveTab: () => void;
+  /** index 越界安静忽略 */
+  selectTabByIndex: (index: number) => void;
+  /** 按 Tab 栏顺序循环切换；无 Tab 时安静忽略 */
+  selectRelativeTab: (delta: number) => void;
+};
+
+export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTerminalProps>(function WorkspaceTerminal(
+  { workspaceId, active, client, onCloseTask },
+  ref,
+) {
   const workspace = useStore(client.store, (state) => state.workspaces.find((item) => item.id === workspaceId));
   const projectWorkspaces = useStore(
     client.store,
@@ -352,6 +370,25 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask }: 
   const activeControlState: TerminalControlState = activeTask ? stateOf(activeTask) : "stopped";
   const activePorts = activeTask ? (ports[activeTask.id] ?? []) : [];
 
+  useImperativeHandle(ref, () => ({
+    createTerminal,
+    closeActiveTab: () => {
+      if (activeTask) onCloseTask(activeTask);
+    },
+    selectTabByIndex: (index: number) => {
+      const task = workspaceTasks[index];
+      if (task) requestActivation(task.id, stateOf(task) === "detached");
+    },
+    selectRelativeTab: (delta: number) => {
+      if (workspaceTasks.length === 0) return;
+      const currentIndex = workspaceTasks.findIndex((task) => task.id === activeTaskId);
+      const base = currentIndex === -1 ? 0 : currentIndex;
+      const next = ((base + delta) % workspaceTasks.length + workspaceTasks.length) % workspaceTasks.length;
+      const task = workspaceTasks[next]!;
+      requestActivation(task.id, stateOf(task) === "detached");
+    },
+  }));
+
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-terminal">
       {/* 单栏顶栏：名称（如有）＋ 可点的分支按钮 │ 终端 Tabs（Tab 用间距而非竖线分隔）＋ 新建/端口 */}
@@ -485,4 +522,4 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask }: 
 
     </section>
   );
-}
+});
