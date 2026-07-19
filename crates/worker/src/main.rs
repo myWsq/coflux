@@ -393,10 +393,11 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
             send_d2s(to_server_tx, daemon_to_server::Payload::SessionStarted(wire::SessionStarted { session_id, task_id, pid })).await;
         }
         SupervisorToWorker::SessionExit { session_id, exit_code } => {
-            let mut s = state.lock().unwrap();
-            s.alive.remove(&session_id);
-            s.dec_modes.remove(&session_id); // 会话退出：释放追踪状态，避免泄漏
-            drop(s);
+            {
+                let mut s = state.lock().unwrap();
+                s.alive.remove(&session_id);
+                s.dec_modes.remove(&session_id); // 会话退出：释放追踪状态，避免泄漏
+            } // guard 显式在块结束处释放，不跨 await 持有（MutexGuard 非 Send）
             send_d2s(to_server_tx, daemon_to_server::Payload::SessionExit(wire::SessionExit { session_id, exit_code })).await;
         }
         SupervisorToWorker::ResyncList { sessions } => {
