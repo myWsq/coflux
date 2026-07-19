@@ -24,7 +24,7 @@ type TerminalPaneProps = {
   registerSessionConsumer: (sessionId: string, consumer: (data: Uint8Array) => void) => () => void;
   sendInput: (sessionId: string, data: string) => void;
   sendResize: (sessionId: string, cols: number, rows: number) => void;
-  sendFsWrite: (workspaceId: string, path: string, data: Uint8Array) => Promise<FsWriteResult>;
+  sendFsWrite: (workspaceId: string, path: string, data: Uint8Array, temp: boolean) => Promise<FsWriteResult>;
   onReady: (taskId: string, controller: TerminalController) => void;
   onDispose: (taskId: string, controller: TerminalController) => void;
   onSessionReady: (taskId: string, sessionId: string, controller: TerminalController) => void;
@@ -222,7 +222,9 @@ export function TerminalPane(props: TerminalPaneProps) {
             blob.size > PASTE_BUDGET_BYTES ? await compressToBudget(blob, PASTE_BUDGET_BYTES) : new Uint8Array(await blob.arrayBuffer());
           const ext = extForMime(blob.size > PASTE_BUDGET_BYTES ? "image/jpeg" : blob.type);
           const name = `paste-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-          const result = await sendFsWrite(workspaceId, `.coflux/pastes/${name}`, bytes);
+          // temp=true：落 daemon 侧系统临时目录，name 是单段文件名（不拼目录前缀）；
+          // 回带的 result.path 是 worker 侧确定的绝对路径，直接注入。
+          const result = await sendFsWrite(workspaceId, name, bytes, true);
           if (result.ok && result.path) {
             terminal.paste(` ${result.path} `);
           } else {

@@ -374,13 +374,15 @@ export function createCofluxClient() {
     });
   }
 
-  /** 终端剪贴板贴图（plan 014）：把图片字节写进该工作区 worktree 内 path（如 ".coflux/pastes/xxx.png"）。
-   * 成功时 path 回带落盘后的（清洗过的）worktree 相对路径——调用方应以它为准，不自行拼装。 */
-  function sendFsWrite(workspaceId: string, path: string, data: Uint8Array): Promise<FsWriteResult> {
+  /** 终端剪贴板贴图（plan 014，temp 模式修订）：把图片字节上传落盘。
+   * temp=true（终端贴图固定用法）：path 须为单段文件名，落到 daemon 侧系统临时目录，
+   * 成功时 path 回带该处的绝对路径。temp=false：path 为该工作区 worktree 内相对路径，
+   * 成功时 path 回带清洗过的相对路径。两种情况均以回带的 path 为准，不自行拼装。 */
+  function sendFsWrite(workspaceId: string, path: string, data: Uint8Array, temp: boolean): Promise<FsWriteResult> {
     return new Promise((resolve) => {
       const requestId = crypto.randomUUID();
       pendingFsWrites.set(requestId, resolve);
-      send({ case: "clientFsWrite", value: { requestId, workspaceId, path, data } });
+      send({ case: "clientFsWrite", value: { requestId, workspaceId, path, data, temp } });
     });
   }
 
