@@ -143,7 +143,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   function closeTaskNow(task: Task) {
-    client.send({ case: "taskStop", value: { taskId: task.id } });
+    // 只发 taskRemove：server 侧该 handler 自带 sessionClose + dropSession。连发 taskStop
+    // 会与之并发处理（transport 不串行同连接消息），taskRemove 先删行时 taskStop 报
+    // "任务不存在"，甚至把已删任务复活成关不掉的僵尸 Tab。
     client.send({ case: "taskRemove", value: { taskId: task.id } });
   }
 
