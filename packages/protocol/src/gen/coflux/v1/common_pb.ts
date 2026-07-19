@@ -16,7 +16,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file coflux/v1/common.proto.
  */
 export const file_coflux_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("ChZjb2ZsdXgvdjEvY29tbW9uLnByb3RvEgljb2ZsdXgudjEiXQoKRGFlbW9uSW5mbxIRCglkYWVtb25faWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRob3N0GAMgASgJEhAKCHBsYXRmb3JtGAQgASgJEg4KBm9ubGluZRgFIAEoCCKJAQoHUHJvamVjdBIKCgJpZBgBIAEoCRISCgphY2NvdW50X2lkGAIgASgJEhEKCWRhZW1vbl9pZBgDIAEoCRIMCgRuYW1lGAQgASgJEhEKCXJlcG9fcGF0aBgFIAEoCRIWCg5kZWZhdWx0X2JyYW5jaBgGIAEoCRISCgpjcmVhdGVkX2F0GAcgASgBIqMBCglXb3Jrc3BhY2USCgoCaWQYASABKAkSEgoKYWNjb3VudF9pZBgCIAEoCRIRCglkYWVtb25faWQYAyABKAkSEgoKcHJvamVjdF9pZBgEIAEoCRIMCgRuYW1lGAUgASgJEgwKBHBhdGgYBiABKAkSDgoGYnJhbmNoGAcgASgJEg8KB2lzX21haW4YCCABKAgSEgoKY3JlYXRlZF9hdBgJIAEoASKPAgoEVGFzaxIKCgJpZBgBIAEoCRISCgphY2NvdW50X2lkGAIgASgJEhEKCWRhZW1vbl9pZBgDIAEoCRISCgpwcm9qZWN0X2lkGAQgASgJEhQKDHdvcmtzcGFjZV9pZBgFIAEoCRINCgV0aXRsZRgGIAEoCRIlCgZzdGF0dXMYByABKA4yFS5jb2ZsdXgudjEuVGFza1N0YXR1cxIXCgpzZXNzaW9uX2lkGAggASgJSACIAQESFgoJZXhpdF9jb2RlGAkgASgFSAGIAQESEgoKY3JlYXRlZF9hdBgKIAEoARISCgp1cGRhdGVkX2F0GAsgASgBQg0KC19zZXNzaW9uX2lkQgwKCl9leGl0X2NvZGUiSwoHRnNFbnRyeRIMCgRuYW1lGAEgASgJEiQKBGtpbmQYAiABKA4yFi5jb2ZsdXgudjEuRnNFbnRyeUtpbmQSDAoEc2l6ZRgDIAEoASIxCgpTZXNzaW9uUmVmEhIKCnNlc3Npb25faWQYASABKAkSDwoHdGFza19pZBgCIAEoCSIxCgxTZXNzaW9uUG9ydHMSEgoKc2Vzc2lvbl9pZBgBIAEoCRINCgVwb3J0cxgCIAMoDSIoCgtQb3J0UHJldmlldxIMCgRwb3J0GAEgASgNEgsKA3VybBgCIAEoCSJDCglUYXNrUG9ydHMSDwoHdGFza19pZBgBIAEoCRIlCgVwb3J0cxgCIAMoCzIWLmNvZmx1eC52MS5Qb3J0UHJldmlldyJ9CgpFeGVjUmVzdWx0EhIKCnJlcXVlc3RfaWQYASABKAkSCgoCb2sYAiABKAgSEQoJZXhpdF9jb2RlGAMgASgFEg4KBnN0ZG91dBgEIAEoCRIOCgZzdGRlcnIYBSABKAkSEgoFZXJyb3IYBiABKAlIAIgBAUIICgZfZXJyb3IiiQEKCEZzTGlzdGVkEhIKCnJlcXVlc3RfaWQYASABKAkSCgoCb2sYAiABKAgSIwoHZW50cmllcxgDIAMoCzISLmNvZmx1eC52MS5Gc0VudHJ5EhIKBWVycm9yGAQgASgJSACIAQESEQoEcGF0aBgFIAEoCUgBiAEBQggKBl9lcnJvckIHCgVfcGF0aCJdCgxGc1JlYWRSZXN1bHQSEgoKcmVxdWVzdF9pZBgBIAEoCRIKCgJvaxgCIAEoCBIPCgdjb250ZW50GAMgASgJEhIKBWVycm9yGAQgASgJSACIAQFCCAoGX2Vycm9yIi0KCVB0eU91dHB1dBISCgpzZXNzaW9uX2lkGAEgASgJEgwKBGRhdGEYAiABKAwiLAoIUHR5SW5wdXQSEgoKc2Vzc2lvbl9pZBgBIAEoCRIMCgRkYXRhGAIgASgMIkEKCVB0eVJlcGxheRISCgpzZXNzaW9uX2lkGAEgASgJEhIKCnJlcXVlc3RfaWQYAiABKAkSDAoEZGF0YRgDIAEoDCIqCglQcm94eURhdGESDwoHY29ubl9pZBgBIAEoCRIMCgRkYXRhGAIgASgMKnAKClRhc2tTdGF0dXMSGwoXVEFTS19TVEFUVVNfVU5TUEVDSUZJRUQQABIUChBUQVNLX1NUQVRVU19JRExFEAESFwoTVEFTS19TVEFUVVNfUlVOTklORxACEhYKElRBU0tfU1RBVFVTX0VYSVRFRBADKo8BCgtGc0VudHJ5S2luZBIdChlGU19FTlRSWV9LSU5EX1VOU1BFQ0lGSUVEEAASFgoSRlNfRU5UUllfS0lORF9GSUxFEAESFQoRRlNfRU5UUllfS0lORF9ESVIQAhIZChVGU19FTlRSWV9LSU5EX1NZTUxJTksQAxIXChNGU19FTlRSWV9LSU5EX09USEVSEARiBnByb3RvMw");
+  fileDesc("ChZjb2ZsdXgvdjEvY29tbW9uLnByb3RvEgljb2ZsdXgudjEiXQoKRGFlbW9uSW5mbxIRCglkYWVtb25faWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRob3N0GAMgASgJEhAKCHBsYXRmb3JtGAQgASgJEg4KBm9ubGluZRgFIAEoCCKJAQoHUHJvamVjdBIKCgJpZBgBIAEoCRISCgphY2NvdW50X2lkGAIgASgJEhEKCWRhZW1vbl9pZBgDIAEoCRIMCgRuYW1lGAQgASgJEhEKCXJlcG9fcGF0aBgFIAEoCRIWCg5kZWZhdWx0X2JyYW5jaBgGIAEoCRISCgpjcmVhdGVkX2F0GAcgASgBIqMBCglXb3Jrc3BhY2USCgoCaWQYASABKAkSEgoKYWNjb3VudF9pZBgCIAEoCRIRCglkYWVtb25faWQYAyABKAkSEgoKcHJvamVjdF9pZBgEIAEoCRIMCgRuYW1lGAUgASgJEgwKBHBhdGgYBiABKAkSDgoGYnJhbmNoGAcgASgJEg8KB2lzX21haW4YCCABKAgSEgoKY3JlYXRlZF9hdBgJIAEoASKPAgoEVGFzaxIKCgJpZBgBIAEoCRISCgphY2NvdW50X2lkGAIgASgJEhEKCWRhZW1vbl9pZBgDIAEoCRISCgpwcm9qZWN0X2lkGAQgASgJEhQKDHdvcmtzcGFjZV9pZBgFIAEoCRINCgV0aXRsZRgGIAEoCRIlCgZzdGF0dXMYByABKA4yFS5jb2ZsdXgudjEuVGFza1N0YXR1cxIXCgpzZXNzaW9uX2lkGAggASgJSACIAQESFgoJZXhpdF9jb2RlGAkgASgFSAGIAQESEgoKY3JlYXRlZF9hdBgKIAEoARISCgp1cGRhdGVkX2F0GAsgASgBQg0KC19zZXNzaW9uX2lkQgwKCl9leGl0X2NvZGUiSwoHRnNFbnRyeRIMCgRuYW1lGAEgASgJEiQKBGtpbmQYAiABKA4yFi5jb2ZsdXgudjEuRnNFbnRyeUtpbmQSDAoEc2l6ZRgDIAEoASIxCgpTZXNzaW9uUmVmEhIKCnNlc3Npb25faWQYASABKAkSDwoHdGFza19pZBgCIAEoCSIxCgxTZXNzaW9uUG9ydHMSEgoKc2Vzc2lvbl9pZBgBIAEoCRINCgVwb3J0cxgCIAMoDSIoCgtQb3J0UHJldmlldxIMCgRwb3J0GAEgASgNEgsKA3VybBgCIAEoCSJDCglUYXNrUG9ydHMSDwoHdGFza19pZBgBIAEoCRIlCgVwb3J0cxgCIAMoCzIWLmNvZmx1eC52MS5Qb3J0UHJldmlldyJ9CgpFeGVjUmVzdWx0EhIKCnJlcXVlc3RfaWQYASABKAkSCgoCb2sYAiABKAgSEQoJZXhpdF9jb2RlGAMgASgFEg4KBnN0ZG91dBgEIAEoCRIOCgZzdGRlcnIYBSABKAkSEgoFZXJyb3IYBiABKAlIAIgBAUIICgZfZXJyb3IiiQEKCEZzTGlzdGVkEhIKCnJlcXVlc3RfaWQYASABKAkSCgoCb2sYAiABKAgSIwoHZW50cmllcxgDIAMoCzISLmNvZmx1eC52MS5Gc0VudHJ5EhIKBWVycm9yGAQgASgJSACIAQESEQoEcGF0aBgFIAEoCUgBiAEBQggKBl9lcnJvckIHCgVfcGF0aCJdCgxGc1JlYWRSZXN1bHQSEgoKcmVxdWVzdF9pZBgBIAEoCRIKCgJvaxgCIAEoCBIPCgdjb250ZW50GAMgASgJEhIKBWVycm9yGAQgASgJSACIAQFCCAoGX2Vycm9yImkKDUZzV3JpdGVSZXN1bHQSEgoKcmVxdWVzdF9pZBgBIAEoCRIKCgJvaxgCIAEoCBIRCgRwYXRoGAMgASgJSACIAQESEgoFZXJyb3IYBCABKAlIAYgBAUIHCgVfcGF0aEIICgZfZXJyb3IiLQoJUHR5T3V0cHV0EhIKCnNlc3Npb25faWQYASABKAkSDAoEZGF0YRgCIAEoDCIsCghQdHlJbnB1dBISCgpzZXNzaW9uX2lkGAEgASgJEgwKBGRhdGEYAiABKAwiQQoJUHR5UmVwbGF5EhIKCnNlc3Npb25faWQYASABKAkSEgoKcmVxdWVzdF9pZBgCIAEoCRIMCgRkYXRhGAMgASgMIioKCVByb3h5RGF0YRIPCgdjb25uX2lkGAEgASgJEgwKBGRhdGEYAiABKAwqcAoKVGFza1N0YXR1cxIbChdUQVNLX1NUQVRVU19VTlNQRUNJRklFRBAAEhQKEFRBU0tfU1RBVFVTX0lETEUQARIXChNUQVNLX1NUQVRVU19SVU5OSU5HEAISFgoSVEFTS19TVEFUVVNfRVhJVEVEEAMqjwEKC0ZzRW50cnlLaW5kEh0KGUZTX0VOVFJZX0tJTkRfVU5TUEVDSUZJRUQQABIWChJGU19FTlRSWV9LSU5EX0ZJTEUQARIVChFGU19FTlRSWV9LSU5EX0RJUhACEhkKFUZTX0VOVFJZX0tJTkRfU1lNTElOSxADEhcKE0ZTX0VOVFJZX0tJTkRfT1RIRVIQBGIGcHJvdG8z");
 
 /**
  * @generated from message coflux.v1.DaemonInfo
@@ -468,6 +468,40 @@ export const FsReadResultSchema: GenMessage<FsReadResult> = /*@__PURE__*/
   messageDesc(file_coflux_v1_common, 11);
 
 /**
+ * @generated from message coflux.v1.FsWriteResult
+ */
+export type FsWriteResult = Message<"coflux.v1.FsWriteResult"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * @generated from field: bool ok = 2;
+   */
+  ok: boolean;
+
+  /**
+   * 成功时为落盘后的 worktree 相对路径（worker 侧确定的真相；client 直接拿它注入 PTY，不自行拼装）
+   *
+   * @generated from field: optional string path = 3;
+   */
+  path?: string | undefined;
+
+  /**
+   * @generated from field: optional string error = 4;
+   */
+  error?: string | undefined;
+};
+
+/**
+ * Describes the message coflux.v1.FsWriteResult.
+ * Use `create(FsWriteResultSchema)` to create a new message.
+ */
+export const FsWriteResultSchema: GenMessage<FsWriteResult> = /*@__PURE__*/
+  messageDesc(file_coflux_v1_common, 12);
+
+/**
  * @generated from message coflux.v1.PtyOutput
  */
 export type PtyOutput = Message<"coflux.v1.PtyOutput"> & {
@@ -487,7 +521,7 @@ export type PtyOutput = Message<"coflux.v1.PtyOutput"> & {
  * Use `create(PtyOutputSchema)` to create a new message.
  */
 export const PtyOutputSchema: GenMessage<PtyOutput> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 12);
+  messageDesc(file_coflux_v1_common, 13);
 
 /**
  * @generated from message coflux.v1.PtyInput
@@ -509,7 +543,7 @@ export type PtyInput = Message<"coflux.v1.PtyInput"> & {
  * Use `create(PtyInputSchema)` to create a new message.
  */
 export const PtyInputSchema: GenMessage<PtyInput> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 13);
+  messageDesc(file_coflux_v1_common, 14);
 
 /**
  * @generated from message coflux.v1.PtyReplay
@@ -536,7 +570,7 @@ export type PtyReplay = Message<"coflux.v1.PtyReplay"> & {
  * Use `create(PtyReplaySchema)` to create a new message.
  */
 export const PtyReplaySchema: GenMessage<PtyReplay> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 14);
+  messageDesc(file_coflux_v1_common, 15);
 
 /**
  * 端口转发隧道的原始 TCP 字节（server↔daemon 双向）
@@ -560,7 +594,7 @@ export type ProxyData = Message<"coflux.v1.ProxyData"> & {
  * Use `create(ProxyDataSchema)` to create a new message.
  */
 export const ProxyDataSchema: GenMessage<ProxyData> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 15);
+  messageDesc(file_coflux_v1_common, 16);
 
 /**
  * @generated from enum coflux.v1.TaskStatus

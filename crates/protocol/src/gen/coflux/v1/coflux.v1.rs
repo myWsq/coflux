@@ -160,6 +160,18 @@ pub struct FsReadResult {
     #[prost(string, optional, tag="4")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsWriteResult {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    /// 成功时为落盘后的 worktree 相对路径（worker 侧确定的真相；client 直接拿它注入 PTY，不自行拼装）
+    #[prost(string, optional, tag="3")]
+    pub path: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
 // ===== 数据面（高频）=====
 // 原自定义二进制帧（kind 1..4）收敛进 protobuf binary 信封；payload 一律 bytes，
 // 杜绝 UTF-8 往返破坏 scrollback 的半截字节（原 replayFrameToOutput 的动机自然消失）。
@@ -363,7 +375,7 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18")]
+    #[prost(oneof="daemon_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 19, 15, 16, 17, 18")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -398,6 +410,8 @@ pub mod daemon_to_server {
         FsListed(super::FsListed),
         #[prost(message, tag="14")]
         FsReadResult(super::FsReadResult),
+        #[prost(message, tag="19")]
+        FsWriteResult(super::FsWriteResult),
         /// 数据面（高频）
         #[prost(message, tag="15")]
         PtyOutput(super::PtyOutput),
@@ -573,9 +587,21 @@ pub struct FsRead {
     #[prost(string, tag="3")]
     pub path: ::prost::alloc::string::String,
 }
+/// 通用原语：写文件（root 为锚定根，path 为相对路径，daemon 校验不越界；父目录不存在则创建）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsWrite {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub root: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="4")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 18, 19, 20")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -616,6 +642,8 @@ pub mod server_to_daemon {
         FsList(super::FsList),
         #[prost(message, tag="17")]
         FsRead(super::FsRead),
+        #[prost(message, tag="21")]
+        FsWrite(super::FsWrite),
         /// 数据面（高频）
         #[prost(message, tag="18")]
         PtyInput(super::PtyInput),
@@ -815,9 +843,22 @@ pub struct ClientFsRead {
     #[prost(string, tag="3")]
     pub path: ::prost::alloc::string::String,
 }
+/// 终端剪贴板贴图（plan 014）：把图片字节上传到该工作区 worktree 内落盘，path 由 client 生成
+/// （形如 ".coflux/pastes/paste-<ts>-<rand>.<ext>"），data 为原始（或客户端已压缩过的）图片字节。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClientFsWrite {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="4")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 23, 24")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -868,6 +909,8 @@ pub mod client_to_server {
         ClientFsList(super::ClientFsList),
         #[prost(message, tag="22")]
         ClientFsRead(super::ClientFsRead),
+        #[prost(message, tag="25")]
+        ClientFsWrite(super::ClientFsWrite),
         /// 数据面（高频）
         #[prost(message, tag="23")]
         PtyInput(super::PtyInput),
@@ -999,7 +1042,7 @@ pub struct ServerError {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 22")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -1048,6 +1091,8 @@ pub mod server_to_client {
         FsReadResult(super::FsReadResult),
         #[prost(message, tag="21")]
         Error(super::ServerError),
+        #[prost(message, tag="23")]
+        FsWriteResult(super::FsWriteResult),
         /// 数据面（高频）
         #[prost(message, tag="22")]
         PtyOutput(super::PtyOutput),

@@ -415,6 +415,42 @@ public struct Coflux_V1_FsReadResult: Sendable {
   fileprivate var _error: String? = nil
 }
 
+public struct Coflux_V1_FsWriteResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var ok: Bool = false
+
+  /// 成功时为落盘后的 worktree 相对路径（worker 侧确定的真相；client 直接拿它注入 PTY，不自行拼装）
+  public var path: String {
+    get {_path ?? String()}
+    set {_path = newValue}
+  }
+  /// Returns true if `path` has been explicitly set.
+  public var hasPath: Bool {self._path != nil}
+  /// Clears the value of `path`. Subsequent reads from it will return its default value.
+  public mutating func clearPath() {self._path = nil}
+
+  public var error: String {
+    get {_error ?? String()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _path: String? = nil
+  fileprivate var _error: String? = nil
+}
+
 public struct Coflux_V1_PtyOutput: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1086,6 +1122,55 @@ extension Coflux_V1_FsReadResult: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     if lhs.requestID != rhs.requestID {return false}
     if lhs.ok != rhs.ok {return false}
     if lhs.content != rhs.content {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_FsWriteResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".FsWriteResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}path\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._path) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    try { if let v = self._path {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    try { if let v = self._error {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_FsWriteResult, rhs: Coflux_V1_FsWriteResult) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs._path != rhs._path {return false}
     if lhs._error != rhs._error {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true

@@ -124,6 +124,14 @@ message FsReadResult {
   optional string error = 4;
 }
 
+message FsWriteResult {
+  string request_id = 1;
+  bool ok = 2;
+  // 成功时为落盘后的 worktree 相对路径（worker 侧确定的真相；client 直接拿它注入 PTY，不自行拼装）
+  optional string path = 3;
+  optional string error = 4;
+}
+
 // ===== 数据面（高频）=====
 // 原自定义二进制帧（kind 1..4）收敛进 protobuf binary 信封；payload 一律 bytes，
 // 杜绝 UTF-8 往返破坏 scrollback 的半截字节（原 replayFrameToOutput 的动机自然消失）。
