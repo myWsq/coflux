@@ -678,10 +678,10 @@ async fn route_authed(msg: server_to_daemon::Payload, cfg: &Arc<Config>, to_serv
                 send_d2s(&to_server, daemon_to_server::Payload::FsReadResult(wire::FsReadResult { request_id, ok, content, error })).await;
             });
         }
-        server_to_daemon::Payload::FsWrite(wire::FsWrite { request_id, root, path, data }) => {
+        server_to_daemon::Payload::FsWrite(wire::FsWrite { request_id, root, path, data, temp }) => {
             let to_server = to_server_tx.clone();
             tokio::spawn(async move {
-                let (ok, written_path, error) = ops::write_file(&root, &path, &data).await;
+                let (ok, written_path, error) = ops::write_file(&root, &path, &data, temp).await;
                 send_d2s(&to_server, daemon_to_server::Payload::FsWriteResult(wire::FsWriteResult { request_id, ok, path: written_path, error })).await;
             });
         }
