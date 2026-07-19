@@ -15,11 +15,13 @@ const ATTACH_GRACE_MS = 500;
 
 type WorkspaceTerminalProps = {
   workspaceId: string;
+  /** 是否为当前显示的工作区：隐藏时保持挂载与 attach，仅切回时 fit + focus。 */
+  active: boolean;
   client: CofluxClient;
   onCloseTask: (task: Task) => void;
 };
 
-export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: WorkspaceTerminalProps) {
+export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask }: WorkspaceTerminalProps) {
   const workspace = useStore(client.store, (state) => state.workspaces.find((item) => item.id === workspaceId));
   const projectWorkspaces = useStore(
     client.store,
@@ -320,6 +322,20 @@ export function WorkspaceTerminal({ workspaceId, client, onCloseTask }: Workspac
     launchingTaskIdsRef.current.clear();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastError]);
+
+  // 工作区从隐藏切回显示：重新 fit（隐藏期间尺寸为 0，ResizeObserver 的 fit 被 no-op 掉）并聚焦。
+  // attach 状态在隐藏期间一直保持，无需重新申请控制权。
+  useEffect(() => {
+    if (!active) return;
+    const frame = requestAnimationFrame(() => {
+      const taskId = activeTaskIdRef.current;
+      if (!taskId) return;
+      const controller = controllersRef.current.get(taskId);
+      controller?.fit();
+      controller?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active]);
 
   useEffect(() => {
     return () => {

@@ -27,6 +27,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(() => localStorage.getItem(WORKSPACE_KEY));
+  // 访问过的工作区保持挂载（display 隐藏而非卸载）：卸载会 dispose xterm，
+  // 丢 scrollback / 活跃 Tab / 控制权，切回来要重新 attach。同 TerminalPane 的 Tab 保活模式上移一层。
+  const [visitedWorkspaceIds, setVisitedWorkspaceIds] = useState<ReadonlySet<string>>(new Set());
   const [dismissedErrorId, setDismissedErrorId] = useState<number | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [enrollmentOpen, setEnrollmentOpen] = useState(false);
@@ -157,7 +160,14 @@ export function Workbench({ client }: { client: CofluxClient }) {
     });
   }
 
+  useEffect(() => {
+    if (!selectedWorkspaceId) return;
+    setVisitedWorkspaceIds((prev) => (prev.has(selectedWorkspaceId) ? prev : new Set(prev).add(selectedWorkspaceId)));
+  }, [selectedWorkspaceId]);
+
   const selectedWorkspace = workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
+  // 已删除的工作区随 workspaces 过滤自动卸载；含 selectedWorkspaceId 是避免等 visited 效果多一帧空白。
+  const terminalWorkspaces = workspaces.filter((workspace) => visitedWorkspaceIds.has(workspace.id) || workspace.id === selectedWorkspaceId);
   const showError = lastError !== null && lastError.id !== dismissedErrorId;
   const displayError = lastError?.message.replaceAll("任务", "终端");
 
@@ -203,7 +213,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onRemoveDevice={requestRemoveDevice}
       />
 
-      {selectedWorkspace?.id ? (
+      {terminalWorkspaces.length > 0 ? (
         <Suspense
           fallback={
             <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal text-muted-foreground">
@@ -211,9 +221,20 @@ export function Workbench({ client }: { client: CofluxClient }) {
             </main>
           }
         >
-          <WorkspaceTerminal key={selectedWorkspace.id} workspaceId={selectedWorkspace.id} client={client} onCloseTask={requestCloseTask} />
+          {terminalWorkspaces.map((workspace) => (
+            // display:contents 让 <section> 仍作为根 flex 行的直接子项参与布局
+            <div key={workspace.id} className={workspace.id === selectedWorkspaceId ? "contents" : "hidden"}>
+              <WorkspaceTerminal
+                workspaceId={workspace.id}
+                active={workspace.id === selectedWorkspaceId}
+                client={client}
+                onCloseTask={requestCloseTask}
+              />
+            </div>
+          ))}
         </Suspense>
-      ) : (
+      ) : null}
+      {!selectedWorkspace ? (
         <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
           <div className="flex max-w-sm flex-col items-center text-center">
             <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
@@ -228,7 +249,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
             ) : null}
           </div>
         </main>
-      )}
+      ) : null}
 
       {/* 断线重连横幅：保留最后快照渲染（乐观 UI），只提示连接状态。 */}
       {status !== "connected" ? (
