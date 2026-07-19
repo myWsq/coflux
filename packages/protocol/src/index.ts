@@ -125,6 +125,7 @@ export function decodeServerToDaemon(buf: Uint8Array): ServerToDaemon | null {
 
 /** 把任意输入钳制为合法终端尺寸 */
 export function clampDim(n: unknown, fallback: number): number {
-  const v = typeof n === "number" && Number.isFinite(n) ? Math.floor(n) : fallback;
+  // 0 = proto3 缺省值（客户端未传尺寸），与非法输入一样回落 fallback，而非被夹成 1
+  const v = typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
   return Math.max(1, Math.min(1000, v));
 }
