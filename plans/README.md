@@ -16,6 +16,6 @@
 | 012 | [导入项目两步向导（设备 → 远程文件树选文件夹）](012-import-project-wizard.md) | DONE | none |
 | 013 | [web 端 xterm.js 5.5 → 6.0 升级（与 server 侧 headless 6.0 对齐）](013-web-xterm6-upgrade.md) | DONE (00918d8) | none |
 | 014 | [web 终端剪贴板贴图 —— 上传远程 worktree 并注入路径给 agent](014-terminal-image-paste.md) | DONE (dc32dc0) | none |
-| 015 | [daemon worker 自动热更新编排层](015-auto-update-orchestration.md) | TODO | none |
+| 015 | [daemon worker 自动热更新编排层](015-auto-update-orchestration.md) | DONE (2729930) | none |
 
 执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015。
