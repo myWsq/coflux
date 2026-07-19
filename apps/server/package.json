@@ -13,6 +13,8 @@
     "@coflux/protocol": "workspace:*",
     "@hono/node-server": "^2.0.8",
     "@raven.js/core": "^3.0.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
     "hono": "^4.12.30",
     "jose": "^5.9.6",
     "postgres": "^3.4.9",

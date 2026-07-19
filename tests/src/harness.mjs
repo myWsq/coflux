@@ -283,6 +283,12 @@ export async function startStack(opts = {}) {
       ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
       await waitHealth(port);
     },
+    /** 杀掉整个 daemon 进程树（supervisor+worker），模拟用户机器离线（offline-view.test.mjs） */
+    async stopDaemon() {
+      killTree(ref.daemon);
+      ref.daemon = null;
+      await sleep(300);
+    },
     /** 给 server 发 SIGTERM，等其优雅退出，返回退出码（或 'timeout'） */
     gracefulStopServer(ms = 3000) {
       return new Promise((res) => {
