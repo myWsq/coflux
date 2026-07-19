@@ -18,6 +18,7 @@ import { HubState } from "./plugins/hub.plugin.js";
 import type { ClientConn, DaemonCtx } from "./hub.js";
 import { attachEndpoint } from "./transport.js";
 import { matchProxyHost, handleProxyRequest, handleProxyUpgrade, type ProxyServerContext } from "./proxy.js";
+import { AutoUpdater } from "./auto-update.js";
 
 const log = createLogger("server");
 
@@ -92,6 +93,11 @@ const heartbeat = setInterval(() => {
 }, config.heartbeatMs);
 heartbeat.unref();
 
+// 自动更新编排（plan 015）：未设 COFLUX_AUTOUPDATE_REPO 时 enabled=false，start() 直接空转。
+const autoUpdater = new AutoUpdater(hub);
+hub.onDaemonHandshake = (daemonId) => autoUpdater.checkDaemon(daemonId);
+autoUpdater.start();
+
 httpServer.listen(config.port, config.host, () => {
   // 注意：绝不打印 config.databaseUrl（含密码）。
   log.info("listening", { host: config.host, port: config.port });
@@ -104,6 +110,7 @@ async function shutdown(reason: string, code = 0) {
   shuttingDown = true;
   log.info("shutdown", { reason });
   clearInterval(heartbeat);
+  autoUpdater.stop();
   try {
     httpServer.close();
   } catch {
