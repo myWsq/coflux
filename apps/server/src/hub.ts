@@ -906,14 +906,15 @@ export class Hub {
       }
       case "clientFsWrite": {
         const value = msg.payload.value;
-        // 终端剪贴板贴图（plan 014）：字节经中继落到该工作区 worktree 内，root 恒为 ws.path（与
-        // exec/fs.read/fs.list 同一锚定语义），worker 侧再校验一次防越界（server 这层只做归属/在线校验）。
+        // 终端剪贴板贴图（plan 014，temp 模式修订）：temp=true 时字节落到 daemon 侧系统临时目录
+        // （worker 忽略 root，仅用它做单段文件名校验），temp=false 走原 root 锚定语义（ws.path）。
+        // workspace_id 两种模式下都要归属校验 + 路由到正确 daemon，故 server 这层逻辑不变。
         const ws = await this.workspaceForClient(client, value.workspaceId);
         if (!ws) return void this.relayError(client, "fs.write", value.requestId, "工作区不存在或不属于本账号");
         if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.write", value.requestId, "daemon 不在线");
         const reqId = randomUUID();
         this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: value.requestId, kind: "fs.write" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
-        this.sendDaemon(this.daemons.get(ws.daemonId)!, { case: "fsWrite", value: { requestId: reqId, root: ws.path, path: value.path, data: value.data } });
+        this.sendDaemon(this.daemons.get(ws.daemonId)!, { case: "fsWrite", value: { requestId: reqId, root: ws.path, path: value.path, data: value.data, temp: value.temp } });
         break;
       }
     }
