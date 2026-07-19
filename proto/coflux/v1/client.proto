@@ -135,13 +135,16 @@ message ClientFsRead {
   string path = 3;
 }
 
-// 终端剪贴板贴图（plan 014）：把图片字节上传到该工作区 worktree 内落盘，path 由 client 生成
-// （形如 ".coflux/pastes/paste-<ts>-<rand>.<ext>"），data 为原始（或客户端已压缩过的）图片字节。
+// 终端剪贴板贴图（plan 014，temp 模式修订）：把图片字节上传到 daemon 侧系统临时目录落盘，
+// data 为原始（或客户端已压缩过的）图片字节。temp=true 时 path 为单段文件名
+// （形如 "paste-<ts>-<rand>.<ext>"），落盘绝对路径由 worker 回带。workspace_id 仍用于
+// 归属校验与路由到正确 daemon（temp 模式不写入该 workspace 的 worktree）。
 message ClientFsWrite {
   string request_id = 1;
   string workspace_id = 2;
   string path = 3;
   bytes data = 4;
+  bool temp = 5;
 }
 
 message ClientToServer {

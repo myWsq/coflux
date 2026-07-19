@@ -750,7 +750,10 @@ public struct Coflux_V1_FsRead: Sendable {
   public init() {}
 }
 
-/// 通用原语：写文件（root 为锚定根，path 为相对路径，daemon 校验不越界；父目录不存在则创建）
+/// 通用原语：写文件。
+/// temp=false（默认）：root 为锚定根，path 为相对路径，daemon 校验不越界，父目录不存在则创建。
+/// temp=true：忽略 root/锚定语义，落到 daemon 侧系统临时目录（std::env::temp_dir()/coflux-pastes/）；
+/// path 此时仅允许单段文件名（不得含 '/'，不得为 '.' 或 '..'）。
 public struct Coflux_V1_FsWrite: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -763,6 +766,8 @@ public struct Coflux_V1_FsWrite: Sendable {
   public var path: String = String()
 
   public var data: Data = Data()
+
+  public var temp: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2509,7 +2514,7 @@ extension Coflux_V1_FsRead: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
 
 extension Coflux_V1_FsWrite: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".FsWrite"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}root\0\u{1}path\0\u{1}data\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}root\0\u{1}path\0\u{1}data\0\u{1}temp\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2521,6 +2526,7 @@ extension Coflux_V1_FsWrite: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
       case 2: try { try decoder.decodeSingularStringField(value: &self.root) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.path) }()
       case 4: try { try decoder.decodeSingularBytesField(value: &self.data) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.temp) }()
       default: break
       }
     }
@@ -2539,6 +2545,9 @@ extension Coflux_V1_FsWrite: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
     if !self.data.isEmpty {
       try visitor.visitSingularBytesField(value: self.data, fieldNumber: 4)
     }
+    if self.temp != false {
+      try visitor.visitSingularBoolField(value: self.temp, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2547,6 +2556,7 @@ extension Coflux_V1_FsWrite: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
     if lhs.root != rhs.root {return false}
     if lhs.path != rhs.path {return false}
     if lhs.data != rhs.data {return false}
+    if lhs.temp != rhs.temp {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

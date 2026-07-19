@@ -216,12 +216,16 @@ message FsRead {
   string path = 3;
 }
 
-// 通用原语：写文件（root 为锚定根，path 为相对路径，daemon 校验不越界；父目录不存在则创建）
+// 通用原语：写文件。
+// temp=false（默认）：root 为锚定根，path 为相对路径，daemon 校验不越界，父目录不存在则创建。
+// temp=true：忽略 root/锚定语义，落到 daemon 侧系统临时目录（std::env::temp_dir()/coflux-pastes/）；
+// path 此时仅允许单段文件名（不得含 '/'，不得为 '.' 或 '..'）。
 message FsWrite {
   string request_id = 1;
   string root = 2;
   string path = 3;
   bytes data = 4;
+  bool temp = 5;
 }
 
 message ServerToDaemon {

@@ -166,7 +166,9 @@ pub struct FsWriteResult {
     pub request_id: ::prost::alloc::string::String,
     #[prost(bool, tag="2")]
     pub ok: bool,
-    /// 成功时为落盘后的 worktree 相对路径（worker 侧确定的真相；client 直接拿它注入 PTY，不自行拼装）
+    /// 成功时为落盘路径，worker 侧确定的真相，client 直接拿它注入 PTY，不自行拼装：
+    /// root 锚定模式（temp=false）下为 worktree 相对路径；temp 模式（temp=true）下为
+    /// daemon 侧系统临时目录的绝对路径。
     #[prost(string, optional, tag="3")]
     pub path: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="4")]
@@ -587,7 +589,10 @@ pub struct FsRead {
     #[prost(string, tag="3")]
     pub path: ::prost::alloc::string::String,
 }
-/// 通用原语：写文件（root 为锚定根，path 为相对路径，daemon 校验不越界；父目录不存在则创建）
+/// 通用原语：写文件。
+/// temp=false（默认）：root 为锚定根，path 为相对路径，daemon 校验不越界，父目录不存在则创建。
+/// temp=true：忽略 root/锚定语义，落到 daemon 侧系统临时目录（std::env::temp_dir()/coflux-pastes/）；
+/// path 此时仅允许单段文件名（不得含 '/'，不得为 '.' 或 '..'）。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FsWrite {
     #[prost(string, tag="1")]
@@ -598,6 +603,8 @@ pub struct FsWrite {
     pub path: ::prost::alloc::string::String,
     #[prost(bytes="vec", tag="4")]
     pub data: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag="5")]
+    pub temp: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
@@ -843,8 +850,10 @@ pub struct ClientFsRead {
     #[prost(string, tag="3")]
     pub path: ::prost::alloc::string::String,
 }
-/// 终端剪贴板贴图（plan 014）：把图片字节上传到该工作区 worktree 内落盘，path 由 client 生成
-/// （形如 ".coflux/pastes/paste-<ts>-<rand>.<ext>"），data 为原始（或客户端已压缩过的）图片字节。
+/// 终端剪贴板贴图（plan 014，temp 模式修订）：把图片字节上传到 daemon 侧系统临时目录落盘，
+/// data 为原始（或客户端已压缩过的）图片字节。temp=true 时 path 为单段文件名
+/// （形如 "paste-<ts>-<rand>.<ext>"），落盘绝对路径由 worker 回带。workspace_id 仍用于
+/// 归属校验与路由到正确 daemon（temp 模式不写入该 workspace 的 worktree）。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientFsWrite {
     #[prost(string, tag="1")]
@@ -855,6 +864,8 @@ pub struct ClientFsWrite {
     pub path: ::prost::alloc::string::String,
     #[prost(bytes="vec", tag="4")]
     pub data: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag="5")]
+    pub temp: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {

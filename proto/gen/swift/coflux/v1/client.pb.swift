@@ -442,8 +442,10 @@ public struct Coflux_V1_ClientFsRead: Sendable {
   public init() {}
 }
 
-/// 终端剪贴板贴图（plan 014）：把图片字节上传到该工作区 worktree 内落盘，path 由 client 生成
-/// （形如 ".coflux/pastes/paste-<ts>-<rand>.<ext>"），data 为原始（或客户端已压缩过的）图片字节。
+/// 终端剪贴板贴图（plan 014，temp 模式修订）：把图片字节上传到 daemon 侧系统临时目录落盘，
+/// data 为原始（或客户端已压缩过的）图片字节。temp=true 时 path 为单段文件名
+/// （形如 "paste-<ts>-<rand>.<ext>"），落盘绝对路径由 worker 回带。workspace_id 仍用于
+/// 归属校验与路由到正确 daemon（temp 模式不写入该 workspace 的 worktree）。
 public struct Coflux_V1_ClientFsWrite: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -456,6 +458,8 @@ public struct Coflux_V1_ClientFsWrite: Sendable {
   public var path: String = String()
 
   public var data: Data = Data()
+
+  public var temp: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2059,7 +2063,7 @@ extension Coflux_V1_ClientFsRead: SwiftProtobuf.Message, SwiftProtobuf._MessageI
 
 extension Coflux_V1_ClientFsWrite: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientFsWrite"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}path\0\u{1}data\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}path\0\u{1}data\0\u{1}temp\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2071,6 +2075,7 @@ extension Coflux_V1_ClientFsWrite: SwiftProtobuf.Message, SwiftProtobuf._Message
       case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.path) }()
       case 4: try { try decoder.decodeSingularBytesField(value: &self.data) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.temp) }()
       default: break
       }
     }
@@ -2089,6 +2094,9 @@ extension Coflux_V1_ClientFsWrite: SwiftProtobuf.Message, SwiftProtobuf._Message
     if !self.data.isEmpty {
       try visitor.visitSingularBytesField(value: self.data, fieldNumber: 4)
     }
+    if self.temp != false {
+      try visitor.visitSingularBoolField(value: self.temp, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2097,6 +2105,7 @@ extension Coflux_V1_ClientFsWrite: SwiftProtobuf.Message, SwiftProtobuf._Message
     if lhs.workspaceID != rhs.workspaceID {return false}
     if lhs.path != rhs.path {return false}
     if lhs.data != rhs.data {return false}
+    if lhs.temp != rhs.temp {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
