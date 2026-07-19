@@ -157,6 +157,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           const webgl = new WebglAddon();
           webgl.onContextLoss(() => webgl.dispose());
           terminal.loadAddon(webgl);
+          fit(); // WebGL 用字形图集重新度量 cell，尺寸可能与挂载时的 DOM 渲染器度量有亚像素差异，补一次 fit 对齐
         } catch {
           // WebGL 不可用（无硬件加速/被禁用），保持默认 DOM 渲染器。
         }
@@ -248,9 +249,25 @@ export function TerminalPane(props: TerminalPaneProps) {
     observer.observe(host);
     if (props.active) requestAnimationFrame(() => fit());
 
+    // devicePixelRatio 变化（浏览器缩放、拖跨不同缩放比的显示器）后 xterm 按新 dpr
+    // 重新取整 cell 尺寸，host CSS 尺寸不变、ResizeObserver 不会触发，需主动补 fit。
+    // media query 字符串绑定的是创建时的 dpr 值，change 只在离开该值时触发一次，
+    // 故每次触发后以新 dpr 自递归重建监听。
+    let dprQuery: MediaQueryList | null = null;
+    const onDprChange = () => {
+      fit();
+      watchDpr();
+    };
+    const watchDpr = () => {
+      dprQuery = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      dprQuery.addEventListener("change", onDprChange, { once: true });
+    };
+    watchDpr();
+
     return () => {
       disposed = true;
       observer.disconnect();
+      dprQuery?.removeEventListener("change", onDprChange);
       host.removeEventListener("paste", handlePaste, { capture: true });
       props.onDispose(props.taskId, controller);
       terminal.dispose(); // 一并 dispose 已挂载的 addons（fit/webgl）与输入监听
