@@ -20,6 +20,7 @@
 - **server RavenJS 化 + 全仓库 TypeScript 7**（2026-07-15）：HTTP 应用层迁 `@raven.js/core`（组合根 + 插件 + 契约路由），WS/反代保持传输层；确认架构不变量——**client/daemon 均只连中心服务器（严格星形，含 PTY），server(Postgres) 是全部逻辑状态的真相源**。
 - **黑盒集成测试**（`tests/`，跨重构有效）：37 项，覆盖 auth/多账号隔离/项目-worktree-任务-PTY/重启恢复/两级 resync/跨 daemon 安全/handoff/热升级与验签对抗/端口转发门禁与 WS 透传/畸形 wire/优雅关闭。
 - **生产部署**：prod-jp（Debian + Caddy 自动 HTTPS + systemd），DNS/泛证书/DB 见运维记录；`scripts/prod-smoke.mjs` 7 步真协议冒烟。
+- **server 侧终端镜像**（2026-07-19，69e132a/d8b3237）：每 session 一个 `@xterm/headless` 实例实时消化 pty 流（`apps/server/src/mirror.ts`），attach 下发几 KB 重绘快照（免 200KB scrollback 往返），**daemon 离线也能看最后现场**（含 2000 行可翻历史）；协议/daemon/web 零改动。断档（server 重启/daemon 闪断）走原 replay 路径自愈重建。顺带：TaskAttach 补终端尺寸字段、clampDim 把 0（proto3 缺省）回落默认修复。web 端 xterm 5.5→6.0 对齐（plan 013）。
 
 ## 待办
 
@@ -36,7 +37,7 @@
 - [ ] 终端样式调整
 - [ ] 导入设备引导优化
 - [ ] 端口转发能力交互
-- [ ] 终端恢复的性能问题
+- [x] 终端恢复的性能问题：server 侧镜像快照解决（2026-07-19，见已完成）
 - [ ] git diff 的展示
 - [ ] 快捷键支持
 - [ ] 登录页和设备授权页的 UI 优化
