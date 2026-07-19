@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { ExternalLink, GitBranch, LoaderCircle, Plus, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
+import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import type { CofluxClient } from "@/client/store";
 import { cn } from "@/lib/utils";
@@ -21,7 +22,25 @@ type WorkspaceTerminalProps = {
   onCloseTask: (task: Task) => void;
 };
 
-export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask }: WorkspaceTerminalProps) {
+/**
+ * 全局快捷键（plan 015）向 active 实例下发的命令。Workbench 只把 ref 挂在
+ * active===true 的那个实例上（见 workbench.tsx），保活但隐藏的实例永远拿不到这份 ref，
+ * 天然满足"只有 active 实例响应快捷键"的约束。
+ */
+export type WorkspaceTerminalHandle = {
+  createTerminal: () => void;
+  /** 复用 onCloseTask（RUNNING 走既有确认对话框），无 active Tab 时安静忽略 */
+  closeActiveTab: () => void;
+  /** index 越界安静忽略 */
+  selectTabByIndex: (index: number) => void;
+  /** 按 Tab 栏顺序循环切换；无 Tab 时安静忽略 */
+  selectRelativeTab: (delta: number) => void;
+};
+
+export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTerminalProps>(function WorkspaceTerminal(
+  { workspaceId, active, client, onCloseTask },
+  ref,
+) {
   const workspace = useStore(client.store, (state) => state.workspaces.find((item) => item.id === workspaceId));
   const projectWorkspaces = useStore(
     client.store,
@@ -352,6 +371,25 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask }: 
   const activeControlState: TerminalControlState = activeTask ? stateOf(activeTask) : "stopped";
   const activePorts = activeTask ? (ports[activeTask.id] ?? []) : [];
 
+  useImperativeHandle(ref, () => ({
+    createTerminal,
+    closeActiveTab: () => {
+      if (activeTask) onCloseTask(activeTask);
+    },
+    selectTabByIndex: (index: number) => {
+      const task = workspaceTasks[index];
+      if (task) requestActivation(task.id, stateOf(task) === "detached");
+    },
+    selectRelativeTab: (delta: number) => {
+      if (workspaceTasks.length === 0) return;
+      const currentIndex = workspaceTasks.findIndex((task) => task.id === activeTaskId);
+      const base = currentIndex === -1 ? 0 : currentIndex;
+      const next = ((base + delta) % workspaceTasks.length + workspaceTasks.length) % workspaceTasks.length;
+      const task = workspaceTasks[next]!;
+      requestActivation(task.id, stateOf(task) === "detached");
+    },
+  }));
+
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-terminal">
       {/* 单栏顶栏：名称（如有）＋ 可点的分支按钮 │ 终端 Tabs（Tab 用间距而非竖线分隔）＋ 新建/端口 */}
@@ -400,25 +438,27 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask }: 
                   <span className="truncate">{task.title || "终端"}</span>
                   {taskPorts.length > 0 ? <span className="ml-0.5 font-mono text-2xs text-muted-foreground">:{taskPorts[0].port}</span> : null}
                 </button>
-                <button
-                  className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
-                  onClick={() => onCloseTask(task)}
-                  title="关闭终端"
-                >
-                  <X className="size-3" />
-                </button>
+                <Tooltip content="关闭终端 ⌃⌘W" placement="below">
+                  <button
+                    className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                    onClick={() => onCloseTask(task)}
+                  >
+                    <X className="size-3" />
+                  </button>
+                </Tooltip>
               </div>
             );
           })}
           {/* 新建按钮跟随最后一个 Tab（浏览器式），不钉在最右 */}
-          <button
-            className="ml-0.5 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-wait disabled:opacity-50"
-            onClick={createTerminal}
-            disabled={creating}
-            title="新建终端"
-          >
-            {creating ? <LoaderCircle className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
-          </button>
+          <Tooltip content="新建终端 ⌃⌘T" placement="below">
+            <button
+              className="ml-0.5 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-wait disabled:opacity-50"
+              onClick={createTerminal}
+              disabled={creating}
+            >
+              {creating ? <LoaderCircle className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
+            </button>
+          </Tooltip>
         </div>
         {activePorts.length > 0 ? (
           <div className="flex shrink-0 items-center gap-1">
@@ -466,7 +506,7 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask }: 
                 <SquareTerminal className="size-5" />
               </div>
               <h2 className="text-base font-medium text-foreground">这个工作区还没有终端</h2>
-              <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。</p>
+              <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。也可以按 ⌃⌘T 快速新建。</p>
               <Button className="mt-5" label="新建终端" variant="primary" size="sm" icon={<Plus />} isLoading={creating} onClick={createTerminal} />
             </div>
           </div>
@@ -485,4 +525,4 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask }: 
 
     </section>
   );
-}
+});
