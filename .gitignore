@@ -7,6 +7,5 @@ target/
 *.log
 *.tsbuildinfo
 .DS_Store
-.env
-.env.local
+.env*
 .coflux-dev/
