@@ -5,6 +5,7 @@
 //! 全 Rust 化后整个 daemon 无 node 运行时依赖。
 
 mod creds;
+mod dec_modes;
 mod git;
 mod ops;
 mod ports;
@@ -27,6 +28,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use creds::{CredStore, Credentials, PendingAuth};
+use dec_modes::DecModeTracker;
 
 #[derive(Clone)]
 struct Config {
@@ -57,6 +59,9 @@ struct WorkerState {
     workspaces: HashMap<String, String>,
     /// 上次上报的分支：workspace_id -> branch。收到新清单时清空，下一轮全量比对上报（重连对账）
     last_branches: HashMap<String, String>,
+    /// per-session DEC 私有模式追踪（见 dec_modes.rs）：supervisor scrollback 环把模式设置转义
+    /// 挤出去后，replay 转发前用它补前缀，不让 attach/resync 丢失 bracketed-paste 等模式状态。
+    dec_modes: HashMap<String, DecModeTracker>,
 }
 
 /// 出站到 server 的消息：WS 上只有 binary message，一条 = 一个已编码好的 protobuf 信封字节串
@@ -192,6 +197,7 @@ async fn main() {
         last_reported_ports: Vec::new(),
         workspaces: HashMap::new(),
         last_branches: HashMap::new(),
+        dec_modes: HashMap::new(),
     }));
 
     let (to_server_tx, to_server_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
@@ -348,9 +354,28 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
         // protobuf 信封转发给 server —— WS 侧只认 protobuf binary，不再透传 UDS 自定义帧。
         match decode_frame(&rec) {
             Some(DataFrame::Output { session_id, data }) => {
+                // 旁路喂给模式追踪器，转发字节本身不受影响（live 输出路径，见 dec_modes.rs）。
+                state.lock().unwrap().dec_modes.entry(session_id.clone()).or_default().feed(&data);
                 send_d2s(to_server_tx, daemon_to_server::Payload::PtyOutput(wire::PtyOutput { session_id, data })).await;
             }
             Some(DataFrame::Replay { session_id, request_id, data }) => {
+                // 先取"当前已知激活模式"快照拼前缀，再把本次 replay 数据喂进追踪器——
+                // 前缀代表被 supervisor scrollback 环挤掉的前缀净效果，顺序不能反（否则
+                // replay 里自带的 h/l 会先污染"起点状态"）。
+                let prefix = {
+                    let mut s = state.lock().unwrap();
+                    let tracker = s.dec_modes.entry(session_id.clone()).or_default();
+                    let prefix = tracker.prefix();
+                    tracker.feed(&data);
+                    prefix
+                };
+                let data = if prefix.is_empty() {
+                    data
+                } else {
+                    let mut buf = prefix;
+                    buf.extend_from_slice(&data);
+                    buf
+                };
                 send_d2s(to_server_tx, daemon_to_server::Payload::PtyReplay(wire::PtyReplay { session_id, request_id, data })).await;
             }
             // Input/ProxyData 不会从 supervisor→worker 方向出现；畸形帧同样丢弃，不 panic。
@@ -368,7 +393,10 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
             send_d2s(to_server_tx, daemon_to_server::Payload::SessionStarted(wire::SessionStarted { session_id, task_id, pid })).await;
         }
         SupervisorToWorker::SessionExit { session_id, exit_code } => {
-            state.lock().unwrap().alive.remove(&session_id);
+            let mut s = state.lock().unwrap();
+            s.alive.remove(&session_id);
+            s.dec_modes.remove(&session_id); // 会话退出：释放追踪状态，避免泄漏
+            drop(s);
             send_d2s(to_server_tx, daemon_to_server::Payload::SessionExit(wire::SessionExit { session_id, exit_code })).await;
         }
         SupervisorToWorker::ResyncList { sessions } => {
@@ -378,6 +406,10 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
                 for r in &sessions {
                     s.alive.insert(r.session_id.clone(), (r.task_id.clone(), r.pid));
                 }
+                // 断线期间静默退出的会话不会单独收到 SessionExit：resync 快照是这批会话的
+                // 权威在场证明，借机把已不在场的追踪状态一并回收。
+                let alive_now = s.alive.clone();
+                s.dec_modes.retain(|session_id, _| alive_now.contains_key(session_id));
                 s.sup_synced = true;
                 s.authed
             };
