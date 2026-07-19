@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FsEntryKind } from "@coflux/protocol";
@@ -75,6 +75,42 @@ test("fs：路径穿越被拒（锚定在 root 内）", async () => {
   const read = await c.waitFor((m) => m.case === "fsReadResult" && m.requestId === "r2", "fs.read.result");
   assert.equal(read.ok, false, "越界读取被拒");
   assert.match(read.error ?? "", /越界/);
+  c.close();
+});
+
+test("fs.write：上传字节原样落盘到 .coflux/pastes/，内容一致且自带 .gitignore（plan 014）", async () => {
+  const c = stack.makeClient();
+  await c.authSubscribe();
+  const ws = await importWorkspace(c);
+  const content = "fake-image-bytes-\x01\x02\x03-payload";
+  c.send({ case: "clientFsWrite", requestId: "w1", workspaceId: ws.id, path: ".coflux/pastes/paste-test.png", data: content });
+  const r = await c.waitFor((m) => m.case === "fsWriteResult" && m.requestId === "w1", "fs.write.result");
+  assert.equal(r.ok, true);
+  assert.equal(r.path, ".coflux/pastes/paste-test.png");
+  const written = readFileSync(join(ws.path, ".coflux", "pastes", "paste-test.png"), "utf8");
+  assert.equal(written, content, "落盘字节与上传字节一致（不重编码）");
+  const gitignore = readFileSync(join(ws.path, ".coflux", "pastes", ".gitignore"), "utf8");
+  assert.equal(gitignore, "*\n", "pastes 目录自我 .gitignore");
+  c.close();
+});
+
+test("fs.write：'..' 越界路径被拒", async () => {
+  const c = stack.makeClient();
+  await c.authSubscribe();
+  const ws = await importWorkspace(c);
+  c.send({ case: "clientFsWrite", requestId: "w2", workspaceId: ws.id, path: "../escaped.png", data: "x" });
+  const r = await c.waitFor((m) => m.case === "fsWriteResult" && m.requestId === "w2", "fs.write.result");
+  assert.equal(r.ok, false, "越界写入被拒");
+  c.close();
+});
+
+test("fs.write：非归属（不存在的）workspace 被拒", async () => {
+  const c = stack.makeClient();
+  await c.authSubscribe();
+  c.send({ case: "clientFsWrite", requestId: "w3", workspaceId: "00000000-0000-0000-0000-000000000000", path: ".coflux/pastes/x.png", data: "x" });
+  const r = await c.waitFor((m) => m.case === "fsWriteResult" && m.requestId === "w3", "fs.write.result");
+  assert.equal(r.ok, false, "非归属 workspace 被拒");
+  assert.match(r.error ?? "", /不存在|不属于本账号/);
   c.close();
 });
 

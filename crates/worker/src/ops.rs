@@ -1,15 +1,19 @@
-//! 通用原语：exec（一次性命令）+ fs（root 锚定列目录/读文件，realpath 防穿越）。与 TS exec.ts/fs.ts 一致。
+//! 通用原语：exec（一次性命令）+ fs（root 锚定列目录/读文件/写文件，realpath 防穿越）。与 TS exec.ts/fs.ts 一致。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use coflux_protocol::{FsEntry, FsEntryKind};
 use tokio::process::Command;
 
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
+// 客户端（plan 014 终端贴图）已按 COFLUX_MAX_PAYLOAD 预算压缩到约 3.5MB；此处放宽留冗余，纯兜底。
+const MAX_WRITE_BYTES: u64 = 8 * 1024 * 1024;
+// 落盘目录自我清理的存活期：超过此 mtime 的文件视为陈旧贴图，写入时顺手清掉（不起独立定时任务）。
+const WRITE_DIR_CLEANUP_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 pub struct ExecOutcome {
     pub ok: bool,
@@ -60,6 +64,9 @@ pub fn expand_home(path: &str) -> Option<String> {
 /// 把 root + 路径解析为绝对真实路径，并保证不越出 root（canonicalize 解引用符号链接 + ".."）。
 /// root / path 均可含 "~"；path 为绝对路径时以该路径为准（仍须落在 root 下）。
 /// 越界/不存在返回 None。
+///
+/// 注意：此函数 canonicalize 目标本身，故目标必须已存在——写新文件不能直接复用它
+/// （见 safe_resolve_write_target，它只 canonicalize 父目录）。
 fn safe_resolve(root: &str, rel: &str) -> Option<PathBuf> {
     let root = expand_home(root)?;
     let rel = expand_home(rel)?;
@@ -71,6 +78,84 @@ fn safe_resolve(root: &str, rel: &str) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// 为写文件解析目标：root 必须已存在；rel 的每个路径段都不能是空/"."/".."（拒绝越界与穿越），
+/// 父目录按需创建后 canonicalize 校验仍落在 root 内（防符号链接逃逸，与 safe_resolve 同一语义）。
+/// 返回 (安全的真实父目录, 文件名, 清洗后的相对路径="dir/dir/file"形式)。
+fn safe_resolve_write_target(root: &str, rel: &str) -> Option<(PathBuf, String, String)> {
+    let root = expand_home(root)?;
+    let real_root = std::fs::canonicalize(&root).ok()?;
+    let rel = expand_home(rel)?;
+    let mut segments: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    let file_name = segments.pop()?.to_string();
+    if file_name == "." || file_name == ".." {
+        return None;
+    }
+    // 逐段拼接 + 逐段 canonicalize 校验（而非拼完整路径再一次性 create_dir_all + 校验）：
+    // 若中间某段是指向 root 外的既有符号链接，在"跳进去创建下一段"之前就会被发现并拒绝，
+    // 不会先在界外建出目录才追悔。
+    let mut dir = real_root.clone();
+    for seg in &segments {
+        if *seg == "." || *seg == ".." {
+            return None;
+        }
+        dir = dir.join(seg);
+        if !dir.exists() {
+            std::fs::create_dir(&dir).ok()?;
+        }
+        dir = std::fs::canonicalize(&dir).ok()?;
+        if dir != real_root && !dir.starts_with(&real_root) {
+            return None;
+        }
+    }
+    let mut clean_rel = segments.join("/");
+    if !clean_rel.is_empty() {
+        clean_rel.push('/');
+    }
+    clean_rel.push_str(&file_name);
+    Some((dir, file_name, clean_rel))
+}
+
+/// 目录自我托管：确保带一个内容为 "*" 的 .gitignore（自我忽略，worktree 场景无 commondir 问题，
+/// 不碰 `.git`）；顺手清理目录内 mtime 超过 7 天的陈旧文件（.gitignore 与刚落盘的文件除外）。
+/// 低频操作，纯尽力而为——任何一步失败都不影响本次写入结果。
+fn housekeep_write_dir(dir: &Path, just_written: &str) {
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.exists() {
+        let _ = std::fs::write(&gitignore, "*\n");
+    }
+    let Some(cutoff) = SystemTime::now().checked_sub(WRITE_DIR_CLEANUP_AGE) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        if name == ".gitignore" || name.to_string_lossy() == just_written {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        if matches!(meta.modified(), Ok(modified) if modified < cutoff) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// 写文件（plan 014 终端贴图上传落盘）：root 锚定 + 防越界 + 父目录按需创建；
+/// 成功回带清洗后的 worktree 相对路径（真相在 worker 侧，client 不自行拼装）。
+pub async fn write_file(root: &str, rel: &str, data: &[u8]) -> (bool, Option<String>, Option<String>) {
+    if data.len() as u64 > MAX_WRITE_BYTES {
+        return (false, None, Some("文件过大".into()));
+    }
+    let Some((dir, file_name, clean_rel)) = safe_resolve_write_target(root, rel) else {
+        return (false, None, Some("路径越界或非法".into()));
+    };
+    if let Err(e) = std::fs::write(dir.join(&file_name), data) {
+        return (false, None, Some(e.to_string()));
+    }
+    housekeep_write_dir(&dir, &file_name);
+    (true, Some(clean_rel), None)
 }
 
 pub async fn list_dir(root: &str, rel: &str) -> (bool, Vec<FsEntry>, Option<String>, Option<String>) {
