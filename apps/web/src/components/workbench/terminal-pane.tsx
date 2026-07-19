@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import type { FsWriteResult } from "@/client/store";
 
 /** 控制权四态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。 */
 export type TerminalControlState = "stopped" | "attaching" | "owned" | "detached";
@@ -17,39 +18,93 @@ export type TerminalController = {
 type TerminalPaneProps = {
   taskId: string;
   sessionId: string | null;
+  workspaceId: string;
   active: boolean;
   controlState: TerminalControlState;
   registerSessionConsumer: (sessionId: string, consumer: (data: Uint8Array) => void) => () => void;
   sendInput: (sessionId: string, data: string) => void;
   sendResize: (sessionId: string, cols: number, rows: number) => void;
+  sendFsWrite: (workspaceId: string, path: string, data: Uint8Array) => Promise<FsWriteResult>;
   onReady: (taskId: string, controller: TerminalController) => void;
   onDispose: (taskId: string, controller: TerminalController) => void;
   onSessionReady: (taskId: string, sessionId: string, controller: TerminalController) => void;
   onOutput: (taskId: string, sessionId: string) => void;
 };
 
+// 终端贴图（plan 014）：3.5MB 预算 = COFLUX_MAX_PAYLOAD 默认 4MB 减去信封/协议开销的经验余量。
+// 与 apps/server/src/config.ts 的 maxPayload 存在隐式耦合，若日后调整该值需同步这里。
+const PASTE_BUDGET_BYTES = 3.5 * 1024 * 1024;
+const PASTE_MIN_DIMENSION = 64; // 降分辨率的下限：避免退化成不可读的一两个像素
+
+function extForMime(mime: string): string {
+  switch (mime) {
+    case "image/png":
+      return "png";
+    case "image/jpeg":
+      return "jpg";
+    case "image/gif":
+      return "gif";
+    case "image/webp":
+      return "webp";
+    default:
+      return "png";
+  }
+}
+
+/** 把图片压缩到预算内：先在原分辨率按 JPEG 质量阶梯降（文字截图的可读性损失最小），
+ * 仍超限再减半分辨率重来；两者都到头仍超限则回落已压出的最小结果（上传若仍失败，由调用方报错）。 */
+async function compressToBudget(blob: Blob, budget: number): Promise<Uint8Array> {
+  const bitmap = await createImageBitmap(blob);
+  let width = bitmap.width;
+  let height = bitmap.height;
+  const qualities = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3];
+  let smallest: Blob | null = null;
+  while (true) {
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width));
+    canvas.height = Math.max(1, Math.round(height));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) break;
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    for (const quality of qualities) {
+      const encoded = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+      if (!encoded) continue;
+      if (!smallest || encoded.size < smallest.size) smallest = encoded;
+      if (encoded.size <= budget) return new Uint8Array(await encoded.arrayBuffer());
+    }
+    if (Math.min(width, height) <= PASTE_MIN_DIMENSION) break;
+    width /= 2;
+    height /= 2;
+  }
+  return new Uint8Array(await (smallest ?? blob).arrayBuffer());
+}
+
 export function TerminalPane(props: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const controllerRef = useRef<TerminalController | null>(null);
 
-  // onData/onResize 在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId——
+  // onData/onResize/粘贴处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
   // 这里反过来是"始终读最新"而非"读一次"，用同样的 ref 手段解决）。
   const liveRef = useRef({
     active: props.active,
     controlState: props.controlState,
     sessionId: props.sessionId,
+    workspaceId: props.workspaceId,
     sendInput: props.sendInput,
     sendResize: props.sendResize,
+    sendFsWrite: props.sendFsWrite,
   });
   useEffect(() => {
     liveRef.current = {
       active: props.active,
       controlState: props.controlState,
       sessionId: props.sessionId,
+      workspaceId: props.workspaceId,
       sendInput: props.sendInput,
       sendResize: props.sendResize,
+      sendFsWrite: props.sendFsWrite,
     };
   });
 
@@ -142,6 +197,44 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (active && controlState === "owned" && sessionId) sendResize(sessionId, cols, rows);
     });
 
+    // 剪贴板贴图（plan 014）：capture 阶段挂在 host（xterm textarea 的祖先）上，
+    // 抢在 xterm 自己给 textarea 注册的 paste 监听之前拦截——只处理 image/*，
+    // 文本粘贴不 preventDefault，原样落到 xterm 默认行为，行为不变。
+    const handlePaste = (event: ClipboardEvent) => {
+      const items = event.clipboardData?.items;
+      if (!items) return;
+      const imageItem = [...items].find((item) => item.type.startsWith("image/"));
+      if (!imageItem) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const { active, controlState, sessionId, workspaceId, sendFsWrite } = liveRef.current;
+      if (!(active && controlState === "owned" && sessionId)) {
+        controllerRef.current?.writeSystem("未持有控制权，无法粘贴图片", "warning");
+        return;
+      }
+      const blob = imageItem.getAsFile();
+      if (!blob) return;
+
+      void (async () => {
+        try {
+          const bytes =
+            blob.size > PASTE_BUDGET_BYTES ? await compressToBudget(blob, PASTE_BUDGET_BYTES) : new Uint8Array(await blob.arrayBuffer());
+          const ext = extForMime(blob.size > PASTE_BUDGET_BYTES ? "image/jpeg" : blob.type);
+          const name = `paste-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+          const result = await sendFsWrite(workspaceId, `.coflux/pastes/${name}`, bytes);
+          if (result.ok && result.path) {
+            terminal.paste(` ${result.path} `);
+          } else {
+            controllerRef.current?.writeSystem(`图片上传失败：${result.error}`, "error");
+          }
+        } catch (e) {
+          controllerRef.current?.writeSystem(`图片处理失败：${e instanceof Error ? e.message : String(e)}`, "error");
+        }
+      })();
+    };
+    host.addEventListener("paste", handlePaste, { capture: true });
+
     const observer = new ResizeObserver(() => fit());
     observer.observe(host);
     if (props.active) requestAnimationFrame(() => fit());
@@ -149,6 +242,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     return () => {
       disposed = true;
       observer.disconnect();
+      host.removeEventListener("paste", handlePaste, { capture: true });
       props.onDispose(props.taskId, controller);
       terminal.dispose(); // 一并 dispose 已挂载的 addons（fit/webgl）与输入监听
       terminalRef.current = null;
