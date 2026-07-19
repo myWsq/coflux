@@ -236,6 +236,19 @@ export class Hub {
     this.onDaemonHandshake?.(info.daemonId);
   }
 
+  /** 自动更新编排（plan 015）读取在线 daemon 快照用于比对期望版本。 */
+  listOnlineDaemonsForUpdate(): { daemonId: DaemonId; workerVersion: string; platform: string; arch: string }[] {
+    return [...this.daemons.values()].map((d) => ({ daemonId: d.info.daemonId, workerVersion: d.info.workerVersion, platform: d.info.platform, arch: d.arch }));
+  }
+
+  /** 对某在线 daemon 下发 worker 升级：复用 clientUpgradeDaemon 的发送路径，不绕过/复制 supervisor 侧语义。 */
+  sendWorkerUpgrade(daemonId: DaemonId, payload: { version: string; url: string; sha256: string; signature: string }): boolean {
+    const d = this.daemons.get(daemonId);
+    if (!d) return false;
+    this.sendDaemon(d, { case: "workerUpgrade", value: payload });
+    return true;
+  }
+
   /** 全量下发某设备的工作区清单（连接时 + 工作区增删时），worker 据此监视各 worktree 的 HEAD 分支 */
   private async pushWorkspaceList(daemonId: DaemonId): Promise<void> {
     const daemon = this.daemons.get(daemonId);

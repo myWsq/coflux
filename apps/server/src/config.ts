@@ -86,6 +86,14 @@ export const config = {
   maxDevicesPerAccount: int("COFLUX_MAX_DEVICES", 100),
   execDefaultTimeoutMs: int("COFLUX_EXEC_TIMEOUT_MS", 60_000),
   execMaxTimeoutMs: int("COFLUX_EXEC_MAX_TIMEOUT_MS", 300_000),
+
+  /** 自动更新编排（plan 015）：轮询 GitHub `/releases/latest` + manifest.json，对在线 daemon
+   * 推送 worker 升级。未设 COFLUX_AUTOUPDATE_REPO（形如 owner/repo）则功能整体关闭。 */
+  autoUpdateApiBase: process.env.COFLUX_AUTOUPDATE_API_BASE ?? "https://api.github.com",
+  autoUpdateRepo: process.env.COFLUX_AUTOUPDATE_REPO ?? "",
+  autoUpdatePollMs: int("COFLUX_AUTOUPDATE_POLL_MS", 10 * 60 * 1000),
+  autoUpdateMaxAttempts: int("COFLUX_AUTOUPDATE_MAX_ATTEMPTS", 3),
+  autoUpdateCooldownMs: int("COFLUX_AUTOUPDATE_COOLDOWN_MS", 60 * 60 * 1000),
 } as const;
 
 // fail-closed：生产（非 COFLUX_DEV）缺任何秘密类 env 就拒绝启动，绝不带弱默认口令上线。
