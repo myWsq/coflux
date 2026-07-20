@@ -1,4 +1,4 @@
-# Plan 015: daemon worker 自动热更新编排层
+# Plan 017: daemon worker 自动热更新编排层
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation

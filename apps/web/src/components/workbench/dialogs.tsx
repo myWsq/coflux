@@ -172,6 +172,53 @@ export type ConfirmAction = {
   onConfirm: () => void;
 };
 
+/** 键位展示：物理键位组合，纯展示不做输入解析（解析逻辑见 use-global-shortcuts.ts）。
+ * 修饰键顺序遵循 macOS 菜单惯例：⌃⌥⇧⌘。 */
+const SHORTCUT_ROWS: { keys: string[]; description: string }[] = [
+  { keys: ["⌃", "⌘", "T"], description: "新建终端" },
+  { keys: ["⌃", "⌘", "W"], description: "关闭当前终端" },
+  { keys: ["⌃", "⌘", "1-9"], description: "切换到第 N 个终端" },
+  { keys: ["⌃", "⌘", "["], description: "上一个终端" },
+  { keys: ["⌃", "⌘", "]"], description: "下一个终端" },
+  { keys: ["⌃", "⌘", "N"], description: "新建工作区" },
+  { keys: ["⌘", "/"], description: "显示 / 隐藏本面板" },
+];
+
+function KeyCap({ label }: { label: string }) {
+  return (
+    <kbd className="inline-flex h-5 min-w-5 items-center justify-center rounded border border-border bg-muted px-1 font-mono text-xs text-foreground">
+      {label}
+    </kbd>
+  );
+}
+
+/** 快捷键帮助面板：Cmd+/ 打开，再按一次或 Esc 关闭；键位表硬编码（6 条快捷键不值得配置化）。 */
+export function ShortcutsHelpDialog(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  return (
+    <AstryxDialog isOpen={props.open} onOpenChange={props.onOpenChange} width={380}>
+      <Layout
+        header={<AstryxDialogHeader title="快捷键" onOpenChange={props.onOpenChange} hasDivider={false} />}
+        content={
+          <LayoutContent>
+            <VStack gap={2} hAlign="stretch">
+              {SHORTCUT_ROWS.map((row) => (
+                <HStack key={row.description} gap={3} hAlign="between" vAlign="center">
+                  <Text type="body">{row.description}</Text>
+                  <HStack gap={1} vAlign="center">
+                    {row.keys.map((key, index) => (
+                      <KeyCap key={index} label={key} />
+                    ))}
+                  </HStack>
+                </HStack>
+              ))}
+            </VStack>
+          </LayoutContent>
+        }
+      />
+    </AstryxDialog>
+  );
+}
+
 export function ConfirmActionDialog(props: { action: ConfirmAction | null; onCancel: () => void }) {
   return (
     <AstryxDialog isOpen={Boolean(props.action)} onOpenChange={(open) => !open && props.onCancel()} width={400}>
