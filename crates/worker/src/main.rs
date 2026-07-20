@@ -752,6 +752,27 @@ async fn route_authed(msg: server_to_daemon::Payload, cfg: &Arc<Config>, to_serv
         server_to_daemon::Payload::ProxyData(wire::ProxyData { conn_id, data }) => {
             tunnels.feed(conn_id, data).await;
         }
+        // 设备重命名：patch 本地 settings.json 的 deviceName 字段（plan 018）
+        server_to_daemon::Payload::DaemonSetName(wire::DaemonSetName { name }) => {
+            let home = cfg.home.clone();
+            tokio::spawn(async move {
+                let settings_path = format!("{home}/settings.json");
+                // 尝试读取现有 settings.json；缺失则跳过（测试/容器环境常见，纯 env 驱动）
+                if let Ok(content) = std::fs::read_to_string(&settings_path) {
+                    if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
+                        // patch deviceName 字段（或创建）
+                        if let Some(obj) = settings.as_object_mut() {
+                            obj.insert("deviceName".to_string(), serde_json::Value::String(name));
+                            // 写回文件（跟随现有直接 truncate 写风格）
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::File::options().write(true).truncate(true).open(&settings_path) {
+                                let _ = f.write_all(settings.to_string().as_bytes());
+                            }
+                        }
+                    }
+                }
+            });
+        }
         _ => {}
     }
 }
