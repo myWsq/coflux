@@ -84,6 +84,12 @@ message WorkspaceSetName {
   string name = 2;
 }
 
+// 重命名设备（别名；空则服务端拒绝）
+message DeviceSetName {
+  string daemon_id = 1;
+  string name = 2;
+}
+
 message TaskCreate {
   string workspace_id = 1;
   string title = 2;
@@ -172,6 +178,7 @@ message ClientToServer {
     ClientFsList client_fs_list = 21;
     ClientFsRead client_fs_read = 22;
     ClientFsWrite client_fs_write = 25;
+    DeviceSetName device_set_name = 26;
     // 数据面（高频）
     PtyInput pty_input = 23;
     WorkspaceSetName workspace_set_name = 24;
