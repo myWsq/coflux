@@ -1,4 +1,4 @@
-# Plan 020: Sidebar 拖拽调宽与本地记忆
+# Plan 021: Sidebar 拖拽调宽与本地记忆
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
