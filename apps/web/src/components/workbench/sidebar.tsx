@@ -19,6 +19,7 @@ type SidebarProps = {
   onRenameWorkspace: (workspace: Workspace) => void;
   onAddDevice: () => void;
   onRemoveDevice: (daemon: DaemonInfo) => void;
+  onRenameDevice: (daemon: DaemonInfo) => void;
   /** 新建工作区菜单当前打开的项目（受控：+ 按钮/右键菜单项/Cmd+Ctrl+N 快捷键共用同一个锚点菜单） */
   createMenuProjectId: string | null;
   onCreateMenuProjectIdChange: (projectId: string | null) => void;
@@ -258,26 +259,34 @@ export function Sidebar(props: SidebarProps) {
 
           <div className="space-y-0.5">
             {daemons.map((daemon) => (
-              <div
+              <ContextMenu
                 key={daemon.daemonId}
-                className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground"
+                label={`设备「${daemon.name}」操作`}
+                size="sm"
+                items={[
+                  { label: "重命名", onClick: () => props.onRenameDevice(daemon) },
+                  { type: "divider" },
+                  { label: "移除设备", onClick: () => props.onRemoveDevice(daemon) },
+                ]}
               >
-                <span className={cn("size-1.5 rounded-full", daemon.online ? "bg-success animate-pulse-alive" : "bg-muted-foreground/40")} />
-                <Monitor className="size-3.5 opacity-70" />
-                <span
-                  className="min-w-0 flex-1 truncate"
-                  title={`${daemon.host}/${daemon.platform}${daemon.workerVersion ? ` · worker ${daemon.workerVersion}` : ""}${daemon.supervisorVersion ? ` · supervisor ${daemon.supervisorVersion}` : ""}`}
-                >
-                  {daemon.name}
-                </span>
-                <button
-                  className="flex size-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/device:opacity-100 focus-visible:opacity-100"
-                  onClick={() => props.onRemoveDevice(daemon)}
-                  title="移除设备"
-                >
-                  <Trash2 className="size-3" />
-                </button>
-              </div>
+                <div className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground">
+                  <span className={cn("size-1.5 rounded-full", daemon.online ? "bg-success animate-pulse-alive" : "bg-muted-foreground/40")} />
+                  <Monitor className="size-3.5 opacity-70" />
+                  <span
+                    className="min-w-0 flex-1 truncate"
+                    title={`${daemon.host}/${daemon.platform}${daemon.workerVersion ? ` · worker ${daemon.workerVersion}` : ""}${daemon.supervisorVersion ? ` · supervisor ${daemon.supervisorVersion}` : ""}`}
+                  >
+                    {daemon.name}
+                  </span>
+                  <button
+                    className="flex size-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/device:opacity-100 focus-visible:opacity-100"
+                    onClick={() => props.onRemoveDevice(daemon)}
+                    title="移除设备"
+                  >
+                    <Trash2 className="size-3" />
+                  </button>
+                </div>
+              </ContextMenu>
             ))}
           </div>
         </section>

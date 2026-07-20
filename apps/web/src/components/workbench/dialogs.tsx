@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { TerminalSquare } from "lucide-react";
-import type { Workspace } from "@coflux/protocol";
+import type { DaemonInfo, Workspace } from "@coflux/protocol";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import { CodeBlock } from "@astryxdesign/core/CodeBlock";
@@ -64,6 +64,71 @@ export function WorkspaceRenameDialog(props: WorkspaceRenameDialogProps) {
             <HStack gap={2} hAlign="end">
               <AstryxButton label="取消" variant="secondary" onClick={() => props.onOpenChange(false)} />
               <AstryxButton label="保存" variant="primary" onClick={save} />
+            </HStack>
+          </LayoutFooter>
+        }
+      />
+    </AstryxDialog>
+  );
+}
+
+type DeviceRenameDialogProps = {
+  daemon: DaemonInfo | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSave: (daemonId: string, name: string) => void;
+};
+
+/** 重命名设备（别名；空则拒绝） */
+export function DeviceRenameDialog(props: DeviceRenameDialogProps) {
+  const [name, setName] = useState("");
+
+  useEffect(() => {
+    if (!props.open) return;
+    const daemon = props.daemon;
+    setName(daemon?.name ?? "");
+  }, [props.open, props.daemon]);
+
+  function save() {
+    if (!props.daemon) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    props.onSave(props.daemon.daemonId, trimmed);
+    props.onOpenChange(false);
+  }
+
+  const trimmed = name.trim();
+  const isSaveDisabled = !trimmed;
+
+  return (
+    <AstryxDialog isOpen={props.open} onOpenChange={props.onOpenChange} purpose="form" width={400}>
+      <Layout
+        header={
+          <AstryxDialogHeader
+            title="重命名设备"
+            subtitle={`给「${props.daemon?.name ?? ""}」起一个易识别的别名。`}
+            onOpenChange={props.onOpenChange}
+            hasDivider={false}
+          />
+        }
+        content={
+          <LayoutContent>
+            <form
+              onSubmit={(event: FormEvent<HTMLFormElement>) => {
+                event.preventDefault();
+                if (!isSaveDisabled) save();
+              }}
+            >
+              <TextInput label="名称" isLabelHidden value={name} onChange={setName} placeholder="比如：家里的 MacBook Pro" hasAutoFocus />
+              <button type="submit" hidden />
+            </form>
+          </LayoutContent>
+        }
+        footer={
+          <LayoutFooter hasDivider={false}>
+            <HStack gap={2} hAlign="end">
+              <AstryxButton label="取消" variant="secondary" onClick={() => props.onOpenChange(false)} />
+              <AstryxButton label="保存" variant="primary" onClick={save} disabled={isSaveDisabled} />
             </HStack>
           </LayoutFooter>
         }
