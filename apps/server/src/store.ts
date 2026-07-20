@@ -389,6 +389,10 @@ export class Store {
   async revokeDevice(id: DaemonId): Promise<void> {
     await this.sql`UPDATE devices SET revoked = true WHERE id = ${id}`;
   }
+  async updateDeviceName(id: DaemonId, name: string): Promise<Device | undefined> {
+    await this.sql`UPDATE devices SET name = ${name} WHERE id = ${id}`;
+    return this.getDevice(id);
+  }
 
   /* ---------------------------- projects --------------------------- */
   async createProject(p: Project): Promise<Project> {
