@@ -173,17 +173,13 @@ test("设备重命名：空名（trim 后为空）被拒绝，不落库不下发
   // 尝试用空名或空格重命名
   c.send({ case: "deviceSetName", daemonId: daemon.daemonId, name: "   " });
 
-  // 应该看不到任何 daemonUpdated（或者如果有，名称应该未变）
+  // 应该看不到任何 daemonUpdated（空名被拒绝）
   await new Promise((resolve) => setTimeout(resolve, 300));
   const afterEmpty = c.log.filter(
     (m) => m.case === "daemonUpdated" && m.daemon.daemonId === daemon.daemonId
   );
 
-  // 不应该有更新（空名被拒绝）
-  if (afterEmpty.length > 0) {
-    // 如果有更新，名称应该保持原值（说明拒绝生效）
-    assert.equal(afterEmpty[afterEmpty.length - 1].daemon.name, originalName, "空名被拒绝，设备名称未变");
-  }
+  assert.equal(afterEmpty.length, 0, "空名不应该产生 daemonUpdated 广播");
 
   c.close();
 });
