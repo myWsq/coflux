@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use coflux_protocol::{
     decode_frame, encode_frame, is_frame, wire, write_record, DataFrame, RecordParser, Settings, SessionInfo, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
+    SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
 };
 use coflux_protocol::wire::{daemon_to_server, server_to_daemon};
 use futures_util::{SinkExt, StreamExt};
@@ -37,6 +38,12 @@ struct Config {
     device_name: String,
     host: String,
     platform: String,
+    /// 热更新编排（plan 015）：worker 完全不知自身版本——纯 supervisor 侧概念，每次 spawn 经
+    /// env 告知（见 crates/supervisor/src/manager.rs 的 WORKER_VERSION_ENV/SUPERVISOR_VERSION_ENV）。
+    /// 握手消息原样携带，供 server 比对 + web 展示。
+    worker_version: String,
+    supervisor_version: String,
+    arch: String,
     home: String,
     cred_path: String,
     worktrees_dir: String,
@@ -170,6 +177,9 @@ async fn main() {
         device_name: pick("COFLUX_DEVICE_NAME", s.device_name, &env_or("HOSTNAME", "coflux-daemon".into())),
         host: env_or("HOSTNAME", "localhost".into()),
         platform: std::env::consts::OS.to_string(),
+        worker_version: env_or(WORKER_VERSION_ENV, "builtin".into()),
+        supervisor_version: env_or(SUPERVISOR_VERSION_ENV, "dev".into()),
+        arch: std::env::consts::ARCH.to_string(),
         cred_path: format!("{home}/credentials.json"),
         worktrees_dir: format!("{home}/worktrees"),
         sock_path: std::env::var(SUPERVISOR_SOCK_ENV).unwrap_or_default(),
@@ -479,17 +489,28 @@ async fn run_server_connection(
     // filter 语义）走 Tailscale 式 daemon.enrollRequest，等 web 端确认后 server 原地推 daemon.enrolled。
     let creds = state.lock().unwrap().credentials.clone();
     let init = match creds {
-        Some(c) => daemon_to_server::Payload::DaemonAuth(wire::DaemonAuth { device_token: c.device_token }),
+        Some(c) => daemon_to_server::Payload::DaemonAuth(wire::DaemonAuth {
+            device_token: c.device_token,
+            worker_version: cfg.worker_version.clone(),
+            supervisor_version: cfg.supervisor_version.clone(),
+            arch: cfg.arch.clone(),
+        }),
         None if cfg.enroll_key.is_empty() => daemon_to_server::Payload::DaemonEnrollRequest(wire::DaemonEnrollRequest {
             name: cfg.device_name.clone(),
             host: cfg.host.clone(),
             platform: cfg.platform.clone(),
+            worker_version: cfg.worker_version.clone(),
+            supervisor_version: cfg.supervisor_version.clone(),
+            arch: cfg.arch.clone(),
         }),
         None => daemon_to_server::Payload::DaemonEnroll(wire::DaemonEnroll {
             enrollment_key: cfg.enroll_key.clone(),
             name: cfg.device_name.clone(),
             host: cfg.host.clone(),
             platform: cfg.platform.clone(),
+            worker_version: cfg.worker_version.clone(),
+            supervisor_version: cfg.supervisor_version.clone(),
+            arch: cfg.arch.clone(),
         }),
     };
     let init_bytes = (wire::DaemonToServer { payload: Some(init) }).encode_to_vec();
@@ -528,6 +549,9 @@ async fn run_server_connection(
                         name: cfg.device_name.clone(),
                         host: cfg.host.clone(),
                         platform: cfg.platform.clone(),
+                        worker_version: cfg.worker_version.clone(),
+                        supervisor_version: cfg.supervisor_version.clone(),
+                        arch: cfg.arch.clone(),
                     });
                     let bytes = (wire::DaemonToServer { payload: Some(req) }).encode_to_vec();
                     if sink.send(Message::binary(bytes)).await.is_err() { break; }

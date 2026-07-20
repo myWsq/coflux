@@ -1,0 +1,6 @@
+# cross（linux musl 交叉编译在 Docker 容器内跑）默认不把宿主 env 透传进容器；
+# release.yml 靠 COFLUX_RELEASE_VERSION 给 supervisor 编译期注入版本号（见
+# crates/supervisor/src/main.rs::SUPERVISOR_VERSION），必须显式放行，否则 linux
+# 矩阵产物的版本永远落 "dev"（见 plans/015 review）。
+[build.env]
+passthrough = ["COFLUX_RELEASE_VERSION"]

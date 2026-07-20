@@ -134,6 +134,11 @@ public struct Coflux_V1_DaemonInfo: Sendable {
 
   public var online: Bool = false
 
+  /// 热更新编排（plan 015）：在线连接的内存态版本，供 web 展示；离线设备无此信息（空串）。
+  public var workerVersion: String = String()
+
+  public var supervisorVersion: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -526,7 +531,7 @@ extension Coflux_V1_FsEntryKind: SwiftProtobuf._ProtoNameProviding {
 
 extension Coflux_V1_DaemonInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonInfo"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_id\0\u{1}name\0\u{1}host\0\u{1}platform\0\u{1}online\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_id\0\u{1}name\0\u{1}host\0\u{1}platform\0\u{1}online\0\u{3}worker_version\0\u{3}supervisor_version\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -539,6 +544,8 @@ extension Coflux_V1_DaemonInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
       case 3: try { try decoder.decodeSingularStringField(value: &self.host) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.platform) }()
       case 5: try { try decoder.decodeSingularBoolField(value: &self.online) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.workerVersion) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.supervisorVersion) }()
       default: break
       }
     }
@@ -560,6 +567,12 @@ extension Coflux_V1_DaemonInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     if self.online != false {
       try visitor.visitSingularBoolField(value: self.online, fieldNumber: 5)
     }
+    if !self.workerVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.workerVersion, fieldNumber: 6)
+    }
+    if !self.supervisorVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.supervisorVersion, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -569,6 +582,8 @@ extension Coflux_V1_DaemonInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     if lhs.host != rhs.host {return false}
     if lhs.platform != rhs.platform {return false}
     if lhs.online != rhs.online {return false}
+    if lhs.workerVersion != rhs.workerVersion {return false}
+    if lhs.supervisorVersion != rhs.supervisorVersion {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

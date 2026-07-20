@@ -24,6 +24,15 @@ use coflux_protocol::{decode_frame, is_frame, DataFrame, RecordParser, Settings,
 use manager::{Manager, WorkerSpec};
 use sessions::{Pause, Sessions};
 
+/// supervisor 自身版本：编译期注入 release tag（`.github/workflows/release.yml` 传
+/// `COFLUX_RELEASE_VERSION=${{ github.ref_name }}`）；本地构建未设该 env 时落 "dev"。
+/// 注意这与 worker 版本是两回事——worker 版本纯是 supervisor 侧概念（见 manager.rs WorkerSpec），
+/// 此处只是 supervisor 自己的版本，随握手消息一并上报供 web 展示（不参与自动升级判断）。
+const SUPERVISOR_VERSION: &str = match option_env!("COFLUX_RELEASE_VERSION") {
+    Some(v) => v,
+    None => "dev",
+};
+
 /// 与 supervisor 二进制同目录的 coflux-worker 路径（cofluxd 把两个二进制装在一起）。
 fn sibling_worker() -> String {
     std::env::current_exe()
@@ -90,7 +99,7 @@ fn main() {
     }
 
     // worker 子进程管理
-    let manager = Manager::new(builtin, known, sock_path.clone(), home, Duration::from_millis(probation_ms));
+    let manager = Manager::new(builtin, known, sock_path.clone(), home, Duration::from_millis(probation_ms), SUPERVISOR_VERSION.to_string());
     manager.start();
 
     // 优雅关闭：SIGTERM/SIGINT → 杀 worker + 全部 PTY 后退出（systemd/launchd 会发 SIGTERM）

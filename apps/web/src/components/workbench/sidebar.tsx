@@ -264,7 +264,10 @@ export function Sidebar(props: SidebarProps) {
               >
                 <span className={cn("size-1.5 rounded-full", daemon.online ? "bg-success animate-pulse-alive" : "bg-muted-foreground/40")} />
                 <Monitor className="size-3.5 opacity-70" />
-                <span className="min-w-0 flex-1 truncate" title={`${daemon.host}/${daemon.platform}`}>
+                <span
+                  className="min-w-0 flex-1 truncate"
+                  title={`${daemon.host}/${daemon.platform}${daemon.workerVersion ? ` · worker ${daemon.workerVersion}` : ""}${daemon.supervisorVersion ? ` · supervisor ${daemon.supervisorVersion}` : ""}`}
+                >
                   {daemon.name}
                 </span>
                 <button

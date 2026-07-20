@@ -25,6 +25,9 @@ fn daemon_to_server_envelope_dispatches_to_daemon_enroll() {
             name: "dev".into(),
             host: "h".into(),
             platform: "darwin".into(),
+            worker_version: "wv1".into(),
+            supervisor_version: "sv1".into(),
+            arch: "aarch64".into(),
         })),
     };
     let bytes = env.encode_to_vec();
@@ -35,6 +38,9 @@ fn daemon_to_server_envelope_dispatches_to_daemon_enroll() {
             assert_eq!(m.name, "dev");
             assert_eq!(m.host, "h");
             assert_eq!(m.platform, "darwin");
+            assert_eq!(m.worker_version, "wv1");
+            assert_eq!(m.supervisor_version, "sv1");
+            assert_eq!(m.arch, "aarch64");
         }
         other => panic!("wrong variant: {other:?}"),
     }
@@ -173,7 +179,14 @@ fn auth_error_and_enroll_request_round_trip() {
     assert_eq!(back.message, "bad");
 
     let req = DaemonToServer {
-        payload: Some(daemon_to_server::Payload::DaemonEnrollRequest(DaemonEnrollRequest { name: "dev".into(), host: "h".into(), platform: "darwin".into() })),
+        payload: Some(daemon_to_server::Payload::DaemonEnrollRequest(DaemonEnrollRequest {
+            name: "dev".into(),
+            host: "h".into(),
+            platform: "darwin".into(),
+            worker_version: "wv2".into(),
+            supervisor_version: "sv2".into(),
+            arch: "x86_64".into(),
+        })),
     };
     let back2 = DaemonToServer::decode(req.encode_to_vec().as_slice()).unwrap();
     assert!(matches!(back2.payload, Some(daemon_to_server::Payload::DaemonEnrollRequest(_))));
