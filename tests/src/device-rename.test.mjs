@@ -43,6 +43,26 @@ test("设备重命名：在线改名后 web 端广播可见且新名落库", asy
   c2.close();
 });
 
+test("设备重命名：空名（trim 后为空）被拒绝，不落库不下发", async () => {
+  const c = stack.makeClient();
+  const snap = await c.authSubscribe();
+  const daemon = snap.daemons.find((d) => d.online);
+  const originalName = daemon.name;
+
+  // 尝试用空名或空格重命名
+  c.send({ case: "deviceSetName", daemonId: daemon.daemonId, name: "   " });
+
+  // 应该看不到任何 daemonUpdated（空名被拒绝）
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const afterEmpty = c.log.filter(
+    (m) => m.case === "daemonUpdated" && m.daemon.daemonId === daemon.daemonId
+  );
+
+  assert.equal(afterEmpty.length, 0, "空名不应该产生 daemonUpdated 广播");
+
+  c.close();
+});
+
 test("设备重命名：在线改名后 daemon 收到 DaemonSetName 且本地 settings.json 被更新", async () => {
   // 这个测试需要 daemon 有实际的 settings.json 文件
   // 我们停止原有的 daemon，手写 settings.json，然后重启 daemon
@@ -162,24 +182,4 @@ test("设备重命名：离线设备改名后重连即被补发同步", async ()
       daemonProcess.kill();
     } catch {}
   }
-});
-
-test("设备重命名：空名（trim 后为空）被拒绝，不落库不下发", async () => {
-  const c = stack.makeClient();
-  const snap = await c.authSubscribe();
-  const daemon = snap.daemons.find((d) => d.online);
-  const originalName = daemon.name;
-
-  // 尝试用空名或空格重命名
-  c.send({ case: "deviceSetName", daemonId: daemon.daemonId, name: "   " });
-
-  // 应该看不到任何 daemonUpdated（空名被拒绝）
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  const afterEmpty = c.log.filter(
-    (m) => m.case === "daemonUpdated" && m.daemon.daemonId === daemon.daemonId
-  );
-
-  assert.equal(afterEmpty.length, 0, "空名不应该产生 daemonUpdated 广播");
-
-  c.close();
 });
