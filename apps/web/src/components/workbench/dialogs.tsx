@@ -128,7 +128,7 @@ export function DeviceRenameDialog(props: DeviceRenameDialogProps) {
           <LayoutFooter hasDivider={false}>
             <HStack gap={2} hAlign="end">
               <AstryxButton label="取消" variant="secondary" onClick={() => props.onOpenChange(false)} />
-              <AstryxButton label="保存" variant="primary" onClick={save} disabled={isSaveDisabled} />
+              <AstryxButton label="保存" variant="primary" onClick={save} isDisabled={isSaveDisabled} />
             </HStack>
           </LayoutFooter>
         }

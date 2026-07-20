@@ -233,10 +233,7 @@ export class Hub {
     this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: { ...info, online: true } } });
     await this.pushWorkspaceList(info.daemonId);
     // 握手完成时机：下发最新设备名称以支持设备重命名同步（plan 018）
-    const device = await this.store.getDevice(info.daemonId);
-    if (device) {
-      this.sendDaemon({ ws: conn.ws, info, accountId, arch }, { case: "daemonSetName", value: { name: device.name } });
-    }
+    this.sendDaemon({ ws: conn.ws, info, accountId, arch }, { case: "daemonSetName", value: { name: info.name } });
     // 握手完成时机（plan 015）：给自动更新编排一个立即比对本台 daemon 的机会，不必等下一次轮询。
     this.onDaemonHandshake?.(info.daemonId);
   }
@@ -827,7 +824,7 @@ export class Hub {
         if (!trimmedName) return;
         const updated = await this.store.updateDeviceName(device.id, trimmedName);
         if (updated) {
-          this.broadcast(updated.accountId, { case: "daemonUpdated", value: { daemon: { ...updated, daemonId: updated.id, online: this.isDaemonOnline(updated.id), workerVersion: "", supervisorVersion: "" } } });
+          this.broadcast(updated.accountId, { case: "daemonUpdated", value: { daemon: { daemonId: updated.id, name: updated.name, host: updated.host, platform: updated.platform, online: this.isDaemonOnline(updated.id), workerVersion: "", supervisorVersion: "" } } });
           // 若设备当前在线，更新内存并即时下发
           const d = this.daemons.get(updated.id);
           if (d) {

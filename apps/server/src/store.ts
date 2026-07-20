@@ -390,8 +390,8 @@ export class Store {
     await this.sql`UPDATE devices SET revoked = true WHERE id = ${id}`;
   }
   async updateDeviceName(id: DaemonId, name: string): Promise<Device | undefined> {
-    await this.sql`UPDATE devices SET name = ${name} WHERE id = ${id}`;
-    return this.getDevice(id);
+    const rows = await this.sql<Device[]>`UPDATE devices SET name = ${name} WHERE id = ${id} RETURNING *`;
+    return rows[0];
   }
 
   /* ---------------------------- projects --------------------------- */
