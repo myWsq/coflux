@@ -41,6 +41,7 @@ pub struct RepoInfo {
     pub repo_path: String,
     pub branch: String,
     pub error: Option<String>,
+    pub suggested_name: Option<String>,
 }
 
 pub struct WorktreeResult {
@@ -58,7 +59,13 @@ pub async fn validate_repo(path: &str) -> RepoInfo {
     };
     let (ok, out, _) = run_git(&["-C", path, "rev-parse", "--show-toplevel"]).await;
     if !ok {
-        return RepoInfo { ok: false, repo_path: path.to_string(), branch: String::new(), error: Some("不是 git 仓库".into()) };
+        return RepoInfo {
+            ok: false,
+            repo_path: path.to_string(),
+            branch: String::new(),
+            error: Some("不是 git 仓库".into()),
+            suggested_name: None,
+        };
     }
     let repo_path = out.trim().to_string();
     let (bok, bout, _) = run_git(&["-C", &repo_path, "rev-parse", "--abbrev-ref", "HEAD"]).await;
@@ -68,7 +75,86 @@ pub async fn validate_repo(path: &str) -> RepoInfo {
     } else {
         "HEAD".into()
     };
-    RepoInfo { ok: true, repo_path, branch, error: None }
+    let suggested_name = remote_project_name(&repo_path).await;
+    RepoInfo { ok: true, repo_path, branch, error: None, suggested_name }
+}
+
+/// 只把 remote 的解析结果带出 worker；原始 URL 不进入协议、日志或错误。
+async fn remote_project_name(repo_path: &str) -> Option<String> {
+    let (ok, out, _) = run_git(&["-C", repo_path, "remote"]).await;
+    if !ok {
+        return None;
+    }
+
+    let names = ordered_remote_names(&out);
+    let mut remotes = Vec::with_capacity(names.len());
+    for name in names {
+        let (ok, url, _) = run_git(&["-C", repo_path, "remote", "get-url", &name]).await;
+        if ok {
+            remotes.push((name, url.trim().to_string()));
+        }
+    }
+    suggested_name_from_remotes(&remotes)
+}
+
+/// origin 固定优先；其余 remote 保持 `git remote` 的返回顺序。
+fn ordered_remote_names(output: &str) -> Vec<String> {
+    let names: Vec<String> = output
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+    let mut ordered = Vec::with_capacity(names.len());
+    if names.iter().any(|name| name == "origin") {
+        ordered.push("origin".to_string());
+    }
+    ordered.extend(names.into_iter().filter(|name| name != "origin"));
+    ordered
+}
+
+fn suggested_name_from_remotes(remotes: &[(String, String)]) -> Option<String> {
+    remotes.iter().find_map(|(_, url)| project_name_from_remote(url))
+}
+
+fn project_name_from_remote(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    if let Some((scheme, rest)) = remote.split_once("://") {
+        if !matches!(scheme, "http" | "https" | "ssh" | "git") {
+            return None;
+        }
+        let (authority, path) = rest.split_once('/')?;
+        if authority.is_empty() {
+            return None;
+        }
+        return normalize_remote_path(path);
+    }
+
+    // SCP-like：要求显式 user@host，避免把 Windows 盘符或本地含冒号路径误判为网络 remote。
+    let (endpoint, path) = remote.split_once(':')?;
+    let (user, host) = endpoint.rsplit_once('@')?;
+    if user.is_empty() || host.is_empty() || endpoint.contains('/') || endpoint.contains('\\') {
+        return None;
+    }
+    normalize_remote_path(path)
+}
+
+fn normalize_remote_path(path: &str) -> Option<String> {
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() < 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || matches!(*part, "." | "..")
+                || part.contains('\\')
+                || part.contains('?')
+                || part.contains('#')
+        })
+    {
+        return None;
+    }
+    Some(parts.join("/"))
 }
 
 pub async fn add_worktree(worktrees_dir: &str, repo_path: &str, workspace_id: &str, branch: &str, create_new: bool) -> WorktreeResult {
@@ -94,5 +180,61 @@ pub async fn remove_worktree(repo_path: &str, worktree_path: &str) {
     let (ok, _o, _e) = run_git(&["-C", repo_path, "worktree", "remove", "--force", worktree_path]).await;
     if !ok {
         let _ = run_git(&["-C", repo_path, "worktree", "prune"]).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ordered_remote_names, project_name_from_remote, suggested_name_from_remotes};
+
+    #[test]
+    fn parses_common_network_remote_formats() {
+        let cases = [
+            ("https://github.com/myWsq/coflux.git", "myWsq/coflux"),
+            ("http://git.example.com/group/subgroup/project.git", "group/subgroup/project"),
+            ("ssh://git@git.example.com/group/project", "group/project"),
+            ("git://git.example.com/group/project.git/", "group/project"),
+            ("git@git.example.com:group/subgroup/project.git", "group/subgroup/project"),
+        ];
+        for (remote, expected) in cases {
+            assert_eq!(project_name_from_remote(remote).as_deref(), Some(expected), "remote 格式：{remote}");
+        }
+    }
+
+    #[test]
+    fn rejects_local_or_unsafe_remote_values() {
+        for remote in [
+            "",
+            "/srv/git/group/project.git",
+            "../group/project.git",
+            "C:\\git\\group\\project.git",
+            "file:///srv/git/group/project.git",
+            "https://git.example.com/project.git",
+            "ssh://git@git.example.com/",
+            "git@example.com:../private/project.git",
+        ] {
+            assert_eq!(project_name_from_remote(remote), None, "remote 应被拒绝：{remote}");
+        }
+    }
+
+    #[test]
+    fn origin_precedes_other_remotes_and_invalid_values_are_skipped() {
+        assert_eq!(
+            ordered_remote_names("backup\norigin\nmirror\n"),
+            vec!["origin".to_string(), "backup".to_string(), "mirror".to_string()]
+        );
+
+        let valid_origin = vec![
+            ("origin".into(), "https://git.example.com/team/main.git".into()),
+            ("backup".into(), "https://git.example.com/team/backup.git".into()),
+        ];
+        assert_eq!(suggested_name_from_remotes(&valid_origin).as_deref(), Some("team/main"));
+
+        let invalid_origin = vec![
+            ("origin".into(), "/local/private.git".into()),
+            ("backup".into(), "file:///local/private.git".into()),
+            ("mirror".into(), "git@git.example.com:group/project.git".into()),
+        ];
+        assert_eq!(suggested_name_from_remotes(&invalid_origin).as_deref(), Some("group/project"));
     }
 }
