@@ -4,6 +4,7 @@ export const SERVER_URL =
 
 export const TOKEN_KEY = "coflux_token";
 export const WORKSPACE_KEY = "coflux_workspace";
+export const SIDEBAR_WIDTH_KEY = "coflux_sidebar_width";
 
 // Supabase 是构建期开关；未配置时继续使用服务端的本地账号模式。
 export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL?.replace(/\/+$/, "");
