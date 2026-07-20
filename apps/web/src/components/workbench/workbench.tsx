@@ -8,11 +8,14 @@ import { Button } from "@astryxdesign/core/Button";
 import {
   ConfirmActionDialog,
   EnrollmentDialog,
+  ShortcutsHelpDialog,
   WorkspaceRenameDialog,
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar } from "@/components/workbench/sidebar";
+import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
+import type { WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 import { WORKSPACE_KEY, USE_SUPABASE } from "@/config";
 import type { CofluxClient } from "@/client/store";
 
@@ -35,6 +38,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [enrollmentOpen, setEnrollmentOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [renameWorkspace, setRenameWorkspace] = useState<Workspace | null>(null);
+  // 新建工作区菜单当前打开的项目：Sidebar 的 + 按钮/右键菜单与 Cmd+Ctrl+N 快捷键共用同一份受控状态。
+  const [createMenuProjectId, setCreateMenuProjectId] = useState<string | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  // 只指向当前 active 的 WorkspaceTerminal 实例：ref 只挂在 active===true 的那个元素上（见下方渲染），
+  // 保活但隐藏的实例永远拿不到这份 ref，全局快捷键天然只广播给 active 实例。
+  const activeTerminalRef = useRef<WorkspaceTerminalHandle | null>(null);
 
   const authState = useStore(client.store, (state) => state.authState);
   const loginError = useStore(client.store, (state) => state.loginError);
@@ -143,7 +152,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   function closeTaskNow(task: Task) {
-    client.send({ case: "taskStop", value: { taskId: task.id } });
+    // 只发 taskRemove：server 侧该 handler 自带 sessionClose + dropSession。连发 taskStop
+    // 会与之并发处理（transport 不串行同连接消息），taskRemove 先删行时 taskStop 报
+    // "任务不存在"，甚至把已删任务复活成关不掉的僵尸 Tab。
     client.send({ case: "taskRemove", value: { taskId: task.id } });
   }
 
@@ -170,6 +181,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const terminalWorkspaces = workspaces.filter((workspace) => visitedWorkspaceIds.has(workspace.id) || workspace.id === selectedWorkspaceId);
   const showError = lastError !== null && lastError.id !== dismissedErrorId;
   const displayError = lastError?.message.replaceAll("任务", "终端");
+
+  useGlobalShortcuts({
+    selectedProjectId: selectedWorkspace?.projectId ?? null,
+    activeTerminalRef,
+    onOpenCreateWorkspaceMenu: setCreateMenuProjectId,
+    onToggleHelp: () => setHelpOpen((open) => !open),
+  });
 
   // 恢复会话 / 登录握手中：只显示安静加载，不渲染登录表单（避免刷新闪一下）。
   if (authState === "authenticating") {
@@ -211,6 +229,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onRenameWorkspace={setRenameWorkspace}
         onAddDevice={openEnrollment}
         onRemoveDevice={requestRemoveDevice}
+        createMenuProjectId={createMenuProjectId}
+        onCreateMenuProjectIdChange={setCreateMenuProjectId}
       />
 
       {terminalWorkspaces.length > 0 ? (
@@ -221,17 +241,22 @@ export function Workbench({ client }: { client: CofluxClient }) {
             </main>
           }
         >
-          {terminalWorkspaces.map((workspace) => (
-            // display:contents 让 <section> 仍作为根 flex 行的直接子项参与布局
-            <div key={workspace.id} className={workspace.id === selectedWorkspaceId ? "contents" : "hidden"}>
-              <WorkspaceTerminal
-                workspaceId={workspace.id}
-                active={workspace.id === selectedWorkspaceId}
-                client={client}
-                onCloseTask={requestCloseTask}
-              />
-            </div>
-          ))}
+          {terminalWorkspaces.map((workspace) => {
+            const isActive = workspace.id === selectedWorkspaceId;
+            return (
+              // display:contents 让 <section> 仍作为根 flex 行的直接子项参与布局
+              <div key={workspace.id} className={isActive ? "contents" : "hidden"}>
+                <WorkspaceTerminal
+                  // ref 只挂在 active 实例上：非 active 的保活实例传 undefined，永远拿不到命令句柄。
+                  ref={isActive ? activeTerminalRef : undefined}
+                  workspaceId={workspace.id}
+                  active={isActive}
+                  client={client}
+                  onCloseTask={requestCloseTask}
+                />
+              </div>
+            );
+          })}
         </Suspense>
       ) : null}
       {!selectedWorkspace ? (
@@ -288,6 +313,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onSave={saveWorkspaceName}
       />
       <ConfirmActionDialog action={confirmAction} onCancel={() => setConfirmAction(null)} />
+      <ShortcutsHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
     </div>
   );
 }
