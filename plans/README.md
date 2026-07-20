@@ -20,5 +20,6 @@
 | 016 | [终端 cell 度量漂移后自动 refit，消除溢出滚动条](016-terminal-refit-on-metric-drift.md) | DONE (9e1cac9) | none |
 | 017 | [daemon worker 自动热更新编排层](017-auto-update-orchestration.md) | DONE (2729930) | none |
 | 018 | [设备重命名（别名）—— server/web 展示 + daemon 本地 settings.json 同步](018-device-rename.md) | DONE (0379a55) | none |
+| 019 | [终端 tab 端口转发展示 —— PlugZap icon + HoverCard 悬浮跳转](019-terminal-tab-port-hovercard.md) | TODO | none |
 
-执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018。
+执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019。
