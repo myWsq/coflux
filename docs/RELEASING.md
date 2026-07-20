@@ -21,6 +21,43 @@ node scripts/gen-keypair.mjs
 
 提交公钥改动后，所有新构建的 supervisor 就内置了你的发布公钥。
 
+## 一次性设置（macOS 签名 + 公证）
+
+cargo 交叉/原生编译产物只有 ad-hoc 签名（无 Team ID、未公证）。macOS（Sequoia 起）对新下载的
+顶层可执行文件（launchd 直接 spawn，`cofluxd update` 换的 supervisor 二进制正是这条路径）会判
+`OS_REASON_CODESIGNING` 静默 SIGKILL——`launchctl print gui/$(id -u)/com.coflux.daemon` 的
+`last exit reason` 能看到（2026-07-20 实测踩坑）。用真 Developer ID 证书签名 + 苹果公证从根上
+解决，用户端 `cofluxd update` 不再需要任何手动步骤。
+
+需要 Apple Developer Program 账号（付费）。一次性生成：
+
+1. **Developer ID Application 证书**（不是 Apple Development / Apple Distribution，那两种是给
+   App Store 用的）：Xcode 或 Apple Developer 后台生成，导出 `.p12`（带密码）。
+2. **App Store Connect API Key**（Developer 权限即可，用于 `notarytool` 免交互认证）：
+   App Store Connect → Users and Access → Integrations → 生成，下载 `.p8`，记 Key ID + Issuer ID。
+
+6 个 GitHub secret（Settings → Secrets → Actions）：
+
+| Secret | 内容 |
+| --- | --- |
+| `MACOS_CERT_P12` | `.p12` 的 base64（`base64 -i cert.p12`，不要额外加换行） |
+| `MACOS_CERT_PASSWORD` | 导出 `.p12` 时设的密码 |
+| `APPLE_TEAM_ID` | Team ID（本项目：`8Y2J55823C`） |
+| `NOTARY_API_KEY_P8` | `.p8` 文件原文（含首尾 `-----BEGIN/END PRIVATE KEY-----`） |
+| `NOTARY_KEY_ID` | API Key ID |
+| `NOTARY_ISSUER_ID` | Issuer ID |
+
+签名身份字符串（`release.yml` 里硬编码，非密）：`Developer ID Application: Shuaiqi Wang (8Y2J55823C)`。
+
+> **裸二进制不支持 stapling**（只有 .app/.pkg/.dmg 能钉公证票据）。所以只签名+提交公证，不 staple——
+> Gatekeeper 首次执行时联网向苹果查公证记录，daemon 本来就要联网连 server，可接受；机器完全离线
+> 时首次执行公证校验可能失败或变慢，这是裸二进制公证的固有限制。
+>
+> `KEYCHAIN_PASSWORD` 不需要存成 secret：CI 每次跑时用 `openssl rand` 现生成一个，只在当次
+> runner 生命周期内有效，无需持久化。
+>
+> Developer ID 证书通常 5 年有效期，到期需要重新生成 `.p12` 并更新 `MACOS_CERT_P12`/`MACOS_CERT_PASSWORD`。
+
 ## 发一个版本
 
 发版前 checklist：
