@@ -37,6 +37,52 @@ type TerminalPaneProps = {
 const PASTE_BUDGET_BYTES = 3.5 * 1024 * 1024;
 const PASTE_MIN_DIMENSION = 64; // 降分辨率的下限：避免退化成不可读的一两个像素
 
+/** xterm 6.0.0 私有内部结构（仅补丁用到的字段），升级 @xterm/xterm 需复验。 */
+type XtermCoreInternals = {
+  _compositionHelper?: { _isComposing: boolean; _isSendingComposition: boolean; _handleAnyTextareaChanges: () => void };
+  _inputEvent?: (ev: InputEvent) => boolean;
+  _keyPressHandled?: boolean;
+  _unprocessedDeadKey?: boolean;
+  coreService?: { triggerDataEvent: (data: string, wasUserInput: boolean) => void };
+  textarea?: HTMLTextAreaElement;
+  cancel?: (ev: Event) => void;
+};
+
+/** 全角标点丢字 workaround（上游 xtermjs/xterm.js#5887，6.1.0-beta 仍未修）：
+ * 中文 IME 直接提交（无 composition 会话）的字符只出现在 textarea 'input' 事件里，
+ * 但 xterm 的 _inputEvent 被 (!ev.composed || !_keyDownSeen) 门控挡住，兜底的
+ * CompositionHelper setTimeout(0) textarea diff 又与 IME 落字时序竞态——
+ * 表现为全角 ？！ 等（带 Shift 的标点）需连输两次才出一个。
+ * 这里改为由 input 事件确定性发送并停用竞态 diff 路径；任一内部字段缺失
+ * （日后升级 xterm 内部改名）则整体跳过，行为回落为上游现状。 */
+function patchImeCommittedInput(terminal: Terminal): void {
+  const core = (terminal as unknown as { _core?: XtermCoreInternals })._core;
+  const helper = core?._compositionHelper;
+  const origInputEvent = core?._inputEvent;
+  if (!core || !helper || !origInputEvent || !core.coreService || !core.textarea || !core.cancel) return;
+
+  helper._handleAnyTextareaChanges = () => {};
+  core._inputEvent = (ev: InputEvent) => {
+    if (helper._isComposing || helper._isSendingComposition) return false;
+    // Alt/Option 组合字符走 keypress 已发过（_keyPressHandled），不能重复发。
+    if (ev.inputType === "insertText" && ev.data && !core._keyPressHandled) {
+      core._unprocessedDeadKey = false;
+      core.coreService!.triggerDataEvent(ev.data, true);
+      core.textarea!.value = ""; // 及时清空，textarea 累积残值正是上游 diff 路径不可靠的来源之一
+      core.cancel!(ev);
+      return true;
+    }
+    if (ev.inputType === "deleteContentBackward") {
+      // 对应被停用的 diff 路径里"值变短发 DEL"分支（IME 吞掉 Backspace keydown 的场景）
+      core.coreService!.triggerDataEvent("\x7f", true);
+      core.textarea!.value = "";
+      core.cancel!(ev);
+      return true;
+    }
+    return origInputEvent.call(core, ev);
+  };
+}
+
 function extForMime(mime: string): string {
   switch (mime) {
     case "image/png":
@@ -144,6 +190,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(new WebLinksAddon()); // 输出中的 URL 可点击（默认 window.open 新开 Tab）
     terminal.open(host);
+    patchImeCommittedInput(terminal);
     terminalRef.current = terminal;
 
     // WebGL 渲染器动态加载（addon 约 247KB，不进首屏主 chunk）：
