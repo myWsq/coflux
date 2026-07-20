@@ -604,6 +604,19 @@ public struct Coflux_V1_WorkerUpgrade: Sendable {
   fileprivate var _signature: String? = nil
 }
 
+/// 设备重命名：server 通知 daemon 更新本地设备名称
+public struct Coflux_V1_DaemonSetName: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var name: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_SessionCreate: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -945,6 +958,14 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     set {payload = .fsWrite(newValue)}
   }
 
+  public var daemonSetName: Coflux_V1_DaemonSetName {
+    get {
+      if case .daemonSetName(let v)? = payload {return v}
+      return Coflux_V1_DaemonSetName()
+    }
+    set {payload = .daemonSetName(newValue)}
+  }
+
   /// 数据面（高频）
   public var ptyInput: Coflux_V1_PtyInput {
     get {
@@ -991,6 +1012,7 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     case fsList(Coflux_V1_FsList)
     case fsRead(Coflux_V1_FsRead)
     case fsWrite(Coflux_V1_FsWrite)
+    case daemonSetName(Coflux_V1_DaemonSetName)
     /// 数据面（高频）
     case ptyInput(Coflux_V1_PtyInput)
     case proxyData(Coflux_V1_ProxyData)
@@ -2209,6 +2231,36 @@ extension Coflux_V1_WorkerUpgrade: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
+extension Coflux_V1_DaemonSetName: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DaemonSetName"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DaemonSetName, rhs: Coflux_V1_DaemonSetName) -> Bool {
+    if lhs.name != rhs.name {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_SessionCreate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SessionCreate"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}cwd\0\u{1}shell\0\u{1}cols\0\u{1}rows\0")
@@ -2629,7 +2681,7 @@ extension Coflux_V1_FsWrite: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
 
 extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToDaemon"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{3}session_replay\0\u{3}pty_resize\0\u{3}proxy_open\0\u{3}proxy_close\0\u{3}exec_run\0\u{3}fs_list\0\u{3}fs_read\0\u{3}pty_input\0\u{3}proxy_data\0\u{3}workspace_list\0\u{3}fs_write\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{3}session_replay\0\u{3}pty_resize\0\u{3}proxy_open\0\u{3}proxy_close\0\u{3}exec_run\0\u{3}fs_list\0\u{3}fs_read\0\u{3}pty_input\0\u{3}proxy_data\0\u{3}workspace_list\0\u{3}fs_write\0\u{3}daemon_set_name\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2910,6 +2962,19 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .fsWrite(v)
         }
       }()
+      case 22: try {
+        var v: Coflux_V1_DaemonSetName?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .daemonSetName(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .daemonSetName(v)
+        }
+      }()
       default: break
       }
     }
@@ -3004,6 +3069,10 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .fsWrite?: try {
       guard case .fsWrite(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
+    }()
+    case .daemonSetName?: try {
+      guard case .daemonSetName(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
     }()
     case nil: break
     }

@@ -169,6 +169,11 @@ message WorkerUpgrade {
   optional string signature = 4;
 }
 
+// 设备重命名：server 通知 daemon 更新本地设备名称
+message DaemonSetName {
+  string name = 1;
+}
+
 message SessionCreate {
   string session_id = 1;
   string task_id = 2;
@@ -259,6 +264,7 @@ message ServerToDaemon {
     FsList fs_list = 16;
     FsRead fs_read = 17;
     FsWrite fs_write = 21;
+    DaemonSetName daemon_set_name = 22;
     // 数据面（高频）
     PtyInput pty_input = 18;
     ProxyData proxy_data = 19;

@@ -529,6 +529,12 @@ pub struct WorkerUpgrade {
     #[prost(string, optional, tag="4")]
     pub signature: ::core::option::Option<::prost::alloc::string::String>,
 }
+/// 设备重命名：server 通知 daemon 更新本地设备名称
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DaemonSetName {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SessionCreate {
     #[prost(string, tag="1")]
@@ -633,7 +639,7 @@ pub struct FsWrite {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 18, 19, 20")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 18, 19, 20")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -676,6 +682,8 @@ pub mod server_to_daemon {
         FsRead(super::FsRead),
         #[prost(message, tag="21")]
         FsWrite(super::FsWrite),
+        #[prost(message, tag="22")]
+        DaemonSetName(super::DaemonSetName),
         /// 数据面（高频）
         #[prost(message, tag="18")]
         PtyInput(super::PtyInput),
@@ -802,6 +810,14 @@ pub struct WorkspaceSetName {
     #[prost(string, tag="2")]
     pub name: ::prost::alloc::string::String,
 }
+/// 重命名设备（别名；空则服务端拒绝）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSetName {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TaskCreate {
     #[prost(string, tag="1")]
@@ -894,7 +910,7 @@ pub struct ClientFsWrite {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 23, 24")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 23, 24")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -947,6 +963,8 @@ pub mod client_to_server {
         ClientFsRead(super::ClientFsRead),
         #[prost(message, tag="25")]
         ClientFsWrite(super::ClientFsWrite),
+        #[prost(message, tag="26")]
+        DeviceSetName(super::DeviceSetName),
         /// 数据面（高频）
         #[prost(message, tag="23")]
         PtyInput(super::PtyInput),
