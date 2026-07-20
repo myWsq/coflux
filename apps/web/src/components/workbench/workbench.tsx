@@ -7,6 +7,7 @@ import { AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
 import { Button } from "@astryxdesign/core/Button";
 import {
   ConfirmActionDialog,
+  DeviceRenameDialog,
   EnrollmentDialog,
   ShortcutsHelpDialog,
   WorkspaceRenameDialog,
@@ -38,6 +39,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [enrollmentOpen, setEnrollmentOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [renameWorkspace, setRenameWorkspace] = useState<Workspace | null>(null);
+  const [renameDevice, setRenameDevice] = useState<DaemonInfo | null>(null);
   // 新建工作区菜单当前打开的项目：Sidebar 的 + 按钮/右键菜单与 Cmd+Ctrl+N 快捷键共用同一份受控状态。
   const [createMenuProjectId, setCreateMenuProjectId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -131,6 +133,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   function saveWorkspaceName(workspaceId: string, name: string) {
     client.send({ case: "workspaceSetName", value: { workspaceId, name } });
+  }
+
+  function saveDeviceName(daemonId: string, name: string) {
+    client.send({ case: "deviceSetName", value: { daemonId, name } });
   }
 
   function requestRemoveWorkspace(workspace: Workspace) {
@@ -229,6 +235,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onRenameWorkspace={setRenameWorkspace}
         onAddDevice={openEnrollment}
         onRemoveDevice={requestRemoveDevice}
+        onRenameDevice={setRenameDevice}
         createMenuProjectId={createMenuProjectId}
         onCreateMenuProjectIdChange={setCreateMenuProjectId}
       />
@@ -311,6 +318,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
         open={Boolean(renameWorkspace)}
         onOpenChange={(open) => !open && setRenameWorkspace(null)}
         onSave={saveWorkspaceName}
+      />
+      <DeviceRenameDialog
+        daemon={renameDevice}
+        open={Boolean(renameDevice)}
+        onOpenChange={(open) => !open && setRenameDevice(null)}
+        onSave={saveDeviceName}
       />
       <ConfirmActionDialog action={confirmAction} onCancel={() => setConfirmAction(null)} />
       <ShortcutsHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
