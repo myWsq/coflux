@@ -123,7 +123,7 @@ interface RuntimeSession {
 }
 
 type OpData =
-  | { kind: "project.import"; name: string }
+  | { kind: "project.import"; explicitName?: string }
   | { kind: "worktree.add"; projectId: ProjectId; workspaceId: WorkspaceId; name: string };
 
 type RelayKind = "exec" | "fs.list" | "fs.read" | "fs.write";
@@ -339,7 +339,9 @@ export class Hub {
           return;
         }
         const ts = Date.now();
-        const project: Project = create(ProjectSchema, { id: randomUUID(), accountId: conn.accountId!, daemonId: conn.daemonId!, name: p.data.name, repoPath: value.repoPath, defaultBranch: value.branch, createdAt: ts });
+        const suggestedName = value.suggestedName?.trim();
+        const name = p.data.explicitName ?? (suggestedName || basename(value.repoPath));
+        const project: Project = create(ProjectSchema, { id: randomUUID(), accountId: conn.accountId!, daemonId: conn.daemonId!, name, repoPath: value.repoPath, defaultBranch: value.branch, createdAt: ts });
         await this.store.createProject(project);
         const main: Workspace = create(WorkspaceSchema, { id: randomUUID(), accountId: project.accountId, daemonId: project.daemonId, projectId: project.id, name: "main", path: value.repoPath, branch: value.branch, isMain: true, createdAt: ts });
         await this.store.createWorkspace(main);
@@ -722,9 +724,9 @@ export class Hub {
           this.sendClient(client, { case: "error", value: { message: "daemon 不在线或不属于本账号" } });
           return;
         }
-        const name = typeof value.name === "string" && value.name.trim() ? value.name.trim() : basename(value.path);
+        const explicitName = typeof value.name === "string" && value.name.trim() ? value.name.trim() : undefined;
         const requestId = randomUUID();
-        this.pendingOps.register(requestId, value.daemonId, client, { kind: "project.import", name }, (p) =>
+        this.pendingOps.register(requestId, value.daemonId, client, { kind: "project.import", explicitName }, (p) =>
           this.sendClient(p.client, { case: "error", value: { message: "导入超时" } }),
         );
         this.sendDaemon(d, { case: "projectValidate", value: { requestId, path: value.path } });

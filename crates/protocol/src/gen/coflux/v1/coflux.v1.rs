@@ -347,6 +347,9 @@ pub struct ProjectValidated {
     pub branch: ::prost::alloc::string::String,
     #[prost(string, optional, tag="5")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
+    /// worker 从 remote URL 推导出的 namespace/project；不传原始 URL，缺失时 server 回退仓库根目录名
+    #[prost(string, optional, tag="6")]
+    pub suggested_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// git worktree add 结果
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

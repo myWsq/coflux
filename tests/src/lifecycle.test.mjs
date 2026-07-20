@@ -1,5 +1,8 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo, rawDaemon } from "./harness.mjs";
 
@@ -29,12 +32,14 @@ test("auth: 错误密码被拒，正确用户名密码通过并看到在线设�
 test("项目制：导入 git 仓库 → 主工作区=仓库本身 → worktree 工作区 → 任务跑 PTY", async () => {
   const repo = mkRepo();
   repos.push(repo);
+  execFileSync("git", ["-C", repo.dir, "remote", "add", "origin", "https://github.com/myWsq/coflux.git"]);
   const c = stack.makeClient();
   await c.authSubscribe();
 
   c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const proj = await c.waitFor((m) => m.case === "projectCreated", "project.created");
   assert.ok(proj.project.repoPath.endsWith(repo.dir.split("/").pop()), "repoPath 指向仓库");
+  assert.equal(proj.project.name, "myWsq/coflux", "项目名取 origin 的完整 namespace/project");
   const main = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain && m.workspace.projectId === proj.project.id, "main ws");
   assert.equal(main.workspace.branch, "main");
 
@@ -52,6 +57,34 @@ test("项目制：导入 git 仓库 → 主工作区=仓库本身 → worktree �
 
   c.send({ case: "ptyInput", sessionId: run.task.sessionId, data: "echo MARK_$((6*7))\r" });
   await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("MARK_42"), "PTY 回流");
+  c.close();
+});
+
+test("导入项目：显式名称覆盖 remote 推导名称", async () => {
+  const repo = mkRepo();
+  repos.push(repo);
+  execFileSync("git", ["-C", repo.dir, "remote", "add", "origin", "https://github.com/myWsq/coflux.git"]);
+  const c = stack.makeClient();
+  await c.authSubscribe();
+
+  c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir, name: "  我的项目  " });
+  const proj = await c.waitFor((m) => m.case === "projectCreated", "explicit project.created");
+  assert.equal(proj.project.name, "我的项目");
+  c.close();
+});
+
+test("导入项目：无有效 remote 时从规范仓库根目录取名称", async () => {
+  const repo = mkRepo();
+  repos.push(repo);
+  const subdir = join(repo.dir, "nested", "directory");
+  mkdirSync(subdir, { recursive: true });
+  execFileSync("git", ["-C", repo.dir, "remote", "add", "origin", repo.dir]);
+  const c = stack.makeClient();
+  await c.authSubscribe();
+
+  c.send({ case: "projectImport", daemonId: stack.daemonId, path: subdir });
+  const proj = await c.waitFor((m) => m.case === "projectCreated", "fallback project.created");
+  assert.equal(proj.project.name, repo.dir.split("/").pop(), "回退名来自仓库根目录而非导入子目录");
   c.close();
 });
 

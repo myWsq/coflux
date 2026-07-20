@@ -49,6 +49,8 @@ message ProjectValidated {
   string repo_path = 3;
   string branch = 4;
   optional string error = 5;
+  // worker 从 remote URL 推导出的 namespace/project；不传原始 URL，缺失时 server 回退仓库根目录名
+  optional string suggested_name = 6;
 }
 
 // git worktree add 结果

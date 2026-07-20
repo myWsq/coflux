@@ -676,7 +676,14 @@ async fn route_authed(msg: server_to_daemon::Payload, cfg: &Arc<Config>, to_serv
             let to_server = to_server_tx.clone();
             tokio::spawn(async move {
                 let r = git::validate_repo(&path).await;
-                send_d2s(&to_server, daemon_to_server::Payload::ProjectValidated(wire::ProjectValidated { request_id, ok: r.ok, repo_path: r.repo_path, branch: r.branch, error: r.error })).await;
+                send_d2s(&to_server, daemon_to_server::Payload::ProjectValidated(wire::ProjectValidated {
+                    request_id,
+                    ok: r.ok,
+                    repo_path: r.repo_path,
+                    branch: r.branch,
+                    error: r.error,
+                    suggested_name: r.suggested_name,
+                })).await;
             });
         }
         server_to_daemon::Payload::WorktreeAdd(wire::WorktreeAdd { request_id, repo_path, workspace_id, name: _, branch, create_new }) => {
