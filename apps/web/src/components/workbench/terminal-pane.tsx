@@ -305,7 +305,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Tab 切换用 display 隐藏而非卸载：卸载 xterm 会丢 scrollback 与选区。
   return (
     <div className={props.active ? "absolute inset-0 block" : "absolute inset-0 hidden"} aria-hidden={!props.active}>
-      <div ref={hostRef} className="h-full w-full px-3 py-2" />
+      <div ref={hostRef} className="h-full w-full pb-3 pl-3 pt-2" />
     </div>
   );
 }
