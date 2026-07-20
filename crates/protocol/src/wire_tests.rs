@@ -73,17 +73,26 @@ fn server_to_daemon_envelope_dispatches_to_session_create() {
     }
 }
 
-/// optional 字段缺省：error=None 往返后仍是 None（且不占用编码字节——省了才叫 optional）。
+/// ProjectValidated 的 optional 字段缺省/有值都能原样往返。
 #[test]
-fn optional_error_field_round_trips_when_none() {
-    let m = ProjectValidated { request_id: "r".into(), ok: true, repo_path: "/repo".into(), branch: "main".into(), error: None };
+fn project_validated_optional_fields_round_trip() {
+    let m = ProjectValidated {
+        request_id: "r".into(),
+        ok: true,
+        repo_path: "/repo".into(),
+        branch: "main".into(),
+        error: None,
+        suggested_name: None,
+    };
     let bytes = m.encode_to_vec();
     let back = ProjectValidated::decode(bytes.as_slice()).unwrap();
     assert_eq!(back.error, None);
+    assert_eq!(back.suggested_name, None);
 
-    let with_err = ProjectValidated { error: Some("boom".into()), ..m };
-    let back2 = ProjectValidated::decode(with_err.encode_to_vec().as_slice()).unwrap();
+    let with_values = ProjectValidated { error: Some("boom".into()), suggested_name: Some("group/project".into()), ..m };
+    let back2 = ProjectValidated::decode(with_values.encode_to_vec().as_slice()).unwrap();
     assert_eq!(back2.error, Some("boom".into()));
+    assert_eq!(back2.suggested_name, Some("group/project".into()));
 }
 
 /// optional uint32（timeout_ms）同样：None/Some 都要原样往返，不能被悄悄转成 0。

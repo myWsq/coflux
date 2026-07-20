@@ -21,5 +21,6 @@
 | 017 | [daemon worker 自动热更新编排层](017-auto-update-orchestration.md) | DONE (2729930) | none |
 | 018 | [设备重命名（别名）—— server/web 展示 + daemon 本地 settings.json 同步](018-device-rename.md) | DONE (0379a55) | none |
 | 019 | [终端 tab 端口转发展示 —— PlugZap icon + HoverCard 悬浮跳转](019-terminal-tab-port-hovercard.md) | DONE (db1fc87) | none |
+| 020 | [从 Git remote 推导 project 名称](020-project-name-from-git-remote.md) | DONE (105bc70) | none |
 
-执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019。
+执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020。
