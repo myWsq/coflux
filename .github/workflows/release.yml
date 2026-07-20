@@ -33,6 +33,9 @@ jobs:
           tool: cross
 
       - name: 构建
+        env:
+          # supervisor 编译期版本注入（见 crates/supervisor/src/main.rs::SUPERVISOR_VERSION、build.rs）。
+          COFLUX_RELEASE_VERSION: ${{ github.ref_name }}
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker

@@ -34,7 +34,10 @@ pub mod wire {
 pub use settings::Settings;
 
 pub use frame::{decode_frame, encode_frame, DataFrame, FRAME_INPUT, FRAME_OUTPUT, FRAME_PROXY_DATA, FRAME_REPLAY};
-pub use ipc::{is_frame, write_record, RecordParser, SessionInfo, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV};
+pub use ipc::{
+    is_frame, write_record, RecordParser, SessionInfo, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV, SUPERVISOR_VERSION_ENV,
+    WORKER_VERSION_ENV,
+};
 pub use wire::{DaemonToServer, FsEntry, FsEntryKind, ServerToDaemon, SessionPorts, SessionRef};
 
 #[cfg(test)]

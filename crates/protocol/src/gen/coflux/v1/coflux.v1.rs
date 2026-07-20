@@ -12,6 +12,11 @@ pub struct DaemonInfo {
     pub platform: ::prost::alloc::string::String,
     #[prost(bool, tag="5")]
     pub online: bool,
+    /// 热更新编排（plan 015）：在线连接的内存态版本，供 web 展示；离线设备无此信息（空串）。
+    #[prost(string, tag="6")]
+    pub worker_version: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub supervisor_version: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Project {
@@ -288,11 +293,25 @@ pub struct DaemonEnroll {
     pub host: ::prost::alloc::string::String,
     #[prost(string, tag="4")]
     pub platform: ::prost::alloc::string::String,
+    /// 热更新编排（plan 015）：worker/supervisor 当前版本 + CPU 架构（std::env::consts::ARCH）。
+    /// 旧 daemon 不带这三个字段 → server 收到空串，按"不上报"处理（不参与自动推送比对）。
+    #[prost(string, tag="5")]
+    pub worker_version: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub supervisor_version: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub arch: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DaemonAuth {
     #[prost(string, tag="1")]
     pub device_token: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub worker_version: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub supervisor_version: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub arch: ::prost::alloc::string::String,
 }
 /// 未登记且无 enrollmentKey 时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -303,6 +322,12 @@ pub struct DaemonEnrollRequest {
     pub host: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub platform: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub worker_version: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub supervisor_version: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub arch: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonResync {
