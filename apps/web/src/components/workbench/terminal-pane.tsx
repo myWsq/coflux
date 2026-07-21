@@ -3,6 +3,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { useToast } from "@astryxdesign/core/Toast";
 import type { FsWriteResult } from "@/client/store";
 
 /** 控制权四态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。 */
@@ -146,6 +147,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   const terminalRef = useRef<Terminal | null>(null);
   const controllerRef = useRef<TerminalController | null>(null);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
+  // 拖拽上传的状态提示走 web toast，不写进终端画面——避免污染 claude 会话输出。
+  const showToast = useToast();
 
   // onData/onResize/粘贴/拖拽处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
@@ -158,6 +161,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     sendInput: props.sendInput,
     sendResize: props.sendResize,
     sendFsWrite: props.sendFsWrite,
+    showToast,
   });
   useEffect(() => {
     liveRef.current = {
@@ -168,6 +172,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       sendInput: props.sendInput,
       sendResize: props.sendResize,
       sendFsWrite: props.sendFsWrite,
+      showToast,
     };
   });
 
@@ -333,20 +338,20 @@ export function TerminalPane(props: TerminalPaneProps) {
       const files = Array.from(event.dataTransfer?.items ?? []).map(fileFromDragItem).filter((file): file is File => file !== null);
       if (files.length === 0) return; // 文件夹不递归展开，也不打扰用户。
 
-      const { active, controlState, sessionId, workspaceId, sendFsWrite } = liveRef.current;
+      const { active, controlState, sessionId, workspaceId, sendFsWrite, showToast } = liveRef.current;
       if (!(active && controlState === "owned" && sessionId)) {
-        controllerRef.current?.writeSystem("未持有控制权，无法上传文件", "warning");
+        showToast({ body: "未持有控制权，无法上传文件", type: "error" });
         return;
       }
 
       const uploadableFiles = files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
       const rejectedCount = files.length - uploadableFiles.length;
       if (rejectedCount > 0) {
-        controllerRef.current?.writeSystem(`${rejectedCount} 个文件超过 30MB，已拒绝上传`, "error");
+        showToast({ body: `${rejectedCount} 个文件超过 30MB，已拒绝上传`, type: "error" });
       }
       if (uploadableFiles.length === 0) return;
 
-      controllerRef.current?.writeSystem("上传中…");
+      const dismissUploading = showToast({ body: "上传中…", type: "info", isAutoHide: false });
       void (async () => {
         const uploadedPaths: string[] = [];
         for (const file of uploadableFiles) {
@@ -357,14 +362,15 @@ export function TerminalPane(props: TerminalPaneProps) {
             if (result.ok && result.path) {
               uploadedPaths.push(result.path);
             } else {
-              controllerRef.current?.writeSystem(`文件上传失败：${result.error}`, "error");
+              showToast({ body: `文件上传失败：${result.error}`, type: "error" });
             }
           } catch (e) {
-            controllerRef.current?.writeSystem(`文件上传失败：${e instanceof Error ? e.message : String(e)}`, "error");
+            showToast({ body: `文件上传失败：${e instanceof Error ? e.message : String(e)}`, type: "error" });
           }
         }
+        dismissUploading();
         if (uploadedPaths.length > 0) {
-          controllerRef.current?.writeSystem(`已上传 ${uploadedPaths.length} 个文件`, "success");
+          showToast({ body: `已上传 ${uploadedPaths.length} 个文件`, type: "info" });
           terminal.paste(` ${uploadedPaths.join(" ")} `);
         }
       })();
