@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { Theme } from "@astryxdesign/core/theme";
+import { LayerProvider } from "@astryxdesign/core/Layer";
 import { neutralTheme } from "@astryxdesign/theme-neutral/built";
 
 import { App } from "./App";
@@ -10,6 +11,9 @@ import "./index.css";
 // Astryx Theme 固定 dark：coflux 是深色优先的 IDE 工具面。
 createRoot(document.getElementById("root")!).render(
   <Theme theme={neutralTheme} mode="dark">
-    <App />
+    {/* LayerProvider 让 useToast 走正规 viewport 并继承 dark 主题；缺它时 toast 自挂浅色兜底 viewport，定位与配色都不对。 */}
+    <LayerProvider>
+      <App />
+    </LayerProvider>
   </Theme>,
 );
