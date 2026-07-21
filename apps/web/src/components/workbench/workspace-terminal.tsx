@@ -43,6 +43,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   ref,
 ) {
   const workspace = useStore(client.store, (state) => state.workspaces.find((item) => item.id === workspaceId));
+  const projectName = useStore(client.store, (state) => state.projects.find((item) => item.id === workspace?.projectId)?.name);
   const projectWorkspaces = useStore(
     client.store,
     useShallow((state) => state.workspaces.filter((item) => item.projectId === workspace?.projectId)),
@@ -395,6 +396,14 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     <section className="flex min-w-0 flex-1 flex-col bg-terminal">
       {/* 单栏顶栏：名称（如有）＋ 可点的分支按钮 │ 终端 Tabs（Tab 用间距而非竖线分隔）＋ 新建/端口 */}
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-background px-3">
+        {projectName ? (
+          <>
+            <span className="shrink-0 truncate text-xs text-secondary-foreground" style={{ maxWidth: 160 }}>
+              {projectName}
+            </span>
+            <div className="h-4 w-px shrink-0 bg-border" />
+          </>
+        ) : null}
         <BranchMenu
           currentBranch={workspace?.branch ?? ""}
           button={{
