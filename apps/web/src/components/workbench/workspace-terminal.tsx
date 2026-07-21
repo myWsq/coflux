@@ -1,11 +1,11 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { ExternalLink, GitBranch, LoaderCircle, PlugZap, Plus, SquareTerminal, Unplug, X } from "lucide-react";
+import { ExternalLink, GitBranch, LoaderCircle, Plus, Router, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
-import { HoverCard } from "@astryxdesign/core/HoverCard";
+import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import type { CofluxClient } from "@/client/store";
@@ -439,32 +439,23 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                   <span className="truncate">{task.title || "终端"}</span>
                 </button>
                 {taskPorts.length > 0 ? (
-                  <HoverCard
-                    placement="below"
-                    content={
-                      <div className="flex flex-col gap-0.5 p-1">
-                        {taskPorts.map((preview) => (
-                          <a
-                            key={preview.port}
-                            href={preview.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex h-5 items-center gap-1 rounded px-1.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                          >
-                            :{preview.port}
-                            <ExternalLink className="size-2.5" />
-                          </a>
-                        ))}
-                      </div>
-                    }
-                  >
-                    <button
-                      type="button"
-                      className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-70 transition-colors hover:bg-muted hover:text-foreground"
-                    >
-                      <PlugZap className="size-3" />
-                    </button>
-                  </HoverCard>
+                  <DropdownMenu
+                    button={{
+                      label: "转发端口",
+                      tooltip: "转发端口",
+                      icon: <Router className="size-3" />,
+                      isIconOnly: true,
+                      variant: "ghost",
+                      size: "sm",
+                      className:
+                        "mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-70 transition-colors hover:bg-muted hover:text-foreground",
+                    }}
+                    hasChevron={false}
+                    items={taskPorts.map((preview) => ({
+                      label: `:${preview.port}`,
+                      onClick: () => window.open(preview.url, "_blank", "noreferrer"),
+                    }))}
+                  />
                 ) : null}
                 <Tooltip content="关闭终端 ⌃⌘W" placement="below">
                   <button
