@@ -13,7 +13,7 @@ export type TerminalController = {
   fit: () => void;
   focus: () => void;
   reset: () => void;
-  writeSystem: (message: string, tone?: "warning" | "error") => void;
+  writeSystem: (message: string, tone?: "warning" | "error" | "success") => void;
 };
 
 type TerminalPaneProps = {
@@ -251,7 +251,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         terminal.clear();
       },
       writeSystem: (message, tone = "warning") => {
-        const color = tone === "error" ? "31" : "33";
+        const color = tone === "error" ? "31" : tone === "success" ? "32" : "33";
         terminal.writeln(`\r\n\x1b[${color}m[${message}]\x1b[0m`);
       },
     };
@@ -364,6 +364,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           }
         }
         if (uploadedPaths.length > 0) {
+          controllerRef.current?.writeSystem(`已上传 ${uploadedPaths.length} 个文件`, "success");
           terminal.paste(` ${uploadedPaths.join(" ")} `);
         }
       })();
