@@ -398,7 +398,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-background px-3">
         {projectName ? (
           <>
-            <span className="shrink-0 truncate text-sm text-secondary-foreground" style={{ maxWidth: 160 }}>
+            <span className="shrink-0 truncate text-xs text-secondary-foreground" style={{ maxWidth: 160 }}>
               {projectName}
             </span>
             <div className="h-4 w-px shrink-0 bg-border" />
