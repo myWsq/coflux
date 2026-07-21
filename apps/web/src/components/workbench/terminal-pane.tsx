@@ -147,7 +147,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   const terminalRef = useRef<Terminal | null>(null);
   const controllerRef = useRef<TerminalController | null>(null);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
-  // 拖拽上传的状态提示走 web toast，不写进终端画面——避免污染 claude 会话输出。
+  // 上传中用光标转圈表达进行态；成功不打扰，只在失败时弹 toast 告知原因——不写进终端画面避免污染 claude 会话。
+  const [isUploading, setIsUploading] = useState(false);
   const showToast = useToast();
 
   // onData/onResize/粘贴/拖拽处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
@@ -351,7 +352,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       }
       if (uploadableFiles.length === 0) return;
 
-      const dismissUploading = showToast({ body: "上传中…", type: "info", isAutoHide: false });
+      setIsUploading(true);
       void (async () => {
         const uploadedPaths: string[] = [];
         for (const file of uploadableFiles) {
@@ -368,9 +369,8 @@ export function TerminalPane(props: TerminalPaneProps) {
             showToast({ body: `文件上传失败：${e instanceof Error ? e.message : String(e)}`, type: "error" });
           }
         }
-        dismissUploading();
+        setIsUploading(false);
         if (uploadedPaths.length > 0) {
-          showToast({ body: `已上传 ${uploadedPaths.length} 个文件`, type: "info" });
           terminal.paste(` ${uploadedPaths.join(" ")} `);
         }
       })();
@@ -444,7 +444,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Tab 切换用 display 隐藏而非卸载：卸载 xterm 会丢 scrollback 与选区。
   return (
     <div className={props.active ? "absolute inset-0 block" : "absolute inset-0 hidden"} aria-hidden={!props.active}>
-      <div ref={hostRef} className="h-full w-full pb-3 pl-3 pt-2" />
+      <div ref={hostRef} className={`h-full w-full pb-3 pl-3 pt-2${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
       {isDraggingFile ? (
         <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-lg border border-warning/20 bg-warning/10 text-sm font-medium text-warning backdrop-blur">
           松开上传
