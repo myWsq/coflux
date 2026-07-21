@@ -32,10 +32,11 @@ type TerminalPaneProps = {
   onOutput: (taskId: string, sessionId: string) => void;
 };
 
-// 终端贴图（plan 014）：3.5MB 预算 = COFLUX_MAX_PAYLOAD 默认 4MB 减去信封/协议开销的经验余量。
-// 与 apps/server/src/config.ts 的 maxPayload 存在隐式耦合，若日后调整该值需同步这里。
+// 终端贴图（plan 014）的压缩目标独立于文件上传上限，保持 3.5MB 以节省截图传输带宽。
 const PASTE_BUDGET_BYTES = 3.5 * 1024 * 1024;
 const PASTE_MIN_DIMENSION = 64; // 降分辨率的下限：避免退化成不可读的一两个像素
+// 拖拽文件上传上限须与 server maxPayload、worker MAX_WRITE_BYTES 同为 30MB；任一偏小都会让前端放行后被下游拒绝。
+const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
 
 /** xterm 6.0.0 私有内部结构（仅补丁用到的字段），升级 @xterm/xterm 需复验。 */
 type XtermCoreInternals = {
