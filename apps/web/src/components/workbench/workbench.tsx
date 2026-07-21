@@ -74,6 +74,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
     else localStorage.removeItem(WORKSPACE_KEY);
   }, [snapshotRevision, projects, workspaces, selectedWorkspaceId]);
 
+  // 浏览器标签页标题跟随当前工作区所属项目，便于多标签页/多工作区场景下辨认。
+  useEffect(() => {
+    const workspace = workspaces.find((item) => item.id === selectedWorkspaceId);
+    const project = projects.find((item) => item.id === workspace?.projectId);
+    document.title = project ? `${project.name} · coflux` : "coflux · workspace";
+  }, [selectedWorkspaceId, workspaces, projects]);
+
   function selectWorkspace(workspaceId: string) {
     setSelectedWorkspaceId(workspaceId);
     localStorage.setItem(WORKSPACE_KEY, workspaceId);
