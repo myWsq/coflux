@@ -8,5 +8,17 @@ export function MainPage() {
   // 必须用 useState 惰性初始化保证只创建一次）。
   const [client] = useState(() => createCofluxClient());
   useEffect(() => () => client.disconnect(), [client]);
+
+  // 关标签/刷新/关窗前弹浏览器原生确认框，防止 cmd+w 等误操作退出工作台。
+  // 浏览器只允许原生文案，无法自定义；preventDefault 是现代标准，returnValue 兼容旧内核。
+  useEffect(() => {
+    const confirmExit = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", confirmExit);
+    return () => window.removeEventListener("beforeunload", confirmExit);
+  }, []);
+
   return <Workbench client={client} />;
 }
