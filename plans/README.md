@@ -24,5 +24,6 @@
 | 020 | [从 Git remote 推导 project 名称](020-project-name-from-git-remote.md) | DONE (105bc70) | none |
 | 021 | [Sidebar 拖拽调宽与本地记忆](021-resizable-sidebar.md) | DONE (a22bbd8) | none |
 | 022 | [PWA 可安装（manifest + 图标，无 service worker）](022-pwa-installable.md) | DONE (85fa24f) | none |
+| 023 | [web 终端拖拽小文件上传（drop 落 daemon 临时目录并注入路径）](023-terminal-file-drag-upload.md) | DONE (2a1636d) | none |
 
-执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022。
+执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023。

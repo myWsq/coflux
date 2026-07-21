@@ -78,7 +78,8 @@ export const config = {
   // web 会话 token 有效期：登录签发后多久过期（重连也用它）。默认 30 天。
   sessionTtlMs: int("COFLUX_SESSION_TTL_MS", 30 * 24 * 60 * 60 * 1000),
 
-  maxPayload: int("COFLUX_MAX_PAYLOAD", 4 * 1024 * 1024),
+  /** client/daemon 两条 WS 共用的单帧上限；须与 web MAX_UPLOAD_BYTES、worker MAX_WRITE_BYTES 同为 30MB。 */
+  maxPayload: int("COFLUX_MAX_PAYLOAD", 30 * 1024 * 1024),
   authDeadlineMs: int("COFLUX_AUTH_DEADLINE_MS", 15_000),
   heartbeatMs: int("COFLUX_HEARTBEAT_MS", 30_000),
   pendingTimeoutMs: int("COFLUX_PENDING_TIMEOUT_MS", 30_000),
