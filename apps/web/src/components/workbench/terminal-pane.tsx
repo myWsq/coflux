@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
@@ -99,6 +99,20 @@ function extForMime(mime: string): string {
   }
 }
 
+/** 拖拽上传使用生成式单段文件名，原扩展名只保留安全的 ASCII 字母数字，避免 temp 路径校验失败。 */
+function safeDropExtension(name: string): string {
+  const match = name.match(/\.([a-zA-Z0-9]{1,16})$/);
+  return match ? `.${match[1]}` : "";
+}
+
+function fileFromDragItem(item: DataTransferItem): File | null {
+  if (item.kind !== "file") return null;
+  // 只借 entry 标记区分文件与目录，不递归展开目录；不支持该 API 的浏览器回落到标准 getAsFile。
+  const entry = (item as DataTransferItem & { webkitGetAsEntry?: () => { isFile: boolean } | null }).webkitGetAsEntry?.();
+  if (entry && !entry.isFile) return null;
+  return item.getAsFile();
+}
+
 /** 把图片压缩到预算内：先在原分辨率按 JPEG 质量阶梯降（文字截图的可读性损失最小），
  * 仍超限再减半分辨率重来；两者都到头仍超限则回落已压出的最小结果（上传若仍失败，由调用方报错）。 */
 async function compressToBudget(blob: Blob, budget: number): Promise<Uint8Array> {
@@ -131,8 +145,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const controllerRef = useRef<TerminalController | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
 
-  // onData/onResize/粘贴处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
+  // onData/onResize/粘贴/拖拽处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
   // 这里反过来是"始终读最新"而非"读一次"，用同样的 ref 手段解决）。
   const liveRef = useRef({
@@ -293,6 +308,71 @@ export function TerminalPane(props: TerminalPaneProps) {
     };
     host.addEventListener("paste", handlePaste, { capture: true });
 
+    const hasFileTransfer = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    const handleDragEnter = (event: DragEvent) => {
+      if (!hasFileTransfer(event)) return;
+      event.preventDefault();
+      setIsDraggingFile(true);
+    };
+    const handleDragOver = (event: DragEvent) => {
+      if (!hasFileTransfer(event)) return;
+      event.preventDefault(); // 必须拦截，否则浏览器会拒绝 drop 或把文件导航到当前页面。
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      setIsDraggingFile(true);
+    };
+    const handleDragLeave = (event: DragEvent) => {
+      const nextTarget = event.relatedTarget;
+      // host 内子元素之间移动会冒泡出 dragleave；只有真正离开整个终端区域才隐藏遮罩。
+      if (nextTarget instanceof Node && host.contains(nextTarget)) return;
+      setIsDraggingFile(false);
+    };
+    const handleDrop = (event: DragEvent) => {
+      event.preventDefault(); // 防止浏览器用拖入文件替换当前页面。
+      setIsDraggingFile(false);
+
+      const files = Array.from(event.dataTransfer?.items ?? []).map(fileFromDragItem).filter((file): file is File => file !== null);
+      if (files.length === 0) return; // 文件夹不递归展开，也不打扰用户。
+
+      const { active, controlState, sessionId, workspaceId, sendFsWrite } = liveRef.current;
+      if (!(active && controlState === "owned" && sessionId)) {
+        controllerRef.current?.writeSystem("未持有控制权，无法上传文件", "warning");
+        return;
+      }
+
+      const uploadableFiles = files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+      const rejectedCount = files.length - uploadableFiles.length;
+      if (rejectedCount > 0) {
+        controllerRef.current?.writeSystem(`${rejectedCount} 个文件超过 30MB，已拒绝上传`, "error");
+      }
+      if (uploadableFiles.length === 0) return;
+
+      controllerRef.current?.writeSystem("上传中…");
+      void (async () => {
+        const uploadedPaths: string[] = [];
+        for (const file of uploadableFiles) {
+          try {
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            const name = `drop-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${safeDropExtension(file.name)}`;
+            const result = await sendFsWrite(workspaceId, name, bytes, true);
+            if (result.ok && result.path) {
+              uploadedPaths.push(result.path);
+            } else {
+              controllerRef.current?.writeSystem(`文件上传失败：${result.error}`, "error");
+            }
+          } catch (e) {
+            controllerRef.current?.writeSystem(`文件上传失败：${e instanceof Error ? e.message : String(e)}`, "error");
+          }
+        }
+        if (uploadedPaths.length > 0) {
+          terminal.paste(` ${uploadedPaths.join(" ")} `);
+        }
+      })();
+    };
+    host.addEventListener("dragenter", handleDragEnter);
+    host.addEventListener("dragover", handleDragOver);
+    host.addEventListener("dragleave", handleDragLeave);
+    host.addEventListener("drop", handleDrop);
+
     const observer = new ResizeObserver(() => fit());
     observer.observe(host);
     if (props.active) requestAnimationFrame(() => fit());
@@ -317,6 +397,10 @@ export function TerminalPane(props: TerminalPaneProps) {
       observer.disconnect();
       dprQuery?.removeEventListener("change", onDprChange);
       host.removeEventListener("paste", handlePaste, { capture: true });
+      host.removeEventListener("dragenter", handleDragEnter);
+      host.removeEventListener("dragover", handleDragOver);
+      host.removeEventListener("dragleave", handleDragLeave);
+      host.removeEventListener("drop", handleDrop);
       props.onDispose(props.taskId, controller);
       terminal.dispose(); // 一并 dispose 已挂载的 addons（fit/webgl）与输入监听
       terminalRef.current = null;
@@ -354,6 +438,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   return (
     <div className={props.active ? "absolute inset-0 block" : "absolute inset-0 hidden"} aria-hidden={!props.active}>
       <div ref={hostRef} className="h-full w-full pb-3 pl-3 pt-2" />
+      {isDraggingFile ? (
+        <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-lg border border-warning/20 bg-warning/10 text-sm font-medium text-warning backdrop-blur">
+          松开上传
+        </div>
+      ) : null}
     </div>
   );
 }
