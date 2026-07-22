@@ -81,6 +81,10 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   // （对应 Solid 信号的同步读语义），而 React state 变量本身要等下一次渲染才更新，故用 ref 双轨。
   const activeTaskIdRef = useRef<string | null>(null);
   const controlStatesRef = useRef<Record<string, TerminalControlState>>({});
+  // active prop 的镜像：handleSessionReady 等回调由子组件 effect 在任意渲染代触发，
+  // 直接闭包捕获 active 会读到过期值（landmine），渲染期同步赋值即可，无需 useEffect。
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   function updateActiveTaskId(taskId: string | null) {
     activeTaskIdRef.current = taskId;
@@ -203,7 +207,9 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     if (launchingTaskIdsRef.current.delete(taskId)) {
       attachedKeysRef.current.set(taskId, `${client.store.getState().snapshotRevision}:${sessionId}`);
       markOwned(taskId, sessionId);
-    } else {
+    } else if (activeRef.current && activeTaskIdRef.current === taskId) {
+      // 只有本实例可见（用户正在看这个工作区）且该任务是激活 Tab 时才主动申请控制权；
+      // 后台面板 / 隐藏工作区 / 旁观页面里的非激活任务不发 taskStart，不抢占对端 holder。
       beginAttach(task, controller, false);
     }
     if (activationRequestsRef.current.has(taskId)) performActivation(taskId);
@@ -316,15 +322,17 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   }, [detachedTaskIds]);
 
   // snapshotRevision 变更 = 重连/重登：server 侧旧连接的 holder 已失效，
-  // 必须对所有 RUNNING 任务重新 beginAttach 重新申请 holder，否则变成只读观众。
+  // 正在看的那个终端必须重新 beginAttach 重新申请 holder，否则变成只读观众；
+  // 隐藏工作区 / 非激活 Tab 不重新申请（避免把对端手里的 RUNNING 终端整批抢一遍）。
   useEffect(() => {
-    if (snapshotRevision === 0) return;
+    if (snapshotRevision === 0 || !activeRef.current) return;
     const frame = requestAnimationFrame(() => {
-      for (const task of currentTasks()) {
-        const controller = controllersRef.current.get(task.id);
-        if (task.status === TaskStatus.RUNNING && task.sessionId && controller && sessionReadyRef.current.get(task.id) === task.sessionId) {
-          beginAttach(task, controller, false);
-        }
+      const taskId = activeTaskIdRef.current;
+      if (!taskId) return;
+      const task = currentTasks().find((item) => item.id === taskId);
+      const controller = controllersRef.current.get(taskId);
+      if (task && task.status === TaskStatus.RUNNING && task.sessionId && controller && sessionReadyRef.current.get(taskId) === task.sessionId) {
+        beginAttach(task, controller, false);
       }
     });
     return () => cancelAnimationFrame(frame);
@@ -364,8 +372,10 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     };
   }, []);
 
+  // RUNNING 且尚未（且可能永不）发起 attach 的任务（后台面板 / 隐藏工作区 / 旁观页面）
+  // 回落为 "idle"：Tab 图标呈中性终端图标，不是永转的 attaching spinner。
   function stateOf(task: Task): TerminalControlState {
-    return controlStates[task.id] ?? (task.status === TaskStatus.RUNNING ? "attaching" : "stopped");
+    return controlStates[task.id] ?? (task.status === TaskStatus.RUNNING ? "idle" : "stopped");
   }
 
   const activeTask = workspaceTasks.find((task) => task.id === activeTaskId) ?? null;
@@ -506,7 +516,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             sessionId={task.sessionId ?? null}
             workspaceId={workspaceId}
             active={task.id === activeTaskId}
-            controlState={controlStates[task.id] ?? (task.status === TaskStatus.RUNNING ? "attaching" : "stopped")}
+            controlState={stateOf(task)}
             registerSessionConsumer={client.registerSessionConsumer}
             sendInput={client.sendInput}
             sendResize={(sessionId, cols, rows) => client.send({ case: "ptyResize", value: { sessionId, cols, rows } })}
