@@ -7,6 +7,7 @@ import { TaskStatus, type Task } from "@coflux/protocol";
 import { Button } from "@astryxdesign/core/Button";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
+import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
 import type { CofluxClient } from "@/client/store";
 import { cn } from "@/lib/utils";
 import { TerminalPane, type TerminalController, type TerminalControlState } from "@/components/workbench/terminal-pane";
@@ -53,6 +54,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     ),
   );
   const detachedTaskIds = useStore(client.store, (state) => state.detachedTaskIds);
+  const modPrefix = shortcutModifierPrefix(useIsStandalone());
   const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
   const lastError = useStore(client.store, (state) => state.lastError);
   const ports = useStore(client.store, (state) => state.ports);
@@ -438,7 +440,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                   <span className="truncate">{task.title || "终端"}</span>
                   {taskPorts.length > 0 ? <span className="ml-0.5 font-mono text-2xs text-muted-foreground">:{taskPorts[0].port}</span> : null}
                 </button>
-                <Tooltip content="关闭终端 ⌃⌘W" placement="below">
+                <Tooltip content={`关闭终端 ${modPrefix}W`} placement="below">
                   <button
                     className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                     onClick={() => onCloseTask(task)}
@@ -450,7 +452,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             );
           })}
           {/* 新建按钮跟随最后一个 Tab（浏览器式），不钉在最右 */}
-          <Tooltip content="新建终端 ⌃⌘T" placement="below">
+          <Tooltip content={`新建终端 ${modPrefix}T`} placement="below">
             <button
               className="ml-0.5 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-wait disabled:opacity-50"
               onClick={createTerminal}
@@ -506,7 +508,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                 <SquareTerminal className="size-5" />
               </div>
               <h2 className="text-base font-medium text-foreground">这个工作区还没有终端</h2>
-              <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。也可以按 ⌃⌘T 快速新建。</p>
+              <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。也可以按 {modPrefix}T 快速新建。</p>
               <Button className="mt-5" label="新建终端" variant="primary" size="sm" icon={<Plus />} isLoading={creating} onClick={createTerminal} />
             </div>
           </div>

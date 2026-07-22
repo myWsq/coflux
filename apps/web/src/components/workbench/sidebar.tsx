@@ -5,6 +5,7 @@ import { ChevronRight, Folder, FolderOpen, FolderPlus, GitBranch, Monitor, Plus,
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
+import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
 import type { CofluxClient } from "@/client/store";
 import { cn } from "@/lib/utils";
 
@@ -33,6 +34,7 @@ export function Sidebar(props: SidebarProps) {
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
   const createMenuProjectId = props.createMenuProjectId;
   const setCreateMenuProjectId = props.onCreateMenuProjectIdChange;
+  const modPrefix = shortcutModifierPrefix(useIsStandalone());
 
   function toggleProject(projectId: string) {
     setCollapsedIds((prev) => {
@@ -148,7 +150,7 @@ export function Sidebar(props: SidebarProps) {
                             isIconOnly: true,
                             variant: "ghost",
                             size: "sm",
-                            tooltip: "新建工作区 ⌃⌘N",
+                            tooltip: `新建工作区 ${modPrefix}N`,
                             style: { color: "var(--muted-foreground)", height: 20, width: 20, minWidth: 20, paddingInline: 0 },
                           }}
                           isOpen={createMenuProjectId === project.id}

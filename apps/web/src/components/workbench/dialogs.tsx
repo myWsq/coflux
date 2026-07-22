@@ -11,6 +11,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 
 import type { ClientError } from "@/client/store";
+import { shortcutModifiers, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
 
 type WorkspaceRenameDialogProps = {
   workspace: Workspace | null;
@@ -173,16 +174,19 @@ export type ConfirmAction = {
 };
 
 /** 键位展示：物理键位组合，纯展示不做输入解析（解析逻辑见 use-global-shortcuts.ts）。
- * 修饰键顺序遵循 macOS 菜单惯例：⌃⌥⇧⌘。 */
-const SHORTCUT_ROWS: { keys: string[]; description: string }[] = [
-  { keys: ["⌃", "⌘", "T"], description: "新建终端" },
-  { keys: ["⌃", "⌘", "W"], description: "关闭当前终端" },
-  { keys: ["⌃", "⌘", "1-9"], description: "切换到第 N 个终端" },
-  { keys: ["⌃", "⌘", "["], description: "上一个终端" },
-  { keys: ["⌃", "⌘", "]"], description: "下一个终端" },
-  { keys: ["⌃", "⌘", "N"], description: "新建工作区" },
-  { keys: ["⌘", "/"], description: "显示 / 隐藏本面板" },
-];
+ * 修饰键顺序遵循 macOS 菜单惯例：⌃⌥⇧⌘。前缀随 PWA standalone 环境变（⌃⌘ ↔ ⌘）。 */
+function shortcutRows(standalone: boolean): { keys: string[]; description: string }[] {
+  const mod = shortcutModifiers(standalone);
+  return [
+    { keys: [...mod, "T"], description: "新建终端" },
+    { keys: [...mod, "W"], description: "关闭当前终端" },
+    { keys: [...mod, "1-9"], description: "切换到第 N 个终端" },
+    { keys: [...mod, "["], description: "上一个终端" },
+    { keys: [...mod, "]"], description: "下一个终端" },
+    { keys: [...mod, "N"], description: "新建工作区" },
+    { keys: ["⌘", "/"], description: "显示 / 隐藏本面板" },
+  ];
+}
 
 function KeyCap({ label }: { label: string }) {
   return (
@@ -194,6 +198,7 @@ function KeyCap({ label }: { label: string }) {
 
 /** 快捷键帮助面板：Cmd+/ 打开，再按一次或 Esc 关闭；键位表硬编码（6 条快捷键不值得配置化）。 */
 export function ShortcutsHelpDialog(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  const rows = shortcutRows(useIsStandalone());
   return (
     <AstryxDialog isOpen={props.open} onOpenChange={props.onOpenChange} width={380}>
       <Layout
@@ -201,7 +206,7 @@ export function ShortcutsHelpDialog(props: { open: boolean; onOpenChange: (open:
         content={
           <LayoutContent>
             <VStack gap={2} hAlign="stretch">
-              {SHORTCUT_ROWS.map((row) => (
+              {rows.map((row) => (
                 <HStack key={row.description} gap={3} hAlign="between" vAlign="center">
                   <Text type="body">{row.description}</Text>
                   <HStack gap={1} vAlign="center">
