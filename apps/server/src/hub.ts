@@ -251,14 +251,17 @@ export class Hub {
     return true;
   }
 
-  /** 全量下发某设备的工作区清单（连接时 + 工作区增删时），worker 据此监视各 worktree 的 HEAD 分支 */
+  /** 全量下发某设备的工作区清单（连接时 + 工作区增删时），worker 据此监视各 worktree 的 HEAD 分支 +
+   * git diff 统计；defaultBranch 带出所属 project 的默认分支（diff 统计基准），server DB 是权威值，
+   * worker 不自行猜测。 */
   private async pushWorkspaceList(daemonId: DaemonId): Promise<void> {
     const daemon = this.daemons.get(daemonId);
     if (!daemon) return;
-    const workspaces = await this.store.listWorkspacesByDaemon(daemonId);
+    const [workspaces, projects] = await Promise.all([this.store.listWorkspacesByDaemon(daemonId), this.store.listProjectsByDaemon(daemonId)]);
+    const defaultBranchByProject = new Map(projects.map((p) => [p.id, p.defaultBranch]));
     this.sendDaemon(daemon, {
       case: "workspaceList",
-      value: { workspaces: workspaces.map((ws) => ({ workspaceId: ws.id, path: ws.path })) },
+      value: { workspaces: workspaces.map((ws) => ({ workspaceId: ws.id, path: ws.path, defaultBranch: defaultBranchByProject.get(ws.projectId) ?? "" })) },
     });
   }
 
@@ -376,6 +379,16 @@ export class Hub {
         if (!branch || branch === ws.branch) return;
         // 未起名（name === 旧 branch）时 name 跟随新分支，保持"未命名"语义
         const updated = await this.store.updateWorkspaceBranch(ws.id, branch, ws.name === ws.branch);
+        if (updated) this.broadcast(updated.accountId, { case: "workspaceCreated", value: { workspace: updated } });
+        break;
+      }
+      // worker 周期计算的 git diff 累计统计：真相源在设备侧，DB 只做镜像 + 广播（同 workspaceBranch 形态）
+      case "workspaceDiff": {
+        const value = msg.payload.value;
+        const ws = await this.store.getWorkspace(value.workspaceId);
+        if (!ws || ws.daemonId !== conn.daemonId) return;
+        if (value.additions === ws.additions && value.deletions === ws.deletions) return;
+        const updated = await this.store.updateWorkspaceDiff(ws.id, value.additions, value.deletions);
         if (updated) this.broadcast(updated.accountId, { case: "workspaceCreated", value: { workspace: updated } });
         break;
       }

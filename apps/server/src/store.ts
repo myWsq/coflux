@@ -178,7 +178,9 @@ const SCHEMA_DDL = `
     path TEXT NOT NULL,
     branch TEXT NOT NULL,
     is_main BOOLEAN NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL
+    created_at DOUBLE PRECISION NOT NULL,
+    additions INTEGER NOT NULL DEFAULT 0,
+    deletions INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS idx_ws_account ON workspaces(account_id);
   CREATE INDEX IF NOT EXISTS idx_ws_project ON workspaces(project_id);
@@ -235,7 +237,10 @@ export class Store {
   /** 轻量列迁移的挂载点（information_schema 查列补列）：当前全新建表已含所有列，暂无需迁移。
    * 保留此方法承接未来的增量 schema 演进，沿用与旧 sqlite 版本相同的思路。 */
   private async migrate(): Promise<void> {
-    /* no-op for now */
+    // plan 024：workspaces 表新增 additions/deletions（git diff 累计统计）。
+    // SCHEMA_DDL 是 CREATE TABLE IF NOT EXISTS 幂等块，生产已有的 workspaces 表不会自动得到新列。
+    await this.sql`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS additions INTEGER NOT NULL DEFAULT 0`;
+    await this.sql`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS deletions INTEGER NOT NULL DEFAULT 0`;
   }
 
   /**
@@ -420,7 +425,7 @@ export class Store {
   /* --------------------------- workspaces -------------------------- */
   async createWorkspace(w: Workspace): Promise<Workspace> {
     await this.sql`
-      INSERT INTO workspaces ${this.sql(w, "id", "accountId", "daemonId", "projectId", "name", "path", "branch", "isMain", "createdAt")}
+      INSERT INTO workspaces ${this.sql(w, "id", "accountId", "daemonId", "projectId", "name", "path", "branch", "isMain", "createdAt", "additions", "deletions")}
     `;
     return w;
   }
@@ -448,6 +453,12 @@ export class Store {
     const rows = alsoName
       ? await this.sql<Workspace[]>`UPDATE workspaces SET branch = ${branch}, name = ${branch} WHERE id = ${id} RETURNING *`
       : await this.sql<Workspace[]>`UPDATE workspaces SET branch = ${branch} WHERE id = ${id} RETURNING *`;
+    return rows[0] && create(WorkspaceSchema, rows[0]);
+  }
+  async updateWorkspaceDiff(id: WorkspaceId, additions: number, deletions: number): Promise<Workspace | undefined> {
+    const rows = await this.sql<Workspace[]>`
+      UPDATE workspaces SET additions = ${additions}, deletions = ${deletions} WHERE id = ${id} RETURNING *
+    `;
     return rows[0] && create(WorkspaceSchema, rows[0]);
   }
   async removeWorkspace(id: WorkspaceId): Promise<void> {

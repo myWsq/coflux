@@ -1,4 +1,4 @@
-# Plan 024: 旁观客户端不再被动抢占终端控制权
+# Plan 025: 旁观客户端不再被动抢占终端控制权
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -120,7 +120,7 @@ In scope:
 - `apps/web/src/components/workbench/workspace-terminal.tsx`
 - `apps/web/src/components/workbench/terminal-pane.tsx`（仅当引入新
   `TerminalControlState` 字面量时的类型与判等跟改）
-- `plans/024-passive-attach-containment.md`、`plans/README.md`（状态更新）
+- `plans/025-passive-attach-containment.md`、`plans/README.md`（状态更新）
 
 Out of scope:
 - `apps/server/src/hub.ts`、`proto/`、`packages/protocol/` —— server/协议语义
