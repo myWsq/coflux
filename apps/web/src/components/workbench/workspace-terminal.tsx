@@ -1,13 +1,14 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { ExternalLink, GitBranch, LoaderCircle, Plus, Router, SquareTerminal, Unplug, X } from "lucide-react";
+import { ExternalLink, GitBranch, GitCompareArrows, LoaderCircle, Plus, Router, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
 import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
+import { ChangesView } from "@/components/workbench/changes-view";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
 import type { CofluxClient } from "@/client/store";
 import { cn } from "@/lib/utils";
@@ -48,6 +49,8 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     client.store,
     useShallow((state) => state.workspaces.filter((item) => item.projectId === workspace?.projectId)),
   );
+  // diff 基准（merge-base 用）：与 024 的 worker 侧 diff_stat 同一权威值，来自 project 实体。
+  const defaultBranch = useStore(client.store, (state) => state.projects.find((item) => item.id === workspace?.projectId)?.defaultBranch ?? "");
   const workspaceTasks = useStore(
     client.store,
     useShallow((state) =>
@@ -61,6 +64,9 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   const ports = useStore(client.store, (state) => state.ports);
 
   const [activeTaskId, setActiveTaskIdState] = useState<string | null>(null);
+  // 主面板视图：常驻「变更」tab 与终端 Tab 互斥（plan 025）。本组件随工作区常驻挂载
+  // （workbench.tsx 隐藏而非卸载），故该 state 天然按工作区独立保留，无需额外持久化。
+  const [view, setView] = useState<"terminal" | "changes">("terminal");
   /** 切换分支中：目标分支名（按钮 pending 态；成功由 daemon 上报驱动 branch 变更后自动清除） */
   const [pendingBranch, setPendingBranch] = useState<string | null>(null);
   const [controlStates, setControlStatesState] = useState<Record<string, TerminalControlState>>({});
@@ -178,6 +184,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   }
 
   function requestActivation(taskId: string, forceClaim = false) {
+    setView("terminal"); // 任何终端 Tab 的激活（点击/键盘/新建）都切回终端视图，与「变更」互斥
     updateActiveTaskId(taskId);
     activationRequestsRef.current.add(taskId);
     if (forceClaim) forcedClaimsRef.current.add(taskId);
@@ -412,20 +419,31 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           takenBranches={takenBranches}
           onPick={switchBranch}
         />
-        {/* git diff 累计统计（plan 024）：X=Y=0 时不渲染 */}
-        {workspace && (workspace.additions > 0 || workspace.deletions > 0) ? (
-          <span
-            className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums"
-            title={`+${workspace.additions} −${workspace.deletions}`}
-          >
-            <span className="text-success">+{workspace.additions}</span> <span className="text-destructive">−{workspace.deletions}</span>
-          </span>
-        ) : null}
+        {/* 常驻「变更」tab（plan 025）：统计徽标并入 tab，原顶栏独立 +X −Y span 已移除。
+            与终端 Tab 选中态互斥；X=Y=0 时数字隐藏，tab 本身仍在。 */}
+        <button
+          className={cn(
+            "flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-sm transition-colors",
+            view === "changes"
+              ? "bg-accent text-foreground"
+              : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
+          )}
+          onClick={() => setView("changes")}
+        >
+          <GitCompareArrows className="size-3 shrink-0 opacity-70" />
+          <span>变更</span>
+          {workspace && (workspace.additions > 0 || workspace.deletions > 0) ? (
+            <span className="whitespace-nowrap font-mono text-2xs tabular-nums" title={`+${workspace.additions} −${workspace.deletions}`}>
+              <span className="text-success">+{workspace.additions}</span> <span className="text-destructive">−{workspace.deletions}</span>
+            </span>
+          ) : null}
+        </button>
         <div className="h-4 w-px shrink-0 bg-border" />
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {workspaceTasks.map((task) => {
             const state = stateOf(task);
-            const isActive = task.id === activeTaskId;
+            // 「变更」视图激活时终端 Tab 一律去高亮，两种视图选中态互斥（plan 025）。
+            const isActive = view === "terminal" && task.id === activeTaskId;
             const taskPorts = ports[task.id] ?? [];
             return (
               <div
@@ -516,7 +534,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             taskId={task.id}
             sessionId={task.sessionId ?? null}
             workspaceId={workspaceId}
-            active={task.id === activeTaskId}
+            active={view === "terminal" && task.id === activeTaskId}
             controlState={controlStates[task.id] ?? (task.status === TaskStatus.RUNNING ? "attaching" : "stopped")}
             registerSessionConsumer={client.registerSessionConsumer}
             sendInput={client.sendInput}
@@ -542,7 +560,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           </div>
         ) : null}
 
-        {activeTask && activeControlState === "detached" ? (
+        {view === "terminal" && activeTask && activeControlState === "detached" ? (
           <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between border-b border-warning/20 bg-warning/10 px-4 py-2 text-xs text-warning backdrop-blur">
             <span className="flex items-center gap-2">
               <Unplug className="size-3.5" />
@@ -551,6 +569,18 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             <Button label="重新接管" variant="secondary" size="sm" onClick={() => requestActivation(activeTask.id, true)} />
           </div>
         ) : null}
+
+        {/* 「变更」视图：与终端面板同保活模式（隐藏不卸载），折叠态/已拉取数据才不随切换丢失。 */}
+        <div className={cn("absolute inset-0", view === "changes" ? "block" : "hidden")}>
+          <ChangesView
+            workspaceId={workspaceId}
+            active={view === "changes"}
+            client={client}
+            defaultBranch={defaultBranch}
+            additions={workspace?.additions ?? 0}
+            deletions={workspace?.deletions ?? 0}
+          />
+        </div>
       </div>
 
     </section>
