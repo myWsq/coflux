@@ -58,6 +58,12 @@ pub struct Workspace {
     pub is_main: bool,
     #[prost(double, tag="9")]
     pub created_at: f64,
+    /// git diff 累计统计（plan 024）：merge-base(default_branch, HEAD) 到工作树的累积新增/删除行数
+    /// （含已提交 + 未提交 + untracked）。真相源在设备侧，DB 只是镜像，与 branch 同语义。
+    #[prost(int32, tag="10")]
+    pub additions: i32,
+    #[prost(int32, tag="11")]
+    pub deletions: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Task {
@@ -405,7 +411,7 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 19, 15, 16, 17, 18")]
+    #[prost(oneof="daemon_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 19, 15, 16, 17, 18, 20")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -451,6 +457,8 @@ pub mod daemon_to_server {
         ProxyData(super::ProxyData),
         #[prost(message, tag="18")]
         WorkspaceBranch(super::WorkspaceBranch),
+        #[prost(message, tag="20")]
+        WorkspaceDiff(super::WorkspaceDiff),
     }
 }
 /// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
@@ -460,6 +468,16 @@ pub struct WorkspaceBranch {
     pub workspace_id: ::prost::alloc::string::String,
     #[prost(string, tag="2")]
     pub branch: ::prost::alloc::string::String,
+}
+/// worker 周期计算的某 worktree 累积 git diff 行数统计（真相源：设备上的 worktree，DB 只是镜像）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkspaceDiff {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(int32, tag="2")]
+    pub additions: i32,
+    #[prost(int32, tag="3")]
+    pub deletions: i32,
 }
 // ===== Server → Daemon 载荷 =====
 
@@ -697,12 +715,16 @@ pub mod server_to_daemon {
     }
 }
 /// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD
+/// 分支与 diff 统计；default_branch 是所属 project 的默认分支，diff 统计基准
+/// merge-base(default_branch, HEAD) 依赖它，server 侧权威值，worker 不自行猜测。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WorkspaceRef {
     #[prost(string, tag="1")]
     pub workspace_id: ::prost::alloc::string::String,
     #[prost(string, tag="2")]
     pub path: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub default_branch: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WorkspaceList {

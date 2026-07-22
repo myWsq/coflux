@@ -8,6 +8,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
+import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
 import type { CofluxClient } from "@/client/store";
 import { cn } from "@/lib/utils";
 import { TerminalPane, type TerminalController, type TerminalControlState } from "@/components/workbench/terminal-pane";
@@ -54,6 +55,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     ),
   );
   const detachedTaskIds = useStore(client.store, (state) => state.detachedTaskIds);
+  const modPrefix = shortcutModifierPrefix(useIsStandalone());
   const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
   const lastError = useStore(client.store, (state) => state.lastError);
   const ports = useStore(client.store, (state) => state.ports);
@@ -437,6 +439,15 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           takenBranches={takenBranches}
           onPick={switchBranch}
         />
+        {/* git diff 累计统计（plan 024）：X=Y=0 时不渲染 */}
+        {workspace && (workspace.additions > 0 || workspace.deletions > 0) ? (
+          <span
+            className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums"
+            title={`+${workspace.additions} −${workspace.deletions}`}
+          >
+            <span className="text-success">+{workspace.additions}</span> <span className="text-destructive">−{workspace.deletions}</span>
+          </span>
+        ) : null}
         <div className="h-4 w-px shrink-0 bg-border" />
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {workspaceTasks.map((task) => {
@@ -484,7 +495,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                     }))}
                   />
                 ) : null}
-                <Tooltip content="关闭终端 ⌃⌘W" placement="below">
+                <Tooltip content={`关闭终端 ${modPrefix}W`} placement="below">
                   <button
                     className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                     onClick={() => onCloseTask(task)}
@@ -496,7 +507,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             );
           })}
           {/* 新建按钮跟随最后一个 Tab（浏览器式），不钉在最右 */}
-          <Tooltip content="新建终端 ⌃⌘T" placement="below">
+          <Tooltip content={`新建终端 ${modPrefix}T`} placement="below">
             <button
               className="ml-0.5 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-wait disabled:opacity-50"
               onClick={createTerminal}
@@ -552,7 +563,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                 <SquareTerminal className="size-5" />
               </div>
               <h2 className="text-base font-medium text-foreground">这个工作区还没有终端</h2>
-              <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。也可以按 ⌃⌘T 快速新建。</p>
+              <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。也可以按 {modPrefix}T 快速新建。</p>
               <Button className="mt-5" label="新建终端" variant="primary" size="sm" icon={<Plus />} isLoading={creating} onClick={createTerminal} />
             </div>
           </div>

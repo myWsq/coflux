@@ -5,6 +5,7 @@ import { ChevronRight, Folder, FolderOpen, FolderPlus, GitBranch, Monitor, Plus,
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
+import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
 import type { CofluxClient } from "@/client/store";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
 import { cn } from "@/lib/utils";
@@ -73,6 +74,7 @@ export function Sidebar(props: SidebarProps) {
   } | null>(null);
   const createMenuProjectId = props.createMenuProjectId;
   const setCreateMenuProjectId = props.onCreateMenuProjectIdChange;
+  const modPrefix = shortcutModifierPrefix(useIsStandalone());
 
   function updateSidebarWidth(width: number) {
     const nextWidth = clampSidebarWidth(width);
@@ -258,7 +260,7 @@ export function Sidebar(props: SidebarProps) {
                             isIconOnly: true,
                             variant: "ghost",
                             size: "sm",
-                            tooltip: "新建工作区 ⌃⌘N",
+                            tooltip: `新建工作区 ${modPrefix}N`,
                             style: { color: "var(--muted-foreground)", height: 20, width: 20, minWidth: 20, paddingInline: 0 },
                           }}
                           isOpen={createMenuProjectId === project.id}
@@ -300,6 +302,16 @@ export function Sidebar(props: SidebarProps) {
                             >
                               <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
                               <span className="min-w-0 flex-1 truncate text-base">{workspace.branch}</span>
+                              {/* git diff 累计统计（plan 024）：X=Y=0 时不渲染 */}
+                              {workspace.additions > 0 || workspace.deletions > 0 ? (
+                                <span
+                                  className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums"
+                                  title={`+${workspace.additions} −${workspace.deletions}`}
+                                >
+                                  <span className="text-success">+{workspace.additions}</span>{" "}
+                                  <span className="text-destructive">−{workspace.deletions}</span>
+                                </span>
+                              ) : null}
                               {/* 右端小字：自定义名称（name ≠ branch 时才有）；主工作区未起名时默认叫「主工作区」。
                                   hover 渐变淡出给删除按钮让位 */}
                               {(() => {
