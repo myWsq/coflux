@@ -421,6 +421,14 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     set {payload = .workspaceBranch(newValue)}
   }
 
+  public var workspaceDiff: Coflux_V1_WorkspaceDiff {
+    get {
+      if case .workspaceDiff(let v)? = payload {return v}
+      return Coflux_V1_WorkspaceDiff()
+    }
+    set {payload = .workspaceDiff(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -444,6 +452,7 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     case ptyReplay(Coflux_V1_PtyReplay)
     case proxyData(Coflux_V1_ProxyData)
     case workspaceBranch(Coflux_V1_WorkspaceBranch)
+    case workspaceDiff(Coflux_V1_WorkspaceDiff)
 
   }
 
@@ -459,6 +468,23 @@ public struct Coflux_V1_WorkspaceBranch: Sendable {
   public var workspaceID: String = String()
 
   public var branch: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker 周期计算的某 worktree 累积 git diff 行数统计（真相源：设备上的 worktree，DB 只是镜像）
+public struct Coflux_V1_WorkspaceDiff: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var workspaceID: String = String()
+
+  public var additions: Int32 = 0
+
+  public var deletions: Int32 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1035,6 +1061,8 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
 }
 
 /// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD
+/// 分支与 diff 统计；default_branch 是所属 project 的默认分支，diff 统计基准
+/// merge-base(default_branch, HEAD) 依赖它，server 侧权威值，worker 不自行猜测。
 public struct Coflux_V1_WorkspaceRef: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1043,6 +1071,8 @@ public struct Coflux_V1_WorkspaceRef: Sendable {
   public var workspaceID: String = String()
 
   public var path: String = String()
+
+  public var defaultBranch: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1549,7 +1579,7 @@ extension Coflux_V1_ProxyClosed: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enroll\0\u{3}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{3}exec_result\0\u{3}fs_listed\0\u{3}fs_read_result\0\u{3}pty_output\0\u{3}pty_replay\0\u{3}proxy_data\0\u{3}workspace_branch\0\u{3}fs_write_result\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enroll\0\u{3}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{3}exec_result\0\u{3}fs_listed\0\u{3}fs_read_result\0\u{3}pty_output\0\u{3}pty_replay\0\u{3}proxy_data\0\u{3}workspace_branch\0\u{3}fs_write_result\0\u{3}workspace_diff\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1804,6 +1834,19 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .fsWriteResult(v)
         }
       }()
+      case 20: try {
+        var v: Coflux_V1_WorkspaceDiff?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .workspaceDiff(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .workspaceDiff(v)
+        }
+      }()
       default: break
       }
     }
@@ -1891,6 +1934,10 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .fsWriteResult(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
     }()
+    case .workspaceDiff?: try {
+      guard case .workspaceDiff(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -1933,6 +1980,46 @@ extension Coflux_V1_WorkspaceBranch: SwiftProtobuf.Message, SwiftProtobuf._Messa
   public static func ==(lhs: Coflux_V1_WorkspaceBranch, rhs: Coflux_V1_WorkspaceBranch) -> Bool {
     if lhs.workspaceID != rhs.workspaceID {return false}
     if lhs.branch != rhs.branch {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_WorkspaceDiff: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".WorkspaceDiff"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}workspace_id\0\u{1}additions\0\u{1}deletions\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 2: try { try decoder.decodeSingularInt32Field(value: &self.additions) }()
+      case 3: try { try decoder.decodeSingularInt32Field(value: &self.deletions) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 1)
+    }
+    if self.additions != 0 {
+      try visitor.visitSingularInt32Field(value: self.additions, fieldNumber: 2)
+    }
+    if self.deletions != 0 {
+      try visitor.visitSingularInt32Field(value: self.deletions, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_WorkspaceDiff, rhs: Coflux_V1_WorkspaceDiff) -> Bool {
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.additions != rhs.additions {return false}
+    if lhs.deletions != rhs.deletions {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3104,7 +3191,7 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_WorkspaceRef: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WorkspaceRef"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}workspace_id\0\u{1}path\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}workspace_id\0\u{1}path\0\u{3}default_branch\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3114,6 +3201,7 @@ extension Coflux_V1_WorkspaceRef: SwiftProtobuf.Message, SwiftProtobuf._MessageI
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.defaultBranch) }()
       default: break
       }
     }
@@ -3126,12 +3214,16 @@ extension Coflux_V1_WorkspaceRef: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     if !self.path.isEmpty {
       try visitor.visitSingularStringField(value: self.path, fieldNumber: 2)
     }
+    if !self.defaultBranch.isEmpty {
+      try visitor.visitSingularStringField(value: self.defaultBranch, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Coflux_V1_WorkspaceRef, rhs: Coflux_V1_WorkspaceRef) -> Bool {
     if lhs.workspaceID != rhs.workspaceID {return false}
     if lhs.path != rhs.path {return false}
+    if lhs.defaultBranch != rhs.defaultBranch {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -112,6 +112,7 @@ message DaemonToServer {
     PtyReplay pty_replay = 16;
     ProxyData proxy_data = 17;
     WorkspaceBranch workspace_branch = 18;
+    WorkspaceDiff workspace_diff = 20;
   }
 }
 
@@ -119,6 +120,13 @@ message DaemonToServer {
 message WorkspaceBranch {
   string workspace_id = 1;
   string branch = 2;
+}
+
+// worker 周期计算的某 worktree 累积 git diff 行数统计（真相源：设备上的 worktree，DB 只是镜像）
+message WorkspaceDiff {
+  string workspace_id = 1;
+  int32 additions = 2;
+  int32 deletions = 3;
 }
 
 // ===== Server → Daemon 载荷 =====
@@ -275,9 +283,12 @@ message ServerToDaemon {
 }
 
 // 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD
+// 分支与 diff 统计；default_branch 是所属 project 的默认分支，diff 统计基准
+// merge-base(default_branch, HEAD) 依赖它，server 侧权威值，worker 不自行猜测。
 message WorkspaceRef {
   string workspace_id = 1;
   string path = 2;
+  string default_branch = 3;
 }
 
 message WorkspaceList {

@@ -62,10 +62,13 @@ struct WorkerState {
     pending_auth_expires_at: Option<f64>,
     /// 端口探测(005)上一次实际发出的全量快照:变化才发的比较基准，也是重连补发的缓存。
     last_reported_ports: Vec<wire::SessionPorts>,
-    /// server 下发的本设备工作区清单：workspace_id -> worktree 路径（分支监视用）
-    workspaces: HashMap<String, String>,
+    /// server 下发的本设备工作区清单：workspace_id -> (worktree 路径, 所属 project 的 default_branch)
+    /// （分支监视 + diff 统计基准用）
+    workspaces: HashMap<String, (String, String)>,
     /// 上次上报的分支：workspace_id -> branch。收到新清单时清空，下一轮全量比对上报（重连对账）
     last_branches: HashMap<String, String>,
+    /// 上次上报的 diff 统计：workspace_id -> (additions, deletions)。收到新清单时清空，同上
+    last_diffs: HashMap<String, (i32, i32)>,
     /// per-session DEC 私有模式追踪（见 dec_modes.rs）：supervisor scrollback 环把模式设置转义
     /// 挤出去后，replay 转发前用它补前缀，不让 attach/resync 丢失 bracketed-paste 等模式状态。
     dec_modes: HashMap<String, DecModeTracker>,
@@ -207,6 +210,7 @@ async fn main() {
         last_reported_ports: Vec::new(),
         workspaces: HashMap::new(),
         last_branches: HashMap::new(),
+        last_diffs: HashMap::new(),
         dec_modes: HashMap::new(),
     }));
 
@@ -242,7 +246,9 @@ async fn main() {
         tokio::spawn(async move { supervisor_loop(cfg, state, to_server_tx, to_sup_rx).await });
     }
 
-    // 分支监视：worktree HEAD 是分支的真相源，周期读取（纯文件读，无子进程），变化才上报。
+    // 分支监视 + diff 统计（plan 024）：worktree HEAD 是分支的真相源（纯文件读，无子进程）；
+    // diff 统计基准是 merge-base(default_branch, HEAD)（git 子进程 + untracked 文件读，见
+    // git::diff_stat）。同一 3s 周期内一并处理，变化才上报，满足 ≤5s 轮询间隔的约束。
     {
         let state = state.clone();
         let to_server_tx = to_server_tx.clone();
@@ -251,26 +257,41 @@ async fn main() {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                let targets: Vec<(String, String)> = {
+                let targets: Vec<(String, String, String)> = {
                     let s = state.lock().unwrap();
                     if !s.authed {
                         continue;
                     }
-                    s.workspaces.iter().map(|(id, path)| (id.clone(), path.clone())).collect()
+                    s.workspaces.iter().map(|(id, (path, default_branch))| (id.clone(), path.clone(), default_branch.clone())).collect()
                 };
-                for (workspace_id, path) in targets {
-                    let Some(branch) = git::current_branch(&path) else { continue };
+                for (workspace_id, path, default_branch) in targets {
+                    if let Some(branch) = git::current_branch(&path) {
+                        let changed = {
+                            let mut s = state.lock().unwrap();
+                            if s.last_branches.get(&workspace_id) == Some(&branch) {
+                                false
+                            } else {
+                                s.last_branches.insert(workspace_id.clone(), branch.clone());
+                                true
+                            }
+                        };
+                        if changed {
+                            send_d2s(&to_server_tx, daemon_to_server::Payload::WorkspaceBranch(wire::WorkspaceBranch { workspace_id: workspace_id.clone(), branch })).await;
+                        }
+                    }
+
+                    let stat = git::diff_stat(&path, &default_branch).await;
                     let changed = {
                         let mut s = state.lock().unwrap();
-                        if s.last_branches.get(&workspace_id) == Some(&branch) {
+                        if s.last_diffs.get(&workspace_id) == Some(&(stat.additions, stat.deletions)) {
                             false
                         } else {
-                            s.last_branches.insert(workspace_id.clone(), branch.clone());
+                            s.last_diffs.insert(workspace_id.clone(), (stat.additions, stat.deletions));
                             true
                         }
                     };
                     if changed {
-                        send_d2s(&to_server_tx, daemon_to_server::Payload::WorkspaceBranch(wire::WorkspaceBranch { workspace_id, branch })).await;
+                        send_d2s(&to_server_tx, daemon_to_server::Payload::WorkspaceDiff(wire::WorkspaceDiff { workspace_id, additions: stat.additions, deletions: stat.deletions })).await;
                     }
                 }
             }
@@ -637,11 +658,12 @@ async fn on_server_message(
                 std::process::exit(1);
             }
         }
-        // 工作区清单：更新监视目标；清空分支缓存让下一轮全量比对上报（连接/增删后的对账）
+        // 工作区清单：更新监视目标；清空分支/diff 缓存让下一轮全量比对上报（连接/增删后的对账）
         server_to_daemon::Payload::WorkspaceList(wire::WorkspaceList { workspaces }) => {
             let mut s = state.lock().unwrap();
-            s.workspaces = workspaces.into_iter().map(|w| (w.workspace_id, w.path)).collect();
+            s.workspaces = workspaces.into_iter().map(|w| (w.workspace_id, (w.path, w.default_branch))).collect();
             s.last_branches.clear();
+            s.last_diffs.clear();
         }
         other => {
             let authed = state.lock().unwrap().authed;

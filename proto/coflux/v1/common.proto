@@ -41,6 +41,10 @@ message Workspace {
   // 主工作区 = 仓库本身；其它 = git worktree
   bool is_main = 8;
   double created_at = 9;
+  // git diff 累计统计（plan 024）：merge-base(default_branch, HEAD) 到工作树的累积新增/删除行数
+  // （含已提交 + 未提交 + untracked）。真相源在设备侧，DB 只是镜像，与 branch 同语义。
+  int32 additions = 10;
+  int32 deletions = 11;
 }
 
 enum TaskStatus {
