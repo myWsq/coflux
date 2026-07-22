@@ -194,6 +194,12 @@ public struct Coflux_V1_Workspace: Sendable {
 
   public var createdAt: Double = 0
 
+  /// git diff 累计统计（plan 024）：merge-base(default_branch, HEAD) 到工作树的累积新增/删除行数
+  /// （含已提交 + 未提交 + untracked）。真相源在设备侧，DB 只是镜像，与 branch 同语义。
+  public var additions: Int32 = 0
+
+  public var deletions: Int32 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -651,7 +657,7 @@ extension Coflux_V1_Project: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
 
 extension Coflux_V1_Workspace: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Workspace"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}account_id\0\u{3}daemon_id\0\u{3}project_id\0\u{1}name\0\u{1}path\0\u{1}branch\0\u{3}is_main\0\u{3}created_at\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}account_id\0\u{3}daemon_id\0\u{3}project_id\0\u{1}name\0\u{1}path\0\u{1}branch\0\u{3}is_main\0\u{3}created_at\0\u{1}additions\0\u{1}deletions\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -668,6 +674,8 @@ extension Coflux_V1_Workspace: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
       case 7: try { try decoder.decodeSingularStringField(value: &self.branch) }()
       case 8: try { try decoder.decodeSingularBoolField(value: &self.isMain) }()
       case 9: try { try decoder.decodeSingularDoubleField(value: &self.createdAt) }()
+      case 10: try { try decoder.decodeSingularInt32Field(value: &self.additions) }()
+      case 11: try { try decoder.decodeSingularInt32Field(value: &self.deletions) }()
       default: break
       }
     }
@@ -701,6 +709,12 @@ extension Coflux_V1_Workspace: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
     if self.createdAt.bitPattern != 0 {
       try visitor.visitSingularDoubleField(value: self.createdAt, fieldNumber: 9)
     }
+    if self.additions != 0 {
+      try visitor.visitSingularInt32Field(value: self.additions, fieldNumber: 10)
+    }
+    if self.deletions != 0 {
+      try visitor.visitSingularInt32Field(value: self.deletions, fieldNumber: 11)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -714,6 +728,8 @@ extension Coflux_V1_Workspace: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
     if lhs.branch != rhs.branch {return false}
     if lhs.isMain != rhs.isMain {return false}
     if lhs.createdAt != rhs.createdAt {return false}
+    if lhs.additions != rhs.additions {return false}
+    if lhs.deletions != rhs.deletions {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

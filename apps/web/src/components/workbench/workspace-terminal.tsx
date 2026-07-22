@@ -412,6 +412,15 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           takenBranches={takenBranches}
           onPick={switchBranch}
         />
+        {/* git diff 累计统计（plan 024）：X=Y=0 时不渲染 */}
+        {workspace && (workspace.additions > 0 || workspace.deletions > 0) ? (
+          <span
+            className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums"
+            title={`+${workspace.additions} −${workspace.deletions}`}
+          >
+            <span className="text-success">+{workspace.additions}</span> <span className="text-error">−{workspace.deletions}</span>
+          </span>
+        ) : null}
         <div className="h-4 w-px shrink-0 bg-border" />
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {workspaceTasks.map((task) => {

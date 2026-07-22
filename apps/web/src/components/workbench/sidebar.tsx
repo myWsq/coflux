@@ -302,6 +302,16 @@ export function Sidebar(props: SidebarProps) {
                             >
                               <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
                               <span className="min-w-0 flex-1 truncate text-base">{workspace.branch}</span>
+                              {/* git diff 累计统计（plan 024）：X=Y=0 时不渲染 */}
+                              {workspace.additions > 0 || workspace.deletions > 0 ? (
+                                <span
+                                  className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums"
+                                  title={`+${workspace.additions} −${workspace.deletions}`}
+                                >
+                                  <span className="text-success">+{workspace.additions}</span>{" "}
+                                  <span className="text-error">−{workspace.deletions}</span>
+                                </span>
+                              ) : null}
                               {/* 右端小字：自定义名称（name ≠ branch 时才有）；主工作区未起名时默认叫「主工作区」。
                                   hover 渐变淡出给删除按钮让位 */}
                               {(() => {

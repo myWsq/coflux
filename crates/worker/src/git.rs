@@ -36,6 +36,85 @@ pub fn current_branch(worktree: &str) -> Option<String> {
     }
 }
 
+pub struct DiffStat {
+    pub additions: i32,
+    pub deletions: i32,
+}
+
+/// 计算某 worktree 相对 default_branch 的累积 git diff：merge-base(default_branch, HEAD) 到
+/// 工作树（一条 `git diff --shortstat <base>` 同时涵盖已提交与未提交改动），untracked 新文件
+/// 行数另计入 additions。merge-base 解析失败（default_branch 已删/孤儿分支）时回退到
+/// `git diff --shortstat HEAD`（仅未提交）。
+pub async fn diff_stat(worktree: &str, default_branch: &str) -> DiffStat {
+    let base = merge_base(worktree, default_branch).await;
+    let diff_ref = base.as_deref().unwrap_or("HEAD");
+    let (ok, out, _) = run_git(&["-C", worktree, "diff", "--shortstat", diff_ref]).await;
+    let (mut additions, deletions) = if ok { parse_shortstat(&out) } else { (0, 0) };
+    additions += untracked_additions(worktree).await;
+    DiffStat { additions, deletions }
+}
+
+async fn merge_base(worktree: &str, default_branch: &str) -> Option<String> {
+    if default_branch.trim().is_empty() {
+        return None;
+    }
+    let (ok, out, _) = run_git(&["-C", worktree, "merge-base", default_branch, "HEAD"]).await;
+    let sha = out.trim();
+    (ok && !sha.is_empty()).then(|| sha.to_string())
+}
+
+/// 解析 `git diff --shortstat` 的输出（如 " 3 files changed, 10 insertions(+), 2 deletions(-)"）。
+/// 缺失的 insertions/deletions 分支（比如全增无删、或全无改动的空输出）按 0 处理。
+fn parse_shortstat(out: &str) -> (i32, i32) {
+    let mut additions = 0i32;
+    let mut deletions = 0i32;
+    for part in out.split(',') {
+        let part = part.trim();
+        if let Some(n) = part.strip_suffix("insertion(+)").or_else(|| part.strip_suffix("insertions(+)")) {
+            additions = n.trim().parse().unwrap_or(0);
+        } else if let Some(n) = part.strip_suffix("deletion(-)").or_else(|| part.strip_suffix("deletions(-)")) {
+            deletions = n.trim().parse().unwrap_or(0);
+        }
+    }
+    (additions, deletions)
+}
+
+/// untracked 新文件不含尾随换行的末行也算 1 行，对齐 git numstat 语义；空文件 0 行。
+/// 内容含 NUL 字节视为二进制，返回 None（调用方跳过，不计入统计）。
+fn count_untracked_lines(data: &[u8]) -> Option<i32> {
+    if data.contains(&0) {
+        return None;
+    }
+    if data.is_empty() {
+        return Some(0);
+    }
+    let newlines = data.iter().filter(|&&b| b == b'\n').count();
+    let lines = if data.last() == Some(&b'\n') { newlines } else { newlines + 1 };
+    Some(lines as i32)
+}
+
+/// worker 直接读 untracked 文件统计行数（无需为每个文件起 `git diff --no-index` 子进程）；
+/// 单文件 >1MB 跳过（防大产物文件拖慢轮询）。
+async fn untracked_additions(worktree: &str) -> i32 {
+    let (ok, out, _) = run_git(&["-C", worktree, "ls-files", "--others", "--exclude-standard", "-z"]).await;
+    if !ok {
+        return 0;
+    }
+    let mut total = 0i32;
+    for rel in out.split('\0').filter(|s| !s.is_empty()) {
+        let path = std::path::Path::new(worktree).join(rel);
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        if !meta.is_file() || meta.len() > 1_000_000 {
+            continue;
+        }
+        let Ok(data) = std::fs::read(&path) else { continue };
+        if let Some(lines) = count_untracked_lines(&data) {
+            total += lines;
+        }
+    }
+    total
+}
+
 pub struct RepoInfo {
     pub ok: bool,
     pub repo_path: String,
@@ -185,7 +264,26 @@ pub async fn remove_worktree(repo_path: &str, worktree_path: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ordered_remote_names, project_name_from_remote, suggested_name_from_remotes};
+    use super::{count_untracked_lines, ordered_remote_names, parse_shortstat, project_name_from_remote, suggested_name_from_remotes};
+
+    #[test]
+    fn parses_shortstat_variants() {
+        assert_eq!(parse_shortstat(" 3 files changed, 10 insertions(+), 2 deletions(-)"), (10, 2));
+        assert_eq!(parse_shortstat(" 1 file changed, 1 insertion(+)"), (1, 0));
+        assert_eq!(parse_shortstat(" 1 file changed, 1 deletion(-)"), (0, 1));
+        assert_eq!(parse_shortstat(""), (0, 0));
+    }
+
+    #[test]
+    fn counts_untracked_lines_and_detects_binary() {
+        assert_eq!(count_untracked_lines(b""), Some(0));
+        assert_eq!(count_untracked_lines(b"a\nb\n"), Some(2));
+        // 末行无尾随换行也计为一行
+        assert_eq!(count_untracked_lines(b"a\nb"), Some(2));
+        assert_eq!(count_untracked_lines(b"no trailing newline"), Some(1));
+        // NUL 字节判定为二进制，跳过统计
+        assert_eq!(count_untracked_lines(b"a\0b"), None);
+    }
 
     #[test]
     fn parses_common_network_remote_formats() {
