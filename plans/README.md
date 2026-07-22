@@ -26,5 +26,6 @@
 | 022 | [PWA 可安装（manifest + 图标，无 service worker）](022-pwa-installable.md) | DONE (85fa24f) | none |
 | 023 | [web 终端拖拽小文件上传（drop 落 daemon 临时目录并注入路径）](023-terminal-file-drag-upload.md) | DONE (2a1636d) | none |
 | 024 | [工作区 git diff 统计展示（+X −Y）](024-workspace-diff-stats.md) | DONE (ce70a4a) | none |
+| 025 | [旁观客户端不再被动抢占终端控制权](025-passive-attach-containment.md) | DONE (b5814d4) | none |
 
-执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024。
+执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025。
