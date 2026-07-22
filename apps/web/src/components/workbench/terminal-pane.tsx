@@ -6,8 +6,10 @@ import "@xterm/xterm/css/xterm.css";
 import { useToast } from "@astryxdesign/core/Toast";
 import type { FsWriteResult } from "@/client/store";
 
-/** 控制权四态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。 */
-export type TerminalControlState = "stopped" | "attaching" | "owned" | "detached";
+/** 控制权状态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。
+ * idle = RUNNING 但本端未申请控制权（旁观 / 后台面板），仅用于 Tab 图标呈现为中性态，
+ * 输入门控与 attaching/stopped 一致（下方 owned 判等），不需要单独处理。 */
+export type TerminalControlState = "stopped" | "idle" | "attaching" | "owned" | "detached";
 
 export type TerminalController = {
   dimensions: () => { cols: number; rows: number };
