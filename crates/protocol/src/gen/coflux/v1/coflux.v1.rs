@@ -12,6 +12,11 @@ pub struct DaemonInfo {
     pub platform: ::prost::alloc::string::String,
     #[prost(bool, tag="5")]
     pub online: bool,
+    /// 热更新编排（plan 015）：在线连接的内存态版本，供 web 展示；离线设备无此信息（空串）。
+    #[prost(string, tag="6")]
+    pub worker_version: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub supervisor_version: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Project {
@@ -288,11 +293,25 @@ pub struct DaemonEnroll {
     pub host: ::prost::alloc::string::String,
     #[prost(string, tag="4")]
     pub platform: ::prost::alloc::string::String,
+    /// 热更新编排（plan 015）：worker/supervisor 当前版本 + CPU 架构（std::env::consts::ARCH）。
+    /// 旧 daemon 不带这三个字段 → server 收到空串，按"不上报"处理（不参与自动推送比对）。
+    #[prost(string, tag="5")]
+    pub worker_version: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub supervisor_version: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub arch: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DaemonAuth {
     #[prost(string, tag="1")]
     pub device_token: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub worker_version: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub supervisor_version: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub arch: ::prost::alloc::string::String,
 }
 /// 未登记且无 enrollmentKey 时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -303,6 +322,12 @@ pub struct DaemonEnrollRequest {
     pub host: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub platform: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub worker_version: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub supervisor_version: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub arch: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonResync {
@@ -322,6 +347,9 @@ pub struct ProjectValidated {
     pub branch: ::prost::alloc::string::String,
     #[prost(string, optional, tag="5")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
+    /// worker 从 remote URL 推导出的 namespace/project；不传原始 URL，缺失时 server 回退仓库根目录名
+    #[prost(string, optional, tag="6")]
+    pub suggested_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// git worktree add 结果
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -504,6 +532,12 @@ pub struct WorkerUpgrade {
     #[prost(string, optional, tag="4")]
     pub signature: ::core::option::Option<::prost::alloc::string::String>,
 }
+/// 设备重命名：server 通知 daemon 更新本地设备名称
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DaemonSetName {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SessionCreate {
     #[prost(string, tag="1")]
@@ -608,7 +642,7 @@ pub struct FsWrite {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 18, 19, 20")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 18, 19, 20")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -651,6 +685,8 @@ pub mod server_to_daemon {
         FsRead(super::FsRead),
         #[prost(message, tag="21")]
         FsWrite(super::FsWrite),
+        #[prost(message, tag="22")]
+        DaemonSetName(super::DaemonSetName),
         /// 数据面（高频）
         #[prost(message, tag="18")]
         PtyInput(super::PtyInput),
@@ -777,6 +813,14 @@ pub struct WorkspaceSetName {
     #[prost(string, tag="2")]
     pub name: ::prost::alloc::string::String,
 }
+/// 重命名设备（别名；空则服务端拒绝）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSetName {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TaskCreate {
     #[prost(string, tag="1")]
@@ -869,7 +913,7 @@ pub struct ClientFsWrite {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 23, 24")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 23, 24")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -922,6 +966,8 @@ pub mod client_to_server {
         ClientFsRead(super::ClientFsRead),
         #[prost(message, tag="25")]
         ClientFsWrite(super::ClientFsWrite),
+        #[prost(message, tag="26")]
+        DeviceSetName(super::DeviceSetName),
         /// 数据面（高频）
         #[prost(message, tag="23")]
         PtyInput(super::PtyInput),

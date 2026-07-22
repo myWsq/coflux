@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coflux_protocol::SUPERVISOR_SOCK_ENV;
+use coflux_protocol::{SUPERVISOR_SOCK_ENV, SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV};
 
 const MAX_PENDING_CRASHES: u32 = 2;
 
@@ -35,17 +35,21 @@ pub struct Manager {
     sock_path: String,
     home: String,
     probation: Duration,
+    /// supervisor 自身版本（编译期注入，main.rs::SUPERVISOR_VERSION）；随 spawn env 传给 worker，
+    /// worker 握手时原样上报，供 web 展示（见 plans/015）。
+    supervisor_version: String,
     state: Mutex<State>,
 }
 
 impl Manager {
-    pub fn new(builtin: WorkerSpec, mut known: HashMap<String, WorkerSpec>, sock_path: String, home: String, probation: Duration) -> Arc<Self> {
+    pub fn new(builtin: WorkerSpec, mut known: HashMap<String, WorkerSpec>, sock_path: String, home: String, probation: Duration, supervisor_version: String) -> Arc<Self> {
         known.insert(builtin.version.clone(), builtin.clone());
         let now = Instant::now();
         Arc::new(Self {
             sock_path,
             home,
             probation,
+            supervisor_version,
             state: Mutex::new(State {
                 known,
                 running_version: builtin.version.clone(),
@@ -74,6 +78,10 @@ impl Manager {
         let mut cmd = Command::new(&spec.cmd);
         cmd.args(&spec.args)
             .env(SUPERVISOR_SOCK_ENV, &self.sock_path)
+            // worker 完全不知自身版本——这是 supervisor 侧概念，每次 spawn 都经 env 告知当前跑的
+            // 版本 + supervisor 自身版本；worker 握手消息据此上报（见 plans/015）。
+            .env(WORKER_VERSION_ENV, &spec.version)
+            .env(SUPERVISOR_VERSION_ENV, &self.supervisor_version)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());

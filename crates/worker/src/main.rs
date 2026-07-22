@@ -5,6 +5,7 @@
 //! 全 Rust 化后整个 daemon 无 node 运行时依赖。
 
 mod creds;
+mod dec_modes;
 mod git;
 mod ops;
 mod ports;
@@ -16,6 +17,7 @@ use std::time::Duration;
 
 use coflux_protocol::{
     decode_frame, encode_frame, is_frame, wire, write_record, DataFrame, RecordParser, Settings, SessionInfo, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
+    SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
 };
 use coflux_protocol::wire::{daemon_to_server, server_to_daemon};
 use futures_util::{SinkExt, StreamExt};
@@ -27,6 +29,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use creds::{CredStore, Credentials, PendingAuth};
+use dec_modes::DecModeTracker;
 
 #[derive(Clone)]
 struct Config {
@@ -35,6 +38,12 @@ struct Config {
     device_name: String,
     host: String,
     platform: String,
+    /// 热更新编排（plan 015）：worker 完全不知自身版本——纯 supervisor 侧概念，每次 spawn 经
+    /// env 告知（见 crates/supervisor/src/manager.rs 的 WORKER_VERSION_ENV/SUPERVISOR_VERSION_ENV）。
+    /// 握手消息原样携带，供 server 比对 + web 展示。
+    worker_version: String,
+    supervisor_version: String,
+    arch: String,
     home: String,
     cred_path: String,
     worktrees_dir: String,
@@ -57,6 +66,9 @@ struct WorkerState {
     workspaces: HashMap<String, String>,
     /// 上次上报的分支：workspace_id -> branch。收到新清单时清空，下一轮全量比对上报（重连对账）
     last_branches: HashMap<String, String>,
+    /// per-session DEC 私有模式追踪（见 dec_modes.rs）：supervisor scrollback 环把模式设置转义
+    /// 挤出去后，replay 转发前用它补前缀，不让 attach/resync 丢失 bracketed-paste 等模式状态。
+    dec_modes: HashMap<String, DecModeTracker>,
 }
 
 /// 出站到 server 的消息：WS 上只有 binary message，一条 = 一个已编码好的 protobuf 信封字节串
@@ -165,6 +177,9 @@ async fn main() {
         device_name: pick("COFLUX_DEVICE_NAME", s.device_name, &env_or("HOSTNAME", "coflux-daemon".into())),
         host: env_or("HOSTNAME", "localhost".into()),
         platform: std::env::consts::OS.to_string(),
+        worker_version: env_or(WORKER_VERSION_ENV, "builtin".into()),
+        supervisor_version: env_or(SUPERVISOR_VERSION_ENV, "dev".into()),
+        arch: std::env::consts::ARCH.to_string(),
         cred_path: format!("{home}/credentials.json"),
         worktrees_dir: format!("{home}/worktrees"),
         sock_path: std::env::var(SUPERVISOR_SOCK_ENV).unwrap_or_default(),
@@ -192,6 +207,7 @@ async fn main() {
         last_reported_ports: Vec::new(),
         workspaces: HashMap::new(),
         last_branches: HashMap::new(),
+        dec_modes: HashMap::new(),
     }));
 
     let (to_server_tx, to_server_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
@@ -348,9 +364,28 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
         // protobuf 信封转发给 server —— WS 侧只认 protobuf binary，不再透传 UDS 自定义帧。
         match decode_frame(&rec) {
             Some(DataFrame::Output { session_id, data }) => {
+                // 旁路喂给模式追踪器，转发字节本身不受影响（live 输出路径，见 dec_modes.rs）。
+                state.lock().unwrap().dec_modes.entry(session_id.clone()).or_default().feed(&data);
                 send_d2s(to_server_tx, daemon_to_server::Payload::PtyOutput(wire::PtyOutput { session_id, data })).await;
             }
             Some(DataFrame::Replay { session_id, request_id, data }) => {
+                // 先取"当前已知激活模式"快照拼前缀，再把本次 replay 数据喂进追踪器——
+                // 前缀代表被 supervisor scrollback 环挤掉的前缀净效果，顺序不能反（否则
+                // replay 里自带的 h/l 会先污染"起点状态"）。
+                let prefix = {
+                    let mut s = state.lock().unwrap();
+                    let tracker = s.dec_modes.entry(session_id.clone()).or_default();
+                    let prefix = tracker.prefix();
+                    tracker.feed(&data);
+                    prefix
+                };
+                let data = if prefix.is_empty() {
+                    data
+                } else {
+                    let mut buf = prefix;
+                    buf.extend_from_slice(&data);
+                    buf
+                };
                 send_d2s(to_server_tx, daemon_to_server::Payload::PtyReplay(wire::PtyReplay { session_id, request_id, data })).await;
             }
             // Input/ProxyData 不会从 supervisor→worker 方向出现；畸形帧同样丢弃，不 panic。
@@ -368,7 +403,11 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
             send_d2s(to_server_tx, daemon_to_server::Payload::SessionStarted(wire::SessionStarted { session_id, task_id, pid })).await;
         }
         SupervisorToWorker::SessionExit { session_id, exit_code } => {
-            state.lock().unwrap().alive.remove(&session_id);
+            {
+                let mut s = state.lock().unwrap();
+                s.alive.remove(&session_id);
+                s.dec_modes.remove(&session_id); // 会话退出：释放追踪状态，避免泄漏
+            } // guard 显式在块结束处释放，不跨 await 持有（MutexGuard 非 Send）
             send_d2s(to_server_tx, daemon_to_server::Payload::SessionExit(wire::SessionExit { session_id, exit_code })).await;
         }
         SupervisorToWorker::ResyncList { sessions } => {
@@ -378,6 +417,10 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
                 for r in &sessions {
                     s.alive.insert(r.session_id.clone(), (r.task_id.clone(), r.pid));
                 }
+                // 断线期间静默退出的会话不会单独收到 SessionExit：resync 快照是这批会话的
+                // 权威在场证明，借机把已不在场的追踪状态一并回收。
+                let alive_now = s.alive.clone();
+                s.dec_modes.retain(|session_id, _| alive_now.contains_key(session_id));
                 s.sup_synced = true;
                 s.authed
             };
@@ -446,17 +489,28 @@ async fn run_server_connection(
     // filter 语义）走 Tailscale 式 daemon.enrollRequest，等 web 端确认后 server 原地推 daemon.enrolled。
     let creds = state.lock().unwrap().credentials.clone();
     let init = match creds {
-        Some(c) => daemon_to_server::Payload::DaemonAuth(wire::DaemonAuth { device_token: c.device_token }),
+        Some(c) => daemon_to_server::Payload::DaemonAuth(wire::DaemonAuth {
+            device_token: c.device_token,
+            worker_version: cfg.worker_version.clone(),
+            supervisor_version: cfg.supervisor_version.clone(),
+            arch: cfg.arch.clone(),
+        }),
         None if cfg.enroll_key.is_empty() => daemon_to_server::Payload::DaemonEnrollRequest(wire::DaemonEnrollRequest {
             name: cfg.device_name.clone(),
             host: cfg.host.clone(),
             platform: cfg.platform.clone(),
+            worker_version: cfg.worker_version.clone(),
+            supervisor_version: cfg.supervisor_version.clone(),
+            arch: cfg.arch.clone(),
         }),
         None => daemon_to_server::Payload::DaemonEnroll(wire::DaemonEnroll {
             enrollment_key: cfg.enroll_key.clone(),
             name: cfg.device_name.clone(),
             host: cfg.host.clone(),
             platform: cfg.platform.clone(),
+            worker_version: cfg.worker_version.clone(),
+            supervisor_version: cfg.supervisor_version.clone(),
+            arch: cfg.arch.clone(),
         }),
     };
     let init_bytes = (wire::DaemonToServer { payload: Some(init) }).encode_to_vec();
@@ -495,6 +549,9 @@ async fn run_server_connection(
                         name: cfg.device_name.clone(),
                         host: cfg.host.clone(),
                         platform: cfg.platform.clone(),
+                        worker_version: cfg.worker_version.clone(),
+                        supervisor_version: cfg.supervisor_version.clone(),
+                        arch: cfg.arch.clone(),
                     });
                     let bytes = (wire::DaemonToServer { payload: Some(req) }).encode_to_vec();
                     if sink.send(Message::binary(bytes)).await.is_err() { break; }
@@ -619,7 +676,14 @@ async fn route_authed(msg: server_to_daemon::Payload, cfg: &Arc<Config>, to_serv
             let to_server = to_server_tx.clone();
             tokio::spawn(async move {
                 let r = git::validate_repo(&path).await;
-                send_d2s(&to_server, daemon_to_server::Payload::ProjectValidated(wire::ProjectValidated { request_id, ok: r.ok, repo_path: r.repo_path, branch: r.branch, error: r.error })).await;
+                send_d2s(&to_server, daemon_to_server::Payload::ProjectValidated(wire::ProjectValidated {
+                    request_id,
+                    ok: r.ok,
+                    repo_path: r.repo_path,
+                    branch: r.branch,
+                    error: r.error,
+                    suggested_name: r.suggested_name,
+                })).await;
             });
         }
         server_to_daemon::Payload::WorktreeAdd(wire::WorktreeAdd { request_id, repo_path, workspace_id, name: _, branch, create_new }) => {
@@ -694,6 +758,27 @@ async fn route_authed(msg: server_to_daemon::Payload, cfg: &Arc<Config>, to_serv
         }
         server_to_daemon::Payload::ProxyData(wire::ProxyData { conn_id, data }) => {
             tunnels.feed(conn_id, data).await;
+        }
+        // 设备重命名：patch 本地 settings.json 的 deviceName 字段（plan 018）
+        server_to_daemon::Payload::DaemonSetName(wire::DaemonSetName { name }) => {
+            let home = cfg.home.clone();
+            tokio::spawn(async move {
+                let settings_path = format!("{home}/settings.json");
+                // 尝试读取现有 settings.json；缺失则跳过（测试/容器环境常见，纯 env 驱动）
+                if let Ok(content) = std::fs::read_to_string(&settings_path) {
+                    if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
+                        // patch deviceName 字段（或创建）
+                        if let Some(obj) = settings.as_object_mut() {
+                            obj.insert("deviceName".to_string(), serde_json::Value::String(name));
+                            // 写回文件（跟随现有直接 truncate 写风格）
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::File::options().write(true).truncate(true).open(&settings_path) {
+                                let _ = f.write_all(settings.to_string().as_bytes());
+                            }
+                        }
+                    }
+                }
+            });
         }
         _ => {}
     }

@@ -25,6 +25,9 @@ fn daemon_to_server_envelope_dispatches_to_daemon_enroll() {
             name: "dev".into(),
             host: "h".into(),
             platform: "darwin".into(),
+            worker_version: "wv1".into(),
+            supervisor_version: "sv1".into(),
+            arch: "aarch64".into(),
         })),
     };
     let bytes = env.encode_to_vec();
@@ -35,6 +38,9 @@ fn daemon_to_server_envelope_dispatches_to_daemon_enroll() {
             assert_eq!(m.name, "dev");
             assert_eq!(m.host, "h");
             assert_eq!(m.platform, "darwin");
+            assert_eq!(m.worker_version, "wv1");
+            assert_eq!(m.supervisor_version, "sv1");
+            assert_eq!(m.arch, "aarch64");
         }
         other => panic!("wrong variant: {other:?}"),
     }
@@ -67,17 +73,26 @@ fn server_to_daemon_envelope_dispatches_to_session_create() {
     }
 }
 
-/// optional 字段缺省：error=None 往返后仍是 None（且不占用编码字节——省了才叫 optional）。
+/// ProjectValidated 的 optional 字段缺省/有值都能原样往返。
 #[test]
-fn optional_error_field_round_trips_when_none() {
-    let m = ProjectValidated { request_id: "r".into(), ok: true, repo_path: "/repo".into(), branch: "main".into(), error: None };
+fn project_validated_optional_fields_round_trip() {
+    let m = ProjectValidated {
+        request_id: "r".into(),
+        ok: true,
+        repo_path: "/repo".into(),
+        branch: "main".into(),
+        error: None,
+        suggested_name: None,
+    };
     let bytes = m.encode_to_vec();
     let back = ProjectValidated::decode(bytes.as_slice()).unwrap();
     assert_eq!(back.error, None);
+    assert_eq!(back.suggested_name, None);
 
-    let with_err = ProjectValidated { error: Some("boom".into()), ..m };
-    let back2 = ProjectValidated::decode(with_err.encode_to_vec().as_slice()).unwrap();
+    let with_values = ProjectValidated { error: Some("boom".into()), suggested_name: Some("group/project".into()), ..m };
+    let back2 = ProjectValidated::decode(with_values.encode_to_vec().as_slice()).unwrap();
     assert_eq!(back2.error, Some("boom".into()));
+    assert_eq!(back2.suggested_name, Some("group/project".into()));
 }
 
 /// optional uint32（timeout_ms）同样：None/Some 都要原样往返，不能被悄悄转成 0。
@@ -173,7 +188,14 @@ fn auth_error_and_enroll_request_round_trip() {
     assert_eq!(back.message, "bad");
 
     let req = DaemonToServer {
-        payload: Some(daemon_to_server::Payload::DaemonEnrollRequest(DaemonEnrollRequest { name: "dev".into(), host: "h".into(), platform: "darwin".into() })),
+        payload: Some(daemon_to_server::Payload::DaemonEnrollRequest(DaemonEnrollRequest {
+            name: "dev".into(),
+            host: "h".into(),
+            platform: "darwin".into(),
+            worker_version: "wv2".into(),
+            supervisor_version: "sv2".into(),
+            arch: "x86_64".into(),
+        })),
     };
     let back2 = DaemonToServer::decode(req.encode_to_vec().as_slice()).unwrap();
     assert!(matches!(back2.payload, Some(daemon_to_server::Payload::DaemonEnrollRequest(_))));

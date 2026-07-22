@@ -21,6 +21,43 @@ node scripts/gen-keypair.mjs
 
 提交公钥改动后，所有新构建的 supervisor 就内置了你的发布公钥。
 
+## 一次性设置（macOS 签名 + 公证）
+
+cargo 交叉/原生编译产物只有 ad-hoc 签名（无 Team ID、未公证）。macOS（Sequoia 起）对新下载的
+顶层可执行文件（launchd 直接 spawn，`cofluxd update` 换的 supervisor 二进制正是这条路径）会判
+`OS_REASON_CODESIGNING` 静默 SIGKILL——`launchctl print gui/$(id -u)/com.coflux.daemon` 的
+`last exit reason` 能看到（2026-07-20 实测踩坑）。用真 Developer ID 证书签名 + 苹果公证从根上
+解决，用户端 `cofluxd update` 不再需要任何手动步骤。
+
+需要 Apple Developer Program 账号（付费）。一次性生成：
+
+1. **Developer ID Application 证书**（不是 Apple Development / Apple Distribution，那两种是给
+   App Store 用的）：Xcode 或 Apple Developer 后台生成，导出 `.p12`（带密码）。
+2. **App Store Connect API Key**（Developer 权限即可，用于 `notarytool` 免交互认证）：
+   App Store Connect → Users and Access → Integrations → 生成，下载 `.p8`，记 Key ID + Issuer ID。
+
+6 个 GitHub secret（Settings → Secrets → Actions）：
+
+| Secret | 内容 |
+| --- | --- |
+| `MACOS_CERT_P12` | `.p12` 的 base64（`base64 -i cert.p12`，不要额外加换行） |
+| `MACOS_CERT_PASSWORD` | 导出 `.p12` 时设的密码 |
+| `APPLE_TEAM_ID` | Team ID（本项目：`8Y2J55823C`） |
+| `NOTARY_API_KEY_P8` | `.p8` 文件原文（含首尾 `-----BEGIN/END PRIVATE KEY-----`） |
+| `NOTARY_KEY_ID` | API Key ID |
+| `NOTARY_ISSUER_ID` | Issuer ID |
+
+签名身份字符串（`release.yml` 里硬编码，非密）：`Developer ID Application: Shuaiqi Wang (8Y2J55823C)`。
+
+> **裸二进制不支持 stapling**（只有 .app/.pkg/.dmg 能钉公证票据）。所以只签名+提交公证，不 staple——
+> Gatekeeper 首次执行时联网向苹果查公证记录，daemon 本来就要联网连 server，可接受；机器完全离线
+> 时首次执行公证校验可能失败或变慢，这是裸二进制公证的固有限制。
+>
+> `KEYCHAIN_PASSWORD` 不需要存成 secret：CI 每次跑时用 `openssl rand` 现生成一个，只在当次
+> runner 生命周期内有效，无需持久化。
+>
+> Developer ID 证书通常 5 年有效期，到期需要重新生成 `.p12` 并更新 `MACOS_CERT_P12`/`MACOS_CERT_PASSWORD`。
+
 ## 发一个版本
 
 发版前 checklist：
@@ -48,11 +85,13 @@ git push origin v1.2.3
 
 ## 升级是怎么落地的
 
-1. server 读 Release 的 `manifest.json`，按 daemon 平台/arch 选对应条目，下发 `worker.upgrade{version,url,sha256,signature}`。
-2. supervisor 下载 → 校 sha256 → 验签（内置公钥）→ 落 `~/.coflux/workers/<version>/` → 观察期切换；**验签不过则拒绝、保持当前版本**（见 `tests/src/signed-upgrade.test.mjs`）。
-3. worker 换版本，PTY 会话在 supervisor 不受影响（热升级）。
+1. server 轮询 GitHub `/releases/latest`（天然排除 prerelease/draft）+ 该 release 的 `manifest.json`，缓存最新版本号与每 target 的 `url`/`sha256`/`signature`。
+2. 每台在线 daemon 握手时（上报 `workerVersion`/`platform`/`arch`）立即比对一次；轮询到新 release 后再对全部在线 daemon 扫一遍：版本不等（且非空）、按 platform+arch 映射到 manifest 里的 target，就下发 `worker.upgrade{version,url,sha256,signature}`——不做 semver 比较，不等即推。
+3. supervisor 下载 → 校 sha256 → 验签（内置公钥）→ 落 `~/.coflux/workers/<version>/` → 观察期切换；**验签不过则拒绝、保持当前版本**（见 `tests/src/signed-upgrade.test.mjs`）。
+4. worker 换版本，PTY 会话在 supervisor 不受影响（热升级）。
+5. 升级失败会导致 supervisor 回滚、worker 重连并重新上报旧版本；server 按 `(daemonId, version)` 记推送次数做退避（`COFLUX_AUTOUPDATE_MAX_ATTEMPTS`/`COFLUX_AUTOUPDATE_COOLDOWN_MS`），避免"回滚→再推→再失败"无限循环（见 `tests/src/auto-update.test.mjs`）。
 
-> **server 端"读 manifest + 自动决定推送"是后续项**——升级机制 + 手动触发（`client.upgradeDaemon`）已就绪；自动编排需要 daemon 上报 arch（小协议补充）。
+未设 `COFLUX_AUTOUPDATE_REPO` 时该特性整体关闭，行为与现状完全一致；手动触发（`client.upgradeDaemon`）不受影响，仍是灰度/紧急场景的兜底手段。相关 env（均在 `apps/server/src/config.ts`）：`COFLUX_AUTOUPDATE_API_BASE`（默认 `https://api.github.com`）、`COFLUX_AUTOUPDATE_REPO`（`owner/repo`）、`COFLUX_AUTOUPDATE_POLL_MS`（默认 10 分钟）、`COFLUX_AUTOUPDATE_MAX_ATTEMPTS`（默认 3）、`COFLUX_AUTOUPDATE_COOLDOWN_MS`（默认 1 小时）。supervisor 版本随 web 设备 tooltip 一并可见，但**不**自动升级（见下）。
 
 ## 升级 supervisor 自身
 

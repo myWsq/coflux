@@ -1,7 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { useToast } from "@astryxdesign/core/Toast";
 import type { FsWriteResult } from "@/client/store";
 
 /** 控制权四态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。 */
@@ -12,7 +14,7 @@ export type TerminalController = {
   fit: () => void;
   focus: () => void;
   reset: () => void;
-  writeSystem: (message: string, tone?: "warning" | "error") => void;
+  writeSystem: (message: string, tone?: "warning" | "error" | "success") => void;
 };
 
 type TerminalPaneProps = {
@@ -31,10 +33,57 @@ type TerminalPaneProps = {
   onOutput: (taskId: string, sessionId: string) => void;
 };
 
-// 终端贴图（plan 014）：3.5MB 预算 = COFLUX_MAX_PAYLOAD 默认 4MB 减去信封/协议开销的经验余量。
-// 与 apps/server/src/config.ts 的 maxPayload 存在隐式耦合，若日后调整该值需同步这里。
+// 终端贴图（plan 014）的压缩目标独立于文件上传上限，保持 3.5MB 以节省截图传输带宽。
 const PASTE_BUDGET_BYTES = 3.5 * 1024 * 1024;
 const PASTE_MIN_DIMENSION = 64; // 降分辨率的下限：避免退化成不可读的一两个像素
+// 拖拽文件上传上限须与 server maxPayload、worker MAX_WRITE_BYTES 同为 30MB；任一偏小都会让前端放行后被下游拒绝。
+const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
+
+/** xterm 6.0.0 私有内部结构（仅补丁用到的字段），升级 @xterm/xterm 需复验。 */
+type XtermCoreInternals = {
+  _compositionHelper?: { _isComposing: boolean; _isSendingComposition: boolean; _handleAnyTextareaChanges: () => void };
+  _inputEvent?: (ev: InputEvent) => boolean;
+  _keyPressHandled?: boolean;
+  _unprocessedDeadKey?: boolean;
+  coreService?: { triggerDataEvent: (data: string, wasUserInput: boolean) => void };
+  textarea?: HTMLTextAreaElement;
+  cancel?: (ev: Event) => void;
+};
+
+/** 全角标点丢字 workaround（上游 xtermjs/xterm.js#5887，6.1.0-beta 仍未修）：
+ * 中文 IME 直接提交（无 composition 会话）的字符只出现在 textarea 'input' 事件里，
+ * 但 xterm 的 _inputEvent 被 (!ev.composed || !_keyDownSeen) 门控挡住，兜底的
+ * CompositionHelper setTimeout(0) textarea diff 又与 IME 落字时序竞态——
+ * 表现为全角 ？！ 等（带 Shift 的标点）需连输两次才出一个。
+ * 这里改为由 input 事件确定性发送并停用竞态 diff 路径；任一内部字段缺失
+ * （日后升级 xterm 内部改名）则整体跳过，行为回落为上游现状。 */
+function patchImeCommittedInput(terminal: Terminal): void {
+  const core = (terminal as unknown as { _core?: XtermCoreInternals })._core;
+  const helper = core?._compositionHelper;
+  const origInputEvent = core?._inputEvent;
+  if (!core || !helper || !origInputEvent || !core.coreService || !core.textarea || !core.cancel) return;
+
+  helper._handleAnyTextareaChanges = () => {};
+  core._inputEvent = (ev: InputEvent) => {
+    if (helper._isComposing || helper._isSendingComposition) return false;
+    // Alt/Option 组合字符走 keypress 已发过（_keyPressHandled），不能重复发。
+    if (ev.inputType === "insertText" && ev.data && !core._keyPressHandled) {
+      core._unprocessedDeadKey = false;
+      core.coreService!.triggerDataEvent(ev.data, true);
+      core.textarea!.value = ""; // 及时清空，textarea 累积残值正是上游 diff 路径不可靠的来源之一
+      core.cancel!(ev);
+      return true;
+    }
+    if (ev.inputType === "deleteContentBackward") {
+      // 对应被停用的 diff 路径里"值变短发 DEL"分支（IME 吞掉 Backspace keydown 的场景）
+      core.coreService!.triggerDataEvent("\x7f", true);
+      core.textarea!.value = "";
+      core.cancel!(ev);
+      return true;
+    }
+    return origInputEvent.call(core, ev);
+  };
+}
 
 function extForMime(mime: string): string {
   switch (mime) {
@@ -49,6 +98,20 @@ function extForMime(mime: string): string {
     default:
       return "png";
   }
+}
+
+/** 拖拽上传使用生成式单段文件名，原扩展名只保留安全的 ASCII 字母数字，避免 temp 路径校验失败。 */
+function safeDropExtension(name: string): string {
+  const match = name.match(/\.([a-zA-Z0-9]{1,16})$/);
+  return match ? `.${match[1]}` : "";
+}
+
+function fileFromDragItem(item: DataTransferItem): File | null {
+  if (item.kind !== "file") return null;
+  // 只借 entry 标记区分文件与目录，不递归展开目录；不支持该 API 的浏览器回落到标准 getAsFile。
+  const entry = (item as DataTransferItem & { webkitGetAsEntry?: () => { isFile: boolean } | null }).webkitGetAsEntry?.();
+  if (entry && !entry.isFile) return null;
+  return item.getAsFile();
 }
 
 /** 把图片压缩到预算内：先在原分辨率按 JPEG 质量阶梯降（文字截图的可读性损失最小），
@@ -83,8 +146,12 @@ export function TerminalPane(props: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const controllerRef = useRef<TerminalController | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  // 上传中用光标转圈表达进行态；成功不打扰，只在失败时弹 toast 告知原因——不写进终端画面避免污染 claude 会话。
+  const [isUploading, setIsUploading] = useState(false);
+  const showToast = useToast();
 
-  // onData/onResize/粘贴处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
+  // onData/onResize/粘贴/拖拽处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
   // 这里反过来是"始终读最新"而非"读一次"，用同样的 ref 手段解决）。
   const liveRef = useRef({
@@ -95,6 +162,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     sendInput: props.sendInput,
     sendResize: props.sendResize,
     sendFsWrite: props.sendFsWrite,
+    showToast,
   });
   useEffect(() => {
     liveRef.current = {
@@ -105,6 +173,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       sendInput: props.sendInput,
       sendResize: props.sendResize,
       sendFsWrite: props.sendFsWrite,
+      showToast,
     };
   });
 
@@ -141,7 +210,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+    terminal.loadAddon(new WebLinksAddon()); // 输出中的 URL 可点击（默认 window.open 新开 Tab）
     terminal.open(host);
+    patchImeCommittedInput(terminal);
     terminalRef.current = terminal;
 
     // WebGL 渲染器动态加载（addon 约 247KB，不进首屏主 chunk）：
@@ -155,6 +226,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           const webgl = new WebglAddon();
           webgl.onContextLoss(() => webgl.dispose());
           terminal.loadAddon(webgl);
+          fit(); // WebGL 用字形图集重新度量 cell，尺寸可能与挂载时的 DOM 渲染器度量有亚像素差异，补一次 fit 对齐
         } catch {
           // WebGL 不可用（无硬件加速/被禁用），保持默认 DOM 渲染器。
         }
@@ -185,7 +257,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         terminal.clear();
       },
       writeSystem: (message, tone = "warning") => {
-        const color = tone === "error" ? "31" : "33";
+        const color = tone === "error" ? "31" : tone === "success" ? "32" : "33";
         terminal.writeln(`\r\n\x1b[${color}m[${message}]\x1b[0m`);
       },
     };
@@ -242,14 +314,100 @@ export function TerminalPane(props: TerminalPaneProps) {
     };
     host.addEventListener("paste", handlePaste, { capture: true });
 
+    const hasFileTransfer = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    const handleDragEnter = (event: DragEvent) => {
+      if (!hasFileTransfer(event)) return;
+      event.preventDefault();
+      setIsDraggingFile(true);
+    };
+    const handleDragOver = (event: DragEvent) => {
+      if (!hasFileTransfer(event)) return;
+      event.preventDefault(); // 必须拦截，否则浏览器会拒绝 drop 或把文件导航到当前页面。
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      setIsDraggingFile(true);
+    };
+    const handleDragLeave = (event: DragEvent) => {
+      const nextTarget = event.relatedTarget;
+      // host 内子元素之间移动会冒泡出 dragleave；只有真正离开整个终端区域才隐藏遮罩。
+      if (nextTarget instanceof Node && host.contains(nextTarget)) return;
+      setIsDraggingFile(false);
+    };
+    const handleDrop = (event: DragEvent) => {
+      event.preventDefault(); // 防止浏览器用拖入文件替换当前页面。
+      setIsDraggingFile(false);
+
+      const files = Array.from(event.dataTransfer?.items ?? []).map(fileFromDragItem).filter((file): file is File => file !== null);
+      if (files.length === 0) return; // 文件夹不递归展开，也不打扰用户。
+
+      const { active, controlState, sessionId, workspaceId, sendFsWrite, showToast } = liveRef.current;
+      if (!(active && controlState === "owned" && sessionId)) {
+        showToast({ body: "未持有控制权，无法上传文件", type: "error" });
+        return;
+      }
+
+      const uploadableFiles = files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+      const rejectedCount = files.length - uploadableFiles.length;
+      if (rejectedCount > 0) {
+        showToast({ body: `${rejectedCount} 个文件超过 30MB，已拒绝上传`, type: "error" });
+      }
+      if (uploadableFiles.length === 0) return;
+
+      setIsUploading(true);
+      void (async () => {
+        const uploadedPaths: string[] = [];
+        for (const file of uploadableFiles) {
+          try {
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            const name = `drop-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${safeDropExtension(file.name)}`;
+            const result = await sendFsWrite(workspaceId, name, bytes, true);
+            if (result.ok && result.path) {
+              uploadedPaths.push(result.path);
+            } else {
+              showToast({ body: `文件上传失败：${result.error}`, type: "error" });
+            }
+          } catch (e) {
+            showToast({ body: `文件上传失败：${e instanceof Error ? e.message : String(e)}`, type: "error" });
+          }
+        }
+        setIsUploading(false);
+        if (uploadedPaths.length > 0) {
+          terminal.paste(` ${uploadedPaths.join(" ")} `);
+        }
+      })();
+    };
+    host.addEventListener("dragenter", handleDragEnter);
+    host.addEventListener("dragover", handleDragOver);
+    host.addEventListener("dragleave", handleDragLeave);
+    host.addEventListener("drop", handleDrop);
+
     const observer = new ResizeObserver(() => fit());
     observer.observe(host);
     if (props.active) requestAnimationFrame(() => fit());
 
+    // devicePixelRatio 变化（浏览器缩放、拖跨不同缩放比的显示器）后 xterm 按新 dpr
+    // 重新取整 cell 尺寸，host CSS 尺寸不变、ResizeObserver 不会触发，需主动补 fit。
+    // media query 字符串绑定的是创建时的 dpr 值，change 只在离开该值时触发一次，
+    // 故每次触发后以新 dpr 自递归重建监听。
+    let dprQuery: MediaQueryList | null = null;
+    const onDprChange = () => {
+      fit();
+      watchDpr();
+    };
+    const watchDpr = () => {
+      dprQuery = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      dprQuery.addEventListener("change", onDprChange, { once: true });
+    };
+    watchDpr();
+
     return () => {
       disposed = true;
       observer.disconnect();
+      dprQuery?.removeEventListener("change", onDprChange);
       host.removeEventListener("paste", handlePaste, { capture: true });
+      host.removeEventListener("dragenter", handleDragEnter);
+      host.removeEventListener("dragover", handleDragOver);
+      host.removeEventListener("dragleave", handleDragLeave);
+      host.removeEventListener("drop", handleDrop);
       props.onDispose(props.taskId, controller);
       terminal.dispose(); // 一并 dispose 已挂载的 addons（fit/webgl）与输入监听
       terminalRef.current = null;
@@ -286,7 +444,12 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Tab 切换用 display 隐藏而非卸载：卸载 xterm 会丢 scrollback 与选区。
   return (
     <div className={props.active ? "absolute inset-0 block" : "absolute inset-0 hidden"} aria-hidden={!props.active}>
-      <div ref={hostRef} className="h-full w-full px-3 py-2" />
+      <div ref={hostRef} className={`h-full w-full pb-3 pl-3 pt-2${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
+      {isDraggingFile ? (
+        <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-lg border border-warning/20 bg-warning/10 text-sm font-medium text-warning backdrop-blur">
+          松开上传
+        </div>
+      ) : null}
     </div>
   );
 }

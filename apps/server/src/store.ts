@@ -389,6 +389,10 @@ export class Store {
   async revokeDevice(id: DaemonId): Promise<void> {
     await this.sql`UPDATE devices SET revoked = true WHERE id = ${id}`;
   }
+  async updateDeviceName(id: DaemonId, name: string): Promise<Device | undefined> {
+    const rows = await this.sql<Device[]>`UPDATE devices SET name = ${name} WHERE id = ${id} RETURNING *`;
+    return rows[0];
+  }
 
   /* ---------------------------- projects --------------------------- */
   async createProject(p: Project): Promise<Project> {
@@ -482,15 +486,19 @@ export class Store {
     `;
     return t;
   }
+  /** 单语句 UPDATE ... RETURNING：与 removeTask 并发时"先读后写"会把已删的行拼回内存对象返回，
+   * 调用方 emitTask 广播出去就是复活的僵尸任务（web 侧 taskRemoved 之后又收到 taskUpdated）。
+   * patch 语义与对象 spread 一致：键存在即写入（undefined → NULL 清空），键缺席保持原值。 */
   async updateTask(id: TaskId, patch: Partial<Pick<Task, "status" | "sessionId" | "exitCode" | "title">>): Promise<Task | undefined> {
-    const existing = await this.getTask(id);
-    if (!existing) return undefined;
-    const next: Task = { ...existing, ...patch, updatedAt: Date.now() };
-    const row = { status: taskStatusToDb(next.status), sessionId: next.sessionId ?? null, exitCode: next.exitCode ?? null, title: next.title, updatedAt: next.updatedAt };
-    await this.sql`
-      UPDATE tasks SET ${this.sql(row, "status", "sessionId", "exitCode", "title", "updatedAt")} WHERE id = ${id}
+    const set: Record<string, unknown> = { updatedAt: Date.now() };
+    if ("status" in patch) set.status = taskStatusToDb(patch.status!);
+    if ("sessionId" in patch) set.sessionId = patch.sessionId ?? null;
+    if ("exitCode" in patch) set.exitCode = patch.exitCode ?? null;
+    if ("title" in patch) set.title = patch.title;
+    const rows = await this.sql<TaskRow[]>`
+      UPDATE tasks SET ${this.sql(set, ...Object.keys(set))} WHERE id = ${id} RETURNING *
     `;
-    return next;
+    return rows[0] && rowToTask(rows[0]);
   }
   async removeTask(id: TaskId): Promise<void> {
     await this.sql`DELETE FROM tasks WHERE id = ${id}`;

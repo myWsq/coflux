@@ -1,10 +1,11 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { ExternalLink, GitBranch, LoaderCircle, Plus, SquareTerminal, Unplug, X } from "lucide-react";
+import { ExternalLink, GitBranch, LoaderCircle, Plus, Router, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
+import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
@@ -438,8 +439,26 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                     <SquareTerminal className={cn("size-3 shrink-0", isActive ? "opacity-90" : "opacity-50")} />
                   )}
                   <span className="truncate">{task.title || "终端"}</span>
-                  {taskPorts.length > 0 ? <span className="ml-0.5 font-mono text-2xs text-muted-foreground">:{taskPorts[0].port}</span> : null}
                 </button>
+                {taskPorts.length > 0 ? (
+                  <DropdownMenu
+                    button={{
+                      label: "转发端口",
+                      tooltip: "转发端口",
+                      icon: <Router className="size-3" />,
+                      isIconOnly: true,
+                      variant: "ghost",
+                      size: "sm",
+                      className:
+                        "mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-70 transition-colors hover:bg-muted hover:text-foreground",
+                    }}
+                    hasChevron={false}
+                    items={taskPorts.map((preview) => ({
+                      label: `:${preview.port}`,
+                      onClick: () => window.open(preview.url, "_blank", "noreferrer"),
+                    }))}
+                  />
+                ) : null}
                 <Tooltip content={`关闭终端 ${modPrefix}W`} placement="below">
                   <button
                     className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"

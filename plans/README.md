@@ -17,5 +17,13 @@
 | 013 | [web 端 xterm.js 5.5 → 6.0 升级（与 server 侧 headless 6.0 对齐）](013-web-xterm6-upgrade.md) | DONE (00918d8) | none |
 | 014 | [web 终端剪贴板贴图 —— 上传远程 worktree 并注入路径给 agent](014-terminal-image-paste.md) | DONE (dc32dc0) | none |
 | 015 | [web 端全局快捷键（Cmd+Ctrl 前缀）+ 帮助面板](015-web-hotkeys.md) | DONE (7f63985) | none |
+| 016 | [终端 cell 度量漂移后自动 refit，消除溢出滚动条](016-terminal-refit-on-metric-drift.md) | DONE (9e1cac9) | none |
+| 017 | [daemon worker 自动热更新编排层](017-auto-update-orchestration.md) | DONE (2729930) | none |
+| 018 | [设备重命名（别名）—— server/web 展示 + daemon 本地 settings.json 同步](018-device-rename.md) | DONE (0379a55) | none |
+| 019 | [终端 tab 端口转发展示 —— PlugZap icon + HoverCard 悬浮跳转](019-terminal-tab-port-hovercard.md) | DONE (db1fc87) | none |
+| 020 | [从 Git remote 推导 project 名称](020-project-name-from-git-remote.md) | DONE (105bc70) | none |
+| 021 | [Sidebar 拖拽调宽与本地记忆](021-resizable-sidebar.md) | DONE (a22bbd8) | none |
+| 022 | [PWA 可安装（manifest + 图标，无 service worker）](022-pwa-installable.md) | DONE (85fa24f) | none |
+| 023 | [web 终端拖拽小文件上传（drop 落 daemon 临时目录并注入路径）](023-terminal-file-drag-upload.md) | DONE (2a1636d) | none |
 
-执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015。
+执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023。

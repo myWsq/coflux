@@ -33,12 +33,64 @@ jobs:
           tool: cross
 
       - name: 构建
+        env:
+          # supervisor 编译期版本注入（见 crates/supervisor/src/main.rs::SUPERVISOR_VERSION、build.rs）。
+          COFLUX_RELEASE_VERSION: ${{ github.ref_name }}
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker
           else
             cargo build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker
           fi
+
+      # macOS 专属：cargo 交叉/原生编译产物只有 ad-hoc 签名，launchd 直接 spawn 的新鲜下载二进制
+      # 会被 Gatekeeper 判 OS_REASON_CODESIGNING 静默 SIGKILL（本地手动重签名可绕过，但正式发布用
+      # 真 Developer ID 证书签名 + 公证从根上解决，用户端零手动步骤）。裸二进制不支持 stapling
+      # （仅 .app/.pkg/.dmg 支持），故不 staple——Gatekeeper 首次执行时联网向苹果查公证记录。
+      - name: Apple 签名 + 公证（仅 macOS）
+        if: ${{ !matrix.cross }}
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          KEY_PATH="$RUNNER_TEMP/AuthKey_${NOTARY_KEY_ID}.p8"
+
+          echo -n "$MACOS_CERT_P12" | base64 --decode > "$CERT_PATH"
+          echo -n "$NOTARY_API_KEY_P8" > "$KEY_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT_PATH" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
+
+          SIGN_ID="Developer ID Application: Shuaiqi Wang (${APPLE_TEAM_ID})"
+          bin="target/${{ matrix.target }}/release"
+          for name in coflux-supervisor coflux-worker; do
+            codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$bin/$name"
+            ditto -c -k --keepParent "$bin/$name" "$RUNNER_TEMP/$name.zip"
+            SUBMIT_OUT=$(xcrun notarytool submit "$RUNNER_TEMP/$name.zip" \
+              --key "$KEY_PATH" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" --wait 2>&1) || {
+              echo "$SUBMIT_OUT"
+              SUB_ID=$(echo "$SUBMIT_OUT" | grep -m1 '  id:' | awk '{print $2}')
+              [ -n "$SUB_ID" ] && xcrun notarytool log "$SUB_ID" --key "$KEY_PATH" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID"
+              exit 1
+            }
+            echo "$SUBMIT_OUT"
+            codesign -dv --verbose=2 "$bin/$name"
+          done
+
+          security delete-keychain "$KEYCHAIN"
+          rm -f "$CERT_PATH" "$KEY_PATH"
 
       - name: 打包产物
         run: |

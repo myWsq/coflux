@@ -78,7 +78,8 @@ export const config = {
   // web 会话 token 有效期：登录签发后多久过期（重连也用它）。默认 30 天。
   sessionTtlMs: int("COFLUX_SESSION_TTL_MS", 30 * 24 * 60 * 60 * 1000),
 
-  maxPayload: int("COFLUX_MAX_PAYLOAD", 4 * 1024 * 1024),
+  /** client/daemon 两条 WS 共用的单帧上限；须与 web MAX_UPLOAD_BYTES、worker MAX_WRITE_BYTES 同为 30MB。 */
+  maxPayload: int("COFLUX_MAX_PAYLOAD", 30 * 1024 * 1024),
   authDeadlineMs: int("COFLUX_AUTH_DEADLINE_MS", 15_000),
   heartbeatMs: int("COFLUX_HEARTBEAT_MS", 30_000),
   pendingTimeoutMs: int("COFLUX_PENDING_TIMEOUT_MS", 30_000),
@@ -86,6 +87,14 @@ export const config = {
   maxDevicesPerAccount: int("COFLUX_MAX_DEVICES", 100),
   execDefaultTimeoutMs: int("COFLUX_EXEC_TIMEOUT_MS", 60_000),
   execMaxTimeoutMs: int("COFLUX_EXEC_MAX_TIMEOUT_MS", 300_000),
+
+  /** 自动更新编排（plan 015）：轮询 GitHub `/releases/latest` + manifest.json，对在线 daemon
+   * 推送 worker 升级。未设 COFLUX_AUTOUPDATE_REPO（形如 owner/repo）则功能整体关闭。 */
+  autoUpdateApiBase: process.env.COFLUX_AUTOUPDATE_API_BASE ?? "https://api.github.com",
+  autoUpdateRepo: process.env.COFLUX_AUTOUPDATE_REPO ?? "",
+  autoUpdatePollMs: int("COFLUX_AUTOUPDATE_POLL_MS", 10 * 60 * 1000),
+  autoUpdateMaxAttempts: int("COFLUX_AUTOUPDATE_MAX_ATTEMPTS", 3),
+  autoUpdateCooldownMs: int("COFLUX_AUTOUPDATE_COOLDOWN_MS", 60 * 60 * 1000),
 } as const;
 
 // fail-closed：生产（非 COFLUX_DEV）缺任何秘密类 env 就拒绝启动，绝不带弱默认口令上线。

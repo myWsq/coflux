@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { ChevronRight, Folder, FolderOpen, FolderPlus, GitBranch, Monitor, Plus, Trash2, X } from "lucide-react";
@@ -7,7 +7,35 @@ import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
 import type { CofluxClient } from "@/client/store";
+import { SIDEBAR_WIDTH_KEY } from "@/config";
 import { cn } from "@/lib/utils";
+
+const DEFAULT_SIDEBAR_WIDTH = 260;
+const MIN_SIDEBAR_WIDTH = 200;
+const MAX_SIDEBAR_WIDTH = 480;
+
+function clampSidebarWidth(width: number) {
+  if (!Number.isFinite(width)) return DEFAULT_SIDEBAR_WIDTH;
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, width));
+}
+
+function readSidebarWidth() {
+  try {
+    const stored = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    if (stored === null || stored.trim() === "") return DEFAULT_SIDEBAR_WIDTH;
+    return clampSidebarWidth(Number(stored));
+  } catch {
+    return DEFAULT_SIDEBAR_WIDTH;
+  }
+}
+
+function persistSidebarWidth(width: number) {
+  try {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clampSidebarWidth(width)));
+  } catch {
+    // localStorage 不可用时仍保留本次会话中的宽度。
+  }
+}
 
 type SidebarProps = {
   client: CofluxClient;
@@ -20,6 +48,7 @@ type SidebarProps = {
   onRenameWorkspace: (workspace: Workspace) => void;
   onAddDevice: () => void;
   onRemoveDevice: (daemon: DaemonInfo) => void;
+  onRenameDevice: (daemon: DaemonInfo) => void;
   /** 新建工作区菜单当前打开的项目（受控：+ 按钮/右键菜单项/Cmd+Ctrl+N 快捷键共用同一个锚点菜单） */
   createMenuProjectId: string | null;
   onCreateMenuProjectIdChange: (projectId: string | null) => void;
@@ -32,9 +61,87 @@ export function Sidebar(props: SidebarProps) {
   const daemons = useStore(client.store, (state) => state.daemons);
   // 默认全部展开，只记折叠集合（新项目出现时自然是展开态）
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
+  const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
+  const [isResizing, setIsResizing] = useState(false);
+  const sidebarWidthRef = useRef(sidebarWidth);
+  const resizeRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+    handle: HTMLDivElement;
+    previousCursor: string;
+    previousUserSelect: string;
+  } | null>(null);
   const createMenuProjectId = props.createMenuProjectId;
   const setCreateMenuProjectId = props.onCreateMenuProjectIdChange;
   const modPrefix = shortcutModifierPrefix(useIsStandalone());
+
+  function updateSidebarWidth(width: number) {
+    const nextWidth = clampSidebarWidth(width);
+    sidebarWidthRef.current = nextWidth;
+    setSidebarWidth(nextWidth);
+  }
+
+  function restoreResizeEnvironment() {
+    const resize = resizeRef.current;
+    if (!resize) return;
+    resizeRef.current = null;
+    document.documentElement.style.cursor = resize.previousCursor;
+    document.documentElement.style.userSelect = resize.previousUserSelect;
+    if (resize.handle.hasPointerCapture(resize.pointerId)) {
+      resize.handle.releasePointerCapture(resize.pointerId);
+    }
+  }
+
+  function finishResize(pointerId: number) {
+    if (resizeRef.current?.pointerId !== pointerId) return;
+    restoreResizeEnvironment();
+    setIsResizing(false);
+    persistSidebarWidth(sidebarWidthRef.current);
+  }
+
+  function handleResizeStart(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!event.isPrimary || event.button !== 0 || resizeRef.current) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    resizeRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: sidebarWidthRef.current,
+      handle,
+      previousCursor: document.documentElement.style.cursor,
+      previousUserSelect: document.documentElement.style.userSelect,
+    };
+    handle.setPointerCapture(event.pointerId);
+    document.documentElement.style.cursor = "col-resize";
+    document.documentElement.style.userSelect = "none";
+    setIsResizing(true);
+  }
+
+  function handleResizeMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    updateSidebarWidth(resize.startWidth + event.clientX - resize.startX);
+  }
+
+  function handleResizeEnd(event: ReactPointerEvent<HTMLDivElement>) {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    updateSidebarWidth(resize.startWidth + event.clientX - resize.startX);
+    finishResize(event.pointerId);
+  }
+
+  function resetSidebarWidth() {
+    updateSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+    persistSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+  }
+
+  useEffect(
+    () => () => {
+      restoreResizeEnvironment();
+    },
+    [],
+  );
 
   function toggleProject(projectId: string) {
     setCollapsedIds((prev) => {
@@ -72,7 +179,10 @@ export function Sidebar(props: SidebarProps) {
       .sort((left, right) => (left.isMain === right.isMain ? left.createdAt - right.createdAt : left.isMain ? -1 : 1));
 
   return (
-    <aside className="flex h-screen w-[260px] shrink-0 flex-col border-r border-border bg-sidebar text-base">
+    <aside
+      className="relative flex h-screen shrink-0 flex-col border-r border-border bg-sidebar text-base"
+      style={{ width: sidebarWidth }}
+    >
       <div className="flex min-h-0 flex-1 flex-col pt-1.5">
         <section className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           <div className="mb-1.5 flex h-7 items-center px-2">
@@ -260,26 +370,53 @@ export function Sidebar(props: SidebarProps) {
 
           <div className="space-y-0.5">
             {daemons.map((daemon) => (
-              <div
+              <ContextMenu
                 key={daemon.daemonId}
-                className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground"
+                label={`设备「${daemon.name}」操作`}
+                size="sm"
+                items={[
+                  { label: "重命名", onClick: () => props.onRenameDevice(daemon) },
+                  { type: "divider" },
+                  { label: "移除设备", onClick: () => props.onRemoveDevice(daemon) },
+                ]}
               >
-                <span className={cn("size-1.5 rounded-full", daemon.online ? "bg-success animate-pulse-alive" : "bg-muted-foreground/40")} />
-                <Monitor className="size-3.5 opacity-70" />
-                <span className="min-w-0 flex-1 truncate" title={`${daemon.host}/${daemon.platform}`}>
-                  {daemon.name}
-                </span>
-                <button
-                  className="flex size-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/device:opacity-100 focus-visible:opacity-100"
-                  onClick={() => props.onRemoveDevice(daemon)}
-                  title="移除设备"
-                >
-                  <Trash2 className="size-3" />
-                </button>
-              </div>
+                <div className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground">
+                  <span className={cn("size-1.5 rounded-full", daemon.online ? "bg-success animate-pulse-alive" : "bg-muted-foreground/40")} />
+                  <Monitor className="size-3.5 opacity-70" />
+                  <span
+                    className="min-w-0 flex-1 truncate"
+                    title={`${daemon.host}/${daemon.platform}${daemon.workerVersion ? ` · worker ${daemon.workerVersion}` : ""}${daemon.supervisorVersion ? ` · supervisor ${daemon.supervisorVersion}` : ""}`}
+                  >
+                    {daemon.name}
+                  </span>
+                  <button
+                    className="flex size-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/device:opacity-100 focus-visible:opacity-100"
+                    onClick={() => props.onRemoveDevice(daemon)}
+                    title="移除设备"
+                  >
+                    <Trash2 className="size-3" />
+                  </button>
+                </div>
+              </ContextMenu>
             ))}
           </div>
         </section>
+      </div>
+      <div
+        className="group/resize absolute inset-y-0 -right-[3px] z-20 w-1.5 cursor-col-resize touch-none"
+        onDoubleClick={resetSidebarWidth}
+        onLostPointerCapture={(event) => finishResize(event.pointerId)}
+        onPointerCancel={(event) => finishResize(event.pointerId)}
+        onPointerDown={handleResizeStart}
+        onPointerMove={handleResizeMove}
+        onPointerUp={handleResizeEnd}
+      >
+        <div
+          className={cn(
+            "pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors",
+            isResizing ? "bg-primary/70" : "bg-transparent group-hover/resize:bg-primary/50",
+          )}
+        />
       </div>
     </aside>
   );

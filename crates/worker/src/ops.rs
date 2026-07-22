@@ -10,8 +10,8 @@ use tokio::process::Command;
 
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
-// 客户端（plan 014 终端贴图）已按 COFLUX_MAX_PAYLOAD 预算压缩到约 3.5MB；此处放宽留冗余，纯兜底。
-const MAX_WRITE_BYTES: u64 = 8 * 1024 * 1024;
+// 拖拽文件上传上限须与 web MAX_UPLOAD_BYTES、server maxPayload 同为 30MB；此处是落盘前的最终兜底。
+const MAX_WRITE_BYTES: u64 = 30 * 1024 * 1024;
 // 落盘目录自我清理的存活期：超过此 mtime 的文件视为陈旧贴图，写入时顺手清掉（不起独立定时任务）。
 const WRITE_DIR_CLEANUP_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
