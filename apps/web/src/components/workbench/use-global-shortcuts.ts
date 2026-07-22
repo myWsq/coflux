@@ -1,5 +1,6 @@
 import { useEffect, type RefObject } from "react";
 
+import { isStandalone } from "@/components/workbench/use-shortcut-modifier";
 import type { WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 
 type GlobalShortcutsOptions = {
@@ -39,7 +40,12 @@ export function useGlobalShortcuts({
         return;
       }
 
-      if (!event.metaKey || !event.ctrlKey) return;
+      // 前缀：PWA standalone 下浏览器无 tab 栏，⌘T/⌘W/… 释放给页面，前缀降级为纯 ⌘；
+      // 浏览器 tab 模式仍用 ⌃⌘（Cmd 单修饰在 tab 下被 chrome 层硬保留，网页拦不住）。
+      const hasPrefix = isStandalone()
+        ? event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
+        : event.metaKey && event.ctrlKey;
+      if (!hasPrefix) return;
 
       const terminal = activeTerminalRef.current;
       switch (event.code) {
@@ -49,6 +55,8 @@ export function useGlobalShortcuts({
           terminal?.createTerminal();
           return;
         case "KeyW":
+          // ponytail: standalone 下纯 ⌘W 可能仍被 OS/浏览器抢去关 PWA 窗口（无 Keyboard Lock 时
+          // preventDefault 拦不住）——需在真机 PWA 验证；拦不住则此键退回 ⌃⌘W。
           event.preventDefault();
           event.stopPropagation();
           terminal?.closeActiveTab();
