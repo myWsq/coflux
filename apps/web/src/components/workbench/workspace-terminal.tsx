@@ -418,7 +418,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums"
             title={`+${workspace.additions} −${workspace.deletions}`}
           >
-            <span className="text-success">+{workspace.additions}</span> <span className="text-error">−{workspace.deletions}</span>
+            <span className="text-success">+{workspace.additions}</span> <span className="text-destructive">−{workspace.deletions}</span>
           </span>
         ) : null}
         <div className="h-4 w-px shrink-0 bg-border" />

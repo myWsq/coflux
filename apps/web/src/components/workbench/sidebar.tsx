@@ -309,7 +309,7 @@ export function Sidebar(props: SidebarProps) {
                                   title={`+${workspace.additions} −${workspace.deletions}`}
                                 >
                                   <span className="text-success">+{workspace.additions}</span>{" "}
-                                  <span className="text-error">−{workspace.deletions}</span>
+                                  <span className="text-destructive">−{workspace.deletions}</span>
                                 </span>
                               ) : null}
                               {/* 右端小字：自定义名称（name ≠ branch 时才有）；主工作区未起名时默认叫「主工作区」。
