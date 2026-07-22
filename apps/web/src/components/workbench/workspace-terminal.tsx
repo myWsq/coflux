@@ -547,7 +547,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           />
         ))}
 
-        {workspaceTasks.length === 0 ? (
+        {view === "terminal" && workspaceTasks.length === 0 ? (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="flex max-w-sm flex-col items-center text-center">
               <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
@@ -571,7 +571,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
         ) : null}
 
         {/* 「变更」视图：与终端面板同保活模式（隐藏不卸载），折叠态/已拉取数据才不随切换丢失。 */}
-        <div className={cn("absolute inset-0", view === "changes" ? "block" : "hidden")}>
+        <div className={cn("absolute inset-0 bg-terminal", view === "changes" ? "block" : "hidden")}>
           <ChangesView
             workspaceId={workspaceId}
             active={view === "changes"}
