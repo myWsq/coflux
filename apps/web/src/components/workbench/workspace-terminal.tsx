@@ -164,7 +164,10 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       if (sessionReadyRef.current.get(taskId) !== task.sessionId) return;
       activationRequestsRef.current.delete(taskId);
       const force = forcedClaimsRef.current.delete(taskId) || controlStatesRef.current[taskId] === "detached";
-      beginAttach(task, controller, force);
+      // 隐藏实例的自动激活（workspaceTasks 效果里"无 currentActive 时选第一个任务"）也会
+      // 走到这里：本实例不可见时不申请控制权，否则旁观端打开页面会把每个隐藏工作区的
+      // 第一个任务都抢一遍。点击 Tab / 快捷键触发的 performActivation 只可能发生在可见实例，不受影响。
+      if (activeRef.current) beginAttach(task, controller, force);
       return;
     }
 
@@ -351,8 +354,10 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastError]);
 
-  // 工作区从隐藏切回显示：重新 fit（隐藏期间尺寸为 0，ResizeObserver 的 fit 被 no-op 掉）并聚焦。
-  // attach 状态在隐藏期间一直保持，无需重新申请控制权。
+  // 工作区从隐藏切回显示：重新 fit（隐藏期间尺寸为 0，ResizeObserver 的 fit 被 no-op 掉）并聚焦；
+  // 激活 Tab 若隐藏期间从未 attach（idle）或恰逢重连（snapshotRevision 效果被跳过）而丢了 holder，
+  // 在此补一次 beginAttach——dedup key 天然区分"已 attach 过同一代 no-op" vs "换代需重新申请"，
+  // 无需额外区分场景。detached 显式排除：必须由用户点击才重新接管，不能一切回工作区就自动抢回。
   useEffect(() => {
     if (!active) return;
     const frame = requestAnimationFrame(() => {
@@ -361,8 +366,20 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       const controller = controllersRef.current.get(taskId);
       controller?.fit();
       controller?.focus();
+      const task = currentTasks().find((item) => item.id === taskId);
+      if (
+        task &&
+        controller &&
+        task.status === TaskStatus.RUNNING &&
+        task.sessionId &&
+        sessionReadyRef.current.get(taskId) === task.sessionId &&
+        controlStatesRef.current[taskId] !== "detached"
+      ) {
+        beginAttach(task, controller, false);
+      }
     });
     return () => cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
   useEffect(() => {
