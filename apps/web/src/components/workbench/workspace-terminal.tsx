@@ -449,7 +449,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
         <div className="h-4 w-px shrink-0 bg-border" />
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {/* 常驻「变更」tab（plan 025）：与终端 Tab 同级同组、选中态互斥；
-              统计徽标并入 tab，X=Y=0 时数字隐藏，tab 本身仍在。 */}
+              统计徽标并入 tab，X=Y=0 时数字压成 muted 而非隐藏（隐藏会让 tab 变窄跳动）。 */}
           <button
             className={cn(
               "flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-sm transition-colors",
@@ -461,11 +461,17 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           >
             <FileDiff className={cn("size-3 shrink-0", view === "changes" ? "opacity-90" : "opacity-50")} />
             <span>变更</span>
-            {workspace && (workspace.additions > 0 || workspace.deletions > 0) ? (
-              <span className="whitespace-nowrap font-mono text-2xs tabular-nums" title={`+${workspace.additions} −${workspace.deletions}`}>
-                <span className="text-success">+{workspace.additions}</span> <span className="text-destructive">−{workspace.deletions}</span>
-              </span>
-            ) : null}
+            {(() => {
+              const additions = workspace?.additions ?? 0;
+              const deletions = workspace?.deletions ?? 0;
+              const dirty = additions > 0 || deletions > 0;
+              return (
+                <span className="whitespace-nowrap font-mono text-2xs tabular-nums" title={`+${additions} −${deletions}`}>
+                  <span className={dirty ? "text-success" : "text-muted-foreground"}>+{additions}</span>{" "}
+                  <span className={dirty ? "text-destructive" : "text-muted-foreground"}>−{deletions}</span>
+                </span>
+              );
+            })()}
           </button>
           {workspaceTasks.map((task) => {
             const state = stateOf(task);
