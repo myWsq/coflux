@@ -192,12 +192,51 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (active && controlState === "owned" && sessionId) sendResize(sessionId, cols, rows);
     });
 
+    // xterm 6.0 的滚动实现自 VS Code 移植（scrollable-element + Gesture 手势系统），
+    // 但其 Gesture.addTarget 在打包产物中零调用——触摸滑动从未接入滚动，只有 wheel
+    // 路径可用（上游缺陷，桌面不受影响）。这里自补：touchmove 位移按 cell 高度换算
+    // 行数走公开 API scrollLines；只拦截 move（tap 聚焦/软键盘不受影响），
+    // preventDefault 阻止页面级橡皮筋回弹。升级 @xterm/xterm 时复验是否已修。
+    // ponytail: 无惯性动量，真机手感不足再加速度采样。
+    let touchLastY: number | null = null;
+    let touchAccum = 0;
+    const handleTouchStart = (event: TouchEvent) => {
+      touchLastY = event.touches.length === 1 ? event.touches[0]!.clientY : null;
+      touchAccum = 0;
+    };
+    const handleTouchMove = (event: TouchEvent) => {
+      if (touchLastY === null || event.touches.length !== 1) return;
+      event.preventDefault();
+      const y = event.touches[0]!.clientY;
+      touchAccum += touchLastY - y;
+      touchLastY = y;
+      const screen = host.querySelector(".xterm-screen");
+      const cellHeight = screen && terminal.rows > 0 ? screen.clientHeight / terminal.rows : 0;
+      if (cellHeight <= 0) return;
+      const lines = Math.trunc(touchAccum / cellHeight);
+      if (lines !== 0) {
+        touchAccum -= lines * cellHeight;
+        terminal.scrollLines(lines);
+      }
+    };
+    const handleTouchEnd = () => {
+      touchLastY = null;
+    };
+    host.addEventListener("touchstart", handleTouchStart, { passive: true });
+    host.addEventListener("touchmove", handleTouchMove, { passive: false });
+    host.addEventListener("touchend", handleTouchEnd);
+    host.addEventListener("touchcancel", handleTouchEnd);
+
     const observer = new ResizeObserver(() => fit());
     observer.observe(host);
     if (props.active) requestAnimationFrame(() => fit());
 
     return () => {
       observer.disconnect();
+      host.removeEventListener("touchstart", handleTouchStart);
+      host.removeEventListener("touchmove", handleTouchMove);
+      host.removeEventListener("touchend", handleTouchEnd);
+      host.removeEventListener("touchcancel", handleTouchEnd);
       props.onDispose(props.taskId, controller);
       terminal.dispose();
       terminalRef.current = null;
