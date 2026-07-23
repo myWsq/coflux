@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Folder, Monitor, MonitorUp, Search } from "lucide-react";
+import { Eye, EyeOff, Folder, Monitor, MonitorUp, Search } from "lucide-react";
 import { FsEntryKind, type DaemonInfo, type FsEntry } from "@coflux/protocol";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { Icon } from "@astryxdesign/core/Icon";
 import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from "@astryxdesign/core/Layout";
-import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
+import { ToggleButton } from "@astryxdesign/core/ToggleButton";
 
 import type { FsListResult } from "@/client/store";
 
@@ -295,11 +295,14 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
             endContent={
               <HStack gap={3} vAlign="center">
                 {step === "browse" ? (
-                  <Switch
+                  <ToggleButton
+                    size="sm"
+                    isIconOnly
                     label="显示隐藏项"
-                    labelPosition="start"
-                    value={showHidden}
-                    onChange={setShowHidden}
+                    icon={<EyeOff />}
+                    pressedIcon={<Eye />}
+                    isPressed={showHidden}
+                    onPressedChange={setShowHidden}
                   />
                 ) : null}
                 <Text type="body" color="secondary" size="sm">
