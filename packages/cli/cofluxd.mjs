@@ -8,6 +8,10 @@ import { join, dirname } from "node:path";
 import { createInterface } from "node:readline/promises";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
+import dns from "node:dns/promises";
+import net from "node:net";
+import tls from "node:tls";
+import crypto from "node:crypto";
 
 // 默认中心服务（公共 SaaS）；自托管用 --server 覆盖。
 const DEFAULT_SERVER = "wss://api.coflux.dev/daemon";
@@ -15,7 +19,7 @@ const DEFAULT_SERVER = "wss://api.coflux.dev/daemon";
 const REPO = "myWsq/coflux";
 const HOME = process.env.COFLUX_HOME || join(homedir(), ".coflux");
 const BIN_DIR = join(HOME, "bin");
-const SETTINGS = join(HOME, "settings.json"); // 用户配置（含一次性登记密钥）→ daemon 直接读；含密钥故 600
+const SETTINGS = join(HOME, "settings.json"); // 用户配置（serverUrl/deviceName/shell）→ daemon 直接读；600 权限防同机其他用户窥探
 const LOG_FILE = join(HOME, "daemon.log");
 const CRED = join(HOME, "credentials.json");
 const PENDING_AUTH = join(HOME, "pending-auth.json"); // worker 落盘的待授权链接（daemon.authorizePending）
@@ -88,7 +92,9 @@ async function resolveLatestTag() {
   }
 }
 
-async function ensureBinaries({ version, binDir }) {
+// skipIfPresent：up 的幂等语义——二进制已存在且调用方未显式传 version 时跳过下载，
+// 避免重跑 up 变成隐式升级（用户拍板，见 plan 035 Decisions）。update/--bin-dir/显式 --version 不受影响。
+async function ensureBinaries({ version, binDir, skipIfPresent }) {
   fs.mkdirSync(BIN_DIR, { recursive: true });
   if (binDir) {
     for (const b of ["coflux-supervisor", "coflux-worker"]) {
@@ -100,9 +106,13 @@ async function ensureBinaries({ version, binDir }) {
     console.log(`✓ 用本地二进制（${binDir}）`);
     return;
   }
+  if (skipIfPresent && !version && fs.existsSync(SUP_BIN) && fs.existsSync(WRK_BIN)) {
+    console.log(`✓ 二进制已存在（${BIN_DIR}），跳过下载（用 cofluxd update 升级）`);
+    return;
+  }
   const t = rustTarget();
   let base;
-  if (version === "latest") {
+  if (!version || version === "latest") {
     const tag = await resolveLatestTag();
     if (tag) console.log(`最新版本: ${tag}`);
     base = tag ? `https://github.com/${REPO}/releases/download/${tag}` : `https://github.com/${REPO}/releases/latest/download`;
@@ -183,7 +193,7 @@ function stopService() {
 }
 
 async function applyAndStart({ serverUrl, deviceName, shell, version, binDir, noStart }) {
-  await ensureBinaries({ version, binDir });
+  await ensureBinaries({ version, binDir, skipIfPresent: true });
   applyConfig({ serverUrl, deviceName, shell });
   // 非默认服务器醒目提示：保存值/--server 仍生效（不强制覆盖），但防止 staging 之类残留值静默错连。
   if (serverUrl !== DEFAULT_SERVER) {
@@ -241,39 +251,31 @@ async function cmdUp(v) {
   });
 }
 
-async function cmdOnboard(v) {
-  const s = readSettings();
-  // 服务器地址不再交互询问（用户拍板 2026-07-04）：--server > 已保存值 > 默认公共服务；
-  // 优先级与 cmdUp 一致（见 packages/cli/cofluxd.mjs 里 applyAndStart 的非默认提示）。
-  const serverUrl = v.server || s.serverUrl || DEFAULT_SERVER;
-  console.log("\n  欢迎使用 coflux —— 配置这台设备\n  ──────────────────────────────\n");
-  console.log(`  服务器: ${serverUrl}\n`);
-  console.log("  登记方式：起服务后打印浏览器授权链接，登录确认即可。\n");
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const deviceName = (await rl.question(`设备名 [${s.deviceName || hostname()}]: `)).trim() || s.deviceName || hostname();
-    rl.close();
-    console.log("");
-    await applyAndStart({ serverUrl, deviceName, shell: s.shell, version: v.version, binDir: v["bin-dir"], noStart: v["no-start"] });
-  } finally {
-    rl.close();
-  }
-}
-
-function cmdReload() {
-  if (!fs.existsSync(SETTINGS)) die("无 settings.json，先 cofluxd up 或 cofluxd onboard");
-  restartService(); // daemon 重启时重新读 settings.json
-  console.log("✓ 已重启（daemon 重新读取 settings.json）");
-}
-
 function cmdDown() { stopService(); console.log("✓ 已停止"); }
 
+// 只有 supervisor 真正靠这条命令更新——它不自动升级（持 PTY，重启会杀会话，见 plan 017）。
+// worker 运行中会被 server 自动热升级到最新 stable（无需停服）；这里顺带刷新的是 worker 的
+// "内置兜底二进制"（supervisor 冷启动/热升级缓存皆无时的 fallback），日常可不管。
 async function cmdUpdate(v) {
-  if (!fs.existsSync(SETTINGS)) die("尚未安装，先 cofluxd up / onboard");
-  await ensureBinaries({ version: v.version, binDir: v["bin-dir"] });
+  if (!fs.existsSync(SETTINGS)) die("尚未安装，先 cofluxd up");
+  const version = v.version || "latest";
+  await ensureBinaries({ version, binDir: v["bin-dir"] });
   restartService();
-  console.log(`✓ 已更新到 ${v["bin-dir"] ? "本地产物" : v.version} 并重启（supervisor）`);
-  console.log("  注：worker 还可由 server 远程热升级，无需停服。");
+  console.log(`✓ supervisor 已更新到 ${v["bin-dir"] ? "本地产物" : version} 并重启`);
+  console.log("  worker 由 server 自动热升级，通常无需手动更新；此命令只更新 supervisor（及其兜底 worker 二进制）。");
+}
+
+// launchd(macOS) / systemd --user(Linux) 服务活跃态查询，status 与 doctor 共用。
+function serviceRunningInfo() {
+  if (IS_MAC) {
+    const running = run("launchctl", ["list", "com.coflux.daemon"]).status === 0;
+    return { running, active: running ? "运行中" : "未运行" };
+  }
+  if (IS_LINUX) {
+    const active = (run("systemctl", ["--user", "is-active", "coflux-daemon.service"]).stdout || "").trim() || "未运行";
+    return { running: active === "active", active };
+  }
+  return { running: false, active: "未运行" };
 }
 
 function cmdStatus() {
@@ -291,14 +293,7 @@ function cmdStatus() {
   } else {
     console.log("凭证:   未登记");
   }
-  let running = false, active = "未运行";
-  if (IS_MAC) {
-    running = run("launchctl", ["list", "com.coflux.daemon"]).status === 0;
-    active = running ? "运行中" : "未运行";
-  } else if (IS_LINUX) {
-    active = (run("systemctl", ["--user", "is-active", "coflux-daemon.service"]).stdout || "").trim() || "未运行";
-    running = active === "active";
-  }
+  const { running, active } = serviceRunningInfo();
   let pid = "";
   if (running) {
     try { pid = ` (worker pid ${fs.readFileSync(join(HOME, "worker.pid"), "utf8").trim()})`; } catch { /* */ }
@@ -318,6 +313,168 @@ function cmdStatus() {
     const hint = fda === "granted" ? "" : "（`cofluxd fda` 引导授权，避免弹窗卡住 PTY 会话）";
     console.log(`FDA:    ${fdaLabel(fda)}${hint}`);
   }
+}
+
+/* ------------------------------ doctor：分层连通性自检 ------------------------------ */
+// 只做传输层探测（DNS/TCP/TLS/WS 升级），不解析 coflux 协议消息——CLI 保持零协议
+// （见 plan 035 Decisions）。每层探测成功即断开，不占用 server 的已认证连接名额；
+// WS 升级对 server 是一条未认证连接，server 侧 authDeadline 自然回收。
+const DOCTOR_TIMEOUT_MS = 5000;
+
+function parseServerUrl(serverUrl) {
+  const u = new URL(serverUrl);
+  const useTls = u.protocol === "wss:";
+  if (!useTls && u.protocol !== "ws:") throw new Error(`不支持的协议: ${u.protocol}（需 ws:// 或 wss://）`);
+  const port = u.port ? Number(u.port) : (useTls ? 443 : 80);
+  const path = u.pathname || "/";
+  return { host: u.hostname, port, path, useTls };
+}
+
+async function timed(fn) {
+  const t0 = Date.now();
+  try { return { ok: true, ms: Date.now() - t0, ...(await fn()) }; }
+  catch (e) { return { ok: false, ms: Date.now() - t0, error: e?.message || String(e) }; }
+}
+
+function probeDns(host) {
+  return timed(async () => {
+    const addrs = await dns.lookup(host, { all: true });
+    return { detail: addrs.map((a) => a.address).join(", ") };
+  });
+}
+
+function probeTcp(host, port) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const socket = net.connect({ host, port, timeout: DOCTOR_TIMEOUT_MS });
+    const done = (ok, extra) => { socket.destroy(); resolve({ ok, ms: Date.now() - t0, ...extra }); };
+    socket.once("connect", () => done(true, {}));
+    socket.once("timeout", () => done(false, { error: `连接超时（>${DOCTOR_TIMEOUT_MS}ms）` }));
+    socket.once("error", (e) => done(false, { error: e.message }));
+  });
+}
+
+function probeTls(host, port) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const socket = tls.connect({ host, port, servername: host, timeout: DOCTOR_TIMEOUT_MS }, () => {
+      const detail = socket.authorized ? socket.getProtocol() : `${socket.getProtocol()}（证书未验证: ${socket.authorizationError}）`;
+      socket.destroy();
+      resolve({ ok: true, ms: Date.now() - t0, detail });
+    });
+    socket.once("timeout", () => { socket.destroy(); resolve({ ok: false, ms: Date.now() - t0, error: `握手超时（>${DOCTOR_TIMEOUT_MS}ms）` }); });
+    socket.once("error", (e) => resolve({ ok: false, ms: Date.now() - t0, error: e.message }));
+  });
+}
+
+// 手写一条最小 HTTP/1.1 Upgrade 请求，只看是否拿到 101——不建立真实 WebSocket 帧连接。
+function probeWsUpgrade({ host, port, path, useTls }) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const key = crypto.randomBytes(16).toString("base64");
+    const req = `GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${key}\r\n\r\n`;
+    const finish = (r) => resolve({ ms: Date.now() - t0, ...r });
+    const onOpen = (socket) => {
+      let buf = "";
+      const timer = setTimeout(() => { socket.destroy(); finish({ ok: false, error: `升级响应超时（>${DOCTOR_TIMEOUT_MS}ms）` }); }, DOCTOR_TIMEOUT_MS);
+      socket.on("data", (chunk) => {
+        buf += chunk.toString("latin1");
+        if (!buf.includes("\r\n\r\n")) return;
+        clearTimeout(timer);
+        const statusLine = buf.split("\r\n")[0];
+        socket.destroy();
+        const ok = /^HTTP\/1\.\d 101\b/.test(statusLine);
+        finish(ok ? { ok, detail: statusLine } : { ok, error: `未收到 101 切换协议响应: ${statusLine}` });
+      });
+      socket.once("error", (e) => { clearTimeout(timer); finish({ ok: false, error: e.message }); });
+      socket.write(req);
+    };
+    const socket = useTls
+      ? tls.connect({ host, port, servername: host, timeout: DOCTOR_TIMEOUT_MS })
+      : net.connect({ host, port, timeout: DOCTOR_TIMEOUT_MS });
+    socket.once(useTls ? "secureConnect" : "connect", () => onOpen(socket));
+    socket.once("timeout", () => { socket.destroy(); finish({ ok: false, error: `连接超时（>${DOCTOR_TIMEOUT_MS}ms）` }); });
+    socket.once("error", (e) => finish({ ok: false, error: e.message }));
+  });
+}
+
+function printLayer(name, r) {
+  const mark = r.ok ? "✓" : "✗";
+  const msg = r.ok ? (r.detail ? `→ ${r.detail}` : "") : (r.error || "");
+  console.log(`  ${mark} ${name} (${r.ms}ms)${msg ? `  ${msg}` : ""}`);
+}
+
+// 本地事实汇总：服务进程存活、conn-state.json 连接态、凭证有无、FDA。返回是否已连接
+// （供全层探测通过但仍未连接时给出"问题在认证层"的结论）。
+function printLocalFacts() {
+  console.log("\n  本地状态\n  ────────");
+  console.log(`  凭证:   ${fs.existsSync(CRED) ? "已登记" : "未登记"}`);
+  const { running, active } = serviceRunningInfo();
+  console.log(`  服务:   ${active}`);
+  let connected = false;
+  if (running) {
+    const conn = readConnState();
+    if (conn?.state && CONN_STATE_LABEL[conn.state]) {
+      console.log(`  连接:   ${CONN_STATE_LABEL[conn.state]}`);
+      connected = conn.state === "connected";
+    } else {
+      console.log("  连接:   (无快照)");
+    }
+  }
+  if (IS_MAC) console.log(`  FDA:    ${fdaLabel(readFdaStatus())}`);
+  console.log("");
+  return connected;
+}
+
+function printConclusion(ok, msg) {
+  console.log(`  ${ok ? "✓" : "✗"} ${msg}\n`);
+}
+
+async function cmdDoctor() {
+  const s = readSettings();
+  const serverUrl = s.serverUrl || DEFAULT_SERVER;
+  console.log(`\n  连通性自检 —— ${serverUrl}\n  ────────────────────────────\n`);
+  let target;
+  try { target = parseServerUrl(serverUrl); }
+  catch (e) { die(`server_url 解析失败: ${serverUrl}（${e.message}）`); }
+  const { host, port, useTls } = target;
+
+  const dnsR = await probeDns(host);
+  printLayer("DNS 解析", dnsR);
+  if (!dnsR.ok) {
+    printConclusion(false, "DNS 解析失败——检查网络连接/DNS 配置，或该域名是否可达。");
+    printLocalFacts();
+    return;
+  }
+
+  const tcpR = await probeTcp(host, port);
+  printLayer(`TCP 连接 (${host}:${port})`, tcpR);
+  if (!tcpR.ok) {
+    printConclusion(false, "DNS 可解析但 TCP 连不上——防火墙/代理拦截，或目标端口未开放。");
+    printLocalFacts();
+    return;
+  }
+
+  if (useTls) {
+    const tlsR = await probeTls(host, port);
+    printLayer("TLS 握手", tlsR);
+    if (!tlsR.ok) {
+      printConclusion(false, "TCP 可连但 TLS 握手失败——可能是企业代理 MITM 证书、系统时间错误，或服务端证书问题。");
+      printLocalFacts();
+      return;
+    }
+  }
+
+  const wsR = await probeWsUpgrade(target);
+  printLayer("WS 升级握手", wsR);
+  if (!wsR.ok) {
+    printConclusion(false, "网络层通但 WebSocket 升级被拒——可能是反代/负载均衡未正确转发 Upgrade 头，或路径不对。");
+    printLocalFacts();
+    return;
+  }
+
+  const connected = printLocalFacts();
+  printConclusion(true, connected ? "各层连通性正常。" : "各层连通性正常，但本地未显示已连接——问题大概率在认证/授权层而非网络层，查 `cofluxd logs`。");
 }
 
 function cmdLogs(v) {
@@ -361,20 +518,26 @@ function cmdUninstall(v) {
 
 const HELP = `cofluxd —— coflux daemon 管理
 
-  cofluxd                 首次=交互式配置(onboard)，已配置=status
-  cofluxd onboard         交互式配置并启用
-  cofluxd up [flags]      非交互装/起，零参数即可（打印浏览器授权链接）
-  cofluxd reload          按 ~/.coflux/settings.json 重载并重启
-  cofluxd update          更新二进制并重启（worker 另可远程热升级）
-  cofluxd status          服务器/登记（含"等待授权"）/服务状态
+  cofluxd                 首次=up（打印浏览器授权链接），已配置=status
+  cofluxd up [flags]      幂等：首次装+起，已装则按当前 settings.json 重装服务并重启
+  cofluxd status          服务器/登记（含"等待授权"）/服务/连接状态
+  cofluxd doctor          分层连通性自检（DNS→TCP→TLS→WS 升级）+ 本地状态汇总
+  cofluxd update          更新本地 supervisor 二进制并重启（worker 由 server 自动热升级）
   cofluxd fda             [仅 macOS] 引导授予完全磁盘访问权限（避免 PTY 因 TCC 弹窗卡住）
   cofluxd logs [-f]       看 daemon 日志
   cofluxd down            停止
   cofluxd uninstall [--purge]   卸载（--purge 连二进制/配置/凭证一并删）
 
 up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
-通用: --version <vX|latest>(默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
-配置都在 ~/.coflux/settings.json（serverUrl/deviceName/shell），daemon 直接读；改后 cofluxd reload 生效。`;
+通用: --version <vX|latest>(不传时 up 沿用已有二进制，update 默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
+配置都在 ~/.coflux/settings.json（serverUrl/deviceName/shell），daemon 直接读；改后重跑 cofluxd up 生效。`;
+
+// onboard/reload 已在命令面重梳中移除（用户拍板 2026-07-23，见 plans/035）：onboard 的交互
+// 问答只剩"问设备名"，价值不足以撑一个命令；reload 与幂等化后的 up 语义重复。
+const MIGRATED = {
+  onboard: "onboard 已并入 up，直接运行 `cofluxd up`",
+  reload: "reload 已并入 up（up 现幂等，会按 settings.json 重装服务并重启），直接运行 `cofluxd up`",
+};
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -382,7 +545,7 @@ const { values, positionals } = parseArgs({
     server: { type: "string" },
     name: { type: "string" },
     shell: { type: "string" },
-    version: { type: "string", default: "latest" },
+    version: { type: "string" },
     "bin-dir": { type: "string" },
     "no-start": { type: "boolean", default: false },
     purge: { type: "boolean", default: false },
@@ -393,9 +556,9 @@ const { values, positionals } = parseArgs({
 
 let cmd = positionals[0];
 if (values.help || cmd === "help") { console.log(HELP); process.exit(0); }
-if (!cmd) cmd = fs.existsSync(SETTINGS) ? "status" : "onboard"; // 首次裸跑 → 引导
+if (!cmd) cmd = fs.existsSync(SETTINGS) ? "status" : "up"; // 首次裸跑 → 引导
 
-const handlers = { up: cmdUp, onboard: cmdOnboard, reload: cmdReload, update: cmdUpdate, down: cmdDown, status: cmdStatus, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall };
+const handlers = { up: cmdUp, update: cmdUpdate, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall };
 const h = handlers[cmd];
-if (!h) die(`未知命令: ${cmd}\n\n${HELP}`);
+if (!h) die(`未知命令: ${cmd}${MIGRATED[cmd] ? `\n${MIGRATED[cmd]}` : ""}\n\n${HELP}`);
 await h(values);

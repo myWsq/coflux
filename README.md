@@ -14,7 +14,7 @@
 | `crates/protocol` | Rust 线协议真相源：serde 类型 + 帧 codec + UDS 消息 |
 | `crates/supervisor` | Rust daemon 的 supervisor：portable-pty 起 PTY + scrollback + 起/管 worker（极少升级） |
 | `crates/worker` | Rust daemon 的 worker（tokio）：连服务器/认证/重连 + git/exec/fs + 编排（频繁升级） |
-| `packages/cli` | `cofluxd`：用户侧管理 CLI（npm，零依赖 node）——装/起/停/升级 daemon |
+| `packages/cli` | `cofluxd`：用户侧管理 CLI（npm，零依赖 node）——装/起/停/升级 daemon + doctor 连通性自检 |
 
 server/web 是 TypeScript（pnpm workspace）；**daemon 全 Rust**（Cargo workspace，零 node 运行时）。daemon 拆成 supervisor + worker 两进程：升级只换 worker，PTY 在 supervisor 里存活（热升级方案 A）。
 
@@ -24,12 +24,12 @@ daemon 是预编译的 Rust 二进制，用 `cofluxd`（npm）装成系统服务
 
 ```bash
 npm i -g cofluxd
-cofluxd                 # 首次=交互式引导（问服务器/设备名），之后=看状态
-cofluxd up               # 零参数即可：起服务后打印浏览器授权链接，登录确认即完成登记
-cofluxd status / logs -f / update / down / uninstall
+cofluxd                 # 首次=up（起服务后打印浏览器授权链接），之后=看状态
+cofluxd up               # 幂等：零参数即可装/起；已装则按当前配置重装服务并重启
+cofluxd status / doctor / logs -f / update / down / uninstall
 ```
 
-登记走浏览器授权：`cofluxd up` 打印一次性授权链接，在浏览器用已登录账号打开确认即可（链接可在任意设备打开）。**所有配置都在 `~/.coflux/settings.json`**（`serverUrl`/`deviceName`/`shell`），**daemon 直接读这个文件**；手改后 `cofluxd reload` 生效。不碰源码、不装 Rust。发版/签名见 [docs/RELEASING.md](docs/RELEASING.md)。
+登记走浏览器授权：`cofluxd up` 打印一次性授权链接，在浏览器用已登录账号打开确认即可（链接可在任意设备打开）。连不上时用 `cofluxd doctor` 做分层连通性自检（DNS → TCP → TLS → WS 升级）。**所有配置都在 `~/.coflux/settings.json`**（`serverUrl`/`deviceName`/`shell`），**daemon 直接读这个文件**；手改后重跑 `cofluxd up` 生效。不碰源码、不装 Rust。发版/签名见 [docs/RELEASING.md](docs/RELEASING.md)。
 
 ## 快速开始
 
