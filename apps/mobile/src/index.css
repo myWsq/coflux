@@ -1,0 +1,206 @@
+/* Astryx + Tailwind 4 共存：显式声明 cascade layer 顺序（官方 migration 方案，同 apps/web）。
+ * astryx-base/astryx-theme 在 Tailwind utilities 之前，工具类可覆盖组件默认样式。 */
+@layer reset, theme, base, astryx-base, astryx-theme, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "@astryxdesign/core/reset.css";
+@import "@astryxdesign/core/astryx.css";
+@import "@astryxdesign/theme-neutral/theme.css";
+@import "@astryxdesign/core/tailwind-theme.css";
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@custom-variant dark (&:is(.dark *));
+
+/* 近黑 IDE 色板：与桌面 web（apps/web/src/index.css）同一份主题变量真相源，
+ * 两端各自维护一份是刻意的（无共享 CSS 包边界，见 plan 032）。 */
+:root {
+  --coflux-font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --coflux-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --coflux-text-2xs: 10px;
+  --coflux-text-xs: 11px;
+  --coflux-text-sm: 12px;
+  --coflux-text-base: 14px;
+  --coflux-text-lg: 16px;
+  --coflux-text-xl: 18px;
+  --coflux-text-2xl: 20px;
+
+  font-family: var(--coflux-font-sans);
+  color-scheme: dark;
+  --background: #0f0f0f;
+  --foreground: #e6e6e3;
+  --card: #151514;
+  --card-foreground: #e6e6e3;
+  --popover: #1b1b1a;
+  --popover-foreground: #e6e6e3;
+  --primary: #ececea;
+  --primary-foreground: #0f0f0f;
+  --secondary: #1f1f1e;
+  --secondary-foreground: #e6e6e3;
+  --muted: #1b1b1a;
+  --muted-foreground: #75756d;
+  --accent: #262624;
+  --accent-foreground: #f0f0ee;
+  --destructive: #e05c6a;
+  --destructive-foreground: #fff4f5;
+  --border: #242422;
+  --input: #2a2a28;
+  --ring: #5c5c55;
+  --success: #4fae6e;
+  --warning: #c9a227;
+  --sidebar: #151514;
+  --terminal: #0a0a0a;
+  --radius: 0.5rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-sidebar: var(--sidebar);
+  --color-terminal: var(--terminal);
+  --radius-sm: calc(var(--radius) - 0.125rem);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 0.125rem);
+  --font-sans: var(--coflux-font-sans);
+  --font-mono: var(--coflux-font-mono);
+  --animate-pulse-alive: pulse-alive 2.6s ease-in-out infinite;
+
+  --text-2xs: var(--coflux-text-2xs);
+  --text-2xs--line-height: 1.35;
+  --text-xs: var(--coflux-text-xs);
+  --text-xs--line-height: 1.35;
+  --text-sm: var(--coflux-text-sm);
+  --text-sm--line-height: 1.35;
+  --text-base: var(--coflux-text-base);
+  --text-base--line-height: 1.4;
+  --text-lg: var(--coflux-text-lg);
+  --text-lg--line-height: 1.4;
+}
+
+/* 覆盖 theme-neutral 的 14px base + Figtree，与 Tailwind 字阶对齐 */
+@layer astryx-theme {
+  @scope ([data-astryx-theme="neutral"]) to ([data-astryx-theme]) {
+    :scope {
+      --font-family-body: var(--coflux-font-sans);
+      --font-family-heading: var(--coflux-font-sans);
+      --font-family-code: var(--coflux-font-mono);
+      --font-size-2xs: var(--coflux-text-2xs);
+      --font-size-xs: var(--coflux-text-xs);
+      --font-size-sm: var(--coflux-text-sm);
+      --font-size-base: var(--coflux-text-base);
+      --font-size-lg: var(--coflux-text-lg);
+      --font-size-xl: var(--coflux-text-xl);
+      --font-size-2xl: var(--coflux-text-2xl);
+      --text-body-size: var(--font-size-base);
+      --text-label-size: var(--font-size-base);
+      --text-code-size: var(--font-size-base);
+      --text-supporting-size: var(--font-size-sm);
+      --text-large-size: var(--font-size-lg);
+      --text-heading-1-size: var(--font-size-2xl);
+      --text-heading-2-size: var(--font-size-xl);
+      --text-heading-3-size: var(--font-size-lg);
+      --text-heading-4-size: var(--font-size-base);
+      --text-heading-5-size: var(--font-size-sm);
+      --text-heading-6-size: var(--font-size-xs);
+    }
+  }
+}
+
+@keyframes pulse-alive {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+:focus-visible {
+  outline: 1px solid var(--ring);
+  outline-offset: 1px;
+}
+
+[class*="astryx-"] :is(input, textarea, button, select):focus-visible,
+[class*="astryx-"]:is(input, textarea, button, select):focus-visible {
+  outline: none;
+}
+
+* {
+  box-sizing: border-box;
+  /* 触屏无 hover：任何元素长按都不该弹原生放大镜/选择菜单，交互层自己决定何时允许选中。 */
+  -webkit-touch-callout: none;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden; /* 外层不滚动：滚动区域由各页面内部容器承担，避免橡皮筋双重回弹 */
+  overscroll-behavior: none;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--coflux-font-sans);
+  font-size: var(--coflux-text-base);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  background: rgb(80 80 80 / 55%);
+}
+
+.xterm {
+  height: 100%;
+}
+
+.xterm .xterm-viewport {
+  scrollbar-color: #333333 transparent;
+  scrollbar-width: thin;
+}
