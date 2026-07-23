@@ -6,6 +6,7 @@
 //! 渐进式 Rust 化：本进程是 Rust，但能对接现有已测的 TS worker（UDS 协议语言中立），
 //! 故现有黑盒测试可直接验证。worker 走 COFLUX_WORKER_CMD/ARGS 指定（TS 阶段=node --import tsx worker.ts）。
 
+mod fda;
 mod manager;
 mod sessions;
 mod upgrade;
@@ -45,6 +46,7 @@ fn main() {
     let sock_path = std::env::var(SUPERVISOR_SOCK_ENV).unwrap_or_else(|_| format!("/tmp/coflux-sup-{}.sock", std::process::id()));
     let home = std::env::var("COFLUX_HOME").unwrap_or_else(|_| format!("{}/.coflux", std::env::var("HOME").unwrap_or_default()));
     let settings = Settings::load(&home);
+    fda::write_status(&home); // macOS: 探测完全磁盘访问权限并落盘,供 cofluxd status/fda 展示引导；非 macOS 空操作
     let shell = std::env::var("COFLUX_SHELL").ok().filter(|s| !s.is_empty()).or(settings.shell).or_else(|| std::env::var("SHELL").ok()).unwrap_or_else(|| "/bin/bash".to_string());
     let scrollback_limit: usize = 200_000;
     let probation_ms: u64 = std::env::var("COFLUX_WORKER_PROBATION_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(8000);
