@@ -19,8 +19,8 @@
  *           Task     编排单位             PTY 的 cwd = workspace.path
  *             Session  PTY 运行时实例（活在 daemon；scrollback 也在 daemon）
  *
- * 认证（Tailscale 式，见 docs/auth-design.md）：daemon 用 EnrollmentKey 登记换取每设备 deviceToken；
- * daemonId 服务器签发绑定不可冒充；client 用 ClientToken 登录账号，账号是隔离单元。
+ * 认证（Tailscale 式，见 docs/auth-design.md）：daemon 发起浏览器授权请求，用户在 web 端确认后
+ * 换取每设备 deviceToken；daemonId 服务器签发绑定不可冒充；client 用 ClientToken 登录账号，账号是隔离单元。
  *
  * 运行时校验：protobuf 解码即结构校验，畸形字节直接 fromBinary 抛错——本包的 decode* helpers
  * 统一 try/catch 兜底为 null，调用方按"丢弃 + 记日志"处理，不再需要手写的 isValid* 校验表。

@@ -102,17 +102,6 @@ public struct Coflux_V1_ClientSubscribe: Sendable {
   public init() {}
 }
 
-/// 为当前账号生成一条新的登记密钥（账号级、可复用），供新机器 daemon 登记
-public struct Coflux_V1_ClientCreateEnrollmentKey: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 public struct Coflux_V1_ClientRemoveDevice: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -512,14 +501,6 @@ public struct Coflux_V1_ClientToServer: Sendable {
     set {payload = .clientSubscribe(newValue)}
   }
 
-  public var clientCreateEnrollmentKey: Coflux_V1_ClientCreateEnrollmentKey {
-    get {
-      if case .clientCreateEnrollmentKey(let v)? = payload {return v}
-      return Coflux_V1_ClientCreateEnrollmentKey()
-    }
-    set {payload = .clientCreateEnrollmentKey(newValue)}
-  }
-
   public var clientRemoveDevice: Coflux_V1_ClientRemoveDevice {
     get {
       if case .clientRemoveDevice(let v)? = payload {return v}
@@ -703,7 +684,6 @@ public struct Coflux_V1_ClientToServer: Sendable {
     case clientAuth(Coflux_V1_ClientAuth)
     case clientLogout(Coflux_V1_ClientLogout)
     case clientSubscribe(Coflux_V1_ClientSubscribe)
-    case clientCreateEnrollmentKey(Coflux_V1_ClientCreateEnrollmentKey)
     case clientRemoveDevice(Coflux_V1_ClientRemoveDevice)
     case deviceAuthorizeInfo(Coflux_V1_DeviceAuthorizeInfoRequest)
     case deviceAuthorize(Coflux_V1_DeviceAuthorize)
@@ -762,21 +742,6 @@ public struct Coflux_V1_AuthError: Sendable {
   // methods supported on all messages.
 
   public var message: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// 登记密钥已生成（明文仅此一次回传；服务器只存 hash）
-public struct Coflux_V1_EnrollmentKeyCreated: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var enrollmentKey: String = String()
-
-  public var daemonURL: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1097,14 +1062,6 @@ public struct Coflux_V1_ServerToClient: Sendable {
     set {payload = .authError(newValue)}
   }
 
-  public var enrollmentKeyCreated: Coflux_V1_EnrollmentKeyCreated {
-    get {
-      if case .enrollmentKeyCreated(let v)? = payload {return v}
-      return Coflux_V1_EnrollmentKeyCreated()
-    }
-    set {payload = .enrollmentKeyCreated(newValue)}
-  }
-
   public var deviceAuthorizeInfo: Coflux_V1_DeviceAuthorizeInfoResult {
     get {
       if case .deviceAuthorizeInfo(let v)? = payload {return v}
@@ -1271,7 +1228,6 @@ public struct Coflux_V1_ServerToClient: Sendable {
   public enum OneOf_Payload: Equatable, Sendable {
     case authOk(Coflux_V1_AuthOk)
     case authError(Coflux_V1_AuthError)
-    case enrollmentKeyCreated(Coflux_V1_EnrollmentKeyCreated)
     case deviceAuthorizeInfo(Coflux_V1_DeviceAuthorizeInfoResult)
     case deviceAuthorized(Coflux_V1_DeviceAuthorized)
     case proxyAuth(Coflux_V1_ProxyAuth)
@@ -1385,25 +1341,6 @@ extension Coflux_V1_ClientSubscribe: SwiftProtobuf.Message, SwiftProtobuf._Messa
   }
 
   public static func ==(lhs: Coflux_V1_ClientSubscribe, rhs: Coflux_V1_ClientSubscribe) -> Bool {
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_ClientCreateEnrollmentKey: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ClientCreateEnrollmentKey"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap()
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    // Load everything into unknown fields
-    while try decoder.nextFieldNumber() != nil {}
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_ClientCreateEnrollmentKey, rhs: Coflux_V1_ClientCreateEnrollmentKey) -> Bool {
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2172,7 +2109,7 @@ extension Coflux_V1_ClientFsWrite: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{3}client_create_enrollment_key\0\u{3}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{3}task_attach\0\u{3}task_stop\0\u{3}task_remove\0\u{3}pty_resize\0\u{3}client_exec\0\u{3}client_fs_list\0\u{3}client_fs_read\0\u{3}pty_input\0\u{3}workspace_set_name\0\u{3}client_fs_write\0\u{3}device_set_name\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{3}task_attach\0\u{3}task_stop\0\u{3}task_remove\0\u{3}pty_resize\0\u{3}client_exec\0\u{3}client_fs_list\0\u{3}client_fs_read\0\u{3}pty_input\0\u{3}workspace_set_name\0\u{3}client_fs_write\0\u{3}device_set_name\0\u{b}client_create_enrollment_key\0\u{c}\u{4}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2217,19 +2154,6 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .clientSubscribe(v)
-        }
-      }()
-      case 4: try {
-        var v: Coflux_V1_ClientCreateEnrollmentKey?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .clientCreateEnrollmentKey(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .clientCreateEnrollmentKey(v)
         }
       }()
       case 5: try {
@@ -2541,10 +2465,6 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .clientSubscribe(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
     }()
-    case .clientCreateEnrollmentKey?: try {
-      guard case .clientCreateEnrollmentKey(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
-    }()
     case .clientRemoveDevice?: try {
       guard case .clientRemoveDevice(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
@@ -2709,41 +2629,6 @@ extension Coflux_V1_AuthError: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
 
   public static func ==(lhs: Coflux_V1_AuthError, rhs: Coflux_V1_AuthError) -> Bool {
     if lhs.message != rhs.message {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_EnrollmentKeyCreated: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".EnrollmentKeyCreated"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}enrollment_key\0\u{3}daemon_url\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.enrollmentKey) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.daemonURL) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.enrollmentKey.isEmpty {
-      try visitor.visitSingularStringField(value: self.enrollmentKey, fieldNumber: 1)
-    }
-    if !self.daemonURL.isEmpty {
-      try visitor.visitSingularStringField(value: self.daemonURL, fieldNumber: 2)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_EnrollmentKeyCreated, rhs: Coflux_V1_EnrollmentKeyCreated) -> Bool {
-    if lhs.enrollmentKey != rhs.enrollmentKey {return false}
-    if lhs.daemonURL != rhs.daemonURL {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3269,7 +3154,7 @@ extension Coflux_V1_ServerError: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToClient"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{3}enrollment_key_created\0\u{3}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{3}task_detached\0\u{3}exec_result\0\u{3}fs_listed\0\u{3}fs_read_result\0\u{1}error\0\u{3}pty_output\0\u{3}fs_write_result\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{3}task_detached\0\u{3}exec_result\0\u{3}fs_listed\0\u{3}fs_read_result\0\u{1}error\0\u{3}pty_output\0\u{3}fs_write_result\0\u{b}enrollment_key_created\0\u{c}\u{3}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3301,19 +3186,6 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .authError(v)
-        }
-      }()
-      case 3: try {
-        var v: Coflux_V1_EnrollmentKeyCreated?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .enrollmentKeyCreated(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .enrollmentKeyCreated(v)
         }
       }()
       case 4: try {
@@ -3594,10 +3466,6 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .authError?: try {
       guard case .authError(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
-    }()
-    case .enrollmentKeyCreated?: try {
-      guard case .enrollmentKeyCreated(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
     }()
     case .deviceAuthorizeInfo?: try {
       guard case .deviceAuthorizeInfo(let v)? = self.payload else { preconditionFailure() }
