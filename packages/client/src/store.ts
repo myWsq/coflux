@@ -30,6 +30,8 @@ export type CofluxClientOptions = {
   serverUrl: string;
   /** 会话 token 的 localStorage key，两端（web/移动）各自命名空间。 */
   tokenStorageKey: string;
+  /** 构建版本（git short SHA；vite dev 固定 "dev"），随认证上报供 server 做版本准入（plan 033）。 */
+  buildId: string;
   /** 提供时启用外部登录（如 Supabase）：login() 走该 provider 换取 supabaseToken，
    * 且 authError 文案切换为「会话过期」；不提供则走用户名密码直登，文案为「用户名或密码错误」。 */
   loginProvider?: LoginProvider;
@@ -100,8 +102,14 @@ export function createCofluxClient(options: CofluxClientOptions) {
     snapshotRevision: 0,
   }));
 
+  // 版本失配 reload 防循环（plan 033）：一次性守卫（key 带 tokenStorageKey 命名空间，
+  // 与 web/mobile 各自 token key 一致，避免同源双 app 互相踩）——首次 reload 拿新 bundle；
+  // reload 后仍失配（如 index.html 被缓存）则不再 reload，改停止重连 + 提示强制刷新。
+  const outdatedReloadKey = `${options.tokenStorageKey}_outdated_reloaded_for`;
+
   const connection = createConnection({
     url: options.serverUrl,
+    buildId: options.buildId,
     onStatus: (status) => {
       store.setState({ status });
       // 断线时 in-flight 的 fsList 无法再收到响应，统一以失败结清避免调用方悬挂。
@@ -173,6 +181,21 @@ export function createCofluxClient(options: CofluxClientOptions) {
           authState: "auth-failed",
         });
         shouldRetry = false;
+        break;
+      }
+      case "clientOutdated": {
+        // server 判定本连接的构建版本失配（plan 033）：token 不清（无感升级），只判断是否已为
+        // 当前 buildId reload 过，避免 index.html 被缓存导致 reload 后仍失配的无限刷新循环。
+        if (sessionStorage.getItem(outdatedReloadKey) !== options.buildId) {
+          sessionStorage.setItem(outdatedReloadKey, options.buildId);
+          location.reload();
+        } else {
+          shouldRetry = false;
+          store.setState({
+            loginError: "客户端版本已更新，自动刷新未生效，请强制刷新页面（忽略缓存）后重试",
+            authState: "auth-failed",
+          });
+        }
         break;
       }
       case "stateSnapshot": {

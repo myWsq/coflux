@@ -71,6 +71,17 @@ public struct Coflux_V1_ClientAuth: Sendable {
   /// Clears the value of `supabaseToken`. Subsequent reads from it will return its default value.
   public mutating func clearSupabaseToken() {self._supabaseToken = nil}
 
+  /// 构建版本（git short SHA；vite dev 固定 "dev"）：server 配了 COFLUX_BUILD_ID 时用于
+  /// 认证阶段的版本准入（plan 033）。缺失本字段是"旧 bundle"的检测信号本身，不可伪造更早语义。
+  public var clientVersion: String {
+    get {_clientVersion ?? String()}
+    set {_clientVersion = newValue}
+  }
+  /// Returns true if `clientVersion` has been explicitly set.
+  public var hasClientVersion: Bool {self._clientVersion != nil}
+  /// Clears the value of `clientVersion`. Subsequent reads from it will return its default value.
+  public mutating func clearClientVersion() {self._clientVersion = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -79,6 +90,7 @@ public struct Coflux_V1_ClientAuth: Sendable {
   fileprivate var _password: String? = nil
   fileprivate var _clientToken: String? = nil
   fileprivate var _supabaseToken: String? = nil
+  fileprivate var _clientVersion: String? = nil
 }
 
 /// 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地）
@@ -1074,6 +1086,20 @@ public struct Coflux_V1_ServerError: Sendable {
   public init() {}
 }
 
+/// build 版本失配（新客户端跑旧代码判定的对称面，plan 033）：认证阶段 server 比对
+/// client_version 与 COFLUX_BUILD_ID 不一致时下发本消息后关闭连接。旧 bundle（缺失
+/// client_version）走 AuthError 而非本消息——本消息对它是无法理解的未知 case（见
+/// apps/server/src/hub.ts handleClientAuth）。
+public struct Coflux_V1_ClientOutdated: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_ServerToClient: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1257,6 +1283,14 @@ public struct Coflux_V1_ServerToClient: Sendable {
     set {payload = .fsWriteResult(newValue)}
   }
 
+  public var clientOutdated: Coflux_V1_ClientOutdated {
+    get {
+      if case .clientOutdated(let v)? = payload {return v}
+      return Coflux_V1_ClientOutdated()
+    }
+    set {payload = .clientOutdated(newValue)}
+  }
+
   /// 数据面（高频）
   public var ptyOutput: Coflux_V1_PtyOutput {
     get {
@@ -1291,6 +1325,7 @@ public struct Coflux_V1_ServerToClient: Sendable {
     case fsReadResult(Coflux_V1_FsReadResult)
     case error(Coflux_V1_ServerError)
     case fsWriteResult(Coflux_V1_FsWriteResult)
+    case clientOutdated(Coflux_V1_ClientOutdated)
     /// 数据面（高频）
     case ptyOutput(Coflux_V1_PtyOutput)
 
@@ -1305,7 +1340,7 @@ fileprivate let _protobuf_package = "coflux.v1"
 
 extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientAuth"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}username\0\u{1}password\0\u{3}client_token\0\u{3}supabase_token\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}username\0\u{1}password\0\u{3}client_token\0\u{3}supabase_token\0\u{3}client_version\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1317,6 +1352,7 @@ extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
       case 2: try { try decoder.decodeSingularStringField(value: &self._password) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self._clientToken) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self._supabaseToken) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self._clientVersion) }()
       default: break
       }
     }
@@ -1339,6 +1375,9 @@ extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     try { if let v = self._supabaseToken {
       try visitor.visitSingularStringField(value: v, fieldNumber: 4)
     } }()
+    try { if let v = self._clientVersion {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 5)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1347,6 +1386,7 @@ extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     if lhs._password != rhs._password {return false}
     if lhs._clientToken != rhs._clientToken {return false}
     if lhs._supabaseToken != rhs._supabaseToken {return false}
+    if lhs._clientVersion != rhs._clientVersion {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3267,9 +3307,28 @@ extension Coflux_V1_ServerError: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
   }
 }
 
+extension Coflux_V1_ClientOutdated: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ClientOutdated"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap()
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    // Load everything into unknown fields
+    while try decoder.nextFieldNumber() != nil {}
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ClientOutdated, rhs: Coflux_V1_ClientOutdated) -> Bool {
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToClient"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{3}enrollment_key_created\0\u{3}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{3}task_detached\0\u{3}exec_result\0\u{3}fs_listed\0\u{3}fs_read_result\0\u{1}error\0\u{3}pty_output\0\u{3}fs_write_result\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{3}enrollment_key_created\0\u{3}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{3}task_detached\0\u{3}exec_result\0\u{3}fs_listed\0\u{3}fs_read_result\0\u{1}error\0\u{3}pty_output\0\u{3}fs_write_result\0\u{3}client_outdated\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3576,6 +3635,19 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .fsWriteResult(v)
         }
       }()
+      case 24: try {
+        var v: Coflux_V1_ClientOutdated?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .clientOutdated(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .clientOutdated(v)
+        }
+      }()
       default: break
       }
     }
@@ -3678,6 +3750,10 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .fsWriteResult?: try {
       guard case .fsWriteResult(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 23)
+    }()
+    case .clientOutdated?: try {
+      guard case .clientOutdated(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 24)
     }()
     case nil: break
     }

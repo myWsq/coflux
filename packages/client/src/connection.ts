@@ -20,18 +20,20 @@ const RECONNECT_MAX_MS = 15_000;
 
 type ConnectionOptions = {
   url: string;
+  /** 构建版本（git short SHA；vite dev 固定 "dev"）：随每次认证上报，供 server 做版本准入（plan 033）。 */
+  buildId: string;
   onStatus: (status: ConnectionStatus) => void;
   onMessage: (payload: ServerPayload) => void;
   /** 返回 null 表示当前不应自动重连（未登录 / 已登出 / 认证失败）。 */
   reconnectCredential: () => AuthCredential | null;
 };
 
-export function buildAuthPayload(credential: AuthCredential): ClientToServerPayload {
+export function buildAuthPayload(credential: AuthCredential, buildId: string): ClientToServerPayload {
   return "token" in credential
-    ? { case: "clientAuth", value: { clientToken: credential.token } }
+    ? { case: "clientAuth", value: { clientToken: credential.token, clientVersion: buildId } }
     : "supabaseToken" in credential
-      ? { case: "clientAuth", value: { supabaseToken: credential.supabaseToken } }
-      : { case: "clientAuth", value: { username: credential.username, password: credential.password } };
+      ? { case: "clientAuth", value: { supabaseToken: credential.supabaseToken, clientVersion: buildId } }
+      : { case: "clientAuth", value: { username: credential.username, password: credential.password, clientVersion: buildId } };
 }
 
 /**
@@ -70,6 +72,10 @@ export function createConnection(options: ConnectionOptions) {
     clearReconnectTimer();
     options.onStatus("connecting");
 
+    // 换新连接前先关旧的：否则旧 socket 对象只是被覆盖引用丢弃，底层 WS 在 server 侧继续
+    // 存活为只收不发的幽灵连接（不会自动因失去 JS 引用而关闭）。
+    socket?.close();
+
     const ws = new WebSocket(options.url);
     ws.binaryType = "arraybuffer";
     socket = ws;
@@ -77,7 +83,7 @@ export function createConnection(options: ConnectionOptions) {
     ws.onopen = () => {
       if (socket !== ws) return;
       options.onStatus("connected");
-      ws.send(encodeClientToServer(create(ClientToServerSchema, { payload: buildAuthPayload(credential) })));
+      ws.send(encodeClientToServer(create(ClientToServerSchema, { payload: buildAuthPayload(credential, options.buildId) })));
     };
 
     ws.onclose = () => {
