@@ -7,8 +7,9 @@
 coflux：可跑在任意节点上的 **daemon**，本地起 PTY、驱动 Agent（claude/codex CLI），主动外连**中心服务器**；**client**（web）连服务器即可触达任意 daemon。模型类 Tailscale（账号 → 设备 → 项目 → 工作区 → 任务 → 会话）。
 
 - `apps/server`（TS）：账号/设备认证 + 编排路由 + sqlite 持久化。
-- `apps/web`（TS）：Vite + React + xterm 终端。
-- `packages/{protocol,core}`（TS）：server/web 共享的线协议类型与日志。
+- `apps/web`（TS）：Vite + React + xterm 终端。**桌面端，是默认的迭代对象**。
+- `apps/mobile`（TS）：移动随身端（m.coflux.dev，plan 032）。**已冻结**：功能锁定在 2026-07 的形态（列表/详情 + 终端快捷键条 + 简版 diff），"迭代 web"默认指 `apps/web`，不给 mobile 加功能、不同步桌面新特性；仅当共享层（protocol/client）变更弄坏它的构建时做最小修复。
+- `packages/{protocol,core,client}`（TS）：共享的线协议类型、日志、协议 client + store（client 为 web/mobile 双端共享）。
 - `crates/{protocol,supervisor,worker}`（Rust）：**daemon，全 Rust、零 node 运行时**。
   - `supervisor`：持 PTY(portable-pty) + scrollback + 背压；UDS server；起/管/重启 worker + 版本切换/观察期回滚。极少升级。
   - `worker`（tokio）：连服务器(WS)/认证/重连 + git/exec/fs + 两级 resync。频繁升级（热升级只换它，PTY 在 supervisor 存活）。
