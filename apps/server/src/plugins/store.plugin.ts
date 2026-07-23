@@ -25,14 +25,13 @@ export function storePlugin() {
 }
 
 async function bootstrap(store: Store) {
-  // 以下三项（default 账号 seed / env 登记密钥 seed / credFingerprint 撤销）都是单账号 + env 口令的伴生物，
-  // 仅 local 模式执行。supabase 模式下账号按 userId lazy 建、登记密钥走 UI 生成。
+  // 以下两项（default 账号 seed / credFingerprint 撤销）都是单账号 + env 口令的伴生物，
+  // 仅 local 模式执行。supabase 模式下账号按 userId lazy 建。
   if (config.authProvider === "local") {
     if (!(await store.getAccount(config.accountId))) {
       await store.createAccount({ id: config.accountId, name: "default", createdAt: Date.now() });
       log.info("created account", { accountId: config.accountId });
     }
-    await store.upsertEnrollmentKey(hashToken(config.enrollKey), config.accountId, Date.now());
     // 不再 seed 静态登录令牌；web 用用户名+密码登录，登录时签发会话 token。
 
     // 凭证变更检测：用户名/密码改了（改 env 重启）就撤销全部已签发会话 token，
