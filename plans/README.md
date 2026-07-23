@@ -27,6 +27,6 @@
 | 023 | [web 终端拖拽小文件上传（drop 落 daemon 临时目录并注入路径）](023-terminal-file-drag-upload.md) | DONE (2a1636d) | none |
 | 024 | [工作区 git diff 统计展示（+X −Y）](024-workspace-diff-stats.md) | DONE (ce70a4a) | none |
 | 025 | [工作区「变更」tab + diff 查看视图](025-workspace-changes-diff-view.md) | DONE (a3046df) | none |
-| 026 | [侧边栏工作区行右端 hover 遮罩统一 + diff 数字固定行末](026-sidebar-diff-hover-mask.md) | TODO | none |
+| 026 | [侧边栏工作区行右端 hover 遮罩统一 + diff 数字固定行末](026-sidebar-diff-hover-mask.md) | DONE (a27a12e) | none |
 
 执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026。
