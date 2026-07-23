@@ -302,18 +302,8 @@ export function Sidebar(props: SidebarProps) {
                             >
                               <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
                               <span className="min-w-0 flex-1 truncate text-base">{workspace.branch}</span>
-                              {/* git diff 累计统计（plan 024）：X=Y=0 时不渲染 */}
-                              {workspace.additions > 0 || workspace.deletions > 0 ? (
-                                <span
-                                  className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums"
-                                  title={`+${workspace.additions} −${workspace.deletions}`}
-                                >
-                                  <span className="text-success">+{workspace.additions}</span>{" "}
-                                  <span className="text-destructive">−{workspace.deletions}</span>
-                                </span>
-                              ) : null}
-                              {/* 右端小字：自定义名称（name ≠ branch 时才有）；主工作区未起名时默认叫「主工作区」。
-                                  hover 渐变淡出给删除按钮让位 */}
+                              {/* 右端内容：自定义名称（name ≠ branch 时才有；主工作区未起名时默认叫「主工作区」）+ git diff 累计统计（plan 024，X=Y=0 时不渲染）。
+                                  diff 固定在最末；两者作为整体 hover 渐变淡出给删除按钮让位 */}
                               {(() => {
                                 const label =
                                   workspace.name && workspace.name !== workspace.branch
@@ -321,18 +311,32 @@ export function Sidebar(props: SidebarProps) {
                                     : workspace.isMain
                                       ? "主工作区"
                                       : null;
-                                return label ? (
+                                const hasDiff = workspace.additions > 0 || workspace.deletions > 0;
+                                if (!label && !hasDiff) return null;
+                                return (
                                   <span
                                     className={cn(
-                                      "max-w-24 truncate text-xs text-muted-foreground",
+                                      "flex shrink-0 items-center gap-2",
                                       !workspace.isMain &&
                                         "group-hover/workspace:[mask-image:linear-gradient(to_left,transparent_18px,black_44px)]",
                                     )}
-                                    title={label}
                                   >
-                                    {label}
+                                    {label ? (
+                                      <span className="max-w-24 truncate text-xs text-muted-foreground" title={label}>
+                                        {label}
+                                      </span>
+                                    ) : null}
+                                    {hasDiff ? (
+                                      <span
+                                        className="whitespace-nowrap font-mono text-xs tabular-nums"
+                                        title={`+${workspace.additions} −${workspace.deletions}`}
+                                      >
+                                        <span className="text-success">+{workspace.additions}</span>{" "}
+                                        <span className="text-destructive">−{workspace.deletions}</span>
+                                      </span>
+                                    ) : null}
                                   </span>
-                                ) : null;
+                                );
                               })()}
                             </button>
                             {/* 主工作区不可删除：不渲染删除入口（服务端同样会拒绝，此处是入口层收敛） */}
