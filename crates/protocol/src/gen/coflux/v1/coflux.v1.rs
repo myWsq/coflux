@@ -300,7 +300,7 @@ pub struct DaemonAuth {
     #[prost(string, tag="4")]
     pub arch: ::prost::alloc::string::String,
 }
-/// 未登记且无 enrollmentKey 时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
+/// 本地无凭证（未登记）时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DaemonEnrollRequest {
     #[prost(string, tag="1")]

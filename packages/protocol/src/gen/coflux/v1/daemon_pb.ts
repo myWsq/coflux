@@ -51,7 +51,7 @@ export const DaemonAuthSchema: GenMessage<DaemonAuth> = /*@__PURE__*/
   messageDesc(file_coflux_v1_daemon, 0);
 
 /**
- * 未登记且无 enrollmentKey 时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
+ * 本地无凭证（未登记）时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
  *
  * @generated from message coflux.v1.DaemonEnrollRequest
  */
