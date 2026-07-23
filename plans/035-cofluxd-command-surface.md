@@ -7,8 +7,7 @@
 > verification happens outside its session. Stop on any STOP condition. When
 > complete, update this plan in `plans/README.md`.
 >
-> Drift check: `git diff --stat <planned-sha>..HEAD -- packages/cli/cofluxd.mjs README.md tests/src/`
-> （planned-sha 在 plan 034 完成后回填；本 plan 依赖 034 的 CLI 现场。）
+> Drift check: `git diff --stat 2e2e92a..HEAD -- packages/cli/cofluxd.mjs README.md tests/src/`
 
 ## Status
 
@@ -18,7 +17,7 @@
 - Depends on: plans/033-worker-connection-resilience.md（DONE）、plans/034-remove-enroll-key.md
 - Category: dx
 - Execution: subagent sonnet
-- Planned at: 034 完成后回填 sha，2026-07-23
+- Planned at: `2e2e92a`, 2026-07-23
 
 ## Requirement
 
