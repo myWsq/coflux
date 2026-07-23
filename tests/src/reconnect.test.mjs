@@ -28,8 +28,7 @@ test("服务器重启：DB 持久化 + daemon resync 重挂运行中任务 + scr
 
   // 杀掉并重启服务器（同一 DB）；daemon 仍存活，会重连重认证并 resync
   await stack.restartServer();
-  // 给 daemon 重连 + resync 的时间
-  await new Promise((r) => setTimeout(r, 4500));
+  await stack.waitDaemonOnline();
 
   const c = stack.makeClient();
   const snap = await c.authSubscribe();
