@@ -9,18 +9,6 @@ import "coflux/v1/common.proto";
 
 // ===== Daemon → Server 载荷 =====
 
-message DaemonEnroll {
-  string enrollment_key = 1;
-  string name = 2;
-  string host = 3;
-  string platform = 4;
-  // 热更新编排（plan 015）：worker/supervisor 当前版本 + CPU 架构（std::env::consts::ARCH）。
-  // 旧 daemon 不带这三个字段 → server 收到空串，按"不上报"处理（不参与自动推送比对）。
-  string worker_version = 5;
-  string supervisor_version = 6;
-  string arch = 7;
-}
-
 message DaemonAuth {
   string device_token = 1;
   string worker_version = 2;
@@ -91,8 +79,9 @@ message ProxyClosed {
 }
 
 message DaemonToServer {
+  reserved 1;
+  reserved "daemon_enroll";
   oneof payload {
-    DaemonEnroll daemon_enroll = 1;
     DaemonAuth daemon_auth = 2;
     DaemonEnrollRequest daemon_enroll_request = 3;
     DaemonResync daemon_resync = 4;

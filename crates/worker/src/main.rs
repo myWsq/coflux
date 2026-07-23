@@ -36,7 +36,6 @@ use dec_modes::DecModeTracker;
 #[derive(Clone)]
 struct Config {
     server_url: String,
-    enroll_key: String,
     device_name: String,
     host: String,
     platform: String,
@@ -192,7 +191,6 @@ async fn main() {
     let s = Settings::load(&home); // 用户配置，env 同名变量可覆盖
     let cfg = Arc::new(Config {
         server_url: pick("COFLUX_SERVER", s.server_url, "ws://localhost:8787/daemon"),
-        enroll_key: pick("COFLUX_ENROLL_KEY", s.enroll_key, "dev-enroll"),
         device_name: pick("COFLUX_DEVICE_NAME", s.device_name, &env_or("HOSTNAME", "coflux-daemon".into())),
         host: env_or("HOSTNAME", "localhost".into()),
         platform: std::env::consts::OS.to_string(),
@@ -533,9 +531,8 @@ async fn run_server_connection(
     // 隧道状态绑定单次 server 连接生命周期：不跨重连恢复（浏览器侧 TCP 早已断，恢复无意义）
     let tunnels = tunnel::TunnelSet::new(to_server_tx.clone());
 
-    // 认证 / 登记：三选一。credentials.json 存在 → daemon.auth 重连；否则看有没有配 enrollKey——
-    // 非空走经典 daemon.enroll；空（cofluxd 默认 up 零参数写入的显式 ""，见 pick() 的 env-only
-    // filter 语义）走 Tailscale 式 daemon.enrollRequest，等 web 端确认后 server 原地推 daemon.enrolled。
+    // 认证 / 登记：二选一。credentials.json 存在 → daemon.auth 重连；否则走 Tailscale 式
+    // daemon.enrollRequest，等 web 端确认后 server 原地推 daemon.enrolled。
     let creds = state.lock().unwrap().credentials.clone();
     let init = match creds {
         Some(c) => daemon_to_server::Payload::DaemonAuth(wire::DaemonAuth {
@@ -544,16 +541,7 @@ async fn run_server_connection(
             supervisor_version: cfg.supervisor_version.clone(),
             arch: cfg.arch.clone(),
         }),
-        None if cfg.enroll_key.is_empty() => daemon_to_server::Payload::DaemonEnrollRequest(wire::DaemonEnrollRequest {
-            name: cfg.device_name.clone(),
-            host: cfg.host.clone(),
-            platform: cfg.platform.clone(),
-            worker_version: cfg.worker_version.clone(),
-            supervisor_version: cfg.supervisor_version.clone(),
-            arch: cfg.arch.clone(),
-        }),
-        None => daemon_to_server::Payload::DaemonEnroll(wire::DaemonEnroll {
-            enrollment_key: cfg.enroll_key.clone(),
+        None => daemon_to_server::Payload::DaemonEnrollRequest(wire::DaemonEnrollRequest {
             name: cfg.device_name.clone(),
             host: cfg.host.clone(),
             platform: cfg.platform.clone(),
@@ -690,7 +678,7 @@ async fn on_server_message(
         server_to_daemon::Payload::DaemonEnrolled(wire::DaemonEnrolled { daemon_id, device_token }) => {
             let c = Credentials { server_url: cfg.server_url.clone(), daemon_id: daemon_id.clone(), device_token };
             creds_store.save(&c);
-            creds_store.clear_pending_auth(); // 无论是经典 enroll 还是 authorize 兑现来的，都不再是 pending 了
+            creds_store.clear_pending_auth(); // 授权兑现后不再是 pending 了
             {
                 let mut s = state.lock().unwrap();
                 s.credentials = Some(c);
@@ -716,7 +704,7 @@ async fn on_server_message(
                 creds_store.clear();
                 state.lock().unwrap().credentials = None;
             } else {
-                eprintln!("[worker] enrollment key invalid; exiting");
+                eprintln!("[worker] 不可恢复的认证错误，退出");
                 std::process::exit(1);
             }
         }

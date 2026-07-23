@@ -12,39 +12,9 @@
 use prost::Message;
 
 use crate::wire::{
-    daemon_to_server, server_to_daemon, DaemonAuthError, DaemonEnroll, DaemonEnrollRequest, DaemonToServer, ExecRun, FsEntry, FsEntryKind, ProjectValidated, PtyOutput, ServerToDaemon,
-    SessionCreate, SessionPorts,
+    daemon_to_server, server_to_daemon, DaemonAuthError, DaemonEnrollRequest, DaemonToServer, ExecRun, FsEntry, FsEntryKind, ProjectValidated, PtyOutput, ServerToDaemon, SessionCreate,
+    SessionPorts,
 };
-
-/// 信封 oneof 分派：DaemonToServer 编码 DaemonEnroll，解码后 match 回同一 variant、字段原样。
-#[test]
-fn daemon_to_server_envelope_dispatches_to_daemon_enroll() {
-    let env = DaemonToServer {
-        payload: Some(daemon_to_server::Payload::DaemonEnroll(DaemonEnroll {
-            enrollment_key: "k".into(),
-            name: "dev".into(),
-            host: "h".into(),
-            platform: "darwin".into(),
-            worker_version: "wv1".into(),
-            supervisor_version: "sv1".into(),
-            arch: "aarch64".into(),
-        })),
-    };
-    let bytes = env.encode_to_vec();
-    let back = DaemonToServer::decode(bytes.as_slice()).unwrap();
-    match back.payload {
-        Some(daemon_to_server::Payload::DaemonEnroll(m)) => {
-            assert_eq!(m.enrollment_key, "k");
-            assert_eq!(m.name, "dev");
-            assert_eq!(m.host, "h");
-            assert_eq!(m.platform, "darwin");
-            assert_eq!(m.worker_version, "wv1");
-            assert_eq!(m.supervisor_version, "sv1");
-            assert_eq!(m.arch, "aarch64");
-        }
-        other => panic!("wrong variant: {other:?}"),
-    }
-}
 
 /// 反方向：ServerToDaemon 编码 SessionCreate，解码后分派正确、可选字段（shell 缺省）为 None。
 #[test]
