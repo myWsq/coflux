@@ -6,6 +6,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { Icon } from "@astryxdesign/core/Icon";
 import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from "@astryxdesign/core/Layout";
+import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 
 import type { FsListResult } from "@/client/store";
@@ -56,6 +57,8 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
   const [cwdAbs, setCwdAbs] = useState("");
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [pathFilter, setPathFilter] = useState("");
+  /** 是否显示 `.` 开头的隐藏文件夹；会话级状态，重开对话框重置为 false */
+  const [showHidden, setShowHidden] = useState(false);
   /** -1 = 未进入键盘选择；按 ↓ 才从 0 开始高亮 */
   const [highlight, setHighlight] = useState(-1);
   const [loading, setLoading] = useState(false);
@@ -76,10 +79,14 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
   }, [onlineDaemons, query]);
 
   const filteredEntries = useMemo(() => {
-    const q = pathFilter.trim().toLowerCase();
-    if (!q) return entries;
-    return entries.filter((entry) => entry.name.toLowerCase().includes(q));
-  }, [entries, pathFilter]);
+    const trimmed = pathFilter.trim();
+    const q = trimmed.toLowerCase();
+    // 过滤词以 `.` 开头时临时放行隐藏目录参与匹配（对齐 VSCode quick-open）
+    const includeHidden = showHidden || trimmed.startsWith(".");
+    const visible = includeHidden ? entries : entries.filter((entry) => !entry.name.startsWith("."));
+    if (!q) return visible;
+    return visible.filter((entry) => entry.name.toLowerCase().includes(q));
+  }, [entries, pathFilter, showHidden]);
 
   const listLength = step === "device" ? filteredDaemons.length : filteredEntries.length;
 
@@ -91,6 +98,7 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
     setCwdAbs("");
     setEntries([]);
     setPathFilter("");
+    setShowHidden(false);
     setHighlight(-1);
     setError("");
     setDaemonId("");
@@ -100,7 +108,7 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
 
   useEffect(() => {
     setHighlight(-1);
-  }, [step, query, pathFilter, entries]);
+  }, [step, query, pathFilter, entries, showHidden]);
 
   useEffect(() => {
     if (highlight >= 0 && highlight >= listLength) {
@@ -133,7 +141,7 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
       setCwdAbs(result.path);
       if (path === "~") setHomeAbs(result.path);
     }
-    // 与 Cursor 一致：展示全部子目录（含隐藏），方便定位仓库
+    // 拿全部子目录（含隐藏），隐藏项默认过滤在 filteredEntries 里，开关/`.` 前缀可临时放行
     setEntries(result.entries.filter((entry) => entry.kind === FsEntryKind.DIR));
     queueMicrotask(() => pathInputRef.current?.focus());
   }
@@ -285,9 +293,19 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
           <DialogHeader
             title="导入项目"
             endContent={
-              <Text type="body" color="secondary" size="sm">
-                {stepLabel}
-              </Text>
+              <HStack gap={3} vAlign="center">
+                {step === "browse" ? (
+                  <Switch
+                    label="显示隐藏项"
+                    labelPosition="start"
+                    value={showHidden}
+                    onChange={setShowHidden}
+                  />
+                ) : null}
+                <Text type="body" color="secondary" size="sm">
+                  {stepLabel}
+                </Text>
+              </HStack>
             }
             onOpenChange={props.onOpenChange}
             hasDivider={false}
