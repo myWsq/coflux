@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { TaskStatus } from "@coflux/protocol";
-import { startStack, mkRepo, rawDaemon } from "./harness.mjs";
+import { startStack, mkRepo, rawDaemon, tokenFromUrl } from "./harness.mjs";
 
 const PORT = 8821;
 let stack;
@@ -127,18 +127,18 @@ test("关闭终端：运行中任务 taskStop+taskRemove 连发，删除后不�
   c.close();
 });
 
-test("添加设备：web 生成登记密钥，新 daemon 可用其登记", async () => {
-  const c = stack.makeClient();
-  await c.authSubscribe();
-  c.send({ case: "clientCreateEnrollmentKey" });
-  const created = await c.waitFor((m) => m.case === "enrollmentKeyCreated", "enrollmentKey.created");
-  assert.ok(created.enrollmentKey.startsWith("cf_enroll_"), "登记密钥格式");
-  assert.equal(created.daemonUrl, `ws://127.0.0.1:${PORT}/daemon`, "daemonUrl 指向本栈");
-
+test("添加设备：浏览器授权登记新 daemon", async () => {
   // 用 harness 的裸 /daemon 连接（协议是 protobuf 信封，不再手撸 JSON/WebSocket）
   const dev = rawDaemon(PORT);
   await dev.ready;
-  dev.send({ case: "daemonEnroll", enrollmentKey: created.enrollmentKey, name: "dev2", host: "h2", platform: "test" });
+  dev.send({ case: "daemonEnrollRequest", name: "dev2", host: "h2", platform: "test" });
+  const pending = await dev.waitFor((m) => m.case === "daemonAuthorizePending", "authorizePending");
+
+  const c = stack.makeClient();
+  await c.authSubscribe();
+  c.send({ case: "deviceAuthorize", token: tokenFromUrl(pending.url) });
+  await c.waitFor((m) => m.case === "deviceAuthorized", "device.authorized");
+
   const enrolled = await dev.waitFor((m) => m.case === "daemonEnrolled", "daemon.enrolled");
   assert.ok(enrolled.daemonId);
   dev.close();

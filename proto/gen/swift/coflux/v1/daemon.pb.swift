@@ -47,7 +47,7 @@ public struct Coflux_V1_DaemonAuth: Sendable {
   public init() {}
 }
 
-/// 未登记且无 enrollmentKey 时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
+/// 本地无凭证（未登记）时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
 public struct Coflux_V1_DaemonEnrollRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
