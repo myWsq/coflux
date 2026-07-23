@@ -116,12 +116,11 @@ async function ensureBinaries({ version, binDir }) {
   }
 }
 
-// 写 settings.json（daemon 直接读；含一次性登记密钥 → 600）。未提供 enrollKey 时保留旧值。
-function applyConfig({ serverUrl, enrollKey, deviceName, shell }) {
+// 写 settings.json（daemon 直接读）。
+function applyConfig({ serverUrl, deviceName, shell }) {
   fs.mkdirSync(HOME, { recursive: true });
   fs.chmodSync(HOME, 0o700);
-  const old = readSettings();
-  const settings = { serverUrl, deviceName, enrollKey: enrollKey || old.enrollKey || "" };
+  const settings = { serverUrl, deviceName };
   if (shell) settings.shell = shell;
   fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
   return settings;
@@ -183,17 +182,17 @@ function stopService() {
   else if (IS_LINUX) run("systemctl", ["--user", "stop", "coflux-daemon.service"]);
 }
 
-async function applyAndStart({ serverUrl, enrollKey, deviceName, shell, version, binDir, noStart }) {
+async function applyAndStart({ serverUrl, deviceName, shell, version, binDir, noStart }) {
   await ensureBinaries({ version, binDir });
-  const settings = applyConfig({ serverUrl, enrollKey, deviceName, shell });
+  applyConfig({ serverUrl, deviceName, shell });
   // 非默认服务器醒目提示：保存值/--server 仍生效（不强制覆盖），但防止 staging 之类残留值静默错连。
   if (serverUrl !== DEFAULT_SERVER) {
     console.log(`⚠ 使用非默认服务器: ${serverUrl}`);
   }
   installService(!noStart);
   console.log(noStart ? "已安装（未启动）。" : `✓ daemon 已启动 → ${serverUrl}`);
-  if (!noStart && !settings.enrollKey && !fs.existsSync(CRED)) {
-    // 默认流程（零参数 up）：无登记密钥、未登记 → 走浏览器授权，轮询 daemon 落盘的链接/凭证文件。
+  if (!noStart && !fs.existsSync(CRED)) {
+    // 未登记 → 走浏览器授权，轮询 daemon 落盘的链接/凭证文件。
     await waitForAuthorization();
   } else {
     cmdStatus();
@@ -236,7 +235,6 @@ async function cmdUp(v) {
   const s = readSettings();
   await applyAndStart({
     serverUrl: v.server || s.serverUrl || DEFAULT_SERVER,
-    enrollKey: v["enroll-key"],
     deviceName: v.name || s.deviceName || hostname(),
     shell: v.shell || s.shell,
     version: v.version, binDir: v["bin-dir"], noStart: v["no-start"],
@@ -250,14 +248,13 @@ async function cmdOnboard(v) {
   const serverUrl = v.server || s.serverUrl || DEFAULT_SERVER;
   console.log("\n  欢迎使用 coflux —— 配置这台设备\n  ──────────────────────────────\n");
   console.log(`  服务器: ${serverUrl}\n`);
-  console.log("  登记方式：留空走浏览器授权（推荐，起服务后打印链接，登录确认即可）；\n  已有登记密钥可直接粘贴。\n");
+  console.log("  登记方式：起服务后打印浏览器授权链接，登录确认即可。\n");
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const enrollKey = (v["enroll-key"] ?? (await rl.question("登记密钥（可留空）: "))).trim();
     const deviceName = (await rl.question(`设备名 [${s.deviceName || hostname()}]: `)).trim() || s.deviceName || hostname();
     rl.close();
     console.log("");
-    await applyAndStart({ serverUrl, enrollKey, deviceName, shell: s.shell, version: v.version, binDir: v["bin-dir"], noStart: v["no-start"] });
+    await applyAndStart({ serverUrl, deviceName, shell: s.shell, version: v.version, binDir: v["bin-dir"], noStart: v["no-start"] });
   } finally {
     rl.close();
   }
@@ -366,7 +363,7 @@ const HELP = `cofluxd —— coflux daemon 管理
 
   cofluxd                 首次=交互式配置(onboard)，已配置=status
   cofluxd onboard         交互式配置并启用
-  cofluxd up [flags]      非交互装/起，零参数即可（不带 --enroll-key 时打印浏览器授权链接）
+  cofluxd up [flags]      非交互装/起，零参数即可（打印浏览器授权链接）
   cofluxd reload          按 ~/.coflux/settings.json 重载并重启
   cofluxd update          更新二进制并重启（worker 另可远程热升级）
   cofluxd status          服务器/登记（含"等待授权"）/服务状态
@@ -375,15 +372,14 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd down            停止
   cofluxd uninstall [--purge]   卸载（--purge 连二进制/配置/凭证一并删）
 
-up flags: --server <ws://.../daemon>  --enroll-key <KEY>（留空则走浏览器授权）  --name <名>  --shell <路径>
+up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
 通用: --version <vX|latest>(默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
-配置都在 ~/.coflux/settings.json（serverUrl/enrollKey/deviceName/shell，含密钥故 600），daemon 直接读；改后 cofluxd reload 生效。`;
+配置都在 ~/.coflux/settings.json（serverUrl/deviceName/shell），daemon 直接读；改后 cofluxd reload 生效。`;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     server: { type: "string" },
-    "enroll-key": { type: "string" },
     name: { type: "string" },
     shell: { type: "string" },
     version: { type: "string", default: "latest" },

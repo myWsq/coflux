@@ -24,13 +24,12 @@ daemon 是预编译的 Rust 二进制，用 `cofluxd`（npm）装成系统服务
 
 ```bash
 npm i -g cofluxd
-cofluxd                 # 首次=交互式引导（问服务器/登记密钥/设备名），之后=看状态
-# 或非交互（web「添加设备」给的命令）：
-cofluxd up --enroll-key <KEY>
+cofluxd                 # 首次=交互式引导（问服务器/设备名），之后=看状态
+cofluxd up               # 零参数即可：起服务后打印浏览器授权链接，登录确认即完成登记
 cofluxd status / logs -f / update / down / uninstall
 ```
 
-登记密钥从 web 控制台「添加设备」获取。**所有配置都在 `~/.coflux/settings.json`**（`serverUrl`/`enrollKey`/`deviceName`/`shell`，含密钥故 600），**daemon 直接读这个文件**；手改后 `cofluxd reload` 生效。不碰源码、不装 Rust。发版/签名见 [docs/RELEASING.md](docs/RELEASING.md)。
+登记走浏览器授权：`cofluxd up` 打印一次性授权链接，在浏览器用已登录账号打开确认即可（链接可在任意设备打开）。**所有配置都在 `~/.coflux/settings.json`**（`serverUrl`/`deviceName`/`shell`），**daemon 直接读这个文件**；手改后 `cofluxd reload` 生效。不碰源码、不装 Rust。发版/签名见 [docs/RELEASING.md](docs/RELEASING.md)。
 
 ## 快速开始
 
@@ -40,9 +39,9 @@ cofluxd status / logs -f / update / down / uninstall
 pnpm install          # 安装 TS 依赖
 
 # 分终端跑（dev = server + web；daemon 单独，因为它是 Rust 二进制）：
-pnpm dev:server       # 中心服务器，监听 :8787（开发期默认登记密钥 dev-enroll / 登录令牌 dev-client）
+pnpm dev:server       # 中心服务器，监听 :8787（开发期默认登录令牌 dev-client）
 pnpm dev:web          # Web，打开 http://localhost:5173
-pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 spawn worker）；用 dev-enroll 登记，凭证存 ~/.coflux
+pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 spawn worker）；走浏览器授权登记，凭证存 ~/.coflux
 ```
 
 1. 打开网页，用登录令牌 `dev-client` 登录（生产改 `COFLUX_CLIENT_TOKEN`）。
@@ -53,7 +52,7 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 
 ## 认证模型（Tailscale 式）
 
-- **登记密钥（EnrollmentKey，账号级）**：新机器首次用它登记进账号 → 服务器签发 **每设备 deviceToken**，daemon 本地持久化。
+- **浏览器授权**：新机器 daemon 发起授权请求，用户在已登录的浏览器里确认 → 服务器签发 **每设备 deviceToken**，daemon 本地持久化。
 - **设备凭证（deviceToken）**：后续连接用它认证；daemonId 由服务器签发绑定，无法冒充他机。
 - **登录令牌（ClientToken，账号级）**：web 用它登录账号，可见/可达该账号下所有设备。
 - 服务器只存 token 的 sha256 hash。详见 [docs/auth-design.md](docs/auth-design.md)。
@@ -64,7 +63,6 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 |------|------|------|
 | `COFLUX_PORT` | `8787` | server 监听端口 |
 | `DATABASE_URL` | 生产必填；`COFLUX_DEV=1` 时弱默认 `postgres://postgres:postgres@127.0.0.1:5432/postgres` | server 的 Postgres 连接串（含密码，视为秘密） |
-| `COFLUX_ENROLL_KEY` | `dev-enroll` | 账号登记密钥（server 配置，daemon 登记时用） |
 | `COFLUX_CLIENT_TOKEN` | `dev-client` | 账号登录令牌（server 配置，web 登录用） |
 | `COFLUX_PROXY_HOST` | `p.localhost` | 端口转发预览域：`<shortId>.<该值>` 按反代路由（Host 头分流，与 client/daemon WS 共用同一端口）；生产需配好泛解析 + 泛证书 |
 | `COFLUX_SERVER` | `ws://localhost:8787/daemon` | daemon 连接的服务器地址 |
