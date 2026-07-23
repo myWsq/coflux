@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { ExternalLink, GitBranch, GitCompareArrows, LoaderCircle, Plus, Router, SquareTerminal, Unplug, X } from "lucide-react";
+import { Diff, ExternalLink, GitBranch, LoaderCircle, Plus, Router, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
@@ -432,7 +432,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             )}
             onClick={() => setView("changes")}
           >
-            <GitCompareArrows className={cn("size-3 shrink-0", view === "changes" ? "opacity-90" : "opacity-50")} />
+            <Diff className={cn("size-3 shrink-0", view === "changes" ? "opacity-90" : "opacity-50")} />
             <span>变更</span>
             {workspace && (workspace.additions > 0 || workspace.deletions > 0) ? (
               <span className="whitespace-nowrap font-mono text-2xs tabular-nums" title={`+${workspace.additions} −${workspace.deletions}`}>
