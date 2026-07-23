@@ -7,7 +7,7 @@
 > verification happens outside its session. Stop on any STOP condition. When
 > complete, update this plan in `plans/README.md`.
 >
-> Drift check: `git diff --stat <planned-sha>..HEAD -- packages/client apps/web/src/components/workbench/parse-diff.ts apps/web/src/components/workbench/changes-view.tsx apps/web/src/components/workbench/terminal-pane.tsx apps/web/index.html`
+> Drift check: `git diff --stat 3f45104..HEAD -- packages/client apps/web/src/components/workbench/parse-diff.ts apps/web/src/components/workbench/changes-view.tsx apps/web/src/components/workbench/terminal-pane.tsx apps/web/index.html`
 
 ## Status
 
@@ -17,7 +17,7 @@
 - Depends on: plans/031-extract-client-package.md
 - Category: feature
 - Execution: subagent sonnet
-- Planned at: 031 完成后以其收尾 commit 为基线（写入 Drift check 的 `<planned-sha>` 由执行编排时替换为当时 HEAD）
+- Planned at: `3f45104`, 2026-07-23（031 DONE 后的基线）
 
 ## Requirement
 
