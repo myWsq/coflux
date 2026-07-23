@@ -46,8 +46,6 @@ export const config = {
   // Postgres 连接串（含密码，视为秘密）：生产必须显式提供（Supabase session pooler）；
   // dev（COFLUX_DEV=1）弱默认落到本机裸 Postgres。见 plans/002。
   databaseUrl: secret("DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/postgres"),
-  // 登记密钥 / env 口令仅 local 模式必需；supabase 模式下登记密钥走 UI 生成、web 登录走 Supabase。
-  enrollKey: secret("COFLUX_ENROLL_KEY", "dev-enroll", isLocal),
   // web 登录：用户名 + 密码（单租户）。登录成功签发会话 token 给 web 存用，用户不碰 token。
   // username 非秘密（账号名），保留默认；password 是秘密，local 生产必须由 env 提供。
   username: process.env.COFLUX_USERNAME ?? "admin",

@@ -45,7 +45,6 @@ export type CofluxState = {
   tasks: Task[];
   ports: Record<string, PortPreview[]>;
   detachedTaskIds: Set<string>;
-  enrollCommand: string | null;
   lastError: ClientError | null;
   snapshotRevision: number;
 };
@@ -95,7 +94,6 @@ export function createCofluxClient(options: CofluxClientOptions) {
     tasks: [],
     ports: {},
     detachedTaskIds: new Set<string>(),
-    enrollCommand: null,
     lastError: null,
     snapshotRevision: 0,
   }));
@@ -275,11 +273,6 @@ export function createCofluxClient(options: CofluxClientOptions) {
         store.setState((state) => ({ detachedTaskIds: new Set(state.detachedTaskIds).add(value.taskId) }));
         break;
       }
-      case "enrollmentKeyCreated": {
-        const value = payload.value;
-        store.setState({ enrollCommand: `npm i -g cofluxd && cofluxd up --server ${value.daemonUrl} --enroll-key ${value.enrollmentKey}` });
-        break;
-      }
       case "ptyOutput": {
         // PTY 数据零响应式开销：直达 consumer（terminal.write），不进 store。
         const value = payload.value;
@@ -360,7 +353,6 @@ export function createCofluxClient(options: CofluxClientOptions) {
       tasks: [],
       ports: {},
       detachedTaskIds: new Set<string>(),
-      enrollCommand: null,
     });
   }
 
@@ -405,15 +397,6 @@ export function createCofluxClient(options: CofluxClientOptions) {
     store.setState({ lastError: { id: errorSequence, message } });
   }
 
-  function requestEnrollmentKey() {
-    store.setState({ enrollCommand: null });
-    send({ case: "clientCreateEnrollmentKey", value: {} });
-  }
-
-  function clearEnrollmentCommand() {
-    store.setState({ enrollCommand: null });
-  }
-
   if (token) connection.connect({ token });
 
   function disconnect() {
@@ -442,8 +425,6 @@ export function createCofluxClient(options: CofluxClientOptions) {
     execInWorkspace,
     sendFsWrite,
     reportLocalError,
-    requestEnrollmentKey,
-    clearEnrollmentCommand,
     disconnect,
   };
 }

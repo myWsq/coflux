@@ -54,7 +54,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const workspaces = useStore(client.store, (state) => state.workspaces);
   const daemons = useStore(client.store, (state) => state.daemons);
   const lastError = useStore(client.store, (state) => state.lastError);
-  const enrollCommand = useStore(client.store, (state) => state.enrollCommand);
   const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
 
   // 快照后校准选中工作区：无效选择回退到首项目 main workspace（或任一工作区）。
@@ -93,7 +92,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   function openEnrollment() {
     setImportOpen(false);
-    client.clearEnrollmentCommand();
     setEnrollmentOpen(true);
   }
 
@@ -334,6 +332,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       />
       <ConfirmActionDialog action={confirmAction} onCancel={() => setConfirmAction(null)} />
       <ShortcutsHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
+      <EnrollmentDialog open={enrollmentOpen} onOpenChange={setEnrollmentOpen} />
     </div>
   );
 }
