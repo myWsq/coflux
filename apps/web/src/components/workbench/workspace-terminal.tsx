@@ -449,10 +449,10 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
         <div className="h-4 w-px shrink-0 bg-border" />
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {/* 常驻「变更」tab（plan 025）：与终端 Tab 同级同组、选中态互斥；
-              统计徽标并入 tab，X=Y=0 时数字隐藏，min-w 兜底避免 tab 显得过窄。 */}
+              统计徽标并入 tab，X=Y=0 时数字隐藏，min-w 对齐终端 Tab 的 max-w-52 避免显得过窄，内容靠左。 */}
           <button
             className={cn(
-              "flex h-7 min-w-20 shrink-0 items-center justify-center gap-1.5 rounded-md px-2.5 text-sm transition-colors",
+              "flex h-7 min-w-52 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-sm transition-colors",
               view === "changes"
                 ? "bg-accent text-foreground"
                 : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
