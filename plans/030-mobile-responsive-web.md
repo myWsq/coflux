@@ -11,6 +11,11 @@
 
 ## Status
 
+> **WITHDRAWN 2026-07-23**：写完并派发执行后方向变更——移动端不做桌面 web 的响应式
+> 适配，改为独立的精简随身端 app（按移动场景单独设计，功能面为桌面子集）。本计划
+> 未产生任何提交；其中的调研结论（iOS 长按不触发 contextmenu、visualViewport 键盘
+> 兜底、Astryx MobileNav 可脱离 AppShell 受控使用）对新移动端计划仍然有效。
+
 - Priority: P1
 - Effort: M
 - Risk: LOW
