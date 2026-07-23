@@ -28,6 +28,14 @@ node packages/cli/cofluxd.mjs up --server ... --enroll-key ... --bin-dir target/
 git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编译 + 签名 worker + GitHub Release（见 docs/RELEASING.md）
 ```
 
+### 本地开发环境的坑
+
+- **dev server 必须连 Postgres 直连口 54322**：`config.ts` 默认的 5432 是本地 Supabase 的 supavisor 池化口，会报 `no tenant identifier`。正确启动：
+  `DATABASE_URL="postgres://postgres:postgres@127.0.0.1:54322/postgres" pnpm dev:server`。
+  黑盒测试同理：`COFLUX_TEST_PG_URL` 也要指 54322。
+- **web dev 页面「能打开但卡住连不上」= 8787 没跑**：vite（5273）把 `/client` WS 和 `/health` 代理到 `localhost:8787`（见 `apps/web/vite.config.ts`），dev server 不在时页面 HTML/JS 照常加载、但 WS 永远连不上。此时 console 里往往只看到 manifest/CORS 之类的噪音报错，真因不是它们。自查一条命令：`curl localhost:5273/health` 应 200。
+- **经生产 `p.coflux.dev` 端口转发访问本机 dev web**：完整链路是 浏览器 → 生产 server → 本机生产 daemon → 5273 vite → 8787 dev server，后两个进程都得活着。5273 要出现在转发列表里，vite 需在 coflux 终端（生产 daemon 的 PTY 进程树）里启动。manifest 请求经门禁需带凭据，`index.html` 的 manifest link 已带 `crossorigin="use-credentials"`，勿删。
+
 CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（tag `v*` 发布）。worker 产物用 ed25519 签名、supervisor 验签，密钥设置见 [docs/RELEASING.md](docs/RELEASING.md)。
 
 前置：Node 22+（server 用 `node:sqlite`）、pnpm、Rust stable（`rustup`）。
