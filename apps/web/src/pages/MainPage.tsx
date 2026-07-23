@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { Workbench } from "@/components/workbench/workbench";
 import { createCofluxClient } from "@coflux/client";
-import { SERVER_URL, TOKEN_KEY, USE_SUPABASE } from "@/config";
+import { BUILD_ID, SERVER_URL, TOKEN_KEY, USE_SUPABASE } from "@/config";
 import { loginWithSupabase } from "@/lib/auth";
 
 export function MainPage() {
@@ -12,6 +12,7 @@ export function MainPage() {
     createCofluxClient({
       serverUrl: SERVER_URL,
       tokenStorageKey: TOKEN_KEY,
+      buildId: BUILD_ID,
       loginProvider: USE_SUPABASE ? loginWithSupabase : undefined,
     }),
   );

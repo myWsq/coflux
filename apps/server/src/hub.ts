@@ -1031,6 +1031,35 @@ export class Hub {
       }
       return;
     }
+
+    // 构建版本准入（plan 033）：认证成功后、进入 subscribed 前拦截失配/缺失版本的客户端，
+    // 不可能靠"连上后广播、客户端自觉 reload"——旧客户端根本不认识新消息。
+    // config.buildId 未设置（本机开发 / 黑盒测试）完全跳过；client 上报 "dev"（vite dev）总放行。
+    if (config.buildId && msg.clientVersion !== "dev") {
+      if (!msg.clientVersion) {
+        // 缺失版本 = 旧 bundle（协议里从未有过该字段）：唯一对它生效的杠杆是它已理解的
+        // authError（清 token、停止重连、退回登录页）。不发 clientOutdated——旧代码不认识它。
+        this.sendClient(client, { case: "authError", value: { message: "客户端版本已过期，请刷新页面" } });
+        try {
+          client.ws.close(4001, "outdated client");
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      if (msg.clientVersion !== config.buildId) {
+        // 失配但认识协议的新客户端：只发 clientOutdated，不发 authError——发 authError 会清本地
+        // token，等于每次部署逼所有在线用户重新登录，违背"无感升级"目标。
+        this.sendClient(client, { case: "clientOutdated", value: {} });
+        try {
+          client.ws.close(4001, "build mismatch");
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+    }
+
     client.accountId = accountId;
     client.tokenHash = tokenHash;
     this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued } });

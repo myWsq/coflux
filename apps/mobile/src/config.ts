@@ -4,6 +4,7 @@ export const SERVER_URL =
 
 // 独立命名空间：与桌面 web 同域调试时不串台（决策见 plan 032）。
 export const TOKEN_KEY = "coflux_m_token";
+export const BUILD_ID = __COFLUX_BUILD_ID__;
 
 // Supabase 是构建期开关；未配置时继续使用服务端的本地账号模式。
 export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL?.replace(/\/+$/, "");

@@ -95,6 +95,10 @@ export const config = {
   autoUpdatePollMs: int("COFLUX_AUTOUPDATE_POLL_MS", 10 * 60 * 1000),
   autoUpdateMaxAttempts: int("COFLUX_AUTOUPDATE_MAX_ATTEMPTS", 3),
   autoUpdateCooldownMs: int("COFLUX_AUTOUPDATE_COOLDOWN_MS", 60 * 60 * 1000),
+
+  /** 构建版本准入（plan 033）：空串（未设）= 完全跳过版本检查（本机开发 / 黑盒测试的模拟
+   * 客户端不带版本号）。生产部署设为 git short SHA，与 web/mobile 构建注入的值一致。 */
+  buildId: process.env.COFLUX_BUILD_ID ?? "",
 } as const;
 
 // fail-closed：生产（非 COFLUX_DEV）缺任何秘密类 env 就拒绝启动，绝不带弱默认口令上线。

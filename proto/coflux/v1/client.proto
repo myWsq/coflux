@@ -16,6 +16,9 @@ message ClientAuth {
   optional string password = 2;
   optional string client_token = 3;
   optional string supabase_token = 4;
+  // 构建版本（git short SHA；vite dev 固定 "dev"）：server 配了 COFLUX_BUILD_ID 时用于
+  // 认证阶段的版本准入（plan 033）。缺失本字段是"旧 bundle"的检测信号本身，不可伪造更早语义。
+  optional string client_version = 5;
 }
 
 // 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地）
@@ -276,6 +279,12 @@ message ServerError {
   string message = 1;
 }
 
+// build 版本失配（新客户端跑旧代码判定的对称面，plan 033）：认证阶段 server 比对
+// client_version 与 COFLUX_BUILD_ID 不一致时下发本消息后关闭连接。旧 bundle（缺失
+// client_version）走 AuthError 而非本消息——本消息对它是无法理解的未知 case（见
+// apps/server/src/hub.ts handleClientAuth）。
+message ClientOutdated {}
+
 message ServerToClient {
   oneof payload {
     AuthOk auth_ok = 1;
@@ -300,6 +309,7 @@ message ServerToClient {
     FsReadResult fs_read_result = 20;
     ServerError error = 21;
     FsWriteResult fs_write_result = 23;
+    ClientOutdated client_outdated = 24;
     // 数据面（高频）
     PtyOutput pty_output = 22;
   }

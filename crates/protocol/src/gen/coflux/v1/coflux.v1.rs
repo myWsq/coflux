@@ -745,6 +745,10 @@ pub struct ClientAuth {
     pub client_token: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="4")]
     pub supabase_token: ::core::option::Option<::prost::alloc::string::String>,
+    /// 构建版本（git short SHA；vite dev 固定 "dev"）：server 配了 COFLUX_BUILD_ID 时用于
+    /// 认证阶段的版本准入（plan 033）。缺失本字段是"旧 bundle"的检测信号本身，不可伪造更早语义。
+    #[prost(string, optional, tag="5")]
+    pub client_version: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地）
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1119,9 +1123,16 @@ pub struct ServerError {
     #[prost(string, tag="1")]
     pub message: ::prost::alloc::string::String,
 }
+/// build 版本失配（新客户端跑旧代码判定的对称面，plan 033）：认证阶段 server 比对
+/// client_version 与 COFLUX_BUILD_ID 不一致时下发本消息后关闭连接。旧 bundle（缺失
+/// client_version）走 AuthError 而非本消息——本消息对它是无法理解的未知 case（见
+/// apps/server/src/hub.ts handleClientAuth）。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClientOutdated {
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 22")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 22")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -1172,6 +1183,8 @@ pub mod server_to_client {
         Error(super::ServerError),
         #[prost(message, tag="23")]
         FsWriteResult(super::FsWriteResult),
+        #[prost(message, tag="24")]
+        ClientOutdated(super::ClientOutdated),
         /// 数据面（高频）
         #[prost(message, tag="22")]
         PtyOutput(super::PtyOutput),
