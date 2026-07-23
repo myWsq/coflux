@@ -404,26 +404,29 @@ function printLayer(name, r) {
   console.log(`  ${mark} ${name} (${r.ms}ms)${msg ? `  ${msg}` : ""}`);
 }
 
-// 本地事实汇总：服务进程存活、conn-state.json 连接态、凭证有无、FDA。返回是否已连接
-// （供全层探测通过但仍未连接时给出"问题在认证层"的结论）。
+// 本地事实汇总：服务进程存活、conn-state.json 连接态、凭证有无、FDA。返回连接态三态：
+// "connected" | "not-connected"（有快照但非 connected，如 connecting/reconnecting）
+// | "unknown"（服务未运行，或无快照——daemon 版本较旧还没写、或刚启动）。
+// 三态区分是因为"无快照"不等于"未连接"：旧版 worker 不写 conn-state.json，把它当"未连接"
+// 会把"连接态未知"误报成"认证/授权层有问题"（2026-07-23 实操验收发现）。
 function printLocalFacts() {
   console.log("\n  本地状态\n  ────────");
   console.log(`  凭证:   ${fs.existsSync(CRED) ? "已登记" : "未登记"}`);
   const { running, active } = serviceRunningInfo();
   console.log(`  服务:   ${active}`);
-  let connected = false;
+  let connState = "unknown";
   if (running) {
     const conn = readConnState();
     if (conn?.state && CONN_STATE_LABEL[conn.state]) {
       console.log(`  连接:   ${CONN_STATE_LABEL[conn.state]}`);
-      connected = conn.state === "connected";
+      connState = conn.state === "connected" ? "connected" : "not-connected";
     } else {
       console.log("  连接:   (无快照)");
     }
   }
   if (IS_MAC) console.log(`  FDA:    ${fdaLabel(readFdaStatus())}`);
   console.log("");
-  return connected;
+  return connState;
 }
 
 function printConclusion(ok, msg) {
@@ -473,8 +476,13 @@ async function cmdDoctor() {
     return;
   }
 
-  const connected = printLocalFacts();
-  printConclusion(true, connected ? "各层连通性正常。" : "各层连通性正常，但本地未显示已连接——问题大概率在认证/授权层而非网络层，查 `cofluxd logs`。");
+  const connState = printLocalFacts();
+  const conclusion = {
+    connected: "各层连通性正常。",
+    "not-connected": "各层连通性正常，但本地未显示已连接——问题大概率在认证/授权层而非网络层，查 `cofluxd logs`。",
+    unknown: "各层连通性正常；本地连接态未知（daemon 版本较旧或刚启动，尚无 conn-state 快照），如有异常查 `cofluxd logs`。",
+  }[connState];
+  printConclusion(true, conclusion);
 }
 
 function cmdLogs(v) {
