@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { useStore } from "zustand";
-import { LoaderCircle } from "lucide-react";
+import { LoaderCircle, RefreshCw } from "lucide-react";
+import { Button } from "@astryxdesign/core/Button";
+import { Card } from "@astryxdesign/core/Card";
+import { Center } from "@astryxdesign/core/Center";
+import { VStack } from "@astryxdesign/core/Layout";
+import { Heading, Text } from "@astryxdesign/core/Text";
 import { createCofluxClient } from "@coflux/client";
 
 import { AuthScreen } from "@/components/auth-screen";
@@ -47,6 +52,32 @@ export function App() {
         style={ROOT_HEIGHT_STYLE}
       >
         <LoaderCircle className="size-5 animate-spin" />
+      </div>
+    );
+  }
+
+  // 版本失配、reload 一次仍未拿到新 bundle（plan 033）：不是认证失败，独立展示面
+  // （mobile 冻结范围内的共享层状态最小配套 UI，就地内联，不新建组件文件）。
+  if (authState === "outdated") {
+    return (
+      <div style={ROOT_HEIGHT_STYLE}>
+        <Center axis="both" minHeight="100%" style={{ backgroundColor: "var(--color-background)", padding: "var(--spacing-4, 16px)" }}>
+          <VStack gap={4} hAlign="center" style={{ width: "100%", maxWidth: 380 }}>
+            <Text type="body" weight="bold" size="lg">
+              coflux
+            </Text>
+            <Card padding={8} width="100%">
+              <VStack gap={2} hAlign="center">
+                <RefreshCw className="size-5 text-primary" />
+                <Heading level={2}>客户端已更新</Heading>
+                <Text type="body" color="secondary" size="sm">
+                  服务器已部署新版本，请刷新页面获取；若刷新后仍看到此页，请强制刷新（忽略缓存）后重试。
+                </Text>
+                <Button className="mt-2 w-full" label="刷新页面" variant="primary" onClick={() => location.reload()} />
+              </VStack>
+            </Card>
+          </VStack>
+        </Center>
       </div>
     );
   }

@@ -1,9 +1,9 @@
 import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from "react";
 import { useStore } from "zustand";
-import { AlertCircle, FolderGit2, LoaderCircle, X } from "lucide-react";
+import { AlertCircle, FolderGit2, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { TaskStatus, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
 
-import { AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
+import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
 import { Button } from "@astryxdesign/core/Button";
 import {
   ConfirmActionDialog,
@@ -208,6 +208,22 @@ export function Workbench({ client }: { client: CofluxClient }) {
       <div className="flex h-screen min-w-[1024px] items-center justify-center bg-background text-muted-foreground">
         <LoaderCircle className="size-5 animate-spin" />
       </div>
+    );
+  }
+
+  // 版本失配、reload 一次仍未拿到新 bundle（plan 033）：不是认证失败，独立展示面，
+  // 不复用登录表单的 error 语义（混用会误导用户以为账号/密码有问题）。
+  if (authState === "outdated") {
+    return (
+      <AuthShell>
+        <AuthMessage
+          icon={<RefreshCw className="size-5 text-primary" />}
+          title="客户端已更新"
+          description="服务器已部署新版本，请刷新页面获取；若刷新后仍看到此页，请强制刷新（忽略缓存）后重试。"
+        >
+          <Button className="mt-4 w-full" label="刷新页面" variant="primary" onClick={() => location.reload()} />
+        </AuthMessage>
+      </AuthShell>
     );
   }
 

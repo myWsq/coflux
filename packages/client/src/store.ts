@@ -12,7 +12,9 @@ import {
 import { createConnection, type AuthCredential, type ConnectionStatus, type ServerPayload } from "./connection";
 
 export type { AuthCredential, ConnectionStatus } from "./connection";
-export type AuthState = "need-login" | "authenticating" | "authed" | "auth-failed";
+// "outdated"：构建版本失配，reload 一次仍未拿到新 bundle（plan 033）——不是认证失败，
+// UI 须走独立展示面，不与 auth-failed 的 loginError 混用（语义不同，混用会误导用户）。
+export type AuthState = "need-login" | "authenticating" | "authed" | "auth-failed" | "outdated";
 export type PortPreview = { port: number; url: string };
 export type ClientError = { id: number; message: string };
 export type FsListResult = { ok: boolean; entries: FsEntry[]; error: string; path?: string };
@@ -190,11 +192,10 @@ export function createCofluxClient(options: CofluxClientOptions) {
           sessionStorage.setItem(outdatedReloadKey, options.buildId);
           location.reload();
         } else {
+          // reload 后仍失配（如 index.html 被缓存）：停止重连，进入专用状态页（非认证失败，
+          // 不设 loginError——auth-failed 展示面语义是"账号/密码错了"，混用会误导用户）。
           shouldRetry = false;
-          store.setState({
-            loginError: "客户端版本已更新，自动刷新未生效，请强制刷新页面（忽略缓存）后重试",
-            authState: "auth-failed",
-          });
+          store.setState({ authState: "outdated" });
         }
         break;
       }
