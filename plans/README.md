@@ -28,5 +28,6 @@
 | 024 | [工作区 git diff 统计展示（+X −Y）](024-workspace-diff-stats.md) | DONE (ce70a4a) | none |
 | 025 | [工作区「变更」tab + diff 查看视图](025-workspace-changes-diff-view.md) | DONE (a3046df) | none |
 | 026 | [旁观客户端不再被动抢占终端控制权](026-passive-attach-containment.md) | DONE (b5814d4) | none |
+| 027 | [侧边栏工作区行右端 hover 遮罩统一 + diff 数字固定行末](027-sidebar-diff-hover-mask.md) | DONE (a27a12e) | none |
 
-执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026。
+执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026 → 027。
