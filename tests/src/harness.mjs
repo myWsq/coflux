@@ -317,24 +317,34 @@ export async function startStack(opts = {}) {
       if (existsSync(home)) try { rmSync(home, { recursive: true, force: true }); } catch {}
       await dropTestDatabaseLoudly(testDb.name);
     },
+    /** 轮询新鲜快照直到 daemon 在线（每轮全新 client，避免读到旧快照）。
+     * 首次启动与 server 重启后 daemon 重连均适用：重连有 backoff，时长跨机器不定，
+     * 裸 sleep 固定毫秒数在慢 CI 上会赌输（dec-modes-replay 曾因此 flaky）。 */
+    async waitDaemonOnline(ms = 20000) {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        const p = stack.makeClient();
+        try {
+          const s = await p.authSubscribe(username, password);
+          const dev = s.daemons.find((d) => d.online && (!stack.daemonId || d.daemonId === stack.daemonId));
+          if (dev) return dev;
+        } catch {
+          /* server 可能还没就绪 */
+        } finally {
+          p.close();
+        }
+        await sleep(250);
+      }
+      throw new Error("daemon did not come online");
+    },
   };
 
-  // 等 daemon 在线：每次用全新 client 取一份新鲜快照（避免读到旧快照）
-  let dev = null;
-  for (let i = 0; i < 60 && !dev; i++) {
-    const p = stack.makeClient();
-    try {
-      const s = await p.authSubscribe(username, password);
-      dev = s.daemons.find((d) => d.online);
-    } catch {
-      /* server 可能还没就绪 */
-    }
-    p.close();
-    if (!dev) await sleep(250);
-  }
-  if (!dev) {
+  let dev;
+  try {
+    dev = await stack.waitDaemonOnline(15000);
+  } catch (e) {
     await stack.stop();
-    throw new Error("daemon did not come online");
+    throw e;
   }
   stack.daemonId = dev.daemonId;
   return stack;
