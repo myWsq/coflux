@@ -44,12 +44,15 @@ holder（抓包实证），另有两个旧页面以 ~100ms 周期死循环 `task
 
 ## Decisions & tradeoffs
 
-- **版本真相源**：git short SHA 作为唯一 build id，随构建注入。web/mobile 经 vite
-  `define` 在构建时嵌入（生产构建自动取 `git rev-parse --short HEAD`，vite dev 固定为
-  `"dev"`）；server 从环境变量 `COFLUX_BUILD_ID` 读取（生产部署时设置）。Rejected:
-  server 读 web dist 产物文件 — server 与静态资源分属 node/caddy 两个服务，路径耦合脆
-  弱；Rejected: 运行时 exec git — server 生产环境虽在 repo 内跑 tsx（prod-jp 现状），
-  但把 git 状态当运行时依赖会让部署语义不可再现。
+- **版本真相源**（2026-07-23 用户反馈修订）：git short SHA 作为唯一 build id，web/mobile
+  经 vite `define` 构建时嵌入（生产构建自动取 `git rev-parse --short HEAD`，vite dev 固
+  定为 `"dev"`），并且构建同时把同一值写入 `dist/build-id.txt`。server 的允许版本集合 =
+  `COFLUX_BUILD_ID`（显式覆盖，黑盒测试用）∪ `COFLUX_BUILD_ID_FILE`（逗号分隔的产物文件
+  路径，生产一次性配置指向 web/mobile 两个 dist）在**每次认证时现读**的内容；集合为空 =
+  检查关闭。产物文件自举保证"server 期望的版本"与"caddy 正在服务的版本"由同一文件恒
+  等——重建不必重启、重启不必重建，不存在手动对齐。Rejected: 仅环境变量手填 SHA — 每次
+  部署人工对齐，易错（用户明确否决）；Rejected: 运行时 exec git — git 状态当运行时依赖，
+  且 pull 后未重建时 git SHA 与 dist 实际内容脱节，恰好制造它要防的失配。
   Based on: server 经 systemd 跑 `tsx src/index.ts`（apps/server/package.json `start`）；
   config 已有环境变量惯例（apps/server/src/config.ts:43-50）。
 - **检查门控在 server 侧环境变量**：`COFLUX_BUILD_ID` 未设置 → 完全跳过版本检查；设置
@@ -70,11 +73,14 @@ holder（抓包实证），另有两个旧页面以 ~100ms 周期死循环 `task
   （store.ts:322），`authError` 是唯一能让它停止重连（`shouldRetry=false`）并退回登录
   页的既有杠杆。用户已确认接受旧设备刷新后重新登录一次的迁移成本。
   Based on: store.ts:168-176（authError 处理）、store.ts:322（未知消息忽略）。
-- **客户端 reload 防循环**：收到 `clientOutdated` 后，以 sessionStorage 记录"已为版本
-  X reload 过"；首次 → `location.reload()`；重复触发（如 index.html 被缓存导致 reload
-  后仍是旧 bundle）→ 不再 reload，停止自动重连并给出可读提示（复用现有 loginError /
-  authState 展示面，文案指引强制刷新）。Rejected: 无守卫直接 reload — 缓存旧
-  index.html 时变成 reload 风暴。
+- **客户端 reload 防循环 + 专用状态页**（2026-07-23 用户反馈修订）：收到 `clientOutdated`
+  后，以 sessionStorage 记录"已为版本 X reload 过"；首次 → `location.reload()`；重复触
+  发（如 index.html 被缓存导致 reload 后仍是旧 bundle）→ 不再 reload，停止自动重连，
+  store 进入独立的 `authState: "outdated"`，web/mobile 各渲染**专门的"版本已更新"页面**
+  （说明文案 + 刷新按钮），不复用登录页/authError 展示面，token 全程不清。Rejected:
+  复用 loginError/auth-failed 展示 — 版本更新不是认证失败，混用语义误导用户（用户明确
+  否决）；Rejected: 无守卫直接 reload — 缓存旧 index.html 时变成 reload 风暴。
+  mobile 属冻结范围，此页面是共享层 store 状态变更的最小配套 UI，按冻结约定做最简实现。
 - **注入路径走共享层**：`createCofluxClient` options 增加 `buildId`，随所有三种
   ClientAuth 变体上报（packages/client/src/connection.ts:29-35 buildAuthPayload）。
   web/mobile 各自在创建 client 处传入（apps/web/src/pages/MainPage.tsx:12、
@@ -152,8 +158,8 @@ In scope:
 - `packages/protocol/src/gen/**`、`crates/protocol/src/gen/**`、`proto/gen/swift/**`（regen 产物）
 - `packages/client/src/store.ts`、`packages/client/src/connection.ts`、`packages/client/src/index.ts`（如需导出）
 - `apps/server/src/hub.ts`、`apps/server/src/config.ts`
-- `apps/web/vite.config.ts`、`apps/web/src/pages/MainPage.tsx`（或 client 创建处的最小接线）
-- `apps/mobile/vite.config.ts`、`apps/mobile/src/App.tsx`（仅 buildId 传参接线）
+- `apps/web/vite.config.ts`、`apps/web/src/pages/MainPage.tsx`（或 client 创建处的最小接线）、web 认证门控组件与新增"版本已更新"状态页（最小实现）
+- `apps/mobile/vite.config.ts`、`apps/mobile/src/App.tsx`（buildId 传参接线 + "版本已更新"状态页最小实现）
 - `tests/src/**`（新增版本准入用例）
 - `plans/README.md`
 
@@ -202,10 +208,11 @@ tenant 错，见 AGENTS.md 本地开发环境的坑）。
 ## Maintenance notes
 
 - **生产部署清单（本 plan 合入后的首次上线，人工执行）**：
-  1. prod-jp 拉代码构建 web/mobile；
-  2. systemd unit（coflux-server.service）环境加 `COFLUX_BUILD_ID=<部署 commit 的 short SHA>`，与 web/mobile 构建 commit 一致；
+  1. prod-jp 拉代码构建 web/mobile（构建自动产出 `dist/build-id.txt`）；
+  2. `/etc/coflux/server.env` 一次性加
+     `COFLUX_BUILD_ID_FILE=/opt/coflux/apps/web/dist/build-id.txt,/opt/coflux/apps/mobile/dist/build-id.txt`
+     ——此后每次部署无需再碰版本号（server 每次认证现读文件，产物自举）；
   3. Caddyfile 给 app.coflux.dev / m.coflux.dev 的 index.html 响应加 `Cache-Control: no-cache`（防 reload 拿到缓存旧壳造成守卫兜底路径频繁触发）；
   4. 重启 coflux-server；预期：所有旧 bundle 页面在下次重连时被踢到登录页，从此丧失抢占能力。
-- 此后每次部署需保证 `COFLUX_BUILD_ID` 与前端构建同 commit 更新——不一致会把所有在线
-  客户端刷新一轮（自愈但扰民）。若未来引入部署脚本，把该 env 的写入并入脚本。
+- 日常部署只需 拉代码 + 构建（server 代码变了才需重启）；版本集合随 build-id.txt 即时生效。
 - 版本检查是精确匹配而非最小版本比较：回滚部署同样触发客户端 reload，语义自洽。
