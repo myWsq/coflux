@@ -10,7 +10,7 @@ import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { ChangesView } from "@/components/workbench/changes-view";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
-import type { CofluxClient } from "@/client/store";
+import type { CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
 import { TerminalPane, type TerminalController, type TerminalControlState } from "@/components/workbench/terminal-pane";
 

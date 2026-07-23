@@ -11,6 +11,7 @@
   "dependencies": {
     "@astryxdesign/core": "^0.1.6",
     "@astryxdesign/theme-neutral": "^0.1.6",
+    "@coflux/client": "workspace:*",
     "@coflux/protocol": "workspace:*",
     "@shikijs/langs": "^4.3.1",
     "@shikijs/themes": "^4.3.1",

@@ -6,7 +6,7 @@ import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
-import type { CofluxClient } from "@/client/store";
+import type { CofluxClient } from "@coflux/client";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
 import { cn } from "@/lib/utils";
 

@@ -9,7 +9,7 @@ import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from "@astryxdesi
 import { Text } from "@astryxdesign/core/Text";
 import { ToggleButton } from "@astryxdesign/core/ToggleButton";
 
-import type { FsListResult } from "@/client/store";
+import type { FsListResult } from "@coflux/client";
 
 type ImportProjectWizardProps = {
   open: boolean;
