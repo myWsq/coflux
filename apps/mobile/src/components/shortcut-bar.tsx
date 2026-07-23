@@ -58,6 +58,8 @@ function Key({
       type="button"
       disabled={disabled}
       onClick={onClick}
+      // 阻止按钮抢走焦点：保持 xterm 隐藏 textarea 的焦点不丢，否则触屏软键盘会随之收起。
+      onPointerDown={(event) => event.preventDefault()}
       className={cn(
         "flex h-9 shrink-0 items-center justify-center gap-1 rounded-md px-3 text-xs font-medium",
         "disabled:cursor-not-allowed disabled:opacity-40",
