@@ -32,7 +32,7 @@
 | 028 | [macOS 完全磁盘访问权限（FDA）检测 + 引导流程](028-macos-fda-guide.md) | DONE (ba2b0de) | none |
 | 029 | [导入向导浏览步默认隐藏点开头文件夹 + header 开关](029-import-wizard-hide-dotfolders.md) | DONE (4735839) | none |
 | 030 | [web 简单移动端适配（手机可正常使用现有全部功能）](030-mobile-responsive-web.md) | WITHDRAWN（方向变更：移动端改为独立精简 app，不做桌面响应式适配） | none |
-| 031 | [抽取 packages/client（协议 client + store 双端共享）](031-extract-client-package.md) | TODO | none |
+| 031 | [抽取 packages/client（协议 client + store 双端共享）](031-extract-client-package.md) | DONE (452daa0) | none |
 | 032 | [apps/mobile 移动随身端（精简 Agent 指挥中心）](032-mobile-companion-app.md) | TODO | 031 |
 
 执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026 → 027 → 028 → 029 → 031 → 032。（030 已撤回，未执行）
