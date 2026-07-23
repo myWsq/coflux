@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, ChevronDown, ChevronRight, FileDiff, GitCompareArrows, LoaderCircle } from "lucide-react";
+import { AlertCircle, ChevronDown, ChevronRight, Diff, FileDiff, LoaderCircle } from "lucide-react";
 
 import { Button } from "@astryxdesign/core/Button";
 import type { CofluxClient, ExecResult } from "@/client/store";
@@ -157,7 +157,7 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   if (files.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-        <GitCompareArrows className="size-6 text-muted-foreground" />
+        <Diff className="size-6 text-muted-foreground" />
         <p className="text-sm text-muted-foreground">这个工作区还没有变更</p>
       </div>
     );
