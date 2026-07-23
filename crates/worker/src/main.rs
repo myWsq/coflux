@@ -4,6 +4,7 @@
 //! 再向 server resync（否则空列表 resync 会让 server 误标 exited，随后真 resync 反触发 session.close 杀 PTY）。
 //! 全 Rust 化后整个 daemon 无 node 运行时依赖。
 
+mod conn_state;
 mod creds;
 mod dec_modes;
 mod git;
@@ -13,7 +14,7 @@ mod tunnel;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use coflux_protocol::{
     decode_frame, encode_frame, is_frame, wire, write_record, DataFrame, RecordParser, Settings, SessionInfo, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
@@ -28,6 +29,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
+use conn_state::ConnState;
 use creds::{CredStore, Credentials, PendingAuth};
 use dec_modes::DecModeTracker;
 
@@ -50,6 +52,12 @@ struct Config {
     sock_path: String,
     reconnect_base_ms: u64,
     reconnect_cap_ms: u64,
+    /// 入站帧 idle 达此阈值 → 主动发 WS Ping 探活（半死连接自愈，plan 033）。
+    idle_ping_ms: u64,
+    /// 探活 Ping 发出后再等这么久仍无任何入站帧 → 判定连接已死，断开走 backoff 重连。
+    idle_grace_ms: u64,
+    /// connect_async 本身的超时——黑洞网络下 TCP/TLS/WS 握手可能永久挂起，必须有限时失败。
+    connect_timeout_ms: u64,
 }
 
 struct WorkerState {
@@ -72,6 +80,8 @@ struct WorkerState {
     /// per-session DEC 私有模式追踪（见 dec_modes.rs）：supervisor scrollback 环把模式设置转义
     /// 挤出去后，replay 转发前用它补前缀，不让 attach/resync 丢失 bracketed-paste 等模式状态。
     dec_modes: HashMap<String, DecModeTracker>,
+    /// 连接状态落盘快照（conn-state.json），供 cofluxd status 展示真实在线态（plan 033）。
+    conn_state: ConnState,
 }
 
 /// 出站到 server 的消息：WS 上只有 binary message，一条 = 一个已编码好的 protobuf 信封字节串
@@ -81,6 +91,12 @@ pub(crate) type WsOut = Vec<u8>;
 
 fn env_or(key: &str, default: String) -> String {
     std::env::var(key).unwrap_or(default)
+}
+
+/// 毫秒阈值类配置的取值：env 覆盖（非法/缺失则用默认值）。目前只用于黑盒测试驱动
+/// watchdog/connect-timeout 路径，故不进 settings.json（YAGNI，见 plan 033 决策）。
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
 /// 取值优先级：同名 env（非空）> settings.json > 默认。env 覆盖便于测试/开发。
@@ -189,6 +205,11 @@ async fn main() {
         home: home.clone(),
         reconnect_base_ms: 1_000,
         reconnect_cap_ms: 30_000,
+        // 75s = 2.5 × server 心跳周期（COFLUX_HEARTBEAT_MS 默认 30_000，见 apps/server/src/config.ts）：
+        // 正常连接每 ≤30s 必收到 server Ping，误伤概率可忽略。均可 env 覆盖，供黑盒测试秒级驱动。
+        idle_ping_ms: env_u64("COFLUX_IDLE_PING_MS", 75_000),
+        idle_grace_ms: env_u64("COFLUX_IDLE_GRACE_MS", 10_000),
+        connect_timeout_ms: env_u64("COFLUX_CONNECT_TIMEOUT_MS", 15_000),
     });
     if cfg.sock_path.is_empty() {
         eprintln!("[worker] 缺少 {SUPERVISOR_SOCK_ENV}");
@@ -201,6 +222,8 @@ async fn main() {
     let _ = std::fs::write(format!("{home}/worker.pid"), std::process::id().to_string());
 
     let creds_store = Arc::new(CredStore::new(cfg.cred_path.clone(), cfg.home.clone()));
+    let mut conn_state = ConnState::new(&home);
+    conn_state.connecting(); // 进程刚起，尚未连上任何东西
     let state = Arc::new(Mutex::new(WorkerState {
         authed: false,
         sup_synced: false,
@@ -212,6 +235,7 @@ async fn main() {
         last_branches: HashMap::new(),
         last_diffs: HashMap::new(),
         dec_modes: HashMap::new(),
+        conn_state,
     }));
 
     let (to_server_tx, to_server_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
@@ -474,14 +498,18 @@ async fn server_loop(
 ) {
     let mut attempts: u32 = 0;
     loop {
-        match connect_async(&cfg.server_url).await {
-            Ok((ws, _)) => {
+        // 黑洞网络下 TCP/TLS/WS 握手可能永久挂起（无 RST/FIN、无错误返回）——connect_async
+        // 本身也要包超时，否则这是第二个永久挂死路径（idle watchdog 只覆盖"连上之后"）。
+        match tokio::time::timeout(Duration::from_millis(cfg.connect_timeout_ms), connect_async(&cfg.server_url)).await {
+            Ok(Ok((ws, _))) => {
                 eprintln!("[worker] connected to server");
                 attempts = 0;
                 run_server_connection(ws, &cfg, &state, &creds_store, &to_server_tx, &mut to_server_rx, &to_sup_tx).await;
             }
-            Err(e) => eprintln!("[worker] server connect error: {e}"),
+            Ok(Err(e)) => eprintln!("[worker] server connect error: {e}"),
+            Err(_) => eprintln!("[worker] server connect timeout ({}ms)", cfg.connect_timeout_ms),
         }
+        state.lock().unwrap().conn_state.reconnecting();
         attempts += 1;
         tokio::time::sleep(backoff(attempts, &cfg)).await;
     }
@@ -545,8 +573,36 @@ async fn run_server_connection(
     let mut renew_tick = tokio::time::interval(Duration::from_secs(1));
     renew_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // idle watchdog（半死连接自愈，plan 033）：公司网络可能静默丢弃连接（无 RST/FIN），
+    // server 侧 ping/pong sweep 会摘掉这条连接，但 worker 侧此前没有任何对等机制——
+    // stream.next() 会永久 pending。这里记录"最后收到任意入站帧"的时刻：idle 超过阈值先
+    // 主动发 WS Ping 探活；再过宽限期仍无任何入站帧（含 Pong）就判死，退出本连接走既有
+    // backoff 重连（不是单独等 Pong——任何帧都证明链路活着，见 stream.next 分支）。
+    let idle_ping = Duration::from_millis(cfg.idle_ping_ms.max(1));
+    let idle_grace = Duration::from_millis(cfg.idle_grace_ms.max(1));
+    let mut last_inbound = Instant::now();
+    let mut ping_pending_since: Option<Instant> = None;
+    // 检查粒度取阈值的 1/5（钳位 20ms~500ms）：足够细以不拖长判死时间，又不空转浪费 CPU。
+    let watchdog_tick_ms = (cfg.idle_ping_ms.min(cfg.idle_grace_ms) / 5).clamp(20, 500);
+    let mut watchdog_tick = tokio::time::interval(Duration::from_millis(watchdog_tick_ms));
+    watchdog_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
+            _ = watchdog_tick.tick() => {
+                if let Some(since) = ping_pending_since {
+                    if since.elapsed() >= idle_grace {
+                        eprintln!("[worker] 连接 idle 超时（探活 {}ms 内无任何入站帧），判定连接已死，断开重连", idle_grace.as_millis());
+                        break;
+                    }
+                } else if last_inbound.elapsed() >= idle_ping {
+                    eprintln!("[worker] 连接 idle {}ms，发送探活 ping", last_inbound.elapsed().as_millis());
+                    if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                        break; // 发送本身就失败：连接已经死了，无需再等宽限期
+                    }
+                    ping_pending_since = Some(Instant::now());
+                }
+            }
             _ = renew_tick.tick() => {
                 let expired = {
                     let mut s = state.lock().unwrap();
@@ -585,6 +641,12 @@ async fn run_server_connection(
                 }
             }
             inc = stream.next() => {
+                // 任意入站帧（含 Ping/Pong/Close）都证明链路活着：无条件刷新 idle 计时、
+                // 撤销待定的探活判死——哪怕最终这一帧是 Close，也不影响，反正下面立即 break。
+                if let Some(Ok(_)) = &inc {
+                    last_inbound = Instant::now();
+                    ping_pending_since = None;
+                }
                 match inc {
                     Some(Ok(Message::Binary(b))) => on_server_message(b.as_ref(), cfg, state, creds_store, to_server_tx, to_sup_tx, &tunnels).await,
                     // WS 上只有 binary message；收到 text/其它帧类型说明对端协议版本不对——
@@ -678,6 +740,7 @@ async fn on_authed(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>
     let resync = {
         let mut s = state.lock().unwrap();
         s.authed = true;
+        s.conn_state.connected();
         if s.sup_synced {
             Some(alive_to_resync(&s.alive))
         } else {
