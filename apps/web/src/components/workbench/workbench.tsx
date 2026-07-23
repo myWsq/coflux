@@ -18,7 +18,7 @@ import { Sidebar } from "@/components/workbench/sidebar";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import type { WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 import { WORKSPACE_KEY, USE_SUPABASE } from "@/config";
-import type { CofluxClient } from "@/client/store";
+import type { CofluxClient } from "@coflux/client";
 
 // 终端栈（xterm + WorkspaceTerminal/TerminalPane）懒加载，不进首屏主 chunk：
 // 登录页与"未选中工作区"的空状态都不需要它。module 级别声明，保证只 lazy() 一次，

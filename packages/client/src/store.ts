@@ -9,11 +9,9 @@ import {
   type Workspace,
 } from "@coflux/protocol";
 
-import { SERVER_URL, TOKEN_KEY, USE_SUPABASE, type AuthCredential } from "@/config";
-import { loginWithSupabase } from "@/lib/auth";
-import { createConnection, type ConnectionStatus, type ServerPayload } from "@/client/connection";
+import { createConnection, type AuthCredential, type ConnectionStatus, type ServerPayload } from "./connection";
 
-export type { ConnectionStatus } from "@/client/connection";
+export type { AuthCredential, ConnectionStatus } from "./connection";
 export type AuthState = "need-login" | "authenticating" | "authed" | "auth-failed";
 export type PortPreview = { port: number; url: string };
 export type ClientError = { id: number; message: string };
@@ -21,6 +19,21 @@ export type FsListResult = { ok: boolean; entries: FsEntry[]; error: string; pat
 export type ExecResult = { ok: boolean; exitCode: number; stdout: string; stderr: string; error: string };
 export type FsWriteResult = { ok: boolean; path?: string; error: string };
 type SessionConsumer = (data: Uint8Array) => void;
+
+export type LoginProvider = (
+  username: string,
+  password: string,
+) => Promise<{ ok: true; accessToken: string } | { ok: false; message: string }>;
+
+export type CofluxClientOptions = {
+  /** /client WS 端点地址（含协议与路径）。 */
+  serverUrl: string;
+  /** 会话 token 的 localStorage key，两端（web/移动）各自命名空间。 */
+  tokenStorageKey: string;
+  /** 提供时启用外部登录（如 Supabase）：login() 走该 provider 换取 supabaseToken，
+   * 且 authError 文案切换为「会话过期」；不提供则走用户名密码直登，文案为「用户名或密码错误」。 */
+  loginProvider?: LoginProvider;
+};
 
 export type CofluxState = {
   status: ConnectionStatus;
@@ -56,11 +69,11 @@ function withoutSetValue(values: Set<string>, value: string): Set<string> {
  * 主页面状态 store：zustand vanilla store 只承载控制面（实体集合 / 连接态 / 控制权态）。
  * PTY 数据流（ptyOutput）绝不进 store——经 consumer 注册表（普通 Map，非响应式）直达 terminal.write。
  *
- * 须在顶层页面组件内只创建一次（如 useState(() => createCofluxClient())[0]）：
+ * 须在顶层页面组件内只创建一次（如 useState(() => createCofluxClient(options))[0]）：
  * 连接生命周期需要与调用方显式配对 disconnect()。
  */
-export function createCofluxClient() {
-  let token = localStorage.getItem(TOKEN_KEY) ?? "";
+export function createCofluxClient(options: CofluxClientOptions) {
+  let token = localStorage.getItem(options.tokenStorageKey) ?? "";
   let shouldRetry = false;
   let errorSequence = 0;
   const sessionConsumers = new Map<string, Set<SessionConsumer>>();
@@ -88,7 +101,7 @@ export function createCofluxClient() {
   }));
 
   const connection = createConnection({
-    url: SERVER_URL,
+    url: options.serverUrl,
     onStatus: (status) => {
       store.setState({ status });
       // 断线时 in-flight 的 fsList 无法再收到响应，统一以失败结清避免调用方悬挂。
@@ -147,16 +160,16 @@ export function createCofluxClient() {
         connection.resetBackoff();
         if (value.clientToken) {
           token = value.clientToken;
-          localStorage.setItem(TOKEN_KEY, value.clientToken);
+          localStorage.setItem(options.tokenStorageKey, value.clientToken);
         }
         send({ case: "clientSubscribe", value: {} });
         break;
       }
       case "authError": {
         token = "";
-        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(options.tokenStorageKey);
         store.setState({
-          loginError: USE_SUPABASE ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误",
+          loginError: options.loginProvider ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误",
           authState: "auth-failed",
         });
         shouldRetry = false;
@@ -319,13 +332,13 @@ export function createCofluxClient() {
 
   async function login(username: string, password: string) {
     store.setState({ loginError: "" });
-    if (!USE_SUPABASE) {
+    if (!options.loginProvider) {
       connect({ username, password });
       return;
     }
 
     store.setState({ authState: "authenticating" });
-    const result = await loginWithSupabase(username, password);
+    const result = await options.loginProvider(username, password);
     if (!result.ok) {
       store.setState({ loginError: result.message, authState: "auth-failed" });
       return;
@@ -337,7 +350,7 @@ export function createCofluxClient() {
     shouldRetry = false;
     send({ case: "clientLogout", value: {} });
     token = "";
-    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(options.tokenStorageKey);
     connection.stop();
     store.setState({
       authState: "need-login",

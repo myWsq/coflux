@@ -4,7 +4,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useToast } from "@astryxdesign/core/Toast";
-import type { FsWriteResult } from "@/client/store";
+import type { FsWriteResult } from "@coflux/client";
 
 /** 控制权状态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。
  * idle = RUNNING 但本端未申请控制权（旁观 / 后台面板），仅用于 Tab 图标呈现为中性态，

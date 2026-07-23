@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AlertCircle, ChevronDown, ChevronRight, FileDiff, LoaderCircle } from "lucide-react";
 
 import { Button } from "@astryxdesign/core/Button";
-import type { CofluxClient, ExecResult } from "@/client/store";
+import type { CofluxClient, ExecResult } from "@coflux/client";
 import { highlightLines, resolveLang, type HighlightToken } from "@/components/workbench/diff-highlight";
 import { parseUnifiedDiff, type DiffFile } from "@/components/workbench/parse-diff";
 import { cn } from "@/lib/utils";

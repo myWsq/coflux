@@ -10,7 +10,7 @@ import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from "@astryxdesi
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 
-import type { ClientError } from "@/client/store";
+import type { ClientError } from "@coflux/client";
 import { shortcutModifiers, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
 
 type WorkspaceRenameDialogProps = {

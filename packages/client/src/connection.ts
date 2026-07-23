@@ -7,7 +7,10 @@ import {
   type ServerToClient,
 } from "@coflux/protocol";
 
-import type { AuthCredential } from "@/config";
+export type AuthCredential =
+  | { token: string }
+  | { supabaseToken: string }
+  | { username: string; password: string };
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 export type ServerPayload = ServerToClient["payload"];

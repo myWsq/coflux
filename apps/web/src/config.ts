@@ -11,7 +11,4 @@ export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL?.replace(/\/+$/, "
 export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 export const USE_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 
-export type AuthCredential =
-  | { token: string }
-  | { supabaseToken: string }
-  | { username: string; password: string };
+export type { AuthCredential } from "@coflux/client";

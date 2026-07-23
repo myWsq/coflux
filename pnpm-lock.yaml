@@ -63,6 +63,9 @@ importers:
       '@astryxdesign/theme-neutral':
         specifier: ^0.1.6
         version: 0.1.6(@astryxdesign/core@0.1.6(@stylexjs/stylex@0.19.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(react@19.2.7)
+      '@coflux/client':
+        specifier: workspace:*
+        version: link:../../packages/client
       '@coflux/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -135,6 +138,15 @@ importers:
         version: 6.4.3(@types/node@22.19.21)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4)
 
   packages/cli: {}
+
+  packages/client:
+    dependencies:
+      '@coflux/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zustand:
+        specifier: ^5.0.14
+        version: 5.0.14(@types/react@19.2.17)(react@19.2.7)
 
   packages/core: {}
 
