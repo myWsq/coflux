@@ -96,9 +96,17 @@ export const config = {
   autoUpdateMaxAttempts: int("COFLUX_AUTOUPDATE_MAX_ATTEMPTS", 3),
   autoUpdateCooldownMs: int("COFLUX_AUTOUPDATE_COOLDOWN_MS", 60 * 60 * 1000),
 
-  /** 构建版本准入（plan 033）：空串（未设）= 完全跳过版本检查（本机开发 / 黑盒测试的模拟
-   * 客户端不带版本号）。生产部署设为 git short SHA，与 web/mobile 构建注入的值一致。 */
+  /** 构建版本准入（plan 033）：显式覆盖口，黑盒测试用；生产改用 buildIdFiles 自举，通常不设。 */
   buildId: process.env.COFLUX_BUILD_ID ?? "",
+  /** 构建版本准入（plan 033，2026-07-23 修订）：逗号分隔的 build-id.txt 文件路径（web/mobile
+   * vite 构建各自产出，内容与 define 注入的版本号恒等）。认证时现读每个文件的 trim 后内容，
+   * 与 buildId 取并集为"允许版本集合"；两者都空 = 完全跳过版本检查（本机开发 / 黑盒测试的
+   * 模拟客户端不带版本号）。生产部署一次性指到两个 dist 产物，此后拉代码+构建即生效，无需
+   * 手动对齐版本号、无需重启 server。 */
+  buildIdFiles: (process.env.COFLUX_BUILD_ID_FILE ?? "")
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0),
 } as const;
 
 // fail-closed：生产（非 COFLUX_DEV）缺任何秘密类 env 就拒绝启动，绝不带弱默认口令上线。
