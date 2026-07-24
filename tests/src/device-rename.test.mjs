@@ -73,9 +73,10 @@ test("设备重命名：在线改名后 daemon 收到 DaemonSetName 且本地 se
 
   // 2. 在 stack.home 下写初始 settings.json（包含 deviceName 和其他字段）
   const settingsPath = join(stack.home, "settings.json");
+  // settings.json 只管 deviceName/shell 这类展示配置；credentials.json（登记凭证）是独立文件，
+  // 由 before() 里第一次授权时已经落在 stack.home 下，重启复用它走 daemon.auth，无需再授权。
   const initialSettings = {
     serverUrl: `ws://127.0.0.1:${stack.port}/daemon`,
-    enrollKey: stack.enrollKey,
     deviceName: "original-device",
     shell: "/bin/bash"
   };
@@ -85,7 +86,6 @@ test("设备重命名：在线改名后 daemon 收到 DaemonSetName 且本地 se
   const daemonEnv = {
     ...process.env,
     COFLUX_SERVER: `ws://127.0.0.1:${stack.port}/daemon`,
-    COFLUX_ENROLL_KEY: stack.enrollKey,
     COFLUX_HOME: stack.home,
     // 不设 COFLUX_DEVICE_NAME，让 daemon 从 settings.json 读
   };
@@ -137,7 +137,6 @@ test("设备重命名：离线设备改名后重连即被补发同步", async ()
   const settingsPath = join(stack.home, "settings.json");
   const offlineSettings = {
     serverUrl: `ws://127.0.0.1:${stack.port}/daemon`,
-    enrollKey: stack.enrollKey,
     deviceName: "offline-device",
     shell: "/bin/bash"
   };
@@ -163,7 +162,6 @@ test("设备重命名：离线设备改名后重连即被补发同步", async ()
   const daemonEnv = {
     ...process.env,
     COFLUX_SERVER: `ws://127.0.0.1:${stack.port}/daemon`,
-    COFLUX_ENROLL_KEY: stack.enrollKey,
     COFLUX_HOME: stack.home,
   };
   const daemonProcess = spawnDaemon(daemonEnv);

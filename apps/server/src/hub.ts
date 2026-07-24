@@ -268,7 +268,7 @@ export class Hub {
 
   /* ============================ Daemon 侧 ============================ */
   async handleDaemonMessage(conn: DaemonCtx, msg: DaemonToServer): Promise<void> {
-    if (msg.payload.case !== "daemonEnroll" && msg.payload.case !== "daemonAuth" && msg.payload.case !== "daemonEnrollRequest" && !conn.daemonId) return;
+    if (msg.payload.case !== "daemonAuth" && msg.payload.case !== "daemonEnrollRequest" && !conn.daemonId) return;
 
     switch (msg.payload.case) {
       case "daemonEnrollRequest": {
@@ -291,28 +291,6 @@ export class Hub {
         conn.pendingAuthToken = token;
         this.sendRaw(conn.ws, { case: "daemonAuthorizePending", value: { url: `${config.webUrl}/authorize/${token}`, expiresAt: createdAt + config.authorizeTtlMs } });
         log.info("daemon authorize requested", { name: value.name, host: value.host });
-        break;
-      }
-      case "daemonEnroll": {
-        const value = msg.payload.value;
-        const accountId = await this.store.accountForEnrollmentKey(hashToken(value.enrollmentKey));
-        if (!accountId) {
-          this.sendRaw(conn.ws, { case: "daemonAuthError", value: { message: "登记密钥无效", needEnroll: false } });
-          conn.ws.close(4001, "bad enrollment key");
-          return;
-        }
-        if ((await this.store.countDevices(accountId)) >= config.maxDevicesPerAccount) {
-          this.sendRaw(conn.ws, { case: "daemonAuthError", value: { message: "账号设备数已达上限", needEnroll: false } });
-          conn.ws.close(4004, "device cap reached");
-          return;
-        }
-        const daemonId = randomUUID();
-        const deviceToken = genToken("ck_dev");
-        const ts = Date.now();
-        await this.store.createDevice({ id: daemonId, accountId, name: value.name, host: value.host, platform: value.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: false });
-        log.info("daemon enrolled", { daemonId, name: value.name, host: value.host });
-        this.sendRaw(conn.ws, { case: "daemonEnrolled", value: { daemonId, deviceToken } });
-        await this.registerDaemonConn(conn, { daemonId, name: value.name, host: value.host, platform: value.platform, online: true, workerVersion: value.workerVersion, supervisorVersion: value.supervisorVersion }, accountId, value.arch);
         break;
       }
       case "daemonAuth": {
@@ -692,13 +670,6 @@ export class Hub {
         client.subscribed = true;
         this.clients.add(client);
         this.sendClient(client, { case: "stateSnapshot", value: { daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) } });
-        break;
-      }
-      case "clientCreateEnrollmentKey": {
-        const enrollmentKey = genToken("cf_enroll");
-        await this.store.createEnrollmentKey(hashToken(enrollmentKey), client.accountId!, Date.now());
-        this.sendClient(client, { case: "enrollmentKeyCreated", value: { enrollmentKey, daemonUrl: config.daemonUrl } });
-        log.info("enrollment key created", { accountId: client.accountId });
         break;
       }
       case "clientRemoveDevice": {
@@ -1203,8 +1174,8 @@ export class Hub {
     return p;
   }
 
-  /** 兑现一次授权：摘除 pending（一次性）、把设备绑进当前登录账号、走与 daemon.enroll 完全相同的
-   * createDevice + registerDaemonConn 路径——授权完成后的 daemon 与 enrollmentKey 登记的设备无状态差异。 */
+  /** 兑现一次授权：摘除 pending（一次性）、把设备绑进当前登录账号，走 createDevice +
+   * registerDaemonConn 路径。 */
   private async completeDeviceAuthorize(client: ClientConn, p: PendingAuthorization): Promise<void> {
     this.pendingAuthorizations.delete(p.token);
     clearTimeout(p.timer);
@@ -1212,7 +1183,7 @@ export class Hub {
 
     const accountId = client.accountId!;
     if ((await this.store.countDevices(accountId)) >= config.maxDevicesPerAccount) {
-      // 与 daemon.enroll 路径一致：设备数超限是致命错误，daemon 侧直接退出（needEnroll:false）。
+      // 设备数超限是致命错误，daemon 侧直接退出（needEnroll:false）。
       this.sendRaw(p.conn.ws, { case: "daemonAuthError", value: { message: "账号设备数已达上限", needEnroll: false } });
       try {
         p.conn.ws.close(4004, "device cap reached");
