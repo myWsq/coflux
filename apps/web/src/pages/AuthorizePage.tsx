@@ -4,7 +4,7 @@ import { create, encodeClientToServer, decodeServerToClient, ClientToServerSchem
 
 import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
 import { Button } from "@astryxdesign/core/Button";
-import { SERVER_URL, TOKEN_KEY, USE_SUPABASE, type AuthCredential } from "@/config";
+import { BUILD_ID, SERVER_URL, TOKEN_KEY, USE_SUPABASE, type AuthCredential } from "@/config";
 import { loginWithSupabase } from "@/lib/auth";
 
 type AuthorizeState =
@@ -39,9 +39,11 @@ export function AuthorizePage({ token }: { token: string }) {
     socket.binaryType = "arraybuffer";
     wsRef.current = socket;
     socket.onopen = () => {
-      if ("token" in credential) send({ case: "clientAuth", value: { clientToken: credential.token } });
-      else if ("supabaseToken" in credential) send({ case: "clientAuth", value: { supabaseToken: credential.supabaseToken } });
-      else send({ case: "clientAuth", value: { username: credential.username, password: credential.password } });
+      // clientVersion 必带：本页是独立于主 store 的旁路连接，版本准入（plan 033）同样适用——
+      // 漏掉会被 server 当旧 bundle 拒掉（2026-07-24 生产事故）。
+      if ("token" in credential) send({ case: "clientAuth", value: { clientToken: credential.token, clientVersion: BUILD_ID } });
+      else if ("supabaseToken" in credential) send({ case: "clientAuth", value: { supabaseToken: credential.supabaseToken, clientVersion: BUILD_ID } });
+      else send({ case: "clientAuth", value: { username: credential.username, password: credential.password, clientVersion: BUILD_ID } });
     };
     socket.onclose = () => {
       setState((current) => (current.phase === "done" ? current : { phase: "failed", message: "连接已断开，请刷新页面重试" }));
