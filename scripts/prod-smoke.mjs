@@ -28,7 +28,8 @@ if (!TOKEN && !(USER && PASS)) {
   console.error("缺 COFLUX_SMOKE_TOKEN（或 COFLUX_SMOKE_USER/PASS）");
   process.exit(2);
 }
-const AUTH = TOKEN ? { clientToken: TOKEN } : { username: USER, password: PASS };
+// clientVersion "dev" 走版本准入的放行通道（plan 033）——本脚本是运维工具，不是受管 bundle
+const AUTH = { clientVersion: "dev", ...(TOKEN ? { clientToken: TOKEN } : { username: USER, password: PASS }) };
 
 const td = new TextDecoder();
 const te = new TextEncoder();
