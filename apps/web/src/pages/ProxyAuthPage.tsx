@@ -3,7 +3,7 @@ import { ExternalLink, LoaderCircle, ShieldX } from "lucide-react";
 import { create, encodeClientToServer, decodeServerToClient, ClientToServerSchema, type ClientToServerPayload } from "@coflux/protocol";
 
 import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
-import { SERVER_URL, TOKEN_KEY, USE_SUPABASE, type AuthCredential } from "@/config";
+import { BUILD_ID, SERVER_URL, TOKEN_KEY, USE_SUPABASE, type AuthCredential } from "@/config";
 import { loginWithSupabase } from "@/lib/auth";
 
 type ProxyAuthState =
@@ -37,9 +37,10 @@ export function ProxyAuthPage() {
     socket.binaryType = "arraybuffer";
     wsRef.current = socket;
     socket.onopen = () => {
-      if ("token" in credential) send({ case: "clientAuth", value: { clientToken: credential.token } });
-      else if ("supabaseToken" in credential) send({ case: "clientAuth", value: { supabaseToken: credential.supabaseToken } });
-      else send({ case: "clientAuth", value: { username: credential.username, password: credential.password } });
+      // clientVersion 必带：旁路连接同样受版本准入（plan 033）约束，见 AuthorizePage 同注释。
+      if ("token" in credential) send({ case: "clientAuth", value: { clientToken: credential.token, clientVersion: BUILD_ID } });
+      else if ("supabaseToken" in credential) send({ case: "clientAuth", value: { supabaseToken: credential.supabaseToken, clientVersion: BUILD_ID } });
+      else send({ case: "clientAuth", value: { username: credential.username, password: credential.password, clientVersion: BUILD_ID } });
     };
     socket.onclose = () => {
       setState((current) => (current.phase === "issuing" ? current : { phase: "failed", message: "连接已断开，请刷新页面重试" }));
