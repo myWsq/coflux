@@ -35,5 +35,8 @@
 | 031 | [抽取 packages/client（协议 client + store 双端共享）](031-extract-client-package.md) | DONE (452daa0) | none |
 | 032 | [apps/mobile 移动随身端（精简 Agent 指挥中心）](032-mobile-companion-app.md) | DONE (223ae02) | 031 |
 | 033 | [构建版本号贯通 + 失配踢出（终结旧 bundle 僵尸客户端）](033-build-version-skew-kick.md) | DONE (87642ee) | none |
+| 033 | [worker 连接韧性（半死连接自愈）+ 连接态可观测](033-worker-connection-resilience.md)（与上行撞号，两分支并行开发所致） | DONE (b8261fd) | none |
+| 034 | [enrollKey 全链路删除——浏览器授权成为唯一登记路径](034-remove-enroll-key.md) | DONE (fc5db48) | 033 |
+| 035 | [cofluxd 命令面重梳 + doctor 连通性自检](035-cofluxd-command-surface.md) | DONE (7f97423) | 034 |
 
-执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026 → 027 → 028 → 029 → 031 → 032 → 033。（030 已撤回，未执行）
+执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026 → 027 → 028 → 029 → 031 → 032 → {033-skew ∥ 033-conn} → 034 → 035。（030 已撤回，未执行）

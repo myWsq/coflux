@@ -1,6 +1,6 @@
 /**
  * 服务器持久化层（Postgres，porsager/postgres 客户端）。
- * 持久化：accounts / devices / enrollment_keys / client_tokens / memberships / projects / workspaces / tasks。
+ * 持久化：accounts / devices / client_tokens / memberships / projects / workspaces / tasks。
  * 运行时（不落盘）：daemon 连接、运行时 session —— 见 hub。
  * token 一律只存 sha256 hash（见 secrets.ts）。
  *
@@ -112,13 +112,6 @@ const SCHEMA_DDL = `
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     created_at DOUBLE PRECISION NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS enrollment_keys (
-    key_hash TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL,
-    revoked BOOLEAN NOT NULL DEFAULT false
   );
 
   CREATE TABLE IF NOT EXISTS client_tokens (
@@ -294,27 +287,6 @@ export class Store {
   async createAccount(a: Account): Promise<Account> {
     await this.sql`INSERT INTO accounts ${this.sql(a, "id", "name", "createdAt")}`;
     return a;
-  }
-
-  /* ------------------------ enrollment keys ------------------------ */
-  async upsertEnrollmentKey(keyHash: string, accountId: AccountId, createdAt: number): Promise<void> {
-    await this.sql`
-      INSERT INTO enrollment_keys (key_hash, account_id, created_at, revoked)
-      VALUES (${keyHash}, ${accountId}, ${createdAt}, false)
-      ON CONFLICT (key_hash) DO NOTHING
-    `;
-  }
-  async createEnrollmentKey(keyHash: string, accountId: AccountId, createdAt: number): Promise<void> {
-    await this.sql`
-      INSERT INTO enrollment_keys (key_hash, account_id, created_at, revoked)
-      VALUES (${keyHash}, ${accountId}, ${createdAt}, false)
-    `;
-  }
-  async accountForEnrollmentKey(keyHash: string): Promise<AccountId | undefined> {
-    const rows = await this.sql<{ accountId: string }[]>`
-      SELECT account_id FROM enrollment_keys WHERE key_hash = ${keyHash} AND revoked = false
-    `;
-    return rows[0]?.accountId;
   }
 
   /* ------------------------ memberships ---------------------------- */

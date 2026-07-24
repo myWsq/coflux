@@ -13,7 +13,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
-import { startServer } from "./harness.mjs";
+import { startServer, tokenFromUrl } from "./harness.mjs";
 
 const JWKS_PORT = 8831;
 const SERVER_PORT = 8830;
@@ -119,13 +119,14 @@ test("两个不同 userId 账号隔离：互相看不到设备", async () => {
   const okA = await authWith(a, { supabaseToken: await signJwt("iso-a", "isoa@x.com") });
   a.send({ case: "clientSubscribe" });
   await a.waitFor((m) => m.case === "stateSnapshot", "snapA");
-  a.send({ case: "clientCreateEnrollmentKey" });
-  const key = await a.waitFor((m) => m.case === "enrollmentKeyCreated", "enrollKey");
 
-  // 用原始 /daemon 连接在 A 账号下登记一台设备（无需 Rust supervisor）
+  // 用原始 /daemon 连接走浏览器授权，在 A 账号下登记一台设备（无需 Rust supervisor）
   const dev = stack.rawDaemon();
   await dev.ready;
-  dev.send({ case: "daemonEnroll", enrollmentKey: key.enrollmentKey, name: "devA", host: "hostA", platform: "linux" });
+  dev.send({ case: "daemonEnrollRequest", name: "devA", host: "hostA", platform: "linux" });
+  const pending = await dev.waitFor((m) => m.case === "daemonAuthorizePending", "authorizePending");
+  a.send({ case: "deviceAuthorize", token: tokenFromUrl(pending.url) });
+  await a.waitFor((m) => m.case === "deviceAuthorized", "A 确认授权");
   await dev.waitFor((m) => m.case === "daemonEnrolled", "enrolled");
   await a.waitFor((m) => m.case === "daemonUpdated" && m.daemon.name === "devA" && m.daemon.online, "A 看到自己的设备");
 

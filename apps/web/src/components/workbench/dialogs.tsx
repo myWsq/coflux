@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { TerminalSquare } from "lucide-react";
 import type { DaemonInfo, Workspace } from "@coflux/protocol";
-import { Banner } from "@astryxdesign/core/Banner";
 import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import { CodeBlock } from "@astryxdesign/core/CodeBlock";
 import { Dialog as AstryxDialog, DialogHeader as AstryxDialogHeader } from "@astryxdesign/core/Dialog";
@@ -10,7 +9,6 @@ import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from "@astryxdesi
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 
-import type { ClientError } from "@coflux/client";
 import { shortcutModifiers, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
 
 type WorkspaceRenameDialogProps = {
@@ -140,91 +138,45 @@ export function DeviceRenameDialog(props: DeviceRenameDialogProps) {
 
 type EnrollmentDialogProps = {
   open: boolean;
-  command: string | null;
-  lastError: ClientError | null;
   onOpenChange: (open: boolean) => void;
-  onRequest: () => void;
-  onClear: () => void;
 };
 
+/** 添加设备：静态安装引导（无凭证生成——登记走浏览器授权，daemon 自己打印链接）。 */
 export function EnrollmentDialog(props: EnrollmentDialogProps) {
-  const requestErrorBaseline = useRef<number | null>(null);
-  const [requested, setRequested] = useState(false);
-  const [requestError, setRequestError] = useState("");
-
-  useEffect(() => {
-    if (!props.open) return;
-    setRequested(false);
-    setRequestError("");
-    requestErrorBaseline.current = props.lastError?.id ?? null;
-    // 打开时只消费一次当时的 lastError 作为基线，之后的变化交给下面的效果处理。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.open]);
-
-  useEffect(() => {
-    if (!requested || !props.lastError || props.lastError.id === requestErrorBaseline.current) return;
-    setRequested(false);
-    setRequestError(props.lastError.message.replaceAll("任务", "终端"));
-  }, [props.lastError, requested]);
-
-  function changeOpen(nextOpen: boolean) {
-    if (!nextOpen) props.onClear();
-    props.onOpenChange(nextOpen);
-  }
-
-  function requestCommand() {
-    requestErrorBaseline.current = props.lastError?.id ?? null;
-    setRequestError("");
-    setRequested(true);
-    props.onRequest();
-  }
-
   return (
-    <AstryxDialog isOpen={props.open} onOpenChange={changeOpen} purpose="form" width={480}>
+    <AstryxDialog isOpen={props.open} onOpenChange={props.onOpenChange} purpose="form" width={480}>
       <Layout
         header={
           <AstryxDialogHeader
             title="添加设备"
-            subtitle="生成一次登记命令，在要接入的机器上执行。设备上线后会自动出现在侧边栏。"
-            onOpenChange={changeOpen}
+            subtitle="在要接入的机器上安装并启动 daemon，然后在浏览器里完成一次授权。"
+            onOpenChange={props.onOpenChange}
             hasDivider={false}
           />
         }
         content={
           <LayoutContent>
-            {props.command ? (
-              <VStack gap={3} hAlign="stretch">
-                <Text type="body" size="sm">
-                  在新机器的终端中运行：
-                </Text>
-                {/* CodeBlock 自带复制按钮；文本可选中，剪贴板权限被拒时可手动复制 */}
-                <CodeBlock code={props.command} language="plaintext" size="sm" isWrapped />
-              </VStack>
-            ) : (
-              <VStack gap={3} hAlign="center">
+            <VStack gap={3} hAlign="stretch">
+              <Text type="body" size="sm">
+                在新机器的终端中运行：
+              </Text>
+              {/* CodeBlock 自带复制按钮；文本可选中，剪贴板权限被拒时可手动复制 */}
+              <CodeBlock code={"npm i -g cofluxd && cofluxd up"} language="plaintext" size="sm" isWrapped />
+              <VStack gap={2} hAlign="center">
                 <Icon icon={TerminalSquare} size="md" />
                 <Text type="supporting" justify="center">
-                  命令包含登记凭证，请只在你信任的机器上使用，不要转发或公开。
+                  daemon 启动后会打印一个授权链接，在任意设备的浏览器里打开它并确认，设备即上线。
                 </Text>
-                {requestError ? <Banner status="error" title={requestError} container="card" /> : null}
-                <AstryxButton
-                  label={requested ? "正在生成…" : "生成登记命令"}
-                  variant="primary"
-                  isLoading={requested}
-                  onClick={requestCommand}
-                />
               </VStack>
-            )}
+            </VStack>
           </LayoutContent>
         }
         footer={
-          props.command ? (
-            <LayoutFooter hasDivider={false}>
-              <HStack gap={2} hAlign="end">
-                <AstryxButton label="完成" variant="primary" onClick={() => changeOpen(false)} />
-              </HStack>
-            </LayoutFooter>
-          ) : undefined
+          <LayoutFooter hasDivider={false}>
+            <HStack gap={2} hAlign="end">
+              <AstryxButton label="完成" variant="primary" onClick={() => props.onOpenChange(false)} />
+            </HStack>
+          </LayoutFooter>
         }
       />
     </AstryxDialog>

@@ -290,25 +290,6 @@ impl FsEntryKind {
 // ===== Daemon → Server 载荷 =====
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DaemonEnroll {
-    #[prost(string, tag="1")]
-    pub enrollment_key: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub host: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub platform: ::prost::alloc::string::String,
-    /// 热更新编排（plan 015）：worker/supervisor 当前版本 + CPU 架构（std::env::consts::ARCH）。
-    /// 旧 daemon 不带这三个字段 → server 收到空串，按"不上报"处理（不参与自动推送比对）。
-    #[prost(string, tag="5")]
-    pub worker_version: ::prost::alloc::string::String,
-    #[prost(string, tag="6")]
-    pub supervisor_version: ::prost::alloc::string::String,
-    #[prost(string, tag="7")]
-    pub arch: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DaemonAuth {
     #[prost(string, tag="1")]
     pub device_token: ::prost::alloc::string::String,
@@ -319,7 +300,7 @@ pub struct DaemonAuth {
     #[prost(string, tag="4")]
     pub arch: ::prost::alloc::string::String,
 }
-/// 未登记且无 enrollmentKey 时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
+/// 本地无凭证（未登记）时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DaemonEnrollRequest {
     #[prost(string, tag="1")]
@@ -411,15 +392,13 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 19, 15, 16, 17, 18, 20")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 19, 15, 16, 17, 18, 20")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
 pub mod daemon_to_server {
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Payload {
-        #[prost(message, tag="1")]
-        DaemonEnroll(super::DaemonEnroll),
         #[prost(message, tag="2")]
         DaemonAuth(super::DaemonAuth),
         #[prost(message, tag="3")]
@@ -757,10 +736,6 @@ pub struct ClientLogout {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientSubscribe {
 }
-/// 为当前账号生成一条新的登记密钥（账号级、可复用），供新机器 daemon 登记
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientCreateEnrollmentKey {
-}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientRemoveDevice {
     #[prost(string, tag="1")]
@@ -939,7 +914,7 @@ pub struct ClientFsWrite {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 23, 24")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 23, 24")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -952,8 +927,6 @@ pub mod client_to_server {
         ClientLogout(super::ClientLogout),
         #[prost(message, tag="3")]
         ClientSubscribe(super::ClientSubscribe),
-        #[prost(message, tag="4")]
-        ClientCreateEnrollmentKey(super::ClientCreateEnrollmentKey),
         #[prost(message, tag="5")]
         ClientRemoveDevice(super::ClientRemoveDevice),
         #[prost(message, tag="6")]
@@ -1014,14 +987,6 @@ pub struct AuthOk {
 pub struct AuthError {
     #[prost(string, tag="1")]
     pub message: ::prost::alloc::string::String,
-}
-/// 登记密钥已生成（明文仅此一次回传；服务器只存 hash）
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct EnrollmentKeyCreated {
-    #[prost(string, tag="1")]
-    pub enrollment_key: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub daemon_url: ::prost::alloc::string::String,
 }
 /// DeviceAuthorizeInfoRequest 的回应：ok 时带设备信息，否则 error 说明原因（无效/已用/已过期）
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1132,7 +1097,7 @@ pub struct ClientOutdated {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 22")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 22")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -1143,8 +1108,6 @@ pub mod server_to_client {
         AuthOk(super::AuthOk),
         #[prost(message, tag="2")]
         AuthError(super::AuthError),
-        #[prost(message, tag="3")]
-        EnrollmentKeyCreated(super::EnrollmentKeyCreated),
         #[prost(message, tag="4")]
         DeviceAuthorizeInfo(super::DeviceAuthorizeInfoResult),
         #[prost(message, tag="5")]

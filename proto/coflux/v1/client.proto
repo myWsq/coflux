@@ -26,9 +26,6 @@ message ClientLogout {}
 
 message ClientSubscribe {}
 
-// 为当前账号生成一条新的登记密钥（账号级、可复用），供新机器 daemon 登记
-message ClientCreateEnrollmentKey {}
-
 message ClientRemoveDevice {
   string daemon_id = 1;
 }
@@ -157,11 +154,12 @@ message ClientFsWrite {
 }
 
 message ClientToServer {
+  reserved 4;
+  reserved "client_create_enrollment_key";
   oneof payload {
     ClientAuth client_auth = 1;
     ClientLogout client_logout = 2;
     ClientSubscribe client_subscribe = 3;
-    ClientCreateEnrollmentKey client_create_enrollment_key = 4;
     ClientRemoveDevice client_remove_device = 5;
     DeviceAuthorizeInfoRequest device_authorize_info = 6;
     DeviceAuthorize device_authorize = 7;
@@ -197,12 +195,6 @@ message AuthOk {
 
 message AuthError {
   string message = 1;
-}
-
-// 登记密钥已生成（明文仅此一次回传；服务器只存 hash）
-message EnrollmentKeyCreated {
-  string enrollment_key = 1;
-  string daemon_url = 2;
 }
 
 // DeviceAuthorizeInfoRequest 的回应：ok 时带设备信息，否则 error 说明原因（无效/已用/已过期）
@@ -286,10 +278,11 @@ message ServerError {
 message ClientOutdated {}
 
 message ServerToClient {
+  reserved 3;
+  reserved "enrollment_key_created";
   oneof payload {
     AuthOk auth_ok = 1;
     AuthError auth_error = 2;
-    EnrollmentKeyCreated enrollment_key_created = 3;
     DeviceAuthorizeInfoResult device_authorize_info = 4;
     DeviceAuthorized device_authorized = 5;
     ProxyAuth proxy_auth = 6;

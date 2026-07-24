@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import { create, ClientToServerSchema, encodeClientToServer, TaskStatus } from "@coflux/protocol";
-import { startStack, mkRepo, rawDaemon } from "./harness.mjs";
+import { startStack, mkRepo, rawDaemon, tokenFromUrl } from "./harness.mjs";
 
 const PORT = 8824;
 let stack;
@@ -25,10 +25,16 @@ test("跨 daemon 劫持被拒：resync/session.exit 对他设备的任务无效"
   const run = await a.waitFor((m) => m.case === "taskUpdated" && m.task.id === taskId && m.task.status === TaskStatus.RUNNING, "run");
   const victimSession = run.task.sessionId;
 
-  // 模拟"同账号但不同设备"的恶意/有缺陷 daemon（复用 harness 的裸 /daemon 连接）
+  // 模拟"同账号但不同设备"的恶意/有缺陷 daemon（复用 harness 的裸 /daemon 连接，走浏览器授权登记）
   const evil = rawDaemon(PORT);
   await evil.ready;
-  evil.send({ case: "daemonEnroll", enrollmentKey: "dev-enroll", name: "evil", host: "evil", platform: "x" });
+  evil.send({ case: "daemonEnrollRequest", name: "evil", host: "evil", platform: "x" });
+  const pending = await evil.waitFor((m) => m.case === "daemonAuthorizePending", "evil authorizePending");
+  const authorizer = stack.makeClient();
+  await authorizer.authSubscribe();
+  authorizer.send({ case: "deviceAuthorize", token: tokenFromUrl(pending.url) });
+  await authorizer.waitFor((m) => m.case === "deviceAuthorized", "evil authorized");
+  authorizer.close();
   await evil.waitFor((m) => m.case === "daemonEnrolled", "evil enrolled");
   evil.send({ case: "daemonResync", sessions: [{ sessionId: "evil-sess", taskId }] });
   evil.send({ case: "sessionExit", sessionId: victimSession, exitCode: 0 });

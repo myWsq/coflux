@@ -14,7 +14,7 @@
  * （仍然完全不 import apps/* 的任何代码）。
  */
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -205,7 +205,7 @@ export async function startServer(opts = {}) {
   };
 }
 
-/** 一个原始 /daemon 连接：直接发 daemon.enroll/daemon.auth，不需要 Rust supervisor。
+/** 一个原始 /daemon 连接：直接发 daemon.enrollRequest/daemon.auth，不需要 Rust supervisor。
  * send(m) 里 m 形如 `{ case: "daemonEnrollRequest", name, host, platform }`（扁平）；
  * 收到的消息同样拍平为 `{ case, ...value }` 塞进 log/waitFor。 */
 export function rawDaemon(port) {
@@ -238,11 +238,44 @@ export function rawDaemon(port) {
   };
 }
 
+/** 从 daemon.authorizePending 的 url（`<webUrl>/authorize/<token>`）里取 token。 */
+export function tokenFromUrl(url) {
+  return url.split("/").filter(Boolean).pop();
+}
+
+/** 驱动一次浏览器授权确认：等 daemon 把待授权链接落到 `<home>/pending-auth.json`
+ * （daemon 已发出 daemon.enrollRequest 是前提，spawnDaemon 之后调用即可），
+ * 用一个测试 client 以 username/password 登录后确认 device.authorize。
+ * startStack 用它替代已删除的 classic enrollKey 登记；也供需要手动起第二台 daemon 的测试复用。 */
+export async function authorizeDaemon(port, home, { username = "admin", password = "admin", ms = 20000 } = {}) {
+  const pendingPath = join(home, "pending-auth.json");
+  const t0 = Date.now();
+  let pending;
+  while (Date.now() - t0 < ms && !pending) {
+    if (existsSync(pendingPath)) {
+      try {
+        pending = JSON.parse(readFileSync(pendingPath, "utf8"));
+      } catch {
+        /* 文件可能正在被写，重试 */
+      }
+    }
+    if (!pending) await sleep(200);
+  }
+  if (!pending?.url) throw new Error("daemon did not write pending-auth.json in time");
+  const c = new Client(port);
+  try {
+    await c.authSubscribe(username, password);
+    c.send({ case: "deviceAuthorize", token: tokenFromUrl(pending.url) });
+    await c.waitFor((m) => m.case === "deviceAuthorized", "device.authorized");
+  } finally {
+    c.close();
+  }
+}
+
 /** 起一套独立栈，返回控制句柄。等到 daemon 在线后才返回。 */
 export async function startStack(opts = {}) {
   const port = opts.port;
   if (!port) throw new Error("startStack requires a port");
-  const enrollKey = opts.enrollKey ?? "dev-enroll";
   const username = opts.username ?? "admin";
   const password = opts.password ?? "admin";
 
@@ -251,14 +284,16 @@ export async function startStack(opts = {}) {
 
   // opts.serverEnv：额外/覆盖 server 侧 env（如 proxy.test.mjs 显式钉死 COFLUX_PROXY_SCHEME，
   // 避免测试环境未设 COFLUX_DEV 时 isDev=false 导致 proxyScheme 默认落到 https，门禁/cookie 断言随之漂移）。
-  const serverEnv = { ...process.env, COFLUX_PORT: String(port), DATABASE_URL: testDb.url, COFLUX_ENROLL_KEY: enrollKey, COFLUX_USERNAME: username, COFLUX_PASSWORD: password, ...(opts.serverEnv ?? {}) };
-  const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`, COFLUX_ENROLL_KEY: enrollKey, COFLUX_HOME: home, COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev", ...(opts.daemonEnv ?? {}) };
+  const serverEnv = { ...process.env, COFLUX_PORT: String(port), DATABASE_URL: testDb.url, COFLUX_USERNAME: username, COFLUX_PASSWORD: password, ...(opts.serverEnv ?? {}) };
+  const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`, COFLUX_HOME: home, COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev", ...(opts.daemonEnv ?? {}) };
 
   const ref = { server: null, daemon: null };
   try {
     ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
     await waitHealth(port);
     ref.daemon = spawnDaemon(daemonEnv);
+    // 空 home，daemon 无 credentials.json → 走浏览器授权（唯一登记路径），这里现场自动确认。
+    await authorizeDaemon(port, home, { username, password });
   } catch (e) {
     // 建库之后、stack.stop() 可用之前失败：就地清理，别泄漏测试库/临时目录
     killTree(ref.daemon);
@@ -272,7 +307,6 @@ export async function startStack(opts = {}) {
     port,
     username,
     password,
-    enrollKey,
     home,
     daemonId: null,
     makeClient: () => new Client(port),

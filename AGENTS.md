@@ -25,7 +25,7 @@ cargo build -p coflux-supervisor -p coflux-worker   # 构建 daemon 二进制
 node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit   # server 类型检查
 node_modules/.bin/tsc -b apps/web/tsconfig.json               # web 类型检查
 pnpm dev:server / dev:web / dev:daemon              # 本地起三端
-node packages/cli/cofluxd.mjs up --server ... --enroll-key ... --bin-dir target/release   # 用 cofluxd CLI 装/起 daemon（用户侧：npm i -g cofluxd && cofluxd up）
+node packages/cli/cofluxd.mjs up --server ... --bin-dir target/release   # 用 cofluxd CLI 装/起 daemon（用户侧：npm i -g cofluxd && cofluxd up）
 git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编译 + 签名 worker + GitHub Release（见 docs/RELEASING.md）
 ```
 

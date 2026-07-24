@@ -5,24 +5,23 @@
  * 与仓库既有黑盒测试风格一致（见 harness.mjs 顶部说明）。
  *
  * 场景 1（真实 daemon 全链路：匿名 → 拿链接 → 授权 → 上线 → 能跑任务）用真实
- * Rust supervisor+worker 二进制起一个"未登记"的 daemon（settings.json 显式
- * enrollKey:""，触发 crates/worker/src/main.rs 里 pick() 的空串直通语义）；
- * 场景 2-4（TTL/一次性/断线作废）与限速用 harness 的裸 /daemon WS 连接
- * （rawDaemon）直接发 daemon.enrollRequest，更快也更聚焦协议本身。
+ * Rust supervisor+worker 二进制起一个本地无凭证的 daemon（空 home，无 credentials.json，
+ * 唯一登记路径就是发 daemon.enrollRequest）；场景 2-4（TTL/一次性/断线作废）与限速用
+ * harness 的裸 /daemon WS 连接（rawDaemon）直接发 daemon.enrollRequest，更快也更聚焦协议本身。
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
-import { startServer, rawDaemon, mkRepo, spawnDaemon, killTree } from "./harness.mjs";
+import { startServer, rawDaemon, mkRepo, spawnDaemon, killTree, tokenFromUrl } from "./harness.mjs";
 
 const PORT = 8830;
-// startServer 不像 startStack 会带默认的 enrollKey/password；local 认证模式下这两个是必需的秘密类配置
+// startServer 不像 startStack 会带默认的 password；local 认证模式下这是必需的秘密类配置
 // （见 apps/server/src/config.ts 的 secret()/fail-closed），显式给一份弱默认值，仅供测试用。
-const LOCAL_ENV = { COFLUX_ENROLL_KEY: "dev-enroll", COFLUX_PASSWORD: "admin" };
+const LOCAL_ENV = { COFLUX_PASSWORD: "admin" };
 let server;
 
 before(async () => {
@@ -32,20 +31,11 @@ after(async () => {
   await server?.stop();
 });
 
-/** 从 daemon.authorizePending 的 url（`<webUrl>/authorize/<token>`）里取 token */
-function tokenFromUrl(url) {
-  return url.split("/").filter(Boolean).pop();
-}
-
 test("授权成功端到端：匿名 daemon 拿链接 → client 授权 → daemon 上线且能跑任务", async () => {
   const home = mkdtempSync(join(tmpdir(), "coflux-test-authhome-"));
   const deviceName = "auth-e2e-dev";
-  // 显式空串（非缺省）：这正是 worker 判定"走新授权流而非 classic enroll"的信号
-  // （见 crates/protocol/src/settings.rs + crates/worker/src/main.rs 的 pick() 语义）。
-  writeFileSync(join(home, "settings.json"), JSON.stringify({ enrollKey: "" }), { mode: 0o600 });
-
+  // 空 home（无 settings.json/credentials.json）：daemon 无凭证，唯一路径就是发 enrollRequest。
   const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${PORT}/daemon`, COFLUX_HOME: home, COFLUX_DEVICE_NAME: deviceName };
-  delete daemonEnv.COFLUX_ENROLL_KEY;
   const daemonProc = spawnDaemon(daemonEnv);
 
   const repo = mkRepo();
@@ -83,7 +73,7 @@ test("授权成功端到端：匿名 daemon 拿链接 → client 授权 → daem
     assert.ok(upd.daemon.online, "授权后 daemon 在线");
     const daemonId = upd.daemon.daemonId;
 
-    // 与 classic enroll 流无差：能真正导入项目、起任务、走 PTY
+    // 授权后即是一台正常设备：能真正导入项目、起任务、走 PTY
     c.send({ case: "projectImport", daemonId, path: repo.dir });
     const main = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main ws");
     c.send({ case: "taskCreate", workspaceId: main.workspace.id, title: "authz-task" });
@@ -94,7 +84,7 @@ test("授权成功端到端：匿名 daemon 拿链接 → client 授权 → daem
     c.send({ case: "ptyInput", sessionId: run.task.sessionId, data: "echo MARK_$((6*7))\r" });
     await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("MARK_42"), "PTY 回流");
 
-    // credentials.json 落盘（daemon 端与 classic enroll 一样持久化，重启可重连而非再次授权）
+    // credentials.json 落盘（daemon 端持久化，重启可重连而非再次授权）
     assert.ok(existsSync(join(home, "credentials.json")), "授权后 daemon 落地 credentials.json");
     assert.ok(!existsSync(pendingPath), "授权完成后 pending-auth.json 应被清理");
 
@@ -181,9 +171,7 @@ test("TTL 过期后 worker 自动换新链接：旧 token 作废、新 token 可
   // TTL 2s + worker 1s 粒度的续期检查 → 第二个链接应在 ~3s 内出现。
   const short = await startServer({ port: PORT + 3, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_TTL_MS: "2000" } });
   const home = mkdtempSync(join(tmpdir(), "coflux-test-renewhome-"));
-  writeFileSync(join(home, "settings.json"), JSON.stringify({ enrollKey: "" }), { mode: 0o600 });
   const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${short.port}/daemon`, COFLUX_HOME: home, COFLUX_DEVICE_NAME: "renew-dev" };
-  delete daemonEnv.COFLUX_ENROLL_KEY;
   const daemonProc = spawnDaemon(daemonEnv);
 
   try {
