@@ -79,6 +79,8 @@ final class CofluxClient {
     private var deviceRouter: DeviceRouter!
     /// 单 consumer（iOS 同刻只有一个详情页；web 版的多 consumer 集合是超配，store.ts:298）。
     private var sessionConsumers: [String: (Data, _ replace: Bool) -> Void] = [:]
+    /// 注册令牌：换绑竞态下旧 release 闭包不得误删新 consumer。
+    private var sessionConsumerTokens: [String: UUID] = [:]
     private var liveSessionIDs: Set<String> = []
     /// 设备事实先于中心事实到达的窗口：session 已退出但 server task 还没更新（store.ts:376-384
     /// localSessions 合并语义的最小移植——iOS 无 UI 消费 pid/cwd，只留退出覆盖）。
@@ -496,13 +498,16 @@ final class CofluxClient {
         _ consumer: @escaping (Data, _ replace: Bool) -> Void
     ) -> () -> Void {
         let routedTask = tasks.first { $0.hasSessionID && $0.sessionID == sessionID }
+        let token = UUID()
         sessionConsumers[sessionID] = consumer
+        sessionConsumerTokens[sessionID] = token
         if let checkpoint = sessionCheckpoints[sessionID], !liveSessionIDs.contains(sessionID) {
             consumer(checkpoint.ansiSnapshot, true)
         }
         return { [weak self] in
-            guard let self, self.sessionConsumers[sessionID] != nil else { return }
+            guard let self, self.sessionConsumerTokens[sessionID] == token else { return }
             self.sessionConsumers[sessionID] = nil
+            self.sessionConsumerTokens[sessionID] = nil
             self.liveSessionIDs.remove(sessionID)
             if let routedTask {
                 self.deviceRouter.suspendSession(daemonID: routedTask.daemonID, sessionID: sessionID)
