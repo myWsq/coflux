@@ -42,7 +42,8 @@
 | 037 | [supervisor 演进为本机 sessiond](037-supervisor-sessiond-authority.md) | DONE (201186c) | 036 |
 | 038 | [worker loopback gateway + 双 transport](038-worker-local-gateway.md) | DONE (76a2aa1) | 036 |
 | 039 | [server 收敛为控制面 + relay](039-server-control-plane-relay.md) | DONE (183faf6) | 036 |
-| 040 | [web/client 本地优先 DeviceTransport](040-web-local-first-device-transport.md) | TODO | 036 |
-| 041 | [本地优先架构集成、迁移与验收](041-local-first-integration.md) | TODO | 037, 038, 039, 040 |
+| 040 | [web/client 真正本地优先的 DeviceTransport](040-web-local-first-device-transport.md) | TODO | 036, 042 |
+| 041 | [本地优先架构集成、迁移与发布验收](041-local-first-integration.md) | TODO | 037, 038, 039, 042, 040 |
+| 042 | [Device PTY 输入累计 ACK 与连续 exactly-once 契约](042-device-input-ack-contract.md) | TODO | 036 |
 
-执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026 → 027 → 028 → 029 → 031 → 032 → {033-skew ∥ 033-conn} → 034 → 035 → 036 → {037 ∥ 038 ∥ 039 ∥ 040}（本地优先 plan group，协议冻结后 scope 不相交）→ 041。（030 已撤回，未执行）
+执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026 → 027 → 028 → 029 → 031 → 032 → {033-skew ∥ 033-conn} → 034 → 035 → 036 → {037 ∥ 038 ∥ 039}（本地优先 daemon/server 成员，已完成）→ 042（输入 ACK 串行契约）→ 040（web/client）→ 041（集成与发布验收）。（030 已撤回，未执行）
