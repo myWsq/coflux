@@ -59,7 +59,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   );
   const detachedTaskIds = useStore(client.store, (state) => state.detachedTaskIds);
   const modPrefix = shortcutModifierPrefix(useIsStandalone());
-  const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
   const lastError = useStore(client.store, (state) => state.lastError);
   const ports = useStore(client.store, (state) => state.ports);
 
@@ -135,24 +134,24 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       controller.fit();
       controller.focus();
       const { cols, rows } = controller.dimensions();
-      client.send({ case: "ptyResize", value: { sessionId, cols, rows } });
+      client.resizeSession(sessionId, cols, rows);
     }
   }
 
-  // attach 即 taskStart（申请接管）；去重 key = `${snapshotRevision}:${sessionId}`，
-  // 同一快照代内对同一 session 只 attach 一次；强制接管用递增序列 key 绕过去重。
+  // DeviceRouter 自行处理 direct/relay generation 迁移；组件只按 session 去重用户级 attach。
+  // 强制接管用递增序列 key 绕过去重，且显式传给 router 清除 detached 门闩。
   function beginAttach(task: Task, controller: TerminalController, force = false) {
     if (task.status !== TaskStatus.RUNNING || !task.sessionId) return;
     if (sessionReadyRef.current.get(task.id) !== task.sessionId) return;
     const attachKey = force
       ? `claim:${++attachSequenceRef.current}:${task.sessionId}`
-      : `${client.store.getState().snapshotRevision}:${task.sessionId}`;
+      : `session:${task.sessionId}`;
     if (!force && attachedKeysRef.current.get(task.id) === attachKey) return;
 
     attachedKeysRef.current.set(task.id, attachKey);
     updateControlState(task.id, "attaching");
     const { cols, rows } = controller.dimensions();
-    client.startTask(task.id, cols, rows);
+    client.startTask(task.id, cols, rows, force);
     clearAttachTimer(task.id);
     attachSequenceRef.current += 1;
     const timer = window.setTimeout(() => {
@@ -209,16 +208,15 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     clearAttachTimer(taskId);
   }
 
-  // 新建启动 vs attach 区分：自己发起启动的任务在 session 就绪后直接 markOwned，
-  // 不再发第二次 taskStart。
+  // durable create 完成后仍需做第一次 live attach；startTask 看到 RUNNING task 会走本地 lane，
+  // 不会再次请求中心创建。
   function handleSessionReady(taskId: string, sessionId: string, controller: TerminalController) {
     sessionReadyRef.current.set(taskId, sessionId);
     const task = currentTasks().find((item) => item.id === taskId);
     if (!task || task.sessionId !== sessionId || task.status !== TaskStatus.RUNNING) return;
 
     if (launchingTaskIdsRef.current.delete(taskId)) {
-      attachedKeysRef.current.set(taskId, `${client.store.getState().snapshotRevision}:${sessionId}`);
-      markOwned(taskId, sessionId);
+      beginAttach(task, controller, false);
     } else if (activeRef.current && activeTaskIdRef.current === taskId) {
       // 只有本实例可见（用户正在看这个工作区）且该任务是激活 Tab 时才主动申请控制权；
       // 后台面板 / 隐藏工作区 / 旁观页面里的非激活任务不发 taskStart，不抢占对端 holder。
@@ -333,24 +331,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detachedTaskIds]);
 
-  // snapshotRevision 变更 = 重连/重登：server 侧旧连接的 holder 已失效，
-  // 正在看的那个终端必须重新 beginAttach 重新申请 holder，否则变成只读观众；
-  // 隐藏工作区 / 非激活 Tab 不重新申请（避免把对端手里的 RUNNING 终端整批抢一遍）。
-  useEffect(() => {
-    if (snapshotRevision === 0 || !activeRef.current) return;
-    const frame = requestAnimationFrame(() => {
-      const taskId = activeTaskIdRef.current;
-      if (!taskId) return;
-      const task = currentTasks().find((item) => item.id === taskId);
-      const controller = controllersRef.current.get(taskId);
-      if (task && task.status === TaskStatus.RUNNING && task.sessionId && controller && sessionReadyRef.current.get(taskId) === task.sessionId) {
-        beginAttach(task, controller, false);
-      }
-    });
-    return () => cancelAnimationFrame(frame);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshotRevision]);
-
   // error 消息到达时清 pending 创建态与 launching 态（taskCreate/taskStart 失败兜底）。
   useEffect(() => {
     if (!lastError) return;
@@ -364,9 +344,8 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   }, [lastError]);
 
   // 工作区从隐藏切回显示：重新 fit（隐藏期间尺寸为 0，ResizeObserver 的 fit 被 no-op 掉）并聚焦；
-  // 激活 Tab 若隐藏期间从未 attach（idle）或恰逢重连（snapshotRevision 效果被跳过）而丢了 holder，
-  // 在此补一次 beginAttach——dedup key 天然区分"已 attach 过同一代 no-op" vs "换代需重新申请"，
-  // 无需额外区分场景。detached 显式排除：必须由用户点击才重新接管，不能一切回工作区就自动抢回。
+  // 激活 Tab 若隐藏期间从未 attach，在此补一次 beginAttach。transport 重连由 DeviceRouter
+  // 自己迁移，不再借中心 snapshotRevision 重抢 holder。detached 显式排除：必须用户点击。
   useEffect(() => {
     if (!active) return;
     const frame = requestAnimationFrame(() => {
@@ -565,7 +544,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             controlState={stateOf(task)}
             registerSessionConsumer={client.registerSessionConsumer}
             sendInput={client.sendInput}
-            sendResize={(sessionId, cols, rows) => client.send({ case: "ptyResize", value: { sessionId, cols, rows } })}
+            sendResize={client.resizeSession}
             sendFsWrite={client.sendFsWrite}
             onReady={handleTerminalReady}
             onDispose={handleTerminalDispose}

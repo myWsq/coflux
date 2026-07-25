@@ -59,6 +59,9 @@ export function Sidebar(props: SidebarProps) {
   const projects = useStore(client.store, (state) => state.projects);
   const workspaces = useStore(client.store, (state) => state.workspaces);
   const daemons = useStore(client.store, (state) => state.daemons);
+  const tasks = useStore(client.store, (state) => state.tasks);
+  const localSessions = useStore(client.store, (state) => state.localSessions);
+  const deviceTransports = useStore(client.store, (state) => state.deviceTransports);
   // 默认全部展开，只记折叠集合（新项目出现时自然是展开态）
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
@@ -383,36 +386,72 @@ export function Sidebar(props: SidebarProps) {
           ) : null}
 
           <div className="space-y-0.5">
-            {daemons.map((daemon) => (
-              <ContextMenu
-                key={daemon.daemonId}
-                label={`设备「${daemon.name}」操作`}
-                size="sm"
-                items={[
-                  { label: "重命名", onClick: () => props.onRenameDevice(daemon) },
-                  { type: "divider" },
-                  { label: "移除设备", onClick: () => props.onRemoveDevice(daemon) },
-                ]}
-              >
-                <div className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground">
-                  <span className={cn("size-1.5 rounded-full", daemon.online ? "bg-success animate-pulse-alive" : "bg-muted-foreground/40")} />
-                  <Monitor className="size-3.5 opacity-70" />
-                  <span
-                    className="min-w-0 flex-1 truncate"
-                    title={`${daemon.host}/${daemon.platform}${daemon.workerVersion ? ` · worker ${daemon.workerVersion}` : ""}${daemon.supervisorVersion ? ` · supervisor ${daemon.supervisorVersion}` : ""}`}
-                  >
-                    {daemon.name}
-                  </span>
-                  <button
-                    className="flex size-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/device:opacity-100 focus-visible:opacity-100"
-                    onClick={() => props.onRemoveDevice(daemon)}
-                    title="移除设备"
-                  >
-                    <Trash2 className="size-3" />
-                  </button>
-                </div>
-              </ContextMenu>
-            ))}
+            {daemons.map((daemon) => {
+              const transport = deviceTransports[daemon.daemonId];
+              const orphans = localSessions.filter(
+                (session) => session.daemonId === daemon.daemonId && session.status === "running" &&
+                  !tasks.some((task) => task.id === session.taskId && task.sessionId === session.sessionId),
+              );
+              const routeLabel = transport?.mode === "direct"
+                ? "本机直连"
+                : transport?.mode === "relay"
+                  ? "中心 relay"
+                  : transport?.mode === "probing"
+                    ? "正在探测"
+                    : transport?.mode === "offline"
+                      ? "Device route 离线"
+                      : daemon.online ? "中心在线" : "中心离线";
+              return (
+                <ContextMenu
+                  key={daemon.daemonId}
+                  label={`设备「${daemon.name}」操作`}
+                  size="sm"
+                  items={[
+                    { label: "重命名", onClick: () => props.onRenameDevice(daemon) },
+                    { type: "divider" },
+                    { label: "移除设备", onClick: () => props.onRemoveDevice(daemon) },
+                  ]}
+                >
+                  <div className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground">
+                    <span
+                      className={cn(
+                        "size-1.5 rounded-full",
+                        transport?.mode === "direct"
+                          ? "bg-success animate-pulse-alive"
+                          : transport?.mode === "relay"
+                            ? "bg-warning"
+                            : transport?.mode === "probing"
+                              ? "bg-primary animate-pulse"
+                              : daemon.online ? "bg-success/60" : "bg-muted-foreground/40",
+                      )}
+                      title={transport?.detail ?? routeLabel}
+                    />
+                    <Monitor className="size-3.5 opacity-70" />
+                    <span
+                      className="min-w-0 flex-1 truncate"
+                      title={`${daemon.host}/${daemon.platform} · ${routeLabel}${transport?.detail ? ` · ${transport.detail}` : ""}${daemon.workerVersion ? ` · worker ${daemon.workerVersion}` : ""}${daemon.supervisorVersion ? ` · supervisor ${daemon.supervisorVersion}` : ""}`}
+                    >
+                      {daemon.name}
+                    </span>
+                    {orphans.length > 0 ? (
+                      <span
+                        className="shrink-0 rounded bg-warning/10 px-1 text-2xs text-warning"
+                        title={`本机存在 ${orphans.length} 个中心 catalog 未登记的存活 session：${orphans.map((item) => item.sessionId).join(", ")}`}
+                      >
+                        本地 {orphans.length}
+                      </span>
+                    ) : null}
+                    <button
+                      className="flex size-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/device:opacity-100 focus-visible:opacity-100"
+                      onClick={() => props.onRemoveDevice(daemon)}
+                      title="移除设备"
+                    >
+                      <Trash2 className="size-3" />
+                    </button>
+                  </div>
+                </ContextMenu>
+              );
+            })}
           </div>
         </section>
       </div>

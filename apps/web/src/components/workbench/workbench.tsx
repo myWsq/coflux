@@ -55,6 +55,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const daemons = useStore(client.store, (state) => state.daemons);
   const lastError = useStore(client.store, (state) => state.lastError);
   const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
+  const selectedDaemonId = workspaces.find((item) => item.id === selectedWorkspaceId)?.daemonId;
 
   // 快照后校准选中工作区：无效选择回退到首项目 main workspace（或任一工作区）。
   useEffect(() => {
@@ -79,6 +80,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const project = projects.find((item) => item.id === workspace?.projectId);
     document.title = project ? `${project.name} · coflux` : "coflux · workspace";
   }, [selectedWorkspaceId, workspaces, projects]);
+
+  // 只为当前进入的工作区显式持有 Device route；隐藏终端若仍 desired，会由 session 自身继续
+  // 持有。切换/删除工作区时 release，避免一次 probe 永久留下 socket 与轮询器。
+  useEffect(() => {
+    if (!selectedDaemonId) return;
+    return client.retainDevice(selectedDaemonId);
+  }, [client, selectedDaemonId]);
 
   function selectWorkspace(workspaceId: string) {
     setSelectedWorkspaceId(workspaceId);
@@ -163,10 +171,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   function closeTaskNow(task: Task) {
-    // 只发 taskRemove：server 侧该 handler 自带 sessionClose + dropSession。连发 taskStop
-    // 会与之并发处理（transport 不串行同连接消息），taskRemove 先删行时 taskStop 报
-    // "任务不存在"，甚至把已删任务复活成关不掉的僵尸 Tab。
-    client.send({ case: "taskRemove", value: { taskId: task.id } });
+    // RUNNING 先由本机 session authority 停 PTY；中心已认证时再删除 catalog task。中心离线时
+    // 只记录明确的本地 exit，不伪造远端 task 删除。
+    void client.closeTask(task);
   }
 
   function requestCloseTask(task: Task) {

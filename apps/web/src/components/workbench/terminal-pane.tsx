@@ -25,7 +25,7 @@ type TerminalPaneProps = {
   workspaceId: string;
   active: boolean;
   controlState: TerminalControlState;
-  registerSessionConsumer: (sessionId: string, consumer: (data: Uint8Array) => void) => () => void;
+  registerSessionConsumer: (sessionId: string, consumer: (data: Uint8Array, replace: boolean) => void) => () => void;
   sendInput: (sessionId: string, data: string) => void;
   sendResize: (sessionId: string, cols: number, rows: number) => void;
   sendFsWrite: (workspaceId: string, path: string, data: Uint8Array, temp: boolean) => Promise<FsWriteResult>;
@@ -425,7 +425,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     const terminal = terminalRef.current;
     const controller = controllerRef.current;
     if (!sessionId || !terminal || !controller) return;
-    const unregister = props.registerSessionConsumer(sessionId, (data) => {
+    const unregister = props.registerSessionConsumer(sessionId, (data, replace) => {
+      if (replace) terminal.reset();
       terminal.write(data);
       props.onOutput(props.taskId, sessionId);
     });
