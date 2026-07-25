@@ -1,7 +1,7 @@
 //! PTY 会话生命周期（活在 supervisor）。每个 session 用独立 mutex 串行化 PTY、VT、sequence
 //! 与 attach；worker/中心只是可丢失并重建的 transport。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
@@ -9,8 +9,9 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use coflux_protocol::wire::{
-    device_envelope, DeviceEnvelope, DeviceError, DevicePtyGap, DevicePtyOutput, DeviceSessionAttach, DeviceSessionAttached, DeviceSessionCatalog,
-    DeviceSessionCatalogRequest, DeviceSessionExitTombstone, DeviceSessionInfo, DeviceSessionSnapshot, DeviceSessionSnapshotRequest,
+    device_envelope, DeviceEnvelope, DeviceError, DeviceOperationAck, DevicePtyGap, DevicePtyInput, DevicePtyOutput, DevicePtyResize,
+    DeviceSessionAttach, DeviceSessionAttached, DeviceSessionCatalog, DeviceSessionCatalogRequest, DeviceSessionCreate,
+    DeviceSessionExitTombstone, DeviceSessionInfo, DeviceSessionSnapshot, DeviceSessionSnapshotRequest, DeviceSessionStop,
 };
 use coflux_protocol::{
     decode_device_envelope, encode_device_envelope, encode_frame, write_record, DataFrame, SessionInfo, SupervisorToWorker,
@@ -18,7 +19,49 @@ use coflux_protocol::{
 };
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-use crate::sessiond::SessionState;
+use crate::sessiond::{SequencedDecision, SessionState};
+
+const OPERATION_LEDGER_LIMIT: usize = 4096;
+
+#[derive(Clone, PartialEq)]
+enum OperationRequest {
+    Create(DeviceSessionCreate),
+    Stop(DeviceSessionStop),
+}
+
+#[derive(Clone)]
+struct StoredOperation {
+    request: OperationRequest,
+    ack: DeviceOperationAck,
+}
+
+#[derive(Default)]
+struct OperationLedger {
+    entries: HashMap<String, StoredOperation>,
+    order: VecDeque<String>,
+}
+
+impl OperationLedger {
+    fn cached(&self, operation_id: &str, request: &OperationRequest) -> Result<Option<DeviceOperationAck>, ()> {
+        match self.entries.get(operation_id) {
+            Some(stored) if &stored.request == request => Ok(Some(stored.ack.clone())),
+            Some(_) => Err(()),
+            None => Ok(None),
+        }
+    }
+
+    fn remember(&mut self, operation_id: String, request: OperationRequest, ack: DeviceOperationAck) {
+        if !self.entries.contains_key(&operation_id) {
+            self.order.push_back(operation_id.clone());
+        }
+        self.entries.insert(operation_id, StoredOperation { request, ack });
+        while self.entries.len() > OPERATION_LEDGER_LIMIT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+}
 
 struct Session {
     master: Box<dyn MasterPty + Send>,
@@ -44,6 +87,7 @@ pub struct Sessions {
     home: String,
     history_line_limit: usize,
     tombstones: Mutex<Vec<DeviceSessionExitTombstone>>,
+    operations: Mutex<OperationLedger>,
 }
 
 impl Sessions {
@@ -56,6 +100,7 @@ impl Sessions {
             home,
             history_line_limit,
             tombstones: Mutex::new(Vec::new()),
+            operations: Mutex::new(OperationLedger::default()),
         })
     }
 
@@ -89,14 +134,27 @@ impl Sessions {
     }
 
     pub fn create(self: &Arc<Self>, session_id: String, task_id: String, cwd: String, shell: String, cols: u16, rows: u16) {
+        if let Err(error) = self.create_session(session_id.clone(), task_id, cwd, shell, cols, rows) {
+            self.fail(&session_id, &error);
+        }
+    }
+
+    fn create_session(
+        self: &Arc<Self>,
+        session_id: String,
+        task_id: String,
+        cwd: String,
+        shell: String,
+        cols: u16,
+        rows: u16,
+    ) -> Result<i32, String> {
         if self.get(&session_id).is_some() {
-            return self.fail(&session_id, "duplicate session id");
+            return Err("duplicate session id".into());
         }
         let pty_system = native_pty_system();
-        let pair = match pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
-            Ok(pair) => pair,
-            Err(error) => return self.fail(&session_id, &format!("openpty: {error}")),
-        };
+        let pair = pty_system
+            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|error| format!("openpty: {error}"))?;
         let shell = if shell.is_empty() { self.shell.clone() } else { shell };
         let cwd = if cwd.is_empty() { self.home.clone() } else { cwd };
         let mut command = CommandBuilder::new(&shell);
@@ -105,19 +163,10 @@ impl Sessions {
             command.env(key, value);
         }
         command.env("TERM", "xterm-256color");
-        let child = match pair.slave.spawn_command(command) {
-            Ok(child) => child,
-            Err(error) => return self.fail(&session_id, &format!("spawn: {error}")),
-        };
+        let child = pair.slave.spawn_command(command).map_err(|error| format!("spawn: {error}"))?;
         drop(pair.slave);
-        let reader = match pair.master.try_clone_reader() {
-            Ok(reader) => reader,
-            Err(error) => return self.fail(&session_id, &format!("clone_reader: {error}")),
-        };
-        let writer = match pair.master.take_writer() {
-            Ok(writer) => writer,
-            Err(error) => return self.fail(&session_id, &format!("take_writer: {error}")),
-        };
+        let reader = pair.master.try_clone_reader().map_err(|error| format!("clone_reader: {error}"))?;
+        let writer = pair.master.take_writer().map_err(|error| format!("take_writer: {error}"))?;
         let pid = child.process_id().map_or(-1, |pid| pid as i32);
         let session = Arc::new(Mutex::new(Session {
             master: pair.master,
@@ -133,6 +182,7 @@ impl Sessions {
         eprintln!("[supervisor] session started {session_id} pid={pid}");
         self.send_ctrl(&SupervisorToWorker::SessionStarted { session_id: session_id.clone(), task_id, pid });
         self.spawn_reader(session_id, session, reader);
+        Ok(pid)
     }
 
     fn fail(&self, session_id: &str, why: &str) {
@@ -243,7 +293,7 @@ impl Sessions {
         self.send_ctrl(&SupervisorToWorker::ResyncList { sessions });
     }
 
-    pub fn handle_device(&self, outer_channel_id: &str, bytes: &[u8]) {
+    pub fn handle_device(self: &Arc<Self>, outer_channel_id: &str, bytes: &[u8]) {
         let Some(envelope) = decode_device_envelope(bytes) else {
             return self.send_device_error(outer_channel_id, None, "malformed_envelope", "DeviceEnvelope 解码失败");
         };
@@ -260,6 +310,10 @@ impl Sessions {
             device_envelope::Payload::SessionCatalogRequest(request) => self.device_catalog(outer_channel_id, request),
             device_envelope::Payload::SessionAttach(request) => self.device_attach(outer_channel_id, request),
             device_envelope::Payload::SessionSnapshotRequest(request) => self.device_snapshot(outer_channel_id, request),
+            device_envelope::Payload::PtyInput(request) => self.device_input(outer_channel_id, request),
+            device_envelope::Payload::PtyResize(request) => self.device_resize(outer_channel_id, request),
+            device_envelope::Payload::SessionStop(request) => self.device_stop(outer_channel_id, request),
+            device_envelope::Payload::SessionCreate(request) => self.device_create(outer_channel_id, request),
             other => self.send_device_error(
                 outer_channel_id,
                 request_id_of(&other),
@@ -368,6 +422,158 @@ impl Sessions {
         );
     }
 
+    fn device_input(&self, channel_id: &str, request: DevicePtyInput) {
+        let Some(session) = self.get(&request.session_id) else {
+            return self.send_device_error(channel_id, Some(request.request_id), "session_not_found", "session 不存在或已退出");
+        };
+        let mut locked = session.lock().unwrap();
+        match locked.state.input_decision(channel_id, request.holder_epoch, request.input_seq, &request.data) {
+            Ok(SequencedDecision::Duplicate) => {}
+            Ok(SequencedDecision::Apply) => {
+                if let Err(error) = locked.writer.write_all(&request.data) {
+                    return self.send_device_error(channel_id, Some(request.request_id), "pty_write_failed", error.to_string());
+                }
+                if let Err(error) = locked.state.commit_input(channel_id, request.holder_epoch, request.input_seq, request.data) {
+                    self.send_device_error(channel_id, Some(request.request_id), error.code, error.message);
+                }
+            }
+            Err(error) => self.send_device_error(channel_id, Some(request.request_id), error.code, error.message),
+        }
+    }
+
+    fn device_resize(&self, channel_id: &str, request: DevicePtyResize) {
+        let Some(session) = self.get(&request.session_id) else {
+            return self.send_device_error(channel_id, Some(request.request_id), "session_not_found", "session 不存在或已退出");
+        };
+        let mut locked = session.lock().unwrap();
+        let cols = clamp_dim(request.cols, locked.state.cols());
+        let rows = clamp_dim(request.rows, locked.state.rows());
+        match locked.state.resize_decision(channel_id, request.holder_epoch, request.resize_seq, rows, cols) {
+            Ok(SequencedDecision::Duplicate) => {}
+            Ok(SequencedDecision::Apply) => {
+                if let Err(error) = locked.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
+                    return self.send_device_error(channel_id, Some(request.request_id), "pty_resize_failed", error.to_string());
+                }
+                locked.state.resize(rows, cols);
+                if let Err(error) = locked.state.commit_resize(channel_id, request.holder_epoch, request.resize_seq, rows, cols) {
+                    self.send_device_error(channel_id, Some(request.request_id), error.code, error.message);
+                }
+            }
+            Err(error) => self.send_device_error(channel_id, Some(request.request_id), error.code, error.message),
+        }
+    }
+
+    fn device_stop(&self, channel_id: &str, request: DeviceSessionStop) {
+        let operation = OperationRequest::Stop(request.clone());
+        let mut ledger = self.operations.lock().unwrap();
+        match ledger.cached(&request.operation_id, &operation) {
+            Ok(Some(ack)) => {
+                self.send_device(channel_id, device_envelope::Payload::OperationAck(ack));
+                return;
+            }
+            Err(()) => {
+                return self.send_device_error(
+                    channel_id,
+                    Some(request.request_id),
+                    "operation_collision",
+                    "相同 operationId 携带了不同 stop payload",
+                );
+            }
+            Ok(None) => {}
+        }
+
+        let ack = match self.get(&request.session_id) {
+            None => DeviceOperationAck {
+                request_id: request.request_id.clone(),
+                operation_id: request.operation_id.clone(),
+                ok: false,
+                error: Some("session 不存在或已退出".into()),
+                session_id: Some(request.session_id.clone()),
+                pid: None,
+            },
+            Some(session) => {
+                let mut locked = session.lock().unwrap();
+                match locked.state.authorize_holder(channel_id, request.holder_epoch) {
+                    Err(error) => {
+                        drop(ledger);
+                        return self.send_device_error(channel_id, Some(request.request_id), error.code, error.message);
+                    }
+                    Ok(()) => match locked.child.kill() {
+                        Ok(()) => DeviceOperationAck {
+                            request_id: request.request_id.clone(),
+                            operation_id: request.operation_id.clone(),
+                            ok: true,
+                            error: None,
+                            session_id: Some(request.session_id.clone()),
+                            pid: Some(locked.pid),
+                        },
+                        Err(error) => DeviceOperationAck {
+                            request_id: request.request_id.clone(),
+                            operation_id: request.operation_id.clone(),
+                            ok: false,
+                            error: Some(error.to_string()),
+                            session_id: Some(request.session_id.clone()),
+                            pid: Some(locked.pid),
+                        },
+                    },
+                }
+            }
+        };
+        ledger.remember(request.operation_id.clone(), operation, ack.clone());
+        self.send_device(channel_id, device_envelope::Payload::OperationAck(ack));
+    }
+
+    fn device_create(self: &Arc<Self>, channel_id: &str, request: DeviceSessionCreate) {
+        let operation = OperationRequest::Create(request.clone());
+        let mut ledger = self.operations.lock().unwrap();
+        match ledger.cached(&request.operation_id, &operation) {
+            Ok(Some(ack)) => {
+                self.send_device(channel_id, device_envelope::Payload::OperationAck(ack));
+                return;
+            }
+            Err(()) => {
+                return self.send_device_error(
+                    channel_id,
+                    Some(request.request_id),
+                    "operation_collision",
+                    "相同 operationId 携带了不同 create payload",
+                );
+            }
+            Ok(None) => {}
+        }
+
+        let cols = clamp_dim(request.cols, 80);
+        let rows = clamp_dim(request.rows, 24);
+        let created = self.create_session(
+            request.session_id.clone(),
+            request.task_id.clone(),
+            request.cwd.clone(),
+            request.shell.clone().unwrap_or_default(),
+            cols,
+            rows,
+        );
+        let ack = match created {
+            Ok(pid) => DeviceOperationAck {
+                request_id: request.request_id.clone(),
+                operation_id: request.operation_id.clone(),
+                ok: true,
+                error: None,
+                session_id: Some(request.session_id.clone()),
+                pid: Some(pid),
+            },
+            Err(error) => DeviceOperationAck {
+                request_id: request.request_id.clone(),
+                operation_id: request.operation_id.clone(),
+                ok: false,
+                error: Some(error),
+                session_id: Some(request.session_id.clone()),
+                pid: None,
+            },
+        };
+        ledger.remember(request.operation_id.clone(), operation, ack.clone());
+        self.send_device(channel_id, device_envelope::Payload::OperationAck(ack));
+    }
+
     pub fn set_pause(&self, value: bool) {
         let (lock, cvar) = &*self.pause;
         let mut paused = lock.lock().unwrap();
@@ -403,5 +609,38 @@ fn request_id_of(payload: &device_envelope::Payload) -> Option<String> {
         device_envelope::Payload::SessionStop(value) => Some(value.request_id.clone()),
         device_envelope::Payload::SessionCreate(value) => Some(value.request_id.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stop_request(request_id: &str, session_id: &str) -> DeviceSessionStop {
+        DeviceSessionStop {
+            request_id: request_id.into(),
+            operation_id: "operation-stop".into(),
+            session_id: session_id.into(),
+            holder_epoch: 7,
+        }
+    }
+
+    #[test]
+    fn sessiond_holder_operation_ledger_replays_same_result_and_rejects_collision() {
+        let request = OperationRequest::Stop(stop_request("request-1", "session-1"));
+        let ack = DeviceOperationAck {
+            request_id: "request-1".into(),
+            operation_id: "operation-stop".into(),
+            ok: true,
+            error: None,
+            session_id: Some("session-1".into()),
+            pid: Some(42),
+        };
+        let mut ledger = OperationLedger::default();
+        ledger.remember("operation-stop".into(), request.clone(), ack.clone());
+        assert_eq!(ledger.cached("operation-stop", &request).unwrap(), Some(ack));
+
+        let collision = OperationRequest::Stop(stop_request("request-2", "session-2"));
+        assert!(ledger.cached("operation-stop", &collision).is_err());
     }
 }

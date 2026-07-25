@@ -278,17 +278,51 @@ pub struct AttachError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SequencedDecision {
+    Apply,
+    Duplicate,
+}
+
+#[derive(Debug, Clone)]
+pub struct ControlError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+struct InputCursor {
+    seq: u64,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct ResizeCursor {
+    seq: u64,
+    rows: u16,
+    cols: u16,
+}
+
 /// PTY/网络无关的每-session authority；调用方在同一 mutex 内执行 attach/feed/send-result。
 pub struct SessionState {
     terminal: TerminalState,
     subscribers: HashMap<String, Subscriber>,
     holder: Option<Holder>,
     next_holder_epoch: u64,
+    input_cursors: HashMap<String, InputCursor>,
+    resize_cursors: HashMap<String, ResizeCursor>,
 }
 
 impl SessionState {
     pub fn new(rows: u16, cols: u16, history_line_limit: usize) -> Self {
-        Self { terminal: TerminalState::new(rows, cols, history_line_limit), subscribers: HashMap::new(), holder: None, next_holder_epoch: 0 }
+        Self {
+            terminal: TerminalState::new(rows, cols, history_line_limit),
+            subscribers: HashMap::new(),
+            holder: None,
+            next_holder_epoch: 0,
+            input_cursors: HashMap::new(),
+            resize_cursors: HashMap::new(),
+        }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<PendingDelta> {
@@ -336,6 +370,7 @@ impl SessionState {
             }
             Some(holder) => {
                 detached = Some(DetachedTarget { channel_id: holder.channel_id.clone(), holder_epoch: holder.epoch });
+                self.subscribers.remove(&holder.channel_id);
                 self.bump_holder_epoch()
             }
         };
@@ -393,6 +428,87 @@ impl SessionState {
         if let Some(subscriber) = self.subscribers.get_mut(channel_id) {
             subscriber.gap_notified = sent;
         }
+    }
+
+    fn current_holder(&self, channel_id: &str, holder_epoch: u64) -> Result<&Holder, ControlError> {
+        let Some(holder) = &self.holder else {
+            return Err(ControlError { code: "no_holder", message: "session 当前没有 holder".into() });
+        };
+        if holder.epoch != holder_epoch {
+            return Err(ControlError { code: "stale_holder", message: "holder epoch 已过期".into() });
+        }
+        if holder.channel_id != channel_id {
+            return Err(ControlError { code: "stale_transport", message: "该 channel 已不是当前 transport".into() });
+        }
+        Ok(holder)
+    }
+
+    pub fn authorize_holder(&self, channel_id: &str, holder_epoch: u64) -> Result<(), ControlError> {
+        self.current_holder(channel_id, holder_epoch).map(|_| ())
+    }
+
+    pub fn input_decision(
+        &self,
+        channel_id: &str,
+        holder_epoch: u64,
+        input_seq: u64,
+        data: &[u8],
+    ) -> Result<SequencedDecision, ControlError> {
+        if input_seq == 0 {
+            return Err(ControlError { code: "invalid_input_seq", message: "input sequence 必须从 1 开始".into() });
+        }
+        let holder = self.current_holder(channel_id, holder_epoch)?;
+        match self.input_cursors.get(&holder.client_instance_id) {
+            None => Ok(SequencedDecision::Apply),
+            Some(cursor) if input_seq > cursor.seq => Ok(SequencedDecision::Apply),
+            Some(cursor) if input_seq == cursor.seq && cursor.data == data => Ok(SequencedDecision::Duplicate),
+            Some(cursor) if input_seq == cursor.seq => {
+                Err(ControlError { code: "input_seq_collision", message: "相同 input sequence 携带了不同 payload".into() })
+            }
+            Some(_) => Err(ControlError { code: "stale_input", message: "input sequence 已过期".into() }),
+        }
+    }
+
+    pub fn commit_input(&mut self, channel_id: &str, holder_epoch: u64, input_seq: u64, data: Vec<u8>) -> Result<(), ControlError> {
+        let client_instance_id = self.current_holder(channel_id, holder_epoch)?.client_instance_id.clone();
+        self.input_cursors.insert(client_instance_id, InputCursor { seq: input_seq, data });
+        Ok(())
+    }
+
+    pub fn resize_decision(
+        &self,
+        channel_id: &str,
+        holder_epoch: u64,
+        resize_seq: u64,
+        rows: u16,
+        cols: u16,
+    ) -> Result<SequencedDecision, ControlError> {
+        if resize_seq == 0 {
+            return Err(ControlError { code: "invalid_resize_seq", message: "resize sequence 必须从 1 开始".into() });
+        }
+        let holder = self.current_holder(channel_id, holder_epoch)?;
+        match self.resize_cursors.get(&holder.client_instance_id) {
+            None => Ok(SequencedDecision::Apply),
+            Some(cursor) if resize_seq > cursor.seq => Ok(SequencedDecision::Apply),
+            Some(cursor) if resize_seq == cursor.seq && cursor.rows == rows && cursor.cols == cols => Ok(SequencedDecision::Duplicate),
+            Some(cursor) if resize_seq == cursor.seq => {
+                Err(ControlError { code: "resize_seq_collision", message: "相同 resize sequence 携带了不同尺寸".into() })
+            }
+            Some(_) => Err(ControlError { code: "stale_resize", message: "resize sequence 已过期".into() }),
+        }
+    }
+
+    pub fn commit_resize(
+        &mut self,
+        channel_id: &str,
+        holder_epoch: u64,
+        resize_seq: u64,
+        rows: u16,
+        cols: u16,
+    ) -> Result<(), ControlError> {
+        let client_instance_id = self.current_holder(channel_id, holder_epoch)?.client_instance_id.clone();
+        self.resize_cursors.insert(client_instance_id, ResizeCursor { seq: resize_seq, rows, cols });
+        Ok(())
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -741,6 +857,56 @@ mod tests {
         assert!(fallback.ansi_snapshot.is_some());
         assert!(fallback.replay.is_empty());
         assert_eq!(fallback.holder_epoch, resumed.holder_epoch, "transport migration must not self-handoff");
+    }
+
+    #[test]
+    fn sessiond_holder_migration_keeps_epoch_and_rejects_old_transport() {
+        let mut state = SessionState::new(3, 12, 4);
+        let first = state.attach("direct-1", "client-a", 1, None).unwrap();
+        let migrated = state.attach("relay-2", "client-a", 2, None).unwrap();
+        assert_eq!(migrated.holder_epoch, first.holder_epoch);
+        assert!(migrated.detached.is_none(), "same logical client must not detach itself");
+        assert_eq!(
+            state.input_decision("direct-1", first.holder_epoch, 1, b"old").unwrap_err().code,
+            "stale_transport"
+        );
+        assert_eq!(
+            state.attach("stale", "client-a", 1, None).unwrap_err().code,
+            "stale_transport"
+        );
+    }
+
+    #[test]
+    fn sessiond_holder_takeover_increments_epoch_and_detaches_previous_channel() {
+        let mut state = SessionState::new(3, 12, 4);
+        let first = state.attach("channel-a", "client-a", 1, None).unwrap();
+        let second = state.attach("channel-b", "client-b", 1, None).unwrap();
+        assert_eq!(second.holder_epoch, first.holder_epoch + 1);
+        let detached = second.detached.unwrap();
+        assert_eq!(detached.channel_id, "channel-a");
+        assert_eq!(detached.holder_epoch, first.holder_epoch);
+        assert_eq!(state.input_decision("channel-a", first.holder_epoch, 1, b"no").unwrap_err().code, "stale_holder");
+    }
+
+    #[test]
+    fn sessiond_holder_input_and_resize_sequences_are_idempotent() {
+        let mut state = SessionState::new(3, 12, 4);
+        let attached = state.attach("channel-a", "client-a", 1, None).unwrap();
+        let epoch = attached.holder_epoch;
+
+        assert_eq!(state.input_decision("channel-a", epoch, 1, b"hello").unwrap(), SequencedDecision::Apply);
+        state.commit_input("channel-a", epoch, 1, b"hello".to_vec()).unwrap();
+        assert_eq!(state.input_decision("channel-a", epoch, 1, b"hello").unwrap(), SequencedDecision::Duplicate);
+        assert_eq!(state.input_decision("channel-a", epoch, 1, b"changed").unwrap_err().code, "input_seq_collision");
+        assert_eq!(state.input_decision("channel-a", epoch, 2, b"next").unwrap(), SequencedDecision::Apply);
+        state.commit_input("channel-a", epoch, 2, b"next".to_vec()).unwrap();
+        assert_eq!(state.input_decision("channel-a", epoch, 1, b"hello").unwrap_err().code, "stale_input");
+
+        assert_eq!(state.resize_decision("channel-a", epoch, 1, 40, 120).unwrap(), SequencedDecision::Apply);
+        state.commit_resize("channel-a", epoch, 1, 40, 120).unwrap();
+        assert_eq!(state.resize_decision("channel-a", epoch, 1, 40, 120).unwrap(), SequencedDecision::Duplicate);
+        assert_eq!(state.resize_decision("channel-a", epoch, 1, 41, 120).unwrap_err().code, "resize_seq_collision");
+        assert_eq!(state.resize_decision("channel-a", epoch, 3, 50, 140).unwrap(), SequencedDecision::Apply);
     }
 
 }
