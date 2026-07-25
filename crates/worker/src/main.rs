@@ -7,7 +7,10 @@
 mod conn_state;
 mod creds;
 mod dec_modes;
+mod device;
+mod gateway;
 mod git;
+mod local_auth;
 mod ops;
 mod ports;
 mod tunnel;
@@ -18,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use coflux_protocol::{
     decode_frame, encode_frame, is_frame, wire, write_record, DataFrame, RecordParser, Settings, SessionInfo, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
-    SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
+    LOCAL_GATEWAY_PORT, SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
 };
 use coflux_protocol::wire::{daemon_to_server, server_to_daemon};
 use futures_util::{SinkExt, StreamExt};
@@ -57,11 +60,18 @@ struct Config {
     idle_grace_ms: u64,
     /// connect_async 本身的超时——黑洞网络下 TCP/TLS/WS 握手可能永久挂起，必须有限时失败。
     connect_timeout_ms: u64,
+    /// loopback gateway 固定端口；0 仅供 dev/test 申请临时端口。
+    local_gateway_port: u16,
 }
 
 struct WorkerState {
     authed: bool,
     sup_synced: bool,
+    /// 当前中心登记身份；本地 gateway challenge 与 operation report 都从可信凭证/认证消息取得，
+    /// 不接受 browser 自报 daemonId。
+    daemon_id: Option<String>,
+    /// gateway 当前实际监听端口；bind 失败时为 None，但不影响中心 relay。
+    gateway_port: Option<u16>,
     alive: HashMap<String, (String, i32)>, // sessionId -> (taskId, pid)
     credentials: Option<Credentials>,
     /// 等待授权中的链接过期时刻（server 侧 epoch ms）。到期且连接仍在、仍未登记时，
@@ -98,6 +108,10 @@ fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
+fn env_u16(key: &str, default: u16) -> u16 {
+    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
 /// 取值优先级：同名 env（非空）> settings.json > 默认。env 覆盖便于测试/开发。
 fn pick(env_key: &str, from_settings: Option<String>, default: &str) -> String {
     std::env::var(env_key)
@@ -115,6 +129,30 @@ fn alive_to_resync(alive: &HashMap<String, (String, i32)>) -> Vec<wire::SessionR
 pub(crate) async fn send_d2s(tx: &Sender<WsOut>, payload: daemon_to_server::Payload) {
     let env = wire::DaemonToServer { payload: Some(payload) };
     let _ = tx.send(env.encode_to_vec()).await;
+}
+
+/// UDS 热路径不得等待中心队列。慢/断中心时可以丢弃派生上行，sessiond PTY 与 local channel
+/// 必须继续推进；catalog/checkpoint 会在恢复后重新对账。
+fn try_send_d2s(tx: &Sender<WsOut>, payload: daemon_to_server::Payload) {
+    let env = wire::DaemonToServer { payload: Some(payload) };
+    let _ = tx.try_send(env.encode_to_vec());
+}
+
+fn announce_local_gateway(state: &Arc<Mutex<WorkerState>>, auth: Option<&Arc<local_auth::LocalAuth>>, to_server_tx: &Sender<WsOut>) {
+    let Some(auth) = auth else { return };
+    let port = {
+        let state = state.lock().unwrap();
+        if !state.authed {
+            return;
+        }
+        state.gateway_port
+    };
+    if let Some(port) = port {
+        try_send_d2s(
+            to_server_tx,
+            daemon_to_server::Payload::LocalGatewayAnnounce(wire::LocalGatewayAnnounce { gateway: Some(auth.descriptor(port)) }),
+        );
+    }
 }
 async fn sup_ctrl(tx: &Sender<Vec<u8>>, msg: &WorkerToSupervisor) {
     if let Ok(bytes) = serde_json::to_vec(msg) {
@@ -177,7 +215,7 @@ async fn force_report_ports(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Send
         Err(_) => return,
     };
     state.lock().unwrap().last_reported_ports = sessions.clone();
-    send_d2s(to_server_tx, daemon_to_server::Payload::PortsUpdate(wire::PortsUpdate { sessions })).await;
+    try_send_d2s(to_server_tx, daemon_to_server::Payload::PortsUpdate(wire::PortsUpdate { sessions }));
 }
 
 #[tokio::main]
@@ -208,6 +246,7 @@ async fn main() {
         idle_ping_ms: env_u64("COFLUX_IDLE_PING_MS", 75_000),
         idle_grace_ms: env_u64("COFLUX_IDLE_GRACE_MS", 10_000),
         connect_timeout_ms: env_u64("COFLUX_CONNECT_TIMEOUT_MS", 15_000),
+        local_gateway_port: env_u16("COFLUX_LOCAL_GATEWAY_PORT", LOCAL_GATEWAY_PORT),
     });
     if cfg.sock_path.is_empty() {
         eprintln!("[worker] 缺少 {SUPERVISOR_SOCK_ENV}");
@@ -222,11 +261,15 @@ async fn main() {
     let creds_store = Arc::new(CredStore::new(cfg.cred_path.clone(), cfg.home.clone()));
     let mut conn_state = ConnState::new(&home);
     conn_state.connecting(); // 进程刚起，尚未连上任何东西
+    let credentials = creds_store.load();
+    let daemon_id = credentials.as_ref().map(|credentials| credentials.daemon_id.clone());
     let state = Arc::new(Mutex::new(WorkerState {
         authed: false,
         sup_synced: false,
+        daemon_id,
+        gateway_port: None,
         alive: HashMap::new(),
-        credentials: creds_store.load(),
+        credentials,
         pending_auth_expires_at: None,
         last_reported_ports: Vec::new(),
         workspaces: HashMap::new(),
@@ -237,27 +280,52 @@ async fn main() {
     }));
 
     let (to_server_tx, to_server_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
+    let (to_mirror_tx, to_mirror_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
+    let (to_relay_tx, to_relay_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
     let (to_sup_tx, to_sup_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2048);
 
-    // 背压：to_server 通道深度近满 → 让 supervisor 暂停 PTY，降下来再恢复
+    // gateway 身份损坏/不可写只关闭 direct；中心 relay 与既有 daemon 能力照常启动。
+    let local_auth = match local_auth::LocalAuth::load_or_create(&home) {
+        Ok(auth) => Some(Arc::new(auth)),
+        Err(error) => {
+            eprintln!("[worker] local gateway disabled: {error}");
+            None
+        }
+    };
+    let checkpoints = Arc::new(device::CheckpointOutbox::default());
+    let device = device::DeviceRuntime::production(
+        local_auth.clone(),
+        to_sup_tx.clone(),
+        to_server_tx.clone(),
+        to_relay_tx,
+        checkpoints.clone(),
+        state.clone(),
+        cfg.clone(),
+    );
+
+    // gateway 监听独立于中心 server_loop；热升级时旧 worker 短暂占端口会在后台重试。
+    if let Some(auth) = local_auth.clone() {
+        let daemon_state = state.clone();
+        let status_state = state.clone();
+        let status_auth = auth.clone();
+        let status_server = to_server_tx.clone();
+        let requested_port = cfg.local_gateway_port;
+        let device_runtime = device.clone();
+        tokio::spawn(gateway::run(
+            requested_port,
+            auth,
+            device_runtime,
+            Arc::new(move || daemon_state.lock().unwrap().daemon_id.clone()),
+            Arc::new(move |port| {
+                status_state.lock().unwrap().gateway_port = port;
+                announce_local_gateway(&status_state, Some(&status_auth), &status_server);
+            }),
+        ));
+    }
+
     {
-        let to_server_tx = to_server_tx.clone();
-        let to_sup_tx = to_sup_tx.clone();
-        let max = 2048usize;
-        tokio::spawn(async move {
-            let mut paused = false;
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let used = max - to_server_tx.capacity();
-                if !paused && used > max * 3 / 4 {
-                    sup_ctrl(&to_sup_tx, &WorkerToSupervisor::PtyPause).await;
-                    paused = true;
-                } else if paused && used < max / 4 {
-                    sup_ctrl(&to_sup_tx, &WorkerToSupervisor::PtyResume).await;
-                    paused = false;
-                }
-            }
-        });
+        let device = device.clone();
+        tokio::spawn(async move { device.run_checkpoint_loop().await });
     }
 
     // supervisor 连接循环
@@ -265,7 +333,9 @@ async fn main() {
         let cfg = cfg.clone();
         let state = state.clone();
         let to_server_tx = to_server_tx.clone();
-        tokio::spawn(async move { supervisor_loop(cfg, state, to_server_tx, to_sup_rx).await });
+        let to_mirror_tx = to_mirror_tx.clone();
+        let device = device.clone();
+        tokio::spawn(async move { supervisor_loop(cfg, state, to_server_tx, to_mirror_tx, to_sup_rx, device).await });
     }
 
     // 分支监视 + diff 统计（plan 024）：worktree HEAD 是分支的真相源（纯文件读，无子进程）；
@@ -348,26 +418,55 @@ async fn main() {
     }
 
     // server 连接循环（主任务）
-    server_loop(cfg, state, creds_store, to_server_tx, to_server_rx, to_sup_tx).await;
+    server_loop(
+        cfg,
+        state,
+        creds_store,
+        to_server_tx,
+        to_server_rx,
+        to_mirror_rx,
+        to_relay_rx,
+        checkpoints,
+        to_sup_tx,
+        local_auth,
+        device,
+    )
+    .await;
 }
 
 /* ----------------------------- supervisor ----------------------------- */
 
-async fn supervisor_loop(cfg: Arc<Config>, state: Arc<Mutex<WorkerState>>, to_server_tx: Sender<WsOut>, mut to_sup_rx: Receiver<Vec<u8>>) {
+async fn supervisor_loop(
+    cfg: Arc<Config>,
+    state: Arc<Mutex<WorkerState>>,
+    to_server_tx: Sender<WsOut>,
+    to_mirror_tx: Sender<WsOut>,
+    mut to_sup_rx: Receiver<Vec<u8>>,
+    device: Arc<device::DeviceRuntime>,
+) {
     loop {
         match UnixStream::connect(&cfg.sock_path).await {
             Ok(stream) => {
                 eprintln!("[worker] connected to supervisor");
-                run_sup_connection(stream, &state, &to_server_tx, &mut to_sup_rx).await;
+                device.supervisor_connected();
+                run_sup_connection(stream, &state, &to_server_tx, &to_mirror_tx, &mut to_sup_rx, &device).await;
             }
             Err(_) => {}
         }
         state.lock().unwrap().sup_synced = false;
+        device.supervisor_disconnected();
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
-async fn run_sup_connection(stream: UnixStream, state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>, to_sup_rx: &mut Receiver<Vec<u8>>) {
+async fn run_sup_connection(
+    stream: UnixStream,
+    state: &Arc<Mutex<WorkerState>>,
+    to_server_tx: &Sender<WsOut>,
+    to_mirror_tx: &Sender<WsOut>,
+    to_sup_rx: &mut Receiver<Vec<u8>>,
+    device: &Arc<device::DeviceRuntime>,
+) {
     let (mut rd, mut wr) = stream.into_split();
     // 索要存活会话快照
     if let Ok(bytes) = serde_json::to_vec(&WorkerToSupervisor::ResyncRequest) {
@@ -392,7 +491,7 @@ async fn run_sup_connection(stream: UnixStream, state: &Arc<Mutex<WorkerState>>,
                         let mut records: Vec<Vec<u8>> = Vec::new();
                         parser.push(&buf[..n], |r| records.push(r.to_vec()));
                         for rec in records {
-                            handle_sup_record(rec, state, to_server_tx).await;
+                            handle_sup_record(rec, state, to_server_tx, to_mirror_tx, device);
                         }
                     }
                 }
@@ -401,7 +500,13 @@ async fn run_sup_connection(stream: UnixStream, state: &Arc<Mutex<WorkerState>>,
     }
 }
 
-async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>) {
+fn handle_sup_record(
+    rec: Vec<u8>,
+    state: &Arc<Mutex<WorkerState>>,
+    to_server_tx: &Sender<WsOut>,
+    to_mirror_tx: &Sender<WsOut>,
+    device: &Arc<device::DeviceRuntime>,
+) {
     if is_frame(&rec) {
         // pty.output / pty.replay：UDS 内部帧格式（frame.rs，未变）解出原始字节，套成
         // protobuf 信封转发给 server —— WS 侧只认 protobuf binary，不再透传 UDS 自定义帧。
@@ -409,7 +514,8 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
             Some(DataFrame::Output { session_id, data }) => {
                 // 旁路喂给模式追踪器，转发字节本身不受影响（live 输出路径，见 dec_modes.rs）。
                 state.lock().unwrap().dec_modes.entry(session_id.clone()).or_default().feed(&data);
-                send_d2s(to_server_tx, daemon_to_server::Payload::PtyOutput(wire::PtyOutput { session_id, data })).await;
+                device.mark_session_dirty(&session_id);
+                try_send_d2s(to_mirror_tx, daemon_to_server::Payload::PtyOutput(wire::PtyOutput { session_id, data }));
             }
             Some(DataFrame::Replay { session_id, request_id, data }) => {
                 // 先取"当前已知激活模式"快照拼前缀，再把本次 replay 数据喂进追踪器——
@@ -429,7 +535,10 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
                     buf.extend_from_slice(&data);
                     buf
                 };
-                send_d2s(to_server_tx, daemon_to_server::Payload::PtyReplay(wire::PtyReplay { session_id, request_id, data })).await;
+                try_send_d2s(to_mirror_tx, daemon_to_server::Payload::PtyReplay(wire::PtyReplay { session_id, request_id, data }));
+            }
+            Some(DataFrame::Device { channel_id, data }) => {
+                device.deliver_from_sessiond(&channel_id, &data);
             }
             // Input/ProxyData 不会从 supervisor→worker 方向出现；畸形帧同样丢弃，不 panic。
             Some(_) | None => eprintln!("[worker] 丢弃来自 supervisor 的未知/畸形数据帧"),
@@ -443,7 +552,7 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
     match msg {
         SupervisorToWorker::SessionStarted { session_id, task_id, pid } => {
             state.lock().unwrap().alive.insert(session_id.clone(), (task_id.clone(), pid));
-            send_d2s(to_server_tx, daemon_to_server::Payload::SessionStarted(wire::SessionStarted { session_id, task_id, pid })).await;
+            try_send_d2s(to_server_tx, daemon_to_server::Payload::SessionStarted(wire::SessionStarted { session_id, task_id, pid }));
         }
         SupervisorToWorker::SessionExit { session_id, exit_code } => {
             {
@@ -451,7 +560,7 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
                 s.alive.remove(&session_id);
                 s.dec_modes.remove(&session_id); // 会话退出：释放追踪状态，避免泄漏
             } // guard 显式在块结束处释放，不跨 await 持有（MutexGuard 非 Send）
-            send_d2s(to_server_tx, daemon_to_server::Payload::SessionExit(wire::SessionExit { session_id, exit_code })).await;
+            try_send_d2s(to_server_tx, daemon_to_server::Payload::SessionExit(wire::SessionExit { session_id, exit_code }));
         }
         SupervisorToWorker::ResyncList { sessions } => {
             let authed = {
@@ -472,8 +581,9 @@ async fn handle_sup_record(rec: Vec<u8>, state: &Arc<Mutex<WorkerState>>, to_ser
                 // daemon→server 的 daemon.resync 形状已冻结（SessionRef，不含 pid），
                 // pid 只在 UDS 快照(SessionInfo)里供本地端口探测（005）用
                 let resync: Vec<wire::SessionRef> = sessions.into_iter().map(|s: SessionInfo| wire::SessionRef { session_id: s.session_id, task_id: s.task_id }).collect();
-                send_d2s(to_server_tx, daemon_to_server::Payload::DaemonResync(wire::DaemonResync { sessions: resync })).await;
+                try_send_d2s(to_server_tx, daemon_to_server::Payload::DaemonResync(wire::DaemonResync { sessions: resync }));
             }
+            device.request_reconciliation_catalog();
         }
     }
 }
@@ -486,13 +596,26 @@ fn backoff(attempts: u32, cfg: &Config) -> Duration {
     Duration::from_millis(base / 2 + (nanos % (base / 2 + 1))) // base*(0.5..1.0)
 }
 
+async fn send_server_ws(
+    sink: &mut futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+    message: Message,
+    timeout: Duration,
+) -> bool {
+    matches!(tokio::time::timeout(timeout, sink.send(message)).await, Ok(Ok(())))
+}
+
 async fn server_loop(
     cfg: Arc<Config>,
     state: Arc<Mutex<WorkerState>>,
     creds_store: Arc<CredStore>,
     to_server_tx: Sender<WsOut>,
     mut to_server_rx: Receiver<WsOut>,
+    mut to_mirror_rx: Receiver<WsOut>,
+    mut to_relay_rx: Receiver<WsOut>,
+    checkpoints: Arc<device::CheckpointOutbox>,
     to_sup_tx: Sender<Vec<u8>>,
+    local_auth: Option<Arc<local_auth::LocalAuth>>,
+    device: Arc<device::DeviceRuntime>,
 ) {
     let mut attempts: u32 = 0;
     loop {
@@ -502,12 +625,36 @@ async fn server_loop(
             Ok(Ok((ws, _))) => {
                 eprintln!("[worker] connected to server");
                 attempts = 0;
-                run_server_connection(ws, &cfg, &state, &creds_store, &to_server_tx, &mut to_server_rx, &to_sup_tx).await;
+                run_server_connection(
+                    ws,
+                    &cfg,
+                    &state,
+                    &creds_store,
+                    &to_server_tx,
+                    &mut to_server_rx,
+                    &mut to_mirror_rx,
+                    &mut to_relay_rx,
+                    &checkpoints,
+                    &to_sup_tx,
+                    local_auth.as_ref(),
+                    &device,
+                )
+                .await;
             }
             Ok(Err(e)) => eprintln!("[worker] server connect error: {e}"),
             Err(_) => eprintln!("[worker] server connect timeout ({}ms)", cfg.connect_timeout_ms),
         }
-        state.lock().unwrap().conn_state.reconnecting();
+        {
+            let mut state = state.lock().unwrap();
+            state.authed = false;
+            state.conn_state.reconnecting();
+        }
+        if let Some(auth) = &local_auth {
+            auth.set_server_online(false);
+        }
+        device.close_relays();
+        while to_mirror_rx.try_recv().is_ok() {}
+        while to_relay_rx.try_recv().is_ok() {}
         attempts += 1;
         tokio::time::sleep(backoff(attempts, &cfg)).await;
     }
@@ -520,14 +667,24 @@ async fn run_server_connection(
     creds_store: &Arc<CredStore>,
     to_server_tx: &Sender<WsOut>,
     to_server_rx: &mut Receiver<WsOut>,
+    to_mirror_rx: &mut Receiver<WsOut>,
+    to_relay_rx: &mut Receiver<WsOut>,
+    checkpoints: &Arc<device::CheckpointOutbox>,
     to_sup_tx: &Sender<Vec<u8>>,
+    local_auth: Option<&Arc<local_auth::LocalAuth>>,
+    device: &Arc<device::DeviceRuntime>,
 ) {
     let (mut sink, mut stream) = ws.split();
+    let write_timeout = Duration::from_millis(cfg.idle_grace_ms.max(1_000));
     {
         let mut s = state.lock().unwrap();
         s.authed = false;
         s.pending_auth_expires_at = None; // 授权链接与连接同生命周期，新连接从零开始
     }
+    if let Some(auth) = local_auth {
+        auth.set_server_online(false);
+    }
+    device.close_relays();
     // 隧道状态绑定单次 server 连接生命周期：不跨重连恢复（浏览器侧 TCP 早已断，恢复无意义）
     let tunnels = tunnel::TunnelSet::new(to_server_tx.clone());
 
@@ -551,7 +708,7 @@ async fn run_server_connection(
         }),
     };
     let init_bytes = (wire::DaemonToServer { payload: Some(init) }).encode_to_vec();
-    if sink.send(Message::binary(init_bytes)).await.is_err() {
+    if !send_server_ws(&mut sink, Message::binary(init_bytes), write_timeout).await {
         return;
     }
 
@@ -576,6 +733,9 @@ async fn run_server_connection(
     watchdog_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
+        // 应用数据只在本条 WS 已认证后发送；重连期间积下的 report/catalog/checkpoint 不能抢在
+        // daemon.auth 前面进入 server。
+        let connection_authed = state.lock().unwrap().authed;
         tokio::select! {
             _ = watchdog_tick.tick() => {
                 if let Some(since) = ping_pending_since {
@@ -585,7 +745,7 @@ async fn run_server_connection(
                     }
                 } else if last_inbound.elapsed() >= idle_ping {
                     eprintln!("[worker] 连接 idle {}ms，发送探活 ping", last_inbound.elapsed().as_millis());
-                    if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                    if !send_server_ws(&mut sink, Message::Ping(Vec::new()), write_timeout).await {
                         break; // 发送本身就失败：连接已经死了，无需再等宽限期
                     }
                     ping_pending_since = Some(Instant::now());
@@ -619,14 +779,29 @@ async fn run_server_connection(
                         arch: cfg.arch.clone(),
                     });
                     let bytes = (wire::DaemonToServer { payload: Some(req) }).encode_to_vec();
-                    if sink.send(Message::binary(bytes)).await.is_err() { break; }
+                    if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; }
                 }
             }
-            out = to_server_rx.recv() => {
+            out = to_server_rx.recv(), if connection_authed => {
                 match out {
-                    Some(bytes) => if sink.send(Message::binary(bytes)).await.is_err() { break; },
+                    Some(bytes) => if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; },
                     None => break,
                 }
+            }
+            out = to_mirror_rx.recv(), if connection_authed => {
+                match out {
+                    Some(bytes) => if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; },
+                    None => break,
+                }
+            }
+            out = to_relay_rx.recv(), if connection_authed => {
+                match out {
+                    Some(bytes) => if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; },
+                    None => break,
+                }
+            }
+            out = checkpoints.recv(), if connection_authed => {
+                if !send_server_ws(&mut sink, Message::binary(out), write_timeout).await { break; }
             }
             inc = stream.next() => {
                 // 任意入站帧（含 Ping/Pong/Close）都证明链路活着：无条件刷新 idle 计时、
@@ -636,11 +811,23 @@ async fn run_server_connection(
                     ping_pending_since = None;
                 }
                 match inc {
-                    Some(Ok(Message::Binary(b))) => on_server_message(b.as_ref(), cfg, state, creds_store, to_server_tx, to_sup_tx, &tunnels).await,
+                    Some(Ok(Message::Binary(b))) => on_server_message(
+                        b.as_ref(),
+                        cfg,
+                        state,
+                        creds_store,
+                        to_server_tx,
+                        to_sup_tx,
+                        &tunnels,
+                        local_auth,
+                        device,
+                    ).await,
                     // WS 上只有 binary message；收到 text/其它帧类型说明对端协议版本不对——
                     // 丢弃并记日志，不 panic（与解码失败的处理原则一致）。
                     Some(Ok(Message::Text(_))) => eprintln!("[worker] 忽略非 binary 的 WS 消息（协议已切换为 protobuf binary）"),
-                    Some(Ok(Message::Ping(p))) => { let _ = sink.send(Message::Pong(p)).await; }
+                    Some(Ok(Message::Ping(p))) => {
+                        if !send_server_ws(&mut sink, Message::Pong(p), write_timeout).await { break; }
+                    }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     _ => {}
                 }
@@ -662,6 +849,8 @@ async fn on_server_message(
     to_server_tx: &Sender<WsOut>,
     to_sup_tx: &Sender<Vec<u8>>,
     tunnels: &tunnel::TunnelSet,
+    local_auth: Option<&Arc<local_auth::LocalAuth>>,
+    device: &Arc<device::DeviceRuntime>,
 ) {
     let envelope = match wire::ServerToDaemon::decode(bytes) {
         Ok(e) => e,
@@ -679,17 +868,32 @@ async fn on_server_message(
             let c = Credentials { server_url: cfg.server_url.clone(), daemon_id: daemon_id.clone(), device_token };
             creds_store.save(&c);
             creds_store.clear_pending_auth(); // 授权兑现后不再是 pending 了
-            {
+            let daemon_changed = {
                 let mut s = state.lock().unwrap();
+                let changed = s.daemon_id.as_deref().is_some_and(|current| current != daemon_id);
                 s.credentials = Some(c);
+                s.daemon_id = Some(daemon_id.clone());
                 s.pending_auth_expires_at = None; // 停掉续期检查：已登记后绝不能再发 enrollRequest
+                changed
+            };
+            if daemon_changed {
+                device.close_local_channels();
             }
             eprintln!("[worker] enrolled {daemon_id}");
-            on_authed(state, to_server_tx).await;
+            on_authed(state, to_server_tx, local_auth, device).await;
         }
         server_to_daemon::Payload::DaemonAuthed(wire::DaemonAuthed { daemon_id }) => {
             eprintln!("[worker] authenticated {daemon_id}");
-            on_authed(state, to_server_tx).await;
+            let daemon_changed = {
+                let mut state = state.lock().unwrap();
+                let changed = state.daemon_id.as_deref().is_some_and(|current| current != daemon_id);
+                state.daemon_id = Some(daemon_id);
+                changed
+            };
+            if daemon_changed {
+                device.close_local_channels();
+            }
+            on_authed(state, to_server_tx, local_auth, device).await;
         }
         server_to_daemon::Payload::DaemonAuthorizePending(wire::DaemonAuthorizePending { url, expires_at }) => {
             // 等待用户在浏览器确认授权；连接保持打开，server 确认后会在同一连接上直接推 DaemonEnrolled
@@ -702,7 +906,11 @@ async fn on_server_message(
             eprintln!("[worker] auth error: {message}");
             if need_enroll {
                 creds_store.clear();
-                state.lock().unwrap().credentials = None;
+                let mut state = state.lock().unwrap();
+                state.credentials = None;
+                state.daemon_id = None;
+                drop(state);
+                device.close_local_channels();
             } else {
                 eprintln!("[worker] 不可恢复的认证错误，退出");
                 std::process::exit(1);
@@ -718,13 +926,114 @@ async fn on_server_message(
         other => {
             let authed = state.lock().unwrap().authed;
             if authed {
-                route_authed(other, cfg, to_server_tx, to_sup_tx, tunnels).await;
+                match other {
+                    server_to_daemon::Payload::LocalGatewayConfigure(wire::LocalGatewayConfigure { origins }) => {
+                        if let Some(auth) = local_auth {
+                            if let Err(error) = auth.configure_origins(origins) {
+                                eprintln!("[worker] local gateway origin 配置被拒: {error}");
+                            } else {
+                                device.revalidate_local_origins();
+                            }
+                        }
+                    }
+                    server_to_daemon::Payload::LocalGrantInstall(wire::LocalGrantInstall { request_id, grant }) => {
+                        let grant_id = grant.as_ref().map_or_else(String::new, |grant| grant.grant_id.clone());
+                        let daemon_id = state.lock().unwrap().daemon_id.clone();
+                        let result = match (local_auth, grant, daemon_id) {
+                            (Some(auth), Some(grant), Some(daemon_id)) => auth.install_grant(grant, &daemon_id),
+                            (None, _, _) => Err("local gateway 已禁用".into()),
+                            (_, None, _) => Err("grant payload 缺失".into()),
+                            (_, _, None) => Err("daemon 尚未登记".into()),
+                        };
+                        if result.as_ref().is_ok_and(|changed| *changed) && !grant_id.is_empty() {
+                            // 同 grantId 的 key/origin 轮换必须让旧 WebSocket 重新证明身份；幂等重装
+                            // install_grant 会返回 false，不打断稳定 direct channel。
+                            device.revoke_local_grant(&grant_id);
+                        }
+                        try_send_d2s(
+                            to_server_tx,
+                            daemon_to_server::Payload::LocalGrantAck(wire::LocalGrantAck {
+                                request_id,
+                                grant_id,
+                                ok: result.is_ok(),
+                                error: result.err(),
+                            }),
+                        );
+                    }
+                    server_to_daemon::Payload::LocalGrantRevoke(wire::LocalGrantRevoke { request_id, grant_id }) => {
+                        let result = local_auth.map_or_else(|| Err("local gateway 已禁用".into()), |auth| auth.revoke_grant(&grant_id));
+                        if result.is_ok() {
+                            device.revoke_local_grant(&grant_id);
+                        }
+                        try_send_d2s(
+                            to_server_tx,
+                            daemon_to_server::Payload::LocalGrantAck(wire::LocalGrantAck {
+                                request_id,
+                                grant_id,
+                                ok: result.is_ok(),
+                                error: result.err(),
+                            }),
+                        );
+                    }
+                    server_to_daemon::Payload::LocalLeaseInstall(wire::LocalLeaseInstall { lease }) => {
+                        let daemon_id = state.lock().unwrap().daemon_id.clone();
+                        let result = match (local_auth, lease, daemon_id) {
+                            (Some(auth), Some(lease), Some(daemon_id)) => auth.install_lease(lease, &daemon_id),
+                            (None, _, _) => Err("local gateway 已禁用".into()),
+                            (_, None, _) => Err("lease payload 缺失".into()),
+                            (_, _, None) => Err("daemon 尚未登记".into()),
+                        };
+                        if let Err(error) = result {
+                            eprintln!("[worker] local lease 安装被拒: {error}");
+                        }
+                    }
+                    server_to_daemon::Payload::DeviceRelayOpen(open) => {
+                        if let Err(error) = device.open_relay(open.clone()) {
+                            try_send_d2s(
+                                to_server_tx,
+                                daemon_to_server::Payload::DeviceRelayClose(wire::DeviceRelayClose {
+                                    channel_id: open.channel_id,
+                                    reason: Some(error),
+                                }),
+                            );
+                        }
+                    }
+                    server_to_daemon::Payload::DeviceRelayFrame(wire::DeviceRelayFrame { channel_id, frame }) => {
+                        if !device.handle_relay_frame(&channel_id, &frame) {
+                            try_send_d2s(
+                                to_server_tx,
+                                daemon_to_server::Payload::DeviceRelayClose(wire::DeviceRelayClose {
+                                    channel_id,
+                                    reason: Some("relay channel 不存在".into()),
+                                }),
+                            );
+                        }
+                    }
+                    server_to_daemon::Payload::DeviceRelayClose(wire::DeviceRelayClose { channel_id, .. }) => {
+                        device.close_relay(&channel_id);
+                    }
+                    server_to_daemon::Payload::SessionCatalogRequest(request) => device.request_server_catalog(request),
+                    server_to_daemon::Payload::ExitAck(request) => device.acknowledge_exits(request),
+                    server_to_daemon::Payload::PreparedDeviceOperation(operation) => {
+                        let installed = device.install_prepared_operation(operation);
+                        try_send_d2s(
+                            to_server_tx,
+                            daemon_to_server::Payload::PreparedDeviceOperationInstalled(installed),
+                        );
+                    }
+                    legacy => route_authed(legacy, cfg, to_server_tx, to_sup_tx, tunnels).await,
+                }
             }
         }
     }
 }
 
-async fn on_authed(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>) {
+async fn on_authed(
+    state: &Arc<Mutex<WorkerState>>,
+    to_server_tx: &Sender<WsOut>,
+    local_auth: Option<&Arc<local_auth::LocalAuth>>,
+    device: &Arc<device::DeviceRuntime>,
+) {
     let resync = {
         let mut s = state.lock().unwrap();
         s.authed = true;
@@ -735,9 +1044,14 @@ async fn on_authed(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>
             None
         }
     };
+    if let Some(auth) = local_auth {
+        auth.set_server_online(true);
+    }
+    announce_local_gateway(state, local_auth, to_server_tx);
+    device.server_authenticated();
     // 两级 resync：拿到 supervisor 快照后才向 server resync；否则待 resync.list 到达时补发
     if let Some(sessions) = resync {
-        send_d2s(to_server_tx, daemon_to_server::Payload::DaemonResync(wire::DaemonResync { sessions })).await;
+        try_send_d2s(to_server_tx, daemon_to_server::Payload::DaemonResync(wire::DaemonResync { sessions }));
         force_report_ports(state, to_server_tx).await; // 重连补发端口全量，防 server 重启丢状态
     }
 }
@@ -768,7 +1082,9 @@ async fn route_authed(msg: server_to_daemon::Payload, cfg: &Arc<Config>, to_serv
             });
         }
         server_to_daemon::Payload::WorktreeRemove(wire::WorktreeRemove { repo_path, worktree_path }) => {
-            tokio::spawn(async move { git::remove_worktree(&repo_path, &worktree_path).await });
+            tokio::spawn(async move {
+                let _ = git::remove_worktree(&repo_path, &worktree_path).await;
+            });
         }
         // PTY → 转给 supervisor；wire 上 cols/rows 是 uint32，UDS/portable-pty 侧是 u16，钳位收窄。
         server_to_daemon::Payload::SessionCreate(wire::SessionCreate { session_id, task_id, cwd, shell, cols, rows }) => {

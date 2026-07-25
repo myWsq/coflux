@@ -15,8 +15,9 @@
 //! 直接持锁写 TCP 没有这个环——最坏情况只是本地端口写得慢时暂时拖住 WS 读循环,是
 //! plan 已接受的「V1 不做 per-connection 流控」代价的一部分,而不是新增风险。
 //!
-//! V1 数据面无流控:TCP 读一块(≤64KiB)发一帧,不做背压;大流量隧道会顶高全局
-//! `to_server_tx` 水位、触发 PtyPause(见 main.rs 背压任务与 plan Landmines)。
+//! V1 数据面无 per-connection 流控:TCP 读一块(≤64KiB)发一帧；大流量隧道可让自己的
+//! 上行任务等待中心队列，但 worker 不再据此暂停 supervisor PTY。local Device channel 与
+//! checkpoint/relay 也使用独立出口，不受这条隧道反压。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
