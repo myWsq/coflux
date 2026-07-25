@@ -278,6 +278,10 @@ interface DeviceRoute {
   lastPublished?: { mode: DeviceTransportMode; detail: string };
   retainCount: number;
   transientDemand: number;
+  /** 「只测量」持有数（侧栏用）：够格把 relay lane 拉起来测心跳，但**不**够格触发本机配对
+   * 与 direct 提升——对不在本机的设备，那两样是对 loopback 的永久无效重试，且会在浏览器
+   * 控制台刷满连不上的 WS 错误（浏览器强制打印，代码抑制不掉）。 */
+  measureCount: number;
 }
 
 interface ControlWaiter<T> {
@@ -449,6 +453,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         directRetryAttempts: 0,
         retainCount: 0,
         transientDemand: 0,
+        measureCount: 0,
       };
       routes.set(daemonId, route);
       publish(route, "idle", "尚未建立 Device transport");
@@ -778,7 +783,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
   function pairInBackground(route: DeviceRoute): void {
-    if (!options.enableLocalTransport || !controlOnline || route.pairPromise || !routeHasDemand(route)) return;
+    if (!options.enableLocalTransport || !controlOnline || route.pairPromise || !routeHasFullDemand(route)) return;
     const epoch = route.epoch;
     const controller = new AbortController();
     route.pairController = controller;
@@ -945,7 +950,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       })();
     };
 
-    if (!options.enableLocalTransport) {
+    // 纯 relay 短路：本地直连整体关闭时，或本 route 只有「测量」需求（侧栏对每台在线设备）
+    // 时都走这里——跳过读 grant、direct hedge 与本机配对。direct 走的是 loopback，只有与
+    // 浏览器同机的那台设备才可能命中；为侧栏那个读数去敲 loopback，对其余设备是永远失败的。
+    if (!options.enableLocalTransport || !routeHasFullDemand(route)) {
       attempt.cachePending = false;
       startRelay();
       finish();
@@ -1183,7 +1191,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
   function sessionLaneDemand(route: DeviceRoute): boolean {
-    if (route.retainCount > 0 || route.transientDemand > 0) return true;
+    if (route.retainCount > 0 || route.transientDemand > 0 || route.measureCount > 0) return true;
     if ([...route.sessions.values()].some((session) => session.desired)) return true;
     return [...route.pendingRequests.values()].some(
       (pending) => pending.scope === DeviceScope.SESSION_READ || pending.scope === DeviceScope.SESSION_CONTROL,
@@ -1200,6 +1208,17 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
 
   function routeHasDemand(route: DeviceRoute): boolean {
     return sessionLaneDemand(route) || elevatedLaneDemand(route);
+  }
+
+  /** 「完整」需求：除只测量之外的任何持有。本机配对、direct 提升、会话 catalog 轮询都只为
+   * 它服务——只测量的 route（侧栏对每台在线设备）只要一条 relay lane 和心跳，别的一概不做。
+   * direct 走的是 loopback，只有与浏览器同机的那台设备可能命中，为一个读数去敲它，对其余
+   * 设备是每 5s 一次注定失败的重试，还会把浏览器控制台刷满连不上的 WS 错误。 */
+  function routeHasFullDemand(route: DeviceRoute): boolean {
+    if (route.retainCount > 0 || route.transientDemand > 0) return true;
+    if ([...route.sessions.values()].some((session) => session.desired)) return true;
+    if (route.pendingRequests.size > 0) return true;
+    return elevatedLaneDemand(route);
   }
 
   function pruneExpiredOperations(route: DeviceRoute): void {
@@ -1586,6 +1605,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
   function sendCatalogRequest(route: DeviceRoute): void {
+    // 在此收口而非只拦定时器：activateSessionLane 建好 lane 后会直接打一发，绕过定时器。
+    if (!routeHasFullDemand(route)) return;
     const channel = route.sessionLane.active;
     if (!channelCovers(channel, DeviceScope.SESSION_READ)) return;
     if (!sendOn(channel, normalizePayload({
@@ -1595,7 +1616,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
   function maintainCatalogTimer(route: DeviceRoute): void {
-    if (!sessionLaneDemand(route) || !route.sessionLane.active) {
+    // catalog 只为完整需求转：只测量的 route 不关心会话清单，没必要每 3s 打扰 daemon 一次。
+    if (!routeHasFullDemand(route) || !route.sessionLane.active) {
       if (route.catalogTimer !== undefined) clock.clearInterval(route.catalogTimer);
       route.catalogTimer = undefined;
       return;
@@ -1646,7 +1668,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       destroyed ||
       routes.get(route.daemonId) !== route ||
       route.sessionLane.active?.kind !== "relay" ||
-      !sessionLaneDemand(route) ||
+      !routeHasFullDemand(route) ||
       route.directProbe ||
       (route.sessionLane.attempt && !immediate)
     ) return;
@@ -1669,7 +1691,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     if (
       route.directProbe ||
       route.sessionLane.active?.kind !== "relay" ||
-      !sessionLaneDemand(route) ||
+      !routeHasFullDemand(route) ||
       destroyed
     ) return;
     const epoch = route.epoch;
@@ -1857,16 +1879,26 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
   }
 
-  function retainDevice(daemonId: string): () => void {
+  /** measureOnly：只要一条 relay lane 用来跑心跳（侧栏对每台在线设备）。它照样把连接建起来，
+   * 所以之后真进这台设备时是热的——只是不碰 loopback，见 routeHasFullDemand。 */
+  function retainDevice(daemonId: string, options?: { measureOnly?: boolean }): () => void {
     const route = routeFor(daemonId);
-    route.retainCount += 1;
+    const measureOnly = options?.measureOnly === true;
+    if (measureOnly) route.measureCount += 1;
+    else {
+      route.retainCount += 1;
+      // 从「只测量」升级成完整需求时，lane 可能已经是测量期建好的 relay——它当时刻意跳过了
+      // direct。这里补一次立即提升，否则这条 relay 会一直用到底，本机设备永远升不回 direct。
+      if (route.sessionLane.active?.kind === "relay") scheduleDirectRetry(route, true);
+    }
     void ensureSessionLane(route).catch(() => scheduleRecovery(route, route.sessionLane));
     let released = false;
     return () => {
       if (released) return;
       released = true;
       if (routes.get(daemonId) !== route) return;
-      route.retainCount = Math.max(0, route.retainCount - 1);
+      if (measureOnly) route.measureCount = Math.max(0, route.measureCount - 1);
+      else route.retainCount = Math.max(0, route.retainCount - 1);
       releaseIdle(route);
     };
   }
