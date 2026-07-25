@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 70;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -27,22 +27,9 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		CF0000000000000000000006 /* Coflux */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Coflux;
-			sourceTree = "<group>";
-		};
-		CF0000000000000000000007 /* CofluxTests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = CofluxTests;
-			sourceTree = "<group>";
-		};
-		CF0000000000000000000008 /* ProtoGen */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			name = ProtoGen;
-			path = "../../proto/gen/swift";
-			sourceTree = "<group>";
-		};
+		CF0000000000000000000006 /* Coflux */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = Coflux; sourceTree = "<group>"; };
+		CF0000000000000000000007 /* CofluxTests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = CofluxTests; sourceTree = "<group>"; };
+		CF0000000000000000000008 /* ProtoGen */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); name = ProtoGen; path = ../../proto/gen/swift; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -167,7 +154,6 @@
 			packageReferences = (
 				CF000000000000000000001C /* XCRemoteSwiftPackageReference "swift-protobuf" */,
 			);
-			preferredProjectObjectVersion = 77;
 			productRefGroup = CF0000000000000000000003 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";

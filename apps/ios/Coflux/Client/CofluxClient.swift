@@ -46,6 +46,12 @@ final class CofluxClient {
     private(set) var lastError: ClientError?
     /// 每次 stateSnapshot 自增（store.ts:392）；第二片终端 re-attach 依赖它判定重连边界。
     private(set) var snapshotRevision = 0
+    /// 被其它客户端接管的任务（plan 026 旁观语义）：UI 出横幅，仅强制接管可恢复。
+    private(set) var detachedTaskIDs: Set<String> = []
+    /// server 侧终端镜像（sessionCheckpoint）：无 live session 时的只读回放来源。
+    private(set) var sessionCheckpoints: [String: Coflux_V1_SessionCheckpoint] = [:]
+    /// 输入台账触顶的 session（等待 PTY 累计确认）：UI 提示输入受阻。
+    private(set) var blockedSessionIDs: Set<String> = []
 
     /// 构建版本上报固定 "dev"：生产版本准入唯一无条件放行通道（apps/server/src/hub.ts:1464，
     /// plan 044 决策）；原生版本准入另立 plan。
@@ -58,6 +64,9 @@ final class CofluxClient {
     private var token: String?
     /// authOk 后才允许自动重连（store.ts shouldRetry 同语义）；authError/登出/版本失配收回。
     private var shouldRetry = false
+    /// 控制面已认证（store.ts controlAuthenticated 同语义）：device rendezvous 与
+    /// taskRemove 的前置门。
+    private var controlAuthenticated = false
     private var reconnectAttempts = 0
     /// 连接代际：每次重建/断开自增，旧循环与旧重连计时器以代际不符自行退出。
     private var generation = 0
@@ -65,6 +74,15 @@ final class CofluxClient {
     private var currentConnection: (any TransportConnection)?
     private var errorSequence = 0
     private var suspendedInBackground = false
+
+    /// PTY 数据面（plan 045）。输出字节不进可观察状态：经 consumer 闭包直达终端 feed。
+    private var deviceRouter: DeviceRouter!
+    /// 单 consumer（iOS 同刻只有一个详情页；web 版的多 consumer 集合是超配，store.ts:298）。
+    private var sessionConsumers: [String: (Data, _ replace: Bool) -> Void] = [:]
+    private var liveSessionIDs: Set<String> = []
+    /// 设备事实先于中心事实到达的窗口：session 已退出但 server task 还没更新（store.ts:376-384
+    /// localSessions 合并语义的最小移植——iOS 无 UI 消费 pid/cwd，只留退出覆盖）。
+    private var localExits: [String: Int32] = [:]
 
     init(
         transport: any Transport = NetworkTransport(),
@@ -77,6 +95,35 @@ final class CofluxClient {
         self.serverURL = serverURL
         self.usesExternalLogin = usesExternalLogin
         token = tokenStore.read()
+        deviceRouter = DeviceRouter(transport: transport, callbacks: DeviceRouterCallbacks(
+            sendControl: { [weak self] payload in self?.send(payload) },
+            onSessionSnapshot: { [weak self] _, _, sessionID, data in
+                self?.liveSessionIDs.insert(sessionID)
+                self?.sessionConsumers[sessionID]?(data, true)
+            },
+            onSessionOutput: { [weak self] _, _, sessionID, data in
+                self?.liveSessionIDs.insert(sessionID)
+                self?.sessionConsumers[sessionID]?(data, false)
+            },
+            onSessionAttached: { [weak self] _, taskID, _ in
+                self?.detachedTaskIDs.remove(taskID)
+            },
+            onSessionDetached: { [weak self] _, taskID, _, _ in
+                self?.detachedTaskIDs.insert(taskID)
+            },
+            onSessionExited: { [weak self] _, taskID, sessionID, exitCode in
+                self?.markSessionExited(taskID: taskID, sessionID: sessionID, exitCode: exitCode)
+            },
+            onCatalog: { [weak self] _, catalog in
+                for exit in catalog.exits {
+                    self?.markSessionExited(taskID: exit.taskID, sessionID: exit.sessionID, exitCode: exit.exitCode)
+                }
+            },
+            onError: { [weak self] message in self?.reportLocalError(message) },
+            onInputBlocked: { [weak self] sessionID, blocked in
+                if blocked { self?.blockedSessionIDs.insert(sessionID) } else { self?.blockedSessionIDs.remove(sessionID) }
+            }
+        ))
         if let token {
             // 有本地会话 token 时首屏直接 authenticating，避免闪登录页（store.ts:122-127）
             authState = .authenticating
@@ -113,6 +160,9 @@ final class CofluxClient {
         connectionTask = nil
         let connection = currentConnection
         currentConnection = nil
+        controlAuthenticated = false
+        deviceRouter.setControlOnline(false)
+        deviceRouter.reset()
         Task {
             // 先投递服务端撤销再关闭（ClientLogout 使会话 token 服务端失效，非仅清本地）
             if let connection {
@@ -128,9 +178,15 @@ final class CofluxClient {
         projects = []
         workspaces = []
         tasks = []
+        detachedTaskIDs = []
+        sessionCheckpoints = [:]
+        blockedSessionIDs = []
+        liveSessionIDs = []
+        localExits = [:]
     }
 
     /// 进后台：主动断连并取消重连计时器（iOS 不保证后台 WS 存活；会话韧性在 server/daemon 侧）。
+    /// 设备通道随控制面一起关（relay 存活依赖中心）；session desired 保留，回前台重挂。
     func sceneDidEnterBackground() {
         guard connectionTask != nil || currentConnection != nil else { return }
         suspendedInBackground = true
@@ -141,6 +197,8 @@ final class CofluxClient {
         currentConnection = nil
         Task { await connection?.close() }
         status = .disconnected
+        controlAuthenticated = false
+        deviceRouter.setControlOnline(false)
     }
 
     /// 回前台：无条件废弃旧连接重建，不探测旧 socket 活性（系统超时可达分钟级）。
@@ -171,6 +229,9 @@ final class CofluxClient {
         let stale = currentConnection
         currentConnection = nil
         status = .connecting
+        // 控制面重建期间设备通道一律视为不可用（TS onStatus !connected 同语义）
+        controlAuthenticated = false
+        deviceRouter.setControlOnline(false)
         connectionTask = Task {
             // 换新连接前先关旧的，否则 server 侧残留幽灵连接（connection.ts:75-77）
             await stale?.close()
@@ -201,6 +262,8 @@ final class CofluxClient {
         guard generation == gen, !Task.isCancelled else { return }
         currentConnection = nil
         status = .disconnected
+        controlAuthenticated = false
+        deviceRouter.setControlOnline(false)
         scheduleReconnect()
     }
 
@@ -229,12 +292,16 @@ final class CofluxClient {
     // MARK: - 归约（store.ts handleServerMessage 控制面子集）
 
     func apply(_ payload: Coflux_V1_ServerToClient.OneOf_Payload) {
+        // device 域负载（relayGrant/preparedOperation）先经路由消费（store.ts:324）
+        if deviceRouter.handleControlPayload(payload) { return }
         switch payload {
         case .authOk(let value):
             authState = .authed
             loginError = ""
             shouldRetry = true
             reconnectAttempts = 0
+            controlAuthenticated = true
+            deviceRouter.setControlOnline(true)
             if value.hasClientToken, !value.clientToken.isEmpty {
                 token = value.clientToken
                 tokenStore.write(value.clientToken)
@@ -259,7 +326,9 @@ final class CofluxClient {
             daemons = value.daemons
             projects = value.projects
             workspaces = value.workspaces
-            tasks = value.tasks
+            tasks = value.tasks.map(applyLocalExit)
+            let taskIDs = Set(value.tasks.map(\.id))
+            detachedTaskIDs = detachedTaskIDs.intersection(taskIDs)
             snapshotRevision += 1
 
         case .daemonUpdated(let value):
@@ -292,18 +361,158 @@ final class CofluxClient {
 
         case .taskUpdated(let value):
             guard value.hasTask else { break }
-            upsert(&tasks, value.task) { $0.id == value.task.id }
+            let task = applyLocalExit(value.task)
+            upsert(&tasks, task) { $0.id == task.id }
+            if task.status != .running { detachedTaskIDs.remove(task.id) }
 
         case .taskRemoved(let value):
+            let removed = tasks.first { $0.id == value.taskID }
+            let removedSessionID = removed?.hasSessionID == true ? removed?.sessionID : nil
             tasks.removeAll { $0.id == value.taskID }
+            detachedTaskIDs.remove(value.taskID)
+            if let sessionID = removedSessionID {
+                sessionCheckpoints[sessionID] = nil
+                blockedSessionIDs.remove(sessionID)
+                liveSessionIDs.remove(sessionID)
+                localExits[sessionID] = nil
+                if let removed { deviceRouter.forgetSession(daemonID: removed.daemonID, sessionID: sessionID) }
+            }
+
+        case .sessionCheckpoint(let checkpoint):
+            // server 侧终端镜像：live 输出在场时不覆盖现场，只在无 live 时投给终端做只读回放
+            sessionCheckpoints[checkpoint.sessionID] = checkpoint
+            if !liveSessionIDs.contains(checkpoint.sessionID) {
+                sessionConsumers[checkpoint.sessionID]?(checkpoint.ansiSnapshot, true)
+            }
 
         case .error(let value):
             errorSequence += 1
             lastError = ClientError(id: errorSequence, message: value.message)
 
         default:
-            break // ports/checkpoint/device-relay 等 PTY 域负载：第二片
+            break // ports 等无 UI 消费的负载
         }
+    }
+
+    /// 设备事实覆盖：session 已在设备侧退出的 task，不采信 server 的 RUNNING 残影
+    /// （store.ts:376-384 合并语义）。
+    private func applyLocalExit(_ task: Coflux_V1_Task) -> Coflux_V1_Task {
+        guard task.hasSessionID, let exitCode = localExits[task.sessionID] else { return task }
+        var adjusted = task
+        adjusted.status = .exited
+        adjusted.clearSessionID()
+        adjusted.exitCode = exitCode
+        return adjusted
+    }
+
+    private func markSessionExited(taskID: String, sessionID: String, exitCode: Int32) {
+        localExits[sessionID] = exitCode
+        liveSessionIDs.remove(sessionID)
+        blockedSessionIDs.remove(sessionID)
+        detachedTaskIDs.remove(taskID)
+        tasks = tasks.map { task in
+            guard task.id == taskID, task.hasSessionID, task.sessionID == sessionID else { return task }
+            var adjusted = task
+            adjusted.status = .exited
+            adjusted.clearSessionID()
+            adjusted.exitCode = exitCode
+            return adjusted
+        }
+    }
+
+    // MARK: - 任务/终端操作（store.ts:566-609 + 279-318 对应面）
+
+    /// RUNNING 的 attach 直接交给 session authority；IDLE/EXITED 由中心 prepare durable create。
+    func startTask(taskID: String, cols: UInt32, rows: UInt32, force: Bool = false) {
+        if let task = tasks.first(where: { $0.id == taskID }), task.status == .running, task.hasSessionID {
+            if force { detachedTaskIDs.remove(taskID) }
+            deviceRouter.attachSession(
+                daemonID: task.daemonID, taskID: task.id, sessionID: task.sessionID,
+                cols: cols, rows: rows, force: force
+            )
+            return
+        }
+        detachedTaskIDs.remove(taskID)
+        var start = Coflux_V1_TaskStart()
+        start.taskID = taskID
+        start.cols = cols
+        start.rows = rows
+        send(.taskStart(start))
+    }
+
+    /// 停止并删除任务。iOS relay-only：中心离线时设备通道必然也不可达，不做离线记账
+    /// （plan 045 决策：pendingTaskRemovals 不移植），直接报错。
+    func closeTask(_ task: Coflux_V1_Task) async {
+        if task.status == .running, task.hasSessionID {
+            do {
+                deviceRouter.attachSession(
+                    daemonID: task.daemonID, taskID: task.id, sessionID: task.sessionID,
+                    cols: 80, rows: 24, force: true
+                )
+                try await deviceRouter.stopSession(daemonID: task.daemonID, sessionID: task.sessionID)
+            } catch let error as DeviceRouteError {
+                // session_not_found 是「设备侧已经没有它」的确定答复，继续删 catalog task
+                // 才能收敛（store.ts:583-589）；其余错误中止，不猜测设备状态。
+                guard error.code == "session_not_found" else {
+                    reportLocalError(error.message)
+                    return
+                }
+            } catch {
+                reportLocalError(String(describing: error))
+                return
+            }
+        }
+        removeTask(taskID: task.id)
+    }
+
+    private func removeTask(taskID: String) {
+        guard controlAuthenticated else {
+            reportLocalError("中心未连接，无法删除任务")
+            return
+        }
+        var remove = Coflux_V1_TaskRemove()
+        remove.taskID = taskID
+        send(.taskRemove(remove))
+    }
+
+    func sendInput(sessionID: String, _ text: String) {
+        guard let data = text.data(using: .utf8), !data.isEmpty else { return }
+        guard let task = tasks.first(where: { $0.hasSessionID && $0.sessionID == sessionID }) else {
+            reportLocalError("会话不存在，无法发送终端输入")
+            return
+        }
+        deviceRouter.sendInput(daemonID: task.daemonID, sessionID: sessionID, data: data)
+    }
+
+    func resizeSession(sessionID: String, cols: UInt32, rows: UInt32) {
+        guard let task = tasks.first(where: { $0.hasSessionID && $0.sessionID == sessionID }) else { return }
+        deviceRouter.resize(daemonID: task.daemonID, sessionID: sessionID, cols: cols, rows: rows)
+    }
+
+    /// 注册终端字节 consumer（replace=true 整屏替换，false 追加）。返回释放闭包；
+    /// 注册时若有 checkpoint 且无 live 输出，先投一次只读回放（store.ts:306-307）。
+    func registerSessionConsumer(
+        sessionID: String,
+        _ consumer: @escaping (Data, _ replace: Bool) -> Void
+    ) -> () -> Void {
+        let routedTask = tasks.first { $0.hasSessionID && $0.sessionID == sessionID }
+        sessionConsumers[sessionID] = consumer
+        if let checkpoint = sessionCheckpoints[sessionID], !liveSessionIDs.contains(sessionID) {
+            consumer(checkpoint.ansiSnapshot, true)
+        }
+        return { [weak self] in
+            guard let self, self.sessionConsumers[sessionID] != nil else { return }
+            self.sessionConsumers[sessionID] = nil
+            self.liveSessionIDs.remove(sessionID)
+            if let routedTask {
+                self.deviceRouter.suspendSession(daemonID: routedTask.daemonID, sessionID: sessionID)
+            }
+        }
+    }
+
+    func reportLocalError(_ message: String) {
+        errorSequence += 1
+        lastError = ClientError(id: errorSequence, message: message)
     }
 
     private func send(_ payload: Coflux_V1_ClientToServer.OneOf_Payload) {
