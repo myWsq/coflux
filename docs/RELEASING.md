@@ -93,6 +93,24 @@ git push origin v1.2.3
 
 未设 `COFLUX_AUTOUPDATE_REPO` 时该特性整体关闭，行为与现状完全一致；手动触发（`client.upgradeDaemon`）不受影响，仍是灰度/紧急场景的兜底手段。相关 env（均在 `apps/server/src/config.ts`）：`COFLUX_AUTOUPDATE_API_BASE`（默认 `https://api.github.com`）、`COFLUX_AUTOUPDATE_REPO`（`owner/repo`）、`COFLUX_AUTOUPDATE_POLL_MS`（默认 10 分钟）、`COFLUX_AUTOUPDATE_MAX_ATTEMPTS`（默认 3）、`COFLUX_AUTOUPDATE_COOLDOWN_MS`（默认 1 小时）。supervisor 版本随 web 设备 tooltip 一并可见，但**不**自动升级（见下）。
 
+## 中心机器的前置要求：时钟必须同步
+
+online lease 的 `expiresAt` 由 **中心** 时钟算（`now + config.localLeaseTtlMs`，默认 45s），由
+**daemon** 时钟校验（`crates/worker/src/local_auth.rs` `validate_lease`），两端没有 skew 容差。
+中心时钟慢于 daemon 超过 45s，每条 lease 到达即过期，daemon 日志刷 `local lease 安装被拒: lease 已过期`，
+direct 路径的 rpc/lifecycle scope 全废（offline grant 覆盖的 session read/control 仍可用，所以
+`cofluxd doctor` 依然报绿——不要用它排除这个故障）。
+
+2026-07-25 在 prod-jp 上实际踩到：`timedatectl` 显示 `System clock synchronized: no`、
+NTP service `n/a`，系统时钟比 RTC 和真实时间慢 78s。修法：
+
+```sh
+apt-get install -y systemd-timesyncd && timedatectl set-ntp true
+timedatectl   # 确认 System clock synchronized: yes
+```
+
+新中心机器上线时先查这一项。
+
 ## 升级 supervisor 自身
 
 supervisor 不走热升级（它持有 PTY）。用 `cofluxd update` 重下二进制并重启服务——很罕见。
