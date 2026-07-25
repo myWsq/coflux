@@ -53,7 +53,14 @@ export class BrowserIdentityStore {
   constructor(private readonly databaseName: string) {}
 
   async identity(): Promise<BrowserIdentity> {
-    this.identityPromise ??= this.loadOrCreateIdentity();
+    if (!this.identityPromise) {
+      const promise = this.loadOrCreateIdentity();
+      this.identityPromise = promise;
+      // blocked/临时存储错误不能把当前 tab 永久钉死在 rejected promise 上，后续 probe 可重试。
+      void promise.catch(() => {
+        if (this.identityPromise === promise) this.identityPromise = undefined;
+      });
+    }
     return this.identityPromise;
   }
 
@@ -126,7 +133,8 @@ export class BrowserIdentityStore {
   }
 
   close(): void {
-    void this.databasePromise?.then((database) => database.close());
+    // database() 可能已因 IndexedDB 禁用/blocked 而拒绝；close 本身不能再制造未处理 rejection。
+    void this.databasePromise?.then((database) => database.close(), () => undefined);
     this.databasePromise = undefined;
     this.identityPromise = undefined;
   }
@@ -192,18 +200,39 @@ export class BrowserIdentityStore {
 
   private database(): Promise<IDBDatabase> {
     if (!globalThis.indexedDB) return Promise.reject(new Error("当前浏览器不支持 IndexedDB"));
-    this.databasePromise ??= new Promise((resolve, reject) => {
+    if (this.databasePromise) return this.databasePromise;
+    let settled = false;
+    const promise = new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open(this.databaseName, DATABASE_VERSION);
       request.onupgradeneeded = () => {
         const database = request.result;
         if (!database.objectStoreNames.contains(IDENTITY_STORE)) database.createObjectStore(IDENTITY_STORE);
         if (!database.objectStoreNames.contains(GRANT_STORE)) database.createObjectStore(GRANT_STORE, { keyPath: "daemonId" });
       };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error ?? new Error("打开 browser identity database 失败"));
-      request.onblocked = () => reject(new Error("browser identity database 升级被其它页面阻塞"));
+      request.onsuccess = () => {
+        if (settled) {
+          request.result.close();
+          return;
+        }
+        settled = true;
+        resolve(request.result);
+      };
+      request.onerror = () => {
+        if (settled) return;
+        settled = true;
+        reject(request.error ?? new Error("打开 browser identity database 失败"));
+      };
+      request.onblocked = () => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("browser identity database 升级被其它页面阻塞"));
+      };
     });
-    return this.databasePromise;
+    this.databasePromise = promise;
+    void promise.catch(() => {
+      if (this.databasePromise === promise) this.databasePromise = undefined;
+    });
+    return promise;
   }
 }
 

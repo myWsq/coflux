@@ -12,6 +12,7 @@ import {
   DeviceScope,
   type DeviceEnvelopePayload,
   type LocalGatewayDescriptor,
+  type OnlineDeviceLease,
 } from "@coflux/protocol";
 
 import {
@@ -75,7 +76,7 @@ class FakeClock implements DeviceRouterClock {
 
 interface OpenCall {
   kind: "direct" | "relay";
-  options: DeviceTransportOpenOptions;
+  options: DeviceTransportOpenOptions & { grant?: CachedLocalGrant; lease?: OnlineDeviceLease };
   channelId: string;
   sent: Uint8Array<ArrayBuffer>[];
   closed: boolean;
@@ -94,6 +95,18 @@ const gateway: LocalGatewayDescriptor = {
 
 function grant(daemonId = "daemon-1"): CachedLocalGrant {
   return { daemonId, grantId: `grant-${daemonId}`, gateway, updatedAt: 1 };
+}
+
+function onlineLease(leaseId: string, daemonId = "daemon-1"): OnlineDeviceLease {
+  return {
+    $typeName: "coflux.v1.OnlineDeviceLease",
+    leaseId,
+    grantId: `grant-${daemonId}`,
+    accountId: "account-1",
+    daemonId,
+    scopes: [DeviceScope.RPC, DeviceScope.LIFECYCLE],
+    expiresAt: 60_000,
+  };
 }
 
 class FakeAdapter implements DeviceRouterAdapter {
@@ -125,18 +138,10 @@ class FakeAdapter implements DeviceRouterAdapter {
   async requestLease(daemonId: string, grantId: string, signal: AbortSignal) {
     this.leaseCalls += 1;
     if (signal.aborted) throw new DOMException("aborted", "AbortError");
-    return {
-      $typeName: "coflux.v1.OnlineDeviceLease" as const,
-      leaseId: `lease-${this.leaseCalls}`,
-      grantId,
-      accountId: "account-1",
-      daemonId,
-      scopes: [DeviceScope.RPC, DeviceScope.LIFECYCLE],
-      expiresAt: 60_000,
-    };
+    return { ...onlineLease(`lease-${this.leaseCalls}`, daemonId), grantId };
   }
 
-  openDirect(options: DeviceTransportOpenOptions): Promise<OpenedDeviceTransport> {
+  openDirect(options: DeviceTransportOpenOptions & { grant: CachedLocalGrant; lease?: OnlineDeviceLease }): Promise<OpenedDeviceTransport> {
     return this.open("direct", options);
   }
 
@@ -158,7 +163,7 @@ class FakeAdapter implements DeviceRouterAdapter {
     this.closed = true;
   }
 
-  resolve(call: OpenCall): void {
+  resolve(call: OpenCall, lease?: OnlineDeviceLease): void {
     const scopes = call.options.scope === DeviceScope.RPC || call.options.scope === DeviceScope.LIFECYCLE
       ? new Set([DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE])
       : new Set([DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL]);
@@ -166,6 +171,7 @@ class FakeAdapter implements DeviceRouterAdapter {
       channelId: call.channelId,
       scopes,
       leaseExpiresAt: call.kind === "direct" && scopes.has(DeviceScope.RPC) ? 60_000 : undefined,
+      lease,
       send: (frame) => {
         if (!call.sendOk || call.closed) return false;
         call.sent.push(frame);
@@ -189,7 +195,10 @@ class FakeAdapter implements DeviceRouterAdapter {
     })));
   }
 
-  private open(kind: "direct" | "relay", options: DeviceTransportOpenOptions): Promise<OpenedDeviceTransport> {
+  private open(
+    kind: "direct" | "relay",
+    options: DeviceTransportOpenOptions & { grant?: CachedLocalGrant; lease?: OnlineDeviceLease },
+  ): Promise<OpenedDeviceTransport> {
     return new Promise((resolve, reject) => {
       const call: OpenCall = {
         kind,
@@ -208,6 +217,29 @@ class FakeAdapter implements DeviceRouterAdapter {
       }, { once: true });
       this.opens.push(call);
     });
+  }
+}
+
+class DeferredPairAdapter extends FakeAdapter {
+  override pair(_daemonId: string, signal: AbortSignal): Promise<CachedLocalGrant> {
+    this.pairCalls += 1;
+    return new Promise((_resolve, reject) => {
+      if (signal.aborted) {
+        reject(new DOMException("aborted", "AbortError"));
+        return;
+      }
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    });
+  }
+}
+
+class FlakyReadAdapter extends FakeAdapter {
+  readCalls = 0;
+
+  override async readGrant(): Promise<CachedLocalGrant | undefined> {
+    this.readCalls += 1;
+    if (this.readCalls === 1) throw new Error("IndexedDB temporarily blocked");
+    return this.cachedGrant;
   }
 }
 
@@ -344,6 +376,23 @@ test("无缓存时 relay 立即工作，pair 后后台迁回 direct", async () =
   h.router.destroy();
 });
 
+test("缓存读取的瞬时失败不会永久禁用离线 direct", async () => {
+  const adapter = new FlakyReadAdapter(grant());
+  const h = harness(adapter);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "offline");
+  assert.equal(adapter.readCalls, 1);
+  h.clock.advance(350);
+  await flush();
+  assert.equal(adapter.readCalls, 2);
+  const direct = latestOpen(adapter, "direct");
+  adapter.resolve(direct);
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "direct");
+  h.router.destroy();
+});
+
 test("elevated lane 的 direct/relay 失败不会关闭健康 session lane", async () => {
   const h = harness();
   h.router.setControlOnline(true);
@@ -364,6 +413,73 @@ test("elevated lane 的 direct/relay 失败不会关闭健康 session lane", asy
   assert.equal(session.closed, false);
   assert.equal(h.states.at(-1)?.mode, "direct");
   release();
+  h.router.destroy();
+});
+
+test("direct 内部续签采用的新 lease 会写回 route 并供下一条 elevated lane 复用", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const firstResult = h.router.fsList("daemon-1", "workspace-1", "", false);
+  await flush();
+  const first = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  assert.equal(first.options.lease?.leaseId, "lease-1");
+  const refreshed = onlineLease("lease-refreshed");
+  h.adapter.resolve(first, refreshed);
+  await flush();
+  const firstRequest = payloads(first).find((payload) => payload?.case === "fsList");
+  assert.equal(firstRequest?.case, "fsList");
+  h.adapter.emit(first, {
+    case: "fsListed",
+    value: { requestId: firstRequest!.value.requestId, ok: true, entries: [] },
+  });
+  await firstResult;
+
+  const secondResult = h.router.fsList("daemon-1", "workspace-1", "", false);
+  await flush();
+  const second = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  assert.notEqual(second, first);
+  assert.equal(h.adapter.leaseCalls, 1);
+  assert.equal(second.options.lease?.leaseId, refreshed.leaseId);
+  h.adapter.resolve(second, refreshed);
+  await flush();
+  const secondRequest = payloads(second).find((payload) => payload?.case === "fsList");
+  assert.equal(secondRequest?.case, "fsList");
+  h.adapter.emit(second, {
+    case: "fsListed",
+    value: { requestId: secondRequest!.value.requestId, ok: true, entries: [] },
+  });
+  await secondResult;
+  h.router.destroy();
+});
+
+test("direct elevated scope_denied 会废弃旧 lease 并重新签发", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const result = h.router.fsList("daemon-1", "workspace-1", "", false);
+  await flush();
+  const first = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  h.adapter.resolve(first);
+  await flush();
+  const request = payloads(first).find((payload) => payload?.case === "fsList");
+  assert.equal(request?.case, "fsList");
+  h.adapter.emit(first, {
+    case: "error",
+    value: { requestId: request!.value.requestId, code: "scope_denied", message: "lease rejected" },
+  });
+  await flush();
+  const retried = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  assert.notEqual(retried, first);
+  assert.equal(h.adapter.leaseCalls, 2);
+  assert.equal(retried.options.lease?.leaseId, "lease-2");
+  h.adapter.resolve(retried);
+  await flush();
+  const retriedRequest = payloads(retried).find((payload) => payload?.case === "fsList");
+  assert.equal(retriedRequest?.case, "fsList");
+  h.adapter.emit(retried, {
+    case: "fsListed",
+    value: { requestId: retriedRequest!.value.requestId, ok: true, entries: [] },
+  });
+  await result;
   h.router.destroy();
 });
 
@@ -393,6 +509,25 @@ test("generation 跨 release 与 reset 严格递增", async () => {
   h.router.destroy();
 });
 
+test("logout 清空 grant 时更换 logical client，避免沿用已丢失的 input cursor", async () => {
+  const h = harness();
+  const release = h.router.retainDevice("daemon-1");
+  await flush();
+  const first = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(first);
+  await flush();
+  release();
+
+  await h.router.reset(true);
+  h.adapter.cachedGrant = grant();
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const second = latestOpen(h.adapter, "direct");
+  assert.notEqual(second.options.clientInstanceId, first.options.clientInstanceId);
+  assert.equal(second.options.generation, 1n);
+  h.router.destroy();
+});
+
 test("detached 后自动 attach 被抑制，只有显式 force 才重新接管", async () => {
   const h = harness();
   h.router.retainDevice("daemon-1");
@@ -410,6 +545,25 @@ test("detached 后自动 attach 被抑制，只有显式 force 才重新接管",
   h.router.attachSession("daemon-1", "task-1", "session-1", 80, 24, true);
   await flush();
   assert.equal(payloads(direct).filter((payload) => payload?.case === "sessionAttach").length, before + 1);
+  h.router.destroy();
+});
+
+test("attach 返回 stale_holder 后释放无其它 demand 的 session lane", async () => {
+  const h = harness();
+  h.router.attachSession("daemon-1", "task-1", "session-1", 80, 24);
+  await flush();
+  const direct = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(direct);
+  await flush();
+  const request = attachRequest(direct);
+  h.adapter.emit(direct, {
+    case: "error",
+    value: { requestId: request.requestId, code: "stale_holder", message: "taken" },
+  });
+  await flush();
+  assert.equal(direct.closed, true);
+  assert.equal(h.detached.at(-1), "taken");
+  assert.equal(h.clock.pendingTimers, 0);
   h.router.destroy();
 });
 
@@ -448,6 +602,7 @@ test("输入队列满时拒绝新输入但不淘汰旧前缀", async () => {
   for (let index = 0; index < 256; index += 1) {
     assert.equal(h.router.sendInput("daemon-1", "session-1", new Uint8Array([index % 255])), true);
   }
+  assert.equal(h.inputStates.at(-1)?.blocked, true);
   assert.equal(h.router.sendInput("daemon-1", "session-1", new Uint8Array([9])), false);
   assert.equal(h.inputStates.at(-1)?.blocked, true);
   h.clock.advance(500);
@@ -498,6 +653,161 @@ test("checkpoint 不 seed live cursor，重复 gap 合并为单个 full attach",
   const attaches = payloads(direct).filter((payload) => payload?.case === "sessionAttach");
   assert.equal(attaches.length, before + 1);
   assert.equal(attaches.at(-1)?.case === "sessionAttach" ? attaches.at(-1)!.value.resumeFromSeq : 1n, undefined);
+  h.router.destroy();
+});
+
+test("已完成 attach 的重复 response 不会覆盖 live snapshot", async () => {
+  const h = harness();
+  h.router.attachSession("daemon-1", "task-1", "session-1", 80, 24);
+  await flush();
+  const direct = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(direct);
+  await flush();
+  const request = attachRequest(direct);
+  attach(h.router, h.adapter, direct, 12n);
+  assert.equal(h.snapshots.length, 1);
+  h.adapter.emit(direct, {
+    case: "sessionAttached",
+    value: {
+      requestId: request.requestId,
+      sessionId: request.sessionId,
+      holderEpoch: 1n,
+      snapshotSeq: 3n,
+      ansiSnapshot: new Uint8Array([9]),
+      cols: 80,
+      rows: 24,
+    },
+  });
+  assert.equal(h.snapshots.length, 1);
+  h.router.destroy();
+});
+
+test("terminal consumer 释放后丢弃 live cursor，重新 attach 必须取完整 snapshot", async () => {
+  const h = harness();
+  h.router.retainDevice("daemon-1");
+  h.router.attachSession("daemon-1", "task-1", "session-1", 80, 24);
+  await flush();
+  const direct = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(direct);
+  await flush();
+  attach(h.router, h.adapter, direct, 12n);
+  h.router.suspendSession("daemon-1", "session-1");
+  h.router.attachSession("daemon-1", "task-1", "session-1", 80, 24);
+  await flush();
+  const request = attachRequest(direct);
+  assert.equal(request.resumeFromSeq, undefined);
+  h.router.destroy();
+});
+
+test("初始 direct 与 relay 都失败后发布 offline 并进入有界恢复", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const direct = latestOpen(h.adapter, "direct");
+  h.clock.advance(200);
+  await flush();
+  const relay = latestOpen(h.adapter, "relay");
+  h.adapter.fail(direct, "gateway down");
+  h.adapter.fail(relay, "relay down");
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "offline");
+  assert.match(h.states.at(-1)?.detail ?? "", /gateway down/);
+  assert.ok(h.clock.pendingTimers > 0);
+  h.router.destroy();
+});
+
+test("catalog 请求与 exit ACK 的 send=false 都触发 session lane 恢复", async () => {
+  const catalog = harness();
+  catalog.router.retainDevice("daemon-1");
+  await flush();
+  const catalogChannel = latestOpen(catalog.adapter, "direct");
+  catalogChannel.sendOk = false;
+  catalog.adapter.resolve(catalogChannel);
+  await flush();
+  assert.equal(catalogChannel.closed, true);
+  assert.equal(catalog.states.at(-1)?.mode, "offline");
+  assert.match(catalog.states.at(-1)?.detail ?? "", /catalog/);
+  catalog.router.destroy();
+
+  const ack = harness();
+  ack.router.retainDevice("daemon-1");
+  await flush();
+  const ackChannel = latestOpen(ack.adapter, "direct");
+  ack.adapter.resolve(ackChannel);
+  await flush();
+  ackChannel.sendOk = false;
+  ack.adapter.emit(ackChannel, {
+    case: "sessionCatalog",
+    value: {
+      requestId: "catalog-1",
+      sessions: [],
+      exits: [{
+        eventId: "exit-1",
+        sessionId: "session-1",
+        taskId: "task-1",
+        exitCode: 0,
+        finalOutputSeq: 0n,
+        exitedAt: 1,
+      }],
+    },
+  });
+  assert.equal(ackChannel.closed, true);
+  assert.equal(ack.states.at(-1)?.mode, "offline");
+  assert.match(ack.states.at(-1)?.detail ?? "", /exit ACK/);
+  ack.router.destroy();
+});
+
+test("release 会立即取消并清除后台 pair，下一次 demand 可重新配对", async () => {
+  const adapter = new DeferredPairAdapter();
+  const h = harness(adapter);
+  h.router.setControlOnline(true);
+  const release = h.router.retainDevice("daemon-1");
+  await flush();
+  assert.equal(adapter.pairCalls, 1);
+  const firstRelay = latestOpen(adapter, "relay");
+  adapter.resolve(firstRelay);
+  await flush();
+
+  release();
+  h.router.retainDevice("daemon-1");
+  await flush();
+  assert.equal(adapter.pairCalls, 2);
+  h.router.destroy();
+});
+
+test("离线 prepared operation 过期后停止 elevated recovery", async () => {
+  const h = harness();
+  const operationId = "operation-1";
+  const frame = encodeDeviceEnvelope(create(DeviceEnvelopeSchema, {
+    protocolVersion: DEVICE_PROTOCOL_VERSION,
+    channelId: "",
+    payload: {
+      case: "sessionCreate",
+      value: {
+        requestId: "request-1",
+        operationId,
+        sessionId: "session-1",
+        taskId: "task-1",
+        cwd: "/tmp",
+        cols: 80,
+        rows: 24,
+      },
+    },
+  }));
+  h.router.executePrepared({
+    $typeName: "coflux.v1.PreparedDeviceOperation",
+    operationId,
+    daemonId: "daemon-1",
+    frame,
+    expiresAt: 100,
+  });
+  await flush();
+  assert.ok(h.clock.pendingTimers > 0);
+  h.clock.advance(350);
+  await flush();
+  assert.equal(h.clock.pendingTimers, 0);
+  assert.match(h.errors.at(-1) ?? "", /已过期/);
   h.router.destroy();
 });
 

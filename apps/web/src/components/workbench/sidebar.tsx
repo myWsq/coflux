@@ -422,7 +422,9 @@ export function Sidebar(props: SidebarProps) {
                             ? "bg-warning"
                             : transport?.mode === "probing"
                               ? "bg-primary animate-pulse"
-                              : daemon.online ? "bg-success/60" : "bg-muted-foreground/40",
+                              : transport?.mode === "offline"
+                                ? "bg-destructive/70"
+                                : daemon.online ? "bg-success/60" : "bg-muted-foreground/40",
                       )}
                       title={transport?.detail ?? routeLabel}
                     />
