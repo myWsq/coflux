@@ -67,7 +67,7 @@ import {
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
 import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
-import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, validRelayId } from "./relay-rendezvous.js";
+import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, supportsRelayDial, validRelayId } from "./relay-rendezvous.js";
 import { LocalControlPlane } from "./local-control.js";
 import type { SupabaseVerifier, SupabaseIdentity } from "./auth.js";
 
@@ -1609,6 +1609,9 @@ export class Hub {
 
     const daemon = this.daemons.get(request.daemonId);
     if (!daemon || daemon.accountId !== client.accountId) return void fail("daemon 不在线或不属于本账号");
+    if (!supportsRelayDial(daemon.info.workerVersion)) {
+      return void fail(`设备 worker 版本过旧（${daemon.info.workerVersion}），不支持按需拨号；在该设备上运行 \`cofluxd update && cofluxd restart\` 后重试`);
+    }
 
     const ttl = config.relayTokenTtlMs;
     this.sendDaemon(daemon, {
