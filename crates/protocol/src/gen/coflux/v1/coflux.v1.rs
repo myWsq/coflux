@@ -693,12 +693,22 @@ pub struct DevicePtyInput {
     pub session_id: ::prost::alloc::string::String,
     #[prost(uint64, tag="3")]
     pub holder_epoch: u64,
-    /// 从 1 开始且在同一 logical client/session 单调；重投相同 seq 返回原结果且不得重复写 PTY，
-    /// 较小 seq 拒绝。
+    /// 从 1 开始且在同一 logical client/session 严格连续：authority 只应用当前累计游标 N 的
+    /// N+1，gap 不得越级写 PTY。input_seq <= N 的重投不再执行，并返回当前累计 ACK；等于 N
+    /// 且 payload 不同可报告 collision。request_id 只关联 error，不承担提交确认。
     #[prost(uint64, tag="4")]
     pub input_seq: u64,
     #[prost(bytes="vec", tag="5")]
     pub data: ::prost::alloc::vec::Vec<u8>,
+}
+/// sessiond 已成功写入存活 PTY 的连续输入前缀。logical client 由已认证 channel 隐式确定；
+/// ACK 丢失后重投任一已提交 input，authority 必须再次返回当前累计游标。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DevicePtyInputAck {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub applied_through_seq: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DevicePtyResize {
@@ -1010,7 +1020,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 60")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 60")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -1055,6 +1065,8 @@ pub mod device_envelope {
         SessionSnapshotRequest(super::DeviceSessionSnapshotRequest),
         #[prost(message, tag="35")]
         SessionSnapshot(super::DeviceSessionSnapshot),
+        #[prost(message, tag="36")]
+        PtyInputAck(super::DevicePtyInputAck),
         #[prost(message, tag="40")]
         ProjectValidate(super::DeviceProjectValidate),
         #[prost(message, tag="41")]

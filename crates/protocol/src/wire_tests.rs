@@ -13,8 +13,8 @@ use prost::Message;
 
 use crate::wire::{
     daemon_to_server, device_envelope, server_to_daemon, DaemonAuthError, DaemonEnrollRequest, DaemonToServer, DeviceEnvelope,
-    DevicePtyOutput, DeviceRelayFrame, DeviceSessionAttached, DeviceSessionCreate, ExecRun, FsEntry, FsEntryKind, LocalClientHello,
-    PreparedDeviceOperation, ProjectValidated, PtyOutput, ServerToDaemon, SessionCreate, SessionPorts,
+    DevicePtyInputAck, DevicePtyOutput, DeviceRelayFrame, DeviceSessionAttached, DeviceSessionCreate, ExecRun, FsEntry, FsEntryKind,
+    LocalClientHello, PreparedDeviceOperation, ProjectValidated, PtyOutput, ServerToDaemon, SessionCreate, SessionPorts,
 };
 use crate::{decode_device_envelope, encode_device_envelope, DEVICE_PROTOCOL_VERSION};
 
@@ -96,6 +96,27 @@ fn pty_output_bytes_round_trip_preserves_invalid_utf8() {
         Some(daemon_to_server::Payload::PtyOutput(p)) => assert_eq!(p.data, data),
         other => panic!("wrong variant: {other:?}"),
     }
+}
+
+#[test]
+fn device_input_ack_round_trip_preserves_cumulative_u64_cursor() {
+    let envelope = DeviceEnvelope {
+        protocol_version: DEVICE_PROTOCOL_VERSION,
+        channel_id: "channel-input".into(),
+        payload: Some(device_envelope::Payload::PtyInputAck(DevicePtyInputAck {
+            session_id: "session-input".into(),
+            applied_through_seq: u64::from(u32::MAX) + 7,
+        })),
+    };
+    let decoded = decode_device_envelope(&encode_device_envelope(&envelope)).unwrap();
+    assert_eq!(decoded.channel_id, "channel-input");
+    assert!(matches!(
+        decoded.payload,
+        Some(device_envelope::Payload::PtyInputAck(DevicePtyInputAck {
+            ref session_id,
+            applied_through_seq,
+        })) if session_id == "session-input" && applied_through_seq == u64::from(u32::MAX) + 7
+    ));
 }
 
 /// DeviceEnvelope 直接承载原始 PTY bytes；再套进 relay frame 后，中心只需 opaque 转发，

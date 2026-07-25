@@ -12,10 +12,10 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use coflux_protocol::wire::{
-    device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck, DeviceOperationAck, DevicePtyGap, DevicePtyInput, DevicePtyOutput,
-    DevicePtyResize, DeviceSessionAttach, DeviceSessionAttached, DeviceSessionCatalog, DeviceSessionCatalogRequest, DeviceSessionCreate,
-    DeviceSessionExitTombstone, DeviceSessionExited, DeviceSessionInfo, DeviceSessionSnapshot, DeviceSessionSnapshotRequest,
-    DeviceSessionStop,
+    device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck, DeviceOperationAck, DevicePtyGap, DevicePtyInput,
+    DevicePtyInputAck, DevicePtyOutput, DevicePtyResize, DeviceSessionAttach, DeviceSessionAttached, DeviceSessionCatalog,
+    DeviceSessionCatalogRequest, DeviceSessionCreate, DeviceSessionExitTombstone, DeviceSessionExited, DeviceSessionInfo,
+    DeviceSessionSnapshot, DeviceSessionSnapshotRequest, DeviceSessionStop,
 };
 use coflux_protocol::{
     decode_device_envelope, encode_device_envelope, encode_frame, write_record, DataFrame, SessionInfo, SupervisorToWorker,
@@ -23,7 +23,7 @@ use coflux_protocol::{
 };
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-use crate::sessiond::{estimated_terminal_bytes, SequencedDecision, SessionState};
+use crate::sessiond::{estimated_terminal_bytes, ControlError, SequencedDecision, SessionState};
 
 const OPERATION_LEDGER_LIMIT: usize = 4096;
 const WORKER_QUEUE_RECORDS: usize = 512;
@@ -246,6 +246,29 @@ struct Session {
     history_line_limit: usize,
     reserved_bytes: usize,
     state: SessionState,
+}
+
+fn apply_device_input(
+    state: &mut SessionState,
+    writer: &mut dyn Write,
+    channel_id: &str,
+    session_id: &str,
+    holder_epoch: u64,
+    input_seq: u64,
+    data: Vec<u8>,
+) -> Result<DevicePtyInputAck, ControlError> {
+    match state.input_decision(channel_id, holder_epoch, input_seq, &data)? {
+        SequencedDecision::Duplicate => Ok(DevicePtyInputAck {
+            session_id: session_id.to_string(),
+            applied_through_seq: state.input_applied_through(channel_id, holder_epoch)?,
+        }),
+        SequencedDecision::Apply => {
+            writer.write_all(&data).map_err(|error| ControlError { code: "pty_write_failed", message: error.to_string() })?;
+            // decision 与 commit 位于同一 session mutex 临界区；写入后 authority 不可能被并发改变。
+            state.commit_input(channel_id, holder_epoch, input_seq, data)?;
+            Ok(DevicePtyInputAck { session_id: session_id.to_string(), applied_through_seq: input_seq })
+        }
+    }
 }
 
 type SessionHandle = Arc<Mutex<Session>>;
@@ -697,18 +720,19 @@ impl Sessions {
         let Some(session) = self.get(&request.session_id) else {
             return self.send_device_error(channel_id, Some(request.request_id), "session_not_found", "session 不存在或已退出");
         };
+        let request_id = request.request_id;
+        let session_id = request.session_id;
         let mut locked = session.lock().unwrap();
-        match locked.state.input_decision(channel_id, request.holder_epoch, request.input_seq, &request.data) {
-            Ok(SequencedDecision::Duplicate) => {}
-            Ok(SequencedDecision::Apply) => {
-                if let Err(error) = locked.writer.write_all(&request.data) {
-                    return self.send_device_error(channel_id, Some(request.request_id), "pty_write_failed", error.to_string());
-                }
-                if let Err(error) = locked.state.commit_input(channel_id, request.holder_epoch, request.input_seq, request.data) {
-                    self.send_device_error(channel_id, Some(request.request_id), error.code, error.message);
-                }
+        let result = {
+            let Session { state, writer, .. } = &mut *locked;
+            apply_device_input(state, writer.as_mut(), channel_id, &session_id, request.holder_epoch, request.input_seq, request.data)
+        };
+        drop(locked);
+        match result {
+            Ok(ack) => {
+                self.send_device(channel_id, device_envelope::Payload::PtyInputAck(ack));
             }
-            Err(error) => self.send_device_error(channel_id, Some(request.request_id), error.code, error.message),
+            Err(error) => self.send_device_error(channel_id, Some(request_id), error.code, error.message),
         }
     }
 
@@ -892,6 +916,18 @@ fn request_id_of(payload: &device_envelope::Payload) -> Option<String> {
 mod tests {
     use super::*;
 
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("injected write failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     fn stop_request(request_id: &str, session_id: &str) -> DeviceSessionStop {
         DeviceSessionStop {
             request_id: request_id.into(),
@@ -921,6 +957,43 @@ mod tests {
 
         let collision = OperationRequest::Stop(canonical_stop_request(&stop_request("request-2", "session-2")));
         assert!(ledger.cached("operation-stop", &collision).is_err());
+    }
+
+    #[test]
+    fn sessiond_input_ack_advances_only_after_write_and_replays_cumulative_cursor() {
+        let mut state = SessionState::new(3, 12, 4);
+        let epoch = state.attach("channel-a", "client-a", 1, None).unwrap().holder_epoch;
+        let mut writer = Vec::new();
+
+        let first = apply_device_input(&mut state, &mut writer, "channel-a", "session-1", epoch, 1, b"one".to_vec()).unwrap();
+        assert_eq!(first.session_id, "session-1");
+        assert_eq!(first.applied_through_seq, 1);
+        assert_eq!(writer, b"one");
+
+        let duplicate = apply_device_input(&mut state, &mut writer, "channel-a", "session-1", epoch, 1, b"one".to_vec()).unwrap();
+        assert_eq!(duplicate.applied_through_seq, 1);
+        assert_eq!(writer, b"one", "duplicate input must not reach the PTY writer");
+
+        let second = apply_device_input(&mut state, &mut writer, "channel-a", "session-1", epoch, 2, b"two".to_vec()).unwrap();
+        assert_eq!(second.applied_through_seq, 2);
+        assert_eq!(writer, b"onetwo");
+
+        let stale = apply_device_input(&mut state, &mut writer, "channel-a", "session-1", epoch, 1, b"old retry".to_vec()).unwrap();
+        assert_eq!(stale.applied_through_seq, 2);
+        assert_eq!(writer, b"onetwo", "older retry must only return the cumulative ACK");
+
+        let gap = apply_device_input(&mut state, &mut writer, "channel-a", "session-1", epoch, 4, b"gap".to_vec()).unwrap_err();
+        assert_eq!(gap.code, "input_seq_gap");
+        assert_eq!(state.input_applied_through("channel-a", epoch).unwrap(), 2);
+        assert_eq!(writer, b"onetwo");
+
+        let failed = apply_device_input(&mut state, &mut FailingWriter, "channel-a", "session-1", epoch, 3, b"three".to_vec()).unwrap_err();
+        assert_eq!(failed.code, "pty_write_failed");
+        assert_eq!(state.input_applied_through("channel-a", epoch).unwrap(), 2);
+
+        let retry = apply_device_input(&mut state, &mut writer, "channel-a", "session-1", epoch, 3, b"three".to_vec()).unwrap();
+        assert_eq!(retry.applied_through_seq, 3);
+        assert_eq!(writer, b"onetwothree");
     }
 
     #[test]

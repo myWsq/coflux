@@ -1452,6 +1452,7 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         | device_envelope::Payload::PtyGap(_)
         | device_envelope::Payload::SessionDetached(_)
         | device_envelope::Payload::SessionExited(_) => Some(DeviceScope::SessionRead),
+        device_envelope::Payload::PtyInputAck(_) => Some(DeviceScope::SessionControl),
         device_envelope::Payload::ExecResult(_)
         | device_envelope::Payload::FsListed(_)
         | device_envelope::Payload::FsReadResult(_)
@@ -1515,7 +1516,7 @@ fn epoch_ms() -> f64 {
 mod tests {
     use super::*;
     use coflux_protocol::wire::{
-        DeviceExecRun, DevicePortsRequest, DevicePtyOutput, DeviceRelayDaemonOpen, DeviceSessionAttached,
+        DeviceExecRun, DevicePortsRequest, DevicePtyInputAck, DevicePtyOutput, DeviceRelayDaemonOpen, DeviceSessionAttached,
         DeviceSessionCatalogRequest, DeviceSessionCreate, LocalBrowserGrant, OnlineDeviceLease,
     };
     use p256::ecdsa::SigningKey;
@@ -1692,6 +1693,56 @@ mod tests {
         assert_eq!(required_scope(&device_envelope::Payload::ExecRun(Default::default())), Some(DeviceScope::Rpc));
         assert_eq!(required_scope(&device_envelope::Payload::SessionCreate(Default::default())), Some(DeviceScope::Lifecycle));
         assert_eq!(required_scope(&device_envelope::Payload::PtyOutput(Default::default())), None);
+        assert_eq!(
+            response_required_scope(&device_envelope::Payload::PtyInputAck(Default::default())),
+            Some(DeviceScope::SessionControl)
+        );
+    }
+
+    #[tokio::test]
+    async fn device_router_input_ack_returns_only_to_its_bound_local_or_relay_channel() {
+        let mut fixture = test_runtime();
+        let local_ack = DeviceEnvelope {
+            protocol_version: DEVICE_PROTOCOL_VERSION,
+            channel_id: fixture.local_id.clone(),
+            payload: Some(device_envelope::Payload::PtyInputAck(DevicePtyInputAck {
+                session_id: "session-local".into(),
+                applied_through_seq: 7,
+            })),
+        };
+        fixture.runtime.deliver_from_sessiond(&fixture.local_id, &encode_device_envelope(&local_ack));
+        let local = tokio::time::timeout(Duration::from_secs(2), fixture.local_rx.recv()).await.unwrap().unwrap();
+        assert!(matches!(
+            decode_device_envelope(&local).unwrap().payload,
+            Some(device_envelope::Payload::PtyInputAck(DevicePtyInputAck {
+                ref session_id,
+                applied_through_seq: 7,
+            })) if session_id == "session-local"
+        ));
+        assert!(fixture.relay_rx.try_recv().is_err(), "local ACK must not leak to relay channels");
+
+        let relay_ack = DeviceEnvelope {
+            protocol_version: DEVICE_PROTOCOL_VERSION,
+            channel_id: fixture.relay_id.clone(),
+            payload: Some(device_envelope::Payload::PtyInputAck(DevicePtyInputAck {
+                session_id: "session-relay".into(),
+                applied_through_seq: 9,
+            })),
+        };
+        fixture.runtime.deliver_from_sessiond(&fixture.relay_id, &encode_device_envelope(&relay_ack));
+        let relay = relay_envelope(&mut fixture.relay_rx).await;
+        assert!(matches!(
+            relay.payload,
+            Some(device_envelope::Payload::PtyInputAck(DevicePtyInputAck {
+                ref session_id,
+                applied_through_seq: 9,
+            })) if session_id == "session-relay"
+        ));
+        assert!(tokio::time::timeout(Duration::from_millis(20), fixture.local_rx.recv()).await.is_err());
+
+        fixture.runtime.close_channel(&fixture.local_id);
+        fixture.runtime.close_relays();
+        let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
     #[tokio::test]

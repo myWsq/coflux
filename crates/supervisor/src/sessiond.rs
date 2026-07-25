@@ -508,18 +508,38 @@ impl SessionState {
         }
         let holder = self.current_holder(channel_id, holder_epoch)?;
         match self.input_cursors.get(&holder.client_instance_id) {
-            None => Ok(SequencedDecision::Apply),
-            Some(cursor) if input_seq > cursor.seq => Ok(SequencedDecision::Apply),
+            None if input_seq == 1 => Ok(SequencedDecision::Apply),
+            None => Err(ControlError { code: "input_seq_gap", message: "input sequence 不连续，期望 1".into() }),
+            Some(cursor) if cursor.seq.checked_add(1) == Some(input_seq) => Ok(SequencedDecision::Apply),
             Some(cursor) if input_seq == cursor.seq && cursor.data == data => Ok(SequencedDecision::Duplicate),
             Some(cursor) if input_seq == cursor.seq => {
                 Err(ControlError { code: "input_seq_collision", message: "相同 input sequence 携带了不同 payload".into() })
             }
-            Some(_) => Err(ControlError { code: "stale_input", message: "input sequence 已过期".into() }),
+            Some(cursor) if input_seq < cursor.seq => Ok(SequencedDecision::Duplicate),
+            Some(cursor) => Err(ControlError {
+                code: "input_seq_gap",
+                message: format!("input sequence 不连续，期望 {}", cursor.seq.saturating_add(1)),
+            }),
         }
+    }
+
+    pub fn input_applied_through(&self, channel_id: &str, holder_epoch: u64) -> Result<u64, ControlError> {
+        let holder = self.current_holder(channel_id, holder_epoch)?;
+        Ok(self.input_cursors.get(&holder.client_instance_id).map_or(0, |cursor| cursor.seq))
     }
 
     pub fn commit_input(&mut self, channel_id: &str, holder_epoch: u64, input_seq: u64, data: Vec<u8>) -> Result<(), ControlError> {
         let client_instance_id = self.current_holder(channel_id, holder_epoch)?.client_instance_id.clone();
+        let applied_through = self.input_cursors.get(&client_instance_id).map_or(0, |cursor| cursor.seq);
+        let Some(expected) = applied_through.checked_add(1) else {
+            return Err(ControlError { code: "input_seq_exhausted", message: "input sequence 已耗尽".into() });
+        };
+        if input_seq != expected {
+            return Err(ControlError {
+                code: "input_commit_out_of_order",
+                message: format!("input commit 不连续，期望 {expected}"),
+            });
+        }
         self.input_cursors.insert(client_instance_id, InputCursor { seq: input_seq, data });
         Ok(())
     }
@@ -957,13 +977,20 @@ mod tests {
         let attached = state.attach("channel-a", "client-a", 1, None).unwrap();
         let epoch = attached.holder_epoch;
 
+        assert_eq!(state.input_applied_through("channel-a", epoch).unwrap(), 0);
+        assert_eq!(state.input_decision("channel-a", epoch, 2, b"gap").unwrap_err().code, "input_seq_gap");
+        assert_eq!(state.commit_input("channel-a", epoch, 2, b"gap".to_vec()).unwrap_err().code, "input_commit_out_of_order");
         assert_eq!(state.input_decision("channel-a", epoch, 1, b"hello").unwrap(), SequencedDecision::Apply);
         state.commit_input("channel-a", epoch, 1, b"hello".to_vec()).unwrap();
+        assert_eq!(state.input_applied_through("channel-a", epoch).unwrap(), 1);
         assert_eq!(state.input_decision("channel-a", epoch, 1, b"hello").unwrap(), SequencedDecision::Duplicate);
         assert_eq!(state.input_decision("channel-a", epoch, 1, b"changed").unwrap_err().code, "input_seq_collision");
+        assert_eq!(state.input_decision("channel-a", epoch, 3, b"gap").unwrap_err().code, "input_seq_gap");
         assert_eq!(state.input_decision("channel-a", epoch, 2, b"next").unwrap(), SequencedDecision::Apply);
         state.commit_input("channel-a", epoch, 2, b"next".to_vec()).unwrap();
-        assert_eq!(state.input_decision("channel-a", epoch, 1, b"hello").unwrap_err().code, "stale_input");
+        assert_eq!(state.input_applied_through("channel-a", epoch).unwrap(), 2);
+        assert_eq!(state.input_decision("channel-a", epoch, 1, b"hello").unwrap(), SequencedDecision::Duplicate);
+        assert_eq!(state.input_decision("channel-a", epoch, 1, b"changed stale payload").unwrap(), SequencedDecision::Duplicate);
 
         assert_eq!(state.resize_decision("channel-a", epoch, 1, 40, 120).unwrap(), SequencedDecision::Apply);
         state.commit_resize("channel-a", epoch, 1, 40, 120).unwrap();
