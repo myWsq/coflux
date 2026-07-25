@@ -57,6 +57,21 @@ export function buildRelayPipeUrl(base: string, token: string): string {
   return `${base.replace(/\/+$/, "")}/v1/pipe?token=${token}`;
 }
 
+/** 按需拨号（deviceRelayDial）自 v0.13.0 起才被 worker 认识；更老的 worker 收到该 payload 会
+ * 静默丢弃，client 于是连上 relay 干等到配对超时——现场表现为"设备在线但怎么都连不上"，
+ * 且 server/relay 两侧都只留下一句超时。这里在 rendezvous 前把它拦成一句人话。
+ * 非 vX.Y.Z 形态（builtin / 本地 cargo 产物）一律放行：dev 构建不受此门限制。 */
+const MIN_RELAY_DIAL_VERSION = [0, 13, 0];
+export function supportsRelayDial(workerVersion: string): boolean {
+  const parsed = /^v?(\d+)\.(\d+)\.(\d+)/.exec(workerVersion.trim());
+  if (!parsed) return true;
+  for (let i = 0; i < 3; i++) {
+    const got = Number(parsed[i + 1]);
+    if (got !== MIN_RELAY_DIAL_VERSION[i]) return got > MIN_RELAY_DIAL_VERSION[i];
+  }
+  return true;
+}
+
 /** 与旧 DeviceRelayRouter 相同的 id 校验语义（长度、控制字符、保留前缀在调用方另查）。 */
 export function validRelayId(value: string): boolean {
   return value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_ID_BYTES && ![...value].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
