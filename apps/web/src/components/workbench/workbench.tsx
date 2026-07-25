@@ -37,6 +37,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [visitedWorkspaceIds, setVisitedWorkspaceIds] = useState<ReadonlySet<string>>(new Set());
   const [dismissedErrorId, setDismissedErrorId] = useState<number | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [newTerminalOpen, setNewTerminalOpen] = useState(false);
   const [enrollmentOpen, setEnrollmentOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [renameWorkspace, setRenameWorkspace] = useState<Workspace | null>(null);
@@ -120,6 +121,18 @@ export function Workbench({ client }: { client: CofluxClient }) {
     client.send({ case: "projectImport", value: { daemonId, path } });
   }
 
+  // 无 repo 终端（plan 045）：先经设备浏览通道解析 HOME 绝对路径（FsListed.path），
+  // 再发 terminalCreate；全链路绝对路径，daemon 侧不做 `~` 展开。
+  async function createDeviceTerminal(daemonId: string): Promise<string | null> {
+    const result = await client.listDeviceDirectory(daemonId, "~");
+    if (!result.ok || !result.path) return result.error || "无法解析设备 HOME 目录";
+    // 目录工作区 projectId 恒为空串，复用 pendingWorkspaceCreateRef 的"新工作区自动切换"机制：
+    // projectId === "" 只会匹配目录工作区，不会误认项目工作区。
+    pendingWorkspaceCreateRef.current = { projectId: "", knownIds: new Set(client.store.getState().workspaces.map((workspace) => workspace.id)) };
+    client.send({ case: "terminalCreate", value: { daemonId, path: result.path } });
+    return null;
+  }
+
   // workspaceCreate 无请求-响应关联：记下发起时已知的工作区 id，
   // 广播中新出现的该项目工作区即本次创建的，自动切换过去（同终端创建的识别模式）。
   const pendingWorkspaceCreateRef = useRef<{ projectId: string; knownIds: Set<string> } | null>(null);
@@ -166,6 +179,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   function requestRemoveWorkspace(workspace: Workspace) {
+    // 目录工作区（无 repo 终端）：只删记录，不涉及任何 git/文件系统操作，文案不能沿用 worktree 措辞
+    if (!workspace.projectId) {
+      setConfirmAction({
+        title: "移除这个终端？",
+        description: "正在运行的 shell 会停止，终端记录会被移除；目录本身不受影响。",
+        confirmLabel: "移除终端",
+        onConfirm: () => client.send({ case: "workspaceRemove", value: { workspaceId: workspace.id } }),
+      });
+      return;
+    }
     setConfirmAction({
       title: `删除工作区「${workspace.branch}」？`,
       description: `对应的 git worktree 目录会被移除，分支「${workspace.branch}」不会被自动删除。`,
@@ -277,6 +300,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         selectedWorkspaceId={selectedWorkspaceId}
         onSelectWorkspace={selectWorkspace}
         onImportProject={() => setImportOpen(true)}
+        onNewTerminal={() => setNewTerminalOpen(true)}
         onCreateWorkspace={createWorkspace}
         onRemoveProject={requestRemoveProject}
         onRemoveWorkspace={requestRemoveWorkspace}
@@ -360,6 +384,19 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onImport={importProject}
         onAddDevice={openEnrollment}
         listDirectory={client.listDeviceDirectory}
+      />
+      {/* 无 repo 终端：同一向导组件的"选设备即完"模式，选中设备后直接在其 HOME 开终端 */}
+      <ImportProjectWizard
+        open={newTerminalOpen}
+        daemons={daemons}
+        onOpenChange={setNewTerminalOpen}
+        onImport={importProject}
+        onAddDevice={() => {
+          setNewTerminalOpen(false);
+          setEnrollmentOpen(true);
+        }}
+        listDirectory={client.listDeviceDirectory}
+        pickDeviceOnly={{ title: "新建终端", onPick: createDeviceTerminal }}
       />
       <WorkspaceRenameDialog
         workspace={renameWorkspace}

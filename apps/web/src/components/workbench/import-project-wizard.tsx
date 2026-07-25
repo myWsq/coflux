@@ -18,6 +18,9 @@ type ImportProjectWizardProps = {
   onImport: (daemonId: string, path: string) => void;
   onAddDevice: () => void;
   listDirectory: (daemonId: string, path: string) => Promise<FsListResult>;
+  /** 选设备即完模式（无 repo 终端，plan 045）：跳过浏览步，选中设备后调用并关闭；
+   * 返回错误文案则停留在设备步显示错误。存在此 prop 时 title 也随之切换。 */
+  pickDeviceOnly?: { title: string; onPick: (daemonId: string) => Promise<string | null> };
 };
 
 /** Dialog 定高：header/搜索/底栏固定，中间列表超出内部滚动 */
@@ -102,6 +105,7 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
     setHighlight(-1);
     setError("");
     setDaemonId("");
+    setLoading(false);
     queueMicrotask(() => deviceInputRef.current?.focus());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.open, props.daemons]);
@@ -147,6 +151,19 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
   }
 
   function selectDevice(id: string) {
+    const pick = props.pickDeviceOnly;
+    if (pick) {
+      if (loading) return;
+      setDaemonId(id);
+      setLoading(true);
+      setError("");
+      void pick.onPick(id).then((pickError) => {
+        setLoading(false);
+        if (pickError) setError(pickError);
+        else props.onOpenChange(false);
+      });
+      return;
+    }
     setDaemonId(id);
     setHomeAbs("");
     setCwdAbs("");
@@ -275,7 +292,7 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
   }, [props.open, step, canImport, cwdAbs, daemonId, onImport, onOpenChange]);
 
   const currentName = pathSegments.length > 0 ? pathSegments[pathSegments.length - 1]! : cwdAbs || "/";
-  const stepLabel = step === "device" ? "第 1 步（共 2 步）" : "第 2 步（共 2 步）";
+  const stepLabel = props.pickDeviceOnly ? "" : step === "device" ? "第 1 步（共 2 步）" : "第 2 步（共 2 步）";
   const showDeviceFooter = step === "device" && onlineDaemons.length > 0;
   const showBrowseFooter = step === "browse";
 
@@ -291,7 +308,7 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
       <Layout
         header={
           <DialogHeader
-            title="导入项目"
+            title={props.pickDeviceOnly?.title ?? "导入项目"}
             endContent={
               <HStack gap={3} vAlign="center">
                 {step === "browse" ? (
@@ -305,9 +322,11 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
                     onPressedChange={setShowHidden}
                   />
                 ) : null}
-                <Text type="body" color="secondary" size="sm">
-                  {stepLabel}
-                </Text>
+                {stepLabel ? (
+                  <Text type="body" color="secondary" size="sm">
+                    {stepLabel}
+                  </Text>
+                ) : null}
               </HStack>
             }
             onOpenChange={props.onOpenChange}
@@ -338,8 +357,17 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
                     />
                   </div>
 
+                  {error ? <Banner status="error" title={error} container="card" /> : null}
+
                   {filteredDaemons.length > 0 ? (
-                    <div ref={listRef} role="listbox" aria-label="在线设备" className="coflux-import-list">
+                    <div
+                      ref={listRef}
+                      role="listbox"
+                      aria-label="在线设备"
+                      aria-busy={loading}
+                      className="coflux-import-list"
+                      style={loading ? { opacity: 0.55 } : undefined}
+                    >
                       {filteredDaemons.map((daemon, index) => (
                         <button
                           key={daemon.daemonId}

@@ -62,6 +62,10 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   const lastError = useStore(client.store, (state) => state.lastError);
   const ports = useStore(client.store, (state) => state.ports);
 
+  // 目录工作区（无 repo 终端，plan 045）：projectId 为空。一工作区一终端，
+  // 不渲染顶栏（分支按钮/「变更」tab/终端 Tabs/新建按钮），git 语义功能全部不适用。
+  const isDirWorkspace = Boolean(workspace && !workspace.projectId);
+
   const [activeTaskId, setActiveTaskIdState] = useState<string | null>(null);
   // 主面板视图：常驻「变更」tab 与终端 Tab 互斥（plan 025）。本组件随工作区常驻挂载
   // （workbench.tsx 隐藏而非卸载），故该 state 天然按工作区独立保留，无需额外持久化。
@@ -272,6 +276,9 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   function createTerminal() {
     if (pendingCreateRef.current) return;
     const tasksNow = currentTasks();
+    // 目录工作区一工作区一终端：已有任务时快捷键新建（modPrefix+T）安静忽略，
+    // 没有 Tab 栏可切换，第二个任务会不可达。空态重建（任务被关闭后）仍放行。
+    if (isDirWorkspace && tasksNow.length > 0) return;
     pendingCreateRef.current = { knownTaskIds: new Set(tasksNow.map((task) => task.id)) };
     setCreating(true);
     client.send({ case: "taskCreate", value: { workspaceId, title: `终端 ${tasksNow.length + 1}` } });
@@ -408,7 +415,9 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
 
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-terminal">
-      {/* 单栏顶栏：名称（如有）＋ 可点的分支按钮 │ 终端 Tabs（Tab 用间距而非竖线分隔）＋ 新建/端口 */}
+      {/* 单栏顶栏：名称（如有）＋ 可点的分支按钮 │ 终端 Tabs（Tab 用间距而非竖线分隔）＋ 新建/端口。
+          目录工作区不渲染整个顶栏（一工作区一终端，无 Tab/分支/变更语义）。 */}
+      {isDirWorkspace ? null : (
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-background px-3">
         <BranchMenu
           currentBranch={workspace?.branch ?? ""}
@@ -531,6 +540,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           </div>
         ) : null}
       </header>
+      )}
 
       <div className="relative min-h-0 flex-1 bg-terminal">
         {/* 面板按 taskId 建立稳定身份（React key）：任务实体更新不重建 xterm（重建会丢 scrollback）。 */}
@@ -576,17 +586,20 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           </div>
         ) : null}
 
-        {/* 「变更」视图：与终端面板同保活模式（隐藏不卸载），折叠态/已拉取数据才不随切换丢失。 */}
-        <div className={cn("absolute inset-0 bg-terminal", view === "changes" ? "block" : "hidden")}>
-          <ChangesView
-            workspaceId={workspaceId}
-            active={view === "changes"}
-            client={client}
-            defaultBranch={defaultBranch}
-            additions={workspace?.additions ?? 0}
-            deletions={workspace?.deletions ?? 0}
-          />
-        </div>
+        {/* 「变更」视图：与终端面板同保活模式（隐藏不卸载），折叠态/已拉取数据才不随切换丢失。
+            目录工作区无 git 语义，整个视图不渲染（顶栏已隐藏，view 也不可能切到 changes）。 */}
+        {isDirWorkspace ? null : (
+          <div className={cn("absolute inset-0 bg-terminal", view === "changes" ? "block" : "hidden")}>
+            <ChangesView
+              workspaceId={workspaceId}
+              active={view === "changes"}
+              client={client}
+              defaultBranch={defaultBranch}
+              additions={workspace?.additions ?? 0}
+              deletions={workspace?.deletions ?? 0}
+            />
+          </div>
+        )}
       </div>
 
     </section>
