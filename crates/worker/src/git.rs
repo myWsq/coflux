@@ -255,11 +255,15 @@ pub async fn add_worktree(worktrees_dir: &str, repo_path: &str, workspace_id: &s
     WorktreeResult { ok: true, path: dir, branch: branch.to_string(), error: None }
 }
 
-pub async fn remove_worktree(repo_path: &str, worktree_path: &str) {
-    let (ok, _o, _e) = run_git(&["-C", repo_path, "worktree", "remove", "--force", worktree_path]).await;
+pub async fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(), String> {
+    let (ok, _o, error) = run_git(&["-C", repo_path, "worktree", "remove", "--force", worktree_path]).await;
     if !ok {
         let _ = run_git(&["-C", repo_path, "worktree", "prune"]).await;
+        let error = error.trim();
+        let error = if error.is_empty() { "git worktree remove failed" } else { error };
+        return Err(error.chars().take(400).collect());
     }
+    Ok(())
 }
 
 #[cfg(test)]
