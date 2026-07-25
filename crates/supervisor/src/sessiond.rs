@@ -190,9 +190,42 @@ impl TerminalState {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        if self.rows == rows && self.cols == cols {
+            return;
+        }
+        // vt100::Grid::set_size 在列数变化时会直接清掉 wrap 标记并截/补每个 physical row，
+        // 与浏览器 xterm 的 logical-line reflow 不一致；尤其 alt screen 激活时，隐藏 normal
+        // screen 会停在旧布局，退出 alt 后丢行。先把规范 snapshot 当成逻辑行流，再在新尺寸的
+        // parser 中重放，既保留 hard line 边界，也让 normal/history 与 xterm 按新列宽重排。
+        let was_alt = self.parser.screen().alternate_screen();
+        let normal = if was_alt {
+            self.normal_before_alt.clone().unwrap_or_else(|| b"\x1bc".to_vec())
+        } else {
+            render_normal_snapshot(self.parser.screen(), self.history_line_limit, self.history_row_capacity)
+        };
+        let reflowed_normal = reflow_normal_snapshot(
+            &normal,
+            self.rows,
+            self.cols,
+            rows,
+            cols,
+            self.history_line_limit,
+            self.history_row_capacity,
+        );
+        let snapshot = if was_alt {
+            let mut snapshot = reflowed_normal.clone();
+            snapshot.extend_from_slice(b"\x1b[?1049h\x1b[H\x1b[2J");
+            render_active_grid(&mut snapshot, self.parser.screen(), &[]);
+            snapshot
+        } else {
+            reflowed_normal.clone()
+        };
+        let mut parser = vt100::Parser::new(rows, cols, self.history_row_capacity);
+        parser.process(&snapshot);
+        self.parser = parser;
+        self.normal_before_alt = was_alt.then_some(reflowed_normal);
         self.rows = rows;
         self.cols = cols;
-        self.parser.screen_mut().set_size(rows, cols);
     }
 
     pub fn output_seq(&self) -> u64 {
@@ -719,6 +752,35 @@ fn render_normal_snapshot(screen: &Screen, line_limit: usize, row_capacity: usiz
     snapshot
 }
 
+fn reflow_normal_snapshot(
+    snapshot: &[u8],
+    old_rows: u16,
+    old_cols: u16,
+    rows: u16,
+    cols: u16,
+    line_limit: usize,
+    row_capacity: usize,
+) -> Vec<u8> {
+    let mut old = vt100::Parser::new(old_rows, old_cols, row_capacity);
+    old.process(snapshot);
+    let (cursor_row, cursor_col) = old.screen().cursor_position();
+    // xterm 增高 viewport 时会先从 scrollback 拉回 physical rows，cursor 随 viewport 一起
+    // 下移；单纯在新尺寸重放 ANSI 会把 cursor 固定在旧 viewport row，退出 alt 后少出空行。
+    let history_rows = {
+        let mut view = old.screen().clone();
+        view.set_scrollback(usize::MAX);
+        view.scrollback()
+    };
+    let pulled = rows.saturating_sub(old_rows).min(u16::try_from(history_rows).unwrap_or(u16::MAX));
+    let target_row = cursor_row.saturating_add(pulled).min(rows.saturating_sub(1));
+    let target_col = cursor_col.min(cols.saturating_sub(1));
+
+    let mut parser = vt100::Parser::new(rows, cols, row_capacity);
+    parser.process(snapshot);
+    parser.process(format!("\x1b[{};{}H", target_row.saturating_add(1), target_col.saturating_add(1)).as_bytes());
+    render_normal_snapshot(parser.screen(), line_limit, row_capacity)
+}
+
 fn render_active_grid(out: &mut Vec<u8>, screen: &Screen, history: &[RowSnapshot]) {
     let mut rows = Vec::with_capacity(history.len() + usize::from(screen.size().0));
     rows.extend_from_slice(history);
@@ -766,6 +828,11 @@ fn render_row(out: &mut Vec<u8>, row: &RowSnapshot) {
     }
     if style != default {
         emit_style(out, &default);
+    }
+    if end < row.cells.len() {
+        // auto-wrap 在 viewport 底部滚动时，新 row 会继承当时的背景色。显式用默认属性擦掉
+        // 未序列化的尾部 padding，既不把空白变成文字，也不改变 logical-line wrap。
+        out.extend_from_slice(b"\x1b[K");
     }
 }
 
@@ -872,6 +939,53 @@ mod tests {
         parser.process(b"\x1b[?1049l");
         assert_screen_equivalent(state.parser.screen(), parser.screen());
         assert!(state.parser.screen().contents().contains("normal survives"));
+    }
+
+    #[test]
+    fn sessiond_vt_snapshot_clears_unserialized_trailing_padding() {
+        let mut state = TerminalState::new(2, 8, 8);
+        state.feed(b"first\r\n\x1b[48;5;24m1234567890\x1b[0m");
+        state.resize(3, 10);
+        let screen = state.parser.screen();
+        assert!(screen.contents().contains("1234567890"));
+        for row in 0..screen.size().0 {
+            for col in 0..screen.size().1 {
+                let cell = screen.cell(row, col).unwrap();
+                if cell.contents().is_empty() {
+                    assert_eq!(cell.bgcolor(), Color::Default, "cell ({row}, {col}) 保留了 reflow padding 背景色");
+                }
+            }
+        }
+        let snapshot = state.snapshot();
+        assert!(snapshot.windows(b"\x1b[K".len()).any(|window| window == b"\x1b[K"));
+        let mut parser = vt100::Parser::new(state.rows, state.cols, state.history_row_capacity);
+        parser.process(&snapshot);
+        assert_screen_equivalent(screen, parser.screen());
+    }
+
+    #[test]
+    fn sessiond_vt_resize_while_alt_reflows_hidden_normal_screen() {
+        let mut state = TerminalState::new(2, 8, 8);
+        state.feed(b"first\r\n\x1b[48;5;24m1234567890\x1b[0m");
+        state.feed(b"\x1b[?1049h\x1b[2J\x1b[Halt tui");
+        state.resize(3, 10);
+
+        let mut parser = restored(&state);
+        assert!(parser.screen().alternate_screen());
+        assert_screen_equivalent(state.parser.screen(), parser.screen());
+
+        state.feed(b"\x1b[?1049l");
+        parser.process(b"\x1b[?1049l");
+        assert_screen_equivalent(state.parser.screen(), parser.screen());
+        assert!(state.parser.screen().contents().contains("1234567890"));
+        for row in 0..state.parser.screen().size().0 {
+            for col in 0..state.parser.screen().size().1 {
+                let cell = state.parser.screen().cell(row, col).unwrap();
+                if cell.contents().is_empty() {
+                    assert_eq!(cell.bgcolor(), Color::Default, "hidden normal cell ({row}, {col}) 保留了背景色");
+                }
+            }
+        }
     }
 
     #[test]

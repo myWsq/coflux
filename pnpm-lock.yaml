@@ -228,6 +228,9 @@ importers:
       '@coflux/protocol':
         specifier: workspace:*
         version: link:../packages/protocol
+      '@xterm/headless':
+        specifier: ^6.0.0
+        version: 6.0.0
       jose:
         specifier: ^5.9.6
         version: 5.10.0
