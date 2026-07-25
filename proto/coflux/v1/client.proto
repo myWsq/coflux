@@ -5,7 +5,6 @@ syntax = "proto3";
 package coflux.v1;
 
 import "coflux/v1/common.proto";
-import "coflux/v1/daemon.proto";
 import "coflux/v1/device.proto";
 
 // ===== Client → Server 载荷 =====
@@ -102,61 +101,16 @@ message TaskStart {
   uint32 rows = 3;
 }
 
-message TaskAttach {
-  string task_id = 1;
-  // 客户端终端尺寸：镜像慢路径（replay prime）按此尺寸解析历史字节。
-  // 缺省（0）时 server 回落 80×24。
-  uint32 cols = 2;
-  uint32 rows = 3;
-}
-
-message TaskStop {
-  string task_id = 1;
-}
-
 message TaskRemove {
   string task_id = 1;
 }
 
-// 通用原语（IDE/工具用）：在某工作区里跑命令、读/列文件。request_id 由 client 自定，server 原样回带
-message ClientExec {
-  string request_id = 1;
-  string workspace_id = 2;
-  string command = 3;
-  repeated string args = 4;
-  optional uint32 timeout_ms = 5;
-}
-
-message ClientFsList {
-  string request_id = 1;
-  string workspace_id = 2;
-  string path = 3;
-  // 设备浏览模式（plan 012 导入向导）：设置时忽略 workspace_id，
-  // 以该设备的用户 home 为根浏览（server 校验设备归属后 root 下发 "~"）。
-  optional string daemon_id = 4;
-}
-
-message ClientFsRead {
-  string request_id = 1;
-  string workspace_id = 2;
-  string path = 3;
-}
-
-// 终端剪贴板贴图（plan 014，temp 模式修订）：把图片字节上传到 daemon 侧系统临时目录落盘，
-// data 为原始（或客户端已压缩过的）图片字节。temp=true 时 path 为单段文件名
-// （形如 "paste-<ts>-<rand>.<ext>"），落盘绝对路径由 worker 回带。workspace_id 仍用于
-// 归属校验与路由到正确 daemon（temp 模式不写入该 workspace 的 worktree）。
-message ClientFsWrite {
-  string request_id = 1;
-  string workspace_id = 2;
-  string path = 3;
-  bytes data = 4;
-  bool temp = 5;
-}
-
 message ClientToServer {
-  reserved 4;
-  reserved "client_create_enrollment_key";
+  // 旧 terminal/RPC adapter 已由端到端 DeviceEnvelope 取代；编号与字段名永久保留，
+  // 防止旧 bundle 的 raw PTY/RPC 被未来字段误解。
+  reserved 4, 16, 17, 19, 20, 21, 22, 23, 25;
+  reserved "client_create_enrollment_key", "task_attach", "task_stop", "pty_resize", "client_exec",
+    "client_fs_list", "client_fs_read", "pty_input", "client_fs_write";
   oneof payload {
     ClientAuth client_auth = 1;
     ClientLogout client_logout = 2;
@@ -172,14 +126,7 @@ message ClientToServer {
     WorkspaceRemove workspace_remove = 13;
     TaskCreate task_create = 14;
     TaskStart task_start = 15;
-    TaskAttach task_attach = 16;
-    TaskStop task_stop = 17;
     TaskRemove task_remove = 18;
-    PtyResize pty_resize = 19;
-    ClientExec client_exec = 20;
-    ClientFsList client_fs_list = 21;
-    ClientFsRead client_fs_read = 22;
-    ClientFsWrite client_fs_write = 25;
     DeviceSetName device_set_name = 26;
     LocalPairRequest local_pair_request = 27;
     LocalLeaseRequest local_lease_request = 28;
@@ -187,8 +134,6 @@ message ClientToServer {
     DeviceRelayFrame device_relay_frame = 30;
     DeviceRelayClose device_relay_close = 31;
     LocalUnpairRequest local_unpair_request = 32;
-    // 数据面（高频）
-    PtyInput pty_input = 23;
     WorkspaceSetName workspace_set_name = 24;
   }
 }
@@ -269,11 +214,6 @@ message TaskRemoved {
   string task_id = 1;
 }
 
-// 本 client 对该任务的控制权被另一个 client 接管（独占模型）
-message TaskDetached {
-  string task_id = 1;
-}
-
 message ServerError {
   string message = 1;
 }
@@ -285,8 +225,10 @@ message ServerError {
 message ClientOutdated {}
 
 message ServerToClient {
-  reserved 3;
-  reserved "enrollment_key_created";
+  // holder/output/RPC 结果全部封装在 opaque Device relay 内；server 不再理解这些数据。
+  reserved 3, 17, 18, 19, 20, 22, 23;
+  reserved "enrollment_key_created", "task_detached", "exec_result", "fs_listed", "fs_read_result",
+    "pty_output", "fs_write_result";
   oneof payload {
     AuthOk auth_ok = 1;
     AuthError auth_error = 2;
@@ -303,12 +245,7 @@ message ServerToClient {
     WorkspaceRemoved workspace_removed = 14;
     TaskUpdated task_updated = 15;
     TaskRemoved task_removed = 16;
-    TaskDetached task_detached = 17;
-    ExecResult exec_result = 18;
-    FsListed fs_listed = 19;
-    FsReadResult fs_read_result = 20;
     ServerError error = 21;
-    FsWriteResult fs_write_result = 23;
     ClientOutdated client_outdated = 24;
     LocalPairResult local_pair_result = 25;
     LocalLeaseResult local_lease_result = 26;
@@ -318,7 +255,5 @@ message ServerToClient {
     PreparedDeviceOperation prepared_device_operation = 30;
     SessionCheckpoint session_checkpoint = 31;
     LocalUnpairResult local_unpair_result = 32;
-    // 数据面（高频）
-    PtyOutput pty_output = 22;
   }
 }

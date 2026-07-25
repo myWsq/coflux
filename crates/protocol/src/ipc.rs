@@ -42,18 +42,9 @@ pub enum WorkerToSupervisor {
     },
     #[serde(rename = "session.close")]
     SessionClose { session_id: String },
-    #[serde(rename = "session.replay")]
-    SessionReplay { session_id: String, request_id: String },
-    #[serde(rename = "pty.resize")]
-    PtyResize { session_id: String, cols: u16, rows: u16 },
     /// worker（重）连后索要存活会话列表
     #[serde(rename = "resync.request")]
     ResyncRequest,
-    /// 背压：worker 的 server WS 缓冲水位驱动 supervisor 暂停/恢复全部 PTY
-    #[serde(rename = "pty.pause")]
-    PtyPause,
-    #[serde(rename = "pty.resume")]
-    PtyResume,
     /// 热升级：把 server 下发的版本切换转给 supervisor（带 url 走下载+验签）
     #[serde(rename = "worker.upgrade")]
     WorkerUpgrade {
@@ -150,7 +141,6 @@ mod tests {
     #[test]
     fn uds_unit_variant_json() {
         assert_eq!(serde_json::to_string(&WorkerToSupervisor::ResyncRequest).unwrap(), r#"{"type":"resync.request"}"#);
-        assert_eq!(serde_json::to_string(&WorkerToSupervisor::PtyPause).unwrap(), r#"{"type":"pty.pause"}"#);
     }
 
     #[test]

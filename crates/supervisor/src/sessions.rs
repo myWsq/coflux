@@ -437,9 +437,10 @@ impl Sessions {
                         let mut locked = session.lock().unwrap();
                         let pending = locked.state.feed(chunk);
 
-                        // legacy adapter：旧 worker/server 仍收 raw live output；replay 已改为 VT snapshot。
-                        let legacy = encode_frame(&DataFrame::Output { session_id: session_id.clone(), data: chunk.to_vec() });
-                        this.send_record(write_record(&legacy));
+                        // 只通知 worker 该 session 的派生 checkpoint 已脏；PTY 原始字节不离开
+                        // supervisor/sessiond。保留旧 output frame 编号便于跨版本 worker 忽略 payload。
+                        let dirty = encode_frame(&DataFrame::Output { session_id: session_id.clone(), data: Vec::new() });
+                        this.send_record(write_record(&dirty));
 
                         for delivery in pending {
                             let output = DevicePtyOutput {
@@ -504,12 +505,6 @@ impl Sessions {
         });
     }
 
-    pub fn input(&self, session_id: &str, data: &[u8]) {
-        if let Some(session) = self.get(session_id) {
-            let _ = session.lock().unwrap().writer.write_all(data);
-        }
-    }
-
     fn resize_locked(&self, session: &mut Session, rows: u16, cols: u16) -> Result<(), String> {
         let new_reserved = estimated_terminal_bytes(rows, cols, session.history_line_limit);
         let old_reserved = session.reserved_bytes;
@@ -529,23 +524,10 @@ impl Sessions {
         Ok(())
     }
 
-    pub fn resize(&self, session_id: &str, cols: u16, rows: u16) {
-        if let Some(session) = self.get(session_id) {
-            let mut locked = session.lock().unwrap();
-            let _ = self.resize_locked(&mut locked, rows, cols);
-        }
-    }
-
     pub fn close(&self, session_id: &str) {
         if let Some(session) = self.get(session_id) {
             let _ = session.lock().unwrap().child.kill();
         }
-    }
-
-    pub fn replay(&self, session_id: &str, request_id: String) {
-        let snapshot = self.get(session_id).map_or_else(Vec::new, |session| session.lock().unwrap().state.snapshot());
-        let frame = encode_frame(&DataFrame::Replay { session_id: session_id.to_string(), request_id, data: snapshot });
-        self.send_record(write_record(&frame));
     }
 
     pub fn send_resync(&self) {

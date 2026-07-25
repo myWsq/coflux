@@ -12,11 +12,6 @@
 /// wire：每个 WS binary message = 一个 protobuf 编码的信封（DaemonToServer / ServerToDaemon）。
 /// 旧 JSON 控制面 + 自定义二进制帧已收敛为单一 protobuf binary，protojson 仅用于日志调试。
 
-#if canImport(FoundationEssentials)
-import FoundationEssentials
-#else
-import Foundation
-#endif
 import SwiftProtobuf
 
 // If the compiler emits an error on this type, it is because this file
@@ -345,55 +340,6 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     set {payload = .proxyClosed(newValue)}
   }
 
-  public var execResult: Coflux_V1_ExecResult {
-    get {
-      if case .execResult(let v)? = payload {return v}
-      return Coflux_V1_ExecResult()
-    }
-    set {payload = .execResult(newValue)}
-  }
-
-  public var fsListed: Coflux_V1_FsListed {
-    get {
-      if case .fsListed(let v)? = payload {return v}
-      return Coflux_V1_FsListed()
-    }
-    set {payload = .fsListed(newValue)}
-  }
-
-  public var fsReadResult: Coflux_V1_FsReadResult {
-    get {
-      if case .fsReadResult(let v)? = payload {return v}
-      return Coflux_V1_FsReadResult()
-    }
-    set {payload = .fsReadResult(newValue)}
-  }
-
-  public var fsWriteResult: Coflux_V1_FsWriteResult {
-    get {
-      if case .fsWriteResult(let v)? = payload {return v}
-      return Coflux_V1_FsWriteResult()
-    }
-    set {payload = .fsWriteResult(newValue)}
-  }
-
-  /// 数据面（高频）
-  public var ptyOutput: Coflux_V1_PtyOutput {
-    get {
-      if case .ptyOutput(let v)? = payload {return v}
-      return Coflux_V1_PtyOutput()
-    }
-    set {payload = .ptyOutput(newValue)}
-  }
-
-  public var ptyReplay: Coflux_V1_PtyReplay {
-    get {
-      if case .ptyReplay(let v)? = payload {return v}
-      return Coflux_V1_PtyReplay()
-    }
-    set {payload = .ptyReplay(newValue)}
-  }
-
   public var proxyData: Coflux_V1_ProxyData {
     get {
       if case .proxyData(let v)? = payload {return v}
@@ -496,13 +442,6 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     case portsUpdate(Coflux_V1_PortsUpdate)
     case proxyOpened(Coflux_V1_ProxyOpened)
     case proxyClosed(Coflux_V1_ProxyClosed)
-    case execResult(Coflux_V1_ExecResult)
-    case fsListed(Coflux_V1_FsListed)
-    case fsReadResult(Coflux_V1_FsReadResult)
-    case fsWriteResult(Coflux_V1_FsWriteResult)
-    /// 数据面（高频）
-    case ptyOutput(Coflux_V1_PtyOutput)
-    case ptyReplay(Coflux_V1_PtyReplay)
     case proxyData(Coflux_V1_ProxyData)
     case workspaceBranch(Coflux_V1_WorkspaceBranch)
     case workspaceDiff(Coflux_V1_WorkspaceDiff)
@@ -773,36 +712,6 @@ public struct Coflux_V1_SessionClose: Sendable {
   public init() {}
 }
 
-public struct Coflux_V1_SessionReplay: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var sessionID: String = String()
-
-  public var requestID: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public struct Coflux_V1_PtyResize: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var sessionID: String = String()
-
-  public var cols: UInt32 = 0
-
-  public var rows: UInt32 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 /// 打开一条隧道连接：daemon 向本地 port 发起 TCP 连接，字节经 ProxyData 双向透传
 public struct Coflux_V1_ProxyOpen: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
@@ -825,95 +734,6 @@ public struct Coflux_V1_ProxyClose: Sendable {
   // methods supported on all messages.
 
   public var connID: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// 通用原语：一次性命令
-public struct Coflux_V1_ExecRun: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var requestID: String = String()
-
-  public var cwd: String = String()
-
-  public var command: String = String()
-
-  public var args: [String] = []
-
-  public var env: Dictionary<String,String> = [:]
-
-  public var timeoutMs: UInt32 {
-    get {_timeoutMs ?? 0}
-    set {_timeoutMs = newValue}
-  }
-  /// Returns true if `timeoutMs` has been explicitly set.
-  public var hasTimeoutMs: Bool {self._timeoutMs != nil}
-  /// Clears the value of `timeoutMs`. Subsequent reads from it will return its default value.
-  public mutating func clearTimeoutMs() {self._timeoutMs = nil}
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-
-  fileprivate var _timeoutMs: UInt32? = nil
-}
-
-/// 通用原语：文件系统（root 为锚定根，path 为相对路径，daemon 校验不越界）
-public struct Coflux_V1_FsList: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var requestID: String = String()
-
-  public var root: String = String()
-
-  public var path: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public struct Coflux_V1_FsRead: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var requestID: String = String()
-
-  public var root: String = String()
-
-  public var path: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// 通用原语：写文件。
-/// temp=false（默认）：root 为锚定根，path 为相对路径，daemon 校验不越界，父目录不存在则创建。
-/// temp=true：忽略 root/锚定语义，落到 daemon 侧系统临时目录（std::env::temp_dir()/coflux-pastes/）；
-/// path 此时仅允许单段文件名（不得含 '/'，不得为 '.' 或 '..'）。
-public struct Coflux_V1_FsWrite: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var requestID: String = String()
-
-  public var root: String = String()
-
-  public var path: String = String()
-
-  public var data: Data = Data()
-
-  public var temp: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1007,22 +827,6 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     set {payload = .sessionClose(newValue)}
   }
 
-  public var sessionReplay: Coflux_V1_SessionReplay {
-    get {
-      if case .sessionReplay(let v)? = payload {return v}
-      return Coflux_V1_SessionReplay()
-    }
-    set {payload = .sessionReplay(newValue)}
-  }
-
-  public var ptyResize: Coflux_V1_PtyResize {
-    get {
-      if case .ptyResize(let v)? = payload {return v}
-      return Coflux_V1_PtyResize()
-    }
-    set {payload = .ptyResize(newValue)}
-  }
-
   public var proxyOpen: Coflux_V1_ProxyOpen {
     get {
       if case .proxyOpen(let v)? = payload {return v}
@@ -1037,38 +841,6 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
       return Coflux_V1_ProxyClose()
     }
     set {payload = .proxyClose(newValue)}
-  }
-
-  public var execRun: Coflux_V1_ExecRun {
-    get {
-      if case .execRun(let v)? = payload {return v}
-      return Coflux_V1_ExecRun()
-    }
-    set {payload = .execRun(newValue)}
-  }
-
-  public var fsList: Coflux_V1_FsList {
-    get {
-      if case .fsList(let v)? = payload {return v}
-      return Coflux_V1_FsList()
-    }
-    set {payload = .fsList(newValue)}
-  }
-
-  public var fsRead: Coflux_V1_FsRead {
-    get {
-      if case .fsRead(let v)? = payload {return v}
-      return Coflux_V1_FsRead()
-    }
-    set {payload = .fsRead(newValue)}
-  }
-
-  public var fsWrite: Coflux_V1_FsWrite {
-    get {
-      if case .fsWrite(let v)? = payload {return v}
-      return Coflux_V1_FsWrite()
-    }
-    set {payload = .fsWrite(newValue)}
   }
 
   public var daemonSetName: Coflux_V1_DaemonSetName {
@@ -1159,15 +931,6 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     set {payload = .preparedDeviceOperation(newValue)}
   }
 
-  /// 数据面（高频）
-  public var ptyInput: Coflux_V1_PtyInput {
-    get {
-      if case .ptyInput(let v)? = payload {return v}
-      return Coflux_V1_PtyInput()
-    }
-    set {payload = .ptyInput(newValue)}
-  }
-
   public var proxyData: Coflux_V1_ProxyData {
     get {
       if case .proxyData(let v)? = payload {return v}
@@ -1197,14 +960,8 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     case workerUpgrade(Coflux_V1_WorkerUpgrade)
     case sessionCreate(Coflux_V1_SessionCreate)
     case sessionClose(Coflux_V1_SessionClose)
-    case sessionReplay(Coflux_V1_SessionReplay)
-    case ptyResize(Coflux_V1_PtyResize)
     case proxyOpen(Coflux_V1_ProxyOpen)
     case proxyClose(Coflux_V1_ProxyClose)
-    case execRun(Coflux_V1_ExecRun)
-    case fsList(Coflux_V1_FsList)
-    case fsRead(Coflux_V1_FsRead)
-    case fsWrite(Coflux_V1_FsWrite)
     case daemonSetName(Coflux_V1_DaemonSetName)
     case localGrantInstall(Coflux_V1_LocalGrantInstall)
     case localGrantRevoke(Coflux_V1_LocalGrantRevoke)
@@ -1216,8 +973,6 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     case sessionCatalogRequest(Coflux_V1_DeviceSessionCatalogRequest)
     case exitAck(Coflux_V1_DeviceExitAck)
     case preparedDeviceOperation(Coflux_V1_PreparedDeviceOperation)
-    /// 数据面（高频）
-    case ptyInput(Coflux_V1_PtyInput)
     case proxyData(Coflux_V1_ProxyData)
     case workspaceList(Coflux_V1_WorkspaceList)
 
@@ -1719,7 +1474,7 @@ extension Coflux_V1_ProxyClosed: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{3}exec_result\0\u{3}fs_listed\0\u{3}fs_read_result\0\u{3}pty_output\0\u{3}pty_replay\0\u{3}proxy_data\0\u{3}workspace_branch\0\u{3}fs_write_result\0\u{3}workspace_diff\0\u{3}local_grant_ack\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{b}daemon_enroll\0\u{c}\u{1}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1857,71 +1612,6 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .proxyClosed(v)
         }
       }()
-      case 12: try {
-        var v: Coflux_V1_ExecResult?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .execResult(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .execResult(v)
-        }
-      }()
-      case 13: try {
-        var v: Coflux_V1_FsListed?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .fsListed(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .fsListed(v)
-        }
-      }()
-      case 14: try {
-        var v: Coflux_V1_FsReadResult?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .fsReadResult(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .fsReadResult(v)
-        }
-      }()
-      case 15: try {
-        var v: Coflux_V1_PtyOutput?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .ptyOutput(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .ptyOutput(v)
-        }
-      }()
-      case 16: try {
-        var v: Coflux_V1_PtyReplay?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .ptyReplay(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .ptyReplay(v)
-        }
-      }()
       case 17: try {
         var v: Coflux_V1_ProxyData?
         var hadOneofValue = false
@@ -1946,19 +1636,6 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .workspaceBranch(v)
-        }
-      }()
-      case 19: try {
-        var v: Coflux_V1_FsWriteResult?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .fsWriteResult(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .fsWriteResult(v)
         }
       }()
       case 20: try {
@@ -2129,26 +1806,6 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .proxyClosed(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
     }()
-    case .execResult?: try {
-      guard case .execResult(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
-    }()
-    case .fsListed?: try {
-      guard case .fsListed(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
-    }()
-    case .fsReadResult?: try {
-      guard case .fsReadResult(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 14)
-    }()
-    case .ptyOutput?: try {
-      guard case .ptyOutput(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
-    }()
-    case .ptyReplay?: try {
-      guard case .ptyReplay(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 16)
-    }()
     case .proxyData?: try {
       guard case .proxyData(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 17)
@@ -2156,10 +1813,6 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .workspaceBranch?: try {
       guard case .workspaceBranch(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 18)
-    }()
-    case .fsWriteResult?: try {
-      guard case .fsWriteResult(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
     }()
     case .workspaceDiff?: try {
       guard case .workspaceDiff(let v)? = self.payload else { preconditionFailure() }
@@ -2742,81 +2395,6 @@ extension Coflux_V1_SessionClose: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension Coflux_V1_SessionReplay: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".SessionReplay"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}request_id\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.sessionID.isEmpty {
-      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
-    }
-    if !self.requestID.isEmpty {
-      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 2)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_SessionReplay, rhs: Coflux_V1_SessionReplay) -> Bool {
-    if lhs.sessionID != rhs.sessionID {return false}
-    if lhs.requestID != rhs.requestID {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_PtyResize: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".PtyResize"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{1}cols\0\u{1}rows\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
-      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.cols) }()
-      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.rows) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.sessionID.isEmpty {
-      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
-    }
-    if self.cols != 0 {
-      try visitor.visitSingularUInt32Field(value: self.cols, fieldNumber: 2)
-    }
-    if self.rows != 0 {
-      try visitor.visitSingularUInt32Field(value: self.rows, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_PtyResize, rhs: Coflux_V1_PtyResize) -> Bool {
-    if lhs.sessionID != rhs.sessionID {return false}
-    if lhs.cols != rhs.cols {return false}
-    if lhs.rows != rhs.rows {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 extension Coflux_V1_ProxyOpen: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProxyOpen"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}conn_id\0\u{1}port\0")
@@ -2882,198 +2460,9 @@ extension Coflux_V1_ProxyClose: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
   }
 }
 
-extension Coflux_V1_ExecRun: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ExecRun"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}cwd\0\u{1}command\0\u{1}args\0\u{1}env\0\u{3}timeout_ms\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.cwd) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.command) }()
-      case 4: try { try decoder.decodeRepeatedStringField(value: &self.args) }()
-      case 5: try { try decoder.decodeMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: &self.env) }()
-      case 6: try { try decoder.decodeSingularUInt32Field(value: &self._timeoutMs) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if !self.requestID.isEmpty {
-      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
-    }
-    if !self.cwd.isEmpty {
-      try visitor.visitSingularStringField(value: self.cwd, fieldNumber: 2)
-    }
-    if !self.command.isEmpty {
-      try visitor.visitSingularStringField(value: self.command, fieldNumber: 3)
-    }
-    if !self.args.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.args, fieldNumber: 4)
-    }
-    if !self.env.isEmpty {
-      try visitor.visitMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: self.env, fieldNumber: 5)
-    }
-    try { if let v = self._timeoutMs {
-      try visitor.visitSingularUInt32Field(value: v, fieldNumber: 6)
-    } }()
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_ExecRun, rhs: Coflux_V1_ExecRun) -> Bool {
-    if lhs.requestID != rhs.requestID {return false}
-    if lhs.cwd != rhs.cwd {return false}
-    if lhs.command != rhs.command {return false}
-    if lhs.args != rhs.args {return false}
-    if lhs.env != rhs.env {return false}
-    if lhs._timeoutMs != rhs._timeoutMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_FsList: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".FsList"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}root\0\u{1}path\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.root) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.path) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.requestID.isEmpty {
-      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
-    }
-    if !self.root.isEmpty {
-      try visitor.visitSingularStringField(value: self.root, fieldNumber: 2)
-    }
-    if !self.path.isEmpty {
-      try visitor.visitSingularStringField(value: self.path, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_FsList, rhs: Coflux_V1_FsList) -> Bool {
-    if lhs.requestID != rhs.requestID {return false}
-    if lhs.root != rhs.root {return false}
-    if lhs.path != rhs.path {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_FsRead: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".FsRead"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}root\0\u{1}path\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.root) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.path) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.requestID.isEmpty {
-      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
-    }
-    if !self.root.isEmpty {
-      try visitor.visitSingularStringField(value: self.root, fieldNumber: 2)
-    }
-    if !self.path.isEmpty {
-      try visitor.visitSingularStringField(value: self.path, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_FsRead, rhs: Coflux_V1_FsRead) -> Bool {
-    if lhs.requestID != rhs.requestID {return false}
-    if lhs.root != rhs.root {return false}
-    if lhs.path != rhs.path {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_FsWrite: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".FsWrite"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}root\0\u{1}path\0\u{1}data\0\u{1}temp\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.root) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.path) }()
-      case 4: try { try decoder.decodeSingularBytesField(value: &self.data) }()
-      case 5: try { try decoder.decodeSingularBoolField(value: &self.temp) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.requestID.isEmpty {
-      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
-    }
-    if !self.root.isEmpty {
-      try visitor.visitSingularStringField(value: self.root, fieldNumber: 2)
-    }
-    if !self.path.isEmpty {
-      try visitor.visitSingularStringField(value: self.path, fieldNumber: 3)
-    }
-    if !self.data.isEmpty {
-      try visitor.visitSingularBytesField(value: self.data, fieldNumber: 4)
-    }
-    if self.temp != false {
-      try visitor.visitSingularBoolField(value: self.temp, fieldNumber: 5)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_FsWrite, rhs: Coflux_V1_FsWrite) -> Bool {
-    if lhs.requestID != rhs.requestID {return false}
-    if lhs.root != rhs.root {return false}
-    if lhs.path != rhs.path {return false}
-    if lhs.data != rhs.data {return false}
-    if lhs.temp != rhs.temp {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToDaemon"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{3}session_replay\0\u{3}pty_resize\0\u{3}proxy_open\0\u{3}proxy_close\0\u{3}exec_run\0\u{3}fs_list\0\u{3}fs_read\0\u{3}pty_input\0\u{3}proxy_data\0\u{3}workspace_list\0\u{3}fs_write\0\u{3}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{3}device_relay_open\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{4}\u{3}proxy_open\0\u{3}proxy_close\0\u{4}\u{5}proxy_data\0\u{3}workspace_list\0\u{4}\u{2}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{3}device_relay_open\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0\u{b}session_replay\0\u{b}pty_resize\0\u{b}exec_run\0\u{b}fs_list\0\u{b}fs_read\0\u{b}pty_input\0\u{b}fs_write\0\u{c}\u{b}\u{1}\u{c}\u{c}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{15}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3211,32 +2600,6 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .sessionClose(v)
         }
       }()
-      case 11: try {
-        var v: Coflux_V1_SessionReplay?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .sessionReplay(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .sessionReplay(v)
-        }
-      }()
-      case 12: try {
-        var v: Coflux_V1_PtyResize?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .ptyResize(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .ptyResize(v)
-        }
-      }()
       case 13: try {
         var v: Coflux_V1_ProxyOpen?
         var hadOneofValue = false
@@ -3263,58 +2626,6 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .proxyClose(v)
         }
       }()
-      case 15: try {
-        var v: Coflux_V1_ExecRun?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .execRun(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .execRun(v)
-        }
-      }()
-      case 16: try {
-        var v: Coflux_V1_FsList?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .fsList(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .fsList(v)
-        }
-      }()
-      case 17: try {
-        var v: Coflux_V1_FsRead?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .fsRead(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .fsRead(v)
-        }
-      }()
-      case 18: try {
-        var v: Coflux_V1_PtyInput?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .ptyInput(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .ptyInput(v)
-        }
-      }()
       case 19: try {
         var v: Coflux_V1_ProxyData?
         var hadOneofValue = false
@@ -3339,19 +2650,6 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .workspaceList(v)
-        }
-      }()
-      case 21: try {
-        var v: Coflux_V1_FsWrite?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .fsWrite(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .fsWrite(v)
         }
       }()
       case 22: try {
@@ -3548,14 +2846,6 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .sessionClose(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 10)
     }()
-    case .sessionReplay?: try {
-      guard case .sessionReplay(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
-    }()
-    case .ptyResize?: try {
-      guard case .ptyResize(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
-    }()
     case .proxyOpen?: try {
       guard case .proxyOpen(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
@@ -3564,22 +2854,6 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .proxyClose(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 14)
     }()
-    case .execRun?: try {
-      guard case .execRun(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
-    }()
-    case .fsList?: try {
-      guard case .fsList(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 16)
-    }()
-    case .fsRead?: try {
-      guard case .fsRead(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 17)
-    }()
-    case .ptyInput?: try {
-      guard case .ptyInput(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 18)
-    }()
     case .proxyData?: try {
       guard case .proxyData(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
@@ -3587,10 +2861,6 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .workspaceList?: try {
       guard case .workspaceList(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
-    }()
-    case .fsWrite?: try {
-      guard case .fsWrite(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
     }()
     case .daemonSetName?: try {
       guard case .daemonSetName(let v)? = self.payload else { preconditionFailure() }

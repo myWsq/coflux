@@ -29,6 +29,11 @@ export function App() {
       tokenStorageKey: TOKEN_KEY,
       buildId: BUILD_ID,
       loginProvider: USE_SUPABASE ? loginWithSupabase : undefined,
+      // mobile 保持冻结：不尝试 loopback direct，只把既有 terminal/RPC 迁到中心 opaque relay。
+      deviceTransport: {
+        enableLocalTransport: false,
+        identityDatabaseName: "coflux-mobile-device-v1",
+      },
     }),
   );
   useEffect(() => () => client.disconnect(), [client]);

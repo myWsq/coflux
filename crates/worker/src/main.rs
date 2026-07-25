@@ -6,7 +6,6 @@
 
 mod conn_state;
 mod creds;
-mod dec_modes;
 mod device;
 mod gateway;
 mod git;
@@ -20,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use coflux_protocol::{
-    decode_frame, encode_frame, is_frame, wire, write_record, DataFrame, RecordParser, Settings, SessionInfo, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
+    decode_frame, is_frame, wire, write_record, DataFrame, RecordParser, Settings, SessionInfo, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV,
     LOCAL_GATEWAY_PORT, SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
 };
 use coflux_protocol::wire::{daemon_to_server, server_to_daemon};
@@ -34,7 +33,6 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use conn_state::ConnState;
 use creds::{CredStore, Credentials, PendingAuth};
-use dec_modes::DecModeTracker;
 
 #[derive(Clone)]
 struct Config {
@@ -86,9 +84,6 @@ struct WorkerState {
     last_branches: HashMap<String, String>,
     /// 上次上报的 diff 统计：workspace_id -> (additions, deletions)。收到新清单时清空，同上
     last_diffs: HashMap<String, (i32, i32)>,
-    /// per-session DEC 私有模式追踪（见 dec_modes.rs）：supervisor scrollback 环把模式设置转义
-    /// 挤出去后，replay 转发前用它补前缀，不让 attach/resync 丢失 bracketed-paste 等模式状态。
-    dec_modes: HashMap<String, DecModeTracker>,
     /// 连接状态落盘快照（conn-state.json），供 cofluxd status 展示真实在线态（plan 033）。
     conn_state: ConnState,
 }
@@ -275,12 +270,10 @@ async fn main() {
         workspaces: HashMap::new(),
         last_branches: HashMap::new(),
         last_diffs: HashMap::new(),
-        dec_modes: HashMap::new(),
         conn_state,
     }));
 
     let (to_server_tx, to_server_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
-    let (to_mirror_tx, to_mirror_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
     let (to_relay_tx, to_relay_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
     let (to_sup_tx, to_sup_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2048);
 
@@ -333,9 +326,8 @@ async fn main() {
         let cfg = cfg.clone();
         let state = state.clone();
         let to_server_tx = to_server_tx.clone();
-        let to_mirror_tx = to_mirror_tx.clone();
         let device = device.clone();
-        tokio::spawn(async move { supervisor_loop(cfg, state, to_server_tx, to_mirror_tx, to_sup_rx, device).await });
+        tokio::spawn(async move { supervisor_loop(cfg, state, to_server_tx, to_sup_rx, device).await });
     }
 
     // 分支监视 + diff 统计（plan 024）：worktree HEAD 是分支的真相源（纯文件读，无子进程）；
@@ -424,7 +416,6 @@ async fn main() {
         creds_store,
         to_server_tx,
         to_server_rx,
-        to_mirror_rx,
         to_relay_rx,
         checkpoints,
         to_sup_tx,
@@ -440,7 +431,6 @@ async fn supervisor_loop(
     cfg: Arc<Config>,
     state: Arc<Mutex<WorkerState>>,
     to_server_tx: Sender<WsOut>,
-    to_mirror_tx: Sender<WsOut>,
     mut to_sup_rx: Receiver<Vec<u8>>,
     device: Arc<device::DeviceRuntime>,
 ) {
@@ -449,7 +439,7 @@ async fn supervisor_loop(
             Ok(stream) => {
                 eprintln!("[worker] connected to supervisor");
                 device.supervisor_connected();
-                run_sup_connection(stream, &state, &to_server_tx, &to_mirror_tx, &mut to_sup_rx, &device).await;
+                run_sup_connection(stream, &state, &to_server_tx, &mut to_sup_rx, &device).await;
             }
             Err(_) => {}
         }
@@ -463,7 +453,6 @@ async fn run_sup_connection(
     stream: UnixStream,
     state: &Arc<Mutex<WorkerState>>,
     to_server_tx: &Sender<WsOut>,
-    to_mirror_tx: &Sender<WsOut>,
     to_sup_rx: &mut Receiver<Vec<u8>>,
     device: &Arc<device::DeviceRuntime>,
 ) {
@@ -491,7 +480,7 @@ async fn run_sup_connection(
                         let mut records: Vec<Vec<u8>> = Vec::new();
                         parser.push(&buf[..n], |r| records.push(r.to_vec()));
                         for rec in records {
-                            handle_sup_record(rec, state, to_server_tx, to_mirror_tx, device);
+                            handle_sup_record(rec, state, to_server_tx, device);
                         }
                     }
                 }
@@ -504,43 +493,19 @@ fn handle_sup_record(
     rec: Vec<u8>,
     state: &Arc<Mutex<WorkerState>>,
     to_server_tx: &Sender<WsOut>,
-    to_mirror_tx: &Sender<WsOut>,
     device: &Arc<device::DeviceRuntime>,
 ) {
     if is_frame(&rec) {
-        // pty.output / pty.replay：UDS 内部帧格式（frame.rs，未变）解出原始字节，套成
-        // protobuf 信封转发给 server —— WS 侧只认 protobuf binary，不再透传 UDS 自定义帧。
+        // output 只是一条本地 dirty 通知；真实 terminal bytes 仅经 Device channel 交付，
+        // 绝不再套 daemon protobuf 信封发往中心。
         match decode_frame(&rec) {
-            Some(DataFrame::Output { session_id, data }) => {
-                // 旁路喂给模式追踪器，转发字节本身不受影响（live 输出路径，见 dec_modes.rs）。
-                state.lock().unwrap().dec_modes.entry(session_id.clone()).or_default().feed(&data);
+            Some(DataFrame::Output { session_id, .. }) => {
                 device.mark_session_dirty(&session_id);
-                try_send_d2s(to_mirror_tx, daemon_to_server::Payload::PtyOutput(wire::PtyOutput { session_id, data }));
-            }
-            Some(DataFrame::Replay { session_id, request_id, data }) => {
-                // 先取"当前已知激活模式"快照拼前缀，再把本次 replay 数据喂进追踪器——
-                // 前缀代表被 supervisor scrollback 环挤掉的前缀净效果，顺序不能反（否则
-                // replay 里自带的 h/l 会先污染"起点状态"）。
-                let prefix = {
-                    let mut s = state.lock().unwrap();
-                    let tracker = s.dec_modes.entry(session_id.clone()).or_default();
-                    let prefix = tracker.prefix();
-                    tracker.feed(&data);
-                    prefix
-                };
-                let data = if prefix.is_empty() {
-                    data
-                } else {
-                    let mut buf = prefix;
-                    buf.extend_from_slice(&data);
-                    buf
-                };
-                try_send_d2s(to_mirror_tx, daemon_to_server::Payload::PtyReplay(wire::PtyReplay { session_id, request_id, data }));
             }
             Some(DataFrame::Device { channel_id, data }) => {
                 device.deliver_from_sessiond(&channel_id, &data);
             }
-            // Input/ProxyData 不会从 supervisor→worker 方向出现；畸形帧同样丢弃，不 panic。
+            // ProxyData 不会从 supervisor→worker 方向出现；畸形/已保留帧同样丢弃，不 panic。
             Some(_) | None => eprintln!("[worker] 丢弃来自 supervisor 的未知/畸形数据帧"),
         }
         return;
@@ -555,11 +520,7 @@ fn handle_sup_record(
             try_send_d2s(to_server_tx, daemon_to_server::Payload::SessionStarted(wire::SessionStarted { session_id, task_id, pid }));
         }
         SupervisorToWorker::SessionExit { session_id, exit_code } => {
-            {
-                let mut s = state.lock().unwrap();
-                s.alive.remove(&session_id);
-                s.dec_modes.remove(&session_id); // 会话退出：释放追踪状态，避免泄漏
-            } // guard 显式在块结束处释放，不跨 await 持有（MutexGuard 非 Send）
+            state.lock().unwrap().alive.remove(&session_id);
             try_send_d2s(to_server_tx, daemon_to_server::Payload::SessionExit(wire::SessionExit { session_id, exit_code }));
         }
         SupervisorToWorker::ResyncList { sessions } => {
@@ -569,10 +530,6 @@ fn handle_sup_record(
                 for r in &sessions {
                     s.alive.insert(r.session_id.clone(), (r.task_id.clone(), r.pid));
                 }
-                // 断线期间静默退出的会话不会单独收到 SessionExit：resync 快照是这批会话的
-                // 权威在场证明，借机把已不在场的追踪状态一并回收。
-                let alive_now = s.alive.clone();
-                s.dec_modes.retain(|session_id, _| alive_now.contains_key(session_id));
                 s.sup_synced = true;
                 s.authed
             };
@@ -610,7 +567,6 @@ async fn server_loop(
     creds_store: Arc<CredStore>,
     to_server_tx: Sender<WsOut>,
     mut to_server_rx: Receiver<WsOut>,
-    mut to_mirror_rx: Receiver<WsOut>,
     mut to_relay_rx: Receiver<WsOut>,
     checkpoints: Arc<device::CheckpointOutbox>,
     to_sup_tx: Sender<Vec<u8>>,
@@ -632,7 +588,6 @@ async fn server_loop(
                     &creds_store,
                     &to_server_tx,
                     &mut to_server_rx,
-                    &mut to_mirror_rx,
                     &mut to_relay_rx,
                     &checkpoints,
                     &to_sup_tx,
@@ -653,7 +608,6 @@ async fn server_loop(
             auth.set_server_online(false);
         }
         device.close_relays();
-        while to_mirror_rx.try_recv().is_ok() {}
         while to_relay_rx.try_recv().is_ok() {}
         attempts += 1;
         tokio::time::sleep(backoff(attempts, &cfg)).await;
@@ -667,7 +621,6 @@ async fn run_server_connection(
     creds_store: &Arc<CredStore>,
     to_server_tx: &Sender<WsOut>,
     to_server_rx: &mut Receiver<WsOut>,
-    to_mirror_rx: &mut Receiver<WsOut>,
     to_relay_rx: &mut Receiver<WsOut>,
     checkpoints: &Arc<device::CheckpointOutbox>,
     to_sup_tx: &Sender<Vec<u8>>,
@@ -783,12 +736,6 @@ async fn run_server_connection(
                 }
             }
             out = to_server_rx.recv(), if connection_authed => {
-                match out {
-                    Some(bytes) => if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; },
-                    None => break,
-                }
-            }
-            out = to_mirror_rx.recv(), if connection_authed => {
                 match out {
                     Some(bytes) => if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; },
                     None => break,
@@ -1090,12 +1037,6 @@ async fn route_authed(msg: server_to_daemon::Payload, cfg: &Arc<Config>, to_serv
         server_to_daemon::Payload::SessionCreate(wire::SessionCreate { session_id, task_id, cwd, shell, cols, rows }) => {
             sup_ctrl(to_sup_tx, &WorkerToSupervisor::SessionCreate { session_id, task_id, cwd, shell, cols: clamp_u16(cols), rows: clamp_u16(rows) }).await;
         }
-        server_to_daemon::Payload::SessionReplay(wire::SessionReplay { session_id, request_id }) => {
-            sup_ctrl(to_sup_tx, &WorkerToSupervisor::SessionReplay { session_id, request_id }).await;
-        }
-        server_to_daemon::Payload::PtyResize(wire::PtyResize { session_id, cols, rows }) => {
-            sup_ctrl(to_sup_tx, &WorkerToSupervisor::PtyResize { session_id, cols: clamp_u16(cols), rows: clamp_u16(rows) }).await;
-        }
         server_to_daemon::Payload::SessionClose(wire::SessionClose { session_id }) => {
             sup_ctrl(to_sup_tx, &WorkerToSupervisor::SessionClose { session_id }).await;
         }
@@ -1109,42 +1050,7 @@ async fn route_authed(msg: server_to_daemon::Payload, cfg: &Arc<Config>, to_serv
         server_to_daemon::Payload::ProxyClose(wire::ProxyClose { conn_id }) => {
             tunnels.close(&conn_id);
         }
-        // exec / fs → 派生任务，结果回带；timeout_ms 是 wire 上的 uint32，run_command 内部用 u64
-        server_to_daemon::Payload::ExecRun(wire::ExecRun { request_id, cwd, command, args, env, timeout_ms }) => {
-            let to_server = to_server_tx.clone();
-            tokio::spawn(async move {
-                let r = ops::run_command(&cwd, &command, &args, &env, timeout_ms.map(u64::from)).await;
-                send_d2s(&to_server, daemon_to_server::Payload::ExecResult(wire::ExecResult { request_id, ok: r.ok, exit_code: r.exit_code, stdout: r.stdout, stderr: r.stderr, error: r.error })).await;
-            });
-        }
-        server_to_daemon::Payload::FsList(wire::FsList { request_id, root, path }) => {
-            let to_server = to_server_tx.clone();
-            tokio::spawn(async move {
-                let (ok, entries, error, listed_path) = ops::list_dir(&root, &path).await;
-                send_d2s(&to_server, daemon_to_server::Payload::FsListed(wire::FsListed { request_id, ok, entries, error, path: listed_path })).await;
-            });
-        }
-        server_to_daemon::Payload::FsRead(wire::FsRead { request_id, root, path }) => {
-            let to_server = to_server_tx.clone();
-            tokio::spawn(async move {
-                let (ok, content, error) = ops::read_file_text(&root, &path).await;
-                send_d2s(&to_server, daemon_to_server::Payload::FsReadResult(wire::FsReadResult { request_id, ok, content, error })).await;
-            });
-        }
-        server_to_daemon::Payload::FsWrite(wire::FsWrite { request_id, root, path, data, temp }) => {
-            let to_server = to_server_tx.clone();
-            tokio::spawn(async move {
-                let (ok, written_path, error) = ops::write_file(&root, &path, &data, temp).await;
-                send_d2s(&to_server, daemon_to_server::Payload::FsWriteResult(wire::FsWriteResult { request_id, ok, path: written_path, error })).await;
-            });
-        }
-        // 数据面（高频）：pty.input → 转给 supervisor（复用 UDS 内部帧格式，frame.rs 未变，
-        // 这条链路本次不动）；proxy.data → 隧道模块按 connId 转发到对应 TCP 连接（不再经过
-        // 任何"帧"编解码，protobuf 信封已经是唯一的 wire 表示）。
-        server_to_daemon::Payload::PtyInput(wire::PtyInput { session_id, data }) => {
-            let frame = encode_frame(&DataFrame::Input { session_id, data });
-            let _ = to_sup_tx.send(write_record(&frame)).await;
-        }
+        // 中心可见的数据面只剩 proxy.data；terminal 与普通设备 RPC 均走 opaque Device relay。
         server_to_daemon::Payload::ProxyData(wire::ProxyData { conn_id, data }) => {
             tunnels.feed(conn_id, data).await;
         }

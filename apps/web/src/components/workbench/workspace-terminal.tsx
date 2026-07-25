@@ -229,7 +229,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     if (controlStatesRef.current[taskId] === "attaching") markOwned(taskId, sessionId);
   }
 
-  // 分支切换：checkout 在本 worktree 内经 clientExec 完成，成功后同步元数据（workspaceSetBranch）。
+  // 分支切换：checkout 在本 worktree 内经 Device exec 完成，成功后同步元数据（workspaceSetBranch）。
   const takenBranches = new Map<string, BranchTaken>(
     projectWorkspaces.map((item) =>
       item.id === workspaceId
@@ -317,7 +317,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceTasks]);
 
-  // taskDetached 广播：被他端接管 → 置 detached、清 attach key、终端内写系统提示行。
+  // Device holder 被他端接管 → 置 detached、清 attach key、终端内写系统提示行。
   // 重新接管走 force claim（Tab 点击或横幅按钮）。
   useEffect(() => {
     for (const taskId of detachedTaskIds) {
