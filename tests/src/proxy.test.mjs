@@ -42,6 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { WebSocket } from "ws";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
+import { openRelayDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8831;
 const TESTS_ROOT = resolve(import.meta.dirname, "..");
@@ -110,12 +111,12 @@ function stripAnsi(s) {
 }
 
 /** 累积某 sessionId 的全部 pty.output，直到正则匹配（PTY 输出可能带 ANSI 转义、可能跨帧分片）。 */
-async function waitPtyMatch(client, sessionId, re, timeoutMs = 15000) {
+async function waitPtyMatch(device, sessionId, re, timeoutMs = 15000) {
   const t0 = Date.now();
   for (;;) {
-    const acc = client.log
+    const acc = device.log
       .filter((m) => m.case === "ptyOutput" && m.sessionId === sessionId)
-      .map((m) => m.data)
+      .map((m) => utf8(m.data))
       .join("");
     const m = stripAnsi(acc).match(re);
     if (m) return m;
@@ -150,13 +151,15 @@ async function waitUntil(pred, timeoutMs, label) {
 }
 
 /** 建一个任务并启动，等到 running，返回 {taskId, sessionId}。 */
-async function startTaskRunning(client, wsId, title) {
+async function startTaskRunning(device, wsId, title) {
+  const client = device.control;
   const sinceIndex = client.log.length;
   client.send({ case: "taskCreate", workspaceId: wsId, title });
   const created = await waitForSince(client, sinceIndex, (m) => m.case === "taskUpdated" && m.task.title === title && m.task.status === TaskStatus.IDLE, "task idle");
   const taskId = created.task.id;
   client.send({ case: "taskStart", taskId, cols: 80, rows: 24 });
   const running = await client.waitFor((m) => m.case === "taskUpdated" && m.task.id === taskId && m.task.status === TaskStatus.RUNNING && m.task.sessionId, "task running", 15000);
+  await device.attach(running.task.sessionId);
   return { taskId, sessionId: running.task.sessionId };
 }
 
@@ -243,12 +246,12 @@ before(async () => {
   writeFileSync(join(repo.dir, "server-slow.js"), SLOW_SERVER_SRC);
   writeFileSync(join(repo.dir, "ws-echo.js"), WS_ECHO_SERVER_SRC);
 
-  const setup = stack.makeClient();
-  await setup.authSubscribe(stack.username, stack.password);
+  const setupDevice = await openRelayDevice(stack);
+  const setup = setupDevice.control;
   setup.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await setup.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main workspace", 15000);
   workspaceId = main.workspace.id;
-  setup.close();
+  setupDevice.close();
 });
 
 after(async () => {
@@ -259,8 +262,8 @@ after(async () => {
 /* ============================ Requirement 1：探测 + 撤销 + 安全边界 ============================ */
 
 test("端口探测：PTY 内服务端口出现在 ports.updated；停任务后撤销为空集；非 PTY 端口绝不上报", async () => {
-  const c = stack.makeClient();
-  await c.authSubscribe(stack.username, stack.password);
+  const device = await openRelayDevice(stack);
+  const c = device.control;
 
   // 安全边界对照组：测试进程自己开一个监听端口（不在任何 daemon PTY 进程树下）。
   const rogue = net.createServer();
@@ -271,10 +274,10 @@ test("端口探测：PTY 内服务端口出现在 ports.updated；停任务后�
   const roguePort = rogue.address().port;
 
   try {
-    const { taskId, sessionId } = await startTaskRunning(c, workspaceId, "probe-task");
+    const { taskId, sessionId } = await startTaskRunning(device, workspaceId, "probe-task");
     const sinceStart = c.log.length;
-    c.send({ case: "ptyInput", sessionId, data: "node server-http.js\r" });
-    const m = await waitPtyMatch(c, sessionId, /PORT=(\d+)/);
+    await device.input(sessionId, "node server-http.js\r");
+    const m = await waitPtyMatch(device, sessionId, /PORT=(\d+)/);
     const port = Number(m[1]);
 
     const updated = await waitPortsUpdated(c, sinceStart, (msg) => msg.taskId === taskId && msg.ports.some((p) => p.port === port), "ports.updated with probed port");
@@ -293,27 +296,27 @@ test("端口探测：PTY 内服务端口出现在 ports.updated；停任务后�
     assert.ok(!snap.ports?.some((p) => p.ports.some((pp) => pp.port === roguePort)), "state.snapshot 不应含 rogue 端口");
     fresh.close();
 
-    // 停任务 -> 路由应被撤销（空集广播）。task.stop 的撤销是异步的（要等 daemon 的
-    // session.exit 回执才触发 dropSession），故用轮询等待，不假设同步生效。
+    // Device stop -> session exit fact 收敛到中心后，路由异步撤销为空集。
     const sinceStop = c.log.length;
-    c.send({ case: "taskStop", taskId });
+    const stopped = await device.stopSession(sessionId);
+    assert.equal(stopped.ok, true);
     const revoked = await waitPortsUpdated(c, sinceStop, (msg) => msg.taskId === taskId && msg.ports.length === 0, "revocation ports.updated");
     assert.equal(revoked.ports.length, 0, "任务停止后应广播空端口集（撤销）");
   } finally {
     rogue.close();
-    c.close();
+    device.close();
   }
 });
 
 /* ============================ Requirement 2：门禁 ============================ */
 
 test("门禁：无 cookie 302 到授权页；issueAuth 换回调 URL；回调种 cookie 并 302 回原路径；带 cookie 200 拿到真实响应；伪造 cookie 与外部 redirect 均被拒", async () => {
-  const c = stack.makeClient();
-  await c.authSubscribe(stack.username, stack.password);
-  const { taskId, sessionId } = await startTaskRunning(c, workspaceId, "gate-task");
+  const device = await openRelayDevice(stack);
+  const c = device.control;
+  const { taskId, sessionId } = await startTaskRunning(device, workspaceId, "gate-task");
   const sinceStart = c.log.length;
-  c.send({ case: "ptyInput", sessionId, data: "node server-gate.js\r" });
-  const m = await waitPtyMatch(c, sessionId, /PORT=(\d+)/);
+  await device.input(sessionId, "node server-gate.js\r");
+  const m = await waitPtyMatch(device, sessionId, /PORT=(\d+)/);
   const port = Number(m[1]);
   const updated = await waitPortsUpdated(c, sinceStart, (msg) => msg.taskId === taskId && msg.ports.some((p) => p.port === port), "gate task port reported");
   const url = updated.ports.find((p) => p.port === port).url;
@@ -334,18 +337,18 @@ test("门禁：无 cookie 302 到授权页；issueAuth 换回调 URL；回调种
   const rejected = await waitForSince(c, sinceReject, (msg) => msg.case === "proxyAuth", "proxy.auth（外部 redirect）");
   assert.equal(rejected.ok, false, "issueAuth 对外部域名的 redirect 应拒绝（ok:false）");
 
-  c.close();
+  device.close();
 });
 
 /* ============================ Requirement 3：WS 透传 ============================ */
 
 test("WS 透传：代理一个 PTY 内的 WebSocket echo 服务，伪造 Host + 合法 cookie 完成 upgrade 并 echo 往返", async () => {
-  const c = stack.makeClient();
-  await c.authSubscribe(stack.username, stack.password);
-  const { taskId, sessionId } = await startTaskRunning(c, workspaceId, "ws-task");
+  const device = await openRelayDevice(stack);
+  const c = device.control;
+  const { taskId, sessionId } = await startTaskRunning(device, workspaceId, "ws-task");
   const sinceStart = c.log.length;
-  c.send({ case: "ptyInput", sessionId, data: "node ws-echo.js\r" });
-  const m = await waitPtyMatch(c, sessionId, /WSPORT=(\d+)/);
+  await device.input(sessionId, "node ws-echo.js\r");
+  const m = await waitPtyMatch(device, sessionId, /WSPORT=(\d+)/);
   const port = Number(m[1]);
   const updated = await waitPortsUpdated(c, sinceStart, (msg) => msg.taskId === taskId && msg.ports.some((p) => p.port === port), "ws task port reported");
   const url = updated.ports.find((p) => p.port === port).url;
@@ -371,18 +374,18 @@ test("WS 透传：代理一个 PTY 内的 WebSocket echo 服务，伪造 Host + 
   } finally {
     try { ws.close(); } catch { /* ignore */ }
   }
-  c.close();
+  device.close();
 });
 
 /* ============================ Requirement 4：生命周期 ============================ */
 
 test("生命周期：daemon 断线使在途代理请求失败并触发路由撤销；重连后端口重新上报、新链接可再次打通", async () => {
-  const c = stack.makeClient();
-  await c.authSubscribe(stack.username, stack.password);
-  const { taskId, sessionId } = await startTaskRunning(c, workspaceId, "lifecycle-task");
+  const device = await openRelayDevice(stack);
+  const c = device.control;
+  const { taskId, sessionId } = await startTaskRunning(device, workspaceId, "lifecycle-task");
   const sinceStart = c.log.length;
-  c.send({ case: "ptyInput", sessionId, data: "node server-slow.js\r" });
-  const m = await waitPtyMatch(c, sessionId, /PORT=(\d+)/);
+  await device.input(sessionId, "node server-slow.js\r");
+  const m = await waitPtyMatch(device, sessionId, /PORT=(\d+)/);
   const port = Number(m[1]);
   const first = await waitPortsUpdated(c, sinceStart, (msg) => msg.taskId === taskId && msg.ports.some((p) => p.port === port), "first ports.updated");
   const firstUrl = first.ports.find((p) => p.port === port).url;
@@ -442,5 +445,5 @@ test("生命周期：daemon 断线使在途代理请求失败并触发路由撤�
   assert.equal(ok2.status, 200, "重连后新（或相同）shortId 的链接应可再次打通代理");
   assert.equal(ok2.body, "OK-C");
 
-  c.close();
+  device.close();
 });

@@ -172,6 +172,8 @@ export class DeviceClient {
     this.log = [];
     this.waiters = [];
     this.handledPrepared = new Set();
+    this.sessionControls = new Map();
+    this.preparedAutoUnsubscribe = null;
   }
 
   async initialize() {
@@ -432,6 +434,42 @@ export class DeviceClient {
     if (!this.transport?.send(frame)) throw new Error("Device transport send failed");
   }
 
+  async request(requestCase, responseCase, value = {}, options = {}) {
+    const requestId = value.requestId ?? randomUUID();
+    const from = this.mark();
+    this.send(requestCase, { ...value, requestId });
+    const result = await this.waitFor(
+      (message) =>
+        (message.case === responseCase && message.requestId === requestId) ||
+        (message.case === "error" && message.requestId === requestId),
+      `${requestCase} response`,
+      options.timeout ?? 10000,
+      from,
+    );
+    if (result.case === "error" && !options.allowError) throw new Error(`${result.code}: ${result.message}`);
+    return result;
+  }
+
+  async waitWorkspaceReady(workspaceId, timeout = 5000) {
+    const deadline = Date.now() + timeout;
+    let lastError;
+    while (Date.now() < deadline) {
+      try {
+        return await this.request("execRun", "execResult", {
+          workspaceId,
+          command: "/bin/sh",
+          args: ["-c", "printf ready"],
+          env: {},
+        });
+      } catch (error) {
+        lastError = error;
+        if (!String(error).includes("workspace_unknown")) throw error;
+        await sleep(50);
+      }
+    }
+    throw lastError ?? new Error(`workspace ${workspaceId} 未同步到 worker`);
+  }
+
   async waitPrepared(payloadCase, timeout = 10000) {
     const operation = await this.control.waitFor((message) => {
       if (message.case !== "preparedDeviceOperation" || this.handledPrepared.has(message.operationId)) return false;
@@ -460,6 +498,21 @@ export class DeviceClient {
     return template.payload;
   }
 
+  /** 旧 control-plane 黑盒用例的迁移适配：中心只 prepare，实际 effect 自动经当前 Device transport 执行。 */
+  enablePreparedAutoExecution() {
+    if (this.preparedAutoUnsubscribe) return;
+    this.preparedAutoUnsubscribe = this.control.subscribe((message) => {
+      if (message.case !== "preparedDeviceOperation" || this.handledPrepared.has(message.operationId)) return;
+      this.handledPrepared.add(message.operationId);
+      try {
+        this.executePrepared(message);
+      } catch (error) {
+        this.handledPrepared.delete(message.operationId);
+        queueMicrotask(() => { throw error; });
+      }
+    });
+  }
+
   async catalog() {
     const requestId = randomUUID();
     const from = this.mark();
@@ -479,9 +532,73 @@ export class DeviceClient {
       rows: options.rows ?? 24,
       resumeFromSeq: options.resumeFromSeq,
     });
-    return this.waitFor(
+    const attached = await this.waitFor(
       (message) => message.case === "sessionAttached" && message.requestId === requestId,
       "sessionAttached",
+      options.timeout ?? 10000,
+      from,
+    );
+    this.sessionControls.set(sessionId, {
+      holderEpoch: attached.holderEpoch,
+      inputSeq: options.inputSeq ?? this.sessionControls.get(sessionId)?.inputSeq ?? 0n,
+      resizeSeq: options.resizeSeq ?? this.sessionControls.get(sessionId)?.resizeSeq ?? 0n,
+    });
+    return attached;
+  }
+
+  async input(sessionId, data, options = {}) {
+    const control = this.sessionControls.get(sessionId);
+    if (!control) throw new Error(`session ${sessionId} 尚未 attach`);
+    const inputSeq = options.inputSeq ?? control.inputSeq + 1n;
+    const requestId = options.requestId ?? randomUUID();
+    const from = this.mark();
+    this.send("ptyInput", {
+      requestId,
+      sessionId,
+      holderEpoch: options.holderEpoch ?? control.holderEpoch,
+      inputSeq,
+      data: typeof data === "string" ? encoder.encode(data) : data,
+    });
+    const ack = await this.waitFor(
+      (message) => message.case === "ptyInputAck" && message.sessionId === sessionId && message.appliedThroughSeq >= inputSeq,
+      "ptyInputAck",
+      options.timeout ?? 10000,
+      from,
+    );
+    if (inputSeq > control.inputSeq) control.inputSeq = inputSeq;
+    return ack;
+  }
+
+  async resize(sessionId, cols, rows, options = {}) {
+    const control = this.sessionControls.get(sessionId);
+    if (!control) throw new Error(`session ${sessionId} 尚未 attach`);
+    const resizeSeq = options.resizeSeq ?? control.resizeSeq + 1n;
+    this.send("ptyResize", {
+      requestId: options.requestId ?? randomUUID(),
+      sessionId,
+      holderEpoch: options.holderEpoch ?? control.holderEpoch,
+      resizeSeq,
+      cols,
+      rows,
+    });
+    if (resizeSeq > control.resizeSeq) control.resizeSeq = resizeSeq;
+  }
+
+  async stopSession(sessionId, options = {}) {
+    const control = this.sessionControls.get(sessionId);
+    if (!control) throw new Error(`session ${sessionId} 尚未 attach`);
+    const requestId = options.requestId ?? randomUUID();
+    const operationId = options.operationId ?? randomUUID();
+    const from = this.mark();
+    this.send("sessionStop", {
+      requestId,
+      operationId,
+      sessionId,
+      holderEpoch: options.holderEpoch ?? control.holderEpoch,
+    });
+    return this.waitFor(
+      (message) => message.case === "operationAck" && message.requestId === requestId && message.operationId === operationId,
+      "session stop ack",
       options.timeout ?? 10000,
       from,
     );
@@ -495,11 +612,21 @@ export class DeviceClient {
   }
 
   close() {
+    this.preparedAutoUnsubscribe?.();
+    this.preparedAutoUnsubscribe = null;
     this.closeTransport();
     this.control.close();
     for (const waiter of this.waiters) waiter.reject?.(new Error("DeviceClient closed"));
     this.waiters = [];
   }
+}
+
+/** 建立 relay Device，并自动执行中心下发的 prepared lifecycle operation。 */
+export async function openRelayDevice(stack, options = {}) {
+  const device = await DeviceClient.pair(stack, options);
+  await device.openRelay();
+  device.enablePreparedAutoExecution();
+  return device;
 }
 
 export function utf8(bytes) {

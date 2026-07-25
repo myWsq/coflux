@@ -1,8 +1,8 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
+import { openRelayDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8833;
 let stack;
@@ -11,14 +11,13 @@ const repos = [];
 before(async () => { stack = await startStack({ port: PORT }); });
 after(async () => { await stack?.stop(); repos.forEach((r) => r.cleanup()); });
 
-// server 侧终端镜像（mirror.ts）的核心产品能力：daemon 离线后 attach 仍能看到最后画面。
-// 顺带覆盖"无人观看（无 holder）期间镜像仍在吃字节"：A 关闭后再产生输出，B 也要能看到。
-test("daemon 离线后 attach：server 镜像快照可看最后现场", async () => {
+// 中心只保存 sessiond 派生的最近 checkpoint：不持 holder、不解析 live output，也不裁决现场。
+test("daemon 离线后中心仍提供最近一个有界 checkpoint 画面", async () => {
   const repo = mkRepo();
   repos.push(repo);
 
-  const A = stack.makeClient();
-  await A.authSubscribe();
+  const device = await openRelayDevice(stack);
+  const A = device.control;
   A.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await A.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
   A.send({ case: "taskCreate", workspaceId: main.workspace.id, title: "ov" });
@@ -27,13 +26,21 @@ test("daemon 离线后 attach：server 镜像快照可看最后现场", async ()
   A.send({ case: "taskStart", taskId, cols: 80, rows: 24 });
   const run = await A.waitFor((m) => m.case === "taskUpdated" && m.task.id === taskId && m.task.status === TaskStatus.RUNNING, "run");
   const sessionId = run.task.sessionId;
-  await A.waitFor((m) => m.case === "ptyOutput" && m.sessionId === sessionId, "first out");
-  // 延迟输出：A 关闭后 2 秒才打出的 marker，只有"无 holder 也喂镜像"才能被 B 看到
-  A.send({ case: "ptyInput", sessionId, data: "(sleep 2; echo OFFLINE_MARKER) &\r" });
-  await A.waitFor((m) => m.case === "ptyOutput" && m.data.includes("sleep 2"), "echo input");
-  A.close();
+  await device.attach(sessionId);
+  // 延迟输出：Device subscriber 关闭后才产生 marker，checkpoint 必须由 worker 主动向 sessiond 取。
+  await device.input(sessionId, "(sleep 2; echo OFFLINE_MARKER) &\r");
+  device.close();
 
-  await sleep(3000); // 等后台 echo 落进 server 镜像（此时无任何 holder）
+  const observer = stack.makeClient();
+  await observer.authSubscribe();
+  const onlineCheckpoint = await observer.waitFor(
+    (m) => m.case === "sessionCheckpoint" && m.sessionId === sessionId && utf8(m.ansiSnapshot).includes("OFFLINE_MARKER"),
+    "checkpoint with offline marker",
+    12000,
+  );
+  assert.ok(onlineCheckpoint.snapshotSeq > 0n);
+  assert.ok(onlineCheckpoint.capturedAt > 0);
+  observer.close();
   await stack.stopDaemon();
 
   // daemon 已离线；task 仍 RUNNING、session 仍在（handleDaemonClose 按设计保留 sessions）
@@ -42,9 +49,9 @@ test("daemon 离线后 attach：server 镜像快照可看最后现场", async ()
   const dev = snap.daemons.find((d) => d.daemonId === stack.daemonId);
   assert.ok(dev && !dev.online, "daemon 已离线");
 
-  B.send({ case: "taskAttach", taskId });
-  const out = await B.waitFor((m) => m.case === "ptyOutput" && m.sessionId === sessionId, "offline snapshot");
-  assert.ok(out.data.includes("OFFLINE_MARKER"), "快照包含无人观看期间的输出");
-  assert.ok(!B.log.some((m) => m.case === "error" && m.message.includes("离线")), "没有报 daemon 离线错误");
+  const checkpoint = await B.waitFor((m) => m.case === "sessionCheckpoint" && m.sessionId === sessionId, "offline checkpoint");
+  assert.ok(utf8(checkpoint.ansiSnapshot).includes("OFFLINE_MARKER"), "checkpoint 包含无 subscriber 期间的输出");
+  assert.equal(checkpoint.snapshotSeq, onlineCheckpoint.snapshotSeq, "离线后中心只返回最近派生 checkpoint");
+  assert.equal(checkpoint.capturedAt, onlineCheckpoint.capturedAt);
   B.close();
 });
