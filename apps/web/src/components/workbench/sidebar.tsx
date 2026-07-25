@@ -406,19 +406,33 @@ export function Sidebar(props: SidebarProps) {
                       ? "Device route 离线"
                       : daemon.online ? "中心在线" : "中心离线";
               // 色标语义（2026-07-26 改）：颜色只表达延迟，不再表达走哪条路——relay 只要够快
-              // 就该是绿的。传输方式由形状承担：direct 额外挂一枚闪电，离线是空心圈。
+              // 就该是绿的。传输方式由**形状**承担，且只占一个位置：direct 时闪电取代圆点，
+              // 而不是并排两个图标；离线是空心圈。
               // 规则：状态差异走色相或形状，绝不走透明度（6px 圆点上 alpha 差肉眼等同）。
               const rttMs = transport?.rttMs;
               const connected = transport?.mode === "direct" || transport?.mode === "relay";
-              const dotClass = transport?.mode === "probing"
-                ? "bg-primary animate-pulse"
+              // tone 只管颜色，让圆点（bg-*）与闪电（text-*）共用同一套延迟分档。
+              const tone = transport?.mode === "probing"
+                ? "primary"
                 : transport?.mode === "offline"
-                  ? "bg-destructive/70"
+                  ? "destructive"
                   : connected
-                    ? rttMs === undefined
-                      ? "bg-muted-foreground/70"
-                      : rttMs < RTT_GOOD_MS ? "bg-success animate-pulse-alive" : "bg-warning"
-                    : daemon.online ? "bg-muted-foreground/70" : "ring-1 ring-inset ring-muted-foreground/60";
+                    ? rttMs === undefined ? "muted" : rttMs < RTT_GOOD_MS ? "success" : "warning"
+                    : daemon.online ? "muted" : "hollow";
+              const dotClass = tone === "primary"
+                ? "bg-primary animate-pulse"
+                : tone === "destructive"
+                  ? "bg-destructive/70"
+                  : tone === "success"
+                    ? "bg-success animate-pulse-alive"
+                    : tone === "warning"
+                      ? "bg-warning"
+                      : tone === "muted"
+                        ? "bg-muted-foreground/70"
+                        : "ring-1 ring-inset ring-muted-foreground/60";
+              const zapClass = tone === "success"
+                ? "text-success"
+                : tone === "warning" ? "text-warning" : "text-muted-foreground";
               const rttText = rttMs === undefined ? "" : ` · ${Math.round(rttMs)}ms`;
               const dotTitle = `${routeLabel}${rttText}${transport?.detail ? ` · ${transport.detail}` : ""}`;
               // 整行共用：圆点只有 6px，把延迟只挂在它上面等于挂了个瞄不准的靶子。
@@ -439,10 +453,14 @@ export function Sidebar(props: SidebarProps) {
                     className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground"
                     title={rowTitle}
                   >
-                    <span className={cn("size-1.5 rounded-full", dotClass)} title={dotTitle} />
-                    {transport?.mode === "direct" ? (
-                      <Zap className="size-3 shrink-0 text-success" aria-label={`本机直连${rttText}`} />
-                    ) : null}
+                    {/* 固定 12px 槽位：闪电与圆点尺寸不同，不统一宽度设备名会参差。 */}
+                    <span className="flex size-3 shrink-0 items-center justify-center" title={dotTitle}>
+                      {transport?.mode === "direct" ? (
+                        <Zap className={cn("size-3", zapClass)} aria-label={`本机直连${rttText}`} />
+                      ) : (
+                        <span className={cn("size-1.5 rounded-full", dotClass)} />
+                      )}
+                    </span>
                     <Monitor className="size-3.5 opacity-70" />
                     <span className="min-w-0 flex-1 truncate">
                       {daemon.name}
