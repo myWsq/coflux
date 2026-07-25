@@ -216,7 +216,7 @@ relay+pair、permission denied、fallback/promotion、worker restart、server ou
 
 | 浏览器 | 版本 | 结果 |
 |---|---|---|
-| Chrome stable | 未安装 | BLOCKED：自动验收宿主未暴露可控浏览器实例 |
+| Chrome stable | 本机 Chrome 150.0.7871.187 | BLOCKED：已安装并运行，但尚未建立 ChatGPT Chrome Extension 控制连接，自动验收宿主未暴露可控实例 |
 | Safari stable | 本机 Safari 27.0（macOS 27.0 build 26A5378n） | BLOCKED：已安装，但自动验收宿主未暴露可控实例；未据此冒充 stable 结果 |
 | Firefox stable | 未安装 | BLOCKED：自动验收宿主未暴露可控浏览器实例 |
 
