@@ -8,8 +8,8 @@
 - **Tailscale 式认证**：登记密钥 + 每设备凭证（daemonId 服务器签发不可冒充）+ 账号隔离。
 - **独占 + handoff**：一个终端同时一个控制端，attach 即接管。
 - **生产化加固**（两轮 + 一轮对抗式审查，共修 30 项确认问题）：WS 心跳、背压/流控、优雅关闭、崩溃兜底、重连指数退避、store 事务、级联删除原子化、结构化日志、统一配置。
-- **daemon 通用原语**：`exec`、`fs.list`/`fs.read`、`fs.write`（root 锚定 + realpath 防穿越；`fs.write` 另支持写入 daemon 系统临时目录）。很多新功能用现有原语即可，只动 server+web。
-- **二进制数据面**（2026-06）：pty 数据走二进制帧免 JSON 转义；后随 plan 009 统一为全 protobuf binary wire。
+- **daemon 通用原语**：`exec`、`fs.list`/`fs.read`、`fs.write`（root 锚定 + realpath 防穿越；`fs.write` 另支持写入 daemon 系统临时目录），现统一经 direct/relay 共用的 DeviceEnvelope。
+- **二进制数据面**（2026-06）：曾把 PTY 收敛为中心 protobuf wire；2026-07-25 进一步迁到端到端 DeviceEnvelope，中心 raw PTY 字段已删除并 reserved。
 - **自动热升级全链路**（2026-06，方案 A，详见 [hot-upgrade-design.md](hot-upgrade-design.md)）：supervisor/worker 拆分 + 全 Rust 化（零 node 运行时，UDS IPC + 两级 resync，升级时会话存活）；版本注册表 + 观察期切换/自动回滚；远程下载 + sha256 + ed25519 验签（验签不过一律拒绝，防中心服务器被攻破 → 全网 RCE）；用户侧 `cofluxd` CLI（npm）装 systemd/launchd 服务。
 - **发布链路**（2026-06→07）：git tag `v*` → release.yml 四平台交叉编译 + worker 产物 ed25519 签名（`WORKER_SIGNING_KEY` secret）+ manifest；supervisor 内置真发布公钥（`release-pubkey.hex` 编译期嵌入，公钥非密可提交）；macOS 产物经 Developer ID 签名与 Apple 公证。
 - **多账号 + Supabase 认证**（plans/001-002，2026-07）：换票模式（Supabase 只管"你是谁"，JWKS 本地验签换 coflux 会话 token，之后不再触碰 Supabase）；存储迁 Postgres（生产 = Supabase 云，`coflux` schema）。
@@ -17,14 +17,16 @@
 - **端口转发预览**（plans/004-007，2026-07）：`*.p.coflux.dev` 泛域名，账号级门禁 cookie + 一次性授权 code，整条 TCP 经 daemon 隧道字节级透传（HTTP/SSE/WS 通吃）；shortId 确定性可收藏。
 - **Web 工作区多终端 Tab**（plan 008，2026-07）。
 - **协议真相源 Protobuf 化**（plan 009，2026-07-15）：`proto/`（Buf 管理）单一真相源，`buf generate` 出 TS（protobuf-es）/ Rust（prost）/ Swift（swift-protobuf）三端；wire 迁全 protobuf binary 信封，旧 JSON 协议下线；CI 上 `buf lint` + `buf breaking` + 生成产物零 diff 校验。v0.3.0 发布并上线生产（api/app.coflux.dev）。
-- **server RavenJS 化 + 全仓库 TypeScript 7**（2026-07-15）：HTTP 应用层迁 `@raven.js/core`（组合根 + 插件 + 契约路由），WS/反代保持传输层；确认架构不变量——**client/daemon 均只连中心服务器（严格星形，含 PTY），server(Postgres) 是全部逻辑状态的真相源**。
+- **server RavenJS 化 + 全仓库 TypeScript 7**（2026-07-15）：HTTP 应用层迁 `@raven.js/core`（组合根 + 插件 + 契约路由），WS/反代保持传输层。当时的“含 PTY 严格星形”决策已被 2026-07-25 本地优先架构取代；Postgres 只权威持有业务元数据，不持 terminal authority。
 - **Web 客户端技术栈与产品骨架重塑**（plans 010-012，2026-07-16→17）：完成 Cursor 式高密度工作台重写，最终收敛到 React 19 + React Compiler；接入 Astryx 设计系统；项目导入改为“在线设备 → 远程文件树”的两步向导。
 - **Web 终端交互完善**（plans 013-016、019，2026-07-19→20）：xterm 6.0 对齐；剪贴板图片压缩后经 `fs.write` 写入远端临时目录并把路径注入 Agent；全局快捷键与帮助面板；cell 度量漂移自动 refit；终端 URL 可点击；端口以 PlugZap + HoverCard 聚合展示并可跳转。
 - **worker 自动更新编排**（plan 017，2026-07-20）：daemon 上报 worker/supervisor 版本与架构，server 轮询 stable GitHub Release + manifest 后自动向在线 daemon 投递 worker 升级；失败按 daemon/版本退避封顶。supervisor 仍由 `cofluxd update` 人工升级。
 - **设备识别与管理**（plan 018，2026-07-20）：web 支持设备重命名，server 持久化并广播；在线即时同步、离线重连补偿到 daemon 本地 `settings.json`；设备 tooltip 展示 worker/supervisor 版本。
-- **黑盒集成测试**（`tests/`，跨重构有效）：55 项，覆盖 auth/多账号隔离/项目-worktree-任务-PTY/重启恢复/两级 resync/跨 daemon 安全/handoff/热升级、自动编排与验签对抗/端口转发门禁与 WS 透传/设备重命名/文件读写与路径安全/畸形 wire/优雅关闭。
+- **黑盒集成测试**（`tests/`，跨重构有效）：74 项，覆盖 auth/账号隔离/项目-worktree-task-session、direct/relay、中心真实停机、input/mutation exactly-once、VT oracle、checkpoint、两级 resync、跨 daemon 安全、handoff、热升级与验签对抗、端口转发、文件路径安全、畸形 wire 与优雅关闭。
 - **生产部署**：prod-jp（Debian + Caddy 自动 HTTPS + systemd），DNS/泛证书/DB 见运维记录；`scripts/prod-smoke.mjs` 7 步真协议冒烟。
-- **server 侧终端镜像**（2026-07-19，69e132a/d8b3237）：每 session 一个 `@xterm/headless` 实例实时消化 pty 流（`apps/server/src/mirror.ts`），attach 下发几 KB 重绘快照（免 200KB scrollback 往返），**daemon 离线也能看最后现场**（含 2000 行可翻历史）；协议/daemon/web 零改动。断档（server 重启/daemon 闪断）走原 replay 路径自愈重建。顺带：TaskAttach 补终端尺寸字段、clampDim 把 0（proto3 缺省）回落默认修复。web 端 xterm 5.5→6.0 对齐（plan 013）。
+- **本地优先 session authority**（plans 036-042、040-041，2026-07-25）：supervisor/sessiond 持 PTY、VT/history、holder、sequence 与 tombstone；web cached direct 走 `127.0.0.1:8788`，失败自动 opaque relay；中心停机后已加载/配对页面仍可 list/attach/input/resize/stop；input/op exactly-once、output gap snapshot 自愈。旧 server xterm live mirror、raw replay、viewer/holder、全局 pause 与 server-routed exec/fs 已删除。mobile 仅做 relay-only 内部迁移，无新功能。
+- **独立 VT 与性能发布证据**（2026-07-25）：xterm 6 双 oracle + 脱敏 Claude/Codex/Vim fixtures；Apple M1 Pro debug、2000 行 history、20 warmup + 100 samples：echo p95 0.589ms，attach+xterm p95 64.820ms，direct timed path 中心 relay frame=0。保证/非保证 fidelity 见 [architecture.md](architecture.md#6-attach-与现场恢复)。
+- **server 侧终端镜像（历史，已取代）**（2026-07-19，69e132a/d8b3237）：曾用 `@xterm/headless` 实时消化 raw PTY 解决 attach 延迟；该方案让中心进入 terminal hot path，已由 sessiond snapshot + 有界派生 checkpoint 替代，server xterm 依赖和旧协议已删除。
 
 ## 待办
 
@@ -35,14 +37,15 @@
 > 围绕"在各设备的工作区里跑 claude/codex 任务，人监督、随时接管"组织功能与交互，
 > 终端仍是核心界面，但组织逻辑是任务而非连接。功能/交互细化待产品设计讨论产出。
 
-**已知问题/待细化（更新至 2026-07-20）：**
+**已知问题/待细化（更新至 2026-07-25）：**
 - [x] 终端渲染问题：经常错位——xterm 6.0 升级后未再复现（2026-07-19 用户确认）
 - [x] 图片复制粘贴：浏览器剪贴板图片上传 daemon 临时目录并注入远端路径（plan 014）
 - [x] 终端样式调整：字号 13→12 与页面 UI 视觉平衡（0f1256b，2026-07-19 用户确认）
 - [x] 项目导入引导：在线设备 → 远程文件树两步向导（plan 012）
 - [ ] 设备接入引导优化（安装 `cofluxd` → 浏览器授权 → 上线）
 - [x] 端口转发基础交互：终端 Tab 聚合提示全部端口并可直接打开预览（plan 019）
-- [x] 终端恢复的性能问题：server 侧镜像快照解决（2026-07-19，见已完成）
+- [x] 终端恢复的性能问题：sessiond snapshot + cached direct 达到 attach+xterm p95 64.820ms（2026-07-25）
+- [ ] 本地优先浏览器发布矩阵：macOS 当前稳定版 Chrome/Safari/Firefox 的 cached direct、首次 relay+pair、permission denied、fallback/promotion、worker restart、server outage 全部实机签字
 - [x] git diff 的展示：workspace 行数统计 `+X −Y`（plan 024）
 - [x] 快捷键支持：全局快捷键 + 帮助面板（plan 015）
 - [ ] 登录页和设备授权页的 UI 优化

@@ -1,81 +1,100 @@
 # daemon 自动热升级设计（方案 A）
 
-> 状态：**全 Rust daemon 已落地（2026-06）**——`crates/supervisor`(portable-pty) + `crates/worker`(tokio) 两进程 + UDS IPC + 两级 resync + 版本切换 + 观察期回滚,零 node 运行时,旧 TS daemon 已删。均有黑盒测试(杀 worker 存活、升级提交、坏版本回滚,会话均不丢)。先 TS 验证机制、再逐进程 Rust 化（UDS/WS 语言中立，一路黑盒验证不返工）。**下载 + ed25519 验签也已实现**(`crates/supervisor/src/upgrade.rs`：ureq 下载 → sha256 → 验签 → 落盘 → 观察期切换;篡改/签名不符一律拒绝并保持当前版本,黑盒覆盖正向+两种负向)、打包 + launcher 已实现。剩余仅：发布时把占位公钥(全 0)换成真公钥。目标：daemon 后台自动升级，且**升级时运行中的 PTY/Agent 会话存活**——已达成。**触发编排也已落地（plan 015，2026-07）**：此前"升级机制齐备但触发只有手动 `client.upgradeDaemon`"的缺口已补上——server 轮询 GitHub `/releases/latest` + `manifest.json`，握手/轮询两个时机比对在线 daemon 版本，不等即推 + 退避，见 `docs/RELEASING.md#升级是怎么落地的`、`apps/server/src/auto-update.ts`、`tests/src/auto-update.test.mjs`。supervisor 自身不参与自动升级（仍需人工 `cofluxd update`），此前提未变。
->
-> 关键决策（2026-06 讨论确认）：
-> - **目标基线**：坚持"升级时运行中会话零丢失"，故走方案 A（而非基线方案：launcher + re-exec + agent resume）。
-> - **supervisor 用 Rust**，worker 保持 TS。理由见 [§语言与打包](#语言与打包)。**落地策略：先用 TS 把进程拆分 + UDS + 两级 resync 验证通过（已完成），Rust 端口作为后续打包优化**——核心 resync 逻辑用现有黑盒测试覆盖，移植时不必重证机制。
-> - **当前实现映射**：supervisor = `apps/daemon/src/index.ts`（持 node-pty + scrollback + 背压）；worker = `apps/daemon/src/worker.ts`（连接/认证/git/exec/fs/编排）；UDS 帧 = `apps/daemon/src/ipc.ts`（长度前缀 + 首字节判别，复用 #1 的 pty 帧）。supervisor `spawn` 并重启 worker，崩溃计数退避（验签/回滚的占位）。
-> - **排序**：先收尾[二进制数据面](ROADMAP.md#1-二进制数据面)，再做 supervisor 拆分——UDS 必然要自己分帧，长度前缀二进制帧是 UDS 与 WS 共用的帧格式，先把它做稳，拆分时 WS 这段不返工。
-> - **签名**：方向定为 ed25519 + supervisor 内置公钥（无现有发布签名体系可复用），但**首版先不做**，列入后续优化项。⚠️ 见 [§安全](#安全)：验签是热升级**真正启用前**的硬前置，未补上前 worker 自动升级不得开启。
+> 状态：已落地。daemon 是 `coflux-supervisor` + `coflux-worker` 两个 Rust 二进制，零 Node 运行时；
+> worker 可自动下载、sha256 校验、ed25519 验签、观察期切换和崩溃回滚，升级时 PTY/Agent 会话存活。
+> supervisor 自身仍由 `cofluxd update` 人工升级。
 
-## 背景与约束
+## 1. 为什么拆两个进程
 
-- daemon 散落在用户各台机器上，无法强制升级 → 需要后台自动升级。
-- PTY 是 daemon 进程的子进程，daemon 一退出会话就死（B3 决策）。要让会话跨"代码更换"存活，必须把**持有 PTY 的进程**与**会升级的逻辑**分开。
-- 信任模型：单用户自有机器。但自动跑下载来的代码 = 潜在全网 RCE，**验签是热升级启用前的硬前置**（首版可暂缺，但在未补上前不得开启 worker 自动升级，详见 [§安全](#安全)）。
+PTY 是持有它的进程的资源。若把网络、协议和 PTY 都放在一个频繁升级的进程里，更换代码就会杀死
+正在运行的 shell/Agent。方案 A 把稳定 session authority 与频繁变化的 transport adapter 分开：
 
-## 拓扑
-
-```
-        ┌─────────────────────────────────────────┐
-        │ supervisor（Rust 静态二进制；极少升级）   │
-        │  · 持有 PTY(portable-pty) 进程 + scrollback│  ← 升级 worker 时这些不动
-        │  · 起/管/重启/升级 worker                 │
-        │  · 下载新版 + 验签(ed25519) + 切换 + 回滚 │
-        └───────────────▲───────────────────────────┘
-          本地 UDS IPC   │  session.create/write/resize/kill/replay ↕ pty.output/started/exit
-        ┌───────────────┴───────────────────────────┐
-        │ worker（TS；频繁升级，承载大部分逻辑）     │
-        │  · 连服务器(WS) + 认证 + git + fs + 协议   │
-        │  · 会话编排                                │
-        └───────────────▲───────────────────────────┘
-                    WS   │  ↕  现有 daemon↔server 协议
-                     中心服务器
+```text
+┌──────────────────────────────────────────────────────────┐
+│ coflux-supervisor（极少升级）                              │
+│ · portable-pty + sessiond：PTY、VT/history、holder/seq     │
+│ · UDS server                                              │
+│ · spawn/监控 worker、版本注册表、观察期与回滚               │
+│ · 下载 + sha256 + ed25519 验签                            │
+└──────────────────────▲───────────────────────────────────┘
+                       │ 本地 UDS
+                       │ control JSON + DeviceEnvelope frame
+┌──────────────────────┴───────────────────────────────────┐
+│ coflux-worker（频繁升级）                                  │
+│ · 中心 WS、认证、重连、loopback gateway                    │
+│ · direct/opaque relay、git/exec/fs、checkpoint             │
+└──────────────────────▲───────────────────────────────────┘
+                       │ /daemon protobuf WS
+                    中心服务器
 ```
 
-**拆分边界（按现有 `apps/daemon/src/` 文件）**：`sessions.ts`(PTY+scrollback+背压) → supervisor（Rust 重写）；`index.ts` 的 WS/认证/重连/路由 + `creds.ts`/`git.ts`/`exec.ts`/`fs.ts` → worker。
-**关键洞察**：拆完后**原生依赖 `node-pty` 完全留在 supervisor**，worker 退化为纯 JS（git 是 spawn、fs 是 node:fs、sqlite 在 server）。所以 worker 打包很容易，supervisor 作为 Rust 静态二进制也无原生模块折腾（连 `scripts/fix-pty-perms.mjs` 的 prebuild 执行位坑都消失）。
+worker 崩溃、升级或与中心断线时，supervisor 继续读 PTY、推进 VT/history，并保留 sessiond 中的
+logical holder/sequence；本地/relay channel transport 由新 worker 重建。transport 永远没有暂停全部
+PTY 的裁决权。
 
-## 关键设计：两级 resync（复用现有模式）
+## 2. UDS 与两级对账
 
-`worker↔supervisor`（本地 UDS）与 `daemon↔server`（WS）**是同一套模式**——"会话跨重连存活 + resync 重挂"，只是下沉一层。
-- 升级 = **只重启 worker**；PTY 在 supervisor 里不受影响。
-- worker 重启后：① 重连 supervisor 的 UDS、resync 拿回存活会话；② 重连 server、resync。会话全程没死。
-- scrollback 放 supervisor → 连 worker 崩溃都能恢复。
+UDS 是长度前缀 record stream：控制消息用 JSON，数据消息用首字节 frame kind 区分。当前 terminal
+input/resize/output 全部在 DeviceEnvelope 内由 sessiond 裁决；旧 input/replay frame 编号 2/3 已保留但
+拒绝解码。kind 1 只通知 worker 某 session 的 checkpoint 已脏，不携带 raw PTY。
 
-IPC：Unix domain socket（Windows 用 named pipe，Node `net` 同一套 path API），worker 作为独立进程连接、可重连，镜像 WS 行为。
+worker 启动后分两级恢复：
 
-## 升级流程
+1. 连接 supervisor，发送 `resync.request`，取得存活 `SessionInfo(sessionId, taskId, pid)`；
+2. 建立/恢复中心连接，上报 daemon resync 与完整 Device catalog；
+3. 重建 checkpoint dirty 集合、本地 gateway 和 relay channel；
+4. client 以更高 transport generation reattach，logical holder 与未确认 input 可继续。
 
-1. server 检测 worker 版本 < 期望 → 下发 `worker.upgrade{version, url, sha256, signature}`（WS）。
-2. worker 把信号转给 supervisor。
-3. **supervisor**（稳定、安全关键）下载产物 → **验签 + 校验 sha256** → 落盘新版本。
-4. supervisor 重启 worker 到新版；worker 重连 + 两级 resync；会话存活。
-5. **回滚**：保留上一版；新 worker 在 N 秒内崩溃 M 次 → 自动回退。
+Session 缺席不直接等于 exit；sessiond tombstone/catalog 才是退出事实。中心也不会因为 worker/server 重启
+杀死 unknown orphan。
 
-## 安全
+## 3. 升级流程
 
-- 发布产物用私钥签名；**supervisor 内置公钥**，切换前验签 + sha256。**（首版延后，见下方 ⚠️）**
-- 全程 TLS；升级下载通道与控制通道分离。
-- 版本可固定 / 灰度。
+1. release workflow 为四个平台构建 supervisor/worker，生成 sha256 和 manifest，并用 ed25519 私钥签
+   worker 产物。
+2. server 轮询 stable GitHub Release；daemon 握手或轮询发现版本落后时，下发
+   `worker.upgrade {version,url,sha256,signature}`。
+3. worker 把升级请求经 UDS 交给 supervisor。
+4. supervisor 下载到 `COFLUX_HOME/workers/` 临时目标，先校验 sha256，再用内置发布公钥验签；任一
+   不符都删除/拒绝候选，保持当前 worker。
+5. 验证通过后切换版本并启动观察期。新 worker 连接 UDS、完成两级对账，PTY 全程不动。
+6. 观察期内连续崩溃达到阈值，supervisor 自动回退上一版；稳定通过后提交新版本。
 
-> ⚠️ **签名延后的前置约束**：验签是"自动下载并运行远端代码"的安全闸门——缺它时，中心服务器一旦被攻破即可向全网 daemon 推任意代码（全网 RCE）。因此首版可以不实现验签，但 **worker 自动升级投递在验签补齐前不得启用**：拆分阶段 supervisor 只拉起本地已安装的 worker，不接 `worker.upgrade` 下载流程。补验签后再开启升级。
+同一坏版本的 server 推送还有 daemon/版本级退避上限，避免反复切换。
 
-## 代价（取舍）
+## 4. 安全边界
 
-- PTY 字节多一跳本地 IPC（supervisor→worker→server），背压跨两段。
-- 两级 resync、两套连接生命周期，复杂度上升。
-- supervisor 偶尔也需升级（那次非热升级，但很罕见）。
+- ed25519 防的是“中心或下载源被攻破后向全网推恶意二进制”。公钥编译进 supervisor；发布私钥只在
+  CI secret 中。
+- 测试可用 `COFLUX_WORKER_PUBKEY` 注入临时公钥，因为本地可信方已拥有机器权限；远端中心无法设置
+  本机 env，不削弱生产威胁模型。
+- sha256 用于 manifest/传输完整性，签名用于产物来源真实性，两者都必须通过。
+- 下载失败、hash 错、签名错、无法落盘或候选崩溃，都不能破坏当前 worker 和 PTY。
+- supervisor 升级不热切换：它持有 authority，必须由 `cofluxd update` 明确重启，届时不承诺活 session
+  保留。
 
-## 软化点
+## 5. 与本地优先数据面的关系
 
-跑的是 Agent（Claude Code/Codex），它们有 `--continue/--resume`、成果落工作区文件。即便会话重启，让 agent 自己 resume 往往够用 —— 若接受"自动升级 + 会话重启"，则**基线方案**（launcher + 验签 + re-exec，无 supervisor 拆分）就足够，复杂度低很多。方案 A 是"要会话零丢失"时的选择。
+升级目标不是“让中心继续 replay PTY”。最终架构中：
 
-## 已定决策（2026-06 讨论确认）
+- raw PTY 永不发送到中心；
+- direct/relay 都承载相同 DeviceEnvelope，holder/sequence 在 sessiond；
+- worker 重启导致 channel/generation 重建，client 自动重投未 ACK input；sessiond 去重保证 effect once；
+- output 若产生 gap，client 重新 attach 取 sessiond snapshot；
+- checkpoint 是可丢弃、按 session 合并的派生状态，不会反压 PTY。
 
-1. **排序**：先收尾[二进制数据面](ROADMAP.md#1-二进制数据面)，再做 supervisor 拆分。UDS 字节流必须自己分帧，长度前缀二进制帧是 UDS 与 WS 共用的帧格式；先把它在 WS 这段做稳，拆分时不返工。
-2. **打包**：
-   - **supervisor = Rust 静态二进制**——一并解决"打包"难题：无 node 运行时依赖、无原生模块 prebuild（`portable-pty` 自带、`ed25519-dalek` 验签），`scripts/fix-pty-perms.mjs` 那类 prebuild 执行位坑直接消失。
-   - **worker = TS**——拆分后原生依赖 `node-pty` 全留在 supervisor，worker 退化为纯 JS（git 走 spawn、fs 走 node:fs、sqlite 在 server），打包成可替换产物即可；保留共享 `@coflux/protocol` 类型与快速迭代。具体形态（`node --experimental-sea` / `bun build --compile` / 带 node tarball）实现时再定，不阻塞设计。
-3. **签名**：方向是 **ed25519 + supervisor 内置公钥**（无现有体系可复用），但**首版延后**，列入后续优化项。**前置约束**：在验签补齐前，supervisor 不得自动下载并运行远端 worker 产物（即热升级特性整体不启用）；拆分阶段可先只跑本地已安装的 worker，不接升级投递。
+因此“worker 可替换”和“中心不在本地 terminal 热路径”是同一 authority 切分的两个结果。
+
+## 6. 验收
+
+黑盒 harness 直接启动真实 server、supervisor、worker，并用临时 `COFLUX_HOME` 隔离：
+
+- 杀 worker：PTY 存活，重启后 catalog/attach 恢复；
+- 切到合法新版本：观察期提交，会话存活；
+- 候选崩溃循环：自动回滚，会话存活；
+- 合法签名：远程下载升级成功；
+- sha256 被篡改、签名属于其它内容：必须拒绝且保持当前版本；
+- worker 重启期间 direct/relay holder、input ACK 与 output snapshot 自愈不产生重复 effect。
+
+发布与密钥操作见 [RELEASING.md](RELEASING.md)，最终 authority/transport 设计见
+[architecture.md](architecture.md)。
