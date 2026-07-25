@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
-import { ChevronRight, Folder, FolderOpen, FolderPlus, GitBranch, Monitor, Plus, Trash2, X } from "lucide-react";
+import { ChevronRight, Folder, FolderOpen, FolderPlus, GitBranch, Monitor, Plus, Trash2, X, Zap } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
@@ -9,6 +9,10 @@ import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/
 import type { CofluxClient } from "@coflux/client";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
 import { cn } from "@/lib/utils";
+
+/** 心跳往返低于此值算「快」（绿），否则「慢」（黄）。局域网直连通常个位数到几十 ms，
+ * 跨洲 relay 常在 200ms 以上——阈值取在这两簇之间，而不是取某个整数好看。 */
+const RTT_GOOD_MS = 200;
 
 const DEFAULT_SIDEBAR_WIDTH = 260;
 const MIN_SIDEBAR_WIDTH = 200;
@@ -401,6 +405,25 @@ export function Sidebar(props: SidebarProps) {
                     : transport?.mode === "offline"
                       ? "Device route 离线"
                       : daemon.online ? "中心在线" : "中心离线";
+              // 色标语义（2026-07-26 改）：颜色只表达延迟，不再表达走哪条路——relay 只要够快
+              // 就该是绿的。传输方式由形状承担：direct 额外挂一枚闪电，离线是空心圈。
+              // 规则：状态差异走色相或形状，绝不走透明度（6px 圆点上 alpha 差肉眼等同）。
+              const rttMs = transport?.rttMs;
+              const connected = transport?.mode === "direct" || transport?.mode === "relay";
+              const dotClass = transport?.mode === "probing"
+                ? "bg-primary animate-pulse"
+                : transport?.mode === "offline"
+                  ? "bg-destructive/70"
+                  : connected
+                    ? rttMs === undefined
+                      ? "bg-muted-foreground/70"
+                      : rttMs < RTT_GOOD_MS ? "bg-success animate-pulse-alive" : "bg-warning"
+                    : daemon.online ? "bg-muted-foreground/70" : "ring-1 ring-inset ring-muted-foreground/60";
+              const rttText = rttMs === undefined ? "" : ` · ${Math.round(rttMs)}ms`;
+              const dotTitle = `${routeLabel}${rttText}${transport?.detail ? ` · ${transport.detail}` : ""}`;
+              // 整行共用：圆点只有 6px，把延迟只挂在它上面等于挂了个瞄不准的靶子。
+              // 圆点自己保留更聚焦的 dotTitle（内层 title 优先于外层）。
+              const rowTitle = `${daemon.host}/${daemon.platform} · ${routeLabel}${rttText}${transport?.detail ? ` · ${transport.detail}` : ""}${daemon.workerVersion ? ` · worker ${daemon.workerVersion}` : ""}${daemon.supervisorVersion ? ` · supervisor ${daemon.supervisorVersion}` : ""}`;
               return (
                 <ContextMenu
                   key={daemon.daemonId}
@@ -412,30 +435,16 @@ export function Sidebar(props: SidebarProps) {
                     { label: "移除设备", onClick: () => props.onRemoveDevice(daemon) },
                   ]}
                 >
-                  <div className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground">
-                    <span
-                      className={cn(
-                        "size-1.5 rounded-full",
-                        transport?.mode === "direct"
-                          ? "bg-success animate-pulse-alive"
-                          : transport?.mode === "relay"
-                            ? "bg-warning"
-                            : transport?.mode === "probing"
-                              ? "bg-primary animate-pulse"
-                              : transport?.mode === "offline"
-                                ? "bg-destructive/70"
-                                // 未建 Device transport 时用中性灰而非绿：绿只代表 direct、黄代表
-                              // relay，让色标单调（direct > relay > 未连 > 离线）。半透明绿在 6px
-                              // 圆点上与实心绿难辨，会让"根本没连"看起来比"已连但走 relay"更健康。
-                              : daemon.online ? "bg-muted-foreground/70" : "bg-muted-foreground/40",
-                      )}
-                      title={transport?.detail ?? routeLabel}
-                    />
+                  <div
+                    className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground"
+                    title={rowTitle}
+                  >
+                    <span className={cn("size-1.5 rounded-full", dotClass)} title={dotTitle} />
+                    {transport?.mode === "direct" ? (
+                      <Zap className="size-3 shrink-0 text-success" aria-label={`本机直连${rttText}`} />
+                    ) : null}
                     <Monitor className="size-3.5 opacity-70" />
-                    <span
-                      className="min-w-0 flex-1 truncate"
-                      title={`${daemon.host}/${daemon.platform} · ${routeLabel}${transport?.detail ? ` · ${transport.detail}` : ""}${daemon.workerVersion ? ` · worker ${daemon.workerVersion}` : ""}${daemon.supervisorVersion ? ` · supervisor ${daemon.supervisorVersion}` : ""}`}
-                    >
+                    <span className="min-w-0 flex-1 truncate">
                       {daemon.name}
                     </span>
                     {orphans.length > 0 ? (
