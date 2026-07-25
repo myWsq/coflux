@@ -38,5 +38,11 @@
 | 033 | [worker 连接韧性（半死连接自愈）+ 连接态可观测](033-worker-connection-resilience.md)（与上行撞号，两分支并行开发所致） | DONE (b8261fd) | none |
 | 034 | [enrollKey 全链路删除——浏览器授权成为唯一登记路径](034-remove-enroll-key.md) | DONE (fc5db48) | 033 |
 | 035 | [cofluxd 命令面重梳 + doctor 连通性自检](035-cofluxd-command-surface.md) | DONE (7f97423) | 034 |
+| 036 | [本地优先 session/device 协议契约](036-local-first-session-device-contract.md) | TODO | none |
+| 037 | [supervisor 演进为本机 sessiond](037-supervisor-sessiond-authority.md) | TODO | 036 |
+| 038 | [worker loopback gateway + 双 transport](038-worker-local-gateway.md) | TODO | 036 |
+| 039 | [server 收敛为控制面 + relay](039-server-control-plane-relay.md) | TODO | 036 |
+| 040 | [web/client 本地优先 DeviceTransport](040-web-local-first-device-transport.md) | TODO | 036 |
+| 041 | [本地优先架构集成、迁移与验收](041-local-first-integration.md) | TODO | 037, 038, 039, 040 |
 
-执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026 → 027 → 028 → 029 → 031 → 032 → {033-skew ∥ 033-conn} → 034 → 035。（030 已撤回，未执行）
+执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026 → 027 → 028 → 029 → 031 → 032 → {033-skew ∥ 033-conn} → 034 → 035 → 036 → {037 ∥ 038 ∥ 039 ∥ 040}（本地优先 plan group，协议冻结后 scope 不相交）→ 041。（030 已撤回，未执行）
