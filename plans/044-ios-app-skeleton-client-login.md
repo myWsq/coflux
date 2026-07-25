@@ -46,7 +46,12 @@ CommandLineTools，未装 Xcode——执行前置未满足即 STOP。
 ## Decisions & tradeoffs
 
 - **全原生 Swift 6.2 + SwiftUI + vanilla `@Observable`**，保持 Xcode 26 新工程默认的
-  MainActor default isolation + approachable concurrency 设置。Rejected: TCA——单人
+  MainActor default isolation + approachable concurrency 设置。
+  【执行偏离 2026-07-25】`SWIFT_DEFAULT_ACTOR_ISOLATION=MainActor` 使 buf 生成的
+  pb.swift 类型隔离进 MainActor、打破 Sendable/Message conformance（编译失败，
+  生成代码无 nonisolated 标注），故不设该项，app 代码显式标 `@MainActor`；
+  approachable concurrency 保留。备选「proto 拆独立 nonisolated target」因结构成本
+  被拒。Rejected: TCA——单人
   项目学习成本无回报；WKWebView 包壳——违背「体验全面升级」的立项动机（2026-07-25
   三路调研定稿，见 `docs/ROADMAP.md:65-70` 原 macOS 调研与本计划的更新）。
 - **部署目标 iOS 26，iPhone-only**。用户手机为 iOS 27（2026-07），26 目标在其上
