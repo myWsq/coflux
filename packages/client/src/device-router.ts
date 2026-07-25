@@ -269,6 +269,9 @@ interface DeviceRoute {
   heartbeatTimer?: TimerHandle;
   /** 在途的那一发心跳；只保留最后一发，迟到的旧 pong 一律丢弃。 */
   pendingPing?: { requestId: string; startedAt: number };
+  /** 对端太老、不认识 ping：不再发，也不再把它的抱怨弹给用户。随 route 生命周期重置——
+   * daemon 热升级后会重连并新建 route，届时自然重新尝试。 */
+  heartbeatUnsupported?: boolean;
   /** 最近一次心跳往返；随 publish 一并对外暴露，见 DeviceTransportState.rttMs。 */
   rttMs?: number;
   /** publish 过的最后一组 (mode, detail)：心跳只更新 rtt，需要照原样重发一次状态。 */
@@ -1367,14 +1370,22 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     code: string,
     message: string,
   ): boolean {
+    // 比心跳早的 daemon 的 prost 解不出 ping 的字段号，整个 payload 落成 None，于是回一条
+    // **不带 requestId** 的 empty_payload——它无从告诉我们这是哪一发引起的。心跳在途时把它
+    // 归给心跳，是新 client 对旧 daemon 唯一可能的归因；不归就会顺着默认路径落到
+    // options.onError，变成每个心跳周期骚扰用户一次，且骚扰的恰恰是最该被安静降级的旧设备。
+    // 归因后顺手关掉这条 route 的心跳：在旧 daemon 上它永远不会成功，再发只是白费往返。
+    if (route.pendingPing && (code === "empty_payload" || code === "unsupported_payload")
+      && (!requestId || requestId === route.pendingPing.requestId)) {
+      route.pendingPing = undefined;
+      route.rttMs = undefined;
+      route.heartbeatUnsupported = true;
+      if (route.heartbeatTimer !== undefined) clock.clearInterval(route.heartbeatTimer);
+      route.heartbeatTimer = undefined;
+      if (route.lastPublished) publish(route, route.lastPublished.mode, route.lastPublished.detail);
+      return true;
+    }
     if (requestId) {
-      // 比心跳早的 daemon 不认识 ping，会回 unsupported_payload。这是预期内的降级——没有
-      // 读数就是没有读数，绝不能顺着默认路径落到 options.onError 去弹给用户：那会变成每个
-      // 心跳周期骚扰一次，且骚扰的恰恰是最该被安静降级的旧设备。
-      if (route.pendingPing?.requestId === requestId) {
-        route.pendingPing = undefined;
-        return true;
-      }
       for (const session of route.sessions.values()) {
         if (session.attachRequestId === requestId) {
           session.attachGeneration = undefined;
@@ -1615,6 +1626,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   /** 心跳只在 transport 真正活着时转：按需拨号下 idle 的设备根本没有连接，无从 ping，
    * 也不该为了一个读数把它拨起来（那等于废掉 plan 043 的按需语义）。 */
   function maintainHeartbeatTimer(route: DeviceRoute): void {
+    if (route.heartbeatUnsupported) return;
     if (!route.sessionLane.active) {
       if (route.heartbeatTimer !== undefined) clock.clearInterval(route.heartbeatTimer);
       route.heartbeatTimer = undefined;
