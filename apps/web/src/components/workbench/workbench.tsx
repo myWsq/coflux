@@ -18,6 +18,7 @@ import { Sidebar } from "@/components/workbench/sidebar";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import type { WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 import { WORKSPACE_KEY, USE_SUPABASE } from "@/config";
+import { cn } from "@/lib/utils";
 import type { CofluxClient } from "@coflux/client";
 
 // 终端栈（xterm + WorkspaceTerminal/TerminalPane）懒加载，不进首屏主 chunk：
@@ -251,7 +252,14 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   return (
-    <div className="flex h-screen min-h-[640px] min-w-[1024px] overflow-hidden bg-background text-foreground">
+    // 断线时给顶部横幅留出 h-7：横幅是 fixed 的，不留白就会压住终端 tab 栏，中心离线期间
+    // 点不到切换/关闭终端（padding 改变容器高度，终端 fit 由 ResizeObserver 跟随）。
+    <div
+      className={cn(
+        "flex h-screen min-h-[640px] min-w-[1024px] overflow-hidden bg-background text-foreground",
+        status !== "connected" && "pt-7",
+      )}
+    >
       <Sidebar
         client={client}
         selectedWorkspaceId={selectedWorkspaceId}
@@ -311,7 +319,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         </main>
       ) : null}
 
-      {/* 断线重连横幅：保留最后快照渲染（乐观 UI），只提示连接状态。 */}
+      {/* 断线重连横幅：保留最后快照渲染（乐观 UI），只提示连接状态。根容器同步留出 pt-7。 */}
       {status !== "connected" ? (
         <div className="fixed inset-x-0 top-0 z-50 flex h-7 items-center justify-center gap-2 border-b border-warning/20 bg-warning/10 text-xs text-warning backdrop-blur">
           <LoaderCircle className="size-3 animate-spin" />

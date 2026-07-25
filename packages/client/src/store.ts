@@ -117,6 +117,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
   let controlAuthenticated = false;
   let errorSequence = 0;
   const sessionConsumers = new Map<string, Set<SessionConsumer>>();
+  // 中心离线期间已在本机 stop、但还没能删除的 catalog task；重连认证后补投（见 removeTask）。
+  const pendingTaskRemovals = new Set<string>();
   // 有本地会话 token 时首屏直接进入 authenticating，避免刷新先闪登录页。
   const store: StoreApi<CofluxState> = createStore<CofluxState>(() => ({
     status: token ? "connecting" : "disconnected",
@@ -333,6 +335,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           localStorage.setItem(options.tokenStorageKey, value.clientToken);
         }
         send({ case: "clientSubscribe", value: {} });
+        flushPendingTaskRemovals();
         break;
       }
       case "authError": {
@@ -538,6 +541,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
   function logout() {
     shouldRetry = false;
     controlAuthenticated = false;
+    pendingTaskRemovals.clear();
     void deviceRouter.reset(true);
     send({ case: "clientLogout", value: {} });
     token = "";
@@ -576,14 +580,32 @@ export function createCofluxClient(options: CofluxClientOptions) {
         deviceRouter.attachSession(task.daemonId, task.id, task.sessionId, 80, 24, true);
         await deviceRouter.stopSession(task.daemonId, task.sessionId);
       } catch (error) {
-        reportLocalError(error instanceof Error ? error.message : String(error));
-        return;
+        // session_not_found 是「设备侧已经没有它」的确定答复（daemon/supervisor 重启后的残留
+        // task 都是这种），继续删 catalog task 才能收敛；其余错误仍然中止，不猜测本机状态。
+        if ((error as { code?: string }).code !== "session_not_found") {
+          reportLocalError(error instanceof Error ? error.message : String(error));
+          return;
+        }
       }
-      // 本地 stop 是独立设备事实；只有中心已认证时才继续删除 catalog task。
-      if (controlAuthenticated) connection.send({ case: "taskRemove", value: { taskId: task.id } });
+      // 本地 stop 是独立设备事实；中心离线时排队，重连认证后补投删除。
+      removeTask(task.id);
       return;
     }
-    connection.send({ case: "taskRemove", value: { taskId: task.id } });
+    removeTask(task.id);
+  }
+
+  /** 删除 catalog task：中心离线时不伪造成功，改为记账，authOk 后按序补投。 */
+  function removeTask(taskId: string): void {
+    if (!controlAuthenticated) {
+      pendingTaskRemovals.add(taskId);
+      return;
+    }
+    connection.send({ case: "taskRemove", value: { taskId } });
+  }
+
+  function flushPendingTaskRemovals(): void {
+    for (const taskId of pendingTaskRemovals) connection.send({ case: "taskRemove", value: { taskId } });
+    pendingTaskRemovals.clear();
   }
 
   function retainDevice(daemonId: string): () => void {
