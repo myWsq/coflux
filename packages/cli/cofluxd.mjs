@@ -115,6 +115,22 @@ function fdaLabel(status) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function fileSha256(path) {
+  try { return crypto.createHash("sha256").update(fs.readFileSync(path)).digest("hex"); } catch { return null; }
+}
+
+// macOS：新落盘的二进制带 com.apple.provenance，launchd 顶层 spawn 会被 AMFI 以
+// OS_REASON_CODESIGNING 静默杀死——即使产物是 Developer ID 签名 + 已公证（2026-07-25
+// v0.13.0 实测仍被连杀）。本地 ad-hoc 重签使其成为"本机产物"绕开该检查；签名威胁模型
+// 不受影响（防的是中心被攻破推恶意产物，靠下载后的 sha256+ed25519 验签，与此无关）。
+function resignMacBinaries(paths) {
+  if (!IS_MAC) return;
+  for (const p of paths) {
+    const r = run("codesign", ["--force", "-s", "-", p]);
+    if (r.status !== 0) console.warn(`⚠ 本地重签失败: ${p}（daemon 若被系统杀，手动 codesign --force -s - 该文件后 cofluxd restart）`);
+  }
+}
+
 async function download(url, dest) {
   const res = await fetch(url, { redirect: "follow" });
   if (!res.ok) die(`下载失败 HTTP ${res.status}: ${url}\n（该版本/平台的 release 资产是否已发布？）`);
@@ -145,6 +161,7 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
       fs.copyFileSync(src, join(BIN_DIR, b));
       fs.chmodSync(join(BIN_DIR, b), 0o755);
     }
+    resignMacBinaries([SUP_BIN, WRK_BIN]);
     console.log(`✓ 用本地二进制（${binDir}）`);
     return;
   }
@@ -166,6 +183,7 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
     await download(`${base}/${b}-${t}`, join(BIN_DIR, b));
     console.log("✓");
   }
+  resignMacBinaries([SUP_BIN, WRK_BIN]);
 }
 
 // 写 settings.json（daemon 直接读）。
@@ -298,20 +316,41 @@ function cmdDown() { stopService(); console.log("✓ 已停止"); }
 // 只有 supervisor 真正靠这条命令更新——它不自动升级（持 PTY，重启会杀会话，见 plan 017）。
 // worker 运行中会被 server 自动热升级到最新 stable（无需停服）；这里顺带刷新的是 worker 的
 // "内置兜底二进制"（supervisor 冷启动/热升级缓存皆无时的 fallback），日常可不管。
+//
+// update 与 restart 拆开（2026-07-25 用户拍板）：update 只落盘二进制、绝不重启——替换磁盘
+// 文件对运行中的 supervisor/PTY 零影响；supervisor 内容没变就明说不用重启（大多数发版
+// 都不动 supervisor，旧行为等于白丢一次全部会话）。真正的中断收敛到显式的 `cofluxd restart`。
 async function cmdUpdate(v) {
   if (!fs.existsSync(SETTINGS)) die("尚未安装，先 cofluxd up");
   const version = v.version || "latest";
+  const before = fileSha256(SUP_BIN);
   await ensureBinaries({ version, binDir: v["bin-dir"] });
+  if (before === fileSha256(SUP_BIN)) {
+    console.log("✓ 已更新：supervisor 无变化——不需要重启，活会话不受影响");
+    console.log("  worker 由 server 自动热升级；本次刷新的只是兜底 worker 二进制。");
+  } else {
+    console.log(`✓ 新 supervisor 已就位（${v["bin-dir"] ? "本地产物" : version}），但尚未生效`);
+    console.log("  ⚠ 运行 `cofluxd restart` 应用——会重启 daemon 并结束本机所有活会话（PTY 随 supervisor 退出）。");
+  }
+}
+
+// 唯一会主动中断会话的命令：应用已就位的新 supervisor（或单纯重启 daemon）。
+function cmdRestart() {
+  if (!fs.existsSync(SETTINGS)) die("尚未安装，先 cofluxd up");
+  console.log("⚠ 正在重启 daemon：本机所有活会话将结束（PTY 随 supervisor 退出）…");
   restartService();
-  console.log(`✓ supervisor 已更新到 ${v["bin-dir"] ? "本地产物" : version} 并重启`);
-  console.log("  worker 由 server 自动热升级，通常无需手动更新；此命令只更新 supervisor（及其兜底 worker 二进制）。");
+  console.log("✓ 已重启（cofluxd status 查看状态）");
 }
 
 // launchd(macOS) / systemd --user(Linux) 服务活跃态查询，status 与 doctor 共用。
+// macOS 必须以 launchctl list 输出里的 PID 为准：label 登记 ≠ 进程存活（supervisor 被
+// OS_REASON_CODESIGNING 杀掉时 label 仍在，旧实现会报假"运行中"，2026-07-25 实测踩过）。
 function serviceRunningInfo() {
   if (IS_MAC) {
-    const running = run("launchctl", ["list", "com.coflux.daemon"]).status === 0;
-    return { running, active: running ? "运行中" : "未运行" };
+    const out = run("launchctl", ["list", "com.coflux.daemon"]);
+    const registered = out.status === 0;
+    const running = registered && /"PID"\s*=\s*\d+/.test(out.stdout || "");
+    return { running, active: running ? "运行中" : registered ? "已登记但进程不在（看 cofluxd logs；常见于系统拒签杀进程）" : "未运行" };
   }
   if (IS_LINUX) {
     const active = (run("systemctl", ["--user", "is-active", "coflux-daemon.service"]).stdout || "").trim() || "未运行";
@@ -631,7 +670,8 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd up [flags]      幂等：首次装+起，已装则按当前 settings.json 重装服务并重启
   cofluxd status          服务器/登记（含"等待授权"）/服务/连接状态
   cofluxd doctor          中心网络 + gateway bind/grant/loopback + daemon 状态分层自检
-  cofluxd update          更新本地 supervisor 二进制并重启（worker 由 server 自动热升级）
+  cofluxd update          下载新二进制（不重启；supervisor 有变化时提示用 restart 应用）
+  cofluxd restart         重启 daemon 应用新 supervisor（⚠ 结束本机所有活会话）
   cofluxd fda             [仅 macOS] 引导授予完全磁盘访问权限（避免 PTY 因 TCC 弹窗卡住）
   cofluxd logs [-f]       看 daemon 日志
   cofluxd down            停止
@@ -667,7 +707,7 @@ let cmd = positionals[0];
 if (values.help || cmd === "help") { console.log(HELP); process.exit(0); }
 if (!cmd) cmd = fs.existsSync(SETTINGS) ? "status" : "up"; // 首次裸跑 → 引导
 
-const handlers = { up: cmdUp, update: cmdUpdate, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall };
+const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall };
 const h = handlers[cmd];
 if (!h) die(`未知命令: ${cmd}${MIGRATED[cmd] ? `\n${MIGRATED[cmd]}` : ""}\n\n${HELP}`);
 await h(values);
