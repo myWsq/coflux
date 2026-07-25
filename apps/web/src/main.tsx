@@ -24,9 +24,11 @@ const cofluxTheme = defineTheme({
         fontSize: "var(--font-size-sm)",
         borderRadius: "var(--radius-element)",
         // 分开写而非 border 简写：简写在样式合并里容易被整体覆盖，拆开才保得住这 1px。
+        // 颜色取 overlay-hover（5% 白）而非 pressed（10%）：这道边只是把卡片从深色背景里
+        // 剥出来，不该被看成一个框——Retina 上 1px CSS 落成 2 物理像素，10% 已经显重。
         borderWidth: "1px",
         borderStyle: "solid",
-        borderColor: "var(--color-overlay-pressed)",
+        borderColor: "var(--color-overlay-hover)",
         boxShadow: "var(--shadow-high)",
         padding: "6px 8px",
         textAlign: "start",
