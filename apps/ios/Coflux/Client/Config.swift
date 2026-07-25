@@ -1,10 +1,11 @@
 import Foundation
 
 enum Config {
-    // 生产 Supabase 常量（anon key 非密可提交）：真机验收时填入。两者均非 nil 时登录页
-    // 走 supabase 模式（邮箱密码换票）；否则走 local 模式（用户名密码直发，本机 dev server）。
-    static let supabaseURL: String? = nil // TODO: 生产验收时填入，如 "https://xxx.supabase.co"
-    static let supabaseAnonKey: String? = nil // TODO: 生产验收时填入
+    // 生产 Supabase 常量（publishable key 设计上公开，与 web bundle 同值，可提交）。
+    // 两者均非 nil 时登录页走 supabase 模式（邮箱密码换票）；置 nil 则退 local 模式
+    // （用户名密码直发，本机 dev server 调试用）。
+    static let supabaseURL: String? = "https://yafiocdmkhjuphmmwtrn.supabase.co"
+    static let supabaseAnonKey: String? = "sb_publishable_KkFO_9qiJiGknB_kxFwupw_jGjeKaa1"
 
     static var useSupabase: Bool { supabaseURL != nil && supabaseAnonKey != nil }
 
