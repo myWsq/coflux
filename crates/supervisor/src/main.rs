@@ -14,17 +14,19 @@ mod upgrade;
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
 use coflux_protocol::{decode_frame, is_frame, DataFrame, RecordParser, Settings, WorkerToSupervisor, SUPERVISOR_SOCK_ENV};
 
 use manager::{Manager, WorkerSpec};
-use sessions::{Pause, Sessions};
+use sessions::{Outbound, Sessions};
+
+const DEFAULT_TERMINAL_MEMORY_MB: usize = 128;
 
 /// supervisor 自身版本：编译期注入 release tag（`.github/workflows/release.yml` 传
 /// `COFLUX_RELEASE_VERSION=${{ github.ref_name }}`）；本地构建未设该 env 时落 "dev"。
@@ -50,6 +52,12 @@ fn main() {
     fda::write_status(&home); // macOS: 探测完全磁盘访问权限并落盘,供 cofluxd status/fda 展示引导；非 macOS 空操作
     let shell = std::env::var("COFLUX_SHELL").ok().filter(|s| !s.is_empty()).or(settings.shell).or_else(|| std::env::var("SHELL").ok()).unwrap_or_else(|| "/bin/bash".to_string());
     let history_line_limit: usize = std::env::var("COFLUX_HISTORY_LINES").ok().and_then(|s| s.parse().ok()).unwrap_or(2000);
+    let terminal_memory_mb: usize = std::env::var("COFLUX_TERMINAL_MEMORY_MB")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_TERMINAL_MEMORY_MB);
+    let terminal_memory_limit = terminal_memory_mb.saturating_mul(1024 * 1024);
     let probation_ms: u64 = std::env::var("COFLUX_WORKER_PROBATION_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(8000);
 
     // 内置 worker 规格：默认用与 supervisor 同目录的 coflux-worker；COFLUX_WORKER_CMD 可覆盖（测试用）。
@@ -79,27 +87,9 @@ fn main() {
         }
     }
 
-    // 共享：outbound 通道（→ 当前 worker）+ 背压闸
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    let pause: Pause = Arc::new((Mutex::new(false), Condvar::new()));
-    let sessions = Sessions::new(tx, pause, shell, home.clone(), history_line_limit);
-
-    // 当前 worker 的写端（worker 重连即替换；断开置 None，输出被丢，scrollback 仍保留）
-    let worker_w: Arc<Mutex<Option<UnixStream>>> = Arc::new(Mutex::new(None));
-    {
-        let worker_w = worker_w.clone();
-        thread::spawn(move || {
-            use std::io::Write;
-            for rec in rx {
-                let mut g = worker_w.lock().unwrap();
-                if let Some(stream) = g.as_mut() {
-                    if stream.write_all(&rec).is_err() {
-                        *g = None;
-                    }
-                }
-            }
-        });
-    }
+    // PTY/VT authority 永远不等待 worker；每次连接有独立的 bounded outbound writer。
+    let outbound = Outbound::new();
+    let sessions = Sessions::new(outbound, shell, home.clone(), history_line_limit, terminal_memory_limit);
 
     // worker 子进程管理
     let manager = Manager::new(builtin, known, sock_path.clone(), home, Duration::from_millis(probation_ms), SUPERVISOR_VERSION.to_string());
@@ -132,10 +122,16 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Err(error) = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)) {
+        eprintln!("[supervisor] chmod {sock_path}: {error}");
+        let _ = std::fs::remove_file(&sock_path);
+        std::process::exit(1);
+    }
     eprintln!("[supervisor] listening {sock_path}");
 
     let conn_counter = Arc::new(AtomicU64::new(0));
-    let current_conn = Arc::new(AtomicU64::new(0));
+    // read guard 覆盖单条 worker record 的完整 dispatch，write guard 则定义新连接接管点。
+    let current_conn = Arc::new(RwLock::new(0u64));
 
     for incoming in listener.incoming() {
         let stream = match incoming {
@@ -143,41 +139,56 @@ fn main() {
             Err(_) => continue,
         };
         let id = conn_counter.fetch_add(1, Ordering::SeqCst) + 1;
-        current_conn.store(id, Ordering::SeqCst);
-        match stream.try_clone() {
-            Ok(wc) => *worker_w.lock().unwrap() = Some(wc),
+        let writer_stream = match stream.try_clone() {
+            Ok(stream) => stream,
             Err(e) => {
                 eprintln!("[supervisor] try_clone: {e}");
                 continue;
             }
+        };
+        {
+            let mut current = current_conn.write().unwrap();
+            sessions.worker_connected(id, writer_stream);
+            *current = id;
         }
-        eprintln!("[supervisor] worker connected");
-        // 复位背压闸：pause 仅由 worker 的 PtyPause/PtyResume 翻转，worker 断开/升级时不会自动清零。
-        // 若上一个 worker 崩在 pause=true（背压态），新 worker 从 false 起步、永不主动发 Resume，
-        // PTY 读线程会永久卡在 cvar.wait —— 会话虽存活但全冻结。新连接建立即代表旧 worker 已走，此处复位解冻。
-        sessions.set_pause(false);
+        eprintln!("[supervisor] worker connected generation={id}");
         let sessions = sessions.clone();
         let manager = manager.clone();
-        let worker_w = worker_w.clone();
         let current_conn = current_conn.clone();
         thread::spawn(move || {
-            handle_worker(stream, &sessions, &manager);
-            if current_conn.load(Ordering::SeqCst) == id {
-                *worker_w.lock().unwrap() = None;
+            handle_worker(stream, &sessions, &manager, id, &current_conn);
+            sessions.worker_disconnected(id);
+            let mut current = current_conn.write().unwrap();
+            if *current == id {
+                *current = 0;
             }
-            eprintln!("[supervisor] worker disconnected");
+            eprintln!("[supervisor] worker disconnected generation={id}");
         });
     }
 }
 
-fn handle_worker(mut stream: UnixStream, sessions: &Arc<Sessions>, manager: &Arc<Manager>) {
+fn handle_worker(
+    mut stream: UnixStream,
+    sessions: &Arc<Sessions>,
+    manager: &Arc<Manager>,
+    generation: u64,
+    current_conn: &RwLock<u64>,
+) {
     let mut parser = RecordParser::new();
     let mut buf = [0u8; 8192];
     loop {
+        if *current_conn.read().unwrap() != generation {
+            break;
+        }
         match stream.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 parser.push(&buf[..n], |rec| {
+                    // 新连接一旦接管，旧 socket 已读入但尚未 dispatch 的记录也必须失效。
+                    let current = current_conn.read().unwrap();
+                    if *current != generation {
+                        return;
+                    }
                     if is_frame(rec) {
                         match decode_frame(rec) {
                             Some(DataFrame::Input { session_id, data }) => sessions.input(&session_id, &data),
@@ -203,8 +214,8 @@ fn dispatch(msg: WorkerToSupervisor, sessions: &Arc<Sessions>, manager: &Arc<Man
         SessionReplay { session_id, request_id } => sessions.replay(&session_id, request_id),
         PtyResize { session_id, cols, rows } => sessions.resize(&session_id, cols, rows),
         ResyncRequest => sessions.send_resync(),
-        PtyPause => sessions.set_pause(true),
-        PtyResume => sessions.set_pause(false),
+        // 兼容旧 worker 的控制消息；sessiond 不再允许 transport 暂停 PTY reader。
+        PtyPause | PtyResume => {}
         WorkerUpgrade { version, url, sha256, signature } => match url {
             // 带 url：下载 + 验签（线程内），通过才切换
             Some(url) => manager.install_from_url(version, url, sha256.unwrap_or_default(), signature.unwrap_or_default()),

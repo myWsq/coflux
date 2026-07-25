@@ -9,6 +9,16 @@ use vt100::{Cell, Color, Screen};
 
 const HISTORY_WRAP_FACTOR: usize = 4;
 const RETRANSMIT_LIMIT: usize = 512 * 1024;
+const ESTIMATED_CELL_BYTES: usize = 40;
+
+/// vt100 同时持 normal/alternate viewport，normal 另持 bounded history；用保守 cell 大小做
+/// reservation，确保多 session 的理论上限不超过 supervisor 全局 budget。
+pub fn estimated_terminal_bytes(rows: u16, cols: u16, history_line_limit: usize) -> usize {
+    let history_rows = history_line_limit.saturating_mul(HISTORY_WRAP_FACTOR);
+    (usize::from(rows).saturating_mul(2).saturating_add(history_rows))
+        .saturating_mul(usize::from(cols))
+        .saturating_mul(ESTIMATED_CELL_BYTES)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AltEvent {
@@ -245,6 +255,12 @@ struct Holder {
 }
 
 #[derive(Debug, Clone)]
+struct TransportBinding {
+    generation: u64,
+    channel_id: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct DetachedTarget {
     pub channel_id: String,
     pub holder_epoch: u64,
@@ -308,6 +324,7 @@ pub struct SessionState {
     terminal: TerminalState,
     subscribers: HashMap<String, Subscriber>,
     holder: Option<Holder>,
+    transport_bindings: HashMap<String, TransportBinding>,
     next_holder_epoch: u64,
     input_cursors: HashMap<String, InputCursor>,
     resize_cursors: HashMap<String, ResizeCursor>,
@@ -319,6 +336,7 @@ impl SessionState {
             terminal: TerminalState::new(rows, cols, history_line_limit),
             subscribers: HashMap::new(),
             holder: None,
+            transport_bindings: HashMap::new(),
             next_holder_epoch: 0,
             input_cursors: HashMap::new(),
             resize_cursors: HashMap::new(),
@@ -349,20 +367,11 @@ impl SessionState {
         transport_generation: u64,
         resume_from_seq: Option<u64>,
     ) -> Result<AttachOutcome, AttachError> {
-        if channel_id.is_empty() || client_instance_id.is_empty() || transport_generation == 0 {
-            return Err(AttachError { code: "invalid_attach", message: "channel/client/generation 必须有效".into() });
-        }
-
+        self.validate_attach(channel_id, client_instance_id, transport_generation)?;
         let mut detached = None;
         let epoch = match &self.holder {
             None => self.bump_holder_epoch(),
             Some(holder) if holder.client_instance_id == client_instance_id => {
-                if transport_generation < holder.transport_generation {
-                    return Err(AttachError { code: "stale_transport", message: "transport generation 已过期".into() });
-                }
-                if transport_generation == holder.transport_generation && holder.channel_id != channel_id {
-                    return Err(AttachError { code: "generation_collision", message: "同一 transport generation 不能绑定不同 channel".into() });
-                }
                 if transport_generation > holder.transport_generation && holder.channel_id != channel_id {
                     self.subscribers.remove(&holder.channel_id);
                 }
@@ -380,6 +389,10 @@ impl SessionState {
             channel_id: channel_id.to_string(),
             epoch,
         });
+        self.transport_bindings.insert(
+            client_instance_id.to_string(),
+            TransportBinding { generation: transport_generation, channel_id: channel_id.to_string() },
+        );
 
         let (snapshot_seq, ansi_snapshot, replay) = match resume_from_seq.and_then(|seq| self.terminal.deltas_after(seq).map(|deltas| (seq, deltas))) {
             Some((seq, replay)) => (seq, None, replay),
@@ -387,13 +400,35 @@ impl SessionState {
         };
         self.subscribers.insert(
             channel_id.to_string(),
-            Subscriber {
-                next_seq: snapshot_seq.saturating_add(1),
-                gapped: false,
-                gap_notified: false,
-            },
+            Subscriber { next_seq: snapshot_seq.saturating_add(1), gapped: false, gap_notified: false },
         );
         Ok(AttachOutcome { holder_epoch: epoch, snapshot_seq, ansi_snapshot, replay, detached })
+    }
+
+    pub fn validate_attach(
+        &self,
+        channel_id: &str,
+        client_instance_id: &str,
+        transport_generation: u64,
+    ) -> Result<(), AttachError> {
+        if channel_id.is_empty() || client_instance_id.is_empty() || transport_generation == 0 {
+            return Err(AttachError { code: "invalid_attach", message: "channel/client/generation 必须有效".into() });
+        }
+        if let Some(binding) = self.transport_bindings.get(client_instance_id) {
+            if transport_generation < binding.generation {
+                return Err(AttachError { code: "stale_transport", message: "transport generation 已过期".into() });
+            }
+            if transport_generation == binding.generation && binding.channel_id != channel_id {
+                return Err(AttachError { code: "generation_collision", message: "同一 transport generation 不能绑定不同 channel".into() });
+            }
+            if transport_generation > binding.generation && binding.channel_id == channel_id {
+                return Err(AttachError {
+                    code: "generation_collision",
+                    message: "更高 transport generation 必须迁移到新的 channel".into(),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn bump_holder_epoch(&mut self) -> u64 {
@@ -428,6 +463,20 @@ impl SessionState {
         if let Some(subscriber) = self.subscribers.get_mut(channel_id) {
             subscriber.gap_notified = sent;
         }
+    }
+
+    pub fn subscriber_channels(&self) -> Vec<String> {
+        self.subscribers.keys().cloned().collect()
+    }
+
+    /// worker 物理连接重建后旧 channel transport 全部失效；logical holder/epoch 保留，等待同一
+    /// client 以更高 generation 迁移，不能把 worker restart 误判成 holder handoff。
+    pub fn clear_subscribers(&mut self) {
+        self.subscribers.clear();
+    }
+
+    pub fn remove_subscriber(&mut self, channel_id: &str) {
+        self.subscribers.remove(channel_id);
     }
 
     fn current_holder(&self, channel_id: &str, holder_epoch: u64) -> Result<&Holder, ControlError> {
@@ -889,6 +938,20 @@ mod tests {
     }
 
     #[test]
+    fn sessiond_holder_rejects_stale_generation_after_another_client_takes_over() {
+        let mut state = SessionState::new(3, 12, 4);
+        state.attach("channel-a-3", "client-a", 3, None).unwrap();
+        state.attach("channel-b-1", "client-b", 1, None).unwrap();
+
+        assert_eq!(state.attach("channel-a-2", "client-a", 2, None).unwrap_err().code, "stale_transport");
+        assert_eq!(state.attach("channel-a-other", "client-a", 3, None).unwrap_err().code, "generation_collision");
+        assert_eq!(state.attach("channel-a-3", "client-a", 4, None).unwrap_err().code, "generation_collision");
+
+        let current = state.attach("channel-a-4", "client-a", 4, None).unwrap();
+        assert_eq!(current.holder_epoch, 3);
+    }
+
+    #[test]
     fn sessiond_holder_input_and_resize_sequences_are_idempotent() {
         let mut state = SessionState::new(3, 12, 4);
         let attached = state.attach("channel-a", "client-a", 1, None).unwrap();
@@ -907,6 +970,60 @@ mod tests {
         assert_eq!(state.resize_decision("channel-a", epoch, 1, 40, 120).unwrap(), SequencedDecision::Duplicate);
         assert_eq!(state.resize_decision("channel-a", epoch, 1, 41, 120).unwrap_err().code, "resize_seq_collision");
         assert_eq!(state.resize_decision("channel-a", epoch, 3, 50, 140).unwrap(), SequencedDecision::Apply);
+    }
+
+    #[test]
+    fn sessiond_backpressure_delivery_gap_does_not_stop_terminal_state() {
+        let mut state = SessionState::new(4, 24, 8);
+        let attached = state.attach("channel-a", "client-a", 1, None).unwrap();
+        assert_eq!(attached.snapshot_seq, 0);
+
+        let pending = state.feed(b"agent is working");
+        assert_eq!(pending.len(), 1);
+        state.delivery_result("channel-a", pending[0].delta.to_seq, false);
+        let gaps = state.pending_gaps();
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].expected_seq, 1);
+
+        let marker = b"\r\nCOMPLETED";
+        assert!(state.feed(marker).is_empty(), "gapped subscriber must not receive later out-of-order deltas");
+        assert_eq!(state.output_seq(), b"agent is working".len() as u64 + marker.len() as u64);
+
+        let mut restored = vt100::Parser::new(4, 24, 32);
+        restored.process(&state.snapshot());
+        assert!(restored.screen().contents().contains("COMPLETED"));
+    }
+
+    #[test]
+    fn sessiond_backpressure_worker_reconnect_keeps_holder_and_migrates_transport() {
+        let mut state = SessionState::new(3, 16, 4);
+        let first = state.attach("direct-1", "client-a", 1, None).unwrap();
+        state.clear_subscribers();
+        assert!(state.subscriber_channels().is_empty());
+
+        let migrated = state.attach("relay-2", "client-a", 2, None).unwrap();
+        assert_eq!(migrated.holder_epoch, first.holder_epoch);
+        assert!(migrated.detached.is_none());
+        assert_eq!(state.input_decision("direct-1", first.holder_epoch, 1, b"stale").unwrap_err().code, "stale_transport");
+
+        let pending = state.feed(b"online again");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].channel_id, "relay-2");
+    }
+
+    #[test]
+    fn sessiond_backpressure_failed_attach_delivery_waits_for_retry() {
+        let mut state = SessionState::new(3, 16, 4);
+        let first = state.attach("channel-a", "client-a", 1, None).unwrap();
+        state.remove_subscriber("channel-a");
+        assert!(state.feed(b"not streamed").is_empty());
+
+        let retried = state.attach("channel-a", "client-a", 1, None).unwrap();
+        assert_eq!(retried.holder_epoch, first.holder_epoch);
+        assert!(retried.ansi_snapshot.is_some());
+        let pending = state.feed(b"streamed");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].channel_id, "channel-a");
     }
 
 }
