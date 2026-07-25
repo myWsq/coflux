@@ -40,6 +40,16 @@ pub use ipc::{
 };
 pub use wire::{DaemonToServer, FsEntry, FsEntryKind, ServerToDaemon, SessionPorts, SessionRef};
 
+/// 编码 transport-neutral Device envelope，供不直接依赖 prost 的 supervisor 使用。
+pub fn encode_device_envelope(message: &wire::DeviceEnvelope) -> Vec<u8> {
+    prost::Message::encode_to_vec(message)
+}
+
+/// 解码 Device envelope；畸形 bytes 返回 None，由 transport 记录并丢弃。
+pub fn decode_device_envelope(bytes: &[u8]) -> Option<wire::DeviceEnvelope> {
+    prost::Message::decode(bytes).ok()
+}
+
 /// Browser/worker/sessiond 共用的 DeviceEnvelope 语义版本。
 pub const DEVICE_PROTOCOL_VERSION: u32 = 1;
 /// 本机 gateway 的生产固定端口；dev/test 可经 worker 配置覆盖。
