@@ -1282,11 +1282,62 @@ export class Hub {
         });
         break;
       }
+      case "terminalCreate": {
+        // 无 repo 的目录工作区（projectId 为空即目录工作区）+ 一个任务；path 是 daemon 侧
+        // FsListed 回传的 HOME 绝对路径，无 git 语义可校验，直接落库、不走 prepared operation。
+        const value = msg.payload.value;
+        const d = this.daemons.get(value.daemonId);
+        if (!d || d.accountId !== client.accountId) {
+          this.sendClient(client, { case: "error", value: { message: "daemon 不在线或不属于本账号" } });
+          return;
+        }
+        if (!value.path.trim()) {
+          this.sendClient(client, { case: "error", value: { message: "终端目录路径为空" } });
+          return;
+        }
+        const ts = Date.now();
+        const workspace = create(WorkspaceSchema, {
+          id: randomUUID(),
+          accountId: client.accountId!,
+          daemonId: value.daemonId,
+          projectId: "",
+          name: "~",
+          path: value.path,
+          branch: "",
+          isMain: false,
+          createdAt: ts,
+        });
+        const task: Task = create(TaskSchema, { id: randomUUID(), accountId: workspace.accountId, daemonId: workspace.daemonId, projectId: "", workspaceId: workspace.id, title: "终端", status: TaskStatus.IDLE, createdAt: ts, updatedAt: ts });
+        await this.store.transaction(async (tx) => {
+          await tx.createWorkspace(workspace);
+          await tx.createTask(task);
+        });
+        this.broadcast(workspace.accountId, { case: "workspaceCreated", value: { workspace } });
+        this.emitTask(task);
+        await this.pushWorkspaceList(workspace.daemonId);
+        break;
+      }
       case "workspaceRemove": {
         const ws = await this.store.getWorkspace(msg.payload.value.workspaceId);
         if (!ws || ws.accountId !== client.accountId) return;
         if (ws.isMain) {
           this.sendClient(client, { case: "error", value: { message: "主工作区不能删除（删除整个项目即可）" } });
+          return;
+        }
+        if (!ws.projectId) {
+          // 目录工作区：只删记录，绝不进入 worktree.remove（不能对 HOME 跑 git worktree 操作），
+          // daemon 离线也可删。
+          const tasks = await this.store.listTasksByWorkspace(ws.id);
+          for (const t of tasks) {
+            if (!t.sessionId) continue;
+            this.routeToSessionDaemon(t.sessionId, { case: "sessionClose", value: { sessionId: t.sessionId } });
+            this.dropSession(t.sessionId);
+          }
+          const removedTaskIds = await this.store.removeTasksByWorkspace(ws.id);
+          await this.store.removeWorkspace(ws.id);
+          for (const taskId of removedTaskIds) this.broadcast(ws.accountId, { case: "taskRemoved", value: { taskId } });
+          this.broadcast(ws.accountId, { case: "workspaceRemoved", value: { workspaceId: ws.id } });
+          await this.pushWorkspaceList(ws.daemonId);
           return;
         }
         const project = await this.store.getProject(ws.projectId);
@@ -1333,9 +1384,12 @@ export class Hub {
         const outcome = await this.store.transaction(async (tx) => {
           const ws = await tx.getWorkspace(value.workspaceId);
           if (!ws || ws.accountId !== client.accountId) return { error: "工作区不存在或不属于本账号" } as const;
-          const project = await tx.claimActiveProject(ws.projectId);
-          if (!project || project.accountId !== ws.accountId || project.daemonId !== ws.daemonId) {
-            return { error: "项目正在删除，不能再创建任务" } as const;
+          // 目录工作区（projectId 为空）没有 project 可检查
+          if (ws.projectId) {
+            const project = await tx.claimActiveProject(ws.projectId);
+            if (!project || project.accountId !== ws.accountId || project.daemonId !== ws.daemonId) {
+              return { error: "项目正在删除，不能再创建任务" } as const;
+            }
           }
           const ts = Date.now();
           const task: Task = create(TaskSchema, { id: randomUUID(), accountId: ws.accountId, daemonId: ws.daemonId, projectId: ws.projectId, workspaceId: ws.id, title: value.title || "未命名任务", status: TaskStatus.IDLE, createdAt: ts, updatedAt: ts });
