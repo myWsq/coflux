@@ -907,18 +907,26 @@ test("旧 daemon 对 ping 回 unsupported_payload 时静默降级，不弹错误
   assert.ok(ping, "建连后应发出 ping");
 
   const errorsBefore = h.errors.length;
+  // 真实回归（2026-07-26 线上）：旧 daemon 的 prost 解不出 ping 的字段号，整个 payload 落成
+  // None，于是回的是 **不带 requestId** 的 empty_payload。按 requestId 匹配的拦截够不着它，
+  // 错误一路落到 onError，每 15s 弹一次。requestId 缺席是这条用例的全部要害，别给它补上。
   h.adapter.emit(direct, {
     case: "error",
     value: {
-      requestId: (ping.value as { requestId: string }).requestId,
-      code: "unsupported_payload",
-      message: "该 Device payload 不属于 worker RPC router",
+      code: "empty_payload",
+      message: "DeviceEnvelope payload 为空",
     },
   });
   await flush();
-  // 每 15s 一次的骚扰：这条断言就是防它回来的。
   assert.equal(h.errors.length, errorsBefore, "旧 daemon 不认识 ping 不该弹给用户");
   assert.equal(h.states.at(-1)?.rttMs, undefined);
+
+  // 归因之后必须彻底停发：在旧 daemon 上心跳永远不会成功，再发只是白费往返 + 再弹一次。
+  const pingsBefore = payloads(direct).filter((payload) => payload?.case === "ping").length;
+  h.clock.advance(60_000);
+  await flush();
+  assert.equal(payloads(direct).filter((payload) => payload?.case === "ping").length, pingsBefore, "已判定不支持后不该继续发心跳");
+  assert.equal(h.errors.length, errorsBefore, "更不该继续弹错误");
   release();
   h.router.destroy();
 });
