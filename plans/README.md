@@ -47,6 +47,6 @@
 | 042 | [Device PTY 输入累计 ACK 与连续 exactly-once 契约](042-device-input-ack-contract.md) | DONE (e235158) | 036 |
 | 043 | [独立 relay 服务·第一片 —— crates/relay 二进制 + 按需拨号 rendezvous](043-standalone-relay-rendezvous.md) | DONE (74f3ba6) | none（前置 036-042 已 DONE；第二片=多节点就近，另立 plan） |
 | 044 | [iOS app 第一片 —— apps/ios 工程骨架 + Swift 客户端层 + 登录跑通](044-ios-app-skeleton-client-login.md) | DONE（模拟器闭环已验收；真机生产验收待用户；第二片=SwiftTerm 终端交互，另立 plan） | none |
-| 045 | [无 repo 终端 —— 选设备后在其 HOME 直接开终端](045-no-repo-home-terminal.md) | TODO | none |
+| 045 | [无 repo 终端 —— 选设备后在其 HOME 直接开终端](045-no-repo-home-terminal.md) | DONE（自动化门已过；UI 走查待用户人工验收） | none |
 
 执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026 → 027 → 028 → 029 → 031 → 032 → {033-skew ∥ 033-conn} → 034 → 035 → 036 → {037 ∥ 038 ∥ 039}（本地优先 daemon/server 成员，已完成）→ 042（输入 ACK 串行契约）→ 040（web/client）→ 041（集成与发布验收）→ 043（独立 relay 第一片）→ 044（iOS 第一片，与 043 无依赖可并行）→ 045（无 repo 终端，无依赖）。（030 已撤回，未执行）
