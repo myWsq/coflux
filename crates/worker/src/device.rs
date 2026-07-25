@@ -1155,16 +1155,11 @@ impl DeviceRuntime {
                 }
                 if let Some(services) = &self.services {
                     self.dirty_sessions.lock().unwrap().extend(catalog.sessions.iter().map(|session| session.session_id.clone()));
-                    {
-                        let mut state = services.state.lock().unwrap();
-                        state.alive = catalog
-                            .sessions
-                            .iter()
-                            .map(|session| (session.session_id.clone(), (session.task_id.clone(), session.pid)))
-                            .collect();
-                        let alive = state.alive.clone();
-                        state.dec_modes.retain(|session_id, _| alive.contains_key(session_id));
-                    }
+                    services.state.lock().unwrap().alive = catalog
+                        .sessions
+                        .iter()
+                        .map(|session| (session.session_id.clone(), (session.task_id.clone(), session.pid)))
+                        .collect();
                     let payload = daemon_to_server::Payload::SessionCatalog(DeviceSessionCatalog {
                         request_id: catalog.request_id.clone(),
                         sessions: catalog.sessions.clone(),
@@ -1605,7 +1600,6 @@ mod tests {
             workspaces,
             last_branches: HashMap::new(),
             last_diffs: HashMap::new(),
-            dec_modes: HashMap::new(),
             conn_state: crate::conn_state::ConnState::new(&home),
         }));
         let (to_supervisor, from_supervisor) = mpsc::channel(32);

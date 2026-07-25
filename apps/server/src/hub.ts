@@ -5,16 +5,15 @@
  *
  * 认证（Tailscale 式）：daemonId 服务器签发绑定不可冒充；account 隔离。
  * 健壮性（经两轮对抗式审查）：daemon 上行消息按 task.daemonId === conn.daemonId 归属校验；
- *   重启后绝不重复起 PTY；session 生命周期 closing 标志；pending 超时 + 掉线清理；client 越权拦截。
+ *   重启后绝不重复起 PTY；pending 超时 + 掉线清理；client 越权拦截。
  *
  * 存储层是 Postgres（异步）：所有触库路径已 async 化。并发语义靠 DB 约束兜底（主键/唯一约束/
  * ON CONFLICT）而非应用层锁；级联删除、lazy provision 等多语句操作经 `store.transaction()` 保证
  * 原子性。单连接内消息处理不做串行队列（同连接消息仍可能交错，见 plans/002 决策）——各 handler
  * 内部保持"写完再广播"的顺序（await 与其后的同步语句之间不留出让点），确需的跨语句原子性交给事务。
  *
- * wire（plan 009）：WS 上只有 binary message，每条 = 一个 protobuf 信封。pty/proxy 数据面不再是
- * 独立的自定义二进制帧，而是信封 oneof 里的普通 case（pty_output/pty_replay/proxy_data/pty_input），
- * 与其它控制面消息走同一个 switch —— 旧的 handleDaemonBinary/handleClientBinary 已整体删除。
+ * wire：WS 上只有 binary protobuf 信封。terminal 与普通设备 RPC 封装在端到端 DeviceEnvelope，
+ * 中心只转发 opaque bytes；中心可见的数据面只剩端口代理的 ProxyData 与派生 checkpoint。
  */
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -65,7 +64,6 @@ import {
 } from "./store.js";
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
-import { PendingRegistry } from "./pending.js";
 import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
 import { DeviceRelayRouter } from "./device-relay.js";
 import { LocalControlPlane } from "./local-control.js";
@@ -139,9 +137,6 @@ interface RuntimeSession {
   daemonId: DaemonId;
   accountId: AccountId;
   taskId: TaskId;
-  closing: boolean;
-  /** 仅供旧 protobuf PTY adapter 路由输出；不是 holder，也不参与任何控制权裁决。 */
-  legacyViewers: Set<ClientConn>;
 }
 
 interface PreparedWaiter {
@@ -168,7 +163,6 @@ export class Hub {
   private daemons = new Map<DaemonId, DaemonConn>();
   private sessions = new Map<SessionId, RuntimeSession>();
   private clients = new Set<ClientConn>();
-  private pendingReplays = new PendingRegistry<ClientConn, { sessionId: SessionId }>(config.pendingTimeoutMs);
   private preparedWaiters = new Map<string, Set<PreparedWaiter>>();
   private preparedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private catalog = new Map<DaemonId, Map<SessionId, DeviceSessionInfo>>();
@@ -357,8 +351,6 @@ export class Hub {
           daemonId: daemon.info.daemonId,
           accountId: daemon.accountId,
           taskId: session.taskId,
-          closing: false,
-          legacyViewers: new Set(),
         });
       }
       if (task.status !== TaskStatus.RUNNING || task.sessionId !== session.sessionId) {
@@ -782,8 +774,6 @@ export class Hub {
         daemonId: effect.daemonId,
         accountId: effect.accountId,
         taskId: effect.task.id,
-        closing: false,
-        legacyViewers: new Set(),
       });
       this.emitTask(effect.task);
     }
@@ -996,40 +986,6 @@ export class Hub {
         if (conn.daemonId) this.tunnels.handleData(conn.daemonId, value.connId, value.data);
         break;
       }
-      /* ---------------- 数据面（原自定义二进制帧，现为普通 oneof case）---------------- */
-      case "ptyOutput": {
-        const value = msg.payload.value;
-        const s = this.sessions.get(value.sessionId);
-        if (!s || s.daemonId !== conn.daemonId) return;
-        // 旧客户端迁移 adapter：只维护 viewer 集合，不拥有 holder/epoch/输入裁决。
-        for (const viewer of [...s.legacyViewers]) {
-          if (viewer.ws.bufferedAmount > config.clientBufferHardLimit) {
-            s.legacyViewers.delete(viewer);
-            try {
-              viewer.ws.close(1013, "client too slow");
-            } catch {
-              /* ignore */
-            }
-            continue;
-          }
-          this.sendClient(viewer, { case: "ptyOutput", value });
-        }
-        break;
-      }
-      case "ptyReplay": {
-        const value = msg.payload.value;
-        const p = this.pendingReplays.get(value.requestId);
-        if (!p || p.daemonId !== conn.daemonId) return;
-        this.pendingReplays.take(value.requestId);
-        // 重新包成 pty_output 转发给控制端：bytes 原样复制，无需旧版的字节级重组 hack
-        if (value.data.length > 0) {
-          this.sendClient(p.client, { case: "ptyOutput", value: { sessionId: value.sessionId, data: value.data } });
-        }
-        // 旧 adapter 只登记输出订阅；真正 holder 由 Device attach 在 sessiond 裁决。
-        const s = this.sessions.get(value.sessionId);
-        if (s && !s.closing) s.legacyViewers.add(p.client);
-        break;
-      }
     }
   }
 
@@ -1042,7 +998,7 @@ export class Hub {
       if (!task || task.accountId !== accountId || task.daemonId !== daemonId) continue;
       if (task.sessionId && task.sessionId !== sessionId) continue;
       if (!this.sessions.has(sessionId)) {
-        this.sessions.set(sessionId, { sessionId, daemonId, accountId, taskId, closing: false, legacyViewers: new Set() });
+        this.sessions.set(sessionId, { sessionId, daemonId, accountId, taskId });
       }
       if (task.sessionId !== sessionId) {
         const updated = await this.store.updateTask(taskId, { status: TaskStatus.RUNNING, sessionId, exitCode: undefined });
@@ -1153,8 +1109,6 @@ export class Hub {
     for (const r of releasedRoutes) this.broadcastPorts(accountId, r.taskId);
     await this.store.touchDevice(daemonId, Date.now());
     log.info("daemon disconnected", { daemonId });
-
-    this.pendingReplays.removeByDaemon(daemonId, (p) => this.sendClient(p.client, { case: "error", value: { message: "daemon 掉线，无法回放" } }));
 
     const device = await this.store.getDevice(daemonId);
     if (device && !device.revoked) {
@@ -1422,35 +1376,6 @@ export class Hub {
         await this.startOrAttachTask(client, value.taskId, value.cols, value.rows);
         break;
       }
-      case "taskAttach": {
-        const value = msg.payload.value;
-        const task = await this.requireTask(client, value.taskId);
-        if (!task) return;
-        const s = task.sessionId ? this.sessions.get(task.sessionId) : undefined;
-        if (task.status === TaskStatus.RUNNING && s && !s.closing) await this.attachSession(client, s.sessionId);
-        else if (task.status === TaskStatus.RUNNING && task.sessionId) {
-          const checkpoint = await this.store.getSessionCheckpoint(task.sessionId);
-          if (checkpoint) {
-            this.sendCheckpoint(client, checkpoint);
-            this.sendClient(client, { case: "ptyOutput", value: { sessionId: task.sessionId, data: checkpoint.ansiSnapshot } });
-          } else this.sendClient(client, { case: "error", value: { message: "会话事实尚未恢复" } });
-        }
-        else this.sendClient(client, { case: "error", value: { message: "任务未在运行，无法 attach" } });
-        break;
-      }
-      case "taskStop": {
-        const task = await this.requireTask(client, msg.payload.value.taskId);
-        if (!task) return;
-        const s = task.sessionId ? this.sessions.get(task.sessionId) : undefined;
-        if (s && this.isDaemonOnline(s.daemonId)) {
-          s.closing = true;
-          this.routeToSessionDaemon(s.sessionId, { case: "sessionClose", value: { sessionId: s.sessionId } });
-        } else if (task.status === TaskStatus.RUNNING) {
-          // daemon 离线不是 exit fact；保留 running，等 local stop 的 tombstone/catalog 收敛。
-          this.sendClient(client, { case: "error", value: { message: "daemon control WS 离线，请通过本地 DeviceTransport 停止" } });
-        }
-        break;
-      }
       case "taskRemove": {
         const task = await this.requireTask(client, msg.payload.value.taskId);
         if (!task) return;
@@ -1461,33 +1386,6 @@ export class Hub {
         await this.store.removeTask(task.id);
         await this.store.removeSessionCheckpointsByTask(task.id);
         this.broadcast(task.accountId, { case: "taskRemoved", value: { taskId: task.id } });
-        break;
-      }
-      case "ptyResize": {
-        const value = msg.payload.value;
-        const s = this.sessions.get(value.sessionId);
-        if (!s || s.accountId !== client.accountId) return;
-        const cols = clampDim(value.cols, 80);
-        const rows = clampDim(value.rows, 24);
-        this.routeToSessionDaemon(value.sessionId, { case: "ptyResize", value: { sessionId: value.sessionId, cols, rows } });
-        break;
-      }
-      case "ptyInput": {
-        const value = msg.payload.value;
-        const s = this.sessions.get(value.sessionId);
-        if (!s || s.accountId !== client.accountId) return;
-        // migration adapter 不作 holder 判断；新客户端的 input/resize 经 Device channel，
-        // 由 sessiond 以 holderEpoch + sequence 做最终裁决。
-        const d = this.daemons.get(s.daemonId);
-        if (d) this.sendDaemon(d, { case: "ptyInput", value });
-        break;
-      }
-      case "clientExec":
-      case "clientFsList":
-      case "clientFsRead":
-      case "clientFsWrite": {
-        // build-skew 迁移兜底；新 web/mobile 的 daemon RPC 必须走统一 DeviceTransport。
-        this.sendClient(client, { case: "error", value: { message: "客户端版本过旧，请刷新后重试设备操作" } });
         break;
       }
     }
@@ -1622,16 +1520,7 @@ export class Hub {
     if (!task) return;
 
     if (task.status === TaskStatus.RUNNING && task.sessionId) {
-      const s = this.sessions.get(task.sessionId);
-      if (s && !s.closing) return void (await this.attachSession(client, s.sessionId));
-      if (s && s.closing) return void this.sendClient(client, { case: "error", value: { message: "任务正在停止，请稍候重试" } });
-      const checkpoint = await this.store.getSessionCheckpoint(task.sessionId);
-      if (checkpoint) {
-        this.sendCheckpoint(client, checkpoint);
-        this.sendClient(client, { case: "ptyOutput", value: { sessionId: task.sessionId, data: checkpoint.ansiSnapshot } });
-        return;
-      }
-      return void this.sendClient(client, { case: "error", value: { message: "会话事实尚未从 daemon catalog 恢复" } });
+      return void this.sendClient(client, { case: "error", value: { message: "任务已在运行，请通过 DeviceTransport attach" } });
     }
 
     const d = this.daemons.get(task.daemonId);
@@ -1671,29 +1560,6 @@ export class Hub {
       metadata: JSON.stringify({ taskId: task.id, sessionId }),
       expiresAt: Date.now() + config.preparedOperationTtlMs,
     });
-  }
-
-  private async attachSession(client: ClientConn, sessionId: SessionId): Promise<void> {
-    const s = this.sessions.get(sessionId);
-    if (!s) return;
-    if (!this.isDaemonOnline(s.daemonId)) {
-      const checkpoint = await this.store.getSessionCheckpoint(sessionId);
-      if (!checkpoint) return void this.sendClient(client, { case: "error", value: { message: "daemon 离线且没有 checkpoint" } });
-      this.sendCheckpoint(client, checkpoint);
-      // 旧 web 不认识 sessionCheckpoint，兼容地把同一缓存作为 ptyOutput 下发；不解析、不改写。
-      this.sendClient(client, { case: "ptyOutput", value: { sessionId, data: checkpoint.ansiSnapshot } });
-      return;
-    }
-    // 仅旧客户端走 raw replay adapter；新 Device attach 直接从 sessiond 取 snapshot/seq。
-    const requestId = randomUUID();
-    this.pendingReplays.register(requestId, s.daemonId, client, { sessionId }, (p) =>
-      this.sendClient(p.client, { case: "error", value: { message: "回放超时" } }),
-    );
-    const ok = this.routeToSessionDaemon(sessionId, { case: "sessionReplay", value: { sessionId, requestId } });
-    if (!ok) {
-      this.pendingReplays.take(requestId);
-      this.sendClient(client, { case: "error", value: { message: "daemon 离线，无法回放" } });
-    }
   }
 
   /** device.authorizeInfo / device.authorize 共用的 token 查找 + 限速门。
@@ -1761,8 +1627,6 @@ export class Hub {
     this.catalog.delete(daemonId);
     this.deviceRelay.closeByDaemon(daemonId);
     for (const [sid, s] of this.sessions) if (s.daemonId === daemonId) this.dropSession(sid);
-    this.pendingReplays.removeByDaemon(daemonId);
-
     const workspaces = await this.store.listWorkspacesByDaemon(daemonId);
     const projects = await this.store.listProjectsByDaemon(daemonId);
     let taskIds: TaskId[] = [];
@@ -1782,9 +1646,7 @@ export class Hub {
 
   handleClientClose(client: ClientConn): void {
     this.clients.delete(client);
-    for (const s of this.sessions.values()) s.legacyViewers.delete(client);
     this.deviceRelay.closeByClient(client);
-    this.pendingReplays.removeByClient(client);
     this.removePreparedWaitersByClient(client);
   }
 
@@ -1795,7 +1657,6 @@ export class Hub {
 
   /** 优雅关闭：清定时器、关所有连接 */
   shutdown(): void {
-    this.pendingReplays.clear();
     this.deviceRelay.shutdown();
     this.localControl.shutdown();
     for (const timer of this.preparedRetryTimers.values()) clearTimeout(timer);

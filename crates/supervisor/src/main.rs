@@ -191,7 +191,6 @@ fn handle_worker(
                     }
                     if is_frame(rec) {
                         match decode_frame(rec) {
-                            Some(DataFrame::Input { session_id, data }) => sessions.input(&session_id, &data),
                             Some(DataFrame::Device { channel_id, data }) => sessions.handle_device(&channel_id, &data),
                             _ => {}
                         }
@@ -211,11 +210,7 @@ fn dispatch(msg: WorkerToSupervisor, sessions: &Arc<Sessions>, manager: &Arc<Man
             sessions.create(session_id, task_id, cwd, shell.unwrap_or_default(), cols, rows)
         }
         SessionClose { session_id } => sessions.close(&session_id),
-        SessionReplay { session_id, request_id } => sessions.replay(&session_id, request_id),
-        PtyResize { session_id, cols, rows } => sessions.resize(&session_id, cols, rows),
         ResyncRequest => sessions.send_resync(),
-        // 兼容旧 worker 的控制消息；sessiond 不再允许 transport 暂停 PTY reader。
-        PtyPause | PtyResume => {}
         WorkerUpgrade { version, url, sha256, signature } => match url {
             // 带 url：下载 + 验签（线程内），通过才切换
             Some(url) => manager.install_from_url(version, url, sha256.unwrap_or_default(), signature.unwrap_or_default()),

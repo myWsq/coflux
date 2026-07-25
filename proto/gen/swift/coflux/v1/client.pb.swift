@@ -11,11 +11,6 @@
 /// Client ⟷ Server 链路（/client WebSocket）。
 /// wire：每个 WS binary message = 一个 protobuf 编码的信封（ClientToServer / ServerToClient）。
 
-#if canImport(FoundationEssentials)
-import FoundationEssentials
-#else
-import Foundation
-#endif
 import SwiftProtobuf
 
 // If the compiler emits an error on this type, it is because this file
@@ -341,141 +336,12 @@ public struct Coflux_V1_TaskStart: Sendable {
   public init() {}
 }
 
-public struct Coflux_V1_TaskAttach: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var taskID: String = String()
-
-  /// 客户端终端尺寸：镜像慢路径（replay prime）按此尺寸解析历史字节。
-  /// 缺省（0）时 server 回落 80×24。
-  public var cols: UInt32 = 0
-
-  public var rows: UInt32 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public struct Coflux_V1_TaskStop: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var taskID: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 public struct Coflux_V1_TaskRemove: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var taskID: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// 通用原语（IDE/工具用）：在某工作区里跑命令、读/列文件。request_id 由 client 自定，server 原样回带
-public struct Coflux_V1_ClientExec: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var requestID: String = String()
-
-  public var workspaceID: String = String()
-
-  public var command: String = String()
-
-  public var args: [String] = []
-
-  public var timeoutMs: UInt32 {
-    get {_timeoutMs ?? 0}
-    set {_timeoutMs = newValue}
-  }
-  /// Returns true if `timeoutMs` has been explicitly set.
-  public var hasTimeoutMs: Bool {self._timeoutMs != nil}
-  /// Clears the value of `timeoutMs`. Subsequent reads from it will return its default value.
-  public mutating func clearTimeoutMs() {self._timeoutMs = nil}
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-
-  fileprivate var _timeoutMs: UInt32? = nil
-}
-
-public struct Coflux_V1_ClientFsList: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var requestID: String = String()
-
-  public var workspaceID: String = String()
-
-  public var path: String = String()
-
-  /// 设备浏览模式（plan 012 导入向导）：设置时忽略 workspace_id，
-  /// 以该设备的用户 home 为根浏览（server 校验设备归属后 root 下发 "~"）。
-  public var daemonID: String {
-    get {_daemonID ?? String()}
-    set {_daemonID = newValue}
-  }
-  /// Returns true if `daemonID` has been explicitly set.
-  public var hasDaemonID: Bool {self._daemonID != nil}
-  /// Clears the value of `daemonID`. Subsequent reads from it will return its default value.
-  public mutating func clearDaemonID() {self._daemonID = nil}
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-
-  fileprivate var _daemonID: String? = nil
-}
-
-public struct Coflux_V1_ClientFsRead: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var requestID: String = String()
-
-  public var workspaceID: String = String()
-
-  public var path: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// 终端剪贴板贴图（plan 014，temp 模式修订）：把图片字节上传到 daemon 侧系统临时目录落盘，
-/// data 为原始（或客户端已压缩过的）图片字节。temp=true 时 path 为单段文件名
-/// （形如 "paste-<ts>-<rand>.<ext>"），落盘绝对路径由 worker 回带。workspace_id 仍用于
-/// 归属校验与路由到正确 daemon（temp 模式不写入该 workspace 的 worktree）。
-public struct Coflux_V1_ClientFsWrite: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var requestID: String = String()
-
-  public var workspaceID: String = String()
-
-  public var path: String = String()
-
-  public var data: Data = Data()
-
-  public var temp: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -601,68 +467,12 @@ public struct Coflux_V1_ClientToServer: Sendable {
     set {payload = .taskStart(newValue)}
   }
 
-  public var taskAttach: Coflux_V1_TaskAttach {
-    get {
-      if case .taskAttach(let v)? = payload {return v}
-      return Coflux_V1_TaskAttach()
-    }
-    set {payload = .taskAttach(newValue)}
-  }
-
-  public var taskStop: Coflux_V1_TaskStop {
-    get {
-      if case .taskStop(let v)? = payload {return v}
-      return Coflux_V1_TaskStop()
-    }
-    set {payload = .taskStop(newValue)}
-  }
-
   public var taskRemove: Coflux_V1_TaskRemove {
     get {
       if case .taskRemove(let v)? = payload {return v}
       return Coflux_V1_TaskRemove()
     }
     set {payload = .taskRemove(newValue)}
-  }
-
-  public var ptyResize: Coflux_V1_PtyResize {
-    get {
-      if case .ptyResize(let v)? = payload {return v}
-      return Coflux_V1_PtyResize()
-    }
-    set {payload = .ptyResize(newValue)}
-  }
-
-  public var clientExec: Coflux_V1_ClientExec {
-    get {
-      if case .clientExec(let v)? = payload {return v}
-      return Coflux_V1_ClientExec()
-    }
-    set {payload = .clientExec(newValue)}
-  }
-
-  public var clientFsList: Coflux_V1_ClientFsList {
-    get {
-      if case .clientFsList(let v)? = payload {return v}
-      return Coflux_V1_ClientFsList()
-    }
-    set {payload = .clientFsList(newValue)}
-  }
-
-  public var clientFsRead: Coflux_V1_ClientFsRead {
-    get {
-      if case .clientFsRead(let v)? = payload {return v}
-      return Coflux_V1_ClientFsRead()
-    }
-    set {payload = .clientFsRead(newValue)}
-  }
-
-  public var clientFsWrite: Coflux_V1_ClientFsWrite {
-    get {
-      if case .clientFsWrite(let v)? = payload {return v}
-      return Coflux_V1_ClientFsWrite()
-    }
-    set {payload = .clientFsWrite(newValue)}
   }
 
   public var deviceSetName: Coflux_V1_DeviceSetName {
@@ -721,15 +531,6 @@ public struct Coflux_V1_ClientToServer: Sendable {
     set {payload = .localUnpairRequest(newValue)}
   }
 
-  /// 数据面（高频）
-  public var ptyInput: Coflux_V1_PtyInput {
-    get {
-      if case .ptyInput(let v)? = payload {return v}
-      return Coflux_V1_PtyInput()
-    }
-    set {payload = .ptyInput(newValue)}
-  }
-
   public var workspaceSetName: Coflux_V1_WorkspaceSetName {
     get {
       if case .workspaceSetName(let v)? = payload {return v}
@@ -755,14 +556,7 @@ public struct Coflux_V1_ClientToServer: Sendable {
     case workspaceRemove(Coflux_V1_WorkspaceRemove)
     case taskCreate(Coflux_V1_TaskCreate)
     case taskStart(Coflux_V1_TaskStart)
-    case taskAttach(Coflux_V1_TaskAttach)
-    case taskStop(Coflux_V1_TaskStop)
     case taskRemove(Coflux_V1_TaskRemove)
-    case ptyResize(Coflux_V1_PtyResize)
-    case clientExec(Coflux_V1_ClientExec)
-    case clientFsList(Coflux_V1_ClientFsList)
-    case clientFsRead(Coflux_V1_ClientFsRead)
-    case clientFsWrite(Coflux_V1_ClientFsWrite)
     case deviceSetName(Coflux_V1_DeviceSetName)
     case localPairRequest(Coflux_V1_LocalPairRequest)
     case localLeaseRequest(Coflux_V1_LocalLeaseRequest)
@@ -770,8 +564,6 @@ public struct Coflux_V1_ClientToServer: Sendable {
     case deviceRelayFrame(Coflux_V1_DeviceRelayFrame)
     case deviceRelayClose(Coflux_V1_DeviceRelayClose)
     case localUnpairRequest(Coflux_V1_LocalUnpairRequest)
-    /// 数据面（高频）
-    case ptyInput(Coflux_V1_PtyInput)
     case workspaceSetName(Coflux_V1_WorkspaceSetName)
 
   }
@@ -1080,19 +872,6 @@ public struct Coflux_V1_TaskRemoved: Sendable {
   public init() {}
 }
 
-/// 本 client 对该任务的控制权被另一个 client 接管（独占模型）
-public struct Coflux_V1_TaskDetached: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var taskID: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 public struct Coflux_V1_ServerError: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1246,52 +1025,12 @@ public struct Coflux_V1_ServerToClient: Sendable {
     set {payload = .taskRemoved(newValue)}
   }
 
-  public var taskDetached: Coflux_V1_TaskDetached {
-    get {
-      if case .taskDetached(let v)? = payload {return v}
-      return Coflux_V1_TaskDetached()
-    }
-    set {payload = .taskDetached(newValue)}
-  }
-
-  public var execResult: Coflux_V1_ExecResult {
-    get {
-      if case .execResult(let v)? = payload {return v}
-      return Coflux_V1_ExecResult()
-    }
-    set {payload = .execResult(newValue)}
-  }
-
-  public var fsListed: Coflux_V1_FsListed {
-    get {
-      if case .fsListed(let v)? = payload {return v}
-      return Coflux_V1_FsListed()
-    }
-    set {payload = .fsListed(newValue)}
-  }
-
-  public var fsReadResult: Coflux_V1_FsReadResult {
-    get {
-      if case .fsReadResult(let v)? = payload {return v}
-      return Coflux_V1_FsReadResult()
-    }
-    set {payload = .fsReadResult(newValue)}
-  }
-
   public var error: Coflux_V1_ServerError {
     get {
       if case .error(let v)? = payload {return v}
       return Coflux_V1_ServerError()
     }
     set {payload = .error(newValue)}
-  }
-
-  public var fsWriteResult: Coflux_V1_FsWriteResult {
-    get {
-      if case .fsWriteResult(let v)? = payload {return v}
-      return Coflux_V1_FsWriteResult()
-    }
-    set {payload = .fsWriteResult(newValue)}
   }
 
   public var clientOutdated: Coflux_V1_ClientOutdated {
@@ -1366,15 +1105,6 @@ public struct Coflux_V1_ServerToClient: Sendable {
     set {payload = .localUnpairResult(newValue)}
   }
 
-  /// 数据面（高频）
-  public var ptyOutput: Coflux_V1_PtyOutput {
-    get {
-      if case .ptyOutput(let v)? = payload {return v}
-      return Coflux_V1_PtyOutput()
-    }
-    set {payload = .ptyOutput(newValue)}
-  }
-
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -1393,12 +1123,7 @@ public struct Coflux_V1_ServerToClient: Sendable {
     case workspaceRemoved(Coflux_V1_WorkspaceRemoved)
     case taskUpdated(Coflux_V1_TaskUpdated)
     case taskRemoved(Coflux_V1_TaskRemoved)
-    case taskDetached(Coflux_V1_TaskDetached)
-    case execResult(Coflux_V1_ExecResult)
-    case fsListed(Coflux_V1_FsListed)
-    case fsReadResult(Coflux_V1_FsReadResult)
     case error(Coflux_V1_ServerError)
-    case fsWriteResult(Coflux_V1_FsWriteResult)
     case clientOutdated(Coflux_V1_ClientOutdated)
     case localPairResult(Coflux_V1_LocalPairResult)
     case localLeaseResult(Coflux_V1_LocalLeaseResult)
@@ -1408,8 +1133,6 @@ public struct Coflux_V1_ServerToClient: Sendable {
     case preparedDeviceOperation(Coflux_V1_PreparedDeviceOperation)
     case sessionCheckpoint(Coflux_V1_SessionCheckpoint)
     case localUnpairResult(Coflux_V1_LocalUnpairResult)
-    /// 数据面（高频）
-    case ptyOutput(Coflux_V1_PtyOutput)
 
   }
 
@@ -1980,76 +1703,6 @@ extension Coflux_V1_TaskStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
   }
 }
 
-extension Coflux_V1_TaskAttach: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".TaskAttach"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0\u{1}cols\0\u{1}rows\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
-      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.cols) }()
-      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.rows) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.taskID.isEmpty {
-      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 1)
-    }
-    if self.cols != 0 {
-      try visitor.visitSingularUInt32Field(value: self.cols, fieldNumber: 2)
-    }
-    if self.rows != 0 {
-      try visitor.visitSingularUInt32Field(value: self.rows, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_TaskAttach, rhs: Coflux_V1_TaskAttach) -> Bool {
-    if lhs.taskID != rhs.taskID {return false}
-    if lhs.cols != rhs.cols {return false}
-    if lhs.rows != rhs.rows {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_TaskStop: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".TaskStop"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.taskID.isEmpty {
-      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 1)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_TaskStop, rhs: Coflux_V1_TaskStop) -> Bool {
-    if lhs.taskID != rhs.taskID {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 extension Coflux_V1_TaskRemove: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskRemove"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0")
@@ -2080,202 +1733,9 @@ extension Coflux_V1_TaskRemove: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
   }
 }
 
-extension Coflux_V1_ClientExec: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ClientExec"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}command\0\u{1}args\0\u{3}timeout_ms\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.command) }()
-      case 4: try { try decoder.decodeRepeatedStringField(value: &self.args) }()
-      case 5: try { try decoder.decodeSingularUInt32Field(value: &self._timeoutMs) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if !self.requestID.isEmpty {
-      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
-    }
-    if !self.workspaceID.isEmpty {
-      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
-    }
-    if !self.command.isEmpty {
-      try visitor.visitSingularStringField(value: self.command, fieldNumber: 3)
-    }
-    if !self.args.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.args, fieldNumber: 4)
-    }
-    try { if let v = self._timeoutMs {
-      try visitor.visitSingularUInt32Field(value: v, fieldNumber: 5)
-    } }()
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_ClientExec, rhs: Coflux_V1_ClientExec) -> Bool {
-    if lhs.requestID != rhs.requestID {return false}
-    if lhs.workspaceID != rhs.workspaceID {return false}
-    if lhs.command != rhs.command {return false}
-    if lhs.args != rhs.args {return false}
-    if lhs._timeoutMs != rhs._timeoutMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_ClientFsList: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ClientFsList"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}path\0\u{3}daemon_id\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.path) }()
-      case 4: try { try decoder.decodeSingularStringField(value: &self._daemonID) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if !self.requestID.isEmpty {
-      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
-    }
-    if !self.workspaceID.isEmpty {
-      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
-    }
-    if !self.path.isEmpty {
-      try visitor.visitSingularStringField(value: self.path, fieldNumber: 3)
-    }
-    try { if let v = self._daemonID {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 4)
-    } }()
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_ClientFsList, rhs: Coflux_V1_ClientFsList) -> Bool {
-    if lhs.requestID != rhs.requestID {return false}
-    if lhs.workspaceID != rhs.workspaceID {return false}
-    if lhs.path != rhs.path {return false}
-    if lhs._daemonID != rhs._daemonID {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_ClientFsRead: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ClientFsRead"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}path\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.path) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.requestID.isEmpty {
-      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
-    }
-    if !self.workspaceID.isEmpty {
-      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
-    }
-    if !self.path.isEmpty {
-      try visitor.visitSingularStringField(value: self.path, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_ClientFsRead, rhs: Coflux_V1_ClientFsRead) -> Bool {
-    if lhs.requestID != rhs.requestID {return false}
-    if lhs.workspaceID != rhs.workspaceID {return false}
-    if lhs.path != rhs.path {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_ClientFsWrite: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ClientFsWrite"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}path\0\u{1}data\0\u{1}temp\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.path) }()
-      case 4: try { try decoder.decodeSingularBytesField(value: &self.data) }()
-      case 5: try { try decoder.decodeSingularBoolField(value: &self.temp) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.requestID.isEmpty {
-      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
-    }
-    if !self.workspaceID.isEmpty {
-      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
-    }
-    if !self.path.isEmpty {
-      try visitor.visitSingularStringField(value: self.path, fieldNumber: 3)
-    }
-    if !self.data.isEmpty {
-      try visitor.visitSingularBytesField(value: self.data, fieldNumber: 4)
-    }
-    if self.temp != false {
-      try visitor.visitSingularBoolField(value: self.temp, fieldNumber: 5)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_ClientFsWrite, rhs: Coflux_V1_ClientFsWrite) -> Bool {
-    if lhs.requestID != rhs.requestID {return false}
-    if lhs.workspaceID != rhs.workspaceID {return false}
-    if lhs.path != rhs.path {return false}
-    if lhs.data != rhs.data {return false}
-    if lhs.temp != rhs.temp {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{3}task_attach\0\u{3}task_stop\0\u{3}task_remove\0\u{3}pty_resize\0\u{3}client_exec\0\u{3}client_fs_list\0\u{3}client_fs_read\0\u{3}pty_input\0\u{3}workspace_set_name\0\u{3}client_fs_write\0\u{3}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{3}device_relay_open\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}local_unpair_request\0\u{b}client_create_enrollment_key\0\u{c}\u{4}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{3}device_relay_open\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}local_unpair_request\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2465,32 +1925,6 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .taskStart(v)
         }
       }()
-      case 16: try {
-        var v: Coflux_V1_TaskAttach?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .taskAttach(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .taskAttach(v)
-        }
-      }()
-      case 17: try {
-        var v: Coflux_V1_TaskStop?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .taskStop(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .taskStop(v)
-        }
-      }()
       case 18: try {
         var v: Coflux_V1_TaskRemove?
         var hadOneofValue = false
@@ -2504,71 +1938,6 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .taskRemove(v)
         }
       }()
-      case 19: try {
-        var v: Coflux_V1_PtyResize?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .ptyResize(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .ptyResize(v)
-        }
-      }()
-      case 20: try {
-        var v: Coflux_V1_ClientExec?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .clientExec(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .clientExec(v)
-        }
-      }()
-      case 21: try {
-        var v: Coflux_V1_ClientFsList?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .clientFsList(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .clientFsList(v)
-        }
-      }()
-      case 22: try {
-        var v: Coflux_V1_ClientFsRead?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .clientFsRead(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .clientFsRead(v)
-        }
-      }()
-      case 23: try {
-        var v: Coflux_V1_PtyInput?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .ptyInput(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .ptyInput(v)
-        }
-      }()
       case 24: try {
         var v: Coflux_V1_WorkspaceSetName?
         var hadOneofValue = false
@@ -2580,19 +1949,6 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .workspaceSetName(v)
-        }
-      }()
-      case 25: try {
-        var v: Coflux_V1_ClientFsWrite?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .clientFsWrite(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .clientFsWrite(v)
         }
       }()
       case 26: try {
@@ -2753,45 +2109,13 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .taskStart(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
     }()
-    case .taskAttach?: try {
-      guard case .taskAttach(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 16)
-    }()
-    case .taskStop?: try {
-      guard case .taskStop(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 17)
-    }()
     case .taskRemove?: try {
       guard case .taskRemove(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 18)
     }()
-    case .ptyResize?: try {
-      guard case .ptyResize(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
-    }()
-    case .clientExec?: try {
-      guard case .clientExec(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
-    }()
-    case .clientFsList?: try {
-      guard case .clientFsList(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
-    }()
-    case .clientFsRead?: try {
-      guard case .clientFsRead(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
-    }()
-    case .ptyInput?: try {
-      guard case .ptyInput(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 23)
-    }()
     case .workspaceSetName?: try {
       guard case .workspaceSetName(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 24)
-    }()
-    case .clientFsWrite?: try {
-      guard case .clientFsWrite(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 25)
     }()
     case .deviceSetName?: try {
       guard case .deviceSetName(let v)? = self.payload else { preconditionFailure() }
@@ -3360,36 +2684,6 @@ extension Coflux_V1_TaskRemoved: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
   }
 }
 
-extension Coflux_V1_TaskDetached: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".TaskDetached"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.taskID.isEmpty {
-      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 1)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_TaskDetached, rhs: Coflux_V1_TaskDetached) -> Bool {
-    if lhs.taskID != rhs.taskID {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 extension Coflux_V1_ServerError: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerError"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}message\0")
@@ -3441,7 +2735,7 @@ extension Coflux_V1_ClientOutdated: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToClient"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{3}task_detached\0\u{3}exec_result\0\u{3}fs_listed\0\u{3}fs_read_result\0\u{1}error\0\u{3}pty_output\0\u{3}fs_write_result\0\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{3}device_relay_status\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{b}enrollment_key_created\0\u{c}\u{3}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{3}device_relay_status\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3644,58 +2938,6 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .taskRemoved(v)
         }
       }()
-      case 17: try {
-        var v: Coflux_V1_TaskDetached?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .taskDetached(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .taskDetached(v)
-        }
-      }()
-      case 18: try {
-        var v: Coflux_V1_ExecResult?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .execResult(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .execResult(v)
-        }
-      }()
-      case 19: try {
-        var v: Coflux_V1_FsListed?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .fsListed(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .fsListed(v)
-        }
-      }()
-      case 20: try {
-        var v: Coflux_V1_FsReadResult?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .fsReadResult(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .fsReadResult(v)
-        }
-      }()
       case 21: try {
         var v: Coflux_V1_ServerError?
         var hadOneofValue = false
@@ -3707,32 +2949,6 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .error(v)
-        }
-      }()
-      case 22: try {
-        var v: Coflux_V1_PtyOutput?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .ptyOutput(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .ptyOutput(v)
-        }
-      }()
-      case 23: try {
-        var v: Coflux_V1_FsWriteResult?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .fsWriteResult(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .fsWriteResult(v)
         }
       }()
       case 24: try {
@@ -3923,33 +3139,9 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .taskRemoved(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 16)
     }()
-    case .taskDetached?: try {
-      guard case .taskDetached(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 17)
-    }()
-    case .execResult?: try {
-      guard case .execResult(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 18)
-    }()
-    case .fsListed?: try {
-      guard case .fsListed(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
-    }()
-    case .fsReadResult?: try {
-      guard case .fsReadResult(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
-    }()
     case .error?: try {
       guard case .error(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
-    }()
-    case .ptyOutput?: try {
-      guard case .ptyOutput(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
-    }()
-    case .fsWriteResult?: try {
-      guard case .fsWriteResult(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 23)
     }()
     case .clientOutdated?: try {
       guard case .clientOutdated(let v)? = self.payload else { preconditionFailure() }

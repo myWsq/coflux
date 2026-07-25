@@ -46,7 +46,7 @@ export type LocalSessionState = {
 };
 
 export type DeviceTransportOptions = {
-  /** desktop 为 true；mobile 不传整个配置，继续走冻结的 legacy adapter。 */
+  /** desktop 为 true；mobile 为 false，只使用中心 opaque relay。 */
   enableLocalTransport: boolean;
   identityDatabaseName: string;
   origin?: string;
@@ -67,8 +67,8 @@ export type CofluxClientOptions = {
   /** 提供时启用外部登录（如 Supabase）：login() 走该 provider 换取 supabaseToken，
    * 且 authError 文案切换为「会话过期」；不提供则走用户名密码直登，文案为「用户名或密码错误」。 */
   loginProvider?: LoginProvider;
-  /** 提供时启用统一 DeviceTransport；desktop web 提供，冻结的 mobile 不提供。 */
-  deviceTransport?: DeviceTransportOptions;
+  /** 所有客户端统一走 DeviceTransport；是否尝试 loopback direct 由 enableLocalTransport 决定。 */
+  deviceTransport: DeviceTransportOptions;
 };
 
 export type CofluxState = {
@@ -117,13 +117,6 @@ export function createCofluxClient(options: CofluxClientOptions) {
   let controlAuthenticated = false;
   let errorSequence = 0;
   const sessionConsumers = new Map<string, Set<SessionConsumer>>();
-  // fsList 请求-响应关联（一次性数据不进 store）：requestId → resolve。
-  // 超时由 server 中继兜底（超时回 ok:false）；断线时本地统一 reject 清空。
-  const pendingFsLists = new Map<string, (result: FsListResult) => void>();
-  const pendingExecs = new Map<string, (result: ExecResult) => void>();
-  // 终端剪贴板贴图（plan 014）：requestId → resolve，同一 pending-map 模式。
-  const pendingFsWrites = new Map<string, (result: FsWriteResult) => void>();
-
   // 有本地会话 token 时首屏直接进入 authenticating，避免刷新先闪登录页。
   const store: StoreApi<CofluxState> = createStore<CofluxState>(() => ({
     status: token ? "connecting" : "disconnected",
@@ -228,42 +221,40 @@ export function createCofluxClient(options: CofluxClientOptions) {
   }
 
   let connection!: ReturnType<typeof createConnection>;
-  const deviceRouter: DeviceRouter | undefined = options.deviceTransport
-    ? createDeviceRouter({
-      enableLocalTransport: options.deviceTransport.enableLocalTransport,
-      identityDatabaseName: options.deviceTransport.identityDatabaseName,
-      origin: options.deviceTransport.origin ?? location.origin,
-      sendControl: (payload) => connection.send(payload),
-      onTransportState: (daemonId, transport) => {
-        store.setState((state) => ({ deviceTransports: { ...state.deviceTransports, [daemonId]: transport } }));
-      },
-      onSessionSnapshot: (_daemonId, _taskId, sessionId, data) => {
-        liveSessionIds.add(sessionId);
-        deliverSession(sessionId, data, true);
-      },
-      onSessionOutput: (_daemonId, _taskId, sessionId, data) => {
-        liveSessionIds.add(sessionId);
-        deliverSession(sessionId, data, false);
-      },
-      onSessionAttached: (_daemonId, taskId) => {
-        store.setState((state) => ({ detachedTaskIds: withoutSetValue(state.detachedTaskIds, taskId) }));
-      },
-      onSessionDetached: (_daemonId, taskId) => {
-        store.setState((state) => ({ detachedTaskIds: new Set(state.detachedTaskIds).add(taskId) }));
-      },
-      onSessionExited: markSessionExited,
-      onCatalog: updateLocalCatalog,
-      onPorts: () => {
-        // 预览 URL 仍由中心的账号门禁路由签发；Device RPC 只负责确认本机原始监听事实。
-      },
-      onError: reportLocalError,
-      onInputState: (_daemonId, _taskId, sessionId, inputState) => {
-        const wasBlocked = store.getState().inputStates[sessionId]?.blocked ?? false;
-        store.setState((state) => ({ inputStates: { ...state.inputStates, [sessionId]: inputState } }));
-        if (inputState.blocked && !wasBlocked) reportLocalError("终端输入正在等待本机确认，缓冲区已满，请稍候");
-      },
-    })
-    : undefined;
+  const deviceRouter: DeviceRouter = createDeviceRouter({
+    enableLocalTransport: options.deviceTransport.enableLocalTransport,
+    identityDatabaseName: options.deviceTransport.identityDatabaseName,
+    origin: options.deviceTransport.origin ?? location.origin,
+    sendControl: (payload) => connection.send(payload),
+    onTransportState: (daemonId, transport) => {
+      store.setState((state) => ({ deviceTransports: { ...state.deviceTransports, [daemonId]: transport } }));
+    },
+    onSessionSnapshot: (_daemonId, _taskId, sessionId, data) => {
+      liveSessionIds.add(sessionId);
+      deliverSession(sessionId, data, true);
+    },
+    onSessionOutput: (_daemonId, _taskId, sessionId, data) => {
+      liveSessionIds.add(sessionId);
+      deliverSession(sessionId, data, false);
+    },
+    onSessionAttached: (_daemonId, taskId) => {
+      store.setState((state) => ({ detachedTaskIds: withoutSetValue(state.detachedTaskIds, taskId) }));
+    },
+    onSessionDetached: (_daemonId, taskId) => {
+      store.setState((state) => ({ detachedTaskIds: new Set(state.detachedTaskIds).add(taskId) }));
+    },
+    onSessionExited: markSessionExited,
+    onCatalog: updateLocalCatalog,
+    onPorts: () => {
+      // 预览 URL 仍由中心的账号门禁路由签发；Device RPC 只负责确认本机原始监听事实。
+    },
+    onError: reportLocalError,
+    onInputState: (_daemonId, _taskId, sessionId, inputState) => {
+      const wasBlocked = store.getState().inputStates[sessionId]?.blocked ?? false;
+      store.setState((state) => ({ inputStates: { ...state.inputStates, [sessionId]: inputState } }));
+      if (inputState.blocked && !wasBlocked) reportLocalError("终端输入正在等待本机确认，缓冲区已满，请稍候");
+    },
+  });
 
   connection = createConnection({
     url: options.serverUrl,
@@ -272,23 +263,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       store.setState({ status });
       if (status !== "connected") {
         controlAuthenticated = false;
-        deviceRouter?.setControlOnline(false);
-      }
-      // 断线时 in-flight 的 fsList 无法再收到响应，统一以失败结清避免调用方悬挂。
-      if (status !== "connected" && pendingFsLists.size > 0) {
-        const pending = [...pendingFsLists.values()];
-        pendingFsLists.clear();
-        for (const resolve of pending) resolve({ ok: false, entries: [], error: "连接已断开", path: undefined });
-      }
-      if (status !== "connected" && pendingExecs.size > 0) {
-        const pending = [...pendingExecs.values()];
-        pendingExecs.clear();
-        for (const resolve of pending) resolve({ ok: false, exitCode: -1, stdout: "", stderr: "", error: "连接已断开" });
-      }
-      if (status !== "connected" && pendingFsWrites.size > 0) {
-        const pending = [...pendingFsWrites.values()];
-        pendingFsWrites.clear();
-        for (const resolve of pending) resolve({ ok: false, error: "连接已断开" });
+        deviceRouter.setControlOnline(false);
       }
     },
     onMessage: handleServerMessage,
@@ -302,20 +277,20 @@ export function createCofluxClient(options: CofluxClientOptions) {
   function sendInput(sessionId: string, data: string) {
     const bytes = new TextEncoder().encode(data);
     const task = store.getState().tasks.find((item) => item.sessionId === sessionId);
-    if (deviceRouter && task) {
+    if (task) {
       deviceRouter.sendInput(task.daemonId, sessionId, bytes);
       return;
     }
-    send({ case: "ptyInput", value: { sessionId, data: bytes } });
+    reportLocalError("会话不存在，无法发送终端输入");
   }
 
   function resizeSession(sessionId: string, cols: number, rows: number) {
     const task = store.getState().tasks.find((item) => item.sessionId === sessionId);
-    if (deviceRouter && task) {
+    if (task) {
       deviceRouter.resize(task.daemonId, sessionId, cols, rows);
       return;
     }
-    connection.send({ case: "ptyResize", value: { sessionId, cols, rows } });
+    reportLocalError("会话不存在，无法调整终端尺寸");
   }
 
   function registerSessionConsumer(sessionId: string, consumer: SessionConsumer) {
@@ -335,7 +310,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       if (current.size === 0) {
         sessionConsumers.delete(sessionId);
         liveSessionIds.delete(sessionId);
-        if (routedTask) deviceRouter?.suspendSession(routedTask.daemonId, sessionId);
+        if (routedTask) deviceRouter.suspendSession(routedTask.daemonId, sessionId);
       }
     };
   }
@@ -344,12 +319,12 @@ export function createCofluxClient(options: CofluxClientOptions) {
   // 每条消息只调用一次 store.setState：天然原子提交，订阅者只看到一致的最终状态
   // （不依赖 React 批处理细节，比 Solid 版的 batch(...) 包裹更直接）。
   function handleServerMessage(payload: ServerPayload) {
-    if (deviceRouter?.handleControlPayload(payload)) return;
+    if (deviceRouter.handleControlPayload(payload)) return;
     switch (payload.case) {
       case "authOk": {
         const value = payload.value;
         controlAuthenticated = true;
-        deviceRouter?.setControlOnline(true);
+        deviceRouter.setControlOnline(true);
         store.setState({ authState: "authed", loginError: "" });
         shouldRetry = true;
         connection.resetBackoff();
@@ -362,7 +337,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       }
       case "authError": {
         controlAuthenticated = false;
-        deviceRouter?.setControlOnline(false);
+        deviceRouter.setControlOnline(false);
         token = "";
         localStorage.removeItem(options.tokenStorageKey);
         store.setState({
@@ -374,7 +349,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       }
       case "clientOutdated": {
         controlAuthenticated = false;
-        deviceRouter?.setControlOnline(false);
+        deviceRouter.setControlOnline(false);
         // server 判定本连接的构建版本失配（plan 033）：token 不清（无感升级），只判断是否已为
         // 当前 buildId reload 过，避免 index.html 被缓存导致 reload 后仍失配的无限刷新循环。
         if (sessionStorage.getItem(outdatedReloadKey) !== options.buildId) {
@@ -505,7 +480,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         });
         if (removed && removedSessionId) {
           liveSessionIds.delete(removedSessionId);
-          deviceRouter?.forgetSession(removed.daemonId, removedSessionId);
+          deviceRouter.forgetSession(removed.daemonId, removedSessionId);
         }
         break;
       }
@@ -516,53 +491,14 @@ export function createCofluxClient(options: CofluxClientOptions) {
         }));
         break;
       }
-      case "taskDetached": {
-        const value = payload.value;
-        store.setState((state) => ({ detachedTaskIds: new Set(state.detachedTaskIds).add(value.taskId) }));
-        break;
-      }
-      case "ptyOutput": {
-        // PTY 数据零响应式开销：直达 consumer（terminal.write），不进 store。
-        const value = payload.value;
-        deliverSession(value.sessionId, value.data, false);
-        break;
-      }
       case "sessionCheckpoint": {
-        if (!deviceRouter) break;
         const checkpoint = payload.value;
         store.setState((state) => ({
           sessionCheckpoints: { ...state.sessionCheckpoints, [checkpoint.sessionId]: checkpoint },
         }));
         const task = store.getState().tasks.find((item) => item.id === checkpoint.taskId);
-        if (task) deviceRouter?.seedCheckpoint(task.daemonId, checkpoint.taskId, checkpoint.sessionId, checkpoint.snapshotSeq);
+        if (task) deviceRouter.seedCheckpoint(task.daemonId, checkpoint.taskId, checkpoint.sessionId, checkpoint.snapshotSeq);
         if (!liveSessionIds.has(checkpoint.sessionId)) deliverSession(checkpoint.sessionId, checkpoint.ansiSnapshot, true);
-        break;
-      }
-      case "fsListed": {
-        const value = payload.value;
-        const resolve = pendingFsLists.get(value.requestId);
-        if (resolve) {
-          pendingFsLists.delete(value.requestId);
-          resolve({ ok: value.ok, entries: value.entries, error: value.error ?? "", path: value.path });
-        }
-        break;
-      }
-      case "execResult": {
-        const value = payload.value;
-        const resolve = pendingExecs.get(value.requestId);
-        if (resolve) {
-          pendingExecs.delete(value.requestId);
-          resolve({ ok: value.ok, exitCode: value.exitCode, stdout: value.stdout, stderr: value.stderr, error: value.error ?? "" });
-        }
-        break;
-      }
-      case "fsWriteResult": {
-        const value = payload.value;
-        const resolve = pendingFsWrites.get(value.requestId);
-        if (resolve) {
-          pendingFsWrites.delete(value.requestId);
-          resolve({ ok: value.ok, path: value.path, error: value.error ?? "" });
-        }
         break;
       }
       case "error": {
@@ -579,7 +515,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     // 重连/重登时若已 authed 则保持：断线期间保留最后快照渲染，由顶部横幅提示，不整页退回 loading。
     if (store.getState().authState !== "authed") store.setState({ authState: "authenticating" });
     controlAuthenticated = false;
-    deviceRouter?.setControlOnline(false);
+    deviceRouter.setControlOnline(false);
     connection.connect(credential);
   }
 
@@ -602,7 +538,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
   function logout() {
     shouldRetry = false;
     controlAuthenticated = false;
-    void deviceRouter?.reset(true);
+    void deviceRouter.reset(true);
     send({ case: "clientLogout", value: {} });
     token = "";
     localStorage.removeItem(options.tokenStorageKey);
@@ -625,7 +561,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
   // RUNNING 的 attach 直接交给本机 session authority；IDLE/EXITED 仍由中心 prepare durable create。
   function startTask(taskId: string, cols: number, rows: number, force = false) {
     const task = store.getState().tasks.find((item) => item.id === taskId);
-    if (deviceRouter && task?.status === TaskStatus.RUNNING && task.sessionId) {
+    if (task?.status === TaskStatus.RUNNING && task.sessionId) {
       if (force) store.setState((state) => ({ detachedTaskIds: withoutSetValue(state.detachedTaskIds, taskId) }));
       deviceRouter.attachSession(task.daemonId, task.id, task.sessionId, cols, rows, force);
       return;
@@ -635,7 +571,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
   }
 
   async function closeTask(task: Task): Promise<void> {
-    if (deviceRouter && task.status === TaskStatus.RUNNING && task.sessionId) {
+    if (task.status === TaskStatus.RUNNING && task.sessionId) {
       try {
         deviceRouter.attachSession(task.daemonId, task.id, task.sessionId, 80, 24, true);
         await deviceRouter.stopSession(task.daemonId, task.sessionId);
@@ -651,7 +587,6 @@ export function createCofluxClient(options: CofluxClientOptions) {
   }
 
   function retainDevice(daemonId: string): () => void {
-    if (!deviceRouter) return () => undefined;
     const release = deviceRouter.retainDevice(daemonId);
     // ports 是独立 elevated RPC；失败不会触碰健康 terminal lane，URL 仍由中心门禁事实更新。
     void deviceRouter.requestPorts(daemonId).catch(() => undefined);
@@ -660,43 +595,29 @@ export function createCofluxClient(options: CofluxClientOptions) {
 
   /** 设备浏览模式列目录（导入向导）：以设备用户 home 为根，path 为相对路径（"" = home 本身）。 */
   async function listDeviceDirectory(daemonId: string, path: string): Promise<FsListResult> {
-    if (deviceRouter) {
-      try {
-        const result = await deviceRouter.fsList(daemonId, "", path, true);
-        return { ok: result.ok, entries: result.entries, error: result.error ?? "", path: result.path };
-      } catch (error) {
-        return { ok: false, entries: [], error: error instanceof Error ? error.message : String(error) };
-      }
+    try {
+      const result = await deviceRouter.fsList(daemonId, "", path, true);
+      return { ok: result.ok, entries: result.entries, error: result.error ?? "", path: result.path };
+    } catch (error) {
+      return { ok: false, entries: [], error: error instanceof Error ? error.message : String(error) };
     }
-    return new Promise((resolve) => {
-      const requestId = crypto.randomUUID();
-      pendingFsLists.set(requestId, resolve);
-      send({ case: "clientFsList", value: { requestId, workspaceId: "", path, daemonId } });
-    });
   }
 
   async function execInWorkspace(workspaceId: string, command: string, args: string[], timeoutMs?: number): Promise<ExecResult> {
     const workspace = store.getState().workspaces.find((item) => item.id === workspaceId);
-    if (deviceRouter) {
-      if (!workspace) return { ok: false, exitCode: -1, stdout: "", stderr: "", error: "工作区不存在" };
-      try {
-        const result = await deviceRouter.exec(workspace.daemonId, workspaceId, command, args, timeoutMs);
-        return {
-          ok: result.ok,
-          exitCode: result.exitCode,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          error: result.error ?? "",
-        };
-      } catch (error) {
-        return { ok: false, exitCode: -1, stdout: "", stderr: "", error: error instanceof Error ? error.message : String(error) };
-      }
+    if (!workspace) return { ok: false, exitCode: -1, stdout: "", stderr: "", error: "工作区不存在" };
+    try {
+      const result = await deviceRouter.exec(workspace.daemonId, workspaceId, command, args, timeoutMs);
+      return {
+        ok: result.ok,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: result.error ?? "",
+      };
+    } catch (error) {
+      return { ok: false, exitCode: -1, stdout: "", stderr: "", error: error instanceof Error ? error.message : String(error) };
     }
-    return new Promise((resolve) => {
-      const requestId = crypto.randomUUID();
-      pendingExecs.set(requestId, resolve);
-      send({ case: "clientExec", value: { requestId, workspaceId, command, args, timeoutMs } });
-    });
   }
 
   /** 终端剪贴板贴图（plan 014，temp 模式修订）：把图片字节上传落盘。
@@ -705,20 +626,13 @@ export function createCofluxClient(options: CofluxClientOptions) {
    * 成功时 path 回带清洗过的相对路径。两种情况均以回带的 path 为准，不自行拼装。 */
   async function sendFsWrite(workspaceId: string, path: string, data: Uint8Array, temp: boolean): Promise<FsWriteResult> {
     const workspace = store.getState().workspaces.find((item) => item.id === workspaceId);
-    if (deviceRouter) {
-      if (!workspace) return { ok: false, error: "工作区不存在" };
-      try {
-        const result = await deviceRouter.fsWrite(workspace.daemonId, workspaceId, path, data, temp);
-        return { ok: result.ok, path: result.path, error: result.error ?? "" };
-      } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : String(error) };
-      }
+    if (!workspace) return { ok: false, error: "工作区不存在" };
+    try {
+      const result = await deviceRouter.fsWrite(workspace.daemonId, workspaceId, path, data, temp);
+      return { ok: result.ok, path: result.path, error: result.error ?? "" };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-    return new Promise((resolve) => {
-      const requestId = crypto.randomUUID();
-      pendingFsWrites.set(requestId, resolve);
-      send({ case: "clientFsWrite", value: { requestId, workspaceId, path, data, temp } });
-    });
   }
 
   /** 本地失败（exec/checkout 等非服务端错误）汇入同一个全局错误提示通道 */
@@ -731,18 +645,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
 
   function disconnect() {
     controlAuthenticated = false;
-    deviceRouter?.destroy();
+    deviceRouter.destroy();
     connection.stop();
     sessionConsumers.clear();
-    const pending = [...pendingFsLists.values()];
-    pendingFsLists.clear();
-    for (const resolve of pending) resolve({ ok: false, entries: [], error: "连接已断开", path: undefined });
-    const pendingExec = [...pendingExecs.values()];
-    pendingExecs.clear();
-    for (const resolve of pendingExec) resolve({ ok: false, exitCode: -1, stdout: "", stderr: "", error: "连接已断开" });
-    const pendingWrite = [...pendingFsWrites.values()];
-    pendingFsWrites.clear();
-    for (const resolve of pendingWrite) resolve({ ok: false, error: "连接已断开" });
   }
 
   return {

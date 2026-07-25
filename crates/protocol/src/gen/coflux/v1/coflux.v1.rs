@@ -130,7 +130,7 @@ pub struct TaskPorts {
     #[prost(message, repeated, tag="2")]
     pub ports: ::prost::alloc::vec::Vec<PortPreview>,
 }
-/// exec/fs 结果 —— 同一形状在 daemon→server 和 server→client 两段复用（server 只换 request_id 转发）
+/// exec/fs 结果由端到端 DeviceEnvelope 复用；中心 relay 不解析载荷。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecResult {
     #[prost(string, tag="1")]
@@ -184,33 +184,6 @@ pub struct FsWriteResult {
     pub path: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="4")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
-}
-// ===== 数据面（高频）=====
-// 原自定义二进制帧（kind 1..4）收敛进 protobuf binary 信封；payload 一律 bytes，
-// 杜绝 UTF-8 往返破坏 scrollback 的半截字节（原 replayFrameToOutput 的动机自然消失）。
-
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PtyOutput {
-    #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
-    #[prost(bytes="vec", tag="2")]
-    pub data: ::prost::alloc::vec::Vec<u8>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PtyInput {
-    #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
-    #[prost(bytes="vec", tag="2")]
-    pub data: ::prost::alloc::vec::Vec<u8>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PtyReplay {
-    #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(bytes="vec", tag="3")]
-    pub data: ::prost::alloc::vec::Vec<u8>,
 }
 /// 端口转发隧道的原始 TCP 字节（server↔daemon 双向）
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1222,6 +1195,372 @@ impl LocalAuthErrorCode {
         }
     }
 }
+// ===== Client → Server 载荷 =====
+
+/// 登录：用户名+密码（local 模式首次）/ supabase_token（supabase 模式换票）/ 会话 client_token（重连，两模式通用）。
+/// 服务器认证成功会在 AuthOk 回带 coflux 会话 token；之后重连只用该 token，不再触碰 Supabase。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClientAuth {
+    #[prost(string, optional, tag="1")]
+    pub username: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="2")]
+    pub password: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="3")]
+    pub client_token: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="4")]
+    pub supabase_token: ::core::option::Option<::prost::alloc::string::String>,
+    /// 构建版本（git short SHA；vite dev 固定 "dev"）：server 配了 COFLUX_BUILD_ID 时用于
+    /// 认证阶段的版本准入（plan 033）。缺失本字段是"旧 bundle"的检测信号本身，不可伪造更早语义。
+    #[prost(string, optional, tag="5")]
+    pub client_version: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地）
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClientLogout {
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClientSubscribe {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClientRemoveDevice {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+}
+/// 查看某授权链接对应的待授权设备信息（不消费 token，供确认页展示 name/host/platform）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceAuthorizeInfoRequest {
+    #[prost(string, tag="1")]
+    pub token: ::prost::alloc::string::String,
+}
+/// 确认授权：把该 token 对应的设备绑到当前登录账号（一次性，成功后 token 失效）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceAuthorize {
+    #[prost(string, tag="1")]
+    pub token: ::prost::alloc::string::String,
+}
+/// 为端口转发签发一次性代理认证（浏览器经 <shortId>.<proxyHost> 访问前换票）。
+/// redirect 是换票成功后要跳回的地址；url 白名单校验在 hub（不属于协议层）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProxyIssueAuth {
+    #[prost(string, tag="1")]
+    pub redirect: ::prost::alloc::string::String,
+}
+/// 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClientUpgradeDaemon {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub version: ::prost::alloc::string::String,
+    #[prost(string, optional, tag="3")]
+    pub url: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="4")]
+    pub sha256: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="5")]
+    pub signature: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// 导入一个 git 仓库为 project（自动创建主工作区）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProjectImport {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(string, optional, tag="3")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProjectRemove {
+    #[prost(string, tag="1")]
+    pub project_id: ::prost::alloc::string::String,
+}
+/// 在 project 下用 git worktree 新建工作区
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkspaceCreate {
+    #[prost(string, tag="1")]
+    pub project_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub branch: ::prost::alloc::string::String,
+    #[prost(bool, tag="4")]
+    pub create_new: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkspaceRemove {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+}
+/// 重命名工作区（name 是自由文本；空则服务端回落为分支名）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkspaceSetName {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
+/// 重命名设备（别名；空则服务端拒绝）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSetName {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TaskCreate {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub title: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TaskStart {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub cols: u32,
+    #[prost(uint32, tag="3")]
+    pub rows: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TaskRemove {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClientToServer {
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 29, 30, 31, 32, 24")]
+    pub payload: ::core::option::Option<client_to_server::Payload>,
+}
+/// Nested message and enum types in `ClientToServer`.
+pub mod client_to_server {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="1")]
+        ClientAuth(super::ClientAuth),
+        #[prost(message, tag="2")]
+        ClientLogout(super::ClientLogout),
+        #[prost(message, tag="3")]
+        ClientSubscribe(super::ClientSubscribe),
+        #[prost(message, tag="5")]
+        ClientRemoveDevice(super::ClientRemoveDevice),
+        #[prost(message, tag="6")]
+        DeviceAuthorizeInfo(super::DeviceAuthorizeInfoRequest),
+        #[prost(message, tag="7")]
+        DeviceAuthorize(super::DeviceAuthorize),
+        #[prost(message, tag="8")]
+        ProxyIssueAuth(super::ProxyIssueAuth),
+        #[prost(message, tag="9")]
+        ClientUpgradeDaemon(super::ClientUpgradeDaemon),
+        #[prost(message, tag="10")]
+        ProjectImport(super::ProjectImport),
+        #[prost(message, tag="11")]
+        ProjectRemove(super::ProjectRemove),
+        #[prost(message, tag="12")]
+        WorkspaceCreate(super::WorkspaceCreate),
+        #[prost(message, tag="13")]
+        WorkspaceRemove(super::WorkspaceRemove),
+        #[prost(message, tag="14")]
+        TaskCreate(super::TaskCreate),
+        #[prost(message, tag="15")]
+        TaskStart(super::TaskStart),
+        #[prost(message, tag="18")]
+        TaskRemove(super::TaskRemove),
+        #[prost(message, tag="26")]
+        DeviceSetName(super::DeviceSetName),
+        #[prost(message, tag="27")]
+        LocalPairRequest(super::LocalPairRequest),
+        #[prost(message, tag="28")]
+        LocalLeaseRequest(super::LocalLeaseRequest),
+        #[prost(message, tag="29")]
+        DeviceRelayOpen(super::DeviceRelayClientOpen),
+        #[prost(message, tag="30")]
+        DeviceRelayFrame(super::DeviceRelayFrame),
+        #[prost(message, tag="31")]
+        DeviceRelayClose(super::DeviceRelayClose),
+        #[prost(message, tag="32")]
+        LocalUnpairRequest(super::LocalUnpairRequest),
+        #[prost(message, tag="24")]
+        WorkspaceSetName(super::WorkspaceSetName),
+    }
+}
+// ===== Server → Client 载荷 =====
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuthOk {
+    #[prost(string, tag="1")]
+    pub account_id: ::prost::alloc::string::String,
+    #[prost(string, optional, tag="2")]
+    pub client_token: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuthError {
+    #[prost(string, tag="1")]
+    pub message: ::prost::alloc::string::String,
+}
+/// DeviceAuthorizeInfoRequest 的回应：ok 时带设备信息，否则 error 说明原因（无效/已用/已过期）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceAuthorizeInfoResult {
+    #[prost(bool, tag="1")]
+    pub ok: bool,
+    #[prost(string, optional, tag="2")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="3")]
+    pub host: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="4")]
+    pub platform: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="5")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// 设备授权成功（该连接的 daemon 已收到 DaemonEnrolled 并上线）
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceAuthorized {
+}
+/// ProxyIssueAuth 的回应：ok 时带跳转 url（换票成功，浏览器可直接访问 <shortId>.<proxyHost>）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProxyAuth {
+    #[prost(bool, tag="1")]
+    pub ok: bool,
+    #[prost(string, optional, tag="2")]
+    pub url: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// 某任务当前可访问的端口列表变化（daemon PortsUpdate 上报后重新计算得出）
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PortsUpdated {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub ports: ::prost::alloc::vec::Vec<PortPreview>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StateSnapshot {
+    #[prost(message, repeated, tag="1")]
+    pub daemons: ::prost::alloc::vec::Vec<DaemonInfo>,
+    #[prost(message, repeated, tag="2")]
+    pub projects: ::prost::alloc::vec::Vec<Project>,
+    #[prost(message, repeated, tag="3")]
+    pub workspaces: ::prost::alloc::vec::Vec<Workspace>,
+    #[prost(message, repeated, tag="4")]
+    pub tasks: ::prost::alloc::vec::Vec<Task>,
+    #[prost(message, repeated, tag="5")]
+    pub ports: ::prost::alloc::vec::Vec<TaskPorts>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DaemonUpdated {
+    #[prost(message, optional, tag="1")]
+    pub daemon: ::core::option::Option<DaemonInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DaemonRemoved {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProjectCreated {
+    #[prost(message, optional, tag="1")]
+    pub project: ::core::option::Option<Project>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProjectRemoved {
+    #[prost(string, tag="1")]
+    pub project_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WorkspaceCreated {
+    #[prost(message, optional, tag="1")]
+    pub workspace: ::core::option::Option<Workspace>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkspaceRemoved {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TaskUpdated {
+    #[prost(message, optional, tag="1")]
+    pub task: ::core::option::Option<Task>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TaskRemoved {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerError {
+    #[prost(string, tag="1")]
+    pub message: ::prost::alloc::string::String,
+}
+/// build 版本失配（新客户端跑旧代码判定的对称面，plan 033）：认证阶段 server 比对
+/// client_version 与 COFLUX_BUILD_ID 不一致时下发本消息后关闭连接。旧 bundle（缺失
+/// client_version）走 AuthError 而非本消息——本消息对它是无法理解的未知 case（见
+/// apps/server/src/hub.ts handleClientAuth）。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClientOutdated {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ServerToClient {
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32")]
+    pub payload: ::core::option::Option<server_to_client::Payload>,
+}
+/// Nested message and enum types in `ServerToClient`.
+pub mod server_to_client {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="1")]
+        AuthOk(super::AuthOk),
+        #[prost(message, tag="2")]
+        AuthError(super::AuthError),
+        #[prost(message, tag="4")]
+        DeviceAuthorizeInfo(super::DeviceAuthorizeInfoResult),
+        #[prost(message, tag="5")]
+        DeviceAuthorized(super::DeviceAuthorized),
+        #[prost(message, tag="6")]
+        ProxyAuth(super::ProxyAuth),
+        #[prost(message, tag="7")]
+        PortsUpdated(super::PortsUpdated),
+        #[prost(message, tag="8")]
+        StateSnapshot(super::StateSnapshot),
+        #[prost(message, tag="9")]
+        DaemonUpdated(super::DaemonUpdated),
+        #[prost(message, tag="10")]
+        DaemonRemoved(super::DaemonRemoved),
+        #[prost(message, tag="11")]
+        ProjectCreated(super::ProjectCreated),
+        #[prost(message, tag="12")]
+        ProjectRemoved(super::ProjectRemoved),
+        #[prost(message, tag="13")]
+        WorkspaceCreated(super::WorkspaceCreated),
+        #[prost(message, tag="14")]
+        WorkspaceRemoved(super::WorkspaceRemoved),
+        #[prost(message, tag="15")]
+        TaskUpdated(super::TaskUpdated),
+        #[prost(message, tag="16")]
+        TaskRemoved(super::TaskRemoved),
+        #[prost(message, tag="21")]
+        Error(super::ServerError),
+        #[prost(message, tag="24")]
+        ClientOutdated(super::ClientOutdated),
+        #[prost(message, tag="25")]
+        LocalPairResult(super::LocalPairResult),
+        #[prost(message, tag="26")]
+        LocalLeaseResult(super::LocalLeaseResult),
+        #[prost(message, tag="27")]
+        DeviceRelayStatus(super::DeviceRelayStatus),
+        #[prost(message, tag="28")]
+        DeviceRelayFrame(super::DeviceRelayFrame),
+        #[prost(message, tag="29")]
+        DeviceRelayClose(super::DeviceRelayClose),
+        #[prost(message, tag="30")]
+        PreparedDeviceOperation(super::PreparedDeviceOperation),
+        #[prost(message, tag="31")]
+        SessionCheckpoint(super::SessionCheckpoint),
+        #[prost(message, tag="32")]
+        LocalUnpairResult(super::LocalUnpairResult),
+    }
+}
 // ===== Daemon → Server 载荷 =====
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1334,7 +1673,7 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 19, 15, 16, 17, 18, 20, 21, 22, 23, 24, 25, 26, 27, 28")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 22, 23, 24, 25, 26, 27, 28")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -1361,19 +1700,6 @@ pub mod daemon_to_server {
         ProxyOpened(super::ProxyOpened),
         #[prost(message, tag="11")]
         ProxyClosed(super::ProxyClosed),
-        #[prost(message, tag="12")]
-        ExecResult(super::ExecResult),
-        #[prost(message, tag="13")]
-        FsListed(super::FsListed),
-        #[prost(message, tag="14")]
-        FsReadResult(super::FsReadResult),
-        #[prost(message, tag="19")]
-        FsWriteResult(super::FsWriteResult),
-        /// 数据面（高频）
-        #[prost(message, tag="15")]
-        PtyOutput(super::PtyOutput),
-        #[prost(message, tag="16")]
-        PtyReplay(super::PtyReplay),
         #[prost(message, tag="17")]
         ProxyData(super::ProxyData),
         #[prost(message, tag="18")]
@@ -1521,22 +1847,6 @@ pub struct SessionClose {
     #[prost(string, tag="1")]
     pub session_id: ::prost::alloc::string::String,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SessionReplay {
-    #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub request_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PtyResize {
-    #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
-    #[prost(uint32, tag="2")]
-    pub cols: u32,
-    #[prost(uint32, tag="3")]
-    pub rows: u32,
-}
 /// 打开一条隧道连接：daemon 向本地 port 发起 TCP 连接，字节经 ProxyData 双向透传
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProxyOpen {
@@ -1551,61 +1861,9 @@ pub struct ProxyClose {
     #[prost(string, tag="1")]
     pub conn_id: ::prost::alloc::string::String,
 }
-/// 通用原语：一次性命令
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ExecRun {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub cwd: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub command: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag="4")]
-    pub args: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(map="string, string", tag="5")]
-    pub env: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
-    #[prost(uint32, optional, tag="6")]
-    pub timeout_ms: ::core::option::Option<u32>,
-}
-/// 通用原语：文件系统（root 为锚定根，path 为相对路径，daemon 校验不越界）
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct FsList {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub root: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub path: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct FsRead {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub root: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub path: ::prost::alloc::string::String,
-}
-/// 通用原语：写文件。
-/// temp=false（默认）：root 为锚定根，path 为相对路径，daemon 校验不越界，父目录不存在则创建。
-/// temp=true：忽略 root/锚定语义，落到 daemon 侧系统临时目录（std::env::temp_dir()/coflux-pastes/）；
-/// path 此时仅允许单段文件名（不得含 '/'，不得为 '.' 或 '..'）。
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct FsWrite {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub root: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub path: ::prost::alloc::string::String,
-    #[prost(bytes="vec", tag="4")]
-    pub data: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bool, tag="5")]
-    pub temp: bool,
-}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 18, 19, 20")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 19, 20")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -1632,22 +1890,10 @@ pub mod server_to_daemon {
         SessionCreate(super::SessionCreate),
         #[prost(message, tag="10")]
         SessionClose(super::SessionClose),
-        #[prost(message, tag="11")]
-        SessionReplay(super::SessionReplay),
-        #[prost(message, tag="12")]
-        PtyResize(super::PtyResize),
         #[prost(message, tag="13")]
         ProxyOpen(super::ProxyOpen),
         #[prost(message, tag="14")]
         ProxyClose(super::ProxyClose),
-        #[prost(message, tag="15")]
-        ExecRun(super::ExecRun),
-        #[prost(message, tag="16")]
-        FsList(super::FsList),
-        #[prost(message, tag="17")]
-        FsRead(super::FsRead),
-        #[prost(message, tag="21")]
-        FsWrite(super::FsWrite),
         #[prost(message, tag="22")]
         DaemonSetName(super::DaemonSetName),
         #[prost(message, tag="23")]
@@ -1670,9 +1916,6 @@ pub mod server_to_daemon {
         ExitAck(super::DeviceExitAck),
         #[prost(message, tag="32")]
         PreparedDeviceOperation(super::PreparedDeviceOperation),
-        /// 数据面（高频）
-        #[prost(message, tag="18")]
-        PtyInput(super::PtyInput),
         #[prost(message, tag="19")]
         ProxyData(super::ProxyData),
         #[prost(message, tag="20")]
@@ -1695,476 +1938,5 @@ pub struct WorkspaceRef {
 pub struct WorkspaceList {
     #[prost(message, repeated, tag="1")]
     pub workspaces: ::prost::alloc::vec::Vec<WorkspaceRef>,
-}
-// ===== Client → Server 载荷 =====
-
-/// 登录：用户名+密码（local 模式首次）/ supabase_token（supabase 模式换票）/ 会话 client_token（重连，两模式通用）。
-/// 服务器认证成功会在 AuthOk 回带 coflux 会话 token；之后重连只用该 token，不再触碰 Supabase。
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientAuth {
-    #[prost(string, optional, tag="1")]
-    pub username: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag="2")]
-    pub password: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag="3")]
-    pub client_token: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag="4")]
-    pub supabase_token: ::core::option::Option<::prost::alloc::string::String>,
-    /// 构建版本（git short SHA；vite dev 固定 "dev"）：server 配了 COFLUX_BUILD_ID 时用于
-    /// 认证阶段的版本准入（plan 033）。缺失本字段是"旧 bundle"的检测信号本身，不可伪造更早语义。
-    #[prost(string, optional, tag="5")]
-    pub client_version: ::core::option::Option<::prost::alloc::string::String>,
-}
-/// 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地）
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientLogout {
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientSubscribe {
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientRemoveDevice {
-    #[prost(string, tag="1")]
-    pub daemon_id: ::prost::alloc::string::String,
-}
-/// 查看某授权链接对应的待授权设备信息（不消费 token，供确认页展示 name/host/platform）
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeviceAuthorizeInfoRequest {
-    #[prost(string, tag="1")]
-    pub token: ::prost::alloc::string::String,
-}
-/// 确认授权：把该 token 对应的设备绑到当前登录账号（一次性，成功后 token 失效）
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeviceAuthorize {
-    #[prost(string, tag="1")]
-    pub token: ::prost::alloc::string::String,
-}
-/// 为端口转发签发一次性代理认证（浏览器经 <shortId>.<proxyHost> 访问前换票）。
-/// redirect 是换票成功后要跳回的地址；url 白名单校验在 hub（不属于协议层）
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ProxyIssueAuth {
-    #[prost(string, tag="1")]
-    pub redirect: ::prost::alloc::string::String,
-}
-/// 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientUpgradeDaemon {
-    #[prost(string, tag="1")]
-    pub daemon_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub version: ::prost::alloc::string::String,
-    #[prost(string, optional, tag="3")]
-    pub url: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag="4")]
-    pub sha256: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag="5")]
-    pub signature: ::core::option::Option<::prost::alloc::string::String>,
-}
-/// 导入一个 git 仓库为 project（自动创建主工作区）
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ProjectImport {
-    #[prost(string, tag="1")]
-    pub daemon_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub path: ::prost::alloc::string::String,
-    #[prost(string, optional, tag="3")]
-    pub name: ::core::option::Option<::prost::alloc::string::String>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ProjectRemove {
-    #[prost(string, tag="1")]
-    pub project_id: ::prost::alloc::string::String,
-}
-/// 在 project 下用 git worktree 新建工作区
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct WorkspaceCreate {
-    #[prost(string, tag="1")]
-    pub project_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub branch: ::prost::alloc::string::String,
-    #[prost(bool, tag="4")]
-    pub create_new: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct WorkspaceRemove {
-    #[prost(string, tag="1")]
-    pub workspace_id: ::prost::alloc::string::String,
-}
-/// 重命名工作区（name 是自由文本；空则服务端回落为分支名）
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct WorkspaceSetName {
-    #[prost(string, tag="1")]
-    pub workspace_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-}
-/// 重命名设备（别名；空则服务端拒绝）
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeviceSetName {
-    #[prost(string, tag="1")]
-    pub daemon_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TaskCreate {
-    #[prost(string, tag="1")]
-    pub workspace_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub title: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TaskStart {
-    #[prost(string, tag="1")]
-    pub task_id: ::prost::alloc::string::String,
-    #[prost(uint32, tag="2")]
-    pub cols: u32,
-    #[prost(uint32, tag="3")]
-    pub rows: u32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TaskAttach {
-    #[prost(string, tag="1")]
-    pub task_id: ::prost::alloc::string::String,
-    /// 客户端终端尺寸：镜像慢路径（replay prime）按此尺寸解析历史字节。
-    /// 缺省（0）时 server 回落 80×24。
-    #[prost(uint32, tag="2")]
-    pub cols: u32,
-    #[prost(uint32, tag="3")]
-    pub rows: u32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TaskStop {
-    #[prost(string, tag="1")]
-    pub task_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TaskRemove {
-    #[prost(string, tag="1")]
-    pub task_id: ::prost::alloc::string::String,
-}
-/// 通用原语（IDE/工具用）：在某工作区里跑命令、读/列文件。request_id 由 client 自定，server 原样回带
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientExec {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub workspace_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub command: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag="4")]
-    pub args: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(uint32, optional, tag="5")]
-    pub timeout_ms: ::core::option::Option<u32>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientFsList {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub workspace_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub path: ::prost::alloc::string::String,
-    /// 设备浏览模式（plan 012 导入向导）：设置时忽略 workspace_id，
-    /// 以该设备的用户 home 为根浏览（server 校验设备归属后 root 下发 "~"）。
-    #[prost(string, optional, tag="4")]
-    pub daemon_id: ::core::option::Option<::prost::alloc::string::String>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientFsRead {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub workspace_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub path: ::prost::alloc::string::String,
-}
-/// 终端剪贴板贴图（plan 014，temp 模式修订）：把图片字节上传到 daemon 侧系统临时目录落盘，
-/// data 为原始（或客户端已压缩过的）图片字节。temp=true 时 path 为单段文件名
-/// （形如 "paste-<ts>-<rand>.<ext>"），落盘绝对路径由 worker 回带。workspace_id 仍用于
-/// 归属校验与路由到正确 daemon（temp 模式不写入该 workspace 的 worktree）。
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientFsWrite {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub workspace_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub path: ::prost::alloc::string::String,
-    #[prost(bytes="vec", tag="4")]
-    pub data: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bool, tag="5")]
-    pub temp: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 31, 32, 23, 24")]
-    pub payload: ::core::option::Option<client_to_server::Payload>,
-}
-/// Nested message and enum types in `ClientToServer`.
-pub mod client_to_server {
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
-    pub enum Payload {
-        #[prost(message, tag="1")]
-        ClientAuth(super::ClientAuth),
-        #[prost(message, tag="2")]
-        ClientLogout(super::ClientLogout),
-        #[prost(message, tag="3")]
-        ClientSubscribe(super::ClientSubscribe),
-        #[prost(message, tag="5")]
-        ClientRemoveDevice(super::ClientRemoveDevice),
-        #[prost(message, tag="6")]
-        DeviceAuthorizeInfo(super::DeviceAuthorizeInfoRequest),
-        #[prost(message, tag="7")]
-        DeviceAuthorize(super::DeviceAuthorize),
-        #[prost(message, tag="8")]
-        ProxyIssueAuth(super::ProxyIssueAuth),
-        #[prost(message, tag="9")]
-        ClientUpgradeDaemon(super::ClientUpgradeDaemon),
-        #[prost(message, tag="10")]
-        ProjectImport(super::ProjectImport),
-        #[prost(message, tag="11")]
-        ProjectRemove(super::ProjectRemove),
-        #[prost(message, tag="12")]
-        WorkspaceCreate(super::WorkspaceCreate),
-        #[prost(message, tag="13")]
-        WorkspaceRemove(super::WorkspaceRemove),
-        #[prost(message, tag="14")]
-        TaskCreate(super::TaskCreate),
-        #[prost(message, tag="15")]
-        TaskStart(super::TaskStart),
-        #[prost(message, tag="16")]
-        TaskAttach(super::TaskAttach),
-        #[prost(message, tag="17")]
-        TaskStop(super::TaskStop),
-        #[prost(message, tag="18")]
-        TaskRemove(super::TaskRemove),
-        #[prost(message, tag="19")]
-        PtyResize(super::PtyResize),
-        #[prost(message, tag="20")]
-        ClientExec(super::ClientExec),
-        #[prost(message, tag="21")]
-        ClientFsList(super::ClientFsList),
-        #[prost(message, tag="22")]
-        ClientFsRead(super::ClientFsRead),
-        #[prost(message, tag="25")]
-        ClientFsWrite(super::ClientFsWrite),
-        #[prost(message, tag="26")]
-        DeviceSetName(super::DeviceSetName),
-        #[prost(message, tag="27")]
-        LocalPairRequest(super::LocalPairRequest),
-        #[prost(message, tag="28")]
-        LocalLeaseRequest(super::LocalLeaseRequest),
-        #[prost(message, tag="29")]
-        DeviceRelayOpen(super::DeviceRelayClientOpen),
-        #[prost(message, tag="30")]
-        DeviceRelayFrame(super::DeviceRelayFrame),
-        #[prost(message, tag="31")]
-        DeviceRelayClose(super::DeviceRelayClose),
-        #[prost(message, tag="32")]
-        LocalUnpairRequest(super::LocalUnpairRequest),
-        /// 数据面（高频）
-        #[prost(message, tag="23")]
-        PtyInput(super::PtyInput),
-        #[prost(message, tag="24")]
-        WorkspaceSetName(super::WorkspaceSetName),
-    }
-}
-// ===== Server → Client 载荷 =====
-
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AuthOk {
-    #[prost(string, tag="1")]
-    pub account_id: ::prost::alloc::string::String,
-    #[prost(string, optional, tag="2")]
-    pub client_token: ::core::option::Option<::prost::alloc::string::String>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AuthError {
-    #[prost(string, tag="1")]
-    pub message: ::prost::alloc::string::String,
-}
-/// DeviceAuthorizeInfoRequest 的回应：ok 时带设备信息，否则 error 说明原因（无效/已用/已过期）
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeviceAuthorizeInfoResult {
-    #[prost(bool, tag="1")]
-    pub ok: bool,
-    #[prost(string, optional, tag="2")]
-    pub name: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag="3")]
-    pub host: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag="4")]
-    pub platform: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag="5")]
-    pub error: ::core::option::Option<::prost::alloc::string::String>,
-}
-/// 设备授权成功（该连接的 daemon 已收到 DaemonEnrolled 并上线）
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeviceAuthorized {
-}
-/// ProxyIssueAuth 的回应：ok 时带跳转 url（换票成功，浏览器可直接访问 <shortId>.<proxyHost>）
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ProxyAuth {
-    #[prost(bool, tag="1")]
-    pub ok: bool,
-    #[prost(string, optional, tag="2")]
-    pub url: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag="3")]
-    pub error: ::core::option::Option<::prost::alloc::string::String>,
-}
-/// 某任务当前可访问的端口列表变化（daemon PortsUpdate 上报后重新计算得出）
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PortsUpdated {
-    #[prost(string, tag="1")]
-    pub task_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub ports: ::prost::alloc::vec::Vec<PortPreview>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct StateSnapshot {
-    #[prost(message, repeated, tag="1")]
-    pub daemons: ::prost::alloc::vec::Vec<DaemonInfo>,
-    #[prost(message, repeated, tag="2")]
-    pub projects: ::prost::alloc::vec::Vec<Project>,
-    #[prost(message, repeated, tag="3")]
-    pub workspaces: ::prost::alloc::vec::Vec<Workspace>,
-    #[prost(message, repeated, tag="4")]
-    pub tasks: ::prost::alloc::vec::Vec<Task>,
-    #[prost(message, repeated, tag="5")]
-    pub ports: ::prost::alloc::vec::Vec<TaskPorts>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DaemonUpdated {
-    #[prost(message, optional, tag="1")]
-    pub daemon: ::core::option::Option<DaemonInfo>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DaemonRemoved {
-    #[prost(string, tag="1")]
-    pub daemon_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ProjectCreated {
-    #[prost(message, optional, tag="1")]
-    pub project: ::core::option::Option<Project>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ProjectRemoved {
-    #[prost(string, tag="1")]
-    pub project_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct WorkspaceCreated {
-    #[prost(message, optional, tag="1")]
-    pub workspace: ::core::option::Option<Workspace>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct WorkspaceRemoved {
-    #[prost(string, tag="1")]
-    pub workspace_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct TaskUpdated {
-    #[prost(message, optional, tag="1")]
-    pub task: ::core::option::Option<Task>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TaskRemoved {
-    #[prost(string, tag="1")]
-    pub task_id: ::prost::alloc::string::String,
-}
-/// 本 client 对该任务的控制权被另一个 client 接管（独占模型）
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TaskDetached {
-    #[prost(string, tag="1")]
-    pub task_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ServerError {
-    #[prost(string, tag="1")]
-    pub message: ::prost::alloc::string::String,
-}
-/// build 版本失配（新客户端跑旧代码判定的对称面，plan 033）：认证阶段 server 比对
-/// client_version 与 COFLUX_BUILD_ID 不一致时下发本消息后关闭连接。旧 bundle（缺失
-/// client_version）走 AuthError 而非本消息——本消息对它是无法理解的未知 case（见
-/// apps/server/src/hub.ts handleClientAuth）。
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ClientOutdated {
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 22")]
-    pub payload: ::core::option::Option<server_to_client::Payload>,
-}
-/// Nested message and enum types in `ServerToClient`.
-pub mod server_to_client {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Payload {
-        #[prost(message, tag="1")]
-        AuthOk(super::AuthOk),
-        #[prost(message, tag="2")]
-        AuthError(super::AuthError),
-        #[prost(message, tag="4")]
-        DeviceAuthorizeInfo(super::DeviceAuthorizeInfoResult),
-        #[prost(message, tag="5")]
-        DeviceAuthorized(super::DeviceAuthorized),
-        #[prost(message, tag="6")]
-        ProxyAuth(super::ProxyAuth),
-        #[prost(message, tag="7")]
-        PortsUpdated(super::PortsUpdated),
-        #[prost(message, tag="8")]
-        StateSnapshot(super::StateSnapshot),
-        #[prost(message, tag="9")]
-        DaemonUpdated(super::DaemonUpdated),
-        #[prost(message, tag="10")]
-        DaemonRemoved(super::DaemonRemoved),
-        #[prost(message, tag="11")]
-        ProjectCreated(super::ProjectCreated),
-        #[prost(message, tag="12")]
-        ProjectRemoved(super::ProjectRemoved),
-        #[prost(message, tag="13")]
-        WorkspaceCreated(super::WorkspaceCreated),
-        #[prost(message, tag="14")]
-        WorkspaceRemoved(super::WorkspaceRemoved),
-        #[prost(message, tag="15")]
-        TaskUpdated(super::TaskUpdated),
-        #[prost(message, tag="16")]
-        TaskRemoved(super::TaskRemoved),
-        #[prost(message, tag="17")]
-        TaskDetached(super::TaskDetached),
-        #[prost(message, tag="18")]
-        ExecResult(super::ExecResult),
-        #[prost(message, tag="19")]
-        FsListed(super::FsListed),
-        #[prost(message, tag="20")]
-        FsReadResult(super::FsReadResult),
-        #[prost(message, tag="21")]
-        Error(super::ServerError),
-        #[prost(message, tag="23")]
-        FsWriteResult(super::FsWriteResult),
-        #[prost(message, tag="24")]
-        ClientOutdated(super::ClientOutdated),
-        #[prost(message, tag="25")]
-        LocalPairResult(super::LocalPairResult),
-        #[prost(message, tag="26")]
-        LocalLeaseResult(super::LocalLeaseResult),
-        #[prost(message, tag="27")]
-        DeviceRelayStatus(super::DeviceRelayStatus),
-        #[prost(message, tag="28")]
-        DeviceRelayFrame(super::DeviceRelayFrame),
-        #[prost(message, tag="29")]
-        DeviceRelayClose(super::DeviceRelayClose),
-        #[prost(message, tag="30")]
-        PreparedDeviceOperation(super::PreparedDeviceOperation),
-        #[prost(message, tag="31")]
-        SessionCheckpoint(super::SessionCheckpoint),
-        #[prost(message, tag="32")]
-        LocalUnpairResult(super::LocalUnpairResult),
-        /// 数据面（高频）
-        #[prost(message, tag="22")]
-        PtyOutput(super::PtyOutput),
-    }
 }
 // @@protoc_insertion_point(module)

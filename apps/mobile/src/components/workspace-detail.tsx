@@ -99,7 +99,7 @@ export function WorkspaceDetail({ client, workspaceId, onBack }: WorkspaceDetail
       controller.fit();
       controller.focus();
       const { cols, rows } = controller.dimensions();
-      client.send({ case: "ptyResize", value: { sessionId, cols, rows } });
+      client.resizeSession(sessionId, cols, rows);
     }
   }
 
@@ -195,8 +195,7 @@ export function WorkspaceDetail({ client, workspaceId, onBack }: WorkspaceDetail
   }
 
   function closeTaskNow(task: Task) {
-    // 只发 taskRemove：server 侧 handler 自带 sessionClose + dropSession。
-    client.send({ case: "taskRemove", value: { taskId: task.id } });
+    void client.closeTask(task);
   }
 
   function requestCloseTask(task: Task) {
@@ -249,7 +248,7 @@ export function WorkspaceDetail({ client, workspaceId, onBack }: WorkspaceDetail
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceTasks]);
 
-  // taskDetached 广播：被他端接管 → 置 detached、清 attach key、终端内写系统提示行。
+  // Device holder 被他端接管 → 置 detached、清 attach key、终端内写系统提示行。
   useEffect(() => {
     for (const taskId of detachedTaskIds) {
       const task = currentTasks().find((item) => item.id === taskId);
@@ -401,7 +400,7 @@ export function WorkspaceDetail({ client, workspaceId, onBack }: WorkspaceDetail
             controlState={stateOf(task)}
             registerSessionConsumer={client.registerSessionConsumer}
             sendInput={client.sendInput}
-            sendResize={(sessionId, cols, rows) => client.send({ case: "ptyResize", value: { sessionId, cols, rows } })}
+            sendResize={client.resizeSession}
             onReady={handleTerminalReady}
             onDispose={handleTerminalDispose}
             onSessionReady={handleSessionReady}

@@ -86,8 +86,10 @@ message ProxyClosed {
 }
 
 message DaemonToServer {
-  reserved 1;
-  reserved "daemon_enroll";
+  // 旧 raw PTY mirror 与 server-routed exec/fs 已由 DeviceEnvelope 取代。
+  reserved 1, 12, 13, 14, 15, 16, 19;
+  reserved "daemon_enroll", "exec_result", "fs_listed", "fs_read_result", "pty_output", "pty_replay",
+    "fs_write_result";
   oneof payload {
     DaemonAuth daemon_auth = 2;
     DaemonEnrollRequest daemon_enroll_request = 3;
@@ -99,13 +101,6 @@ message DaemonToServer {
     PortsUpdate ports_update = 9;
     ProxyOpened proxy_opened = 10;
     ProxyClosed proxy_closed = 11;
-    ExecResult exec_result = 12;
-    FsListed fs_listed = 13;
-    FsReadResult fs_read_result = 14;
-    FsWriteResult fs_write_result = 19;
-    // 数据面（高频）
-    PtyOutput pty_output = 15;
-    PtyReplay pty_replay = 16;
     ProxyData proxy_data = 17;
     WorkspaceBranch workspace_branch = 18;
     WorkspaceDiff workspace_diff = 20;
@@ -208,17 +203,6 @@ message SessionClose {
   string session_id = 1;
 }
 
-message SessionReplay {
-  string session_id = 1;
-  string request_id = 2;
-}
-
-message PtyResize {
-  string session_id = 1;
-  uint32 cols = 2;
-  uint32 rows = 3;
-}
-
 // 打开一条隧道连接：daemon 向本地 port 发起 TCP 连接，字节经 ProxyData 双向透传
 message ProxyOpen {
   string conn_id = 1;
@@ -230,42 +214,10 @@ message ProxyClose {
   string conn_id = 1;
 }
 
-// 通用原语：一次性命令
-message ExecRun {
-  string request_id = 1;
-  string cwd = 2;
-  string command = 3;
-  repeated string args = 4;
-  map<string, string> env = 5;
-  optional uint32 timeout_ms = 6;
-}
-
-// 通用原语：文件系统（root 为锚定根，path 为相对路径，daemon 校验不越界）
-message FsList {
-  string request_id = 1;
-  string root = 2;
-  string path = 3;
-}
-
-message FsRead {
-  string request_id = 1;
-  string root = 2;
-  string path = 3;
-}
-
-// 通用原语：写文件。
-// temp=false（默认）：root 为锚定根，path 为相对路径，daemon 校验不越界，父目录不存在则创建。
-// temp=true：忽略 root/锚定语义，落到 daemon 侧系统临时目录（std::env::temp_dir()/coflux-pastes/）；
-// path 此时仅允许单段文件名（不得含 '/'，不得为 '.' 或 '..'）。
-message FsWrite {
-  string request_id = 1;
-  string root = 2;
-  string path = 3;
-  bytes data = 4;
-  bool temp = 5;
-}
-
 message ServerToDaemon {
+  // 旧 replay/input/resize/RPC adapter 已删除；生命周期编排与 proxy control 继续保留。
+  reserved 11, 12, 15, 16, 17, 18, 21;
+  reserved "session_replay", "pty_resize", "exec_run", "fs_list", "fs_read", "pty_input", "fs_write";
   oneof payload {
     DaemonEnrolled daemon_enrolled = 1;
     DaemonAuthed daemon_authed = 2;
@@ -277,14 +229,8 @@ message ServerToDaemon {
     WorkerUpgrade worker_upgrade = 8;
     SessionCreate session_create = 9;
     SessionClose session_close = 10;
-    SessionReplay session_replay = 11;
-    PtyResize pty_resize = 12;
     ProxyOpen proxy_open = 13;
     ProxyClose proxy_close = 14;
-    ExecRun exec_run = 15;
-    FsList fs_list = 16;
-    FsRead fs_read = 17;
-    FsWrite fs_write = 21;
     DaemonSetName daemon_set_name = 22;
     LocalGrantInstall local_grant_install = 23;
     LocalGrantRevoke local_grant_revoke = 24;
@@ -296,8 +242,6 @@ message ServerToDaemon {
     DeviceSessionCatalogRequest session_catalog_request = 30;
     DeviceExitAck exit_ack = 31;
     PreparedDeviceOperation prepared_device_operation = 32;
-    // 数据面（高频）
-    PtyInput pty_input = 18;
     ProxyData proxy_data = 19;
     WorkspaceList workspace_list = 20;
   }

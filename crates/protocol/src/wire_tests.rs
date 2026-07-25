@@ -5,16 +5,14 @@
 //! [wire::ServerToDaemon]），覆盖三个关键点：
 //! - 信封 oneof 分派：encode 一个具体 payload variant，decode 后 match 回同一 variant。
 //! - optional 字段缺省：`None` 不下线、往返后仍是 `None`；`Some` 往返后原样保留。
-//! - bytes payload 原样往返：PTY/proxy 数据面 payload 是 `bytes`，任意（含非法 UTF-8）
-//!   字节序列编解码后必须逐字节相同——这是本次迁移把 pty 数据从「已解码 string」改为
-//!   「原始 bytes」的核心验收点。
+//! - bytes payload 原样往返：DeviceEnvelope 内的 PTY 与外层 relay bytes 都不得被中心改写。
 
 use prost::Message;
 
 use crate::wire::{
     daemon_to_server, device_envelope, server_to_daemon, DaemonAuthError, DaemonEnrollRequest, DaemonToServer, DeviceEnvelope,
-    DevicePtyInputAck, DevicePtyOutput, DeviceRelayFrame, DeviceSessionAttached, DeviceSessionCreate, ExecRun, FsEntry, FsEntryKind,
-    LocalClientHello, PreparedDeviceOperation, ProjectValidated, PtyOutput, ServerToDaemon, SessionCreate, SessionPorts,
+    DeviceExecRun, DevicePtyInputAck, DevicePtyOutput, DeviceRelayFrame, DeviceSessionAttached, DeviceSessionCreate, FsEntry,
+    FsEntryKind, LocalClientHello, PreparedDeviceOperation, ProjectValidated, ServerToDaemon, SessionCreate, SessionPorts,
 };
 use crate::{decode_device_envelope, encode_device_envelope, DEVICE_PROTOCOL_VERSION};
 
@@ -70,32 +68,21 @@ fn project_validated_optional_fields_round_trip() {
 /// optional uint32（timeout_ms）同样：None/Some 都要原样往返，不能被悄悄转成 0。
 #[test]
 fn optional_uint32_round_trips() {
-    let m = ExecRun { request_id: "r".into(), cwd: "/".into(), command: "ls".into(), args: vec![], env: Default::default(), timeout_ms: None };
-    let back = ExecRun::decode(m.encode_to_vec().as_slice()).unwrap();
+    let m = DeviceExecRun {
+        request_id: "r".into(),
+        workspace_id: "workspace-1".into(),
+        command: "ls".into(),
+        args: vec![],
+        env: Default::default(),
+        timeout_ms: None,
+        operation_id: None,
+    };
+    let back = DeviceExecRun::decode(m.encode_to_vec().as_slice()).unwrap();
     assert_eq!(back.timeout_ms, None);
 
-    let m2 = ExecRun { timeout_ms: Some(5_000), ..m };
-    let back2 = ExecRun::decode(m2.encode_to_vec().as_slice()).unwrap();
+    let m2 = DeviceExecRun { timeout_ms: Some(5_000), ..m };
+    let back2 = DeviceExecRun::decode(m2.encode_to_vec().as_slice()).unwrap();
     assert_eq!(back2.timeout_ms, Some(5_000));
-}
-
-/// bytes payload 原样往返：非法 UTF-8 字节（游离延续字节 + NUL）编解码后必须逐字节相同——
-/// 这正是本次迁移放弃「pty 输出先按 UTF-8 解码再传」的验收点。
-#[test]
-fn pty_output_bytes_round_trip_preserves_invalid_utf8() {
-    let data: Vec<u8> = vec![0x68, 0x69, 0xff, 0x00, 0x80, 0x81, b'\n'];
-    let m = PtyOutput { session_id: "sess-1".into(), data: data.clone() };
-    let back = PtyOutput::decode(m.encode_to_vec().as_slice()).unwrap();
-    assert_eq!(back.data, data);
-    assert!(std::str::from_utf8(&back.data).is_err(), "测试数据本身要确实不是合法 UTF-8");
-
-    // 套进信封走一遍完整分派，确认 oneof 场景下 bytes 依旧不被动过。
-    let env = DaemonToServer { payload: Some(daemon_to_server::Payload::PtyOutput(m)) };
-    let back_env = DaemonToServer::decode(env.encode_to_vec().as_slice()).unwrap();
-    match back_env.payload {
-        Some(daemon_to_server::Payload::PtyOutput(p)) => assert_eq!(p.data, data),
-        other => panic!("wrong variant: {other:?}"),
-    }
 }
 
 #[test]

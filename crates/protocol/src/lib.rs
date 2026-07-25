@@ -1,7 +1,8 @@
 //! coflux 线协议（Rust 侧）。
 //!
 //! 真相源是 `proto/`（Buf 管理，三端 codegen）；本 crate 是 Rust（daemon）侧的消费者：
-//! - [frame]：worker ⟷ supervisor UDS 内部数据面二进制帧（pty.output/input/replay），与
+//! - [frame]：worker ⟷ supervisor UDS 内部二进制帧（dirty/proxy/device；旧 input/replay
+//!   编号保留但拒绝解码），与
 //!   WS wire 无关，进程内部协议，不随本次 wire 迁移变化。
 //! - [wire]：Daemon ↔ Server WS 线协议（`buf generate` 产出的 prost 类型，见 [gen]）。
 //!   WS 上只有 binary message，每条 = 一个 [wire::DaemonToServer] / [wire::ServerToDaemon]
