@@ -3,30 +3,202 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, Mutex};
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use coflux_protocol::wire::{
-    device_envelope, DeviceEnvelope, DeviceError, DeviceOperationAck, DevicePtyGap, DevicePtyInput, DevicePtyOutput, DevicePtyResize,
-    DeviceSessionAttach, DeviceSessionAttached, DeviceSessionCatalog, DeviceSessionCatalogRequest, DeviceSessionCreate,
-    DeviceSessionExitTombstone, DeviceSessionInfo, DeviceSessionSnapshot, DeviceSessionSnapshotRequest, DeviceSessionStop,
+    device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck, DeviceOperationAck, DevicePtyGap, DevicePtyInput, DevicePtyOutput,
+    DevicePtyResize, DeviceSessionAttach, DeviceSessionAttached, DeviceSessionCatalog, DeviceSessionCatalogRequest, DeviceSessionCreate,
+    DeviceSessionExitTombstone, DeviceSessionExited, DeviceSessionInfo, DeviceSessionSnapshot, DeviceSessionSnapshotRequest,
+    DeviceSessionStop,
 };
 use coflux_protocol::{
     decode_device_envelope, encode_device_envelope, encode_frame, write_record, DataFrame, SessionInfo, SupervisorToWorker,
-    DEVICE_PROTOCOL_VERSION, MAX_TERMINAL_DIMENSION, MIN_TERMINAL_DIMENSION,
+    DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES, MAX_TERMINAL_DIMENSION, MIN_TERMINAL_DIMENSION,
 };
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-use crate::sessiond::{SequencedDecision, SessionState};
+use crate::sessiond::{estimated_terminal_bytes, SequencedDecision, SessionState};
 
 const OPERATION_LEDGER_LIMIT: usize = 4096;
+const WORKER_QUEUE_RECORDS: usize = 512;
+const WORKER_QUEUE_BYTES: usize = MAX_DEVICE_FRAME_BYTES + 2 * 1024 * 1024;
+
+struct ConnectionSink {
+    generation: u64,
+    sender: SyncSender<Vec<u8>>,
+    pending_bytes: Arc<AtomicUsize>,
+    shutdown: Option<UnixStream>,
+}
+
+/// 每次 worker 连接拥有独立有界队列/写线程；旧写端即使永久阻塞，也不能卡住新 worker 或 PTY。
+pub struct Outbound {
+    current: Mutex<Option<ConnectionSink>>,
+    record_limit: usize,
+    byte_limit: usize,
+}
+
+impl Outbound {
+    pub fn new() -> Arc<Self> {
+        Self::with_limits(WORKER_QUEUE_RECORDS, WORKER_QUEUE_BYTES)
+    }
+
+    fn with_limits(record_limit: usize, byte_limit: usize) -> Arc<Self> {
+        Arc::new(Self { current: Mutex::new(None), record_limit, byte_limit })
+    }
+
+    pub fn connect(self: &Arc<Self>, generation: u64, mut stream: UnixStream) {
+        let (sender, receiver) = sync_channel(self.record_limit);
+        let pending_bytes = Arc::new(AtomicUsize::new(0));
+        let shutdown = stream.try_clone().ok();
+        self.replace(Some(ConnectionSink { generation, sender, pending_bytes: pending_bytes.clone(), shutdown }));
+        let this = Arc::clone(self);
+        thread::spawn(move || {
+            for record in receiver {
+                let length = record.len();
+                if !this.is_current(generation) || stream.write_all(&record).is_err() {
+                    pending_bytes.fetch_sub(length, Ordering::AcqRel);
+                    break;
+                }
+                pending_bytes.fetch_sub(length, Ordering::AcqRel);
+            }
+            this.disconnect(generation);
+            // 同一 socket 的 read clone 可能仍阻塞；shutdown 使旧 handler 及时退出，不能继续变更 authority。
+            let _ = stream.shutdown(Shutdown::Both);
+        });
+    }
+
+    pub fn disconnect(&self, generation: u64) {
+        let removed = {
+            let mut current = self.current.lock().unwrap();
+            if current.as_ref().is_some_and(|sink| sink.generation == generation) {
+                current.take()
+            } else {
+                None
+            }
+        };
+        Self::shutdown(removed);
+    }
+
+    fn clear(&self) {
+        self.replace(None);
+    }
+
+    fn replace(&self, replacement: Option<ConnectionSink>) {
+        let previous = std::mem::replace(&mut *self.current.lock().unwrap(), replacement);
+        Self::shutdown(previous);
+    }
+
+    fn shutdown(sink: Option<ConnectionSink>) {
+        if let Some(stream) = sink.and_then(|sink| sink.shutdown) {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.current.lock().unwrap().as_ref().is_some_and(|sink| sink.generation == generation)
+    }
+
+    fn try_send(&self, record: Vec<u8>) -> bool {
+        let mut current = self.current.lock().unwrap();
+        let Some(sink) = current.as_ref() else { return false };
+        let length = record.len();
+        if !reserve_pending_bytes(&sink.pending_bytes, length, self.byte_limit) {
+            return false;
+        }
+        match sink.sender.try_send(record) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                sink.pending_bytes.fetch_sub(length, Ordering::AcqRel);
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                sink.pending_bytes.fetch_sub(length, Ordering::AcqRel);
+                let removed = current.take();
+                drop(current);
+                Self::shutdown(removed);
+                false
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn connect_sender(&self, generation: u64, sender: SyncSender<Vec<u8>>) {
+        self.replace(Some(ConnectionSink {
+            generation,
+            sender,
+            pending_bytes: Arc::new(AtomicUsize::new(0)),
+            shutdown: None,
+        }));
+    }
+}
+
+fn reserve_pending_bytes(pending: &AtomicUsize, length: usize, limit: usize) -> bool {
+    let mut current = pending.load(Ordering::Acquire);
+    loop {
+        if length > limit.saturating_sub(current) {
+            return false;
+        }
+        match pending.compare_exchange_weak(current, current + length, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+struct MemoryBudget {
+    limit: usize,
+    used: usize,
+}
+
+impl MemoryBudget {
+    fn reserve(&mut self, rows: u16, cols: u16, desired_history_lines: usize) -> Option<(usize, usize)> {
+        let available = self.limit.saturating_sub(self.used);
+        let viewport = estimated_terminal_bytes(rows, cols, 0);
+        if viewport > available {
+            return None;
+        }
+        let per_line = estimated_terminal_bytes(rows, cols, 1).saturating_sub(viewport).max(1);
+        let history_lines = desired_history_lines.min((available - viewport) / per_line);
+        let reserved = estimated_terminal_bytes(rows, cols, history_lines);
+        self.used = self.used.saturating_add(reserved);
+        Some((history_lines, reserved))
+    }
+
+    fn resize(&mut self, old: usize, new: usize) -> bool {
+        if new > old && new - old > self.limit.saturating_sub(self.used) {
+            return false;
+        }
+        self.used = self.used.saturating_sub(old).saturating_add(new);
+        true
+    }
+
+    fn release(&mut self, bytes: usize) {
+        self.used = self.used.saturating_sub(bytes);
+    }
+}
 
 #[derive(Clone, PartialEq)]
 enum OperationRequest {
     Create(DeviceSessionCreate),
     Stop(DeviceSessionStop),
+}
+
+fn canonical_stop_request(request: &DeviceSessionStop) -> DeviceSessionStop {
+    let mut canonical = request.clone();
+    canonical.request_id.clear();
+    canonical
+}
+
+fn canonical_create_request(request: &DeviceSessionCreate) -> DeviceSessionCreate {
+    let mut canonical = request.clone();
+    canonical.request_id.clear();
+    canonical
 }
 
 #[derive(Clone)]
@@ -71,41 +243,42 @@ struct Session {
     cwd: String,
     pid: i32,
     started_at: f64,
+    history_line_limit: usize,
+    reserved_bytes: usize,
     state: SessionState,
 }
 
 type SessionHandle = Arc<Mutex<Session>>;
 
-/// 迁移期保留的 legacy 背压闸；milestone 4 会移除其对 PTY reader 的控制。
-pub type Pause = Arc<(Mutex<bool>, Condvar)>;
-
 pub struct Sessions {
     map: Mutex<HashMap<String, SessionHandle>>,
-    outbound: Mutex<Sender<Vec<u8>>>,
-    pause: Pause,
+    outbound: Arc<Outbound>,
     shell: String,
     home: String,
     history_line_limit: usize,
+    memory: Mutex<MemoryBudget>,
     tombstones: Mutex<Vec<DeviceSessionExitTombstone>>,
+    next_event_id: AtomicU64,
     operations: Mutex<OperationLedger>,
 }
 
 impl Sessions {
-    pub fn new(outbound: Sender<Vec<u8>>, pause: Pause, shell: String, home: String, history_line_limit: usize) -> Arc<Self> {
+    pub fn new(outbound: Arc<Outbound>, shell: String, home: String, history_line_limit: usize, memory_limit: usize) -> Arc<Self> {
         Arc::new(Self {
             map: Mutex::new(HashMap::new()),
-            outbound: Mutex::new(outbound),
-            pause,
+            outbound,
             shell,
             home,
             history_line_limit,
+            memory: Mutex::new(MemoryBudget { limit: memory_limit, used: 0 }),
             tombstones: Mutex::new(Vec::new()),
+            next_event_id: AtomicU64::new(0),
             operations: Mutex::new(OperationLedger::default()),
         })
     }
 
     fn send_record(&self, record: Vec<u8>) -> bool {
-        self.outbound.lock().unwrap().send(record).is_ok()
+        self.outbound.try_send(record)
     }
 
     fn send_ctrl(&self, message: &SupervisorToWorker) -> bool {
@@ -118,7 +291,11 @@ impl Sessions {
             channel_id: channel_id.to_string(),
             payload: Some(payload),
         };
-        let frame = encode_frame(&DataFrame::Device { channel_id: channel_id.to_string(), data: encode_device_envelope(&envelope) });
+        let data = encode_device_envelope(&envelope);
+        if data.len() > MAX_DEVICE_FRAME_BYTES {
+            return false;
+        }
+        let frame = encode_frame(&DataFrame::Device { channel_id: channel_id.to_string(), data });
         self.send_record(write_record(&frame))
     }
 
@@ -127,6 +304,20 @@ impl Sessions {
             channel_id,
             device_envelope::Payload::Error(DeviceError { request_id, code: code.to_string(), message: message.into() }),
         );
+    }
+
+    fn deliver_pending_gaps(&self, session_id: &str, state: &mut SessionState) {
+        for gap in state.pending_gaps() {
+            let sent = self.send_device(
+                &gap.channel_id,
+                device_envelope::Payload::PtyGap(DevicePtyGap {
+                    session_id: session_id.to_string(),
+                    expected_seq: gap.expected_seq,
+                    available_seq: gap.available_seq,
+                }),
+            );
+            state.gap_delivery_result(&gap.channel_id, sent);
+        }
     }
 
     fn get(&self, session_id: &str) -> Option<SessionHandle> {
@@ -163,11 +354,30 @@ impl Sessions {
             command.env(key, value);
         }
         command.env("TERM", "xterm-256color");
-        let child = pair.slave.spawn_command(command).map_err(|error| format!("spawn: {error}"))?;
+        let mut child = pair.slave.spawn_command(command).map_err(|error| format!("spawn: {error}"))?;
         drop(pair.slave);
-        let reader = pair.master.try_clone_reader().map_err(|error| format!("clone_reader: {error}"))?;
-        let writer = pair.master.take_writer().map_err(|error| format!("take_writer: {error}"))?;
+        let reader = match pair.master.try_clone_reader() {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = child.kill();
+                return Err(format!("clone_reader: {error}"));
+            }
+        };
+        let writer = match pair.master.take_writer() {
+            Ok(writer) => writer,
+            Err(error) => {
+                let _ = child.kill();
+                return Err(format!("take_writer: {error}"));
+            }
+        };
         let pid = child.process_id().map_or(-1, |pid| pid as i32);
+        let (history_line_limit, reserved_bytes) = match self.memory.lock().unwrap().reserve(rows, cols, self.history_line_limit) {
+            Some(reservation) => reservation,
+            None => {
+                let _ = child.kill();
+                return Err("terminal memory budget exhausted".into());
+            }
+        };
         let session = Arc::new(Mutex::new(Session {
             master: pair.master,
             writer,
@@ -176,7 +386,9 @@ impl Sessions {
             cwd,
             pid,
             started_at: now_ms(),
-            state: SessionState::new(rows, cols, self.history_line_limit),
+            history_line_limit,
+            reserved_bytes,
+            state: SessionState::new(rows, cols, history_line_limit),
         }));
         self.map.lock().unwrap().insert(session_id.clone(), session.clone());
         eprintln!("[supervisor] session started {session_id} pid={pid}");
@@ -195,13 +407,6 @@ impl Sessions {
         thread::spawn(move || {
             let mut buffer = [0u8; 8192];
             loop {
-                {
-                    let (lock, cvar) = &*this.pause;
-                    let mut paused = lock.lock().unwrap();
-                    while *paused {
-                        paused = cvar.wait(paused).unwrap();
-                    }
-                }
                 match reader.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
                     Ok(length) => {
@@ -223,33 +428,54 @@ impl Sessions {
                             let sent = this.send_device(&delivery.channel_id, device_envelope::Payload::PtyOutput(output));
                             locked.state.delivery_result(&delivery.channel_id, delivery.delta.to_seq, sent);
                         }
-                        for gap in locked.state.pending_gaps() {
-                            let sent = this.send_device(
-                                &gap.channel_id,
-                                device_envelope::Payload::PtyGap(DevicePtyGap {
-                                    session_id: session_id.clone(),
-                                    expected_seq: gap.expected_seq,
-                                    available_seq: gap.available_seq,
-                                }),
-                            );
-                            locked.state.gap_delivery_result(&gap.channel_id, sent);
-                        }
+                        this.deliver_pending_gaps(&session_id, &mut locked.state);
                     }
                 }
             }
 
-            let removed = {
+            let mut locked = session.lock().unwrap();
+            let code = locked.child.wait().map_or(-1, |status| status.exit_code() as i32);
+            let final_output_seq = locked.state.output_seq();
+            let task_id = locked.task_id.clone();
+            let channels = locked.state.subscriber_channels();
+            let reserved_bytes = locked.reserved_bytes;
+            let event_number = this.next_event_id.fetch_add(1, Ordering::Relaxed) + 1;
+            let tombstone = DeviceSessionExitTombstone {
+                event_id: format!("exit-{}-{event_number}", std::process::id()),
+                session_id: session_id.clone(),
+                task_id,
+                exit_code: code,
+                final_output_seq,
+                exited_at: now_ms(),
+            };
+            let transitioned = {
                 let mut map = this.map.lock().unwrap();
                 if map.get(&session_id).is_some_and(|current| Arc::ptr_eq(current, &session)) {
-                    map.remove(&session_id)
+                    // 与 device_catalog 使用相同的 map → tombstones 锁顺序，使 live→exit 在
+                    // catalog 视角中是一次原子切换。
+                    let mut tombstones = this.tombstones.lock().unwrap();
+                    map.remove(&session_id);
+                    tombstones.push(tombstone);
+                    true
                 } else {
-                    None
+                    false
                 }
             };
-            if let Some(session) = removed {
-                let mut locked = session.lock().unwrap();
-                let code = locked.child.wait().map_or(-1, |status| status.exit_code() as i32);
+            drop(locked);
+
+            if transitioned {
+                this.memory.lock().unwrap().release(reserved_bytes);
                 eprintln!("[supervisor] session exited {session_id} code={code}");
+                for channel_id in channels {
+                    this.send_device(
+                        &channel_id,
+                        device_envelope::Payload::SessionExited(DeviceSessionExited {
+                            session_id: session_id.clone(),
+                            exit_code: code,
+                            final_output_seq,
+                        }),
+                    );
+                }
                 this.send_ctrl(&SupervisorToWorker::SessionExit { session_id, exit_code: code });
             }
         });
@@ -261,11 +487,29 @@ impl Sessions {
         }
     }
 
+    fn resize_locked(&self, session: &mut Session, rows: u16, cols: u16) -> Result<(), String> {
+        let new_reserved = estimated_terminal_bytes(rows, cols, session.history_line_limit);
+        let old_reserved = session.reserved_bytes;
+        // 保持 reservation 直到 PTY resize 成功或完整回滚；否则 shrink 释放出的额度可能被并发
+        // session 占用，底层 resize 失败时便无法恢复旧 reservation。
+        let mut memory = self.memory.lock().unwrap();
+        if !memory.resize(old_reserved, new_reserved) {
+            return Err("terminal memory budget exhausted".into());
+        }
+        if let Err(error) = session.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
+            let restored = memory.resize(new_reserved, old_reserved);
+            debug_assert!(restored, "reserved terminal memory rollback must succeed");
+            return Err(error.to_string());
+        }
+        session.state.resize(rows, cols);
+        session.reserved_bytes = new_reserved;
+        Ok(())
+    }
+
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) {
         if let Some(session) = self.get(session_id) {
             let mut locked = session.lock().unwrap();
-            let _ = locked.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-            locked.state.resize(rows, cols);
+            let _ = self.resize_locked(&mut locked, rows, cols);
         }
     }
 
@@ -314,6 +558,7 @@ impl Sessions {
             device_envelope::Payload::PtyResize(request) => self.device_resize(outer_channel_id, request),
             device_envelope::Payload::SessionStop(request) => self.device_stop(outer_channel_id, request),
             device_envelope::Payload::SessionCreate(request) => self.device_create(outer_channel_id, request),
+            device_envelope::Payload::ExitAck(request) => self.device_exit_ack(request),
             other => self.send_device_error(
                 outer_channel_id,
                 request_id_of(&other),
@@ -324,7 +569,12 @@ impl Sessions {
     }
 
     fn device_catalog(&self, channel_id: &str, request: DeviceSessionCatalogRequest) {
-        let handles: Vec<(String, SessionHandle)> = self.map.lock().unwrap().iter().map(|(id, session)| (id.clone(), session.clone())).collect();
+        let (handles, exits): (Vec<(String, SessionHandle)>, Vec<DeviceSessionExitTombstone>) = {
+            let map = self.map.lock().unwrap();
+            let exits = self.tombstones.lock().unwrap().clone();
+            let handles = map.iter().map(|(id, session)| (id.clone(), session.clone())).collect();
+            (handles, exits)
+        };
         let sessions = handles
             .into_iter()
             .map(|(session_id, session)| {
@@ -341,11 +591,18 @@ impl Sessions {
                 }
             })
             .collect();
-        let exits = self.tombstones.lock().unwrap().clone();
         self.send_device(
             channel_id,
             device_envelope::Payload::SessionCatalog(DeviceSessionCatalog { request_id: request.request_id, sessions, exits }),
         );
+    }
+
+    fn device_exit_ack(&self, request: DeviceExitAck) {
+        if request.event_ids.is_empty() {
+            return;
+        }
+        let mut tombstones = self.tombstones.lock().unwrap();
+        tombstones.retain(|event| !request.event_ids.contains(&event.event_id));
     }
 
     fn device_attach(&self, channel_id: &str, request: DeviceSessionAttach) {
@@ -355,8 +612,12 @@ impl Sessions {
         let mut locked = session.lock().unwrap();
         let cols = clamp_dim(request.cols, locked.state.cols());
         let rows = clamp_dim(request.rows, locked.state.rows());
-        let _ = locked.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-        locked.state.resize(rows, cols);
+        if let Err(error) = locked.state.validate_attach(channel_id, &request.client_instance_id, request.transport_generation) {
+            return self.send_device_error(channel_id, Some(request.request_id), error.code, error.message);
+        }
+        if let Err(error) = self.resize_locked(&mut locked, rows, cols) {
+            return self.send_device_error(channel_id, Some(request.request_id), "pty_resize_failed", error);
+        }
         let outcome = match locked.state.attach(
             channel_id,
             &request.client_instance_id,
@@ -377,7 +638,7 @@ impl Sessions {
                 }),
             );
         }
-        self.send_device(
+        let attached_sent = self.send_device(
             channel_id,
             device_envelope::Payload::SessionAttached(DeviceSessionAttached {
                 request_id: request.request_id,
@@ -389,6 +650,12 @@ impl Sessions {
                 rows: u32::from(rows),
             }),
         );
+        if !attached_sent {
+            // 首帧未进入 bounded worker queue 时，client 尚不知道 snapshot/epoch；不允许后续
+            // replay 越过它。保留 logical holder，移除 subscription，等待同一 attach 重试。
+            locked.state.remove_subscriber(channel_id);
+            return;
+        }
         for delta in outcome.replay {
             let to_seq = delta.to_seq;
             let sent = self.send_device(
@@ -401,7 +668,11 @@ impl Sessions {
                 }),
             );
             locked.state.delivery_result(channel_id, to_seq, sent);
+            if !sent {
+                break;
+            }
         }
+        self.deliver_pending_gaps(&request.session_id, &mut locked.state);
     }
 
     fn device_snapshot(&self, channel_id: &str, request: DeviceSessionSnapshotRequest) {
@@ -451,10 +722,9 @@ impl Sessions {
         match locked.state.resize_decision(channel_id, request.holder_epoch, request.resize_seq, rows, cols) {
             Ok(SequencedDecision::Duplicate) => {}
             Ok(SequencedDecision::Apply) => {
-                if let Err(error) = locked.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
-                    return self.send_device_error(channel_id, Some(request.request_id), "pty_resize_failed", error.to_string());
+                if let Err(error) = self.resize_locked(&mut locked, rows, cols) {
+                    return self.send_device_error(channel_id, Some(request.request_id), "pty_resize_failed", error);
                 }
-                locked.state.resize(rows, cols);
                 if let Err(error) = locked.state.commit_resize(channel_id, request.holder_epoch, request.resize_seq, rows, cols) {
                     self.send_device_error(channel_id, Some(request.request_id), error.code, error.message);
                 }
@@ -464,10 +734,11 @@ impl Sessions {
     }
 
     fn device_stop(&self, channel_id: &str, request: DeviceSessionStop) {
-        let operation = OperationRequest::Stop(request.clone());
+        let operation = OperationRequest::Stop(canonical_stop_request(&request));
         let mut ledger = self.operations.lock().unwrap();
         match ledger.cached(&request.operation_id, &operation) {
-            Ok(Some(ack)) => {
+            Ok(Some(mut ack)) => {
+                ack.request_id = request.request_id.clone();
                 self.send_device(channel_id, device_envelope::Payload::OperationAck(ack));
                 return;
             }
@@ -524,10 +795,11 @@ impl Sessions {
     }
 
     fn device_create(self: &Arc<Self>, channel_id: &str, request: DeviceSessionCreate) {
-        let operation = OperationRequest::Create(request.clone());
+        let operation = OperationRequest::Create(canonical_create_request(&request));
         let mut ledger = self.operations.lock().unwrap();
         match ledger.cached(&request.operation_id, &operation) {
-            Ok(Some(ack)) => {
+            Ok(Some(mut ack)) => {
+                ack.request_id = request.request_id.clone();
                 self.send_device(channel_id, device_envelope::Payload::OperationAck(ack));
                 return;
             }
@@ -574,13 +846,17 @@ impl Sessions {
         self.send_device(channel_id, device_envelope::Payload::OperationAck(ack));
     }
 
-    pub fn set_pause(&self, value: bool) {
-        let (lock, cvar) = &*self.pause;
-        let mut paused = lock.lock().unwrap();
-        *paused = value;
-        if !value {
-            cvar.notify_all();
+    pub fn worker_connected(self: &Arc<Self>, generation: u64, stream: UnixStream) {
+        self.outbound.clear();
+        let sessions: Vec<SessionHandle> = self.map.lock().unwrap().values().cloned().collect();
+        for session in sessions {
+            session.lock().unwrap().state.clear_subscribers();
         }
+        self.outbound.connect(generation, stream);
+    }
+
+    pub fn worker_disconnected(&self, generation: u64) {
+        self.outbound.disconnect(generation);
     }
 
     pub fn shutdown(&self) {
@@ -627,7 +903,7 @@ mod tests {
 
     #[test]
     fn sessiond_holder_operation_ledger_replays_same_result_and_rejects_collision() {
-        let request = OperationRequest::Stop(stop_request("request-1", "session-1"));
+        let request = OperationRequest::Stop(canonical_stop_request(&stop_request("request-1", "session-1")));
         let ack = DeviceOperationAck {
             request_id: "request-1".into(),
             operation_id: "operation-stop".into(),
@@ -638,9 +914,75 @@ mod tests {
         };
         let mut ledger = OperationLedger::default();
         ledger.remember("operation-stop".into(), request.clone(), ack.clone());
-        assert_eq!(ledger.cached("operation-stop", &request).unwrap(), Some(ack));
+        assert_eq!(ledger.cached("operation-stop", &request).unwrap(), Some(ack.clone()));
 
-        let collision = OperationRequest::Stop(stop_request("request-2", "session-2"));
+        let retry = OperationRequest::Stop(canonical_stop_request(&stop_request("request-2", "session-1")));
+        assert_eq!(ledger.cached("operation-stop", &retry).unwrap(), Some(ack));
+
+        let collision = OperationRequest::Stop(canonical_stop_request(&stop_request("request-2", "session-2")));
         assert!(ledger.cached("operation-stop", &collision).is_err());
+    }
+
+    #[test]
+    fn sessiond_backpressure_outbound_is_bounded_and_generation_safe() {
+        let outbound = Outbound::with_limits(2, 2);
+        let (first_sender, _first_receiver) = sync_channel(2);
+        outbound.connect_sender(1, first_sender);
+        assert!(outbound.try_send(vec![1, 2]));
+        assert!(!outbound.try_send(vec![3]), "byte-full queue must reject instead of blocking the PTY reader");
+
+        let (second_sender, second_receiver) = sync_channel(1);
+        outbound.connect_sender(2, second_sender);
+        outbound.disconnect(1);
+        assert!(outbound.try_send(vec![3]), "old writer teardown must not clear the replacement connection");
+        assert_eq!(second_receiver.try_recv().unwrap(), vec![3]);
+    }
+
+    #[test]
+    fn sessiond_backpressure_memory_budget_never_exceeds_limit() {
+        let viewport = estimated_terminal_bytes(24, 80, 0);
+        let limit = estimated_terminal_bytes(24, 80, 10);
+        let mut budget = MemoryBudget { limit, used: 0 };
+        let (history_lines, reserved) = budget.reserve(24, 80, 100).unwrap();
+        assert_eq!(history_lines, 10);
+        assert_eq!(reserved, limit);
+        assert_eq!(budget.used, limit);
+        assert!(!budget.resize(reserved, limit + 1));
+        assert_eq!(budget.used, limit);
+
+        assert!(budget.resize(reserved, viewport));
+        assert_eq!(budget.used, viewport);
+        budget.release(viewport);
+        assert_eq!(budget.used, 0);
+    }
+
+    #[test]
+    fn sessiond_backpressure_exit_tombstones_survive_until_ack() {
+        let sessions = Sessions::new(Outbound::new(), "/bin/sh".into(), "/tmp".into(), 0, 1024 * 1024);
+        sessions.tombstones.lock().unwrap().extend([
+            DeviceSessionExitTombstone {
+                event_id: "exit-1".into(),
+                session_id: "session-1".into(),
+                task_id: "task-1".into(),
+                exit_code: 0,
+                final_output_seq: 10,
+                exited_at: 1.0,
+            },
+            DeviceSessionExitTombstone {
+                event_id: "exit-2".into(),
+                session_id: "session-2".into(),
+                task_id: "task-2".into(),
+                exit_code: 1,
+                final_output_seq: 20,
+                exited_at: 2.0,
+            },
+        ]);
+
+        sessions.device_exit_ack(DeviceExitAck { event_ids: Vec::new() });
+        assert_eq!(sessions.tombstones.lock().unwrap().len(), 2);
+        sessions.device_exit_ack(DeviceExitAck { event_ids: vec!["exit-1".into()] });
+        let tombstones = sessions.tombstones.lock().unwrap();
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].event_id, "exit-2");
     }
 }
