@@ -24,6 +24,7 @@ const LOG_FILE = join(HOME, "daemon.log");
 const CRED = join(HOME, "credentials.json");
 const PENDING_AUTH = join(HOME, "pending-auth.json"); // worker 落盘的待授权链接（daemon.authorizePending）
 const CONN_STATE = join(HOME, "conn-state.json"); // worker 落盘的连接态快照（plan 033，见 crates/worker/src/conn_state.rs）
+const LOCAL_GATEWAY_STORE = join(HOME, "local-gateway.json"); // gateway key/origin/grant；doctor 只读结构与数量，绝不打印秘密
 const FDA_STATUS = join(HOME, "fda-status"); // supervisor 启动时探测落盘（仅 macOS，见 crates/supervisor/src/fda.rs）
 const SUP_BIN = join(BIN_DIR, "coflux-supervisor");
 const WRK_BIN = join(BIN_DIR, "coflux-worker");
@@ -31,6 +32,7 @@ const IS_MAC = platform() === "darwin";
 const IS_LINUX = platform() === "linux";
 const PLIST = join(homedir(), "Library", "LaunchAgents", "com.coflux.daemon.plist");
 const UNIT = join(homedir(), ".config", "systemd", "user", "coflux-daemon.service");
+const DEFAULT_LOCAL_GATEWAY_PORT = 8788; // 与 packages/crates protocol 的 LOCAL_GATEWAY_PORT 保持一致
 
 const die = (m) => { console.error("✗ " + m); process.exit(1); };
 const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: "utf8", ...opts });
@@ -52,6 +54,46 @@ function readPendingAuth() {
 
 function readConnState() {
   try { return JSON.parse(fs.readFileSync(CONN_STATE, "utf8")); } catch { return null; }
+}
+
+function readLocalGatewaySummary() {
+  let store;
+  try { store = JSON.parse(fs.readFileSync(LOCAL_GATEWAY_STORE, "utf8")); }
+  catch {
+    return {
+      ok: false,
+      ready: false,
+      // JSON.parse 的错误在部分 Node 版本会带原文片段；store 含私钥，诊断输出绝不能回显。
+      error: fs.existsSync(LOCAL_GATEWAY_STORE) ? "grant store 无法解析" : "grant store 尚未创建",
+    };
+  }
+  if (store?.version !== 1 || !Array.isArray(store.origins) || !Array.isArray(store.grants)) {
+    return { ok: false, ready: false, error: "grant store 结构/版本无效" };
+  }
+  const origins = store.origins.filter((origin) => typeof origin === "string" && origin.length > 0);
+  const grants = store.grants.filter((grant) => grant && typeof grant.origin === "string" && grant.origin.length > 0);
+  const origin = grants.find((grant) => origins.includes(grant.origin))?.origin || origins[0];
+  const ready = grants.length > 0 && !!origin;
+  const summary = ready
+    ? `${grants.length} 个持久 grant / ${origins.length} 个 Origin`
+    : `${grants.length} 个 grant / ${origins.length} 个 Origin（尚无可用浏览器配对）`;
+  return {
+    ok: ready,
+    ready,
+    origin,
+    detail: ready ? summary : undefined,
+    error: ready ? undefined : summary,
+  };
+}
+
+function localGatewayPort() {
+  const raw = process.env.COFLUX_LOCAL_GATEWAY_PORT;
+  if (raw === undefined || raw === "") return { ok: true, port: DEFAULT_LOCAL_GATEWAY_PORT };
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { ok: false, error: `COFLUX_LOCAL_GATEWAY_PORT=${raw} 无法定位固定监听端口` };
+  }
+  return { ok: true, port };
 }
 const CONN_STATE_LABEL = { connecting: "连接中", connected: "已连接", reconnecting: "重连中" };
 function formatDuration(ms) {
@@ -315,10 +357,9 @@ function cmdStatus() {
   }
 }
 
-/* ------------------------------ doctor：分层连通性自检 ------------------------------ */
-// 只做传输层探测（DNS/TCP/TLS/WS 升级），不解析 coflux 协议消息——CLI 保持零协议
-// （见 plan 035 Decisions）。每层探测成功即断开，不占用 server 的已认证连接名额；
-// WS 升级对 server 是一条未认证连接，server 侧 authDeadline 自然回收。
+/* ------------------------------ doctor：中心 + 本地直连分层自检 ------------------------------ */
+// 中心与 loopback 都只做传输层探测，不解析 coflux 协议消息——CLI 保持零协议。中心 WS
+// 成功升级后立即断开；loopback 只验证已持久 Origin 能拿到 101，不发送 browser 私钥或 grant。
 const DOCTOR_TIMEOUT_MS = 5000;
 
 function parseServerUrl(serverUrl) {
@@ -368,12 +409,19 @@ function probeTls(host, port) {
 }
 
 // 手写一条最小 HTTP/1.1 Upgrade 请求，只看是否拿到 101——不建立真实 WebSocket 帧连接。
-function probeWsUpgrade({ host, port, path, useTls }) {
+function probeWsUpgrade({ host, port, path, useTls, origin }) {
   return new Promise((resolve) => {
     const t0 = Date.now();
     const key = crypto.randomBytes(16).toString("base64");
-    const req = `GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${key}\r\n\r\n`;
-    const finish = (r) => resolve({ ms: Date.now() - t0, ...r });
+    const hostHeader = host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+    const originHeader = origin ? `Origin: ${origin}\r\n` : "";
+    const req = `GET ${path} HTTP/1.1\r\nHost: ${hostHeader}\r\n${originHeader}Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${key}\r\n\r\n`;
+    let settled = false;
+    const finish = (r) => {
+      if (settled) return;
+      settled = true;
+      resolve({ ms: Date.now() - t0, ...r });
+    };
     const onOpen = (socket) => {
       let buf = "";
       const timer = setTimeout(() => { socket.destroy(); finish({ ok: false, error: `升级响应超时（>${DOCTOR_TIMEOUT_MS}ms）` }); }, DOCTOR_TIMEOUT_MS);
@@ -404,85 +452,138 @@ function printLayer(name, r) {
   console.log(`  ${mark} ${name} (${r.ms}ms)${msg ? `  ${msg}` : ""}`);
 }
 
+function printLocalLayer(name, r) {
+  const mark = r.ok ? "✓" : "⚠";
+  const msg = r.ok ? (r.detail ? `→ ${r.detail}` : "") : (r.error || "");
+  const elapsed = Number.isFinite(r.ms) ? ` (${r.ms}ms)` : "";
+  console.log(`  ${mark} ${name}${elapsed}${msg ? `  ${msg}` : ""}`);
+}
+
 // 本地事实汇总：服务进程存活、conn-state.json 连接态、凭证有无、FDA。返回连接态三态：
 // "connected" | "not-connected"（有快照但非 connected，如 connecting/reconnecting）
 // | "unknown"（服务未运行，或无快照——daemon 版本较旧还没写、或刚启动）。
 // 三态区分是因为"无快照"不等于"未连接"：旧版 worker 不写 conn-state.json，把它当"未连接"
 // 会把"连接态未知"误报成"认证/授权层有问题"（2026-07-23 实操验收发现）。
 function printLocalFacts() {
-  console.log("\n  本地状态\n  ────────");
-  console.log(`  凭证:   ${fs.existsSync(CRED) ? "已登记" : "未登记"}`);
+  console.log("\n  Daemon 状态\n  ───────────");
+  const registered = fs.existsSync(CRED);
+  console.log(`  凭证:   ${registered ? "已登记" : "未登记"}`);
   const { running, active } = serviceRunningInfo();
   console.log(`  服务:   ${active}`);
   let connState = "unknown";
   if (running) {
     const conn = readConnState();
     if (conn?.state && CONN_STATE_LABEL[conn.state]) {
-      console.log(`  连接:   ${CONN_STATE_LABEL[conn.state]}`);
+      console.log(`  中心:   ${CONN_STATE_LABEL[conn.state]}`);
       connState = conn.state === "connected" ? "connected" : "not-connected";
     } else {
-      console.log("  连接:   (无快照)");
+      console.log("  中心:   (无连接态快照)");
     }
+  } else {
+    console.log("  中心:   未探测（服务未运行）");
   }
   if (IS_MAC) console.log(`  FDA:    ${fdaLabel(readFdaStatus())}`);
   console.log("");
-  return connState;
+  return { registered, running, connState };
 }
 
-function printConclusion(ok, msg) {
-  console.log(`  ${ok ? "✓" : "✗"} ${msg}\n`);
+function printConclusion(level, msg) {
+  const mark = level === "ok" ? "✓" : level === "warning" ? "⚠" : "✗";
+  console.log(`  ${mark} ${msg}\n`);
 }
 
-async function cmdDoctor() {
-  const s = readSettings();
-  const serverUrl = s.serverUrl || DEFAULT_SERVER;
-  console.log(`\n  连通性自检 —— ${serverUrl}\n  ────────────────────────────\n`);
-  let target;
-  try { target = parseServerUrl(serverUrl); }
-  catch (e) { die(`server_url 解析失败: ${serverUrl}（${e.message}）`); }
+async function probeCenter(target) {
   const { host, port, useTls } = target;
-
   const dnsR = await probeDns(host);
   printLayer("DNS 解析", dnsR);
   if (!dnsR.ok) {
-    printConclusion(false, "DNS 解析失败——检查网络连接/DNS 配置，或该域名是否可达。");
-    printLocalFacts();
-    return;
+    return { ok: false, reason: "DNS 解析失败——检查网络连接/DNS 配置，或该域名是否可达。" };
   }
 
   const tcpR = await probeTcp(host, port);
   printLayer(`TCP 连接 (${host}:${port})`, tcpR);
   if (!tcpR.ok) {
-    printConclusion(false, "DNS 可解析但 TCP 连不上——防火墙/代理拦截，或目标端口未开放。");
-    printLocalFacts();
-    return;
+    return { ok: false, reason: "DNS 可解析但 TCP 连不上——防火墙/代理拦截，或目标端口未开放。" };
   }
 
   if (useTls) {
     const tlsR = await probeTls(host, port);
     printLayer("TLS 握手", tlsR);
     if (!tlsR.ok) {
-      printConclusion(false, "TCP 可连但 TLS 握手失败——可能是企业代理 MITM 证书、系统时间错误，或服务端证书问题。");
-      printLocalFacts();
-      return;
+      return { ok: false, reason: "TCP 可连但 TLS 握手失败——可能是企业代理 MITM 证书、系统时间错误，或服务端证书问题。" };
     }
   }
 
   const wsR = await probeWsUpgrade(target);
   printLayer("WS 升级握手", wsR);
   if (!wsR.ok) {
-    printConclusion(false, "网络层通但 WebSocket 升级被拒——可能是反代/负载均衡未正确转发 Upgrade 头，或路径不对。");
-    printLocalFacts();
-    return;
+    return { ok: false, reason: "网络层通但 WebSocket 升级被拒——可能是反代/负载均衡未正确转发 Upgrade 头，或路径不对。" };
+  }
+  return { ok: true };
+}
+
+async function probeLocalDirect() {
+  const portResult = localGatewayPort();
+  if (!portResult.ok) {
+    printLocalLayer("Gateway bind", { ok: false, error: portResult.error });
+    printLocalLayer("Loopback WS", { ok: false, error: "固定 gateway 端口未知，无法探测" });
+    const grant = readLocalGatewaySummary();
+    printLocalLayer("本地 grant", grant);
+    return { ready: false };
   }
 
-  const connState = printLocalFacts();
-  const conclusion = {
-    connected: "各层连通性正常。",
-    "not-connected": "各层连通性正常，但本地未显示已连接——问题大概率在认证/授权层而非网络层，查 `cofluxd logs`。",
-    unknown: "各层连通性正常；本地连接态未知（daemon 版本较旧或刚启动，尚无 conn-state 快照），如有异常查 `cofluxd logs`。",
-  }[connState];
-  printConclusion(true, conclusion);
+  const bind = await probeTcp("127.0.0.1", portResult.port);
+  printLocalLayer(`Gateway bind (127.0.0.1:${portResult.port})`, bind);
+  const grant = readLocalGatewaySummary();
+  printLocalLayer("本地 grant", grant);
+
+  let loopback;
+  if (!bind.ok) {
+    loopback = { ok: false, error: "gateway 未监听，跳过 WS 握手" };
+  } else {
+    loopback = await probeWsUpgrade({
+      host: "127.0.0.1",
+      port: portResult.port,
+      path: "/device",
+      useTls: false,
+      // 没有持久 Origin 时仍发一个合法 Origin；403 能区分“coflux gateway 可达但未配对”。
+      origin: grant.origin || "http://127.0.0.1",
+    });
+  }
+  printLocalLayer("Loopback WS（主机侧）", loopback);
+  return { ready: bind.ok && grant.ready && loopback.ok };
+}
+
+async function cmdDoctor() {
+  const s = readSettings();
+  const serverUrl = s.serverUrl || DEFAULT_SERVER;
+  console.log(`\n  中心网络 —— ${serverUrl}\n  ────────────────────────────`);
+  let center;
+  try {
+    center = await probeCenter(parseServerUrl(serverUrl));
+  } catch (error) {
+    printLayer("server URL", { ok: false, ms: 0, error: `${serverUrl}（${error.message}）` });
+    center = { ok: false, reason: "中心地址配置无效。" };
+  }
+
+  console.log("\n  本地直连\n  ────────");
+  const direct = await probeLocalDirect();
+  const facts = printLocalFacts();
+  const relayReady = center.ok && facts.running && facts.connState === "connected";
+
+  if (direct.ready && relayReady) {
+    printConclusion("ok", "本地直连与中心 relay 均可用。");
+  } else if (!direct.ready && relayReady) {
+    printConclusion("warning", "直连降级：中心 relay 仍可用，daemon 不是离线；检查上面的 gateway/grant/loopback 项。");
+  } else if (direct.ready && !center.ok) {
+    printConclusion("warning", "中心不可达，但本地直连可用；已加载且已配对页面可继续会话，刷新/冷启动不保证。");
+  } else if (direct.ready) {
+    printConclusion("warning", "本地直连可用；中心网络可达，但 daemon→中心连接未确认，relay 状态未知。");
+  } else if (center.ok) {
+    printConclusion("warning", "直连降级；中心网络可达，但 daemon→中心连接未确认。不要据此把 daemon 判为离线，查 `cofluxd logs`。");
+  } else {
+    printConclusion("error", `${center.reason || "中心不可达"} 同时本地直连降级；当前两条路径都未确认可用。`);
+  }
 }
 
 function cmdLogs(v) {
@@ -529,7 +630,7 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd                 首次=up（打印浏览器授权链接），已配置=status
   cofluxd up [flags]      幂等：首次装+起，已装则按当前 settings.json 重装服务并重启
   cofluxd status          服务器/登记（含"等待授权"）/服务/连接状态
-  cofluxd doctor          分层连通性自检（DNS→TCP→TLS→WS 升级）+ 本地状态汇总
+  cofluxd doctor          中心网络 + gateway bind/grant/loopback + daemon 状态分层自检
   cofluxd update          更新本地 supervisor 二进制并重启（worker 由 server 自动热升级）
   cofluxd fda             [仅 macOS] 引导授予完全磁盘访问权限（避免 PTY 因 TCC 弹窗卡住）
   cofluxd logs [-f]       看 daemon 日志
