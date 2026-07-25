@@ -23,16 +23,16 @@ const cofluxTheme = defineTheme({
         // 一号，tooltip 作为附注不该比正文更响；退到 12px。
         fontSize: "var(--font-size-sm)",
         borderRadius: "var(--radius-element)",
-        // 分开写而非 border 简写：简写在样式合并里容易被整体覆盖，拆开才保得住这 1px。
-        // 颜色取 overlay-hover（5% 白）而非 pressed（10%）：这道边只是把卡片从深色背景里
-        // 剥出来，不该被看成一个框——Retina 上 1px CSS 落成 2 物理像素，10% 已经显重。
-        borderWidth: "1px",
-        borderStyle: "solid",
-        borderColor: "var(--color-overlay-hover)",
         boxShadow: "var(--shadow-high)",
-        padding: "6px 8px",
+        // padding 归零、不加边框，都是因为 Tooltip 是两层 DOM：.astryx-tooltip 是外层容器，
+        // 真正裹住文字的是内层 div，后者自带 padding-top: --spacing-1 / padding-inline-start:
+        // --spacing-2（4px / 8px，本来就合适）。在外层再给 padding 只会与内层叠加，越调越胖；
+        // 而内层那份用 StyleX 的 `:not(#\#)` 堆到特异性 (0,5,0)，单类的 .astryx-tooltip
+        // (0,1,0) 压根盖不掉——所以能做的只有别往上加。同理边框：默认没有，之前那道就是这里
+        // 加出来的，去掉即可，深浅由 popover 底色与阴影区分足矣。
+        padding: "0",
+        borderWidth: "0",
         textAlign: "start",
-        maxWidth: "300px",
       },
     },
   },

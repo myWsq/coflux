@@ -431,9 +431,12 @@ export function Sidebar(props: SidebarProps) {
                       : tone === "muted"
                         ? "bg-muted-foreground/70"
                         : "ring-1 ring-inset ring-muted-foreground/60";
-              const zapClass = tone === "success"
+              // 图标与圆点共用同一套延迟分档；direct=闪电、relay=云，与 tooltip 标题里的
+              // 图标保持同一套语汇，未建连时才退回圆点。
+              const iconClass = tone === "success"
                 ? "text-success"
                 : tone === "warning" ? "text-warning" : "text-muted-foreground";
+              const RouteIcon = transport?.mode === "direct" ? Zap : transport?.mode === "relay" ? Cloud : null;
               const rttText = rttMs === undefined ? "" : ` · ${Math.round(rttMs)}ms`;
               // 挂在整行而非那个 12px 图标上：图标太小，只挂它等于挂了个瞄不准的靶子。
               // 用组件库 Tooltip 而非原生 title：原生要悬停约 1s 才弹，且弹出后内容不再随
@@ -474,10 +477,10 @@ export function Sidebar(props: SidebarProps) {
                 >
                   <Tooltip content={tooltipContent} placement="end" hasHoverIndication={false}>
                     <div className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground">
-                      {/* 固定 12px 槽位：闪电与圆点尺寸不同，不统一宽度设备名会参差。 */}
+                      {/* 固定 12px 槽位：图标与圆点尺寸不同，不统一宽度设备名会参差。 */}
                       <span className="flex size-3 shrink-0 items-center justify-center">
-                        {transport?.mode === "direct" ? (
-                          <Zap className={cn("size-3", zapClass)} aria-label={`本机直连${rttText}`} />
+                        {RouteIcon ? (
+                          <RouteIcon className={cn("size-3", iconClass)} aria-label={`${routeLabel}${rttText}`} />
                         ) : (
                           <span className={cn("size-1.5 rounded-full", dotClass)} />
                         )}
