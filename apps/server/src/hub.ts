@@ -34,8 +34,10 @@ import {
   WorkspaceSchema,
   TaskSchema,
   TaskStatus,
+  DeviceScope,
   type AccountId,
   type DaemonId,
+  type DeviceRelayConnect,
   type DaemonToServer,
   type ClientToServer,
   type ServerToDaemonPayload,
@@ -65,7 +67,7 @@ import {
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
 import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
-import { DeviceRelayRouter } from "./device-relay.js";
+import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, validRelayId } from "./relay-rendezvous.js";
 import { LocalControlPlane } from "./local-control.js";
 import type { SupabaseVerifier, SupabaseIdentity } from "./auth.js";
 
@@ -167,7 +169,8 @@ export class Hub {
   private preparedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private catalog = new Map<DaemonId, Map<SessionId, DeviceSessionInfo>>();
   private readonly localControl: LocalControlPlane<ClientConn, DaemonConn>;
-  private readonly deviceRelay: DeviceRelayRouter<ClientConn, DaemonConn>;
+  /** 独立 relay 的 token 签发（plan 043）；server 不再承载 relay 数据面。 */
+  private readonly relayTokens: RelayTokenSigner;
   /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
 
@@ -194,12 +197,7 @@ export class Hub {
       (daemon, payload) => this.sendDaemon(daemon, payload),
       (client, payload) => this.sendClient(client, payload),
     );
-    this.deviceRelay = new DeviceRelayRouter(
-      (daemonId) => this.daemons.get(daemonId),
-      (daemon, payload) => this.sendDaemon(daemon, payload),
-      (client, payload) => this.sendClient(client, payload),
-      config.clientBufferHardLimit,
-    );
+    this.relayTokens = new RelayTokenSigner(config.relaySigningKeySeed);
   }
 
   /* ============================ 发送工具 ============================ */
@@ -251,7 +249,6 @@ export class Hub {
   private async registerDaemonConn(conn: DaemonCtx, info: DaemonInfoData, accountId: AccountId, arch: string): Promise<void> {
     const prev = this.daemons.get(info.daemonId);
     if (prev && prev.ws !== conn.ws) {
-      this.deviceRelay.closeByDaemon(info.daemonId);
       try {
         prev.ws.close(4002, "replaced by new connection");
       } catch {
@@ -890,16 +887,6 @@ export class Hub {
         if (daemon) await this.localControl.grantAck(daemon, msg.payload.value);
         break;
       }
-      case "deviceRelayFrame": {
-        const daemon = this.currentDaemon(conn);
-        if (daemon) this.deviceRelay.fromDaemon(daemon, msg.payload.value);
-        break;
-      }
-      case "deviceRelayClose": {
-        const daemon = this.currentDaemon(conn);
-        if (daemon) this.deviceRelay.closeFromDaemon(daemon, msg.payload.value);
-        break;
-      }
       case "sessionCatalog": {
         const daemon = this.currentDaemon(conn);
         if (daemon) await this.reconcileSessionCatalog(daemon, msg.payload.value);
@@ -1100,7 +1087,6 @@ export class Hub {
 
     this.daemons.delete(daemonId);
     this.catalog.delete(daemonId);
-    this.deviceRelay.closeByDaemon(daemonId);
     await this.localControl.daemonDisconnected(daemonId);
     // 端口转发：daemon 掉线即所有隧道失联，摘路由表 + 关在途连接（this.sessions 本身按既有设计不动，
     // 留给 daemon.resync 重连后自愈；shortId 会在重连后 ports.update 时重新签发，见 plan 006）。
@@ -1168,16 +1154,8 @@ export class Hub {
         await this.localControl.unpair(client, msg.payload.value);
         break;
       }
-      case "deviceRelayOpen": {
-        this.deviceRelay.open(client, msg.payload.value);
-        break;
-      }
-      case "deviceRelayFrame": {
-        this.deviceRelay.fromClient(client, msg.payload.value);
-        break;
-      }
-      case "deviceRelayClose": {
-        this.deviceRelay.closeFromClient(client, msg.payload.value);
+      case "deviceRelayConnect": {
+        this.handleDeviceRelayConnect(client, msg.payload.value);
         break;
       }
       case "clientRemoveDevice": {
@@ -1608,6 +1586,53 @@ export class Hub {
     this.sendClient(client, { case: "deviceAuthorized", value: {} });
   }
 
+  /** relay rendezvous（plan 043）：校验归属 → 两端各签短时单次 token → 通知 daemon 拨号。
+   * 校验语义沿用旧 DeviceRelayRouter.open；server 从此不持 channel 状态，channel 的
+   * 生死由 relay 配对/两端 WS 收敛，断开即由 client 重新 rendezvous。 */
+  private handleDeviceRelayConnect(client: ClientConn, request: DeviceRelayConnect): void {
+    const fail = (error: string) =>
+      this.sendClient(client, { case: "deviceRelayGrant", value: { channelId: request.channelId, ok: false, error } });
+
+    if (!client.accountId) return void fail("client 未认证");
+    if (
+      request.protocolVersion !== DEVICE_PROTOCOL_VERSION ||
+      !validRelayId(request.daemonId) ||
+      !validRelayId(request.channelId) ||
+      request.channelId.startsWith("__coflux-") ||
+      !validRelayId(request.clientInstanceId) ||
+      request.transportGeneration <= 0n
+    ) {
+      return void fail("relay channel/principal/version 无效");
+    }
+    if (!config.relayUrl) return void fail("中心未配置 relay 节点");
+    if (!allowRendezvous(client)) return void fail("rendezvous 频率超限");
+
+    const daemon = this.daemons.get(request.daemonId);
+    if (!daemon || daemon.accountId !== client.accountId) return void fail("daemon 不在线或不属于本账号");
+
+    const ttl = config.relayTokenTtlMs;
+    this.sendDaemon(daemon, {
+      case: "deviceRelayDial",
+      value: {
+        channelId: request.channelId,
+        relayUrl: buildRelayPipeUrl(config.relayUrl, this.relayTokens.sign(request.channelId, "daemon", ttl)),
+        accountId: client.accountId,
+        clientInstanceId: request.clientInstanceId,
+        transportGeneration: request.transportGeneration,
+        scopes: [DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE],
+        protocolVersion: DEVICE_PROTOCOL_VERSION,
+      },
+    });
+    this.sendClient(client, {
+      case: "deviceRelayGrant",
+      value: {
+        channelId: request.channelId,
+        ok: true,
+        relayUrl: buildRelayPipeUrl(config.relayUrl, this.relayTokens.sign(request.channelId, "client", ttl)),
+      },
+    });
+  }
+
   private async removeDevice(client: ClientConn, daemonId: DaemonId): Promise<void> {
     const device = await this.store.getDevice(daemonId);
     if (!device || device.accountId !== client.accountId) return;
@@ -1625,7 +1650,6 @@ export class Hub {
       this.daemons.delete(daemonId);
     }
     this.catalog.delete(daemonId);
-    this.deviceRelay.closeByDaemon(daemonId);
     for (const [sid, s] of this.sessions) if (s.daemonId === daemonId) this.dropSession(sid);
     const workspaces = await this.store.listWorkspacesByDaemon(daemonId);
     const projects = await this.store.listProjectsByDaemon(daemonId);
@@ -1646,7 +1670,6 @@ export class Hub {
 
   handleClientClose(client: ClientConn): void {
     this.clients.delete(client);
-    this.deviceRelay.closeByClient(client);
     this.removePreparedWaitersByClient(client);
   }
 
@@ -1657,7 +1680,6 @@ export class Hub {
 
   /** 优雅关闭：清定时器、关所有连接 */
   shutdown(): void {
-    this.deviceRelay.shutdown();
     this.localControl.shutdown();
     for (const timer of this.preparedRetryTimers.values()) clearTimeout(timer);
     this.preparedRetryTimers.clear();

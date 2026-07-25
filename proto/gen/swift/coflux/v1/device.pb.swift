@@ -595,9 +595,8 @@ public struct Coflux_V1_LocalGrantAck: Sendable {
   fileprivate var _error: String? = nil
 }
 
-/// client→server：申请一个中心 relay logical channel。channel_id/client_instance_id 均由 client
-/// 随机生成；server 把已认证 account/scopes 加到 DeviceRelayDaemonOpen 后发给目标 worker。
-public struct Coflux_V1_DeviceRelayClientOpen: Sendable {
+/// client→server：channel_id/client_instance_id 均由 client 随机生成；`__coflux-` 前缀保留。
+public struct Coflux_V1_DeviceRelayConnect: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -617,67 +616,9 @@ public struct Coflux_V1_DeviceRelayClientOpen: Sendable {
   public init() {}
 }
 
-public struct Coflux_V1_DeviceRelayDaemonOpen: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var channelID: String = String()
-
-  public var accountID: String = String()
-
-  public var clientInstanceID: String = String()
-
-  public var transportGeneration: UInt64 = 0
-
-  public var scopes: [Coflux_V1_DeviceScope] = []
-
-  public var protocolVersion: UInt32 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public struct Coflux_V1_DeviceRelayFrame: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var channelID: String = String()
-
-  /// 编码后的 DeviceEnvelope；server 原样转发。
-  public var frame: Data = Data()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public struct Coflux_V1_DeviceRelayClose: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var channelID: String = String()
-
-  public var reason: String {
-    get {_reason ?? String()}
-    set {_reason = newValue}
-  }
-  /// Returns true if `reason` has been explicitly set.
-  public var hasReason: Bool {self._reason != nil}
-  /// Clears the value of `reason`. Subsequent reads from it will return its default value.
-  public mutating func clearReason() {self._reason = nil}
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-
-  fileprivate var _reason: String? = nil
-}
-
-public struct Coflux_V1_DeviceRelayStatus: Sendable {
+/// server→client：rendezvous 结果。ok 时 relay_url 就绪（完整 ws(s) URL，token 在 query 内，
+/// TTL 短且同 channel+role 只可用一次）；失败时 error 给拒因。
+public struct Coflux_V1_DeviceRelayGrant: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -685,6 +626,15 @@ public struct Coflux_V1_DeviceRelayStatus: Sendable {
   public var channelID: String = String()
 
   public var ok: Bool = false
+
+  public var relayURL: String {
+    get {_relayURL ?? String()}
+    set {_relayURL = newValue}
+  }
+  /// Returns true if `relayURL` has been explicitly set.
+  public var hasRelayURL: Bool {self._relayURL != nil}
+  /// Clears the value of `relayURL`. Subsequent reads from it will return its default value.
+  public mutating func clearRelayURL() {self._relayURL = nil}
 
   public var error: String {
     get {_error ?? String()}
@@ -699,7 +649,34 @@ public struct Coflux_V1_DeviceRelayStatus: Sendable {
 
   public init() {}
 
+  fileprivate var _relayURL: String? = nil
   fileprivate var _error: String? = nil
+}
+
+/// server→daemon：要求 worker 立即拨号 relay 建立本 channel 的 daemon 侧 WS。
+/// account/scopes 语义与旧 DeviceRelayDaemonOpen 相同：由 server 授予，daemon 信任控制面。
+public struct Coflux_V1_DeviceRelayDial: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var channelID: String = String()
+
+  public var relayURL: String = String()
+
+  public var accountID: String = String()
+
+  public var clientInstanceID: String = String()
+
+  public var transportGeneration: UInt64 = 0
+
+  public var scopes: [Coflux_V1_DeviceScope] = []
+
+  public var protocolVersion: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 public struct Coflux_V1_DeviceSessionInfo: Sendable {
@@ -2718,8 +2695,8 @@ extension Coflux_V1_LocalGrantAck: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension Coflux_V1_DeviceRelayClientOpen: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".DeviceRelayClientOpen"
+extension Coflux_V1_DeviceRelayConnect: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceRelayConnect"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_id\0\u{3}channel_id\0\u{3}client_instance_id\0\u{3}transport_generation\0\u{3}protocol_version\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
@@ -2757,7 +2734,7 @@ extension Coflux_V1_DeviceRelayClientOpen: SwiftProtobuf.Message, SwiftProtobuf.
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  public static func ==(lhs: Coflux_V1_DeviceRelayClientOpen, rhs: Coflux_V1_DeviceRelayClientOpen) -> Bool {
+  public static func ==(lhs: Coflux_V1_DeviceRelayConnect, rhs: Coflux_V1_DeviceRelayConnect) -> Bool {
     if lhs.daemonID != rhs.daemonID {return false}
     if lhs.channelID != rhs.channelID {return false}
     if lhs.clientInstanceID != rhs.clientInstanceID {return false}
@@ -2768,138 +2745,9 @@ extension Coflux_V1_DeviceRelayClientOpen: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
-extension Coflux_V1_DeviceRelayDaemonOpen: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".DeviceRelayDaemonOpen"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0\u{3}account_id\0\u{3}client_instance_id\0\u{3}transport_generation\0\u{1}scopes\0\u{3}protocol_version\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.accountID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.clientInstanceID) }()
-      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.transportGeneration) }()
-      case 5: try { try decoder.decodeRepeatedEnumField(value: &self.scopes) }()
-      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.protocolVersion) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.channelID.isEmpty {
-      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
-    }
-    if !self.accountID.isEmpty {
-      try visitor.visitSingularStringField(value: self.accountID, fieldNumber: 2)
-    }
-    if !self.clientInstanceID.isEmpty {
-      try visitor.visitSingularStringField(value: self.clientInstanceID, fieldNumber: 3)
-    }
-    if self.transportGeneration != 0 {
-      try visitor.visitSingularUInt64Field(value: self.transportGeneration, fieldNumber: 4)
-    }
-    if !self.scopes.isEmpty {
-      try visitor.visitPackedEnumField(value: self.scopes, fieldNumber: 5)
-    }
-    if self.protocolVersion != 0 {
-      try visitor.visitSingularUInt32Field(value: self.protocolVersion, fieldNumber: 6)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_DeviceRelayDaemonOpen, rhs: Coflux_V1_DeviceRelayDaemonOpen) -> Bool {
-    if lhs.channelID != rhs.channelID {return false}
-    if lhs.accountID != rhs.accountID {return false}
-    if lhs.clientInstanceID != rhs.clientInstanceID {return false}
-    if lhs.transportGeneration != rhs.transportGeneration {return false}
-    if lhs.scopes != rhs.scopes {return false}
-    if lhs.protocolVersion != rhs.protocolVersion {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_DeviceRelayFrame: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".DeviceRelayFrame"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0\u{1}frame\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
-      case 2: try { try decoder.decodeSingularBytesField(value: &self.frame) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.channelID.isEmpty {
-      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
-    }
-    if !self.frame.isEmpty {
-      try visitor.visitSingularBytesField(value: self.frame, fieldNumber: 2)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_DeviceRelayFrame, rhs: Coflux_V1_DeviceRelayFrame) -> Bool {
-    if lhs.channelID != rhs.channelID {return false}
-    if lhs.frame != rhs.frame {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_DeviceRelayClose: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".DeviceRelayClose"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0\u{1}reason\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self._reason) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if !self.channelID.isEmpty {
-      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
-    }
-    try { if let v = self._reason {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 2)
-    } }()
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Coflux_V1_DeviceRelayClose, rhs: Coflux_V1_DeviceRelayClose) -> Bool {
-    if lhs.channelID != rhs.channelID {return false}
-    if lhs._reason != rhs._reason {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Coflux_V1_DeviceRelayStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".DeviceRelayStatus"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0\u{1}ok\0\u{1}error\0")
+extension Coflux_V1_DeviceRelayGrant: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceRelayGrant"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0\u{1}ok\0\u{3}relay_url\0\u{1}error\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2909,7 +2757,8 @@ extension Coflux_V1_DeviceRelayStatus: SwiftProtobuf.Message, SwiftProtobuf._Mes
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
       case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._relayURL) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self._error) }()
       default: break
       }
     }
@@ -2926,16 +2775,80 @@ extension Coflux_V1_DeviceRelayStatus: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if self.ok != false {
       try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
     }
-    try { if let v = self._error {
+    try { if let v = self._relayURL {
       try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    try { if let v = self._error {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 4)
     } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  public static func ==(lhs: Coflux_V1_DeviceRelayStatus, rhs: Coflux_V1_DeviceRelayStatus) -> Bool {
+  public static func ==(lhs: Coflux_V1_DeviceRelayGrant, rhs: Coflux_V1_DeviceRelayGrant) -> Bool {
     if lhs.channelID != rhs.channelID {return false}
     if lhs.ok != rhs.ok {return false}
+    if lhs._relayURL != rhs._relayURL {return false}
     if lhs._error != rhs._error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceRelayDial: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceRelayDial"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0\u{3}relay_url\0\u{3}account_id\0\u{3}client_instance_id\0\u{3}transport_generation\0\u{1}scopes\0\u{3}protocol_version\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.relayURL) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.accountID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.clientInstanceID) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.transportGeneration) }()
+      case 6: try { try decoder.decodeRepeatedEnumField(value: &self.scopes) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.protocolVersion) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.channelID.isEmpty {
+      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
+    }
+    if !self.relayURL.isEmpty {
+      try visitor.visitSingularStringField(value: self.relayURL, fieldNumber: 2)
+    }
+    if !self.accountID.isEmpty {
+      try visitor.visitSingularStringField(value: self.accountID, fieldNumber: 3)
+    }
+    if !self.clientInstanceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.clientInstanceID, fieldNumber: 4)
+    }
+    if self.transportGeneration != 0 {
+      try visitor.visitSingularUInt64Field(value: self.transportGeneration, fieldNumber: 5)
+    }
+    if !self.scopes.isEmpty {
+      try visitor.visitPackedEnumField(value: self.scopes, fieldNumber: 6)
+    }
+    if self.protocolVersion != 0 {
+      try visitor.visitSingularUInt32Field(value: self.protocolVersion, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceRelayDial, rhs: Coflux_V1_DeviceRelayDial) -> Bool {
+    if lhs.channelID != rhs.channelID {return false}
+    if lhs.relayURL != rhs.relayURL {return false}
+    if lhs.accountID != rhs.accountID {return false}
+    if lhs.clientInstanceID != rhs.clientInstanceID {return false}
+    if lhs.transportGeneration != rhs.transportGeneration {return false}
+    if lhs.scopes != rhs.scopes {return false}
+    if lhs.protocolVersion != rhs.protocolVersion {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

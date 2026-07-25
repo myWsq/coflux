@@ -5,12 +5,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use coflux_protocol::wire::{self,
-    daemon_to_server, device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck, DevicePtyGap, DeviceRelayClose,
-    DeviceRelayDaemonOpen, DeviceRelayFrame, DeviceScope, DeviceSessionCatalog, DeviceSessionCatalogRequest,
+    daemon_to_server, device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck, DevicePtyGap, DeviceRelayDial,
+    DeviceScope, DeviceSessionCatalog, DeviceSessionCatalogRequest,
     DeviceSessionSnapshotRequest, PreparedDeviceOperation, PreparedDeviceOperationInstalled, SessionCheckpoint,
 };
 use coflux_protocol::{
@@ -66,7 +66,6 @@ impl CheckpointOutbox {
 }
 
 struct ProductionServices {
-    relay_to_server: mpsc::Sender<WsOut>,
     checkpoints: Arc<CheckpointOutbox>,
     state: Arc<Mutex<WorkerState>>,
     cfg: Arc<Config>,
@@ -243,6 +242,22 @@ impl ChannelReceiver {
         };
         (!self.closed.load(Ordering::Acquire)).then_some(bytes)
     }
+
+    /// 非阻塞读；语义与 [`Self::recv`] 一致（普通帧优先于 gap）。仅测试断言用。
+    #[cfg(test)]
+    pub fn try_recv(&mut self) -> Option<Vec<u8>> {
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let bytes = match self.regular.try_recv() {
+            Ok(value) => {
+                self.pending_bytes.fetch_sub(value.len(), Ordering::AcqRel);
+                value
+            }
+            Err(_) => self.priority.try_recv().ok()?,
+        };
+        (!self.closed.load(Ordering::Acquire)).then_some(bytes)
+    }
 }
 
 pub struct DeviceRuntime {
@@ -274,7 +289,6 @@ impl DeviceRuntime {
         auth: Option<Arc<LocalAuth>>,
         to_supervisor: mpsc::Sender<Vec<u8>>,
         to_server: mpsc::Sender<WsOut>,
-        relay_to_server: mpsc::Sender<WsOut>,
         checkpoints: Arc<CheckpointOutbox>,
         state: Arc<Mutex<WorkerState>>,
         cfg: Arc<Config>,
@@ -283,7 +297,7 @@ impl DeviceRuntime {
             auth,
             to_supervisor,
             to_server,
-            Some(ProductionServices { relay_to_server, checkpoints, state, cfg }),
+            Some(ProductionServices { checkpoints, state, cfg }),
             CHANNEL_QUEUE_RECORDS,
             CHANNEL_QUEUE_BYTES,
         )
@@ -340,51 +354,30 @@ impl DeviceRuntime {
         (channel_id, receiver)
     }
 
-    pub fn open_relay(self: &Arc<Self>, open: DeviceRelayDaemonOpen) -> Result<(), String> {
-        validate_relay_open(&open)?;
-        let (sink, mut receiver) = ChannelSink::pair(self.record_limit, self.byte_limit);
-        {
-            let mut channels = self.channels.lock().unwrap();
-            if channels.contains_key(&open.channel_id) {
-                return Err("relay channelId 已存在".into());
-            }
-            channels.insert(
-                open.channel_id.clone(),
-                ChannelEntry {
-                    transport: TransportKind::Relay,
-                    principal: Principal::Relay {
-                        account_id: open.account_id,
-                        client_instance_id: open.client_instance_id,
-                        transport_generation: open.transport_generation,
-                        scopes: normalized_scopes(open.scopes)?,
-                    },
-                    sink,
-                    streams: HashMap::new(),
-                },
-            );
+    /// 注册一条 relay channel 并返回其出向帧接收端（plan 043：帧不再回中心控制 WS，
+    /// 由调用方——relay 拨号任务——泵到该 channel 专属的 relay WS）。
+    pub fn open_relay(self: &Arc<Self>, dial: &DeviceRelayDial) -> Result<ChannelReceiver, String> {
+        validate_relay_dial(dial)?;
+        let (sink, receiver) = ChannelSink::pair(self.record_limit, self.byte_limit);
+        let mut channels = self.channels.lock().unwrap();
+        if channels.contains_key(&dial.channel_id) {
+            return Err("relay channelId 已存在".into());
         }
-
-        let channel_id = open.channel_id;
-        let to_server = self.services.as_ref().map_or_else(|| self.to_server.clone(), |services| services.relay_to_server.clone());
-        let runtime: Weak<Self> = Arc::downgrade(self);
-        tokio::spawn(async move {
-            while let Some(frame) = receiver.recv().await {
-                let payload = daemon_to_server::Payload::DeviceRelayFrame(DeviceRelayFrame { channel_id: channel_id.clone(), frame });
-                let bytes = coflux_protocol::wire::DaemonToServer { payload: Some(payload) }.encode_to_vec();
-                if to_server.try_send(bytes).is_err() {
-                    break;
-                }
-            }
-            if let Some(runtime) = runtime.upgrade() {
-                runtime.close_channel(&channel_id);
-            }
-            let close = daemon_to_server::Payload::DeviceRelayClose(DeviceRelayClose {
-                channel_id,
-                reason: Some("relay transport unavailable".into()),
-            });
-            let _ = to_server.try_send(coflux_protocol::wire::DaemonToServer { payload: Some(close) }.encode_to_vec());
-        });
-        Ok(())
+        channels.insert(
+            dial.channel_id.clone(),
+            ChannelEntry {
+                transport: TransportKind::Relay,
+                principal: Principal::Relay {
+                    account_id: dial.account_id.clone(),
+                    client_instance_id: dial.client_instance_id.clone(),
+                    transport_generation: dial.transport_generation,
+                    scopes: normalized_scopes(dial.scopes.clone())?,
+                },
+                sink,
+                streams: HashMap::new(),
+            },
+        );
+        Ok(receiver)
     }
 
     pub fn close_channel(&self, channel_id: &str) {
@@ -1387,19 +1380,22 @@ fn prepared_task_id(prepared: &HashMap<String, PreparedRecord>, operation_id: &s
     }
 }
 
-fn validate_relay_open(open: &DeviceRelayDaemonOpen) -> Result<(), String> {
-    if open.protocol_version != DEVICE_PROTOCOL_VERSION {
+fn validate_relay_dial(dial: &DeviceRelayDial) -> Result<(), String> {
+    if dial.protocol_version != DEVICE_PROTOCOL_VERSION {
         return Err("relay Device protocol version 不兼容".into());
     }
-    if !valid_id(&open.channel_id)
-        || open.channel_id.starts_with("__coflux-")
-        || !valid_id(&open.account_id)
-        || !valid_id(&open.client_instance_id)
-        || open.transport_generation == 0
+    if !valid_id(&dial.channel_id)
+        || dial.channel_id.starts_with("__coflux-")
+        || !valid_id(&dial.account_id)
+        || !valid_id(&dial.client_instance_id)
+        || dial.transport_generation == 0
     {
         return Err("relay principal/channel/generation 无效".into());
     }
-    normalized_scopes(open.scopes.clone()).map(|_| ())
+    if !dial.relay_url.starts_with("ws://") && !dial.relay_url.starts_with("wss://") {
+        return Err("relay URL scheme 无效".into());
+    }
+    normalized_scopes(dial.scopes.clone()).map(|_| ())
 }
 
 fn normalized_scopes(mut scopes: Vec<i32>) -> Result<Vec<i32>, String> {
@@ -1511,7 +1507,7 @@ fn epoch_ms() -> f64 {
 mod tests {
     use super::*;
     use coflux_protocol::wire::{
-        DeviceExecRun, DevicePortsRequest, DevicePtyInputAck, DevicePtyOutput, DeviceRelayDaemonOpen, DeviceSessionAttached,
+        DeviceExecRun, DevicePortsRequest, DevicePtyInputAck, DevicePtyOutput, DeviceSessionAttached,
         DeviceSessionCatalogRequest, DeviceSessionCreate, LocalBrowserGrant, OnlineDeviceLease,
     };
     use p256::ecdsa::SigningKey;
@@ -1525,7 +1521,7 @@ mod tests {
         local_id: String,
         local_rx: ChannelReceiver,
         relay_id: String,
-        relay_rx: mpsc::Receiver<WsOut>,
+        relay_rx: ChannelReceiver,
         from_server: mpsc::Receiver<WsOut>,
         from_supervisor: mpsc::Receiver<Vec<u8>>,
     }
@@ -1604,13 +1600,11 @@ mod tests {
         }));
         let (to_supervisor, from_supervisor) = mpsc::channel(32);
         let (to_server, from_server) = mpsc::channel(32);
-        let (to_relay, relay_rx) = mpsc::channel(32);
         let checkpoints = Arc::new(CheckpointOutbox::default());
         let runtime = DeviceRuntime::production(
             Some(auth.clone()),
             to_supervisor,
             to_server,
-            to_relay,
             checkpoints.clone(),
             state.clone(),
             cfg,
@@ -1635,9 +1629,10 @@ mod tests {
             ],
         });
         let relay_id = "relay-1".to_string();
-        runtime
-            .open_relay(DeviceRelayDaemonOpen {
+        let relay_rx = runtime
+            .open_relay(&DeviceRelayDial {
                 channel_id: relay_id.clone(),
+                relay_url: "ws://127.0.0.1:1/v1/pipe?token=test.test".into(),
                 account_id: "account-1".into(),
                 client_instance_id: "client-1".into(),
                 transport_generation: 2,
@@ -1668,13 +1663,11 @@ mod tests {
         })
     }
 
-    async fn relay_envelope(receiver: &mut mpsc::Receiver<WsOut>) -> DeviceEnvelope {
+    /// plan 043：relay channel 出向帧就是 ChannelReceiver 里的原始 DeviceEnvelope bytes
+    /// （由拨号任务直接泵进该 channel 的 relay WS），不再有 DaemonToServer wrap。
+    async fn relay_envelope(receiver: &mut ChannelReceiver) -> DeviceEnvelope {
         let bytes = tokio::time::timeout(Duration::from_secs(2), receiver.recv()).await.unwrap().unwrap();
-        let message = wire::DaemonToServer::decode(bytes.as_slice()).unwrap();
-        let daemon_to_server::Payload::DeviceRelayFrame(frame) = message.payload.unwrap() else {
-            panic!("expected relay frame");
-        };
-        decode_device_envelope(&frame.frame).unwrap()
+        decode_device_envelope(&bytes).unwrap()
     }
 
     #[test]
@@ -1713,7 +1706,7 @@ mod tests {
                 applied_through_seq: 7,
             })) if session_id == "session-local"
         ));
-        assert!(fixture.relay_rx.try_recv().is_err(), "local ACK must not leak to relay channels");
+        assert!(fixture.relay_rx.try_recv().is_none(), "local ACK must not leak to relay channels");
 
         let relay_ack = DeviceEnvelope {
             protocol_version: DEVICE_PROTOCOL_VERSION,

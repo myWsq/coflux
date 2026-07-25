@@ -172,9 +172,16 @@ message LocalGrantAck {
   optional string error = 4;
 }
 
-// client→server：申请一个中心 relay logical channel。channel_id/client_instance_id 均由 client
-// 随机生成；server 把已认证 account/scopes 加到 DeviceRelayDaemonOpen 后发给目标 worker。
-message DeviceRelayClientOpen {
+// ===== 独立 relay rendezvous（plan 043）=====
+//
+// relay 数据面不再经中心控制 WS 多路复用（旧 DeviceRelayClientOpen/DeviceRelayDaemonOpen/
+// DeviceRelayFrame/DeviceRelayClose/DeviceRelayStatus 已删除并在各信封 reserved）。新语义：
+// client 经本消息向中心申请 channel；中心校验归属后给两端各签一张短时单次 ed25519 token
+// 并拼进完整 relay URL；daemon 收 DeviceRelayDial 后按需拨号。两条 relay WS 按 channel_id
+// 配对成 opaque 字节管道，帧仍是端到端 DeviceEnvelope，relay 与中心都不解析。
+
+// client→server：channel_id/client_instance_id 均由 client 随机生成；`__coflux-` 前缀保留。
+message DeviceRelayConnect {
   string daemon_id = 1;
   string channel_id = 2;
   string client_instance_id = 3;
@@ -182,29 +189,25 @@ message DeviceRelayClientOpen {
   uint32 protocol_version = 5;
 }
 
-message DeviceRelayDaemonOpen {
-  string channel_id = 1;
-  string account_id = 2;
-  string client_instance_id = 3;
-  uint64 transport_generation = 4;
-  repeated DeviceScope scopes = 5;
-  uint32 protocol_version = 6;
-}
-
-message DeviceRelayFrame {
-  string channel_id = 1;
-  bytes frame = 2; // 编码后的 DeviceEnvelope；server 原样转发。
-}
-
-message DeviceRelayClose {
-  string channel_id = 1;
-  optional string reason = 2;
-}
-
-message DeviceRelayStatus {
+// server→client：rendezvous 结果。ok 时 relay_url 就绪（完整 ws(s) URL，token 在 query 内，
+// TTL 短且同 channel+role 只可用一次）；失败时 error 给拒因。
+message DeviceRelayGrant {
   string channel_id = 1;
   bool ok = 2;
-  optional string error = 3;
+  optional string relay_url = 3;
+  optional string error = 4;
+}
+
+// server→daemon：要求 worker 立即拨号 relay 建立本 channel 的 daemon 侧 WS。
+// account/scopes 语义与旧 DeviceRelayDaemonOpen 相同：由 server 授予，daemon 信任控制面。
+message DeviceRelayDial {
+  string channel_id = 1;
+  string relay_url = 2;
+  string account_id = 3;
+  string client_instance_id = 4;
+  uint64 transport_generation = 5;
+  repeated DeviceScope scopes = 6;
+  uint32 protocol_version = 7;
 }
 
 message DeviceSessionInfo {

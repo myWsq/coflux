@@ -12,6 +12,7 @@ mod git;
 mod local_auth;
 mod ops;
 mod ports;
+mod relay_dial;
 mod tunnel;
 
 use std::collections::HashMap;
@@ -274,7 +275,6 @@ async fn main() {
     }));
 
     let (to_server_tx, to_server_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
-    let (to_relay_tx, to_relay_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
     let (to_sup_tx, to_sup_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2048);
 
     // gateway 身份损坏/不可写只关闭 direct；中心 relay 与既有 daemon 能力照常启动。
@@ -290,7 +290,6 @@ async fn main() {
         local_auth.clone(),
         to_sup_tx.clone(),
         to_server_tx.clone(),
-        to_relay_tx,
         checkpoints.clone(),
         state.clone(),
         cfg.clone(),
@@ -416,7 +415,6 @@ async fn main() {
         creds_store,
         to_server_tx,
         to_server_rx,
-        to_relay_rx,
         checkpoints,
         to_sup_tx,
         local_auth,
@@ -567,7 +565,6 @@ async fn server_loop(
     creds_store: Arc<CredStore>,
     to_server_tx: Sender<WsOut>,
     mut to_server_rx: Receiver<WsOut>,
-    mut to_relay_rx: Receiver<WsOut>,
     checkpoints: Arc<device::CheckpointOutbox>,
     to_sup_tx: Sender<Vec<u8>>,
     local_auth: Option<Arc<local_auth::LocalAuth>>,
@@ -588,7 +585,6 @@ async fn server_loop(
                     &creds_store,
                     &to_server_tx,
                     &mut to_server_rx,
-                    &mut to_relay_rx,
                     &checkpoints,
                     &to_sup_tx,
                     local_auth.as_ref(),
@@ -608,7 +604,6 @@ async fn server_loop(
             auth.set_server_online(false);
         }
         device.close_relays();
-        while to_relay_rx.try_recv().is_ok() {}
         attempts += 1;
         tokio::time::sleep(backoff(attempts, &cfg)).await;
     }
@@ -621,7 +616,6 @@ async fn run_server_connection(
     creds_store: &Arc<CredStore>,
     to_server_tx: &Sender<WsOut>,
     to_server_rx: &mut Receiver<WsOut>,
-    to_relay_rx: &mut Receiver<WsOut>,
     checkpoints: &Arc<device::CheckpointOutbox>,
     to_sup_tx: &Sender<Vec<u8>>,
     local_auth: Option<&Arc<local_auth::LocalAuth>>,
@@ -736,12 +730,6 @@ async fn run_server_connection(
                 }
             }
             out = to_server_rx.recv(), if connection_authed => {
-                match out {
-                    Some(bytes) => if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; },
-                    None => break,
-                }
-            }
-            out = to_relay_rx.recv(), if connection_authed => {
                 match out {
                     Some(bytes) => if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; },
                     None => break,
@@ -934,30 +922,9 @@ async fn on_server_message(
                             eprintln!("[worker] local lease 安装被拒: {error}");
                         }
                     }
-                    server_to_daemon::Payload::DeviceRelayOpen(open) => {
-                        if let Err(error) = device.open_relay(open.clone()) {
-                            try_send_d2s(
-                                to_server_tx,
-                                daemon_to_server::Payload::DeviceRelayClose(wire::DeviceRelayClose {
-                                    channel_id: open.channel_id,
-                                    reason: Some(error),
-                                }),
-                            );
-                        }
-                    }
-                    server_to_daemon::Payload::DeviceRelayFrame(wire::DeviceRelayFrame { channel_id, frame }) => {
-                        if !device.handle_relay_frame(&channel_id, &frame) {
-                            try_send_d2s(
-                                to_server_tx,
-                                daemon_to_server::Payload::DeviceRelayClose(wire::DeviceRelayClose {
-                                    channel_id,
-                                    reason: Some("relay channel 不存在".into()),
-                                }),
-                            );
-                        }
-                    }
-                    server_to_daemon::Payload::DeviceRelayClose(wire::DeviceRelayClose { channel_id, .. }) => {
-                        device.close_relay(&channel_id);
+                    server_to_daemon::Payload::DeviceRelayDial(dial) => {
+                        // 拨号失败/被拒不回中心——client 侧以配对超时自愈并重新 rendezvous。
+                        relay_dial::spawn(device.clone(), dial, cfg.connect_timeout_ms);
                     }
                     server_to_daemon::Payload::SessionCatalogRequest(request) => device.request_server_catalog(request),
                     server_to_daemon::Payload::ExitAck(request) => device.acknowledge_exits(request),

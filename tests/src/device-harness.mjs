@@ -168,6 +168,10 @@ export class DeviceClient {
     this.grantId = options.grantId;
     this.gateway = options.gateway;
     this.generation = options.generation ?? 0n;
+    // plan 043：relay 数据面走独立 WS，中心控制 WS 上不再可见。direct 热路径的
+    // "零 relay 帧"断言改为观测这两个跨 transport 累计计数。
+    this.relayFramesSent = 0;
+    this.relayEnvelopesReceived = 0;
     this.transport = null;
     this.log = [];
     this.waiters = [];
@@ -337,50 +341,50 @@ export class DeviceClient {
     return transport;
   }
 
+  /** plan 043：relay = 中心 rendezvous（拿签好 token 的 relay URL）+ 拨 channel 专属 WS，
+   * 帧是原始 DeviceEnvelope bytes，不再经中心控制 WS。 */
   async openRelay(options = {}) {
     const generation = options.generation ?? this.nextGeneration();
     if (generation > this.generation) this.generation = generation;
     const channelId = options.channelId ?? `relay-${randomUUID()}`;
-    let transport;
-    const unsubscribe = this.control.subscribe((message) => {
-      if (message.case === "deviceRelayFrame" && message.channelId === channelId) {
-        const envelope = decodeDeviceEnvelope(message.frame);
-        if (envelope) this.receive(envelope, "relay", channelId);
-      } else if (message.case === "deviceRelayClose" && message.channelId === channelId && transport) {
-        transport.closed = true;
-      }
-    });
     this.control.send({
-      case: "deviceRelayOpen",
+      case: "deviceRelayConnect",
       daemonId: this.daemonId,
       channelId,
       clientInstanceId: this.clientInstanceId,
       transportGeneration: generation,
       protocolVersion: DEVICE_PROTOCOL_VERSION,
     });
-    const status = await this.control.waitFor(
-      (message) => message.case === "deviceRelayStatus" && message.channelId === channelId,
-      "deviceRelayStatus",
+    const grant = await this.control.waitFor(
+      (message) => message.case === "deviceRelayGrant" && message.channelId === channelId,
+      "deviceRelayGrant",
     );
-    if (!status.ok) {
-      unsubscribe();
-      throw new Error(status.error ?? "relay open failed");
-    }
-    transport = {
+    if (!grant.ok || !grant.relayUrl) throw new Error(grant.error ?? "relay rendezvous failed");
+    const relayUrl = options.mutateRelayUrl ? options.mutateRelayUrl(grant.relayUrl) : grant.relayUrl;
+    const socket = new WebSocket(relayUrl);
+    const inbox = new EnvelopeInbox(socket);
+    await inbox.ready;
+    const transport = {
       kind: "relay",
       channelId,
       generation,
       scopes: [],
       closed: false,
-      unsubscribe,
+      socket,
+      inbox,
+      unsubscribe: inbox.subscribe((envelope) => {
+        this.relayEnvelopesReceived += 1;
+        this.receive(envelope, "relay", channelId);
+      }),
       send: (frame) => {
-        if (transport.closed || this.control.ws.readyState !== WebSocket.OPEN) return false;
-        this.control.send({ case: "deviceRelayFrame", channelId, frame });
+        if (transport.closed || socket.readyState !== WebSocket.OPEN) return false;
+        this.relayFramesSent += 1;
+        socket.send(frame);
         return true;
       },
-      close: () => {
-        if (!transport.closed) this.control.send({ case: "deviceRelayClose", channelId, reason: "test client closed" });
+      close: (terminate = false) => {
         transport.closed = true;
+        terminate ? socket.terminate() : socket.close();
       },
     };
     this.replaceTransport(transport);

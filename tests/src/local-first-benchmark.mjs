@@ -40,23 +40,12 @@ function outputSince(device, from, sessionId) {
     .join("");
 }
 
-function relayFrameCount(device) {
-  return device.control.log.filter((message) => message.case === "deviceRelayFrame").length;
-}
-
-function observeClientRelayFrames(control) {
-  const send = control.send.bind(control);
-  let count = 0;
-  control.send = (message) => {
-    if (message.case === "deviceRelayFrame") count += 1;
-    return send(message);
-  };
-  return () => count;
-}
-
-function relayFrameSnapshot(device, sentCount) {
-  const clientToServer = sentCount();
-  const serverToClient = relayFrameCount(device);
+// plan 043：relay 数据面走独立 relay WS（中心控制 WS 上已无 relay 帧消息）。
+// timed direct path 的"零 relay 帧"改为观测 device 在 relay transport 上的双向累计计数，
+// 字段名沿用旧报告口径：clientToServer=client→relay 发出、serverToClient=relay→client 收到。
+function relayFrameSnapshot(device) {
+  const clientToServer = device.relayFramesSent;
+  const serverToClient = device.relayEnvelopesReceived;
   return { clientToServer, serverToClient, total: clientToServer + serverToClient };
 }
 
@@ -176,14 +165,13 @@ async function main() {
       daemonEnv: { COFLUX_HISTORY_LINES: String(HISTORY_LINES) },
     });
     device = await openRelayDevice(stack);
-    const sentRelayFrameCount = observeClientRelayFrames(device.control);
     const sessionId = await createRunningSession(stack, device, repo);
     await device.attach(sessionId, { cols: COLS, rows: ROWS });
     const seededSnapshot = await fillDefaultHistory(device, sessionId);
 
     await device.openDirect();
     await device.attach(sessionId, { cols: COLS, rows: ROWS });
-    const relayFramesBefore = relayFrameSnapshot(device, sentRelayFrameCount);
+    const relayFramesBefore = relayFrameSnapshot(device);
 
     for (let index = 0; index < WARMUP; index += 1) await sampleEcho(device, sessionId, `warmup-${index}`);
     const echoSamples = [];
@@ -198,7 +186,7 @@ async function main() {
       snapshotBytes = Math.max(snapshotBytes, sample.snapshotBytes);
     }
 
-    const relayFramesAfter = relayFrameSnapshot(device, sentRelayFrameCount);
+    const relayFramesAfter = relayFrameSnapshot(device);
     const relayFrameDelta = {
       clientToServer: relayFramesAfter.clientToServer - relayFramesBefore.clientToServer,
       serverToClient: relayFramesAfter.serverToClient - relayFramesBefore.serverToClient,
