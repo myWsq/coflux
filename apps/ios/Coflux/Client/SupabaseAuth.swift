@@ -23,8 +23,15 @@ enum SupabaseAuth {
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["email": email, "password": password])
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                return .failed(message: "邮箱或密码错误")
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard status == 200 else {
+                // 只有 invalid_credentials 才是真凭证错；401(key 无效)/429/5xx/代理拦截页
+                // 一律带状态码暴露——否则全被误报成密码错，无从诊断
+                let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                let reason = body?["error_code"] as? String ?? body?["msg"] as? String
+                return .failed(message: reason == "invalid_credentials"
+                    ? "邮箱或密码错误"
+                    : "登录失败（HTTP \(status)：\(reason ?? "无响应详情")）")
             }
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             guard let token = json?["access_token"] as? String, !token.isEmpty else {
