@@ -243,13 +243,17 @@ mod tests {
 
     /// 安全边界:不是该进程树成员的端口绝不能被报出来。用一个真正无关的子进程(sleep)
     /// 做根——它没有也不可能拿到我们这边绑定的 socket fd(std TcpListener 默认 CLOEXEC)。
+    ///
+    /// 先 spawn 再 bind,顺序是必须的:CLOEXEC 只在 exec 那一刻生效,fork 之后到 exec 之前
+    /// 子进程的 /proc/<pid>/fd 仍是父进程 fd 表的副本。若先 bind 再 spawn,慢机器上就可能
+    /// 在那个窗口里读到继承来的 listener fd 而误判泄漏(CI 上实测 flaky)。
     #[test]
     fn does_not_find_port_of_unrelated_process() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().expect("local_addr").port();
-
         let mut child = std::process::Command::new("sleep").arg("2").spawn().expect("spawn sleep");
         let unrelated_pid = child.id() as i32;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
 
         let found = listening_ports(unrelated_pid);
         assert!(!found.contains(&port), "port {port} leaked to unrelated pid {unrelated_pid}: {found:?}");
