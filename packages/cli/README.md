@@ -16,7 +16,8 @@ cofluxd up              # 幂等：零参数即可装/起；已装则按当前�
 cofluxd status          # 服务器/登记（含"等待授权"）/服务/连接状态
 cofluxd doctor          # 中心网络 + gateway/grant/loopback + daemon 状态分层自检
 cofluxd logs -f         # 看 daemon 日志
-cofluxd update          # 更新本地 supervisor 二进制并重启（worker 由 server 自动热升级）
+cofluxd update          # 下载新二进制（不重启；supervisor 有变化时提示用 restart 应用）
+cofluxd restart         # 重启 daemon 应用新 supervisor（⚠ 结束本机所有活会话）
 cofluxd down            # 停止
 cofluxd uninstall [--purge]   # 卸载（--purge 连二进制/配置/凭证一并删）
 ```
