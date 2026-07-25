@@ -179,8 +179,10 @@ fn handle_worker(mut stream: UnixStream, sessions: &Arc<Sessions>, manager: &Arc
             Ok(n) => {
                 parser.push(&buf[..n], |rec| {
                     if is_frame(rec) {
-                        if let Some(DataFrame::Input { session_id, data }) = decode_frame(rec) {
-                            sessions.input(&session_id, &data);
+                        match decode_frame(rec) {
+                            Some(DataFrame::Input { session_id, data }) => sessions.input(&session_id, &data),
+                            Some(DataFrame::Device { channel_id, data }) => sessions.handle_device(&channel_id, &data),
+                            _ => {}
                         }
                     } else if let Ok(msg) = serde_json::from_slice::<WorkerToSupervisor>(rec) {
                         dispatch(msg, sessions, manager);
