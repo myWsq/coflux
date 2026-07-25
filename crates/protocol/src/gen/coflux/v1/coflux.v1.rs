@@ -287,6 +287,929 @@ impl FsEntryKind {
         }
     }
 }
+/// worker 在认证完成后通过独立 announce 上报持久 gateway identity。public_key_sec1 是 P-256
+/// uncompressed SEC1 point（65 bytes）；private key 永不离开 daemon。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalGatewayDescriptor {
+    #[prost(uint32, tag="1")]
+    pub protocol_version: u32,
+    #[prost(uint32, tag="2")]
+    pub port: u32,
+    #[prost(bytes="vec", tag="3")]
+    pub public_key_sec1: ::prost::alloc::vec::Vec<u8>,
+}
+/// 中心持久化并安装到目标 daemon 的 browser public-key grant。public_key_sec1 同为 P-256
+/// uncompressed SEC1 point；offline_scopes 只能包含 SESSION_READ/SESSION_CONTROL。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LocalBrowserGrant {
+    #[prost(string, tag="1")]
+    pub grant_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub account_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub origin: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="5")]
+    pub public_key_sec1: ::prost::alloc::vec::Vec<u8>,
+    #[prost(enumeration="DeviceScope", repeated, tag="6")]
+    pub offline_scopes: ::prost::alloc::vec::Vec<i32>,
+    #[prost(double, tag="7")]
+    pub created_at: f64,
+}
+/// 中心在线时滚动安装的短期高权限 lease。worker 一旦失去中心认证连接，应立即撤销所有
+/// online lease，不等待 expires_at；expires_at 仍用于防时钟/消息丢失后的陈旧使用。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OnlineDeviceLease {
+    #[prost(string, tag="1")]
+    pub lease_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub grant_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub account_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(enumeration="DeviceScope", repeated, tag="5")]
+    pub scopes: ::prost::alloc::vec::Vec<i32>,
+    #[prost(double, tag="6")]
+    pub expires_at: f64,
+}
+/// Gateway/client 两个签名均为 P-256 ECDSA-SHA256 的 IEEE-P1363 r||s（固定 64 bytes）。
+/// 签名输入不是 protobuf bytes，避免不同实现的 deterministic-encoding 差异，而是：
+///    domain ASCII + 0x00 + 每字段 [u32 BE length][raw bytes]
+/// string 按 UTF-8；数字用固定宽度 BE。gateway domain = "coflux-local-gateway-v1"，字段依次为
+/// protocol_version(BE32)、daemon_id、origin、nonce；client domain = "coflux-local-client-v1"，
+/// 字段依次为 protocol_version(BE32)、daemon_id、origin、nonce、gateway_public_key_sec1、grant_id、
+/// browser_public_key_sec1、client_instance_id、transport_generation(BE64)、lease_id（缺省编码为空）。
+/// nonce 必须是 gateway 生成的 32 random bytes，单次使用且受 TTL 约束。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalGatewayHello {
+    #[prost(uint32, tag="1")]
+    pub protocol_version: u32,
+    #[prost(string, tag="2")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub origin: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="4")]
+    pub nonce: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="5")]
+    pub gateway_public_key_sec1: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="6")]
+    pub signature_p1363: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalClientHello {
+    #[prost(uint32, tag="1")]
+    pub protocol_version: u32,
+    #[prost(string, tag="2")]
+    pub grant_id: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="3")]
+    pub browser_public_key_sec1: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag="4")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="5")]
+    pub transport_generation: u64,
+    #[prost(string, optional, tag="6")]
+    pub lease_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bytes="vec", tag="7")]
+    pub gateway_nonce: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="8")]
+    pub signature_p1363: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalAuthResult {
+    #[prost(bool, tag="1")]
+    pub ok: bool,
+    #[prost(string, optional, tag="2")]
+    pub channel_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(enumeration="DeviceScope", repeated, tag="3")]
+    pub scopes: ::prost::alloc::vec::Vec<i32>,
+    #[prost(string, optional, tag="4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(enumeration="LocalAuthErrorCode", tag="5")]
+    pub error_code: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalPairRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub daemon_id: ::prost::alloc::string::String,
+    /// server 必须与已认证 client WS 的实际 Origin 精确比对，不信任自报值。
+    #[prost(string, tag="3")]
+    pub origin: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="4")]
+    pub browser_public_key_sec1: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalPairResult {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub grant_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag="4")]
+    pub gateway: ::core::option::Option<LocalGatewayDescriptor>,
+    #[prost(string, optional, tag="5")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalLeaseRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub grant_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LocalLeaseResult {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(message, optional, tag="3")]
+    pub lease: ::core::option::Option<OnlineDeviceLease>,
+    #[prost(string, optional, tag="4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalUnpairRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub grant_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalUnpairResult {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LocalGrantInstall {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub grant: ::core::option::Option<LocalBrowserGrant>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalGrantRevoke {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub grant_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LocalLeaseInstall {
+    #[prost(message, optional, tag="1")]
+    pub lease: ::core::option::Option<OnlineDeviceLease>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalGrantAck {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub grant_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="3")]
+    pub ok: bool,
+    #[prost(string, optional, tag="4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// client→server：申请一个中心 relay logical channel。channel_id/client_instance_id 均由 client
+/// 随机生成；server 把已认证 account/scopes 加到 DeviceRelayDaemonOpen 后发给目标 worker。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceRelayClientOpen {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="4")]
+    pub transport_generation: u64,
+    #[prost(uint32, tag="5")]
+    pub protocol_version: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceRelayDaemonOpen {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub account_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="4")]
+    pub transport_generation: u64,
+    #[prost(enumeration="DeviceScope", repeated, tag="5")]
+    pub scopes: ::prost::alloc::vec::Vec<i32>,
+    #[prost(uint32, tag="6")]
+    pub protocol_version: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceRelayFrame {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+    /// 编码后的 DeviceEnvelope；server 原样转发。
+    #[prost(bytes="vec", tag="2")]
+    pub frame: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceRelayClose {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(string, optional, tag="2")]
+    pub reason: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceRelayStatus {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceSessionInfo {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(int32, tag="3")]
+    pub pid: i32,
+    #[prost(string, tag="4")]
+    pub cwd: ::prost::alloc::string::String,
+    #[prost(uint32, tag="5")]
+    pub cols: u32,
+    #[prost(uint32, tag="6")]
+    pub rows: u32,
+    /// 从 session 创建起累计读到的 PTY byte 数；0 表示尚无输出，首个 byte 的 sequence 是 1。
+    #[prost(uint64, tag="7")]
+    pub output_seq: u64,
+    #[prost(double, tag="8")]
+    pub started_at: f64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceSessionExitTombstone {
+    #[prost(string, tag="1")]
+    pub event_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(int32, tag="4")]
+    pub exit_code: i32,
+    #[prost(uint64, tag="5")]
+    pub final_output_seq: u64,
+    #[prost(double, tag="6")]
+    pub exited_at: f64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSessionCatalogRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceSessionCatalog {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub sessions: ::prost::alloc::vec::Vec<DeviceSessionInfo>,
+    #[prost(message, repeated, tag="3")]
+    pub exits: ::prost::alloc::vec::Vec<DeviceSessionExitTombstone>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceExitAck {
+    #[prost(string, repeated, tag="1")]
+    pub event_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// client_instance_id 是跨 transport 稳定的 browser logical client identity；同一 client 的
+/// transport_generation 从 1 开始且必须单调递增。更高 generation 只替换旧 direct/relay 路径并保留现有
+/// holder_epoch；同代重投幂等，更低 generation 是 stale。不同 client 成功 attach 时 sessiond
+/// 原子递增 holder_epoch，并向旧 holder 发 detached。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSessionAttach {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="4")]
+    pub transport_generation: u64,
+    #[prost(uint32, tag="5")]
+    pub cols: u32,
+    #[prost(uint32, tag="6")]
+    pub rows: u32,
+    /// client 已连续接收的最后一个 byte sequence；sessiond 若仍保留从 N+1 起的完整 whole-frame
+    /// delta 可免 snapshot，否则必须回 snapshot。
+    #[prost(uint64, optional, tag="7")]
+    pub resume_from_seq: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSessionAttached {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    /// 从 1 开始；sessiond 裁决的当前 holder lease，control 请求必须精确匹配。
+    #[prost(uint64, tag="3")]
+    pub holder_epoch: u64,
+    /// 有 ansi_snapshot 时，它与 snapshot_seq 是同一把 session 锁下取得的原子状态：N 表示
+    /// snapshot 已包含 sequence <= N 的所有 PTY bytes，下一段增量从 N+1 开始。无 ansi_snapshot
+    /// 表示 resume_from_seq 已接受，snapshot_seq 必须等于该值，随后同样从 N+1 重传。
+    #[prost(uint64, tag="4")]
+    pub snapshot_seq: u64,
+    /// 可直接写入空 xterm 的规范化 ANSI：有界、按完整逻辑行裁剪的 history + 当前 VT grid/modes。
+    #[prost(bytes="vec", optional, tag="5")]
+    pub ansi_snapshot: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    #[prost(uint32, tag="6")]
+    pub cols: u32,
+    #[prost(uint32, tag="7")]
+    pub rows: u32,
+}
+/// 只读取得原子 snapshot，不注册 output subscriber、也不读取或改变 holder。供 worker 生成中心
+/// checkpoint，以及未来只读诊断使用；browser 的可写 attach 仍必须走 DeviceSessionAttach。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSessionSnapshotRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSessionSnapshot {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="3")]
+    pub snapshot_seq: u64,
+    #[prost(bytes="vec", tag="4")]
+    pub ansi_snapshot: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag="5")]
+    pub cols: u32,
+    #[prost(uint32, tag="6")]
+    pub rows: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DevicePtyOutput {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    /// from_seq/to_seq 是 1-based inclusive byte sequence；非空 data 必须满足
+    /// to_seq = from_seq + data.length - 1，且 from_seq 等于接收方最后确认的 to_seq + 1。
+    /// 不连续时接收方不得猜测缺口内容，必须重新 attach 获取原子 snapshot。
+    #[prost(uint64, tag="2")]
+    pub from_seq: u64,
+    /// session 生命周期内不回退。
+    #[prost(uint64, tag="3")]
+    pub to_seq: u64,
+    #[prost(bytes="vec", tag="4")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DevicePtyGap {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    /// subscriber 期望的下一个 byte sequence。
+    #[prost(uint64, tag="2")]
+    pub expected_seq: u64,
+    /// sessiond 当前最早仍可重传的 byte sequence。
+    #[prost(uint64, tag="3")]
+    pub available_seq: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DevicePtyInput {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="3")]
+    pub holder_epoch: u64,
+    /// 从 1 开始且在同一 logical client/session 单调；重投相同 seq 返回原结果且不得重复写 PTY，
+    /// 较小 seq 拒绝。
+    #[prost(uint64, tag="4")]
+    pub input_seq: u64,
+    #[prost(bytes="vec", tag="5")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DevicePtyResize {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="3")]
+    pub holder_epoch: u64,
+    /// 从 1 开始、与 input_seq 独立单调；同 seq 重投幂等，较小 seq 拒绝。
+    #[prost(uint64, tag="4")]
+    pub resize_seq: u64,
+    #[prost(uint32, tag="5")]
+    pub cols: u32,
+    #[prost(uint32, tag="6")]
+    pub rows: u32,
+}
+/// operation_id 是不可复用的 opaque ID，在同一 daemon 上跨 logical channel 与 direct/relay
+/// transport 全局幂等：同 ID、
+/// 同 payload 返回已记录结果而不重复执行；同 ID、不同 payload 必须拒绝。stop 是离线 scope 的
+/// 特例，可由 client 生成 operation_id；create/project/worktree 必须匹配中心预安装模板。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSessionStop {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="4")]
+    pub holder_epoch: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSessionDetached {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub holder_epoch: u64,
+    #[prost(string, optional, tag="3")]
+    pub reason: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSessionExited {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(int32, tag="2")]
+    pub exit_code: i32,
+    #[prost(uint64, tag="3")]
+    pub final_output_seq: u64,
+}
+/// lifecycle operation 采用与 stop 相同的 operation_id 去重规则。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSessionCreate {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub cwd: ::prost::alloc::string::String,
+    #[prost(string, optional, tag="6")]
+    pub shell: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, tag="7")]
+    pub cols: u32,
+    #[prost(uint32, tag="8")]
+    pub rows: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceOperationAck {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="3")]
+    pub ok: bool,
+    #[prost(string, optional, tag="4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="5")]
+    pub session_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(int32, optional, tag="6")]
+    pub pid: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceProjectValidate {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub path: ::prost::alloc::string::String,
+    /// project import 的中心 prepared operation；daemon 必须先见过同 ID 模板。
+    #[prost(string, tag="3")]
+    pub operation_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceProjectValidated {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, tag="3")]
+    pub repo_path: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub branch: ::prost::alloc::string::String,
+    #[prost(string, optional, tag="5")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="6")]
+    pub suggested_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, tag="7")]
+    pub operation_id: ::prost::alloc::string::String,
+}
+/// 所有携带 operation_id 的设备事实变更均采用 session stop 所述的全局去重规则。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceWorktreeAdd {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub repo_path: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub branch: ::prost::alloc::string::String,
+    #[prost(bool, tag="7")]
+    pub create_new: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceWorktreeAdded {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="3")]
+    pub ok: bool,
+    #[prost(string, tag="4")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub branch: ::prost::alloc::string::String,
+    #[prost(string, optional, tag="6")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceWorktreeRemove {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub repo_path: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub worktree_path: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceExecRun {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// worker 只接受中心当前 WorkspaceList 中属于本 daemon 的 ID，并自行解析 cwd；不信 browser 路径。
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub command: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="4")]
+    pub args: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(map="string, string", tag="5")]
+    pub env: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag="6")]
+    pub timeout_ms: ::core::option::Option<u32>,
+    /// 设置时必须 exactly-once 去重。
+    #[prost(string, optional, tag="7")]
+    pub operation_id: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceFsList {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// browse_home=false 时由 worker 从 WorkspaceList 解析 workspace_id；true 仅用于在线导入向导，
+    /// workspace_id 必须为空且根固定为 daemon 用户 home。
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(bool, tag="4")]
+    pub browse_home: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceFsRead {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// worker 从中心同步的 WorkspaceList 解析并锚定 root。
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub path: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceFsWrite {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub operation_id: ::prost::alloc::string::String,
+    /// temp=false 时必须存在于中心同步的 WorkspaceList。
+    #[prost(string, tag="3")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="5")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+    /// true 时仍需有效 workspace_id 做授权/归属校验，但落盘到 daemon 临时目录。
+    #[prost(bool, tag="6")]
+    pub temp: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DevicePortsRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DevicePortsResult {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub sessions: ::prost::alloc::vec::Vec<SessionPorts>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceError {
+    #[prost(string, optional, tag="1")]
+    pub request_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, tag="2")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub message: ::prost::alloc::string::String,
+}
+/// 中心持久 prepare 后，先经可信 daemon control WS 安装同一模板并等待
+/// PreparedDeviceOperationInstalled，再交给 client。frame 是 channel_id 为空的 DeviceEnvelope；
+/// client 只可填入自己已认证的 channel_id 后经 direct/relay 发送。daemon 解码后必须确认除
+/// channel_id 外与已安装模板完全相等，再按 operation_id 幂等执行；未知/过期/被篡改模板拒绝。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PreparedDeviceOperation {
+    #[prost(string, tag="1")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="3")]
+    pub frame: ::prost::alloc::vec::Vec<u8>,
+    #[prost(double, tag="4")]
+    pub expires_at: f64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PreparedDeviceOperationInstalled {
+    #[prost(string, tag="1")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// daemon→server 的控制面事实报告，不依赖发起 browser channel 是否仍存在。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceOperationReport {
+    #[prost(string, tag="1")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="3")]
+    pub ok: bool,
+    #[prost(string, optional, tag="4")]
+    pub task_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="5")]
+    pub session_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(int32, optional, tag="6")]
+    pub pid: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag="7")]
+    pub exit_code: ::core::option::Option<i32>,
+    #[prost(string, optional, tag="8")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    /// 编码后的结果 DeviceEnvelope，channel_id 必须清空；供中心按 durable operation 类型收敛
+    /// project/worktree 等结构化结果。重复 report 必须幂等，中心不以 browser 转述作为设备事实。
+    #[prost(bytes="vec", optional, tag="9")]
+    pub result_frame: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+}
+/// 中心只缓存最后一个有界 checkpoint；它不是 session authority，也不用于增量排序以外的裁决。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SessionCheckpoint {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub task_id: ::prost::alloc::string::String,
+    /// 与 DeviceSessionSnapshot 相同的已包含 byte sequence 上界。
+    #[prost(uint64, tag="3")]
+    pub snapshot_seq: u64,
+    #[prost(bytes="vec", tag="4")]
+    pub ansi_snapshot: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag="5")]
+    pub cols: u32,
+    #[prost(uint32, tag="6")]
+    pub rows: u32,
+    #[prost(double, tag="7")]
+    pub captured_at: f64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceEnvelope {
+    #[prost(uint32, tag="1")]
+    pub protocol_version: u32,
+    /// 已认证后的 inner channel_id 必须与 loopback/relay/UDS 外层 channel 相同；LocalGatewayHello
+    /// 与中心 prepared template 尚未绑定 channel 时必须为空。
+    #[prost(string, tag="2")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 60")]
+    pub payload: ::core::option::Option<device_envelope::Payload>,
+}
+/// Nested message and enum types in `DeviceEnvelope`.
+pub mod device_envelope {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="10")]
+        LocalGatewayHello(super::LocalGatewayHello),
+        #[prost(message, tag="11")]
+        LocalClientHello(super::LocalClientHello),
+        #[prost(message, tag="12")]
+        LocalAuthResult(super::LocalAuthResult),
+        #[prost(message, tag="20")]
+        SessionCatalogRequest(super::DeviceSessionCatalogRequest),
+        #[prost(message, tag="21")]
+        SessionCatalog(super::DeviceSessionCatalog),
+        #[prost(message, tag="22")]
+        ExitAck(super::DeviceExitAck),
+        #[prost(message, tag="23")]
+        SessionAttach(super::DeviceSessionAttach),
+        #[prost(message, tag="24")]
+        SessionAttached(super::DeviceSessionAttached),
+        #[prost(message, tag="25")]
+        PtyOutput(super::DevicePtyOutput),
+        #[prost(message, tag="26")]
+        PtyGap(super::DevicePtyGap),
+        #[prost(message, tag="27")]
+        PtyInput(super::DevicePtyInput),
+        #[prost(message, tag="28")]
+        PtyResize(super::DevicePtyResize),
+        #[prost(message, tag="29")]
+        SessionStop(super::DeviceSessionStop),
+        #[prost(message, tag="30")]
+        SessionDetached(super::DeviceSessionDetached),
+        #[prost(message, tag="31")]
+        SessionExited(super::DeviceSessionExited),
+        #[prost(message, tag="32")]
+        SessionCreate(super::DeviceSessionCreate),
+        #[prost(message, tag="33")]
+        OperationAck(super::DeviceOperationAck),
+        #[prost(message, tag="34")]
+        SessionSnapshotRequest(super::DeviceSessionSnapshotRequest),
+        #[prost(message, tag="35")]
+        SessionSnapshot(super::DeviceSessionSnapshot),
+        #[prost(message, tag="40")]
+        ProjectValidate(super::DeviceProjectValidate),
+        #[prost(message, tag="41")]
+        ProjectValidated(super::DeviceProjectValidated),
+        #[prost(message, tag="42")]
+        WorktreeAdd(super::DeviceWorktreeAdd),
+        #[prost(message, tag="43")]
+        WorktreeAdded(super::DeviceWorktreeAdded),
+        #[prost(message, tag="44")]
+        WorktreeRemove(super::DeviceWorktreeRemove),
+        #[prost(message, tag="45")]
+        ExecRun(super::DeviceExecRun),
+        #[prost(message, tag="46")]
+        ExecResult(super::ExecResult),
+        #[prost(message, tag="47")]
+        FsList(super::DeviceFsList),
+        #[prost(message, tag="48")]
+        FsListed(super::FsListed),
+        #[prost(message, tag="49")]
+        FsRead(super::DeviceFsRead),
+        #[prost(message, tag="50")]
+        FsReadResult(super::FsReadResult),
+        #[prost(message, tag="51")]
+        FsWrite(super::DeviceFsWrite),
+        #[prost(message, tag="52")]
+        FsWriteResult(super::FsWriteResult),
+        #[prost(message, tag="53")]
+        PortsRequest(super::DevicePortsRequest),
+        #[prost(message, tag="54")]
+        PortsResult(super::DevicePortsResult),
+        #[prost(message, tag="60")]
+        Error(super::DeviceError),
+    }
+}
+// Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
+// 常量；wire 握手必须显式带版本，所有 cols/rows 在 authority 边界钳制为 \[1, 1000\]。
+// 本文件全部 created_at/started_at/exited_at/captured_at/expires_at 均为 Unix epoch milliseconds。
+// request_id 由 logical client 生成并在同一请求重投时保持不变；它只做响应关联/短期去重。
+// 有副作用请求的 exactly-once 边界由 operation_id 或 input_seq 明确承担，不能只依赖 request_id。
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum DeviceScope {
+    Unspecified = 0,
+    /// 查看存活 session catalog、attach 与接收输出。
+    SessionRead = 1,
+    /// 向存活 session 输入、resize、stop；持久 browser grant 离线最多到此范围。
+    SessionControl = 2,
+    /// 已同步 workspace 内的 exec/fs、home 浏览与 ports 等设备 RPC；只能由中心在线 lease 授予。
+    Rpc = 3,
+    /// project validate/import、worktree 与新建 session 等中心 prepared operation。
+    Lifecycle = 4,
+}
+impl DeviceScope {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "DEVICE_SCOPE_UNSPECIFIED",
+            Self::SessionRead => "DEVICE_SCOPE_SESSION_READ",
+            Self::SessionControl => "DEVICE_SCOPE_SESSION_CONTROL",
+            Self::Rpc => "DEVICE_SCOPE_RPC",
+            Self::Lifecycle => "DEVICE_SCOPE_LIFECYCLE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "DEVICE_SCOPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "DEVICE_SCOPE_SESSION_READ" => Some(Self::SessionRead),
+            "DEVICE_SCOPE_SESSION_CONTROL" => Some(Self::SessionControl),
+            "DEVICE_SCOPE_RPC" => Some(Self::Rpc),
+            "DEVICE_SCOPE_LIFECYCLE" => Some(Self::Lifecycle),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum DeviceTransportKind {
+    Unspecified = 0,
+    Loopback = 1,
+    Relay = 2,
+}
+impl DeviceTransportKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "DEVICE_TRANSPORT_KIND_UNSPECIFIED",
+            Self::Loopback => "DEVICE_TRANSPORT_KIND_LOOPBACK",
+            Self::Relay => "DEVICE_TRANSPORT_KIND_RELAY",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "DEVICE_TRANSPORT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "DEVICE_TRANSPORT_KIND_LOOPBACK" => Some(Self::Loopback),
+            "DEVICE_TRANSPORT_KIND_RELAY" => Some(Self::Relay),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum LocalAuthErrorCode {
+    Unspecified = 0,
+    VersionMismatch = 1,
+    OriginDenied = 2,
+    GrantUnknown = 3,
+    KeyMismatch = 4,
+    SignatureInvalid = 5,
+    NonceInvalid = 6,
+    LeaseInvalid = 7,
+    RateLimited = 8,
+}
+impl LocalAuthErrorCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "LOCAL_AUTH_ERROR_CODE_UNSPECIFIED",
+            Self::VersionMismatch => "LOCAL_AUTH_ERROR_CODE_VERSION_MISMATCH",
+            Self::OriginDenied => "LOCAL_AUTH_ERROR_CODE_ORIGIN_DENIED",
+            Self::GrantUnknown => "LOCAL_AUTH_ERROR_CODE_GRANT_UNKNOWN",
+            Self::KeyMismatch => "LOCAL_AUTH_ERROR_CODE_KEY_MISMATCH",
+            Self::SignatureInvalid => "LOCAL_AUTH_ERROR_CODE_SIGNATURE_INVALID",
+            Self::NonceInvalid => "LOCAL_AUTH_ERROR_CODE_NONCE_INVALID",
+            Self::LeaseInvalid => "LOCAL_AUTH_ERROR_CODE_LEASE_INVALID",
+            Self::RateLimited => "LOCAL_AUTH_ERROR_CODE_RATE_LIMITED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "LOCAL_AUTH_ERROR_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "LOCAL_AUTH_ERROR_CODE_VERSION_MISMATCH" => Some(Self::VersionMismatch),
+            "LOCAL_AUTH_ERROR_CODE_ORIGIN_DENIED" => Some(Self::OriginDenied),
+            "LOCAL_AUTH_ERROR_CODE_GRANT_UNKNOWN" => Some(Self::GrantUnknown),
+            "LOCAL_AUTH_ERROR_CODE_KEY_MISMATCH" => Some(Self::KeyMismatch),
+            "LOCAL_AUTH_ERROR_CODE_SIGNATURE_INVALID" => Some(Self::SignatureInvalid),
+            "LOCAL_AUTH_ERROR_CODE_NONCE_INVALID" => Some(Self::NonceInvalid),
+            "LOCAL_AUTH_ERROR_CODE_LEASE_INVALID" => Some(Self::LeaseInvalid),
+            "LOCAL_AUTH_ERROR_CODE_RATE_LIMITED" => Some(Self::RateLimited),
+            _ => None,
+        }
+    }
+}
 // ===== Daemon → Server 载荷 =====
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -315,6 +1238,13 @@ pub struct DaemonEnrollRequest {
     pub supervisor_version: ::prost::alloc::string::String,
     #[prost(string, tag="6")]
     pub arch: ::prost::alloc::string::String,
+}
+/// 独立于认证消息的 gateway capability announce；保持旧认证构造面完全兼容，worker 可在
+/// authed 后及 gateway identity 变化时重复上报，server 以 daemon 连接身份绑定该 descriptor。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalGatewayAnnounce {
+    #[prost(message, optional, tag="1")]
+    pub gateway: ::core::option::Option<LocalGatewayDescriptor>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonResync {
@@ -392,7 +1322,7 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 19, 15, 16, 17, 18, 20")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 19, 15, 16, 17, 18, 20, 21, 22, 23, 24, 25, 26, 27, 28")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -438,6 +1368,23 @@ pub mod daemon_to_server {
         WorkspaceBranch(super::WorkspaceBranch),
         #[prost(message, tag="20")]
         WorkspaceDiff(super::WorkspaceDiff),
+        #[prost(message, tag="21")]
+        LocalGrantAck(super::LocalGrantAck),
+        #[prost(message, tag="22")]
+        DeviceRelayFrame(super::DeviceRelayFrame),
+        #[prost(message, tag="23")]
+        DeviceRelayClose(super::DeviceRelayClose),
+        #[prost(message, tag="24")]
+        SessionCheckpoint(super::SessionCheckpoint),
+        #[prost(message, tag="25")]
+        DeviceOperationReport(super::DeviceOperationReport),
+        #[prost(message, tag="26")]
+        LocalGatewayAnnounce(super::LocalGatewayAnnounce),
+        /// sessiond truth 的完整 reconciliation snapshot；server 不得据此关闭 unknown live session。
+        #[prost(message, tag="27")]
+        SessionCatalog(super::DeviceSessionCatalog),
+        #[prost(message, tag="28")]
+        PreparedDeviceOperationInstalled(super::PreparedDeviceOperationInstalled),
     }
 }
 /// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
@@ -471,6 +1418,13 @@ pub struct DaemonEnrolled {
 pub struct DaemonAuthed {
     #[prost(string, tag="1")]
     pub daemon_id: ::prost::alloc::string::String,
+}
+/// loopback gateway 只接受这些精确 Origin；worker 持久化最后一次成功认证下发值，供中心
+/// 离线时使用。独立消息允许中心在不重做 daemon auth 的前提下轮换 allowlist。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalGatewayConfigure {
+    #[prost(string, repeated, tag="1")]
+    pub origins: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DaemonAuthError {
@@ -639,7 +1593,7 @@ pub struct FsWrite {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 18, 19, 20")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 18, 19, 20")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -684,6 +1638,26 @@ pub mod server_to_daemon {
         FsWrite(super::FsWrite),
         #[prost(message, tag="22")]
         DaemonSetName(super::DaemonSetName),
+        #[prost(message, tag="23")]
+        LocalGrantInstall(super::LocalGrantInstall),
+        #[prost(message, tag="24")]
+        LocalGrantRevoke(super::LocalGrantRevoke),
+        #[prost(message, tag="25")]
+        LocalLeaseInstall(super::LocalLeaseInstall),
+        #[prost(message, tag="26")]
+        DeviceRelayOpen(super::DeviceRelayDaemonOpen),
+        #[prost(message, tag="27")]
+        DeviceRelayFrame(super::DeviceRelayFrame),
+        #[prost(message, tag="28")]
+        DeviceRelayClose(super::DeviceRelayClose),
+        #[prost(message, tag="29")]
+        LocalGatewayConfigure(super::LocalGatewayConfigure),
+        #[prost(message, tag="30")]
+        SessionCatalogRequest(super::DeviceSessionCatalogRequest),
+        #[prost(message, tag="31")]
+        ExitAck(super::DeviceExitAck),
+        #[prost(message, tag="32")]
+        PreparedDeviceOperation(super::PreparedDeviceOperation),
         /// 数据面（高频）
         #[prost(message, tag="18")]
         PtyInput(super::PtyInput),
@@ -914,7 +1888,7 @@ pub struct ClientFsWrite {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 23, 24")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 31, 32, 23, 24")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -967,6 +1941,18 @@ pub mod client_to_server {
         ClientFsWrite(super::ClientFsWrite),
         #[prost(message, tag="26")]
         DeviceSetName(super::DeviceSetName),
+        #[prost(message, tag="27")]
+        LocalPairRequest(super::LocalPairRequest),
+        #[prost(message, tag="28")]
+        LocalLeaseRequest(super::LocalLeaseRequest),
+        #[prost(message, tag="29")]
+        DeviceRelayOpen(super::DeviceRelayClientOpen),
+        #[prost(message, tag="30")]
+        DeviceRelayFrame(super::DeviceRelayFrame),
+        #[prost(message, tag="31")]
+        DeviceRelayClose(super::DeviceRelayClose),
+        #[prost(message, tag="32")]
+        LocalUnpairRequest(super::LocalUnpairRequest),
         /// 数据面（高频）
         #[prost(message, tag="23")]
         PtyInput(super::PtyInput),
@@ -1097,7 +2083,7 @@ pub struct ClientOutdated {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 22")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 22")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -1148,6 +2134,22 @@ pub mod server_to_client {
         FsWriteResult(super::FsWriteResult),
         #[prost(message, tag="24")]
         ClientOutdated(super::ClientOutdated),
+        #[prost(message, tag="25")]
+        LocalPairResult(super::LocalPairResult),
+        #[prost(message, tag="26")]
+        LocalLeaseResult(super::LocalLeaseResult),
+        #[prost(message, tag="27")]
+        DeviceRelayStatus(super::DeviceRelayStatus),
+        #[prost(message, tag="28")]
+        DeviceRelayFrame(super::DeviceRelayFrame),
+        #[prost(message, tag="29")]
+        DeviceRelayClose(super::DeviceRelayClose),
+        #[prost(message, tag="30")]
+        PreparedDeviceOperation(super::PreparedDeviceOperation),
+        #[prost(message, tag="31")]
+        SessionCheckpoint(super::SessionCheckpoint),
+        #[prost(message, tag="32")]
+        LocalUnpairResult(super::LocalUnpairResult),
         /// 数据面（高频）
         #[prost(message, tag="22")]
         PtyOutput(super::PtyOutput),

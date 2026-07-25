@@ -9,9 +9,9 @@
 //!   自定义二进制帧。
 //! - [ipc]：worker ↔ supervisor 本地 UDS 消息 + 长度前缀分帧。
 //!
-//! Client ↔ Server 协议仍由 TS server/web 持有，不在 Rust 侧（Rust daemon 不说 client 协议）；
-//! 生成代码里与之相关的 message/oneof 变体在本 crate 未被引用，属于正常的「同一份生成文件、
-//! 各端各取所需」。
+//! Client ↔ Server control 协议仍由 TS server/web 持有；端到端 DeviceEnvelope 则由
+//! browser/worker/sessiond 共用。生成代码里未被某端引用的 message/oneof 变体属于正常的
+//! 「同一份生成文件、各端各取所需」。
 
 #[allow(clippy::all)]
 mod gen {
@@ -33,12 +33,24 @@ pub mod wire {
 
 pub use settings::Settings;
 
-pub use frame::{decode_frame, encode_frame, DataFrame, FRAME_INPUT, FRAME_OUTPUT, FRAME_PROXY_DATA, FRAME_REPLAY};
+pub use frame::{decode_frame, encode_frame, DataFrame, FRAME_DEVICE, FRAME_INPUT, FRAME_OUTPUT, FRAME_PROXY_DATA, FRAME_REPLAY};
 pub use ipc::{
     is_frame, write_record, RecordParser, SessionInfo, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV, SUPERVISOR_VERSION_ENV,
     WORKER_VERSION_ENV,
 };
 pub use wire::{DaemonToServer, FsEntry, FsEntryKind, ServerToDaemon, SessionPorts, SessionRef};
+
+/// Browser/worker/sessiond 共用的 DeviceEnvelope 语义版本。
+pub const DEVICE_PROTOCOL_VERSION: u32 = 1;
+/// 本机 gateway 的生产固定端口；dev/test 可经 worker 配置覆盖。
+pub const LOCAL_GATEWAY_PORT: u16 = 8788;
+/// PTY 创建/resize 的共享尺寸边界；TS `clampDim` 使用同值。
+pub const MIN_TERMINAL_DIMENSION: u16 = 1;
+pub const MAX_TERMINAL_DIMENSION: u16 = 1000;
+/// relay/local Device frame 上限；保留现有 30MiB 文件写入能力。
+pub const MAX_DEVICE_FRAME_BYTES: usize = 30 * 1024 * 1024;
+/// 中心 checkpoint 的 ANSI snapshot 上限。
+pub const MAX_SESSION_CHECKPOINT_BYTES: usize = 512 * 1024;
 
 #[cfg(test)]
 mod wire_tests;

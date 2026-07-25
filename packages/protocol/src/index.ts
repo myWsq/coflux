@@ -30,13 +30,26 @@ import { create, fromBinary, toBinary, type MessageInitShape } from "@bufbuild/p
 export * from "./gen/coflux/v1/common_pb.js";
 export * from "./gen/coflux/v1/client_pb.js";
 export * from "./gen/coflux/v1/daemon_pb.js";
+export * from "./gen/coflux/v1/device_pb.js";
 
 export { create };
 
 import { ClientToServerSchema, ServerToClientSchema, type ClientToServer, type ServerToClient } from "./gen/coflux/v1/client_pb.js";
 import { DaemonToServerSchema, ServerToDaemonSchema, type DaemonToServer, type ServerToDaemon } from "./gen/coflux/v1/daemon_pb.js";
+import { DeviceEnvelopeSchema, type DeviceEnvelope } from "./gen/coflux/v1/device_pb.js";
 
 export const DEFAULT_PORT = 8787;
+/** 本机 gateway 的生产固定端口；dev/test 可在各自 transport 配置里覆盖。 */
+export const LOCAL_GATEWAY_PORT = 8788;
+/** browser/worker/sessiond 共用的 DeviceEnvelope 语义版本。 */
+export const DEVICE_PROTOCOL_VERSION = 1;
+/** PTY 创建/resize 的共享尺寸边界；Rust sessiond 使用同值，避免 transport 间行为漂移。 */
+export const MIN_TERMINAL_DIMENSION = 1;
+export const MAX_TERMINAL_DIMENSION = 1000;
+/** relay/local Device frame 上限；保留现有 30MiB 文件写入能力。 */
+export const MAX_DEVICE_FRAME_BYTES = 30 * 1024 * 1024;
+/** 中心 checkpoint 只保存有界 terminal state，不承载完整 Device frame 上限。 */
+export const MAX_SESSION_CHECKPOINT_BYTES = 512 * 1024;
 
 /**
  * 信封 oneof 载荷的"构造态"类型（供发送方构造消息用）。
@@ -51,6 +64,7 @@ export type ServerToClientPayload = MessageInitShape<typeof ServerToClientSchema
 export type ServerToDaemonPayload = MessageInitShape<typeof ServerToDaemonSchema>["payload"];
 export type ClientToServerPayload = MessageInitShape<typeof ClientToServerSchema>["payload"];
 export type DaemonToServerPayload = MessageInitShape<typeof DaemonToServerSchema>["payload"];
+export type DeviceEnvelopePayload = MessageInitShape<typeof DeviceEnvelopeSchema>["payload"];
 
 export type AccountId = string;
 export type DaemonId = string;
@@ -120,6 +134,22 @@ export function decodeServerToDaemon(buf: Uint8Array): ServerToDaemon | null {
 }
 
 /* ------------------------------------------------------------------ *
+ * Device 端到端协议（loopback 直连 / 中心 opaque relay 共用）
+ * ------------------------------------------------------------------ */
+
+export function encodeDeviceEnvelope(msg: DeviceEnvelope): Uint8Array<ArrayBuffer> {
+  return toBinary(DeviceEnvelopeSchema, msg) as Uint8Array<ArrayBuffer>;
+}
+
+export function decodeDeviceEnvelope(buf: Uint8Array): DeviceEnvelope | null {
+  try {
+    return fromBinary(DeviceEnvelopeSchema, buf);
+  } catch {
+    return null;
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * 小工具
  * ------------------------------------------------------------------ */
 
@@ -127,5 +157,5 @@ export function decodeServerToDaemon(buf: Uint8Array): ServerToDaemon | null {
 export function clampDim(n: unknown, fallback: number): number {
   // 0 = proto3 缺省值（客户端未传尺寸），与非法输入一样回落 fallback，而非被夹成 1
   const v = typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
-  return Math.max(1, Math.min(1000, v));
+  return Math.max(MIN_TERMINAL_DIMENSION, Math.min(MAX_TERMINAL_DIMENSION, v));
 }
