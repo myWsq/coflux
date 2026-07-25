@@ -16,7 +16,7 @@ use crate::wire::{
     DevicePtyOutput, DeviceRelayFrame, DeviceSessionAttached, DeviceSessionCreate, ExecRun, FsEntry, FsEntryKind, LocalClientHello,
     PreparedDeviceOperation, ProjectValidated, PtyOutput, ServerToDaemon, SessionCreate, SessionPorts,
 };
-use crate::DEVICE_PROTOCOL_VERSION;
+use crate::{decode_device_envelope, encode_device_envelope, DEVICE_PROTOCOL_VERSION};
 
 /// 反方向：ServerToDaemon 编码 SessionCreate，解码后分派正确、可选字段（shell 缺省）为 None。
 #[test]
@@ -239,6 +239,14 @@ fn prepared_device_operation_template_round_trip() {
     let decoded_template = DeviceEnvelope::decode(prepared.frame.as_slice()).unwrap();
     assert!(decoded_template.channel_id.is_empty());
     assert_eq!(decoded_template, template);
+}
+
+#[test]
+fn rust_device_envelope_helpers_reject_malformed_bytes() {
+    let envelope = DeviceEnvelope { protocol_version: DEVICE_PROTOCOL_VERSION, channel_id: "helper-channel".into(), payload: None };
+    let encoded = encode_device_envelope(&envelope);
+    assert_eq!(decode_device_envelope(&encoded), Some(envelope));
+    assert_eq!(decode_device_envelope(&[0xff, 0xff, 0xff]), None);
 }
 
 /// repeated 消息字段（sessions/ports）+ enum 字段（FsEntryKind）往返正确。
