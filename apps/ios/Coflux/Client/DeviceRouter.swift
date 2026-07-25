@@ -432,20 +432,22 @@ final class DeviceRouter {
 
         lane.token += 1
         let token = lane.token
+        // 激活在 attempt 内部完成（TS acceptCandidate 先 activate 再 resolve 同语义）：
+        // 所有并发等待者恢复时 lane.active 必已就位，不会误判无通道再开一条。
         let attempt = Task<Channel, any Error> { [weak self] in
             guard let self else { throw DeviceRouteError("Device router 已停止") }
-            return try await self.openRelayChannel(route, lane)
+            let channel = try await self.openRelayChannel(route, lane)
+            // 竞态守卫：等待期间 lane 被 close/重建则丢弃本次结果
+            guard !self.destroyed, self.routes[route.daemonID] === route, lane.token == token else {
+                self.closeChannel(channel)
+                throw DeviceRouteError("lane 已重建")
+            }
+            self.activate(route, lane, channel)
+            return channel
         }
         lane.attempt = attempt
         defer { if lane.token == token { lane.attempt = nil } }
-        let channel = try await attempt.value
-        // 竞态守卫：等待期间 lane 被 close/重建则丢弃本次结果
-        guard !destroyed, routes[route.daemonID] === route, lane.token == token else {
-            closeChannel(channel)
-            throw DeviceRouteError("lane 已重建")
-        }
-        activate(route, lane, channel)
-        return channel
+        return try await attempt.value
     }
 
     /// relay rendezvous（plan 043）：deviceRelayConnect → deviceRelayGrant（带 token 的完整
