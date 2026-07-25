@@ -64,11 +64,20 @@ jobs:
           node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit
           node_modules/.bin/tsc -b apps/web/tsconfig.json
 
-      - name: Rust 单元测试（协议帧/serde）
-        run: cargo test -p coflux-protocol
+      - name: Rust 单元测试（协议帧/serde + sessiond/gateway）
+        run: cargo test -p coflux-protocol -p coflux-supervisor -p coflux-worker
 
       - name: Rust 构建
         run: cargo build -p coflux-supervisor -p coflux-worker
 
+      - name: client 状态机测试（DeviceRouter transport/holder/ACK）
+        run: node --import tsx --test packages/client/src/*.test.ts
+
       - name: 黑盒集成测试（pretest 构建 daemon，跑全量）
+        # harness 默认连 54322（本机 Supabase 直连口）；CI 的 service 是裸 Postgres 5432。
+        env:
+          COFLUX_TEST_PG_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: pnpm -C tests test
+
+      - name: mobile 构建（冻结端：只保共享层不弄坏它）
+        run: pnpm -C apps/mobile build
