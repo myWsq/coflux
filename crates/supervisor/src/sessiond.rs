@@ -9,16 +9,6 @@ use vt100::{Cell, Color, Screen};
 
 const HISTORY_WRAP_FACTOR: usize = 4;
 const RETRANSMIT_LIMIT: usize = 512 * 1024;
-const ESTIMATED_CELL_BYTES: usize = 40;
-
-/// vt100 同时持 normal/alternate viewport，normal 另持 bounded history；用保守 cell 大小做
-/// reservation，确保多 session 的理论上限不超过 supervisor 全局 budget。
-pub fn estimated_terminal_bytes(rows: u16, cols: u16, history_line_limit: usize) -> usize {
-    let history_rows = history_line_limit.saturating_mul(HISTORY_WRAP_FACTOR);
-    (usize::from(rows).saturating_mul(2).saturating_add(history_rows))
-        .saturating_mul(usize::from(cols))
-        .saturating_mul(ESTIMATED_CELL_BYTES)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AltEvent {

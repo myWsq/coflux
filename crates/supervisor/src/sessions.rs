@@ -23,7 +23,7 @@ use coflux_protocol::{
 };
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-use crate::sessiond::{estimated_terminal_bytes, ControlError, SequencedDecision, SessionState};
+use crate::sessiond::{ControlError, SequencedDecision, SessionState};
 
 const OPERATION_LEDGER_LIMIT: usize = 4096;
 const WORKER_QUEUE_RECORDS: usize = 512;
@@ -151,38 +151,6 @@ fn reserve_pending_bytes(pending: &AtomicUsize, length: usize, limit: usize) -> 
     }
 }
 
-struct MemoryBudget {
-    limit: usize,
-    used: usize,
-}
-
-impl MemoryBudget {
-    fn reserve(&mut self, rows: u16, cols: u16, desired_history_lines: usize) -> Option<(usize, usize)> {
-        let available = self.limit.saturating_sub(self.used);
-        let viewport = estimated_terminal_bytes(rows, cols, 0);
-        if viewport > available {
-            return None;
-        }
-        let per_line = estimated_terminal_bytes(rows, cols, 1).saturating_sub(viewport).max(1);
-        let history_lines = desired_history_lines.min((available - viewport) / per_line);
-        let reserved = estimated_terminal_bytes(rows, cols, history_lines);
-        self.used = self.used.saturating_add(reserved);
-        Some((history_lines, reserved))
-    }
-
-    fn resize(&mut self, old: usize, new: usize) -> bool {
-        if new > old && new - old > self.limit.saturating_sub(self.used) {
-            return false;
-        }
-        self.used = self.used.saturating_sub(old).saturating_add(new);
-        true
-    }
-
-    fn release(&mut self, bytes: usize) {
-        self.used = self.used.saturating_sub(bytes);
-    }
-}
-
 #[derive(Clone, PartialEq)]
 enum OperationRequest {
     Create(DeviceSessionCreate),
@@ -243,8 +211,6 @@ struct Session {
     cwd: String,
     pid: i32,
     started_at: f64,
-    history_line_limit: usize,
-    reserved_bytes: usize,
     state: SessionState,
 }
 
@@ -279,21 +245,19 @@ pub struct Sessions {
     shell: String,
     home: String,
     history_line_limit: usize,
-    memory: Mutex<MemoryBudget>,
     tombstones: Mutex<Vec<DeviceSessionExitTombstone>>,
     next_event_id: AtomicU64,
     operations: Mutex<OperationLedger>,
 }
 
 impl Sessions {
-    pub fn new(outbound: Arc<Outbound>, shell: String, home: String, history_line_limit: usize, memory_limit: usize) -> Arc<Self> {
+    pub fn new(outbound: Arc<Outbound>, shell: String, home: String, history_line_limit: usize) -> Arc<Self> {
         Arc::new(Self {
             map: Mutex::new(HashMap::new()),
             outbound,
             shell,
             home,
             history_line_limit,
-            memory: Mutex::new(MemoryBudget { limit: memory_limit, used: 0 }),
             tombstones: Mutex::new(Vec::new()),
             next_event_id: AtomicU64::new(0),
             operations: Mutex::new(OperationLedger::default()),
@@ -394,13 +358,6 @@ impl Sessions {
             }
         };
         let pid = child.process_id().map_or(-1, |pid| pid as i32);
-        let (history_line_limit, reserved_bytes) = match self.memory.lock().unwrap().reserve(rows, cols, self.history_line_limit) {
-            Some(reservation) => reservation,
-            None => {
-                let _ = child.kill();
-                return Err("terminal memory budget exhausted".into());
-            }
-        };
         let session = Arc::new(Mutex::new(Session {
             master: pair.master,
             writer,
@@ -409,9 +366,7 @@ impl Sessions {
             cwd,
             pid,
             started_at: now_ms(),
-            history_line_limit,
-            reserved_bytes,
-            state: SessionState::new(rows, cols, history_line_limit),
+            state: SessionState::new(rows, cols, self.history_line_limit),
         }));
         self.map.lock().unwrap().insert(session_id.clone(), session.clone());
         eprintln!("[supervisor] session started {session_id} pid={pid}");
@@ -462,7 +417,6 @@ impl Sessions {
             let final_output_seq = locked.state.output_seq();
             let task_id = locked.task_id.clone();
             let channels = locked.state.subscriber_channels();
-            let reserved_bytes = locked.reserved_bytes;
             let event_number = this.next_event_id.fetch_add(1, Ordering::Relaxed) + 1;
             let tombstone = DeviceSessionExitTombstone {
                 event_id: format!("exit-{}-{event_number}", std::process::id()),
@@ -488,7 +442,6 @@ impl Sessions {
             drop(locked);
 
             if transitioned {
-                this.memory.lock().unwrap().release(reserved_bytes);
                 eprintln!("[supervisor] session exited {session_id} code={code}");
                 for channel_id in channels {
                     this.send_device(
@@ -505,22 +458,12 @@ impl Sessions {
         });
     }
 
+    // 单 session 的内存天然由 COFLUX_HISTORY_LINES 封顶（history 行数 × 列宽），故不再做全局
+    // 字节预算：那套 reservation 用保守估算（wrap ×4、cell 40B）虚高约一个数量级，结果是机器
+    // 内存充裕却拒绝开新终端 / 拒绝 attach 更宽的客户端。
     fn resize_locked(&self, session: &mut Session, rows: u16, cols: u16) -> Result<(), String> {
-        let new_reserved = estimated_terminal_bytes(rows, cols, session.history_line_limit);
-        let old_reserved = session.reserved_bytes;
-        // 保持 reservation 直到 PTY resize 成功或完整回滚；否则 shrink 释放出的额度可能被并发
-        // session 占用，底层 resize 失败时便无法恢复旧 reservation。
-        let mut memory = self.memory.lock().unwrap();
-        if !memory.resize(old_reserved, new_reserved) {
-            return Err("terminal memory budget exhausted".into());
-        }
-        if let Err(error) = session.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
-            let restored = memory.resize(new_reserved, old_reserved);
-            debug_assert!(restored, "reserved terminal memory rollback must succeed");
-            return Err(error.to_string());
-        }
+        session.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|error| error.to_string())?;
         session.state.resize(rows, cols);
-        session.reserved_bytes = new_reserved;
         Ok(())
     }
 
@@ -994,26 +937,8 @@ mod tests {
     }
 
     #[test]
-    fn sessiond_backpressure_memory_budget_never_exceeds_limit() {
-        let viewport = estimated_terminal_bytes(24, 80, 0);
-        let limit = estimated_terminal_bytes(24, 80, 10);
-        let mut budget = MemoryBudget { limit, used: 0 };
-        let (history_lines, reserved) = budget.reserve(24, 80, 100).unwrap();
-        assert_eq!(history_lines, 10);
-        assert_eq!(reserved, limit);
-        assert_eq!(budget.used, limit);
-        assert!(!budget.resize(reserved, limit + 1));
-        assert_eq!(budget.used, limit);
-
-        assert!(budget.resize(reserved, viewport));
-        assert_eq!(budget.used, viewport);
-        budget.release(viewport);
-        assert_eq!(budget.used, 0);
-    }
-
-    #[test]
     fn sessiond_backpressure_exit_tombstones_survive_until_ack() {
-        let sessions = Sessions::new(Outbound::new(), "/bin/sh".into(), "/tmp".into(), 0, 1024 * 1024);
+        let sessions = Sessions::new(Outbound::new(), "/bin/sh".into(), "/tmp".into(), 0);
         sessions.tombstones.lock().unwrap().extend([
             DeviceSessionExitTombstone {
                 event_id: "exit-1".into(),

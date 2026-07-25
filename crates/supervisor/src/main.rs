@@ -26,8 +26,6 @@ use coflux_protocol::{decode_frame, is_frame, DataFrame, RecordParser, Settings,
 use manager::{Manager, WorkerSpec};
 use sessions::{Outbound, Sessions};
 
-const DEFAULT_TERMINAL_MEMORY_MB: usize = 128;
-
 /// supervisor 自身版本：编译期注入 release tag（`.github/workflows/release.yml` 传
 /// `COFLUX_RELEASE_VERSION=${{ github.ref_name }}`）；本地构建未设该 env 时落 "dev"。
 /// 注意这与 worker 版本是两回事——worker 版本纯是 supervisor 侧概念（见 manager.rs WorkerSpec），
@@ -52,12 +50,6 @@ fn main() {
     fda::write_status(&home); // macOS: 探测完全磁盘访问权限并落盘,供 cofluxd status/fda 展示引导；非 macOS 空操作
     let shell = std::env::var("COFLUX_SHELL").ok().filter(|s| !s.is_empty()).or(settings.shell).or_else(|| std::env::var("SHELL").ok()).unwrap_or_else(|| "/bin/bash".to_string());
     let history_line_limit: usize = std::env::var("COFLUX_HISTORY_LINES").ok().and_then(|s| s.parse().ok()).unwrap_or(2000);
-    let terminal_memory_mb: usize = std::env::var("COFLUX_TERMINAL_MEMORY_MB")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_TERMINAL_MEMORY_MB);
-    let terminal_memory_limit = terminal_memory_mb.saturating_mul(1024 * 1024);
     let probation_ms: u64 = std::env::var("COFLUX_WORKER_PROBATION_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(8000);
 
     // 内置 worker 规格：默认用与 supervisor 同目录的 coflux-worker；COFLUX_WORKER_CMD 可覆盖（测试用）。
@@ -89,7 +81,7 @@ fn main() {
 
     // PTY/VT authority 永远不等待 worker；每次连接有独立的 bounded outbound writer。
     let outbound = Outbound::new();
-    let sessions = Sessions::new(outbound, shell, home.clone(), history_line_limit, terminal_memory_limit);
+    let sessions = Sessions::new(outbound, shell, home.clone(), history_line_limit);
 
     // worker 子进程管理
     let manager = Manager::new(builtin, known, sock_path.clone(), home, Duration::from_millis(probation_ms), SUPERVISOR_VERSION.to_string());
