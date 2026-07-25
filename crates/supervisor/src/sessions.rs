@@ -1,4 +1,4 @@
-//! PTY 会话生命周期（活在 supervisor）。持有 portable-pty + scrollback；
+//! PTY 会话生命周期（活在 supervisor）。持有 portable-pty + VT state；
 //! 输出/事件经 outbound 通道发给 worker（UDS）。背压 = 全局暂停读线程，让 OS 管道回压子进程
 //! （复刻 node-pty 的 pause 语义）。
 
@@ -11,13 +11,15 @@ use std::thread;
 use coflux_protocol::{encode_frame, write_record, DataFrame, SessionInfo, SupervisorToWorker};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
+use crate::sessiond::TerminalState;
+
 struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
     task_id: String,
     pid: i32,
-    scrollback: Vec<u8>,
+    terminal: TerminalState,
 }
 
 /// 全局背压闸：true=暂停全部 PTY 读线程
@@ -29,18 +31,18 @@ pub struct Sessions {
     pause: Pause,
     shell: String,
     home: String,
-    scrollback_limit: usize,
+    history_line_limit: usize,
 }
 
 impl Sessions {
-    pub fn new(outbound: Sender<Vec<u8>>, pause: Pause, shell: String, home: String, scrollback_limit: usize) -> Arc<Self> {
+    pub fn new(outbound: Sender<Vec<u8>>, pause: Pause, shell: String, home: String, history_line_limit: usize) -> Arc<Self> {
         Arc::new(Self {
             map: Mutex::new(HashMap::new()),
             outbound: Mutex::new(outbound),
             pause,
             shell,
             home,
-            scrollback_limit,
+            history_line_limit,
         })
     }
 
@@ -83,7 +85,14 @@ impl Sessions {
         let pid = child.process_id().map(|p| p as i32).unwrap_or(-1);
         self.map.lock().unwrap().insert(
             session_id.clone(),
-            Session { master: pair.master, writer, child, task_id: task_id.clone(), pid, scrollback: Vec::new() },
+            Session {
+                master: pair.master,
+                writer,
+                child,
+                task_id: task_id.clone(),
+                pid,
+                terminal: TerminalState::new(rows, cols, self.history_line_limit),
+            },
         );
         eprintln!("[supervisor] session started {session_id} pid={pid}");
         self.send_ctrl(&SupervisorToWorker::SessionStarted { session_id: session_id.clone(), task_id, pid });
@@ -115,11 +124,7 @@ impl Sessions {
                             let mut map = this.map.lock().unwrap();
                             match map.get_mut(&session_id) {
                                 Some(s) => {
-                                    s.scrollback.extend_from_slice(chunk);
-                                    let len = s.scrollback.len();
-                                    if len > this.scrollback_limit {
-                                        s.scrollback.drain(0..len - this.scrollback_limit);
-                                    }
+                                    s.terminal.feed(chunk);
                                 }
                                 None => break,
                             }
@@ -145,8 +150,9 @@ impl Sessions {
         }
     }
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) {
-        if let Some(s) = self.map.lock().unwrap().get(session_id) {
+        if let Some(s) = self.map.lock().unwrap().get_mut(session_id) {
             let _ = s.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            s.terminal.resize(rows, cols);
         }
     }
     pub fn close(&self, session_id: &str) {
@@ -156,7 +162,7 @@ impl Sessions {
         }
     }
     pub fn replay(&self, session_id: &str, request_id: String) {
-        let sb = self.map.lock().unwrap().get(session_id).map(|s| s.scrollback.clone()).unwrap_or_default();
+        let sb = self.map.lock().unwrap().get(session_id).map(|s| s.terminal.snapshot()).unwrap_or_default();
         let frame = encode_frame(&DataFrame::Replay { session_id: session_id.to_string(), request_id, data: sb });
         self.send_record(write_record(&frame));
     }

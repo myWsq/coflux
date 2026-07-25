@@ -8,6 +8,7 @@
 
 mod fda;
 mod manager;
+mod sessiond;
 mod sessions;
 mod upgrade;
 
@@ -48,7 +49,7 @@ fn main() {
     let settings = Settings::load(&home);
     fda::write_status(&home); // macOS: 探测完全磁盘访问权限并落盘,供 cofluxd status/fda 展示引导；非 macOS 空操作
     let shell = std::env::var("COFLUX_SHELL").ok().filter(|s| !s.is_empty()).or(settings.shell).or_else(|| std::env::var("SHELL").ok()).unwrap_or_else(|| "/bin/bash".to_string());
-    let scrollback_limit: usize = 200_000;
+    let history_line_limit: usize = std::env::var("COFLUX_HISTORY_LINES").ok().and_then(|s| s.parse().ok()).unwrap_or(2000);
     let probation_ms: u64 = std::env::var("COFLUX_WORKER_PROBATION_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(8000);
 
     // 内置 worker 规格：默认用与 supervisor 同目录的 coflux-worker；COFLUX_WORKER_CMD 可覆盖（测试用）。
@@ -81,7 +82,7 @@ fn main() {
     // 共享：outbound 通道（→ 当前 worker）+ 背压闸
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let pause: Pause = Arc::new((Mutex::new(false), Condvar::new()));
-    let sessions = Sessions::new(tx, pause, shell, home.clone(), scrollback_limit);
+    let sessions = Sessions::new(tx, pause, shell, home.clone(), history_line_limit);
 
     // 当前 worker 的写端（worker 重连即替换；断开置 None，输出被丢，scrollback 仍保留）
     let worker_w: Arc<Mutex<Option<UnixStream>>> = Arc::new(Mutex::new(None));
