@@ -44,7 +44,7 @@ const DEBUG = !!process.env.COFLUX_TEST_DEBUG;
  * 管理连接（建库/删库用）与 server 自己的连接串一样，走 COFLUX_TEST_PG_URL，
  * 弱默认值必须与 apps/server/src/config.ts 的 DATABASE_URL 开发默认值保持一致。
  */
-const ADMIN_PG_URL = process.env.COFLUX_TEST_PG_URL || "postgres://postgres:postgres@127.0.0.1:5432/postgres";
+const ADMIN_PG_URL = process.env.COFLUX_TEST_PG_URL || "postgres://postgres:postgres@127.0.0.1:54322/postgres";
 
 /** 建一个随机命名的临时库，返回 {name, url}（url 指向新库，供 spawn 的 server 用作 DATABASE_URL）。 */
 async function createTestDatabase() {
@@ -118,6 +118,17 @@ function spawnApp(rel, env) {
   return spawn(TSX, [join(ROOT, rel)], { env, stdio: DEBUG ? "inherit" : "ignore", detached: true });
 }
 
+function waitProcessExit(process, ms = 3000) {
+  if (!process || process.exitCode !== null || process.signalCode !== null) return Promise.resolve();
+  return new Promise((resolveExit) => {
+    const timer = setTimeout(resolveExit, ms);
+    process.once("exit", () => {
+      clearTimeout(timer);
+      resolveExit();
+    });
+  });
+}
+
 // daemon = Rust supervisor + Rust worker（两个二进制，零 node 运行时）。
 // 默认用 target/debug 下的产物（pretest 会 cargo build）；可用环境变量覆盖路径。
 const SUPERVISOR_BIN = process.env.COFLUX_SUPERVISOR_BIN || join(ROOT, "target/debug/coflux-supervisor");
@@ -188,7 +199,7 @@ export async function startServer(opts = {}) {
   }
   return {
     port,
-    makeClient: () => new Client(port),
+    makeClient: (options) => new Client(port, options),
     rawDaemon: () => rawDaemon(port),
     async restartServer() {
       killTree(ref.server);
@@ -285,7 +296,15 @@ export async function startStack(opts = {}) {
   // opts.serverEnv：额外/覆盖 server 侧 env（如 proxy.test.mjs 显式钉死 COFLUX_PROXY_SCHEME，
   // 避免测试环境未设 COFLUX_DEV 时 isDev=false 导致 proxyScheme 默认落到 https，门禁/cookie 断言随之漂移）。
   const serverEnv = { ...process.env, COFLUX_PORT: String(port), DATABASE_URL: testDb.url, COFLUX_USERNAME: username, COFLUX_PASSWORD: password, ...(opts.serverEnv ?? {}) };
-  const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`, COFLUX_HOME: home, COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev", ...(opts.daemonEnv ?? {}) };
+  const daemonEnv = {
+    ...process.env,
+    COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`,
+    COFLUX_HOME: home,
+    COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev",
+    // 黑盒栈绝不能占用真实 daemon 的生产端口；worker 会把实际随机端口上报给 control plane。
+    COFLUX_LOCAL_GATEWAY_PORT: "0",
+    ...(opts.daemonEnv ?? {}),
+  };
 
   const ref = { server: null, daemon: null };
   try {
@@ -309,10 +328,18 @@ export async function startStack(opts = {}) {
     password,
     home,
     daemonId: null,
-    makeClient: () => new Client(port),
+    makeClient: (options) => new Client(port, options),
+    /** 真正停止中心进程，但保留 daemon、临时数据库与 loopback gateway。 */
+    async stopServer() {
+      const process = ref.server;
+      if (!process) return;
+      ref.server = null;
+      killTree(process);
+      await waitProcessExit(process);
+      await sleep(100);
+    },
     async restartServer() {
-      killTree(ref.server);
-      await sleep(800);
+      await stack.stopServer();
       // 复用同一个临时库（serverEnv 里的 DATABASE_URL 不变）：数据必须跨重启保留（reconnect.test.mjs 依赖此行为）。
       ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
       await waitHealth(port);
@@ -329,7 +356,11 @@ export async function startStack(opts = {}) {
         const p = ref.server;
         if (!p) return res(null);
         const t = setTimeout(() => res("timeout"), ms);
-        p.on("exit", (code) => { clearTimeout(t); res(code); });
+        p.on("exit", (code) => {
+          if (ref.server === p) ref.server = null;
+          clearTimeout(t);
+          res(code);
+        });
         try { process.kill(p.pid, "SIGTERM"); } catch { clearTimeout(t); res("err"); }
       });
     },
@@ -388,10 +419,11 @@ export async function startStack(opts = {}) {
  * send(m)：m 形如 `{ case: "clientAuth", username, password }`（扁平，"case" 选 oneof 分支）。
  * 收到的消息拍平为 `{ case, ...value }`（`waitFor` 按 `payload.case` 匹配）。 */
 export class Client {
-  constructor(port) {
+  constructor(port, options = {}) {
     this.log = [];
     this.waiters = [];
-    this.ws = new WebSocket(`ws://127.0.0.1:${port}/client`);
+    this.listeners = new Set();
+    this.ws = new WebSocket(`ws://127.0.0.1:${port}/client`, { origin: options.origin });
     this.ready = new Promise((res, rej) => {
       this.ws.onopen = res;
       this.ws.onerror = (e) => rej(new Error("ws error: " + (e.message || "?")));
@@ -403,6 +435,7 @@ export class Client {
       if (!m) return;
       this.log.push(m);
       this.waiters = this.waiters.filter((w) => !w.try(m));
+      for (const listener of this.listeners) listener(m);
     };
   }
   send(m) {
@@ -425,7 +458,12 @@ export class Client {
     this.send({ case: "clientSubscribe" });
     return this.waitFor((m) => m.case === "stateSnapshot", "snapshot");
   }
+  subscribe(listener) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
   close() {
+    this.listeners.clear();
     try { this.ws.close(); } catch {}
   }
 }
