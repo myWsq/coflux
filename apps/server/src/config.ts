@@ -72,6 +72,10 @@ export const config = {
   /** 设备授权（Tailscale 式）：一次性授权码 TTL（plan 003 定为 10min）、client 侧 device.authorize 的限速阈值 */
   authorizeTtlMs: int("COFLUX_AUTHORIZE_TTL_MS", 10 * 60 * 1000),
   authorizeMaxFailures: int("COFLUX_AUTHORIZE_MAX_FAILURES", 10),
+  /** local gateway 的 elevated lease 很短且不跨 daemon control WS 重连恢复。 */
+  localLeaseTtlMs: Math.max(10_000, Math.min(120_000, int("COFLUX_LOCAL_LEASE_TTL_MS", 45_000))),
+  /** lifecycle prepared template 的投递/执行窗口；过期 frame 会被 worker 拒绝。 */
+  preparedOperationTtlMs: Math.max(30_000, Math.min(30 * 60_000, int("COFLUX_PREPARED_OPERATION_TTL_MS", 5 * 60_000))),
 
   // web 会话 token 有效期：登录签发后多久过期（重连也用它）。默认 30 天。
   sessionTtlMs: int("COFLUX_SESSION_TTL_MS", 30 * 24 * 60 * 60 * 1000),

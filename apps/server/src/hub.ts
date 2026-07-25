@@ -22,8 +22,13 @@ import type { WebSocket } from "ws";
 import {
   create,
   clampDim,
+  decodeDeviceEnvelope,
+  DEVICE_PROTOCOL_VERSION,
+  encodeDeviceEnvelope,
   encodeServerToDaemon,
   encodeServerToClient,
+  MAX_SESSION_CHECKPOINT_BYTES,
+  DeviceEnvelopeSchema,
   ServerToDaemonSchema,
   ServerToClientSchema,
   ProjectSchema,
@@ -44,17 +49,35 @@ import {
   type TaskId,
   type Workspace,
   type WorkspaceId,
+  type DeviceOperationReport,
+  type DeviceEnvelope,
+  type DeviceEnvelopePayload,
+  type DeviceSessionCatalog,
+  type DeviceSessionInfo,
+  type SessionCheckpoint,
 } from "@coflux/protocol";
 import { createLogger } from "@coflux/core";
-import { Store } from "./store.js";
+import {
+  Store,
+  type NewPreparedOperation,
+  type PreparedOperationRecord,
+  type SessionCheckpointRecord,
+} from "./store.js";
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
 import { PendingRegistry } from "./pending.js";
 import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
-import { SessionMirror } from "./mirror.js";
+import { DeviceRelayRouter } from "./device-relay.js";
+import { LocalControlPlane } from "./local-control.js";
 import type { SupabaseVerifier, SupabaseIdentity } from "./auth.js";
 
 const log = createLogger("hub");
+const MAX_PREPARED_FRAME_BYTES = 1024 * 1024;
+const MAX_ACTIVE_PREPARED_PER_DAEMON = 128;
+const MAX_CATALOG_ENTRIES = 4096;
+const MAX_CATALOG_PATH_BYTES = 16 * 1024;
+const MAX_RETAINED_CATALOG_BYTES = 4 * 1024 * 1024;
+const MAX_CONTROL_ID_BYTES = 256;
 
 /** daemon 展示信息：不用生成的 DaemonInfo 消息类型（无需 $typeName）——它只作为其它信封消息的
  * 嵌套字段被构造（nested init 接受纯对象），从不单独序列化，用生成类型纯属多余的仪式。 */
@@ -81,6 +104,8 @@ export interface ClientConn {
   ws: WebSocket;
   accountId: AccountId | null;
   subscribed: boolean;
+  /** 浏览器 WebSocket 握手的真实 Origin；localPairRequest 的自报 origin 必须与它精确相等。 */
+  origin?: string;
   /** 本连接认证所用会话 token 的 hash（登出时按它撤销） */
   tokenHash?: string;
   /** device.authorize(Info) 猜测失败次数（同连接累计）；达上限后拒绝再试（限速见 plan 003） */
@@ -114,29 +139,41 @@ interface RuntimeSession {
   daemonId: DaemonId;
   accountId: AccountId;
   taskId: TaskId;
-  /** 独占模型：同一时刻只有一个控制端；attach 即接管，原控制端被踢 */
-  holder: ClientConn | null;
   closing: boolean;
-  /** session.create 后的启动确认超时；收到 session.started 即清除。超时未确认视为启动失败 */
-  startTimer?: ReturnType<typeof setTimeout>;
-  /** server 侧终端镜像：primed 时 attach 直接下发快照（daemon 离线也可看）；见 mirror.ts */
-  mirror?: SessionMirror;
+  /** 仅供旧 protobuf PTY adapter 路由输出；不是 holder，也不参与任何控制权裁决。 */
+  legacyViewers: Set<ClientConn>;
 }
 
-type OpData =
-  | { kind: "project.import"; explicitName?: string }
-  | { kind: "worktree.add"; projectId: ProjectId; workspaceId: WorkspaceId; name: string };
+interface PreparedWaiter {
+  client: ClientConn;
+  timer: ReturnType<typeof setTimeout>;
+}
 
-type RelayKind = "exec" | "fs.list" | "fs.read" | "fs.write";
+interface OperationEffect {
+  accountId: AccountId;
+  daemonId: DaemonId;
+  project?: Project;
+  workspace?: Workspace;
+  task?: Task;
+  sessionId?: SessionId;
+  removedTaskIds?: TaskId[];
+  removedWorkspaceId?: WorkspaceId;
+  deletingProjectId?: ProjectId;
+  error?: string;
+}
+
+class OperationConvergenceError extends Error {}
 
 export class Hub {
   private daemons = new Map<DaemonId, DaemonConn>();
   private sessions = new Map<SessionId, RuntimeSession>();
   private clients = new Set<ClientConn>();
-  private pendingOps = new PendingRegistry<ClientConn, OpData>(config.pendingTimeoutMs);
-  private pendingReplays = new PendingRegistry<ClientConn, { sessionId: SessionId; cols: number; rows: number }>(config.pendingTimeoutMs);
-  /** exec/fs 这类"client 发起、daemon 应答、原样回传给 client"的中继 */
-  private pendingRelays = new PendingRegistry<ClientConn, { clientRequestId: string; kind: RelayKind }>(config.pendingTimeoutMs);
+  private pendingReplays = new PendingRegistry<ClientConn, { sessionId: SessionId }>(config.pendingTimeoutMs);
+  private preparedWaiters = new Map<string, Set<PreparedWaiter>>();
+  private preparedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private catalog = new Map<DaemonId, Map<SessionId, DeviceSessionInfo>>();
+  private readonly localControl: LocalControlPlane<ClientConn, DaemonConn>;
+  private readonly deviceRelay: DeviceRelayRouter<ClientConn, DaemonConn>;
   /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
 
@@ -156,7 +193,20 @@ export class Hub {
   });
 
   /** supabase 模式下的验签器；local 模式为 undefined */
-  constructor(private store: Store, private verifier?: SupabaseVerifier) {}
+  constructor(private store: Store, private verifier?: SupabaseVerifier) {
+    this.localControl = new LocalControlPlane(
+      store,
+      (daemonId) => this.daemons.get(daemonId),
+      (daemon, payload) => this.sendDaemon(daemon, payload),
+      (client, payload) => this.sendClient(client, payload),
+    );
+    this.deviceRelay = new DeviceRelayRouter(
+      (daemonId) => this.daemons.get(daemonId),
+      (daemon, payload) => this.sendDaemon(daemon, payload),
+      (client, payload) => this.sendClient(client, payload),
+      config.clientBufferHardLimit,
+    );
+  }
 
   /* ============================ 发送工具 ============================ */
   private sendDaemon(d: DaemonConn, payload: ServerToDaemonPayload) {
@@ -177,20 +227,6 @@ export class Hub {
   }
   private isDaemonOnline(daemonId: DaemonId): boolean {
     return this.daemons.has(daemonId);
-  }
-  /** 给 client 回一个带它自定 requestId 的失败结果（超时/不支持/掉线等） */
-  private relayError(client: ClientConn, kind: RelayKind, clientRequestId: string, message: string) {
-    if (kind === "exec") this.sendClient(client, { case: "execResult", value: { requestId: clientRequestId, ok: false, exitCode: -1, stdout: "", stderr: "", error: message } });
-    else if (kind === "fs.list") this.sendClient(client, { case: "fsListed", value: { requestId: clientRequestId, ok: false, entries: [], error: message } });
-    else if (kind === "fs.read") this.sendClient(client, { case: "fsReadResult", value: { requestId: clientRequestId, ok: false, content: "", error: message } });
-    else this.sendClient(client, { case: "fsWriteResult", value: { requestId: clientRequestId, ok: false, error: message } });
-  }
-  /** 把 client 设为某会话的控制端；若原控制端是别人，则踢出并通知（handoff 接管） */
-  private setHolder(s: RuntimeSession, client: ClientConn) {
-    if (s.holder && s.holder !== client) {
-      this.sendClient(s.holder, { case: "taskDetached", value: { taskId: s.taskId } });
-    }
-    s.holder = client;
   }
 
   private async daemonInfoList(accountId: AccountId): Promise<DaemonInfoData[]> {
@@ -221,6 +257,7 @@ export class Hub {
   private async registerDaemonConn(conn: DaemonCtx, info: DaemonInfoData, accountId: AccountId, arch: string): Promise<void> {
     const prev = this.daemons.get(info.daemonId);
     if (prev && prev.ws !== conn.ws) {
+      this.deviceRelay.closeByDaemon(info.daemonId);
       try {
         prev.ws.close(4002, "replaced by new connection");
       } catch {
@@ -229,12 +266,18 @@ export class Hub {
     }
     conn.daemonId = info.daemonId;
     conn.accountId = accountId;
-    this.daemons.set(info.daemonId, { ws: conn.ws, info, accountId, arch });
+    const daemon = { ws: conn.ws, info, accountId, arch };
+    this.daemons.set(info.daemonId, daemon);
     await this.store.touchDevice(info.daemonId, Date.now());
     this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: { ...info, online: true } } });
     await this.pushWorkspaceList(info.daemonId);
     // 握手完成时机：下发最新设备名称以支持设备重命名同步（plan 018）
-    this.sendDaemon({ ws: conn.ws, info, accountId, arch }, { case: "daemonSetName", value: { name: info.name } });
+    this.sendDaemon(daemon, { case: "daemonSetName", value: { name: info.name } });
+    // durable grant/prepared state 由中心在每次 daemon 认证后重装；lease 不跨连接恢复。
+    await this.localControl.restoreDaemon(daemon);
+    await this.restorePreparedOperations(daemon);
+    await this.reconcileDeletingProjects(daemon);
+    this.requestSessionCatalog(daemon);
     // 握手完成时机（plan 015）：给自动更新编排一个立即比对本台 daemon 的机会，不必等下一次轮询。
     this.onDaemonHandshake?.(info.daemonId);
   }
@@ -264,6 +307,542 @@ export class Hub {
       case: "workspaceList",
       value: { workspaces: workspaces.map((ws) => ({ workspaceId: ws.id, path: ws.path, defaultBranch: defaultBranchByProject.get(ws.projectId) ?? "" })) },
     });
+  }
+
+  private currentDaemon(conn: DaemonCtx): DaemonConn | undefined {
+    if (!conn.daemonId) return undefined;
+    const daemon = this.daemons.get(conn.daemonId);
+    return daemon?.ws === conn.ws ? daemon : undefined;
+  }
+
+  private requestSessionCatalog(daemon: DaemonConn): void {
+    this.sendDaemon(daemon, { case: "sessionCatalogRequest", value: { requestId: randomUUID() } });
+  }
+
+  /**
+   * sessiond catalog/tombstone 是活 PTY truth。unknown/mismatched session 只保留为 local orphan；
+   * 中心不自动创建 task，也绝不因“不认识”而关闭它。
+   */
+  private async reconcileSessionCatalog(daemon: DaemonConn, catalog: DeviceSessionCatalog): Promise<void> {
+    if (!validControlId(catalog.requestId) || catalog.sessions.length > MAX_CATALOG_ENTRIES || catalog.exits.length > MAX_CATALOG_ENTRIES) return;
+    const live = new Map<SessionId, DeviceSessionInfo>();
+    let retainedBytes = 0;
+    for (const session of catalog.sessions) {
+      if (!validControlId(session.sessionId) || !validControlId(session.taskId) || live.has(session.sessionId)) continue;
+      const cwdBytes = Buffer.byteLength(session.cwd, "utf8");
+      const entryBytes = Buffer.byteLength(session.sessionId, "utf8") + Buffer.byteLength(session.taskId, "utf8") + cwdBytes + 64;
+      if (
+        cwdBytes > MAX_CATALOG_PATH_BYTES ||
+        retainedBytes > MAX_RETAINED_CATALOG_BYTES - entryBytes ||
+        session.pid <= 0 ||
+        session.cols < 1 ||
+        session.cols > 1000 ||
+        session.rows < 1 ||
+        session.rows > 1000 ||
+        !Number.isFinite(session.startedAt) ||
+        session.startedAt <= 0
+      ) continue;
+      retainedBytes += entryBytes;
+      live.set(session.sessionId, session);
+      const task = await this.store.getTask(session.taskId);
+      if (!task || task.accountId !== daemon.accountId || task.daemonId !== daemon.info.daemonId) continue;
+      if (task.sessionId && task.sessionId !== session.sessionId) continue;
+      if (task.status === TaskStatus.EXITED && !task.sessionId) {
+        const latest = await this.store.findLatestPreparedOperation(task.accountId, task.daemonId, "session.create", task.id);
+        if (latest?.reportSessionId === session.sessionId && latest.reportExitCode !== null) continue;
+      }
+      if (!this.sessions.has(session.sessionId)) {
+        this.sessions.set(session.sessionId, {
+          sessionId: session.sessionId,
+          daemonId: daemon.info.daemonId,
+          accountId: daemon.accountId,
+          taskId: session.taskId,
+          closing: false,
+          legacyViewers: new Set(),
+        });
+      }
+      if (task.status !== TaskStatus.RUNNING || task.sessionId !== session.sessionId) {
+        const updated = await this.store.updateTask(task.id, { status: TaskStatus.RUNNING, sessionId: session.sessionId, exitCode: undefined });
+        if (updated) this.emitTask(updated);
+      }
+    }
+    this.catalog.set(daemon.info.daemonId, live);
+
+    const ackIds: string[] = [];
+    const seenExitEvents = new Set<string>();
+    for (const exit of catalog.exits) {
+      if (
+        !validControlId(exit.eventId) ||
+        !validControlId(exit.sessionId) ||
+        !validControlId(exit.taskId) ||
+        seenExitEvents.has(exit.eventId) ||
+        !Number.isFinite(exit.exitedAt)
+      ) continue;
+      seenExitEvents.add(exit.eventId);
+      const updated = await this.store.transaction(async (tx) => {
+        const task = await tx.getTask(exit.taskId);
+        if (!task || task.accountId !== daemon.accountId || task.daemonId !== daemon.info.daemonId) return undefined;
+        const operation = await tx.findLatestPreparedOperation(task.accountId, task.daemonId, "session.create", task.id);
+        const metadata = operation ? parseOperationMetadata(operation.metadata) : undefined;
+        const preparedSessionId = metadata && metadataString(metadata, "sessionId");
+        const matchesCurrent = task.sessionId === exit.sessionId;
+        const matchesPendingCreate = !task.sessionId && preparedSessionId === exit.sessionId;
+        if (!matchesCurrent && !matchesPendingCreate) return undefined;
+        if (task.status === TaskStatus.EXITED && task.exitCode === exit.exitCode && !task.sessionId) {
+          if (operation && !operation.completed) {
+            await tx.finishPreparedOperationFromExit(operation.operationId, task.id, exit.sessionId, exit.exitCode);
+          }
+          return undefined;
+        }
+        const changed = await tx.updateTask(task.id, {
+          status: TaskStatus.EXITED,
+          sessionId: undefined,
+          exitCode: exit.exitCode,
+        });
+        if (operation && preparedSessionId === exit.sessionId && !operation.completed) {
+          await tx.finishPreparedOperationFromExit(operation.operationId, task.id, exit.sessionId, exit.exitCode);
+        }
+        return changed;
+      });
+      if (updated) this.emitTask(updated);
+      this.dropSession(exit.sessionId);
+      // unknown/orphan tombstone 无需业务映射，但仍可在持久化收敛后 ack 让 sessiond 有界清理。
+      ackIds.push(exit.eventId);
+    }
+    if (ackIds.length > 0) this.sendDaemon(daemon, { case: "exitAck", value: { eventIds: ackIds } });
+    log.debug("session catalog reconciled", { daemonId: daemon.info.daemonId, live: live.size, exits: ackIds.length });
+  }
+
+  private async acceptSessionCheckpoint(daemon: DaemonConn, checkpoint: SessionCheckpoint): Promise<void> {
+    if (
+      !validControlId(checkpoint.sessionId) ||
+      !validControlId(checkpoint.taskId) ||
+      checkpoint.ansiSnapshot.byteLength > MAX_SESSION_CHECKPOINT_BYTES ||
+      checkpoint.cols < 1 ||
+      checkpoint.cols > 1000 ||
+      checkpoint.rows < 1 ||
+      checkpoint.rows > 1000 ||
+      !Number.isFinite(checkpoint.capturedAt) ||
+      checkpoint.capturedAt <= 0 ||
+      checkpoint.capturedAt > Date.now() + 5 * 60_000
+    ) return;
+    const live = this.catalog.get(daemon.info.daemonId)?.get(checkpoint.sessionId);
+    const runtime = this.sessions.get(checkpoint.sessionId);
+    const matchesKnownSession = live
+      ? live.taskId === checkpoint.taskId
+      : runtime?.daemonId === daemon.info.daemonId && runtime.taskId === checkpoint.taskId;
+    if (!matchesKnownSession) return;
+    const task = await this.store.getTask(checkpoint.taskId);
+    if (
+      !task ||
+      task.accountId !== daemon.accountId ||
+      task.daemonId !== daemon.info.daemonId ||
+      task.sessionId !== checkpoint.sessionId ||
+      task.status !== TaskStatus.RUNNING
+    ) return;
+    const stored = await this.store.upsertSessionCheckpoint(daemon.accountId, daemon.info.daemonId, checkpoint);
+    if (!stored) return; // duplicate/older seq
+    for (const client of this.clients) if (client.subscribed && client.accountId === daemon.accountId) this.sendCheckpoint(client, stored);
+  }
+
+  private sendCheckpoint(client: ClientConn, checkpoint: SessionCheckpointRecord): void {
+    this.sendClient(client, {
+      case: "sessionCheckpoint",
+      value: {
+        sessionId: checkpoint.sessionId,
+        taskId: checkpoint.taskId,
+        snapshotSeq: checkpoint.snapshotSeq,
+        ansiSnapshot: checkpoint.ansiSnapshot,
+        cols: checkpoint.cols,
+        rows: checkpoint.rows,
+        capturedAt: checkpoint.capturedAt,
+      },
+    });
+  }
+
+  /* ----------------------- durable prepared op ----------------------- */
+
+  private preparedFrame(operationId: string, payload: DeviceEnvelopePayload): Uint8Array {
+    if (!validControlId(operationId)) throw new Error("prepared operationId 无效");
+    const frame = encodeDeviceEnvelope(create(DeviceEnvelopeSchema, {
+      protocolVersion: DEVICE_PROTOCOL_VERSION,
+      channelId: "",
+      payload,
+    }));
+    if (frame.byteLength === 0 || frame.byteLength > MAX_PREPARED_FRAME_BYTES) throw new Error("prepared operation frame 超限");
+    return frame;
+  }
+
+  private async prepareOperation(client: ClientConn, operation: NewPreparedOperation): Promise<void> {
+    await this.store.expirePreparedOperations(Date.now());
+    if (operation.targetId) {
+      const existing = await this.store.findActivePreparedOperation(operation.accountId, operation.kind, operation.targetId, Date.now());
+      if (existing) {
+        if (existing.state === "installed") {
+          this.sendPrepared(client, existing);
+        } else {
+          this.watchPrepared(existing.operationId, client);
+          this.dispatchPrepared(existing);
+        }
+        return;
+      }
+    }
+    if ((await this.store.countActivePreparedOperations(operation.accountId, operation.daemonId, Date.now())) >= MAX_ACTIVE_PREPARED_PER_DAEMON) {
+      this.sendClient(client, { case: "error", value: { message: "该 daemon 的 prepared operation 已达上限，请稍后重试" } });
+      return;
+    }
+    const created = await this.store.createPreparedOperation(operation);
+    if (!created && operation.targetId) {
+      const raced = await this.store.findActivePreparedOperation(operation.accountId, operation.kind, operation.targetId, Date.now());
+      if (raced) {
+        if (raced.state === "installed") {
+          this.sendPrepared(client, raced);
+        } else {
+          this.watchPrepared(raced.operationId, client);
+          this.dispatchPrepared(raced);
+        }
+        return;
+      }
+    }
+    if (!created) return void this.sendClient(client, { case: "error", value: { message: "prepared operation ID 冲突" } });
+    this.watchPrepared(created.operationId, client);
+    this.dispatchPrepared(created);
+  }
+
+  private async restorePreparedOperations(daemon: DaemonConn): Promise<void> {
+    await this.store.expirePreparedOperations(Date.now());
+    for (const operation of await this.store.listInstallablePreparedOperations(daemon.info.daemonId, Date.now())) {
+      if (operation.accountId === daemon.accountId) this.dispatchPrepared(operation);
+    }
+  }
+
+  private dispatchPrepared(operation: PreparedOperationRecord): void {
+    const daemon = this.daemons.get(operation.daemonId);
+    if (!daemon || daemon.accountId !== operation.accountId || operation.completed || operation.expiresAt <= Date.now()) return;
+    this.sendDaemon(daemon, {
+      case: "preparedDeviceOperation",
+      value: {
+        operationId: operation.operationId,
+        daemonId: operation.daemonId,
+        frame: operation.frame,
+        expiresAt: operation.expiresAt,
+      },
+    });
+    const previous = this.preparedRetryTimers.get(operation.operationId);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => void this.retryPrepared(operation.operationId), 1_000);
+    timer.unref?.();
+    this.preparedRetryTimers.set(operation.operationId, timer);
+  }
+
+  private async retryPrepared(operationId: string): Promise<void> {
+    this.preparedRetryTimers.delete(operationId);
+    const operation = await this.store.getPreparedOperation(operationId);
+    if (!operation || operation.completed || operation.state === "installed") return;
+    if (operation.expiresAt <= Date.now()) {
+      await this.store.expirePreparedOperations(Date.now());
+      this.failPreparedWaiters(operationId, "prepared operation 安装超时，可安全重试");
+      return;
+    }
+    if (!this.daemons.has(operation.daemonId)) return;
+    this.dispatchPrepared(operation);
+  }
+
+  private async handlePreparedInstalled(daemon: DaemonConn, operationId: string, ok: boolean, error?: string): Promise<void> {
+    if (!validControlId(operationId)) return;
+    const operation = await this.store.markPreparedOperationInstalled(operationId, daemon.info.daemonId, ok, error ?? null);
+    if (!operation || operation.accountId !== daemon.accountId) return;
+    const retry = this.preparedRetryTimers.get(operationId);
+    if (retry) clearTimeout(retry);
+    this.preparedRetryTimers.delete(operationId);
+    if (!ok) return void this.failPreparedWaiters(operationId, error ?? "daemon 拒绝 prepared operation");
+    const waiters = this.preparedWaiters.get(operationId);
+    if (waiters) for (const waiter of waiters) this.sendPrepared(waiter.client, operation);
+    this.clearPreparedWaiters(operationId);
+  }
+
+  private sendPrepared(client: ClientConn, operation: PreparedOperationRecord): void {
+    this.sendClient(client, {
+      case: "preparedDeviceOperation",
+      value: {
+        operationId: operation.operationId,
+        daemonId: operation.daemonId,
+        frame: operation.frame,
+        expiresAt: operation.expiresAt,
+      },
+    });
+  }
+
+  private watchPrepared(operationId: string, client: ClientConn): void {
+    const waiters = this.preparedWaiters.get(operationId) ?? new Set<PreparedWaiter>();
+    if ([...waiters].some((waiter) => waiter.client === client)) return;
+    const waiter: PreparedWaiter = {
+      client,
+      timer: setTimeout(() => {
+        waiters.delete(waiter);
+        if (waiters.size === 0) this.preparedWaiters.delete(operationId);
+        this.sendClient(client, { case: "error", value: { message: "prepared operation 安装确认超时" } });
+      }, config.pendingTimeoutMs),
+    };
+    waiter.timer.unref?.();
+    waiters.add(waiter);
+    this.preparedWaiters.set(operationId, waiters);
+  }
+
+  private failPreparedWaiters(operationId: string, message: string): void {
+    const waiters = this.preparedWaiters.get(operationId);
+    if (waiters) for (const waiter of waiters) this.sendClient(waiter.client, { case: "error", value: { message } });
+    this.clearPreparedWaiters(operationId);
+  }
+
+  private clearPreparedWaiters(operationId: string): void {
+    const waiters = this.preparedWaiters.get(operationId);
+    if (waiters) for (const waiter of waiters) clearTimeout(waiter.timer);
+    this.preparedWaiters.delete(operationId);
+  }
+
+  private removePreparedWaitersByClient(client: ClientConn): void {
+    for (const [operationId, waiters] of this.preparedWaiters) {
+      for (const waiter of [...waiters]) {
+        if (waiter.client !== client) continue;
+        clearTimeout(waiter.timer);
+        waiters.delete(waiter);
+      }
+      if (waiters.size === 0) this.preparedWaiters.delete(operationId);
+    }
+  }
+
+  private async handleDeviceOperationReport(daemon: DaemonConn, report: DeviceOperationReport): Promise<void> {
+    if (
+      !validControlId(report.operationId) ||
+      report.daemonId !== daemon.info.daemonId ||
+      !report.resultFrame ||
+      report.resultFrame.byteLength === 0 ||
+      report.resultFrame.byteLength > MAX_PREPARED_FRAME_BYTES
+    ) return;
+    const known = await this.store.getPreparedOperation(report.operationId);
+    if (!known || known.accountId !== daemon.accountId || known.daemonId !== daemon.info.daemonId || known.completed) return;
+    const result = decodeDeviceEnvelope(report.resultFrame);
+    if (!result || result.protocolVersion !== DEVICE_PROTOCOL_VERSION || result.channelId !== "" || !result.payload.case) return;
+    if (!validOperationResult(known, report, result.payload)) return;
+
+    let effect: OperationEffect | undefined;
+    try {
+      await this.store.transaction(async (tx) => {
+        const operation = await tx.claimPreparedOperationReport(report.operationId, daemon.info.daemonId);
+        if (!operation) return;
+        const metadata = parseOperationMetadata(operation.metadata);
+        if (!metadata) throw new OperationConvergenceError("prepared operation metadata 损坏");
+
+        effect = { accountId: operation.accountId, daemonId: operation.daemonId };
+        if (!report.ok) {
+          effect.error = report.error ?? "设备操作失败";
+        } else if (operation.kind === "project.import" && result.payload.case === "projectValidated") {
+          const value = result.payload.value;
+          const projectId = metadataString(metadata, "projectId");
+          const workspaceId = metadataString(metadata, "workspaceId");
+          if (!projectId || !workspaceId || !value.repoPath || !value.branch) throw new OperationConvergenceError("project.import report 缺少收敛字段");
+          const suggestedName = value.suggestedName?.trim();
+          const explicitName = metadataString(metadata, "explicitName");
+          const ts = Date.now();
+          const project = create(ProjectSchema, {
+            id: projectId,
+            accountId: operation.accountId,
+            daemonId: operation.daemonId,
+            name: explicitName ?? (suggestedName || basename(value.repoPath)),
+            repoPath: value.repoPath,
+            defaultBranch: value.branch,
+            createdAt: ts,
+          });
+          const workspace = create(WorkspaceSchema, {
+            id: workspaceId,
+            accountId: operation.accountId,
+            daemonId: operation.daemonId,
+            projectId,
+            name: "main",
+            path: value.repoPath,
+            branch: value.branch,
+            isMain: true,
+            createdAt: ts,
+          });
+          await tx.createProject(project);
+          await tx.createWorkspace(workspace);
+          effect.project = project;
+          effect.workspace = workspace;
+        } else if (operation.kind === "worktree.add" && result.payload.case === "worktreeAdded") {
+          const value = result.payload.value;
+          const projectId = metadataString(metadata, "projectId");
+          const workspaceId = metadataString(metadata, "workspaceId");
+          const name = metadataString(metadata, "name");
+          if (!projectId || !workspaceId || !name || !value.path || !value.branch) throw new OperationConvergenceError("worktree.add report 缺少收敛字段");
+          const project = await tx.claimActiveProject(projectId);
+          if (
+            !project ||
+            project.accountId !== operation.accountId ||
+            project.daemonId !== operation.daemonId
+          ) throw new OperationConvergenceError("worktree.add target project 已失效或正在删除");
+          const workspace = create(WorkspaceSchema, {
+            id: workspaceId,
+            accountId: operation.accountId,
+            daemonId: operation.daemonId,
+            projectId,
+            name,
+            path: value.path,
+            branch: value.branch,
+            isMain: false,
+            createdAt: Date.now(),
+          });
+          await tx.createWorkspace(workspace);
+          effect.workspace = workspace;
+        } else if (operation.kind === "worktree.remove" && result.payload.case === "operationAck") {
+          const workspaceId = metadataString(metadata, "workspaceId");
+          const projectId = metadataString(metadata, "projectId");
+          if (!workspaceId || !projectId) throw new OperationConvergenceError("worktree.remove report 缺少收敛字段");
+          const workspace = await tx.getWorkspace(workspaceId);
+          if (
+            workspace &&
+            (workspace.accountId !== operation.accountId ||
+              workspace.daemonId !== operation.daemonId ||
+              workspace.projectId !== projectId ||
+              workspace.isMain ||
+              workspace.createdAt !== operation.targetVersion)
+          ) throw new OperationConvergenceError("worktree.remove target version/CAS 已变化");
+          if (workspace) {
+            const removedTaskIds = await tx.removeTasksByWorkspace(workspace.id);
+            for (const taskId of removedTaskIds) await tx.removeSessionCheckpointsByTask(taskId);
+            await tx.removeWorkspace(workspace.id);
+            effect.removedTaskIds = removedTaskIds;
+            effect.removedWorkspaceId = workspace.id;
+          }
+          // standalone workspace 删除时 finalizer 会因 project.deleting=false 安全空转；若同一 op
+          // 后来被 projectRemove 复用，则仍能完成项目级收口。
+          effect.deletingProjectId = projectId;
+        } else if (operation.kind === "session.create" && result.payload.case === "operationAck") {
+          const value = result.payload.value;
+          const taskId = metadataString(metadata, "taskId");
+          const sessionId = metadataString(metadata, "sessionId");
+          if (
+            !taskId ||
+            !sessionId ||
+            value.sessionId !== sessionId ||
+            (report.taskId !== undefined && report.taskId !== taskId) ||
+            (report.sessionId !== undefined && report.sessionId !== sessionId)
+          ) throw new OperationConvergenceError("session.create report 绑定不匹配");
+          const task = await tx.getTask(taskId);
+          if (!task || task.accountId !== operation.accountId || task.daemonId !== operation.daemonId) throw new OperationConvergenceError("session.create target task 已失效");
+          let updated = task;
+          if (task.status !== TaskStatus.RUNNING || task.sessionId !== sessionId) {
+            if (task.status === TaskStatus.RUNNING || task.sessionId || task.updatedAt !== operation.targetVersion) {
+              throw new OperationConvergenceError("session.create target version/CAS 已变化");
+            }
+            const changed = await tx.updateTask(task.id, { status: TaskStatus.RUNNING, sessionId, exitCode: undefined });
+            if (!changed) throw new OperationConvergenceError("session.create target task 已删除");
+            updated = changed;
+          }
+          effect.task = updated;
+          effect.sessionId = sessionId;
+        } else {
+          throw new OperationConvergenceError(`prepared operation result 类型不匹配: ${operation.kind}`);
+        }
+
+        const finished = await tx.finishPreparedOperation(operation.operationId, report);
+        if (!finished) throw new Error("prepared operation report 提交冲突");
+      });
+    } catch (error) {
+      if (!(error instanceof OperationConvergenceError)) throw error;
+      const failed = await this.store.failPreparedOperationConvergence(report.operationId, daemon.info.daemonId, error.message);
+      if (failed) {
+        const retry = this.preparedRetryTimers.get(report.operationId);
+        if (retry) clearTimeout(retry);
+        this.preparedRetryTimers.delete(report.operationId);
+        this.clearPreparedWaiters(report.operationId);
+        this.broadcast(failed.accountId, { case: "error", value: { message: error.message } });
+      }
+      return;
+    }
+
+    if (!effect) return; // duplicate report
+    const retry = this.preparedRetryTimers.get(report.operationId);
+    if (retry) clearTimeout(retry);
+    this.preparedRetryTimers.delete(report.operationId);
+    this.clearPreparedWaiters(report.operationId);
+    if (effect.project) {
+      this.broadcast(effect.accountId, { case: "projectCreated", value: { project: effect.project } });
+      log.info("project imported", { projectId: effect.project.id, repoPath: effect.project.repoPath });
+    }
+    if (effect.workspace) this.broadcast(effect.accountId, { case: "workspaceCreated", value: { workspace: effect.workspace } });
+    for (const taskId of effect.removedTaskIds ?? []) this.broadcast(effect.accountId, { case: "taskRemoved", value: { taskId } });
+    if (effect.removedWorkspaceId) this.broadcast(effect.accountId, { case: "workspaceRemoved", value: { workspaceId: effect.removedWorkspaceId } });
+    if (effect.project || effect.workspace) await this.pushWorkspaceList(effect.daemonId);
+    if (effect.removedWorkspaceId) await this.pushWorkspaceList(effect.daemonId);
+    if (effect.deletingProjectId) await this.finalizeDeletingProject(effect.deletingProjectId, effect.accountId, effect.daemonId);
+    if (effect.task && effect.sessionId) {
+      this.sessions.set(effect.sessionId, {
+        sessionId: effect.sessionId,
+        daemonId: effect.daemonId,
+        accountId: effect.accountId,
+        taskId: effect.task.id,
+        closing: false,
+        legacyViewers: new Set(),
+      });
+      this.emitTask(effect.task);
+    }
+    if (effect.error) this.broadcast(effect.accountId, { case: "error", value: { message: effect.error } });
+  }
+
+  private async prepareWorktreeRemoval(client: ClientConn, project: Project, workspace: Workspace, removeProject: boolean): Promise<void> {
+    const operationId = randomUUID();
+    const frame = this.preparedFrame(operationId, {
+      case: "worktreeRemove",
+      value: {
+        requestId: operationId,
+        operationId,
+        repoPath: project.repoPath,
+        worktreePath: workspace.path,
+      },
+    });
+    await this.prepareOperation(client, {
+      operationId,
+      accountId: workspace.accountId,
+      daemonId: workspace.daemonId,
+      kind: "worktree.remove",
+      targetId: workspace.id,
+      targetVersion: workspace.createdAt,
+      frame,
+      metadata: JSON.stringify({ projectId: project.id, workspaceId: workspace.id, removeProject }),
+      expiresAt: Date.now() + config.preparedOperationTtlMs,
+    });
+  }
+
+  private async reconcileDeletingProjects(daemon: DaemonConn): Promise<void> {
+    for (const project of await this.store.listDeletingProjectsByDaemon(daemon.info.daemonId)) {
+      if (project.accountId === daemon.accountId) await this.finalizeDeletingProject(project.id, project.accountId, project.daemonId);
+    }
+  }
+
+  private async finalizeDeletingProject(projectId: ProjectId, accountId: AccountId, daemonId: DaemonId): Promise<void> {
+    let removedTaskIds: TaskId[] = [];
+    let removedWorkspaceIds: WorkspaceId[] = [];
+    const removed = await this.store.transaction(async (tx) => {
+      const project = await tx.claimDeletingProject(projectId);
+      if (!project || project.accountId !== accountId || project.daemonId !== daemonId) return false;
+      const workspaces = await tx.listWorkspacesByProject(projectId);
+      if (workspaces.some((workspace) => !workspace.isMain)) return false;
+      for (const workspace of workspaces) {
+        const taskIds = await tx.removeTasksByWorkspace(workspace.id);
+        removedTaskIds.push(...taskIds);
+        for (const taskId of taskIds) await tx.removeSessionCheckpointsByTask(taskId);
+        await tx.removeWorkspace(workspace.id);
+        removedWorkspaceIds.push(workspace.id);
+      }
+      await tx.removeProject(projectId);
+      return true;
+    });
+    if (!removed) return;
+    for (const taskId of removedTaskIds) this.broadcast(accountId, { case: "taskRemoved", value: { taskId } });
+    for (const workspaceId of removedWorkspaceIds) this.broadcast(accountId, { case: "workspaceRemoved", value: { workspaceId } });
+    this.broadcast(accountId, { case: "projectRemoved", value: { projectId } });
+    await this.pushWorkspaceList(daemonId);
   }
 
   /* ============================ Daemon 侧 ============================ */
@@ -311,42 +890,44 @@ export class Hub {
         await this.reconcileDaemonSessions(conn.daemonId!, conn.accountId!, value.sessions);
         break;
       }
-      case "projectValidated": {
-        const value = msg.payload.value;
-        const p = this.pendingOps.get(value.requestId);
-        if (!p || p.data.kind !== "project.import" || p.daemonId !== conn.daemonId) return;
-        this.pendingOps.take(value.requestId);
-        if (!value.ok) {
-          this.sendClient(p.client, { case: "error", value: { message: `不是有效的 git 仓库：${value.error ?? value.repoPath}` } });
-          return;
-        }
-        const ts = Date.now();
-        const suggestedName = value.suggestedName?.trim();
-        const name = p.data.explicitName ?? (suggestedName || basename(value.repoPath));
-        const project: Project = create(ProjectSchema, { id: randomUUID(), accountId: conn.accountId!, daemonId: conn.daemonId!, name, repoPath: value.repoPath, defaultBranch: value.branch, createdAt: ts });
-        await this.store.createProject(project);
-        const main: Workspace = create(WorkspaceSchema, { id: randomUUID(), accountId: project.accountId, daemonId: project.daemonId, projectId: project.id, name: "main", path: value.repoPath, branch: value.branch, isMain: true, createdAt: ts });
-        await this.store.createWorkspace(main);
-        log.info("project imported", { projectId: project.id, repoPath: project.repoPath, branch: value.branch });
-        this.broadcast(project.accountId, { case: "projectCreated", value: { project } });
-        this.broadcast(project.accountId, { case: "workspaceCreated", value: { workspace: main } });
-        await this.pushWorkspaceList(project.daemonId);
+      case "localGatewayAnnounce": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) await this.localControl.announce(daemon, msg.payload.value.gateway);
         break;
       }
-      case "worktreeAdded": {
-        const value = msg.payload.value;
-        const p = this.pendingOps.get(value.requestId);
-        if (!p || p.data.kind !== "worktree.add" || p.daemonId !== conn.daemonId) return;
-        this.pendingOps.take(value.requestId);
-        if (!value.ok) {
-          this.sendClient(p.client, { case: "error", value: { message: `创建工作区失败：${value.error ?? ""}` } });
-          return;
-        }
-        const ws: Workspace = create(WorkspaceSchema, { id: p.data.workspaceId, accountId: conn.accountId!, daemonId: conn.daemonId!, projectId: p.data.projectId, name: p.data.name, path: value.path, branch: value.branch, isMain: false, createdAt: Date.now() });
-        await this.store.createWorkspace(ws);
-        log.info("worktree created", { workspaceId: ws.id, path: ws.path, branch: ws.branch });
-        this.broadcast(ws.accountId, { case: "workspaceCreated", value: { workspace: ws } });
-        await this.pushWorkspaceList(ws.daemonId);
+      case "localGrantAck": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) await this.localControl.grantAck(daemon, msg.payload.value);
+        break;
+      }
+      case "deviceRelayFrame": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) this.deviceRelay.fromDaemon(daemon, msg.payload.value);
+        break;
+      }
+      case "deviceRelayClose": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) this.deviceRelay.closeFromDaemon(daemon, msg.payload.value);
+        break;
+      }
+      case "sessionCatalog": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) await this.reconcileSessionCatalog(daemon, msg.payload.value);
+        break;
+      }
+      case "sessionCheckpoint": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) await this.acceptSessionCheckpoint(daemon, msg.payload.value);
+        break;
+      }
+      case "preparedDeviceOperationInstalled": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) await this.handlePreparedInstalled(daemon, msg.payload.value.operationId, msg.payload.value.ok, msg.payload.value.error);
+        break;
+      }
+      case "deviceOperationReport": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) await this.handleDeviceOperationReport(daemon, msg.payload.value);
         break;
       }
       // worker 观测到 worktree HEAD 变化：分支真相源在设备侧，DB 只做镜像 + 广播
@@ -375,10 +956,6 @@ export class Hub {
         const value = msg.payload.value;
         const s = this.sessions.get(value.sessionId);
         if (s && s.daemonId !== conn.daemonId) return;
-        if (s?.startTimer) {
-          clearTimeout(s.startTimer);
-          s.startTimer = undefined; // 已确认启动，撤销启动超时
-        }
         const task = await this.store.getTask(value.taskId);
         if (task && task.daemonId === conn.daemonId && task.sessionId === value.sessionId && task.status !== TaskStatus.RUNNING) {
           const updated = await this.store.updateTask(task.id, { status: TaskStatus.RUNNING, exitCode: undefined });
@@ -396,7 +973,6 @@ export class Hub {
           const updated = await this.store.updateTask(task.id, { status: TaskStatus.EXITED, sessionId: undefined, exitCode: value.exitCode });
           if (updated) this.emitTask(updated);
         }
-        if (s?.startTimer) clearTimeout(s.startTimer);
         if (s) this.dropSession(value.sessionId);
         log.debug("session exit", { sessionId: value.sessionId, code: value.exitCode });
         break;
@@ -425,18 +1001,19 @@ export class Hub {
         const value = msg.payload.value;
         const s = this.sessions.get(value.sessionId);
         if (!s || s.daemonId !== conn.daemonId) return;
-        s.mirror?.feed(value.data); // 无人观看时也要喂镜像（离线快照的数据来源）
-        if (!s.holder) return;
-        if (s.holder.ws.bufferedAmount > config.clientBufferHardLimit) {
-          // 控制端严重落后：断开它（重连后回放 scrollback 自愈），保护服务器内存
-          try {
-            s.holder.ws.close(1013, "client too slow");
-          } catch {
-            /* ignore */
+        // 旧客户端迁移 adapter：只维护 viewer 集合，不拥有 holder/epoch/输入裁决。
+        for (const viewer of [...s.legacyViewers]) {
+          if (viewer.ws.bufferedAmount > config.clientBufferHardLimit) {
+            s.legacyViewers.delete(viewer);
+            try {
+              viewer.ws.close(1013, "client too slow");
+            } catch {
+              /* ignore */
+            }
+            continue;
           }
-          return;
+          this.sendClient(viewer, { case: "ptyOutput", value });
         }
-        this.sendClient(s.holder, { case: "ptyOutput", value });
         break;
       }
       case "ptyReplay": {
@@ -448,45 +1025,9 @@ export class Hub {
         if (value.data.length > 0) {
           this.sendClient(p.client, { case: "ptyOutput", value: { sessionId: value.sessionId, data: value.data } });
         }
-        // 回放完成后接管控制权（踢掉原控制端）
+        // 旧 adapter 只登记输出订阅；真正 holder 由 Device attach 在 sessiond 裁决。
         const s = this.sessions.get(value.sessionId);
-        if (s && !s.closing) {
-          // 全量 scrollback 在手：重建（prime）镜像，此后 attach 走本地快照
-          (s.mirror ??= new SessionMirror(p.data.cols, p.data.rows, false)).prime(p.data.cols, p.data.rows, value.data);
-          this.setHolder(s, p.client);
-        }
-        break;
-      }
-      case "execResult": {
-        const value = msg.payload.value;
-        const p = this.pendingRelays.get(value.requestId);
-        if (!p || p.daemonId !== conn.daemonId) return;
-        this.pendingRelays.take(value.requestId);
-        this.sendClient(p.client, { case: "execResult", value: { ...value, requestId: p.data.clientRequestId } });
-        break;
-      }
-      case "fsListed": {
-        const value = msg.payload.value;
-        const p = this.pendingRelays.get(value.requestId);
-        if (!p || p.daemonId !== conn.daemonId) return;
-        this.pendingRelays.take(value.requestId);
-        this.sendClient(p.client, { case: "fsListed", value: { ...value, requestId: p.data.clientRequestId } });
-        break;
-      }
-      case "fsReadResult": {
-        const value = msg.payload.value;
-        const p = this.pendingRelays.get(value.requestId);
-        if (!p || p.daemonId !== conn.daemonId) return;
-        this.pendingRelays.take(value.requestId);
-        this.sendClient(p.client, { case: "fsReadResult", value: { ...value, requestId: p.data.clientRequestId } });
-        break;
-      }
-      case "fsWriteResult": {
-        const value = msg.payload.value;
-        const p = this.pendingRelays.get(value.requestId);
-        if (!p || p.daemonId !== conn.daemonId) return;
-        this.pendingRelays.take(value.requestId);
-        this.sendClient(p.client, { case: "fsWriteResult", value: { ...value, requestId: p.data.clientRequestId } });
+        if (s && !s.closing) s.legacyViewers.add(p.client);
         break;
       }
     }
@@ -494,37 +1035,21 @@ export class Hub {
 
   private async reconcileDaemonSessions(daemonId: DaemonId, accountId: AccountId, alive: readonly { sessionId: SessionId; taskId: TaskId }[]): Promise<void> {
     const valid = alive.filter((a) => a && typeof a.sessionId === "string" && typeof a.taskId === "string");
-    const aliveIds = new Set(valid.map((a) => a.sessionId));
-    const daemon = this.daemons.get(daemonId);
-
     for (const { sessionId, taskId } of valid) {
       const task = await this.store.getTask(taskId);
-      if (!task || task.daemonId !== daemonId || task.status !== TaskStatus.RUNNING) {
-        if (daemon) this.sendDaemon(daemon, { case: "sessionClose", value: { sessionId } });
-        this.dropSession(sessionId);
-        continue;
-      }
-      const existing = this.sessions.get(sessionId);
-      if (existing) {
-        // daemon 闪断重连：掉线窗口的输出已丢（worker 断连期间不缓存），镜像断档作废，
-        // 下次 attach 走 replay 全量重建
-        if (existing.mirror) existing.mirror.primed = false;
-      } else {
-        // server 重启后重建：尺寸未知且无历史，等首次 attach 的 replay 来 prime
-        this.sessions.set(sessionId, { sessionId, daemonId, accountId, taskId, holder: null, closing: false, mirror: new SessionMirror(80, 24, false) });
+      // legacy resync 只补已知 task 的路由；unknown/mismatched live PTY 是 local orphan，
+      // 中心既不创建业务 task，也绝不再发 sessionClose。
+      if (!task || task.accountId !== accountId || task.daemonId !== daemonId) continue;
+      if (task.sessionId && task.sessionId !== sessionId) continue;
+      if (!this.sessions.has(sessionId)) {
+        this.sessions.set(sessionId, { sessionId, daemonId, accountId, taskId, closing: false, legacyViewers: new Set() });
       }
       if (task.sessionId !== sessionId) {
         const updated = await this.store.updateTask(taskId, { status: TaskStatus.RUNNING, sessionId, exitCode: undefined });
         if (updated) this.emitTask(updated);
       }
     }
-    for (const task of await this.store.listRunningTasksByDaemon(daemonId)) {
-      if (task.sessionId && !aliveIds.has(task.sessionId)) {
-        const updated = await this.store.updateTask(task.id, { status: TaskStatus.EXITED, sessionId: undefined, exitCode: -1 });
-        if (updated) this.emitTask(updated);
-        this.dropSession(task.sessionId);
-      }
-    }
+    // absence 不是 exit 事实；退出只由 sessiond tombstone/sessionExit 收敛。
     log.debug("daemon resync", { daemonId, live: valid.length });
   }
 
@@ -594,7 +1119,6 @@ export class Hub {
    * 广播受影响任务的 ports.updated（原来分散在各调用点的 `this.sessions.delete(x)` 均改走此处）。 */
   private dropSession(sessionId: SessionId): void {
     const s = this.sessions.get(sessionId);
-    s?.mirror?.dispose();
     this.sessions.delete(sessionId);
     const released = this.routeTable.releaseSession(sessionId);
     if (!released) return;
@@ -619,6 +1143,9 @@ export class Hub {
     if (!current || current.ws !== conn.ws) return;
 
     this.daemons.delete(daemonId);
+    this.catalog.delete(daemonId);
+    this.deviceRelay.closeByDaemon(daemonId);
+    await this.localControl.daemonDisconnected(daemonId);
     // 端口转发：daemon 掉线即所有隧道失联，摘路由表 + 关在途连接（this.sessions 本身按既有设计不动，
     // 留给 daemon.resync 重连后自愈；shortId 会在重连后 ports.update 时重新签发，见 plan 006）。
     const releasedRoutes = this.routeTable.releaseDaemon(daemonId);
@@ -627,9 +1154,7 @@ export class Hub {
     await this.store.touchDevice(daemonId, Date.now());
     log.info("daemon disconnected", { daemonId });
 
-    this.pendingOps.removeByDaemon(daemonId, (p) => this.sendClient(p.client, { case: "error", value: { message: "daemon 掉线，操作未完成" } }));
     this.pendingReplays.removeByDaemon(daemonId, (p) => this.sendClient(p.client, { case: "error", value: { message: "daemon 掉线，无法回放" } }));
-    this.pendingRelays.removeByDaemon(daemonId, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "daemon 掉线"));
 
     const device = await this.store.getDevice(daemonId);
     if (device && !device.revoked) {
@@ -653,6 +1178,7 @@ export class Hub {
       }
       case "clientLogout": {
         // 服务器侧撤销本连接的会话 token（不止清本地），撤销后该 token 重连即失败。
+        await this.localControl.logout(client);
         if (client.tokenHash) await this.store.revokeClientToken(client.tokenHash);
         client.ws.close(4001, "logout");
         break;
@@ -661,15 +1187,43 @@ export class Hub {
         const accountId = client.accountId!;
         // 先把快照数据查齐，最后才置 subscribed=true 并发送——避免在"已订阅但还没收到
         // 首个快照"的窗口期收到其它连接触发的广播导致乱序（landmine：广播不能抢在快照前）。
-        const [daemons, projects, workspaces, tasks] = await Promise.all([
+        const [daemons, projects, workspaces, tasks, checkpoints, prepared] = await Promise.all([
           this.daemonInfoList(accountId),
           this.store.listProjects(accountId),
           this.store.listWorkspaces(accountId),
           this.store.listTasks(accountId),
+          this.store.listSessionCheckpoints(accountId),
+          this.store.listReadyPreparedOperations(accountId, Date.now()),
         ]);
         client.subscribed = true;
         this.clients.add(client);
         this.sendClient(client, { case: "stateSnapshot", value: { daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) } });
+        for (const checkpoint of checkpoints) this.sendCheckpoint(client, checkpoint);
+        for (const operation of prepared) this.sendPrepared(client, operation);
+        break;
+      }
+      case "localPairRequest": {
+        await this.localControl.pair(client, msg.payload.value);
+        break;
+      }
+      case "localLeaseRequest": {
+        await this.localControl.lease(client, msg.payload.value);
+        break;
+      }
+      case "localUnpairRequest": {
+        await this.localControl.unpair(client, msg.payload.value);
+        break;
+      }
+      case "deviceRelayOpen": {
+        this.deviceRelay.open(client, msg.payload.value);
+        break;
+      }
+      case "deviceRelayFrame": {
+        this.deviceRelay.fromClient(client, msg.payload.value);
+        break;
+      }
+      case "deviceRelayClose": {
+        this.deviceRelay.closeFromClient(client, msg.payload.value);
         break;
       }
       case "clientRemoveDevice": {
@@ -710,41 +1264,46 @@ export class Hub {
           return;
         }
         const explicitName = typeof value.name === "string" && value.name.trim() ? value.name.trim() : undefined;
-        const requestId = randomUUID();
-        this.pendingOps.register(requestId, value.daemonId, client, { kind: "project.import", explicitName }, (p) =>
-          this.sendClient(p.client, { case: "error", value: { message: "导入超时" } }),
-        );
-        this.sendDaemon(d, { case: "projectValidate", value: { requestId, path: value.path } });
+        const operationId = randomUUID();
+        const frame = this.preparedFrame(operationId, {
+          case: "projectValidate",
+          value: { requestId: operationId, operationId, path: value.path },
+        });
+        await this.prepareOperation(client, {
+          operationId,
+          accountId: client.accountId!,
+          daemonId: value.daemonId,
+          kind: "project.import",
+          targetId: `${value.daemonId}:${value.path}`,
+          targetVersion: null,
+          frame,
+          metadata: JSON.stringify({ projectId: randomUUID(), workspaceId: randomUUID(), explicitName }),
+          expiresAt: Date.now() + config.preparedOperationTtlMs,
+        });
         break;
       }
       case "projectRemove": {
         const project = await this.store.getProject(msg.payload.value.projectId);
         if (!project || project.accountId !== client.accountId) return;
+        const initialWorkspaces = await this.store.listWorkspacesByProject(project.id);
+        if (initialWorkspaces.some((workspace) => !workspace.isMain) && !this.daemons.has(project.daemonId)) {
+          return void this.sendClient(client, { case: "error", value: { message: "daemon 不在线，无法删除 worktree" } });
+        }
+        await this.store.markProjectDeleting(project.id);
+        // markProjectDeleting 与 worktree.add report 共用 project 行锁；标记完成后必须重新读取，
+        // 否则等待行锁期间刚收敛的 workspace 会漏出本次删除集合，让 project 永久卡在 deleting。
         const workspaces = await this.store.listWorkspacesByProject(project.id);
+        const removable = workspaces.filter((workspace) => !workspace.isMain);
         const sessionCloses: SessionId[] = [];
-        const worktreePaths: string[] = [];
         for (const ws of workspaces) {
           for (const task of await this.store.listTasksByWorkspace(ws.id)) if (task.sessionId) sessionCloses.push(task.sessionId);
-          if (!ws.isMain) worktreePaths.push(ws.path); // 主工作区=仓库本身，不删
         }
-        // 级联删除原子化：要么全删，要么不变
-        let removedTaskIds: TaskId[] = [];
-        await this.store.transaction(async (tx) => {
-          for (const ws of workspaces) removedTaskIds.push(...(await tx.removeTasksByWorkspace(ws.id)));
-          for (const ws of workspaces) await tx.removeWorkspace(ws.id);
-          await tx.removeProject(project.id);
-        });
-        // 提交后做副作用（关 PTY、删 worktree、广播）
         for (const sid of sessionCloses) {
           this.routeToSessionDaemon(sid, { case: "sessionClose", value: { sessionId: sid } });
           this.dropSession(sid);
         }
-        const daemon = this.daemons.get(project.daemonId);
-        if (daemon) for (const wp of worktreePaths) this.sendDaemon(daemon, { case: "worktreeRemove", value: { repoPath: project.repoPath, worktreePath: wp } });
-        for (const id of removedTaskIds) this.broadcast(project.accountId, { case: "taskRemoved", value: { taskId: id } });
-        for (const ws of workspaces) this.broadcast(project.accountId, { case: "workspaceRemoved", value: { workspaceId: ws.id } });
-        this.broadcast(project.accountId, { case: "projectRemoved", value: { projectId: project.id } });
-        await this.pushWorkspaceList(project.daemonId);
+        if (removable.length === 0) await this.finalizeDeletingProject(project.id, project.accountId, project.daemonId);
+        else for (const workspace of removable) await this.prepareWorktreeRemoval(client, project, workspace, true);
         break;
       }
       case "workspaceCreate": {
@@ -754,18 +1313,41 @@ export class Hub {
           this.sendClient(client, { case: "error", value: { message: "项目不存在或不属于本账号" } });
           return;
         }
+        if (await this.store.isProjectDeleting(project.id)) {
+          this.sendClient(client, { case: "error", value: { message: "项目正在删除，不能再创建工作区" } });
+          return;
+        }
         const d = this.daemons.get(project.daemonId);
         if (!d) {
           this.sendClient(client, { case: "error", value: { message: "daemon 不在线" } });
           return;
         }
         const workspaceId = randomUUID();
-        const requestId = randomUUID();
+        const operationId = randomUUID();
         const name = value.name.trim() || "工作区";
-        this.pendingOps.register(requestId, project.daemonId, client, { kind: "worktree.add", projectId: project.id, workspaceId, name }, (p) =>
-          this.sendClient(p.client, { case: "error", value: { message: "创建工作区超时" } }),
-        );
-        this.sendDaemon(d, { case: "worktreeAdd", value: { requestId, repoPath: project.repoPath, workspaceId, name, branch: value.branch, createNew: value.createNew } });
+        const frame = this.preparedFrame(operationId, {
+          case: "worktreeAdd",
+          value: {
+            requestId: operationId,
+            operationId,
+            repoPath: project.repoPath,
+            workspaceId,
+            name,
+            branch: value.branch,
+            createNew: value.createNew,
+          },
+        });
+        await this.prepareOperation(client, {
+          operationId,
+          accountId: client.accountId!,
+          daemonId: project.daemonId,
+          kind: "worktree.add",
+          targetId: workspaceId,
+          targetVersion: null,
+          frame,
+          metadata: JSON.stringify({ projectId: project.id, workspaceId, name }),
+          expiresAt: Date.now() + config.preparedOperationTtlMs,
+        });
         break;
       }
       case "workspaceRemove": {
@@ -776,21 +1358,14 @@ export class Hub {
           return;
         }
         const project = await this.store.getProject(ws.projectId);
+        if (!project || project.daemonId !== ws.daemonId) return;
+        if (!this.daemons.has(ws.daemonId)) return void this.sendClient(client, { case: "error", value: { message: "daemon 不在线" } });
         const sessionCloses = (await this.store.listTasksByWorkspace(ws.id)).filter((t) => t.sessionId).map((t) => t.sessionId!);
-        let removed: TaskId[] = [];
-        await this.store.transaction(async (tx) => {
-          removed = await tx.removeTasksByWorkspace(ws.id);
-          await tx.removeWorkspace(ws.id);
-        });
         for (const sid of sessionCloses) {
           this.routeToSessionDaemon(sid, { case: "sessionClose", value: { sessionId: sid } });
           this.dropSession(sid);
         }
-        const daemon = this.daemons.get(ws.daemonId);
-        if (daemon && project) this.sendDaemon(daemon, { case: "worktreeRemove", value: { repoPath: project.repoPath, worktreePath: ws.path } });
-        for (const id of removed) this.broadcast(ws.accountId, { case: "taskRemoved", value: { taskId: id } });
-        this.broadcast(ws.accountId, { case: "workspaceRemoved", value: { workspaceId: ws.id } });
-        await this.pushWorkspaceList(ws.daemonId);
+        await this.prepareWorktreeRemoval(client, project, ws, false);
         break;
       }
       case "workspaceSetName": {
@@ -823,15 +1398,23 @@ export class Hub {
       }
       case "taskCreate": {
         const value = msg.payload.value;
-        const ws = await this.store.getWorkspace(value.workspaceId);
-        if (!ws || ws.accountId !== client.accountId) {
-          this.sendClient(client, { case: "error", value: { message: "工作区不存在或不属于本账号" } });
+        const outcome = await this.store.transaction(async (tx) => {
+          const ws = await tx.getWorkspace(value.workspaceId);
+          if (!ws || ws.accountId !== client.accountId) return { error: "工作区不存在或不属于本账号" } as const;
+          const project = await tx.claimActiveProject(ws.projectId);
+          if (!project || project.accountId !== ws.accountId || project.daemonId !== ws.daemonId) {
+            return { error: "项目正在删除，不能再创建任务" } as const;
+          }
+          const ts = Date.now();
+          const task: Task = create(TaskSchema, { id: randomUUID(), accountId: ws.accountId, daemonId: ws.daemonId, projectId: ws.projectId, workspaceId: ws.id, title: value.title || "未命名任务", status: TaskStatus.IDLE, createdAt: ts, updatedAt: ts });
+          await tx.createTask(task);
+          return { task } as const;
+        });
+        if ("error" in outcome) {
+          this.sendClient(client, { case: "error", value: { message: outcome.error } });
           return;
         }
-        const ts = Date.now();
-        const task: Task = create(TaskSchema, { id: randomUUID(), accountId: ws.accountId, daemonId: ws.daemonId, projectId: ws.projectId, workspaceId: ws.id, title: value.title || "未命名任务", status: TaskStatus.IDLE, createdAt: ts, updatedAt: ts });
-        await this.store.createTask(task);
-        this.emitTask(task);
+        this.emitTask(outcome.task);
         break;
       }
       case "taskStart": {
@@ -844,7 +1427,14 @@ export class Hub {
         const task = await this.requireTask(client, value.taskId);
         if (!task) return;
         const s = task.sessionId ? this.sessions.get(task.sessionId) : undefined;
-        if (task.status === TaskStatus.RUNNING && s && !s.closing) this.attachSession(client, s.sessionId, value.cols, value.rows);
+        if (task.status === TaskStatus.RUNNING && s && !s.closing) await this.attachSession(client, s.sessionId);
+        else if (task.status === TaskStatus.RUNNING && task.sessionId) {
+          const checkpoint = await this.store.getSessionCheckpoint(task.sessionId);
+          if (checkpoint) {
+            this.sendCheckpoint(client, checkpoint);
+            this.sendClient(client, { case: "ptyOutput", value: { sessionId: task.sessionId, data: checkpoint.ansiSnapshot } });
+          } else this.sendClient(client, { case: "error", value: { message: "会话事实尚未恢复" } });
+        }
         else this.sendClient(client, { case: "error", value: { message: "任务未在运行，无法 attach" } });
         break;
       }
@@ -856,9 +1446,8 @@ export class Hub {
           s.closing = true;
           this.routeToSessionDaemon(s.sessionId, { case: "sessionClose", value: { sessionId: s.sessionId } });
         } else if (task.status === TaskStatus.RUNNING) {
-          if (task.sessionId) this.dropSession(task.sessionId);
-          const updated = await this.store.updateTask(task.id, { status: TaskStatus.EXITED, sessionId: undefined, exitCode: -1 });
-          if (updated) this.emitTask(updated);
+          // daemon 离线不是 exit fact；保留 running，等 local stop 的 tombstone/catalog 收敛。
+          this.sendClient(client, { case: "error", value: { message: "daemon control WS 离线，请通过本地 DeviceTransport 停止" } });
         }
         break;
       }
@@ -870,16 +1459,16 @@ export class Hub {
           this.dropSession(task.sessionId);
         }
         await this.store.removeTask(task.id);
+        await this.store.removeSessionCheckpointsByTask(task.id);
         this.broadcast(task.accountId, { case: "taskRemoved", value: { taskId: task.id } });
         break;
       }
       case "ptyResize": {
         const value = msg.payload.value;
         const s = this.sessions.get(value.sessionId);
-        if (!s || s.accountId !== client.accountId || s.holder !== client) return;
+        if (!s || s.accountId !== client.accountId) return;
         const cols = clampDim(value.cols, 80);
         const rows = clampDim(value.rows, 24);
-        s.mirror?.resize(cols, rows); // 镜像尺寸始终跟随 PTY，否则后续字节解析错位
         this.routeToSessionDaemon(value.sessionId, { case: "ptyResize", value: { sessionId: value.sessionId, cols, rows } });
         break;
       }
@@ -887,70 +1476,18 @@ export class Hub {
         const value = msg.payload.value;
         const s = this.sessions.get(value.sessionId);
         if (!s || s.accountId !== client.accountId) return;
-        if (s.holder !== client) {
-          this.sendClient(client, { case: "error", value: { message: "无控制权：该任务已被其它客户端接管" } });
-          return;
-        }
+        // migration adapter 不作 holder 判断；新客户端的 input/resize 经 Device channel，
+        // 由 sessiond 以 holderEpoch + sequence 做最终裁决。
         const d = this.daemons.get(s.daemonId);
         if (d) this.sendDaemon(d, { case: "ptyInput", value });
         break;
       }
-      case "clientExec": {
-        const value = msg.payload.value;
-        const ws = await this.workspaceForClient(client, value.workspaceId);
-        if (!ws) return void this.relayError(client, "exec", value.requestId, "工作区不存在或不属于本账号");
-        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "exec", value.requestId, "daemon 不在线");
-        const reqId = randomUUID();
-        // exec 可能慢：服务器端钳制命令超时，并让中继超时 = 命令超时 + 宽限，避免命令仍在跑却误报超时
-        const execTimeout = Math.min(config.execMaxTimeoutMs, value.timeoutMs && value.timeoutMs > 0 ? value.timeoutMs : config.execDefaultTimeoutMs);
-        this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: value.requestId, kind: "exec" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"), execTimeout + 5_000);
-        this.sendDaemon(this.daemons.get(ws.daemonId)!, { case: "execRun", value: { requestId: reqId, cwd: ws.path, command: value.command, args: value.args, timeoutMs: execTimeout } });
-        break;
-      }
-      case "clientFsList": {
-        const value = msg.payload.value;
-        // 两种锚定模式：daemon_id = 设备浏览（root=/，path 可为 ~ 或绝对路径；向导默认从 HOME 起步）；
-        // 否则 workspace_id = 工作区内浏览（root 为 worktree 路径，行为不变）。
-        let daemonId: DaemonId;
-        let root: string;
-        if (value.daemonId !== undefined && value.daemonId !== "") {
-          const device = await this.store.getDevice(value.daemonId);
-          if (!device || device.accountId !== client.accountId) return void this.relayError(client, "fs.list", value.requestId, "设备不存在或不属于本账号");
-          daemonId = value.daemonId;
-          root = "/";
-        } else {
-          const ws = await this.workspaceForClient(client, value.workspaceId);
-          if (!ws) return void this.relayError(client, "fs.list", value.requestId, "工作区不存在或不属于本账号");
-          daemonId = ws.daemonId;
-          root = ws.path;
-        }
-        if (!this.isDaemonOnline(daemonId)) return void this.relayError(client, "fs.list", value.requestId, "daemon 不在线");
-        const reqId = randomUUID();
-        this.pendingRelays.register(reqId, daemonId, client, { clientRequestId: value.requestId, kind: "fs.list" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
-        this.sendDaemon(this.daemons.get(daemonId)!, { case: "fsList", value: { requestId: reqId, root, path: value.path } });
-        break;
-      }
-      case "clientFsRead": {
-        const value = msg.payload.value;
-        const ws = await this.workspaceForClient(client, value.workspaceId);
-        if (!ws) return void this.relayError(client, "fs.read", value.requestId, "工作区不存在或不属于本账号");
-        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.read", value.requestId, "daemon 不在线");
-        const reqId = randomUUID();
-        this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: value.requestId, kind: "fs.read" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
-        this.sendDaemon(this.daemons.get(ws.daemonId)!, { case: "fsRead", value: { requestId: reqId, root: ws.path, path: value.path } });
-        break;
-      }
+      case "clientExec":
+      case "clientFsList":
+      case "clientFsRead":
       case "clientFsWrite": {
-        const value = msg.payload.value;
-        // 终端剪贴板贴图（plan 014，temp 模式修订）：temp=true 时字节落到 daemon 侧系统临时目录
-        // （worker 忽略 root，仅用它做单段文件名校验），temp=false 走原 root 锚定语义（ws.path）。
-        // workspace_id 两种模式下都要归属校验 + 路由到正确 daemon，故 server 这层逻辑不变。
-        const ws = await this.workspaceForClient(client, value.workspaceId);
-        if (!ws) return void this.relayError(client, "fs.write", value.requestId, "工作区不存在或不属于本账号");
-        if (!this.isDaemonOnline(ws.daemonId)) return void this.relayError(client, "fs.write", value.requestId, "daemon 不在线");
-        const reqId = randomUUID();
-        this.pendingRelays.register(reqId, ws.daemonId, client, { clientRequestId: value.requestId, kind: "fs.write" }, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "超时"));
-        this.sendDaemon(this.daemons.get(ws.daemonId)!, { case: "fsWrite", value: { requestId: reqId, root: ws.path, path: value.path, data: value.data, temp: value.temp } });
+        // build-skew 迁移兜底；新 web/mobile 的 daemon RPC 必须走统一 DeviceTransport。
+        this.sendClient(client, { case: "error", value: { message: "客户端版本过旧，请刷新后重试设备操作" } });
         break;
       }
     }
@@ -1071,11 +1608,6 @@ export class Hub {
     return accountId;
   }
 
-  private async workspaceForClient(client: ClientConn, workspaceId: WorkspaceId): Promise<Workspace | undefined> {
-    const ws = await this.store.getWorkspace(workspaceId);
-    return ws && ws.accountId === client.accountId ? ws : undefined;
-  }
-
   private async requireTask(client: ClientConn, taskId: TaskId): Promise<Task | undefined> {
     const task = await this.store.getTask(taskId);
     if (!task || task.accountId !== client.accountId) {
@@ -1091,64 +1623,70 @@ export class Hub {
 
     if (task.status === TaskStatus.RUNNING && task.sessionId) {
       const s = this.sessions.get(task.sessionId);
-      if (s && !s.closing) return void this.attachSession(client, s.sessionId, cols, rows);
+      if (s && !s.closing) return void (await this.attachSession(client, s.sessionId));
       if (s && s.closing) return void this.sendClient(client, { case: "error", value: { message: "任务正在停止，请稍候重试" } });
-      this.sendClient(client, { case: "error", value: { message: "会话恢复中，请稍候重试" } });
-      return;
+      const checkpoint = await this.store.getSessionCheckpoint(task.sessionId);
+      if (checkpoint) {
+        this.sendCheckpoint(client, checkpoint);
+        this.sendClient(client, { case: "ptyOutput", value: { sessionId: task.sessionId, data: checkpoint.ansiSnapshot } });
+        return;
+      }
+      return void this.sendClient(client, { case: "error", value: { message: "会话事实尚未从 daemon catalog 恢复" } });
     }
 
     const d = this.daemons.get(task.daemonId);
     if (!d) return void this.sendClient(client, { case: "error", value: { message: `daemon 不在线：${task.daemonId}` } });
     const ws = await this.store.getWorkspace(task.workspaceId);
     if (!ws) return void this.sendClient(client, { case: "error", value: { message: "工作区已不存在" } });
+    if (await this.store.isProjectDeleting(task.projectId)) {
+      return void this.sendClient(client, { case: "error", value: { message: "项目正在删除，不能启动新 session" } });
+    }
 
     const sessionId = randomUUID();
     const c = clampDim(cols, 80);
     const r = clampDim(rows, 24);
-    // 新会话从第一个字节起就被镜像连续观测 → 天然 primed
-    const session: RuntimeSession = { sessionId, daemonId: task.daemonId, accountId: task.accountId, taskId: task.id, holder: client, closing: false, mirror: new SessionMirror(c, r, true) };
-    // 启动确认超时：daemon 收到 session.create 却起 PTY 失败又不回消息时，避免 task 永久卡 running + session 泄漏。
-    const startTimer = setTimeout(() => void this.onSessionStartTimeout(sessionId), config.pendingTimeoutMs);
-    (startTimer as { unref?: () => void }).unref?.();
-    session.startTimer = startTimer;
-    this.sessions.set(sessionId, session);
-    this.sendDaemon(d, { case: "sessionCreate", value: { sessionId, taskId: task.id, cwd: ws.path, cols: c, rows: r } });
-    const updated = await this.store.updateTask(task.id, { status: TaskStatus.RUNNING, sessionId, exitCode: undefined });
-    if (updated) this.emitTask(updated);
-  }
-
-  /** session.create 超时未确认启动：清运行时 session、标 task exited、通知控制端。 */
-  private async onSessionStartTimeout(sessionId: SessionId): Promise<void> {
-    const s = this.sessions.get(sessionId);
-    if (!s || !s.startTimer) return; // 已确认启动（timer 被清）或已清理
-    this.dropSession(sessionId);
-    const task = await this.store.getTaskBySession(sessionId);
-    if (task && task.sessionId === sessionId && task.status === TaskStatus.RUNNING) {
-      const updated = await this.store.updateTask(task.id, { status: TaskStatus.EXITED, sessionId: undefined, exitCode: -1 });
-      if (updated) this.emitTask(updated);
-    }
-    if (s.holder) this.sendClient(s.holder, { case: "error", value: { message: "会话启动超时" } });
-    log.warn("session start timed out", { sessionId });
-  }
-
-  private attachSession(client: ClientConn, sessionId: SessionId, cols: number, rows: number): void {
-    const s = this.sessions.get(sessionId);
-    if (!s) return;
-    // 快路径：镜像可信 → 本地序列化几 KB 快照，免 daemon 往返；daemon 离线也能看到最后画面。
-    // snapshot 回调是 write 队列排空后的异步点：重取 session 防在途 drop，回调体内同步无出让点。
-    if (s.mirror?.primed) {
-      s.mirror.snapshot((ansi) => {
-        const cur = this.sessions.get(sessionId);
-        if (!cur || cur.closing) return void this.sendClient(client, { case: "error", value: { message: "会话已结束" } });
-        this.sendClient(client, { case: "ptyOutput", value: { sessionId, data: new TextEncoder().encode(ansi) } });
-        this.setHolder(cur, client);
-      });
+    const existing = await this.store.findActivePreparedOperation(task.accountId, "session.create", task.id, Date.now());
+    if (existing) {
+      if (existing.state === "installed") {
+        this.sendPrepared(client, existing);
+      } else {
+        this.watchPrepared(existing.operationId, client);
+        this.dispatchPrepared(existing);
+      }
       return;
     }
-    // 慢路径（server 重启 / daemon 闪断后镜像断档）：向 daemon 要全量 scrollback，顺带 prime 镜像
-    if (!this.isDaemonOnline(s.daemonId)) return void this.sendClient(client, { case: "error", value: { message: "daemon 离线，无法回放" } });
+    const operationId = randomUUID();
+    const frame = this.preparedFrame(operationId, {
+      case: "sessionCreate",
+      value: { requestId: operationId, operationId, sessionId, taskId: task.id, cwd: ws.path, cols: c, rows: r },
+    });
+    await this.prepareOperation(client, {
+      operationId,
+      accountId: task.accountId,
+      daemonId: task.daemonId,
+      kind: "session.create",
+      targetId: task.id,
+      targetVersion: task.updatedAt,
+      frame,
+      metadata: JSON.stringify({ taskId: task.id, sessionId }),
+      expiresAt: Date.now() + config.preparedOperationTtlMs,
+    });
+  }
+
+  private async attachSession(client: ClientConn, sessionId: SessionId): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    if (!this.isDaemonOnline(s.daemonId)) {
+      const checkpoint = await this.store.getSessionCheckpoint(sessionId);
+      if (!checkpoint) return void this.sendClient(client, { case: "error", value: { message: "daemon 离线且没有 checkpoint" } });
+      this.sendCheckpoint(client, checkpoint);
+      // 旧 web 不认识 sessionCheckpoint，兼容地把同一缓存作为 ptyOutput 下发；不解析、不改写。
+      this.sendClient(client, { case: "ptyOutput", value: { sessionId, data: checkpoint.ansiSnapshot } });
+      return;
+    }
+    // 仅旧客户端走 raw replay adapter；新 Device attach 直接从 sessiond 取 snapshot/seq。
     const requestId = randomUUID();
-    this.pendingReplays.register(requestId, s.daemonId, client, { sessionId, cols: clampDim(cols, 80), rows: clampDim(rows, 24) }, (p) =>
+    this.pendingReplays.register(requestId, s.daemonId, client, { sessionId }, (p) =>
       this.sendClient(p.client, { case: "error", value: { message: "回放超时" } }),
     );
     const ok = this.routeToSessionDaemon(sessionId, { case: "sessionReplay", value: { sessionId, requestId } });
@@ -1209,6 +1747,8 @@ export class Hub {
     if (!device || device.accountId !== client.accountId) return;
     const accountId = device.accountId;
 
+    // 先清 origin/撤销 grant 再关闭 control WS；即使 revoke ack 丢失，durable tombstone 仍保留。
+    await this.localControl.revokeDevice(daemonId);
     const conn = this.daemons.get(daemonId);
     if (conn) {
       try {
@@ -1218,16 +1758,17 @@ export class Hub {
       }
       this.daemons.delete(daemonId);
     }
+    this.catalog.delete(daemonId);
+    this.deviceRelay.closeByDaemon(daemonId);
     for (const [sid, s] of this.sessions) if (s.daemonId === daemonId) this.dropSession(sid);
-    this.pendingOps.removeByDaemon(daemonId);
     this.pendingReplays.removeByDaemon(daemonId);
-    this.pendingRelays.removeByDaemon(daemonId, (p) => this.relayError(p.client, p.data.kind, p.data.clientRequestId, "daemon 已移除"));
 
     const workspaces = await this.store.listWorkspacesByDaemon(daemonId);
     const projects = await this.store.listProjectsByDaemon(daemonId);
     let taskIds: TaskId[] = [];
     await this.store.transaction(async (tx) => {
       await tx.revokeDevice(daemonId);
+      await tx.removeSessionCheckpointsByDaemon(daemonId);
       taskIds = await tx.removeTasksByDaemon(daemonId);
       for (const w of workspaces) await tx.removeWorkspace(w.id);
       for (const p of projects) await tx.removeProject(p.id);
@@ -1241,10 +1782,10 @@ export class Hub {
 
   handleClientClose(client: ClientConn): void {
     this.clients.delete(client);
-    for (const s of this.sessions.values()) if (s.holder === client) s.holder = null;
+    for (const s of this.sessions.values()) s.legacyViewers.delete(client);
+    this.deviceRelay.closeByClient(client);
     this.pendingReplays.removeByClient(client);
-    this.pendingOps.removeByClient(client);
-    this.pendingRelays.removeByClient(client);
+    this.removePreparedWaitersByClient(client);
   }
 
   /** 运行时计数（供 /health 暴露） */
@@ -1254,14 +1795,56 @@ export class Hub {
 
   /** 优雅关闭：清定时器、关所有连接 */
   shutdown(): void {
-    this.pendingOps.clear();
     this.pendingReplays.clear();
-    this.pendingRelays.clear();
+    this.deviceRelay.shutdown();
+    this.localControl.shutdown();
+    for (const timer of this.preparedRetryTimers.values()) clearTimeout(timer);
+    this.preparedRetryTimers.clear();
+    for (const waiters of this.preparedWaiters.values()) for (const waiter of waiters) clearTimeout(waiter.timer);
+    this.preparedWaiters.clear();
     for (const p of this.pendingAuthorizations.values()) clearTimeout(p.timer);
     this.pendingAuthorizations.clear();
     for (const d of this.daemons.values()) try { d.ws.close(1001, "server shutting down"); } catch { /* ignore */ }
     for (const c of this.clients) try { c.ws.close(1001, "server shutting down"); } catch { /* ignore */ }
   }
+}
+
+function validOperationResult(operation: PreparedOperationRecord, report: DeviceOperationReport, payload: DeviceEnvelope["payload"]): boolean {
+  if (payload.case === "error") return !report.ok;
+  if (operation.kind === "project.import" && payload.case === "projectValidated") {
+    return payload.value.operationId === operation.operationId && payload.value.ok === report.ok;
+  }
+  if (operation.kind === "worktree.add" && payload.case === "worktreeAdded") {
+    return payload.value.operationId === operation.operationId && payload.value.ok === report.ok;
+  }
+  if (operation.kind === "worktree.remove" && payload.case === "operationAck") {
+    return payload.value.operationId === operation.operationId && payload.value.ok === report.ok;
+  }
+  if (operation.kind === "session.create" && payload.case === "operationAck") {
+    return payload.value.operationId === operation.operationId && payload.value.ok === report.ok;
+  }
+  return false;
+}
+
+function parseOperationMetadata(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function metadataString(metadata: Record<string, unknown>, key: string): string | undefined {
+  const value = metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function validControlId(value: string): boolean {
+  return value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_CONTROL_ID_BYTES && ![...value].some((char) => {
+    const code = char.charCodeAt(0);
+    return code < 32 || code === 127;
+  });
 }
 
 function basename(p: string): string {
