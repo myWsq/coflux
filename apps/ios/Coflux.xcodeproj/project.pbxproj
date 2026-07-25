@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		CF0000000000000000000020 /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000001D /* SwiftProtobuf */; };
 		CF0000000000000000000021 /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000001E /* SwiftProtobuf */; };
+		CF0000000000000000000022 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000001F /* SwiftTerm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -38,6 +39,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CF0000000000000000000020 /* SwiftProtobuf in Frameworks */,
+				CF0000000000000000000022 /* SwiftTerm in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -93,6 +95,7 @@
 			name = Coflux;
 			packageProductDependencies = (
 				CF000000000000000000001D /* SwiftProtobuf */,
+				CF000000000000000000001F /* SwiftTerm */,
 			);
 			productName = Coflux;
 			productReference = CF0000000000000000000004 /* Coflux.app */;
@@ -153,6 +156,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				CF000000000000000000001C /* XCRemoteSwiftPackageReference "swift-protobuf" */,
+				CF0000000000000000000023 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 			);
 			productRefGroup = CF0000000000000000000003 /* Products */;
 			projectDirPath = "";
@@ -388,6 +392,14 @@
 				minimumVersion = 1.37.0;
 			};
 		};
+		CF0000000000000000000023 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.2.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -400,6 +412,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = CF000000000000000000001C /* XCRemoteSwiftPackageReference "swift-protobuf" */;
 			productName = SwiftProtobuf;
+		};
+		CF000000000000000000001F /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CF0000000000000000000023 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
