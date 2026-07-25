@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Folder, FolderOpen, FolderPlus, GitBranch, Monitor, Plus, Trash2, X, Zap } from "lucide-react";
+import { ChevronRight, Cloud, Cog, Folder, FolderOpen, FolderPlus, GitBranch, Info, Monitor, Package, Plus, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
@@ -435,20 +435,31 @@ export function Sidebar(props: SidebarProps) {
                 ? "text-success"
                 : tone === "warning" ? "text-warning" : "text-muted-foreground";
               const rttText = rttMs === undefined ? "" : ` · ${Math.round(rttMs)}ms`;
-              const versionText = [
-                daemon.workerVersion ? `worker ${daemon.workerVersion}` : "",
-                daemon.supervisorVersion ? `supervisor ${daemon.supervisorVersion}` : "",
-              ].filter(Boolean).join(" · ");
               // 挂在整行而非那个 12px 图标上：图标太小，只挂它等于挂了个瞄不准的靶子。
               // 用组件库 Tooltip 而非原生 title：原生要悬停约 1s 才弹，且弹出后内容不再随
               // 心跳更新——延迟读数正是每 15s 会变的东西。
+              // 布局照 Cursor：一行标题说结论（走哪条路 + 多快），下面是图标条目列表铺上下文。
+              const tooltipRows: { icon: LucideIcon; text: string }[] = [
+                { icon: Monitor, text: `${daemon.host} / ${daemon.platform}` },
+                ...(daemon.workerVersion ? [{ icon: Package, text: `worker ${daemon.workerVersion}` }] : []),
+                ...(daemon.supervisorVersion ? [{ icon: Cog, text: `supervisor ${daemon.supervisorVersion}` }] : []),
+                ...(transport?.detail ? [{ icon: Info, text: transport.detail }] : []),
+              ];
               const tooltipContent = (
-                <>
-                  <div>{routeLabel}{rttText}</div>
-                  <div className="text-2xs opacity-70">{daemon.host} / {daemon.platform}</div>
-                  {versionText ? <div className="text-2xs opacity-70">{versionText}</div> : null}
-                  {transport?.detail ? <div className="text-2xs opacity-70">{transport.detail}</div> : null}
-                </>
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-1.5 font-medium text-foreground">
+                    {transport?.mode === "direct" ? <Zap className="size-3 shrink-0" /> : <Cloud className="size-3 shrink-0" />}
+                    {routeLabel}{rttText}
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {tooltipRows.map((row) => (
+                      <span key={row.text} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <row.icon className="size-3 shrink-0 opacity-70" />
+                        <span className="truncate">{row.text}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
               );
               return (
                 <ContextMenu
