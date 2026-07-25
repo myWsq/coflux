@@ -419,11 +419,12 @@ export async function startStack(opts = {}) {
  * send(m)：m 形如 `{ case: "clientAuth", username, password }`（扁平，"case" 选 oneof 分支）。
  * 收到的消息拍平为 `{ case, ...value }`（`waitFor` 按 `payload.case` 匹配）。 */
 export class Client {
+  // options.url 覆盖目标（生产冒烟走 wss://api.coflux.dev/client；黑盒仍是本地临时端口）。
   constructor(port, options = {}) {
     this.log = [];
     this.waiters = [];
     this.listeners = new Set();
-    this.ws = new WebSocket(`ws://127.0.0.1:${port}/client`, { origin: options.origin });
+    this.ws = new WebSocket(options.url ?? `ws://127.0.0.1:${port}/client`, { origin: options.origin });
     this.ready = new Promise((res, rej) => {
       this.ws.onopen = res;
       this.ws.onerror = (e) => rej(new Error("ws error: " + (e.message || "?")));
@@ -454,6 +455,14 @@ export class Client {
   async authSubscribe(username = "admin", password = "admin") {
     await this.ready;
     this.send({ case: "clientAuth", username, password });
+    await this.waitFor((m) => m.case === "authOk", "auth.ok");
+    this.send({ case: "clientSubscribe" });
+    return this.waitFor((m) => m.case === "stateSnapshot", "snapshot");
+  }
+  /** 会话 token 认证（生产冒烟用）。clientVersion=dev 是版本准入的显式放行值，见 plan 033。 */
+  async authTokenSubscribe(clientToken, clientVersion = "dev") {
+    await this.ready;
+    this.send({ case: "clientAuth", clientToken, clientVersion });
     await this.waitFor((m) => m.case === "authOk", "auth.ok");
     this.send({ case: "clientSubscribe" });
     return this.waitFor((m) => m.case === "stateSnapshot", "snapshot");

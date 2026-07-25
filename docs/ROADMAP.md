@@ -23,7 +23,7 @@
 - **worker 自动更新编排**（plan 017，2026-07-20）：daemon 上报 worker/supervisor 版本与架构，server 轮询 stable GitHub Release + manifest 后自动向在线 daemon 投递 worker 升级；失败按 daemon/版本退避封顶。supervisor 仍由 `cofluxd update` 人工升级。
 - **设备识别与管理**（plan 018，2026-07-20）：web 支持设备重命名，server 持久化并广播；在线即时同步、离线重连补偿到 daemon 本地 `settings.json`；设备 tooltip 展示 worker/supervisor 版本。
 - **黑盒集成测试**（`tests/`，跨重构有效）：74 项，覆盖 auth/账号隔离/项目-worktree-task-session、direct/relay、中心真实停机、input/mutation exactly-once、VT oracle、checkpoint、两级 resync、跨 daemon 安全、handoff、热升级与验签对抗、端口转发、文件路径安全、畸形 wire 与优雅关闭。
-- **生产部署**：prod-jp（Debian + Caddy 自动 HTTPS + systemd），DNS/泛证书/DB 见运维记录；`scripts/prod-smoke.mjs` 7 步真协议冒烟。
+- **生产部署**：prod-jp（Debian + Caddy 自动 HTTPS + systemd），DNS/泛证书/DB 见运维记录；`scripts/prod-smoke.mjs` 11 步真协议冒烟（Device opaque relay 路径，不落 local grant）。
 - **本地优先 session authority**（plans 036-042、040-041，2026-07-25）：supervisor/sessiond 持 PTY、VT/history、holder、sequence 与 tombstone；web cached direct 走 `127.0.0.1:8788`，失败自动 opaque relay；中心停机后已加载/配对页面仍可 list/attach/input/resize/stop；input/op exactly-once、output gap snapshot 自愈。旧 server xterm live mirror、raw replay、viewer/holder、全局 pause 与 server-routed exec/fs 已删除。mobile 仅做 relay-only 内部迁移，无新功能。
 - **独立 VT 与性能发布证据**（2026-07-25）：xterm 6 双 oracle + 脱敏 Claude/Codex/Vim fixtures；Apple M1 Pro debug、2000 行 history、20 warmup + 100 samples：echo p95 0.589ms，attach+xterm p95 64.820ms，direct timed path 中心 relay frame=0。保证/非保证 fidelity 见 [architecture.md](architecture.md#6-attach-与现场恢复)。
 - **server 侧终端镜像（历史，已取代）**（2026-07-19，69e132a/d8b3237）：曾用 `@xterm/headless` 实时消化 raw PTY 解决 attach 延迟；该方案让中心进入 terminal hot path，已由 sessiond snapshot + 有界派生 checkpoint 替代，server xterm 依赖和旧协议已删除。
