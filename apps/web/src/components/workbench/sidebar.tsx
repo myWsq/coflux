@@ -424,7 +424,10 @@ export function Sidebar(props: SidebarProps) {
                               ? "bg-primary animate-pulse"
                               : transport?.mode === "offline"
                                 ? "bg-destructive/70"
-                                : daemon.online ? "bg-success/60" : "bg-muted-foreground/40",
+                                // 未建 Device transport 时用中性灰而非绿：绿只代表 direct、黄代表
+                              // relay，让色标单调（direct > relay > 未连 > 离线）。半透明绿在 6px
+                              // 圆点上与实心绿难辨，会让"根本没连"看起来比"已连但走 relay"更健康。
+                              : daemon.online ? "bg-muted-foreground/70" : "bg-muted-foreground/40",
                       )}
                       title={transport?.detail ?? routeLabel}
                     />
