@@ -308,10 +308,18 @@ message DevicePtyInput {
   string request_id = 1;
   string session_id = 2;
   uint64 holder_epoch = 3;
-  // 从 1 开始且在同一 logical client/session 单调；重投相同 seq 返回原结果且不得重复写 PTY，
-  // 较小 seq 拒绝。
+  // 从 1 开始且在同一 logical client/session 严格连续：authority 只应用当前累计游标 N 的
+  // N+1，gap 不得越级写 PTY。input_seq <= N 的重投不再执行，并返回当前累计 ACK；等于 N
+  // 且 payload 不同可报告 collision。request_id 只关联 error，不承担提交确认。
   uint64 input_seq = 4;
   bytes data = 5;
+}
+
+// sessiond 已成功写入存活 PTY 的连续输入前缀。logical client 由已认证 channel 隐式确定；
+// ACK 丢失后重投任一已提交 input，authority 必须再次返回当前累计游标。
+message DevicePtyInputAck {
+  string session_id = 1;
+  uint64 applied_through_seq = 2;
 }
 
 message DevicePtyResize {
@@ -528,6 +536,7 @@ message DeviceEnvelope {
     DeviceOperationAck operation_ack = 33;
     DeviceSessionSnapshotRequest session_snapshot_request = 34;
     DeviceSessionSnapshot session_snapshot = 35;
+    DevicePtyInputAck pty_input_ack = 36;
     DeviceProjectValidate project_validate = 40;
     DeviceProjectValidated project_validated = 41;
     DeviceWorktreeAdd worktree_add = 42;

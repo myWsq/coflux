@@ -957,11 +957,28 @@ public struct Coflux_V1_DevicePtyInput: Sendable {
 
   public var holderEpoch: UInt64 = 0
 
-  /// 从 1 开始且在同一 logical client/session 单调；重投相同 seq 返回原结果且不得重复写 PTY，
-  /// 较小 seq 拒绝。
+  /// 从 1 开始且在同一 logical client/session 严格连续：authority 只应用当前累计游标 N 的
+  /// N+1，gap 不得越级写 PTY。input_seq <= N 的重投不再执行，并返回当前累计 ACK；等于 N
+  /// 且 payload 不同可报告 collision。request_id 只关联 error，不承担提交确认。
   public var inputSeq: UInt64 = 0
 
   public var data: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// sessiond 已成功写入存活 PTY 的连续输入前缀。logical client 由已认证 channel 隐式确定；
+/// ACK 丢失后重投任一已提交 input，authority 必须再次返回当前累计游标。
+public struct Coflux_V1_DevicePtyInputAck: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var appliedThroughSeq: UInt64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1742,6 +1759,14 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     set {payload = .sessionSnapshot(newValue)}
   }
 
+  public var ptyInputAck: Coflux_V1_DevicePtyInputAck {
+    get {
+      if case .ptyInputAck(let v)? = payload {return v}
+      return Coflux_V1_DevicePtyInputAck()
+    }
+    set {payload = .ptyInputAck(newValue)}
+  }
+
   public var projectValidate: Coflux_V1_DeviceProjectValidate {
     get {
       if case .projectValidate(let v)? = payload {return v}
@@ -1892,6 +1917,7 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     case operationAck(Coflux_V1_DeviceOperationAck)
     case sessionSnapshotRequest(Coflux_V1_DeviceSessionSnapshotRequest)
     case sessionSnapshot(Coflux_V1_DeviceSessionSnapshot)
+    case ptyInputAck(Coflux_V1_DevicePtyInputAck)
     case projectValidate(Coflux_V1_DeviceProjectValidate)
     case projectValidated(Coflux_V1_DeviceProjectValidated)
     case worktreeAdd(Coflux_V1_DeviceWorktreeAdd)
@@ -3488,6 +3514,41 @@ extension Coflux_V1_DevicePtyInput: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
+extension Coflux_V1_DevicePtyInputAck: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DevicePtyInputAck"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}applied_through_seq\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.appliedThroughSeq) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.appliedThroughSeq != 0 {
+      try visitor.visitSingularUInt64Field(value: self.appliedThroughSeq, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DevicePtyInputAck, rhs: Coflux_V1_DevicePtyInputAck) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.appliedThroughSeq != rhs.appliedThroughSeq {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_DevicePtyResize: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DevicePtyResize"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}holder_epoch\0\u{3}resize_seq\0\u{1}cols\0\u{1}rows\0")
@@ -4606,7 +4667,7 @@ extension Coflux_V1_SessionCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceEnvelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{4}\u{5}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{2}\u{6}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{2}\u{6}error\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4861,6 +4922,19 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .sessionSnapshot(v)
+        }
+      }()
+      case 36: try {
+        var v: Coflux_V1_DevicePtyInputAck?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .ptyInputAck(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .ptyInputAck(v)
         }
       }()
       case 40: try {
@@ -5163,6 +5237,10 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .sessionSnapshot?: try {
       guard case .sessionSnapshot(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 35)
+    }()
+    case .ptyInputAck?: try {
+      guard case .ptyInputAck(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 36)
     }()
     case .projectValidate?: try {
       guard case .projectValidate(let v)? = self.payload else { preconditionFailure() }
