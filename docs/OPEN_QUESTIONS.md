@@ -9,13 +9,13 @@
 | # | 决策 | 理由 | 备选 |
 |---|------|------|------|
 | A1 | ~~持久化用内置 `node:sqlite`~~ **已被 plan 002 取代：Supabase Postgres**（2026-07） | SaaS 化后需共享库 + 托管备份 | ——|
-| A2 | scrollback 移到 **daemon 侧**（每会话 200k 字符上限） | 与"daemon 持有会话生命周期"一致，服务器重启不丢 | 服务器侧缓冲（已废弃） |
-| A3 | 重连协议 `daemon.resync { sessionId, taskId }[]` | 即使服务器重启也能把存活 PTY 重挂回 task；已 e2e 验证 | 仅 sessionId（需服务器记忆映射） |
+| A2 | PTY/VT/history/holder/sequence 统一在 **supervisor/sessiond** | client、worker、中心断开都不影响会话；attach 直接取当前 snapshot | server live mirror（已删除） |
+| A3 | daemon resync + 完整 Device catalog/tombstone 对账 | 服务器重启可重挂已知 task，unknown live session 保留为 orphan，不伪造 exit | 仅 sessionId（无法可靠收敛生命周期） |
 | A4 | 任务状态机 `idle / running / exited`；对 `exited` 的 task 再 `task.start` = **重跑**（起新 session） | 简单够用 | 显式 restart 语义 / 保留多次运行历史 |
-| A5 | PTY 在线协议传**原始 JSON 字符串**（非二进制/base64） | 实现简单、易调试 | 二进制分帧（见 B6） |
-| A6 | Web 用 `window.prompt` 创建工作区/任务 | 先把逻辑跑通 | 正式表单 UI |
-| A7 | 鉴权仍是**单一共享 token**（daemon 与 client 同一个） | MVP 单用户够用 | 见 B1 |
-| A8 | 切换任务时 client 端按 `sessionId` 过滤输出，不向服务器发 detach | 协议更简单；旧 session 仍在服务器侧推送但被前端丢弃 | 加 detach 消息精确退订 |
+| A5 | PTY 与普通 RPC 统一走端到端 **DeviceEnvelope** | direct/relay 共用语义，中心不解析 raw terminal | 中心 protobuf PTY（已删除并 reserved） |
+| A6 | Web 已迁正式工作台与导入/任务交互 | desktop web 是默认迭代对象 | `window.prompt` 原型（已删除） |
+| A7 | daemon 每设备凭证、client 账号会话 token | daemonId 由服务器绑定，账号隔离 | 单一共享 token（已删除） |
+| A8 | sessiond 单 holder + 显式 takeover | detach、epoch、sequence 在唯一 authority 裁决 | server viewer/holder（已删除） |
 
 ---
 
@@ -42,18 +42,19 @@
 ### B3. daemon 离线时，运行中任务怎么处理？ —— ✅ 已定
 **决策（2026-06-21）**：接受现状。daemon 进程整死 → PTY 没了，恢复上限是"重新拉起 Agent"而非"恢复同一进程"；网络掉线进程仍活 → 重连 resync 恢复（已验证）。无需额外落盘 PTY 状态。
 
-### B4. task 与 terminal 的基数
-现在：一个 task = 一个 PTY。
-- 你想要"一个工作区开多个并列终端"吗？还是 task=单终端就够？
-- 这影响数据模型（task 下要不要挂多个 session）。
+### B4. task 与 terminal 的基数 —— ✅ 已定
+一个 workspace 可有多个 task/终端 Tab；一个 task 的一次运行对应一个 live session，退出后重跑会创建
+新 session。desktop web 已落地，mobile 保持冻结形态。
 
 ### B5. Agent 集成（V2）
 通路已通，下一步接 Agent 时：
 - 起任务时**自动拉起** `claude`/`codex` 并喂初始 prompt（人再接管），还是保持"只开 shell、人手动起"？
 - 要不要解析 Agent 的结构化输出（headless 模式）做富 UI？（这会引入"半 PTY 半结构化"的混合通道。）
 
-### B6. 数据面是否需要二进制优化 —— ✅ 已完成（2026-06）
-`pty.output`/`pty.input`/`pty.replay` 已改二进制帧（`packages/protocol` 的 `encodeFrame`/`decodeFrame`），控制面保持 JSON。见 ROADMAP 条目 1。
+### B6. 数据面是否需要二进制优化 —— ✅ 已完成并演进为本地优先（2026-07）
+terminal、holder、input ACK 与普通 RPC 使用 direct/relay 共用的 protobuf DeviceEnvelope。中心 relay 只转发
+opaque bytes；旧 `pty.output/input/replay` 与 server-routed RPC 已删除并保留字段编号。见
+[architecture.md](architecture.md)。
 
 ### B7. 中心服务器部署形态 —— ✅ 已定（2026-07）
 - 单实例自托管（prod-jp），存储已迁 Supabase Postgres（plan 002），身份层 Supabase Auth 多账号（plan 001）。
