@@ -36,5 +36,15 @@ struct LoginView: View {
             Spacer()
         }
         .padding(.horizontal, 32)
+        .task {
+            #if DEBUG
+            // 无头验收/开发循环便利：经 SIMCTL_CHILD_* 注入即自动登录，仅 Debug 构建生效
+            let env = ProcessInfo.processInfo.environment
+            if let user = env["COFLUX_DEBUG_USERNAME"], let pass = env["COFLUX_DEBUG_PASSWORD"],
+               client.authState == .needLogin {
+                client.login(username: user, password: pass)
+            }
+            #endif
+        }
     }
 }
