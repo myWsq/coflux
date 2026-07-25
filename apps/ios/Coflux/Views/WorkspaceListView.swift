@@ -24,7 +24,14 @@ struct WorkspaceListView: View {
                         Section {
                             let members = client.workspaces.filter { $0.projectID == project.id }
                             ForEach(members, id: \.id) { workspace in
-                                workspaceRow(workspace)
+                                NavigationLink {
+                                    TaskListView(client: client, workspace: workspace)
+                                } label: {
+                                    workspaceRow(workspace)
+                                }
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
+                                .listRowBackground(Color.black)
+                                .listRowSeparatorTint(Color(white: 0.16))
                             }
                         } header: {
                             projectHeader(project)
@@ -136,14 +143,7 @@ struct WorkspaceListView: View {
                 }
                 .foregroundStyle(.green)
             }
-            Image(systemName: "chevron.right")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(Color(white: 0.35))
         }
         .padding(.vertical, 12)
-        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-        .listRowBackground(Color.black)
-        .listRowSeparatorTint(Color(white: 0.16))
-        .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
     }
 }
