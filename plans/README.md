@@ -38,7 +38,7 @@
 | 033 | [worker 连接韧性（半死连接自愈）+ 连接态可观测](033-worker-connection-resilience.md)（与上行撞号，两分支并行开发所致） | DONE (b8261fd) | none |
 | 034 | [enrollKey 全链路删除——浏览器授权成为唯一登记路径](034-remove-enroll-key.md) | DONE (fc5db48) | 033 |
 | 035 | [cofluxd 命令面重梳 + doctor 连通性自检](035-cofluxd-command-surface.md) | DONE (7f97423) | 034 |
-| 036 | [本地优先 session/device 协议契约](036-local-first-session-device-contract.md) | TODO | none |
+| 036 | [本地优先 session/device 协议契约](036-local-first-session-device-contract.md) | DONE (af5ae18) | none |
 | 037 | [supervisor 演进为本机 sessiond](037-supervisor-sessiond-authority.md) | TODO | 036 |
 | 038 | [worker loopback gateway + 双 transport](038-worker-local-gateway.md) | TODO | 036 |
 | 039 | [server 收敛为控制面 + relay](039-server-control-plane-relay.md) | TODO | 036 |
