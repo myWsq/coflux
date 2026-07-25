@@ -465,6 +465,18 @@ message DevicePortsResult {
   repeated SessionPorts sessions = 2;
 }
 
+// Device 通道心跳：client 定期发 Ping、daemon 原样回 Pong，client 据往返算 RTT。
+// 走既有 request/response 配对（request_id），daemon 侧是纯 echo——不读任何状态、不做任何
+// 副作用，故它的往返时间接近纯链路延迟。同时补上 device 通道此前完全没有的探活：
+// 主控连接有 idle ping（见 worker/main.rs），device 通道此前只能靠用户操作超时才发现半死。
+message DevicePing {
+  string request_id = 1;
+}
+
+message DevicePong {
+  string request_id = 1;
+}
+
 message DeviceError {
   optional string request_id = 1;
   string code = 2;
@@ -555,6 +567,8 @@ message DeviceEnvelope {
     FsWriteResult fs_write_result = 52;
     DevicePortsRequest ports_request = 53;
     DevicePortsResult ports_result = 54;
+    DevicePing ping = 55;
+    DevicePong pong = 56;
     DeviceError error = 60;
   }
 }

@@ -200,5 +200,10 @@ test("普通 Device RPC 在 direct/relay 等价，direct 热路径不产生中�
   assert.equal(relayMutation.ok, true);
   assert.equal(readFileSync(exactlyOncePath, "utf8"), "O", "同 operationId 跨 direct/relay 重投只执行一次");
 
+  // 心跳跨语言 wire 一致性：TS 侧 protobuf-es 编的 ping，真 Rust worker（prost）必须解得开
+  // 并原样回 pong。UI 的延迟读数全靠这一发往返，两侧生成器只要字段号对不上就静默失效。
+  const pong = await request(device, "ping", "pong", {});
+  assert.ok(pong.requestId, "worker 必须回带同一 requestId 的 pong");
+
   device.close();
 });

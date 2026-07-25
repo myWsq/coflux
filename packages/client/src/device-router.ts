@@ -46,6 +46,11 @@ const RECOVER_MAX_MS = 5_000;
 const DIRECT_HEDGE_MS = 200;
 const INPUT_RETRY_MS = 500;
 const CATALOG_INTERVAL_MS = 3_000;
+/** device 心跳周期：够密到 UI 上的延迟读数不显陈旧，够疏到对空闲连接几乎无成本
+ * （一来一回两个空 envelope）。同时兼作 device 通道的探活——此前它完全没有。 */
+const HEARTBEAT_INTERVAL_MS = 15_000;
+/** 心跳超时远短于普通 RPC 的 20s：心跳测的是链路好坏，等满 20s 才判失败毫无意义。 */
+const HEARTBEAT_TIMEOUT_MS = 5_000;
 const LEASE_EXPIRY_MARGIN_MS = 2_000;
 const MAX_RETAINED_INPUTS = 256;
 const MAX_RETAINED_INPUT_BYTES = 1024 * 1024;
@@ -60,6 +65,9 @@ export interface DeviceTransportState {
   scopes: DeviceScope[];
   detail: string;
   updatedAt: number;
+  /** 最近一次 device 心跳往返（毫秒）。仅在 transport 活着时有值；心跳失败或尚未测得为
+   * undefined。daemon 侧 ping 是纯 echo，故此值近似纯链路延迟，可直接用于 UI 分档。 */
+  rttMs?: number;
 }
 
 export interface DeviceInputState {
@@ -258,6 +266,13 @@ interface DeviceRoute {
   directRetryTimer?: TimerHandle;
   directRetryAttempts: number;
   catalogTimer?: TimerHandle;
+  heartbeatTimer?: TimerHandle;
+  /** 在途的那一发心跳；只保留最后一发，迟到的旧 pong 一律丢弃。 */
+  pendingPing?: { requestId: string; startedAt: number };
+  /** 最近一次心跳往返；随 publish 一并对外暴露，见 DeviceTransportState.rttMs。 */
+  rttMs?: number;
+  /** publish 过的最后一组 (mode, detail)：心跳只更新 rtt，需要照原样重发一次状态。 */
+  lastPublished?: { mode: DeviceTransportMode; detail: string };
   retainCount: number;
   transientDemand: number;
 }
@@ -439,12 +454,17 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
   function publish(route: DeviceRoute, mode: DeviceTransportMode, detail: string, channel = route.sessionLane.active): void {
+    route.lastPublished = { mode, detail };
+    // transport 不在（idle/offline）时 rtt 必须清掉：留着上一次的读数会让一条已断的链路
+    // 在 UI 上继续显示"12ms"，比没有读数更糟。
+    if (mode === "idle" || mode === "offline") route.rttMs = undefined;
     options.onTransportState(route.daemonId, {
       mode,
       generation: Number(channel?.generation ?? generations.get(route.daemonId) ?? 0n),
       scopes: channel ? [...channel.scopes].sort((left, right) => left - right) : [],
       detail,
       updatedAt: clock.now(),
+      rttMs: route.rttMs,
     });
   }
 
@@ -1085,6 +1105,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     flushLane(route, "session");
     sendCatalogRequest(route);
     maintainCatalogTimer(route);
+    maintainHeartbeatTimer(route);
     if (previous && previous !== channel) previous.close();
     if (channel.kind === "relay") scheduleDirectRetry(route);
     else {
@@ -1305,6 +1326,15 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       case "portsResult":
         options.onPorts(route.daemonId, payload.value);
         break;
+      case "pong": {
+        // 心跳不走 pendingRequests（那条路带 demand 语义，会把按需拨号的连接钉住不放），
+        // 故在这里自行配对：只认最后发出的那一发，迟到的旧 pong 直接丢。
+        if (route.pendingPing?.requestId !== payload.value.requestId) break;
+        route.rttMs = Math.max(0, clock.now() - route.pendingPing.startedAt);
+        route.pendingPing = undefined;
+        if (route.lastPublished) publish(route, route.lastPublished.mode, route.lastPublished.detail);
+        break;
+      }
       case "projectValidated":
       case "worktreeAdded":
       case "operationAck": {
@@ -1338,6 +1368,13 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     message: string,
   ): boolean {
     if (requestId) {
+      // 比心跳早的 daemon 不认识 ping，会回 unsupported_payload。这是预期内的降级——没有
+      // 读数就是没有读数，绝不能顺着默认路径落到 options.onError 去弹给用户：那会变成每个
+      // 心跳周期骚扰一次，且骚扰的恰恰是最该被安静降级的旧设备。
+      if (route.pendingPing?.requestId === requestId) {
+        route.pendingPing = undefined;
+        return true;
+      }
       for (const session of route.sessions.values()) {
         if (session.attachRequestId === requestId) {
           session.attachGeneration = undefined;
@@ -1553,6 +1590,42 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       return;
     }
     route.catalogTimer ??= clock.setInterval(() => sendCatalogRequest(route), CATALOG_INTERVAL_MS);
+  }
+
+  /** 一次心跳：纯 echo 的 ping/pong 往返，用时即 rtt。刻意不走 request()——那条路会登记
+   * pendingRequests，而 pendingRequests 非空即构成 lane demand，会把本该按需释放的连接
+   * 永久钉住（plan 043 的按需拨号就此失效）。这里照 sendCatalogRequest 的样子直接发。
+   * 发送失败不在这里判死：那是既有恢复逻辑的职责，心跳只负责让读数别撒谎。 */
+  function sendHeartbeat(route: DeviceRoute): void {
+    // 走 session lane：它是常在的那条（elevated 只在有 RPC/生命周期操作时按需建），
+    // 也正是终端数据实际走的路——侧栏那个读数要回答的就是"我用这台设备卡不卡"。
+    const channel = route.sessionLane.active;
+    if (!channelCovers(channel, DeviceScope.SESSION_READ)) return;
+    // 上一发还没回来就又到点了：链路已经慢过一个心跳周期，抹掉读数而不是留着旧的。
+    if (route.pendingPing) {
+      route.pendingPing = undefined;
+      route.rttMs = undefined;
+      if (route.lastPublished) publish(route, route.lastPublished.mode, route.lastPublished.detail);
+    }
+    const requestId = randomUUID();
+    if (!sendOn(channel, normalizePayload({ case: "ping", value: { requestId } }))) return;
+    route.pendingPing = { requestId, startedAt: clock.now() };
+  }
+
+  /** 心跳只在 transport 真正活着时转：按需拨号下 idle 的设备根本没有连接，无从 ping，
+   * 也不该为了一个读数把它拨起来（那等于废掉 plan 043 的按需语义）。 */
+  function maintainHeartbeatTimer(route: DeviceRoute): void {
+    if (!route.sessionLane.active) {
+      if (route.heartbeatTimer !== undefined) clock.clearInterval(route.heartbeatTimer);
+      route.heartbeatTimer = undefined;
+      route.pendingPing = undefined;
+      route.rttMs = undefined;
+      return;
+    }
+    if (route.heartbeatTimer !== undefined) return;
+    // 立刻打一次再进周期：否则建连后头 15s 拿不到读数，UI 会先灰一下再变色。
+    sendHeartbeat(route);
+    route.heartbeatTimer = clock.setInterval(() => sendHeartbeat(route), HEARTBEAT_INTERVAL_MS);
   }
 
   function scheduleDirectRetry(route: DeviceRoute, immediate = false): void {
@@ -2178,6 +2251,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       maintainCatalogTimer(route);
     }
     if (!needsElevated) closeLane(route, route.elevatedLane, "elevated lane 已释放");
+    maintainHeartbeatTimer(route);
     if (!needsSession && !needsElevated) {
       const pairController = route.pairController;
       pairController?.abort();
@@ -2192,8 +2266,12 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     route.epoch += 1;
     if (route.directRetryTimer !== undefined) clock.clearTimeout(route.directRetryTimer);
     if (route.catalogTimer !== undefined) clock.clearInterval(route.catalogTimer);
+    if (route.heartbeatTimer !== undefined) clock.clearInterval(route.heartbeatTimer);
     route.directRetryTimer = undefined;
     route.catalogTimer = undefined;
+    route.heartbeatTimer = undefined;
+    route.pendingPing = undefined;
+    route.rttMs = undefined;
     route.directProbeController?.abort();
     route.directProbeController = undefined;
     route.directProbe = undefined;
