@@ -446,12 +446,12 @@ export function Sidebar(props: SidebarProps) {
                 ...(transport?.detail ? [{ icon: Info, text: transport.detail }] : []),
               ];
               const tooltipContent = (
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-1.5 font-medium text-foreground">
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-1.5 font-medium">
                     {transport?.mode === "direct" ? <Zap className="size-3 shrink-0" /> : <Cloud className="size-3 shrink-0" />}
                     {routeLabel}{rttText}
                   </div>
-                  <div className="flex flex-col gap-1">
+                  <div className="flex flex-col gap-0.5">
                     {tooltipRows.map((row) => (
                       <span key={row.text} className="flex items-center gap-1.5 text-xs text-muted-foreground">
                         <row.icon className="size-3 shrink-0 opacity-70" />

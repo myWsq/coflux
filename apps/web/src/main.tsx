@@ -16,10 +16,19 @@ const cofluxTheme = defineTheme({
     tooltip: {
       base: {
         backgroundColor: "var(--color-background-popover)",
+        // 前景必须跟着背景一起改：默认 tooltip 在 dark 下是反色（浅底深字），只换底色
+        // 会留下深底深字看不清——尤其那些没有自带文字类的 tooltip。
+        color: "var(--color-text-primary)",
+        // astryx 的 --font-size-base 是 14px，比本项目正文（--coflux-text-base 13px）还大
+        // 一号，tooltip 作为附注不该比正文更响；退到 12px。
+        fontSize: "var(--font-size-sm)",
         borderRadius: "var(--radius-element)",
-        border: "1px solid var(--color-overlay-pressed)",
+        // 分开写而非 border 简写：简写在样式合并里容易被整体覆盖，拆开才保得住这 1px。
+        borderWidth: "1px",
+        borderStyle: "solid",
+        borderColor: "var(--color-overlay-pressed)",
         boxShadow: "var(--shadow-high)",
-        padding: "8px 10px",
+        padding: "6px 8px",
         textAlign: "start",
         maxWidth: "300px",
       },
