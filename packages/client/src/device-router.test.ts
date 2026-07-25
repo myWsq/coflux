@@ -930,3 +930,60 @@ test("旧 daemon 对 ping 回 unsupported_payload 时静默降级，不弹错误
   release();
   h.router.destroy();
 });
+
+test("measureOnly 持有只建 relay：不读 grant、不试 direct、不配对、不轮询 catalog", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const release = h.router.retainDevice("daemon-1", { measureOnly: true });
+  await flush();
+
+  // 本机有 cached grant（harness 默认给了），完整持有本会从 t=0 抢 direct；measureOnly 必须
+  // 跳过整条本地路径——direct 走 loopback，只有与浏览器同机的设备可能命中，为侧栏一个读数
+  // 去敲它，对其余设备就是每 5s 一次注定失败的重试。
+  assert.equal(h.adapter.opens.filter((call) => call.kind === "direct").length, 0, "不该尝试 direct");
+  assert.equal(h.adapter.pairCalls, 0, "不该发起本机配对");
+  const relay = latestOpen(h.adapter, "relay");
+  h.adapter.resolve(relay);
+  await flush();
+
+  // 该有的还得有：心跳照发，否则侧栏拿不到读数，这层持有就没意义了。
+  assert.ok(payloads(relay).some((payload) => payload?.case === "ping"), "measureOnly 仍须发心跳");
+  // 不该有的：catalog 轮询是给真正在用这台设备的人的。
+  assert.equal(payloads(relay).filter((payload) => payload?.case === "sessionCatalogRequest").length, 0, "不该轮询 catalog");
+
+  h.clock.advance(30_000);
+  await flush();
+  assert.equal(h.adapter.opens.filter((call) => call.kind === "direct").length, 0, "30s 内也不该冒出 direct 重试");
+  assert.equal(h.adapter.pairCalls, 0, "30s 内也不该冒出配对");
+
+  release();
+  h.router.destroy();
+});
+
+test("measureOnly 之上叠加完整持有会立即提升 direct，且释放完整持有后连接仍在", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const releaseMeasure = h.router.retainDevice("daemon-1", { measureOnly: true });
+  await flush();
+  h.adapter.resolve(latestOpen(h.adapter, "relay"));
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "relay");
+
+  // 进项目：此时 lane 已是测量期建好的 relay，它当时刻意跳过了 direct。不补这一下，
+  // 本机设备会一直用着 relay，永远升不回 direct。
+  const releaseFull = h.router.retainDevice("daemon-1");
+  h.clock.advance(1); // immediate 提升排的是 delay=0 的 timer，FakeClock 要走一步才触发
+  await flush();
+  const direct = latestOpen(h.adapter, "direct");
+  assert.ok(direct, "完整持有必须立即触发 direct 提升");
+  h.adapter.resolve(direct);
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "direct");
+
+  // 退出项目：measureOnly 还在，连接不该被拆掉（侧栏还要读数）。
+  releaseFull();
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "direct", "measureOnly 仍持有时不该掉线");
+  releaseMeasure();
+  h.router.destroy();
+});

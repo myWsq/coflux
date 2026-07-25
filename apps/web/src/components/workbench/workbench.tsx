@@ -89,6 +89,18 @@ export function Workbench({ client }: { client: CofluxClient }) {
     return client.retainDevice(selectedDaemonId);
   }, [client, selectedDaemonId]);
 
+  // 连接从进入页面就开始，而不是等进某个项目：侧栏要对每台在线设备显示延迟，就得有连接。
+  // measureOnly = 一条 relay lane + 心跳，不碰 loopback（direct 只对与浏览器同机的那台设备
+  // 有意义，为一个读数去敲它，对其余设备是每 5s 一次注定失败的重试）。顺带把连接焐热，
+  // 之后真进某台设备时不用再从 rendezvous 开始等。
+  // 依赖收敛成排序后的 id 串：daemons 每次广播都是新数组，直接依赖它会反复 retain/release。
+  const onlineDaemonIds = daemons.filter((daemon) => daemon.online).map((daemon) => daemon.daemonId).sort().join(",");
+  useEffect(() => {
+    if (!onlineDaemonIds) return;
+    const releases = onlineDaemonIds.split(",").map((id) => client.retainDevice(id, { measureOnly: true }));
+    return () => releases.forEach((release) => release());
+  }, [client, onlineDaemonIds]);
+
   function selectWorkspace(workspaceId: string) {
     setSelectedWorkspaceId(workspaceId);
     localStorage.setItem(WORKSPACE_KEY, workspaceId);

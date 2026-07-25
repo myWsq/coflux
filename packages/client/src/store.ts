@@ -608,10 +608,11 @@ export function createCofluxClient(options: CofluxClientOptions) {
     pendingTaskRemovals.clear();
   }
 
-  function retainDevice(daemonId: string): () => void {
-    const release = deviceRouter.retainDevice(daemonId);
+  function retainDevice(daemonId: string, options?: { measureOnly?: boolean }): () => void {
+    const release = deviceRouter.retainDevice(daemonId, options);
     // ports 是独立 elevated RPC；失败不会触碰健康 terminal lane，URL 仍由中心门禁事实更新。
-    void deviceRouter.requestPorts(daemonId).catch(() => undefined);
+    // 只测量时不取：那会连带把 elevated lane 拉起来（还要 lease），而侧栏那个读数用不上端口清单。
+    if (options?.measureOnly !== true) void deviceRouter.requestPorts(daemonId).catch(() => undefined);
     return release;
   }
 
