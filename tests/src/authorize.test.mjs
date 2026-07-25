@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startServer, rawDaemon, mkRepo, spawnDaemon, killTree, tokenFromUrl } from "./harness.mjs";
+import { openRelayDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8830;
 // startServer 不像 startStack 会带默认的 password；local 认证模式下这是必需的秘密类配置
@@ -35,7 +36,13 @@ test("授权成功端到端：匿名 daemon 拿链接 → client 授权 → daem
   const home = mkdtempSync(join(tmpdir(), "coflux-test-authhome-"));
   const deviceName = "auth-e2e-dev";
   // 空 home（无 settings.json/credentials.json）：daemon 无凭证，唯一路径就是发 enrollRequest。
-  const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${PORT}/daemon`, COFLUX_HOME: home, COFLUX_DEVICE_NAME: deviceName };
+  const daemonEnv = {
+    ...process.env,
+    COFLUX_SERVER: `ws://127.0.0.1:${PORT}/daemon`,
+    COFLUX_HOME: home,
+    COFLUX_DEVICE_NAME: deviceName,
+    COFLUX_LOCAL_GATEWAY_PORT: "0",
+  };
   const daemonProc = spawnDaemon(daemonEnv);
 
   const repo = mkRepo();
@@ -72,22 +79,27 @@ test("授权成功端到端：匿名 daemon 拿链接 → client 授权 → daem
     const upd = await c.waitFor((m) => m.case === "daemonUpdated" && m.daemon.name === deviceName, "daemon.updated", 15000);
     assert.ok(upd.daemon.online, "授权后 daemon 在线");
     const daemonId = upd.daemon.daemonId;
+    const device = await openRelayDevice({ ...server, daemonId });
+    const control = device.control;
 
     // 授权后即是一台正常设备：能真正导入项目、起任务、走 PTY
-    c.send({ case: "projectImport", daemonId, path: repo.dir });
-    const main = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main ws");
-    c.send({ case: "taskCreate", workspaceId: main.workspace.id, title: "authz-task" });
-    const idle = await c.waitFor((m) => m.case === "taskUpdated" && m.task.title === "authz-task", "idle");
-    c.send({ case: "taskStart", taskId: idle.task.id, cols: 80, rows: 24 });
-    const run = await c.waitFor((m) => m.case === "taskUpdated" && m.task.id === idle.task.id && m.task.status === TaskStatus.RUNNING, "running");
+    control.send({ case: "projectImport", daemonId, path: repo.dir });
+    const main = await control.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main ws");
+    control.send({ case: "taskCreate", workspaceId: main.workspace.id, title: "authz-task" });
+    const idle = await control.waitFor((m) => m.case === "taskUpdated" && m.task.title === "authz-task", "idle");
+    control.send({ case: "taskStart", taskId: idle.task.id, cols: 80, rows: 24 });
+    const run = await control.waitFor((m) => m.case === "taskUpdated" && m.task.id === idle.task.id && m.task.status === TaskStatus.RUNNING, "running");
     assert.ok(run.task.sessionId);
-    c.send({ case: "ptyInput", sessionId: run.task.sessionId, data: "echo MARK_$((6*7))\r" });
-    await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("MARK_42"), "PTY 回流");
+    await device.attach(run.task.sessionId);
+    const from = device.mark();
+    await device.input(run.task.sessionId, "echo MARK_$((6*7))\r");
+    await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("MARK_42"), "PTY 回流", 10000, from);
 
     // credentials.json 落盘（daemon 端持久化，重启可重连而非再次授权）
     assert.ok(existsSync(join(home, "credentials.json")), "授权后 daemon 落地 credentials.json");
     assert.ok(!existsSync(pendingPath), "授权完成后 pending-auth.json 应被清理");
 
+    device.close();
     c.close();
   } finally {
     killTree(daemonProc);

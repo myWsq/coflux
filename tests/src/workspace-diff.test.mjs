@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startStack, mkRepo } from "./harness.mjs";
+import { openRelayDevice } from "./device-harness.mjs";
 
 const PORT = 8836;
 let stack;
@@ -29,8 +30,8 @@ test("工作区 diff 统计：untracked 计入 additions，commit 后累积数�
   writeFileSync(join(repo.dir, "a.txt"), "line1\n");
   commit(repo.dir, "add a");
 
-  const c = stack.makeClient();
-  await c.authSubscribe();
+  const device = await openRelayDevice(stack);
+  const c = device.control;
 
   c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const proj = await c.waitFor((m) => m.case === "projectCreated", "project.created");
@@ -70,5 +71,5 @@ test("工作区 diff 统计：untracked 计入 additions，commit 后累积数�
   );
   assert.equal(afterCommit.workspace.deletions, 0);
 
-  c.close();
+  device.close();
 });

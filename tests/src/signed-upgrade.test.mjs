@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
+import { openRelayDevice, utf8 } from "./device-harness.mjs";
 
 // 远程下载 + ed25519 验签的验收。头等用例是负向：被篡改 / 签名不符的产物必须被拒、保持当前版本。
 // 隔离：临时 127.0.0.1 HTTP server 服务产物（零外网）；临时 ed25519，公钥经 env 注入 supervisor；
@@ -75,8 +76,8 @@ async function waitNewWorker(prevPid) {
 async function runTaskWithMarker(marker) {
   const repo = mkRepo();
   repos.push(repo);
-  const a = stack.makeClient();
-  await a.authSubscribe();
+  const device = await openRelayDevice(stack);
+  const a = device.control;
   a.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await a.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
   a.send({ case: "taskCreate", workspaceId: main.workspace.id, title: "su" });
@@ -85,19 +86,19 @@ async function runTaskWithMarker(marker) {
   a.send({ case: "taskStart", taskId, cols: 80, rows: 24 });
   const run = await a.waitFor((m) => m.case === "taskUpdated" && m.task.id === taskId && m.task.status === TaskStatus.RUNNING, "run");
   const sessionId = run.task.sessionId;
-  a.send({ case: "ptyInput", sessionId, data: `echo ${marker}\r` });
-  await a.waitFor((m) => m.case === "ptyOutput" && m.data.includes(marker), "marker");
-  a.close();
-  return { taskId, sessionId };
+  const attached = await device.attach(sessionId);
+  const from = device.mark();
+  await device.input(sessionId, `echo ${marker}\r`);
+  await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes(marker), "marker", 10000, from);
+  return { device, taskId, sessionId, holderEpoch: attached.holderEpoch };
 }
 
 test("远程下载 + 验签：合法签名产物升级成功、会话存活", async () => {
   assert.equal(readActive(), "builtin");
-  const { taskId, sessionId } = await runTaskWithMarker("SIGNED_OK");
+  const { device, sessionId, holderEpoch } = await runTaskWithMarker("SIGNED_OK");
   const pid1 = readWorkerPid();
 
-  const c = stack.makeClient();
-  await c.authSubscribe();
+  const c = device.control;
   c.send({ case: "clientUpgradeDaemon", daemonId: stack.daemonId, version: "dl-good", url: `${baseUrl}/good`, sha256: sha256hex(ARTIFACT), signature: sign(ARTIFACT) });
 
   assert.ok(await waitNewWorker(pid1), "下载验签通过后新 worker 起来且在线");
@@ -108,20 +109,22 @@ test("远程下载 + 验签：合法签名产物升级成功、会话存活", as
   }
   assert.ok(committed, "验签产物升级提交，worker.active=dl-good");
 
-  c.send({ case: "taskAttach", taskId });
-  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("SIGNED_OK"), "升级后回放历史");
-  c.send({ case: "ptyInput", sessionId, data: "echo AFTER_SIGNED\r" });
-  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("AFTER_SIGNED"), "升级后交互恢复");
-  c.close();
+  await device.openRelay();
+  const restored = await device.attach(sessionId);
+  assert.equal(restored.holderEpoch, holderEpoch);
+  assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("SIGNED_OK"), "升级后 snapshot 保留历史");
+  const from = device.mark();
+  await device.input(sessionId, "echo AFTER_SIGNED\r");
+  await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("AFTER_SIGNED"), "升级后交互恢复", 10000, from);
+  device.close();
 });
 
 test("篡改产物被拒：sha256 不符 → 不切换、保持当前版本、会话不受影响", async () => {
   const activeBefore = readActive();
-  const { taskId, sessionId } = await runTaskWithMarker("TAMPER_MARK");
+  const { device, sessionId } = await runTaskWithMarker("TAMPER_MARK");
   const pidBefore = readWorkerPid();
 
-  const c = stack.makeClient();
-  await c.authSubscribe();
+  const c = device.control;
   // 下发被篡改的 url，但 sha256/signature 仍是原始产物的 → 校验必失败
   c.send({ case: "clientUpgradeDaemon", daemonId: stack.daemonId, version: "dl-tampered", url: `${baseUrl}/tampered`, sha256: sha256hex(ARTIFACT), signature: sign(ARTIFACT) });
 
@@ -130,12 +133,12 @@ test("篡改产物被拒：sha256 不符 → 不切换、保持当前版本、�
   assert.equal(readWorkerPid(), pidBefore, "worker 未重启（验签在切换前就失败）");
   assert.ok(await isOnline(), "daemon 仍在线");
 
-  // 会话不受影响：attach 接管后仍能回放 + 交互
-  c.send({ case: "taskAttach", taskId });
-  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("TAMPER_MARK"), "篡改被拒后回放历史");
-  c.send({ case: "ptyInput", sessionId, data: "echo STILL_ALIVE\r" });
-  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("STILL_ALIVE"), "篡改被拒后会话仍存活");
-  c.close();
+  const restored = await device.attach(sessionId);
+  assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("TAMPER_MARK"), "篡改被拒后 snapshot 历史保留");
+  const from = device.mark();
+  await device.input(sessionId, "echo STILL_ALIVE\r");
+  await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("STILL_ALIVE"), "篡改被拒后会话仍存活", 10000, from);
+  device.close();
 });
 
 test("签名不符被拒：产物合法但签名是别的数据 → 验签失败、保持当前版本", async () => {

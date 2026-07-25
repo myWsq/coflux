@@ -8,6 +8,7 @@ import { platform, arch } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
+import { openRelayDevice, utf8 } from "./device-harness.mjs";
 
 // server 自动编排（plan 015）：本地 http server 同时扮演 GitHub releases API 与产物下载端，
 // server 以 COFLUX_AUTOUPDATE_API_BASE/COFLUX_AUTOUPDATE_REPO 指向它。断言两件事：
@@ -110,8 +111,8 @@ async function waitActive(version, tries = 60) {
 async function runTaskWithMarker(marker) {
   const repo = mkRepo();
   repos.push(repo);
-  const a = stack.makeClient();
-  await a.authSubscribe();
+  const device = await openRelayDevice(stack);
+  const a = device.control;
   a.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await a.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
   a.send({ case: "taskCreate", workspaceId: main.workspace.id, title: "au" });
@@ -120,10 +121,11 @@ async function runTaskWithMarker(marker) {
   a.send({ case: "taskStart", taskId, cols: 80, rows: 24 });
   const run = await a.waitFor((m) => m.case === "taskUpdated" && m.task.id === taskId && m.task.status === TaskStatus.RUNNING, "run");
   const sessionId = run.task.sessionId;
-  a.send({ case: "ptyInput", sessionId, data: `echo ${marker}\r` });
-  await a.waitFor((m) => m.case === "ptyOutput" && m.data.includes(marker), "marker");
-  a.close();
-  return { taskId, sessionId };
+  const attached = await device.attach(sessionId);
+  const from = device.mark();
+  await device.input(sessionId, `echo ${marker}\r`);
+  await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes(marker), "marker", 10000, from);
+  return { device, taskId, sessionId, holderEpoch: attached.holderEpoch };
 }
 
 test("release 发布后在线 daemon 无需手动触发即自动升级，会话不死", async () => {
@@ -131,18 +133,19 @@ test("release 发布后在线 daemon 无需手动触发即自动升级，会话�
   // 同一事件触发，自动推送可能在测试代码跑到这里之前就已下发/提交，断言初始版本必然竞态。
   // 核心事实只有两条：(a) 最终收敛到 release 版本、全程无手动 clientUpgradeDaemon；
   // (b) 升级前创建的会话数据在升级后仍可回放 + 交互，与升级实际发生的精确时刻无关。
-  const { taskId, sessionId } = await runTaskWithMarker("AUTOUP_MARK");
+  const { device, sessionId, holderEpoch } = await runTaskWithMarker("AUTOUP_MARK");
 
   assert.ok(await waitActive("v1.2.3"), "server 自动轮询到 release 后无手动 clientUpgradeDaemon 也推送并提交升级");
   assert.ok(await isOnline(), "升级后 daemon 仍在线");
 
-  const c = stack.makeClient();
-  await c.authSubscribe();
-  c.send({ case: "taskAttach", taskId });
-  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("AUTOUP_MARK"), "自动升级后回放历史");
-  c.send({ case: "ptyInput", sessionId, data: "echo AFTER_AUTOUP\r" });
-  await c.waitFor((m) => m.case === "ptyOutput" && m.data.includes("AFTER_AUTOUP"), "自动升级后交互恢复");
-  c.close();
+  await device.openRelay();
+  const restored = await device.attach(sessionId);
+  assert.equal(restored.holderEpoch, holderEpoch);
+  assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("AUTOUP_MARK"), "自动升级后 snapshot 保留历史");
+  const from = device.mark();
+  await device.input(sessionId, "echo AFTER_AUTOUP\r");
+  await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("AFTER_AUTOUP"), "自动升级后交互恢复", 10000, from);
+  device.close();
 });
 
 test("坏版本反复推送被退避封顶：推送次数不超过 COFLUX_AUTOUPDATE_MAX_ATTEMPTS", async () => {
