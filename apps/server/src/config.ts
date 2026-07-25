@@ -74,6 +74,15 @@ export const config = {
   authorizeMaxFailures: int("COFLUX_AUTHORIZE_MAX_FAILURES", 10),
   /** local gateway 的 elevated lease 很短且不跨 daemon control WS 重连恢复。 */
   localLeaseTtlMs: Math.max(10_000, Math.min(120_000, int("COFLUX_LOCAL_LEASE_TTL_MS", 45_000))),
+
+  /** 独立 relay（plan 043）：token 签名种子（秘密，hex 裸 32B ed25519 seed）。对应公钥经
+   * `COFLUX_RELAY_PUBKEY` 注入 relay 进程；轮换时先双公钥并存再撤旧（见 plans/043 维护注记）。 */
+  relaySigningKeySeed: secret("COFLUX_RELAY_SIGNING_KEY", "636f666c75782d6465762d72656c61792d7369676e696e672d73656564212121"),
+  /** relay 对外基址（如 `wss://relay.coflux.dev`）；未配置时 rendezvous 明确报错，
+   * 数据面退化为 direct-only。dev 默认指向 `pnpm dev:relay` 的本机明文端口。 */
+  relayUrl: process.env.COFLUX_RELAY_URL ?? (isDev ? "ws://127.0.0.1:8790" : ""),
+  /** relay token TTL：上限 120s 必须 ≤ relay 侧 tombstone 窗口，保证 token 重放必然失败。 */
+  relayTokenTtlMs: Math.max(10_000, Math.min(120_000, int("COFLUX_RELAY_TOKEN_TTL_MS", 60_000))),
   /** lifecycle prepared template 的投递/执行窗口；过期 frame 会被 worker 拒绝。 */
   preparedOperationTtlMs: Math.max(30_000, Math.min(30 * 60_000, int("COFLUX_PREPARED_OPERATION_TTL_MS", 5 * 60_000))),
 

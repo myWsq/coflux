@@ -89,8 +89,10 @@ async function waitWorkspaceReady(device, workspaceId) {
   throw new Error("workspace list 没有同步到 worker");
 }
 
+// plan 043：relay 数据面走独立 relay WS（中心控制 WS 上已无 relay 帧消息），
+// "零 relay 帧经手"改为观测 device 在 relay transport 上双向累计的帧数。
 function relayFrameCount(device) {
-  return device.control.log.filter((message) => message.case === "deviceRelayFrame").length;
+  return device.relayFramesSent + device.relayEnvelopesReceived;
 }
 
 test("普通 Device RPC 在 direct/relay 等价，direct 热路径不产生中心 relay frame", async () => {

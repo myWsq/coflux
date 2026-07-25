@@ -499,36 +499,20 @@ public struct Coflux_V1_ClientToServer: Sendable {
     set {payload = .localLeaseRequest(newValue)}
   }
 
-  public var deviceRelayOpen: Coflux_V1_DeviceRelayClientOpen {
-    get {
-      if case .deviceRelayOpen(let v)? = payload {return v}
-      return Coflux_V1_DeviceRelayClientOpen()
-    }
-    set {payload = .deviceRelayOpen(newValue)}
-  }
-
-  public var deviceRelayFrame: Coflux_V1_DeviceRelayFrame {
-    get {
-      if case .deviceRelayFrame(let v)? = payload {return v}
-      return Coflux_V1_DeviceRelayFrame()
-    }
-    set {payload = .deviceRelayFrame(newValue)}
-  }
-
-  public var deviceRelayClose: Coflux_V1_DeviceRelayClose {
-    get {
-      if case .deviceRelayClose(let v)? = payload {return v}
-      return Coflux_V1_DeviceRelayClose()
-    }
-    set {payload = .deviceRelayClose(newValue)}
-  }
-
   public var localUnpairRequest: Coflux_V1_LocalUnpairRequest {
     get {
       if case .localUnpairRequest(let v)? = payload {return v}
       return Coflux_V1_LocalUnpairRequest()
     }
     set {payload = .localUnpairRequest(newValue)}
+  }
+
+  public var deviceRelayConnect: Coflux_V1_DeviceRelayConnect {
+    get {
+      if case .deviceRelayConnect(let v)? = payload {return v}
+      return Coflux_V1_DeviceRelayConnect()
+    }
+    set {payload = .deviceRelayConnect(newValue)}
   }
 
   public var workspaceSetName: Coflux_V1_WorkspaceSetName {
@@ -560,10 +544,8 @@ public struct Coflux_V1_ClientToServer: Sendable {
     case deviceSetName(Coflux_V1_DeviceSetName)
     case localPairRequest(Coflux_V1_LocalPairRequest)
     case localLeaseRequest(Coflux_V1_LocalLeaseRequest)
-    case deviceRelayOpen(Coflux_V1_DeviceRelayClientOpen)
-    case deviceRelayFrame(Coflux_V1_DeviceRelayFrame)
-    case deviceRelayClose(Coflux_V1_DeviceRelayClose)
     case localUnpairRequest(Coflux_V1_LocalUnpairRequest)
+    case deviceRelayConnect(Coflux_V1_DeviceRelayConnect)
     case workspaceSetName(Coflux_V1_WorkspaceSetName)
 
   }
@@ -1057,30 +1039,6 @@ public struct Coflux_V1_ServerToClient: Sendable {
     set {payload = .localLeaseResult(newValue)}
   }
 
-  public var deviceRelayStatus: Coflux_V1_DeviceRelayStatus {
-    get {
-      if case .deviceRelayStatus(let v)? = payload {return v}
-      return Coflux_V1_DeviceRelayStatus()
-    }
-    set {payload = .deviceRelayStatus(newValue)}
-  }
-
-  public var deviceRelayFrame: Coflux_V1_DeviceRelayFrame {
-    get {
-      if case .deviceRelayFrame(let v)? = payload {return v}
-      return Coflux_V1_DeviceRelayFrame()
-    }
-    set {payload = .deviceRelayFrame(newValue)}
-  }
-
-  public var deviceRelayClose: Coflux_V1_DeviceRelayClose {
-    get {
-      if case .deviceRelayClose(let v)? = payload {return v}
-      return Coflux_V1_DeviceRelayClose()
-    }
-    set {payload = .deviceRelayClose(newValue)}
-  }
-
   public var preparedDeviceOperation: Coflux_V1_PreparedDeviceOperation {
     get {
       if case .preparedDeviceOperation(let v)? = payload {return v}
@@ -1105,6 +1063,14 @@ public struct Coflux_V1_ServerToClient: Sendable {
     set {payload = .localUnpairResult(newValue)}
   }
 
+  public var deviceRelayGrant: Coflux_V1_DeviceRelayGrant {
+    get {
+      if case .deviceRelayGrant(let v)? = payload {return v}
+      return Coflux_V1_DeviceRelayGrant()
+    }
+    set {payload = .deviceRelayGrant(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -1127,12 +1093,10 @@ public struct Coflux_V1_ServerToClient: Sendable {
     case clientOutdated(Coflux_V1_ClientOutdated)
     case localPairResult(Coflux_V1_LocalPairResult)
     case localLeaseResult(Coflux_V1_LocalLeaseResult)
-    case deviceRelayStatus(Coflux_V1_DeviceRelayStatus)
-    case deviceRelayFrame(Coflux_V1_DeviceRelayFrame)
-    case deviceRelayClose(Coflux_V1_DeviceRelayClose)
     case preparedDeviceOperation(Coflux_V1_PreparedDeviceOperation)
     case sessionCheckpoint(Coflux_V1_SessionCheckpoint)
     case localUnpairResult(Coflux_V1_LocalUnpairResult)
+    case deviceRelayGrant(Coflux_V1_DeviceRelayGrant)
 
   }
 
@@ -1735,7 +1699,7 @@ extension Coflux_V1_TaskRemove: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{3}device_relay_open\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}local_unpair_request\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{4}\u{4}local_unpair_request\0\u{3}device_relay_connect\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}\u{c}\u{1d}\u{1}\u{c}\u{1e}\u{1}\u{c}\u{1f}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1990,45 +1954,6 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .localLeaseRequest(v)
         }
       }()
-      case 29: try {
-        var v: Coflux_V1_DeviceRelayClientOpen?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceRelayOpen(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceRelayOpen(v)
-        }
-      }()
-      case 30: try {
-        var v: Coflux_V1_DeviceRelayFrame?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceRelayFrame(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceRelayFrame(v)
-        }
-      }()
-      case 31: try {
-        var v: Coflux_V1_DeviceRelayClose?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceRelayClose(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceRelayClose(v)
-        }
-      }()
       case 32: try {
         var v: Coflux_V1_LocalUnpairRequest?
         var hadOneofValue = false
@@ -2040,6 +1965,19 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .localUnpairRequest(v)
+        }
+      }()
+      case 33: try {
+        var v: Coflux_V1_DeviceRelayConnect?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceRelayConnect(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceRelayConnect(v)
         }
       }()
       default: break
@@ -2129,21 +2067,13 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .localLeaseRequest(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 28)
     }()
-    case .deviceRelayOpen?: try {
-      guard case .deviceRelayOpen(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 29)
-    }()
-    case .deviceRelayFrame?: try {
-      guard case .deviceRelayFrame(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 30)
-    }()
-    case .deviceRelayClose?: try {
-      guard case .deviceRelayClose(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 31)
-    }()
     case .localUnpairRequest?: try {
       guard case .localUnpairRequest(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 32)
+    }()
+    case .deviceRelayConnect?: try {
+      guard case .deviceRelayConnect(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 33)
     }()
     case nil: break
     }
@@ -2735,7 +2665,7 @@ extension Coflux_V1_ClientOutdated: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToClient"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{3}device_relay_status\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{4}\u{4}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{3}device_relay_grant\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{b}device_relay_status\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}\u{c}\u{1d}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2990,45 +2920,6 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .localLeaseResult(v)
         }
       }()
-      case 27: try {
-        var v: Coflux_V1_DeviceRelayStatus?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceRelayStatus(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceRelayStatus(v)
-        }
-      }()
-      case 28: try {
-        var v: Coflux_V1_DeviceRelayFrame?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceRelayFrame(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceRelayFrame(v)
-        }
-      }()
-      case 29: try {
-        var v: Coflux_V1_DeviceRelayClose?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceRelayClose(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceRelayClose(v)
-        }
-      }()
       case 30: try {
         var v: Coflux_V1_PreparedDeviceOperation?
         var hadOneofValue = false
@@ -3066,6 +2957,19 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .localUnpairResult(v)
+        }
+      }()
+      case 33: try {
+        var v: Coflux_V1_DeviceRelayGrant?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceRelayGrant(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceRelayGrant(v)
         }
       }()
       default: break
@@ -3155,18 +3059,6 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .localLeaseResult(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 26)
     }()
-    case .deviceRelayStatus?: try {
-      guard case .deviceRelayStatus(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 27)
-    }()
-    case .deviceRelayFrame?: try {
-      guard case .deviceRelayFrame(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 28)
-    }()
-    case .deviceRelayClose?: try {
-      guard case .deviceRelayClose(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 29)
-    }()
     case .preparedDeviceOperation?: try {
       guard case .preparedDeviceOperation(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 30)
@@ -3178,6 +3070,10 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .localUnpairResult?: try {
       guard case .localUnpairResult(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 32)
+    }()
+    case .deviceRelayGrant?: try {
+      guard case .deviceRelayGrant(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 33)
     }()
     case nil: break
     }

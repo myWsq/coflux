@@ -87,9 +87,10 @@ message ProxyClosed {
 
 message DaemonToServer {
   // 旧 raw PTY mirror 与 server-routed exec/fs 已由 DeviceEnvelope 取代。
-  reserved 1, 12, 13, 14, 15, 16, 19;
+  // 22-23 是控制面复用 relay 路径（plan 043 改为独立 relay + rendezvous 后删除）。
+  reserved 1, 12, 13, 14, 15, 16, 19, 22, 23;
   reserved "daemon_enroll", "exec_result", "fs_listed", "fs_read_result", "pty_output", "pty_replay",
-    "fs_write_result";
+    "fs_write_result", "device_relay_frame", "device_relay_close";
   oneof payload {
     DaemonAuth daemon_auth = 2;
     DaemonEnrollRequest daemon_enroll_request = 3;
@@ -105,8 +106,6 @@ message DaemonToServer {
     WorkspaceBranch workspace_branch = 18;
     WorkspaceDiff workspace_diff = 20;
     LocalGrantAck local_grant_ack = 21;
-    DeviceRelayFrame device_relay_frame = 22;
-    DeviceRelayClose device_relay_close = 23;
     SessionCheckpoint session_checkpoint = 24;
     DeviceOperationReport device_operation_report = 25;
     LocalGatewayAnnounce local_gateway_announce = 26;
@@ -216,8 +215,10 @@ message ProxyClose {
 
 message ServerToDaemon {
   // 旧 replay/input/resize/RPC adapter 已删除；生命周期编排与 proxy control 继续保留。
-  reserved 11, 12, 15, 16, 17, 18, 21;
-  reserved "session_replay", "pty_resize", "exec_run", "fs_list", "fs_read", "pty_input", "fs_write";
+  // 26-28 是控制面复用 relay 路径（plan 043 改为独立 relay + rendezvous 后删除）。
+  reserved 11, 12, 15, 16, 17, 18, 21, 26, 27, 28;
+  reserved "session_replay", "pty_resize", "exec_run", "fs_list", "fs_read", "pty_input", "fs_write",
+    "device_relay_open", "device_relay_frame", "device_relay_close";
   oneof payload {
     DaemonEnrolled daemon_enrolled = 1;
     DaemonAuthed daemon_authed = 2;
@@ -235,13 +236,11 @@ message ServerToDaemon {
     LocalGrantInstall local_grant_install = 23;
     LocalGrantRevoke local_grant_revoke = 24;
     LocalLeaseInstall local_lease_install = 25;
-    DeviceRelayDaemonOpen device_relay_open = 26;
-    DeviceRelayFrame device_relay_frame = 27;
-    DeviceRelayClose device_relay_close = 28;
     LocalGatewayConfigure local_gateway_configure = 29;
     DeviceSessionCatalogRequest session_catalog_request = 30;
     DeviceExitAck exit_ack = 31;
     PreparedDeviceOperation prepared_device_operation = 32;
+    DeviceRelayDial device_relay_dial = 33;
     ProxyData proxy_data = 19;
     WorkspaceList workspace_list = 20;
   }

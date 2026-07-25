@@ -43,6 +43,12 @@ if (n === 0) {
   console.error("未找到 coflux-worker-<target> 产物");
   process.exit(1);
 }
+// relay 产物（plan 043，仅 linux 矩阵）：不签名（人工 ssh 部署，不走自动下载验签），但进 SHA256SUMS 供部署校验。
+for (const name of readdirSync(dir)) {
+  if (!name.startsWith("coflux-relay-") || name.includes(".")) continue;
+  const sha256 = crypto.createHash("sha256").update(readFileSync(join(dir, name))).digest("hex");
+  sums.push(`${sha256}  ${name}`);
+}
 writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 writeFileSync(join(dir, "SHA256SUMS"), sums.join("\n") + "\n");
 console.error(`已签名 ${n} 个 worker 产物，写出 manifest.json / SHA256SUMS`);

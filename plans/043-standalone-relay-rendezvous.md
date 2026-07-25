@@ -87,11 +87,12 @@ Device relay 数据面目前不是独立连接，而是复用两条控制面 WS 
   客户端会被踢，无需双路径过渡；mobile 经共享 `packages/client` 自动跟随（属
   允许的共享层变更，不加 mobile 功能）。Rejected: 过渡期双路径 —— 两套语义并存
   正是 036-041 刚清理掉的债。
-- **中心兜底 = 同机部署 relay 二进制，server 不内嵌数据面**：`apps/server/src/
-  device-relay.ts` 整个删除；生产 prod-jp 与 relay 二进制同机跑一个实例，
-  server 配置 `COFLUX_RELAY_URL`（本片单节点、单 URL；第二片扩为列表）。dev/
-  harness 同样以 spawn 二进制方式起 relay。Rejected: server 内嵌 TS 等价端点
-  兜底 —— 同一协议两套实现，长期漂移。
+- **relay 独立部署，server 不内嵌数据面**（2026-07-25 执行中经用户修订：生产不做
+  同机伴生，relay 自有主机/域名独立部署）：`apps/server/src/device-relay.ts` 整个
+  删除；server 只配置 `COFLUX_RELAY_URL` 指向外部 relay（本片单节点、单 URL；第二片
+  扩为列表），relay 与中心零连接、耦合面仅签名密钥对。dev/harness 以 spawn 二进制
+  方式起 relay（测试拓扑，与部署形态无关）。Rejected: server 内嵌 TS 等价端点兜底
+  —— 同一协议两套实现，长期漂移。
 - **不做 P2P/WebRTC、不做多节点就近**：仅在 `docs/ROADMAP.md` 记一行（P2P 叠加
   在 relay 之上、relay 为其兜底层；多节点就近为第二片）。
 - **协议双侧一致纪律**：`proto/` 改动经 buf 生成到 `packages/protocol/src/gen`
