@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
+import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { ChevronRight, Folder, FolderOpen, FolderPlus, GitBranch, Monitor, Plus, Trash2, X, Zap } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
@@ -434,10 +435,21 @@ export function Sidebar(props: SidebarProps) {
                 ? "text-success"
                 : tone === "warning" ? "text-warning" : "text-muted-foreground";
               const rttText = rttMs === undefined ? "" : ` · ${Math.round(rttMs)}ms`;
-              const dotTitle = `${routeLabel}${rttText}${transport?.detail ? ` · ${transport.detail}` : ""}`;
-              // 整行共用：圆点只有 6px，把延迟只挂在它上面等于挂了个瞄不准的靶子。
-              // 圆点自己保留更聚焦的 dotTitle（内层 title 优先于外层）。
-              const rowTitle = `${daemon.host}/${daemon.platform} · ${routeLabel}${rttText}${transport?.detail ? ` · ${transport.detail}` : ""}${daemon.workerVersion ? ` · worker ${daemon.workerVersion}` : ""}${daemon.supervisorVersion ? ` · supervisor ${daemon.supervisorVersion}` : ""}`;
+              const versionText = [
+                daemon.workerVersion ? `worker ${daemon.workerVersion}` : "",
+                daemon.supervisorVersion ? `supervisor ${daemon.supervisorVersion}` : "",
+              ].filter(Boolean).join(" · ");
+              // 挂在整行而非那个 12px 图标上：图标太小，只挂它等于挂了个瞄不准的靶子。
+              // 用组件库 Tooltip 而非原生 title：原生要悬停约 1s 才弹，且弹出后内容不再随
+              // 心跳更新——延迟读数正是每 15s 会变的东西。
+              const tooltipContent = (
+                <>
+                  <div>{routeLabel}{rttText}</div>
+                  <div className="text-2xs opacity-70">{daemon.host} / {daemon.platform}</div>
+                  {versionText ? <div className="text-2xs opacity-70">{versionText}</div> : null}
+                  {transport?.detail ? <div className="text-2xs opacity-70">{transport.detail}</div> : null}
+                </>
+              );
               return (
                 <ContextMenu
                   key={daemon.daemonId}
@@ -449,38 +461,37 @@ export function Sidebar(props: SidebarProps) {
                     { label: "移除设备", onClick: () => props.onRemoveDevice(daemon) },
                   ]}
                 >
-                  <div
-                    className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground"
-                    title={rowTitle}
-                  >
-                    {/* 固定 12px 槽位：闪电与圆点尺寸不同，不统一宽度设备名会参差。 */}
-                    <span className="flex size-3 shrink-0 items-center justify-center" title={dotTitle}>
-                      {transport?.mode === "direct" ? (
-                        <Zap className={cn("size-3", zapClass)} aria-label={`本机直连${rttText}`} />
-                      ) : (
-                        <span className={cn("size-1.5 rounded-full", dotClass)} />
-                      )}
-                    </span>
-                    <Monitor className="size-3.5 opacity-70" />
-                    <span className="min-w-0 flex-1 truncate">
-                      {daemon.name}
-                    </span>
-                    {orphans.length > 0 ? (
-                      <span
-                        className="shrink-0 rounded bg-warning/10 px-1 text-2xs text-warning"
-                        title={`本机存在 ${orphans.length} 个中心 catalog 未登记的存活 session：${orphans.map((item) => item.sessionId).join(", ")}`}
-                      >
-                        本地 {orphans.length}
+                  <Tooltip content={tooltipContent} placement="end" hasHoverIndication={false}>
+                    <div className="group/device flex h-7 items-center gap-2 rounded-md px-2 text-base text-secondary-foreground hover:bg-accent/70 hover:text-foreground">
+                      {/* 固定 12px 槽位：闪电与圆点尺寸不同，不统一宽度设备名会参差。 */}
+                      <span className="flex size-3 shrink-0 items-center justify-center">
+                        {transport?.mode === "direct" ? (
+                          <Zap className={cn("size-3", zapClass)} aria-label={`本机直连${rttText}`} />
+                        ) : (
+                          <span className={cn("size-1.5 rounded-full", dotClass)} />
+                        )}
                       </span>
-                    ) : null}
-                    <button
-                      className="flex size-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/device:opacity-100 focus-visible:opacity-100"
-                      onClick={() => props.onRemoveDevice(daemon)}
-                      title="移除设备"
-                    >
-                      <Trash2 className="size-3" />
-                    </button>
-                  </div>
+                      <Monitor className="size-3.5 opacity-70" />
+                      <span className="min-w-0 flex-1 truncate">
+                        {daemon.name}
+                      </span>
+                      {orphans.length > 0 ? (
+                        <span
+                          className="shrink-0 rounded bg-warning/10 px-1 text-2xs text-warning"
+                          title={`本机存在 ${orphans.length} 个中心 catalog 未登记的存活 session：${orphans.map((item) => item.sessionId).join(", ")}`}
+                        >
+                          本地 {orphans.length}
+                        </span>
+                      ) : null}
+                      <button
+                        className="flex size-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/device:opacity-100 focus-visible:opacity-100"
+                        onClick={() => props.onRemoveDevice(daemon)}
+                        title="移除设备"
+                      >
+                        <Trash2 className="size-3" />
+                      </button>
+                    </div>
+                  </Tooltip>
                 </ContextMenu>
               );
             })}
