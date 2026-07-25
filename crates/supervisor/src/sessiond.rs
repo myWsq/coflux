@@ -1,11 +1,14 @@
-//! sessiond 的纯状态核心：VT grid/history 与规范化 ANSI snapshot。
+//! sessiond 的纯状态核心：VT grid/history、规范化 ANSI snapshot、输出序号与 channel stream。
 //!
 //! 本模块不持有 PTY/网络对象，单测可以把生成的 ANSI snapshot 喂给第二个 `vt100::Parser`
 //! 做状态等价验证。PTY 生命周期与 Device channel 路由留在 `sessions.rs`。
 
+use std::collections::{HashMap, VecDeque};
+
 use vt100::{Cell, Color, Screen};
 
 const HISTORY_WRAP_FACTOR: usize = 4;
+const RETRANSMIT_LIMIT: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AltEvent {
@@ -87,6 +90,9 @@ pub struct TerminalState {
     cols: u16,
     history_line_limit: usize,
     history_row_capacity: usize,
+    output_seq: u64,
+    retransmit: VecDeque<Delta>,
+    retransmit_bytes: usize,
     mode_scanner: DecModeScanner,
     /// 进入 alt screen 前的完整主屏 snapshot；退出 alt 后由 vt100 内部主 grid 接回。
     normal_before_alt: Option<Vec<u8>>,
@@ -101,14 +107,17 @@ impl TerminalState {
             cols,
             history_line_limit,
             history_row_capacity,
+            output_seq: 0,
+            retransmit: VecDeque::new(),
+            retransmit_bytes: 0,
             mode_scanner: DecModeScanner::default(),
             normal_before_alt: None,
         }
     }
 
-    pub fn feed(&mut self, bytes: &[u8]) {
+    pub fn feed(&mut self, bytes: &[u8]) -> Option<Delta> {
         if bytes.is_empty() {
-            return;
+            return None;
         }
 
         // 只在 alt mode 边界拆 chunk；其余仍批量交给 vte，避免逐 byte clone/dispatch。
@@ -136,6 +145,27 @@ impl TerminalState {
             self.parser.process(&bytes[start..]);
         }
 
+        let from_seq = self.output_seq.saturating_add(1);
+        self.output_seq = self.output_seq.saturating_add(bytes.len() as u64);
+        let delta = Delta { from_seq, to_seq: self.output_seq, data: bytes.to_vec() };
+        self.push_retransmit(delta.clone());
+        Some(delta)
+    }
+
+    fn push_retransmit(&mut self, delta: Delta) {
+        if delta.data.len() > RETRANSMIT_LIMIT {
+            self.retransmit.clear();
+            self.retransmit_bytes = 0;
+            return;
+        }
+        self.retransmit_bytes += delta.data.len();
+        self.retransmit.push_back(delta);
+        while self.retransmit_bytes > RETRANSMIT_LIMIT {
+            if let Some(removed) = self.retransmit.pop_front() {
+                self.retransmit_bytes -= removed.data.len();
+            }
+        }
+
     }
 
     pub fn snapshot(&self) -> Vec<u8> {
@@ -153,6 +183,236 @@ impl TerminalState {
         self.rows = rows;
         self.cols = cols;
         self.parser.screen_mut().set_size(rows, cols);
+    }
+
+    pub fn output_seq(&self) -> u64 {
+        self.output_seq
+    }
+
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+
+    pub fn earliest_retransmit_seq(&self) -> u64 {
+        self.retransmit.front().map(|delta| delta.from_seq).unwrap_or_else(|| self.output_seq.saturating_add(1))
+    }
+
+    /// `last_seq` 必须位于 whole-frame 边界；否则调用方应返回原子 snapshot。
+    fn deltas_after(&self, last_seq: u64) -> Option<Vec<Delta>> {
+        if last_seq == self.output_seq {
+            return Some(Vec::new());
+        }
+        let expected = last_seq.checked_add(1)?;
+        let start = self.retransmit.iter().position(|delta| delta.from_seq == expected)?;
+        let mut next = expected;
+        let mut output = Vec::new();
+        for delta in self.retransmit.iter().skip(start) {
+            if delta.from_seq != next {
+                return None;
+            }
+            output.push(delta.clone());
+            next = delta.to_seq.saturating_add(1);
+        }
+        (next == self.output_seq.saturating_add(1)).then_some(output)
+    }
+
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delta {
+    pub from_seq: u64,
+    pub to_seq: u64,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct Subscriber {
+    next_seq: u64,
+    gapped: bool,
+    gap_notified: bool,
+}
+
+#[derive(Debug, Clone)]
+struct Holder {
+    client_instance_id: String,
+    transport_generation: u64,
+    channel_id: String,
+    epoch: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DetachedTarget {
+    pub channel_id: String,
+    pub holder_epoch: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachOutcome {
+    pub holder_epoch: u64,
+    pub snapshot_seq: u64,
+    pub ansi_snapshot: Option<Vec<u8>>,
+    pub replay: Vec<Delta>,
+    pub detached: Option<DetachedTarget>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingDelta {
+    pub channel_id: String,
+    pub delta: Delta,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingGap {
+    pub channel_id: String,
+    pub expected_seq: u64,
+    pub available_seq: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// PTY/网络无关的每-session authority；调用方在同一 mutex 内执行 attach/feed/send-result。
+pub struct SessionState {
+    terminal: TerminalState,
+    subscribers: HashMap<String, Subscriber>,
+    holder: Option<Holder>,
+    next_holder_epoch: u64,
+}
+
+impl SessionState {
+    pub fn new(rows: u16, cols: u16, history_line_limit: usize) -> Self {
+        Self { terminal: TerminalState::new(rows, cols, history_line_limit), subscribers: HashMap::new(), holder: None, next_holder_epoch: 0 }
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<PendingDelta> {
+        let Some(delta) = self.terminal.feed(bytes) else { return Vec::new() };
+        let mut pending = Vec::new();
+        for (channel_id, subscriber) in &mut self.subscribers {
+            if subscriber.gapped {
+                continue;
+            }
+            if subscriber.next_seq != delta.from_seq {
+                subscriber.gapped = true;
+                subscriber.gap_notified = false;
+                continue;
+            }
+            pending.push(PendingDelta { channel_id: channel_id.clone(), delta: delta.clone() });
+        }
+        pending
+    }
+
+    pub fn attach(
+        &mut self,
+        channel_id: &str,
+        client_instance_id: &str,
+        transport_generation: u64,
+        resume_from_seq: Option<u64>,
+    ) -> Result<AttachOutcome, AttachError> {
+        if channel_id.is_empty() || client_instance_id.is_empty() || transport_generation == 0 {
+            return Err(AttachError { code: "invalid_attach", message: "channel/client/generation 必须有效".into() });
+        }
+
+        let mut detached = None;
+        let epoch = match &self.holder {
+            None => self.bump_holder_epoch(),
+            Some(holder) if holder.client_instance_id == client_instance_id => {
+                if transport_generation < holder.transport_generation {
+                    return Err(AttachError { code: "stale_transport", message: "transport generation 已过期".into() });
+                }
+                if transport_generation == holder.transport_generation && holder.channel_id != channel_id {
+                    return Err(AttachError { code: "generation_collision", message: "同一 transport generation 不能绑定不同 channel".into() });
+                }
+                if transport_generation > holder.transport_generation && holder.channel_id != channel_id {
+                    self.subscribers.remove(&holder.channel_id);
+                }
+                holder.epoch
+            }
+            Some(holder) => {
+                detached = Some(DetachedTarget { channel_id: holder.channel_id.clone(), holder_epoch: holder.epoch });
+                self.bump_holder_epoch()
+            }
+        };
+        self.holder = Some(Holder {
+            client_instance_id: client_instance_id.to_string(),
+            transport_generation,
+            channel_id: channel_id.to_string(),
+            epoch,
+        });
+
+        let (snapshot_seq, ansi_snapshot, replay) = match resume_from_seq.and_then(|seq| self.terminal.deltas_after(seq).map(|deltas| (seq, deltas))) {
+            Some((seq, replay)) => (seq, None, replay),
+            None => (self.terminal.output_seq(), Some(self.terminal.snapshot()), Vec::new()),
+        };
+        self.subscribers.insert(
+            channel_id.to_string(),
+            Subscriber {
+                next_seq: snapshot_seq.saturating_add(1),
+                gapped: false,
+                gap_notified: false,
+            },
+        );
+        Ok(AttachOutcome { holder_epoch: epoch, snapshot_seq, ansi_snapshot, replay, detached })
+    }
+
+    fn bump_holder_epoch(&mut self) -> u64 {
+        self.next_holder_epoch = self.next_holder_epoch.saturating_add(1).max(1);
+        self.next_holder_epoch
+    }
+
+    pub fn delivery_result(&mut self, channel_id: &str, to_seq: u64, sent: bool) {
+        let Some(subscriber) = self.subscribers.get_mut(channel_id) else { return };
+        if sent && subscriber.next_seq <= to_seq {
+            subscriber.next_seq = to_seq.saturating_add(1);
+        } else if !sent {
+            subscriber.gapped = true;
+            subscriber.gap_notified = false;
+        }
+    }
+
+    pub fn pending_gaps(&self) -> Vec<PendingGap> {
+        let available_seq = self.terminal.earliest_retransmit_seq();
+        self.subscribers
+            .iter()
+            .filter(|(_, subscriber)| subscriber.gapped && !subscriber.gap_notified)
+            .map(|(channel_id, subscriber)| PendingGap {
+                channel_id: channel_id.clone(),
+                expected_seq: subscriber.next_seq,
+                available_seq,
+            })
+            .collect()
+    }
+
+    pub fn gap_delivery_result(&mut self, channel_id: &str, sent: bool) {
+        if let Some(subscriber) = self.subscribers.get_mut(channel_id) {
+            subscriber.gap_notified = sent;
+        }
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        self.terminal.resize(rows, cols);
+    }
+
+    pub fn snapshot(&self) -> Vec<u8> {
+        self.terminal.snapshot()
+    }
+
+    pub fn output_seq(&self) -> u64 {
+        self.terminal.output_seq()
+    }
+
+    pub fn rows(&self) -> u16 {
+        self.terminal.rows()
+    }
+
+    pub fn cols(&self) -> u16 {
+        self.terminal.cols()
     }
 
 }
@@ -445,6 +705,42 @@ mod tests {
         let mut parser = vt100::Parser::new(3, 10, 16);
         parser.process(&snapshot);
         assert!(parser.screen().contents().contains("current"));
+    }
+
+    #[test]
+    fn sessiond_attach_snapshot_then_live_delta_is_contiguous() {
+        let mut state = SessionState::new(3, 12, 4);
+        state.feed(b"abc");
+        let attached = state.attach("channel-1", "client-1", 1, None).unwrap();
+        assert_eq!(attached.snapshot_seq, 3);
+        assert!(attached.ansi_snapshot.is_some());
+        assert!(attached.replay.is_empty());
+        assert_eq!(attached.holder_epoch, 1);
+
+        let pending = state.feed(b"de");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].channel_id, "channel-1");
+        assert_eq!((pending[0].delta.from_seq, pending[0].delta.to_seq), (4, 5));
+        state.delivery_result("channel-1", 5, true);
+        assert!(state.pending_gaps().is_empty());
+    }
+
+    #[test]
+    fn sessiond_attach_resume_starts_at_n_plus_one_or_falls_back_to_snapshot() {
+        let mut state = SessionState::new(3, 12, 4);
+        state.feed(b"abc");
+        state.feed(b"de");
+        let resumed = state.attach("channel-1", "client-1", 1, Some(3)).unwrap();
+        assert_eq!(resumed.snapshot_seq, 3);
+        assert_eq!(resumed.ansi_snapshot, None);
+        assert_eq!(resumed.replay.len(), 1);
+        assert_eq!((resumed.replay[0].from_seq, resumed.replay[0].to_seq), (4, 5));
+
+        let fallback = state.attach("channel-2", "client-1", 2, Some(4)).unwrap();
+        assert_eq!(fallback.snapshot_seq, 5);
+        assert!(fallback.ansi_snapshot.is_some());
+        assert!(fallback.replay.is_empty());
+        assert_eq!(fallback.holder_epoch, resumed.holder_epoch, "transport migration must not self-handoff");
     }
 
 }
