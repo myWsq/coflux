@@ -1,7 +1,7 @@
 /**
  * 服务器持久化层（Postgres，porsager/postgres 客户端）。
- * 持久化：accounts / devices / client_tokens / memberships / projects / workspaces / tasks。
- * 运行时（不落盘）：daemon 连接、运行时 session —— 见 hub。
+ * 持久化：账号/设备/业务元数据，以及 local gateway grant、prepared operation、checkpoint cache。
+ * 运行时（不落盘）：daemon/client 连接、relay channel、短期 waiter —— 见 hub。
  * token 一律只存 sha256 hash（见 secrets.ts）。
  *
  * 表全部位于独立 schema `coflux`（不用 `public`，避免与 Supabase 自带对象/PostgREST 暴露面混杂）；
@@ -29,6 +29,11 @@ import {
   type Workspace,
   type WorkspaceId,
   type SessionId,
+  type DeviceOperationReport,
+  type LocalBrowserGrant,
+  type LocalGatewayDescriptor,
+  type OnlineDeviceLease,
+  type SessionCheckpoint,
 } from "@coflux/protocol";
 
 /** DB 里 tasks.status 列存字符串（可读、迁移友好）；协议侧是 proto enum TaskStatus。
@@ -102,6 +107,107 @@ export interface Device {
   createdAt: number;
   lastSeenAt: number;
   revoked: boolean;
+}
+
+export interface LocalGatewayRecord {
+  daemonId: DaemonId;
+  accountId: AccountId;
+  protocolVersion: number;
+  port: number;
+  publicKeySec1: Uint8Array;
+  updatedAt: number;
+}
+
+export type LocalGrantState = "pending_install" | "active" | "install_failed" | "pending_revoke" | "revoked";
+export type LocalGrantControlAction = "install" | "sync_install" | "revoke" | "sync_revoke";
+
+export interface LocalGrantRecord {
+  grantId: string;
+  accountId: AccountId;
+  daemonId: DaemonId;
+  origin: string;
+  publicKeySec1: Uint8Array;
+  offlineScopes: number[];
+  clientTokenHash: string | null;
+  pairRequestId: string;
+  state: LocalGrantState;
+  controlRequestId: string | null;
+  controlAction: LocalGrantControlAction | null;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+  revokedAt: number | null;
+}
+
+export interface LocalLeaseRecord {
+  leaseId: string;
+  grantId: string;
+  accountId: AccountId;
+  daemonId: DaemonId;
+  clientTokenHash: string | null;
+  scopes: number[];
+  expiresAt: number;
+  createdAt: number;
+  revoked: boolean;
+}
+
+export type PreparedOperationState =
+  | "pending_install"
+  | "installed"
+  | "install_failed"
+  | "expired"
+  | "applying"
+  | "completed"
+  | "failed";
+
+export interface PreparedOperationRecord {
+  operationId: string;
+  accountId: AccountId;
+  daemonId: DaemonId;
+  kind: string;
+  targetId: string | null;
+  targetVersion: number | null;
+  frame: Uint8Array;
+  metadata: string;
+  expiresAt: number;
+  state: PreparedOperationState;
+  completed: boolean;
+  installError: string | null;
+  reportOk: boolean | null;
+  reportTaskId: string | null;
+  reportSessionId: string | null;
+  reportPid: number | null;
+  reportExitCode: number | null;
+  reportError: string | null;
+  resultFrame: Uint8Array | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type NewPreparedOperation = Pick<
+  PreparedOperationRecord,
+  "operationId" | "accountId" | "daemonId" | "kind" | "targetId" | "targetVersion" | "frame" | "metadata" | "expiresAt"
+>;
+
+interface SessionCheckpointRow {
+  sessionId: SessionId;
+  taskId: TaskId;
+  accountId: AccountId;
+  daemonId: DaemonId;
+  snapshotSeq: string;
+  ansiSnapshot: Uint8Array;
+  cols: number;
+  rows: number;
+  capturedAt: number;
+  updatedAt: number;
+}
+
+export interface SessionCheckpointRecord extends Omit<SessionCheckpointRow, "snapshotSeq"> {
+  snapshotSeq: bigint;
+}
+
+function rowToCheckpoint(row: SessionCheckpointRow): SessionCheckpointRecord {
+  return { ...row, snapshotSeq: BigInt(row.snapshotSeq) };
 }
 
 /** 建表 DDL：一个 simple-query 多语句块，启动时幂等执行（CREATE ... IF NOT EXISTS）。 */
@@ -195,6 +301,96 @@ const SCHEMA_DDL = `
   CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id);
   CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
   CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
+
+  CREATE TABLE IF NOT EXISTS local_gateways (
+    daemon_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    protocol_version INTEGER NOT NULL,
+    port INTEGER NOT NULL,
+    public_key_sec1 BYTEA NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_local_gateways_account ON local_gateways(account_id);
+
+  CREATE TABLE IF NOT EXISTS local_browser_grants (
+    grant_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    daemon_id TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    public_key_sec1 BYTEA NOT NULL,
+    offline_scopes INTEGER[] NOT NULL,
+    client_token_hash TEXT,
+    pair_request_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    control_request_id TEXT,
+    control_action TEXT,
+    error TEXT,
+    created_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL,
+    revoked_at DOUBLE PRECISION,
+    UNIQUE (account_id, pair_request_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_local_grants_daemon ON local_browser_grants(daemon_id);
+  CREATE INDEX IF NOT EXISTS idx_local_grants_account ON local_browser_grants(account_id);
+  CREATE INDEX IF NOT EXISTS idx_local_grants_token ON local_browser_grants(client_token_hash);
+  CREATE INDEX IF NOT EXISTS idx_local_grants_control ON local_browser_grants(control_request_id);
+
+  CREATE TABLE IF NOT EXISTS local_device_leases (
+    lease_id TEXT PRIMARY KEY,
+    grant_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    daemon_id TEXT NOT NULL,
+    client_token_hash TEXT,
+    scopes INTEGER[] NOT NULL,
+    expires_at DOUBLE PRECISION NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL,
+    revoked BOOLEAN NOT NULL DEFAULT false
+  );
+  CREATE INDEX IF NOT EXISTS idx_local_leases_grant ON local_device_leases(grant_id);
+  CREATE INDEX IF NOT EXISTS idx_local_leases_daemon ON local_device_leases(daemon_id);
+  CREATE INDEX IF NOT EXISTS idx_local_leases_expiry ON local_device_leases(expires_at);
+
+  CREATE TABLE IF NOT EXISTS prepared_device_operations (
+    operation_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    daemon_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    target_id TEXT,
+    target_version DOUBLE PRECISION,
+    frame BYTEA NOT NULL,
+    metadata TEXT NOT NULL,
+    expires_at DOUBLE PRECISION NOT NULL,
+    state TEXT NOT NULL,
+    completed BOOLEAN NOT NULL DEFAULT false,
+    install_error TEXT,
+    report_ok BOOLEAN,
+    report_task_id TEXT,
+    report_session_id TEXT,
+    report_pid INTEGER,
+    report_exit_code INTEGER,
+    report_error TEXT,
+    result_frame BYTEA,
+    created_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_prepared_daemon ON prepared_device_operations(daemon_id, completed, expires_at);
+  CREATE INDEX IF NOT EXISTS idx_prepared_account ON prepared_device_operations(account_id, completed, expires_at);
+  CREATE INDEX IF NOT EXISTS idx_prepared_target ON prepared_device_operations(account_id, kind, target_id, completed);
+
+  CREATE TABLE IF NOT EXISTS session_checkpoints (
+    session_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    daemon_id TEXT NOT NULL,
+    snapshot_seq NUMERIC(20, 0) NOT NULL,
+    ansi_snapshot BYTEA NOT NULL,
+    cols INTEGER NOT NULL,
+    rows INTEGER NOT NULL,
+    captured_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_checkpoints_account ON session_checkpoints(account_id, captured_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON session_checkpoints(task_id);
 `;
 
 export class Store {
@@ -371,6 +567,155 @@ export class Store {
     return rows[0];
   }
 
+  /* ---------------------- local gateway / grants ---------------------- */
+  async upsertLocalGateway(accountId: AccountId, daemonId: DaemonId, gateway: LocalGatewayDescriptor, updatedAt: number): Promise<LocalGatewayRecord> {
+    const rows = await this.sql<LocalGatewayRecord[]>`
+      INSERT INTO local_gateways (daemon_id, account_id, protocol_version, port, public_key_sec1, updated_at)
+      VALUES (${daemonId}, ${accountId}, ${gateway.protocolVersion}, ${gateway.port}, ${gateway.publicKeySec1}, ${updatedAt})
+      ON CONFLICT (daemon_id) DO UPDATE SET
+        account_id = excluded.account_id,
+        protocol_version = excluded.protocol_version,
+        port = excluded.port,
+        public_key_sec1 = excluded.public_key_sec1,
+        updated_at = excluded.updated_at
+      RETURNING *
+    `;
+    return rows[0];
+  }
+
+  async getLocalGateway(daemonId: DaemonId): Promise<LocalGatewayRecord | undefined> {
+    const rows = await this.sql<LocalGatewayRecord[]>`SELECT * FROM local_gateways WHERE daemon_id = ${daemonId}`;
+    return rows[0];
+  }
+
+  async createLocalGrant(grant: LocalBrowserGrant, clientTokenHash: string | null, pairRequestId: string): Promise<LocalGrantRecord | undefined> {
+    const now = Date.now();
+    const rows = await this.sql<LocalGrantRecord[]>`
+      INSERT INTO local_browser_grants (
+        grant_id, account_id, daemon_id, origin, public_key_sec1, offline_scopes,
+        client_token_hash, pair_request_id, state, created_at, updated_at
+      ) VALUES (
+        ${grant.grantId}, ${grant.accountId}, ${grant.daemonId}, ${grant.origin}, ${grant.publicKeySec1},
+        ${grant.offlineScopes}, ${clientTokenHash}, ${pairRequestId}, 'pending_install', ${grant.createdAt}, ${now}
+      )
+      ON CONFLICT DO NOTHING
+      RETURNING *
+    `;
+    return rows[0];
+  }
+
+  async getLocalGrant(grantId: string): Promise<LocalGrantRecord | undefined> {
+    const rows = await this.sql<LocalGrantRecord[]>`SELECT * FROM local_browser_grants WHERE grant_id = ${grantId}`;
+    return rows[0];
+  }
+
+  async getLocalGrantByPairRequest(accountId: AccountId, pairRequestId: string): Promise<LocalGrantRecord | undefined> {
+    const rows = await this.sql<LocalGrantRecord[]>`
+      SELECT * FROM local_browser_grants WHERE account_id = ${accountId} AND pair_request_id = ${pairRequestId}
+    `;
+    return rows[0];
+  }
+
+  async findMatchingLocalGrant(accountId: AccountId, daemonId: DaemonId, origin: string, publicKeySec1: Uint8Array): Promise<LocalGrantRecord | undefined> {
+    const rows = await this.sql<LocalGrantRecord[]>`
+      SELECT * FROM local_browser_grants
+      WHERE account_id = ${accountId} AND daemon_id = ${daemonId} AND origin = ${origin}
+        AND public_key_sec1 = ${publicKeySec1} AND state NOT IN ('pending_revoke', 'revoked')
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    return rows[0];
+  }
+
+  async listLocalGrantsByDaemon(daemonId: DaemonId): Promise<LocalGrantRecord[]> {
+    return this.sql<LocalGrantRecord[]>`
+      SELECT * FROM local_browser_grants WHERE daemon_id = ${daemonId} ORDER BY created_at
+    `;
+  }
+
+  async listLocalGrantsByClientToken(accountId: AccountId, tokenHash: string): Promise<LocalGrantRecord[]> {
+    return this.sql<LocalGrantRecord[]>`
+      SELECT * FROM local_browser_grants
+      WHERE account_id = ${accountId} AND client_token_hash = ${tokenHash} AND state NOT IN ('pending_revoke', 'revoked')
+      ORDER BY created_at
+    `;
+  }
+
+  async countLiveLocalGrants(accountId: AccountId, daemonId: DaemonId): Promise<number> {
+    const rows = await this.sql<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM local_browser_grants
+      WHERE account_id = ${accountId} AND daemon_id = ${daemonId} AND state NOT IN ('pending_revoke', 'revoked')
+    `;
+    return rows[0].n;
+  }
+
+  async beginLocalGrantControl(
+    grantId: string,
+    state: LocalGrantState,
+    requestId: string,
+    action: LocalGrantControlAction,
+    now: number,
+  ): Promise<LocalGrantRecord | undefined> {
+    const revokedAt = action === "revoke" || action === "sync_revoke" ? now : null;
+    const rows = await this.sql<LocalGrantRecord[]>`
+      UPDATE local_browser_grants SET
+        state = ${state}, control_request_id = ${requestId}, control_action = ${action},
+        error = NULL, updated_at = ${now},
+        revoked_at = CASE WHEN ${revokedAt}::double precision IS NULL THEN revoked_at ELSE ${revokedAt} END
+      WHERE grant_id = ${grantId}
+      RETURNING *
+    `;
+    return rows[0];
+  }
+
+  /** 只接收当前 control request 的 ack；重连后迟到的旧 ack 不得覆盖新状态。 */
+  async applyLocalGrantAck(requestId: string, grantId: string, ok: boolean, error: string | null, now: number): Promise<LocalGrantRecord | undefined> {
+    const rows = await this.sql<LocalGrantRecord[]>`
+      UPDATE local_browser_grants SET
+        state = CASE
+          WHEN ${ok} AND control_action IN ('revoke', 'sync_revoke') THEN 'revoked'
+          WHEN ${ok} THEN 'active'
+          WHEN control_action IN ('revoke', 'sync_revoke') THEN 'pending_revoke'
+          ELSE 'install_failed'
+        END,
+        error = ${ok ? null : error},
+        control_request_id = NULL,
+        control_action = NULL,
+        updated_at = ${now}
+      WHERE grant_id = ${grantId} AND control_request_id = ${requestId}
+      RETURNING *
+    `;
+    return rows[0];
+  }
+
+  async createLocalLease(lease: OnlineDeviceLease, clientTokenHash: string | null, createdAt: number): Promise<LocalLeaseRecord> {
+    const rows = await this.sql<LocalLeaseRecord[]>`
+      INSERT INTO local_device_leases (
+        lease_id, grant_id, account_id, daemon_id, client_token_hash, scopes, expires_at, created_at, revoked
+      ) VALUES (
+        ${lease.leaseId}, ${lease.grantId}, ${lease.accountId}, ${lease.daemonId}, ${clientTokenHash},
+        ${lease.scopes}, ${lease.expiresAt}, ${createdAt}, false
+      ) RETURNING *
+    `;
+    return rows[0];
+  }
+
+  async revokeLocalLeasesForGrant(grantId: string): Promise<void> {
+    await this.sql`UPDATE local_device_leases SET revoked = true WHERE grant_id = ${grantId}`;
+  }
+
+  async revokeLocalLeasesForDaemon(daemonId: DaemonId): Promise<void> {
+    await this.sql`UPDATE local_device_leases SET revoked = true WHERE daemon_id = ${daemonId} AND revoked = false`;
+  }
+
+  async pruneLocalControlState(now: number): Promise<void> {
+    await this.sql`DELETE FROM local_device_leases WHERE revoked = true OR expires_at <= ${now}`;
+    // 已确认撤销的 grant 仍保留一段时间作为重连 revoke tombstone；避免表无限增长。
+    await this.sql`
+      DELETE FROM local_browser_grants
+      WHERE state = 'revoked' AND revoked_at IS NOT NULL AND revoked_at < ${now - 30 * 24 * 60 * 60 * 1000}
+    `;
+  }
+
   /* ---------------------------- projects --------------------------- */
   async createProject(p: Project): Promise<Project> {
     await this.sql`
@@ -494,5 +839,152 @@ export class Store {
   async removeTasksByDaemon(daemonId: DaemonId): Promise<TaskId[]> {
     const rows = await this.sql<{ id: TaskId }[]>`DELETE FROM tasks WHERE daemon_id = ${daemonId} RETURNING id`;
     return rows.map((r) => r.id);
+  }
+
+  /* ---------------------- prepared operations ---------------------- */
+  async createPreparedOperation(operation: NewPreparedOperation): Promise<PreparedOperationRecord | undefined> {
+    const now = Date.now();
+    const rows = await this.sql<PreparedOperationRecord[]>`
+      INSERT INTO prepared_device_operations (
+        operation_id, account_id, daemon_id, kind, target_id, target_version, frame, metadata,
+        expires_at, state, completed, created_at, updated_at
+      ) VALUES (
+        ${operation.operationId}, ${operation.accountId}, ${operation.daemonId}, ${operation.kind},
+        ${operation.targetId}, ${operation.targetVersion}, ${operation.frame}, ${operation.metadata},
+        ${operation.expiresAt}, 'pending_install', false, ${now}, ${now}
+      )
+      ON CONFLICT DO NOTHING
+      RETURNING *
+    `;
+    return rows[0];
+  }
+
+  async getPreparedOperation(operationId: string): Promise<PreparedOperationRecord | undefined> {
+    const rows = await this.sql<PreparedOperationRecord[]>`
+      SELECT * FROM prepared_device_operations WHERE operation_id = ${operationId}
+    `;
+    return rows[0];
+  }
+
+  async findActivePreparedOperation(accountId: AccountId, kind: string, targetId: string, now: number): Promise<PreparedOperationRecord | undefined> {
+    const rows = await this.sql<PreparedOperationRecord[]>`
+      SELECT * FROM prepared_device_operations
+      WHERE account_id = ${accountId} AND kind = ${kind} AND target_id = ${targetId}
+        AND completed = false AND expires_at > ${now} AND state <> 'expired'
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    return rows[0];
+  }
+
+  async listInstallablePreparedOperations(daemonId: DaemonId, now: number): Promise<PreparedOperationRecord[]> {
+    return this.sql<PreparedOperationRecord[]>`
+      SELECT * FROM prepared_device_operations
+      WHERE daemon_id = ${daemonId} AND completed = false AND expires_at > ${now}
+        AND state IN ('pending_install', 'installed', 'install_failed')
+      ORDER BY created_at LIMIT 1024
+    `;
+  }
+
+  async listReadyPreparedOperations(accountId: AccountId, now: number): Promise<PreparedOperationRecord[]> {
+    return this.sql<PreparedOperationRecord[]>`
+      SELECT * FROM prepared_device_operations
+      WHERE account_id = ${accountId} AND completed = false AND expires_at > ${now} AND state = 'installed'
+      ORDER BY created_at LIMIT 1024
+    `;
+  }
+
+  async markPreparedOperationInstalled(operationId: string, daemonId: DaemonId, ok: boolean, error: string | null): Promise<PreparedOperationRecord | undefined> {
+    const rows = await this.sql<PreparedOperationRecord[]>`
+      UPDATE prepared_device_operations SET
+        state = ${ok ? "installed" : "install_failed"}, install_error = ${ok ? null : error}, updated_at = ${Date.now()}
+      WHERE operation_id = ${operationId} AND daemon_id = ${daemonId} AND completed = false
+      RETURNING *
+    `;
+    return rows[0];
+  }
+
+  /** 在事务内原子 claim report；重复/并发 report 只有一个调用方拿到记录。 */
+  async claimPreparedOperationReport(operationId: string, daemonId: DaemonId): Promise<PreparedOperationRecord | undefined> {
+    const rows = await this.sql<PreparedOperationRecord[]>`
+      UPDATE prepared_device_operations SET state = 'applying', updated_at = ${Date.now()}
+      WHERE operation_id = ${operationId} AND daemon_id = ${daemonId} AND completed = false AND state <> 'applying'
+      RETURNING *
+    `;
+    return rows[0];
+  }
+
+  async finishPreparedOperation(operationId: string, report: DeviceOperationReport): Promise<PreparedOperationRecord | undefined> {
+    const rows = await this.sql<PreparedOperationRecord[]>`
+      UPDATE prepared_device_operations SET
+        state = ${report.ok ? "completed" : "failed"}, completed = true,
+        report_ok = ${report.ok}, report_task_id = ${report.taskId ?? null},
+        report_session_id = ${report.sessionId ?? null}, report_pid = ${report.pid ?? null},
+        report_exit_code = ${report.exitCode ?? null}, report_error = ${report.error ?? null},
+        result_frame = ${report.resultFrame ?? null}, updated_at = ${Date.now()}
+      WHERE operation_id = ${operationId} AND state = 'applying' AND completed = false
+      RETURNING *
+    `;
+    return rows[0];
+  }
+
+  async expirePreparedOperations(now: number): Promise<void> {
+    await this.sql`
+      UPDATE prepared_device_operations SET state = 'expired', updated_at = ${now}
+      WHERE completed = false AND expires_at <= ${now} AND state NOT IN ('applying', 'expired')
+    `;
+    // 完成记录只保留 30 天；result_frame 有界但仍不应永久占用数据库。
+    await this.sql`
+      DELETE FROM prepared_device_operations
+      WHERE completed = true AND updated_at < ${now - 30 * 24 * 60 * 60 * 1000}
+    `;
+  }
+
+  /* ------------------------- checkpoint cache ------------------------ */
+  async upsertSessionCheckpoint(accountId: AccountId, daemonId: DaemonId, checkpoint: SessionCheckpoint): Promise<SessionCheckpointRecord | undefined> {
+    const now = Date.now();
+    const rows = await this.sql<SessionCheckpointRow[]>`
+      INSERT INTO session_checkpoints (
+        session_id, task_id, account_id, daemon_id, snapshot_seq, ansi_snapshot,
+        cols, rows, captured_at, updated_at
+      ) VALUES (
+        ${checkpoint.sessionId}, ${checkpoint.taskId}, ${accountId}, ${daemonId}, ${checkpoint.snapshotSeq.toString()},
+        ${checkpoint.ansiSnapshot}, ${checkpoint.cols}, ${checkpoint.rows}, ${checkpoint.capturedAt}, ${now}
+      )
+      ON CONFLICT (session_id) DO UPDATE SET
+        task_id = excluded.task_id,
+        account_id = excluded.account_id,
+        daemon_id = excluded.daemon_id,
+        snapshot_seq = excluded.snapshot_seq,
+        ansi_snapshot = excluded.ansi_snapshot,
+        cols = excluded.cols,
+        rows = excluded.rows,
+        captured_at = excluded.captured_at,
+        updated_at = excluded.updated_at
+      WHERE session_checkpoints.daemon_id = excluded.daemon_id
+        AND session_checkpoints.task_id = excluded.task_id
+        AND session_checkpoints.snapshot_seq < excluded.snapshot_seq
+      RETURNING *
+    `;
+    return rows[0] && rowToCheckpoint(rows[0]);
+  }
+
+  async getSessionCheckpoint(sessionId: SessionId): Promise<SessionCheckpointRecord | undefined> {
+    const rows = await this.sql<SessionCheckpointRow[]>`SELECT * FROM session_checkpoints WHERE session_id = ${sessionId}`;
+    return rows[0] && rowToCheckpoint(rows[0]);
+  }
+
+  async listSessionCheckpoints(accountId: AccountId): Promise<SessionCheckpointRecord[]> {
+    const rows = await this.sql<SessionCheckpointRow[]>`
+      SELECT * FROM session_checkpoints WHERE account_id = ${accountId} ORDER BY captured_at DESC LIMIT 1024
+    `;
+    return rows.map(rowToCheckpoint);
+  }
+
+  async removeSessionCheckpointsByTask(taskId: TaskId): Promise<void> {
+    await this.sql`DELETE FROM session_checkpoints WHERE task_id = ${taskId}`;
+  }
+
+  async removeSessionCheckpointsByDaemon(daemonId: DaemonId): Promise<void> {
+    await this.sql`DELETE FROM session_checkpoints WHERE daemon_id = ${daemonId}`;
   }
 }
