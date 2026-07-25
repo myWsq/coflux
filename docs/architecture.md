@@ -216,9 +216,9 @@ relay+pair、permission denied、fallback/promotion、worker restart、server ou
 
 | 浏览器 | 版本 | 结果 |
 |---|---|---|
-| Chrome stable | N/A | BLOCKED：自动验收宿主未暴露可控浏览器实例 |
-| Safari stable | N/A | BLOCKED：自动验收宿主未暴露可控浏览器实例 |
-| Firefox stable | N/A | BLOCKED：自动验收宿主未暴露可控浏览器实例 |
+| Chrome stable | 未安装 | BLOCKED：自动验收宿主未暴露可控浏览器实例 |
+| Safari stable | 本机 Safari 27.0（macOS 27.0 build 26A5378n） | BLOCKED：已安装，但自动验收宿主未暴露可控实例；未据此冒充 stable 结果 |
+| Firefox stable | 未安装 | BLOCKED：自动验收宿主未暴露可控浏览器实例 |
 
 该矩阵仍是“待实机签字”，不能用 Playwright 模拟结果替代，也不能据此判定产品失败或通过。
 
