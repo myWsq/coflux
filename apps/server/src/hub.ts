@@ -1324,7 +1324,7 @@ export class Hub {
           this.sendClient(client, { case: "error", value: { message: "主工作区不能删除（删除整个项目即可）" } });
           return;
         }
-        if (!ws.projectId) {
+        if (isDirWorkspace(ws)) {
           // 目录工作区：只删记录，绝不进入 worktree.remove（不能对 HOME 跑 git worktree 操作），
           // daemon 离线也可删。
           const tasks = await this.store.listTasksByWorkspace(ws.id);
@@ -1384,8 +1384,8 @@ export class Hub {
         const outcome = await this.store.transaction(async (tx) => {
           const ws = await tx.getWorkspace(value.workspaceId);
           if (!ws || ws.accountId !== client.accountId) return { error: "工作区不存在或不属于本账号" } as const;
-          // 目录工作区（projectId 为空）没有 project 可检查
-          if (ws.projectId) {
+          // 目录工作区没有 project 可检查
+          if (!isDirWorkspace(ws)) {
             const project = await tx.claimActiveProject(ws.projectId);
             if (!project || project.accountId !== ws.accountId || project.daemonId !== ws.daemonId) {
               return { error: "项目正在删除，不能再创建任务" } as const;
@@ -1747,6 +1747,11 @@ export class Hub {
     for (const d of this.daemons.values()) try { d.ws.close(1001, "server shutting down"); } catch { /* ignore */ }
     for (const c of this.clients) try { c.ws.close(1001, "server shutting down"); } catch { /* ignore */ }
   }
+}
+
+/** 目录工作区（无 repo 终端，plan 045）：projectId 为空即目录工作区，判定收敛在此一处 */
+function isDirWorkspace(ws: Workspace): boolean {
+  return !ws.projectId;
 }
 
 function validOperationResult(operation: PreparedOperationRecord, report: DeviceOperationReport, payload: DeviceEnvelope["payload"]): boolean {

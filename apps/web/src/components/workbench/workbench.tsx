@@ -19,7 +19,7 @@ import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts"
 import type { WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 import { WORKSPACE_KEY, USE_SUPABASE } from "@/config";
 import { cn } from "@/lib/utils";
-import type { CofluxClient } from "@coflux/client";
+import { isDirWorkspace, type CofluxClient } from "@coflux/client";
 
 // 终端栈（xterm + WorkspaceTerminal/TerminalPane）懒加载，不进首屏主 chunk：
 // 登录页与"未选中工作区"的空状态都不需要它。module 级别声明，保证只 lazy() 一次，
@@ -180,7 +180,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   function requestRemoveWorkspace(workspace: Workspace) {
     // 目录工作区（无 repo 终端）：只删记录，不涉及任何 git/文件系统操作，文案不能沿用 worktree 措辞
-    if (!workspace.projectId) {
+    if (isDirWorkspace(workspace)) {
       setConfirmAction({
         title: "移除这个终端？",
         description: "正在运行的 shell 会停止，终端记录会被移除；目录本身不受影响。",

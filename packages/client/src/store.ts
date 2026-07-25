@@ -97,6 +97,12 @@ function upsert<T>(list: T[], item: T, match: (value: T) => boolean): T[] {
   return next;
 }
 
+/** 目录工作区（无 repo 终端，plan 045）：projectId 为空即目录工作区。
+ * 判定在客户端收敛于此一处，勿在 UI 层散落裸比较。 */
+export function isDirWorkspace(workspace: Workspace): boolean {
+  return !workspace.projectId;
+}
+
 function withoutSetValue(values: Set<string>, value: string): Set<string> {
   if (!values.has(value)) return values;
   const next = new Set(values);

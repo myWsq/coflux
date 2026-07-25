@@ -7,7 +7,7 @@ import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
-import type { CofluxClient } from "@coflux/client";
+import { isDirWorkspace, type CofluxClient } from "@coflux/client";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
 import { cn } from "@/lib/utils";
 
@@ -187,10 +187,8 @@ export function Sidebar(props: SidebarProps) {
       .filter((workspace) => workspace.projectId === projectId)
       .sort((left, right) => (left.isMain === right.isMain ? left.createdAt - right.createdAt : left.isMain ? -1 : 1));
 
-  /** 目录工作区（无 repo 终端，plan 045）：projectId 为空即目录工作区 */
-  const dirWorkspaces = workspaces
-    .filter((workspace) => !workspace.projectId)
-    .sort((left, right) => left.createdAt - right.createdAt);
+  /** 目录工作区（无 repo 终端，plan 045） */
+  const dirWorkspaces = workspaces.filter(isDirWorkspace).sort((left, right) => left.createdAt - right.createdAt);
 
   return (
     <aside

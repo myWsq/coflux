@@ -10,7 +10,7 @@ import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { ChangesView } from "@/components/workbench/changes-view";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
-import type { CofluxClient } from "@coflux/client";
+import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
 import { TerminalPane, type TerminalController, type TerminalControlState } from "@/components/workbench/terminal-pane";
 
@@ -62,9 +62,9 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   const lastError = useStore(client.store, (state) => state.lastError);
   const ports = useStore(client.store, (state) => state.ports);
 
-  // 目录工作区（无 repo 终端，plan 045）：projectId 为空。一工作区一终端，
+  // 目录工作区（无 repo 终端，plan 045）：一工作区一终端，
   // 不渲染顶栏（分支按钮/「变更」tab/终端 Tabs/新建按钮），git 语义功能全部不适用。
-  const isDirWorkspace = Boolean(workspace && !workspace.projectId);
+  const isDirWorkspace = Boolean(workspace && isDirWorkspaceOf(workspace));
 
   const [activeTaskId, setActiveTaskIdState] = useState<string | null>(null);
   // 主面板视图：常驻「变更」tab 与终端 Tab 互斥（plan 025）。本组件随工作区常驻挂载
