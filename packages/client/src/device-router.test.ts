@@ -567,6 +567,33 @@ test("attach 返回 stale_holder 后释放无其它 demand 的 session lane", as
   h.router.destroy();
 });
 
+test("attach 返回 session_not_found 时 stopSession 立即带 code 失败，不空等 holder", async () => {
+  const h = harness();
+  h.router.attachSession("daemon-1", "task-1", "session-1", 80, 24);
+  await flush();
+  const direct = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(direct);
+  await flush();
+  const stopped = h.router.stopSession("daemon-1", "session-1").then(
+    () => undefined,
+    (error: { code?: string }) => error,
+  );
+  await flush();
+  const request = attachRequest(direct);
+  h.adapter.emit(direct, {
+    case: "error",
+    value: { requestId: request.requestId, code: "session_not_found", message: "session 不存在或已退出" },
+  });
+  await flush();
+  // 推进过 holder 超时：修复前要空等到这里才得到无从判定的「等待 session holder 超时」，
+  // 上层据此中止、不删 catalog task（残留 tab 永远关不掉）。
+  h.clock.advance(10_000); // > CONTROL_REQUEST_TIMEOUT_MS
+  await flush();
+  const error = await stopped;
+  assert.equal((error as { code?: string })?.code, "session_not_found");
+  h.router.destroy();
+});
+
 test("累计 ACK 只释放确认前缀，ACK 丢失时活连接严格重投", async () => {
   const h = harness();
   h.router.attachSession("daemon-1", "task-1", "session-1", 80, 24);

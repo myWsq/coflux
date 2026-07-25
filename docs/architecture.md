@@ -211,16 +211,57 @@ code，再由账号 cookie 进入代理。HTTP/SSE/WebSocket 都通过 `ProxyDat
 | Device attach + 全新 xterm 6 解析到可用画面 | 64.820 ms | < 100 ms |
 | timed direct path 中心 `deviceRelayFrame` 增量 | 0 | = 0 |
 
+2026-07-25 在 `a89476b` 上二次复现同一 benchmark：echo p95 0.771 ms、attach p95 59.838 ms、
+中心帧增量 0，SLO 仍全部通过（采样波动在门限内）。
+
 浏览器实机矩阵是独立发布门：macOS 当前稳定版 Chrome、Safari、Firefox 都要覆盖 cached direct、首次
 relay+pair、permission denied、fallback/promotion、worker restart、server outage。本轮记录：
 
 | 浏览器 | 版本 | 结果 |
 |---|---|---|
-| Chrome stable | 本机 Chrome 150.0.7871.187 | BLOCKED：已安装并运行，但尚未建立 ChatGPT Chrome Extension 控制连接，自动验收宿主未暴露可控实例 |
-| Safari stable | 本机 Safari 27.0（macOS 27.0 build 26A5378n） | BLOCKED：已安装，但自动验收宿主未暴露可控实例；未据此冒充 stable 结果 |
-| Firefox stable | 未安装 | BLOCKED：自动验收宿主未暴露可控浏览器实例 |
+| Chrome stable | 本机 Chrome 150.0.7871.187（CDP 控真实实例，非 headless shell） | PASS，6 场景全过；发现 3 个 UI/收敛缺陷（见下表） |
+| Safari stable | 本机 Safari 27.0（macOS 27.0 build 26A5378n） | 本轮不做（2026-07-25 决定）：自动化需手动开启「开发 → 允许 Apple 事件的 JavaScript」或 `safaridriver --enable` |
+| Firefox stable | 未安装 | 本轮不做（2026-07-25 决定） |
 
-该矩阵仍是“待实机签字”，不能用 Playwright 模拟结果替代，也不能据此判定产品失败或通过。
+矩阵门范围因此收窄为 Chrome：本地优先直连在 Safari/Firefox 上未经实机验证，两者的 loopback
+WebSocket、LNA/permission 行为都属未知，不得据本表宣称跨浏览器可用。要扩回三浏览器时，
+按上表 6 个场景逐项复跑并补记版本与结果。
+
+2026-07-25 Chrome 150 实机结果（dev 栈：vite 5273 + server 8787 + `.coflux-dev` daemon，
+gateway 8788；transport mode 取自 sidebar 设备行 `title`，direct 由 `lsof` 确认 Chrome↔worker
+loopback TCP，输入副作用用 append-only 文件计数）：
+
+| 场景 | 观测 |
+|---|---|
+| cached direct | 设备行 `同机 Device 数据直连本地 daemon`；Chrome PID↔`coflux-worker` `127.0.0.1:8788` ESTABLISHED；输入副作用恰好一次 |
+| 首次无缓存 relay+pair | 清 IndexedDB 后：probing 341 ms → `中心 opaque relay` 425 ms → `本机直连` 525 ms（后台 pair 完成即升直连） |
+| loopback 被拒 | 注入 `WebSocket` 对 `:8788` 抛 `SecurityError`：立即 relay，detail 带拒因，无 loopback TCP；relay 下 attach/input/resize 全部可用（36×132 → 37×118） |
+| relay fallback（真实） | 先占满 `127.0.0.1`/`::1` 的 gateway 端口使 worker bind 失败：328 ms 落 relay；释放端口后 worker 自动重试 bind 成功 |
+| worker restart | `kill -9` worker（supervisor 存活）：`本地 gateway 连接已关闭` → 探测 → 直连恢复，全程 591 ms；PTY pid 不变、历史完整、输入不重复 |
+| server outage | `kill -9` server：detail 转 `中心离线；本地 session read/control 仍可用` 且仍是直连；list/attach（snapshot 全量恢复）/input/resize（37×118 → 39×160）/stop（PTY 真退出）全部成立；中心重启后横幅自动消失 |
+
+同一轮实机暴露 3 个缺陷（黑盒 wire 测试结构上覆盖不到：它只验证协议行为、不渲染 DOM），
+均已在同一轮修复并实机复验：
+
+1. 中心离线横幅 `fixed top-0 h-7` 压住终端 tab 栏（tab 矩形 y=4..32），`elementFromPoint`
+   命中横幅——中心离线期间鼠标点不到任何终端 tab 与关闭按钮，与「中心离线仍可 attach/stop」
+   相抵。修复：断线时根容器同步 `pt-7` 给横幅留白（终端 fit 由 ResizeObserver 跟随）。
+   复验：断线横幅在场时 tab 落到 y=32，四个 tab 的 `elementFromPoint` 全部命中自身。
+2. `closeTask()` 在 `stopSession` 抛错时直接中止，不再删 catalog task：daemon/supervisor
+   重启后残留的 task（PTY 已不存在）永远关不掉。根因在 router——`session_not_found` 不 reject
+   holder 等待，调用方只能空等到 holder 超时、拿到无从判定的原因。修复：router 收到
+   `session_not_found` 立即带 code 拒掉 holder waiter（`device-router.test.ts` 有回归用例），
+   `closeTask` 见此 code 时继续删 task。复验：实机点关闭，僵尸 tab 全部可清。
+3. 同一函数在 `controlAuthenticated` 为 false 时静默跳过 `taskRemove` 且不排队补偿。
+   修复：中心离线时记账，`authOk` 后按序补投（`logout` 清空，避免跨账号误删）。
+   复验：中心停止时关终端 → PTY 立即退出、tab 暂留；中心重启后 tab 自动消失。
+
+已知次要项（未修）：中心恢复后 device transport detail 仍停留在 `中心离线；本地 session
+read/control 仍可用`（未 republish，直连本身正常）；缓存 grant 里的 gateway 端口与实际监听
+端口不一致时不刷新 grant，direct 只在 gateway 回到 grant 记录端口后才恢复（默认端口固定，
+触发面窄）。
+
+实机结果不能用 Playwright 模拟替代：本轮的 6 个场景都在真实 Chrome 与真实 daemon/server 进程上跑。
 
 ## 12. 仓库结构与验证
 

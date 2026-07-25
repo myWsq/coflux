@@ -1332,6 +1332,15 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
             rejectHolderWaiters(session, new DeviceRouteError(message, code));
             options.onSessionDetached(route.daemonId, session.taskId, session.sessionId, message);
             releaseIdle(route);
+          } else if (code === "session_not_found") {
+            // authority 明确说没有这个 session：立刻带 code 拒掉 holder 等待，否则 stopSession
+            // 之类的调用要空等到 holder 超时，上层拿不到可判定的原因（本机 stop 永远收敛不了）。
+            session.desired = false;
+            session.holderEpoch = undefined;
+            clearInputRetry(session);
+            rejectHolderWaiters(session, new DeviceRouteError(message, code));
+            options.onError(message);
+            releaseIdle(route);
           } else {
             options.onError(message);
           }
