@@ -74,11 +74,12 @@ git push origin v1.2.3
 
 `v*` tag 触发 `.github/workflows/release.yml`：
 
-1. **矩阵交叉编译** supervisor + worker：`x86_64`/`aarch64` 的 linux-musl（静态，`cross`）+ macOS（`aarch64`/`x86_64`，原生）。
-2. **签名 + 清单**（`scripts/release-sign.mjs`，用 `WORKER_SIGNING_KEY`）：对每个 `coflux-worker-<target>` 产物算 sha256 + ed25519 签名。
+1. **矩阵交叉编译** supervisor + worker：`x86_64`/`aarch64` 的 linux-musl（静态，`cross`）+ macOS（`aarch64`/`x86_64`，原生）；linux 矩阵额外产出独立 relay（`coflux-relay`，plan 043，服务器节点部署用，macOS 不产）。
+2. **签名 + 清单**（`scripts/release-sign.mjs`，用 `WORKER_SIGNING_KEY`）：对每个 `coflux-worker-<target>` 产物算 sha256 + ed25519 签名。relay 产物不签名（人工 ssh 部署、不走自动下载验签），只进 `SHA256SUMS` 供部署校验。
 3. **发布 Release**，资产含：
    - `coflux-worker-<target>`（原始二进制，下载+验签对象）+ `.sig`
-   - `coflux-<tag>-<target>.tar.gz`（含两个二进制，人工安装用）
+   - `coflux-relay-<linux-target>`（独立 relay 节点部署用；部署流程见运维记录）
+   - `coflux-<tag>-<target>.tar.gz`（含 supervisor+worker，人工安装用）
    - `manifest.json`（每个 target 的 `url`/`sha256`/`signature`）+ `SHA256SUMS`
 
 `ci.yml`（push/PR 到 main）是质量门：类型检查 + `cargo test` + `cargo build`（`-D warnings`）+ 黑盒 20 项。
