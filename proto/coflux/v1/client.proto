@@ -6,6 +6,7 @@ package coflux.v1;
 
 import "coflux/v1/common.proto";
 import "coflux/v1/daemon.proto";
+import "coflux/v1/device.proto";
 
 // ===== Client → Server 载荷 =====
 
@@ -180,6 +181,12 @@ message ClientToServer {
     ClientFsRead client_fs_read = 22;
     ClientFsWrite client_fs_write = 25;
     DeviceSetName device_set_name = 26;
+    LocalPairRequest local_pair_request = 27;
+    LocalLeaseRequest local_lease_request = 28;
+    DeviceRelayClientOpen device_relay_open = 29;
+    DeviceRelayFrame device_relay_frame = 30;
+    DeviceRelayClose device_relay_close = 31;
+    LocalUnpairRequest local_unpair_request = 32;
     // 数据面（高频）
     PtyInput pty_input = 23;
     WorkspaceSetName workspace_set_name = 24;
@@ -303,6 +310,14 @@ message ServerToClient {
     ServerError error = 21;
     FsWriteResult fs_write_result = 23;
     ClientOutdated client_outdated = 24;
+    LocalPairResult local_pair_result = 25;
+    LocalLeaseResult local_lease_result = 26;
+    DeviceRelayStatus device_relay_status = 27;
+    DeviceRelayFrame device_relay_frame = 28;
+    DeviceRelayClose device_relay_close = 29;
+    PreparedDeviceOperation prepared_device_operation = 30;
+    SessionCheckpoint session_checkpoint = 31;
+    LocalUnpairResult local_unpair_result = 32;
     // 数据面（高频）
     PtyOutput pty_output = 22;
   }

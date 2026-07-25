@@ -2,7 +2,7 @@
 //!
 //! 与 TS `packages/protocol` 的 encodeFrame/decodeFrame 字节级一致：
 //!   [kind:1][idLen:1][id:utf8][? ridLen:1][? requestId:utf8][payload 到帧尾]
-//! kind: 1=output 2=input 3=replay（仅 replay 带 requestId）4=proxy.data。
+//! kind: 1=output 2=input 3=replay（仅 replay 带 requestId）4=proxy.data 5=device envelope。
 //! proxy.data 的 id 是 connId（隧道连接 id），复用同一头部布局，双向（server↔daemon）透传
 //! 任意 TCP 字节。
 //!
@@ -15,6 +15,7 @@ pub const FRAME_OUTPUT: u8 = 1;
 pub const FRAME_INPUT: u8 = 2;
 pub const FRAME_REPLAY: u8 = 3;
 pub const FRAME_PROXY_DATA: u8 = 4;
+pub const FRAME_DEVICE: u8 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataFrame {
@@ -22,15 +23,18 @@ pub enum DataFrame {
     Input { session_id: String, data: Vec<u8> },
     Replay { session_id: String, request_id: String, data: Vec<u8> },
     ProxyData { conn_id: String, data: Vec<u8> },
+    /// worker↔supervisor 的 multiplexed DeviceEnvelope；id 是 logical channelId。
+    Device { channel_id: String, data: Vec<u8> },
 }
 
-/// 编码为二进制帧。sessionId/requestId/connId 为服务器签发的短 id（< 256 字节）。
+/// 编码为二进制帧。sessionId/requestId/connId/channelId 均为短 id（< 256 字节）。
 pub fn encode_frame(frame: &DataFrame) -> Vec<u8> {
     let (kind, sid, rid, data): (u8, &str, Option<&str>, &[u8]) = match frame {
         DataFrame::Output { session_id, data } => (FRAME_OUTPUT, session_id, None, data),
         DataFrame::Input { session_id, data } => (FRAME_INPUT, session_id, None, data),
         DataFrame::Replay { session_id, request_id, data } => (FRAME_REPLAY, session_id, Some(request_id), data),
         DataFrame::ProxyData { conn_id, data } => (FRAME_PROXY_DATA, conn_id, None, data),
+        DataFrame::Device { channel_id, data } => (FRAME_DEVICE, channel_id, None, data),
     };
     let sid = sid.as_bytes();
     debug_assert!(sid.len() <= 255, "sessionId too long for frame");
@@ -77,6 +81,7 @@ pub fn decode_frame(buf: &[u8]) -> Option<DataFrame> {
             Some(DataFrame::Replay { session_id, request_id, data: buf[off..].to_vec() })
         }
         FRAME_PROXY_DATA => Some(DataFrame::ProxyData { conn_id: session_id, data: buf[off..].to_vec() }),
+        FRAME_DEVICE => Some(DataFrame::Device { channel_id: session_id, data: buf[off..].to_vec() }),
         _ => None,
     }
 }
@@ -129,5 +134,13 @@ mod tests {
     fn proxy_data_rejects_truncated() {
         assert_eq!(decode_frame(&[FRAME_PROXY_DATA]), None);
         assert_eq!(decode_frame(&[FRAME_PROXY_DATA, 5, b'a']), None); // idLen=5 但不足
+    }
+
+    #[test]
+    fn device_envelope_roundtrip() {
+        let f = DataFrame::Device { channel_id: "local-1".into(), data: vec![0, 1, 2, 0xff] };
+        let enc = encode_frame(&f);
+        assert_eq!(enc[0], FRAME_DEVICE);
+        assert_eq!(decode_frame(&enc), Some(f));
     }
 }

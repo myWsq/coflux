@@ -6,6 +6,7 @@ syntax = "proto3";
 package coflux.v1;
 
 import "coflux/v1/common.proto";
+import "coflux/v1/device.proto";
 
 // ===== Daemon → Server 载荷 =====
 
@@ -24,6 +25,12 @@ message DaemonEnrollRequest {
   string worker_version = 4;
   string supervisor_version = 5;
   string arch = 6;
+}
+
+// 独立于认证消息的 gateway capability announce；保持旧认证构造面完全兼容，worker 可在
+// authed 后及 gateway identity 变化时重复上报，server 以 daemon 连接身份绑定该 descriptor。
+message LocalGatewayAnnounce {
+  LocalGatewayDescriptor gateway = 1;
 }
 
 message DaemonResync {
@@ -102,6 +109,15 @@ message DaemonToServer {
     ProxyData proxy_data = 17;
     WorkspaceBranch workspace_branch = 18;
     WorkspaceDiff workspace_diff = 20;
+    LocalGrantAck local_grant_ack = 21;
+    DeviceRelayFrame device_relay_frame = 22;
+    DeviceRelayClose device_relay_close = 23;
+    SessionCheckpoint session_checkpoint = 24;
+    DeviceOperationReport device_operation_report = 25;
+    LocalGatewayAnnounce local_gateway_announce = 26;
+    // sessiond truth 的完整 reconciliation snapshot；server 不得据此关闭 unknown live session。
+    DeviceSessionCatalog session_catalog = 27;
+    PreparedDeviceOperationInstalled prepared_device_operation_installed = 28;
   }
 }
 
@@ -127,6 +143,12 @@ message DaemonEnrolled {
 
 message DaemonAuthed {
   string daemon_id = 1;
+}
+
+// loopback gateway 只接受这些精确 Origin；worker 持久化最后一次成功认证下发值，供中心
+// 离线时使用。独立消息允许中心在不重做 daemon auth 的前提下轮换 allowlist。
+message LocalGatewayConfigure {
+  repeated string origins = 1;
 }
 
 message DaemonAuthError {
@@ -264,6 +286,16 @@ message ServerToDaemon {
     FsRead fs_read = 17;
     FsWrite fs_write = 21;
     DaemonSetName daemon_set_name = 22;
+    LocalGrantInstall local_grant_install = 23;
+    LocalGrantRevoke local_grant_revoke = 24;
+    LocalLeaseInstall local_lease_install = 25;
+    DeviceRelayDaemonOpen device_relay_open = 26;
+    DeviceRelayFrame device_relay_frame = 27;
+    DeviceRelayClose device_relay_close = 28;
+    LocalGatewayConfigure local_gateway_configure = 29;
+    DeviceSessionCatalogRequest session_catalog_request = 30;
+    DeviceExitAck exit_ack = 31;
+    PreparedDeviceOperation prepared_device_operation = 32;
     // 数据面（高频）
     PtyInput pty_input = 18;
     ProxyData proxy_data = 19;

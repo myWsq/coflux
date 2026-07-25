@@ -2,8 +2,8 @@
 //!
 //! 复用数据面二进制帧（[frame]）；控制消息走 JSON。UDS 无消息边界，故每条记录加
 //! 4 字节大端长度前缀：`[u32 BE 长度][payload]`。
-//! payload 首字节是 FrameKind(1/2/3) → pty 数据帧；否则按 UTF-8 JSON 解析
-//! （JSON 控制消息以 '{'=0x7b 开头，与 1/2/3 不冲突）。与 TS `apps/daemon/src/ipc.ts` 等价。
+//! payload 首字节是 FrameKind(1..=5) → pty/proxy/device 数据帧；否则按 UTF-8 JSON 解析
+//! （JSON 控制消息以 '{'=0x7b 开头，与 frame kind 不冲突）。
 
 use serde::{Deserialize, Serialize};
 
@@ -87,9 +87,9 @@ pub fn write_record(payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// payload 是 pty 数据帧（首字节 1/2/3）还是 JSON 控制消息
+/// payload 是二进制数据帧（首字节 1..=5）还是 JSON 控制消息
 pub fn is_frame(payload: &[u8]) -> bool {
-    matches!(payload.first().copied(), Some(1..=3))
+    matches!(payload.first().copied(), Some(1..=5))
 }
 
 /// 累积式分帧解析器：喂入任意字节块，凑齐一条记录就回调（镜像 TS RecordParser）。
@@ -143,6 +143,7 @@ mod tests {
     fn frame_vs_json_discriminator() {
         assert!(is_frame(&[1, 0]));
         assert!(is_frame(&[3, 0]));
+        assert!(is_frame(&[5, 0]));
         assert!(!is_frame(b"{\"type\":\"x\"}")); // '{' = 0x7b
     }
 

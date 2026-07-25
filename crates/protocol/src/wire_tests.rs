@@ -12,9 +12,11 @@
 use prost::Message;
 
 use crate::wire::{
-    daemon_to_server, server_to_daemon, DaemonAuthError, DaemonEnrollRequest, DaemonToServer, ExecRun, FsEntry, FsEntryKind, ProjectValidated, PtyOutput, ServerToDaemon, SessionCreate,
-    SessionPorts,
+    daemon_to_server, device_envelope, server_to_daemon, DaemonAuthError, DaemonEnrollRequest, DaemonToServer, DeviceEnvelope,
+    DevicePtyOutput, DeviceRelayFrame, DeviceSessionAttached, DeviceSessionCreate, ExecRun, FsEntry, FsEntryKind, LocalClientHello,
+    PreparedDeviceOperation, ProjectValidated, PtyOutput, ServerToDaemon, SessionCreate, SessionPorts,
 };
+use crate::DEVICE_PROTOCOL_VERSION;
 
 /// 反方向：ServerToDaemon 编码 SessionCreate，解码后分派正确、可选字段（shell 缺省）为 None。
 #[test]
@@ -94,6 +96,149 @@ fn pty_output_bytes_round_trip_preserves_invalid_utf8() {
         Some(daemon_to_server::Payload::PtyOutput(p)) => assert_eq!(p.data, data),
         other => panic!("wrong variant: {other:?}"),
     }
+}
+
+/// DeviceEnvelope 直接承载原始 PTY bytes；再套进 relay frame 后，中心只需 opaque 转发，
+/// 内层 oneof、channel 与非法 UTF-8 数据都不能发生变化。
+#[test]
+fn device_envelope_survives_relay_wrapping() {
+    let data = vec![0x1b, b'[', b'3', b'1', b'm', 0xff, 0x00];
+    let inner = DeviceEnvelope {
+        protocol_version: DEVICE_PROTOCOL_VERSION,
+        channel_id: "channel-7".into(),
+        payload: Some(device_envelope::Payload::PtyOutput(DevicePtyOutput {
+            session_id: "session-9".into(),
+            from_seq: 4_294_967_301,
+            to_seq: 4_294_967_301 + data.len() as u64 - 1,
+            data: data.clone(),
+        })),
+    };
+    let relay = DaemonToServer {
+        payload: Some(daemon_to_server::Payload::DeviceRelayFrame(DeviceRelayFrame {
+            channel_id: "channel-7".into(),
+            frame: inner.encode_to_vec(),
+        })),
+    };
+
+    let decoded_relay = DaemonToServer::decode(relay.encode_to_vec().as_slice()).unwrap();
+    let frame = match decoded_relay.payload {
+        Some(daemon_to_server::Payload::DeviceRelayFrame(frame)) => frame,
+        other => panic!("wrong relay variant: {other:?}"),
+    };
+    assert_eq!(frame.channel_id, "channel-7");
+
+    let decoded_inner = DeviceEnvelope::decode(frame.frame.as_slice()).unwrap();
+    assert_eq!(decoded_inner.protocol_version, DEVICE_PROTOCOL_VERSION);
+    assert_eq!(decoded_inner.channel_id, "channel-7");
+    match decoded_inner.payload {
+        Some(device_envelope::Payload::PtyOutput(output)) => {
+            assert_eq!(output.session_id, "session-9");
+            assert_eq!(output.from_seq, 4_294_967_301);
+            assert_eq!(output.to_seq, 4_294_967_301 + data.len() as u64 - 1);
+            assert_eq!(output.data, data);
+        }
+        other => panic!("wrong device variant: {other:?}"),
+    }
+}
+
+/// holder/snapshot sequence 是完整 uint64，而不是 JS-safe integer 或 32-bit 计数器；
+/// protobuf 往返必须保留高位，才能支撑长寿命 session 与 transport 迁移。
+#[test]
+fn device_snapshot_uint64_fields_preserve_high_bits() {
+    let attached = DeviceEnvelope {
+        protocol_version: DEVICE_PROTOCOL_VERSION,
+        channel_id: "channel-high-bits".into(),
+        payload: Some(device_envelope::Payload::SessionAttached(DeviceSessionAttached {
+            request_id: "request-1".into(),
+            session_id: "session-1".into(),
+            holder_epoch: u64::MAX - 1,
+            snapshot_seq: u64::MAX - 1024,
+            ansi_snapshot: Some(b"\x1b[2Jready".to_vec()),
+            cols: 240,
+            rows: 80,
+        })),
+    };
+
+    let decoded = DeviceEnvelope::decode(attached.encode_to_vec().as_slice()).unwrap();
+    match decoded.payload {
+        Some(device_envelope::Payload::SessionAttached(value)) => {
+            assert_eq!(value.holder_epoch, u64::MAX - 1);
+            assert_eq!(value.snapshot_seq, u64::MAX - 1024);
+            assert_eq!(value.ansi_snapshot, Some(b"\x1b[2Jready".to_vec()));
+        }
+        other => panic!("wrong device variant: {other:?}"),
+    }
+}
+
+/// WebCrypto/Rust handshake 的 SEC1/P1363 bytes 与 transport generation 高位经 protobuf 原样保留。
+#[test]
+fn local_client_hello_round_trip_preserves_key_material_and_generation() {
+    let public_key = [vec![0x04], vec![0x11; 64]].concat();
+    let signature = vec![0x22; 64];
+    let hello = DeviceEnvelope {
+        protocol_version: DEVICE_PROTOCOL_VERSION,
+        channel_id: String::new(),
+        payload: Some(device_envelope::Payload::LocalClientHello(LocalClientHello {
+            protocol_version: DEVICE_PROTOCOL_VERSION,
+            grant_id: "grant-1".into(),
+            browser_public_key_sec1: public_key.clone(),
+            client_instance_id: "client-1".into(),
+            transport_generation: 9_007_199_254_740_999,
+            lease_id: Some("lease-1".into()),
+            gateway_nonce: vec![0x33; 32],
+            signature_p1363: signature.clone(),
+        })),
+    };
+
+    let decoded = DeviceEnvelope::decode(hello.encode_to_vec().as_slice()).unwrap();
+    match decoded.payload {
+        Some(device_envelope::Payload::LocalClientHello(value)) => {
+            assert_eq!(value.browser_public_key_sec1, public_key);
+            assert_eq!(value.signature_p1363, signature);
+            assert_eq!(value.transport_generation, 9_007_199_254_740_999);
+            assert_eq!(value.lease_id.as_deref(), Some("lease-1"));
+        }
+        other => panic!("wrong local-client-hello variant: {other:?}"),
+    }
+}
+
+/// prepared operation 经 server→daemon envelope 安装时，内层 DeviceEnvelope 必须原样保留；
+/// daemon 后续据此校验 direct/relay 请求除 channel_id 外没有被 browser 篡改。
+#[test]
+fn prepared_device_operation_template_round_trip() {
+    let template = DeviceEnvelope {
+        protocol_version: DEVICE_PROTOCOL_VERSION,
+        channel_id: String::new(),
+        payload: Some(device_envelope::Payload::SessionCreate(DeviceSessionCreate {
+            request_id: "request-create".into(),
+            operation_id: "operation-create".into(),
+            session_id: "session-create".into(),
+            task_id: "task-create".into(),
+            cwd: "/repo/worktree".into(),
+            shell: None,
+            cols: 120,
+            rows: 40,
+        })),
+    };
+    let outer = ServerToDaemon {
+        payload: Some(server_to_daemon::Payload::PreparedDeviceOperation(PreparedDeviceOperation {
+            operation_id: "operation-create".into(),
+            daemon_id: "daemon-1".into(),
+            frame: template.encode_to_vec(),
+            expires_at: 1_800_000_000_000.0,
+        })),
+    };
+
+    let decoded = ServerToDaemon::decode(outer.encode_to_vec().as_slice()).unwrap();
+    let prepared = match decoded.payload {
+        Some(server_to_daemon::Payload::PreparedDeviceOperation(value)) => value,
+        other => panic!("wrong prepared-operation variant: {other:?}"),
+    };
+    assert_eq!(prepared.operation_id, "operation-create");
+    assert_eq!(prepared.daemon_id, "daemon-1");
+    let decoded_template = DeviceEnvelope::decode(prepared.frame.as_slice()).unwrap();
+    assert!(decoded_template.channel_id.is_empty());
+    assert_eq!(decoded_template, template);
 }
 
 /// repeated 消息字段（sessions/ports）+ enum 字段（FsEntryKind）往返正确。

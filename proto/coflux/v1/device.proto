@@ -1,0 +1,548 @@
+// Browser ⟷ worker 的端到端 Device 协议。
+//
+// 同一 DeviceEnvelope 可直接承载于 loopback WebSocket，也可作为 opaque bytes 经中心 relay；
+// server 只在 channel open 阶段鉴权/绑定 daemon，不解释 envelope 内的具体 RPC。
+syntax = "proto3";
+
+package coflux.v1;
+
+import "coflux/v1/common.proto";
+
+// Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
+// 常量；wire 握手必须显式带版本，所有 cols/rows 在 authority 边界钳制为 [1, 1000]。
+// 本文件全部 created_at/started_at/exited_at/captured_at/expires_at 均为 Unix epoch milliseconds。
+// request_id 由 logical client 生成并在同一请求重投时保持不变；它只做响应关联/短期去重。
+// 有副作用请求的 exactly-once 边界由 operation_id 或 input_seq 明确承担，不能只依赖 request_id。
+
+enum DeviceScope {
+  DEVICE_SCOPE_UNSPECIFIED = 0;
+  // 查看存活 session catalog、attach 与接收输出。
+  DEVICE_SCOPE_SESSION_READ = 1;
+  // 向存活 session 输入、resize、stop；持久 browser grant 离线最多到此范围。
+  DEVICE_SCOPE_SESSION_CONTROL = 2;
+  // 已同步 workspace 内的 exec/fs、home 浏览与 ports 等设备 RPC；只能由中心在线 lease 授予。
+  DEVICE_SCOPE_RPC = 3;
+  // project validate/import、worktree 与新建 session 等中心 prepared operation。
+  DEVICE_SCOPE_LIFECYCLE = 4;
+}
+
+enum DeviceTransportKind {
+  DEVICE_TRANSPORT_KIND_UNSPECIFIED = 0;
+  DEVICE_TRANSPORT_KIND_LOOPBACK = 1;
+  DEVICE_TRANSPORT_KIND_RELAY = 2;
+}
+
+enum LocalAuthErrorCode {
+  LOCAL_AUTH_ERROR_CODE_UNSPECIFIED = 0;
+  LOCAL_AUTH_ERROR_CODE_VERSION_MISMATCH = 1;
+  LOCAL_AUTH_ERROR_CODE_ORIGIN_DENIED = 2;
+  LOCAL_AUTH_ERROR_CODE_GRANT_UNKNOWN = 3;
+  LOCAL_AUTH_ERROR_CODE_KEY_MISMATCH = 4;
+  LOCAL_AUTH_ERROR_CODE_SIGNATURE_INVALID = 5;
+  LOCAL_AUTH_ERROR_CODE_NONCE_INVALID = 6;
+  LOCAL_AUTH_ERROR_CODE_LEASE_INVALID = 7;
+  LOCAL_AUTH_ERROR_CODE_RATE_LIMITED = 8;
+}
+
+// worker 在认证完成后通过独立 announce 上报持久 gateway identity。public_key_sec1 是 P-256
+// uncompressed SEC1 point（65 bytes）；private key 永不离开 daemon。
+message LocalGatewayDescriptor {
+  uint32 protocol_version = 1;
+  uint32 port = 2;
+  bytes public_key_sec1 = 3;
+}
+
+// 中心持久化并安装到目标 daemon 的 browser public-key grant。public_key_sec1 同为 P-256
+// uncompressed SEC1 point；offline_scopes 只能包含 SESSION_READ/SESSION_CONTROL。
+message LocalBrowserGrant {
+  string grant_id = 1;
+  string account_id = 2;
+  string daemon_id = 3;
+  string origin = 4;
+  bytes public_key_sec1 = 5;
+  repeated DeviceScope offline_scopes = 6;
+  double created_at = 7;
+}
+
+// 中心在线时滚动安装的短期高权限 lease。worker 一旦失去中心认证连接，应立即撤销所有
+// online lease，不等待 expires_at；expires_at 仍用于防时钟/消息丢失后的陈旧使用。
+message OnlineDeviceLease {
+  string lease_id = 1;
+  string grant_id = 2;
+  string account_id = 3;
+  string daemon_id = 4;
+  repeated DeviceScope scopes = 5;
+  double expires_at = 6;
+}
+
+// Gateway/client 两个签名均为 P-256 ECDSA-SHA256 的 IEEE-P1363 r||s（固定 64 bytes）。
+// 签名输入不是 protobuf bytes，避免不同实现的 deterministic-encoding 差异，而是：
+//   domain ASCII + 0x00 + 每字段 [u32 BE length][raw bytes]
+// string 按 UTF-8；数字用固定宽度 BE。gateway domain = "coflux-local-gateway-v1"，字段依次为
+// protocol_version(BE32)、daemon_id、origin、nonce；client domain = "coflux-local-client-v1"，
+// 字段依次为 protocol_version(BE32)、daemon_id、origin、nonce、gateway_public_key_sec1、grant_id、
+// browser_public_key_sec1、client_instance_id、transport_generation(BE64)、lease_id（缺省编码为空）。
+// nonce 必须是 gateway 生成的 32 random bytes，单次使用且受 TTL 约束。
+message LocalGatewayHello {
+  uint32 protocol_version = 1;
+  string daemon_id = 2;
+  string origin = 3;
+  bytes nonce = 4;
+  bytes gateway_public_key_sec1 = 5;
+  bytes signature_p1363 = 6;
+}
+
+message LocalClientHello {
+  uint32 protocol_version = 1;
+  string grant_id = 2;
+  bytes browser_public_key_sec1 = 3;
+  string client_instance_id = 4;
+  uint64 transport_generation = 5;
+  optional string lease_id = 6;
+  bytes gateway_nonce = 7;
+  bytes signature_p1363 = 8;
+}
+
+message LocalAuthResult {
+  bool ok = 1;
+  optional string channel_id = 2;
+  repeated DeviceScope scopes = 3;
+  optional string error = 4;
+  LocalAuthErrorCode error_code = 5;
+}
+
+message LocalPairRequest {
+  string request_id = 1;
+  string daemon_id = 2;
+  string origin = 3; // server 必须与已认证 client WS 的实际 Origin 精确比对，不信任自报值。
+  bytes browser_public_key_sec1 = 4;
+}
+
+message LocalPairResult {
+  string request_id = 1;
+  bool ok = 2;
+  optional string grant_id = 3;
+  optional LocalGatewayDescriptor gateway = 4;
+  optional string error = 5;
+}
+
+message LocalLeaseRequest {
+  string request_id = 1;
+  string daemon_id = 2;
+  string grant_id = 3;
+}
+
+message LocalLeaseResult {
+  string request_id = 1;
+  bool ok = 2;
+  optional OnlineDeviceLease lease = 3;
+  optional string error = 4;
+}
+
+message LocalUnpairRequest {
+  string request_id = 1;
+  string daemon_id = 2;
+  string grant_id = 3;
+}
+
+message LocalUnpairResult {
+  string request_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+}
+
+message LocalGrantInstall {
+  string request_id = 1;
+  LocalBrowserGrant grant = 2;
+}
+
+message LocalGrantRevoke {
+  string request_id = 1;
+  string grant_id = 2;
+}
+
+message LocalLeaseInstall {
+  OnlineDeviceLease lease = 1;
+}
+
+message LocalGrantAck {
+  string request_id = 1;
+  string grant_id = 2;
+  bool ok = 3;
+  optional string error = 4;
+}
+
+// client→server：申请一个中心 relay logical channel。channel_id/client_instance_id 均由 client
+// 随机生成；server 把已认证 account/scopes 加到 DeviceRelayDaemonOpen 后发给目标 worker。
+message DeviceRelayClientOpen {
+  string daemon_id = 1;
+  string channel_id = 2;
+  string client_instance_id = 3;
+  uint64 transport_generation = 4;
+  uint32 protocol_version = 5;
+}
+
+message DeviceRelayDaemonOpen {
+  string channel_id = 1;
+  string account_id = 2;
+  string client_instance_id = 3;
+  uint64 transport_generation = 4;
+  repeated DeviceScope scopes = 5;
+  uint32 protocol_version = 6;
+}
+
+message DeviceRelayFrame {
+  string channel_id = 1;
+  bytes frame = 2; // 编码后的 DeviceEnvelope；server 原样转发。
+}
+
+message DeviceRelayClose {
+  string channel_id = 1;
+  optional string reason = 2;
+}
+
+message DeviceRelayStatus {
+  string channel_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+}
+
+message DeviceSessionInfo {
+  string session_id = 1;
+  string task_id = 2;
+  int32 pid = 3;
+  string cwd = 4;
+  uint32 cols = 5;
+  uint32 rows = 6;
+  // 从 session 创建起累计读到的 PTY byte 数；0 表示尚无输出，首个 byte 的 sequence 是 1。
+  uint64 output_seq = 7;
+  double started_at = 8;
+}
+
+message DeviceSessionExitTombstone {
+  string event_id = 1;
+  string session_id = 2;
+  string task_id = 3;
+  int32 exit_code = 4;
+  uint64 final_output_seq = 5;
+  double exited_at = 6;
+}
+
+message DeviceSessionCatalogRequest {
+  string request_id = 1;
+}
+
+message DeviceSessionCatalog {
+  string request_id = 1;
+  repeated DeviceSessionInfo sessions = 2;
+  repeated DeviceSessionExitTombstone exits = 3;
+}
+
+message DeviceExitAck {
+  repeated string event_ids = 1;
+}
+
+// client_instance_id 是跨 transport 稳定的 browser logical client identity；同一 client 的
+// transport_generation 从 1 开始且必须单调递增。更高 generation 只替换旧 direct/relay 路径并保留现有
+// holder_epoch；同代重投幂等，更低 generation 是 stale。不同 client 成功 attach 时 sessiond
+// 原子递增 holder_epoch，并向旧 holder 发 detached。
+message DeviceSessionAttach {
+  string request_id = 1;
+  string session_id = 2;
+  string client_instance_id = 3;
+  uint64 transport_generation = 4;
+  uint32 cols = 5;
+  uint32 rows = 6;
+  // client 已连续接收的最后一个 byte sequence；sessiond 若仍保留从 N+1 起的完整 whole-frame
+  // delta 可免 snapshot，否则必须回 snapshot。
+  optional uint64 resume_from_seq = 7;
+}
+
+message DeviceSessionAttached {
+  string request_id = 1;
+  string session_id = 2;
+  uint64 holder_epoch = 3; // 从 1 开始；sessiond 裁决的当前 holder lease，control 请求必须精确匹配。
+  // 有 ansi_snapshot 时，它与 snapshot_seq 是同一把 session 锁下取得的原子状态：N 表示
+  // snapshot 已包含 sequence <= N 的所有 PTY bytes，下一段增量从 N+1 开始。无 ansi_snapshot
+  // 表示 resume_from_seq 已接受，snapshot_seq 必须等于该值，随后同样从 N+1 重传。
+  uint64 snapshot_seq = 4;
+  // 可直接写入空 xterm 的规范化 ANSI：有界、按完整逻辑行裁剪的 history + 当前 VT grid/modes。
+  optional bytes ansi_snapshot = 5;
+  uint32 cols = 6;
+  uint32 rows = 7;
+}
+
+// 只读取得原子 snapshot，不注册 output subscriber、也不读取或改变 holder。供 worker 生成中心
+// checkpoint，以及未来只读诊断使用；browser 的可写 attach 仍必须走 DeviceSessionAttach。
+message DeviceSessionSnapshotRequest {
+  string request_id = 1;
+  string session_id = 2;
+}
+
+message DeviceSessionSnapshot {
+  string request_id = 1;
+  string session_id = 2;
+  uint64 snapshot_seq = 3;
+  bytes ansi_snapshot = 4;
+  uint32 cols = 5;
+  uint32 rows = 6;
+}
+
+message DevicePtyOutput {
+  string session_id = 1;
+  // from_seq/to_seq 是 1-based inclusive byte sequence；非空 data 必须满足
+  // to_seq = from_seq + data.length - 1，且 from_seq 等于接收方最后确认的 to_seq + 1。
+  // 不连续时接收方不得猜测缺口内容，必须重新 attach 获取原子 snapshot。
+  uint64 from_seq = 2;
+  uint64 to_seq = 3; // session 生命周期内不回退。
+  bytes data = 4;
+}
+
+message DevicePtyGap {
+  string session_id = 1;
+  uint64 expected_seq = 2; // subscriber 期望的下一个 byte sequence。
+  uint64 available_seq = 3; // sessiond 当前最早仍可重传的 byte sequence。
+}
+
+message DevicePtyInput {
+  string request_id = 1;
+  string session_id = 2;
+  uint64 holder_epoch = 3;
+  // 从 1 开始且在同一 logical client/session 单调；重投相同 seq 返回原结果且不得重复写 PTY，
+  // 较小 seq 拒绝。
+  uint64 input_seq = 4;
+  bytes data = 5;
+}
+
+message DevicePtyResize {
+  string request_id = 1;
+  string session_id = 2;
+  uint64 holder_epoch = 3;
+  uint64 resize_seq = 4; // 从 1 开始、与 input_seq 独立单调；同 seq 重投幂等，较小 seq 拒绝。
+  uint32 cols = 5;
+  uint32 rows = 6;
+}
+
+// operation_id 是不可复用的 opaque ID，在同一 daemon 上跨 logical channel 与 direct/relay
+// transport 全局幂等：同 ID、
+// 同 payload 返回已记录结果而不重复执行；同 ID、不同 payload 必须拒绝。stop 是离线 scope 的
+// 特例，可由 client 生成 operation_id；create/project/worktree 必须匹配中心预安装模板。
+message DeviceSessionStop {
+  string request_id = 1;
+  string operation_id = 2;
+  string session_id = 3;
+  uint64 holder_epoch = 4;
+}
+
+message DeviceSessionDetached {
+  string session_id = 1;
+  uint64 holder_epoch = 2;
+  optional string reason = 3;
+}
+
+message DeviceSessionExited {
+  string session_id = 1;
+  int32 exit_code = 2;
+  uint64 final_output_seq = 3;
+}
+
+// lifecycle operation 采用与 stop 相同的 operation_id 去重规则。
+message DeviceSessionCreate {
+  string request_id = 1;
+  string operation_id = 2;
+  string session_id = 3;
+  string task_id = 4;
+  string cwd = 5;
+  optional string shell = 6;
+  uint32 cols = 7;
+  uint32 rows = 8;
+}
+
+message DeviceOperationAck {
+  string request_id = 1;
+  string operation_id = 2;
+  bool ok = 3;
+  optional string error = 4;
+  optional string session_id = 5;
+  optional int32 pid = 6;
+}
+
+message DeviceProjectValidate {
+  string request_id = 1;
+  string path = 2;
+  string operation_id = 3; // project import 的中心 prepared operation；daemon 必须先见过同 ID 模板。
+}
+
+message DeviceProjectValidated {
+  string request_id = 1;
+  bool ok = 2;
+  string repo_path = 3;
+  string branch = 4;
+  optional string error = 5;
+  optional string suggested_name = 6;
+  string operation_id = 7;
+}
+
+// 所有携带 operation_id 的设备事实变更均采用 session stop 所述的全局去重规则。
+message DeviceWorktreeAdd {
+  string request_id = 1;
+  string operation_id = 2;
+  string repo_path = 3;
+  string workspace_id = 4;
+  string name = 5;
+  string branch = 6;
+  bool create_new = 7;
+}
+
+message DeviceWorktreeAdded {
+  string request_id = 1;
+  string operation_id = 2;
+  bool ok = 3;
+  string path = 4;
+  string branch = 5;
+  optional string error = 6;
+}
+
+message DeviceWorktreeRemove {
+  string request_id = 1;
+  string operation_id = 2;
+  string repo_path = 3;
+  string worktree_path = 4;
+}
+
+message DeviceExecRun {
+  string request_id = 1;
+  // worker 只接受中心当前 WorkspaceList 中属于本 daemon 的 ID，并自行解析 cwd；不信 browser 路径。
+  string workspace_id = 2;
+  string command = 3;
+  repeated string args = 4;
+  map<string, string> env = 5;
+  optional uint32 timeout_ms = 6;
+  optional string operation_id = 7; // 设置时必须 exactly-once 去重。
+}
+
+message DeviceFsList {
+  string request_id = 1;
+  // browse_home=false 时由 worker 从 WorkspaceList 解析 workspace_id；true 仅用于在线导入向导，
+  // workspace_id 必须为空且根固定为 daemon 用户 home。
+  string workspace_id = 2;
+  string path = 3;
+  bool browse_home = 4;
+}
+
+message DeviceFsRead {
+  string request_id = 1;
+  string workspace_id = 2; // worker 从中心同步的 WorkspaceList 解析并锚定 root。
+  string path = 3;
+}
+
+message DeviceFsWrite {
+  string request_id = 1;
+  string operation_id = 2;
+  string workspace_id = 3; // temp=false 时必须存在于中心同步的 WorkspaceList。
+  string path = 4;
+  bytes data = 5;
+  bool temp = 6; // true 时仍需有效 workspace_id 做授权/归属校验，但落盘到 daemon 临时目录。
+}
+
+message DevicePortsRequest {
+  string request_id = 1;
+}
+
+message DevicePortsResult {
+  string request_id = 1;
+  repeated SessionPorts sessions = 2;
+}
+
+message DeviceError {
+  optional string request_id = 1;
+  string code = 2;
+  string message = 3;
+}
+
+// 中心持久 prepare 后，先经可信 daemon control WS 安装同一模板并等待
+// PreparedDeviceOperationInstalled，再交给 client。frame 是 channel_id 为空的 DeviceEnvelope；
+// client 只可填入自己已认证的 channel_id 后经 direct/relay 发送。daemon 解码后必须确认除
+// channel_id 外与已安装模板完全相等，再按 operation_id 幂等执行；未知/过期/被篡改模板拒绝。
+message PreparedDeviceOperation {
+  string operation_id = 1;
+  string daemon_id = 2;
+  bytes frame = 3;
+  double expires_at = 4;
+}
+
+message PreparedDeviceOperationInstalled {
+  string operation_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+}
+
+// daemon→server 的控制面事实报告，不依赖发起 browser channel 是否仍存在。
+message DeviceOperationReport {
+  string operation_id = 1;
+  string daemon_id = 2;
+  bool ok = 3;
+  optional string task_id = 4;
+  optional string session_id = 5;
+  optional int32 pid = 6;
+  optional int32 exit_code = 7;
+  optional string error = 8;
+  // 编码后的结果 DeviceEnvelope，channel_id 必须清空；供中心按 durable operation 类型收敛
+  // project/worktree 等结构化结果。重复 report 必须幂等，中心不以 browser 转述作为设备事实。
+  optional bytes result_frame = 9;
+}
+
+// 中心只缓存最后一个有界 checkpoint；它不是 session authority，也不用于增量排序以外的裁决。
+message SessionCheckpoint {
+  string session_id = 1;
+  string task_id = 2;
+  uint64 snapshot_seq = 3; // 与 DeviceSessionSnapshot 相同的已包含 byte sequence 上界。
+  bytes ansi_snapshot = 4;
+  uint32 cols = 5;
+  uint32 rows = 6;
+  double captured_at = 7;
+}
+
+message DeviceEnvelope {
+  uint32 protocol_version = 1;
+  // 已认证后的 inner channel_id 必须与 loopback/relay/UDS 外层 channel 相同；LocalGatewayHello
+  // 与中心 prepared template 尚未绑定 channel 时必须为空。
+  string channel_id = 2;
+  oneof payload {
+    LocalGatewayHello local_gateway_hello = 10;
+    LocalClientHello local_client_hello = 11;
+    LocalAuthResult local_auth_result = 12;
+    DeviceSessionCatalogRequest session_catalog_request = 20;
+    DeviceSessionCatalog session_catalog = 21;
+    DeviceExitAck exit_ack = 22;
+    DeviceSessionAttach session_attach = 23;
+    DeviceSessionAttached session_attached = 24;
+    DevicePtyOutput pty_output = 25;
+    DevicePtyGap pty_gap = 26;
+    DevicePtyInput pty_input = 27;
+    DevicePtyResize pty_resize = 28;
+    DeviceSessionStop session_stop = 29;
+    DeviceSessionDetached session_detached = 30;
+    DeviceSessionExited session_exited = 31;
+    DeviceSessionCreate session_create = 32;
+    DeviceOperationAck operation_ack = 33;
+    DeviceSessionSnapshotRequest session_snapshot_request = 34;
+    DeviceSessionSnapshot session_snapshot = 35;
+    DeviceProjectValidate project_validate = 40;
+    DeviceProjectValidated project_validated = 41;
+    DeviceWorktreeAdd worktree_add = 42;
+    DeviceWorktreeAdded worktree_added = 43;
+    DeviceWorktreeRemove worktree_remove = 44;
+    DeviceExecRun exec_run = 45;
+    ExecResult exec_result = 46;
+    DeviceFsList fs_list = 47;
+    FsListed fs_listed = 48;
+    DeviceFsRead fs_read = 49;
+    FsReadResult fs_read_result = 50;
+    DeviceFsWrite fs_write = 51;
+    FsWriteResult fs_write_result = 52;
+    DevicePortsRequest ports_request = 53;
+    DevicePortsResult ports_result = 54;
+    DeviceError error = 60;
+  }
+}
