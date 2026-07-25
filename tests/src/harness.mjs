@@ -224,8 +224,9 @@ export async function startServer(opts = {}) {
   const port = opts.port;
   if (!port) throw new Error("startServer requires a port");
   const testDb = await createTestDatabase();
-  // 与生产拓扑一致：server 总是带一个伴生 relay（随机端口 + 每栈临时密钥），
-  // rendezvous 才有落点；config 对 COFLUX_RELAY_SIGNING_KEY 也是 fail-closed。
+  // 测试栈总是配一个 relay 进程（随机端口 + 每栈临时密钥），rendezvous 才有落点；
+  // 这只是测试装配——生产上 relay 独立部署（自有主机/域名），与中心零连接、只共享密钥对。
+  // config 对 COFLUX_RELAY_SIGNING_KEY 也是 fail-closed。
   const relayKeys = makeRelayKeys();
   const ref = {};
   let relayPort;

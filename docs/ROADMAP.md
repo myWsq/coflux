@@ -61,6 +61,12 @@
 - [ ] Agent 集成（B5）：起任务时可选自动拉起 `claude` / `codex` 带 prompt，人随时接管
 - [ ] 退出任务的保留/GC 策略（exited task 长期累积）
 - [ ] 中心服务器多实例 + 共享状态（当前暂无明确需求，Postgres 外置已留扩展位，按需启动）
+- [x] 独立 relay 服务·第一片（plan 043，2026-07-25）：`crates/relay` 单二进制 + 按需拨号
+  rendezvous，数据帧不再经中心控制 WS；relay 独立部署，与中心零连接、仅共享签名密钥对
+- [ ] 独立 relay·第二片：多节点就近（daemon/client 双端 RTT 探测上报、rendezvous 返回候选
+  列表取两端之和最小、多地部署清单）——消灭 CN↔CN 绕 JP hairpin 的完整形态
+- [ ] P2P 直连（WebRTC DataChannel，Tailscale 式）：叠加在 relay 之上、relay 永远是打洞失败
+  的兜底层；需 worker 引入 Rust WebRTC 栈 + 浏览器矩阵扩测，等 relay 就近仍不够时再立项
 
 ### 4. macOS 原生客户端（后续增强，暂缓）
 

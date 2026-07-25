@@ -1,8 +1,9 @@
 # coflux 架构设计
 
-> 状态：本地优先架构已实现。supervisor/sessiond 是唯一 PTY、VT、history、holder 与 sequence
-> authority；同机 web 优先直连 loopback gateway，中心只负责账号、设备、项目/task 编排、opaque
-> relay 与有界 checkpoint。远端或本地直连不可用时自动走中心 relay。
+> 状态：本地优先架构已实现；relay 数据面已剥离为独立服务（plan 043）。supervisor/sessiond
+> 是唯一 PTY、VT、history、holder 与 sequence authority；同机 web 优先直连 loopback gateway，
+> 中心只负责账号、设备、项目/task 编排、relay rendezvous（token 签发）与有界 checkpoint。
+> 远端或本地直连不可用时自动经独立部署的 `coflux-relay` 中转。
 
 ## 1. 产品形态
 
@@ -10,15 +11,15 @@ coflux 在用户任意节点运行 daemon，在本机 PTY 中驱动 Claude Code�
 web client 既可以经中心触达远端 daemon，也可以在 client 与 daemon 同机时直接连接 daemon：
 
 ```text
-                                     远端 / direct 不可用
-Web ── /client control WS ──▶ Server ── opaque Device relay ──▶ Worker
- │                              │                                 │
- │                              ├─ Postgres：账号/设备/项目/task   │ UDS
- │                              └─ 最近一个派生 checkpoint         ▼
- │                                                            Supervisor
- └──── ws://127.0.0.1:8788 ─────── direct Device channel ──────▶ / sessiond
-                                                                  │
-                                                                  └─ PTY + VT + history
+Web ── /client control WS ──▶ Server ──(rendezvous：签 token+通知拨号)──▶ Worker
+ │                              ├─ Postgres：账号/设备/项目/task            │
+ │        远端 / direct 不可用   └─ 最近一个派生 checkpoint                 │ UDS
+ ├── wss://relay/…?token ──▶ coflux-relay ◀── wss 拨号 ───────────────────┤
+ │        （每 channel 一条 WS，opaque DeviceEnvelope bytes，零解析）        ▼
+ │                                                                    Supervisor
+ └──── ws://127.0.0.1:8788 ─────── direct Device channel ────────────▶ / sessiond
+                                                                        │
+                                                                        └─ PTY + VT + history
 ```
 
 daemon 仍主动外连中心，因此 NAT 后的远端设备不需要开放入站端口。loopback gateway 只监听本机，
@@ -99,10 +100,19 @@ cached direct 的 terminal 与普通 Device RPC 不等待中心：browser → lo
 
 ### 5.2 relay 与自动切换
 
-无缓存、固定端口占用、Origin/LNA/loopback permission 拒绝或 direct 故障时，DeviceRouter 立即使用
-中心 relay。server 的 `DeviceRelayRouter` 只按账号/daemon/channel 路由 opaque frame，不解析终端或
-RPC 载荷。direct 恢复后，router 用更高 transport generation 自动 promotion；同一 logical client、
-holder 与 input queue 不变。
+无缓存、固定端口占用、Origin/LNA/loopback permission 拒绝或 direct 故障时，DeviceRouter 立即走
+relay。relay 是独立部署的 `crates/relay` 单二进制（plan 043）：中心在 rendezvous 阶段校验账号/
+daemon 归属后给两端各签一张短时（≤120s）单次 ed25519 token 并拼出完整拨号 URL；client 与 worker
+各自拨一条 channel 专属 WS，relay 按 channelId 配对成 opaque 字节管道——零解析 DeviceEnvelope、
+无账号 DB、限速限量与旧中心内嵌 relay 相同。数据帧从此不经过中心控制 WS；中心零 channel 状态，
+channel 断开由 client 重新 rendezvous。daemon 侧零驻留连接（按需拨号）；worker 在中心控制连接
+断开时主动关闭全部 relay channel（语义与旧路径一致）。direct 恢复后，router 用更高 transport
+generation 自动 promotion；同一 logical client、holder 与 input queue 不变。
+
+生产部署：relay 是**独立部署**的服务（自有主机/域名，不与中心捆绑）；中心配置
+`COFLUX_RELAY_SIGNING_KEY`（签名种子）与 `COFLUX_RELAY_URL`（对外 relay 基址），relay 进程只需
+`COFLUX_RELAY_PUBKEY`（对应公钥 hex）与监听地址，TLS 由 Caddy 终结。relay 与中心之间没有任何
+连接——耦合面只有这对签名密钥。本片为单节点；多节点就近探测/选择见第二片计划。
 
 mobile 已冻结，不启用 loopback direct；它使用同一 DeviceRouter 的 relay-only 配置，因此没有旧
 `taskAttach/ptyInput/ptyOutput/clientExec/clientFs*` 兼容路径。
@@ -163,8 +173,8 @@ worker 至多每 2 秒请求脏 session 的当前 snapshot，并通过独立 coa
 | 故障 | 行为 |
 |---|---|
 | client→server control 断开 | cached direct session lane 继续；冷启动与新业务编排不可用 |
-| direct 失败/权限拒绝 | 自动 relay；不把 daemon 误报为 offline |
-| relay/中心失败 | direct 已建立时继续 catalog/attach/input/resize/stop |
+| direct 失败/权限拒绝 | 自动 rendezvous+relay；不把 daemon 误报为 offline |
+| relay/中心失败 | direct 已建立时继续 catalog/attach/input/resize/stop；中心离线时无法开新 relay channel（rendezvous 依赖中心） |
 | worker 重启 | supervisor/PTY 存活；generation 增加并重建 channel/catalog |
 | server 重启 | Postgres 元数据 + daemon catalog/checkpoint 对账；不杀 unknown orphan |
 | 慢中心 | relay/checkpoint 可丢弃或滞后；本地 PTY 与 direct channel继续 |
@@ -183,7 +193,9 @@ code，再由账号 cookie 进入代理。HTTP/SSE/WebSocket 都通过 `ProxyDat
 ## 10. 认证与安全边界
 
 - daemon 通过浏览器一次性授权换取服务器签发的每设备凭证；token 在 server 只存 sha256 hash。
-- client token 绑定账号；所有 control、relay、checkpoint 与 proxy 都校验账号/daemon 归属。
+- client token 绑定账号；所有 control、rendezvous、checkpoint 与 proxy 都校验账号/daemon 归属。
+- relay 不持账号 DB：只验中心签发的短时单次 token（ed25519，domain 分离），同 channel+role 二连
+  拒后到者，channel 结束后 tombstone 窗口内拒绝 token 重放。
 - loopback identity/grant store 与 daemon 凭证落在 `COFLUX_HOME`，权限 `0600`；`cofluxd doctor` 不输出
   私钥、grant id、token 或凭证内容。
 - exec/fs 由 worker 根据中心同步的 workspace id 解析 root，并做 realpath 锚定；不信任 browser 自报 cwd。
@@ -209,7 +221,11 @@ code，再由账号 cookie 进入代理。HTTP/SSE/WebSocket 都通过 `ProxyDat
 |---|---:|---:|
 | cached direct PTY echo | 0.589 ms | < 20 ms |
 | Device attach + 全新 xterm 6 解析到可用画面 | 64.820 ms | < 100 ms |
-| timed direct path 中心 `deviceRelayFrame` 增量 | 0 | = 0 |
+| timed direct path relay 帧增量 | 0 | = 0 |
+
+（plan 043 起中心控制 WS 上已无 relay 帧消息，该门的观测对象改为 relay transport 双向
+帧计数——`tests/src/local-first-benchmark.mjs` 的 `relayFrameSnapshot`，语义不变：timed
+direct 热路径零 relay 经手。）
 
 2026-07-25 在 `a89476b` 上二次复现同一 benchmark：echo p95 0.771 ms、attach p95 59.838 ms、
 中心帧增量 0，SLO 仍全部通过（采样波动在门限内）。
@@ -266,14 +282,15 @@ read/control 仍可用`（未 republish，直连本身正常）；缓存 grant �
 ## 12. 仓库结构与验证
 
 ```text
-apps/server       中心 control / opaque relay / checkpoint / Postgres
+apps/server       中心 control / relay rendezvous / checkpoint / Postgres
 apps/web          desktop React + xterm.js（默认迭代对象，启用 direct）
 apps/mobile       冻结的 relay-only client
 packages/client   control store + DeviceRouter
 packages/protocol TS protobuf 绑定
 crates/protocol   Rust protobuf、UDS frame/IPC
 crates/supervisor PTY/sessiond authority
-crates/worker     gateway、relay、RPC、checkpoint、升级 adapter
+crates/worker     gateway、relay 拨号、RPC、checkpoint、升级 adapter
+crates/relay      独立 relay：token 验签 + channel 配对 + opaque 管道
 tests             真实进程 + WebSocket 黑盒 harness
 ```
 
