@@ -80,6 +80,8 @@ export interface OpenedDeviceTransport {
   channelId: string;
   scopes: ReadonlySet<DeviceScope>;
   leaseExpiresAt?: number;
+  /** direct handshake 因 LEASE_INVALID 内部续签时，把实际采用的 lease 回写给 route。 */
+  lease?: OnlineDeviceLease;
   send: (frame: Uint8Array<ArrayBuffer>) => boolean;
   close: () => void;
 }
@@ -295,7 +297,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     clearInterval: (timer) => globalThis.clearInterval(timer),
   };
   const randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
-  const clientInstanceId = randomUUID();
+  let clientInstanceId = randomUUID();
   const identityStore = !options.adapter && options.enableLocalTransport
     ? new BrowserIdentityStore(options.identityDatabaseName)
     : undefined;
@@ -549,6 +551,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         channelId: auth.channelId,
         scopes: new Set(auth.scopes),
         leaseExpiresAt: lease?.expiresAt,
+        lease,
         send(frame) {
           if (socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > MAX_DEVICE_FRAME_BYTES) return false;
           socket.send(frame);
@@ -581,7 +584,13 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     await new Promise<void>((resolve, reject) => {
       if (openOptions.signal.aborted) return reject(abortError());
       const timer = clock.setTimeout(() => {
+        const waiter = relayOpenWaiters.get(channelId);
+        if (!waiter) return;
         relayOpenWaiters.delete(channelId);
+        waiter.abort?.();
+        if (controlOnline) {
+          options.sendControl({ case: "deviceRelayClose", value: { channelId, reason: "client relay open timeout" } });
+        }
         reject(new DeviceRouteError("中心 relay channel 打开超时"));
       }, CONTROL_REQUEST_TIMEOUT_MS);
       const aborted = () => {
@@ -589,6 +598,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         if (!waiter) return;
         relayOpenWaiters.delete(channelId);
         clock.clearTimeout(timer);
+        if (controlOnline) {
+          options.sendControl({ case: "deviceRelayClose", value: { channelId, reason: "client relay open aborted" } });
+        }
         reject(abortError());
       };
       openOptions.signal.addEventListener("abort", aborted, { once: true });
@@ -669,13 +681,14 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       transport.close();
       throw abortError();
     }
+    if (kind === "direct" && transport.lease) route.lease = transport.lease;
     channel = {
       kind,
       daemonId: route.daemonId,
       channelId: transport.channelId,
       generation,
       scopes: new Set(transport.scopes),
-      leaseExpiresAt: transport.leaseExpiresAt ?? lease?.expiresAt,
+      leaseExpiresAt: transport.leaseExpiresAt ?? transport.lease?.expiresAt ?? lease?.expiresAt,
       lane,
       closed: false,
       send: transport.send,
@@ -707,8 +720,11 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         return grant;
       })
       .catch((error) => {
-        if (routes.get(route.daemonId) === route) route.grantLoaded = true;
-        route.localFailure = errorMessage(error);
+        if (routes.get(route.daemonId) === route) {
+          // IndexedDB blocked 等瞬时错误允许下一轮有界 recovery 重新读取；成功读到“无记录”才缓存 miss。
+          route.grantLoaded = false;
+          route.localFailure = errorMessage(error);
+        }
         return undefined;
       })
       .finally(() => {
@@ -724,7 +740,13 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     route.pairController = controller;
     route.pairPromise = adapter.pair(route.daemonId, controller.signal)
       .then((grant) => {
-        if (destroyed || routes.get(route.daemonId) !== route || route.epoch !== epoch) return undefined;
+        if (
+          destroyed ||
+          routes.get(route.daemonId) !== route ||
+          route.epoch !== epoch ||
+          route.pairController !== controller ||
+          controller.signal.aborted
+        ) return undefined;
         route.grant = grant;
         route.grantLoaded = true;
         route.localFailure = "";
@@ -732,7 +754,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         return grant;
       })
       .catch((error) => {
-        if (!isAbortError(error)) route.localFailure = `本地配对失败：${errorMessage(error)}`;
+        if (route.pairController === controller && !isAbortError(error)) {
+          route.localFailure = `本地配对失败：${errorMessage(error)}`;
+        }
         return undefined;
       })
       .finally(() => {
@@ -794,7 +818,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       if (lane.attempt === attempt) lane.attempt = undefined;
       if (!attempt.settled) {
         attempt.settled = true;
-        attempt.reject(new DeviceRouteError(route.localFailure || "中心与本地 gateway 均不可用"));
+        const reason = route.localFailure || "中心与本地 gateway 均不可用";
+        publish(route, "offline", reason);
+        attempt.reject(new DeviceRouteError(reason));
       }
       if (lane.active?.kind === "relay") scheduleDirectRetry(route);
     };
@@ -955,7 +981,12 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
           return direct;
         } catch (error) {
           directError = error;
-          if (!isAbortError(error)) route.localFailure = errorMessage(error);
+          if (!isAbortError(error)) {
+            route.localFailure = errorMessage(error);
+            if (error instanceof LocalAuthFailure && error.code === LocalAuthErrorCode.LEASE_INVALID) {
+              route.lease = undefined;
+            }
+          }
         }
       } else {
         pairInBackground(route);
@@ -1094,6 +1125,11 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     lane.recoveryAttempts += 1;
     lane.recoveryTimer = clock.setTimeout(() => {
       lane.recoveryTimer = undefined;
+      const stillNeeded = lane.kind === "session" ? sessionLaneDemand(route) : elevatedLaneDemand(route);
+      if (!stillNeeded) {
+        releaseIdle(route);
+        return;
+      }
       const promise = lane.kind === "session"
         ? ensureSessionLane(route)
         : ensureElevatedLane(route, requiredElevatedScope(route));
@@ -1110,6 +1146,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
   function elevatedLaneDemand(route: DeviceRoute): boolean {
+    pruneExpiredOperations(route);
     if (route.pendingOperations.size > 0) return true;
     return [...route.pendingRequests.values()].some(
       (pending) => pending.scope === DeviceScope.RPC || pending.scope === DeviceScope.LIFECYCLE,
@@ -1118,6 +1155,16 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
 
   function routeHasDemand(route: DeviceRoute): boolean {
     return sessionLaneDemand(route) || elevatedLaneDemand(route);
+  }
+
+  function pruneExpiredOperations(route: DeviceRoute): void {
+    let expired = false;
+    for (const operation of route.pendingOperations.values()) {
+      if (operation.expiresAt > clock.now()) continue;
+      route.pendingOperations.delete(operation.operationId);
+      expired = true;
+    }
+    if (expired) options.onError("prepared device operation 已过期，请重试");
   }
 
   function requiredElevatedScope(route: DeviceRoute): DeviceScope {
@@ -1166,6 +1213,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       if (sendOn(channel, operation.payload)) operation.sentGeneration = channel.generation;
       else loseChannel(route, channel, "prepared operation 发送失败");
     }
+    if (!elevatedLaneDemand(route)) releaseIdle(route);
   }
 
   function receiveFrame(route: DeviceRoute, channel: DeviceChannel, frame: Uint8Array): void {
@@ -1182,7 +1230,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         options.onCatalog(route.daemonId, payload.value);
         if (payload.value.exits.length > 0) {
           const ids = payload.value.exits.map((item) => item.eventId).filter(Boolean);
-          if (ids.length > 0) sendOn(channel, normalizePayload({ case: "exitAck", value: { eventIds: ids } }));
+          if (
+            ids.length > 0 &&
+            !sendOn(channel, normalizePayload({ case: "exitAck", value: { eventIds: ids } }))
+          ) loseChannel(route, channel, "session exit ACK 发送失败");
         }
         break;
       case "sessionAttached":
@@ -1280,6 +1331,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
             clearInputRetry(session);
             rejectHolderWaiters(session, new DeviceRouteError(message, code));
             options.onSessionDetached(route.daemonId, session.taskId, session.sessionId, message);
+            releaseIdle(route);
           } else {
             options.onError(message);
           }
@@ -1302,7 +1354,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         if (["scope_denied", "stale_transport", "channel_mismatch", "supervisor_busy"].includes(code)) {
           pending.sentGeneration = undefined;
           if (channel.lane === "elevated") {
-            if (channel.kind === "direct") channel.leaseExpiresAt = 0;
+            if (channel.kind === "direct" && code === "scope_denied") route.lease = undefined;
             closeLane(route, route.elevatedLane, message);
           } else {
             closeLane(route, route.sessionLane, message);
@@ -1318,7 +1370,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       if (operation) {
         if (["scope_denied", "stale_transport", "supervisor_busy"].includes(code)) {
           operation.sentGeneration = undefined;
-          if (channel.kind === "direct") channel.leaseExpiresAt = 0;
+          if (channel.kind === "direct" && code === "scope_denied") route.lease = undefined;
           closeLane(route, route.elevatedLane, message);
           void ensureElevatedLane(route, DeviceScope.LIFECYCLE)
             .then(() => flushLane(route, "elevated"))
@@ -1326,6 +1378,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         } else {
           route.pendingOperations.delete(operation.operationId);
           options.onError(message);
+          releaseIdle(route);
         }
         return true;
       }
@@ -1337,7 +1390,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   function handleAttached(route: DeviceRoute, channel: DeviceChannel, attached: Extract<RuntimeDevicePayload, { case: "sessionAttached" }>["value"]): void {
     const session = route.sessions.get(attached.sessionId);
     if (!session || !session.desired || route.sessionLane.active !== channel) return;
-    if (session.attachRequestId && attached.requestId !== session.attachRequestId) return;
+    if (!session.attachRequestId || attached.requestId !== session.attachRequestId) return;
     if (session.attachGeneration !== channel.generation) return;
     session.attachRequestId = undefined;
     session.attachGeneration = undefined;
@@ -1457,10 +1510,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   function sendCatalogRequest(route: DeviceRoute): void {
     const channel = route.sessionLane.active;
     if (!channelCovers(channel, DeviceScope.SESSION_READ)) return;
-    sendOn(channel, normalizePayload({
+    if (!sendOn(channel, normalizePayload({
       case: "sessionCatalogRequest",
       value: { requestId: randomUUID() },
-    }));
+    }))) loseChannel(route, channel, "session catalog 请求发送失败");
   }
 
   function maintainCatalogTimer(route: DeviceRoute): void {
@@ -1780,7 +1833,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     const input: RetainedInput = { requestId: randomUUID(), seq: session.inputSeq, data: copy };
     session.retainedInputs.push(input);
     session.retainedInputBytes += copy.byteLength;
-    publishInputState(route, session, false, "等待 PTY 累计确认");
+    const blocked = session.retainedInputs.length >= MAX_RETAINED_INPUTS || session.retainedInputBytes >= MAX_RETAINED_INPUT_BYTES;
+    publishInputState(route, session, blocked, blocked ? "输入等待本机确认，缓冲区已满" : "等待 PTY 累计确认");
     const channel = route.sessionLane.active;
     if (channelCovers(channel, DeviceScope.SESSION_CONTROL) && session.holderEpoch !== undefined) {
       sendInputFrame(route, channel, session, input);
@@ -1841,6 +1895,22 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       rejectHolderWaiters(session, new DeviceRouteError("session route 已释放"));
     }
     route.sessions.delete(sessionId);
+    releaseIdle(route);
+  }
+
+  function suspendSession(daemonId: string, sessionId: string): void {
+    const route = routes.get(daemonId);
+    const session = route?.sessions.get(sessionId);
+    if (!route || !session) return;
+    session.desired = false;
+    session.holderEpoch = undefined;
+    session.outputSeq = undefined;
+    session.hasLiveSnapshot = false;
+    session.attachRequestId = undefined;
+    session.attachGeneration = undefined;
+    session.attachedGeneration = undefined;
+    clearInputRetry(session);
+    rejectHolderWaiters(session, new DeviceRouteError("terminal consumer 已释放"));
     releaseIdle(route);
   }
 
@@ -1907,6 +1977,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     if (
       !operation.operationId ||
       !operation.daemonId ||
+      !Number.isFinite(operation.expiresAt) ||
       operation.expiresAt <= clock.now() ||
       operation.frame.byteLength === 0 ||
       operation.frame.byteLength > MAX_DEVICE_FRAME_BYTES
@@ -2027,6 +2098,12 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   async function reset(clearGrants: boolean): Promise<void> {
     setControlOnline(false);
     closeRoutes("Device router 已重置");
+    // logout 会丢弃 route 内的 input cursor；同步更换 logical client，避免新输入与 sessiond
+    // 为旧 clientInstanceId 保留的累计序号发生碰撞。普通 transport reset 仍保持原 identity/generation。
+    if (clearGrants) {
+      clientInstanceId = randomUUID();
+      generations.clear();
+    }
     if (clearGrants) await adapter.clearGrants().catch(() => undefined);
   }
 
@@ -2089,8 +2166,12 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
     if (!needsElevated) closeLane(route, route.elevatedLane, "elevated lane 已释放");
     if (!needsSession && !needsElevated) {
-      route.pairController?.abort();
-      route.pairController = undefined;
+      const pairController = route.pairController;
+      pairController?.abort();
+      if (route.pairController === pairController) {
+        route.pairController = undefined;
+        route.pairPromise = undefined;
+      }
     }
   }
 
@@ -2102,8 +2183,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     route.catalogTimer = undefined;
     route.directProbeController?.abort();
     route.directProbeController = undefined;
+    route.directProbe = undefined;
     route.pairController?.abort();
     route.pairController = undefined;
+    route.pairPromise = undefined;
     closeLane(route, route.sessionLane, reason);
     closeLane(route, route.elevatedLane, reason);
     for (const session of route.sessions.values()) {
@@ -2146,6 +2229,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     sendInput,
     resize,
     stopSession,
+    suspendSession,
     forgetSession,
     exec,
     fsList,

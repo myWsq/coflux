@@ -212,14 +212,17 @@ export function createCofluxClient(options: CofluxClientOptions) {
         startedAt: existing?.startedAt ?? 0,
         status: "exited",
         exitCode,
-        exitedAt: Date.now(),
+        exitedAt: existing?.exitedAt ?? Date.now(),
       };
+      const inputStates = { ...state.inputStates };
+      delete inputStates[sessionId];
       return {
         localSessions: upsert(state.localSessions, local, (item) => item.daemonId === daemonId && item.sessionId === sessionId),
         tasks: state.tasks.map((task) => task.id === taskId && task.sessionId === sessionId
           ? { ...task, status: TaskStatus.EXITED, sessionId: undefined, exitCode }
           : task),
         detachedTaskIds: withoutSetValue(state.detachedTaskIds, taskId),
+        inputStates,
       };
     });
   }
@@ -316,6 +319,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
   }
 
   function registerSessionConsumer(sessionId: string, consumer: SessionConsumer) {
+    const routedTask = store.getState().tasks.find((task) => task.sessionId === sessionId);
     let consumers = sessionConsumers.get(sessionId);
     if (!consumers) {
       consumers = new Set<SessionConsumer>();
@@ -328,7 +332,11 @@ export function createCofluxClient(options: CofluxClientOptions) {
       const current = sessionConsumers.get(sessionId);
       if (!current) return;
       current.delete(consumer);
-      if (current.size === 0) sessionConsumers.delete(sessionId);
+      if (current.size === 0) {
+        sessionConsumers.delete(sessionId);
+        liveSessionIds.delete(sessionId);
+        if (routedTask) deviceRouter?.suspendSession(routedTask.daemonId, sessionId);
+      }
     };
   }
 
@@ -476,14 +484,20 @@ export function createCofluxClient(options: CofluxClientOptions) {
         const removedSessionId = removed?.sessionId ?? store.getState().localSessions.find((session) => session.taskId === value.taskId)?.sessionId;
         store.setState((state) => {
           let ports = state.ports;
+          let inputStates = state.inputStates;
           if (value.taskId in ports) {
             ports = { ...ports };
             delete ports[value.taskId];
+          }
+          if (removedSessionId && removedSessionId in inputStates) {
+            inputStates = { ...inputStates };
+            delete inputStates[removedSessionId];
           }
           return {
             tasks: state.tasks.filter((task) => task.id !== value.taskId),
             ports,
             detachedTaskIds: withoutSetValue(state.detachedTaskIds, value.taskId),
+            inputStates,
             sessionCheckpoints: removedSessionId
               ? Object.fromEntries(Object.entries(state.sessionCheckpoints).filter(([sessionId]) => sessionId !== removedSessionId))
               : state.sessionCheckpoints,
