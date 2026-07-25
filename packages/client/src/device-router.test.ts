@@ -862,3 +862,63 @@ test("direct 先赢后迟到 relay 不能覆盖，release 后无重试与轮询�
   assert.equal(h.clock.pendingTimers, 0);
   h.router.destroy();
 });
+
+test("心跳往返产生 rttMs，链路断掉后读数被清掉而不是留着", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const release = h.router.retainDevice("daemon-1");
+  await flush();
+  const direct = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(direct);
+  await flush();
+
+  // 建连即打第一发，不等满一个周期——否则 UI 头 15s 没有读数。
+  const ping = payloads(direct).find((payload) => payload?.case === "ping");
+  assert.ok(ping, "建连后应立刻发出一次 ping");
+
+  // daemon 侧 echo 回来时已过 42ms：这个差值就是 rtt。
+  h.clock.advance(42);
+  h.adapter.emit(direct, { case: "pong", value: { requestId: (ping.value as { requestId: string }).requestId } });
+  await flush();
+  assert.equal(h.states.at(-1)?.rttMs, 42);
+
+  // 周期到点会再打一发（而不是只打建连那一次）。
+  const before = payloads(direct).filter((payload) => payload?.case === "ping").length;
+  h.clock.advance(15_000);
+  await flush();
+  assert.equal(payloads(direct).filter((payload) => payload?.case === "ping").length, before + 1);
+
+  // 链路掉了必须清读数：留着上一次的 42ms 会让一条已断的链路在 UI 上继续显示"很快"。
+  release();
+  await flush();
+  assert.equal(h.states.at(-1)?.rttMs, undefined);
+  h.router.destroy();
+});
+
+test("旧 daemon 对 ping 回 unsupported_payload 时静默降级，不弹错误", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const release = h.router.retainDevice("daemon-1");
+  await flush();
+  const direct = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(direct);
+  await flush();
+  const ping = payloads(direct).find((payload) => payload?.case === "ping");
+  assert.ok(ping, "建连后应发出 ping");
+
+  const errorsBefore = h.errors.length;
+  h.adapter.emit(direct, {
+    case: "error",
+    value: {
+      requestId: (ping.value as { requestId: string }).requestId,
+      code: "unsupported_payload",
+      message: "该 Device payload 不属于 worker RPC router",
+    },
+  });
+  await flush();
+  // 每 15s 一次的骚扰：这条断言就是防它回来的。
+  assert.equal(h.errors.length, errorsBefore, "旧 daemon 不认识 ping 不该弹给用户");
+  assert.equal(h.states.at(-1)?.rttMs, undefined);
+  release();
+  h.router.destroy();
+});

@@ -915,6 +915,10 @@ impl DeviceRuntime {
                 let sessions = tokio::task::spawn_blocking(move || crate::build_ports_update(&alive)).await.unwrap_or_default();
                 device_envelope::Payload::PortsResult(wire::DevicePortsResult { request_id: request.request_id, sessions })
             }
+            // 心跳：纯 echo，不读任何状态、不做任何副作用——往返时间才近似纯链路延迟。
+            device_envelope::Payload::Ping(request) => {
+                device_envelope::Payload::Pong(wire::DevicePong { request_id: request.request_id })
+            }
             other => device_error(request_id(&other), "unsupported_payload", "该 Device payload 不属于 worker RPC router"),
         }
     }
@@ -1354,6 +1358,7 @@ fn set_response_request_id(payload: &mut device_envelope::Payload, request_id: &
         device_envelope::Payload::FsReadResult(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::FsWriteResult(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::PortsResult(value) => value.request_id = request_id.to_string(),
+        device_envelope::Payload::Pong(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::Error(value) => value.request_id = (!request_id.is_empty()).then(|| request_id.to_string()),
         _ => {}
     }
@@ -1426,6 +1431,9 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         | device_envelope::Payload::FsRead(_)
         | device_envelope::Payload::FsWrite(_)
         | device_envelope::Payload::PortsRequest(_) => Some(DeviceScope::Rpc),
+        // 心跳取最低权限：它是纯 echo，不读任何状态，要 RPC scope 只会把它挡在
+        // 没有 lease 的通道外——而恰恰是那种通道最需要被探活。
+        device_envelope::Payload::Ping(_) => Some(DeviceScope::SessionRead),
         device_envelope::Payload::SessionCreate(_)
         | device_envelope::Payload::ProjectValidate(_)
         | device_envelope::Payload::WorktreeAdd(_)
@@ -1482,6 +1490,7 @@ fn request_id(payload: &device_envelope::Payload) -> Option<String> {
         device_envelope::Payload::FsRead(value) => Some(value.request_id.clone()),
         device_envelope::Payload::FsWrite(value) => Some(value.request_id.clone()),
         device_envelope::Payload::PortsRequest(value) => Some(value.request_id.clone()),
+        device_envelope::Payload::Ping(value) => Some(value.request_id.clone()),
         _ => None,
     }
 }

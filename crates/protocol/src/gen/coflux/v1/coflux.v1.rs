@@ -909,6 +909,20 @@ pub struct DevicePortsResult {
     #[prost(message, repeated, tag="2")]
     pub sessions: ::prost::alloc::vec::Vec<SessionPorts>,
 }
+/// Device 通道心跳：client 定期发 Ping、daemon 原样回 Pong，client 据往返算 RTT。
+/// 走既有 request/response 配对（request_id），daemon 侧是纯 echo——不读任何状态、不做任何
+/// 副作用，故它的往返时间接近纯链路延迟。同时补上 device 通道此前完全没有的探活：
+/// 主控连接有 idle ping（见 worker/main.rs），device 通道此前只能靠用户操作超时才发现半死。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DevicePing {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DevicePong {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceError {
     #[prost(string, optional, tag="1")]
@@ -993,7 +1007,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 60")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -1070,6 +1084,10 @@ pub mod device_envelope {
         PortsRequest(super::DevicePortsRequest),
         #[prost(message, tag="54")]
         PortsResult(super::DevicePortsResult),
+        #[prost(message, tag="55")]
+        Ping(super::DevicePing),
+        #[prost(message, tag="56")]
+        Pong(super::DevicePong),
         #[prost(message, tag="60")]
         Error(super::DeviceError),
     }
