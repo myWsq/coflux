@@ -9,6 +9,7 @@
     "dev:web": "pnpm --filter @coflux/web dev",
     "dev:mobile": "pnpm --filter @coflux/mobile dev",
     "dev:daemon": "cargo build -p coflux-supervisor -p coflux-worker && COFLUX_HOME=\"$PWD/.coflux-dev\" COFLUX_WORKER_CMD=\"$PWD/target/debug/coflux-worker\" ./target/debug/coflux-supervisor",
+    "dev:relay": "cargo build -p coflux-relay && COFLUX_RELAY_LISTEN=127.0.0.1:8790 COFLUX_RELAY_PUBKEY=37ae65ed9043f7d09ccbd7818368f7d417f9fdbaa65a73c8782d83478a15d686 ./target/debug/coflux-relay",
     "dev": "pnpm -r --parallel --filter @coflux/server --filter @coflux/web dev",
     "build": "pnpm -r build && cargo build --release",
     "build:daemon": "cargo build --release -p coflux-supervisor -p coflux-worker"

@@ -107,10 +107,12 @@ message TaskRemove {
 
 message ClientToServer {
   // 旧 terminal/RPC adapter 已由端到端 DeviceEnvelope 取代；编号与字段名永久保留，
-  // 防止旧 bundle 的 raw PTY/RPC 被未来字段误解。
-  reserved 4, 16, 17, 19, 20, 21, 22, 23, 25;
+  // 防止旧 bundle 的 raw PTY/RPC 被未来字段误解。29-31 是控制面复用 relay 路径（plan 043
+  // 改为独立 relay + rendezvous 后删除）。
+  reserved 4, 16, 17, 19, 20, 21, 22, 23, 25, 29, 30, 31;
   reserved "client_create_enrollment_key", "task_attach", "task_stop", "pty_resize", "client_exec",
-    "client_fs_list", "client_fs_read", "pty_input", "client_fs_write";
+    "client_fs_list", "client_fs_read", "pty_input", "client_fs_write", "device_relay_open",
+    "device_relay_frame", "device_relay_close";
   oneof payload {
     ClientAuth client_auth = 1;
     ClientLogout client_logout = 2;
@@ -130,10 +132,8 @@ message ClientToServer {
     DeviceSetName device_set_name = 26;
     LocalPairRequest local_pair_request = 27;
     LocalLeaseRequest local_lease_request = 28;
-    DeviceRelayClientOpen device_relay_open = 29;
-    DeviceRelayFrame device_relay_frame = 30;
-    DeviceRelayClose device_relay_close = 31;
     LocalUnpairRequest local_unpair_request = 32;
+    DeviceRelayConnect device_relay_connect = 33;
     WorkspaceSetName workspace_set_name = 24;
   }
 }
@@ -226,9 +226,10 @@ message ClientOutdated {}
 
 message ServerToClient {
   // holder/output/RPC 结果全部封装在 opaque Device relay 内；server 不再理解这些数据。
-  reserved 3, 17, 18, 19, 20, 22, 23;
+  // 27-29 是控制面复用 relay 路径（plan 043 改为独立 relay + rendezvous 后删除）。
+  reserved 3, 17, 18, 19, 20, 22, 23, 27, 28, 29;
   reserved "enrollment_key_created", "task_detached", "exec_result", "fs_listed", "fs_read_result",
-    "pty_output", "fs_write_result";
+    "pty_output", "fs_write_result", "device_relay_status", "device_relay_frame", "device_relay_close";
   oneof payload {
     AuthOk auth_ok = 1;
     AuthError auth_error = 2;
@@ -249,11 +250,9 @@ message ServerToClient {
     ClientOutdated client_outdated = 24;
     LocalPairResult local_pair_result = 25;
     LocalLeaseResult local_lease_result = 26;
-    DeviceRelayStatus device_relay_status = 27;
-    DeviceRelayFrame device_relay_frame = 28;
-    DeviceRelayClose device_relay_close = 29;
     PreparedDeviceOperation prepared_device_operation = 30;
     SessionCheckpoint session_checkpoint = 31;
     LocalUnpairResult local_unpair_result = 32;
+    DeviceRelayGrant device_relay_grant = 33;
   }
 }

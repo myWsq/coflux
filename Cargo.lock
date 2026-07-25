@@ -150,6 +150,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "coflux-relay"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "coflux-protocol",
+ "ed25519-dalek",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "coflux-supervisor"
 version = "0.0.0"
 dependencies = [

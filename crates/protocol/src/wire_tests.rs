@@ -11,8 +11,8 @@ use prost::Message;
 
 use crate::wire::{
     daemon_to_server, device_envelope, server_to_daemon, DaemonAuthError, DaemonEnrollRequest, DaemonToServer, DeviceEnvelope,
-    DeviceExecRun, DevicePtyInputAck, DevicePtyOutput, DeviceRelayFrame, DeviceSessionAttached, DeviceSessionCreate, FsEntry,
-    FsEntryKind, LocalClientHello, PreparedDeviceOperation, ProjectValidated, ServerToDaemon, SessionCreate, SessionPorts,
+    DeviceExecRun, DevicePtyInputAck, DevicePtyOutput, DeviceRelayDial, DeviceScope, DeviceSessionAttached, DeviceSessionCreate,
+    FsEntry, FsEntryKind, LocalClientHello, PreparedDeviceOperation, ProjectValidated, ServerToDaemon, SessionCreate, SessionPorts,
 };
 use crate::{decode_device_envelope, encode_device_envelope, DEVICE_PROTOCOL_VERSION};
 
@@ -106,10 +106,11 @@ fn device_input_ack_round_trip_preserves_cumulative_u64_cursor() {
     ));
 }
 
-/// DeviceEnvelope 直接承载原始 PTY bytes；再套进 relay frame 后，中心只需 opaque 转发，
-/// 内层 oneof、channel 与非法 UTF-8 数据都不能发生变化。
+/// relay 数据面（plan 043）：DeviceEnvelope 以原始 protobuf bytes 直接走 relay WS，
+/// 不再有外层 wrap。opaque 往返 = encode 后 decode，内层 oneof、channel 与非法 UTF-8
+/// PTY 数据都不能发生变化——这是 relay 二进制"零解析转发"的 wire 前提。
 #[test]
-fn device_envelope_survives_relay_wrapping() {
+fn device_envelope_bytes_roundtrip_for_opaque_relay() {
     let data = vec![0x1b, b'[', b'3', b'1', b'm', 0xff, 0x00];
     let inner = DeviceEnvelope {
         protocol_version: DEVICE_PROTOCOL_VERSION,
@@ -121,21 +122,13 @@ fn device_envelope_survives_relay_wrapping() {
             data: data.clone(),
         })),
     };
-    let relay = DaemonToServer {
-        payload: Some(daemon_to_server::Payload::DeviceRelayFrame(DeviceRelayFrame {
-            channel_id: "channel-7".into(),
-            frame: inner.encode_to_vec(),
-        })),
-    };
 
-    let decoded_relay = DaemonToServer::decode(relay.encode_to_vec().as_slice()).unwrap();
-    let frame = match decoded_relay.payload {
-        Some(daemon_to_server::Payload::DeviceRelayFrame(frame)) => frame,
-        other => panic!("wrong relay variant: {other:?}"),
-    };
-    assert_eq!(frame.channel_id, "channel-7");
+    // relay 视角：拿到的只是 bytes，转发前后必须逐字节一致。
+    let frame = inner.encode_to_vec();
+    let forwarded = frame.clone();
+    assert_eq!(forwarded, frame);
 
-    let decoded_inner = DeviceEnvelope::decode(frame.frame.as_slice()).unwrap();
+    let decoded_inner = DeviceEnvelope::decode(forwarded.as_slice()).unwrap();
     assert_eq!(decoded_inner.protocol_version, DEVICE_PROTOCOL_VERSION);
     assert_eq!(decoded_inner.channel_id, "channel-7");
     match decoded_inner.payload {
@@ -146,6 +139,41 @@ fn device_envelope_survives_relay_wrapping() {
             assert_eq!(output.data, data);
         }
         other => panic!("wrong device variant: {other:?}"),
+    }
+}
+
+/// rendezvous 拨号指令（plan 043）：ServerToDaemon 携带 DeviceRelayDial，scopes 枚举、
+/// URL 与 generation 必须原样往返——daemon 信任控制面授予的 scopes，错一位就是权限错位。
+#[test]
+fn server_to_daemon_relay_dial_roundtrips() {
+    let env = ServerToDaemon {
+        payload: Some(server_to_daemon::Payload::DeviceRelayDial(DeviceRelayDial {
+            channel_id: "relay-abc".into(),
+            relay_url: "wss://relay.example/v1/pipe?token=p.s".into(),
+            account_id: "acct-1".into(),
+            client_instance_id: "client-1".into(),
+            transport_generation: u64::from(u32::MAX) + 11,
+            scopes: vec![
+                DeviceScope::SessionRead as i32,
+                DeviceScope::SessionControl as i32,
+                DeviceScope::Rpc as i32,
+                DeviceScope::Lifecycle as i32,
+            ],
+            protocol_version: DEVICE_PROTOCOL_VERSION,
+        })),
+    };
+    let decoded = ServerToDaemon::decode(env.encode_to_vec().as_slice()).unwrap();
+    match decoded.payload {
+        Some(server_to_daemon::Payload::DeviceRelayDial(dial)) => {
+            assert_eq!(dial.channel_id, "relay-abc");
+            assert_eq!(dial.relay_url, "wss://relay.example/v1/pipe?token=p.s");
+            assert_eq!(dial.account_id, "acct-1");
+            assert_eq!(dial.client_instance_id, "client-1");
+            assert_eq!(dial.transport_generation, u64::from(u32::MAX) + 11);
+            assert_eq!(dial.scopes.len(), 4);
+            assert_eq!(dial.protocol_version, DEVICE_PROTOCOL_VERSION);
+        }
+        other => panic!("wrong variant: {other:?}"),
     }
 }
 

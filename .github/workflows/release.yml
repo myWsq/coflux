@@ -37,8 +37,10 @@ jobs:
           # supervisor 编译期版本注入（见 crates/supervisor/src/main.rs::SUPERVISOR_VERSION、build.rs）。
           COFLUX_RELEASE_VERSION: ${{ github.ref_name }}
         run: |
+          # relay 只随 linux 矩阵发布（部署对象是 Linux 服务器节点，plan 043）；
+          # macOS 不产 relay，也就不进签名/公证循环。
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker
+            cross build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker -p coflux-relay
           else
             cargo build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker
           fi
@@ -100,6 +102,10 @@ jobs:
           #   worker 还是热升级下载+验签的对象（会被签名）
           cp "$bin/coflux-supervisor" "dist/coflux-supervisor-${{ matrix.target }}"
           cp "$bin/coflux-worker" "dist/coflux-worker-${{ matrix.target }}"
+          # 独立 relay（plan 043，仅 linux 矩阵产出）：服务器节点手动部署，稳定命名同上
+          if [ -f "$bin/coflux-relay" ]; then
+            cp "$bin/coflux-relay" "dist/coflux-relay-${{ matrix.target }}"
+          fi
           # tar.gz：含两个二进制，供人工安装
           tar -C "$bin" -czf "dist/coflux-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" coflux-supervisor coflux-worker
 
