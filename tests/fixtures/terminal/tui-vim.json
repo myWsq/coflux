@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "name": "Vim 9 sanitized TUI",
+  "initial": { "cols": 60, "rows": 14 },
+  "stages": [
+    {
+      "marker": "TUI_STAGE_0_READY",
+      "resizeAfter": { "cols": 68, "rows": 17 },
+      "dataBase64": "G2NidWlsZCBsb2cgMDEg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMDIg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMDMg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMDQg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMDUg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMDYg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMDcg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMDgg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMDkg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMTAg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMTEg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMTIg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMTMg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMTQg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMTUg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMTYg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQpidWlsZCBsb2cgMTcg4oCUIHNhbml0aXplZCBwcm9ncmVzcyBsaW5lDQobWzM2bW9wZW5pbmcgc2FuaXRpemVkLnR4dBtbMG0NClRVSV9TVEFHRV8wX1JFQURZ"
+    },
+    {
+      "marker": "TUI_STAGE_1_READY",
+      "resizeAfter": { "cols": 74, "rows": 19 },
+      "dataBase64": "G1s/MTA0OWgbWzJKG1tIG1s/MWgbPRtbPzIwMDRoG1sxOzQ0OzM3bSBzYW5pdGl6ZWQudHh0ICAgICAgICAgICAgICAgICAgICAgICAgIDEsMSAgQWxsIBtbMG0NCmZuIG1haW4oKSB7DQogIHByaW50bG4hKCLkvaDlpb0gZcyBIik7DQp9DQobWzM4OzU7MjQ0bX4bWzBtDQobWzM4OzU7MjQ0bX4bWzBtG1sxNTsxSBtbN20tLSBJTlNFUlQgLS0bWzBtIFRVSV9TVEFHRV8xX1JFQURZ"
+    },
+    {
+      "marker": "TUI_SNAPSHOT_READY",
+      "dataBase64": "G1syOzNIG1sxOzM7NDszODsyOzI1NTsxODA7ODBtZm4bWzBtG1s1OzFIG1s0ODs1OzIzNjszODs1OzI1MG1kaWFnbm9zdGljczogMCBlcnJvcnMbWzBtG1s/MjVsG1sxNzsxSFRVSV9TTkFQU0hPVF9SRUFEWQ=="
+    }
+  ],
+  "tailBase64": "G1szOzNIG1szMm1wcmludGxuIRtbMG0bWz8yNWgbWz8xMDQ5bA0KVFVJIHJldHVybmVkIHRvIHNoZWxsDQpUVUlfVEFJTF9ET05F"
+}
