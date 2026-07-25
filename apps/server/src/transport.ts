@@ -5,12 +5,13 @@
  * wire：WS 上只有 binary message，每条 = 一个 protobuf 编码的信封；decode 失败（畸形字节/
  * 未知 oneof case）直接丢弃，不再需要单独的 JSON 文本帧 + isValid* 校验表。
  */
+import type { IncomingMessage } from "node:http";
 import type { WebSocketServer, WebSocket } from "ws";
 import type { Logger } from "@coflux/core";
 
 export interface EndpointOptions<Ctx, Msg> {
   /** 每条连接的上下文 */
-  makeCtx: (ws: WebSocket) => Ctx;
+  makeCtx: (ws: WebSocket, request: IncomingMessage) => Ctx;
   /** 该连接是否已认证（用于认证截止判定） */
   isAuthed: (ctx: Ctx) => boolean;
   /** 未认证但处于合法等待态（如 daemon 等浏览器授权），deadline 到点豁免不关。
@@ -33,8 +34,8 @@ export interface Endpoint {
 export function attachEndpoint<Ctx, Msg>(wss: WebSocketServer, opts: EndpointOptions<Ctx, Msg>): Endpoint {
   const alive = new WeakSet<WebSocket>();
 
-  wss.on("connection", (ws: WebSocket) => {
-    const ctx = opts.makeCtx(ws);
+  wss.on("connection", (ws: WebSocket, request: IncomingMessage) => {
+    const ctx = opts.makeCtx(ws, request);
     alive.add(ws);
     ws.on("pong", () => alive.add(ws));
 

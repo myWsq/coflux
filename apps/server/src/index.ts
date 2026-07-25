@@ -78,7 +78,12 @@ const daemonEp = attachEndpoint(daemonWss, {
 });
 
 const clientEp = attachEndpoint(clientWss, {
-  makeCtx: (ws: WebSocket): ClientConn => ({ ws, accountId: null, subscribed: false }),
+  makeCtx: (ws: WebSocket, request): ClientConn => ({
+    ws,
+    accountId: null,
+    subscribed: false,
+    origin: typeof request.headers.origin === "string" ? request.headers.origin : undefined,
+  }),
   isAuthed: (c) => c.accountId !== null,
   decode: decodeClientToServer,
   onMessage: (c, m) => hub.handleClientMessage(c, m),

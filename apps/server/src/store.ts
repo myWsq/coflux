@@ -36,6 +36,10 @@ import {
   type SessionCheckpoint,
 } from "@coflux/protocol";
 
+const MAX_SESSION_CHECKPOINTS_PER_ACCOUNT = 256;
+const MAX_SESSION_CHECKPOINT_BYTES_PER_ACCOUNT = 64 * 1024 * 1024;
+const SESSION_CHECKPOINT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
 /** DB 里 tasks.status 列存字符串（可读、迁移友好）；协议侧是 proto enum TaskStatus。
  * 这一对 helper 是两者唯一的换算点，别处一律用 TaskStatus。 */
 function taskStatusToDb(status: TaskStatus): string {
@@ -264,7 +268,8 @@ const SCHEMA_DDL = `
     name TEXT NOT NULL,
     repo_path TEXT NOT NULL,
     default_branch TEXT NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL
+    created_at DOUBLE PRECISION NOT NULL,
+    deleting BOOLEAN NOT NULL DEFAULT false
   );
   CREATE INDEX IF NOT EXISTS idx_projects_account ON projects(account_id);
 
@@ -376,6 +381,9 @@ const SCHEMA_DDL = `
   CREATE INDEX IF NOT EXISTS idx_prepared_daemon ON prepared_device_operations(daemon_id, completed, expires_at);
   CREATE INDEX IF NOT EXISTS idx_prepared_account ON prepared_device_operations(account_id, completed, expires_at);
   CREATE INDEX IF NOT EXISTS idx_prepared_target ON prepared_device_operations(account_id, kind, target_id, completed);
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_prepared_active_target
+    ON prepared_device_operations(account_id, kind, target_id)
+    WHERE target_id IS NOT NULL AND completed = false AND state <> 'expired';
 
   CREATE TABLE IF NOT EXISTS session_checkpoints (
     session_id TEXT PRIMARY KEY,
@@ -430,6 +438,7 @@ export class Store {
     // SCHEMA_DDL 是 CREATE TABLE IF NOT EXISTS 幂等块，生产已有的 workspaces 表不会自动得到新列。
     await this.sql`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS additions INTEGER NOT NULL DEFAULT 0`;
     await this.sql`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS deletions INTEGER NOT NULL DEFAULT 0`;
+    await this.sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS deleting BOOLEAN NOT NULL DEFAULT false`;
   }
 
   /**
@@ -571,7 +580,7 @@ export class Store {
   async upsertLocalGateway(accountId: AccountId, daemonId: DaemonId, gateway: LocalGatewayDescriptor, updatedAt: number): Promise<LocalGatewayRecord> {
     const rows = await this.sql<LocalGatewayRecord[]>`
       INSERT INTO local_gateways (daemon_id, account_id, protocol_version, port, public_key_sec1, updated_at)
-      VALUES (${daemonId}, ${accountId}, ${gateway.protocolVersion}, ${gateway.port}, ${gateway.publicKeySec1}, ${updatedAt})
+      VALUES (${daemonId}, ${accountId}, ${gateway.protocolVersion}, ${gateway.port}, ${Buffer.from(gateway.publicKeySec1)}, ${updatedAt})
       ON CONFLICT (daemon_id) DO UPDATE SET
         account_id = excluded.account_id,
         protocol_version = excluded.protocol_version,
@@ -595,7 +604,7 @@ export class Store {
         grant_id, account_id, daemon_id, origin, public_key_sec1, offline_scopes,
         client_token_hash, pair_request_id, state, created_at, updated_at
       ) VALUES (
-        ${grant.grantId}, ${grant.accountId}, ${grant.daemonId}, ${grant.origin}, ${grant.publicKeySec1},
+        ${grant.grantId}, ${grant.accountId}, ${grant.daemonId}, ${grant.origin}, ${Buffer.from(grant.publicKeySec1)},
         ${grant.offlineScopes}, ${clientTokenHash}, ${pairRequestId}, 'pending_install', ${grant.createdAt}, ${now}
       )
       ON CONFLICT DO NOTHING
@@ -616,11 +625,20 @@ export class Store {
     return rows[0];
   }
 
+  async bindLocalGrantToClientToken(grantId: string, accountId: AccountId, tokenHash: string): Promise<LocalGrantRecord | undefined> {
+    const rows = await this.sql<LocalGrantRecord[]>`
+      UPDATE local_browser_grants SET client_token_hash = ${tokenHash}, updated_at = ${Date.now()}
+      WHERE grant_id = ${grantId} AND account_id = ${accountId} AND state NOT IN ('pending_revoke', 'revoked')
+      RETURNING *
+    `;
+    return rows[0];
+  }
+
   async findMatchingLocalGrant(accountId: AccountId, daemonId: DaemonId, origin: string, publicKeySec1: Uint8Array): Promise<LocalGrantRecord | undefined> {
     const rows = await this.sql<LocalGrantRecord[]>`
       SELECT * FROM local_browser_grants
       WHERE account_id = ${accountId} AND daemon_id = ${daemonId} AND origin = ${origin}
-        AND public_key_sec1 = ${publicKeySec1} AND state NOT IN ('pending_revoke', 'revoked')
+        AND public_key_sec1 = ${Buffer.from(publicKeySec1)} AND state NOT IN ('pending_revoke', 'revoked')
       ORDER BY created_at DESC LIMIT 1
     `;
     return rows[0];
@@ -648,6 +666,14 @@ export class Store {
     return rows[0].n;
   }
 
+  async countRetainedLocalGrants(accountId: AccountId, daemonId: DaemonId): Promise<number> {
+    const rows = await this.sql<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM local_browser_grants
+      WHERE account_id = ${accountId} AND daemon_id = ${daemonId}
+    `;
+    return rows[0].n;
+  }
+
   async beginLocalGrantControl(
     grantId: string,
     state: LocalGrantState,
@@ -668,7 +694,7 @@ export class Store {
   }
 
   /** 只接收当前 control request 的 ack；重连后迟到的旧 ack 不得覆盖新状态。 */
-  async applyLocalGrantAck(requestId: string, grantId: string, ok: boolean, error: string | null, now: number): Promise<LocalGrantRecord | undefined> {
+  async applyLocalGrantAck(requestId: string, grantId: string, daemonId: DaemonId, ok: boolean, error: string | null, now: number): Promise<LocalGrantRecord | undefined> {
     const rows = await this.sql<LocalGrantRecord[]>`
       UPDATE local_browser_grants SET
         state = CASE
@@ -681,7 +707,7 @@ export class Store {
         control_request_id = NULL,
         control_action = NULL,
         updated_at = ${now}
-      WHERE grant_id = ${grantId} AND control_request_id = ${requestId}
+      WHERE grant_id = ${grantId} AND daemon_id = ${daemonId} AND control_request_id = ${requestId}
       RETURNING *
     `;
     return rows[0];
@@ -697,6 +723,14 @@ export class Store {
       ) RETURNING *
     `;
     return rows[0];
+  }
+
+  async countActiveLocalLeases(accountId: AccountId, daemonId: DaemonId, now: number): Promise<number> {
+    const rows = await this.sql<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM local_device_leases
+      WHERE account_id = ${accountId} AND daemon_id = ${daemonId} AND revoked = false AND expires_at > ${now}
+    `;
+    return rows[0].n;
   }
 
   async revokeLocalLeasesForGrant(grantId: string): Promise<void> {
@@ -734,6 +768,28 @@ export class Store {
   async listProjectsByDaemon(daemonId: DaemonId): Promise<Project[]> {
     const rows = await this.sql<Project[]>`SELECT * FROM projects WHERE daemon_id = ${daemonId}`;
     return rows.map((r) => create(ProjectSchema, r));
+  }
+  async listDeletingProjectsByDaemon(daemonId: DaemonId): Promise<Project[]> {
+    const rows = await this.sql<Project[]>`SELECT * FROM projects WHERE daemon_id = ${daemonId} AND deleting = true`;
+    return rows.map((r) => create(ProjectSchema, r));
+  }
+  async markProjectDeleting(id: ProjectId): Promise<void> {
+    await this.sql`UPDATE projects SET deleting = true WHERE id = ${id}`;
+  }
+  async isProjectDeleting(id: ProjectId): Promise<boolean> {
+    const rows = await this.sql<{ deleting: boolean }[]>`SELECT deleting FROM projects WHERE id = ${id}`;
+    return rows[0]?.deleting ?? false;
+  }
+  /** 必须在 transaction() 内调用；与 project 删除共用行锁，避免迟到的 worktree report
+   * 在 finalizer 已读取子项后重新插入 workspace。 */
+  async claimActiveProject(id: ProjectId): Promise<Project | undefined> {
+    const rows = await this.sql<Project[]>`SELECT * FROM projects WHERE id = ${id} AND deleting = false FOR UPDATE`;
+    return rows[0] && create(ProjectSchema, rows[0]);
+  }
+  /** 必须在 transaction() 内调用；串行化 project 删除的最终收口，避免重复广播/级联。 */
+  async claimDeletingProject(id: ProjectId): Promise<Project | undefined> {
+    const rows = await this.sql<Project[]>`SELECT * FROM projects WHERE id = ${id} AND deleting = true FOR UPDATE`;
+    return rows[0] && create(ProjectSchema, rows[0]);
   }
   async removeProject(id: ProjectId): Promise<void> {
     await this.sql`DELETE FROM projects WHERE id = ${id}`;
@@ -850,7 +906,7 @@ export class Store {
         expires_at, state, completed, created_at, updated_at
       ) VALUES (
         ${operation.operationId}, ${operation.accountId}, ${operation.daemonId}, ${operation.kind},
-        ${operation.targetId}, ${operation.targetVersion}, ${operation.frame}, ${operation.metadata},
+        ${operation.targetId}, ${operation.targetVersion}, ${Buffer.from(operation.frame)}, ${operation.metadata},
         ${operation.expiresAt}, 'pending_install', false, ${now}, ${now}
       )
       ON CONFLICT DO NOTHING
@@ -876,6 +932,24 @@ export class Store {
     return rows[0];
   }
 
+  async findLatestPreparedOperation(accountId: AccountId, daemonId: DaemonId, kind: string, targetId: string): Promise<PreparedOperationRecord | undefined> {
+    const rows = await this.sql<PreparedOperationRecord[]>`
+      SELECT * FROM prepared_device_operations
+      WHERE account_id = ${accountId} AND daemon_id = ${daemonId} AND kind = ${kind} AND target_id = ${targetId}
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    return rows[0];
+  }
+
+  async countActivePreparedOperations(accountId: AccountId, daemonId: DaemonId, now: number): Promise<number> {
+    const rows = await this.sql<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM prepared_device_operations
+      WHERE account_id = ${accountId} AND daemon_id = ${daemonId}
+        AND completed = false AND expires_at > ${now} AND state <> 'expired'
+    `;
+    return rows[0].n;
+  }
+
   async listInstallablePreparedOperations(daemonId: DaemonId, now: number): Promise<PreparedOperationRecord[]> {
     return this.sql<PreparedOperationRecord[]>`
       SELECT * FROM prepared_device_operations
@@ -894,10 +968,12 @@ export class Store {
   }
 
   async markPreparedOperationInstalled(operationId: string, daemonId: DaemonId, ok: boolean, error: string | null): Promise<PreparedOperationRecord | undefined> {
+    const now = Date.now();
     const rows = await this.sql<PreparedOperationRecord[]>`
       UPDATE prepared_device_operations SET
-        state = ${ok ? "installed" : "install_failed"}, install_error = ${ok ? null : error}, updated_at = ${Date.now()}
+        state = ${ok ? "installed" : "install_failed"}, install_error = ${ok ? null : error}, updated_at = ${now}
       WHERE operation_id = ${operationId} AND daemon_id = ${daemonId} AND completed = false
+        AND expires_at > ${now} AND state IN ('pending_install', 'installed', 'install_failed')
       RETURNING *
     `;
     return rows[0];
@@ -907,7 +983,8 @@ export class Store {
   async claimPreparedOperationReport(operationId: string, daemonId: DaemonId): Promise<PreparedOperationRecord | undefined> {
     const rows = await this.sql<PreparedOperationRecord[]>`
       UPDATE prepared_device_operations SET state = 'applying', updated_at = ${Date.now()}
-      WHERE operation_id = ${operationId} AND daemon_id = ${daemonId} AND completed = false AND state <> 'applying'
+      WHERE operation_id = ${operationId} AND daemon_id = ${daemonId} AND completed = false
+        AND state NOT IN ('applying', 'expired')
       RETURNING *
     `;
     return rows[0];
@@ -920,8 +997,35 @@ export class Store {
         report_ok = ${report.ok}, report_task_id = ${report.taskId ?? null},
         report_session_id = ${report.sessionId ?? null}, report_pid = ${report.pid ?? null},
         report_exit_code = ${report.exitCode ?? null}, report_error = ${report.error ?? null},
-        result_frame = ${report.resultFrame ?? null}, updated_at = ${Date.now()}
+        result_frame = ${report.resultFrame ? Buffer.from(report.resultFrame) : null}, updated_at = ${Date.now()}
       WHERE operation_id = ${operationId} AND state = 'applying' AND completed = false
+      RETURNING *
+    `;
+    return rows[0];
+  }
+
+  async finishPreparedOperationFromExit(
+    operationId: string,
+    taskId: TaskId,
+    sessionId: SessionId,
+    exitCode: number,
+  ): Promise<PreparedOperationRecord | undefined> {
+    const rows = await this.sql<PreparedOperationRecord[]>`
+      UPDATE prepared_device_operations SET
+        state = 'completed', completed = true, report_ok = true,
+        report_task_id = ${taskId}, report_session_id = ${sessionId}, report_exit_code = ${exitCode},
+        report_error = NULL, updated_at = ${Date.now()}
+      WHERE operation_id = ${operationId} AND completed = false
+      RETURNING *
+    `;
+    return rows[0];
+  }
+
+  async failPreparedOperationConvergence(operationId: string, daemonId: DaemonId, error: string): Promise<PreparedOperationRecord | undefined> {
+    const rows = await this.sql<PreparedOperationRecord[]>`
+      UPDATE prepared_device_operations SET
+        state = 'failed', completed = true, report_ok = false, report_error = ${error}, updated_at = ${Date.now()}
+      WHERE operation_id = ${operationId} AND daemon_id = ${daemonId} AND completed = false
       RETURNING *
     `;
     return rows[0];
@@ -948,7 +1052,7 @@ export class Store {
         cols, rows, captured_at, updated_at
       ) VALUES (
         ${checkpoint.sessionId}, ${checkpoint.taskId}, ${accountId}, ${daemonId}, ${checkpoint.snapshotSeq.toString()},
-        ${checkpoint.ansiSnapshot}, ${checkpoint.cols}, ${checkpoint.rows}, ${checkpoint.capturedAt}, ${now}
+        ${Buffer.from(checkpoint.ansiSnapshot)}, ${checkpoint.cols}, ${checkpoint.rows}, ${checkpoint.capturedAt}, ${now}
       )
       ON CONFLICT (session_id) DO UPDATE SET
         task_id = excluded.task_id,
@@ -965,19 +1069,47 @@ export class Store {
         AND session_checkpoints.snapshot_seq < excluded.snapshot_seq
       RETURNING *
     `;
+    if (rows[0]) await this.pruneSessionCheckpoints(accountId, now);
     return rows[0] && rowToCheckpoint(rows[0]);
   }
 
   async getSessionCheckpoint(sessionId: SessionId): Promise<SessionCheckpointRecord | undefined> {
-    const rows = await this.sql<SessionCheckpointRow[]>`SELECT * FROM session_checkpoints WHERE session_id = ${sessionId}`;
+    const rows = await this.sql<SessionCheckpointRow[]>`
+      SELECT * FROM session_checkpoints
+      WHERE session_id = ${sessionId} AND updated_at >= ${Date.now() - SESSION_CHECKPOINT_RETENTION_MS}
+    `;
     return rows[0] && rowToCheckpoint(rows[0]);
   }
 
   async listSessionCheckpoints(accountId: AccountId): Promise<SessionCheckpointRecord[]> {
+    await this.pruneSessionCheckpoints(accountId, Date.now());
     const rows = await this.sql<SessionCheckpointRow[]>`
-      SELECT * FROM session_checkpoints WHERE account_id = ${accountId} ORDER BY captured_at DESC LIMIT 1024
+      SELECT * FROM session_checkpoints WHERE account_id = ${accountId} ORDER BY captured_at DESC
     `;
     return rows.map(rowToCheckpoint);
+  }
+
+  /** checkpoint 是可丢派生缓存：按账号同时限制保留期、条目数和 BYTEA 总量。 */
+  private async pruneSessionCheckpoints(accountId: AccountId, now: number): Promise<void> {
+    await this.sql`
+      WITH ranked AS (
+        SELECT
+          session_id,
+          updated_at,
+          ROW_NUMBER() OVER (ORDER BY updated_at DESC, session_id) AS row_number,
+          SUM(OCTET_LENGTH(ansi_snapshot)) OVER (ORDER BY updated_at DESC, session_id) AS cumulative_bytes
+        FROM session_checkpoints
+        WHERE account_id = ${accountId}
+      )
+      DELETE FROM session_checkpoints AS checkpoints
+      USING ranked
+      WHERE checkpoints.session_id = ranked.session_id
+        AND (
+          ranked.updated_at < ${now - SESSION_CHECKPOINT_RETENTION_MS}
+          OR ranked.row_number > ${MAX_SESSION_CHECKPOINTS_PER_ACCOUNT}
+          OR ranked.cumulative_bytes > ${MAX_SESSION_CHECKPOINT_BYTES_PER_ACCOUNT}
+        )
+    `;
   }
 
   async removeSessionCheckpointsByTask(taskId: TaskId): Promise<void> {
