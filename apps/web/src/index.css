@@ -262,11 +262,6 @@ dialog button[aria-label="Close"] svg,
   height: 100%;
 }
 
-.xterm .xterm-viewport {
-  scrollbar-color: #333333 transparent;
-  scrollbar-width: thin;
-}
-
 .xterm .xterm-screen canvas {
   image-rendering: auto;
 }
