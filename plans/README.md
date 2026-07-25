@@ -42,7 +42,7 @@
 | 037 | [supervisor 演进为本机 sessiond](037-supervisor-sessiond-authority.md) | DONE (201186c) | 036 |
 | 038 | [worker loopback gateway + 双 transport](038-worker-local-gateway.md) | DONE (76a2aa1) | 036 |
 | 039 | [server 收敛为控制面 + relay](039-server-control-plane-relay.md) | DONE (183faf6) | 036 |
-| 040 | [web/client 真正本地优先的 DeviceTransport](040-web-local-first-device-transport.md) | TODO | 036, 042 |
+| 040 | [web/client 真正本地优先的 DeviceTransport](040-web-local-first-device-transport.md) | DONE | 036, 042 |
 | 041 | [本地优先架构集成、迁移与发布验收](041-local-first-integration.md) | TODO | 037, 038, 039, 042, 040 |
 | 042 | [Device PTY 输入累计 ACK 与连续 exactly-once 契约](042-device-input-ack-contract.md) | DONE (e235158) | 036 |
 
