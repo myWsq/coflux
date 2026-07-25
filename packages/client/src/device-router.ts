@@ -183,6 +183,13 @@ interface RoutedSession {
   attachGeneration?: bigint;
   attachedGeneration?: bigint;
   inputRetryTimer?: TimerHandle;
+  holderWaiters: Set<HolderWaiter>;
+}
+
+interface HolderWaiter {
+  timer: TimerHandle;
+  resolve: () => void;
+  reject: (error: Error) => void;
 }
 
 interface PendingRequest {
@@ -1204,6 +1211,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
           session.attachGeneration = undefined;
           session.attachedGeneration = undefined;
           clearInputRetry(session);
+          rejectHolderWaiters(session, new DeviceRouteError("session holder 已被其它客户端接管", "stale_holder"));
           options.onSessionDetached(route.daemonId, session.taskId, session.sessionId, payload.value.reason ?? "holder detached");
           releaseIdle(route);
         }
@@ -1216,6 +1224,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
           session.detached = false;
           session.holderEpoch = undefined;
           clearInputRetry(session);
+          rejectHolderWaiters(session, new DeviceRouteError("session 已退出", "session_exited"));
           options.onSessionExited(route.daemonId, session.taskId, session.sessionId, payload.value.exitCode);
           releaseIdle(route);
         }
@@ -1269,6 +1278,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
             session.detached = true;
             session.holderEpoch = undefined;
             clearInputRetry(session);
+            rejectHolderWaiters(session, new DeviceRouteError(message, code));
             options.onSessionDetached(route.daemonId, session.taskId, session.sessionId, message);
           } else {
             options.onError(message);
@@ -1333,6 +1343,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     session.attachGeneration = undefined;
     session.attachedGeneration = channel.generation;
     session.holderEpoch = attached.holderEpoch;
+    resolveHolderWaiters(session);
     if (attached.ansiSnapshot !== undefined) {
       session.outputSeq = attached.snapshotSeq;
       session.hasLiveSnapshot = true;
@@ -1602,6 +1613,37 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     if (session.retainedInputs.length > 0) scheduleInputRetry(route, session);
   }
 
+  function waitForSessionHolder(session: RoutedSession): Promise<void> {
+    if (session.holderEpoch !== undefined) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const waiter: HolderWaiter = {
+        timer: clock.setTimeout(() => {
+          session.holderWaiters.delete(waiter);
+          reject(new DeviceRouteError("等待 session holder 超时"));
+        }, CONTROL_REQUEST_TIMEOUT_MS),
+        resolve,
+        reject,
+      };
+      session.holderWaiters.add(waiter);
+    });
+  }
+
+  function resolveHolderWaiters(session: RoutedSession): void {
+    for (const waiter of session.holderWaiters) {
+      clock.clearTimeout(waiter.timer);
+      waiter.resolve();
+    }
+    session.holderWaiters.clear();
+  }
+
+  function rejectHolderWaiters(session: RoutedSession, error: Error): void {
+    for (const waiter of session.holderWaiters) {
+      clock.clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    session.holderWaiters.clear();
+  }
+
   function request(
     daemonId: string,
     scope: DeviceScope,
@@ -1679,6 +1721,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         hasLiveSnapshot: false,
         retainedInputs: [],
         retainedInputBytes: 0,
+        holderWaiters: new Set(),
       };
       route.sessions.set(sessionId, session);
     } else {
@@ -1717,6 +1760,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       resizeSeq: 0n,
       retainedInputs: [],
       retainedInputBytes: 0,
+      holderWaiters: new Set(),
     });
   }
 
@@ -1775,7 +1819,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     if (!session) throw new DeviceRouteError("本地没有该 session 的路由状态");
     if (session.holderEpoch === undefined) {
       attachSession(daemonId, session.taskId, sessionId, session.cols, session.rows, true);
-      await waitForHolder(session, clock);
+      await waitForSessionHolder(session);
     }
     const requestId = randomUUID();
     const operationId = randomUUID();
@@ -1792,7 +1836,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     const route = routes.get(daemonId);
     if (!route) return;
     const session = route.sessions.get(sessionId);
-    if (session) clearInputRetry(session);
+    if (session) {
+      clearInputRetry(session);
+      rejectHolderWaiters(session, new DeviceRouteError("session route 已释放"));
+    }
     route.sessions.delete(sessionId);
     releaseIdle(route);
   }
@@ -2059,7 +2106,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     route.pairController = undefined;
     closeLane(route, route.sessionLane, reason);
     closeLane(route, route.elevatedLane, reason);
-    for (const session of route.sessions.values()) clearInputRetry(session);
+    for (const session of route.sessions.values()) {
+      clearInputRetry(session);
+      rejectHolderWaiters(session, new DeviceRouteError(reason));
+    }
     for (const pending of route.pendingRequests.values()) {
       clock.clearTimeout(pending.timer);
       pending.reject(new DeviceRouteError(reason));
@@ -2190,18 +2240,6 @@ function isAbortError(error: unknown): boolean {
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortError();
-}
-
-function waitForHolder(session: RoutedSession, clock: DeviceRouterClock): Promise<void> {
-  const deadline = clock.now() + CONTROL_REQUEST_TIMEOUT_MS;
-  return new Promise((resolve, reject) => {
-    const poll = () => {
-      if (session.holderEpoch !== undefined) return resolve();
-      if (clock.now() >= deadline) return reject(new DeviceRouteError("等待 session holder 超时"));
-      clock.setTimeout(poll, 25);
-    };
-    poll();
-  });
 }
 
 function waitForOpen(socket: WebSocket, timeoutMs: number, signal: AbortSignal): Promise<void> {

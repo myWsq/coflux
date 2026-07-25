@@ -14,6 +14,11 @@ export function MainPage() {
       tokenStorageKey: TOKEN_KEY,
       buildId: BUILD_ID,
       loginProvider: USE_SUPABASE ? loginWithSupabase : undefined,
+      deviceTransport: {
+        enableLocalTransport: true,
+        identityDatabaseName: "coflux-web-device-v1",
+        origin: window.location.origin,
+      },
     }),
   );
   useEffect(() => () => client.disconnect(), [client]);

@@ -10,5 +10,12 @@ export {
   type FsListResult,
   type ExecResult,
   type FsWriteResult,
+  type DeviceTransportOptions,
+  type LocalSessionState,
   type LoginProvider,
 } from "./store";
+export {
+  type DeviceInputState,
+  type DeviceTransportMode,
+  type DeviceTransportState,
+} from "./device-router";
