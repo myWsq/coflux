@@ -9,3 +9,6 @@ target/
 .DS_Store
 .env*
 .coflux-dev/
+
+# Xcode 自动生成（本项目不用 Xcode Cloud）
+xcodecloud/
