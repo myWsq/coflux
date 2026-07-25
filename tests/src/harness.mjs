@@ -17,7 +17,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import http from "node:http";
 import { WebSocket } from "ws";
@@ -137,6 +137,44 @@ export function spawnDaemon(env) {
   const env2 = { ...env, COFLUX_WORKER_CMD: WORKER_BIN, COFLUX_WORKER_ARGS: "[]" };
   return spawn(SUPERVISOR_BIN, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
 }
+// 独立 relay（plan 043）：每套 stack 生成一对临时 ed25519 密钥——seed(hex) 给 server 签
+// rendezvous token，公钥(hex) 经 env 注入 relay 验签（同 COFLUX_WORKER_PUBKEY 的注入惯例）。
+// relay 用随机端口并在 stdout 打就绪行，这里解析实际端口，遵守"各测试文件独占端口"纪律。
+const RELAY_BIN = process.env.COFLUX_RELAY_BIN || join(ROOT, "target/debug/coflux-relay");
+
+export function makeRelayKeys() {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const seedHex = Buffer.from(privateKey.export({ format: "jwk" }).d, "base64url").toString("hex");
+  const pubHex = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("hex");
+  return { seedHex, pubHex };
+}
+
+export async function spawnRelay(pubHex, ms = 8000) {
+  const child = spawn(RELAY_BIN, [], {
+    env: { ...process.env, COFLUX_RELAY_LISTEN: "127.0.0.1:0", COFLUX_RELAY_PUBKEY: pubHex },
+    stdio: ["ignore", "pipe", DEBUG ? "inherit" : "ignore"],
+    detached: true,
+  });
+  const port = await new Promise((resolvePort, rejectPort) => {
+    let buffer = "";
+    const timer = setTimeout(() => rejectPort(new Error("relay did not report listening line")), ms);
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const match = buffer.match(/coflux-relay listening on [^\s:]*:(\d+)/);
+      if (match) {
+        clearTimeout(timer);
+        if (DEBUG) process.stdout.write(buffer);
+        resolvePort(Number(match[1]));
+      }
+    });
+    child.once("exit", () => {
+      clearTimeout(timer);
+      rejectPort(new Error("relay exited before listening"));
+    });
+  });
+  return { process: child, port };
+}
+
 export function killTree(p) {
   if (!p) return;
   try {
@@ -186,19 +224,36 @@ export async function startServer(opts = {}) {
   const port = opts.port;
   if (!port) throw new Error("startServer requires a port");
   const testDb = await createTestDatabase();
-  const serverEnv = { ...process.env, COFLUX_PORT: String(port), DATABASE_URL: testDb.url, ...(opts.env ?? {}) };
+  // 与生产拓扑一致：server 总是带一个伴生 relay（随机端口 + 每栈临时密钥），
+  // rendezvous 才有落点；config 对 COFLUX_RELAY_SIGNING_KEY 也是 fail-closed。
+  const relayKeys = makeRelayKeys();
   const ref = {};
+  let relayPort;
+  let serverEnv;
   try {
+    const relay = await spawnRelay(relayKeys.pubHex);
+    ref.relay = relay.process;
+    relayPort = relay.port;
+    serverEnv = {
+      ...process.env,
+      COFLUX_PORT: String(port),
+      DATABASE_URL: testDb.url,
+      COFLUX_RELAY_SIGNING_KEY: relayKeys.seedHex,
+      COFLUX_RELAY_URL: `ws://127.0.0.1:${relay.port}`,
+      ...(opts.env ?? {}),
+    };
     ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
     await waitHealth(port);
   } catch (e) {
     // 建库之后、句柄（含 stop()）交还调用方之前失败：就地清理，别泄漏测试库
     killTree(ref.server);
+    killTree(ref.relay);
     await dropTestDatabaseLoudly(testDb.name);
     throw e;
   }
   return {
     port,
+    relayPort,
     makeClient: (options) => new Client(port, options),
     rawDaemon: () => rawDaemon(port),
     async restartServer() {
@@ -210,6 +265,7 @@ export async function startServer(opts = {}) {
     },
     async stop() {
       killTree(ref.server);
+      killTree(ref.relay);
       await sleep(150);
       await dropTestDatabaseLoudly(testDb.name);
     },
@@ -292,22 +348,37 @@ export async function startStack(opts = {}) {
 
   const testDb = await createTestDatabase();
   const home = mkdtempSync(join(tmpdir(), "coflux-test-home-"));
+  const relayKeys = makeRelayKeys();
 
-  // opts.serverEnv：额外/覆盖 server 侧 env（如 proxy.test.mjs 显式钉死 COFLUX_PROXY_SCHEME，
-  // 避免测试环境未设 COFLUX_DEV 时 isDev=false 导致 proxyScheme 默认落到 https，门禁/cookie 断言随之漂移）。
-  const serverEnv = { ...process.env, COFLUX_PORT: String(port), DATABASE_URL: testDb.url, COFLUX_USERNAME: username, COFLUX_PASSWORD: password, ...(opts.serverEnv ?? {}) };
-  const daemonEnv = {
-    ...process.env,
-    COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`,
-    COFLUX_HOME: home,
-    COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev",
-    // 黑盒栈绝不能占用真实 daemon 的生产端口；worker 会把实际随机端口上报给 control plane。
-    COFLUX_LOCAL_GATEWAY_PORT: "0",
-    ...(opts.daemonEnv ?? {}),
-  };
-
-  const ref = { server: null, daemon: null };
+  const ref = { server: null, daemon: null, relay: null };
+  let relayPort;
   try {
+    // relay 先起（随机端口），server env 才能带上它的 URL。
+    const relay = await spawnRelay(relayKeys.pubHex);
+    ref.relay = relay.process;
+    relayPort = relay.port;
+    // opts.serverEnv：额外/覆盖 server 侧 env（如 proxy.test.mjs 显式钉死 COFLUX_PROXY_SCHEME，
+    // 避免测试环境未设 COFLUX_DEV 时 isDev=false 导致 proxyScheme 默认落到 https，门禁/cookie 断言随之漂移）。
+    const serverEnv = {
+      ...process.env,
+      COFLUX_PORT: String(port),
+      DATABASE_URL: testDb.url,
+      COFLUX_USERNAME: username,
+      COFLUX_PASSWORD: password,
+      COFLUX_RELAY_SIGNING_KEY: relayKeys.seedHex,
+      COFLUX_RELAY_URL: `ws://127.0.0.1:${relay.port}`,
+      ...(opts.serverEnv ?? {}),
+    };
+    const daemonEnv = {
+      ...process.env,
+      COFLUX_SERVER: `ws://127.0.0.1:${port}/daemon`,
+      COFLUX_HOME: home,
+      COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev",
+      // 黑盒栈绝不能占用真实 daemon 的生产端口；worker 会把实际随机端口上报给 control plane。
+      COFLUX_LOCAL_GATEWAY_PORT: "0",
+      ...(opts.daemonEnv ?? {}),
+    };
+    ref.serverEnv = serverEnv;
     ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
     await waitHealth(port);
     ref.daemon = spawnDaemon(daemonEnv);
@@ -317,6 +388,7 @@ export async function startStack(opts = {}) {
     // 建库之后、stack.stop() 可用之前失败：就地清理，别泄漏测试库/临时目录
     killTree(ref.daemon);
     killTree(ref.server);
+    killTree(ref.relay);
     if (existsSync(home)) try { rmSync(home, { recursive: true, force: true }); } catch {}
     await dropTestDatabaseLoudly(testDb.name);
     throw e;
@@ -327,6 +399,7 @@ export async function startStack(opts = {}) {
     username,
     password,
     home,
+    relayPort,
     daemonId: null,
     makeClient: (options) => new Client(port, options),
     /** 真正停止中心进程，但保留 daemon、临时数据库与 loopback gateway。 */
@@ -341,7 +414,7 @@ export async function startStack(opts = {}) {
     async restartServer() {
       await stack.stopServer();
       // 复用同一个临时库（serverEnv 里的 DATABASE_URL 不变）：数据必须跨重启保留（reconnect.test.mjs 依赖此行为）。
-      ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
+      ref.server = spawnApp("apps/server/src/index.ts", ref.serverEnv);
       await waitHealth(port);
     },
     /** 杀掉整个 daemon 进程树（supervisor+worker），模拟用户机器离线（offline-view.test.mjs） */
@@ -378,6 +451,7 @@ export async function startStack(opts = {}) {
     async stop() {
       killTree(ref.daemon);
       killTree(ref.server);
+      killTree(ref.relay);
       await sleep(200);
       if (existsSync(home)) try { rmSync(home, { recursive: true, force: true }); } catch {}
       await dropTestDatabaseLoudly(testDb.name);

@@ -455,10 +455,17 @@ pub struct LocalGrantAck {
     #[prost(string, optional, tag="4")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// client→server：申请一个中心 relay logical channel。channel_id/client_instance_id 均由 client
-/// 随机生成；server 把已认证 account/scopes 加到 DeviceRelayDaemonOpen 后发给目标 worker。
+// ===== 独立 relay rendezvous（plan 043）=====
+//
+// relay 数据面不再经中心控制 WS 多路复用（旧 DeviceRelayClientOpen/DeviceRelayDaemonOpen/
+// DeviceRelayFrame/DeviceRelayClose/DeviceRelayStatus 已删除并在各信封 reserved）。新语义：
+// client 经本消息向中心申请 channel；中心校验归属后给两端各签一张短时单次 ed25519 token
+// 并拼进完整 relay URL；daemon 收 DeviceRelayDial 后按需拨号。两条 relay WS 按 channel_id
+// 配对成 opaque 字节管道，帧仍是端到端 DeviceEnvelope，relay 与中心都不解析。
+
+/// client→server：channel_id/client_instance_id 均由 client 随机生成；`__coflux-` 前缀保留。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeviceRelayClientOpen {
+pub struct DeviceRelayConnect {
     #[prost(string, tag="1")]
     pub daemon_id: ::prost::alloc::string::String,
     #[prost(string, tag="2")]
@@ -470,44 +477,37 @@ pub struct DeviceRelayClientOpen {
     #[prost(uint32, tag="5")]
     pub protocol_version: u32,
 }
+/// server→client：rendezvous 结果。ok 时 relay_url 就绪（完整 ws(s) URL，token 在 query 内，
+/// TTL 短且同 channel+role 只可用一次）；失败时 error 给拒因。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeviceRelayDaemonOpen {
-    #[prost(string, tag="1")]
-    pub channel_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub account_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub client_instance_id: ::prost::alloc::string::String,
-    #[prost(uint64, tag="4")]
-    pub transport_generation: u64,
-    #[prost(enumeration="DeviceScope", repeated, tag="5")]
-    pub scopes: ::prost::alloc::vec::Vec<i32>,
-    #[prost(uint32, tag="6")]
-    pub protocol_version: u32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeviceRelayFrame {
-    #[prost(string, tag="1")]
-    pub channel_id: ::prost::alloc::string::String,
-    /// 编码后的 DeviceEnvelope；server 原样转发。
-    #[prost(bytes="vec", tag="2")]
-    pub frame: ::prost::alloc::vec::Vec<u8>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeviceRelayClose {
-    #[prost(string, tag="1")]
-    pub channel_id: ::prost::alloc::string::String,
-    #[prost(string, optional, tag="2")]
-    pub reason: ::core::option::Option<::prost::alloc::string::String>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeviceRelayStatus {
+pub struct DeviceRelayGrant {
     #[prost(string, tag="1")]
     pub channel_id: ::prost::alloc::string::String,
     #[prost(bool, tag="2")]
     pub ok: bool,
     #[prost(string, optional, tag="3")]
+    pub relay_url: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="4")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// server→daemon：要求 worker 立即拨号 relay 建立本 channel 的 daemon 侧 WS。
+/// account/scopes 语义与旧 DeviceRelayDaemonOpen 相同：由 server 授予，daemon 信任控制面。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceRelayDial {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub relay_url: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub account_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="5")]
+    pub transport_generation: u64,
+    #[prost(enumeration="DeviceScope", repeated, tag="6")]
+    pub scopes: ::prost::alloc::vec::Vec<i32>,
+    #[prost(uint32, tag="7")]
+    pub protocol_version: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceSessionInfo {
@@ -1330,7 +1330,7 @@ pub struct TaskRemove {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 29, 30, 31, 32, 24")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 24")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -1373,14 +1373,10 @@ pub mod client_to_server {
         LocalPairRequest(super::LocalPairRequest),
         #[prost(message, tag="28")]
         LocalLeaseRequest(super::LocalLeaseRequest),
-        #[prost(message, tag="29")]
-        DeviceRelayOpen(super::DeviceRelayClientOpen),
-        #[prost(message, tag="30")]
-        DeviceRelayFrame(super::DeviceRelayFrame),
-        #[prost(message, tag="31")]
-        DeviceRelayClose(super::DeviceRelayClose),
         #[prost(message, tag="32")]
         LocalUnpairRequest(super::LocalUnpairRequest),
+        #[prost(message, tag="33")]
+        DeviceRelayConnect(super::DeviceRelayConnect),
         #[prost(message, tag="24")]
         WorkspaceSetName(super::WorkspaceSetName),
     }
@@ -1502,7 +1498,7 @@ pub struct ClientOutdated {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 33")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -1547,18 +1543,14 @@ pub mod server_to_client {
         LocalPairResult(super::LocalPairResult),
         #[prost(message, tag="26")]
         LocalLeaseResult(super::LocalLeaseResult),
-        #[prost(message, tag="27")]
-        DeviceRelayStatus(super::DeviceRelayStatus),
-        #[prost(message, tag="28")]
-        DeviceRelayFrame(super::DeviceRelayFrame),
-        #[prost(message, tag="29")]
-        DeviceRelayClose(super::DeviceRelayClose),
         #[prost(message, tag="30")]
         PreparedDeviceOperation(super::PreparedDeviceOperation),
         #[prost(message, tag="31")]
         SessionCheckpoint(super::SessionCheckpoint),
         #[prost(message, tag="32")]
         LocalUnpairResult(super::LocalUnpairResult),
+        #[prost(message, tag="33")]
+        DeviceRelayGrant(super::DeviceRelayGrant),
     }
 }
 // ===== Daemon → Server 载荷 =====
@@ -1673,7 +1665,7 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 22, 23, 24, 25, 26, 27, 28")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -1708,10 +1700,6 @@ pub mod daemon_to_server {
         WorkspaceDiff(super::WorkspaceDiff),
         #[prost(message, tag="21")]
         LocalGrantAck(super::LocalGrantAck),
-        #[prost(message, tag="22")]
-        DeviceRelayFrame(super::DeviceRelayFrame),
-        #[prost(message, tag="23")]
-        DeviceRelayClose(super::DeviceRelayClose),
         #[prost(message, tag="24")]
         SessionCheckpoint(super::SessionCheckpoint),
         #[prost(message, tag="25")]
@@ -1863,7 +1851,7 @@ pub struct ProxyClose {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 19, 20")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 33, 19, 20")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -1902,12 +1890,6 @@ pub mod server_to_daemon {
         LocalGrantRevoke(super::LocalGrantRevoke),
         #[prost(message, tag="25")]
         LocalLeaseInstall(super::LocalLeaseInstall),
-        #[prost(message, tag="26")]
-        DeviceRelayOpen(super::DeviceRelayDaemonOpen),
-        #[prost(message, tag="27")]
-        DeviceRelayFrame(super::DeviceRelayFrame),
-        #[prost(message, tag="28")]
-        DeviceRelayClose(super::DeviceRelayClose),
         #[prost(message, tag="29")]
         LocalGatewayConfigure(super::LocalGatewayConfigure),
         #[prost(message, tag="30")]
@@ -1916,6 +1898,8 @@ pub mod server_to_daemon {
         ExitAck(super::DeviceExitAck),
         #[prost(message, tag="32")]
         PreparedDeviceOperation(super::PreparedDeviceOperation),
+        #[prost(message, tag="33")]
+        DeviceRelayDial(super::DeviceRelayDial),
         #[prost(message, tag="19")]
         ProxyData(super::ProxyData),
         #[prost(message, tag="20")]

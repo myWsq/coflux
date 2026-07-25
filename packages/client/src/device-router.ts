@@ -39,6 +39,8 @@ const DEVICE_REQUEST_TIMEOUT_MS = 20_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 const TRANSPORT_DEADLINE_MARGIN_MS = 5_000;
 const DIRECT_CONNECT_TIMEOUT_MS = 2_500;
+/** relay 可能跨洲：比 loopback 宽松，但仍要有限时失败以便重新 rendezvous。 */
+const RELAY_CONNECT_TIMEOUT_MS = 10_000;
 const RECOVER_BASE_MS = 350;
 const RECOVER_MAX_MS = 5_000;
 const DIRECT_HEDGE_MS = 200;
@@ -267,7 +269,8 @@ interface ControlWaiter<T> {
   abort?: () => void;
 }
 
-interface RelayOpenWaiter extends ControlWaiter<void> {
+/** rendezvous 等待者：resolve 值为中心签好 token 的完整 relay 拨号 URL（plan 043）。 */
+interface RelayOpenWaiter extends ControlWaiter<string> {
   daemonId: string;
 }
 
@@ -578,37 +581,34 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
   }
 
+  /** plan 043：中心只做 rendezvous（归属校验 + token 签发 + 通知 daemon 拨号），
+   * 数据帧走本函数拨出的 channel 专属 relay WS，不再经中心控制 WS。
+   * rendezvous 超时/中止无需通知中心——中心无 channel 状态，daemon 侧靠配对超时自愈。 */
   async function openRelayTransport(openOptions: DeviceTransportOpenOptions): Promise<OpenedDeviceTransport> {
-    if (!controlOnline) throw new DeviceRouteError("中心 relay 不可用");
+    if (!controlOnline) throw new DeviceRouteError("中心 rendezvous 不可用");
     const channelId = `relay-${randomUUID()}`;
-    await new Promise<void>((resolve, reject) => {
+    const relayUrl = await new Promise<string>((resolve, reject) => {
       if (openOptions.signal.aborted) return reject(abortError());
       const timer = clock.setTimeout(() => {
         const waiter = relayOpenWaiters.get(channelId);
         if (!waiter) return;
         relayOpenWaiters.delete(channelId);
         waiter.abort?.();
-        if (controlOnline) {
-          options.sendControl({ case: "deviceRelayClose", value: { channelId, reason: "client relay open timeout" } });
-        }
-        reject(new DeviceRouteError("中心 relay channel 打开超时"));
+        reject(new DeviceRouteError("中心 relay rendezvous 超时"));
       }, CONTROL_REQUEST_TIMEOUT_MS);
       const aborted = () => {
         const waiter = relayOpenWaiters.get(channelId);
         if (!waiter) return;
         relayOpenWaiters.delete(channelId);
         clock.clearTimeout(timer);
-        if (controlOnline) {
-          options.sendControl({ case: "deviceRelayClose", value: { channelId, reason: "client relay open aborted" } });
-        }
         reject(abortError());
       };
       openOptions.signal.addEventListener("abort", aborted, { once: true });
       relayOpenWaiters.set(channelId, {
         daemonId: openOptions.daemonId,
-        resolve: () => {
+        resolve: (url) => {
           openOptions.signal.removeEventListener("abort", aborted);
-          resolve();
+          resolve(url);
         },
         reject: (error) => {
           openOptions.signal.removeEventListener("abort", aborted);
@@ -618,7 +618,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         abort: () => openOptions.signal.removeEventListener("abort", aborted),
       });
       options.sendControl({
-        case: "deviceRelayOpen",
+        case: "deviceRelayConnect",
         value: {
           daemonId: openOptions.daemonId,
           channelId,
@@ -629,21 +629,42 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       });
     });
 
-    let closed = false;
-    return {
+    const socket = new WebSocket(relayUrl);
+    socket.binaryType = "arraybuffer";
+    const abortSocket = () => {
+      try { socket.close(); } catch { /* ignore */ }
+    };
+    openOptions.signal.addEventListener("abort", abortSocket, { once: true });
+    try {
+      await waitForOpen(socket, RELAY_CONNECT_TIMEOUT_MS, openOptions.signal);
+    } catch (error) {
+      openOptions.signal.removeEventListener("abort", abortSocket);
+      try { socket.close(); } catch { /* ignore */ }
+      throw error;
+    }
+
+    const transport: OpenedDeviceTransport = {
       channelId,
       scopes: new Set([DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE]),
       send(frame) {
-        if (!controlOnline || closed) return false;
-        options.sendControl({ case: "deviceRelayFrame", value: { channelId, frame } });
+        if (socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > MAX_DEVICE_FRAME_BYTES) return false;
+        socket.send(frame);
         return true;
       },
       close() {
-        if (closed) return;
-        closed = true;
-        if (controlOnline) options.sendControl({ case: "deviceRelayClose", value: { channelId, reason: "client route replaced" } });
+        openOptions.signal.removeEventListener("abort", abortSocket);
+        try { socket.close(); } catch { /* ignore */ }
       },
     };
+    socket.onmessage = (event) => {
+      if (!(event.data instanceof ArrayBuffer)) return;
+      openOptions.onFrame(new Uint8Array(event.data));
+    };
+    socket.onclose = () => openOptions.onClose("relay 连接已关闭");
+    socket.onerror = () => {
+      // 与 direct 同理：close 是唯一状态迁移出口，error 通常紧跟 close。
+    };
+    return transport;
   }
 
   async function openChannel(
@@ -2037,31 +2058,14 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         else waiter.reject(new DeviceRouteError(payload.value.error ?? "online lease 签发失败"));
         return true;
       }
-      case "deviceRelayStatus": {
+      case "deviceRelayGrant": {
         const waiter = relayOpenWaiters.get(payload.value.channelId);
         if (!waiter) return true;
         relayOpenWaiters.delete(payload.value.channelId);
         clock.clearTimeout(waiter.timer);
         waiter.abort?.();
-        if (payload.value.ok) waiter.resolve();
-        else waiter.reject(new DeviceRouteError(payload.value.error ?? "relay channel 打开失败"));
-        return true;
-      }
-      case "deviceRelayFrame": {
-        const target = relayChannels.get(payload.value.channelId);
-        if (target) receiveFrame(target.route, target.channel, payload.value.frame);
-        return true;
-      }
-      case "deviceRelayClose": {
-        const opening = relayOpenWaiters.get(payload.value.channelId);
-        if (opening) {
-          relayOpenWaiters.delete(payload.value.channelId);
-          clock.clearTimeout(opening.timer);
-          opening.abort?.();
-          opening.reject(new DeviceRouteError(payload.value.reason ?? "relay channel 已关闭"));
-        }
-        const target = relayChannels.get(payload.value.channelId);
-        if (target) loseChannel(target.route, target.channel, payload.value.reason ?? "relay channel 已关闭");
+        if (payload.value.ok && payload.value.relayUrl) waiter.resolve(payload.value.relayUrl);
+        else waiter.reject(new DeviceRouteError(payload.value.error ?? "relay rendezvous 失败"));
         return true;
       }
       case "preparedDeviceOperation":

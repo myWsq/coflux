@@ -372,22 +372,6 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     set {payload = .localGrantAck(newValue)}
   }
 
-  public var deviceRelayFrame: Coflux_V1_DeviceRelayFrame {
-    get {
-      if case .deviceRelayFrame(let v)? = payload {return v}
-      return Coflux_V1_DeviceRelayFrame()
-    }
-    set {payload = .deviceRelayFrame(newValue)}
-  }
-
-  public var deviceRelayClose: Coflux_V1_DeviceRelayClose {
-    get {
-      if case .deviceRelayClose(let v)? = payload {return v}
-      return Coflux_V1_DeviceRelayClose()
-    }
-    set {payload = .deviceRelayClose(newValue)}
-  }
-
   public var sessionCheckpoint: Coflux_V1_SessionCheckpoint {
     get {
       if case .sessionCheckpoint(let v)? = payload {return v}
@@ -446,8 +430,6 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     case workspaceBranch(Coflux_V1_WorkspaceBranch)
     case workspaceDiff(Coflux_V1_WorkspaceDiff)
     case localGrantAck(Coflux_V1_LocalGrantAck)
-    case deviceRelayFrame(Coflux_V1_DeviceRelayFrame)
-    case deviceRelayClose(Coflux_V1_DeviceRelayClose)
     case sessionCheckpoint(Coflux_V1_SessionCheckpoint)
     case deviceOperationReport(Coflux_V1_DeviceOperationReport)
     case localGatewayAnnounce(Coflux_V1_LocalGatewayAnnounce)
@@ -875,30 +857,6 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     set {payload = .localLeaseInstall(newValue)}
   }
 
-  public var deviceRelayOpen: Coflux_V1_DeviceRelayDaemonOpen {
-    get {
-      if case .deviceRelayOpen(let v)? = payload {return v}
-      return Coflux_V1_DeviceRelayDaemonOpen()
-    }
-    set {payload = .deviceRelayOpen(newValue)}
-  }
-
-  public var deviceRelayFrame: Coflux_V1_DeviceRelayFrame {
-    get {
-      if case .deviceRelayFrame(let v)? = payload {return v}
-      return Coflux_V1_DeviceRelayFrame()
-    }
-    set {payload = .deviceRelayFrame(newValue)}
-  }
-
-  public var deviceRelayClose: Coflux_V1_DeviceRelayClose {
-    get {
-      if case .deviceRelayClose(let v)? = payload {return v}
-      return Coflux_V1_DeviceRelayClose()
-    }
-    set {payload = .deviceRelayClose(newValue)}
-  }
-
   public var localGatewayConfigure: Coflux_V1_LocalGatewayConfigure {
     get {
       if case .localGatewayConfigure(let v)? = payload {return v}
@@ -929,6 +887,14 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
       return Coflux_V1_PreparedDeviceOperation()
     }
     set {payload = .preparedDeviceOperation(newValue)}
+  }
+
+  public var deviceRelayDial: Coflux_V1_DeviceRelayDial {
+    get {
+      if case .deviceRelayDial(let v)? = payload {return v}
+      return Coflux_V1_DeviceRelayDial()
+    }
+    set {payload = .deviceRelayDial(newValue)}
   }
 
   public var proxyData: Coflux_V1_ProxyData {
@@ -966,13 +932,11 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     case localGrantInstall(Coflux_V1_LocalGrantInstall)
     case localGrantRevoke(Coflux_V1_LocalGrantRevoke)
     case localLeaseInstall(Coflux_V1_LocalLeaseInstall)
-    case deviceRelayOpen(Coflux_V1_DeviceRelayDaemonOpen)
-    case deviceRelayFrame(Coflux_V1_DeviceRelayFrame)
-    case deviceRelayClose(Coflux_V1_DeviceRelayClose)
     case localGatewayConfigure(Coflux_V1_LocalGatewayConfigure)
     case sessionCatalogRequest(Coflux_V1_DeviceSessionCatalogRequest)
     case exitAck(Coflux_V1_DeviceExitAck)
     case preparedDeviceOperation(Coflux_V1_PreparedDeviceOperation)
+    case deviceRelayDial(Coflux_V1_DeviceRelayDial)
     case proxyData(Coflux_V1_ProxyData)
     case workspaceList(Coflux_V1_WorkspaceList)
 
@@ -1474,7 +1438,7 @@ extension Coflux_V1_ProxyClosed: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{4}\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1664,32 +1628,6 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .localGrantAck(v)
         }
       }()
-      case 22: try {
-        var v: Coflux_V1_DeviceRelayFrame?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceRelayFrame(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceRelayFrame(v)
-        }
-      }()
-      case 23: try {
-        var v: Coflux_V1_DeviceRelayClose?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceRelayClose(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceRelayClose(v)
-        }
-      }()
       case 24: try {
         var v: Coflux_V1_SessionCheckpoint?
         var hadOneofValue = false
@@ -1821,14 +1759,6 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .localGrantAck?: try {
       guard case .localGrantAck(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
-    }()
-    case .deviceRelayFrame?: try {
-      guard case .deviceRelayFrame(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
-    }()
-    case .deviceRelayClose?: try {
-      guard case .deviceRelayClose(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 23)
     }()
     case .sessionCheckpoint?: try {
       guard case .sessionCheckpoint(let v)? = self.payload else { preconditionFailure() }
@@ -2462,7 +2392,7 @@ extension Coflux_V1_ProxyClose: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToDaemon"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{4}\u{3}proxy_open\0\u{3}proxy_close\0\u{4}\u{5}proxy_data\0\u{3}workspace_list\0\u{4}\u{2}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{3}device_relay_open\0\u{3}device_relay_frame\0\u{3}device_relay_close\0\u{3}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0\u{b}session_replay\0\u{b}pty_resize\0\u{b}exec_run\0\u{b}fs_list\0\u{b}fs_read\0\u{b}pty_input\0\u{b}fs_write\0\u{c}\u{b}\u{1}\u{c}\u{c}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{15}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{4}\u{3}proxy_open\0\u{3}proxy_close\0\u{4}\u{5}proxy_data\0\u{3}workspace_list\0\u{4}\u{2}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{4}\u{4}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0\u{3}device_relay_dial\0\u{b}session_replay\0\u{b}pty_resize\0\u{b}exec_run\0\u{b}fs_list\0\u{b}fs_read\0\u{b}pty_input\0\u{b}fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{b}\u{1}\u{c}\u{c}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{15}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2704,45 +2634,6 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .localLeaseInstall(v)
         }
       }()
-      case 26: try {
-        var v: Coflux_V1_DeviceRelayDaemonOpen?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceRelayOpen(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceRelayOpen(v)
-        }
-      }()
-      case 27: try {
-        var v: Coflux_V1_DeviceRelayFrame?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceRelayFrame(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceRelayFrame(v)
-        }
-      }()
-      case 28: try {
-        var v: Coflux_V1_DeviceRelayClose?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceRelayClose(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceRelayClose(v)
-        }
-      }()
       case 29: try {
         var v: Coflux_V1_LocalGatewayConfigure?
         var hadOneofValue = false
@@ -2793,6 +2684,19 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .preparedDeviceOperation(v)
+        }
+      }()
+      case 33: try {
+        var v: Coflux_V1_DeviceRelayDial?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceRelayDial(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceRelayDial(v)
         }
       }()
       default: break
@@ -2878,18 +2782,6 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .localLeaseInstall(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 25)
     }()
-    case .deviceRelayOpen?: try {
-      guard case .deviceRelayOpen(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 26)
-    }()
-    case .deviceRelayFrame?: try {
-      guard case .deviceRelayFrame(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 27)
-    }()
-    case .deviceRelayClose?: try {
-      guard case .deviceRelayClose(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 28)
-    }()
     case .localGatewayConfigure?: try {
       guard case .localGatewayConfigure(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 29)
@@ -2905,6 +2797,10 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .preparedDeviceOperation?: try {
       guard case .preparedDeviceOperation(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 32)
+    }()
+    case .deviceRelayDial?: try {
+      guard case .deviceRelayDial(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 33)
     }()
     case nil: break
     }
