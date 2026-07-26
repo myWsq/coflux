@@ -106,7 +106,6 @@ struct TerminalInputArea: View {
                         key("tab", bytes: "\t")
                         key("⇧tab", bytes: "\u{1b}[Z")
                         key("/", bytes: "/")
-                        repeatKey(systemImage: "delete.left", bytes: "\u{7f}")
                     }
                     HStack(spacing: 6) {
                         key("esc", bytes: "\u{1b}")
@@ -128,12 +127,17 @@ struct TerminalInputArea: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                enterKey
+                // 右缘列：⌫ 在上、⏎ 在下（标准键盘习惯位，2026-07-26 用户定）
+                VStack(spacing: 6) {
+                    repeatKey(systemImage: "delete.left", bytes: "\u{7f}")
+                        .frame(width: 52)
+                    enterKey
+                }
             }
         }
     }
 
-    /// 回车：最高频主键，竖跨两行、primary 高亮、钉右下角
+    /// 回车：最高频主键，primary 高亮、钉右下角
     private var enterKey: some View {
         Button {
             press("\r")
@@ -141,7 +145,7 @@ struct TerminalInputArea: View {
             Image(systemName: "return")
                 .font(Theme.Fonts.label.weight(.semibold))
                 .foregroundStyle(Theme.primaryForeground)
-                .frame(width: 52, height: 82)
+                .frame(width: 52, height: 38)
                 .background(Theme.primary, in: RoundedRectangle(cornerRadius: 8))
         }
         .accessibilityLabel("回车")
