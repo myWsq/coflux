@@ -94,10 +94,10 @@ struct TerminalInputArea: View {
     /// - ^C 破坏性大 → 缩小、与回车对角隔离。
     private var padRows: some View {
         VStack(spacing: 6) {
-            // 顶排（与下块同高对齐）：esc 左上角 + 数字快选 1-4 + 右上角小⌫
+            // 顶排：esc + 数字快选 1-5 + 右上角小⌫（六个等宽键与下块六列大致对齐）
             HStack(spacing: 6) {
                 key("esc", bytes: "\u{1b}")
-                ForEach(["1", "2", "3", "4"], id: \.self) { digit in
+                ForEach(["1", "2", "3", "4", "5"], id: \.self) { digit in
                     key(digit, bytes: digit)
                 }
                 repeatKey(systemImage: "delete.left", bytes: "\u{7f}")
