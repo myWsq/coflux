@@ -94,23 +94,27 @@ struct TerminalInputArea: View {
     /// - ^C 破坏性大 → 缩小、与回车对角隔离。
     private var padRows: some View {
         VStack(spacing: 6) {
-            // 数字快选只留 1-4：agent 菜单选项极少超过 4（2026-07-26 用户定）
+            // 顶行：数字快选 1-4（agent 菜单极少超过 4）+ 右上角小退格
             HStack(spacing: 6) {
                 ForEach(["1", "2", "3", "4"], id: \.self) { digit in
                     key(digit, height: 32, bytes: digit)
                 }
+                repeatKey(systemImage: "delete.left", height: 32, bytes: "\u{7f}")
+                    .frame(width: 52)
             }
-            HStack(spacing: 8) {
+            // 下块：左控制区 + 倒 T 方向簇 + 右下角竖跨大回车
+            HStack(spacing: 6) {
+                // 左区：esc 钉左上角、^C 钉左下角（2026-07-26 用户定）
                 VStack(spacing: 6) {
                     HStack(spacing: 6) {
+                        key("esc", bytes: "\u{1b}")
                         key("tab", bytes: "\t")
                         key("⇧tab", bytes: "\u{1b}[Z")
-                        key("/", bytes: "/")
                     }
                     HStack(spacing: 6) {
-                        key("esc", bytes: "\u{1b}")
                         key("^C", tint: Theme.destructive, bytes: "\u{03}")
                             .frame(width: 52)
+                        key("/", bytes: "/")
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -127,17 +131,13 @@ struct TerminalInputArea: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                // 右缘列：⌫ 在上、⏎ 在下（标准键盘习惯位，2026-07-26 用户定）
-                VStack(spacing: 6) {
-                    repeatKey(systemImage: "delete.left", bytes: "\u{7f}")
-                        .frame(width: 52)
-                    enterKey
-                }
+                enterKey
             }
         }
     }
 
-    /// 回车：最高频主键，primary 高亮、钉右下角
+    /// 回车：最高频主键，竖跨两行大键、primary 高亮、钉右下角；
+    /// 顶上是同宽的小退格（右缘列 = 小⌫ + 大⏎）
     private var enterKey: some View {
         Button {
             press("\r")
@@ -145,7 +145,7 @@ struct TerminalInputArea: View {
             Image(systemName: "return")
                 .font(Theme.Fonts.label.weight(.semibold))
                 .foregroundStyle(Theme.primaryForeground)
-                .frame(width: 52, height: 38)
+                .frame(width: 52, height: 82)
                 .background(Theme.primary, in: RoundedRectangle(cornerRadius: 8))
         }
         .accessibilityLabel("回车")
@@ -187,9 +187,10 @@ struct TerminalInputArea: View {
     /// 以 80ms 间隔连发，松手停。
     private func repeatKey(
         systemImage: String,
+        height: CGFloat = 38,
         bytes: @autoclosure @escaping () -> String
     ) -> some View {
-        keyCap(label: nil, systemImage: systemImage, tint: Theme.foreground, height: 38)
+        keyCap(label: nil, systemImage: systemImage, tint: Theme.foreground, height: height)
             .contentShape(RoundedRectangle(cornerRadius: 8))
             .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 40) {
                 guard let sessionID else { return }
