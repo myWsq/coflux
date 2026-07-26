@@ -3,7 +3,7 @@ import UIKit
 
 /// 终端输入区（plan 053）——移动端两层输入模型：
 /// - 成文层：原生输入框 + 系统输入法（中文可用），整段编辑一次发送；
-///   发送 = 文本+回车，长按发送 = 仅插入不回车。
+///   发送 = 仅落文本不回车（plan 054 复议 053），回车由控制板大回车键补。
 /// - 控制层：精简键盘（数字/Esc//、Tab/⇧Tab/⌫、^C/方向/回车），单键直发。
 ///   无字母（字母走成文层），故不设粘滞 Ctrl——组合键以专用键给出（^C）。
 /// 终端本体是纯显示（DisplayOnlyTerminalView），软键盘输入全部从这里走
@@ -219,7 +219,7 @@ struct TerminalInputArea: View {
 
 /// 成文层（plan 053 最终形态）：与系统键盘同层的输入条（fullScreenCover
 /// 透明底、无暗色蒙层——底下的终端与控制板完全冻结可见）。
-/// 点输入条外任意处取消（草稿保留）；发送 = 文本+回车，长按 = 仅插入。
+/// 点输入条外任意处取消（草稿保留）；发送 = 仅落文本不回车（plan 054）。
 /// 可调强度毛玻璃：暂停的 UIViewPropertyAnimator 用 fractionComplete 控制
 /// 模糊深度（0-1 连续），这是"淡毛玻璃"的唯一正确姿势——直接给材质设
 /// opacity 会禁用模糊、退化成不透明灰遮罩（真机踩过）。强度渐变自带淡入淡出。
@@ -273,7 +273,7 @@ struct VariableBlurView: UIViewRepresentable {
 
 struct TerminalComposeOverlay: View {
     @Binding var draft: String
-    let onSend: (_ newline: Bool) -> Void
+    let onSend: () -> Void
     let onDismiss: () -> Void
     @FocusState private var focused: Bool
     /// 自绘淡入淡出（呈现层动画已禁）：毛玻璃强度与输入条透明度同步渐变
@@ -302,11 +302,7 @@ struct TerminalComposeOverlay: View {
                     .frame(width: 34, height: 34)
                     .background(Circle().fill(draft.isEmpty ? Theme.secondarySurface : Theme.primary))
                     .onTapGesture {
-                        onSend(true)
-                        fadeOutAndDismiss()
-                    }
-                    .onLongPressGesture {
-                        onSend(false)
+                        onSend()
                         fadeOutAndDismiss()
                     }
                     .accessibilityLabel("发送")
