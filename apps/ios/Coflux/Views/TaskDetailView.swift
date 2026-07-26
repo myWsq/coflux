@@ -32,8 +32,17 @@ struct TaskDetailView: View {
                 .ignoresSafeArea(.container, edges: .bottom)
             } else {
                 // 任务已被删除（本端或它端）：现场不复存在
-                ContentUnavailableView("任务不存在", systemImage: "square.terminal")
-                    .frame(maxHeight: .infinity)
+                ContentUnavailableView {
+                    Label {
+                        Text("任务不存在")
+                    } icon: {
+                        Image("square-terminal")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 42, height: 42)
+                    }
+                }
+                .frame(maxHeight: .infinity)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
