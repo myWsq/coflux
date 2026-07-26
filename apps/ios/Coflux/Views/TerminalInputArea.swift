@@ -94,8 +94,9 @@ struct TerminalInputArea: View {
     /// - ^C 破坏性大 → 缩小、与回车对角隔离。
     private var padRows: some View {
         VStack(spacing: 6) {
+            // 数字快选只留 1-4：agent 菜单选项极少超过 4（2026-07-26 用户定）
             HStack(spacing: 6) {
-                ForEach(["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"], id: \.self) { digit in
+                ForEach(["1", "2", "3", "4"], id: \.self) { digit in
                     key(digit, height: 32, bytes: digit)
                 }
             }
