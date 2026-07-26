@@ -103,10 +103,10 @@ struct TerminalInputArea: View {
                 repeatKey(systemImage: "delete.left", bytes: "\u{7f}")
                     .frame(width: 52)
             }
-            // 下块：左列（⇧tab 上 / ^C 左下角）+ 方向簇（tab、/ 夹 ↑ 两侧）+ 竖跨大⏎
+            // 下块：左列（粘贴 上 / ^C 左下角）+ 方向簇（tab、/ 夹 ↑ 两侧）+ 竖跨大⏎
             HStack(spacing: 6) {
                 VStack(spacing: 6) {
-                    key("⇧tab", bytes: "\u{1b}[Z")
+                    pasteKey
                     key("^C", tint: Theme.destructive, bytes: "\u{03}")
                 }
                 .frame(width: 84)
@@ -126,6 +126,18 @@ struct TerminalInputArea: View {
                 enterKey
             }
         }
+    }
+
+    /// 粘贴：系统剪贴板直发终端（移动端独有高频缺口，替代低频 ⇧tab）；
+    /// 与成文层多行发送同理，包 bracketed paste 防换行被当提交
+    private var pasteKey: some View {
+        Button {
+            guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
+            press("\u{1b}[200~" + text + "\u{1b}[201~")
+        } label: {
+            keyCap(label: nil, systemImage: "doc.on.clipboard", tint: Theme.foreground, height: 38)
+        }
+        .accessibilityLabel("粘贴到终端")
     }
 
     /// 回车：最高频主键，竖跨两行大键、primary 高亮、钉右下角；
