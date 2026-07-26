@@ -104,7 +104,7 @@ struct WorkspaceListView: View {
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 3) {
                 Text(name)
-                    .font(Theme.Fonts.rowTitle)
+                    .font(Theme.Fonts.body)
                 if workspace.name.isEmpty == false, workspace.branch != workspace.name {
                     Text(workspace.branch)
                         .font(Theme.Fonts.label.monospaced())

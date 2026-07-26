@@ -31,9 +31,10 @@ struct TerminalHostView: UIViewRepresentable {
     func makeUIView(context: Context) -> TerminalView {
         let view = TerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
-        // 字体/光标/配色对齐 web 终端（SF Mono 12 + bar 光标；iOS 的
-        // monospacedSystemFont 即 SF Mono，与 web 首选字体同族）
-        view.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        // 字体/光标/配色对齐 web 终端（bar 光标；iOS 的 monospacedSystemFont
+        // 即 SF Mono，与 web 首选字体同族）。字号 13 而非 web 的 12：
+        // 手机阅读距离更远，用户实测 12 偏小（2026-07-26）
+        view.font = UIFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         view.backgroundColor = Theme.terminalUIColor
         view.nativeBackgroundColor = Theme.terminalUIColor
         view.nativeForegroundColor = Theme.terminalForegroundUIColor
