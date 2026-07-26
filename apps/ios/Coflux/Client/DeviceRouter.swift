@@ -34,11 +34,11 @@ struct DeviceRouterCallbacks {
     var onInputBlocked: (_ sessionID: String, _ blocked: Bool) -> Void
 }
 
-/// relay-only Device 数据路由（plan 045）。语义基准 `packages/client/src/device-router.ts` 的
+/// relay-only Device 数据路由（plan 046）。语义基准 `packages/client/src/device-router.ts` 的
 /// relay 子集：per-daemon route（session/elevated 两条 lane）、transport generation 单调、
 /// attach 三重匹配 + snapshot/resume、输入/resize 台账与累计 ACK 重投、prepared operation
 /// 台账、按需建连与空闲释放。direct/loopback、pair/lease、心跳、fs/exec RPC 不移植
-/// （iOS 永不与 daemon 同机；ceiling 见 plan 045 Maintenance）。
+/// （iOS 永不与 daemon 同机；ceiling 见 plan 046 Maintenance）。
 ///
 /// 与 CofluxClient 同在 MainActor：单线程状态机与 TS 版一一对应；网络 IO 在子 Task，
 /// 回 MainActor 提交状态。

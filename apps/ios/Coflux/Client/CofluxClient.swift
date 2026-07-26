@@ -75,7 +75,7 @@ final class CofluxClient {
     private var errorSequence = 0
     private var suspendedInBackground = false
 
-    /// PTY 数据面（plan 045）。输出字节不进可观察状态：经 consumer 闭包直达终端 feed。
+    /// PTY 数据面（plan 046）。输出字节不进可观察状态：经 consumer 闭包直达终端 feed。
     private var deviceRouter: DeviceRouter!
     /// 单 consumer（iOS 同刻只有一个详情页；web 版的多 consumer 集合是超配，store.ts:298）。
     private var sessionConsumers: [String: (Data, _ replace: Bool) -> Void] = [:]
@@ -443,7 +443,7 @@ final class CofluxClient {
     }
 
     /// 停止并删除任务。iOS relay-only：中心离线时设备通道必然也不可达，不做离线记账
-    /// （plan 045 决策：pendingTaskRemovals 不移植），直接报错。
+    /// （plan 046 决策：pendingTaskRemovals 不移植），直接报错。
     func closeTask(_ task: Coflux_V1_Task) async {
         if task.status == .running, task.hasSessionID {
             do {
