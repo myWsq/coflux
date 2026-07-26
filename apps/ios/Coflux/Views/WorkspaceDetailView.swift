@@ -12,7 +12,9 @@ struct WorkspaceDetailView: View {
     @State private var termRows: UInt32 = 24
     @State private var confirmingRemove = false
     @State private var knownTaskIDsBeforeCreate: Set<String>?
-    @Namespace private var glassNamespace
+    /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
+    @State private var pageProgress: CGFloat = 0
+    @State private var chipFrames: [String: CGRect] = [:]
 
     /// tab 序 = 创建序（mobile 同序：createdAt 升序）
     private var members: [Coflux_V1_Task] {
@@ -31,13 +33,26 @@ struct WorkspaceDetailView: View {
                 emptyState
             } else {
                 tabBar
-                TabView(selection: $activeTaskID) {
-                    ForEach(members, id: \.id) { task in
-                        taskPage(task)
-                            .tag(Optional(task.id))
+                // 分页容器用 ScrollView 而非 TabView(.page)：后者不暴露连续
+                // 滚动进度，药丸只能落定后追赶（"不跟手"，plan 050 返工点）
+                ScrollView(.horizontal) {
+                    HStack(spacing: 0) {
+                        ForEach(members, id: \.id) { task in
+                            taskPage(task)
+                                .containerRelativeFrame(.horizontal)
+                                .id(task.id)
+                        }
                     }
+                    .scrollTargetLayout()
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
+                .scrollTargetBehavior(.paging)
+                .scrollPosition(id: $activeTaskID)
+                .scrollIndicators(.hidden)
+                .onScrollGeometryChange(for: CGFloat.self) { geo in
+                    geo.containerSize.width > 0 ? geo.contentOffset.x / geo.containerSize.width : 0
+                } action: { _, value in
+                    pageProgress = value
+                }
                 .ignoresSafeArea(.container, edges: .bottom)
             }
         }
@@ -84,7 +99,7 @@ struct WorkspaceDetailView: View {
     }
 
     // MARK: - tab 条（内容组件非导航 chrome；激活指示 = 单一常驻玻璃药丸，
-    // matchedGeometryEffect 锚定到激活 chip，切换时真实位移滑动，plan 050）
+    // 位置按翻页连续进度在相邻 chip 框架间插值 → 跟手滑动，plan 050）
 
     private var tabBar: some View {
         ScrollViewReader { proxy in
@@ -92,7 +107,11 @@ struct WorkspaceDetailView: View {
                 HStack(spacing: 8) {
                     ForEach(members, id: \.id) { task in
                         tabChip(task)
-                            .matchedGeometryEffect(id: task.id, in: glassNamespace, isSource: true)
+                            .onGeometryChange(for: CGRect.self) { proxy in
+                                proxy.frame(in: .named("chipBar"))
+                            } action: { frame in
+                                chipFrames[task.id] = frame
+                            }
                             .id(task.id)
                     }
                     Button {
@@ -110,16 +129,15 @@ struct WorkspaceDetailView: View {
                 // 垂直留白必须在 ScrollView 内容里而非外面：药丸边缘高光
                 // 贴着滚动容器裁剪边界会被切掉（真机踩过）
                 .padding(.vertical, 6)
+                .coordinateSpace(.named("chipBar"))
                 .background {
-                    // 药丸常驻不销毁（避免插入/移除被容器 blend 成糊斑的老路），
-                    // 只换锚定目标 → matchedGeometry 给出位移滑动
-                    if let activeTaskID {
+                    if let frame = pillFrame() {
                         Color.clear
                             .glassEffect(.regular, in: .capsule)
-                            .matchedGeometryEffect(id: activeTaskID, in: glassNamespace, isSource: false)
+                            .frame(width: frame.width, height: frame.height)
+                            .position(x: frame.midX, y: frame.midY)
                     }
                 }
-                .animation(.smooth(duration: 0.3), value: activeTaskID)
             }
             .onChange(of: activeTaskID) { _, id in
                 guard let id else { return }
@@ -128,10 +146,27 @@ struct WorkspaceDetailView: View {
         }
     }
 
+    /// 药丸目标框架：翻页进度的整数部分定相邻 chip 对，小数部分线性插值。
+    private func pillFrame() -> CGRect? {
+        let ids = members.map(\.id)
+        guard !ids.isEmpty else { return nil }
+        let progress = min(max(pageProgress, 0), CGFloat(ids.count - 1))
+        let index = Int(progress.rounded(.down))
+        let fraction = progress - CGFloat(index)
+        guard let from = chipFrames[ids[index]] else { return nil }
+        guard fraction > 0, index + 1 < ids.count, let to = chipFrames[ids[index + 1]] else { return from }
+        return CGRect(
+            x: from.minX + (to.minX - from.minX) * fraction,
+            y: from.minY + (to.minY - from.minY) * fraction,
+            width: from.width + (to.width - from.width) * fraction,
+            height: from.height + (to.height - from.height) * fraction
+        )
+    }
+
     private func tabChip(_ task: Coflux_V1_Task) -> some View {
         let active = task.id == activeTaskID
         return Button {
-            activeTaskID = task.id
+            withAnimation(.smooth(duration: 0.3)) { activeTaskID = task.id }
         } label: {
             HStack(spacing: 6) {
                 Circle()
