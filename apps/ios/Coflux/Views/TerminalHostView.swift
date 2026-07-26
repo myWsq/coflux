@@ -1,18 +1,34 @@
 import SwiftUI
 import SwiftTerm
 
+/// 激活终端的模式注册表：输入板据此决定方向键序列（DECCKM）与
+/// 多行文本是否包 bracketed paste（plan 053）。
+@MainActor
+final class TerminalModeRegistry {
+    static let shared = TerminalModeRegistry()
+    private var applicationCursorGetters: [String: () -> Bool] = [:]
+
+    func register(taskID: String, applicationCursor: @escaping () -> Bool) {
+        applicationCursorGetters[taskID] = applicationCursor
+    }
+
+    func unregister(taskID: String) {
+        applicationCursorGetters[taskID] = nil
+    }
+
+    func applicationCursor(taskID: String) -> Bool {
+        applicationCursorGetters[taskID]?() ?? false
+    }
+}
+
 /// SwiftTerm TerminalView 的 SwiftUI 宿主。职责：
 /// - 按 task.sessionID 绑定/换绑 session consumer（replace 帧先 resetToInitialState 再 feed）
-/// - 键盘输入 → client.sendInput；布局变化 → client.resizeSession + 上报 dims 给详情页
+/// - 硬件键盘输入 → client.sendInput；布局变化 → client.resizeSession + 上报 dims 给详情页
 /// - RUNNING 任务在绑定时以终端实际 dims 发起 attach（client.startTask 内部路由）
-/// 快捷键条用 SwiftTerm 内置 TerminalAccessory（Esc/Ctrl/Tab/箭头，iOSTerminalView 自装）。
 struct TerminalHostView: UIViewRepresentable {
     let client: CofluxClient
     let taskID: String
     let sessionID: String?
-    /// 任务台多页保活场景：非激活页必须放弃 firstResponder，否则键盘输入
-    /// 会继续打到滑走的旧终端（正确性问题，见 plan 049）。单页使用可不传。
-    var isActive: Bool = true
     var onSizeChanged: ((UInt32, UInt32) -> Void)?
 
     /// ANSI 16 色对齐 web xterm theme（terminal-pane.tsx:197-211）。web 未指定的
@@ -30,6 +46,11 @@ struct TerminalHostView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> TerminalView {
         let view = TerminalView(frame: .zero)
+        // 纯显示化（plan 053）：inputView 置空视图挡系统键盘（点按不再弹）、
+        // 置 nil 去内置快捷条；保留 firstResponder → 长按选择/拷贝、外接硬件
+        // 键盘直通不受影响。软键盘输入一律走 TerminalInputArea。
+        view.inputView = UIView()
+        view.inputAccessoryView = nil
         view.terminalDelegate = context.coordinator
         // 字体/光标/配色对齐 web 终端（bar 光标；iOS 的 monospacedSystemFont
         // 即 SF Mono，与 web 首选字体同族）。字号 13 而非 web 的 12：
@@ -48,8 +69,8 @@ struct TerminalHostView: UIViewRepresentable {
     func updateUIView(_ uiView: TerminalView, context: Context) {
         context.coordinator.taskID = taskID
         context.coordinator.bind(sessionID: sessionID)
-        if !isActive, uiView.isFirstResponder {
-            uiView.resignFirstResponder()
+        TerminalModeRegistry.shared.register(taskID: taskID) { [weak uiView] in
+            uiView?.getTerminal().applicationCursor ?? false
         }
     }
 
@@ -92,6 +113,7 @@ struct TerminalHostView: UIViewRepresentable {
         }
 
         func release() {
+            TerminalModeRegistry.shared.unregister(taskID: taskID)
             releaseConsumer?()
             releaseConsumer = nil
             boundSessionID = nil
