@@ -13,5 +13,8 @@
 	</dict>
 	<key>UIUserInterfaceStyle</key>
 	<string>Dark</string>
+	<!-- TestFlight/App Store 出口合规：仅用 HTTPS/WSS 标准加密（豁免类），免每次构建回答加密问题 -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
