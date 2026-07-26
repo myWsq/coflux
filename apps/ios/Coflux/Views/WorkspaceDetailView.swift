@@ -19,6 +19,9 @@ struct WorkspaceDetailView: View {
     /// 位移量 = 面板实测高度（尺寸不受 transition 影响，量值稳定）；
     /// 平滑感来自 offset 自身的动画插值（纯 transform，不触发布局）。
     @State private var panelHeight: CGFloat = 0
+    /// 模态成文层：键盘只存在于蒙层里，终端页与系统键盘绝缘
+    @State private var composing = false
+    @State private var draft = ""
 
     private var terminalLift: CGFloat { inputCollapsed ? 0 : panelHeight }
     /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
@@ -82,21 +85,43 @@ struct WorkspaceDetailView: View {
                 .offset(y: -terminalLift)
                 .animation(.smooth(duration: 0.25), value: terminalLift)
                 .clipped()
+                // 终端页与系统键盘绝缘：键盘只属于模态成文层
+                .ignoresSafeArea(.keyboard)
             }
         }
         .overlay(alignment: .bottom) {
             ZStack {
                 if !inputCollapsed, !members.isEmpty {
-                    TerminalInputArea(client: client, task: activeTask, collapsed: $inputCollapsed)
-                        .onGeometryChange(for: CGFloat.self) { proxy in
-                            proxy.size.height
-                        } action: { height in
-                            panelHeight = height
-                        }
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    TerminalInputArea(
+                        client: client,
+                        task: activeTask,
+                        collapsed: $inputCollapsed,
+                        draft: draft,
+                        onCompose: { composing = true }
+                    )
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height
+                    } action: { height in
+                        panelHeight = height
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             .animation(.smooth(duration: 0.25), value: inputCollapsed)
+            .ignoresSafeArea(.keyboard)
+        }
+        .overlay {
+            ZStack {
+                if composing {
+                    TerminalComposeOverlay(
+                        draft: $draft,
+                        onSend: { newline in sendDraft(newline: newline) },
+                        onDismiss: { composing = false }
+                    )
+                    .transition(.opacity)
+                }
+            }
+            .animation(.smooth(duration: 0.2), value: composing)
         }
         .overlay(alignment: .bottomTrailing) {
             // 折叠态：右下角玻璃气泡（plan 053，用户定案 AssistiveTouch 式）。
@@ -295,6 +320,19 @@ struct WorkspaceDetailView: View {
     private func createTerminal() {
         knownTaskIDsBeforeCreate = Set(members.map(\.id))
         client.createTask(workspaceID: workspace.id, title: "终端 \(members.count + 1)")
+    }
+
+    /// 发送成文草稿到激活任务。多行包 bracketed paste 防换行被行编辑器当提交
+    /// （Claude Code/zsh 均开 2004 模式，2026-07-26 实测）。
+    private func sendDraft(newline: Bool) {
+        guard let task = activeTask, task.status == .running, task.hasSessionID, !draft.isEmpty else { return }
+        var payload = draft
+        if payload.contains("\n") {
+            payload = "\u{1b}[200~" + payload + "\u{1b}[201~"
+        }
+        client.sendInput(sessionID: task.sessionID, newline ? payload + "\r" : payload)
+        draft = ""
+        composing = false
     }
 
     // MARK: - 逐任务横幅（语义同 plan 046：接管/可启动/输入缓冲满）
