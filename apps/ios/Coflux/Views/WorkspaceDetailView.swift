@@ -151,7 +151,7 @@ struct WorkspaceDetailView: View {
             .padding(.bottom, 24)
         }
         .background(Theme.background)
-        .navigationTitle(workspace.name.isEmpty ? workspace.branch : workspace.name)
+        .navigationTitle(workspace.branch.isEmpty ? workspace.name : workspace.branch) // 主标题=分支，与 web 对齐
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if activeTask != nil {
