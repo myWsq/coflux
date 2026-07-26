@@ -103,13 +103,21 @@ struct TerminalInputArea: View {
                 repeatKey(systemImage: "delete.left", bytes: "\u{7f}")
                     .frame(width: 52)
             }
-            // 下块：左列（粘贴 上 / ^C 左下角）+ 方向簇（tab、/ 夹 ↑ 两侧）+ 竖跨大⏎
+            // 下块：左区 3 列扩充键（^C 守左下角）+ 收窄方向簇（tab、/ 夹 ↑）+ 竖跨大⏎
             HStack(spacing: 6) {
                 VStack(spacing: 6) {
-                    pasteKey
-                    key("^C", tint: Theme.destructive, bytes: "\u{03}")
+                    HStack(spacing: 6) {
+                        pasteKey
+                        key("q", bytes: "q")
+                        key("^D", bytes: "\u{04}")
+                    }
+                    HStack(spacing: 6) {
+                        key("^C", tint: Theme.destructive, bytes: "\u{03}")
+                        key("^U", bytes: "\u{15}")
+                        key("^L", bytes: "\u{0c}")
+                    }
                 }
-                .frame(width: 84)
+                .frame(maxWidth: .infinity)
                 VStack(spacing: 6) {
                     HStack(spacing: 6) {
                         key("tab", bytes: "\t")
@@ -122,7 +130,7 @@ struct TerminalInputArea: View {
                         repeatKey(systemImage: "arrowtriangle.right.fill", bytes: arrowBytes("C"))
                     }
                 }
-                .frame(maxWidth: .infinity)
+                .frame(width: 150)
                 enterKey
             }
         }
