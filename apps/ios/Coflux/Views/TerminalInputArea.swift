@@ -281,9 +281,9 @@ struct TerminalComposeOverlay: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // 系统全强度毛玻璃（= Spotlight 下拉同款，material 拉满）：
-            // 点空白先淡出再关呈现
-            VariableBlurView(intensity: appeared ? 1.0 : 0)
+            // 控制中心式清透重糊的最优公开逼近：部分强度下着色层按比例变淡、
+            // 模糊保留大半（全强度时内置 tint 拉满会发闷；调研见 plan 053）
+            VariableBlurView(intensity: appeared ? 0.65 : 0)
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture { fadeOutAndDismiss() }
