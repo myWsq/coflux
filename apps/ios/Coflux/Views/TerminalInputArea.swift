@@ -94,35 +94,27 @@ struct TerminalInputArea: View {
     /// - ^C 破坏性大 → 缩小、与回车对角隔离。
     private var padRows: some View {
         VStack(spacing: 6) {
-            // 顶行：数字快选 1-4（agent 菜单极少超过 4）+ 右上角小退格
+            // 顶排（与下块同高对齐）：esc 左上角 + 数字快选 1-4 + 右上角小⌫
             HStack(spacing: 6) {
+                key("esc", bytes: "\u{1b}")
                 ForEach(["1", "2", "3", "4"], id: \.self) { digit in
-                    key(digit, height: 32, bytes: digit)
+                    key(digit, bytes: digit)
                 }
-                repeatKey(systemImage: "delete.left", height: 32, bytes: "\u{7f}")
+                repeatKey(systemImage: "delete.left", bytes: "\u{7f}")
                     .frame(width: 52)
             }
-            // 下块：左控制区 + 倒 T 方向簇 + 右下角竖跨大回车
+            // 下块：左列（⇧tab 上 / ^C 左下角）+ 方向簇（tab、/ 夹 ↑ 两侧）+ 竖跨大⏎
             HStack(spacing: 6) {
-                // 左区：esc 钉左上角、^C 钉左下角（2026-07-26 用户定）
                 VStack(spacing: 6) {
-                    HStack(spacing: 6) {
-                        key("esc", bytes: "\u{1b}")
-                        key("tab", bytes: "\t")
-                        key("⇧tab", bytes: "\u{1b}[Z")
-                    }
-                    HStack(spacing: 6) {
-                        key("^C", tint: Theme.destructive, bytes: "\u{03}")
-                            .frame(width: 52)
-                        key("/", bytes: "/")
-                    }
+                    key("⇧tab", bytes: "\u{1b}[Z")
+                    key("^C", tint: Theme.destructive, bytes: "\u{03}")
                 }
-                .frame(maxWidth: .infinity)
+                .frame(width: 84)
                 VStack(spacing: 6) {
                     HStack(spacing: 6) {
-                        keyPlaceholder
+                        key("tab", bytes: "\t")
                         repeatKey(systemImage: "arrowtriangle.up.fill", bytes: arrowBytes("A"))
-                        keyPlaceholder
+                        key("/", bytes: "/")
                     }
                     HStack(spacing: 6) {
                         repeatKey(systemImage: "arrowtriangle.left.fill", bytes: arrowBytes("D"))
@@ -149,12 +141,6 @@ struct TerminalInputArea: View {
                 .background(Theme.primary, in: RoundedRectangle(cornerRadius: 8))
         }
         .accessibilityLabel("回车")
-    }
-
-    private var keyPlaceholder: some View {
-        Color.clear
-            .frame(maxWidth: .infinity)
-            .frame(height: 38)
     }
 
     /// 方向键按下时查激活终端的 DECCKM：应用模式发 SS3（ESC O），否则 CSI（ESC [）
