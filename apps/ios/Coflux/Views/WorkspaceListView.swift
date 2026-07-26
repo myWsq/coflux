@@ -20,8 +20,8 @@ struct WorkspaceListView: View {
                                 workspaceRow(workspace)
                             }
                             .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-                            .listRowBackground(Color(.systemBackground))
-                            .listRowSeparatorTint(Color(.separator))
+                            .listRowBackground(Theme.background)
+                            .listRowSeparatorTint(Theme.border)
                         }
                     } header: {
                         projectHeader(project)
@@ -30,7 +30,7 @@ struct WorkspaceListView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
-            .background(Color(.systemBackground))
+            .background(Theme.background)
             .safeAreaInset(edge: .top, spacing: 0) {
                 if client.status != .connected {
                     offlineBanner
@@ -65,10 +65,10 @@ struct WorkspaceListView: View {
             systemImage: client.status == .connecting ? "arrow.triangle.2.circlepath" : "wifi.slash"
         )
         .font(.footnote.weight(.medium))
-        .foregroundStyle(.orange)
+        .foregroundStyle(Theme.warning)
         .frame(maxWidth: .infinity)
         .padding(.vertical, 8)
-        .background(.orange.opacity(0.12))
+        .background(Theme.warning.opacity(0.12))
     }
 
     private func projectHeader(_ project: Coflux_V1_Project) -> some View {
@@ -78,13 +78,13 @@ struct WorkspaceListView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 15, height: 15)
-                .foregroundStyle(Color(.secondaryLabel))
+                .foregroundStyle(Theme.mutedForeground)
             Text(project.name)
                 .font(.body)
-                .foregroundStyle(Color(.secondaryLabel))
+                .foregroundStyle(Theme.mutedForeground)
                 .textCase(nil)
             Circle()
-                .fill(online ? Color.green : Color(.tertiaryLabel))
+                .fill(online ? Theme.success : Theme.subtleForeground)
                 .frame(width: 7, height: 7)
         }
         .padding(.vertical, 4)
@@ -100,7 +100,7 @@ struct WorkspaceListView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 18, height: 18)
-                .foregroundStyle(workspace.isMain ? Color.orange : Color(.secondaryLabel))
+                .foregroundStyle(workspace.isMain ? Theme.warning : Theme.mutedForeground)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 3) {
                 Text(name)
@@ -108,28 +108,28 @@ struct WorkspaceListView: View {
                 if workspace.name.isEmpty == false, workspace.branch != workspace.name {
                     Text(workspace.branch)
                         .font(.footnote.monospaced())
-                        .foregroundStyle(Color(.secondaryLabel))
+                        .foregroundStyle(Theme.mutedForeground)
                 }
             }
             Spacer()
             if workspace.additions != 0 || workspace.deletions != 0 {
                 HStack(spacing: 4) {
                     Text("+\(workspace.additions)")
-                        .foregroundStyle(.green)
+                        .foregroundStyle(Theme.success)
                     Text("−\(workspace.deletions)")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Theme.destructive)
                 }
                 .font(.caption.monospacedDigit().weight(.medium))
             }
             if running > 0 {
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(.green)
+                        .fill(Theme.success)
                         .frame(width: 6, height: 6)
                     Text("\(running)")
                         .font(.caption.monospacedDigit().weight(.semibold))
                 }
-                .foregroundStyle(.green)
+                .foregroundStyle(Theme.success)
             }
         }
         .padding(.vertical, 12)

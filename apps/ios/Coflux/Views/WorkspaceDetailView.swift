@@ -67,7 +67,7 @@ struct WorkspaceDetailView: View {
                 .ignoresSafeArea(.container, edges: .bottom)
             }
         }
-        .background(Color(.systemBackground))
+        .background(Theme.background)
         .navigationTitle(workspace.name.isEmpty ? workspace.branch : workspace.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -130,7 +130,7 @@ struct WorkspaceDetailView: View {
                     } label: {
                         Image(systemName: "plus")
                             .font(.footnote.weight(.semibold))
-                            .foregroundStyle(Color(.secondaryLabel))
+                            .foregroundStyle(Theme.mutedForeground)
                             .frame(width: 30, height: 30)
                     }
                     .glassEffect(.regular.interactive(), in: .circle)
@@ -187,7 +187,7 @@ struct WorkspaceDetailView: View {
                     .font(.footnote.weight(active ? .semibold : .regular))
                     .lineLimit(1)
             }
-            .foregroundStyle(active ? Color.primary : Color(.secondaryLabel))
+            .foregroundStyle(active ? Theme.foreground : Theme.mutedForeground)
             .padding(.horizontal, 12)
             .frame(height: 30)
         }
@@ -195,9 +195,9 @@ struct WorkspaceDetailView: View {
 
     private func statusColor(_ task: Coflux_V1_Task) -> Color {
         switch task.status {
-        case .running: return client.detachedTaskIDs.contains(task.id) ? .orange : .green
-        case .exited: return task.exitCode == 0 ? Color(.tertiaryLabel) : .red
-        default: return Color(.tertiaryLabel)
+        case .running: return client.detachedTaskIDs.contains(task.id) ? Theme.warning : Theme.success
+        case .exited: return task.exitCode == 0 ? Theme.subtleForeground : Theme.destructive
+        default: return Theme.subtleForeground
         }
     }
 
@@ -234,6 +234,7 @@ struct WorkspaceDetailView: View {
         } actions: {
             Button("新建终端") { createTerminal() }
                 .buttonStyle(.borderedProminent)
+                .tint(Theme.primary)
         }
     }
 
@@ -250,7 +251,7 @@ struct WorkspaceDetailView: View {
             banner(
                 text: "已被其它客户端接管，当前为旁观视图",
                 icon: "eye",
-                tint: .orange,
+                tint: Theme.warning,
                 actionLabel: "强制接管"
             ) {
                 client.startTask(taskID: task.id, cols: termCols, rows: termRows, force: true)
@@ -259,13 +260,13 @@ struct WorkspaceDetailView: View {
             banner(
                 text: task.status == .exited ? "会话已退出" : "任务尚未启动",
                 icon: "play.circle",
-                tint: Color(.secondaryLabel),
+                tint: Theme.mutedForeground,
                 actionLabel: "启动"
             ) {
                 client.startTask(taskID: task.id, cols: termCols, rows: termRows)
             }
         } else if task.hasSessionID, client.blockedSessionIDs.contains(task.sessionID) {
-            banner(text: "终端输入等待确认，缓冲区已满", icon: "hourglass", tint: .orange, actionLabel: nil, action: nil)
+            banner(text: "终端输入等待确认，缓冲区已满", icon: "hourglass", tint: Theme.warning, actionLabel: nil, action: nil)
         }
     }
 

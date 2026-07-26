@@ -15,10 +15,31 @@ struct TerminalHostView: UIViewRepresentable {
     var isActive: Bool = true
     var onSizeChanged: ((UInt32, UInt32) -> Void)?
 
+    /// ANSI 16 色对齐 web xterm theme（terminal-pane.tsx:197-211）。web 未指定的
+    /// bright 位沿用 normal 同色（brightBlack/brightWhite 例外），保持双端观感一致。
+    private static let webAnsiPalette: [SwiftTerm.Color] = [
+        0x1A1A1A, 0xE05C6A, 0x4FAE6E, 0xC9A227, 0x6B9BD1, 0xB07CC6, 0x56B6C2, 0xD4D4D4,
+        0x6A6A6A, 0xE05C6A, 0x4FAE6E, 0xC9A227, 0x6B9BD1, 0xB07CC6, 0x56B6C2, 0xFFFFFF,
+    ].map { (rgb: UInt32) in
+        SwiftTerm.Color(
+            red: UInt16((rgb >> 16) & 0xFF) * 257,
+            green: UInt16((rgb >> 8) & 0xFF) * 257,
+            blue: UInt16(rgb & 0xFF) * 257
+        )
+    }
+
     func makeUIView(context: Context) -> TerminalView {
         let view = TerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
-        view.backgroundColor = .black
+        // 字体/光标/配色对齐 web 终端（SF Mono 12 + bar 光标；iOS 的
+        // monospacedSystemFont 即 SF Mono，与 web 首选字体同族）
+        view.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        view.backgroundColor = Theme.terminalUIColor
+        view.nativeBackgroundColor = Theme.terminalUIColor
+        view.nativeForegroundColor = Theme.terminalForegroundUIColor
+        view.caretColor = Theme.terminalForegroundUIColor
+        view.installColors(Self.webAnsiPalette)
+        view.getTerminal().setCursorStyle(.blinkBar)
         context.coordinator.terminalView = view
         return view
     }

@@ -48,6 +48,12 @@ success #4fae6e / warning #c9a227 / destructive #e05c6a——双端同一设计�
   的系统 tint 保持原生——那是 047/050 的决策面，配色对齐只管内容色。
 - **同步机制 = 手工**: web 换色时 iOS Theme.swift 手工同步（同 048 图标
   策略）；token 少、变更罕见，不值得自动化管道。
+- **终端字体/样式一并对齐**（用户执行中追加）: SF Mono 12（iOS
+  `monospacedSystemFont` 即 SF Mono，与 web 首选 SFMono-Regular 同族）、
+  bar 光标带闪烁、前景/光标 #e4e4e4、ANSI 16 色对齐 web xterm theme
+  （bright 位 web 未指定，沿用 normal 同色，brightBlack #6a6a6a/
+  brightWhite #ffffff 例外）。web 的 lineHeight 1.25 SwiftTerm 不暴露，
+  放弃。Based on: `apps/web/src/components/workbench/terminal-pane.tsx:188-212`。
 
 ## Direction
 
