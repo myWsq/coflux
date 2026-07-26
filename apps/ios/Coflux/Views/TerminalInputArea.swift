@@ -12,11 +12,9 @@ struct TerminalInputArea: View {
     let client: CofluxClient
     let task: Coflux_V1_Task?
     @Binding var collapsed: Bool
-    /// 成文草稿在宿主持有（模态成文层与占位条共享预览）
-    let draft: String
-    /// 点占位条 → 宿主起蒙层成文卡片（本页不直接弹系统键盘，2026-07-26 用户定案）
-    let onCompose: () -> Void
+    @State private var draft = ""
     @State private var repeatTimer: Timer?
+    @FocusState private var composerFocused: Bool
 
     private var sessionID: String? {
         guard let task, task.status == .running, task.hasSessionID else { return nil }
@@ -39,32 +37,53 @@ struct TerminalInputArea: View {
         .opacity(sessionID == nil ? 0.45 : 1)
     }
 
-    // MARK: - 成文入口（伪输入条：只展示草稿预览，点击进模态成文层）
+    // MARK: - 成文层（系统键盘弹起时整个面板被宿主上移，成文框骑在键盘顶上，
+    // 控制板下半部分被键盘盖住——页面对键盘免疫，位移全由宿主手动控制）
 
     private var composerRow: some View {
         HStack(spacing: 8) {
-            Button(action: onCompose) {
-                HStack {
-                    Text(draft.isEmpty ? "输入后发送到终端" : draft)
-                        .font(Theme.Fonts.label)
-                        .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.foreground)
-                        .lineLimit(1)
-                    Spacer()
-                }
+            TextField("输入后发送到终端", text: $draft)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($composerFocused)
+                .font(Theme.Fonts.label)
                 .padding(.horizontal, 12)
                 .frame(height: 38)
                 .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
-            }
+            Image(systemName: "arrow.up")
+                .font(Theme.Fonts.label.weight(.bold))
+                .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.primaryForeground)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(draft.isEmpty ? Theme.secondarySurface : Theme.primary))
+                .onTapGesture { send(newline: true) }
+                .onLongPressGesture { send(newline: false) }
+                .accessibilityLabel("发送")
             Button {
-                collapsed = true // 布局刻意不动画：见 WorkspaceDetailView 气泡注释
+                if composerFocused {
+                    composerFocused = false // 键盘起时先收键盘
+                } else {
+                    collapsed = true // 布局刻意不动画：见 WorkspaceDetailView 气泡注释
+                }
             } label: {
                 Image(systemName: "keyboard.chevron.compact.down")
                     .font(Theme.Fonts.label)
                     .foregroundStyle(Theme.mutedForeground)
                     .frame(width: 34, height: 34)
             }
-            .accessibilityLabel("收起输入区")
+            .accessibilityLabel("收起")
         }
+    }
+
+    /// 发送整段草稿。多行文本包 bracketed paste 标记，防换行被行编辑器当提交
+    /// （Claude Code/zsh 均开 2004 模式，2026-07-26 实测）。发送后保焦点连续对话。
+    private func send(newline: Bool) {
+        guard let sessionID, !draft.isEmpty else { return }
+        var payload = draft
+        if payload.contains("\n") {
+            payload = "\u{1b}[200~" + payload + "\u{1b}[201~"
+        }
+        client.sendInput(sessionID: sessionID, newline ? payload + "\r" : payload)
+        draft = ""
     }
 
     // MARK: - 控制层
@@ -214,47 +233,5 @@ struct TerminalInputArea: View {
         .frame(maxWidth: .infinity)
         .frame(height: height)
         .background(Theme.secondarySurface, in: RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-/// 模态成文层（plan 053，2026-07-26 用户定案）：蒙层 + 底部成文卡片。
-/// 系统键盘只存在于这一层，终端页与键盘完全绝缘（零 resize）；
-/// 点蒙层取消（草稿保留），发送 = 文本+回车，长按发送 = 仅插入。
-struct TerminalComposeOverlay: View {
-    @Binding var draft: String
-    let onSend: (_ newline: Bool) -> Void
-    let onDismiss: () -> Void
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        ZStack(alignment: .bottom) {
-            Color.black.opacity(0.45)
-                .ignoresSafeArea()
-                .onTapGesture { onDismiss() }
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("输入后发送到终端", text: $draft, axis: .vertical)
-                    .lineLimit(1...6)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .focused($focused)
-                    .font(Theme.Fonts.body)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 8)
-                Image(systemName: "arrow.up")
-                    .font(Theme.Fonts.label.weight(.bold))
-                    .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.primaryForeground)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(draft.isEmpty ? Theme.secondarySurface : Theme.primary))
-                    .onTapGesture { onSend(true) }
-                    .onLongPressGesture { onSend(false) }
-                    .accessibilityLabel("发送")
-            }
-            .padding(10)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Theme.border, lineWidth: 0.5))
-            .padding(.horizontal, 12)
-            .padding(.bottom, 8)
-        }
-        .onAppear { focused = true }
     }
 }

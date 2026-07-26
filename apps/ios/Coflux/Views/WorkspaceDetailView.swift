@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// 工作区任务台（plan 049）：终端不设二级页——顶部横向 tab 条 + 整页 paged
 /// 滑动切换任务，结构对齐 mobile workspace-detail（进入即挂载全部任务页，
@@ -19,11 +20,17 @@ struct WorkspaceDetailView: View {
     /// 位移量 = 面板实测高度（尺寸不受 transition 影响，量值稳定）；
     /// 平滑感来自 offset 自身的动画插值（纯 transform，不触发布局）。
     @State private var panelHeight: CGFloat = 0
-    /// 模态成文层：键盘只存在于蒙层里，终端页与系统键盘绝缘
-    @State private var composing = false
-    @State private var draft = ""
+    /// 手动键盘追踪：页面对键盘免疫（最外层 ignoresSafeArea(.keyboard)），
+    /// 键盘弹起时手动把面板平移到"成文框骑在键盘顶上"的位置，
+    /// 控制板下半部分被键盘盖住（2026-07-26 用户定案，取代蒙层方案）
+    @State private var keyboardHeight: CGFloat = 0
 
-    private var terminalLift: CGFloat { inputCollapsed ? 0 : panelHeight }
+    /// 面板上移量：成文框底边（面板顶 8pt padding + 38pt 输入条）贴键盘顶
+    private var panelShift: CGFloat {
+        keyboardHeight > 0 ? max(0, keyboardHeight - panelHeight + 54) : 0
+    }
+
+    private var terminalLift: CGFloat { inputCollapsed ? 0 : panelHeight + panelShift }
     /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
     @State private var pageProgress: CGFloat = 0
     @State private var chipFrames: [String: CGRect] = [:]
@@ -92,34 +99,25 @@ struct WorkspaceDetailView: View {
         .overlay(alignment: .bottom) {
             ZStack {
                 if !inputCollapsed, !members.isEmpty {
-                    TerminalInputArea(
-                        client: client,
-                        task: activeTask,
-                        collapsed: $inputCollapsed,
-                        draft: draft,
-                        onCompose: { composing = true }
-                    )
-                    .onGeometryChange(for: CGFloat.self) { proxy in
-                        proxy.size.height
-                    } action: { height in
-                        panelHeight = height
-                    }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    TerminalInputArea(client: client, task: activeTask, collapsed: $inputCollapsed)
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.size.height
+                        } action: { height in
+                            panelHeight = height
+                        }
+                        // 键盘弹起：面板上移让成文框骑在键盘顶上（纯 transform）
+                        .offset(y: -panelShift)
+                        .animation(.smooth(duration: 0.25), value: panelShift)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             .animation(.smooth(duration: 0.25), value: inputCollapsed)
-            .ignoresSafeArea(.keyboard)
         }
-        // 成文层走独立呈现上下文（fullScreenCover）：键盘规避只发生在
-        // 呈现层内部，底下的终端页/面板不被键盘顶起（overlay 方案做不到——
-        // 键盘压缩的是宿主容器本身，真机踩过）
-        .fullScreenCover(isPresented: $composing) {
-            TerminalComposeOverlay(
-                draft: $draft,
-                onSend: { newline in sendDraft(newline: newline) },
-                onDismiss: { composing = false }
-            )
-            .presentationBackground(.clear)
+        // 页面整体对系统键盘免疫：位移全部由 panelShift/terminalLift 手动控制
+        .ignoresSafeArea(.keyboard)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+            guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+            keyboardHeight = max(0, UIScreen.main.bounds.height - frame.origin.y)
         }
         .overlay(alignment: .bottomTrailing) {
             // 折叠态：右下角玻璃气泡（plan 053，用户定案 AssistiveTouch 式）。
@@ -320,18 +318,6 @@ struct WorkspaceDetailView: View {
         client.createTask(workspaceID: workspace.id, title: "终端 \(members.count + 1)")
     }
 
-    /// 发送成文草稿到激活任务。多行包 bracketed paste 防换行被行编辑器当提交
-    /// （Claude Code/zsh 均开 2004 模式，2026-07-26 实测）。
-    private func sendDraft(newline: Bool) {
-        guard let task = activeTask, task.status == .running, task.hasSessionID, !draft.isEmpty else { return }
-        var payload = draft
-        if payload.contains("\n") {
-            payload = "\u{1b}[200~" + payload + "\u{1b}[201~"
-        }
-        client.sendInput(sessionID: task.sessionID, newline ? payload + "\r" : payload)
-        draft = ""
-        composing = false
-    }
 
     // MARK: - 逐任务横幅（语义同 plan 046：接管/可启动/输入缓冲满）
 
