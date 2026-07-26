@@ -45,7 +45,7 @@ struct WorkspaceListView: View {
                     )
                 }
             }
-            .navigationTitle("工作区")
+            .navigationTitle("项目") // 与 web 侧栏对齐（sidebar.tsx:201）：列表主体是项目，工作区是项下成员
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -93,7 +93,16 @@ struct WorkspaceListView: View {
 
     private func workspaceRow(_ workspace: Coflux_V1_Workspace) -> some View {
         let running = client.tasks.filter { $0.workspaceID == workspace.id && $0.status == .running }.count
-        let name = workspace.name.isEmpty ? workspace.branch : workspace.name
+        // 与 web 侧栏对齐（sidebar.tsx:325-331）：主标题=分支；自定义名只在行尾灰字
+        // （name≠branch 时才有；主工作区未起名默认「主工作区」）。目录工作区无分支回退 name
+        let title = workspace.branch.isEmpty ? workspace.name : workspace.branch
+        let customName: String? = if !workspace.name.isEmpty, workspace.name != workspace.branch {
+            workspace.name
+        } else if workspace.isMain {
+            "主工作区"
+        } else {
+            nil
+        }
         return HStack(spacing: 14) {
             // 与 web 侧栏同源：lucide GitBranch（asset 模板渲染），main 分支同 web 用 warning 色
             Image("git-branch")
@@ -102,16 +111,16 @@ struct WorkspaceListView: View {
                 .frame(width: 18, height: 18)
                 .foregroundStyle(workspace.isMain ? Theme.warning : Theme.mutedForeground)
                 .frame(width: 24)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(name)
-                    .font(Theme.Fonts.body)
-                if workspace.name.isEmpty == false, workspace.branch != workspace.name {
-                    Text(workspace.branch)
-                        .font(Theme.Fonts.label.monospaced())
-                        .foregroundStyle(Theme.mutedForeground)
-                }
-            }
+            Text(title)
+                .font(Theme.Fonts.body)
+                .lineLimit(1)
             Spacer()
+            if let customName {
+                Text(customName)
+                    .font(Theme.Fonts.label)
+                    .foregroundStyle(Theme.mutedForeground)
+                    .lineLimit(1)
+            }
             if workspace.additions != 0 || workspace.deletions != 0 {
                 HStack(spacing: 4) {
                     Text("+\(workspace.additions)")
