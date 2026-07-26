@@ -12,6 +12,7 @@ struct WorkspaceDetailView: View {
     @State private var termRows: UInt32 = 24
     @State private var confirmingRemove = false
     @State private var knownTaskIDsBeforeCreate: Set<String>?
+    @Namespace private var glassNamespace
 
     /// tab 序 = 创建序（mobile 同序：createdAt 升序）
     private var members: [Coflux_V1_Task] {
@@ -82,28 +83,32 @@ struct WorkspaceDetailView: View {
         }
     }
 
-    // MARK: - tab 条（内容组件非导航 chrome，自绘水平 chips）
+    // MARK: - tab 条（内容组件非导航 chrome；激活指示 = 液态玻璃药丸，
+    // 切换时经 glassEffectID 形变流到新 chip，plan 050）
 
     private var tabBar: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(members, id: \.id) { task in
-                        tabChip(task)
-                            .id(task.id)
+                GlassEffectContainer(spacing: 12) {
+                    HStack(spacing: 8) {
+                        ForEach(members, id: \.id) { task in
+                            tabChip(task)
+                                .id(task.id)
+                        }
+                        Button {
+                            createTerminal()
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(Color(.secondaryLabel))
+                                .frame(width: 30, height: 30)
+                        }
+                        .glassEffect(.regular.interactive(), in: .circle)
+                        .accessibilityLabel("新建终端")
                     }
-                    Button {
-                        createTerminal()
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(Color(.secondaryLabel))
-                            .frame(width: 30, height: 30)
-                            .background(Circle().fill(Color(.secondarySystemFill)))
-                    }
-                    .accessibilityLabel("新建终端")
+                    .padding(.horizontal, 16)
+                    .animation(.smooth(duration: 0.3), value: activeTaskID)
                 }
-                .padding(.horizontal, 16)
             }
             .padding(.vertical, 6)
             .onChange(of: activeTaskID) { _, id in
@@ -129,7 +134,13 @@ struct WorkspaceDetailView: View {
             .foregroundStyle(active ? Color.primary : Color(.secondaryLabel))
             .padding(.horizontal, 12)
             .frame(height: 30)
-            .background(Capsule().fill(active ? Color(.secondarySystemFill) : .clear))
+        }
+        .background {
+            if active {
+                Color.clear
+                    .glassEffect(.regular, in: .capsule)
+                    .glassEffectID("active-pill", in: glassNamespace)
+            }
         }
     }
 
