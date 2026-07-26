@@ -102,7 +102,7 @@ struct WorkspaceDetailView: View {
                         task: activeTask,
                         collapsed: $inputCollapsed,
                         draft: draft,
-                        onCompose: { composing = true }
+                        onCompose: { setComposing(true) }
                     )
                     .onGeometryChange(for: CGFloat.self) { proxy in
                         proxy.size.height
@@ -120,9 +120,10 @@ struct WorkspaceDetailView: View {
             TerminalComposeOverlay(
                 draft: $draft,
                 onSend: { newline in sendDraft(newline: newline) },
-                onDismiss: { composing = false }
+                onDismiss: { setComposing(false) }
             )
-            .presentationBackground(.ultraThinMaterial) // 毛玻璃暗底（2026-07-26 用户定）
+            // 毛玻璃底在内容层自绘并淡入淡出；呈现层禁默认滑入动画（见 setComposing）
+            .presentationBackground(.clear)
         }
         .overlay(alignment: .bottomTrailing) {
             // 折叠态：右下角玻璃气泡（plan 053，用户定案 AssistiveTouch 式）。
@@ -323,6 +324,14 @@ struct WorkspaceDetailView: View {
         client.createTask(workspaceID: workspace.id, title: "终端 \(members.count + 1)")
     }
 
+    /// fullScreenCover 默认自下滑入/滑出；成文层要的是背景淡入淡出（内容层
+    /// 自己做 fade），故呈现切换一律禁系统动画
+    private func setComposing(_ on: Bool) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { composing = on }
+    }
+
     /// 发送成文草稿到激活任务。多行包 bracketed paste 防换行被行编辑器当提交
     /// （Claude Code/zsh 均开 2004 模式，2026-07-26 实测）。
     private func sendDraft(newline: Bool) {
@@ -333,7 +342,7 @@ struct WorkspaceDetailView: View {
         }
         client.sendInput(sessionID: task.sessionID, newline ? payload + "\r" : payload)
         draft = ""
-        composing = false
+        setComposing(false)
     }
 
 
