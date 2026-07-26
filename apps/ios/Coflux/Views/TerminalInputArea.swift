@@ -60,7 +60,7 @@ struct TerminalInputArea: View {
                 .accessibilityLabel("发送")
             Button {
                 composerFocused = false
-                withAnimation(.smooth(duration: 0.25)) { collapsed = true }
+                collapsed = true // 布局刻意不动画：见 WorkspaceDetailView 气泡注释
             } label: {
                 Image(systemName: "keyboard.chevron.compact.down")
                     .font(Theme.Fonts.label)

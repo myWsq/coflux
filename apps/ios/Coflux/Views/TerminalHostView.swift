@@ -127,12 +127,20 @@ struct TerminalHostView: UIViewRepresentable {
             client.sendInput(sessionID: sessionID, text)
         }
 
+        private var resizeDebounce: Task<Void, Never>?
+
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
             guard newCols > 0, newRows > 0 else { return }
             let cols = UInt32(newCols)
             let rows = UInt32(newRows)
             onSizeChanged?(cols, rows)
-            if let sessionID = boundSessionID {
+            guard let sessionID = boundSessionID else { return }
+            // 尾沿去抖：布局连续变化（输入区展开/收起、系统键盘滑入）只把最终
+            // 尺寸发给 daemon，避免 SIGWINCH 风暴让远端 TUI 重画闪动（plan 053）
+            resizeDebounce?.cancel()
+            resizeDebounce = Task { [client] in
+                try? await Task.sleep(for: .milliseconds(180))
+                guard !Task.isCancelled else { return }
                 client.resizeSession(sessionID: sessionID, cols: cols, rows: rows)
             }
         }
