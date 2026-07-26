@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { Clock, ExternalLink, FileDiff, GitBranch, Hash, LoaderCircle, Monitor, Plus, RefreshCw, Router, SquareTerminal, Unplug, X } from "lucide-react";
+import { ExternalLink, FileDiff, GitBranch, LoaderCircle, Plus, Router, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
@@ -17,20 +17,6 @@ import { TerminalPane, type TerminalController, type TerminalControlState } from
 // attach 后即使无 ptyOutput 回放（空 scrollback）也要在 500ms 后判定 owned；有输出则立即 owned。
 const ATTACH_GRACE_MS = 500;
 
-// Tab tooltip 标题行状态文案：detached 优先（保留原 title 的"点击重新接管"提示语义），
-// 其次按 task.status 合成，与本地控制状态无关的 IDLE/attaching 等态给简短中文兜底。
-function tabStatusText(task: Task, state: TerminalControlState): string {
-  if (state === "detached") return "已被接管（点击重新接管）";
-  if (task.status === TaskStatus.EXITED) return `已退出${task.exitCode !== undefined ? ` code ${task.exitCode}` : ""}`;
-  if (task.status === TaskStatus.RUNNING) return "运行中";
-  if (state === "attaching") return "接管中";
-  return "待启动";
-}
-
-// createdAt/updatedAt 是 Date.now() 毫秒 epoch；精确到分钟即可，用原生 Date 本地化输出，不引第三方日期库。
-function formatTaskTime(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
-}
 
 type WorkspaceTerminalProps = {
   workspaceId: string;
@@ -479,35 +465,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             const isActive = view === "terminal" && task.id === activeTaskId;
             const taskPorts = ports[task.id] ?? [];
             const daemon = daemons.find((item) => item.daemonId === task.daemonId);
-            const deviceText = daemon ? `${daemon.name}（${daemon.online ? "在线" : "离线"}）` : "设备记录缺失";
-            // 版式照抄侧边栏设备 tooltip（sidebar.tsx:522-537）：加粗标题行 + 图标条目列表。
-            const tooltipContent = (
-              <div className="flex flex-col gap-1">
-                <div className="font-medium">
-                  {task.title || "终端"} · {tabStatusText(task, state)}
-                </div>
-                <div className="flex flex-col gap-0.5">
-                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Monitor className="size-3 shrink-0 opacity-70" />
-                    <span className="truncate">{deviceText}</span>
-                  </span>
-                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Clock className="size-3 shrink-0 opacity-70" />
-                    <span className="truncate">创建于 {formatTaskTime(task.createdAt)}</span>
-                  </span>
-                  {task.sessionId ? (
-                    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <Hash className="size-3 shrink-0 opacity-70" />
-                      <span className="truncate">session {task.sessionId}</span>
-                    </span>
-                  ) : null}
-                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <RefreshCw className="size-3 shrink-0 opacity-70" />
-                    <span className="truncate">更新于 {formatTaskTime(task.updatedAt)}</span>
-                  </span>
-                </div>
-              </div>
-            );
             return (
               <div
                 key={task.id}
@@ -516,7 +473,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                   isActive ? "bg-accent text-foreground" : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
                 )}
               >
-                <Tooltip content={tooltipContent} placement="below" hasHoverIndication={false}>
                   <button
                     className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left"
                     onClick={() => requestActivation(task.id, state === "detached")}
@@ -530,7 +486,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                     )}
                     <span className="truncate">{task.title || "终端"}</span>
                   </button>
-                </Tooltip>
                 {taskPorts.length > 0 ? (
                   <DropdownMenu
                     button={{
