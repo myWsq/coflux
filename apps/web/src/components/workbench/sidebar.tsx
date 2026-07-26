@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, Cog, Folder, FolderOpen, FolderPlus, GitBranch, Info, Monitor, Package, Plus, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, Monitor, Package, Plus, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
@@ -287,7 +287,41 @@ export function Sidebar(props: SidebarProps) {
 
                   {expanded && projectWorkspaces.length > 0 ? (
                     <div className="ml-3 space-y-0.5 border-l border-border pl-1.5">
-                      {projectWorkspaces.map((workspace) => (
+                      {projectWorkspaces.map((workspace) => {
+                        const label =
+                          workspace.name && workspace.name !== workspace.branch
+                            ? workspace.name
+                            : workspace.isMain
+                              ? "主工作区"
+                              : null;
+                        const hasDiff = workspace.additions > 0 || workspace.deletions > 0;
+                        // 工作区详情 tooltip（需求勘误：原 plan 048-task-tab-tooltip 做到了任务 Tab 上，
+                        // 真正诉求是侧栏工作区行——版式照抄设备 tooltip：加粗标题行 + 图标条目列表）
+                        const workspaceTooltip = (
+                          <div className="flex flex-col gap-1">
+                            <div className="font-medium">
+                              {workspace.branch}
+                              {label ? ` · ${label}` : ""}
+                            </div>
+                            <div className="flex flex-col gap-0.5">
+                              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                <Folder className="size-3 shrink-0 opacity-70" />
+                                <span className="truncate">{workspace.path}</span>
+                              </span>
+                              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                <Monitor className="size-3 shrink-0 opacity-70" />
+                                <span className="truncate">{daemon ? `${daemon.name}（${daemon.online ? "在线" : "离线"}）` : "设备记录缺失"}</span>
+                              </span>
+                              {hasDiff ? (
+                                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                  <FileDiff className="size-3 shrink-0 opacity-70" />
+                                  <span className="truncate">未提交变更 +{workspace.additions} −{workspace.deletions}</span>
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                        return (
                         <ContextMenu
                           key={workspace.id}
                           label={`工作区「${workspace.branch}」操作`}
@@ -299,6 +333,7 @@ export function Sidebar(props: SidebarProps) {
                               : []),
                           ]}
                         >
+                          <Tooltip content={workspaceTooltip} placement="end" hasHoverIndication={false}>
                           <div
                             className={cn(
                               "group/workspace relative flex h-7 items-center rounded-md transition-colors",
@@ -310,20 +345,12 @@ export function Sidebar(props: SidebarProps) {
                             <button
                               className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left"
                               onClick={() => props.onSelectWorkspace(workspace.id)}
-                              title={`${workspace.path}\n${workspace.branch}`}
                             >
                               <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
                               <span className="min-w-0 flex-1 truncate text-base">{workspace.branch}</span>
                               {/* 右端内容：自定义名称（name ≠ branch 时才有；主工作区未起名时默认叫「主工作区」）+ git diff 累计统计（plan 024，X=Y=0 时不渲染）。
                                   diff 固定在最末；两者作为整体 hover 渐变淡出给删除按钮让位 */}
                               {(() => {
-                                const label =
-                                  workspace.name && workspace.name !== workspace.branch
-                                    ? workspace.name
-                                    : workspace.isMain
-                                      ? "主工作区"
-                                      : null;
-                                const hasDiff = workspace.additions > 0 || workspace.deletions > 0;
                                 if (!label && !hasDiff) return null;
                                 return (
                                   <span
@@ -334,15 +361,12 @@ export function Sidebar(props: SidebarProps) {
                                     )}
                                   >
                                     {label ? (
-                                      <span className="max-w-24 truncate text-xs text-muted-foreground" title={label}>
+                                      <span className="max-w-24 truncate text-xs text-muted-foreground">
                                         {label}
                                       </span>
                                     ) : null}
                                     {hasDiff ? (
-                                      <span
-                                        className="whitespace-nowrap font-mono text-xs tabular-nums"
-                                        title={`+${workspace.additions} −${workspace.deletions}`}
-                                      >
+                                      <span className="whitespace-nowrap font-mono text-xs tabular-nums">
                                         <span className="text-success">+{workspace.additions}</span>{" "}
                                         <span className="text-destructive">−{workspace.deletions}</span>
                                       </span>
@@ -362,8 +386,10 @@ export function Sidebar(props: SidebarProps) {
                               </button>
                             ) : null}
                           </div>
+                          </Tooltip>
                         </ContextMenu>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : null}
                 </div>

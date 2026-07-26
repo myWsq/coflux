@@ -50,7 +50,7 @@
 | 045 | [无 repo 终端 —— 选设备后在其 HOME 直接开终端](045-no-repo-home-terminal.md) | DONE（自动化门已过；UI 走查待用户人工验收） | none |
 | 046 | [iOS 第二片 —— 任务详情页 + SwiftTerm 终端交互（relay-only Device 数据面）](046-ios-task-detail-terminal.md) | DONE（模拟器真拓扑闭环验收已过——启动/attach/回显/停止删除；真机生产验收与接管双端场景待用户） | 044 |
 | 047 | [iOS 回归系统导航，启用 Liquid Glass](047-ios-liquid-glass-native-nav.md) | DONE (97df47b)（构建/残留检查已过；玻璃视觉真机验收待用户） | none |
-| 048 | [终端任务 Tab 换组件库 Tooltip（状态 + 所属设备 + 调试信息）](048-task-tab-tooltip.md) | DONE (69b5980)（tsc 门已过；UI 走查待用户人工验收） | none |
+| 048 | [终端任务 Tab 换组件库 Tooltip（状态 + 所属设备 + 调试信息）](048-task-tab-tooltip.md) | DONE (69b5980)（需求勘误：详情 tooltip 真正诉求在侧栏工作区行，已补实现；Tab tooltip 作为 title 替换系列保留） | none |
 | 048 | [无 repo 终端迁入设备详情 —— 设备行可点、每设备幂等一个目录工作区](048-device-detail-terminal.md)（与上行撞号，两会话并行开发所致） | DONE（自动化门已过；cli-doctor 2 例为基线既有环境失败，与本 plan 无关；UI 走查待用户人工验收） | none（改写 045 语义） |
 | 048 | [iOS 内容图标对齐 web（lucide）](048-ios-lucide-content-icons.md)（与上两行撞号，三会话并行开发所致） | DONE (67f4bc8)（构建/残留检查已过；图标视觉真机验收待用户） | none |
 | 049 | [iOS 任务台单页 —— 终端横向 tab + 整页滑动 + 新建终端](049-ios-workspace-task-deck.md) | DONE (b691c31)（构建/删除检查已过；滑动手势冲突与多任务并行 attach 待真机验收） | none |
