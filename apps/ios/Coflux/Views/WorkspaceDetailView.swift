@@ -118,9 +118,12 @@ struct WorkspaceDetailView: View {
         }
     }
 
+    /// 玻璃须直接套在 chip 内容上（内容作为玻璃前景才有自适应对比处理）；
+    /// 放 background 的空载体会渲染成一团糊斑、文字淹没（真机踩过）。
+    @ViewBuilder
     private func tabChip(_ task: Coflux_V1_Task) -> some View {
         let active = task.id == activeTaskID
-        return Button {
+        let chip = Button {
             activeTaskID = task.id
         } label: {
             HStack(spacing: 6) {
@@ -135,12 +138,12 @@ struct WorkspaceDetailView: View {
             .padding(.horizontal, 12)
             .frame(height: 30)
         }
-        .background {
-            if active {
-                Color.clear
-                    .glassEffect(.regular, in: .capsule)
-                    .glassEffectID("active-pill", in: glassNamespace)
-            }
+        if active {
+            chip
+                .glassEffect(.regular, in: .capsule)
+                .glassEffectID("active-pill", in: glassNamespace)
+        } else {
+            chip
         }
     }
 
