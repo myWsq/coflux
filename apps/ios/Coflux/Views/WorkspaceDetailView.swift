@@ -83,34 +83,44 @@ struct WorkspaceDetailView: View {
         }
     }
 
-    // MARK: - tab 条（内容组件非导航 chrome；激活指示 = 液态玻璃药丸，
-    // 切换时经 glassEffectID 形变流到新 chip，plan 050）
+    // MARK: - tab 条（内容组件非导航 chrome；激活指示 = 单一常驻玻璃药丸，
+    // matchedGeometryEffect 锚定到激活 chip，切换时真实位移滑动，plan 050）
 
     private var tabBar: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                GlassEffectContainer(spacing: 12) {
-                    HStack(spacing: 8) {
-                        ForEach(members, id: \.id) { task in
-                            tabChip(task)
-                                .id(task.id)
-                        }
-                        Button {
-                            createTerminal()
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(Color(.secondaryLabel))
-                                .frame(width: 30, height: 30)
-                        }
-                        .glassEffect(.regular.interactive(), in: .circle)
-                        .accessibilityLabel("新建终端")
+                HStack(spacing: 8) {
+                    ForEach(members, id: \.id) { task in
+                        tabChip(task)
+                            .matchedGeometryEffect(id: task.id, in: glassNamespace, isSource: true)
+                            .id(task.id)
                     }
-                    .padding(.horizontal, 16)
-                    .animation(.smooth(duration: 0.3), value: activeTaskID)
+                    Button {
+                        createTerminal()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color(.secondaryLabel))
+                            .frame(width: 30, height: 30)
+                    }
+                    .glassEffect(.regular.interactive(), in: .circle)
+                    .accessibilityLabel("新建终端")
                 }
+                .padding(.horizontal, 16)
+                // 垂直留白必须在 ScrollView 内容里而非外面：药丸边缘高光
+                // 贴着滚动容器裁剪边界会被切掉（真机踩过）
+                .padding(.vertical, 6)
+                .background {
+                    // 药丸常驻不销毁（避免插入/移除被容器 blend 成糊斑的老路），
+                    // 只换锚定目标 → matchedGeometry 给出位移滑动
+                    if let activeTaskID {
+                        Color.clear
+                            .glassEffect(.regular, in: .capsule)
+                            .matchedGeometryEffect(id: activeTaskID, in: glassNamespace, isSource: false)
+                    }
+                }
+                .animation(.smooth(duration: 0.3), value: activeTaskID)
             }
-            .padding(.vertical, 6)
             .onChange(of: activeTaskID) { _, id in
                 guard let id else { return }
                 withAnimation { proxy.scrollTo(id, anchor: .center) }
@@ -118,12 +128,9 @@ struct WorkspaceDetailView: View {
         }
     }
 
-    /// 玻璃须直接套在 chip 内容上（内容作为玻璃前景才有自适应对比处理）；
-    /// 放 background 的空载体会渲染成一团糊斑、文字淹没（真机踩过）。
-    @ViewBuilder
     private func tabChip(_ task: Coflux_V1_Task) -> some View {
         let active = task.id == activeTaskID
-        let chip = Button {
+        return Button {
             activeTaskID = task.id
         } label: {
             HStack(spacing: 6) {
@@ -137,13 +144,6 @@ struct WorkspaceDetailView: View {
             .foregroundStyle(active ? Color.primary : Color(.secondaryLabel))
             .padding(.horizontal, 12)
             .frame(height: 30)
-        }
-        if active {
-            chip
-                .glassEffect(.regular, in: .capsule)
-                .glassEffectID("active-pill", in: glassNamespace)
-        } else {
-            chip
         }
     }
 
