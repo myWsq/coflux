@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from "react";
 import { useStore } from "zustand";
-import { AlertCircle, FolderGit2, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { AlertCircle, FolderGit2, LoaderCircle, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
 import { TaskStatus, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
 
 import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
@@ -28,17 +28,38 @@ const WorkspaceTerminal = lazy(() =>
   import("@/components/workbench/workspace-terminal").then((module) => ({ default: module.WorkspaceTerminal })),
 );
 
+/** 主区选中项（plan 048）：项目工作区或设备详情，二选一互斥。 */
+type Selection = { kind: "workspace" | "device"; id: string };
+
+// 持久化沿用 WORKSPACE_KEY：设备加 "device:" 前缀，裸字符串即工作区 id（旧值天然兼容）。
+const DEVICE_SELECTION_PREFIX = "device:";
+
+function readStoredSelection(): Selection | null {
+  const raw = localStorage.getItem(WORKSPACE_KEY);
+  if (!raw) return null;
+  if (raw.startsWith(DEVICE_SELECTION_PREFIX)) return { kind: "device", id: raw.slice(DEVICE_SELECTION_PREFIX.length) };
+  return { kind: "workspace", id: raw };
+}
+
+function persistSelection(selection: Selection | null) {
+  if (!selection) localStorage.removeItem(WORKSPACE_KEY);
+  else localStorage.setItem(WORKSPACE_KEY, selection.kind === "device" ? `${DEVICE_SELECTION_PREFIX}${selection.id}` : selection.id);
+}
+
 export function Workbench({ client }: { client: CofluxClient }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(() => localStorage.getItem(WORKSPACE_KEY));
+  const [selection, setSelection] = useState<Selection | null>(readStoredSelection);
   // 访问过的工作区保持挂载（display 隐藏而非卸载）：卸载会 dispose xterm，
   // 丢 scrollback / 活跃 Tab / 控制权，切回来要重新 attach。同 TerminalPane 的 Tab 保活模式上移一层。
   const [visitedWorkspaceIds, setVisitedWorkspaceIds] = useState<ReadonlySet<string>>(new Set());
   const [dismissedErrorId, setDismissedErrorId] = useState<number | null>(null);
   const [importOpen, setImportOpen] = useState(false);
-  const [newTerminalOpen, setNewTerminalOpen] = useState(false);
   const [enrollmentOpen, setEnrollmentOpen] = useState(false);
+  // 设备空态「新建终端」的进行中/错误态（plan 048）：fsList 失败在空态原地显示；
+  // server 端拒绝走 error 广播 toast，同时解除 busy。
+  const [deviceTerminalBusy, setDeviceTerminalBusy] = useState(false);
+  const [deviceTerminalError, setDeviceTerminalError] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [renameWorkspace, setRenameWorkspace] = useState<Workspace | null>(null);
   const [renameDevice, setRenameDevice] = useState<DaemonInfo | null>(null);
@@ -57,31 +78,47 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const daemons = useStore(client.store, (state) => state.daemons);
   const lastError = useStore(client.store, (state) => state.lastError);
   const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
-  const selectedDaemonId = workspaces.find((item) => item.id === selectedWorkspaceId)?.daemonId;
 
-  // 快照后校准选中工作区：无效选择回退到首项目 main workspace（或任一工作区）。
+  // 设备详情的载体（plan 048）：该设备的 canonical 目录工作区 = isDirWorkspace 且
+  // daemonId 匹配、createdAt 最早。与 server 侧 terminalCreate 幂等复用规则同构。
+  const canonicalDirWorkspaceOf = (daemonId: string): Workspace | null =>
+    workspaces
+      .filter((workspace) => isDirWorkspace(workspace) && workspace.daemonId === daemonId)
+      .sort((left, right) => left.createdAt - right.createdAt)[0] ?? null;
+
+  const selectedWorkspace = selection?.kind === "workspace" ? (workspaces.find((workspace) => workspace.id === selection.id) ?? null) : null;
+  const selectedDevice = selection?.kind === "device" ? (daemons.find((daemon) => daemon.daemonId === selection.id) ?? null) : null;
+  // 主区实际渲染的工作区：workspace 选中即其本身；device 选中解析 canonical 目录工作区（可能为空 → 设备空态）
+  const activeWorkspace = selection?.kind === "device" ? canonicalDirWorkspaceOf(selection.id) : selectedWorkspace;
+  const activeWorkspaceId = activeWorkspace?.id ?? null;
+  const selectedDaemonId = selection?.kind === "device" ? selection.id : selectedWorkspace?.daemonId;
+
+  // 快照后校准选中项：无效选择回退到首项目 main workspace（或任一工作区）。
+  // device 选中以设备仍在 daemons 为有效判据（离线设备仍可进详情看现场）。
   useEffect(() => {
     if (snapshotRevision === 0) return;
-    if (selectedWorkspaceId && workspaces.some((workspace) => workspace.id === selectedWorkspaceId)) {
-      localStorage.setItem(WORKSPACE_KEY, selectedWorkspaceId);
+    const valid =
+      selection?.kind === "device"
+        ? daemons.some((daemon) => daemon.daemonId === selection.id)
+        : selection?.kind === "workspace" && workspaces.some((workspace) => workspace.id === selection.id);
+    if (selection && valid) {
+      persistSelection(selection);
       return;
     }
 
     const firstProject = [...projects].sort((left, right) => left.createdAt - right.createdAt)[0];
     const fallback =
       (firstProject && workspaces.find((workspace) => workspace.projectId === firstProject.id && workspace.isMain)) ?? workspaces[0];
-    const nextId = fallback?.id ?? null;
-    setSelectedWorkspaceId(nextId);
-    if (nextId) localStorage.setItem(WORKSPACE_KEY, nextId);
-    else localStorage.removeItem(WORKSPACE_KEY);
-  }, [snapshotRevision, projects, workspaces, selectedWorkspaceId]);
+    const next: Selection | null = fallback ? { kind: "workspace", id: fallback.id } : null;
+    setSelection(next);
+    persistSelection(next);
+  }, [snapshotRevision, projects, workspaces, daemons, selection]);
 
-  // 浏览器标签页标题跟随当前工作区所属项目，便于多标签页/多工作区场景下辨认。
+  // 浏览器标签页标题跟随当前选中：项目工作区用项目名，设备详情用设备名。
   useEffect(() => {
-    const workspace = workspaces.find((item) => item.id === selectedWorkspaceId);
-    const project = projects.find((item) => item.id === workspace?.projectId);
-    document.title = project ? `${project.name} · coflux` : "coflux · workspace";
-  }, [selectedWorkspaceId, workspaces, projects]);
+    const project = projects.find((item) => item.id === selectedWorkspace?.projectId);
+    document.title = selectedDevice ? `${selectedDevice.name} · coflux` : project ? `${project.name} · coflux` : "coflux · workspace";
+  }, [selectedWorkspace, selectedDevice, projects]);
 
   // 只为当前进入的工作区显式持有 Device route；隐藏终端若仍 desired，会由 session 自身继续
   // 持有。切换/删除工作区时 release，避免一次 probe 永久留下 socket 与轮询器。
@@ -103,8 +140,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }, [client, onlineDaemonIds]);
 
   function selectWorkspace(workspaceId: string) {
-    setSelectedWorkspaceId(workspaceId);
-    localStorage.setItem(WORKSPACE_KEY, workspaceId);
+    const next: Selection = { kind: "workspace", id: workspaceId };
+    setSelection(next);
+    persistSelection(next);
+  }
+
+  function selectDevice(daemonId: string) {
+    const next: Selection = { kind: "device", id: daemonId };
+    setSelection(next);
+    persistSelection(next);
+    setDeviceTerminalError(null);
   }
 
   async function login(event: FormEvent<HTMLFormElement>) {
@@ -121,17 +166,26 @@ export function Workbench({ client }: { client: CofluxClient }) {
     client.send({ case: "projectImport", value: { daemonId, path } });
   }
 
-  // 无 repo 终端（plan 045）：先经设备浏览通道解析 HOME 绝对路径（FsListed.path），
-  // 再发 terminalCreate；全链路绝对路径，daemon 侧不做 `~` 展开。
-  async function createDeviceTerminal(daemonId: string): Promise<string | null> {
+  // 设备详情首次开终端（plan 045/048）：先经设备浏览通道解析 HOME 绝对路径（FsListed.path），
+  // 再发 terminalCreate；全链路绝对路径，daemon 侧不做 `~` 展开。设备已选中，无需自动切换——
+  // workspaceCreated 广播到达后 canonical 解析自然让终端出现，busy 随空态卸载一并失效。
+  async function createDeviceTerminal(daemonId: string) {
+    setDeviceTerminalBusy(true);
+    setDeviceTerminalError(null);
     const result = await client.listDeviceDirectory(daemonId, "~");
-    if (!result.ok || !result.path) return result.error || "无法解析设备 HOME 目录";
-    // 目录工作区 projectId 恒为空串，复用 pendingWorkspaceCreateRef 的"新工作区自动切换"机制：
-    // projectId === "" 只会匹配目录工作区，不会误认项目工作区。
-    pendingWorkspaceCreateRef.current = { projectId: "", knownIds: new Set(client.store.getState().workspaces.map((workspace) => workspace.id)) };
+    if (!result.ok || !result.path) {
+      setDeviceTerminalBusy(false);
+      setDeviceTerminalError(result.error || "无法解析设备 HOME 目录");
+      return;
+    }
     client.send({ case: "terminalCreate", value: { daemonId, path: result.path } });
-    return null;
   }
+
+  // server 拒绝（error 广播）或工作区已出现时解除设备空态的 busy。
+  useEffect(() => {
+    if (deviceTerminalBusy && (lastError || activeWorkspaceId)) setDeviceTerminalBusy(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastError, activeWorkspaceId]);
 
   // workspaceCreate 无请求-响应关联：记下发起时已知的工作区 id，
   // 广播中新出现的该项目工作区即本次创建的，自动切换过去（同终端创建的识别模式）。
@@ -179,16 +233,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   function requestRemoveWorkspace(workspace: Workspace) {
-    // 目录工作区（无 repo 终端）：只删记录，不涉及任何 git/文件系统操作，文案不能沿用 worktree 措辞
-    if (isDirWorkspace(workspace)) {
-      setConfirmAction({
-        title: "移除这个终端？",
-        description: "正在运行的 shell 会停止，终端记录会被移除；目录本身不受影响。",
-        confirmLabel: "移除终端",
-        onConfirm: () => client.send({ case: "workspaceRemove", value: { workspaceId: workspace.id } }),
-      });
-      return;
-    }
     setConfirmAction({
       title: `删除工作区「${workspace.branch}」？`,
       description: `对应的 git worktree 目录会被移除，分支「${workspace.branch}」不会被自动删除。`,
@@ -226,13 +270,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   useEffect(() => {
-    if (!selectedWorkspaceId) return;
-    setVisitedWorkspaceIds((prev) => (prev.has(selectedWorkspaceId) ? prev : new Set(prev).add(selectedWorkspaceId)));
-  }, [selectedWorkspaceId]);
+    if (!activeWorkspaceId) return;
+    setVisitedWorkspaceIds((prev) => (prev.has(activeWorkspaceId) ? prev : new Set(prev).add(activeWorkspaceId)));
+  }, [activeWorkspaceId]);
 
-  const selectedWorkspace = workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
-  // 已删除的工作区随 workspaces 过滤自动卸载；含 selectedWorkspaceId 是避免等 visited 效果多一帧空白。
-  const terminalWorkspaces = workspaces.filter((workspace) => visitedWorkspaceIds.has(workspace.id) || workspace.id === selectedWorkspaceId);
+  // 已删除的工作区随 workspaces 过滤自动卸载；含 activeWorkspaceId 是避免等 visited 效果多一帧空白。
+  const terminalWorkspaces = workspaces.filter((workspace) => visitedWorkspaceIds.has(workspace.id) || workspace.id === activeWorkspaceId);
   const showError = lastError !== null && lastError.id !== dismissedErrorId;
   const displayError = lastError?.message.replaceAll("任务", "终端");
 
@@ -297,10 +340,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
     >
       <Sidebar
         client={client}
-        selectedWorkspaceId={selectedWorkspaceId}
+        selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
         onSelectWorkspace={selectWorkspace}
+        selectedDeviceId={selection?.kind === "device" ? selection.id : null}
+        onSelectDevice={selectDevice}
         onImportProject={() => setImportOpen(true)}
-        onNewTerminal={() => setNewTerminalOpen(true)}
         onCreateWorkspace={createWorkspace}
         onRemoveProject={requestRemoveProject}
         onRemoveWorkspace={requestRemoveWorkspace}
@@ -321,7 +365,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
           }
         >
           {terminalWorkspaces.map((workspace) => {
-            const isActive = workspace.id === selectedWorkspaceId;
+            const isActive = workspace.id === activeWorkspaceId;
             return (
               // display:contents 让 <section> 仍作为根 flex 行的直接子项参与布局
               <div key={workspace.id} className={isActive ? "contents" : "hidden"}>
@@ -338,7 +382,35 @@ export function Workbench({ client }: { client: CofluxClient }) {
           })}
         </Suspense>
       ) : null}
-      {!selectedWorkspace ? (
+      {selectedDevice && !activeWorkspace ? (
+        // 设备详情空态（plan 048）：这台设备还没有目录工作区，首次新建走 fsList(~) + terminalCreate；
+        // 创建成功后 canonical 解析让终端自然出现，本空态随之卸载。
+        <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
+          <div className="flex max-w-sm flex-col items-center text-center">
+            <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
+              <SquareTerminal className="size-5" />
+            </div>
+            <h1 className="text-base font-medium">在「{selectedDevice.name}」上开一个终端</h1>
+            <p className="mt-1.5 text-sm leading-5 text-muted-foreground">
+              {selectedDevice.online
+                ? "终端会打开在这台设备的 HOME 目录，之后可以在顶栏继续开更多 Tab。"
+                : "设备当前离线，上线后才能新建终端。"}
+            </p>
+            <Button
+              className="mt-5"
+              label="新建终端"
+              variant="primary"
+              size="sm"
+              icon={<Plus />}
+              isDisabled={!selectedDevice.online}
+              isLoading={deviceTerminalBusy}
+              onClick={() => void createDeviceTerminal(selectedDevice.daemonId)}
+            />
+            {deviceTerminalError ? <p className="mt-3 text-sm leading-5 text-destructive">{deviceTerminalError}</p> : null}
+          </div>
+        </main>
+      ) : null}
+      {!selectedDevice && !activeWorkspace ? (
         <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
           <div className="flex max-w-sm flex-col items-center text-center">
             <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
@@ -384,19 +456,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onImport={importProject}
         onAddDevice={openEnrollment}
         listDirectory={client.listDeviceDirectory}
-      />
-      {/* 无 repo 终端：同一向导组件的"选设备即完"模式，选中设备后直接在其 HOME 开终端 */}
-      <ImportProjectWizard
-        open={newTerminalOpen}
-        daemons={daemons}
-        onOpenChange={setNewTerminalOpen}
-        onImport={importProject}
-        onAddDevice={() => {
-          setNewTerminalOpen(false);
-          setEnrollmentOpen(true);
-        }}
-        listDirectory={client.listDeviceDirectory}
-        pickDeviceOnly={{ title: "新建终端", onPick: createDeviceTerminal }}
       />
       <WorkspaceRenameDialog
         workspace={renameWorkspace}
