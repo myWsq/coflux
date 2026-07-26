@@ -7,6 +7,7 @@ struct CofluxApp: App {
 
     var body: some Scene {
         WindowGroup {
+            // 视觉对标 Cursor iOS；主题跟随系统自动切换（深色=真黑，浅色=系统白）
             RootView(client: client)
         }
         .onChange(of: scenePhase) { _, phase in

@@ -41,6 +41,11 @@ final class FakeConnection: TransportConnection, @unchecked Sendable {
     func finish() {
         continuation.finish()
     }
+
+    /// device 测试用：直接投递已编码帧（DeviceEnvelope 等非控制面信封）。
+    func pushRaw(_ data: Data) {
+        continuation.yield(data)
+    }
 }
 
 actor FakeTransport: Transport {
