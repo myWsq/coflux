@@ -16,9 +16,11 @@ struct WorkspaceDetailView: View {
     @State private var inputCollapsed = false
     /// 无 resize 平移模型（plan 053）：终端容器尺寸恒定，被输入面板整体
     /// "顶上去"（offset 平移 + 裁剪），行列数不变 → 零 SIGWINCH 零重排。
-    /// lift = 面板顶边侵入 deck 的深度，随面板滑动逐帧跟随。
-    @State private var terminalLift: CGFloat = 0
-    @State private var deckHeight: CGFloat = 0
+    /// 位移量 = 面板实测高度（尺寸不受 transition 影响，量值稳定）；
+    /// 平滑感来自 offset 自身的动画插值（纯 transform，不触发布局）。
+    @State private var panelHeight: CGFloat = 0
+
+    private var terminalLift: CGFloat { inputCollapsed ? 0 : panelHeight }
     /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
     @State private var pageProgress: CGFloat = 0
     @State private var chipFrames: [String: CGRect] = [:]
@@ -75,26 +77,21 @@ struct WorkspaceDetailView: View {
                     }
                 }
                 // 平移而非缩放：终端整体被顶上去，顶部裁掉（scrollback 仍可
-                // 在终端内滚动回看；完整画面 = 收起面板）
+                // 在终端内滚动回看；完整画面 = 收起面板）。
+                // 动画挂在 offset 上：与面板同曲线同时长，一起滑动
                 .offset(y: -terminalLift)
+                .animation(.smooth(duration: 0.25), value: terminalLift)
                 .clipped()
             }
-        }
-        .coordinateSpace(.named("deck"))
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.height
-        } action: { height in
-            deckHeight = height
         }
         .overlay(alignment: .bottom) {
             ZStack {
                 if !inputCollapsed, !members.isEmpty {
                     TerminalInputArea(client: client, task: activeTask, collapsed: $inputCollapsed)
                         .onGeometryChange(for: CGFloat.self) { proxy in
-                            proxy.frame(in: .named("deck")).minY
-                        } action: { panelTop in
-                            // 面板滑动（含系统键盘把它推高）逐帧驱动终端跟随
-                            terminalLift = max(0, deckHeight - panelTop)
+                            proxy.size.height
+                        } action: { height in
+                            panelHeight = height
                         }
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
