@@ -7,6 +7,7 @@ import SwiftUI
 struct WorkspaceDetailView: View {
     let client: CofluxClient
     let workspace: Coflux_V1_Workspace
+    @Environment(\.dismiss) private var dismiss
     @State private var activeTaskID: String?
     @State private var termCols: UInt32 = 80
     @State private var termRows: UInt32 = 24
@@ -52,6 +53,16 @@ struct WorkspaceDetailView: View {
                     geo.containerSize.width > 0 ? geo.contentOffset.x / geo.containerSize.width : 0
                 } action: { _, value in
                     pageProgress = value
+                }
+                // 第一页继续往回滑 = 返回工作区列表：松手瞬间（离开拖拽相位）
+                // 左缘回弹超过 12% 页宽即 pop，一次手势只判定一次
+                .onScrollPhaseChange { oldPhase, _, context in
+                    guard oldPhase == .interacting || oldPhase == .tracking else { return }
+                    let width = context.geometry.containerSize.width
+                    guard width > 0 else { return }
+                    if context.geometry.contentOffset.x / width < -0.12 {
+                        dismiss()
+                    }
                 }
                 .ignoresSafeArea(.container, edges: .bottom)
             }
