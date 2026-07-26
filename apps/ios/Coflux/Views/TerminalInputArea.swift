@@ -85,43 +85,49 @@ struct TerminalInputArea: View {
 
     // MARK: - 控制层
 
+    /// 双板布局（用户定案）：左 = 电话式数字小键盘（含 / 与退格），
+    /// 右 = 快捷键盘（控制键在上，倒 T 方向簇在下）。两板各 4 行等高。
     private var padRows: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                ForEach(["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"], id: \.self) { digit in
-                    key(digit, bytes: digit)
+        HStack(spacing: 10) {
+            VStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    key("1", bytes: "1"); key("2", bytes: "2"); key("3", bytes: "3")
+                }
+                HStack(spacing: 6) {
+                    key("4", bytes: "4"); key("5", bytes: "5"); key("6", bytes: "6")
+                }
+                HStack(spacing: 6) {
+                    key("7", bytes: "7"); key("8", bytes: "8"); key("9", bytes: "9")
+                }
+                HStack(spacing: 6) {
+                    key("/", bytes: "/")
+                    key("0", bytes: "0")
+                    key(nil, systemImage: "delete.left", bytes: "\u{7f}")
                 }
             }
-            // 左 = 控制键两行；右 = 实体键盘式倒 T 方向簇（↑ 居中，← ↓ → 在下）
-            HStack(spacing: 6) {
-                VStack(spacing: 6) {
-                    HStack(spacing: 6) {
-                        key("esc", bytes: "\u{1b}")
-                        key("/", bytes: "/")
-                        key("tab", bytes: "\t")
-                        key("⇧tab", bytes: "\u{1b}[Z")
-                    }
-                    HStack(spacing: 6) {
-                        key("^C", tint: Theme.destructive, bytes: "\u{03}")
-                        key(nil, systemImage: "delete.left", bytes: "\u{7f}")
-                        key(nil, systemImage: "return", bytes: "\r")
-                    }
+            .frame(maxWidth: .infinity)
+            VStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    key("esc", bytes: "\u{1b}")
+                    key("tab", bytes: "\t")
+                    key("⇧tab", bytes: "\u{1b}[Z")
                 }
-                .frame(maxWidth: .infinity)
-                VStack(spacing: 6) {
-                    HStack(spacing: 6) {
-                        keyPlaceholder
-                        key(nil, systemImage: "arrowtriangle.up.fill", bytes: arrowBytes("A"))
-                        keyPlaceholder
-                    }
-                    HStack(spacing: 6) {
-                        key(nil, systemImage: "arrowtriangle.left.fill", bytes: arrowBytes("D"))
-                        key(nil, systemImage: "arrowtriangle.down.fill", bytes: arrowBytes("B"))
-                        key(nil, systemImage: "arrowtriangle.right.fill", bytes: arrowBytes("C"))
-                    }
+                HStack(spacing: 6) {
+                    key("^C", tint: Theme.destructive, bytes: "\u{03}")
+                    key(nil, systemImage: "return", bytes: "\r")
                 }
-                .frame(maxWidth: .infinity)
+                HStack(spacing: 6) {
+                    keyPlaceholder
+                    key(nil, systemImage: "arrowtriangle.up.fill", bytes: arrowBytes("A"))
+                    keyPlaceholder
+                }
+                HStack(spacing: 6) {
+                    key(nil, systemImage: "arrowtriangle.left.fill", bytes: arrowBytes("D"))
+                    key(nil, systemImage: "arrowtriangle.down.fill", bytes: arrowBytes("B"))
+                    key(nil, systemImage: "arrowtriangle.right.fill", bytes: arrowBytes("C"))
+                }
             }
+            .frame(maxWidth: .infinity)
         }
     }
 
