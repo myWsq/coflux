@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Coflux
 
-/// 真环境终端闭环验收（plan 045 acceptance）：连本机 dev 拓扑（server 8787 + relay 8790 +
+/// 真环境终端闭环验收（plan 046 acceptance）：连本机 dev 拓扑（server 8787 + relay 8790 +
 /// 真 daemon），不经 UI 直接驱动 CofluxClient/DeviceRouter 完成
 /// 启动任务 → attach → 输入回显 → 停止删除。
 ///

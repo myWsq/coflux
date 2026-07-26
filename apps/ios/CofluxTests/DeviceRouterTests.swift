@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Coflux
 
-/// Device 数据面状态机（plan 045）：fake transport 注入，覆盖 attach 三重匹配、
+/// Device 数据面状态机（plan 046）：fake transport 注入，覆盖 attach 三重匹配、
 /// resume 拒绝转 snapshot、输出 gap recovery、输入台账 ACK/重投、detach/接管、
 /// prepared operation、控制面离线关通道。语义基准 packages/client/src/device-router.ts。
 @MainActor

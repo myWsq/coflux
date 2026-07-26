@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 工作区的任务列表。视觉延续 Cursor iOS：圆形返回钮 + 大标题 + 高行距 plain 列表，
-/// 行 = 状态点 + 任务标题 + 元数据行。数据全部来自控制面归约器（plan 045：本片不动协议）。
+/// 行 = 状态点 + 任务标题 + 元数据行。数据全部来自控制面归约器（plan 046：本片不动协议）。
 struct TaskListView: View {
     let client: CofluxClient
     let workspace: Coflux_V1_Workspace
