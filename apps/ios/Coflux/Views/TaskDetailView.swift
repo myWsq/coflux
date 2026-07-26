@@ -38,7 +38,7 @@ struct TaskDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black)
+        .background(Color(.systemBackground))
         .toolbar(.hidden, for: .navigationBar)
         .confirmationDialog("删除任务？", isPresented: $confirmingRemove, titleVisibility: .visible) {
             Button("停止并删除", role: .destructive) {
@@ -63,7 +63,7 @@ struct TaskDetailView: View {
                 if let task {
                     Text(headerSubtitle(task))
                         .font(.caption)
-                        .foregroundStyle(Color(white: 0.5))
+                        .foregroundStyle(Color(.secondaryLabel))
                 }
             }
             Spacer()
@@ -105,7 +105,7 @@ struct TaskDetailView: View {
             banner(
                 text: task.status == .exited ? "会话已退出" : "任务尚未启动",
                 icon: "play.circle",
-                tint: Color(white: 0.6),
+                tint: Color(.secondaryLabel),
                 actionLabel: "启动"
             ) {
                 client.startTask(taskID: task.id, cols: termCols, rows: termRows)

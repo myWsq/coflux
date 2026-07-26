@@ -30,8 +30,8 @@ struct TaskListView: View {
                         taskRow(task)
                     }
                     .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-                    .listRowBackground(Color.black)
-                    .listRowSeparatorTint(Color(white: 0.16))
+                    .listRowBackground(Color(.systemBackground))
+                    .listRowSeparatorTint(Color(.separator))
                 }
             }
             .listStyle(.plain)
@@ -47,7 +47,7 @@ struct TaskListView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black)
+        .background(Color(.systemBackground))
         .toolbar(.hidden, for: .navigationBar)
     }
 
@@ -72,7 +72,7 @@ struct TaskListView: View {
                     .lineLimit(1)
                 Text(statusText(task))
                     .font(.footnote)
-                    .foregroundStyle(Color(white: 0.5))
+                    .foregroundStyle(Color(.secondaryLabel))
             }
             Spacer()
         }
@@ -82,8 +82,8 @@ struct TaskListView: View {
     private func statusColor(_ task: Coflux_V1_Task) -> Color {
         switch task.status {
         case .running: return client.detachedTaskIDs.contains(task.id) ? .orange : .green
-        case .exited: return task.exitCode == 0 ? Color(white: 0.35) : .red
-        default: return Color(white: 0.35)
+        case .exited: return task.exitCode == 0 ? Color(.tertiaryLabel) : .red
+        default: return Color(.tertiaryLabel)
         }
     }
 
@@ -106,9 +106,9 @@ struct CircleIconButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color(white: 0.75))
+                .foregroundStyle(Color(.secondaryLabel))
                 .frame(width: 40, height: 40)
-                .background(Circle().fill(Color(white: 0.14)))
+                .background(Circle().fill(Color(.secondarySystemFill)))
         }
     }
 }
