@@ -119,7 +119,7 @@ struct WorkspaceDetailView: View {
         .fullScreenCover(isPresented: $composing) {
             TerminalComposeOverlay(
                 draft: $draft,
-                onSend: { newline in sendDraft(newline: newline) },
+                onSend: { sendDraft() },
                 onDismiss: { setComposing(false) }
             )
             // 毛玻璃底在内容层自绘并淡入淡出；呈现层禁默认滑入动画（见 setComposing）
@@ -332,15 +332,16 @@ struct WorkspaceDetailView: View {
         withTransaction(transaction) { composing = on }
     }
 
-    /// 发送成文草稿到激活任务。多行包 bracketed paste 防换行被行编辑器当提交
-    /// （Claude Code/zsh 均开 2004 模式，2026-07-26 实测）。
-    private func sendDraft(newline: Bool) {
+    /// 发送成文草稿到激活任务：仅落文本不追加回车（plan 054 复议 053——
+    /// 提交时机由用户按控制板大回车决定）。多行包 bracketed paste 防草稿
+    /// 内部换行被行编辑器当提交（Claude Code/zsh 均开 2004 模式，2026-07-26 实测）。
+    private func sendDraft() {
         guard let task = activeTask, task.status == .running, task.hasSessionID, !draft.isEmpty else { return }
         var payload = draft
         if payload.contains("\n") {
             payload = "\u{1b}[200~" + payload + "\u{1b}[201~"
         }
-        client.sendInput(sessionID: task.sessionID, newline ? payload + "\r" : payload)
+        client.sendInput(sessionID: task.sessionID, payload)
         draft = ""
         // 呈现层的拆除由 overlay 的 fadeOutAndDismiss 统一走淡出时序，此处不拆
     }
