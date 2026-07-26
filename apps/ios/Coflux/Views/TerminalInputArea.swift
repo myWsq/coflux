@@ -237,10 +237,10 @@ struct VariableBlurView: UIViewRepresentable {
             stepper?.cancel()
             let start = current
             guard abs(target - start) > 0.001 else { return }
-            let steps = 12
+            let steps = 10
             stepper = Task { [weak self] in
                 for step in 1...steps {
-                    try? await Task.sleep(for: .milliseconds(15))
+                    try? await Task.sleep(for: .milliseconds(12))
                     guard let self, !Task.isCancelled else { return }
                     self.current = start + (target - start) * CGFloat(step) / CGFloat(steps)
                     self.animator?.fractionComplete = self.current
@@ -301,8 +301,14 @@ struct TerminalComposeOverlay: View {
                     .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.primaryForeground)
                     .frame(width: 34, height: 34)
                     .background(Circle().fill(draft.isEmpty ? Theme.secondarySurface : Theme.primary))
-                    .onTapGesture { onSend(true) }
-                    .onLongPressGesture { onSend(false) }
+                    .onTapGesture {
+                        onSend(true)
+                        fadeOutAndDismiss()
+                    }
+                    .onLongPressGesture {
+                        onSend(false)
+                        fadeOutAndDismiss()
+                    }
                     .accessibilityLabel("发送")
             }
             .padding(10)
@@ -318,11 +324,14 @@ struct TerminalComposeOverlay: View {
         }
     }
 
+    /// 收场时序：模糊/卡片 ~120ms 淡完 → 系统键盘 ~250ms 落完 → 320ms 时
+    /// 才拆呈现层（此刻屏上已无残留，拆除不可见）。提前拆会把淡出中的模糊
+    /// 和下落中的键盘硬切掉——"结尾一卡"的根因（真机踩过）。
     private func fadeOutAndDismiss() {
         focused = false
-        withAnimation(.easeIn(duration: 0.15)) { appeared = false }
+        withAnimation(.easeIn(duration: 0.12)) { appeared = false }
         Task {
-            try? await Task.sleep(for: .milliseconds(160))
+            try? await Task.sleep(for: .milliseconds(320))
             onDismiss()
         }
     }
