@@ -13,6 +13,7 @@ struct TerminalInputArea: View {
     let task: Coflux_V1_Task?
     @Binding var collapsed: Bool
     @State private var draft = ""
+    @State private var repeatTimer: Timer?
     @FocusState private var composerFocused: Bool
 
     private var sessionID: String? {
@@ -85,50 +86,64 @@ struct TerminalInputArea: View {
 
     // MARK: - 控制层
 
-    /// 双板布局（用户定案）：左 = 电话式数字小键盘（含 / 与退格），
-    /// 右 = 快捷键盘（控制键在上，倒 T 方向簇在下）。两板各 4 行等高。
+    /// 频率分区布局（2026-07-26 用户定案，第一性推导）：
+    /// - 回车 = 最高频 → 竖跨两行大键钉右下角（右拇指落点），primary 高亮；
+    /// - 方向簇紧贴回车左侧（菜单流 ↓↓⏎ 零位移），按住连发；
+    /// - esc = 打断 agent，高频 → 宽键钉左下角（左拇指落点）；
+    /// - 数字 = 快选，中频 → 降为顶部矮行；
+    /// - ^C 破坏性大 → 缩小、与回车对角隔离。
     private var padRows: some View {
-        HStack(spacing: 10) {
-            VStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    key("1", bytes: "1"); key("2", bytes: "2"); key("3", bytes: "3")
-                }
-                HStack(spacing: 6) {
-                    key("4", bytes: "4"); key("5", bytes: "5"); key("6", bytes: "6")
-                }
-                HStack(spacing: 6) {
-                    key("7", bytes: "7"); key("8", bytes: "8"); key("9", bytes: "9")
-                }
-                HStack(spacing: 6) {
-                    key("/", bytes: "/")
-                    key("0", bytes: "0")
-                    key(nil, systemImage: "delete.left", bytes: "\u{7f}")
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                ForEach(["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"], id: \.self) { digit in
+                    key(digit, height: 32, bytes: digit)
                 }
             }
-            .frame(maxWidth: .infinity)
-            VStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    key("esc", bytes: "\u{1b}")
-                    key("tab", bytes: "\t")
-                    key("⇧tab", bytes: "\u{1b}[Z")
+            HStack(spacing: 8) {
+                VStack(spacing: 6) {
+                    HStack(spacing: 6) {
+                        key("tab", bytes: "\t")
+                        key("⇧tab", bytes: "\u{1b}[Z")
+                        key("/", bytes: "/")
+                        repeatKey(systemImage: "delete.left", bytes: "\u{7f}")
+                    }
+                    HStack(spacing: 6) {
+                        key("esc", bytes: "\u{1b}")
+                        key("^C", tint: Theme.destructive, bytes: "\u{03}")
+                            .frame(width: 52)
+                    }
                 }
-                HStack(spacing: 6) {
-                    key("^C", tint: Theme.destructive, bytes: "\u{03}")
-                    key(nil, systemImage: "return", bytes: "\r")
+                .frame(maxWidth: .infinity)
+                VStack(spacing: 6) {
+                    HStack(spacing: 6) {
+                        keyPlaceholder
+                        repeatKey(systemImage: "arrowtriangle.up.fill", bytes: arrowBytes("A"))
+                        keyPlaceholder
+                    }
+                    HStack(spacing: 6) {
+                        repeatKey(systemImage: "arrowtriangle.left.fill", bytes: arrowBytes("D"))
+                        repeatKey(systemImage: "arrowtriangle.down.fill", bytes: arrowBytes("B"))
+                        repeatKey(systemImage: "arrowtriangle.right.fill", bytes: arrowBytes("C"))
+                    }
                 }
-                HStack(spacing: 6) {
-                    keyPlaceholder
-                    key(nil, systemImage: "arrowtriangle.up.fill", bytes: arrowBytes("A"))
-                    keyPlaceholder
-                }
-                HStack(spacing: 6) {
-                    key(nil, systemImage: "arrowtriangle.left.fill", bytes: arrowBytes("D"))
-                    key(nil, systemImage: "arrowtriangle.down.fill", bytes: arrowBytes("B"))
-                    key(nil, systemImage: "arrowtriangle.right.fill", bytes: arrowBytes("C"))
-                }
+                .frame(maxWidth: .infinity)
+                enterKey
             }
-            .frame(maxWidth: .infinity)
         }
+    }
+
+    /// 回车：最高频主键，竖跨两行、primary 高亮、钉右下角
+    private var enterKey: some View {
+        Button {
+            press("\r")
+        } label: {
+            Image(systemName: "return")
+                .font(Theme.Fonts.label.weight(.semibold))
+                .foregroundStyle(Theme.primaryForeground)
+                .frame(width: 52, height: 82)
+                .background(Theme.primary, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .accessibilityLabel("回车")
     }
 
     private var keyPlaceholder: some View {
@@ -143,29 +158,66 @@ struct TerminalInputArea: View {
         return (application ? "\u{1b}O" : "\u{1b}[") + letter
     }
 
+    private func press(_ bytes: String) {
+        guard let sessionID else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        client.sendInput(sessionID: sessionID, bytes)
+    }
+
     private func key(
         _ label: String?,
         systemImage: String? = nil,
         tint: Color = Theme.foreground,
+        height: CGFloat = 38,
         bytes: @autoclosure @escaping () -> String
     ) -> some View {
         Button {
-            guard let sessionID else { return }
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            client.sendInput(sessionID: sessionID, bytes())
+            press(bytes())
         } label: {
-            Group {
-                if let systemImage {
-                    Image(systemName: systemImage)
+            keyCap(label: label, systemImage: systemImage, tint: tint, height: height)
+        }
+    }
+
+    /// 可连发键（方向/退格）：按下即发一次（实体键盘语义），按住 0.35s 后
+    /// 以 80ms 间隔连发，松手停。
+    private func repeatKey(
+        systemImage: String,
+        bytes: @autoclosure @escaping () -> String
+    ) -> some View {
+        keyCap(label: nil, systemImage: systemImage, tint: Theme.foreground, height: 38)
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+            .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 40) {
+                guard let sessionID else { return }
+                // 连发期间序列求值一次即可（按住途中 DECCKM 不会切换）；
+                // 只捕获 Sendable 值跨进 Timer 闭包
+                let payload = bytes()
+                let client = self.client
+                repeatTimer?.invalidate()
+                repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in
+                    Task { @MainActor in client.sendInput(sessionID: sessionID, payload) }
+                }
+            } onPressingChanged: { pressing in
+                if pressing {
+                    press(bytes())
                 } else {
-                    Text(label ?? "")
+                    repeatTimer?.invalidate()
+                    repeatTimer = nil
                 }
             }
-            .font(Theme.Fonts.label.weight(.medium))
-            .foregroundStyle(tint)
-            .frame(maxWidth: .infinity)
-            .frame(height: 38)
-            .background(Theme.secondarySurface, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func keyCap(label: String?, systemImage: String?, tint: Color, height: CGFloat) -> some View {
+        Group {
+            if let systemImage {
+                Image(systemName: systemImage)
+            } else {
+                Text(label ?? "")
+            }
         }
+        .font(Theme.Fonts.label.weight(.medium))
+        .foregroundStyle(tint)
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
+        .background(Theme.secondarySurface, in: RoundedRectangle(cornerRadius: 8))
     }
 }
