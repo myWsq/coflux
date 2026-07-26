@@ -21,7 +21,7 @@ struct LoginView: View {
                 .font(.system(size: 40, weight: .bold, design: .monospaced))
             Text("Agent 指挥中心")
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.mutedForeground)
                 .padding(.top, 6)
 
             VStack(spacing: 12) {
@@ -44,7 +44,7 @@ struct LoginView: View {
             if !client.loginError.isEmpty {
                 Label(client.loginError, systemImage: "exclamationmark.circle.fill")
                     .font(.footnote)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Theme.destructive)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 12)
             }
@@ -53,7 +53,7 @@ struct LoginView: View {
                 Group {
                     if isAuthenticating {
                         ProgressView()
-                            .tint(Color(.systemBackground))
+                            .tint(Theme.primaryForeground)
                     } else {
                         Text("登录")
                             .font(.body.weight(.semibold))
@@ -63,8 +63,8 @@ struct LoginView: View {
                 .frame(height: 50)
             }
             .buttonStyle(.plain)
-            .background(Color.primary, in: RoundedRectangle(cornerRadius: 12))
-            .foregroundStyle(Color(.systemBackground))
+            .background(Theme.primary, in: RoundedRectangle(cornerRadius: 12))
+            .foregroundStyle(Theme.primaryForeground)
             .opacity(username.isEmpty || password.isEmpty || isAuthenticating ? 0.4 : 1)
             .disabled(username.isEmpty || password.isEmpty || isAuthenticating)
             .padding(.top, 20)
@@ -73,7 +73,7 @@ struct LoginView: View {
             Spacer()
         }
         .padding(.horizontal, 28)
-        .background(Color(.systemBackground))
+        .background(Theme.background)
         .task {
             #if DEBUG
             // 无头验收/开发循环便利：经 SIMCTL_CHILD_* 注入即自动登录，仅 Debug 构建生效
@@ -97,10 +97,10 @@ private extension View {
         self
             .padding(.horizontal, 16)
             .frame(height: 50)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+            .background(Theme.input, in: RoundedRectangle(cornerRadius: 12))
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(focused ? Color.primary.opacity(0.35) : .clear, lineWidth: 1)
+                    .strokeBorder(focused ? Theme.foreground.opacity(0.35) : .clear, lineWidth: 1)
             )
             .animation(.easeOut(duration: 0.15), value: focused)
     }
