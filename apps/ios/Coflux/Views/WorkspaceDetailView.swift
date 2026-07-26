@@ -14,9 +14,11 @@ struct WorkspaceDetailView: View {
     @State private var confirmingRemove = false
     @State private var knownTaskIDsBeforeCreate: Set<String>?
     @State private var inputCollapsed = false
-    /// 输入区实测高（overlay 布局外挂靠它给终端让位）；初值取接近真实值，
-    /// 首帧误差由 resize 去抖吸收
-    @State private var inputAreaHeight: CGFloat = 250
+    /// 无 resize 平移模型（plan 053）：终端容器尺寸恒定，被输入面板整体
+    /// "顶上去"（offset 平移 + 裁剪），行列数不变 → 零 SIGWINCH 零重排。
+    /// lift = 面板顶边侵入 deck 的深度，随面板滑动逐帧跟随。
+    @State private var terminalLift: CGFloat = 0
+    @State private var deckHeight: CGFloat = 0
     /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
     @State private var pageProgress: CGFloat = 0
     @State private var chipFrames: [String: CGRect] = [:]
@@ -38,6 +40,10 @@ struct WorkspaceDetailView: View {
                 emptyState
             } else {
                 tabBar
+                // 横幅挪出终端页（终端会被面板顶上去裁顶，横幅必须常驻可见）
+                if let task = activeTask {
+                    statusStrip(task)
+                }
                 // 分页容器用 ScrollView 而非 TabView(.page)：后者不暴露连续
                 // 滚动进度，药丸只能落定后追赶（"不跟手"，plan 050 返工点）
                 ScrollView(.horizontal) {
@@ -68,19 +74,27 @@ struct WorkspaceDetailView: View {
                         dismiss()
                     }
                 }
-                // 输入区让位：padding 瞬时切换（终端只重排一次），
-                // 滑入滑出动画在下方 overlay 里只属于输入面板自己
-                .padding(.bottom, inputCollapsed ? 0 : inputAreaHeight)
+                // 平移而非缩放：终端整体被顶上去，顶部裁掉（scrollback 仍可
+                // 在终端内滚动回看；完整画面 = 收起面板）
+                .offset(y: -terminalLift)
+                .clipped()
             }
+        }
+        .coordinateSpace(.named("deck"))
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.height
+        } action: { height in
+            deckHeight = height
         }
         .overlay(alignment: .bottom) {
             ZStack {
                 if !inputCollapsed, !members.isEmpty {
                     TerminalInputArea(client: client, task: activeTask, collapsed: $inputCollapsed)
                         .onGeometryChange(for: CGFloat.self) { proxy in
-                            proxy.size.height
-                        } action: { height in
-                            inputAreaHeight = height
+                            proxy.frame(in: .named("deck")).minY
+                        } action: { panelTop in
+                            // 面板滑动（含系统键盘把它推高）逐帧驱动终端跟随
+                            terminalLift = max(0, deckHeight - panelTop)
                         }
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -250,7 +264,6 @@ struct WorkspaceDetailView: View {
 
     private func taskPage(_ task: Coflux_V1_Task) -> some View {
         VStack(spacing: 0) {
-            statusStrip(task)
             TerminalHostView(
                 client: client,
                 taskID: task.id,
