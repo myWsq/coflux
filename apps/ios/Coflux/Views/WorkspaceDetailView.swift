@@ -13,6 +13,7 @@ struct WorkspaceDetailView: View {
     @State private var termRows: UInt32 = 24
     @State private var confirmingRemove = false
     @State private var knownTaskIDsBeforeCreate: Set<String>?
+    @State private var inputCollapsed = false
     /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
     @State private var pageProgress: CGFloat = 0
     @State private var chipFrames: [String: CGRect] = [:]
@@ -64,7 +65,26 @@ struct WorkspaceDetailView: View {
                         dismiss()
                     }
                 }
-                .ignoresSafeArea(.container, edges: .bottom)
+                if !inputCollapsed {
+                    TerminalInputArea(client: client, task: activeTask, collapsed: $inputCollapsed)
+                }
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            // 折叠态：右下角玻璃气泡（plan 053，用户定案 AssistiveTouch 式）
+            if inputCollapsed, !members.isEmpty {
+                Button {
+                    withAnimation(.smooth(duration: 0.25)) { inputCollapsed = false }
+                } label: {
+                    Image(systemName: "keyboard")
+                        .font(Theme.Fonts.body.weight(.medium))
+                        .foregroundStyle(Theme.foreground)
+                        .frame(width: 52, height: 52)
+                }
+                .glassEffect(.regular.interactive(), in: .circle)
+                .padding(.trailing, 20)
+                .padding(.bottom, 24)
+                .accessibilityLabel("展开输入区")
             }
         }
         .background(Theme.background)
@@ -210,7 +230,6 @@ struct WorkspaceDetailView: View {
                 client: client,
                 taskID: task.id,
                 sessionID: task.hasSessionID ? task.sessionID : nil,
-                isActive: task.id == activeTaskID,
                 onSizeChanged: { cols, rows in
                     termCols = cols
                     termRows = rows
