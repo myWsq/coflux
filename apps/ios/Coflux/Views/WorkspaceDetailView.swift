@@ -122,7 +122,7 @@ struct WorkspaceDetailView: View {
                 onSend: { newline in sendDraft(newline: newline) },
                 onDismiss: { composing = false }
             )
-            .presentationBackground(.clear)
+            .presentationBackground(.ultraThinMaterial) // 毛玻璃暗底（2026-07-26 用户定）
         }
         .overlay(alignment: .bottomTrailing) {
             // 折叠态：右下角玻璃气泡（plan 053，用户定案 AssistiveTouch 式）。
