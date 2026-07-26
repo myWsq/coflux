@@ -92,22 +92,43 @@ struct TerminalInputArea: View {
                     key(digit, bytes: digit)
                 }
             }
+            // 左 = 控制键两行；右 = 实体键盘式倒 T 方向簇（↑ 居中，← ↓ → 在下）
             HStack(spacing: 6) {
-                key("esc", bytes: "\u{1b}")
-                key("/", bytes: "/")
-                key("tab", bytes: "\t")
-                key("⇧tab", bytes: "\u{1b}[Z")
-                key(nil, systemImage: "delete.left", bytes: "\u{7f}")
-            }
-            HStack(spacing: 6) {
-                key("^C", tint: Theme.destructive, bytes: "\u{03}")
-                key(nil, systemImage: "arrowtriangle.left.fill", bytes: arrowBytes("D"))
-                key(nil, systemImage: "arrowtriangle.up.fill", bytes: arrowBytes("A"))
-                key(nil, systemImage: "arrowtriangle.down.fill", bytes: arrowBytes("B"))
-                key(nil, systemImage: "arrowtriangle.right.fill", bytes: arrowBytes("C"))
-                key(nil, systemImage: "return", bytes: "\r")
+                VStack(spacing: 6) {
+                    HStack(spacing: 6) {
+                        key("esc", bytes: "\u{1b}")
+                        key("/", bytes: "/")
+                        key("tab", bytes: "\t")
+                        key("⇧tab", bytes: "\u{1b}[Z")
+                    }
+                    HStack(spacing: 6) {
+                        key("^C", tint: Theme.destructive, bytes: "\u{03}")
+                        key(nil, systemImage: "delete.left", bytes: "\u{7f}")
+                        key(nil, systemImage: "return", bytes: "\r")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                VStack(spacing: 6) {
+                    HStack(spacing: 6) {
+                        keyPlaceholder
+                        key(nil, systemImage: "arrowtriangle.up.fill", bytes: arrowBytes("A"))
+                        keyPlaceholder
+                    }
+                    HStack(spacing: 6) {
+                        key(nil, systemImage: "arrowtriangle.left.fill", bytes: arrowBytes("D"))
+                        key(nil, systemImage: "arrowtriangle.down.fill", bytes: arrowBytes("B"))
+                        key(nil, systemImage: "arrowtriangle.right.fill", bytes: arrowBytes("C"))
+                    }
+                }
+                .frame(maxWidth: .infinity)
             }
         }
+    }
+
+    private var keyPlaceholder: some View {
+        Color.clear
+            .frame(maxWidth: .infinity)
+            .frame(height: 38)
     }
 
     /// 方向键按下时查激活终端的 DECCKM：应用模式发 SS3（ESC O），否则 CSI（ESC [）
