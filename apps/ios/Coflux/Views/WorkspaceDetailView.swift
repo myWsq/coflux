@@ -14,6 +14,9 @@ struct WorkspaceDetailView: View {
     @State private var confirmingRemove = false
     @State private var knownTaskIDsBeforeCreate: Set<String>?
     @State private var inputCollapsed = false
+    /// 输入区实测高（overlay 布局外挂靠它给终端让位）；初值取接近真实值，
+    /// 首帧误差由 resize 去抖吸收
+    @State private var inputAreaHeight: CGFloat = 250
     /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
     @State private var pageProgress: CGFloat = 0
     @State private var chipFrames: [String: CGRect] = [:]
@@ -65,10 +68,24 @@ struct WorkspaceDetailView: View {
                         dismiss()
                     }
                 }
-                if !inputCollapsed {
+                // 输入区让位：padding 瞬时切换（终端只重排一次），
+                // 滑入滑出动画在下方 overlay 里只属于输入面板自己
+                .padding(.bottom, inputCollapsed ? 0 : inputAreaHeight)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            ZStack {
+                if !inputCollapsed, !members.isEmpty {
                     TerminalInputArea(client: client, task: activeTask, collapsed: $inputCollapsed)
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.size.height
+                        } action: { height in
+                            inputAreaHeight = height
+                        }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
+            .animation(.smooth(duration: 0.25), value: inputCollapsed)
         }
         .overlay(alignment: .bottomTrailing) {
             // 折叠态：右下角玻璃气泡（plan 053，用户定案 AssistiveTouch 式）。
