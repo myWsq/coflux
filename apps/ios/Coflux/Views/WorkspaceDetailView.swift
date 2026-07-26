@@ -71,21 +71,29 @@ struct WorkspaceDetailView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            // 折叠态：右下角玻璃气泡（plan 053，用户定案 AssistiveTouch 式）
-            if inputCollapsed, !members.isEmpty {
-                Button {
-                    withAnimation(.smooth(duration: 0.25)) { inputCollapsed = false }
-                } label: {
-                    Image(systemName: "keyboard")
-                        .font(Theme.Fonts.body.weight(.medium))
-                        .foregroundStyle(Theme.foreground)
-                        .frame(width: 52, height: 52)
+            // 折叠态：右下角玻璃气泡（plan 053，用户定案 AssistiveTouch 式）。
+            // 布局切换刻意不做动画：终端高度一步到位只触发一次 resize，
+            // 动画期间逐帧 resize 会引发远端 TUI 重画闪动；过渡只给气泡自己
+            ZStack {
+                if inputCollapsed, !members.isEmpty {
+                    Button {
+                        inputCollapsed = false
+                    } label: {
+                        Image(systemName: "keyboard")
+                            .font(Theme.Fonts.body.weight(.medium))
+                            .foregroundStyle(Theme.foreground)
+                            .frame(width: 52, height: 52)
+                    }
+                    .glassEffect(.regular.interactive(), in: .circle)
+                    .accessibilityLabel("展开输入区")
+                    .transition(.scale.combined(with: .opacity))
                 }
-                .glassEffect(.regular.interactive(), in: .circle)
-                .padding(.trailing, 20)
-                .padding(.bottom, 24)
-                .accessibilityLabel("展开输入区")
             }
+            // 动画只作用于气泡容器内部（ZStack 常驻承接 transition），
+            // 不外溢到布局——外溢会重新引入逐帧 resize 闪动
+            .animation(.smooth(duration: 0.2), value: inputCollapsed)
+            .padding(.trailing, 20)
+            .padding(.bottom, 24)
         }
         .background(Theme.background)
         .navigationTitle(workspace.name.isEmpty ? workspace.branch : workspace.name)
