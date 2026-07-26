@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 /// 工作区任务台（plan 049）：终端不设二级页——顶部横向 tab 条 + 整页 paged
 /// 滑动切换任务，结构对齐 mobile workspace-detail（进入即挂载全部任务页，
@@ -23,20 +22,13 @@ struct WorkspaceDetailView: View {
     /// 手动键盘追踪：页面对键盘免疫（最外层 ignoresSafeArea(.keyboard)），
     /// 键盘弹起时手动把面板平移到"成文框骑在键盘顶上"的位置，
     /// 控制板下半部分被键盘盖住（2026-07-26 用户定案，取代蒙层方案）
-    @State private var keyboardHeight: CGFloat = 0
-    /// 底部安全区高（面板底边悬在 home 指示条上方，位移必须扣掉这截）
-    @State private var safeAreaBottom: CGFloat = 0
+    /// 成文层与系统键盘同层（fullScreenCover 透明底，无暗色蒙层）：
+    /// 底下的终端/控制板完全冻结不动（2026-07-26 用户最终定案——
+    /// 键盘骑乘/面板位移方案均已尝试并废弃，冻结基座手感最好）
+    @State private var composing = false
+    @State private var draft = ""
 
-    /// 与 iOS 键盘运动匹配的插值弹簧（系统键盘动画等效参数）；
-    /// smooth 定时曲线与键盘错拍会显得"卡"
-    static let keyboardSpring = Animation.interpolatingSpring(mass: 3, stiffness: 1000, damping: 500, initialVelocity: 0)
-
-    /// 面板上移量：成文框底边（面板顶 8pt padding + 38pt 输入条 = 46）精确贴键盘顶
-    private var panelShift: CGFloat {
-        keyboardHeight > 0 ? max(0, keyboardHeight - safeAreaBottom - (panelHeight - 46)) : 0
-    }
-
-    private var terminalLift: CGFloat { inputCollapsed ? 0 : panelHeight + panelShift }
+    private var terminalLift: CGFloat { inputCollapsed ? 0 : panelHeight }
     /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
     @State private var pageProgress: CGFloat = 0
     @State private var chipFrames: [String: CGRect] = [:]
@@ -96,7 +88,7 @@ struct WorkspaceDetailView: View {
                 // 在终端内滚动回看；完整画面 = 收起面板）。
                 // 动画挂在 offset 上：与面板同曲线同时长，一起滑动
                 .offset(y: -terminalLift)
-                .animation(Self.keyboardSpring, value: terminalLift)
+                .animation(.smooth(duration: 0.25), value: terminalLift)
                 .clipped()
                 // 终端页与系统键盘绝缘：键盘只属于模态成文层
                 .ignoresSafeArea(.keyboard)
@@ -105,30 +97,32 @@ struct WorkspaceDetailView: View {
         .overlay(alignment: .bottom) {
             ZStack {
                 if !inputCollapsed, !members.isEmpty {
-                    TerminalInputArea(client: client, task: activeTask, collapsed: $inputCollapsed)
-                        .onGeometryChange(for: CGFloat.self) { proxy in
-                            proxy.size.height
-                        } action: { height in
-                            panelHeight = height
-                        }
-                        // 键盘弹起：面板上移让成文框骑在键盘顶上（纯 transform）
-                        .offset(y: -panelShift)
-                        .animation(Self.keyboardSpring, value: panelShift)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    TerminalInputArea(
+                        client: client,
+                        task: activeTask,
+                        collapsed: $inputCollapsed,
+                        draft: draft,
+                        onCompose: { composing = true }
+                    )
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height
+                    } action: { height in
+                        panelHeight = height
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             .animation(.smooth(duration: 0.25), value: inputCollapsed)
         }
-        // 页面整体对系统键盘免疫：位移全部由 panelShift/terminalLift 手动控制
+        // 基座对系统键盘免疫（冻结）；成文层走独立呈现上下文与键盘同层
         .ignoresSafeArea(.keyboard)
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.safeAreaInsets.bottom
-        } action: { inset in
-            safeAreaBottom = inset
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
-            guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-            keyboardHeight = max(0, UIScreen.main.bounds.height - frame.origin.y)
+        .fullScreenCover(isPresented: $composing) {
+            TerminalComposeOverlay(
+                draft: $draft,
+                onSend: { newline in sendDraft(newline: newline) },
+                onDismiss: { composing = false }
+            )
+            .presentationBackground(.clear)
         }
         .overlay(alignment: .bottomTrailing) {
             // 折叠态：右下角玻璃气泡（plan 053，用户定案 AssistiveTouch 式）。
@@ -327,6 +321,19 @@ struct WorkspaceDetailView: View {
     private func createTerminal() {
         knownTaskIDsBeforeCreate = Set(members.map(\.id))
         client.createTask(workspaceID: workspace.id, title: "终端 \(members.count + 1)")
+    }
+
+    /// 发送成文草稿到激活任务。多行包 bracketed paste 防换行被行编辑器当提交
+    /// （Claude Code/zsh 均开 2004 模式，2026-07-26 实测）。
+    private func sendDraft(newline: Bool) {
+        guard let task = activeTask, task.status == .running, task.hasSessionID, !draft.isEmpty else { return }
+        var payload = draft
+        if payload.contains("\n") {
+            payload = "\u{1b}[200~" + payload + "\u{1b}[201~"
+        }
+        client.sendInput(sessionID: task.sessionID, newline ? payload + "\r" : payload)
+        draft = ""
+        composing = false
     }
 
 
