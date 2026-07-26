@@ -74,8 +74,10 @@ struct WorkspaceListView: View {
     private func projectHeader(_ project: Coflux_V1_Project) -> some View {
         let online = client.daemons.first { $0.daemonID == project.daemonID }?.online ?? false
         return HStack(spacing: 8) {
-            Image(systemName: "folder")
-                .font(.subheadline)
+            Image("folder")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 15, height: 15)
                 .foregroundStyle(Color(.secondaryLabel))
             Text(project.name)
                 .font(.body)
@@ -93,9 +95,11 @@ struct WorkspaceListView: View {
         let running = client.tasks.filter { $0.workspaceID == workspace.id && $0.status == .running }.count
         let name = workspace.name.isEmpty ? workspace.branch : workspace.name
         return HStack(spacing: 14) {
-            // 与 web 侧栏对齐：lucide GitBranch ≈ SF arrow.branch，main 分支同 web 用 warning 色
-            Image(systemName: "arrow.branch")
-                .font(.body)
+            // 与 web 侧栏同源：lucide GitBranch（asset 模板渲染），main 分支同 web 用 warning 色
+            Image("git-branch")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 18, height: 18)
                 .foregroundStyle(workspace.isMain ? Color.orange : Color(.secondaryLabel))
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 3) {

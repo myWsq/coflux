@@ -30,11 +30,18 @@ struct TaskListView: View {
         .background(Color(.systemBackground))
         .overlay {
             if members.isEmpty {
-                ContentUnavailableView(
-                    "暂无任务",
-                    systemImage: "square.terminal",
-                    description: Text("在桌面端新建任务后此处会出现")
-                )
+                ContentUnavailableView {
+                    Label {
+                        Text("暂无任务")
+                    } icon: {
+                        Image("square-terminal")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 42, height: 42)
+                    }
+                } description: {
+                    Text("在桌面端新建任务后此处会出现")
+                }
             }
         }
         .navigationTitle(workspace.name.isEmpty ? workspace.branch : workspace.name)
