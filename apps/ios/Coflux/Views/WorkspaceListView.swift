@@ -2,7 +2,7 @@ import SwiftUI
 
 /// 项目分组的工作区列表 + 设备在线/任务状态。断线不清空内容：
 /// 保留最后快照渲染，顶部横幅提示（store.ts:517-519 同语义）。
-/// 视觉对标 Cursor iOS：真黑底、圆形头像钮 + 独立大标题、
+/// 视觉对标 Cursor iOS（主题随系统：深色=真黑，浅色=系统白）：圆形头像钮 + 独立大标题、
 /// 高行距 plain 列表、灰色常规体分组标题、行尾 chevron。
 struct WorkspaceListView: View {
     let client: CofluxClient
@@ -30,8 +30,8 @@ struct WorkspaceListView: View {
                                     workspaceRow(workspace)
                                 }
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-                                .listRowBackground(Color.black)
-                                .listRowSeparatorTint(Color(white: 0.16))
+                                .listRowBackground(Color(.systemBackground))
+                                .listRowSeparatorTint(Color(.separator))
                             }
                         } header: {
                             projectHeader(project)
@@ -51,7 +51,7 @@ struct WorkspaceListView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.black)
+            .background(Color(.systemBackground))
             .toolbar(.hidden, for: .navigationBar)
         }
     }
@@ -64,9 +64,9 @@ struct WorkspaceListView: View {
             } label: {
                 Image(systemName: "person.fill")
                     .font(.subheadline)
-                    .foregroundStyle(Color(white: 0.75))
+                    .foregroundStyle(Color(.secondaryLabel))
                     .frame(width: 40, height: 40)
-                    .background(Circle().fill(Color(white: 0.14)))
+                    .background(Circle().fill(Color(.secondarySystemFill)))
             }
             .accessibilityLabel("账号")
             Spacer()
@@ -92,13 +92,13 @@ struct WorkspaceListView: View {
         return HStack(spacing: 8) {
             Image(systemName: "folder")
                 .font(.subheadline)
-                .foregroundStyle(Color(white: 0.55))
+                .foregroundStyle(Color(.secondaryLabel))
             Text(project.name)
                 .font(.body)
-                .foregroundStyle(Color(white: 0.55))
+                .foregroundStyle(Color(.secondaryLabel))
                 .textCase(nil)
             Circle()
-                .fill(online ? Color.green : Color(white: 0.3))
+                .fill(online ? Color.green : Color(.tertiaryLabel))
                 .frame(width: 7, height: 7)
         }
         .padding(.vertical, 4)
@@ -112,7 +112,7 @@ struct WorkspaceListView: View {
             // 与 web 侧栏对齐：lucide GitBranch ≈ SF arrow.branch，main 分支同 web 用 warning 色
             Image(systemName: "arrow.branch")
                 .font(.body)
-                .foregroundStyle(workspace.isMain ? Color.orange : Color(white: 0.55))
+                .foregroundStyle(workspace.isMain ? Color.orange : Color(.secondaryLabel))
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 3) {
                 Text(name)
@@ -120,7 +120,7 @@ struct WorkspaceListView: View {
                 if workspace.name.isEmpty == false, workspace.branch != workspace.name {
                     Text(workspace.branch)
                         .font(.footnote.monospaced())
-                        .foregroundStyle(Color(white: 0.5))
+                        .foregroundStyle(Color(.secondaryLabel))
                 }
             }
             Spacer()
