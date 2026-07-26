@@ -110,18 +110,16 @@ struct WorkspaceDetailView: View {
             .animation(.smooth(duration: 0.25), value: inputCollapsed)
             .ignoresSafeArea(.keyboard)
         }
-        .overlay {
-            ZStack {
-                if composing {
-                    TerminalComposeOverlay(
-                        draft: $draft,
-                        onSend: { newline in sendDraft(newline: newline) },
-                        onDismiss: { composing = false }
-                    )
-                    .transition(.opacity)
-                }
-            }
-            .animation(.smooth(duration: 0.2), value: composing)
+        // 成文层走独立呈现上下文（fullScreenCover）：键盘规避只发生在
+        // 呈现层内部，底下的终端页/面板不被键盘顶起（overlay 方案做不到——
+        // 键盘压缩的是宿主容器本身，真机踩过）
+        .fullScreenCover(isPresented: $composing) {
+            TerminalComposeOverlay(
+                draft: $draft,
+                onSend: { newline in sendDraft(newline: newline) },
+                onDismiss: { composing = false }
+            )
+            .presentationBackground(.clear)
         }
         .overlay(alignment: .bottomTrailing) {
             // 折叠态：右下角玻璃气泡（plan 053，用户定案 AssistiveTouch 式）。
