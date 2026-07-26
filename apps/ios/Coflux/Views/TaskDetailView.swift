@@ -18,7 +18,6 @@ struct TaskDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
             if let task {
                 statusStrip(task)
                 TerminalHostView(
@@ -39,7 +38,21 @@ struct TaskDetailView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.systemBackground))
-        .toolbar(.hidden, for: .navigationBar)
+        .navigationTitle(task.map { $0.title.isEmpty ? "任务 \($0.id.prefix(6))" : $0.title } ?? "任务")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationSubtitle(task.map(headerSubtitle) ?? "")
+        .toolbar {
+            if task != nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button("停止并删除任务", role: .destructive) { confirmingRemove = true }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                    }
+                    .accessibilityLabel("任务操作")
+                }
+            }
+        }
         .confirmationDialog("删除任务？", isPresented: $confirmingRemove, titleVisibility: .visible) {
             Button("停止并删除", role: .destructive) {
                 if let task {
@@ -50,35 +63,6 @@ struct TaskDetailView: View {
         } message: {
             Text("运行中的会话将被停止，任务从列表移除")
         }
-    }
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            CircleIconButton(systemName: "chevron.left") { dismiss() }
-                .accessibilityLabel("返回")
-            VStack(alignment: .leading, spacing: 1) {
-                Text(task.map { $0.title.isEmpty ? "任务 \($0.id.prefix(6))" : $0.title } ?? "任务")
-                    .font(.body.weight(.semibold))
-                    .lineLimit(1)
-                if let task {
-                    Text(headerSubtitle(task))
-                        .font(.caption)
-                        .foregroundStyle(Color(.secondaryLabel))
-                }
-            }
-            Spacer()
-            if task != nil {
-                Menu {
-                    Button("停止并删除任务", role: .destructive) { confirmingRemove = true }
-                } label: {
-                    CircleIconButton(systemName: "ellipsis") {}
-                        .allowsHitTesting(false)
-                }
-                .accessibilityLabel("任务操作")
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
     }
 
     private func headerSubtitle(_ task: Coflux_V1_Task) -> String {
