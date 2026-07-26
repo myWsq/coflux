@@ -281,8 +281,9 @@ struct TerminalComposeOverlay: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // 淡毛玻璃底（强度 0.45）：点空白先淡出再关呈现
-            VariableBlurView(intensity: appeared ? 0.45 : 0)
+            // 系统全强度毛玻璃（= Spotlight 下拉同款，material 拉满）：
+            // 点空白先淡出再关呈现
+            VariableBlurView(intensity: appeared ? 1.0 : 0)
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture { fadeOutAndDismiss() }
