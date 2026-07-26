@@ -345,7 +345,13 @@ async fn main() {
                     if !s.authed {
                         continue;
                     }
-                    s.workspaces.iter().map(|(id, (path, default_branch))| (id.clone(), path.clone(), default_branch.clone())).collect()
+                    s.workspaces
+                        .iter()
+                        // default_branch 为空 = 目录工作区（无 repo 终端），跳过 git 轮询：
+                        // 即使目录恰好在某个 git 仓库内（如 dotfiles 管理的 HOME）也不该上报 branch/diff
+                        .filter(|(_, (_, default_branch))| !default_branch.is_empty())
+                        .map(|(id, (path, default_branch))| (id.clone(), path.clone(), default_branch.clone()))
+                        .collect()
                 };
                 for (workspace_id, path, default_branch) in targets {
                     if let Some(branch) = git::current_branch(&path) {
