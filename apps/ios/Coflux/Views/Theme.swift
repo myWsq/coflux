@@ -33,6 +33,26 @@ enum Theme {
     // 终端（SwiftTerm 用 UIColor；真相源 = web terminal-pane.tsx 的 xterm theme）
     static let terminalUIColor = UIColor(red: 0x0A / 255, green: 0x0A / 255, blue: 0x0A / 255, alpha: 1)
     static let terminalForegroundUIColor = UIColor(red: 0xE4 / 255, green: 0xE4 / 255, blue: 0xE4 / 255, alpha: 1)
+
+    /// 字阶 —— 移动端规范（plan 052）：语义角色制，全部锚定 Apple 文本样式
+    /// （随 Dynamic Type 缩放）。字号真相源是平台而非 web（web base 13px 是
+    /// 桌面 IDE 密度，色彩/图形对齐 web、尺寸跟平台）。weight/monospaced 等
+    /// 强调修饰在调用点叠加：角色管"是什么"，修饰管"怎么强调"。
+    /// 新增文字先选角色；没有合适角色时加角色，不写裸 .font。
+    enum Fonts {
+        /// 登录页品牌字标——图形而非正文，唯一的固定尺寸豁免
+        static let brand = Font.system(size: 40, weight: .bold, design: .monospaced)
+        /// 列表主行标题（工作区名/任务名）
+        static let rowTitle = Font.title3
+        /// 分组标题/主按钮等正文级
+        static let body = Font.body
+        /// 说明文字：横幅、tab chip、副标题行、错误提示
+        static let label = Font.footnote
+        /// 元数据小字：diff 数字、运行计数
+        static let meta = Font.caption
+        /// 页面副标题（登录页 slogan）
+        static let subtitle = Font.subheadline
+    }
 }
 
 private extension Color {

@@ -64,7 +64,7 @@ struct WorkspaceListView: View {
             client.status == .connecting ? "连接中…" : "连接已断开，恢复后自动重连",
             systemImage: client.status == .connecting ? "arrow.triangle.2.circlepath" : "wifi.slash"
         )
-        .font(.footnote.weight(.medium))
+        .font(Theme.Fonts.label.weight(.medium))
         .foregroundStyle(Theme.warning)
         .frame(maxWidth: .infinity)
         .padding(.vertical, 8)
@@ -80,7 +80,7 @@ struct WorkspaceListView: View {
                 .frame(width: 15, height: 15)
                 .foregroundStyle(Theme.mutedForeground)
             Text(project.name)
-                .font(.body)
+                .font(Theme.Fonts.body)
                 .foregroundStyle(Theme.mutedForeground)
                 .textCase(nil)
             Circle()
@@ -104,10 +104,10 @@ struct WorkspaceListView: View {
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 3) {
                 Text(name)
-                    .font(.system(size: 19))
+                    .font(Theme.Fonts.rowTitle)
                 if workspace.name.isEmpty == false, workspace.branch != workspace.name {
                     Text(workspace.branch)
-                        .font(.footnote.monospaced())
+                        .font(Theme.Fonts.label.monospaced())
                         .foregroundStyle(Theme.mutedForeground)
                 }
             }
@@ -119,7 +119,7 @@ struct WorkspaceListView: View {
                     Text("−\(workspace.deletions)")
                         .foregroundStyle(Theme.destructive)
                 }
-                .font(.caption.monospacedDigit().weight(.medium))
+                .font(Theme.Fonts.meta.monospacedDigit().weight(.medium))
             }
             if running > 0 {
                 HStack(spacing: 4) {
@@ -127,7 +127,7 @@ struct WorkspaceListView: View {
                         .fill(Theme.success)
                         .frame(width: 6, height: 6)
                     Text("\(running)")
-                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .font(Theme.Fonts.meta.monospacedDigit().weight(.semibold))
                 }
                 .foregroundStyle(Theme.success)
             }
