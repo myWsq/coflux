@@ -14,6 +14,7 @@ coflux：可跑在任意节点上的 **daemon**，本地起 PTY、驱动 Agent�
   - `supervisor`：持 PTY(portable-pty) + scrollback + 背压；UDS server；起/管/重启 worker + 版本切换/观察期回滚。极少升级。
   - `worker`（tokio）：连服务器(WS)/认证/重连 + git/exec/fs + 两级 resync。频繁升级（热升级只换它，PTY 在 supervisor 存活）。
   - 详见 [docs/architecture.md](docs/architecture.md)、[docs/hot-upgrade-design.md](docs/hot-upgrade-design.md)、[docs/ROADMAP.md](docs/ROADMAP.md)。
+  - 改 web UI 先看 [docs/design-guidelines.md](docs/design-guidelines.md)（悬浮提示用 Tooltip 组件不用原生 title 等约定）。
 
 ## 常用命令
 

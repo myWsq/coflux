@@ -199,20 +199,22 @@ export function Sidebar(props: SidebarProps) {
         <section className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           <div className="mb-1.5 flex h-7 items-center px-2">
             <span className="text-xs text-muted-foreground">项目</span>
-            <button
-              className="ml-auto flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              onClick={() => props.onImportProject()}
-              title="导入项目"
-            >
-              <FolderPlus className="size-3.5" />
-            </button>
-            <button
-              className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              onClick={() => props.onNewTerminal()}
-              title="新建终端（无 repo，打开在设备 HOME）"
-            >
-              <SquareTerminal className="size-3.5" />
-            </button>
+            <Tooltip content="导入项目">
+              <button
+                className="ml-auto flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                onClick={() => props.onImportProject()}
+              >
+                <FolderPlus className="size-3.5" />
+              </button>
+            </Tooltip>
+            <Tooltip content="新建终端（无 repo，打开在设备 HOME）">
+              <button
+                className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                onClick={() => props.onNewTerminal()}
+              >
+                <SquareTerminal className="size-3.5" />
+              </button>
+            </Tooltip>
           </div>
 
           {projects.length === 0 ? (
