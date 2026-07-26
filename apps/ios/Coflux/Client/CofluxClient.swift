@@ -424,6 +424,19 @@ final class CofluxClient {
 
     // MARK: - 任务/终端操作（store.ts:566-609 + 279-318 对应面）
 
+    /// 新建终端任务。taskCreate 无请求-响应关联（workspace-detail.tsx:188 同语义）：
+    /// 自建任务的识别与激活由 view 侧靠快照增量的未知 task id 完成。
+    func createTask(workspaceID: String, title: String) {
+        guard controlAuthenticated else {
+            reportLocalError("中心未连接，无法新建终端")
+            return
+        }
+        var create = Coflux_V1_TaskCreate()
+        create.workspaceID = workspaceID
+        create.title = title
+        send(.taskCreate(create))
+    }
+
     /// RUNNING 的 attach 直接交给 session authority；IDLE/EXITED 由中心 prepare durable create。
     func startTask(taskID: String, cols: UInt32, rows: UInt32, force: Bool = false) {
         if let task = tasks.first(where: { $0.id == taskID }), task.status == .running, task.hasSessionID {

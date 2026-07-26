@@ -15,7 +15,7 @@ struct WorkspaceListView: View {
                         let members = client.workspaces.filter { $0.projectID == project.id }
                         ForEach(members, id: \.id) { workspace in
                             NavigationLink {
-                                TaskListView(client: client, workspace: workspace)
+                                WorkspaceDetailView(client: client, workspace: workspace)
                             } label: {
                                 workspaceRow(workspace)
                             }

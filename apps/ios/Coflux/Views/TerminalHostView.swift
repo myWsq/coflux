@@ -10,6 +10,9 @@ struct TerminalHostView: UIViewRepresentable {
     let client: CofluxClient
     let taskID: String
     let sessionID: String?
+    /// 任务台多页保活场景：非激活页必须放弃 firstResponder，否则键盘输入
+    /// 会继续打到滑走的旧终端（正确性问题，见 plan 049）。单页使用可不传。
+    var isActive: Bool = true
     var onSizeChanged: ((UInt32, UInt32) -> Void)?
 
     func makeUIView(context: Context) -> TerminalView {
@@ -23,6 +26,9 @@ struct TerminalHostView: UIViewRepresentable {
     func updateUIView(_ uiView: TerminalView, context: Context) {
         context.coordinator.taskID = taskID
         context.coordinator.bind(sessionID: sessionID)
+        if !isActive, uiView.isFirstResponder {
+            uiView.resignFirstResponder()
+        }
     }
 
     static func dismantleUIView(_ uiView: TerminalView, coordinator: Coordinator) {
