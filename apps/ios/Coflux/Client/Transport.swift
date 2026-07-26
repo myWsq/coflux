@@ -29,20 +29,30 @@ struct NetworkTransport: Transport {
     }
 }
 
-private struct NetworkWebSocketConnection: TransportConnection {
-    let connection: NetworkConnection<WebSocket>
+/// 用 messages 流而非逐次 receive()：iOS 26 的 NetworkConnection.receive() 收到 WS ping
+/// 控制帧时以 EINVAL 失败并弃连接（server 30s 心跳一到必断，实测复现）；messages 流
+/// 无此问题，ping 作为消息投递（忽略即可），pong 由 autoReplyPing 自动回。
+/// @unchecked Sendable：iterator 仅被 runConnection 的单一循环串行消费，无并发访问。
+private final class NetworkWebSocketConnection: TransportConnection, @unchecked Sendable {
+    private let connection: NetworkConnection<WebSocket>
+    private var iterator: AsyncThrowingStream<WebSocket.Message<Data>, any Error>.Iterator
+
+    init(connection: NetworkConnection<WebSocket>) {
+        self.connection = connection
+        iterator = connection.messages.makeAsyncIterator()
+    }
 
     func send(_ data: Data) async throws {
         try await connection.send(data)
     }
 
     func receive() async throws -> Data {
-        while true {
-            let message = try await connection.receive()
+        while let message = try await iterator.next() {
             if message.metadata.opcode == .binary {
                 return message.content
             }
         }
+        throw TransportClosedError()
     }
 
     func close() async {
