@@ -24,10 +24,16 @@ struct WorkspaceDetailView: View {
     /// 键盘弹起时手动把面板平移到"成文框骑在键盘顶上"的位置，
     /// 控制板下半部分被键盘盖住（2026-07-26 用户定案，取代蒙层方案）
     @State private var keyboardHeight: CGFloat = 0
+    /// 底部安全区高（面板底边悬在 home 指示条上方，位移必须扣掉这截）
+    @State private var safeAreaBottom: CGFloat = 0
 
-    /// 面板上移量：成文框底边（面板顶 8pt padding + 38pt 输入条）贴键盘顶
+    /// 与 iOS 键盘运动匹配的插值弹簧（系统键盘动画等效参数）；
+    /// smooth 定时曲线与键盘错拍会显得"卡"
+    static let keyboardSpring = Animation.interpolatingSpring(mass: 3, stiffness: 1000, damping: 500, initialVelocity: 0)
+
+    /// 面板上移量：成文框底边（面板顶 8pt padding + 38pt 输入条 = 46）精确贴键盘顶
     private var panelShift: CGFloat {
-        keyboardHeight > 0 ? max(0, keyboardHeight - panelHeight + 54) : 0
+        keyboardHeight > 0 ? max(0, keyboardHeight - safeAreaBottom - (panelHeight - 46)) : 0
     }
 
     private var terminalLift: CGFloat { inputCollapsed ? 0 : panelHeight + panelShift }
@@ -90,7 +96,7 @@ struct WorkspaceDetailView: View {
                 // 在终端内滚动回看；完整画面 = 收起面板）。
                 // 动画挂在 offset 上：与面板同曲线同时长，一起滑动
                 .offset(y: -terminalLift)
-                .animation(.smooth(duration: 0.25), value: terminalLift)
+                .animation(Self.keyboardSpring, value: terminalLift)
                 .clipped()
                 // 终端页与系统键盘绝缘：键盘只属于模态成文层
                 .ignoresSafeArea(.keyboard)
@@ -107,7 +113,7 @@ struct WorkspaceDetailView: View {
                         }
                         // 键盘弹起：面板上移让成文框骑在键盘顶上（纯 transform）
                         .offset(y: -panelShift)
-                        .animation(.smooth(duration: 0.25), value: panelShift)
+                        .animation(Self.keyboardSpring, value: panelShift)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
@@ -115,6 +121,11 @@ struct WorkspaceDetailView: View {
         }
         // 页面整体对系统键盘免疫：位移全部由 panelShift/terminalLift 手动控制
         .ignoresSafeArea(.keyboard)
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.safeAreaInsets.bottom
+        } action: { inset in
+            safeAreaBottom = inset
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
             guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
             keyboardHeight = max(0, UIScreen.main.bounds.height - frame.origin.y)
