@@ -107,7 +107,7 @@ struct TerminalInputArea: View {
             HStack(spacing: 6) {
                 VStack(spacing: 6) {
                     HStack(spacing: 6) {
-                        pasteKey
+                        key("tab", bytes: "\t")
                         key("q", bytes: "q")
                         key("^D", bytes: "\u{04}")
                     }
@@ -120,7 +120,7 @@ struct TerminalInputArea: View {
                 .frame(maxWidth: .infinity)
                 VStack(spacing: 6) {
                     HStack(spacing: 6) {
-                        key("tab", bytes: "\t")
+                        pasteKey
                         repeatKey(systemImage: "arrowtriangle.up.fill", bytes: arrowBytes("A"))
                         key("/", bytes: "/")
                     }
