@@ -225,14 +225,17 @@ struct TerminalComposeOverlay: View {
     let onSend: (_ newline: Bool) -> Void
     let onDismiss: () -> Void
     @FocusState private var focused: Bool
+    /// 自绘淡入淡出（呈现层动画已禁）：毛玻璃底与输入条同步 fade
+    @State private var appeared = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // 透明点击区：不压暗底层，点空白即收
-            Color.clear
-                .contentShape(Rectangle())
+            // 毛玻璃底（降浓度 0.7 不压死底层）：点空白先淡出再关呈现
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .opacity(appeared ? 0.7 : 0)
                 .ignoresSafeArea()
-                .onTapGesture { onDismiss() }
+                .onTapGesture { fadeOutAndDismiss() }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("输入后发送到终端", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
@@ -256,7 +259,20 @@ struct TerminalComposeOverlay: View {
             .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Theme.border, lineWidth: 0.5))
             .padding(.horizontal, 8)
             .padding(.bottom, 6)
+            .opacity(appeared ? 1 : 0)
         }
-        .onAppear { focused = true }
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.18)) { appeared = true }
+            focused = true
+        }
+    }
+
+    private func fadeOutAndDismiss() {
+        focused = false
+        withAnimation(.easeIn(duration: 0.15)) { appeared = false }
+        Task {
+            try? await Task.sleep(for: .milliseconds(160))
+            onDismiss()
+        }
     }
 }
