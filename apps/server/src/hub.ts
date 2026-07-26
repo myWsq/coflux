@@ -1295,6 +1295,19 @@ export class Hub {
           this.sendClient(client, { case: "error", value: { message: "终端目录路径为空" } });
           return;
         }
+        // 幂等（plan 048）：每设备最多一个目录工作区。已有则复用（多个取最早，与 web 侧
+        // canonical 规则同构），只补建一个任务；不重播 workspaceCreated——web 是 upsert
+        // 语义不会坏，但复用时没有新事实要广播。
+        const existing = (await this.store.listWorkspacesByDaemon(value.daemonId))
+          .filter(isDirWorkspace)
+          .sort((left, right) => left.createdAt - right.createdAt)[0];
+        if (existing) {
+          const now = Date.now();
+          const reusedTask: Task = create(TaskSchema, { id: randomUUID(), accountId: existing.accountId, daemonId: existing.daemonId, projectId: "", workspaceId: existing.id, title: "终端", status: TaskStatus.IDLE, createdAt: now, updatedAt: now });
+          await this.store.createTask(reusedTask);
+          this.emitTask(reusedTask);
+          break;
+        }
         const ts = Date.now();
         const workspace = create(WorkspaceSchema, {
           id: randomUUID(),

@@ -2,77 +2,61 @@ import SwiftUI
 
 /// 项目分组的工作区列表 + 设备在线/任务状态。断线不清空内容：
 /// 保留最后快照渲染，顶部横幅提示（store.ts:517-519 同语义）。
-/// 视觉对标 Cursor iOS（主题随系统：深色=真黑，浅色=系统白）：圆形头像钮 + 独立大标题、
-/// 高行距 plain 列表、灰色常规体分组标题、行尾 chevron。
+/// 导航 chrome 走系统 NavigationStack（大标题 + toolbar），Liquid Glass 由系统提供；
+/// 列表保持高行距 plain 风格、灰色常规体分组标题、行尾 chevron。
 struct WorkspaceListView: View {
     let client: CofluxClient
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 0) {
-                header
-                Text("工作区")
-                    .font(.system(size: 34, weight: .bold))
-                    .padding(.horizontal, 20)
-                    .padding(.top, 20)
-                    .padding(.bottom, 8)
+            List {
+                ForEach(client.projects, id: \.id) { project in
+                    Section {
+                        let members = client.workspaces.filter { $0.projectID == project.id }
+                        ForEach(members, id: \.id) { workspace in
+                            NavigationLink {
+                                TaskListView(client: client, workspace: workspace)
+                            } label: {
+                                workspaceRow(workspace)
+                            }
+                            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
+                            .listRowBackground(Color(.systemBackground))
+                            .listRowSeparatorTint(Color(.separator))
+                        }
+                    } header: {
+                        projectHeader(project)
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(Color(.systemBackground))
+            .safeAreaInset(edge: .top, spacing: 0) {
                 if client.status != .connected {
                     offlineBanner
                 }
-                List {
-                    ForEach(client.projects, id: \.id) { project in
-                        Section {
-                            let members = client.workspaces.filter { $0.projectID == project.id }
-                            ForEach(members, id: \.id) { workspace in
-                                NavigationLink {
-                                    TaskListView(client: client, workspace: workspace)
-                                } label: {
-                                    workspaceRow(workspace)
-                                }
-                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-                                .listRowBackground(Color(.systemBackground))
-                                .listRowSeparatorTint(Color(.separator))
-                            }
-                        } header: {
-                            projectHeader(project)
-                        }
-                    }
-                }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .overlay {
-                    if client.projects.isEmpty {
-                        ContentUnavailableView(
-                            "暂无项目",
-                            systemImage: "tray",
-                            description: Text("在桌面端导入 git 仓库后此处会出现")
-                        )
-                    }
+            }
+            .overlay {
+                if client.projects.isEmpty {
+                    ContentUnavailableView(
+                        "暂无项目",
+                        systemImage: "tray",
+                        description: Text("在桌面端导入 git 仓库后此处会出现")
+                    )
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(.systemBackground))
-            .toolbar(.hidden, for: .navigationBar)
-        }
-    }
-
-    /// Cursor 式顶栏：左侧圆形头像钮（收纳账号操作），标准 nav bar 隐藏
-    private var header: some View {
-        HStack {
-            Menu {
-                Button("登出", role: .destructive) { client.logout() }
-            } label: {
-                Image(systemName: "person.fill")
-                    .font(.subheadline)
-                    .foregroundStyle(Color(.secondaryLabel))
-                    .frame(width: 40, height: 40)
-                    .background(Circle().fill(Color(.secondarySystemFill)))
+            .navigationTitle("工作区")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button("登出", role: .destructive) { client.logout() }
+                    } label: {
+                        Image(systemName: "person.fill")
+                    }
+                    .accessibilityLabel("账号")
+                }
             }
-            .accessibilityLabel("账号")
-            Spacer()
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
     }
 
     private var offlineBanner: some View {

@@ -78,8 +78,8 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   const lastError = useStore(client.store, (state) => state.lastError);
   const ports = useStore(client.store, (state) => state.ports);
 
-  // 目录工作区（无 repo 终端，plan 045）：一工作区一终端，
-  // 不渲染顶栏（分支按钮/「变更」tab/终端 Tabs/新建按钮），git 语义功能全部不适用。
+  // 目录工作区（无 repo 终端，plan 045/048）：作为设备详情的载体，顶栏保留终端
+  // Tabs/新建/端口，但 git 语义（分支按钮/「变更」tab/diff）全部不渲染。
   const isDirWorkspace = Boolean(workspace && isDirWorkspaceOf(workspace));
 
   const [activeTaskId, setActiveTaskIdState] = useState<string | null>(null);
@@ -292,9 +292,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   function createTerminal() {
     if (pendingCreateRef.current) return;
     const tasksNow = currentTasks();
-    // 目录工作区一工作区一终端：已有任务时快捷键新建（modPrefix+T）安静忽略，
-    // 没有 Tab 栏可切换，第二个任务会不可达。空态重建（任务被关闭后）仍放行。
-    if (isDirWorkspace && tasksNow.length > 0) return;
     pendingCreateRef.current = { knownTaskIds: new Set(tasksNow.map((task) => task.id)) };
     setCreating(true);
     client.send({ case: "taskCreate", value: { workspaceId, title: `终端 ${tasksNow.length + 1}` } });
@@ -432,45 +429,50 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-terminal">
       {/* 单栏顶栏：名称（如有）＋ 可点的分支按钮 │ 终端 Tabs（Tab 用间距而非竖线分隔）＋ 新建/端口。
-          目录工作区不渲染整个顶栏（一工作区一终端，无 Tab/分支/变更语义）。 */}
-      {isDirWorkspace ? null : (
+          目录工作区（设备详情，plan 048）保留 Tabs/新建/端口，不渲染分支按钮与「变更」tab。 */}
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-background px-3">
-        <BranchMenu
-          currentBranch={workspace?.branch ?? ""}
-          button={{
-            label: pendingBranch ?? workspace?.branch ?? "",
-            icon: pendingBranch ? <LoaderCircle className="size-3 animate-spin" /> : <GitBranch className="size-3" />,
-            isDisabled: Boolean(pendingBranch),
-            variant: "ghost",
-            size: "sm",
-            // ghost 默认色偏亮、内边距偏大：压到与顶栏辅助元素一致（内联样式压 StyleX）
-            style: { color: "var(--secondary-foreground)", height: 24, paddingInline: 6, gap: 6 },
-          }}
-          listBranches={listBranches}
-          takenBranches={takenBranches}
-          onPick={switchBranch}
-        />
-        <div className="h-4 w-px shrink-0 bg-border" />
+        {isDirWorkspace ? null : (
+          <>
+            <BranchMenu
+              currentBranch={workspace?.branch ?? ""}
+              button={{
+                label: pendingBranch ?? workspace?.branch ?? "",
+                icon: pendingBranch ? <LoaderCircle className="size-3 animate-spin" /> : <GitBranch className="size-3" />,
+                isDisabled: Boolean(pendingBranch),
+                variant: "ghost",
+                size: "sm",
+                // ghost 默认色偏亮、内边距偏大：压到与顶栏辅助元素一致（内联样式压 StyleX）
+                style: { color: "var(--secondary-foreground)", height: 24, paddingInline: 6, gap: 6 },
+              }}
+              listBranches={listBranches}
+              takenBranches={takenBranches}
+              onPick={switchBranch}
+            />
+            <div className="h-4 w-px shrink-0 bg-border" />
+          </>
+        )}
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {/* 常驻「变更」tab（plan 025）：与终端 Tab 同级同组、选中态互斥；
               统计徽标并入 tab，X=Y=0 时数字隐藏，min-w 对齐「终端 N」默认标题 Tab 的实际宽度（≈96px）避免显得过窄，内容靠左。 */}
-          <button
-            className={cn(
-              "flex h-7 min-w-24 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-sm transition-colors",
-              view === "changes"
-                ? "bg-accent text-foreground"
-                : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
-            )}
-            onClick={() => setView("changes")}
-          >
-            <FileDiff className={cn("size-3 shrink-0", view === "changes" ? "opacity-90" : "opacity-50")} />
-            <span>变更</span>
-            {workspace && (workspace.additions > 0 || workspace.deletions > 0) ? (
-              <span className="whitespace-nowrap font-mono text-2xs tabular-nums" title={`+${workspace.additions} −${workspace.deletions}`}>
-                <span className="text-success">+{workspace.additions}</span> <span className="text-destructive">−{workspace.deletions}</span>
-              </span>
-            ) : null}
-          </button>
+          {isDirWorkspace ? null : (
+            <button
+              className={cn(
+                "flex h-7 min-w-24 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-sm transition-colors",
+                view === "changes"
+                  ? "bg-accent text-foreground"
+                  : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
+              )}
+              onClick={() => setView("changes")}
+            >
+              <FileDiff className={cn("size-3 shrink-0", view === "changes" ? "opacity-90" : "opacity-50")} />
+              <span>变更</span>
+              {workspace && (workspace.additions > 0 || workspace.deletions > 0) ? (
+                <span className="whitespace-nowrap font-mono text-2xs tabular-nums" title={`+${workspace.additions} −${workspace.deletions}`}>
+                  <span className="text-success">+{workspace.additions}</span> <span className="text-destructive">−{workspace.deletions}</span>
+                </span>
+              ) : null}
+            </button>
+          )}
           {workspaceTasks.map((task) => {
             const state = stateOf(task);
             // 「变更」视图激活时终端 Tab 一律去高亮，两种视图选中态互斥（plan 025）。
@@ -587,7 +589,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           </div>
         ) : null}
       </header>
-      )}
 
       <div className="relative min-h-0 flex-1 bg-terminal">
         {/* 面板按 taskId 建立稳定身份（React key）：任务实体更新不重建 xterm（重建会丢 scrollback）。 */}
@@ -616,7 +617,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
               <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
                 <SquareTerminal className="size-5" />
               </div>
-              <h2 className="text-base font-medium text-foreground">这个工作区还没有终端</h2>
+              <h2 className="text-base font-medium text-foreground">{isDirWorkspace ? "这台设备还没有终端" : "这个工作区还没有终端"}</h2>
               <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。也可以按 {modPrefix}T 快速新建。</p>
               <Button className="mt-5" label="新建终端" variant="primary" size="sm" icon={<Plus />} isLoading={creating} onClick={createTerminal} />
             </div>
