@@ -342,7 +342,7 @@ struct WorkspaceDetailView: View {
         }
         client.sendInput(sessionID: task.sessionID, newline ? payload + "\r" : payload)
         draft = ""
-        setComposing(false)
+        // 呈现层的拆除由 overlay 的 fadeOutAndDismiss 统一走淡出时序，此处不拆
     }
 
 
