@@ -42,9 +42,7 @@ enum Theme {
     enum Fonts {
         /// 登录页品牌字标——图形而非正文，唯一的固定尺寸豁免
         static let brand = Font.system(size: 40, weight: .bold, design: .monospaced)
-        /// 列表主行标题（工作区名/任务名）
-        static let rowTitle = Font.title3
-        /// 分组标题/主按钮等正文级
+        /// 正文级：列表主行标题、分组标题、主按钮（行标题不单设放大档，2026-07-26 用户定）
         static let body = Font.body
         /// 说明文字：横幅、tab chip、副标题行、错误提示
         static let label = Font.footnote
