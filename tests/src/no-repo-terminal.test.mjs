@@ -47,19 +47,34 @@ test("terminalCreate：目录工作区 + 任务同建，PTY 打开在传入目�
   const from = device.mark();
   await device.input(run.task.sessionId, "echo CWD_$(pwd -P)_END\r");
   await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes(`CWD_${home}_END`), "PTY cwd 为传入目录", 10000, from);
+  // 清理：terminalCreate 自 plan 048 起按设备幂等复用目录工作区，残留会改变后续用例的行为
+  c.send({ case: "workspaceRemove", workspaceId: ws.workspace.id });
+  await c.waitFor((m) => m.case === "workspaceRemoved" && m.workspaceId === ws.workspace.id, "cleanup ws removed");
   device.close();
 });
 
-test("terminalCreate：每次点击各建一个工作区，互不复用", async () => {
+test("terminalCreate：同设备幂等复用目录工作区，第二次只建任务（plan 048）", async () => {
   const home = mkDir();
   const device = await openRelayDevice(stack);
   const c = device.control;
 
   c.send({ case: "terminalCreate", daemonId: stack.daemonId, path: home });
   const first = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.path === home, "first ws");
-  c.send({ case: "terminalCreate", daemonId: stack.daemonId, path: home });
-  const second = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.path === home && m.workspace.id !== first.workspace.id, "second ws");
-  assert.notEqual(second.workspace.id, first.workspace.id);
+  const firstTask = await c.waitFor((m) => m.case === "taskUpdated" && m.task.workspaceId === first.workspace.id, "first task");
+  // 第二次传不同 path：幂等复用不看 path，任务仍挂在首个工作区下
+  c.send({ case: "terminalCreate", daemonId: stack.daemonId, path: mkDir() });
+  const secondTask = await c.waitFor(
+    (m) => m.case === "taskUpdated" && m.task.workspaceId === first.workspace.id && m.task.id !== firstTask.task.id,
+    "second task on same ws",
+  );
+  assert.equal(secondTask.task.projectId, "", "复用任务同样不挂 project");
+  // 若第二次误建了新工作区，上面的 taskUpdated 之前必先有它的 workspaceCreated——在已收
+  // 消息日志里断言只存在一个目录工作区的创建广播
+  const extraWs = c.log.find((m) => m.case === "workspaceCreated" && m.workspace.projectId === "" && m.workspace.id !== first.workspace.id);
+  assert.equal(extraWs, undefined, "不产生第二个目录工作区");
+  // 清理：不给后续用例留存量目录工作区
+  c.send({ case: "workspaceRemove", workspaceId: first.workspace.id });
+  await c.waitFor((m) => m.case === "workspaceRemoved" && m.workspaceId === first.workspace.id, "cleanup ws removed");
   device.close();
 });
 
