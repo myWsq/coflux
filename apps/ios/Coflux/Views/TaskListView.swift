@@ -1,11 +1,10 @@
 import SwiftUI
 
-/// 工作区的任务列表。视觉延续 Cursor iOS：圆形返回钮 + 大标题 + 高行距 plain 列表，
+/// 工作区的任务列表：系统导航栏大标题 + 高行距 plain 列表，
 /// 行 = 状态点 + 任务标题 + 元数据行。数据全部来自控制面归约器（plan 046：本片不动协议）。
 struct TaskListView: View {
     let client: CofluxClient
     let workspace: Coflux_V1_Workspace
-    @Environment(\.dismiss) private var dismiss
 
     private var members: [Coflux_V1_Task] {
         client.tasks
@@ -14,51 +13,31 @@ struct TaskListView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            Text(workspace.name.isEmpty ? workspace.branch : workspace.name)
-                .font(.system(size: 34, weight: .bold))
-                .lineLimit(1)
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
-                .padding(.bottom, 8)
-            List {
-                ForEach(members, id: \.id) { task in
-                    NavigationLink {
-                        TaskDetailView(client: client, taskID: task.id)
-                    } label: {
-                        taskRow(task)
-                    }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-                    .listRowBackground(Color(.systemBackground))
-                    .listRowSeparatorTint(Color(.separator))
+        List {
+            ForEach(members, id: \.id) { task in
+                NavigationLink {
+                    TaskDetailView(client: client, taskID: task.id)
+                } label: {
+                    taskRow(task)
                 }
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .overlay {
-                if members.isEmpty {
-                    ContentUnavailableView(
-                        "暂无任务",
-                        systemImage: "square.terminal",
-                        description: Text("在桌面端新建任务后此处会出现")
-                    )
-                }
+                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
+                .listRowBackground(Color(.systemBackground))
+                .listRowSeparatorTint(Color(.separator))
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
         .background(Color(.systemBackground))
-        .toolbar(.hidden, for: .navigationBar)
-    }
-
-    private var header: some View {
-        HStack {
-            CircleIconButton(systemName: "chevron.left") { dismiss() }
-                .accessibilityLabel("返回")
-            Spacer()
+        .overlay {
+            if members.isEmpty {
+                ContentUnavailableView(
+                    "暂无任务",
+                    systemImage: "square.terminal",
+                    description: Text("在桌面端新建任务后此处会出现")
+                )
+            }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
+        .navigationTitle(workspace.name.isEmpty ? workspace.branch : workspace.name)
     }
 
     private func taskRow(_ task: Coflux_V1_Task) -> some View {
@@ -93,22 +72,6 @@ struct TaskListView: View {
         case .exited: return task.hasExitCode ? "已退出 · exit \(task.exitCode)" : "已退出"
         case .idle: return "未启动"
         default: return "未知状态"
-        }
-    }
-}
-
-/// Cursor 式圆形图标钮（深灰填充圆），顶栏通用。
-struct CircleIconButton: View {
-    let systemName: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color(.secondaryLabel))
-                .frame(width: 40, height: 40)
-                .background(Circle().fill(Color(.secondarySystemFill)))
         }
     }
 }
