@@ -1332,6 +1332,15 @@ pub struct TaskCreate {
     #[prost(string, tag="2")]
     pub title: ::prost::alloc::string::String,
 }
+/// 在设备上新建无 repo 的目录工作区（projectId 为空即目录工作区）+ 一个任务。
+/// path 是 web 经 DeviceFsList{browse_home:true} 从 daemon 拿到的 HOME 绝对路径。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TerminalCreate {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub path: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TaskStart {
     #[prost(string, tag="1")]
@@ -1348,7 +1357,7 @@ pub struct TaskRemove {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 24")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 34, 24")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -1395,6 +1404,8 @@ pub mod client_to_server {
         LocalUnpairRequest(super::LocalUnpairRequest),
         #[prost(message, tag="33")]
         DeviceRelayConnect(super::DeviceRelayConnect),
+        #[prost(message, tag="34")]
+        TerminalCreate(super::TerminalCreate),
         #[prost(message, tag="24")]
         WorkspaceSetName(super::WorkspaceSetName),
     }

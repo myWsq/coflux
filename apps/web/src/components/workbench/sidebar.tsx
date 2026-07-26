@@ -2,12 +2,12 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, Cog, Folder, FolderOpen, FolderPlus, GitBranch, Info, Monitor, Package, Plus, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronRight, Cloud, Cog, Folder, FolderOpen, FolderPlus, GitBranch, Info, Monitor, Package, Plus, SquareTerminal, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
-import type { CofluxClient } from "@coflux/client";
+import { isDirWorkspace, type CofluxClient } from "@coflux/client";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
 import { cn } from "@/lib/utils";
 
@@ -47,6 +47,7 @@ type SidebarProps = {
   selectedWorkspaceId: string | null;
   onSelectWorkspace: (workspaceId: string) => void;
   onImportProject: () => void;
+  onNewTerminal: () => void;
   onCreateWorkspace: (project: Project, branch: string, createNew: boolean) => void;
   onRemoveProject: (project: Project) => void;
   onRemoveWorkspace: (workspace: Workspace) => void;
@@ -186,6 +187,9 @@ export function Sidebar(props: SidebarProps) {
       .filter((workspace) => workspace.projectId === projectId)
       .sort((left, right) => (left.isMain === right.isMain ? left.createdAt - right.createdAt : left.isMain ? -1 : 1));
 
+  /** 目录工作区（无 repo 终端，plan 045） */
+  const dirWorkspaces = workspaces.filter(isDirWorkspace).sort((left, right) => left.createdAt - right.createdAt);
+
   return (
     <aside
       className="relative flex h-screen shrink-0 flex-col border-r border-border bg-sidebar text-base"
@@ -201,6 +205,13 @@ export function Sidebar(props: SidebarProps) {
               title="导入项目"
             >
               <FolderPlus className="size-3.5" />
+            </button>
+            <button
+              className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              onClick={() => props.onNewTerminal()}
+              title="新建终端（无 repo，打开在设备 HOME）"
+            >
+              <SquareTerminal className="size-3.5" />
             </button>
           </div>
 
@@ -366,6 +377,64 @@ export function Sidebar(props: SidebarProps) {
               );
             })}
           </div>
+
+          {/* 「终端」分组（plan 045）：无 repo 的目录工作区（projectId 为空），按设备 HOME 打开的
+              独立终端。与项目树共用滚动区但视觉上独立分组；一个都没有时整组不渲染。 */}
+          {dirWorkspaces.length > 0 ? (
+            <>
+              <div className="mb-1.5 mt-4 flex h-7 items-center px-2">
+                <span className="text-xs text-muted-foreground">终端</span>
+              </div>
+              <div className="space-y-0.5">
+                {dirWorkspaces.map((workspace) => {
+                  const daemon = daemons.find((item) => item.daemonId === workspace.daemonId);
+                  return (
+                    <ContextMenu
+                      key={workspace.id}
+                      label={`终端「${daemon?.name ?? workspace.path}」操作`}
+                      size="sm"
+                      items={[{ label: "移除终端", onClick: () => props.onRemoveWorkspace(workspace) }]}
+                    >
+                      <div
+                        className={cn(
+                          "group/workspace relative flex h-7 items-center rounded-md transition-colors",
+                          workspace.id === props.selectedWorkspaceId
+                            ? "bg-accent text-foreground"
+                            : "text-secondary-foreground hover:bg-accent/70 hover:text-foreground",
+                        )}
+                      >
+                        <button
+                          className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left"
+                          onClick={() => props.onSelectWorkspace(workspace.id)}
+                          title={workspace.path}
+                        >
+                          <SquareTerminal className="size-3 shrink-0 opacity-70" />
+                          <span className="min-w-0 flex-1 truncate text-base">{daemon?.name ?? workspace.path}</span>
+                          {/* 右端内容 hover 渐变淡出给移除按钮让位（同项目工作区行的 mask 模式） */}
+                          <span className="flex shrink-0 items-center gap-2 group-hover/workspace:[mask-image:linear-gradient(to_left,transparent_18px,black_44px)]">
+                            <span className="text-xs text-muted-foreground">{workspace.name}</span>
+                            {!daemon?.online ? (
+                              <span
+                                className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40"
+                                title={daemon ? `设备「${daemon.name}」离线` : "设备记录缺失"}
+                              />
+                            ) : null}
+                          </span>
+                        </button>
+                        <button
+                          className="absolute right-1 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/workspace:opacity-100 focus-visible:opacity-100"
+                          onClick={() => props.onRemoveWorkspace(workspace)}
+                          title="移除终端"
+                        >
+                          <X className="size-3" />
+                        </button>
+                      </div>
+                    </ContextMenu>
+                  );
+                })}
+              </div>
+            </>
+          ) : null}
         </section>
 
         <section className="max-h-[42%] shrink-0 overflow-y-auto border-t border-border px-2 py-2.5">

@@ -95,6 +95,13 @@ message TaskCreate {
   string title = 2;
 }
 
+// 在设备上新建无 repo 的目录工作区（projectId 为空即目录工作区）+ 一个任务。
+// path 是 web 经 DeviceFsList{browse_home:true} 从 daemon 拿到的 HOME 绝对路径。
+message TerminalCreate {
+  string daemon_id = 1;
+  string path = 2;
+}
+
 message TaskStart {
   string task_id = 1;
   uint32 cols = 2;
@@ -134,6 +141,7 @@ message ClientToServer {
     LocalLeaseRequest local_lease_request = 28;
     LocalUnpairRequest local_unpair_request = 32;
     DeviceRelayConnect device_relay_connect = 33;
+    TerminalCreate terminal_create = 34;
     WorkspaceSetName workspace_set_name = 24;
   }
 }

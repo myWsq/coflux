@@ -1,6 +1,7 @@
 export type { AuthCredential, ConnectionStatus } from "./connection";
 export {
   createCofluxClient,
+  isDirWorkspace,
   type CofluxClient,
   type CofluxClientOptions,
   type CofluxState,
