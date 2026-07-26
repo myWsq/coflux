@@ -220,21 +220,71 @@ struct TerminalInputArea: View {
 /// 成文层（plan 053 最终形态）：与系统键盘同层的输入条（fullScreenCover
 /// 透明底、无暗色蒙层——底下的终端与控制板完全冻结可见）。
 /// 点输入条外任意处取消（草稿保留）；发送 = 文本+回车，长按 = 仅插入。
+/// 可调强度毛玻璃：暂停的 UIViewPropertyAnimator 用 fractionComplete 控制
+/// 模糊深度（0-1 连续），这是"淡毛玻璃"的唯一正确姿势——直接给材质设
+/// opacity 会禁用模糊、退化成不透明灰遮罩（真机踩过）。强度渐变自带淡入淡出。
+struct VariableBlurView: UIViewRepresentable {
+    /// 0 = 无模糊，1 = 完整 ultraThinMaterialDark
+    var intensity: CGFloat
+
+    @MainActor
+    final class Coordinator {
+        var animator: UIViewPropertyAnimator?
+        var stepper: Task<Void, Never>?
+        var current: CGFloat = 0
+
+        func set(_ target: CGFloat) {
+            stepper?.cancel()
+            let start = current
+            guard abs(target - start) > 0.001 else { return }
+            let steps = 12
+            stepper = Task { [weak self] in
+                for step in 1...steps {
+                    try? await Task.sleep(for: .milliseconds(15))
+                    guard let self, !Task.isCancelled else { return }
+                    self.current = start + (target - start) * CGFloat(step) / CGFloat(steps)
+                    self.animator?.fractionComplete = self.current
+                }
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UIVisualEffectView {
+        let view = UIVisualEffectView(effect: nil)
+        let animator = UIViewPropertyAnimator(duration: 1, curve: .linear) {
+            view.effect = UIBlurEffect(style: .systemUltraThinMaterialDark)
+        }
+        animator.pausesOnCompletion = true
+        context.coordinator.animator = animator
+        return view
+    }
+
+    func updateUIView(_ view: UIVisualEffectView, context: Context) {
+        context.coordinator.set(intensity)
+    }
+
+    static func dismantleUIView(_ uiView: UIVisualEffectView, coordinator: Coordinator) {
+        coordinator.stepper?.cancel()
+        coordinator.animator?.stopAnimation(true)
+    }
+}
+
 struct TerminalComposeOverlay: View {
     @Binding var draft: String
     let onSend: (_ newline: Bool) -> Void
     let onDismiss: () -> Void
     @FocusState private var focused: Bool
-    /// 自绘淡入淡出（呈现层动画已禁）：毛玻璃底与输入条同步 fade
+    /// 自绘淡入淡出（呈现层动画已禁）：毛玻璃强度与输入条透明度同步渐变
     @State private var appeared = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // 毛玻璃底（降浓度 0.7 不压死底层）：点空白先淡出再关呈现
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .opacity(appeared ? 0.7 : 0)
+            // 淡毛玻璃底（强度 0.45）：点空白先淡出再关呈现
+            VariableBlurView(intensity: appeared ? 0.45 : 0)
                 .ignoresSafeArea()
+                .contentShape(Rectangle())
                 .onTapGesture { fadeOutAndDismiss() }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("输入后发送到终端", text: $draft, axis: .vertical)
