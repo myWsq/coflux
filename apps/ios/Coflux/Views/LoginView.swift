@@ -18,9 +18,9 @@ struct LoginView: View {
             Spacer()
 
             Text("coflux")
-                .font(.system(size: 40, weight: .bold, design: .monospaced))
+                .font(Theme.Fonts.brand)
             Text("Agent 指挥中心")
-                .font(.subheadline)
+                .font(Theme.Fonts.subtitle)
                 .foregroundStyle(Theme.mutedForeground)
                 .padding(.top, 6)
 
@@ -43,7 +43,7 @@ struct LoginView: View {
 
             if !client.loginError.isEmpty {
                 Label(client.loginError, systemImage: "exclamationmark.circle.fill")
-                    .font(.footnote)
+                    .font(Theme.Fonts.label)
                     .foregroundStyle(Theme.destructive)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 12)
@@ -56,7 +56,7 @@ struct LoginView: View {
                             .tint(Theme.primaryForeground)
                     } else {
                         Text("登录")
-                            .font(.body.weight(.semibold))
+                            .font(Theme.Fonts.body.weight(.semibold))
                     }
                 }
                 .frame(maxWidth: .infinity)

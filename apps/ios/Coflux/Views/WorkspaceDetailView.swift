@@ -129,7 +129,7 @@ struct WorkspaceDetailView: View {
                         createTerminal()
                     } label: {
                         Image(systemName: "plus")
-                            .font(.footnote.weight(.semibold))
+                            .font(Theme.Fonts.label.weight(.semibold))
                             .foregroundStyle(Theme.mutedForeground)
                             .frame(width: 30, height: 30)
                     }
@@ -184,7 +184,7 @@ struct WorkspaceDetailView: View {
                     .fill(statusColor(task))
                     .frame(width: 6, height: 6)
                 Text(task.title.isEmpty ? "任务 \(task.id.prefix(6))" : task.title)
-                    .font(.footnote.weight(active ? .semibold : .regular))
+                    .font(Theme.Fonts.label.weight(active ? .semibold : .regular))
                     .lineLimit(1)
             }
             .foregroundStyle(active ? Theme.foreground : Theme.mutedForeground)
@@ -274,15 +274,15 @@ struct WorkspaceDetailView: View {
     private func banner(text: String, icon: String, tint: Color, actionLabel: String?, action: (() -> Void)?) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
-                .font(.footnote)
+                .font(Theme.Fonts.label)
             Text(text)
-                .font(.footnote.weight(.medium))
+                .font(Theme.Fonts.label.weight(.medium))
                 .lineLimit(1)
             Spacer()
             if let actionLabel, let action {
                 Button(action: action) {
                     Text(actionLabel)
-                        .font(.footnote.weight(.semibold))
+                        .font(Theme.Fonts.label.weight(.semibold))
                         .padding(.horizontal, 12)
                         .padding(.vertical, 5)
                         .background(Capsule().fill(tint.opacity(0.22)))
