@@ -50,6 +50,6 @@
 | 045 | [无 repo 终端 —— 选设备后在其 HOME 直接开终端](045-no-repo-home-terminal.md) | DONE（自动化门已过；UI 走查待用户人工验收） | none |
 | 046 | [iOS 第二片 —— 任务详情页 + SwiftTerm 终端交互（relay-only Device 数据面）](046-ios-task-detail-terminal.md) | DONE（模拟器真拓扑闭环验收已过——启动/attach/回显/停止删除；真机生产验收与接管双端场景待用户） | 044 |
 | 047 | [iOS 回归系统导航，启用 Liquid Glass](047-ios-liquid-glass-native-nav.md) | TODO | none |
-| 048 | [终端任务 Tab 换组件库 Tooltip（状态 + 所属设备 + 调试信息）](048-task-tab-tooltip.md) | TODO | none |
+| 048 | [终端任务 Tab 换组件库 Tooltip（状态 + 所属设备 + 调试信息）](048-task-tab-tooltip.md) | DONE (69b5980)（tsc 门已过；UI 走查待用户人工验收） | none |
 
 执行顺序：001 → 002 → 003 → 004 → {005 ∥ 006}（plan group，scope 不相交可并行）→ 007 → 008 → 009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018 → 019 → 020 → 021 → 022 → 023 → 024 → 025 → 026 → 027 → 028 → 029 → 031 → 032 → {033-skew ∥ 033-conn} → 034 → 035 → 036 → {037 ∥ 038 ∥ 039}（本地优先 daemon/server 成员，已完成）→ 042（输入 ACK 串行契约）→ 040（web/client）→ 041（集成与发布验收）→ 043（独立 relay 第一片）→ 044（iOS 第一片，与 043 无依赖可并行）→ 045（无 repo 终端，无依赖）→ 046（iOS 第二片）→ 047（iOS 液态玻璃，无依赖）→ 048（任务 Tab Tooltip，无依赖）。（030 已撤回，未执行）
