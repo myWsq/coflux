@@ -13,7 +13,7 @@ struct WorkspaceDetailView: View {
     @State private var termRows: UInt32 = 24
     @State private var confirmingRemove = false
     @State private var knownTaskIDsBeforeCreate: Set<String>?
-    @State private var inputCollapsed = false
+    @State private var inputCollapsed = true // 默认折叠成气泡（2026-07-26 用户定），阅读优先
     /// 无 resize 平移模型（plan 053）：终端容器尺寸恒定，被输入面板整体
     /// "顶上去"（offset 平移 + 裁剪），行列数不变 → 零 SIGWINCH 零重排。
     /// 位移量 = 面板实测高度（尺寸不受 transition 影响，量值稳定）；
