@@ -29,14 +29,28 @@ final class DictationSession: ObservableObject {
     private let capture = AudioCapture()
     private var provider: (any SpeechTranscribing)?
     private var listenTask: Task<Void, Never>?
+    private var startTask: Task<Void, Never>?
     /// 快速按下-松开可能在豆包 2.5s 准入判定还没跑完时就要求收尾；每个 await
     /// 挂起点之后都要重新检查这个标志，避免残留连接或重复初始化（真实场景，
     /// 不是臆造的边界情况）。
     private var teardownRequested = false
+    /// 准入期（握手/降级判定，最多几百 ms 到 2.5s）采到的音频先攒这里，
+    /// provider 就绪后在 feedProvider 里补喂——否则开口前几百 ms 全丢字。
+    /// 上限防异常场景无限膨胀（16kHz mono Int16 下 300KB ≈ 9.4s，远超准入窗口）。
+    private var pendingPCM: [Data] = []
+    private var pendingPCMBytes = 0
+    private static let pendingPCMCapBytes = 300 * 1024
 
     private static let admissionTimeout: UInt64 = 2_500_000_000
 
-    func start() async {
+    /// 长按触发：包一层 Task 存进 startTask，finish() 靠它等 phase 落定
+    /// （权限被拒/引擎失败都在 start() 内部同步设置，await 它就不会读到
+    /// 过期的 .connecting）。
+    func begin() {
+        startTask = Task { await self.start() }
+    }
+
+    private func start() async {
         guard await Self.requestMicPermission() else {
             phase = .permissionDenied
             return
@@ -117,20 +131,44 @@ final class DictationSession: ObservableObject {
         }
     }
 
-    /// 松手结束：请求引擎给出终稿，最多等 2s，返回当前已转写文字（不含首尾空白）
+    /// 松手结束：等 start() 把 phase 落定（权限拒绝/引擎失败也在此刻才能读到
+    /// 准确值），再请求引擎给出终稿，最多等 2s，返回已转写文字（不含首尾空白）。
+    /// 收尾强制调 provider.cancel() 关 ws/结束 listenTask：SessionFinished
+    /// 丢包或超时都不该让连接悬挂到服务端自己断（cancel 内部已改幂等）。
     func finish() async -> String {
         guard !teardownRequested else { return displayText.trimmingCharacters(in: .whitespacesAndNewlines) }
         teardownRequested = true
+        await startTask?.value
         capture.stop()
         await provider?.finish()
         if let task = listenTask {
             _ = try? await Self.withTimeout(2_000_000_000) { await task.value }
         }
+        await provider?.cancel()
         return displayText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func feedProvider(_ data: Data) async {
-        guard let provider else { return }
+        guard let provider else {
+            pendingPCM.append(data)
+            pendingPCMBytes += data.count
+            while pendingPCMBytes > Self.pendingPCMCapBytes, !pendingPCM.isEmpty {
+                pendingPCMBytes -= pendingPCM.removeFirst().count
+            }
+            return
+        }
+        if !pendingPCM.isEmpty {
+            let backlog = pendingPCM
+            pendingPCM.removeAll()
+            pendingPCMBytes = 0
+            // ponytail: actor 重入下背压帧与几乎同时到达的新帧理论上可能交错
+            // （排空期间 MainActor 可能先处理另一路 feedProvider 调用），实践中
+            // 窗口 < 一帧（20ms），ASR 对此不敏感；要严格保序需单一串行发送
+            // 队列，量级不值当。
+            for chunk in backlog {
+                await provider.feed(pcm: chunk)
+            }
+        }
         await provider.feed(pcm: data)
     }
 

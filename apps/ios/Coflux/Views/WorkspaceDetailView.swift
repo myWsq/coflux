@@ -216,7 +216,11 @@ struct WorkspaceDetailView: View {
             // 对讲浮层：不用 fullScreenCover（对讲不涉及系统键盘，不需要成文层
             // 那套呈现层+冻结基座机制），纯 .overlay 铺满即可，叠在其它层之上
             if let dictationSession {
-                DictationOverlay(session: dictationSession, pendingCancel: dictationPendingCancel)
+                DictationOverlay(
+                    session: dictationSession,
+                    pendingCancel: dictationPendingCancel,
+                    onDismiss: { self.dictationSession = nil }
+                )
             }
         }
         .animation(.easeOut(duration: 0.15), value: dictationSession != nil)
@@ -423,19 +427,31 @@ struct WorkspaceDetailView: View {
         let session = DictationSession()
         dictationSession = session
         dictationPendingCancel = false
-        Task { await session.start() }
+        session.begin()
     }
 
+    /// 松手完成路径必须等 session.finish() 把 phase 落定后再判断——权限被拒/
+    /// 引擎失败往往在 start() 内部异步才写进 phase，若在 finish() 返回前就
+    /// 点 dictationSession = nil，浮层会在用户来得及看到「前往设置」引导前
+    /// 被拆掉（DictationSession.finish 内部已 await startTask 保证这点）。
     private func endDictation(cancelled: Bool) {
         guard let session = dictationSession else { return }
-        dictationSession = nil
         dictationPendingCancel = false
         if cancelled {
+            dictationSession = nil
             session.cancel()
             return
         }
         Task {
             let text = await session.finish()
+            switch session.phase {
+            case .permissionDenied, .failed:
+                // 浮层留驻，等用户点任意处关闭（DictationOverlay.onDismiss）
+                return
+            default:
+                break
+            }
+            dictationSession = nil
             if !text.isEmpty {
                 draft = text
             }

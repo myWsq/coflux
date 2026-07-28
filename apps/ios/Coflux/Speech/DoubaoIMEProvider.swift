@@ -29,6 +29,7 @@ actor DoubaoIMEProvider: SpeechTranscribing {
     private var frameIndex = 0
     private var timestampMs: UInt64 = 0
     private var sessionFinished = false
+    private var torndown = false
     private var confirmedText = ""
     private var lastSegmentText = ""
     private var listenTask: Task<Void, Never>?
@@ -42,6 +43,10 @@ actor DoubaoIMEProvider: SpeechTranscribing {
     // MARK: - SpeechTranscribing
 
     func start() async throws {
+        // 对应 doubaoime.rs:792-795：connect 时把 timestamp_ms 起点定为当前 epoch
+        // 毫秒（不是从 0 起）——伪装参数须与参考实现一致，服务端行为未知不引入差异
+        timestampMs = UInt64(Date().timeIntervalSince1970 * 1000)
+
         let creds = try await DoubaoCredentialStore.ensureCredentials()
         token = creds.token
         deviceID = creds.deviceID
@@ -129,12 +134,23 @@ actor DoubaoIMEProvider: SpeechTranscribing {
         try? await send(finishFrame)
     }
 
+    /// 幂等收尾：finish() 已经把 sessionFinished 提前置位（不让 feed 再灌新音频），
+    /// 但那不代表 ws 已经关——SessionFinished 丢包/服务端不回时连接会一直挂着。
+    /// 之前用 sessionFinished 当收尾判据，会被 finish() 提前置位挡住导致 ws 永远
+    /// 不关；改用独立的 torndown 标志，finish() 之后再调 cancel() 仍能真正关闭。
     func cancel() async {
-        guard !sessionFinished else { return }
         sessionFinished = true
+        teardown(emitClosed: true)
+    }
+
+    private func teardown(emitClosed: Bool) {
+        guard !torndown else { return }
+        torndown = true
         listenTask?.cancel()
         ws?.cancel(with: .goingAway, reason: nil)
-        eventContinuation.yield(.closed)
+        if emitClosed {
+            eventContinuation.yield(.closed)
+        }
         eventContinuation.finish()
     }
 
@@ -189,16 +205,14 @@ actor DoubaoIMEProvider: SpeechTranscribing {
                 handle(resp)
                 if resp.messageType.contains("SessionFinished") {
                     sessionFinished = true
-                    eventContinuation.yield(.closed)
-                    eventContinuation.finish()
+                    teardown(emitClosed: true)
                     return
                 }
             } catch {
                 if !sessionFinished {
                     eventContinuation.yield(.failed("豆包语音连接中断"))
                 }
-                eventContinuation.yield(.closed)
-                eventContinuation.finish()
+                teardown(emitClosed: true)
                 return
             }
         }
@@ -221,19 +235,35 @@ actor DoubaoIMEProvider: SpeechTranscribing {
         }
         guard !resp.resultJSON.isEmpty,
               let jsonData = resp.resultJSON.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-              let results = obj["results"] as? [[String: Any]], !results.isEmpty
+              let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
         else { return }
 
+        // 对应 doubaoime.rs:1047-1054：vad_start 是心跳帧，results 字段可能同时
+        // 非空，须在解析 results 前就挡掉，否则会被当正常识别结果误处理
+        if let extra = obj["extra"] as? [String: Any], extra["vad_start"] != nil {
+            return
+        }
+
+        guard let results = obj["results"] as? [[String: Any]], !results.isEmpty else { return }
+
+        // 对应 doubaoime.rs:1072-1084：三个 flag 都取「最后一个 result」的值，
+        // is_interim 缺省 true（未知即当中间稿，不能默认当定稿）；
+        // nonstream_result 挂在 result 级 extra 下，不是顶层 extra（三 pass
+        // 终稿检测靠它，取错层级会导致这条判据永远失效）
         var text = ""
-        var isInterim = false
+        var isInterim = true
         var isVadFinished = false
+        var nonstreamResult = false
         for result in results {
             if let t = result["text"] as? String { text += t }
-            isInterim = (result["is_interim"] as? Bool) ?? isInterim
-            isVadFinished = (result["is_vad_finished"] as? Bool) ?? isVadFinished
+            isInterim = (result["is_interim"] as? Bool) ?? true
+            isVadFinished = (result["is_vad_finished"] as? Bool) ?? false
+            nonstreamResult = ((result["extra"] as? [String: Any])?["nonstream_result"] as? Bool) ?? false
         }
-        let nonstreamResult = ((obj["extra"] as? [String: Any])?["nonstream_result"] as? Bool) ?? false
+        // 对应 doubaoime.rs:1087-1089：空 text 是心跳，直接跳过——否则
+        // lastSegmentText 会被空串覆盖，hasPrefix("") 恒真使分段重置启发式失效，
+        // 屏上文字也会被空前缀稿闪退
+        guard !text.isEmpty else { return }
 
         if !lastSegmentText.isEmpty,
            text.utf8.count < lastSegmentText.utf8.count / 2,
