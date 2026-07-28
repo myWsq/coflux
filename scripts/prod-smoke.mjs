@@ -44,7 +44,7 @@ async function connect(label) {
   clients.push(client);
   const snapshot = TOKEN
     ? await client.authTokenSubscribe(TOKEN)
-    : await client.authSubscribe(USER, PASS);
+    : await client.authSubscribe(USER, PASS, "dev");
   console.log(`  ${label} 已认证`);
   return { client, snapshot };
 }

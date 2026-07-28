@@ -527,9 +527,10 @@ export class Client {
       this.waiters.push({ try: (m) => (pred(m) ? (clearTimeout(t), res(m), true) : false) });
     });
   }
-  async authSubscribe(username = "admin", password = "admin") {
+  /** clientVersion 缺省不带（黑盒测试依赖"无版本=跳过准入"语义）；生产冒烟传 "dev" 显式放行。 */
+  async authSubscribe(username = "admin", password = "admin", clientVersion) {
     await this.ready;
-    this.send({ case: "clientAuth", username, password });
+    this.send(clientVersion ? { case: "clientAuth", username, password, clientVersion } : { case: "clientAuth", username, password });
     await this.waitFor((m) => m.case === "authOk", "auth.ok");
     this.send({ case: "clientSubscribe" });
     return this.waitFor((m) => m.case === "stateSnapshot", "snapshot");
