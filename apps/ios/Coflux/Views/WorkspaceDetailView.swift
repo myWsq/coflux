@@ -445,8 +445,15 @@ struct WorkspaceDetailView: View {
         Task {
             let text = await session.finish()
             switch session.phase {
-            case .permissionDenied, .failed:
-                // 浮层留驻，等用户点任意处关闭（DictationOverlay.onDismiss）
+            case .permissionDenied:
+                // 权限被拒不可能转写出文字，浮层留驻等用户点任意处关闭即可
+                return
+            case .failed:
+                // 中途断连（如豆包握手后掉线）不等于没说话：已转写文字要保留
+                // 落 draft（plan 064 决策：断连不换引擎，结束会话保留已转写
+                // 文字），浮层仍留驻展示错误，等用户点任意处关闭（此时占位条
+                // 已能看见落下的草稿，不强行弹开成文层打断）
+                if !text.isEmpty { draft = text }
                 return
             default:
                 break
