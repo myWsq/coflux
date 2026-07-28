@@ -14,7 +14,14 @@ struct TerminalInputArea: View {
     /// 草稿宿主持有：占位条只做预览，点击进与系统键盘同层的成文层
     let draft: String
     let onCompose: () -> Void
+    /// 长按对讲（plan 064）：按下即进入对讲态；松手前上滑越过阈值再释放 = 取消，
+    /// 否则完成——move 回调只报是否已越过阈值（供浮层实时切换"松开取消"提示）
+    let onDictateBegin: () -> Void
+    let onDictateMove: (Bool) -> Void
+    let onDictateEnd: (Bool) -> Void
     @State private var repeatTimer: Timer?
+    @State private var dictateActive = false
+    @State private var longPressTask: Task<Void, Never>?
 
     private var sessionID: String? {
         guard let task, task.status == .running, task.hasSessionID else { return nil }
@@ -41,19 +48,56 @@ struct TerminalInputArea: View {
     // 输入框与系统键盘在独立呈现层同层升降）。收起入口在右下浮键（plan 056）
 
     private var composerRow: some View {
-        Button(action: onCompose) {
-            HStack {
-                Text(draft.isEmpty ? "输入后发送到终端" : draft)
-                    .font(Theme.Fonts.label)
-                    .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.foreground)
-                    .lineLimit(1)
-                Spacer()
+        HStack {
+            Text(draft.isEmpty ? "长按说话・点击输入到终端" : draft)
+                .font(Theme.Fonts.label)
+                .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.foreground)
+                .lineLimit(1)
+            Spacer()
+            if dictateActive {
+                Image(systemName: "mic.fill")
+                    .foregroundStyle(Theme.primary)
             }
-            .padding(.horizontal, 12)
-            .frame(height: 38)
-            .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
         }
+        .padding(.horizontal, 12)
+        .frame(height: 38)
+        .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
+        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .gesture(composerGesture)
     }
+
+    /// 单一 DragGesture 而非 Button+onLongPressGesture 叠加：两个手势识别器
+    /// 抢事件会吞掉短按/加长按延迟（真实存在的冲突类，故不叠加、只用一个）。
+    /// 280ms 判定长按阈值，-80pt 上滑判定取消阈值。
+    private var composerGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if !dictateActive && longPressTask == nil {
+                    longPressTask = Task {
+                        try? await Task.sleep(for: .milliseconds(280))
+                        guard !Task.isCancelled else { return }
+                        dictateActive = true
+                        onDictateBegin()
+                    }
+                }
+                if dictateActive {
+                    onDictateMove(value.translation.height < Self.dictateCancelThreshold)
+                }
+            }
+            .onEnded { value in
+                longPressTask?.cancel()
+                longPressTask = nil
+                if dictateActive {
+                    let cancelled = value.translation.height < Self.dictateCancelThreshold
+                    dictateActive = false
+                    onDictateEnd(cancelled)
+                } else {
+                    onCompose()
+                }
+            }
+    }
+
+    private static let dictateCancelThreshold: CGFloat = -80
 
     // MARK: - 控制层
 

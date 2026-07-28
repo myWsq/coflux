@@ -30,6 +30,10 @@ struct WorkspaceDetailView: View {
     /// 键盘骑乘/面板位移方案均已尝试并废弃，冻结基座手感最好）
     @State private var composing = false
     @State private var draft = ""
+    /// 长按对讲会话（plan 064）：非 nil = 对讲态，浮层铺满屏幕；松手取消/完成
+    /// 都清空。豆包优先、Apple 本地降级只在 session.start() 内部判定一次。
+    @State private var dictationSession: DictationSession?
+    @State private var dictationPendingCancel = false
     /// 逐任务离底态（plan 056）：true = 在底部。未上报（无输出/未滚动）视为在底
     @State private var atBottomByTask: [String: Bool] = [:]
     /// 逐任务底部空白（pt，TerminalHostView 上报）：未上报视为满屏（整量抬升）
@@ -125,7 +129,10 @@ struct WorkspaceDetailView: View {
                         client: client,
                         task: activeTask,
                         draft: draft,
-                        onCompose: { setComposing(true) }
+                        onCompose: { setComposing(true) },
+                        onDictateBegin: { beginDictation() },
+                        onDictateMove: { dictationPendingCancel = $0 },
+                        onDictateEnd: { endDictation(cancelled: $0) }
                     )
                     .onGeometryChange(for: CGFloat.self) { proxy in
                         proxy.size.height
@@ -205,6 +212,14 @@ struct WorkspaceDetailView: View {
             .offset(y: -panelLift)
             .animation(.smooth(duration: 0.25), value: panelLift)
         }
+        .overlay {
+            // 对讲浮层：不用 fullScreenCover（对讲不涉及系统键盘，不需要成文层
+            // 那套呈现层+冻结基座机制），纯 .overlay 铺满即可，叠在其它层之上
+            if let dictationSession {
+                DictationOverlay(session: dictationSession, pendingCancel: dictationPendingCancel)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: dictationSession != nil)
         .background(Theme.background)
         .onChange(of: inputCollapsed) { _, collapsed in
             UserDefaults.standard.set(collapsed, forKey: Self.padCollapsedKey(workspace.id))
@@ -399,6 +414,34 @@ struct WorkspaceDetailView: View {
         // 呈现层的拆除由 overlay 的 fadeOutAndDismiss 统一走淡出时序，此处不拆
     }
 
+
+    // MARK: - 长按对讲（plan 064）：占位条长按开始，上滑松手取消，
+    // 直接松手完成——转写结果只落草稿、打开成文层等用户确认发送，
+    // 不直发终端（对讲误听的代价比打字误触大得多，必须过一道人工确认）
+
+    private func beginDictation() {
+        let session = DictationSession()
+        dictationSession = session
+        dictationPendingCancel = false
+        Task { await session.start() }
+    }
+
+    private func endDictation(cancelled: Bool) {
+        guard let session = dictationSession else { return }
+        dictationSession = nil
+        dictationPendingCancel = false
+        if cancelled {
+            session.cancel()
+            return
+        }
+        Task {
+            let text = await session.finish()
+            if !text.isEmpty {
+                draft = text
+            }
+            setComposing(true)
+        }
+    }
 
     // MARK: - 逐任务横幅（语义同 plan 046：接管/可启动/输入缓冲满）
 
