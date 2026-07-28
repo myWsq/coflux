@@ -419,7 +419,9 @@ export class Store {
       max: 5, // 生产走 Supabase session pooler，免费版客户端连接额度有限，单实例用不了多的
       ssl: "prefer", // 本地自托管通常明文；托管 Supabase pooler 要求 TLS——两边都能连
       transform: postgres.camel,
-      connection: { search_path: "coflux" },
+      // extra_float_digits=3：float8 按 shortest-round-trip 输出，读回不丢精度
+      // （postgres.js 启动包默认压成 0，会把 capturedAt 之类的时间戳截到 15 位）。
+      connection: { search_path: "coflux", extra_float_digits: 3 },
     });
     const store = new Store(sql);
     await store.init();
@@ -1046,7 +1048,7 @@ export class Store {
   /* ------------------------- checkpoint cache ------------------------ */
   async upsertSessionCheckpoint(accountId: AccountId, daemonId: DaemonId, checkpoint: SessionCheckpoint): Promise<SessionCheckpointRecord | undefined> {
     const now = Date.now();
-    const rows = await this.sql<SessionCheckpointRow[]>`
+    const rows = await this.sql<{ sessionId: SessionId }[]>`
       INSERT INTO session_checkpoints (
         session_id, task_id, account_id, daemon_id, snapshot_seq, ansi_snapshot,
         cols, rows, captured_at, updated_at
@@ -1067,10 +1069,23 @@ export class Store {
       WHERE session_checkpoints.daemon_id = excluded.daemon_id
         AND session_checkpoints.task_id = excluded.task_id
         AND session_checkpoints.snapshot_seq < excluded.snapshot_seq
-      RETURNING *
+      RETURNING session_id
     `;
-    if (rows[0]) await this.pruneSessionCheckpoints(accountId, now);
-    return rows[0] && rowToCheckpoint(rows[0]);
+    // 不 RETURNING *：ansi_snapshot 上百 KB，从 Supabase 回传是纯 egress 浪费；快照本就在入参里。
+    if (!rows[0]) return undefined;
+    await this.pruneSessionCheckpoints(accountId, now);
+    return {
+      sessionId: checkpoint.sessionId,
+      taskId: checkpoint.taskId,
+      accountId,
+      daemonId,
+      snapshotSeq: checkpoint.snapshotSeq,
+      ansiSnapshot: checkpoint.ansiSnapshot,
+      cols: checkpoint.cols,
+      rows: checkpoint.rows,
+      capturedAt: checkpoint.capturedAt,
+      updatedAt: now,
+    };
   }
 
   async getSessionCheckpoint(sessionId: SessionId): Promise<SessionCheckpointRecord | undefined> {
