@@ -27,6 +27,8 @@ struct WorkspaceDetailView: View {
     /// 键盘骑乘/面板位移方案均已尝试并废弃，冻结基座手感最好）
     @State private var composing = false
     @State private var draft = ""
+    /// 逐任务离底态（plan 056）：true = 在底部。未上报（无输出/未滚动）视为在底
+    @State private var atBottomByTask: [String: Bool] = [:]
 
     private var terminalLift: CGFloat { inputCollapsed ? 0 : panelHeight }
     /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
@@ -100,7 +102,6 @@ struct WorkspaceDetailView: View {
                     TerminalInputArea(
                         client: client,
                         task: activeTask,
-                        collapsed: $inputCollapsed,
                         draft: draft,
                         onCompose: { setComposing(true) }
                     )
@@ -126,29 +127,49 @@ struct WorkspaceDetailView: View {
             .presentationBackground(.clear)
         }
         .overlay(alignment: .bottomTrailing) {
-            // 折叠态：右下角玻璃气泡（plan 053，用户定案 AssistiveTouch 式）。
+            // 右下浮键列（plan 053 气泡 → plan 056 常驻两态）：键盘键折叠态=
+            // 展开输入区、展开态=收起输入区（收起入口只此一处，输入区内不再有）；
+            // 激活终端离底时上方浮现滚到底键。
             // 布局切换刻意不做动画：终端高度一步到位只触发一次 resize，
-            // 动画期间逐帧 resize 会引发远端 TUI 重画闪动；过渡只给气泡自己
+            // 动画期间逐帧 resize 会引发远端 TUI 重画闪动；过渡只给浮键自己
             ZStack {
-                if inputCollapsed, !members.isEmpty {
-                    Button {
-                        inputCollapsed = false
-                    } label: {
-                        Image(systemName: "keyboard")
-                            .font(Theme.Fonts.body.weight(.medium))
-                            .foregroundStyle(Theme.foreground)
-                            .frame(width: 52, height: 52)
+                if !members.isEmpty {
+                    VStack(spacing: 12) {
+                        if let taskID = activeTask?.id, atBottomByTask[taskID] == false {
+                            Button {
+                                TerminalModeRegistry.shared.scrollToBottom(taskID: taskID)
+                            } label: {
+                                Image(systemName: "arrow.down.to.line")
+                                    .font(Theme.Fonts.body.weight(.medium))
+                                    .foregroundStyle(Theme.foreground)
+                                    .frame(width: 52, height: 52)
+                            }
+                            .glassEffect(.regular.interactive(), in: .circle)
+                            .accessibilityLabel("滚动到底部")
+                            .transition(.scale.combined(with: .opacity))
+                        }
+                        Button {
+                            inputCollapsed.toggle()
+                        } label: {
+                            Image(systemName: inputCollapsed ? "keyboard" : "keyboard.chevron.compact.down")
+                                .font(Theme.Fonts.body.weight(.medium))
+                                .foregroundStyle(Theme.foreground)
+                                .frame(width: 52, height: 52)
+                        }
+                        .glassEffect(.regular.interactive(), in: .circle)
+                        .accessibilityLabel(inputCollapsed ? "展开输入区" : "收起输入区")
                     }
-                    .glassEffect(.regular.interactive(), in: .circle)
-                    .accessibilityLabel("展开输入区")
-                    .transition(.scale.combined(with: .opacity))
                 }
             }
-            // 动画只作用于气泡容器内部（ZStack 常驻承接 transition），
+            // 动画只作用于浮键容器内部（ZStack 常驻承接 transition），
             // 不外溢到布局——外溢会重新引入逐帧 resize 闪动
             .animation(.smooth(duration: 0.2), value: inputCollapsed)
+            .animation(.smooth(duration: 0.2), value: atBottomByTask)
             .padding(.trailing, 20)
             .padding(.bottom, 24)
+            // 展开时随终端同曲线抬到控制板上方（纯 transform，同 terminalLift 注释）
+            .offset(y: -terminalLift)
+            .animation(.smooth(duration: 0.25), value: terminalLift)
         }
         .background(Theme.background)
         .navigationTitle(workspace.branch.isEmpty ? workspace.name : workspace.branch) // 主标题=分支，与 web 对齐
@@ -295,7 +316,8 @@ struct WorkspaceDetailView: View {
                 onSizeChanged: { cols, rows in
                     termCols = cols
                     termRows = rows
-                }
+                },
+                onAtBottomChanged: { atBottomByTask[task.id] = $0 }
             )
         }
     }

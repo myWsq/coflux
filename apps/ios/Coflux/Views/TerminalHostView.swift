@@ -1,23 +1,34 @@
 import SwiftUI
 import SwiftTerm
 
-/// 激活终端的模式注册表：输入板据此决定方向键序列（DECCKM）与
-/// 多行文本是否包 bracketed paste（plan 053）。
+/// 激活终端的能力注册表：输入板据此决定方向键序列（DECCKM，plan 053）；
+/// 滚到底浮键经此触达激活任务的 TerminalView（plan 056）。
 @MainActor
 final class TerminalModeRegistry {
     static let shared = TerminalModeRegistry()
     private var applicationCursorGetters: [String: () -> Bool] = [:]
+    private var scrollToBottomActions: [String: () -> Void] = [:]
 
-    func register(taskID: String, applicationCursor: @escaping () -> Bool) {
+    func register(
+        taskID: String,
+        applicationCursor: @escaping () -> Bool,
+        scrollToBottom: @escaping () -> Void
+    ) {
         applicationCursorGetters[taskID] = applicationCursor
+        scrollToBottomActions[taskID] = scrollToBottom
     }
 
     func unregister(taskID: String) {
         applicationCursorGetters[taskID] = nil
+        scrollToBottomActions[taskID] = nil
     }
 
     func applicationCursor(taskID: String) -> Bool {
         applicationCursorGetters[taskID]?() ?? false
+    }
+
+    func scrollToBottom(taskID: String) {
+        scrollToBottomActions[taskID]?()
     }
 }
 
@@ -30,6 +41,8 @@ struct TerminalHostView: UIViewRepresentable {
     let taskID: String
     let sessionID: String?
     var onSizeChanged: ((UInt32, UInt32) -> Void)?
+    /// 离底态变化上报（plan 056）：true = 已在底部。详情页据此显隐滚到底浮键
+    var onAtBottomChanged: ((Bool) -> Void)?
 
     /// ANSI 16 色对齐 web xterm theme（terminal-pane.tsx:197-211）。web 未指定的
     /// bright 位沿用 normal 同色（brightBlack/brightWhite 例外），保持双端观感一致。
@@ -51,6 +64,9 @@ struct TerminalHostView: UIViewRepresentable {
         // 键盘直通不受影响。软键盘输入一律走 TerminalInputArea。
         view.inputView = UIView()
         view.inputAccessoryView = nil
+        // 点状态栏回顶是 UIScrollView 系统默认，终端场景纯误触源（plan 056）；
+        // 反向的滚到底走右下浮键
+        view.scrollsToTop = false
         view.terminalDelegate = context.coordinator
         // 字体/光标/配色对齐 web 终端（bar 光标；iOS 的 monospacedSystemFont
         // 即 SF Mono，与 web 首选字体同族）。字号 13 而非 web 的 12：
@@ -69,9 +85,11 @@ struct TerminalHostView: UIViewRepresentable {
     func updateUIView(_ uiView: TerminalView, context: Context) {
         context.coordinator.taskID = taskID
         context.coordinator.bind(sessionID: sessionID)
-        TerminalModeRegistry.shared.register(taskID: taskID) { [weak uiView] in
-            uiView?.getTerminal().applicationCursor ?? false
-        }
+        TerminalModeRegistry.shared.register(
+            taskID: taskID,
+            applicationCursor: { [weak uiView] in uiView?.getTerminal().applicationCursor ?? false },
+            scrollToBottom: { [weak uiView] in uiView?.scroll(toPosition: 1.0) }
+        )
     }
 
     static func dismantleUIView(_ uiView: TerminalView, coordinator: Coordinator) {
@@ -79,7 +97,12 @@ struct TerminalHostView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(client: client, taskID: taskID, onSizeChanged: onSizeChanged)
+        Coordinator(
+            client: client,
+            taskID: taskID,
+            onSizeChanged: onSizeChanged,
+            onAtBottomChanged: onAtBottomChanged
+        )
     }
 
     @MainActor
@@ -87,14 +110,22 @@ struct TerminalHostView: UIViewRepresentable {
         private let client: CofluxClient
         var taskID: String
         private let onSizeChanged: ((UInt32, UInt32) -> Void)?
+        private let onAtBottomChanged: ((Bool) -> Void)?
+        private var lastAtBottom: Bool?
         weak var terminalView: TerminalView?
         private var boundSessionID: String?
         private var releaseConsumer: (() -> Void)?
 
-        init(client: CofluxClient, taskID: String, onSizeChanged: ((UInt32, UInt32) -> Void)?) {
+        init(
+            client: CofluxClient,
+            taskID: String,
+            onSizeChanged: ((UInt32, UInt32) -> Void)?,
+            onAtBottomChanged: ((Bool) -> Void)?
+        ) {
             self.client = client
             self.taskID = taskID
             self.onSizeChanged = onSizeChanged
+            self.onAtBottomChanged = onAtBottomChanged
         }
 
         func bind(sessionID: String?) {
@@ -103,10 +134,13 @@ struct TerminalHostView: UIViewRepresentable {
             releaseConsumer = nil
             boundSessionID = sessionID
             guard let sessionID, let terminalView else { return }
-            releaseConsumer = client.registerSessionConsumer(sessionID: sessionID) { [weak terminalView] data, replace in
-                guard let terminalView else { return }
+            releaseConsumer = client.registerSessionConsumer(sessionID: sessionID) { [weak self] data, replace in
+                guard let self, let terminalView = self.terminalView else { return }
                 if replace { terminalView.getTerminal().resetToInitialState() }
                 terminalView.feed(byteArray: ArraySlice([UInt8](data)))
+                // feed 后补刷离底态：新输出/replace 会改变 scrollback 与 yDisp，
+                // 而 scrolled 回调只保证用户拖动路径（plan 056 landmine）
+                self.reportScrollState()
             }
             let terminal = terminalView.getTerminal()
             client.startTask(taskID: taskID, cols: UInt32(terminal.cols), rows: UInt32(terminal.rows))
@@ -145,9 +179,21 @@ struct TerminalHostView: UIViewRepresentable {
             }
         }
 
+        /// 离底判定：无 scrollback（含 alternate buffer 全屏 TUI）视为在底——
+        /// scrollPosition 对空 scrollback 返回 0，单看 >= 1 会误报离底
+        private func reportScrollState() {
+            guard let view = terminalView else { return }
+            let atBottom = !view.canScroll || view.scrollPosition >= 1
+            guard atBottom != lastAtBottom else { return }
+            lastAtBottom = atBottom
+            onAtBottomChanged?(atBottom)
+        }
+
         func setTerminalTitle(source: TerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-        func scrolled(source: TerminalView, position: Double) {}
+        func scrolled(source: TerminalView, position: Double) {
+            reportScrollState()
+        }
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
             if let url = URL(string: link), url.scheme == "https" || url.scheme == "http" {
                 UIApplication.shared.open(url)
