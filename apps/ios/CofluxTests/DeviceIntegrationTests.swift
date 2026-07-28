@@ -18,8 +18,7 @@ struct DeviceIntegrationTests {
         let client = CofluxClient(
             transport: NetworkTransport(),
             tokenStore: InMemoryTokenStore(),
-            serverURL: URL(string: "ws://127.0.0.1:8787/client")!,
-            usesExternalLogin: false
+            serverURL: URL(string: "ws://127.0.0.1:8787/client")!
         )
         client.login(username: "admin", password: "admin")
         #expect(await waitUntil(timeout: .seconds(10)) { client.authState == .authed })

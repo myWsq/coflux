@@ -56,7 +56,8 @@ Validation: `xcodebuild -project apps/ios/Coflux.xcodeproj -scheme Coflux -desti
 In scope:
 - `apps/ios/Coflux/Client/{SupabaseAuth.swift（删）,Config.swift,CofluxClient.swift}`
 - `apps/ios/Coflux/Views/LoginView.swift`
-- `apps/ios/Coflux.xcodeproj/project.pbxproj`（仅文件引用清理）
+- `apps/ios/Coflux.xcodeproj/project.pbxproj`（仅文件引用清理；执行时确认为 fileSystemSynchronized 工程，删文件无需改 pbxproj）
+- `apps/ios/CofluxTests/{AuthFlowTests,DeviceIntegrationTests,ReducerTests}.swift`（执行期 scope 修订：init 删 `usesExternalLogin` 参数连带更新三处调用点——计划期未发现这三个测试文件传参）
 
 Out of scope:
 - `proto/gen/swift/` —— 生成码不动

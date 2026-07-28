@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// 登录表单：模式由编译期配置决定（server 无从探测，与 web 同策略）——
-/// supabase 模式 = 邮箱密码换票；local 模式 = 用户名密码直发（plan 044 决策）。
+/// 登录表单：账号密码直发 clientAuth 帧（plan 061——server 侧 local/password 两模式同帧，
+/// 文案中性化「账号」，生产输邮箱、本机 dev 输用户名均可）。
 /// 视觉对标 Raycast iOS 登录：填充式圆角输入框 + 高对比单色主按钮。
 struct LoginView: View {
     let client: CofluxClient
@@ -25,10 +25,10 @@ struct LoginView: View {
                 .padding(.top, 6)
 
             VStack(spacing: 12) {
-                TextField(Config.useSupabase ? "邮箱" : "用户名", text: $username)
+                TextField("账号", text: $username)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .keyboardType(Config.useSupabase ? .emailAddress : .asciiCapable)
+                    .keyboardType(.emailAddress)
                     .focused($focus, equals: .username)
                     .submitLabel(.next)
                     .onSubmit { focus = .password }

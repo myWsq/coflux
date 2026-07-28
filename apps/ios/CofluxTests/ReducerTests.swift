@@ -8,8 +8,7 @@ struct ReducerTests {
         CofluxClient(
             transport: FakeTransport(),
             tokenStore: store,
-            serverURL: URL(string: "ws://fake.test/client")!,
-            usesExternalLogin: false
+            serverURL: URL(string: "ws://fake.test/client")!
         )
     }
 

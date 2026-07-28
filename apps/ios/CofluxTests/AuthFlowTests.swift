@@ -11,8 +11,7 @@ struct AuthFlowTests {
         CofluxClient(
             transport: transport,
             tokenStore: store,
-            serverURL: URL(string: "ws://fake.test/client")!,
-            usesExternalLogin: false
+            serverURL: URL(string: "ws://fake.test/client")!
         )
     }
 
