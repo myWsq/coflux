@@ -3,8 +3,7 @@ import { ExternalLink, LoaderCircle, ShieldX } from "lucide-react";
 import { create, encodeClientToServer, decodeServerToClient, ClientToServerSchema, type ClientToServerPayload } from "@coflux/protocol";
 
 import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
-import { BUILD_ID, SERVER_URL, TOKEN_KEY, USE_SUPABASE, type AuthCredential } from "@/config";
-import { loginWithSupabase } from "@/lib/auth";
+import { BUILD_ID, SERVER_URL, TOKEN_KEY, type AuthCredential } from "@/config";
 
 type ProxyAuthState =
   | { phase: "need-login" }
@@ -39,7 +38,6 @@ export function ProxyAuthPage() {
     socket.onopen = () => {
       // clientVersion 必带：旁路连接同样受版本准入（plan 033）约束，见 AuthorizePage 同注释。
       if ("token" in credential) send({ case: "clientAuth", value: { clientToken: credential.token, clientVersion: BUILD_ID } });
-      else if ("supabaseToken" in credential) send({ case: "clientAuth", value: { supabaseToken: credential.supabaseToken, clientVersion: BUILD_ID } });
       else send({ case: "clientAuth", value: { username: credential.username, password: credential.password, clientVersion: BUILD_ID } });
     };
     socket.onclose = () => {
@@ -56,10 +54,7 @@ export function ProxyAuthPage() {
           break;
         case "authError":
           localStorage.removeItem(TOKEN_KEY);
-          setState({
-            phase: "auth-failed",
-            message: USE_SUPABASE ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误",
-          });
+          setState({ phase: "auth-failed", message: "登录失败：用户名或密码错误" });
           break;
         case "proxyAuth": {
           const value = message.payload.value;
@@ -82,19 +77,9 @@ export function ProxyAuthPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function login(event: FormEvent<HTMLFormElement>) {
+  function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!USE_SUPABASE) {
-      connect({ username, password });
-      return;
-    }
-    setState({ phase: "authenticating" });
-    const result = await loginWithSupabase(username, password);
-    if (!result.ok) {
-      setState({ phase: "auth-failed", message: result.message });
-      return;
-    }
-    connect({ supabaseToken: result.accessToken });
+    connect({ username, password });
   }
 
   const showLogin = state.phase === "need-login" || state.phase === "authenticating" || state.phase === "auth-failed";

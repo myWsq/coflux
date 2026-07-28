@@ -7,10 +7,7 @@ import {
   type ServerToClient,
 } from "@coflux/protocol";
 
-export type AuthCredential =
-  | { token: string }
-  | { supabaseToken: string }
-  | { username: string; password: string };
+export type AuthCredential = { token: string } | { username: string; password: string };
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 export type ServerPayload = ServerToClient["payload"];
@@ -31,9 +28,7 @@ type ConnectionOptions = {
 export function buildAuthPayload(credential: AuthCredential, buildId: string): ClientToServerPayload {
   return "token" in credential
     ? { case: "clientAuth", value: { clientToken: credential.token, clientVersion: buildId } }
-    : "supabaseToken" in credential
-      ? { case: "clientAuth", value: { supabaseToken: credential.supabaseToken, clientVersion: buildId } }
-      : { case: "clientAuth", value: { username: credential.username, password: credential.password, clientVersion: buildId } };
+    : { case: "clientAuth", value: { username: credential.username, password: credential.password, clientVersion: buildId } };
 }
 
 /**
