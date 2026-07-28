@@ -26,7 +26,7 @@ export function storePlugin() {
 
 async function bootstrap(store: Store) {
   // 以下两项（default 账号 seed / credFingerprint 撤销）都是单账号 + env 口令的伴生物，
-  // 仅 local 模式执行。supabase 模式下账号按 userId lazy 建。
+  // 仅 local 模式执行。password 模式下账号按 userId lazy 建（见 hub.ts resolveAccountForUser）。
   if (config.authProvider === "local") {
     if (!(await store.getAccount(config.accountId))) {
       await store.createAccount({ id: config.accountId, name: "default", createdAt: Date.now() });

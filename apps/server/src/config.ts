@@ -13,19 +13,20 @@ function int(name: string, def: number): number {
 const isDev = process.env.COFLUX_DEV === "1";
 const missingSecrets: string[] = [];
 
-// 身份提供方：local（默认，env 用户名+密码单账号）| supabase（Supabase Auth 换票多账号）。
-// 见 plans/001。local 模式行为与历史完全一致；supabase 模式只把「你是谁」的认证外包给 Supabase，
-// 会话/数据/授权全部由 coflux 自持（验签得 userId → 查/建 membership → 签发 coflux 会话 token）。
+// 身份提供方：local（默认，env 用户名+密码单账号）| password（自建邮箱密码多账号）。
+// 见 plans/059（Supabase 已全面退役，历史决策见 plans/001）。local 模式行为与历史完全一致；
+// password 模式把「你是谁」外包给自建 users 表的 scrypt 口令校验，会话/数据/授权全部由
+// coflux 自持（验密码得 userId → 查/建 membership → 签发 coflux 会话 token）。
 const authRaw = process.env.COFLUX_AUTH ?? "local";
-if (authRaw !== "local" && authRaw !== "supabase") {
-  console.error(`[config] COFLUX_AUTH 取值非法：${authRaw}（仅支持 local | supabase）。`);
+if (authRaw !== "local" && authRaw !== "password") {
+  console.error(`[config] COFLUX_AUTH 取值非法：${authRaw}（仅支持 local | password）。`);
   process.exit(1);
 }
-const authProvider: "local" | "supabase" = authRaw;
+const authProvider: "local" | "password" = authRaw;
 const isLocal = authProvider === "local";
 
 /** 秘密类配置：生产必须由环境变量提供；开发回落到 devDefault（弱值，仅本地用）。
- * required=false 的项（如 supabase 模式下的 env 口令/登记密钥）不参与 fail-closed 校验。 */
+ * required=false 的项（如 password 模式下的 env 口令）不参与 fail-closed 校验。 */
 function secret(name: string, devDefault: string, required = true): string {
   const v = process.env[name];
   if (v !== undefined && v !== "") return v;
@@ -33,13 +34,8 @@ function secret(name: string, devDefault: string, required = true): string {
   return devDefault;
 }
 
-// supabase 模式必需 SUPABASE_URL（验签的 iss / JWKS 来源）；去掉尾斜杠以稳定拼接。
-const supabaseUrl = (process.env.SUPABASE_URL ?? "").replace(/\/+$/, "");
-if (authProvider === "supabase" && !supabaseUrl) missingSecrets.push("SUPABASE_URL");
-
 export const config = {
   authProvider,
-  supabaseUrl,
   port: int("COFLUX_PORT", DEFAULT_PORT),
   // 默认只绑 localhost：生产由反向代理(Caddy)对外，不直接暴露端口。需对外监听设 COFLUX_HOST=0.0.0.0。
   host: process.env.COFLUX_HOST ?? "127.0.0.1",

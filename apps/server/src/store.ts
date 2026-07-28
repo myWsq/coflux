@@ -101,6 +101,14 @@ export interface Account {
   createdAt: number;
 }
 
+/** password 模式（plan 059）的登录账号：email 归一化小写存储/查询。 */
+export interface User {
+  id: string;
+  email: string;
+  passwordHash: string;
+  createdAt: number;
+}
+
 export interface Device {
   id: DaemonId;
   accountId: AccountId;
@@ -231,6 +239,13 @@ const SCHEMA_DDL = `
     revoked BOOLEAN NOT NULL DEFAULT false,
     expires_at DOUBLE PRECISION,
     user_id TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS memberships (
@@ -494,6 +509,21 @@ export class Store {
   async createAccount(a: Account): Promise<Account> {
     await this.sql`INSERT INTO accounts ${this.sql(a, "id", "name", "createdAt")}`;
     return a;
+  }
+
+  /* ------------------------- users（password 模式） ------------------------- */
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const rows = await this.sql<User[]>`SELECT * FROM users WHERE email = ${email}`;
+    return rows[0];
+  }
+  /** 建号脚本用：邮箱已存在则更新口令哈希（保留原 id/createdAt），否则新建。 */
+  async upsertUser(u: User): Promise<User> {
+    const rows = await this.sql<User[]>`
+      INSERT INTO users ${this.sql(u, "id", "email", "passwordHash", "createdAt")}
+      ON CONFLICT (email) DO UPDATE SET password_hash = excluded.password_hash
+      RETURNING *
+    `;
+    return rows[0];
   }
 
   /* ------------------------ memberships ---------------------------- */
