@@ -1,5 +1,7 @@
 # Plan 062: server 数据层迁 prisma-next——contract 化 + store.ts 改写 + 本地链路脱离 selfhost Supabase
 
+> **已撤回（2026-07-28，未执行）**：用户复议放弃 Prisma Cloud / prisma-next，生产数据库改为 prod-jp 本机自托管 Postgres（见改写后的 plans/063）。数据层代码保持 porsager/postgres + SCHEMA_DDL 原样，schema 保留 `coflux` 不迁 public。本文仅留档。
+
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
 > yourself against the live code. Run milestone validations as you go only if
