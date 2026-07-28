@@ -11,7 +11,6 @@ import UIKit
 struct TerminalInputArea: View {
     let client: CofluxClient
     let task: Coflux_V1_Task?
-    @Binding var collapsed: Bool
     /// 草稿宿主持有：占位条只做预览，点击进与系统键盘同层的成文层
     let draft: String
     let onCompose: () -> Void
@@ -39,31 +38,20 @@ struct TerminalInputArea: View {
     }
 
     // MARK: - 成文入口（占位条：预览草稿，点击进成文层——基座冻结，
-    // 输入框与系统键盘在独立呈现层同层升降）
+    // 输入框与系统键盘在独立呈现层同层升降）。收起入口在右下浮键（plan 056）
 
     private var composerRow: some View {
-        HStack(spacing: 8) {
-            Button(action: onCompose) {
-                HStack {
-                    Text(draft.isEmpty ? "输入后发送到终端" : draft)
-                        .font(Theme.Fonts.label)
-                        .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.foreground)
-                        .lineLimit(1)
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .frame(height: 38)
-                .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
-            }
-            Button {
-                collapsed = true // 布局刻意不动画：见 WorkspaceDetailView 气泡注释
-            } label: {
-                Image(systemName: "keyboard.chevron.compact.down")
+        Button(action: onCompose) {
+            HStack {
+                Text(draft.isEmpty ? "输入后发送到终端" : draft)
                     .font(Theme.Fonts.label)
-                    .foregroundStyle(Theme.mutedForeground)
-                    .frame(width: 34, height: 34)
+                    .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.foreground)
+                    .lineLimit(1)
+                Spacer()
             }
-            .accessibilityLabel("收起输入区")
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+            .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
         }
     }
 

@@ -105,7 +105,7 @@ Out of scope:
 | Purpose | Command | Expected result |
 | --- | --- | --- |
 | 构建 | `xcodebuild -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0' build CODE_SIGNING_ALLOWED=NO` | BUILD SUCCEEDED |
-| 收起按钮残留 | `grep -rn 'keyboard.chevron.compact.down' apps/ios/Coflux/Views/` | 无输出（exit 1） |
+| 收起按钮残留 | `grep -n 'keyboard.chevron.compact.down' apps/ios/Coflux/Views/TerminalInputArea.swift`（浮键收起态合法使用同图标，只查输入区内） | 无输出（exit 1） |
 | 真机验收 (acceptance) | 点状态栏不回顶；上滑离底后浮键出现、点按直达底部并消失；控制板展开时气泡变收起键且常驻；输入区内无收起按钮；vim/htop 等全屏 TUI 下浮键不出现 | 用户人工确认 |
 
 ## Done criteria
