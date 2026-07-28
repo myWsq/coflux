@@ -32,8 +32,17 @@ struct WorkspaceDetailView: View {
     @State private var draft = ""
     /// 逐任务离底态（plan 056）：true = 在底部。未上报（无输出/未滚动）视为在底
     @State private var atBottomByTask: [String: Bool] = [:]
+    /// 逐任务底部空白（pt，TerminalHostView 上报）：未上报视为满屏（整量抬升）
+    @State private var bottomSlackByTask: [String: CGFloat] = [:]
 
-    private var terminalLift: CGFloat { inputCollapsed ? 0 : panelHeight }
+    /// 浮键列避开控制板的抬升量（恒 = 面板高）
+    private var panelLift: CGFloat { inputCollapsed ? 0 : panelHeight }
+    /// 终端抬升量 clamp 到内容真正需要让出的量：新终端内容在顶、下半屏
+    /// 全空时不抬（整量抬会把唯一有内容的顶部裁掉，露出的却是空白）
+    private var terminalLift: CGFloat {
+        let slack = activeTaskID.flatMap { bottomSlackByTask[$0] } ?? 0
+        return max(0, panelLift - slack)
+    }
 
     init(client: CofluxClient, workspace: Coflux_V1_Workspace) {
         self.client = client
@@ -191,9 +200,10 @@ struct WorkspaceDetailView: View {
             .animation(.smooth(duration: 0.2), value: atBottomByTask)
             .padding(.trailing, 20)
             .padding(.bottom, 24)
-            // 展开时随终端同曲线抬到控制板上方（纯 transform，同 terminalLift 注释）
-            .offset(y: -terminalLift)
-            .animation(.smooth(duration: 0.25), value: terminalLift)
+            // 展开时抬到控制板上方（纯 transform）：恒用整量面板高——
+            // 终端侧 clamp 后可能不抬，浮键仍须让开面板
+            .offset(y: -panelLift)
+            .animation(.smooth(duration: 0.25), value: panelLift)
         }
         .background(Theme.background)
         .onChange(of: inputCollapsed) { _, collapsed in
@@ -231,6 +241,10 @@ struct WorkspaceDetailView: View {
                let mine = ids.first(where: { !known.contains($0) }) {
                 activeTaskID = mine
                 knownTaskIDsBeforeCreate = nil
+                // 自建任务直接启动（web performActivation 同语义）：新任务无 session，
+                // TerminalHostView.bind 只对 RUNNING 任务发 attach，不补这发
+                // 会停在「任务尚未启动」横幅等手动点启动
+                client.startTask(taskID: mine, cols: termCols, rows: termRows)
             }
             // 激活任务被删除（本端或它端）：收敛到仍存在的页
             if let active = activeTaskID, !ids.contains(active) {
@@ -334,7 +348,8 @@ struct WorkspaceDetailView: View {
                     termCols = cols
                     termRows = rows
                 },
-                onAtBottomChanged: { atBottomByTask[task.id] = $0 }
+                onAtBottomChanged: { atBottomByTask[task.id] = $0 },
+                onBottomSlackChanged: { bottomSlackByTask[task.id] = $0 }
             )
         }
     }
