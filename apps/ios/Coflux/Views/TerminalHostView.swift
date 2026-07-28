@@ -43,6 +43,9 @@ struct TerminalHostView: UIViewRepresentable {
     var onSizeChanged: ((UInt32, UInt32) -> Void)?
     /// 离底态变化上报（plan 056）：true = 已在底部。详情页据此显隐滚到底浮键
     var onAtBottomChanged: ((Bool) -> Void)?
+    /// 底部空白上报（pt）：内容底边以下的空白高度。详情页据此把面板抬升量
+    /// clamp 到真正需要让出的量——新终端内容在顶、下半屏全空时不裁顶
+    var onBottomSlackChanged: ((CGFloat) -> Void)?
 
     /// ANSI 16 色对齐 web xterm theme（terminal-pane.tsx:197-211）。web 未指定的
     /// bright 位沿用 normal 同色（brightBlack/brightWhite 例外），保持双端观感一致。
@@ -101,7 +104,8 @@ struct TerminalHostView: UIViewRepresentable {
             client: client,
             taskID: taskID,
             onSizeChanged: onSizeChanged,
-            onAtBottomChanged: onAtBottomChanged
+            onAtBottomChanged: onAtBottomChanged,
+            onBottomSlackChanged: onBottomSlackChanged
         )
     }
 
@@ -111,7 +115,9 @@ struct TerminalHostView: UIViewRepresentable {
         var taskID: String
         private let onSizeChanged: ((UInt32, UInt32) -> Void)?
         private let onAtBottomChanged: ((Bool) -> Void)?
+        private let onBottomSlackChanged: ((CGFloat) -> Void)?
         private var lastAtBottom: Bool?
+        private var lastBottomSlack: CGFloat = -1
         weak var terminalView: TerminalView?
         private var boundSessionID: String?
         private var releaseConsumer: (() -> Void)?
@@ -120,12 +126,14 @@ struct TerminalHostView: UIViewRepresentable {
             client: CofluxClient,
             taskID: String,
             onSizeChanged: ((UInt32, UInt32) -> Void)?,
-            onAtBottomChanged: ((Bool) -> Void)?
+            onAtBottomChanged: ((Bool) -> Void)?,
+            onBottomSlackChanged: ((CGFloat) -> Void)?
         ) {
             self.client = client
             self.taskID = taskID
             self.onSizeChanged = onSizeChanged
             self.onAtBottomChanged = onAtBottomChanged
+            self.onBottomSlackChanged = onBottomSlackChanged
         }
 
         func bind(sessionID: String?) {
@@ -141,6 +149,7 @@ struct TerminalHostView: UIViewRepresentable {
                 // feed 后补刷离底态：新输出/replace 会改变 scrollback 与 yDisp，
                 // 而 scrolled 回调只保证用户拖动路径（plan 056 landmine）
                 self.reportScrollState()
+                self.reportBottomSlack()
             }
             let terminal = terminalView.getTerminal()
             client.startTask(taskID: taskID, cols: UInt32(terminal.cols), rows: UInt32(terminal.rows))
@@ -168,6 +177,7 @@ struct TerminalHostView: UIViewRepresentable {
             let cols = UInt32(newCols)
             let rows = UInt32(newRows)
             onSizeChanged?(cols, rows)
+            reportBottomSlack()
             guard let sessionID = boundSessionID else { return }
             // 尾沿去抖：布局连续变化（输入区展开/收起、系统键盘滑入）只把最终
             // 尺寸发给 daemon，避免 SIGWINCH 风暴让远端 TUI 重画闪动（plan 053）
@@ -187,6 +197,22 @@ struct TerminalHostView: UIViewRepresentable {
             guard atBottom != lastAtBottom else { return }
             lastAtBottom = atBottom
             onAtBottomChanged?(atBottom)
+        }
+
+        /// 底部空白：normal buffer 且无 scrollback 时 = 光标行以下的空白高度；
+        /// 有 scrollback 或 alternate buffer（全屏 TUI）内容满屏，slack 恒 0。
+        /// ponytail: 光标行近似内容底行——normal buffer 光标上移后打印会低估空白，可接受
+        private func reportBottomSlack() {
+            guard let view = terminalView else { return }
+            let terminal = view.getTerminal()
+            var slack: CGFloat = 0
+            if !view.canScroll, !terminal.isCurrentBufferAlternate, terminal.rows > 0 {
+                let rowsBelow = terminal.rows - terminal.getCursorLocation().y - 1
+                slack = view.frame.height * CGFloat(rowsBelow) / CGFloat(terminal.rows)
+            }
+            guard abs(slack - lastBottomSlack) > 0.5 else { return }
+            lastBottomSlack = slack
+            onBottomSlackChanged?(slack)
         }
 
         func setTerminalTitle(source: TerminalView, title: String) {}
