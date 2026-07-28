@@ -2,8 +2,8 @@ import SwiftUI
 import UIKit
 
 /// 终端输入区（plan 053）——移动端两层输入模型：
-/// - 成文层：原生输入框 + 系统输入法（中文可用），整段编辑一次发送；
-///   发送 = 仅落文本不回车（plan 054 复议 053），回车由控制板大回车键补。
+/// - 成文层：单行原生输入框 + 系统输入法（中文可用），整行编辑一次发送；
+///   发送 = 仅落字面文本不回车（plan 054/055 复议 053），回车由控制板大回车键补。
 /// - 控制层：精简键盘（数字/Esc//、Tab/⇧Tab/⌫、^C/方向/回车），单键直发。
 ///   无字母（字母走成文层），故不设粘滞 Ctrl——组合键以专用键给出（^C）。
 /// 终端本体是纯显示（DisplayOnlyTerminalView），软键盘输入全部从这里走
@@ -120,7 +120,7 @@ struct TerminalInputArea: View {
     }
 
     /// 粘贴：系统剪贴板直发终端（移动端独有高频缺口，替代低频 ⇧tab）；
-    /// 与成文层多行发送同理，包 bracketed paste 防换行被当提交
+    /// 剪贴板天然可能多行，包 bracketed paste 防换行在开 2004 的接收端被当提交
     private var pasteKey: some View {
         Button {
             guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
@@ -219,7 +219,8 @@ struct TerminalInputArea: View {
 
 /// 成文层（plan 053 最终形态）：与系统键盘同层的输入条（fullScreenCover
 /// 透明底、无暗色蒙层——底下的终端与控制板完全冻结可见）。
-/// 点输入条外任意处取消（草稿保留）；发送 = 仅落文本不回车（plan 054）。
+/// 点输入条外任意处取消（草稿保留）；单行输入，发送/键盘回车 = 仅落文本
+/// 不回车（plan 054/055）。
 /// 可调强度毛玻璃：暂停的 UIViewPropertyAnimator 用 fractionComplete 控制
 /// 模糊深度（0-1 连续），这是"淡毛玻璃"的唯一正确姿势——直接给材质设
 /// opacity 会禁用模糊、退化成不透明灰遮罩（真机踩过）。强度渐变自带淡入淡出。
@@ -288,10 +289,14 @@ struct TerminalComposeOverlay: View {
                 .contentShape(Rectangle())
                 .onTapGesture { fadeOutAndDismiss() }
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("输入后发送到终端", text: $draft, axis: .vertical)
-                    .lineLimit(1...6)
+                TextField("输入后发送到终端", text: $draft)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .submitLabel(.send)
+                    .onSubmit {
+                        onSend()
+                        fadeOutAndDismiss()
+                    }
                     .focused($focused)
                     .font(Theme.Fonts.body)
                     .padding(.horizontal, 4)
