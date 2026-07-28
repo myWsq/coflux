@@ -11,8 +11,6 @@ import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import type { CofluxClient } from "@coflux/client";
 
-import { USE_SUPABASE } from "@/config";
-
 /** 登录页（同 apps/web 的 auth-shell.tsx 结构，收窄给单栏手机视口）。 */
 export function AuthScreen({ client }: { client: CofluxClient }) {
   const [username, setUsername] = useState("");
@@ -39,18 +37,18 @@ export function AuthScreen({ client }: { client: CofluxClient }) {
                 <Icon icon={LockKeyhole} size="md" />
                 <Heading level={2}>登录到 coflux</Heading>
                 <Text type="body" color="secondary" size="sm">
-                  {USE_SUPABASE ? "使用你的邮箱和密码访问远程工作区" : "使用本地账号访问远程工作区"}
+                  使用你的账号访问远程工作区
                 </Text>
               </VStack>
 
               {authState === "auth-failed" ? <Banner status="error" title={loginError || "登录失败"} container="card" /> : null}
 
               <TextInput
-                label={USE_SUPABASE ? "邮箱" : "用户名"}
-                type={USE_SUPABASE ? "email" : "text"}
+                label="账号"
+                type="text"
                 value={username}
                 onChange={setUsername}
-                placeholder={USE_SUPABASE ? "you@example.com" : "输入用户名"}
+                placeholder="输入账号"
                 htmlName="username"
                 isDisabled={busy}
               />

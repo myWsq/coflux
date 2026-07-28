@@ -11,8 +11,7 @@ import { createCofluxClient } from "@coflux/client";
 import { AuthScreen } from "@/components/auth-screen";
 import { WorkspaceList } from "@/components/workspace-list";
 import { WorkspaceDetail } from "@/components/workspace-detail";
-import { BUILD_ID, SERVER_URL, TOKEN_KEY, USE_SUPABASE } from "@/config";
-import { loginWithSupabase } from "@/lib/auth";
+import { BUILD_ID, SERVER_URL, TOKEN_KEY } from "@/config";
 import { useRoute } from "@/lib/use-route";
 import { useViewportHeight } from "@/lib/use-viewport-height";
 
@@ -28,7 +27,6 @@ export function App() {
       serverUrl: SERVER_URL,
       tokenStorageKey: TOKEN_KEY,
       buildId: BUILD_ID,
-      loginProvider: USE_SUPABASE ? loginWithSupabase : undefined,
       // mobile 保持冻结：不尝试 loopback direct，只把既有 terminal/RPC 迁到中心 opaque relay。
       deviceTransport: {
         enableLocalTransport: false,

@@ -17,7 +17,7 @@ import { ImportProjectWizard } from "@/components/workbench/import-project-wizar
 import { Sidebar } from "@/components/workbench/sidebar";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import type { WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
-import { WORKSPACE_KEY, USE_SUPABASE } from "@/config";
+import { WORKSPACE_KEY } from "@/config";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
 
@@ -316,7 +316,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       <AuthShell>
         <CredentialsForm
           title="登录到 coflux"
-          description={USE_SUPABASE ? "使用你的邮箱和密码访问远程工作区" : "使用本地账号访问远程工作区"}
+          description="使用你的账号访问远程工作区"
           username={username}
           password={password}
           busy={false}
