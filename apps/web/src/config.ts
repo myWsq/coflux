@@ -7,9 +7,4 @@ export const BUILD_ID = __COFLUX_BUILD_ID__;
 export const WORKSPACE_KEY = "coflux_workspace";
 export const SIDEBAR_WIDTH_KEY = "coflux_sidebar_width";
 
-// Supabase 是构建期开关；未配置时继续使用服务端的本地账号模式。
-export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL?.replace(/\/+$/, "");
-export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-export const USE_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
-
 export type { AuthCredential } from "@coflux/client";

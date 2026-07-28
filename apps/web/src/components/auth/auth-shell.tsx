@@ -9,8 +9,6 @@ import { VStack } from "@astryxdesign/core/Layout";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 
-import { USE_SUPABASE } from "@/config";
-
 // 独立认证页自绘 body 背景（无宿主壳），结构参照官方 login 模板。
 const pageStyle: CSSProperties = {
   minHeight: "100%",
@@ -68,11 +66,11 @@ export function CredentialsForm(props: CredentialsFormProps) {
         {props.error ? <Banner status="error" title={props.error} container="card" /> : null}
 
         <TextInput
-          label={USE_SUPABASE ? "邮箱" : "用户名"}
-          type={USE_SUPABASE ? "email" : "text"}
+          label="账号"
+          type="text"
           value={props.username}
           onChange={(value) => props.onUsernameChange(value)}
-          placeholder={USE_SUPABASE ? "you@example.com" : "输入用户名"}
+          placeholder="输入账号"
           htmlName="username"
           hasAutoFocus
           isDisabled={props.busy}
