@@ -2,8 +2,7 @@ import { useEffect, useState } from "react";
 
 import { Workbench } from "@/components/workbench/workbench";
 import { createCofluxClient } from "@coflux/client";
-import { BUILD_ID, SERVER_URL, TOKEN_KEY, USE_SUPABASE } from "@/config";
-import { loginWithSupabase } from "@/lib/auth";
+import { BUILD_ID, SERVER_URL, TOKEN_KEY } from "@/config";
 
 export function MainPage() {
   // 一次性初始化（组件体每次渲染都跑，createCofluxClient 内部含副作用/命令式资源，
@@ -13,7 +12,6 @@ export function MainPage() {
       serverUrl: SERVER_URL,
       tokenStorageKey: TOKEN_KEY,
       buildId: BUILD_ID,
-      loginProvider: USE_SUPABASE ? loginWithSupabase : undefined,
       deviceTransport: {
         enableLocalTransport: true,
         identityDatabaseName: "coflux-web-device-v1",

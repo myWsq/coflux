@@ -13,7 +13,6 @@ export {
   type FsWriteResult,
   type DeviceTransportOptions,
   type LocalSessionState,
-  type LoginProvider,
 } from "./store";
 export {
   type DeviceInputState,

@@ -52,11 +52,6 @@ export type DeviceTransportOptions = {
   origin?: string;
 };
 
-export type LoginProvider = (
-  username: string,
-  password: string,
-) => Promise<{ ok: true; accessToken: string } | { ok: false; message: string }>;
-
 export type CofluxClientOptions = {
   /** /client WS 端点地址（含协议与路径）。 */
   serverUrl: string;
@@ -64,9 +59,6 @@ export type CofluxClientOptions = {
   tokenStorageKey: string;
   /** 构建版本（git short SHA；vite dev 固定 "dev"），随认证上报供 server 做版本准入（plan 033）。 */
   buildId: string;
-  /** 提供时启用外部登录（如 Supabase）：login() 走该 provider 换取 supabaseToken，
-   * 且 authError 文案切换为「会话过期」；不提供则走用户名密码直登，文案为「用户名或密码错误」。 */
-  loginProvider?: LoginProvider;
   /** 所有客户端统一走 DeviceTransport；是否尝试 loopback direct 由 enableLocalTransport 决定。 */
   deviceTransport: DeviceTransportOptions;
 };
@@ -350,7 +342,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         token = "";
         localStorage.removeItem(options.tokenStorageKey);
         store.setState({
-          loginError: options.loginProvider ? "登录失败：会话已过期或凭证无效，请重新登录" : "登录失败：用户名或密码错误",
+          loginError: "登录失败：用户名或密码错误",
           authState: "auth-failed",
         });
         shouldRetry = false;
@@ -530,18 +522,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
 
   async function login(username: string, password: string) {
     store.setState({ loginError: "" });
-    if (!options.loginProvider) {
-      connect({ username, password });
-      return;
-    }
-
-    store.setState({ authState: "authenticating" });
-    const result = await options.loginProvider(username, password);
-    if (!result.ok) {
-      store.setState({ loginError: result.message, authState: "auth-failed" });
-      return;
-    }
-    connect({ supabaseToken: result.accessToken });
+    connect({ username, password });
   }
 
   function logout() {
