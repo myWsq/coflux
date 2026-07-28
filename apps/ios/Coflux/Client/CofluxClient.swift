@@ -18,7 +18,6 @@ enum ConnectionStatus: Equatable {
 
 enum AuthCredential: Sendable, Equatable {
     case token(String)
-    case supabase(String)
     case password(username: String, password: String)
 }
 
@@ -59,7 +58,6 @@ final class CofluxClient {
     private let transport: any Transport
     private let tokenStore: any TokenStore
     private let serverURL: URL
-    private let usesExternalLogin: Bool
 
     private var token: String?
     /// authOk 后才允许自动重连（store.ts shouldRetry 同语义）；authError/登出/版本失配收回。
@@ -89,13 +87,11 @@ final class CofluxClient {
     init(
         transport: any Transport = NetworkTransport(),
         tokenStore: any TokenStore = KeychainTokenStore(),
-        serverURL: URL = Config.serverURL,
-        usesExternalLogin: Bool = Config.useSupabase
+        serverURL: URL = Config.serverURL
     ) {
         self.transport = transport
         self.tokenStore = tokenStore
         self.serverURL = serverURL
-        self.usesExternalLogin = usesExternalLogin
         token = tokenStore.read()
         deviceRouter = DeviceRouter(transport: transport, callbacks: DeviceRouterCallbacks(
             sendControl: { [weak self] payload in self?.send(payload) },
@@ -135,22 +131,11 @@ final class CofluxClient {
 
     // MARK: - 对外操作
 
+    /// 登录：账号密码直发 clientAuth 帧（plan 061——server 侧 local/password 两模式同帧，
+    /// 外部 IdP 两跳换票已随 plan 059 退役）。
     func login(username: String, password: String) {
         loginError = ""
-        guard usesExternalLogin else {
-            connectAuthenticating(credential: .password(username: username, password: password))
-            return
-        }
-        authState = .authenticating
-        Task {
-            switch await SupabaseAuth.exchange(email: username, password: password) {
-            case .ok(let accessToken):
-                connectAuthenticating(credential: .supabase(accessToken))
-            case .failed(let message):
-                loginError = message
-                authState = .authFailed
-            }
-        }
+        connectAuthenticating(credential: .password(username: username, password: password))
     }
 
     func logout() {
@@ -315,9 +300,7 @@ final class CofluxClient {
             token = nil
             tokenStore.clear()
             shouldRetry = false
-            loginError = usesExternalLogin
-                ? "登录失败：会话已过期或凭证无效，请重新登录"
-                : "登录失败：用户名或密码错误"
+            loginError = "登录失败：账号或密码错误，或会话已过期"
             authState = .authFailed
 
         case .clientOutdated:
@@ -544,8 +527,6 @@ final class CofluxClient {
         switch credential {
         case .token(let value):
             auth.clientToken = value
-        case .supabase(let value):
-            auth.supabaseToken = value
         case .password(let username, let password):
             auth.username = username
             auth.password = password

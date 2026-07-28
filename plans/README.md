@@ -65,7 +65,7 @@
 | 058 | [iOS 控制板默认展开 + 每工作区持久化 + 浮键列序修正](058-ios-pad-default-open-persist.md) | DONE (3c63fbc)（构建已过；持久化与列序真机验收待用户） | none（复议 053 默认折叠 / 057 列序） |
 | 059 | [server 自建邮箱密码多账号认证（password 模式替换 supabase 模式）](059-server-password-auth.md) | DONE (392d1a5)（黑盒 82/85：password 5/5 全过，3 例失败=已知 cli-doctor 环境基线×2 + auto-update flaky×1，均与本 plan 无关；store/config 的 Supabase 托管注释留给 063 切库时清理） | none（Supabase 退役迁移组契约 plan） |
 | 060 | [web + mobile 登录收敛——删 Supabase 直连，统一邮箱密码直发](060-web-mobile-login-consolidation.md) | TODO | 059（与 061/062 同并行组，scope 两两不相交） |
-| 061 | [iOS 登录收敛——删 SupabaseAuth，统一邮箱密码直发](061-ios-login-consolidation.md) | TODO | 059（与 060 同并行组） |
+| 061 | [iOS 登录收敛——删 SupabaseAuth，统一邮箱密码直发](061-ios-login-consolidation.md) | DONE（xcodebuild 构建已过；残留检查零命中；scope 修订=CofluxTests 三文件连带去参；登录闭环随 063 生产切换验收，真机待用户） | 059（与 060 同并行组） |
 | 062 | [server 数据层迁 prisma-next（已撤回）](062-server-prisma-next-datalayer.md) | WITHDRAWN（2026-07-28 用户复议放弃 Prisma，数据库改 prod-jp 自托管，数据层代码不动） | — |
 | 063 | [生产切换 prod-jp 自托管 Postgres + Supabase 全面退役](063-prod-cutover-supabase-retirement.md) | TODO | 059+060+061（串行收尾，主会话+用户配合） |
 
