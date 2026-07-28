@@ -13,7 +13,10 @@ struct WorkspaceDetailView: View {
     @State private var termRows: UInt32 = 24
     @State private var confirmingRemove = false
     @State private var knownTaskIDsBeforeCreate: Set<String>?
-    @State private var inputCollapsed = true // 默认折叠成气泡（2026-07-26 用户定），阅读优先
+    /// 控制板展开态按工作区持久化（plan 058 复议 2026-07-26 默认折叠定案）：
+    /// init 播种（onAppear 翻转会有可见跳变 + 一次多余 resize），变更时写回；
+    /// UserDefaults.bool 缺省 false 恰为默认展开，纯新工作区免三态判断
+    @State private var inputCollapsed: Bool
     /// 无 resize 平移模型（plan 053）：终端容器尺寸恒定，被输入面板整体
     /// "顶上去"（offset 平移 + 裁剪），行列数不变 → 零 SIGWINCH 零重排。
     /// 位移量 = 面板实测高度（尺寸不受 transition 影响，量值稳定）；
@@ -31,6 +34,16 @@ struct WorkspaceDetailView: View {
     @State private var atBottomByTask: [String: Bool] = [:]
 
     private var terminalLift: CGFloat { inputCollapsed ? 0 : panelHeight }
+
+    init(client: CofluxClient, workspace: Coflux_V1_Workspace) {
+        self.client = client
+        self.workspace = workspace
+        _inputCollapsed = State(initialValue: UserDefaults.standard.bool(forKey: Self.padCollapsedKey(workspace.id)))
+    }
+
+    private static func padCollapsedKey(_ workspaceID: String) -> String {
+        "terminalPadCollapsed.\(workspaceID)"
+    }
     /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
     @State private var pageProgress: CGFloat = 0
     @State private var chipFrames: [String: CGRect] = [:]
@@ -127,8 +140,8 @@ struct WorkspaceDetailView: View {
             .presentationBackground(.clear)
         }
         .overlay(alignment: .bottomTrailing) {
-            // 右下浮键列（plan 053 气泡 → plan 056 常驻两态 → plan 057 收编新建）：
-            // 排序频率倒挂——新建（低频）最上、滚到底（离底浮现）居中、
+            // 右下浮键列（plan 053 气泡 → 056 常驻两态 → 057 收编新建 → 058 定序）：
+            // 瞬态键置列顶——滚到底浮现时列向上生长，常驻键（新建/键盘）零位移；
             // 键盘键守最下拇指位（折叠态=展开输入区、展开态=收起输入区，
             // 收起入口只此一处，输入区内不再有）。
             // 布局切换刻意不做动画：终端高度一步到位只触发一次 resize，
@@ -136,16 +149,6 @@ struct WorkspaceDetailView: View {
             ZStack {
                 if !members.isEmpty {
                     VStack(spacing: 12) {
-                        Button {
-                            createTerminal()
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(Theme.Fonts.body.weight(.medium))
-                                .foregroundStyle(Theme.foreground)
-                                .frame(width: 52, height: 52)
-                        }
-                        .glassEffect(.regular.interactive(), in: .circle)
-                        .accessibilityLabel("新建终端")
                         if let taskID = activeTask?.id, atBottomByTask[taskID] == false {
                             Button {
                                 TerminalModeRegistry.shared.scrollToBottom(taskID: taskID)
@@ -159,6 +162,16 @@ struct WorkspaceDetailView: View {
                             .accessibilityLabel("滚动到底部")
                             .transition(.scale.combined(with: .opacity))
                         }
+                        Button {
+                            createTerminal()
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(Theme.Fonts.body.weight(.medium))
+                                .foregroundStyle(Theme.foreground)
+                                .frame(width: 52, height: 52)
+                        }
+                        .glassEffect(.regular.interactive(), in: .circle)
+                        .accessibilityLabel("新建终端")
                         Button {
                             inputCollapsed.toggle()
                         } label: {
@@ -183,6 +196,9 @@ struct WorkspaceDetailView: View {
             .animation(.smooth(duration: 0.25), value: terminalLift)
         }
         .background(Theme.background)
+        .onChange(of: inputCollapsed) { _, collapsed in
+            UserDefaults.standard.set(collapsed, forKey: Self.padCollapsedKey(workspace.id))
+        }
         .navigationTitle(workspace.branch.isEmpty ? workspace.name : workspace.branch) // 主标题=分支，与 web 对齐
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
