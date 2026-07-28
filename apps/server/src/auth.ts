@@ -1,44 +1,34 @@
 /**
- * Supabase 身份验签（IdP 一次性认证，见 plans/001）。
+ * 口令哈希（password 模式，多账号邮箱+密码认证，见 plans/059）。
  *
- * 核心决策：Supabase 只做「你是谁」。web 用 Supabase 的 access_token(JWT) 换 coflux 会话 token，
- * server 用 JWKS 本地验签（无网络往返，公钥缓存 + 自动轮换），取 sub 为 userId。
- * 之后所有 WS 重连只用 coflux 自己的会话 token，全程不再触碰 Supabase。
- *
- * 要求 Supabase 项目启用非对称签名（ES256/RS256，新项目默认）；HS256 legacy secret 不支持，验签失败。
+ * 用 node:crypto scrypt（stdlib，无额外依赖）+ 随机 salt + timingSafeEqual 定时比较。
+ * 存储格式自描述："scrypt:<saltHex>:<hashHex>"，前缀留作未来升级哈希参数时的判别位
+ * （旧格式哈希仍可校验，新格式哈希并行存在）。
  */
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
 
-export interface SupabaseIdentity {
-  /** JWT `sub`：Supabase user UUID，作为 coflux 的 userId */
-  userId: string;
-  /** JWT `email` claim（可能缺失）；用作 lazy 建号时的账号名 */
-  email: string | null;
+const scryptAsync = promisify(scrypt);
+const KEY_LEN = 64;
+
+/** 生成新哈希（建号/改密码用）。 */
+export async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  const derived = (await scryptAsync(password, salt, KEY_LEN)) as Buffer;
+  return `scrypt:${salt.toString("hex")}:${derived.toString("hex")}`;
 }
 
-export class SupabaseVerifier {
-  private jwks: ReturnType<typeof createRemoteJWKSet>;
-  private issuer: string;
-  private audience = "authenticated";
-
-  /** supabaseUrl 已去尾斜杠（见 config.ts） */
-  constructor(supabaseUrl: string) {
-    this.issuer = `${supabaseUrl}/auth/v1`;
-    this.jwks = createRemoteJWKSet(new URL(`${supabaseUrl}/auth/v1/.well-known/jwks.json`));
-  }
-
-  /** 验签通过返回身份；过期 / 错签名 / iss/aud 不符 / 缺 sub 一律返回 null（调用方回 auth.error）。 */
-  async verify(token: string): Promise<SupabaseIdentity | null> {
-    try {
-      const { payload } = await jwtVerify(token, this.jwks, {
-        issuer: this.issuer,
-        audience: this.audience,
-      });
-      if (typeof payload.sub !== "string" || !payload.sub) return null;
-      const email = typeof payload.email === "string" ? payload.email : null;
-      return { userId: payload.sub, email };
-    } catch {
-      return null;
-    }
+/** 校验口令是否匹配已存哈希；格式不识别/派生失败一律返回 false（不抛出，调用方按认证失败处理）。 */
+export async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const parts = stored.split(":");
+  if (parts.length !== 3 || parts[0] !== "scrypt") return false;
+  const [, saltHex, hashHex] = parts;
+  try {
+    const salt = Buffer.from(saltHex, "hex");
+    const expected = Buffer.from(hashHex, "hex");
+    const derived = (await scryptAsync(password, salt, expected.length)) as Buffer;
+    return derived.length === expected.length && timingSafeEqual(derived, expected);
+  } catch {
+    return false;
   }
 }

@@ -69,7 +69,7 @@ import { config } from "./config.js";
 import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
 import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, supportsRelayDial, validRelayId } from "./relay-rendezvous.js";
 import { LocalControlPlane } from "./local-control.js";
-import type { SupabaseVerifier, SupabaseIdentity } from "./auth.js";
+import { verifyPassword } from "./auth.js";
 
 const log = createLogger("hub");
 const MAX_PREPARED_FRAME_BYTES = 1024 * 1024;
@@ -189,8 +189,7 @@ export class Hub {
     },
   });
 
-  /** supabase 模式下的验签器；local 模式为 undefined */
-  constructor(private store: Store, private verifier?: SupabaseVerifier) {
+  constructor(private store: Store) {
     this.localControl = new LocalControlPlane(
       store,
       (daemonId) => this.daemons.get(daemonId),
@@ -1455,8 +1454,8 @@ export class Hub {
 
   /**
    * client.auth：三条互斥路径
-   *   1) clientToken 重连（两模式通用）——coflux 自持会话 token，全程不碰 Supabase。
-   *   2) supabase 换票（仅 supabase 模式）——JWKS 本地验签 → userId → 查/建 membership → 签发会话 token。
+   *   1) clientToken 重连（两模式通用）——coflux 自持会话 token，全程不碰 users 表。
+   *   2) 邮箱+密码（仅 password 模式）——查 users 表 → scrypt 校验 → 查/建 membership → 签发会话 token。
    *   3) env 用户名+密码（仅 local 模式）——单账号 default。
    * 非 string 的凭证字段自然落空 → auth.error（与既有 clientToken 类型校验一致严格）。
    */
@@ -1471,12 +1470,13 @@ export class Hub {
       // 重连：已签发的会话 token（校验未撤销且未过期）
       tokenHash = hashToken(msg.clientToken);
       accountId = await this.store.accountForClientToken(tokenHash, now);
-    } else if (config.authProvider === "supabase" && typeof msg.supabaseToken === "string" && msg.supabaseToken) {
-      // 换票：验签 Supabase JWT → userId → 查/建个人账号 → 签发 coflux 会话 token
-      const identity = this.verifier ? await this.verifier.verify(msg.supabaseToken) : null;
-      if (identity) {
-        accountId = await this.resolveAccountForUser(identity);
-        userId = identity.userId;
+    } else if (config.authProvider === "password" && typeof msg.username === "string" && typeof msg.password === "string") {
+      // 登录：邮箱（username 字段承载）+ 密码 → 查 users 表 → scrypt 校验 → 查/建个人账号 → 签发会话 token
+      const email = msg.username.trim().toLowerCase();
+      const user = email ? await this.store.getUserByEmail(email) : undefined;
+      if (user && (await verifyPassword(msg.password, user.passwordHash))) {
+        accountId = await this.resolveAccountForUser({ userId: user.id, email: user.email });
+        userId = user.id;
         issued = genToken("ck_sess");
         tokenHash = hashToken(issued);
         await this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs, userId);
@@ -1536,9 +1536,9 @@ export class Hub {
     this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued } });
   }
 
-  /** 验签通过且合法的 Supabase 用户：查已有个人账号，无则 lazy 建号 + owner membership。
-   * 能出示合法 JWT ⇒ 管理员在 Supabase 亲手建的用户，故 lazy provision 安全（见 plans/001）。 */
-  private async resolveAccountForUser(identity: SupabaseIdentity): Promise<AccountId> {
+  /** 口令校验通过的合法用户：查已有个人账号，无则 lazy 建号 + owner membership。
+   * 能通过口令校验 ⇒ 管理员用建号脚本亲手建的用户，故 lazy provision 安全（见 plans/001, 059）。 */
+  private async resolveAccountForUser(identity: { userId: string; email: string | null }): Promise<AccountId> {
     const existing = await this.store.getMembershipByUser(identity.userId);
     if (existing) return existing.accountId;
     const accountId = randomUUID();
@@ -1547,7 +1547,7 @@ export class Hub {
       await tx.createAccount({ id: accountId, name: identity.email ?? identity.userId, createdAt: now });
       await tx.createMembership(identity.userId, accountId, "owner", now);
     });
-    log.info("provisioned account for supabase user", { accountId });
+    log.info("provisioned account for user", { accountId });
     return accountId;
   }
 
