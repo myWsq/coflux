@@ -63,7 +63,7 @@
 | 056 | [iOS 终端滚动治理——禁状态栏回顶 + 滚到底浮键 + 气泡常驻两态](056-ios-scroll-bubbles.md) | DONE (9e49875)（构建/残留检查已过；真机验收待用户——重点 Landmine：离底信号新鲜度；build 402 已上 TestFlight） | none |
 | 057 | [iOS 新建终端入口迁至右下浮键列](057-ios-new-terminal-bubble.md) | DONE (38a849c)（构建已过；真机反馈列序问题 → 058 修正；build 405 已上 TestFlight） | none（在 056 浮键列之上） |
 | 058 | [iOS 控制板默认展开 + 每工作区持久化 + 浮键列序修正](058-ios-pad-default-open-persist.md) | DONE (3c63fbc)（构建已过；持久化与列序真机验收待用户） | none（复议 053 默认折叠 / 057 列序） |
-| 059 | [server 自建邮箱密码多账号认证（password 模式替换 supabase 模式）](059-server-password-auth.md) | TODO | none（Supabase 退役迁移组契约 plan） |
+| 059 | [server 自建邮箱密码多账号认证（password 模式替换 supabase 模式）](059-server-password-auth.md) | DONE (392d1a5)（黑盒 82/85：password 5/5 全过，3 例失败=已知 cli-doctor 环境基线×2 + auto-update flaky×1，均与本 plan 无关；store/config 的 Supabase 托管注释留给 063 切库时清理） | none（Supabase 退役迁移组契约 plan） |
 | 060 | [web + mobile 登录收敛——删 Supabase 直连，统一邮箱密码直发](060-web-mobile-login-consolidation.md) | TODO | 059（与 061/062 同并行组，scope 两两不相交） |
 | 061 | [iOS 登录收敛——删 SupabaseAuth，统一邮箱密码直发](061-ios-login-consolidation.md) | TODO | 059（与 060 同并行组） |
 | 062 | [server 数据层迁 prisma-next（已撤回）](062-server-prisma-next-datalayer.md) | WITHDRAWN（2026-07-28 用户复议放弃 Prisma，数据库改 prod-jp 自托管，数据层代码不动） | — |
