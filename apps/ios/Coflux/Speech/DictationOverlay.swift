@@ -7,11 +7,24 @@ import UIKit
 struct DictationOverlay: View {
     @ObservedObject var session: DictationSession
     let pendingCancel: Bool
+    /// 权限被拒/失败态下点任意处关闭——用户手指已经离开占位条（endDictation
+    /// 已触发），这两态浮层刻意留驻等一次主动点击，否则「前往设置」按钮
+    /// 永远点不到（松手瞬间浮层就随手势收尾一起拆了）
+    let onDismiss: () -> Void
+
+    private var isDismissable: Bool {
+        switch session.phase {
+        case .permissionDenied, .failed: return true
+        default: return false
+        }
+    }
 
     var body: some View {
         ZStack {
             VariableBlurView(intensity: 0.7)
                 .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { if isDismissable { onDismiss() } }
             VStack(spacing: 20) {
                 Spacer()
                 engineBadge
