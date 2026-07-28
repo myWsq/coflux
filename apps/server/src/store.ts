@@ -4,7 +4,8 @@
  * 运行时（不落盘）：daemon/client 连接、relay channel、短期 waiter —— 见 hub。
  * token 一律只存 sha256 hash（见 secrets.ts）。
  *
- * 表全部位于独立 schema `coflux`（不用 `public`，避免与 Supabase 自带对象/PostgREST 暴露面混杂）；
+ * 表全部位于独立 schema `coflux`（历史因由：曾托管 Supabase 时避开其自带对象/PostgREST 暴露面；
+ * 2026-07-28 迁 prod-jp 自托管后沿用，不折腾）；
  * 连接时用 `connection.search_path` 固定指向它，SQL 里不必显式加 schema 前缀。
  *
  * 列名用 snake_case（Postgres 惯例，免加引号）；应用层对象一律 camelCase（匹配 @coflux/protocol），
@@ -431,8 +432,8 @@ export class Store {
   /** 建连 + 建 schema/表。生产/开发通用；`databaseUrl` 由 config.ts 的 fail-closed 体系提供。 */
   static async connect(databaseUrl: string): Promise<Store> {
     const sql = postgres(databaseUrl, {
-      max: 5, // 生产走 Supabase session pooler，免费版客户端连接额度有限，单实例用不了多的
-      ssl: "prefer", // 本地自托管通常明文；托管 Supabase pooler 要求 TLS——两边都能连
+      max: 5, // 单用户轻负载，单实例用不了多的（生产是 prod-jp 本机 PG，plan 063）
+      ssl: "prefer", // 本机/localhost 明文直连；若换要求 TLS 的托管 PG 也能连
       transform: postgres.camel,
       // extra_float_digits=3：float8 按 shortest-round-trip 输出，读回不丢精度
       // （postgres.js 启动包默认压成 0，会把 capturedAt 之类的时间戳截到 15 位）。
@@ -1101,7 +1102,7 @@ export class Store {
         AND session_checkpoints.snapshot_seq < excluded.snapshot_seq
       RETURNING session_id
     `;
-    // 不 RETURNING *：ansi_snapshot 上百 KB，从 Supabase 回传是纯 egress 浪费；快照本就在入参里。
+    // 不 RETURNING *：ansi_snapshot 上百 KB，回传是纯浪费；快照本就在入参里。
     if (!rows[0]) return undefined;
     await this.pruneSessionCheckpoints(accountId, now);
     return {

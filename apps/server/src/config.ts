@@ -39,7 +39,7 @@ export const config = {
   port: int("COFLUX_PORT", DEFAULT_PORT),
   // 默认只绑 localhost：生产由反向代理(Caddy)对外，不直接暴露端口。需对外监听设 COFLUX_HOST=0.0.0.0。
   host: process.env.COFLUX_HOST ?? "127.0.0.1",
-  // Postgres 连接串（含密码，视为秘密）：生产必须显式提供（Supabase session pooler）；
+  // Postgres 连接串（含密码，视为秘密）：生产必须显式提供（prod-jp 本机 PG，plan 063）；
   // dev（COFLUX_DEV=1）弱默认落到本机裸 Postgres。见 plans/002。
   databaseUrl: secret("DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/postgres"),
   // web 登录：用户名 + 密码（单租户）。登录成功签发会话 token 给 web 存用，用户不碰 token。
