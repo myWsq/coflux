@@ -127,14 +127,25 @@ struct WorkspaceDetailView: View {
             .presentationBackground(.clear)
         }
         .overlay(alignment: .bottomTrailing) {
-            // 右下浮键列（plan 053 气泡 → plan 056 常驻两态）：键盘键折叠态=
-            // 展开输入区、展开态=收起输入区（收起入口只此一处，输入区内不再有）；
-            // 激活终端离底时上方浮现滚到底键。
+            // 右下浮键列（plan 053 气泡 → plan 056 常驻两态 → plan 057 收编新建）：
+            // 排序频率倒挂——新建（低频）最上、滚到底（离底浮现）居中、
+            // 键盘键守最下拇指位（折叠态=展开输入区、展开态=收起输入区，
+            // 收起入口只此一处，输入区内不再有）。
             // 布局切换刻意不做动画：终端高度一步到位只触发一次 resize，
             // 动画期间逐帧 resize 会引发远端 TUI 重画闪动；过渡只给浮键自己
             ZStack {
                 if !members.isEmpty {
                     VStack(spacing: 12) {
+                        Button {
+                            createTerminal()
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(Theme.Fonts.body.weight(.medium))
+                                .foregroundStyle(Theme.foreground)
+                                .frame(width: 52, height: 52)
+                        }
+                        .glassEffect(.regular.interactive(), in: .circle)
+                        .accessibilityLabel("新建终端")
                         if let taskID = activeTask?.id, atBottomByTask[taskID] == false {
                             Button {
                                 TerminalModeRegistry.shared.scrollToBottom(taskID: taskID)
@@ -229,16 +240,6 @@ struct WorkspaceDetailView: View {
                             }
                             .id(task.id)
                     }
-                    Button {
-                        createTerminal()
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(Theme.Fonts.label.weight(.semibold))
-                            .foregroundStyle(Theme.mutedForeground)
-                            .frame(width: 30, height: 30)
-                    }
-                    .glassEffect(.regular.interactive(), in: .circle)
-                    .accessibilityLabel("新建终端")
                 }
                 .padding(.horizontal, 16)
                 // 垂直留白必须在 ScrollView 内容里而非外面：药丸边缘高光
