@@ -10,6 +10,7 @@
 		CF0000000000000000000020 /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000001D /* SwiftProtobuf */; };
 		CF0000000000000000000021 /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000001E /* SwiftProtobuf */; };
 		CF0000000000000000000022 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000001F /* SwiftTerm */; };
+		CF0000000000000000000026 /* Opus in Frameworks */ = {isa = PBXBuildFile; productRef = CF0000000000000000000025 /* Opus */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -40,6 +41,7 @@
 			files = (
 				CF0000000000000000000020 /* SwiftProtobuf in Frameworks */,
 				CF0000000000000000000022 /* SwiftTerm in Frameworks */,
+				CF0000000000000000000026 /* Opus in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -96,6 +98,7 @@
 			packageProductDependencies = (
 				CF000000000000000000001D /* SwiftProtobuf */,
 				CF000000000000000000001F /* SwiftTerm */,
+				CF0000000000000000000025 /* Opus */,
 			);
 			productName = Coflux;
 			productReference = CF0000000000000000000004 /* Coflux.app */;
@@ -157,6 +160,7 @@
 			packageReferences = (
 				CF000000000000000000001C /* XCRemoteSwiftPackageReference "swift-protobuf" */,
 				CF0000000000000000000023 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+				CF0000000000000000000024 /* XCRemoteSwiftPackageReference "swift-opus" */,
 			);
 			productRefGroup = CF0000000000000000000003 /* Products */;
 			projectDirPath = "";
@@ -454,6 +458,14 @@
 				minimumVersion = 1.2.0;
 			};
 		};
+		CF0000000000000000000024 /* XCRemoteSwiftPackageReference "swift-opus" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/alta/swift-opus.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.0.2;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -471,6 +483,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = CF0000000000000000000023 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
 			productName = SwiftTerm;
+		};
+		CF0000000000000000000025 /* Opus */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CF0000000000000000000024 /* XCRemoteSwiftPackageReference "swift-opus" */;
+			productName = Opus;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
