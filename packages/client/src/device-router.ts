@@ -92,6 +92,8 @@ export interface OpenedDeviceTransport {
   leaseExpiresAt?: number;
   /** direct handshake 因 LEASE_INVALID 内部续签时，把实际采用的 lease 回写给 route。 */
   lease?: OnlineDeviceLease;
+  /** relay transport 专用：rendezvous URL 的 host（如 relay-jp.coflux.dev），供 UI 展示实际经过的节点（plan 065 多节点）。 */
+  relayHost?: string;
   send: (frame: Uint8Array<ArrayBuffer>) => boolean;
   close: () => void;
 }
@@ -153,6 +155,7 @@ interface DeviceChannel {
   generation: bigint;
   scopes: Set<DeviceScope>;
   leaseExpiresAt?: number;
+  relayHost?: string;
   lane: LaneKind;
   closed: boolean;
   send: (frame: Uint8Array<ArrayBuffer>) => boolean;
@@ -671,9 +674,16 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       throw error;
     }
 
+    let relayHost: string | undefined;
+    try {
+      relayHost = new URL(relayUrl).host;
+    } catch {
+      // relayUrl 由中心 rendezvous 拼出，理论必为合法 URL；解析失败只丢展示信息，不影响管道。
+    }
     const transport: OpenedDeviceTransport = {
       channelId,
       scopes: new Set([DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE]),
+      relayHost,
       send(frame) {
         if (socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > MAX_DEVICE_FRAME_BYTES) return false;
         socket.send(frame);
@@ -738,6 +748,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       generation,
       scopes: new Set(transport.scopes),
       leaseExpiresAt: transport.leaseExpiresAt ?? transport.lease?.expiresAt ?? lease?.expiresAt,
+      relayHost: transport.relayHost,
       lane,
       closed: false,
       send: transport.send,
@@ -1091,14 +1102,16 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     lane.recoveryAttempts = 0;
     if (lane.recoveryTimer !== undefined) clock.clearTimeout(lane.recoveryTimer);
     lane.recoveryTimer = undefined;
+    // relay 节点名来自 rendezvous URL（plan 065 多节点就近）：展示实际经过的节点而非 daemon 偏好。
+    const relayVia = channel.relayHost ? `（${channel.relayHost}）` : "";
     publish(
       route,
       channel.kind,
       channel.kind === "direct"
         ? "同机 Device 数据直连本地 daemon"
         : route.localFailure
-          ? `本地直连不可用，已回退中心 relay：${route.localFailure}`
-          : "Device 数据经中心 opaque relay",
+          ? `本地直连不可用，已回退中心 relay${relayVia}：${route.localFailure}`
+          : `Device 数据经中心 opaque relay${relayVia}`,
       channel,
     );
 
