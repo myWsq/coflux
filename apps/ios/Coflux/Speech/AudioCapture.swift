@@ -2,6 +2,7 @@ import AVFoundation
 
 enum SpeechCaptureError: Error {
     case converterUnavailable
+    case inputUnavailable
 }
 
 /// 共享采音器（plan 064 决策）：一份 AVAudioEngine tap，统一重采样到 16kHz mono
@@ -31,7 +32,15 @@ final class AudioCapture: @unchecked Sendable {
 
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
+        // 无输入路由/权限受限时 inputNode 报 0Hz/0ch，把它交给 installTap 会
+        // NSException(SIGABRT) 直接崩进程（AVAudioEngine 不容忍无效格式，
+        // 2026-07-29 真机长按崩溃 + 模拟器探针复现同源）。此处拦下走报错态
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            throw SpeechCaptureError.inputUnavailable
+        }
         guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
             throw SpeechCaptureError.converterUnavailable
         }
         self.converter = converter

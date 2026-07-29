@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import Speech
+import UIKit
 
 private struct DictationTimeoutError: Error {}
 
@@ -51,11 +52,27 @@ final class DictationSession: ObservableObject {
     }
 
     private func start() async {
+        let firstAsk = AVAudioApplication.shared.recordPermission != .granted
         guard await Self.requestMicPermission() else {
             phase = .permissionDenied
             return
         }
         let speechGranted = await Self.requestSpeechPermission()
+        guard !teardownRequested else { return }
+
+        // 真机长按崩溃根因（2026-07-29，栈：_ReportRPCTimeout →
+        // AURemoteIO::Initialize → [AVAudioEngine inputNode]）：权限框刚收起
+        // 的瞬间 app 尚未回到 active、mediaserverd 的授权迁移未完成，此时起
+        // AURemoteIO 会 RPC 超时被 AudioToolbox 直接 abort——app 侧 catch 不住，
+        // 只能消除时序：等回 active（上限 2s 防挂死），首次授权再多留一拍缓冲
+        var waited = 0
+        while UIApplication.shared.applicationState != .active, waited < 2000 {
+            try? await Task.sleep(for: .milliseconds(100))
+            waited += 100
+        }
+        if firstAsk {
+            try? await Task.sleep(for: .milliseconds(400))
+        }
         guard !teardownRequested else { return }
 
         do {
