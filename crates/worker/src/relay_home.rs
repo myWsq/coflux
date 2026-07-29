@@ -100,13 +100,14 @@ async fn run_selector(
             continue;
         }
 
+        // probe_now 只唤醒探测后的等待：探测期间到达的通知会保留一个 permit，
+        // 本轮完成后立即触发下一轮；重复通知天然合并，不能取消正在进行的探测。
         let measurements = tokio::select! {
             changed = nodes_rx.changed() => {
                 if changed.is_err() { return; }
                 home = None;
                 continue;
             },
-            _ = probe.notified() => continue,
             measurements = probe_nodes(nodes.as_ref(), &connector, timeout) => measurements,
         };
 
