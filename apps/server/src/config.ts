@@ -13,6 +13,48 @@ function int(name: string, def: number): number {
 const isDev = process.env.COFLUX_DEV === "1";
 const missingSecrets: string[] = [];
 
+export interface RelayNodeConfig {
+  id: string;
+  url: string;
+}
+
+function parseRelayNodes(raw: string | undefined, fallbackUrl: string): RelayNodeConfig[] {
+  if (raw === undefined || raw.trim() === "") {
+    return fallbackUrl ? [{ id: "default", url: fallbackUrl }] : [];
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("COFLUX_RELAY_NODES 必须是合法 JSON 数组");
+  }
+  if (!Array.isArray(value)) throw new Error("COFLUX_RELAY_NODES 必须是 JSON 数组");
+
+  const ids = new Set<string>();
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== "object") throw new Error(`COFLUX_RELAY_NODES[${index}] 必须是对象`);
+    const { id, url } = entry as { id?: unknown; url?: unknown };
+    if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+      throw new Error(`COFLUX_RELAY_NODES[${index}].id 必须是 1-64 位字母、数字、_ 或 -`);
+    }
+    if (ids.has(id)) throw new Error(`COFLUX_RELAY_NODES 中 relay id 重复: ${id}`);
+    ids.add(id);
+    if (typeof url !== "string" || !url) throw new Error(`COFLUX_RELAY_NODES[${index}].url 必须是非空字符串`);
+
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error(`COFLUX_RELAY_NODES[${index}].url 不是合法 URL`);
+    }
+    if ((parsed.protocol !== "ws:" && parsed.protocol !== "wss:") || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error(`COFLUX_RELAY_NODES[${index}].url 必须是无凭证、query、fragment 的 ws/wss 基址`);
+    }
+    return { id, url: url.replace(/\/+$/, "") };
+  });
+}
+
 // 身份提供方：local（默认，env 用户名+密码单账号）| password（自建邮箱密码多账号）。
 // 见 plans/059（Supabase 已全面退役，历史决策见 plans/001）。local 模式行为与历史完全一致；
 // password 模式把「你是谁」外包给自建 users 表的 scrypt 口令校验，会话/数据/授权全部由
@@ -24,6 +66,8 @@ if (authRaw !== "local" && authRaw !== "password") {
 }
 const authProvider: "local" | "password" = authRaw;
 const isLocal = authProvider === "local";
+const relayUrl = process.env.COFLUX_RELAY_URL ?? (isDev ? "ws://127.0.0.1:8790" : "");
+const relayNodes = parseRelayNodes(process.env.COFLUX_RELAY_NODES, relayUrl);
 
 /** 秘密类配置：生产必须由环境变量提供；开发回落到 devDefault（弱值，仅本地用）。
  * required=false 的项（如 password 模式下的 env 口令）不参与 fail-closed 校验。 */
@@ -74,9 +118,11 @@ export const config = {
   /** 独立 relay（plan 043）：token 签名种子（秘密，hex 裸 32B ed25519 seed）。对应公钥经
    * `COFLUX_RELAY_PUBKEY` 注入 relay 进程；轮换时先双公钥并存再撤旧（见 plans/043 维护注记）。 */
   relaySigningKeySeed: secret("COFLUX_RELAY_SIGNING_KEY", "636f666c75782d6465762d72656c61792d7369676e696e672d73656564212121"),
-  /** relay 对外基址（如 `wss://relay.coflux.dev`）；未配置时 rendezvous 明确报错，
-   * 数据面退化为 direct-only。dev 默认指向 `pnpm dev:relay` 的本机明文端口。 */
-  relayUrl: process.env.COFLUX_RELAY_URL ?? (isDev ? "ws://127.0.0.1:8790" : ""),
+  /** 旧单节点入口；未配置 COFLUX_RELAY_NODES 时用它合成 id=default 的单节点清单，
+   * dev 默认仍指向 `pnpm dev:relay` 的本机明文端口。 */
+  relayUrl,
+  /** relay 对外节点静态清单；列表首项是 daemon 未上报 home 时的 rendezvous 回退节点。 */
+  relayNodes,
   /** relay token TTL：上限 120s 必须 ≤ relay 侧 tombstone 窗口，保证 token 重放必然失败。 */
   relayTokenTtlMs: Math.max(10_000, Math.min(120_000, int("COFLUX_RELAY_TOKEN_TTL_MS", 60_000))),
   /** lifecycle prepared template 的投递/执行窗口；过期 frame 会被 worker 拒绝。 */

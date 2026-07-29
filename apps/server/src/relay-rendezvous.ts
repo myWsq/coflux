@@ -57,6 +57,12 @@ export function buildRelayPipeUrl(base: string, token: string): string {
   return `${base.replace(/\/+$/, "")}/v1/pipe?token=${token}`;
 }
 
+/** 一条 channel 的两端必须落在同一节点：优先 daemon 当前 home；尚未上报或 id 已失效时
+ * 回退静态清单首项。节点列表为空表示中心没有可用 relay。 */
+export function selectRelayNode<T extends { id: string }>(nodes: readonly T[], homeRelayId?: string): T | undefined {
+  return (homeRelayId ? nodes.find((node) => node.id === homeRelayId) : undefined) ?? nodes[0];
+}
+
 /** 按需拨号（deviceRelayDial）自 v0.13.0 起才被 worker 认识；更老的 worker 收到该 payload 会
  * 静默丢弃，client 于是连上 relay 干等到配对超时——现场表现为"设备在线但怎么都连不上"，
  * 且 server/relay 两侧都只留下一句超时。这里在 rendezvous 前把它拦成一句人话。
