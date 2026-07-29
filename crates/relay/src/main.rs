@@ -22,7 +22,7 @@ use coflux_protocol::MAX_DEVICE_FRAME_BYTES;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -47,6 +47,7 @@ const TOMBSTONE_TTL: Duration = Duration::from_secs(120);
 const TOKEN_DOMAIN: &[u8] = b"coflux-relay-token-v1";
 const TOKEN_VERSION: u32 = 1;
 const HEALTHZ_REQUEST_PREFIX: &[u8] = b"GET /healthz ";
+const MAX_HEALTHZ_REQUEST_BYTES: usize = 8 * 1024;
 const HEALTHZ_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n";
 
 type Ws = WebSocketStream<TcpStream>;
@@ -201,8 +202,9 @@ async fn main() {
 
 async fn handle_connection(mut stream: TcpStream, registry: Arc<Registry>, pubkey: Arc<VerifyingKey>) -> Result<(), String> {
     // 普通 HTTP 请求不会进入 tungstenite 的 Upgrade 回调；先以 peek 识别 healthz，
-    // 不消费任何非 healthz 字节，保证 /v1/pipe 的握手输入与原先完全相同。
+    // 仅确认 healthz 后才消费完整请求头，保证 /v1/pipe 的握手输入与原先完全相同。
     if is_healthz_request(&stream).await? {
+        consume_healthz_request(&mut stream).await?;
         stream.write_all(HEALTHZ_RESPONSE).await.map_err(|error| format!("写 healthz 响应失败: {error}"))?;
         stream.shutdown().await.map_err(|error| format!("关闭 healthz 连接失败: {error}"))?;
         return Ok(());
@@ -311,6 +313,29 @@ async fn is_healthz_request(stream: &TcpStream) -> Result<bool, String> {
         }
         // peek 不消费已有的半截前缀，等待下一批字节，避免在同一可读状态上忙循环。
         tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+async fn consume_healthz_request(stream: &mut TcpStream) -> Result<(), String> {
+    let mut request = Vec::with_capacity(1024);
+    let mut chunk = [0_u8; 1024];
+    loop {
+        if request.len() == MAX_HEALTHZ_REQUEST_BYTES {
+            return Err(format!("healthz 请求头超过 {MAX_HEALTHZ_REQUEST_BYTES} 字节"));
+        }
+        let remaining = MAX_HEALTHZ_REQUEST_BYTES - request.len();
+        let read_limit = remaining.min(chunk.len());
+        let read = stream
+            .read(&mut chunk[..read_limit])
+            .await
+            .map_err(|error| format!("读取 healthz 请求失败: {error}"))?;
+        if read == 0 {
+            return Err("healthz 请求在头部结束前关闭".to_string());
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(());
+        }
     }
 }
 
