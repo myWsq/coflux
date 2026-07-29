@@ -218,7 +218,8 @@ export function mkRepo() {
 
 /**
  * 只起 server（不起 Rust daemon），用于 supabase 模式等需要自定认证/装配的测试。
- * opts.env 追加/覆盖 server 环境变量（如 COFLUX_AUTH、SUPABASE_URL）。
+ * opts.env 追加/覆盖 server 环境变量（如 COFLUX_AUTH）；manageRelay=false 时调用方自行
+ * 装配 relay 与签名配置（多节点测试用），stop() 不接管这些外部 relay。
  */
 export async function startServer(opts = {}) {
   const port = opts.port;
@@ -227,20 +228,25 @@ export async function startServer(opts = {}) {
   // 测试栈总是配一个 relay 进程（随机端口 + 每栈临时密钥），rendezvous 才有落点；
   // 这只是测试装配——生产上 relay 独立部署（自有主机/域名），与中心零连接、只共享密钥对。
   // config 对 COFLUX_RELAY_SIGNING_KEY 也是 fail-closed。
-  const relayKeys = makeRelayKeys();
+  const manageRelay = opts.manageRelay !== false;
+  const relayKeys = manageRelay ? makeRelayKeys() : null;
   const ref = {};
   let relayPort;
   let serverEnv;
   try {
-    const relay = await spawnRelay(relayKeys.pubHex);
-    ref.relay = relay.process;
-    relayPort = relay.port;
+    if (manageRelay) {
+      const relay = await spawnRelay(relayKeys.pubHex);
+      ref.relay = relay.process;
+      relayPort = relay.port;
+    }
     serverEnv = {
       ...process.env,
       COFLUX_PORT: String(port),
       DATABASE_URL: testDb.url,
-      COFLUX_RELAY_SIGNING_KEY: relayKeys.seedHex,
-      COFLUX_RELAY_URL: `ws://127.0.0.1:${relay.port}`,
+      ...(manageRelay ? {
+        COFLUX_RELAY_SIGNING_KEY: relayKeys.seedHex,
+        COFLUX_RELAY_URL: `ws://127.0.0.1:${relayPort}`,
+      } : {}),
       ...(opts.env ?? {}),
     };
     ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
