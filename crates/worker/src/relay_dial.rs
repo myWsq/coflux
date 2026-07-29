@@ -14,11 +14,12 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::device::{ChannelReceiver, DeviceRuntime};
+use crate::relay_home::RelayHomeSelector;
 
 /// 写超时与中心 WS 同理：黑洞网络下 send 可能永久挂起，必须有限时失败。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 
-pub fn spawn(device: Arc<DeviceRuntime>, dial: DeviceRelayDial, connect_timeout_ms: u64) {
+pub fn spawn(device: Arc<DeviceRuntime>, dial: DeviceRelayDial, connect_timeout_ms: u64, relay_home: RelayHomeSelector) {
     tokio::spawn(async move {
         let channel_id = dial.channel_id.clone();
         let receiver = match device.open_relay(&dial) {
@@ -28,24 +29,39 @@ pub fn spawn(device: Arc<DeviceRuntime>, dial: DeviceRelayDial, connect_timeout_
                 return;
             }
         };
-        if let Err(error) = run(&device, &dial.relay_url, &channel_id, receiver, connect_timeout_ms).await {
+        let ws = match connect(&dial.relay_url, connect_timeout_ms).await {
+            Ok(ws) => ws,
+            Err(error) => {
+                eprintln!("[worker] relay channel {channel_id} 拨号失败: {error}");
+                relay_home.probe_now();
+                device.close_relay(&channel_id);
+                return;
+            }
+        };
+        if let Err(error) = run(&device, ws, &channel_id, receiver).await {
             eprintln!("[worker] relay channel {channel_id} 结束: {error}");
         }
         device.close_relay(&channel_id);
     });
 }
 
-async fn run(
-    device: &Arc<DeviceRuntime>,
+async fn connect(
     relay_url: &str,
-    channel_id: &str,
-    mut receiver: ChannelReceiver,
     connect_timeout_ms: u64,
-) -> Result<(), String> {
+) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, String> {
     let (ws, _) = tokio::time::timeout(Duration::from_millis(connect_timeout_ms), connect_async(relay_url))
         .await
         .map_err(|_| format!("relay connect 超时（{connect_timeout_ms}ms）"))?
         .map_err(|error| format!("relay connect: {error}"))?;
+    Ok(ws)
+}
+
+async fn run(
+    device: &Arc<DeviceRuntime>,
+    ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    channel_id: &str,
+    mut receiver: ChannelReceiver,
+) -> Result<(), String> {
     let (mut sink, mut stream) = ws.split();
     loop {
         tokio::select! {

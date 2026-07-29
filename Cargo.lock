@@ -196,7 +196,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

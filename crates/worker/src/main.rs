@@ -13,6 +13,7 @@ mod local_auth;
 mod ops;
 mod ports;
 mod relay_dial;
+mod relay_home;
 mod tunnel;
 
 use std::collections::HashMap;
@@ -276,6 +277,11 @@ async fn main() {
 
     let (to_server_tx, to_server_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
     let (to_sup_tx, to_sup_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2048);
+    let relay_home = relay_home::RelayHomeSelector::spawn(
+        to_server_tx.clone(),
+        Duration::from_millis(env_u64("COFLUX_RELAY_PROBE_INTERVAL_MS", 60_000).max(50)),
+        Duration::from_millis(env_u64("COFLUX_RELAY_PROBE_TIMEOUT_MS", 3_000).max(50)),
+    );
 
     // gateway 身份损坏/不可写只关闭 direct；中心 relay 与既有 daemon 能力照常启动。
     let local_auth = match local_auth::LocalAuth::load_or_create(&home) {
@@ -425,6 +431,7 @@ async fn main() {
         to_sup_tx,
         local_auth,
         device,
+        relay_home,
     )
     .await;
 }
@@ -575,9 +582,12 @@ async fn server_loop(
     to_sup_tx: Sender<Vec<u8>>,
     local_auth: Option<Arc<local_auth::LocalAuth>>,
     device: Arc<device::DeviceRuntime>,
+    relay_home: relay_home::RelayHomeSelector,
 ) {
     let mut attempts: u32 = 0;
     loop {
+        // home 是单条 control WS 的 presence；每次重连先清空，等新清单重新探测并上报。
+        relay_home.clear();
         // 黑洞网络下 TCP/TLS/WS 握手可能永久挂起（无 RST/FIN、无错误返回）——connect_async
         // 本身也要包超时，否则这是第二个永久挂死路径（idle watchdog 只覆盖"连上之后"）。
         match tokio::time::timeout(Duration::from_millis(cfg.connect_timeout_ms), connect_async(&cfg.server_url)).await {
@@ -595,6 +605,7 @@ async fn server_loop(
                     &to_sup_tx,
                     local_auth.as_ref(),
                     &device,
+                    &relay_home,
                 )
                 .await;
             }
@@ -610,6 +621,7 @@ async fn server_loop(
             auth.set_server_online(false);
         }
         device.close_relays();
+        relay_home.clear();
         attempts += 1;
         tokio::time::sleep(backoff(attempts, &cfg)).await;
     }
@@ -626,6 +638,7 @@ async fn run_server_connection(
     to_sup_tx: &Sender<Vec<u8>>,
     local_auth: Option<&Arc<local_auth::LocalAuth>>,
     device: &Arc<device::DeviceRuntime>,
+    relay_home: &relay_home::RelayHomeSelector,
 ) {
     let (mut sink, mut stream) = ws.split();
     let write_timeout = Duration::from_millis(cfg.idle_grace_ms.max(1_000));
@@ -762,6 +775,7 @@ async fn run_server_connection(
                         &tunnels,
                         local_auth,
                         device,
+                        relay_home,
                     ).await,
                     // WS 上只有 binary message；收到 text/其它帧类型说明对端协议版本不对——
                     // 丢弃并记日志，不 panic（与解码失败的处理原则一致）。
@@ -792,6 +806,7 @@ async fn on_server_message(
     tunnels: &tunnel::TunnelSet,
     local_auth: Option<&Arc<local_auth::LocalAuth>>,
     device: &Arc<device::DeviceRuntime>,
+    relay_home: &relay_home::RelayHomeSelector,
 ) {
     let envelope = match wire::ServerToDaemon::decode(bytes) {
         Ok(e) => e,
@@ -929,8 +944,12 @@ async fn on_server_message(
                         }
                     }
                     server_to_daemon::Payload::DeviceRelayDial(dial) => {
-                        // 拨号失败/被拒不回中心——client 侧以配对超时自愈并重新 rendezvous。
-                        relay_dial::spawn(device.clone(), dial, cfg.connect_timeout_ms);
+                        // 拨号失败不另回 channel 结果；立即唤醒 home 重探，client 重试 rendezvous
+                        // 时中心就会按新上报的 home 指路。指令本身无效则只在本地拒绝。
+                        relay_dial::spawn(device.clone(), dial, cfg.connect_timeout_ms, relay_home.clone());
+                    }
+                    server_to_daemon::Payload::RelayNodeList(wire::RelayNodeList { nodes }) => {
+                        relay_home.set_nodes(nodes);
                     }
                     server_to_daemon::Payload::SessionCatalogRequest(request) => device.request_server_catalog(request),
                     server_to_daemon::Payload::ExitAck(request) => device.acknowledge_exits(request),
