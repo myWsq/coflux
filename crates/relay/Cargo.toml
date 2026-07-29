@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 # 只取 MAX_DEVICE_FRAME_BYTES 等常量做单一真相；刻意不使用任何 DeviceEnvelope 编解码。
 coflux-protocol = { path = "../protocol" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 # 明文 WS 即可：TLS 由部署侧（Caddy）终结，与 server 同一惯例。
 tokio-tungstenite = "0.24"
 futures-util = "0.3"

@@ -22,6 +22,7 @@ use coflux_protocol::MAX_DEVICE_FRAME_BYTES;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -45,6 +46,8 @@ const TOMBSTONE_TTL: Duration = Duration::from_secs(120);
 /// token 签名的 domain separation 前缀（`域 + 0x00 + payload`，同 local gateway 签名惯例）。
 const TOKEN_DOMAIN: &[u8] = b"coflux-relay-token-v1";
 const TOKEN_VERSION: u32 = 1;
+const HEALTHZ_REQUEST_PREFIX: &[u8] = b"GET /healthz ";
+const HEALTHZ_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n";
 
 type Ws = WebSocketStream<TcpStream>;
 
@@ -196,7 +199,15 @@ async fn main() {
     }
 }
 
-async fn handle_connection(stream: TcpStream, registry: Arc<Registry>, pubkey: Arc<VerifyingKey>) -> Result<(), String> {
+async fn handle_connection(mut stream: TcpStream, registry: Arc<Registry>, pubkey: Arc<VerifyingKey>) -> Result<(), String> {
+    // 普通 HTTP 请求不会进入 tungstenite 的 Upgrade 回调；先以 peek 识别 healthz，
+    // 不消费任何非 healthz 字节，保证 /v1/pipe 的握手输入与原先完全相同。
+    if is_healthz_request(&stream).await? {
+        stream.write_all(HEALTHZ_RESPONSE).await.map_err(|error| format!("写 healthz 响应失败: {error}"))?;
+        stream.shutdown().await.map_err(|error| format!("关闭 healthz 连接失败: {error}"))?;
+        return Ok(());
+    }
+
     // token 验证放在 upgrade 回调里：不合法的请求以 HTTP 状态码拒绝，根本不建 WS。
     let captured = Arc::new(Mutex::new(None::<(TokenClaims, Role)>));
     let callback_captured = captured.clone();
@@ -285,6 +296,24 @@ async fn handle_connection(stream: TcpStream, registry: Arc<Registry>, pubkey: A
     result.map_err(|reason| format!("channel {channel_id}: {reason}"))
 }
 
+async fn is_healthz_request(stream: &TcpStream) -> Result<bool, String> {
+    let mut prefix = [0_u8; HEALTHZ_REQUEST_PREFIX.len()];
+    loop {
+        let read = stream.peek(&mut prefix).await.map_err(|error| format!("读取请求前缀失败: {error}"))?;
+        if read == 0 {
+            return Err("请求在发送首行前关闭".to_string());
+        }
+        if prefix[..read] != HEALTHZ_REQUEST_PREFIX[..read] {
+            return Ok(false);
+        }
+        if read == HEALTHZ_REQUEST_PREFIX.len() {
+            return Ok(true);
+        }
+        // peek 不消费已有的半截前缀，等待下一批字节，避免在同一可读状态上忙循环。
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
 impl Registry {
     fn close_channel(&self, channel_id: &str) {
         self.channels
@@ -355,5 +384,87 @@ async fn pump(mut from: SplitStream<Ws>, mut to: SplitSink<Ws, Message>) -> Resu
             Some(Ok(_)) => {}
             Some(Err(error)) => return Err(format!("读取失败: {error}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn test_keys() -> (SigningKey, Arc<VerifyingKey>) {
+        let signing = SigningKey::from_bytes(&[7_u8; 32]);
+        let verifying = Arc::new(signing.verifying_key());
+        (signing, verifying)
+    }
+
+    fn signed_token(signing: &SigningKey, channel_id: &str, role: &str) -> String {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "v": TOKEN_VERSION,
+            "channelId": channel_id,
+            "role": role,
+            "exp": now_ms() + 60_000.0,
+        }))
+        .unwrap();
+        let mut message = Vec::from(TOKEN_DOMAIN);
+        message.push(0);
+        message.extend_from_slice(&payload);
+        let signature = signing.sign(&message);
+        format!("{}.{}", URL_SAFE_NO_PAD.encode(payload), URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+    }
+
+    async fn test_listener(expected_connections: usize, verifying: Arc<VerifyingKey>) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let registry = Arc::new(Registry { channels: Mutex::new(HashMap::new()) });
+        let task = tokio::spawn(async move {
+            for _ in 0..expected_connections {
+                let (stream, _) = listener.accept().await.unwrap();
+                let registry = registry.clone();
+                let verifying = verifying.clone();
+                tokio::spawn(async move {
+                    let _ = handle_connection(stream, registry, verifying).await;
+                });
+            }
+        });
+        (addr, task)
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_plain_http_200() {
+        let (_, verifying) = test_keys();
+        let (addr, listener) = test_listener(1, verifying).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: relay\r\n\r\n").await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with(b"\r\n\r\nok\n"));
+        listener.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pipe_still_pairs_and_forwards_binary_frames() {
+        let (signing, verifying) = test_keys();
+        let (addr, listener) = test_listener(2, verifying).await;
+        let channel_id = "healthz-pipe-regression";
+        let client_token = signed_token(&signing, channel_id, "client");
+        let daemon_token = signed_token(&signing, channel_id, "daemon");
+        let (mut client, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/v1/pipe?token={client_token}"
+        ))
+        .await
+        .unwrap();
+        let (mut daemon, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/v1/pipe?token={daemon_token}"
+        ))
+        .await
+        .unwrap();
+
+        client.send(Message::Binary(vec![1, 2, 3].into())).await.unwrap();
+        assert_eq!(daemon.next().await.unwrap().unwrap(), Message::Binary(vec![1, 2, 3].into()));
+        listener.await.unwrap();
     }
 }
