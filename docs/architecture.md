@@ -1,6 +1,6 @@
 # coflux 架构设计
 
-> 状态：本地优先架构已实现；relay 数据面已剥离为独立服务（plan 043）。supervisor/sessiond
+> 状态：本地优先架构已实现；relay 数据面已剥离为可多节点部署的独立服务（plan 043/065）。supervisor/sessiond
 > 是唯一 PTY、VT、history、holder 与 sequence authority；同机 web 优先直连 loopback gateway，
 > 中心只负责账号、设备、项目/task 编排、relay rendezvous（token 签发）与有界 checkpoint。
 > 远端或本地直连不可用时自动经独立部署的 `coflux-relay` 中转。
@@ -109,10 +109,24 @@ channel 断开由 client 重新 rendezvous。daemon 侧零驻留连接（按需�
 断开时主动关闭全部 relay channel（语义与旧路径一致）。direct 恢复后，router 用更高 transport
 generation 自动 promotion；同一 logical client、holder 与 input queue 不变。
 
-生产部署：relay 是**独立部署**的服务（自有主机/域名，不与中心捆绑）；中心配置
-`COFLUX_RELAY_SIGNING_KEY`（签名种子）与 `COFLUX_RELAY_URL`（对外 relay 基址），relay 进程只需
-`COFLUX_RELAY_PUBKEY`（对应公钥 hex）与监听地址，TLS 由 Caddy 终结。relay 与中心之间没有任何
-连接——耦合面只有这对签名密钥。本片为单节点；多节点就近探测/选择见第二片计划。
+多节点使用 daemon home relay 模型：中心在 daemon 认证后下发静态节点清单；worker 把每个 ws/wss
+基址换成 http/https 后 GET `/healthz`，多次采样取 RTT 中位数并带滞后选择 home，周期重探，relay
+拨号失败时立即重探。daemon 上报 home id 后，中心把同一 channel 的 client 与 daemon **都**指向该
+节点；尚未上报时回退清单首项。relay 节点之间没有互联或转发，client/web/iOS 也不接收清单、不做
+探测，只消费 rendezvous 返回的单个 `relay_url`。home 是在线连接的纯内存 presence，不进入数据库。
+
+生产可在多地 VPS 各运行一份 `coflux-relay`，由当地 Caddy 终结 TLS 并把 `/healthz`、`/v1/pipe`
+反代到 relay 的明文监听端口。所有节点注入同一个 `COFLUX_RELAY_PUBKEY`；中心保留对应的单一
+`COFLUX_RELAY_SIGNING_KEY`，并配置按优先回退顺序排列的节点列表：
+
+```sh
+COFLUX_RELAY_NODES='[{"id":"jp","url":"wss://relay-jp.example.com"},{"id":"us","url":"wss://relay-us.example.com"}]'
+```
+
+`id` 应短、稳定且唯一；列表首项必须是最稳的主节点，因为旧 worker、刚连接尚未完成探测的 worker
+都回退到它。改清单后重启中心，daemon 随控制 WS 重连取得新列表。只部署单节点时可继续只设
+`COFLUX_RELAY_URL`，中心会合成 `id=default` 的单项清单，拨号行为与原来一致。relay 仍不向中心注册，
+也不持账号/节点数据库；两者之间没有连接，耦合面只有共享签名密钥。
 
 mobile 已冻结，不启用 loopback direct；它使用同一 DeviceRouter 的 relay-only 配置，因此没有旧
 `taskAttach/ptyInput/ptyOutput/clientExec/clientFs*` 兼容路径。
