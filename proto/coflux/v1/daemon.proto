@@ -85,6 +85,12 @@ message ProxyClosed {
   string conn_id = 1;
 }
 
+// daemon 探测中心下发的 relay 节点后，上报当前 home；仅存于本次在线连接的 presence，
+// 重连后必须重报。relay_id 必须来自最近一次 RelayNodeList。
+message RelayHome {
+  string relay_id = 1;
+}
+
 message DaemonToServer {
   // 旧 raw PTY mirror 与 server-routed exec/fs 已由 DeviceEnvelope 取代。
   // 22-23 是控制面复用 relay 路径（plan 043 改为独立 relay + rendezvous 后删除）。
@@ -112,6 +118,7 @@ message DaemonToServer {
     // sessiond truth 的完整 reconciliation snapshot；server 不得据此关闭 unknown live session。
     DeviceSessionCatalog session_catalog = 27;
     PreparedDeviceOperationInstalled prepared_device_operation_installed = 28;
+    RelayHome relay_home = 29;
   }
 }
 
@@ -213,6 +220,16 @@ message ProxyClose {
   string conn_id = 1;
 }
 
+// 中心静态配置的 relay 节点清单；认证完成后下发一次，首项兼作 daemon 尚未上报 home
+// 时的 rendezvous 回退节点。url 是 ws/wss 对外基址，不含 /v1/pipe。
+message RelayNodeList {
+  message RelayNode {
+    string id = 1;
+    string url = 2;
+  }
+  repeated RelayNode nodes = 1;
+}
+
 message ServerToDaemon {
   // 旧 replay/input/resize/RPC adapter 已删除；生命周期编排与 proxy control 继续保留。
   // 26-28 是控制面复用 relay 路径（plan 043 改为独立 relay + rendezvous 后删除）。
@@ -241,6 +258,7 @@ message ServerToDaemon {
     DeviceExitAck exit_ack = 31;
     PreparedDeviceOperation prepared_device_operation = 32;
     DeviceRelayDial device_relay_dial = 33;
+    RelayNodeList relay_node_list = 34;
     ProxyData proxy_data = 19;
     WorkspaceList workspace_list = 20;
   }

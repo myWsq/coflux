@@ -67,7 +67,7 @@ import {
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
 import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
-import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, supportsRelayDial, validRelayId } from "./relay-rendezvous.js";
+import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, selectRelayNode, supportsRelayDial, validRelayId } from "./relay-rendezvous.js";
 import { LocalControlPlane } from "./local-control.js";
 import { verifyPassword } from "./auth.js";
 
@@ -99,6 +99,8 @@ export interface DaemonConn {
   /** 握手上报的 CPU 架构（std::env::consts::ARCH），仅供自动升级编排做 target 映射，不下发给 web。 */
   arch: string;
   ws: WebSocket;
+  /** daemon 探测选出的 home relay；纯连接 presence，重连后由新 worker 重新上报。 */
+  homeRelayId?: string;
 }
 export interface ClientConn {
   ws: WebSocket;
@@ -258,6 +260,8 @@ export class Hub {
     conn.accountId = accountId;
     const daemon = { ws: conn.ws, info, accountId, arch };
     this.daemons.set(info.daemonId, daemon);
+    // 新 oneof 对旧 worker 会按 protobuf unknown field 解成空 payload 并忽略；无需版本门。
+    this.sendDaemon(daemon, { case: "relayNodeList", value: { nodes: config.relayNodes } });
     await this.store.touchDevice(info.daemonId, Date.now());
     this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: { ...info, online: true } } });
     await this.pushWorkspaceList(info.daemonId);
@@ -874,6 +878,20 @@ export class Hub {
       case "daemonResync": {
         const value = msg.payload.value;
         await this.reconcileDaemonSessions(conn.daemonId!, conn.accountId!, value.sessions);
+        break;
+      }
+      case "relayHome": {
+        const daemon = this.currentDaemon(conn);
+        if (!daemon) break;
+        const relayId = msg.payload.value.relayId;
+        if (!config.relayNodes.some((node) => node.id === relayId)) {
+          log.warn("daemon reported unknown home relay", { daemonId: daemon.info.daemonId, relayId });
+          break;
+        }
+        if (daemon.homeRelayId !== relayId) {
+          daemon.homeRelayId = relayId;
+          log.info("daemon home relay changed", { daemonId: daemon.info.daemonId, relayId });
+        }
         break;
       }
       case "localGatewayAnnounce": {
@@ -1671,7 +1689,7 @@ export class Hub {
     ) {
       return void fail("relay channel/principal/version 无效");
     }
-    if (!config.relayUrl) return void fail("中心未配置 relay 节点");
+    if (config.relayNodes.length === 0) return void fail("中心未配置 relay 节点");
     if (!allowRendezvous(client)) return void fail("rendezvous 频率超限");
 
     const daemon = this.daemons.get(request.daemonId);
@@ -1680,12 +1698,14 @@ export class Hub {
       return void fail(`设备 worker 版本过旧（${daemon.info.workerVersion}），不支持按需拨号；在该设备上运行 \`cofluxd update && cofluxd restart\` 后重试`);
     }
 
+    const relayNode = selectRelayNode(config.relayNodes, daemon.homeRelayId);
+    if (!relayNode) return void fail("中心未配置 relay 节点");
     const ttl = config.relayTokenTtlMs;
     this.sendDaemon(daemon, {
       case: "deviceRelayDial",
       value: {
         channelId: request.channelId,
-        relayUrl: buildRelayPipeUrl(config.relayUrl, this.relayTokens.sign(request.channelId, "daemon", ttl)),
+        relayUrl: buildRelayPipeUrl(relayNode.url, this.relayTokens.sign(request.channelId, "daemon", ttl)),
         accountId: client.accountId,
         clientInstanceId: request.clientInstanceId,
         transportGeneration: request.transportGeneration,
@@ -1698,7 +1718,7 @@ export class Hub {
       value: {
         channelId: request.channelId,
         ok: true,
-        relayUrl: buildRelayPipeUrl(config.relayUrl, this.relayTokens.sign(request.channelId, "client", ttl)),
+        relayUrl: buildRelayPipeUrl(relayNode.url, this.relayTokens.sign(request.channelId, "client", ttl)),
       },
     });
   }

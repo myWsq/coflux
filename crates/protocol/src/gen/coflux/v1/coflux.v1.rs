@@ -1692,9 +1692,16 @@ pub struct ProxyClosed {
     #[prost(string, tag="1")]
     pub conn_id: ::prost::alloc::string::String,
 }
+/// daemon 探测中心下发的 relay 节点后，上报当前 home；仅存于本次在线连接的 presence，
+/// 重连后必须重报。relay_id 必须来自最近一次 RelayNodeList。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RelayHome {
+    #[prost(string, tag="1")]
+    pub relay_id: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -1740,6 +1747,8 @@ pub mod daemon_to_server {
         SessionCatalog(super::DeviceSessionCatalog),
         #[prost(message, tag="28")]
         PreparedDeviceOperationInstalled(super::PreparedDeviceOperationInstalled),
+        #[prost(message, tag="29")]
+        RelayHome(super::RelayHome),
     }
 }
 /// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
@@ -1878,9 +1887,26 @@ pub struct ProxyClose {
     #[prost(string, tag="1")]
     pub conn_id: ::prost::alloc::string::String,
 }
+/// 中心静态配置的 relay 节点清单；认证完成后下发一次，首项兼作 daemon 尚未上报 home
+/// 时的 rendezvous 回退节点。url 是 ws/wss 对外基址，不含 /v1/pipe。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RelayNodeList {
+    #[prost(message, repeated, tag="1")]
+    pub nodes: ::prost::alloc::vec::Vec<relay_node_list::RelayNode>,
+}
+/// Nested message and enum types in `RelayNodeList`.
+pub mod relay_node_list {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct RelayNode {
+        #[prost(string, tag="1")]
+        pub id: ::prost::alloc::string::String,
+        #[prost(string, tag="2")]
+        pub url: ::prost::alloc::string::String,
+    }
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 33, 19, 20")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 33, 34, 19, 20")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -1929,6 +1955,8 @@ pub mod server_to_daemon {
         PreparedDeviceOperation(super::PreparedDeviceOperation),
         #[prost(message, tag="33")]
         DeviceRelayDial(super::DeviceRelayDial),
+        #[prost(message, tag="34")]
+        RelayNodeList(super::RelayNodeList),
         #[prost(message, tag="19")]
         ProxyData(super::ProxyData),
         #[prost(message, tag="20")]
