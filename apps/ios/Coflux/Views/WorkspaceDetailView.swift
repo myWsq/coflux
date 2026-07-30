@@ -34,6 +34,10 @@ struct WorkspaceDetailView: View {
     /// 都清空。豆包优先、Apple 本地降级只在 session.start() 内部判定一次。
     @State private var dictationSession: DictationSession?
     @State private var dictationPendingCancel = false
+    /// 成稿态（plan 066）：松手后同步置位，蒙层立即留驻展示草稿，不等
+    /// session.finish() 落定；finish() 落定前 dictationFinalizing 拦发送。
+    @State private var dictationReleased = false
+    @State private var dictationFinalizing = false
     /// 逐任务离底态（plan 056）：true = 在底部。未上报（无输出/未滚动）视为在底
     @State private var atBottomByTask: [String: Bool] = [:]
     /// 逐任务底部空白（pt，TerminalHostView 上报）：未上报视为满屏（整量抬升）
@@ -219,11 +223,24 @@ struct WorkspaceDetailView: View {
                 DictationOverlay(
                     session: dictationSession,
                     pendingCancel: dictationPendingCancel,
-                    onDismiss: { self.dictationSession = nil }
+                    released: dictationReleased,
+                    finalizing: dictationFinalizing,
+                    onDismiss: { closeDictationOverlay() },
+                    onSend: {
+                        sendText(dictationSession.displayText)
+                        closeDictationOverlay()
+                    },
+                    onEdit: {
+                        let text = dictationSession.displayText
+                        closeDictationOverlay()
+                        if !text.isEmpty { draft = text }
+                        setComposing(true)
+                    }
                 )
             }
         }
         .animation(.easeOut(duration: 0.15), value: dictationSession != nil)
+        .animation(.easeOut(duration: 0.15), value: dictationReleased)
         .background(Theme.background)
         .onChange(of: inputCollapsed) { _, collapsed in
             UserDefaults.standard.set(collapsed, forKey: Self.padCollapsedKey(workspace.id))
@@ -405,35 +422,49 @@ struct WorkspaceDetailView: View {
         withTransaction(transaction) { composing = on }
     }
 
-    /// 发送成文草稿到激活任务：单行字面文本原样落终端，不追加回车、不包
+    /// 发送文本到激活任务：单行字面文本原样落终端，不追加回车、不包
     /// bracketed paste（plan 054/055 复议 053——包裹依赖接收端 2004 模式，
     /// 未开时草稿内 \n 会被当回车执行，即真机「时灵时不灵」根因；提交时机
-    /// 由用户按控制板大回车决定）。输入框已单行化，换行符只可能经粘贴混入，
-    /// 信任边界上以空格拍平。
-    private func sendDraft() {
-        guard let task = activeTask, task.status == .running, task.hasSessionID, !draft.isEmpty else { return }
-        let payload = draft.components(separatedBy: .newlines).joined(separator: " ")
+    /// 由用户按控制板大回车/对讲蒙层「发送」决定）。换行符只可能经粘贴/
+    /// 语音混入，信任边界上以空格拍平。成文草稿与对讲成稿共用此路径
+    /// （plan 066 landmine：蒙层发送不得绕过它自行写终端）。
+    private func sendText(_ text: String) {
+        guard let task = activeTask, task.status == .running, task.hasSessionID, !text.isEmpty else { return }
+        let payload = text.components(separatedBy: .newlines).joined(separator: " ")
         client.sendInput(sessionID: task.sessionID, payload)
+    }
+
+    private func sendDraft() {
+        sendText(draft)
         draft = ""
         // 呈现层的拆除由 overlay 的 fadeOutAndDismiss 统一走淡出时序，此处不拆
     }
 
-
-    // MARK: - 长按对讲（plan 064）：占位条长按开始，上滑松手取消，
-    // 直接松手完成——转写结果只落草稿、打开成文层等用户确认发送，
-    // 不直发终端（对讲误听的代价比打字误触大得多，必须过一道人工确认）
+    // MARK: - 长按对讲（plan 064；成稿态 plan 066）：占位条长按开始，上滑
+    // 松手取消，直接松手完成——完成后蒙层留驻成稿：文字定格，发送直落
+    // 终端 / 点文字进成文层编辑 / 弃掉拆层，不再自动弹成文层打断。
 
     private func beginDictation() {
         let session = DictationSession()
         dictationSession = session
         dictationPendingCancel = false
+        dictationReleased = false
+        dictationFinalizing = false
         session.begin()
     }
 
-    /// 松手完成路径必须等 session.finish() 把 phase 落定后再判断——权限被拒/
-    /// 引擎失败往往在 start() 内部异步才写进 phase，若在 finish() 返回前就
-    /// 点 dictationSession = nil，浮层会在用户来得及看到「前往设置」引导前
-    /// 被拆掉（DictationSession.finish 内部已 await startTask 保证这点）。
+    private func closeDictationOverlay() {
+        dictationSession = nil
+        dictationReleased = false
+        dictationFinalizing = false
+    }
+
+    /// 松手完成路径：蒙层立即切成稿态（不等 session.finish() 落定——草稿先
+    /// 显示当前已转写文本，终稿到达后 session.displayText 原位更新）；
+    /// finish() 仍必须在后台跑：松手即停止占用麦克风，不能拖到用户点发送
+    /// 才释放（landmine）。finish() 落定后按结果收敛：权限被拒退回旧的
+    /// 引导留驻态；无字可看的失败退回旧的错误留驻态；正常但空转写直接
+    /// 拆层（无稿可确认）；其余（含失败但已有文字）留在成稿态。
     private func endDictation(cancelled: Bool) {
         guard let session = dictationSession else { return }
         dictationPendingCancel = false
@@ -442,27 +473,26 @@ struct WorkspaceDetailView: View {
             session.cancel()
             return
         }
+        dictationReleased = true
+        dictationFinalizing = true
         Task {
             let text = await session.finish()
+            guard dictationSession === session else { return }
+            dictationFinalizing = false
             switch session.phase {
             case .permissionDenied:
-                // 权限被拒不可能转写出文字，浮层留驻等用户点任意处关闭即可
-                return
+                // 不可能转写出文字，退回旧的引导留驻态（点任意处关闭）
+                dictationReleased = false
             case .failed:
-                // 中途断连（如豆包握手后掉线）不等于没说话：已转写文字要保留
-                // 落 draft（plan 064 决策：断连不换引擎，结束会话保留已转写
-                // 文字），浮层仍留驻展示错误，等用户点任意处关闭（此时占位条
-                // 已能看见落下的草稿，不强行弹开成文层打断）
-                if !text.isEmpty { draft = text }
-                return
+                // 无字可看的失败退回旧的错误留驻态；有字（如豆包中途断连）
+                // 留在成稿态，浮层一并展示错误标注（decided 2026-07-30）
+                if text.isEmpty { dictationReleased = false }
             default:
-                break
+                if text.isEmpty {
+                    // 空转写：无稿可确认，直接拆层（不再弹空成文层）
+                    closeDictationOverlay()
+                }
             }
-            dictationSession = nil
-            if !text.isEmpty {
-                draft = text
-            }
-            setComposing(true)
         }
     }
 
