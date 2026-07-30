@@ -22,6 +22,9 @@ struct TerminalInputArea: View {
     @State private var repeatTimer: Timer?
     @State private var dictateActive = false
     @State private var longPressTask: Task<Void, Never>?
+    /// 按下瞬间（判定通过前）的按压视觉态（plan 066）：与 dictateActive 分开，
+    /// 覆盖 180ms 判定窗口——判定期占位条毫无动静是"不跟手"投诉的一环
+    @State private var pressing = false
 
     private var sessionID: String? {
         guard let task, task.status == .running, task.hasSessionID else { return nil }
@@ -63,18 +66,24 @@ struct TerminalInputArea: View {
         .frame(height: 38)
         .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
         .contentShape(RoundedRectangle(cornerRadius: 10))
+        .scaleEffect(pressing ? 0.97 : 1)
+        .animation(.easeOut(duration: 0.08), value: pressing)
         .gesture(composerGesture)
     }
 
     /// 单一 DragGesture 而非 Button+onLongPressGesture 叠加：两个手势识别器
     /// 抢事件会吞掉短按/加长按延迟（真实存在的冲突类，故不叠加、只用一个）。
-    /// 280ms 判定长按阈值，-80pt 上滑判定取消阈值。
+    /// 180ms 判定长按阈值（plan 066，2026-07-30 用户定案，280ms 太钝），-80pt
+    /// 上滑判定取消阈值。按下瞬间（首个 onChanged）先给触觉+按压视觉，不等
+    /// 判定通过，让手指一落地就有回馈。
     private var composerGesture: some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 if !dictateActive && longPressTask == nil {
+                    pressing = true
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     longPressTask = Task {
-                        try? await Task.sleep(for: .milliseconds(280))
+                        try? await Task.sleep(for: .milliseconds(180))
                         guard !Task.isCancelled else { return }
                         dictateActive = true
                         onDictateBegin()
@@ -87,6 +96,7 @@ struct TerminalInputArea: View {
             .onEnded { value in
                 longPressTask?.cancel()
                 longPressTask = nil
+                pressing = false
                 if dictateActive {
                     let cancelled = value.translation.height < Self.dictateCancelThreshold
                     dictateActive = false

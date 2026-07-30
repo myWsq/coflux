@@ -52,26 +52,39 @@ final class DictationSession: ObservableObject {
     }
 
     private func start() async {
-        let firstAsk = AVAudioApplication.shared.recordPermission != .granted
-        guard await AVAudioApplication.requestRecordPermission() else {
-            phase = .permissionDenied
-            return
-        }
-        let speechGranted = await Self.requestSpeechPermission()
-        guard !teardownRequested else { return }
+        let speechGranted: Bool
+        if AVAudioApplication.shared.recordPermission == .granted,
+            SFSpeechRecognizer.authorizationStatus() == .authorized
+        {
+            // 权限快路径（plan 066，2026-07-30 用户定案）：两个系统查询都能
+            // 同步读到，已授权时没有权限框弹出/收起这回事，下面那套"等回
+            // active + 400ms 缓冲"只为消化权限框收起的瞬态而存在（见慢路径
+            // 分支注释）——可以整段跳过，直接进 capture.start()，消除长按后
+            // 立即开口时头几百 ms 音频在采音开始前被丢的窗口。
+            speechGranted = true
+        } else {
+            let firstAsk = AVAudioApplication.shared.recordPermission != .granted
+            guard await AVAudioApplication.requestRecordPermission() else {
+                phase = .permissionDenied
+                return
+            }
+            let granted = await Self.requestSpeechPermission()
+            guard !teardownRequested else { return }
 
-        // 真机长按崩溃根因（2026-07-29，栈：_ReportRPCTimeout →
-        // AURemoteIO::Initialize → [AVAudioEngine inputNode]）：权限框刚收起
-        // 的瞬间 app 尚未回到 active、mediaserverd 的授权迁移未完成，此时起
-        // AURemoteIO 会 RPC 超时被 AudioToolbox 直接 abort——app 侧 catch 不住，
-        // 只能消除时序：等回 active（上限 2s 防挂死），首次授权再多留一拍缓冲
-        var waited = 0
-        while UIApplication.shared.applicationState != .active, waited < 2000 {
-            try? await Task.sleep(for: .milliseconds(100))
-            waited += 100
-        }
-        if firstAsk {
-            try? await Task.sleep(for: .milliseconds(400))
+            // 真机长按崩溃根因（2026-07-29，栈：_ReportRPCTimeout →
+            // AURemoteIO::Initialize → [AVAudioEngine inputNode]）：权限框刚收起
+            // 的瞬间 app 尚未回到 active、mediaserverd 的授权迁移未完成，此时起
+            // AURemoteIO 会 RPC 超时被 AudioToolbox 直接 abort——app 侧 catch 不住，
+            // 只能消除时序：等回 active（上限 2s 防挂死），首次授权再多留一拍缓冲
+            var waited = 0
+            while UIApplication.shared.applicationState != .active, waited < 2000 {
+                try? await Task.sleep(for: .milliseconds(100))
+                waited += 100
+            }
+            if firstAsk {
+                try? await Task.sleep(for: .milliseconds(400))
+            }
+            speechGranted = granted
         }
         guard !teardownRequested else { return }
 
