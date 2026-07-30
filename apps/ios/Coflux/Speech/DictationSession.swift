@@ -53,7 +53,7 @@ final class DictationSession: ObservableObject {
 
     private func start() async {
         let firstAsk = AVAudioApplication.shared.recordPermission != .granted
-        guard await Self.requestMicPermission() else {
+        guard await AVAudioApplication.requestRecordPermission() else {
             phase = .permissionDenied
             return
         }
@@ -214,15 +214,10 @@ final class DictationSession: ObservableObject {
         }
     }
 
-    private static func requestMicPermission() async -> Bool {
-        await withCheckedContinuation { continuation in
-            AVAudioApplication.requestRecordPermission { granted in
-                continuation.resume(returning: granted)
-            }
-        }
-    }
-
-    private static func requestSpeechPermission() async -> Bool {
+    /// nonisolated 是必须的：类是 @MainActor，若闭包继承主线程隔离，tccd 在
+    /// 后台队列回调时 SE-0423 动态隔离检查会直接 SIGTRAP（2026-07-29 全部
+    /// 真机崩溃的根因，iOS 27 起回调不再落主线程）。
+    private nonisolated static func requestSpeechPermission() async -> Bool {
         await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { status in
                 continuation.resume(returning: status == .authorized)
