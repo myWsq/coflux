@@ -21,10 +21,9 @@ struct TerminalInputArea: View {
     let onDictateEnd: (Bool) -> Void
     @State private var repeatTimer: Timer?
     @State private var dictateActive = false
-    @State private var longPressTask: Task<Void, Never>?
-    /// 按下瞬间（判定通过前）的按压视觉态（plan 066）：与 dictateActive 分开，
-    /// 覆盖 180ms 判定窗口——判定期占位条毫无动静是"不跟手"投诉的一环
-    @State private var pressing = false
+    /// 按压视觉态：GestureState 在手势结束/被系统取消时自动复位，
+    /// 不会像手动 @State 那样在手势中断路径上卡住
+    @GestureState private var pressing = false
 
     private var sessionID: String? {
         guard let task, task.status == .running, task.hasSessionID else { return nil }
@@ -68,42 +67,41 @@ struct TerminalInputArea: View {
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .scaleEffect(pressing ? 0.97 : 1)
         .animation(.easeOut(duration: 0.08), value: pressing)
+        .onTapGesture { onCompose() }
         .gesture(composerGesture)
     }
 
-    /// 单一 DragGesture 而非 Button+onLongPressGesture 叠加：两个手势识别器
-    /// 抢事件会吞掉短按/加长按延迟（真实存在的冲突类，故不叠加、只用一个）。
-    /// 180ms 判定长按阈值（plan 066，2026-07-30 用户定案，280ms 太钝），-80pt
-    /// 上滑判定取消阈值。按下瞬间（首个 onChanged）先给触觉+按压视觉，不等
-    /// 判定通过，让手指一落地就有回馈。
+    /// 长按对讲手势（plan 066 复议 2026-07-30）：不自造长按判定——此前
+    /// DragGesture+定时器方案里，首个 onChanged 本身滞后于手指落下（要过
+    /// 系统手势消歧），自计时叠在这个不确定起点上，实际判定时长远超设定值
+    /// 且不稳定（真机投诉根因）。改用 iOS 原生语义：LongPressGesture 系统
+    /// 默认参数 sequenced DragGesture（Apple 官方"长按后拖动"组合），判定
+    /// 时长/移动容差/与点按的消歧全交系统；判定通过瞬间给触觉（context
+    /// menu 惯例），随后 drag 跟踪上滑取消（-80pt 阈值）。短按由
+    /// .onTapGesture 独立消歧，抬手即触发、不等长按超时。
     private var composerGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
+        LongPressGesture()
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .updating($pressing) { _, state, _ in
+                state = true
+            }
             .onChanged { value in
-                if !dictateActive && longPressTask == nil {
-                    pressing = true
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    longPressTask = Task {
-                        try? await Task.sleep(for: .milliseconds(180))
-                        guard !Task.isCancelled else { return }
-                        dictateActive = true
-                        onDictateBegin()
-                    }
+                guard case .second(true, let drag) = value else { return }
+                if !dictateActive {
+                    dictateActive = true
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    onDictateBegin()
                 }
-                if dictateActive {
-                    onDictateMove(value.translation.height < Self.dictateCancelThreshold)
-                }
+                onDictateMove((drag?.translation.height ?? 0) < Self.dictateCancelThreshold)
             }
             .onEnded { value in
-                longPressTask?.cancel()
-                longPressTask = nil
-                pressing = false
-                if dictateActive {
-                    let cancelled = value.translation.height < Self.dictateCancelThreshold
-                    dictateActive = false
-                    onDictateEnd(cancelled)
-                } else {
-                    onCompose()
+                guard dictateActive else { return }
+                dictateActive = false
+                var cancelled = false
+                if case .second(true, let drag) = value {
+                    cancelled = (drag?.translation.height ?? 0) < Self.dictateCancelThreshold
                 }
+                onDictateEnd(cancelled)
             }
     }
 
