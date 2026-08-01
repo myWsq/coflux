@@ -33,14 +33,15 @@ struct WorkspaceDetailView: View {
     /// 长按对讲会话（plan 064）：非 nil = 对讲态，浮层铺满屏幕；松手分发完
     /// 清空。豆包优先、Apple 本地降级只在 session.start() 内部判定一次。
     @State private var dictationSession: DictationSession?
-    /// 手指当前命中的底部扇区（plan 067）：蒙层拿它做高亮/提示，松手也按它
-    /// 分发——用户看到高亮的那个扇区就是执行的那个。
+    /// 手指当前命中的底部按钮（plan 068）：蒙层拿它做高亮/提示，松手也按它
+    /// 分发——用户看到高亮的那颗就是执行的那个。
     @State private var dictationZone: DictationZone = .none
-    /// 蒙层在全局坐标系里的框：扇区圆心 = 它的两个底角，命中判定与扇区绘制
-    /// 同源（手势位置也取 .global，两边同一坐标空间）。
+    /// 蒙层在全局坐标系里的框：按钮位置由它推出，命中判定与按钮绘制同源
+    /// （手势位置也取 .global，两边同一坐标空间）。
     @State private var dictationBounds: CGRect = .zero
-    /// session.finish() 尚未返回的短暂窗口：蒙层留驻等终稿，期间不接收交互。
-    @State private var dictationFinalizing = false
+    /// 蒙层相位（plan 068）：listening（手指在屏上）→ finalizing（等终稿）
+    /// → settled（确认态 / 留驻示错）。
+    @State private var dictationStage: DictationStage = .listening
     /// 逐任务离底态（plan 056）：true = 在底部。未上报（无输出/未滚动）视为在底
     @State private var atBottomByTask: [String: Bool] = [:]
     /// 逐任务底部空白（pt，TerminalHostView 上报）：未上报视为满屏（整量抬升）
@@ -226,13 +227,15 @@ struct WorkspaceDetailView: View {
                 DictationOverlay(
                     session: dictationSession,
                     zone: dictationZone,
-                    finalizing: dictationFinalizing,
-                    onDismiss: { closeDictationOverlay() }
+                    stage: dictationStage,
+                    onDiscard: { closeDictationOverlay() },
+                    onSend: { sendDictation() },
+                    onEdit: { editDictation() }
                 )
             }
         }
-        // 扇区几何真相源：蒙层就铺在这个框里，扇区圆心 = 框的两个底角，
-        // 命中判定（全局坐标）与蒙层绘制（对齐自身底角）由此同源
+        // 按钮几何真相源：蒙层就铺在这个框里，两颗胶囊按 DictationZone 的常量
+        // 从框的底边推出，命中判定（全局坐标）与蒙层绘制（对齐自身底边）同源
         .onGeometryChange(for: CGRect.self) { proxy in
             proxy.frame(in: .global)
         } action: { frame in
@@ -430,8 +433,8 @@ struct WorkspaceDetailView: View {
     /// 发送文本到激活任务：单行字面文本原样落终端，不追加回车、不包
     /// bracketed paste（plan 054/055 复议 053——包裹依赖接收端 2004 模式，
     /// 未开时草稿内 \n 会被当回车执行，即真机「时灵时不灵」根因；提交时机
-    /// 由用户按控制板大回车决定——对讲松手也只落文本，回车仍在用户手里，
-    /// plan 067）。换行符只可能经粘贴/语音混入，信任边界上以空格拍平。
+    /// 由用户按控制板大回车决定——对讲确认发送也只落文本，回车仍在用户手里，
+    /// plan 067/068）。换行符只可能经粘贴/语音混入，信任边界上以空格拍平。
     /// 成文草稿与对讲成稿共用此路径（plan 066 landmine：蒙层落文本不得
     /// 绕过它自行写终端）。
     private func sendText(_ text: String) {
@@ -446,76 +449,95 @@ struct WorkspaceDetailView: View {
         // 呈现层的拆除由 overlay 的 fadeOutAndDismiss 统一走淡出时序，此处不拆
     }
 
-    // MARK: - 长按对讲（plan 064；微信式扇区操作台 plan 067 推翻 066 成稿
-    // 确认态）：占位条长按开始，蒙层底部常驻左「取消」右「编辑」两个扇区，
-    // 一次手势完成——滑进扇区松手即执行该操作，扇区外松手把文字落终端输入
-    // 行（不回车）并拆层。松手后不再留驻等第二次点击；误听的最终执行仍卡
-    // 在用户按终端回车这一层（2026-08-01 用户定案）。
+    // MARK: - 长按对讲（plan 064 → 066 确认态 → 067 松手直发 → plan 068
+    // 复议恢复确认关卡）：占位条长按开始，蒙层底部两颗按钮（左取消 / 右发送）。
+    // 快慢两档——按住期间滑进哪颗，松手就直接执行哪个；原地松手则进确认态，
+    // 草稿定格等用户点发送/点文字编辑。转写文字落终端必经显式确认：coflux
+    // 是纯转文字，识别错误没有兜底（2026-08-01 用户复议推翻 067 松手直发）。
 
     private func beginDictation() {
         let session = DictationSession()
         dictationSession = session
         dictationZone = .none
-        dictationFinalizing = false
+        dictationStage = .listening
         session.begin()
     }
 
     private func closeDictationOverlay() {
         dictationSession = nil
         dictationZone = .none
-        dictationFinalizing = false
+        dictationStage = .listening
     }
 
-    /// 松手分发：按松手瞬间命中的扇区决定去向。
-    /// - 取消扇区：立即弃稿拆层，不等终稿；
+    /// 松手分发：按松手瞬间命中的按钮决定去向。
+    /// - 取消：立即弃稿拆层，不等终稿；
     /// - 其余：finalizing 短暂留驻等 session.finish() 落定拿终稿——finish()
-    ///   在松手瞬间就跑（松手即释放麦克风，不能拖，landmine），且落定前
-    ///   不得拆 session/蒙层（权限引导会闪没，plan 066 landmine），也不得
-    ///   用松手瞬间的 volatile 文本抢跑。终稿到手后：编辑扇区 → 落 draft
-    ///   开成文层；扇区外 → 落终端输入行；空转写 → 直接拆层，什么都不落。
-    ///   权限被拒 / 无字可看的失败保留 064 的留驻示错态（点任意处关闭）。
+    ///   在松手瞬间就跑（松手即释放麦克风，不能拖到用户点发送，landmine），
+    ///   且落定前不得拆 session/蒙层（权限引导会闪没，plan 066 landmine），
+    ///   也不得用松手瞬间的 volatile 文本抢跑。终稿到手后：
+    ///   滑入发送 → 直接落终端输入行并拆层（手指滑过去就是明确意图）；
+    ///   原地松手 → 停在确认态等显式点击；空转写 → 直接拆层，什么都不落；
+    ///   权限被拒 / 无字可看的失败保留 064 的留驻示错态（点任意处关闭），
+    ///   失败带字则并入确认态（蒙层在气泡下加错误标注，文字仍可发送/编辑）。
     private func endDictation() {
         guard let session = dictationSession else { return }
         let zone = dictationZone
         dictationZone = .none
         if zone == .cancel {
             dictationSession = nil
+            dictationStage = .listening
             session.cancel()
             return
         }
-        dictationFinalizing = true
+        dictationStage = .finalizing
         Task {
             let text = await session.finish()
             guard dictationSession === session else { return }
-            dictationFinalizing = false
+            dictationStage = .settled
             if text.isEmpty {
                 switch session.phase {
                 case .permissionDenied, .failed:
                     return  // 留驻示错/引导，点任意处关闭
                 default:
                     closeDictationOverlay()  // 空转写：无字可落
-                    return
                 }
-            }
-            if zone == .edit {
-                closeDictationOverlay()
-                draft = text
-                setComposing(true)
                 return
             }
-            // 落地：能直发就走 sendText（单行不回车）；落不下去（任务已退出/
-            // 无 session，sendText 会静默 no-op）退到草稿，用户的话不能凭空消失
-            if terminalReady {
-                sendText(text)
-            } else {
-                draft = text
+            if zone == .send {
+                closeDictationOverlay()
+                deliver(text)
             }
-            if case .failed = session.phase {
-                // 失败但已有文字（如豆包中途断连）：文字照落，错误标注留一拍再拆
-                try? await Task.sleep(for: .milliseconds(1200))
-                guard dictationSession === session else { return }
-            }
-            closeDictationOverlay()
+            // zone == .none：停在确认态，等用户点发送 / 点草稿编辑 / 点取消
+        }
+    }
+
+    /// 确认态点「发送」：终稿已落定（确认态只在 finish() 返回后才出现），
+    /// 直接取当前文本落地。
+    private func sendDictation() {
+        guard let session = dictationSession else { return }
+        let text = session.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+        closeDictationOverlay()
+        deliver(text)
+    }
+
+    /// 确认态点草稿文字：落 draft 开成文层继续编辑（plan 066 的通道，
+    /// 067 删掉，068 恢复）。
+    private func editDictation() {
+        guard let session = dictationSession else { return }
+        let text = session.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+        closeDictationOverlay()
+        draft = text
+        setComposing(true)
+    }
+
+    /// 对讲成稿落地：能直发就走 sendText（单行不回车）；落不下去（任务已退出/
+    /// 无 session，sendText 会静默 no-op）退到草稿，用户的话不能凭空消失。
+    private func deliver(_ text: String) {
+        guard !text.isEmpty else { return }
+        if terminalReady {
+            sendText(text)
+        } else {
+            draft = text
         }
     }
 
