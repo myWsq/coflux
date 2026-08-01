@@ -14,9 +14,10 @@ struct TerminalInputArea: View {
     /// 草稿宿主持有：占位条只做预览，点击进与系统键盘同层的成文层
     let draft: String
     let onCompose: () -> Void
-    /// 长按对讲（plan 064；扇区操作台 plan 067）：按下即进入对讲态；手指位置
-    /// （全局坐标）实时外传，由宿主对蒙层底部扇区做命中判定并在松手时按最后
-    /// 命中的扇区分发（取消 / 编辑 / 落终端输入行）——本层不再自己判取消。
+    /// 长按对讲（plan 064；操作台几何 plan 067 → 068）：按下即进入对讲态；
+    /// 手指位置（全局坐标）实时外传，由宿主对蒙层底部两颗按钮做命中判定，
+    /// 松手时按最后命中的按钮分发（滑入取消 / 滑入发送 / 原地松手进确认
+    /// 态）——本层不判去向，只管把位置递出去。
     let onDictateBegin: () -> Void
     let onDictateMove: (CGPoint) -> Void
     let onDictateEnd: () -> Void
@@ -80,10 +81,15 @@ struct TerminalInputArea: View {
     /// 时长/移动容差/与点按的消歧全交系统；判定通过瞬间给触觉（context
     /// menu 惯例），随后 drag 把手指位置持续外传。短按由 .onTapGesture 独立
     /// 消歧，抬手即触发、不等长按超时。
-    /// 坐标空间取 .global（plan 067）：蒙层底角扇区的命中判定要和扇区几何
+    /// minimumDuration 0.28s（2026-08-01 用户实测定案；系统默认 0.5s 明显
+    /// 拖沓，再调需用户拍板）。与 066 结论的分界要看清：被否掉的是**自造
+    /// 计时**（DragGesture + Timer——首个 onChanged 本身滞后于手指落下，自
+    /// 计时叠在这个不确定起点上，实际判定时长失控），不是给系统手势传参；
+    /// 判定与和 .onTapGesture 的消歧此处仍全归系统，不是"又在自造阈值"。
+    /// 坐标空间取 .global（plan 067）：蒙层底部按钮的命中判定要和按钮几何
     /// 在同一坐标系里比，local（占位条自身坐标）没法和全屏蒙层对齐。
     private var composerGesture: some Gesture {
-        LongPressGesture()
+        LongPressGesture(minimumDuration: 0.28)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
             .updating($pressing) { _, state, _ in
                 state = true
