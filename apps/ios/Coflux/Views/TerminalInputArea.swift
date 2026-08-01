@@ -14,11 +14,12 @@ struct TerminalInputArea: View {
     /// 草稿宿主持有：占位条只做预览，点击进与系统键盘同层的成文层
     let draft: String
     let onCompose: () -> Void
-    /// 长按对讲（plan 064）：按下即进入对讲态；松手前上滑越过阈值再释放 = 取消，
-    /// 否则完成——move 回调只报是否已越过阈值（供浮层实时切换"松开取消"提示）
+    /// 长按对讲（plan 064；扇区操作台 plan 067）：按下即进入对讲态；手指位置
+    /// （全局坐标）实时外传，由宿主对蒙层底部扇区做命中判定并在松手时按最后
+    /// 命中的扇区分发（取消 / 编辑 / 落终端输入行）——本层不再自己判取消。
     let onDictateBegin: () -> Void
-    let onDictateMove: (Bool) -> Void
-    let onDictateEnd: (Bool) -> Void
+    let onDictateMove: (CGPoint) -> Void
+    let onDictateEnd: () -> Void
     @State private var repeatTimer: Timer?
     @State private var dictateActive = false
     /// 按压视觉态：GestureState 在手势结束/被系统取消时自动复位，
@@ -77,11 +78,13 @@ struct TerminalInputArea: View {
     /// 且不稳定（真机投诉根因）。改用 iOS 原生语义：LongPressGesture 系统
     /// 默认参数 sequenced DragGesture（Apple 官方"长按后拖动"组合），判定
     /// 时长/移动容差/与点按的消歧全交系统；判定通过瞬间给触觉（context
-    /// menu 惯例），随后 drag 跟踪上滑取消（-80pt 阈值）。短按由
-    /// .onTapGesture 独立消歧，抬手即触发、不等长按超时。
+    /// menu 惯例），随后 drag 把手指位置持续外传。短按由 .onTapGesture 独立
+    /// 消歧，抬手即触发、不等长按超时。
+    /// 坐标空间取 .global（plan 067）：蒙层底角扇区的命中判定要和扇区几何
+    /// 在同一坐标系里比，local（占位条自身坐标）没法和全屏蒙层对齐。
     private var composerGesture: some Gesture {
         LongPressGesture()
-            .sequenced(before: DragGesture(minimumDistance: 0))
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
             .updating($pressing) { _, state, _ in
                 state = true
             }
@@ -92,20 +95,14 @@ struct TerminalInputArea: View {
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     onDictateBegin()
                 }
-                onDictateMove((drag?.translation.height ?? 0) < Self.dictateCancelThreshold)
+                if let drag { onDictateMove(drag.location) }
             }
-            .onEnded { value in
+            .onEnded { _ in
                 guard dictateActive else { return }
                 dictateActive = false
-                var cancelled = false
-                if case .second(true, let drag) = value {
-                    cancelled = (drag?.translation.height ?? 0) < Self.dictateCancelThreshold
-                }
-                onDictateEnd(cancelled)
+                onDictateEnd()
             }
     }
-
-    private static let dictateCancelThreshold: CGFloat = -80
 
     // MARK: - 控制层
 
