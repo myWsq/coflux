@@ -315,7 +315,7 @@ export function Sidebar(props: SidebarProps) {
                               {hasDiff ? (
                                 <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                                   <FileDiff className="size-3 shrink-0 opacity-70" />
-                                  <span className="truncate">未提交变更 +{workspace.additions} −{workspace.deletions}</span>
+                                  <span className="truncate">相对 {project.defaultBranch || "默认分支"} 的变更 +{workspace.additions} −{workspace.deletions}</span>
                                 </span>
                               ) : null}
                             </div>

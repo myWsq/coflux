@@ -1181,12 +1181,24 @@ public struct Coflux_V1_DeviceProjectValidated: Sendable {
 
   public var operationID: String = String()
 
+  /// 仓库真实默认分支（remote HEAD 探测，如 origin/HEAD → master）；缺失时 server 回退 branch
+  /// （导入时恰好所在的分支）。diff 统计基准 merge-base(default_branch, HEAD) 依赖它。
+  public var defaultBranch: String {
+    get {_defaultBranch ?? String()}
+    set {_defaultBranch = newValue}
+  }
+  /// Returns true if `defaultBranch` has been explicitly set.
+  public var hasDefaultBranch: Bool {self._defaultBranch != nil}
+  /// Clears the value of `defaultBranch`. Subsequent reads from it will return its default value.
+  public mutating func clearDefaultBranch() {self._defaultBranch = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _error: String? = nil
   fileprivate var _suggestedName: String? = nil
+  fileprivate var _defaultBranch: String? = nil
 }
 
 /// 所有携带 operation_id 的设备事实变更均采用 session stop 所述的全局去重规则。
@@ -3862,7 +3874,7 @@ extension Coflux_V1_DeviceProjectValidate: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Coflux_V1_DeviceProjectValidated: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceProjectValidated"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{3}repo_path\0\u{1}branch\0\u{1}error\0\u{3}suggested_name\0\u{3}operation_id\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{3}repo_path\0\u{1}branch\0\u{1}error\0\u{3}suggested_name\0\u{3}operation_id\0\u{3}default_branch\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3877,6 +3889,7 @@ extension Coflux_V1_DeviceProjectValidated: SwiftProtobuf.Message, SwiftProtobuf
       case 5: try { try decoder.decodeSingularStringField(value: &self._error) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self._suggestedName) }()
       case 7: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self._defaultBranch) }()
       default: break
       }
     }
@@ -3908,6 +3921,9 @@ extension Coflux_V1_DeviceProjectValidated: SwiftProtobuf.Message, SwiftProtobuf
     if !self.operationID.isEmpty {
       try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 7)
     }
+    try { if let v = self._defaultBranch {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 8)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3919,6 +3935,7 @@ extension Coflux_V1_DeviceProjectValidated: SwiftProtobuf.Message, SwiftProtobuf
     if lhs._error != rhs._error {return false}
     if lhs._suggestedName != rhs._suggestedName {return false}
     if lhs.operationID != rhs.operationID {return false}
+    if lhs._defaultBranch != rhs._defaultBranch {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
