@@ -44,6 +44,19 @@ final class DictationSession: ObservableObject {
 
     private static let admissionTimeout: UInt64 = 2_500_000_000
 
+    /// 麦克风与语音识别是否都已授权。两个系统查询都能同步读到，故此判据
+    /// 一处两用：
+    /// - start() 的权限快路径（plan 066）：已授权时没有权限框弹出/收起这回事，
+    ///   慢路径那套等待可整段跳过；
+    /// - 预热准入（plan 069）：不满足就完全不预热——否则首次点一下占位条想
+    ///   打字就弹麦克风权限框。这同时把预热隔在"权限框刚收起就起 AURemoteIO
+    ///   被 AudioToolbox abort"的崩溃时序之外（见下面慢路径注释），别为了
+    ///   "预热也支持首次授权"把它打开。
+    static var permissionsGranted: Bool {
+        AVAudioApplication.shared.recordPermission == .granted
+            && SFSpeechRecognizer.authorizationStatus() == .authorized
+    }
+
     /// 长按触发：包一层 Task 存进 startTask，finish() 靠它等 phase 落定
     /// （权限被拒/引擎失败都在 start() 内部同步设置，await 它就不会读到
     /// 过期的 .connecting）。
@@ -53,14 +66,11 @@ final class DictationSession: ObservableObject {
 
     private func start() async {
         let speechGranted: Bool
-        if AVAudioApplication.shared.recordPermission == .granted,
-            SFSpeechRecognizer.authorizationStatus() == .authorized
-        {
-            // 权限快路径（plan 066，2026-07-30 用户定案）：两个系统查询都能
-            // 同步读到，已授权时没有权限框弹出/收起这回事，下面那套"等回
+        if Self.permissionsGranted {
+            // 权限快路径（plan 066，2026-07-30 用户定案）：下面那套"等回
             // active + 400ms 缓冲"只为消化权限框收起的瞬态而存在（见慢路径
-            // 分支注释）——可以整段跳过，直接进 capture.start()，消除长按后
-            // 立即开口时头几百 ms 音频在采音开始前被丢的窗口。
+            // 分支注释）——已授权时可以整段跳过，直接进 capture.start()，
+            // 消除长按后立即开口时头几百 ms 音频在采音开始前被丢的窗口。
             speechGranted = true
         } else {
             let firstAsk = AVAudioApplication.shared.recordPermission != .granted

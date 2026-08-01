@@ -30,9 +30,13 @@ struct WorkspaceDetailView: View {
     /// 键盘骑乘/面板位移方案均已尝试并废弃，冻结基座手感最好）
     @State private var composing = false
     @State private var draft = ""
-    /// 长按对讲会话（plan 064）：非 nil = 对讲态，浮层铺满屏幕；松手分发完
-    /// 清空。豆包优先、Apple 本地降级只在 session.start() 内部判定一次。
+    /// 长按对讲会话（plan 064）：非 nil = 已在采音；松手分发完清空。
+    /// 豆包优先、Apple 本地降级只在 session.start() 内部判定一次。
     @State private var dictationSession: DictationSession?
+    /// 蒙层可见性（plan 069）：与 session 生命周期解耦——预热期 session 已在
+    /// 采音而蒙层还不显示。两者绑死（此前的 `if let dictationSession`）会让
+    /// 按下占位条就闪一次蒙层，破坏 plan 066 定下的点击/长按系统消歧。
+    @State private var dictationOverlayVisible = false
     /// 手指当前命中的底部按钮（plan 068）：蒙层拿它做高亮/提示，松手也按它
     /// 分发——用户看到高亮的那颗就是执行的那个。
     @State private var dictationZone: DictationZone = .none
@@ -138,9 +142,11 @@ struct WorkspaceDetailView: View {
                         task: activeTask,
                         draft: draft,
                         onCompose: { setComposing(true) },
+                        onDictatePrewarm: { prewarmDictation() },
                         onDictateBegin: { beginDictation() },
                         onDictateMove: { dictationZone = DictationZone.hit($0, in: dictationBounds) },
-                        onDictateEnd: { endDictation() }
+                        onDictateEnd: { endDictation() },
+                        onDictateAbort: { abortDictation() }
                     )
                     .onGeometryChange(for: CGFloat.self) { proxy in
                         proxy.size.height
@@ -223,7 +229,7 @@ struct WorkspaceDetailView: View {
         .overlay {
             // 对讲浮层：不用 fullScreenCover（对讲不涉及系统键盘，不需要成文层
             // 那套呈现层+冻结基座机制），纯 .overlay 铺满即可，叠在其它层之上
-            if let dictationSession {
+            if dictationOverlayVisible, let dictationSession {
                 DictationOverlay(
                     session: dictationSession,
                     zone: dictationZone,
@@ -241,7 +247,7 @@ struct WorkspaceDetailView: View {
         } action: { frame in
             dictationBounds = frame
         }
-        .animation(.easeOut(duration: 0.15), value: dictationSession != nil)
+        .animation(.easeOut(duration: 0.15), value: dictationOverlayVisible)
         .background(Theme.background)
         .onChange(of: inputCollapsed) { _, collapsed in
             UserDefaults.standard.set(collapsed, forKey: Self.padCollapsedKey(workspace.id))
@@ -450,12 +456,43 @@ struct WorkspaceDetailView: View {
     }
 
     // MARK: - 长按对讲（plan 064 → 066 确认态 → 067 松手直发 → plan 068
-    // 复议恢复确认关卡）：占位条长按开始，蒙层底部两颗按钮（左取消 / 右发送）。
-    // 快慢两档——按住期间滑进哪颗，松手就直接执行哪个；原地松手则进确认态，
-    // 草稿定格等用户点发送/点文字编辑。转写文字落终端必经显式确认：coflux
-    // 是纯转文字，识别错误没有兜底（2026-08-01 用户复议推翻 067 松手直发）。
+    // 复议恢复确认关卡 → plan 069 乐观启动）：占位条长按开始，蒙层底部两颗
+    // 按钮（左取消 / 右发送）。快慢两档——按住期间滑进哪颗，松手就直接执行
+    // 哪个；原地松手则进确认态，草稿定格等用户点发送/点文字编辑。转写文字
+    // 落终端必经显式确认：coflux 是纯转文字，识别错误没有兜底（2026-08-01
+    // 用户复议推翻 067 松手直发）。
+    // 采音早于蒙层（plan 069）：按下即起 session（prewarm），长按判定通过才
+    // 显示蒙层（begin），未达长按松手则静默拆掉（abort）——按下瞬间说的话由
+    // session 的 pendingPCM 接住，蒙层显现时草稿里已有第一个词。
 
+    /// 按下即采音（plan 069）：touch down 去抖后起 session，蒙层不显示。
+    /// 长按判定通过时 beginDictation 直接接管这个 session——不得丢弃重建，
+    /// 那样预热采到的音全废，等于没做（landmine）。按下抖动可能重入，
+    /// 靠 session 非空幂等去重。
+    /// 未授权时整段跳过（判据见 DictationSession.permissionsGranted）：否则
+    /// 首次点一下占位条想打字就弹麦克风权限框。
+    private func prewarmDictation() {
+        guard dictationSession == nil, DictationSession.permissionsGranted else { return }
+        startDictation()
+    }
+
+    /// 长按判定通过：显示蒙层。session 通常已在预热中（复用）；未授权/预热被
+    /// 跳过时此刻才起，走完整 start()（含权限请求），与 069 之前完全一致。
     private func beginDictation() {
+        if dictationSession == nil { startDictation() }
+        dictationOverlayVisible = true
+    }
+
+    /// 未达长按就松手（plan 069）：静默拆预热 session，不弹任何提示——麦克风
+    /// 必须在这条路径上释放，否则悬挂 tap 让下次长按静音或崩溃（AudioCapture
+    /// landmine）。蒙层已显示 = 走的是正常松手分发（endDictation），不插手。
+    private func abortDictation() {
+        guard !dictationOverlayVisible, let session = dictationSession else { return }
+        dictationSession = nil
+        session.cancel()
+    }
+
+    private func startDictation() {
         let session = DictationSession()
         dictationSession = session
         dictationZone = .none
@@ -465,6 +502,7 @@ struct WorkspaceDetailView: View {
 
     private func closeDictationOverlay() {
         dictationSession = nil
+        dictationOverlayVisible = false
         dictationZone = .none
         dictationStage = .listening
     }
@@ -484,8 +522,7 @@ struct WorkspaceDetailView: View {
         let zone = dictationZone
         dictationZone = .none
         if zone == .cancel {
-            dictationSession = nil
-            dictationStage = .listening
+            closeDictationOverlay()
             session.cancel()
             return
         }
