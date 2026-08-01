@@ -14,18 +14,33 @@ struct TerminalInputArea: View {
     /// 草稿宿主持有：占位条只做预览，点击进与系统键盘同层的成文层
     let draft: String
     let onCompose: () -> Void
-    /// 长按对讲（plan 064；操作台几何 plan 067 → 068）：按下即进入对讲态；
-    /// 手指位置（全局坐标）实时外传，由宿主对蒙层底部两颗按钮做命中判定，
-    /// 松手时按最后命中的按钮分发（滑入取消 / 滑入发送 / 原地松手进确认
-    /// 态）——本层不判去向，只管把位置递出去。
+    /// 长按对讲（plan 064；操作台几何 plan 067 → 068；乐观启动 plan 069）：
+    /// 手指落下即请求预热采音（prewarm，去抖后），长按判定通过才进对讲态
+    /// （begin，宿主此刻才显示蒙层），未达长按松手则请求拆掉预热（abort）。
+    /// 对讲期间手指位置（全局坐标）实时外传，由宿主对蒙层底部两颗按钮做命中
+    /// 判定，松手时按最后命中的按钮分发（滑入取消 / 滑入发送 / 原地松手进
+    /// 确认态）——本层不判去向，只管把位置递出去。
+    let onDictatePrewarm: () -> Void
     let onDictateBegin: () -> Void
     let onDictateMove: (CGPoint) -> Void
     let onDictateEnd: () -> Void
+    let onDictateAbort: () -> Void
     @State private var repeatTimer: Timer?
     @State private var dictateActive = false
+    @State private var prewarmTask: Task<Void, Never>?
+    /// 对讲预兆的显现度（0-1，plan 069）：按下即向 1 渐变，见 pressChanged
+    @State private var dictateHint: Double = 0
     /// 按压视觉态：GestureState 在手势结束/被系统取消时自动复位，
     /// 不会像手动 @State 那样在手势中断路径上卡住
     @GestureState private var pressing = false
+
+    /// 预热去抖（plan 069）：手指落下到真正起采音之间的等待。AudioCapture 用
+    /// `.record` category，激活即打断其它音频播放并点亮状态栏橙点——点一下
+    /// 占位条打字不该付这个代价，正常点击（~60-120ms 抬手）必须被它完全滤掉；
+    /// 同时它远短于长按阈值 0.28s，不影响"按下即说"。
+    /// 注意这不是 plan 066 否掉的自造计时：长按判定与点按/长按的消歧仍全归
+    /// 系统手势，这个定时器只决定预热何时开始，不参与任何手势判定。
+    private static let prewarmDelay = Duration.milliseconds(120)
 
     private var sessionID: String? {
         guard let task, task.status == .running, task.hasSessionID else { return nil }
@@ -58,19 +73,56 @@ struct TerminalInputArea: View {
                 .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.foreground)
                 .lineLimit(1)
             Spacer()
-            if dictateActive {
-                Image(systemName: "mic.fill")
-                    .foregroundStyle(Theme.primary)
-            }
+            // 常驻占位、只调透明度：条件插入会让预兆显隐时行内布局跳一下
+            Image(systemName: "mic.fill")
+                .foregroundStyle(Theme.primary)
+                .opacity(dictateHint)
         }
         .padding(.horizontal, 12)
         .frame(height: 38)
         .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Theme.primary, lineWidth: 1)
+                .opacity(dictateHint)
+        }
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .scaleEffect(pressing ? 0.97 : 1)
         .animation(.easeOut(duration: 0.08), value: pressing)
         .onTapGesture { onCompose() }
         .gesture(composerGesture)
+        .onChange(of: pressing) { _, down in pressChanged(down) }
+        // 手指还按着时输入区被拆掉（收起控制板/离开工作区）：GestureState 复位
+        // 的 onChange 到不了这里，热着的预热 session 会连着麦克风悬在后台，
+        // 手动补一次抬手（蒙层已显示的正常对讲由宿主的 guard 挡住）
+        .onDisappear { pressChanged(false) }
+    }
+
+    /// 手指落下/离开（plan 069）：`pressing` 由 sequenced 手势的 .updating 驱动，
+    /// 是当前能拿到的最早按下信号（早于 0.28s 长按判定），一路管两件事——
+    /// - **视觉预兆**：mic 图标与 primary 边框渐显，让长按判定窗口不再是"按了
+    ///   没反应"的空白。刻意用慢 easeIn：正常点击（~60-120ms 抬手）时预兆几乎
+    ///   不可见，按住不放才完全显现。显式 withAnimation 给自己的曲线，不蹭
+    ///   上面按压缩放那条 0.08s。
+    /// - **预热采音**：去抖后请求宿主起 session（见 prewarmDelay）；抬手时
+    ///   若长按未判定通过则请求拆掉。abort 在宿主侧按"蒙层是否已显示"自判，
+    ///   故与 onEnded 的先后顺序无关，正常对讲的松手分发不会被它插一脚。
+    private func pressChanged(_ down: Bool) {
+        withAnimation(down ? .easeIn(duration: 0.3) : .easeOut(duration: 0.12)) {
+            dictateHint = down ? 1 : 0
+        }
+        prewarmTask?.cancel()
+        prewarmTask = nil
+        guard down else {
+            onDictateAbort()
+            return
+        }
+        prewarmTask = Task {
+            // sleep 被取消时 try? 会立刻返回，必须再查一次 isCancelled
+            try? await Task.sleep(for: Self.prewarmDelay)
+            guard !Task.isCancelled else { return }
+            onDictatePrewarm()
+        }
     }
 
     /// 长按对讲手势（plan 066 复议 2026-07-30）：不自造长按判定——此前
