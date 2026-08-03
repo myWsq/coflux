@@ -1,7 +1,8 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo, rawDaemon, tokenFromUrl } from "./harness.mjs";
@@ -88,6 +89,27 @@ test("导入项目：无有效 remote 时从规范仓库根目录取名称", asy
   c.send({ case: "projectImport", daemonId: stack.daemonId, path: subdir });
   const proj = await c.waitFor((m) => m.case === "projectCreated", "fallback project.created");
   assert.equal(proj.project.name, repo.dir.split("/").pop(), "回退名来自仓库根目录而非导入子目录");
+  device.close();
+});
+
+test("导入项目：默认分支取 origin/HEAD 而非导入时恰好所在的分支", async () => {
+  // 源仓库（充当 remote，HEAD 在 main）→ clone（本地路径，零网络，clone 自带 origin/HEAD）
+  // → 切到 feature 分支再导入。默认分支应探测为 main，而非导入时所在的 feat-x。
+  const origin = mkRepo();
+  repos.push(origin);
+  execFileSync("git", ["-C", origin.dir, "branch", "feat-x"]);
+  const clone = mkdtempSync(join(tmpdir(), "coflux-test-clone-"));
+  repos.push({ cleanup: () => { try { rmSync(clone, { recursive: true, force: true }); } catch {} } });
+  execFileSync("git", ["clone", "-q", origin.dir, clone]);
+  execFileSync("git", ["-C", clone, "checkout", "-q", "feat-x"]);
+
+  const device = await openRelayDevice(stack);
+  const c = device.control;
+  c.send({ case: "projectImport", daemonId: stack.daemonId, path: clone });
+  const proj = await c.waitFor((m) => m.case === "projectCreated", "cloned project.created");
+  assert.equal(proj.project.defaultBranch, "main", "默认分支来自 origin/HEAD 探测");
+  const main = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain && m.workspace.projectId === proj.project.id, "cloned main ws");
+  assert.equal(main.workspace.branch, "feat-x", "主工作区分支仍是导入时所在分支");
   device.close();
 });
 
