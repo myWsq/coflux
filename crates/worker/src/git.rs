@@ -121,6 +121,8 @@ pub struct RepoInfo {
     pub branch: String,
     pub error: Option<String>,
     pub suggested_name: Option<String>,
+    /// 仓库真实默认分支（remote HEAD 探测）；None = 探测不到（无 remote / 未 clone），调用方回退 branch
+    pub default_branch: Option<String>,
 }
 
 pub struct WorktreeResult {
@@ -144,6 +146,7 @@ pub async fn validate_repo(path: &str) -> RepoInfo {
             branch: String::new(),
             error: Some("不是 git 仓库".into()),
             suggested_name: None,
+            default_branch: None,
         };
     }
     let repo_path = out.trim().to_string();
@@ -155,7 +158,21 @@ pub async fn validate_repo(path: &str) -> RepoInfo {
         "HEAD".into()
     };
     let suggested_name = remote_project_name(&repo_path).await;
-    RepoInfo { ok: true, repo_path, branch, error: None, suggested_name }
+    let default_branch = detect_default_branch(&repo_path).await;
+    RepoInfo { ok: true, repo_path, branch, error: None, suggested_name, default_branch }
+}
+
+/// 探测仓库真实默认分支：`git symbolic-ref refs/remotes/origin/HEAD`（clone 时本地就有，
+/// 纯本地读、不碰网络）→ "refs/remotes/origin/master" → "master"。
+/// 探测不到（无 remote、非 clone 仓库）返回 None，调用方回退当前分支。
+/// ponytail: origin/HEAD 可能过期（remote 改默认分支后本地不跟随）；真不准时再补 ls-remote --symref
+async fn detect_default_branch(repo_path: &str) -> Option<String> {
+    let (ok, out, _) = run_git(&["-C", repo_path, "symbolic-ref", "refs/remotes/origin/HEAD"]).await;
+    if !ok {
+        return None;
+    }
+    let branch = out.trim().strip_prefix("refs/remotes/origin/")?;
+    (!branch.is_empty()).then(|| branch.to_string())
 }
 
 /// 只把 remote 的解析结果带出 worker；原始 URL 不进入协议、日志或错误。

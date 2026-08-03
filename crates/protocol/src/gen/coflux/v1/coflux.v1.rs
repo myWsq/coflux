@@ -793,6 +793,10 @@ pub struct DeviceProjectValidated {
     pub suggested_name: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, tag="7")]
     pub operation_id: ::prost::alloc::string::String,
+    /// 仓库真实默认分支（remote HEAD 探测，如 origin/HEAD → master）；缺失时 server 回退 branch
+    /// （导入时恰好所在的分支）。diff 统计基准 merge-base(default_branch, HEAD) 依赖它。
+    #[prost(string, optional, tag="8")]
+    pub default_branch: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// 所有携带 operation_id 的设备事实变更均采用 session stop 所述的全局去重规则。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

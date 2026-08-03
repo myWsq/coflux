@@ -826,6 +826,7 @@ impl DeviceRuntime {
                     error: result.error,
                     suggested_name: result.suggested_name,
                     operation_id: request.operation_id,
+                    default_branch: result.default_branch,
                 })
             }
             device_envelope::Payload::WorktreeAdd(request) => {

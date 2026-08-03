@@ -643,7 +643,9 @@ export class Hub {
             daemonId: operation.daemonId,
             name: explicitName ?? (suggestedName || basename(value.repoPath)),
             repoPath: value.repoPath,
-            defaultBranch: value.branch,
+            // 优先 worker 探测的仓库真实默认分支（origin/HEAD）；探测不到才回退导入时所在分支。
+            // diff 统计与变更视图的基准都吃这个值，记错会把主干显示成上万行"变更"。
+            defaultBranch: value.defaultBranch?.trim() || value.branch,
             createdAt: ts,
           });
           const workspace = create(WorkspaceSchema, {

@@ -392,6 +392,9 @@ message DeviceProjectValidated {
   optional string error = 5;
   optional string suggested_name = 6;
   string operation_id = 7;
+  // 仓库真实默认分支（remote HEAD 探测，如 origin/HEAD → master）；缺失时 server 回退 branch
+  // （导入时恰好所在的分支）。diff 统计基准 merge-base(default_branch, HEAD) 依赖它。
+  optional string default_branch = 8;
 }
 
 // 所有携带 operation_id 的设备事实变更均采用 session stop 所述的全局去重规则。
