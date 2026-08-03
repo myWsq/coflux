@@ -19,18 +19,23 @@ enum DictationZone: Equatable {
     /// 178pt；命中区下沿 = lift - diameter/2 - tolerance = 200pt，留 22pt
     /// 余量——手指静止按在占位条上（含最左/最右边缘）必判 none。
     static let lift: CGFloat = 252
-    /// 圆心距蒙层左右边的内缩：贴底座弧肩，比 068 贴屏幕边缘（旧胶囊外沿
-    /// 仅 24pt）更内移一截，不再是凭空悬浮的两个点。
+    /// 圆心距蒙层左右边的内缩：绘制的圆钉在这个位置，贴底座弧肩，比 068
+    /// 贴屏幕边缘（旧胶囊外沿仅 24pt）更内移一截。命中区不受这次内移影响
+    /// ——见 box()，外侧照样吃到蒙层边缘。
     static let edgeInset: CGFloat = 88
-    /// 命中容差：滑过去不必压得准；余量见 lift，仍够不到静止的手指
+    /// 命中容差：内侧（靠中间那侧）外扩的量；外侧直接吃到蒙层边缘，见 box()
     static let tolerance: CGFloat = 22
     /// 绘制用：圆底边贴容器底时，要抬多少让圆心落在 lift 上
     static var drawLift: CGFloat { lift - diameter / 2 }
 
-    /// 底座拱顶距蒙层底边的高度——纯视觉，不进 hit()。比按钮矮一截，让两颗
-    /// 圆看起来"架在"弧肩上；不算弧线与按钮 x 的精确交点（这是观感而非
-    /// 物理约束，不满意就单独调这个常量，无需联动按钮几何）。
-    static let baseApex: CGFloat = 208
+    /// 底座拱顶距蒙层底边的高度——纯视觉，不进 hit()。微信参考是舒缓的扁弧
+    /// 带、不是圆丘：拱顶矮 + 宽度远超屏宽（见 baseWidthMultiplier），屏幕
+    /// 边缘处弧仍有可观高度，不会像"椭圆宽度=屏宽"那样在边缘正好落到
+    /// 0——首轮真机反馈的"灰色大饼"就是那个诱因。
+    static let baseApex: CGFloat = 140
+    /// 底座椭圆宽度相对蒙层宽度的倍数：椭圆用 scaleEffect(x:) 水平拉伸做出
+    /// 超宽扁弧，两侧沉出屏外只露中段——微信参考量级 1.5-1.8 倍，取中值。
+    static let baseWidthMultiplier: CGFloat = 1.7
 
     /// bounds = 蒙层的框。判定传全局框（手势坐标空间也是 .global），
     /// 绘制时同一组常量对齐蒙层自身底边——两边同源。
@@ -42,15 +47,22 @@ enum DictationZone: Equatable {
         return .none
     }
 
+    /// 命中框故意跟绘制的圆不对称：内侧（靠中间）只外扩 tolerance，外侧
+    /// （贴屏边那侧）直接吃到蒙层边缘。圆内移到 edgeInset 后，若命中区也
+    /// 跟着整体内移，"按住往屏幕边缘滑"（068 时代的肌肉记忆）会在圆外侧
+    /// 落空、判成 .none——真机验收出的坑，圆的绘制位置不用跟着改，只把
+    /// 命中的外侧边界钉回屏边。上下沿（含 200pt 硬约束）不受影响。
     private static func box(_ zone: DictationZone, in bounds: CGRect) -> CGRect {
         let centerX = zone == .cancel ? bounds.minX + edgeInset : bounds.maxX - edgeInset
-        return CGRect(
-            x: centerX - diameter / 2,
-            y: bounds.maxY - lift - diameter / 2,
-            width: diameter,
-            height: diameter
-        )
-        .insetBy(dx: -tolerance, dy: -tolerance)
+        let y = bounds.maxY - lift - diameter / 2 - tolerance
+        let height = diameter + tolerance * 2
+        if zone == .cancel {
+            let innerEdge = centerX + diameter / 2 + tolerance
+            return CGRect(x: bounds.minX, y: y, width: innerEdge - bounds.minX, height: height)
+        } else {
+            let innerEdge = centerX - diameter / 2 - tolerance
+            return CGRect(x: innerEdge, y: y, width: bounds.maxX - innerEdge, height: height)
+        }
     }
 }
 
@@ -171,22 +183,30 @@ struct DictationOverlay: View {
 
     // MARK: - 半圆底座（纯视觉锚点，不参与命中）
 
-    /// 屏幕底部全宽、向上凸的宽弧——手指原地（zone == .none）时整体高亮，
+    /// 屏幕底部的舒缓扁弧带——手指原地（zone == .none）时整体变浅色，
     /// 提示语悬在拱顶上方（见 footer 的 padding）。confirming 态不高亮
     /// （手指已离屏，"原地"语义消失），但保留原样作视觉锚，不淡出。
+    /// 椭圆本身按容器宽度画，再用 scaleEffect 水平拉伸出两侧沉出屏外的
+    /// 超宽弧——scaleEffect 只影响渲染不影响布局尺寸，外层的 offset/frame
+    /// 定位数学不用跟着变。真机首轮反馈"灰色大饼"：椭圆宽度=屏宽时边缘
+    /// 弧高正好是 0、加实底 fill + 描边，看着像扣在底部的圆丘；这轮换成
+    /// 材质 + 无描边 + 更宽更矮的椭圆。
     private var stand: some View {
         let active = stage == .listening && zone == .none
         return Color.clear
             .overlay(alignment: .bottom) {
                 ZStack(alignment: .top) {
-                    Ellipse()
-                        .fill(active ? Theme.primary.opacity(0.14) : Theme.surface.opacity(0.9))
-                    Ellipse()
-                        .strokeBorder(active ? Theme.primary.opacity(0.5) : Theme.border, lineWidth: 1)
+                    ZStack {
+                        Ellipse().fill(.ultraThinMaterial)
+                        if active {
+                            Ellipse().fill(Theme.primary.opacity(0.18))
+                        }
+                    }
+                    .scaleEffect(x: DictationZone.baseWidthMultiplier, y: 1)
                     Image(systemName: "waveform")
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundStyle(active ? Theme.primary : Theme.mutedForeground)
-                        .padding(.top, 28)
+                        .padding(.top, 24)
                 }
                 .frame(height: DictationZone.baseApex * 2)
                 .offset(y: DictationZone.baseApex)
@@ -210,8 +230,13 @@ struct DictationOverlay: View {
             }
     }
 
-    /// 一颗圆按钮：图标在圆内，文字标签悬在圆上方（overlay 出去，不进
-    /// 圆的几何——命中/绘制位置只认圆本身，标签宽窄不影响定位）。
+    /// 一颗圆按钮。进行中（角标）态标签用 overlay 悬在圆外——纯展示，不进
+    /// 命中区，反正整层 allowsHitTesting 在这个相位就是关的。确认态标签
+    /// 并进 Button 的 label（VStack 标签+圆整块都能点）——首轮真机反馈标签
+    /// 用 overlay 悬在 Button 外面点不到字，这轮把它纳入可点区，不是给
+    /// 标签单独加手势（那会绕开整层 allowsHitTesting 这条 landmine）。
+    /// VStack 的标签在圆上方、圆在下：整块的底边仍是圆的底边，drawLift 的
+    /// 定位数学（按圆本身算）不受标签高度影响。
     @ViewBuilder
     private func orb(_ target: DictationZone, icon: String, label: String, tint: Color) -> some View {
         // 命中高亮只在手指还在屏上时有意义；确认态手指已离屏，语义消失
@@ -219,11 +244,16 @@ struct DictationOverlay: View {
         let glyph = Image(systemName: icon)
             .font(.system(size: 22, weight: .semibold))
             .frame(width: DictationZone.diameter, height: DictationZone.diameter)
+        let labelText = Text(label)
+            .font(Theme.Fonts.meta.weight(.semibold))
+            .fixedSize()
 
-        Group {
-            if confirming {
-                // 实体按钮：发送是主操作（反色实底），取消次操作（玻璃）
-                Button(action: target == .cancel ? onDiscard : onSend) {
+        if confirming {
+            // 实体按钮：发送是主操作（反色实底），取消次操作（玻璃）；标签
+            // 在 Button 的 label 里，点字跟点圆一样能触发
+            Button(action: target == .cancel ? onDiscard : onSend) {
+                VStack(spacing: 6) {
+                    labelText.foregroundStyle(tint)
                     if target == .cancel {
                         glyph
                             .foregroundStyle(Theme.destructive)
@@ -234,26 +264,24 @@ struct DictationOverlay: View {
                             .background(Circle().fill(Theme.primary))
                     }
                 }
-                .buttonStyle(.plain)
-            } else {
-                // 角标：低对比、无实体按钮感（手指还在屏上，这不是可点控件），
-                // 滑进去才亮起来
-                glyph
-                    .foregroundStyle(active ? tint : Theme.mutedForeground)
-                    .background(Circle().fill(tint.opacity(active ? 0.22 : 0.06)))
-                    .overlay {
-                        Circle().strokeBorder(active ? tint.opacity(0.65) : Theme.border, lineWidth: 1)
-                    }
-                    .scaleEffect(active ? 1.12 : 1)
-                    .animation(.smooth(duration: 0.15), value: active)
             }
-        }
-        .overlay(alignment: .top) {
-            Text(label)
-                .font(Theme.Fonts.meta.weight(.semibold))
-                .foregroundStyle(confirming ? tint : (active ? tint : Theme.mutedForeground))
-                .fixedSize()
-                .offset(y: -24)
+            .buttonStyle(.plain)
+        } else {
+            // 角标：低对比、无实体按钮感（手指还在屏上，这不是可点控件），
+            // 滑进去才亮起来；标签纯展示，悬在圆外不进圆的几何
+            glyph
+                .foregroundStyle(active ? tint : Theme.mutedForeground)
+                .background(Circle().fill(tint.opacity(active ? 0.22 : 0.06)))
+                .overlay {
+                    Circle().strokeBorder(active ? tint.opacity(0.65) : Theme.border, lineWidth: 1)
+                }
+                .scaleEffect(active ? 1.12 : 1)
+                .animation(.smooth(duration: 0.15), value: active)
+                .overlay(alignment: .top) {
+                    labelText
+                        .foregroundStyle(active ? tint : Theme.mutedForeground)
+                        .offset(y: -24)
+                }
         }
     }
 
