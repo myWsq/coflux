@@ -1,10 +1,10 @@
 import SwiftUI
 import UIKit
 
-/// 对讲操作台底部的两颗按钮（plan 068 复议 067 的底角巨圆）：胶囊分居蒙层
-/// 底部左右、抬到占位条上方——微信语音输入台那条向上凸的弧形带上，对称的
-/// 两颗即弧上等高的两点（中间的弧顶留空，编辑入口挪到草稿文字上）。命中区
-/// = 胶囊本体外扩 tolerance，不再是覆盖小半个屏幕的巨圆。
+/// 对讲操作台的三件套（plan 070 补全 068 留白的"要不要画弧"）：屏幕底部全宽
+/// 的半圆底座（纯视觉锚点，微信"按住说话"的观感）+ 贴底座弧肩的两颗圆按钮
+/// （左取消 / 右发送，不再贴屏幕边缘）。松手语义完全不变——原地松手仍进
+/// 068 的确认态，底座只是把既有的 `.none` 区画出来，不参与命中。
 /// 绘制（蒙层对齐自身底边）与命中判定（宿主拿蒙层的全局框）共用这组常量，
 /// 改一处两边同时变。
 enum DictationZone: Equatable {
@@ -13,17 +13,24 @@ enum DictationZone: Equatable {
     case cancel
     case send
 
-    static let size = CGSize(width: 112, height: 52)
-    /// 胶囊中心距蒙层底边的高度。占位条（高 38）中心在底边上方约 159pt、
-    /// 顶边约 178pt；命中区下沿 = lift - height/2 - tolerance = 200pt，
-    /// 留 22pt 余量——手指静止按在占位条上（含最左/最右边缘）必判 none。
-    static let lift: CGFloat = 248
-    /// 胶囊距蒙层左右边的内缩
-    static let edgeInset: CGFloat = 24
+    /// 圆按钮直径（微信参考量级 56-64pt，取中值；plan 070 胶囊→圆）
+    static let diameter: CGFloat = 60
+    /// 圆心距蒙层底边的高度。占位条（高 38）中心在底边上方约 159pt、顶边约
+    /// 178pt；命中区下沿 = lift - diameter/2 - tolerance = 200pt，留 22pt
+    /// 余量——手指静止按在占位条上（含最左/最右边缘）必判 none。
+    static let lift: CGFloat = 252
+    /// 圆心距蒙层左右边的内缩：贴底座弧肩，比 068 贴屏幕边缘（旧胶囊外沿
+    /// 仅 24pt）更内移一截，不再是凭空悬浮的两个点。
+    static let edgeInset: CGFloat = 88
     /// 命中容差：滑过去不必压得准；余量见 lift，仍够不到静止的手指
     static let tolerance: CGFloat = 22
-    /// 绘制用：胶囊底边贴着容器底时，要抬多少才让中心落在 lift 上
-    static var drawLift: CGFloat { lift - size.height / 2 }
+    /// 绘制用：圆底边贴容器底时，要抬多少让圆心落在 lift 上
+    static var drawLift: CGFloat { lift - diameter / 2 }
+
+    /// 底座拱顶距蒙层底边的高度——纯视觉，不进 hit()。比按钮矮一截，让两颗
+    /// 圆看起来"架在"弧肩上；不算弧线与按钮 x 的精确交点（这是观感而非
+    /// 物理约束，不满意就单独调这个常量，无需联动按钮几何）。
+    static let baseApex: CGFloat = 208
 
     /// bounds = 蒙层的框。判定传全局框（手势坐标空间也是 .global），
     /// 绘制时同一组常量对齐蒙层自身底边——两边同源。
@@ -36,15 +43,12 @@ enum DictationZone: Equatable {
     }
 
     private static func box(_ zone: DictationZone, in bounds: CGRect) -> CGRect {
-        let centerX =
-            zone == .cancel
-            ? bounds.minX + edgeInset + size.width / 2
-            : bounds.maxX - edgeInset - size.width / 2
+        let centerX = zone == .cancel ? bounds.minX + edgeInset : bounds.maxX - edgeInset
         return CGRect(
-            x: centerX - size.width / 2,
-            y: bounds.maxY - lift - size.height / 2,
-            width: size.width,
-            height: size.height
+            x: centerX - diameter / 2,
+            y: bounds.maxY - lift - diameter / 2,
+            width: diameter,
+            height: diameter
         )
         .insetBy(dx: -tolerance, dy: -tolerance)
     }
@@ -52,7 +56,7 @@ enum DictationZone: Equatable {
 
 /// 蒙层交互相位（plan 068）
 enum DictationStage: Equatable {
-    /// 手指还按在占位条上：胶囊是轻量角标，蒙层一概不拦触摸
+    /// 手指还按在占位条上：按钮是轻量角标，蒙层一概不拦触摸
     case listening
     /// 松手后等 session.finish() 落定的窗口：不出按钮，杜绝终稿到手前的误触
     case finalizing
@@ -61,19 +65,21 @@ enum DictationStage: Equatable {
     case settled
 }
 
-/// 对讲态浮层（plan 064；plan 068 恢复 066 的确认关卡并换掉 067 的扇区几何）：
-/// 占位条长按后铺满屏幕，三个 UI 相位——
-/// - 进行中：转写气泡居中 + 底部两颗角标（左取消 / 右发送），滑进哪颗哪颗
-///   高亮，松手即执行该操作；不接触摸（手指还在占位条上跟 DragGesture 走）；
-/// - 确认态：原地松手且有字，草稿定格居中且可点（进成文层编辑），两颗角标
-///   变实体按钮可点——转写文字落终端前必经这一关（coflux 是纯转文字，
-///   识别错误没有兜底，2026-08-01 用户复议推翻 067 的松手直发）；
+/// 对讲态浮层（plan 064；plan 068 恢复 066 的确认关卡并换掉 067 的扇区几何；
+/// plan 070 把凭空悬浮的两颗胶囊换成微信式三件套）：占位条长按后铺满屏幕——
+/// - 进行中：转写气泡居中 + 底部半圆底座（原地=底座高亮、提示语悬拱顶上方）
+///   + 贴底座弧肩的两颗圆角标（左取消 / 右发送），滑进哪颗哪颗变大高亮，
+///   松手即执行该操作；不接触摸（手指还在占位条上跟 DragGesture 走）；
+/// - 确认态：原地松手且有字，草稿定格居中且可点（进成文层编辑），两颗圆
+///   原位变实体按钮可点、底座保留作锚——转写文字落终端前必经这一关
+///   （coflux 是纯转文字，识别错误没有兜底，2026-08-01 用户复议推翻 067
+///   的松手直发；本次三件套换皮不换这条语义）；
 /// - 错误/权限留驻：权限被拒 / 无字可看的失败，点任意处关闭（064 语义）。
 /// 不走 TerminalComposeOverlay 那套 fullScreenCover + 320ms 拆除时序——那是
 /// 为了与系统键盘共存；对讲全程不出现键盘，纯 .overlay() 已经够用。
 struct DictationOverlay: View {
     @ObservedObject var session: DictationSession
-    /// 手指当前命中的按钮：驱动角标高亮与提示语（松手分发用同一个值，
+    /// 手指当前命中的按钮：驱动圆的高亮与提示语（松手分发用同一个值，
     /// 用户看到高亮的那个就是会执行的那个）
     let zone: DictationZone
     let stage: DictationStage
@@ -120,15 +126,23 @@ struct DictationOverlay: View {
                 }
                 Spacer()
                 footer
-                    .padding(.bottom, 48)
+                    // 底座出现时（!resting）footer 得让到拱顶上方；resting
+                    // 没有底座，沿用 068 的 48pt 位置不变（权限/失败提示不用跟着挪）
+                    .padding(.bottom, resting ? 48 : DictationZone.baseApex + 24)
             }
-            if !resting, stage != .finalizing {
-                buttons
+            if !resting {
+                // 底座在 finalizing 也留着（手指刚离开，画面别抽走），
+                // 只有按钮在 finalizing 期间不出（终稿没到手，不给误触）
+                stand
+                if stage != .finalizing {
+                    buttons
+                }
             }
         }
         // hit-testing 两态（plan 066 老坑）：进行中蒙层一概不拦触摸——手指还
         // 按在占位条上，DragGesture 在跟踪它；确认态必须收按钮与草稿的点击。
-        // finalizing 期间也关着：终稿没到手，没有可点的东西。
+        // finalizing 期间也关着：终稿没到手，没有可点的东西。底座/标签等新
+        // 视图不单独加手势或 allowsHitTesting，一概走这一条（landmine）。
         .allowsHitTesting(stage == .settled)
         // 手指压在按钮上会挡住高亮，进出给一记轻触觉（触发值就是命中区本身）
         .sensoryFeedback(.selection, trigger: zone)
@@ -155,58 +169,91 @@ struct DictationOverlay: View {
         }
     }
 
-    // MARK: - 底部两颗按钮（进行中 = 角标，确认态 = 实体按钮）
+    // MARK: - 半圆底座（纯视觉锚点，不参与命中）
+
+    /// 屏幕底部全宽、向上凸的宽弧——手指原地（zone == .none）时整体高亮，
+    /// 提示语悬在拱顶上方（见 footer 的 padding）。confirming 态不高亮
+    /// （手指已离屏，"原地"语义消失），但保留原样作视觉锚，不淡出。
+    private var stand: some View {
+        let active = stage == .listening && zone == .none
+        return Color.clear
+            .overlay(alignment: .bottom) {
+                ZStack(alignment: .top) {
+                    Ellipse()
+                        .fill(active ? Theme.primary.opacity(0.14) : Theme.surface.opacity(0.9))
+                    Ellipse()
+                        .strokeBorder(active ? Theme.primary.opacity(0.5) : Theme.border, lineWidth: 1)
+                    Image(systemName: "waveform")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(active ? Theme.primary : Theme.mutedForeground)
+                        .padding(.top, 28)
+                }
+                .frame(height: DictationZone.baseApex * 2)
+                .offset(y: DictationZone.baseApex)
+            }
+            .animation(.smooth(duration: 0.15), value: active)
+    }
+
+    // MARK: - 底部两颗圆按钮（进行中 = 角标，确认态 = 实体按钮）
 
     private var buttons: some View {
         Color.clear
             .overlay(alignment: .bottomLeading) {
-                pill(.cancel, icon: "xmark", label: "取消", tint: Theme.destructive)
-                    .padding(.leading, DictationZone.edgeInset)
+                orb(.cancel, icon: "xmark", label: "取消", tint: Theme.destructive)
+                    .padding(.leading, DictationZone.edgeInset - DictationZone.diameter / 2)
                     .offset(y: -DictationZone.drawLift)
             }
             .overlay(alignment: .bottomTrailing) {
-                pill(.send, icon: "arrow.up", label: "发送", tint: Theme.primary)
-                    .padding(.trailing, DictationZone.edgeInset)
+                orb(.send, icon: "arrow.up", label: "发送", tint: Theme.primary)
+                    .padding(.trailing, DictationZone.edgeInset - DictationZone.diameter / 2)
                     .offset(y: -DictationZone.drawLift)
             }
     }
 
+    /// 一颗圆按钮：图标在圆内，文字标签悬在圆上方（overlay 出去，不进
+    /// 圆的几何——命中/绘制位置只认圆本身，标签宽窄不影响定位）。
     @ViewBuilder
-    private func pill(_ target: DictationZone, icon: String, label: String, tint: Color) -> some View {
+    private func orb(_ target: DictationZone, icon: String, label: String, tint: Color) -> some View {
         // 命中高亮只在手指还在屏上时有意义；确认态手指已离屏，语义消失
         let active = stage == .listening && zone == target
-        let content = HStack(spacing: 6) {
-            Image(systemName: icon)
-            Text(label)
-        }
-        .font(Theme.Fonts.label.weight(.semibold))
-        .frame(width: DictationZone.size.width, height: DictationZone.size.height)
+        let glyph = Image(systemName: icon)
+            .font(.system(size: 22, weight: .semibold))
+            .frame(width: DictationZone.diameter, height: DictationZone.diameter)
 
-        if confirming {
-            // 实体按钮：发送是主操作（反色实底），取消次操作（玻璃）
-            Button(action: target == .cancel ? onDiscard : onSend) {
-                if target == .cancel {
-                    content
-                        .foregroundStyle(Theme.destructive)
-                        .glassEffect(.regular.interactive(), in: .capsule)
-                } else {
-                    content
-                        .foregroundStyle(Theme.primaryForeground)
-                        .background(Capsule().fill(Theme.primary))
+        Group {
+            if confirming {
+                // 实体按钮：发送是主操作（反色实底），取消次操作（玻璃）
+                Button(action: target == .cancel ? onDiscard : onSend) {
+                    if target == .cancel {
+                        glyph
+                            .foregroundStyle(Theme.destructive)
+                            .glassEffect(.regular.interactive(), in: Circle())
+                    } else {
+                        glyph
+                            .foregroundStyle(Theme.primaryForeground)
+                            .background(Circle().fill(Theme.primary))
+                    }
                 }
+                .buttonStyle(.plain)
+            } else {
+                // 角标：低对比、无实体按钮感（手指还在屏上，这不是可点控件），
+                // 滑进去才亮起来
+                glyph
+                    .foregroundStyle(active ? tint : Theme.mutedForeground)
+                    .background(Circle().fill(tint.opacity(active ? 0.22 : 0.06)))
+                    .overlay {
+                        Circle().strokeBorder(active ? tint.opacity(0.65) : Theme.border, lineWidth: 1)
+                    }
+                    .scaleEffect(active ? 1.12 : 1)
+                    .animation(.smooth(duration: 0.15), value: active)
             }
-            .buttonStyle(.plain)
-        } else {
-            // 角标：低对比、无实体按钮感（手指还在屏上，这不是可点控件），
-            // 滑进去才亮起来
-            content
-                .foregroundStyle(active ? tint : Theme.mutedForeground)
-                .background(Capsule().fill(tint.opacity(active ? 0.22 : 0.06)))
-                .overlay {
-                    Capsule().strokeBorder(active ? tint.opacity(0.65) : Theme.border, lineWidth: 1)
-                }
-                .scaleEffect(active ? 1.08 : 1)
-                .animation(.smooth(duration: 0.15), value: active)
+        }
+        .overlay(alignment: .top) {
+            Text(label)
+                .font(Theme.Fonts.meta.weight(.semibold))
+                .foregroundStyle(confirming ? tint : (active ? tint : Theme.mutedForeground))
+                .fixedSize()
+                .offset(y: -24)
         }
     }
 
