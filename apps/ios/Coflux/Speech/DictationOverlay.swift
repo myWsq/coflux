@@ -174,7 +174,9 @@ struct DictationOverlay: View {
             .glassEffect(.regular, in: .rect(cornerRadius: 20))
             .padding(.horizontal, 32)
         if confirming {
-            Button(action: onEdit) { content }
+            // contentShape 兜底：label 里 padding/glassEffect 叠了几层，
+            // 防止点在视觉边缘的空隙上不算命中（同 orb 这轮的修法）
+            Button(action: onEdit) { content.contentShape(Rectangle()) }
                 .buttonStyle(.plain)
         } else {
             content
@@ -249,21 +251,27 @@ struct DictationOverlay: View {
             .fixedSize()
 
         if confirming {
-            // 实体按钮：发送是主操作（反色实底），取消次操作（玻璃）；标签
-            // 在 Button 的 label 里，点字跟点圆一样能触发
+            // 实体按钮：发送是主操作（反色实底），取消次操作（材质环）；标签
+            // 在 Button 的 label 里，点字跟点圆一样能触发。取消这里不能用
+            // .glassEffect(.interactive())——那层自带 UIKit 背板触摸响应，
+            // 会在事件传到 SwiftUI Button 之前就把它吃掉，按了没反应
             Button(action: target == .cancel ? onDiscard : onSend) {
                 VStack(spacing: 6) {
                     labelText.foregroundStyle(tint)
                     if target == .cancel {
                         glyph
                             .foregroundStyle(Theme.destructive)
-                            .glassEffect(.regular.interactive(), in: Circle())
+                            .background(Circle().fill(.ultraThinMaterial))
+                            .overlay {
+                                Circle().strokeBorder(Theme.border, lineWidth: 1)
+                            }
                     } else {
                         glyph
                             .foregroundStyle(Theme.primaryForeground)
                             .background(Circle().fill(Theme.primary))
                     }
                 }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         } else {
