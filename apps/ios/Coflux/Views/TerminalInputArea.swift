@@ -1,5 +1,7 @@
+import PhotosUI
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// 终端输入区（plan 053）——移动端两层输入模型：
 /// - 成文层：单行原生输入框 + 系统输入法（中文可用），整行编辑一次发送；
@@ -28,6 +30,10 @@ struct TerminalInputArea: View {
     @State private var repeatTimer: Timer?
     @State private var dictateActive = false
     @State private var prewarmTask: Task<Void, Never>?
+    /// 相册/文件 App 选择器呈现态（plan 071）：sheet(isPresented:) 驱动，
+    /// picker 内部选完/取消都会把它拨回 false。
+    @State private var showingPhotoPicker = false
+    @State private var showingFilePicker = false
     /// 对讲预兆的显现度（0-1，plan 069）：按下即向 1 渐变，见 pressChanged
     @State private var dictateHint: Double = 0
     /// 按压视觉态：GestureState 在手势结束/被系统取消时自动复位，
@@ -45,6 +51,12 @@ struct TerminalInputArea: View {
     private var sessionID: String? {
         guard let task, task.status == .running, task.hasSessionID else { return nil }
         return task.sessionID
+    }
+
+    /// 上传忙态（plan 071）：相册/文件/粘贴三个入口键共享——同一 session 同刻只有
+    /// 一次上传在途（CofluxClient.uploadFile 自身也有此门控，这里只管 UI 呈现）。
+    private var uploading: Bool {
+        sessionID.map { client.uploadingSessionIDs.contains($0) } ?? false
     }
 
     var body: some View {
@@ -211,19 +223,81 @@ struct TerminalInputArea: View {
                 .frame(width: 150)
                 enterKey
             }
+            // 上传入口（plan 071）：相册 + 文件 App，与粘贴键同属"输入来源"语义组，
+            // 低频独立成行，不扰动上方已手调的控制键几何。
+            HStack(spacing: 6) {
+                photoKey
+                fileKey
+            }
         }
     }
 
-    /// 粘贴：系统剪贴板直发终端（移动端独有高频缺口，替代低频 ⇧tab）；
-    /// 剪贴板天然可能多行，包 bracketed paste 防换行在开 2004 的接收端被当提交
+    /// 粘贴：剪贴板有图先走上传（plan 071），否则回落系统剪贴板文本直发终端
+    /// （移动端独有高频缺口，替代低频 ⇧tab）；剪贴板天然可能多行，包 bracketed
+    /// paste 防换行在开 2004 的接收端被当提交。
     private var pasteKey: some View {
         Button {
+            if let (data, typeIdentifier) = clipboardImageData() {
+                uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "paste")
+                return
+            }
             guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
             press("\u{1b}[200~" + text + "\u{1b}[201~")
         } label: {
             keyCap(label: nil, systemImage: "doc.on.clipboard", tint: Theme.foreground, height: 38)
         }
+        .disabled(uploading)
+        .opacity(uploading ? 0.5 : 1)
         .accessibilityLabel("粘贴到终端")
+    }
+
+    /// 剪贴板原始图片字节（plan 071 landmine）：UIPasteboard.image 返回的是系统重新
+    /// 解码的 UIImage，会丢原始字节（PNG 截图经它会被静默转成别的编码）；
+    /// data(forPasteboardType:) 才是未经改动的原始数据，只在超预算时才允许重编码。
+    private func clipboardImageData() -> (Data, String)? {
+        let pasteboard = UIPasteboard.general
+        for uti in [UTType.png.identifier, UTType.jpeg.identifier, UTType.heic.identifier] {
+            if let data = pasteboard.data(forPasteboardType: uti), !data.isEmpty {
+                return (data, uti)
+            }
+        }
+        return nil
+    }
+
+    /// 相册取图（plan 071）：PHPickerViewController 系统选择器，app 不触碰照片库权限
+    /// （免弹权限授权），单选。
+    private var photoKey: some View {
+        Button {
+            showingPhotoPicker = true
+        } label: {
+            keyCap(label: nil, systemImage: "photo", tint: Theme.foreground, height: 38)
+        }
+        .disabled(uploading)
+        .opacity(uploading ? 0.5 : 1)
+        .accessibilityLabel("从相册上传")
+        .sheet(isPresented: $showingPhotoPicker) {
+            PhotoPicker(isPresented: $showingPhotoPicker) { data, typeIdentifier in
+                uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "photo")
+            }
+        }
+    }
+
+    /// 文件 App 取文件（plan 071）：UIDocumentPickerViewController asCopy: true，
+    /// 任意类型单选，原样上传（受 DeviceRouter.maxUploadBytes 前置拦截）。
+    private var fileKey: some View {
+        Button {
+            showingFilePicker = true
+        } label: {
+            keyCap(label: nil, systemImage: "doc", tint: Theme.foreground, height: 38)
+        }
+        .disabled(uploading)
+        .opacity(uploading ? 0.5 : 1)
+        .accessibilityLabel("从文件 App 上传")
+        .sheet(isPresented: $showingFilePicker) {
+            FilePicker(isPresented: $showingFilePicker) { url in
+                uploadFile(url: url)
+            }
+        }
     }
 
     /// 回车：最高频主键，竖跨两行大键、primary 高亮、钉右下角；
@@ -251,6 +325,60 @@ struct TerminalInputArea: View {
         guard let sessionID else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         client.sendInput(sessionID: sessionID, bytes)
+    }
+
+    /// 图片上传编排（plan 071）：ImagePipeline.process 是 nonisolated async——await 时
+    /// 真正跑在后台线程，大图解码/重编码不占用这里的 MainActor（DictationSession.
+    /// requestSpeechPermission 同构手法）。命名单段 `<前缀>-<epoch毫秒>-<短随机><ext>`
+    /// （temp 模式 path 只认单段文件名，device.proto:453 注释）。
+    private func uploadImage(data: Data, typeIdentifier: String?, prefix: String) {
+        guard let sessionID else { return }
+        let client = self.client
+        Task {
+            guard let (payload, ext) = await ImagePipeline.process(data: data, typeIdentifier: typeIdentifier) else {
+                client.reportLocalError("图片处理失败")
+                return
+            }
+            await client.uploadFile(
+                sessionID: sessionID, data: payload, suggestedName: Self.uploadName(prefix: prefix, ext: ext)
+            )
+        }
+    }
+
+    /// 文件上传编排（plan 071）：asCopy 拿到的沙盒拷贝直接读字节，原文件名只取安全
+    /// 扩展名（web safeDropExtension 同原则）。超上限由 CofluxClient.uploadFile→
+    /// DeviceRouter.fsWrite 前置拦截并报错，这里不重复判断。
+    /// ponytail: Data(contentsOf:) 在 MainActor 上同步读（asCopy 沙盒拷贝，量级
+    /// 上限 30MB，本地闪存读取通常 <100ms）；若真机测出卡顿再挪后台线程。
+    private func uploadFile(url: URL) {
+        guard let sessionID else { return }
+        let client = self.client
+        Task {
+            guard let data = try? Data(contentsOf: url) else {
+                client.reportLocalError("读取文件失败")
+                return
+            }
+            let name = Self.uploadName(prefix: "file", ext: Self.safeExtension(url.lastPathComponent))
+            await client.uploadFile(sessionID: sessionID, data: data, suggestedName: name)
+        }
+    }
+
+    /// 单段上传文件名（plan 071 命名规则，对照 web terminal-pane.tsx 的 paste-/drop-
+    /// 命名）：<前缀>-<epoch毫秒>-<短随机><ext>（ext 含前导点，可为空）。
+    private static func uploadName(prefix: String, ext: String) -> String {
+        let suffix = String((0 ..< 6).compactMap { _ in "abcdefghijklmnopqrstuvwxyz0123456789".randomElement() })
+        return "\(prefix)-\(Int(Date().timeIntervalSince1970 * 1000))-\(suffix)\(ext)"
+    }
+
+    /// web safeDropExtension 同原则（terminal-pane.tsx:105-108）：只保留 ASCII 字母数字
+    /// 扩展名（1-16 字符），避免奇怪字符拖累 temp 路径；不满足条件直接丢扩展名。
+    private static func safeExtension(_ filename: String) -> String {
+        guard let dotIndex = filename.lastIndex(of: "."), dotIndex != filename.startIndex else { return "" }
+        let ext = filename[filename.index(after: dotIndex)...]
+        guard (1 ... 16).contains(ext.count), ext.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else {
+            return ""
+        }
+        return ".\(ext)"
     }
 
     private func key(
@@ -309,6 +437,145 @@ struct TerminalInputArea: View {
         .frame(maxWidth: .infinity)
         .frame(height: height)
         .background(Theme.secondarySurface, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// 相册取图入口（plan 071）：PHPickerViewController 系统选择器，app 不触碰照片库权限
+/// （免弹权限授权弹窗）。委托回调不保证在主线程（真机已知坑）：关闭 sheet 与把选中
+/// 字节交回调用方都经 Task { @MainActor in } 显式跳回。
+struct PhotoPicker: UIViewControllerRepresentable {
+    @Binding var isPresented: Bool
+    let onPick: (Data, String?) -> Void
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration(photoLibrary: .shared())
+        config.filter = .images
+        config.selectionLimit = 1
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isPresented: $isPresented, onPick: onPick)
+    }
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let isPresented: Binding<Bool>
+        let onPick: (Data, String?) -> Void
+
+        init(isPresented: Binding<Bool>, onPick: @escaping (Data, String?) -> Void) {
+            self.isPresented = isPresented
+            self.onPick = onPick
+        }
+
+        nonisolated func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            let provider = results.first?.itemProvider
+            let typeIdentifier = provider?.registeredTypeIdentifiers.first
+            Task { @MainActor in self.isPresented.wrappedValue = false }
+            guard let provider, let typeIdentifier else { return }
+            provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { [onPick] data, _ in
+                guard let data else { return }
+                Task { @MainActor in onPick(data, typeIdentifier) }
+            }
+        }
+    }
+}
+
+/// 文件 App 取文件入口（plan 071）：UIDocumentPickerViewController asCopy: true——
+/// 拿到的是沙盒内拷贝，免 startAccessingSecurityScopedResource 配对管理（漏配对读取
+/// 直接失败，真机已知坑）。委托回调不保证在主线程，同 PhotoPicker 显式跳回处理。
+struct FilePicker: UIViewControllerRepresentable {
+    @Binding var isPresented: Bool
+    let onPick: (URL) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+        picker.delegate = context.coordinator
+        picker.allowsMultipleSelection = false
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isPresented: $isPresented, onPick: onPick)
+    }
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let isPresented: Binding<Bool>
+        let onPick: (URL) -> Void
+
+        init(isPresented: Binding<Bool>, onPick: @escaping (URL) -> Void) {
+            self.isPresented = isPresented
+            self.onPick = onPick
+        }
+
+        nonisolated func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            Task { @MainActor in self.isPresented.wrappedValue = false }
+            guard let url = urls.first else { return }
+            Task { @MainActor in onPick(url) }
+        }
+
+        nonisolated func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            Task { @MainActor in self.isPresented.wrappedValue = false }
+        }
+    }
+}
+
+/// 图片处理管线（plan 071，语义对照 web terminal-pane.tsx 的 compressToBudget）：
+/// HEIC 一律转 JPEG；PNG/JPEG 在预算内原字节直传（保无损）；其余（含超预算 PNG/
+/// JPEG）按质量阶梯压缩，仍超限再减半分辨率重来。
+private enum ImagePipeline {
+    /// 与 web PASTE_BUDGET_BYTES 同预算（terminal-pane.tsx），蜂窝网络传输带宽折衷值。
+    static let budgetBytes = 3_500_000
+    private static let minDimension: CGFloat = 64
+    private static let qualities: [CGFloat] = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
+
+    /// nonisolated + async：经 await 从 MainActor 调用时真正跑在后台线程，不占用
+    /// 调用方（DictationSession.requestSpeechPermission 同构手法）。
+    nonisolated static func process(data: Data, typeIdentifier: String?) async -> (Data, String)? {
+        if let ext = losslessExt(for: typeIdentifier), data.count <= budgetBytes {
+            return (data, ext)
+        }
+        guard let image = UIImage(data: data), let compressed = compressToBudget(image, budget: budgetBytes) else {
+            return nil
+        }
+        return (compressed, ".jpg")
+    }
+
+    private static func losslessExt(for typeIdentifier: String?) -> String? {
+        guard let typeIdentifier, let type = UTType(typeIdentifier) else { return nil }
+        if type.conforms(to: .png) { return ".png" }
+        if type.conforms(to: .jpeg) { return ".jpg" }
+        return nil
+    }
+
+    /// 先在原分辨率按质量阶梯降，仍超限再减半分辨率重来；两者都到头则回落已压出
+    /// 的最小结果（与 web compressToBudget 同算法）。
+    private static func compressToBudget(_ image: UIImage, budget: Int) -> Data? {
+        guard let cgImage = image.cgImage else { return nil }
+        var width = CGFloat(cgImage.width)
+        var height = CGFloat(cgImage.height)
+        var smallest: Data?
+        while true {
+            let size = CGSize(width: max(1, width.rounded()), height: max(1, height.rounded()))
+            let renderer = UIGraphicsImageRenderer(size: size)
+            let resized = renderer.image { _ in
+                UIImage(cgImage: cgImage).draw(in: CGRect(origin: .zero, size: size))
+            }
+            for quality in qualities {
+                guard let encoded = resized.jpegData(compressionQuality: quality) else { continue }
+                if smallest == nil || encoded.count < smallest!.count { smallest = encoded }
+                if encoded.count <= budget { return encoded }
+            }
+            if min(width, height) <= minDimension { break }
+            width /= 2
+            height /= 2
+        }
+        return smallest
     }
 }
 
