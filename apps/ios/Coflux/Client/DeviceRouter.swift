@@ -959,7 +959,7 @@ final class DeviceRouter {
         lane: LaneKind,
         requestID: String,
         payload: Coflux_V1_DeviceEnvelope.OneOf_Payload,
-        timeout: Duration = Self.deviceRequestTimeout
+        timeout: Duration = DeviceRouter.deviceRequestTimeout
     ) async throws -> Coflux_V1_DeviceEnvelope.OneOf_Payload {
         try await withCheckedThrowingContinuation { continuation in
             var pending = PendingRequest(
