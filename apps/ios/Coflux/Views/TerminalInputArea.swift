@@ -445,7 +445,9 @@ struct TerminalInputArea: View {
 /// 字节交回调用方都经 Task { @MainActor in } 显式跳回。
 struct PhotoPicker: UIViewControllerRepresentable {
     @Binding var isPresented: Bool
-    let onPick: (Data, String?) -> Void
+    // ponytail: @MainActor 限定令闭包类型自身 Sendable，nonisolated 委托方法里
+    // 把它送进 Task { @MainActor in } 才不会被 Swift 6 严格并发拒绝。
+    let onPick: @MainActor (Data, String?) -> Void
 
     func makeUIViewController(context: Context) -> PHPickerViewController {
         var config = PHPickerConfiguration(photoLibrary: .shared())
@@ -464,9 +466,9 @@ struct PhotoPicker: UIViewControllerRepresentable {
 
     final class Coordinator: NSObject, PHPickerViewControllerDelegate {
         let isPresented: Binding<Bool>
-        let onPick: (Data, String?) -> Void
+        let onPick: @MainActor (Data, String?) -> Void
 
-        init(isPresented: Binding<Bool>, onPick: @escaping (Data, String?) -> Void) {
+        init(isPresented: Binding<Bool>, onPick: @escaping @MainActor (Data, String?) -> Void) {
             self.isPresented = isPresented
             self.onPick = onPick
         }
@@ -478,7 +480,7 @@ struct PhotoPicker: UIViewControllerRepresentable {
             guard let provider, let typeIdentifier else { return }
             provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { [onPick] data, _ in
                 guard let data else { return }
-                Task { @MainActor in onPick(data, typeIdentifier) }
+                Task { @MainActor [onPick] in onPick(data, typeIdentifier) }
             }
         }
     }
@@ -489,7 +491,8 @@ struct PhotoPicker: UIViewControllerRepresentable {
 /// 直接失败，真机已知坑）。委托回调不保证在主线程，同 PhotoPicker 显式跳回处理。
 struct FilePicker: UIViewControllerRepresentable {
     @Binding var isPresented: Bool
-    let onPick: (URL) -> Void
+    // ponytail: 同 PhotoPicker.onPick——@MainActor 限定让闭包类型 Sendable。
+    let onPick: @MainActor (URL) -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
@@ -506,9 +509,9 @@ struct FilePicker: UIViewControllerRepresentable {
 
     final class Coordinator: NSObject, UIDocumentPickerDelegate {
         let isPresented: Binding<Bool>
-        let onPick: (URL) -> Void
+        let onPick: @MainActor (URL) -> Void
 
-        init(isPresented: Binding<Bool>, onPick: @escaping (URL) -> Void) {
+        init(isPresented: Binding<Bool>, onPick: @escaping @MainActor (URL) -> Void) {
             self.isPresented = isPresented
             self.onPick = onPick
         }
@@ -516,7 +519,7 @@ struct FilePicker: UIViewControllerRepresentable {
         nonisolated func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
             Task { @MainActor in self.isPresented.wrappedValue = false }
             guard let url = urls.first else { return }
-            Task { @MainActor in onPick(url) }
+            Task { @MainActor [onPick] in onPick(url) }
         }
 
         nonisolated func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
