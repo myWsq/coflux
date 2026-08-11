@@ -5,6 +5,10 @@ import Foundation
 enum DeviceProtocol {
     static let version: UInt32 = 1
     static let maxFrameBytes = 30 * 1024 * 1024
+    /// 单文件上传上限（plan 071 决策）：帧上限留 64KB 封皮余量。卡在帧上限附近的文件会被
+    /// encodeFrame（DeviceRouter.swift 内）静默丢弃，悬到 fsWrite 请求超时才报错——
+    /// 必须在编码前前置拒绝，不能指望 encodeFrame 兜底。
+    static let maxUploadBytes = maxFrameBytes - 64 * 1024
     /// cols/rows 在 authority 边界钳制为 [1, 1000]（device.proto:12）。
     static func clampDim(_ n: UInt32, fallback: UInt32) -> UInt32 {
         (1 ... 1000).contains(n) ? n : fallback
@@ -37,8 +41,9 @@ struct DeviceRouterCallbacks {
 /// relay-only Device 数据路由（plan 046）。语义基准 `packages/client/src/device-router.ts` 的
 /// relay 子集：per-daemon route（session/elevated 两条 lane）、transport generation 单调、
 /// attach 三重匹配 + snapshot/resume、输入/resize 台账与累计 ACK 重投、prepared operation
-/// 台账、按需建连与空闲释放。direct/loopback、pair/lease、心跳、fs/exec RPC 不移植
-/// （iOS 永不与 daemon 同机；ceiling 见 plan 046 Maintenance）。
+/// 台账、按需建连与空闲释放。direct/loopback、pair/lease、心跳、fsList/fsRead/execRun 不移植
+/// （iOS 永不与 daemon 同机；ceiling 见 plan 046 Maintenance）；fsWrite 已移植（plan 071，
+/// 终端文件/图片上传经它落盘取回绝对路径）。
 ///
 /// 与 CofluxClient 同在 MainActor：单线程状态机与 TS 版一一对应；网络 IO 在子 Task，
 /// 回 MainActor 提交状态。
@@ -49,6 +54,9 @@ final class DeviceRouter {
     // 与 TS 同参数（device-router.ts:37-56 relay-only 子集）
     private static let controlRequestTimeout: Duration = .seconds(10)
     private static let deviceRequestTimeout: Duration = .seconds(20)
+    /// fsWrite 单独放宽（plan 071 决策）：蜂窝网络传数十 MB 文件在 20s 内大概率超时，
+    /// 其余请求（TS 侧同为 20s，device-router.ts:38）不受影响。
+    private static let fsWriteRequestTimeout: Duration = .seconds(60)
     private static let relayConnectTimeout: Duration = .seconds(10)
     private static let recoverBaseMS = 350.0
     private static let recoverMaxMS = 5_000.0
@@ -388,6 +396,37 @@ final class DeviceRouter {
         ensureLaneThen(route, route.elevatedLane) { [weak self] in
             self?.flushLane(route, .elevated)
         }
+    }
+
+    // MARK: - fs 上传（plan 071）
+
+    /// temp=true 落 daemon 侧系统临时目录，回带绝对路径供 client 直接注入 PTY，不自行拼装
+    /// （common.proto:137-140）。经 elevated lane——RPC scope 在 relay 侧被授权
+    /// （hub.ts:1714），TS 参照同构（device-router.ts:2111-2125）。operation_id 必填新
+    /// UUID，worker 据它做幂等去重。
+    func fsWrite(daemonID: String, workspaceID: String, path: String, data: Data, temp: Bool) async throws -> Coflux_V1_FsWriteResult {
+        // 上限前置拒绝：encodeFrame 对超帧静默丢弃，若不在此挡住，卡线文件会悬到
+        // fsWriteRequestTimeout 才报错，极难排查（plan 071 landmine）。
+        guard data.count <= DeviceProtocol.maxUploadBytes else {
+            throw DeviceRouteError(
+                "文件超过上传上限（\(DeviceProtocol.maxUploadBytes / 1024 / 1024)MB）", code: "upload_too_large"
+            )
+        }
+        let route = routeFor(daemonID)
+        var write = Coflux_V1_DeviceFsWrite()
+        write.requestID = UUID().uuidString
+        write.operationID = UUID().uuidString
+        write.workspaceID = workspaceID
+        write.path = path
+        write.data = data
+        write.temp = temp
+        let response = try await request(
+            route, lane: .elevated, requestID: write.requestID, payload: .fsWrite(write), timeout: Self.fsWriteRequestTimeout
+        )
+        guard case .fsWriteResult(let result) = response else {
+            throw DeviceRouteError("收到意外的 fsWrite 回包类型")
+        }
+        return result
     }
 
     // MARK: - Lane 生命周期
@@ -919,7 +958,8 @@ final class DeviceRouter {
         _ route: Route,
         lane: LaneKind,
         requestID: String,
-        payload: Coflux_V1_DeviceEnvelope.OneOf_Payload
+        payload: Coflux_V1_DeviceEnvelope.OneOf_Payload,
+        timeout: Duration = Self.deviceRequestTimeout
     ) async throws -> Coflux_V1_DeviceEnvelope.OneOf_Payload {
         try await withCheckedThrowingContinuation { continuation in
             var pending = PendingRequest(
@@ -927,7 +967,7 @@ final class DeviceRouter {
                 sentGeneration: nil, continuation: continuation, timeoutTask: nil
             )
             pending.timeoutTask = Task { [weak self] in
-                try? await Task.sleep(for: Self.deviceRequestTimeout)
+                try? await Task.sleep(for: timeout)
                 guard !Task.isCancelled, let self else { return }
                 self.finishPending(route, requestID: requestID,
                                    with: .failure(DeviceRouteError("Device request 超时", code: "request_timeout")))
@@ -1138,6 +1178,7 @@ final class DeviceRouter {
         case .ptyResize(let value): return value.requestID
         case .sessionStop(let value): return value.requestID
         case .sessionCreate(let value): return value.requestID
+        case .fsWrite(let value): return value.requestID
         default: return nil
         }
     }
@@ -1148,6 +1189,7 @@ final class DeviceRouter {
         case .sessionAttached(let value): return value.requestID
         case .sessionSnapshot(let value): return value.requestID
         case .operationAck(let value): return value.requestID
+        case .fsWriteResult(let value): return value.requestID
         case .error(let value): return value.hasRequestID ? value.requestID : nil
         default: return nil
         }

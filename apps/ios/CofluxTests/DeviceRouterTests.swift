@@ -299,6 +299,91 @@ struct DeviceRouterTests {
         #expect(harness.attachFrames(second).first!.resumeFromSeq == 10)
     }
 
+    @Test func fsWriteSendsFrameAndResolvesResult() async throws {
+        let harness = DeviceHarness()
+        harness.router.setControlOnline(true)
+        let resultTask = Task {
+            try await harness.router.fsWrite(
+                daemonID: "d1", workspaceID: "w1", path: "paste-1.png", data: Data([1, 2, 3]), temp: true
+            )
+        }
+        let connection = try await harness.grantNextRelay()
+        let channelID = harness.lastRelayChannelID!
+        guard await waitUntil({ !harness.deviceFrames(connection).isEmpty }) else {
+            Issue.record("fsWrite 帧未发出")
+            return
+        }
+        let frame = harness.deviceFrames(connection).first!
+        #expect(frame.channelID == channelID)
+        guard case .fsWrite(let sent) = frame.payload else {
+            Issue.record("期望 fsWrite 帧")
+            return
+        }
+        #expect(sent.workspaceID == "w1")
+        #expect(sent.path == "paste-1.png")
+        #expect(sent.temp == true)
+        #expect(sent.data == Data([1, 2, 3]))
+        #expect(!sent.operationID.isEmpty)
+
+        var response = Coflux_V1_FsWriteResult()
+        response.requestID = sent.requestID
+        response.ok = true
+        response.path = "/tmp/coflux-uploads/paste-1.png"
+        harness.push(connection, channelID: channelID, .fsWriteResult(response))
+
+        let result = try await resultTask.value
+        #expect(result.ok)
+        #expect(result.path == "/tmp/coflux-uploads/paste-1.png")
+    }
+
+    @Test func fsWriteErrorResponseRejectsPendingRequest() async throws {
+        let harness = DeviceHarness()
+        harness.router.setControlOnline(true)
+        let resultTask = Task {
+            try await harness.router.fsWrite(
+                daemonID: "d1", workspaceID: "w1", path: "paste-1.png", data: Data([1]), temp: true
+            )
+        }
+        let connection = try await harness.grantNextRelay()
+        let channelID = harness.lastRelayChannelID!
+        guard await waitUntil({ !harness.deviceFrames(connection).isEmpty }) else {
+            Issue.record("fsWrite 帧未发出")
+            return
+        }
+        guard case .fsWrite(let sent) = harness.deviceFrames(connection).first!.payload else {
+            Issue.record("期望 fsWrite 帧")
+            return
+        }
+        var error = Coflux_V1_DeviceError()
+        error.requestID = sent.requestID
+        error.code = "workspace_unknown"
+        error.message = "workspaceId 不属于本 daemon 当前清单"
+        harness.push(connection, channelID: channelID, .error(error))
+
+        do {
+            _ = try await resultTask.value
+            Issue.record("期望抛出错误")
+        } catch let routeError as DeviceRouteError {
+            #expect(routeError.code == "workspace_unknown")
+        }
+    }
+
+    @Test func fsWriteRejectsOversizedPayloadBeforeSending() async throws {
+        let harness = DeviceHarness()
+        harness.router.setControlOnline(true)
+        let oversized = Data(count: DeviceProtocol.maxUploadBytes + 1)
+        do {
+            _ = try await harness.router.fsWrite(
+                daemonID: "d1", workspaceID: "w1", path: "huge.bin", data: oversized, temp: true
+            )
+            Issue.record("期望抛出上限错误")
+        } catch let routeError as DeviceRouteError {
+            #expect(routeError.code == "upload_too_large")
+        }
+        // 前置拒绝：不该建任何 relay 通道
+        #expect(harness.relayConnectCount == 0)
+    }
+
     @Test func suspendReleasesLaneWhenNoDemand() async throws {
         let harness = DeviceHarness()
         let (connection, channelID) = try await harness.attachAndSnapshot(snapshotSeq: 10)
