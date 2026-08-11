@@ -51,6 +51,8 @@ final class CofluxClient {
     private(set) var sessionCheckpoints: [String: Coflux_V1_SessionCheckpoint] = [:]
     /// 输入台账触顶的 session（等待 PTY 累计确认）：UI 提示输入受阻。
     private(set) var blockedSessionIDs: Set<String> = []
+    /// 正在上传文件/图片的 session（plan 071）：UI 据此把入口键置忙态、禁重复触发。
+    private(set) var uploadingSessionIDs: Set<String> = []
 
     /// 构建版本上报固定 "dev"：生产版本准入唯一无条件放行通道（apps/server/src/hub.ts:1464，
     /// plan 044 决策）；原生版本准入另立 plan。
@@ -485,6 +487,35 @@ final class CofluxClient {
     func resizeSession(sessionID: String, cols: UInt32, rows: UInt32) {
         guard let task = tasks.first(where: { $0.hasSessionID && $0.sessionID == sessionID }) else { return }
         deviceRouter.resize(daemonID: task.daemonID, sessionID: sessionID, cols: cols, rows: rows)
+    }
+
+    /// 从相册/文件 App/剪贴板上传字节到当前活跃终端（plan 071）：经 device 数据面 fsWrite
+    /// （temp=true）落 daemon 侧系统临时目录，回带绝对路径后以 bracketed paste 包裹注入 PTY
+    /// （pasteKey 同语义，TerminalInputArea.swift）。同一 session 同刻只允许一次上传；
+    /// 与 sendInput 同门控——按 sessionID 反查 task，查不到即视为不可用（无 RUNNING session
+    /// 时输入板整体已禁用，天然满足"无 RUNNING session 不可上传"）。
+    func uploadFile(sessionID: String, data: Data, suggestedName: String) async {
+        guard !uploadingSessionIDs.contains(sessionID) else { return }
+        guard let task = tasks.first(where: { $0.hasSessionID && $0.sessionID == sessionID }) else {
+            reportLocalError("会话不存在，无法上传文件")
+            return
+        }
+        uploadingSessionIDs.insert(sessionID)
+        defer { uploadingSessionIDs.remove(sessionID) }
+        do {
+            let result = try await deviceRouter.fsWrite(
+                daemonID: task.daemonID, workspaceID: task.workspaceID, path: suggestedName, data: data, temp: true
+            )
+            if result.ok, result.hasPath, !result.path.isEmpty {
+                sendInput(sessionID: sessionID, "\u{1b}[200~ \(result.path) \u{1b}[201~")
+            } else {
+                reportLocalError("文件上传失败：\(result.hasError ? result.error : "未知错误")")
+            }
+        } catch let error as DeviceRouteError {
+            reportLocalError(error.message)
+        } catch {
+            reportLocalError(String(describing: error))
+        }
     }
 
     /// 注册终端字节 consumer（replace=true 整屏替换，false 追加）。返回释放闭包；
