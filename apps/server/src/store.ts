@@ -806,6 +806,13 @@ export class Store {
     const rows = await this.sql<Project[]>`SELECT * FROM projects WHERE daemon_id = ${daemonId} AND deleting = true`;
     return rows.map((r) => create(ProjectSchema, r));
   }
+  /** 默认分支的真相是 daemon 本地的 origin/HEAD，DB 只是缓存；daemon 核对后上报纠正（plan 072）。 */
+  async updateProjectDefaultBranch(id: ProjectId, defaultBranch: string): Promise<Project | undefined> {
+    const rows = await this.sql<Project[]>`
+      UPDATE projects SET default_branch = ${defaultBranch} WHERE id = ${id} RETURNING *
+    `;
+    return rows[0] && create(ProjectSchema, rows[0]);
+  }
   async markProjectDeleting(id: ProjectId): Promise<void> {
     await this.sql`UPDATE projects SET deleting = true WHERE id = ${id}`;
   }
