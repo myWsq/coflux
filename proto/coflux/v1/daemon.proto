@@ -119,6 +119,7 @@ message DaemonToServer {
     DeviceSessionCatalog session_catalog = 27;
     PreparedDeviceOperationInstalled prepared_device_operation_installed = 28;
     RelayHome relay_home = 29;
+    WorkspaceDefaultBranch workspace_default_branch = 30;
   }
 }
 
@@ -133,6 +134,14 @@ message WorkspaceDiff {
   string workspace_id = 1;
   int32 additions = 2;
   int32 deletions = 3;
+}
+
+// worker 收到工作区清单后核对本地 origin/HEAD，与 server 记录不符时上报纠正（plan 072）。
+// 探测不到 origin/HEAD（无 remote / 非 clone 仓库）时不发此消息，server 保持现值。
+// 按 workspace 粒度上报，project 归属由 server 反查——WorkspaceRef 里没有 project_id。
+message WorkspaceDefaultBranch {
+  string workspace_id = 1;
+  string default_branch = 2;
 }
 
 // ===== Server → Daemon 载荷 =====
@@ -266,7 +275,8 @@ message ServerToDaemon {
 
 // 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD
 // 分支与 diff 统计；default_branch 是所属 project 的默认分支，diff 统计基准
-// merge-base(default_branch, HEAD) 依赖它，server 侧权威值，worker 不自行猜测。
+// merge-base(default_branch, HEAD) 依赖它。这里下发的是 server 侧**缓存**——真相是 daemon
+// 本地的 origin/HEAD，worker 收到后核对，不符则经 WorkspaceDefaultBranch 上报纠正（plan 072）。
 message WorkspaceRef {
   string workspace_id = 1;
   string path = 2;

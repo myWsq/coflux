@@ -435,6 +435,14 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     set {payload = .relayHome(newValue)}
   }
 
+  public var workspaceDefaultBranch: Coflux_V1_WorkspaceDefaultBranch {
+    get {
+      if case .workspaceDefaultBranch(let v)? = payload {return v}
+      return Coflux_V1_WorkspaceDefaultBranch()
+    }
+    set {payload = .workspaceDefaultBranch(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -459,6 +467,7 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     case sessionCatalog(Coflux_V1_DeviceSessionCatalog)
     case preparedDeviceOperationInstalled(Coflux_V1_PreparedDeviceOperationInstalled)
     case relayHome(Coflux_V1_RelayHome)
+    case workspaceDefaultBranch(Coflux_V1_WorkspaceDefaultBranch)
 
   }
 
@@ -491,6 +500,23 @@ public struct Coflux_V1_WorkspaceDiff: Sendable {
   public var additions: Int32 = 0
 
   public var deletions: Int32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker 收到工作区清单后核对本地 origin/HEAD，与 server 记录不符时上报纠正（plan 072）。
+/// 探测不到 origin/HEAD（无 remote / 非 clone 仓库）时不发此消息，server 保持现值。
+/// 按 workspace 粒度上报，project 归属由 server 反查——WorkspaceRef 里没有 project_id。
+public struct Coflux_V1_WorkspaceDefaultBranch: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var workspaceID: String = String()
+
+  public var defaultBranch: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1007,7 +1033,8 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
 
 /// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD
 /// 分支与 diff 统计；default_branch 是所属 project 的默认分支，diff 统计基准
-/// merge-base(default_branch, HEAD) 依赖它，server 侧权威值，worker 不自行猜测。
+/// merge-base(default_branch, HEAD) 依赖它。这里下发的是 server 侧**缓存**——真相是 daemon
+/// 本地的 origin/HEAD，worker 收到后核对，不符则经 WorkspaceDefaultBranch 上报纠正（plan 072）。
 public struct Coflux_V1_WorkspaceRef: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1528,7 +1555,7 @@ extension Coflux_V1_RelayHome: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
 
 extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{4}\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{3}relay_home\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{4}\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{3}relay_home\0\u{3}workspace_default_branch\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1796,6 +1823,19 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .relayHome(v)
         }
       }()
+      case 30: try {
+        var v: Coflux_V1_WorkspaceDefaultBranch?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .workspaceDefaultBranch(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .workspaceDefaultBranch(v)
+        }
+      }()
       default: break
       }
     }
@@ -1887,6 +1927,10 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .relayHome(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 29)
     }()
+    case .workspaceDefaultBranch?: try {
+      guard case .workspaceDefaultBranch(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 30)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -1969,6 +2013,41 @@ extension Coflux_V1_WorkspaceDiff: SwiftProtobuf.Message, SwiftProtobuf._Message
     if lhs.workspaceID != rhs.workspaceID {return false}
     if lhs.additions != rhs.additions {return false}
     if lhs.deletions != rhs.deletions {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_WorkspaceDefaultBranch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".WorkspaceDefaultBranch"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}workspace_id\0\u{3}default_branch\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.defaultBranch) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 1)
+    }
+    if !self.defaultBranch.isEmpty {
+      try visitor.visitSingularStringField(value: self.defaultBranch, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_WorkspaceDefaultBranch, rhs: Coflux_V1_WorkspaceDefaultBranch) -> Bool {
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.defaultBranch != rhs.defaultBranch {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
