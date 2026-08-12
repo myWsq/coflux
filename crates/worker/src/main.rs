@@ -874,10 +874,36 @@ async fn on_server_message(
         }
         // 工作区清单：更新监视目标；清空分支/diff 缓存让下一轮全量比对上报（连接/增删后的对账）
         server_to_daemon::Payload::WorkspaceList(wire::WorkspaceList { workspaces }) => {
-            let mut s = state.lock().unwrap();
-            s.workspaces = workspaces.into_iter().map(|w| (w.workspace_id, (w.path, w.default_branch))).collect();
-            s.last_branches.clear();
-            s.last_diffs.clear();
+            let targets: Vec<(String, String, String)> = {
+                let mut s = state.lock().unwrap();
+                s.workspaces = workspaces.into_iter().map(|w| (w.workspace_id, (w.path, w.default_branch))).collect();
+                s.last_branches.clear();
+                s.last_diffs.clear();
+                // default_branch 为空 = 目录工作区（无 repo 终端），不参与探测（同 3s 轮询的过滤）
+                s.workspaces
+                    .iter()
+                    .filter(|(_, (_, default_branch))| !default_branch.is_empty())
+                    .map(|(id, (path, default_branch))| (id.clone(), path.clone(), default_branch.clone()))
+                    .collect()
+            };
+            // 项目默认分支的真相是本地 origin/HEAD，清单里带的是 server 缓存：不符则上报纠正
+            // （plan 072）。探测起 git 子进程，另开 task 以免阻塞消息循环；探测不到（无 remote /
+            // 非 clone）不上报，保持现值——空 default_branch 在 worker 侧的语义是"跳过 git 轮询"，
+            // 误清会把 diff 统计一起废掉。server 落库后会重推清单，届时值已相同，第二轮即收敛。
+            let tx = to_server_tx.clone();
+            tokio::spawn(async move {
+                for (workspace_id, path, cached) in targets {
+                    if let Some(detected) = git::detect_default_branch(&path).await {
+                        if detected != cached {
+                            send_d2s(
+                                &tx,
+                                daemon_to_server::Payload::WorkspaceDefaultBranch(wire::WorkspaceDefaultBranch { workspace_id, default_branch: detected }),
+                            )
+                            .await;
+                        }
+                    }
+                }
+            });
         }
         other => {
             let authed = state.lock().unwrap().authed;
