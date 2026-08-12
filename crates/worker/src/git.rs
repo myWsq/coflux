@@ -164,9 +164,11 @@ pub async fn validate_repo(path: &str) -> RepoInfo {
 
 /// 探测仓库真实默认分支：`git symbolic-ref refs/remotes/origin/HEAD`（clone 时本地就有，
 /// 纯本地读、不碰网络）→ "refs/remotes/origin/master" → "master"。
-/// 探测不到（无 remote、非 clone 仓库）返回 None，调用方回退当前分支。
+/// 探测不到（无 remote、非 clone 仓库）返回 None——调用方**不得**把 None 当作"应清空"：
+/// 导入时回退当前分支，收清单核对时保持现值不上报（plan 072）。
+/// worktree 与主仓库共享 refs/remotes/，所以传任一 worktree 路径都能探到同一个值。
 /// ponytail: origin/HEAD 可能过期（remote 改默认分支后本地不跟随）；真不准时再补 ls-remote --symref
-async fn detect_default_branch(repo_path: &str) -> Option<String> {
+pub async fn detect_default_branch(repo_path: &str) -> Option<String> {
     let (ok, out, _) = run_git(&["-C", repo_path, "symbolic-ref", "refs/remotes/origin/HEAD"]).await;
     if !ok {
         return None;
