@@ -960,7 +960,8 @@ export class Hub {
         const defaultBranch = value.defaultBranch.trim();
         if (!defaultBranch) return;
         const project = await this.store.getProject(ws.projectId);
-        if (!project || project.defaultBranch === defaultBranch) return;
+        // project 归属独立校验：这条消息是跨实体写入（workspace → project），不能只靠 workspace 的守卫
+        if (!project || project.daemonId !== conn.daemonId || project.defaultBranch === defaultBranch) return;
         const updated = await this.store.updateProjectDefaultBranch(project.id, defaultBranch);
         if (!updated) return;
         this.broadcast(updated.accountId, { case: "projectCreated", value: { project: updated } });
