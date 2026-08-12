@@ -290,8 +290,10 @@ export class Hub {
   }
 
   /** 全量下发某设备的工作区清单（连接时 + 工作区增删时），worker 据此监视各 worktree 的 HEAD 分支 +
-   * git diff 统计；defaultBranch 带出所属 project 的默认分支（diff 统计基准），server DB 是权威值，
-   * worker 不自行猜测。 */
+   * git diff 统计；defaultBranch 带出所属 project 的默认分支（diff 统计基准）。这里下发的是
+   * **缓存**——它的真相是 daemon 本地的 origin/HEAD，server 无从验证，worker 收到后核对、不符则经
+   * workspaceDefaultBranch 上报纠正（plan 072）。自愈频率绑在本方法的调用时机上：减少调用会让
+   * 自愈变慢甚至失效。 */
   private async pushWorkspaceList(daemonId: DaemonId): Promise<void> {
     const daemon = this.daemons.get(daemonId);
     if (!daemon) return;
@@ -946,6 +948,23 @@ export class Hub {
         if (value.additions === ws.additions && value.deletions === ws.deletions) return;
         const updated = await this.store.updateWorkspaceDiff(ws.id, value.additions, value.deletions);
         if (updated) this.broadcast(updated.accountId, { case: "workspaceCreated", value: { workspace: updated } });
+        break;
+      }
+      // worker 核对本地 origin/HEAD 后上报的项目默认分支纠正（plan 072）：真相在设备侧，DB 是缓存。
+      // 同一 project 的多个工作区会各报一次（refs/remotes 为 worktree 共享），靠这里比对现值幂等吸收。
+      // 落库后必须重推清单——否则 worker 手里仍是旧值，diff_stat 会继续按错基准算。
+      case "workspaceDefaultBranch": {
+        const value = msg.payload.value;
+        const ws = await this.store.getWorkspace(value.workspaceId);
+        if (!ws || ws.daemonId !== conn.daemonId) return;
+        const defaultBranch = value.defaultBranch.trim();
+        if (!defaultBranch) return;
+        const project = await this.store.getProject(ws.projectId);
+        if (!project || project.defaultBranch === defaultBranch) return;
+        const updated = await this.store.updateProjectDefaultBranch(project.id, defaultBranch);
+        if (!updated) return;
+        this.broadcast(updated.accountId, { case: "projectCreated", value: { project: updated } });
+        await this.pushWorkspaceList(conn.daemonId);
         break;
       }
       case "sessionStarted": {
