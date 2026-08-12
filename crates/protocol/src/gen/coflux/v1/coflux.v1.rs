@@ -1705,7 +1705,7 @@ pub struct RelayHome {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29, 30")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -1753,6 +1753,8 @@ pub mod daemon_to_server {
         PreparedDeviceOperationInstalled(super::PreparedDeviceOperationInstalled),
         #[prost(message, tag="29")]
         RelayHome(super::RelayHome),
+        #[prost(message, tag="30")]
+        WorkspaceDefaultBranch(super::WorkspaceDefaultBranch),
     }
 }
 /// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
@@ -1772,6 +1774,16 @@ pub struct WorkspaceDiff {
     pub additions: i32,
     #[prost(int32, tag="3")]
     pub deletions: i32,
+}
+/// worker 收到工作区清单后核对本地 origin/HEAD，与 server 记录不符时上报纠正（plan 072）。
+/// 探测不到 origin/HEAD（无 remote / 非 clone 仓库）时不发此消息，server 保持现值。
+/// 按 workspace 粒度上报，project 归属由 server 反查——WorkspaceRef 里没有 project_id。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkspaceDefaultBranch {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub default_branch: ::prost::alloc::string::String,
 }
 // ===== Server → Daemon 载荷 =====
 
@@ -1969,7 +1981,8 @@ pub mod server_to_daemon {
 }
 /// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD
 /// 分支与 diff 统计；default_branch 是所属 project 的默认分支，diff 统计基准
-/// merge-base(default_branch, HEAD) 依赖它，server 侧权威值，worker 不自行猜测。
+/// merge-base(default_branch, HEAD) 依赖它。这里下发的是 server 侧**缓存**——真相是 daemon
+/// 本地的 origin/HEAD，worker 收到后核对，不符则经 WorkspaceDefaultBranch 上报纠正（plan 072）。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WorkspaceRef {
     #[prost(string, tag="1")]
