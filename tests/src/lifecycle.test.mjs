@@ -113,6 +113,38 @@ test("导入项目：默认分支取 origin/HEAD 而非导入时恰好所在的�
   device.close();
 });
 
+test("默认分支自愈：导入后仓库补上 origin/HEAD，下发工作区清单时被纠正", async () => {
+  // 无 remote 的仓库导入 → 探测不到 origin/HEAD → 默认分支回退成导入时所在的 feat-y（错值，
+  // 正是生产上 interview-evals / data-analysis 两条脏数据的成因）。此后补上 origin 与
+  // origin/HEAD，任一次工作区清单下发都应触发 daemon 核对并上报纠正（plan 072）。
+  const origin = mkRepo();
+  repos.push(origin);
+  const repo = mkRepo();
+  repos.push(repo);
+  execFileSync("git", ["-C", repo.dir, "checkout", "-q", "-b", "feat-y"]);
+
+  const device = await openRelayDevice(stack);
+  const c = device.control;
+  c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
+  const proj = await c.waitFor((m) => m.case === "projectCreated", "no-remote project.created");
+  assert.equal(proj.project.defaultBranch, "feat-y", "无 remote 时回退成导入时所在分支（错值前提）");
+  await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain && m.workspace.projectId === proj.project.id, "main ws");
+
+  // 补 remote 并让 origin/HEAD 指向 main（set-head -a 读 remote 的真实 HEAD，本地路径零网络）
+  execFileSync("git", ["-C", repo.dir, "remote", "add", "origin", origin.dir]);
+  execFileSync("git", ["-C", repo.dir, "fetch", "-q", "origin"]);
+  execFileSync("git", ["-C", repo.dir, "remote", "set-head", "origin", "-a"]);
+
+  // 新增工作区 → server 重推工作区清单 → worker 核对 origin/HEAD 并上报纠正
+  c.send({ case: "workspaceCreate", projectId: proj.project.id, name: "probe", branch: "probe", createNew: true });
+  const healed = await c.waitFor(
+    (m) => m.case === "projectCreated" && m.project.id === proj.project.id && m.project.defaultBranch === "main",
+    "default branch healed to main",
+  );
+  assert.equal(healed.project.defaultBranch, "main", "默认分支被 daemon 上报的 origin/HEAD 纠正");
+  device.close();
+});
+
 test("主工作区不可删除", async () => {
   const repo = mkRepo();
   repos.push(repo);

@@ -82,4 +82,4 @@
 
 ## Backlog（未排期，想到就记，做之前要先立 plan）
 
-- **项目默认分支可改（P3，不重要）**：`projects.default_branch` 现在只在导入项目时由 daemon 探测一次写死，之后无任何自愈或人工修正入口。2026-08-01 生产库里 `haolin` 存成了 `HEAD`、`aohun/maxkb` 存成了 `feature/sso-default-application-chat`（新导入路径的探测已由 PR #29 修好，存量靠手写 SQL 修），今后仓库把 `master` 迁到 `main` 也会再犯。这个值错了不会报错，只让 diff 统计基准悄悄失真，是最难被反馈上来的一类 bug。做的时候两个坑：①真相只在 daemon 本地的 `git symbolic-ref refs/remotes/origin/HEAD`，server 无从验证，所以 `hub.ts:292` 注释里「server DB 是权威值」这个定位本身要一并复议；②改库不会主动下发，`pushWorkspaceList`（`hub.ts:295`）只在 daemon 连接时和工作区增删时全量推送，纯 UI 改值必须自己补一次推送。
+（暂无。「项目默认分支可改」已由 plan 072 以 daemon 自愈的形式兑现。）
