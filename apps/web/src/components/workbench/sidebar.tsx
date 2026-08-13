@@ -2,12 +2,12 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, Monitor, Package, Plus, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, LoaderCircle, MessageSquareDot, Monitor, Package, Plus, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
-import type { CofluxClient } from "@coflux/client";
+import { workspaceActivity, type CofluxClient } from "@coflux/client";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
 import { cn } from "@/lib/utils";
 
@@ -70,6 +70,15 @@ export function Sidebar(props: SidebarProps) {
   const tasks = useStore(client.store, (state) => state.tasks);
   const localSessions = useStore(client.store, (state) => state.localSessions);
   const deviceTransports = useStore(client.store, (state) => state.deviceTransports);
+  const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
+  const sessionActivity = useStore(client.store, (state) => state.sessionActivity);
+  // 活动状态（plan 073）由"距最后输出多久"推导，需要时钟前进触发重算：2s tick 与
+  // checkpoint 上报节奏同粒度，再细也换不来信息增量。
+  const [activityNow, setActivityNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setActivityNow(Date.now()), 2_000);
+    return () => clearInterval(timer);
+  }, []);
   // 默认全部展开，只记折叠集合（新项目出现时自然是展开态）
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
@@ -295,6 +304,14 @@ export function Sidebar(props: SidebarProps) {
                               ? "主工作区"
                               : null;
                         const hasDiff = workspace.additions > 0 || workspace.deletions > 0;
+                        // 活动三态（plan 073）：正在执行（绿）/ 等待交互（琥珀）/ 中性。
+                        // 判定阈值与优先级收敛在 workspaceActivity（packages/client），UI 只做呈现。
+                        const activity = workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents, sessionActivity, activityNow);
+                        const activityText = activity.status === "active"
+                          ? `${activity.agent ? `${activity.agent} ` : ""}正在执行`
+                          : activity.status === "waiting"
+                            ? `${activity.agent} 等待交互`
+                            : "";
                         // 工作区详情 tooltip（需求勘误：原 plan 048-task-tab-tooltip 做到了任务 Tab 上，
                         // 真正诉求是侧栏工作区行——版式照抄设备 tooltip：加粗标题行 + 图标条目列表）
                         const workspaceTooltip = (
@@ -304,6 +321,16 @@ export function Sidebar(props: SidebarProps) {
                               {label ? ` · ${label}` : ""}
                             </div>
                             <div className="flex flex-col gap-0.5">
+                              {activity.status !== "idle" ? (
+                                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                  {activity.status === "active" ? (
+                                    <LoaderCircle className="size-3 shrink-0 animate-spin text-success" />
+                                  ) : (
+                                    <MessageSquareDot className="size-3 shrink-0 text-warning" />
+                                  )}
+                                  <span className="truncate">{activityText}</span>
+                                </span>
+                              ) : null}
                               <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                                 <Folder className="size-3 shrink-0 opacity-70" />
                                 <span className="truncate">{workspace.path}</span>
@@ -346,7 +373,15 @@ export function Sidebar(props: SidebarProps) {
                               className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left"
                               onClick={() => props.onSelectWorkspace(workspace.id)}
                             >
-                              <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
+                              {/* 图标槽原位替换（plan 073，与设备行「direct 时闪电取代圆点」同一手法）：
+                                  有活动状态时呈现状态图标，中性态保留 GitBranch 原样；槽位固定 size-3 不跳版式 */}
+                              {activity.status === "active" ? (
+                                <LoaderCircle className="size-3 shrink-0 animate-spin text-success" aria-label={activityText} />
+                              ) : activity.status === "waiting" ? (
+                                <MessageSquareDot className="size-3 shrink-0 text-warning" aria-label={activityText} />
+                              ) : (
+                                <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
+                              )}
                               <span className="min-w-0 flex-1 truncate text-base">{workspace.branch}</span>
                               {/* 右端内容：自定义名称（name ≠ branch 时才有；主工作区未起名时默认叫「主工作区」）+ git diff 累计统计（plan 024，X=Y=0 时不渲染）。
                                   diff 固定在最末；两者作为整体 hover 渐变淡出给删除按钮让位 */}

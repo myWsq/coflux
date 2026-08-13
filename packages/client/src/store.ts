@@ -11,6 +11,59 @@ import {
   type Workspace,
 } from "@coflux/protocol";
 
+/* ------------------------------------------------------------------ *
+ * 工作区活动状态（plan 073）
+ * ------------------------------------------------------------------ */
+
+/** 距最后输出不超过此值算「正在执行」（绿）。checkpoint 节奏 ≤2s，×2 + 余量。 */
+export const ACTIVE_OUTPUT_WINDOW_MS = 5_000;
+/** agent 在进程树内且安静达此值算「等待交互」（琥珀）；5–10s 之间维持绿，避免三态闪烁。 */
+export const AGENT_WAITING_QUIET_MS = 10_000;
+
+export type SessionAgentState = { daemonId: string; taskId: string; agent: string };
+/** 最后输出时间：seq 前进（新输出）用本地时钟记录，首见（订阅补发）退回 capturedAt 兜底——
+ * 避免 daemon/浏览器时钟偏差扭曲「安静了多久」（plan 073 时钟口径）。 */
+export type SessionActivityState = { seq: bigint; at: number };
+
+export type WorkspaceActivity =
+  | { status: "idle" }
+  | { status: "active"; agent?: string }
+  | { status: "waiting"; agent: string };
+
+/** 工作区三态聚合：多 session 冲突时「等待交互」优先于「正在执行」——它才是可行动信号。
+ * 设备离线一律中性（presence 已不可信）。 */
+export function workspaceActivity(
+  workspaceId: string,
+  daemonOnline: boolean,
+  tasks: readonly Task[],
+  sessionAgents: Record<string, SessionAgentState>,
+  sessionActivity: Record<string, SessionActivityState>,
+  now: number,
+): WorkspaceActivity {
+  if (!daemonOnline) return { status: "idle" };
+  let waitingAgent: string | null = null;
+  let active = false;
+  let activeAgent: string | undefined;
+  for (const task of tasks) {
+    if (task.workspaceId !== workspaceId || task.status !== TaskStatus.RUNNING || !task.sessionId) continue;
+    const agent = sessionAgents[task.sessionId]?.agent;
+    // 无活动记录（从未见过 checkpoint / 被配额清掉）= 没有近期输出的证据，按安静已久处理
+    const quietMs = now - (sessionActivity[task.sessionId]?.at ?? 0);
+    if (agent !== undefined) {
+      if (quietMs >= AGENT_WAITING_QUIET_MS) waitingAgent = waitingAgent ?? agent;
+      else {
+        active = true;
+        activeAgent = activeAgent ?? agent;
+      }
+    } else if (quietMs <= ACTIVE_OUTPUT_WINDOW_MS) {
+      active = true;
+    }
+  }
+  if (waitingAgent !== null) return { status: "waiting", agent: waitingAgent };
+  if (active) return { status: "active", agent: activeAgent };
+  return { status: "idle" };
+}
+
 import { createConnection, type AuthCredential, type ConnectionStatus, type ServerPayload } from "./connection";
 import {
   createDeviceRouter,
@@ -77,6 +130,10 @@ export type CofluxState = {
   inputStates: Record<string, DeviceInputState>;
   localSessions: LocalSessionState[];
   sessionCheckpoints: Record<string, SessionCheckpoint>;
+  /** agent presence（plan 073）：sessionId → 检测到的 agent。来自 sessionAgentsUpdated 按设备全量替换。 */
+  sessionAgents: Record<string, SessionAgentState>;
+  /** 每 session 最后输出时间（plan 073）：由 checkpoint 到达推导，见 SessionActivityState。 */
+  sessionActivity: Record<string, SessionActivityState>;
   lastError: ClientError | null;
   snapshotRevision: number;
 };
@@ -132,6 +189,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     inputStates: {},
     localSessions: [],
     sessionCheckpoints: {},
+    sessionAgents: {},
+    sessionActivity: {},
     lastError: null,
     snapshotRevision: 0,
   }));
@@ -209,6 +268,11 @@ export function createCofluxClient(options: CofluxClientOptions) {
       };
       const inputStates = { ...state.inputStates };
       delete inputStates[sessionId];
+      // session 已退出：agent presence / 活动记录一并清理，防僵尸琥珀（plan 073）
+      const sessionAgents = { ...state.sessionAgents };
+      delete sessionAgents[sessionId];
+      const sessionActivity = { ...state.sessionActivity };
+      delete sessionActivity[sessionId];
       return {
         localSessions: upsert(state.localSessions, local, (item) => item.daemonId === daemonId && item.sessionId === sessionId),
         tasks: state.tasks.map((task) => task.id === taskId && task.sessionId === sessionId
@@ -216,6 +280,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
           : task),
         detachedTaskIds: withoutSetValue(state.detachedTaskIds, taskId),
         inputStates,
+        sessionAgents,
+        sessionActivity,
       };
     });
   }
@@ -387,6 +453,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
             tasks,
             ports: nextPorts,
             detachedTaskIds: new Set([...state.detachedTaskIds].filter((taskId) => taskIds.has(taskId))),
+            // agent presence 清零重建：server 会紧随快照按设备补发当前全量（plan 073）。
+            // sessionActivity 保留——它是"最后输出时间"的累积事实，快照不推翻它。
+            sessionAgents: {},
             snapshotRevision: state.snapshotRevision + 1,
           };
         });
@@ -405,6 +474,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           projects: state.projects.filter((project) => project.daemonId !== value.daemonId),
           workspaces: state.workspaces.filter((workspace) => workspace.daemonId !== value.daemonId),
           tasks: state.tasks.filter((task) => task.daemonId !== value.daemonId),
+          sessionAgents: Object.fromEntries(Object.entries(state.sessionAgents).filter(([, entry]) => entry.daemonId !== value.daemonId)),
         }));
         break;
       }
@@ -477,6 +547,12 @@ export function createCofluxClient(options: CofluxClientOptions) {
             sessionCheckpoints: removedSessionId
               ? Object.fromEntries(Object.entries(state.sessionCheckpoints).filter(([sessionId]) => sessionId !== removedSessionId))
               : state.sessionCheckpoints,
+            sessionAgents: removedSessionId
+              ? Object.fromEntries(Object.entries(state.sessionAgents).filter(([sessionId]) => sessionId !== removedSessionId))
+              : state.sessionAgents,
+            sessionActivity: removedSessionId
+              ? Object.fromEntries(Object.entries(state.sessionActivity).filter(([sessionId]) => sessionId !== removedSessionId))
+              : state.sessionActivity,
           };
         });
         if (removed && removedSessionId) {
@@ -494,12 +570,38 @@ export function createCofluxClient(options: CofluxClientOptions) {
       }
       case "sessionCheckpoint": {
         const checkpoint = payload.value;
-        store.setState((state) => ({
-          sessionCheckpoints: { ...state.sessionCheckpoints, [checkpoint.sessionId]: checkpoint },
-        }));
+        store.setState((state) => {
+          // 最后输出时间（plan 073）：seq 前进 = 确凿的新输出，用本地时钟；首见（订阅补发的
+          // 存量）退回 capturedAt 兜底（钳到不超过本地 now，防 daemon 时钟超前）。
+          const previous = state.sessionActivity[checkpoint.sessionId];
+          const at = previous === undefined
+            ? Math.min(checkpoint.capturedAt, Date.now())
+            : checkpoint.snapshotSeq > previous.seq
+              ? Date.now()
+              : previous.at;
+          const seq = previous !== undefined && previous.seq > checkpoint.snapshotSeq ? previous.seq : checkpoint.snapshotSeq;
+          return {
+            sessionCheckpoints: { ...state.sessionCheckpoints, [checkpoint.sessionId]: checkpoint },
+            sessionActivity: { ...state.sessionActivity, [checkpoint.sessionId]: { seq, at } },
+          };
+        });
         const task = store.getState().tasks.find((item) => item.id === checkpoint.taskId);
         if (task) deviceRouter.seedCheckpoint(task.daemonId, checkpoint.taskId, checkpoint.sessionId, checkpoint.snapshotSeq);
         if (!liveSessionIds.has(checkpoint.sessionId)) deliverSession(checkpoint.sessionId, checkpoint.ansiSnapshot, true);
+        break;
+      }
+      case "sessionAgentsUpdated": {
+        const value = payload.value;
+        store.setState((state) => {
+          // 按设备全量替换：先清该 daemon 的旧条目再写入新清单（空清单 = 该设备全清）
+          const sessionAgents: Record<string, SessionAgentState> = Object.fromEntries(
+            Object.entries(state.sessionAgents).filter(([, entry]) => entry.daemonId !== value.daemonId),
+          );
+          for (const session of value.sessions) {
+            sessionAgents[session.sessionId] = { daemonId: value.daemonId, taskId: session.taskId, agent: session.agent };
+          }
+          return { sessionAgents };
+        });
         break;
       }
       case "error": {
@@ -546,6 +648,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
       inputStates: {},
       localSessions: [],
       sessionCheckpoints: {},
+      sessionAgents: {},
+      sessionActivity: {},
     });
   }
 
