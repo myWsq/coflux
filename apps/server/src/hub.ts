@@ -55,6 +55,7 @@ import {
   type DeviceEnvelopePayload,
   type DeviceSessionCatalog,
   type DeviceSessionInfo,
+  type SessionAgentRef,
   type SessionCheckpoint,
 } from "@coflux/protocol";
 import { createLogger } from "@coflux/core";
@@ -78,6 +79,8 @@ const MAX_CATALOG_ENTRIES = 4096;
 const MAX_CATALOG_PATH_BYTES = 16 * 1024;
 const MAX_RETAINED_CATALOG_BYTES = 4 * 1024 * 1024;
 const MAX_CONTROL_ID_BYTES = 256;
+const MAX_AGENT_ENTRIES = 1024;
+const MAX_AGENT_NAME_BYTES = 64;
 
 /** daemon 展示信息：不用生成的 DaemonInfo 消息类型（无需 $typeName）——它只作为其它信封消息的
  * 嵌套字段被构造（nested init 接受纯对象），从不单独序列化，用生成类型纯属多余的仪式。 */
@@ -91,6 +94,14 @@ interface DaemonInfoData {
    * 离线设备（来自 devices 表）无此信息——版本不入库，纯在线连接内存态，空串即"未知"。 */
   workerVersion: string;
   supervisorVersion: string;
+}
+
+/** agent presence 条目（plan 073）：不用生成的 SessionAgentRef 消息类型（无需 $typeName）——
+ * 只作为广播消息的嵌套字段被构造（nested init 接受纯对象），从不单独序列化。 */
+interface SessionAgentData {
+  sessionId: SessionId;
+  taskId: TaskId;
+  agent: string;
 }
 
 export interface DaemonConn {
@@ -170,6 +181,9 @@ export class Hub {
   private preparedWaiters = new Map<string, Set<PreparedWaiter>>();
   private preparedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private catalog = new Map<DaemonId, Map<SessionId, DeviceSessionInfo>>();
+  /** agent presence（plan 073）：daemon 上报的"会话进程树内检测到的 agent CLI"。派生运行时
+   * 事实——纯内存、不落库，daemon 断开即清空并广播；订阅时按设备补发当前全量。 */
+  private sessionAgents = new Map<DaemonId, { accountId: AccountId; sessions: SessionAgentData[] }>();
   private readonly localControl: LocalControlPlane<ClientConn, DaemonConn>;
   /** 独立 relay 的 token 签发（plan 043）；server 不再承载 relay 数据面。 */
   private readonly relayTokens: RelayTokenSigner;
@@ -452,6 +466,36 @@ export class Hub {
         capturedAt: checkpoint.capturedAt,
       },
     });
+  }
+
+  /** agent presence（plan 073）：逐条校验会话归属本连接 daemon（catalog live 或 runtime 路由，
+   * 同 checkpoint 的 matchesKnownSession 口径），非法条目丢弃不广播。与现值相同则直接吸收
+   * （worker 变化才发，但重连补发是无条件的）。 */
+  private acceptSessionAgents(daemon: DaemonConn, sessions: readonly SessionAgentRef[]): void {
+    const daemonId = daemon.info.daemonId;
+    const live = this.catalog.get(daemonId);
+    const valid: SessionAgentData[] = [];
+    for (const entry of sessions.slice(0, MAX_AGENT_ENTRIES)) {
+      if (!validControlId(entry.sessionId) || !validControlId(entry.taskId)) continue;
+      if (!entry.agent || Buffer.byteLength(entry.agent) > MAX_AGENT_NAME_BYTES) continue;
+      const catalogInfo = live?.get(entry.sessionId);
+      const runtime = this.sessions.get(entry.sessionId);
+      const matchesKnownSession = catalogInfo
+        ? catalogInfo.taskId === entry.taskId
+        : runtime?.daemonId === daemonId && runtime.taskId === entry.taskId;
+      if (!matchesKnownSession) continue;
+      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent });
+    }
+    const previous = this.sessionAgents.get(daemonId);
+    const unchanged =
+      previous !== undefined &&
+      previous.sessions.length === valid.length &&
+      previous.sessions.every((p, i) => p.sessionId === valid[i]!.sessionId && p.taskId === valid[i]!.taskId && p.agent === valid[i]!.agent);
+    if (unchanged) return;
+    if (valid.length === 0 && previous === undefined) return;
+    if (valid.length === 0) this.sessionAgents.delete(daemonId);
+    else this.sessionAgents.set(daemonId, { accountId: daemon.accountId, sessions: valid });
+    this.broadcast(daemon.accountId, { case: "sessionAgentsUpdated", value: { daemonId, sessions: valid } });
   }
 
   /* ----------------------- durable prepared op ----------------------- */
@@ -918,6 +962,11 @@ export class Hub {
         if (daemon) await this.acceptSessionCheckpoint(daemon, msg.payload.value);
         break;
       }
+      case "sessionAgents": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) this.acceptSessionAgents(daemon, msg.payload.value.sessions);
+        break;
+      }
       case "preparedDeviceOperationInstalled": {
         const daemon = this.currentDaemon(conn);
         if (daemon) await this.handlePreparedInstalled(daemon, msg.payload.value.operationId, msg.payload.value.ok, msg.payload.value.error);
@@ -1126,6 +1175,10 @@ export class Hub {
 
     this.daemons.delete(daemonId);
     this.catalog.delete(daemonId);
+    // agent presence 是在线连接的派生事实：daemon 断开即清空并广播，防琥珀点残留（plan 073）
+    if (this.sessionAgents.delete(daemonId)) {
+      this.broadcast(accountId, { case: "sessionAgentsUpdated", value: { daemonId, sessions: [] } });
+    }
     await this.localControl.daemonDisconnected(daemonId);
     // 端口转发：daemon 掉线即所有隧道失联，摘路由表 + 关在途连接（this.sessions 本身按既有设计不动，
     // 留给 daemon.resync 重连后自愈；shortId 会在重连后 ports.update 时重新签发，见 plan 006）。
@@ -1178,6 +1231,11 @@ export class Hub {
         this.clients.add(client);
         this.sendClient(client, { case: "stateSnapshot", value: { daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) } });
         for (const checkpoint of checkpoints) this.sendCheckpoint(client, checkpoint);
+        // agent presence 补发（plan 073）：client 的 stateSnapshot handler 会清空本地 presence，
+        // 这里按设备补发当前全量——顺序在快照之后、与 checkpoint 同批，天然落在乱序防护序列内。
+        for (const [daemonId, entry] of this.sessionAgents) {
+          if (entry.accountId === accountId) this.sendClient(client, { case: "sessionAgentsUpdated", value: { daemonId, sessions: entry.sessions } });
+        }
         for (const operation of prepared) this.sendPrepared(client, operation);
         break;
       }
