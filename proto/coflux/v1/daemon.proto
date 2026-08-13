@@ -73,6 +73,12 @@ message PortsUpdate {
   repeated SessionPorts sessions = 1;
 }
 
+// 全量幂等上报存活会话进程树内检测到的 agent（plan 073）；仅含检测到 agent 的 session，
+// 变化才发、认证后无条件补发一次（与 PortsUpdate 同形态）。
+message SessionAgents {
+  repeated SessionAgentRef sessions = 1;
+}
+
 // server→daemon ProxyOpen 的回应：隧道连接建立结果
 message ProxyOpened {
   string conn_id = 1;
@@ -120,6 +126,7 @@ message DaemonToServer {
     PreparedDeviceOperationInstalled prepared_device_operation_installed = 28;
     RelayHome relay_home = 29;
     WorkspaceDefaultBranch workspace_default_branch = 30;
+    SessionAgents session_agents = 31;
   }
 }
 

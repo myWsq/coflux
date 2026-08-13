@@ -182,6 +182,13 @@ message PortsUpdated {
   repeated PortPreview ports = 2;
 }
 
+// 某设备当前的 agent presence 全量（plan 073）：daemon SessionAgents 上报或断开清空后广播，
+// 订阅时按设备补发。sessions 为该设备当前全量，空 = 全部清空。内存派生事实，不落库。
+message SessionAgentsUpdated {
+  string daemon_id = 1;
+  repeated SessionAgentRef sessions = 2;
+}
+
 message StateSnapshot {
   repeated DaemonInfo daemons = 1;
   repeated Project projects = 2;
@@ -262,5 +269,6 @@ message ServerToClient {
     SessionCheckpoint session_checkpoint = 31;
     LocalUnpairResult local_unpair_result = 32;
     DeviceRelayGrant device_relay_grant = 33;
+    SessionAgentsUpdated session_agents_updated = 34;
   }
 }

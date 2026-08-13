@@ -315,6 +315,25 @@ public struct Coflux_V1_PortPreview: Sendable {
   public init() {}
 }
 
+/// worker 周期扫描存活会话 PTY 进程树检测到的 agent CLI（plan 073）。
+/// 派生运行时事实：server 只做内存镜像 + 广播，不落库；daemon 断开即全部清空。
+public struct Coflux_V1_SessionAgentRef: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var taskID: String = String()
+
+  /// 检测到的 agent 名（内置名单，如 "claude"/"codex"）；无 agent 的 session 不出现在清单里
+  public var agent: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_TaskPorts: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -915,6 +934,46 @@ extension Coflux_V1_PortPreview: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
   public static func ==(lhs: Coflux_V1_PortPreview, rhs: Coflux_V1_PortPreview) -> Bool {
     if lhs.port != rhs.port {return false}
     if lhs.url != rhs.url {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SessionAgentRef"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}agent\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.agent) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 2)
+    }
+    if !self.agent.isEmpty {
+      try visitor.visitSingularStringField(value: self.agent, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_SessionAgentRef, rhs: Coflux_V1_SessionAgentRef) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.taskID != rhs.taskID {return false}
+    if lhs.agent != rhs.agent {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
