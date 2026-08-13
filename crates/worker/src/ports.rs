@@ -16,6 +16,12 @@ pub fn listening_ports(root_pid: i32) -> HashSet<u16> {
     imp::listen_ports_for_pids(&pids)
 }
 
+/// root_pid 自身 + 全部子孙 pid。agent 探测（agents.rs，plan 073）与端口探测共用同一套
+/// 平台实现，避免第二份 /proc / libproc 遍历代码。
+pub(crate) fn process_tree(root_pid: i32) -> Vec<i32> {
+    imp::process_tree(root_pid)
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use std::collections::HashSet;

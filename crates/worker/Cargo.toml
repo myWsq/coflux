@@ -33,5 +33,7 @@ sha2 = "0.10"
 
 # 端口探测（005）仅 macOS 侧需要：同 uid 无特权枚举进程 fd/socket 信息（listpidinfo/pidfdinfo），
 # 不需要 root、不 fork lsof 子进程。Linux 手撸 /proc，其余平台空实现，故只在 macOS target 引入。
+# libc：agent 探测（plan 073）读 KERN_PROCARGS2 取进程 argv（libproc 未封装该 sysctl）。
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "0.14"
+libc = "0.2"

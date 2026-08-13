@@ -187,6 +187,7 @@ dependencies = [
  "coflux-protocol",
  "futures-util",
  "hex",
+ "libc",
  "libproc",
  "p256",
  "prost",

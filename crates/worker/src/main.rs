@@ -4,6 +4,7 @@
 //! 再向 server resync（否则空列表 resync 会让 server 误标 exited，随后真 resync 反触发 session.close 杀 PTY）。
 //! 全 Rust 化后整个 daemon 无 node 运行时依赖。
 
+mod agents;
 mod conn_state;
 mod creds;
 mod device;
@@ -79,6 +80,8 @@ struct WorkerState {
     pending_auth_expires_at: Option<f64>,
     /// 端口探测(005)上一次实际发出的全量快照:变化才发的比较基准，也是重连补发的缓存。
     last_reported_ports: Vec<wire::SessionPorts>,
+    /// agent 探测(plan 073)上一次实际发出的全量快照：语义同 last_reported_ports。
+    last_reported_agents: Vec<wire::SessionAgentRef>,
     /// server 下发的本设备工作区清单：workspace_id -> (worktree 路径, 所属 project 的 default_branch)
     /// （分支监视 + diff 统计基准用）
     workspaces: HashMap<String, (String, String)>,
@@ -215,6 +218,40 @@ async fn force_report_ports(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Send
     try_send_d2s(to_server_tx, daemon_to_server::Payload::PortsUpdate(wire::PortsUpdate { sessions }));
 }
 
+/// 周期(2s)扫描每个存活会话进程树内的 agent CLI（plan 073）；变化才发全量。扫描同端口
+/// 探测一样是同步阻塞 IO（/proc 读或 libproc/sysctl 系统调用），spawn_blocking 挪出执行器。
+async fn report_agents_if_changed(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>) {
+    let alive = { state.lock().unwrap().alive.clone() }; // 取快照即释放锁，不跨扫描 await 持锁
+    let sessions = match tokio::task::spawn_blocking(move || agents::detect_session_agents(&alive)).await {
+        Ok(s) => s,
+        Err(_) => return, // 扫描任务 panic：静默跳过这一轮，不影响主循环
+    };
+    let changed = {
+        let mut s = state.lock().unwrap();
+        if s.last_reported_agents == sessions {
+            false
+        } else {
+            s.last_reported_agents = sessions.clone();
+            true
+        }
+    };
+    if changed {
+        try_send_d2s(to_server_tx, daemon_to_server::Payload::SessionAgents(wire::SessionAgents { sessions }));
+    }
+}
+
+/// 重连认证成功后无条件补发一次 agent presence 全量：server 侧是内存 presence，
+/// 重启即丢，语义同 force_report_ports。
+async fn force_report_agents(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>) {
+    let alive = { state.lock().unwrap().alive.clone() };
+    let sessions = match tokio::task::spawn_blocking(move || agents::detect_session_agents(&alive)).await {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    state.lock().unwrap().last_reported_agents = sessions.clone();
+    try_send_d2s(to_server_tx, daemon_to_server::Payload::SessionAgents(wire::SessionAgents { sessions }));
+}
+
 #[tokio::main]
 async fn main() {
     // rustls 0.23 要求在任何 TLS 握手前选定 process-level CryptoProvider，
@@ -269,6 +306,7 @@ async fn main() {
         credentials,
         pending_auth_expires_at: None,
         last_reported_ports: Vec::new(),
+        last_reported_agents: Vec::new(),
         workspaces: HashMap::new(),
         last_branches: HashMap::new(),
         last_diffs: HashMap::new(),
@@ -403,6 +441,8 @@ async fn main() {
             loop {
                 tick.tick().await;
                 report_ports_if_changed(&state, &to_server_tx).await;
+                // agent 探测（plan 073）与端口探测同周期：都走一遍进程树，成本同量级
+                report_agents_if_changed(&state, &to_server_tx).await;
             }
         });
     }
@@ -1018,6 +1058,7 @@ async fn on_authed(
     if let Some(sessions) = resync {
         try_send_d2s(to_server_tx, daemon_to_server::Payload::DaemonResync(wire::DaemonResync { sessions }));
         force_report_ports(state, to_server_tx).await; // 重连补发端口全量，防 server 重启丢状态
+        force_report_agents(state, to_server_tx).await; // agent presence 同为 server 内存态，一并补发
     }
 }
 
