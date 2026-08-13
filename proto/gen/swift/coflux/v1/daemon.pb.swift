@@ -214,6 +214,20 @@ public struct Coflux_V1_PortsUpdate: Sendable {
   public init() {}
 }
 
+/// 全量幂等上报存活会话进程树内检测到的 agent（plan 073）；仅含检测到 agent 的 session，
+/// 变化才发、认证后无条件补发一次（与 PortsUpdate 同形态）。
+public struct Coflux_V1_SessionAgents: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessions: [Coflux_V1_SessionAgentRef] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 /// server→daemon ProxyOpen 的回应：隧道连接建立结果
 public struct Coflux_V1_ProxyOpened: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
@@ -443,6 +457,14 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     set {payload = .workspaceDefaultBranch(newValue)}
   }
 
+  public var sessionAgents: Coflux_V1_SessionAgents {
+    get {
+      if case .sessionAgents(let v)? = payload {return v}
+      return Coflux_V1_SessionAgents()
+    }
+    set {payload = .sessionAgents(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -468,6 +490,7 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     case preparedDeviceOperationInstalled(Coflux_V1_PreparedDeviceOperationInstalled)
     case relayHome(Coflux_V1_RelayHome)
     case workspaceDefaultBranch(Coflux_V1_WorkspaceDefaultBranch)
+    case sessionAgents(Coflux_V1_SessionAgents)
 
   }
 
@@ -1449,6 +1472,36 @@ extension Coflux_V1_PortsUpdate: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
   }
 }
 
+extension Coflux_V1_SessionAgents: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SessionAgents"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}sessions\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.sessions) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessions.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.sessions, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_SessionAgents, rhs: Coflux_V1_SessionAgents) -> Bool {
+    if lhs.sessions != rhs.sessions {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_ProxyOpened: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProxyOpened"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}conn_id\0\u{1}ok\0\u{1}error\0")
@@ -1555,7 +1608,7 @@ extension Coflux_V1_RelayHome: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
 
 extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{4}\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{3}relay_home\0\u{3}workspace_default_branch\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{4}\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{3}relay_home\0\u{3}workspace_default_branch\0\u{3}session_agents\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1836,6 +1889,19 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .workspaceDefaultBranch(v)
         }
       }()
+      case 31: try {
+        var v: Coflux_V1_SessionAgents?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .sessionAgents(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .sessionAgents(v)
+        }
+      }()
       default: break
       }
     }
@@ -1930,6 +1996,10 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .workspaceDefaultBranch?: try {
       guard case .workspaceDefaultBranch(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 30)
+    }()
+    case .sessionAgents?: try {
+      guard case .sessionAgents(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 31)
     }()
     case nil: break
     }

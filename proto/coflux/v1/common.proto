@@ -100,6 +100,15 @@ message PortPreview {
   string url = 2;
 }
 
+// worker 周期扫描存活会话 PTY 进程树检测到的 agent CLI（plan 073）。
+// 派生运行时事实：server 只做内存镜像 + 广播，不落库；daemon 断开即全部清空。
+message SessionAgentRef {
+  string session_id = 1;
+  string task_id = 2;
+  // 检测到的 agent 名（内置名单，如 "claude"/"codex"）；无 agent 的 session 不出现在清单里
+  string agent = 3;
+}
+
 message TaskPorts {
   string task_id = 1;
   repeated PortPreview ports = 2;

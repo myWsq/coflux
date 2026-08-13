@@ -123,6 +123,18 @@ pub struct PortPreview {
     #[prost(string, tag="2")]
     pub url: ::prost::alloc::string::String,
 }
+/// worker 周期扫描存活会话 PTY 进程树检测到的 agent CLI（plan 073）。
+/// 派生运行时事实：server 只做内存镜像 + 广播，不落库；daemon 断开即全部清空。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SessionAgentRef {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub task_id: ::prost::alloc::string::String,
+    /// 检测到的 agent 名（内置名单，如 "claude"/"codex"）；无 agent 的 session 不出现在清单里
+    #[prost(string, tag="3")]
+    pub agent: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TaskPorts {
     #[prost(string, tag="1")]
@@ -1464,6 +1476,15 @@ pub struct PortsUpdated {
     #[prost(message, repeated, tag="2")]
     pub ports: ::prost::alloc::vec::Vec<PortPreview>,
 }
+/// 某设备当前的 agent presence 全量（plan 073）：daemon SessionAgents 上报或断开清空后广播，
+/// 订阅时按设备补发。sessions 为该设备当前全量，空 = 全部清空。内存派生事实，不落库。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SessionAgentsUpdated {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub sessions: ::prost::alloc::vec::Vec<SessionAgentRef>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StateSnapshot {
     #[prost(message, repeated, tag="1")]
@@ -1531,7 +1552,7 @@ pub struct ClientOutdated {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 33")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 33, 34")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -1584,6 +1605,8 @@ pub mod server_to_client {
         LocalUnpairResult(super::LocalUnpairResult),
         #[prost(message, tag="33")]
         DeviceRelayGrant(super::DeviceRelayGrant),
+        #[prost(message, tag="34")]
+        SessionAgentsUpdated(super::SessionAgentsUpdated),
     }
 }
 // ===== Daemon → Server 载荷 =====
@@ -1680,6 +1703,13 @@ pub struct PortsUpdate {
     #[prost(message, repeated, tag="1")]
     pub sessions: ::prost::alloc::vec::Vec<SessionPorts>,
 }
+/// 全量幂等上报存活会话进程树内检测到的 agent（plan 073）；仅含检测到 agent 的 session，
+/// 变化才发、认证后无条件补发一次（与 PortsUpdate 同形态）。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SessionAgents {
+    #[prost(message, repeated, tag="1")]
+    pub sessions: ::prost::alloc::vec::Vec<SessionAgentRef>,
+}
 /// server→daemon ProxyOpen 的回应：隧道连接建立结果
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProxyOpened {
@@ -1705,7 +1735,7 @@ pub struct RelayHome {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29, 30")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29, 30, 31")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -1755,6 +1785,8 @@ pub mod daemon_to_server {
         RelayHome(super::RelayHome),
         #[prost(message, tag="30")]
         WorkspaceDefaultBranch(super::WorkspaceDefaultBranch),
+        #[prost(message, tag="31")]
+        SessionAgents(super::SessionAgents),
     }
 }
 /// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
