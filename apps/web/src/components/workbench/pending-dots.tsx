@@ -1,10 +1,10 @@
 /**
- * Cursor Glass / assistant-ui 同款：3×3 SVG 圆点，每颗点自己闪。
+ * Cursor Glass / assistant-ui 同款：4×4 SVG 圆点，每颗点自己闪。
  * 见 https://www.assistant-ui.com/docs/ui/dot-matrix （loading = randomized twinkle）
  * 不用 Unicode 盲文——UI 字体度量不稳，会把行撑开。
  */
 
-const GRID = 3;
+const GRID = 4;
 
 /** 打散相邻点的相位，避免整列一起闪（assistant-ui 的 bit-mix hash）。 */
 function hash(n: number, salt: number, range: number) {
@@ -33,7 +33,7 @@ export function PendingDots({ label }: { label?: string }) {
           key={i}
           cx={dot.cx}
           cy={dot.cy}
-          r={0.36}
+          r={0.32}
           fill="currentColor"
           className="coflux-dot-twinkle"
           style={{ animationDuration: `${dot.duration}s`, animationDelay: `${dot.delay}s` }}
