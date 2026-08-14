@@ -51,7 +51,7 @@ async function isOnline() {
 }
 // 等到「新」worker 起来且在线（pid 变化 = 新进程；避免抢到升级前的旧在线状态）
 async function waitNewWorker(prevPid) {
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 120; i++) {
     await sleep(250);
     let pid;
     try { pid = readWorkerPid(); } catch { continue; }

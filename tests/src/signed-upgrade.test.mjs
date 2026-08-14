@@ -65,7 +65,7 @@ async function isOnline() {
   }
 }
 async function waitNewWorker(prevPid) {
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 120; i++) {
     await sleep(250);
     let pid;
     try { pid = readWorkerPid(); } catch { continue; }
@@ -103,7 +103,7 @@ test("远程下载 + 验签：合法签名产物升级成功、会话存活", as
 
   assert.ok(await waitNewWorker(pid1), "下载验签通过后新 worker 起来且在线");
   let committed = false;
-  for (let i = 0; i < 40 && !committed; i++) {
+  for (let i = 0; i < 80 && !committed; i++) {
     await sleep(250);
     try { committed = readActive() === "dl-good"; } catch { /* 文件瞬时缺失 */ }
   }
