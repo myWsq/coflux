@@ -139,6 +139,11 @@ pub struct SessionAgentRef {
     /// 空 = 尚无 hook 信号。agent 进程退出时随条目一起消失。
     #[prost(string, tag="4")]
     pub state: ::prost::alloc::string::String,
+    /// agent 经 `cofluxd notify` 主动留给用户的一句话（plan 074）：与 state 同生命周期，
+    /// 后续任一 hook 事件到达即被清空（那时 agent 已换了状态，旧消息就过期了）。
+    /// 纯展示、不落库；长度由 worker 侧钳制。
+    #[prost(string, tag="5")]
+    pub message: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TaskPorts {
@@ -1715,6 +1720,97 @@ pub struct SessionAgents {
     #[prost(message, repeated, tag="1")]
     pub sessions: ::prost::alloc::vec::Vec<SessionAgentRef>,
 }
+/// ===== agent 协同控制（plan 074）=====
+///
+/// 跑在 PTY 里的 agent 经 loopback 发起的中心操作。worker 已用调用方 pid 反查进程树确认它
+/// 属于 session_id 这个存活会话（树外 pid 在 worker 侧就被拒，永不到达这里）；server 据
+/// session_id 反查 task→workspace 完成归属校验，daemon 不自报 workspace。
+///
+/// request_id 由 worker 生成，只做响应关联，不承担幂等：terminal_new 有副作用但不做
+/// exactly-once 去重——CLI 不自动重试，在飞请求遇断连即把错误交给 agent 自己决定
+/// （见 plans/074 Decisions）。这条与 browser 的 prepared operation 不同：daemon 控制 WS
+/// 是已认证的可信面，无需 operation_id 模板。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentTerminalNew {
+    #[prost(string, tag="1")]
+    pub title: ::prost::alloc::string::String,
+    /// worker 已写好的临时包装脚本绝对路径，server 原样填进 SessionCreate.shell。
+    /// server 不解释也不校验它——脚本由 daemon 自己生成、只回到同一个 daemon 执行。
+    #[prost(string, tag="2")]
+    pub shell: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentTerminalList {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentControlRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// 发起方所属的存活 session，由 worker 认定而非 agent 自报。
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(oneof="agent_control_request::Payload", tags="10, 11")]
+    pub payload: ::core::option::Option<agent_control_request::Payload>,
+}
+/// Nested message and enum types in `AgentControlRequest`.
+pub mod agent_control_request {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="10")]
+        TerminalNew(super::AgentTerminalNew),
+        #[prost(message, tag="11")]
+        TerminalList(super::AgentTerminalList),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentTerminalNewResult {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+}
+/// 同 workspace 下一个终端的对外视图；status/exit_code 取自中心的 Task 真相。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AgentTerminalRef {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub title: ::prost::alloc::string::String,
+    #[prost(enumeration="TaskStatus", tag="3")]
+    pub status: i32,
+    #[prost(int32, optional, tag="4")]
+    pub exit_code: ::core::option::Option<i32>,
+    #[prost(string, optional, tag="5")]
+    pub session_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(double, tag="6")]
+    pub created_at: f64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AgentTerminalListResult {
+    #[prost(message, repeated, tag="1")]
+    pub terminals: ::prost::alloc::vec::Vec<AgentTerminalRef>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AgentControlResult {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(oneof="agent_control_result::Payload", tags="10, 11")]
+    pub payload: ::core::option::Option<agent_control_result::Payload>,
+}
+/// Nested message and enum types in `AgentControlResult`.
+pub mod agent_control_result {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="10")]
+        TerminalNew(super::AgentTerminalNewResult),
+        #[prost(message, tag="11")]
+        TerminalList(super::AgentTerminalListResult),
+    }
+}
 /// server→daemon ProxyOpen 的回应：隧道连接建立结果
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProxyOpened {
@@ -1740,7 +1836,7 @@ pub struct RelayHome {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29, 30, 31")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -1792,6 +1888,8 @@ pub mod daemon_to_server {
         WorkspaceDefaultBranch(super::WorkspaceDefaultBranch),
         #[prost(message, tag="31")]
         SessionAgents(super::SessionAgents),
+        #[prost(message, tag="32")]
+        AgentControlRequest(super::AgentControlRequest),
     }
 }
 /// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
@@ -1959,7 +2057,7 @@ pub mod relay_node_list {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 33, 34, 19, 20")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 33, 34, 19, 20, 35")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -2014,6 +2112,8 @@ pub mod server_to_daemon {
         ProxyData(super::ProxyData),
         #[prost(message, tag="20")]
         WorkspaceList(super::WorkspaceList),
+        #[prost(message, tag="35")]
+        AgentControlResult(super::AgentControlResult),
     }
 }
 /// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD
