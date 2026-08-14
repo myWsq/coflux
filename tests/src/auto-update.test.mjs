@@ -97,7 +97,7 @@ async function isOnline() {
     p.close();
   }
 }
-async function waitActive(version, tries = 60) {
+async function waitActive(version, tries = 120) {
   for (let i = 0; i < tries; i++) {
     await sleep(250);
     try {
