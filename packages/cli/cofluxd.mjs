@@ -747,6 +747,97 @@ async function cmdHook() {
   }
 }
 
+/* --------------------- agent 协同控制（plan 074） --------------------- */
+// 跑在 coflux 终端里的 claude/codex 用这组命令，把自己的工作外化成用户在 web/手机上
+// **看得见、能接管**的 coflux 实体——而不是在自己的 Bash 里后台起一个谁也看不见的进程。
+//
+// 不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，树外一律拒。
+// 与 `hook` 子命令的约定**相反**：这些命令必须写 stdout——输出就是给 agent 读的返回值。
+// 也刻意不做自动重试：terminal new 有副作用，重试会开出两个终端，失败就把错误交给 agent。
+
+const AGENT_TIMEOUT_MS = 30_000;
+const DEFAULT_READ_LINES = 200;
+
+async function agentPost(body) {
+  const portResult = localGatewayPort();
+  if (!portResult.ok) die(portResult.error);
+  let res;
+  try {
+    res = await fetch(`http://127.0.0.1:${portResult.port}/agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...body, pid: process.pid, ppid: process.ppid }),
+      signal: AbortSignal.timeout(AGENT_TIMEOUT_MS),
+    });
+  } catch (error) {
+    die(`连不上本机 daemon：${error?.message || error}（daemon 没在跑？先看 cofluxd status）`);
+  }
+  let parsed = null;
+  try { parsed = await res.json(); } catch { /* 非 JSON 响应按下面的兜底报错处理 */ }
+  if (!res.ok || !parsed?.ok) die(parsed?.error || `daemon 返回 ${res.status}`);
+  return parsed;
+}
+
+// 剥掉 ANSI/OSC 转义与 C0 控制字符，保留 \t 与 \n——snapshot 是给终端渲染的字节流，
+// agent 要的是能读的纯文本。去转义放在 CLI 侧：daemon 的 snapshot 同时是 checkpoint 的
+// 数据来源，不为 agent 的可读性改它的语义。
+const ANSI_RE =
+  /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[[\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-PR-TZcf-ntqry=><~]|[\u0000-\u0008\u000b-\u001f\u007f]/g;
+
+function stripAnsi(raw) {
+  return String(raw ?? "").replace(ANSI_RE, "");
+}
+
+/** 取最后 n 行并去掉尾部空行——VT snapshot 的下半屏通常是成片空行，对 agent 是纯噪音。 */
+function tailLines(text, n) {
+  const lines = text.split("\n");
+  while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
+  return lines.slice(-n).join("\n");
+}
+
+async function cmdTerminal(values) {
+  const sub = positionals[1];
+  if (sub === "new") {
+    const command = values.cmd;
+    if (!command) die(`terminal new 需要 --cmd "<命令>"`);
+    const result = await agentPost({ action: "terminal.new", title: values.title || "", command });
+    console.log(`已开终端 ${result.taskId}（用户可在 coflux 侧栏看到并随时接管）`);
+    console.log(`看输出：cofluxd terminal read ${result.taskId}`);
+  } else if (sub === "list") {
+    const { terminals } = await agentPost({ action: "terminal.list" });
+    if (!terminals.length) return void console.log("本工作区暂无终端");
+    for (const t of terminals) {
+      const exit = t.exitCode === undefined || t.exitCode === null ? "" : ` exit=${t.exitCode}`;
+      console.log(`${t.taskId}  ${t.status}${exit}  ${t.title}`);
+    }
+  } else if (sub === "read") {
+    const taskId = positionals[2];
+    if (!taskId) die("terminal read 需要 <taskId>（用 cofluxd terminal list 查）");
+    const requested = Number(values.lines);
+    const lines = Number.isInteger(requested) && requested > 0 ? requested : DEFAULT_READ_LINES;
+    const result = await agentPost({ action: "terminal.read", taskId });
+    const exit = result.exitCode === undefined || result.exitCode === null ? "" : ` exit=${result.exitCode}`;
+    console.log(`# ${result.status}${exit}`);
+    const text = tailLines(stripAnsi(result.ansi), lines);
+    console.log(text || "（暂无输出）");
+  } else {
+    die(`terminal 需要子命令：new | list | read`);
+  }
+}
+
+async function cmdNotify() {
+  const message = positionals.slice(1).join(" ").trim();
+  if (!message) die(`notify 需要一句话，例如：cofluxd notify "两个方案拿不准，需要你定"`);
+  await agentPost({ action: "notify", message });
+  console.log("已通知用户（工作区在侧栏转为「等待交互」）");
+}
+
+async function cmdPorts() {
+  const { ports } = await agentPost({ action: "ports" });
+  if (!ports.length) return void console.log("本工作区暂无监听端口");
+  for (const p of ports) console.log(`${p.port}  ${p.url}`);
+}
+
 const HELP = `cofluxd —— coflux daemon 管理
 
   cofluxd                 首次=up（打印浏览器授权链接），已配置=status
@@ -761,6 +852,16 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd uninstall [--purge]   卸载（--purge 连二进制/配置/凭证一并删）
   cofluxd hook <claude|codex>   [agent hook 信使] 读 stdin/argv 的事件 JSON，转发给本机 daemon
                           （在 claude/codex 的 hook 配置里指向本命令；失败静默，不干扰 agent）
+
+  以下几条供**跑在 coflux 终端里的 agent** 调用，把工作变成用户看得见、能接管的东西：
+
+  cofluxd terminal new --cmd "<命令>" [--title "<标题>"]
+                          开一个真实终端跑命令，用户在 coflux 侧栏能看到并随时接管
+  cofluxd terminal list   列出本工作区的终端（含 status / 退出码）
+  cofluxd terminal read <taskId> [--lines N]
+                          读某个终端的内容（纯文本，默认最后 200 行；终端已退出也能读）
+  cofluxd notify "<一句话>"  叫人：工作区在侧栏转为「等待交互」并显示这句话
+  cofluxd ports           列出本工作区的监听端口及可直接打开的预览 URL
 
 up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
 通用: --version <vX|latest>(不传时 up 沿用已有二进制，update 默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
@@ -779,6 +880,9 @@ const { values, positionals } = parseArgs({
     server: { type: "string" },
     name: { type: "string" },
     shell: { type: "string" },
+    title: { type: "string" },
+    cmd: { type: "string" },
+    lines: { type: "string" },
     version: { type: "string" },
     "bin-dir": { type: "string" },
     "no-start": { type: "boolean", default: false },
@@ -792,7 +896,7 @@ let cmd = positionals[0];
 if (values.help || cmd === "help") { console.log(HELP); process.exit(0); }
 if (!cmd) cmd = fs.existsSync(SETTINGS) ? "status" : "up"; // 首次裸跑 → 引导
 
-const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall, hook: cmdHook };
+const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall, hook: cmdHook, terminal: cmdTerminal, notify: cmdNotify, ports: cmdPorts };
 const h = handlers[cmd];
 if (!h) die(`未知命令: ${cmd}${MIGRATED[cmd] ? `\n${MIGRATED[cmd]}` : ""}\n\n${HELP}`);
 await h(values);
