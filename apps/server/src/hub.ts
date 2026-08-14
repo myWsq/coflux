@@ -446,10 +446,21 @@ export class Hub {
    *
    * 每条请求必回一条 agentControlResult：worker 侧在等，静默丢弃只会让 agent 干等到超时。 */
   private async handleAgentControl(daemon: DaemonConn, request: AgentControlRequest): Promise<void> {
-    const reply = (payload: AgentControlResultPayload) =>
-      this.sendDaemon(daemon, { case: "agentControlResult", value: { requestId: request.requestId, ok: true, payload } });
     const fail = (error: string) =>
       this.sendDaemon(daemon, { case: "agentControlResult", value: { requestId: request.requestId, ok: false, error } });
+    // transport 层只会 log 掉 handler 的 rejection（见 transport.ts），而 agent 在等回执——
+    // 不兜底的话一次 DB 抖动就让它干等到超时。异常一律转成明确失败。
+    try {
+      await this.dispatchAgentControl(daemon, request, fail);
+    } catch (error) {
+      log.error("agent control failed", { daemonId: daemon.info.daemonId, err: (error as Error).message });
+      fail("中心处理该请求时出错");
+    }
+  }
+
+  private async dispatchAgentControl(daemon: DaemonConn, request: AgentControlRequest, fail: (error: string) => void): Promise<void> {
+    const reply = (payload: AgentControlResultPayload) =>
+      this.sendDaemon(daemon, { case: "agentControlResult", value: { requestId: request.requestId, ok: true, payload } });
 
     const originTask = await this.store.getTaskBySession(request.sessionId);
     if (!originTask || originTask.daemonId !== daemon.info.daemonId || originTask.accountId !== daemon.accountId) {

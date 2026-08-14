@@ -18,7 +18,9 @@ use std::time::Duration;
 use coflux_protocol::wire::{self, agent_control_request, agent_control_result, daemon_to_server};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{agents, ops, send_d2s, WorkerState, WsOut};
+use prost::Message as _;
+
+use crate::{agents, ops, WorkerState, WsOut};
 
 /// 等中心回执的上限：只防在飞请求永久占住 pending 表，CLI 侧自己的超时更短。
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
@@ -220,15 +222,19 @@ async fn ask_server(
         }
         s.agent_pending.insert(request_id.clone(), tx);
     }
-    send_d2s(
-        to_server_tx,
-        daemon_to_server::Payload::AgentControlRequest(wire::AgentControlRequest {
+    // try_send 而非 send，且必须看返回值：出站队列有界，断连期间会满。阻塞会让 agent 干等到
+    // 超时，静默丢弃更糟（同样干等）——满了就立刻说「发不出去」。发送失败要自己摘 pending。
+    let envelope = wire::DaemonToServer {
+        payload: Some(daemon_to_server::Payload::AgentControlRequest(wire::AgentControlRequest {
             request_id: request_id.clone(),
             session_id,
             payload: Some(payload),
-        }),
-    )
-    .await;
+        })),
+    };
+    if to_server_tx.try_send(envelope.encode_to_vec()).is_err() {
+        state.lock().unwrap().agent_pending.remove(&request_id);
+        return Err(AgentResponse::err("503 Service Unavailable", "与中心的出站队列已满或已断开，请重试"));
+    }
 
     let outcome = tokio::time::timeout(SERVER_TIMEOUT, rx).await;
     // 无论成败都摘掉 pending：超时/断连后迟到的回执没有接收方，留着就是泄漏。
