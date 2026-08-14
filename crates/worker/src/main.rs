@@ -4,6 +4,7 @@
 //! 再向 server resync（否则空列表 resync 会让 server 误标 exited，随后真 resync 反触发 session.close 杀 PTY）。
 //! 全 Rust 化后整个 daemon 无 node 运行时依赖。
 
+mod agent_ctl;
 mod agents;
 mod conn_state;
 mod creds;
@@ -86,6 +87,13 @@ struct WorkerState {
     /// hook 上报的回合状态：sessionId -> active/approval/question/done。进程树 presence 扫描是存活门——
     /// 合并上报时剪掉扫描已不见 agent 的条目（agent 退出/换新时不残留旧状态）。
     hook_states: HashMap<String, &'static str>,
+    /// `cofluxd notify` 留给用户的一句话（plan 074）：sessionId -> 消息。与 hook_states 同
+    /// 生命周期——任一 hook 事件到达即清掉该 session 的留言（那时 agent 已换了状态，旧留言
+    /// 就过期了），presence 扫描不见的会话也一并剪掉。
+    hook_messages: HashMap<String, String>,
+    /// agent 控制请求的在飞关联表（plan 074）：requestId -> 中心回执的接收端。
+    /// 断开中心连接时整表清空——发送端 drop 会让等待方立刻拿到「连接中断」而不是干等超时。
+    agent_pending: HashMap<String, tokio::sync::oneshot::Sender<wire::AgentControlResult>>,
     /// server 下发的本设备工作区清单：workspace_id -> (worktree 路径, 所属 project 的 default_branch)
     /// （分支监视 + diff 统计基准用）
     workspaces: HashMap<String, (String, String)>,
@@ -226,9 +234,13 @@ async fn force_report_ports(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Send
 /// 扫描已不见 agent 的会话被剪掉——agent 退出/换新后不残留旧状态；扫到的条目回填 state。
 fn merge_hook_states(s: &mut WorkerState, mut sessions: Vec<wire::SessionAgentRef>) -> Vec<wire::SessionAgentRef> {
     s.hook_states.retain(|session_id, _| sessions.iter().any(|entry| entry.session_id == *session_id));
+    s.hook_messages.retain(|session_id, _| sessions.iter().any(|entry| entry.session_id == *session_id));
     for entry in &mut sessions {
         if let Some(hook_state) = s.hook_states.get(&entry.session_id) {
             entry.state = (*hook_state).to_string();
+        }
+        if let Some(message) = s.hook_messages.get(&entry.session_id) {
+            entry.message = message.clone();
         }
     }
     sessions
@@ -237,7 +249,7 @@ fn merge_hook_states(s: &mut WorkerState, mut sessions: Vec<wire::SessionAgentRe
 /// 周期(2s)扫描每个存活会话进程树内的 agent CLI（plan 073）+ 合并 hook 回合状态；变化才发
 /// 全量。扫描同端口探测一样是同步阻塞 IO（/proc 读或 libproc/sysctl 系统调用），
 /// spawn_blocking 挪出执行器。hook 事件被接受后也会立即触发一次（不等下个周期）。
-async fn report_agents_if_changed(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>) {
+pub(crate) async fn report_agents_if_changed(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>) {
     let alive = { state.lock().unwrap().alive.clone() }; // 取快照即释放锁，不跨扫描 await 持锁
     let sessions = match tokio::task::spawn_blocking(move || agents::detect_session_agents(&alive)).await {
         Ok(s) => s,
@@ -290,15 +302,7 @@ async fn consume_hook_events(
         };
         let alive = { state.lock().unwrap().alive.clone() };
         let (pid, ppid) = (request.pid, request.ppid);
-        let session_id = tokio::task::spawn_blocking(move || {
-            alive.iter().find_map(|(session_id, (_task_id, root_pid))| {
-                let tree = ports::process_tree(*root_pid);
-                (tree.contains(&pid) || tree.contains(&ppid)).then(|| session_id.clone())
-            })
-        })
-        .await
-        .ok()
-        .flatten();
+        let session_id = tokio::task::spawn_blocking(move || agents::session_of_pid(&alive, pid, ppid)).await.ok().flatten();
         let Some(session_id) = session_id else {
             let _ = request.respond.send(hook::HookOutcome::SessionNotFound);
             continue;
@@ -307,7 +311,12 @@ async fn consume_hook_events(
             "[worker] hook event agent={} event={} notification={} state={hook_state} session={session_id}",
             request.agent, request.event, request.notification
         );
-        state.lock().unwrap().hook_states.insert(session_id, hook_state);
+        {
+            // hook 事件到达 = agent 已经换了状态，上一条 notify 留言就此过期（plan 074）。
+            let mut s = state.lock().unwrap();
+            s.hook_states.insert(session_id.clone(), hook_state);
+            s.hook_messages.remove(&session_id);
+        }
         report_agents_if_changed(&state, &to_server_tx).await;
         let _ = request.respond.send(hook::HookOutcome::Accepted);
     }
@@ -369,6 +378,8 @@ async fn main() {
         last_reported_ports: Vec::new(),
         last_reported_agents: Vec::new(),
         hook_states: HashMap::new(),
+        hook_messages: HashMap::new(),
+        agent_pending: HashMap::new(),
         workspaces: HashMap::new(),
         last_branches: HashMap::new(),
         last_diffs: HashMap::new(),
@@ -406,6 +417,12 @@ async fn main() {
     let (hook_tx, hook_rx) = tokio::sync::mpsc::channel::<hook::HookRequest>(64);
     tokio::spawn(consume_hook_events(hook_rx, state.clone(), to_server_tx.clone()));
 
+    // agent 控制通道（plan 074）：同为 gateway 的 loopback POST 路径，但走独立消费任务——
+    // terminal.* 要等中心回执（最长 20s），不能和 hook 的短回合状态上报挤同一条队列。
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<agent_ctl::AgentRequest>(64);
+    tokio::spawn(agent_ctl::consume_agent_requests(agent_rx, state.clone(), to_server_tx.clone()));
+    let local_endpoints = Arc::new(hook::LocalEndpoints { hook_tx, agent_tx });
+
     // gateway 监听独立于中心 server_loop；热升级时旧 worker 短暂占端口会在后台重试。
     if let Some(auth) = local_auth.clone() {
         let daemon_state = state.clone();
@@ -423,7 +440,7 @@ async fn main() {
                 status_state.lock().unwrap().gateway_port = port;
                 announce_local_gateway(&status_state, Some(&status_auth), &status_server);
             }),
-            hook_tx,
+            local_endpoints,
         ));
     }
 
@@ -724,6 +741,9 @@ async fn server_loop(
             let mut state = state.lock().unwrap();
             state.authed = false;
             state.conn_state.reconnecting();
+            // 在飞的 agent 控制请求随连接一起作废：drop 发送端让等待方立刻拿到「连接中断」，
+            // 而不是干等到 20s 超时（plan 074）。
+            state.agent_pending.clear();
         }
         if let Some(auth) = &local_auth {
             auth.set_server_online(false);
@@ -1084,6 +1104,14 @@ async fn on_server_message(
                     }
                     server_to_daemon::Payload::RelayNodeList(wire::RelayNodeList { nodes }) => {
                         relay_home.set_nodes(nodes);
+                    }
+                    // agent 控制回执（plan 074）：按 request_id 找到等待中的 agent_ctl 任务。
+                    // 找不到 = 已超时摘除或本就不是本进程发的，静默丢弃。
+                    server_to_daemon::Payload::AgentControlResult(result) => {
+                        let waiter = state.lock().unwrap().agent_pending.remove(&result.request_id);
+                        if let Some(waiter) = waiter {
+                            let _ = waiter.send(result);
+                        }
                     }
                     server_to_daemon::Payload::SessionCatalogRequest(request) => device.request_server_catalog(request),
                     server_to_daemon::Payload::ExitAck(request) => device.acknowledge_exits(request),

@@ -55,12 +55,27 @@ pub fn detect_session_agents(alive: &HashMap<String, (String, i32)>) -> Vec<wire
                 session_id: session_id.clone(),
                 task_id: task_id.clone(),
                 agent: agent.to_string(),
-                state: String::new(), // 回合状态由 main 合并 hook_states 时回填
+                state: String::new(),   // 回合状态由 main 合并 hook_states 时回填
+                message: String::new(), // notify 留言同上（plan 074）
             })
         })
         .collect();
     sessions.sort_by(|a, b| a.session_id.cmp(&b.session_id));
     sessions
+}
+
+/// 用调用方 pid（或其父 pid）反查它落在哪个存活会话的进程树内。
+///
+/// 这是 loopback 端点的**身份判据**：调用方报的是自己的 pid，能不能通过由 worker 扫描进程树
+/// 裁定，不是自报的字段。返回 None = 调用方不在任何存活 session 里（coflux 之外启动的进程），
+/// 一律拒绝——plan 073 的 hook 上报与 plan 074 的 agent 控制共用这道门。
+///
+/// 阻塞式进程树扫描（/proc 读或 libproc/sysctl 系统调用），调用方负责 spawn_blocking。
+pub fn session_of_pid(alive: &HashMap<String, (String, i32)>, pid: i32, ppid: i32) -> Option<String> {
+    alive.iter().find_map(|(session_id, (_task_id, root_pid))| {
+        let tree = ports::process_tree(*root_pid);
+        (tree.contains(&pid) || tree.contains(&ppid)).then(|| session_id.clone())
+    })
 }
 
 fn detect_in_tree(root_pid: i32) -> Option<&'static str> {

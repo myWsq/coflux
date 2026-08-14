@@ -19,7 +19,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{accept_hdr_async_with_config, WebSocketStream};
 
 use crate::device::DeviceRuntime;
-use crate::hook::{self, HookRequest};
+use crate::hook::{self, LocalEndpoints};
 use crate::local_auth::{AuthFailure, LocalAuth};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
@@ -36,7 +36,7 @@ pub async fn run(
     runtime: Arc<DeviceRuntime>,
     daemon_id: DaemonIdProvider,
     status: GatewayStatus,
-    hook_tx: tokio::sync::mpsc::Sender<HookRequest>,
+    endpoints: Arc<LocalEndpoints>,
 ) {
     loop {
         let (port, listeners) = match bind_loopbacks(requested_port).await {
@@ -56,8 +56,8 @@ pub async fn run(
                 let auth = auth.clone();
                 let runtime = runtime.clone();
                 let daemon_id = daemon_id.clone();
-                let hook_tx = hook_tx.clone();
-                Box::pin(accept_loop(listener, auth, runtime, daemon_id, hook_tx)) as Pin<Box<dyn Future<Output = ()> + Send>>
+                let endpoints = endpoints.clone();
+                Box::pin(accept_loop(listener, auth, runtime, daemon_id, endpoints)) as Pin<Box<dyn Future<Output = ()> + Send>>
             })
             .collect();
         if loops.len() == 1 {
@@ -93,7 +93,7 @@ async fn accept_loop(
     auth: Arc<LocalAuth>,
     runtime: Arc<DeviceRuntime>,
     daemon_id: DaemonIdProvider,
-    hook_tx: tokio::sync::mpsc::Sender<HookRequest>,
+    endpoints: Arc<LocalEndpoints>,
 ) {
     loop {
         match listener.accept().await {
@@ -101,9 +101,9 @@ async fn accept_loop(
                 let auth = auth.clone();
                 let runtime = runtime.clone();
                 let daemon_id = daemon_id.clone();
-                let hook_tx = hook_tx.clone();
+                let endpoints = endpoints.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = handle_connection(stream, auth, runtime, daemon_id, hook_tx).await {
+                    if let Err(error) = handle_connection(stream, auth, runtime, daemon_id, endpoints).await {
                         eprintln!("[worker] local gateway connection closed: {error}");
                     }
                 });
@@ -116,8 +116,9 @@ async fn accept_loop(
     }
 }
 
-/// peek 首 5 字节分流：`POST ` 开头是 hook 信使的纯 HTTP 上报（唯一的非 WS 路径），
-/// 其余（GET 升级请求）走原有 WebSocket 握手。peek 不消费字节，两条路径都拿到完整请求。
+/// peek 首 5 字节分流：`POST ` 开头是本地端点的纯 HTTP 请求（hook 上报与 agent 控制，
+/// 见 [crate::hook]——唯二的非 WS 路径），其余（GET 升级请求）走原有 WebSocket 握手。
+/// peek 不消费字节，两条路径都拿到完整请求。
 async fn probe_is_post(stream: &TcpStream) -> bool {
     let probe = async {
         let mut buffer = [0u8; 5];
@@ -139,10 +140,10 @@ async fn handle_connection(
     auth: Arc<LocalAuth>,
     runtime: Arc<DeviceRuntime>,
     daemon_id: DaemonIdProvider,
-    hook_tx: tokio::sync::mpsc::Sender<HookRequest>,
+    endpoints: Arc<LocalEndpoints>,
 ) -> Result<(), String> {
     if probe_is_post(&stream).await {
-        return hook::serve(stream, hook_tx).await;
+        return hook::serve(stream, endpoints).await;
     }
     let captured_origin = Arc::new(Mutex::new(None::<String>));
     let callback_origin = captured_origin.clone();
@@ -342,7 +343,7 @@ mod tests {
             Arc::new(move |status| {
                 let _ = status_tx.send(status);
             }),
-            tokio::sync::mpsc::channel(4).0,
+            Arc::new(crate::hook::LocalEndpoints { hook_tx: tokio::sync::mpsc::channel(4).0, agent_tx: tokio::sync::mpsc::channel(4).0 }),
         ));
         let port = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -466,7 +467,7 @@ mod tests {
             Arc::new(move |status| {
                 let _ = status_tx.send(status);
             }),
-            tokio::sync::mpsc::channel(4).0,
+            Arc::new(crate::hook::LocalEndpoints { hook_tx: tokio::sync::mpsc::channel(4).0, agent_tx: tokio::sync::mpsc::channel(4).0 }),
         ));
         let port = loop {
             if let Some(Some(port)) = status_rx.recv().await {
@@ -498,7 +499,7 @@ mod tests {
             Arc::new(move |status| {
                 let _ = first_tx.send(status);
             }),
-            tokio::sync::mpsc::channel(4).0,
+            Arc::new(crate::hook::LocalEndpoints { hook_tx: tokio::sync::mpsc::channel(4).0, agent_tx: tokio::sync::mpsc::channel(4).0 }),
         ));
         let port = loop {
             if let Some(Some(port)) = first_rx.recv().await {
@@ -517,7 +518,7 @@ mod tests {
             Arc::new(move |status| {
                 let _ = second_tx.send(status);
             }),
-            tokio::sync::mpsc::channel(4).0,
+            Arc::new(crate::hook::LocalEndpoints { hook_tx: tokio::sync::mpsc::channel(4).0, agent_tx: tokio::sync::mpsc::channel(4).0 }),
         ));
         let rebound = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
