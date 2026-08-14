@@ -12,6 +12,11 @@
 /// wire：每个 WS binary message = 一个 protobuf 编码的信封（DaemonToServer / ServerToDaemon）。
 /// 旧 JSON 控制面 + 自定义二进制帧已收敛为单一 protobuf binary，protojson 仅用于日志调试。
 
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
+import Foundation
+#endif
 import SwiftProtobuf
 
 // If the compiler emits an error on this type, it is because this file
@@ -264,6 +269,34 @@ public struct Coflux_V1_AgentTerminalList: Sendable {
   public init() {}
 }
 
+/// 读某个终端当前内容。取的是中心缓存的 checkpoint 而非 daemon 本地 snapshot：本地 snapshot
+/// 在 session 退出后就没了，而「命令跑完了看输出」恰恰是 agent 最常用的场景（见 plans/074
+/// 执行期偏离记录）。中心 checkpoint 滞后 ≤2s（CHECKPOINT_INTERVAL），且经 server 天然完成
+/// 「该 task 与发起方同 workspace」的归属校验。
+public struct Coflux_V1_AgentTerminalRead: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var taskID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// 本会话进程树监听端口的预览 URL。必须经中心：URL 由 server 用 proxyHost 配置 + shortId
+/// 路由表生成（apps/server/src/proxy.ts），daemon 侧无从得知。
+public struct Coflux_V1_AgentPortsList: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_AgentControlRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -292,11 +325,29 @@ public struct Coflux_V1_AgentControlRequest: Sendable {
     set {payload = .terminalList(newValue)}
   }
 
+  public var terminalRead: Coflux_V1_AgentTerminalRead {
+    get {
+      if case .terminalRead(let v)? = payload {return v}
+      return Coflux_V1_AgentTerminalRead()
+    }
+    set {payload = .terminalRead(newValue)}
+  }
+
+  public var portsList: Coflux_V1_AgentPortsList {
+    get {
+      if case .portsList(let v)? = payload {return v}
+      return Coflux_V1_AgentPortsList()
+    }
+    set {payload = .portsList(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
     case terminalNew(Coflux_V1_AgentTerminalNew)
     case terminalList(Coflux_V1_AgentTerminalList)
+    case terminalRead(Coflux_V1_AgentTerminalRead)
+    case portsList(Coflux_V1_AgentPortsList)
 
   }
 
@@ -369,6 +420,48 @@ public struct Coflux_V1_AgentTerminalListResult: Sendable {
   public init() {}
 }
 
+public struct Coflux_V1_AgentTerminalReadResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// 中心缓存的最后一个 checkpoint 的规范化 ANSI；去转义成纯文本由 CLI 侧负责
+  /// （snapshot 同时是 checkpoint 的数据来源，不为 agent 可读性改它的语义）。
+  /// 无 checkpoint（如刚建还没输出）时为空，不是错误。
+  public var ansiSnapshot: Data = Data()
+
+  public var capturedAt: Double = 0
+
+  public var status: Coflux_V1_TaskStatus = .unspecified
+
+  public var exitCode: Int32 {
+    get {_exitCode ?? 0}
+    set {_exitCode = newValue}
+  }
+  /// Returns true if `exitCode` has been explicitly set.
+  public var hasExitCode: Bool {self._exitCode != nil}
+  /// Clears the value of `exitCode`. Subsequent reads from it will return its default value.
+  public mutating func clearExitCode() {self._exitCode = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _exitCode: Int32? = nil
+}
+
+public struct Coflux_V1_AgentPortsListResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var ports: [Coflux_V1_PortPreview] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_AgentControlResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -405,11 +498,29 @@ public struct Coflux_V1_AgentControlResult: Sendable {
     set {payload = .terminalList(newValue)}
   }
 
+  public var terminalRead: Coflux_V1_AgentTerminalReadResult {
+    get {
+      if case .terminalRead(let v)? = payload {return v}
+      return Coflux_V1_AgentTerminalReadResult()
+    }
+    set {payload = .terminalRead(newValue)}
+  }
+
+  public var portsList: Coflux_V1_AgentPortsListResult {
+    get {
+      if case .portsList(let v)? = payload {return v}
+      return Coflux_V1_AgentPortsListResult()
+    }
+    set {payload = .portsList(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
     case terminalNew(Coflux_V1_AgentTerminalNewResult)
     case terminalList(Coflux_V1_AgentTerminalListResult)
+    case terminalRead(Coflux_V1_AgentTerminalReadResult)
+    case portsList(Coflux_V1_AgentPortsListResult)
 
   }
 
@@ -1764,9 +1875,58 @@ extension Coflux_V1_AgentTerminalList: SwiftProtobuf.Message, SwiftProtobuf._Mes
   }
 }
 
+extension Coflux_V1_AgentTerminalRead: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentTerminalRead"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentTerminalRead, rhs: Coflux_V1_AgentTerminalRead) -> Bool {
+    if lhs.taskID != rhs.taskID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentPortsList: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentPortsList"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap()
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    // Load everything into unknown fields
+    while try decoder.nextFieldNumber() != nil {}
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentPortsList, rhs: Coflux_V1_AgentPortsList) -> Bool {
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_AgentControlRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AgentControlRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{4}\u{8}terminal_new\0\u{3}terminal_list\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{4}\u{8}terminal_new\0\u{3}terminal_list\0\u{3}terminal_read\0\u{3}ports_list\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1802,6 +1962,32 @@ extension Coflux_V1_AgentControlRequest: SwiftProtobuf.Message, SwiftProtobuf._M
           self.payload = .terminalList(v)
         }
       }()
+      case 12: try {
+        var v: Coflux_V1_AgentTerminalRead?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .terminalRead(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .terminalRead(v)
+        }
+      }()
+      case 13: try {
+        var v: Coflux_V1_AgentPortsList?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .portsList(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .portsList(v)
+        }
+      }()
       default: break
       }
     }
@@ -1826,6 +2012,14 @@ extension Coflux_V1_AgentControlRequest: SwiftProtobuf.Message, SwiftProtobuf._M
     case .terminalList?: try {
       guard case .terminalList(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
+    }()
+    case .terminalRead?: try {
+      guard case .terminalRead(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+    }()
+    case .portsList?: try {
+      guard case .portsList(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
     }()
     case nil: break
     }
@@ -1965,9 +2159,88 @@ extension Coflux_V1_AgentTerminalListResult: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
+extension Coflux_V1_AgentTerminalReadResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentTerminalReadResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}ansi_snapshot\0\u{3}captured_at\0\u{1}status\0\u{3}exit_code\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.ansiSnapshot) }()
+      case 2: try { try decoder.decodeSingularDoubleField(value: &self.capturedAt) }()
+      case 3: try { try decoder.decodeSingularEnumField(value: &self.status) }()
+      case 4: try { try decoder.decodeSingularInt32Field(value: &self._exitCode) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.ansiSnapshot.isEmpty {
+      try visitor.visitSingularBytesField(value: self.ansiSnapshot, fieldNumber: 1)
+    }
+    if self.capturedAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.capturedAt, fieldNumber: 2)
+    }
+    if self.status != .unspecified {
+      try visitor.visitSingularEnumField(value: self.status, fieldNumber: 3)
+    }
+    try { if let v = self._exitCode {
+      try visitor.visitSingularInt32Field(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentTerminalReadResult, rhs: Coflux_V1_AgentTerminalReadResult) -> Bool {
+    if lhs.ansiSnapshot != rhs.ansiSnapshot {return false}
+    if lhs.capturedAt != rhs.capturedAt {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs._exitCode != rhs._exitCode {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentPortsListResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentPortsListResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}ports\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.ports) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.ports.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.ports, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentPortsListResult, rhs: Coflux_V1_AgentPortsListResult) -> Bool {
+    if lhs.ports != rhs.ports {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_AgentControlResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AgentControlResult"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{4}\u{7}terminal_new\0\u{3}terminal_list\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{4}\u{7}terminal_new\0\u{3}terminal_list\0\u{3}terminal_read\0\u{3}ports_list\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2004,6 +2277,32 @@ extension Coflux_V1_AgentControlResult: SwiftProtobuf.Message, SwiftProtobuf._Me
           self.payload = .terminalList(v)
         }
       }()
+      case 12: try {
+        var v: Coflux_V1_AgentTerminalReadResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .terminalRead(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .terminalRead(v)
+        }
+      }()
+      case 13: try {
+        var v: Coflux_V1_AgentPortsListResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .portsList(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .portsList(v)
+        }
+      }()
       default: break
       }
     }
@@ -2031,6 +2330,14 @@ extension Coflux_V1_AgentControlResult: SwiftProtobuf.Message, SwiftProtobuf._Me
     case .terminalList?: try {
       guard case .terminalList(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
+    }()
+    case .terminalRead?: try {
+      guard case .terminalRead(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+    }()
+    case .portsList?: try {
+      guard case .portsList(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
     }()
     case nil: break
     }

@@ -1742,6 +1742,20 @@ pub struct AgentTerminalNew {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentTerminalList {
 }
+/// 读某个终端当前内容。取的是中心缓存的 checkpoint 而非 daemon 本地 snapshot：本地 snapshot
+/// 在 session 退出后就没了，而「命令跑完了看输出」恰恰是 agent 最常用的场景（见 plans/074
+/// 执行期偏离记录）。中心 checkpoint 滞后 ≤2s（CHECKPOINT_INTERVAL），且经 server 天然完成
+/// 「该 task 与发起方同 workspace」的归属校验。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentTerminalRead {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+}
+/// 本会话进程树监听端口的预览 URL。必须经中心：URL 由 server 用 proxyHost 配置 + shortId
+/// 路由表生成（apps/server/src/proxy.ts），daemon 侧无从得知。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentPortsList {
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentControlRequest {
     #[prost(string, tag="1")]
@@ -1749,7 +1763,7 @@ pub struct AgentControlRequest {
     /// 发起方所属的存活 session，由 worker 认定而非 agent 自报。
     #[prost(string, tag="2")]
     pub session_id: ::prost::alloc::string::String,
-    #[prost(oneof="agent_control_request::Payload", tags="10, 11")]
+    #[prost(oneof="agent_control_request::Payload", tags="10, 11, 12, 13")]
     pub payload: ::core::option::Option<agent_control_request::Payload>,
 }
 /// Nested message and enum types in `AgentControlRequest`.
@@ -1760,6 +1774,10 @@ pub mod agent_control_request {
         TerminalNew(super::AgentTerminalNew),
         #[prost(message, tag="11")]
         TerminalList(super::AgentTerminalList),
+        #[prost(message, tag="12")]
+        TerminalRead(super::AgentTerminalRead),
+        #[prost(message, tag="13")]
+        PortsList(super::AgentPortsList),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1791,6 +1809,25 @@ pub struct AgentTerminalListResult {
     pub terminals: ::prost::alloc::vec::Vec<AgentTerminalRef>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AgentTerminalReadResult {
+    /// 中心缓存的最后一个 checkpoint 的规范化 ANSI；去转义成纯文本由 CLI 侧负责
+    /// （snapshot 同时是 checkpoint 的数据来源，不为 agent 可读性改它的语义）。
+    /// 无 checkpoint（如刚建还没输出）时为空，不是错误。
+    #[prost(bytes="vec", tag="1")]
+    pub ansi_snapshot: ::prost::alloc::vec::Vec<u8>,
+    #[prost(double, tag="2")]
+    pub captured_at: f64,
+    #[prost(enumeration="TaskStatus", tag="3")]
+    pub status: i32,
+    #[prost(int32, optional, tag="4")]
+    pub exit_code: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AgentPortsListResult {
+    #[prost(message, repeated, tag="1")]
+    pub ports: ::prost::alloc::vec::Vec<PortPreview>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AgentControlResult {
     #[prost(string, tag="1")]
     pub request_id: ::prost::alloc::string::String,
@@ -1798,7 +1835,7 @@ pub struct AgentControlResult {
     pub ok: bool,
     #[prost(string, optional, tag="3")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(oneof="agent_control_result::Payload", tags="10, 11")]
+    #[prost(oneof="agent_control_result::Payload", tags="10, 11, 12, 13")]
     pub payload: ::core::option::Option<agent_control_result::Payload>,
 }
 /// Nested message and enum types in `AgentControlResult`.
@@ -1809,6 +1846,10 @@ pub mod agent_control_result {
         TerminalNew(super::AgentTerminalNewResult),
         #[prost(message, tag="11")]
         TerminalList(super::AgentTerminalListResult),
+        #[prost(message, tag="12")]
+        TerminalRead(super::AgentTerminalReadResult),
+        #[prost(message, tag="13")]
+        PortsList(super::AgentPortsListResult),
     }
 }
 /// server→daemon ProxyOpen 的回应：隧道连接建立结果

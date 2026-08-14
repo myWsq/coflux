@@ -98,6 +98,18 @@ message AgentTerminalNew {
 
 message AgentTerminalList {}
 
+// 读某个终端当前内容。取的是中心缓存的 checkpoint 而非 daemon 本地 snapshot：本地 snapshot
+// 在 session 退出后就没了，而「命令跑完了看输出」恰恰是 agent 最常用的场景（见 plans/074
+// 执行期偏离记录）。中心 checkpoint 滞后 ≤2s（CHECKPOINT_INTERVAL），且经 server 天然完成
+// 「该 task 与发起方同 workspace」的归属校验。
+message AgentTerminalRead {
+  string task_id = 1;
+}
+
+// 本会话进程树监听端口的预览 URL。必须经中心：URL 由 server 用 proxyHost 配置 + shortId
+// 路由表生成（apps/server/src/proxy.ts），daemon 侧无从得知。
+message AgentPortsList {}
+
 message AgentControlRequest {
   string request_id = 1;
   // 发起方所属的存活 session，由 worker 认定而非 agent 自报。
@@ -105,6 +117,8 @@ message AgentControlRequest {
   oneof payload {
     AgentTerminalNew terminal_new = 10;
     AgentTerminalList terminal_list = 11;
+    AgentTerminalRead terminal_read = 12;
+    AgentPortsList ports_list = 13;
   }
 }
 
@@ -127,6 +141,20 @@ message AgentTerminalListResult {
   repeated AgentTerminalRef terminals = 1;
 }
 
+message AgentTerminalReadResult {
+  // 中心缓存的最后一个 checkpoint 的规范化 ANSI；去转义成纯文本由 CLI 侧负责
+  // （snapshot 同时是 checkpoint 的数据来源，不为 agent 可读性改它的语义）。
+  // 无 checkpoint（如刚建还没输出）时为空，不是错误。
+  bytes ansi_snapshot = 1;
+  double captured_at = 2;
+  TaskStatus status = 3;
+  optional int32 exit_code = 4;
+}
+
+message AgentPortsListResult {
+  repeated PortPreview ports = 1;
+}
+
 message AgentControlResult {
   string request_id = 1;
   bool ok = 2;
@@ -134,6 +162,8 @@ message AgentControlResult {
   oneof payload {
     AgentTerminalNewResult terminal_new = 10;
     AgentTerminalListResult terminal_list = 11;
+    AgentTerminalReadResult terminal_read = 12;
+    AgentPortsListResult ports_list = 13;
   }
 }
 

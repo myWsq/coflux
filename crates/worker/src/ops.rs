@@ -252,3 +252,75 @@ pub async fn read_file_text(root: &str, rel: &str) -> (bool, String, Option<Stri
         }
     }
 }
+
+/* ------------------- agent 协同控制：命令包装脚本（plan 074） ------------------- */
+
+/// 把 shell 命令行包成一个可执行脚本，返回其绝对路径。
+///
+/// 为什么要包这一层：supervisor 侧起 PTY 用的是 `CommandBuilder::new(&shell)`，**只接受
+/// 单个可执行程序名、不接受 args**（见 `crates/supervisor/src/sessions.rs`），所以 agent
+/// 想让新终端跑一条命令，唯一不改 supervisor 的办法就是让 `shell` 字段指向这样一个脚本。
+/// supervisor 不走热升级，改它意味着全网 daemon 都要用户手动 `cofluxd update`，所以这层
+/// 包装是刻意付出的代价（见 plans/074 Decisions）。
+///
+/// 脚本用 **login shell** 执行命令：daemon 由 launchd/systemd 拉起，PATH 通常只有系统默认，
+/// 不走 login shell 会找不到 pnpm/node 这类装在用户 PATH 里的东西。
+///
+/// 命令执行完脚本即退出 → session 退出 → 中心 task 转 EXITED 并带上退出码，这正是 agent
+/// 判断「跑完没有、成没成」的依据。刻意**不**在末尾留交互 shell：那会让 task 永远 RUNNING，
+/// 侧栏堆满假的「运行中」，而用户想接管在命令运行期间本来就可以。
+pub fn write_command_script(command: &str) -> Result<String, String> {
+    let base = std::env::temp_dir().join("coflux-agent-cmd");
+    std::fs::create_dir_all(&base).map_err(|error| error.to_string())?;
+    let dir = std::fs::canonicalize(&base).map_err(|error| error.to_string())?;
+    let name = format!(
+        "cmd-{}-{}.sh",
+        std::process::id(),
+        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+    );
+    let full = dir.join(&name);
+    let login_shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/bash".to_string());
+    let script = format!("#!/bin/sh\nexec {} -lc {}\n", sh_quote(&login_shell), sh_quote(command));
+    std::fs::write(&full, script).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o700)).map_err(|error| error.to_string())?;
+    }
+    cleanup_stale_files(&dir, &name, "");
+    Ok(full.to_string_lossy().into_owned())
+}
+
+/// POSIX shell 单引号转义：整体套单引号，内部的 `'` 换成 `'\''`（收单引号→转义单引号→再开）。
+/// 这是唯一一条规则，任意字节序列都安全——命令来自 agent，不能假设它不含引号。
+fn sh_quote(raw: &str) -> String {
+    format!("'{}'", raw.replace('\'', r"'\''"))
+}
+
+#[cfg(test)]
+mod agent_script_tests {
+    use super::*;
+
+    #[test]
+    fn sh_quote_survives_embedded_quotes() {
+        assert_eq!(sh_quote("pnpm test"), "'pnpm test'");
+        assert_eq!(sh_quote("echo 'hi'"), r"'echo '\''hi'\'''");
+        // 转义后交给真 sh 执行，取回的必须是原字符串
+        for raw in ["a'b", "it's; rm -rf /", "$(whoami)", "`id`", "多字节 中文 '引号'"] {
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("printf %s {}", sh_quote(raw)))
+                .output()
+                .expect("run sh");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), raw, "quote 失真: {raw}");
+        }
+    }
+
+    #[test]
+    fn script_runs_command_and_propagates_exit_code() {
+        let path = write_command_script("exit 7").expect("write script");
+        let status = std::process::Command::new(&path).status().expect("run script");
+        assert_eq!(status.code(), Some(7), "退出码必须透传——agent 靠它判断成败");
+        let _ = std::fs::remove_file(&path);
+    }
+}
