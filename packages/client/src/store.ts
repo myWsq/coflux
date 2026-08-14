@@ -16,13 +16,13 @@ import {
  * ------------------------------------------------------------------ */
 
 /** state 来自 agent hook 上报（daemon 侧合并进 presence）。空 = 无 hook 信号。 */
-export type SessionAgentState = { daemonId: string; taskId: string; agent: string; state: string };
+export type SessionAgentState = { daemonId: string; taskId: string; agent: string; state: string; /** `cofluxd notify` 的留言（plan 074），空 = agent 没留话 */ message: string };
 
 export type WorkspaceActivity =
   | { status: "idle" }
   | { status: "active"; agent?: string }
   | { status: "approval"; agent: string }
-  | { status: "question"; agent: string }
+  | { status: "question"; agent: string; message?: string }
   | { status: "done"; agent: string };
 
 /** 工作区活动聚合（对齐 Vibe Island）：纯粹转述 hook 上报，无阈值、无时钟推断。
@@ -36,7 +36,7 @@ export function workspaceActivity(
 ): WorkspaceActivity {
   if (!daemonOnline) return { status: "idle" };
   let approval: string | null = null;
-  let question: string | null = null;
+  let question: SessionAgentState | null = null;
   let active: string | undefined;
   let done: string | null = null;
   for (const task of tasks) {
@@ -44,12 +44,12 @@ export function workspaceActivity(
     const entry = sessionAgents[task.sessionId];
     if (entry === undefined) continue;
     if (entry.state === "approval") approval = approval ?? entry.agent;
-    else if (entry.state === "question") question = question ?? entry.agent;
+    else if (entry.state === "question") question = question ?? entry;
     else if (entry.state === "active") active = active ?? entry.agent;
     else if (entry.state === "done" || entry.state === "waiting") done = done ?? entry.agent;
   }
   if (approval !== null) return { status: "approval", agent: approval };
-  if (question !== null) return { status: "question", agent: question };
+  if (question !== null) return { status: "question", agent: question.agent, message: question.message || undefined };
   if (active !== undefined) return { status: "active", agent: active };
   if (done !== null) return { status: "done", agent: done };
   return { status: "idle" };
@@ -567,7 +567,13 @@ export function createCofluxClient(options: CofluxClientOptions) {
             Object.entries(state.sessionAgents).filter(([, entry]) => entry.daemonId !== value.daemonId),
           );
           for (const session of value.sessions) {
-            sessionAgents[session.sessionId] = { daemonId: value.daemonId, taskId: session.taskId, agent: session.agent, state: session.state };
+            sessionAgents[session.sessionId] = {
+              daemonId: value.daemonId,
+              taskId: session.taskId,
+              agent: session.agent,
+              state: session.state,
+              message: session.message,
+            };
           }
           return { sessionAgents };
         });

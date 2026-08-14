@@ -87,6 +87,8 @@ const MAX_AGENT_ENTRIES = 1024;
 const AGENT_TERMINAL_COLS = 120;
 const AGENT_TERMINAL_ROWS = 40;
 const MAX_AGENT_NAME_BYTES = 64;
+/** notify 留言的字节兜底（worker 已按字符钳过，这里防伪造/畸形上报） */
+const MAX_AGENT_MESSAGE_BYTES = 1024;
 
 /** daemon 展示信息：不用生成的 DaemonInfo 消息类型（无需 $typeName）——它只作为其它信封消息的
  * 嵌套字段被构造（nested init 接受纯对象），从不单独序列化，用生成类型纯属多余的仪式。 */
@@ -110,6 +112,8 @@ interface SessionAgentData {
   agent: string;
   /** hook 上报的回合状态：active / approval / question / done，空 = 无 hook 信号 */
   state: string;
+  /** `cofluxd notify` 的留言（plan 074）：与 state 同生命周期，纯展示 */
+  message: string;
 }
 
 /** state 白名单：名单外的按畸形消息整条丢弃。waiting 是 v0.21 旧值，仍收以免混版本丢条目。 */
@@ -598,14 +602,20 @@ export class Hub {
         ? catalogInfo.taskId === entry.taskId
         : runtime?.daemonId === daemonId && runtime.taskId === entry.taskId;
       if (!matchesKnownSession) continue;
-      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state });
+      const message = Buffer.byteLength(entry.message) > MAX_AGENT_MESSAGE_BYTES ? "" : entry.message;
+      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state, message });
     }
     const previous = this.sessionAgents.get(daemonId);
     const unchanged =
       previous !== undefined &&
       previous.sessions.length === valid.length &&
       previous.sessions.every(
-        (p, i) => p.sessionId === valid[i]!.sessionId && p.taskId === valid[i]!.taskId && p.agent === valid[i]!.agent && p.state === valid[i]!.state,
+        (p, i) =>
+          p.sessionId === valid[i]!.sessionId &&
+          p.taskId === valid[i]!.taskId &&
+          p.agent === valid[i]!.agent &&
+          p.state === valid[i]!.state &&
+          p.message === valid[i]!.message,
       );
     if (unchanged) return;
     if (valid.length === 0 && previous === undefined) return;
