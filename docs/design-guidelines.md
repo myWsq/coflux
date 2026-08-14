@@ -12,11 +12,12 @@
 
 例外：纯文本溢出场景（truncate 后想看全文）暂允许 title，待逐步迁移。
 
-## 执行中：4×4 SVG 点阵闪，不要转圈、不要盲文字符
+## 工作区活动：SVG 点阵，不要转圈、不要盲文字符
 
-工作区「正在执行」用 `PendingDots`（Cursor Glass / assistant-ui 同款：
-4×4 SVG 圆点、每颗点自己闪）。不要 `LoaderCircle`、不要扫光、不要 Unicode
-盲文。待批准 / 待回答保持静态警告图标。
+工作区活动四态用 `ActivityDots`（assistant-ui DotMatrix 同款：NxN SVG 圆点）。
+执行中 4×4 随机闪；待批准 5×5 感叹号慢闪；待回答 5×5 省略号轮闪；本轮完成
+5×5 勾、静态。中性态仍是 GitBranch。不要 `LoaderCircle`、不要扫光、不要
+Unicode 盲文、不要 lucide 状态图标占这个槽。
 
 ## 图标：lucide-react，跨端语义对齐
 
