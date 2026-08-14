@@ -127,6 +127,23 @@
   }
 }
 
+/* Cursor Glass / assistant-ui：点阵每颗点自己闪，相位打散 */
+@keyframes coflux-dot-twinkle {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.15;
+  }
+}
+
+.coflux-dot-twinkle {
+  animation-name: coflux-dot-twinkle;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+
 /* signature：「活性」呼吸 —— 在线状态点的缓慢明暗，示意远端是活的系统 */
 @keyframes pulse-alive {
   0%,
