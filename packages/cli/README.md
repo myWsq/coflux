@@ -24,6 +24,26 @@ cofluxd uninstall [--purge]   # 卸载（--purge 连二进制/配置/凭证一�
 
 默认连公共服务 `wss://api.coflux.dev/daemon`（自托管用 `--server` 改；已保存的地址继续生效，非默认时会有醒目提示）。
 
+## 给 agent 用的命令
+
+跑在 coflux 终端里的 claude/codex 可以用下面几条，把工作外化成用户在 web/手机上**看得见、能接管**的东西——而不是在自己的 Bash 里后台起一个谁也看不见的进程：
+
+```sh
+cofluxd terminal new --title "跑单测" --cmd "pnpm test"   # 开真实终端，用户可接管
+cofluxd terminal list                                     # 本工作区的终端 + 状态/退出码
+cofluxd terminal read <taskId> [--lines N]                # 读终端内容（纯文本，已退出也能读）
+cofluxd notify "需要你定一下用哪个方案"                    # 叫人：侧栏转「等待交互」
+cofluxd ports                                             # 端口 + 可直接打开的预览 URL
+```
+
+不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，**coflux 会话之外的进程一律拒绝**，权限也天然限定在该会话所属的工作区内。
+
+配套的 skill 在 `skills/coflux/SKILL.md`（随包分发），装给 Claude Code：
+
+```sh
+mkdir -p ~/.claude/skills && ln -sfn "$(npm root -g)/cofluxd/skills/coflux" ~/.claude/skills/coflux
+```
+
 `cofluxd up` 起服务后会打印一个一次性授权链接，在浏览器用已登录的账号打开确认即可（链接可在任意设备打开，包括无头设备），无需先去 web 控制台生成密钥。已登记设备重跑 `up` 不会重新触发授权。
 
 ## 本地优先与 doctor
