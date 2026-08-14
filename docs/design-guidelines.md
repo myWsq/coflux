@@ -12,11 +12,11 @@
 
 例外：纯文本溢出场景（truncate 后想看全文）暂允许 title，待逐步迁移。
 
-## 执行中：固定像素点阵，不要转圈、不要 Unicode 盲文
+## 执行中：5×5 SVG 点阵闪，不要转圈、不要盲文字符
 
-工作区「正在执行」用 `PendingDots`（6×4 CSS 点阵，槽位锁 17×11），不要
-`LoaderCircle`、不要扫光、不要盲文字符。UI 字体没有稳定盲文度量，空格和
-实心格宽度不同，会乱晃、把行撑开。待批准 / 待回答保持静态警告图标。
+工作区「正在执行」用 `PendingDots`（Cursor Glass / assistant-ui 同款：
+5×5 SVG 圆点、每颗点自己闪）。不要 `LoaderCircle`、不要扫光、不要 Unicode
+盲文。待批准 / 待回答保持静态警告图标。
 
 ## 图标：lucide-react，跨端语义对齐
 
