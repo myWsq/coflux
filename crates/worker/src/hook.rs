@@ -50,9 +50,11 @@ pub enum HookOutcome {
 /// 忽略（而非拒绝），用户多配了 hook 事件不会造成干扰。
 pub fn event_state(event: &str, notification: &str) -> Option<&'static str> {
     match event {
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some("active"),
+        // 真正在干活：工具调用。UserPromptSubmit 不标 active——每个回合都会打
+        // （插件 Stop 续跑 / 排队消息也会），人没打字也会被标成「正在执行」。
+        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some("active"),
         "PermissionRequest" | "approval-requested" => Some("approval"),
-        "Stop" | "agent-turn-complete" => Some("done"),
+        "Stop" | "StopFailure" | "agent-turn-complete" => Some("done"),
         "Notification" => match notification {
             "permission_prompt" => Some("approval"),
             "agent_needs_input" | "elicitation_dialog" | "elicitation_url_dialog" => Some("question"),
@@ -199,8 +201,11 @@ mod tests {
 
     #[test]
     fn event_mapping_covers_both_agents() {
-        assert_eq!(event_state("UserPromptSubmit", ""), Some("active"));
+        assert_eq!(event_state("UserPromptSubmit", ""), None);
+        assert_eq!(event_state("PreToolUse", ""), Some("active"));
+        assert_eq!(event_state("PostToolUse", ""), Some("active"));
         assert_eq!(event_state("Stop", ""), Some("done"));
+        assert_eq!(event_state("StopFailure", ""), Some("done"));
         assert_eq!(event_state("PermissionRequest", ""), Some("approval"));
         assert_eq!(event_state("agent-turn-complete", ""), Some("done"));
         assert_eq!(event_state("approval-requested", ""), Some("approval"));

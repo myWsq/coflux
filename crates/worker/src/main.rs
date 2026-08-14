@@ -304,7 +304,7 @@ async fn consume_hook_events(
             continue;
         };
         eprintln!(
-            "[worker] hook event agent={} event={} notification={} session={session_id}",
+            "[worker] hook event agent={} event={} notification={} state={hook_state} session={session_id}",
             request.agent, request.event, request.notification
         );
         state.lock().unwrap().hook_states.insert(session_id, hook_state);
