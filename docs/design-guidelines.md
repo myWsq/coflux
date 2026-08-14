@@ -12,10 +12,10 @@
 
 例外：纯文本溢出场景（truncate 后想看全文）暂允许 title，待逐步迁移。
 
-## 执行中：5×5 SVG 点阵闪，不要转圈、不要盲文字符
+## 执行中：3×3 SVG 点阵闪，不要转圈、不要盲文字符
 
 工作区「正在执行」用 `PendingDots`（Cursor Glass / assistant-ui 同款：
-5×5 SVG 圆点、每颗点自己闪）。不要 `LoaderCircle`、不要扫光、不要 Unicode
+3×3 SVG 圆点、每颗点自己闪）。不要 `LoaderCircle`、不要扫光、不要 Unicode
 盲文。待批准 / 待回答保持静态警告图标。
 
 ## 图标：lucide-react，跨端语义对齐
