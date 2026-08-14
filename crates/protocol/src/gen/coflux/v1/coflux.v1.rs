@@ -134,6 +134,10 @@ pub struct SessionAgentRef {
     /// 检测到的 agent 名（内置名单，如 "claude"/"codex"）；无 agent 的 session 不出现在清单里
     #[prost(string, tag="3")]
     pub agent: ::prost::alloc::string::String,
+    /// agent hook 上报的回合状态（plan 07x）："active" = 回合进行中 / "waiting" = 等待用户交互；
+    /// 空 = 该 session 尚无 hook 信号（未配 hook 或 agent 刚启动）。agent 进程退出时随条目一起消失。
+    #[prost(string, tag="4")]
+    pub state: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TaskPorts {

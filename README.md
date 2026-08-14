@@ -42,14 +42,14 @@ cofluxd status / doctor / logs -f / update / down / uninstall
 
 ## 快速开始
 
-前置：Node 22+ + pnpm（server/web）、Rust stable（daemon）、本机 Postgres。使用本地 Supabase 时
-必须走直连口 `54322`，不能走 5432 的 Supavisor 池化口：
+前置：Node 22+ + pnpm（server/web）、Rust stable（daemon）、Docker（本地 Postgres）。
 
 ```bash
 pnpm install          # 安装 TS 依赖
+pnpm dev:pg           # 独立 Postgres（127.0.0.1:5432，与 CI / 开发默认连接串一致）
 
 # 分终端跑（dev = server + web；daemon 单独，因为它是 Rust 二进制）：
-DATABASE_URL="postgres://postgres:postgres@127.0.0.1:54322/postgres" pnpm dev:server
+pnpm dev:server
 pnpm dev:web          # Web，打开 http://localhost:5273；/client 代理到 :8787
 pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 spawn worker）；走浏览器授权登记，凭证存 ~/.coflux
 ```

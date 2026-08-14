@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import postgres from "postgres";
-import { startServer, tokenFromUrl } from "./harness.mjs";
+import { ADMIN_PG_URL, startServer, tokenFromUrl } from "./harness.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..", "..");
 const TSX = join(ROOT, "node_modules", ".bin", "tsx");
@@ -26,7 +26,6 @@ const CREATE_USER_SCRIPT = join(ROOT, "scripts", "create-user.mjs");
 const DEBUG = !!process.env.COFLUX_TEST_DEBUG;
 
 const SERVER_PORT = 8830;
-const ADMIN_PG_URL = process.env.COFLUX_TEST_PG_URL || "postgres://postgres:postgres@127.0.0.1:54322/postgres";
 
 let stack, testDb, sql;
 

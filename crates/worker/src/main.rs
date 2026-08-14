@@ -10,6 +10,7 @@ mod creds;
 mod device;
 mod gateway;
 mod git;
+mod hook;
 mod local_auth;
 mod ops;
 mod ports;
@@ -82,6 +83,9 @@ struct WorkerState {
     last_reported_ports: Vec<wire::SessionPorts>,
     /// agent 探测(plan 073)上一次实际发出的全量快照：语义同 last_reported_ports。
     last_reported_agents: Vec<wire::SessionAgentRef>,
+    /// hook 上报的回合状态：sessionId -> "active"/"waiting"。进程树 presence 扫描是存活门——
+    /// 合并上报时剪掉扫描已不见 agent 的条目（agent 退出/换新时不残留旧状态）。
+    hook_states: HashMap<String, &'static str>,
     /// server 下发的本设备工作区清单：workspace_id -> (worktree 路径, 所属 project 的 default_branch)
     /// （分支监视 + diff 统计基准用）
     workspaces: HashMap<String, (String, String)>,
@@ -218,8 +222,21 @@ async fn force_report_ports(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Send
     try_send_d2s(to_server_tx, daemon_to_server::Payload::PortsUpdate(wire::PortsUpdate { sessions }));
 }
 
-/// 周期(2s)扫描每个存活会话进程树内的 agent CLI（plan 073）；变化才发全量。扫描同端口
-/// 探测一样是同步阻塞 IO（/proc 读或 libproc/sysctl 系统调用），spawn_blocking 挪出执行器。
+/// 扫描结果与 hook 回合状态合并（锁内调用）：presence 扫描是存活门，hook_states 里
+/// 扫描已不见 agent 的会话被剪掉——agent 退出/换新后不残留旧状态；扫到的条目回填 state。
+fn merge_hook_states(s: &mut WorkerState, mut sessions: Vec<wire::SessionAgentRef>) -> Vec<wire::SessionAgentRef> {
+    s.hook_states.retain(|session_id, _| sessions.iter().any(|entry| entry.session_id == *session_id));
+    for entry in &mut sessions {
+        if let Some(hook_state) = s.hook_states.get(&entry.session_id) {
+            entry.state = (*hook_state).to_string();
+        }
+    }
+    sessions
+}
+
+/// 周期(2s)扫描每个存活会话进程树内的 agent CLI（plan 073）+ 合并 hook 回合状态；变化才发
+/// 全量。扫描同端口探测一样是同步阻塞 IO（/proc 读或 libproc/sysctl 系统调用），
+/// spawn_blocking 挪出执行器。hook 事件被接受后也会立即触发一次（不等下个周期）。
 async fn report_agents_if_changed(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sender<WsOut>) {
     let alive = { state.lock().unwrap().alive.clone() }; // 取快照即释放锁，不跨扫描 await 持锁
     let sessions = match tokio::task::spawn_blocking(move || agents::detect_session_agents(&alive)).await {
@@ -228,14 +245,15 @@ async fn report_agents_if_changed(state: &Arc<Mutex<WorkerState>>, to_server_tx:
     };
     let changed = {
         let mut s = state.lock().unwrap();
+        let sessions = merge_hook_states(&mut s, sessions);
         if s.last_reported_agents == sessions {
-            false
+            None
         } else {
             s.last_reported_agents = sessions.clone();
-            true
+            Some(sessions)
         }
     };
-    if changed {
+    if let Some(sessions) = changed {
         try_send_d2s(to_server_tx, daemon_to_server::Payload::SessionAgents(wire::SessionAgents { sessions }));
     }
 }
@@ -248,8 +266,48 @@ async fn force_report_agents(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Sen
         Ok(s) => s,
         Err(_) => return,
     };
-    state.lock().unwrap().last_reported_agents = sessions.clone();
+    let sessions = {
+        let mut s = state.lock().unwrap();
+        let sessions = merge_hook_states(&mut s, sessions);
+        s.last_reported_agents = sessions.clone();
+        sessions
+    };
     try_send_d2s(to_server_tx, daemon_to_server::Payload::SessionAgents(wire::SessionAgents { sessions }));
+}
+
+/// hook 事件消费：pid（信使进程，仍存活——响应发出前它不退出）反查落在哪个存活会话的
+/// 进程树内，命中则记录回合状态并立即触发一次 presence 上报。找不到 = coflux 之外启动的
+/// agent，静默 404（信使侧本来就静默）。
+async fn consume_hook_events(
+    mut hook_rx: tokio::sync::mpsc::Receiver<hook::HookRequest>,
+    state: Arc<Mutex<WorkerState>>,
+    to_server_tx: Sender<WsOut>,
+) {
+    while let Some(request) = hook_rx.recv().await {
+        let Some(hook_state) = hook::event_state(&request.event) else {
+            let _ = request.respond.send(hook::HookOutcome::Ignored);
+            continue;
+        };
+        let alive = { state.lock().unwrap().alive.clone() };
+        let (pid, ppid) = (request.pid, request.ppid);
+        let session_id = tokio::task::spawn_blocking(move || {
+            alive.iter().find_map(|(session_id, (_task_id, root_pid))| {
+                let tree = ports::process_tree(*root_pid);
+                (tree.contains(&pid) || tree.contains(&ppid)).then(|| session_id.clone())
+            })
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(session_id) = session_id else {
+            let _ = request.respond.send(hook::HookOutcome::SessionNotFound);
+            continue;
+        };
+        eprintln!("[worker] hook event agent={} event={} session={session_id}", request.agent, request.event);
+        state.lock().unwrap().hook_states.insert(session_id, hook_state);
+        report_agents_if_changed(&state, &to_server_tx).await;
+        let _ = request.respond.send(hook::HookOutcome::Accepted);
+    }
 }
 
 #[tokio::main]
@@ -307,6 +365,7 @@ async fn main() {
         pending_auth_expires_at: None,
         last_reported_ports: Vec::new(),
         last_reported_agents: Vec::new(),
+        hook_states: HashMap::new(),
         workspaces: HashMap::new(),
         last_branches: HashMap::new(),
         last_diffs: HashMap::new(),
@@ -339,6 +398,11 @@ async fn main() {
         cfg.clone(),
     );
 
+    // hook 事件通道：gateway 收 POST /hook 解析后经此转交，消费侧做 pid→session 反查与上报。
+    // gateway 未起（无 local_auth）时 tx 直接掉落，消费任务随之退出。
+    let (hook_tx, hook_rx) = tokio::sync::mpsc::channel::<hook::HookRequest>(64);
+    tokio::spawn(consume_hook_events(hook_rx, state.clone(), to_server_tx.clone()));
+
     // gateway 监听独立于中心 server_loop；热升级时旧 worker 短暂占端口会在后台重试。
     if let Some(auth) = local_auth.clone() {
         let daemon_state = state.clone();
@@ -356,6 +420,7 @@ async fn main() {
                 status_state.lock().unwrap().gateway_port = port;
                 announce_local_gateway(&status_state, Some(&status_auth), &status_server);
             }),
+            hook_tx,
         ));
     }
 

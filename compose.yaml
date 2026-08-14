@@ -1,0 +1,22 @@
+# 本地开发 / 黑盒测试用的独立 Postgres（与 CI 同镜像、同口令、同端口）。
+# 起：pnpm dev:pg    停：docker compose down
+services:
+  postgres:
+    image: postgres:17
+    container_name: coflux-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - coflux-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  coflux-pg:

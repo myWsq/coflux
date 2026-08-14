@@ -25,6 +25,7 @@ cargo test -p coflux-protocol      # Rust 单元测试（帧 codec / serde 线�
 cargo build -p coflux-supervisor -p coflux-worker   # 构建 daemon 二进制
 node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit   # server 类型检查
 node_modules/.bin/tsc -b apps/web/tsconfig.json               # web 类型检查
+pnpm dev:pg                                         # 本地独立 Postgres（compose，127.0.0.1:5432）
 pnpm dev:server / dev:web / dev:daemon              # 本地起三端
 node packages/cli/cofluxd.mjs up --server ... --bin-dir target/release   # 用 cofluxd CLI 装/起 daemon（用户侧：npm i -g cofluxd && cofluxd up）
 git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编译 + 签名 worker + GitHub Release（见 docs/RELEASING.md）
@@ -32,9 +33,7 @@ git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编�
 
 ### 本地开发环境的坑
 
-- **dev server 必须连 Postgres 直连口 54322**：`config.ts` 默认的 5432 是本地 Supabase 的 supavisor 池化口，会报 `no tenant identifier`。正确启动：
-  `DATABASE_URL="postgres://postgres:postgres@127.0.0.1:54322/postgres" pnpm dev:server`。
-  黑盒测试同理：`COFLUX_TEST_PG_URL` 也要指 54322。
+- **本机 Postgres**：`pnpm dev:pg` 起独立实例（`compose.yaml`，`127.0.0.1:5432`）。`pnpm dev:server` 与黑盒测试默认都连 `postgres://postgres:postgres@127.0.0.1:5432/postgres`，不必再设 `DATABASE_URL` / `COFLUX_TEST_PG_URL`。不要用本机残留的 Supabase 容器（54322 / 5432 池化口）。
 - **web dev 页面「能打开但卡住连不上」= 8787 没跑**：vite（5273）把 `/client` WS 和 `/health` 代理到 `localhost:8787`（见 `apps/web/vite.config.ts`），dev server 不在时页面 HTML/JS 照常加载、但 WS 永远连不上。此时 console 里往往只看到 manifest/CORS 之类的噪音报错，真因不是它们。自查一条命令：`curl localhost:5273/health` 应 200。
 - **经生产 `p.coflux.dev` 端口转发访问本机 dev web**：完整链路是 浏览器 → 生产 server → 本机生产 daemon → 5273 vite → 8787 dev server，后两个进程都得活着。5273 要出现在转发列表里，vite 需在 coflux 终端（生产 daemon 的 PTY 进程树）里启动。manifest 请求经门禁需带凭据，`index.html` 的 manifest link 已带 `crossorigin="use-credentials"`，勿删。
 

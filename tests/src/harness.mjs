@@ -44,7 +44,7 @@ const DEBUG = !!process.env.COFLUX_TEST_DEBUG;
  * 管理连接（建库/删库用）与 server 自己的连接串一样，走 COFLUX_TEST_PG_URL，
  * 弱默认值必须与 apps/server/src/config.ts 的 DATABASE_URL 开发默认值保持一致。
  */
-const ADMIN_PG_URL = process.env.COFLUX_TEST_PG_URL || "postgres://postgres:postgres@127.0.0.1:54322/postgres";
+export const ADMIN_PG_URL = process.env.COFLUX_TEST_PG_URL || "postgres://postgres:postgres@127.0.0.1:5432/postgres";
 
 /** 建一个随机命名的临时库，返回 {name, url}（url 指向新库，供 spawn 的 server 用作 DATABASE_URL）。 */
 async function createTestDatabase() {
@@ -217,7 +217,7 @@ export function mkRepo() {
 }
 
 /**
- * 只起 server（不起 Rust daemon），用于 supabase 模式等需要自定认证/装配的测试。
+ * 只起 server（不起 Rust daemon），用于 password 模式等需要自定认证/装配的测试。
  * opts.env 追加/覆盖 server 环境变量（如 COFLUX_AUTH）；manageRelay=false 时调用方自行
  * 装配 relay 与签名配置（多节点测试用），stop() 不接管这些外部 relay。
  */

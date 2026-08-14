@@ -55,6 +55,7 @@ pub fn detect_session_agents(alive: &HashMap<String, (String, i32)>) -> Vec<wire
                 session_id: session_id.clone(),
                 task_id: task_id.clone(),
                 agent: agent.to_string(),
+                state: String::new(), // 回合状态由 main 合并 hook_states 时回填
             })
         })
         .collect();
