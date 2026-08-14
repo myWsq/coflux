@@ -5,6 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@11.6.0",
   "scripts": {
+    "dev:pg": "docker compose up -d",
     "dev:server": "pnpm --filter @coflux/server dev",
     "dev:web": "pnpm --filter @coflux/web dev",
     "dev:mobile": "pnpm --filter @coflux/mobile dev",

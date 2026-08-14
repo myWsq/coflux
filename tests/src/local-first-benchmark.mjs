@@ -2,8 +2,7 @@
  * 本地优先发布 benchmark（不进入 CI 的脆弱性能门）。
  *
  * 运行：
- *   COFLUX_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:54322/postgres \
- *     node --import tsx tests/src/local-first-benchmark.mjs
+ *   node --import tsx tests/src/local-first-benchmark.mjs
  *
  * 独立临时 stack 先经中心完成配对/建任务，再切到 warm cached direct。计时区间内普通
  * Device frame 不经过中心；attach 指标包含 sessiond 生成/传输 snapshot，以及全新 xterm 6

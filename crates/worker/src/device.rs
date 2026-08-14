@@ -1604,6 +1604,7 @@ mod tests {
             pending_auth_expires_at: None,
             last_reported_ports: Vec::new(),
             last_reported_agents: Vec::new(),
+            hook_states: HashMap::new(),
             workspaces,
             last_branches: HashMap::new(),
             last_diffs: HashMap::new(),

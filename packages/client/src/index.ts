@@ -3,8 +3,6 @@ export {
   createCofluxClient,
   isDirWorkspace,
   workspaceActivity,
-  ACTIVE_OUTPUT_WINDOW_MS,
-  AGENT_WAITING_QUIET_MS,
   type CofluxClient,
   type CofluxClientOptions,
   type CofluxState,
@@ -17,7 +15,6 @@ export {
   type DeviceTransportOptions,
   type LocalSessionState,
   type SessionAgentState,
-  type SessionActivityState,
   type WorkspaceActivity,
 } from "./store";
 export {

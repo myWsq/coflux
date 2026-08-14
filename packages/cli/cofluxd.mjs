@@ -664,6 +664,86 @@ function cmdUninstall(v) {
   else console.log(`✓ 已卸载服务（保留二进制/配置/凭证于 ${HOME}；--purge 可全清）`);
 }
 
+/* ------------------------------ hook：agent 事件信使 ------------------------------ */
+// agent hook 的上报信使：用户在 claude/codex 的 hook 配置里指向本命令，事件发生时它把
+// 事件名转发给本机 worker 的固定 gateway（POST /hook），供活动状态判定（执行中/等待交互）。
+//
+// 输入两种形态都收：claude 与 codex hooks 引擎走 stdin JSON；codex 旧式 notify 把 payload
+// 作为最后一个 argv 传入。只转发事件名 + agent 会话 id + 本进程 pid/ppid——payload 里的
+// prompt / 回答原文一律不出机（隐私边界）。
+//
+// 契约（worker 侧将来实现 /hook 时依赖）：请求保持到收到响应才退出——worker 在处理期间
+// 用上报的 pid 反查进程树归属哪个 session，本进程活着扫描才有效。
+//
+// 纪律：本命令绝不能干扰 agent 本体——任何失败（daemon 不在/端口不通/payload 畸形）都
+// 静默退出 0（claude 把 Stop hook 的非零退出码解释为"阻止收尾"）；绝不写 stdout（claude
+// 会把 hook 的 stdout 当决策 JSON 解析），调试信息走 stderr（COFLUX_HOOK_DEBUG=1 开启）。
+const HOOK_STDIN_TIMEOUT_MS = 300; // stdin 没有数据时不能干等（notify 形态下 stdin 是继承的 TTY/空管道）
+const HOOK_POST_TIMEOUT_MS = 2000;
+
+const hookDebug = (...args) => { if (process.env.COFLUX_HOOK_DEBUG) console.error("[cofluxd hook]", ...args); };
+
+async function readStdinJson() {
+  if (process.stdin.isTTY) return null;
+  const chunks = [];
+  const drained = (async () => { for await (const chunk of process.stdin) chunks.push(chunk); })().catch(() => {});
+  await Promise.race([drained, sleep(HOOK_STDIN_TIMEOUT_MS)]);
+  process.stdin.destroy(); // 超时后放掉 stdin，否则 for await 会吊着进程不退出
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+async function cmdHook() {
+  try {
+    const agent = positionals[1];
+    if (agent !== "claude" && agent !== "codex") {
+      hookDebug(`未知 agent: ${agent ?? "(缺参)"}（需 claude|codex）`);
+      return;
+    }
+    let payload = null;
+    if (positionals[2]) {
+      try { payload = JSON.parse(positionals[2]); } catch { /* 非 JSON 的多余参数，忽略 */ }
+    }
+    if (!payload) payload = await readStdinJson();
+    if (!payload || typeof payload !== "object") {
+      hookDebug("无有效 payload，忽略");
+      return;
+    }
+    // claude/codex hooks 引擎用 hook_event_name；codex notify 用 type
+    const event = payload.hook_event_name || payload.type;
+    if (typeof event !== "string" || !event) {
+      hookDebug("payload 缺事件名，忽略");
+      return;
+    }
+    const portResult = localGatewayPort();
+    if (!portResult.ok) {
+      hookDebug(portResult.error);
+      return;
+    }
+    const body = {
+      agent,
+      event,
+      pid: process.pid,
+      ppid: process.ppid,
+      // agent 自身的会话标识（claude: session_id / codex notify: thread-id），供 worker 去重与调试
+      agentSessionId: payload.session_id ?? payload["thread-id"] ?? undefined,
+    };
+    hookDebug("POST /hook", JSON.stringify(body));
+    const res = await fetch(`http://127.0.0.1:${portResult.port}/hook`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(HOOK_POST_TIMEOUT_MS),
+    });
+    hookDebug(`响应 ${res.status}`);
+  } catch (error) {
+    hookDebug(error?.message || String(error));
+  } finally {
+    process.exit(0); // 无论成败都干净退出：不给 agent 留非零退出码，也不让残留句柄吊住进程
+  }
+}
+
 const HELP = `cofluxd —— coflux daemon 管理
 
   cofluxd                 首次=up（打印浏览器授权链接），已配置=status
@@ -676,6 +756,8 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd logs [-f]       看 daemon 日志
   cofluxd down            停止
   cofluxd uninstall [--purge]   卸载（--purge 连二进制/配置/凭证一并删）
+  cofluxd hook <claude|codex>   [agent hook 信使] 读 stdin/argv 的事件 JSON，转发给本机 daemon
+                          （在 claude/codex 的 hook 配置里指向本命令；失败静默，不干扰 agent）
 
 up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
 通用: --version <vX|latest>(不传时 up 沿用已有二进制，update 默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
@@ -707,7 +789,7 @@ let cmd = positionals[0];
 if (values.help || cmd === "help") { console.log(HELP); process.exit(0); }
 if (!cmd) cmd = fs.existsSync(SETTINGS) ? "status" : "up"; // 首次裸跑 → 引导
 
-const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall };
+const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall, hook: cmdHook };
 const h = handlers[cmd];
 if (!h) die(`未知命令: ${cmd}${MIGRATED[cmd] ? `\n${MIGRATED[cmd]}` : ""}\n\n${HELP}`);
 await h(values);

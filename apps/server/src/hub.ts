@@ -102,7 +102,12 @@ interface SessionAgentData {
   sessionId: SessionId;
   taskId: TaskId;
   agent: string;
+  /** hook 上报的回合状态："active" / "waiting"，空 = 无 hook 信号（见 common.proto SessionAgentRef.state） */
+  state: string;
 }
+
+/** state 白名单：daemon 侧只会产出这三种取值，名单外的按畸形消息整条丢弃。 */
+const AGENT_STATES = new Set(["", "active", "waiting"]);
 
 export interface DaemonConn {
   info: DaemonInfoData;
@@ -478,19 +483,22 @@ export class Hub {
     for (const entry of sessions.slice(0, MAX_AGENT_ENTRIES)) {
       if (!validControlId(entry.sessionId) || !validControlId(entry.taskId)) continue;
       if (!entry.agent || Buffer.byteLength(entry.agent) > MAX_AGENT_NAME_BYTES) continue;
+      if (!AGENT_STATES.has(entry.state)) continue;
       const catalogInfo = live?.get(entry.sessionId);
       const runtime = this.sessions.get(entry.sessionId);
       const matchesKnownSession = catalogInfo
         ? catalogInfo.taskId === entry.taskId
         : runtime?.daemonId === daemonId && runtime.taskId === entry.taskId;
       if (!matchesKnownSession) continue;
-      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent });
+      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state });
     }
     const previous = this.sessionAgents.get(daemonId);
     const unchanged =
       previous !== undefined &&
       previous.sessions.length === valid.length &&
-      previous.sessions.every((p, i) => p.sessionId === valid[i]!.sessionId && p.taskId === valid[i]!.taskId && p.agent === valid[i]!.agent);
+      previous.sessions.every(
+        (p, i) => p.sessionId === valid[i]!.sessionId && p.taskId === valid[i]!.taskId && p.agent === valid[i]!.agent && p.state === valid[i]!.state,
+      );
     if (unchanged) return;
     if (valid.length === 0 && previous === undefined) return;
     if (valid.length === 0) this.sessionAgents.delete(daemonId);

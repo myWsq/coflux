@@ -1,21 +1,26 @@
 /**
- * plan 073：session agent presence（工作区活动状态的进程树信号）。
+ * plan 073：session agent presence（工作区活动状态的进程树信号）+ hook 回合状态。
  *
  * 验收核心：PTY 进程树里出现名为 claude 的进程 → 全账号客户端收到 sessionAgentsUpdated
  * （含 agent 名与 session/task 归属）；进程退出 → presence 清空；纯 shell 绝不误报；
  * 新订阅的客户端（页面刷新路径）订阅即拿到当前全量补发，无需等下一次变化。
+ *
+ * hook 化后的回合状态：`cofluxd hook` 信使在会话进程树内 POST /hook → worker 用 pid
+ * 反查归属 session → presence 条目携带 state（waiting/active）立即广播；树外 pid 被拒。
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
 
 const PORT = 8856;
+const COFLUXD = fileURLToPath(new URL("../../packages/cli/cofluxd.mjs", import.meta.url));
 let stack;
 const dirs = [];
 
@@ -98,6 +103,68 @@ test("agent presence：claude 进程出现→上报（含归属），退出→�
     "agent 退出后 presence 清空",
     20000,
   );
+
+  await removeWorkspace(c, ws.id);
+  device.close();
+});
+
+test("hook 回合状态：Stop→waiting、UserPromptSubmit→active 即时广播；树外 pid 与非 json 被拒", async () => {
+  const home = mkDir();
+  const script = join(home, "claude");
+  writeFileSync(script, "#!/bin/sh\nsleep 300\n");
+  chmodSync(script, 0o755);
+
+  const device = await openRelayDevice(stack);
+  const c = device.control;
+  const { ws, task } = await startDirTerminal(c, home);
+  const sessionId = task.sessionId;
+  const gatewayPort = device.gateway.port;
+
+  await device.attach(sessionId);
+  // 假 agent 挂后台：presence 靠它，前台留给 hook 信使跑
+  await device.input(sessionId, "./claude &\r");
+
+  // presence 先就位，初始无 hook 信号（state 空）
+  const present = await c.waitFor(
+    (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId),
+    "presence 上报",
+    20000,
+  );
+  assert.equal(present.sessions.find((s) => s.sessionId === sessionId).state, "");
+
+  // 信使在会话进程树内执行（与真实 hook 同构）：事件被接受即触发上报，无需等扫描周期
+  const hookCmd = (event) =>
+    `printf '%s' '{"hook_event_name":"${event}"}' | COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} node ${COFLUXD} hook claude\r`;
+  await device.input(sessionId, hookCmd("Stop"));
+  const waiting = await c.waitFor(
+    (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId && s.state === "waiting"),
+    "Stop → waiting",
+    15000,
+  );
+  assert.equal(waiting.sessions.find((s) => s.sessionId === sessionId).agent, "claude", "state 变化不丢 agent 名");
+
+  await device.input(sessionId, hookCmd("UserPromptSubmit"));
+  await c.waitFor(
+    (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId && s.state === "active"),
+    "UserPromptSubmit → active",
+    15000,
+  );
+
+  // 树外 pid（测试进程自身，coflux 之外启动的 agent 的等价形态）：404 拒收
+  const outside = await fetch(`http://127.0.0.1:${gatewayPort}/hook`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ agent: "claude", event: "Stop", pid: process.pid, ppid: process.ppid }),
+  });
+  assert.equal(outside.status, 404, "树外 pid 的上报必须被拒");
+
+  // content-type 门禁：非 json 直接 400（挡浏览器"简单请求"对 localhost 的盲打）
+  const plain = await fetch(`http://127.0.0.1:${gatewayPort}/hook`, {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: JSON.stringify({ agent: "claude", event: "Stop", pid: process.pid }),
+  });
+  assert.equal(plain.status, 400, "非 application/json 必须被拒");
 
   await removeWorkspace(c, ws.id);
   device.close();

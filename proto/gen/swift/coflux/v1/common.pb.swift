@@ -329,6 +329,10 @@ public struct Coflux_V1_SessionAgentRef: Sendable {
   /// 检测到的 agent 名（内置名单，如 "claude"/"codex"）；无 agent 的 session 不出现在清单里
   public var agent: String = String()
 
+  /// agent hook 上报的回合状态（plan 07x）："active" = 回合进行中 / "waiting" = 等待用户交互；
+  /// 空 = 该 session 尚无 hook 信号（未配 hook 或 agent 刚启动）。agent 进程退出时随条目一起消失。
+  public var state: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -941,7 +945,7 @@ extension Coflux_V1_PortPreview: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SessionAgentRef"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}agent\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}agent\0\u{1}state\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -952,6 +956,7 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
       case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.agent) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.state) }()
       default: break
       }
     }
@@ -967,6 +972,9 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if !self.agent.isEmpty {
       try visitor.visitSingularStringField(value: self.agent, fieldNumber: 3)
     }
+    if !self.state.isEmpty {
+      try visitor.visitSingularStringField(value: self.state, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -974,6 +982,7 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if lhs.sessionID != rhs.sessionID {return false}
     if lhs.taskID != rhs.taskID {return false}
     if lhs.agent != rhs.agent {return false}
+    if lhs.state != rhs.state {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

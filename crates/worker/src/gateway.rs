@@ -19,10 +19,13 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{accept_hdr_async_with_config, WebSocketStream};
 
 use crate::device::DeviceRuntime;
+use crate::hook::{self, HookRequest};
 use crate::local_auth::{AuthFailure, LocalAuth};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
 const BIND_RETRY: Duration = Duration::from_millis(250);
+/// 分流 peek 的等待上限：正常客户端连上即发请求首字节，超时按 WS 处理（由握手路径报错）。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub type DaemonIdProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 pub type GatewayStatus = Arc<dyn Fn(Option<u16>) + Send + Sync>;
@@ -33,6 +36,7 @@ pub async fn run(
     runtime: Arc<DeviceRuntime>,
     daemon_id: DaemonIdProvider,
     status: GatewayStatus,
+    hook_tx: tokio::sync::mpsc::Sender<HookRequest>,
 ) {
     loop {
         let (port, listeners) = match bind_loopbacks(requested_port).await {
@@ -52,7 +56,8 @@ pub async fn run(
                 let auth = auth.clone();
                 let runtime = runtime.clone();
                 let daemon_id = daemon_id.clone();
-                Box::pin(accept_loop(listener, auth, runtime, daemon_id)) as Pin<Box<dyn Future<Output = ()> + Send>>
+                let hook_tx = hook_tx.clone();
+                Box::pin(accept_loop(listener, auth, runtime, daemon_id, hook_tx)) as Pin<Box<dyn Future<Output = ()> + Send>>
             })
             .collect();
         if loops.len() == 1 {
@@ -83,15 +88,22 @@ async fn bind_loopbacks(requested_port: u16) -> Option<(u16, Vec<TcpListener>)> 
     (!listeners.is_empty()).then_some((actual_port, listeners))
 }
 
-async fn accept_loop(listener: TcpListener, auth: Arc<LocalAuth>, runtime: Arc<DeviceRuntime>, daemon_id: DaemonIdProvider) {
+async fn accept_loop(
+    listener: TcpListener,
+    auth: Arc<LocalAuth>,
+    runtime: Arc<DeviceRuntime>,
+    daemon_id: DaemonIdProvider,
+    hook_tx: tokio::sync::mpsc::Sender<HookRequest>,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, _peer)) => {
                 let auth = auth.clone();
                 let runtime = runtime.clone();
                 let daemon_id = daemon_id.clone();
+                let hook_tx = hook_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = handle_connection(stream, auth, runtime, daemon_id).await {
+                    if let Err(error) = handle_connection(stream, auth, runtime, daemon_id, hook_tx).await {
                         eprintln!("[worker] local gateway connection closed: {error}");
                     }
                 });
@@ -104,12 +116,34 @@ async fn accept_loop(listener: TcpListener, auth: Arc<LocalAuth>, runtime: Arc<D
     }
 }
 
+/// peek 首 5 字节分流：`POST ` 开头是 hook 信使的纯 HTTP 上报（唯一的非 WS 路径），
+/// 其余（GET 升级请求）走原有 WebSocket 握手。peek 不消费字节，两条路径都拿到完整请求。
+async fn probe_is_post(stream: &TcpStream) -> bool {
+    let probe = async {
+        let mut buffer = [0u8; 5];
+        loop {
+            match stream.peek(&mut buffer).await {
+                Ok(0) | Err(_) => return false,
+                Ok(n) if n >= 5 => return &buffer[..5] == b"POST ",
+                // 前缀是 "POST " 真前缀才值得等更多字节；否则（如 "GET /"）立即定案
+                Ok(n) if &buffer[..n] != &b"POST "[..n] => return false,
+                Ok(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+    };
+    tokio::time::timeout(PROBE_TIMEOUT, probe).await.unwrap_or(false)
+}
+
 async fn handle_connection(
     stream: TcpStream,
     auth: Arc<LocalAuth>,
     runtime: Arc<DeviceRuntime>,
     daemon_id: DaemonIdProvider,
+    hook_tx: tokio::sync::mpsc::Sender<HookRequest>,
 ) -> Result<(), String> {
+    if probe_is_post(&stream).await {
+        return hook::serve(stream, hook_tx).await;
+    }
     let captured_origin = Arc::new(Mutex::new(None::<String>));
     let callback_origin = captured_origin.clone();
     let callback_auth = auth.clone();
@@ -308,6 +342,7 @@ mod tests {
             Arc::new(move |status| {
                 let _ = status_tx.send(status);
             }),
+            tokio::sync::mpsc::channel(4).0,
         ));
         let port = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -431,6 +466,7 @@ mod tests {
             Arc::new(move |status| {
                 let _ = status_tx.send(status);
             }),
+            tokio::sync::mpsc::channel(4).0,
         ));
         let port = loop {
             if let Some(Some(port)) = status_rx.recv().await {
@@ -462,6 +498,7 @@ mod tests {
             Arc::new(move |status| {
                 let _ = first_tx.send(status);
             }),
+            tokio::sync::mpsc::channel(4).0,
         ));
         let port = loop {
             if let Some(Some(port)) = first_rx.recv().await {
@@ -480,6 +517,7 @@ mod tests {
             Arc::new(move |status| {
                 let _ = second_tx.send(status);
             }),
+            tokio::sync::mpsc::channel(4).0,
         ));
         let rebound = tokio::time::timeout(Duration::from_secs(2), async {
             loop {

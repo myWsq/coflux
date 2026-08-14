@@ -71,14 +71,6 @@ export function Sidebar(props: SidebarProps) {
   const localSessions = useStore(client.store, (state) => state.localSessions);
   const deviceTransports = useStore(client.store, (state) => state.deviceTransports);
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
-  const sessionActivity = useStore(client.store, (state) => state.sessionActivity);
-  // 活动状态（plan 073）由"距最后输出多久"推导，需要时钟前进触发重算：2s tick 与
-  // checkpoint 上报节奏同粒度，再细也换不来信息增量。
-  const [activityNow, setActivityNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setActivityNow(Date.now()), 2_000);
-    return () => clearInterval(timer);
-  }, []);
   // 默认全部展开，只记折叠集合（新项目出现时自然是展开态）
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
@@ -305,8 +297,9 @@ export function Sidebar(props: SidebarProps) {
                               : null;
                         const hasDiff = workspace.additions > 0 || workspace.deletions > 0;
                         // 活动三态（plan 073）：正在执行（绿）/ 等待交互（琥珀）/ 中性。
-                        // 判定阈值与优先级收敛在 workspaceActivity（packages/client），UI 只做呈现。
-                        const activity = workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents, sessionActivity, activityNow);
+                        // 状态来自 agent hook 上报（经 daemon 合并），聚合优先级收敛在
+                        // workspaceActivity（packages/client），UI 只做呈现。
+                        const activity = workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents);
                         const activityText = activity.status === "active"
                           ? `${activity.agent ? `${activity.agent} ` : ""}正在执行`
                           : activity.status === "waiting"
