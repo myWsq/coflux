@@ -84,6 +84,8 @@ const MAX_CONTROL_ID_BYTES = 256;
 const MAX_AGENT_ENTRIES = 1024;
 /** agent 自建终端的初始视口（plan 074）：没有真实 client 视口可依，取一个比 80×24 宽的默认值——
  * agent 是靠读 checkpoint 文本判断进度的，行太窄会把输出折得难认。用户接管时 xterm 会重新 resize。 */
+/** terminal list 回给 agent 的最大条数（取最近的）：用久的工作区会攒下几十个 exited 终端。 */
+const MAX_AGENT_TERMINAL_LIST = 50;
 const AGENT_TERMINAL_COLS = 120;
 const AGENT_TERMINAL_ROWS = 40;
 const MAX_AGENT_NAME_BYTES = 64;
@@ -473,9 +475,13 @@ export class Hub {
       case "terminalNew": {
         const value = request.payload.value;
         const tasks = await this.store.listTasksByWorkspace(workspace.id);
+        // 统计所有活跃终端而不只是 agent 建的：防的是「侧栏被刷满」，来源无所谓，而区分来源
+        // 要给 Task 加一个只服务于计数的持久字段，不值得。错误信息里说清含用户自己开的。
         const active = tasks.filter((t) => t.status === TaskStatus.RUNNING).length;
         if (active >= config.maxAgentTerminalsPerWorkspace) {
-          return void fail(`工作区活跃终端已达上限 ${config.maxAgentTerminalsPerWorkspace}，先停掉一些再开新的`);
+          return void fail(
+            `本工作区活跃终端已达上限 ${config.maxAgentTerminalsPerWorkspace}（含用户手动开的），先停掉一些再开新的`,
+          );
         }
         const sessionId = randomUUID();
         const ts = Date.now();
@@ -505,9 +511,11 @@ export class Hub {
       }
       case "terminalList": {
         const tasks = await this.store.listTasksByWorkspace(workspace.id);
+        // 只给最近的一批：用久的工作区会攒下几十个 exited 终端，全塞给 agent 是纯噪音。
         const terminals = tasks
           .slice()
           .sort((left, right) => left.createdAt - right.createdAt)
+          .slice(-MAX_AGENT_TERMINAL_LIST)
           .map((task) => ({
             taskId: task.id,
             title: task.title,
