@@ -269,7 +269,16 @@ pub async fn read_file_text(root: &str, rel: &str) -> (bool, String, Option<Stri
 /// 命令执行完脚本即退出 → session 退出 → 中心 task 转 EXITED 并带上退出码，这正是 agent
 /// 判断「跑完没有、成没成」的依据。刻意**不**在末尾留交互 shell：那会让 task 永远 RUNNING，
 /// 侧栏堆满假的「运行中」，而用户想接管在命令运行期间本来就可以。
-pub fn write_command_script(command: &str) -> Result<String, String> {
+///
+/// 输出经 `tee` 同时落一份日志，返回 `(脚本路径, 日志路径)`。**这不是可选的优化**：中心
+/// checkpoint 是 2 秒周期的派生缓存，而 session 一退出 supervisor 就把它从 map 里摘掉
+/// （见 `crates/supervisor/src/sessions.rs` 的 reaper），所以跑 1 秒的命令输出永远进不了
+/// checkpoint——而「跑完了看输出」正是 agent 最常用的动作。日志还比 VT 快照更有用：快照
+/// 只有一屏，日志是全量。
+///
+/// 代价：命令的 stdout 是管道而非 tty，多数程序会因此关掉颜色和进度条。对 agent 读日志
+/// 反而更干净，用户接管时仍能在 PTY 上看到实时输出（tee 的另一路）。
+pub fn write_command_script(command: &str) -> Result<(String, String), String> {
     let base = std::env::temp_dir().join("coflux-agent-cmd");
     std::fs::create_dir_all(&base).map_err(|error| error.to_string())?;
     let dir = std::fs::canonicalize(&base).map_err(|error| error.to_string())?;
@@ -279,8 +288,16 @@ pub fn write_command_script(command: &str) -> Result<String, String> {
         SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
     );
     let full = dir.join(&name);
+    let log = dir.join(format!("{name}.log"));
     let login_shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/bash".to_string());
-    let script = format!("#!/bin/sh\nexec {} -lc {}\n", sh_quote(&login_shell), sh_quote(command));
+    // bash 而非 sh：管道尾是 tee，命令自己的退出码只能靠 PIPESTATUS 取回，而 agent 判断
+    // 成败全靠它。仓库已假设 bash 存在（supervisor 的默认 shell fallback 就是 /bin/bash）。
+    let script = format!(
+        "#!/bin/bash\n{} -lc {} 2>&1 | tee {}\nexit \"${{PIPESTATUS[0]}}\"\n",
+        sh_quote(&login_shell),
+        sh_quote(command),
+        sh_quote(&log.to_string_lossy()),
+    );
     std::fs::write(&full, script).map_err(|error| error.to_string())?;
     #[cfg(unix)]
     {
@@ -288,7 +305,21 @@ pub fn write_command_script(command: &str) -> Result<String, String> {
         std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o700)).map_err(|error| error.to_string())?;
     }
     cleanup_stale_files(&dir, &name, "");
-    Ok(full.to_string_lossy().into_owned())
+    Ok((full.to_string_lossy().into_owned(), log.to_string_lossy().into_owned()))
+}
+
+/// 读命令日志的尾部若干字节，按 UTF-8 lossy 转字符串。截断从字节位置切，首行可能残缺——
+/// agent 读的是终端输出，少半行无害，不值得为它做行边界扫描。
+pub fn read_command_log_tail(path: &str, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len > max_bytes {
+        file.seek(SeekFrom::Start(len - max_bytes)).ok()?;
+    }
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).ok()?;
+    Some(String::from_utf8_lossy(&buffer).into_owned())
 }
 
 /// POSIX shell 单引号转义：整体套单引号，内部的 `'` 换成 `'\''`（收单引号→转义单引号→再开）。
@@ -318,9 +349,40 @@ mod agent_script_tests {
 
     #[test]
     fn script_runs_command_and_propagates_exit_code() {
-        let path = write_command_script("exit 7").expect("write script");
+        // 管道尾是 tee，退出码必须来自 PIPESTATUS 而非 tee——agent 靠它判断成败
+        let (path, log) = write_command_script("exit 7").expect("write script");
         let status = std::process::Command::new(&path).status().expect("run script");
-        assert_eq!(status.code(), Some(7), "退出码必须透传——agent 靠它判断成败");
+        assert_eq!(status.code(), Some(7), "退出码必须透传");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&log);
+    }
+
+    /// 日志是「跑完了看输出」唯一可靠的数据源：中心 checkpoint 是 2 秒周期的派生缓存，
+    /// 秒级命令的输出根本进不去。stdout 与 stderr 都要落进去。
+    #[test]
+    fn script_log_captures_stdout_and_stderr() {
+        let (path, log) = write_command_script("echo 到标准输出; echo 到标准错误 >&2").expect("write script");
+        let output = std::process::Command::new(&path).output().expect("run script");
+        assert!(output.status.success());
+        let captured = read_command_log_tail(&log, 64 * 1024).expect("读日志");
+        assert!(captured.contains("到标准输出"), "stdout 未落盘: {captured:?}");
+        assert!(captured.contains("到标准错误"), "stderr 未落盘: {captured:?}");
+        // tee 的另一路仍然到达调用方（用户接管时才看得到实时输出）
+        assert!(String::from_utf8_lossy(&output.stdout).contains("到标准输出"), "tee 必须同时输出到 PTY");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&log);
+    }
+
+    #[test]
+    fn log_tail_truncates_from_the_end() {
+        let dir = std::env::temp_dir().join("coflux-agent-cmd");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join(format!("tail-test-{}.log", std::process::id()));
+        std::fs::write(&path, "0123456789").expect("write");
+        let tail = read_command_log_tail(&path.to_string_lossy(), 4).expect("读日志");
+        assert_eq!(tail, "6789", "超限时保留尾部——agent 要的是最后发生了什么");
+        assert_eq!(read_command_log_tail(&path.to_string_lossy(), 100).unwrap(), "0123456789");
+        assert!(read_command_log_tail("/nonexistent/coflux/x.log", 100).is_none());
         let _ = std::fs::remove_file(&path);
     }
 }

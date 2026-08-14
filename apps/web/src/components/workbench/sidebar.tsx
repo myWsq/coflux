@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, Monitor, Package, Plus, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, MessageSquare, Monitor, Package, Plus, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
@@ -329,6 +329,15 @@ export function Sidebar(props: SidebarProps) {
                                 <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                                   <ActivityIcon activity={activity} />
                                   <span className="truncate">{activityText}</span>
+                                </span>
+                              ) : null}
+                              {/* agent 经 `cofluxd notify` 主动留的话（plan 074）：状态图标只能表达
+                                  「它在等你」，具体等什么得由 agent 自己说。不 truncate——留言就是
+                                  要读的内容，worker 侧已按 200 字符钳过。 */}
+                              {activity.status === "question" && activity.message ? (
+                                <span className="flex items-start gap-1.5 text-xs text-foreground">
+                                  <MessageSquare className="mt-0.5 size-3 shrink-0 opacity-70" />
+                                  <span className="whitespace-pre-wrap break-words">{activity.message}</span>
                                 </span>
                               ) : null}
                               <span className="flex items-center gap-1.5 text-xs text-muted-foreground">

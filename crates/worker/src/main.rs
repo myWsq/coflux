@@ -91,6 +91,10 @@ struct WorkerState {
     /// 生命周期——任一 hook 事件到达即清掉该 session 的留言（那时 agent 已换了状态，旧留言
     /// 就过期了），presence 扫描不见的会话也一并剪掉。
     hook_messages: HashMap<String, String>,
+    /// agent 自建终端的命令日志（plan 074）：taskId -> 日志绝对路径。读终端时优先用它而不是
+    /// 中心 checkpoint——checkpoint 是 2 秒周期的派生缓存，秒级命令的输出根本进不去，而日志
+    /// 还是全量而非一屏。worker 重启（热升级）后此表丢失，read 自动降级回 checkpoint。
+    agent_logs: HashMap<String, String>,
     /// agent 控制请求的在飞关联表（plan 074）：requestId -> 中心回执的接收端。
     /// 断开中心连接时整表清空——发送端 drop 会让等待方立刻拿到「连接中断」而不是干等超时。
     agent_pending: HashMap<String, tokio::sync::oneshot::Sender<wire::AgentControlResult>>,
@@ -379,6 +383,7 @@ async fn main() {
         last_reported_agents: Vec::new(),
         hook_states: HashMap::new(),
         hook_messages: HashMap::new(),
+        agent_logs: HashMap::new(),
         agent_pending: HashMap::new(),
         workspaces: HashMap::new(),
         last_branches: HashMap::new(),

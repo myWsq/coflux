@@ -24,6 +24,20 @@ use crate::{agents, ops, send_d2s, WorkerState, WsOut};
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
 /// notify 留言长度上限（字符）。它只是侧栏 tooltip 里的一句话，不是日志通道。
 const MAX_NOTIFY_CHARS: usize = 200;
+/// 单次 read 从命令日志尾部取的字节上限；CLI 侧还会再按行数收窄。
+const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
+/// agent_logs 表的条目上限。超出即整表清空——丢失只意味着 read 退回中心 checkpoint，
+/// 没有正确性后果，所以不值得为它做 LRU。
+/// ponytail: 粗暴清表，真出现「一个工作区几百个终端」的用法再换 LRU。
+const MAX_TRACKED_LOGS: usize = 256;
+
+fn remember_log(state: &Arc<Mutex<WorkerState>>, task_id: String, log_path: String) {
+    let mut s = state.lock().unwrap();
+    if s.agent_logs.len() >= MAX_TRACKED_LOGS {
+        s.agent_logs.clear();
+    }
+    s.agent_logs.insert(task_id, log_path);
+}
 
 /// gateway 解析出的一条 agent 控制请求；`respond` 回填 HTTP 应答。
 pub struct AgentRequest {
@@ -110,14 +124,15 @@ async fn handle(
             AgentResponse::ok(serde_json::json!({}))
         }
         AgentAction::TerminalNew { title, command } => {
-            let shell = match ops::write_command_script(&command) {
-                Ok(path) => path,
+            let (shell, log_path) = match ops::write_command_script(&command) {
+                Ok(paths) => paths,
                 Err(error) => return AgentResponse::err("500 Internal Server Error", format!("写命令脚本失败：{error}")),
             };
             let payload = agent_control_request::Payload::TerminalNew(wire::AgentTerminalNew { title, shell });
             match ask_server(state, to_server_tx, session_id, payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalNew(result)) => {
+                    remember_log(state, result.task_id.clone(), log_path);
                     AgentResponse::ok(serde_json::json!({ "taskId": result.task_id, "sessionId": result.session_id }))
                 }
                 Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
@@ -148,18 +163,26 @@ async fn handle(
             }
         }
         AgentAction::TerminalRead { task_id } => {
+            // 先问中心：它做归属校验（该 task 必须与发起方同工作区）并给出 status/exit_code。
+            // 内容的**首选**数据源是本地命令日志：中心 checkpoint 是 2 秒周期的派生缓存，
+            // 秒级命令的输出根本进不去，而日志是全量而非一屏。非 agent 自建的终端（用户
+            // 手开的）没有日志，此时退回 checkpoint。
+            let local_log = { state.lock().unwrap().agent_logs.get(&task_id).cloned() };
             let payload = agent_control_request::Payload::TerminalRead(wire::AgentTerminalRead { task_id });
             match ask_server(state, to_server_tx, session_id, payload).await {
                 Err(response) => response,
-                Ok(agent_control_result::Payload::TerminalRead(result)) => AgentResponse::ok(serde_json::json!({
+                Ok(agent_control_result::Payload::TerminalRead(result)) => {
+                    let from_log = local_log.as_deref().and_then(|path| ops::read_command_log_tail(path, MAX_LOG_TAIL_BYTES));
                     // ANSI 原样带回，去转义在 CLI 侧做（snapshot 同时是 checkpoint 的数据来源，
-                    // 不为 agent 可读性改它的语义）。lossy：极少数被截断的多字节字符不值得
-                    // 为它引入 base64 依赖。
-                    "ansi": String::from_utf8_lossy(&result.ansi_snapshot),
-                    "capturedAt": result.captured_at,
-                    "status": status_name(result.status),
-                    "exitCode": result.exit_code,
-                })),
+                    // 不为 agent 可读性改它的语义）。
+                    let text = from_log.unwrap_or_else(|| String::from_utf8_lossy(&result.ansi_snapshot).into_owned());
+                    AgentResponse::ok(serde_json::json!({
+                        "ansi": text,
+                        "capturedAt": result.captured_at,
+                        "status": status_name(result.status),
+                        "exitCode": result.exit_code,
+                    }))
+                }
                 Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
             }
         }
