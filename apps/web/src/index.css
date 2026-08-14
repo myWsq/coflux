@@ -127,14 +127,26 @@
   }
 }
 
-/* Cursor Glass / assistant-ui：点阵每颗点自己闪，相位打散 */
+/* assistant-ui DotMatrix：每颗点自己闪；hi/lo 按状态设，静态态 hi=lo 看起来不动 */
+@property --coflux-dot-hi {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 1;
+}
+
+@property --coflux-dot-lo {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 0.15;
+}
+
 @keyframes coflux-dot-twinkle {
   0%,
   100% {
-    opacity: 1;
+    opacity: var(--coflux-dot-hi, 1);
   }
   50% {
-    opacity: 0.15;
+    opacity: var(--coflux-dot-lo, 0.15);
   }
 }
 
@@ -162,6 +174,11 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .coflux-dot-twinkle {
+    animation: none !important;
+    opacity: var(--coflux-dot-hi, 1);
   }
 }
 
