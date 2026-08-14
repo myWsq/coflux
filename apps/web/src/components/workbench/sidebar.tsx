@@ -2,18 +2,36 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, LoaderCircle, MessageSquareDot, Monitor, Package, Plus, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { Check, ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, LoaderCircle, MessageSquareDot, Monitor, Package, Plus, ShieldAlert, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
-import { workspaceActivity, type CofluxClient } from "@coflux/client";
+import { workspaceActivity, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
 import { cn } from "@/lib/utils";
 
 /** 心跳往返低于此值算「快」（绿），否则「慢」（黄）。局域网直连通常个位数到几十 ms，
  * 跨洲 relay 常在 200ms 以上——阈值取在这两簇之间，而不是取某个整数好看。 */
 const RTT_GOOD_MS = 200;
+
+function activityLabel(activity: WorkspaceActivity): string {
+  if (activity.status === "idle") return "";
+  const name = activity.agent ? `${activity.agent} ` : "";
+  if (activity.status === "active") return `${name}正在执行`;
+  if (activity.status === "approval") return `${name}等待批准`;
+  if (activity.status === "question") return `${name}等待回答`;
+  return `${name}本轮完成`;
+}
+
+function ActivityIcon({ activity, labeled }: { activity: WorkspaceActivity; labeled?: boolean }) {
+  const label = labeled ? activityLabel(activity) : undefined;
+  if (activity.status === "active") return <LoaderCircle className="size-3 shrink-0 animate-spin text-success" aria-label={label} />;
+  if (activity.status === "approval") return <ShieldAlert className="size-3 shrink-0 text-warning" aria-label={label} />;
+  if (activity.status === "question") return <MessageSquareDot className="size-3 shrink-0 text-warning" aria-label={label} />;
+  if (activity.status === "done") return <Check className="size-3 shrink-0 text-muted-foreground" aria-label={label} />;
+  return null;
+}
 
 const DEFAULT_SIDEBAR_WIDTH = 260;
 const MIN_SIDEBAR_WIDTH = 200;
@@ -300,11 +318,7 @@ export function Sidebar(props: SidebarProps) {
                         // 状态来自 agent hook 上报（经 daemon 合并），聚合优先级收敛在
                         // workspaceActivity（packages/client），UI 只做呈现。
                         const activity = workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents);
-                        const activityText = activity.status === "active"
-                          ? `${activity.agent ? `${activity.agent} ` : ""}正在执行`
-                          : activity.status === "waiting"
-                            ? `${activity.agent} 等待交互`
-                            : "";
+                        const activityText = activityLabel(activity);
                         // 工作区详情 tooltip（需求勘误：原 plan 048-task-tab-tooltip 做到了任务 Tab 上，
                         // 真正诉求是侧栏工作区行——版式照抄设备 tooltip：加粗标题行 + 图标条目列表）
                         const workspaceTooltip = (
@@ -316,11 +330,7 @@ export function Sidebar(props: SidebarProps) {
                             <div className="flex flex-col gap-0.5">
                               {activity.status !== "idle" ? (
                                 <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                                  {activity.status === "active" ? (
-                                    <LoaderCircle className="size-3 shrink-0 animate-spin text-success" />
-                                  ) : (
-                                    <MessageSquareDot className="size-3 shrink-0 text-warning" />
-                                  )}
+                                  <ActivityIcon activity={activity} />
                                   <span className="truncate">{activityText}</span>
                                 </span>
                               ) : null}
@@ -368,10 +378,8 @@ export function Sidebar(props: SidebarProps) {
                             >
                               {/* 图标槽原位替换（plan 073，与设备行「direct 时闪电取代圆点」同一手法）：
                                   有活动状态时呈现状态图标，中性态保留 GitBranch 原样；槽位固定 size-3 不跳版式 */}
-                              {activity.status === "active" ? (
-                                <LoaderCircle className="size-3 shrink-0 animate-spin text-success" aria-label={activityText} />
-                              ) : activity.status === "waiting" ? (
-                                <MessageSquareDot className="size-3 shrink-0 text-warning" aria-label={activityText} />
+                              {activity.status !== "idle" ? (
+                                <ActivityIcon activity={activity} labeled />
                               ) : (
                                 <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
                               )}

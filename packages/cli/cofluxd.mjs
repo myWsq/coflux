@@ -666,11 +666,11 @@ function cmdUninstall(v) {
 
 /* ------------------------------ hook：agent 事件信使 ------------------------------ */
 // agent hook 的上报信使：用户在 claude/codex 的 hook 配置里指向本命令，事件发生时它把
-// 事件名转发给本机 worker 的固定 gateway（POST /hook），供活动状态判定（执行中/等待交互）。
+// 事件名转发给本机 worker 的固定 gateway（POST /hook），供活动状态判定。
 //
 // 输入两种形态都收：claude 与 codex hooks 引擎走 stdin JSON；codex 旧式 notify 把 payload
-// 作为最后一个 argv 传入。只转发事件名 + agent 会话 id + 本进程 pid/ppid——payload 里的
-// prompt / 回答原文一律不出机（隐私边界）。
+// 作为最后一个 argv 传入。只转发事件名 + notification 类型 + agent 会话 id + 本进程
+// pid/ppid——payload 里的 prompt / 回答原文 / 通知正文一律不出机（隐私边界）。
 //
 // 契约（worker 侧将来实现 /hook 时依赖）：请求保持到收到响应才退出——worker 在处理期间
 // 用上报的 pid 反查进程树归属哪个 session，本进程活着扫描才有效。
@@ -721,6 +721,7 @@ async function cmdHook() {
       hookDebug(portResult.error);
       return;
     }
+    const notification = payload.notification_type ?? payload.notificationType;
     const body = {
       agent,
       event,
@@ -728,6 +729,8 @@ async function cmdHook() {
       ppid: process.ppid,
       // agent 自身的会话标识（claude: session_id / codex notify: thread-id），供 worker 去重与调试
       agentSessionId: payload.session_id ?? payload["thread-id"] ?? undefined,
+      // Claude Notification 的类型枚举（permission_prompt / agent_needs_input …），不含正文
+      notification: typeof notification === "string" && notification ? notification : undefined,
     };
     hookDebug("POST /hook", JSON.stringify(body));
     const res = await fetch(`http://127.0.0.1:${portResult.port}/hook`, {

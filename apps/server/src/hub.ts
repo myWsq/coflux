@@ -102,12 +102,12 @@ interface SessionAgentData {
   sessionId: SessionId;
   taskId: TaskId;
   agent: string;
-  /** hook 上报的回合状态："active" / "waiting"，空 = 无 hook 信号（见 common.proto SessionAgentRef.state） */
+  /** hook 上报的回合状态：active / approval / question / done，空 = 无 hook 信号 */
   state: string;
 }
 
-/** state 白名单：daemon 侧只会产出这三种取值，名单外的按畸形消息整条丢弃。 */
-const AGENT_STATES = new Set(["", "active", "waiting"]);
+/** state 白名单：名单外的按畸形消息整条丢弃。waiting 是 v0.21 旧值，仍收以免混版本丢条目。 */
+const AGENT_STATES = new Set(["", "active", "approval", "question", "done", "waiting"]);
 
 export interface DaemonConn {
   info: DaemonInfoData;

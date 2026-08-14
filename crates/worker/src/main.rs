@@ -83,7 +83,7 @@ struct WorkerState {
     last_reported_ports: Vec<wire::SessionPorts>,
     /// agent 探测(plan 073)上一次实际发出的全量快照：语义同 last_reported_ports。
     last_reported_agents: Vec<wire::SessionAgentRef>,
-    /// hook 上报的回合状态：sessionId -> "active"/"waiting"。进程树 presence 扫描是存活门——
+    /// hook 上报的回合状态：sessionId -> active/approval/question/done。进程树 presence 扫描是存活门——
     /// 合并上报时剪掉扫描已不见 agent 的条目（agent 退出/换新时不残留旧状态）。
     hook_states: HashMap<String, &'static str>,
     /// server 下发的本设备工作区清单：workspace_id -> (worktree 路径, 所属 project 的 default_branch)
@@ -284,7 +284,7 @@ async fn consume_hook_events(
     to_server_tx: Sender<WsOut>,
 ) {
     while let Some(request) = hook_rx.recv().await {
-        let Some(hook_state) = hook::event_state(&request.event) else {
+        let Some(hook_state) = hook::event_state(&request.event, &request.notification) else {
             let _ = request.respond.send(hook::HookOutcome::Ignored);
             continue;
         };
@@ -303,7 +303,10 @@ async fn consume_hook_events(
             let _ = request.respond.send(hook::HookOutcome::SessionNotFound);
             continue;
         };
-        eprintln!("[worker] hook event agent={} event={} session={session_id}", request.agent, request.event);
+        eprintln!(
+            "[worker] hook event agent={} event={} notification={} session={session_id}",
+            request.agent, request.event, request.notification
+        );
         state.lock().unwrap().hook_states.insert(session_id, hook_state);
         report_agents_if_changed(&state, &to_server_tx).await;
         let _ = request.respond.send(hook::HookOutcome::Accepted);

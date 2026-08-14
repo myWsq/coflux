@@ -108,7 +108,7 @@ test("agent presence：claude 进程出现→上报（含归属），退出→�
   device.close();
 });
 
-test("hook 回合状态：Stop→waiting、UserPromptSubmit→active 即时广播；树外 pid 与非 json 被拒", async () => {
+test("hook 回合状态：Stop→done、PermissionRequest→approval、Notification 分型、UserPromptSubmit→active；树外 pid 与非 json 被拒", async () => {
   const home = mkDir();
   const script = join(home, "claude");
   writeFileSync(script, "#!/bin/sh\nsleep 300\n");
@@ -133,17 +133,31 @@ test("hook 回合状态：Stop→waiting、UserPromptSubmit→active 即时广�
   assert.equal(present.sessions.find((s) => s.sessionId === sessionId).state, "");
 
   // 信使在会话进程树内执行（与真实 hook 同构）：事件被接受即触发上报，无需等扫描周期
-  const hookCmd = (event) =>
-    `printf '%s' '{"hook_event_name":"${event}"}' | COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} node ${COFLUXD} hook claude\r`;
-  await device.input(sessionId, hookCmd("Stop"));
-  const waiting = await c.waitFor(
-    (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId && s.state === "waiting"),
-    "Stop → waiting",
+  const hookCmd = (json) =>
+    `printf '%s' '${json}' | COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} node ${COFLUXD} hook claude\r`;
+  await device.input(sessionId, hookCmd('{"hook_event_name":"Stop"}'));
+  const done = await c.waitFor(
+    (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId && s.state === "done"),
+    "Stop → done",
     15000,
   );
-  assert.equal(waiting.sessions.find((s) => s.sessionId === sessionId).agent, "claude", "state 变化不丢 agent 名");
+  assert.equal(done.sessions.find((s) => s.sessionId === sessionId).agent, "claude", "state 变化不丢 agent 名");
 
-  await device.input(sessionId, hookCmd("UserPromptSubmit"));
+  await device.input(sessionId, hookCmd('{"hook_event_name":"PermissionRequest"}'));
+  await c.waitFor(
+    (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId && s.state === "approval"),
+    "PermissionRequest → approval",
+    15000,
+  );
+
+  await device.input(sessionId, hookCmd('{"hook_event_name":"Notification","notification_type":"agent_needs_input"}'));
+  await c.waitFor(
+    (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId && s.state === "question"),
+    "Notification agent_needs_input → question",
+    15000,
+  );
+
+  await device.input(sessionId, hookCmd('{"hook_event_name":"UserPromptSubmit"}'));
   await c.waitFor(
     (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId && s.state === "active"),
     "UserPromptSubmit → active",

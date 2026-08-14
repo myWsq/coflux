@@ -380,8 +380,9 @@ export type SessionAgentRef = Message<"coflux.v1.SessionAgentRef"> & {
   agent: string;
 
   /**
-   * agent hook 上报的回合状态（plan 07x）："active" = 回合进行中 / "waiting" = 等待用户交互；
-   * 空 = 该 session 尚无 hook 信号（未配 hook 或 agent 刚启动）。agent 进程退出时随条目一起消失。
+   * agent hook 上报的回合状态（对齐 Vibe Island）：
+   * "active" 进行中 / "approval" 要权限 / "question" 要回答 / "done" 本轮说完；
+   * 空 = 尚无 hook 信号。agent 进程退出时随条目一起消失。
    *
    * @generated from field: string state = 4;
    */

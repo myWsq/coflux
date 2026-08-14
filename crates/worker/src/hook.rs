@@ -2,7 +2,9 @@
 //!
 //! `cofluxd hook <agent>` 作为信使，把 claude/codex 的 hook 事件 POST 到本地 gateway 的
 //! `/hook`。本模块解析这条极小的 HTTP 请求并交给 main 的消费任务：用上报的 pid 反查
-//! 进程树归属哪个 session，再把回合状态（active/waiting）合并进 agent presence 上报。
+//! 进程树归属哪个 session，再把回合状态合并进 agent presence 上报。
+//!
+//! 状态对齐 Vibe Island：active / approval / question / done（空 = 尚无 hook 信号）。
 //!
 //! 契约：响应在 pid→session 反查完成后才发出——信使收到响应前不退出，保证扫描进程树时
 //! 上报 pid 仍然存活。
@@ -28,6 +30,7 @@ const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct HookRequest {
     pub agent: String,
     pub event: String,
+    pub notification: String,
     pub pid: i32,
     pub ppid: i32,
     pub respond: oneshot::Sender<HookOutcome>,
@@ -42,15 +45,20 @@ pub enum HookOutcome {
     SessionNotFound,
 }
 
-/// hook 事件名 → 回合状态。claude 与 codex hooks 引擎共用 claude 命名；
-/// codex 旧式 notify 用 kebab-case 事件。名单外的事件一律忽略（而非拒绝），
-/// 用户多配了 hook 事件不会造成干扰。
-pub fn event_state(event: &str) -> Option<&'static str> {
+/// hook 事件名（+ Notification 的类型）→ 回合状态。claude 与 codex hooks 引擎共用
+/// claude 命名；codex 旧式 notify 用 kebab-case。名单外或 Notification 类型未知一律
+/// 忽略（而非拒绝），用户多配了 hook 事件不会造成干扰。
+pub fn event_state(event: &str, notification: &str) -> Option<&'static str> {
     match event {
-        // 回合进行中：提交了 prompt / 正在跑工具
         "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some("active"),
-        // 等待用户交互：回合结束 / 需要权限确认 / agent 主动通知
-        "Stop" | "Notification" | "PermissionRequest" | "agent-turn-complete" | "approval-requested" => Some("waiting"),
+        "PermissionRequest" | "approval-requested" => Some("approval"),
+        "Stop" | "agent-turn-complete" => Some("done"),
+        "Notification" => match notification {
+            "permission_prompt" => Some("approval"),
+            "agent_needs_input" | "elicitation_dialog" | "elicitation_url_dialog" => Some("question"),
+            "agent_completed" | "idle_prompt" => Some("done"),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -59,6 +67,8 @@ pub fn event_state(event: &str) -> Option<&'static str> {
 struct HookBody {
     agent: String,
     event: String,
+    #[serde(default)]
+    notification: String,
     pid: i32,
     #[serde(default)]
     ppid: i32,
@@ -117,11 +127,18 @@ async fn handle(stream: &mut TcpStream, hook_tx: &mpsc::Sender<HookRequest>) -> 
     }
     let parsed: HookBody =
         serde_json::from_slice(&body[..content_length]).map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
-    if event_state(&parsed.event).is_none() {
+    if event_state(&parsed.event, &parsed.notification).is_none() {
         return Ok(HookOutcome::Ignored);
     }
     let (respond, outcome_rx) = oneshot::channel();
-    let request = HookRequest { agent: parsed.agent, event: parsed.event, pid: parsed.pid, ppid: parsed.ppid, respond };
+    let request = HookRequest {
+        agent: parsed.agent,
+        event: parsed.event,
+        notification: parsed.notification,
+        pid: parsed.pid,
+        ppid: parsed.ppid,
+        respond,
+    };
     hook_tx.send(request).await.map_err(|_| RequestError::Unavailable)?;
     match tokio::time::timeout(PROCESS_TIMEOUT, outcome_rx).await {
         Ok(Ok(outcome)) => Ok(outcome),
@@ -182,12 +199,19 @@ mod tests {
 
     #[test]
     fn event_mapping_covers_both_agents() {
-        assert_eq!(event_state("UserPromptSubmit"), Some("active"));
-        assert_eq!(event_state("Stop"), Some("waiting"));
-        assert_eq!(event_state("PermissionRequest"), Some("waiting"));
-        assert_eq!(event_state("agent-turn-complete"), Some("waiting"));
-        assert_eq!(event_state("SessionStart"), None);
-        assert_eq!(event_state(""), None);
+        assert_eq!(event_state("UserPromptSubmit", ""), Some("active"));
+        assert_eq!(event_state("Stop", ""), Some("done"));
+        assert_eq!(event_state("PermissionRequest", ""), Some("approval"));
+        assert_eq!(event_state("agent-turn-complete", ""), Some("done"));
+        assert_eq!(event_state("approval-requested", ""), Some("approval"));
+        assert_eq!(event_state("Notification", "permission_prompt"), Some("approval"));
+        assert_eq!(event_state("Notification", "agent_needs_input"), Some("question"));
+        assert_eq!(event_state("Notification", "elicitation_dialog"), Some("question"));
+        assert_eq!(event_state("Notification", "agent_completed"), Some("done"));
+        assert_eq!(event_state("Notification", "auth_success"), None);
+        assert_eq!(event_state("Notification", ""), None);
+        assert_eq!(event_state("SessionStart", ""), None);
+        assert_eq!(event_state("", ""), None);
     }
 
     #[test]
