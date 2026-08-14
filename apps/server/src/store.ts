@@ -1134,6 +1134,18 @@ export class Store {
     return rows[0] && rowToCheckpoint(rows[0]);
   }
 
+  /** 按 task 取最新 checkpoint（plan 074）。agent 读终端必须走这条而不是 getSessionCheckpoint：
+   * session 退出时 task.sessionId 被清空（见 hub 的 sessionExit 处理），而「命令跑完了看输出」
+   * 恰恰是 agent 最常用的场景——按 session 查在那一刻永远查不到东西。同 task 多次运行时取最新。 */
+  async getSessionCheckpointByTask(taskId: TaskId): Promise<SessionCheckpointRecord | undefined> {
+    const rows = await this.sql<SessionCheckpointRow[]>`
+      SELECT * FROM session_checkpoints
+      WHERE task_id = ${taskId} AND updated_at >= ${Date.now() - SESSION_CHECKPOINT_RETENTION_MS}
+      ORDER BY captured_at DESC LIMIT 1
+    `;
+    return rows[0] && rowToCheckpoint(rows[0]);
+  }
+
   async listSessionCheckpoints(accountId: AccountId): Promise<SessionCheckpointRecord[]> {
     await this.pruneSessionCheckpoints(accountId, Date.now());
     const rows = await this.sql<SessionCheckpointRow[]>`

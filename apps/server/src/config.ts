@@ -138,6 +138,9 @@ export const config = {
   pendingTimeoutMs: int("COFLUX_PENDING_TIMEOUT_MS", 30_000),
   clientBufferHardLimit: int("COFLUX_CLIENT_BUFFER_LIMIT", 32 * 1024 * 1024),
   maxDevicesPerAccount: int("COFLUX_MAX_DEVICES", 100),
+  // 每工作区允许同时活着的 agent 自建终端数（plan 074）。防的是跑飞的 agent 把侧栏刷满——
+  // 信任模型上 agent 就是用户自己（OPEN_QUESTIONS B2），所以是硬上限而非配额/回收策略。
+  maxAgentTerminalsPerWorkspace: int("COFLUX_MAX_AGENT_TERMINALS", 8),
   execDefaultTimeoutMs: int("COFLUX_EXEC_TIMEOUT_MS", 60_000),
   execMaxTimeoutMs: int("COFLUX_EXEC_MAX_TIMEOUT_MS", 300_000),
 

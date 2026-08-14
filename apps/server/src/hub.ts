@@ -57,6 +57,8 @@ import {
   type DeviceSessionInfo,
   type SessionAgentRef,
   type SessionCheckpoint,
+  type AgentControlRequest,
+  type AgentControlResultPayload,
 } from "@coflux/protocol";
 import { createLogger } from "@coflux/core";
 import {
@@ -80,6 +82,10 @@ const MAX_CATALOG_PATH_BYTES = 16 * 1024;
 const MAX_RETAINED_CATALOG_BYTES = 4 * 1024 * 1024;
 const MAX_CONTROL_ID_BYTES = 256;
 const MAX_AGENT_ENTRIES = 1024;
+/** agent 自建终端的初始视口（plan 074）：没有真实 client 视口可依，取一个比 80×24 宽的默认值——
+ * agent 是靠读 checkpoint 文本判断进度的，行太窄会把输出折得难认。用户接管时 xterm 会重新 resize。 */
+const AGENT_TERMINAL_COLS = 120;
+const AGENT_TERMINAL_ROWS = 40;
 const MAX_AGENT_NAME_BYTES = 64;
 
 /** daemon 展示信息：不用生成的 DaemonInfo 消息类型（无需 $typeName）——它只作为其它信封消息的
@@ -424,6 +430,108 @@ export class Hub {
     }
     if (ackIds.length > 0) this.sendDaemon(daemon, { case: "exitAck", value: { eventIds: ackIds } });
     log.debug("session catalog reconciled", { daemonId: daemon.info.daemonId, live: live.size, exits: ackIds.length });
+  }
+
+  /* ==================== agent 协同控制（plan 074） ==================== */
+
+  /** daemon 转发的 agent 控制请求。worker 已用调用方 pid 反查进程树确认它属于 `sessionId`
+   * 这个存活会话；这里据它反查 task→workspace 完成归属校验——agent 不自报 workspace，
+   * 也无从伪造。走 daemon 控制 WS 而非 browser 那套 prepared operation：后者的最后一跳是
+   * 把 frame 交给 client 转投，而 agent 场景根本没有 client，且 daemon 控制 WS 本身就是
+   * 已认证的可信面。
+   *
+   * 每条请求必回一条 agentControlResult：worker 侧在等，静默丢弃只会让 agent 干等到超时。 */
+  private async handleAgentControl(daemon: DaemonConn, request: AgentControlRequest): Promise<void> {
+    const reply = (payload: AgentControlResultPayload) =>
+      this.sendDaemon(daemon, { case: "agentControlResult", value: { requestId: request.requestId, ok: true, payload } });
+    const fail = (error: string) =>
+      this.sendDaemon(daemon, { case: "agentControlResult", value: { requestId: request.requestId, ok: false, error } });
+
+    const originTask = await this.store.getTaskBySession(request.sessionId);
+    if (!originTask || originTask.daemonId !== daemon.info.daemonId || originTask.accountId !== daemon.accountId) {
+      return void fail("发起方会话不属于本设备的任何任务");
+    }
+    const workspace = await this.store.getWorkspace(originTask.workspaceId);
+    if (!workspace || workspace.accountId !== daemon.accountId) return void fail("发起方工作区已不存在");
+
+    switch (request.payload.case) {
+      case "terminalNew": {
+        const value = request.payload.value;
+        const tasks = await this.store.listTasksByWorkspace(workspace.id);
+        const active = tasks.filter((t) => t.status === TaskStatus.RUNNING).length;
+        if (active >= config.maxAgentTerminalsPerWorkspace) {
+          return void fail(`工作区活跃终端已达上限 ${config.maxAgentTerminalsPerWorkspace}，先停掉一些再开新的`);
+        }
+        const sessionId = randomUUID();
+        const ts = Date.now();
+        // sessionId 建库时就写死：daemon 回 sessionStarted 时按 task.sessionId 匹配才会转 RUNNING。
+        const task: Task = create(TaskSchema, {
+          id: randomUUID(),
+          accountId: workspace.accountId,
+          daemonId: workspace.daemonId,
+          projectId: workspace.projectId,
+          workspaceId: workspace.id,
+          title: value.title.trim() || "agent 终端",
+          status: TaskStatus.IDLE,
+          sessionId,
+          createdAt: ts,
+          updatedAt: ts,
+        });
+        await this.store.createTask(task);
+        this.sessions.set(sessionId, { sessionId, daemonId: workspace.daemonId, accountId: workspace.accountId, taskId: task.id });
+        this.emitTask(task); // 先广播：用户在终端起来之前就能看见这个任务出现在侧栏
+        this.sendDaemon(daemon, {
+          case: "sessionCreate",
+          // shell 指向 worker 自己写的命令包装脚本（supervisor 的 CommandBuilder 不接受 args）。
+          // 路径由 daemon 生成、只回到同一个 daemon 执行，server 不解释也不校验它。
+          value: { sessionId, taskId: task.id, cwd: workspace.path, shell: value.shell, cols: AGENT_TERMINAL_COLS, rows: AGENT_TERMINAL_ROWS },
+        });
+        return void reply({ case: "terminalNew", value: { taskId: task.id, sessionId } });
+      }
+      case "terminalList": {
+        const tasks = await this.store.listTasksByWorkspace(workspace.id);
+        const terminals = tasks
+          .slice()
+          .sort((left, right) => left.createdAt - right.createdAt)
+          .map((task) => ({
+            taskId: task.id,
+            title: task.title,
+            status: task.status,
+            exitCode: task.exitCode,
+            sessionId: task.sessionId,
+            createdAt: task.createdAt,
+          }));
+        return void reply({ case: "terminalList", value: { terminals } });
+      }
+      case "terminalRead": {
+        const target = await this.store.getTask(request.payload.value.taskId);
+        if (!target || target.workspaceId !== workspace.id || target.accountId !== daemon.accountId) {
+          return void fail("该终端不在本工作区");
+        }
+        // 按 task 查而不是按 session：session 退出时 task.sessionId 会被清空，而读已结束的
+        // 终端正是最常用的场景。无 checkpoint（刚建、还没有输出）返回空内容，不算失败。
+        const checkpoint = await this.store.getSessionCheckpointByTask(target.id);
+        return void reply({
+          case: "terminalRead",
+          value: {
+            ansiSnapshot: checkpoint?.ansiSnapshot ?? new Uint8Array(),
+            capturedAt: checkpoint?.capturedAt ?? 0,
+            status: target.status,
+            exitCode: target.exitCode,
+          },
+        });
+      }
+      case "portsList": {
+        // 整个工作区的端口，不只发起方那个终端——agent 常在 A 终端起 dev server、在 B 终端问 URL。
+        const tasks = await this.store.listTasksByWorkspace(workspace.id);
+        const ports = tasks.flatMap((task) =>
+          this.routeTable.portsForTask(task.id).map((route) => ({ port: route.port, url: buildPreviewUrl(route.shortId) })),
+        );
+        return void reply({ case: "portsList", value: { ports } });
+      }
+      default:
+        return void fail("未知的 agent 控制动作");
+    }
   }
 
   private async acceptSessionCheckpoint(daemon: DaemonConn, checkpoint: SessionCheckpoint): Promise<void> {
@@ -973,6 +1081,11 @@ export class Hub {
       case "sessionAgents": {
         const daemon = this.currentDaemon(conn);
         if (daemon) this.acceptSessionAgents(daemon, msg.payload.value.sessions);
+        break;
+      }
+      case "agentControlRequest": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) await this.handleAgentControl(daemon, msg.payload.value);
         break;
       }
       case "preparedDeviceOperationInstalled": {
