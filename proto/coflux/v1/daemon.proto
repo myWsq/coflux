@@ -79,6 +79,64 @@ message SessionAgents {
   repeated SessionAgentRef sessions = 1;
 }
 
+// ===== agent 协同控制（plan 074）=====
+//
+// 跑在 PTY 里的 agent 经 loopback 发起的中心操作。worker 已用调用方 pid 反查进程树确认它
+// 属于 session_id 这个存活会话（树外 pid 在 worker 侧就被拒，永不到达这里）；server 据
+// session_id 反查 task→workspace 完成归属校验，daemon 不自报 workspace。
+//
+// request_id 由 worker 生成，只做响应关联，不承担幂等：terminal_new 有副作用但不做
+// exactly-once 去重——CLI 不自动重试，在飞请求遇断连即把错误交给 agent 自己决定
+// （见 plans/074 Decisions）。这条与 browser 的 prepared operation 不同：daemon 控制 WS
+// 是已认证的可信面，无需 operation_id 模板。
+message AgentTerminalNew {
+  string title = 1;
+  // worker 已写好的临时包装脚本绝对路径，server 原样填进 SessionCreate.shell。
+  // server 不解释也不校验它——脚本由 daemon 自己生成、只回到同一个 daemon 执行。
+  string shell = 2;
+}
+
+message AgentTerminalList {}
+
+message AgentControlRequest {
+  string request_id = 1;
+  // 发起方所属的存活 session，由 worker 认定而非 agent 自报。
+  string session_id = 2;
+  oneof payload {
+    AgentTerminalNew terminal_new = 10;
+    AgentTerminalList terminal_list = 11;
+  }
+}
+
+message AgentTerminalNewResult {
+  string task_id = 1;
+  string session_id = 2;
+}
+
+// 同 workspace 下一个终端的对外视图；status/exit_code 取自中心的 Task 真相。
+message AgentTerminalRef {
+  string task_id = 1;
+  string title = 2;
+  TaskStatus status = 3;
+  optional int32 exit_code = 4;
+  optional string session_id = 5;
+  double created_at = 6;
+}
+
+message AgentTerminalListResult {
+  repeated AgentTerminalRef terminals = 1;
+}
+
+message AgentControlResult {
+  string request_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+  oneof payload {
+    AgentTerminalNewResult terminal_new = 10;
+    AgentTerminalListResult terminal_list = 11;
+  }
+}
+
 // server→daemon ProxyOpen 的回应：隧道连接建立结果
 message ProxyOpened {
   string conn_id = 1;
@@ -127,6 +185,7 @@ message DaemonToServer {
     RelayHome relay_home = 29;
     WorkspaceDefaultBranch workspace_default_branch = 30;
     SessionAgents session_agents = 31;
+    AgentControlRequest agent_control_request = 32;
   }
 }
 
@@ -277,6 +336,7 @@ message ServerToDaemon {
     RelayNodeList relay_node_list = 34;
     ProxyData proxy_data = 19;
     WorkspaceList workspace_list = 20;
+    AgentControlResult agent_control_result = 35;
   }
 }
 

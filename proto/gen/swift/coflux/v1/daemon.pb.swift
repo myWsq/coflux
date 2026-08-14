@@ -228,6 +228,196 @@ public struct Coflux_V1_SessionAgents: Sendable {
   public init() {}
 }
 
+/// ===== agent 协同控制（plan 074）=====
+///
+/// 跑在 PTY 里的 agent 经 loopback 发起的中心操作。worker 已用调用方 pid 反查进程树确认它
+/// 属于 session_id 这个存活会话（树外 pid 在 worker 侧就被拒，永不到达这里）；server 据
+/// session_id 反查 task→workspace 完成归属校验，daemon 不自报 workspace。
+///
+/// request_id 由 worker 生成，只做响应关联，不承担幂等：terminal_new 有副作用但不做
+/// exactly-once 去重——CLI 不自动重试，在飞请求遇断连即把错误交给 agent 自己决定
+/// （见 plans/074 Decisions）。这条与 browser 的 prepared operation 不同：daemon 控制 WS
+/// 是已认证的可信面，无需 operation_id 模板。
+public struct Coflux_V1_AgentTerminalNew: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var title: String = String()
+
+  /// worker 已写好的临时包装脚本绝对路径，server 原样填进 SessionCreate.shell。
+  /// server 不解释也不校验它——脚本由 daemon 自己生成、只回到同一个 daemon 执行。
+  public var shell: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_AgentTerminalList: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_AgentControlRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  /// 发起方所属的存活 session，由 worker 认定而非 agent 自报。
+  public var sessionID: String = String()
+
+  public var payload: Coflux_V1_AgentControlRequest.OneOf_Payload? = nil
+
+  public var terminalNew: Coflux_V1_AgentTerminalNew {
+    get {
+      if case .terminalNew(let v)? = payload {return v}
+      return Coflux_V1_AgentTerminalNew()
+    }
+    set {payload = .terminalNew(newValue)}
+  }
+
+  public var terminalList: Coflux_V1_AgentTerminalList {
+    get {
+      if case .terminalList(let v)? = payload {return v}
+      return Coflux_V1_AgentTerminalList()
+    }
+    set {payload = .terminalList(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public enum OneOf_Payload: Equatable, Sendable {
+    case terminalNew(Coflux_V1_AgentTerminalNew)
+    case terminalList(Coflux_V1_AgentTerminalList)
+
+  }
+
+  public init() {}
+}
+
+public struct Coflux_V1_AgentTerminalNewResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var taskID: String = String()
+
+  public var sessionID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// 同 workspace 下一个终端的对外视图；status/exit_code 取自中心的 Task 真相。
+public struct Coflux_V1_AgentTerminalRef: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var taskID: String = String()
+
+  public var title: String = String()
+
+  public var status: Coflux_V1_TaskStatus = .unspecified
+
+  public var exitCode: Int32 {
+    get {_exitCode ?? 0}
+    set {_exitCode = newValue}
+  }
+  /// Returns true if `exitCode` has been explicitly set.
+  public var hasExitCode: Bool {self._exitCode != nil}
+  /// Clears the value of `exitCode`. Subsequent reads from it will return its default value.
+  public mutating func clearExitCode() {self._exitCode = nil}
+
+  public var sessionID: String {
+    get {_sessionID ?? String()}
+    set {_sessionID = newValue}
+  }
+  /// Returns true if `sessionID` has been explicitly set.
+  public var hasSessionID: Bool {self._sessionID != nil}
+  /// Clears the value of `sessionID`. Subsequent reads from it will return its default value.
+  public mutating func clearSessionID() {self._sessionID = nil}
+
+  public var createdAt: Double = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _exitCode: Int32? = nil
+  fileprivate var _sessionID: String? = nil
+}
+
+public struct Coflux_V1_AgentTerminalListResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var terminals: [Coflux_V1_AgentTerminalRef] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_AgentControlResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String {
+    get {_error ?? String()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var payload: Coflux_V1_AgentControlResult.OneOf_Payload? = nil
+
+  public var terminalNew: Coflux_V1_AgentTerminalNewResult {
+    get {
+      if case .terminalNew(let v)? = payload {return v}
+      return Coflux_V1_AgentTerminalNewResult()
+    }
+    set {payload = .terminalNew(newValue)}
+  }
+
+  public var terminalList: Coflux_V1_AgentTerminalListResult {
+    get {
+      if case .terminalList(let v)? = payload {return v}
+      return Coflux_V1_AgentTerminalListResult()
+    }
+    set {payload = .terminalList(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public enum OneOf_Payload: Equatable, Sendable {
+    case terminalNew(Coflux_V1_AgentTerminalNewResult)
+    case terminalList(Coflux_V1_AgentTerminalListResult)
+
+  }
+
+  public init() {}
+
+  fileprivate var _error: String? = nil
+}
+
 /// server→daemon ProxyOpen 的回应：隧道连接建立结果
 public struct Coflux_V1_ProxyOpened: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
@@ -465,6 +655,14 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     set {payload = .sessionAgents(newValue)}
   }
 
+  public var agentControlRequest: Coflux_V1_AgentControlRequest {
+    get {
+      if case .agentControlRequest(let v)? = payload {return v}
+      return Coflux_V1_AgentControlRequest()
+    }
+    set {payload = .agentControlRequest(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -491,6 +689,7 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     case relayHome(Coflux_V1_RelayHome)
     case workspaceDefaultBranch(Coflux_V1_WorkspaceDefaultBranch)
     case sessionAgents(Coflux_V1_SessionAgents)
+    case agentControlRequest(Coflux_V1_AgentControlRequest)
 
   }
 
@@ -1021,6 +1220,14 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     set {payload = .workspaceList(newValue)}
   }
 
+  public var agentControlResult: Coflux_V1_AgentControlResult {
+    get {
+      if case .agentControlResult(let v)? = payload {return v}
+      return Coflux_V1_AgentControlResult()
+    }
+    set {payload = .agentControlResult(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -1048,6 +1255,7 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     case relayNodeList(Coflux_V1_RelayNodeList)
     case proxyData(Coflux_V1_ProxyData)
     case workspaceList(Coflux_V1_WorkspaceList)
+    case agentControlResult(Coflux_V1_AgentControlResult)
 
   }
 
@@ -1502,6 +1710,343 @@ extension Coflux_V1_SessionAgents: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
+extension Coflux_V1_AgentTerminalNew: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentTerminalNew"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}title\0\u{1}shell\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.shell) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 1)
+    }
+    if !self.shell.isEmpty {
+      try visitor.visitSingularStringField(value: self.shell, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentTerminalNew, rhs: Coflux_V1_AgentTerminalNew) -> Bool {
+    if lhs.title != rhs.title {return false}
+    if lhs.shell != rhs.shell {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentTerminalList: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentTerminalList"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap()
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    // Load everything into unknown fields
+    while try decoder.nextFieldNumber() != nil {}
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentTerminalList, rhs: Coflux_V1_AgentTerminalList) -> Bool {
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentControlRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentControlRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{4}\u{8}terminal_new\0\u{3}terminal_list\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 10: try {
+        var v: Coflux_V1_AgentTerminalNew?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .terminalNew(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .terminalNew(v)
+        }
+      }()
+      case 11: try {
+        var v: Coflux_V1_AgentTerminalList?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .terminalList(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .terminalList(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 2)
+    }
+    switch self.payload {
+    case .terminalNew?: try {
+      guard case .terminalNew(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 10)
+    }()
+    case .terminalList?: try {
+      guard case .terminalList(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentControlRequest, rhs: Coflux_V1_AgentControlRequest) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.payload != rhs.payload {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentTerminalNewResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentTerminalNewResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0\u{3}session_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 1)
+    }
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentTerminalNewResult, rhs: Coflux_V1_AgentTerminalNewResult) -> Bool {
+    if lhs.taskID != rhs.taskID {return false}
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentTerminalRef: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentTerminalRef"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0\u{1}title\0\u{1}status\0\u{3}exit_code\0\u{3}session_id\0\u{3}created_at\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 3: try { try decoder.decodeSingularEnumField(value: &self.status) }()
+      case 4: try { try decoder.decodeSingularInt32Field(value: &self._exitCode) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self._sessionID) }()
+      case 6: try { try decoder.decodeSingularDoubleField(value: &self.createdAt) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 1)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 2)
+    }
+    if self.status != .unspecified {
+      try visitor.visitSingularEnumField(value: self.status, fieldNumber: 3)
+    }
+    try { if let v = self._exitCode {
+      try visitor.visitSingularInt32Field(value: v, fieldNumber: 4)
+    } }()
+    try { if let v = self._sessionID {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 5)
+    } }()
+    if self.createdAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.createdAt, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentTerminalRef, rhs: Coflux_V1_AgentTerminalRef) -> Bool {
+    if lhs.taskID != rhs.taskID {return false}
+    if lhs.title != rhs.title {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs._exitCode != rhs._exitCode {return false}
+    if lhs._sessionID != rhs._sessionID {return false}
+    if lhs.createdAt != rhs.createdAt {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentTerminalListResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentTerminalListResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}terminals\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.terminals) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.terminals.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.terminals, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentTerminalListResult, rhs: Coflux_V1_AgentTerminalListResult) -> Bool {
+    if lhs.terminals != rhs.terminals {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentControlResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentControlResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{4}\u{7}terminal_new\0\u{3}terminal_list\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      case 10: try {
+        var v: Coflux_V1_AgentTerminalNewResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .terminalNew(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .terminalNew(v)
+        }
+      }()
+      case 11: try {
+        var v: Coflux_V1_AgentTerminalListResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .terminalList(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .terminalList(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    switch self.payload {
+    case .terminalNew?: try {
+      guard case .terminalNew(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 10)
+    }()
+    case .terminalList?: try {
+      guard case .terminalList(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentControlResult, rhs: Coflux_V1_AgentControlResult) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.payload != rhs.payload {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_ProxyOpened: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProxyOpened"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}conn_id\0\u{1}ok\0\u{1}error\0")
@@ -1608,7 +2153,7 @@ extension Coflux_V1_RelayHome: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
 
 extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{4}\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{3}relay_home\0\u{3}workspace_default_branch\0\u{3}session_agents\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{4}\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{3}relay_home\0\u{3}workspace_default_branch\0\u{3}session_agents\0\u{3}agent_control_request\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1902,6 +2447,19 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .sessionAgents(v)
         }
       }()
+      case 32: try {
+        var v: Coflux_V1_AgentControlRequest?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .agentControlRequest(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .agentControlRequest(v)
+        }
+      }()
       default: break
       }
     }
@@ -2000,6 +2558,10 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .sessionAgents?: try {
       guard case .sessionAgents(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 31)
+    }()
+    case .agentControlRequest?: try {
+      guard case .agentControlRequest(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 32)
     }()
     case nil: break
     }
@@ -2713,7 +3275,7 @@ extension Coflux_V1_RelayNodeList.RelayNode: SwiftProtobuf.Message, SwiftProtobu
 
 extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToDaemon"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{4}\u{3}proxy_open\0\u{3}proxy_close\0\u{4}\u{5}proxy_data\0\u{3}workspace_list\0\u{4}\u{2}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{4}\u{4}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0\u{3}device_relay_dial\0\u{3}relay_node_list\0\u{b}session_replay\0\u{b}pty_resize\0\u{b}exec_run\0\u{b}fs_list\0\u{b}fs_read\0\u{b}pty_input\0\u{b}fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{b}\u{1}\u{c}\u{c}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{15}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{4}\u{3}proxy_open\0\u{3}proxy_close\0\u{4}\u{5}proxy_data\0\u{3}workspace_list\0\u{4}\u{2}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{4}\u{4}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0\u{3}device_relay_dial\0\u{3}relay_node_list\0\u{3}agent_control_result\0\u{b}session_replay\0\u{b}pty_resize\0\u{b}exec_run\0\u{b}fs_list\0\u{b}fs_read\0\u{b}pty_input\0\u{b}fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{b}\u{1}\u{c}\u{c}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{15}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3033,6 +3595,19 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .relayNodeList(v)
         }
       }()
+      case 35: try {
+        var v: Coflux_V1_AgentControlResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .agentControlResult(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .agentControlResult(v)
+        }
+      }()
       default: break
       }
     }
@@ -3139,6 +3714,10 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .relayNodeList?: try {
       guard case .relayNodeList(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 34)
+    }()
+    case .agentControlResult?: try {
+      guard case .agentControlResult(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 35)
     }()
     case nil: break
     }
