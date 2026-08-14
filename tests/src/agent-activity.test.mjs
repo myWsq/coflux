@@ -108,7 +108,7 @@ test("agent presence：claude 进程出现→上报（含归属），退出→�
   device.close();
 });
 
-test("hook 回合状态：Stop→done、PermissionRequest→approval、Notification 分型、UserPromptSubmit→active；树外 pid 与非 json 被拒", async () => {
+test("hook 回合状态：Stop→done、PermissionRequest→approval、Notification 分型、PreToolUse→active；树外 pid 与非 json 被拒", async () => {
   const home = mkDir();
   const script = join(home, "claude");
   writeFileSync(script, "#!/bin/sh\nsleep 300\n");
@@ -157,10 +157,10 @@ test("hook 回合状态：Stop→done、PermissionRequest→approval、Notificat
     15000,
   );
 
-  await device.input(sessionId, hookCmd('{"hook_event_name":"UserPromptSubmit"}'));
+  await device.input(sessionId, hookCmd('{"hook_event_name":"PreToolUse"}'));
   await c.waitFor(
     (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId && s.state === "active"),
-    "UserPromptSubmit → active",
+    "PreToolUse → active",
     15000,
   );
 

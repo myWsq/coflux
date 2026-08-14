@@ -2,10 +2,11 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { Check, ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, LoaderCircle, MessageSquareDot, Monitor, Package, Plus, ShieldAlert, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { Check, ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, MessageSquareDot, Monitor, Package, Plus, ShieldAlert, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
+import { PendingDots } from "@/components/workbench/pending-dots";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
 import { workspaceActivity, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
@@ -26,7 +27,7 @@ function activityLabel(activity: WorkspaceActivity): string {
 
 function ActivityIcon({ activity, labeled }: { activity: WorkspaceActivity; labeled?: boolean }) {
   const label = labeled ? activityLabel(activity) : undefined;
-  if (activity.status === "active") return <LoaderCircle className="size-3 shrink-0 animate-spin text-success" aria-label={label} />;
+  if (activity.status === "active") return <PendingDots label={label} />;
   if (activity.status === "approval") return <ShieldAlert className="size-3 shrink-0 text-warning" aria-label={label} />;
   if (activity.status === "question") return <MessageSquareDot className="size-3 shrink-0 text-warning" aria-label={label} />;
   if (activity.status === "done") return <Check className="size-3 shrink-0 text-muted-foreground" aria-label={label} />;
@@ -314,7 +315,7 @@ export function Sidebar(props: SidebarProps) {
                               ? "主工作区"
                               : null;
                         const hasDiff = workspace.additions > 0 || workspace.deletions > 0;
-                        // 活动三态（plan 073）：正在执行（绿）/ 等待交互（琥珀）/ 中性。
+                        // 活动四态：执行中（盲文点阵）/ 待批准 / 待回答 / 本轮完成。
                         // 状态来自 agent hook 上报（经 daemon 合并），聚合优先级收敛在
                         // workspaceActivity（packages/client），UI 只做呈现。
                         const activity = workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents);
@@ -376,8 +377,8 @@ export function Sidebar(props: SidebarProps) {
                               className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left"
                               onClick={() => props.onSelectWorkspace(workspace.id)}
                             >
-                              {/* 图标槽原位替换（plan 073，与设备行「direct 时闪电取代圆点」同一手法）：
-                                  有活动状态时呈现状态图标，中性态保留 GitBranch 原样；槽位固定 size-3 不跳版式 */}
+                              {/* 图标槽原位替换（与设备行「direct 时闪电取代圆点」同一手法）：
+                                  有活动状态时呈现状态图标，中性态保留 GitBranch；执行中是盲文点阵。 */}
                               {activity.status !== "idle" ? (
                                 <ActivityIcon activity={activity} labeled />
                               ) : (
