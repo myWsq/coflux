@@ -572,7 +572,12 @@ export class Hub {
     ) return;
     // title 由 sessiond 源头钳制（256B）；这里兜底截断而非整条拒收——伪造 daemon 塞超长
     // 标题不该连累 ansi_snapshot 一起丢。256 个 UTF-16 单元对展示已绰绰有余。
-    if (checkpoint.title.length > 256) checkpoint.title = checkpoint.title.slice(0, 256);
+    // 注意不能在 surrogate pair 中间截：proto 解码保证 well-formed，半个代理对只会由
+    // 这次截断制造，而它不是合法 UTF-8，会让 PG 的 TEXT 写入整条报错。
+    if (checkpoint.title.length > 256) {
+      const end = /[\uD800-\uDBFF]/.test(checkpoint.title[255]!) ? 255 : 256;
+      checkpoint.title = checkpoint.title.slice(0, end);
+    }
     const live = this.catalog.get(daemon.info.daemonId)?.get(checkpoint.sessionId);
     const runtime = this.sessions.get(checkpoint.sessionId);
     const matchesKnownSession = live
