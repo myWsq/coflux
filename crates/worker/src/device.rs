@@ -2030,14 +2030,15 @@ mod tests {
                 ansi_snapshot: b"\x1bcursor".to_vec(),
                 cols: 80,
                 rows: 24,
+                title: "osc-title".into(),
             })),
         };
         fixture.runtime.deliver_from_sessiond(INTERNAL_CHANNEL_ID, &encode_device_envelope(&snapshot));
         let checkpoint = fixture.checkpoints.recv().await;
         assert!(matches!(
             wire::DaemonToServer::decode(checkpoint.as_slice()).unwrap().payload,
-            Some(daemon_to_server::Payload::SessionCheckpoint(SessionCheckpoint { snapshot_seq: 9, ref session_id, .. }))
-                if session_id == "session-1"
+            Some(daemon_to_server::Payload::SessionCheckpoint(SessionCheckpoint { snapshot_seq: 9, ref session_id, ref title, .. }))
+                if session_id == "session-1" && title == "osc-title"
         ));
 
         fixture.runtime.close_channel(&fixture.local_id);
