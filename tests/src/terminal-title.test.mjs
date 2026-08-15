@@ -38,24 +38,26 @@ test("OSC 标题无 subscriber 也随 checkpoint 上报，新订阅补发仍带 
   await device.input(sessionId, "(sleep 2; printf '\\033]0;TITLE_MARKER \\345\\244\\207\\346\\263\\250\\007') &\r");
   device.close();
 
+  // 谓词直接等我们的标题：shell 自身也可能发 OSC（CI 的 bash PS1 带 \e]0;\u@\h…\a，
+  // 每次出 prompt 都会覆盖标题——这正是「通用终端标题」语义），不能假设第一条非空
+  // title 就是 marker。clamp_title 剔除控制字符、保留 UTF-8（\345\244\207\346\263\250 = 备注）。
   const observer = stack.makeClient();
   await observer.authSubscribe();
-  const checkpoint = await observer.waitFor(
-    (m) => m.case === "sessionCheckpoint" && m.sessionId === sessionId && m.title !== "",
+  await observer.waitFor(
+    (m) => m.case === "sessionCheckpoint" && m.sessionId === sessionId && m.title === "TITLE_MARKER 备注",
     "checkpoint carries OSC title",
     12000,
   );
-  // clamp_title 剔除控制字符、保留 UTF-8 文本（\345\244\207\346\263\250 = 备注）
-  assert.equal(checkpoint.title, "TITLE_MARKER 备注");
   observer.close();
 
-  // 页面刷新路径：全新客户端订阅即拿到存量补发，title 不依赖再次输出。
+  // 页面刷新路径：全新客户端订阅即拿到存量补发。补发只保存最新 title，此后 shell 可能
+  // 已再次覆盖（如 bash 的 job-done 重绘 prompt），故只断言 title 字段经落库补发存续非空。
   const B = stack.makeClient();
   await B.authSubscribe();
   const replayed = await B.waitFor(
     (m) => m.case === "sessionCheckpoint" && m.sessionId === sessionId,
     "checkpoint replay on subscribe",
   );
-  assert.equal(replayed.title, "TITLE_MARKER 备注", "订阅补发的 checkpoint 带同一 title");
+  assert.notEqual(replayed.title, "", "订阅补发的 checkpoint 带非空 title");
   B.close();
 });
