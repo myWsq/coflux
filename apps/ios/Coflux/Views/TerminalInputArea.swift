@@ -34,6 +34,8 @@ struct TerminalInputArea: View {
     /// picker 内部选完/取消都会把它拨回 false。
     @State private var showingPhotoPicker = false
     @State private var showingFilePicker = false
+    /// 上传来源二选一菜单（2026-08-15 复议 071 的入口位）
+    @State private var showingAttachMenu = false
     /// 对讲预兆的显现度（0-1，plan 069）：按下即向 1 渐变，见 pressChanged
     @State private var dictateHint: Double = 0
     /// 按压视觉态：GestureState 在手势结束/被系统取消时自动复位，
@@ -61,7 +63,10 @@ struct TerminalInputArea: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            composerRow
+            HStack(spacing: 6) {
+                composerRow
+                attachKey
+            }
             padRows
         }
         .padding(.horizontal, 12)
@@ -73,6 +78,38 @@ struct TerminalInputArea: View {
         }
         .disabled(sessionID == nil)
         .opacity(sessionID == nil ? 0.45 : 1)
+        // 两个 picker 的 sheet 挂在根上而非 attachKey 上：菜单收起与 sheet 呈现
+        // 同锚点会撞呈现时序（dialog 未落定即 present，sheet 静默不出）
+        .sheet(isPresented: $showingPhotoPicker) {
+            PhotoPicker(isPresented: $showingPhotoPicker) { data, typeIdentifier in
+                uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "photo")
+            }
+        }
+        .sheet(isPresented: $showingFilePicker) {
+            FilePicker(isPresented: $showingFilePicker) { url in
+                uploadFile(url: url)
+            }
+        }
+    }
+
+    /// 上传入口（plan 071 → 2026-08-15 复议入口位）：原先在控制板独立一行，
+    /// 真机上那行没出来（根因未定），且成文条右侧本就是 iOS 附件惯例位——
+    /// 挪来这里顺带省掉控制板一行高度。相册/文件走系统 confirmationDialog 二选一。
+    private var attachKey: some View {
+        Button {
+            showingAttachMenu = true
+        } label: {
+            keyCap(label: nil, systemImage: "paperclip", tint: Theme.foreground, height: 38)
+        }
+        .frame(width: 44)
+        .disabled(uploading)
+        .opacity(uploading ? 0.5 : 1)
+        .accessibilityLabel("上传文件到终端")
+        .confirmationDialog("上传到终端", isPresented: $showingAttachMenu, titleVisibility: .visible) {
+            Button("相册") { showingPhotoPicker = true }
+            Button("文件") { showingFilePicker = true }
+            Button("取消", role: .cancel) {}
+        }
     }
 
     // MARK: - 成文入口（占位条：预览草稿，点击进成文层——基座冻结，
@@ -223,12 +260,6 @@ struct TerminalInputArea: View {
                 .frame(width: 150)
                 enterKey
             }
-            // 上传入口（plan 071）：相册 + 文件 App，与粘贴键同属"输入来源"语义组，
-            // 低频独立成行，不扰动上方已手调的控制键几何。
-            HStack(spacing: 6) {
-                photoKey
-                fileKey
-            }
         }
     }
 
@@ -262,42 +293,6 @@ struct TerminalInputArea: View {
             }
         }
         return nil
-    }
-
-    /// 相册取图（plan 071）：PHPickerViewController 系统选择器，app 不触碰照片库权限
-    /// （免弹权限授权），单选。
-    private var photoKey: some View {
-        Button {
-            showingPhotoPicker = true
-        } label: {
-            keyCap(label: nil, systemImage: "photo", tint: Theme.foreground, height: 38)
-        }
-        .disabled(uploading)
-        .opacity(uploading ? 0.5 : 1)
-        .accessibilityLabel("从相册上传")
-        .sheet(isPresented: $showingPhotoPicker) {
-            PhotoPicker(isPresented: $showingPhotoPicker) { data, typeIdentifier in
-                uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "photo")
-            }
-        }
-    }
-
-    /// 文件 App 取文件（plan 071）：UIDocumentPickerViewController asCopy: true，
-    /// 任意类型单选，原样上传（受 DeviceRouter.maxUploadBytes 前置拦截）。
-    private var fileKey: some View {
-        Button {
-            showingFilePicker = true
-        } label: {
-            keyCap(label: nil, systemImage: "doc", tint: Theme.foreground, height: 38)
-        }
-        .disabled(uploading)
-        .opacity(uploading ? 0.5 : 1)
-        .accessibilityLabel("从文件 App 上传")
-        .sheet(isPresented: $showingFilePicker) {
-            FilePicker(isPresented: $showingFilePicker) { url in
-                uploadFile(url: url)
-            }
-        }
     }
 
     /// 回车：最高频主键，竖跨两行大键、primary 高亮、钉右下角；
