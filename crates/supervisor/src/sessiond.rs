@@ -84,8 +84,41 @@ impl DecModeScanner {
     }
 }
 
+/// OSC 标题的长度钳制（plan 075）：标题是 PTY 内程序给的不可信输入，源头截断。
+const MAX_TITLE_BYTES: usize = 256;
+
+/// OSC 0/2 终端标题捕获（plan 075）。vt100 只在回调瞬间给出 bytes，这里暂存一拍，
+/// `TerminalState::feed` 处理完后收割到自身字段——parser 在 resize 时会被整个重建
+/// （规范 snapshot 重放不含 OSC），标题的存续必须独立于 parser 生命周期。
+/// `Option` 区分「本轮没有标题事件」与「程序显式设空标题」。
+#[derive(Default)]
+struct TitleCapture {
+    pending: Option<Vec<u8>>,
+}
+
+impl vt100::Callbacks for TitleCapture {
+    fn set_window_title(&mut self, _: &mut Screen, title: &[u8]) {
+        self.pending = Some(title.to_vec());
+    }
+}
+
+/// 不可信标题的规范化：lossy 解码、剔除控制字符、按字符边界截到 MAX_TITLE_BYTES。
+fn clamp_title(raw: &[u8]) -> String {
+    let text: String = String::from_utf8_lossy(raw).chars().filter(|c| !c.is_control()).collect();
+    if text.len() <= MAX_TITLE_BYTES {
+        return text;
+    }
+    let mut end = MAX_TITLE_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
 pub struct TerminalState {
-    parser: vt100::Parser,
+    parser: vt100::Parser<TitleCapture>,
+    /// PTY 内程序经 OSC 0/2 设置的终端标题；空 = 从未设置。跨 resize 存续。
+    title: String,
     rows: u16,
     cols: u16,
     history_line_limit: usize,
@@ -102,7 +135,8 @@ impl TerminalState {
     pub fn new(rows: u16, cols: u16, history_line_limit: usize) -> Self {
         let history_row_capacity = history_line_limit.saturating_mul(HISTORY_WRAP_FACTOR);
         Self {
-            parser: vt100::Parser::new(rows, cols, history_row_capacity),
+            parser: vt100::Parser::new_with_callbacks(rows, cols, history_row_capacity, TitleCapture::default()),
+            title: String::new(),
             rows,
             cols,
             history_line_limit,
@@ -143,6 +177,9 @@ impl TerminalState {
         }
         if start < bytes.len() {
             self.parser.process(&bytes[start..]);
+        }
+        if let Some(pending) = self.parser.callbacks_mut().pending.take() {
+            self.title = clamp_title(&pending);
         }
 
         let from_seq = self.output_seq.saturating_add(1);
@@ -210,7 +247,7 @@ impl TerminalState {
         } else {
             reflowed_normal.clone()
         };
-        let mut parser = vt100::Parser::new(rows, cols, self.history_row_capacity);
+        let mut parser = vt100::Parser::new_with_callbacks(rows, cols, self.history_row_capacity, TitleCapture::default());
         parser.process(&snapshot);
         self.parser = parser;
         self.normal_before_alt = was_alt.then_some(reflowed_normal);
@@ -220,6 +257,10 @@ impl TerminalState {
 
     pub fn output_seq(&self) -> u64 {
         self.output_seq
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
     }
 
     pub fn rows(&self) -> u16 {
@@ -615,6 +656,10 @@ impl SessionState {
         self.terminal.output_seq()
     }
 
+    pub fn title(&self) -> &str {
+        self.terminal.title()
+    }
+
     pub fn rows(&self) -> u16 {
         self.terminal.rows()
     }
@@ -913,6 +958,44 @@ mod tests {
         }
         assert_screen_equivalent(whole.parser.screen(), split.parser.screen());
         assert_eq!(whole.snapshot(), split.snapshot());
+    }
+
+    #[test]
+    fn sessiond_title_captures_osc_0_and_2_including_explicit_clear() {
+        let mut state = TerminalState::new(4, 12, 8);
+        assert_eq!(state.title(), "");
+        state.feed(b"\x1b]0;from osc 0\x07");
+        assert_eq!(state.title(), "from osc 0");
+        state.feed(b"\x1b]2;from osc 2\x1b\\"); // ST 结尾同样合法
+        assert_eq!(state.title(), "from osc 2");
+        state.feed(b"plain output does not touch title");
+        assert_eq!(state.title(), "from osc 2");
+        state.feed(b"\x1b]0;\x07"); // 显式设空 = 清空
+        assert_eq!(state.title(), "");
+    }
+
+    #[test]
+    fn sessiond_title_survives_chunked_feed_and_resize() {
+        let bytes = "\x1b]0;标题跨 chunk 不碎\x07".as_bytes();
+        let mut state = TerminalState::new(4, 12, 8);
+        for byte in bytes {
+            state.feed(std::slice::from_ref(byte));
+        }
+        assert_eq!(state.title(), "标题跨 chunk 不碎");
+        // resize 重建 parser（snapshot 重放不含 OSC），标题必须存续。
+        state.resize(6, 20);
+        assert_eq!(state.title(), "标题跨 chunk 不碎");
+    }
+
+    #[test]
+    fn sessiond_title_clamps_length_and_strips_control_bytes() {
+        let mut state = TerminalState::new(4, 12, 8);
+        let long = format!("\x1b]2;{}\x07", "标".repeat(200)); // 600 bytes UTF-8
+        state.feed(long.as_bytes());
+        assert!(state.title().len() <= MAX_TITLE_BYTES);
+        assert!(state.title().chars().all(|c| c == '标'));
+        state.feed(b"\x1b]2;tab\there\x07");
+        assert_eq!(state.title(), "tabhere");
     }
 
     #[test]

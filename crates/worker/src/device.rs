@@ -1189,6 +1189,7 @@ impl DeviceRuntime {
                     cols: snapshot.cols,
                     rows: snapshot.rows,
                     captured_at: epoch_ms(),
+                    title: snapshot.title.clone(),
                 };
                 let payload = daemon_to_server::Payload::SessionCheckpoint(checkpoint);
                 services.checkpoints.publish(

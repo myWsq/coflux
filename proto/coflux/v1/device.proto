@@ -289,6 +289,9 @@ message DeviceSessionSnapshot {
   bytes ansi_snapshot = 4;
   uint32 cols = 5;
   uint32 rows = 6;
+  // PTY 内程序经 OSC 0/2 设置的终端标题（plan 075）：sessiond 的 vt100 回调捕获、
+  // 源头截断；空 = 从未设置或旧 supervisor 不支持，消费方一律回落自身默认。
+  string title = 7;
 }
 
 message DevicePtyOutput {
@@ -527,6 +530,8 @@ message SessionCheckpoint {
   uint32 cols = 5;
   uint32 rows = 6;
   double captured_at = 7;
+  // OSC 0/2 终端标题（plan 075），随 snapshot 原样透传；语义同 DeviceSessionSnapshot.title。
+  string title = 8;
 }
 
 message DeviceEnvelope {

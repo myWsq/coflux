@@ -637,6 +637,7 @@ impl Sessions {
                 ansi_snapshot: locked.state.snapshot(),
                 cols: u32::from(locked.state.cols()),
                 rows: u32::from(locked.state.rows()),
+                title: locked.state.title().to_string(),
             }),
         );
     }

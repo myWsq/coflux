@@ -653,6 +653,10 @@ pub struct DeviceSessionSnapshot {
     pub cols: u32,
     #[prost(uint32, tag="6")]
     pub rows: u32,
+    /// PTY 内程序经 OSC 0/2 设置的终端标题（plan 075）：sessiond 的 vt100 回调捕获、
+    /// 源头截断；空 = 从未设置或旧 supervisor 不支持，消费方一律回落自身默认。
+    #[prost(string, tag="7")]
+    pub title: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DevicePtyOutput {
@@ -1024,6 +1028,9 @@ pub struct SessionCheckpoint {
     pub rows: u32,
     #[prost(double, tag="7")]
     pub captured_at: f64,
+    /// OSC 0/2 终端标题（plan 075），随 snapshot 原样透传；语义同 DeviceSessionSnapshot.title。
+    #[prost(string, tag="8")]
+    pub title: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceEnvelope {
