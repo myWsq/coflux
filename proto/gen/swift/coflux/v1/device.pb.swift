@@ -878,6 +878,10 @@ public struct Coflux_V1_DeviceSessionSnapshot: Sendable {
 
   public var rows: UInt32 = 0
 
+  /// PTY 内程序经 OSC 0/2 设置的终端标题（plan 075）：sessiond 的 vt100 回调捕获、
+  /// 源头截断；空 = 从未设置或旧 supervisor 不支持，消费方一律回落自身默认。
+  public var title: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1605,6 +1609,9 @@ public struct Coflux_V1_SessionCheckpoint: Sendable {
   public var rows: UInt32 = 0
 
   public var capturedAt: Double = 0
+
+  /// OSC 0/2 终端标题（plan 075），随 snapshot 原样透传；语义同 DeviceSessionSnapshot.title。
+  public var title: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -3297,7 +3304,7 @@ extension Coflux_V1_DeviceSessionSnapshotRequest: SwiftProtobuf.Message, SwiftPr
 
 extension Coflux_V1_DeviceSessionSnapshot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceSessionSnapshot"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}snapshot_seq\0\u{3}ansi_snapshot\0\u{1}cols\0\u{1}rows\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}snapshot_seq\0\u{3}ansi_snapshot\0\u{1}cols\0\u{1}rows\0\u{1}title\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3311,6 +3318,7 @@ extension Coflux_V1_DeviceSessionSnapshot: SwiftProtobuf.Message, SwiftProtobuf.
       case 4: try { try decoder.decodeSingularBytesField(value: &self.ansiSnapshot) }()
       case 5: try { try decoder.decodeSingularUInt32Field(value: &self.cols) }()
       case 6: try { try decoder.decodeSingularUInt32Field(value: &self.rows) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.title) }()
       default: break
       }
     }
@@ -3335,6 +3343,9 @@ extension Coflux_V1_DeviceSessionSnapshot: SwiftProtobuf.Message, SwiftProtobuf.
     if self.rows != 0 {
       try visitor.visitSingularUInt32Field(value: self.rows, fieldNumber: 6)
     }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3345,6 +3356,7 @@ extension Coflux_V1_DeviceSessionSnapshot: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.ansiSnapshot != rhs.ansiSnapshot {return false}
     if lhs.cols != rhs.cols {return false}
     if lhs.rows != rhs.rows {return false}
+    if lhs.title != rhs.title {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -4643,7 +4655,7 @@ extension Coflux_V1_DeviceOperationReport: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Coflux_V1_SessionCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SessionCheckpoint"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{3}snapshot_seq\0\u{3}ansi_snapshot\0\u{1}cols\0\u{1}rows\0\u{3}captured_at\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{3}snapshot_seq\0\u{3}ansi_snapshot\0\u{1}cols\0\u{1}rows\0\u{3}captured_at\0\u{1}title\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4658,6 +4670,7 @@ extension Coflux_V1_SessionCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._Mes
       case 5: try { try decoder.decodeSingularUInt32Field(value: &self.cols) }()
       case 6: try { try decoder.decodeSingularUInt32Field(value: &self.rows) }()
       case 7: try { try decoder.decodeSingularDoubleField(value: &self.capturedAt) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.title) }()
       default: break
       }
     }
@@ -4685,6 +4698,9 @@ extension Coflux_V1_SessionCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if self.capturedAt.bitPattern != 0 {
       try visitor.visitSingularDoubleField(value: self.capturedAt, fieldNumber: 7)
     }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -4696,6 +4712,7 @@ extension Coflux_V1_SessionCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.cols != rhs.cols {return false}
     if lhs.rows != rhs.rows {return false}
     if lhs.capturedAt != rhs.capturedAt {return false}
+    if lhs.title != rhs.title {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
