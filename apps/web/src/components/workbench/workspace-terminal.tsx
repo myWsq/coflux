@@ -17,23 +17,23 @@ import { TerminalPane, type TerminalController, type TerminalControlState } from
 // attach 后即使无 ptyOutput 回放（空 scrollback）也要在 500ms 后判定 owned；有输出则立即 owned。
 const ATTACH_GRACE_MS = 500;
 
-/** Tab 上的 agent 图标（plan 075）：claude 用 Claude Code 的小机器人头（圆角方脸 +
- * 两只竖条眼，evenodd 挖空让眼睛透出 tab 背景），其余 agent 用 lucide 通用机器人轮廓。
- * 颜色只在「等你动手」时上警示色（approval/question→warning、done→success），
- * active/无 hook 信号保持中性——与侧栏 ActivityDots 的色语义一致（active 本就是中性闪烁）。 */
+/** Tab 上的 agent 图标（plan 075）：claude 用 Clawd 像素小机器人（Claude Code 欢迎屏
+ * 同款形态：双耳/双钳/双脚/竖条眼），固定品牌橙不随状态变色（用户 2026-08-15 指定）——
+ * 品牌色属第三方标识，不走主题 token。其余 agent 用 lucide 机器人轮廓，
+ * 保留状态警示色（approval/question→warning、done→success，与侧栏语义一致）。 */
 function AgentGlyph({ agent, state, className }: { agent: string; state: string; className?: string }) {
-  const tone = state === "approval" || state === "question" ? "text-warning" : state === "done" ? "text-success" : "";
   if (agent === "claude") {
     return (
-      <svg viewBox="0 0 16 16" className={cn("size-3 shrink-0", tone, className)} aria-hidden>
+      <svg viewBox="0 0 16 16" className={cn("size-3 shrink-0", className)} aria-hidden>
         <path
-          fill="currentColor"
-          fillRule="evenodd"
-          d="M4.5 3.5h7A2.5 2.5 0 0 1 14 6v4.5a2.5 2.5 0 0 1-2.5 2.5h-7A2.5 2.5 0 0 1 2 10.5V6a2.5 2.5 0 0 1 2.5-2.5Zm1.3 3.2h1.7v3.1H5.8Zm2.7 0h1.7v3.1H8.5Z"
+          fill="#D97757"
+          d="M3 2h2v2H3zM11 2h2v2h-2zM2 4h12v8H2zM0 7h2v2H0zM14 7h2v2h-2zM4 12h2v2H4zM10 12h2v2h-2z"
         />
+        <path fill="#000000" d="M5 6h1.5v3H5zM9.5 6H11v3H9.5z" />
       </svg>
     );
   }
+  const tone = state === "approval" || state === "question" ? "text-warning" : state === "done" ? "text-success" : "";
   return <Bot className={cn("size-3 shrink-0", tone, className)} />;
 }
 
