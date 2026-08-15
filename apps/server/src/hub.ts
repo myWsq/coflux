@@ -570,6 +570,9 @@ export class Hub {
       checkpoint.capturedAt <= 0 ||
       checkpoint.capturedAt > Date.now() + 5 * 60_000
     ) return;
+    // title 由 sessiond 源头钳制（256B）；这里兜底截断而非整条拒收——伪造 daemon 塞超长
+    // 标题不该连累 ansi_snapshot 一起丢。256 个 UTF-16 单元对展示已绰绰有余。
+    if (checkpoint.title.length > 256) checkpoint.title = checkpoint.title.slice(0, 256);
     const live = this.catalog.get(daemon.info.daemonId)?.get(checkpoint.sessionId);
     const runtime = this.sessions.get(checkpoint.sessionId);
     const matchesKnownSession = live
@@ -599,6 +602,7 @@ export class Hub {
         ansiSnapshot: checkpoint.ansiSnapshot,
         cols: checkpoint.cols,
         rows: checkpoint.rows,
+        title: checkpoint.title,
         capturedAt: checkpoint.capturedAt,
       },
     });
