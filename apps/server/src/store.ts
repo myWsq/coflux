@@ -211,6 +211,7 @@ interface SessionCheckpointRow {
   ansiSnapshot: Uint8Array;
   cols: number;
   rows: number;
+  title: string;
   capturedAt: number;
   updatedAt: number;
 }
@@ -410,6 +411,7 @@ const SCHEMA_DDL = `
     ansi_snapshot BYTEA NOT NULL,
     cols INTEGER NOT NULL,
     rows INTEGER NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
     captured_at DOUBLE PRECISION NOT NULL,
     updated_at DOUBLE PRECISION NOT NULL
   );
@@ -457,6 +459,8 @@ export class Store {
     await this.sql`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS additions INTEGER NOT NULL DEFAULT 0`;
     await this.sql`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS deletions INTEGER NOT NULL DEFAULT 0`;
     await this.sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS deleting BOOLEAN NOT NULL DEFAULT false`;
+    // plan 075：session_checkpoints 新增 title（OSC 0/2 终端标题）。
+    await this.sql`ALTER TABLE session_checkpoints ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT ''`;
   }
 
   /**
@@ -1089,10 +1093,10 @@ export class Store {
     const rows = await this.sql<{ sessionId: SessionId }[]>`
       INSERT INTO session_checkpoints (
         session_id, task_id, account_id, daemon_id, snapshot_seq, ansi_snapshot,
-        cols, rows, captured_at, updated_at
+        cols, rows, title, captured_at, updated_at
       ) VALUES (
         ${checkpoint.sessionId}, ${checkpoint.taskId}, ${accountId}, ${daemonId}, ${checkpoint.snapshotSeq.toString()},
-        ${Buffer.from(checkpoint.ansiSnapshot)}, ${checkpoint.cols}, ${checkpoint.rows}, ${checkpoint.capturedAt}, ${now}
+        ${Buffer.from(checkpoint.ansiSnapshot)}, ${checkpoint.cols}, ${checkpoint.rows}, ${checkpoint.title}, ${checkpoint.capturedAt}, ${now}
       )
       ON CONFLICT (session_id) DO UPDATE SET
         task_id = excluded.task_id,
@@ -1102,6 +1106,7 @@ export class Store {
         ansi_snapshot = excluded.ansi_snapshot,
         cols = excluded.cols,
         rows = excluded.rows,
+        title = excluded.title,
         captured_at = excluded.captured_at,
         updated_at = excluded.updated_at
       WHERE session_checkpoints.daemon_id = excluded.daemon_id
@@ -1121,6 +1126,7 @@ export class Store {
       ansiSnapshot: checkpoint.ansiSnapshot,
       cols: checkpoint.cols,
       rows: checkpoint.rows,
+      title: checkpoint.title,
       capturedAt: checkpoint.capturedAt,
       updatedAt: now,
     };
