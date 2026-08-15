@@ -17,27 +17,20 @@ import { TerminalPane, type TerminalController, type TerminalControlState } from
 // attach 后即使无 ptyOutput 回放（空 scrollback）也要在 500ms 后判定 owned；有输出则立即 owned。
 const ATTACH_GRACE_MS = 500;
 
-/** Tab 上的 agent 图标（plan 075）：claude 用星芒（对齐其品牌 ✳ 意象），其余 agent 用
- * 通用机器人轮廓。颜色只在「等你动手」时上警示色（approval/question→warning、done→success），
+/** Tab 上的 agent 图标（plan 075）：claude 用 Claude Code 的小机器人头（圆角方脸 +
+ * 两只竖条眼，evenodd 挖空让眼睛透出 tab 背景），其余 agent 用 lucide 通用机器人轮廓。
+ * 颜色只在「等你动手」时上警示色（approval/question→warning、done→success），
  * active/无 hook 信号保持中性——与侧栏 ActivityDots 的色语义一致（active 本就是中性闪烁）。 */
 function AgentGlyph({ agent, state, className }: { agent: string; state: string; className?: string }) {
   const tone = state === "approval" || state === "question" ? "text-warning" : state === "done" ? "text-success" : "";
   if (agent === "claude") {
     return (
       <svg viewBox="0 0 16 16" className={cn("size-3 shrink-0", tone, className)} aria-hidden>
-        {[0, 45, 90, 135].map((angle) => (
-          <line
-            key={angle}
-            x1="8"
-            y1="2.8"
-            x2="8"
-            y2="13.2"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            transform={`rotate(${angle} 8 8)`}
-          />
-        ))}
+        <path
+          fill="currentColor"
+          fillRule="evenodd"
+          d="M4.5 3.5h7A2.5 2.5 0 0 1 14 6v4.5a2.5 2.5 0 0 1-2.5 2.5h-7A2.5 2.5 0 0 1 2 10.5V6a2.5 2.5 0 0 1 2.5-2.5Zm1.3 3.2h1.7v3.1H5.8Zm2.7 0h1.7v3.1H8.5Z"
+        />
       </svg>
     );
   }
