@@ -11,6 +11,7 @@
     "@coflux/protocol": "workspace:*",
     "@xterm/headless": "^6.0.0",
     "postgres": "^3.4.9",
+    "werift": "^0.24.4",
     "ws": "^8.18.0"
   }
 }

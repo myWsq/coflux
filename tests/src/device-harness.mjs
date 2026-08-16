@@ -391,6 +391,113 @@ export class DeviceClient {
     return transport;
   }
 
+  /** plan 076：P2P = 中心信令（offer/answer + 逐 channel 授权）+ werift RTCPeerConnection
+   * + DataChannel 分片流。werift 与 worker 的 webrtc-rs 是两个独立 WebRTC 实现，跨栈互通
+   * 本身就是被测面；分帧格式（4B BE 前缀 + ≤16KiB chunk）有意内联，不与被测两端共享代码。 */
+  async openP2p(options = {}) {
+    const { RTCPeerConnection } = await import("werift");
+    const generation = options.generation ?? this.nextGeneration();
+    if (generation > this.generation) this.generation = generation;
+    const connectionId = options.connectionId ?? `p2p-${randomUUID()}`;
+    const channelId = options.channelId ?? `p2p-${randomUUID()}`;
+    const pc = new RTCPeerConnection({});
+    const dc = pc.createDataChannel(channelId);
+    await pc.setLocalDescription(await pc.createOffer());
+    // vanilla ICE：等 gathering 完成再送 offer；超时兜底——同机 host candidate 早已在 SDP 里。
+    await new Promise((resolve) => {
+      if (pc.iceGatheringState === "complete") return resolve(undefined);
+      const timer = setTimeout(resolve, 3000);
+      pc.iceGatheringStateChange.subscribe((state) => {
+        if (state === "complete") {
+          clearTimeout(timer);
+          resolve(undefined);
+        }
+      });
+    });
+    // 任何建立阶段失败都必须关 pc：泄漏的 werift socket 会让测试进程永不退出。
+    try {
+      this.control.send({
+        case: "deviceP2pOffer",
+        daemonId: options.daemonId ?? this.daemonId,
+        connectionId,
+        clientInstanceId: this.clientInstanceId,
+        sdp: pc.localDescription.sdp,
+        protocolVersion: DEVICE_PROTOCOL_VERSION,
+      });
+      const answer = await this.control.waitFor(
+        (message) => message.case === "deviceP2pAnswer" && message.connectionId === connectionId,
+        "deviceP2pAnswer",
+        20000,
+      );
+      if (!answer.ok || !answer.sdp) {
+        const error = new Error(answer.error ?? "p2p offer rejected");
+        error.rejected = true;
+        throw error;
+      }
+      await pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+      this.control.send({
+        case: "deviceP2pChannelOpen",
+        daemonId: options.daemonId ?? this.daemonId,
+        connectionId,
+        channelId,
+        clientInstanceId: this.clientInstanceId,
+        transportGeneration: generation,
+        protocolVersion: DEVICE_PROTOCOL_VERSION,
+      });
+      const granted = await this.control.waitFor(
+        (message) => message.case === "deviceP2pChannelResult" && message.channelId === channelId,
+        "deviceP2pChannelResult",
+      );
+      if (!granted.ok) throw new Error(granted.error ?? "p2p channel denied");
+      await new Promise((resolve, reject) => {
+        if (dc.readyState === "open") return resolve(undefined);
+        const timer = setTimeout(() => reject(new Error("p2p DataChannel open timeout")), 15000);
+        dc.stateChanged.subscribe((state) => {
+          if (state === "open") {
+            clearTimeout(timer);
+            resolve(undefined);
+          } else if (state === "closed") {
+            clearTimeout(timer);
+            reject(new Error("p2p DataChannel closed during open"));
+          }
+        });
+      });
+    } catch (error) {
+      await pc.close();
+      throw error;
+    }
+    const assembler = new P2pAssembler();
+    const transport = {
+      kind: "p2p",
+      channelId,
+      generation,
+      scopes: [],
+      closed: false,
+      pc,
+      dc,
+      send: (frame) => {
+        if (transport.closed || dc.readyState !== "open") return false;
+        for (const chunk of p2pEncodeChunks(frame)) dc.send(Buffer.from(chunk));
+        return true;
+      },
+      close: () => {
+        if (transport.closed) return;
+        transport.closed = true;
+        try { dc.close(); } catch { /* ignore */ }
+        void pc.close();
+      },
+    };
+    dc.onMessage.subscribe((data) => {
+      const bytes = typeof data === "string" ? new TextEncoder().encode(data) : toUint8(data);
+      for (const frameBytes of assembler.push(bytes)) {
+        const envelope = decodeDeviceEnvelope(frameBytes);
+        if (envelope) this.receive(envelope, "p2p", channelId);
+      }
+    });
+    this.replaceTransport(transport);
+    return transport;
+  }
+
   replaceTransport(next) {
     const previous = this.transport;
     this.transport = next;
@@ -631,6 +738,51 @@ export async function openRelayDevice(stack, options = {}) {
   await device.openRelay();
   device.enablePreparedAutoExecution();
   return device;
+}
+
+/** 建立 P2P Device（plan 076）。pair 只用来等 daemon 就绪，P2P 本身不依赖 loopback grant。 */
+export async function openP2pDevice(stack, options = {}) {
+  const device = await DeviceClient.pair(stack, options);
+  await device.openP2p();
+  device.enablePreparedAutoExecution();
+  return device;
+}
+
+// ===== P2P 分片流（plan 076，有意内联：4B BE 帧长前缀 + ≤16KiB chunk）=====
+
+const P2P_CHUNK_BYTES = 16 * 1024;
+
+function p2pEncodeChunks(frame) {
+  const stream = new Uint8Array(4 + frame.byteLength);
+  new DataView(stream.buffer).setUint32(0, frame.byteLength);
+  stream.set(frame, 4);
+  const chunks = [];
+  for (let offset = 0; offset < stream.byteLength; offset += P2P_CHUNK_BYTES) {
+    chunks.push(stream.subarray(offset, Math.min(offset + P2P_CHUNK_BYTES, stream.byteLength)));
+  }
+  return chunks;
+}
+
+class P2pAssembler {
+  constructor() {
+    this.buf = new Uint8Array(0);
+  }
+
+  push(bytes) {
+    const merged = new Uint8Array(this.buf.byteLength + bytes.byteLength);
+    merged.set(this.buf, 0);
+    merged.set(bytes, this.buf.byteLength);
+    this.buf = merged;
+    const frames = [];
+    for (;;) {
+      if (this.buf.byteLength < 4) return frames;
+      const declared = new DataView(this.buf.buffer, this.buf.byteOffset, 4).getUint32(0);
+      if (declared === 0) throw new Error("p2p 帧长前缀违规");
+      if (this.buf.byteLength < 4 + declared) return frames;
+      frames.push(this.buf.slice(4, 4 + declared));
+      this.buf = this.buf.slice(4 + declared);
+    }
+  }
 }
 
 export function utf8(bytes) {
