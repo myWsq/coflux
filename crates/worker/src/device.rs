@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use coflux_protocol::wire::{self,
-    daemon_to_server, device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck, DevicePtyGap, DeviceRelayDial,
-    DeviceScope, DeviceSessionCatalog, DeviceSessionCatalogRequest,
+    daemon_to_server, device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck, DeviceP2pChannelGrant, DevicePtyGap,
+    DeviceRelayDial, DeviceScope, DeviceSessionCatalog, DeviceSessionCatalogRequest,
     DeviceSessionSnapshotRequest, PreparedDeviceOperation, PreparedDeviceOperationInstalled, SessionCheckpoint,
 };
 use coflux_protocol::{
@@ -149,6 +149,9 @@ impl Principal {
 enum TransportKind {
     Local,
     Relay,
+    // P2P DataChannel（plan 076）。授权与生命周期语义与 Relay 相同（中心逐 channel 授
+    // scopes、中心断开即全关），只是帧由 p2p 泵送往 DataChannel 而非 relay WS。
+    P2p,
 }
 
 #[derive(Default)]
@@ -358,20 +361,39 @@ impl DeviceRuntime {
     /// 由调用方——relay 拨号任务——泵到该 channel 专属的 relay WS）。
     pub fn open_relay(self: &Arc<Self>, dial: &DeviceRelayDial) -> Result<ChannelReceiver, String> {
         validate_relay_dial(dial)?;
+        self.open_remote(TransportKind::Relay, &dial.channel_id, &dial.account_id, &dial.client_instance_id, dial.transport_generation, &dial.scopes)
+    }
+
+    /// 注册一条 P2P channel（plan 076）。授权语义与 relay 相同：中心逐 channel 授 scopes、
+    /// daemon 信任控制面；帧由调用方——p2p channel 泵——送往该 channel 的 DataChannel。
+    pub fn open_p2p(self: &Arc<Self>, grant: &DeviceP2pChannelGrant) -> Result<ChannelReceiver, String> {
+        validate_p2p_channel_grant(grant)?;
+        self.open_remote(TransportKind::P2p, &grant.channel_id, &grant.account_id, &grant.client_instance_id, grant.transport_generation, &grant.scopes)
+    }
+
+    fn open_remote(
+        &self,
+        transport: TransportKind,
+        channel_id: &str,
+        account_id: &str,
+        client_instance_id: &str,
+        transport_generation: u64,
+        scopes: &[i32],
+    ) -> Result<ChannelReceiver, String> {
         let (sink, receiver) = ChannelSink::pair(self.record_limit, self.byte_limit);
         let mut channels = self.channels.lock().unwrap();
-        if channels.contains_key(&dial.channel_id) {
-            return Err("relay channelId 已存在".into());
+        if channels.contains_key(channel_id) {
+            return Err("channelId 已存在".into());
         }
         channels.insert(
-            dial.channel_id.clone(),
+            channel_id.to_string(),
             ChannelEntry {
-                transport: TransportKind::Relay,
+                transport,
                 principal: Principal::Relay {
-                    account_id: dial.account_id.clone(),
-                    client_instance_id: dial.client_instance_id.clone(),
-                    transport_generation: dial.transport_generation,
-                    scopes: normalized_scopes(dial.scopes.clone())?,
+                    account_id: account_id.to_string(),
+                    client_instance_id: client_instance_id.to_string(),
+                    transport_generation,
+                    scopes: normalized_scopes(scopes.to_vec())?,
                 },
                 sink,
                 streams: HashMap::new(),
@@ -387,9 +409,17 @@ impl DeviceRuntime {
     }
 
     pub fn close_relay(&self, channel_id: &str) {
+        self.close_remote(TransportKind::Relay, channel_id);
+    }
+
+    pub fn close_p2p(&self, channel_id: &str) {
+        self.close_remote(TransportKind::P2p, channel_id);
+    }
+
+    fn close_remote(&self, kind: TransportKind, channel_id: &str) {
         let removed = {
             let mut channels = self.channels.lock().unwrap();
-            if channels.get(channel_id).is_some_and(|entry| entry.transport == TransportKind::Relay) {
+            if channels.get(channel_id).is_some_and(|entry| entry.transport == kind) {
                 channels.remove(channel_id)
             } else {
                 None
@@ -401,14 +431,22 @@ impl DeviceRuntime {
     }
 
     pub fn close_relays(&self) {
+        self.close_remote_all(TransportKind::Relay);
+    }
+
+    pub fn close_p2ps(&self) {
+        self.close_remote_all(TransportKind::P2p);
+    }
+
+    fn close_remote_all(&self, kind: TransportKind) {
         let removed: Vec<ChannelSink> = {
             let mut channels = self.channels.lock().unwrap();
-            let relay_ids: Vec<String> = channels
+            let ids: Vec<String> = channels
                 .iter()
-                .filter(|(_, entry)| entry.transport == TransportKind::Relay)
+                .filter(|(_, entry)| entry.transport == kind)
                 .map(|(channel_id, _)| channel_id.clone())
                 .collect();
-            relay_ids.into_iter().filter_map(|channel_id| channels.remove(&channel_id).map(|entry| entry.sink)).collect()
+            ids.into_iter().filter_map(|channel_id| channels.remove(&channel_id).map(|entry| entry.sink)).collect()
         };
         for sink in removed {
             sink.close();
@@ -703,16 +741,24 @@ impl DeviceRuntime {
     }
 
     pub fn handle_relay_frame(self: &Arc<Self>, channel_id: &str, bytes: &[u8]) -> bool {
-        let relay = self
+        self.handle_remote_frame(TransportKind::Relay, channel_id, bytes)
+    }
+
+    pub fn handle_p2p_frame(self: &Arc<Self>, channel_id: &str, bytes: &[u8]) -> bool {
+        self.handle_remote_frame(TransportKind::P2p, channel_id, bytes)
+    }
+
+    fn handle_remote_frame(self: &Arc<Self>, kind: TransportKind, channel_id: &str, bytes: &[u8]) -> bool {
+        let known = self
             .channels
             .lock()
             .unwrap()
             .get(channel_id)
-            .is_some_and(|entry| entry.transport == TransportKind::Relay);
-        if relay {
+            .is_some_and(|entry| entry.transport == kind);
+        if known {
             self.handle_client_frame(channel_id, bytes);
         }
-        relay
+        known
     }
 
     fn authorize_prepared(&self, envelope: &DeviceEnvelope) -> Result<(), String> {
@@ -1403,6 +1449,21 @@ fn validate_relay_dial(dial: &DeviceRelayDial) -> Result<(), String> {
         return Err("relay URL scheme 无效".into());
     }
     normalized_scopes(dial.scopes.clone()).map(|_| ())
+}
+
+fn validate_p2p_channel_grant(grant: &DeviceP2pChannelGrant) -> Result<(), String> {
+    if grant.protocol_version != DEVICE_PROTOCOL_VERSION {
+        return Err("p2p Device protocol version 不兼容".into());
+    }
+    if !valid_id(&grant.channel_id)
+        || grant.channel_id.starts_with("__coflux-")
+        || !valid_id(&grant.account_id)
+        || !valid_id(&grant.client_instance_id)
+        || grant.transport_generation == 0
+    {
+        return Err("p2p principal/channel/generation 无效".into());
+    }
+    normalized_scopes(grant.scopes.clone()).map(|_| ())
 }
 
 fn normalized_scopes(mut scopes: Vec<i32>) -> Result<Vec<i32>, String> {
