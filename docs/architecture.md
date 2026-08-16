@@ -245,7 +245,7 @@ Task 创建和首次 session create 属于中心编排；本地 stop 是 session
 
 ## 9. 端口预览
 
-worker 只探测 PTY 进程树内的 LISTEN 端口，上报中心生成 `<shortId>.<proxyHost>`。浏览器先换一次性授权
+worker 只探测 PTY 进程树内的 LISTEN 端口，上报中心生成 `<shortId>-<proxyHost>`。浏览器先换一次性授权
 code，再由账号 cookie 进入代理。HTTP/SSE/WebSocket 都通过 `ProxyData` 隧道；这类远端端口流量明确
 经过中心，不属于 local-first terminal/RPC 热路径。
 

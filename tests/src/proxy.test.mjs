@@ -15,7 +15,7 @@
  *
  * 设计要点（对应 plan 007 的 Decisions）：
  * - 用 node:http 手发请求而非 fetch：fetch 禁止覆盖 Host 头（WHATWG 禁止头名单），
- *   而伪造 Host 打到 <shortId>.p.localhost 正是本测试的核心手法（真实连的是 127.0.0.1:<PORT>）。
+ *   而伪造 Host 打到 <shortId>-p.localhost 正是本测试的核心手法（真实连的是 127.0.0.1:<PORT>）。
  * - PTY 内跑的辅助服务写成真实 .js 文件（而非一行 node -e）：更易读、避免 shell 转义地雷。
  * - WS echo 服务在 PTY 内用真实 `ws` 库实现（而非手撸帧解析），靠 daemonEnv.NODE_PATH 指向
  *   tests/node_modules（已有到 pnpm store 的 ws 符号链接），让 PTY 里的 node 能 require("ws")。
@@ -163,7 +163,7 @@ async function startTaskRunning(device, wsId, title) {
   return { taskId, sessionId: running.task.sessionId };
 }
 
-/** 裸 HTTP 请求：连 127.0.0.1:PORT，显式设 Host 头伪装成打到 <shortId>.p.localhost。
+/** 裸 HTTP 请求：连 127.0.0.1:PORT，显式设 Host 头伪装成打到 <shortId>-p.localhost。
  * 用 node:http（而非 fetch）因为 fetch 禁止覆盖 Host 头。一次性连接（agent:false），
  * 与反代"每请求一条隧道、响应完主动关连接"的设计天然匹配。 */
 function rawRequest(port, { method = "GET", host, path = "/", headers = {} } = {}) {

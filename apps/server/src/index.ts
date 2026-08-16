@@ -35,7 +35,7 @@ const proxyCtx: ProxyServerContext = hub;
 
 const listener = getRequestListener(fetchHandler);
 const httpServer = http.createServer((req, res) => {
-  // Host 命中 <shortId>.<proxyHost> 的请求走端口转发反代（整条 TCP 原始字节级接管，见 proxy.ts），
+  // Host 命中 <shortId>-<proxyHost> 的请求走端口转发反代（整条 TCP 原始字节级接管，见 proxy.ts），
   // 必须在进 fetch 适配器之前分流；其余 HTTP 全部交给 Raven 应用层（/health + 默认 404）。
   if (matchProxyHost(req.headers.host)) {
     void handleProxyRequest(proxyCtx, req, res);

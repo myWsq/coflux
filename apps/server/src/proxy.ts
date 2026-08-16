@@ -4,13 +4,15 @@
  * 边界：本模块只做机制，不碰账号/会话领域逻辑；路由表的"谁拥有哪个 shortId"由调用方（hub.ts）
  * 通过 ProxyServerContext 注入（依赖倒置，避免 proxy.ts ⇄ hub.ts 循环导入）。
  *
- * 反代模型：Host 形如 `<shortId>.<proxyHost>` 的请求/升级，在网关校验门禁 cookie 后，把整条底层
+ * 反代模型：Host 形如 `<shortId>-<proxyHost>`（如 web-3000-p.coflux.dev，一级子域——CF Universal SSL
+ * 通配符不跨点，二级泛域 `*.p.coflux.dev` 在橙云下无边缘证书，2026-08-16 挪平）的请求/升级，
+ * 在网关校验门禁 cookie 后，把整条底层
  * TCP 连接（含后续 keep-alive 请求/SSE/WS）原始字节级接管，经 daemon 的 proxy.open/proxy.data/
  * proxy.close 隧道透传到 daemon 本地端口——不逐请求重新解析，见 handleProxyRequest 的 hijack。
  *
  * 门禁：无有效 cookie ⇒ 302 到 web 的 /proxy-auth（带原始完整 URL）；web（已登录）用 WS
- * proxy.issueAuth 换一次性 code，浏览器带 code 跳回 <shortId>.<proxyHost>/__cf_proxy_auth，
- * 服务器验 code、发 Domain=.<proxyHost> 的长效 cookie（覆盖账号下所有预览子域名）、302 回原路径。
+ * proxy.issueAuth 换一次性 code，浏览器带 code 跳回 <shortId>-<proxyHost>/__cf_proxy_auth，
+ * 服务器验 code、发 Domain=父域 的长效 cookie（覆盖账号下所有预览子域名）、302 回原路径。
  */
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -48,7 +50,9 @@ function escapeRegExp(s: string): string {
 }
 
 // 允许任意合法 DNS label（含 '-'，1..63，首尾字母数字）——路由标识现在含设备名与连字符。
-const PROXY_HOST_RE = new RegExp(`^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\\.${escapeRegExp(config.proxyHost)}$`, "i");
+// `-` 而非 `.` 分隔：预览域必须落在一级子域（`{shortId}-p.coflux.dev`），CF Universal SSL 的
+// `*.coflux.dev` 才覆盖得到。标签总长约束：shortId ≤47 + "-p" ≤2 = 49 < DNS 单标签上限 63。
+const PROXY_HOST_RE = new RegExp(`^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)-${escapeRegExp(config.proxyHost)}$`, "i");
 
 /** Host 头可能带 `:port`；本项目预览域不支持 IPv6 字面量 Host，遇到方括号原样返回兜底。 */
 export function stripPort(hostHeader: string): string {
@@ -62,7 +66,7 @@ export function shortIdFromHostname(hostname: string): string | null {
   return m ? m[1] : null;
 }
 
-/** 供 index.ts 分流：Host 命中 `<shortId>.<proxyHost>` 形态即为预览域请求（是否有效路由在内部处理）。 */
+/** 供 index.ts 分流：Host 命中 `<shortId>-<proxyHost>` 形态即为预览域请求（是否有效路由在内部处理）。 */
 export function matchProxyHost(hostHeader: string | undefined): boolean {
   return !!hostHeader && shortIdFromHostname(stripPort(hostHeader)) !== null;
 }
@@ -71,7 +75,7 @@ export function matchProxyHost(hostHeader: string | undefined): boolean {
 export function buildPreviewUrl(shortId: string): string {
   const defaultPort = config.proxyScheme === "https" ? 443 : 80;
   const portSuffix = config.proxyPort === defaultPort ? "" : `:${config.proxyPort}`;
-  return `${config.proxyScheme}://${shortId}.${config.proxyHost}${portSuffix}`;
+  return `${config.proxyScheme}://${shortId}-${config.proxyHost}${portSuffix}`;
 }
 
 /* ============================ 路由表 ============================ */
@@ -248,9 +252,13 @@ export function parseCookies(header: string | undefined): Record<string, string>
 }
 
 function buildSetCookie(token: string): string {
+  // 预览域彼此是兄弟一级子域（{a}-p.coflux.dev / {b}-p.coflux.dev），共享 cookie 只能挂父域
+  // （生产 .coflux.dev）。dev 的父域 localhost 是 public suffix，带 Domain 的 cookie 会被浏览器
+  // 整个拒收——此时省略 Domain 退 host-only（每个预览域各走一次 auth code，功能不损）。
+  const parent = config.proxyHost.slice(config.proxyHost.indexOf(".") + 1);
   const attrs = [
     `${PROXY_COOKIE_NAME}=${encodeURIComponent(token)}`,
-    `Domain=.${config.proxyHost}`,
+    ...(parent.includes(".") ? [`Domain=.${parent}`] : []),
     "Path=/",
     "HttpOnly",
     "SameSite=Lax",
@@ -270,7 +278,7 @@ function safeRelativeTarget(to: string | null): string {
   return to;
 }
 
-/** hub 侧校验 client.proxy.issueAuth 的 redirect 入参：host 必须形如 `<shortId>.<proxyHost>`
+/** hub 侧校验 client.proxy.issueAuth 的 redirect 入参：host 必须形如 `<shortId>-<proxyHost>`
  * （open-redirect 防御第一道；第二道是 handleAuthCallback 里对 `to` 的 safeRelativeTarget）。 */
 export function parseProxyRedirect(redirect: string): { host: string; shortId: string; pathAndQuery: string } | null {
   let u: URL;

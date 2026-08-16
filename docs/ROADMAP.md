@@ -14,7 +14,7 @@
 - **发布链路**（2026-06→07）：git tag `v*` → release.yml 四平台交叉编译 + worker 产物 ed25519 签名（`WORKER_SIGNING_KEY` secret）+ manifest；supervisor 内置真发布公钥（`release-pubkey.hex` 编译期嵌入，公钥非密可提交）；macOS 产物经 Developer ID 签名与 Apple 公证。
 - **多账号 + Supabase 认证**（plans/001-002，2026-07）：换票模式（Supabase 只管"你是谁"，JWKS 本地验签换 coflux 会话 token，之后不再触碰 Supabase）；存储迁 Postgres（生产 = Supabase 云，`coflux` schema）。
 - **设备授权**（plan 003，2026-07）：daemon 无登记密钥时走浏览器授权流（一次性授权码 + `/authorize` 页）。
-- **端口转发预览**（plans/004-007，2026-07）：`*.p.coflux.dev` 泛域名，账号级门禁 cookie + 一次性授权 code，整条 TCP 经 daemon 隧道字节级透传（HTTP/SSE/WS 通吃）；shortId 确定性可收藏。
+- **端口转发预览**（plans/004-007，2026-07）：`*.p.coflux.dev` 泛域名，账号级门禁 cookie + 一次性授权 code，整条 TCP 经 daemon 隧道字节级透传（HTTP/SSE/WS 通吃）；shortId 确定性可收藏。2026-08-16 预览域挪平一级（`{shortId}-p.coflux.dev`）：coflux.dev 套 CF 橙云后二级泛域无边缘证书（Universal SSL 通配符不跨点），门禁 cookie Domain 随之挂到父域。
 - **Web 工作区多终端 Tab**（plan 008，2026-07）。
 - **协议真相源 Protobuf 化**（plan 009，2026-07-15）：`proto/`（Buf 管理）单一真相源，`buf generate` 出 TS（protobuf-es）/ Rust（prost）/ Swift（swift-protobuf）三端；wire 迁全 protobuf binary 信封，旧 JSON 协议下线；CI 上 `buf lint` + `buf breaking` + 生成产物零 diff 校验。v0.3.0 发布并上线生产（api/app.coflux.dev）。
 - **server RavenJS 化 + 全仓库 TypeScript 7**（2026-07-15）：HTTP 应用层迁 `@raven.js/core`（组合根 + 插件 + 契约路由），WS/反代保持传输层。当时的“含 PTY 严格星形”决策已被 2026-07-25 本地优先架构取代；Postgres 只权威持有业务元数据，不持 terminal authority。
