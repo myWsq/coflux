@@ -17,6 +17,10 @@ import { TerminalPane, type TerminalController, type TerminalControlState } from
 // attach 后即使无 ptyOutput 回放（空 scrollback）也要在 500ms 后判定 owned；有输出则立即 owned。
 const ATTACH_GRACE_MS = 500;
 
+// 乐观 tab（plan 078）的本地兜底：taskCreate 既没广播成功也没广播错误时撤掉 pending tab，
+// 避免永久滞留。
+const PENDING_CREATE_TIMEOUT_MS = 15_000;
+
 /** Tab 上的 agent 图标（plan 075）：claude 用 Clawd 像素小机器人（Claude Code 欢迎屏
  * 同款形态：双耳/双钳/双脚/竖条眼），固定品牌橙不随状态变色（用户 2026-08-15 指定）——
  * 品牌色属第三方标识，不走主题 token。其余 agent 用 lucide 机器人轮廓，
@@ -112,6 +116,13 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   const [pendingBranch, setPendingBranch] = useState<string | null>(null);
   const [controlStates, setControlStatesState] = useState<Record<string, TerminalControlState>>({});
   const [creating, setCreating] = useState(false);
+  // 乐观终端 tab（plan 078）：taskCreate 发出后下一帧即出现并被选中。只动视图态——
+  // 不进 activationRequestsRef / attach 状态机、不挂 TerminalPane，假 id 不产生任何请求。
+  // createTerminal 有 pendingCreateRef 单发门禁，同一工作区同一时刻至多一个 pending tab。
+  const [pendingTab, setPendingTab] = useState<{ id: string; title: string } | null>(null);
+  const pendingTabRef = useRef<{ id: string; title: string } | null>(null);
+  const pendingTabTimerRef = useRef<number | undefined>(undefined);
+  const pendingTabSeqRef = useRef(0);
 
   // 接管状态机的非响应式内部账本：只驱动副作用，不驱动渲染（landmine 17：
   // Solid 组件体只跑一次、这些 Map/Set 天然是长生命周期闭包；React 每次渲染都跑组件体，
@@ -314,9 +325,45 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   function createTerminal() {
     if (pendingCreateRef.current) return;
     const tasksNow = currentTasks();
+    const title = `终端 ${tasksNow.length + 1}`;
     pendingCreateRef.current = { knownTaskIds: new Set(tasksNow.map((task) => task.id)) };
+    const pending = { id: `pending-tab-${++pendingTabSeqRef.current}`, title };
+    updatePendingTab(pending);
     setCreating(true);
-    client.send({ case: "taskCreate", value: { workspaceId, title: `终端 ${tasksNow.length + 1}` } });
+    // 乐观选中：任何终端 Tab 的激活都切回终端视图；不调用 requestActivation——
+    // 那会进 activationRequestsRef 并在 rAF 里 performActivation，假 id 绝不能碰那条路。
+    setView("terminal");
+    updateActiveTaskId(pending.id);
+    pendingTabTimerRef.current = window.setTimeout(() => {
+      pendingCreateRef.current = null;
+      setCreating(false);
+      dropPendingTab();
+    }, PENDING_CREATE_TIMEOUT_MS);
+    client.send({ case: "taskCreate", value: { workspaceId, title } });
+  }
+
+  function updatePendingTab(next: { id: string; title: string } | null) {
+    pendingTabRef.current = next;
+    setPendingTab(next);
+  }
+
+  // 清计时与状态（转正/失败/超时共用），不管焦点。
+  function settlePendingTab() {
+    if (pendingTabTimerRef.current !== undefined) window.clearTimeout(pendingTabTimerRef.current);
+    pendingTabTimerRef.current = undefined;
+    updatePendingTab(null);
+  }
+
+  // 失败/超时撤 pending tab：若焦点还在它身上，回落到第一个真实任务（或清空）。
+  function dropPendingTab() {
+    const pending = pendingTabRef.current;
+    if (!pending) return;
+    settlePendingTab();
+    if (activeTaskIdRef.current === pending.id) {
+      const nextTask = currentTasks()[0];
+      if (nextTask) requestActivation(nextTask.id);
+      else updateActiveTaskId(null);
+    }
   }
 
   useEffect(() => {
@@ -345,12 +392,15 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       if (created) {
         pendingCreateRef.current = null;
         setCreating(false);
-        requestActivation(created.id);
+        // 转正不抢焦点：等待期间用户已手动切到别的 Tab，则保持其选择，只撤乐观条目。
+        const pending = pendingTabRef.current;
+        settlePendingTab();
+        if (!pending || activeTaskIdRef.current === pending.id) requestActivation(created.id);
       }
     }
 
     const currentActive = activeTaskIdRef.current;
-    if (currentActive && ids.has(currentActive)) return;
+    if (currentActive && (ids.has(currentActive) || currentActive === pendingTabRef.current?.id)) return;
     const nextTask = workspaceTasks[0];
     if (nextTask) requestActivation(nextTask.id);
     else updateActiveTaskId(null);
@@ -380,6 +430,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       pendingCreateRef.current = null;
       setCreating(false);
     }
+    dropPendingTab();
     for (const taskId of launchingTaskIdsRef.current) updateControlState(taskId, "stopped");
     launchingTaskIdsRef.current.clear();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -416,6 +467,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     return () => {
       for (const timer of attachTimersRef.current.values()) window.clearTimeout(timer);
       attachTimersRef.current.clear();
+      if (pendingTabTimerRef.current !== undefined) window.clearTimeout(pendingTabTimerRef.current);
     };
   }, []);
 
@@ -564,6 +616,28 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
               </div>
             );
           })}
+          {/* 乐观 pending tab（plan 078）：点击只回焦点，不进激活/attach 状态机；无关闭入口。 */}
+          {pendingTab ? (
+            <div
+              className={cn(
+                "flex h-7 max-w-52 shrink-0 items-center rounded-md text-sm transition-colors",
+                view === "terminal" && pendingTab.id === activeTaskId
+                  ? "bg-accent text-foreground"
+                  : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
+              )}
+            >
+              <button
+                className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left"
+                onClick={() => {
+                  setView("terminal");
+                  updateActiveTaskId(pendingTab.id);
+                }}
+              >
+                <LoaderCircle className="size-3 shrink-0 animate-spin text-muted-foreground" />
+                <span className="truncate">{pendingTab.title}</span>
+              </button>
+            </div>
+          ) : null}
           {/* 新建按钮跟随最后一个 Tab（浏览器式），不钉在最右 */}
           <Tooltip content={`新建终端 ${modPrefix}T`} placement="below">
             <button
@@ -614,7 +688,17 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           />
         ))}
 
-        {view === "terminal" && workspaceTasks.length === 0 ? (
+        {view === "terminal" && pendingTab && activeTaskId === pendingTab.id ? (
+          // pending tab 的主区（plan 078）：不挂 TerminalPane（假 id 不产生请求），只显示创建中。
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="flex max-w-sm flex-col items-center text-center">
+              <LoaderCircle className="size-5 animate-spin text-muted-foreground" />
+              <p className="mt-4 text-sm leading-5 text-muted-foreground">正在创建终端…</p>
+            </div>
+          </div>
+        ) : null}
+
+        {view === "terminal" && workspaceTasks.length === 0 && !pendingTab ? (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="flex max-w-sm flex-col items-center text-center">
               <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
