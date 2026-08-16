@@ -774,6 +774,14 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     set {payload = .agentControlRequest(newValue)}
   }
 
+  public var deviceP2PAnswerReport: Coflux_V1_DeviceP2pAnswerReport {
+    get {
+      if case .deviceP2PAnswerReport(let v)? = payload {return v}
+      return Coflux_V1_DeviceP2pAnswerReport()
+    }
+    set {payload = .deviceP2PAnswerReport(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -801,6 +809,7 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     case workspaceDefaultBranch(Coflux_V1_WorkspaceDefaultBranch)
     case sessionAgents(Coflux_V1_SessionAgents)
     case agentControlRequest(Coflux_V1_AgentControlRequest)
+    case deviceP2PAnswerReport(Coflux_V1_DeviceP2pAnswerReport)
 
   }
 
@@ -1339,6 +1348,22 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     set {payload = .agentControlResult(newValue)}
   }
 
+  public var deviceP2PDial: Coflux_V1_DeviceP2pDial {
+    get {
+      if case .deviceP2PDial(let v)? = payload {return v}
+      return Coflux_V1_DeviceP2pDial()
+    }
+    set {payload = .deviceP2PDial(newValue)}
+  }
+
+  public var deviceP2PChannelGrant: Coflux_V1_DeviceP2pChannelGrant {
+    get {
+      if case .deviceP2PChannelGrant(let v)? = payload {return v}
+      return Coflux_V1_DeviceP2pChannelGrant()
+    }
+    set {payload = .deviceP2PChannelGrant(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -1367,6 +1392,8 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     case proxyData(Coflux_V1_ProxyData)
     case workspaceList(Coflux_V1_WorkspaceList)
     case agentControlResult(Coflux_V1_AgentControlResult)
+    case deviceP2PDial(Coflux_V1_DeviceP2pDial)
+    case deviceP2PChannelGrant(Coflux_V1_DeviceP2pChannelGrant)
 
   }
 
@@ -2460,7 +2487,7 @@ extension Coflux_V1_RelayHome: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
 
 extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{4}\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{3}relay_home\0\u{3}workspace_default_branch\0\u{3}session_agents\0\u{3}agent_control_request\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{4}\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{3}relay_home\0\u{3}workspace_default_branch\0\u{3}session_agents\0\u{3}agent_control_request\0\u{3}device_p2p_answer_report\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2767,6 +2794,19 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .agentControlRequest(v)
         }
       }()
+      case 33: try {
+        var v: Coflux_V1_DeviceP2pAnswerReport?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceP2PAnswerReport(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceP2PAnswerReport(v)
+        }
+      }()
       default: break
       }
     }
@@ -2869,6 +2909,10 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .agentControlRequest?: try {
       guard case .agentControlRequest(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 32)
+    }()
+    case .deviceP2PAnswerReport?: try {
+      guard case .deviceP2PAnswerReport(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 33)
     }()
     case nil: break
     }
@@ -3582,7 +3626,7 @@ extension Coflux_V1_RelayNodeList.RelayNode: SwiftProtobuf.Message, SwiftProtobu
 
 extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToDaemon"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{4}\u{3}proxy_open\0\u{3}proxy_close\0\u{4}\u{5}proxy_data\0\u{3}workspace_list\0\u{4}\u{2}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{4}\u{4}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0\u{3}device_relay_dial\0\u{3}relay_node_list\0\u{3}agent_control_result\0\u{b}session_replay\0\u{b}pty_resize\0\u{b}exec_run\0\u{b}fs_list\0\u{b}fs_read\0\u{b}pty_input\0\u{b}fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{b}\u{1}\u{c}\u{c}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{15}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{4}\u{3}proxy_open\0\u{3}proxy_close\0\u{4}\u{5}proxy_data\0\u{3}workspace_list\0\u{4}\u{2}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{4}\u{4}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0\u{3}device_relay_dial\0\u{3}relay_node_list\0\u{3}agent_control_result\0\u{3}device_p2p_dial\0\u{3}device_p2p_channel_grant\0\u{b}session_replay\0\u{b}pty_resize\0\u{b}exec_run\0\u{b}fs_list\0\u{b}fs_read\0\u{b}pty_input\0\u{b}fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{b}\u{1}\u{c}\u{c}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{15}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3915,6 +3959,32 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .agentControlResult(v)
         }
       }()
+      case 36: try {
+        var v: Coflux_V1_DeviceP2pDial?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceP2PDial(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceP2PDial(v)
+        }
+      }()
+      case 37: try {
+        var v: Coflux_V1_DeviceP2pChannelGrant?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceP2PChannelGrant(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceP2PChannelGrant(v)
+        }
+      }()
       default: break
       }
     }
@@ -4025,6 +4095,14 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .agentControlResult?: try {
       guard case .agentControlResult(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 35)
+    }()
+    case .deviceP2PDial?: try {
+      guard case .deviceP2PDial(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 36)
+    }()
+    case .deviceP2PChannelGrant?: try {
+      guard case .deviceP2PChannelGrant(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 37)
     }()
     case nil: break
     }

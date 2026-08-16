@@ -30,6 +30,7 @@ enum DeviceTransportKind {
   DEVICE_TRANSPORT_KIND_UNSPECIFIED = 0;
   DEVICE_TRANSPORT_KIND_LOOPBACK = 1;
   DEVICE_TRANSPORT_KIND_RELAY = 2;
+  DEVICE_TRANSPORT_KIND_P2P = 3;
 }
 
 enum LocalAuthErrorCode {
@@ -208,6 +209,85 @@ message DeviceRelayDial {
   uint64 transport_generation = 5;
   repeated DeviceScope scopes = 6;
   uint32 protocol_version = 7;
+}
+
+// ===== P2P WebRTC 直连信令（plan 076）=====
+//
+// PeerConnection 按 daemon 常驻（client 对该设备有完整需求时建立），DataChannel 按 logical
+// channel（label == channel_id）。信令经已认证中心控制 WS 转发：中心校验归属后传递 SDP，
+// 不签 token——P2P 数据面不经任何中心基础设施，对端身份由 SDP 内 DTLS fingerprint 绑定
+//（信令信道已认证）保证。vanilla ICE：两端各等 gathering 完成后一次性交换完整 SDP。
+// channel 级 scopes 仍由中心逐 channel 授予（语义对齐 DeviceRelayDial：server 授予、daemon
+// 信任控制面）；中心控制连接断开时 worker 关闭全部 P2P 连接——P2P 与 relay 同属在线授权，
+// 无 loopback grant 那样的离线存活。
+// DataChannel 上的 DeviceEnvelope 帧走长度前缀分片流（见 protocol 包 P2P_CHUNK_BYTES）。
+
+// client→server：为目标 daemon 建立 P2P 连接，携带完整 offer SDP。
+// connection_id 由 client 随机生成；`__coflux-` 前缀保留。
+message DeviceP2pOffer {
+  string daemon_id = 1;
+  string connection_id = 2;
+  string client_instance_id = 3;
+  string sdp = 4;
+  uint32 protocol_version = 5;
+}
+
+// server→daemon：要求 worker 建立 answer 侧 PeerConnection。ice_servers 是 STUN URL 列表
+//（`stun:host:port`，来自中心 COFLUX_STUN_URLS），可为空 = 纯 host candidate。
+message DeviceP2pDial {
+  string connection_id = 1;
+  string account_id = 2;
+  string client_instance_id = 3;
+  string sdp = 4;
+  repeated string ice_servers = 5;
+  uint32 protocol_version = 6;
+}
+
+// daemon→server：answer SDP 或建 PeerConnection 失败的拒因。
+message DeviceP2pAnswerReport {
+  string connection_id = 1;
+  bool ok = 2;
+  optional string sdp = 3;
+  optional string error = 4;
+}
+
+// server→client：转发 answer 结果（或中心侧拒因：设备离线/归属不符/超限）。
+message DeviceP2pAnswer {
+  string connection_id = 1;
+  bool ok = 2;
+  optional string sdp = 3;
+  optional string error = 4;
+}
+
+// client→server：为已建立的 P2P 连接开一条 logical channel 并申请授权。
+// channel_id/transport_generation 语义同 DeviceRelayConnect。
+message DeviceP2pChannelOpen {
+  string daemon_id = 1;
+  string connection_id = 2;
+  string channel_id = 3;
+  string client_instance_id = 4;
+  uint64 transport_generation = 5;
+  uint32 protocol_version = 6;
+}
+
+// server→daemon：channel 授权。DataChannel 以 label == channel_id 在 SCTP 上到达；
+// worker 等 label 与本授权两者齐备（顺序无关）才把 channel 泵进 runtime。
+message DeviceP2pChannelGrant {
+  string connection_id = 1;
+  string channel_id = 2;
+  string account_id = 3;
+  string client_instance_id = 4;
+  uint64 transport_generation = 5;
+  repeated DeviceScope scopes = 6;
+  uint32 protocol_version = 7;
+}
+
+// server→client：channel 授权结果。授权通过但 daemon 侧拒收/连接已消亡时不再有补充消息，
+// client 靠 DataChannel open 超时回落 relay。
+message DeviceP2pChannelResult {
+  string channel_id = 1;
+  bool ok = 2;
+  optional string error = 3;
 }
 
 message DeviceSessionInfo {

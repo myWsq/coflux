@@ -531,6 +531,120 @@ pub struct DeviceRelayDial {
     #[prost(uint32, tag="7")]
     pub protocol_version: u32,
 }
+// ===== P2P WebRTC 直连信令（plan 076）=====
+//
+// PeerConnection 按 daemon 常驻（client 对该设备有完整需求时建立），DataChannel 按 logical
+// channel（label == channel_id）。信令经已认证中心控制 WS 转发：中心校验归属后传递 SDP，
+// 不签 token——P2P 数据面不经任何中心基础设施，对端身份由 SDP 内 DTLS fingerprint 绑定
+// （信令信道已认证）保证。vanilla ICE：两端各等 gathering 完成后一次性交换完整 SDP。
+// channel 级 scopes 仍由中心逐 channel 授予（语义对齐 DeviceRelayDial：server 授予、daemon
+// 信任控制面）；中心控制连接断开时 worker 关闭全部 P2P 连接——P2P 与 relay 同属在线授权，
+// 无 loopback grant 那样的离线存活。
+// DataChannel 上的 DeviceEnvelope 帧走长度前缀分片流（见 protocol 包 P2P_CHUNK_BYTES）。
+
+/// client→server：为目标 daemon 建立 P2P 连接，携带完整 offer SDP。
+/// connection_id 由 client 随机生成；`__coflux-` 前缀保留。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceP2pOffer {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub sdp: ::prost::alloc::string::String,
+    #[prost(uint32, tag="5")]
+    pub protocol_version: u32,
+}
+/// server→daemon：要求 worker 建立 answer 侧 PeerConnection。ice_servers 是 STUN URL 列表
+/// （`stun:host:port`，来自中心 COFLUX_STUN_URLS），可为空 = 纯 host candidate。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceP2pDial {
+    #[prost(string, tag="1")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub account_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub sdp: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="5")]
+    pub ice_servers: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, tag="6")]
+    pub protocol_version: u32,
+}
+/// daemon→server：answer SDP 或建 PeerConnection 失败的拒因。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceP2pAnswerReport {
+    #[prost(string, tag="1")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub sdp: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// server→client：转发 answer 结果（或中心侧拒因：设备离线/归属不符/超限）。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceP2pAnswer {
+    #[prost(string, tag="1")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub sdp: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// client→server：为已建立的 P2P 连接开一条 logical channel 并申请授权。
+/// channel_id/transport_generation 语义同 DeviceRelayConnect。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceP2pChannelOpen {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="5")]
+    pub transport_generation: u64,
+    #[prost(uint32, tag="6")]
+    pub protocol_version: u32,
+}
+/// server→daemon：channel 授权。DataChannel 以 label == channel_id 在 SCTP 上到达；
+/// worker 等 label 与本授权两者齐备（顺序无关）才把 channel 泵进 runtime。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceP2pChannelGrant {
+    #[prost(string, tag="1")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub account_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="5")]
+    pub transport_generation: u64,
+    #[prost(enumeration="DeviceScope", repeated, tag="6")]
+    pub scopes: ::prost::alloc::vec::Vec<i32>,
+    #[prost(uint32, tag="7")]
+    pub protocol_version: u32,
+}
+/// server→client：channel 授权结果。授权通过但 daemon 侧拒收/连接已消亡时不再有补充消息，
+/// client 靠 DataChannel open 超时回落 relay。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceP2pChannelResult {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceSessionInfo {
     #[prost(string, tag="1")]
@@ -1176,6 +1290,7 @@ pub enum DeviceTransportKind {
     Unspecified = 0,
     Loopback = 1,
     Relay = 2,
+    P2p = 3,
 }
 impl DeviceTransportKind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1187,6 +1302,7 @@ impl DeviceTransportKind {
             Self::Unspecified => "DEVICE_TRANSPORT_KIND_UNSPECIFIED",
             Self::Loopback => "DEVICE_TRANSPORT_KIND_LOOPBACK",
             Self::Relay => "DEVICE_TRANSPORT_KIND_RELAY",
+            Self::P2p => "DEVICE_TRANSPORT_KIND_P2P",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1195,6 +1311,7 @@ impl DeviceTransportKind {
             "DEVICE_TRANSPORT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
             "DEVICE_TRANSPORT_KIND_LOOPBACK" => Some(Self::Loopback),
             "DEVICE_TRANSPORT_KIND_RELAY" => Some(Self::Relay),
+            "DEVICE_TRANSPORT_KIND_P2P" => Some(Self::P2p),
             _ => None,
         }
     }
@@ -1390,7 +1507,7 @@ pub struct TaskRemove {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 34, 24")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 34, 24, 35, 36")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -1441,6 +1558,10 @@ pub mod client_to_server {
         TerminalCreate(super::TerminalCreate),
         #[prost(message, tag="24")]
         WorkspaceSetName(super::WorkspaceSetName),
+        #[prost(message, tag="35")]
+        DeviceP2pOffer(super::DeviceP2pOffer),
+        #[prost(message, tag="36")]
+        DeviceP2pChannelOpen(super::DeviceP2pChannelOpen),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -1451,6 +1572,11 @@ pub struct AuthOk {
     pub account_id: ::prost::alloc::string::String,
     #[prost(string, optional, tag="2")]
     pub client_token: ::core::option::Option<::prost::alloc::string::String>,
+    /// P2P 建连用的 STUN URL 列表（`stun:host:port`，来自中心 COFLUX_STUN_URLS）。
+    /// 空 = 纯 host candidate（daemon 有公网 IP / 同 LAN 场景已可用）。认证成功即下发，
+    /// client 建 RTCPeerConnection（发 offer 之前）需要它。
+    #[prost(string, repeated, tag="3")]
+    pub ice_servers: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthError {
@@ -1569,7 +1695,7 @@ pub struct ClientOutdated {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 33, 34")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 33, 34, 35, 36")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -1624,6 +1750,10 @@ pub mod server_to_client {
         DeviceRelayGrant(super::DeviceRelayGrant),
         #[prost(message, tag="34")]
         SessionAgentsUpdated(super::SessionAgentsUpdated),
+        #[prost(message, tag="35")]
+        DeviceP2pAnswer(super::DeviceP2pAnswer),
+        #[prost(message, tag="36")]
+        DeviceP2pChannelResult(super::DeviceP2pChannelResult),
     }
 }
 // ===== Daemon → Server 载荷 =====
@@ -1884,7 +2014,7 @@ pub struct RelayHome {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -1938,6 +2068,8 @@ pub mod daemon_to_server {
         SessionAgents(super::SessionAgents),
         #[prost(message, tag="32")]
         AgentControlRequest(super::AgentControlRequest),
+        #[prost(message, tag="33")]
+        DeviceP2pAnswerReport(super::DeviceP2pAnswerReport),
     }
 }
 /// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
@@ -2105,7 +2237,7 @@ pub mod relay_node_list {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 33, 34, 19, 20, 35")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 33, 34, 19, 20, 35, 36, 37")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -2162,6 +2294,10 @@ pub mod server_to_daemon {
         WorkspaceList(super::WorkspaceList),
         #[prost(message, tag="35")]
         AgentControlResult(super::AgentControlResult),
+        #[prost(message, tag="36")]
+        DeviceP2pDial(super::DeviceP2pDial),
+        #[prost(message, tag="37")]
+        DeviceP2pChannelGrant(super::DeviceP2pChannelGrant),
     }
 }
 /// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD

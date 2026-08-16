@@ -143,6 +143,8 @@ message ClientToServer {
     DeviceRelayConnect device_relay_connect = 33;
     TerminalCreate terminal_create = 34;
     WorkspaceSetName workspace_set_name = 24;
+    DeviceP2pOffer device_p2p_offer = 35;
+    DeviceP2pChannelOpen device_p2p_channel_open = 36;
   }
 }
 
@@ -151,6 +153,10 @@ message ClientToServer {
 message AuthOk {
   string account_id = 1;
   optional string client_token = 2;
+  // P2P 建连用的 STUN URL 列表（`stun:host:port`，来自中心 COFLUX_STUN_URLS）。
+  // 空 = 纯 host candidate（daemon 有公网 IP / 同 LAN 场景已可用）。认证成功即下发，
+  // client 建 RTCPeerConnection（发 offer 之前）需要它。
+  repeated string ice_servers = 3;
 }
 
 message AuthError {
@@ -270,5 +276,7 @@ message ServerToClient {
     LocalUnpairResult local_unpair_result = 32;
     DeviceRelayGrant device_relay_grant = 33;
     SessionAgentsUpdated session_agents_updated = 34;
+    DeviceP2pAnswer device_p2p_answer = 35;
+    DeviceP2pChannelResult device_p2p_channel_result = 36;
   }
 }

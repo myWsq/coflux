@@ -62,6 +62,11 @@ pub const MAX_TERMINAL_DIMENSION: u16 = 1000;
 pub const MAX_DEVICE_FRAME_BYTES: usize = 30 * 1024 * 1024;
 /// 中心 checkpoint 的 ANSI snapshot 上限。
 pub const MAX_SESSION_CHECKPOINT_BYTES: usize = 512 * 1024;
+/// P2P DataChannel 分片流格式（plan 076，线上契约——改动需带版本协商）：
+/// 每个 DeviceEnvelope 帧封为 [u32 BE 帧长][帧字节]，整体按 ≤ P2P_CHUNK_BYTES 切成
+/// DataChannel messages；SCTP reliable+ordered 下等价字节流，接收端按前缀重组。
+/// 64KiB 远低于 Chrome 宣告的 256KiB 单消息接收硬上限，且该上限不可协商放大。
+pub const P2P_CHUNK_BYTES: usize = 64 * 1024;
 
 #[cfg(test)]
 mod wire_tests;
