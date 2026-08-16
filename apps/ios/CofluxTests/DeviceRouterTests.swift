@@ -16,6 +16,7 @@ final class DeviceHarness {
     var exited: [(sessionID: String, exitCode: Int32)] = []
     var errors: [String] = []
     var blocked: [(sessionID: String, blocked: Bool)] = []
+    var transportEvents: [(daemonID: String, relayHost: String?, rttMs: Double?)] = []
     var nowMS: Double = 1_000_000
     private(set) var router: DeviceRouter!
 
@@ -31,7 +32,8 @@ final class DeviceHarness {
                 onSessionExited: { [weak self] _, _, sessionID, exitCode in self?.exited.append((sessionID, exitCode)) },
                 onCatalog: { _, _ in },
                 onError: { [weak self] message in self?.errors.append(message) },
-                onInputBlocked: { [weak self] sessionID, isBlocked in self?.blocked.append((sessionID, isBlocked)) }
+                onInputBlocked: { [weak self] sessionID, isBlocked in self?.blocked.append((sessionID, isBlocked)) },
+                onDeviceTransport: { [weak self] daemonID, relayHost, rttMs in self?.transportEvents.append((daemonID, relayHost, rttMs)) }
             ),
             now: { [weak self] in self?.nowMS ?? 0 }
         )

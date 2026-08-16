@@ -47,6 +47,15 @@ struct WorkspaceListView: View {
             }
             .navigationTitle("项目") // 与 web 侧栏对齐（sidebar.tsx:201）：列表主体是项目，工作区是项下成员
             .toolbar {
+                // 设备面板入口（plan 077）：设备是账号级资源，与项目列表平级但不抢主位。
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        DevicesView(client: client)
+                    } label: {
+                        Image(systemName: "macbook.and.iphone")
+                    }
+                    .accessibilityLabel("设备")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button("登出", role: .destructive) { client.logout() }

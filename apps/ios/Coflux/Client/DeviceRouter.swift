@@ -36,6 +36,9 @@ struct DeviceRouterCallbacks {
     var onCatalog: (_ daemonID: String, _ catalog: Coflux_V1_DeviceSessionCatalog) -> Void
     var onError: (_ message: String) -> Void
     var onInputBlocked: (_ sessionID: String, _ blocked: Bool) -> Void
+    /// 设备面板（plan 077）：session lane 的传输可观测状态——relay 节点 host 与最近一次
+    /// RTT。lane 建立/心跳/关闭时上报；nil = 对应读数当前不可得。
+    var onDeviceTransport: (_ daemonID: String, _ relayHost: String?, _ rttMs: Double?) -> Void
 }
 
 /// relay-only Device 数据路由（plan 046）。语义基准 `packages/client/src/device-router.ts` 的
@@ -60,6 +63,10 @@ final class DeviceRouter {
     private static let relayConnectTimeout: Duration = .seconds(10)
     private static let recoverBaseMS = 350.0
     private static let recoverMaxMS = 5_000.0
+    /// 设备面板 RTT 心跳（plan 077）：页面在场时 10s 一发；超时远短于普通 RPC 20s——
+    /// 心跳测的是链路好坏，等满毫无意义（web HEARTBEAT_TIMEOUT 同理）。
+    private static let pingInterval: Duration = .seconds(10)
+    private static let pingTimeout: Duration = .seconds(5)
     private static let inputRetry: Duration = .milliseconds(500)
     private static let catalogInterval: Duration = .seconds(3)
     private static let maxRetainedInputs = 256
@@ -85,16 +92,19 @@ final class DeviceRouter {
         let generation: UInt64
         let lane: LaneKind
         let connection: any TransportConnection
+        /// rendezvous URL 的 host（如 relay-bj.…），供设备面板展示实际经过的节点（plan 065/077）。
+        let relayHost: String?
         var closed = false
         var receiveTask: Task<Void, Never>?
         /// 串行发送链：input_seq 连续性契约要求帧不乱序（plan 042）。
         var sendChain: Task<Void, Never>?
 
-        init(channelID: String, generation: UInt64, lane: LaneKind, connection: any TransportConnection) {
+        init(channelID: String, generation: UInt64, lane: LaneKind, connection: any TransportConnection, relayHost: String?) {
             self.channelID = channelID
             self.generation = generation
             self.lane = lane
             self.connection = connection
+            self.relayHost = relayHost
         }
     }
 
@@ -169,6 +179,13 @@ final class DeviceRouter {
         var pendingRequests: [String: PendingRequest] = [:]
         var pendingOperations: [String: PendingOperation] = [:]
         var catalogTask: Task<Void, Never>?
+        /// 「只测量」持有数（设备面板，plan 077；web measureOnly 同概念）：把 session lane
+        /// 拉起来跑 RTT 心跳但不 attach session。必须计入 sessionLaneDemand——否则两次
+        /// ping 之间 pendingRequests 清空会触发 idle 释放，每轮心跳都重新 rendezvous。
+        var measureCount = 0
+        var relayHost: String?
+        var rttMs: Double?
+        var pingTask: Task<Void, Never>?
 
         init(daemonID: String) { self.daemonID = daemonID }
     }
@@ -429,6 +446,62 @@ final class DeviceRouter {
         return result
     }
 
+    // MARK: - 设备面板测量（plan 077）
+
+    /// 「只测量」持有（web measureOnly 同概念，device-router.ts:284-287）：把 session lane
+    /// 拉起来周期 ping 测 RTT，但不 attach 任何 session；返回的闭包释放持有，计数归零即
+    /// 停测并允许 lane 空闲释放。设备页 onAppear 起、onDisappear 停——不常驻耗电。
+    func retainMeasure(daemonID: String) -> () -> Void {
+        let route = routeFor(daemonID)
+        route.measureCount += 1
+        kickLane(route, route.sessionLane)
+        startPingLoop(route)
+        var released = false
+        return { [weak self] in
+            guard let self, !released else { return }
+            released = true
+            guard self.routes[daemonID] === route else { return }
+            route.measureCount = max(0, route.measureCount - 1)
+            guard route.measureCount == 0 else { return }
+            route.pingTask?.cancel()
+            route.pingTask = nil
+            if route.rttMs != nil {
+                route.rttMs = nil
+                self.callbacks.onDeviceTransport(daemonID, route.relayHost, nil)
+            }
+            self.releaseIdle(route)
+        }
+    }
+
+    private func startPingLoop(_ route: Route) {
+        guard route.pingTask == nil else { return }
+        route.pingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, !self.destroyed else { return }
+                await self.pingOnce(route)
+                try? await Task.sleep(for: Self.pingInterval)
+            }
+        }
+    }
+
+    private func pingOnce(_ route: Route) async {
+        guard route.measureCount > 0, controlOnline, routes[route.daemonID] === route else { return }
+        var ping = Coflux_V1_DevicePing()
+        ping.requestID = UUID().uuidString
+        let started = now()
+        do {
+            let response = try await request(
+                route, lane: .session, requestID: ping.requestID, payload: .ping(ping), timeout: Self.pingTimeout
+            )
+            guard case .pong = response else { return }
+            route.rttMs = now() - started
+        } catch {
+            // 旧 worker 不识 ping / 通道波动：清读数不清 host，下一轮再试（通道恢复由既有机制负责）。
+            route.rttMs = nil
+        }
+        callbacks.onDeviceTransport(route.daemonID, route.relayHost, route.rttMs)
+    }
+
     // MARK: - Lane 生命周期
 
     private func routeFor(_ daemonID: String) -> Route {
@@ -517,7 +590,7 @@ final class DeviceRouter {
         let connection = try await withTimeout(Self.relayConnectTimeout, message: "连接 relay 超时") { [transport] in
             try await transport.connect(to: url)
         }
-        return Channel(channelID: channelID, generation: generation, lane: lane.kind, connection: connection)
+        return Channel(channelID: channelID, generation: generation, lane: lane.kind, connection: connection, relayHost: url.host)
     }
 
     /// 收帧循环在 activate 时才启动：relay 对端在我们发帧前不会主动发帧，激活前无早帧；
@@ -567,6 +640,8 @@ final class DeviceRouter {
             flushLane(route, .session)
             sendCatalogRequest(route)
             maintainCatalogTimer(route)
+            route.relayHost = channel.relayHost
+            callbacks.onDeviceTransport(route.daemonID, route.relayHost, route.rttMs)
         } else {
             for requestID in route.pendingRequests.keys where route.pendingRequests[requestID]?.lane == .elevated {
                 route.pendingRequests[requestID]?.sentGeneration = nil
@@ -629,6 +704,12 @@ final class DeviceRouter {
                 session.attachGeneration = nil
                 session.attachedGeneration = nil
             }
+            // 传输读数与 lane 同生命周期：lane 没了就没有「正在走的路」，不展示陈值。
+            if route.relayHost != nil || route.rttMs != nil {
+                route.relayHost = nil
+                route.rttMs = nil
+                callbacks.onDeviceTransport(route.daemonID, nil, nil)
+            }
         }
     }
 
@@ -656,6 +737,7 @@ final class DeviceRouter {
     // MARK: - 需求判定与空闲释放
 
     private func sessionLaneDemand(_ route: Route) -> Bool {
+        if route.measureCount > 0 { return true }
         if route.sessions.values.contains(where: { $0.desired }) { return true }
         return route.pendingRequests.values.contains { $0.lane == .session }
     }
@@ -1190,6 +1272,7 @@ final class DeviceRouter {
         case .sessionSnapshot(let value): return value.requestID
         case .operationAck(let value): return value.requestID
         case .fsWriteResult(let value): return value.requestID
+        case .pong(let value): return value.requestID
         case .error(let value): return value.hasRequestID ? value.requestID : nil
         default: return nil
         }
