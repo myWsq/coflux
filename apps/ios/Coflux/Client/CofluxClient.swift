@@ -54,6 +54,14 @@ final class CofluxClient {
     /// 正在上传文件/图片的 session（plan 071）：UI 据此把入口键置忙态、禁重复触发。
     private(set) var uploadingSessionIDs: Set<String> = []
 
+    /// 设备面板（plan 077）：per-daemon 传输可观测状态。relayHost = 正在经过的 relay 节点
+    /// host；rttMs = 最近一次 DevicePing 往返。仅设备页在场（retainDeviceMeasure）时点亮。
+    struct DeviceTransportInfo: Equatable {
+        var relayHost: String?
+        var rttMs: Double?
+    }
+    private(set) var deviceTransports: [String: DeviceTransportInfo] = [:]
+
     /// 构建版本上报固定 "dev"：生产版本准入唯一无条件放行通道（apps/server/src/hub.ts:1464，
     /// plan 044 决策）；原生版本准入另立 plan。
     private let buildID = "dev"
@@ -122,6 +130,9 @@ final class CofluxClient {
             onError: { [weak self] message in self?.reportLocalError(message) },
             onInputBlocked: { [weak self] sessionID, blocked in
                 if blocked { self?.blockedSessionIDs.insert(sessionID) } else { self?.blockedSessionIDs.remove(sessionID) }
+            },
+            onDeviceTransport: { [weak self] daemonID, relayHost, rttMs in
+                self?.deviceTransports[daemonID] = DeviceTransportInfo(relayHost: relayHost, rttMs: rttMs)
             }
         ))
         if let token {
@@ -540,6 +551,11 @@ final class CofluxClient {
                 self.deviceRouter.suspendSession(daemonID: routedTask.daemonID, sessionID: sessionID)
             }
         }
+    }
+
+    /// 设备面板的测量持有（plan 077）：页面在场时对在线设备逐台调用，返回的闭包释放持有。
+    func retainDeviceMeasure(daemonID: String) -> () -> Void {
+        deviceRouter.retainMeasure(daemonID: daemonID)
     }
 
     func reportLocalError(_ message: String) {
