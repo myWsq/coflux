@@ -43,8 +43,33 @@ fn sibling_worker() -> String {
         .unwrap_or_default()
 }
 
+/// 启动清扫：删掉默认路径模式下进程已死的残留 socket。SIGTERM 路径有清理（见下方信号处理），
+/// 但测试/崩溃/SIGKILL 不走那条路，残留只能靠下一次启动兜底。仅 ESRCH 才删：
+/// PID 被复用或属他人（EPERM）时保留，宁可少删。
+fn sweep_dead_sockets() {
+    let Ok(entries) = std::fs::read_dir("/tmp") else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("coflux-sup-"))
+            .and_then(|n| n.strip_suffix(".sock"))
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid != std::process::id() as i32
+            && unsafe { libc::kill(pid, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn main() {
     let sock_path = std::env::var(SUPERVISOR_SOCK_ENV).unwrap_or_else(|_| format!("/tmp/coflux-sup-{}.sock", std::process::id()));
+    sweep_dead_sockets();
     let home = std::env::var("COFLUX_HOME").unwrap_or_else(|_| format!("{}/.coflux", std::env::var("HOME").unwrap_or_default()));
     let settings = Settings::load(&home);
     fda::write_status(&home); // macOS: 探测完全磁盘访问权限并落盘,供 cofluxd status/fda 展示引导；非 macOS 空操作
@@ -192,6 +217,24 @@ fn handle_worker(
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::sweep_dead_sockets;
+
+    #[test]
+    fn removes_dead_keeps_alive() {
+        // 999999 超出 macOS/Linux 默认 pid 上限，必死；自身 pid 必活。
+        let dead = std::path::PathBuf::from("/tmp/coflux-sup-999999.sock");
+        let alive = std::path::PathBuf::from(format!("/tmp/coflux-sup-{}.sock", std::process::id()));
+        std::fs::write(&dead, b"").unwrap();
+        std::fs::write(&alive, b"").unwrap();
+        sweep_dead_sockets();
+        assert!(!dead.exists(), "死 PID 的 socket 应被清掉");
+        assert!(alive.exists(), "活 PID 的 socket 应保留");
+        let _ = std::fs::remove_file(&alive);
     }
 }
 

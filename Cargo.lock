@@ -428,6 +428,7 @@ dependencies = [
  "coflux-protocol",
  "ed25519-dalek",
  "hex",
+ "libc",
  "portable-pty",
  "serde_json",
  "sha2",
