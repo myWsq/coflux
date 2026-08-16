@@ -547,6 +547,22 @@ public struct Coflux_V1_ClientToServer: Sendable {
     set {payload = .workspaceSetName(newValue)}
   }
 
+  public var deviceP2POffer: Coflux_V1_DeviceP2pOffer {
+    get {
+      if case .deviceP2POffer(let v)? = payload {return v}
+      return Coflux_V1_DeviceP2pOffer()
+    }
+    set {payload = .deviceP2POffer(newValue)}
+  }
+
+  public var deviceP2PChannelOpen: Coflux_V1_DeviceP2pChannelOpen {
+    get {
+      if case .deviceP2PChannelOpen(let v)? = payload {return v}
+      return Coflux_V1_DeviceP2pChannelOpen()
+    }
+    set {payload = .deviceP2PChannelOpen(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -572,6 +588,8 @@ public struct Coflux_V1_ClientToServer: Sendable {
     case deviceRelayConnect(Coflux_V1_DeviceRelayConnect)
     case terminalCreate(Coflux_V1_TerminalCreate)
     case workspaceSetName(Coflux_V1_WorkspaceSetName)
+    case deviceP2POffer(Coflux_V1_DeviceP2pOffer)
+    case deviceP2PChannelOpen(Coflux_V1_DeviceP2pChannelOpen)
 
   }
 
@@ -593,6 +611,11 @@ public struct Coflux_V1_AuthOk: Sendable {
   public var hasClientToken: Bool {self._clientToken != nil}
   /// Clears the value of `clientToken`. Subsequent reads from it will return its default value.
   public mutating func clearClientToken() {self._clientToken = nil}
+
+  /// P2P 建连用的 STUN URL 列表（`stun:host:port`，来自中心 COFLUX_STUN_URLS）。
+  /// 空 = 纯 host candidate（daemon 有公网 IP / 同 LAN 场景已可用）。认证成功即下发，
+  /// client 建 RTCPeerConnection（发 offer 之前）需要它。
+  public var iceServers: [String] = []
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1120,6 +1143,22 @@ public struct Coflux_V1_ServerToClient: Sendable {
     set {payload = .sessionAgentsUpdated(newValue)}
   }
 
+  public var deviceP2PAnswer: Coflux_V1_DeviceP2pAnswer {
+    get {
+      if case .deviceP2PAnswer(let v)? = payload {return v}
+      return Coflux_V1_DeviceP2pAnswer()
+    }
+    set {payload = .deviceP2PAnswer(newValue)}
+  }
+
+  public var deviceP2PChannelResult: Coflux_V1_DeviceP2pChannelResult {
+    get {
+      if case .deviceP2PChannelResult(let v)? = payload {return v}
+      return Coflux_V1_DeviceP2pChannelResult()
+    }
+    set {payload = .deviceP2PChannelResult(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -1147,6 +1186,8 @@ public struct Coflux_V1_ServerToClient: Sendable {
     case localUnpairResult(Coflux_V1_LocalUnpairResult)
     case deviceRelayGrant(Coflux_V1_DeviceRelayGrant)
     case sessionAgentsUpdated(Coflux_V1_SessionAgentsUpdated)
+    case deviceP2PAnswer(Coflux_V1_DeviceP2pAnswer)
+    case deviceP2PChannelResult(Coflux_V1_DeviceP2pChannelResult)
 
   }
 
@@ -1784,7 +1825,7 @@ extension Coflux_V1_TaskRemove: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{4}\u{4}local_unpair_request\0\u{3}device_relay_connect\0\u{3}terminal_create\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}\u{c}\u{1d}\u{1}\u{c}\u{1e}\u{1}\u{c}\u{1f}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{4}\u{4}local_unpair_request\0\u{3}device_relay_connect\0\u{3}terminal_create\0\u{3}device_p2p_offer\0\u{3}device_p2p_channel_open\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}\u{c}\u{1d}\u{1}\u{c}\u{1e}\u{1}\u{c}\u{1f}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2078,6 +2119,32 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .terminalCreate(v)
         }
       }()
+      case 35: try {
+        var v: Coflux_V1_DeviceP2pOffer?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceP2POffer(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceP2POffer(v)
+        }
+      }()
+      case 36: try {
+        var v: Coflux_V1_DeviceP2pChannelOpen?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceP2PChannelOpen(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceP2PChannelOpen(v)
+        }
+      }()
       default: break
       }
     }
@@ -2177,6 +2244,14 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .terminalCreate(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 34)
     }()
+    case .deviceP2POffer?: try {
+      guard case .deviceP2POffer(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 35)
+    }()
+    case .deviceP2PChannelOpen?: try {
+      guard case .deviceP2PChannelOpen(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 36)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -2191,7 +2266,7 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AuthOk"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}client_token\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}client_token\0\u{3}ice_servers\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2201,6 +2276,7 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.accountID) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self._clientToken) }()
+      case 3: try { try decoder.decodeRepeatedStringField(value: &self.iceServers) }()
       default: break
       }
     }
@@ -2217,12 +2293,16 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     try { if let v = self._clientToken {
       try visitor.visitSingularStringField(value: v, fieldNumber: 2)
     } }()
+    if !self.iceServers.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.iceServers, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Coflux_V1_AuthOk, rhs: Coflux_V1_AuthOk) -> Bool {
     if lhs.accountID != rhs.accountID {return false}
     if lhs._clientToken != rhs._clientToken {return false}
+    if lhs.iceServers != rhs.iceServers {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2802,7 +2882,7 @@ extension Coflux_V1_ClientOutdated: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToClient"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{4}\u{4}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{3}device_relay_grant\0\u{3}session_agents_updated\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{b}device_relay_status\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}\u{c}\u{1d}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{4}\u{4}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{3}device_relay_grant\0\u{3}session_agents_updated\0\u{3}device_p2p_answer\0\u{3}device_p2p_channel_result\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{b}device_relay_status\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}\u{c}\u{1d}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3122,6 +3202,32 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .sessionAgentsUpdated(v)
         }
       }()
+      case 35: try {
+        var v: Coflux_V1_DeviceP2pAnswer?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceP2PAnswer(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceP2PAnswer(v)
+        }
+      }()
+      case 36: try {
+        var v: Coflux_V1_DeviceP2pChannelResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceP2PChannelResult(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceP2PChannelResult(v)
+        }
+      }()
       default: break
       }
     }
@@ -3228,6 +3334,14 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .sessionAgentsUpdated?: try {
       guard case .sessionAgentsUpdated(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 34)
+    }()
+    case .deviceP2PAnswer?: try {
+      guard case .deviceP2PAnswer(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 35)
+    }()
+    case .deviceP2PChannelResult?: try {
+      guard case .deviceP2PChannelResult(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 36)
     }()
     case nil: break
     }
