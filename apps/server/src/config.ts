@@ -96,8 +96,9 @@ export const config = {
   /** web 控制台地址：拼进 daemon.authorizePending 下发的授权链接；反代/公网部署时用 COFLUX_WEB_URL 覆盖 */
   webUrl: process.env.COFLUX_WEB_URL ?? "http://127.0.0.1:5273",
 
-  /** 端口转发预览域：Host 形如 `<shortId>.<proxyHost>` 的请求按反代处理（见 plan 006）。
-   *  生产由部署侧配好泛解析 + 泛证书（Caddy）并设此 env；开发零配置落到 p.localhost（无需真 DNS，Host 头模拟）。 */
+  /** 端口转发预览域：Host 形如 `<shortId>-<proxyHost>` 的请求按反代处理（见 plan 006；2026-08-16
+   *  从 `.` 分隔挪为 `-` 分隔——预览域落一级子域，CF 橙云 Universal SSL 的 `*.coflux.dev` 才覆盖）。
+   *  生产由部署侧配好一级泛解析 + 泛证书（Caddy）并设此 env；开发零配置落到 p.localhost（无需真 DNS，Host 头模拟）。 */
   proxyHost: process.env.COFLUX_PROXY_HOST ?? "p.localhost",
   /** 预览链接 / 门禁回调用的协议：dev 无 https，cookie 不能带 Secure，故随之默认 http；生产默认 https。 */
   proxyScheme: (process.env.COFLUX_PROXY_SCHEME as "http" | "https" | undefined) ?? (isDev ? "http" : "https"),

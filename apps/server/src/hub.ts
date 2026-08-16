@@ -1299,7 +1299,7 @@ export class Hub {
     return [...byTask.entries()].map(([taskId, ports]) => ({ taskId, ports }));
   }
 
-  /** 端口转发版 proxy.issueAuth：校验 redirect 的 host 命中 <shortId>.<proxyHost> 且该 shortId
+  /** 端口转发版 proxy.issueAuth：校验 redirect 的 host 命中 <shortId>-<proxyHost> 且该 shortId
    * 当前路由属于本账号（跨账号严拒），签发一次性 code，拼出浏览器要跳转的回调 URL。 */
   private handleProxyIssueAuth(client: ClientConn, redirect: string): void {
     const parsed = parseProxyRedirect(redirect);
