@@ -65,8 +65,11 @@
   rendezvous，数据帧不再经中心控制 WS；relay 独立部署，与中心零连接、仅共享签名密钥对
 - [ ] 独立 relay·第二片：多节点就近（daemon/client 双端 RTT 探测上报、rendezvous 返回候选
   列表取两端之和最小、多地部署清单）——消灭 CN↔CN 绕 JP hairpin 的完整形态
-- [ ] P2P 直连（WebRTC DataChannel，Tailscale 式）：叠加在 relay 之上、relay 永远是打洞失败
-  的兜底层；需 worker 引入 Rust WebRTC 栈 + 浏览器矩阵扩测，等 relay 就近仍不够时再立项
+- [x] P2P 直连·第一片（plan 076，2026-08-16）：WebRTC DataChannel 端到端直连并入 direct
+  槽位（loopback > P2P > relay，promotion 复用）；信令照 rendezvous 三角走中心控制 WS
+  （vanilla ICE），worker 引 webrtc-rs，分片流适配 30MiB 帧；黑盒以 werift 跨栈互通全链路
+  4 用例。STUN 部署（coturn on relay 节点）见 architecture.md，实机开通与打洞成功率生产
+  实测待用户；iOS/浏览器实机矩阵与 trickle ICE 为后续迭代
 
 ### 4. macOS 原生客户端（后续增强，暂缓）
 

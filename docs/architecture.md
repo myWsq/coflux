@@ -1,9 +1,10 @@
 # coflux 架构设计
 
-> 状态：本地优先架构已实现；relay 数据面已剥离为可多节点部署的独立服务（plan 043/065）。supervisor/sessiond
+> 状态：本地优先架构已实现；relay 数据面已剥离为可多节点部署的独立服务（plan 043/065）；
+> 非同机设备可经 P2P WebRTC DataChannel 端到端直连（plan 076）。supervisor/sessiond
 > 是唯一 PTY、VT、history、holder 与 sequence authority；同机 web 优先直连 loopback gateway，
-> 中心只负责账号、设备、项目/task 编排、relay rendezvous（token 签发）与有界 checkpoint。
-> 远端或本地直连不可用时自动经独立部署的 `coflux-relay` 中转。
+> 中心只负责账号、设备、项目/task 编排、relay/P2P rendezvous 与有界 checkpoint。
+> 直连（loopback 或 P2P）不可用时自动经独立部署的 `coflux-relay` 中转。
 
 ## 1. 产品形态
 
@@ -11,19 +12,20 @@ coflux 在用户任意节点运行 daemon，在本机 PTY 中驱动 Claude Code�
 web client 既可以经中心触达远端 daemon，也可以在 client 与 daemon 同机时直接连接 daemon：
 
 ```text
-Web ── /client control WS ──▶ Server ──(rendezvous：签 token+通知拨号)──▶ Worker
+Web ── /client control WS ──▶ Server ──(rendezvous：签 token / 转 SDP+通知拨号)──▶ Worker
  │                              ├─ Postgres：账号/设备/项目/task            │
- │        远端 / direct 不可用   └─ 最近一个派生 checkpoint                 │ UDS
+ │        直连均不可用           └─ 最近一个派生 checkpoint                 │ UDS
  ├── wss://relay/…?token ──▶ coflux-relay ◀── wss 拨号 ───────────────────┤
  │        （每 channel 一条 WS，opaque DeviceEnvelope bytes，零解析）        ▼
- │                                                                    Supervisor
- └──── ws://127.0.0.1:8788 ─────── direct Device channel ────────────▶ / sessiond
-                                                                        │
+ ├──── WebRTC DataChannel ── P2P 端到端直连（不经任何中间节点）──────────▶ Supervisor
+ │                                                                     / sessiond
+ └──── ws://127.0.0.1:8788 ─────── direct Device channel（同机）───────▶   │
                                                                         └─ PTY + VT + history
 ```
 
 daemon 仍主动外连中心，因此 NAT 后的远端设备不需要开放入站端口。loopback gateway 只监听本机，
-不会把 daemon 暴露到 LAN 或公网。
+不会把 daemon 暴露到 LAN 或公网；P2P 的 UDP socket 由 ICE/DTLS 保护，只与信令认证过的对端
+握手。
 
 ## 2. Authority 边界
 
@@ -89,19 +91,42 @@ worker 重启时 supervisor 与 PTY 不动；新 worker 通过 resync/catalog �
 
 ## 5. DeviceTransport
 
-### 5.1 direct
+### 5.1 direct 槽位：loopback 与 P2P
 
-desktop web 默认尝试 `ws://127.0.0.1:8788`。首次配对由已认证中心连接协助安装 Origin 绑定的持久
-grant；之后浏览器身份、grant 与 generation 可在中心离线时复用。gateway 只接受精确 Origin，握手
-校验签名、nonce、期限和速率限制。
+direct 槽位内部有两个候选，优先级 loopback > P2P；槽位整体与 relay 竞争（hedge + generation
+promotion，见 5.2）。
 
-cached direct 的 terminal 与普通 Device RPC 不等待中心：browser → loopback gateway → worker → UDS
-→ sessiond。中心仍可并行承载低频 control 和 checkpoint，但不在热路径上。
+**loopback**：desktop web 默认尝试 `ws://127.0.0.1:8788`。首次配对由已认证中心连接协助安装
+Origin 绑定的持久 grant；之后浏览器身份、grant 与 generation 可在中心离线时复用。gateway 只
+接受精确 Origin，握手校验签名、nonce、期限和速率限制。cached direct 的 terminal 与普通
+Device RPC 不等待中心：browser → loopback gateway → worker → UDS → sessiond。中心仍可并行
+承载低频 control 和 checkpoint，但不在热路径上。
+
+**P2P（WebRTC DataChannel，plan 076）**：非同机设备的直连主路径。信令照 relay rendezvous
+三角走中心控制 WS（client 带完整 offer SDP → 中心校验归属并附 account/scopes 转发 → worker
+回 answer），vanilla ICE（两端各等 gathering 完成一次性交换，不做 trickle——建连 1-3s 由
+relay 先行 + promotion 掩盖）；中心不签 token，对端身份由信令信道已认证 + SDP 内 DTLS
+fingerprint 绑定保证。PeerConnection 按 daemon 常驻（client 有完整需求时建立），DataChannel
+按 logical channel（label == channelId），channel 级 scopes 仍由中心逐 channel 授予。帧走
+长度前缀分片流（`P2P_CHUNK_BYTES` = 16KiB，取 webrtc-rs 接收上限与 Chrome 256KiB 的交集），
+出向有 SCTP 缓冲背压。**P2P 属在线授权语义**：与 relay 一样，中心控制连接断开时 worker 关闭
+全部 PeerConnection，client 同步对称清理——它没有 loopback grant 那样的离线存活。
+
+worker 侧经 `webrtc`（webrtc-rs）实现 answer 端：枚举全部非 loopback 接口（LAN/Tailscale/
+公网 v4v6）作 host candidates（该库不做接口枚举，bind 什么地址 candidate 就是什么），answer
+的 DTLS 角色显式设 passive（对端做 client——双方实现互通性最好的路径）。STUN 列表由中心
+`COFLUX_STUN_URLS` 下发两端（authOk / deviceP2pDial），默认空 = 纯 host candidate。
+
+预期设定：daemon 在有公网 IP 的 VPS 上时建连近必成（client 出站方向 connectivity check 即可
+配对）；同 LAN host candidate 直连；CN↔CN 打洞成功时流量不出境（绕开 hairpin 与 GFW）；
+**P2P 不解决 GFW 干扰**——跨境线路被掐时它与 relay 走同样的 IP 路径同样受影响；对称 NAT/
+CGNAT 打洞失败自动回落 relay，零损失。打洞成功率待生产实测回填。
 
 ### 5.2 relay 与自动切换
 
-无缓存、固定端口占用、Origin/LNA/loopback permission 拒绝或 direct 故障时，DeviceRouter 立即走
-relay。relay 是独立部署的 `crates/relay` 单二进制（plan 043）：中心在 rendezvous 阶段校验账号/
+无缓存、固定端口占用、Origin/LNA/loopback permission 拒绝或 direct 槽位（loopback 与 P2P）
+故障时，DeviceRouter 立即走 relay；P2P 建连慢于 200ms hedge，常态是 relay 先赢、P2P 就绪后
+以更高 generation 自动 promotion。relay 是独立部署的 `crates/relay` 单二进制（plan 043）：中心在 rendezvous 阶段校验账号/
 daemon 归属后给两端各签一张短时（≤120s）单次 ed25519 token 并拼出完整拨号 URL；client 与 worker
 各自拨一条 channel 专属 WS，relay 按 channelId 配对成 opaque 字节管道——零解析 DeviceEnvelope、
 无账号 DB、限速限量与旧中心内嵌 relay 相同。数据帧从此不经过中心控制 WS；中心零 channel 状态，
@@ -127,6 +152,25 @@ COFLUX_RELAY_NODES='[{"id":"jp","url":"wss://relay-jp.example.com"},{"id":"us","
 都回退到它。改清单后重启中心，daemon 随控制 WS 重连取得新列表。只部署单节点时可继续只设
 `COFLUX_RELAY_URL`，中心会合成 `id=default` 的单项清单，拨号行为与原来一致。relay 仍不向中心注册，
 也不持账号/节点数据库；两者之间没有连接，耦合面只有共享签名密钥。
+
+**STUN 部署（P2P 打洞增强，可选）**：不配 STUN 时 P2P 只用 host candidates——daemon 在公网
+VPS / 与 client 同 LAN 的场景已可用；要覆盖双端都在 NAT 后的打洞才需要 STUN。在 relay 节点
+（如 owo-jp-gw）旁跑标准 coturn 即可：
+
+```sh
+apt install coturn
+# /etc/turnserver.conf 只需两行（纯 STUN，零认证零中继）：
+#   stun-only
+#   listening-port=3478
+systemctl enable --now coturn
+# VPS 防火墙放行 UDP 3478；中心配置并重启：
+COFLUX_STUN_URLS=stun:relay-jp.coflux.dev:3478
+```
+
+中心把该列表随 authOk 下发 client、随 deviceP2pDial 下发 daemon；两端各自向 STUN 询问反射
+地址生成 srflx candidates。无 TURN——coflux relay 本身就是打洞失败的兜底层。另注意 daemon
+所在 VPS 的防火墙需放行**出站已建立的 UDP 会话**（ICE 的 UDP socket 是 ephemeral 端口；
+worker 主动向 client candidate 发起 check，conntrack 放行回包即可，无需入站白名单）。
 
 mobile 已冻结，不启用 loopback direct；它使用同一 DeviceRouter 的 relay-only 配置，因此没有旧
 `taskAttach/ptyInput/ptyOutput/clientExec/clientFs*` 兼容路径。
@@ -187,8 +231,9 @@ worker 至多每 2 秒请求脏 session 的当前 snapshot，并通过独立 coa
 | 故障 | 行为 |
 |---|---|
 | client→server control 断开 | cached direct session lane 继续；冷启动与新业务编排不可用 |
-| direct 失败/权限拒绝 | 自动 rendezvous+relay；不把 daemon 误报为 offline |
-| relay/中心失败 | direct 已建立时继续 catalog/attach/input/resize/stop；中心离线时无法开新 relay channel（rendezvous 依赖中心） |
+| direct 失败/权限拒绝 | loopback 失败续试 P2P，均败自动 rendezvous+relay；不把 daemon 误报为 offline |
+| P2P 打洞失败/中断 | 回落 relay；relay 稳定后按退避重试 loopback→P2P promotion |
+| relay/中心失败 | loopback direct 已建立时继续 catalog/attach/input/resize/stop；中心离线时无法开新 relay/P2P channel（rendezvous/信令依赖中心），已建 P2P 随中心断开而关闭（在线授权语义） |
 | worker 重启 | supervisor/PTY 存活；generation 增加并重建 channel/catalog |
 | server 重启 | Postgres 元数据 + daemon catalog/checkpoint 对账；不杀 unknown orphan |
 | 慢中心 | relay/checkpoint 可丢弃或滞后；本地 PTY 与 direct channel继续 |
