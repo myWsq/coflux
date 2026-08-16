@@ -24,9 +24,10 @@ use coflux_protocol::{DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES, P2P_CHUNK
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Notify;
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
+use rtc::peer_connection::transport::RTCDtlsRole;
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceGatheringState,
-    RTCIceServer, RTCPeerConnectionState, RTCSessionDescription,
+    RTCIceServer, RTCPeerConnectionState, RTCSessionDescription, SettingEngine,
 };
 
 use crate::device::{ChannelReceiver, DeviceRuntime};
@@ -139,10 +140,17 @@ impl P2pRuntime {
             connection_id: dial.connection_id.clone(),
             gathered: gathered.clone(),
         });
+        // answer 侧选 DTLS passive（对端做 client）：浏览器/werift 作为 offerer 主动发起
+        // DTLS 握手是双方实现最常走、互通性最好的路径。
+        let mut setting_engine = SettingEngine::default();
+        setting_engine
+            .set_answering_dtls_role(RTCDtlsRole::Server)
+            .map_err(|error| format!("dtls role: {error}"))?;
         let pc = PeerConnectionBuilder::new()
             .with_configuration(config)
+            .with_setting_engine(setting_engine)
             .with_handler(handler)
-            .with_udp_addrs(vec!["0.0.0.0:0"])
+            .with_udp_addrs(local_bind_addrs())
             .with_data_channel_send_buffer_limit(SEND_BUFFER_LIMIT)
             .build()
             .await
@@ -355,6 +363,35 @@ async fn pump_out(dc: &Arc<dyn DataChannel>, receiver: &mut ChannelReceiver) -> 
 /// channel 级完整校验仍在 `open_p2p` 内做）。
 fn valid_wire_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128 && !value.starts_with("__coflux-")
+}
+
+/// webrtc-rs 不做接口枚举：bind 什么地址，host candidate 就是什么地址——wildcard 0.0.0.0
+/// 会产生不可路由 candidate。这里枚举全部非 loopback 接口（LAN、Tailscale、公网 v4/v6
+/// 都要进 candidates），每次 dial 现取（网络环境会变），并预试 bind 过滤不可用地址。
+fn local_bind_addrs() -> Vec<String> {
+    let mut addrs = Vec::new();
+    if let Ok(interfaces) = if_addrs::get_if_addrs() {
+        for interface in interfaces {
+            if interface.is_loopback() {
+                continue;
+            }
+            let ip = interface.ip();
+            // fe80:: 链路本地地址不带 scope id 无法作为 candidate 路由，跳过。
+            if let std::net::IpAddr::V6(v6) = ip {
+                if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                    continue;
+                }
+            }
+            let addr = if ip.is_ipv6() { format!("[{ip}]:0") } else { format!("{ip}:0") };
+            if std::net::UdpSocket::bind(&addr).is_ok() {
+                addrs.push(addr);
+            }
+        }
+    }
+    if addrs.is_empty() {
+        addrs.push("0.0.0.0:0".into());
+    }
+    addrs
 }
 
 /// 长度前缀分片流重组器。SCTP reliable+ordered 保证字节序，跨 message 累积，
