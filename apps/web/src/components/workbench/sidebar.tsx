@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, MessageSquare, Monitor, Package, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, LoaderCircle, MessageSquare, Monitor, Package, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
@@ -57,6 +57,15 @@ function persistSidebarWidth(width: number) {
   }
 }
 
+/** 乐观工作区条目（plan 078）：创建请求发出后、服务端广播到达前的占位行。
+ * id 是本地生成的假 id（pending-ws-N），永不进入 store，也不产生任何网络请求。 */
+export type PendingWorkspace = {
+  id: string;
+  projectId: string;
+  branch: string;
+  daemonId: string;
+};
+
 type SidebarProps = {
   client: CofluxClient;
   selectedWorkspaceId: string | null;
@@ -75,6 +84,8 @@ type SidebarProps = {
   /** 新建工作区菜单当前打开的项目（受控：+ 按钮/右键菜单项/Cmd+Ctrl+N 快捷键共用同一个锚点菜单） */
   createMenuProjectId: string | null;
   onCreateMenuProjectIdChange: (projectId: string | null) => void;
+  /** 乐观创建中的工作区（plan 078）：渲染在对应项目的工作区列表末尾 */
+  pendingWorkspaces: PendingWorkspace[];
 };
 
 export function Sidebar(props: SidebarProps) {
@@ -86,6 +97,9 @@ export function Sidebar(props: SidebarProps) {
   const localSessions = useStore(client.store, (state) => state.localSessions);
   const deviceTransports = useStore(client.store, (state) => state.deviceTransports);
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
+  // 首快照未到之前 projects 是空数组：数据没到 ≠ 数据为空（plan 078 第③跳），
+  // 「还没有项目」引导空态要等快照确认真空才渲染。
+  const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
   // 默认全部展开，只记折叠集合（新项目出现时自然是展开态）
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
@@ -224,7 +238,7 @@ export function Sidebar(props: SidebarProps) {
             </Tooltip>
           </div>
 
-          {projects.length === 0 ? (
+          {projects.length === 0 && snapshotRevision > 0 ? (
             <button
               className="mx-1 flex w-[calc(100%-0.5rem)] flex-col items-start rounded-md border border-dashed border-border px-3 py-3.5 text-left transition-colors hover:bg-accent/60"
               onClick={() => props.onImportProject()}
@@ -237,6 +251,7 @@ export function Sidebar(props: SidebarProps) {
           <div className="space-y-0.5">
             {projects.map((project) => {
               const projectWorkspaces = workspacesOf(project.id);
+              const projectPending = props.pendingWorkspaces.filter((item) => item.projectId === project.id);
               const daemon = daemons.find((item) => item.daemonId === project.daemonId);
               const expanded = !collapsedIds.has(project.id);
 
@@ -301,7 +316,7 @@ export function Sidebar(props: SidebarProps) {
                     </div>
                   </ContextMenu>
 
-                  {expanded && projectWorkspaces.length > 0 ? (
+                  {expanded && (projectWorkspaces.length > 0 || projectPending.length > 0) ? (
                     <div className="ml-3 space-y-0.5 border-l border-border pl-1.5">
                       {projectWorkspaces.map((workspace) => {
                         const label =
@@ -432,6 +447,25 @@ export function Sidebar(props: SidebarProps) {
                         </ContextMenu>
                         );
                       })}
+                      {/* 乐观创建中的工作区（plan 078）：无右键菜单/删除入口，不可点击——
+                          点击选中已由创建动作完成，行本身只是进度占位。 */}
+                      {projectPending.map((pending) => (
+                        <div
+                          key={pending.id}
+                          className={cn(
+                            "relative flex h-7 items-center rounded-md",
+                            pending.id === props.selectedWorkspaceId
+                              ? "bg-accent text-foreground"
+                              : "text-secondary-foreground",
+                          )}
+                        >
+                          <span className="flex min-w-0 flex-1 items-center gap-2 px-2">
+                            <LoaderCircle className="size-3 shrink-0 animate-spin opacity-70" />
+                            <span className="min-w-0 flex-1 truncate text-base">{pending.branch}</span>
+                            <span className="shrink-0 text-xs text-muted-foreground">创建中</span>
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   ) : null}
                 </div>
