@@ -69,11 +69,23 @@ export function selectRelayNode<T extends { id: string }>(nodes: readonly T[], h
  * 非 vX.Y.Z 形态（builtin / 本地 cargo 产物）一律放行：dev 构建不受此门限制。 */
 const MIN_RELAY_DIAL_VERSION = [0, 13, 0];
 export function supportsRelayDial(workerVersion: string): boolean {
+  return atLeastVersion(workerVersion, MIN_RELAY_DIAL_VERSION);
+}
+
+/** P2P 信令（deviceP2pDial/ChannelGrant，plan 076）自 v0.26.0 起才被 worker 认识；
+ * 同 relay 门：老 worker 静默丢弃未知 payload，client 只会干等到超时后回落 relay。 */
+const MIN_P2P_DIAL_VERSION = [0, 26, 0];
+export function supportsP2pDial(workerVersion: string): boolean {
+  return atLeastVersion(workerVersion, MIN_P2P_DIAL_VERSION);
+}
+
+/** 非 vX.Y.Z 形态（builtin / 本地 cargo 产物）一律放行：dev 构建不受版本门限制。 */
+function atLeastVersion(workerVersion: string, min: readonly number[]): boolean {
   const parsed = /^v?(\d+)\.(\d+)\.(\d+)/.exec(workerVersion.trim());
   if (!parsed) return true;
   for (let i = 0; i < 3; i++) {
     const got = Number(parsed[i + 1]);
-    if (got !== MIN_RELAY_DIAL_VERSION[i]) return got > MIN_RELAY_DIAL_VERSION[i];
+    if (got !== min[i]) return got > min[i];
   }
   return true;
 }

@@ -38,6 +38,9 @@ import {
   type AccountId,
   type DaemonId,
   type DeviceRelayConnect,
+  type DeviceP2pOffer,
+  type DeviceP2pChannelOpen,
+  type DeviceP2pAnswerReport,
   type DaemonToServer,
   type ClientToServer,
   type ServerToDaemonPayload,
@@ -70,7 +73,7 @@ import {
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
 import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
-import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, selectRelayNode, supportsRelayDial, validRelayId } from "./relay-rendezvous.js";
+import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, selectRelayNode, supportsP2pDial, supportsRelayDial, validRelayId } from "./relay-rendezvous.js";
 import { LocalControlPlane } from "./local-control.js";
 import { verifyPassword } from "./auth.js";
 
@@ -1082,6 +1085,11 @@ export class Hub {
         await this.reconcileDaemonSessions(conn.daemonId!, conn.accountId!, value.sessions);
         break;
       }
+      case "deviceP2pAnswerReport": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) this.handleDeviceP2pAnswerReport(daemon.info.daemonId, msg.payload.value);
+        break;
+      }
       case "relayHome": {
         const daemon = this.currentDaemon(conn);
         if (!daemon) break;
@@ -1412,6 +1420,14 @@ export class Hub {
       }
       case "deviceRelayConnect": {
         this.handleDeviceRelayConnect(client, msg.payload.value);
+        break;
+      }
+      case "deviceP2pOffer": {
+        this.handleDeviceP2pOffer(client, msg.payload.value);
+        break;
+      }
+      case "deviceP2pChannelOpen": {
+        this.handleDeviceP2pChannelOpen(client, msg.payload.value);
         break;
       }
       case "clientRemoveDevice": {
@@ -1790,7 +1806,7 @@ export class Hub {
 
     client.accountId = accountId;
     client.tokenHash = tokenHash;
-    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued } });
+    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, iceServers: config.stunUrls } });
   }
 
   /** 口令校验通过的合法用户：查已有个人账号，无则 lazy 建号 + owner membership。
@@ -1960,6 +1976,104 @@ export class Hub {
         relayUrl: buildRelayPipeUrl(relayNode.url, this.relayTokens.sign(request.channelId, "client", ttl)),
       },
     });
+  }
+
+  /** P2P 信令（plan 076）：中心只做归属校验 + SDP 转发，不签 token、不持连接状态。
+   * 唯一的短时状态是 answer 回程路由（connectionId → 发起 client），TTL 内未回即弃；
+   * 中心重启丢 pending 只导致 client 超时回落 relay。 */
+  private readonly p2pPending = new Map<string, { client: ClientConn; daemonId: DaemonId; at: number }>();
+
+  private handleDeviceP2pOffer(client: ClientConn, request: DeviceP2pOffer): void {
+    const fail = (error: string) =>
+      this.sendClient(client, { case: "deviceP2pAnswer", value: { connectionId: request.connectionId, ok: false, error } });
+
+    if (!client.accountId) return void fail("client 未认证");
+    if (
+      request.protocolVersion !== DEVICE_PROTOCOL_VERSION ||
+      !validRelayId(request.daemonId) ||
+      !validRelayId(request.connectionId) ||
+      request.connectionId.startsWith("__coflux-") ||
+      !validRelayId(request.clientInstanceId) ||
+      request.sdp.length === 0 ||
+      request.sdp.length > 64 * 1024
+    ) {
+      return void fail("p2p connection/principal/version 无效");
+    }
+    if (!allowRendezvous(client)) return void fail("rendezvous 频率超限");
+
+    const daemon = this.daemons.get(request.daemonId);
+    if (!daemon || daemon.accountId !== client.accountId) return void fail("daemon 不在线或不属于本账号");
+    if (!supportsP2pDial(daemon.info.workerVersion)) {
+      return void fail(`设备 worker 版本过旧（${daemon.info.workerVersion}），不支持 P2P 直连；在该设备上运行 \`cofluxd update && cofluxd restart\` 后重试`);
+    }
+
+    // lazy sweep：借每次 offer 清过期 pending，无独立定时器。
+    const now = Date.now();
+    for (const [id, entry] of this.p2pPending) {
+      if (now - entry.at > config.relayTokenTtlMs) this.p2pPending.delete(id);
+    }
+    if (this.p2pPending.size >= 256) return void fail("p2p 信令待处理数超限");
+    this.p2pPending.set(request.connectionId, { client, daemonId: request.daemonId, at: now });
+
+    this.sendDaemon(daemon, {
+      case: "deviceP2pDial",
+      value: {
+        connectionId: request.connectionId,
+        accountId: client.accountId,
+        clientInstanceId: request.clientInstanceId,
+        sdp: request.sdp,
+        iceServers: config.stunUrls,
+        protocolVersion: DEVICE_PROTOCOL_VERSION,
+      },
+    });
+  }
+
+  private handleDeviceP2pAnswerReport(daemonId: DaemonId, report: DeviceP2pAnswerReport): void {
+    const pending = this.p2pPending.get(report.connectionId);
+    if (!pending || pending.daemonId !== daemonId) return;
+    this.p2pPending.delete(report.connectionId);
+    this.sendClient(pending.client, {
+      case: "deviceP2pAnswer",
+      value: { connectionId: report.connectionId, ok: report.ok, sdp: report.sdp, error: report.error },
+    });
+  }
+
+  /** channel 级授权与 relay rendezvous 同语义：scopes 由中心全量授予、daemon 信任控制面。
+   * 授权通过但 worker 侧连接已消亡时不再有补充消息——client 靠 DataChannel open 超时回落。 */
+  private handleDeviceP2pChannelOpen(client: ClientConn, request: DeviceP2pChannelOpen): void {
+    const fail = (error: string) =>
+      this.sendClient(client, { case: "deviceP2pChannelResult", value: { channelId: request.channelId, ok: false, error } });
+
+    if (!client.accountId) return void fail("client 未认证");
+    if (
+      request.protocolVersion !== DEVICE_PROTOCOL_VERSION ||
+      !validRelayId(request.daemonId) ||
+      !validRelayId(request.connectionId) ||
+      !validRelayId(request.channelId) ||
+      request.channelId.startsWith("__coflux-") ||
+      !validRelayId(request.clientInstanceId) ||
+      request.transportGeneration <= 0n
+    ) {
+      return void fail("p2p channel/principal/version 无效");
+    }
+    if (!allowRendezvous(client)) return void fail("rendezvous 频率超限");
+
+    const daemon = this.daemons.get(request.daemonId);
+    if (!daemon || daemon.accountId !== client.accountId) return void fail("daemon 不在线或不属于本账号");
+
+    this.sendDaemon(daemon, {
+      case: "deviceP2pChannelGrant",
+      value: {
+        connectionId: request.connectionId,
+        channelId: request.channelId,
+        accountId: client.accountId,
+        clientInstanceId: request.clientInstanceId,
+        transportGeneration: request.transportGeneration,
+        scopes: [DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE],
+        protocolVersion: DEVICE_PROTOCOL_VERSION,
+      },
+    });
+    this.sendClient(client, { case: "deviceP2pChannelResult", value: { channelId: request.channelId, ok: true } });
   }
 
   private async removeDevice(client: ClientConn, daemonId: DaemonId): Promise<void> {

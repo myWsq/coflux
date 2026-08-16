@@ -125,6 +125,13 @@ export const config = {
   relayNodes,
   /** relay token TTL：上限 120s 必须 ≤ relay 侧 tombstone 窗口，保证 token 重放必然失败。 */
   relayTokenTtlMs: Math.max(10_000, Math.min(120_000, int("COFLUX_RELAY_TOKEN_TTL_MS", 60_000))),
+  /** P2P 直连（plan 076）：STUN URL 列表（逗号分隔，形如 `stun:host:3478`），随 authOk 下发
+   * client、随 deviceP2pDial 下发 daemon。空 = 纯 host candidate（daemon 有公网 IP / 同 LAN
+   * 场景已可用），STUN 只为跨 NAT 打洞增益。 */
+  stunUrls: (process.env.COFLUX_STUN_URLS ?? "")
+    .split(",")
+    .map((url) => url.trim())
+    .filter((url) => url.startsWith("stun:") || url.startsWith("stuns:")),
   /** lifecycle prepared template 的投递/执行窗口；过期 frame 会被 worker 拒绝。 */
   preparedOperationTtlMs: Math.max(30_000, Math.min(30 * 60_000, int("COFLUX_PREPARED_OPERATION_TTL_MS", 5 * 60_000))),
 
