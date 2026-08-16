@@ -14,7 +14,7 @@ import {
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
-import { Sidebar } from "@/components/workbench/sidebar";
+import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import type { WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 import { WORKSPACE_KEY } from "@/config";
@@ -33,6 +33,10 @@ type Selection = { kind: "workspace" | "device"; id: string };
 
 // 持久化沿用 WORKSPACE_KEY：设备加 "device:" 前缀，裸字符串即工作区 id（旧值天然兼容）。
 const DEVICE_SELECTION_PREFIX = "device:";
+
+// 乐观创建（plan 078）的本地兜底：服务端既不广播成功也不广播错误时，撤掉 pending 条目，
+// 避免永久滞留。与遮罩的 8s 无关——工作区创建含 daemon 侧 git worktree add，慢链路可能更长。
+const PENDING_CREATE_TIMEOUT_MS = 15_000;
 
 function readStoredSelection(): Selection | null {
   const raw = localStorage.getItem(WORKSPACE_KEY);
@@ -66,6 +70,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // 新建工作区菜单当前打开的项目：Sidebar 的 + 按钮/右键菜单与 Cmd+Ctrl+N 快捷键共用同一份受控状态。
   const [createMenuProjectId, setCreateMenuProjectId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  // 乐观工作区条目（plan 078）：存组件层、渲染时与 store 数据合并，不进共享 store——
+  // 快照对 workspaces 是整体替换，注入的假条目会被无声抹掉；共享包也不该背 web 专有语义。
+  const [pendingWorkspaces, setPendingWorkspaces] = useState<PendingWorkspace[]>([]);
+  const pendingWorkspaceTimersRef = useRef(new Map<string, number>());
+  const pendingWorkspaceSeqRef = useRef(0);
   // 只指向当前 active 的 WorkspaceTerminal 实例：ref 只挂在 active===true 的那个元素上（见下方渲染），
   // 保活但隐藏的实例永远拿不到这份 ref，全局快捷键天然只广播给 active 实例。
   const activeTerminalRef = useRef<WorkspaceTerminalHandle | null>(null);
@@ -88,21 +97,29 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   const selectedWorkspace = selection?.kind === "workspace" ? (workspaces.find((workspace) => workspace.id === selection.id) ?? null) : null;
   const selectedDevice = selection?.kind === "device" ? (daemons.find((daemon) => daemon.daemonId === selection.id) ?? null) : null;
+  // 选中的乐观条目（plan 078）：pending 期间 selectedWorkspace 解析为空，由它接管主区渲染。
+  const pendingSelected = selection?.kind === "workspace" ? (pendingWorkspaces.find((item) => item.id === selection.id) ?? null) : null;
   // 主区实际渲染的工作区：workspace 选中即其本身；device 选中解析 canonical 目录工作区（可能为空 → 设备空态）
   const activeWorkspace = selection?.kind === "device" ? canonicalDirWorkspaceOf(selection.id) : selectedWorkspace;
   const activeWorkspaceId = activeWorkspace?.id ?? null;
-  const selectedDaemonId = selection?.kind === "device" ? selection.id : selectedWorkspace?.daemonId;
+  // pending 期间继续持有目标设备的 route：创建往返要走它，松开再重连只会更慢。
+  const selectedDaemonId = selection?.kind === "device" ? selection.id : (selectedWorkspace?.daemonId ?? pendingSelected?.daemonId);
 
   // 快照后校准选中项：无效选择回退到首项目 main workspace（或任一工作区）。
   // device 选中以设备仍在 daemons 为有效判据（离线设备仍可进详情看现场）。
+  // 乐观条目（plan 078）天然不在 workspaces 里：pending 期间视为有效，否则
+  // "点击后立即切换过去"会在同一帧被这里撤销，表现为点了没反应。
   useEffect(() => {
     if (snapshotRevision === 0) return;
+    const isPending = selection?.kind === "workspace" && pendingWorkspaces.some((item) => item.id === selection.id);
     const valid =
-      selection?.kind === "device"
+      isPending ||
+      (selection?.kind === "device"
         ? daemons.some((daemon) => daemon.daemonId === selection.id)
-        : selection?.kind === "workspace" && workspaces.some((workspace) => workspace.id === selection.id);
+        : selection?.kind === "workspace" && workspaces.some((workspace) => workspace.id === selection.id));
     if (selection && valid) {
-      persistSelection(selection);
+      // 假 id 不落盘：刷新后读回的 pending id 必然失效，persist 了也得靠这里再回退一次。
+      if (!isPending) persistSelection(selection);
       return;
     }
 
@@ -112,7 +129,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const next: Selection | null = fallback ? { kind: "workspace", id: fallback.id } : null;
     setSelection(next);
     persistSelection(next);
-  }, [snapshotRevision, projects, workspaces, daemons, selection]);
+  }, [snapshotRevision, projects, workspaces, daemons, selection, pendingWorkspaces]);
 
   // 浏览器标签页标题跟随当前选中：项目工作区用项目名，设备详情用设备名。
   useEffect(() => {
@@ -189,11 +206,34 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   // workspaceCreate 无请求-响应关联：记下发起时已知的工作区 id，
   // 广播中新出现的该项目工作区即本次创建的，自动切换过去（同终端创建的识别模式）。
-  const pendingWorkspaceCreateRef = useRef<{ projectId: string; knownIds: Set<string> } | null>(null);
+  // pendingId 把这条识别与乐观条目（plan 078）绑定：转正/失败/超时都按它收敛。
+  const pendingWorkspaceCreateRef = useRef<{ projectId: string; knownIds: Set<string>; pendingId: string } | null>(null);
+
+  function removePendingWorkspace(pendingId: string) {
+    const timer = pendingWorkspaceTimersRef.current.get(pendingId);
+    if (timer !== undefined) window.clearTimeout(timer);
+    pendingWorkspaceTimersRef.current.delete(pendingId);
+    setPendingWorkspaces((prev) => prev.filter((item) => item.id !== pendingId));
+  }
 
   function createWorkspace(project: Project, branch: string, createNew: boolean) {
-    pendingWorkspaceCreateRef.current = { projectId: project.id, knownIds: new Set(client.store.getState().workspaces.map((workspace) => workspace.id)) };
-    // name = branch（未起名语义）；创建成功后由下面的效果自动切换过去
+    const pendingId = `pending-ws-${++pendingWorkspaceSeqRef.current}`;
+    pendingWorkspaceCreateRef.current = {
+      projectId: project.id,
+      knownIds: new Set(client.store.getState().workspaces.map((workspace) => workspace.id)),
+      pendingId,
+    };
+    // name = branch（未起名语义）；乐观条目下一帧即出现在侧栏并被选中，主区显示创建中
+    setPendingWorkspaces((prev) => [...prev, { id: pendingId, projectId: project.id, branch, daemonId: project.daemonId }]);
+    selectWorkspace(pendingId);
+    pendingWorkspaceTimersRef.current.set(
+      pendingId,
+      window.setTimeout(() => {
+        // 成功/失败广播都没到的兜底：撤条目，选中校准会把它回退到有效工作区。
+        if (pendingWorkspaceCreateRef.current?.pendingId === pendingId) pendingWorkspaceCreateRef.current = null;
+        removePendingWorkspace(pendingId);
+      }, PENDING_CREATE_TIMEOUT_MS),
+    );
     client.send({ case: "workspaceCreate", value: { projectId: project.id, name: branch, branch, createNew } });
   }
 
@@ -203,6 +243,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const created = workspaces.find((workspace) => workspace.projectId === pending.projectId && !pending.knownIds.has(workspace.id));
     if (created) {
       pendingWorkspaceCreateRef.current = null;
+      removePendingWorkspace(pending.pendingId);
       selectWorkspace(created.id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -210,7 +251,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   // 创建失败（error 广播）时丢弃 pending，避免误认后续他端创建的工作区
   useEffect(() => {
-    if (lastError) pendingWorkspaceCreateRef.current = null;
+    if (!lastError) return;
+    const pending = pendingWorkspaceCreateRef.current;
+    pendingWorkspaceCreateRef.current = null;
+    if (pending) removePendingWorkspace(pending.pendingId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastError]);
 
@@ -354,6 +398,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onRenameDevice={setRenameDevice}
         createMenuProjectId={createMenuProjectId}
         onCreateMenuProjectIdChange={setCreateMenuProjectId}
+        pendingWorkspaces={pendingWorkspaces}
       />
 
       {terminalWorkspaces.length > 0 ? (
@@ -410,7 +455,25 @@ export function Workbench({ client }: { client: CofluxClient }) {
           </div>
         </main>
       ) : null}
-      {!selectedDevice && !activeWorkspace ? (
+      {pendingSelected ? (
+        // 乐观工作区的主区（plan 078）：pending 条目不进 attach/终端状态机、不产生任何
+        // 指向假 id 的请求，主区只显示创建中提示；广播到达后由上面的识别效果原地转正。
+        <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
+          <div className="flex max-w-sm flex-col items-center text-center">
+            <LoaderCircle className="size-5 animate-spin text-muted-foreground" />
+            <h1 className="mt-4 text-base font-medium">正在创建工作区「{pendingSelected.branch}」</h1>
+            <p className="mt-1.5 text-sm leading-5 text-muted-foreground">正在设备上准备 git worktree，完成后会自动切换过去。</p>
+          </div>
+        </main>
+      ) : null}
+      {!pendingSelected && !selectedDevice && !activeWorkspace ? (
+        snapshotRevision === 0 ? (
+          // 首快照未到：数据没到 ≠ 数据为空（plan 078 第③跳），不得误报引导空态。
+          // 遮罩正常会盖住这里；遮罩兜底撤除后（中心不可达）这里配合断线横幅语义成立。
+          <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal text-muted-foreground">
+            <LoaderCircle className="size-5 animate-spin" />
+          </main>
+        ) : (
         <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
           <div className="flex max-w-sm flex-col items-center text-center">
             <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
@@ -425,6 +488,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
             ) : null}
           </div>
         </main>
+        )
       ) : null}
 
       {/* 断线重连横幅：保留最后快照渲染（乐观 UI），只提示连接状态。根容器同步留出 pt-7。 */}
