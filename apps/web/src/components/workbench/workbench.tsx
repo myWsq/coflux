@@ -4,6 +4,7 @@ import { AlertCircle, FolderGit2, LoaderCircle, Plus, RefreshCw, SquareTerminal,
 import { TaskStatus, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
 
 import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
+import { dismissBootOverlay } from "@/boot-overlay";
 import { Button } from "@astryxdesign/core/Button";
 import {
   ConfirmActionDialog,
@@ -104,6 +105,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const activeWorkspaceId = activeWorkspace?.id ?? null;
   // pending 期间继续持有目标设备的 route：创建往返要走它，松开再重连只会更慢。
   const selectedDaemonId = selection?.kind === "device" ? selection.id : (selectedWorkspace?.daemonId ?? pendingSelected?.daemonId);
+
+  // 冷启动遮罩撤除（plan 078）：首快照到达即撤（snapshotRevision 单调递增，>0 一旦为真
+  // 永远为真，断线不会误触发）；need-login/auth-failed 立即让位给登录表单。
+  // 中心不可达的 8s 无条件兜底在 App.tsx。
+  useEffect(() => {
+    if (snapshotRevision > 0 || authState === "need-login" || authState === "auth-failed") dismissBootOverlay();
+  }, [snapshotRevision, authState]);
 
   // 快照后校准选中项：无效选择回退到首项目 main workspace（或任一工作区）。
   // device 选中以设备仍在 daemons 为有效判据（离线设备仍可进详情看现场）。

@@ -13,7 +13,17 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <meta name="apple-mobile-web-app-title" content="coflux" />
   </head>
-  <body>
+  <body style="margin: 0; background: #111214">
+    <!-- 冷启动遮罩（plan 078）：HTML 到达即见，盖住 bundle 下载 → React 挂载 → 首快照之间的
+         所有中间态。裸 HTML + 内联 CSS 是对 Astryx 约定的有意例外——此刻 React 与 CSS bundle
+         都尚未就位，设计系统尚不存在。底色必须与上面 theme-color 的 #111214 一致，否则冷启动
+         先白闪一下再变深色。撤除判据与兜底出口见 src/boot-overlay.ts 的调用点。 -->
+    <div
+      id="coflux-boot-overlay"
+      style="position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background: #111214; transition: opacity 200ms ease"
+    >
+      <img src="/favicon.svg" alt="" width="72" height="72" />
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
