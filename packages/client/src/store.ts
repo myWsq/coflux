@@ -375,6 +375,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       case "authOk": {
         const value = payload.value;
         controlAuthenticated = true;
+        deviceRouter.setIceServers(value.iceServers);
         deviceRouter.setControlOnline(true);
         store.setState({ authState: "authed", loginError: "" });
         shouldRetry = true;
