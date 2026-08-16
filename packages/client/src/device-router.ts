@@ -30,6 +30,7 @@ import {
   type BrowserIdentity,
   type CachedLocalGrant,
 } from "./browser-identity";
+import { P2pFrameAssembler, p2pFrameChunks } from "./p2p-framing";
 
 type ServerPayload = ServerToClient["payload"];
 type RuntimeDevicePayload = DeviceEnvelope["payload"];
@@ -44,6 +45,11 @@ const RELAY_CONNECT_TIMEOUT_MS = 10_000;
 const RECOVER_BASE_MS = 350;
 const RECOVER_MAX_MS = 5_000;
 const DIRECT_HEDGE_MS = 200;
+/** P2P 建连（信令 + ICE/DTLS + channel 授权各阶段共用）：跨洲 + 打洞最坏情况的上界；
+ * 超时只意味着这次落 relay，promotion 稍后再试。 */
+const P2P_CONNECT_TIMEOUT_MS = 15_000;
+/** vanilla ICE gathering 兜底：配了不可达 STUN 时不无限等，带 host candidates 继续。 */
+const P2P_GATHER_TIMEOUT_MS = 3_000;
 const INPUT_RETRY_MS = 500;
 const CATALOG_INTERVAL_MS = 3_000;
 /** device 心跳周期：够密到 UI 上的延迟读数不显陈旧，够疏到对空闲连接几乎无成本
@@ -57,7 +63,7 @@ const MAX_RETAINED_INPUT_BYTES = 1024 * 1024;
 
 type TimerHandle = ReturnType<typeof globalThis.setTimeout>;
 
-export type DeviceTransportMode = "idle" | "probing" | "direct" | "relay" | "offline";
+export type DeviceTransportMode = "idle" | "probing" | "direct" | "p2p" | "relay" | "offline";
 
 export interface DeviceTransportState {
   mode: DeviceTransportMode;
@@ -120,6 +126,9 @@ export interface DeviceRouterAdapter {
     options: DeviceTransportOpenOptions & { grant: CachedLocalGrant; lease?: OnlineDeviceLease },
   ) => Promise<OpenedDeviceTransport>;
   openRelay: (options: DeviceTransportOpenOptions) => Promise<OpenedDeviceTransport>;
+  /** P2P WebRTC 直连（plan 076）。reuseOnly 时只允许复用已建立的 PeerConnection——
+   * elevated lane 不为一次高权限请求冷付 1-3s 的 ICE/DTLS 建连成本。 */
+  openP2p: (options: DeviceTransportOpenOptions, reuseOnly?: boolean) => Promise<OpenedDeviceTransport>;
   removeGrant: (daemonId: string) => Promise<void>;
   clearGrants: () => Promise<void>;
   close: () => void;
@@ -148,8 +157,13 @@ export interface DeviceRouterOptions {
 
 type LaneKind = "session" | "elevated";
 
+/** direct=loopback；p2p=WebRTC DataChannel。竞争与 promotion 里两者同属「非 relay」阵营
+ * （优于 relay），但授权语义不同：direct 走 loopback grant/lease，p2p 与 relay 一样由
+ * 中心在线授权（见 channelCovers 与 worker 侧「中心断开即全关」）。 */
+type ChannelKind = "direct" | "p2p" | "relay";
+
 interface DeviceChannel {
-  kind: "direct" | "relay";
+  kind: ChannelKind;
   daemonId: string;
   channelId: string;
   generation: bigint;
@@ -244,9 +258,11 @@ interface LaneAttempt {
   pending: number;
   cachePending: boolean;
   directStarted: boolean;
+  p2pStarted: boolean;
   relayStarted: boolean;
   hedgeTimer?: TimerHandle;
   startRelay?: () => void;
+  startP2p?: () => void;
 }
 
 interface DeviceRoute {
@@ -299,6 +315,17 @@ interface RelayOpenWaiter extends ControlWaiter<string> {
   daemonId: string;
 }
 
+/** per-daemon P2P PeerConnection（plan 076）。established = 信令完成（answer 已应用）；
+ * negotiation 由首个 DataChannel 创建后显式启动（offer 必须晚于 createDataChannel，
+ * 否则缺 application m-line）。channels 仅作观测，pc 常驻等复用，断由状态回调清理。 */
+interface P2pPeerState {
+  connectionId: string;
+  pc: RTCPeerConnection;
+  established: Promise<void>;
+  startNegotiation: () => void;
+  channels: number;
+}
+
 class DeviceRouteError extends Error {
   constructor(message: string, readonly code = "route_unavailable") {
     super(message);
@@ -336,6 +363,15 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   const leaseWaiters = new Map<string, ControlWaiter<OnlineDeviceLease>>();
   const relayOpenWaiters = new Map<string, RelayOpenWaiter>();
   const relayChannels = new Map<string, { route: DeviceRoute; channel: DeviceChannel }>();
+  // p2p answer/channel 授权等待者：requestId 分别是 connectionId / channelId。
+  const p2pAnswerWaiters = new Map<string, ControlWaiter<string>>();
+  const p2pChannelWaiters = new Map<string, ControlWaiter<void>>();
+  // p2p channel 与 relay 同为「中心在线授权」：中心断开时同步 lose，不等 worker 的关闭传来。
+  const p2pChannels = new Map<string, { route: DeviceRoute; channel: DeviceChannel }>();
+  /** per-daemon 常驻 PeerConnection（有 full demand 时建立）；DataChannel 按 logical channel。 */
+  const p2pPeers = new Map<string, P2pPeerState>();
+  /** authOk 下发的 STUN 列表；空 = 纯 host candidate。 */
+  let iceServers: string[] = [];
   let controlOnline = false;
   let destroyed = false;
 
@@ -390,6 +426,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       }
     },
     openRelay: openRelayTransport,
+    openP2p: openP2pTransport,
     async removeGrant(daemonId) {
       await identityStore?.removeGrant(daemonId);
     },
@@ -488,7 +525,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   function channelCovers(channel: DeviceChannel | undefined, scope: DeviceScope): channel is DeviceChannel {
     if (!channel || channel.closed || !channel.scopes.has(scope)) return false;
     if (scope === DeviceScope.RPC || scope === DeviceScope.LIFECYCLE) {
-      if (channel.kind === "relay") return controlOnline;
+      // relay 与 p2p 同为中心在线授权（无 lease）；只有 loopback direct 要查 lease 有效期。
+      if (channel.kind !== "direct") return controlOnline;
       return controlOnline && (channel.leaseExpiresAt ?? 0) > clock.now() + LEASE_EXPIRY_MARGIN_MS;
     }
     return true;
@@ -705,10 +743,183 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     return transport;
   }
 
+  /** P2P WebRTC 直连（plan 076）：vanilla ICE（等 gathering 完成一次性交换 SDP），信令
+   * 照 relay rendezvous 三角走中心控制 WS；数据帧经分片流过 DataChannel，不经任何中间
+   * 节点。授权与 relay 同语义（中心逐 channel 授 scopes），故与 relay 一样依赖中心在线。 */
+  async function openP2pTransport(openOptions: DeviceTransportOpenOptions, reuseOnly = false): Promise<OpenedDeviceTransport> {
+    if (!controlOnline) throw new DeviceRouteError("中心信令不可用，无法建立 P2P");
+    if (typeof globalThis.RTCPeerConnection !== "function") throw new DeviceRouteError("环境不支持 WebRTC", "p2p_unsupported");
+    const { daemonId, signal } = openOptions;
+    let peer = p2pPeers.get(daemonId);
+    if (peer && (peer.pc.connectionState === "failed" || peer.pc.connectionState === "closed")) {
+      p2pPeers.delete(daemonId);
+      peer = undefined;
+    }
+    if (!peer) {
+      if (reuseOnly) throw new DeviceRouteError("没有已建立的 P2P 连接", "p2p_no_connection");
+      peer = createP2pPeer(daemonId);
+      p2pPeers.set(daemonId, peer);
+    }
+    const channelId = `p2p-${randomUUID()}`;
+    // createDataChannel 必须先于 negotiation（首个 channel 给 offer 提供 m-line）；
+    // 已建立的连接上新开 channel 走 DCEP in-band，无需重新信令。
+    const dataChannel = peer.pc.createDataChannel(channelId);
+    dataChannel.binaryType = "arraybuffer";
+    peer.startNegotiation();
+    try {
+      await raceSignal(peer.established, signal, P2P_CONNECT_TIMEOUT_MS, "P2P 建连超时");
+      throwIfAborted(signal);
+      await controlRequest(p2pChannelWaiters, channelId, signal, () => {
+        options.sendControl({
+          case: "deviceP2pChannelOpen",
+          value: {
+            daemonId,
+            connectionId: peer.connectionId,
+            channelId,
+            clientInstanceId: openOptions.clientInstanceId,
+            transportGeneration: openOptions.generation,
+            protocolVersion: DEVICE_PROTOCOL_VERSION,
+          },
+        });
+      });
+      await waitForDataChannelOpen(dataChannel, P2P_CONNECT_TIMEOUT_MS, signal);
+    } catch (error) {
+      try { dataChannel.close(); } catch { /* ignore */ }
+      throw error;
+    }
+    peer.channels += 1;
+    const assembler = new P2pFrameAssembler();
+    const transport: OpenedDeviceTransport = {
+      channelId,
+      // scopes 与 relay 相同：中心 ChannelGrant 全量授予，RPC/LIFECYCLE 的可用性仍由
+      // channelCovers 按 controlOnline 把关。
+      scopes: new Set([DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE]),
+      send(frame) {
+        if (dataChannel.readyState !== "open" || dataChannel.bufferedAmount > MAX_DEVICE_FRAME_BYTES) return false;
+        try {
+          for (const chunk of p2pFrameChunks(frame)) dataChannel.send(chunk);
+        } catch {
+          // send 中途抛出（channel 正在关闭）会让分片流失步——channel 随 onclose 一并收敛。
+          return false;
+        }
+        return true;
+      },
+      close() {
+        peer.channels = Math.max(0, peer.channels - 1);
+        try { dataChannel.close(); } catch { /* ignore */ }
+      },
+    };
+    dataChannel.onmessage = (event) => {
+      if (!(event.data instanceof ArrayBuffer)) return;
+      let frames: Uint8Array<ArrayBuffer>[];
+      try {
+        frames = assembler.push(new Uint8Array(event.data));
+      } catch {
+        try { dataChannel.close(); } catch { /* ignore */ }
+        return;
+      }
+      for (const frame of frames) openOptions.onFrame(frame);
+    };
+    dataChannel.onclose = () => openOptions.onClose("P2P DataChannel 已关闭");
+    return transport;
+  }
+
+  function createP2pPeer(daemonId: string): P2pPeerState {
+    const connectionId = `p2p-${randomUUID()}`;
+    const pc = new RTCPeerConnection(iceServers.length > 0 ? { iceServers: [{ urls: iceServers }] } : {});
+    let startNegotiation!: () => void;
+    const negotiationStarted = new Promise<void>((resolve) => {
+      startNegotiation = resolve;
+    });
+    const state: P2pPeerState = {
+      connectionId,
+      pc,
+      startNegotiation,
+      channels: 0,
+      established: (async () => {
+        await negotiationStarted;
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await waitForIceGathering(pc, P2P_GATHER_TIMEOUT_MS);
+        const sdp = pc.localDescription?.sdp;
+        if (!sdp) throw new DeviceRouteError("P2P offer 生成失败");
+        // answer 等待不绑定单个 channel 的 signal：established 是连接级的，可被后续 channel 复用。
+        const answerSdp = await controlRequest(p2pAnswerWaiters, connectionId, new AbortController().signal, () => {
+          options.sendControl({
+            case: "deviceP2pOffer",
+            value: { daemonId, connectionId, clientInstanceId, sdp, protocolVersion: DEVICE_PROTOCOL_VERSION },
+          });
+        });
+        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      })(),
+    };
+    const evict = () => {
+      if (p2pPeers.get(daemonId) === state) p2pPeers.delete(daemonId);
+      try { pc.close(); } catch { /* ignore */ }
+    };
+    // 信令失败即弃连接；rejection 也会传给所有 await established 的 openP2p 调用方。
+    state.established.catch(evict);
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") evict();
+    };
+    return state;
+  }
+
+  function waitForIceGathering(pc: RTCPeerConnection, timeoutMs: number): Promise<void> {
+    if (pc.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise((resolve) => {
+      // 超时是兜底不是失败：配了不可达 STUN 时带着已收的 host candidates 继续。
+      const timer = clock.setTimeout(done, timeoutMs);
+      function done() {
+        clock.clearTimeout(timer);
+        pc.removeEventListener("icegatheringstatechange", check);
+        resolve();
+      }
+      function check() {
+        if (pc.iceGatheringState === "complete") done();
+      }
+      pc.addEventListener("icegatheringstatechange", check);
+    });
+  }
+
+  function waitForDataChannelOpen(dataChannel: RTCDataChannel, timeoutMs: number, signal: AbortSignal): Promise<void> {
+    if (dataChannel.readyState === "open") return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = clock.setTimeout(() => finish(new DeviceRouteError("P2P DataChannel open 超时")), timeoutMs);
+      const aborted = () => finish(abortError());
+      function finish(error?: Error) {
+        clock.clearTimeout(timer);
+        signal.removeEventListener("abort", aborted);
+        dataChannel.onopen = null;
+        dataChannel.onclose = null;
+        if (error) reject(error);
+        else resolve();
+      }
+      signal.addEventListener("abort", aborted, { once: true });
+      dataChannel.onopen = () => finish();
+      dataChannel.onclose = () => finish(new DeviceRouteError("P2P DataChannel 在建立期间关闭"));
+    });
+  }
+
+  function raceSignal<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs: number, timeoutMessage: string): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const timer = clock.setTimeout(() => finish(undefined, new DeviceRouteError(timeoutMessage)), timeoutMs);
+      const aborted = () => finish(undefined, abortError());
+      function finish(value?: T, error?: Error) {
+        clock.clearTimeout(timer);
+        signal.removeEventListener("abort", aborted);
+        if (error) reject(error);
+        else resolve(value as T);
+      }
+      signal.addEventListener("abort", aborted, { once: true });
+      promise.then((value) => finish(value), (error) => finish(undefined, error instanceof Error ? error : new DeviceRouteError(String(error))));
+    });
+  }
+
   async function openChannel(
     route: DeviceRoute,
     lane: LaneKind,
-    kind: "direct" | "relay",
+    kind: ChannelKind,
     scope: DeviceScope,
     signal: AbortSignal,
     grant?: CachedLocalGrant,
@@ -735,7 +946,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     };
     const transport = kind === "direct"
       ? await adapter.openDirect({ ...openOptions, grant: grant!, lease })
-      : await adapter.openRelay(openOptions);
+      : kind === "p2p"
+        ? await adapter.openP2p(openOptions, lane === "elevated")
+        : await adapter.openRelay(openOptions);
     if (signal.aborted || destroyed || routes.get(route.daemonId) !== route) {
       transport.close();
       throw abortError();
@@ -756,10 +969,12 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         if (channel!.closed) return;
         channel!.closed = true;
         if (kind === "relay") relayChannels.delete(channel!.channelId);
+        if (kind === "p2p") p2pChannels.delete(channel!.channelId);
         transport.close();
       },
     };
     if (kind === "relay") relayChannels.set(channel.channelId, { route, channel });
+    if (kind === "p2p") p2pChannels.set(channel.channelId, { route, channel });
     if (earlyClose) {
       channel.close();
       throw new DeviceRouteError(earlyClose);
@@ -855,10 +1070,11 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       pending: 0,
       cachePending: options.enableLocalTransport,
       directStarted: false,
+      p2pStarted: false,
       relayStarted: false,
     };
     lane.attempt = attempt;
-    publish(route, "probing", "正在选择本地直连或中心 relay");
+    publish(route, "probing", "正在选择直连或中心 relay");
 
     const valid = () => (
       !destroyed &&
@@ -893,13 +1109,13 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       if (!active) {
         activateSessionLane(route, channel);
         settleWinner(channel);
-        if (channel.kind === "direct" && attempt.hedgeTimer !== undefined) {
+        if (channel.kind !== "relay" && attempt.hedgeTimer !== undefined) {
           clock.clearTimeout(attempt.hedgeTimer);
           attempt.hedgeTimer = undefined;
         }
         return;
       }
-      if (channel.kind === "direct" && active.kind === "relay") {
+      if (channel.kind !== "relay" && active.kind === "relay") {
         if (channel.generation > active.generation) {
           activateSessionLane(route, channel);
         } else {
@@ -911,7 +1127,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         channel.close();
       }
     };
-    const candidateDone = (kind: "direct" | "relay", error?: unknown) => {
+    const candidateDone = (kind: ChannelKind, error?: unknown) => {
       attempt.pending -= 1;
       if (error && kind === "direct" && !isAbortError(error)) {
         route.localFailure = errorMessage(error);
@@ -924,6 +1140,11 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
           void adapter.removeGrant(route.daemonId).catch(() => undefined);
           pairInBackground(route);
         }
+        // loopback 失败后仍可能 P2P 直连本机 daemon；relay 同时兜底。
+        attempt.startP2p?.();
+        attempt.startRelay?.();
+      }
+      if (error && kind === "p2p" && !isAbortError(error)) {
         attempt.startRelay?.();
       }
       finish();
@@ -944,6 +1165,23 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         .finally(() => candidateDone("relay"));
     };
     attempt.startRelay = startRelay;
+    // P2P 建连 1-3s，慢于 relay hedge——竞争模型是 relay 先赢、P2P 后到经 generation
+    // promotion 升级（acceptCandidate 的非 relay 分支），用户无感。
+    const startP2p = () => {
+      if (!valid() || attempt.p2pStarted || !controlOnline) return;
+      attempt.p2pStarted = true;
+      attempt.pending += 1;
+      void (async () => {
+        try {
+          const channel = await openChannel(route, "session", "p2p", DeviceScope.SESSION_CONTROL, controller.signal);
+          acceptCandidate(channel);
+          candidateDone("p2p");
+        } catch (error) {
+          candidateDone("p2p", error);
+        }
+      })();
+    };
+    attempt.startP2p = startP2p;
     const startDirect = (grant: CachedLocalGrant) => {
       if (!valid() || attempt.directStarted) return;
       attempt.directStarted = true;
@@ -962,8 +1200,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     };
 
     // 纯 relay 短路：本地直连整体关闭时，或本 route 只有「测量」需求（侧栏对每台在线设备）
-    // 时都走这里——跳过读 grant、direct hedge 与本机配对。direct 走的是 loopback，只有与
-    // 浏览器同机的那台设备才可能命中；为侧栏那个读数去敲 loopback，对其余设备是永远失败的。
+    // 时都走这里——跳过读 grant、direct hedge、本机配对与 P2P（为一个侧栏读数给每台设备建
+    // PeerConnection 代价不成比例；loopback 更是只有同机设备可能命中）。
     if (!options.enableLocalTransport || !routeHasFullDemand(route)) {
       attempt.cachePending = false;
       startRelay();
@@ -971,7 +1209,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       return ready;
     }
 
-    // 从 t=0 读缓存并准备 direct；中心 relay 只在 200ms hedge 窗口后加入竞争。
+    // 从 t=0 读缓存并准备 direct 槽位（loopback 或 P2P）；中心 relay 只在 200ms hedge 窗口
+    // 后加入竞争。P2P 建连慢于 hedge，通常 relay 先赢、P2P 就绪后自动 promotion。
     if (controlOnline) {
       attempt.hedgeTimer = clock.setTimeout(() => {
         attempt.hedgeTimer = undefined;
@@ -984,6 +1223,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       attempt.cachePending = false;
       if (grant) startDirect(grant);
       else {
+        // 无 loopback grant 的设备（通常不与浏览器同机）：P2P 是它的直连主路径。
+        startP2p();
         startRelay();
         pairInBackground(route);
       }
@@ -1018,6 +1259,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       pending: 1,
       cachePending: false,
       directStarted: false,
+      p2pStarted: false,
       relayStarted: false,
     };
     lane.attempt = attempt;
@@ -1053,6 +1295,20 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         }
       } else {
         pairInBackground(route);
+      }
+      if (!valid()) throw abortError();
+      // loopback 不可用时先试复用已建立的 P2P 连接（openChannel 对 elevated lane 自动
+      // reuseOnly——不为一次高权限请求冷付建连成本），没有现成连接立刻落 relay。
+      try {
+        const p2p = await openChannel(route, "elevated", "p2p", scope, controller.signal);
+        if (!valid()) {
+          p2p.close();
+          throw abortError();
+        }
+        activateElevatedLane(route, p2p);
+        return p2p;
+      } catch (error) {
+        if (isAbortError(error)) throw error;
       }
       if (!valid()) throw abortError();
       try {
@@ -1109,9 +1365,11 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       channel.kind,
       channel.kind === "direct"
         ? "同机 Device 数据直连本地 daemon"
-        : route.localFailure
-          ? `本地直连不可用，已回退中心 relay${relayVia}：${route.localFailure}`
-          : `Device 数据经中心 opaque relay${relayVia}`,
+        : channel.kind === "p2p"
+          ? "Device 数据经 P2P 端到端直连（WebRTC），不经中间节点"
+          : route.localFailure
+            ? `直连不可用，已回退中心 relay${relayVia}：${route.localFailure}`
+            : `Device 数据经中心 opaque relay${relayVia}`,
       channel,
     );
 
@@ -1711,19 +1969,28 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     const controller = new AbortController();
     route.directProbeController = controller;
     route.directProbe = (async () => {
+      // 升级 probe 与首连同序：loopback（有 grant）优先，失败或无 grant 再试 P2P；
+      // 两者都不通才留在 relay 上按退避重试。
+      let channel: DeviceChannel | undefined;
+      let loopbackError: unknown;
       const grant = await loadGrant(route);
-      if (!grant) {
+      if (grant) {
+        try {
+          channel = await openChannel(route, "session", "direct", DeviceScope.SESSION_CONTROL, controller.signal, grant);
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          loopbackError = error;
+        }
+      } else {
         pairInBackground(route);
-        throw new DeviceRouteError("本机没有已配对 grant", "grant_missing");
       }
-      const channel = await openChannel(
-        route,
-        "session",
-        "direct",
-        DeviceScope.SESSION_CONTROL,
-        controller.signal,
-        grant,
-      );
+      if (!channel) {
+        try {
+          channel = await openChannel(route, "session", "p2p", DeviceScope.SESSION_CONTROL, controller.signal);
+        } catch (error) {
+          throw loopbackError ?? error;
+        }
+      }
       if (
         destroyed ||
         routes.get(route.daemonId) !== route ||
@@ -2198,6 +2465,26 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         else waiter.reject(new DeviceRouteError(payload.value.error ?? "relay rendezvous 失败"));
         return true;
       }
+      case "deviceP2pAnswer": {
+        const waiter = p2pAnswerWaiters.get(payload.value.connectionId);
+        if (!waiter) return true;
+        p2pAnswerWaiters.delete(payload.value.connectionId);
+        clock.clearTimeout(waiter.timer);
+        waiter.abort?.();
+        if (payload.value.ok && payload.value.sdp) waiter.resolve(payload.value.sdp);
+        else waiter.reject(new DeviceRouteError(payload.value.error ?? "P2P 信令失败"));
+        return true;
+      }
+      case "deviceP2pChannelResult": {
+        const waiter = p2pChannelWaiters.get(payload.value.channelId);
+        if (!waiter) return true;
+        p2pChannelWaiters.delete(payload.value.channelId);
+        clock.clearTimeout(waiter.timer);
+        waiter.abort?.();
+        if (payload.value.ok) waiter.resolve(undefined);
+        else waiter.reject(new DeviceRouteError(payload.value.error ?? "P2P channel 授权失败"));
+        return true;
+      }
       case "preparedDeviceOperation":
         executePrepared(payload.value);
         return true;
@@ -2212,6 +2499,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     if (!online) {
       rejectControlWaiters("中心连接已断开");
       for (const { route, channel } of [...relayChannels.values()]) loseChannel(route, channel, "中心 relay 已断开");
+      // P2P 与 relay 同为中心在线授权：worker 侧会 close_all，这里对称地立即收敛，
+      // 不等对端关闭事件穿过（可能已断的）网络传回来。
+      for (const { route, channel } of [...p2pChannels.values()]) loseChannel(route, channel, "中心已断开，P2P 授权失效");
+      closeP2pPeers();
       for (const route of routes.values()) {
         route.lease = undefined;
         if (route.elevatedLane.active) closeLane(route, route.elevatedLane, "中心离线，online lease 已撤销");
@@ -2263,6 +2554,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
     routes.clear();
     relayChannels.clear();
+    p2pChannels.clear();
+    closeP2pPeers();
   }
 
   function closeLane(route: DeviceRoute, lane: DeviceLane, reason: string): void {
@@ -2365,11 +2658,32 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       waiter.reject(error);
     }
     relayOpenWaiters.clear();
+    for (const map of [p2pAnswerWaiters, p2pChannelWaiters] as const) {
+      for (const waiter of map.values()) {
+        clock.clearTimeout(waiter.timer);
+        waiter.abort?.();
+        waiter.reject(error);
+      }
+      map.clear();
+    }
+  }
+
+  function closeP2pPeers(): void {
+    for (const peer of p2pPeers.values()) {
+      try { peer.pc.close(); } catch { /* ignore */ }
+    }
+    p2pPeers.clear();
+  }
+
+  /** authOk 携带的 STUN 列表；影响之后新建的 PeerConnection，已建立的连接不动。 */
+  function setIceServers(urls: string[]): void {
+    iceServers = urls.filter((url) => url.startsWith("stun:") || url.startsWith("stuns:"));
   }
 
   return {
     handleControlPayload,
     setControlOnline,
+    setIceServers,
     probeDevice,
     retainDevice,
     attachSession,

@@ -75,7 +75,7 @@ class FakeClock implements DeviceRouterClock {
 }
 
 interface OpenCall {
-  kind: "direct" | "relay";
+  kind: "direct" | "p2p" | "relay";
   options: DeviceTransportOpenOptions & { grant?: CachedLocalGrant; lease?: OnlineDeviceLease };
   channelId: string;
   sent: Uint8Array<ArrayBuffer>[];
@@ -149,6 +149,12 @@ class FakeAdapter implements DeviceRouterAdapter {
     return this.open("relay", options);
   }
 
+  // 默认模拟无 WebRTC 的环境（node/旧浏览器）：立即拒绝，竞争落回 relay。
+  // P2P 状态机用例见 P2pFakeAdapter。
+  async openP2p(_options: DeviceTransportOpenOptions, _reuseOnly?: boolean): Promise<OpenedDeviceTransport> {
+    throw new Error("环境不支持 WebRTC");
+  }
+
   async removeGrant(daemonId: string): Promise<void> {
     this.removedGrants.push(daemonId);
     this.cachedGrant = undefined;
@@ -195,8 +201,8 @@ class FakeAdapter implements DeviceRouterAdapter {
     })));
   }
 
-  private open(
-    kind: "direct" | "relay",
+  protected open(
+    kind: "direct" | "p2p" | "relay",
     options: DeviceTransportOpenOptions & { grant?: CachedLocalGrant; lease?: OnlineDeviceLease },
   ): Promise<OpenedDeviceTransport> {
     return new Promise((resolve, reject) => {
@@ -217,6 +223,13 @@ class FakeAdapter implements DeviceRouterAdapter {
       }, { once: true });
       this.opens.push(call);
     });
+  }
+}
+
+/** P2P 可用的环境：openP2p 与 direct/relay 一样进入 pending 队列，由测试手动 resolve。 */
+class P2pFakeAdapter extends FakeAdapter {
+  override openP2p(options: DeviceTransportOpenOptions): Promise<OpenedDeviceTransport> {
+    return this.open("p2p", options);
   }
 }
 
@@ -281,7 +294,7 @@ function harness(adapter = new FakeAdapter(grant()), clock = new FakeClock()) {
   return { router, adapter, clock, states, snapshots, outputs, detached, inputStates, errors };
 }
 
-function latestOpen(adapter: FakeAdapter, kind: "direct" | "relay", scope = DeviceScope.SESSION_CONTROL): OpenCall {
+function latestOpen(adapter: FakeAdapter, kind: "direct" | "p2p" | "relay", scope = DeviceScope.SESSION_CONTROL): OpenCall {
   const call = [...adapter.opens].reverse().find((item) => item.kind === kind && item.options.scope === scope);
   if (!call) throw new Error(`missing ${kind} open for scope ${scope}`);
   return call;
@@ -985,5 +998,58 @@ test("measureOnly 之上叠加完整持有会立即提升 direct，且释放完�
   await flush();
   assert.equal(h.states.at(-1)?.mode, "direct", "measureOnly 仍持有时不该掉线");
   releaseMeasure();
+  h.router.destroy();
+});
+
+test("无 grant 设备 P2P 参与直连槽位：relay 先赢，迟到 P2P 经重试自动升迁", async () => {
+  const adapter = new P2pFakeAdapter(undefined);
+  const h = harness(adapter);
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const firstP2p = latestOpen(adapter, "p2p");
+  h.clock.advance(200);
+  await flush();
+  const relay = latestOpen(adapter, "relay");
+  adapter.resolve(relay);
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "relay");
+
+  // 迟到的 P2P generation 落后于 relay winner：关闭并立即以新 generation 重试（与 direct 同语义）。
+  adapter.resolve(firstP2p);
+  await flush();
+  assert.equal(firstP2p.closed, true);
+  h.clock.advance(0);
+  await flush();
+  // pair 在后台已成功（中心协助配对不验证同机），升级 probe 先撞 loopback；
+  // 远程设备上它连不通，随后才轮到 P2P——这正是非同机设备的真实序列。
+  const retryDirect = latestOpen(adapter, "direct");
+  retryDirect.reject(new Error("connection refused"));
+  await flush();
+  const promoted = latestOpen(adapter, "p2p");
+  assert.notEqual(promoted, firstP2p);
+  assert.ok(promoted.options.generation > relay.options.generation);
+  adapter.resolve(promoted);
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "p2p");
+  assert.equal(payloads(relay).filter((payload) => payload?.case === "sessionAttach").length, 0);
+  h.router.destroy();
+});
+
+test("中心断开时 active P2P channel 与 relay 同步失效，不等对端关闭事件", async () => {
+  const adapter = new P2pFakeAdapter(undefined);
+  const h = harness(adapter);
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const p2p = latestOpen(adapter, "p2p");
+  adapter.resolve(p2p);
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "p2p");
+
+  h.router.setControlOnline(false);
+  await flush();
+  assert.equal(p2p.closed, true, "中心断开必须立即关闭 P2P channel（与 worker close_all 对称）");
+  assert.notEqual(h.states.at(-1)?.mode, "p2p");
   h.router.destroy();
 });

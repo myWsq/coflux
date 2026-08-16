@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, MessageSquare, Monitor, Package, Plus, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, MessageSquare, Monitor, Package, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
@@ -472,19 +472,21 @@ export function Sidebar(props: SidebarProps) {
               );
               const routeLabel = transport?.mode === "direct"
                 ? "本机直连"
-                : transport?.mode === "relay"
-                  ? "中心 relay"
-                  : transport?.mode === "probing"
-                    ? "正在探测"
-                    : transport?.mode === "offline"
-                      ? "Device route 离线"
-                      : daemon.online ? "中心在线" : "中心离线";
+                : transport?.mode === "p2p"
+                  ? "P2P 直连"
+                  : transport?.mode === "relay"
+                    ? "中心 relay"
+                    : transport?.mode === "probing"
+                      ? "正在探测"
+                      : transport?.mode === "offline"
+                        ? "Device route 离线"
+                        : daemon.online ? "中心在线" : "中心离线";
               // 色标语义（2026-07-26 改）：颜色只表达延迟，不再表达走哪条路——relay 只要够快
               // 就该是绿的。传输方式由**形状**承担，且只占一个位置：direct 时闪电取代圆点，
               // 而不是并排两个图标；离线是空心圈。
               // 规则：状态差异走色相或形状，绝不走透明度（6px 圆点上 alpha 差肉眼等同）。
               const rttMs = transport?.rttMs;
-              const connected = transport?.mode === "direct" || transport?.mode === "relay";
+              const connected = transport?.mode === "direct" || transport?.mode === "p2p" || transport?.mode === "relay";
               // tone 只管颜色，让圆点（bg-*）与闪电（text-*）共用同一套延迟分档。
               const tone = transport?.mode === "probing"
                 ? "primary"
@@ -509,7 +511,8 @@ export function Sidebar(props: SidebarProps) {
               const iconClass = tone === "success"
                 ? "text-success"
                 : tone === "warning" ? "text-warning" : "text-muted-foreground";
-              const RouteIcon = transport?.mode === "direct" ? Zap : transport?.mode === "relay" ? Cloud : null;
+              // 形状语汇：direct=闪电、p2p=电波、relay=云。
+              const RouteIcon = transport?.mode === "direct" ? Zap : transport?.mode === "p2p" ? Radio : transport?.mode === "relay" ? Cloud : null;
               const rttText = rttMs === undefined ? "" : ` · ${Math.round(rttMs)}ms`;
               // 挂在整行而非那个 12px 图标上：图标太小，只挂它等于挂了个瞄不准的靶子。
               // 用组件库 Tooltip 而非原生 title：原生要悬停约 1s 才弹，且弹出后内容不再随
@@ -524,7 +527,7 @@ export function Sidebar(props: SidebarProps) {
               const tooltipContent = (
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center gap-1.5 font-medium">
-                    {transport?.mode === "direct" ? <Zap className="size-3 shrink-0" /> : <Cloud className="size-3 shrink-0" />}
+                    {transport?.mode === "direct" ? <Zap className="size-3 shrink-0" /> : transport?.mode === "p2p" ? <Radio className="size-3 shrink-0" /> : <Cloud className="size-3 shrink-0" />}
                     {routeLabel}{rttText}
                   </div>
                   <div className="flex flex-col gap-0.5">
