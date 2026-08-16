@@ -126,7 +126,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
         ? daemons.some((daemon) => daemon.daemonId === selection.id)
         : selection?.kind === "workspace" && workspaces.some((workspace) => workspace.id === selection.id));
     if (selection && valid) {
-      // 假 id 不落盘：刷新后读回的 pending id 必然失效，persist 了也得靠这里再回退一次。
+      // 假 id 其实已落盘过一次（selectWorkspace 内部即 persist）：刷新后 pendingWorkspaces 为空，
+      // 本 effect 判定 invalid 回退自愈，无害。这里跳过 persist 只是不再随每次快照重复写。
       if (!isPending) persistSelection(selection);
       return;
     }
@@ -265,6 +266,15 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (pending) removePendingWorkspace(pending.pendingId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastError]);
+
+  // 卸载时清掉未收敛的 pending 兜底定时器（同 workspace-terminal 的 pendingTabTimer 清理）。
+  useEffect(() => {
+    const timers = pendingWorkspaceTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) window.clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
 
 
   function requestRemoveProject(project: Project) {
