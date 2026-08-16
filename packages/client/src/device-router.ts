@@ -50,6 +50,10 @@ const DIRECT_HEDGE_MS = 200;
 const P2P_CONNECT_TIMEOUT_MS = 15_000;
 /** vanilla ICE gathering 兜底：配了不可达 STUN 时不无限等，带 host candidates 继续。 */
 const P2P_GATHER_TIMEOUT_MS = 3_000;
+/** DataChannel 发送水位：Chrome 内部发送缓冲约 16MB、超限 send() 抛异常，高水位取足够
+ * 余量；低于低水位恢复排水。 */
+const P2P_SEND_HIGH_WATER = 4 * 1024 * 1024;
+const P2P_SEND_LOW_WATER = 1024 * 1024;
 const INPUT_RETRY_MS = 500;
 const CATALOG_INTERVAL_MS = 3_000;
 /** device 心跳周期：够密到 UI 上的延迟读数不显陈旧，够疏到对空闲连接几乎无成本
@@ -789,23 +793,67 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
     peer.channels += 1;
     const assembler = new P2pFrameAssembler();
+    // Chrome 的 DataChannel 内部发送缓冲约 16MB，超限 send() 直接抛异常——30MB 帧不能
+    // 同步灌入（半帧失步 = 分片流报废）。改为整帧原子入队 + 后台按水位排水；send 返回
+    // false 的背压语义与 loopback WS 的 bufferedAmount 检查一致（上层丢帧靠重投恢复）。
+    const sendQueue: Uint8Array<ArrayBuffer>[] = [];
+    let queuedBytes = 0;
+    let draining = false;
+    const drain = async () => {
+      if (draining) return;
+      draining = true;
+      try {
+        while (sendQueue.length > 0) {
+          if (dataChannel.readyState !== "open") {
+            sendQueue.length = 0;
+            queuedBytes = 0;
+            return;
+          }
+          if (dataChannel.bufferedAmount > P2P_SEND_HIGH_WATER) {
+            // bufferedamountlow 事件 + 短轮询兜底（事件丢失或 close 期间也能推进循环）。
+            await new Promise<void>((resolve) => {
+              const timer = clock.setTimeout(resolve, 200);
+              dataChannel.bufferedAmountLowThreshold = P2P_SEND_LOW_WATER;
+              dataChannel.onbufferedamountlow = () => {
+                clock.clearTimeout(timer);
+                dataChannel.onbufferedamountlow = null;
+                resolve();
+              };
+            });
+            continue;
+          }
+          const chunk = sendQueue.shift()!;
+          queuedBytes -= chunk.byteLength;
+          dataChannel.send(chunk);
+        }
+      } catch {
+        // send 抛出（channel 正在关闭/缓冲异常）：分片流已不可信，关 channel 收敛。
+        sendQueue.length = 0;
+        queuedBytes = 0;
+        try { dataChannel.close(); } catch { /* ignore */ }
+      } finally {
+        draining = false;
+      }
+    };
     const transport: OpenedDeviceTransport = {
       channelId,
       // scopes 与 relay 相同：中心 ChannelGrant 全量授予，RPC/LIFECYCLE 的可用性仍由
       // channelCovers 按 controlOnline 把关。
       scopes: new Set([DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE]),
       send(frame) {
-        if (dataChannel.readyState !== "open" || dataChannel.bufferedAmount > MAX_DEVICE_FRAME_BYTES) return false;
-        try {
-          for (const chunk of p2pFrameChunks(frame)) dataChannel.send(chunk);
-        } catch {
-          // send 中途抛出（channel 正在关闭）会让分片流失步——channel 随 onclose 一并收敛。
-          return false;
+        if (dataChannel.readyState !== "open") return false;
+        if (queuedBytes + dataChannel.bufferedAmount > MAX_DEVICE_FRAME_BYTES) return false;
+        for (const chunk of p2pFrameChunks(frame)) {
+          sendQueue.push(chunk);
+          queuedBytes += chunk.byteLength;
         }
+        void drain();
         return true;
       },
       close() {
         peer.channels = Math.max(0, peer.channels - 1);
+        sendQueue.length = 0;
+        queuedBytes = 0;
         try { dataChannel.close(); } catch { /* ignore */ }
       },
     };
