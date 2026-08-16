@@ -14,6 +14,7 @@ mod git;
 mod hook;
 mod local_auth;
 mod ops;
+mod p2p;
 mod ports;
 mod relay_dial;
 mod relay_home;
@@ -149,7 +150,7 @@ pub(crate) async fn send_d2s(tx: &Sender<WsOut>, payload: daemon_to_server::Payl
 
 /// UDS 热路径不得等待中心队列。慢/断中心时可以丢弃派生上行，sessiond PTY 与 local channel
 /// 必须继续推进；catalog/checkpoint 会在恢复后重新对账。
-fn try_send_d2s(tx: &Sender<WsOut>, payload: daemon_to_server::Payload) {
+pub(crate) fn try_send_d2s(tx: &Sender<WsOut>, payload: daemon_to_server::Payload) {
     let env = wire::DaemonToServer { payload: Some(payload) };
     let _ = tx.try_send(env.encode_to_vec());
 }
@@ -416,6 +417,8 @@ async fn main() {
         state.clone(),
         cfg.clone(),
     );
+    // P2P runtime 跨重连存活（plan 076）；每次中心断开 close_all 清空全部 PeerConnection。
+    let p2p = p2p::P2pRuntime::new(device.clone(), to_server_tx.clone());
 
     // hook 事件通道：gateway 收 POST /hook 解析后经此转交，消费侧做 pid→session 反查与上报。
     // gateway 未起（无 local_auth）时 tx 直接掉落，消费任务随之退出。
@@ -562,6 +565,7 @@ async fn main() {
         local_auth,
         device,
         relay_home,
+        p2p,
     )
     .await;
 }
@@ -713,6 +717,7 @@ async fn server_loop(
     local_auth: Option<Arc<local_auth::LocalAuth>>,
     device: Arc<device::DeviceRuntime>,
     relay_home: relay_home::RelayHomeSelector,
+    p2p: Arc<p2p::P2pRuntime>,
 ) {
     let mut attempts: u32 = 0;
     loop {
@@ -736,6 +741,7 @@ async fn server_loop(
                     local_auth.as_ref(),
                     &device,
                     &relay_home,
+                    &p2p,
                 )
                 .await;
             }
@@ -754,6 +760,7 @@ async fn server_loop(
             auth.set_server_online(false);
         }
         device.close_relays();
+        p2p.close_all();
         relay_home.clear();
         attempts += 1;
         tokio::time::sleep(backoff(attempts, &cfg)).await;
@@ -772,6 +779,7 @@ async fn run_server_connection(
     local_auth: Option<&Arc<local_auth::LocalAuth>>,
     device: &Arc<device::DeviceRuntime>,
     relay_home: &relay_home::RelayHomeSelector,
+    p2p: &Arc<p2p::P2pRuntime>,
 ) {
     let (mut sink, mut stream) = ws.split();
     let write_timeout = Duration::from_millis(cfg.idle_grace_ms.max(1_000));
@@ -784,6 +792,7 @@ async fn run_server_connection(
         auth.set_server_online(false);
     }
     device.close_relays();
+    p2p.close_all();
     // 隧道状态绑定单次 server 连接生命周期：不跨重连恢复（浏览器侧 TCP 早已断，恢复无意义）
     let tunnels = tunnel::TunnelSet::new(to_server_tx.clone());
 
@@ -909,6 +918,7 @@ async fn run_server_connection(
                         local_auth,
                         device,
                         relay_home,
+                        p2p,
                     ).await,
                     // WS 上只有 binary message；收到 text/其它帧类型说明对端协议版本不对——
                     // 丢弃并记日志，不 panic（与解码失败的处理原则一致）。
@@ -940,6 +950,7 @@ async fn on_server_message(
     local_auth: Option<&Arc<local_auth::LocalAuth>>,
     device: &Arc<device::DeviceRuntime>,
     relay_home: &relay_home::RelayHomeSelector,
+    p2p: &Arc<p2p::P2pRuntime>,
 ) {
     let envelope = match wire::ServerToDaemon::decode(bytes) {
         Ok(e) => e,
@@ -1109,6 +1120,14 @@ async fn on_server_message(
                     }
                     server_to_daemon::Payload::RelayNodeList(wire::RelayNodeList { nodes }) => {
                         relay_home.set_nodes(nodes);
+                    }
+                    // P2P 信令（plan 076）：拨号失败经 AnswerReport 回拒因；grant 无对应
+                    // 连接时静默丢弃，client 靠 DataChannel open 超时回落 relay。
+                    server_to_daemon::Payload::DeviceP2pDial(dial) => {
+                        p2p.handle_dial(dial);
+                    }
+                    server_to_daemon::Payload::DeviceP2pChannelGrant(grant) => {
+                        p2p.handle_channel_grant(grant);
                     }
                     // agent 控制回执（plan 074）：按 request_id 找到等待中的 agent_ctl 任务。
                     // 找不到 = 已超时摘除或本就不是本进程发的，静默丢弃。

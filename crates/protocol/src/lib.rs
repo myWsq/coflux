@@ -65,8 +65,9 @@ pub const MAX_SESSION_CHECKPOINT_BYTES: usize = 512 * 1024;
 /// P2P DataChannel 分片流格式（plan 076，线上契约——改动需带版本协商）：
 /// 每个 DeviceEnvelope 帧封为 [u32 BE 帧长][帧字节]，整体按 ≤ P2P_CHUNK_BYTES 切成
 /// DataChannel messages；SCTP reliable+ordered 下等价字节流，接收端按前缀重组。
-/// 64KiB 远低于 Chrome 宣告的 256KiB 单消息接收硬上限，且该上限不可协商放大。
-pub const P2P_CHUNK_BYTES: usize = 64 * 1024;
+/// 16KiB 取双端接收上限的交集：webrtc-rs 0.20 的 poll OnMessage 上限 16384，
+/// Chrome 宣告 256KiB——两者都是接收侧硬限，不可协商放大。
+pub const P2P_CHUNK_BYTES: usize = 16 * 1024;
 
 #[cfg(test)]
 mod wire_tests;
