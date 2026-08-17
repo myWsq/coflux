@@ -23,7 +23,7 @@ const ATTACH_GRACE_MS = 500;
 const PENDING_CREATE_TIMEOUT_MS = 15_000;
 
 /** Tab 上的 agent 图标（plan 075）：claude 用 Clawd 像素小动物并按状态换姿态；
- * 干活健身、待批准/待回答挥旗、未读完成撒花；看过完成态后冻成坐着的小人。
+ * 干活健身、待批准/待回答挥旗、未读完成撒花；看过完成态后冻成 gym 第 0 帧站姿。
  * 其余 agent 用 lucide 机器人轮廓，保留状态警示色（approval/question→warning、
  * done→success，与侧栏语义一致）。 */
 function AgentGlyph({

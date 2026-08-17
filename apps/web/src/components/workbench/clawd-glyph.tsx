@@ -5,7 +5,7 @@ import confettiSvg from "@/assets/clawd/confetti.svg?raw";
 import flagSvg from "@/assets/clawd/flag.svg?raw";
 import { cn } from "@/lib/utils";
 
-/** Tab 上 Clawd 的姿态。idle = 撒花的坐姿定格，已读完成态用，不再播动画。 */
+/** Tab 上 Clawd 的姿态。idle = gym 第 0 帧站姿定格，已读完成态用。 */
 export type ClawdPose = "active" | "raise" | "rest" | "idle";
 
 // 素材来自 ayotomcs.me/claude-mascot（用户 2026-08-17 拖入）。原站用 GSAP 切
@@ -15,7 +15,7 @@ const SVG: Record<ClawdPose, string> = {
   active: prepare(gymSvg),
   raise: prepare(flagSvg),
   rest: prepare(confettiSvg),
-  idle: prepare(confettiSvg),
+  idle: prepare(gymSvg),
 };
 
 // 36 帧插画，13–24 再播一遍当第二组，共 48 拍。
@@ -169,7 +169,11 @@ function freeze(svg: SVGSVGElement, pose: ClawdPose) {
     showOnly(kids(svg, "g"), 32);
     return;
   }
-  if (pose === "rest" || pose === "idle") {
+  if (pose === "idle") {
+    showOnly(kids(svg, "g"), 0);
+    return;
+  }
+  if (pose === "rest") {
     const groups = kids(svg, "g");
     showOnly(groups.slice(0, 8), 0);
     groups[8]?.setAttribute("style", "display: none");
