@@ -1987,6 +1987,9 @@ export class Hub {
     const fail = (error: string) =>
       this.sendClient(client, { case: "deviceP2pAnswer", value: { connectionId: request.connectionId, ok: false, error } });
 
+    // 总开关（config.p2pEnabled）：拒在信令入口，client 的 candidateDone("p2p", error) 会即刻
+    // 触发 startRelay()，比等 15s 建连超时快得多。关掉时行为等价于 plan 076 上线前。
+    if (!config.p2pEnabled) return void fail("P2P 直连已停用");
     if (!client.accountId) return void fail("client 未认证");
     if (
       request.protocolVersion !== DEVICE_PROTOCOL_VERSION ||
@@ -2044,6 +2047,8 @@ export class Hub {
     const fail = (error: string) =>
       this.sendClient(client, { case: "deviceP2pChannelResult", value: { channelId: request.channelId, ok: false, error } });
 
+    // 与 offer 同门：关掉 P2P 后，任何残留 PeerConnection 想开新 channel 一律拒。
+    if (!config.p2pEnabled) return void fail("P2P 直连已停用");
     if (!client.accountId) return void fail("client 未认证");
     if (
       request.protocolVersion !== DEVICE_PROTOCOL_VERSION ||
