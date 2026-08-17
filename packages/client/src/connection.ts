@@ -14,6 +14,31 @@ export type ServerPayload = ServerToClient["payload"];
 
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 15_000;
+/** `WebSocket.OPEN`。不引用全局常量：本模块的 socket 经 `createSocket` 注入，测试替身没有
+ * 那些静态字段，而这个值由 WHATWG 规范钉死。 */
+const SOCKET_OPEN = 1;
+
+type TimerHandle = ReturnType<typeof setTimeout>;
+
+/** 可注入时钟（同 DeviceRouterClock 的形状，但本模块只依赖自己用到的这几个方法）。
+ * 生产传 window，测试传假时钟——连接生命周期全是定时器驱动的，不注入就没法写确定性用例。 */
+export interface ConnectionClock {
+  random: () => number;
+  setTimeout: (callback: () => void, delayMs: number) => TimerHandle;
+  clearTimeout: (timer: TimerHandle) => void;
+}
+
+/** 本模块用到的 WebSocket 子集。注入而非直接 `new WebSocket`：测试要能驱动
+ * onopen/onclose/onmessage 并断言发出的字节。 */
+export interface ConnectionSocket {
+  binaryType: string;
+  readonly readyState: number;
+  onopen: (() => void) | null;
+  onclose: (() => void) | null;
+  onmessage: ((event: { data: unknown }) => void) | null;
+  send: (data: Uint8Array) => void;
+  close: () => void;
+}
 
 type ConnectionOptions = {
   url: string;
@@ -23,6 +48,8 @@ type ConnectionOptions = {
   onMessage: (payload: ServerPayload) => void;
   /** 返回 null 表示当前不应自动重连（未登录 / 已登出 / 认证失败）。 */
   reconnectCredential: () => AuthCredential | null;
+  clock?: ConnectionClock;
+  createSocket?: (url: string) => ConnectionSocket;
 };
 
 export function buildAuthPayload(credential: AuthCredential, buildId: string): ClientToServerPayload {
@@ -36,14 +63,21 @@ export function buildAuthPayload(credential: AuthCredential, buildId: string): C
  * 纯命令式实现，不依赖任何 UI 框架——响应式状态由上层 store 通过回调自行维护。
  */
 export function createConnection(options: ConnectionOptions) {
-  let socket: WebSocket | null = null;
+  const clock: ConnectionClock = options.clock ?? {
+    random: () => Math.random(),
+    setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs) as unknown as TimerHandle,
+    clearTimeout: (timer) => window.clearTimeout(timer as unknown as number),
+  };
+  const createSocket = options.createSocket ?? ((url: string) => new WebSocket(url) as unknown as ConnectionSocket);
+
+  let socket: ConnectionSocket | null = null;
   let stopped = false;
   let attempts = 0;
-  let reconnectTimer: number | null = null;
+  let reconnectTimer: TimerHandle | null = null;
 
   function clearReconnectTimer() {
     if (reconnectTimer !== null) {
-      window.clearTimeout(reconnectTimer);
+      clock.clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
   }
@@ -53,9 +87,9 @@ export function createConnection(options: ConnectionOptions) {
     if (!options.reconnectCredential()) return;
     // 指数退避 + 抖动：~1s 起步、~15s 封顶，避免服务端恢复瞬间的重连风暴。
     const backoff = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** attempts);
-    const delay = backoff / 2 + Math.random() * (backoff / 2);
+    const delay = backoff / 2 + clock.random() * (backoff / 2);
     attempts += 1;
-    reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = clock.setTimeout(() => {
       reconnectTimer = null;
       const credential = options.reconnectCredential();
       if (!stopped && credential) connect(credential);
@@ -71,7 +105,7 @@ export function createConnection(options: ConnectionOptions) {
     // 存活为只收不发的幽灵连接（不会自动因失去 JS 引用而关闭）。
     socket?.close();
 
-    const ws = new WebSocket(options.url);
+    const ws = createSocket(options.url);
     ws.binaryType = "arraybuffer";
     socket = ws;
 
@@ -97,7 +131,7 @@ export function createConnection(options: ConnectionOptions) {
   }
 
   function send(payload: ClientToServerPayload) {
-    if (socket?.readyState === WebSocket.OPEN) {
+    if (socket?.readyState === SOCKET_OPEN) {
       socket.send(encodeClientToServer(create(ClientToServerSchema, { payload })));
     }
   }
