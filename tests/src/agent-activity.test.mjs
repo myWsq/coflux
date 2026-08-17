@@ -108,7 +108,7 @@ test("agent presence：claude 进程出现→上报（含归属），退出→�
   device.close();
 });
 
-test("hook 回合状态：Stop→done、PermissionRequest→approval、Notification 分型、PreToolUse→active；树外 pid 与非 json 被拒", async () => {
+test("hook 回合状态：Stop→done、后台在飞的 Stop→active、PermissionRequest→approval、Notification 分型、PreToolUse→active；树外 pid 与非 json 被拒", async () => {
   const home = mkDir();
   const script = join(home, "claude");
   writeFileSync(script, "#!/bin/sh\nsleep 300\n");
@@ -142,6 +142,17 @@ test("hook 回合状态：Stop→done、PermissionRequest→approval、Notificat
     15000,
   );
   assert.equal(done.sessions.find((s) => s.sessionId === sessionId).agent, "claude", "state 变化不丢 agent 名");
+
+  // 同一个 Stop，但 payload 带在飞的后台工作：agent 是「挂起等后台叫醒自己」而非做完了。
+  // 这条必须走端到端——信使侧的条数提取（description 不出机）单测覆盖不到。
+  const stopWithBg =
+    '{"hook_event_name":"Stop","background_tasks":[{"id":"b1","type":"shell","status":"running","description":"pnpm build"}]}';
+  await device.input(sessionId, hookCmd(stopWithBg));
+  await c.waitFor(
+    (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId && s.state === "active"),
+    "Stop + 在飞后台工作 → active",
+    15000,
+  );
 
   await device.input(sessionId, hookCmd('{"hook_event_name":"PermissionRequest"}'));
   await c.waitFor(

@@ -47,6 +47,7 @@ pub struct HookRequest {
     pub agent: String,
     pub event: String,
     pub notification: String,
+    pub background_tasks: u32,
     pub pid: i32,
     pub ppid: i32,
     pub respond: oneshot::Sender<HookOutcome>,
@@ -61,16 +62,23 @@ pub enum HookOutcome {
     SessionNotFound,
 }
 
-/// hook 事件名（+ Notification 的类型）→ 回合状态。claude 与 codex hooks 引擎共用
-/// claude 命名；codex 旧式 notify 用 kebab-case。名单外或 Notification 类型未知一律
+/// hook 事件名（+ Notification 的类型 + 在飞后台工作数）→ 回合状态。claude 与 codex hooks
+/// 引擎共用 claude 命名；codex 旧式 notify 用 kebab-case。名单外或 Notification 类型未知一律
 /// 忽略（而非拒绝），用户多配了 hook 事件不会造成干扰。
-pub fn event_state(event: &str, notification: &str) -> Option<&'static str> {
+pub fn event_state(event: &str, notification: &str, background_tasks: u32) -> Option<&'static str> {
     match event {
-        // 真正在干活：工具调用。UserPromptSubmit 不标 active——每个回合都会打
-        // （插件 Stop 续跑 / 排队消息也会），人没打字也会被标成「正在执行」。
-        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some("active"),
+        // 干活的起点是 prompt 进入处理循环，不是第一次调工具：模型思考 + 纯文本输出的那一段
+        // （xhigh 下几十秒起）若不算 active，状态会一直停在上一轮的 done；不调工具的问答轮次
+        // 更是整轮都不亮。plan 073 当初怕「人没打字也被标成正在执行」（插件 Stop 续跑 / 排队
+        // 消息也会打 UserPromptSubmit）——但那两种情形里 agent 恰恰确实在干活，标 active 是对的。
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some("active"),
         "PermissionRequest" | "approval-requested" => Some("approval"),
-        "Stop" | "StopFailure" | "agent-turn-complete" => Some("done"),
+        // 回合结束**但仍有在飞的后台工作**（shell / subagent / monitor / workflow）：agent 不是
+        // 「做完了等你看」，而是「挂起等后台把自己叫醒」——那些活儿一完成它必然继续干。此时落
+        // done 会让用户白跑一趟去看一个还没结束的回合，且假完成窗口 = 后台任务的剩余时长
+        // （一次 build/test 就是几分钟）。claude 的 Stop/SubagentStop payload 带 background_tasks
+        // 正是为区分这两者而设。旧版 claude 与 codex 无此字段（信使给 0），行为与从前一致。
+        "Stop" | "StopFailure" | "agent-turn-complete" => Some(if background_tasks > 0 { "active" } else { "done" }),
         "Notification" => match notification {
             "permission_prompt" => Some("approval"),
             "agent_needs_input" | "elicitation_dialog" | "elicitation_url_dialog" => Some("question"),
@@ -82,6 +90,7 @@ pub fn event_state(event: &str, notification: &str) -> Option<&'static str> {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct HookBody {
     agent: String,
     event: String,
@@ -90,6 +99,9 @@ struct HookBody {
     pid: i32,
     #[serde(default)]
     ppid: i32,
+    /// 信使从 Stop/SubagentStop payload 数出的在飞后台工作条数（旧信使不发 = 0）
+    #[serde(default)]
+    background_tasks: u32,
 }
 
 /// 处理一条已被 gateway 判定为 `POST ` 开头的连接：解析请求 → 转交消费任务 → 等结果 → 应答。
@@ -146,7 +158,7 @@ async fn handle(stream: &mut TcpStream, endpoints: &Arc<LocalEndpoints>) -> Resu
     }
 
     let parsed: HookBody = serde_json::from_slice(raw).map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
-    if event_state(&parsed.event, &parsed.notification).is_none() {
+    if event_state(&parsed.event, &parsed.notification, parsed.background_tasks).is_none() {
         return Ok(hook_response(HookOutcome::Ignored));
     }
     let (respond, outcome_rx) = oneshot::channel();
@@ -154,6 +166,7 @@ async fn handle(stream: &mut TcpStream, endpoints: &Arc<LocalEndpoints>) -> Resu
         agent: parsed.agent,
         event: parsed.event,
         notification: parsed.notification,
+        background_tasks: parsed.background_tasks,
         pid: parsed.pid,
         ppid: parsed.ppid,
         respond,
@@ -281,22 +294,34 @@ mod tests {
 
     #[test]
     fn event_mapping_covers_both_agents() {
-        assert_eq!(event_state("UserPromptSubmit", ""), None);
-        assert_eq!(event_state("PreToolUse", ""), Some("active"));
-        assert_eq!(event_state("PostToolUse", ""), Some("active"));
-        assert_eq!(event_state("Stop", ""), Some("done"));
-        assert_eq!(event_state("StopFailure", ""), Some("done"));
-        assert_eq!(event_state("PermissionRequest", ""), Some("approval"));
-        assert_eq!(event_state("agent-turn-complete", ""), Some("done"));
-        assert_eq!(event_state("approval-requested", ""), Some("approval"));
-        assert_eq!(event_state("Notification", "permission_prompt"), Some("approval"));
-        assert_eq!(event_state("Notification", "agent_needs_input"), Some("question"));
-        assert_eq!(event_state("Notification", "elicitation_dialog"), Some("question"));
-        assert_eq!(event_state("Notification", "agent_completed"), Some("done"));
-        assert_eq!(event_state("Notification", "auth_success"), None);
-        assert_eq!(event_state("Notification", ""), None);
-        assert_eq!(event_state("SessionStart", ""), None);
-        assert_eq!(event_state("", ""), None);
+        assert_eq!(event_state("UserPromptSubmit", "", 0), Some("active"));
+        assert_eq!(event_state("PreToolUse", "", 0), Some("active"));
+        assert_eq!(event_state("PostToolUse", "", 0), Some("active"));
+        assert_eq!(event_state("Stop", "", 0), Some("done"));
+        assert_eq!(event_state("StopFailure", "", 0), Some("done"));
+        assert_eq!(event_state("PermissionRequest", "", 0), Some("approval"));
+        assert_eq!(event_state("agent-turn-complete", "", 0), Some("done"));
+        assert_eq!(event_state("approval-requested", "", 0), Some("approval"));
+        assert_eq!(event_state("Notification", "permission_prompt", 0), Some("approval"));
+        assert_eq!(event_state("Notification", "agent_needs_input", 0), Some("question"));
+        assert_eq!(event_state("Notification", "elicitation_dialog", 0), Some("question"));
+        assert_eq!(event_state("Notification", "agent_completed", 0), Some("done"));
+        assert_eq!(event_state("Notification", "auth_success", 0), None);
+        assert_eq!(event_state("Notification", "", 0), None);
+        assert_eq!(event_state("SessionStart", "", 0), None);
+        assert_eq!(event_state("", "", 0), None);
+    }
+
+    /// 回合结束但后台还有活 = 挂起等唤醒，不是完成；无后台工作时仍是 done。
+    #[test]
+    fn stop_with_background_work_is_not_done() {
+        assert_eq!(event_state("Stop", "", 1), Some("active"));
+        assert_eq!(event_state("StopFailure", "", 3), Some("active"));
+        assert_eq!(event_state("Stop", "", 0), Some("done"));
+        // 后台工作数只对回合结束类事件有意义，不改变其它事件的判定
+        assert_eq!(event_state("PermissionRequest", "", 2), Some("approval"));
+        assert_eq!(event_state("Notification", "agent_needs_input", 2), Some("question"));
+        assert_eq!(event_state("SessionStart", "", 2), None);
     }
 
     #[test]

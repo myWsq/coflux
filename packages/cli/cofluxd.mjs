@@ -731,6 +731,10 @@ async function cmdHook() {
       agentSessionId: payload.session_id ?? payload["thread-id"] ?? undefined,
       // Claude Notification 的类型枚举（permission_prompt / agent_needs_input …），不含正文
       notification: typeof notification === "string" && notification ? notification : undefined,
+      // Stop/SubagentStop 独有：本会话在飞的后台工作（shell/subagent/monitor/workflow）。claude
+      // 官方设它就是为了让 hook 区分「真做完了」与「挂起等后台把自己叫醒」。只传条数——条目里的
+      // description 是自由文本（含路径与代码片段），按本命令的隐私边界不出机。
+      backgroundTasks: Array.isArray(payload.background_tasks) ? payload.background_tasks.length : undefined,
     };
     hookDebug("POST /hook", JSON.stringify(body));
     const res = await fetch(`http://127.0.0.1:${portResult.port}/hook`, {
