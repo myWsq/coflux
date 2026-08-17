@@ -126,6 +126,13 @@ export const config = {
   relayNodes,
   /** relay token TTL：上限 120s 必须 ≤ relay 侧 tombstone 窗口，保证 token 重放必然失败。 */
   relayTokenTtlMs: Math.max(10_000, Math.min(120_000, int("COFLUX_RELAY_TOKEN_TTL_MS", 60_000))),
+  /** P2P 直连（plan 076）总开关。设 `0` 即停用：中心直接拒掉 P2P 信令，client 收到拒绝会
+   * **立刻**回落 relay（不必空等 15s 建连超时）。
+   * 2026-08-17 生产止血用：P2P 通道建成后崩掉需 ~30s ICE 超时才被对端感知（plan 076 已知
+   * 限制），而 client 侧心跳发现链路无响应时只抹 RTT 读数、不摘通道（device-router.ts 的
+   * sendHeartbeat），于是这 30s 内用户输入全进黑洞——现场表现是"设备在线但终端点不动"。
+   * 待 client 补上"心跳判死 → 摘通道 → 回落 relay"后再打开。 */
+  p2pEnabled: (process.env.COFLUX_P2P_ENABLED ?? "1") !== "0",
   /** P2P 直连（plan 076）：STUN URL 列表（逗号分隔，形如 `stun:host:3478`），随 authOk 下发
    * client、随 deviceP2pDial 下发 daemon。空 = 纯 host candidate（daemon 有公网 IP / 同 LAN
    * 场景已可用），STUN 只为跨 NAT 打洞增益。 */
