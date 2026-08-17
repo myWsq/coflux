@@ -61,6 +61,11 @@ const CATALOG_INTERVAL_MS = 3_000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 /** 心跳超时远短于普通 RPC 的 20s：心跳测的是链路好坏，等满 20s 才判失败毫无意义。 */
 const HEARTBEAT_TIMEOUT_MS = 5_000;
+/** 连续多少次心跳无响应就判通道已死。取 2：第一次超时立刻补发一发（不等完整周期），
+ * 于是判死落在 ~10s——既远快于 WebRTC 的 ~30s ICE 超时（DataChannel 崩掉后 onclose 要
+ * 等它才来），又留了一次容忍偶发丢包的机会。生产实测最慢链路 relay-jp RTT 180ms，
+ * 5s 超时对它仍有 27 倍余量，正常慢链路不会被误判。 */
+const HEARTBEAT_MAX_MISSES = 2;
 const LEASE_EXPIRY_MARGIN_MS = 2_000;
 const MAX_RETAINED_INPUTS = 256;
 const MAX_RETAINED_INPUT_BYTES = 1024 * 1024;
@@ -290,6 +295,10 @@ interface DeviceRoute {
   directRetryAttempts: number;
   catalogTimer?: TimerHandle;
   heartbeatTimer?: TimerHandle;
+  /** 在途那一发心跳的超时闸；到点仍无 pong 即记一次 miss（见 heartbeatMisses）。 */
+  heartbeatTimeoutTimer?: TimerHandle;
+  /** 连续无响应的心跳次数，收到任何 pong 即清零；达 HEARTBEAT_MAX_MISSES 判通道已死。 */
+  heartbeatMisses?: number;
   /** 在途的那一发心跳；只保留最后一发，迟到的旧 pong 一律丢弃。 */
   pendingPing?: { requestId: string; startedAt: number };
   /** 对端太老、不认识 ping：不再发，也不再把它的抱怨弹给用户。随 route 生命周期重置——
@@ -1673,6 +1682,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         if (route.pendingPing?.requestId !== payload.value.requestId) break;
         route.rttMs = Math.max(0, clock.now() - route.pendingPing.startedAt);
         route.pendingPing = undefined;
+        route.heartbeatMisses = 0;
+        clearHeartbeatTimeout(route);
         if (route.lastPublished) publish(route, route.lastPublished.mode, route.lastPublished.detail);
         break;
       }
@@ -1718,6 +1729,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       route.pendingPing = undefined;
       route.rttMs = undefined;
       route.heartbeatUnsupported = true;
+      // 旧 daemon 永远不会回 pong，miss 计数必须一并清零并撤掉超时闸——否则会把一台
+      // 只是"太老"的设备判成通道已死，无限摘通道重连。
+      route.heartbeatMisses = 0;
+      clearHeartbeatTimeout(route);
       if (route.heartbeatTimer !== undefined) clock.clearInterval(route.heartbeatTimer);
       route.heartbeatTimer = undefined;
       if (route.lastPublished) publish(route, route.lastPublished.mode, route.lastPublished.detail);
@@ -1947,21 +1962,44 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   /** 一次心跳：纯 echo 的 ping/pong 往返，用时即 rtt。刻意不走 request()——那条路会登记
    * pendingRequests，而 pendingRequests 非空即构成 lane demand，会把本该按需释放的连接
    * 永久钉住（plan 043 的按需拨号就此失效）。这里照 sendCatalogRequest 的样子直接发。
-   * 发送失败不在这里判死：那是既有恢复逻辑的职责，心跳只负责让读数别撒谎。 */
+   *
+   * 心跳同时承担探活（plan 080）：连续 HEARTBEAT_MAX_MISSES 次无响应即摘掉通道，交给既有
+   * scheduleRecovery 重新竞速。此前这里只抹 rtt 读数、把判死甩给"既有恢复逻辑"，而那套
+   * 逻辑依赖 channel 的 onclose——只对 WebSocket（relay/loopback）成立，对 WebRTC
+   * DataChannel 要等 ~30s ICE 超时才来。2026-08-17 事故中用户对着一条已死但状态仍是 open
+   * 的通道敲键盘，每一次按键都发进黑洞。 */
   function sendHeartbeat(route: DeviceRoute): void {
     // 走 session lane：它是常在的那条（elevated 只在有 RPC/生命周期操作时按需建），
     // 也正是终端数据实际走的路——侧栏那个读数要回答的就是"我用这台设备卡不卡"。
     const channel = route.sessionLane.active;
     if (!channelCovers(channel, DeviceScope.SESSION_READ)) return;
-    // 上一发还没回来就又到点了：链路已经慢过一个心跳周期，抹掉读数而不是留着旧的。
-    if (route.pendingPing) {
-      route.pendingPing = undefined;
-      route.rttMs = undefined;
-      if (route.lastPublished) publish(route, route.lastPublished.mode, route.lastPublished.detail);
-    }
+    // 上一发还在途：生死由它自己的超时闸裁决，这里不重复发也不清它。
+    if (route.pendingPing) return;
     const requestId = randomUUID();
     if (!sendOn(channel, normalizePayload({ case: "ping", value: { requestId } }))) return;
     route.pendingPing = { requestId, startedAt: clock.now() };
+    clearHeartbeatTimeout(route);
+    route.heartbeatTimeoutTimer = clock.setTimeout(() => {
+      route.heartbeatTimeoutTimer = undefined;
+      if (!route.pendingPing || route.pendingPing.requestId !== requestId) return; // pong 已到
+      route.pendingPing = undefined;
+      route.rttMs = undefined;
+      route.heartbeatMisses = (route.heartbeatMisses ?? 0) + 1;
+      if (route.heartbeatMisses >= HEARTBEAT_MAX_MISSES) {
+        route.heartbeatMisses = 0;
+        // 只摘通道、不动控制面：recovery 会重新竞速，可用的那条（通常是 relay）随即接管。
+        loseChannel(route, channel, "心跳连续无响应，判定通道已死");
+        return;
+      }
+      if (route.lastPublished) publish(route, route.lastPublished.mode, route.lastPublished.detail);
+      // 立刻补发，不等下一个完整周期——否则判死要拖到两个周期之后，比 ICE 超时还慢。
+      sendHeartbeat(route);
+    }, HEARTBEAT_TIMEOUT_MS);
+  }
+
+  function clearHeartbeatTimeout(route: DeviceRoute): void {
+    if (route.heartbeatTimeoutTimer !== undefined) clock.clearTimeout(route.heartbeatTimeoutTimer);
+    route.heartbeatTimeoutTimer = undefined;
   }
 
   /** 心跳只在 transport 真正活着时转：按需拨号下 idle 的设备根本没有连接，无从 ping，
@@ -1973,6 +2011,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       route.heartbeatTimer = undefined;
       route.pendingPing = undefined;
       route.rttMs = undefined;
+      // 通道没了就没有"连续无响应"可言：miss 计数跟着归零，否则换上来的新通道会背着
+      // 上一条通道的欠账，第一次超时就被判死。
+      route.heartbeatMisses = 0;
+      clearHeartbeatTimeout(route);
       return;
     }
     if (route.heartbeatTimer !== undefined) return;
@@ -2670,6 +2712,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     route.heartbeatTimer = undefined;
     route.pendingPing = undefined;
     route.rttMs = undefined;
+    route.heartbeatMisses = 0;
+    clearHeartbeatTimeout(route);
     route.directProbeController?.abort();
     route.directProbeController = undefined;
     route.directProbe = undefined;
