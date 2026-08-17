@@ -21,19 +21,55 @@ const ATTACH_GRACE_MS = 500;
 // 避免永久滞留。
 const PENDING_CREATE_TIMEOUT_MS = 15_000;
 
-/** Tab 上的 agent 图标（plan 075）：claude 用 Clawd 像素小机器人（Claude Code 欢迎屏
- * 同款形态：双耳/双钳/双脚/竖条眼），固定品牌橙不随状态变色（用户 2026-08-15 指定）——
- * 品牌色属第三方标识，不走主题 token。其余 agent 用 lucide 机器人轮廓，
- * 保留状态警示色（approval/question→warning、done→success，与侧栏语义一致）。 */
+/** Clawd 的三个姿态（Claude Code 欢迎屏同款像素小动物），按 hook 上报的状态换。
+ * 12px 下眼睛/爪子这类细节一律不可读，所以三态的差异全部做在剪影上：
+ * active=左手托着东西（左上一块深蓝，轮廓不对称）；raise=举旗站立（顶部凸起最高）；
+ * rest=正面蹲坐（矮扁、无凸起）。品牌橙固定不随状态变色（用户 2026-08-15 指定）——
+ * 品牌色属第三方标识，不走主题 token。 */
+const CLAWD_POSES = {
+  active: (
+    <>
+      <path
+        fill="#D97757"
+        d="M4 5h9v6.5H4z M4 11.5h1.5v3H4z M6 11.5h1.5v3H6z M9 11.5h1.5v3H9z M11.5 11.5h1.5v3h-1.5z M13 7h3v2.5h-3z M1.5 6h2.5v3H1.5z"
+      />
+      <path fill="#000000" d="M5.5 7h1.5v1.5H5.5z M9.5 7h1.5v1.5H9.5z" />
+      <path fill="#1A4C81" d="M0 3h3.5v3H0z" />
+    </>
+  ),
+  raise: (
+    <>
+      <path
+        fill="#D97757"
+        d="M11 3h2.5v2.5H11z M3.5 5.5h9v6.5h-9z M0 8h3.5v2.5H0z M3.5 12h1.5v3H3.5z M5.5 12h1.5v3H5.5z M9 12h1.5v3H9z M11 12h1.5v3H11z"
+      />
+      <path
+        fill="#000000"
+        d="M12 0h1v3.5h-1z M8.5 0h1.75v1.25H8.5z M10.25 1.25h1.75v1.25h-1.75z M4.5 7.5h2v1h-2z M8.5 7.5h2v1h-2z"
+      />
+    </>
+  ),
+  rest: (
+    <>
+      <path
+        fill="#D97757"
+        d="M3 5.5h10v6.5H3z M0 8.5h3v3H0z M13 8.5h3v3h-3z M3 12h1.5v2H3z M5.5 12h1.5v2H5.5z M9 12h1.5v2H9z M11.5 12h1.5v2h-1.5z"
+      />
+      <path fill="#000000" d="M4.5 7.5h1.5v1.5H4.5z M10 7.5h1.5v1.5H10z" />
+    </>
+  ),
+};
+
+/** Tab 上的 agent 图标（plan 075）：claude 用 Clawd 像素小动物并按状态换姿态；
+ * 其余 agent 用 lucide 机器人轮廓，保留状态警示色（approval/question→warning、
+ * done→success，与侧栏语义一致）。 */
 function AgentGlyph({ agent, state, className }: { agent: string; state: string; className?: string }) {
   if (agent === "claude") {
+    // 旧 worker 的 "waiting" 与未知状态一并按 rest 收（与 store.ts 的活动聚合同口径）。
+    const pose = state === "active" ? "active" : state === "approval" || state === "question" ? "raise" : "rest";
     return (
-      <svg viewBox="0 0 16 16" className={cn("size-3 shrink-0", className)} aria-hidden>
-        <path
-          fill="#D97757"
-          d="M3 2h2v2H3zM11 2h2v2h-2zM2 4h12v8H2zM0 7h2v2H0zM14 7h2v2h-2zM4 12h2v2H4zM10 12h2v2h-2z"
-        />
-        <path fill="#000000" d="M5 6h1.5v3H5zM9.5 6H11v3H9.5z" />
+      <svg viewBox="0 0 16 16" className={cn("size-3 shrink-0", className)} shapeRendering="crispEdges" aria-hidden>
+        {CLAWD_POSES[pose]}
       </svg>
     );
   }
