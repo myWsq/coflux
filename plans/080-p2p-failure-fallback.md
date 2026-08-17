@@ -1,4 +1,4 @@
-# Plan 080: P2P 静默失效的根因与回退——心跳判死接管，relay 兜底不再落空
+# Plan 080: 静默死亡的链路自愈——控制面探活、判死不连坐、数据面通道各自判活
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -7,131 +7,161 @@
 > verification happens outside its session. Stop on any STOP condition. When
 > complete, update this plan in `plans/README.md`.
 >
-> Drift check: `git diff --stat be2e42c..HEAD -- packages/client/src/device-router.ts packages/client/src/device-router.test.ts crates/worker/src/p2p.rs apps/server/src/config.ts`
+> Drift check: `git diff --stat 71c543b..HEAD -- packages/client/src/connection.ts packages/client/src/store.ts packages/client/src/device-router.ts packages/client/src/device-router.test.ts`
 
 ## Status
 
 - Priority: P1
-- Effort: M
-- Risk: MED
-- Depends on: none（plan 076 已 DONE，本 plan 修它遗留的失效模式）
+- Effort: L
+- Risk: HIGH（改的是连接生命周期与通道竞速的核心状态机；2026-08-17 已有两次未测试就上生产、两次都放大故障的记录）
+- Depends on: none
 - Category: bug
 - Execution: self
-- Planned at: `be2e42c`, 2026-08-17
+- Planned at: `71c543b`, 2026-08-17（主因判断于同日调查后修订，见 Requirement）
 
 ## Requirement
 
-2026-08-17 生产事故：用户在 Work 机器的浏览器里操作 Home 机器上的终端，表现为**设备显示在线、终端点不动**——不断线、不报错、不超时，就是彻底没反应，持续数小时；刷新页面能好一小会儿又复发。同一时间 iOS 端（走蜂窝网络，且是独立的 Swift 实现）全程正常。
+2026-08-17 生产事故：用户在 Work 机器的浏览器里操作 Home 机器上的终端，表现为**设备显示在线、终端点不动**——不断线、不报错、不超时，持续数小时；刷新页面能好一小会儿又复发。同一时间 iOS 端（走蜂窝网络、独立 Swift 实现）全程正常。
 
-因果链已查明五环，第四环是核心缺陷：
+**主因（调查修订后）**：控制面 WebSocket 被中间网络静默掐断——不发 FIN 也不发 RST，两端 TCP 都还是 ESTABLISHED。于是：
 
-1. **P2P 跨网络连通了，而它本不该通**。生产没配 STUN（`COFLUX_STUN_URLS` 未设置），按 `apps/server/src/config.ts` 的注释，空值时只有 host candidate，跨 NAT 建不起来。但两台机器都挂着 Tailscale，worker 用 `if_addrs::get_if_addrs()` 枚举**全部**非 loopback 接口（`crates/worker/src/p2p.rs:373`），于是 Tailscale 的 `100.x` 成了双方可达的 host candidate。
-2. **连上了但不稳**。Home 的 `~/.coflux/daemon.log` 累计 17 条 `p2p channel ... 结束: p2p 写失败: data channel closed` / `p2p 写超时`。该机 Tailscale 接口 `utun1` 的 MTU 为 1380（标准 1500）——**首要怀疑但尚未证实**。
-3. **P2P 会顶掉正在正常工作的 relay**：`acceptCandidate`（`device-router.ts:1151`）在非 relay 通道 generation 更高时替换 active 的 relay 通道。这是 plan 076 有意设计的 promotion（"relay 先赢、P2P 后到升级，用户无感"）。
-4. **崩掉之后没有任何机制及时发现**。plan 076 把"webrtc-rs 的关闭对 werift 不可感知（仅 ~30s ICE 超时）"当已知限制接受，前提是"既有恢复逻辑"能兜住——但那套逻辑依赖 channel 的 `onclose`，只对 WebSocket（relay/loopback）成立，对 WebRTC DataChannel 不成立。而心跳每 15s 就能发现链路无响应（`sendHeartbeat` 见 `route.pendingPing` 还在），却被明确设计成**只抹 RTT 读数、不摘通道**（`device-router.ts:1950` 的注释："发送失败不在这里判死：那是既有恢复逻辑的职责，心跳只负责让读数别撒谎"）。
-5. **于是回退根本没机会触发**。`candidateDone`（`:1178`）里的 `startRelay()` 只覆盖**建连阶段**失败，不覆盖**建成后崩掉**。那 ~30 秒里用户的每次按键都经 `sendOn` 发进一个已死、但状态仍为 open 的 DataChannel。
+```
+控制面 WS 静默死亡
+  → ws.onclose 永不触发，client 的 controlOnline 仍为 true，readyState 仍为 OPEN
+  → send() 把消息写进黑洞且不报错，rendezvous 请求石沉大海
+  → 与此同时链路上已建立的 relay / p2p 通道也被掐断
+  → 想重建：startRelay / startP2p 都有 `!controlOnline` 守卫、都要先 rendezvous
+  → 干等，彻底卡死，且永不自愈（重连只由 onclose 驱动）
+```
 
-当前生产靠 `COFLUX_P2P_ENABLED=0` 止血（commit `be2e42c`），等于退回 plan 076 上线前的行为。
+**初版 plan 把主因判成"P2P 崩溃 + 心跳不判死"，调查证据推翻了它**，记录于此以免重蹈：
+
+- Home 的 `daemon.log` 里 17 次 p2p 失败，**15 次是 `data channel closed`**（写之前 channel 已关），只有 2 次写超时。MTU 受限链路的症状应是超时与丢包，不是"已关闭"——**MTU/Tailscale 假设无证据支持**。
+- 那 15 次是**被对端主动关闭**的结果，不是自身崩溃。两侧是对称设计：client 在 `setControlOnline(false)` 时主动 `loseChannel` 掉全部 relay + p2p 通道（`device-router.ts:2549-2552`）；worker 侧同样"每次中心断开 close_all 清空全部 PeerConnection"（`crates/worker/src/main.rs:420` 注释）。
+- **决定性反证**：中心日志显示 Home 的 daemon 从 14:05 起一条 `disconnected` 都没有（直到人工重启 worker），所以 Home 侧的 `close_all` 不可能被触发——那些 channel 只能是 Work 那端的浏览器关的，而它关的原因正是**它自己的控制面断了**。
+- 事故当天关闭 P2P 后用户恢复，但同一动作重启了 `coflux-server`（所有连接因此重建）且用户刷新了页面，**把恢复归因于关闭 P2P 证据不足**。
+
+P2P 在这条链里是受害者而非元凶：relay 通道同样被摧毁、同样重建不了，只是 relay 重建只需一次 rendezvous，而 P2P 还要走完整 ICE 协商，所以显得更糟。
 
 **做完之后为真**：
 
-1. 任何 session lane 通道（p2p / relay / direct）在**建成后静默死亡**时，都能在**远快于 ICE 超时**的时间内被摘掉，并触发既有恢复路径重新竞速，让 relay 接管。
-2. P2P 反复失败时不会靠 promotion 反复抢走可用的 relay 通道，不产生震荡。
-3. 上述行为由 `device-router.test.ts` 的确定性用例覆盖（含负向验证），不依赖真实网络。
-4. 以上全部通过后，生产的 `COFLUX_P2P_ENABLED` 恢复为开启，并在真实跨网络场景确认终端可用。
+1. 控制面 WS 静默死亡能被 client 自己发现，并在十几秒量级内完成重连——不依赖 `onclose`，不依赖用户刷新页面。
+2. 判死与重连的路径不会把连接推进任何不可恢复的死角（凭据、状态机、联动清理都不留缺口）。
+3. 数据面通道（relay / p2p / direct）拥有自己的存活判据，不必等 `onclose`——后者对 WebRTC DataChannel 要 ~30s ICE 超时才来。
+4. P2P 反复失败时不会靠 promotion 反复抢走可用的 relay 通道。
+5. 以上全部由确定性单测覆盖（含负向验证），不依赖真实网络、不靠上生产试。
 
 ## Decisions & tradeoffs
 
-- **判死职责归心跳，不再等 `onclose`**：`sendHeartbeat` 承担探活，连续无响应即 `loseChannel`，交给既有 `scheduleRecovery`（`:1492`）重新竞速。拒绝方案：给 P2P 单独加一套 DataChannel 存活检测——那只修 P2P，而"通道状态是 open、实际已死"对 relay/loopback 同样可能（中间设备静默丢弃时 WebSocket 也不触发 onclose），心跳是唯一对三种通道都成立的判据。
-  Based on: `device-router.ts:1950` 的注释把判死甩给"既有恢复逻辑"，而该逻辑依赖 `onClose` 回调（`:645` loopback、`:743` relay、`:871` p2p），对 DataChannel 需等 ~30s ICE 超时。
+- **控制面判死的判据取"发出消息后是否还有任何入站帧"，不做定期心跳**：链路正常时任何一次 client→server 操作都会在几秒内引来入站流量（广播 / error / checkpoint）；静默死亡时是彻底的寂静。拒绝方案 A：新增 proto 心跳消息——要动 proto + server + 三端，代价与收益不成比例，且 buf 用远程插件、一改要同时生成 TS/Rust/Swift。拒绝方案 B：纯 idle 判据（超过 N 秒无入站即判死）——页面空闲时服务端本就不发消息，会误判。
+  Based on: `packages/client/src/connection.ts` 全文无任何探活，重连唯一入口是 `ws.onclose`；`proto/coflux/v1/client.proto` 的 `ClientToServer` oneof 无任何心跳消息。
 
-- **判死阈值：连续两次心跳无响应，且第二次不等完整周期**。第一次 ping 超过 `HEARTBEAT_TIMEOUT_MS` 无 pong 即记一次失败并立刻补发，第二次同样超时才判死——判死时间因此约 10-15 秒，显著快于 ICE 的 ~30 秒，又留了一次容忍抖动的机会。拒绝方案 A：单次超时判死（5 秒）——对偶发丢包过于敏感，会在正常链路上制造无谓的通道重建。拒绝方案 B：等两个完整心跳周期（~35 秒）——比 ICE 超时还慢，等于没修。
-  Based on: `HEARTBEAT_INTERVAL_MS = 15_000`、`HEARTBEAT_TIMEOUT_MS = 5_000`（`:61,63`）；生产实测 RTT relay-bj 31ms、relay-jp 180ms，5 秒对最慢链路仍有 27 倍余量。
+- **判死后只 `close()`，让 `onclose` 驱动重连，绝不自行调用重连**：与"服务端主动关闭"完全同构，凭据判断（登出 / 版本失配）一并复用。拒绝方案：判死时提前摘掉 socket 引用并直接调 `scheduleReconnect`——2026-08-17 实测这样会绕过 `reconnectCredential()`，撞上 `store.ts` 的 `shouldRetry` 只在 `authOk` 之后才置 true，**连接被推进永久断开态，比不修更糟**。
+  Based on: `packages/client/src/store.ts` 的 `reconnectCredential: () => (shouldRetry && token ? { token } : null)` 与 `shouldRetry` 仅在 `authOk` 分支置 true。
 
-- **`HEARTBEAT_TIMEOUT_MS` 目前是死常量，本 plan 让它生效**：`device-router.ts:63` 定义了它、注释还写明"心跳超时远短于普通 RPC 的 20s：心跳测的是链路好坏，等满 20s 才判失败毫无意义"，但**全文件没有任何使用点**。这说明超时判死本就在设计意图内，只是没实现完。实现时用它，不要另起新常量。
-  Based on: `grep -n HEARTBEAT_TIMEOUT_MS packages/client/src/device-router.ts` 只有第 63 行定义。
+- **本地已有会话 token 即视为可自动重连**：`shouldRetry` 初始为 false，导致刷新后的第一条连接若在 `authOk` 到达前断掉（被掐、或 server 的 15s authDeadline 关闭），会永久停在断开态等用户再刷一次。这个洞早于本次改动就存在，本 plan 一并修掉。清零点（authError / clientOutdated / logout）保持不变。
+  Based on: `store.ts` 的 `let shouldRetry = false;` 与三处清零点。
 
-- **判死对 relay 通道同样生效，这是有意的**：不给 p2p 开特例。relay 走 WebSocket，中间设备静默丢弃时同样不触发 onclose（本次事故的 daemon 侧就出现过 45 分钟的 ESTABLISHED 僵尸连接）。误判代价是一次通道重建（recovery 退避 `RECOVER_BASE_MS=350` 起、封顶 5s），远小于一次 30 秒黑洞。
-  Based on: `device-router.ts:1492-1510` 的 `scheduleRecovery` 退避实现。
+- **控制面判死不得连坐摧毁数据面通道**：`setControlOnline(false)` 现在会主动 `loseChannel` 掉全部 relay + p2p 通道，同时 `startRelay`/`startP2p` 的 `!controlOnline` 守卫封死重建——两者叠加意味着控制面一抖，数据面全废且无法自救。2026-08-17 的第二次改砸正是踩了这个：判死联动 `setControlOnline(false)`，把"部分可用"放大成"全面瘫痪"。**本 plan 必须保证控制面的短暂抖动不会造成数据面的全毁重建**，具体做法（宽限窗口 / 延迟收敛 / 仅在确认断开后收敛）由执行者设计，但必须有用例证明"控制面抖动一次并快速恢复"不会摧毁正在工作的 relay 通道。
+  Based on: `device-router.ts:2547-2560` 的 `setControlOnline(false)` 分支；`:1201`（`startRelay`）与 `:1219`（`startP2p`）的 `!controlOnline` 守卫。
 
-- **P2P 失败必须退避，否则震荡**：判死后重新竞速时 P2P 会再次靠 promotion 抢走刚接管的 relay，崩一次抢一次。参照 `direct` 既有的 `directRetryAttempts` + `scheduleDirectRetry`（`:290,1984-2058`）建立对等机制。拒绝方案：判死后永久禁用该 route 的 P2P——网络恢复后就再也用不上直连，而 P2P 的价值（低延迟）正是为长会话准备的。
-  Based on: `acceptCandidate`（`:1151`）的 promotion 分支对 `channel.kind !== "relay"` 一律放行，没有任何失败记忆。
+- **worker 侧的对称 `close_all` 本 plan 不动**：改它要重新论证"中心断开后 daemon 还该不该信任既有 channel 的授权"，那是 plan 043/076 的安全语义，超出本次范围。因此 client 侧的宽限只在**控制面快速恢复**的前提下有意义——这也正是本 plan 把控制面探活放在首位的原因。
+  Based on: `crates/worker/src/main.rs:420` 注释"每次中心断开 close_all 清空全部 PeerConnection"。
 
-- **隧道接口是否排除出 host candidate，由调查结论决定，不预先拍板**：排除（utun/tailscale/wg）能从源头避免这条不稳链路，但会砍掉"两台机器只在 Tailscale 里互通"这种本来能用 P2P 的场景。Milestone 1 的结论若证实 MTU/隧道是崩溃主因，则做；若主因另有其他（DERP 中继路径、NAT 映射老化等），则不动 worker。**这一条明确委托给执行者，依据是 Milestone 1 的实测结论，不是猜测。**
-  Based on: `crates/worker/src/p2p.rs:373` 的 `if_addrs::get_if_addrs()` 枚举全部非 loopback 接口。
+- **数据面通道的判死归心跳，阈值为连续两次无响应且第二次不等完整周期**：判死时间因此约 10-15 秒，显著快于 WebRTC 的 ~30s ICE 超时，又留一次容忍抖动的机会。拒绝方案 A：单次超时（5s）判死——对偶发丢包过于敏感。拒绝方案 B：等两个完整心跳周期（~35s）——比 ICE 超时还慢，等于没修。判死对 relay/direct 同样生效（WebSocket 在静默丢弃下同样不触发 onclose）。
+  Based on: `HEARTBEAT_INTERVAL_MS = 15_000`、`HEARTBEAT_TIMEOUT_MS = 5_000`（`device-router.ts:61,63`）；生产实测 RTT relay-bj 31ms、relay-jp 180ms，5 秒对最慢链路仍有 27 倍余量。
 
-- **开关默认值不在本 plan 改**：`config.ts` 的 `p2pEnabled` 保持 `?? "1"`（默认开启），生产的 `COFLUX_P2P_ENABLED=0` 是运维侧的止血值。全部验收通过后由人去生产改回，属于部署动作不是代码改动。
-  Based on: `apps/server/src/config.ts` 的 `p2pEnabled` 定义与生产 `/etc/coflux/server.env`。
+- **`HEARTBEAT_TIMEOUT_MS` 目前是死常量，本 plan 让它生效**：`device-router.ts:63` 定义了它、注释写明"心跳超时远短于普通 RPC 的 20s"，但全文件无任何使用点——超时判死本就在设计意图内，只是没实现完。实现时用它，不要另起新常量。
+  Based on: `grep -n HEARTBEAT_TIMEOUT_MS packages/client/src/device-router.ts` 只有第 63 行。
+
+- **P2P 失败必须退避**：否则判死后重新竞速时 P2P 会再次靠 promotion 抢走刚接管的 relay，崩一次抢一次。参照 `direct` 既有的 `directRetryAttempts` + `scheduleDirectRetry`（`:290,1984-2058`）建立对等机制。拒绝方案：判死后永久禁用该 route 的 P2P——网络恢复后就再也用不上直连。退避必须拦在**发起**侧（不去建 P2P），而不是在 `acceptCandidate` 里丢弃已建好的连接。
+  Based on: `acceptCandidate`（`:1151`）的 promotion 分支对 `channel.kind !== "relay"` 一律放行，无任何失败记忆。
+
+- **`connection.ts` 必须先可注入时钟**：现在用裸 `window.setTimeout`/`setInterval`，无法写确定性测试。而本 plan 的全部价值都建立在"有测试"之上——2026-08-17 两次未测试就上生产、两次都放大故障。参照 `device-router.ts` 既有的 clock 注入（`createDeviceRouter` 的 `clock` 参数与 `device-router.test.ts:56` 的 `FakeClock.advance`）。
+  Based on: `connection.ts` 内 `window.setTimeout` 直接调用；`device-router.test.ts:267` 的 `harness(adapter, clock)`。
 
 ## Direction
 
-### Milestone 1: 查实 P2P 在隧道链路上崩溃的直接原因
+Milestone 顺序即风险顺序：先把可测性建起来，再动状态机。
 
-产出一个有实测支撑的结论：DataChannel 崩溃的主因是什么（MTU/PMTU、DERP 中继路径、NAT 映射老化，或其他），并据此决定"是否把隧道接口排除出 host candidate"。结论连同证据写进本 plan 的 Maintenance notes。
+### Milestone 1: `connection.ts` 可注入时钟，既有行为不变
 
-这一步需要真实的两机 + Tailscale 环境，属于 acceptance 层，不能用单测替代。可用手段：`daemon.log` 里 p2p 相关记录、worker 侧 webrtc 的 ICE/DTLS 诊断、对隧道接口做 MTU 探测、必要时临时把 `COFLUX_P2P_ENABLED` 打开复现。
+`createConnection` 接受可选 clock（默认取 `window`），退避重连改用它。新增 `connection` 的测试文件，用假时钟覆盖既有行为：认证包发送、指数退避的时序、`stop()` 后不再重连。
 
-Validation: 结论可复现——能说明"在什么条件下 DataChannel 会崩"，并且该条件与生产观测到的 17 次失败一致。
+Validation: `node --test packages/client/src/connection.test.ts` -> exit 0。
 
-### Milestone 2: 心跳判死接管，通道死亡被及时发现
+### Milestone 2: 控制面静默死亡自愈
 
-任一 session lane 的 active 通道连续两次心跳无响应时被 `loseChannel` 摘掉，走既有 `scheduleRecovery` 重新竞速。对 p2p / relay / direct 一视同仁。判死时间显著短于 ICE 的 ~30 秒。
+发出消息后开始等回音，超时无任何入站帧即判死；判死只 `close()`，重连由 `onclose` 驱动；已有 token 的首连纳入自动重连。
 
-Validation: `node --test packages/client/src/device-router.test.ts` -> exit 0，且新增用例覆盖"P2P 建成后静默崩掉（只停止响应、不触发 onclose）→ 心跳判死 → relay 接管"，并做过负向验证（抽掉判死逻辑该用例必红）。
+Validation: `node --test packages/client/src/connection.test.ts` -> exit 0，用例须覆盖：(a) 发消息后无回音 → 判死 → 重连；(b) 有回音 → 不判死；(c) 认证回执迟迟不到 → 判死后**仍能**重连（守住 `shouldRetry` 死角）；(d) 空闲不收发时不判死。(a)(c) 做负向验证。
 
-### Milestone 3: P2P 失败退避，不与 relay 震荡
+### Milestone 3: 控制面抖动不再连坐摧毁数据面
 
-P2P 建连失败或被判死后进入退避，退避期内不参与竞速、不触发 promotion；成功建立并稳定后重置。
+控制面短暂断开并快速恢复时，正在工作的 relay 通道不被全毁重建。
 
-Validation: `node --test packages/client/src/device-router.test.ts` -> exit 0，且新增用例证明"P2P 反复崩溃时 relay 保持接管，不出现 relay→p2p→relay 的反复切换"。
+Validation: `node --test packages/client/src/device-router.test.ts` -> exit 0，用例证明"控制面抖动一次并在宽限内恢复"后 relay 通道仍是同一条（未经历 loseChannel → 重新竞速）。
 
-### Milestone 4（仅当 Milestone 1 结论支持）: 隧道接口不进 host candidate
+### Milestone 4: 数据面通道心跳判死
 
-worker 侧枚举 host candidate 时跳过隧道类接口。
+任一 session lane 的 active 通道连续两次心跳无响应即被 `loseChannel`，走既有 `scheduleRecovery` 重新竞速。对 p2p / relay / direct 一视同仁，且尊重 `heartbeatUnsupported`。
 
-Validation: `cargo build -p coflux-worker` -> exit 0 零警告；worker 侧单测覆盖接口过滤规则。
+Validation: `node --test packages/client/src/device-router.test.ts` -> exit 0，用例覆盖"P2P 建成后静默停止响应（不触发 onclose）→ 心跳判死 → relay 接管"，并做负向验证。
+
+### Milestone 5: P2P 失败退避
+
+P2P 建连失败或被判死后进入退避，退避期内不发起、不参与竞速、不触发 promotion；稳定后重置。
+
+Validation: `node --test packages/client/src/device-router.test.ts` -> exit 0，用例证明 P2P 反复失败时 relay 保持接管，不出现 relay→p2p→relay 反复切换。
 
 ## Landmines
 
-- `device-router.ts:1950` 的注释明确写着心跳"不判死"，本 plan 正是要推翻它——改实现时必须同步改注释，否则下一个读者会以为这是设计意图而不是已修的缺陷。
-- `device-router.ts:63` 的 `HEARTBEAT_TIMEOUT_MS` 是死常量（无使用点）。看到它别以为超时判死已经实现了。
-- `device-router.ts:1716-1720`：老 daemon 不支持 ping 时会设 `heartbeatUnsupported = true` 并停掉心跳。判死逻辑必须尊重这个标记——否则对老 worker 会因"永远收不到 pong"而无限摘通道。
-- `device-router.ts:1957-1961` 现有逻辑：上一发 ping 没回来时，只是把 `pendingPing` 清空并抹掉 rttMs。改成判死后要注意别把"清空 pendingPing"和"记一次失败"混在一起——清空之后下一轮就看不出上一轮失败过了，计数必须独立存放。
-- `acceptCandidate`（`:1151`）的 promotion 分支：P2P 通道 generation 更高就直接替换 active relay。退避机制必须在**发起**侧拦住（不去建 P2P），而不是在这里拦——否则已经建好的连接被丢弃，白付一次建连成本。
-- `scheduleRecovery`（`:1492`）有 `lane.recoveryTimer !== undefined` 的守卫。判死路径若在 recovery 已排期时再次触发，不会重复排期，但也别指望它会缩短已排的延迟。
-- 测试 harness 的 `FakeClock.advance()`（`device-router.test.ts:56`）是同步推进；心跳与判死都挂在 clock 上，用例要按"advance 到超时点 → 断言未判死 → 再 advance → 断言已判死"的方式钉住阈值，否则改了阈值测试也不会红。
+- `store.ts` 的 `shouldRetry` 只在 `authOk` 后置 true。任何"判死→重连"路径若绕过 `reconnectCredential()`，都会在认证完成前判死时把连接推进**永久断开态**。2026-08-17 实测踩过。
+- `device-router.ts:2547-2560`：`setControlOnline(false)` 会主动摧毁全部 relay + p2p 通道，且 `:1201`/`:1219` 的 `!controlOnline` 守卫同时封死重建。**控制面判死会连坐引爆这两处**，这是把"部分可用"放大成"全面瘫痪"的机制，2026-08-17 实测踩过。
+- `device-router.ts:1950` 的注释明确写着心跳"不判死"，本 plan 要推翻它——改实现时必须同步改注释。
+- `device-router.ts:63` 的 `HEARTBEAT_TIMEOUT_MS` 是死常量（无使用点），别以为超时判死已实现。
+- `device-router.ts:1716-1720`：老 daemon 不支持 ping 时设 `heartbeatUnsupported = true` 并停心跳。判死逻辑必须尊重它，否则老 worker 会因"永远收不到 pong"被无限摘通道。
+- `device-router.ts:1957-1961`：现有逻辑在上一发 ping 未回时只清 `pendingPing` 并抹 rttMs。改成判死后要注意，清空之后下一轮就看不出上一轮失败过——失败计数必须独立存放。
+- `acceptCandidate`（`:1151`）的 promotion：P2P generation 更高就替换 active relay。退避必须拦在发起侧，否则白付一次建连成本。
+- `scheduleRecovery`（`:1492`）有 `lane.recoveryTimer !== undefined` 守卫，判死路径在 recovery 已排期时不会重复排期，也不会缩短已排的延迟。
+- `FakeClock.advance()`（`device-router.test.ts:56`）同步推进；用例要按"advance 到阈值前 → 断言未判死 → 再 advance → 断言已判死"钉住数值，否则改了阈值测试也不会红。
+- `connection.ts` 的 `send()` 在 `readyState !== OPEN` 时静默丢弃消息（既有行为）。这也是一种"操作没反应"的来源，但不在本 plan 范围，别顺手改。
 
 ## Scope
 
 In scope:
+- `packages/client/src/connection.ts`
+- `packages/client/src/store.ts`
 - `packages/client/src/device-router.ts`
 - `packages/client/src/device-router.test.ts`
-- `crates/worker/src/p2p.rs`（仅 Milestone 4，且仅当 Milestone 1 结论支持）
+- `packages/client/src/connection.test.ts`（新增）
 
 Out of scope:
-- `apps/server/` —— 开关已就位（`be2e42c`），本 plan 不改服务端逻辑；把 `COFLUX_P2P_ENABLED` 改回开启是部署动作。
-- `packages/client/src/connection.ts` —— 控制面 WS 的静默链路自愈是另一个洞（无任何探活、且需先改造成可注入时钟才能测），2026-08-17 尝试过并回滚，单独立项。
-- `apps/ios/` —— Swift 端是独立实现，本次事故中表现正常；等 web 侧方案验证后再决定是否对齐。
-- plan 079 的改动（僵尸 task 自愈 + 升级重试封顶 + 会话链路可观测性）—— 在 git stash `plan 079 WIP` 里，黑盒测试因本机 OrbStack 卡死未跑。
+- `crates/worker/` —— 对称的 `close_all` 涉及 plan 043/076 的授权语义，改它要重新论证安全模型。
+- `apps/server/` —— `COFLUX_P2P_ENABLED` 开关已就位（`be2e42c`）；把它改回开启是部署动作不是代码改动。
+- `proto/` —— 本 plan 不新增任何线协议消息（控制面判据刻意选了不需要服务端配合的那种）。
+- `apps/ios/` —— Swift 端独立实现，本次事故中表现正常；等 web 侧方案验证后再决定是否对齐。
+- 隧道接口是否排除出 host candidate —— 初版 plan 的 MTU 假设已被证据推翻，该问题不再是本 plan 的一部分。
+- plan 079（僵尸 task 自愈 + 升级重试封顶 + 会话链路可观测性）—— 在 git stash `plan 079 WIP` 里。
 - 生产 caddy 的 `stream_close_delay 5m` —— 与本次无关，待单独回滚。
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| client 单测 | `node --test packages/client/src/device-router.test.ts` | exit 0 |
+| connection 单测 | `node --test packages/client/src/connection.test.ts` | exit 0 |
+| device-router 单测 | `node --test packages/client/src/device-router.test.ts` | exit 0 |
 | web 类型检查 | `node_modules/.bin/tsc -b apps/web/tsconfig.json` | exit 0 |
-| worker 构建（仅 M4） | `cargo build -p coflux-worker` | exit 0，零警告 |
-| 真实跨网络验收 (acceptance) | 两台不同网络的机器 + 浏览器操作对端终端，`COFLUX_P2P_ENABLED` 开启 | 终端可用；P2P 崩溃时自动回落 relay，用户无感 |
+| 真实跨网络验收 (acceptance) | 两台不同网络的机器 + 浏览器操作对端终端 | 链路被掐后自动恢复，无需刷新页面 |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] Milestone 1 的结论（含证据）写进本 plan 的 Maintenance notes，并据此明确记录 Milestone 4 做或不做及理由。
-- [ ] 新增用例覆盖"P2P 建成后静默崩掉 → 心跳判死 → relay 接管"，且负向验证成立（抽掉判死逻辑该用例必红）。
-- [ ] 新增用例覆盖 P2P 反复失败后的退避，证明不与 relay 震荡。
+- [ ] Milestone 2 的 (a)(c) 与 Milestone 4 的用例都做过负向验证（抽掉实现该用例必红）。
+- [ ] 存在用例证明控制面抖动一次并快速恢复后，relay 通道未被摧毁重建。
 - [ ] 判死逻辑尊重 `heartbeatUnsupported`，老 worker 不会被无限摘通道（用例覆盖）。
 - [ ] `device-router.ts:1950` 那条"心跳不判死"的注释已同步更新。
+- [ ] 任何判死路径都不绕过 `reconnectCredential()`。
 - [ ] Required tests exist and assert meaningful behavior.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
@@ -140,14 +170,15 @@ Out of scope:
 ## STOP conditions
 
 - A fact cited under Decisions & tradeoffs no longer holds。
-- Milestone 1 无法在合理成本内得出结论——此时停下来报告，不要靠猜测决定 Milestone 4 做不做。
-- 判死阈值在测试里被证明无法同时满足"快于 ICE 超时"与"不误摘正常慢链路"——这意味着判据选错了，需要重新设计而不是调数字硬凑。
+- 判死阈值在测试里被证明无法同时满足"快于 ICE 超时"与"不误摘正常慢链路"——判据选错了，重新设计而非调数字硬凑。
+- Milestone 3 的"不连坐"在不动 `crates/worker` 的前提下做不到——停下报告，那意味着要重新论证 worker 侧的授权语义。
 - The outcome requires out-of-scope files。
 - A validation command fails twice after one reasonable fix。
 
 ## Maintenance notes
 
-- **本 plan 的存在本身是一条教训**：2026-08-17 当天，在没有测试的情况下两次直接改生产、两次都让情况更糟——第一次把判死后的重连绕过了凭据检查，撞上 `store.ts` 的 `shouldRetry` 只在 `authOk` 后才置 true，连接被推进永久断开态；第二次判死联动 `setControlOnline(false)`，而 `startRelay`/`startP2p` 都有 `!controlOnline` 守卫，等于亲手摧毁所有数据面通道并封死重建路径，把"部分可用"放大成"全面瘫痪"。两次均已回滚。**判死这类逻辑的误判代价会被下游联动放大，必须先有确定性测试再上生产。**
-- plan 076 把"webrtc-rs 的关闭对 werift 不可感知（~30s ICE 超时）"记为已知限制并接受，理由是"既有恢复逻辑"能兜住。这个判断在当时就不成立——那套逻辑依赖 `onclose`，而 DataChannel 恰恰不给。**引入新 transport 时，"既有恢复逻辑能兜住"这句话必须逐条验证它依赖的信号在新 transport 上是否存在。**
-- 生产 `COFLUX_P2P_ENABLED=0` 是止血值，不是终态。全部验收通过后要记得改回，否则 P2P 会一直是死功能。
-- 若 Milestone 4 决定排除隧道接口，注意这会同时影响"两台机器只在 Tailscale 里互通"的合法场景——那种场景下 P2P 会退化为不可用，只能走 relay。
+- **本 plan 的存在本身是一条教训**：2026-08-17 当天在没有测试的情况下两次直接改生产、两次都让情况更糟。第一次判死后的重连绕过凭据检查，撞上 `shouldRetry` 死角，连接进入永久断开态；第二次判死联动 `setControlOnline(false)`，摧毁所有数据面通道并封死重建路径，把"部分可用"放大成"全面瘫痪"。两次均已回滚。**判死这类逻辑的误判代价会被下游联动放大，必须先有确定性测试再上生产。**
+- **初版 plan 的主因判断（P2P 崩溃 + MTU）是错的**，被 `data channel closed` 占 15/17、以及"Home 控制面全程未断"这两条证据推翻。留在 Requirement 里作为记录：**在多环因果链上，"关掉 X 之后好了"不足以证明 X 是元凶**——当时同一动作还重启了 server、用户还刷新了页面。
+- plan 076 把"webrtc-rs 的关闭对 werift 不可感知（~30s ICE 超时）"记为已知限制并接受，理由是"既有恢复逻辑能兜住"。这个判断在当时就不成立——那套逻辑依赖 `onclose`，而 DataChannel 恰恰不给。**引入新 transport 时，"既有恢复逻辑能兜住"必须逐条验证它依赖的信号在新 transport 上是否存在。**
+- 生产 `COFLUX_P2P_ENABLED=0` 是止血值不是终态。本 plan 验收通过后应改回开启，否则 P2P 是死功能。
+- 事故当天未能取得的关键证据：Work 那台机器浏览器 console 的 WS 报错。下次复现时应优先抓取，它能直接坐实"控制面静默死亡"这一环。
