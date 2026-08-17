@@ -301,7 +301,7 @@ async fn consume_hook_events(
     to_server_tx: Sender<WsOut>,
 ) {
     while let Some(request) = hook_rx.recv().await {
-        let Some(hook_state) = hook::event_state(&request.event, &request.notification) else {
+        let Some(hook_state) = hook::event_state(&request.event, &request.notification, request.background_tasks) else {
             let _ = request.respond.send(hook::HookOutcome::Ignored);
             continue;
         };
@@ -313,8 +313,8 @@ async fn consume_hook_events(
             continue;
         };
         eprintln!(
-            "[worker] hook event agent={} event={} notification={} state={hook_state} session={session_id}",
-            request.agent, request.event, request.notification
+            "[worker] hook event agent={} event={} notification={} bg={} state={hook_state} session={session_id}",
+            request.agent, request.event, request.notification, request.background_tasks
         );
         {
             // hook 事件到达 = agent 已经换了状态，上一条 notify 留言就此过期（plan 074）。
