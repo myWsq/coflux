@@ -63,13 +63,18 @@ class FakeSocket implements ConnectionSocket {
   readonly sent: Uint8Array[] = [];
   closeCalls = 0;
 
+  constructor(private readonly schedule: (callback: () => void) => void) {}
+
   send(data: Uint8Array): void {
     this.sent.push(data);
   }
 
   close(): void {
     this.closeCalls += 1;
+    if (this.readyState === 3) return;
     this.readyState = 3;
+    // 真实 WebSocket 的 onclose 稍后才来，这里排到时钟上而不是同步回调。
+    this.schedule(() => this.onclose?.());
   }
 
   /* ---- 测试驱动 ---- */
@@ -105,7 +110,7 @@ function harness(options: { credential?: () => { token: string } | null } = {}) 
     reconnectCredential: options.credential ?? (() => ({ token: "tok" })),
     clock,
     createSocket: () => {
-      const socket = new FakeSocket();
+      const socket = new FakeSocket((callback) => void clock.setTimeout(callback, 0));
       sockets.push(socket);
       return socket;
     },
@@ -210,6 +215,102 @@ test("只处理二进制帧，文本帧与畸形字节一律忽略", () => {
 
   h.sockets[0]!.emitBinary(new Uint8Array([0xff, 0xff, 0xff]));
   assert.deepEqual(h.messages, [], "解不出的字节被丢弃且不抛");
+});
+
+/* ===== 静默链路自愈（plan 080 M2）=====
+ * 这些用例覆盖的是"TCP 还 ESTABLISHED、onclose 永不触发"的链路——FakeSocket 只要不
+ * emitClose，就正是那个状态。 */
+
+test("发出消息后等不到任何回音即判死，并经 onclose 走既有重连路径", () => {
+  const h = harness();
+  h.connection.connect({ token: "tok" });
+  h.sockets[0]!.emitOpen();
+  h.sockets[0]!.emitBinary(new Uint8Array([1])); // 认证有回音，看门狗解除
+
+  h.connection.send({ case: "clientSubscribe", value: {} });
+  h.clock.advance(9_999);
+  assert.equal(h.sockets[0]!.closeCalls, 0, "判死窗口未到不得关连接");
+
+  h.clock.advance(1);
+  assert.equal(h.sockets[0]!.closeCalls, 1, "静默超窗即判死");
+  assert.ok(h.statuses.includes("disconnected"), "判死须经 onclose 汇报断开");
+
+  h.clock.advance(750);
+  assert.equal(h.sockets.length, 2, "判死后应自动重连");
+});
+
+test("有任何入站帧就不判死——哪怕这帧本身解不出来", () => {
+  const h = harness();
+  h.connection.connect({ token: "tok" });
+  h.sockets[0]!.emitOpen();
+  h.connection.send({ case: "clientSubscribe", value: {} });
+
+  h.clock.advance(9_000);
+  h.sockets[0]!.emitBinary(new Uint8Array([0xff, 0xff])); // 畸形字节，但证明链路活着
+  h.clock.advance(60_000);
+  assert.equal(h.sockets[0]!.closeCalls, 0, "链路有回音就不该被判死");
+  assert.equal(h.sockets.length, 1);
+});
+
+test("认证回执迟迟不到同样判死——刷新后第一条连接不能卡死", () => {
+  const h = harness();
+  h.connection.connect({ token: "tok" });
+  h.sockets[0]!.emitOpen(); // 只发认证包，服务端毫无回音
+
+  h.clock.advance(10_000);
+  assert.equal(h.sockets[0]!.closeCalls, 1, "认证包也必须纳入看门狗");
+  h.clock.advance(750);
+  assert.equal(h.sockets.length, 2, "认证阶段判死后仍要能重连");
+});
+
+test("判死不绕过 reconnectCredential：已登出时只关不重连", () => {
+  let loggedIn = true;
+  const h = harness({ credential: () => (loggedIn ? { token: "tok" } : null) });
+  h.connection.connect({ token: "tok" });
+  h.sockets[0]!.emitOpen();
+  h.sockets[0]!.emitBinary(new Uint8Array([1]));
+
+  loggedIn = false; // 判死之前用户登出
+  h.connection.send({ case: "clientSubscribe", value: {} });
+  h.clock.advance(10_000);
+  assert.equal(h.sockets[0]!.closeCalls, 1, "该关的还是要关");
+  h.clock.advance(60_000);
+  assert.equal(h.sockets.length, 1, "凭据已失效就不得重连——判死不能自建重连路径");
+});
+
+test("页面空闲不收不发时不判死", () => {
+  const h = harness();
+  h.connection.connect({ token: "tok" });
+  h.sockets[0]!.emitOpen();
+  h.sockets[0]!.emitBinary(new Uint8Array([1])); // 认证有回音
+
+  h.clock.advance(10 * 60_000); // 十分钟无任何收发
+  assert.equal(h.sockets[0]!.closeCalls, 0, "空闲期本就无收发，不能当成链路死亡");
+});
+
+test("判死计时从第一条未获回音的消息起算，不被后续消息推后", () => {
+  const h = harness();
+  h.connection.connect({ token: "tok" });
+  h.sockets[0]!.emitOpen();
+  h.sockets[0]!.emitBinary(new Uint8Array([1]));
+
+  h.connection.send({ case: "clientSubscribe", value: {} });
+  h.clock.advance(5_000);
+  h.connection.send({ case: "clientSubscribe", value: {} }); // 若重排计时，这里会把判死推到 15s
+  h.clock.advance(5_000);
+  assert.equal(h.sockets[0]!.closeCalls, 1, "计时须从第一条消息起算");
+});
+
+test("stop() 后看门狗不再判死", () => {
+  const h = harness();
+  h.connection.connect({ token: "tok" });
+  h.sockets[0]!.emitOpen();
+  h.connection.stop();
+  const closesAfterStop = h.sockets[0]!.closeCalls;
+
+  h.clock.advance(60_000);
+  assert.equal(h.sockets[0]!.closeCalls, closesAfterStop, "stop 已关过，看门狗不该再关一次");
+  assert.equal(h.sockets.length, 1);
 });
 
 test("被替换的旧 socket 事件不再影响新连接", () => {
