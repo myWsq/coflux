@@ -23,13 +23,30 @@ const ATTACH_GRACE_MS = 500;
 const PENDING_CREATE_TIMEOUT_MS = 15_000;
 
 /** Tab 上的 agent 图标（plan 075）：claude 用 Clawd 像素小动物并按状态换姿态；
- * 每个姿态播原站那套逐帧（健身 / 挥旗 / 撒花），不是整图标 hop。
+ * 干活健身、待批准/待回答挥旗、未读完成撒花；看过完成态后冻成坐着的小人。
  * 其余 agent 用 lucide 机器人轮廓，保留状态警示色（approval/question→warning、
  * done→success，与侧栏语义一致）。 */
-function AgentGlyph({ agent, state, className }: { agent: string; state: string; className?: string }) {
+function AgentGlyph({
+  agent,
+  state,
+  seen,
+  className,
+}: {
+  agent: string;
+  state: string;
+  /** 完成态已被用户看过（点开过该 tab）→ 不再撒花。 */
+  seen?: boolean;
+  className?: string;
+}) {
   if (agent === "claude") {
-    // 旧 worker 的 "waiting" 与未知状态一并按 rest 收（与 store.ts 的活动聚合同口径）。
-    const pose = state === "active" ? "active" : state === "approval" || state === "question" ? "raise" : "rest";
+    const pose =
+      state === "active"
+        ? "active"
+        : state === "approval" || state === "question"
+          ? "raise"
+          : (state === "done" || state === "waiting") && !seen
+            ? "rest"
+            : "idle";
     return <ClawdGlyph pose={pose} className={className} />;
   }
   const tone = state === "approval" || state === "question" ? "text-warning" : state === "done" ? "text-success" : "";
@@ -131,6 +148,8 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   const activationRequestsRef = useRef(new Set<string>());
   const forcedClaimsRef = useRef(new Set<string>());
   const pendingCreateRef = useRef<{ knownTaskIds: Set<string> } | null>(null);
+  // 完成态看过一次就不再撒花：按 sessionId 记，下一轮又干活时清掉。
+  const seenDoneRef = useRef(new Set<string>());
 
   // activeTaskId/controlStates 的同步镜像：imperative 函数需要在 setState 后立即读到"当下"值
   // （对应 Solid 信号的同步读语义），而 React state 变量本身要等下一次渲染才更新，故用 ref 双轨。
@@ -549,6 +568,16 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             const taskPorts = ports[task.id] ?? [];
             const daemon = daemons.find((item) => item.daemonId === task.daemonId);
             const agentEntry = task.sessionId ? sessionAgents[task.sessionId] : undefined;
+            const sessionId = task.sessionId;
+            const agentState = agentEntry?.state;
+            if (sessionId && agentState && agentState !== "done" && agentState !== "waiting") {
+              seenDoneRef.current.delete(sessionId);
+            }
+            // 本工作区正显示且用户正看着这个 tab，才算已读。
+            if (active && isActive && sessionId && (agentState === "done" || agentState === "waiting")) {
+              seenDoneRef.current.add(sessionId);
+            }
+            const seenDone = Boolean(sessionId && seenDoneRef.current.has(sessionId));
             // OSC 标题非空即覆盖显示；EXITED 后 sessionId 清空 → 自动回落 task.title。
             const tabTitle = (task.sessionId && checkpointTitles[task.sessionId]) || task.title;
             return (
@@ -568,7 +597,12 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                     ) : state === "detached" ? (
                       <Unplug className="size-3 shrink-0 text-warning" />
                     ) : agentEntry ? (
-                      <AgentGlyph agent={agentEntry.agent} state={agentEntry.state} className={isActive ? "opacity-90" : "opacity-70"} />
+                      <AgentGlyph
+                        agent={agentEntry.agent}
+                        state={agentEntry.state}
+                        seen={seenDone}
+                        className={isActive ? "opacity-90" : "opacity-70"}
+                      />
                     ) : (
                       <SquareTerminal className={cn("size-3 shrink-0", isActive ? "opacity-90" : "opacity-50")} />
                     )}
