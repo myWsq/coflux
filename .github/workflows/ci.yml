@@ -73,6 +73,9 @@ jobs:
       - name: client 状态机测试（DeviceRouter transport/holder/ACK）
         run: node --import tsx --test packages/client/src/*.test.ts
 
+      - name: release note 生成器自检（分组/剥前缀/plan 剔除）
+        run: node scripts/release-notes.mjs --self-check
+
       - name: 黑盒集成测试（pretest 构建 daemon，跑全量）
         run: pnpm -C tests test
 

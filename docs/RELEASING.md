@@ -76,7 +76,13 @@ git push origin v1.2.3
 
 1. **矩阵交叉编译** supervisor + worker：`x86_64`/`aarch64` 的 linux-musl（静态，`cross`）+ macOS（`aarch64`/`x86_64`，原生）；linux 矩阵额外产出独立 relay（`coflux-relay`，plan 043，服务器节点部署用，macOS 不产）。
 2. **签名 + 清单**（`scripts/release-sign.mjs`，用 `WORKER_SIGNING_KEY`）：对每个 `coflux-worker-<target>` 产物算 sha256 + ed25519 签名。relay 产物不签名（人工 ssh 部署、不走自动下载验签），只进 `SHA256SUMS` 供部署校验。
-3. **发布 Release**，资产含：
+3. **生成 release note**（`scripts/release-notes.mjs`）：取上一个 `v*` tag 到本 tag 的 commit，按
+   type 分组（新功能 / 修复 / 重构与内部改动 / 其他），剥掉冗余的 type 前缀、scope 加粗，剔除
+   `chore(0xx)`/`plan(0xx)` 这类计划文档流转，末尾附 daemon 与 cofluxd CLI 的升级须知（CLI 版本
+   没变就不印那句指令）。**不用 GitHub 的 `generate_release_notes`**——它只汇总 PR，而本仓库直接
+   push main，产出永远是光秃秃一行 compare 链接。这也意味着 **commit message 就是 changelog**：
+   写清楚 scope 和一句人话结论，发版时零加工直接见人。生成器自带 `--self-check`，挂在 ci.yml。
+4. **发布 Release**，资产含：
    - `coflux-worker-<target>`（原始二进制，下载+验签对象）+ `.sig`
    - `coflux-relay-<linux-target>`（独立 relay 节点部署用；部署流程见运维记录）
    - `coflux-<tag>-<target>.tar.gz`（含 supervisor+worker，人工安装用）

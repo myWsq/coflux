@@ -119,6 +119,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # release note 要按 tag 区间数 commit，浅克隆没有历史
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -133,9 +135,16 @@ jobs:
           WORKER_SIGNING_KEY: ${{ secrets.WORKER_SIGNING_KEY }}
         run: node scripts/release-sign.mjs artifacts "${{ github.ref_name }}"
 
+      - name: 生成 release note
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/release-notes.mjs "${{ github.ref_name }}" > release-notes.md
+
       - name: 发布 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
-          generate_release_notes: true
+          # 自建 note 取代 generate_release_notes：本仓库直接 push main，GitHub 的自动汇总
+          # 只认 PR，产出永远是光秃秃一行 compare 链接。
+          body_path: release-notes.md
           prerelease: ${{ contains(github.ref_name, '-') }}
