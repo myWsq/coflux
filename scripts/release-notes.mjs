@@ -53,7 +53,9 @@ function build(version, prevArg) {
       .filter((t) => t && t !== version);
     prev = tags[0];
   }
-  const subjects = prev ? git("log", `${prev}..${version}`, "--no-merges", "--pretty=format:%s").split("\n").filter(Boolean) : [];
+  // 首版没有 prev：整条历史都算这一版的内容
+  const range = prev ? `${prev}..${version}` : version;
+  const subjects = git("log", range, "--no-merges", "--pretty=format:%s").split("\n").filter(Boolean);
   const lines = changelog(subjects);
 
   // 升级须知：daemon 自动升级不用管，CLI 只有版本变了才需要用户动手——所以拿上一版的
