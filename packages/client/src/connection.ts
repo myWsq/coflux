@@ -14,6 +14,10 @@ export type ServerPayload = ServerToClient["payload"];
 
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 15_000;
+/** 静默链路判死窗口：发出消息后多久没等到**任何**入站帧就认定这条 WS 已死。
+ * 取值要大于最慢的一次正常往返（生产实测跨洲 relay RTT 180ms，服务端处理另计），
+ * 又要短到用户在它之前不会先去刷新页面。 */
+const SILENT_RESPONSE_TIMEOUT_MS = 10_000;
 /** `WebSocket.OPEN`。不引用全局常量：本模块的 socket 经 `createSocket` 注入，测试替身没有
  * 那些静态字段，而这个值由 WHATWG 规范钉死。 */
 const SOCKET_OPEN = 1;
@@ -74,11 +78,44 @@ export function createConnection(options: ConnectionOptions) {
   let stopped = false;
   let attempts = 0;
   let reconnectTimer: TimerHandle | null = null;
+  let watchdogTimer: TimerHandle | null = null;
 
   function clearReconnectTimer() {
     if (reconnectTimer !== null) {
       clock.clearTimeout(reconnectTimer);
       reconnectTimer = null;
+    }
+  }
+
+  /**
+   * 静默链路自愈（2026-08-17 生产事故）。公司网络与中间代理会静默丢弃长连接——不发 FIN
+   * 也不发 RST，两端 TCP 都还是 ESTABLISHED。于是 `onclose` 永不触发、`readyState` 恒为
+   * OPEN、`send()` 把消息写进黑洞还不报错，用户侧表现为"界面正常、点什么都没反应"，且
+   * **永远不会自愈**——重连此前只由 `onclose` 驱动。daemon 侧早在 plan 033 就补过对等
+   * 机制（idle 主动发 WS Ping），但浏览器发不了 WS 控制帧，只能在应用层找判据。
+   *
+   * 判据取"发出消息后是否还有任何入站帧"而非定期心跳：链路正常时，任何一次 client→server
+   * 操作都会在几秒内引来入站流量（广播 / error / checkpoint）；链路静默死亡时则是彻底的
+   * 寂静。这样既不需要服务端配合新增心跳消息，也不会在页面空闲（本就无收发）时误判。
+   *
+   * 判死后**只 close()**，重连交给 `onclose` 那条既有路径——它包含 `reconnectCredential()`
+   * 的登出/版本失配判断。早期版本在这里提前摘掉 socket 引用并直接调 `scheduleReconnect`，
+   * 绕过了那些判断，结果是认证回执尚未到达时判死会撞上 store 侧 shouldRetry 仍为 false，
+   * 连接永久停在断开态——比不修更糟。
+   */
+  function armWatchdog() {
+    // 已在等回音就不重排：计时从**第一条**未被回应的消息起算，后续消息不该把它往后推。
+    if (watchdogTimer !== null || stopped) return;
+    watchdogTimer = clock.setTimeout(() => {
+      watchdogTimer = null;
+      socket?.close();
+    }, SILENT_RESPONSE_TIMEOUT_MS);
+  }
+
+  function disarmWatchdog() {
+    if (watchdogTimer !== null) {
+      clock.clearTimeout(watchdogTimer);
+      watchdogTimer = null;
     }
   }
 
@@ -99,6 +136,7 @@ export function createConnection(options: ConnectionOptions) {
   function connect(credential: AuthCredential) {
     stopped = false;
     clearReconnectTimer();
+    disarmWatchdog();
     options.onStatus("connecting");
 
     // 换新连接前先关旧的：否则旧 socket 对象只是被覆盖引用丢弃，底层 WS 在 server 侧继续
@@ -113,16 +151,22 @@ export function createConnection(options: ConnectionOptions) {
       if (socket !== ws) return;
       options.onStatus("connected");
       ws.send(encodeClientToServer(create(ClientToServerSchema, { payload: buildAuthPayload(credential, options.buildId) })));
+      // 认证包同样纳入看门狗：链路若在握手后立刻被掐，认证回执一样石沉大海——那正是
+      // "刷新后能用一会儿又不行"里下一轮的起点，得让它自己重连而不是靠用户再刷一次。
+      armWatchdog();
     };
 
     ws.onclose = () => {
       if (socket !== ws) return;
+      disarmWatchdog();
       options.onStatus("disconnected");
       scheduleReconnect();
     };
 
     ws.onmessage = (event) => {
       if (socket !== ws) return;
+      // 任何入站帧都证明链路还活着——哪怕这一帧本身解不出来，所以先解除看门狗再解码。
+      disarmWatchdog();
       if (!(event.data instanceof ArrayBuffer)) return; // 全 binary 协议：非二进制帧一律忽略
       const message = decodeServerToClient(new Uint8Array(event.data));
       if (!message) return;
@@ -133,6 +177,8 @@ export function createConnection(options: ConnectionOptions) {
   function send(payload: ClientToServerPayload) {
     if (socket?.readyState === SOCKET_OPEN) {
       socket.send(encodeClientToServer(create(ClientToServerSchema, { payload })));
+      // readyState 在静默死亡的链路上恒为 OPEN、send 也不抛，所以发完必须开始等回音。
+      armWatchdog();
     }
   }
 
@@ -147,6 +193,7 @@ export function createConnection(options: ConnectionOptions) {
     stop() {
       stopped = true;
       clearReconnectTimer();
+      disarmWatchdog();
       socket?.close();
     },
   };
