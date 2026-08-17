@@ -12,6 +12,7 @@ import { ChangesView } from "@/components/workbench/changes-view";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
 import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
+import { ClawdGlyph } from "@/components/workbench/clawd-glyph";
 import { TerminalPane, type TerminalController, type TerminalControlState } from "@/components/workbench/terminal-pane";
 
 // attach 后即使无 ptyOutput 回放（空 scrollback）也要在 500ms 后判定 owned；有输出则立即 owned。
@@ -21,57 +22,15 @@ const ATTACH_GRACE_MS = 500;
 // 避免永久滞留。
 const PENDING_CREATE_TIMEOUT_MS = 15_000;
 
-/** Clawd 的三个姿态（Claude Code 欢迎屏同款像素小动物），按 hook 上报的状态换。
- * 12px 下眼睛/爪子这类细节一律不可读，所以三态的差异全部做在剪影上：
- * active=左手托着东西（左上一块深蓝，轮廓不对称）；raise=举旗站立（顶部凸起最高）；
- * rest=正面蹲坐（矮扁、无凸起）。品牌橙固定不随状态变色（用户 2026-08-15 指定）——
- * 品牌色属第三方标识，不走主题 token。 */
-const CLAWD_POSES = {
-  active: (
-    <>
-      <path
-        fill="#D97757"
-        d="M4 5h9v6.5H4z M4 11.5h1.5v3H4z M6 11.5h1.5v3H6z M9 11.5h1.5v3H9z M11.5 11.5h1.5v3h-1.5z M13 7h3v2.5h-3z M1.5 6h2.5v3H1.5z"
-      />
-      <path fill="#000000" d="M5.5 7h1.5v1.5H5.5z M9.5 7h1.5v1.5H9.5z" />
-      <path fill="#1A4C81" d="M0 3h3.5v3H0z" />
-    </>
-  ),
-  raise: (
-    <>
-      <path
-        fill="#D97757"
-        d="M11 3h2.5v2.5H11z M3.5 5.5h9v6.5h-9z M0 8h3.5v2.5H0z M3.5 12h1.5v3H3.5z M5.5 12h1.5v3H5.5z M9 12h1.5v3H9z M11 12h1.5v3H11z"
-      />
-      <path
-        fill="#000000"
-        d="M12 0h1v3.5h-1z M8.5 0h1.75v1.25H8.5z M10.25 1.25h1.75v1.25h-1.75z M4.5 7.5h2v1h-2z M8.5 7.5h2v1h-2z"
-      />
-    </>
-  ),
-  rest: (
-    <>
-      <path
-        fill="#D97757"
-        d="M3 5.5h10v6.5H3z M0 8.5h3v3H0z M13 8.5h3v3h-3z M3 12h1.5v2H3z M5.5 12h1.5v2H5.5z M9 12h1.5v2H9z M11.5 12h1.5v2h-1.5z"
-      />
-      <path fill="#000000" d="M4.5 7.5h1.5v1.5H4.5z M10 7.5h1.5v1.5H10z" />
-    </>
-  ),
-};
-
 /** Tab 上的 agent 图标（plan 075）：claude 用 Clawd 像素小动物并按状态换姿态；
+ * 每个姿态播原站那套逐帧（健身 / 挥旗 / 撒花），不是整图标 hop。
  * 其余 agent 用 lucide 机器人轮廓，保留状态警示色（approval/question→warning、
  * done→success，与侧栏语义一致）。 */
 function AgentGlyph({ agent, state, className }: { agent: string; state: string; className?: string }) {
   if (agent === "claude") {
     // 旧 worker 的 "waiting" 与未知状态一并按 rest 收（与 store.ts 的活动聚合同口径）。
     const pose = state === "active" ? "active" : state === "approval" || state === "question" ? "raise" : "rest";
-    return (
-      <svg viewBox="0 0 16 16" className={cn("size-3 shrink-0", className)} shapeRendering="crispEdges" aria-hidden>
-        {CLAWD_POSES[pose]}
-      </svg>
-    );
+    return <ClawdGlyph pose={pose} className={className} />;
   }
   const tone = state === "approval" || state === "question" ? "text-warning" : state === "done" ? "text-success" : "";
   return <Bot className={cn("size-3 shrink-0", tone, className)} />;
