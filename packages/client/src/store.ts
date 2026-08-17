@@ -157,7 +157,10 @@ function withoutSetValue(values: Set<string>, value: string): Set<string> {
  */
 export function createCofluxClient(options: CofluxClientOptions) {
   let token = localStorage.getItem(options.tokenStorageKey) ?? "";
-  let shouldRetry = false;
+  // 本地已有会话 token = 之前认证成功过，首次连接就该纳入自动重连——否则刷新后的第一条连接
+  // 若在拿到 authOk 前断掉（链路被静默掐、server authDeadline 关闭…），会永久停在断开态等
+  // 用户再刷一次。清零点在 authError / clientOutdated / logout，那几处都会把它设回 false。
+  let shouldRetry = token !== "";
   let controlAuthenticated = false;
   let errorSequence = 0;
   const sessionConsumers = new Map<string, Set<SessionConsumer>>();
