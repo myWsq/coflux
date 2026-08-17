@@ -1162,6 +1162,63 @@ test("P2P 建成后静默停止响应：心跳判死摘掉它，relay 重新接�
   h.router.destroy();
 });
 
+test("P2P 判死后进入退避：重新竞速时不再发起，relay 稳住不被反复抢占", async () => {
+  const adapter = new P2pFakeAdapter(undefined);
+  const h = harness(adapter);
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const firstP2p = latestOpen(adapter, "p2p");
+  h.clock.advance(200);
+  await flush();
+  adapter.resolve(latestOpen(adapter, "relay"));
+  await flush();
+  adapter.resolve(firstP2p);
+  await flush();
+  h.clock.advance(0);
+  await flush();
+  latestOpen(adapter, "direct").reject(new Error("connection refused"));
+  await flush();
+  const promoted = latestOpen(adapter, "p2p");
+  adapter.resolve(promoted);
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "p2p", "前置：P2P 已接管");
+
+  // 静默死亡 → 判死
+  h.clock.advance(5_000);
+  await flush();
+  h.clock.advance(5_000);
+  await flush();
+  assert.equal(promoted.closed, true);
+  const p2pOpensAtDeath = adapter.opens.filter((call) => call.kind === "p2p").length;
+
+  // recovery 重新竞速：loopback 仍不通，relay 接管。
+  h.clock.advance(1_000);
+  await flush();
+  latestOpen(adapter, "direct").reject(new Error("connection refused"));
+  await flush();
+  h.clock.advance(200);
+  await flush();
+  adapter.resolve(latestOpen(adapter, "relay"));
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "relay");
+  assert.equal(
+    adapter.opens.filter((call) => call.kind === "p2p").length,
+    p2pOpensAtDeath,
+    "退避期内一次都不该再发起 P2P——否则它建成就 promotion 抢走 relay，崩一次抢一次",
+  );
+
+  // 退避到期前始终不发起：再推一段仍在窗口内的时间，并触发一次直连重试。
+  h.clock.advance(3_000);
+  await flush();
+  assert.equal(
+    adapter.opens.filter((call) => call.kind === "p2p").length,
+    p2pOpensAtDeath,
+    "退避未到期就不该重新发起",
+  );
+  h.router.destroy();
+});
+
 test("中心断开时 active P2P channel 与 relay 同步失效，不等对端关闭事件", async () => {
   const adapter = new P2pFakeAdapter(undefined);
   const h = harness(adapter);

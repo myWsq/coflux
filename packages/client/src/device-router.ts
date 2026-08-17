@@ -66,6 +66,12 @@ const HEARTBEAT_TIMEOUT_MS = 5_000;
  * 等它才来），又留了一次容忍偶发丢包的机会。生产实测最慢链路 relay-jp RTT 180ms，
  * 5s 超时对它仍有 27 倍余量，正常慢链路不会被误判。 */
 const HEARTBEAT_MAX_MISSES = 2;
+/** P2P 失败后的退避（plan 080）。P2P 会靠 generation promotion 顶掉正在工作的 relay，
+ * 所以一条不稳的 P2P 若不退避，就会「崩一次抢一次」地和 relay 来回震荡——每次抢走都
+ * 意味着用户再吃一轮判死延迟。基数取 5s（短暂抖动后仍能较快恢复直连），逐次翻倍，
+ * 封顶 5 分钟。收到 pong 即证明这条 P2P 真的能用，届时清零。 */
+const P2P_RETRY_BASE_MS = 5_000;
+const P2P_RETRY_MAX_MS = 5 * 60_000;
 const LEASE_EXPIRY_MARGIN_MS = 2_000;
 const MAX_RETAINED_INPUTS = 256;
 const MAX_RETAINED_INPUT_BYTES = 1024 * 1024;
@@ -293,6 +299,10 @@ interface DeviceRoute {
   directProbeController?: AbortController;
   directRetryTimer?: TimerHandle;
   directRetryAttempts: number;
+  /** P2P 连续失败次数与退避到期时刻（plan 080）：退避期内根本不发起 P2P，
+   * 拦在发起侧而非 acceptCandidate——后者会白付一次建连成本才丢弃。 */
+  p2pRetryAttempts: number;
+  p2pBlockedUntil?: number;
   catalogTimer?: TimerHandle;
   heartbeatTimer?: TimerHandle;
   /** 在途那一发心跳的超时闸；到点仍无 pong 即记一次 miss（见 heartbeatMisses）。 */
@@ -504,6 +514,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         localFailure: "",
         grantLoaded: !options.enableLocalTransport,
         directRetryAttempts: 0,
+        p2pRetryAttempts: 0,
         retainCount: 0,
         transientDemand: 0,
         measureCount: 0,
@@ -1202,6 +1213,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         attempt.startRelay?.();
       }
       if (error && kind === "p2p" && !isAbortError(error)) {
+        blockP2p(route);
         attempt.startRelay?.();
       }
       finish();
@@ -1226,6 +1238,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     // promotion 升级（acceptCandidate 的非 relay 分支），用户无感。
     const startP2p = () => {
       if (!valid() || attempt.p2pStarted || !controlOnline) return;
+      // 退避期内根本不发起：P2P 一旦建成就会 promotion 顶掉正在工作的 relay，不拦在这里
+      // 就会「崩一次抢一次」地震荡，每次抢走都让用户再吃一轮判死延迟。
+      if (clock.now() < (route.p2pBlockedUntil ?? 0)) return;
       attempt.p2pStarted = true;
       attempt.pending += 1;
       void (async () => {
@@ -1684,6 +1699,11 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         route.pendingPing = undefined;
         route.heartbeatMisses = 0;
         clearHeartbeatTimeout(route);
+        // 能回 pong 就证明这条 P2P 真的能用，清掉此前累积的退避。
+        if (route.sessionLane.active?.kind === "p2p") {
+          route.p2pRetryAttempts = 0;
+          route.p2pBlockedUntil = undefined;
+        }
         if (route.lastPublished) publish(route, route.lastPublished.mode, route.lastPublished.detail);
         break;
       }
@@ -1987,6 +2007,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       route.heartbeatMisses = (route.heartbeatMisses ?? 0) + 1;
       if (route.heartbeatMisses >= HEARTBEAT_MAX_MISSES) {
         route.heartbeatMisses = 0;
+        // 死掉的是 P2P 就同时拉起退避，否则紧接着的重新竞速里它又会 promotion 抢回去。
+        if (channel.kind === "p2p") blockP2p(route);
         // 只摘通道、不动控制面：recovery 会重新竞速，可用的那条（通常是 relay）随即接管。
         loseChannel(route, channel, "心跳连续无响应，判定通道已死");
         return;
@@ -2000,6 +2022,13 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   function clearHeartbeatTimeout(route: DeviceRoute): void {
     if (route.heartbeatTimeoutTimer !== undefined) clock.clearTimeout(route.heartbeatTimeoutTimer);
     route.heartbeatTimeoutTimer = undefined;
+  }
+
+  /** P2P 失败（建连失败或建成后被判死）后拉长退避窗口，逐次翻倍、封顶 P2P_RETRY_MAX_MS。 */
+  function blockP2p(route: DeviceRoute): void {
+    const backoff = Math.min(P2P_RETRY_MAX_MS, P2P_RETRY_BASE_MS * 2 ** Math.min(route.p2pRetryAttempts, 6));
+    route.p2pRetryAttempts += 1;
+    route.p2pBlockedUntil = clock.now() + backoff;
   }
 
   /** 心跳只在 transport 真正活着时转：按需拨号下 idle 的设备根本没有连接，无从 ping，
