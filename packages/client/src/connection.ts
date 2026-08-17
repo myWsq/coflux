@@ -77,16 +77,15 @@ export function createConnection(options: ConnectionOptions) {
       disarmWatchdog();
       const dying = socket;
       if (!dying) return;
-      // 先摘引用再 close：close() 可能同步触发 onclose，届时 socket !== ws 的守卫会吃掉它，
-      // 所以这里显式驱动一次重连，避免"关了但没人重连"。
-      socket = null;
-      options.onStatus("disconnected");
+      // 只 close，不自己驱动重连：保留 socket 引用让 onclose 照常触发，后续与"服务端主动
+      // 关闭连接"完全同构，走同一条重连路径（含 reconnectCredential 的登出/版本失配判断）。
+      // 早期版本在这里提前把 socket 置 null 并直接调 scheduleReconnect，绕过了那些判断——
+      // 结果是认证回执尚未到达时判死会撞上 shouldRetry 仍为 false，永久停在断开态。
       try {
         dying.close();
       } catch {
         /* 已经死的 socket，close 本身失败也无所谓 */
       }
-      scheduleReconnect();
     }, WATCHDOG_TICK_MS);
   }
 
