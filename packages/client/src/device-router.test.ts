@@ -908,6 +908,80 @@ test("心跳往返产生 rttMs，链路断掉后读数被清掉而不是留着",
   h.router.destroy();
 });
 
+/* ===== 心跳承担探活（plan 080 M4）=====
+ * 通道"状态是 open、实际已死"时，onclose 未必会来——WebRTC DataChannel 要等 ~30s ICE
+ * 超时。心跳每 15s 就能发现，此前却只抹 rtt 读数不摘通道，用户于是对着死通道敲键盘。 */
+
+test("通道静默死亡：连续两次心跳无响应即摘掉通道", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const direct = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(direct);
+  await flush();
+  assert.equal(payloads(direct).filter((payload) => payload?.case === "ping").length, 1, "建连即发第一发");
+
+  // 首发超时：记一次 miss 并**立刻**补发，不等下一个完整周期——否则判死要拖到两个周期后，
+  // 比 ICE 超时还慢，等于没修。
+  h.clock.advance(5_000);
+  await flush();
+  assert.equal(payloads(direct).filter((payload) => payload?.case === "ping").length, 2, "首次超时应立刻补发");
+  assert.equal(direct.closed, false, "一次无响应不足以判死");
+
+  h.clock.advance(5_000);
+  await flush();
+  assert.equal(direct.closed, true, "连续两次无响应即摘通道（累计 ~10s，快于 30s ICE 超时）");
+  h.router.destroy();
+});
+
+test("偶发丢包不判死：补发拿到 pong 后 miss 计数归零", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const direct = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(direct);
+  await flush();
+
+  h.clock.advance(5_000); // 首发丢了，补发第二发
+  await flush();
+  const pings = payloads(direct).filter((payload) => payload?.case === "ping");
+  assert.equal(pings.length, 2);
+  h.adapter.emit(direct, { case: "pong", value: { requestId: (pings[1]!.value as { requestId: string }).requestId } });
+  await flush();
+  assert.equal(direct.closed, false);
+
+  // 计数归零的证据：再让**一发**超时，仍不该判死（若未归零，这一发就是第二次 miss）。
+  // 心跳周期从建连起算，下一个周期点在 t=15000；此刻 t=5000，故先推 10s 到点发出，
+  // 再推 5s 让它超时——只跨一个超时点，多推会累出第二次 miss，那测的就不是这条了。
+  h.clock.advance(10_000);
+  await flush();
+  h.clock.advance(5_000);
+  await flush();
+  assert.equal(direct.closed, false, "拿到 pong 后 miss 必须归零，否则通道会背着旧欠账被判死");
+  h.router.destroy();
+});
+
+test("旧 daemon 不支持 ping 时不得被判成通道已死", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const direct = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(direct);
+  await flush();
+
+  h.adapter.emit(direct, { case: "error", value: { code: "empty_payload", message: "DeviceEnvelope payload 为空" } });
+  await flush();
+
+  // 旧 daemon 永远不会回 pong：若 miss 计数不跟着清零、超时闸不撤，它会被无限摘通道重连。
+  h.clock.advance(60_000);
+  await flush();
+  assert.equal(direct.closed, false, "只是对端太老，不是通道死了");
+  h.router.destroy();
+});
+
 test("旧 daemon 对 ping 回 unsupported_payload 时静默降级，不弹错误", async () => {
   const h = harness();
   h.router.setControlOnline(true);
@@ -1033,6 +1107,58 @@ test("无 grant 设备 P2P 参与直连槽位：relay 先赢，迟到 P2P 经重
   await flush();
   assert.equal(h.states.at(-1)?.mode, "p2p");
   assert.equal(payloads(relay).filter((payload) => payload?.case === "sessionAttach").length, 0);
+  h.router.destroy();
+});
+
+// 事故复现（2026-08-17）：P2P 靠 promotion 顶掉正常工作的 relay，随后 DataChannel 崩掉，
+// 而 webrtc 的 onclose 要等 ~30s ICE 超时才来——那 30s 里用户的每次按键都发进黑洞。
+// 心跳判死把这个窗口压到 ~10s，并让 relay 重新接管。
+test("P2P 建成后静默停止响应：心跳判死摘掉它，relay 重新接管", async () => {
+  const adapter = new P2pFakeAdapter(undefined);
+  const h = harness(adapter);
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const firstP2p = latestOpen(adapter, "p2p");
+  h.clock.advance(200);
+  await flush();
+  const relay = latestOpen(adapter, "relay");
+  adapter.resolve(relay);
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "relay");
+
+  // 迟到的 P2P 以新 generation 升迁，顶掉正在工作的 relay（plan 076 的既有设计）。
+  adapter.resolve(firstP2p);
+  await flush();
+  h.clock.advance(0);
+  await flush();
+  latestOpen(adapter, "direct").reject(new Error("connection refused"));
+  await flush();
+  const promoted = latestOpen(adapter, "p2p");
+  adapter.resolve(promoted);
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "p2p", "前置：P2P 已接管");
+
+  // 此刻 DataChannel 静默死亡：不回 pong，也不触发 onclose（正是 WebRTC 的实际行为）。
+  h.clock.advance(5_000);
+  await flush();
+  assert.equal(promoted.closed, false, "一次无响应不判死");
+  h.clock.advance(5_000);
+  await flush();
+  assert.equal(promoted.closed, true, "连续两次无响应即摘掉这条 P2P");
+
+  // recovery 重新竞速：loopback 依旧不通，relay 再次接管。
+  h.clock.advance(1_000);
+  await flush();
+  latestOpen(adapter, "direct").reject(new Error("connection refused"));
+  await flush();
+  h.clock.advance(200);
+  await flush();
+  const relay2 = latestOpen(adapter, "relay");
+  assert.notEqual(relay2, relay, "应建一条新的 relay 通道");
+  adapter.resolve(relay2);
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "relay", "P2P 判死后必须回落 relay——这正是事故里没发生的事");
   h.router.destroy();
 });
 
