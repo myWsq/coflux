@@ -9,6 +9,7 @@ import { Button } from "@astryxdesign/core/Button";
 import {
   ConfirmActionDialog,
   DeviceRenameDialog,
+  ProjectRenameDialog,
   EnrollmentDialog,
   ShortcutsHelpDialog,
   WorkspaceRenameDialog,
@@ -68,6 +69,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [renameWorkspace, setRenameWorkspace] = useState<Workspace | null>(null);
   const [renameDevice, setRenameDevice] = useState<DaemonInfo | null>(null);
+  const [renameProject, setRenameProject] = useState<Project | null>(null);
   // 新建工作区菜单当前打开的项目：Sidebar 的 + 按钮/右键菜单与 Cmd+Ctrl+N 快捷键共用同一份受控状态。
   const [createMenuProjectId, setCreateMenuProjectId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -294,6 +296,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
     client.send({ case: "deviceSetName", value: { daemonId, name } });
   }
 
+  function saveProjectName(projectId: string, name: string) {
+    client.send({ case: "projectSetName", value: { projectId, name } });
+  }
+
   function requestRemoveWorkspace(workspace: Workspace) {
     setConfirmAction({
       title: `删除工作区「${workspace.branch}」？`,
@@ -409,6 +415,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onImportProject={() => setImportOpen(true)}
         onCreateWorkspace={createWorkspace}
         onRemoveProject={requestRemoveProject}
+        onRenameProject={setRenameProject}
         onRemoveWorkspace={requestRemoveWorkspace}
         onRenameWorkspace={setRenameWorkspace}
         onAddDevice={openEnrollment}
@@ -550,6 +557,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
         open={Boolean(renameDevice)}
         onOpenChange={(open) => !open && setRenameDevice(null)}
         onSave={saveDeviceName}
+      />
+      <ProjectRenameDialog
+        project={renameProject}
+        open={Boolean(renameProject)}
+        onOpenChange={(open) => !open && setRenameProject(null)}
+        onSave={saveProjectName}
       />
       <ConfirmActionDialog action={confirmAction} onCancel={() => setConfirmAction(null)} />
       <ShortcutsHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
