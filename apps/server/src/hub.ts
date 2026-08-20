@@ -1645,6 +1645,17 @@ export class Hub {
         if (updated) this.broadcast(updated.accountId, { case: "workspaceCreated", value: { workspace: updated } });
         break;
       }
+      case "projectSetName": {
+        const value = msg.payload.value;
+        const project = await this.store.getProject(value.projectId);
+        if (!project || project.accountId !== client.accountId) return;
+        // 空名拒绝（同 deviceSetName）；复用 projectCreated 广播（web 侧为 upsert），无需新增下行消息
+        const trimmed = value.name.trim();
+        if (!trimmed) return;
+        const updated = await this.store.updateProjectName(project.id, trimmed);
+        if (updated) this.broadcast(updated.accountId, { case: "projectCreated", value: { project: updated } });
+        break;
+      }
       case "deviceSetName": {
         const value = msg.payload.value;
         const device = await this.store.getDevice(value.daemonId);
