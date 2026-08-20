@@ -9,8 +9,8 @@ import { Button } from "@astryxdesign/core/Button";
 import {
   ConfirmActionDialog,
   DeviceRenameDialog,
-  ProjectRenameDialog,
   EnrollmentDialog,
+  ProjectRenameDialog,
   ShortcutsHelpDialog,
   WorkspaceRenameDialog,
   type ConfirmAction,
