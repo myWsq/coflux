@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { TerminalSquare } from "lucide-react";
-import type { DaemonInfo, Workspace } from "@coflux/protocol";
+import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import { CodeBlock } from "@astryxdesign/core/CodeBlock";
 import { Dialog as AstryxDialog, DialogHeader as AstryxDialogHeader } from "@astryxdesign/core/Dialog";
@@ -119,6 +119,69 @@ export function DeviceRenameDialog(props: DeviceRenameDialogProps) {
               }}
             >
               <TextInput label="名称" isLabelHidden value={name} onChange={setName} placeholder="比如：家里的 MacBook Pro" hasAutoFocus />
+              <button type="submit" hidden />
+            </form>
+          </LayoutContent>
+        }
+        footer={
+          <LayoutFooter hasDivider={false}>
+            <HStack gap={2} hAlign="end">
+              <AstryxButton label="取消" variant="secondary" onClick={() => props.onOpenChange(false)} />
+              <AstryxButton label="保存" variant="primary" onClick={save} isDisabled={isSaveDisabled} />
+            </HStack>
+          </LayoutFooter>
+        }
+      />
+    </AstryxDialog>
+  );
+}
+
+type ProjectRenameDialogProps = {
+  project: Project | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSave: (projectId: string, name: string) => void;
+};
+
+/** 重命名项目（展示别名；空则拒绝，同设备语义） */
+export function ProjectRenameDialog(props: ProjectRenameDialogProps) {
+  const [name, setName] = useState("");
+
+  useEffect(() => {
+    if (!props.open) return;
+    setName(props.project?.name ?? "");
+  }, [props.open, props.project]);
+
+  function save() {
+    if (!props.project) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    props.onSave(props.project.id, trimmed);
+    props.onOpenChange(false);
+  }
+
+  const isSaveDisabled = !name.trim();
+
+  return (
+    <AstryxDialog isOpen={props.open} onOpenChange={props.onOpenChange} purpose="form" width={400}>
+      <Layout
+        header={
+          <AstryxDialogHeader
+            title="重命名项目"
+            subtitle={`给「${props.project?.name ?? ""}」换一个展示名称。`}
+            onOpenChange={props.onOpenChange}
+            hasDivider={false}
+          />
+        }
+        content={
+          <LayoutContent>
+            <form
+              onSubmit={(event: FormEvent<HTMLFormElement>) => {
+                event.preventDefault();
+                if (!isSaveDisabled) save();
+              }}
+            >
+              <TextInput label="名称" isLabelHidden value={name} onChange={setName} placeholder="比如：myWsq/coflux" hasAutoFocus />
               <button type="submit" hidden />
             </form>
           </LayoutContent>

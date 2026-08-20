@@ -76,6 +76,7 @@ type SidebarProps = {
   onImportProject: () => void;
   onCreateWorkspace: (project: Project, branch: string, createNew: boolean) => void;
   onRemoveProject: (project: Project) => void;
+  onRenameProject: (project: Project) => void;
   onRemoveWorkspace: (workspace: Workspace) => void;
   onRenameWorkspace: (workspace: Workspace) => void;
   onAddDevice: () => void;
@@ -262,6 +263,7 @@ export function Sidebar(props: SidebarProps) {
                     size="sm"
                     items={[
                       { label: "新建工作区", onClick: () => setCreateMenuProjectId(project.id) },
+                      { label: "重命名", onClick: () => props.onRenameProject(project) },
                       { type: "divider" },
                       { label: "移除项目", onClick: () => props.onRemoveProject(project) },
                     ]}
