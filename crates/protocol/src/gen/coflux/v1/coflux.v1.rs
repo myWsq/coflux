@@ -1442,6 +1442,14 @@ pub struct ProjectRemove {
     #[prost(string, tag="1")]
     pub project_id: ::prost::alloc::string::String,
 }
+/// 重命名项目（展示别名；空则服务端拒绝，同 DeviceSetName 语义）
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProjectSetName {
+    #[prost(string, tag="1")]
+    pub project_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
 /// 在 project 下用 git worktree 新建工作区
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WorkspaceCreate {
@@ -1507,7 +1515,7 @@ pub struct TaskRemove {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 34, 24, 35, 36")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 34, 24, 35, 36, 37")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -1562,6 +1570,8 @@ pub mod client_to_server {
         DeviceP2pOffer(super::DeviceP2pOffer),
         #[prost(message, tag="36")]
         DeviceP2pChannelOpen(super::DeviceP2pChannelOpen),
+        #[prost(message, tag="37")]
+        ProjectSetName(super::ProjectSetName),
     }
 }
 // ===== Server → Client 载荷 =====

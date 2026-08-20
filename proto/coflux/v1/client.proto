@@ -66,6 +66,12 @@ message ProjectRemove {
   string project_id = 1;
 }
 
+// 重命名项目（展示别名；空则服务端拒绝，同 DeviceSetName 语义）
+message ProjectSetName {
+  string project_id = 1;
+  string name = 2;
+}
+
 // 在 project 下用 git worktree 新建工作区
 message WorkspaceCreate {
   string project_id = 1;
@@ -145,6 +151,7 @@ message ClientToServer {
     WorkspaceSetName workspace_set_name = 24;
     DeviceP2pOffer device_p2p_offer = 35;
     DeviceP2pChannelOpen device_p2p_channel_open = 36;
+    ProjectSetName project_set_name = 37;
   }
 }
 

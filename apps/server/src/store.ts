@@ -817,6 +817,10 @@ export class Store {
     `;
     return rows[0] && create(ProjectSchema, rows[0]);
   }
+  async updateProjectName(id: ProjectId, name: string): Promise<Project | undefined> {
+    const rows = await this.sql<Project[]>`UPDATE projects SET name = ${name} WHERE id = ${id} RETURNING *`;
+    return rows[0] && create(ProjectSchema, rows[0]);
+  }
   async markProjectDeleting(id: ProjectId): Promise<void> {
     await this.sql`UPDATE projects SET deleting = true WHERE id = ${id}`;
   }
