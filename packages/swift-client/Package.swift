@@ -44,6 +44,11 @@ let package = Package(
             dependencies: ["CofluxClientCore"],
             path: "Tests/CofluxClientCoreTests"
         ),
+        .testTarget(
+            name: "CofluxApplePlatformTests",
+            dependencies: ["CofluxApplePlatform", "CofluxClientCore"],
+            path: "Tests/CofluxApplePlatformTests"
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
