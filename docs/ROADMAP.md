@@ -71,7 +71,7 @@
   4 用例。STUN 部署（coturn on relay 节点）见 architecture.md，实机开通与打洞成功率生产
   实测待用户；iOS/浏览器实机矩阵与 trickle ICE 为后续迭代
 
-### 4. macOS 原生客户端（Phase 0 本机门已过，最终 GO 待外部矩阵）
+### 4. macOS 原生客户端（Phase 0 开发 GO，Foundation 进行中）
 
 plan 082/083 已于 2026-08-25 启动。在 Apple M1 Pro、macOS 27、Xcode 26.6 的隔离
 真实栈上，三个会改变总体架构的未知量均已关闭：
@@ -85,9 +85,10 @@ plan 082/083 已于 2026-08-25 启动。在 Apple M1 Pro、macOS 27、Xcode 26.6
   UDP WebRTC 还需 `network.server`；有 client 但缺 server 时 P2P 被阻断而 relay 仍可用，
   缺 client 时则 control/relay 出站一并被拒。
 
-当前是 **Swift core + native libwebrtc 的 GO candidate**，不是最终 GO。尚缺干净用户
-Local Network TCC Allow/Deny、两台不同 NAT/网络的 Mac、Intel 实机、macOS 14 以及
-Developer ID + notarization + staple + 干净机 Gatekeeper。同机 Rosetta 与 Development
-signing 不代替这些矩阵；闭合前不提前开始 Foundation/UI/Transport 子计划。
+三项架构门已形成 **Swift core + native libwebrtc 的开发 GO**。用户于 2026-08-25 明确允许 LAN
+验证后置，因此 Foundation 从 plan 084 开始执行。尚缺的干净用户 Local Network TCC Allow/Deny、
+两台不同 NAT/网络的 Mac、Intel 实机、macOS 14 以及 Developer ID + notarization + staple +
+干净机 Gatekeeper，继续作为 Phase 6–7 不可删除的发布资格门；同机 Rosetta 与 Development signing
+不代替这些矩阵，未闭合前不宣称发布 GO或完成完整验收。
 详细证据与边界见 `plans/083-macos-native-client-feasibility-gates.md` 与
 `apps/macos/WEBRTC_PROBE.md`。
