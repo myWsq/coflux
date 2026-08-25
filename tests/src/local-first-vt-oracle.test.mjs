@@ -1,6 +1,6 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -158,7 +158,7 @@ function assertTerminalEquivalent(actual, expected, label) {
   );
 }
 
-async function assertFixture(fixture) {
+async function assertFixture(fixture, fixtureId) {
   const sessionId = await createFixtureSession(fixture);
   let dimensions = { ...fixture.initial };
   let holderEpoch;
@@ -206,6 +206,22 @@ async function assertFixture(fixture) {
     Buffer.from(snapshot.ansiSnapshot).includes(Buffer.from("\x1b[?25l")),
     `${fixture.name} snapshot 必须保留隐藏光标状态`,
   );
+
+  const exportDir = process.env.COFLUX_VT_EXPORT_DIR;
+  if (exportDir) {
+    mkdirSync(exportDir, { recursive: true });
+    writeFileSync(
+      join(exportDir, `${fixtureId}.json`),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        fixtureId,
+        fixtureName: fixture.name,
+        cols: snapshot.cols,
+        rows: snapshot.rows,
+        ansiSnapshotBase64: Buffer.from(snapshot.ansiSnapshot).toString("base64"),
+      }, null, 2)}\n`,
+    );
+  }
 
   const original = new Terminal({ ...fixture.initial, scrollback: 2000, allowProposedApi: true });
   for (const stage of fixture.stages) {
@@ -255,6 +271,6 @@ async function assertFixture(fixture) {
 test("独立 xterm 6 oracle：Claude/Codex/TUI 原流与 sessiond snapshot+tail 等价", async () => {
   for (const file of FIXTURE_FILES) {
     const fixture = JSON.parse(readFileSync(join(FIXTURE_ROOT, file), "utf8"));
-    await assertFixture(fixture);
+    await assertFixture(fixture, file.replace(/\.json$/, ""));
   }
 });
