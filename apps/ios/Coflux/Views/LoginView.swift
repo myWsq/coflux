@@ -1,3 +1,4 @@
+import CofluxClientCore
 import SwiftUI
 
 /// 登录表单：账号密码直发 clientAuth 帧（plan 061——server 侧 local/password 两模式同帧，

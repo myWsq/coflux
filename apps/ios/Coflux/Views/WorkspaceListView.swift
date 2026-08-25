@@ -1,3 +1,5 @@
+import CofluxClientCore
+import CofluxProtocol
 import SwiftUI
 
 /// 项目分组的工作区列表 + 设备在线/任务状态。断线不清空内容：

@@ -1,6 +1,28 @@
+import CofluxApplePlatform
+import CofluxClientCore
 import Foundation
 import Testing
 @testable import Coflux
+
+private struct IntegrationTokenStore: TokenStore {
+    func read() throws -> String? { nil }
+    func write(_: String) throws {}
+    func clear() throws {}
+}
+
+@MainActor
+private func integrationWaitUntil(
+    timeout: Duration,
+    _ condition: () -> Bool
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+        if condition() { return true }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    return condition()
+}
 
 /// 真环境终端闭环验收（plan 046 acceptance）：连本机 dev 拓扑（server 8787 + relay 8790 +
 /// 真 daemon），不经 UI 直接驱动 CofluxClient/DeviceRouter 完成
@@ -16,22 +38,25 @@ struct DeviceIntegrationTests {
     @Test(.timeLimit(.minutes(2)))
     func terminalRoundTripAgainstDevTopology() async throws {
         let client = CofluxClient(
-            transport: NetworkTransport(),
-            tokenStore: InMemoryTokenStore(),
-            serverURL: URL(string: "ws://127.0.0.1:8787/client")!
+            configuration: ClientConfiguration(
+                serverURL: URL(string: "ws://127.0.0.1:8787/client")!,
+                buildID: "dev"
+            ),
+            transport: NetworkFrameworkTransport(),
+            tokenStore: IntegrationTokenStore()
         )
         client.login(username: "admin", password: "admin")
-        #expect(await waitUntil(timeout: .seconds(10)) { client.authState == .authed })
+        #expect(await integrationWaitUntil(timeout: .seconds(10)) { client.authState == .authed })
 
         // 前置脚本创建的验收任务
-        #expect(await waitUntil(timeout: .seconds(10)) {
+        #expect(await integrationWaitUntil(timeout: .seconds(10)) {
             client.tasks.contains { $0.title == "ios-acceptance" }
         })
         let taskID = client.tasks.first { $0.title == "ios-acceptance" }!.id
 
         // 启动：taskStart → preparedDeviceOperation → LIFECYCLE relay lane → daemon 建 PTY
         client.startTask(taskID: taskID, cols: 80, rows: 24)
-        #expect(await waitUntil(timeout: .seconds(20)) {
+        #expect(await integrationWaitUntil(timeout: .seconds(20)) {
             client.tasks.first { $0.id == taskID }?.hasSessionID == true
         })
         let sessionID = client.tasks.first { $0.id == taskID }!.sessionID
@@ -49,17 +74,17 @@ struct DeviceIntegrationTests {
         }
         defer { release() }
         client.startTask(taskID: taskID, cols: 80, rows: 24)
-        #expect(await waitUntil(timeout: .seconds(20)) { sawReplace })
+        #expect(await integrationWaitUntil(timeout: .seconds(20)) { sawReplace })
 
         // 输入回显闭环（exactly-once 台账走真 relay）
         client.sendInput(sessionID: sessionID, "echo coflux-ios-e2e\n")
-        #expect(await waitUntil(timeout: .seconds(20)) {
+        #expect(await integrationWaitUntil(timeout: .seconds(20)) {
             String(data: received, encoding: .utf8)?.contains("coflux-ios-e2e") == true
         })
 
         // 停止并删除：sessionStop（holder 前置）+ taskRemove → 任务从控制面消失
         await client.closeTask(client.tasks.first { $0.id == taskID }!)
-        #expect(await waitUntil(timeout: .seconds(15)) {
+        #expect(await integrationWaitUntil(timeout: .seconds(15)) {
             client.tasks.contains { $0.id == taskID } == false
         })
     }

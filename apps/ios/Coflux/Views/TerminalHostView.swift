@@ -1,3 +1,4 @@
+import CofluxClientCore
 import SwiftUI
 import SwiftTerm
 
@@ -120,7 +121,7 @@ struct TerminalHostView: UIViewRepresentable {
         private var lastBottomSlack: CGFloat = -1
         weak var terminalView: TerminalView?
         private var boundSessionID: String?
-        private var releaseConsumer: (() -> Void)?
+        private var releaseConsumer: (@MainActor () -> Void)?
 
         init(
             client: CofluxClient,
