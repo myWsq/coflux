@@ -856,7 +856,9 @@ export class Hub {
             accountId: operation.accountId,
             daemonId: operation.daemonId,
             projectId,
-            name: "main",
+            // 未起名的约定是 name === branch（见 workspaceBranch/workspaceRename 两处），
+            // 硬编码 "main" 会在 master 仓库里挂出一个假标签，且切分支时 name 不跟随
+            name: value.branch,
             path: value.repoPath,
             branch: value.branch,
             isMain: true,
