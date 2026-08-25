@@ -17,8 +17,8 @@ final class NativeWebRTCWorkerInteropTests: XCTestCase {
         // relay 由外层 harness 随后做 ping，证明这次 P2P 失败没有破坏 fallback。
         try assertUnknownDaemonRejected(control: control, iceServers: auth.iceServers, config: config)
         try assertWorkerRejectedMalformedOffer(control: control, config: config)
-        signal("p2p-rejected", in: config.coordinationDirectory)
-        try waitForSignal("relay-after-rejection", in: config.coordinationDirectory, timeout: 20)
+        try signal("p2p-rejected", using: config.coordinationURL)
+        try waitForSignal("relay-after-rejection", using: config.coordinationURL, timeout: 20)
 
         let connectionID = "p2p-\(UUID().uuidString)"
         let channelID = "p2p-\(UUID().uuidString)"
@@ -64,6 +64,10 @@ final class NativeWebRTCWorkerInteropTests: XCTestCase {
             return
         }
         XCTAssertTrue(channelResult.ok, channelResult.error)
+        if config.expectDataChannelBlocked {
+            try assertSandboxClientOnlyBlocksUDP(offerer: offerer, config: config)
+            return
+        }
         try offerer.waitForDataChannelOpen()
         XCTAssertTrue(offerer.dataChannel.isOrdered)
 
@@ -80,8 +84,8 @@ final class NativeWebRTCWorkerInteropTests: XCTestCase {
 
         // relay-first 的真实跨栈证据：外层 Node harness 在 native P2P open 后仍通过原 relay
         // 做一次生产 DevicePing；纯状态门另断言成功后才把 active transport promotion 为 P2P。
-        signal("p2p-open", in: config.coordinationDirectory)
-        try waitForSignal("relay-during-p2p", in: config.coordinationDirectory, timeout: 20)
+        try signal("p2p-open", using: config.coordinationURL)
+        try waitForSignal("relay-during-p2p", using: config.coordinationURL, timeout: 20)
 
         try assertCatalogRoundTrip(offerer: offerer, channelID: channelID)
         for size in [1, NativeP2PFraming.chunkBytes, NativeP2PFraming.chunkBytes * 3 + 17] {
@@ -119,8 +123,8 @@ final class NativeWebRTCWorkerInteropTests: XCTestCase {
         // 真实中心消失：worker 会摘除 P2P，但 libwebrtc 另一端不保证及时收到 close。
         // harness 杀 server 后，这里记录实际状态并断言旧 channel 不再产生业务回应；
         // native Router 必须依赖 control/liveness 主动清理，不能依赖 onClose。
-        signal("stop-server", in: config.coordinationDirectory)
-        try waitForSignal("server-stopped", in: config.coordinationDirectory, timeout: 20)
+        try signal("stop-server", using: config.coordinationURL)
+        try waitForSignal("server-stopped", using: config.coordinationURL, timeout: 20)
         let silentRequestID = "native-silent-\(UUID().uuidString)"
         let silentFrame = try deviceEnvelope(
             channelID: channelID,
@@ -158,18 +162,21 @@ final class NativeWebRTCWorkerInteropTests: XCTestCase {
         let workspaceID: String
         let clientInstanceID: String
         let transportGeneration: UInt64
-        let coordinationDirectory: URL
+        let coordinationURL: URL
         let nearMaximumPayloadBytes: Int
+        let expectDataChannelBlocked: Bool
     }
 
     private func interopConfiguration() throws -> InteropConfiguration {
         let environment = ProcessInfo.processInfo.environment
-        guard let path = environment["COFLUX_WEBRTC_CONFIG_PATH"],
-              !path.isEmpty,
-              path != "$(COFLUX_WEBRTC_CONFIG_PATH)" else {
+        guard let encoded = environment["COFLUX_WEBRTC_CONFIG_BASE64"],
+              !encoded.isEmpty,
+              encoded != "$(COFLUX_WEBRTC_CONFIG_BASE64)" else {
             throw XCTSkip("真实 Rust worker interop 仅由 test-webrtc-worker-interop.sh 启动")
         }
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        guard let data = Data(base64Encoded: encoded) else {
+            throw NativeWebRTCProbeError.invalidMessage("WebRTC interop 配置不是合法 base64")
+        }
         let config = try JSONDecoder().decode(InteropConfiguration.self, from: data)
         guard config.transportGeneration > 0 else {
             throw NativeWebRTCProbeError.invalidMessage("transport generation 无效")
@@ -179,6 +186,38 @@ final class NativeWebRTCWorkerInteropTests: XCTestCase {
             throw NativeWebRTCProbeError.invalidMessage("near-maximum payload 无效")
         }
         return config
+    }
+
+    /// Apple 的 App Sandbox 对 UDP 分别授权 outbound/inbound。只有 network.client 时，
+    /// 当前 libwebrtc 只生成 TCP host candidate，而 worker 提供 UDP host candidate；没有
+    /// 兼容 ICE 路径，DataChannel 不应打开，同时 relay 必须继续可用。某些系统也可能生成
+    /// UDP candidate 后在收包阶段失败，因此负向门以候选证据 + ICE 未连共同裁决。
+    private func assertSandboxClientOnlyBlocksUDP(
+        offerer: NativeWebRTCOfferer,
+        config: InteropConfiguration
+    ) throws {
+        do {
+            try offerer.waitForDataChannelOpen()
+            XCTFail("只有 network.client 的 Sandbox UDP DataChannel 不应打开")
+            return
+        } catch NativeWebRTCProbeError.timeout {
+            // 预期的 UDP inbound deny。
+        } catch NativeWebRTCProbeError.unavailable {
+            // 某些 macOS 版本会直接把 ICE/channel 转为 failed/closed，也属于同一负向。
+        }
+
+        XCTAssertGreaterThan(offerer.localCandidateCount, 0, "负向门必须先完成 native candidate gathering")
+        XCTAssertGreaterThan(offerer.remoteUDPHostCandidateCount, 0, "负向门必须收到 worker UDP host candidate")
+        XCTAssertNotEqual(offerer.dataChannel.readyState, .open)
+        XCTAssertNotEqual(offerer.peerConnection.connectionState, .connected)
+        XCTAssertTrue(
+            offerer.peerConnection.iceConnectionState == .checking
+                || offerer.peerConnection.iceConnectionState == .failed,
+            "client-only 负向应停在 ICE checking/failed：\(offerer.stateDescription)"
+        )
+        print("COFLUX_WEBRTC_SANDBOX client_only=ice_blocked_without_network_server \(offerer.stateDescription)")
+        try signal("p2p-blocked", using: config.coordinationURL)
+        try waitForSignal("relay-after-p2p-blocked", using: config.coordinationURL, timeout: 20)
     }
 
     private func assertUnknownDaemonRejected(
@@ -397,19 +436,56 @@ final class NativeWebRTCWorkerInteropTests: XCTestCase {
         }
     }
 
-    private func signal(_ name: String, in directory: URL) {
-        let path = directory.appendingPathComponent(name).path
-        FileManager.default.createFile(atPath: path, contents: Data())
+    private func signal(_ name: String, using baseURL: URL) throws {
+        let status = try coordinationStatus(name: name, method: "POST", baseURL: baseURL, timeout: 5)
+        guard status == 204 else {
+            throw NativeWebRTCProbeError.unavailable("harness signal \(name) 返回 HTTP \(status)")
+        }
     }
 
-    private func waitForSignal(_ name: String, in directory: URL, timeout: TimeInterval) throws {
-        let path = directory.appendingPathComponent(name).path
+    private func waitForSignal(_ name: String, using baseURL: URL, timeout: TimeInterval) throws {
         let deadline = Date().addingTimeInterval(timeout)
         while deadline.timeIntervalSinceNow > 0 {
-            if FileManager.default.fileExists(atPath: path) { return }
+            let remaining = max(0.1, min(2, deadline.timeIntervalSinceNow))
+            let status = try coordinationStatus(
+                name: name,
+                method: "GET",
+                baseURL: baseURL,
+                timeout: remaining
+            )
+            if status == 204 { return }
+            guard status == 404 else {
+                throw NativeWebRTCProbeError.unavailable("harness wait \(name) 返回 HTTP \(status)")
+            }
             Thread.sleep(forTimeInterval: 0.02)
         }
         throw NativeWebRTCProbeError.timeout("harness signal \(name)")
+    }
+
+    private func coordinationStatus(
+        name: String,
+        method: String,
+        baseURL: URL,
+        timeout: TimeInterval
+    ) throws -> Int {
+        var request = URLRequest(
+            url: baseURL.appendingPathComponent("signal").appendingPathComponent(name)
+        )
+        request.httpMethod = method
+        request.timeoutInterval = timeout
+        let completion = NativeBlockingResult<Int>()
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error {
+                completion.complete(.failure(error))
+            } else if let response = response as? HTTPURLResponse {
+                completion.complete(.success(response.statusCode))
+            } else {
+                completion.complete(.failure(
+                    NativeWebRTCProbeError.invalidMessage("harness coordination 缺少 HTTP response")
+                ))
+            }
+        }.resume()
+        return try completion.wait(timeout: timeout + 1, label: "harness coordination \(name)")
     }
 
     private func residentMemoryBytes() -> UInt64 {
