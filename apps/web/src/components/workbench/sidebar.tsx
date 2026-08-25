@@ -328,6 +328,10 @@ export function Sidebar(props: SidebarProps) {
                               ? "主工作区"
                               : null;
                         const hasDiff = workspace.additions > 0 || workspace.deletions > 0;
+                        // worker 侧 diff_stat 的基准是 merge-base(defaultBranch, HEAD) 比到工作树：当前分支
+                        // 就是默认分支（或默认分支缺失）时 base 即 HEAD 自身，数字实为本地未提交改动（含
+                        // untracked），说成「相对 X 的变更」是同义反复且会被读成分支间历史 diff。
+                        const diffAgainstSelf = !project.defaultBranch || workspace.branch === project.defaultBranch;
                         // 活动四态：执行中 / 待批准 / 待回答 / 本轮完成（同一套 SVG 点阵）。
                         // 状态来自 agent hook 上报（经 daemon 合并），聚合优先级收敛在
                         // workspaceActivity（packages/client），UI 只做呈现。
@@ -368,7 +372,7 @@ export function Sidebar(props: SidebarProps) {
                               {hasDiff ? (
                                 <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                                   <FileDiff className="size-3 shrink-0 opacity-70" />
-                                  <span className="truncate">相对 {project.defaultBranch || "默认分支"} 的变更 +{workspace.additions} −{workspace.deletions}</span>
+                                  <span className="truncate">{diffAgainstSelf ? "未提交改动" : `相对 ${project.defaultBranch} 的变更`} +{workspace.additions} −{workspace.deletions}</span>
                                 </span>
                               ) : null}
                             </div>
