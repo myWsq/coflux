@@ -74,9 +74,11 @@ entitlement。这是签名产物的实际行为，不是只检查 build setting�
 Info.plist 包含 `NSLocalNetworkUsageDescription`、不含 `NSAllowsArbitraryLoads`。
 
 这份矩阵不能回答干净用户的 Local Network TCC prompt：当前没有重置/替换真实
-TCC 数据库，也没有完成 Allow/Deny 两条人工路径。只有真实 prompt 和 Deny 后 relay
-fallback 才能冻结这部分发布决策。同理，Apple Development 签名不代替 Developer ID、
-notarization、staple 和干净机 Gatekeeper。
+TCC 数据库，也没有完成 Allow/Deny 两条人工路径。严格的两个一次性 GUI app、受控物理 LAN peer、
+签名/UUID 审计和人工操作入口见 `LOCAL_NETWORK_TCC_PROBE.md`。只有真实 prompt、明确的
+`localNetworkDenied`、远端 worker P2P 失败和同一 native client 的 relay Ping/Pong 都成立，才能
+冻结 native relay fallback；loopback 或外层 Node relay health 不能代替。同理，Apple Development
+签名不代替 Developer ID、notarization、staple 和干净机 Gatekeeper。
 
 ## 重复验收
 

@@ -61,7 +61,9 @@ libwebrtc↔`webrtc-rs 0.20.2` 和 native P-256/Origin/grant/lease 三门均通�
 Mac、干净用户 Local Network TCC Allow/Deny、Intel 实机、macOS 14 以及
 Developer ID + notarization + staple 矩阵尚未完成；因此 **最终 GO 尚未收口**，
 Foundation/UI/Transport 不提前立项或执行。本机门没有引入新协议、大型 fork 或
-Rust client core，因此 22–30 工程周的项目净估算暂不变。
+Rust client core，因此 22–30 工程周的项目净估算暂不变。TCC 已具备严格的两个一次性 GUI app
+验收入口及 Development 签名 build-only 证据，但本机缺少第二台受控物理 LAN peer；fresh bundle、
+loopback 与外层 Node relay health 均不冒充 clean-user 或同一 native client 的 relay fallback。
 
 ### 已存在的原生资产
 

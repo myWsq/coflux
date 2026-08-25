@@ -64,6 +64,58 @@ targets:
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Coflux.app/Contents/MacOS/Coflux"
         BUNDLE_LOADER: "$(TEST_HOST)"
 
+  CofluxLocalNetworkAllowProbe:
+    type: application
+    platform: macOS
+    sources:
+      - path: CofluxLocalNetworkProbe
+        excludes:
+          - Info.plist
+    dependencies:
+      - sdk: Network.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.coflux.macos.tcc.allow.template
+        PRODUCT_NAME: CofluxTCCAllowProbe
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 1.0
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: CofluxLocalNetworkProbe/Info.plist
+        COFLUX_TCC_DISPLAY_NAME: Coflux Local Network Allow Probe
+        COFLUX_TCC_EXPECTED_DECISION: allow
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) COFLUX_TCC_ALLOW_PROBE"
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_OUTGOING_NETWORK_CONNECTIONS: YES
+        ENABLE_INCOMING_NETWORK_CONNECTIONS: NO
+
+  CofluxLocalNetworkDenyProbe:
+    type: application
+    platform: macOS
+    sources:
+      - path: CofluxLocalNetworkProbe
+        excludes:
+          - Info.plist
+    dependencies:
+      - sdk: Network.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.coflux.macos.tcc.deny.template
+        PRODUCT_NAME: CofluxTCCDenyProbe
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 1.0
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: CofluxLocalNetworkProbe/Info.plist
+        COFLUX_TCC_DISPLAY_NAME: Coflux Local Network Deny Probe
+        COFLUX_TCC_EXPECTED_DECISION: deny
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) COFLUX_TCC_DENY_PROBE"
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_OUTGOING_NETWORK_CONNECTIONS: YES
+        ENABLE_INCOMING_NETWORK_CONNECTIONS: NO
+
 schemes:
   Coflux:
     build:
@@ -77,3 +129,15 @@ schemes:
         COFLUX_LOOPBACK_CONFIG_BASE64: "$(COFLUX_LOOPBACK_CONFIG_BASE64)"
       targets:
         - CofluxTests
+  CofluxLocalNetworkAllowProbe:
+    build:
+      targets:
+        CofluxLocalNetworkAllowProbe: all
+    run:
+      config: Debug
+  CofluxLocalNetworkDenyProbe:
+    build:
+      targets:
+        CofluxLocalNetworkDenyProbe: all
+    run:
+      config: Debug

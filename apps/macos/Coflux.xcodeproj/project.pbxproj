@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		09EC70524DC1A35B18E0F77F /* LocalNetworkProbeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F047E3DE60002B383F0324CE /* LocalNetworkProbeApp.swift */; };
 		15EA287E822400E1173C9F85 /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = 7C1287B36A9279A788E65584 /* SwiftProtobuf */; };
 		1F7523032EAB7A3D92753A7F /* NativeWebRTCWorkerInteropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7A8AFEA4499F3D855F54D1B /* NativeWebRTCWorkerInteropTests.swift */; };
 		3D310D55AC77B505F3F2F9A3 /* TerminalFixtureOracle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DDC80BCFC0398187DF2A956 /* TerminalFixtureOracle.swift */; };
@@ -15,6 +16,7 @@
 		4F857D5BAC625F54EC25F10A /* NativeWebRTCWorkerProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = F629E1B07D69E8098EB840E1 /* NativeWebRTCWorkerProbe.swift */; };
 		55684604FF1A6593F1401207 /* NativeIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A563A4336B4A76A5FC423132 /* NativeIdentityTests.swift */; };
 		614DE2D37DF574F2CFF358B0 /* CofluxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAE54FAA3FF9EFC98EDE946C /* CofluxApp.swift */; };
+		799056883C7CF9E16F9546A6 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0A6591F10002142123432259 /* Network.framework */; };
 		7DE2B1A2CD2206E6ED7B4224 /* daemon.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63FDEB20DB15CEECE26CF1AD /* daemon.pb.swift */; };
 		7E7DC477FE3DAF3964A7B3A3 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 7342B6453F597BC08FEB32A0 /* WebRTC */; };
 		8B2A87D49A31B493BCF6AA26 /* NativeIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1AFAE19A055865E89C3923B /* NativeIdentity.swift */; };
@@ -22,10 +24,12 @@
 		A2CC9B7552604CAB165421BD /* client.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F1A1C3EC7C4D49C34AF352A /* client.pb.swift */; };
 		A8343D1C5D1D33235F8571D3 /* TerminalFixtureCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0C7C4633AC00F7FBE49673 /* TerminalFixtureCompatibilityTests.swift */; };
 		AB01C87F8FACAEE483305245 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 50D63F9C6B9BD03B6C97DD9E /* SwiftTerm */; };
+		AD6EE069A814B4693797F047 /* LocalNetworkProbeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F047E3DE60002B383F0324CE /* LocalNetworkProbeApp.swift */; };
 		AEA45A1EA70EB4322E56FE7E /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 71C9694623FE7390176DEAC2 /* SwiftTerm */; };
 		C57E650AEE13E853BB98A182 /* NativeP2PFraming.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD502B26B95392A6CB12A87F /* NativeP2PFraming.swift */; };
 		E20FB2E31E3E9964C7604396 /* NativeLoopbackAuthInteropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A8C6EC37F82F8742A86F36B /* NativeLoopbackAuthInteropTests.swift */; };
 		E81ECC0C686FC0357434DDE2 /* NativeWebRTCFramingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2370AF91B4B73E4EACD7D957 /* NativeWebRTCFramingTests.swift */; };
+		F091EB6F0D2970CAE8BF0ADE /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0A6591F10002142123432259 /* Network.framework */; };
 		F88B18C3813CA80A88141CC2 /* device.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA45B58E0FDA3E1B3761766B /* device.pb.swift */; };
 /* End PBXBuildFile section */
 
@@ -41,20 +45,24 @@
 
 /* Begin PBXFileReference section */
 		09599851F840F30A927604F3 /* common.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = common.pb.swift; sourceTree = "<group>"; };
+		0A6591F10002142123432259 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
 		1F0C7C4633AC00F7FBE49673 /* TerminalFixtureCompatibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFixtureCompatibilityTests.swift; sourceTree = "<group>"; };
 		1F1A1C3EC7C4D49C34AF352A /* client.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = client.pb.swift; sourceTree = "<group>"; };
 		2370AF91B4B73E4EACD7D957 /* NativeWebRTCFramingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebRTCFramingTests.swift; sourceTree = "<group>"; };
 		347FC8F8486ACA1A0485E2FA /* CofluxTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CofluxTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		4B929062D785F140A2332FF5 /* CofluxLocalNetworkDenyProbe.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CofluxLocalNetworkDenyProbe.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		524655AC8173FC1167EBADAD /* NativeLoopbackAuthProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLoopbackAuthProbe.swift; sourceTree = "<group>"; };
 		5A8C6EC37F82F8742A86F36B /* NativeLoopbackAuthInteropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLoopbackAuthInteropTests.swift; sourceTree = "<group>"; };
 		63FDEB20DB15CEECE26CF1AD /* daemon.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = daemon.pb.swift; sourceTree = "<group>"; };
 		7DDC80BCFC0398187DF2A956 /* TerminalFixtureOracle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFixtureOracle.swift; sourceTree = "<group>"; };
+		895843EF7D8386B452C2CCA0 /* CofluxLocalNetworkAllowProbe.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CofluxLocalNetworkAllowProbe.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A563A4336B4A76A5FC423132 /* NativeIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeIdentityTests.swift; sourceTree = "<group>"; };
 		A7A8AFEA4499F3D855F54D1B /* NativeWebRTCWorkerInteropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebRTCWorkerInteropTests.swift; sourceTree = "<group>"; };
 		AA1532689EC06DAF8E96A57E /* Coflux.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Coflux.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA45B58E0FDA3E1B3761766B /* device.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = device.pb.swift; sourceTree = "<group>"; };
 		BAE54FAA3FF9EFC98EDE946C /* CofluxApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CofluxApp.swift; sourceTree = "<group>"; };
 		BD502B26B95392A6CB12A87F /* NativeP2PFraming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeP2PFraming.swift; sourceTree = "<group>"; };
+		F047E3DE60002B383F0324CE /* LocalNetworkProbeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNetworkProbeApp.swift; sourceTree = "<group>"; };
 		F1AFAE19A055865E89C3923B /* NativeIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeIdentity.swift; sourceTree = "<group>"; };
 		F629E1B07D69E8098EB840E1 /* NativeWebRTCWorkerProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebRTCWorkerProbe.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -69,6 +77,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		5593BB36BBEB57FB9BE3ED8D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F091EB6F0D2970CAE8BF0ADE /* Network.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		572BA1F8513F1138FB1A4905 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -79,6 +95,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		921E1747D6944F722A5D5C8A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				799056883C7CF9E16F9546A6 /* Network.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -86,9 +110,19 @@
 			isa = PBXGroup;
 			children = (
 				AA1532689EC06DAF8E96A57E /* Coflux.app */,
+				895843EF7D8386B452C2CCA0 /* CofluxLocalNetworkAllowProbe.app */,
+				4B929062D785F140A2332FF5 /* CofluxLocalNetworkDenyProbe.app */,
 				347FC8F8486ACA1A0485E2FA /* CofluxTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		218D50D732CE12305087B317 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				0A6591F10002142123432259 /* Network.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		2DB6CF08EC63A7181E5750F4 /* coflux */ = {
@@ -103,10 +137,20 @@
 			isa = PBXGroup;
 			children = (
 				7C8EAD513EE79C2EB6B9ADF9 /* Coflux */,
+				376A53131F3E790684A0D9EB /* CofluxLocalNetworkProbe */,
 				CBCC973FBB561009F87F7E0B /* CofluxTests */,
 				CA358913AF99000803684278 /* Generated */,
+				218D50D732CE12305087B317 /* Frameworks */,
 				0B15A7055E2D8ED4AB14EEE3 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		376A53131F3E790684A0D9EB /* CofluxLocalNetworkProbe */ = {
+			isa = PBXGroup;
+			children = (
+				F047E3DE60002B383F0324CE /* LocalNetworkProbeApp.swift */,
+			);
+			path = CofluxLocalNetworkProbe;
 			sourceTree = "<group>";
 		};
 		7C8EAD513EE79C2EB6B9ADF9 /* Coflux */ = {
@@ -215,6 +259,42 @@
 			productReference = AA1532689EC06DAF8E96A57E /* Coflux.app */;
 			productType = "com.apple.product-type.application";
 		};
+		234CE234454CB1C7D8DD300F /* CofluxLocalNetworkAllowProbe */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C5C5A82F1327F86099DF3797 /* Build configuration list for PBXNativeTarget "CofluxLocalNetworkAllowProbe" */;
+			buildPhases = (
+				78AAE771DC9199A33F36E631 /* Sources */,
+				5593BB36BBEB57FB9BE3ED8D /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CofluxLocalNetworkAllowProbe;
+			packageProductDependencies = (
+			);
+			productName = CofluxLocalNetworkAllowProbe;
+			productReference = 895843EF7D8386B452C2CCA0 /* CofluxLocalNetworkAllowProbe.app */;
+			productType = "com.apple.product-type.application";
+		};
+		361E0C1A9AF33E63B9A0005D /* CofluxLocalNetworkDenyProbe */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3A720E773086707F2D36EE22 /* Build configuration list for PBXNativeTarget "CofluxLocalNetworkDenyProbe" */;
+			buildPhases = (
+				EA263C698DA1E187F842F395 /* Sources */,
+				921E1747D6944F722A5D5C8A /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CofluxLocalNetworkDenyProbe;
+			packageProductDependencies = (
+			);
+			productName = CofluxLocalNetworkDenyProbe;
+			productReference = 4B929062D785F140A2332FF5 /* CofluxLocalNetworkDenyProbe.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -228,6 +308,12 @@
 						ProvisioningStyle = Automatic;
 					};
 					0F0EF74FCF87C92D8ECD0A17 = {
+						ProvisioningStyle = Automatic;
+					};
+					234CE234454CB1C7D8DD300F = {
+						ProvisioningStyle = Automatic;
+					};
+					361E0C1A9AF33E63B9A0005D = {
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -253,11 +339,21 @@
 			targets = (
 				0F0EF74FCF87C92D8ECD0A17 /* Coflux */,
 				0C15EECE4B6E986F0149D3A4 /* CofluxTests */,
+				234CE234454CB1C7D8DD300F /* CofluxLocalNetworkAllowProbe */,
+				361E0C1A9AF33E63B9A0005D /* CofluxLocalNetworkDenyProbe */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXSourcesBuildPhase section */
+		78AAE771DC9199A33F36E631 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AD6EE069A814B4693797F047 /* LocalNetworkProbeApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		86359F31000019CB7C4B8E62 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -284,6 +380,14 @@
 			files = (
 				614DE2D37DF574F2CFF358B0 /* CofluxApp.swift in Sources */,
 				8B2A87D49A31B493BCF6AA26 /* NativeIdentity.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EA263C698DA1E187F842F395 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				09EC70524DC1A35B18E0F77F /* LocalNetworkProbeApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -339,6 +443,33 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.coflux.macos;
 				PRODUCT_NAME = Coflux;
 				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		337EF641E756989B6D723F2A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COFLUX_TCC_DISPLAY_NAME = "Coflux Local Network Deny Probe";
+				COFLUX_TCC_EXPECTED_DECISION = deny;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = CofluxLocalNetworkProbe/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.coflux.macos.tcc.deny.template;
+				PRODUCT_NAME = CofluxTCCDenyProbe;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) COFLUX_TCC_DENY_PROBE";
 			};
 			name = Debug;
 		};
@@ -413,6 +544,87 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.coflux.macos.tests;
 				SDKROOT = macosx;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Coflux.app/Contents/MacOS/Coflux";
+			};
+			name = Release;
+		};
+		870257EAE5F084669AFDC271 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COFLUX_TCC_DISPLAY_NAME = "Coflux Local Network Allow Probe";
+				COFLUX_TCC_EXPECTED_DECISION = allow;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = CofluxLocalNetworkProbe/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.coflux.macos.tcc.allow.template;
+				PRODUCT_NAME = CofluxTCCAllowProbe;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) COFLUX_TCC_ALLOW_PROBE";
+			};
+			name = Debug;
+		};
+		C342FFE59DFC12B150AB3000 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COFLUX_TCC_DISPLAY_NAME = "Coflux Local Network Deny Probe";
+				COFLUX_TCC_EXPECTED_DECISION = deny;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = CofluxLocalNetworkProbe/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.coflux.macos.tcc.deny.template;
+				PRODUCT_NAME = CofluxTCCDenyProbe;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) COFLUX_TCC_DENY_PROBE";
+			};
+			name = Release;
+		};
+		DF6151710F2DE85AD9B02E3A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COFLUX_TCC_DISPLAY_NAME = "Coflux Local Network Allow Probe";
+				COFLUX_TCC_EXPECTED_DECISION = allow;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = CofluxLocalNetworkProbe/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.coflux.macos.tcc.allow.template;
+				PRODUCT_NAME = CofluxTCCAllowProbe;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) COFLUX_TCC_ALLOW_PROBE";
 			};
 			name = Release;
 		};
@@ -505,6 +717,24 @@
 			buildConfigurations = (
 				F8E06CFACD46393D2D65914C /* Debug */,
 				7ADAF6976FBE28876F095000 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		3A720E773086707F2D36EE22 /* Build configuration list for PBXNativeTarget "CofluxLocalNetworkDenyProbe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				337EF641E756989B6D723F2A /* Debug */,
+				C342FFE59DFC12B150AB3000 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C5C5A82F1327F86099DF3797 /* Build configuration list for PBXNativeTarget "CofluxLocalNetworkAllowProbe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				870257EAE5F084669AFDC271 /* Debug */,
+				DF6151710F2DE85AD9B02E3A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

@@ -55,7 +55,11 @@
 - Milestone 4：**IN PROGRESS**。三项本机架构核心门都指向 **GO candidate**，没有触发
   NO-GO，也没有需用 CONDITIONAL GO 包装的 fork、协议放宽或新维护成本。但最终
   GO 所需的外部 acceptance 矩阵尚未闭合，因此本 plan 保持 IN PROGRESS，不立项或
-  自动执行 Foundation/UI/Transport。
+  自动执行 Foundation/UI/Transport。Local Network TCC 已新增两个独立 GUI `.app` 的严格
+  acceptance 入口：每次生成 fresh bundle ID，Allow/Deny 编译常量与 Mach-O UUID 分离，Finder
+  人工启动后以受控物理 LAN peer nonce echo / `NWPath.localNetworkDenied` 分类；脚本拒绝 loopback、
+  自机/非物理 route、全局隐私例外、普通网络错误和自动点击。当前只完成未启动 app 的
+  Development 签名 build-only 审计，没有第二台受控 LAN peer，也没有产生或声称 TCC 结果。
 
 ### 本轮可审计验收记录（2026-08-25）
 
@@ -67,6 +71,12 @@
   universal slices/supply-chain 审计、Node/Shell 语法、`xcodegen generate` 与 `git diff --check`。
   三类测试 identity、`dev.coflux.macos.loopback-probe.*` 和
   `dev.coflux.macos.denied.*` 最终 Keychain 只读盘点均为 0，无遗留测试进程。
+- Local Network TCC acceptance 构型 build-only 通过：两个从未启动的一次性 app 均为真实
+  Apple Development / Team `8Y2J55823C`、Hardened Runtime、Sandbox + `network.client`、无
+  `network.server`/absolute-path exception/ATS 全局放宽，Info.plist 配置完整；arm64 主可执行 UUID
+  分别为 `E43E30F0-481D-3664-B3CA-F0DFD3DBF22C` 与
+  `434CDE7A-52F8-367F-886E-7CF076A85130`。构建后临时 app/DerivedData 已删除，未启动、未写 TCC。
+  UUID 是两个 target 当前编译产物的可复核值，不代表 Intel 或后续 source revision。
 - 仓库级回归：`cargo test -p coflux-protocol` 26/26；daemon build 零警告；真实
   xterm/sessiond oracle 1/1；全量黑盒 101 项中 99 过、2 失败。两个失败仍是仓库
   已记录的 `cofluxd doctor` 本机服务状态基线（本轮没有修改 CLI/doctor），其余 99 项全过。
@@ -288,7 +298,8 @@ Out of scope:
 | universal slices | `apps/macos/scripts/verify-webrtc-slices.sh` | 锁定 XCFramework 同时含 arm64、x86_64，checksum/license 与记录一致 |
 | 两网络 P2P (acceptance) | 两台不同 NAT/网络的 Mac 与真实 daemon，保留 relay fallback | P2P 成功时 promotion；失败时 relay 连续可用 |
 | signed local-network probe (acceptance) | `apps/macos/scripts/test-loopback-auth-interop.sh && apps/macos/scripts/test-webrtc-sandbox-interop.sh` | Development signing/Hardened Runtime/Sandbox entitlement 正负矩阵通过；不代替 clean-user TCC |
-| clean-user TCC (acceptance) | 新用户/未授权数据库下分别 Allow/Deny Local Network prompt | Allow 全路径可用；Deny 后 direct/P2P 失败可诊断且 relay 连续可用 |
+| Local Network TCC app 构型 | `node apps/macos/scripts/local-network-tcc-acceptance.mjs --build-only` | 两个 app 的签名、Team、runtime、Sandbox/entitlement、Info 与不同 executable UUID 通过；app 不启动 |
+| clean-user TCC (acceptance) | 新用户或安装前 VM snapshot 下运行 `node apps/macos/scripts/local-network-tcc-acceptance.mjs --acceptance --peer-host <受控第二台 LAN Mac IP> --peer-port <port> --context new-user`；由 Finder 人工启动并分别 Allow/Deny | Allow 为 nonce echo；Deny 明确为 `localNetworkDenied`；脚本不把 context 参数自动证明成 clean-user，也不声称 native relay fallback |
 | 系统/架构实机 (acceptance) | Intel Mac 与 macOS 14 各跑核心 interop | 不以 Rosetta/macOS 27 代替 |
 | 正式签名 (acceptance) | Developer ID `.app` 签名、notarization、staple，干净机安装 | Gatekeeper 通过，entitlement 与 Development probe 一致 |
 
@@ -303,7 +314,8 @@ Out of scope:
 - [x] P-256 identity 跨 App 重启复用，pair/grant/revoke/key mismatch/lease expiry 的正负路径均通过。
 - [x] control WS 与 loopback WS 的实际 Origin 由对端观测证明一致，server/worker 校验未放宽。
 - [ ] ATS、Local Network、Hardened Runtime 与 App Sandbox 权限矩阵有真实结果。本机签名产物与
-  Sandbox entitlement 矩阵已过；干净用户 TCC Allow/Deny、macOS 14 与 Developer ID 构型待补。
+  Sandbox entitlement 矩阵及 TCC GUI app build-only 审计已过；干净用户 TCC Allow/Deny、远端
+  worker + 同一 native client relay fallback、macOS 14 与 Developer ID 构型待补。
 - [ ] plan 082 回写最终 GO/CONDITIONAL GO/NO-GO、依赖选择、共享 core 建议与估算变化。
 - [ ] 若为 GO，foundation plan 已单独创建，但没有在未经用户确认的情况下自动执行；若非 GO，后续
   UI phases 未启动。
