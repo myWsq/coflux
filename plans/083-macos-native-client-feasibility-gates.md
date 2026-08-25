@@ -37,7 +37,43 @@
   因此后续 Router 必须以 control disconnect + application timeout 主动判死。详见
   `apps/macos/WEBRTC_PROBE.md`。两台不同 NAT/网络的外部 acceptance 尚未执行，最终 GO 前仍须补证，
   不把它伪报为本次已通过。
-- Milestone 3：待执行。
+- Milestone 3：本机 identity/auth 与签名 entitlement 子门完成，commit `50e44fa`。
+  CryptoKit P-256 以 32-byte
+  scalar、65-byte X9.63 公钥和 64-byte IEEE-P1363 签名与现有 wire 互通；固定向量、篡改、
+  损坏 Keychain 与并发首创均 fail closed。两个独立签名 XCTest 进程证明 App restart 后从
+  Keychain 复用 identity。真实 server/worker 闭环已覆盖 pair、对端实际观测的 Origin、
+  session scope、grant 复用/撤销、key mismatch 恢复、elevated lease、expiry 及真实 RPC，
+  server/worker 的 Origin、grant、lease 校验零放宽。签名产物权限实测得出：App Sandbox
+  下 loopback 需 `com.apple.security.network.client`；UDP WebRTC 同时需
+  `com.apple.security.network.client` 与 `com.apple.security.network.server`。只给 client 时 native
+  只生成 TCP host candidates，worker 为 UDP host candidates，ICE 停在 checking 且 relay 仍可用；
+  加 server entitlement 后同一完整 interop 通过。Development signing、Team ID、Hardened Runtime、
+  精确 entitlement、无 absolute-path read/write exception 及无 `NSAllowsArbitraryLoads` 均经
+  产物审计。干净用户 Local Network TCC Allow/Deny 尚未实测，因此 Milestone 3 的
+  privacy/首发 Sandbox 终态部分仍待 M4 外部 acceptance，不把 entitlement 子门写成
+  TCC 已完成。
+- Milestone 4：**IN PROGRESS**。三项本机架构核心门都指向 **GO candidate**，没有触发
+  NO-GO，也没有需用 CONDITIONAL GO 包装的 fork、协议放宽或新维护成本。但最终
+  GO 所需的外部 acceptance 矩阵尚未闭合，因此本 plan 保持 IN PROGRESS，不立项或
+  自动执行 Foundation/UI/Transport。
+
+### 本轮可审计验收记录（2026-08-25）
+
+- 环境：`MacBookPro18,3`、Apple M1 Pro 32 GiB、macOS 27.0 (`26A5388g`)、Xcode
+  26.6 (`17F113`)、Swift 6.3.3。x86_64 只在同机 Rosetta 2 下完成链接、dyld load 与
+  XCTest，**不等于 Intel 实机**。
+- 已过：macOS 全量 XCTest、真实 sessiond interop、hardened native WebRTC↔Rust worker、
+  Sandbox WebRTC client-only 负向与 client+server 正向、native loopback auth 三种签名构型、
+  universal slices/supply-chain 审计、Node/Shell 语法、`xcodegen generate` 与 `git diff --check`。
+  三类测试 identity、`dev.coflux.macos.loopback-probe.*` 和
+  `dev.coflux.macos.denied.*` 最终 Keychain 只读盘点均为 0，无遗留测试进程。
+- 仓库级回归：`cargo test -p coflux-protocol` 26/26；daemon build 零警告；真实
+  xterm/sessiond oracle 1/1；全量黑盒 101 项中 99 过、2 失败。两个失败仍是仓库
+  已记录的 `cofluxd doctor` 本机服务状态基线（本轮没有修改 CLI/doctor），其余 99 项全过。
+- 待补外部矩阵：干净用户首次 Local Network TCC prompt 的 Allow/Deny 两路及
+  Deny 后 relay fallback；两台不同 NAT/网络的 Mac；Intel 实机；macOS 14 实机；
+  Developer ID `.app` + notarization + staple + 干净机 Gatekeeper。这些未完成项不得
+  用 entitlement 负向门、Rosetta 或 Development signing 代替。
 
 ## Requirement
 
@@ -166,8 +202,10 @@ Milestone validation: `xcodebuild test -project apps/macos/Coflux.xcodeproj -sch
 lease expiry 均被拒并进入可恢复状态。两个 WebSocket 握手与 pair payload 的 Origin 必须一致且通过现有
 校验，不能使用测试专属环境变量关闭认证。
 
-同时记录 macOS ATS、Local Network privacy、App Sandbox/Hardened Runtime 下实际所需权限；这份结果
-决定 plan 082 中 App Sandbox 的终态决策。
+本机签名构型先记录 macOS ATS、App Sandbox/Hardened Runtime 下实际所需
+entitlement 和缺失时的失败模式；干净用户 Local Network TCC Allow/Deny 与
+Developer ID 正式签名放到 Milestone 4 外部 acceptance，两部分合起来才能决定
+plan 082 中 App Sandbox 的首发终态。
 
 Milestone validation: `xcodebuild test -project apps/macos/Coflux.xcodeproj -scheme Coflux -destination 'platform=macOS' -only-testing:CofluxTests/NativeIdentityTests` → exit 0，覆盖 P-256 wire、Keychain 重启模拟、Origin request 构造和 lease 状态；真实 server/worker loopback 闭环列在 Commands 的 acceptance 项，最后执行。
 
@@ -240,7 +278,7 @@ Out of scope:
 | --- | --- | --- |
 | macOS probe 全部单测 | `xcodebuild test -project apps/macos/Coflux.xcodeproj -scheme Coflux -destination 'platform=macOS'` | exit 0 |
 | iOS 回归（若抽取共享代码） | `xcodebuild test -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max,OS=latest'` | 除显式环境 probe 外全过 |
-| 既有 xterm snapshot oracle (acceptance) | `node --test tests/src/local-first-vt-oracle.test.mjs` | 真实 stack 中三份 fixture 全过 |
+| 既有 xterm snapshot oracle (acceptance) | `node --import tsx --test tests/src/local-first-vt-oracle.test.mjs` | 真实 stack 中三份 fixture 全过 |
 | Rust protocol | `cargo test -p coflux-protocol` | exit 0 零警告 |
 | daemon build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0 零警告 |
 | SwiftTerm ↔ 真实 sessiond (acceptance) | `apps/macos/scripts/test-terminal-sessiond-interop.sh` | 三份 fixture 的 raw/snapshot/snapshot+tail 契约全过 |
@@ -249,25 +287,30 @@ Out of scope:
 | 全量黑盒 (acceptance) | `pnpm -C tests test` | 全绿；任何既有基线单独证明 |
 | universal slices | `apps/macos/scripts/verify-webrtc-slices.sh` | 锁定 XCFramework 同时含 arm64、x86_64，checksum/license 与记录一致 |
 | 两网络 P2P (acceptance) | 两台不同 NAT/网络的 Mac 与真实 daemon，保留 relay fallback | P2P 成功时 promotion；失败时 relay 连续可用 |
-| signed local-network probe (acceptance) | Hardened Runtime/App Sandbox 两种构型分别跑 loopback/P2P | 权限、提示和失败模式已记录，能冻结首发 sandbox 决策 |
+| signed local-network probe (acceptance) | `apps/macos/scripts/test-loopback-auth-interop.sh && apps/macos/scripts/test-webrtc-sandbox-interop.sh` | Development signing/Hardened Runtime/Sandbox entitlement 正负矩阵通过；不代替 clean-user TCC |
+| clean-user TCC (acceptance) | 新用户/未授权数据库下分别 Allow/Deny Local Network prompt | Allow 全路径可用；Deny 后 direct/P2P 失败可诊断且 relay 连续可用 |
+| 系统/架构实机 (acceptance) | Intel Mac 与 macOS 14 各跑核心 interop | 不以 Rosetta/macOS 27 代替 |
+| 正式签名 (acceptance) | Developer ID `.app` 签名、notarization、staple，干净机安装 | Gatekeeper 通过，entitlement 与 Development probe 一致 |
 
 ## Done criteria
 
-- [ ] 三门各有自动化测试和真实跨栈证据，不以 mock-only、connected 状态或截图代替。
-- [ ] 三份现有终端 fixture 的 raw、真实 snapshot、snapshot+tail 均按架构契约比较；差异报告可定位到
+- [x] 三门各有自动化测试和真实跨栈证据，不以 mock-only、connected 状态或截图代替。
+- [x] 三份现有终端 fixture 的 raw、真实 snapshot、snapshot+tail 均按架构契约比较；差异报告可定位到
   cell/mode，忽略项逐项说明。
-- [ ] native libwebrtc 与当前 Rust worker 完成双向 binary DataChannel，覆盖 16 KiB 分片与大 frame。
-- [ ] P2P 失败/静默后 relay 不被破坏；probe 明确记录可用 liveness 信号和不能依赖的回调。
-- [ ] WebRTC 依赖的 exact version/revision/checksum/license、源码来源、架构 slices、体积/内存已记录。
-- [ ] P-256 identity 跨 App 重启复用，pair/grant/revoke/key mismatch/lease expiry 的正负路径均通过。
-- [ ] control WS 与 loopback WS 的实际 Origin 由对端观测证明一致，server/worker 校验未放宽。
-- [ ] ATS、Local Network、Hardened Runtime 与 App Sandbox 权限矩阵有真实结果。
+- [x] native libwebrtc 与当前 Rust worker 完成双向 binary DataChannel，覆盖 16 KiB 分片与大 frame。
+- [x] P2P 失败/静默后 relay 不被破坏；probe 明确记录可用 liveness 信号和不能依赖的回调。
+- [x] WebRTC 依赖的 exact version/revision/checksum/license、源码来源、架构 slices、体积/内存已记录。
+- [x] P-256 identity 跨 App 重启复用，pair/grant/revoke/key mismatch/lease expiry 的正负路径均通过。
+- [x] control WS 与 loopback WS 的实际 Origin 由对端观测证明一致，server/worker 校验未放宽。
+- [ ] ATS、Local Network、Hardened Runtime 与 App Sandbox 权限矩阵有真实结果。本机签名产物与
+  Sandbox entitlement 矩阵已过；干净用户 TCC Allow/Deny、macOS 14 与 Developer ID 构型待补。
 - [ ] plan 082 回写最终 GO/CONDITIONAL GO/NO-GO、依赖选择、共享 core 建议与估算变化。
 - [ ] 若为 GO，foundation plan 已单独创建，但没有在未经用户确认的情况下自动执行；若非 GO，后续
   UI phases 未启动。
 - [ ] iOS 可运行的既有测试未退化，`apps/mobile` 与生产部署无改动。
 - [ ] 所有 listed commands 通过，acceptance 项由验证者记录环境与结果。
-- [ ] `plans/README.md` 状态已更新。
+- [ ] `plans/README.md` 状态已更新。当前 IN PROGRESS/外部矩阵边界已同步，最终
+  GO/NO-GO 状态待 acceptance 后再更新。
 
 ## STOP conditions
 

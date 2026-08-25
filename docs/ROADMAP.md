@@ -71,9 +71,23 @@
   4 用例。STUN 部署（coturn on relay 节点）见 architecture.md，实机开通与打洞成功率生产
   实测待用户；iOS/浏览器实机矩阵与 trickle ICE 为后续迭代
 
-### 4. macOS 原生客户端（后续增强，暂缓）
+### 4. macOS 原生客户端（Phase 0 本机门已过，最终 GO 待外部矩阵）
 
-2026-07 调研结论保留备用：Swift 6.2+ / SwiftUI-first + AppKit 桥接 / `@Observable` / SwiftTerm /
-`URLSessionWebSocketTask`（actor + AsyncStream）/ Swift Testing；分发 = Developer ID + notarytool +
-Sparkle 2。协议侧已就绪：`proto/gen/swift`（swift-protobuf）与 TS/Rust 同一真相源，立项即可消费。
-最难移植点预判：attach/独占接管状态机（`workspace-terminal.tsx`）。
+plan 082/083 已于 2026-08-25 启动。在 Apple M1 Pro、macOS 27、Xcode 26.6 的隔离
+真实栈上，三个会改变总体架构的未知量均已关闭：
+
+- SwiftTerm 对 Claude/Codex/Vim 三份脱敏 fixture 的 raw、真实 sessiond snapshot 与
+  snapshot+tail 通过 cell/buffer/mode 契约；
+- `stasel/WebRTC` M151 native offerer 与 `webrtc-rs 0.20.2` worker 完成双向生产
+  Device frames、16 KiB 分片、29 MiB 上下行、relay fallback/promotion；
+- CryptoKit P-256 + Keychain 与现有 Origin/pair/grant/revoke/lease 安全模型互通，
+  无 server/worker 授权放宽。Sandbox 本机构型表明 loopback 需 `network.client`，
+  UDP WebRTC 还需 `network.server`；有 client 但缺 server 时 P2P 被阻断而 relay 仍可用，
+  缺 client 时则 control/relay 出站一并被拒。
+
+当前是 **Swift core + native libwebrtc 的 GO candidate**，不是最终 GO。尚缺干净用户
+Local Network TCC Allow/Deny、两台不同 NAT/网络的 Mac、Intel 实机、macOS 14 以及
+Developer ID + notarization + staple + 干净机 Gatekeeper。同机 Rosetta 与 Development
+signing 不代替这些矩阵；闭合前不提前开始 Foundation/UI/Transport 子计划。
+详细证据与边界见 `plans/083-macos-native-client-feasibility-gates.md` 与
+`apps/macos/WEBRTC_PROBE.md`。

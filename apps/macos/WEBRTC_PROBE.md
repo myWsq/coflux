@@ -57,10 +57,32 @@ application ping/timeout 与 control disconnect 主动清理冻结为正式 Rout
 (`26A5388g`)，Xcode 26.6 (`17F113`)，Apple Swift 6.3.3。x86_64 runtime load 在同机 Rosetta 2
 下执行。性能数字仅用于本次架构门量级判断，不作为跨机器 benchmark 阈值。
 
+## 签名与网络权限结果
+
+plan 083 Milestone 3 用真实 Apple Development authority、Team ID 和 Hardened Runtime 重跑
+同一 native↔Rust interop，得到以下本机结果：
+
+| 构型 | 结果 |
+|---|---|
+| Hardened Runtime，Sandbox OFF | 完整 ICE/DTLS/SCTP/DataChannel 与业务帧通过 |
+| Sandbox + `network.client` | native 本机只生成 `tcp-host:12`，worker answer 为 `udp-host:38`；ICE 停在 checking，DataChannel 不 open，原 relay 继续 `DevicePing/Pong` |
+| Sandbox + `network.client` + `network.server` | 同一完整 interop 通过 |
+
+因此当前 libwebrtc 的 UDP ICE 在 App Sandbox 下必须同时有 outbound/inbound network
+entitlement。这是签名产物的实际行为，不是只检查 build setting。签名审计还确认
+每个 variant 没有多余 `network.server`、没有 absolute-path read/write exception，且
+Info.plist 包含 `NSLocalNetworkUsageDescription`、不含 `NSAllowsArbitraryLoads`。
+
+这份矩阵不能回答干净用户的 Local Network TCC prompt：当前没有重置/替换真实
+TCC 数据库，也没有完成 Allow/Deny 两条人工路径。只有真实 prompt 和 Deny 后 relay
+fallback 才能冻结这部分发布决策。同理，Apple Development 签名不代替 Developer ID、
+notarization、staple 和干净机 Gatekeeper。
+
 ## 重复验收
 
 ```sh
 apps/macos/scripts/test-webrtc-worker-interop.sh
+apps/macos/scripts/test-webrtc-sandbox-interop.sh
 ```
 
 该入口使用黑盒 harness 的临时 Postgres 数据库、临时 daemon HOME、临时 git 仓库和动态 loopback
@@ -80,3 +102,4 @@ transport 测试而放宽它。
 本次本机门只证明 native↔Rust 跨栈能力，不宣称生产 STUN/TURN 或跨 NAT 打洞率。计划列出的“两台
 不同 NAT/网络的 Mac”外部 acceptance 仍保持未完成，待具备第二台设备与网络时补证；它不阻塞
 Milestone 3 的本机安全模型门，也不能在最终 GO 收口时被写成已通过。
+Rosetta x86_64 不是 Intel 实机，macOS 27 不是 macOS 14 兼容性证据。
