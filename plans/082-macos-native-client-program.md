@@ -55,12 +55,12 @@ WKWebView、Catalyst 或任何以网页作为主 UI 的壳，也不随 App 携�
 ### 结论
 
 plan 083 已给出明确的本机架构证据：SwiftTerm snapshot fidelity、native
-libwebrtc↔`webrtc-rs 0.20.2` 和 native P-256/Origin/grant/lease 三门均通过，当前
-**Swift core + native libwebrtc 方向是 GO candidate**，没有技术硬性死路，也没有
-需用 CONDITIONAL GO 承担的 fork、协议放宽或新维护面。但两台不同 NAT/网络的
-Mac、干净用户 Local Network TCC Allow/Deny、Intel 实机、macOS 14 以及
-Developer ID + notarization + staple 矩阵尚未完成；因此 **最终 GO 尚未收口**，
-Foundation/UI/Transport 不提前立项或执行。本机门没有引入新协议、大型 fork 或
+libwebrtc↔`webrtc-rs 0.20.2` 和 native P-256/Origin/grant/lease 三门均通过，
+**Swift core + native libwebrtc 方向正式取得开发 GO**，没有技术硬性死路，也没有需用
+CONDITIONAL GO 承担的 fork、协议放宽或新维护面。用户于 2026-08-25 明确决定 LAN 验证可以后置；
+因此两台不同 NAT/网络的 Mac、干净用户 Local Network TCC Allow/Deny、Intel 实机、macOS 14 以及
+Developer ID + notarization + staple 不再阻塞 Foundation，但仍是 Phase 6–7 不可删除的发布资格硬门。
+开发 GO 不等于发布 GO，也不允许把这些外部矩阵写成已通过。本机门没有引入新协议、大型 fork 或
 Rust client core，因此 22–30 工程周的项目净估算暂不变。TCC 已具备严格的两个一次性 GUI app
 验收入口及 Development 签名 build-only 证据，但本机缺少第二台受控物理 LAN peer；fresh bundle、
 loopback 与外层 Node relay health 均不冒充 clean-user 或同一 native client 的 relay fallback。
@@ -272,9 +272,9 @@ webrtc-rs DataChannel 互通、native loopback P-256/Origin/grant/lease。输出
 NO-GO 结论、WebRTC 依赖选择、共享核心边界建议和实测证据。任一门失败不得以“后面再修”为由进入
 全面 UI 重写。
 
-2026-08-25 进度：三项本机架构门已通过，依赖选择和共享核心方向没有改变；
-两网络 P2P、干净用户 TCC、Intel/macOS 14 实机及 Developer ID 正式分发矩阵未闭合。
-因此 Phase 0 仍为 IN PROGRESS，不将本机 GO candidate 改写成最终 GO。
+2026-08-25 结论：三项本机架构门已通过，依赖选择和共享核心方向没有改变，Phase 0 以
+**开发 GO** 收口。用户明确允许把两网络 P2P、干净用户 TCC、Intel/macOS 14 实机及 Developer ID
+正式分发矩阵后置；它们迁入 Phase 6–7 发布资格矩阵，在补证前不得发布、默认切换或宣称完整验收。
 
 ### Phase 1：Apple 客户端核心与 macOS Foundation（3–5 工程周）
 
@@ -314,13 +314,16 @@ Web 桌面功能完整覆盖。
 
 另立 release plan，完成 universal `.app`、DMG、Hardened Runtime、签名、公证/staple、Sparkle feed、
 更新失败回滚、版本准入、macOS CI、依赖 SBOM/checksum、崩溃与连接可观测性。日志不得记录 token、
-私钥或终端内容。
+私钥或终端内容。本阶段必须补齐干净用户 Local Network TCC Allow/Deny（含 Deny 后同一 native
+client 的 relay fallback）、macOS 14、Intel 实机以及 Developer ID 干净机 Gatekeeper 证据；
+这些项目只改变执行时序，不因开发 GO 被删除或默认豁免。
 
 ### Phase 7：Beta、默认切换与回退（1–2 工程周 + 观察期）
 
 内部 → 邀请 Beta → 默认推荐分批推进；至少覆盖 Apple Silicon/Intel、单/双显示器、中英文 IME、
 同机 daemon、异地 relay/P2P、Web/native 同时 attach。回退方案始终是停用 native 推荐/相关 feature
-flag 并回到 Web，不以不可逆 server 数据迁移绑死客户端发布。
+flag 并回到 Web，不以不可逆 server 数据迁移绑死客户端发布。两台不同 NAT/网络的 Mac 上的真实
+P2P/relay 路径必须在默认推荐前闭合；未闭合只能继续开发或内部测试，不能进入发布完成态。
 
 ### 投入区间
 
