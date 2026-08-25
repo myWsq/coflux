@@ -54,9 +54,14 @@ WKWebView、Catalyst 或任何以网页作为主 UI 的壳，也不随 App 携�
 
 ### 结论
 
-技术上没有硬性死路，建议立项为 **GO，但受 plan 083 三项门禁约束**。UI 不是最大风险；最大风险是
-DeviceRouter 的 direct/P2P/relay 状态机、SwiftTerm 对 daemon ANSI snapshot 的兼容性，以及两套
-客户端实现的长期行为同步。
+plan 083 已给出明确的本机架构证据：SwiftTerm snapshot fidelity、native
+libwebrtc↔`webrtc-rs 0.20.2` 和 native P-256/Origin/grant/lease 三门均通过，当前
+**Swift core + native libwebrtc 方向是 GO candidate**，没有技术硬性死路，也没有
+需用 CONDITIONAL GO 承担的 fork、协议放宽或新维护面。但两台不同 NAT/网络的
+Mac、干净用户 Local Network TCC Allow/Deny、Intel 实机、macOS 14 以及
+Developer ID + notarization + staple 矩阵尚未完成；因此 **最终 GO 尚未收口**，
+Foundation/UI/Transport 不提前立项或执行。本机门没有引入新协议、大型 fork 或
+Rust client core，因此 22–30 工程周的项目净估算暂不变。
 
 ### 已存在的原生资产
 
@@ -122,14 +127,22 @@ ICE/DTLS/SCTP。但 macOS 原生 libwebrtc 供应是现实存在的：
 | LiveKit WebRTC | `144.7559.14`，SwiftPM checksum `4b0a4be4564aa05168a02f262bbbc4d6d9a552aaa1c102229ed5adf1c480b81a` | repo 标 MIT；为 LiveKit 前缀化 fork，需验证 raw DataChannel API 与 worker 互通 |
 | Shiguredo build | 当前列表含 `macos_arm64`，不含 x86_64 | Apache-2.0；若放弃 Intel 可作为源码/构建链对照，不是本计划 universal 首选 |
 
-因此 P2P 没有“做不到”的问题，未知量是依赖治理、体积、跨栈互通和长期维护；必须由 plan 083
-实测后定型。现有 worker 使用 `webrtc-rs 0.20.2`：`crates/worker/Cargo.toml:33`。
+plan 083 已实测固定 `stasel/WebRTC` `151.0.0`（wrapper revision
+`19aa8c1fc7120d50df987b7111f42d5024df3d54`，上游 `f20ebb8adbf4fa781830e4384c61f732bd28a217`）。
+44,616,338-byte archive、SwiftPM checksum、BSD 许可、Info.plist 与真实 Mach-O
+`arm64+x86_64` 均经审计；Debug App 约 32,360 KiB。native 与现有
+`webrtc-rs 0.20.2` worker 已完成双向生产 Device frames、16 KiB 分片、29 MiB 上下行、
+relay fallback/promotion 和控制面断开生命周期；本机一次 offer→open 代表值 147 ms。
+同机 Rosetta x86_64 runtime load 只证明 universal binary 可装载，不代替 Intel 实机。
+详见 `apps/macos/WEBRTC_PROBE.md`。
 
 ### 发布资产
 
 Developer ID、notarytool 和现有 GitHub secret 约定已存在：`docs/RELEASING.md:24-59`；但它们
 当前服务 daemon 裸二进制，不等于 `.app`/DMG、Sparkle feed、原生版本准入和 macOS App CI 已完成。
-现有 CI 主质量门只跑 `ubuntu-latest`：`.github/workflows/ci.yml:17`。
+现有 CI 主质量门只跑 `ubuntu-latest`：`.github/workflows/ci.yml:17`。plan 083 已在
+Development authority 下审计 Team ID、Hardened Runtime 与精确 entitlement，但这不是
+Developer ID、notarization、staple 或干净机 Gatekeeper 的替代证据。
 
 ## 功能覆盖矩阵
 
@@ -190,9 +203,11 @@ Developer ID、notarytool 和现有 GitHub secret 约定已存在：`docs/RELEAS
   只写 SwiftTerm 单元测试 — 无法发现 daemon snapshot 对两个解析器的解释漂移；Rejected: 只做截图
   对比 — 会把字体抗锯齿差异混进状态正确性。
 
-- **本机身份沿用 P-256 grant/lease 安全模型，但不默认把“伪装浏览器 Origin”当长期设计**。
-  plan 083 先验证原生 WS 能用稳定 HTTPS Origin 跑通现有协议，再做威胁模型评审；若需要新增
-  native client identity/header，必须另立协议 plan 并同步 TS/Rust/Swift，不能在 App 内静默降低
+- **本机身份沿用 P-256 grant/lease 安全模型，不新增浏览器伪装或授权特例**。
+  plan 083 已证明原生 `URLSessionWebSocketTask` 能携带稳定 HTTPS Origin，且控制面与
+  loopback 对端都实际观测到同一 Origin；P-256 Keychain identity、pair/grant/revoke、
+  key mismatch 和 lease 全部在现有 server/worker 校验下互通。若后续仍需新增 native
+  client identity/header，必须另立协议 plan 并同步 TS/Rust/Swift，不能在 App 内静默降低
   校验。Based on: `apps/server/src/local-control.ts:99-108,401-404`。
 
 - **Web 是伴生入口，不是迁移后待删除的旧实现**。保留 `/authorize`、端口预览门禁、安装引导、
@@ -201,8 +216,12 @@ Developer ID、notarytool 和现有 GitHub secret 约定已存在：`docs/RELEAS
 
 - **首发采用 Developer ID + Hardened Runtime + 公证 + Sparkle 2（或经安全评审的等价更新器），
   不以 Mac App Store 为首发渠道**。Rejected: 先做 App Store — sandbox、更新、loopback/WebRTC
-  权限与现有直接分发体系叠加，不能降低核心产品风险。App Sandbox 是否启用由 plan 083 对本地网络
-  权限实测后冻结，但无论结果都必须最小权限、Keychain 存 token/私钥。
+  权限与现有直接分发体系叠加，不能降低核心产品风险。plan 083 的本机签名构型证明
+  App Sandbox 技术上可行：loopback 需 `network.client`，UDP WebRTC 同时需
+  `network.client` + `network.server`。缺 `network.client` 时 control/relay 出站也被拒，App 不可用；
+  已有 `network.client` 但缺 `network.server` 时 UDP P2P 可诊断地失败，relay 保持可用。是否在
+  Developer ID 首发终态启用 Sandbox，仍待干净用户 TCC Allow/Deny、macOS 14 与正式
+  签名矩阵冻结；无论结果都必须最小权限、Keychain 存 token/私钥。
 
 - **默认兼容目标为 macOS 14+，首发产出 arm64/x86_64 universal App**。原因是 Swift Observation
   与现代 SwiftUI/AppKit 基线，同时覆盖仍在支持期的 Intel Mac；若立项时设备统计证明 Intel 可
@@ -250,6 +269,10 @@ apps/web：继续作为行为参照、伴生入口与 fallback
 webrtc-rs DataChannel 互通、native loopback P-256/Origin/grant/lease。输出 GO / CONDITIONAL GO /
 NO-GO 结论、WebRTC 依赖选择、共享核心边界建议和实测证据。任一门失败不得以“后面再修”为由进入
 全面 UI 重写。
+
+2026-08-25 进度：三项本机架构门已通过，依赖选择和共享核心方向没有改变；
+两网络 P2P、干净用户 TCC、Intel/macOS 14 实机及 Developer ID 正式分发矩阵未闭合。
+因此 Phase 0 仍为 IN PROGRESS，不将本机 GO candidate 改写成最终 GO。
 
 ### Phase 1：Apple 客户端核心与 macOS Foundation（3–5 工程周）
 
@@ -319,9 +342,9 @@ flag 并回到 Web，不以不可逆 server 数据迁移绑死客户端发布。
 | ID | 风险 | 等级 | 证据/触发器 | 缓解与退出条件 |
 | --- | --- | --- | --- | --- |
 | R1 | Swift Router 漏掉 Web 的竞速、generation、恢复或 exactly-once 边界 | CRITICAL | Web Router 约 2,968 行；Swift 当前明确为 relay 子集 | 先冻结行为表，移植确定性测试，再做跨栈黑盒；没有 direct/P2P/relay promotion 证据不得 parity |
-| R2 | daemon ANSI snapshot 在 SwiftTerm 恢复不等价 | CRITICAL | 当前 oracle 只有 xterm：`docs/architecture.md:198-200` | plan 083 用同一 Claude/Codex/Vim fixture 比 cell/mode；关键差异无法在合理 fork 内修正则 STOP |
-| R3 | libwebrtc 依赖体积、许可、符号或 macOS 架构不可接受 | HIGH | Apple 无第一方 API；候选是预编译二进制 | pin tag/checksum、记录 license/SBOM、优先可复现自建；失败时评估 Rust core，不静默换不明 binary |
-| R4 | native Origin/P-256 身份复用削弱本机授权模型 | HIGH | server 强校验 WS Origin：`local-control.ts:99-108` | 走威胁模型评审和真实 loopback 测试；需要协议变化则单独 plan，禁止放宽校验赶进度 |
+| R2 | daemon ANSI snapshot 在 SwiftTerm 恢复不等价 | CRITICAL | plan 083 已用同一 Claude/Codex/Vim fixture 的 raw/真实 snapshot/tail 本机通过 | 把 cell/mode 契约保留为长期回归；新 escape sequence 若出现关键差异，无法在合理小修内收敛则 STOP |
+| R3 | libwebrtc 依赖体积、许可、符号或 macOS 架构不可接受 | HIGH | M151 本机已完成 checksum/license/slices/dyld/跨栈审计；Intel 实机与正式签名待补 | pin tag/checksum、记录 license/SBOM、优先可复现自建；每次 Chromium milestone 升级重跑全矩阵，不静默换不明 binary |
+| R4 | native Origin/P-256 身份复用削弱本机授权模型 | HIGH | plan 083 已在 server 强 Origin 校验下跑通 pair/grant/revoke/lease，生产语义零放宽 | 保留真实 loopback 正负契约；干净用户 TCC 另做发布矩阵；若需协议变化则单独 plan |
 | R5 | Web 与 Swift 两份客户端长期语义漂移 | HIGH | TS/Swift Router 已是两份实现 | 共享 proto + fixture + conformance 测试；协议/行为变更 PR 必须同时列出 Web/Swift 影响 |
 | R6 | 复制 plan 080 已知静默死亡/连坐缺陷 | CRITICAL | `plans/080-p2p-failure-fallback.md` 仍 PARTIAL | native transport 出厂即有独立 liveness/退避测试；授权语义未定前不进入生产 rollout |
 | R7 | SwiftUI 在高密度侧栏/大 diff/高频 PTY 输出下抖动或占 CPU | HIGH | Web 有大量保活、虚拟化与 resize landmine | 允许 AppKit/TextKit 降级；建立 10k 行 diff、持续 PTY、20 Tab 性能门，不强守纯 SwiftUI |
