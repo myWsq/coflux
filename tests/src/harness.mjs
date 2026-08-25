@@ -38,6 +38,39 @@ const ROOT = resolve(import.meta.dirname, "..", "..");
 const TSX = join(ROOT, "node_modules", ".bin", "tsx");
 const DEBUG = !!process.env.COFLUX_TEST_DEBUG;
 
+function stackAbortError(label) {
+  const error = new Error(`${label} aborted`);
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfStackAborted(signal, label = "test stack") {
+  if (signal?.aborted) throw stackAbortError(label);
+}
+
+function waitForStackOperation(promise, { signal, timeoutMs, label, cancel }) {
+  return new Promise((resolveValue, rejectValue) => {
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", aborted);
+      if (error) {
+        try { cancel?.(); } catch { /* best effort；主 cleanup 仍会严格复核 */ }
+        rejectValue(error);
+      } else {
+        resolveValue(value);
+      }
+    };
+    const aborted = () => finish(stackAbortError(label));
+    const timer = setTimeout(() => finish(new Error(`${label} timed out`)), timeoutMs);
+    signal?.addEventListener("abort", aborted, { once: true });
+    promise.then((value) => finish(undefined, value), (error) => finish(error));
+    if (signal?.aborted) aborted();
+  });
+}
+
 /*
  * 每个测试栈用一个独立的临时 Postgres 库（而非临时 schema）：
  * 隔离干净、无需改动任何 SQL，代价只是建/删库的开销（对测试量级可忽略）。
@@ -45,31 +78,176 @@ const DEBUG = !!process.env.COFLUX_TEST_DEBUG;
  * 弱默认值必须与 apps/server/src/config.ts 的 DATABASE_URL 开发默认值保持一致。
  */
 export const ADMIN_PG_URL = process.env.COFLUX_TEST_PG_URL || "postgres://postgres:postgres@127.0.0.1:5432/postgres";
+const DATABASE_OPERATION_TIMEOUT_MS = 10000;
+const DATABASE_BACKEND_DRAIN_TIMEOUT_MS = 5000;
+
+class DatabaseBackendUnconfirmedError extends AggregateError {}
+
+function databaseAdminClient(timeoutMs) {
+  return postgres(ADMIN_PG_URL, {
+    max: 1,
+    ssl: "prefer",
+    connect_timeout: Math.max(1, Math.ceil(timeoutMs / 1000)),
+    connection: {
+      application_name: "coflux-test-harness",
+      statement_timeout: timeoutMs,
+    },
+  });
+}
+
+async function ensureDatabaseBackendGone(backend, timeoutMs = DATABASE_BACKEND_DRAIN_TIMEOUT_MS) {
+  const admin = databaseAdminClient(timeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  try {
+    while (true) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(`database backend ${backend.pid} did not terminate`);
+      }
+      const queryTimeoutMs = Math.max(1, Math.min(remainingMs, 1000));
+      const terminate = admin.unsafe(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid = $1 AND backend_start = $2::timestamptz AND pid <> pg_backend_pid()",
+        [backend.pid, backend.backendStart],
+      ).execute();
+      await waitForStackOperation(terminate, {
+        timeoutMs: queryTimeoutMs,
+        label: `terminate database backend ${backend.pid}`,
+      });
+      const count = admin.unsafe(
+        "SELECT count(*)::int AS count FROM pg_stat_activity WHERE pid = $1 AND backend_start = $2::timestamptz AND pid <> pg_backend_pid()",
+        [backend.pid, backend.backendStart],
+      ).execute();
+      const rows = await waitForStackOperation(count, {
+        timeoutMs: queryTimeoutMs,
+        label: `observe database backend ${backend.pid}`,
+      });
+      if (Number(rows[0]?.count ?? 0) === 0) return;
+      await sleep(25);
+    }
+  } finally {
+    await admin.end({ timeout: 0 });
+  }
+}
+
+async function runDatabaseAdminQuery(statement, { signal, timeoutMs = DATABASE_OPERATION_TIMEOUT_MS, label }) {
+  const admin = databaseAdminClient(timeoutMs);
+  let reserved;
+  let backend;
+  let query;
+  let querySettled = false;
+  let result;
+  let primaryError;
+  try {
+    reserved = await waitForStackOperation(admin.reserve(), {
+      signal,
+      timeoutMs,
+      label: `${label} connection`,
+    });
+    const identity = reserved.unsafe(
+      "SELECT pg_backend_pid()::int AS pid, backend_start::text AS backend_start FROM pg_stat_activity WHERE pid = pg_backend_pid()",
+    ).execute();
+    const identityRows = await waitForStackOperation(identity, {
+      signal,
+      timeoutMs,
+      label: `${label} backend identity`,
+    });
+    const pid = Number(identityRows[0]?.pid);
+    const backendStart = identityRows[0]?.backend_start;
+    if (!Number.isSafeInteger(pid) || pid <= 0 || typeof backendStart !== "string") {
+      throw new Error(`${label} could not identify its PostgreSQL backend`);
+    }
+    backend = { pid, backendStart };
+
+    query = reserved.unsafe(statement).execute();
+    const settledQuery = query.then(
+      (value) => {
+        querySettled = true;
+        return value;
+      },
+      (error) => {
+        querySettled = true;
+        throw error;
+      },
+    );
+    result = await waitForStackOperation(settledQuery, {
+      signal,
+      timeoutMs,
+      label,
+    });
+  } catch (error) {
+    primaryError = error;
+  }
+
+  try {
+    // reserve 保证 PID 查询与目标语句在同一 backend；已终态时先归还，正常关闭连接，
+    // 未终态时直接强拆，再由独立管理连接按 PID + backend_start 终止并观测消失。
+    if (reserved && query && querySettled) reserved.release();
+    await admin.end({ timeout: primaryError && (!query || !querySettled) ? 0 : 5 });
+  } catch (error) {
+    primaryError = primaryError
+      ? new AggregateError([primaryError, error], `${label} failed while closing its admin connection`)
+      : error;
+  }
+  if (primaryError && query && backend) {
+    try {
+      await ensureDatabaseBackendGone(backend);
+    } catch (error) {
+      throw new DatabaseBackendUnconfirmedError(
+        [primaryError, error],
+        `${label} failed and PostgreSQL backend ${backend.pid} could not be confirmed terminated`,
+      );
+    }
+  }
+  if (primaryError) throw primaryError;
+  return result;
+}
 
 /** 建一个随机命名的临时库，返回 {name, url}（url 指向新库，供 spawn 的 server 用作 DATABASE_URL）。 */
-async function createTestDatabase() {
+async function createTestDatabase({ signal, timeoutMs = DATABASE_OPERATION_TIMEOUT_MS } = {}) {
   const name = `coflux_test_${randomUUID().replace(/-/g, "")}`;
-  const admin = postgres(ADMIN_PG_URL, { max: 1, ssl: "prefer" });
+  let primaryError;
   try {
-    await admin.unsafe(`CREATE DATABASE ${name}`);
-  } finally {
-    await admin.end({ timeout: 5 });
+    await runDatabaseAdminQuery(`CREATE DATABASE ${name}`, {
+      signal,
+      timeoutMs,
+      label: `create test database ${name}`,
+    });
+  } catch (error) {
+    primaryError = error;
   }
-  const url = new URL(ADMIN_PG_URL);
-  url.pathname = `/${name}`;
-  return { name, url: url.toString() };
+  if (primaryError) {
+    // 未确认 CREATE backend 消失时，DROP 可能先返回、CREATE 随后落库；此时必须保留明确失败，
+    // 禁止执行会伪装成成功回滚的竞态操作。
+    if (primaryError instanceof DatabaseBackendUnconfirmedError) throw primaryError;
+    try {
+      await dropTestDatabase(name);
+    } catch (rollbackError) {
+      throw new AggregateError([primaryError, rollbackError], `failed to create and roll back test database ${name}`);
+    }
+    throw primaryError;
+  }
+
+  try {
+    const url = new URL(ADMIN_PG_URL);
+    url.pathname = `/${name}`;
+    return { name, url: url.toString() };
+  } catch (error) {
+    try {
+      await dropTestDatabase(name);
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], `failed to prepare and roll back test database ${name}`);
+    }
+    throw error;
+  }
 }
 
 /** 删临时库：DROP ... WITH (FORCE)（PG 13+）由服务端原子地踢连接并删库。
  * 不用 pg_terminate_backend + DROP 两步：terminate 发完信号即返回、不等 backend 真正退出，
  * 紧随的 DROP 仍可能撞上垂死连接报 "being accessed by other users"，造成非确定性泄漏。 */
 async function dropTestDatabase(name) {
-  const admin = postgres(ADMIN_PG_URL, { max: 1, ssl: "prefer" });
-  try {
-    await admin.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-  } finally {
-    await admin.end({ timeout: 5 });
-  }
+  await runDatabaseAdminQuery(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`, {
+    label: `drop test database ${name}`,
+  });
 }
 
 /** 清理路径共用：删库失败不让绿测试变红，但必须在 stderr 留痕（静默吞掉=泄漏不可见）。 */
@@ -115,18 +293,9 @@ function toUint8(data) {
 }
 
 function spawnApp(rel, env) {
-  return spawn(TSX, [join(ROOT, rel)], { env, stdio: DEBUG ? "inherit" : "ignore", detached: true });
-}
-
-function waitProcessExit(process, ms = 3000) {
-  if (!process || process.exitCode !== null || process.signalCode !== null) return Promise.resolve();
-  return new Promise((resolveExit) => {
-    const timer = setTimeout(resolveExit, ms);
-    process.once("exit", () => {
-      clearTimeout(timer);
-      resolveExit();
-    });
-  });
+  const child = spawn(TSX, [join(ROOT, rel)], { env, stdio: DEBUG ? "inherit" : "ignore", detached: true });
+  child.cofluxProcessGroupId = child.pid;
+  return child;
 }
 
 // daemon = Rust supervisor + Rust worker（两个二进制，零 node 运行时）。
@@ -135,7 +304,9 @@ const SUPERVISOR_BIN = process.env.COFLUX_SUPERVISOR_BIN || join(ROOT, "target/d
 const WORKER_BIN = process.env.COFLUX_WORKER_BIN || join(ROOT, "target/debug/coflux-worker");
 export function spawnDaemon(env) {
   const env2 = { ...env, COFLUX_WORKER_CMD: WORKER_BIN, COFLUX_WORKER_ARGS: "[]" };
-  return spawn(SUPERVISOR_BIN, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
+  const child = spawn(SUPERVISOR_BIN, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
+  child.cofluxProcessGroupId = child.pid;
+  return child;
 }
 // 独立 relay（plan 043）：每套 stack 生成一对临时 ed25519 密钥——seed(hex) 给 server 签
 // rendezvous token，公钥(hex) 经 env 注入 relay 验签（同 COFLUX_WORKER_PUBKEY 的注入惯例）。
@@ -149,42 +320,140 @@ export function makeRelayKeys() {
   return { seedHex, pubHex };
 }
 
-export async function spawnRelay(pubHex, ms = 8000) {
+export async function spawnRelay(pubHex, ms = 8000, signal, onSpawn) {
   const child = spawn(RELAY_BIN, [], {
     env: { ...process.env, COFLUX_RELAY_LISTEN: "127.0.0.1:0", COFLUX_RELAY_PUBKEY: pubHex },
     stdio: ["ignore", "pipe", DEBUG ? "inherit" : "ignore"],
     detached: true,
   });
+  child.cofluxProcessGroupId = child.pid;
+  onSpawn?.(child);
   const port = await new Promise((resolvePort, rejectPort) => {
     let buffer = "";
-    const timer = setTimeout(() => rejectPort(new Error("relay did not report listening line")), ms);
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", aborted);
+      if (error) {
+        killTree(child);
+        rejectPort(error);
+      } else {
+        resolvePort(value);
+      }
+    };
+    const aborted = () => finish(stackAbortError("relay spawn"));
+    const timer = setTimeout(() => finish(new Error("relay did not report listening line")), ms);
     child.stdout.on("data", (chunk) => {
       buffer += chunk.toString();
       const match = buffer.match(/coflux-relay listening on [^\s:]*:(\d+)/);
       if (match) {
-        clearTimeout(timer);
         if (DEBUG) process.stdout.write(buffer);
-        resolvePort(Number(match[1]));
+        finish(undefined, Number(match[1]));
       }
     });
     child.once("exit", () => {
-      clearTimeout(timer);
-      rejectPort(new Error("relay exited before listening"));
+      finish(new Error("relay exited before listening"));
     });
+    signal?.addEventListener("abort", aborted, { once: true });
+    if (signal?.aborted) aborted();
   });
   return { process: child, port };
 }
 
-export function killTree(p) {
-  if (!p) return;
+function detachedProcessGroupId(child) {
+  const groupId = child?.cofluxProcessGroupId ?? child?.pid;
+  return Number.isSafeInteger(groupId) && groupId > 1 ? groupId : undefined;
+}
+
+function processGroupExists(groupId) {
+  if (!groupId) return false;
   try {
-    process.kill(-p.pid, "SIGKILL");
-  } catch {
+    process.kill(-groupId, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    if (error?.code === "EPERM") return true;
+    throw error;
+  }
+}
+
+function signalProcessTree(child, signal = "SIGKILL") {
+  if (!child) return;
+  const groupId = detachedProcessGroupId(child);
+  if (groupId) {
     try {
-      p.kill("SIGKILL");
-    } catch {
-      /* ignore */
+      process.kill(-groupId, signal);
+      return;
+    } catch (error) {
+      if (error?.code === "ESRCH") return;
+      let fallbackError;
+      try {
+        if (!child.kill(signal) && child.exitCode === null && child.signalCode === null) {
+          fallbackError = new Error(`child ${child.pid ?? "?"} rejected ${signal}`);
+        }
+      } catch (childError) {
+        fallbackError = childError;
+      }
+      throw new AggregateError(
+        fallbackError ? [error, fallbackError] : [error],
+        `failed to signal detached process group ${groupId}`,
+      );
     }
+  }
+
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (!child.kill(signal)) throw new Error(`child ${child.pid ?? "?"} rejected ${signal}`);
+}
+
+async function waitForProcessTreeExit(child, groupId, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const alive = groupId
+      ? processGroupExists(groupId)
+      : child.exitCode === null && child.signalCode === null;
+    if (!alive) return;
+    if (Date.now() >= deadline) {
+      throw new Error(groupId
+        ? `detached process group ${groupId} survived SIGKILL`
+        : `child ${child.pid ?? "?"} survived SIGKILL`);
+    }
+    await sleep(25);
+  }
+}
+
+async function stopProcessTrees(children, { strict = false } = {}) {
+  const trees = children
+    .filter(Boolean)
+    .map((child) => ({ child, groupId: detachedProcessGroupId(child) }));
+  const errors = [];
+  for (const tree of trees) {
+    try {
+      signalProcessTree(tree.child);
+    } catch (error) {
+      if (strict) errors.push(error);
+    }
+  }
+  if (strict) {
+    await Promise.all(trees.map(async (tree) => {
+      try {
+        await waitForProcessTreeExit(tree.child, tree.groupId);
+      } catch (error) {
+        errors.push(error);
+      }
+    }));
+  } else {
+    await sleep(200);
+  }
+  if (errors.length > 0) throw new AggregateError(errors, "test stack process cleanup failed");
+}
+
+export function killTree(child) {
+  try {
+    signalProcessTree(child);
+  } catch {
+    /* 普通测试沿用 best effort；严格 interop 入口由 stopProcessTrees 复核。 */
   }
 }
 
@@ -198,9 +467,10 @@ function httpHealth(port) {
     req.on("timeout", () => { req.destroy(); res(false); });
   });
 }
-async function waitHealth(port, ms = 12000) {
+async function waitHealth(port, ms = 12000, signal) {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
+    throwIfStackAborted(signal, "server health wait");
     if (await httpHealth(port)) return;
     await sleep(150);
   }
@@ -208,12 +478,27 @@ async function waitHealth(port, ms = 12000) {
 }
 
 /** 造一个临时 git 仓库（一个空提交），返回路径。测试结束由 stack.stop 之外的 rmSync 清理。 */
-export function mkRepo() {
+export function mkRepo({ strictCleanup = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "coflux-test-repo-"));
-  // 显式 -b main：默认分支不依赖宿主/容器的 git 全局配置（否则旧 git 默认 master，断言会跨环境飘）
-  execFileSync("git", ["init", "-q", "-b", "main", dir]);
-  execFileSync("git", ["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
-  return { dir, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} } };
+  try {
+    // 显式 -b main：默认分支不依赖宿主/容器的 git 全局配置（否则旧 git 默认 master，断言会跨环境飘）
+    execFileSync("git", ["init", "-q", "-b", "main", dir]);
+    execFileSync("git", ["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+  } catch (error) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], `failed to initialize and clean temporary repo ${dir}`);
+    }
+    throw error;
+  }
+  return {
+    dir,
+    cleanup: () => {
+      if (strictCleanup) rmSync(dir, { recursive: true, force: true });
+      else try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    },
+  };
 }
 
 /**
@@ -321,11 +606,16 @@ export function tokenFromUrl(url) {
  * （daemon 已发出 daemon.enrollRequest 是前提，spawnDaemon 之后调用即可），
  * 用一个测试 client 以 username/password 登录后确认 device.authorize。
  * startStack 用它替代已删除的 classic enrollKey 登记；也供需要手动起第二台 daemon 的测试复用。 */
-export async function authorizeDaemon(port, home, { username = "admin", password = "admin", ms = 20000 } = {}) {
+export async function authorizeDaemon(
+  port,
+  home,
+  { username = "admin", password = "admin", ms = 20000, signal } = {},
+) {
   const pendingPath = join(home, "pending-auth.json");
   const t0 = Date.now();
   let pending;
   while (Date.now() - t0 < ms && !pending) {
+    throwIfStackAborted(signal, "daemon authorization");
     if (existsSync(pendingPath)) {
       try {
         pending = JSON.parse(readFileSync(pendingPath, "utf8"));
@@ -335,14 +625,51 @@ export async function authorizeDaemon(port, home, { username = "admin", password
     }
     if (!pending) await sleep(200);
   }
+  throwIfStackAborted(signal, "daemon authorization");
   if (!pending?.url) throw new Error("daemon did not write pending-auth.json in time");
   const c = new Client(port);
   try {
     await c.authSubscribe(username, password);
+    throwIfStackAborted(signal, "daemon authorization");
     c.send({ case: "deviceAuthorize", token: tokenFromUrl(pending.url) });
     await c.waitFor((m) => m.case === "deviceAuthorized", "device.authorized");
+    throwIfStackAborted(signal, "daemon authorization");
   } finally {
     c.close();
+  }
+}
+
+/** health 只证明端口上有 HTTP 服务；随机密码认证在 daemon 接入前证明它就是本次 spawn 的 server。
+ * 这样即使动态端口在 bind 窗口被别的 coflux 测试抢占，也不会污染对方的 enrollment/presence。 */
+async function verifyServerIdentity(port, username, password, signal) {
+  throwIfStackAborted(signal, "server identity check");
+  const client = new Client(port);
+  try {
+    await waitForStackOperation(client.ready, {
+      signal,
+      timeoutMs: 3000,
+      label: "server identity websocket",
+      cancel: () => client.close(),
+    });
+    throwIfStackAborted(signal, "server identity check");
+    client.send({ case: "clientAuth", username, password });
+    const result = await waitForStackOperation(
+      client.waitFor(
+        (message) => message.case === "authOk" || message.case === "authError",
+        "server identity",
+        3000,
+      ),
+      {
+        signal,
+        timeoutMs: 3000,
+        label: "server identity auth",
+        cancel: () => client.close(),
+      },
+    );
+    if (result.case !== "authOk") throw new Error("loopback port belongs to another server");
+    throwIfStackAborted(signal, "server identity check");
+  } finally {
+    client.close();
   }
 }
 
@@ -352,18 +679,74 @@ export async function startStack(opts = {}) {
   if (!port) throw new Error("startStack requires a port");
   const username = opts.username ?? "admin";
   const password = opts.password ?? "admin";
-
-  const testDb = await createTestDatabase();
-  const home = mkdtempSync(join(tmpdir(), "coflux-test-home-"));
-  const relayKeys = makeRelayKeys();
-
+  const signal = opts.signal;
+  const strictCleanup = opts.strictCleanup === true;
   const ref = { server: null, daemon: null, relay: null };
+  const retiredProcessTrees = new Set();
+  let testDb;
+  let home;
   let relayPort;
+  let cleanupPromise;
+  const onAbort = () => {
+    // 先同步杀掉已取得句柄的 detached 进程；异步删库/删目录由同一个幂等 cleanup 收口。
+    killTree(ref.daemon);
+    killTree(ref.server);
+    killTree(ref.relay);
+    for (const child of retiredProcessTrees) killTree(child);
+    if (testDb || home) void cleanupResources().catch(() => undefined);
+  };
+  const cleanupResources = () => {
+    if (cleanupPromise) return cleanupPromise;
+    cleanupPromise = (async () => {
+      signal?.removeEventListener("abort", onAbort);
+      const processes = [...retiredProcessTrees, ref.daemon, ref.server, ref.relay];
+      retiredProcessTrees.clear();
+      ref.daemon = null;
+      ref.server = null;
+      ref.relay = null;
+      const errors = [];
+      try {
+        await stopProcessTrees(processes, { strict: strictCleanup });
+      } catch (error) {
+        errors.push(error);
+      }
+      if (home && existsSync(home)) {
+        try {
+          rmSync(home, { recursive: true, force: true });
+        } catch (error) {
+          if (strictCleanup) errors.push(error);
+        }
+      }
+      if (testDb) {
+        try {
+          if (strictCleanup) await dropTestDatabase(testDb.name);
+          else await dropTestDatabaseLoudly(testDb.name);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length > 0) throw new AggregateError(errors, "test stack cleanup failed");
+    })();
+    return cleanupPromise;
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
+    throwIfStackAborted(signal);
+    testDb = await createTestDatabase({ signal });
+    throwIfStackAborted(signal);
+    home = mkdtempSync(join(tmpdir(), "coflux-test-home-"));
+    const relayKeys = makeRelayKeys();
+    throwIfStackAborted(signal);
     // relay 先起（随机端口），server env 才能带上它的 URL。
-    const relay = await spawnRelay(relayKeys.pubHex);
+    const relay = await spawnRelay(
+      relayKeys.pubHex,
+      8000,
+      signal,
+      (child) => { ref.relay = child; },
+    );
     ref.relay = relay.process;
     relayPort = relay.port;
+    throwIfStackAborted(signal);
     // opts.serverEnv：额外/覆盖 server 侧 env（如 proxy.test.mjs 显式钉死 COFLUX_PROXY_SCHEME，
     // 避免测试环境未设 COFLUX_DEV 时 isDev=false 导致 proxyScheme 默认落到 https，门禁/cookie 断言随之漂移）。
     const serverEnv = {
@@ -387,17 +770,20 @@ export async function startStack(opts = {}) {
     };
     ref.serverEnv = serverEnv;
     ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
-    await waitHealth(port);
+    await waitHealth(port, 12000, signal);
+    await verifyServerIdentity(port, username, password, signal);
+    throwIfStackAborted(signal);
     ref.daemon = spawnDaemon(daemonEnv);
     // 空 home，daemon 无 credentials.json → 走浏览器授权（唯一登记路径），这里现场自动确认。
-    await authorizeDaemon(port, home, { username, password });
+    await authorizeDaemon(port, home, { username, password, signal });
+    throwIfStackAborted(signal);
   } catch (e) {
-    // 建库之后、stack.stop() 可用之前失败：就地清理，别泄漏测试库/临时目录
-    killTree(ref.daemon);
-    killTree(ref.server);
-    killTree(ref.relay);
-    if (existsSync(home)) try { rmSync(home, { recursive: true, force: true }); } catch {}
-    await dropTestDatabaseLoudly(testDb.name);
+    // 资源获取从建库开始就在同一个清理域；strict 模式下删库/删目录失败不能伪装成绿验收。
+    try {
+      await cleanupResources();
+    } catch (cleanupError) {
+      throw new AggregateError([e, cleanupError], "startStack failed and cleanup was incomplete");
+    }
     throw e;
   }
 
@@ -411,30 +797,34 @@ export async function startStack(opts = {}) {
     makeClient: (options) => new Client(port, options),
     /** 真正停止中心进程，但保留 daemon、临时数据库与 loopback gateway。 */
     async stopServer() {
-      const process = ref.server;
-      if (!process) return;
+      const serverProcess = ref.server;
+      if (!serverProcess) return;
       ref.server = null;
-      killTree(process);
-      await waitProcessExit(process);
-      await sleep(100);
+      retiredProcessTrees.add(serverProcess);
+      await stopProcessTrees([serverProcess], { strict: strictCleanup });
     },
     async restartServer() {
       await stack.stopServer();
+      throwIfStackAborted(signal, "server restart");
       // 复用同一个临时库（serverEnv 里的 DATABASE_URL 不变）：数据必须跨重启保留（reconnect.test.mjs 依赖此行为）。
       ref.server = spawnApp("apps/server/src/index.ts", ref.serverEnv);
-      await waitHealth(port);
+      await waitHealth(port, 12000, signal);
     },
     /** 杀掉整个 daemon 进程树（supervisor+worker），模拟用户机器离线（offline-view.test.mjs） */
     async stopDaemon() {
-      killTree(ref.daemon);
+      const daemonProcess = ref.daemon;
+      if (!daemonProcess) return;
       ref.daemon = null;
-      await sleep(300);
+      retiredProcessTrees.add(daemonProcess);
+      await stopProcessTrees([daemonProcess], { strict: strictCleanup });
+      if (!strictCleanup) await sleep(100);
     },
     /** 给 server 发 SIGTERM，等其优雅退出，返回退出码（或 'timeout'） */
     gracefulStopServer(ms = 3000) {
       return new Promise((res) => {
         const p = ref.server;
         if (!p) return res(null);
+        retiredProcessTrees.add(p);
         const t = setTimeout(() => res("timeout"), ms);
         p.on("exit", (code) => {
           if (ref.server === p) ref.server = null;
@@ -455,23 +845,18 @@ export async function startStack(opts = {}) {
         req.on("timeout", () => { req.destroy(); rej(new Error("health timeout")); });
       });
     },
-    async stop() {
-      killTree(ref.daemon);
-      killTree(ref.server);
-      killTree(ref.relay);
-      await sleep(200);
-      if (existsSync(home)) try { rmSync(home, { recursive: true, force: true }); } catch {}
-      await dropTestDatabaseLoudly(testDb.name);
-    },
+    stop: cleanupResources,
     /** 轮询新鲜快照直到 daemon 在线（每轮全新 client，避免读到旧快照）。
      * 首次启动与 server 重启后 daemon 重连均适用：重连有 backoff，时长跨机器不定，
      * 裸 sleep 固定毫秒数在慢 CI 上会赌输（dec-modes-replay 曾因此 flaky）。 */
     async waitDaemonOnline(ms = 20000) {
       const t0 = Date.now();
       while (Date.now() - t0 < ms) {
+        throwIfStackAborted(signal, "daemon online wait");
         const p = stack.makeClient();
         try {
           const s = await p.authSubscribe(username, password);
+          throwIfStackAborted(signal, "daemon online wait");
           const dev = s.daemons.find((d) => d.online && (!stack.daemonId || d.daemonId === stack.daemonId));
           if (dev) return dev;
         } catch {

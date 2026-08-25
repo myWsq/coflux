@@ -7,9 +7,15 @@ options:
   groupSortPosition: top
 
 packages:
+  SwiftProtobuf:
+    url: https://github.com/apple/swift-protobuf.git
+    exactVersion: 1.38.1
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm.git
     exactVersion: 1.15.0
+  WebRTC:
+    url: https://github.com/stasel/WebRTC.git
+    exactVersion: 151.0.0
 
 settings:
   base:
@@ -25,6 +31,7 @@ targets:
       - path: Coflux
     dependencies:
       - package: SwiftTerm
+      - package: WebRTC
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.coflux.macos
@@ -41,8 +48,12 @@ targets:
     platform: macOS
     sources:
       - path: CofluxTests
+      - path: ../../proto/gen/swift
+        group: Generated/Protocol
     dependencies:
+      - package: SwiftProtobuf
       - package: SwiftTerm
+      - package: WebRTC
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.coflux.macos.tests
@@ -57,5 +68,7 @@ schemes:
         CofluxTests: [test]
     test:
       gatherCoverageData: false
+      environmentVariables:
+        COFLUX_WEBRTC_CONFIG_PATH: "$(COFLUX_WEBRTC_CONFIG_PATH)"
       targets:
         - CofluxTests
