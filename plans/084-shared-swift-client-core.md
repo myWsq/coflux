@@ -14,6 +14,27 @@
 - Category: refactor
 - Execution: self-execution（沿用 plan 082 departure check）
 - Planned at: `5942465`, 2026-08-25
+- Outcome: DONE（`a402d90` / `0923ddd` / `00e5c7a`）
+
+### 执行结果（2026-08-26）
+
+- Milestone 1：`a402d90` 建立 `packages/swift-client` 唯一物理边界与
+  `CofluxProtocol` / `CofluxClientCore` / `CofluxApplePlatform` 三产品；Swift protobuf 只生成到
+  `CofluxProtocol/Generated`，SwiftProtobuf 精确固定 `1.38.1`。
+- Milestone 2：`0923ddd` 迁移唯一控制面与 relay Router，实现并测试首握手重连、generation 隔离、
+  控制帧串行、10 秒 outbound watchdog、三维状态、完整快照替换/增量/级联清理、TokenStore 错误可见及
+  terminal auth fail-closed。共享包最终为 41 个 Swift Testing 用例 + 3 个 XCTest 全过。
+- Milestone 3–4：`00e5c7a` 将 iOS App/Test 切到 repo-local package，删除 App 内旧
+  Client/Router/Wire/Transport/Keychain 与重复 reducer/router/auth 测试；App 保留原
+  `dev.coflux.Coflux` / `clientToken` namespace 和显式 `buildID = "dev"`，首次 snapshot 前显示同步态，
+  重连保留已有快照。hosted XCTest 通过 TestAction 专属环境注入空 TokenStore，避免测试启动 App 时读取、
+  使用或清除正式 token；Keychain roundtrip 使用随机 service/account。
+- 验收：Buf lint/generate 零漂移；package 44/44；Rust protocol 26/26；iOS generic simulator build
+  通过；iOS 全量测试 5 过、2 个既有环境 probe 按契约 skip；core 平台 import、旧实现/ProtoGen/直接
+  SwiftProtobuf、scope 与 diff hygiene 扫描均通过。两轮独立复审发现并关闭测试 target 冗余 Protocol
+  依赖与 hosted-test 正式 Keychain 污染风险，最终均 APPROVE。
+- 本 plan 没有修改 `apps/mobile`、server、worker、Web 或生产部署。LAN/TCC、Intel、macOS 14 实机与
+  Developer ID 发布矩阵仍按 plan 082 保留为 Phase 6–7 发布资格门，本结果不代表这些后置门已通过。
 
 ## Requirement
 
@@ -176,16 +197,16 @@ Out of scope:
 
 ## Done criteria
 
-- [ ] 所有 listed commands 通过。
-- [ ] iOS 只通过同一 package 产品消费 Swift 协议与客户端核心；package 本身在 macOS 14 目标可编译。
+- [x] 所有 listed commands 通过。
+- [x] iOS 只通过同一 package 产品消费 Swift 协议与客户端核心；package 本身在 macOS 14 目标可编译。
   macOS App 的实际唯一消费由 plan 085 验收。
-- [ ] Core 无平台默认依赖、固定 `dev`、无序控制帧发送或未同步空态。
-- [ ] 存量 token 首次握手失败会重连；auth error/outdated/logout 的 token 与重连语义有负向测试。
-- [ ] reducer 覆盖完整 snapshot 和 Phase 1 所列增量/级联删除，畸形输入 fail closed。
-- [ ] iOS 现有非环境测试、终端、上传、设备面板与后台恢复行为不退化。
-- [ ] `apps/mobile`、server、worker、Web 和生产部署无改动。
-- [ ] `docs/ROADMAP.md` 不再错误声称 Foundation 被外部 LAN/发布矩阵阻塞，且未把后置门写成已通过。
-- [ ] `plans/README.md` 状态已更新。
+- [x] Core 无平台默认依赖、固定 `dev`、无序控制帧发送或未同步空态。
+- [x] 存量 token 首次握手失败会重连；auth error/outdated/logout 的 token 与重连语义有负向测试。
+- [x] reducer 覆盖完整 snapshot 和 Phase 1 所列增量/级联删除，畸形输入 fail closed。
+- [x] iOS 现有非环境测试、终端、上传、设备面板与后台恢复行为不退化。
+- [x] `apps/mobile`、server、worker、Web 和生产部署无改动。
+- [x] `docs/ROADMAP.md` 不再错误声称 Foundation 被外部 LAN/发布矩阵阻塞，且未把后置门写成已通过。
+- [x] `plans/README.md` 状态已更新。
 
 ## STOP conditions
 
