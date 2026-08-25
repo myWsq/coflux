@@ -1,3 +1,5 @@
+import CofluxClientCore
+import CofluxProtocol
 import SwiftUI
 
 /// 设备面板（plan 077）：机群的健康（在线+RTT）、路径（relay 节点）、版本与身份一页扫完。
@@ -7,7 +9,7 @@ struct DevicesView: View {
     let client: CofluxClient
 
     /// 每台在线设备一个测量持有的释放闭包；页面离开或设备下线时释放。
-    @State private var measureReleases: [String: () -> Void] = [:]
+    @State private var measureReleases: [String: @MainActor () -> Void] = [:]
 
     /// 与 web 同档（sidebar.tsx RTT_GOOD_MS）：< 200ms 绿、≥ 200ms 黄。
     private static let rttGoodMS = 200.0

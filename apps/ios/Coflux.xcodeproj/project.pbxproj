@@ -7,10 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		CF0000000000000000000020 /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000001D /* SwiftProtobuf */; };
-		CF0000000000000000000021 /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000001E /* SwiftProtobuf */; };
 		CF0000000000000000000022 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000001F /* SwiftTerm */; };
 		CF0000000000000000000026 /* Opus in Frameworks */ = {isa = PBXBuildFile; productRef = CF0000000000000000000025 /* Opus */; };
+		CF000000000000000000002E /* CofluxProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = CF0000000000000000000028 /* CofluxProtocol */; };
+		CF000000000000000000002F /* CofluxClientCore in Frameworks */ = {isa = PBXBuildFile; productRef = CF0000000000000000000029 /* CofluxClientCore */; };
+		CF0000000000000000000030 /* CofluxApplePlatform in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000002A /* CofluxApplePlatform */; };
+		CF0000000000000000000032 /* CofluxClientCore in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000002C /* CofluxClientCore */; };
+		CF0000000000000000000033 /* CofluxApplePlatform in Frameworks */ = {isa = PBXBuildFile; productRef = CF000000000000000000002D /* CofluxApplePlatform */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -31,7 +34,6 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		CF0000000000000000000006 /* Coflux */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = Coflux; sourceTree = "<group>"; };
 		CF0000000000000000000007 /* CofluxTests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = CofluxTests; sourceTree = "<group>"; };
-		CF0000000000000000000008 /* ProtoGen */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); name = ProtoGen; path = ../../proto/gen/swift; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -39,7 +41,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CF0000000000000000000020 /* SwiftProtobuf in Frameworks */,
+				CF000000000000000000002E /* CofluxProtocol in Frameworks */,
+				CF000000000000000000002F /* CofluxClientCore in Frameworks */,
+				CF0000000000000000000030 /* CofluxApplePlatform in Frameworks */,
 				CF0000000000000000000022 /* SwiftTerm in Frameworks */,
 				CF0000000000000000000026 /* Opus in Frameworks */,
 			);
@@ -49,7 +53,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CF0000000000000000000021 /* SwiftProtobuf in Frameworks */,
+				CF0000000000000000000032 /* CofluxClientCore in Frameworks */,
+				CF0000000000000000000033 /* CofluxApplePlatform in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -61,7 +66,6 @@
 			children = (
 				CF0000000000000000000006 /* Coflux */,
 				CF0000000000000000000007 /* CofluxTests */,
-				CF0000000000000000000008 /* ProtoGen */,
 				CF0000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -92,11 +96,12 @@
 			);
 			fileSystemSynchronizedGroups = (
 				CF0000000000000000000006 /* Coflux */,
-				CF0000000000000000000008 /* ProtoGen */,
 			);
 			name = Coflux;
 			packageProductDependencies = (
-				CF000000000000000000001D /* SwiftProtobuf */,
+				CF0000000000000000000028 /* CofluxProtocol */,
+				CF0000000000000000000029 /* CofluxClientCore */,
+				CF000000000000000000002A /* CofluxApplePlatform */,
 				CF000000000000000000001F /* SwiftTerm */,
 				CF0000000000000000000025 /* Opus */,
 			);
@@ -122,7 +127,8 @@
 			);
 			name = CofluxTests;
 			packageProductDependencies = (
-				CF000000000000000000001E /* SwiftProtobuf */,
+				CF000000000000000000002C /* CofluxClientCore */,
+				CF000000000000000000002D /* CofluxApplePlatform */,
 			);
 			productName = CofluxTests;
 			productReference = CF0000000000000000000005 /* CofluxTests.xctest */;
@@ -158,7 +164,7 @@
 			mainGroup = CF0000000000000000000002;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				CF000000000000000000001C /* XCRemoteSwiftPackageReference "swift-protobuf" */,
+				CF0000000000000000000027 /* XCLocalSwiftPackageReference "../../packages/swift-client" */,
 				CF0000000000000000000023 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 				CF0000000000000000000024 /* XCRemoteSwiftPackageReference "swift-opus" */,
 			);
@@ -441,15 +447,14 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		CF000000000000000000001C /* XCRemoteSwiftPackageReference "swift-protobuf" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/apple/swift-protobuf.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.37.0;
-			};
+/* Begin XCLocalSwiftPackageReference section */
+		CF0000000000000000000027 /* XCLocalSwiftPackageReference "../../packages/swift-client" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../packages/swift-client;
 		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
 		CF0000000000000000000023 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
@@ -469,15 +474,30 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		CF000000000000000000001D /* SwiftProtobuf */ = {
+		CF0000000000000000000028 /* CofluxProtocol */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = CF000000000000000000001C /* XCRemoteSwiftPackageReference "swift-protobuf" */;
-			productName = SwiftProtobuf;
+			package = CF0000000000000000000027 /* XCLocalSwiftPackageReference "../../packages/swift-client" */;
+			productName = CofluxProtocol;
 		};
-		CF000000000000000000001E /* SwiftProtobuf */ = {
+		CF0000000000000000000029 /* CofluxClientCore */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = CF000000000000000000001C /* XCRemoteSwiftPackageReference "swift-protobuf" */;
-			productName = SwiftProtobuf;
+			package = CF0000000000000000000027 /* XCLocalSwiftPackageReference "../../packages/swift-client" */;
+			productName = CofluxClientCore;
+		};
+		CF000000000000000000002A /* CofluxApplePlatform */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CF0000000000000000000027 /* XCLocalSwiftPackageReference "../../packages/swift-client" */;
+			productName = CofluxApplePlatform;
+		};
+		CF000000000000000000002C /* CofluxClientCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CF0000000000000000000027 /* XCLocalSwiftPackageReference "../../packages/swift-client" */;
+			productName = CofluxClientCore;
+		};
+		CF000000000000000000002D /* CofluxApplePlatform */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CF0000000000000000000027 /* XCLocalSwiftPackageReference "../../packages/swift-client" */;
+			productName = CofluxApplePlatform;
 		};
 		CF000000000000000000001F /* SwiftTerm */ = {
 			isa = XCSwiftPackageProductDependency;
