@@ -18,6 +18,27 @@
 - Review state: 用户已于 2026-08-25 明确授权执行、提交与本机依赖安装
 - Execution: self-execution（用户在 departure check 中明确选择）
 
+### 执行进度（2026-08-25）
+
+- Milestone 1：完成，commit `a70bbae`；三份 fixture 的固定 snapshot 快速门与真实 sessiond
+  acceptance 均通过。
+- Milestone 2：本机架构门完成，native `stasel/WebRTC` M151 与真实 `webrtc-rs 0.20.2`
+  worker 完成 DataChannel 双向生产帧。固定 tag `151.0.0`、wrapper revision
+  `19aa8c1fc7120d50df987b7111f42d5024df3d54`、SwiftPM checksum
+  `64a218fad3d84a0d783321aa9a1eec58ca266ac7879123f86b0b44b703b7d8dc`，上游
+  `branch-heads/7922` / `f20ebb8adbf4fa781830e4384c61f732bd28a217`；BSD 许可、release
+  archive bytes/hash、Info.plist 与真实 Mach-O `arm64+x86_64`、两架构实际 dyld load 均验证。
+  中心与 worker 负向拒绝后原 relay 均连续可用，promotion generation、整帧并发串行、半帧发送
+  失败关闭和响应 channel ID 有自动化断言。29 MiB 上行
+  `DeviceFsWrite` 经 daemon 侧 SHA-256 校验，29 MiB 下行走生产 `DeviceExecRun/ExecResult`；
+  `DeviceFsRead` 自身 2 MiB 业务上限保持不变。隔离栈建连代表值 147 ms；测试进程 baseline
+  35,291,136 bytes，空闲 offerer 49,692,672 bytes，连通后 51,462,144 bytes；
+  中心断开后 worker 已静默但 native 仍观测 peer connected / ICE completed / channel open，
+  因此后续 Router 必须以 control disconnect + application timeout 主动判死。详见
+  `apps/macos/WEBRTC_PROBE.md`。两台不同 NAT/网络的外部 acceptance 尚未执行，最终 GO 前仍须补证，
+  不把它伪报为本次已通过。
+- Milestone 3：待执行。
+
 ## Requirement
 
 在投入完整 macOS UI 重写前，用最小但生产语义真实的 native probe 回答三个架构级问题：

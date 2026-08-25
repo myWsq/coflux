@@ -7,19 +7,38 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		15EA287E822400E1173C9F85 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 50D63F9C6B9BD03B6C97DD9E /* SwiftTerm */; };
+		15EA287E822400E1173C9F85 /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = 7C1287B36A9279A788E65584 /* SwiftProtobuf */; };
+		1F7523032EAB7A3D92753A7F /* NativeWebRTCWorkerInteropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7A8AFEA4499F3D855F54D1B /* NativeWebRTCWorkerInteropTests.swift */; };
 		3D310D55AC77B505F3F2F9A3 /* TerminalFixtureOracle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DDC80BCFC0398187DF2A956 /* TerminalFixtureOracle.swift */; };
+		447C4E18F5FDB5DEF4C325E2 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = AB7AD7C9C00CBFD058ECE0AC /* WebRTC */; };
+		457F9D4D325FB154E348E051 /* common.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09599851F840F30A927604F3 /* common.pb.swift */; };
+		4F857D5BAC625F54EC25F10A /* NativeWebRTCWorkerProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = F629E1B07D69E8098EB840E1 /* NativeWebRTCWorkerProbe.swift */; };
 		614DE2D37DF574F2CFF358B0 /* CofluxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAE54FAA3FF9EFC98EDE946C /* CofluxApp.swift */; };
+		7DE2B1A2CD2206E6ED7B4224 /* daemon.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63FDEB20DB15CEECE26CF1AD /* daemon.pb.swift */; };
+		7E7DC477FE3DAF3964A7B3A3 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 7342B6453F597BC08FEB32A0 /* WebRTC */; };
+		A2CC9B7552604CAB165421BD /* client.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F1A1C3EC7C4D49C34AF352A /* client.pb.swift */; };
 		A8343D1C5D1D33235F8571D3 /* TerminalFixtureCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0C7C4633AC00F7FBE49673 /* TerminalFixtureCompatibilityTests.swift */; };
+		AB01C87F8FACAEE483305245 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 50D63F9C6B9BD03B6C97DD9E /* SwiftTerm */; };
 		AEA45A1EA70EB4322E56FE7E /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 71C9694623FE7390176DEAC2 /* SwiftTerm */; };
+		C57E650AEE13E853BB98A182 /* NativeP2PFraming.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD502B26B95392A6CB12A87F /* NativeP2PFraming.swift */; };
+		E81ECC0C686FC0357434DDE2 /* NativeWebRTCFramingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2370AF91B4B73E4EACD7D957 /* NativeWebRTCFramingTests.swift */; };
+		F88B18C3813CA80A88141CC2 /* device.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA45B58E0FDA3E1B3761766B /* device.pb.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		09599851F840F30A927604F3 /* common.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = common.pb.swift; sourceTree = "<group>"; };
 		1F0C7C4633AC00F7FBE49673 /* TerminalFixtureCompatibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFixtureCompatibilityTests.swift; sourceTree = "<group>"; };
+		1F1A1C3EC7C4D49C34AF352A /* client.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = client.pb.swift; sourceTree = "<group>"; };
+		2370AF91B4B73E4EACD7D957 /* NativeWebRTCFramingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebRTCFramingTests.swift; sourceTree = "<group>"; };
 		347FC8F8486ACA1A0485E2FA /* CofluxTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CofluxTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		63FDEB20DB15CEECE26CF1AD /* daemon.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = daemon.pb.swift; sourceTree = "<group>"; };
 		7DDC80BCFC0398187DF2A956 /* TerminalFixtureOracle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFixtureOracle.swift; sourceTree = "<group>"; };
+		A7A8AFEA4499F3D855F54D1B /* NativeWebRTCWorkerInteropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebRTCWorkerInteropTests.swift; sourceTree = "<group>"; };
 		AA1532689EC06DAF8E96A57E /* Coflux.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Coflux.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA45B58E0FDA3E1B3761766B /* device.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = device.pb.swift; sourceTree = "<group>"; };
 		BAE54FAA3FF9EFC98EDE946C /* CofluxApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CofluxApp.swift; sourceTree = "<group>"; };
+		BD502B26B95392A6CB12A87F /* NativeP2PFraming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeP2PFraming.swift; sourceTree = "<group>"; };
+		F629E1B07D69E8098EB840E1 /* NativeWebRTCWorkerProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebRTCWorkerProbe.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -28,6 +47,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AEA45A1EA70EB4322E56FE7E /* SwiftTerm in Frameworks */,
+				447C4E18F5FDB5DEF4C325E2 /* WebRTC in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -35,7 +55,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				15EA287E822400E1173C9F85 /* SwiftTerm in Frameworks */,
+				15EA287E822400E1173C9F85 /* SwiftProtobuf in Frameworks */,
+				AB01C87F8FACAEE483305245 /* SwiftTerm in Frameworks */,
+				7E7DC477FE3DAF3964A7B3A3 /* WebRTC in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -51,11 +73,20 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		2DB6CF08EC63A7181E5750F4 /* coflux */ = {
+			isa = PBXGroup;
+			children = (
+				A094899F8A4E1FFB115CEB0F /* v1 */,
+			);
+			path = coflux;
+			sourceTree = "<group>";
+		};
 		2F649549EBC139A17D96E158 = {
 			isa = PBXGroup;
 			children = (
 				7C8EAD513EE79C2EB6B9ADF9 /* Coflux */,
 				CBCC973FBB561009F87F7E0B /* CofluxTests */,
+				CA358913AF99000803684278 /* Generated */,
 				0B15A7055E2D8ED4AB14EEE3 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -68,13 +99,53 @@
 			path = Coflux;
 			sourceTree = "<group>";
 		};
+		A094899F8A4E1FFB115CEB0F /* v1 */ = {
+			isa = PBXGroup;
+			children = (
+				1F1A1C3EC7C4D49C34AF352A /* client.pb.swift */,
+				09599851F840F30A927604F3 /* common.pb.swift */,
+				63FDEB20DB15CEECE26CF1AD /* daemon.pb.swift */,
+				AA45B58E0FDA3E1B3761766B /* device.pb.swift */,
+			);
+			path = v1;
+			sourceTree = "<group>";
+		};
+		B66326A38B1AFD24BC3EF8CE /* swift */ = {
+			isa = PBXGroup;
+			children = (
+				2DB6CF08EC63A7181E5750F4 /* coflux */,
+			);
+			name = swift;
+			path = ../../proto/gen/swift;
+			sourceTree = "<group>";
+		};
+		CA358913AF99000803684278 /* Generated */ = {
+			isa = PBXGroup;
+			children = (
+				D8F54CE0F10CAA1AFD3FE0A1 /* Protocol */,
+			);
+			name = Generated;
+			sourceTree = "<group>";
+		};
 		CBCC973FBB561009F87F7E0B /* CofluxTests */ = {
 			isa = PBXGroup;
 			children = (
+				BD502B26B95392A6CB12A87F /* NativeP2PFraming.swift */,
+				2370AF91B4B73E4EACD7D957 /* NativeWebRTCFramingTests.swift */,
+				A7A8AFEA4499F3D855F54D1B /* NativeWebRTCWorkerInteropTests.swift */,
+				F629E1B07D69E8098EB840E1 /* NativeWebRTCWorkerProbe.swift */,
 				1F0C7C4633AC00F7FBE49673 /* TerminalFixtureCompatibilityTests.swift */,
 				7DDC80BCFC0398187DF2A956 /* TerminalFixtureOracle.swift */,
 			);
 			path = CofluxTests;
+			sourceTree = "<group>";
+		};
+		D8F54CE0F10CAA1AFD3FE0A1 /* Protocol */ = {
+			isa = PBXGroup;
+			children = (
+				B66326A38B1AFD24BC3EF8CE /* swift */,
+			);
+			name = Protocol;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -93,7 +164,9 @@
 			);
 			name = CofluxTests;
 			packageProductDependencies = (
+				7C1287B36A9279A788E65584 /* SwiftProtobuf */,
 				50D63F9C6B9BD03B6C97DD9E /* SwiftTerm */,
+				7342B6453F597BC08FEB32A0 /* WebRTC */,
 			);
 			productName = CofluxTests;
 			productReference = 347FC8F8486ACA1A0485E2FA /* CofluxTests.xctest */;
@@ -113,6 +186,7 @@
 			name = Coflux;
 			packageProductDependencies = (
 				71C9694623FE7390176DEAC2 /* SwiftTerm */,
+				AB7AD7C9C00CBFD058ECE0AC /* WebRTC */,
 			);
 			productName = Coflux;
 			productReference = AA1532689EC06DAF8E96A57E /* Coflux.app */;
@@ -145,7 +219,9 @@
 			mainGroup = 2F649549EBC139A17D96E158;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				013D0DE6CE52FB8F22A2F023 /* XCRemoteSwiftPackageReference "swift-protobuf" */,
 				1D3C13A04D0B38DD8AF202F0 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+				9AC1DED78B5E22E03E087AEB /* XCRemoteSwiftPackageReference "WebRTC" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0B15A7055E2D8ED4AB14EEE3 /* Products */;
@@ -163,8 +239,16 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C57E650AEE13E853BB98A182 /* NativeP2PFraming.swift in Sources */,
+				E81ECC0C686FC0357434DDE2 /* NativeWebRTCFramingTests.swift in Sources */,
+				1F7523032EAB7A3D92753A7F /* NativeWebRTCWorkerInteropTests.swift in Sources */,
+				4F857D5BAC625F54EC25F10A /* NativeWebRTCWorkerProbe.swift in Sources */,
 				A8343D1C5D1D33235F8571D3 /* TerminalFixtureCompatibilityTests.swift in Sources */,
 				3D310D55AC77B505F3F2F9A3 /* TerminalFixtureOracle.swift in Sources */,
+				A2CC9B7552604CAB165421BD /* client.pb.swift in Sources */,
+				457F9D4D325FB154E348E051 /* common.pb.swift in Sources */,
+				7DE2B1A2CD2206E6ED7B4224 /* daemon.pb.swift in Sources */,
+				F88B18C3813CA80A88141CC2 /* device.pb.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -407,12 +491,28 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		013D0DE6CE52FB8F22A2F023 /* XCRemoteSwiftPackageReference "swift-protobuf" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-protobuf.git";
+			requirement = {
+				kind = exactVersion;
+				version = 1.38.1;
+			};
+		};
 		1D3C13A04D0B38DD8AF202F0 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
 			requirement = {
 				kind = exactVersion;
 				version = 1.15.0;
+			};
+		};
+		9AC1DED78B5E22E03E087AEB /* XCRemoteSwiftPackageReference "WebRTC" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stasel/WebRTC.git";
+			requirement = {
+				kind = exactVersion;
+				version = 151.0.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -427,6 +527,21 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 1D3C13A04D0B38DD8AF202F0 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
 			productName = SwiftTerm;
+		};
+		7342B6453F597BC08FEB32A0 /* WebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9AC1DED78B5E22E03E087AEB /* XCRemoteSwiftPackageReference "WebRTC" */;
+			productName = WebRTC;
+		};
+		7C1287B36A9279A788E65584 /* SwiftProtobuf */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 013D0DE6CE52FB8F22A2F023 /* XCRemoteSwiftPackageReference "swift-protobuf" */;
+			productName = SwiftProtobuf;
+		};
+		AB7AD7C9C00CBFD058ECE0AC /* WebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9AC1DED78B5E22E03E087AEB /* XCRemoteSwiftPackageReference "WebRTC" */;
+			productName = WebRTC;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
