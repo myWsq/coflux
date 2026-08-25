@@ -1,0 +1,61 @@
+name: Coflux
+
+options:
+  bundleIdPrefix: dev.coflux
+  deploymentTarget:
+    macOS: "14.0"
+  groupSortPosition: top
+
+packages:
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm.git
+    exactVersion: 1.15.0
+
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_VERSION: "6.0"
+    CLANG_ENABLE_MODULES: YES
+
+targets:
+  Coflux:
+    type: application
+    platform: macOS
+    sources:
+      - path: Coflux
+    dependencies:
+      - package: SwiftTerm
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.coflux.macos
+        PRODUCT_NAME: Coflux
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Coflux
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: NO
+
+  CofluxTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: CofluxTests
+    dependencies:
+      - package: SwiftTerm
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.coflux.macos.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+
+schemes:
+  Coflux:
+    build:
+      targets:
+        Coflux: all
+        CofluxTests: [test]
+    test:
+      gatherCoverageData: false
+      targets:
+        - CofluxTests

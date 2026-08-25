@@ -13,3 +13,8 @@
 屏、application cursor/keypad、bracketed paste、16/256/RGB 色与 bold/dim/italic/underline/
 inverse。文本替换后逐段回放并在 barrier 处 resize；`player.mjs` 不连接外网、不读取 fixture
 目录以外的用户数据。
+
+`snapshots/*.json` 是同一份语料经真实 Rust sessiond 生成的固定 ANSI snapshot。可用
+`COFLUX_VT_EXPORT_DIR=<dir> node --import tsx --test tests/src/local-first-vt-oracle.test.mjs`
+重新导出；`apps/macos/scripts/test-terminal-sessiond-interop.sh` 会先在临时目录重取快照、校验固定
+fixture 未漂移，再让 SwiftTerm 对 raw、snapshot 与 snapshot+tail 做 cell/mode 结构化比较。
