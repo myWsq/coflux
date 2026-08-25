@@ -69,8 +69,13 @@
       </CommandLineArguments>
       <EnvironmentVariables>
          <EnvironmentVariable
-            key = "COFLUX_WEBRTC_CONFIG_PATH"
-            value = "$(COFLUX_WEBRTC_CONFIG_PATH)"
+            key = "COFLUX_LOOPBACK_CONFIG_BASE64"
+            value = "$(COFLUX_LOOPBACK_CONFIG_BASE64)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "COFLUX_WEBRTC_CONFIG_BASE64"
+            value = "$(COFLUX_WEBRTC_CONFIG_BASE64)"
             isEnabled = "YES">
          </EnvironmentVariable>
       </EnvironmentVariables>

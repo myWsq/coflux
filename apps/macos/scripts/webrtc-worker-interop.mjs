@@ -1,19 +1,37 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHTTPServer } from "node:http";
+import { createServer as createTCPServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { DeviceClient } from "../../../tests/src/device-harness.mjs";
 import { mkRepo, startStack } from "../../../tests/src/harness.mjs";
+import {
+  auditSignedApp,
+  ensureCodeSigningIdentity,
+  signingBuildSettings,
+} from "./macos-signing-audit.mjs";
 
 const ROOT = resolve(import.meta.dirname, "../../..");
 const TIMEOUT_MS = 8 * 60 * 1000;
+const DEVELOPMENT_TEAM = process.env.COFLUX_MACOS_DEVELOPMENT_TEAM || "8Y2J55823C";
+const SIGNING_IDENTITY = process.env.COFLUX_MACOS_SIGNING_IDENTITY || "Apple Development";
 
-function marker(directory, name) {
-  return join(directory, name);
+function permissionVariant() {
+  const name = process.env.COFLUX_WEBRTC_PERMISSION_VARIANT || "hardened";
+  if (name === "hardened") {
+    return { name, sandbox: false, networkClient: false, networkServer: false, expectDataChannelBlocked: false };
+  }
+  if (name === "sandbox-network-client") {
+    return { name, sandbox: true, networkClient: true, networkServer: false, expectDataChannelBlocked: true };
+  }
+  if (name === "sandbox-network-client-server") {
+    return { name, sandbox: true, networkClient: true, networkServer: true, expectDataChannelBlocked: false };
+  }
+  throw new Error(`未知 WebRTC permission variant：${name}`);
 }
 
 async function pingRelay(device, label) {
@@ -25,7 +43,7 @@ async function pingRelay(device, label) {
 }
 
 async function allocateLoopbackPort() {
-  const server = createServer();
+  const server = createTCPServer();
   await new Promise((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
     server.listen(0, "127.0.0.1", resolveListen);
@@ -38,24 +56,78 @@ async function allocateLoopbackPort() {
   return address.port;
 }
 
+async function startCoordinationServer() {
+  const signals = new Set();
+  const server = createHTTPServer((request, response) => {
+    const match = /^\/signal\/([a-z0-9-]+)$/u.exec(request.url ?? "");
+    if (!match || (request.method !== "GET" && request.method !== "POST")) {
+      response.writeHead(404).end();
+      return;
+    }
+    const name = match[1];
+    if (request.method === "POST") {
+      signals.add(name);
+      response.writeHead(204).end();
+      return;
+    }
+    response.writeHead(signals.has(name) ? 204 : 404).end();
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("无法启动 WebRTC coordination server");
+  let closePromise;
+  return {
+    signals,
+    url: `http://127.0.0.1:${address.port}`,
+    close() {
+      closePromise ??= new Promise((resolveClose, rejectClose) => {
+        server.close((error) => error ? rejectClose(error) : resolveClose());
+      });
+      return closePromise;
+    },
+  };
+}
+
 function hostArchitecture() {
   if (process.arch === "arm64") return "arm64";
   if (process.arch === "x64") return "x86_64";
   throw new Error(`不支持的 macOS host architecture：${process.arch}`);
 }
 
-function runXcodebuild(configPath) {
+function runXcodebuild(configuration, derivedDataPath, variant) {
   const child = spawn(
     "xcodebuild",
     [
       "test",
+      ...(process.env.COFLUX_XCODE_VERBOSE ? [] : ["-quiet"]),
       "-project", "apps/macos/Coflux.xcodeproj",
       "-scheme", "Coflux",
       "-destination", `platform=macOS,arch=${hostArchitecture()}`,
+      "-derivedDataPath", derivedDataPath,
       "-only-testing:CofluxTests/NativeWebRTCWorkerInteropTests",
-      `COFLUX_WEBRTC_CONFIG_PATH=${configPath}`,
+      ...signingBuildSettings({
+        team: DEVELOPMENT_TEAM,
+        identity: SIGNING_IDENTITY,
+        sandbox: variant.sandbox,
+        networkClient: variant.networkClient,
+        networkServer: variant.networkServer,
+      }),
     ],
-    { cwd: ROOT, env: process.env, stdio: "inherit", detached: true },
+    {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        COFLUX_WEBRTC_CONFIG_BASE64: Buffer.from(
+          JSON.stringify(configuration),
+          "utf8",
+        ).toString("base64"),
+      },
+      stdio: "inherit",
+      detached: true,
+    },
   );
   child.cofluxProcessGroupId = child.pid;
   return child;
@@ -141,7 +213,10 @@ async function startIsolatedStack(signal) {
 }
 
 async function main() {
+  const variant = permissionVariant();
+  ensureCodeSigningIdentity(SIGNING_IDENTITY);
   let coordinationDirectory;
+  let coordination;
   let repo;
   let stack;
   let relay;
@@ -153,6 +228,7 @@ async function main() {
     stackAbortController.abort();
     signalProcessGroup(child, "SIGTERM");
     relay?.close();
+    if (coordination) void coordination.close().catch(() => undefined);
     if (stack) void stack.stop().catch(() => undefined);
   };
   const onSIGINT = () => onInterrupt("SIGINT");
@@ -161,6 +237,7 @@ async function main() {
   process.on("SIGTERM", onSIGTERM);
   try {
     coordinationDirectory = mkdtempSync(join(tmpdir(), "coflux-native-webrtc-"));
+    coordination = await startCoordinationServer();
     repo = mkRepo({ strictCleanup: true });
     const started = await startIsolatedStack(stackAbortController.signal);
     const port = started.port;
@@ -181,8 +258,7 @@ async function main() {
     );
     await relay.waitWorkspaceReady(workspace.workspace.id, 10000);
 
-    const configPath = marker(coordinationDirectory, "interop-config.json");
-    writeFileSync(configPath, `${JSON.stringify({
+    const configuration = {
       controlURL: `ws://127.0.0.1:${port}/client`,
       origin: `http://127.0.0.1:${port}`,
       username: stack.username,
@@ -191,10 +267,12 @@ async function main() {
       workspaceID: workspace.workspace.id,
       clientInstanceID: clientInstanceId,
       transportGeneration: 2,
-      coordinationDirectory,
+      coordinationURL: coordination.url,
       nearMaximumPayloadBytes: 29 * 1024 * 1024,
-    })}\n`, { mode: 0o600 });
-    child = runXcodebuild(configPath);
+      expectDataChannelBlocked: variant.expectDataChannelBlocked,
+    };
+    const derivedDataPath = join(coordinationDirectory, `DerivedData-${variant.name}`);
+    child = runXcodebuild(configuration, derivedDataPath, variant);
 
     let exited = false;
     let exitCode;
@@ -204,29 +282,35 @@ async function main() {
       exited = true;
       exitCode = 1;
     });
-    child.once("exit", (code, signal) => {
+    child.once("close", (code, signal) => {
       exited = true;
       exitCode = code ?? (signal ? 128 : 1);
     });
     const deadline = Date.now() + TIMEOUT_MS;
     let rejectionHandled = false;
+    let sandboxBlockedHandled = false;
     let promotionHandled = false;
     let serverStopped = false;
     while (!exited && Date.now() < deadline) {
       if (interruptedSignal) break;
-      if (!rejectionHandled && existsSync(marker(coordinationDirectory, "p2p-rejected"))) {
+      if (!rejectionHandled && coordination.signals.has("p2p-rejected")) {
         await pingRelay(relay, "relay-after-p2p-rejection");
-        writeFileSync(marker(coordinationDirectory, "relay-after-rejection"), "ok\n");
+        coordination.signals.add("relay-after-rejection");
         rejectionHandled = true;
       }
-      if (!promotionHandled && existsSync(marker(coordinationDirectory, "p2p-open"))) {
+      if (!sandboxBlockedHandled && coordination.signals.has("p2p-blocked")) {
+        await pingRelay(relay, "relay-after-sandbox-p2p-block");
+        coordination.signals.add("relay-after-p2p-blocked");
+        sandboxBlockedHandled = true;
+      }
+      if (!promotionHandled && coordination.signals.has("p2p-open")) {
         await pingRelay(relay, "relay-while-p2p-open");
-        writeFileSync(marker(coordinationDirectory, "relay-during-p2p"), "ok\n");
+        coordination.signals.add("relay-during-p2p");
         promotionHandled = true;
       }
-      if (!serverStopped && existsSync(marker(coordinationDirectory, "stop-server"))) {
+      if (!serverStopped && coordination.signals.has("stop-server")) {
         await stack.stopServer();
-        writeFileSync(marker(coordinationDirectory, "server-stopped"), "ok\n");
+        coordination.signals.add("server-stopped");
         serverStopped = true;
       }
       await sleep(25);
@@ -241,10 +325,46 @@ async function main() {
       throw new Error("native WebRTC interop 超过 8 分钟");
     }
     if (spawnError) throw new Error(`无法启动 xcodebuild：${spawnError.message}`);
-    if (exitCode !== 0) throw new Error(`xcodebuild interop 失败，exit=${exitCode}`);
-    if (!rejectionHandled || !promotionHandled || !serverStopped) {
-      throw new Error(`interop marker 不完整：rejection=${rejectionHandled} promotion=${promotionHandled} stop=${serverStopped}`);
+    if (exitCode !== 0) {
+      const executionError = new Error(`xcodebuild interop 失败，exit=${exitCode}`);
+      try {
+        const signedFailure = auditSignedApp({
+          derivedDataPath,
+          variant,
+          team: DEVELOPMENT_TEAM,
+          identity: SIGNING_IDENTITY,
+        });
+        console.error(`COFLUX_WEBRTC_PERMISSION_FAILURE ${JSON.stringify({ variant: variant.name, ...signedFailure })}`);
+      } catch (auditError) {
+        throw new AggregateError([executionError, auditError], "WebRTC 失败产物签名审计也未通过");
+      }
+      throw executionError;
     }
+    if (variant.expectDataChannelBlocked) {
+      if (!rejectionHandled || !sandboxBlockedHandled || promotionHandled || serverStopped) {
+        throw new Error(
+          `Sandbox client-only marker 不完整：rejection=${rejectionHandled} blocked=${sandboxBlockedHandled} `
+          + `promotion=${promotionHandled} stop=${serverStopped}`,
+        );
+      }
+    } else if (!rejectionHandled || !promotionHandled || !serverStopped || sandboxBlockedHandled) {
+      throw new Error(
+        `interop marker 不完整：rejection=${rejectionHandled} promotion=${promotionHandled} `
+        + `stop=${serverStopped} blocked=${sandboxBlockedHandled}`,
+      );
+    }
+    const signed = auditSignedApp({
+      derivedDataPath,
+      variant,
+      team: DEVELOPMENT_TEAM,
+      identity: SIGNING_IDENTITY,
+    });
+    console.log(`COFLUX_WEBRTC_PERMISSION ${JSON.stringify({
+      variant: variant.name,
+      dataChannelBlockedAsExpected: variant.expectDataChannelBlocked,
+      relaySurvived: true,
+      ...signed,
+    })}`);
   } catch (error) {
     if (interruptedSignal) {
       throw new Error(`收到 ${interruptedSignal}，已清理 native WebRTC interop`, { cause: error });
@@ -259,6 +379,7 @@ async function main() {
       cleanupErrors.push(error);
     }
     try { relay?.close(); } catch (error) { cleanupErrors.push(error); }
+    try { await coordination?.close(); } catch (error) { cleanupErrors.push(error); }
     try { await stack?.stop(); } catch (error) { cleanupErrors.push(error); }
     try { repo?.cleanup(); } catch (error) { cleanupErrors.push(error); }
     if (coordinationDirectory) {

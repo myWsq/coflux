@@ -13,17 +13,31 @@
 		447C4E18F5FDB5DEF4C325E2 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = AB7AD7C9C00CBFD058ECE0AC /* WebRTC */; };
 		457F9D4D325FB154E348E051 /* common.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09599851F840F30A927604F3 /* common.pb.swift */; };
 		4F857D5BAC625F54EC25F10A /* NativeWebRTCWorkerProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = F629E1B07D69E8098EB840E1 /* NativeWebRTCWorkerProbe.swift */; };
+		55684604FF1A6593F1401207 /* NativeIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A563A4336B4A76A5FC423132 /* NativeIdentityTests.swift */; };
 		614DE2D37DF574F2CFF358B0 /* CofluxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAE54FAA3FF9EFC98EDE946C /* CofluxApp.swift */; };
 		7DE2B1A2CD2206E6ED7B4224 /* daemon.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63FDEB20DB15CEECE26CF1AD /* daemon.pb.swift */; };
 		7E7DC477FE3DAF3964A7B3A3 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 7342B6453F597BC08FEB32A0 /* WebRTC */; };
+		8B2A87D49A31B493BCF6AA26 /* NativeIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1AFAE19A055865E89C3923B /* NativeIdentity.swift */; };
+		A2B7D5E2B934E6900C4355CB /* NativeLoopbackAuthProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 524655AC8173FC1167EBADAD /* NativeLoopbackAuthProbe.swift */; };
 		A2CC9B7552604CAB165421BD /* client.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F1A1C3EC7C4D49C34AF352A /* client.pb.swift */; };
 		A8343D1C5D1D33235F8571D3 /* TerminalFixtureCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0C7C4633AC00F7FBE49673 /* TerminalFixtureCompatibilityTests.swift */; };
 		AB01C87F8FACAEE483305245 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 50D63F9C6B9BD03B6C97DD9E /* SwiftTerm */; };
 		AEA45A1EA70EB4322E56FE7E /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 71C9694623FE7390176DEAC2 /* SwiftTerm */; };
 		C57E650AEE13E853BB98A182 /* NativeP2PFraming.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD502B26B95392A6CB12A87F /* NativeP2PFraming.swift */; };
+		E20FB2E31E3E9964C7604396 /* NativeLoopbackAuthInteropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A8C6EC37F82F8742A86F36B /* NativeLoopbackAuthInteropTests.swift */; };
 		E81ECC0C686FC0357434DDE2 /* NativeWebRTCFramingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2370AF91B4B73E4EACD7D957 /* NativeWebRTCFramingTests.swift */; };
 		F88B18C3813CA80A88141CC2 /* device.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA45B58E0FDA3E1B3761766B /* device.pb.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		7C52E60B663F84598F1F0D01 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E4A985F2CCED336F63E633F4 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0F0EF74FCF87C92D8ECD0A17;
+			remoteInfo = Coflux;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		09599851F840F30A927604F3 /* common.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = common.pb.swift; sourceTree = "<group>"; };
@@ -31,13 +45,17 @@
 		1F1A1C3EC7C4D49C34AF352A /* client.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = client.pb.swift; sourceTree = "<group>"; };
 		2370AF91B4B73E4EACD7D957 /* NativeWebRTCFramingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebRTCFramingTests.swift; sourceTree = "<group>"; };
 		347FC8F8486ACA1A0485E2FA /* CofluxTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CofluxTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		524655AC8173FC1167EBADAD /* NativeLoopbackAuthProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLoopbackAuthProbe.swift; sourceTree = "<group>"; };
+		5A8C6EC37F82F8742A86F36B /* NativeLoopbackAuthInteropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLoopbackAuthInteropTests.swift; sourceTree = "<group>"; };
 		63FDEB20DB15CEECE26CF1AD /* daemon.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = daemon.pb.swift; sourceTree = "<group>"; };
 		7DDC80BCFC0398187DF2A956 /* TerminalFixtureOracle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFixtureOracle.swift; sourceTree = "<group>"; };
+		A563A4336B4A76A5FC423132 /* NativeIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeIdentityTests.swift; sourceTree = "<group>"; };
 		A7A8AFEA4499F3D855F54D1B /* NativeWebRTCWorkerInteropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebRTCWorkerInteropTests.swift; sourceTree = "<group>"; };
 		AA1532689EC06DAF8E96A57E /* Coflux.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Coflux.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA45B58E0FDA3E1B3761766B /* device.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = device.pb.swift; sourceTree = "<group>"; };
 		BAE54FAA3FF9EFC98EDE946C /* CofluxApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CofluxApp.swift; sourceTree = "<group>"; };
 		BD502B26B95392A6CB12A87F /* NativeP2PFraming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeP2PFraming.swift; sourceTree = "<group>"; };
+		F1AFAE19A055865E89C3923B /* NativeIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeIdentity.swift; sourceTree = "<group>"; };
 		F629E1B07D69E8098EB840E1 /* NativeWebRTCWorkerProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebRTCWorkerProbe.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -95,6 +113,7 @@
 			isa = PBXGroup;
 			children = (
 				BAE54FAA3FF9EFC98EDE946C /* CofluxApp.swift */,
+				F1AFAE19A055865E89C3923B /* NativeIdentity.swift */,
 			);
 			path = Coflux;
 			sourceTree = "<group>";
@@ -130,6 +149,9 @@
 		CBCC973FBB561009F87F7E0B /* CofluxTests */ = {
 			isa = PBXGroup;
 			children = (
+				A563A4336B4A76A5FC423132 /* NativeIdentityTests.swift */,
+				5A8C6EC37F82F8742A86F36B /* NativeLoopbackAuthInteropTests.swift */,
+				524655AC8173FC1167EBADAD /* NativeLoopbackAuthProbe.swift */,
 				BD502B26B95392A6CB12A87F /* NativeP2PFraming.swift */,
 				2370AF91B4B73E4EACD7D957 /* NativeWebRTCFramingTests.swift */,
 				A7A8AFEA4499F3D855F54D1B /* NativeWebRTCWorkerInteropTests.swift */,
@@ -161,6 +183,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				27F569B48DCFA7ECA87EC380 /* PBXTargetDependency */,
 			);
 			name = CofluxTests;
 			packageProductDependencies = (
@@ -239,6 +262,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				55684604FF1A6593F1401207 /* NativeIdentityTests.swift in Sources */,
+				E20FB2E31E3E9964C7604396 /* NativeLoopbackAuthInteropTests.swift in Sources */,
+				A2B7D5E2B934E6900C4355CB /* NativeLoopbackAuthProbe.swift in Sources */,
 				C57E650AEE13E853BB98A182 /* NativeP2PFraming.swift in Sources */,
 				E81ECC0C686FC0357434DDE2 /* NativeWebRTCFramingTests.swift in Sources */,
 				1F7523032EAB7A3D92753A7F /* NativeWebRTCWorkerInteropTests.swift in Sources */,
@@ -257,10 +283,19 @@
 			buildActionMask = 2147483647;
 			files = (
 				614DE2D37DF574F2CFF358B0 /* CofluxApp.swift in Sources */,
+				8B2A87D49A31B493BCF6AA26 /* NativeIdentity.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		27F569B48DCFA7ECA87EC380 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0F0EF74FCF87C92D8ECD0A17 /* Coflux */;
+			targetProxy = 7C52E60B663F84598F1F0D01 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		196F6ED5C384A09A351C9E3E /* Release */ = {
@@ -274,6 +309,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Coflux;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Coflux 需要连接你授权的本地设备与局域网设备。";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -295,6 +331,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Coflux;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Coflux 需要连接你授权的本地设备与局域网设备。";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -375,6 +412,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.coflux.macos.tests;
 				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Coflux.app/Contents/MacOS/Coflux";
 			};
 			name = Release;
 		};
@@ -455,6 +493,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.coflux.macos.tests;
 				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Coflux.app/Contents/MacOS/Coflux";
 			};
 			name = Debug;
 		};

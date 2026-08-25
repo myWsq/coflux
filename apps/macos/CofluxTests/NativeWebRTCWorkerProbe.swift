@@ -22,7 +22,7 @@ enum NativeWebRTCProbeError: Error, CustomStringConvertible {
 
 /// 把 callback API 桥成有 deadline 的同步 probe。所有共享状态均由锁保护；
 /// `@unchecked Sendable` 只覆盖这个封装本身，不把底层 ObjC WebRTC 对象跨 actor 传播。
-private final class NativeBlockingResult<Value>: @unchecked Sendable {
+final class NativeBlockingResult<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private let semaphore = DispatchSemaphore(value: 0)
     private var result: Result<Value, Error>?
@@ -197,6 +197,8 @@ final class NativeWebRTCOfferer: NSObject, @unchecked Sendable {
     private var assembler = NativeP2PFrameAssembler()
     private var receivedFrames: [Data] = []
     private var receiveError: Error?
+    private var stateEvents: [String] = ["created"]
+    private var generatedCandidateKinds: [String: Int] = [:]
     private(set) var peerConnection: RTCPeerConnection!
     private(set) var dataChannel: RTCDataChannel!
 
@@ -288,7 +290,7 @@ final class NativeWebRTCOfferer: NSObject, @unchecked Sendable {
             }
             Thread.sleep(forTimeInterval: 0.02)
         }
-        throw NativeWebRTCProbeError.timeout("DataChannel open")
+        throw NativeWebRTCProbeError.timeout("DataChannel open（\(stateDescription)）")
     }
 
     /// 整帧串行后按 16 KiB 排水；任何 sendData=false 都关闭整条 channel，
@@ -312,7 +314,58 @@ final class NativeWebRTCOfferer: NSObject, @unchecked Sendable {
     }
 
     var stateDescription: String {
-        "peer=\(peerConnection.connectionState.rawValue),ice=\(peerConnection.iceConnectionState.rawValue),channel=\(dataChannel.readyState.rawValue)"
+        let observed = lock.withLock {
+            let candidates = generatedCandidateKinds
+                .sorted { $0.key < $1.key }
+                .map { "\($0.key):\($0.value)" }
+                .joined(separator: ",")
+            return (stateEvents.suffix(24).joined(separator: ">"), candidates)
+        }
+        return "peer=\(peerConnection.connectionState.rawValue),ice=\(peerConnection.iceConnectionState.rawValue)," +
+            "gather=\(peerConnection.iceGatheringState.rawValue),signal=\(peerConnection.signalingState.rawValue)," +
+            "channel=\(dataChannel.readyState.rawValue),local=\(candidateSummary(peerConnection.localDescription?.sdp))," +
+            "remote=\(candidateSummary(peerConnection.remoteDescription?.sdp)),generated=[\(observed.1)]," +
+            "events=[\(observed.0)]"
+    }
+
+    var localCandidateCount: Int { candidateCount(peerConnection.localDescription?.sdp) }
+    var remoteUDPHostCandidateCount: Int {
+        candidateCount(peerConnection.remoteDescription?.sdp, matching: "udp-host")
+    }
+
+    private func recordState(_ value: String) {
+        lock.withLock { stateEvents.append(value) }
+    }
+
+    private func candidateKind(_ line: String) -> String {
+        let fields = line.split(separator: " ")
+        let transport = fields.count > 2 ? fields[2].lowercased() : "unknown"
+        let typeIndex = fields.firstIndex(of: "typ")
+        let type = typeIndex.flatMap { fields.indices.contains($0 + 1) ? fields[$0 + 1] : nil } ?? "unknown"
+        return "\(transport)-\(type)"
+    }
+
+    /// 只保留 candidate 的 transport/type 计数，不泄露 IP、端口、ufrag 或 SDP。
+    private func candidateSummary(_ sdp: String?) -> String {
+        guard let sdp else { return "none" }
+        var counts: [String: Int] = [:]
+        for line in sdp.split(whereSeparator: \.isNewline) where line.hasPrefix("a=candidate:") {
+            counts[candidateKind(String(line)), default: 0] += 1
+        }
+        if counts.isEmpty { return "empty" }
+        return counts.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+    }
+
+    private func candidateCount(_ sdp: String?, matching expectedKind: String) -> Int {
+        guard let sdp else { return 0 }
+        return sdp.split(whereSeparator: \.isNewline).count {
+            $0.hasPrefix("a=candidate:") && candidateKind(String($0)) == expectedKind
+        }
+    }
+
+    private func candidateCount(_ sdp: String?) -> Int {
+        guard let sdp else { return 0 }
+        return sdp.split(whereSeparator: \.isNewline).count { $0.hasPrefix("a=candidate:") }
     }
 
     func close() {
@@ -330,6 +383,7 @@ final class NativeWebRTCOfferer: NSObject, @unchecked Sendable {
 
 extension NativeWebRTCOfferer: RTCDataChannelDelegate {
     func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
+        recordState("channel:\(dataChannel.readyState.rawValue)")
         guard dataChannel.readyState == .closed else { return }
         lock.withLock {
             if receiveError == nil {
@@ -369,13 +423,27 @@ extension RTCDataChannel: NativeP2PChunkChannel {
 }
 
 extension NativeWebRTCOfferer: RTCPeerConnectionDelegate {
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {
+        recordState("signal:\(stateChanged.rawValue)")
+    }
     func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {}
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
+        recordState("ice:\(newState.rawValue)")
+    }
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
+        recordState("gather:\(newState.rawValue)")
+    }
+    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+        let kind = candidateKind(candidate.sdp)
+        lock.withLock { generatedCandidateKinds[kind, default: 0] += 1 }
+    }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
+    func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
+        recordState("remote-channel:\(dataChannel.readyState.rawValue)")
+    }
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {
+        recordState("peer:\(newState.rawValue)")
+    }
 }

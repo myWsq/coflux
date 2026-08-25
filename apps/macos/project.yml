@@ -39,6 +39,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Coflux
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Coflux 需要连接你授权的本地设备与局域网设备。
         CODE_SIGN_STYLE: Automatic
         ENABLE_HARDENED_RUNTIME: YES
         ENABLE_APP_SANDBOX: NO
@@ -51,6 +52,7 @@ targets:
       - path: ../../proto/gen/swift
         group: Generated/Protocol
     dependencies:
+      - target: Coflux
       - package: SwiftProtobuf
       - package: SwiftTerm
       - package: WebRTC
@@ -59,6 +61,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.coflux.macos.tests
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Coflux.app/Contents/MacOS/Coflux"
+        BUNDLE_LOADER: "$(TEST_HOST)"
 
 schemes:
   Coflux:
@@ -69,6 +73,7 @@ schemes:
     test:
       gatherCoverageData: false
       environmentVariables:
-        COFLUX_WEBRTC_CONFIG_PATH: "$(COFLUX_WEBRTC_CONFIG_PATH)"
+        COFLUX_WEBRTC_CONFIG_BASE64: "$(COFLUX_WEBRTC_CONFIG_BASE64)"
+        COFLUX_LOOPBACK_CONFIG_BASE64: "$(COFLUX_LOOPBACK_CONFIG_BASE64)"
       targets:
         - CofluxTests
