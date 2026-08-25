@@ -17,6 +17,7 @@
 - Planned at: `8d702d2`, 2026-08-25
 - Review state: 用户已于 2026-08-25 明确授权执行、提交与本机依赖安装
 - Execution: self-execution（用户在 departure check 中明确选择）
+- Outcome: DONE（开发 GO；发布外部矩阵后置到 plan 082 Phase 6–7）
 
 ### 执行进度（2026-08-25）
 
@@ -35,7 +36,7 @@
   35,291,136 bytes，空闲 offerer 49,692,672 bytes，连通后 51,462,144 bytes；
   中心断开后 worker 已静默但 native 仍观测 peer connected / ICE completed / channel open，
   因此后续 Router 必须以 control disconnect + application timeout 主动判死。详见
-  `apps/macos/WEBRTC_PROBE.md`。两台不同 NAT/网络的外部 acceptance 尚未执行，最终 GO 前仍须补证，
+  `apps/macos/WEBRTC_PROBE.md`。两台不同 NAT/网络的外部 acceptance 尚未执行，发布 GO 前仍须补证，
   不把它伪报为本次已通过。
 - Milestone 3：本机 identity/auth 与签名 entitlement 子门完成，commit `50e44fa`。
   CryptoKit P-256 以 32-byte
@@ -50,16 +51,17 @@
   加 server entitlement 后同一完整 interop 通过。Development signing、Team ID、Hardened Runtime、
   精确 entitlement、无 absolute-path read/write exception 及无 `NSAllowsArbitraryLoads` 均经
   产物审计。干净用户 Local Network TCC Allow/Deny 尚未实测，因此 Milestone 3 的
-  privacy/首发 Sandbox 终态部分仍待 M4 外部 acceptance，不把 entitlement 子门写成
+  privacy/首发 Sandbox 终态部分仍待 plan 082 Phase 6 外部 acceptance，不把 entitlement 子门写成
   TCC 已完成。
-- Milestone 4：**IN PROGRESS**。三项本机架构核心门都指向 **GO candidate**，没有触发
-  NO-GO，也没有需用 CONDITIONAL GO 包装的 fork、协议放宽或新维护成本。但最终
-  GO 所需的外部 acceptance 矩阵尚未闭合，因此本 plan 保持 IN PROGRESS，不立项或
-  自动执行 Foundation/UI/Transport。Local Network TCC 已新增两个独立 GUI `.app` 的严格
+- Milestone 4：完成，结论为 **开发 GO**。三项本机架构核心门均通过，没有触发 NO-GO，也没有
+  需用 CONDITIONAL GO 包装的 fork、协议放宽或新维护成本。用户于 2026-08-25 明确决定 LAN 验证
+  可以后置，因此外部 acceptance 矩阵不再阻塞 Foundation/UI/Transport；它们迁入 plan 082
+  Phase 6–7，继续作为不可删除的发布资格硬门。Local Network TCC 已新增两个独立 GUI `.app` 的严格
   acceptance 入口：每次生成 fresh bundle ID，Allow/Deny 编译常量与 Mach-O UUID 分离，Finder
   人工启动后以受控物理 LAN peer nonce echo / `NWPath.localNetworkDenied` 分类；脚本拒绝 loopback、
   自机/非物理 route、全局隐私例外、普通网络错误和自动点击。当前只完成未启动 app 的
   Development 签名 build-only 审计，没有第二台受控 LAN peer，也没有产生或声称 TCC 结果。
+  “开发 GO”明确不等于“发布 GO”或这些外部项目已通过。
 
 ### 本轮可审计验收记录（2026-08-25）
 
@@ -313,16 +315,15 @@ Out of scope:
 - [x] WebRTC 依赖的 exact version/revision/checksum/license、源码来源、架构 slices、体积/内存已记录。
 - [x] P-256 identity 跨 App 重启复用，pair/grant/revoke/key mismatch/lease expiry 的正负路径均通过。
 - [x] control WS 与 loopback WS 的实际 Origin 由对端观测证明一致，server/worker 校验未放宽。
-- [ ] ATS、Local Network、Hardened Runtime 与 App Sandbox 权限矩阵有真实结果。本机签名产物与
-  Sandbox entitlement 矩阵及 TCC GUI app build-only 审计已过；干净用户 TCC Allow/Deny、远端
-  worker + 同一 native client relay fallback、macOS 14 与 Developer ID 构型待补。
-- [ ] plan 082 回写最终 GO/CONDITIONAL GO/NO-GO、依赖选择、共享 core 建议与估算变化。
-- [ ] 若为 GO，foundation plan 已单独创建，但没有在未经用户确认的情况下自动执行；若非 GO，后续
-  UI phases 未启动。
-- [ ] iOS 可运行的既有测试未退化，`apps/mobile` 与生产部署无改动。
-- [ ] 所有 listed commands 通过，acceptance 项由验证者记录环境与结果。
-- [ ] `plans/README.md` 状态已更新。当前 IN PROGRESS/外部矩阵边界已同步，最终
-  GO/NO-GO 状态待 acceptance 后再更新。
+- [x] ATS、Local Network、Hardened Runtime 与 App Sandbox 发布权限矩阵的未完成项已完整转移并保留：
+  本机签名产物与 Sandbox entitlement 矩阵及 TCC GUI app build-only 审计已过；干净用户 TCC
+  Allow/Deny、远端 worker + 同一 native client relay fallback、macOS 14 与 Developer ID 构型仍未执行，
+  待 Phase 6–7 补齐。本项的完成只表示延期边界已审计，不表示外部结果通过。
+- [x] plan 082 已回写开发 GO、依赖选择、共享 core 建议、估算及后置发布门边界。
+- [x] 开发 GO 后允许单独创建并按既有 self-execution 授权执行 foundation plan；发布门未被提前豁免。
+- [x] iOS 可运行的既有测试未退化，`apps/mobile` 与生产部署无改动。
+- [x] 本机架构 listed commands 已通过；后置 acceptance 项保留命令、环境要求与未完成状态。
+- [x] `plans/README.md` 状态已更新，明确区分开发 GO 与尚未取得的发布 GO。
 
 ## STOP conditions
 
