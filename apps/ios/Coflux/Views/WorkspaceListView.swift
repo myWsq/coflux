@@ -117,51 +117,51 @@ struct WorkspaceListView: View {
         // agent 经 `cofluxd progress` 播报的进度短评（plan 088）：副行灰字，随下一条覆盖
         let progress = client.workspaceProgress(workspaceID: workspace.id)
         return VStack(alignment: .leading, spacing: 4) {
-        HStack(spacing: 14) {
-            // 与 web 侧栏同源：lucide GitBranch（asset 模板渲染），main 分支同 web 用 warning 色
-            Image("git-branch")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 18, height: 18)
-                .foregroundStyle(workspace.isMain ? Theme.warning : Theme.mutedForeground)
-                .frame(width: 24)
-            Text(title)
-                .font(Theme.Fonts.body)
-                .lineLimit(1)
-            Spacer()
-            if let customName {
-                Text(customName)
+            HStack(spacing: 14) {
+                // 与 web 侧栏同源：lucide GitBranch（asset 模板渲染），main 分支同 web 用 warning 色
+                Image("git-branch")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 18, height: 18)
+                    .foregroundStyle(workspace.isMain ? Theme.warning : Theme.mutedForeground)
+                    .frame(width: 24)
+                Text(title)
+                    .font(Theme.Fonts.body)
+                    .lineLimit(1)
+                Spacer()
+                if let customName {
+                    Text(customName)
+                        .font(Theme.Fonts.label)
+                        .foregroundStyle(Theme.mutedForeground)
+                        .lineLimit(1)
+                }
+                if workspace.additions != 0 || workspace.deletions != 0 {
+                    HStack(spacing: 4) {
+                        Text("+\(workspace.additions)")
+                            .foregroundStyle(Theme.success)
+                        Text("−\(workspace.deletions)")
+                            .foregroundStyle(Theme.destructive)
+                    }
+                    .font(Theme.Fonts.meta.monospacedDigit().weight(.medium))
+                }
+                if running > 0 {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Theme.success)
+                            .frame(width: 6, height: 6)
+                        Text("\(running)")
+                            .font(Theme.Fonts.meta.monospacedDigit().weight(.semibold))
+                    }
+                    .foregroundStyle(Theme.success)
+                }
+            }
+            if let progress {
+                Text(progress)
                     .font(Theme.Fonts.label)
                     .foregroundStyle(Theme.mutedForeground)
                     .lineLimit(1)
+                    .padding(.leading, 38) // 对齐主标题起点（图标列 24 + 间距 14）
             }
-            if workspace.additions != 0 || workspace.deletions != 0 {
-                HStack(spacing: 4) {
-                    Text("+\(workspace.additions)")
-                        .foregroundStyle(Theme.success)
-                    Text("−\(workspace.deletions)")
-                        .foregroundStyle(Theme.destructive)
-                }
-                .font(Theme.Fonts.meta.monospacedDigit().weight(.medium))
-            }
-            if running > 0 {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(Theme.success)
-                        .frame(width: 6, height: 6)
-                    Text("\(running)")
-                        .font(Theme.Fonts.meta.monospacedDigit().weight(.semibold))
-                }
-                .foregroundStyle(Theme.success)
-            }
-        }
-        if let progress {
-            Text(progress)
-                .font(Theme.Fonts.label)
-                .foregroundStyle(Theme.mutedForeground)
-                .lineLimit(1)
-                .padding(.leading, 38) // 对齐主标题起点（图标列 24 + 间距 14）
-        }
         }
         .padding(.vertical, 12)
     }
