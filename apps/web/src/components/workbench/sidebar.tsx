@@ -8,7 +8,7 @@ import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { ActivityDots } from "@/components/workbench/pending-dots";
 import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
-import { workspaceActivity, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
+import { workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
 import { cn } from "@/lib/utils";
 
@@ -337,6 +337,9 @@ export function Sidebar(props: SidebarProps) {
                         // workspaceActivity（packages/client），UI 只做呈现。
                         const activity = workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents);
                         const activityText = activityLabel(activity);
+                        // agent 经 `cofluxd progress` 播报的进度短评（plan 088）：与活动状态是两个
+                        // 维度（状态 hooks 自动判定，短评 agent 主动播报），跨 hook 事件存活。
+                        const progress = workspaceProgress(workspace.id, tasks, sessionAgents);
                         // 工作区详情 tooltip（需求勘误：原 plan 048-task-tab-tooltip 做到了任务 Tab 上，
                         // 真正诉求是侧栏工作区行——版式照抄设备 tooltip：加粗标题行 + 图标条目列表）
                         const workspaceTooltip = (
@@ -359,6 +362,13 @@ export function Sidebar(props: SidebarProps) {
                                 <span className="flex items-start gap-1.5 text-xs text-foreground">
                                   <MessageSquare className="mt-0.5 size-3 shrink-0 opacity-70" />
                                   <span className="whitespace-pre-wrap break-words">{activity.message}</span>
+                                </span>
+                              ) : null}
+                              {/* 进度短评（plan 088）：agent 主动播报「干到哪了」，不 truncate 同 notify 理由。 */}
+                              {progress ? (
+                                <span className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                                  <LoaderCircle className="mt-0.5 size-3 shrink-0 opacity-70" />
+                                  <span className="whitespace-pre-wrap break-words">{progress}</span>
                                 </span>
                               ) : null}
                               <span className="flex items-center gap-1.5 text-xs text-muted-foreground">

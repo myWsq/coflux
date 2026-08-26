@@ -16,7 +16,16 @@ import {
  * ------------------------------------------------------------------ */
 
 /** state 来自 agent hook 上报（daemon 侧合并进 presence）。空 = 无 hook 信号。 */
-export type SessionAgentState = { daemonId: string; taskId: string; agent: string; state: string; /** `cofluxd notify` 的留言（plan 074），空 = agent 没留话 */ message: string };
+export type SessionAgentState = {
+  daemonId: string;
+  taskId: string;
+  agent: string;
+  state: string;
+  /** `cofluxd notify` 的留言（plan 074），空 = agent 没留话 */
+  message: string;
+  /** `cofluxd progress` 的进度短评（plan 088）：跨 hook 事件存活，覆盖式，空 = 没播报过 */
+  progress: string;
+};
 
 export type WorkspaceActivity =
   | { status: "idle" }
@@ -53,6 +62,22 @@ export function workspaceActivity(
   if (active !== undefined) return { status: "active", agent: active };
   if (done !== null) return { status: "done", agent: done };
   return { status: "idle" };
+}
+
+/** 工作区进度短评（plan 088）：RUNNING 任务的 presence 里第一条非空 progress。
+ * 与活动状态是两个维度——状态永远由 hooks 自动判定，短评永远由 agent 主动播报，
+ * 互不覆盖；agent 进程退出时随 presence 条目一起消失。 */
+export function workspaceProgress(
+  workspaceId: string,
+  tasks: readonly Task[],
+  sessionAgents: Record<string, SessionAgentState>,
+): string | undefined {
+  for (const task of tasks) {
+    if (task.workspaceId !== workspaceId || task.status !== TaskStatus.RUNNING || !task.sessionId) continue;
+    const progress = sessionAgents[task.sessionId]?.progress;
+    if (progress) return progress;
+  }
+  return undefined;
 }
 
 import { createConnection, type AuthCredential, type ConnectionStatus, type ServerPayload } from "./connection";
@@ -578,6 +603,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
               agent: session.agent,
               state: session.state,
               message: session.message,
+              progress: session.progress,
             };
           }
           return { sessionAgents };

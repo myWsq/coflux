@@ -114,7 +114,10 @@ struct WorkspaceListView: View {
         } else {
             nil
         }
-        return HStack(spacing: 14) {
+        // agent 经 `cofluxd progress` 播报的进度短评（plan 088）：副行灰字，随下一条覆盖
+        let progress = client.workspaceProgress(workspaceID: workspace.id)
+        return VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 14) {
             // 与 web 侧栏同源：lucide GitBranch（asset 模板渲染），main 分支同 web 用 warning 色
             Image("git-branch")
                 .resizable()
@@ -151,6 +154,14 @@ struct WorkspaceListView: View {
                 }
                 .foregroundStyle(Theme.success)
             }
+        }
+        if let progress {
+            Text(progress)
+                .font(Theme.Fonts.label)
+                .foregroundStyle(Theme.mutedForeground)
+                .lineLimit(1)
+                .padding(.leading, 38) // 对齐主标题起点（图标列 24 + 间距 14）
+        }
         }
         .padding(.vertical, 12)
     }

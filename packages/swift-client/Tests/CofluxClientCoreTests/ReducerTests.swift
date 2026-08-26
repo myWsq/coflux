@@ -129,6 +129,36 @@ struct ReducerTests {
         #expect(client.sessionAgents["s1"] == nil)
     }
 
+    @Test func workspaceProgressReadsPresenceAndFollowsOverwrite() {
+        let client = makeClient()
+        var initial = snapshot()
+        initial.tasks[0].sessionID = "s1"
+        client.apply(.stateSnapshot(initial))
+        #expect(client.workspaceProgress(workspaceID: "w1") == nil)
+
+        var agent = Coflux_V1_SessionAgentRef()
+        agent.sessionID = "s1"
+        agent.taskID = "t1"
+        agent.agent = "claude"
+        agent.progress = "复现了，正在定位 relay 重连"
+        var agents = Coflux_V1_SessionAgentsUpdated()
+        agents.daemonID = "d1"
+        agents.sessions = [agent]
+        client.apply(.sessionAgentsUpdated(agents))
+        #expect(client.workspaceProgress(workspaceID: "w1") == "复现了，正在定位 relay 重连")
+
+        // 覆盖式：下一条替换上一条；空 progress = 没播报，回到无短评
+        agent.progress = "修好了，在跑回归"
+        agents.sessions = [agent]
+        client.apply(.sessionAgentsUpdated(agents))
+        #expect(client.workspaceProgress(workspaceID: "w1") == "修好了，在跑回归")
+
+        agent.progress = ""
+        agents.sessions = [agent]
+        client.apply(.sessionAgentsUpdated(agents))
+        #expect(client.workspaceProgress(workspaceID: "w1") == nil)
+    }
+
     @Test func localSessionExitImmediatelyClearsAgentPresence() {
         let client = makeClient()
         var initial = snapshot()
