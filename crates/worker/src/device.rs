@@ -1238,9 +1238,18 @@ impl DeviceRuntime {
             return;
         }
         if channel_id.starts_with(AGENT_CHANNEL_PREFIX) {
-            // 在飞的写入把回执转给等待者；迟到帧（等待者已撤）与 PtyOutput 噪音直接丢弃。
-            if let Some(waiter) = self.pending_agent_ios.lock().unwrap().get(channel_id) {
-                let _ = waiter.try_send(payload.clone());
+            // 只把 Attached/InputAck/Error 三类回执转给等待者：attach 附带的 snapshot/replay
+            // （PtyOutput）对写入流程是噪音，clone 又贵，还可能挤满等待者的有界队列；
+            // 迟到帧（等待者已撤）同样直接丢弃。
+            if matches!(
+                payload,
+                device_envelope::Payload::SessionAttached(_)
+                    | device_envelope::Payload::PtyInputAck(_)
+                    | device_envelope::Payload::Error(_)
+            ) {
+                if let Some(waiter) = self.pending_agent_ios.lock().unwrap().get(channel_id) {
+                    let _ = waiter.try_send(payload.clone());
+                }
             }
             return;
         }
