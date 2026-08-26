@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use coflux_protocol::wire::{self,
     daemon_to_server, device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck, DeviceP2pChannelGrant, DevicePtyGap,
-    DeviceRelayDial, DeviceScope, DeviceSessionCatalog, DeviceSessionCatalogRequest,
+    DevicePtyInput, DeviceRelayDial, DeviceScope, DeviceSessionAttach, DeviceSessionCatalog, DeviceSessionCatalogRequest,
     DeviceSessionSnapshotRequest, PreparedDeviceOperation, PreparedDeviceOperationInstalled, SessionCheckpoint,
 };
 use coflux_protocol::{
@@ -27,6 +27,10 @@ use crate::{Config, WorkerState, WsOut};
 const CHANNEL_QUEUE_RECORDS: usize = 256;
 const CHANNEL_QUEUE_BYTES: usize = MAX_DEVICE_FRAME_BYTES + 2 * 1024 * 1024;
 const INTERNAL_CHANNEL_ID: &str = "__coflux-worker";
+// agent 写 PTY（plan 088）用的合成 channel 前缀：每次 send 一次性身份，走 sessiond 的
+// attach/holder/input_seq 正门，不新增任何输入语义。
+const AGENT_CHANNEL_PREFIX: &str = "__coflux-agent-";
+const AGENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
 const CALL_LEDGER_LIMIT: usize = 1024;
 const CALL_LEDGER_BYTES: usize = 64 * 1024 * 1024;
@@ -272,6 +276,12 @@ pub struct DeviceRuntime {
     dirty_sessions: Mutex<HashSet<String>>,
     pending_snapshots: Mutex<HashMap<String, String>>,
     pending_catalogs: Mutex<HashSet<String>>,
+    /// session_id → 最近一次成功 attach 的 channel_id（sessiond 裁决的影子，plan 088）。
+    /// 所有 attach 都经本 runtime 中转，SessionAttached/SessionDetached 回流时在此登记，
+    /// 用于「用户是否正在接管」判定：holder 存在且仍是存活 client channel = 人在场。
+    holders: Mutex<HashMap<String, String>>,
+    /// 在飞的 agent 写入（合成 channel_id → 回执等待者）。
+    pending_agent_ios: Mutex<HashMap<String, mpsc::Sender<device_envelope::Payload>>>,
     prepared: Mutex<HashMap<String, PreparedRecord>>,
     requests: Mutex<CallLedger>,
     operations: Mutex<CallLedger>,
@@ -323,6 +333,8 @@ impl DeviceRuntime {
             dirty_sessions: Mutex::new(HashSet::new()),
             pending_snapshots: Mutex::new(HashMap::new()),
             pending_catalogs: Mutex::new(HashSet::new()),
+            holders: Mutex::new(HashMap::new()),
+            pending_agent_ios: Mutex::new(HashMap::new()),
             prepared: Mutex::new(HashMap::new()),
             requests: Mutex::new(CallLedger::default()),
             operations: Mutex::new(CallLedger::default()),
@@ -654,16 +666,108 @@ impl DeviceRuntime {
     }
 
     fn send_internal(&self, payload: device_envelope::Payload) -> bool {
+        self.send_on_channel(INTERNAL_CHANNEL_ID, payload)
+    }
+
+    fn send_on_channel(&self, channel_id: &str, payload: device_envelope::Payload) -> bool {
         let envelope = DeviceEnvelope {
             protocol_version: DEVICE_PROTOCOL_VERSION,
-            channel_id: INTERNAL_CHANNEL_ID.to_string(),
+            channel_id: channel_id.to_string(),
             payload: Some(payload),
         };
         let frame = encode_frame(&DataFrame::Device {
-            channel_id: INTERNAL_CHANNEL_ID.to_string(),
+            channel_id: channel_id.to_string(),
             data: encode_device_envelope(&envelope),
         });
         self.to_supervisor.try_send(write_record(&frame)).is_ok()
+    }
+
+    /// 「用户是否正在接管该 session」：sessiond 裁决的当前 holder（影子表）仍是存活 client
+    /// channel 才算人在场——holder 是一次性 agent 合成身份、或其 channel 已断开时，都不算。
+    pub fn human_holder_present(&self, session_id: &str) -> bool {
+        let holder = self.holders.lock().unwrap().get(session_id).cloned();
+        holder.is_some_and(|channel_id| self.channels.lock().unwrap().contains_key(&channel_id))
+    }
+
+    /// agent 经正门写 PTY（plan 088）：一次性合成身份 attach（成为普通 holder）→ `input_seq=1`
+    /// 写入。一次性身份让 input 游标恒从 0 起：ack 到达即确证本次写入真实发生，不存在
+    /// 「重投旧 seq 被 sessiond 静默跳过还回 ack」的歧义（那是复用长身份在 worker 重启后
+    /// 必然踩的坑）。连续 send 的新 attach 会顶掉上一个合成 holder 的订阅，sessiond 侧不累积；
+    /// 人类随后 attach 同样把 agent 顶掉——人永远赢。
+    ///
+    /// 「检查人类 holder → attach」之间存在毫秒级竞态窗口（sessiond 无条件 attach 语义，
+    /// 消除它需要改 supervisor，plan 088 判为不值）；真撞上时用户会被顶下线一次，重新点开
+    /// 即夺回，agent 的后续输入随 holder 失效被拒。
+    pub async fn agent_send_input(self: &Arc<Self>, session_id: &str, data: Vec<u8>) -> Result<(), String> {
+        if self.human_holder_present(session_id) {
+            return Err("用户正在接管这个终端：把交互留给用户；要沟通用 cofluxd notify".into());
+        }
+        let sequence = self.internal_sequence.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        let channel_id = format!("{AGENT_CHANNEL_PREFIX}{}-{sequence}", std::process::id());
+        let (tx, mut rx) = mpsc::channel::<device_envelope::Payload>(8);
+        self.pending_agent_ios.lock().unwrap().insert(channel_id.clone(), tx);
+        let outcome = self.agent_io_exchange(&channel_id, session_id, data, &mut rx).await;
+        self.pending_agent_ios.lock().unwrap().remove(&channel_id);
+        outcome
+    }
+
+    async fn agent_io_exchange(
+        self: &Arc<Self>,
+        channel_id: &str,
+        session_id: &str,
+        data: Vec<u8>,
+        rx: &mut mpsc::Receiver<device_envelope::Payload>,
+    ) -> Result<(), String> {
+        let attach = device_envelope::Payload::SessionAttach(DeviceSessionAttach {
+            request_id: format!("{channel_id}-attach"),
+            session_id: session_id.to_string(),
+            client_instance_id: channel_id.to_string(),
+            transport_generation: 1,
+            // 0 = 保持现有行列（sessiond clamp_dim 语义），不产生副作用 resize。
+            cols: 0,
+            rows: 0,
+            resume_from_seq: None,
+        });
+        if !self.send_on_channel(channel_id, attach) {
+            return Err("sessiond 请求队列已满，请重试".into());
+        }
+        let holder_epoch = loop {
+            match tokio::time::timeout(AGENT_IO_TIMEOUT, rx.recv()).await {
+                Ok(Some(device_envelope::Payload::SessionAttached(attached))) if attached.session_id == session_id => {
+                    break attached.holder_epoch;
+                }
+                Ok(Some(device_envelope::Payload::Error(error))) => {
+                    return Err(format!("写入前 attach 被拒（{}）：{}", error.code, error.message));
+                }
+                // attach 回执前不会有别的定向帧；snapshot/replay（PtyOutput）直接略过。
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => return Err("等待 sessiond attach 回执超时".into()),
+            }
+        };
+        let input = device_envelope::Payload::PtyInput(DevicePtyInput {
+            request_id: format!("{channel_id}-input"),
+            session_id: session_id.to_string(),
+            holder_epoch,
+            input_seq: 1,
+            data,
+        });
+        if !self.send_on_channel(channel_id, input) {
+            return Err("sessiond 请求队列已满，请重试".into());
+        }
+        loop {
+            match tokio::time::timeout(AGENT_IO_TIMEOUT, rx.recv()).await {
+                Ok(Some(device_envelope::Payload::PtyInputAck(ack)))
+                    if ack.session_id == session_id && ack.applied_through_seq >= 1 =>
+                {
+                    return Ok(());
+                }
+                Ok(Some(device_envelope::Payload::Error(error))) => {
+                    return Err(format!("写入被拒（{}）：{}", error.code, error.message));
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => return Err("等待 sessiond 写入回执超时".into()),
+            }
+        }
     }
 
     pub fn handle_client_frame(self: &Arc<Self>, channel_id: &str, bytes: &[u8]) {
@@ -1115,8 +1219,29 @@ impl DeviceRuntime {
             return;
         }
         let Some(payload) = envelope.payload.as_ref() else { return };
+        // holder 影子表（plan 088）：所有 attach 决议都经这里回流，无论目的 channel 是 client、
+        // internal 还是 agent 合成身份，先登记再分派。Detached 只在「被顶掉的正是登记者」时清除。
+        match payload {
+            device_envelope::Payload::SessionAttached(attached) => {
+                self.holders.lock().unwrap().insert(attached.session_id.clone(), channel_id.to_string());
+            }
+            device_envelope::Payload::SessionDetached(detached) => {
+                let mut holders = self.holders.lock().unwrap();
+                if holders.get(&detached.session_id).is_some_and(|holder| holder == channel_id) {
+                    holders.remove(&detached.session_id);
+                }
+            }
+            _ => {}
+        }
         if channel_id == INTERNAL_CHANNEL_ID {
             self.handle_internal_response(payload);
+            return;
+        }
+        if channel_id.starts_with(AGENT_CHANNEL_PREFIX) {
+            // 在飞的写入把回执转给等待者；迟到帧（等待者已撤）与 PtyOutput 噪音直接丢弃。
+            if let Some(waiter) = self.pending_agent_ios.lock().unwrap().get(channel_id) {
+                let _ = waiter.try_send(payload.clone());
+            }
             return;
         }
         if let device_envelope::Payload::OperationAck(ack) = payload {
@@ -1199,6 +1324,9 @@ impl DeviceRuntime {
                 }
                 if let Some(services) = &self.services {
                     self.dirty_sessions.lock().unwrap().extend(catalog.sessions.iter().map(|session| session.session_id.clone()));
+                    // holder 影子表随对账回收：死 session 的条目没有清除事件，靠 catalog 兜底。
+                    let live: HashSet<&str> = catalog.sessions.iter().map(|session| session.session_id.as_str()).collect();
+                    self.holders.lock().unwrap().retain(|session_id, _| live.contains(session_id.as_str()));
                     services.state.lock().unwrap().alive = catalog
                         .sessions
                         .iter()

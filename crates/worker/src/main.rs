@@ -428,7 +428,7 @@ async fn main() {
     // agent 控制通道（plan 074）：同为 gateway 的 loopback POST 路径，但走独立消费任务——
     // terminal.* 要等中心回执（最长 20s），不能和 hook 的短回合状态上报挤同一条队列。
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<agent_ctl::AgentRequest>(64);
-    tokio::spawn(agent_ctl::consume_agent_requests(agent_rx, state.clone(), to_server_tx.clone()));
+    tokio::spawn(agent_ctl::consume_agent_requests(agent_rx, state.clone(), to_server_tx.clone(), device.clone()));
     let local_endpoints = Arc::new(hook::LocalEndpoints { hook_tx, agent_tx });
 
     // gateway 监听独立于中心 server_loop；热升级时旧 worker 短暂占端口会在后台重试。

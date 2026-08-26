@@ -829,6 +829,13 @@ async function cmdTerminal(values) {
     console.log(`# ${result.status}${exit}`);
     const text = tailLines(stripAnsi(result.ansi), lines);
     console.log(text || "（暂无输出）");
+  } else if (sub === "send") {
+    const taskId = positionals[2];
+    if (!taskId) die("terminal send 需要 <taskId>（用 cofluxd terminal list 查）");
+    const text = values.text ?? "";
+    if (!text && !values.enter) die(`terminal send 需要 --text "<文本>"（或至少 --enter 发一个回车）`);
+    await agentPost({ action: "terminal.send", taskId, text, enter: Boolean(values.enter) });
+    console.log(`已写入终端 ${taskId}（用 cofluxd terminal read ${taskId} 核对效果）`);
   } else if (sub === "wait") {
     const taskId = positionals[2];
     if (!taskId) die("terminal wait 需要 <taskId>（用 cofluxd terminal list 查）");
@@ -890,6 +897,8 @@ const HELP = `cofluxd —— coflux daemon 管理
                           读某个终端的内容（纯文本，默认最后 200 行；终端已退出也能读）
   cofluxd terminal wait <taskId> [--timeout <秒>]
                           阻塞等到该终端退出，打印退出码（默认超时 30 分钟）
+  cofluxd terminal send <taskId> --text "<文本>" [--enter]
+                          往终端里输入文本（--enter 追加回车）。用户正在接管时会被拒
   cofluxd notify "<一句话>"  叫人：工作区在侧栏转为「等待交互」并显示这句话
   cofluxd ports           列出本工作区的监听端口及可直接打开的预览 URL
 
@@ -914,6 +923,8 @@ const { values, positionals } = parseArgs({
     cmd: { type: "string" },
     lines: { type: "string" },
     timeout: { type: "string" },
+    text: { type: "string" },
+    enter: { type: "boolean", default: false },
     version: { type: "string" },
     "bin-dir": { type: "string" },
     "no-start": { type: "boolean", default: false },
