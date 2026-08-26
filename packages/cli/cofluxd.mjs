@@ -761,6 +761,11 @@ async function cmdHook() {
 
 const AGENT_TIMEOUT_MS = 30_000;
 const DEFAULT_READ_LINES = 200;
+// wait 的循环必须在 CLI 侧：单次 agentPost 撑不起长等待（daemon 控制 WS 有自己的往返超时）。
+// 默认 30 分钟——编码任务常跑很久；轮询走 terminal.list（status 来自 sessionExit 事件链，
+// 不受快照 ~2s 延迟影响），3 秒一次对本机 loopback 是零负担。
+const DEFAULT_WAIT_TIMEOUT_S = 1800;
+const WAIT_POLL_MS = 3000;
 
 async function agentPost(body) {
   const portResult = localGatewayPort();
@@ -824,8 +829,27 @@ async function cmdTerminal(values) {
     console.log(`# ${result.status}${exit}`);
     const text = tailLines(stripAnsi(result.ansi), lines);
     console.log(text || "（暂无输出）");
+  } else if (sub === "wait") {
+    const taskId = positionals[2];
+    if (!taskId) die("terminal wait 需要 <taskId>（用 cofluxd terminal list 查）");
+    const requested = Number(values.timeout);
+    const timeoutSec = Number.isFinite(requested) && requested > 0 ? requested : DEFAULT_WAIT_TIMEOUT_S;
+    const deadline = Date.now() + timeoutSec * 1000;
+    for (;;) {
+      const { terminals } = await agentPost({ action: "terminal.list" });
+      const t = terminals.find((x) => x.taskId === taskId);
+      if (!t) die(`本工作区没有终端 ${taskId}（用 cofluxd terminal list 查）`);
+      if (t.status === "exited") {
+        const exit = t.exitCode === undefined || t.exitCode === null ? "" : ` exit=${t.exitCode}`;
+        return void console.log(`# exited${exit}`);
+      }
+      if (Date.now() >= deadline) {
+        die(`等待超时（${timeoutSec}s）：终端 ${taskId} 仍是 ${t.status}。可加大 --timeout，或 cofluxd terminal read ${taskId} 看现场`);
+      }
+      await sleep(WAIT_POLL_MS);
+    }
   } else {
-    die(`terminal 需要子命令：new | list | read`);
+    die(`terminal 需要子命令：new | list | read | wait | send`);
   }
 }
 
@@ -864,6 +888,8 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd terminal list   列出本工作区的终端（含 status / 退出码）
   cofluxd terminal read <taskId> [--lines N]
                           读某个终端的内容（纯文本，默认最后 200 行；终端已退出也能读）
+  cofluxd terminal wait <taskId> [--timeout <秒>]
+                          阻塞等到该终端退出，打印退出码（默认超时 30 分钟）
   cofluxd notify "<一句话>"  叫人：工作区在侧栏转为「等待交互」并显示这句话
   cofluxd ports           列出本工作区的监听端口及可直接打开的预览 URL
 
@@ -887,6 +913,7 @@ const { values, positionals } = parseArgs({
     title: { type: "string" },
     cmd: { type: "string" },
     lines: { type: "string" },
+    timeout: { type: "string" },
     version: { type: "string" },
     "bin-dir": { type: "string" },
     "no-start": { type: "boolean", default: false },
