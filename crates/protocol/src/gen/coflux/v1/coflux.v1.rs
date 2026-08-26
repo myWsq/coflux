@@ -144,6 +144,11 @@ pub struct SessionAgentRef {
     /// 纯展示、不落库；长度由 worker 侧钳制。
     #[prost(string, tag="5")]
     pub message: ::prost::alloc::string::String,
+    /// agent 经 `cofluxd progress` 主动播报的进度短评（plan 088）：覆盖式单字段，**跨 hook
+    /// 事件存活**（与 message 生命周期刻意不同——进度不因 agent 换回合而过期），被下一条
+    /// progress 覆盖，agent 条目消失时随条目清掉。纯展示、不落库；长度由 worker 侧钳制。
+    #[prost(string, tag="6")]
+    pub progress: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TaskPorts {

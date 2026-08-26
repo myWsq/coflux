@@ -339,6 +339,11 @@ public struct Coflux_V1_SessionAgentRef: Sendable {
   /// 纯展示、不落库；长度由 worker 侧钳制。
   public var message: String = String()
 
+  /// agent 经 `cofluxd progress` 主动播报的进度短评（plan 088）：覆盖式单字段，**跨 hook
+  /// 事件存活**（与 message 生命周期刻意不同——进度不因 agent 换回合而过期），被下一条
+  /// progress 覆盖，agent 条目消失时随条目清掉。纯展示、不落库；长度由 worker 侧钳制。
+  public var progress: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -951,7 +956,7 @@ extension Coflux_V1_PortPreview: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SessionAgentRef"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}agent\0\u{1}state\0\u{1}message\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}agent\0\u{1}state\0\u{1}message\0\u{1}progress\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -964,6 +969,7 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
       case 3: try { try decoder.decodeSingularStringField(value: &self.agent) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.state) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.message) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.progress) }()
       default: break
       }
     }
@@ -985,6 +991,9 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if !self.message.isEmpty {
       try visitor.visitSingularStringField(value: self.message, fieldNumber: 5)
     }
+    if !self.progress.isEmpty {
+      try visitor.visitSingularStringField(value: self.progress, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -994,6 +1003,7 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if lhs.agent != rhs.agent {return false}
     if lhs.state != rhs.state {return false}
     if lhs.message != rhs.message {return false}
+    if lhs.progress != rhs.progress {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
