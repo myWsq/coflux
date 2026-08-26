@@ -113,6 +113,9 @@ In scope:
 - `packages/swift-client/**`（仅 `git revert 7bbcc7c` 触及的文件）
 - `plans/README.md`、`plans/087-withdraw-macos-native-client.md`
 - `docs/ROADMAP.md`、`docs/architecture.md`
+- `tests/fixtures/terminal/README.md`（decided while executing：探索时 grep 输出被截断漏列，
+  其 19-20 行引用已删除的 `apps/macos/scripts/test-terminal-sessiond-interop.sh`，属 M3
+  悬空指针收口的同类内容，仅删该半句；fixtures 本体与 xterm oracle 消费者不动）
 
 Out of scope:
 
