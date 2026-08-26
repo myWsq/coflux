@@ -205,7 +205,15 @@ struct AgentBody {
     task_id: String,
     #[serde(default)]
     message: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    enter: bool,
 }
+
+/// 单次 send 的文本上限：一条交互输入（确认、一行命令）用不到更多，超长基本是误把
+/// 文件内容当输入灌，直接拒绝比截断安全。
+const MAX_SEND_TEXT_BYTES: usize = 4096;
 
 async fn handle_agent(raw: &[u8], agent_tx: &mpsc::Sender<AgentRequest>) -> Result<AgentResponse, RequestError> {
     let parsed: AgentBody = serde_json::from_slice(raw).map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
@@ -222,6 +230,18 @@ async fn handle_agent(raw: &[u8], agent_tx: &mpsc::Sender<AgentRequest>) -> Resu
                 return Err(RequestError::BadRequest("terminal.read 缺 taskId".into()));
             }
             AgentAction::TerminalRead { task_id: parsed.task_id }
+        }
+        "terminal.send" => {
+            if parsed.task_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.send 缺 taskId".into()));
+            }
+            if parsed.text.is_empty() && !parsed.enter {
+                return Err(RequestError::BadRequest("terminal.send 缺 text（或至少 --enter）".into()));
+            }
+            if parsed.text.len() > MAX_SEND_TEXT_BYTES {
+                return Err(RequestError::BadRequest("terminal.send text 超长（≤4KB）".into()));
+            }
+            AgentAction::TerminalSend { task_id: parsed.task_id, text: parsed.text, enter: parsed.enter }
         }
         "notify" => {
             if parsed.message.trim().is_empty() {

@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use prost::Message as _;
 
-use crate::{agents, ops, WorkerState, WsOut};
+use crate::{agents, device::DeviceRuntime, ops, WorkerState, WsOut};
 
 /// 等中心回执的上限：只防在飞请求永久占住 pending 表，CLI 侧自己的超时更短。
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
@@ -53,6 +53,7 @@ pub enum AgentAction {
     TerminalNew { title: String, command: String },
     TerminalList,
     TerminalRead { task_id: String },
+    TerminalSend { task_id: String, text: String, enter: bool },
     Notify { message: String },
     Ports,
 }
@@ -89,13 +90,19 @@ fn next_request_id() -> String {
 }
 
 /// 消费循环：每条请求先过 pid 身份门，再按动作分派。
-pub async fn consume_agent_requests(mut rx: mpsc::Receiver<AgentRequest>, state: Arc<Mutex<WorkerState>>, to_server_tx: mpsc::Sender<WsOut>) {
+pub async fn consume_agent_requests(
+    mut rx: mpsc::Receiver<AgentRequest>,
+    state: Arc<Mutex<WorkerState>>,
+    to_server_tx: mpsc::Sender<WsOut>,
+    device: Arc<DeviceRuntime>,
+) {
     while let Some(request) = rx.recv().await {
         let state = state.clone();
         let to_server_tx = to_server_tx.clone();
+        let device = device.clone();
         // 每条请求独立任务：terminal.* 要等中心回执（最长 SERVER_TIMEOUT），不能阻塞后续请求。
         tokio::spawn(async move {
-            let response = handle(&state, &to_server_tx, request.pid, request.ppid, request.action).await;
+            let response = handle(&state, &to_server_tx, &device, request.pid, request.ppid, request.action).await;
             let _ = request.respond.send(response);
         });
     }
@@ -104,6 +111,7 @@ pub async fn consume_agent_requests(mut rx: mpsc::Receiver<AgentRequest>, state:
 async fn handle(
     state: &Arc<Mutex<WorkerState>>,
     to_server_tx: &mpsc::Sender<WsOut>,
+    device: &Arc<DeviceRuntime>,
     pid: i32,
     ppid: i32,
     action: AgentAction,
@@ -184,6 +192,35 @@ async fn handle(
                         "status": status_name(result.status),
                         "exitCode": result.exit_code,
                     }))
+                }
+                Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
+            }
+        }
+        AgentAction::TerminalSend { task_id, text, enter } => {
+            // 归属寻址复用 terminal.list 的中心校验：清单天然限定在发起方 workspace，
+            // 目标不在清单里 = 不在本工作区或不存在。写入本身在 daemon 本地走 sessiond 正门
+            // （见 DeviceRuntime::agent_send_input 的契约注释），中心不在输入路径上。
+            let payload = agent_control_request::Payload::TerminalList(wire::AgentTerminalList {});
+            match ask_server(state, to_server_tx, session_id, payload).await {
+                Err(response) => response,
+                Ok(agent_control_result::Payload::TerminalList(result)) => {
+                    let Some(target) = result.terminals.into_iter().find(|terminal| terminal.task_id == task_id) else {
+                        return AgentResponse::err("404 Not Found", "终端不在本工作区或不存在（用 cofluxd terminal list 查）");
+                    };
+                    if status_name(target.status) == "exited" {
+                        return AgentResponse::err("409 Conflict", "终端已退出，不能再输入（要跑新命令用 cofluxd terminal new）");
+                    }
+                    let Some(target_session) = target.session_id.as_deref().filter(|session| !session.is_empty()) else {
+                        return AgentResponse::err("409 Conflict", "终端尚未就绪，稍后重试");
+                    };
+                    let mut data = text.into_bytes();
+                    if enter {
+                        data.push(b'\r');
+                    }
+                    match device.agent_send_input(target_session, data).await {
+                        Ok(()) => AgentResponse::ok(serde_json::json!({})),
+                        Err(message) => AgentResponse::err("409 Conflict", message),
+                    }
                 }
                 Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
             }
