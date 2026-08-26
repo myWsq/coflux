@@ -249,6 +249,12 @@ async fn handle_agent(raw: &[u8], agent_tx: &mpsc::Sender<AgentRequest>) -> Resu
             }
             AgentAction::Notify { message: parsed.message }
         }
+        "progress" => {
+            if parsed.message.trim().is_empty() {
+                return Err(RequestError::BadRequest("progress 缺 message".into()));
+            }
+            AgentAction::Progress { message: parsed.message }
+        }
         "ports" => AgentAction::Ports,
         other => return Err(RequestError::BadRequest(format!("未知 action {other}"))),
     };

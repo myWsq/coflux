@@ -55,6 +55,7 @@ pub enum AgentAction {
     TerminalRead { task_id: String },
     TerminalSend { task_id: String, text: String, enter: bool },
     Notify { message: String },
+    Progress { message: String },
     Ports,
 }
 
@@ -130,6 +131,14 @@ async fn handle(
                 s.hook_states.insert(session_id.clone(), "question");
                 s.hook_messages.insert(session_id, message);
             }
+            crate::report_agents_if_changed(state, to_server_tx).await;
+            AgentResponse::ok(serde_json::json!({}))
+        }
+        AgentAction::Progress { message } => {
+            // 与 notify 是两条信道：progress 只播报进度，不改 state、不置 question，
+            // 且跨 hook 事件存活（只被下一条覆盖）。同为 daemon 本地闭环。
+            let message: String = message.chars().take(MAX_NOTIFY_CHARS).collect();
+            state.lock().unwrap().hook_progress.insert(session_id, message);
             crate::report_agents_if_changed(state, to_server_tx).await;
             AgentResponse::ok(serde_json::json!({}))
         }

@@ -867,6 +867,13 @@ async function cmdNotify() {
   console.log("已通知用户（工作区在侧栏转为「等待交互」）");
 }
 
+async function cmdProgress() {
+  const message = positionals.slice(1).join(" ").trim();
+  if (!message) die(`progress 需要一句话，例如：cofluxd progress "复现了，正在定位 relay 重连"`);
+  await agentPost({ action: "progress", message });
+  console.log("已更新进度（显示在工作区卡片上，被下一条覆盖）");
+}
+
 async function cmdPorts() {
   const { ports } = await agentPost({ action: "ports" });
   if (!ports.length) return void console.log("本工作区暂无监听端口");
@@ -900,6 +907,7 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd terminal send <taskId> --text "<文本>" [--enter]
                           往终端里输入文本（--enter 追加回车）。用户正在接管时会被拒
   cofluxd notify "<一句话>"  叫人：工作区在侧栏转为「等待交互」并显示这句话
+  cofluxd progress "<一句话>"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
   cofluxd ports           列出本工作区的监听端口及可直接打开的预览 URL
 
 up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
@@ -938,7 +946,7 @@ let cmd = positionals[0];
 if (values.help || cmd === "help") { console.log(HELP); process.exit(0); }
 if (!cmd) cmd = fs.existsSync(SETTINGS) ? "status" : "up"; // 首次裸跑 → 引导
 
-const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall, hook: cmdHook, terminal: cmdTerminal, notify: cmdNotify, ports: cmdPorts };
+const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall, hook: cmdHook, terminal: cmdTerminal, notify: cmdNotify, progress: cmdProgress, ports: cmdPorts };
 const h = handlers[cmd];
 if (!h) die(`未知命令: ${cmd}${MIGRATED[cmd] ? `\n${MIGRATED[cmd]}` : ""}\n\n${HELP}`);
 await h(values);

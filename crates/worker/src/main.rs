@@ -92,6 +92,10 @@ struct WorkerState {
     /// 生命周期——任一 hook 事件到达即清掉该 session 的留言（那时 agent 已换了状态，旧留言
     /// 就过期了），presence 扫描不见的会话也一并剪掉。
     hook_messages: HashMap<String, String>,
+    /// `cofluxd progress` 的进度短评（plan 088）：sessionId -> 最新一条。与 hook_messages
+    /// 生命周期**刻意不同**——跨 hook 事件存活（进度不因 agent 换回合而过期），只被下一条
+    /// progress 覆盖；presence 扫描不见的会话一并剪掉。
+    hook_progress: HashMap<String, String>,
     /// agent 自建终端的命令日志（plan 074）：taskId -> 日志绝对路径。读终端时优先用它而不是
     /// 中心 checkpoint——checkpoint 是 2 秒周期的派生缓存，秒级命令的输出根本进不去，而日志
     /// 还是全量而非一屏。worker 重启（热升级）后此表丢失，read 自动降级回 checkpoint。
@@ -240,12 +244,16 @@ async fn force_report_ports(state: &Arc<Mutex<WorkerState>>, to_server_tx: &Send
 fn merge_hook_states(s: &mut WorkerState, mut sessions: Vec<wire::SessionAgentRef>) -> Vec<wire::SessionAgentRef> {
     s.hook_states.retain(|session_id, _| sessions.iter().any(|entry| entry.session_id == *session_id));
     s.hook_messages.retain(|session_id, _| sessions.iter().any(|entry| entry.session_id == *session_id));
+    s.hook_progress.retain(|session_id, _| sessions.iter().any(|entry| entry.session_id == *session_id));
     for entry in &mut sessions {
         if let Some(hook_state) = s.hook_states.get(&entry.session_id) {
             entry.state = (*hook_state).to_string();
         }
         if let Some(message) = s.hook_messages.get(&entry.session_id) {
             entry.message = message.clone();
+        }
+        if let Some(progress) = s.hook_progress.get(&entry.session_id) {
+            entry.progress = progress.clone();
         }
     }
     sessions
@@ -384,6 +392,7 @@ async fn main() {
         last_reported_agents: Vec::new(),
         hook_states: HashMap::new(),
         hook_messages: HashMap::new(),
+        hook_progress: HashMap::new(),
         agent_logs: HashMap::new(),
         agent_pending: HashMap::new(),
         workspaces: HashMap::new(),

@@ -119,6 +119,8 @@ interface SessionAgentData {
   state: string;
   /** `cofluxd notify` 的留言（plan 074）：与 state 同生命周期，纯展示 */
   message: string;
+  /** `cofluxd progress` 的进度短评（plan 088）：跨 hook 事件存活，覆盖式，纯展示 */
+  progress: string;
 }
 
 /** state 白名单：名单外的按畸形消息整条丢弃。waiting 是 v0.21 旧值，仍收以免混版本丢条目。 */
@@ -634,7 +636,8 @@ export class Hub {
         : runtime?.daemonId === daemonId && runtime.taskId === entry.taskId;
       if (!matchesKnownSession) continue;
       const message = Buffer.byteLength(entry.message) > MAX_AGENT_MESSAGE_BYTES ? "" : entry.message;
-      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state, message });
+      const progress = Buffer.byteLength(entry.progress) > MAX_AGENT_MESSAGE_BYTES ? "" : entry.progress;
+      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state, message, progress });
     }
     const previous = this.sessionAgents.get(daemonId);
     const unchanged =
@@ -646,7 +649,8 @@ export class Hub {
           p.taskId === valid[i]!.taskId &&
           p.agent === valid[i]!.agent &&
           p.state === valid[i]!.state &&
-          p.message === valid[i]!.message,
+          p.message === valid[i]!.message &&
+          p.progress === valid[i]!.progress,
       );
     if (unchanged) return;
     if (valid.length === 0 && previous === undefined) return;
