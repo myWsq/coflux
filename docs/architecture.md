@@ -102,11 +102,6 @@ Origin 绑定的持久 grant；之后浏览器身份、grant 与 generation 可�
 Device RPC 不等待中心：browser → loopback gateway → worker → UDS → sessiond。中心仍可并行
 承载低频 control 和 checkpoint，但不在热路径上。
 
-plan 083 的 macOS native probe 已在不改动 server/worker 授权语义的前提下，用
-CryptoKit P-256 + Keychain identity 跑通实际 Origin、pair/grant/revoke、App restart、
-key mismatch 恢复、session/elevated scope 和 lease expiry。这证明原生客户可消费
-现有安全模型，不代表干净用户的 Local Network TCC Allow/Deny 已验收。
-
 **P2P（WebRTC DataChannel，plan 076）**：非同机设备的直连主路径。信令照 relay rendezvous
 三角走中心控制 WS（client 带完整 offer SDP → 中心校验归属并附 account/scopes 转发 → worker
 回 answer），vanilla ICE（两端各等 gathering 完成一次性交换，不做 trickle——建连 1-3s 由
@@ -127,14 +122,11 @@ worker 侧经 `webrtc`（webrtc-rs）实现 answer 端：枚举全部非 loopbac
 **P2P 不解决 GFW 干扰**——跨境线路被掐时它与 relay 走同样的 IP 路径同样受影响；对称 NAT/
 CGNAT 打洞失败自动回落 relay，零损失。打洞成功率待生产实测回填。
 
-2026-08-25 的 macOS native probe 用 M151 libwebrtc offerer 与真实
-`webrtc-rs 0.20.2` worker 证明 DataChannel open 后双向 Device frames、16 KiB 分片、
-29 MiB 上下行、relay fallback/promotion 和 control disconnect 后的业务静默边界。native 端
-仍可观测 peer connected/channel open，但 worker 已不回业务帧，因此正式 Router 必须
-同时依赖 control disconnect 与 application ping/timeout，不能只看 WebRTC 回调。App Sandbox
-本机构型下 UDP WebRTC 需 `network.client` + `network.server`；只给 client 时 ICE
-不连通而 relay 保持可用。该证据来自单机 loopback 隔离栈，两台不同 NAT/网络的
-Mac 与 Intel 实机仍未验收；详见 `apps/macos/WEBRTC_PROBE.md`。
+（历史：2026-08-25 macOS native probe 曾用 M151 libwebrtc offerer 与 `webrtc-rs 0.20.2`
+worker 验证跨栈互通；项目已于 2026-08-26 撤回，证据见
+`plans/083-macos-native-client-feasibility-gates.md` 与 git 历史。其中对现行架构仍有效的
+结论——Router 判活必须同时依赖 control disconnect 与 application ping/timeout，不能只看
+transport 回调——已由 plan 080 的心跳判死落地。）
 
 ### 5.2 relay 与自动切换
 
@@ -271,10 +263,6 @@ code，再由账号 cookie 进入代理。HTTP/SSE/WebSocket 都通过 `ProxyDat
   拒后到者，channel 结束后 tombstone 窗口内拒绝 token 重放。
 - loopback identity/grant store 与 daemon 凭证落在 `COFLUX_HOME`，权限 `0600`；`cofluxd doctor` 不输出
   私钥、grant id、token 或凭证内容。
-- plan 083 的 macOS native probe identity 使用 Keychain 中的可导出 P-256 signing key；
-  正式 App 是否改用 Secure Enclave 由后续安全设计决定。当前已验证的线格式为
-  65-byte X9.63 公钥与 64-byte IEEE-P1363 签名。损坏 item 必须 fail closed，首次并发创建
-  必须只产生一个 winner；日志和测试 sentinel 不输出私钥或 token。
 - exec/fs 由 worker 根据中心同步的 workspace id 解析 root，并做 realpath 锚定；不信任 browser 自报 cwd。
 - 信任模型仍是单用户自有机器；coflux 不是多租户代码执行沙箱。
 
@@ -289,14 +277,6 @@ code，再由账号 cookie 进入代理。HTTP/SSE/WebSocket 都通过 `ProxyDat
 5. daemon→中心连接状态。
 
 本地项失败结论是“直连降级，中心 relay 仍可用”，中心失败但本地正常则明确 cached direct 仍可用。
-
-2026-08-25 的 macOS native feasibility 证据环境为 `MacBookPro18,3`、Apple M1 Pro、
-macOS 27.0 (`26A5388g`)、Xcode 26.6 (`17F113`)。SwiftTerm 三份真实 snapshot fixture、
-native WebRTC↔Rust worker 和 native loopback auth 都已在签名隔离栈通过；Development
-authority、Team ID、Hardened Runtime、精确 Sandbox entitlement、ATS 未全局放宽与无
-absolute-path read/write exception 已经审计。同机 Rosetta x86_64 只是载入证据，不是
-Intel 实机；Development signing 也不是 Developer ID/notarization/staple 证据。最终
-发布矩阵仍需干净用户 TCC、macOS 14、Intel 和正式签名构型。
 
 2026-07-25 在 Apple M1 Pro、`a3592ff` debug daemon、默认 2000 行 history（本次最大 snapshot
 98,939 bytes）上的可复现 benchmark（Node v26.3.0 + `@xterm/headless` 6，不含 DOM renderer；
@@ -370,7 +350,6 @@ read/control 仍可用`（未 republish，直连本身正常）；缓存 grant �
 apps/server       中心 control / relay rendezvous / checkpoint / Postgres
 apps/web          desktop React + xterm.js（默认迭代对象，启用 direct）
 apps/mobile       冻结的 relay-only client
-apps/macos        原生 macOS App（当前为 plan 083 feasibility probe/test target）
 packages/client   control store + DeviceRouter
 packages/protocol TS protobuf 绑定
 crates/protocol   Rust protobuf、UDS frame/IPC
@@ -381,6 +360,6 @@ tests             真实进程 + WebSocket 黑盒 harness
 ```
 
 协议真相源是 `proto/`，Buf 生成 TS/Rust/Swift。发布门包括 Buf lint/codegen、client 状态机、server/web
-typecheck、mobile build、Rust test/build、独立 VT oracle、macOS native↔Rust/loopback 跨栈门、全黑盒、
+typecheck、mobile build、Rust test/build、独立 VT oracle、全黑盒、
 benchmark、浏览器/原生实机矩阵和 `git diff --check`。黑盒只用临时 `COFLUX_HOME`、端口、
 数据库与进程组，不触碰真实 daemon。

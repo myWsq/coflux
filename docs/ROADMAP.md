@@ -33,7 +33,8 @@
 ### 1. Web 客户端产品化（主客户端，2026-07-16 确认）
 
 > 2026-07-15 曾立项"弃 Web 转 macOS 原生"，次日复议撤回：web 是当前唯一在用的日常客户端，
-> 先把它做好；macOS 原生降级为后续增强（见条目 4）。产品定位已定：**Agent 指挥中心**——
+> 先把它做好；macOS 原生一度降级为后续增强，2026-08-25 二次立项后又于次日撤回（见条目 4）。
+> 产品定位已定：**Agent 指挥中心**——
 > 围绕"在各设备的工作区里跑 claude/codex 任务，人监督、随时接管"组织功能与交互，
 > 终端仍是核心界面，但组织逻辑是任务而非连接。功能/交互细化待产品设计讨论产出。
 
@@ -71,24 +72,11 @@
   4 用例。STUN 部署（coturn on relay 节点）见 architecture.md，实机开通与打洞成功率生产
   实测待用户；iOS/浏览器实机矩阵与 trickle ICE 为后续迭代
 
-### 4. macOS 原生客户端（Phase 0 开发 GO，Foundation 进行中）
+### 4. macOS 原生客户端（已撤回，2026-08-26）
 
-plan 082/083 已于 2026-08-25 启动。在 Apple M1 Pro、macOS 27、Xcode 26.6 的隔离
-真实栈上，三个会改变总体架构的未知量均已关闭：
-
-- SwiftTerm 对 Claude/Codex/Vim 三份脱敏 fixture 的 raw、真实 sessiond snapshot 与
-  snapshot+tail 通过 cell/buffer/mode 契约；
-- `stasel/WebRTC` M151 native offerer 与 `webrtc-rs 0.20.2` worker 完成双向生产
-  Device frames、16 KiB 分片、29 MiB 上下行、relay fallback/promotion；
-- CryptoKit P-256 + Keychain 与现有 Origin/pair/grant/revoke/lease 安全模型互通，
-  无 server/worker 授权放宽。Sandbox 本机构型表明 loopback 需 `network.client`，
-  UDP WebRTC 还需 `network.server`；有 client 但缺 server 时 P2P 被阻断而 relay 仍可用，
-  缺 client 时则 control/relay 出站一并被拒。
-
-三项架构门已形成 **Swift core + native libwebrtc 的开发 GO**。用户于 2026-08-25 明确允许 LAN
-验证后置，因此 Foundation 从 plan 084 开始执行。尚缺的干净用户 Local Network TCC Allow/Deny、
-两台不同 NAT/网络的 Mac、Intel 实机、macOS 14 以及 Developer ID + notarization + staple +
-干净机 Gatekeeper，继续作为 Phase 6–7 不可删除的发布资格门；同机 Rosetta 与 Development signing
-不代替这些矩阵，未闭合前不宣称发布 GO或完成完整验收。
-详细证据与边界见 `plans/083-macos-native-client-feasibility-gates.md` 与
-`apps/macos/WEBRTC_PROBE.md`。
+> 2026-08-25 二次立项（plans 082–086），Phase 0 三项架构门（SwiftTerm snapshot 契约、
+> `stasel/WebRTC` M151 ↔ `webrtc-rs` 互通、CryptoKit P-256 + Keychain 与现有安全模型互通）
+> 通过并取得开发 GO；2026-08-26 用户决定撤回整个项目，不再做。macOS app 目录（083 可行性门
+> 产物与 085 Foundation 半成品）已随 plan 087 移除，可从 git 历史找回；084 产出的共享
+> Swift Client Core（`packages/swift-client`）保留，现为 iOS 专属。可行性结论不因删除失效，
+> 将来重启参考 `plans/083-macos-native-client-feasibility-gates.md`。
