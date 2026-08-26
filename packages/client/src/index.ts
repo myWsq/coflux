@@ -3,6 +3,7 @@ export {
   createCofluxClient,
   isDirWorkspace,
   workspaceActivity,
+  workspaceProgress,
   type CofluxClient,
   type CofluxClientOptions,
   type CofluxState,

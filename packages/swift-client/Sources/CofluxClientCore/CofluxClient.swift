@@ -50,6 +50,18 @@ public final class CofluxClient {
     /// sessionId → agent presence；StateSnapshot 后清空，server 随后按 daemon 补全。
     public private(set) var sessionAgents: [String: SessionAgentInfo] = [:]
 
+    /// 工作区进度短评（plan 088）：RUNNING 任务的 presence 里第一条非空 progress。
+    /// 与活动状态是两个维度——状态由 hooks 自动判定，短评由 agent 经 `cofluxd progress`
+    /// 主动播报、跨 hook 事件存活（store.ts workspaceProgress 同语义）。
+    public func workspaceProgress(workspaceID: String) -> String? {
+        for task in tasks where task.workspaceID == workspaceID && task.status == .running && task.hasSessionID {
+            if let info = sessionAgents[task.sessionID], !info.session.progress.isEmpty {
+                return info.session.progress
+            }
+        }
+        return nil
+    }
+
     /// 设备面板（plan 077）：per-daemon 传输可观测状态。relayHost = 正在经过的 relay 节点
     /// host；rttMs = 最近一次 DevicePing 往返。仅设备页在场（retainDeviceMeasure）时点亮。
     public struct DeviceTransportInfo: Equatable, Sendable {
