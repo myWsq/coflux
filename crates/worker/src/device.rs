@@ -1795,6 +1795,7 @@ mod tests {
         workspaces.insert("workspace-1".into(), (home.clone(), "main".into()));
         let state = Arc::new(Mutex::new(WorkerState {
             hook_messages: HashMap::new(),
+            hook_progress: HashMap::new(),
             agent_logs: HashMap::new(),
             agent_pending: HashMap::new(),
             authed: true,
