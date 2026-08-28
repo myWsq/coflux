@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "pretest": "cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay",
+    "pretest": "CARGO_PROFILE_DEV_DEBUG=0 cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay",
     "test": "node --import tsx --test --test-concurrency=1 src/*.test.mjs"
   },
   "devDependencies": {
