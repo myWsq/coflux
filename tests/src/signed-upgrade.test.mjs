@@ -46,6 +46,8 @@ function signedRelease(version, artifact = ARTIFACT, target = TARGET) {
   };
 }
 
+// pretest 关闭 debug info：Linux 的 DWARF 会让调试二进制超过生产下载 128 MiB 硬上限，
+// 这里仍使用可执行的真 worker 验收升级链，不能为了 fixture 放宽生产上限。
 const ARTIFACT = readFileSync(WORKER_BIN); // 用真 worker 二进制当"新版本产物"
 const TAMPERED = Buffer.from(ARTIFACT);
 TAMPERED[0] ^= 0xff; // 改一个字节
