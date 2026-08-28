@@ -225,7 +225,8 @@ mod tests {
             match std::process::Command::new(&script).spawn() {
                 Ok(child) => break child,
                 Err(error)
-                    if error.raw_os_error() == Some(libc::ETXTBSY) && text_busy_retries < 50 =>
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && text_busy_retries < 50 =>
                 {
                     text_busy_retries += 1;
                     std::thread::sleep(std::time::Duration::from_millis(10));
