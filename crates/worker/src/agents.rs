@@ -217,9 +217,22 @@ mod tests {
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod");
         }
-        let mut child = std::process::Command::new(&script)
-            .spawn()
-            .expect("spawn claude script");
+        // cargo test 会并行 spawn 其他子进程：fork 到 exec 的短暂窗口里，子进程可能仍继承
+        // 本测试刚关闭的写 fd，Linux 此时执行同一 inode 会返回 ETXTBSY。只对这个瞬时错误
+        // 做有界重试，其他 spawn 错误仍立即失败。
+        let mut text_busy_retries = 0;
+        let mut child = loop {
+            match std::process::Command::new(&script).spawn() {
+                Ok(child) => break child,
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ETXTBSY) && text_busy_retries < 50 =>
+                {
+                    text_busy_retries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("spawn claude script: {error}"),
+            }
+        };
         let alive = HashMap::from([("s1".to_string(), ("t1".to_string(), child.id() as i32))]);
         // fork 到 exec 完成有短暂窗口（comm/argv 还是旧值），轮询到命中为止
         let mut found = Vec::new();
