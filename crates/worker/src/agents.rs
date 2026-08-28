@@ -207,7 +207,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("coflux-agents-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let script = dir.join("claude");
-        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").expect("write script");
+        let mut script_file = std::fs::File::create(&script).expect("create script");
+        std::io::Write::write_all(&mut script_file, b"#!/bin/sh\nsleep 30\n")
+            .expect("write script");
+        drop(script_file);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
