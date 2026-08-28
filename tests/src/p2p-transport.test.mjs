@@ -89,40 +89,54 @@ test("中心校验：不存在的 daemonId 的 offer 被拒，回明确拒因而
 
 test("中心重启：旧 P2P channel 被 worker 摘除不再服务，daemon 重连后可建新 P2P", async () => {
   const device = await openP2pDevice(stack);
-  const ws = await importWorkspace(device);
-  const alive = await device.request("execRun", "execResult", {
-    requestId: "p2p-e2",
-    workspaceId: ws.id,
-    command: "node",
-    args: ["-e", "console.log('pre-disconnect ok')"],
-    env: {},
-  });
-  assert.equal(alive.ok, true);
+  let fresh;
+  try {
+    const ws = await importWorkspace(device);
+    const alive = await device.request("execRun", "execResult", {
+      requestId: "p2p-e2",
+      workspaceId: ws.id,
+      command: "node",
+      args: ["-e", "console.log('pre-disconnect ok')"],
+      env: {},
+    });
+    assert.equal(alive.ok, true);
 
-  // 重启中心：daemon 控制 WS 断开，worker 按语义 close_all 摘除全部 P2P channel。
-  // webrtc-rs 的关闭对 werift 不可感知（只有 ~30s ICE 超时），所以不断言远端 close 事件；
-  // 生产 client 在中心断开时主动对称清理（router 单测覆盖），不依赖对端传播。
-  // 这里断言 worker 侧语义的可观察结果：旧 channel 上的 RPC 不再有任何响应。
-  await stack.restartServer();
-  const from = device.mark();
-  device.send("sessionCatalogRequest", { requestId: "p2p-stale" });
-  await assert.rejects(
-    device.waitFor((m) => m.requestId === "p2p-stale", "stale response", 3000, from),
-    /timeout/,
-    "close_p2ps 之后旧 channel 不得再被 runtime 服务",
-  );
+    // 重启中心：daemon 控制 WS 断开，worker 按语义 close_all 摘除全部 P2P channel。
+    // 关闭可能立即传播到 werift，也可能等约 30s ICE 超时才可感知；两种时序都正确。
+    // 生产 client 在中心断开时主动对称清理（router 单测覆盖），不依赖对端传播。
+    // 这里断言 worker 侧语义的可观察结果：旧 channel 要么拒绝发送，要么不再返回 RPC。
+    await stack.restartServer();
+    await stack.waitDaemonOnline();
+    const from = device.mark();
+    let staleSendError;
+    try {
+      device.send("sessionCatalogRequest", { requestId: "p2p-stale" });
+    } catch (error) {
+      staleSendError = error;
+    }
+    if (staleSendError) {
+      assert.match(String(staleSendError), /Device transport send failed/);
+    } else {
+      await assert.rejects(
+        device.waitFor((m) => m.requestId === "p2p-stale", "stale response", 3000, from),
+        /timeout/,
+        "close_p2ps 之后旧 channel 不得再被 runtime 服务",
+      );
+    }
 
-  // daemon 重连新中心后，新的信令/建连必须可用（恢复能力）。
-  const fresh = await openP2pDevice(stack);
-  const revived = await fresh.request("execRun", "execResult", {
-    requestId: "p2p-e3",
-    workspaceId: ws.id,
-    command: "node",
-    args: ["-e", "console.log('post-restart', 6 * 7)"],
-    env: {},
-  });
-  assert.equal(revived.ok, true);
-  assert.match(revived.stdout, /post-restart 42/);
-  fresh.close();
-  device.close();
+    // daemon 重连新中心后，新的信令/建连必须可用（恢复能力）。
+    fresh = await openP2pDevice(stack);
+    const revived = await fresh.request("execRun", "execResult", {
+      requestId: "p2p-e3",
+      workspaceId: ws.id,
+      command: "node",
+      args: ["-e", "console.log('post-restart', 6 * 7)"],
+      env: {},
+    });
+    assert.equal(revived.ok, true);
+    assert.match(revived.stdout, /post-restart 42/);
+  } finally {
+    fresh?.close();
+    device.close();
+  }
 });
