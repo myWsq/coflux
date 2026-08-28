@@ -5,14 +5,16 @@
 ## 已完成
 
 - **V1 远程终端 + 项目制**：Account → Device → Project(git 仓库) → Workspace(主=仓库本身 / 其它=git worktree) → Task → Session(PTY)。
-- **Tailscale 式认证**：登记密钥 + 每设备凭证（daemonId 服务器签发不可冒充）+ 账号隔离。
+- **Tailscale 式认证**：浏览器一次性授权 + 每设备凭证（daemonId 服务器签发不可冒充）+ 账号隔离。
 - **独占 + handoff**：一个终端同时一个控制端，attach 即接管。
 - **生产化加固**（两轮 + 一轮对抗式审查，共修 30 项确认问题）：WS 心跳、背压/流控、优雅关闭、崩溃兜底、重连指数退避、store 事务、级联删除原子化、结构化日志、统一配置。
 - **daemon 通用原语**：`exec`、`fs.list`/`fs.read`、`fs.write`（root 锚定 + realpath 防穿越；`fs.write` 另支持写入 daemon 系统临时目录），现统一经 direct/relay 共用的 DeviceEnvelope。
 - **二进制数据面**（2026-06）：曾把 PTY 收敛为中心 protobuf wire；2026-07-25 进一步迁到端到端 DeviceEnvelope，中心 raw PTY 字段已删除并 reserved。
-- **自动热升级全链路**（2026-06，方案 A，详见 [hot-upgrade-design.md](hot-upgrade-design.md)）：supervisor/worker 拆分 + 全 Rust 化（零 node 运行时，UDS IPC + 两级 resync，升级时会话存活）；版本注册表 + 观察期切换/自动回滚；远程下载 + sha256 + ed25519 验签（验签不过一律拒绝，防中心服务器被攻破 → 全网 RCE）；用户侧 `cofluxd` CLI（npm）装 systemd/launchd 服务。
-- **发布链路**（2026-06→07）：git tag `v*` → release.yml 四平台交叉编译 + worker 产物 ed25519 签名（`WORKER_SIGNING_KEY` secret）+ manifest；supervisor 内置真发布公钥（`release-pubkey.hex` 编译期嵌入，公钥非密可提交）；macOS 产物经 Developer ID 签名与 Apple 公证。
-- **多账号 + Supabase 认证**（plans/001-002，2026-07）：换票模式（Supabase 只管"你是谁"，JWKS 本地验签换 coflux 会话 token，之后不再触碰 Supabase）；存储迁 Postgres（生产 = Supabase 云，`coflux` schema）。
+- **自动热升级全链路**（2026-06，方案 A，详见 [hot-upgrade-design.md](hot-upgrade-design.md)）：supervisor/worker 拆分 + 全 Rust 化（零 node 运行时，UDS IPC + 两级 resync，升级时会话存活）；版本注册表 + 观察期切换/自动回滚；远程下载 + component-separated ed25519 签名（绑定 version/target/sha256/size）+ 持久严格 SemVer anti-rollback（验签不过或降级/重放一律拒绝；不等同于中心控制面失陷后无 RCE）；用户侧 `cofluxd` CLI（npm）装 systemd/launchd 服务。
+- **发布链路**（2026-06→08）：严格 SemVer `v*` tag → release.yml 四平台交叉编译 + worker raw/release 双签名 + supervisor release 签名（`WORKER_SIGNING_KEY` protected environment secret）+ schema 2 manifest；supervisor 与 cofluxd 内置同一发布公钥，CLI 验证两类 daemon 产物并以双 floor 防远端降级；macOS 产物经 Developer ID 签名与 Apple 公证。
+- **多账号 + 自持认证/Postgres**（plans/001-002、059-063，2026-07）：早期 Supabase 换票与托管
+  Postgres 已退役；当前 `local` 模式使用环境变量口令，`password` 模式使用自建 users/memberships 与
+  scrypt 校验，两者均换取 coflux 自持会话 token；业务数据在自托管 Postgres 的 `coflux` schema。
 - **设备授权**（plan 003，2026-07）：daemon 无登记密钥时走浏览器授权流（一次性授权码 + `/authorize` 页）。
 - **端口转发预览**（plans/004-007，2026-07）：`*.p.coflux.dev` 泛域名，账号级门禁 cookie + 一次性授权 code，整条 TCP 经 daemon 隧道字节级透传（HTTP/SSE/WS 通吃）；shortId 确定性可收藏。2026-08-16 预览域挪平一级（`{shortId}-p.coflux.dev`）：coflux.dev 套 CF 橙云后二级泛域无边缘证书（Universal SSL 通配符不跨点），门禁 cookie Domain 随之挂到父域。
 - **Web 工作区多终端 Tab**（plan 008，2026-07）。
@@ -22,9 +24,9 @@
 - **Web 终端交互完善**（plans 013-016、019，2026-07-19→20）：xterm 6.0 对齐；剪贴板图片压缩后经 `fs.write` 写入远端临时目录并把路径注入 Agent；全局快捷键与帮助面板；cell 度量漂移自动 refit；终端 URL 可点击；端口以 PlugZap + HoverCard 聚合展示并可跳转。
 - **worker 自动更新编排**（plan 017，2026-07-20）：daemon 上报 worker/supervisor 版本与架构，server 轮询 stable GitHub Release + manifest 后自动向在线 daemon 投递 worker 升级；失败按 daemon/版本退避封顶。supervisor 仍由 `cofluxd update` 人工升级。
 - **设备识别与管理**（plan 018，2026-07-20）：web 支持设备重命名，server 持久化并广播；在线即时同步、离线重连补偿到 daemon 本地 `settings.json`；设备 tooltip 展示 worker/supervisor 版本。
-- **黑盒集成测试**（`tests/`，跨重构有效）：74 项，覆盖 auth/账号隔离/项目-worktree-task-session、direct/relay、中心真实停机、input/mutation exactly-once、VT oracle、checkpoint、两级 resync、跨 daemon 安全、handoff、热升级与验签对抗、端口转发、文件路径安全、畸形 wire 与优雅关闭。
-- **生产部署**：prod-jp（Debian + Caddy 自动 HTTPS + systemd），DNS/泛证书/DB 见运维记录；`scripts/prod-smoke.mjs` 11 步真协议冒烟（Device opaque relay 路径，不落 local grant）。
-- **本地优先 session authority**（plans 036-042、040-041，2026-07-25）：supervisor/sessiond 持 PTY、VT/history、holder、sequence 与 tombstone；web cached direct 走 `127.0.0.1:8788`，失败自动 opaque relay；中心停机后已加载/配对页面仍可 list/attach/input/resize/stop；input/op exactly-once、output gap snapshot 自愈。旧 server xterm live mirror、raw replay、viewer/holder、全局 pause 与 server-routed exec/fs 已删除。mobile 仅做 relay-only 内部迁移，无新功能。
+- **黑盒集成测试**（`tests/`，跨重构有效）：全量真实进程测试覆盖 auth/账号隔离/项目-worktree-task-session、direct/P2P/relay、中心真实停机、input/session 生命周期去重与 worker mutation 运行期去重、VT oracle、checkpoint、两级 resync、跨 daemon 安全、handoff、热升级与验签对抗、端口转发、文件路径安全、畸形 wire 与优雅关闭。
+- **生产部署**：prod-jp（Debian + Caddy 自动 HTTPS + systemd），DNS/泛证书/DB 见运维记录；`scripts/prod-smoke.mjs` 走真协议与独立 Device relay 路径，不落 local grant。
+- **本地优先 session authority**（plans 036-042、040-041，2026-07-25）：supervisor/sessiond 持 PTY、VT/history、holder、sequence 与 tombstone；web cached direct 走 `127.0.0.1:8788`，失败自动 opaque relay；中心停机后已加载/配对页面仍可 list/attach/input/resize/stop；input 与 session create/stop 可跨 worker replacement 去重（不跨 supervisor/OS restart），output gap 由 snapshot 自愈。旧 server xterm live mirror、raw replay、viewer/holder、全局 pause 与 server-routed exec/fs 已删除。mobile 仅做 relay-only 内部迁移，无新功能。
 - **独立 VT 与性能发布证据**（2026-07-25）：xterm 6 双 oracle + 脱敏 Claude/Codex/Vim fixtures；Apple M1 Pro debug、2000 行 history、20 warmup + 100 samples：echo p95 0.589ms，attach+xterm p95 64.820ms，direct timed path 中心 relay frame=0。保证/非保证 fidelity 见 [architecture.md](architecture.md#6-attach-与现场恢复)。
 - **server 侧终端镜像（历史，已取代）**（2026-07-19，69e132a/d8b3237）：曾用 `@xterm/headless` 实时消化 raw PTY 解决 attach 延迟；该方案让中心进入 terminal hot path，已由 sessiond snapshot + 有界派生 checkpoint 替代，server xterm 依赖和旧协议已删除。
 
@@ -46,7 +48,7 @@
 - [ ] 设备接入引导优化（安装 `cofluxd` → 浏览器授权 → 上线）
 - [x] 端口转发基础交互：终端 Tab 聚合提示全部端口并可直接打开预览（plan 019）
 - [x] 终端恢复的性能问题：sessiond snapshot + cached direct 达到 attach+xterm p95 64.820ms（2026-07-25）
-- [ ] 本地优先浏览器发布矩阵：macOS 当前稳定版 Chrome/Safari/Firefox 的 cached direct、首次 relay+pair、permission denied、fallback/promotion、worker restart、server outage 全部实机签字
+- [x] 本地优先当前浏览器发布门：macOS Chrome 的 cached direct、首次 relay+pair、permission denied、fallback/promotion、worker restart、server outage 已实机签字；按 2026-07-25 决策 Safari/Firefox 暂不纳入阻断门，二者可用性仍属未知
 - [x] git diff 的展示：workspace 行数统计 `+X −Y`（plan 024）
 - [x] 快捷键支持：全局快捷键 + 帮助面板（plan 015）
 - [ ] 登录页和设备授权页的 UI 优化
@@ -61,11 +63,12 @@
 - [x] worker 自动更新编排：stable release 自动投递 + 失败退避（plan 017）
 - [ ] Agent 集成（B5）：起任务时可选自动拉起 `claude` / `codex` 带 prompt，人随时接管
 - [ ] 退出任务的保留/GC 策略（exited task 长期累积）
-- [ ] 中心服务器多实例 + 共享状态（当前暂无明确需求，Postgres 外置已留扩展位，按需启动）
+- [ ] 中心服务器多实例 + 共享状态（当前既定形态是单实例；没有明确需求前不引入 Redis、leader election 或共享 presence）
 - [x] 独立 relay 服务·第一片（plan 043，2026-07-25）：`crates/relay` 单二进制 + 按需拨号
   rendezvous，数据帧不再经中心控制 WS；relay 独立部署，与中心零连接、仅共享签名密钥对
-- [ ] 独立 relay·第二片：多节点就近（daemon/client 双端 RTT 探测上报、rendezvous 返回候选
-  列表取两端之和最小、多地部署清单）——消灭 CN↔CN 绕 JP hairpin 的完整形态
+- [x] 独立 relay·第二片（plan 065，2026-07-29）：中心下发静态节点清单，daemon 经 `/healthz`
+  多次 RTT 采样并带滞后选择 home、周期重探；上报后 rendezvous 把 client/daemon 双端指向同一
+  home，未上报时回退清单首项。relay 节点间无互联，client/web/iOS 不拿清单也不参与探测
 - [x] P2P 直连·第一片（plan 076，2026-08-16）：WebRTC DataChannel 端到端直连并入 direct
   槽位（loopback > P2P > relay，promotion 复用）；信令照 rendezvous 三角走中心控制 WS
   （vanilla ICE），worker 引 webrtc-rs，分片流适配 30MiB 帧；黑盒以 werift 跨栈互通全链路

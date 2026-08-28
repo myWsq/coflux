@@ -79,20 +79,27 @@ export class LocalControlPlane<C extends ControlClient, D extends ControlDaemon>
 
   /** daemon 每次认证后重装 durable control state；online lease 刻意不恢复。 */
   async restoreDaemon(daemon: D): Promise<void> {
+    const isCurrent = () => this.daemonForId(daemon.info.daemonId) === daemon;
     const now = Date.now();
     await Promise.all([this.store.pruneLocalControlState(now), this.store.revokeLocalLeasesForDaemon(daemon.info.daemonId)]);
-    await this.configureOrigins(daemon.info.daemonId);
-    for (const grant of await this.store.listLocalGrantsByDaemon(daemon.info.daemonId)) {
+    if (!isCurrent()) return;
+    await this.configureOrigins(daemon.info.daemonId, daemon);
+    if (!isCurrent()) return;
+    const grants = await this.store.listLocalGrantsByDaemon(daemon.info.daemonId);
+    if (!isCurrent()) return;
+    for (const grant of grants) {
+      if (!isCurrent()) return;
       const waiter = [...this.pending.values()].find((pending) => pending.grantId === grant.grantId);
       if (grant.state === "pending_revoke") {
-        await this.dispatchGrantControl(grant, "revoke");
+        await this.dispatchGrantControl(grant, "revoke", undefined, undefined, daemon);
       } else if (grant.state === "revoked") {
-        await this.dispatchGrantControl(grant, "sync_revoke");
+        await this.dispatchGrantControl(grant, "sync_revoke", undefined, undefined, daemon);
       } else if (grant.state === "active") {
-        await this.dispatchGrantControl(grant, "sync_install", waiter?.client, waiter?.clientRequestId);
+        await this.dispatchGrantControl(grant, "sync_install", waiter?.client, waiter?.clientRequestId, daemon);
       } else {
-        await this.dispatchGrantControl(grant, "install", waiter?.client, waiter?.clientRequestId);
+        await this.dispatchGrantControl(grant, "install", waiter?.client, waiter?.clientRequestId, daemon);
       }
+      if (!isCurrent()) return;
     }
   }
 
@@ -277,9 +284,10 @@ export class LocalControlPlane<C extends ControlClient, D extends ControlDaemon>
     action: LocalGrantControlAction,
     client?: C,
     clientRequestId?: string,
+    expectedDaemon?: D,
   ): Promise<void> {
     const daemon = this.daemonForId(grant.daemonId);
-    if (!daemon) return;
+    if (!daemon || (expectedDaemon && daemon !== expectedDaemon)) return;
     const displaced = [...this.pending.values()].find((pending) => pending.grantId === grant.grantId);
     if (
       displaced?.client &&
@@ -305,7 +313,12 @@ export class LocalControlPlane<C extends ControlClient, D extends ControlDaemon>
     };
     pending.timer.unref?.();
     this.pending.set(requestId, pending);
-    this.sendGrantControl(daemon, updated, requestId, action);
+    // beginLocalGrantControl 触库期间连接可能换代；永不向捕获的旧对象迟到发送。pending timer
+    // 会在新连接上重试同一 durable requestId，若当前离线则按既有逻辑清掉、下次 restore 重装。
+    const current = this.daemonForId(grant.daemonId);
+    if (current && (!expectedDaemon || current === expectedDaemon)) {
+      this.sendGrantControl(current, updated, requestId, action);
+    }
   }
 
   private async retryControl(requestId: string): Promise<void> {
@@ -333,10 +346,11 @@ export class LocalControlPlane<C extends ControlClient, D extends ControlDaemon>
     this.sendDaemon(daemon, { case: "localGrantInstall", value: { requestId, grant: recordToGrant(grant) } });
   }
 
-  private async configureOrigins(daemonId: DaemonId): Promise<void> {
+  private async configureOrigins(daemonId: DaemonId, expectedDaemon?: D): Promise<void> {
     const daemon = this.daemonForId(daemonId);
-    if (!daemon) return;
+    if (!daemon || (expectedDaemon && daemon !== expectedDaemon)) return;
     const grants = await this.store.listLocalGrantsByDaemon(daemonId);
+    if (this.daemonForId(daemonId) !== daemon) return;
     const origins = [...new Set(grants.filter((grant) => !["pending_revoke", "revoked"].includes(grant.state)).map((grant) => grant.origin))].sort();
     this.sendDaemon(daemon, { case: "localGatewayConfigure", value: { origins } });
   }

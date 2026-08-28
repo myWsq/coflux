@@ -11,6 +11,7 @@
 //! 交给中心，由 server 反查 session→task→workspace 完成归属校验后执行。中心离线时它们必然
 //! 失败——明确报错比默默降级好，因为「让用户看得见」正是这些动作的全部意义。
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,7 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use prost::Message as _;
 
-use crate::{agents, device::DeviceRuntime, ops, WorkerState, WsOut};
+use crate::{agents, device::DeviceRuntime, observed::ObservedState, ops, WorkerState, WsOut};
 
 /// 等中心回执的上限：只防在飞请求永久占住 pending 表，CLI 侧自己的超时更短。
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
@@ -32,6 +33,9 @@ const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
 /// 没有正确性后果，所以不值得为它做 LRU。
 /// ponytail: 粗暴清表，真出现「一个工作区几百个终端」的用法再换 LRU。
 const MAX_TRACKED_LOGS: usize = 256;
+/// 中心回执关联表只保存正在等待的 agent 控制请求；达到上限立即拒绝，不能让本地 HTTP
+/// 并发在 20 秒超时窗口内无界堆积。
+const AGENT_PENDING_LIMIT: usize = 128;
 
 fn remember_log(state: &Arc<Mutex<WorkerState>>, task_id: String, log_path: String) {
     let mut s = state.lock().unwrap();
@@ -50,12 +54,25 @@ pub struct AgentRequest {
 }
 
 pub enum AgentAction {
-    TerminalNew { title: String, command: String },
+    TerminalNew {
+        title: String,
+        command: String,
+    },
     TerminalList,
-    TerminalRead { task_id: String },
-    TerminalSend { task_id: String, text: String, enter: bool },
-    Notify { message: String },
-    Progress { message: String },
+    TerminalRead {
+        task_id: String,
+    },
+    TerminalSend {
+        task_id: String,
+        text: String,
+        enter: bool,
+    },
+    Notify {
+        message: String,
+    },
+    Progress {
+        message: String,
+    },
     Ports,
 }
 
@@ -73,12 +90,18 @@ impl AgentResponse {
         if let serde_json::Value::Object(fields) = payload {
             object.extend(fields);
         }
-        Self { status: "200 OK", body: serde_json::Value::Object(object).to_string() }
+        Self {
+            status: "200 OK",
+            body: serde_json::Value::Object(object).to_string(),
+        }
     }
 
     fn err(status: &'static str, message: impl AsRef<str>) -> Self {
         let body = serde_json::json!({ "ok": false, "error": message.as_ref() });
-        Self { status, body: body.to_string() }
+        Self {
+            status,
+            body: body.to_string(),
+        }
     }
 }
 
@@ -87,23 +110,50 @@ impl AgentResponse {
 static NEXT_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn next_request_id() -> String {
-    format!("agent-{}-{}", std::process::id(), NEXT_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "agent-{}-{}",
+        std::process::id(),
+        NEXT_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn try_insert_agent_pending(
+    pending: &mut HashMap<String, oneshot::Sender<wire::AgentControlResult>>,
+    request_id: String,
+    waiter: oneshot::Sender<wire::AgentControlResult>,
+) -> bool {
+    if pending.len() >= AGENT_PENDING_LIMIT || pending.contains_key(&request_id) {
+        return false;
+    }
+    pending.insert(request_id, waiter);
+    true
 }
 
 /// 消费循环：每条请求先过 pid 身份门，再按动作分派。
 pub async fn consume_agent_requests(
     mut rx: mpsc::Receiver<AgentRequest>,
     state: Arc<Mutex<WorkerState>>,
+    observed: Arc<ObservedState>,
     to_server_tx: mpsc::Sender<WsOut>,
     device: Arc<DeviceRuntime>,
 ) {
     while let Some(request) = rx.recv().await {
         let state = state.clone();
+        let observed = observed.clone();
         let to_server_tx = to_server_tx.clone();
         let device = device.clone();
         // 每条请求独立任务：terminal.* 要等中心回执（最长 SERVER_TIMEOUT），不能阻塞后续请求。
         tokio::spawn(async move {
-            let response = handle(&state, &to_server_tx, &device, request.pid, request.ppid, request.action).await;
+            let response = handle(
+                &state,
+                &observed,
+                &to_server_tx,
+                &device,
+                request.pid,
+                request.ppid,
+                request.action,
+            )
+            .await;
             let _ = request.respond.send(response);
         });
     }
@@ -111,6 +161,7 @@ pub async fn consume_agent_requests(
 
 async fn handle(
     state: &Arc<Mutex<WorkerState>>,
+    observed: &ObservedState,
     to_server_tx: &mpsc::Sender<WsOut>,
     device: &Arc<DeviceRuntime>,
     pid: i32,
@@ -118,41 +169,53 @@ async fn handle(
     action: AgentAction,
 ) -> AgentResponse {
     let alive = { state.lock().unwrap().alive.clone() };
-    let session_id = tokio::task::spawn_blocking(move || agents::session_of_pid(&alive, pid, ppid)).await.ok().flatten();
+    let session_id = tokio::task::spawn_blocking(move || agents::session_of_pid(&alive, pid, ppid))
+        .await
+        .ok()
+        .flatten();
     let Some(session_id) = session_id else {
-        return AgentResponse::err("403 Forbidden", "不在 coflux 终端里：本命令只能由 coflux 会话内的进程调用");
+        return AgentResponse::err(
+            "403 Forbidden",
+            "不在 coflux 终端里：本命令只能由 coflux 会话内的进程调用",
+        );
     };
 
     match action {
         AgentAction::Notify { message } => {
             let message: String = message.chars().take(MAX_NOTIFY_CHARS).collect();
-            {
-                let mut s = state.lock().unwrap();
-                s.hook_states.insert(session_id.clone(), "question");
-                s.hook_messages.insert(session_id, message);
-            }
-            crate::report_agents_if_changed(state, to_server_tx).await;
+            observed.apply_notify(session_id, message);
+            crate::report_agents_if_changed(state, observed, to_server_tx).await;
             AgentResponse::ok(serde_json::json!({}))
         }
         AgentAction::Progress { message } => {
             // 与 notify 是两条信道：progress 只播报进度，不改 state、不置 question，
             // 且跨 hook 事件存活（只被下一条覆盖）。同为 daemon 本地闭环。
             let message: String = message.chars().take(MAX_NOTIFY_CHARS).collect();
-            state.lock().unwrap().hook_progress.insert(session_id, message);
-            crate::report_agents_if_changed(state, to_server_tx).await;
+            observed.apply_progress(session_id, message);
+            crate::report_agents_if_changed(state, observed, to_server_tx).await;
             AgentResponse::ok(serde_json::json!({}))
         }
         AgentAction::TerminalNew { title, command } => {
             let (shell, log_path) = match ops::write_command_script(&command) {
                 Ok(paths) => paths,
-                Err(error) => return AgentResponse::err("500 Internal Server Error", format!("写命令脚本失败：{error}")),
+                Err(error) => {
+                    return AgentResponse::err(
+                        "500 Internal Server Error",
+                        format!("写命令脚本失败：{error}"),
+                    )
+                }
             };
-            let payload = agent_control_request::Payload::TerminalNew(wire::AgentTerminalNew { title, shell });
+            let payload = agent_control_request::Payload::TerminalNew(wire::AgentTerminalNew {
+                title,
+                shell,
+            });
             match ask_server(state, to_server_tx, session_id, payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalNew(result)) => {
                     remember_log(state, result.task_id.clone(), log_path);
-                    AgentResponse::ok(serde_json::json!({ "taskId": result.task_id, "sessionId": result.session_id }))
+                    AgentResponse::ok(
+                        serde_json::json!({ "taskId": result.task_id, "sessionId": result.session_id }),
+                    )
                 }
                 Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
             }
@@ -187,14 +250,19 @@ async fn handle(
             // 秒级命令的输出根本进不去，而日志是全量而非一屏。非 agent 自建的终端（用户
             // 手开的）没有日志，此时退回 checkpoint。
             let local_log = { state.lock().unwrap().agent_logs.get(&task_id).cloned() };
-            let payload = agent_control_request::Payload::TerminalRead(wire::AgentTerminalRead { task_id });
+            let payload =
+                agent_control_request::Payload::TerminalRead(wire::AgentTerminalRead { task_id });
             match ask_server(state, to_server_tx, session_id, payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalRead(result)) => {
-                    let from_log = local_log.as_deref().and_then(|path| ops::read_command_log_tail(path, MAX_LOG_TAIL_BYTES));
+                    let from_log = local_log
+                        .as_deref()
+                        .and_then(|path| ops::read_command_log_tail(path, MAX_LOG_TAIL_BYTES));
                     // ANSI 原样带回，去转义在 CLI 侧做（snapshot 同时是 checkpoint 的数据来源，
                     // 不为 agent 可读性改它的语义）。
-                    let text = from_log.unwrap_or_else(|| String::from_utf8_lossy(&result.ansi_snapshot).into_owned());
+                    let text = from_log.unwrap_or_else(|| {
+                        String::from_utf8_lossy(&result.ansi_snapshot).into_owned()
+                    });
                     AgentResponse::ok(serde_json::json!({
                         "ansi": text,
                         "capturedAt": result.captured_at,
@@ -205,7 +273,11 @@ async fn handle(
                 Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
             }
         }
-        AgentAction::TerminalSend { task_id, text, enter } => {
+        AgentAction::TerminalSend {
+            task_id,
+            text,
+            enter,
+        } => {
             // 归属寻址复用 terminal.list 的中心校验：清单天然限定在发起方 workspace，
             // 目标不在清单里 = 不在本工作区或不存在。写入本身在 daemon 本地走 sessiond 正门
             // （见 DeviceRuntime::agent_send_input 的契约注释），中心不在输入路径上。
@@ -213,13 +285,27 @@ async fn handle(
             match ask_server(state, to_server_tx, session_id, payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalList(result)) => {
-                    let Some(target) = result.terminals.into_iter().find(|terminal| terminal.task_id == task_id) else {
-                        return AgentResponse::err("404 Not Found", "终端不在本工作区或不存在（用 cofluxd terminal list 查）");
+                    let Some(target) = result
+                        .terminals
+                        .into_iter()
+                        .find(|terminal| terminal.task_id == task_id)
+                    else {
+                        return AgentResponse::err(
+                            "404 Not Found",
+                            "终端不在本工作区或不存在（用 cofluxd terminal list 查）",
+                        );
                     };
                     if status_name(target.status) == "exited" {
-                        return AgentResponse::err("409 Conflict", "终端已退出，不能再输入（要跑新命令用 cofluxd terminal new）");
+                        return AgentResponse::err(
+                            "409 Conflict",
+                            "终端已退出，不能再输入（要跑新命令用 cofluxd terminal new）",
+                        );
                     }
-                    let Some(target_session) = target.session_id.as_deref().filter(|session| !session.is_empty()) else {
+                    let Some(target_session) = target
+                        .session_id
+                        .as_deref()
+                        .filter(|session| !session.is_empty())
+                    else {
                         return AgentResponse::err("409 Conflict", "终端尚未就绪，稍后重试");
                     };
                     let mut data = text.into_bytes();
@@ -264,22 +350,35 @@ async fn ask_server(
     {
         let mut s = state.lock().unwrap();
         if !s.authed {
-            return Err(AgentResponse::err("503 Service Unavailable", "daemon 未连上中心：这些操作要经中心才能让用户看见"));
+            return Err(AgentResponse::err(
+                "503 Service Unavailable",
+                "daemon 未连上中心：这些操作要经中心才能让用户看见",
+            ));
         }
-        s.agent_pending.insert(request_id.clone(), tx);
+        if !try_insert_agent_pending(&mut s.agent_pending, request_id.clone(), tx) {
+            return Err(AgentResponse::err(
+                "429 Too Many Requests",
+                "agent 控制请求并发已达上限，请稍后重试",
+            ));
+        }
     }
     // try_send 而非 send，且必须看返回值：出站队列有界，断连期间会满。阻塞会让 agent 干等到
     // 超时，静默丢弃更糟（同样干等）——满了就立刻说「发不出去」。发送失败要自己摘 pending。
     let envelope = wire::DaemonToServer {
-        payload: Some(daemon_to_server::Payload::AgentControlRequest(wire::AgentControlRequest {
-            request_id: request_id.clone(),
-            session_id,
-            payload: Some(payload),
-        })),
+        payload: Some(daemon_to_server::Payload::AgentControlRequest(
+            wire::AgentControlRequest {
+                request_id: request_id.clone(),
+                session_id,
+                payload: Some(payload),
+            },
+        )),
     };
     if to_server_tx.try_send(envelope.encode_to_vec()).is_err() {
         state.lock().unwrap().agent_pending.remove(&request_id);
-        return Err(AgentResponse::err("503 Service Unavailable", "与中心的出站队列已满或已断开，请重试"));
+        return Err(AgentResponse::err(
+            "503 Service Unavailable",
+            "与中心的出站队列已满或已断开，请重试",
+        ));
     }
 
     let outcome = tokio::time::timeout(SERVER_TIMEOUT, rx).await;
@@ -288,12 +387,20 @@ async fn ask_server(
     match outcome {
         Ok(Ok(result)) => {
             if !result.ok {
-                return Err(AgentResponse::err("400 Bad Request", result.error.unwrap_or_else(|| "中心拒绝了该操作".into())));
+                return Err(AgentResponse::err(
+                    "400 Bad Request",
+                    result.error.unwrap_or_else(|| "中心拒绝了该操作".into()),
+                ));
             }
-            result.payload.ok_or_else(|| AgentResponse::err("502 Bad Gateway", "中心回执缺少结果"))
+            result
+                .payload
+                .ok_or_else(|| AgentResponse::err("502 Bad Gateway", "中心回执缺少结果"))
         }
         // 发送端被丢弃 = 连接断开时清了 pending 表
-        Ok(Err(_)) => Err(AgentResponse::err("503 Service Unavailable", "与中心的连接中断，请重试")),
+        Ok(Err(_)) => Err(AgentResponse::err(
+            "503 Service Unavailable",
+            "与中心的连接中断，请重试",
+        )),
         Err(_) => Err(AgentResponse::err("504 Gateway Timeout", "中心响应超时")),
     }
 }
@@ -339,5 +446,25 @@ mod tests {
         let first = next_request_id();
         let second = next_request_id();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn pending_agent_controls_stop_at_hard_limit() {
+        let mut pending = HashMap::new();
+        for index in 0..AGENT_PENDING_LIMIT {
+            let (tx, _rx) = oneshot::channel();
+            assert!(try_insert_agent_pending(
+                &mut pending,
+                format!("request-{index}"),
+                tx
+            ));
+        }
+        let (tx, _rx) = oneshot::channel();
+        assert!(!try_insert_agent_pending(
+            &mut pending,
+            "overflow".into(),
+            tx
+        ));
+        assert_eq!(pending.len(), AGENT_PENDING_LIMIT);
     }
 }

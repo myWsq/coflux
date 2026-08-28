@@ -10,10 +10,10 @@
  * 签名惯例）。relay 侧（crates/relay）持公钥验签，claims 见下方 RelayTokenClaims。
  */
 import crypto from "crypto";
+import { MAX_FRAME_ID_BYTES } from "@coflux/protocol";
 
 const TOKEN_DOMAIN = Buffer.from("coflux-relay-token-v1", "utf8");
 const TOKEN_VERSION = 1;
-const MAX_ID_BYTES = 256;
 /** 每条 client 连接的 rendezvous 限速：正常重连/切换远低于此；防的是失控循环。 */
 const MAX_RENDEZVOUS_PER_SECOND = 32;
 /** raw ed25519 seed → PKCS8 DER 的固定前缀（RFC 8410 结构，Ed25519 OID）。 */
@@ -92,7 +92,7 @@ function atLeastVersion(workerVersion: string, min: readonly number[]): boolean 
 
 /** 与旧 DeviceRelayRouter 相同的 id 校验语义（长度、控制字符、保留前缀在调用方另查）。 */
 export function validRelayId(value: string): boolean {
-  return value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_ID_BYTES && ![...value].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
+  return value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_FRAME_ID_BYTES && ![...value].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
 }
 
 interface RateWindow {

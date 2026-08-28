@@ -33,7 +33,7 @@ daemon 仍主动外连中心，因此 NAT 后的远端设备不需要开放入�
 |---|---|---|
 | PTY 进程、VT、history、输出序号 | supervisor/sessiond | worker 只转发 DeviceEnvelope；server 不接收 raw PTY |
 | holder、holder epoch、input cursor | supervisor/sessiond | client 保存待确认 input；transport 可重建 |
-| Device RPC 与 mutation 去重 | worker/sessiond | direct 与 relay 共用同一 logical client、request/operation id |
+| Device RPC 与 mutation 去重 | 当前 worker runtime / 当前 supervisor runtime 内的 sessiond | direct 与 relay 共用同一 logical client、request/operation id；生命周期边界见 5.3 |
 | 账号、设备、Project、Workspace、Task | server/Postgres | daemon catalog 用来收敛本机事实，不反向伪造退出 |
 | 离线可见画面 | server 的最新 checkpoint | 只用于展示；不裁决 holder，也不能替代首次 live snapshot |
 | 浏览器终端渲染 | xterm.js | 收到 attach snapshot 后应用连续 output delta |
@@ -62,7 +62,7 @@ coflux 把这个核心边界映射为 `supervisor/sessiond = tmux server`，把�
 |---|---|---|
 | session authority | 本机 tmux server | 本机 supervisor/sessiond |
 | 本机 attach | Unix socket | loopback WebSocket + DeviceEnvelope |
-| 远端 attach | 通常先 SSH 到机器 | 中心 opaque relay，无需入站端口 |
+| 远端 attach | 通常先 SSH 到机器 | 中心 rendezvous + 独立 opaque relay，无需入站端口 |
 | 重连画面 | tmux grid/history | sessiond ANSI snapshot + sequence delta |
 | 写控制 | 可多 client 交互 | 单 logical holder；另一 client 必须显式 takeover |
 | 中心依赖 | 无 | 首次登录/配对、冷启动、编排需要；cached direct 热路径不需要 |
@@ -109,8 +109,12 @@ relay 先行 + promotion 掩盖）；中心不签 token，对端身份由信令�
 fingerprint 绑定保证。PeerConnection 按 daemon 常驻（client 有完整需求时建立），DataChannel
 按 logical channel（label == channelId），channel 级 scopes 仍由中心逐 channel 授予。帧走
 长度前缀分片流（`P2P_CHUNK_BYTES` = 16KiB，取 webrtc-rs 接收上限与 Chrome 256KiB 的交集），
-出向有 SCTP 缓冲背压。**P2P 属在线授权语义**：与 relay 一样，中心控制连接断开时 worker 关闭
-全部 PeerConnection，client 同步对称清理——它没有 loopback grant 那样的离线存活。
+出向有 SCTP 缓冲背压。**P2P 属在线授权语义**：worker 自己的 `/daemon` 控制连接断开时立即
+关闭全部 PeerConnection（relay 同理），它没有 loopback grant 那样的离线存活。浏览器的
+`/client` 是另一条独立控制连接：普通 transport 短断并不证明 worker 授权已失效，client 会立即
+停止新 rendezvous、撤 online lease/control waiter/elevated lane，但给已经建立的 relay/P2P
+session lane 15 秒有界宽限；同凭据 `authOk` 窗口内恢复则复用原 channel，超时或 authError、
+clientOutdated、换凭据、reset/destroy/logout 等 hard revoke 立即关闭。
 
 worker 侧经 `webrtc`（webrtc-rs）实现 answer 端：枚举全部非 loopback 接口（LAN/Tailscale/
 公网 v4v6）作 host candidates（该库不做接口枚举，bind 什么地址 candidate 就是什么），answer
@@ -185,7 +189,17 @@ mobile 已冻结，不启用 loopback direct；它使用同一 DeviceRouter 的 
 
 - input 带 `holderEpoch + inputSeq`。sessiond 只顺序应用，重复项返回累计 ACK，gap 不越级执行。
 - client 只用累计 `PtyInputAck.appliedThroughSeq` 清理队列；ACK 丢失后在新 transport 原序重投。
-- mutation 使用 operation id 与有界 ledger，direct/relay 重投只产生一次外部 effect。
+- 去重不提供跨任意故障域的 generic exactly-once，边界由持有 ledger 的 authority 决定：
+  - PTY input 以及 session create/stop 由 sessiond 去重，可跨 direct/relay transport 与 worker
+    replacement；ledger 不跨 supervisor/OS restart。
+  - 其余 worker mutation（project/worktree/exec/fs 等）只在当前 worker runtime 内去重；worker
+    replacement 后不能依赖同一 operation id 阻止外部 effect 再次发生。
+- `execRun` 在 worker 崩溃后可能已经启动甚至完成外部命令，却来不及记录结果；此时结果未知，调用方
+  不得自动重试非幂等命令，也不能宣称 exactly-once。
+- 稳定路径的 `fs.write` 是全量覆盖：状态未知时以相同 path/data 重试可收敛到同一内容。这是基于
+  最终结果的幂等，不是严格一次执行。
+- worktree 操作可用稳定路径与 Git 状态做专用探测、恢复与收敛；这类语义必须由具体操作定义，不能
+  从通用 operation ledger 推导。
 - output 带单调 sequence。发现 gap 时 client 重新 attach/snapshot，不把缺口静默拼接。
 - 每 channel 有记录数和字节数上限；gap 有独立优先槽。checkpoint 同一 session 只保留最新值，慢/断
   中心不会积压 PTY。
@@ -236,10 +250,11 @@ worker 至多每 2 秒请求脏 session 的当前 snapshot，并通过独立 coa
 
 | 故障 | 行为 |
 |---|---|
-| client→server control 断开 | cached direct session lane 继续；冷启动与新业务编排不可用 |
+| browser `/client` control 普通短断 | cached direct 继续；既有 relay/P2P session lane 最多保留 15 秒，同凭据 `authOk` 窗口内复用；online lease、elevated lane、新 rendezvous 与业务编排立即禁用，超时/hard revoke 关闭远端 lane |
+| worker `/daemon` control 断开 | 立即关闭 relay/P2P channel；supervisor/PTY 继续，控制面恢复后重建 |
 | direct 失败/权限拒绝 | loopback 失败续试 P2P，均败自动 rendezvous+relay；不把 daemon 误报为 offline |
 | P2P 打洞失败/中断 | 回落 relay；relay 稳定后按退避重试 loopback→P2P promotion |
-| relay/中心失败 | loopback direct 已建立时继续 catalog/attach/input/resize/stop；中心离线时无法开新 relay/P2P channel（rendezvous/信令依赖中心），已建 P2P 随中心断开而关闭（在线授权语义） |
+| relay/中心失败 | loopback direct 已建立时继续 catalog/attach/input/resize/stop；中心离线时无法开新 relay/P2P channel（rendezvous/信令依赖中心）；既有远端 channel 按上面两条独立控制连接的信号收敛 |
 | worker 重启 | supervisor/PTY 存活；generation 增加并重建 channel/catalog |
 | server 重启 | Postgres 元数据 + daemon catalog/checkpoint 对账；不杀 unknown orphan |
 | 慢中心 | relay/checkpoint 可丢弃或滞后；本地 PTY 与 direct channel继续 |
@@ -258,7 +273,7 @@ code，再由账号 cookie 进入代理。HTTP/SSE/WebSocket 都通过 `ProxyDat
 ## 10. 认证与安全边界
 
 - daemon 通过浏览器一次性授权换取服务器签发的每设备凭证；token 在 server 只存 sha256 hash。
-- client token 绑定账号；所有 control、rendezvous、checkpoint 与 proxy 都校验账号/daemon 归属。
+- server 签发的 client 会话 token 绑定账号；所有 control、rendezvous、checkpoint 与 proxy 都校验账号/daemon 归属。
 - relay 不持账号 DB：只验中心签发的短时单次 token（ed25519，domain 分离），同 channel+role 二连
   拒后到者，channel 结束后 tombstone 窗口内拒绝 token 重放。
 - loopback identity/grant store 与 daemon 凭证落在 `COFLUX_HOME`，权限 `0600`；`cofluxd doctor` 不输出
@@ -295,8 +310,9 @@ direct 热路径零 relay 经手。）
 2026-07-25 在 `a89476b` 上二次复现同一 benchmark：echo p95 0.771 ms、attach p95 59.838 ms、
 中心帧增量 0，SLO 仍全部通过（采样波动在门限内）。
 
-浏览器实机矩阵是独立发布门：macOS 当前稳定版 Chrome、Safari、Firefox 都要覆盖 cached direct、首次
-relay+pair、permission denied、fallback/promotion、worker restart、server outage。本轮记录：
+浏览器实机矩阵原始目标是在 macOS 当前稳定版 Chrome、Safari、Firefox 覆盖 cached direct、首次
+relay+pair、permission denied、fallback/promotion、worker restart、server outage；当前阻断范围按
+2026-07-25 决策收窄为 Chrome。本轮记录：
 
 | 浏览器 | 版本 | 结果 |
 |---|---|---|
@@ -350,8 +366,12 @@ read/control 仍可用`（未 republish，直连本身正常）；缓存 grant �
 apps/server       中心 control / relay rendezvous / checkpoint / Postgres
 apps/web          desktop React + xterm.js（默认迭代对象，启用 direct）
 apps/mobile       冻结的 relay-only client
+apps/ios          原生 iOS client（SwiftUI + SwiftTerm）
+packages/core     TS 共享日志等基础设施
 packages/client   control store + DeviceRouter
 packages/protocol TS protobuf 绑定
+packages/swift-client Swift protobuf、Client Core 与 Apple 平台 transport
+packages/cli      cofluxd 安装/服务管理/doctor CLI
 crates/protocol   Rust protobuf、UDS frame/IPC
 crates/supervisor PTY/sessiond authority
 crates/worker     gateway、relay 拨号、RPC、checkpoint、升级 adapter
@@ -359,7 +379,8 @@ crates/relay      独立 relay：token 验签 + channel 配对 + opaque 管道
 tests             真实进程 + WebSocket 黑盒 harness
 ```
 
-协议真相源是 `proto/`，Buf 生成 TS/Rust/Swift。发布门包括 Buf lint/codegen、client 状态机、server/web
-typecheck、mobile build、Rust test/build、独立 VT oracle、全黑盒、
-benchmark、浏览器/原生实机矩阵和 `git diff --check`。黑盒只用临时 `COFLUX_HOME`、端口、
-数据库与进程组，不触碰真实 daemon。
+协议真相源是 `proto/`，Buf 生成 TS/Rust/Swift。自动发布门包括 Buf lint/codegen、TS/Swift client
+状态机、server/web typecheck、web/mobile build、iOS build-for-testing、Rust test/build、独立 VT
+oracle、全黑盒和 `git diff --check`；benchmark 与当前 Chrome 实机门仍需发布前人工签字。Safari/
+Firefox 当前不是阻断门且可用性未知，原生 iOS 真机生产验收仍待用户。黑盒只用临时
+`COFLUX_HOME`、端口、数据库与进程组，不触碰真实 daemon。

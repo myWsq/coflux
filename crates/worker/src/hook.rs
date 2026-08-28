@@ -78,10 +78,16 @@ pub fn event_state(event: &str, notification: &str, background_tasks: u32) -> Op
         // done 会让用户白跑一趟去看一个还没结束的回合，且假完成窗口 = 后台任务的剩余时长
         // （一次 build/test 就是几分钟）。claude 的 Stop/SubagentStop payload 带 background_tasks
         // 正是为区分这两者而设。旧版 claude 与 codex 无此字段（信使给 0），行为与从前一致。
-        "Stop" | "StopFailure" | "agent-turn-complete" => Some(if background_tasks > 0 { "active" } else { "done" }),
+        "Stop" | "StopFailure" | "agent-turn-complete" => Some(if background_tasks > 0 {
+            "active"
+        } else {
+            "done"
+        }),
         "Notification" => match notification {
             "permission_prompt" => Some("approval"),
-            "agent_needs_input" | "elicitation_dialog" | "elicitation_url_dialog" => Some("question"),
+            "agent_needs_input" | "elicitation_dialog" | "elicitation_url_dialog" => {
+                Some("question")
+            }
             "agent_completed" | "idle_prompt" => Some("done"),
             _ => None,
         },
@@ -111,9 +117,15 @@ pub async fn serve(mut stream: TcpStream, endpoints: Arc<LocalEndpoints>) -> Res
         Ok(response) => (response.status, response.body),
         Err(RequestError::BadRequest(detail)) => {
             eprintln!("[worker] local endpoint bad request: {detail}");
-            ("400 Bad Request", r#"{"ok":false,"error":"bad request"}"#.to_string())
+            (
+                "400 Bad Request",
+                r#"{"ok":false,"error":"bad request"}"#.to_string(),
+            )
         }
-        Err(RequestError::Unavailable) => ("503 Service Unavailable", r#"{"ok":false,"error":"unavailable"}"#.to_string()),
+        Err(RequestError::Unavailable) => (
+            "503 Service Unavailable",
+            r#"{"ok":false,"error":"unavailable"}"#.to_string(),
+        ),
     };
     let response = format!(
         "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -129,13 +141,20 @@ enum RequestError {
     Unavailable,
 }
 
-async fn handle(stream: &mut TcpStream, endpoints: &Arc<LocalEndpoints>) -> Result<AgentResponse, RequestError> {
+async fn handle(
+    stream: &mut TcpStream,
+    endpoints: &Arc<LocalEndpoints>,
+) -> Result<AgentResponse, RequestError> {
     let (head, mut body) = read_head(stream).await.map_err(RequestError::BadRequest)?;
-    let (path, content_length, content_type) = parse_head(&head).map_err(RequestError::BadRequest)?;
+    let (path, content_length, content_type) =
+        parse_head(&head).map_err(RequestError::BadRequest)?;
     if path != "/hook" && path != "/agent" {
         return Err(RequestError::BadRequest(format!("path {path}")));
     }
-    if !content_type.to_ascii_lowercase().contains("application/json") {
+    if !content_type
+        .to_ascii_lowercase()
+        .contains("application/json")
+    {
         return Err(RequestError::BadRequest("content-type 非 json".into()));
     }
     if content_length > MAX_BODY_BYTES {
@@ -157,7 +176,8 @@ async fn handle(stream: &mut TcpStream, endpoints: &Arc<LocalEndpoints>) -> Resu
         return handle_agent(raw, &endpoints.agent_tx).await;
     }
 
-    let parsed: HookBody = serde_json::from_slice(raw).map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
+    let parsed: HookBody = serde_json::from_slice(raw)
+        .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
     if event_state(&parsed.event, &parsed.notification, parsed.background_tasks).is_none() {
         return Ok(hook_response(HookOutcome::Ignored));
     }
@@ -171,7 +191,11 @@ async fn handle(stream: &mut TcpStream, endpoints: &Arc<LocalEndpoints>) -> Resu
         ppid: parsed.ppid,
         respond,
     };
-    endpoints.hook_tx.send(request).await.map_err(|_| RequestError::Unavailable)?;
+    endpoints
+        .hook_tx
+        .send(request)
+        .await
+        .map_err(|_| RequestError::Unavailable)?;
     match tokio::time::timeout(PROCESS_TIMEOUT, outcome_rx).await {
         Ok(Ok(outcome)) => Ok(hook_response(outcome)),
         _ => Err(RequestError::Unavailable),
@@ -181,10 +205,14 @@ async fn handle(stream: &mut TcpStream, endpoints: &Arc<LocalEndpoints>) -> Resu
 /// hook 路径的应答形态（保持 plan 073 起的原样，黑盒用例按它断言）。
 fn hook_response(outcome: HookOutcome) -> AgentResponse {
     match outcome {
-        HookOutcome::Accepted | HookOutcome::Ignored => AgentResponse { status: "200 OK", body: r#"{"ok":true}"#.to_string() },
-        HookOutcome::SessionNotFound => {
-            AgentResponse { status: "404 Not Found", body: r#"{"ok":false,"error":"session not found"}"#.to_string() }
-        }
+        HookOutcome::Accepted | HookOutcome::Ignored => AgentResponse {
+            status: "200 OK",
+            body: r#"{"ok":true}"#.to_string(),
+        },
+        HookOutcome::SessionNotFound => AgentResponse {
+            status: "404 Not Found",
+            body: r#"{"ok":false,"error":"session not found"}"#.to_string(),
+        },
     }
 }
 
@@ -215,52 +243,81 @@ struct AgentBody {
 /// 文件内容当输入灌，直接拒绝比截断安全。
 const MAX_SEND_TEXT_BYTES: usize = 4096;
 
-async fn handle_agent(raw: &[u8], agent_tx: &mpsc::Sender<AgentRequest>) -> Result<AgentResponse, RequestError> {
-    let parsed: AgentBody = serde_json::from_slice(raw).map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
+async fn handle_agent(
+    raw: &[u8],
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<AgentResponse, RequestError> {
+    let parsed: AgentBody = serde_json::from_slice(raw)
+        .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
     let action = match parsed.action.as_str() {
         "terminal.new" => {
             if parsed.command.trim().is_empty() {
                 return Err(RequestError::BadRequest("terminal.new 缺 command".into()));
             }
-            AgentAction::TerminalNew { title: parsed.title, command: parsed.command }
+            AgentAction::TerminalNew {
+                title: parsed.title,
+                command: parsed.command,
+            }
         }
         "terminal.list" => AgentAction::TerminalList,
         "terminal.read" => {
             if parsed.task_id.trim().is_empty() {
                 return Err(RequestError::BadRequest("terminal.read 缺 taskId".into()));
             }
-            AgentAction::TerminalRead { task_id: parsed.task_id }
+            AgentAction::TerminalRead {
+                task_id: parsed.task_id,
+            }
         }
         "terminal.send" => {
             if parsed.task_id.trim().is_empty() {
                 return Err(RequestError::BadRequest("terminal.send 缺 taskId".into()));
             }
             if parsed.text.is_empty() && !parsed.enter {
-                return Err(RequestError::BadRequest("terminal.send 缺 text（或至少 --enter）".into()));
+                return Err(RequestError::BadRequest(
+                    "terminal.send 缺 text（或至少 --enter）".into(),
+                ));
             }
             if parsed.text.len() > MAX_SEND_TEXT_BYTES {
-                return Err(RequestError::BadRequest("terminal.send text 超长（≤4KB）".into()));
+                return Err(RequestError::BadRequest(
+                    "terminal.send text 超长（≤4KB）".into(),
+                ));
             }
-            AgentAction::TerminalSend { task_id: parsed.task_id, text: parsed.text, enter: parsed.enter }
+            AgentAction::TerminalSend {
+                task_id: parsed.task_id,
+                text: parsed.text,
+                enter: parsed.enter,
+            }
         }
         "notify" => {
             if parsed.message.trim().is_empty() {
                 return Err(RequestError::BadRequest("notify 缺 message".into()));
             }
-            AgentAction::Notify { message: parsed.message }
+            AgentAction::Notify {
+                message: parsed.message,
+            }
         }
         "progress" => {
             if parsed.message.trim().is_empty() {
                 return Err(RequestError::BadRequest("progress 缺 message".into()));
             }
-            AgentAction::Progress { message: parsed.message }
+            AgentAction::Progress {
+                message: parsed.message,
+            }
         }
         "ports" => AgentAction::Ports,
         other => return Err(RequestError::BadRequest(format!("未知 action {other}"))),
     };
     let (respond, outcome_rx) = oneshot::channel();
-    let request = AgentRequest { pid: parsed.pid, ppid: parsed.ppid, action, respond };
-    agent_tx.send(request).await.map_err(|_| RequestError::Unavailable)?;
+    let request = AgentRequest {
+        pid: parsed.pid,
+        ppid: parsed.ppid,
+        action,
+        respond,
+    };
+    agent_tx
+        .send(request)
+        .await
+        .map_err(|_| RequestError::Unavailable)?;
     match tokio::time::timeout(AGENT_TIMEOUT, outcome_rx).await {
         Ok(Ok(response)) => Ok(response),
         _ => Err(RequestError::Unavailable),
@@ -304,9 +361,16 @@ fn parse_head(head: &str) -> Result<(String, usize, String), String> {
     let mut content_length = 0usize;
     let mut content_type = String::new();
     for line in lines {
-        let Some((name, value)) = line.split_once(':') else { continue };
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
         match name.trim().to_ascii_lowercase().as_str() {
-            "content-length" => content_length = value.trim().parse().map_err(|_| "content-length 畸形".to_string())?,
+            "content-length" => {
+                content_length = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| "content-length 畸形".to_string())?
+            }
             "content-type" => content_type = value.trim().to_string(),
             _ => {}
         }
@@ -328,10 +392,22 @@ mod tests {
         assert_eq!(event_state("PermissionRequest", "", 0), Some("approval"));
         assert_eq!(event_state("agent-turn-complete", "", 0), Some("done"));
         assert_eq!(event_state("approval-requested", "", 0), Some("approval"));
-        assert_eq!(event_state("Notification", "permission_prompt", 0), Some("approval"));
-        assert_eq!(event_state("Notification", "agent_needs_input", 0), Some("question"));
-        assert_eq!(event_state("Notification", "elicitation_dialog", 0), Some("question"));
-        assert_eq!(event_state("Notification", "agent_completed", 0), Some("done"));
+        assert_eq!(
+            event_state("Notification", "permission_prompt", 0),
+            Some("approval")
+        );
+        assert_eq!(
+            event_state("Notification", "agent_needs_input", 0),
+            Some("question")
+        );
+        assert_eq!(
+            event_state("Notification", "elicitation_dialog", 0),
+            Some("question")
+        );
+        assert_eq!(
+            event_state("Notification", "agent_completed", 0),
+            Some("done")
+        );
         assert_eq!(event_state("Notification", "auth_success", 0), None);
         assert_eq!(event_state("Notification", "", 0), None);
         assert_eq!(event_state("SessionStart", "", 0), None);
@@ -346,7 +422,10 @@ mod tests {
         assert_eq!(event_state("Stop", "", 0), Some("done"));
         // 后台工作数只对回合结束类事件有意义，不改变其它事件的判定
         assert_eq!(event_state("PermissionRequest", "", 2), Some("approval"));
-        assert_eq!(event_state("Notification", "agent_needs_input", 2), Some("question"));
+        assert_eq!(
+            event_state("Notification", "agent_needs_input", 2),
+            Some("question")
+        );
         assert_eq!(event_state("SessionStart", "", 2), None);
     }
 

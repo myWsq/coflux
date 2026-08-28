@@ -1,8 +1,8 @@
 # coflux
 
 可跑在用户任意节点上的 **Daemon**，在本地起 PTY、驱动 Claude Code / Codex CLI 等 Agent。
-远端访问经中心 opaque relay；web 与 daemon 同机时优先直连 loopback gateway，terminal 与普通
-Device RPC 热路径不经过中心。一机一 daemon、登录一个账号，设备模型类似 Tailscale。
+远端访问由中心完成 rendezvous，再经独立 opaque relay；同机优先 loopback，网络条件允许时可升到
+P2P，terminal 与普通 Device RPC 数据帧不经过中心控制 WS。一机一 daemon，设备模型类似 Tailscale。
 
 > 架构详见 [docs/architecture.md](docs/architecture.md)；认证见 [docs/auth-design.md](docs/auth-design.md)；路线图/TODO 见 [docs/ROADMAP.md](docs/ROADMAP.md)；待讨论项见 [docs/OPEN_QUESTIONS.md](docs/OPEN_QUESTIONS.md)。
 
@@ -10,10 +10,16 @@ Device RPC 热路径不经过中心。一机一 daemon、登录一个账号，�
 
 | 包 | 说明 |
 |----|------|
+| `packages/core` | TS 共享基础设施（日志等），供 server/client 复用 |
+| `packages/client` | Web/mobile 共享的 control client、store 与 DeviceRouter |
 | `packages/protocol` | Buf 生成的 TS 共享线协议（真相源在 `proto/`） |
-| `apps/server` | 中心服务器（TS）：认证/编排 + opaque relay + checkpoint + Postgres |
+| `apps/server` | 中心服务器（TS）：认证/编排 + relay rendezvous + checkpoint + Postgres |
 | `apps/web` | Web Client（TS）：Vite + React + xterm.js |
+| `apps/mobile` | 冻结的移动 Web Client；仅在共享层破坏构建时做最小修复 |
+| `apps/ios` | 原生 iOS Client（SwiftUI + SwiftTerm）；使用共享 Swift Client Core |
+| `packages/swift-client` | Buf 生成的 Swift 协议、共享 Client Core 与 Apple 平台 transport |
 | `crates/protocol` | Buf 生成的 Rust 协议 + UDS frame/IPC |
+| `crates/relay` | 独立 opaque 数据面：短时单次 token 验证 + channel 配对，不连账号数据库 |
 | `crates/supervisor` | PTY/sessiond authority：VT/history/holder/sequence + worker 管理（极少升级） |
 | `crates/worker` | gateway、direct/relay、git/exec/fs、checkpoint 与中心连接（频繁升级） |
 | `packages/cli` | `cofluxd`：用户侧管理 CLI（npm，零依赖 node）——装/起/停/升级 daemon + doctor 连通性自检 |
@@ -54,7 +60,7 @@ pnpm dev:web          # Web，打开 http://localhost:5273；/client 代理到 :
 pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 spawn worker）；走浏览器授权登记，凭证存 ~/.coflux
 ```
 
-1. 打开网页，用登录令牌 `dev-client` 登录（生产改 `COFLUX_CLIENT_TOKEN`）。
+1. 打开网页；dev 默认用用户名/密码 `admin` / `admin` 登录（弱默认只在 `COFLUX_DEV=1` 生效）。
 2. 从在线设备导入该机器上已有的 git 仓库，再按需创建 worktree 工作区。
 3. 在工作区中新建终端，直接启动 `claude` / `codex`；同机优先显示 direct transport，失败自动 relay。
 
@@ -65,8 +71,10 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 
 - **浏览器授权**：新机器 daemon 发起授权请求，用户在已登录的浏览器里确认 → 服务器签发 **每设备 deviceToken**，daemon 本地持久化。
 - **设备凭证（deviceToken）**：后续连接用它认证；daemonId 由服务器签发绑定，无法冒充他机。
-- **登录令牌（ClientToken，账号级）**：web 用它登录账号，可见/可达该账号下所有设备。
-- 服务器只存 token 的 sha256 hash。详见 [docs/auth-design.md](docs/auth-design.md)。
+- **用户登录**：`local` 模式校验环境变量中的用户名/密码；`password` 模式校验 Postgres 中的邮箱与
+  scrypt 密码哈希。两者成功后都由服务器签发有期限、可撤销的会话 token，浏览器自动保存并用于重连。
+- 服务器只持久化 device token 与会话 token 的 sha256 hash，不保存明文。详见
+  [docs/auth-design.md](docs/auth-design.md)。
 
 ## 环境变量
 
@@ -74,8 +82,11 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 |------|------|------|
 | `COFLUX_PORT` | `8787` | server 监听端口 |
 | `DATABASE_URL` | 生产必填；`COFLUX_DEV=1` 时弱默认 `postgres://postgres:postgres@127.0.0.1:5432/postgres` | server 的 Postgres 连接串（含密码，视为秘密） |
-| `COFLUX_CLIENT_TOKEN` | `dev-client` | 账号登录令牌（server 配置，web 登录用） |
-| `COFLUX_PROXY_HOST` | `p.localhost` | 端口转发预览域：`<shortId>.<该值>` 按反代路由（Host 头分流，与 client/daemon WS 共用同一端口）；生产需配好泛解析 + 泛证书 |
+| `COFLUX_AUTH` | `local` | 登录模式：`local`（单账号环境变量口令）或 `password`（Postgres 用户表） |
+| `COFLUX_USERNAME` | `admin` | `local` 模式用户名 |
+| `COFLUX_PASSWORD` | dev 为 `admin`；生产必填 | `local` 模式密码 |
+| `COFLUX_SESSION_TTL_MS` | `2592000000` | 登录后签发的会话 token 有效期（默认 30 天） |
+| `COFLUX_PROXY_HOST` | `p.localhost` | 端口转发预览域：`<shortId>-<该值>` 按反代路由；生产需配好泛解析 + 泛证书 |
 | `COFLUX_SERVER` | `ws://localhost:8787/daemon` | daemon 连接的服务器地址 |
 | `COFLUX_DEVICE_NAME` | `<hostname>` | daemon 登记时的设备名 |
 | `COFLUX_HOME` | `~/.coflux` | daemon 凭证存放目录 |
@@ -85,6 +96,9 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 
 ## 当前状态
 
-本地优先 V1 已实现并通过 74 项真实进程黑盒：direct/relay、中心停机、input/mutation exactly-once、
-worker/server restart、VT snapshot oracle、checkpoint、账号隔离与热升级。性能门已满足；macOS 当前稳定版
-Chrome/Safari/Firefox 实机矩阵仍需发布前签字。待办见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+本地优先 V1 已实现，并有全量真实进程黑盒覆盖 direct/P2P/relay、中心停机、连续输入与
+session create/stop 去重、worker/server restart、VT snapshot oracle、checkpoint、账号隔离与热升级。
+`execRun` 等不可回滚副作用在 worker 崩溃后仍可能结果未知，不能笼统宣称 generic exactly-once。
+历史 benchmark 已达到性能门；每次发布仍需复跑 benchmark 与当前 Chrome 实机门。按
+2026-07-25 的既有决策，Safari/Firefox 暂不作为阻断门且可用性仍属未知；原生 iOS 真机生产
+验收待用户完成。待办见 [docs/ROADMAP.md](docs/ROADMAP.md)。

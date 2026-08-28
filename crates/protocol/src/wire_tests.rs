@@ -10,11 +10,41 @@
 use prost::Message;
 
 use crate::wire::{
-    daemon_to_server, device_envelope, server_to_daemon, DaemonAuthError, DaemonEnrollRequest, DaemonToServer, DeviceEnvelope,
-    DeviceExecRun, DevicePtyInputAck, DevicePtyOutput, DeviceRelayDial, DeviceScope, DeviceSessionAttached, DeviceSessionCreate,
-    FsEntry, FsEntryKind, LocalClientHello, PreparedDeviceOperation, ProjectValidated, ServerToDaemon, SessionCreate, SessionPorts,
+    daemon_to_server, device_envelope, server_to_daemon, DaemonAuthError, DaemonEnrollRequest,
+    DaemonToServer, DeviceEnvelope, DeviceExecRun, DevicePtyInputAck, DevicePtyOutput,
+    DeviceRelayDial, DeviceScope, DeviceSessionAttached, DeviceSessionCreate, FsEntry, FsEntryKind,
+    LocalClientHello, PreparedDeviceOperation, ProjectValidated, ServerToDaemon, SessionCreate,
+    SessionPorts,
 };
 use crate::{decode_device_envelope, encode_device_envelope, DEVICE_PROTOCOL_VERSION};
+
+#[derive(Clone, PartialEq, Message)]
+struct LegacyDaemonResync {
+    #[prost(message, repeated, tag = "1")]
+    sessions: Vec<crate::wire::SessionRef>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LegacyDeviceSessionCatalogRequest {
+    #[prost(string, tag = "1")]
+    request_id: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LegacyDeviceSessionCatalog {
+    #[prost(string, tag = "1")]
+    request_id: String,
+    #[prost(message, repeated, tag = "2")]
+    sessions: Vec<crate::wire::DeviceSessionInfo>,
+    #[prost(message, repeated, tag = "3")]
+    exits: Vec<crate::wire::DeviceSessionExitTombstone>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LegacyDeviceExitAck {
+    #[prost(string, repeated, tag = "1")]
+    event_ids: Vec<String>,
+}
 
 /// 反方向：ServerToDaemon 编码 SessionCreate，解码后分派正确、可选字段（shell 缺省）为 None。
 #[test]
@@ -59,7 +89,11 @@ fn project_validated_optional_fields_round_trip() {
     assert_eq!(back.error, None);
     assert_eq!(back.suggested_name, None);
 
-    let with_values = ProjectValidated { error: Some("boom".into()), suggested_name: Some("group/project".into()), ..m };
+    let with_values = ProjectValidated {
+        error: Some("boom".into()),
+        suggested_name: Some("group/project".into()),
+        ..m
+    };
     let back2 = ProjectValidated::decode(with_values.encode_to_vec().as_slice()).unwrap();
     assert_eq!(back2.error, Some("boom".into()));
     assert_eq!(back2.suggested_name, Some("group/project".into()));
@@ -80,7 +114,10 @@ fn optional_uint32_round_trips() {
     let back = DeviceExecRun::decode(m.encode_to_vec().as_slice()).unwrap();
     assert_eq!(back.timeout_ms, None);
 
-    let m2 = DeviceExecRun { timeout_ms: Some(5_000), ..m };
+    let m2 = DeviceExecRun {
+        timeout_ms: Some(5_000),
+        ..m
+    };
     let back2 = DeviceExecRun::decode(m2.encode_to_vec().as_slice()).unwrap();
     assert_eq!(back2.timeout_ms, Some(5_000));
 }
@@ -147,20 +184,22 @@ fn device_envelope_bytes_roundtrip_for_opaque_relay() {
 #[test]
 fn server_to_daemon_relay_dial_roundtrips() {
     let env = ServerToDaemon {
-        payload: Some(server_to_daemon::Payload::DeviceRelayDial(DeviceRelayDial {
-            channel_id: "relay-abc".into(),
-            relay_url: "wss://relay.example/v1/pipe?token=p.s".into(),
-            account_id: "acct-1".into(),
-            client_instance_id: "client-1".into(),
-            transport_generation: u64::from(u32::MAX) + 11,
-            scopes: vec![
-                DeviceScope::SessionRead as i32,
-                DeviceScope::SessionControl as i32,
-                DeviceScope::Rpc as i32,
-                DeviceScope::Lifecycle as i32,
-            ],
-            protocol_version: DEVICE_PROTOCOL_VERSION,
-        })),
+        payload: Some(server_to_daemon::Payload::DeviceRelayDial(
+            DeviceRelayDial {
+                channel_id: "relay-abc".into(),
+                relay_url: "wss://relay.example/v1/pipe?token=p.s".into(),
+                account_id: "acct-1".into(),
+                client_instance_id: "client-1".into(),
+                transport_generation: u64::from(u32::MAX) + 11,
+                scopes: vec![
+                    DeviceScope::SessionRead as i32,
+                    DeviceScope::SessionControl as i32,
+                    DeviceScope::Rpc as i32,
+                    DeviceScope::Lifecycle as i32,
+                ],
+                protocol_version: DEVICE_PROTOCOL_VERSION,
+            },
+        )),
     };
     let decoded = ServerToDaemon::decode(env.encode_to_vec().as_slice()).unwrap();
     match decoded.payload {
@@ -184,15 +223,17 @@ fn device_snapshot_uint64_fields_preserve_high_bits() {
     let attached = DeviceEnvelope {
         protocol_version: DEVICE_PROTOCOL_VERSION,
         channel_id: "channel-high-bits".into(),
-        payload: Some(device_envelope::Payload::SessionAttached(DeviceSessionAttached {
-            request_id: "request-1".into(),
-            session_id: "session-1".into(),
-            holder_epoch: u64::MAX - 1,
-            snapshot_seq: u64::MAX - 1024,
-            ansi_snapshot: Some(b"\x1b[2Jready".to_vec()),
-            cols: 240,
-            rows: 80,
-        })),
+        payload: Some(device_envelope::Payload::SessionAttached(
+            DeviceSessionAttached {
+                request_id: "request-1".into(),
+                session_id: "session-1".into(),
+                holder_epoch: u64::MAX - 1,
+                snapshot_seq: u64::MAX - 1024,
+                ansi_snapshot: Some(b"\x1b[2Jready".to_vec()),
+                cols: 240,
+                rows: 80,
+            },
+        )),
     };
 
     let decoded = DeviceEnvelope::decode(attached.encode_to_vec().as_slice()).unwrap();
@@ -214,16 +255,18 @@ fn local_client_hello_round_trip_preserves_key_material_and_generation() {
     let hello = DeviceEnvelope {
         protocol_version: DEVICE_PROTOCOL_VERSION,
         channel_id: String::new(),
-        payload: Some(device_envelope::Payload::LocalClientHello(LocalClientHello {
-            protocol_version: DEVICE_PROTOCOL_VERSION,
-            grant_id: "grant-1".into(),
-            browser_public_key_sec1: public_key.clone(),
-            client_instance_id: "client-1".into(),
-            transport_generation: 9_007_199_254_740_999,
-            lease_id: Some("lease-1".into()),
-            gateway_nonce: vec![0x33; 32],
-            signature_p1363: signature.clone(),
-        })),
+        payload: Some(device_envelope::Payload::LocalClientHello(
+            LocalClientHello {
+                protocol_version: DEVICE_PROTOCOL_VERSION,
+                grant_id: "grant-1".into(),
+                browser_public_key_sec1: public_key.clone(),
+                client_instance_id: "client-1".into(),
+                transport_generation: 9_007_199_254_740_999,
+                lease_id: Some("lease-1".into()),
+                gateway_nonce: vec![0x33; 32],
+                signature_p1363: signature.clone(),
+            },
+        )),
     };
 
     let decoded = DeviceEnvelope::decode(hello.encode_to_vec().as_slice()).unwrap();
@@ -245,24 +288,28 @@ fn prepared_device_operation_template_round_trip() {
     let template = DeviceEnvelope {
         protocol_version: DEVICE_PROTOCOL_VERSION,
         channel_id: String::new(),
-        payload: Some(device_envelope::Payload::SessionCreate(DeviceSessionCreate {
-            request_id: "request-create".into(),
-            operation_id: "operation-create".into(),
-            session_id: "session-create".into(),
-            task_id: "task-create".into(),
-            cwd: "/repo/worktree".into(),
-            shell: None,
-            cols: 120,
-            rows: 40,
-        })),
+        payload: Some(device_envelope::Payload::SessionCreate(
+            DeviceSessionCreate {
+                request_id: "request-create".into(),
+                operation_id: "operation-create".into(),
+                session_id: "session-create".into(),
+                task_id: "task-create".into(),
+                cwd: "/repo/worktree".into(),
+                shell: None,
+                cols: 120,
+                rows: 40,
+            },
+        )),
     };
     let outer = ServerToDaemon {
-        payload: Some(server_to_daemon::Payload::PreparedDeviceOperation(PreparedDeviceOperation {
-            operation_id: "operation-create".into(),
-            daemon_id: "daemon-1".into(),
-            frame: template.encode_to_vec(),
-            expires_at: 1_800_000_000_000.0,
-        })),
+        payload: Some(server_to_daemon::Payload::PreparedDeviceOperation(
+            PreparedDeviceOperation {
+                operation_id: "operation-create".into(),
+                daemon_id: "daemon-1".into(),
+                frame: template.encode_to_vec(),
+                expires_at: 1_800_000_000_000.0,
+            },
+        )),
     };
 
     let decoded = ServerToDaemon::decode(outer.encode_to_vec().as_slice()).unwrap();
@@ -279,7 +326,11 @@ fn prepared_device_operation_template_round_trip() {
 
 #[test]
 fn rust_device_envelope_helpers_reject_malformed_bytes() {
-    let envelope = DeviceEnvelope { protocol_version: DEVICE_PROTOCOL_VERSION, channel_id: "helper-channel".into(), payload: None };
+    let envelope = DeviceEnvelope {
+        protocol_version: DEVICE_PROTOCOL_VERSION,
+        channel_id: "helper-channel".into(),
+        payload: None,
+    };
     let encoded = encode_device_envelope(&envelope);
     assert_eq!(decode_device_envelope(&encoded), Some(envelope));
     assert_eq!(decode_device_envelope(&[0xff, 0xff, 0xff]), None);
@@ -288,14 +339,26 @@ fn rust_device_envelope_helpers_reject_malformed_bytes() {
 /// repeated 消息字段（sessions/ports）+ enum 字段（FsEntryKind）往返正确。
 #[test]
 fn ports_update_and_fs_entry_kind_round_trip() {
-    let sessions = vec![SessionPorts { session_id: "s1".into(), ports: vec![3000, 8080] }];
-    let m = crate::wire::PortsUpdate { sessions: sessions.clone() };
+    let sessions = vec![SessionPorts {
+        session_id: "s1".into(),
+        ports: vec![3000, 8080],
+    }];
+    let m = crate::wire::PortsUpdate {
+        sessions: sessions.clone(),
+    };
     let back = crate::wire::PortsUpdate::decode(m.encode_to_vec().as_slice()).unwrap();
     assert_eq!(back.sessions, sessions);
 
-    let entry = FsEntry { name: "src".into(), kind: FsEntryKind::Dir as i32, size: 4096.0 };
+    let entry = FsEntry {
+        name: "src".into(),
+        kind: FsEntryKind::Dir as i32,
+        size: 4096.0,
+    };
     let back_entry = FsEntry::decode(entry.encode_to_vec().as_slice()).unwrap();
-    assert_eq!(FsEntryKind::try_from(back_entry.kind).unwrap(), FsEntryKind::Dir);
+    assert_eq!(
+        FsEntryKind::try_from(back_entry.kind).unwrap(),
+        FsEntryKind::Dir
+    );
     assert_eq!(back_entry.size, 4096.0);
 }
 
@@ -304,7 +367,13 @@ fn ports_update_and_fs_entry_kind_round_trip() {
 #[test]
 fn proxy_opened_and_closed_round_trip() {
     let opened = DaemonToServer {
-        payload: Some(daemon_to_server::Payload::ProxyOpened(crate::wire::ProxyOpened { conn_id: "c2".into(), ok: true, error: None })),
+        payload: Some(daemon_to_server::Payload::ProxyOpened(
+            crate::wire::ProxyOpened {
+                conn_id: "c2".into(),
+                ok: true,
+                error: None,
+            },
+        )),
     };
     let back = DaemonToServer::decode(opened.encode_to_vec().as_slice()).unwrap();
     match back.payload {
@@ -316,10 +385,148 @@ fn proxy_opened_and_closed_round_trip() {
         other => panic!("wrong variant: {other:?}"),
     }
 
-    let closed =
-        ServerToDaemon { payload: Some(server_to_daemon::Payload::ProxyClose(crate::wire::ProxyClose { conn_id: "c3".into() })) };
+    let closed = ServerToDaemon {
+        payload: Some(server_to_daemon::Payload::ProxyClose(
+            crate::wire::ProxyClose {
+                conn_id: "c3".into(),
+            },
+        )),
+    };
     let back2 = ServerToDaemon::decode(closed.encode_to_vec().as_slice()).unwrap();
-    assert!(matches!(back2.payload, Some(server_to_daemon::Payload::ProxyClose(m)) if m.conn_id == "c3"));
+    assert!(
+        matches!(back2.payload, Some(server_to_daemon::Payload::ProxyClose(m)) if m.conn_id == "c3")
+    );
+}
+
+#[test]
+fn resync_snapshot_metadata_keeps_legacy_protobuf_readable_both_ways() {
+    let session = crate::wire::SessionRef {
+        session_id: "session-1".into(),
+        task_id: "task-1".into(),
+    };
+    let decoded = crate::wire::DaemonResync::decode(
+        LegacyDaemonResync {
+            sessions: vec![session.clone()],
+        }
+        .encode_to_vec()
+        .as_slice(),
+    )
+    .unwrap();
+    assert_eq!(decoded.sessions, vec![session.clone()]);
+    assert!(decoded.snapshot_owner_id.is_empty());
+    assert_eq!(decoded.snapshot_epoch, 0);
+
+    let legacy = LegacyDaemonResync::decode(
+        crate::wire::DaemonResync {
+            sessions: vec![session.clone()],
+            snapshot_owner_id: "owner-1".into(),
+            snapshot_epoch: 7,
+        }
+        .encode_to_vec()
+        .as_slice(),
+    )
+    .unwrap();
+    assert_eq!(legacy.sessions, vec![session]);
+}
+
+#[test]
+fn catalog_paging_and_bound_ack_fields_default_for_legacy_messages() {
+    let request = crate::wire::DeviceSessionCatalogRequest::decode(
+        LegacyDeviceSessionCatalogRequest {
+            request_id: "catalog-1".into(),
+        }
+        .encode_to_vec()
+        .as_slice(),
+    )
+    .unwrap();
+    assert_eq!(request.request_id, "catalog-1");
+    assert!(request.snapshot_owner_id.is_empty());
+    assert_eq!(request.snapshot_epoch, 0);
+    assert_eq!(request.session_offset, 0);
+    assert_eq!(request.exit_offset, 0);
+    assert_eq!(request.max_page_bytes, 0);
+
+    let session = crate::wire::DeviceSessionInfo {
+        session_id: "session-1".into(),
+        task_id: "task-1".into(),
+        pid: 42,
+        ..Default::default()
+    };
+    let exit = crate::wire::DeviceSessionExitTombstone {
+        event_id: "exit-1".into(),
+        session_id: "session-1".into(),
+        task_id: "task-1".into(),
+        exit_code: 0,
+        ..Default::default()
+    };
+    let catalog = crate::wire::DeviceSessionCatalog::decode(
+        LegacyDeviceSessionCatalog {
+            request_id: "catalog-1".into(),
+            sessions: vec![session.clone()],
+            exits: vec![exit.clone()],
+        }
+        .encode_to_vec()
+        .as_slice(),
+    )
+    .unwrap();
+    assert_eq!(catalog.sessions, vec![session.clone()]);
+    assert_eq!(catalog.exits, vec![exit.clone()]);
+    assert!(catalog.snapshot_owner_id.is_empty());
+    assert_eq!(catalog.snapshot_epoch, 0);
+    assert_eq!(catalog.session_offset, 0);
+    assert_eq!(catalog.exit_offset, 0);
+    assert_eq!(catalog.next_session_offset, 0);
+    assert_eq!(catalog.next_exit_offset, 0);
+    assert!(!catalog.complete);
+    assert!(!catalog.reset);
+
+    let legacy_catalog = LegacyDeviceSessionCatalog::decode(
+        crate::wire::DeviceSessionCatalog {
+            request_id: "catalog-2".into(),
+            sessions: vec![session],
+            exits: vec![exit],
+            snapshot_owner_id: "owner-2".into(),
+            snapshot_epoch: 9,
+            session_offset: 1,
+            exit_offset: 2,
+            next_session_offset: 3,
+            next_exit_offset: 4,
+            complete: true,
+            reset: false,
+        }
+        .encode_to_vec()
+        .as_slice(),
+    )
+    .unwrap();
+    assert_eq!(legacy_catalog.request_id, "catalog-2");
+    assert_eq!(legacy_catalog.sessions.len(), 1);
+    assert_eq!(legacy_catalog.exits.len(), 1);
+
+    let ack = crate::wire::DeviceExitAck::decode(
+        LegacyDeviceExitAck {
+            event_ids: vec!["exit-1".into()],
+        }
+        .encode_to_vec()
+        .as_slice(),
+    )
+    .unwrap();
+    assert_eq!(ack.event_ids, vec!["exit-1"]);
+    assert!(ack.request_id.is_empty());
+    assert!(ack.snapshot_owner_id.is_empty());
+    assert_eq!(ack.snapshot_epoch, 0);
+
+    let legacy_ack = LegacyDeviceExitAck::decode(
+        crate::wire::DeviceExitAck {
+            event_ids: vec!["exit-2".into()],
+            request_id: "catalog-2".into(),
+            snapshot_owner_id: "owner-2".into(),
+            snapshot_epoch: 9,
+        }
+        .encode_to_vec()
+        .as_slice(),
+    )
+    .unwrap();
+    assert_eq!(legacy_ack.event_ids, vec!["exit-2"]);
 }
 
 /// 空 payload（oneof 全无 variant）：decode 成功但 payload=None——调用方据此丢弃并记日志，
@@ -341,21 +548,29 @@ fn decode_rejects_garbage_bytes() {
 /// need_enroll 等 bool 字段 + DaemonAuthError/DaemonEnrollRequest 分派完整性。
 #[test]
 fn auth_error_and_enroll_request_round_trip() {
-    let m = DaemonAuthError { message: "bad".into(), need_enroll: true };
+    let m = DaemonAuthError {
+        message: "bad".into(),
+        need_enroll: true,
+    };
     let back = DaemonAuthError::decode(m.encode_to_vec().as_slice()).unwrap();
     assert!(back.need_enroll);
     assert_eq!(back.message, "bad");
 
     let req = DaemonToServer {
-        payload: Some(daemon_to_server::Payload::DaemonEnrollRequest(DaemonEnrollRequest {
-            name: "dev".into(),
-            host: "h".into(),
-            platform: "darwin".into(),
-            worker_version: "wv2".into(),
-            supervisor_version: "sv2".into(),
-            arch: "x86_64".into(),
-        })),
+        payload: Some(daemon_to_server::Payload::DaemonEnrollRequest(
+            DaemonEnrollRequest {
+                name: "dev".into(),
+                host: "h".into(),
+                platform: "darwin".into(),
+                worker_version: "wv2".into(),
+                supervisor_version: "sv2".into(),
+                arch: "x86_64".into(),
+            },
+        )),
     };
     let back2 = DaemonToServer::decode(req.encode_to_vec().as_slice()).unwrap();
-    assert!(matches!(back2.payload, Some(daemon_to_server::Payload::DaemonEnrollRequest(_))));
+    assert!(matches!(
+        back2.payload,
+        Some(daemon_to_server::Payload::DaemonEnrollRequest(_))
+    ));
 }

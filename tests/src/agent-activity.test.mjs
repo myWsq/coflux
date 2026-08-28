@@ -55,7 +55,7 @@ after(async () => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-test("agent presence：claude 进程出现→上报（含归属），退出→清空；新订阅补发全量", async () => {
+test("agent presence：出现/退出、新订阅补发与 server 重启 force 恢复", async () => {
   const home = mkDir();
   // 假 agent：脚本文件本身命名为 claude——Linux 下 comm 即脚本 basename，macOS 下
   // argv[0]=/bin/sh（解释器）→ 匹配 argv[1] 的 basename，两平台各命中一条规则。
@@ -96,16 +96,31 @@ test("agent presence：claude 进程出现→上报（含归属），退出→�
     fresh.close();
   }
 
+  // server 的 presence 是纯内存态：重启后 daemon 侧观察结果没有变化，周期去重不会重发；
+  // 必须依靠重新认证后的 force 全量补齐。先关旧 client，PTY/假 agent 仍由 supervisor 持有。
+  device.close();
+  await stack.restartServer();
+  await stack.waitDaemonOnline();
+  const reconnected = await openRelayDevice(stack);
+  const reconnectedControl = reconnected.control;
+  const forced = await reconnectedControl.waitFor(
+    (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId && s.agent === "claude"),
+    "server 重启后 force 补发 agent presence",
+    20000,
+  );
+  assert.equal(forced.daemonId, stack.daemonId);
+
   // Ctrl-C 结束假 agent → 下一轮扫描发现集合变化 → 上报清空
-  await device.input(sessionId, "\x03");
-  await c.waitFor(
+  await reconnected.attach(sessionId);
+  await reconnected.input(sessionId, "\x03");
+  await reconnectedControl.waitFor(
     (m) => m.case === "sessionAgentsUpdated" && !m.sessions.some((s) => s.sessionId === sessionId),
     "agent 退出后 presence 清空",
     20000,
   );
 
-  await removeWorkspace(c, ws.id);
-  device.close();
+  await removeWorkspace(reconnectedControl, ws.id);
+  reconnected.close();
 });
 
 test("hook 回合状态：Stop→done、后台在飞的 Stop→active、PermissionRequest→approval、Notification 分型、PreToolUse→active；树外 pid 与非 json 被拒", async () => {

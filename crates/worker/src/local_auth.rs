@@ -15,7 +15,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use coflux_protocol::wire::{
-    DeviceScope, LocalAuthErrorCode, LocalBrowserGrant, LocalClientHello, LocalGatewayDescriptor, LocalGatewayHello, OnlineDeviceLease,
+    DeviceScope, LocalAuthErrorCode, LocalBrowserGrant, LocalClientHello, LocalGatewayDescriptor,
+    LocalGatewayHello, OnlineDeviceLease,
 };
 use coflux_protocol::DEVICE_PROTOCOL_VERSION;
 use p256::ecdsa::signature::{Signer, Verifier};
@@ -116,7 +117,9 @@ impl PersistedGrant {
     }
 
     fn into_wire(self) -> Result<LocalBrowserGrant, String> {
-        let public_key_sec1 = BASE64.decode(self.public_key_sec1).map_err(|_| "grant public key base64 无效".to_string())?;
+        let public_key_sec1 = BASE64
+            .decode(self.public_key_sec1)
+            .map_err(|_| "grant public key base64 无效".to_string())?;
         Ok(LocalBrowserGrant {
             grant_id: self.grant_id,
             account_id: self.account_id,
@@ -138,11 +141,18 @@ struct FailureLimiter {
 
 impl FailureLimiter {
     fn new(limit: usize, window: Duration) -> Self {
-        Self { by_origin: HashMap::new(), limit: limit.max(1), window }
+        Self {
+            by_origin: HashMap::new(),
+            limit: limit.max(1),
+            window,
+        }
     }
 
     fn purge(queue: &mut VecDeque<Instant>, now: Instant, window: Duration) {
-        while queue.front().is_some_and(|instant| now.saturating_duration_since(*instant) >= window) {
+        while queue
+            .front()
+            .is_some_and(|instant| now.saturating_duration_since(*instant) >= window)
+        {
             queue.pop_front();
         }
     }
@@ -184,7 +194,12 @@ impl LocalAuth {
         )
     }
 
-    fn load_or_create_path(path: PathBuf, challenge_ttl: Duration, failure_limit: usize, failure_window: Duration) -> Result<Self, String> {
+    fn load_or_create_path(
+        path: PathBuf,
+        challenge_ttl: Duration,
+        failure_limit: usize,
+        failure_window: Duration,
+    ) -> Result<Self, String> {
         let (signing_key, state) = match fs::read(&path) {
             Ok(bytes) => decode_store(&bytes)?,
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -193,7 +208,9 @@ impl LocalAuth {
                 match create_initial_store(&path, &signing_key, &state) {
                     Ok(()) => (signing_key, state),
                     Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                        let bytes = fs::read(&path).map_err(|read_error| format!("读取并发创建的 local gateway store: {read_error}"))?;
+                        let bytes = fs::read(&path).map_err(|read_error| {
+                            format!("读取并发创建的 local gateway store: {read_error}")
+                        })?;
                         decode_store(&bytes)?
                     }
                     Err(error) => return Err(format!("创建 local gateway store: {error}")),
@@ -222,7 +239,11 @@ impl LocalAuth {
     }
 
     pub fn gateway_public_key(&self) -> Vec<u8> {
-        self.signing_key.verifying_key().to_encoded_point(false).as_bytes().to_vec()
+        self.signing_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec()
     }
 
     pub fn origin_allowed(&self, origin: &str) -> bool {
@@ -244,7 +265,11 @@ impl LocalAuth {
     }
 
     /// 返回是否实际改变持久 grant；幂等重装不应迫使现有 direct channel 重连。
-    pub fn install_grant(&self, mut grant: LocalBrowserGrant, daemon_id: &str) -> Result<bool, String> {
+    pub fn install_grant(
+        &self,
+        mut grant: LocalBrowserGrant,
+        daemon_id: &str,
+    ) -> Result<bool, String> {
         validate_grant(&grant, Some(daemon_id))?;
         grant.offline_scopes.sort_unstable();
         grant.offline_scopes.dedup();
@@ -270,7 +295,10 @@ impl LocalAuth {
         self.update_state(|state| {
             state.grants.remove(grant_id);
         })?;
-        self.leases.lock().unwrap().retain(|_, lease| lease.grant_id != grant_id);
+        self.leases
+            .lock()
+            .unwrap()
+            .retain(|_, lease| lease.grant_id != grant_id);
         Ok(())
     }
 
@@ -285,7 +313,12 @@ impl LocalAuth {
         if !self.server_online.load(Ordering::Acquire) {
             return Err("中心连接离线，不能安装 lease".into());
         }
-        validate_lease(&lease, daemon_id, &self.state.lock().unwrap().grants, epoch_ms())?;
+        validate_lease(
+            &lease,
+            daemon_id,
+            &self.state.lock().unwrap().grants,
+            epoch_ms(),
+        )?;
         let mut leases = self.leases.lock().unwrap();
         let now = epoch_ms();
         leases.retain(|_, lease| lease.expires_at > now);
@@ -296,17 +329,32 @@ impl LocalAuth {
         Ok(())
     }
 
-    pub fn begin_challenge(&self, daemon_id: &str, origin: &str) -> Result<LocalChallenge, AuthFailure> {
+    pub fn begin_challenge(
+        &self,
+        daemon_id: &str,
+        origin: &str,
+    ) -> Result<LocalChallenge, AuthFailure> {
         self.begin_challenge_at(daemon_id, origin, Instant::now())
     }
 
-    fn begin_challenge_at(&self, daemon_id: &str, origin: &str, now: Instant) -> Result<LocalChallenge, AuthFailure> {
+    fn begin_challenge_at(
+        &self,
+        daemon_id: &str,
+        origin: &str,
+        now: Instant,
+    ) -> Result<LocalChallenge, AuthFailure> {
         if !self.limiter.lock().unwrap().allowed(origin, now) {
-            return Err(AuthFailure::new(LocalAuthErrorCode::RateLimited, "本地认证尝试过多"));
+            return Err(AuthFailure::new(
+                LocalAuthErrorCode::RateLimited,
+                "本地认证尝试过多",
+            ));
         }
         if !valid_identifier(daemon_id) || !self.state.lock().unwrap().origins.contains(origin) {
             self.limiter.lock().unwrap().failed(origin, now);
-            return Err(AuthFailure::new(LocalAuthErrorCode::OriginDenied, "Origin 不在 allowlist"));
+            return Err(AuthFailure::new(
+                LocalAuthErrorCode::OriginDenied,
+                "Origin 不在 allowlist",
+            ));
         }
         let mut nonce = vec![0u8; 32];
         OsRng.fill_bytes(&mut nonce);
@@ -327,7 +375,11 @@ impl LocalAuth {
         })
     }
 
-    pub fn authenticate(&self, challenge: &mut LocalChallenge, hello: &LocalClientHello) -> Result<AuthenticatedLocal, AuthFailure> {
+    pub fn authenticate(
+        &self,
+        challenge: &mut LocalChallenge,
+        hello: &LocalClientHello,
+    ) -> Result<AuthenticatedLocal, AuthFailure> {
         self.authenticate_at(challenge, hello, Instant::now(), epoch_ms())
     }
 
@@ -343,7 +395,9 @@ impl LocalAuth {
         let mut limiter = self.limiter.lock().unwrap();
         match &result {
             Ok(_) => limiter.succeeded(&origin),
-            Err(error) if error.code != LocalAuthErrorCode::RateLimited => limiter.failed(&origin, now),
+            Err(error) if error.code != LocalAuthErrorCode::RateLimited => {
+                limiter.failed(&origin, now)
+            }
             Err(_) => {}
         }
         result
@@ -356,40 +410,80 @@ impl LocalAuth {
         now: Instant,
         now_ms: f64,
     ) -> Result<AuthenticatedLocal, AuthFailure> {
-        if !self.limiter.lock().unwrap().allowed(&challenge.hello.origin, now) {
-            return Err(AuthFailure::new(LocalAuthErrorCode::RateLimited, "本地认证尝试过多"));
+        if !self
+            .limiter
+            .lock()
+            .unwrap()
+            .allowed(&challenge.hello.origin, now)
+        {
+            return Err(AuthFailure::new(
+                LocalAuthErrorCode::RateLimited,
+                "本地认证尝试过多",
+            ));
         }
-        if challenge.used || now.saturating_duration_since(challenge.issued_at) > self.challenge_ttl || hello.gateway_nonce != challenge.hello.nonce {
+        if challenge.used
+            || now.saturating_duration_since(challenge.issued_at) > self.challenge_ttl
+            || hello.gateway_nonce != challenge.hello.nonce
+        {
             challenge.used = true;
-            return Err(AuthFailure::new(LocalAuthErrorCode::NonceInvalid, "gateway nonce 无效或已使用"));
+            return Err(AuthFailure::new(
+                LocalAuthErrorCode::NonceInvalid,
+                "gateway nonce 无效或已使用",
+            ));
         }
         // nonce 无论成功失败都只能尝试一次，避免同一 challenge 被离线枚举签名。
         challenge.used = true;
         if hello.protocol_version != DEVICE_PROTOCOL_VERSION {
-            return Err(AuthFailure::new(LocalAuthErrorCode::VersionMismatch, "Device protocol version 不兼容"));
+            return Err(AuthFailure::new(
+                LocalAuthErrorCode::VersionMismatch,
+                "Device protocol version 不兼容",
+            ));
         }
         if !valid_identifier(&hello.grant_id)
             || !valid_identifier(&hello.client_instance_id)
-            || hello.lease_id.as_deref().is_some_and(|lease_id| !valid_identifier(lease_id))
+            || hello
+                .lease_id
+                .as_deref()
+                .is_some_and(|lease_id| !valid_identifier(lease_id))
             || hello.transport_generation == 0
         {
-            return Err(AuthFailure::new(LocalAuthErrorCode::SignatureInvalid, "client identity/generation 无效"));
+            return Err(AuthFailure::new(
+                LocalAuthErrorCode::SignatureInvalid,
+                "client identity/generation 无效",
+            ));
         }
 
         let state = self.state.lock().unwrap();
         let Some(grant) = state.grants.get(&hello.grant_id) else {
-            return Err(AuthFailure::new(LocalAuthErrorCode::GrantUnknown, "browser grant 不存在"));
+            return Err(AuthFailure::new(
+                LocalAuthErrorCode::GrantUnknown,
+                "browser grant 不存在",
+            ));
         };
         if grant.daemon_id != challenge.hello.daemon_id || grant.origin != challenge.hello.origin {
-            return Err(AuthFailure::new(LocalAuthErrorCode::GrantUnknown, "browser grant 与 daemon/origin 不匹配"));
+            return Err(AuthFailure::new(
+                LocalAuthErrorCode::GrantUnknown,
+                "browser grant 与 daemon/origin 不匹配",
+            ));
         }
         if grant.public_key_sec1 != hello.browser_public_key_sec1 {
-            return Err(AuthFailure::new(LocalAuthErrorCode::KeyMismatch, "browser public key 与 grant 不匹配"));
+            return Err(AuthFailure::new(
+                LocalAuthErrorCode::KeyMismatch,
+                "browser public key 与 grant 不匹配",
+            ));
         }
-        let verifying_key = parse_public_key(&hello.browser_public_key_sec1)
-            .map_err(|_| AuthFailure::new(LocalAuthErrorCode::KeyMismatch, "browser public key 格式无效"))?;
-        let signature = Signature::from_slice(&hello.signature_p1363)
-            .map_err(|_| AuthFailure::new(LocalAuthErrorCode::SignatureInvalid, "client signature 格式无效"))?;
+        let verifying_key = parse_public_key(&hello.browser_public_key_sec1).map_err(|_| {
+            AuthFailure::new(
+                LocalAuthErrorCode::KeyMismatch,
+                "browser public key 格式无效",
+            )
+        })?;
+        let signature = Signature::from_slice(&hello.signature_p1363).map_err(|_| {
+            AuthFailure::new(
+                LocalAuthErrorCode::SignatureInvalid,
+                "client signature 格式无效",
+            )
+        })?;
         let transcript = client_transcript(
             hello.protocol_version,
             &challenge.hello.daemon_id,
@@ -402,18 +496,27 @@ impl LocalAuth {
             hello.transport_generation,
             hello.lease_id.as_deref(),
         );
-        verifying_key
-            .verify(&transcript, &signature)
-            .map_err(|_| AuthFailure::new(LocalAuthErrorCode::SignatureInvalid, "client signature 验证失败"))?;
+        verifying_key.verify(&transcript, &signature).map_err(|_| {
+            AuthFailure::new(
+                LocalAuthErrorCode::SignatureInvalid,
+                "client signature 验证失败",
+            )
+        })?;
 
         let mut scopes = grant.offline_scopes.clone();
         if let Some(lease_id) = hello.lease_id.as_deref() {
             if !self.server_online.load(Ordering::Acquire) {
-                return Err(AuthFailure::new(LocalAuthErrorCode::LeaseInvalid, "中心离线，elevated lease 已失效"));
+                return Err(AuthFailure::new(
+                    LocalAuthErrorCode::LeaseInvalid,
+                    "中心离线，elevated lease 已失效",
+                ));
             }
             let leases = self.leases.lock().unwrap();
             let Some(lease) = leases.get(lease_id) else {
-                return Err(AuthFailure::new(LocalAuthErrorCode::LeaseInvalid, "online lease 不存在"));
+                return Err(AuthFailure::new(
+                    LocalAuthErrorCode::LeaseInvalid,
+                    "online lease 不存在",
+                ));
             };
             if lease.grant_id != grant.grant_id
                 || lease.account_id != grant.account_id
@@ -421,7 +524,10 @@ impl LocalAuth {
                 || !lease.expires_at.is_finite()
                 || lease.expires_at <= now_ms
             {
-                return Err(AuthFailure::new(LocalAuthErrorCode::LeaseInvalid, "online lease 已过期或绑定不匹配"));
+                return Err(AuthFailure::new(
+                    LocalAuthErrorCode::LeaseInvalid,
+                    "online lease 已过期或绑定不匹配",
+                ));
             }
             scopes.extend_from_slice(&lease.scopes);
         }
@@ -446,7 +552,9 @@ impl LocalAuth {
     /// 不依赖 WebSocket 重连。
     pub fn effective_scopes(&self, principal: &LocalPrincipal) -> Vec<i32> {
         let state = self.state.lock().unwrap();
-        let Some(grant) = state.grants.get(&principal.grant_id) else { return Vec::new() };
+        let Some(grant) = state.grants.get(&principal.grant_id) else {
+            return Vec::new();
+        };
         if grant.account_id != principal.account_id
             || grant.daemon_id != principal.daemon_id
             || grant.origin != principal.origin
@@ -478,14 +586,21 @@ impl LocalAuth {
         let mut current = self.state.lock().unwrap();
         let mut next = current.clone();
         update(&mut next);
-        write_store_atomic(&self.path, &self.signing_key, &next).map_err(|error| format!("写 local gateway store: {error}"))?;
+        write_store_atomic(&self.path, &self.signing_key, &next)
+            .map_err(|error| format!("写 local gateway store: {error}"))?;
         *current = next;
         Ok(())
     }
 }
 
-fn validate_grant(grant: &LocalBrowserGrant, expected_daemon_id: Option<&str>) -> Result<(), String> {
-    if !valid_identifier(&grant.grant_id) || !valid_identifier(&grant.account_id) || !valid_identifier(&grant.daemon_id) {
+fn validate_grant(
+    grant: &LocalBrowserGrant,
+    expected_daemon_id: Option<&str>,
+) -> Result<(), String> {
+    if !valid_identifier(&grant.grant_id)
+        || !valid_identifier(&grant.account_id)
+        || !valid_identifier(&grant.daemon_id)
+    {
         return Err("grant identity 字段不能为空".into());
     }
     if expected_daemon_id.is_some_and(|expected| expected != grant.daemon_id) {
@@ -494,14 +609,18 @@ fn validate_grant(grant: &LocalBrowserGrant, expected_daemon_id: Option<&str>) -
     if !valid_origin(&grant.origin) {
         return Err("grant Origin 无效".into());
     }
-    parse_public_key(&grant.public_key_sec1).map_err(|_| "grant public key 必须是 P-256 uncompressed SEC1".to_string())?;
+    parse_public_key(&grant.public_key_sec1)
+        .map_err(|_| "grant public key 必须是 P-256 uncompressed SEC1".to_string())?;
     if !grant.created_at.is_finite() {
         return Err("grant createdAt 无效".into());
     }
     if grant.offline_scopes.is_empty()
         || grant.offline_scopes.len() > 2
         || grant.offline_scopes.iter().any(|scope| {
-            !matches!(DeviceScope::try_from(*scope), Ok(DeviceScope::SessionRead | DeviceScope::SessionControl))
+            !matches!(
+                DeviceScope::try_from(*scope),
+                Ok(DeviceScope::SessionRead | DeviceScope::SessionControl)
+            )
         })
     {
         return Err("offline grant 只能包含 session read/control scope".into());
@@ -523,7 +642,9 @@ fn validate_lease(
     {
         return Err("lease identity/binding 无效".into());
     }
-    let Some(grant) = grants.get(&lease.grant_id) else { return Err("lease 对应 grant 不存在".into()) };
+    let Some(grant) = grants.get(&lease.grant_id) else {
+        return Err("lease 对应 grant 不存在".into());
+    };
     if lease.account_id != grant.account_id || lease.daemon_id != grant.daemon_id {
         return Err("lease 与 grant 绑定不匹配".into());
     }
@@ -532,10 +653,15 @@ fn validate_lease(
     }
     if lease.scopes.is_empty()
         || lease.scopes.len() > 4
-        || lease
-            .scopes
-            .iter()
-            .any(|scope| !matches!(DeviceScope::try_from(*scope), Ok(DeviceScope::SessionRead | DeviceScope::SessionControl | DeviceScope::Rpc | DeviceScope::Lifecycle)))
+        || lease.scopes.iter().any(|scope| {
+            !matches!(
+                DeviceScope::try_from(*scope),
+                Ok(DeviceScope::SessionRead
+                    | DeviceScope::SessionControl
+                    | DeviceScope::Rpc
+                    | DeviceScope::Lifecycle)
+            )
+        })
     {
         return Err("lease scope 无效".into());
     }
@@ -546,15 +672,23 @@ fn valid_origin(origin: &str) -> bool {
     if origin.len() > MAX_ORIGIN_BYTES {
         return false;
     }
-    let rest = origin.strip_prefix("https://").or_else(|| origin.strip_prefix("http://"));
+    let rest = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"));
     rest.is_some_and(|authority| {
         !authority.is_empty()
-            && !authority.bytes().any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'?' | b'#' | b'@'))
+            && !authority
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'?' | b'#' | b'@'))
     })
 }
 
 fn valid_identifier(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_ID_BYTES && !value.bytes().any(|byte| byte == 0 || byte.is_ascii_control())
+    !value.is_empty()
+        && value.len() <= MAX_ID_BYTES
+        && !value
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
 }
 
 fn parse_public_key(bytes: &[u8]) -> Result<VerifyingKey, p256::ecdsa::Error> {
@@ -564,10 +698,20 @@ fn parse_public_key(bytes: &[u8]) -> Result<VerifyingKey, p256::ecdsa::Error> {
     VerifyingKey::from_sec1_bytes(bytes)
 }
 
-pub(crate) fn gateway_transcript(protocol_version: u32, daemon_id: &str, origin: &str, nonce: &[u8]) -> Vec<u8> {
+pub(crate) fn gateway_transcript(
+    protocol_version: u32,
+    daemon_id: &str,
+    origin: &str,
+    nonce: &[u8],
+) -> Vec<u8> {
     transcript(
         GATEWAY_DOMAIN,
-        &[&protocol_version.to_be_bytes(), daemon_id.as_bytes(), origin.as_bytes(), nonce],
+        &[
+            &protocol_version.to_be_bytes(),
+            daemon_id.as_bytes(),
+            origin.as_bytes(),
+            nonce,
+        ],
     )
 }
 
@@ -602,7 +746,12 @@ pub(crate) fn client_transcript(
 }
 
 fn transcript(domain: &[u8], fields: &[&[u8]]) -> Vec<u8> {
-    let capacity = domain.len() + 1 + fields.iter().map(|field| 4usize.saturating_add(field.len())).sum::<usize>();
+    let capacity = domain.len()
+        + 1
+        + fields
+            .iter()
+            .map(|field| 4usize.saturating_add(field.len()))
+            .sum::<usize>();
     let mut output = Vec::with_capacity(capacity);
     output.extend_from_slice(domain);
     output.push(0);
@@ -619,18 +768,29 @@ fn encode_store(signing_key: &SigningKey, state: &LocalState) -> Result<Vec<u8>,
         version: STORE_VERSION,
         private_key: BASE64.encode(signing_key.to_bytes()),
         origins: state.origins.iter().cloned().collect(),
-        grants: state.grants.values().map(PersistedGrant::from_wire).collect(),
+        grants: state
+            .grants
+            .values()
+            .map(PersistedGrant::from_wire)
+            .collect(),
     };
     serde_json::to_vec_pretty(&store).map_err(std::io::Error::other)
 }
 
 fn decode_store(bytes: &[u8]) -> Result<(SigningKey, LocalState), String> {
-    let persisted: PersistedStore = serde_json::from_slice(bytes).map_err(|error| format!("解析 local gateway store: {error}"))?;
+    let persisted: PersistedStore = serde_json::from_slice(bytes)
+        .map_err(|error| format!("解析 local gateway store: {error}"))?;
     if persisted.version != STORE_VERSION {
-        return Err(format!("local gateway store version {} 不受支持", persisted.version));
+        return Err(format!(
+            "local gateway store version {} 不受支持",
+            persisted.version
+        ));
     }
-    let private_key = BASE64.decode(persisted.private_key).map_err(|_| "local gateway private key base64 无效".to_string())?;
-    let signing_key = SigningKey::from_slice(&private_key).map_err(|_| "local gateway private key 无效".to_string())?;
+    let private_key = BASE64
+        .decode(persisted.private_key)
+        .map_err(|_| "local gateway private key base64 无效".to_string())?;
+    let signing_key = SigningKey::from_slice(&private_key)
+        .map_err(|_| "local gateway private key 无效".to_string())?;
     let mut state = LocalState::default();
     if persisted.origins.len() > MAX_ORIGINS || persisted.grants.len() > MAX_GRANTS {
         return Err("local gateway store 超过数量上限".into());
@@ -651,26 +811,48 @@ fn decode_store(bytes: &[u8]) -> Result<(SigningKey, LocalState), String> {
     Ok((signing_key, state))
 }
 
-fn create_initial_store(path: &Path, signing_key: &SigningKey, state: &LocalState) -> Result<(), std::io::Error> {
+fn create_initial_store(
+    path: &Path,
+    signing_key: &SigningKey,
+    state: &LocalState,
+) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let bytes = encode_store(signing_key, state)?;
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     secure_permissions_io(path)
 }
 
-fn write_store_atomic(path: &Path, signing_key: &SigningKey, state: &LocalState) -> Result<(), std::io::Error> {
-    let parent = path.parent().ok_or_else(|| std::io::Error::other("local gateway store 缺少 parent"))?;
+fn write_store_atomic(
+    path: &Path,
+    signing_key: &SigningKey,
+    state: &LocalState,
+) -> Result<(), std::io::Error> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("local gateway store 缺少 parent"))?;
     fs::create_dir_all(parent)?;
     let bytes = encode_store(signing_key, state)?;
     let mut suffix = [0u8; 8];
     OsRng.fill_bytes(&mut suffix);
-    let temp = parent.join(format!(".{STORE_FILE}.tmp-{}-{}", std::process::id(), hex::encode(suffix)));
+    let temp = parent.join(format!(
+        ".{STORE_FILE}.tmp-{}-{}",
+        std::process::id(),
+        hex::encode(suffix)
+    ));
     let result = (|| {
-        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
         fs::rename(&temp, path)?;
@@ -687,7 +869,8 @@ fn write_store_atomic(path: &Path, signing_key: &SigningKey, state: &LocalState)
 }
 
 fn secure_permissions(path: &Path) -> Result<(), String> {
-    secure_permissions_io(path).map_err(|error| format!("设置 local gateway store mode 0600: {error}"))
+    secure_permissions_io(path)
+        .map_err(|error| format!("设置 local gateway store mode 0600: {error}"))
 }
 
 fn secure_permissions_io(path: &Path) -> Result<(), std::io::Error> {
@@ -695,7 +878,9 @@ fn secure_permissions_io(path: &Path) -> Result<(), std::io::Error> {
 }
 
 fn epoch_ms() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |duration| duration.as_secs_f64() * 1000.0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |duration| duration.as_secs_f64() * 1000.0)
 }
 
 #[cfg(test)]
@@ -705,7 +890,11 @@ mod tests {
     fn temp_path(name: &str) -> PathBuf {
         let mut random = [0u8; 8];
         OsRng.fill_bytes(&mut random);
-        let directory = std::env::temp_dir().join(format!("coflux-{name}-{}-{}", std::process::id(), hex::encode(random)));
+        let directory = std::env::temp_dir().join(format!(
+            "coflux-{name}-{}-{}",
+            std::process::id(),
+            hex::encode(random)
+        ));
         fs::create_dir_all(&directory).unwrap();
         directory.join(STORE_FILE)
     }
@@ -716,14 +905,30 @@ mod tests {
             account_id: "account-1".into(),
             daemon_id: "daemon-1".into(),
             origin: "https://p.coflux.dev".into(),
-            public_key_sec1: signing_key.verifying_key().to_encoded_point(false).as_bytes().to_vec(),
-            offline_scopes: vec![DeviceScope::SessionControl as i32, DeviceScope::SessionRead as i32],
+            public_key_sec1: signing_key
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
+            offline_scopes: vec![
+                DeviceScope::SessionControl as i32,
+                DeviceScope::SessionRead as i32,
+            ],
             created_at: 1.0,
         }
     }
 
-    fn signed_client_hello(auth: &LocalAuth, challenge: &LocalChallenge, browser_key: &SigningKey, lease_id: Option<String>) -> LocalClientHello {
-        let browser_public_key = browser_key.verifying_key().to_encoded_point(false).as_bytes().to_vec();
+    fn signed_client_hello(
+        auth: &LocalAuth,
+        challenge: &LocalChallenge,
+        browser_key: &SigningKey,
+        lease_id: Option<String>,
+    ) -> LocalClientHello {
+        let browser_public_key = browser_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
         let mut hello = LocalClientHello {
             protocol_version: DEVICE_PROTOCOL_VERSION,
             grant_id: "grant-1".into(),
@@ -753,10 +958,18 @@ mod tests {
 
     fn auth_fixture(name: &str, failure_limit: usize) -> (PathBuf, LocalAuth, SigningKey) {
         let path = temp_path(name);
-        let auth = LocalAuth::load_or_create_path(path.clone(), Duration::from_secs(10), failure_limit, Duration::from_secs(60)).unwrap();
-        auth.configure_origins(vec!["https://p.coflux.dev".into()]).unwrap();
+        let auth = LocalAuth::load_or_create_path(
+            path.clone(),
+            Duration::from_secs(10),
+            failure_limit,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        auth.configure_origins(vec!["https://p.coflux.dev".into()])
+            .unwrap();
         let browser_key = SigningKey::random(&mut OsRng);
-        auth.install_grant(browser_grant(&browser_key), "daemon-1").unwrap();
+        auth.install_grant(browser_grant(&browser_key), "daemon-1")
+            .unwrap();
         (path, auth, browser_key)
     }
 
@@ -766,35 +979,76 @@ mod tests {
         let public_key = auth.gateway_public_key();
         drop(auth);
 
-        let loaded = LocalAuth::load_or_create_path(path.clone(), Duration::from_secs(10), 8, Duration::from_secs(60)).unwrap();
+        let loaded = LocalAuth::load_or_create_path(
+            path.clone(),
+            Duration::from_secs(10),
+            8,
+            Duration::from_secs(60),
+        )
+        .unwrap();
         assert_eq!(loaded.gateway_public_key(), public_key);
-        let mut challenge = loaded.begin_challenge("daemon-1", "https://p.coflux.dev").unwrap();
+        let mut challenge = loaded
+            .begin_challenge("daemon-1", "https://p.coflux.dev")
+            .unwrap();
         let hello = signed_client_hello(&loaded, &challenge, &browser_key, None);
         assert!(loaded.authenticate(&mut challenge, &hello).is_ok());
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn local_auth_transcript_rejects_tamper_wrong_origin_key_and_replay() {
         let (path, auth, browser_key) = auth_fixture("local-auth-negative", 20);
-        assert_eq!(auth.begin_challenge("daemon-1", "https://evil.example").unwrap_err().code, LocalAuthErrorCode::OriginDenied);
+        assert_eq!(
+            auth.begin_challenge("daemon-1", "https://evil.example")
+                .unwrap_err()
+                .code,
+            LocalAuthErrorCode::OriginDenied
+        );
 
-        let mut challenge = auth.begin_challenge("daemon-1", "https://p.coflux.dev").unwrap();
+        let mut challenge = auth
+            .begin_challenge("daemon-1", "https://p.coflux.dev")
+            .unwrap();
         let hello = signed_client_hello(&auth, &challenge, &browser_key, None);
         let authenticated = auth.authenticate(&mut challenge, &hello).unwrap();
-        assert_eq!(authenticated.scopes, vec![DeviceScope::SessionRead as i32, DeviceScope::SessionControl as i32]);
-        assert_eq!(auth.authenticate(&mut challenge, &hello).unwrap_err().code, LocalAuthErrorCode::NonceInvalid);
+        assert_eq!(
+            authenticated.scopes,
+            vec![
+                DeviceScope::SessionRead as i32,
+                DeviceScope::SessionControl as i32
+            ]
+        );
+        assert_eq!(
+            auth.authenticate(&mut challenge, &hello).unwrap_err().code,
+            LocalAuthErrorCode::NonceInvalid
+        );
 
-        let mut tampered_challenge = auth.begin_challenge("daemon-1", "https://p.coflux.dev").unwrap();
+        let mut tampered_challenge = auth
+            .begin_challenge("daemon-1", "https://p.coflux.dev")
+            .unwrap();
         let mut tampered = signed_client_hello(&auth, &tampered_challenge, &browser_key, None);
         tampered.client_instance_id = "tampered".into();
-        assert_eq!(auth.authenticate(&mut tampered_challenge, &tampered).unwrap_err().code, LocalAuthErrorCode::SignatureInvalid);
+        assert_eq!(
+            auth.authenticate(&mut tampered_challenge, &tampered)
+                .unwrap_err()
+                .code,
+            LocalAuthErrorCode::SignatureInvalid
+        );
 
-        let mut wrong_key_challenge = auth.begin_challenge("daemon-1", "https://p.coflux.dev").unwrap();
+        let mut wrong_key_challenge = auth
+            .begin_challenge("daemon-1", "https://p.coflux.dev")
+            .unwrap();
         let wrong_key = SigningKey::random(&mut OsRng);
         let wrong = signed_client_hello(&auth, &wrong_key_challenge, &wrong_key, None);
-        assert_eq!(auth.authenticate(&mut wrong_key_challenge, &wrong).unwrap_err().code, LocalAuthErrorCode::KeyMismatch);
+        assert_eq!(
+            auth.authenticate(&mut wrong_key_challenge, &wrong)
+                .unwrap_err()
+                .code,
+            LocalAuthErrorCode::KeyMismatch
+        );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -814,7 +1068,9 @@ mod tests {
             "daemon-1",
         )
         .unwrap();
-        let mut challenge = auth.begin_challenge("daemon-1", "https://p.coflux.dev").unwrap();
+        let mut challenge = auth
+            .begin_challenge("daemon-1", "https://p.coflux.dev")
+            .unwrap();
         let hello = signed_client_hello(&auth, &challenge, &browser_key, Some("lease-1".into()));
         let authenticated = auth.authenticate(&mut challenge, &hello).unwrap();
         assert_eq!(authenticated.scopes.len(), 4);
@@ -823,11 +1079,26 @@ mod tests {
         auth.set_server_online(false);
         assert_eq!(
             auth.effective_scopes(&authenticated.principal),
-            vec![DeviceScope::SessionRead as i32, DeviceScope::SessionControl as i32]
+            vec![
+                DeviceScope::SessionRead as i32,
+                DeviceScope::SessionControl as i32
+            ]
         );
-        let mut offline_challenge = auth.begin_challenge("daemon-1", "https://p.coflux.dev").unwrap();
-        let offline_hello = signed_client_hello(&auth, &offline_challenge, &browser_key, Some("lease-1".into()));
-        assert_eq!(auth.authenticate(&mut offline_challenge, &offline_hello).unwrap_err().code, LocalAuthErrorCode::LeaseInvalid);
+        let mut offline_challenge = auth
+            .begin_challenge("daemon-1", "https://p.coflux.dev")
+            .unwrap();
+        let offline_hello = signed_client_hello(
+            &auth,
+            &offline_challenge,
+            &browser_key,
+            Some("lease-1".into()),
+        );
+        assert_eq!(
+            auth.authenticate(&mut offline_challenge, &offline_hello)
+                .unwrap_err()
+                .code,
+            LocalAuthErrorCode::LeaseInvalid
+        );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -835,15 +1106,36 @@ mod tests {
     fn local_auth_nonce_expiry_and_failure_rate_limit_are_enforced() {
         let (path, auth, browser_key) = auth_fixture("local-auth-rate", 2);
         let now = Instant::now();
-        let mut expired = auth.begin_challenge_at("daemon-1", "https://p.coflux.dev", now - Duration::from_secs(20)).unwrap();
+        let mut expired = auth
+            .begin_challenge_at(
+                "daemon-1",
+                "https://p.coflux.dev",
+                now - Duration::from_secs(20),
+            )
+            .unwrap();
         let expired_hello = signed_client_hello(&auth, &expired, &browser_key, None);
-        assert_eq!(auth.authenticate_at(&mut expired, &expired_hello, now, epoch_ms()).unwrap_err().code, LocalAuthErrorCode::NonceInvalid);
+        assert_eq!(
+            auth.authenticate_at(&mut expired, &expired_hello, now, epoch_ms())
+                .unwrap_err()
+                .code,
+            LocalAuthErrorCode::NonceInvalid
+        );
 
-        let mut bad = auth.begin_challenge("daemon-1", "https://p.coflux.dev").unwrap();
+        let mut bad = auth
+            .begin_challenge("daemon-1", "https://p.coflux.dev")
+            .unwrap();
         let mut bad_hello = signed_client_hello(&auth, &bad, &browser_key, None);
         bad_hello.signature_p1363[0] ^= 0xff;
-        assert_eq!(auth.authenticate(&mut bad, &bad_hello).unwrap_err().code, LocalAuthErrorCode::SignatureInvalid);
-        assert_eq!(auth.begin_challenge("daemon-1", "https://p.coflux.dev").unwrap_err().code, LocalAuthErrorCode::RateLimited);
+        assert_eq!(
+            auth.authenticate(&mut bad, &bad_hello).unwrap_err().code,
+            LocalAuthErrorCode::SignatureInvalid
+        );
+        assert_eq!(
+            auth.begin_challenge("daemon-1", "https://p.coflux.dev")
+                .unwrap_err()
+                .code,
+            LocalAuthErrorCode::RateLimited
+        );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

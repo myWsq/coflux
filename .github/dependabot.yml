@@ -1,0 +1,10 @@
+version: 2
+
+updates:
+  # workflow 全部 pin 到完整 commit SHA；只让 Dependabot 维护 action ref，
+  # npm/cargo 依赖仍走项目自己的升级节奏。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

@@ -689,6 +689,20 @@ pub struct DeviceSessionExitTombstone {
 pub struct DeviceSessionCatalogRequest {
     #[prost(string, tag="1")]
     pub request_id: ::prost::alloc::string::String,
+    /// 首页留空/0；后续页回填上一页返回的 owner/epoch。epoch 变化时 sessiond 返回 reset，
+    /// worker 丢弃半快照并从第一页重来。
+    #[prost(string, tag="2")]
+    pub snapshot_owner_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="3")]
+    pub snapshot_epoch: u64,
+    #[prost(uint32, tag="4")]
+    pub session_offset: u32,
+    #[prost(uint32, tag="5")]
+    pub exit_offset: u32,
+    /// 0 = legacy 单帧模式；新 worker 填非零值显式 opt-in 分页，保证旧 worker 不会把首个
+    /// 分片误当完整 catalog。sessiond 会把它钳在自身安全范围内。
+    #[prost(uint32, tag="6")]
+    pub max_page_bytes: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceSessionCatalog {
@@ -698,11 +712,36 @@ pub struct DeviceSessionCatalog {
     pub sessions: ::prost::alloc::vec::Vec<DeviceSessionInfo>,
     #[prost(message, repeated, tag="3")]
     pub exits: ::prost::alloc::vec::Vec<DeviceSessionExitTombstone>,
+    #[prost(string, tag="4")]
+    pub snapshot_owner_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="5")]
+    pub snapshot_epoch: u64,
+    #[prost(uint32, tag="6")]
+    pub session_offset: u32,
+    #[prost(uint32, tag="7")]
+    pub exit_offset: u32,
+    #[prost(uint32, tag="8")]
+    pub next_session_offset: u32,
+    #[prost(uint32, tag="9")]
+    pub next_exit_offset: u32,
+    /// legacy response 的这些新字段全为默认值；新 worker 将其视为完整单帧以兼容旧 supervisor。
+    #[prost(bool, tag="10")]
+    pub complete: bool,
+    #[prost(bool, tag="11")]
+    pub reset: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceExitAck {
     #[prost(string, repeated, tag="1")]
     pub event_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// 新链路把 ACK 绑定到完整 catalog 的 request/epoch；空值保留给旧 client/worker 的
+    /// 滚动兼容，不能用于确认新分页请求。
+    #[prost(string, tag="2")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub snapshot_owner_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="4")]
+    pub snapshot_epoch: u64,
 }
 /// client_instance_id 是跨 transport 稳定的 browser logical client identity；同一 client 的
 /// transport_generation 从 1 开始且必须单调递增。更高 generation 只替换旧 direct/relay 路径并保留现有
@@ -844,10 +883,11 @@ pub struct DevicePtyResize {
     #[prost(uint32, tag="6")]
     pub rows: u32,
 }
-/// operation_id 是不可复用的 opaque ID，在同一 daemon 上跨 logical channel 与 direct/relay
-/// transport 全局幂等：同 ID、
-/// 同 payload 返回已记录结果而不重复执行；同 ID、不同 payload 必须拒绝。stop 是离线 scope 的
-/// 特例，可由 client 生成 operation_id；create/project/worktree 必须匹配中心预安装模板。
+/// operation_id 是不可复用的 opaque ID。对 sessiond 管辖的 stop/create，同一 supervisor runtime
+/// 内跨 logical channel、direct/relay transport 与 worker replacement 去重：同 ID、同 payload 返回
+/// 已记录结果而不重复执行；同 ID、不同 payload 必须拒绝。ledger 不跨 supervisor/OS restart。
+/// stop 是离线 scope 的特例，可由 client 生成 operation_id；create/project/worktree 必须匹配中心
+/// 预安装模板。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceSessionStop {
     #[prost(string, tag="1")]
@@ -877,7 +917,7 @@ pub struct DeviceSessionExited {
     #[prost(uint64, tag="3")]
     pub final_output_seq: u64,
 }
-/// lifecycle operation 采用与 stop 相同的 operation_id 去重规则。
+/// session create 采用与 stop 相同的 sessiond 生命周期去重规则。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceSessionCreate {
     #[prost(string, tag="1")]
@@ -943,7 +983,8 @@ pub struct DeviceProjectValidated {
     #[prost(string, optional, tag="8")]
     pub default_branch: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// 所有携带 operation_id 的设备事实变更均采用 session stop 所述的全局去重规则。
+/// 下列 worktree add/remove 的 operation_id ledger 只覆盖当前 worker runtime；worker replacement
+/// 后不提供通用去重。此类操作可基于稳定 worktree path 与 Git 状态做专用探测、恢复与收敛。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceWorktreeAdd {
     #[prost(string, tag="1")]
@@ -1002,7 +1043,8 @@ pub struct DeviceExecRun {
     pub env: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
     #[prost(uint32, optional, tag="6")]
     pub timeout_ms: ::core::option::Option<u32>,
-    /// 设置时必须 exactly-once 去重。
+    /// 设置时只在当前 worker runtime 内去重。worker 崩溃时外部命令可能已执行而结果未记录，
+    /// 此时状态未知；调用方不得自动重试非幂等命令，也不得宣称 exactly-once。
     #[prost(string, optional, tag="7")]
     pub operation_id: ::core::option::Option<::prost::alloc::string::String>,
 }
@@ -1029,6 +1071,8 @@ pub struct DeviceFsRead {
     #[prost(string, tag="3")]
     pub path: ::prost::alloc::string::String,
 }
+/// fs.write 的 operation_id ledger 只覆盖当前 worker runtime。对可稳定重建的目标 path，以相同
+/// path/data 做全量覆盖写可在状态未知时重试并收敛到同一内容；这是结果收敛式幂等，不是严格一次。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceFsWrite {
     #[prost(string, tag="1")]
@@ -1084,7 +1128,8 @@ pub struct DeviceError {
 /// 中心持久 prepare 后，先经可信 daemon control WS 安装同一模板并等待
 /// PreparedDeviceOperationInstalled，再交给 client。frame 是 channel_id 为空的 DeviceEnvelope；
 /// client 只可填入自己已认证的 channel_id 后经 direct/relay 发送。daemon 解码后必须确认除
-/// channel_id 外与已安装模板完全相等，再按 operation_id 幂等执行；未知/过期/被篡改模板拒绝。
+/// channel_id 外与已安装模板完全相等，再按具体消息定义的 authority 生命周期处理 operation_id；
+/// 未知/过期/被篡改模板拒绝。
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PreparedDeviceOperation {
     #[prost(string, tag="1")]
@@ -1248,7 +1293,9 @@ pub mod device_envelope {
 // 常量；wire 握手必须显式带版本，所有 cols/rows 在 authority 边界钳制为 \[1, 1000\]。
 // 本文件全部 created_at/started_at/exited_at/captured_at/expires_at 均为 Unix epoch milliseconds。
 // request_id 由 logical client 生成并在同一请求重投时保持不变；它只做响应关联/短期去重。
-// 有副作用请求的 exactly-once 边界由 operation_id 或 input_seq 明确承担，不能只依赖 request_id。
+// operation_id 与 input_seq 只是各自 authority 生命周期内的去重键，不构成泛化的 exactly-once：
+// worker ledger 只覆盖当前 worker runtime；sessiond 管辖的 input/create/stop 可跨 worker
+// replacement 去重，但不跨 supervisor/OS restart。崩溃与恢复语义由具体消息定义。
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -1370,8 +1417,9 @@ impl LocalAuthErrorCode {
 }
 // ===== Client → Server 载荷 =====
 
-/// 登录：用户名+密码（local 模式首次）/ supabase_token（supabase 模式换票）/ 会话 client_token（重连，两模式通用）。
-/// 服务器认证成功会在 AuthOk 回带 coflux 会话 token；之后重连只用该 token，不再触碰 Supabase。
+/// 登录：用户名+密码（local/password 模式首次）/ 会话 client_token（重连，两模式通用）。
+/// supabase_token 仅为旧 wire 兼容保留，当前 server 不再接受；认证成功会在 AuthOk 回带由
+/// coflux 自持的会话 token，之后重连只使用该 token。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientAuth {
     #[prost(string, optional, tag="1")]
@@ -1418,7 +1466,10 @@ pub struct ProxyIssueAuth {
     #[prost(string, tag="1")]
     pub redirect: ::prost::alloc::string::String,
 }
-/// 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签
+/// 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签。
+/// signature 保留为对原始二进制的 legacy 签名，供已部署的旧 supervisor 滚动兼容；
+/// 新 supervisor 还必须验证 release_signature，其 domain-separated statement 绑定
+/// version / target / sha256 / artifact_size。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientUpgradeDaemon {
     #[prost(string, tag="1")]
@@ -1431,6 +1482,12 @@ pub struct ClientUpgradeDaemon {
     pub sha256: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="5")]
     pub signature: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="6")]
+    pub target: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag="7")]
+    pub artifact_size: ::core::option::Option<u64>,
+    #[prost(string, optional, tag="8")]
+    pub release_signature: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// 导入一个 git 仓库为 project（自动创建主工作区）
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1811,6 +1868,12 @@ pub struct LocalGatewayAnnounce {
 pub struct DaemonResync {
     #[prost(message, repeated, tag="1")]
     pub sessions: ::prost::alloc::vec::Vec<SessionRef>,
+    /// snapshot owner 是 supervisor 启动实例生成的随机身份；epoch 只由持有 PTY/catalog
+    /// 真相的 supervisor 递增。server 用两者拒绝旧 outbox 重放，不能由 worker 自行猜代际。
+    #[prost(string, tag="2")]
+    pub snapshot_owner_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="3")]
+    pub snapshot_epoch: u64,
 }
 /// 校验路径是否为（非裸）git 仓库的结果
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2181,7 +2244,10 @@ pub struct WorktreeRemove {
     #[prost(string, tag="2")]
     pub worktree_path: ::prost::alloc::string::String,
 }
-/// 热升级：切到某个 worker 版本。带 url 走"下载+验签"；不带则按版本标签在 supervisor 自有注册表里切换
+/// 热升级：切到某个 worker 版本。带 url 走"下载+验签"；不带则按版本标签在 supervisor 自有注册表里切换。
+/// signature 保留为对原始二进制的 legacy 签名，供已部署的旧 supervisor 滚动兼容；
+/// 新 supervisor 还必须验证 release_signature，其 domain-separated statement 绑定
+/// version / target / sha256 / artifact_size。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WorkerUpgrade {
     #[prost(string, tag="1")]
@@ -2192,6 +2258,12 @@ pub struct WorkerUpgrade {
     pub sha256: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="4")]
     pub signature: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="5")]
+    pub target: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag="6")]
+    pub artifact_size: ::core::option::Option<u64>,
+    #[prost(string, optional, tag="7")]
+    pub release_signature: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// 设备重命名：server 通知 daemon 更新本地设备名称
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

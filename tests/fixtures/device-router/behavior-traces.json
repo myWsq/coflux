@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "traces": [
+    {
+      "id": "cumulative-ack-survives-control-reconnect",
+      "description": "累计 ACK 后中心断线；relay 重建时沿用输出游标，并只以新 holder epoch 重投未确认输入。",
+      "daemonId": "d1",
+      "taskId": "t1",
+      "sessionId": "s1",
+      "initialSnapshotSeq": "10",
+      "initialHolderEpoch": "1",
+      "steps": [
+        {
+          "event": "sendInput",
+          "utf8": "a",
+          "expectSeq": "1"
+        },
+        {
+          "event": "sendInput",
+          "utf8": "b",
+          "expectSeq": "2"
+        },
+        {
+          "event": "inputAck",
+          "throughSeq": "1"
+        },
+        {
+          "event": "setControlOnline",
+          "online": false,
+          "expectChannelClosed": true
+        },
+        {
+          "event": "setControlOnline",
+          "online": true
+        },
+        {
+          "event": "reopenSession",
+          "holderEpoch": "5",
+          "expectResumeFromSeq": "10"
+        },
+        {
+          "event": "expectInputReplay",
+          "expectUniqueSeqs": ["2"],
+          "expectUtf8BySeq": {
+            "2": "b"
+          },
+          "expectHolderEpoch": "5"
+        }
+      ]
+    },
+    {
+      "id": "catalog-exit-ack-binds-snapshot",
+      "description": "Catalog exit ACK 过滤空 eventId，并原样绑定 catalog request 与 snapshot owner/epoch。",
+      "daemonId": "d1",
+      "taskId": "t-catalog",
+      "sessionId": "s-catalog",
+      "initialSnapshotSeq": "17",
+      "initialHolderEpoch": "3",
+      "steps": [
+        {
+          "event": "sessionCatalog",
+          "requestId": "catalog-request-7",
+          "snapshotOwnerId": "snapshot-owner-7",
+          "snapshotEpoch": "18446744073709551614",
+          "eventIds": ["", "exit-a", "", "exit-b"]
+        },
+        {
+          "event": "expectExitAck",
+          "expectEventIds": ["exit-a", "exit-b"],
+          "expectRequestId": "catalog-request-7",
+          "expectSnapshotOwnerId": "snapshot-owner-7",
+          "expectSnapshotEpoch": "18446744073709551614"
+        }
+      ]
+    }
+  ]
+}

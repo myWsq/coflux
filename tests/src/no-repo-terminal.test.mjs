@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, existsSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack } from "./harness.mjs";
 import { openRelayDevice, utf8 } from "./device-harness.mjs";
@@ -76,6 +77,67 @@ test("terminalCreate：同设备幂等复用目录工作区，第二次只建任
   c.send({ case: "workspaceRemove", workspaceId: first.workspace.id });
   await c.waitFor((m) => m.case === "workspaceRemoved" && m.workspaceId === first.workspace.id, "cleanup ws removed");
   device.close();
+});
+
+test("terminalCreate：多 client 并发首次创建只产生一个 canonical 目录工作区", async () => {
+  const home = mkDir();
+  const device = await openRelayDevice(stack);
+  const observer = device.control;
+  const extraClients = Array.from({ length: 7 }, () => stack.makeClient());
+  let workspaceId;
+
+  try {
+    await Promise.all(extraClients.map((client) => client.authSubscribe()));
+    const senders = [observer, ...extraClients];
+    const from = observer.log.length;
+
+    // 8 条独立 WS 各发两次。即使 transport 对单连接严格顺序执行，不同连接的首个请求
+    // 仍会并发撞进 terminalCreate，能实际验到 device 父行锁，而非只验连接内队列。
+    for (const client of senders) {
+      client.send({ case: "terminalCreate", daemonId: stack.daemonId, path: home });
+      client.send({ case: "terminalCreate", daemonId: stack.daemonId, path: home });
+    }
+
+    const deadline = Date.now() + 15000;
+    let taskIds = new Set();
+    while (Date.now() < deadline) {
+      taskIds = new Set(observer.log.slice(from)
+        .filter((message) => message.case === "taskUpdated" && message.task.daemonId === stack.daemonId && message.task.projectId === "")
+        .map((message) => message.task.id));
+      if (taskIds.size === 16) break;
+      await sleep(20);
+    }
+    assert.equal(taskIds.size, 16, "收到 16 个不同任务的广播");
+
+    const fresh = stack.makeClient();
+    try {
+      const snapshot = await fresh.authSubscribe();
+      const directoryWorkspaces = snapshot.workspaces.filter(
+        (workspace) => workspace.daemonId === stack.daemonId && workspace.projectId === "",
+      );
+      assert.equal(directoryWorkspaces.length, 1, "该 daemon 只有一个目录工作区");
+      workspaceId = directoryWorkspaces[0].id;
+      const tasks = snapshot.tasks.filter((task) => task.workspaceId === workspaceId);
+      assert.equal(tasks.length, 16, "canonical 工作区下恰有 16 个任务");
+      assert.ok(tasks.every((task) => task.workspaceId === workspaceId), "全部任务指向同一个 workspaceId");
+
+      const workspaceCreated = observer.log.slice(from).filter(
+        (message) => message.case === "workspaceCreated" && message.workspace.daemonId === stack.daemonId && message.workspace.projectId === "",
+      );
+      assert.equal(workspaceCreated.length, 1, "目录 workspaceCreated 只广播一次");
+    } finally {
+      fresh.close();
+    }
+
+    observer.send({ case: "workspaceRemove", workspaceId });
+    await observer.waitFor(
+      (message) => message.case === "workspaceRemoved" && message.workspaceId === workspaceId,
+      "cleanup concurrent directory workspace",
+    );
+  } finally {
+    for (const client of extraClients) client.close();
+    device.close();
+  }
 });
 
 test("workspaceRemove：目录工作区连带任务删除，目录本身不被触碰", async () => {

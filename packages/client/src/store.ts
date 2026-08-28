@@ -343,7 +343,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
       store.setState({ status });
       if (status !== "connected") {
         controlAuthenticated = false;
-        deviceRouter.setControlOnline(false);
+        // TCP/WS transport 断开不等于账号授权已撤销，也不等于 worker 那条独立控制 WS 已断。
+        // Router 会立即禁用新 rendezvous/高权限能力，但给既有 remote session lane 一个有界宽限。
+        deviceRouter.setControlDisconnected();
       }
     },
     onMessage: handleServerMessage,
@@ -624,6 +626,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     // 重连/重登时若已 authed 则保持：断线期间保留最后快照渲染，由顶部横幅提示，不整页退回 loading。
     if (store.getState().authState !== "authed") store.setState({ authState: "authenticating" });
     controlAuthenticated = false;
+    // 这是用户显式登录/换凭据，不是 createConnection 内部的同 token 自动重连；旧账号下的
+    // remote channel 不得跨凭据继续存活，因此走 hard revoke。
     deviceRouter.setControlOnline(false);
     connection.connect(credential);
   }

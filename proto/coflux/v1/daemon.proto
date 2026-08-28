@@ -35,6 +35,10 @@ message LocalGatewayAnnounce {
 
 message DaemonResync {
   repeated SessionRef sessions = 1;
+  // snapshot owner 是 supervisor 启动实例生成的随机身份；epoch 只由持有 PTY/catalog
+  // 真相的 supervisor 递增。server 用两者拒绝旧 outbox 重放，不能由 worker 自行猜代际。
+  string snapshot_owner_id = 2;
+  uint64 snapshot_epoch = 3;
 }
 
 // 校验路径是否为（非裸）git 仓库的结果
@@ -289,12 +293,18 @@ message WorktreeRemove {
   string worktree_path = 2;
 }
 
-// 热升级：切到某个 worker 版本。带 url 走"下载+验签"；不带则按版本标签在 supervisor 自有注册表里切换
+// 热升级：切到某个 worker 版本。带 url 走"下载+验签"；不带则按版本标签在 supervisor 自有注册表里切换。
+// signature 保留为对原始二进制的 legacy 签名，供已部署的旧 supervisor 滚动兼容；
+// 新 supervisor 还必须验证 release_signature，其 domain-separated statement 绑定
+// version / target / sha256 / artifact_size。
 message WorkerUpgrade {
   string version = 1;
   optional string url = 2;
   optional string sha256 = 3;
   optional string signature = 4;
+  optional string target = 5;
+  optional uint64 artifact_size = 6;
+  optional string release_signature = 7;
 }
 
 // 设备重命名：server 通知 daemon 更新本地设备名称

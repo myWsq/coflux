@@ -1,17 +1,108 @@
 name: release
 
-# 打 tag v* 触发：交叉编译 supervisor + worker → 签名 worker 产物 → 发布 GitHub Release（含 manifest）。
+# 打 tag v* 触发：交叉编译 supervisor + worker → 签名 daemon 产物 → 发布 GitHub Release（含 manifest）。
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+# GitHub 默认只保留 one-running/one-pending；burst 时新 run 会取代旧 pending，
+# 是 latest-pending-wins 而非 FIFO。RELEASING.md 因此禁止批量/连续推多个 tag。
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
+  metadata:
+    name: 校验 release tag
+    runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: 确认 release SHA 是当前 origin/main tip
+        env:
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # 这只是防“在旧/分叉 commit 上误打新 tag”的操作门，不是权限边界；
+          # 真正的 create/update/delete 授权必须由 GitHub v* tag ruleset 承担。
+          remote_main_ref="refs/release-validation/main-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git fetch --force --no-tags origin \
+            "+refs/heads/main:${remote_main_ref}"
+          origin_main_sha=$(git rev-parse --verify "${remote_main_ref}^{commit}")
+          if ! git merge-base --is-ancestor "$EVENT_SHA" "$origin_main_sha"; then
+            echo "::error::release SHA ${EVENT_SHA} 不可从当前 origin/main ${origin_main_sha} 达到"
+            exit 1
+          fi
+          if [ "$EVENT_SHA" != "$origin_main_sha" ]; then
+            echo "::error::release tag 必须打在当前 origin/main tip：${origin_main_sha}（事件 SHA：${EVENT_SHA}）"
+            exit 1
+          fi
+      - id: tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const { execFileSync } = require("node:child_process");
+          const tag = process.env.RELEASE_TAG || "";
+          const pattern = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+          const parse = (value) => {
+            const match = pattern.exec(value);
+            if (!match || (match[4] || "").split(".").some((part) => /^0\d+$/.test(part))) return undefined;
+            return {
+              tag: value,
+              core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
+              prerelease: !!match[4],
+            };
+          };
+          const current = parse(tag);
+          if (!current) {
+            console.error(`::error::release tag 不是严格 SemVer：${JSON.stringify(tag)}`);
+            process.exit(1);
+          }
+          if (!current.prerelease) {
+            const compareCore = (left, right) => {
+              for (let index = 0; index < 3; index += 1) {
+                if (left[index] < right[index]) return -1;
+                if (left[index] > right[index]) return 1;
+              }
+              return 0;
+            };
+            const previousStable = execFileSync("git", ["tag", "--list", "v*"], { encoding: "utf8" })
+              .split("\n")
+              .map((candidate) => parse(candidate.trim()))
+              .filter((candidate) => candidate && !candidate.prerelease && candidate.tag !== tag)
+              .sort((left, right) => compareCore(right.core, left.core))[0];
+            if (previousStable && compareCore(current.core, previousStable.core) <= 0) {
+              console.error(`::error::稳定 release ${tag} 必须高于已有最新版 ${previousStable.tag}`);
+              process.exit(1);
+            }
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `prerelease=${current.prerelease ? "true" : "false"}\n`);
+          NODE
+
+  # tag 发布的唯一完整质量门；npm-publish 只在本 workflow 全部成功后接力。
+  quality:
+    name: 发布前质量门
+    needs: metadata
+    uses: ./.github/workflows/ci.yml
+    with:
+      checkout_ref: ${{ github.sha }}
+    permissions:
+      contents: read
+
   build:
     name: build ${{ matrix.target }}
+    needs: [metadata, quality]
     runs-on: ${{ matrix.os }}
+    environment: release-signing
     strategy:
       fail-fast: false
       matrix:
@@ -21,14 +112,14 @@ jobs:
           - { os: macos-latest, target: aarch64-apple-darwin, cross: false }
           - { os: macos-latest, target: x86_64-apple-darwin, cross: false }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: ${{ matrix.target }}
 
       - if: matrix.cross
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2
         with:
           tool: cross
 
@@ -36,6 +127,7 @@ jobs:
         env:
           # supervisor 编译期版本注入（见 crates/supervisor/src/main.rs::SUPERVISOR_VERSION、build.rs）。
           COFLUX_RELEASE_VERSION: ${{ github.ref_name }}
+          RUSTFLAGS: -D warnings
         run: |
           # relay 只随 linux 矩阵发布（部署对象是 Linux 服务器节点，plan 043）；
           # macOS 不产 relay，也就不进签名/公证循环。
@@ -64,6 +156,11 @@ jobs:
           KEYCHAIN="$RUNNER_TEMP/build.keychain"
           CERT_PATH="$RUNNER_TEMP/cert.p12"
           KEY_PATH="$RUNNER_TEMP/AuthKey_${NOTARY_KEY_ID}.p8"
+          cleanup_apple_signing() {
+            security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
+            rm -f -- "$CERT_PATH" "$KEY_PATH"
+          }
+          trap cleanup_apple_signing EXIT
 
           echo -n "$MACOS_CERT_P12" | base64 --decode > "$CERT_PATH"
           echo -n "$NOTARY_API_KEY_P8" > "$KEY_PATH"
@@ -91,15 +188,14 @@ jobs:
             codesign -dv --verbose=2 "$bin/$name"
           done
 
-          security delete-keychain "$KEYCHAIN"
-          rm -f "$CERT_PATH" "$KEY_PATH"
-
       - name: 打包产物
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           mkdir -p dist
           bin="target/${{ matrix.target }}/release"
-          # 原始二进制（稳定命名，cofluxd 直接按 /releases/latest/download/<名> 取）：
-          #   worker 还是热升级下载+验签的对象（会被签名）
+          # 原始二进制使用稳定资源名；cofluxd 先解析精确 tag，再按该 tag 的 manifest 下载并验签。
+          # worker 另保留 supervisor 热升级所需的原始二进制签名。
           cp "$bin/coflux-supervisor" "dist/coflux-supervisor-${{ matrix.target }}"
           cp "$bin/coflux-worker" "dist/coflux-worker-${{ matrix.target }}"
           # 独立 relay（plan 043，仅 linux 矩阵产出）：服务器节点手动部署，稳定命名同上
@@ -107,44 +203,100 @@ jobs:
             cp "$bin/coflux-relay" "dist/coflux-relay-${{ matrix.target }}"
           fi
           # tar.gz：含两个二进制，供人工安装
-          tar -C "$bin" -czf "dist/coflux-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" coflux-supervisor coflux-worker
+          tar -C "$bin" -czf "dist/coflux-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" coflux-supervisor coflux-worker
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dist-${{ matrix.target }}
           path: dist/
 
-  release:
-    needs: build
+  sign:
+    name: 签名 release 产物
+    needs: [metadata, build]
     runs-on: ubuntu-latest
+    environment: release-signing
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0 # release note 要按 tag 区间数 commit，浅克隆没有历史
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: 签名 worker 产物 + 生成 manifest/SHA256SUMS
+      - name: 签名 daemon 产物 + 生成 manifest/SHA256SUMS
         env:
           WORKER_SIGNING_KEY: ${{ secrets.WORKER_SIGNING_KEY }}
-        run: node scripts/release-sign.mjs artifacts "${{ github.ref_name }}"
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-sign.mjs artifacts "$RELEASE_TAG"
 
       - name: 生成 release note
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: node scripts/release-notes.mjs "${{ github.ref_name }}" > release-notes.md
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-notes.mjs "$RELEASE_TAG" > release-notes.md
+
+      # 签名 job 只有 contents:read；后续 contents:write job 只拿不可变的同-run artifact，
+      # 不接触 WORKER_SIGNING_KEY，避免发布 token 与离线发布根落在同一权限域。
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-release-assets
+          path: |
+            artifacts/
+            release-notes.md
+
+  release:
+    name: 发布 GitHub Release
+    needs: [metadata, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release-assets
+          path: signed-release
+
+      - name: 发布前确认远程 tag 仍绑定事件 SHA
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          checked_out_sha=$(git rev-parse HEAD)
+          if [ "$checked_out_sha" != "$EVENT_SHA" ]; then
+            echo "::error::checkout SHA ${checked_out_sha} 与 release 事件 SHA ${EVENT_SHA} 不一致"
+            exit 1
+          fi
+
+          # checkout@v4 会把本地 tag 固定到事件 SHA；另取一个临时 ref，
+          # 才能观察长时间签名/公证期间 origin 上的 tag 是否被删除或移动。
+          remote_check_ref="refs/release-validation/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git fetch --force --no-tags origin \
+            "+refs/tags/${RELEASE_TAG}:${remote_check_ref}"
+          remote_tag_sha=$(git rev-parse --verify "${remote_check_ref}^{commit}")
+          if [ "$remote_tag_sha" != "$EVENT_SHA" ]; then
+            echo "::error::origin tag ${RELEASE_TAG} 已漂移：${remote_tag_sha}，事件 SHA：${EVENT_SHA}"
+            exit 1
+          fi
 
       - name: 发布 GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: artifacts/*
+          tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          files: signed-release/artifacts/*
           # 自建 note 取代 generate_release_notes：本仓库直接 push main，GitHub 的自动汇总
           # 只认 PR，产出永远是光秃秃一行 compare 链接。
-          body_path: release-notes.md
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          body_path: signed-release/release-notes.md
+          prerelease: ${{ needs.metadata.outputs.prerelease }}

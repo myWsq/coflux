@@ -191,11 +191,12 @@ struct DeviceRouterTests {
         harness.router.sendInput(daemonID: "d1", sessionID: "s1", data: Data("b".utf8))
         #expect(await waitUntil { harness.inputFrames(connection).count == 2 })
         // 累计 ACK 到 seq=1：seq1 出账
+        let inputStateUpdatesBeforeAck = harness.blocked.count
         var ack = Coflux_V1_DevicePtyInputAck()
         ack.sessionID = "s1"
         ack.appliedThroughSeq = 1
         harness.push(connection, channelID: channelID, .ptyInputAck(ack))
-        #expect(await waitUntil { harness.blocked.contains { $0.blocked == false } })
+        #expect(await waitUntil { harness.blocked.count > inputStateUpdatesBeforeAck })
         // 换通道重挂后 replay：只重投未确认前缀（seq=2），且序号不重排
         connection.finish()
         let second = try await harness.grantNextRelay()

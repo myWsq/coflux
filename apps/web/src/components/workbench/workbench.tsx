@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from "react";
 import { useStore } from "zustand";
 import { AlertCircle, FolderGit2, LoaderCircle, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
-import { TaskStatus, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
+import { type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
 
 import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
 import { dismissBootOverlay } from "@/boot-overlay";
@@ -19,6 +19,15 @@ import { ImportProjectWizard } from "@/components/workbench/import-project-wizar
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import type { WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
+import {
+  parseStoredSelection,
+  resolveWorkbenchSelection,
+  resolveWorkbenchSurface,
+  serializeSelection,
+  shouldShowReconnectBanner,
+  taskCloseNeedsConfirmation,
+  type WorkbenchSelection,
+} from "@/components/workbench/workbench-state";
 import { WORKSPACE_KEY } from "@/config";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
@@ -30,32 +39,24 @@ const WorkspaceTerminal = lazy(() =>
   import("@/components/workbench/workspace-terminal").then((module) => ({ default: module.WorkspaceTerminal })),
 );
 
-/** 主区选中项（plan 048）：项目工作区或设备详情，二选一互斥。 */
-type Selection = { kind: "workspace" | "device"; id: string };
-
-// 持久化沿用 WORKSPACE_KEY：设备加 "device:" 前缀，裸字符串即工作区 id（旧值天然兼容）。
-const DEVICE_SELECTION_PREFIX = "device:";
-
 // 乐观创建（plan 078）的本地兜底：服务端既不广播成功也不广播错误时，撤掉 pending 条目，
 // 避免永久滞留。与遮罩的 8s 无关——工作区创建含 daemon 侧 git worktree add，慢链路可能更长。
 const PENDING_CREATE_TIMEOUT_MS = 15_000;
 
-function readStoredSelection(): Selection | null {
-  const raw = localStorage.getItem(WORKSPACE_KEY);
-  if (!raw) return null;
-  if (raw.startsWith(DEVICE_SELECTION_PREFIX)) return { kind: "device", id: raw.slice(DEVICE_SELECTION_PREFIX.length) };
-  return { kind: "workspace", id: raw };
+function readStoredSelection(): WorkbenchSelection | null {
+  return parseStoredSelection(localStorage.getItem(WORKSPACE_KEY));
 }
 
-function persistSelection(selection: Selection | null) {
-  if (!selection) localStorage.removeItem(WORKSPACE_KEY);
-  else localStorage.setItem(WORKSPACE_KEY, selection.kind === "device" ? `${DEVICE_SELECTION_PREFIX}${selection.id}` : selection.id);
+function persistSelection(selection: WorkbenchSelection | null) {
+  const serialized = serializeSelection(selection);
+  if (serialized === null) localStorage.removeItem(WORKSPACE_KEY);
+  else localStorage.setItem(WORKSPACE_KEY, serialized);
 }
 
 export function Workbench({ client }: { client: CofluxClient }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [selection, setSelection] = useState<Selection | null>(readStoredSelection);
+  const [selection, setSelection] = useState<WorkbenchSelection | null>(readStoredSelection);
   // 访问过的工作区保持挂载（display 隐藏而非卸载）：卸载会 dispose xterm，
   // 丢 scrollback / 活跃 Tab / 控制权，切回来要重新 attach。同 TerminalPane 的 Tab 保活模式上移一层。
   const [visitedWorkspaceIds, setVisitedWorkspaceIds] = useState<ReadonlySet<string>>(new Set());
@@ -121,25 +122,17 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // "点击后立即切换过去"会在同一帧被这里撤销，表现为点了没反应。
   useEffect(() => {
     if (snapshotRevision === 0) return;
-    const isPending = selection?.kind === "workspace" && pendingWorkspaces.some((item) => item.id === selection.id);
-    const valid =
-      isPending ||
-      (selection?.kind === "device"
-        ? daemons.some((daemon) => daemon.daemonId === selection.id)
-        : selection?.kind === "workspace" && workspaces.some((workspace) => workspace.id === selection.id));
-    if (selection && valid) {
-      // 假 id 其实已落盘过一次（selectWorkspace 内部即 persist）：刷新后 pendingWorkspaces 为空，
-      // 本 effect 判定 invalid 回退自愈，无害。这里跳过 persist 只是不再随每次快照重复写。
-      if (!isPending) persistSelection(selection);
-      return;
-    }
-
-    const firstProject = [...projects].sort((left, right) => left.createdAt - right.createdAt)[0];
-    const fallback =
-      (firstProject && workspaces.find((workspace) => workspace.projectId === firstProject.id && workspace.isMain)) ?? workspaces[0];
-    const next: Selection | null = fallback ? { kind: "workspace", id: fallback.id } : null;
-    setSelection(next);
-    persistSelection(next);
+    const resolution = resolveWorkbenchSelection({
+      selection,
+      pendingWorkspaceIds: new Set(pendingWorkspaces.map((item) => item.id)),
+      projects,
+      workspaces,
+      daemons,
+    });
+    // 假 id 其实已落盘过一次（selectWorkspace 内部即 persist）：刷新后 pendingWorkspaces 为空，
+    // 本 effect 判定 invalid 回退自愈，无害。pending 期间跳过 persist，只是不再重复写假 id。
+    if (resolution.changed) setSelection(resolution.selection);
+    if (resolution.shouldPersist) persistSelection(resolution.selection);
   }, [snapshotRevision, projects, workspaces, daemons, selection, pendingWorkspaces]);
 
   // 浏览器标签页标题跟随当前选中：项目工作区用项目名，设备详情用设备名。
@@ -168,13 +161,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }, [client, onlineDaemonIds]);
 
   function selectWorkspace(workspaceId: string) {
-    const next: Selection = { kind: "workspace", id: workspaceId };
+    const next: WorkbenchSelection = { kind: "workspace", id: workspaceId };
     setSelection(next);
     persistSelection(next);
   }
 
   function selectDevice(daemonId: string) {
-    const next: Selection = { kind: "device", id: daemonId };
+    const next: WorkbenchSelection = { kind: "device", id: daemonId };
     setSelection(next);
     persistSelection(next);
     setDeviceTerminalError(null);
@@ -325,7 +318,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   function requestCloseTask(task: Task) {
-    if (task.status !== TaskStatus.RUNNING) {
+    if (!taskCloseNeedsConfirmation(task.status)) {
       closeTaskNow(task);
       return;
     }
@@ -354,8 +347,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
     onToggleHelp: () => setHelpOpen((open) => !open),
   });
 
+  const surface = resolveWorkbenchSurface(authState);
+  const showReconnectBanner = shouldShowReconnectBanner(status);
+
   // 恢复会话 / 登录握手中：只显示安静加载，不渲染登录表单（避免刷新闪一下）。
-  if (authState === "authenticating") {
+  if (surface === "authenticating") {
     return (
       <div className="flex h-screen min-w-[1024px] items-center justify-center bg-background text-muted-foreground">
         <LoaderCircle className="size-5 animate-spin" />
@@ -365,7 +361,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   // 版本失配、reload 一次仍未拿到新 bundle（plan 033）：不是认证失败，独立展示面，
   // 不复用登录表单的 error 语义（混用会误导用户以为账号/密码有问题）。
-  if (authState === "outdated") {
+  if (surface === "outdated") {
     return (
       <AuthShell>
         <AuthMessage
@@ -379,7 +375,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     );
   }
 
-  if (authState !== "authed") {
+  if (surface === "login") {
     return (
       <AuthShell>
         <CredentialsForm
@@ -403,7 +399,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     <div
       className={cn(
         "flex h-screen min-h-[640px] min-w-[1024px] overflow-hidden bg-background text-foreground",
-        status !== "connected" && "pt-7",
+        showReconnectBanner && "pt-7",
       )}
     >
       <Sidebar
@@ -517,7 +513,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       ) : null}
 
       {/* 断线重连横幅：保留最后快照渲染（乐观 UI），只提示连接状态。根容器同步留出 pt-7。 */}
-      {status !== "connected" ? (
+      {showReconnectBanner ? (
         <div className="fixed inset-x-0 top-0 z-50 flex h-7 items-center justify-center gap-2 border-b border-warning/20 bg-warning/10 text-xs text-warning backdrop-blur">
           <LoaderCircle className="size-3 animate-spin" />
           连接已断开，正在自动重连…下方显示的是最后一次同步的状态。

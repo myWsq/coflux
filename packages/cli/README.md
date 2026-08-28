@@ -22,6 +22,11 @@ cofluxd down            # 停止
 cofluxd uninstall [--purge]   # 卸载（--purge 连二进制/配置/凭证一并删）
 ```
 
+从 `cofluxd@0.12.0` 起，远端安装/更新会用 npm 包内置的 ed25519 公钥同时验证
+supervisor 与 worker 的 version/target/size/sha256/release statement；两个文件全部通过后才替换。
+CLI 还会取自身与 worker 的持久 release floor 较大值拒绝远端降级。`--bin-dir` 仍是本机管理员
+显式信任本地产物的开发/救援入口。
+
 默认连公共服务 `wss://api.coflux.dev/daemon`（自托管用 `--server` 改；已保存的地址继续生效，非默认时会有醒目提示）。
 
 ## 给 agent 用的命令

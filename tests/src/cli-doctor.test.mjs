@@ -64,7 +64,13 @@ function fakeServiceCommands(home) {
   mkdirSync(bin);
   const launchctl = join(bin, "launchctl");
   const systemctl = join(bin, "systemctl");
-  writeFileSync(launchctl, "#!/bin/sh\nexit 0\n");
+  // serviceRunningInfo 以 launchctl 的 PID 字段判断进程真正在跑；只返回 0 仅代表 label 已登记。
+  writeFileSync(launchctl, `#!/bin/sh
+if [ "$1" = "list" ] && [ "$2" = "com.coflux.daemon" ]; then
+  echo '{ "Label" = "com.coflux.daemon"; "PID" = 4242; }'
+fi
+exit 0
+`);
   writeFileSync(systemctl, "#!/bin/sh\nif [ \"$2\" = \"is-active\" ]; then echo active; fi\nexit 0\n");
   chmodSync(launchctl, 0o755);
   chmodSync(systemctl, 0o755);

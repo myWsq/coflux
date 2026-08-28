@@ -1,41 +1,159 @@
 name: npm-publish
 
-# 发布 packages/cli（cofluxd）到 npm。两种触发：
-#   - 打 v* tag 时随 daemon 同批发布（与 RELEASING.md checklist 对齐）
-#   - workflow_dispatch 手动补发（CLI 单独出修复时）
+# 发布 packages/cli（cofluxd）到 npm：稳定版 release workflow 全部成功后发布；
+# workflow_dispatch 手动补发会自行先跑质量门。保留本 workflow 文件名以匹配
+# npm Trusted Publisher 的绑定。
 # 幂等：package.json 的版本已在 npm 上则跳过，不会重复发布/报错。
 # 认证走 npm Trusted Publishing（OIDC，无 token）：npmjs.com 上 cofluxd 包需配置
 # trusted publisher = 本仓库 + 本 workflow 文件名（npm-publish.yml）。
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write # OIDC 换发布凭证用
+
+# GitHub 默认只保留 one-running/one-pending；burst 时新 run 会取代旧 pending，
+# 是 latest-pending-wins 而非 FIFO。RELEASING.md 因此禁止批量推 tag/连续手动补发。
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  quality:
+    # workflow_run 的 github.sha/ref 指向默认分支，必须显式检查上游 release head_sha。
+    # OIDC 手动补发只允许默认主干，禁止选功能分支发包。
+    if: >-
+      ${{
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      }}
+    name: npm 发布质量门
+    uses: ./.github/workflows/ci.yml
+    with:
+      checkout_ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+    permissions:
+      contents: read
 
-      - uses: actions/setup-node@v4
+  publish:
+    needs: quality
+    # 两种事件都必须等当前 ci.yml 对实际待发 SHA 验收成功。
+    if: >-
+      ${{
+        always() &&
+        needs.quality.result == 'success' &&
+        (
+          (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+          (
+            github.event_name == 'workflow_dispatch' &&
+            github.ref == 'refs/heads/main'
+          )
+        )
+      }}
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write # OIDC 换发布凭证用
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # workflow_run 默认会 checkout main；发布必须固定到通过 release 的那个 commit。
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: 解析触发 release 的 tag
+        if: ${{ github.event_name == 'workflow_run' }}
+        id: release_tag
+        env:
+          RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          checked_out_sha=$(git rev-parse HEAD)
+          if [ "$checked_out_sha" != "$RUN_HEAD_SHA" ]; then
+            echo "::error::checkout SHA ${checked_out_sha} 与 release SHA ${RUN_HEAD_SHA} 不一致"
+            exit 1
+          fi
+
+          # workflow_run.head_branch 是上游 tag push 的原始 ref 名；禁止按 SHA
+          # 枚举其他 tag 猜测，否则后补/同 commit tag 会篡改这次发布身份。
+          release_channel=$(RELEASE_TAG="$RUN_HEAD_BRANCH" node <<'NODE'
+          const tag = process.env.RELEASE_TAG || "";
+          const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(tag);
+          if (!match || (match[4] || "").split(".").some((part) => /^0\d+$/.test(part))) {
+            console.error(`release workflow head_branch 不是严格 SemVer tag：${JSON.stringify(tag)}`);
+            process.exit(1);
+          }
+          process.stdout.write(match[4] ? "prerelease" : "stable");
+          NODE
+          )
+
+          # checkout 里的 tag 可能是事件快照；另取 origin 当前精确 tag 到临时 ref，
+          # 删除、移动或无法 peel 都 fail closed。
+          remote_check_ref="refs/npm-release-validation/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git fetch --force --no-tags origin \
+            "+refs/tags/${RUN_HEAD_BRANCH}:${remote_check_ref}"
+          remote_tag_sha=$(git rev-parse --verify "${remote_check_ref}^{commit}")
+          if [ "$remote_tag_sha" != "$RUN_HEAD_SHA" ]; then
+            echo "::error::origin tag ${RUN_HEAD_BRANCH} 已漂移：${remote_tag_sha}，release SHA：${RUN_HEAD_SHA}"
+            exit 1
+          fi
+
+          printf 'tag=%s\n' "$RUN_HEAD_BRANCH" >> "$GITHUB_OUTPUT"
+          if [ "$release_channel" = "prerelease" ]; then
+            printf 'publish=false\n' >> "$GITHUB_OUTPUT"
+            echo "::notice::${RUN_HEAD_BRANCH} 是 prerelease，跳过 npm 发布"
+          else
+            printf 'publish=true\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: ${{ steps.release_tag.outputs.publish != 'false' }}
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
       # Trusted Publishing 需要 npm >= 11.5.1
-      - run: npm install -g npm@latest
+      - if: ${{ steps.release_tag.outputs.publish != 'false' }}
+        run: npm install -g npm@11.6.2
 
       - name: 发布（版本已存在则跳过）
+        if: ${{ steps.release_tag.outputs.publish != 'false' }}
         working-directory: packages/cli
         run: |
+          set -euo pipefail
+          PKG_NAME=$(node -p "require('./package.json').name")
           PKG_VERSION=$(node -p "require('./package.json').version")
-          if npm view "cofluxd@${PKG_VERSION}" version >/dev/null 2>&1; then
+          if [ "$PKG_NAME" != "cofluxd" ]; then
+            echo "package name 漂移为 ${PKG_NAME}，拒绝使用 cofluxd Trusted Publisher" >&2
+            exit 1
+          fi
+          PKG_CHANNEL=$(node ../../scripts/npm-publish-guard.mjs --classify "$PKG_VERSION")
+          if [ "$PKG_CHANNEL" = "prerelease" ]; then
+            echo "cofluxd@${PKG_VERSION} 是 prerelease，拒绝发布到 npm latest"
+            exit 0
+          fi
+
+          registry_snapshot=$(mktemp -d "${RUNNER_TEMP}/coflux-npm-registry.XXXXXX")
+          trap 'rm -r -- "$registry_snapshot"' EXIT
+          # 不用 `npm view <exact>` 的退出码猜测“不存在”：网络/权限错误也会非 0。
+          # 两份 registry JSON 任一获取或解析失败，set -e 与 guard 都会 fail closed。
+          npm view "$PKG_NAME" versions --json --registry=https://registry.npmjs.org > "$registry_snapshot/versions.json"
+          npm view "$PKG_NAME" dist-tags --json --registry=https://registry.npmjs.org > "$registry_snapshot/dist-tags.json"
+          decision=$(node ../../scripts/npm-publish-guard.mjs \
+            "$PKG_VERSION" \
+            "$registry_snapshot/versions.json" \
+            "$registry_snapshot/dist-tags.json")
+          if [ "$decision" = "skip-existing" ]; then
             echo "cofluxd@${PKG_VERSION} 已在 npm 上，跳过"
             exit 0
           fi
-          npm publish
+          if [ "$decision" != "publish" ]; then
+            echo "未知 npm 发布裁决：${decision}" >&2
+            exit 1
+          fi
+          npm publish --tag latest --provenance --registry=https://registry.npmjs.org

@@ -12,11 +12,25 @@ import dns from "node:dns/promises";
 import net from "node:net";
 import tls from "node:tls";
 import crypto from "node:crypto";
+import {
+  MAX_RELEASE_ARTIFACT_BYTES,
+  assertReleaseVersion,
+  compareReleaseVersions,
+  createReleasePublicKey,
+  installStagedPair,
+  parseReleaseManifestEntry,
+  verifyReleaseArtifact,
+} from "./release-trust.mjs";
 
 // 默认中心服务（公共 SaaS）；自托管用 --server 覆盖。
 const DEFAULT_SERVER = "wss://api.coflux.dev/daemon";
 
 const REPO = "myWsq/coflux";
+const RELEASE_API_BASE = (process.env.COFLUX_RELEASE_API_BASE || "https://api.github.com").replace(/\/+$/, "");
+const RELEASE_DOWNLOAD_BASE = (
+  process.env.COFLUX_RELEASE_DOWNLOAD_BASE || `https://github.com/${REPO}/releases/download`
+).replace(/\/+$/, "");
+const MAX_RELEASE_METADATA_BYTES = 1024 * 1024;
 const HOME = process.env.COFLUX_HOME || join(homedir(), ".coflux");
 const BIN_DIR = join(HOME, "bin");
 const SETTINGS = join(HOME, "settings.json"); // 用户配置（serverUrl/deviceName/shell）→ daemon 直接读；600 权限防同机其他用户窥探
@@ -28,6 +42,8 @@ const LOCAL_GATEWAY_STORE = join(HOME, "local-gateway.json"); // gateway key/ori
 const FDA_STATUS = join(HOME, "fda-status"); // supervisor 启动时探测落盘（仅 macOS，见 crates/supervisor/src/fda.rs）
 const SUP_BIN = join(BIN_DIR, "coflux-supervisor");
 const WRK_BIN = join(BIN_DIR, "coflux-worker");
+const CLI_RELEASE_FLOOR = join(HOME, "cofluxd.release-floor");
+const WORKER_RELEASE_FLOOR = join(HOME, "worker.release-floor");
 const IS_MAC = platform() === "darwin";
 const IS_LINUX = platform() === "linux";
 const PLIST = join(homedir(), "Library", "LaunchAgents", "com.coflux.daemon.plist");
@@ -121,30 +137,113 @@ function fileSha256(path) {
 
 // macOS：新落盘的二进制带 com.apple.provenance，launchd 顶层 spawn 会被 AMFI 以
 // OS_REASON_CODESIGNING 静默杀死——即使产物是 Developer ID 签名 + 已公证（2026-07-25
-// v0.13.0 实测仍被连杀）。本地 ad-hoc 重签使其成为"本机产物"绕开该检查；签名威胁模型
-// 不受影响（防的是中心被攻破推恶意产物，靠下载后的 sha256+ed25519 验签，与此无关）。
+// v0.13.0 实测仍被连杀）。本地 ad-hoc 重签使其成为"本机产物"绕开该检查。
+// 远端产物必须先完成 release statement 验签，再允许走到这里；绝不能替任意下载内容重签。
 function resignMacBinaries(paths) {
   if (!IS_MAC) return;
   for (const p of paths) {
     const r = run("codesign", ["--force", "-s", "-", p]);
-    if (r.status !== 0) console.warn(`⚠ 本地重签失败: ${p}（daemon 若被系统杀，手动 codesign --force -s - 该文件后 cofluxd restart）`);
+    if (r.status !== 0) {
+      throw new Error(`macOS 本地重签失败: ${p}；保留当前 daemon 二进制`);
+    }
   }
 }
 
-async function download(url, dest) {
-  const res = await fetch(url, { redirect: "follow" });
-  if (!res.ok) die(`下载失败 HTTP ${res.status}: ${url}\n（该版本/平台的 release 资产是否已发布？）`);
-  fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()), { mode: 0o755 });
+async function fetchBounded(url, maxBytes, label) {
+  const res = await fetch(url, {
+    redirect: "follow",
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`${label} 下载失败（HTTP ${res.status}）`);
+  const declaredLength = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw new Error(`${label} 超过大小上限`);
+  }
+  if (!res.body) throw new Error(`${label} 响应没有 body`);
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of res.body) {
+    const bytes = Buffer.from(chunk);
+    total += bytes.byteLength;
+    if (total > maxBytes) {
+      await res.body.cancel().catch(() => {});
+      throw new Error(`${label} 超过大小上限`);
+    }
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks, total);
 }
+
+function loadReleasePublicKey() {
+  const publicKeyHex = process.env.COFLUX_WORKER_PUBKEY ||
+    fs.readFileSync(new URL("./release-pubkey.hex", import.meta.url), "utf8");
+  return createReleasePublicKey(publicKeyHex);
+}
+
+function readReleaseFloor(path, label) {
+  let metadata;
+  try { metadata = fs.lstatSync(path); }
+  catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    throw new Error(`${label} 元数据无法读取，拒绝远端升级`);
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size <= 0 || metadata.size > 128) {
+    throw new Error(`${label} 不是安全且有界的普通文件，拒绝远端升级`);
+  }
+  let value;
+  try { value = fs.readFileSync(path, "utf8").trim(); }
+  catch { throw new Error(`${label} 无法读取，拒绝远端升级`); }
+  try { assertReleaseVersion(value); }
+  catch { throw new Error(`${label} 已损坏，拒绝远端升级`); }
+  return value;
+}
+
+function currentReleaseFloor() {
+  const floors = [
+    readReleaseFloor(CLI_RELEASE_FLOOR, "cofluxd.release-floor"),
+    readReleaseFloor(WORKER_RELEASE_FLOOR, "worker.release-floor"),
+  ].filter(Boolean);
+  return floors.reduce((highest, candidate) => {
+    if (!highest) return candidate;
+    const order = compareReleaseVersions(candidate, highest);
+    if (order === 0 && candidate !== highest) {
+      throw new Error(`本机 release floor precedence 相同但身份冲突：${highest} / ${candidate}`);
+    }
+    return order > 0 ? candidate : highest;
+  }, undefined);
+}
+
+function persistCliReleaseFloor(version) {
+  const temp = join(HOME, `.cofluxd.release-floor.${process.pid}.${crypto.randomBytes(8).toString("hex")}`);
+  let file;
+  try {
+    file = fs.openSync(temp, "wx", 0o600);
+    fs.writeFileSync(file, `${version}\n`);
+    fs.fsyncSync(file);
+    fs.closeSync(file);
+    file = undefined;
+    fs.renameSync(temp, CLI_RELEASE_FLOOR);
+    const homeDir = fs.openSync(HOME, "r");
+    try { fs.fsyncSync(homeDir); }
+    finally { fs.closeSync(homeDir); }
+  } finally {
+    if (file !== undefined) {
+      try { fs.closeSync(file); } catch {}
+    }
+    try { fs.rmSync(temp, { force: true }); } catch {}
+  }
+}
+
 // 取最新 release tag（含 prerelease；GitHub 的 /releases/latest 跳转不含 prerelease，故走 API）。
 async function resolveLatestTag() {
   try {
-    const r = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=1`, {
-      headers: { "user-agent": "cofluxd", accept: "application/vnd.github+json" },
-    });
-    if (!r.ok) return null;
-    const arr = await r.json();
-    return Array.isArray(arr) && arr[0]?.tag_name ? arr[0].tag_name : null;
+    const body = await fetchBounded(
+      `${RELEASE_API_BASE}/repos/${REPO}/releases?per_page=1`,
+      MAX_RELEASE_METADATA_BYTES,
+      "GitHub release 元数据",
+    );
+    const arr = JSON.parse(body.toString("utf8"));
+    return Array.isArray(arr) && typeof arr[0]?.tag_name === "string" ? arr[0].tag_name : null;
   } catch {
     return null;
   }
@@ -155,13 +254,36 @@ async function resolveLatestTag() {
 async function ensureBinaries({ version, binDir, skipIfPresent }) {
   fs.mkdirSync(BIN_DIR, { recursive: true });
   if (binDir) {
-    for (const b of ["coflux-supervisor", "coflux-worker"]) {
-      const src = join(binDir, b);
-      if (!fs.existsSync(src)) die(`本地产物缺失: ${src}（先 cargo build --release？）`);
-      fs.copyFileSync(src, join(BIN_DIR, b));
-      fs.chmodSync(join(BIN_DIR, b), 0o755);
+    const localArtifacts = ["coflux-supervisor", "coflux-worker"].map((name) => ({
+      name,
+      path: join(binDir, name),
+    }));
+    for (const artifact of localArtifacts) {
+      if (!fs.existsSync(artifact.path)) {
+        die(`本地产物缺失: ${artifact.path}（先 cargo build --release？）`);
+      }
     }
-    resignMacBinaries([SUP_BIN, WRK_BIN]);
+    const stageDir = fs.mkdtempSync(join(BIN_DIR, ".coflux-local-install-"));
+    let localFailure;
+    try {
+      const staged = [];
+      for (const artifact of localArtifacts) {
+        const destination = join(BIN_DIR, artifact.name);
+        const source = join(stageDir, artifact.name);
+        fs.copyFileSync(artifact.path, source);
+        fs.chmodSync(source, 0o755);
+        staged.push({ source, destination });
+      }
+      resignMacBinaries(staged.map(({ source }) => source));
+      installStagedPair(staged);
+    } catch (error) {
+      localFailure = error;
+    } finally {
+      fs.rmSync(stageDir, { recursive: true, force: true });
+    }
+    if (localFailure) {
+      die(`本地 daemon 安装失败：${localFailure instanceof Error ? localFailure.message : String(localFailure)}`);
+    }
     console.log(`✓ 用本地二进制（${binDir}）`);
     return;
   }
@@ -169,21 +291,86 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
     console.log(`✓ 二进制已存在（${BIN_DIR}），跳过下载（用 cofluxd update 升级）`);
     return;
   }
-  const t = rustTarget();
-  let base;
+  const target = rustTarget();
+  let releaseVersion;
   if (!version || version === "latest") {
     const tag = await resolveLatestTag();
-    if (tag) console.log(`最新版本: ${tag}`);
-    base = tag ? `https://github.com/${REPO}/releases/download/${tag}` : `https://github.com/${REPO}/releases/latest/download`;
+    if (!tag) die("无法取得最新 release 的精确版本，拒绝无版本身份的下载");
+    releaseVersion = tag;
+    console.log(`最新版本: ${releaseVersion}`);
   } else {
-    base = `https://github.com/${REPO}/releases/download/${version}`;
+    releaseVersion = version;
   }
-  for (const b of ["coflux-supervisor", "coflux-worker"]) {
-    process.stdout.write(`下载 ${b}-${t} … `);
-    await download(`${base}/${b}-${t}`, join(BIN_DIR, b));
-    console.log("✓");
+  try {
+    assertReleaseVersion(releaseVersion);
+  } catch (error) {
+    die(error instanceof Error ? error.message : String(error));
   }
-  resignMacBinaries([SUP_BIN, WRK_BIN]);
+  let releaseFloor;
+  try {
+    releaseFloor = currentReleaseFloor();
+    const floorOrder = releaseFloor
+      ? compareReleaseVersions(releaseVersion, releaseFloor)
+      : 1;
+    if (floorOrder < 0 || (floorOrder === 0 && releaseVersion !== releaseFloor)) {
+      throw new Error(`远端 release ${releaseVersion} 不高于本机可信身份 ${releaseFloor}，拒绝降级/重放`);
+    }
+  } catch (error) {
+    die(error instanceof Error ? error.message : String(error));
+  }
+
+  const base = `${RELEASE_DOWNLOAD_BASE}/${releaseVersion}`;
+  const stageDir = fs.mkdtempSync(join(BIN_DIR, ".coflux-release-install-"));
+  let failure;
+  try {
+    const manifestBytes = await fetchBounded(
+      `${base}/manifest.json`,
+      MAX_RELEASE_METADATA_BYTES,
+      "release manifest",
+    );
+    let manifest;
+    try {
+      manifest = JSON.parse(manifestBytes.toString("utf8"));
+    } catch {
+      throw new Error("release manifest 不是有效 JSON");
+    }
+    const publicKey = loadReleasePublicKey();
+    const staged = [];
+    for (const component of ["supervisor", "worker"]) {
+      const entry = parseReleaseManifestEntry(manifest, component, releaseVersion, target);
+      const artifactName = `coflux-${component}-${target}`;
+      process.stdout.write(`下载并验签 ${artifactName} … `);
+      const data = await fetchBounded(
+        `${base}/${artifactName}`,
+        Math.min(entry.size, MAX_RELEASE_ARTIFACT_BYTES),
+        artifactName,
+      );
+      verifyReleaseArtifact({ component, version: releaseVersion, entry, data, publicKey });
+      const source = join(stageDir, `coflux-${component}`);
+      fs.writeFileSync(source, data, { mode: 0o755 });
+      fs.chmodSync(source, 0o755);
+      staged.push({
+        source,
+        destination: component === "supervisor" ? SUP_BIN : WRK_BIN,
+      });
+      console.log("✓");
+    }
+    // 两个远端产物均通过同一发布根的验签后，才允许做本地平台变换与替换。
+    resignMacBinaries(staged.map(({ source }) => source));
+    // floor 先于 pair 提交：若其后进程崩溃，最多是旧二进制配更高 floor；重跑同版仍允许，
+    // 但任何旧的合法 release 都不能趁窗口降级。
+    if (!releaseFloor || compareReleaseVersions(releaseVersion, releaseFloor) > 0) {
+      persistCliReleaseFloor(releaseVersion);
+    }
+    installStagedPair(staged);
+  } catch (error) {
+    failure = error;
+  } finally {
+    fs.rmSync(stageDir, { recursive: true, force: true });
+  }
+  if (failure) {
+    die(`release 安装失败：${failure instanceof Error ? failure.message : String(failure)}`);
+  }
 }
 
 // 写 settings.json（daemon 直接读）。

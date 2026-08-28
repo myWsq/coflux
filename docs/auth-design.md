@@ -1,78 +1,53 @@
 # coflux 认证与设备登记设计（Tailscale 式）
 
-> 决策来源：单用户管自有多机、一机一 daemon、登录一个账号。详见 OPEN_QUESTIONS B1。
->
-> **现状（plan 034 起）**：登记只有一条路径——浏览器授权（见下方「设备授权流」一节）。
-> 本文档上半部分（EnrollmentKey / classic `daemon.enroll`）是 plan 001/003 时期的历史设计，
-> 相关协议消息、server 表、CLI 参数均已删除，仅保留作演进记录，**不代表当前实现**。
+当前模型是「用户登录账号 → 浏览器授权新设备 → 每设备独立凭证」。早期共享 client token、
+EnrollmentKey 与 Supabase 换票均已退役；历史决策仍保存在对应 plans，不属于运行时契约。
 
 ## 实体
 
 | 实体 | 说明 | 持久化 |
 |------|------|--------|
-| **Account** | 隔离单元。MVP 单账号（`default`），模型留多账号位 | server sqlite |
-| ~~**EnrollmentKey**~~ | ~~登记密钥，账号级、可复用（≈ Tailscale auth key）~~。plan 034 已删除，登记改为浏览器授权 | ~~server，存 **hash**~~ |
-| **Device**（= daemon，一机一个） | `{ id, accountId, name, host, platform, tokenHash, createdAt, lastSeenAt, revoked }`。`id` 服务器签发 | server |
-| **deviceToken** | 每设备独立凭证，登记时签发，daemon 后续连接用它认证 | server 存 hash；daemon 本地明文 |
-| **ClientToken** | 账号级登录凭证，client 用它登录账号 | server，存 **hash** |
-
-服务器只存 token 的 **sha256 hash**，从不持久化明文。
+| **User** | `password` 模式的邮箱身份；密码只存 scrypt 哈希 | Postgres `users` |
+| **Account** | 授权与数据隔离单元；`local` 模式固定为 `default`，`password` 模式通过 membership 归属个人账号 | Postgres |
+| **Device**（= daemon，一机一个） | `{ id, accountId, name, host, platform, tokenHash, createdAt, lastSeenAt, revoked }`；`id` 由服务器签发 | Postgres |
+| **deviceToken** | 每设备独立凭证，浏览器授权成功时签发，daemon 后续连接使用 | server 存 sha256 hash；daemon 本地明文 |
+| **client session token** | 用户名/密码登录成功后由 server 签发；有期限、可撤销，用于 WS 重连 | Postgres `client_tokens` 只存 sha256 hash；浏览器存明文 |
 
 ## 凭证存放
-- **服务器**：accounts / devices / client_tokens 落 sqlite（`enrollment_keys` 表已随 plan 034 删除）。
-- **Daemon**：`~/.coflux/credentials.json` = `{ serverUrl, daemonId, deviceToken }`，`chmod 600`。
-- **Web Client**：登录成功后把 client token 存 `localStorage`。
 
-## 流程
+- **服务器**：账号、用户、membership、设备与 token hash 全部落 Postgres；不持久化 token 明文。
+- **Daemon**：`COFLUX_HOME/credentials.json` 保存 `{ serverUrl, daemonId, deviceToken }`，权限 `0600`。
+- **Web Client**：只把 server 签发的 client session token 存入 `localStorage`；用户不手工配置 token。
 
-### Daemon 首次登记（历史：classic enrollmentKey，plan 034 已删除）
-```
-daemon ──daemon.enroll{ enrollmentKey, name, host, platform }──▶ server
-server: 校验 key（存在/未撤销）→ 建 Device（服务器签发 daemonId）
-        → 签发随机 deviceToken，存 tokenHash → 绑定连接身份 = daemonId/accountId
-        ──daemon.enrolled{ daemonId, deviceToken }──▶ daemon
-daemon: 落盘 credentials.json
-```
-现已被下方「设备授权流」完全取代——`daemon.enroll` message 已从协议删除（field number reserved）。
+## Client 登录
 
-### Daemon 后续连接
+`COFLUX_AUTH` 只接受两个模式：
+
+- `local`（默认）：校验 `COFLUX_USERNAME` / `COFLUX_PASSWORD`，登录固定 `default` account。
+- `password`：把 `username` 字段按邮箱归一化，在 `users` 表查 scrypt 密码哈希，再通过唯一 membership
+  找到或首次创建个人 account。
+
+两条首次登录路径都会签发 `ck_sess_*` 会话 token；重连只提交该 token，不再重复做密码校验。登出会
+在服务器撤销当前 token，过期 token 也不能重新认证。开发模式 `COFLUX_DEV=1` 下 `local` 弱默认是
+`admin` / `admin`；生产缺少 `COFLUX_PASSWORD` 会 fail closed。
+
+## Daemon 后续连接
+
 ```
 daemon ──daemon.auth{ deviceToken }──▶ server
-server: 按 tokenHash 查 Device（未撤销）→ 绑定连接身份 = daemonId/accountId
+server: 按 tokenHash 查未撤销 Device → 从记录绑定 daemonId/accountId
         ──daemon.authed{ daemonId }──▶ daemon
-（认证失败 → daemon.authError；若设备被删，daemon 清本地凭证并重新走浏览器授权登记）
-```
-→ **关键安全性质**：daemonId 由服务器按设备凭证绑定，客户端无法自报/冒充他机（修掉审查 #9）。
-
-### Client 登录
-```
-client ──client.auth{ clientToken }──▶ server
-server: 校验 → 绑定连接 accountId → 可见/可达该账号下所有设备
-        ──auth.ok{ accountId }──▶ client（失败 auth.error）
 ```
 
-## 授权
-- 同一 account 下所有 device 与 client 互相可达（单用户自有多机，无需细粒度 ACL）。
-- 跨 account 隔离：snapshot / daemon 列表 / 广播 / PTY 路由全部按 `accountId` 过滤；
-  client 操作某 session 前，校验 `session.accountId === client.accountId` **且** client 是该 session 订阅者。
+认证失败时 daemon 会收到 `daemon.authError`；设备已删除则清本地凭证并重新走浏览器授权。关键安全性质
+是 daemonId 不接受客户端自报，持有一台设备的 token 不能冒充另一台设备。
 
-## 撤销 / 一机一 daemon
-- `client.removeDevice{ daemonId }`：标记设备 `revoked`、断开其连接、连带删除其 workspace/task、关闭 session。
-- 一机一 daemon 由 daemon 端凭证持久化天然保证；同机重装会登记成新设备，旧的可在 UI 删除。
+## 授权与撤销
 
-## 开发期默认值（零配置可跑）
-- `COFLUX_CLIENT_TOKEN`（默认 `dev-client`）。
-- 服务器启动时确保 `default` 账号存在，并把该值的 hash 登记为该账号的客户端令牌。
-- 生产环境改成随机强值即可（daemon/web 通过同名 env 配置）。
-
-## 协议变更（相对前一版，历史记录）
-- `daemon.register{daemonId,token}` → `daemon.enroll{enrollmentKey,...}` + `daemon.auth{deviceToken}`；新增 `daemon.enrolled` / `daemon.authed` / `daemon.authError`。
-- `client.hello{token}` → `client.auth{clientToken}`；`hello.ok` → `auth.ok{accountId}` / `auth.error`。
-- `DaemonInfo` 增加 `name`；`Workspace`/`Task` 增加 `accountId`。
-- 新增 `client.removeDevice`、`device.removed`。
-- plan 034：`daemon.enroll`（classic enrollmentKey 登记）、`client.createEnrollmentKey`、
-  `enrollmentKeyCreated` 三个 message 从协议删除（field number reserved），登记收敛为下方
-  唯一路径。
+- 同一 account 下的 client 可达该账号全部 device；跨 account 的快照、控制、rendezvous、checkpoint、
+  proxy 与广播均做 account/daemon 归属校验。
+- `client.removeDevice{ daemonId }` 会持久撤销设备、断开连接并清理其 workspace/task 等业务数据。
+- 一机一 daemon 由本地凭证持久化自然保证；同机重装会登记为新设备，旧设备可在 UI 删除。
 
 ## 设备授权流（Tailscale 式，plan 003；plan 034 起是唯一登记路径）
 

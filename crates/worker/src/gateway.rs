@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use coflux_protocol::wire::{device_envelope, DeviceEnvelope, LocalAuthResult};
-use coflux_protocol::{decode_device_envelope, encode_device_envelope, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES};
+use coflux_protocol::{
+    decode_device_envelope, encode_device_envelope, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
+};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -57,7 +59,8 @@ pub async fn run(
                 let runtime = runtime.clone();
                 let daemon_id = daemon_id.clone();
                 let endpoints = endpoints.clone();
-                Box::pin(accept_loop(listener, auth, runtime, daemon_id, endpoints)) as Pin<Box<dyn Future<Output = ()> + Send>>
+                Box::pin(accept_loop(listener, auth, runtime, daemon_id, endpoints))
+                    as Pin<Box<dyn Future<Output = ()> + Send>>
             })
             .collect();
         if loops.len() == 1 {
@@ -78,7 +81,11 @@ async fn bind_loopbacks(requested_port: u16) -> Option<(u16, Vec<TcpListener>)> 
         actual_port = listener.local_addr().ok()?.port();
         listeners.push(listener);
     }
-    let ipv6_port = if requested_port == 0 { actual_port } else { requested_port };
+    let ipv6_port = if requested_port == 0 {
+        actual_port
+    } else {
+        requested_port
+    };
     if let Ok(listener) = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, ipv6_port)).await {
         if listeners.is_empty() {
             actual_port = listener.local_addr().ok()?.port();
@@ -103,7 +110,9 @@ async fn accept_loop(
                 let daemon_id = daemon_id.clone();
                 let endpoints = endpoints.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = handle_connection(stream, auth, runtime, daemon_id, endpoints).await {
+                    if let Err(error) =
+                        handle_connection(stream, auth, runtime, daemon_id, endpoints).await
+                    {
                         eprintln!("[worker] local gateway connection closed: {error}");
                     }
                 });
@@ -132,7 +141,9 @@ async fn probe_is_post(stream: &TcpStream) -> bool {
             }
         }
     };
-    tokio::time::timeout(PROBE_TIMEOUT, probe).await.unwrap_or(false)
+    tokio::time::timeout(PROBE_TIMEOUT, probe)
+        .await
+        .unwrap_or(false)
 }
 
 async fn handle_connection(
@@ -148,19 +159,24 @@ async fn handle_connection(
     let captured_origin = Arc::new(Mutex::new(None::<String>));
     let callback_origin = captured_origin.clone();
     let callback_auth = auth.clone();
-    let callback = move |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
-        if request.uri().path() != "/device" || request.uri().query().is_some() {
-            return Err(reject(StatusCode::NOT_FOUND, "gateway path 不存在"));
-        }
-        let Some(origin) = request.headers().get("origin").and_then(|value| value.to_str().ok()) else {
-            return Err(reject(StatusCode::FORBIDDEN, "缺少 Origin"));
+    let callback =
+        move |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
+            if request.uri().path() != "/device" || request.uri().query().is_some() {
+                return Err(reject(StatusCode::NOT_FOUND, "gateway path 不存在"));
+            }
+            let Some(origin) = request
+                .headers()
+                .get("origin")
+                .and_then(|value| value.to_str().ok())
+            else {
+                return Err(reject(StatusCode::FORBIDDEN, "缺少 Origin"));
+            };
+            if !callback_auth.origin_allowed(origin) {
+                return Err(reject(StatusCode::FORBIDDEN, "Origin denied"));
+            }
+            *callback_origin.lock().unwrap() = Some(origin.to_string());
+            Ok(response)
         };
-        if !callback_auth.origin_allowed(origin) {
-            return Err(reject(StatusCode::FORBIDDEN, "Origin denied"));
-        }
-        *callback_origin.lock().unwrap() = Some(origin.to_string());
-        Ok(response)
-    };
     let config = WebSocketConfig {
         max_write_buffer_size: MAX_DEVICE_FRAME_BYTES + 2 * 1024 * 1024,
         max_message_size: Some(MAX_DEVICE_FRAME_BYTES),
@@ -170,11 +186,18 @@ async fn handle_connection(
     let mut websocket = accept_hdr_async_with_config(stream, callback, Some(config))
         .await
         .map_err(|error| format!("WebSocket handshake: {error}"))?;
-    let origin = captured_origin.lock().unwrap().take().ok_or_else(|| "Origin capture 丢失".to_string())?;
+    let origin = captured_origin
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| "Origin capture 丢失".to_string())?;
     let Some(daemon_id) = daemon_id() else {
         send_auth_failure(
             &mut websocket,
-            AuthFailure { code: coflux_protocol::wire::LocalAuthErrorCode::GrantUnknown, message: "daemon 尚未登记" },
+            AuthFailure {
+                code: coflux_protocol::wire::LocalAuthErrorCode::GrantUnknown,
+                message: "daemon 尚未登记",
+            },
         )
         .await;
         return Ok(());
@@ -189,7 +212,9 @@ async fn handle_connection(
     let gateway_hello = DeviceEnvelope {
         protocol_version: DEVICE_PROTOCOL_VERSION,
         channel_id: String::new(),
-        payload: Some(device_envelope::Payload::LocalGatewayHello(challenge.hello.clone())),
+        payload: Some(device_envelope::Payload::LocalGatewayHello(
+            challenge.hello.clone(),
+        )),
     };
     websocket
         .send(Message::binary(encode_device_envelope(&gateway_hello)))
@@ -201,8 +226,11 @@ async fn handle_connection(
         .map_err(|_| "等待 LocalClientHello 超时".to_string())?;
     let client_hello = match incoming {
         Some(Ok(Message::Binary(bytes))) => {
-            let envelope = decode_device_envelope(&bytes).ok_or_else(|| "LocalClientHello envelope 畸形".to_string())?;
-            if envelope.protocol_version != DEVICE_PROTOCOL_VERSION || !envelope.channel_id.is_empty() {
+            let envelope = decode_device_envelope(&bytes)
+                .ok_or_else(|| "LocalClientHello envelope 畸形".to_string())?;
+            if envelope.protocol_version != DEVICE_PROTOCOL_VERSION
+                || !envelope.channel_id.is_empty()
+            {
                 send_auth_failure(
                     &mut websocket,
                     AuthFailure {
@@ -230,7 +258,18 @@ async fn handle_connection(
         }
     };
     let scopes = authenticated.scopes.clone();
-    let (channel_id, mut outbound) = runtime.open_local(authenticated);
+    let (channel_id, mut outbound) = match runtime.open_local(authenticated) {
+        Ok(channel) => channel,
+        Err(message) => {
+            send_failure(
+                &mut websocket,
+                coflux_protocol::wire::LocalAuthErrorCode::Unspecified,
+                &message,
+            )
+            .await;
+            return Ok(());
+        }
+    };
     let auth_result = DeviceEnvelope {
         protocol_version: DEVICE_PROTOCOL_VERSION,
         channel_id: String::new(),
@@ -242,7 +281,11 @@ async fn handle_connection(
             error_code: coflux_protocol::wire::LocalAuthErrorCode::Unspecified as i32,
         })),
     };
-    if websocket.send(Message::binary(encode_device_envelope(&auth_result))).await.is_err() {
+    if websocket
+        .send(Message::binary(encode_device_envelope(&auth_result)))
+        .await
+        .is_err()
+    {
         runtime.close_channel(&channel_id);
         return Ok(());
     }
@@ -272,10 +315,21 @@ async fn handle_connection(
 }
 
 fn reject(status: StatusCode, message: &str) -> ErrorResponse {
-    HttpResponse::builder().status(status).body(Some(message.to_string())).expect("固定 gateway HTTP error response")
+    HttpResponse::builder()
+        .status(status)
+        .body(Some(message.to_string()))
+        .expect("固定 gateway HTTP error response")
 }
 
 async fn send_auth_failure(websocket: &mut WebSocketStream<TcpStream>, error: AuthFailure) {
+    send_failure(websocket, error.code, error.message).await;
+}
+
+async fn send_failure(
+    websocket: &mut WebSocketStream<TcpStream>,
+    code: coflux_protocol::wire::LocalAuthErrorCode,
+    message: &str,
+) {
     let envelope = DeviceEnvelope {
         protocol_version: DEVICE_PROTOCOL_VERSION,
         channel_id: String::new(),
@@ -283,18 +337,22 @@ async fn send_auth_failure(websocket: &mut WebSocketStream<TcpStream>, error: Au
             ok: false,
             channel_id: None,
             scopes: Vec::new(),
-            error: Some(error.message.to_string()),
-            error_code: error.code as i32,
+            error: Some(message.to_string()),
+            error_code: code as i32,
         })),
     };
-    let _ = websocket.send(Message::binary(encode_device_envelope(&envelope))).await;
+    let _ = websocket
+        .send(Message::binary(encode_device_envelope(&envelope)))
+        .await;
     let _ = websocket.close(None).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coflux_protocol::wire::{DeviceScope, DeviceSessionCatalogRequest, LocalBrowserGrant, LocalClientHello};
+    use coflux_protocol::wire::{
+        DeviceScope, DeviceSessionCatalogRequest, LocalBrowserGrant, LocalClientHello,
+    };
     use coflux_protocol::{decode_frame, is_frame, RecordParser};
     use p256::ecdsa::signature::{Signer, Verifier};
     use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
@@ -306,7 +364,11 @@ mod tests {
     fn temp_home() -> String {
         let mut random = [0u8; 8];
         OsRng.fill_bytes(&mut random);
-        let path = std::env::temp_dir().join(format!("coflux-local-gateway-{}-{}", std::process::id(), hex::encode(random)));
+        let path = std::env::temp_dir().join(format!(
+            "coflux-local-gateway-{}-{}",
+            std::process::id(),
+            hex::encode(random)
+        ));
         std::fs::create_dir_all(&path).unwrap();
         path.to_string_lossy().into_owned()
     }
@@ -315,9 +377,14 @@ mod tests {
     async fn local_gateway_authenticates_and_forwards_device_frame() {
         let home = temp_home();
         let auth = Arc::new(LocalAuth::load_or_create(&home).unwrap());
-        auth.configure_origins(vec!["https://p.coflux.dev".into()]).unwrap();
+        auth.configure_origins(vec!["https://p.coflux.dev".into()])
+            .unwrap();
         let browser_key = SigningKey::random(&mut OsRng);
-        let browser_public_key = browser_key.verifying_key().to_encoded_point(false).as_bytes().to_vec();
+        let browser_public_key = browser_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
         auth.install_grant(
             LocalBrowserGrant {
                 grant_id: "grant-1".into(),
@@ -325,7 +392,10 @@ mod tests {
                 daemon_id: "daemon-1".into(),
                 origin: "https://p.coflux.dev".into(),
                 public_key_sec1: browser_public_key.clone(),
-                offline_scopes: vec![DeviceScope::SessionRead as i32, DeviceScope::SessionControl as i32],
+                offline_scopes: vec![
+                    DeviceScope::SessionRead as i32,
+                    DeviceScope::SessionControl as i32,
+                ],
                 created_at: 1.0,
             },
             "daemon-1",
@@ -343,7 +413,10 @@ mod tests {
             Arc::new(move |status| {
                 let _ = status_tx.send(status);
             }),
-            Arc::new(crate::hook::LocalEndpoints { hook_tx: tokio::sync::mpsc::channel(4).0, agent_tx: tokio::sync::mpsc::channel(4).0 }),
+            Arc::new(crate::hook::LocalEndpoints {
+                hook_tx: tokio::sync::mpsc::channel(4).0,
+                agent_tx: tokio::sync::mpsc::channel(4).0,
+            }),
         ));
         let port = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -355,8 +428,12 @@ mod tests {
         .await
         .unwrap();
 
-        let mut request = format!("ws://127.0.0.1:{port}/device").into_client_request().unwrap();
-        request.headers_mut().insert("Origin", "https://p.coflux.dev".parse().unwrap());
+        let mut request = format!("ws://127.0.0.1:{port}/device")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("Origin", "https://p.coflux.dev".parse().unwrap());
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
         let gateway_envelope = match socket.next().await.unwrap().unwrap() {
             Message::Binary(bytes) => decode_device_envelope(&bytes).unwrap(),
@@ -366,7 +443,8 @@ mod tests {
             device_envelope::Payload::LocalGatewayHello(hello) => hello,
             _ => panic!("expected gateway hello"),
         };
-        let gateway_key = VerifyingKey::from_sec1_bytes(&gateway_hello.gateway_public_key_sec1).unwrap();
+        let gateway_key =
+            VerifyingKey::from_sec1_bytes(&gateway_hello.gateway_public_key_sec1).unwrap();
         let gateway_signature = Signature::from_slice(&gateway_hello.signature_p1363).unwrap();
         gateway_key
             .verify(
@@ -408,7 +486,10 @@ mod tests {
             channel_id: String::new(),
             payload: Some(device_envelope::Payload::LocalClientHello(client_hello)),
         };
-        socket.send(Message::binary(encode_device_envelope(&hello_envelope))).await.unwrap();
+        socket
+            .send(Message::binary(encode_device_envelope(&hello_envelope)))
+            .await
+            .unwrap();
         let auth_envelope = match socket.next().await.unwrap().unwrap() {
             Message::Binary(bytes) => decode_device_envelope(&bytes).unwrap(),
             _ => panic!("expected auth result"),
@@ -423,17 +504,32 @@ mod tests {
         let request = DeviceEnvelope {
             protocol_version: DEVICE_PROTOCOL_VERSION,
             channel_id: channel_id.clone(),
-            payload: Some(device_envelope::Payload::SessionCatalogRequest(DeviceSessionCatalogRequest { request_id: "catalog-1".into() })),
+            payload: Some(device_envelope::Payload::SessionCatalogRequest(
+                DeviceSessionCatalogRequest {
+                    request_id: "catalog-1".into(),
+                    ..Default::default()
+                },
+            )),
         };
-        socket.send(Message::binary(encode_device_envelope(&request))).await.unwrap();
-        let record = tokio::time::timeout(Duration::from_secs(1), from_gateway.recv()).await.unwrap().unwrap();
+        socket
+            .send(Message::binary(encode_device_envelope(&request)))
+            .await
+            .unwrap();
+        let record = tokio::time::timeout(Duration::from_secs(1), from_gateway.recv())
+            .await
+            .unwrap()
+            .unwrap();
         let mut parser = RecordParser::new();
         let mut parsed = Vec::new();
-        parser.push(&record, |value| parsed.push(value.to_vec()));
+        parser
+            .push(&record, |value| parsed.push(value.to_vec()))
+            .unwrap();
         assert_eq!(parsed.len(), 1);
         assert!(is_frame(&parsed[0]));
         match decode_frame(&parsed[0]).unwrap() {
-            coflux_protocol::DataFrame::Device { channel_id: actual, .. } => assert_eq!(actual, channel_id),
+            coflux_protocol::DataFrame::Device {
+                channel_id: actual, ..
+            } => assert_eq!(actual, channel_id),
             _ => panic!("expected Device IPC frame"),
         }
 
@@ -447,14 +543,17 @@ mod tests {
     async fn local_gateway_loopback_bind_uses_an_ephemeral_port() {
         let (port, listeners) = bind_loopbacks(0).await.unwrap();
         assert_ne!(port, 0);
-        assert!(listeners.iter().all(|listener| listener.local_addr().unwrap().ip().is_loopback()));
+        assert!(listeners
+            .iter()
+            .all(|listener| listener.local_addr().unwrap().ip().is_loopback()));
     }
 
     #[tokio::test]
     async fn local_gateway_rejects_unlisted_http_origin_before_websocket_auth() {
         let home = temp_home();
         let auth = Arc::new(LocalAuth::load_or_create(&home).unwrap());
-        auth.configure_origins(vec!["https://p.coflux.dev".into()]).unwrap();
+        auth.configure_origins(vec!["https://p.coflux.dev".into()])
+            .unwrap();
         let (to_supervisor, _from_gateway) = tokio::sync::mpsc::channel(8);
         let (to_server, _from_runtime) = tokio::sync::mpsc::channel(8);
         let runtime = DeviceRuntime::new(Some(auth.clone()), to_supervisor, to_server);
@@ -467,15 +566,22 @@ mod tests {
             Arc::new(move |status| {
                 let _ = status_tx.send(status);
             }),
-            Arc::new(crate::hook::LocalEndpoints { hook_tx: tokio::sync::mpsc::channel(4).0, agent_tx: tokio::sync::mpsc::channel(4).0 }),
+            Arc::new(crate::hook::LocalEndpoints {
+                hook_tx: tokio::sync::mpsc::channel(4).0,
+                agent_tx: tokio::sync::mpsc::channel(4).0,
+            }),
         ));
         let port = loop {
             if let Some(Some(port)) = status_rx.recv().await {
                 break port;
             }
         };
-        let mut request = format!("ws://127.0.0.1:{port}/device").into_client_request().unwrap();
-        request.headers_mut().insert("Origin", "https://evil.example".parse().unwrap());
+        let mut request = format!("ws://127.0.0.1:{port}/device")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("Origin", "https://evil.example".parse().unwrap());
         assert!(tokio_tungstenite::connect_async(request).await.is_err());
         task.abort();
         let _ = task.await;
@@ -499,7 +605,10 @@ mod tests {
             Arc::new(move |status| {
                 let _ = first_tx.send(status);
             }),
-            Arc::new(crate::hook::LocalEndpoints { hook_tx: tokio::sync::mpsc::channel(4).0, agent_tx: tokio::sync::mpsc::channel(4).0 }),
+            Arc::new(crate::hook::LocalEndpoints {
+                hook_tx: tokio::sync::mpsc::channel(4).0,
+                agent_tx: tokio::sync::mpsc::channel(4).0,
+            }),
         ));
         let port = loop {
             if let Some(Some(port)) = first_rx.recv().await {
@@ -518,7 +627,10 @@ mod tests {
             Arc::new(move |status| {
                 let _ = second_tx.send(status);
             }),
-            Arc::new(crate::hook::LocalEndpoints { hook_tx: tokio::sync::mpsc::channel(4).0, agent_tx: tokio::sync::mpsc::channel(4).0 }),
+            Arc::new(crate::hook::LocalEndpoints {
+                hook_tx: tokio::sync::mpsc::channel(4).0,
+                agent_tx: tokio::sync::mpsc::channel(4).0,
+            }),
         ));
         let rebound = tokio::time::timeout(Duration::from_secs(2), async {
             loop {

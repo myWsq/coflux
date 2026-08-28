@@ -12,7 +12,9 @@ import "coflux/v1/common.proto";
 // 常量；wire 握手必须显式带版本，所有 cols/rows 在 authority 边界钳制为 [1, 1000]。
 // 本文件全部 created_at/started_at/exited_at/captured_at/expires_at 均为 Unix epoch milliseconds。
 // request_id 由 logical client 生成并在同一请求重投时保持不变；它只做响应关联/短期去重。
-// 有副作用请求的 exactly-once 边界由 operation_id 或 input_seq 明确承担，不能只依赖 request_id。
+// operation_id 与 input_seq 只是各自 authority 生命周期内的去重键，不构成泛化的 exactly-once：
+// worker ledger 只覆盖当前 worker runtime；sessiond 管辖的 input/create/stop 可跨 worker
+// replacement 去重，但不跨 supervisor/OS restart。崩溃与恢复语义由具体消息定义。
 
 enum DeviceScope {
   DEVICE_SCOPE_UNSPECIFIED = 0;
@@ -313,16 +315,39 @@ message DeviceSessionExitTombstone {
 
 message DeviceSessionCatalogRequest {
   string request_id = 1;
+  // 首页留空/0；后续页回填上一页返回的 owner/epoch。epoch 变化时 sessiond 返回 reset，
+  // worker 丢弃半快照并从第一页重来。
+  string snapshot_owner_id = 2;
+  uint64 snapshot_epoch = 3;
+  uint32 session_offset = 4;
+  uint32 exit_offset = 5;
+  // 0 = legacy 单帧模式；新 worker 填非零值显式 opt-in 分页，保证旧 worker 不会把首个
+  // 分片误当完整 catalog。sessiond 会把它钳在自身安全范围内。
+  uint32 max_page_bytes = 6;
 }
 
 message DeviceSessionCatalog {
   string request_id = 1;
   repeated DeviceSessionInfo sessions = 2;
   repeated DeviceSessionExitTombstone exits = 3;
+  string snapshot_owner_id = 4;
+  uint64 snapshot_epoch = 5;
+  uint32 session_offset = 6;
+  uint32 exit_offset = 7;
+  uint32 next_session_offset = 8;
+  uint32 next_exit_offset = 9;
+  // legacy response 的这些新字段全为默认值；新 worker 将其视为完整单帧以兼容旧 supervisor。
+  bool complete = 10;
+  bool reset = 11;
 }
 
 message DeviceExitAck {
   repeated string event_ids = 1;
+  // 新链路把 ACK 绑定到完整 catalog 的 request/epoch；空值保留给旧 client/worker 的
+  // 滚动兼容，不能用于确认新分页请求。
+  string request_id = 2;
+  string snapshot_owner_id = 3;
+  uint64 snapshot_epoch = 4;
 }
 
 // client_instance_id 是跨 transport 稳定的 browser logical client identity；同一 client 的
@@ -417,10 +442,11 @@ message DevicePtyResize {
   uint32 rows = 6;
 }
 
-// operation_id 是不可复用的 opaque ID，在同一 daemon 上跨 logical channel 与 direct/relay
-// transport 全局幂等：同 ID、
-// 同 payload 返回已记录结果而不重复执行；同 ID、不同 payload 必须拒绝。stop 是离线 scope 的
-// 特例，可由 client 生成 operation_id；create/project/worktree 必须匹配中心预安装模板。
+// operation_id 是不可复用的 opaque ID。对 sessiond 管辖的 stop/create，同一 supervisor runtime
+// 内跨 logical channel、direct/relay transport 与 worker replacement 去重：同 ID、同 payload 返回
+// 已记录结果而不重复执行；同 ID、不同 payload 必须拒绝。ledger 不跨 supervisor/OS restart。
+// stop 是离线 scope 的特例，可由 client 生成 operation_id；create/project/worktree 必须匹配中心
+// 预安装模板。
 message DeviceSessionStop {
   string request_id = 1;
   string operation_id = 2;
@@ -440,7 +466,7 @@ message DeviceSessionExited {
   uint64 final_output_seq = 3;
 }
 
-// lifecycle operation 采用与 stop 相同的 operation_id 去重规则。
+// session create 采用与 stop 相同的 sessiond 生命周期去重规则。
 message DeviceSessionCreate {
   string request_id = 1;
   string operation_id = 2;
@@ -480,7 +506,8 @@ message DeviceProjectValidated {
   optional string default_branch = 8;
 }
 
-// 所有携带 operation_id 的设备事实变更均采用 session stop 所述的全局去重规则。
+// 下列 worktree add/remove 的 operation_id ledger 只覆盖当前 worker runtime；worker replacement
+// 后不提供通用去重。此类操作可基于稳定 worktree path 与 Git 状态做专用探测、恢复与收敛。
 message DeviceWorktreeAdd {
   string request_id = 1;
   string operation_id = 2;
@@ -515,7 +542,9 @@ message DeviceExecRun {
   repeated string args = 4;
   map<string, string> env = 5;
   optional uint32 timeout_ms = 6;
-  optional string operation_id = 7; // 设置时必须 exactly-once 去重。
+  // 设置时只在当前 worker runtime 内去重。worker 崩溃时外部命令可能已执行而结果未记录，
+  // 此时状态未知；调用方不得自动重试非幂等命令，也不得宣称 exactly-once。
+  optional string operation_id = 7;
 }
 
 message DeviceFsList {
@@ -533,6 +562,8 @@ message DeviceFsRead {
   string path = 3;
 }
 
+// fs.write 的 operation_id ledger 只覆盖当前 worker runtime。对可稳定重建的目标 path，以相同
+// path/data 做全量覆盖写可在状态未知时重试并收敛到同一内容；这是结果收敛式幂等，不是严格一次。
 message DeviceFsWrite {
   string request_id = 1;
   string operation_id = 2;
@@ -572,7 +603,8 @@ message DeviceError {
 // 中心持久 prepare 后，先经可信 daemon control WS 安装同一模板并等待
 // PreparedDeviceOperationInstalled，再交给 client。frame 是 channel_id 为空的 DeviceEnvelope；
 // client 只可填入自己已认证的 channel_id 后经 direct/relay 发送。daemon 解码后必须确认除
-// channel_id 外与已安装模板完全相等，再按 operation_id 幂等执行；未知/过期/被篡改模板拒绝。
+// channel_id 外与已安装模板完全相等，再按具体消息定义的 authority 生命周期处理 operation_id；
+// 未知/过期/被篡改模板拒绝。
 message PreparedDeviceOperation {
   string operation_id = 1;
   string daemon_id = 2;

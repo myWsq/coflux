@@ -25,7 +25,13 @@ pub struct ExecOutcome {
 
 /// env：wire 上 `ExecRun.env` 是 proto3 map（恒非 null，缺省即空 map），故此处直接收
 /// `&HashMap`，不再需要 `Option` 包一层——空 map 天然等价于旧协议里的「未提供」。
-pub async fn run_command(cwd: &str, command: &str, args: &[String], env: &HashMap<String, String>, timeout_ms: Option<u64>) -> ExecOutcome {
+pub async fn run_command(
+    cwd: &str,
+    command: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+    timeout_ms: Option<u64>,
+) -> ExecOutcome {
     let mut cmd = Command::new(command);
     cmd.args(args);
     if !cwd.is_empty() {
@@ -35,16 +41,41 @@ pub async fn run_command(cwd: &str, command: &str, args: &[String], env: &HashMa
         cmd.env(k, v);
     }
     cmd.stdin(Stdio::null()).kill_on_drop(true);
-    let timeout = Duration::from_millis(timeout_ms.filter(|&t| t > 0).unwrap_or(DEFAULT_TIMEOUT_MS));
+    let timeout =
+        Duration::from_millis(timeout_ms.filter(|&t| t > 0).unwrap_or(DEFAULT_TIMEOUT_MS));
     match tokio::time::timeout(timeout, cmd.output()).await {
-        Err(_) => ExecOutcome { ok: false, exit_code: -1, stdout: String::new(), stderr: String::new(), error: Some("进程被终止（可能超时）".into()) },
-        Ok(Err(e)) => ExecOutcome { ok: false, exit_code: -1, stdout: String::new(), stderr: String::new(), error: Some(e.to_string()) },
+        Err(_) => ExecOutcome {
+            ok: false,
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("进程被终止（可能超时）".into()),
+        },
+        Ok(Err(e)) => ExecOutcome {
+            ok: false,
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some(e.to_string()),
+        },
         Ok(Ok(out)) => {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             match out.status.code() {
-                Some(code) => ExecOutcome { ok: true, exit_code: code, stdout, stderr, error: None },
-                None => ExecOutcome { ok: false, exit_code: -1, stdout, stderr, error: Some("进程被信号终止".into()) },
+                Some(code) => ExecOutcome {
+                    ok: true,
+                    exit_code: code,
+                    stdout,
+                    stderr,
+                    error: None,
+                },
+                None => ExecOutcome {
+                    ok: false,
+                    exit_code: -1,
+                    stdout,
+                    stderr,
+                    error: Some("进程被信号终止".into()),
+                },
             }
         }
     }
@@ -55,7 +86,9 @@ pub fn expand_home(path: &str) -> Option<String> {
     if path == "~" {
         std::env::var("HOME").ok()
     } else if let Some(rest) = path.strip_prefix("~/") {
-        std::env::var("HOME").ok().map(|home| format!("{home}/{rest}"))
+        std::env::var("HOME")
+            .ok()
+            .map(|home| format!("{home}/{rest}"))
     } else {
         Some(path.to_string())
     }
@@ -71,7 +104,11 @@ fn safe_resolve(root: &str, rel: &str) -> Option<PathBuf> {
     let root = expand_home(root)?;
     let rel = expand_home(rel)?;
     let real_base = std::fs::canonicalize(&root).ok()?;
-    let joined = if rel.is_empty() { real_base.clone() } else { real_base.join(rel) };
+    let joined = if rel.is_empty() {
+        real_base.clone()
+    } else {
+        real_base.join(rel)
+    };
     let real_target = std::fs::canonicalize(&joined).ok()?;
     if real_target == real_base || real_target.starts_with(&real_base) {
         Some(real_target)
@@ -120,8 +157,12 @@ fn safe_resolve_write_target(root: &str, rel: &str) -> Option<(PathBuf, String, 
 /// 清理目录内 mtime 超过 7 天的陈旧文件（刚落盘的文件与 just_skip 除外）。
 /// 低频操作，纯尽力而为——任何一步失败都不影响本次写入结果。
 fn cleanup_stale_files(dir: &Path, just_written: &str, just_skip: &str) {
-    let Some(cutoff) = SystemTime::now().checked_sub(WRITE_DIR_CLEANUP_AGE) else { return };
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Some(cutoff) = SystemTime::now().checked_sub(WRITE_DIR_CLEANUP_AGE) else {
+        return;
+    };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
         let name = entry.file_name();
         if name.to_string_lossy() == just_written || (!just_skip.is_empty() && name == just_skip) {
@@ -164,7 +205,12 @@ fn safe_resolve_temp_target(rel: &str) -> Option<(PathBuf, String)> {
 /// 写文件（plan 014 终端贴图上传落盘）。temp=false：root 锚定 + 防越界 + 父目录按需创建，
 /// 成功回带清洗后的 worktree 相对路径。temp=true：落 daemon 侧系统临时目录，rel 须为单段
 /// 文件名，成功回带绝对路径（真相均在 worker 侧，client 不自行拼装）。
-pub async fn write_file(root: &str, rel: &str, data: &[u8], temp: bool) -> (bool, Option<String>, Option<String>) {
+pub async fn write_file(
+    root: &str,
+    rel: &str,
+    data: &[u8],
+    temp: bool,
+) -> (bool, Option<String>, Option<String>) {
     if data.len() as u64 > MAX_WRITE_BYTES {
         return (false, None, Some("文件过大".into()));
     }
@@ -189,7 +235,10 @@ pub async fn write_file(root: &str, rel: &str, data: &[u8], temp: bool) -> (bool
     (true, Some(clean_rel), None)
 }
 
-pub async fn list_dir(root: &str, rel: &str) -> (bool, Vec<FsEntry>, Option<String>, Option<String>) {
+pub async fn list_dir(
+    root: &str,
+    rel: &str,
+) -> (bool, Vec<FsEntry>, Option<String>, Option<String>) {
     let target = match safe_resolve(root, rel) {
         Some(t) => t,
         None => return (false, vec![], Some("路径越界或不存在".into()), None),
@@ -225,7 +274,14 @@ pub async fn list_dir(root: &str, rel: &str) -> (bool, Vec<FsEntry>, Option<Stri
                 let bd = b.1 == FsEntryKind::Dir;
                 bd.cmp(&ad).then_with(|| a.0.cmp(&b.0))
             });
-            let entries = raw.into_iter().map(|(name, kind, size)| FsEntry { name, kind: kind as i32, size: size as f64 }).collect();
+            let entries = raw
+                .into_iter()
+                .map(|(name, kind, size)| FsEntry {
+                    name,
+                    kind: kind as i32,
+                    size: size as f64,
+                })
+                .collect();
             (true, entries, None, path)
         }
     }
@@ -285,11 +341,17 @@ pub fn write_command_script(command: &str) -> Result<(String, String), String> {
     let name = format!(
         "cmd-{}-{}.sh",
         std::process::id(),
-        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
     );
     let full = dir.join(&name);
     let log = dir.join(format!("{name}.log"));
-    let login_shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/bash".to_string());
+    let login_shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/bash".to_string());
     // bash 而非 sh：管道尾是 tee，命令自己的退出码只能靠 PIPESTATUS 取回，而 agent 判断
     // 成败全靠它。仓库已假设 bash 存在（supervisor 的默认 shell fallback 就是 /bin/bash）。
     let script = format!(
@@ -302,10 +364,14 @@ pub fn write_command_script(command: &str) -> Result<(String, String), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o700)).map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
     }
     cleanup_stale_files(&dir, &name, "");
-    Ok((full.to_string_lossy().into_owned(), log.to_string_lossy().into_owned()))
+    Ok((
+        full.to_string_lossy().into_owned(),
+        log.to_string_lossy().into_owned(),
+    ))
 }
 
 /// 读命令日志的尾部若干字节，按 UTF-8 lossy 转字符串。截断从字节位置切，首行可能残缺——
@@ -337,13 +403,23 @@ mod agent_script_tests {
         assert_eq!(sh_quote("pnpm test"), "'pnpm test'");
         assert_eq!(sh_quote("echo 'hi'"), r"'echo '\''hi'\'''");
         // 转义后交给真 sh 执行，取回的必须是原字符串
-        for raw in ["a'b", "it's; rm -rf /", "$(whoami)", "`id`", "多字节 中文 '引号'"] {
+        for raw in [
+            "a'b",
+            "it's; rm -rf /",
+            "$(whoami)",
+            "`id`",
+            "多字节 中文 '引号'",
+        ] {
             let out = std::process::Command::new("/bin/sh")
                 .arg("-c")
                 .arg(format!("printf %s {}", sh_quote(raw)))
                 .output()
                 .expect("run sh");
-            assert_eq!(String::from_utf8_lossy(&out.stdout), raw, "quote 失真: {raw}");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                raw,
+                "quote 失真: {raw}"
+            );
         }
     }
 
@@ -351,7 +427,9 @@ mod agent_script_tests {
     fn script_runs_command_and_propagates_exit_code() {
         // 管道尾是 tee，退出码必须来自 PIPESTATUS 而非 tee——agent 靠它判断成败
         let (path, log) = write_command_script("exit 7").expect("write script");
-        let status = std::process::Command::new(&path).status().expect("run script");
+        let status = std::process::Command::new(&path)
+            .status()
+            .expect("run script");
         assert_eq!(status.code(), Some(7), "退出码必须透传");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&log);
@@ -361,14 +439,26 @@ mod agent_script_tests {
     /// 秒级命令的输出根本进不去。stdout 与 stderr 都要落进去。
     #[test]
     fn script_log_captures_stdout_and_stderr() {
-        let (path, log) = write_command_script("echo 到标准输出; echo 到标准错误 >&2").expect("write script");
-        let output = std::process::Command::new(&path).output().expect("run script");
+        let (path, log) =
+            write_command_script("echo 到标准输出; echo 到标准错误 >&2").expect("write script");
+        let output = std::process::Command::new(&path)
+            .output()
+            .expect("run script");
         assert!(output.status.success());
         let captured = read_command_log_tail(&log, 64 * 1024).expect("读日志");
-        assert!(captured.contains("到标准输出"), "stdout 未落盘: {captured:?}");
-        assert!(captured.contains("到标准错误"), "stderr 未落盘: {captured:?}");
+        assert!(
+            captured.contains("到标准输出"),
+            "stdout 未落盘: {captured:?}"
+        );
+        assert!(
+            captured.contains("到标准错误"),
+            "stderr 未落盘: {captured:?}"
+        );
         // tee 的另一路仍然到达调用方（用户接管时才看得到实时输出）
-        assert!(String::from_utf8_lossy(&output.stdout).contains("到标准输出"), "tee 必须同时输出到 PTY");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("到标准输出"),
+            "tee 必须同时输出到 PTY"
+        );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&log);
     }
@@ -381,7 +471,10 @@ mod agent_script_tests {
         std::fs::write(&path, "0123456789").expect("write");
         let tail = read_command_log_tail(&path.to_string_lossy(), 4).expect("读日志");
         assert_eq!(tail, "6789", "超限时保留尾部——agent 要的是最后发生了什么");
-        assert_eq!(read_command_log_tail(&path.to_string_lossy(), 100).unwrap(), "0123456789");
+        assert_eq!(
+            read_command_log_tail(&path.to_string_lossy(), 100).unwrap(),
+            "0123456789"
+        );
         assert!(read_command_log_tail("/nonexistent/coflux/x.log", 100).is_none());
         let _ = std::fs::remove_file(&path);
     }

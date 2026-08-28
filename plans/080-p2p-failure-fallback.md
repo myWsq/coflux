@@ -18,6 +18,11 @@
 - Category: bug
 - Execution: self
 - Planned at: `71c543b`, 2026-08-17（主因判断于同日调查后修订，见 Requirement）
+- Result: **DONE（代码里程碑）**。M1/M2/M4/M5 沿用既有实现；M3 于 2026-08-28 完成：
+  浏览器 `/client` 普通 transport 短断立即撤 control waiter、online lease、elevated lane 与新
+  rendezvous 权限，但既有 relay/P2P session lane 有 15 秒有界宽限；同凭据 `authOk` 在窗口内
+  恢复会继续使用同一 channel，超时或 authError/clientOutdated/换凭据/reset/destroy/logout 则
+  hard revoke。client 单测 56/56 通过。生产开关、真实 NAT/STUN 与 Safari/Firefox/iOS 属外部验收。
 
 ## Requirement
 
@@ -98,9 +103,18 @@ Validation: `node --test packages/client/src/connection.test.ts` -> exit 0，用
 
 ### Milestone 3: 控制面抖动不再连坐摧毁数据面
 
-控制面短暂断开并快速恢复时，正在工作的 relay 通道不被全毁重建。
+浏览器控制面短暂断开时，`setControlDisconnected()` 立即撤销只在 online control 下才安全的
+能力（control waiter、online lease、elevated lane、新 relay/P2P rendezvous），但对已经建立的
+relay/P2P session lane 给 15 秒有界宽限。同凭据自动重连在窗口内收到 `authOk` 后取消 timer，
+保留原 channel；超时则关闭远端 channel。authError、clientOutdated、显式换凭据、reset、destroy、
+logout 走 `setControlOnline(false)` hard revoke，立即收敛。control generation token 同时拦截
+断线前发起、断线后才完成的异步 open，以及跨代旧 timer。
 
-Validation: `node --test packages/client/src/device-router.test.ts` -> exit 0，用例证明"控制面抖动一次并在宽限内恢复"后 relay 通道仍是同一条（未经历 loseChannel → 重新竞速）。
+worker 的 `/daemon` 是另一条独立控制连接：它若断开，仍按既有在线授权语义立即
+`close_relays()` + `p2p.close_all()`；浏览器宽限不改变 worker 授权边界。
+
+Validation: `node --import tsx --test packages/client/src/device-router.test.ts` -> exit 0。用例覆盖
+窗口内同一 relay、15 秒超时、hard revoke、迟到 open 和旧 timer 跨代五条路径。
 
 ### Milestone 4: 数据面通道心跳判死
 
@@ -149,23 +163,29 @@ Out of scope:
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| connection 单测 | `node --test packages/client/src/connection.test.ts` | exit 0 |
-| device-router 单测 | `node --test packages/client/src/device-router.test.ts` | exit 0 |
+| connection 单测 | `node --import tsx --test packages/client/src/connection.test.ts` | exit 0 |
+| device-router 单测 | `node --import tsx --test packages/client/src/device-router.test.ts` | exit 0 |
 | web 类型检查 | `node_modules/.bin/tsc -b apps/web/tsconfig.json` | exit 0 |
-| 真实跨网络验收 (acceptance) | 两台不同网络的机器 + 浏览器操作对端终端 | 链路被掐后自动恢复，无需刷新页面 |
+| 外部真实跨网络验收 | 两台不同网络的机器 + 浏览器操作对端终端 | 链路被掐后自动恢复，无需刷新页面 |
 
 ## Done criteria
 
-- [ ] All listed commands pass.
-- [ ] Milestone 2 的 (a)(c) 与 Milestone 4 的用例都做过负向验证（抽掉实现该用例必红）。
-- [ ] 存在用例证明控制面抖动一次并快速恢复后，relay 通道未被摧毁重建。
-- [ ] 判死逻辑尊重 `heartbeatUnsupported`，老 worker 不会被无限摘通道（用例覆盖）。
-- [ ] `device-router.ts:1950` 那条"心跳不判死"的注释已同步更新。
-- [ ] 任何判死路径都不绕过 `reconnectCredential()`。
-- [ ] Required tests exist and assert meaningful behavior.
-- [ ] Implementation follows every entry in Decisions & tradeoffs.
-- [ ] No out-of-scope files changed.
-- [ ] `plans/README.md` status is updated.
+- [x] 所列代码命令通过（connection + device-router 合计 56/56；web 类型检查通过）。
+- [x] Milestone 2 的 (a)(c) 与 Milestone 4 的用例都做过负向验证（抽掉实现该用例必红）。
+- [x] 存在用例证明控制面抖动一次并快速恢复后，relay 通道未被摧毁重建。
+- [x] 判死逻辑尊重 `heartbeatUnsupported`，老 worker 不会被无限摘通道（用例覆盖）。
+- [x] `device-router.ts` 的心跳注释已同步为判死语义。
+- [x] 任何判死路径都不绕过 `reconnectCredential()`。
+- [x] Required tests exist and assert meaningful behavior.
+- [x] Implementation follows every entry in Decisions & tradeoffs。
+- [x] M3 代码仍只改 `packages/client` 既定范围；worker/Swift/proto 零改动。
+- [x] `plans/README.md` status is updated.
+
+外部验收（不冒充代码完成）：
+
+- [ ] 生产重新开启 `COFLUX_P2P_ENABLED`。
+- [ ] 两地真实 NAT/STUN 链路断连恢复与打洞成功率实测。
+- [ ] Safari / Firefox 与 iOS 真机回归。
 
 ## STOP conditions
 

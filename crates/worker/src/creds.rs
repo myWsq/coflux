@@ -46,7 +46,13 @@ impl CredStore {
             Ok(j) => j,
             Err(_) => return,
         };
-        if let Ok(mut f) = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(self.pending_auth_path()) {
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(self.pending_auth_path())
+        {
             let _ = f.write_all(json.as_bytes());
         }
     }
@@ -72,7 +78,13 @@ impl CredStore {
             Ok(j) => j,
             Err(_) => return,
         };
-        if let Ok(mut f) = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&self.path) {
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&self.path)
+        {
             let _ = f.write_all(json.as_bytes());
         }
     }

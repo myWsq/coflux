@@ -224,6 +224,11 @@ async function gateLogin(client, port, host, path = "/") {
   assert.equal(cb.status, 302, "授权回调应种 cookie 并 302 回原路径");
   const setCookie = [].concat(cb.headers["set-cookie"] ?? [])[0];
   assert.ok(setCookie, "授权回调应种下门禁 cookie");
+  assert.equal(
+    (setCookie.match(/(?:^|;\s*)Max-Age=/g) ?? []).length,
+    1,
+    "门禁 cookie 只能带一个 Max-Age 属性",
+  );
   const cookieMatch = /cf_proxy_session=([^;]+)/.exec(setCookie);
   assert.ok(cookieMatch, "Set-Cookie 应含 cf_proxy_session");
   return { cookie: cookieMatch[1], callbackLocation: cb.headers.location };

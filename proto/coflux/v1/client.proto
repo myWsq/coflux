@@ -9,8 +9,9 @@ import "coflux/v1/device.proto";
 
 // ===== Client → Server 载荷 =====
 
-// 登录：用户名+密码（local 模式首次）/ supabase_token（supabase 模式换票）/ 会话 client_token（重连，两模式通用）。
-// 服务器认证成功会在 AuthOk 回带 coflux 会话 token；之后重连只用该 token，不再触碰 Supabase。
+// 登录：用户名+密码（local/password 模式首次）/ 会话 client_token（重连，两模式通用）。
+// supabase_token 仅为旧 wire 兼容保留，当前 server 不再接受；认证成功会在 AuthOk 回带由
+// coflux 自持的会话 token，之后重连只使用该 token。
 message ClientAuth {
   optional string username = 1;
   optional string password = 2;
@@ -46,13 +47,19 @@ message ProxyIssueAuth {
   string redirect = 1;
 }
 
-// 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签
+// 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签。
+// signature 保留为对原始二进制的 legacy 签名，供已部署的旧 supervisor 滚动兼容；
+// 新 supervisor 还必须验证 release_signature，其 domain-separated statement 绑定
+// version / target / sha256 / artifact_size。
 message ClientUpgradeDaemon {
   string daemon_id = 1;
   string version = 2;
   optional string url = 3;
   optional string sha256 = 4;
   optional string signature = 5;
+  optional string target = 6;
+  optional uint64 artifact_size = 7;
+  optional string release_signature = 8;
 }
 
 // 导入一个 git 仓库为 project（自动创建主工作区）

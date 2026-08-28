@@ -1,6 +1,7 @@
 /// <reference types="node" />
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -321,6 +322,218 @@ function attach(router: ReturnType<typeof createDeviceRouter>, adapter: FakeAdap
     },
   });
   void router;
+}
+
+type SharedRouterTraceStep =
+  | { event: "sendInput"; utf8: string; expectSeq: string }
+  | { event: "inputAck"; throughSeq: string }
+  | { event: "setControlOnline"; online: boolean; expectChannelClosed?: boolean }
+  | { event: "reopenSession"; holderEpoch: string; expectResumeFromSeq: string }
+  | {
+      event: "sessionCatalog";
+      requestId: string;
+      snapshotOwnerId: string;
+      snapshotEpoch: string;
+      eventIds: string[];
+    }
+  | {
+      event: "expectExitAck";
+      expectEventIds: string[];
+      expectRequestId: string;
+      expectSnapshotOwnerId: string;
+      expectSnapshotEpoch: string;
+    }
+  | {
+      event: "expectInputReplay";
+      expectUniqueSeqs: string[];
+      expectUtf8BySeq: Record<string, string>;
+      expectHolderEpoch: string;
+    };
+
+interface SharedRouterTrace {
+  id: string;
+  description: string;
+  daemonId: string;
+  taskId: string;
+  sessionId: string;
+  initialSnapshotSeq: string;
+  initialHolderEpoch: string;
+  steps: SharedRouterTraceStep[];
+}
+
+interface SharedRouterTraceFixture {
+  schemaVersion: number;
+  traces: SharedRouterTrace[];
+}
+
+function loadSharedRouterTraces(): SharedRouterTrace[] {
+  const fixture = JSON.parse(readFileSync(
+    new URL("../../../tests/fixtures/device-router/behavior-traces.json", import.meta.url),
+    "utf8",
+  )) as SharedRouterTraceFixture;
+  assert.equal(fixture.schemaVersion, 1, "未知的 DeviceRouter 共享 trace schema");
+  assert.ok(Array.isArray(fixture.traces) && fixture.traces.length > 0, "DeviceRouter 共享 trace 不能为空");
+  return fixture.traces;
+}
+
+async function runSharedRouterTrace(trace: SharedRouterTrace): Promise<void> {
+  // Swift 是 relay-only；TS 解释共享 trace 时也固定走 relay，避免把 Web 独有的 direct/P2P
+  // promotion 混进跨端契约。Deferred pair 使 relay 成为唯一可用候选，但仍运行真实 Router。
+  const adapter = new DeferredPairAdapter();
+  const h = harness(adapter);
+  let active: OpenCall;
+  try {
+    h.router.setControlOnline(true);
+    h.router.attachSession(trace.daemonId, trace.taskId, trace.sessionId, 80, 24);
+    await flush();
+    active = latestOpen(adapter, "relay");
+    adapter.resolve(active);
+    await flush();
+
+    const initialAttach = attachRequest(active);
+    assert.equal(initialAttach.resumeFromSeq, undefined, `${trace.id}: 首次 attach 不得猜测 resume cursor`);
+    adapter.emit(active, {
+      case: "sessionAttached",
+      value: {
+        requestId: initialAttach.requestId,
+        sessionId: trace.sessionId,
+        holderEpoch: BigInt(trace.initialHolderEpoch),
+        snapshotSeq: BigInt(trace.initialSnapshotSeq),
+        ansiSnapshot: new TextEncoder().encode("SNAPSHOT"),
+        cols: 80,
+        rows: 24,
+      },
+    });
+    await flush();
+    assert.equal(h.snapshots.length, 1, `${trace.id}: 初始 snapshot 未投递`);
+
+    for (const step of trace.steps) {
+      switch (step.event) {
+        case "sendInput": {
+          assert.equal(
+            h.router.sendInput(trace.daemonId, trace.sessionId, new TextEncoder().encode(step.utf8)),
+            true,
+            `${trace.id}: input 应进入台账`,
+          );
+          const expectedSeq = BigInt(step.expectSeq);
+          const sent = [...payloads(active)].reverse().find(
+            (payload) => payload?.case === "ptyInput" && payload.value.inputSeq === expectedSeq,
+          );
+          assert.equal(sent?.case, "ptyInput", `${trace.id}: 缺少 input_seq=${step.expectSeq}`);
+          if (sent?.case === "ptyInput") {
+            assert.equal(new TextDecoder().decode(sent.value.data), step.utf8, `${trace.id}: input 数据漂移`);
+          }
+          break;
+        }
+        case "inputAck":
+          adapter.emit(active, {
+            case: "ptyInputAck",
+            value: { sessionId: trace.sessionId, appliedThroughSeq: BigInt(step.throughSeq) },
+          });
+          break;
+        case "setControlOnline":
+          h.router.setControlOnline(step.online);
+          await flush();
+          if (step.expectChannelClosed !== undefined) {
+            assert.equal(active.closed, step.expectChannelClosed, `${trace.id}: control 状态切换后的 channel 生命周期漂移`);
+          }
+          break;
+        case "reopenSession": {
+          const reopened = latestOpen(adapter, "relay");
+          assert.notEqual(reopened, active, `${trace.id}: control 恢复后必须建立新 relay`);
+          adapter.resolve(reopened);
+          await flush();
+          const resumed = attachRequest(reopened);
+          assert.equal(
+            resumed.resumeFromSeq,
+            BigInt(step.expectResumeFromSeq),
+            `${trace.id}: 重连 attach 未沿用已应用输出游标`,
+          );
+          adapter.emit(reopened, {
+            case: "sessionAttached",
+            value: {
+              requestId: resumed.requestId,
+              sessionId: trace.sessionId,
+              holderEpoch: BigInt(step.holderEpoch),
+              snapshotSeq: BigInt(step.expectResumeFromSeq),
+              cols: 80,
+              rows: 24,
+            },
+          });
+          await flush();
+          active = reopened;
+          break;
+        }
+        case "sessionCatalog":
+          adapter.emit(active, {
+            case: "sessionCatalog",
+            value: {
+              requestId: step.requestId,
+              sessions: [],
+              exits: step.eventIds.map((eventId, index) => ({
+                eventId,
+                sessionId: `exited-session-${index}`,
+                taskId: `exited-task-${index}`,
+                exitCode: index,
+                finalOutputSeq: BigInt(index),
+                exitedAt: index + 1,
+              })),
+              snapshotOwnerId: step.snapshotOwnerId,
+              snapshotEpoch: BigInt(step.snapshotEpoch),
+            },
+          });
+          break;
+        case "expectExitAck": {
+          const ack = [...payloads(active)].reverse().find((payload) => payload?.case === "exitAck");
+          assert.equal(ack?.case, "exitAck", `${trace.id}: catalog exits 未产生 ACK`);
+          if (ack?.case === "exitAck") {
+            assert.deepEqual(ack.value.eventIds, step.expectEventIds, `${trace.id}: exitAck 未过滤空 eventId`);
+            assert.equal(ack.value.requestId, step.expectRequestId, `${trace.id}: exitAck requestId 未绑定 catalog`);
+            assert.equal(
+              ack.value.snapshotOwnerId,
+              step.expectSnapshotOwnerId,
+              `${trace.id}: exitAck snapshotOwnerId 未绑定 catalog`,
+            );
+            assert.equal(
+              ack.value.snapshotEpoch,
+              BigInt(step.expectSnapshotEpoch),
+              `${trace.id}: exitAck snapshotEpoch 未绑定 catalog`,
+            );
+          }
+          break;
+        }
+        case "expectInputReplay": {
+          const frames = payloads(active).flatMap((payload) => payload?.case === "ptyInput" ? [payload.value] : []);
+          assert.ok(frames.length > 0, `${trace.id}: 重连后未重投输入`);
+          const uniqueSeqs = [...new Set(frames.map((frame) => frame.inputSeq.toString()))]
+            .sort((left, right) => {
+              const leftSeq = BigInt(left);
+              const rightSeq = BigInt(right);
+              return leftSeq < rightSeq ? -1 : leftSeq > rightSeq ? 1 : 0;
+            });
+          assert.deepEqual(uniqueSeqs, step.expectUniqueSeqs, `${trace.id}: ACK 前缀被重复投递或未确认后缀丢失`);
+          assert.ok(
+            frames.every((frame) => frame.holderEpoch === BigInt(step.expectHolderEpoch)),
+            `${trace.id}: replay 未采用新 holder epoch`,
+          );
+          const utf8BySeq = Object.fromEntries(
+            frames.map((frame) => [frame.inputSeq.toString(), new TextDecoder().decode(frame.data)]),
+          );
+          assert.deepEqual(utf8BySeq, step.expectUtf8BySeq, `${trace.id}: replay 数据与 seq 映射漂移`);
+          break;
+        }
+        default:
+          assert.fail(`${trace.id}: 未实现的共享 trace 事件`);
+      }
+    }
+    assert.deepEqual(h.errors, [], `${trace.id}: trace 不应产生 Router 错误`);
+  } finally {
+    h.router.destroy();
+  }
+}
+
+for (const trace of loadSharedRouterTraces()) {
+  test(`共享 DeviceRouter trace：${trace.id}`, async () => runSharedRouterTrace(trace));
 }
 
 test("cached grant 从 t=0 直连，且 relay 严格延迟到 200ms hedge", async () => {
@@ -1219,7 +1432,126 @@ test("P2P 判死后进入退避：重新竞速时不再发起，relay 稳住不�
   h.router.destroy();
 });
 
-test("中心断开时 active P2P channel 与 relay 同步失效，不等对端关闭事件", async () => {
+/* ===== 控制面判死不连坐（plan 080 M3）=====
+ * 浏览器 `/client` 与 worker `/daemon` 是两条独立控制连接。这里复现的是事故中的前者短暂
+ * 断开、后者仍在线：既有 relay session lane 应继续工作；新 rendezvous 与高权限能力仍关闭。 */
+
+test("client 控制面在 15s 宽限内恢复时保留同一条 relay", async () => {
+  const adapter = new DeferredPairAdapter();
+  const h = harness(adapter);
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const relay = latestOpen(adapter, "relay");
+  adapter.resolve(relay);
+  await flush();
+  // 关闭心跳，避免本用例推进 15s 时把“未模拟 pong”误当成数据面故障；本用例只测控制面。
+  adapter.emit(relay, { case: "error", value: { code: "unsupported_payload", message: "old daemon" } });
+  await flush();
+  const relayOpenCount = adapter.opens.filter((call) => call.kind === "relay").length;
+
+  h.router.setControlDisconnected();
+  h.clock.advance(14_999);
+  await flush();
+  assert.equal(relay.closed, false, "宽限期内既有 relay 不得被 client 自己摧毁");
+
+  h.router.setControlOnline(true);
+  h.clock.advance(2); // 越过旧宽限 timer 原本的到期点，也执行恢复时排下的 delay=0 probe
+  await flush();
+  assert.equal(relay.closed, false, "authOk 在宽限内到达后应继续使用同一条 relay");
+  assert.equal(
+    adapter.opens.filter((call) => call.kind === "relay").length,
+    relayOpenCount,
+    "短暂抖动不得经历 loseChannel → 新 relay 竞速",
+  );
+  h.router.destroy();
+});
+
+test("client 控制面断开超过 15s 后关闭保留的 relay", async () => {
+  const adapter = new DeferredPairAdapter();
+  const h = harness(adapter);
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const relay = latestOpen(adapter, "relay");
+  adapter.resolve(relay);
+  await flush();
+  adapter.emit(relay, { case: "error", value: { code: "unsupported_payload", message: "old daemon" } });
+  await flush();
+
+  h.router.setControlDisconnected();
+  h.clock.advance(14_999);
+  await flush();
+  assert.equal(relay.closed, false, "到期前一毫秒仍须保留");
+  h.clock.advance(1);
+  await flush();
+  assert.equal(relay.closed, true, "宽限到期必须 fail closed，不能把在线授权变成无限离线授权");
+  h.router.destroy();
+});
+
+test("hard revoke 不经过 transient grace，立即关闭 relay", async () => {
+  const adapter = new DeferredPairAdapter();
+  const h = harness(adapter);
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const relay = latestOpen(adapter, "relay");
+  adapter.resolve(relay);
+  await flush();
+
+  h.router.setControlDisconnected();
+  assert.equal(relay.closed, false, "前置：普通 transport disconnect 已进入宽限");
+  h.router.setControlOnline(false); // authError/outdated/换凭据/reset/destroy 共用的 hard revoke
+  assert.equal(relay.closed, true, "明确授权失效必须立即收敛");
+  h.router.destroy();
+});
+
+test("断线前发起、断线后才完成的 relay continuation 不能跨控制代际提交", async () => {
+  const adapter = new DeferredPairAdapter();
+  const h = harness(adapter);
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const stale = latestOpen(adapter, "relay");
+
+  h.router.setControlDisconnected();
+  adapter.resolve(stale); // 模拟 relay WS open 与断线同时完成，continuation 迟到
+  await flush();
+  assert.equal(stale.closed, true, "旧控制代际签出的异步 open 结果必须被关闭");
+  assert.notEqual(h.states.at(-1)?.mode, "relay", "旧 continuation 不得成为 active lane");
+  h.router.destroy();
+});
+
+test("旧 control grace timer 不会误关恢复后新建的 relay", async () => {
+  const adapter = new DeferredPairAdapter();
+  const h = harness(adapter);
+  h.router.setControlOnline(true);
+  h.router.retainDevice("daemon-1");
+  await flush();
+  const first = latestOpen(adapter, "relay");
+  adapter.resolve(first);
+  await flush();
+  adapter.emit(first, { case: "error", value: { code: "unsupported_payload", message: "old daemon" } });
+  await flush();
+
+  h.router.setControlDisconnected(); // t=0：旧 timer 原定 t=15000 提交
+  h.clock.advance(10_000);
+  h.router.setControlOnline(true); // 取消旧代际
+  first.options.onClose("relay test close");
+  h.clock.advance(350);
+  await flush();
+  const recovered = latestOpen(adapter, "relay");
+  assert.notEqual(recovered, first, "前置：在线后已恢复出一条新 relay");
+  adapter.resolve(recovered);
+  await flush();
+
+  h.clock.advance(5_000); // 越过旧 timer 原定提交点
+  await flush();
+  assert.equal(recovered.closed, false, "旧断线代际的 timer 不得关闭新 channel");
+  h.router.destroy();
+});
+
+test("中心授权 hard revoke 时 active P2P channel 立即失效，不等对端关闭事件", async () => {
   const adapter = new P2pFakeAdapter(undefined);
   const h = harness(adapter);
   h.router.setControlOnline(true);
@@ -1232,7 +1564,7 @@ test("中心断开时 active P2P channel 与 relay 同步失效，不等对端�
 
   h.router.setControlOnline(false);
   await flush();
-  assert.equal(p2p.closed, true, "中心断开必须立即关闭 P2P channel（与 worker close_all 对称）");
+  assert.equal(p2p.closed, true, "明确授权失效必须立即关闭 P2P channel");
   assert.notEqual(h.states.at(-1)?.mode, "p2p");
   h.router.destroy();
 });

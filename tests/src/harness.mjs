@@ -203,7 +203,7 @@ async function runDatabaseAdminQuery(statement, { signal, timeoutMs = DATABASE_O
 }
 
 /** 建一个随机命名的临时库，返回 {name, url}（url 指向新库，供 spawn 的 server 用作 DATABASE_URL）。 */
-async function createTestDatabase({ signal, timeoutMs = DATABASE_OPERATION_TIMEOUT_MS } = {}) {
+export async function createTestDatabase({ signal, timeoutMs = DATABASE_OPERATION_TIMEOUT_MS } = {}) {
   const name = `coflux_test_${randomUUID().replace(/-/g, "")}`;
   let primaryError;
   try {
@@ -244,7 +244,7 @@ async function createTestDatabase({ signal, timeoutMs = DATABASE_OPERATION_TIMEO
 /** 删临时库：DROP ... WITH (FORCE)（PG 13+）由服务端原子地踢连接并删库。
  * 不用 pg_terminate_backend + DROP 两步：terminate 发完信号即返回、不等 backend 真正退出，
  * 紧随的 DROP 仍可能撞上垂死连接报 "being accessed by other users"，造成非确定性泄漏。 */
-async function dropTestDatabase(name) {
+export async function dropTestDatabase(name) {
   await runDatabaseAdminQuery(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`, {
     label: `drop test database ${name}`,
   });
@@ -545,6 +545,8 @@ export async function startServer(opts = {}) {
   }
   return {
     port,
+    /** 仅供需要用 PG 锁制造确定性并发窗口的黑盒测试；业务断言仍必须走公开 wire。 */
+    databaseUrl: testDb.url,
     relayPort,
     makeClient: (options) => new Client(port, options),
     rawDaemon: () => rawDaemon(port),
@@ -571,6 +573,9 @@ export function rawDaemon(port) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/daemon`);
   const log = [];
   let waiters = [];
+  const closedInfo = new Promise((res) => {
+    ws.addEventListener("close", (event) => res({ code: event.code, reason: event.reason }), { once: true });
+  });
   ws.onmessage = (ev) => {
     let env;
     try { env = decodeServerToDaemon(toUint8(ev.data)); } catch { return; }
@@ -582,7 +587,9 @@ export function rawDaemon(port) {
   return {
     ready: new Promise((res, rej) => { ws.onopen = res; ws.onerror = (e) => rej(new Error("ws error: " + (e.message || "?"))); }),
     /** 服务端主动关连接时解析为 close code（如 4008 auth timeout）；不关则一直 pending，调用方自行 race 超时 */
-    closed: new Promise((res) => { ws.onclose = (e) => res(e.code); }),
+    closed: closedInfo.then(({ code }) => code),
+    /** 需要同时断言关闭码与 reason 的资源边界测试使用；closed 保留原数字语义兼容既有用例。 */
+    closedInfo,
     log,
     send: (m) => {
       const { case: c, ...fields } = m;
@@ -769,6 +776,7 @@ export async function startStack(opts = {}) {
       ...(opts.daemonEnv ?? {}),
     };
     ref.serverEnv = serverEnv;
+    ref.daemonEnv = daemonEnv;
     ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
     await waitHealth(port, 12000, signal);
     await verifyServerIdentity(port, username, password, signal);
@@ -818,6 +826,13 @@ export async function startStack(opts = {}) {
       retiredProcessTrees.add(daemonProcess);
       await stopProcessTrees([daemonProcess], { strict: strictCleanup });
       if (!strictCleanup) await sleep(100);
+    },
+    /** 整树重启 supervisor + worker，并复用原 COFLUX_HOME/设备凭证。活 PTY 与未 ack tombstone
+     * 都只在 supervisor 内存中；该入口用于验证它们同时丢失后的 catalog 自愈。 */
+    async restartDaemon() {
+      await stack.stopDaemon();
+      throwIfStackAborted(signal, "daemon restart");
+      ref.daemon = spawnDaemon(ref.daemonEnv);
     },
     /** 给 server 发 SIGTERM，等其优雅退出，返回退出码（或 'timeout'） */
     gracefulStopServer(ms = 3000) {

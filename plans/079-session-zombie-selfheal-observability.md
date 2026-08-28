@@ -11,6 +11,7 @@
 
 ## Status
 
+- State: **DONE**
 - Priority: P1
 - Effort: M
 - Risk: MED
@@ -18,6 +19,7 @@
 - Category: bug
 - Execution: self
 - Planned at: `a74f011`, 2026-08-17
+- Completed at: 2026-08-28，当前**未提交审计工作树**（尚无对应 commit，也未发布）
 
 ## Requirement
 
@@ -158,15 +160,23 @@ Out of scope:
 
 ## Done criteria
 
-- [ ] All listed commands pass.
-- [ ] 黑盒用例证明：daemon 整树重启（tombstone 丢失）后重连，中心的 RUNNING+sessionId task 被收敛为 EXITED 且 sessionId 清空；抽掉实现该用例失败。
-- [ ] 黑盒用例证明：跨过冷却期后，同一 daemon+version 的升级派发总次数仍封顶在 `autoUpdateMaxAttempts`。
-- [ ] Milestone 3 表格里每一行都按目标处置，且 `catalog reconciled` 与 `daemon resync` 仍是 debug。
-- [ ] 收敛路径全程不向 daemon 下发任何 session 关闭指令（`sessionClose` / `sessionStop` 在 diff 中零新增调用）。
-- [ ] Required tests exist and assert meaningful behavior.
-- [ ] Implementation follows every entry in Decisions & tradeoffs.
-- [ ] No out-of-scope files changed.
-- [ ] `plans/README.md` status is updated.
+- [x] server `tsc --noEmit` 与 `cargo build -p coflux-relay` 通过，relay 构建零警告。
+- [x] 黑盒用例证明：daemon 整树重启（tombstone 丢失）后重连，中心的 RUNNING+sessionId task 被收敛为 EXITED 且 sessionId 清空；持久化快照中的 `exitCode` 保持未知。
+- [x] 跨过旧冷却窗口后，同一 daemon+version 的 server 派发计数永久封顶在 `autoUpdateMaxAttempts`，并且只打一条放弃 warn；目标版本变化或 server 重启才重开配额。
+- [x] Milestone 3 表格里每一行都按目标处置，且 `catalog reconciled` 与 `daemon resync` 仍是 debug。
+- [x] 反向收敛路径只做中心条件更新、`dropSession` 与广播，不向 daemon 下发 `sessionClose` / `sessionStop`。
+- [x] 僵尸 task 黑盒用例与跨冷却窗口的自动升级回归用例均已加入；后者用 raw daemon observer 直接计数 server→daemon 的 `workerUpgrade` 帧，不再把 supervisor latest-only 合并后的下载次数误当派发次数。
+- [x] Implementation follows every entry in Decisions & tradeoffs；并发审计把“读后无条件写”加固为 store 层带 account/daemon/status/session 四条件的原子 UPDATE。
+- [x] plan 079 的执行期 scope 扩展仅增加 `apps/server/src/store.ts` 的条件查询/更新；当前工作树还包含同轮审计的其他未提交改动，不能把整棵工作树误记为 079 独占 diff。
+- [x] `plans/README.md` status is updated，并明确成果尚未提交。
+
+### 完成记录（2026-08-28）
+
+- Milestone 1：`reconcileSessionCatalog` 用原始 catalog 中通过 `validControlId` 的 sessionId 全集判缺席；只扫描本 daemon 的 RUNNING task，并通过 `exitRunningTaskIfSession` 做带四个归属/版本条件的原子收敛。`tests/src/session-zombie.test.mjs` 会 SIGKILL supervisor+worker 整棵进程树、复用原 `COFLUX_HOME` 重连，并断言 EXITED、sessionId 清空及快照持久化。
+- Milestone 2：`AutoUpdater` 的 `(daemonId, version)` 次数不再随时间重置，达到上限后永久停止且 warn 只发一次。回归用轻量 raw daemon observer 在 server 派发边界直接观察 `workerUpgrade`，确认 `attempt=1/2/3` 后跨过多个旧 cooldown 周期仍无第 4 帧；`tests/src/auto-update.test.mjs` 2/2 通过。
+- Milestone 3：session started/exit、session.create/prepared 失败、relay/P2P 拒绝、daemon close code/reason 与 relay 配对超时上下文均已补齐；高频 catalog/resync 日志保持 debug。
+- 验证实况：Rust/TS 构建门、僵尸 task 定向黑盒与 auto-update 单文件 2/2 均已通过。2026-08-28 最终全量 `pnpm -C tests test` **exit 0：129/129 pass，0 fail，0 skip**；Node 测试统计 228056ms，含 pretest 的总墙钟约 3m58s。
+- 上述实现、测试与本次计划收口都仍在当前**未提交审计工作树**；`DONE` 表示结果契约已实现，不表示已有 commit、tag、部署或生产生效。
 
 ## STOP conditions
 
