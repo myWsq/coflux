@@ -8,7 +8,7 @@
 
 | # | 决策 | 理由 | 备选 |
 |---|------|------|------|
-| A1 | ~~持久化用内置 `node:sqlite`~~ **已被 plan 002 取代：Supabase Postgres**（2026-07） | SaaS 化后需共享库 + 托管备份 | ——|
+| A1 | ~~内置 `node:sqlite` / Supabase Postgres~~ **已由 plans 059-063 收敛为自托管 Postgres**（2026-07） | 业务数据自持；保留事务、备份与未来扩展能力 | ——|
 | A2 | PTY/VT/history/holder/sequence 统一在 **supervisor/sessiond** | client、worker、中心断开都不影响会话；attach 直接取当前 snapshot | server live mirror（已删除） |
 | A3 | daemon resync + 完整 Device catalog/tombstone 对账 | 服务器重启可重挂已知 task，unknown live session 保留为 orphan，不伪造 exit | 仅 sessionId（无法可靠收敛生命周期） |
 | A4 | 任务状态机 `idle / running / exited`；对 `exited` 的 task 再 `task.start` = **重跑**（起新 session） | 简单够用 | 显式 restart 语义 / 保留多次运行历史 |
@@ -21,18 +21,16 @@
 
 ## B. 需要你定夺（未擅自决定）
 
-> 说明：一轮多维度对抗式代码审查确认了 14 个问题，**进程内的竞态/泄漏/越权已全部修复**
-> （同 daemonId 重连竞态、重启后重复起 PTY、stop/start 竞态、pending 泄漏与超时、孤儿 PTY 清理、
-> daemon 消息注册与归属校验、client 跨 session 越权写入）。**唯一残留的安全缺口是下面 B1 的信任模型**
-> ——单一共享 token 下，任何持 token 者都能冒充任意 daemonId，这不是代码 bug 而是模型选择，需你定方向。
+> 本节保留产品与部署决策。早期共享 token、登记密钥、SQLite/Supabase 等候选已经退役；当前安全边界
+> 以每设备凭证、server 签发的 client 会话 token、账号归属校验和单实例中心为准。
 
 ### B1. 鉴权与多租户 ★最重要 —— ✅ 已定（Tailscale 模型）
 **决策（2026-06-21）**：单用户管自有多机，一机一 daemon、登录一个账号。即 Tailscale 式：
 - **Account** 为隔离单元（MVP 单账号，模型留多账号扩展位）。
-- **EnrollmentKey（登记密钥，账号级、可复用）**：一台新机器用它登记进账号。
+- **浏览器一次性授权**：未登记 daemon 的授权请求与当前 WS 连接绑定，用户登录后确认。
 - **每设备独立 deviceToken**：登记后签发，daemon 本地持久化，后续连接用它认证。
   → 从根上修掉 #9 冒充问题：daemonId 由服务器按设备凭证绑定，不再客户端自报。
-- **ClientToken（账号级）**：client 登录账号，可见/可达该账号下所有设备。
+- **用户口令 + 会话 token**：`local`/`password` 两种登录模式均由 server 签发有期限、可撤销的账号会话 token。
 - 账号内全互通（无需更细 ACL）；跨账号隔离。
 - 详见 [auth-design.md](auth-design.md)。
 
@@ -57,5 +55,7 @@ opaque bytes；旧 `pty.output/input/replay` 与 server-routed RPC 已删除并�
 [architecture.md](architecture.md)。
 
 ### B7. 中心服务器部署形态 —— ✅ 已定（2026-07）
-- 单实例自托管（prod-jp），存储已迁 Supabase Postgres（plan 002），身份层 Supabase Auth 多账号（plan 001）。
-- TLS：`api.coflux.dev` 反代终结 `wss://`。多实例 + 共享状态暂无需求，Postgres 外置后已留扩展位。
+- 单实例自托管（prod-jp），业务数据使用自托管 Postgres；身份层为 `local` 或自建 `password` 模式，Supabase 已退役。
+- TLS：`api.coflux.dev` 反代终结 `wss://`。单实例是当前既定产品形态；没有明确需求前不引入 Redis、
+  leader election 或共享 presence。若未来改为多实例，pending authorization、在线 daemon 与 relay home
+  等内存 authority 必须先设计成可线性化的共享状态，不能只把现有 Map 搬进缓存。

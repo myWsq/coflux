@@ -19,7 +19,12 @@ use crate::relay_home::RelayHomeSelector;
 /// 写超时与中心 WS 同理：黑洞网络下 send 可能永久挂起，必须有限时失败。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 
-pub fn spawn(device: Arc<DeviceRuntime>, dial: DeviceRelayDial, connect_timeout_ms: u64, relay_home: RelayHomeSelector) {
+pub fn spawn(
+    device: Arc<DeviceRuntime>,
+    dial: DeviceRelayDial,
+    connect_timeout_ms: u64,
+    relay_home: RelayHomeSelector,
+) {
     tokio::spawn(async move {
         let channel_id = dial.channel_id.clone();
         let receiver = match device.open_relay(&dial) {
@@ -48,17 +53,25 @@ pub fn spawn(device: Arc<DeviceRuntime>, dial: DeviceRelayDial, connect_timeout_
 async fn connect(
     relay_url: &str,
     connect_timeout_ms: u64,
-) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, String> {
-    let (ws, _) = tokio::time::timeout(Duration::from_millis(connect_timeout_ms), connect_async(relay_url))
-        .await
-        .map_err(|_| format!("relay connect 超时（{connect_timeout_ms}ms）"))?
-        .map_err(|error| format!("relay connect: {error}"))?;
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    String,
+> {
+    let (ws, _) = tokio::time::timeout(
+        Duration::from_millis(connect_timeout_ms),
+        connect_async(relay_url),
+    )
+    .await
+    .map_err(|_| format!("relay connect 超时（{connect_timeout_ms}ms）"))?
+    .map_err(|error| format!("relay connect: {error}"))?;
     Ok(ws)
 }
 
 async fn run(
     device: &Arc<DeviceRuntime>,
-    ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
     channel_id: &str,
     mut receiver: ChannelReceiver,
 ) -> Result<(), String> {

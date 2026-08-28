@@ -14,6 +14,11 @@ import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/c
 import { cn } from "@/lib/utils";
 import { ClawdGlyph } from "@/components/workbench/clawd-glyph";
 import { TerminalPane, type TerminalController, type TerminalControlState } from "@/components/workbench/terminal-pane";
+import {
+  resolveActiveTaskId,
+  resolveActiveTaskIdAfterPendingDrop,
+  shouldActivateChangesView,
+} from "@/components/workbench/workbench-state";
 
 // attach 后即使无 ptyOutput 回放（空 scrollback）也要在 500ms 后判定 owned；有输出则立即 owned。
 const ATTACH_GRACE_MS = 500;
@@ -373,11 +378,15 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     const pending = pendingTabRef.current;
     if (!pending) return;
     settlePendingTab();
-    if (activeTaskIdRef.current === pending.id) {
-      const nextTask = currentTasks()[0];
-      if (nextTask) requestActivation(nextTask.id);
-      else updateActiveTaskId(null);
-    }
+    const currentActive = activeTaskIdRef.current;
+    const nextActive = resolveActiveTaskIdAfterPendingDrop(
+      currentActive,
+      pending.id,
+      currentTasks().map((task) => task.id),
+    );
+    if (nextActive === currentActive) return;
+    if (nextActive) requestActivation(nextActive);
+    else updateActiveTaskId(null);
   }
 
   useEffect(() => {
@@ -414,9 +423,13 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     }
 
     const currentActive = activeTaskIdRef.current;
-    if (currentActive && (ids.has(currentActive) || currentActive === pendingTabRef.current?.id)) return;
-    const nextTask = workspaceTasks[0];
-    if (nextTask) requestActivation(nextTask.id);
+    const nextActive = resolveActiveTaskId(
+      currentActive,
+      workspaceTasks.map((task) => task.id),
+      pendingTabRef.current?.id ?? null,
+    );
+    if (nextActive === currentActive) return;
+    if (nextActive) requestActivation(nextActive);
     else updateActiveTaskId(null);
     // 只跟踪 workspaceTasks（对应 Solid `on(workspaceTasks, ...)` 的显式单一依赖），
     // 回调内其余状态一律读 ref/store 当下值，不纳入依赖数组。
@@ -756,7 +769,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           <div className={cn("absolute inset-0 bg-terminal", view === "changes" ? "block" : "hidden")}>
             <ChangesView
               workspaceId={workspaceId}
-              active={view === "changes"}
+              active={shouldActivateChangesView(active, view)}
               client={client}
               defaultBranch={defaultBranch}
               additions={workspace?.additions ?? 0}

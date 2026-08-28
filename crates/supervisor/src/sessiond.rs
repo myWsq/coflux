@@ -9,6 +9,13 @@ use vt100::{Cell, Color, Screen};
 
 const HISTORY_WRAP_FACTOR: usize = 4;
 const RETRANSMIT_LIMIT: usize = 512 * 1024;
+// vt100 0.16 使用的 vte 0.15 最多保留 32 个 CSI 参数/子参数；scanner 必须遵循同一
+// 上限，否则超限尾部的 1049 会被误判成 alt 边界，既与 parser 状态分歧又会多做整屏渲染。
+const VTE_CSI_PARAM_LIMIT: u8 = 32;
+/// logical identity 的 transport generation 与 input/resize cursor 必须保留到 session 结束，
+/// 否则淘汰旧项会破坏同一 supervisor runtime 内的去重。达到上限后只拒绝新 identity；已登记
+/// identity 仍可迁移 transport、提交在途 input 并推进 cursor。
+const LOGICAL_CLIENT_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AltEvent {
@@ -26,10 +33,44 @@ enum ScanState {
     #[default]
     Ground,
     Escape,
-    Csi { private: bool, params: Vec<u16>, current: u16, has_digit: bool },
+    EscapeIntermediate,
+    Csi {
+        phase: CsiPhase,
+        private: bool,
+        retained_params: u8,
+        in_subparams: bool,
+        alt_param_seen: bool,
+        current: u16,
+        has_digit: bool,
+    },
+}
+
+/// 只保留 DECSET/DECRST 判定所需的 VTE CSI 阶段。阶段边界必须与 vte 0.15 一致：
+/// intermediate 后再遇参数字节会进入 ignore，CAN/SUB 则从任意阶段取消整条序列。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CsiPhase {
+    Entry,
+    Parameter,
+    Intermediate,
+    Ignore,
 }
 
 impl DecModeScanner {
+    #[cfg(test)]
+    fn retained_parameter_count(&self) -> usize {
+        match &self.state {
+            ScanState::Csi {
+                retained_params,
+                has_digit,
+                ..
+            } => {
+                usize::from(*retained_params)
+                    + usize::from(*retained_params < VTE_CSI_PARAM_LIMIT && *has_digit)
+            }
+            _ => 0,
+        }
+    }
+
     fn feed(&mut self, byte: u8) -> Option<AltEvent> {
         match &mut self.state {
             ScanState::Ground => {
@@ -39,32 +80,109 @@ impl DecModeScanner {
                 None
             }
             ScanState::Escape => {
-                self.state = if byte == b'[' {
-                    ScanState::Csi { private: false, params: Vec::new(), current: 0, has_digit: false }
-                } else if byte == 0x1b {
-                    ScanState::Escape
-                } else {
-                    ScanState::Ground
+                self.state = match byte {
+                    b'[' => ScanState::Csi {
+                        phase: CsiPhase::Entry,
+                        private: false,
+                        retained_params: 0,
+                        in_subparams: false,
+                        alt_param_seen: false,
+                        current: 0,
+                        has_digit: false,
+                    },
+                    0x18 | 0x1a => ScanState::Ground,
+                    0x1b | 0x00..=0x17 | 0x19 | 0x1c..=0x1f => ScanState::Escape,
+                    0x20..=0x2f => ScanState::EscapeIntermediate,
+                    0x30..=0x7e => ScanState::Ground,
+                    _ => ScanState::Escape,
                 };
                 None
             }
-            ScanState::Csi { private, params, current, has_digit } => {
+            ScanState::EscapeIntermediate => {
+                self.state = match byte {
+                    0x18 | 0x1a => ScanState::Ground,
+                    0x1b => ScanState::Escape,
+                    0x30..=0x7e => ScanState::Ground,
+                    _ => ScanState::EscapeIntermediate,
+                };
+                None
+            }
+            ScanState::Csi {
+                phase,
+                private,
+                retained_params,
+                in_subparams,
+                alt_param_seen,
+                current,
+                has_digit,
+            } => {
+                if matches!(byte, 0x18 | 0x1a) {
+                    self.state = ScanState::Ground;
+                    return None;
+                }
+                if byte == 0x1b {
+                    self.state = ScanState::Escape;
+                    return None;
+                }
+
                 match byte {
-                    b'?' if params.is_empty() && !*has_digit => *private = true,
-                    b'0'..=b'9' => {
-                        *current = current.saturating_mul(10).saturating_add(u16::from(byte - b'0'));
-                        *has_digit = true;
-                    }
-                    b';' => {
-                        params.push(if *has_digit { *current } else { 0 });
-                        *current = 0;
-                        *has_digit = false;
-                    }
-                    0x40..=0x7e => {
-                        if *has_digit || !params.is_empty() {
-                            params.push(if *has_digit { *current } else { 0 });
+                    0x20..=0x2f => {
+                        if !matches!(*phase, CsiPhase::Ignore) {
+                            *phase = CsiPhase::Intermediate;
                         }
-                        let is_alt = *private && params.iter().any(|p| matches!(p, 47 | 1049));
+                    }
+                    b'0'..=b'9' => match phase {
+                        CsiPhase::Entry | CsiPhase::Parameter => {
+                            *phase = CsiPhase::Parameter;
+                            if *retained_params < VTE_CSI_PARAM_LIMIT {
+                                *current = current
+                                    .saturating_mul(10)
+                                    .saturating_add(u16::from(byte - b'0'));
+                                *has_digit = true;
+                            }
+                        }
+                        CsiPhase::Intermediate => *phase = CsiPhase::Ignore,
+                        CsiPhase::Ignore => {}
+                    },
+                    0x3a | 0x3b => match phase {
+                        CsiPhase::Entry | CsiPhase::Parameter => {
+                            *phase = CsiPhase::Parameter;
+                            if *retained_params < VTE_CSI_PARAM_LIMIT {
+                                if byte == b';'
+                                    && !*in_subparams
+                                    && *has_digit
+                                    && matches!(*current, 47 | 1049)
+                                {
+                                    *alt_param_seen = true;
+                                }
+                                *retained_params += 1;
+                            }
+                            *in_subparams = byte == b':';
+                            *current = 0;
+                            *has_digit = false;
+                        }
+                        CsiPhase::Intermediate => *phase = CsiPhase::Ignore,
+                        CsiPhase::Ignore => {}
+                    },
+                    0x3c..=0x3f => match phase {
+                        CsiPhase::Entry => {
+                            // vt100 只把第一个 intermediate 为 '?' 的 CSI 交给 DEC mode。
+                            *private = byte == b'?';
+                            *phase = CsiPhase::Parameter;
+                        }
+                        CsiPhase::Parameter | CsiPhase::Intermediate => {
+                            *phase = CsiPhase::Ignore;
+                        }
+                        CsiPhase::Ignore => {}
+                    },
+                    0x40..=0x7e => {
+                        let is_alt = !matches!(*phase, CsiPhase::Ignore)
+                            && *private
+                            && (*alt_param_seen
+                                || (*retained_params < VTE_CSI_PARAM_LIMIT
+                                    && !*in_subparams
+                                    && *has_digit
+                                    && matches!(*current, 47 | 1049)));
                         let event = if is_alt && byte == b'h' {
                             Some(AltEvent::Enter)
                         } else if is_alt && byte == b'l' {
@@ -75,7 +193,6 @@ impl DecModeScanner {
                         self.state = ScanState::Ground;
                         return event;
                     }
-                    0x1b => self.state = ScanState::Escape,
                     _ => {}
                 }
                 None
@@ -104,7 +221,10 @@ impl vt100::Callbacks for TitleCapture {
 
 /// 不可信标题的规范化：lossy 解码、剔除控制字符、按字符边界截到 MAX_TITLE_BYTES。
 fn clamp_title(raw: &[u8]) -> String {
-    let text: String = String::from_utf8_lossy(raw).chars().filter(|c| !c.is_control()).collect();
+    let text: String = String::from_utf8_lossy(raw)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
     if text.len() <= MAX_TITLE_BYTES {
         return text;
     }
@@ -135,7 +255,12 @@ impl TerminalState {
     pub fn new(rows: u16, cols: u16, history_line_limit: usize) -> Self {
         let history_row_capacity = history_line_limit.saturating_mul(HISTORY_WRAP_FACTOR);
         Self {
-            parser: vt100::Parser::new_with_callbacks(rows, cols, history_row_capacity, TitleCapture::default()),
+            parser: vt100::Parser::new_with_callbacks(
+                rows,
+                cols,
+                history_row_capacity,
+                TitleCapture::default(),
+            ),
             title: String::new(),
             rows,
             cols,
@@ -157,7 +282,9 @@ impl TerminalState {
         // 只在 alt mode 边界拆 chunk；其余仍批量交给 vte，避免逐 byte clone/dispatch。
         let mut start = 0;
         for (index, byte) in bytes.iter().copied().enumerate() {
-            let Some(event) = self.mode_scanner.feed(byte) else { continue };
+            let Some(event) = self.mode_scanner.feed(byte) else {
+                continue;
+            };
             if start < index {
                 self.parser.process(&bytes[start..index]);
             }
@@ -184,7 +311,11 @@ impl TerminalState {
 
         let from_seq = self.output_seq.saturating_add(1);
         self.output_seq = self.output_seq.saturating_add(bytes.len() as u64);
-        let delta = Delta { from_seq, to_seq: self.output_seq, data: bytes.to_vec() };
+        let delta = Delta {
+            from_seq,
+            to_seq: self.output_seq,
+            data: bytes.to_vec(),
+        };
         self.push_retransmit(delta.clone());
         Some(delta)
     }
@@ -202,17 +333,23 @@ impl TerminalState {
                 self.retransmit_bytes -= removed.data.len();
             }
         }
-
     }
 
     pub fn snapshot(&self) -> Vec<u8> {
         if self.parser.screen().alternate_screen() {
-            let mut snapshot = self.normal_before_alt.clone().unwrap_or_else(|| b"\x1bc".to_vec());
+            let mut snapshot = self
+                .normal_before_alt
+                .clone()
+                .unwrap_or_else(|| b"\x1bc".to_vec());
             snapshot.extend_from_slice(b"\x1b[?1049h\x1b[H\x1b[2J");
             render_active_grid(&mut snapshot, self.parser.screen(), &[]);
             snapshot
         } else {
-            render_normal_snapshot(self.parser.screen(), self.history_line_limit, self.history_row_capacity)
+            render_normal_snapshot(
+                self.parser.screen(),
+                self.history_line_limit,
+                self.history_row_capacity,
+            )
         }
     }
 
@@ -226,9 +363,15 @@ impl TerminalState {
         // parser 中重放，既保留 hard line 边界，也让 normal/history 与 xterm 按新列宽重排。
         let was_alt = self.parser.screen().alternate_screen();
         let normal = if was_alt {
-            self.normal_before_alt.clone().unwrap_or_else(|| b"\x1bc".to_vec())
+            self.normal_before_alt
+                .clone()
+                .unwrap_or_else(|| b"\x1bc".to_vec())
         } else {
-            render_normal_snapshot(self.parser.screen(), self.history_line_limit, self.history_row_capacity)
+            render_normal_snapshot(
+                self.parser.screen(),
+                self.history_line_limit,
+                self.history_row_capacity,
+            )
         };
         let reflowed_normal = reflow_normal_snapshot(
             &normal,
@@ -247,7 +390,12 @@ impl TerminalState {
         } else {
             reflowed_normal.clone()
         };
-        let mut parser = vt100::Parser::new_with_callbacks(rows, cols, self.history_row_capacity, TitleCapture::default());
+        let mut parser = vt100::Parser::new_with_callbacks(
+            rows,
+            cols,
+            self.history_row_capacity,
+            TitleCapture::default(),
+        );
         parser.process(&snapshot);
         self.parser = parser;
         self.normal_before_alt = was_alt.then_some(reflowed_normal);
@@ -272,7 +420,10 @@ impl TerminalState {
     }
 
     pub fn earliest_retransmit_seq(&self) -> u64 {
-        self.retransmit.front().map(|delta| delta.from_seq).unwrap_or_else(|| self.output_seq.saturating_add(1))
+        self.retransmit
+            .front()
+            .map(|delta| delta.from_seq)
+            .unwrap_or_else(|| self.output_seq.saturating_add(1))
     }
 
     /// `last_seq` 必须位于 whole-frame 边界；否则调用方应返回原子 snapshot。
@@ -281,7 +432,10 @@ impl TerminalState {
             return Some(Vec::new());
         }
         let expected = last_seq.checked_add(1)?;
-        let start = self.retransmit.iter().position(|delta| delta.from_seq == expected)?;
+        let start = self
+            .retransmit
+            .iter()
+            .position(|delta| delta.from_seq == expected)?;
         let mut next = expected;
         let mut output = Vec::new();
         for delta in self.retransmit.iter().skip(start) {
@@ -293,7 +447,6 @@ impl TerminalState {
         }
         (next == self.output_seq.saturating_add(1)).then_some(output)
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -364,6 +517,28 @@ pub enum SequencedDecision {
     Duplicate,
 }
 
+/// PTY input 在 session mutex 内完成 authority 裁决与 reservation，但实际写入由独立
+/// writer 执行。`Pending` 表示同一 seq 已经排队/写入中；调用方不能再次入队，也不能在
+/// 完整写入前提前 ACK。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputAdmission {
+    Enqueue { client_instance_id: String },
+    Pending,
+    Duplicate { applied_through_seq: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputCompletion {
+    pub channel_id: String,
+    pub applied_through_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputFailureTarget {
+    pub channel_id: String,
+    pub request_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ControlError {
     pub code: &'static str,
@@ -374,6 +549,16 @@ pub struct ControlError {
 struct InputCursor {
     seq: u64,
     data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingInput {
+    seq: u64,
+    data: Vec<u8>,
+    /// ACK/error 总是发往最近一次通过 holder 校验的 transport。worker 重连后同 seq
+    /// 重投会刷新这里，避免写完后只向已经失效的旧 channel 回 ACK。
+    channel_id: String,
+    request_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -391,6 +576,8 @@ pub struct SessionState {
     transport_bindings: HashMap<String, TransportBinding>,
     next_holder_epoch: u64,
     input_cursors: HashMap<String, InputCursor>,
+    input_reservations: HashMap<String, VecDeque<PendingInput>>,
+    input_failure: Option<ControlError>,
     resize_cursors: HashMap<String, ResizeCursor>,
 }
 
@@ -403,12 +590,16 @@ impl SessionState {
             transport_bindings: HashMap::new(),
             next_holder_epoch: 0,
             input_cursors: HashMap::new(),
+            input_reservations: HashMap::new(),
+            input_failure: None,
             resize_cursors: HashMap::new(),
         }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<PendingDelta> {
-        let Some(delta) = self.terminal.feed(bytes) else { return Vec::new() };
+        let Some(delta) = self.terminal.feed(bytes) else {
+            return Vec::new();
+        };
         let mut pending = Vec::new();
         for (channel_id, subscriber) in &mut self.subscribers {
             if subscriber.gapped {
@@ -419,7 +610,10 @@ impl SessionState {
                 subscriber.gap_notified = false;
                 continue;
             }
-            pending.push(PendingDelta { channel_id: channel_id.clone(), delta: delta.clone() });
+            pending.push(PendingDelta {
+                channel_id: channel_id.clone(),
+                delta: delta.clone(),
+            });
         }
         pending
     }
@@ -436,13 +630,18 @@ impl SessionState {
         let epoch = match &self.holder {
             None => self.bump_holder_epoch(),
             Some(holder) if holder.client_instance_id == client_instance_id => {
-                if transport_generation > holder.transport_generation && holder.channel_id != channel_id {
+                if transport_generation > holder.transport_generation
+                    && holder.channel_id != channel_id
+                {
                     self.subscribers.remove(&holder.channel_id);
                 }
                 holder.epoch
             }
             Some(holder) => {
-                detached = Some(DetachedTarget { channel_id: holder.channel_id.clone(), holder_epoch: holder.epoch });
+                detached = Some(DetachedTarget {
+                    channel_id: holder.channel_id.clone(),
+                    holder_epoch: holder.epoch,
+                });
                 self.subscribers.remove(&holder.channel_id);
                 self.bump_holder_epoch()
             }
@@ -455,18 +654,37 @@ impl SessionState {
         });
         self.transport_bindings.insert(
             client_instance_id.to_string(),
-            TransportBinding { generation: transport_generation, channel_id: channel_id.to_string() },
+            TransportBinding {
+                generation: transport_generation,
+                channel_id: channel_id.to_string(),
+            },
         );
 
-        let (snapshot_seq, ansi_snapshot, replay) = match resume_from_seq.and_then(|seq| self.terminal.deltas_after(seq).map(|deltas| (seq, deltas))) {
+        let (snapshot_seq, ansi_snapshot, replay) = match resume_from_seq
+            .and_then(|seq| self.terminal.deltas_after(seq).map(|deltas| (seq, deltas)))
+        {
             Some((seq, replay)) => (seq, None, replay),
-            None => (self.terminal.output_seq(), Some(self.terminal.snapshot()), Vec::new()),
+            None => (
+                self.terminal.output_seq(),
+                Some(self.terminal.snapshot()),
+                Vec::new(),
+            ),
         };
         self.subscribers.insert(
             channel_id.to_string(),
-            Subscriber { next_seq: snapshot_seq.saturating_add(1), gapped: false, gap_notified: false },
+            Subscriber {
+                next_seq: snapshot_seq.saturating_add(1),
+                gapped: false,
+                gap_notified: false,
+            },
         );
-        Ok(AttachOutcome { holder_epoch: epoch, snapshot_seq, ansi_snapshot, replay, detached })
+        Ok(AttachOutcome {
+            holder_epoch: epoch,
+            snapshot_seq,
+            ansi_snapshot,
+            replay,
+            detached,
+        })
     }
 
     pub fn validate_attach(
@@ -476,14 +694,31 @@ impl SessionState {
         transport_generation: u64,
     ) -> Result<(), AttachError> {
         if channel_id.is_empty() || client_instance_id.is_empty() || transport_generation == 0 {
-            return Err(AttachError { code: "invalid_attach", message: "channel/client/generation 必须有效".into() });
+            return Err(AttachError {
+                code: "invalid_attach",
+                message: "channel/client/generation 必须有效".into(),
+            });
+        }
+        if !self.transport_bindings.contains_key(client_instance_id)
+            && self.transport_bindings.len() >= LOGICAL_CLIENT_LIMIT
+        {
+            return Err(AttachError {
+                code: "logical_client_limit",
+                message: format!("session logical client identity 已达上限 {LOGICAL_CLIENT_LIMIT}"),
+            });
         }
         if let Some(binding) = self.transport_bindings.get(client_instance_id) {
             if transport_generation < binding.generation {
-                return Err(AttachError { code: "stale_transport", message: "transport generation 已过期".into() });
+                return Err(AttachError {
+                    code: "stale_transport",
+                    message: "transport generation 已过期".into(),
+                });
             }
             if transport_generation == binding.generation && binding.channel_id != channel_id {
-                return Err(AttachError { code: "generation_collision", message: "同一 transport generation 不能绑定不同 channel".into() });
+                return Err(AttachError {
+                    code: "generation_collision",
+                    message: "同一 transport generation 不能绑定不同 channel".into(),
+                });
             }
             if transport_generation > binding.generation && binding.channel_id == channel_id {
                 return Err(AttachError {
@@ -501,7 +736,9 @@ impl SessionState {
     }
 
     pub fn delivery_result(&mut self, channel_id: &str, to_seq: u64, sent: bool) {
-        let Some(subscriber) = self.subscribers.get_mut(channel_id) else { return };
+        let Some(subscriber) = self.subscribers.get_mut(channel_id) else {
+            return;
+        };
         if sent && subscriber.next_seq <= to_seq {
             subscriber.next_seq = to_seq.saturating_add(1);
         } else if !sent {
@@ -545,58 +782,176 @@ impl SessionState {
 
     fn current_holder(&self, channel_id: &str, holder_epoch: u64) -> Result<&Holder, ControlError> {
         let Some(holder) = &self.holder else {
-            return Err(ControlError { code: "no_holder", message: "session 当前没有 holder".into() });
+            return Err(ControlError {
+                code: "no_holder",
+                message: "session 当前没有 holder".into(),
+            });
         };
         if holder.epoch != holder_epoch {
-            return Err(ControlError { code: "stale_holder", message: "holder epoch 已过期".into() });
+            return Err(ControlError {
+                code: "stale_holder",
+                message: "holder epoch 已过期".into(),
+            });
         }
         if holder.channel_id != channel_id {
-            return Err(ControlError { code: "stale_transport", message: "该 channel 已不是当前 transport".into() });
+            return Err(ControlError {
+                code: "stale_transport",
+                message: "该 channel 已不是当前 transport".into(),
+            });
         }
         Ok(holder)
     }
 
-    pub fn authorize_holder(&self, channel_id: &str, holder_epoch: u64) -> Result<(), ControlError> {
-        self.current_holder(channel_id, holder_epoch).map(|_| ())
-    }
-
-    pub fn input_decision(
+    pub fn authorize_holder(
         &self,
         channel_id: &str,
         holder_epoch: u64,
+    ) -> Result<(), ControlError> {
+        self.current_holder(channel_id, holder_epoch).map(|_| ())
+    }
+
+    pub fn admit_input(
+        &mut self,
+        channel_id: &str,
+        request_id: &str,
+        holder_epoch: u64,
         input_seq: u64,
-        data: &[u8],
-    ) -> Result<SequencedDecision, ControlError> {
+        data: Vec<u8>,
+    ) -> Result<InputAdmission, ControlError> {
         if input_seq == 0 {
-            return Err(ControlError { code: "invalid_input_seq", message: "input sequence 必须从 1 开始".into() });
+            return Err(ControlError {
+                code: "invalid_input_seq",
+                message: "input sequence 必须从 1 开始".into(),
+            });
         }
-        let holder = self.current_holder(channel_id, holder_epoch)?;
-        match self.input_cursors.get(&holder.client_instance_id) {
-            None if input_seq == 1 => Ok(SequencedDecision::Apply),
-            None => Err(ControlError { code: "input_seq_gap", message: "input sequence 不连续，期望 1".into() }),
-            Some(cursor) if cursor.seq.checked_add(1) == Some(input_seq) => Ok(SequencedDecision::Apply),
-            Some(cursor) if input_seq == cursor.seq && cursor.data == data => Ok(SequencedDecision::Duplicate),
-            Some(cursor) if input_seq == cursor.seq => {
-                Err(ControlError { code: "input_seq_collision", message: "相同 input sequence 携带了不同 payload".into() })
+        let client_instance_id = self
+            .current_holder(channel_id, holder_epoch)?
+            .client_instance_id
+            .clone();
+        if let Some(failure) = &self.input_failure {
+            return Err(failure.clone());
+        }
+
+        let applied_through_seq = self
+            .input_cursors
+            .get(&client_instance_id)
+            .map_or(0, |cursor| cursor.seq);
+        if input_seq <= applied_through_seq {
+            if self
+                .input_cursors
+                .get(&client_instance_id)
+                .is_some_and(|cursor| input_seq == cursor.seq && cursor.data != data)
+            {
+                return Err(ControlError {
+                    code: "input_seq_collision",
+                    message: "相同 input sequence 携带了不同 payload".into(),
+                });
             }
-            Some(cursor) if input_seq < cursor.seq => Ok(SequencedDecision::Duplicate),
-            Some(cursor) => Err(ControlError {
-                code: "input_seq_gap",
-                message: format!("input sequence 不连续，期望 {}", cursor.seq.saturating_add(1)),
-            }),
+            return Ok(InputAdmission::Duplicate {
+                applied_through_seq,
+            });
         }
+
+        let reservations = self
+            .input_reservations
+            .entry(client_instance_id.clone())
+            .or_default();
+        if let Some(pending) = reservations
+            .iter_mut()
+            .find(|pending| pending.seq == input_seq)
+        {
+            if pending.data != data {
+                return Err(ControlError {
+                    code: "input_seq_collision",
+                    message: "相同 input sequence 携带了不同 payload".into(),
+                });
+            }
+            pending.channel_id = channel_id.to_string();
+            pending.request_id = request_id.to_string();
+            return Ok(InputAdmission::Pending);
+        }
+
+        let expected = reservations
+            .back()
+            .map_or_else(
+                || applied_through_seq.checked_add(1),
+                |pending| pending.seq.checked_add(1),
+            )
+            .ok_or_else(|| ControlError {
+                code: "input_seq_exhausted",
+                message: "input sequence 已耗尽".into(),
+            })?;
+        if input_seq != expected {
+            return Err(ControlError {
+                code: "input_seq_gap",
+                message: format!("input sequence 不连续，期望 {expected}"),
+            });
+        }
+
+        reservations.push_back(PendingInput {
+            seq: input_seq,
+            data,
+            channel_id: channel_id.to_string(),
+            request_id: request_id.to_string(),
+        });
+        Ok(InputAdmission::Enqueue { client_instance_id })
     }
 
-    pub fn input_applied_through(&self, channel_id: &str, holder_epoch: u64) -> Result<u64, ControlError> {
+    #[cfg(test)]
+    pub fn input_applied_through(
+        &self,
+        channel_id: &str,
+        holder_epoch: u64,
+    ) -> Result<u64, ControlError> {
         let holder = self.current_holder(channel_id, holder_epoch)?;
-        Ok(self.input_cursors.get(&holder.client_instance_id).map_or(0, |cursor| cursor.seq))
+        Ok(self
+            .input_cursors
+            .get(&holder.client_instance_id)
+            .map_or(0, |cursor| cursor.seq))
     }
 
-    pub fn commit_input(&mut self, channel_id: &str, holder_epoch: u64, input_seq: u64, data: Vec<u8>) -> Result<(), ControlError> {
-        let client_instance_id = self.current_holder(channel_id, holder_epoch)?.client_instance_id.clone();
-        let applied_through = self.input_cursors.get(&client_instance_id).map_or(0, |cursor| cursor.seq);
+    /// bounded writer queue 拒绝时回滚刚做出的最后一个 reservation。调用方仍持 session
+    /// mutex，所以 writer 最多已经取走 command 并等待同一把锁，不会抢先完成。
+    pub fn cancel_input_reservation(&mut self, client_instance_id: &str, input_seq: u64) -> bool {
+        let Some(reservations) = self.input_reservations.get_mut(client_instance_id) else {
+            return false;
+        };
+        if reservations
+            .back()
+            .is_none_or(|pending| pending.seq != input_seq)
+        {
+            return false;
+        }
+        reservations.pop_back();
+        if reservations.is_empty() {
+            self.input_reservations.remove(client_instance_id);
+        }
+        true
+    }
+
+    /// writer 完整写完后提交 reservation。这里按 logical client 而不是当前 holder 提交：
+    /// takeover 不能把已经通过旧 authority 裁决、正在 PTY 中执行的输入变成可重放输入。
+    pub fn complete_input(
+        &mut self,
+        client_instance_id: &str,
+        input_seq: u64,
+    ) -> Result<InputCompletion, ControlError> {
+        debug_assert!(
+            self.transport_bindings.contains_key(client_instance_id),
+            "input cursor 只能属于 attach 已准入的 logical identity"
+        );
+        if let Some(failure) = &self.input_failure {
+            return Err(failure.clone());
+        }
+        let applied_through = self
+            .input_cursors
+            .get(client_instance_id)
+            .map_or(0, |cursor| cursor.seq);
         let Some(expected) = applied_through.checked_add(1) else {
-            return Err(ControlError { code: "input_seq_exhausted", message: "input sequence 已耗尽".into() });
+            return Err(ControlError {
+                code: "input_seq_exhausted",
+                message: "input sequence 已耗尽".into(),
+            });
         };
         if input_seq != expected {
             return Err(ControlError {
@@ -604,8 +959,69 @@ impl SessionState {
                 message: format!("input commit 不连续，期望 {expected}"),
             });
         }
-        self.input_cursors.insert(client_instance_id, InputCursor { seq: input_seq, data });
-        Ok(())
+        let pending = {
+            let Some(reservations) = self.input_reservations.get_mut(client_instance_id) else {
+                return Err(ControlError {
+                    code: "input_reservation_missing",
+                    message: "input reservation 不存在".into(),
+                });
+            };
+            if reservations
+                .front()
+                .is_none_or(|pending| pending.seq != input_seq)
+            {
+                return Err(ControlError {
+                    code: "input_commit_out_of_order",
+                    message: "input writer completion 顺序错误".into(),
+                });
+            }
+            reservations.pop_front().unwrap()
+        };
+        if self
+            .input_reservations
+            .get(client_instance_id)
+            .is_some_and(VecDeque::is_empty)
+        {
+            self.input_reservations.remove(client_instance_id);
+        }
+        self.input_cursors.insert(
+            client_instance_id.to_string(),
+            InputCursor {
+                seq: input_seq,
+                data: pending.data,
+            },
+        );
+        Ok(InputCompletion {
+            channel_id: pending.channel_id,
+            applied_through_seq: input_seq,
+        })
+    }
+
+    /// 任何 PTY write error 都使 byte-stream 原子性不可再证明。尤其 partial write 已把前缀
+    /// 交给子进程，绝不能释放 reservation 让客户端全量重投；封死 session input，随后由
+    /// sessions 层 kill child，使这条损坏的流确定终止。
+    pub fn fail_input(
+        &mut self,
+        client_instance_id: &str,
+        input_seq: u64,
+        code: &'static str,
+        message: String,
+    ) -> Result<InputFailureTarget, ControlError> {
+        let pending = self
+            .input_reservations
+            .get(client_instance_id)
+            .and_then(|reservations| reservations.front())
+            .filter(|pending| pending.seq == input_seq)
+            .ok_or_else(|| ControlError {
+                code: "input_reservation_missing",
+                message: "input reservation 不存在".into(),
+            })?;
+        let target = InputFailureTarget {
+            channel_id: pending.channel_id.clone(),
+            request_id: pending.request_id.clone(),
+        };
+        self.input_failure = Some(ControlError { code, message });
+        Ok(target)
     }
 
     pub fn resize_decision(
@@ -617,17 +1033,28 @@ impl SessionState {
         cols: u16,
     ) -> Result<SequencedDecision, ControlError> {
         if resize_seq == 0 {
-            return Err(ControlError { code: "invalid_resize_seq", message: "resize sequence 必须从 1 开始".into() });
+            return Err(ControlError {
+                code: "invalid_resize_seq",
+                message: "resize sequence 必须从 1 开始".into(),
+            });
         }
         let holder = self.current_holder(channel_id, holder_epoch)?;
         match self.resize_cursors.get(&holder.client_instance_id) {
             None => Ok(SequencedDecision::Apply),
             Some(cursor) if resize_seq > cursor.seq => Ok(SequencedDecision::Apply),
-            Some(cursor) if resize_seq == cursor.seq && cursor.rows == rows && cursor.cols == cols => Ok(SequencedDecision::Duplicate),
-            Some(cursor) if resize_seq == cursor.seq => {
-                Err(ControlError { code: "resize_seq_collision", message: "相同 resize sequence 携带了不同尺寸".into() })
+            Some(cursor)
+                if resize_seq == cursor.seq && cursor.rows == rows && cursor.cols == cols =>
+            {
+                Ok(SequencedDecision::Duplicate)
             }
-            Some(_) => Err(ControlError { code: "stale_resize", message: "resize sequence 已过期".into() }),
+            Some(cursor) if resize_seq == cursor.seq => Err(ControlError {
+                code: "resize_seq_collision",
+                message: "相同 resize sequence 携带了不同尺寸".into(),
+            }),
+            Some(_) => Err(ControlError {
+                code: "stale_resize",
+                message: "resize sequence 已过期".into(),
+            }),
         }
     }
 
@@ -639,8 +1066,22 @@ impl SessionState {
         rows: u16,
         cols: u16,
     ) -> Result<(), ControlError> {
-        let client_instance_id = self.current_holder(channel_id, holder_epoch)?.client_instance_id.clone();
-        self.resize_cursors.insert(client_instance_id, ResizeCursor { seq: resize_seq, rows, cols });
+        let client_instance_id = self
+            .current_holder(channel_id, holder_epoch)?
+            .client_instance_id
+            .clone();
+        debug_assert!(
+            self.transport_bindings.contains_key(&client_instance_id),
+            "resize cursor 只能属于 attach 已准入的 logical identity"
+        );
+        self.resize_cursors.insert(
+            client_instance_id,
+            ResizeCursor {
+                seq: resize_seq,
+                rows,
+                cols,
+            },
+        );
         Ok(())
     }
 
@@ -667,7 +1108,6 @@ impl SessionState {
     pub fn cols(&self) -> u16 {
         self.terminal.cols()
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -683,7 +1123,15 @@ struct CellStyle {
 
 impl Default for CellStyle {
     fn default() -> Self {
-        Self { fg: Color::Default, bg: Color::Default, bold: false, dim: false, italic: false, underline: false, inverse: false }
+        Self {
+            fg: Color::Default,
+            bg: Color::Default,
+            bold: false,
+            dim: false,
+            italic: false,
+            underline: false,
+            inverse: false,
+        }
     }
 }
 
@@ -726,18 +1174,32 @@ fn capture_row(screen: &Screen, row: u16, cols: u16) -> RowSnapshot {
                 continuation: cell.is_wide_continuation(),
                 style: CellStyle::from(cell),
             },
-            None => CellSnapshot { contents: String::new(), wide: false, continuation: false, style: CellStyle::default() },
+            None => CellSnapshot {
+                contents: String::new(),
+                wide: false,
+                continuation: false,
+                style: CellStyle::default(),
+            },
         });
     }
-    RowSnapshot { cells, wrapped: screen.row_wrapped(row) }
+    RowSnapshot {
+        cells,
+        wrapped: screen.row_wrapped(row),
+    }
 }
 
 fn capture_viewport(screen: &Screen) -> Vec<RowSnapshot> {
     let (rows, cols) = screen.size();
-    (0..rows).map(|row| capture_row(screen, row, cols)).collect()
+    (0..rows)
+        .map(|row| capture_row(screen, row, cols))
+        .collect()
 }
 
-fn capture_complete_history(screen: &Screen, line_limit: usize, row_capacity: usize) -> Vec<RowSnapshot> {
+fn capture_complete_history(
+    screen: &Screen,
+    line_limit: usize,
+    row_capacity: usize,
+) -> Vec<RowSnapshot> {
     if screen.alternate_screen() || line_limit == 0 {
         return Vec::new();
     }
@@ -754,11 +1216,17 @@ fn capture_complete_history(screen: &Screen, line_limit: usize, row_capacity: us
     // vt100 的底层容量按 physical row 截断。容量打满时无法知道首 row 是否接续已丢前缀，
     // 因而保守丢到第一个 hard-line 结束点；对外 snapshot 永不从半条 logical line 开始。
     if history_rows == row_capacity {
-        let safe_start = rows.iter().position(|row| !row.wrapped).map_or(rows.len(), |index| index + 1);
+        let safe_start = rows
+            .iter()
+            .position(|row| !row.wrapped)
+            .map_or(rows.len(), |index| index + 1);
         rows.drain(..safe_start);
     }
     // history 尾部若仍 wrap 到 viewport，也不作为残缺 logical line 单独写入历史。
-    let safe_end = rows.iter().rposition(|row| !row.wrapped).map_or(0, |index| index + 1);
+    let safe_end = rows
+        .iter()
+        .rposition(|row| !row.wrapped)
+        .map_or(0, |index| index + 1);
     rows.truncate(safe_end);
 
     let logical_lines = rows.iter().filter(|row| !row.wrapped).count();
@@ -806,13 +1274,24 @@ fn reflow_normal_snapshot(
         view.set_scrollback(usize::MAX);
         view.scrollback()
     };
-    let pulled = rows.saturating_sub(old_rows).min(u16::try_from(history_rows).unwrap_or(u16::MAX));
-    let target_row = cursor_row.saturating_add(pulled).min(rows.saturating_sub(1));
+    let pulled = rows
+        .saturating_sub(old_rows)
+        .min(u16::try_from(history_rows).unwrap_or(u16::MAX));
+    let target_row = cursor_row
+        .saturating_add(pulled)
+        .min(rows.saturating_sub(1));
     let target_col = cursor_col.min(cols.saturating_sub(1));
 
     let mut parser = vt100::Parser::new(rows, cols, row_capacity);
     parser.process(snapshot);
-    parser.process(format!("\x1b[{};{}H", target_row.saturating_add(1), target_col.saturating_add(1)).as_bytes());
+    parser.process(
+        format!(
+            "\x1b[{};{}H",
+            target_row.saturating_add(1),
+            target_col.saturating_add(1)
+        )
+        .as_bytes(),
+    );
     render_normal_snapshot(parser.screen(), line_limit, row_capacity)
 }
 
@@ -896,10 +1375,22 @@ fn emit_style(out: &mut Vec<u8>, style: &CellStyle) {
 fn push_color(params: &mut Vec<String>, color: Color, background: bool) {
     match color {
         Color::Default => {}
-        Color::Idx(index) if index < 8 => params.push((if background { 40 + index } else { 30 + index }).to_string()),
-        Color::Idx(index) if index < 16 => params.push((if background { 100 + index - 8 } else { 90 + index - 8 }).to_string()),
+        Color::Idx(index) if index < 8 => {
+            params.push((if background { 40 + index } else { 30 + index }).to_string())
+        }
+        Color::Idx(index) if index < 16 => params.push(
+            (if background {
+                100 + index - 8
+            } else {
+                90 + index - 8
+            })
+            .to_string(),
+        ),
         Color::Idx(index) => params.push(format!("{};5;{index}", if background { 48 } else { 38 })),
-        Color::Rgb(red, green, blue) => params.push(format!("{};2;{red};{green};{blue}", if background { 48 } else { 38 })),
+        Color::Rgb(red, green, blue) => params.push(format!(
+            "{};2;{red};{green};{blue}",
+            if background { 48 } else { 38 }
+        )),
     }
 }
 
@@ -917,9 +1408,17 @@ mod tests {
         assert_eq!(actual.hide_cursor(), expected.hide_cursor());
         let (rows, cols) = actual.size();
         for row in 0..rows {
-            assert_eq!(actual.row_wrapped(row), expected.row_wrapped(row), "row {row} wrap mismatch");
+            assert_eq!(
+                actual.row_wrapped(row),
+                expected.row_wrapped(row),
+                "row {row} wrap mismatch"
+            );
             for col in 0..cols {
-                assert_eq!(actual.cell(row, col), expected.cell(row, col), "cell ({row}, {col}) mismatch");
+                assert_eq!(
+                    actual.cell(row, col),
+                    expected.cell(row, col),
+                    "cell ({row}, {col}) mismatch"
+                );
             }
         }
     }
@@ -928,6 +1427,31 @@ mod tests {
         let mut parser = vt100::Parser::new(state.rows, state.cols, state.history_row_capacity);
         parser.process(&state.snapshot());
         parser
+    }
+
+    /// 把 vt100 的真实 alternate-screen 跳变当 oracle。每个 chunk 至多包含一次预期跳变，
+    /// 这样既比较 scanner 事件，也验证未完成 CSI 跨 `feed` 边界后的状态延续。
+    fn assert_dec_scanner_matches_vt100(chunks: &[&[u8]]) {
+        let mut scanner = DecModeScanner::default();
+        let mut oracle = vt100::Parser::new(4, 12, 0);
+        for (index, chunk) in chunks.iter().enumerate() {
+            let events: Vec<_> = chunk
+                .iter()
+                .filter_map(|byte| scanner.feed(*byte))
+                .collect();
+            let was_alt = oracle.screen().alternate_screen();
+            oracle.process(chunk);
+            let is_alt = oracle.screen().alternate_screen();
+            let expected = match (was_alt, is_alt) {
+                (false, true) => vec![AltEvent::Enter],
+                (true, false) => vec![AltEvent::Exit],
+                _ => Vec::new(),
+            };
+            assert_eq!(
+                events, expected,
+                "chunk {index} 与 vt100/VTE 的 alt mode 跳变不一致: {chunk:?}"
+            );
+        }
     }
 
     #[test]
@@ -958,6 +1482,157 @@ mod tests {
         }
         assert_screen_equivalent(whole.parser.screen(), split.parser.screen());
         assert_eq!(whole.snapshot(), split.snapshot());
+    }
+
+    #[test]
+    fn dec_mode_scanner参数上限与_vte一致且保持常量内存() {
+        let mut scanner = DecModeScanner::default();
+        for byte in b"\x1b[?" {
+            assert_eq!(scanner.feed(*byte), None);
+        }
+        for _ in 0..100_000 {
+            assert_eq!(scanner.feed(b';'), None);
+        }
+        assert_eq!(
+            scanner.retained_parameter_count(),
+            usize::from(VTE_CSI_PARAM_LIMIT),
+            "未终止 CSI 只保留与 VTE 相同的固定参数槽位"
+        );
+        let mut tail_event = None;
+        for byte in b"1049h" {
+            let event = scanner.feed(*byte);
+            if *byte == b'h' {
+                tail_event = event;
+            } else {
+                assert_eq!(event, None);
+            }
+        }
+        assert_eq!(tail_event, None, "VTE 已忽略的超限尾参数不能触发 alt 边界");
+
+        let mut tail_sequence = b"\x1b[?".to_vec();
+        tail_sequence.extend(std::iter::repeat_n(b';', 100_000));
+        tail_sequence.extend_from_slice(b"1049h");
+        let mut parser = vt100::Parser::new(4, 12, 0);
+        parser.process(&tail_sequence);
+        assert!(
+            !parser.screen().alternate_screen(),
+            "底层 VTE 同样不会接受超限尾部的 1049"
+        );
+
+        let mut front_sequence = b"\x1b[?1049;".to_vec();
+        front_sequence.extend(std::iter::repeat_n(b';', 100_000));
+        front_sequence.extend_from_slice(b"0h");
+        let mut front_event = None;
+        for byte in &front_sequence {
+            front_event = scanner.feed(*byte).or(front_event);
+        }
+        parser.process(&front_sequence);
+        assert_eq!(front_event, Some(AltEvent::Enter));
+        assert!(
+            parser.screen().alternate_screen(),
+            "前 32 个槽位内的 1049 必须与 VTE 一样生效"
+        );
+
+        for byte in b"\x1b[?47l" {
+            let event = scanner.feed(*byte);
+            if *byte == b'l' {
+                assert_eq!(event, Some(AltEvent::Exit));
+            } else {
+                assert_eq!(event, None);
+            }
+        }
+        parser.process(b"\x1b[?47l");
+        assert!(!parser.screen().alternate_screen());
+    }
+
+    #[test]
+    fn dec_mode_scanner_can_sub与_vte一致且跨分块取消_csi() {
+        for control in [0x18, 0x1a] {
+            let control = [control];
+            assert_dec_scanner_matches_vt100(&[
+                b"\x1b[?1049",
+                &control,
+                b"h",
+                b"\x1b[?47",
+                b"h",
+                b"\x1b[?1049",
+                &control,
+                b"l",
+                b"\x1b[?47l",
+            ]);
+            assert_dec_scanner_matches_vt100(&[
+                b"\x1b",
+                &control,
+                b"[?1049h",
+                b"\x1b[?47h",
+                b"\x1b[?47l",
+            ]);
+        }
+    }
+
+    #[test]
+    fn dec_mode_scanner_escape内控制字符与_vte状态一致() {
+        for control in [0x00, 0x07, 0x17, 0x19, 0x1c, 0x1f, 0x7f, 0x80] {
+            let control = [control];
+            assert_dec_scanner_matches_vt100(&[b"\x1b", &control, b"[?1049h", b"\x1b[?47l"]);
+        }
+    }
+
+    #[test]
+    fn dec_mode_scanner_escape_intermediate与_vte状态一致() {
+        for intermediate in 0x20..=0x2f {
+            let intermediate = [intermediate];
+            assert_dec_scanner_matches_vt100(&[
+                b"\x1b",
+                &intermediate,
+                b"[?1049h",
+                b"\x1b[?47h",
+                b"\x1b[?47l",
+            ]);
+        }
+    }
+
+    #[test]
+    fn dec_mode_scanner_intermediate阶段与_vte一致且跨分块保留() {
+        for intermediate in 0x20..=0x2f {
+            let intermediate = [intermediate];
+
+            // '?' 是 vt100 识别 DECSET/DECRST 的第一个 intermediate；后续合法
+            // intermediate 不会改变它，因此 1049 仍应生效。
+            assert_dec_scanner_matches_vt100(&[b"\x1b[?1049", &intermediate, b"h", b"\x1b[?47l"]);
+
+            // 先进入 CSI intermediate 后再出现 private marker，VTE 会转入 ignore。
+            assert_dec_scanner_matches_vt100(&[
+                b"\x1b[",
+                &intermediate,
+                b"?1049h",
+                b"\x1b[?47h",
+                b"\x1b[?47l",
+            ]);
+
+            // intermediate 后继续写参数同样进入 ignore；尾部 h 不能误报 Enter。
+            assert_dec_scanner_matches_vt100(&[
+                b"\x1b[?1049",
+                &intermediate,
+                b"1h",
+                b"\x1b[?47h",
+                b"\x1b[?47l",
+            ]);
+        }
+    }
+
+    #[test]
+    fn dec_mode_scanner重复_private_marker与_vte的_csi_ignore一致() {
+        for marker in 0x3c..=0x3f {
+            let marker = [marker];
+            assert_dec_scanner_matches_vt100(&[
+                b"\x1b[?",
+                &marker,
+                b"1049h",
+                b"\x1b[?47h",
+                b"\x1b[?47l",
+            ]);
+        }
     }
 
     #[test]
@@ -1025,12 +1700,18 @@ mod tests {
             for col in 0..screen.size().1 {
                 let cell = screen.cell(row, col).unwrap();
                 if cell.contents().is_empty() {
-                    assert_eq!(cell.bgcolor(), Color::Default, "cell ({row}, {col}) 保留了 reflow padding 背景色");
+                    assert_eq!(
+                        cell.bgcolor(),
+                        Color::Default,
+                        "cell ({row}, {col}) 保留了 reflow padding 背景色"
+                    );
                 }
             }
         }
         let snapshot = state.snapshot();
-        assert!(snapshot.windows(b"\x1b[K".len()).any(|window| window == b"\x1b[K"));
+        assert!(snapshot
+            .windows(b"\x1b[K".len())
+            .any(|window| window == b"\x1b[K"));
         let mut parser = vt100::Parser::new(state.rows, state.cols, state.history_row_capacity);
         parser.process(&snapshot);
         assert_screen_equivalent(screen, parser.screen());
@@ -1055,7 +1736,11 @@ mod tests {
             for col in 0..state.parser.screen().size().1 {
                 let cell = state.parser.screen().cell(row, col).unwrap();
                 if cell.contents().is_empty() {
-                    assert_eq!(cell.bgcolor(), Color::Default, "hidden normal cell ({row}, {col}) 保留了背景色");
+                    assert_eq!(
+                        cell.bgcolor(),
+                        Color::Default,
+                        "hidden normal cell ({row}, {col}) 保留了背景色"
+                    );
                 }
             }
         }
@@ -1067,11 +1752,24 @@ mod tests {
         let mut bytes = vec![b'x'; 100];
         bytes.extend_from_slice(b"\r\none\r\ntwo\r\nthree\r\ncurrent");
         state.feed(&bytes);
-        let selected = capture_complete_history(state.parser.screen(), 2, state.history_row_capacity);
+        let selected =
+            capture_complete_history(state.parser.screen(), 2, state.history_row_capacity);
         let hard_lines = selected.iter().filter(|row| !row.wrapped).count();
-        assert!(hard_lines <= 2, "history exceeded logical-line limit: {hard_lines}");
-        assert!(selected.last().is_none_or(|row| !row.wrapped), "history ended with a partial logical line");
-        assert!(selected.iter().flat_map(|row| &row.cells).all(|cell| !cell.contents.contains('x')), "history began inside truncated long line");
+        assert!(
+            hard_lines <= 2,
+            "history exceeded logical-line limit: {hard_lines}"
+        );
+        assert!(
+            selected.last().is_none_or(|row| !row.wrapped),
+            "history ended with a partial logical line"
+        );
+        assert!(
+            selected
+                .iter()
+                .flat_map(|row| &row.cells)
+                .all(|cell| !cell.contents.contains('x')),
+            "history began inside truncated long line"
+        );
 
         let snapshot = state.snapshot();
         let mut parser = vt100::Parser::new(3, 10, 16);
@@ -1106,13 +1804,19 @@ mod tests {
         assert_eq!(resumed.snapshot_seq, 3);
         assert_eq!(resumed.ansi_snapshot, None);
         assert_eq!(resumed.replay.len(), 1);
-        assert_eq!((resumed.replay[0].from_seq, resumed.replay[0].to_seq), (4, 5));
+        assert_eq!(
+            (resumed.replay[0].from_seq, resumed.replay[0].to_seq),
+            (4, 5)
+        );
 
         let fallback = state.attach("channel-2", "client-1", 2, Some(4)).unwrap();
         assert_eq!(fallback.snapshot_seq, 5);
         assert!(fallback.ansi_snapshot.is_some());
         assert!(fallback.replay.is_empty());
-        assert_eq!(fallback.holder_epoch, resumed.holder_epoch, "transport migration must not self-handoff");
+        assert_eq!(
+            fallback.holder_epoch, resumed.holder_epoch,
+            "transport migration must not self-handoff"
+        );
     }
 
     #[test]
@@ -1121,9 +1825,21 @@ mod tests {
         let first = state.attach("direct-1", "client-a", 1, None).unwrap();
         let migrated = state.attach("relay-2", "client-a", 2, None).unwrap();
         assert_eq!(migrated.holder_epoch, first.holder_epoch);
-        assert!(migrated.detached.is_none(), "same logical client must not detach itself");
+        assert!(
+            migrated.detached.is_none(),
+            "same logical client must not detach itself"
+        );
         assert_eq!(
-            state.input_decision("direct-1", first.holder_epoch, 1, b"old").unwrap_err().code,
+            state
+                .admit_input(
+                    "direct-1",
+                    "request-old",
+                    first.holder_epoch,
+                    1,
+                    b"old".to_vec()
+                )
+                .unwrap_err()
+                .code,
             "stale_transport"
         );
         assert_eq!(
@@ -1141,7 +1857,71 @@ mod tests {
         let detached = second.detached.unwrap();
         assert_eq!(detached.channel_id, "channel-a");
         assert_eq!(detached.holder_epoch, first.holder_epoch);
-        assert_eq!(state.input_decision("channel-a", first.holder_epoch, 1, b"no").unwrap_err().code, "stale_holder");
+        assert_eq!(
+            state
+                .admit_input(
+                    "channel-a",
+                    "request-no",
+                    first.holder_epoch,
+                    1,
+                    b"no".to_vec()
+                )
+                .unwrap_err()
+                .code,
+            "stale_holder"
+        );
+    }
+
+    #[test]
+    fn sessiond_holder_takeover_does_not_replay_or_discard_already_reserved_input() {
+        let mut state = SessionState::new(3, 12, 4);
+        let first = state.attach("channel-a", "client-a", 1, None).unwrap();
+        assert!(matches!(
+            state
+                .admit_input(
+                    "channel-a",
+                    "request-a-1",
+                    first.holder_epoch,
+                    1,
+                    b"accepted-before-takeover".to_vec(),
+                )
+                .unwrap(),
+            InputAdmission::Enqueue { .. }
+        ));
+
+        let second = state.attach("channel-b", "client-b", 1, None).unwrap();
+        assert!(matches!(
+            state
+                .admit_input(
+                    "channel-b",
+                    "request-b-1",
+                    second.holder_epoch,
+                    1,
+                    b"new-holder".to_vec(),
+                )
+                .unwrap(),
+            InputAdmission::Enqueue { .. }
+        ));
+
+        let old_completion = state.complete_input("client-a", 1).unwrap();
+        assert_eq!(old_completion.channel_id, "channel-a");
+        let new_completion = state.complete_input("client-b", 1).unwrap();
+        assert_eq!(new_completion.channel_id, "channel-b");
+        assert_eq!(new_completion.applied_through_seq, 1);
+        assert_eq!(
+            state
+                .admit_input(
+                    "channel-b",
+                    "request-b-1-retry",
+                    second.holder_epoch,
+                    1,
+                    b"new-holder".to_vec(),
+                )
+                .unwrap(),
+            InputAdmission::Duplicate {
+                applied_through_seq: 1
+            }
+        );
     }
 
     #[test]
@@ -1150,12 +1930,95 @@ mod tests {
         state.attach("channel-a-3", "client-a", 3, None).unwrap();
         state.attach("channel-b-1", "client-b", 1, None).unwrap();
 
-        assert_eq!(state.attach("channel-a-2", "client-a", 2, None).unwrap_err().code, "stale_transport");
-        assert_eq!(state.attach("channel-a-other", "client-a", 3, None).unwrap_err().code, "generation_collision");
-        assert_eq!(state.attach("channel-a-3", "client-a", 4, None).unwrap_err().code, "generation_collision");
+        assert_eq!(
+            state
+                .attach("channel-a-2", "client-a", 2, None)
+                .unwrap_err()
+                .code,
+            "stale_transport"
+        );
+        assert_eq!(
+            state
+                .attach("channel-a-other", "client-a", 3, None)
+                .unwrap_err()
+                .code,
+            "generation_collision"
+        );
+        assert_eq!(
+            state
+                .attach("channel-a-3", "client-a", 4, None)
+                .unwrap_err()
+                .code,
+            "generation_collision"
+        );
 
         let current = state.attach("channel-a-4", "client-a", 4, None).unwrap();
         assert_eq!(current.holder_epoch, 3);
+    }
+
+    #[test]
+    fn sessiond_logical_identity_limit_keeps_transport_input_and_resize_admission_consistent() {
+        let mut state = SessionState::new(3, 12, 4);
+        for index in 0..LOGICAL_CLIENT_LIMIT {
+            let channel_id = format!("channel-{index}");
+            let client_instance_id = format!("client-{index}");
+            let attached = state
+                .attach(&channel_id, &client_instance_id, 1, None)
+                .unwrap();
+            assert_eq!(
+                state
+                    .admit_input(
+                        &channel_id,
+                        &format!("request-{index}"),
+                        attached.holder_epoch,
+                        1,
+                        vec![index as u8],
+                    )
+                    .unwrap(),
+                InputAdmission::Enqueue {
+                    client_instance_id: client_instance_id.clone()
+                }
+            );
+            state.complete_input(&client_instance_id, 1).unwrap();
+            assert_eq!(
+                state
+                    .resize_decision(&channel_id, attached.holder_epoch, 1, 24, 80)
+                    .unwrap(),
+                SequencedDecision::Apply
+            );
+            state
+                .commit_resize(&channel_id, attached.holder_epoch, 1, 24, 80)
+                .unwrap();
+        }
+
+        assert_eq!(state.transport_bindings.len(), LOGICAL_CLIENT_LIMIT);
+        assert_eq!(state.input_cursors.len(), LOGICAL_CLIENT_LIMIT);
+        assert_eq!(state.resize_cursors.len(), LOGICAL_CLIENT_LIMIT);
+        assert!(state
+            .input_cursors
+            .keys()
+            .all(|identity| state.transport_bindings.contains_key(identity)));
+        assert!(state
+            .resize_cursors
+            .keys()
+            .all(|identity| state.transport_bindings.contains_key(identity)));
+
+        let rejected = state
+            .attach("channel-overflow", "client-overflow", 1, None)
+            .unwrap_err();
+        assert_eq!(rejected.code, "logical_client_limit");
+        assert_eq!(state.transport_bindings.len(), LOGICAL_CLIENT_LIMIT);
+        assert_eq!(state.input_cursors.len(), LOGICAL_CLIENT_LIMIT);
+        assert_eq!(state.resize_cursors.len(), LOGICAL_CLIENT_LIMIT);
+
+        let migrated = state
+            .attach("channel-0-migrated", "client-0", 2, None)
+            .unwrap();
+        assert!(
+            migrated.holder_epoch > 0,
+            "已准入 identity 在满额后仍可迁移"
+        );
+        assert_eq!(state.transport_bindings.len(), LOGICAL_CLIENT_LIMIT);
     }
 
     #[test]
@@ -1165,25 +2028,145 @@ mod tests {
         let epoch = attached.holder_epoch;
 
         assert_eq!(state.input_applied_through("channel-a", epoch).unwrap(), 0);
-        assert_eq!(state.input_decision("channel-a", epoch, 2, b"gap").unwrap_err().code, "input_seq_gap");
-        assert_eq!(state.commit_input("channel-a", epoch, 2, b"gap".to_vec()).unwrap_err().code, "input_commit_out_of_order");
-        assert_eq!(state.input_decision("channel-a", epoch, 1, b"hello").unwrap(), SequencedDecision::Apply);
-        state.commit_input("channel-a", epoch, 1, b"hello".to_vec()).unwrap();
-        assert_eq!(state.input_applied_through("channel-a", epoch).unwrap(), 1);
-        assert_eq!(state.input_decision("channel-a", epoch, 1, b"hello").unwrap(), SequencedDecision::Duplicate);
-        assert_eq!(state.input_decision("channel-a", epoch, 1, b"changed").unwrap_err().code, "input_seq_collision");
-        assert_eq!(state.input_decision("channel-a", epoch, 3, b"gap").unwrap_err().code, "input_seq_gap");
-        assert_eq!(state.input_decision("channel-a", epoch, 2, b"next").unwrap(), SequencedDecision::Apply);
-        state.commit_input("channel-a", epoch, 2, b"next".to_vec()).unwrap();
-        assert_eq!(state.input_applied_through("channel-a", epoch).unwrap(), 2);
-        assert_eq!(state.input_decision("channel-a", epoch, 1, b"hello").unwrap(), SequencedDecision::Duplicate);
-        assert_eq!(state.input_decision("channel-a", epoch, 1, b"changed stale payload").unwrap(), SequencedDecision::Duplicate);
+        assert_eq!(
+            state
+                .admit_input("channel-a", "request-gap", epoch, 2, b"gap".to_vec())
+                .unwrap_err()
+                .code,
+            "input_seq_gap"
+        );
+        assert_eq!(
+            state
+                .admit_input("channel-a", "request-1", epoch, 1, b"hello".to_vec())
+                .unwrap(),
+            InputAdmission::Enqueue {
+                client_instance_id: "client-a".into()
+            }
+        );
+        assert_eq!(
+            state
+                .admit_input("channel-a", "request-2", epoch, 2, b"next".to_vec())
+                .unwrap(),
+            InputAdmission::Enqueue {
+                client_instance_id: "client-a".into()
+            },
+            "未 ACK 的连续 input 仍可依次 reservation"
+        );
+        assert_eq!(
+            state
+                .admit_input("channel-a", "request-1-retry", epoch, 1, b"hello".to_vec())
+                .unwrap(),
+            InputAdmission::Pending,
+            "写完成前同 seq 重投不能重复入队或提前 ACK"
+        );
+        assert_eq!(
+            state
+                .admit_input(
+                    "channel-a",
+                    "request-collision",
+                    epoch,
+                    1,
+                    b"changed".to_vec()
+                )
+                .unwrap_err()
+                .code,
+            "input_seq_collision"
+        );
+        assert_eq!(
+            state
+                .admit_input("channel-a", "request-gap-2", epoch, 4, b"gap".to_vec())
+                .unwrap_err()
+                .code,
+            "input_seq_gap"
+        );
 
-        assert_eq!(state.resize_decision("channel-a", epoch, 1, 40, 120).unwrap(), SequencedDecision::Apply);
-        state.commit_resize("channel-a", epoch, 1, 40, 120).unwrap();
-        assert_eq!(state.resize_decision("channel-a", epoch, 1, 40, 120).unwrap(), SequencedDecision::Duplicate);
-        assert_eq!(state.resize_decision("channel-a", epoch, 1, 41, 120).unwrap_err().code, "resize_seq_collision");
-        assert_eq!(state.resize_decision("channel-a", epoch, 3, 50, 140).unwrap(), SequencedDecision::Apply);
+        // 同 logical client transport 迁移后会重投所有未确认输入；pending reservation 必须
+        // 刷新 ACK channel，而不能写完后永久回给已失效的旧 transport。
+        let migrated = state.attach("channel-b", "client-a", 2, None).unwrap();
+        assert_eq!(migrated.holder_epoch, epoch);
+        assert_eq!(
+            state
+                .admit_input("channel-b", "request-1-relay", epoch, 1, b"hello".to_vec())
+                .unwrap(),
+            InputAdmission::Pending
+        );
+        assert_eq!(
+            state
+                .admit_input("channel-b", "request-2-relay", epoch, 2, b"next".to_vec())
+                .unwrap(),
+            InputAdmission::Pending
+        );
+        let first = state.complete_input("client-a", 1).unwrap();
+        assert_eq!(
+            first,
+            InputCompletion {
+                channel_id: "channel-b".into(),
+                applied_through_seq: 1
+            }
+        );
+        let second = state.complete_input("client-a", 2).unwrap();
+        assert_eq!(
+            second,
+            InputCompletion {
+                channel_id: "channel-b".into(),
+                applied_through_seq: 2
+            }
+        );
+        assert_eq!(state.input_applied_through("channel-b", epoch).unwrap(), 2);
+        assert_eq!(
+            state
+                .admit_input(
+                    "channel-b",
+                    "request-old",
+                    epoch,
+                    1,
+                    b"changed stale payload".to_vec()
+                )
+                .unwrap(),
+            InputAdmission::Duplicate {
+                applied_through_seq: 2
+            }
+        );
+        assert_eq!(
+            state
+                .admit_input(
+                    "channel-b",
+                    "request-last-collision",
+                    epoch,
+                    2,
+                    b"changed".to_vec()
+                )
+                .unwrap_err()
+                .code,
+            "input_seq_collision"
+        );
+
+        assert_eq!(
+            state
+                .resize_decision("channel-b", epoch, 1, 40, 120)
+                .unwrap(),
+            SequencedDecision::Apply
+        );
+        state.commit_resize("channel-b", epoch, 1, 40, 120).unwrap();
+        assert_eq!(
+            state
+                .resize_decision("channel-b", epoch, 1, 40, 120)
+                .unwrap(),
+            SequencedDecision::Duplicate
+        );
+        assert_eq!(
+            state
+                .resize_decision("channel-b", epoch, 1, 41, 120)
+                .unwrap_err()
+                .code,
+            "resize_seq_collision"
+        );
+        assert_eq!(
+            state
+                .resize_decision("channel-b", epoch, 3, 50, 140)
+                .unwrap(),
+            SequencedDecision::Apply
+        );
     }
 
     #[test]
@@ -1200,8 +2183,14 @@ mod tests {
         assert_eq!(gaps[0].expected_seq, 1);
 
         let marker = b"\r\nCOMPLETED";
-        assert!(state.feed(marker).is_empty(), "gapped subscriber must not receive later out-of-order deltas");
-        assert_eq!(state.output_seq(), b"agent is working".len() as u64 + marker.len() as u64);
+        assert!(
+            state.feed(marker).is_empty(),
+            "gapped subscriber must not receive later out-of-order deltas"
+        );
+        assert_eq!(
+            state.output_seq(),
+            b"agent is working".len() as u64 + marker.len() as u64
+        );
 
         let mut restored = vt100::Parser::new(4, 24, 32);
         restored.process(&state.snapshot());
@@ -1218,7 +2207,19 @@ mod tests {
         let migrated = state.attach("relay-2", "client-a", 2, None).unwrap();
         assert_eq!(migrated.holder_epoch, first.holder_epoch);
         assert!(migrated.detached.is_none());
-        assert_eq!(state.input_decision("direct-1", first.holder_epoch, 1, b"stale").unwrap_err().code, "stale_transport");
+        assert_eq!(
+            state
+                .admit_input(
+                    "direct-1",
+                    "request-stale",
+                    first.holder_epoch,
+                    1,
+                    b"stale".to_vec()
+                )
+                .unwrap_err()
+                .code,
+            "stale_transport"
+        );
 
         let pending = state.feed(b"online again");
         assert_eq!(pending.len(), 1);
@@ -1239,5 +2240,4 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].channel_id, "channel-a");
     }
-
 }

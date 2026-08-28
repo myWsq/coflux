@@ -100,6 +100,12 @@ public struct Coflux_V1_DaemonResync: Sendable {
 
   public var sessions: [Coflux_V1_SessionRef] = []
 
+  /// snapshot owner 是 supervisor 启动实例生成的随机身份；epoch 只由持有 PTY/catalog
+  /// 真相的 supervisor 递增。server 用两者拒绝旧 outbox 重放，不能由 worker 自行猜代际。
+  public var snapshotOwnerID: String = String()
+
+  public var snapshotEpoch: UInt64 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -985,7 +991,10 @@ public struct Coflux_V1_WorktreeRemove: Sendable {
   public init() {}
 }
 
-/// 热升级：切到某个 worker 版本。带 url 走"下载+验签"；不带则按版本标签在 supervisor 自有注册表里切换
+/// 热升级：切到某个 worker 版本。带 url 走"下载+验签"；不带则按版本标签在 supervisor 自有注册表里切换。
+/// signature 保留为对原始二进制的 legacy 签名，供已部署的旧 supervisor 滚动兼容；
+/// 新 supervisor 还必须验证 release_signature，其 domain-separated statement 绑定
+/// version / target / sha256 / artifact_size。
 public struct Coflux_V1_WorkerUpgrade: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1020,6 +1029,33 @@ public struct Coflux_V1_WorkerUpgrade: Sendable {
   /// Clears the value of `signature`. Subsequent reads from it will return its default value.
   public mutating func clearSignature() {self._signature = nil}
 
+  public var target: String {
+    get {_target ?? String()}
+    set {_target = newValue}
+  }
+  /// Returns true if `target` has been explicitly set.
+  public var hasTarget: Bool {self._target != nil}
+  /// Clears the value of `target`. Subsequent reads from it will return its default value.
+  public mutating func clearTarget() {self._target = nil}
+
+  public var artifactSize: UInt64 {
+    get {_artifactSize ?? 0}
+    set {_artifactSize = newValue}
+  }
+  /// Returns true if `artifactSize` has been explicitly set.
+  public var hasArtifactSize: Bool {self._artifactSize != nil}
+  /// Clears the value of `artifactSize`. Subsequent reads from it will return its default value.
+  public mutating func clearArtifactSize() {self._artifactSize = nil}
+
+  public var releaseSignature: String {
+    get {_releaseSignature ?? String()}
+    set {_releaseSignature = newValue}
+  }
+  /// Returns true if `releaseSignature` has been explicitly set.
+  public var hasReleaseSignature: Bool {self._releaseSignature != nil}
+  /// Clears the value of `releaseSignature`. Subsequent reads from it will return its default value.
+  public mutating func clearReleaseSignature() {self._releaseSignature = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1027,6 +1063,9 @@ public struct Coflux_V1_WorkerUpgrade: Sendable {
   fileprivate var _url: String? = nil
   fileprivate var _sha256: String? = nil
   fileprivate var _signature: String? = nil
+  fileprivate var _target: String? = nil
+  fileprivate var _artifactSize: UInt64? = nil
+  fileprivate var _releaseSignature: String? = nil
 }
 
 /// 设备重命名：server 通知 daemon 更新本地设备名称
@@ -1572,7 +1611,7 @@ extension Coflux_V1_LocalGatewayAnnounce: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Coflux_V1_DaemonResync: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonResync"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}sessions\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}sessions\0\u{3}snapshot_owner_id\0\u{3}snapshot_epoch\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1581,6 +1620,8 @@ extension Coflux_V1_DaemonResync: SwiftProtobuf.Message, SwiftProtobuf._MessageI
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeRepeatedMessageField(value: &self.sessions) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.snapshotOwnerID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.snapshotEpoch) }()
       default: break
       }
     }
@@ -1590,11 +1631,19 @@ extension Coflux_V1_DaemonResync: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     if !self.sessions.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.sessions, fieldNumber: 1)
     }
+    if !self.snapshotOwnerID.isEmpty {
+      try visitor.visitSingularStringField(value: self.snapshotOwnerID, fieldNumber: 2)
+    }
+    if self.snapshotEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.snapshotEpoch, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Coflux_V1_DaemonResync, rhs: Coflux_V1_DaemonResync) -> Bool {
     if lhs.sessions != rhs.sessions {return false}
+    if lhs.snapshotOwnerID != rhs.snapshotOwnerID {return false}
+    if lhs.snapshotEpoch != rhs.snapshotEpoch {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3328,7 +3377,7 @@ extension Coflux_V1_WorktreeRemove: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_WorkerUpgrade: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WorkerUpgrade"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{1}url\0\u{1}sha256\0\u{1}signature\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{1}url\0\u{1}sha256\0\u{1}signature\0\u{1}target\0\u{3}artifact_size\0\u{3}release_signature\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3340,6 +3389,9 @@ extension Coflux_V1_WorkerUpgrade: SwiftProtobuf.Message, SwiftProtobuf._Message
       case 2: try { try decoder.decodeSingularStringField(value: &self._url) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self._sha256) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self._signature) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self._target) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self._artifactSize) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self._releaseSignature) }()
       default: break
       }
     }
@@ -3362,6 +3414,15 @@ extension Coflux_V1_WorkerUpgrade: SwiftProtobuf.Message, SwiftProtobuf._Message
     try { if let v = self._signature {
       try visitor.visitSingularStringField(value: v, fieldNumber: 4)
     } }()
+    try { if let v = self._target {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 5)
+    } }()
+    try { if let v = self._artifactSize {
+      try visitor.visitSingularUInt64Field(value: v, fieldNumber: 6)
+    } }()
+    try { if let v = self._releaseSignature {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 7)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3370,6 +3431,9 @@ extension Coflux_V1_WorkerUpgrade: SwiftProtobuf.Message, SwiftProtobuf._Message
     if lhs._url != rhs._url {return false}
     if lhs._sha256 != rhs._sha256 {return false}
     if lhs._signature != rhs._signature {return false}
+    if lhs._target != rhs._target {return false}
+    if lhs._artifactSize != rhs._artifactSize {return false}
+    if lhs._releaseSignature != rhs._releaseSignature {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

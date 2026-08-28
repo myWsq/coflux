@@ -15,6 +15,7 @@
  * 完全无损。
  */
 import postgres from "postgres";
+import { runSchemaMigrations } from "./infra/database/schema-migrations.js";
 import {
   create,
   TaskStatus,
@@ -70,7 +71,7 @@ interface TaskRow {
   id: string;
   accountId: string;
   daemonId: string;
-  projectId: string;
+  projectId: string | null;
   workspaceId: string;
   title: string;
   status: string;
@@ -85,7 +86,7 @@ function rowToTask(r: TaskRow): Task {
     id: r.id,
     accountId: r.accountId,
     daemonId: r.daemonId,
-    projectId: r.projectId,
+    projectId: r.projectId ?? "",
     workspaceId: r.workspaceId,
     title: r.title,
     status: taskStatusFromDb(r.status),
@@ -94,6 +95,13 @@ function rowToTask(r: TaskRow): Task {
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   });
+}
+
+/** 目录 workspace 在协议层沿用空 projectId；数据库用 NULL 表达可选 FK。 */
+type WorkspaceRow = Omit<Workspace, "projectId"> & { projectId: string | null };
+
+function rowToWorkspace(row: WorkspaceRow): Workspace {
+  return create(WorkspaceSchema, { ...row, projectId: row.projectId ?? "" });
 }
 
 export interface Account {
@@ -224,201 +232,6 @@ function rowToCheckpoint(row: SessionCheckpointRow): SessionCheckpointRecord {
   return { ...row, snapshotSeq: BigInt(row.snapshotSeq) };
 }
 
-/** 建表 DDL：一个 simple-query 多语句块，启动时幂等执行（CREATE ... IF NOT EXISTS）。 */
-const SCHEMA_DDL = `
-  CREATE SCHEMA IF NOT EXISTS coflux;
-
-  CREATE TABLE IF NOT EXISTS accounts (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS client_tokens (
-    token_hash TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL,
-    revoked BOOLEAN NOT NULL DEFAULT false,
-    expires_at DOUBLE PRECISION,
-    user_id TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS memberships (
-    user_id TEXT NOT NULL,
-    account_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL,
-    PRIMARY KEY (user_id, account_id)
-  );
-  CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id);
-
-  CREATE TABLE IF NOT EXISTS meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS devices (
-    id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    host TEXT NOT NULL,
-    platform TEXT NOT NULL,
-    token_hash TEXT NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL,
-    last_seen_at DOUBLE PRECISION NOT NULL,
-    revoked BOOLEAN NOT NULL DEFAULT false
-  );
-  CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(account_id);
-  CREATE INDEX IF NOT EXISTS idx_devices_token ON devices(token_hash);
-
-  CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    daemon_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    repo_path TEXT NOT NULL,
-    default_branch TEXT NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL,
-    deleting BOOLEAN NOT NULL DEFAULT false
-  );
-  CREATE INDEX IF NOT EXISTS idx_projects_account ON projects(account_id);
-
-  CREATE TABLE IF NOT EXISTS workspaces (
-    id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    daemon_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    path TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    is_main BOOLEAN NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL,
-    additions INTEGER NOT NULL DEFAULT 0,
-    deletions INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE INDEX IF NOT EXISTS idx_ws_account ON workspaces(account_id);
-  CREATE INDEX IF NOT EXISTS idx_ws_project ON workspaces(project_id);
-
-  CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    daemon_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    status TEXT NOT NULL,
-    session_id TEXT,
-    exit_code INTEGER,
-    created_at DOUBLE PRECISION NOT NULL,
-    updated_at DOUBLE PRECISION NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_tasks_account ON tasks(account_id);
-  CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id);
-  CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
-  CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
-
-  CREATE TABLE IF NOT EXISTS local_gateways (
-    daemon_id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    protocol_version INTEGER NOT NULL,
-    port INTEGER NOT NULL,
-    public_key_sec1 BYTEA NOT NULL,
-    updated_at DOUBLE PRECISION NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_local_gateways_account ON local_gateways(account_id);
-
-  CREATE TABLE IF NOT EXISTS local_browser_grants (
-    grant_id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    daemon_id TEXT NOT NULL,
-    origin TEXT NOT NULL,
-    public_key_sec1 BYTEA NOT NULL,
-    offline_scopes INTEGER[] NOT NULL,
-    client_token_hash TEXT,
-    pair_request_id TEXT NOT NULL,
-    state TEXT NOT NULL,
-    control_request_id TEXT,
-    control_action TEXT,
-    error TEXT,
-    created_at DOUBLE PRECISION NOT NULL,
-    updated_at DOUBLE PRECISION NOT NULL,
-    revoked_at DOUBLE PRECISION,
-    UNIQUE (account_id, pair_request_id)
-  );
-  CREATE INDEX IF NOT EXISTS idx_local_grants_daemon ON local_browser_grants(daemon_id);
-  CREATE INDEX IF NOT EXISTS idx_local_grants_account ON local_browser_grants(account_id);
-  CREATE INDEX IF NOT EXISTS idx_local_grants_token ON local_browser_grants(client_token_hash);
-  CREATE INDEX IF NOT EXISTS idx_local_grants_control ON local_browser_grants(control_request_id);
-
-  CREATE TABLE IF NOT EXISTS local_device_leases (
-    lease_id TEXT PRIMARY KEY,
-    grant_id TEXT NOT NULL,
-    account_id TEXT NOT NULL,
-    daemon_id TEXT NOT NULL,
-    client_token_hash TEXT,
-    scopes INTEGER[] NOT NULL,
-    expires_at DOUBLE PRECISION NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL,
-    revoked BOOLEAN NOT NULL DEFAULT false
-  );
-  CREATE INDEX IF NOT EXISTS idx_local_leases_grant ON local_device_leases(grant_id);
-  CREATE INDEX IF NOT EXISTS idx_local_leases_daemon ON local_device_leases(daemon_id);
-  CREATE INDEX IF NOT EXISTS idx_local_leases_expiry ON local_device_leases(expires_at);
-
-  CREATE TABLE IF NOT EXISTS prepared_device_operations (
-    operation_id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    daemon_id TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    target_id TEXT,
-    target_version DOUBLE PRECISION,
-    frame BYTEA NOT NULL,
-    metadata TEXT NOT NULL,
-    expires_at DOUBLE PRECISION NOT NULL,
-    state TEXT NOT NULL,
-    completed BOOLEAN NOT NULL DEFAULT false,
-    install_error TEXT,
-    report_ok BOOLEAN,
-    report_task_id TEXT,
-    report_session_id TEXT,
-    report_pid INTEGER,
-    report_exit_code INTEGER,
-    report_error TEXT,
-    result_frame BYTEA,
-    created_at DOUBLE PRECISION NOT NULL,
-    updated_at DOUBLE PRECISION NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_prepared_daemon ON prepared_device_operations(daemon_id, completed, expires_at);
-  CREATE INDEX IF NOT EXISTS idx_prepared_account ON prepared_device_operations(account_id, completed, expires_at);
-  CREATE INDEX IF NOT EXISTS idx_prepared_target ON prepared_device_operations(account_id, kind, target_id, completed);
-  CREATE UNIQUE INDEX IF NOT EXISTS uq_prepared_active_target
-    ON prepared_device_operations(account_id, kind, target_id)
-    WHERE target_id IS NOT NULL AND completed = false AND state <> 'expired';
-
-  CREATE TABLE IF NOT EXISTS session_checkpoints (
-    session_id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL,
-    account_id TEXT NOT NULL,
-    daemon_id TEXT NOT NULL,
-    snapshot_seq NUMERIC(20, 0) NOT NULL,
-    ansi_snapshot BYTEA NOT NULL,
-    cols INTEGER NOT NULL,
-    rows INTEGER NOT NULL,
-    title TEXT NOT NULL DEFAULT '',
-    captured_at DOUBLE PRECISION NOT NULL,
-    updated_at DOUBLE PRECISION NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_checkpoints_account ON session_checkpoints(account_id, captured_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON session_checkpoints(task_id);
-`;
-
 export class Store {
   /**
    * 顶层实例持有连接池（`postgres.Sql`）；事务作用域实例（见 `transaction()`）持有
@@ -431,7 +244,7 @@ export class Store {
     this.sql = sql;
   }
 
-  /** 建连 + 建 schema/表。生产/开发通用；`databaseUrl` 由 config.ts 的 fail-closed 体系提供。 */
+  /** 建连 + 运行版本化 schema migration。生产/开发通用；URL 由 config.ts 的 fail-closed 体系提供。 */
   static async connect(databaseUrl: string): Promise<Store> {
     const sql = postgres(databaseUrl, {
       max: 5, // 单用户轻负载，单实例用不了多的（生产是 prod-jp 本机 PG，plan 063）
@@ -441,26 +254,14 @@ export class Store {
       // （postgres.js 启动包默认压成 0，会把 capturedAt 之类的时间戳截到 15 位）。
       connection: { search_path: "coflux", extra_float_digits: 3 },
     });
-    const store = new Store(sql);
-    await store.init();
-    return store;
-  }
-
-  private async init(): Promise<void> {
-    await this.sql.unsafe(SCHEMA_DDL);
-    await this.migrate();
-  }
-
-  /** 轻量列迁移的挂载点（information_schema 查列补列）：当前全新建表已含所有列，暂无需迁移。
-   * 保留此方法承接未来的增量 schema 演进，沿用与旧 sqlite 版本相同的思路。 */
-  private async migrate(): Promise<void> {
-    // plan 024：workspaces 表新增 additions/deletions（git diff 累计统计）。
-    // SCHEMA_DDL 是 CREATE TABLE IF NOT EXISTS 幂等块，生产已有的 workspaces 表不会自动得到新列。
-    await this.sql`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS additions INTEGER NOT NULL DEFAULT 0`;
-    await this.sql`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS deletions INTEGER NOT NULL DEFAULT 0`;
-    await this.sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS deleting BOOLEAN NOT NULL DEFAULT false`;
-    // plan 075：session_checkpoints 新增 title（OSC 0/2 终端标题）。
-    await this.sql`ALTER TABLE session_checkpoints ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT ''`;
+    try {
+      await runSchemaMigrations(sql);
+      return new Store(sql);
+    } catch (error) {
+      // 启动迁移失败时连接池尚未交给 Raven 生命周期，必须在这里主动收口。
+      await sql.end({ timeout: 0 }).catch(() => undefined);
+      throw error;
+    }
   }
 
   /**
@@ -521,6 +322,12 @@ export class Store {
     const rows = await this.sql<User[]>`SELECT * FROM users WHERE email = ${email}`;
     return rows[0];
   }
+  /** 必须在 transaction() 内调用：锁住稳定的 user 父行，串行化该用户首次建个人账号。
+   * uq_memberships_user 是最终防线；父行锁让并发请求复用 canonical account，而不是撞唯一约束。 */
+  async claimUser(id: string): Promise<User | undefined> {
+    const rows = await this.sql<User[]>`SELECT * FROM users WHERE id = ${id} FOR UPDATE`;
+    return rows[0];
+  }
   /** 建号脚本用：邮箱已存在则更新口令哈希（保留原 id/createdAt），否则新建。 */
   async upsertUser(u: User): Promise<User> {
     const rows = await this.sql<User[]>`
@@ -532,10 +339,10 @@ export class Store {
   }
 
   /* ------------------------ memberships ---------------------------- */
-  /** 个人账号 1:1：一个 userId 只有一条 membership。返回其账号与角色。 */
+  /** 个人账号业务语义为 1:1；ORDER BY 让迁移前排障读取也保持确定性。 */
   async getMembershipByUser(userId: string): Promise<{ accountId: AccountId; role: string } | undefined> {
     const rows = await this.sql<{ accountId: string; role: string }[]>`
-      SELECT account_id, role FROM memberships WHERE user_id = ${userId} ORDER BY created_at LIMIT 1
+      SELECT account_id, role FROM memberships WHERE user_id = ${userId} ORDER BY created_at, account_id LIMIT 1
     `;
     return rows[0];
   }
@@ -589,6 +396,17 @@ export class Store {
   }
   async getDevice(id: DaemonId): Promise<Device | undefined> {
     const rows = await this.sql<Device[]>`SELECT * FROM devices WHERE id = ${id}`;
+    return rows[0];
+  }
+  /** 必须在 transaction() 内调用：同时校验设备归属/撤销状态并锁住稳定父行。
+   * terminalCreate、prepared admission 等所有 device 子项写路径都持有此锁；对应唯一约束
+   * 是最终防线，父行锁负责串行化跨连接的检查后写入。 */
+  async claimActiveDevice(id: DaemonId, accountId: AccountId): Promise<Device | undefined> {
+    const rows = await this.sql<Device[]>`
+      SELECT * FROM devices
+      WHERE id = ${id} AND account_id = ${accountId} AND revoked = false
+      FOR UPDATE
+    `;
     return rows[0];
   }
   async getDeviceByTokenHash(tokenHash: string): Promise<Device | undefined> {
@@ -845,42 +663,43 @@ export class Store {
 
   /* --------------------------- workspaces -------------------------- */
   async createWorkspace(w: Workspace): Promise<Workspace> {
+    const row: WorkspaceRow = { ...w, projectId: w.projectId || null };
     await this.sql`
-      INSERT INTO workspaces ${this.sql(w, "id", "accountId", "daemonId", "projectId", "name", "path", "branch", "isMain", "createdAt", "additions", "deletions")}
+      INSERT INTO workspaces ${this.sql(row, "id", "accountId", "daemonId", "projectId", "name", "path", "branch", "isMain", "createdAt", "additions", "deletions")}
     `;
     return w;
   }
   async getWorkspace(id: WorkspaceId): Promise<Workspace | undefined> {
-    const rows = await this.sql<Workspace[]>`SELECT * FROM workspaces WHERE id = ${id}`;
-    return rows[0] && create(WorkspaceSchema, rows[0]);
+    const rows = await this.sql<WorkspaceRow[]>`SELECT * FROM workspaces WHERE id = ${id}`;
+    return rows[0] && rowToWorkspace(rows[0]);
   }
   async listWorkspaces(accountId: AccountId): Promise<Workspace[]> {
-    const rows = await this.sql<Workspace[]>`SELECT * FROM workspaces WHERE account_id = ${accountId} ORDER BY is_main DESC, created_at`;
-    return rows.map((r) => create(WorkspaceSchema, r));
+    const rows = await this.sql<WorkspaceRow[]>`SELECT * FROM workspaces WHERE account_id = ${accountId} ORDER BY is_main DESC, created_at`;
+    return rows.map(rowToWorkspace);
   }
   async listWorkspacesByProject(projectId: ProjectId): Promise<Workspace[]> {
-    const rows = await this.sql<Workspace[]>`SELECT * FROM workspaces WHERE project_id = ${projectId}`;
-    return rows.map((r) => create(WorkspaceSchema, r));
+    const rows = await this.sql<WorkspaceRow[]>`SELECT * FROM workspaces WHERE project_id = ${projectId}`;
+    return rows.map(rowToWorkspace);
   }
   async listWorkspacesByDaemon(daemonId: DaemonId): Promise<Workspace[]> {
-    const rows = await this.sql<Workspace[]>`SELECT * FROM workspaces WHERE daemon_id = ${daemonId}`;
-    return rows.map((r) => create(WorkspaceSchema, r));
+    const rows = await this.sql<WorkspaceRow[]>`SELECT * FROM workspaces WHERE daemon_id = ${daemonId}`;
+    return rows.map(rowToWorkspace);
   }
   async updateWorkspaceName(id: WorkspaceId, name: string): Promise<Workspace | undefined> {
-    const rows = await this.sql<Workspace[]>`UPDATE workspaces SET name = ${name} WHERE id = ${id} RETURNING *`;
-    return rows[0] && create(WorkspaceSchema, rows[0]);
+    const rows = await this.sql<WorkspaceRow[]>`UPDATE workspaces SET name = ${name} WHERE id = ${id} RETURNING *`;
+    return rows[0] && rowToWorkspace(rows[0]);
   }
   async updateWorkspaceBranch(id: WorkspaceId, branch: string, alsoName: boolean): Promise<Workspace | undefined> {
     const rows = alsoName
-      ? await this.sql<Workspace[]>`UPDATE workspaces SET branch = ${branch}, name = ${branch} WHERE id = ${id} RETURNING *`
-      : await this.sql<Workspace[]>`UPDATE workspaces SET branch = ${branch} WHERE id = ${id} RETURNING *`;
-    return rows[0] && create(WorkspaceSchema, rows[0]);
+      ? await this.sql<WorkspaceRow[]>`UPDATE workspaces SET branch = ${branch}, name = ${branch} WHERE id = ${id} RETURNING *`
+      : await this.sql<WorkspaceRow[]>`UPDATE workspaces SET branch = ${branch} WHERE id = ${id} RETURNING *`;
+    return rows[0] && rowToWorkspace(rows[0]);
   }
   async updateWorkspaceDiff(id: WorkspaceId, additions: number, deletions: number): Promise<Workspace | undefined> {
-    const rows = await this.sql<Workspace[]>`
+    const rows = await this.sql<WorkspaceRow[]>`
       UPDATE workspaces SET additions = ${additions}, deletions = ${deletions} WHERE id = ${id} RETURNING *
     `;
-    return rows[0] && create(WorkspaceSchema, rows[0]);
+    return rows[0] && rowToWorkspace(rows[0]);
   }
   async removeWorkspace(id: WorkspaceId): Promise<void> {
     await this.sql`DELETE FROM workspaces WHERE id = ${id}`;
@@ -912,7 +731,7 @@ export class Store {
     return rows.map(rowToTask);
   }
   async createTask(t: Task): Promise<Task> {
-    const row = { id: t.id, accountId: t.accountId, daemonId: t.daemonId, projectId: t.projectId, workspaceId: t.workspaceId, title: t.title, status: taskStatusToDb(t.status), sessionId: t.sessionId ?? null, exitCode: t.exitCode ?? null, createdAt: t.createdAt, updatedAt: t.updatedAt };
+    const row = { id: t.id, accountId: t.accountId, daemonId: t.daemonId, projectId: t.projectId || null, workspaceId: t.workspaceId, title: t.title, status: taskStatusToDb(t.status), sessionId: t.sessionId ?? null, exitCode: t.exitCode ?? null, createdAt: t.createdAt, updatedAt: t.updatedAt };
     await this.sql`
       INSERT INTO tasks ${this.sql(row, "id", "accountId", "daemonId", "projectId", "workspaceId", "title", "status", "sessionId", "exitCode", "createdAt", "updatedAt")}
     `;
@@ -932,8 +751,84 @@ export class Store {
     `;
     return rows[0] && rowToTask(rows[0]);
   }
+  /** sessionStarted 的单语句 CAS：只能把仍绑定同一 session 的本账号/设备任务转为 RUNNING。
+   * 即使旧事件在 sessionExit 清空绑定后才落到这里，也不能制造 RUNNING + NULL session_id。 */
+  async runTaskIfSession(
+    id: TaskId,
+    accountId: AccountId,
+    daemonId: DaemonId,
+    sessionId: SessionId,
+  ): Promise<Task | undefined> {
+    const rows = await this.sql<TaskRow[]>`
+      UPDATE tasks
+      SET status = 'running', exit_code = NULL, updated_at = ${Date.now()}
+      WHERE id = ${id}
+        AND account_id = ${accountId}
+        AND daemon_id = ${daemonId}
+        AND session_id = ${sessionId}
+        AND status <> 'running'
+      RETURNING *
+    `;
+    return rows[0] && rowToTask(rows[0]);
+  }
+  /** sessionExit 的单语句 CAS：事件入口先冻结 taskId，这里再同时核对账号、设备与
+   * session 绑定。即使同一 sessionId 在连接换代后已绑到新 task，旧事件也不会跨行收敛。 */
+  async exitTaskIfSession(
+    id: TaskId,
+    accountId: AccountId,
+    daemonId: DaemonId,
+    sessionId: SessionId,
+    exitCode: number,
+  ): Promise<Task | undefined> {
+    const rows = await this.sql<TaskRow[]>`
+      UPDATE tasks
+      SET status = 'exited', session_id = NULL, exit_code = ${exitCode}, updated_at = ${Date.now()}
+      WHERE id = ${id}
+        AND account_id = ${accountId}
+        AND daemon_id = ${daemonId}
+        AND session_id = ${sessionId}
+      RETURNING *
+    `;
+    return rows[0] && rowToTask(rows[0]);
+  }
+  /** catalog 反向收敛的条件更新：读取快照后 sessionExit/remove 可能并发先落库，必须把
+   * account/daemon/status/session 四个判据留在同一条 UPDATE，避免把真实 exitCode 覆盖成未知。 */
+  async exitRunningTaskIfSession(
+    id: TaskId,
+    accountId: AccountId,
+    daemonId: DaemonId,
+    sessionId: SessionId,
+  ): Promise<Task | undefined> {
+    const rows = await this.sql<TaskRow[]>`
+      UPDATE tasks
+      SET status = 'exited', session_id = NULL, exit_code = NULL, updated_at = ${Date.now()}
+      WHERE id = ${id}
+        AND account_id = ${accountId}
+        AND daemon_id = ${daemonId}
+        AND status = 'running'
+        AND session_id = ${sessionId}
+      RETURNING *
+    `;
+    return rows[0] && rowToTask(rows[0]);
+  }
   async removeTask(id: TaskId): Promise<void> {
     await this.sql`DELETE FROM tasks WHERE id = ${id}`;
+  }
+  /** agent terminalNew 已提交、但 control WS 同步发送失败时的补偿 CAS。只删除尚未启动且仍
+   * 绑定本次随机 sessionId 的新任务，绝不误删已经被 sessionStarted 推进的 incarnation。 */
+  async removeIdleTaskIfSession(
+    id: TaskId,
+    accountId: AccountId,
+    daemonId: DaemonId,
+    sessionId: SessionId,
+  ): Promise<Task | undefined> {
+    const rows = await this.sql<TaskRow[]>`
+      DELETE FROM tasks
+      WHERE id = ${id} AND account_id = ${accountId} AND daemon_id = ${daemonId}
+        AND status = 'idle' AND session_id = ${sessionId}
+      RETURNING *
+    `;
+    return rows[0] && rowToTask(rows[0]);
   }
   /** 删除并原样返回被删任务的 id（单语句 DELETE ... RETURNING，天然原子，无需先查后删）。 */
   async removeTasksByWorkspace(workspaceId: WorkspaceId): Promise<TaskId[]> {
@@ -1000,18 +895,27 @@ export class Store {
 
   async listInstallablePreparedOperations(daemonId: DaemonId, now: number): Promise<PreparedOperationRecord[]> {
     return this.sql<PreparedOperationRecord[]>`
-      SELECT * FROM prepared_device_operations
-      WHERE daemon_id = ${daemonId} AND completed = false AND expires_at > ${now}
-        AND state IN ('pending_install', 'installed', 'install_failed')
-      ORDER BY created_at LIMIT 1024
+      SELECT operation.*
+      FROM prepared_device_operations AS operation
+      JOIN devices AS device
+        ON device.id = operation.daemon_id AND device.account_id = operation.account_id
+      WHERE operation.daemon_id = ${daemonId} AND device.revoked = false
+        AND operation.completed = false AND operation.expires_at > ${now}
+        AND operation.state IN ('pending_install', 'installed', 'install_failed')
+      ORDER BY operation.created_at LIMIT 1024
     `;
   }
 
   async listReadyPreparedOperations(accountId: AccountId, now: number): Promise<PreparedOperationRecord[]> {
     return this.sql<PreparedOperationRecord[]>`
-      SELECT * FROM prepared_device_operations
-      WHERE account_id = ${accountId} AND completed = false AND expires_at > ${now} AND state = 'installed'
-      ORDER BY created_at LIMIT 1024
+      SELECT operation.*
+      FROM prepared_device_operations AS operation
+      JOIN devices AS device
+        ON device.id = operation.daemon_id AND device.account_id = operation.account_id
+      WHERE operation.account_id = ${accountId} AND device.revoked = false
+        AND operation.completed = false AND operation.expires_at > ${now}
+        AND operation.state = 'installed'
+      ORDER BY operation.created_at LIMIT 1024
     `;
   }
 
@@ -1079,16 +983,57 @@ export class Store {
     return rows[0];
   }
 
-  async expirePreparedOperations(now: number): Promise<void> {
+  /** 永久撤销设备时，在持有 device 父行锁的同一事务内终结其全部 active prepared 记录。
+   * 返回 ID 供提交后的易失投递层推进代际、取消 waiter/retry。 */
+  async expirePreparedOperationsByDaemon(
+    accountId: AccountId,
+    daemonId: DaemonId,
+    now: number,
+  ): Promise<void> {
     await this.sql`
       UPDATE prepared_device_operations SET state = 'expired', updated_at = ${now}
-      WHERE completed = false AND expires_at <= ${now} AND state NOT IN ('applying', 'expired')
+      WHERE account_id = ${accountId} AND daemon_id = ${daemonId}
+        AND completed = false AND state <> 'expired'
     `;
-    // 完成记录只保留 30 天；result_frame 有界但仍不应永久占用数据库。
+  }
+
+  /** task/workspace 删除事务内终结尚未完成的目标 operation。调用方持有对应 device 父行锁，
+   * 因此 admission/report 与删除对同一 target 只有一个确定顺序；返回 ID 供提交后同步取消
+   * waiter/retry，不能让删除前查到的旧 prepared continuation 再下发。 */
+  async expirePreparedOperationsByTarget(
+    accountId: AccountId,
+    daemonId: DaemonId,
+    kind: string,
+    targetId: string,
+    now: number,
+  ): Promise<string[]> {
+    const rows = await this.sql<{ operationId: string }[]>`
+      UPDATE prepared_device_operations SET state = 'expired', updated_at = ${now}
+      WHERE account_id = ${accountId} AND daemon_id = ${daemonId}
+        AND kind = ${kind} AND target_id = ${targetId}
+        AND completed = false AND state <> 'expired'
+      RETURNING operation_id
+    `;
+    return rows.map((row) => row.operationId);
+  }
+
+  async expirePreparedOperations(now: number): Promise<number> {
+    const rows = await this.sql<{ count: number }[]>`
+      WITH expired AS (
+        UPDATE prepared_device_operations SET state = 'expired', updated_at = ${now}
+        WHERE completed = false AND expires_at <= ${now} AND state NOT IN ('applying', 'expired')
+        RETURNING 1
+      )
+      SELECT COUNT(*)::int AS count FROM expired
+    `;
+    // 完成或过期记录只保留 30 天；后者刻意保留 completed=false，让迟到的 session exit
+    // 仍可补齐审计结果，但也不能因此永久占用数据库。
     await this.sql`
       DELETE FROM prepared_device_operations
-      WHERE completed = true AND updated_at < ${now - 30 * 24 * 60 * 60 * 1000}
+      WHERE (completed = true OR state = 'expired')
+        AND updated_at < ${now - 30 * 24 * 60 * 60 * 1000}
     `;
+    return rows[0]?.count ?? 0;
   }
 
   /* ------------------------- checkpoint cache ------------------------ */

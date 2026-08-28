@@ -16,7 +16,7 @@ import { app } from "./app.js";
 import { StoreState } from "./plugins/store.plugin.js";
 import { HubState } from "./plugins/hub.plugin.js";
 import type { ClientConn, DaemonCtx } from "./hub.js";
-import { attachEndpoint } from "./transport.js";
+import { attachEndpoint, requestAddress } from "./transport.js";
 import { matchProxyHost, handleProxyRequest, handleProxyUpgrade, type ProxyServerContext } from "./proxy.js";
 import { AutoUpdater } from "./auto-update.js";
 
@@ -64,7 +64,7 @@ httpServer.on("upgrade", (req, socket, head) => {
 });
 
 const daemonEp = attachEndpoint(daemonWss, {
-  makeCtx: (ws: WebSocket): DaemonCtx => ({ ws, daemonId: null, accountId: null }),
+  makeCtx: (ws: WebSocket, request): DaemonCtx => ({ ws, daemonId: null, accountId: null, remoteAddress: requestAddress(request) }),
   isAuthed: (c) => c.daemonId !== null,
   // 等浏览器授权的 daemon（已发 enrollRequest、持有 pending token）是合法未认证态，
   // 不能被 auth deadline 踢——否则每 15s 断连重连、授权链接无限换新（生产实测踩过）。
@@ -72,8 +72,10 @@ const daemonEp = attachEndpoint(daemonWss, {
   canWaitAuth: (c) => !!c.pendingAuthToken,
   decode: decodeDaemonToServer,
   onMessage: (c, m) => hub.handleDaemonMessage(c, m),
-  onClose: (c) => hub.handleDaemonClose(c),
+  onClose: (c, close) => hub.handleDaemonClose(c, close),
   authDeadlineMs: config.authDeadlineMs,
+  maxPendingMessages: config.inboundQueueMaxMessages,
+  maxPendingBytes: config.inboundQueueMaxBytes,
   logger: log.child({ endpoint: "daemon" }),
 });
 
@@ -82,6 +84,7 @@ const clientEp = attachEndpoint(clientWss, {
     ws,
     accountId: null,
     subscribed: false,
+    remoteAddress: requestAddress(request),
     origin: typeof request.headers.origin === "string" ? request.headers.origin : undefined,
   }),
   isAuthed: (c) => c.accountId !== null,
@@ -89,6 +92,8 @@ const clientEp = attachEndpoint(clientWss, {
   onMessage: (c, m) => hub.handleClientMessage(c, m),
   onClose: (c) => hub.handleClientClose(c),
   authDeadlineMs: config.authDeadlineMs,
+  maxPendingMessages: config.inboundQueueMaxMessages,
+  maxPendingBytes: config.inboundQueueMaxBytes,
   logger: log.child({ endpoint: "client" }),
 });
 

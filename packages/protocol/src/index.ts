@@ -46,6 +46,8 @@ export const DEVICE_PROTOCOL_VERSION = 1;
 /** PTY 创建/resize 的共享尺寸边界；Rust sessiond 使用同值，避免 transport 间行为漂移。 */
 export const MIN_TERMINAL_DIMENSION = 1;
 export const MAX_TERMINAL_DIMENSION = 1000;
+/** worker ↔ supervisor 内部 frame 的 idLen 只有一个字节；会进入该字段的 ID 共用此上限。 */
+export const MAX_FRAME_ID_BYTES = 255;
 /** relay/local Device frame 上限；保留现有 30MiB 文件写入能力。 */
 export const MAX_DEVICE_FRAME_BYTES = 30 * 1024 * 1024;
 /** 中心 checkpoint 只保存有界 terminal state，不承载完整 Device frame 上限。 */

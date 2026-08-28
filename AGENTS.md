@@ -6,7 +6,7 @@
 
 coflux：可跑在任意节点上的 **daemon**，本地起 PTY、驱动 Agent（claude/codex CLI），主动外连**中心服务器**；**client**（web）连服务器即可触达任意 daemon。模型类 Tailscale（账号 → 设备 → 项目 → 工作区 → 任务 → 会话）。
 
-- `apps/server`（TS）：账号/设备认证 + 编排路由 + sqlite 持久化。
+- `apps/server`（TS）：账号/设备认证 + 编排路由 + Postgres 持久化。
 - `apps/web`（TS）：Vite + React + xterm 终端。**桌面端，是默认的迭代对象**。
 - `apps/mobile`（TS）：移动随身端（m.coflux.dev，plan 032）。**已冻结**：功能锁定在 2026-07 的形态（列表/详情 + 终端快捷键条 + 简版 diff），"迭代 web"默认指 `apps/web`，不给 mobile 加功能、不同步桌面新特性；仅当共享层（protocol/client）变更弄坏它的构建时做最小修复。
 - `packages/{protocol,core,client}`（TS）：共享的线协议类型、日志、协议 client + store（client 为 web/mobile 双端共享）。
@@ -39,7 +39,7 @@ git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编�
 
 CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（tag `v*` 发布）。worker 产物用 ed25519 签名、supervisor 验签，密钥设置见 [docs/RELEASING.md](docs/RELEASING.md)。
 
-前置：Node 22+（server 用 `node:sqlite`）、pnpm、Rust stable（`rustup`）。
+前置：Node 22+（server 与测试工具链）、pnpm、Rust stable（`rustup`）。
 
 ## 改动纪律
 
@@ -63,7 +63,7 @@ CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（
 每个 stack 都自带隔离，跑完即清，**绝不碰你真实环境**：
 
 - **临时 HOME**：`COFLUX_HOME` 指向 `mkdtemp` 临时目录 → 设备凭证、`worker.pid`、下载产物等全落临时目录，不碰真实 `~/.coflux`。
-- **临时 DB + 临时端口**：server 用临时 sqlite 文件 + 各测试文件独占端口（见各 `*.test.mjs` 顶部 `const PORT`，新增测试请选未占用端口）。
+- **临时 DB + 临时端口**：每个 stack 在本机测试 Postgres 中创建独立临时 database，结束时强制断开并删除；各测试文件另占独立端口（见各 `*.test.mjs` 顶部 `const PORT`，新增测试请选未占用端口）。
 - **直接 spawn 二进制，不跑安装器**：harness 直接拉起 supervisor 二进制，**从不执行 `cofluxd`/安装服务** → 不写系统目录、不注册 systemd/launchd、不动真实系统服务。
 - **进程组清理**：daemon 以 `detached` 起在自己的进程组，`stop()` 用 `kill(-pid)` 杀整组（supervisor + worker + 其 PTY 子进程），再删临时目录。
 - 调试：`COFLUX_TEST_DEBUG=1` 把 server/daemon 的 stdio 直通到终端。
@@ -74,7 +74,7 @@ CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（
 
 - **网络**：测试内起 `127.0.0.1` 临时 HTTP server（Node `http`，随机端口）服务测试产物；`worker.upgrade.url` 指向它。零外网。
 - **密钥**：每次测试临时生成一对 ed25519（Node `crypto`，活在临时目录/内存）；公钥经 **env 注入** supervisor（`COFLUX_WORKER_PUBKEY`），覆盖二进制里 baked-in 的 prod 占位公钥。
-  - *为何 env 注入不削弱安全*：签名防的是"中心服务器被攻破→推恶意产物"，不防本地（自有机器、本地可信）；而**被攻破的服务器无法设置你本地的 env**，所以公钥来自 baked-in 还是本地 env 对真实威胁没区别。
+  - *为何 env 注入不削弱产物校验*：签名把“发布 worker 二进制”的权限与下载源/中心分开；远端无法设置本机 env，测试中的覆盖只代表本地管理员选择了另一把信任根。它不把已控制中心的攻击者降权为“无 RCE”——中心本来就能编排现有 exec/session 能力。
   - 跨语言：ed25519 / sha256 是标准的，Node `crypto`（原始 32B 公钥 + 64B 签名）与 Rust `ed25519-dalek` / `sha2` 互通。
 - **文件系统/服务**：下载产物落临时 `COFLUX_HOME/workers/`；不跑 launcher → 不碰系统。
 

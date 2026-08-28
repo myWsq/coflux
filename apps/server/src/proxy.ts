@@ -188,14 +188,28 @@ interface ProxySession {
   expiresAt: number;
 }
 
+const MAX_PROXY_AUTH_CODES = 4_096;
+const MAX_PROXY_SESSIONS = 16_384;
+
 /** code/cookie 表：纯内存态（同 pendingAuthorizations 的取舍，单实例部署，见 plan 006）。
- * 量级小（每次预览页登录一次），惰性清理即可，无需独立定时器。 */
+ * 量级小（每次预览页登录一次），惰性清理即可，无需独立定时器。短期一次性 code 满额后按
+ * insertion order 撤销最早项；长效 session 满额则拒绝新建，不能把仍有效的浏览器踢下线。 */
 export class ProxyGate {
   private codes = new Map<string, AuthCode>();
   private sessions = new Map<string, ProxySession>();
 
+  constructor(
+    private readonly maxCodes = MAX_PROXY_AUTH_CODES,
+    private readonly maxSessions = MAX_PROXY_SESSIONS,
+  ) {
+    if (!Number.isSafeInteger(maxCodes) || maxCodes < 1 || !Number.isSafeInteger(maxSessions) || maxSessions < 1) {
+      throw new Error("ProxyGate 容量必须是正安全整数");
+    }
+  }
+
   issueAuthCode(accountId: AccountId): string {
     this.sweep();
+    this.makeRoom(this.codes, this.maxCodes);
     const code = genToken("cf_pxauth");
     this.codes.set(code, { accountId, expiresAt: Date.now() + config.proxyAuthCodeTtlMs });
     return code;
@@ -209,7 +223,9 @@ export class ProxyGate {
     return { accountId: c.accountId };
   }
 
-  createSession(accountId: AccountId): string {
+  createSession(accountId: AccountId): string | undefined {
+    this.sweep();
+    if (this.sessions.size >= this.maxSessions) return undefined;
     const token = genToken("cf_pxsess");
     this.sessions.set(token, { accountId, expiresAt: Date.now() + config.proxyCookieTtlMs });
     return token;
@@ -223,6 +239,14 @@ export class ProxyGate {
       return undefined;
     }
     return { accountId: s.accountId };
+  }
+
+  private makeRoom<T>(entries: Map<string, T>, limit: number): void {
+    while (entries.size >= limit) {
+      const oldest = entries.keys().next().value;
+      if (oldest === undefined) return;
+      entries.delete(oldest);
+    }
   }
 
   private sweep(): void {
@@ -308,23 +332,56 @@ interface OpenConn {
   daemonId: DaemonId;
   shortId: string;
   socket: Duplex;
+  state: "connecting" | "active" | "failed" | "timedOut";
   resolveReady?: (ok: boolean, error?: string) => void;
 }
+
+const MAX_PROXY_TUNNELS = 1_024;
+
+type TunnelOpenAttempt =
+  | { accepted: false; error: string }
+  | { accepted: true; connId: string; ready: Promise<{ ok: boolean; error?: string }> };
 
 /** 每条隧道连接 = 一个浏览器侧 TCP socket 接管 + 一个 daemon 侧本地端口连接（经 proxy.open/data/close
  * 控制），字节双向原始透传。connId 由服务器签发（randomUUID），daemon 只认它转发到的本地端口。 */
 export class TunnelRegistry {
   private conns = new Map<string, OpenConn>();
 
-  constructor(private host: TunnelHost) {}
+  constructor(
+    private host: TunnelHost,
+    private readonly maxConns = MAX_PROXY_TUNNELS,
+    private readonly makeConnId: () => string = randomUUID,
+  ) {
+    if (!Number.isSafeInteger(maxConns) || maxConns < 1) throw new Error("TunnelRegistry 容量必须是正安全整数");
+  }
 
   /** 发起打开：立即向 daemon 发 proxy.open，返回 ready promise（daemon 回 proxy.opened 或超时二选一，先到者准）。 */
-  open(route: ProxyRoute, socket: Duplex, timeoutMs = 8000): { connId: string; ready: Promise<{ ok: boolean; error?: string }> } {
-    const connId = randomUUID();
-    const entry: OpenConn = { connId, daemonId: route.daemonId, shortId: route.shortId, socket };
+  open(route: ProxyRoute, socket: Duplex, timeoutMs = 8000): TunnelOpenAttempt {
+    if (this.conns.size >= this.maxConns) {
+      return { accepted: false, error: `预览隧道连接已达上限 ${this.maxConns}` };
+    }
+    const connId = this.makeConnId();
+    // UUID 理论上不会碰撞，但测试注入/随机源故障也不能覆盖仍有效连接并泄漏其 socket。
+    if (!connId || this.conns.has(connId)) {
+      return { accepted: false, error: "预览隧道连接标识冲突" };
+    }
+    // makeConnId 是可注入边界；即使异常实现同步重入 open，也要在真正占位前重验容量。
+    if (this.conns.size >= this.maxConns) {
+      return { accepted: false, error: `预览隧道连接已达上限 ${this.maxConns}` };
+    }
+    const entry: OpenConn = {
+      connId,
+      daemonId: route.daemonId,
+      shortId: route.shortId,
+      socket,
+      state: "connecting",
+    };
+    // 在任何异步 continuation / sendControl 之前占住名额；JS 同一事件循环内的 size+set
+    // 不可被另一条 open 穿插，connecting 与 active 因而共用同一个硬上限。
     this.conns.set(connId, entry);
     const ready = new Promise<{ ok: boolean; error?: string }>((resolve) => {
       const timer = setTimeout(() => {
+        entry.state = "timedOut";
         entry.resolveReady = undefined;
         resolve({ ok: false, error: "连接超时" });
       }, timeoutMs);
@@ -334,8 +391,17 @@ export class TunnelRegistry {
         resolve({ ok, error });
       };
     });
-    this.host.sendControl(route.daemonId, { case: "proxyOpen", value: { connId, port: route.port } });
-    return { connId, ready };
+    try {
+      this.host.sendControl(route.daemonId, { case: "proxyOpen", value: { connId, port: route.port } });
+    } catch {
+      // sendControl 的注入实现可能同步重入 close/open；只删除本次 entry，不能误删同 ID 后继。
+      if (this.conns.get(connId) === entry) this.conns.delete(connId);
+      entry.state = "failed";
+      const resolve = entry.resolveReady;
+      entry.resolveReady = undefined;
+      resolve?.(false, "daemon 控制通道不可用");
+    }
+    return { accepted: true, connId, ready };
   }
 
   /** 把浏览器侧原始字节转发给 daemon（数据面 proxy_data 载荷）。 */
@@ -345,11 +411,19 @@ export class TunnelRegistry {
     this.host.sendControl(e.daemonId, { case: "proxyData", value: { connId, data } });
   }
 
-  /** 浏览器侧关闭（或调用方主动放弃）：通知 daemon 收尾、摘表。幂等（重复调用安全）。 */
-  close(connId: string): void {
+  /** 浏览器侧关闭（或调用方主动放弃）：通知 daemon 收尾、摘表。幂等（重复调用安全）。
+   * expectedSocket 用于异步 continuation / 事件回调的 compare-and-delete：旧连接 A 被其它路径
+   * 摘除后，即使同 connId 已被新连接 B 使用，A 的迟到回调也不能误删 B。 */
+  close(connId: string, expectedSocket?: Duplex): void {
     const e = this.conns.get(connId);
+    if (!e || (expectedSocket && e.socket !== expectedSocket)) return;
     this.conns.delete(connId);
-    if (!e) return;
+    if (e.resolveReady) {
+      e.state = "failed";
+      const resolve = e.resolveReady;
+      e.resolveReady = undefined;
+      resolve(false, "隧道已关闭");
+    }
     this.host.sendControl(e.daemonId, { case: "proxyClose", value: { connId } });
   }
 
@@ -360,6 +434,12 @@ export class TunnelRegistry {
     // 背压兜底：与 hub.ts 对 client ws.bufferedAmount 的处理同一哲学——过硬水位直接断，不无界缓冲。
     if (e.socket.writableLength > config.clientBufferHardLimit) {
       this.conns.delete(connId);
+      if (e.resolveReady) {
+        e.state = "failed";
+        const resolve = e.resolveReady;
+        e.resolveReady = undefined;
+        resolve(false, "浏览器连接背压超限");
+      }
       try {
         e.socket.destroy();
       } catch {
@@ -375,14 +455,16 @@ export class TunnelRegistry {
   handleOpened(daemonId: DaemonId, connId: string, ok: boolean, error?: string): void {
     const e = this.conns.get(connId);
     if (!e || e.daemonId !== daemonId) return;
-    if (e.resolveReady) {
+    if (e.state === "connecting" && e.resolveReady) {
+      e.state = ok ? "active" : "failed";
       const resolve = e.resolveReady;
       e.resolveReady = undefined;
       resolve(ok, error);
       return;
     }
-    // 迟到：调用方早已判超时并放弃（浏览器侧可能已收到 502 或已断开）。若迟到的是"成功"，
-    // 没人会消费这条连接，主动告知 daemon 关掉，避免其空占一条到本地端口的连接。
+    // active/failed 的重复 opened 必须幂等忽略，不能把有效连接摘掉。只有明确 timedOut 的
+    // 首次迟到回应才需要收尾；若成功，主动告知 daemon 关掉无人消费的本地连接。
+    if (e.state !== "timedOut") return;
     this.conns.delete(connId);
     if (ok) this.host.sendControl(daemonId, { case: "proxyClose", value: { connId } });
   }
@@ -392,6 +474,12 @@ export class TunnelRegistry {
     const e = this.conns.get(connId);
     if (!e || e.daemonId !== daemonId) return;
     this.conns.delete(connId);
+    if (e.resolveReady) {
+      e.state = "failed";
+      const resolve = e.resolveReady;
+      e.resolveReady = undefined;
+      resolve(false, "daemon 已关闭隧道");
+    }
     try {
       if (!e.socket.destroyed) e.socket.destroy();
     } catch {
@@ -404,6 +492,12 @@ export class TunnelRegistry {
     for (const [connId, e] of [...this.conns]) {
       if (e.daemonId !== daemonId) continue;
       this.conns.delete(connId);
+      if (e.resolveReady) {
+        e.state = "failed";
+        const resolve = e.resolveReady;
+        e.resolveReady = undefined;
+        resolve(false, "daemon 已断开");
+      }
       try {
         if (!e.socket.destroyed) e.socket.destroy();
       } catch {
@@ -417,6 +511,12 @@ export class TunnelRegistry {
     for (const [connId, e] of [...this.conns]) {
       if (e.shortId !== shortId) continue;
       this.conns.delete(connId);
+      if (e.resolveReady) {
+        e.state = "failed";
+        const resolve = e.resolveReady;
+        e.resolveReady = undefined;
+        resolve(false, "预览路由已失效");
+      }
       try {
         if (!e.socket.destroyed) e.socket.destroy();
       } catch {
@@ -539,6 +639,7 @@ function handleAuthCallback(ctx: ProxyServerContext, res: ServerResponse, params
   const consumed = code ? ctx.proxyGate.consumeAuthCode(code) : undefined;
   if (!consumed) return respondPlain(res, 403, "授权链接已失效，请返回预览页重新登录");
   const sessionToken = ctx.proxyGate.createSession(consumed.accountId);
+  if (!sessionToken) return respondPlain(res, 503, "预览门禁会话已满，请稍后重试");
   const target = safeRelativeTarget(params.get("to"));
   res.writeHead(302, { Location: target, "Set-Cookie": buildSetCookie(sessionToken) });
   res.end();
@@ -559,15 +660,17 @@ async function tunnelHttpRequest(ctx: ProxyServerContext, route: ProxyRoute, req
   }
   if (socket.destroyed) return;
 
-  const { connId, ready } = ctx.tunnels.open(route, socket);
+  const attempt = ctx.tunnels.open(route, socket);
+  if (!attempt.accepted) return respondPlain(res, 503, attempt.error);
+  const { connId, ready } = attempt;
   const result = await ready;
   if (socket.destroyed) {
-    ctx.tunnels.close(connId);
+    ctx.tunnels.close(connId, socket);
     return;
   }
   if (!result.ok) {
     respondPlain(res, 502, `无法连接到该任务的端口 ${route.port}：${result.error ?? "连接失败"}`);
-    ctx.tunnels.close(connId);
+    ctx.tunnels.close(connId, socket);
     return;
   }
 
@@ -575,8 +678,8 @@ async function tunnelHttpRequest(ctx: ProxyServerContext, route: ProxyRoute, req
   socket.removeAllListeners("end");
   socket.removeAllListeners("error");
   socket.on("data", (chunk: Buffer) => ctx.tunnels.write(connId, chunk));
-  socket.on("close", () => ctx.tunnels.close(connId));
-  socket.on("error", () => ctx.tunnels.close(connId));
+  socket.on("close", () => ctx.tunnels.close(connId, socket));
+  socket.on("error", () => ctx.tunnels.close(connId, socket));
 
   const head = buildRawRequestHead(req, route, body.length);
   ctx.tunnels.write(connId, Buffer.concat([Buffer.from(head, "utf8"), body]));
@@ -623,15 +726,17 @@ export async function handleProxyUpgrade(ctx: ProxyServerContext, req: IncomingM
   const session = raw ? ctx.proxyGate.checkSession(raw) : undefined;
   if (!session || session.accountId !== route.accountId) return rejectUpgrade(socket, 401, "Unauthorized");
 
-  const { connId, ready } = ctx.tunnels.open(route, socket);
+  const attempt = ctx.tunnels.open(route, socket);
+  if (!attempt.accepted) return rejectUpgrade(socket, 503, "Service Unavailable");
+  const { connId, ready } = attempt;
   const result = await ready;
   if (socket.destroyed) {
-    ctx.tunnels.close(connId);
+    ctx.tunnels.close(connId, socket);
     return;
   }
   if (!result.ok) {
     rejectUpgrade(socket, 502, "Bad Gateway");
-    ctx.tunnels.close(connId);
+    ctx.tunnels.close(connId, socket);
     return;
   }
 
@@ -639,8 +744,8 @@ export async function handleProxyUpgrade(ctx: ProxyServerContext, req: IncomingM
   socket.removeAllListeners("end");
   socket.removeAllListeners("error");
   socket.on("data", (chunk: Buffer) => ctx.tunnels.write(connId, chunk));
-  socket.on("close", () => ctx.tunnels.close(connId));
-  socket.on("error", () => ctx.tunnels.close(connId));
+  socket.on("close", () => ctx.tunnels.close(connId, socket));
+  socket.on("error", () => ctx.tunnels.close(connId, socket));
 
   const prefix = Buffer.from(buildRawUpgradeHead(req, route), "utf8");
   ctx.tunnels.write(connId, head && head.length > 0 ? Buffer.concat([prefix, head]) : prefix);

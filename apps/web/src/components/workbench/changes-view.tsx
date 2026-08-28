@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, ChevronDown, ChevronRight, FileDiff, LoaderCircle } from "lucide-react";
+import { AlertCircle, ChevronDown, ChevronRight, FileDiff, LoaderCircle, RefreshCw } from "lucide-react";
 
 import { Button } from "@astryxdesign/core/Button";
+import { IconButton } from "@astryxdesign/core/IconButton";
 import type { CofluxClient, ExecResult } from "@coflux/client";
+import { shouldRefreshChanges, type ChangesRefreshObservation } from "@/components/workbench/changes-refresh";
 import { highlightLines, resolveLang, type HighlightToken } from "@/components/workbench/diff-highlight";
 import { parseUnifiedDiff, type DiffFile } from "@/components/workbench/parse-diff";
 import { cn } from "@/lib/utils";
@@ -33,11 +35,12 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   const [files, setFiles] = useState<DiffFile[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [manualRevision, setManualRevision] = useState(0);
   // 折叠态按路径保留：跨重拉不重置（本组件常驻挂载，随工作区切换隐藏而非卸载）。
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [highlighted, setHighlighted] = useState<Record<string, HighlightToken[][]>>({});
 
-  const fetchedForRef = useRef<string | null>(null);
+  const lastObservationRef = useRef<ChangesRefreshObservation | null>(null);
   const generationRef = useRef(0);
 
   async function load() {
@@ -87,7 +90,6 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
         .flatMap((result) => parseUnifiedDiff(result.stdout));
 
       setFiles([...trackedFiles, ...untrackedFiles]);
-      fetchedForRef.current = `${additions}:${deletions}`;
     } catch (err) {
       if (generation !== generationRef.current) return;
       setError(err instanceof Error ? err.message : "获取变更失败");
@@ -97,18 +99,13 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   }
 
   useEffect(() => {
-    if (!active) return;
-    const signature = `${additions}:${deletions}`;
-    if (fetchedForRef.current === signature) return;
-    if (additions === 0 && deletions === 0) {
-      fetchedForRef.current = signature;
-      setFiles([]);
-      setError(null);
-      return;
-    }
+    const observation = { active, workspaceId, defaultBranch, additions, deletions, manualRevision };
+    const shouldRefresh = shouldRefreshChanges(lastObservationRef.current, observation);
+    lastObservationRef.current = observation;
+    if (!shouldRefresh) return;
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, additions, deletions]);
+  }, [active, workspaceId, defaultBranch, additions, deletions, manualRevision]);
 
   // 逐文件异步高亮：整份 hunks 拼接成一份 code 一次性 tokenize，保留跨行语法上下文。
   useEffect(() => {
@@ -136,12 +133,16 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
     });
   }
 
+  function requestRefresh() {
+    setManualRevision((revision) => revision + 1);
+  }
+
   if (error) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
         <AlertCircle className="size-6 text-destructive" />
         <p className="max-w-sm text-sm text-muted-foreground">{error}</p>
-        <Button label="重试" variant="secondary" size="sm" isLoading={loading} onClick={() => void load()} />
+        <Button label="重试" variant="secondary" size="sm" isLoading={loading} onClick={requestRefresh} />
       </div>
     );
   }
@@ -159,6 +160,7 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
       <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
         <FileDiff className="size-6 text-muted-foreground" />
         <p className="text-sm text-muted-foreground">这个工作区还没有变更</p>
+        <Button label="刷新" variant="ghost" size="sm" isLoading={loading} onClick={requestRefresh} />
       </div>
     );
   }
@@ -170,7 +172,16 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
         <span className="font-mono tabular-nums">
           <span className="text-success">+{additions}</span> <span className="text-destructive">−{deletions}</span>
         </span>
-        {loading ? <LoaderCircle className="size-3 animate-spin" /> : null}
+        <IconButton
+          className="ml-auto"
+          label="刷新变更"
+          tooltip="刷新变更"
+          variant="ghost"
+          size="sm"
+          icon={<RefreshCw className="size-3.5" />}
+          isLoading={loading}
+          onClick={requestRefresh}
+        />
       </div>
       <div className="flex flex-col gap-3 p-4">
         {files.map((file) => {

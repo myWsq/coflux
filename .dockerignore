@@ -1,6 +1,9 @@
 target/
 node_modules/
 **/node_modules/
+**/.build/
+**/.swiftpm/
+**/dist/
 **/*.tsbuildinfo
 .git/
 data/

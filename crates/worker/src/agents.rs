@@ -17,7 +17,9 @@ const AGENT_NAMES: &[&str] = &["claude", "codex"];
 
 /// argv[0] 是这些解释器时才看 argv[1]（npm/脚本包装的 agent 常见形态）；
 /// 不无条件看 argv[1]，避免 `vim claude` 这类"参数恰好叫 claude"的误报。
-const INTERPRETERS: &[&str] = &["node", "bun", "deno", "python", "python3", "sh", "bash", "zsh"];
+const INTERPRETERS: &[&str] = &[
+    "node", "bun", "deno", "python", "python3", "sh", "bash", "zsh",
+];
 
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
@@ -46,7 +48,7 @@ fn match_agent(comm: &str, argv: &[String]) -> Option<&'static str> {
 
 /// 对每个存活会话扫描其进程树，树内任一进程命中即算该会话存在 agent（首个命中的名字）。
 /// 返回按 session_id 排序的全量清单——多次调用在进程集合不变时输出完全一致，
-/// 供「变化才发」的相等比较使用（与 ports 的 build_ports_update 同一约定）。
+/// 供「变化才发」的相等比较使用（与 observed::scan_ports 同一约定）。
 pub fn detect_session_agents(alive: &HashMap<String, (String, i32)>) -> Vec<wire::SessionAgentRef> {
     let mut sessions: Vec<wire::SessionAgentRef> = alive
         .iter()
@@ -55,8 +57,8 @@ pub fn detect_session_agents(alive: &HashMap<String, (String, i32)>) -> Vec<wire
                 session_id: session_id.clone(),
                 task_id: task_id.clone(),
                 agent: agent.to_string(),
-                state: String::new(),    // 回合状态由 main 合并 hook_states 时回填
-                message: String::new(),  // notify 留言同上（plan 074）
+                state: String::new(), // 回合状态由 observed 合并本地 annotation 时回填
+                message: String::new(), // notify 留言同上（plan 074）
                 progress: String::new(), // 进度短评同上（plan 088）
             })
         })
@@ -72,7 +74,11 @@ pub fn detect_session_agents(alive: &HashMap<String, (String, i32)>) -> Vec<wire
 /// 一律拒绝——plan 073 的 hook 上报与 plan 074 的 agent 控制共用这道门。
 ///
 /// 阻塞式进程树扫描（/proc 读或 libproc/sysctl 系统调用），调用方负责 spawn_blocking。
-pub fn session_of_pid(alive: &HashMap<String, (String, i32)>, pid: i32, ppid: i32) -> Option<String> {
+pub fn session_of_pid(
+    alive: &HashMap<String, (String, i32)>,
+    pid: i32,
+    ppid: i32,
+) -> Option<String> {
     alive.iter().find_map(|(session_id, (_task_id, root_pid))| {
         let tree = ports::process_tree(*root_pid);
         (tree.contains(&pid) || tree.contains(&ppid)).then(|| session_id.clone())
@@ -95,7 +101,9 @@ mod imp {
     /// /proc/<pid>/comm：被 exec 文件的 basename（shebang 脚本即脚本名，截断 15 字节——
     /// claude/codex 都不超）。
     pub fn comm(pid: i32) -> Option<String> {
-        std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s| s.trim().to_string())
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 
     pub fn argv(pid: i32) -> Option<Vec<String>> {
@@ -122,14 +130,28 @@ mod imp {
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
         let mut size: libc::size_t = 0;
         let rc = unsafe {
-            libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0)
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                std::ptr::null_mut(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
         };
         if rc != 0 || size <= std::mem::size_of::<libc::c_int>() {
             return None;
         }
         let mut buf = vec![0u8; size];
         let rc = unsafe {
-            libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0)
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                buf.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
         };
         if rc != 0 {
             return None;
@@ -189,9 +211,12 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
         }
-        let mut child = std::process::Command::new(&script).spawn().expect("spawn claude script");
+        let mut child = std::process::Command::new(&script)
+            .spawn()
+            .expect("spawn claude script");
         let alive = HashMap::from([("s1".to_string(), ("t1".to_string(), child.id() as i32))]);
         // fork 到 exec 完成有短暂窗口（comm/argv 还是旧值），轮询到命中为止
         let mut found = Vec::new();
@@ -214,7 +239,10 @@ mod tests {
     /// 安全边界：普通进程树（sleep）绝不能报出 agent。
     #[test]
     fn plain_tree_has_no_agent() {
-        let mut child = std::process::Command::new("sleep").arg("30").spawn().expect("spawn sleep");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
         let alive = HashMap::from([("s1".to_string(), ("t1".to_string(), child.id() as i32))]);
         let found = detect_session_agents(&alive);
         let _ = child.kill();
@@ -225,8 +253,14 @@ mod tests {
     /// `vim claude` 这类"参数恰好叫 agent 名"不误报：argv[0] 不是解释器就不看 argv[1]。
     #[test]
     fn non_interpreter_argv1_does_not_match() {
-        assert_eq!(match_agent("vim", &["vim".to_string(), "claude".to_string()]), None);
-        assert_eq!(match_agent("node", &["node".to_string(), "/opt/bin/claude".to_string()]), Some("claude"));
+        assert_eq!(
+            match_agent("vim", &["vim".to_string(), "claude".to_string()]),
+            None
+        );
+        assert_eq!(
+            match_agent("node", &["node".to_string(), "/opt/bin/claude".to_string()]),
+            Some("claude")
+        );
         assert_eq!(match_agent("codex", &[]), Some("codex"));
         assert_eq!(match_agent("zsh", &["-zsh".to_string()]), None);
     }

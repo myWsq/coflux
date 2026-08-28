@@ -10,5 +10,10 @@ target/
 .env*
 .coflux-dev/
 
+# 本地发布凭证：公钥 hex 明确提交，私钥/证书与 npm token 配置绝不入库。
+*.p12
+*.p8
+.npmrc
+
 # Xcode 自动生成（本项目不用 Xcode Cloud）
 xcodecloud/

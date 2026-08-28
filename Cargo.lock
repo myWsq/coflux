@@ -430,6 +430,8 @@ dependencies = [
  "hex",
  "libc",
  "portable-pty",
+ "rand_core 0.6.4",
+ "semver",
  "serde_json",
  "sha2",
  "signal-hook",

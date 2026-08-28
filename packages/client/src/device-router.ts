@@ -72,6 +72,14 @@ const HEARTBEAT_MAX_MISSES = 2;
  * 封顶 5 分钟。收到 pong 即证明这条 P2P 真的能用，届时清零。 */
 const P2P_RETRY_BASE_MS = 5_000;
 const P2P_RETRY_MAX_MS = 5 * 60_000;
+/** 浏览器控制 WS 短暂断开时，既有 relay/P2P session lane 的存活宽限。
+ *
+ * `/client` 与 worker 的 `/daemon` 是两条独立控制连接：浏览器一侧被中间网络静默掐断，
+ * 不代表 worker 一侧也失去中心授权。事故中 worker 控制面全程在线，真正把可用数据面摧毁的
+ * 是 client 自己在 `onclose` 后立即关 channel。这里给既有远端 session channel 一个有界窗口，
+ * 覆盖 10s 静默判死后的首轮重连 + 认证；窗口内不允许新 rendezvous、高权限 RPC 或 lifecycle。
+ * worker 控制面若也断开，worker 仍按自己的在线授权语义立即关闭 channel。 */
+const CONTROL_DATA_GRACE_MS = 15_000;
 const LEASE_EXPIRY_MARGIN_MS = 2_000;
 const MAX_RETAINED_INPUTS = 256;
 const MAX_RETAINED_INPUT_BYTES = 1024 * 1024;
@@ -396,6 +404,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   /** authOk 下发的 STUN 列表；空 = 纯 host candidate。 */
   let iceServers: string[] = [];
   let controlOnline = false;
+  /** 每次 transient disconnect / 恢复 / hard revoke 都推进；宽限定时器只可提交自己的代际。 */
+  let controlStateGeneration = 0;
+  let controlDataGraceTimer: TimerHandle | undefined;
   let destroyed = false;
 
   const adapter: DeviceRouterAdapter = options.adapter ?? {
@@ -994,6 +1005,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     lease?: OnlineDeviceLease,
   ): Promise<DeviceChannel> {
     const generation = nextGeneration(route);
+    // relay/P2P 的 grant 来自当前这代已认证控制面。异步拨号可能在 disconnect/hard revoke
+    // 之后才完成；只在 closeRemoteSessionChannels 里扫已登记 map 会漏掉这种迟到 continuation。
+    const remoteControlGeneration = kind === "direct" ? undefined : controlStateGeneration;
     let channel: DeviceChannel | undefined;
     const earlyFrames: Uint8Array[] = [];
     let earlyClose: string | undefined;
@@ -1017,7 +1031,14 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       : kind === "p2p"
         ? await adapter.openP2p(openOptions, lane === "elevated")
         : await adapter.openRelay(openOptions);
-    if (signal.aborted || destroyed || routes.get(route.daemonId) !== route) {
+    if (
+      signal.aborted ||
+      destroyed ||
+      routes.get(route.daemonId) !== route ||
+      (remoteControlGeneration !== undefined && (
+        !controlOnline || remoteControlGeneration !== controlStateGeneration
+      ))
+    ) {
       transport.close();
       throw abortError();
     }
@@ -1639,7 +1660,15 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
           const ids = payload.value.exits.map((item) => item.eventId).filter(Boolean);
           if (
             ids.length > 0 &&
-            !sendOn(channel, normalizePayload({ case: "exitAck", value: { eventIds: ids } }))
+            !sendOn(channel, normalizePayload({
+              case: "exitAck",
+              value: {
+                eventIds: ids,
+                requestId: payload.value.requestId,
+                snapshotOwnerId: payload.value.snapshotOwnerId,
+                snapshotEpoch: payload.value.snapshotEpoch,
+              },
+            }))
           ) loseChannel(route, channel, "session exit ACK 发送失败");
         }
         break;
@@ -2612,25 +2641,65 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
   }
 
-  function setControlOnline(online: boolean): void {
-    if (controlOnline === online) return;
-    controlOnline = online;
-    if (!online) {
-      rejectControlWaiters("中心连接已断开");
-      for (const { route, channel } of [...relayChannels.values()]) loseChannel(route, channel, "中心 relay 已断开");
-      // P2P 与 relay 同为中心在线授权：worker 侧会 close_all，这里对称地立即收敛，
-      // 不等对端关闭事件穿过（可能已断的）网络传回来。
-      for (const { route, channel } of [...p2pChannels.values()]) loseChannel(route, channel, "中心已断开，P2P 授权失效");
-      closeP2pPeers();
-      for (const route of routes.values()) {
-        route.lease = undefined;
-        if (route.elevatedLane.active) closeLane(route, route.elevatedLane, "中心离线，online lease 已撤销");
-        if (route.sessionLane.active?.kind === "direct") {
-          publish(route, "direct", "中心离线；本地 session read/control 仍可用");
-        }
+  function clearControlDataGrace(): void {
+    if (controlDataGraceTimer !== undefined) clock.clearTimeout(controlDataGraceTimer);
+    controlDataGraceTimer = undefined;
+  }
+
+  /** controlOnline=false 后立即失效的能力：所有控制面 waiter、online lease 与 elevated lane。
+   * session read/control 不在这里关闭；remote session channel 是否保留由 transient/hard 两条
+   * 调用路径分别裁决。 */
+  function invalidateOnlineControl(reason: string): void {
+    rejectControlWaiters(reason);
+    for (const route of routes.values()) {
+      route.lease = undefined;
+      if (route.elevatedLane.active) closeLane(route, route.elevatedLane, "中心离线，online lease 已撤销");
+      if (route.sessionLane.active?.kind === "direct") {
+        publish(route, "direct", "中心离线；本地 session read/control 仍可用");
       }
+    }
+  }
+
+  function closeRemoteSessionChannels(reason: string): void {
+    for (const { route, channel } of [...relayChannels.values()]) loseChannel(route, channel, reason);
+    for (const { route, channel } of [...p2pChannels.values()]) loseChannel(route, channel, reason);
+    closeP2pPeers();
+  }
+
+  /** 浏览器 `/client` transport 断开：控制面能力立即降权，但给已经工作的 relay/P2P session
+   * lane 一个有界存活窗口。该信号不等于账号授权被撤销，也不等于 worker 的独立控制 WS 已断。
+   * 重复的 connecting/disconnected 状态不得延长窗口。 */
+  function setControlDisconnected(): void {
+    if (!controlOnline) return;
+    controlOnline = false;
+    const generation = ++controlStateGeneration;
+    invalidateOnlineControl("中心连接已断开");
+    clearControlDataGrace();
+    // 即使 map 眼下为空也要排期：relay/P2P 的异步 open continuation 可能已越过控制 waiter、
+    // 尚未来得及登记到 map。openChannel 的 generation gate 会拒掉它；本 timer 是第二道收敛闸。
+    controlDataGraceTimer = clock.setTimeout(() => {
+      if (controlOnline || generation !== controlStateGeneration) return;
+      controlDataGraceTimer = undefined;
+      closeRemoteSessionChannels("中心连接断开超过宽限，远端 session 授权已收敛");
+    }, CONTROL_DATA_GRACE_MS);
+  }
+
+  /** 明确的授权失效（authError/outdated/换凭据/reset/destroy/logout）：不适用 transient grace，
+   * 立即恢复原有 fail-closed 语义。保留 boolean API 是为了既有调用与跨端共享 trace；其中
+   * false 始终表示 hard revoke，普通网络断开必须调用 setControlDisconnected()。 */
+  function setControlOnline(online: boolean): void {
+    if (!online) {
+      controlOnline = false;
+      controlStateGeneration += 1;
+      clearControlDataGrace();
+      invalidateOnlineControl("中心授权已失效");
+      closeRemoteSessionChannels("中心授权已失效，远端 session channel 已关闭");
       return;
     }
+    if (controlOnline) return;
+    controlOnline = true;
+    controlStateGeneration += 1;
+    clearControlDataGrace();
     for (const route of routes.values()) {
       route.sessionLane.attempt?.startRelay?.();
       if (sessionLaneDemand(route)) {
@@ -2804,6 +2873,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   return {
     handleControlPayload,
     setControlOnline,
+    setControlDisconnected,
     setIceServers,
     probeDevice,
     retainDevice,

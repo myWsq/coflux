@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use coflux_protocol::MAX_DEVICE_FRAME_BYTES;
+use coflux_protocol::{MAX_DEVICE_FRAME_BYTES, MAX_FRAME_ID_BYTES};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -38,7 +38,6 @@ use tokio_tungstenite::{accept_hdr_async_with_config, WebSocketStream};
 const MAX_CHANNELS_TOTAL: usize = 10_000;
 const MAX_FRAMES_PER_SECOND: u32 = 2048;
 const MAX_BYTES_PER_SECOND: usize = 128 * 1024 * 1024;
-const MAX_ID_BYTES: usize = 256;
 /// 单侧到达后等待对端的窗口；超时即关闭并留 tombstone。
 const PAIR_TIMEOUT: Duration = Duration::from_secs(10);
 /// channel 结束后拒绝同 channelId 重连的窗口：≥ token TTL 上限，使 token 重放必然失败。
@@ -70,7 +69,10 @@ enum Role {
 
 enum Slot {
     /// 先到的一侧在等对端；second 到达后把自己的 socket 从 oneshot 递过去。
-    Waiting { role: Role, handoff: oneshot::Sender<Ws> },
+    Waiting {
+        role: Role,
+        handoff: oneshot::Sender<Ws>,
+    },
     /// 双方已配对、管道进行中；期间拒绝任何同 channelId 连接。
     Active,
     /// channel 已结束；TOMBSTONE_TTL 内拒绝重连（挡 token 重放）。
@@ -82,12 +84,15 @@ struct Registry {
 }
 
 fn now_ms() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
 }
 
 fn valid_channel_id(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= MAX_ID_BYTES
+        && value.len() <= MAX_FRAME_ID_BYTES
         && !value.starts_with("__coflux-")
         && !value.chars().any(|c| (c as u32) < 32 || c as u32 == 127)
 }
@@ -96,14 +101,20 @@ fn valid_channel_id(value: &str) -> bool {
 /// `TOKEN_DOMAIN + 0x00 + payload_bytes`，payload 是中心生成的 JSON claims。
 fn verify_token(pubkey: &VerifyingKey, token: &str) -> Result<TokenClaims, &'static str> {
     let (payload_b64, sig_b64) = token.split_once('.').ok_or("token 格式无效")?;
-    let payload = URL_SAFE_NO_PAD.decode(payload_b64).map_err(|_| "token payload 解码失败")?;
-    let sig_bytes = URL_SAFE_NO_PAD.decode(sig_b64).map_err(|_| "token 签名解码失败")?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .map_err(|_| "token payload 解码失败")?;
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(sig_b64)
+        .map_err(|_| "token 签名解码失败")?;
     let signature = Signature::from_slice(&sig_bytes).map_err(|_| "token 签名长度无效")?;
     let mut message = Vec::with_capacity(TOKEN_DOMAIN.len() + 1 + payload.len());
     message.extend_from_slice(TOKEN_DOMAIN);
     message.push(0);
     message.extend_from_slice(&payload);
-    pubkey.verify(&message, &signature).map_err(|_| "token 验签失败")?;
+    pubkey
+        .verify(&message, &signature)
+        .map_err(|_| "token 验签失败")?;
     let claims: TokenClaims = serde_json::from_slice(&payload).map_err(|_| "token claims 畸形")?;
     if claims.v != TOKEN_VERSION {
         return Err("token 版本不支持");
@@ -133,7 +144,8 @@ fn reject(status: StatusCode, message: &str) -> ErrorResponse {
 
 #[tokio::main]
 async fn main() {
-    let listen = std::env::var("COFLUX_RELAY_LISTEN").unwrap_or_else(|_| "127.0.0.1:8790".to_string());
+    let listen =
+        std::env::var("COFLUX_RELAY_LISTEN").unwrap_or_else(|_| "127.0.0.1:8790".to_string());
     let pubkey_hex = match std::env::var("COFLUX_RELAY_PUBKEY") {
         Ok(value) if !value.trim().is_empty() => value,
         _ => {
@@ -163,7 +175,9 @@ async fn main() {
     // 就绪行走 stdout（stderr 留给诊断日志），格式稳定供 harness/运维解析。
     println!("coflux-relay listening on {addr}");
 
-    let registry = Arc::new(Registry { channels: Mutex::new(HashMap::new()) });
+    let registry = Arc::new(Registry {
+        channels: Mutex::new(HashMap::new()),
+    });
 
     // tombstone / 死等槽位的周期清扫；Waiting 槽由 PAIR_TIMEOUT 自行清理，这里只扫 Closed。
     {
@@ -200,13 +214,23 @@ async fn main() {
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, registry: Arc<Registry>, pubkey: Arc<VerifyingKey>) -> Result<(), String> {
+async fn handle_connection(
+    mut stream: TcpStream,
+    registry: Arc<Registry>,
+    pubkey: Arc<VerifyingKey>,
+) -> Result<(), String> {
     // 普通 HTTP 请求不会进入 tungstenite 的 Upgrade 回调；先以 peek 识别 healthz，
     // 仅确认 healthz 后才消费完整请求头，保证 /v1/pipe 的握手输入与原先完全相同。
     if is_healthz_request(&stream).await? {
         consume_healthz_request(&mut stream).await?;
-        stream.write_all(HEALTHZ_RESPONSE).await.map_err(|error| format!("写 healthz 响应失败: {error}"))?;
-        stream.shutdown().await.map_err(|error| format!("关闭 healthz 连接失败: {error}"))?;
+        stream
+            .write_all(HEALTHZ_RESPONSE)
+            .await
+            .map_err(|error| format!("写 healthz 响应失败: {error}"))?;
+        stream
+            .shutdown()
+            .await
+            .map_err(|error| format!("关闭 healthz 连接失败: {error}"))?;
         return Ok(());
     }
 
@@ -214,20 +238,27 @@ async fn handle_connection(mut stream: TcpStream, registry: Arc<Registry>, pubke
     let captured = Arc::new(Mutex::new(None::<(TokenClaims, Role)>));
     let callback_captured = captured.clone();
     let callback_pubkey = pubkey.clone();
-    let callback = move |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
-        if request.uri().path() != "/v1/pipe" {
-            return Err(reject(StatusCode::NOT_FOUND, "relay path 不存在"));
-        }
-        let token = request
-            .uri()
-            .query()
-            .and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("token=")))
-            .ok_or_else(|| reject(StatusCode::FORBIDDEN, "缺少 token"))?;
-        let claims = verify_token(&callback_pubkey, token).map_err(|error| reject(StatusCode::FORBIDDEN, error))?;
-        let role = parse_role(&claims.role).ok_or_else(|| reject(StatusCode::FORBIDDEN, "token role 无效"))?;
-        *callback_captured.lock().unwrap() = Some((claims, role));
-        Ok(response)
-    };
+    let callback =
+        move |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
+            if request.uri().path() != "/v1/pipe" {
+                return Err(reject(StatusCode::NOT_FOUND, "relay path 不存在"));
+            }
+            let token = request
+                .uri()
+                .query()
+                .and_then(|query| {
+                    query
+                        .split('&')
+                        .find_map(|pair| pair.strip_prefix("token="))
+                })
+                .ok_or_else(|| reject(StatusCode::FORBIDDEN, "缺少 token"))?;
+            let claims = verify_token(&callback_pubkey, token)
+                .map_err(|error| reject(StatusCode::FORBIDDEN, error))?;
+            let role = parse_role(&claims.role)
+                .ok_or_else(|| reject(StatusCode::FORBIDDEN, "token role 无效"))?;
+            *callback_captured.lock().unwrap() = Some((claims, role));
+            Ok(response)
+        };
     let config = WebSocketConfig {
         max_write_buffer_size: MAX_DEVICE_FRAME_BYTES + 2 * 1024 * 1024,
         max_message_size: Some(MAX_DEVICE_FRAME_BYTES),
@@ -237,7 +268,11 @@ async fn handle_connection(mut stream: TcpStream, registry: Arc<Registry>, pubke
     let mut websocket = accept_hdr_async_with_config(stream, callback, Some(config))
         .await
         .map_err(|error| format!("WebSocket handshake: {error}"))?;
-    let (claims, role) = captured.lock().unwrap().take().ok_or_else(|| "token capture 丢失".to_string())?;
+    let (claims, role) = captured
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| "token capture 丢失".to_string())?;
     let channel_id = claims.channel_id;
 
     // 槽位登记：同 channel+role 二连拒后到者；Active/Closed 一律拒；全局上限封顶。
@@ -260,9 +295,13 @@ async fn handle_connection(mut stream: TcpStream, registry: Arc<Registry>, pubke
             }
         } else {
             match channels.get(&channel_id).unwrap() {
-                Slot::Waiting { role: waiting_role, .. } if *waiting_role == role => Action::Reject("同 role 已在等待，拒绝后到者"),
+                Slot::Waiting {
+                    role: waiting_role, ..
+                } if *waiting_role == role => Action::Reject("同 role 已在等待，拒绝后到者"),
                 Slot::Waiting { .. } => {
-                    let Some(Slot::Waiting { handoff, .. }) = channels.remove(&channel_id) else { unreachable!() };
+                    let Some(Slot::Waiting { handoff, .. }) = channels.remove(&channel_id) else {
+                        unreachable!()
+                    };
                     channels.insert(channel_id.clone(), Slot::Active);
                     Action::HandoffTo(handoff)
                 }
@@ -289,7 +328,16 @@ async fn handle_connection(mut stream: TcpStream, registry: Arc<Registry>, pubke
         Ok(Ok(peer)) => peer,
         _ => {
             registry.close_channel(&channel_id);
-            return close_with(&mut websocket, "等待对端配对超时").await;
+            // channel_id 最长 255B，不能拼进受 123B 限制的 WS close reason；完整上下文随
+            // Err 交给连接任务的统一日志出口，客户端只收短原因。
+            let frame = CloseFrame {
+                code: CloseCode::Policy,
+                reason: "等待对端配对超时".to_string().into(),
+            };
+            let _ = websocket.close(Some(frame)).await;
+            return Err(format!(
+                "等待对端配对超时: channel_id={channel_id} role={role:?}"
+            ));
         }
     };
 
@@ -301,7 +349,10 @@ async fn handle_connection(mut stream: TcpStream, registry: Arc<Registry>, pubke
 async fn is_healthz_request(stream: &TcpStream) -> Result<bool, String> {
     let mut prefix = [0_u8; HEALTHZ_REQUEST_PREFIX.len()];
     loop {
-        let read = stream.peek(&mut prefix).await.map_err(|error| format!("读取请求前缀失败: {error}"))?;
+        let read = stream
+            .peek(&mut prefix)
+            .await
+            .map_err(|error| format!("读取请求前缀失败: {error}"))?;
         if read == 0 {
             return Err("请求在发送首行前关闭".to_string());
         }
@@ -321,7 +372,9 @@ async fn consume_healthz_request(stream: &mut TcpStream) -> Result<(), String> {
     let mut chunk = [0_u8; 1024];
     loop {
         if request.len() == MAX_HEALTHZ_REQUEST_BYTES {
-            return Err(format!("healthz 请求头超过 {MAX_HEALTHZ_REQUEST_BYTES} 字节"));
+            return Err(format!(
+                "healthz 请求头超过 {MAX_HEALTHZ_REQUEST_BYTES} 字节"
+            ));
         }
         let remaining = MAX_HEALTHZ_REQUEST_BYTES - request.len();
         let read_limit = remaining.min(chunk.len());
@@ -341,15 +394,20 @@ async fn consume_healthz_request(stream: &mut TcpStream) -> Result<(), String> {
 
 impl Registry {
     fn close_channel(&self, channel_id: &str) {
-        self.channels
-            .lock()
-            .unwrap()
-            .insert(channel_id.to_string(), Slot::Closed { until: SystemTime::now() + TOMBSTONE_TTL });
+        self.channels.lock().unwrap().insert(
+            channel_id.to_string(),
+            Slot::Closed {
+                until: SystemTime::now() + TOMBSTONE_TTL,
+            },
+        );
     }
 }
 
 async fn close_with(websocket: &mut Ws, reason: &str) -> Result<(), String> {
-    let frame = CloseFrame { code: CloseCode::Policy, reason: reason.to_string().into() };
+    let frame = CloseFrame {
+        code: CloseCode::Policy,
+        reason: reason.to_string().into(),
+    };
     let _ = websocket.close(Some(frame)).await;
     Err(reason.to_string())
 }
@@ -362,7 +420,11 @@ struct RateWindow {
 
 impl RateWindow {
     fn new() -> Self {
-        Self { started: tokio::time::Instant::now(), frames: 0, bytes: 0 }
+        Self {
+            started: tokio::time::Instant::now(),
+            frames: 0,
+            bytes: 0,
+        }
     }
 
     fn allow(&mut self, bytes: usize) -> bool {
@@ -401,7 +463,9 @@ async fn pump(mut from: SplitStream<Ws>, mut to: SplitSink<Ws, Message>) -> Resu
                 if !rate.allow(bytes.len()) {
                     return Err("frame 速率超限".into());
                 }
-                to.send(Message::Binary(bytes)).await.map_err(|error| format!("转发失败: {error}"))?;
+                to.send(Message::Binary(bytes))
+                    .await
+                    .map_err(|error| format!("转发失败: {error}"))?;
             }
             Some(Ok(Message::Text(_))) => return Err("协议违规：不接受 text frame".into()),
             Some(Ok(Message::Close(_))) | None => return Ok(()),
@@ -436,13 +500,22 @@ mod tests {
         message.push(0);
         message.extend_from_slice(&payload);
         let signature = signing.sign(&message);
-        format!("{}.{}", URL_SAFE_NO_PAD.encode(payload), URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+        format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(payload),
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        )
     }
 
-    async fn test_listener(expected_connections: usize, verifying: Arc<VerifyingKey>) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    async fn test_listener(
+        expected_connections: usize,
+        verifying: Arc<VerifyingKey>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let registry = Arc::new(Registry { channels: Mutex::new(HashMap::new()) });
+        let registry = Arc::new(Registry {
+            channels: Mutex::new(HashMap::new()),
+        });
         let task = tokio::spawn(async move {
             for _ in 0..expected_connections {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -461,7 +534,10 @@ mod tests {
         let (_, verifying) = test_keys();
         let (addr, listener) = test_listener(1, verifying).await;
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: relay\r\n\r\n").await.unwrap();
+        stream
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: relay\r\n\r\n")
+            .await
+            .unwrap();
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.unwrap();
 
@@ -477,19 +553,23 @@ mod tests {
         let channel_id = "healthz-pipe-regression";
         let client_token = signed_token(&signing, channel_id, "client");
         let daemon_token = signed_token(&signing, channel_id, "daemon");
-        let (mut client, _) = tokio_tungstenite::connect_async(format!(
-            "ws://{addr}/v1/pipe?token={client_token}"
-        ))
-        .await
-        .unwrap();
-        let (mut daemon, _) = tokio_tungstenite::connect_async(format!(
-            "ws://{addr}/v1/pipe?token={daemon_token}"
-        ))
-        .await
-        .unwrap();
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/v1/pipe?token={client_token}"))
+                .await
+                .unwrap();
+        let (mut daemon, _) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/v1/pipe?token={daemon_token}"))
+                .await
+                .unwrap();
 
-        client.send(Message::Binary(vec![1, 2, 3].into())).await.unwrap();
-        assert_eq!(daemon.next().await.unwrap().unwrap(), Message::Binary(vec![1, 2, 3].into()));
+        client
+            .send(Message::Binary(vec![1, 2, 3].into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            daemon.next().await.unwrap().unwrap(),
+            Message::Binary(vec![1, 2, 3].into())
+        );
         listener.await.unwrap();
     }
 }

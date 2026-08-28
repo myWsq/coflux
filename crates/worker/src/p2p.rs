@@ -19,15 +19,18 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use bytes::BytesMut;
-use coflux_protocol::wire::{daemon_to_server, DeviceP2pAnswerReport, DeviceP2pChannelGrant, DeviceP2pDial};
+use coflux_protocol::wire::{
+    daemon_to_server, DeviceP2pAnswerReport, DeviceP2pChannelGrant, DeviceP2pDial,
+};
 use coflux_protocol::{DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES, P2P_CHUNK_BYTES};
+use rtc::peer_connection::transport::RTCDtlsRole;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Notify;
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
-use rtc::peer_connection::transport::RTCDtlsRole;
 use webrtc::peer_connection::{
-    PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceGatheringState,
-    RTCIceServer, RTCPeerConnectionState, RTCSessionDescription, SettingEngine,
+    PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
+    RTCIceGatheringState, RTCIceServer, RTCPeerConnectionState, RTCSessionDescription,
+    SettingEngine,
 };
 
 use crate::device::{ChannelReceiver, DeviceRuntime};
@@ -83,7 +86,10 @@ impl PeerConnectionEventHandler for ConnectionHandler {
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
         // Failed/Closed 摘除连接并关 pc；级联关所有 DataChannel，各 channel 泵经
         // OnClose/send 失败自行退出并 close_p2p。Disconnected 不摘——ICE 可自愈。
-        if matches!(state, RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed) {
+        if matches!(
+            state,
+            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
+        ) {
             if let Some(runtime) = self.runtime.upgrade() {
                 runtime.remove_connection(&self.connection_id);
             }
@@ -92,14 +98,20 @@ impl PeerConnectionEventHandler for ConnectionHandler {
 
     async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
         if let Some(runtime) = self.runtime.upgrade() {
-            runtime.adopt_channel(&self.connection_id, data_channel).await;
+            runtime
+                .adopt_channel(&self.connection_id, data_channel)
+                .await;
         }
     }
 }
 
 impl P2pRuntime {
     pub fn new(device: Arc<DeviceRuntime>, to_server: Sender<WsOut>) -> Arc<Self> {
-        Arc::new(Self { device, to_server, connections: Mutex::new(HashMap::new()) })
+        Arc::new(Self {
+            device,
+            to_server,
+            connections: Mutex::new(HashMap::new()),
+        })
     }
 
     /// 处理中心下发的拨号指令：建 answer 侧 PeerConnection 并回 AnswerReport。
@@ -123,7 +135,10 @@ impl P2pRuntime {
         if dial.protocol_version != DEVICE_PROTOCOL_VERSION {
             return Err("p2p Device protocol version 不兼容".into());
         }
-        if !valid_wire_id(&dial.connection_id) || !valid_wire_id(&dial.account_id) || !valid_wire_id(&dial.client_instance_id) {
+        if !valid_wire_id(&dial.connection_id)
+            || !valid_wire_id(&dial.account_id)
+            || !valid_wire_id(&dial.client_instance_id)
+        {
             return Err("p2p connection/principal 无效".into());
         }
 
@@ -131,9 +146,14 @@ impl P2pRuntime {
             .ice_servers
             .iter()
             .filter(|url| url.starts_with("stun:") || url.starts_with("stuns:"))
-            .map(|url| RTCIceServer { urls: vec![url.clone()], ..Default::default() })
+            .map(|url| RTCIceServer {
+                urls: vec![url.clone()],
+                ..Default::default()
+            })
             .collect();
-        let config = RTCConfigurationBuilder::default().with_ice_servers(ice_servers).build();
+        let config = RTCConfigurationBuilder::default()
+            .with_ice_servers(ice_servers)
+            .build();
         let gathered = Arc::new(Notify::new());
         let handler = Arc::new(ConnectionHandler {
             runtime: Arc::downgrade(self),
@@ -181,10 +201,18 @@ impl P2pRuntime {
             connections.insert(dial.connection_id.clone(), connection);
         }
 
-        let offer = RTCSessionDescription::offer(dial.sdp).map_err(|error| format!("offer sdp: {error}"))?;
-        pc.set_remote_description(offer).await.map_err(|error| format!("set remote: {error}"))?;
-        let answer = pc.create_answer(None).await.map_err(|error| format!("create answer: {error}"))?;
-        pc.set_local_description(answer).await.map_err(|error| format!("set local: {error}"))?;
+        let offer = RTCSessionDescription::offer(dial.sdp)
+            .map_err(|error| format!("offer sdp: {error}"))?;
+        pc.set_remote_description(offer)
+            .await
+            .map_err(|error| format!("set remote: {error}"))?;
+        let answer = pc
+            .create_answer(None)
+            .await
+            .map_err(|error| format!("create answer: {error}"))?;
+        pc.set_local_description(answer)
+            .await
+            .map_err(|error| format!("set local: {error}"))?;
         let _ = tokio::time::timeout(GATHER_TIMEOUT, gathered.notified()).await;
         let answer = pc.local_description().await.ok_or("answer 缺失")?;
         Ok(answer.sdp)
@@ -193,12 +221,24 @@ impl P2pRuntime {
     /// 中心逐 channel 授权。与 DataChannel（label == channel_id）到达顺序无关，两者齐备
     /// 即起泵；连接不存在/principal 不符则丢弃——client 靠 DataChannel open 超时回落 relay。
     pub fn handle_channel_grant(self: &Arc<Self>, grant: DeviceP2pChannelGrant) {
-        let Some(connection) = self.connections.lock().unwrap().get(&grant.connection_id).cloned() else {
-            eprintln!("[worker] p2p channel grant 无对应连接 connection={}", grant.connection_id);
+        let Some(connection) = self
+            .connections
+            .lock()
+            .unwrap()
+            .get(&grant.connection_id)
+            .cloned()
+        else {
+            eprintln!(
+                "[worker] p2p channel grant 无对应连接 connection={}",
+                grant.connection_id
+            );
             return;
         };
         if connection.client_instance_id != grant.client_instance_id {
-            eprintln!("[worker] p2p channel grant principal 不符 channel={}", grant.channel_id);
+            eprintln!(
+                "[worker] p2p channel grant principal 不符 channel={}",
+                grant.channel_id
+            );
             return;
         }
         let matched = {
@@ -207,10 +247,15 @@ impl P2pRuntime {
                 Some(dc)
             } else {
                 if pending.grants.len() >= MAX_PENDING {
-                    eprintln!("[worker] p2p pending grant 超限 connection={}", grant.connection_id);
+                    eprintln!(
+                        "[worker] p2p pending grant 超限 connection={}",
+                        grant.connection_id
+                    );
                     return;
                 }
-                pending.grants.insert(grant.channel_id.clone(), grant.clone());
+                pending
+                    .grants
+                    .insert(grant.channel_id.clone(), grant.clone());
                 None
             }
         };
@@ -250,11 +295,18 @@ impl P2pRuntime {
         }
     }
 
-    fn spawn_channel_pump(self: &Arc<Self>, dc: Arc<dyn DataChannel>, grant: DeviceP2pChannelGrant) {
+    fn spawn_channel_pump(
+        self: &Arc<Self>,
+        dc: Arc<dyn DataChannel>,
+        grant: DeviceP2pChannelGrant,
+    ) {
         let receiver = match self.device.open_p2p(&grant) {
             Ok(receiver) => receiver,
             Err(error) => {
-                eprintln!("[worker] p2p channel 注册被拒 channel={}: {error}", grant.channel_id);
+                eprintln!(
+                    "[worker] p2p channel 注册被拒 channel={}: {error}",
+                    grant.channel_id
+                );
                 tokio::spawn(async move {
                     let _ = dc.close().await;
                 });
@@ -273,7 +325,9 @@ impl P2pRuntime {
                 let mut assembler = FrameAssembler::default();
                 'poll: loop {
                     match dc.poll().await {
-                        Some(DataChannelEvent::OnMessage(message)) => match assembler.push(&message.data) {
+                        Some(DataChannelEvent::OnMessage(message)) => match assembler
+                            .push(&message.data)
+                        {
                             Ok(frames) => {
                                 for frame in frames {
                                     if !device.handle_p2p_frame(&channel_id, &frame) {
@@ -318,7 +372,13 @@ impl P2pRuntime {
 
     /// 中心控制连接断开：关闭全部 PeerConnection 与其 runtime channel（与 relay 同语义）。
     pub fn close_all(&self) {
-        let removed: Vec<Arc<P2pConnection>> = self.connections.lock().unwrap().drain().map(|(_, conn)| conn).collect();
+        let removed: Vec<Arc<P2pConnection>> = self
+            .connections
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, conn)| conn)
+            .collect();
         for connection in removed {
             tokio::spawn(async move {
                 let _ = connection.pc.close().await;
@@ -382,7 +442,11 @@ fn local_bind_addrs() -> Vec<String> {
                     continue;
                 }
             }
-            let addr = if ip.is_ipv6() { format!("[{ip}]:0") } else { format!("{ip}:0") };
+            let addr = if ip.is_ipv6() {
+                format!("[{ip}]:0")
+            } else {
+                format!("{ip}:0")
+            };
             if std::net::UdpSocket::bind(&addr).is_ok() {
                 addrs.push(addr);
             }
@@ -409,7 +473,8 @@ impl FrameAssembler {
             if self.buf.len() < 4 {
                 return Ok(frames);
             }
-            let declared = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+            let declared =
+                u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
             if declared == 0 || declared > MAX_DEVICE_FRAME_BYTES {
                 return Err(format!("帧长前缀违规: {declared}"));
             }

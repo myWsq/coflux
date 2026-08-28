@@ -13,7 +13,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { supportsRelayDial } from "../../apps/server/src/relay-rendezvous.ts";
+import { supportsRelayDial, validRelayId } from "../../apps/server/src/relay-rendezvous.ts";
 
 describe("supportsRelayDial", () => {
   test("低于 v0.13.0 一律拦下", () => {
@@ -37,5 +37,14 @@ describe("supportsRelayDial", () => {
   test("按段比较而非字典序（v0.9.0 < v0.13.0）", () => {
     assert.equal(supportsRelayDial("v0.9.0"), false);
     assert.equal(supportsRelayDial("v0.130.0"), true);
+  });
+});
+
+describe("validRelayId", () => {
+  test("按 UTF-8 字节将内部 frame ID 限在 255 字节", () => {
+    assert.equal(validRelayId("a".repeat(255)), true);
+    assert.equal(validRelayId("a".repeat(256)), false);
+    assert.equal(validRelayId("界".repeat(85)), true);
+    assert.equal(validRelayId("界".repeat(86)), false);
   });
 });

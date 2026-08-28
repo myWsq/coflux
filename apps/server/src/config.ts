@@ -113,6 +113,14 @@ export const config = {
   /** 设备授权（Tailscale 式）：一次性授权码 TTL（plan 003 定为 10min）、client 侧 device.authorize 的限速阈值 */
   authorizeTtlMs: int("COFLUX_AUTHORIZE_TTL_MS", 10 * 60 * 1000),
   authorizeMaxFailures: int("COFLUX_AUTHORIZE_MAX_FAILURES", 10),
+  /** 匿名登记与口令登录的资源边界：窗口按来源 IP 计数，pending/并发再给全局硬上限。 */
+  authRateWindowMs: Math.max(1, int("COFLUX_AUTH_RATE_WINDOW_MS", 60_000)),
+  enrollRateLimit: Math.max(1, int("COFLUX_ENROLL_RATE_LIMIT", 12)),
+  daemonAuthRateLimit: Math.max(1, int("COFLUX_DAEMON_AUTH_RATE_LIMIT", 120)),
+  loginRateLimit: Math.max(1, int("COFLUX_LOGIN_RATE_LIMIT", 30)),
+  tokenAuthRateLimit: Math.max(1, int("COFLUX_TOKEN_AUTH_RATE_LIMIT", 300)),
+  maxPendingAuthorizations: Math.max(1, int("COFLUX_MAX_PENDING_AUTHORIZATIONS", 1_024)),
+  maxConcurrentPasswordChecks: Math.max(1, int("COFLUX_MAX_PASSWORD_CHECKS", 8)),
   /** local gateway 的 elevated lease 很短且不跨 daemon control WS 重连恢复。 */
   localLeaseTtlMs: Math.max(10_000, Math.min(120_000, int("COFLUX_LOCAL_LEASE_TTL_MS", 45_000))),
 
@@ -151,7 +159,11 @@ export const config = {
   authDeadlineMs: int("COFLUX_AUTH_DEADLINE_MS", 15_000),
   heartbeatMs: int("COFLUX_HEARTBEAT_MS", 30_000),
   pendingTimeoutMs: int("COFLUX_PENDING_TIMEOUT_MS", 30_000),
+  /** client/daemon 控制 WS 与预览 TCP socket 共用的发送缓冲硬水位（沿用旧 env 名兼容部署）。 */
   clientBufferHardLimit: int("COFLUX_CLIENT_BUFFER_LIMIT", 32 * 1024 * 1024),
+  /** 单连接已解码、尚未开始执行的消息队列边界；当前正在执行的单帧另受 maxPayload 限制。 */
+  inboundQueueMaxMessages: Math.max(1, int("COFLUX_INBOUND_QUEUE_MAX_MESSAGES", 64)),
+  inboundQueueMaxBytes: Math.max(1_024, int("COFLUX_INBOUND_QUEUE_MAX_BYTES", 16 * 1024 * 1024)),
   maxDevicesPerAccount: int("COFLUX_MAX_DEVICES", 100),
   // 每工作区允许同时活着的 agent 自建终端数（plan 074）。防的是跑飞的 agent 把侧栏刷满——
   // 信任模型上 agent 就是用户自己（OPEN_QUESTIONS B2），所以是硬上限而非配额/回收策略。
@@ -165,7 +177,6 @@ export const config = {
   autoUpdateRepo: process.env.COFLUX_AUTOUPDATE_REPO ?? "",
   autoUpdatePollMs: int("COFLUX_AUTOUPDATE_POLL_MS", 10 * 60 * 1000),
   autoUpdateMaxAttempts: int("COFLUX_AUTOUPDATE_MAX_ATTEMPTS", 3),
-  autoUpdateCooldownMs: int("COFLUX_AUTOUPDATE_COOLDOWN_MS", 60 * 60 * 1000),
 
   /** 构建版本准入（plan 033）：显式覆盖口，黑盒测试用；生产改用 buildIdFiles 自举，通常不设。 */
   buildId: process.env.COFLUX_BUILD_ID ?? "",

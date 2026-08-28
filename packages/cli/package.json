@@ -1,6 +1,6 @@
 {
   "name": "cofluxd",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "coflux daemon 管理 CLI：装/起/停/升级 Rust daemon（supervisor + worker）",
   "type": "module",
   "bin": {
@@ -8,6 +8,8 @@
   },
   "files": [
     "cofluxd.mjs",
+    "release-pubkey.hex",
+    "release-trust.mjs",
     "README.md",
     "skills"
   ],

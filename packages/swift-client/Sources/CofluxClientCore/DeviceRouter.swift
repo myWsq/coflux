@@ -1098,6 +1098,9 @@ final class DeviceRouter {
             if !eventIDs.isEmpty {
                 var ack = Coflux_V1_DeviceExitAck()
                 ack.eventIds = eventIDs
+                ack.requestID = catalog.requestID
+                ack.snapshotOwnerID = catalog.snapshotOwnerID
+                ack.snapshotEpoch = catalog.snapshotEpoch
                 sendOn(route, channel, .exitAck(ack))
             }
         case .sessionAttached(let attached):

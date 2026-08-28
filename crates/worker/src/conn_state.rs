@@ -23,7 +23,10 @@ struct ConnStateFile {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 pub struct ConnState {
@@ -35,7 +38,12 @@ pub struct ConnState {
 
 impl ConnState {
     pub fn new(home: &str) -> Self {
-        Self { path: format!("{home}/conn-state.json"), current: "", since_ms: 0, last_authed_ms: None }
+        Self {
+            path: format!("{home}/conn-state.json"),
+            current: "",
+            since_ms: 0,
+            last_authed_ms: None,
+        }
     }
 
     fn set(&mut self, state: &'static str) {
@@ -47,7 +55,11 @@ impl ConnState {
     }
 
     fn flush(&self) {
-        let file = ConnStateFile { state: self.current, since: self.since_ms, last_authed: self.last_authed_ms };
+        let file = ConnStateFile {
+            state: self.current,
+            since: self.since_ms,
+            last_authed: self.last_authed_ms,
+        };
         if let Ok(json) = serde_json::to_string_pretty(&file) {
             let _ = fs::write(&self.path, json);
         }

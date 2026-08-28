@@ -23,8 +23,9 @@ fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAP
   typealias Version = _2
 }
 
-/// 登录：用户名+密码（local 模式首次）/ supabase_token（supabase 模式换票）/ 会话 client_token（重连，两模式通用）。
-/// 服务器认证成功会在 AuthOk 回带 coflux 会话 token；之后重连只用该 token，不再触碰 Supabase。
+/// 登录：用户名+密码（local/password 模式首次）/ 会话 client_token（重连，两模式通用）。
+/// supabase_token 仅为旧 wire 兼容保留，当前 server 不再接受；认证成功会在 AuthOk 回带由
+/// coflux 自持的会话 token，之后重连只使用该 token。
 public struct Coflux_V1_ClientAuth: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -161,7 +162,10 @@ public struct Coflux_V1_ProxyIssueAuth: Sendable {
   public init() {}
 }
 
-/// 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签
+/// 触发某设备的 worker 热升级到指定版本（管理操作；账号内校验归属）。带 url 走下载+验签。
+/// signature 保留为对原始二进制的 legacy 签名，供已部署的旧 supervisor 滚动兼容；
+/// 新 supervisor 还必须验证 release_signature，其 domain-separated statement 绑定
+/// version / target / sha256 / artifact_size。
 public struct Coflux_V1_ClientUpgradeDaemon: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -198,6 +202,33 @@ public struct Coflux_V1_ClientUpgradeDaemon: Sendable {
   /// Clears the value of `signature`. Subsequent reads from it will return its default value.
   public mutating func clearSignature() {self._signature = nil}
 
+  public var target: String {
+    get {_target ?? String()}
+    set {_target = newValue}
+  }
+  /// Returns true if `target` has been explicitly set.
+  public var hasTarget: Bool {self._target != nil}
+  /// Clears the value of `target`. Subsequent reads from it will return its default value.
+  public mutating func clearTarget() {self._target = nil}
+
+  public var artifactSize: UInt64 {
+    get {_artifactSize ?? 0}
+    set {_artifactSize = newValue}
+  }
+  /// Returns true if `artifactSize` has been explicitly set.
+  public var hasArtifactSize: Bool {self._artifactSize != nil}
+  /// Clears the value of `artifactSize`. Subsequent reads from it will return its default value.
+  public mutating func clearArtifactSize() {self._artifactSize = nil}
+
+  public var releaseSignature: String {
+    get {_releaseSignature ?? String()}
+    set {_releaseSignature = newValue}
+  }
+  /// Returns true if `releaseSignature` has been explicitly set.
+  public var hasReleaseSignature: Bool {self._releaseSignature != nil}
+  /// Clears the value of `releaseSignature`. Subsequent reads from it will return its default value.
+  public mutating func clearReleaseSignature() {self._releaseSignature = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -205,6 +236,9 @@ public struct Coflux_V1_ClientUpgradeDaemon: Sendable {
   fileprivate var _url: String? = nil
   fileprivate var _sha256: String? = nil
   fileprivate var _signature: String? = nil
+  fileprivate var _target: String? = nil
+  fileprivate var _artifactSize: UInt64? = nil
+  fileprivate var _releaseSignature: String? = nil
 }
 
 /// 导入一个 git 仓库为 project（自动创建主工作区）
@@ -1436,7 +1470,7 @@ extension Coflux_V1_ProxyIssueAuth: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_ClientUpgradeDaemon: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientUpgradeDaemon"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_id\0\u{1}version\0\u{1}url\0\u{1}sha256\0\u{1}signature\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_id\0\u{1}version\0\u{1}url\0\u{1}sha256\0\u{1}signature\0\u{1}target\0\u{3}artifact_size\0\u{3}release_signature\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1449,6 +1483,9 @@ extension Coflux_V1_ClientUpgradeDaemon: SwiftProtobuf.Message, SwiftProtobuf._M
       case 3: try { try decoder.decodeSingularStringField(value: &self._url) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self._sha256) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self._signature) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self._target) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self._artifactSize) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self._releaseSignature) }()
       default: break
       }
     }
@@ -1474,6 +1511,15 @@ extension Coflux_V1_ClientUpgradeDaemon: SwiftProtobuf.Message, SwiftProtobuf._M
     try { if let v = self._signature {
       try visitor.visitSingularStringField(value: v, fieldNumber: 5)
     } }()
+    try { if let v = self._target {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 6)
+    } }()
+    try { if let v = self._artifactSize {
+      try visitor.visitSingularUInt64Field(value: v, fieldNumber: 7)
+    } }()
+    try { if let v = self._releaseSignature {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 8)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1483,6 +1529,9 @@ extension Coflux_V1_ClientUpgradeDaemon: SwiftProtobuf.Message, SwiftProtobuf._M
     if lhs._url != rhs._url {return false}
     if lhs._sha256 != rhs._sha256 {return false}
     if lhs._signature != rhs._signature {return false}
+    if lhs._target != rhs._target {return false}
+    if lhs._artifactSize != rhs._artifactSize {return false}
+    if lhs._releaseSignature != rhs._releaseSignature {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

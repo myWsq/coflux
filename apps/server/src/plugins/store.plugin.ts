@@ -43,8 +43,11 @@ async function bootstrap(store: Store) {
       log.info("credentials changed since last boot, revoked all client tokens");
     }
   }
-  // 清理已撤销/过期的会话 token，防 client_tokens 表无界增长（两模式通用）。
-  await store.pruneClientTokens(Date.now());
+  // 启动维护属于 Store 运行时生命周期：即使长期没有 daemon/新操作，也要让两类保留表
+  // 获得确定的 GC 触发点，不能只依赖请求流量。
+  const now = Date.now();
+  await store.pruneClientTokens(now);
+  await store.expirePreparedOperations(now);
 
   log.info("bootstrap ready", { authProvider: config.authProvider });
 }

@@ -4,12 +4,21 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release 与手动 npm 补发复用同一份质量门；tag 发布只由 release 调用一次。
+  workflow_call:
+    inputs:
+      checkout_ref:
+        description: "可选的受检代码 ref/SHA；workflow_run 必须显式传上游 head_sha"
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # 被 release/npm 复用时按 caller workflow + 受检 SHA 隔离；workflow_run
+  # 的 github.ref 总是默认分支，不能拿它区分不同 release。
+  group: ci-${{ github.workflow }}-${{ inputs.checkout_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -30,45 +39,114 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          # breaking 需要 PR base / push before / 前一 release tag 的完整历史与 tags。
+          fetch-depth: 0
 
       # 协议真相源治理（plan 009）：lint + 破坏性变更拦截 + 生成产物零 diff
-      - uses: bufbuild/buf-action@v1
+      - uses: bufbuild/buf-action@8c6a16e16f12ba20b6470afa9c2ba9b5ba8c97c3 # v1
         with:
           setup_only: true
       - name: 协议 lint + breaking + 生成产物一致性
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_REF: ${{ github.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
+          set -euo pipefail
           cd proto
           buf lint
-          # 只有 main 已存在 proto/ 基线时才做 breaking 拦截（首个提交无基线）
-          git fetch --depth 1 origin main
-          if git cat-file -e "$(git rev-parse FETCH_HEAD)":proto/buf.yaml 2>/dev/null; then
-            buf breaking --against "../.git#ref=$(git rev-parse FETCH_HEAD),subdir=proto"
+
+          head_sha=$(git rev-parse HEAD)
+          base_ref=""
+          if [ "$CI_EVENT_NAME" = "pull_request" ]; then
+            base_ref="$PR_BASE_SHA"
+          elif [ "$CI_EVENT_NAME" = "push" ] && [ "$CI_REF" = "refs/heads/main" ]; then
+            # direct-push main 的 origin/main 已经指向当前提交，必须用事件携带的旧 tip。
+            base_ref="$PUSH_BEFORE_SHA"
+            if [ -z "$base_ref" ] || printf '%s' "$base_ref" | grep -Eq '^0+$'; then
+              base_ref="HEAD^"
+            fi
           else
-            echo "::notice::main 尚无 proto 基线，跳过 breaking 检查"
+            # tag release 与 workflow_call（含手动 npm 补发）以当前提交可达的前一 v* tag
+            # 为基线；跳过所有与 HEAD 同 commit 的 tag，禁止悄悄退化成与自己比较。
+            while IFS= read -r candidate; do
+              candidate_sha=$(git rev-parse "${candidate}^{commit}")
+              if [ "$candidate_sha" != "$head_sha" ]; then
+                base_ref="$candidate"
+                break
+              fi
+            done < <(git tag --list 'v*' --merged HEAD --sort=-version:refname)
+            [ -n "$base_ref" ] || base_ref="HEAD^"
           fi
+
+          if ! base_sha=$(git rev-parse --verify "${base_ref}^{commit}" 2>/dev/null); then
+            # force-push 后 event.before 可能不在本地完整历史中，尝试按 SHA 精确补取；
+            # 仍不可得就 fail-closed，不能换成当前 HEAD 制造虚假绿灯。
+            git fetch --no-tags origin "$base_ref" || true
+            base_sha=$(git rev-parse --verify "${base_ref}^{commit}" 2>/dev/null || true)
+          fi
+          if [ -z "$base_sha" ]; then
+            echo "::error::无法解析协议 breaking 基线：${base_ref}"
+            exit 1
+          fi
+          if [ "$base_sha" = "$head_sha" ]; then
+            echo "::error::协议 breaking 基线意外等于当前 HEAD：${head_sha}"
+            exit 1
+          fi
+          echo "CI_DIFF_BASE=$base_sha" >> "$GITHUB_ENV"
+
+          if git cat-file -e "${base_sha}:proto/buf.yaml" 2>/dev/null; then
+            echo "::notice::协议 breaking 基线：${base_ref} (${base_sha})"
+            buf breaking --against "../.git#ref=${base_sha},subdir=proto"
+          else
+            echo "::notice::基线 ${base_ref} 尚无 proto/buf.yaml，跳过 breaking 检查"
+          fi
+
           buf generate
-          git diff --exit-code -- ../packages/protocol/src/gen ../crates/protocol/src/gen gen/swift
+          generated_status=$(git -C .. status --porcelain --untracked-files=all -- \
+            packages/protocol/src/gen \
+            crates/protocol/src/gen \
+            packages/swift-client/Sources/CofluxProtocol/Generated)
+          if [ -n "$generated_status" ]; then
+            echo "::error::协议生成产物与仓库不一致"
+            printf '%s\n' "$generated_status"
+            exit 1
+          fi
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
 
-      - name: 类型检查（server + web）
-        run: |
-          node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit
-          node_modules/.bin/tsc -b apps/web/tsconfig.json
+      - name: Git diff 格式检查
+        run: git diff --check "$CI_DIFF_BASE" HEAD
 
-      - name: Rust 单元测试（协议帧/serde + sessiond/gateway）
-        run: cargo test -p coflux-protocol -p coflux-supervisor -p coflux-worker
+      - name: server 类型检查
+        run: node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit
+
+      - name: web production 构建
+        run: pnpm -C apps/web build
+
+      - name: web 单元测试（变更视图刷新/缓存）
+        run: pnpm test:web
+
+      - name: Rust 单元测试（protocol/supervisor/worker/relay）
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test -p coflux-protocol -p coflux-supervisor -p coflux-worker -p coflux-relay
 
       - name: Rust 构建
-        run: cargo build -p coflux-supervisor -p coflux-worker
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay
 
       - name: client 状态机测试（DeviceRouter transport/holder/ACK）
         run: node --import tsx --test packages/client/src/*.test.ts
@@ -76,8 +154,49 @@ jobs:
       - name: release note 生成器自检（分组/剥前缀/plan 剔除）
         run: node scripts/release-notes.mjs --self-check
 
+      - name: npm latest 发布门自检（SemVer/幂等/防回退）
+        run: node scripts/npm-publish-guard.mjs --self-check
+
       - name: 黑盒集成测试（pretest 构建 daemon，跑全量）
         run: pnpm -C tests test
 
       - name: mobile 构建（冻结端：只保共享层不弄坏它）
         run: pnpm -C apps/mobile build
+
+      # Package.swift 在 Linux 仅暴露跨平台 Protocol/Core；ApplePlatform 由下方
+      # macOS + iOS SDK 的 xcodebuild 门覆盖，避免用假 stub 获得虚假的 Linux 绿灯。
+      - uses: swift-actions/setup-swift@7591e4f04c00624cb043783da51a7fd6ee0a6bf6 # v2
+        with:
+          # swift-protobuf 1.38.1 的 package tools version 已要求 Swift 6.2。
+          swift-version: "6.2"
+
+      - name: Swift 协议与 client core 测试
+        run: swift test --package-path packages/swift-client --parallel
+
+  ios-build:
+    name: iOS build-for-testing
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: macOS cofluxd doctor fixture
+        run: node --test tests/src/cli-doctor.test.mjs
+
+      - name: iOS app + tests 编译门（ApplePlatform 真 SDK）
+        run: |
+          xcodebuild \
+            -project apps/ios/Coflux.xcodeproj \
+            -scheme Coflux \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/CofluxDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            build-for-testing

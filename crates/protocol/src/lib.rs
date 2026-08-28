@@ -34,10 +34,14 @@ pub mod wire {
 
 pub use settings::Settings;
 
-pub use frame::{decode_frame, encode_frame, DataFrame, FRAME_DEVICE, FRAME_INPUT, FRAME_OUTPUT, FRAME_PROXY_DATA, FRAME_REPLAY};
+pub use frame::{
+    decode_frame, encode_frame, DataFrame, FrameEncodeError, FRAME_DEVICE, FRAME_INPUT,
+    FRAME_OUTPUT, FRAME_PROXY_DATA, FRAME_REPLAY, MAX_FRAME_ID_BYTES,
+};
 pub use ipc::{
-    is_frame, write_record, RecordParser, SessionInfo, SupervisorToWorker, WorkerToSupervisor, SUPERVISOR_SOCK_ENV, SUPERVISOR_VERSION_ENV,
-    WORKER_VERSION_ENV,
+    is_frame, write_record, RecordParseError, RecordParser, RecordWriteError, SessionInfo,
+    SupervisorToWorker, WorkerToSupervisor, MAX_IPC_RECORD_BYTES, SUPERVISOR_SOCK_ENV,
+    SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
 };
 pub use wire::{DaemonToServer, FsEntry, FsEntryKind, ServerToDaemon, SessionPorts, SessionRef};
 

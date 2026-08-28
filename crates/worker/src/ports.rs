@@ -38,7 +38,8 @@ mod imp {
         let mut seen: HashSet<i32> = [root_pid].into_iter().collect();
         let mut frontier = vec![root_pid];
         while let Some(pid) = frontier.pop() {
-            let children = pids_by_type(ProcFilter::ByParentProcess { ppid: pid as u32 }).unwrap_or_default();
+            let children =
+                pids_by_type(ProcFilter::ByParentProcess { ppid: pid as u32 }).unwrap_or_default();
             for c in children {
                 let c = c as i32;
                 if seen.insert(c) {
@@ -53,13 +54,19 @@ mod imp {
     pub fn listen_ports_for_pids(pids: &[i32]) -> HashSet<u16> {
         let mut ports = HashSet::new();
         for &pid in pids {
-            let Ok(info) = pidinfo::<BSDInfo>(pid, 0) else { continue };
-            let Ok(fds) = listpidinfo::<ListFDs>(pid, info.pbi_nfiles as usize) else { continue };
+            let Ok(info) = pidinfo::<BSDInfo>(pid, 0) else {
+                continue;
+            };
+            let Ok(fds) = listpidinfo::<ListFDs>(pid, info.pbi_nfiles as usize) else {
+                continue;
+            };
             for fd in fds {
                 if !matches!(ProcFDType::from(fd.proc_fdtype), ProcFDType::Socket) {
                     continue;
                 }
-                let Ok(sock) = pidfdinfo::<SocketFDInfo>(pid, fd.proc_fd) else { continue };
+                let Ok(sock) = pidfdinfo::<SocketFDInfo>(pid, fd.proc_fd) else {
+                    continue;
+                };
                 if !matches!(SocketInfoKind::from(sock.psi.soi_kind), SocketInfoKind::Tcp) {
                     continue;
                 }
@@ -87,7 +94,9 @@ mod imp {
     /// 避免正常构建里出现 dead code 警告。
     #[cfg(test)]
     pub(crate) fn parent_pid(pid: i32) -> Option<i32> {
-        pidinfo::<BSDInfo>(pid, 0).ok().map(|info| info.pbi_ppid as i32)
+        pidinfo::<BSDInfo>(pid, 0)
+            .ok()
+            .map(|info| info.pbi_ppid as i32)
     }
 }
 
@@ -108,7 +117,11 @@ mod imp {
         while let Some(pid) = frontier.pop() {
             let children = match children_via_proc(pid) {
                 Some(c) => c,
-                None => fallback.get_or_insert_with(build_ppid_map).get(&pid).cloned().unwrap_or_default(),
+                None => fallback
+                    .get_or_insert_with(build_ppid_map)
+                    .get(&pid)
+                    .cloned()
+                    .unwrap_or_default(),
             };
             for c in children {
                 if seen.insert(c) {
@@ -131,7 +144,11 @@ mod imp {
             let children_path = entry.path().join("children");
             if let Ok(content) = fs::read_to_string(&children_path) {
                 any_children_file = true;
-                out.extend(content.split_whitespace().filter_map(|tok| tok.parse::<i32>().ok()));
+                out.extend(
+                    content
+                        .split_whitespace()
+                        .filter_map(|tok| tok.parse::<i32>().ok()),
+                );
             }
         }
         any_children_file.then_some(out)
@@ -140,9 +157,17 @@ mod imp {
     /// 兜底:全量遍历 `/proc/*/stat` 建 pid -> children 反向表(一次扫描覆盖全部 pid)。
     fn build_ppid_map() -> HashMap<i32, Vec<i32>> {
         let mut map: HashMap<i32, Vec<i32>> = HashMap::new();
-        let Ok(entries) = fs::read_dir("/proc") else { return map };
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return map;
+        };
         for entry in entries.flatten() {
-            let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else { continue };
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|s| s.parse::<i32>().ok())
+            else {
+                continue;
+            };
             if let Some(ppid) = read_ppid(pid) {
                 map.entry(ppid).or_default().push(pid);
             }
@@ -163,7 +188,9 @@ mod imp {
     pub fn listen_ports_for_pids(pids: &[i32]) -> HashSet<u16> {
         let mut owned_inodes: HashSet<u64> = HashSet::new();
         for &pid in pids {
-            let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
+            let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 if let Ok(target) = fs::read_link(entry.path()) {
                     if let Some(inode) = parse_socket_inode(&target) {
@@ -184,11 +211,18 @@ mod imp {
     }
 
     fn parse_socket_inode(target: &Path) -> Option<u64> {
-        target.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok()
+        target
+            .to_str()?
+            .strip_prefix("socket:[")?
+            .strip_suffix(']')?
+            .parse()
+            .ok()
     }
 
     fn collect_listen_ports(path: &str, owned_inodes: &HashSet<u64>, ports: &mut HashSet<u16>) {
-        let Ok(content) = fs::read_to_string(path) else { return };
+        let Ok(content) = fs::read_to_string(path) else {
+            return;
+        };
         for line in content.lines().skip(1) {
             // sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode ...
             let fields: Vec<&str> = line.split_whitespace().collect();
@@ -198,9 +232,15 @@ mod imp {
             if fields[3] != "0A" {
                 continue; // TCP_LISTEN
             }
-            let Some((_, port_hex)) = fields[1].split_once(':') else { continue };
-            let Ok(port) = u16::from_str_radix(port_hex, 16) else { continue };
-            let Ok(inode) = fields[9].parse::<u64>() else { continue };
+            let Some((_, port_hex)) = fields[1].split_once(':') else {
+                continue;
+            };
+            let Ok(port) = u16::from_str_radix(port_hex, 16) else {
+                continue;
+            };
+            let Ok(inode) = fields[9].parse::<u64>() else {
+                continue;
+            };
             if owned_inodes.contains(&inode) {
                 ports.insert(port);
             }
@@ -244,7 +284,10 @@ mod tests {
         let parent = imp::parent_pid(self_pid).expect("determine parent pid of test process");
 
         let found = listening_ports(parent);
-        assert!(found.contains(&port), "expected port {port} reachable from parent pid {parent}, got {found:?}");
+        assert!(
+            found.contains(&port),
+            "expected port {port} reachable from parent pid {parent}, got {found:?}"
+        );
     }
 
     /// 安全边界:不是该进程树成员的端口绝不能被报出来。用一个真正无关的子进程(sleep)
@@ -255,14 +298,20 @@ mod tests {
     /// 在那个窗口里读到继承来的 listener fd 而误判泄漏(CI 上实测 flaky)。
     #[test]
     fn does_not_find_port_of_unrelated_process() {
-        let mut child = std::process::Command::new("sleep").arg("2").spawn().expect("spawn sleep");
+        let mut child = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .expect("spawn sleep");
         let unrelated_pid = child.id() as i32;
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("local_addr").port();
 
         let found = listening_ports(unrelated_pid);
-        assert!(!found.contains(&port), "port {port} leaked to unrelated pid {unrelated_pid}: {found:?}");
+        assert!(
+            !found.contains(&port),
+            "port {port} leaked to unrelated pid {unrelated_pid}: {found:?}"
+        );
 
         let _ = child.kill();
         let _ = child.wait();

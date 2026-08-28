@@ -93,6 +93,58 @@ test("首次登录：lazy 建个人账号并回带会话 token", async () => {
   c.close();
 });
 
+test("并发首次登录：同一用户只 provision 一个个人账号", async () => {
+  const userId = randomUUID();
+  const email = "concurrent-first@x.com";
+  const password = "concurrent-secret";
+  createUser(email, password, userId);
+
+  // 先等所有 WS ready，再同一轮发送认证帧，确保 8 次密码校验后的 lazy provision
+  // 真正并发进入 server，而不是由建连时序碰巧串行。
+  const clients = Array.from({ length: 8 }, () => stack.makeClient());
+  try {
+    await Promise.all(clients.map((client) => client.ready));
+    for (const client of clients) client.send({ case: "clientAuth", username: email, password });
+    const replies = await Promise.all(clients.map((client) => client.waitFor(
+      (message) => message.case === "authOk" || message.case === "authError",
+      "concurrent auth reply",
+    )));
+    assert.ok(replies.every((reply) => reply.case === "authOk"), "全部并发登录都成功");
+    const accountIds = new Set(replies.map((reply) => reply.accountId));
+    assert.equal(accountIds.size, 1, "全部登录返回同一个 accountId");
+    const [accountId] = accountIds;
+
+    const memberships = await sql`SELECT account_id FROM memberships WHERE user_id = ${userId}`;
+    assert.equal(memberships.length, 1, "该 user 只有一条 membership");
+    assert.equal(memberships[0].account_id, accountId, "membership 指向返回的账号");
+    const accounts = await sql`SELECT id FROM accounts WHERE id = ${accountId}`;
+    assert.equal(accounts.length, 1, "相关 account 只有一条");
+  } finally {
+    for (const client of clients) client.close();
+  }
+});
+
+test("同一连接按 wire 顺序完成异步认证后再处理订阅", async () => {
+  const email = "ordered-handler@x.com";
+  const password = "ordered-secret";
+  createUser(email, password);
+  const client = stack.makeClient();
+  try {
+    await client.ready;
+    // 不等 authOk 就紧接着发 subscribe：password scrypt 明显异步，若 transport fire-and-forget，
+    // subscribe 会越过认证并收到“未认证”；连接内队列必须保住这两个 wire 事件的先后。
+    client.send({ case: "clientAuth", username: email, password });
+    client.send({ case: "clientSubscribe" });
+    const auth = await client.waitFor((message) => message.case === "authOk", "ordered authOk");
+    assert.ok(auth.accountId);
+    const snapshot = await client.waitFor((message) => message.case === "stateSnapshot", "ordered snapshot");
+    assert.ok(Array.isArray(snapshot.tasks), "订阅在认证完成后成功返回快照");
+    assert.ok(!client.log.some((message) => message.case === "error" && message.message === "未认证"));
+  } finally {
+    client.close();
+  }
+});
+
 test("同一用户二次登录复用同一账号，每次签发不同会话 token", async () => {
   createUser("reuse@x.com", "secret2");
   const c1 = stack.makeClient();

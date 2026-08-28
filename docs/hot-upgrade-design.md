@@ -1,8 +1,10 @@
 # daemon 自动热升级设计（方案 A）
 
 > 状态：已落地。daemon 是 `coflux-supervisor` + `coflux-worker` 两个 Rust 二进制，零 Node 运行时；
-> worker 可自动下载、sha256 校验、ed25519 验签、观察期切换和崩溃回滚，升级时 PTY/Agent 会话存活。
-> supervisor 自身仍由 `cofluxd update` 人工升级。
+> worker 可自动下载、校验双 ed25519 签名、做持久 anti-rollback、观察期切换和崩溃回滚，升级时
+> PTY/Agent 会话存活。
+> supervisor 自身仍由 `cofluxd update` 人工升级；cofluxd 在安装前用同一发布根验证
+> supervisor/worker，并持久拒绝远端降级。
 
 ## 1. 为什么拆两个进程
 
@@ -15,7 +17,7 @@ PTY 是持有它的进程的资源。若把网络、协议和 PTY 都放在一�
 │ · portable-pty + sessiond：PTY、VT/history、holder/seq     │
 │ · UDS server                                              │
 │ · spawn/监控 worker、版本注册表、观察期与回滚               │
-│ · 下载 + sha256 + ed25519 验签                            │
+│ · 下载 + 双签名验真 + SemVer anti-rollback                │
 └──────────────────────▲───────────────────────────────────┘
                        │ 本地 UDS
                        │ control JSON + DeviceEnvelope frame
@@ -50,28 +52,41 @@ Session 缺席不直接等于 exit；sessiond tombstone/catalog 才是退出事�
 
 ## 3. 升级流程
 
-1. release workflow 为四个平台构建 supervisor/worker，生成 sha256 和 manifest，并用 ed25519 私钥签
-   worker 产物。
+1. release workflow 为四个平台构建 supervisor/worker，生成 schema 2 manifest，并用同一 ed25519
+   私钥签原始 worker，以及 worker/supervisor 各自 domain-separated 的 release statement。statement
+   精确绑定 `version`、Rust `target`、sha256 原始 32 字节和 artifact size；URL 只表示下载位置，不签入。
 2. server 轮询 stable GitHub Release；daemon 握手或轮询发现版本落后时，下发
-   `worker.upgrade {version,url,sha256,signature}`。
+   `worker.upgrade {version,url,target,sha256,artifactSize,signature,releaseSignature}`。
 3. worker 把升级请求经 UDS 交给 supervisor。
-4. supervisor 下载到 `COFLUX_HOME/workers/` 临时目标，先校验 sha256，再用内置发布公钥验签；任一
-   不符都删除/拒绝候选，保持当前 worker。
+4. supervisor 要求规范严格 SemVer 与本机 target，并先按本地 `worker.release-floor` 拒绝降级/重放；
+   再有界下载到 `COFLUX_HOME/workers/` 临时目标，核对已签名 size、sha256、legacy raw 签名与 release
+   statement 签名。任一不符都删除/拒绝候选，保持当前 worker。
 5. 验证通过后切换版本并启动观察期。新 worker 连接 UDS、完成两级对账，PTY 全程不动。
-6. 观察期内连续崩溃达到阈值，supervisor 自动回退上一版；稳定通过后提交新版本。
+6. 观察期内连续崩溃达到阈值，supervisor 自动回退上一版；稳定通过后先持久 `worker.active`，再持久
+   `worker.release-floor` 才提交。pending 不推进 floor；active→floor 之间崩溃时，重启从安全恢复的
+   active SemVer 重建 floor。floor 持久失败则不提交并禁用新的远程升级。
 
 同一坏版本的 server 推送还有 daemon/版本级退避上限，避免反复切换。
 
 ## 4. 安全边界
 
-- ed25519 防的是“中心或下载源被攻破后向全网推恶意二进制”。公钥编译进 supervisor；发布私钥只在
-  CI secret 中。
+- ed25519 把“发布 daemon 二进制”的权限与中心、下载源分开：未持发布私钥者不能把任意字节冒充
+  合法升级产物。它不是中心控制面的权限隔离；已控制中心的攻击者仍可编排系统现有的 exec/session
+  能力，不能把这层验签表述成“中心失陷后无 RCE”。公钥编译进 supervisor 并随 cofluxd npm 包分发；
+  发布私钥只在 protected environment secret 中。
 - 测试可用 `COFLUX_WORKER_PUBKEY` 注入临时公钥，因为本地可信方已拥有机器权限；远端中心无法设置
   本机 env，不削弱生产威胁模型。
-- sha256 用于 manifest/传输完整性，签名用于产物来源真实性，两者都必须通过。
+- legacy raw 签名保留给旧 supervisor；新 supervisor 还必须验证带 domain separation 的 release
+  statement，防止把一份合法二进制重标成其它版本/架构/大小。新字段通过 protobuf unknown field 与
+  serde 忽略未知字段实现“新 server/worker → 旧 supervisor”滚动兼容；raw-only 请求对新 supervisor
+  fail closed。
+- `worker.release-floor` 采用严格 SemVer precedence，等于 floor（包括仅 build metadata 不同）也按重放
+  拒绝。它只约束远程发布请求；supervisor 内部仍可回滚到旧 active，本地已知版本切换也由管理员负责。
+- sha256 用于 manifest/传输完整性，双签名用于产物及发布元数据的来源真实性，全部必须通过。
 - 下载失败、hash 错、签名错、无法落盘或候选崩溃，都不能破坏当前 worker 和 PTY。
 - supervisor 升级不热切换：它持有 authority，必须由 `cofluxd update` 明确重启，届时不承诺活 session
-  保留。
+  保留。cofluxd 会先验证 supervisor/worker 的 component-separated statement，再从同一暂存代替换；
+  `cofluxd.release-floor` 与 `worker.release-floor` 的较大者阻止下载源重放旧的合法 release。
 
 ## 5. 与本地优先数据面的关系
 
@@ -93,7 +108,8 @@ Session 缺席不直接等于 exit；sessiond tombstone/catalog 才是退出事�
 - 切到合法新版本：观察期提交，会话存活；
 - 候选崩溃循环：自动回滚，会话存活；
 - 合法签名：远程下载升级成功；
-- sha256 被篡改、签名属于其它内容：必须拒绝且保持当前版本；
+- sha256、size、version、target 或任一签名被篡改：必须拒绝且保持当前版本；
+- 已提交版本在 supervisor 重启后仍拒绝降级与同 precedence 重放；
 - worker 重启期间 direct/relay holder、input ACK 与 output snapshot 自愈不产生重复 effect。
 
 发布与密钥操作见 [RELEASING.md](RELEASING.md)，最终 authority/transport 设计见

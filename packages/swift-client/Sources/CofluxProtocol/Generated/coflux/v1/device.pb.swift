@@ -934,6 +934,20 @@ public struct Coflux_V1_DeviceSessionCatalogRequest: Sendable {
 
   public var requestID: String = String()
 
+  /// 首页留空/0；后续页回填上一页返回的 owner/epoch。epoch 变化时 sessiond 返回 reset，
+  /// worker 丢弃半快照并从第一页重来。
+  public var snapshotOwnerID: String = String()
+
+  public var snapshotEpoch: UInt64 = 0
+
+  public var sessionOffset: UInt32 = 0
+
+  public var exitOffset: UInt32 = 0
+
+  /// 0 = legacy 单帧模式；新 worker 填非零值显式 opt-in 分页，保证旧 worker 不会把首个
+  /// 分片误当完整 catalog。sessiond 会把它钳在自身安全范围内。
+  public var maxPageBytes: UInt32 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -950,6 +964,23 @@ public struct Coflux_V1_DeviceSessionCatalog: Sendable {
 
   public var exits: [Coflux_V1_DeviceSessionExitTombstone] = []
 
+  public var snapshotOwnerID: String = String()
+
+  public var snapshotEpoch: UInt64 = 0
+
+  public var sessionOffset: UInt32 = 0
+
+  public var exitOffset: UInt32 = 0
+
+  public var nextSessionOffset: UInt32 = 0
+
+  public var nextExitOffset: UInt32 = 0
+
+  /// legacy response 的这些新字段全为默认值；新 worker 将其视为完整单帧以兼容旧 supervisor。
+  public var complete: Bool = false
+
+  public var reset: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -961,6 +992,14 @@ public struct Coflux_V1_DeviceExitAck: Sendable {
   // methods supported on all messages.
 
   public var eventIds: [String] = []
+
+  /// 新链路把 ACK 绑定到完整 catalog 的 request/epoch；空值保留给旧 client/worker 的
+  /// 滚动兼容，不能用于确认新分页请求。
+  public var requestID: String = String()
+
+  public var snapshotOwnerID: String = String()
+
+  public var snapshotEpoch: UInt64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1188,10 +1227,11 @@ public struct Coflux_V1_DevicePtyResize: Sendable {
   public init() {}
 }
 
-/// operation_id 是不可复用的 opaque ID，在同一 daemon 上跨 logical channel 与 direct/relay
-/// transport 全局幂等：同 ID、
-/// 同 payload 返回已记录结果而不重复执行；同 ID、不同 payload 必须拒绝。stop 是离线 scope 的
-/// 特例，可由 client 生成 operation_id；create/project/worktree 必须匹配中心预安装模板。
+/// operation_id 是不可复用的 opaque ID。对 sessiond 管辖的 stop/create，同一 supervisor runtime
+/// 内跨 logical channel、direct/relay transport 与 worker replacement 去重：同 ID、同 payload 返回
+/// 已记录结果而不重复执行；同 ID、不同 payload 必须拒绝。ledger 不跨 supervisor/OS restart。
+/// stop 是离线 scope 的特例，可由 client 生成 operation_id；create/project/worktree 必须匹配中心
+/// 预安装模板。
 public struct Coflux_V1_DeviceSessionStop: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1251,7 +1291,7 @@ public struct Coflux_V1_DeviceSessionExited: Sendable {
   public init() {}
 }
 
-/// lifecycle operation 采用与 stop 相同的 operation_id 去重规则。
+/// session create 采用与 stop 相同的 sessiond 生命周期去重规则。
 public struct Coflux_V1_DeviceSessionCreate: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1404,7 +1444,8 @@ public struct Coflux_V1_DeviceProjectValidated: Sendable {
   fileprivate var _defaultBranch: String? = nil
 }
 
-/// 所有携带 operation_id 的设备事实变更均采用 session stop 所述的全局去重规则。
+/// 下列 worktree add/remove 的 operation_id ledger 只覆盖当前 worker runtime；worker replacement
+/// 后不提供通用去重。此类操作可基于稳定 worktree path 与 Git 状态做专用探测、恢复与收敛。
 public struct Coflux_V1_DeviceWorktreeAdd: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1503,7 +1544,8 @@ public struct Coflux_V1_DeviceExecRun: Sendable {
   /// Clears the value of `timeoutMs`. Subsequent reads from it will return its default value.
   public mutating func clearTimeoutMs() {self._timeoutMs = nil}
 
-  /// 设置时必须 exactly-once 去重。
+  /// 设置时只在当前 worker runtime 内去重。worker 崩溃时外部命令可能已执行而结果未记录，
+  /// 此时状态未知；调用方不得自动重试非幂等命令，也不得宣称 exactly-once。
   public var operationID: String {
     get {_operationID ?? String()}
     set {_operationID = newValue}
@@ -1558,6 +1600,8 @@ public struct Coflux_V1_DeviceFsRead: Sendable {
   public init() {}
 }
 
+/// fs.write 的 operation_id ledger 只覆盖当前 worker runtime。对可稳定重建的目标 path，以相同
+/// path/data 做全量覆盖写可在状态未知时重试并收敛到同一内容；这是结果收敛式幂等，不是严格一次。
 public struct Coflux_V1_DeviceFsWrite: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1664,7 +1708,8 @@ public struct Coflux_V1_DeviceError: Sendable {
 /// 中心持久 prepare 后，先经可信 daemon control WS 安装同一模板并等待
 /// PreparedDeviceOperationInstalled，再交给 client。frame 是 channel_id 为空的 DeviceEnvelope；
 /// client 只可填入自己已认证的 channel_id 后经 direct/relay 发送。daemon 解码后必须确认除
-/// channel_id 外与已安装模板完全相等，再按 operation_id 幂等执行；未知/过期/被篡改模板拒绝。
+/// channel_id 外与已安装模板完全相等，再按具体消息定义的 authority 生命周期处理 operation_id；
+/// 未知/过期/被篡改模板拒绝。
 public struct Coflux_V1_PreparedDeviceOperation: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -3602,7 +3647,7 @@ extension Coflux_V1_DeviceSessionExitTombstone: SwiftProtobuf.Message, SwiftProt
 
 extension Coflux_V1_DeviceSessionCatalogRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceSessionCatalogRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}snapshot_owner_id\0\u{3}snapshot_epoch\0\u{3}session_offset\0\u{3}exit_offset\0\u{3}max_page_bytes\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3611,6 +3656,11 @@ extension Coflux_V1_DeviceSessionCatalogRequest: SwiftProtobuf.Message, SwiftPro
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.snapshotOwnerID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.snapshotEpoch) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.sessionOffset) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.exitOffset) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.maxPageBytes) }()
       default: break
       }
     }
@@ -3620,11 +3670,31 @@ extension Coflux_V1_DeviceSessionCatalogRequest: SwiftProtobuf.Message, SwiftPro
     if !self.requestID.isEmpty {
       try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
     }
+    if !self.snapshotOwnerID.isEmpty {
+      try visitor.visitSingularStringField(value: self.snapshotOwnerID, fieldNumber: 2)
+    }
+    if self.snapshotEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.snapshotEpoch, fieldNumber: 3)
+    }
+    if self.sessionOffset != 0 {
+      try visitor.visitSingularUInt32Field(value: self.sessionOffset, fieldNumber: 4)
+    }
+    if self.exitOffset != 0 {
+      try visitor.visitSingularUInt32Field(value: self.exitOffset, fieldNumber: 5)
+    }
+    if self.maxPageBytes != 0 {
+      try visitor.visitSingularUInt32Field(value: self.maxPageBytes, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Coflux_V1_DeviceSessionCatalogRequest, rhs: Coflux_V1_DeviceSessionCatalogRequest) -> Bool {
     if lhs.requestID != rhs.requestID {return false}
+    if lhs.snapshotOwnerID != rhs.snapshotOwnerID {return false}
+    if lhs.snapshotEpoch != rhs.snapshotEpoch {return false}
+    if lhs.sessionOffset != rhs.sessionOffset {return false}
+    if lhs.exitOffset != rhs.exitOffset {return false}
+    if lhs.maxPageBytes != rhs.maxPageBytes {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3632,7 +3702,7 @@ extension Coflux_V1_DeviceSessionCatalogRequest: SwiftProtobuf.Message, SwiftPro
 
 extension Coflux_V1_DeviceSessionCatalog: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceSessionCatalog"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}sessions\0\u{1}exits\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}sessions\0\u{1}exits\0\u{3}snapshot_owner_id\0\u{3}snapshot_epoch\0\u{3}session_offset\0\u{3}exit_offset\0\u{3}next_session_offset\0\u{3}next_exit_offset\0\u{1}complete\0\u{1}reset\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3643,6 +3713,14 @@ extension Coflux_V1_DeviceSessionCatalog: SwiftProtobuf.Message, SwiftProtobuf._
       case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
       case 2: try { try decoder.decodeRepeatedMessageField(value: &self.sessions) }()
       case 3: try { try decoder.decodeRepeatedMessageField(value: &self.exits) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.snapshotOwnerID) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.snapshotEpoch) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.sessionOffset) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.exitOffset) }()
+      case 8: try { try decoder.decodeSingularUInt32Field(value: &self.nextSessionOffset) }()
+      case 9: try { try decoder.decodeSingularUInt32Field(value: &self.nextExitOffset) }()
+      case 10: try { try decoder.decodeSingularBoolField(value: &self.complete) }()
+      case 11: try { try decoder.decodeSingularBoolField(value: &self.reset) }()
       default: break
       }
     }
@@ -3658,6 +3736,30 @@ extension Coflux_V1_DeviceSessionCatalog: SwiftProtobuf.Message, SwiftProtobuf._
     if !self.exits.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.exits, fieldNumber: 3)
     }
+    if !self.snapshotOwnerID.isEmpty {
+      try visitor.visitSingularStringField(value: self.snapshotOwnerID, fieldNumber: 4)
+    }
+    if self.snapshotEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.snapshotEpoch, fieldNumber: 5)
+    }
+    if self.sessionOffset != 0 {
+      try visitor.visitSingularUInt32Field(value: self.sessionOffset, fieldNumber: 6)
+    }
+    if self.exitOffset != 0 {
+      try visitor.visitSingularUInt32Field(value: self.exitOffset, fieldNumber: 7)
+    }
+    if self.nextSessionOffset != 0 {
+      try visitor.visitSingularUInt32Field(value: self.nextSessionOffset, fieldNumber: 8)
+    }
+    if self.nextExitOffset != 0 {
+      try visitor.visitSingularUInt32Field(value: self.nextExitOffset, fieldNumber: 9)
+    }
+    if self.complete != false {
+      try visitor.visitSingularBoolField(value: self.complete, fieldNumber: 10)
+    }
+    if self.reset != false {
+      try visitor.visitSingularBoolField(value: self.reset, fieldNumber: 11)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3665,6 +3767,14 @@ extension Coflux_V1_DeviceSessionCatalog: SwiftProtobuf.Message, SwiftProtobuf._
     if lhs.requestID != rhs.requestID {return false}
     if lhs.sessions != rhs.sessions {return false}
     if lhs.exits != rhs.exits {return false}
+    if lhs.snapshotOwnerID != rhs.snapshotOwnerID {return false}
+    if lhs.snapshotEpoch != rhs.snapshotEpoch {return false}
+    if lhs.sessionOffset != rhs.sessionOffset {return false}
+    if lhs.exitOffset != rhs.exitOffset {return false}
+    if lhs.nextSessionOffset != rhs.nextSessionOffset {return false}
+    if lhs.nextExitOffset != rhs.nextExitOffset {return false}
+    if lhs.complete != rhs.complete {return false}
+    if lhs.reset != rhs.reset {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3672,7 +3782,7 @@ extension Coflux_V1_DeviceSessionCatalog: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Coflux_V1_DeviceExitAck: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceExitAck"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_ids\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_ids\0\u{3}request_id\0\u{3}snapshot_owner_id\0\u{3}snapshot_epoch\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3681,6 +3791,9 @@ extension Coflux_V1_DeviceExitAck: SwiftProtobuf.Message, SwiftProtobuf._Message
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeRepeatedStringField(value: &self.eventIds) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.snapshotOwnerID) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.snapshotEpoch) }()
       default: break
       }
     }
@@ -3690,11 +3803,23 @@ extension Coflux_V1_DeviceExitAck: SwiftProtobuf.Message, SwiftProtobuf._Message
     if !self.eventIds.isEmpty {
       try visitor.visitRepeatedStringField(value: self.eventIds, fieldNumber: 1)
     }
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 2)
+    }
+    if !self.snapshotOwnerID.isEmpty {
+      try visitor.visitSingularStringField(value: self.snapshotOwnerID, fieldNumber: 3)
+    }
+    if self.snapshotEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.snapshotEpoch, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Coflux_V1_DeviceExitAck, rhs: Coflux_V1_DeviceExitAck) -> Bool {
     if lhs.eventIds != rhs.eventIds {return false}
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.snapshotOwnerID != rhs.snapshotOwnerID {return false}
+    if lhs.snapshotEpoch != rhs.snapshotEpoch {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

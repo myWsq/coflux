@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { Workbench } from "@/components/workbench/workbench";
+import { requestWorkbenchExitConfirmation } from "@/components/workbench/workbench-state";
 import { createCofluxClient } from "@coflux/client";
 import { BUILD_ID, SERVER_URL, TOKEN_KEY } from "@/config";
 
@@ -24,12 +25,8 @@ export function MainPage() {
   // 关标签/刷新/关窗前弹浏览器原生确认框，防止 cmd+w 等误操作退出工作台。
   // 浏览器只允许原生文案，无法自定义；preventDefault 是现代标准，returnValue 兼容旧内核。
   useEffect(() => {
-    const confirmExit = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = "";
-    };
-    window.addEventListener("beforeunload", confirmExit);
-    return () => window.removeEventListener("beforeunload", confirmExit);
+    window.addEventListener("beforeunload", requestWorkbenchExitConfirmation);
+    return () => window.removeEventListener("beforeunload", requestWorkbenchExitConfirmation);
   }, []);
 
   return <Workbench client={client} />;

@@ -4,7 +4,12 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 async fn run_git(args: &[&str]) -> (bool, String, String) {
-    match Command::new("git").args(args).stdin(Stdio::null()).output().await {
+    match Command::new("git")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+    {
         Ok(o) => (
             o.status.success(),
             String::from_utf8_lossy(&o.stdout).into_owned(),
@@ -22,7 +27,11 @@ pub fn current_branch(worktree: &str) -> Option<String> {
         let content = std::fs::read_to_string(&dotgit).ok()?;
         let p = content.trim().strip_prefix("gitdir:")?.trim().to_string();
         let pb = std::path::PathBuf::from(&p);
-        if pb.is_absolute() { pb } else { std::path::Path::new(worktree).join(pb) }
+        if pb.is_absolute() {
+            pb
+        } else {
+            std::path::Path::new(worktree).join(pb)
+        }
     } else {
         dotgit
     };
@@ -51,7 +60,10 @@ pub async fn diff_stat(worktree: &str, default_branch: &str) -> DiffStat {
     let (ok, out, _) = run_git(&["-C", worktree, "diff", "--shortstat", diff_ref]).await;
     let (mut additions, deletions) = if ok { parse_shortstat(&out) } else { (0, 0) };
     additions += untracked_additions(worktree).await;
-    DiffStat { additions, deletions }
+    DiffStat {
+        additions,
+        deletions,
+    }
 }
 
 async fn merge_base(worktree: &str, default_branch: &str) -> Option<String> {
@@ -70,9 +82,15 @@ fn parse_shortstat(out: &str) -> (i32, i32) {
     let mut deletions = 0i32;
     for part in out.split(',') {
         let part = part.trim();
-        if let Some(n) = part.strip_suffix("insertion(+)").or_else(|| part.strip_suffix("insertions(+)")) {
+        if let Some(n) = part
+            .strip_suffix("insertion(+)")
+            .or_else(|| part.strip_suffix("insertions(+)"))
+        {
             additions = n.trim().parse().unwrap_or(0);
-        } else if let Some(n) = part.strip_suffix("deletion(-)").or_else(|| part.strip_suffix("deletions(-)")) {
+        } else if let Some(n) = part
+            .strip_suffix("deletion(-)")
+            .or_else(|| part.strip_suffix("deletions(-)"))
+        {
             deletions = n.trim().parse().unwrap_or(0);
         }
     }
@@ -89,25 +107,41 @@ fn count_untracked_lines(data: &[u8]) -> Option<i32> {
         return Some(0);
     }
     let newlines = data.iter().filter(|&&b| b == b'\n').count();
-    let lines = if data.last() == Some(&b'\n') { newlines } else { newlines + 1 };
+    let lines = if data.last() == Some(&b'\n') {
+        newlines
+    } else {
+        newlines + 1
+    };
     Some(lines as i32)
 }
 
 /// worker 直接读 untracked 文件统计行数（无需为每个文件起 `git diff --no-index` 子进程）；
 /// 单文件 >1MB 跳过（防大产物文件拖慢轮询）。
 async fn untracked_additions(worktree: &str) -> i32 {
-    let (ok, out, _) = run_git(&["-C", worktree, "ls-files", "--others", "--exclude-standard", "-z"]).await;
+    let (ok, out, _) = run_git(&[
+        "-C",
+        worktree,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    ])
+    .await;
     if !ok {
         return 0;
     }
     let mut total = 0i32;
     for rel in out.split('\0').filter(|s| !s.is_empty()) {
         let path = std::path::Path::new(worktree).join(rel);
-        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
         if !meta.is_file() || meta.len() > 1_000_000 {
             continue;
         }
-        let Ok(data) = std::fs::read(&path) else { continue };
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
         if let Some(lines) = count_untracked_lines(&data) {
             total += lines;
         }
@@ -153,13 +187,24 @@ pub async fn validate_repo(path: &str) -> RepoInfo {
     let (bok, bout, _) = run_git(&["-C", &repo_path, "rev-parse", "--abbrev-ref", "HEAD"]).await;
     let branch = if bok {
         let b = bout.trim();
-        if b.is_empty() { "HEAD".into() } else { b.to_string() }
+        if b.is_empty() {
+            "HEAD".into()
+        } else {
+            b.to_string()
+        }
     } else {
         "HEAD".into()
     };
     let suggested_name = remote_project_name(&repo_path).await;
     let default_branch = detect_default_branch(&repo_path).await;
-    RepoInfo { ok: true, repo_path, branch, error: None, suggested_name, default_branch }
+    RepoInfo {
+        ok: true,
+        repo_path,
+        branch,
+        error: None,
+        suggested_name,
+        default_branch,
+    }
 }
 
 /// 探测仓库真实默认分支：`git symbolic-ref refs/remotes/origin/HEAD`（clone 时本地就有，
@@ -169,7 +214,8 @@ pub async fn validate_repo(path: &str) -> RepoInfo {
 /// worktree 与主仓库共享 refs/remotes/，所以传任一 worktree 路径都能探到同一个值。
 /// ponytail: origin/HEAD 可能过期（remote 改默认分支后本地不跟随）；真不准时再补 ls-remote --symref
 pub async fn detect_default_branch(repo_path: &str) -> Option<String> {
-    let (ok, out, _) = run_git(&["-C", repo_path, "symbolic-ref", "refs/remotes/origin/HEAD"]).await;
+    let (ok, out, _) =
+        run_git(&["-C", repo_path, "symbolic-ref", "refs/remotes/origin/HEAD"]).await;
     if !ok {
         return None;
     }
@@ -212,7 +258,9 @@ fn ordered_remote_names(output: &str) -> Vec<String> {
 }
 
 fn suggested_name_from_remotes(remotes: &[(String, String)]) -> Option<String> {
-    remotes.iter().find_map(|(_, url)| project_name_from_remote(url))
+    remotes
+        .iter()
+        .find_map(|(_, url)| project_name_from_remote(url))
 }
 
 fn project_name_from_remote(remote: &str) -> Option<String> {
@@ -255,31 +303,71 @@ fn normalize_remote_path(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-pub async fn add_worktree(worktrees_dir: &str, repo_path: &str, workspace_id: &str, branch: &str, create_new: bool) -> WorktreeResult {
+pub async fn add_worktree(
+    worktrees_dir: &str,
+    repo_path: &str,
+    workspace_id: &str,
+    branch: &str,
+    create_new: bool,
+) -> WorktreeResult {
     let _ = std::fs::create_dir_all(worktrees_dir);
     // 目录名只用稳定 id：branch 可被 checkout 换掉、name 是自由文本备注，都不适合当路径身份
     let dir = format!("{}/{}", worktrees_dir, workspace_id);
     let args: Vec<&str> = if create_new {
-        vec!["-C", repo_path, "worktree", "add", "-b", branch, dir.as_str()]
+        vec![
+            "-C",
+            repo_path,
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            dir.as_str(),
+        ]
     } else {
         vec!["-C", repo_path, "worktree", "add", dir.as_str(), branch]
     };
     let (ok, _o, err) = run_git(&args).await;
     if !ok {
         let e = err.trim();
-        let e = if e.is_empty() { "git worktree add failed" } else { e };
+        let e = if e.is_empty() {
+            "git worktree add failed"
+        } else {
+            e
+        };
         let error: String = e.chars().take(400).collect();
-        return WorktreeResult { ok: false, path: dir, branch: branch.to_string(), error: Some(error) };
+        return WorktreeResult {
+            ok: false,
+            path: dir,
+            branch: branch.to_string(),
+            error: Some(error),
+        };
     }
-    WorktreeResult { ok: true, path: dir, branch: branch.to_string(), error: None }
+    WorktreeResult {
+        ok: true,
+        path: dir,
+        branch: branch.to_string(),
+        error: None,
+    }
 }
 
 pub async fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(), String> {
-    let (ok, _o, error) = run_git(&["-C", repo_path, "worktree", "remove", "--force", worktree_path]).await;
+    let (ok, _o, error) = run_git(&[
+        "-C",
+        repo_path,
+        "worktree",
+        "remove",
+        "--force",
+        worktree_path,
+    ])
+    .await;
     if !ok {
         let _ = run_git(&["-C", repo_path, "worktree", "prune"]).await;
         let error = error.trim();
-        let error = if error.is_empty() { "git worktree remove failed" } else { error };
+        let error = if error.is_empty() {
+            "git worktree remove failed"
+        } else {
+            error
+        };
         return Err(error.chars().take(400).collect());
     }
     Ok(())
@@ -287,11 +375,17 @@ pub async fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    use super::{count_untracked_lines, ordered_remote_names, parse_shortstat, project_name_from_remote, suggested_name_from_remotes};
+    use super::{
+        count_untracked_lines, ordered_remote_names, parse_shortstat, project_name_from_remote,
+        suggested_name_from_remotes,
+    };
 
     #[test]
     fn parses_shortstat_variants() {
-        assert_eq!(parse_shortstat(" 3 files changed, 10 insertions(+), 2 deletions(-)"), (10, 2));
+        assert_eq!(
+            parse_shortstat(" 3 files changed, 10 insertions(+), 2 deletions(-)"),
+            (10, 2)
+        );
         assert_eq!(parse_shortstat(" 1 file changed, 1 insertion(+)"), (1, 0));
         assert_eq!(parse_shortstat(" 1 file changed, 1 deletion(-)"), (0, 1));
         assert_eq!(parse_shortstat(""), (0, 0));
@@ -312,13 +406,23 @@ mod tests {
     fn parses_common_network_remote_formats() {
         let cases = [
             ("https://github.com/myWsq/coflux.git", "myWsq/coflux"),
-            ("http://git.example.com/group/subgroup/project.git", "group/subgroup/project"),
+            (
+                "http://git.example.com/group/subgroup/project.git",
+                "group/subgroup/project",
+            ),
             ("ssh://git@git.example.com/group/project", "group/project"),
             ("git://git.example.com/group/project.git/", "group/project"),
-            ("git@git.example.com:group/subgroup/project.git", "group/subgroup/project"),
+            (
+                "git@git.example.com:group/subgroup/project.git",
+                "group/subgroup/project",
+            ),
         ];
         for (remote, expected) in cases {
-            assert_eq!(project_name_from_remote(remote).as_deref(), Some(expected), "remote 格式：{remote}");
+            assert_eq!(
+                project_name_from_remote(remote).as_deref(),
+                Some(expected),
+                "remote 格式：{remote}"
+            );
         }
     }
 
@@ -334,7 +438,11 @@ mod tests {
             "ssh://git@git.example.com/",
             "git@example.com:../private/project.git",
         ] {
-            assert_eq!(project_name_from_remote(remote), None, "remote 应被拒绝：{remote}");
+            assert_eq!(
+                project_name_from_remote(remote),
+                None,
+                "remote 应被拒绝：{remote}"
+            );
         }
     }
 
@@ -342,20 +450,39 @@ mod tests {
     fn origin_precedes_other_remotes_and_invalid_values_are_skipped() {
         assert_eq!(
             ordered_remote_names("backup\norigin\nmirror\n"),
-            vec!["origin".to_string(), "backup".to_string(), "mirror".to_string()]
+            vec![
+                "origin".to_string(),
+                "backup".to_string(),
+                "mirror".to_string()
+            ]
         );
 
         let valid_origin = vec![
-            ("origin".into(), "https://git.example.com/team/main.git".into()),
-            ("backup".into(), "https://git.example.com/team/backup.git".into()),
+            (
+                "origin".into(),
+                "https://git.example.com/team/main.git".into(),
+            ),
+            (
+                "backup".into(),
+                "https://git.example.com/team/backup.git".into(),
+            ),
         ];
-        assert_eq!(suggested_name_from_remotes(&valid_origin).as_deref(), Some("team/main"));
+        assert_eq!(
+            suggested_name_from_remotes(&valid_origin).as_deref(),
+            Some("team/main")
+        );
 
         let invalid_origin = vec![
             ("origin".into(), "/local/private.git".into()),
             ("backup".into(), "file:///local/private.git".into()),
-            ("mirror".into(), "git@git.example.com:group/project.git".into()),
+            (
+                "mirror".into(),
+                "git@git.example.com:group/project.git".into(),
+            ),
         ];
-        assert_eq!(suggested_name_from_remotes(&invalid_origin).as_deref(), Some("group/project"));
+        assert_eq!(
+            suggested_name_from_remotes(&invalid_origin).as_deref(),
+            Some("group/project")
+        );
     }
 }
