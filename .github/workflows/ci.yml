@@ -158,6 +158,10 @@ jobs:
         run: node scripts/npm-publish-guard.mjs --self-check
 
       - name: 黑盒集成测试（pretest 构建 daemon，跑全量）
+        # Linux 的未剥离 debug worker 可能超过发布下载 128 MiB 硬上限；黑盒会把
+        # 该真二进制当作签名升级产物，故这里只关闭测试构建的 debug info，不能放宽生产上限。
+        env:
+          CARGO_PROFILE_DEV_DEBUG: 0
         run: pnpm -C tests test
 
       - name: mobile 构建（冻结端：只保共享层不弄坏它）
