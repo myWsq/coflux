@@ -67,9 +67,14 @@ prod-jp 的 `82.40.34.55` 本身还是 [[gfw-blocked-home-line]] 记录过的受
   **副作用（有利）**：泛记录全程不动，回滚只需删掉新建的三条，泛记录自动接管。
 
 - **回源必须走 HTTPS**：`reverse_proxy https://82.40.34.55` + `header_up Host {host}`
-  + `transport http { tls_insecure_skip_verify }`。daemon 与 client 的认证 token 走这
-  条链路，同机房也不接受明文。`tls_insecure_skip_verify` 是必需的，因为对端证书将变成
-  Caddy 自签（见下条）。Rejected: 反代到 `http://82.40.34.55`（明文承载 token）。
+  + `transport http { tls_server_name {host}; tls_insecure_skip_verify }`。daemon 与
+  client 的认证 token 走这条链路，同机房也不接受明文。`tls_insecure_skip_verify` 是
+  必需的，因为对端证书将变成 Caddy 自签（见下条）。
+  **`tls_server_name {host}` 同样是必需的（执行时补上）**：Caddy 反代到
+  `https://<IP>` 时 TLS SNI 默认取上游地址（即那个 IP），prod-jp 的 Caddy 没有匹配 IP
+  的 site，握手直接失败、上游报 502。实测：`curl -k https://82.40.34.55/ -H "Host:
+  m.coflux.dev"`（SNI=IP）得 `000`，`curl --resolve m.coflux.dev:443:82.40.34.55`
+  （SNI=域名）得 `200`。`header_up Host` 只改 HTTP 头，改不了 SNI，两者都要写。Rejected: 反代到 `http://82.40.34.55`（明文承载 token）。
   Rejected: 直连 `82.40.34.55:8787`——该端口只绑 `127.0.0.1`，且 `app`/`m` 的静态 SPA
   由 prod-jp 的 Caddy `file_server` 提供、根本不在 8787 上。Based on:
   `ss -ltnp` 显示 `127.0.0.1:8787`；prod-jp `/etc/caddy/Caddyfile:60-94` 的 app 站是
@@ -121,6 +126,14 @@ prod-jp 的 `82.40.34.55` 本身还是 [[gfw-blocked-home-line]] 记录过的受
 
 顺序上先让 prod-jp 具备"被回源"的能力，再切 DNS，最后验收——反过来做会在切换后撞上
 后端证书问题。
+
+> **执行时的顺序修正（2026-09-04，已落地）**：Milestone 1 原定"一次性把四站改
+> `tls internal`"是不安全的——彼时四域仍在橙云后面，若该 zone 的 SSL 模式是
+> Full (strict)，自签会被 CF 拒绝（526）而当场打断线上；而 `/etc/caddy/cloudflare.env`
+> 里的 token 仅有 DNS 编辑权限，读 zone settings 返回 `9109 Unauthorized`，**该前提
+> 无法预先验证**。实际改为**逐域完整推进**：对每个域名依次做「owo 加 site → 切 DNS 到
+> 灰云 → owo 签 HTTP-01 → 验证 → prod-jp 该站改 `tls internal`」。把自签放在该域已
+> 脱离 CF 之后，就不再依赖任何关于 SSL 模式的假设。方向与各项决策均未改变。
 
 ### Milestone 1: prod-jp 四站转为只接回源
 
@@ -243,6 +256,28 @@ Out of scope:
 - Decisions & tradeoffs 中引用的事实不再成立（尤以 DNS 记录构成、`8787` 仅绑回环、
   Caddy 2.6.2 不支持 `stream_close_delay` 三条为要）。
 - 任一验证命令在一次合理修复后仍连续失败两次。
+
+## 落地结果（2026-09-04）
+
+国内视角（prod-bj）实测，同时段对照：
+
+| 域名 | 链路 | TTFB |
+| --- | --- | --- |
+| `app.coflux.dev` | 灰云 → owo → prod-jp | 0.193 / 0.268 / 0.272 s |
+| `api.coflux.dev` | 同上 | 0.178 / 0.191 / 0.279 / 0.292 s |
+| `m.coflux.dev` | 同上 | 0.180 / 0.194 / 0.272 / 0.291 s |
+| `www.coflux.dev` | **仍在橙云**（对照组） | 1.712 / 1.852 / 2.138 s |
+
+切换前基线 `app.coflux.dev` TTFB 1.598s → 切换后约 0.27s，**约 7 倍**。WS 升级
+`/client` 与 `/daemon` 均返回 `101`；owo 访问日志确认四域流量确实过境本机
+（app 208 / coflux.dev 105 / m 98 / api 88 次，含 SPA 资源）。
+
+两条与本次无关但当场观察到的既有状况，未处理：
+
+- `cchost.cc` / `cdn.cchost.cc` 域名解析失败（`Could not resolve host`，owo 与
+  prod-bj 皆然）。属另一 zone，本次 CF token 无权限，与本变更无因果。
+- daemon `Echoo-Mac-mini`（另一账号）自 20:43 起持续每 1~2 分钟重连，**早于本次任何
+  变更**。本账号设备（Bytedance Work、Devbox）切换后未见反复重连。
 
 ## Maintenance notes
 
