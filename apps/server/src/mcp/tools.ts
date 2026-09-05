@@ -8,8 +8,9 @@
  * 账号与不存在一律回同一句错误（不泄漏存在性）。写 tools 的归属校验在操作层内做（同一句错误）。
  *
  * 写 tools 的三条纪律（描述里也写给 agent 看）：人类优先（用户正在接管的终端拒绝输入）、有界等待
- * （Claude Code 远程 MCP 单请求 60s，wait 上限 50s、建/删操作 30s 到期回「已提交」）、能力门禁
- * （目标设备的 daemon 不支持本片控制消息时立即回「需要升级」，不等待）。
+ * （wait 上限 600s 但受宿主单请求超时约束——手动 `claude mcp add` 的宿主默认 60s、coflux 插件的
+ * .mcp.json 放到 ≥ 600s；建/删操作 30s 到期回「已提交」）、能力门禁（目标设备的 daemon 不支持本片
+ * 控制消息时立即回「需要升级」，不等待）。
  */
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -55,9 +56,11 @@ export interface DaemonInfoLike {
 const DEFAULT_READ_LINES = 200;
 const MAX_READ_LINES = 2000;
 const NOT_FOUND = "不存在或不属于当前账号";
-/** wait_terminal 的默认/上限秒数：与 hub 的 TERMINAL_WAIT_* 一致，都 ≤ 50s（Claude Code 单请求 60s）。 */
+/** wait_terminal 的默认/上限秒数：与 hub 的 TERMINAL_WAIT_* 一致（plan 094 上限 600s）。真正的天花板是宿主的
+ * 单请求超时：手动 `claude mcp add` 的宿主默认 60s，coflux 插件的 .mcp.json 把 timeout 放到 ≥ 600s——描述里写明让
+ * agent 自己权衡。 */
 const WAIT_DEFAULT_SECONDS = 30;
-const WAIT_MAX_SECONDS = 50;
+const WAIT_MAX_SECONDS = 600;
 /** 「需要升级」错误的含义写进每个写 tool 的描述，agent 才知道该让用户升级而不是重试。 */
 const UPGRADE_NOTE = "目标设备的 daemon 不支持本操作时立即返回「该设备的 daemon 需要升级」——让用户在该设备上跑 `cofluxd update && cofluxd restart`，不要重试。";
 
@@ -436,7 +439,7 @@ export function createCofluxMcpServer(principal: OAuthPrincipal, deps: McpToolDe
     {
       title: "等终端退出",
       description:
-        `阻塞等某个终端退出并返回退出码。有上限：timeoutSeconds 默认 ${WAIT_DEFAULT_SECONDS}、最大 ${WAIT_MAX_SECONDS}（远程 MCP 单请求 60 秒）；到期返回当前状态（exited=false、timedOut=true），不是错误——需要更久就再调一次。`,
+        `阻塞等某个终端退出并返回退出码。有上限：timeoutSeconds 默认 ${WAIT_DEFAULT_SECONDS}、最大 ${WAIT_MAX_SECONDS}；到期返回当前状态（exited=false、timedOut=true），不是错误——需要更久就再调一次。注意宿主的单请求超时是真正的天花板：手动 \`claude mcp add\` 的 Claude Code 默认 60 秒，此时 timeoutSeconds 别超过 50；经 coflux 插件接入的宿主 timeout 已放宽到 600 秒以上。`,
       inputSchema: {
         terminalId: z.string().describe("终端 id"),
         timeoutSeconds: z.number().min(1).max(WAIT_MAX_SECONDS).optional().describe(`最多等多少秒，默认 ${WAIT_DEFAULT_SECONDS}，上限 ${WAIT_MAX_SECONDS}`),

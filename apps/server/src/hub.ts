@@ -124,7 +124,9 @@ const MAX_COMPLETION_WAITERS = 256;
 const OPERATION_WAIT_MS = 30_000;
 /** wait_terminal 的默认与上限（同上，≤ 50 秒）。 */
 const TERMINAL_WAIT_DEFAULT_MS = 30_000;
-const TERMINAL_WAIT_MAX_MS = 50_000;
+// plan 094：上限放宽到 600s。真正的天花板是宿主的单请求超时——手动 `claude mcp add` 的宿主默认 60s，
+// coflux 插件的 .mcp.json 把 timeout 放到 ≥ 600s；到期回 timedOut 让 agent 再调，长持请求越长越脆。
+const TERMINAL_WAIT_MAX_MS = 600_000;
 /** stop_terminal 发出 sessionClose 后等退出的上限；到期按「已在退出中」返回。 */
 const STOP_WAIT_MS = 15_000;
 /** server→daemon 读/写请求的回执超时。写入超时不重发（结果未知，先 read 再决定）。 */
