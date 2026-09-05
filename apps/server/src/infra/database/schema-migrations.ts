@@ -768,7 +768,9 @@ const OAUTH_SCHEMA_SQL = `
     scope TEXT NOT NULL DEFAULT '',
     created_at DOUBLE PRECISION NOT NULL,
     expires_at DOUBLE PRECISION NOT NULL,
-    revoked BOOLEAN NOT NULL DEFAULT false
+    revoked BOOLEAN NOT NULL DEFAULT false,
+    -- refresh 被轮换掉的时刻：宽限内再次出现按"同机并发轮换"复用，超过宽限才当泄露整链撤销
+    rotated_at DOUBLE PRECISION
   );
   CREATE INDEX idx_oauth_tokens_account ON coflux.oauth_tokens(account_id);
   CREATE INDEX idx_oauth_tokens_grant ON coflux.oauth_tokens(grant_id);
