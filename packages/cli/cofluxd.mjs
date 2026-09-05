@@ -943,14 +943,16 @@ async function cmdHook() {
 // **看得见、能接管**的 coflux 实体——而不是在自己的 Bash 里后台起一个谁也看不见的进程。
 //
 // 不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，树外一律拒。
+// local-first（plan 094）：send/read/wait/notify/progress 在 daemon 本地闭环，不经中心；只有
+// new/list/ports 由 daemon 代问中心（Task 要落库广播、预览 URL 由中心生成）。
 // 与 `hook` 子命令的约定**相反**：这些命令必须写 stdout——输出就是给 agent 读的返回值。
 // 也刻意不做自动重试：terminal new 有副作用，重试会开出两个终端，失败就把错误交给 agent。
 
 const AGENT_TIMEOUT_MS = 30_000;
 const DEFAULT_READ_LINES = 200;
-// wait 的循环必须在 CLI 侧：单次 agentPost 撑不起长等待（daemon 控制 WS 有自己的往返超时）。
-// 默认 30 分钟——编码任务常跑很久；轮询走 terminal.list（status 来自 sessionExit 事件链，
-// 不受快照 ~2s 延迟影响），3 秒一次对本机 loopback 是零负担。
+// wait 的循环必须在 CLI 侧：单次 agentPost 有 25 秒的 loopback 应答上限。默认 30 分钟——编码任务
+// 常跑很久；轮询走 terminal.status（daemon 本地账本直接答，不经中心），3 秒一次对本机 loopback
+// 是零负担。
 const DEFAULT_WAIT_TIMEOUT_S = 1800;
 const WAIT_POLL_MS = 3000;
 
@@ -1030,9 +1032,8 @@ async function cmdTerminal(values) {
     const timeoutSec = Number.isFinite(requested) && requested > 0 ? requested : DEFAULT_WAIT_TIMEOUT_S;
     const deadline = Date.now() + timeoutSec * 1000;
     for (;;) {
-      const { terminals } = await agentPost({ action: "terminal.list" });
-      const t = terminals.find((x) => x.taskId === taskId);
-      if (!t) die(`本工作区没有终端 ${taskId}（用 cofluxd terminal list 查）`);
+      // 按 taskId 直接问本地账本；目标不存在/不在本工作区时 daemon 回可读错误，agentPost 直接 die。
+      const t = await agentPost({ action: "terminal.status", taskId });
       if (t.status === "exited") {
         const exit = t.exitCode === undefined || t.exitCode === null ? "" : ` exit=${t.exitCode}`;
         return void console.log(`# exited${exit}`);

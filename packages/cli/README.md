@@ -37,13 +37,16 @@ CLI 还会取自身与 worker 的持久 release floor 较大值拒绝远端降�
 cofluxd terminal new --title "跑单测" --cmd "pnpm test"   # 开真实终端，用户可接管
 cofluxd terminal list                                     # 本工作区的终端 + 状态/退出码
 cofluxd terminal read <taskId> [--lines N]                # 读终端内容（纯文本，已退出也能读）
+cofluxd terminal wait <taskId> [--timeout <秒>]           # 阻塞到退出，打印退出码
+cofluxd terminal send <taskId> --text "y" --enter         # 往终端输入；用户正在接管时被拒
+cofluxd progress "复现了，正在定位"                        # 播报进度：显示在工作区卡片上
 cofluxd notify "需要你定一下用哪个方案"                    # 叫人：侧栏转「等待交互」
 cofluxd ports                                             # 端口 + 可直接打开的预览 URL
 ```
 
-不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，**coflux 会话之外的进程一律拒绝**，权限也天然限定在该会话所属的工作区内。
+不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，**coflux 会话之外的进程一律拒绝**，权限也天然限定在该会话所属的工作区内。**local-first**：send/read/wait/notify/progress 在 daemon 本地闭环、不经中心（归属与退出码来自 daemon 自己的会话账本，内容来自本地命令日志或 sessiond 快照）；只有 new/list/ports 由 daemon 代问中心——Task 要落库广播、预览 URL 由中心生成。早于 daemon 升级开出来的终端缺归属信息，本地命令会明确拒绝，重开即可。
 
-每个 coflux 开出来的 PTY 会话里还注入了一组 `COFLUX_*` 环境变量（由 supervisor 组装，中心只下发 id）：`COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID`（目录工作区为空串）/ `COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` / `COFLUX_MCP_URL`。agent 读它们就知道自己在哪台设备、哪个项目/工作区/终端，值与中心 MCP `list_*` 返回的 id 完全一致，可直接传给 MCP tools。本地命令与 MCP 的分工：本工作区内的开终端/读/等/输入/播报/叫人/端口用上面的零凭证命令；开子工作区、跨工作区/跨设备读写、或从 coflux 之外接入，用中心的 `coflux` MCP（`claude mcp add --transport http coflux "$COFLUX_MCP_URL"`，一次 OAuth 授权）。supervisor 不走热升级，旧机器要 `cofluxd update && cofluxd restart` 之后会话里才有这些变量；skill 里写了变量为空时的降级分支。
+每个 coflux 开出来的 PTY 会话里还注入了一组 `COFLUX_*` 环境变量（由 supervisor 组装，中心只下发 id）：`COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID`（目录工作区为空串）/ `COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` / `COFLUX_MCP_URL`。agent 读它们就知道自己在哪台设备、哪个项目/工作区/终端，值与中心 MCP `list_*` 返回的 id 完全一致，可直接传给 MCP tools。本地命令与 MCP 的分工只有一条规则：**本地能闭环的一律本地命令**（本工作区内的开终端/读/等/输入/播报/叫人/端口）；只有跨出本工作区——开子工作区、跨工作区/跨设备读写、或从 coflux 之外接入——才用中心的 `coflux` MCP（`claude mcp add --transport http coflux "$COFLUX_MCP_URL"`，一次 OAuth 授权）。supervisor 不走热升级，旧机器要 `cofluxd update && cofluxd restart` 之后会话里才有这些变量；skill 里写了变量为空时的降级分支。
 
 配套的 skill 在 `skills/coflux/SKILL.md`（随包分发），装给 Claude Code：
 
