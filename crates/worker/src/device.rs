@@ -1930,6 +1930,18 @@ impl DeviceRuntime {
             }
         }
 
+        // 会话账本（plan 094）：client 转投的 prepared 建会话（web/iOS 手开的终端）在授权通过后登记归属；
+        // 中心发起的建会话在 execute_prepared_operation 里登记，直发的在 main.rs 登记——三条路径各记一次。
+        if let device_envelope::Payload::SessionCreate(create) = payload {
+            if let Some(services) = &self.services {
+                services.state.lock().unwrap().ledger.remember_create(
+                    &create.session_id,
+                    &create.task_id,
+                    &create.workspace_id,
+                );
+            }
+        }
+
         if routed_to_sessiond(payload) {
             let Ok(frame) = encode_frame(&DataFrame::Device {
                 channel_id: channel_id.to_string(),
