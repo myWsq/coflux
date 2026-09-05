@@ -292,6 +292,19 @@ test("每工作区活跃终端上限（含用户手开的）：超限被拒", as
   assert.equal(terminals.terminals.length, 0, "本工作区终端已全部清理");
 });
 
+test("wait_terminal 上限 600 秒（plan 094）：一次超过 60 秒的等待穿过真实 HTTP 完整返回，不被中心掐断", async () => {
+  // Node 的 requestTimeout 默认 5 分钟只管收请求体，handler 阶段不受它管——但要用真实请求证明，不凭文档。
+  const { terminal } = await okTool("create_terminal", { workspaceId: subWorkspace.id, title: "慢退出", command: "sleep 65; exit 0" });
+  const t0 = Date.now();
+  const waited = await okTool("wait_terminal", { terminalId: terminal.id, timeoutSeconds: 120 });
+  const elapsed = Date.now() - t0;
+  assert.equal(waited.exited, true, `65 秒的命令必须等到退出: ${JSON.stringify(waited)}`);
+  assert.equal(waited.timedOut, false);
+  assert.equal(waited.exitCode, 0);
+  assert.ok(elapsed >= 60_000, `真实等待应超过 60 秒: ${elapsed}ms`);
+  await okTool("remove_terminal", { terminalId: terminal.id });
+});
+
 test("remove_workspace：主工作区被拒；子工作区删除后 worktree 从磁盘消失且 web 收到 workspaceRemoved", async () => {
   const mainRejected = await errTool("remove_workspace", { workspaceId: mainWorkspaceId });
   assert.match(mainRejected, /主工作区/);
