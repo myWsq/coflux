@@ -1,6 +1,5 @@
 /**
- * `/mcp` 的 tools：六个只读（plan 090）+ 八个写/等（plan 091）+ 两个 agent 自我标注（plan 093：notify_user /
- * report_progress，接替已删的 `cofluxd notify/progress`）。每个请求 new 一个 McpServer 绑定
+ * `/mcp` 的 tools：六个只读（plan 090）+ 八个写/等（plan 091）。每个请求 new 一个 McpServer 绑定
  * principal，tool 实现只拿 principal + 中心既有的账号读法（store / hub.daemonInfoList / routeTable）
  * 与 hub 的操作层（McpOperations：准入事务 + 中心发起的 prepared 执行 + 完成原语），不碰 Request、
  * 不碰 Raven 上下文。
@@ -9,8 +8,8 @@
  * 账号与不存在一律回同一句错误（不泄漏存在性）。写 tools 的归属校验在操作层内做（同一句错误）。
  *
  * 写 tools 的三条纪律（描述里也写给 agent 看）：人类优先（用户正在接管的终端拒绝输入）、有界等待
- * （wait 上限 600s 但受宿主单请求超时约束——手动 `claude mcp add` 的宿主仍是 60s、建/删操作 30s 到期回
- * 「已提交」）、能力门禁（目标设备的 daemon 不支持本片控制消息时立即回「需要升级」，不等待）。
+ * （Claude Code 远程 MCP 单请求 60s，wait 上限 50s、建/删操作 30s 到期回「已提交」）、能力门禁
+ * （目标设备的 daemon 不支持本片控制消息时立即回「需要升级」，不等待）。
  */
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -32,8 +31,6 @@ export interface McpOperations {
   waitTerminalForAccount(accountId: AccountId, terminalId: TaskId, timeoutMs?: number): Promise<OperationOutcome<{ task: Task; exited: boolean; timedOut: boolean }>>;
   stopTerminalForAccount(accountId: AccountId, terminalId: TaskId): Promise<OperationOutcome<{ task: Task; exited: boolean }>>;
   removeTerminalForAccount(accountId: AccountId, terminalId: TaskId): Promise<OperationOutcome<TaskId>>;
-  notifyTerminalForAccount(accountId: AccountId, terminalId: TaskId, message: string): Promise<OperationOutcome<{ terminalId: TaskId }>>;
-  reportTerminalProgressForAccount(accountId: AccountId, terminalId: TaskId, message: string): Promise<OperationOutcome<{ terminalId: TaskId }>>;
 }
 
 /** tool 层需要的中心读法：hub 暴露设备在线态、端口路由表与操作层，其余走 store。 */
@@ -58,12 +55,9 @@ export interface DaemonInfoLike {
 const DEFAULT_READ_LINES = 200;
 const MAX_READ_LINES = 2000;
 const NOT_FOUND = "不存在或不属于当前账号";
-/** wait_terminal 的默认/上限秒数：与 hub 的 TERMINAL_WAIT_* 一致（plan 093 上限 600s）。真正的天花板是宿主的单请求
- * 超时：手动 `claude mcp add` 的宿主默认 60s，coflux 插件的 .mcp.json 把 timeout 放到 ≥ 600s——描述里写明让 agent 自己权衡。 */
+/** wait_terminal 的默认/上限秒数：与 hub 的 TERMINAL_WAIT_* 一致，都 ≤ 50s（Claude Code 单请求 60s）。 */
 const WAIT_DEFAULT_SECONDS = 30;
-const WAIT_MAX_SECONDS = 600;
-/** notify_user / report_progress 留言的字符上限：与 hub 的 MAX_ANNOTATION_CHARS、worker 的 MAX_NOTIFY_CHARS 一致。 */
-const ANNOTATION_MAX_CHARS = 200;
+const WAIT_MAX_SECONDS = 50;
 /** 「需要升级」错误的含义写进每个写 tool 的描述，agent 才知道该让用户升级而不是重试。 */
 const UPGRADE_NOTE = "目标设备的 daemon 不支持本操作时立即返回「该设备的 daemon 需要升级」——让用户在该设备上跑 `cofluxd update && cofluxd restart`，不要重试。";
 
@@ -442,7 +436,7 @@ export function createCofluxMcpServer(principal: OAuthPrincipal, deps: McpToolDe
     {
       title: "等终端退出",
       description:
-        `阻塞等某个终端退出并返回退出码。有上限：timeoutSeconds 默认 ${WAIT_DEFAULT_SECONDS}、最大 ${WAIT_MAX_SECONDS}；到期返回当前状态（exited=false、timedOut=true），不是错误——需要更久就再调一次，别自己写轮询循环。注意它受宿主单请求超时约束：手动 \`claude mcp add\` 接入的宿主单请求默认 60 秒（超过会被宿主掐断，不是 coflux 的错误），coflux 插件接入的宿主放宽到 600 秒；拿不准就用 ≤ 50 的 timeoutSeconds 多调几次。`,
+        `阻塞等某个终端退出并返回退出码。有上限：timeoutSeconds 默认 ${WAIT_DEFAULT_SECONDS}、最大 ${WAIT_MAX_SECONDS}（远程 MCP 单请求 60 秒）；到期返回当前状态（exited=false、timedOut=true），不是错误——需要更久就再调一次。`,
       inputSchema: {
         terminalId: z.string().describe("终端 id"),
         timeoutSeconds: z.number().min(1).max(WAIT_MAX_SECONDS).optional().describe(`最多等多少秒，默认 ${WAIT_DEFAULT_SECONDS}，上限 ${WAIT_MAX_SECONDS}`),
@@ -487,61 +481,6 @@ export function createCofluxMcpServer(principal: OAuthPrincipal, deps: McpToolDe
       const result = await deps.ops.removeTerminalForAccount(accountId, terminalId);
       if (!result.ok) return fail(result.error);
       return ok({ terminalId: result.value });
-    },
-  );
-
-  /* ==================== agent 自我标注 tools（plan 093，接替 cofluxd notify/progress） ==================== */
-  /** 两个 tool 共用的入口校验：留言非空且 ≤ 200 字符，超限即拒并说明上限（不静默截断）。 */
-  const checkAnnotation = (message: string): string | null => {
-    const trimmed = message.trim();
-    if (!trimmed) return "留言不能为空";
-    if ([...trimmed].length > ANNOTATION_MAX_CHARS) return `留言不超过 ${ANNOTATION_MAX_CHARS} 个字符（它是侧栏上的一句话，不是日志通道），请精简后重试`;
-    return null;
-  };
-  const PRESENCE_NOTE =
-    "以 terminalId 寻址，通常就是你自己的 $COFLUX_TASK_ID。要求该终端里正跑着 claude/codex（有 agent presence）：终端不存在或不属于当前账号、未在运行或还没有会话、设备离线、终端里没有 agent，都会明确报错而不会静默成功。";
-
-  server.registerTool(
-    "notify_user",
-    {
-      title: "叫人（通知用户）",
-      description:
-        `叫人：把某个终端的 agent 状态转为「等待交互」并携带一句话，用户在 coflux web 侧栏/手机上立刻看到。用在你真的卡住的时候：需要用户决策、要密码/权限、发现了必须人来判断的问题——一句话说清要什么，别写成日志。这条留言随你的下一个 hook 事件（下一次工具调用/回合结束）自动清空，所以叫完人就停下等，别继续干活把它冲掉。你正常的提问与权限请求已经会自动反映到侧栏状态上，不需要额外 notify。${PRESENCE_NOTE}留言 ≤ ${ANNOTATION_MAX_CHARS} 字符。${UPGRADE_NOTE}`,
-      inputSchema: {
-        terminalId: z.string().describe("终端 id（你自己的就是 $COFLUX_TASK_ID）"),
-        message: z.string().describe(`给用户的一句话（≤ ${ANNOTATION_MAX_CHARS} 字符），说清需要他做什么`),
-      },
-      outputSchema: { terminalId: z.string(), state: z.literal("question"), message: z.string() },
-      annotations: mutating,
-    },
-    async ({ terminalId, message }) => {
-      const invalid = checkAnnotation(message);
-      if (invalid) return fail(invalid);
-      const result = await deps.ops.notifyTerminalForAccount(accountId, terminalId, message.trim());
-      if (!result.ok) return fail(result.error);
-      return ok({ terminalId: result.value.terminalId, state: "question" as const, message: message.trim() });
-    },
-  );
-
-  server.registerTool(
-    "report_progress",
-    {
-      title: "播报进度",
-      description:
-        `播报进度：一句话告诉用户你干到哪了，显示在工作区卡片上，被下一条覆盖。它不打扰用户，也不改变你的状态（不会变成「等待交互」），并且跨你的 hook 事件存活——只在你下一次 report_progress 时被覆盖、在 agent 退出时随之消失。在关键节点更新：复现了、定位到了、修完在验、卡在哪。拿不准用 notify_user 还是它：不需要用户做任何事就用 report_progress。${PRESENCE_NOTE}留言 ≤ ${ANNOTATION_MAX_CHARS} 字符。${UPGRADE_NOTE}`,
-      inputSchema: {
-        terminalId: z.string().describe("终端 id（你自己的就是 $COFLUX_TASK_ID）"),
-        message: z.string().describe(`进度短评（≤ ${ANNOTATION_MAX_CHARS} 字符）`),
-      },
-      outputSchema: { terminalId: z.string(), progress: z.string() },
-      annotations: mutating,
-    },
-    async ({ terminalId, message }) => {
-      const invalid = checkAnnotation(message);
-      if (invalid) return fail(invalid);
-      const result = await deps.ops.reportTerminalProgressForAccount(accountId, terminalId, message.trim());
-      if (!result.ok) return fail(result.error);
-      return ok({ terminalId: result.value.terminalId, progress: message.trim() });
     },
   );
 
