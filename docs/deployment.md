@@ -67,6 +67,13 @@ daemon 跑在各用户自己的机器上，不在任何一台服务器（prod-bj
   建号：`DATABASE_URL=... node --import tsx scripts/create-user.mjs --email .. --password ..`
 - Caddy 上 coflux 的四个站（裸域/api/app/m）用 **`tls internal`**（自签）——它们转灰云后
   公网 ACME 必然失败；`*.coflux.dev` 仍走 DNS-01 cloudflare 插件，**别动**。
+- MCP / OAuth（plan 090）：`server.env` 里须有 `COFLUX_PUBLIC_URL=https://api.coflux.dev`
+  （issuer 与所有元数据 URL 由它拼，不看请求 Host）。宿主接入地址 `https://api.coflux.dev/mcp`；
+  端点 `/.well-known/oauth-protected-resource[/mcp]`、`/.well-known/oauth-authorization-server`、
+  `/oauth/{register,authorize,token}` 全部随 api 站反代到 8787，无需单独 handle。上线检查：
+  owo-jp-gw 与 prod-jp 的 api 站块没有别的 `.well-known` handle（HTTP-01 只占 `acme-challenge`）；
+  确认页在 `app.coflux.dev/oauth/consent`（SPA 兜底即可）；web 与 server 须同批部署（新 client 消息 +
+  版本准入）。
 
 ## owo-jp-gw —— 公网入口 + jp relay
 
