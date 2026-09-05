@@ -72,6 +72,7 @@ import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxy
 import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, selectRelayNode, supportsP2pDial, supportsRelayDial, validRelayId } from "./relay-rendezvous.js";
 import { LocalControlPlane } from "./local-control.js";
 import { verifyPassword } from "./auth.js";
+import { OAuthService } from "./oauth.js";
 import {
   createPreparedOperationService,
   MAX_PREPARED_FRAME_BYTES,
@@ -274,6 +275,9 @@ export class Hub {
   private readonly relayTokens: RelayTokenSigner;
   /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
+  /** MCP 宿主的 OAuth 授权服务器（plan 090）：待确认请求/授权码在它的内存里，与设备授权同款生命周期；
+   * HTTP 端点经 HubState 取它，确认页的两条 client 消息在下方 handleClientMessage 里落地。 */
+  readonly oauth: OAuthService;
   private readonly enrollLimiter = new FixedWindowLimiter(config.enrollRateLimit, config.authRateWindowMs);
   private readonly daemonAuthLimiter = new FixedWindowLimiter(config.daemonAuthRateLimit, config.authRateWindowMs);
   private readonly loginLimiter = new FixedWindowLimiter(config.loginRateLimit, config.authRateWindowMs);
@@ -306,6 +310,7 @@ export class Hub {
   });
 
   constructor(private store: Store) {
+    this.oauth = new OAuthService(store);
     this.localControl = new LocalControlPlane(
       store,
       (daemonId) => this.daemons.get(daemonId),
@@ -548,7 +553,8 @@ export class Hub {
     return this.daemons.has(daemonId);
   }
 
-  private async daemonInfoList(accountId: AccountId): Promise<DaemonInfoData[]> {
+  /** 账号下设备清单（在线连接优先，离线补自 devices 表）。clientSubscribe 与 MCP list_devices 共用。 */
+  async daemonInfoList(accountId: AccountId): Promise<DaemonInfoData[]> {
     const list: DaemonInfoData[] = [];
     const seen = new Set<DaemonId>();
     for (const d of this.daemons.values()) {
@@ -2266,6 +2272,38 @@ export class Hub {
         await this.removeDevice(client, msg.payload.value.daemonId);
         break;
       }
+      case "oauthAuthorizeInfo": {
+        // OAuth 确认页查询（plan 090）：与 device.authorizeInfo 同一套失败计数——请求 id 是 ≥128bit
+        // 随机值，限速是纵深防御。
+        if ((client.authorizeFailures ?? 0) >= config.authorizeMaxFailures) {
+          this.sendClient(client, { case: "oauthAuthorizeInfo", value: { ok: false, error: "尝试次数过多，请回到宿主重新发起授权" } });
+          break;
+        }
+        const info = this.oauth.describePending(msg.payload.value.requestId);
+        if (!info) {
+          client.authorizeFailures = (client.authorizeFailures ?? 0) + 1;
+          this.sendClient(client, { case: "oauthAuthorizeInfo", value: { ok: false, error: "授权请求无效或已过期，请回到宿主重新发起授权" } });
+          break;
+        }
+        this.sendClient(client, { case: "oauthAuthorizeInfo", value: { ok: true, clientName: info.clientName, redirectHost: info.redirectHost, scope: info.scope } });
+        break;
+      }
+      case "oauthAuthorizeDecide": {
+        if ((client.authorizeFailures ?? 0) >= config.authorizeMaxFailures) {
+          this.sendClient(client, { case: "oauthAuthorizeResult", value: { ok: false, error: "尝试次数过多，请回到宿主重新发起授权" } });
+          break;
+        }
+        // userId 可得时（password 模式）随凭证落库；local 模式为 null。
+        const userId = client.tokenHash ? await this.store.userIdForClientToken(client.tokenHash) : null;
+        const result = this.oauth.decide(msg.payload.value.requestId, msg.payload.value.approve, { accountId: client.accountId!, userId });
+        if (!result) {
+          client.authorizeFailures = (client.authorizeFailures ?? 0) + 1;
+          this.sendClient(client, { case: "oauthAuthorizeResult", value: { ok: false, error: "授权请求无效或已过期，请回到宿主重新发起授权" } });
+          break;
+        }
+        this.sendClient(client, { case: "oauthAuthorizeResult", value: { ok: true, redirectUrl: result.redirectUrl } });
+        break;
+      }
       case "deviceAuthorizeInfo": {
         const p = this.checkedPendingAuth(client, msg.payload.value.token);
         if (!p) break; // helper 已回过 error
@@ -3239,6 +3277,7 @@ export class Hub {
     this.preparedOperations.shutdown();
     for (const p of this.pendingAuthorizations.values()) clearTimeout(p.timer);
     this.pendingAuthorizations.clear();
+    this.oauth.shutdown();
     this.daemonResyncAuthorities.clear();
     for (const d of daemons) try { d.ws.close(1001, "server shutting down"); } catch { /* ignore */ }
     for (const c of this.clients) try { c.ws.close(1001, "server shutting down"); } catch { /* ignore */ }
