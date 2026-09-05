@@ -1575,9 +1575,25 @@ pub struct TaskRemove {
     #[prost(string, tag="1")]
     pub task_id: ::prost::alloc::string::String,
 }
+/// 查询待确认的 OAuth 授权请求（plan 090：MCP 宿主经 /oauth/authorize 发起、302 落到 web 确认页）。
+/// 不消费请求，供确认页展示客户端名与回调 host；request_id 由 302 的 query 带来。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OAuthAuthorizeInfoRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+}
+/// 确认或拒绝 OAuth 授权请求（一次性：无论确认还是拒绝，请求随即从内存摘除）。
+/// approve=true 时 server 以当前登录账号签发授权码；false 时回调带 error=access_denied。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OAuthAuthorizeDecide {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub approve: bool,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 34, 24, 35, 36, 37")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 34, 24, 35, 36, 37, 38, 39")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -1634,6 +1650,10 @@ pub mod client_to_server {
         DeviceP2pChannelOpen(super::DeviceP2pChannelOpen),
         #[prost(message, tag="37")]
         ProjectSetName(super::ProjectSetName),
+        #[prost(message, tag="38")]
+        OauthAuthorizeInfo(super::OAuthAuthorizeInfoRequest),
+        #[prost(message, tag="39")]
+        OauthAuthorizeDecide(super::OAuthAuthorizeDecide),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -1765,9 +1785,35 @@ pub struct ServerError {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientOutdated {
 }
+/// OAuthAuthorizeInfoRequest 的回应：ok 时带客户端名与回调 host（供确认页展示），否则 error 说明原因
+/// （无效/已用/已过期，不区分——同 DeviceAuthorizeInfoResult 的不泄漏原则）。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OAuthAuthorizeInfoResult {
+    #[prost(bool, tag="1")]
+    pub ok: bool,
+    #[prost(string, optional, tag="2")]
+    pub client_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="3")]
+    pub redirect_host: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="4")]
+    pub scope: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="5")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// OAuthAuthorizeDecide 的回应：ok 时带完整的回调 URL（含 code 与原 state，或 error=access_denied），
+/// 确认页直接 location.assign 跳回宿主；请求无效/过期时 ok=false 带 error。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OAuthAuthorizeResult {
+    #[prost(bool, tag="1")]
+    pub ok: bool,
+    #[prost(string, optional, tag="2")]
+    pub redirect_url: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 33, 34, 35, 36")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 33, 34, 35, 36, 37, 38")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -1826,6 +1872,10 @@ pub mod server_to_client {
         DeviceP2pAnswer(super::DeviceP2pAnswer),
         #[prost(message, tag="36")]
         DeviceP2pChannelResult(super::DeviceP2pChannelResult),
+        #[prost(message, tag="37")]
+        OauthAuthorizeInfo(super::OAuthAuthorizeInfoResult),
+        #[prost(message, tag="38")]
+        OauthAuthorizeResult(super::OAuthAuthorizeResult),
     }
 }
 // ===== Daemon → Server 载荷 =====

@@ -157,6 +157,7 @@ test("runSchemaMigrations 不依赖 postgres.camel，默认 transform pool 可�
       { version: 1, baseline: false },
       { version: 2, baseline: false },
       { version: 3, baseline: false },
+      { version: 4, baseline: false },
     ]);
   });
 });
@@ -170,6 +171,7 @@ test("canonical 空 migration ledger 无业务表时可安全初始化", async (
       { version: 1, baseline: false },
       { version: 2, baseline: false },
       { version: 3, baseline: false },
+      { version: 4, baseline: false },
     ]);
   });
 });

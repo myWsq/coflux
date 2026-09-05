@@ -78,6 +78,23 @@ function secret(name: string, devDefault: string, required = true): string {
   return devDefault;
 }
 
+/** 中心公网基址：只接受无凭证、无 query/fragment 的 http(s) 基址，去掉尾部斜杠后原样作 issuer。 */
+function publicUrl(): string {
+  const raw = process.env.COFLUX_PUBLIC_URL ?? `http://127.0.0.1:${int("COFLUX_PORT", DEFAULT_PORT)}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    console.error(`[config] COFLUX_PUBLIC_URL 不是合法 URL：${raw}`);
+    process.exit(1);
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    console.error("[config] COFLUX_PUBLIC_URL 必须是无凭证、query、fragment 的 http/https 基址");
+    process.exit(1);
+  }
+  return raw.replace(/\/+$/, "");
+}
+
 export const config = {
   authProvider,
   port: int("COFLUX_PORT", DEFAULT_PORT),
@@ -95,6 +112,13 @@ export const config = {
   daemonUrl: process.env.COFLUX_DAEMON_URL ?? `ws://127.0.0.1:${int("COFLUX_PORT", DEFAULT_PORT)}/daemon`,
   /** web 控制台地址：拼进 daemon.authorizePending 下发的授权链接；反代/公网部署时用 COFLUX_WEB_URL 覆盖 */
   webUrl: process.env.COFLUX_WEB_URL ?? "http://127.0.0.1:5273",
+  /** 中心自身的公网基址（plan 090）：OAuth issuer、PRM/AS 元数据与 `/mcp` 的 resource 全由它拼，
+   *  绝不从请求 Host / X-Forwarded-* 推导（生产前面压着两层反代，头部可伪造且各层不一致）。
+   *  dev 默认本机监听地址；生产设 COFLUX_PUBLIC_URL=https://api.coflux.dev。 */
+  publicUrl: publicUrl(),
+  /** MCP OAuth 凭证有效期：access 短期（默认 1 小时），refresh 长期且用过即作废（默认与会话 token 同 30 天）。 */
+  oauthAccessTtlMs: Math.max(60_000, int("COFLUX_OAUTH_ACCESS_TTL_MS", 60 * 60 * 1000)),
+  oauthRefreshTtlMs: Math.max(60_000, int("COFLUX_OAUTH_REFRESH_TTL_MS", int("COFLUX_SESSION_TTL_MS", 30 * 24 * 60 * 60 * 1000))),
 
   /** 端口转发预览域：Host 形如 `<shortId>-<proxyHost>` 的请求按反代处理（见 plan 006；2026-08-16
    *  从 `.` 分隔挪为 `-` 分隔——预览域落一级子域，CF 橙云 Universal SSL 的 `*.coflux.dev` 才覆盖）。
