@@ -119,6 +119,10 @@ export const config = {
   /** MCP OAuth 凭证有效期：access 短期（默认 1 小时），refresh 长期且用过即作废（默认与会话 token 同 30 天）。 */
   oauthAccessTtlMs: Math.max(60_000, int("COFLUX_OAUTH_ACCESS_TTL_MS", 60 * 60 * 1000)),
   oauthRefreshTtlMs: Math.max(60_000, int("COFLUX_OAUTH_REFRESH_TTL_MS", int("COFLUX_SESSION_TTL_MS", 30 * 24 * 60 * 60 * 1000))),
+  /** refresh 轮换的复用宽限：同机多个宿主进程共用一份 token 时会拿同一个 refresh 并发去换，
+   *  刚被轮换掉的 refresh 在宽限内再次出现 → 同一 grant 下再签一对新 token、不撤链；超过宽限才当泄露整链撤销。
+   *  设 0 即无宽限（任何复用都整链撤销）。 */
+  oauthRefreshReuseGraceMs: Math.max(0, int("COFLUX_OAUTH_REFRESH_REUSE_GRACE_MS", 60_000)),
   /** DCR 注册限速（全局固定窗口，窗口同 authRateWindowMs）：Raven 上下文拿不到来源 IP，只能全局兜底。 */
   oauthRegisterRateLimit: Math.max(1, int("COFLUX_OAUTH_REGISTER_RATE_LIMIT", 30)),
 

@@ -139,7 +139,9 @@ server: 摘除待确认请求（一次性）→ 允许则签授权码并回完�
   直接 400，绝不往未经校验的地址跳；其余参数错误按规范带 `error` 跳回宿主。
 - **PKCE S256 必填**：verifier 不符 → `invalid_grant`。
 - **授权码一次性**：二次使用 → `invalid_grant`，且首次兑现签出的整链 token 作废。
-- **refresh 轮换**：旧 refresh 再次出现视为泄露信号，整链撤销；`client_id` 不匹配也拒。
+- **refresh 轮换**：原子条件更新（只有仍未撤销的 refresh 会被本次轮换掉）；刚被轮换掉的 refresh 在
+  `COFLUX_OAUTH_REFRESH_REUSE_GRACE_MS`（默认 60s）内再次出现按同机多宿主并发轮换处理——同一 grant 下再签一对、
+  不撤链；超过宽限再出现视为泄露信号，整链撤销；`client_id` 不匹配也拒。
 - **隔离**：所有 tools 只按 bearer 解析出的 `accountId` 读取；带 id 的入参不属于当前账号与不存在回同一句错误。
 - URL 全部由 `COFLUX_PUBLIC_URL` 拼，不从请求 `Host` / `X-Forwarded-*` 推导（生产前面压着两层反代）。
 - 未做（后续）：已授权应用列表 / 单个撤销 UI、CIMD 注册、token 内省/撤销端点。

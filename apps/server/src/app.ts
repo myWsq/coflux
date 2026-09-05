@@ -4,6 +4,7 @@
  * （WS 升级、预览域反代分流、心跳、信号）。
  */
 import { Raven, RavenContext, isRavenError, registerContractRoute } from "@raven.js/core";
+import { createLogger } from "@coflux/core";
 import { storePlugin } from "./plugins/store.plugin.js";
 import { hubPlugin } from "./plugins/hub.plugin.js";
 import { GetHealthContract } from "./interface/get-health/get-health.contract.js";
@@ -28,6 +29,8 @@ import { DeleteMcpContract, GetMcpContract, PostMcpContract } from "./interface/
 import { DeleteMcpHandler, GetMcpHandler, PostMcpHandler } from "./interface/mcp/mcp.handler.js";
 import { oauthErrorResponse } from "./oauth.js";
 
+const log = createLogger("server");
+
 export const app = new Raven();
 
 // load 串行：hub 依赖 store 写入的 StoreState，注册顺序即依赖顺序。
@@ -41,7 +44,7 @@ app.onError((error) => {
   if (!(pathname.startsWith("/oauth/") || pathname === "/mcp" || pathname.startsWith("/.well-known/"))) return undefined;
   if (error.message === "Not Found") return oauthErrorResponse(404, "invalid_request", "未知的端点");
   if (isRavenError(error) && error.code === "ERR_BAD_REQUEST") return oauthErrorResponse(400, "invalid_request", "请求体不是合法 JSON");
-  console.error("Unhandled OAuth/MCP error:", error);
+  log.error("OAuth/MCP 路径未处理的错误", { pathname, err: error.stack ?? String(error) });
   return oauthErrorResponse(500, "server_error", "服务器内部错误");
 });
 

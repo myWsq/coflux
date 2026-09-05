@@ -16,7 +16,7 @@ import { createLogger } from "@coflux/core";
 import type { AccountId } from "@coflux/protocol";
 import { config } from "./config.js";
 import { genToken, hashToken } from "./secrets.js";
-import type { OAuthClientRecord, Store } from "./store.js";
+import type { OAuthClientRecord, OAuthTokenRecord, Store } from "./store.js";
 
 const log = createLogger("server");
 
@@ -435,18 +435,37 @@ export class OAuthService {
     const clientId = field("client_id");
     if (!refreshToken) return oauthErrorResponse(400, "invalid_request", "缺少 refresh_token");
     if (!clientId) return oauthErrorResponse(400, "invalid_request", "缺少 client_id");
+    const now = Date.now();
     const record = await this.store.getOAuthToken(hashToken(refreshToken), "refresh");
     if (!record) return oauthErrorResponse(400, "invalid_grant", "refresh_token 无效或已过期");
-    if (record.revoked) {
-      // 已轮换掉的 refresh 再次出现 = 泄露信号，整链撤销。
+    if (record.revoked) return this.reuseRotatedRefresh(record, clientId, now);
+    if (record.expiresAt <= now) return oauthErrorResponse(400, "invalid_grant", "refresh_token 无效或已过期");
+    if (record.clientId !== clientId) return oauthErrorResponse(400, "invalid_grant", "client_id 与 refresh_token 不匹配");
+    // 轮换必须原子：读到未撤销 → 条件更新；0 行说明另一并发请求刚把它轮换掉（同机两个宿主进程
+    // 共用一份 token 的典型场景），此时按"刚被轮换"走宽限逻辑，而不是把两边一起锁出去。
+    const rotated = await this.store.rotateOAuthRefreshToken(record.tokenHash, now);
+    if (!rotated) {
+      const latest = await this.store.getOAuthToken(record.tokenHash, "refresh");
+      if (!latest) return oauthErrorResponse(400, "invalid_grant", "refresh_token 无效或已过期");
+      return this.reuseRotatedRefresh(latest, clientId, now);
+    }
+    // 旧 refresh 已作废（旧 access 到期自然失效），新 access+refresh 沿用 grant。
+    return this.issueTokens({ grantId: record.grantId, clientId, accountId: record.accountId, userId: record.userId, scope: record.scope });
+  }
+
+  /** 已撤销的 refresh 再次出现：刚被轮换且在宽限内 → 同一 grant 下再签一对（并发轮换，不撤链）；
+   * 否则（超过宽限、或不是被轮换而是被整链撤销的）= 泄露信号，整链撤销。 */
+  private async reuseRotatedRefresh(record: OAuthTokenRecord, clientId: string, now: number): Promise<Response> {
+    const grace = config.oauthRefreshReuseGraceMs;
+    const withinGrace = grace > 0 && record.rotatedAt !== null && now - record.rotatedAt <= grace;
+    if (!withinGrace) {
       await this.store.revokeOAuthGrant(record.grantId);
       log.warn("oauth refresh token 被重放，已整链撤销", { clientId: record.clientId });
       return oauthErrorResponse(400, "invalid_grant", "refresh_token 已失效");
     }
-    if (record.expiresAt <= Date.now()) return oauthErrorResponse(400, "invalid_grant", "refresh_token 无效或已过期");
+    if (record.expiresAt <= now) return oauthErrorResponse(400, "invalid_grant", "refresh_token 无效或已过期");
     if (record.clientId !== clientId) return oauthErrorResponse(400, "invalid_grant", "client_id 与 refresh_token 不匹配");
-    // 轮换：旧 refresh 立即作废（旧 access 到期自然失效），新 access+refresh 沿用 grant。
-    await this.store.revokeOAuthToken(record.tokenHash);
+    log.info("oauth refresh token 在宽限内复用（并发轮换）", { clientId, graceMs: grace });
     return this.issueTokens({ grantId: record.grantId, clientId, accountId: record.accountId, userId: record.userId, scope: record.scope });
   }
 
@@ -466,6 +485,7 @@ export class OAuthService {
       createdAt: now,
       expiresAt: accessExpiresAt,
       revoked: false,
+      rotatedAt: null,
     });
     await this.store.insertOAuthToken({
       tokenHash: hashToken(refreshToken),
@@ -478,6 +498,7 @@ export class OAuthService {
       createdAt: now,
       expiresAt: now + config.oauthRefreshTtlMs,
       revoked: false,
+      rotatedAt: null,
     });
     await this.store.touchOAuthClient(grant.clientId, now);
     return jsonNoStore(200, {
@@ -508,7 +529,8 @@ export class OAuthService {
   /** `/mcp` 的 401 挑战：`WWW-Authenticate: Bearer resource_metadata="…"`，宿主据此发现 PRM → AS。 */
   challenge(error?: "invalid"): Response {
     const parts = [`resource_metadata="${this.resourceMetadataUrl}"`];
-    if (error === "invalid") parts.push('error="invalid_token"', 'error_description="access token 无效或已过期"');
+    // 头值只能是 ISO-8859-1（undici 对非 ASCII 头值直接抛 TypeError → 变成 500）：中文只留在 JSON body 里。
+    if (error === "invalid") parts.push('error="invalid_token"', 'error_description="The access token is invalid or expired"');
     return Response.json(
       { jsonrpc: "2.0", error: { code: -32001, message: error === "invalid" ? "Unauthorized: access token 无效或已过期" : "Unauthorized: 需要 OAuth 授权" }, id: null },
       { status: 401, headers: { "WWW-Authenticate": `Bearer ${parts.join(", ")}`, "Cache-Control": "no-store" } },

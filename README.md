@@ -90,6 +90,7 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 | `COFLUX_PUBLIC_URL` | `http://127.0.0.1:<COFLUX_PORT>` | 中心自身公网基址：OAuth issuer、PRM/AS 元数据与 `/mcp` 资源标识全由它拼（生产 `https://api.coflux.dev`），不从请求头推导 |
 | `COFLUX_OAUTH_ACCESS_TTL_MS` | `3600000` | MCP 宿主 OAuth access token 有效期（默认 1 小时） |
 | `COFLUX_OAUTH_REFRESH_TTL_MS` | 同 `COFLUX_SESSION_TTL_MS` | MCP 宿主 OAuth refresh token 有效期（用过即作废、轮换） |
+| `COFLUX_OAUTH_REFRESH_REUSE_GRACE_MS` | `60000` | 刚被轮换掉的 refresh token 在此宽限内再次出现按同机并发轮换复用（同 grant 再签一对）；超过宽限才当泄露整链撤销；`0` = 无宽限 |
 | `COFLUX_SERVER` | `ws://localhost:8787/daemon` | daemon 连接的服务器地址 |
 | `COFLUX_DEVICE_NAME` | `<hostname>` | daemon 登记时的设备名 |
 | `COFLUX_HOME` | `~/.coflux` | daemon 凭证存放目录 |

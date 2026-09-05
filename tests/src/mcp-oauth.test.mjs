@@ -10,13 +10,15 @@
  *
  * 注意 read_terminal 基于中心 2 秒周期的 checkpoint（过渡实现，091 换经 daemon 读）：先等观察端收到
  * 含 marker 的 sessionCheckpoint 再读。
+ *
+ * 端口：主栈 8866（refresh 复用宽限设 0，保住"重放即整链撤销"断言）；宽限正向用例另起只有 server 的 8868。
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { TaskStatus } from "@coflux/protocol";
-import { startStack, mkRepo } from "./harness.mjs";
+import { startStack, startServer, mkRepo } from "./harness.mjs";
 import { openRelayDevice, utf8 } from "./device-harness.mjs";
 import {
   callTool,
@@ -38,6 +40,8 @@ import {
 
 const PORT = 8866;
 const BASE = `http://127.0.0.1:${PORT}`;
+const GRACE_PORT = 8868;
+const GRACE_BASE = `http://127.0.0.1:${GRACE_PORT}`;
 const EXPECTED_TOOLS = ["list_devices", "list_projects", "list_workspaces", "list_terminals", "read_terminal", "list_ports"];
 
 const HTTP_SERVER_SRC = `
@@ -48,6 +52,8 @@ server.listen(0, "127.0.0.1", () => { console.log("PORT=" + server.address().por
 
 let stack;
 let repo;
+/** daemon 导入时对仓库路径做了 realpath（macOS 的 /var → /private/var），比较一律用它。 */
+let repoPath;
 let device;
 let consentWs;
 let clientId;
@@ -58,7 +64,7 @@ let taskId;
 let sessionId;
 
 before(async () => {
-  stack = await startStack({ port: PORT, serverEnv: { COFLUX_PUBLIC_URL: BASE } });
+  stack = await startStack({ port: PORT, serverEnv: { COFLUX_PUBLIC_URL: BASE, COFLUX_OAUTH_REFRESH_REUSE_GRACE_MS: "0" } });
   consentWs = await consentClient(stack);
 });
 
@@ -158,6 +164,7 @@ test("坏 token → 401 且 error=invalid_token", async () => {
 
 test("造账号资产：设备在线、导入项目、开终端并留下输出", async () => {
   repo = mkRepo();
+  repoPath = realpathSync(repo.dir);
   writeFileSync(join(repo.dir, "server-http.js"), HTTP_SERVER_SRC);
   device = await openRelayDevice(stack);
   const c = device.control;
@@ -209,7 +216,7 @@ test("list_projects：看到导入的仓库", async () => {
   assert.ok(!r.result.isError);
   const project = r.result.structuredContent.projects.find((p) => p.id === projectId);
   assert.ok(project);
-  assert.equal(project.repoPath, repo.dir);
+  assert.equal(project.repoPath, repoPath);
   assert.equal(project.deviceId, stack.daemonId);
   assert.ok(project.defaultBranch);
 });
@@ -221,7 +228,7 @@ test("list_workspaces：全量与按项目筛", async () => {
   assert.ok(main);
   assert.equal(main.isMain, true);
   assert.equal(main.projectId, projectId);
-  assert.equal(main.path, repo.dir);
+  assert.equal(main.path, repoPath);
   assert.equal(typeof main.additions, "number");
 
   const filtered = await callTool(BASE, tokens.access_token, "list_workspaces", { projectId });
@@ -319,7 +326,7 @@ test("负向：授权码二次使用被拒，且首次签出的 token 整链作�
   assert.equal(revoked.status, 401, "重放后首次签出的 access 也失效");
 });
 
-test("负向：refresh 轮换后旧 refresh 被拒，新 access 可用", async () => {
+test("负向：refresh 轮换后旧 refresh 被拒（宽限 0：重放即整链撤销），新 access 可用", async () => {
   const rotated = await refreshTokens(BASE, { refreshToken: tokens.refresh_token, clientId });
   assert.equal(rotated.status, 200, JSON.stringify(rotated.json));
   assert.notEqual(rotated.json.access_token, tokens.access_token);
@@ -341,6 +348,42 @@ test("负向：refresh 轮换后旧 refresh 被拒，新 access 可用", async (
   assert.equal(mismatch.status, 400);
   assert.equal(mismatch.json.error, "invalid_grant");
   tokens = stolen;
+});
+
+test("refresh 复用宽限：并发轮换时旧 refresh 在宽限内再换到新 token，旧链不撤", async () => {
+  // 同机两个宿主进程共用一份 token 的场景：宽限设得很长，不靠 sleep 卡时间窗
+  const server = await startServer({
+    port: GRACE_PORT,
+    env: { COFLUX_PASSWORD: "admin", COFLUX_PUBLIC_URL: GRACE_BASE, COFLUX_OAUTH_REFRESH_REUSE_GRACE_MS: "600000" },
+  });
+  let ws;
+  try {
+    ws = await consentClient(server);
+    const first = await obtainTokens(GRACE_BASE, ws);
+    const second = await refreshTokens(GRACE_BASE, { refreshToken: first.refresh_token, clientId: first.clientId });
+    assert.equal(second.status, 200, JSON.stringify(second.json));
+    // 另一个进程拿着同一个（刚被轮换掉的）refresh 再来换
+    const reused = await refreshTokens(GRACE_BASE, { refreshToken: first.refresh_token, clientId: first.clientId });
+    assert.equal(reused.status, 200, `宽限内复用应拿到新 token：${JSON.stringify(reused.json)}`);
+    assert.notEqual(reused.json.access_token, second.json.access_token);
+    assert.notEqual(reused.json.refresh_token, second.json.refresh_token);
+    // 两边的 access 都能用：没有整链撤销
+    assert.equal((await mcpListTools(GRACE_BASE, second.json.access_token)).status, 200, "第一次轮换出的 access 未被撤");
+    assert.equal((await mcpListTools(GRACE_BASE, reused.json.access_token)).status, 200, "宽限内复用签出的 access 可用");
+    // 各自拿到的新 refresh 也都能继续轮换
+    const third = await refreshTokens(GRACE_BASE, { refreshToken: second.json.refresh_token, clientId: first.clientId });
+    assert.equal(third.status, 200, JSON.stringify(third.json));
+    const fourth = await refreshTokens(GRACE_BASE, { refreshToken: reused.json.refresh_token, clientId: first.clientId });
+    assert.equal(fourth.status, 200, JSON.stringify(fourth.json));
+    // 换 client_id 仍拒，宽限不放松客户端绑定
+    const other = await registerClient(GRACE_BASE);
+    const mismatch = await refreshTokens(GRACE_BASE, { refreshToken: first.refresh_token, clientId: other.json.client_id });
+    assert.equal(mismatch.status, 400);
+    assert.equal(mismatch.json.error, "invalid_grant");
+  } finally {
+    ws?.close();
+    await server.stop();
+  }
 });
 
 test("负向：非 loopback 且未注册的 redirect_uri 直接 400，不跳转", async () => {

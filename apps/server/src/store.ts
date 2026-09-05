@@ -279,6 +279,8 @@ export interface OAuthTokenRecord {
   createdAt: number;
   expiresAt: number;
   revoked: boolean;
+  /** refresh 被轮换掉的时刻（access / 未轮换的 refresh 为 NULL），供复用宽限判定。 */
+  rotatedAt: number | null;
 }
 
 function rowToCheckpoint(row: SessionCheckpointRow): SessionCheckpointRecord {
@@ -1118,10 +1120,10 @@ export class Store {
 
   async insertOAuthToken(token: OAuthTokenRecord): Promise<void> {
     await this.sql`
-      INSERT INTO oauth_tokens (token_hash, kind, grant_id, client_id, account_id, user_id, scope, created_at, expires_at, revoked)
+      INSERT INTO oauth_tokens (token_hash, kind, grant_id, client_id, account_id, user_id, scope, created_at, expires_at, revoked, rotated_at)
       VALUES (
         ${token.tokenHash}, ${token.kind}, ${token.grantId}, ${token.clientId}, ${token.accountId}, ${token.userId},
-        ${token.scope}, ${token.createdAt}, ${token.expiresAt}, ${token.revoked}
+        ${token.scope}, ${token.createdAt}, ${token.expiresAt}, ${token.revoked}, ${token.rotatedAt}
       )
     `;
   }
@@ -1132,6 +1134,16 @@ export class Store {
   }
   async revokeOAuthToken(tokenHash: string): Promise<void> {
     await this.sql`UPDATE oauth_tokens SET revoked = true WHERE token_hash = ${tokenHash}`;
+  }
+  /** 原子轮换：只有"仍未撤销"的 refresh 才会被本次轮换掉（条件更新），返回是否由本次完成。
+   * 0 行 = 另一并发请求刚把它轮换掉，调用方按"刚被轮换"走宽限逻辑，而不是当泄露撤链。 */
+  async rotateOAuthRefreshToken(tokenHash: string, now: number): Promise<boolean> {
+    const rows = await this.sql<{ tokenHash: string }[]>`
+      UPDATE oauth_tokens SET revoked = true, rotated_at = ${now}
+      WHERE token_hash = ${tokenHash} AND kind = 'refresh' AND revoked = false
+      RETURNING token_hash
+    `;
+    return rows.length === 1;
   }
   /** 整链撤销：refresh 重放 / 授权码二次使用时把同一 grant 下的全部 token 作废。 */
   async revokeOAuthGrant(grantId: string): Promise<void> {
