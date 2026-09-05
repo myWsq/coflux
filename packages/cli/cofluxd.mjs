@@ -938,135 +938,6 @@ async function cmdHook() {
   }
 }
 
-/* --------------------- agent 协同控制（plan 074） --------------------- */
-// 跑在 coflux 终端里的 claude/codex 用这组命令，把自己的工作外化成用户在 web/手机上
-// **看得见、能接管**的 coflux 实体——而不是在自己的 Bash 里后台起一个谁也看不见的进程。
-//
-// 不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，树外一律拒。
-// 与 `hook` 子命令的约定**相反**：这些命令必须写 stdout——输出就是给 agent 读的返回值。
-// 也刻意不做自动重试：terminal new 有副作用，重试会开出两个终端，失败就把错误交给 agent。
-
-const AGENT_TIMEOUT_MS = 30_000;
-const DEFAULT_READ_LINES = 200;
-// wait 的循环必须在 CLI 侧：单次 agentPost 撑不起长等待（daemon 控制 WS 有自己的往返超时）。
-// 默认 30 分钟——编码任务常跑很久；轮询走 terminal.list（status 来自 sessionExit 事件链，
-// 不受快照 ~2s 延迟影响），3 秒一次对本机 loopback 是零负担。
-const DEFAULT_WAIT_TIMEOUT_S = 1800;
-const WAIT_POLL_MS = 3000;
-
-async function agentPost(body) {
-  const portResult = localGatewayPort();
-  if (!portResult.ok) die(portResult.error);
-  let res;
-  try {
-    res = await fetch(`http://127.0.0.1:${portResult.port}/agent`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...body, pid: process.pid, ppid: process.ppid }),
-      signal: AbortSignal.timeout(AGENT_TIMEOUT_MS),
-    });
-  } catch (error) {
-    die(`连不上本机 daemon：${error?.message || error}（daemon 没在跑？先看 cofluxd status）`);
-  }
-  let parsed = null;
-  try { parsed = await res.json(); } catch { /* 非 JSON 响应按下面的兜底报错处理 */ }
-  if (!res.ok || !parsed?.ok) die(parsed?.error || `daemon 返回 ${res.status}`);
-  return parsed;
-}
-
-// 剥掉 ANSI/OSC 转义与 C0 控制字符，保留 \t 与 \n——snapshot 是给终端渲染的字节流，
-// agent 要的是能读的纯文本。去转义放在 CLI 侧：daemon 的 snapshot 同时是 checkpoint 的
-// 数据来源，不为 agent 的可读性改它的语义。
-const ANSI_RE =
-  /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[[\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-PR-TZcf-ntqry=><~]|[\u0000-\u0008\u000b-\u001f\u007f]/g;
-
-function stripAnsi(raw) {
-  return String(raw ?? "").replace(ANSI_RE, "");
-}
-
-/** 取最后 n 行并去掉尾部空行——VT snapshot 的下半屏通常是成片空行，对 agent 是纯噪音。 */
-function tailLines(text, n) {
-  const lines = text.split("\n");
-  while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
-  return lines.slice(-n).join("\n");
-}
-
-async function cmdTerminal(values) {
-  const sub = positionals[1];
-  if (sub === "new") {
-    const command = values.cmd;
-    if (!command) die(`terminal new 需要 --cmd "<命令>"`);
-    const result = await agentPost({ action: "terminal.new", title: values.title || "", command });
-    console.log(`已开终端 ${result.taskId}（用户可在 coflux 侧栏看到并随时接管）`);
-    console.log(`看输出：cofluxd terminal read ${result.taskId}`);
-  } else if (sub === "list") {
-    const { terminals } = await agentPost({ action: "terminal.list" });
-    if (!terminals.length) return void console.log("本工作区暂无终端");
-    for (const t of terminals) {
-      const exit = t.exitCode === undefined || t.exitCode === null ? "" : ` exit=${t.exitCode}`;
-      console.log(`${t.taskId}  ${t.status}${exit}  ${t.title}`);
-    }
-  } else if (sub === "read") {
-    const taskId = positionals[2];
-    if (!taskId) die("terminal read 需要 <taskId>（用 cofluxd terminal list 查）");
-    const requested = Number(values.lines);
-    const lines = Number.isInteger(requested) && requested > 0 ? requested : DEFAULT_READ_LINES;
-    const result = await agentPost({ action: "terminal.read", taskId });
-    const exit = result.exitCode === undefined || result.exitCode === null ? "" : ` exit=${result.exitCode}`;
-    console.log(`# ${result.status}${exit}`);
-    const text = tailLines(stripAnsi(result.ansi), lines);
-    console.log(text || "（暂无输出）");
-  } else if (sub === "send") {
-    const taskId = positionals[2];
-    if (!taskId) die("terminal send 需要 <taskId>（用 cofluxd terminal list 查）");
-    const text = values.text ?? "";
-    if (!text && !values.enter) die(`terminal send 需要 --text "<文本>"（或至少 --enter 发一个回车）`);
-    await agentPost({ action: "terminal.send", taskId, text, enter: Boolean(values.enter) });
-    console.log(`已写入终端 ${taskId}（用 cofluxd terminal read ${taskId} 核对效果）`);
-  } else if (sub === "wait") {
-    const taskId = positionals[2];
-    if (!taskId) die("terminal wait 需要 <taskId>（用 cofluxd terminal list 查）");
-    const requested = Number(values.timeout);
-    const timeoutSec = Number.isFinite(requested) && requested > 0 ? requested : DEFAULT_WAIT_TIMEOUT_S;
-    const deadline = Date.now() + timeoutSec * 1000;
-    for (;;) {
-      const { terminals } = await agentPost({ action: "terminal.list" });
-      const t = terminals.find((x) => x.taskId === taskId);
-      if (!t) die(`本工作区没有终端 ${taskId}（用 cofluxd terminal list 查）`);
-      if (t.status === "exited") {
-        const exit = t.exitCode === undefined || t.exitCode === null ? "" : ` exit=${t.exitCode}`;
-        return void console.log(`# exited${exit}`);
-      }
-      if (Date.now() >= deadline) {
-        die(`等待超时（${timeoutSec}s）：终端 ${taskId} 仍是 ${t.status}。可加大 --timeout，或 cofluxd terminal read ${taskId} 看现场`);
-      }
-      await sleep(WAIT_POLL_MS);
-    }
-  } else {
-    die(`terminal 需要子命令：new | list | read | wait | send`);
-  }
-}
-
-async function cmdNotify() {
-  const message = positionals.slice(1).join(" ").trim();
-  if (!message) die(`notify 需要一句话，例如：cofluxd notify "两个方案拿不准，需要你定"`);
-  await agentPost({ action: "notify", message });
-  console.log("已通知用户（工作区在侧栏转为「等待交互」）");
-}
-
-async function cmdProgress() {
-  const message = positionals.slice(1).join(" ").trim();
-  if (!message) die(`progress 需要一句话，例如：cofluxd progress "复现了，正在定位 relay 重连"`);
-  await agentPost({ action: "progress", message });
-  console.log("已更新进度（显示在工作区卡片上，被下一条覆盖）");
-}
-
-async function cmdPorts() {
-  const { ports } = await agentPost({ action: "ports" });
-  if (!ports.length) return void console.log("本工作区暂无监听端口");
-  for (const p of ports) console.log(`${p.port}  ${p.url}`);
-}
-
 const HELP = `cofluxd —— coflux daemon 管理
 
   cofluxd                 首次=up（打印浏览器授权链接），已配置=status
@@ -1082,20 +953,9 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd hook <claude|codex>   [agent hook 信使] 读 stdin/argv 的事件 JSON，转发给本机 daemon
                           （在 claude/codex 的 hook 配置里指向本命令；失败静默，不干扰 agent）
 
-  以下几条供**跑在 coflux 终端里的 agent** 调用，把工作变成用户看得见、能接管的东西：
-
-  cofluxd terminal new --cmd "<命令>" [--title "<标题>"]
-                          开一个真实终端跑命令，用户在 coflux 侧栏能看到并随时接管
-  cofluxd terminal list   列出本工作区的终端（含 status / 退出码）
-  cofluxd terminal read <taskId> [--lines N]
-                          读某个终端的内容（纯文本，默认最后 200 行；终端已退出也能读）
-  cofluxd terminal wait <taskId> [--timeout <秒>]
-                          阻塞等到该终端退出，打印退出码（默认超时 30 分钟）
-  cofluxd terminal send <taskId> --text "<文本>" [--enter]
-                          往终端里输入文本（--enter 追加回车）。用户正在接管时会被拒
-  cofluxd notify "<一句话>"  叫人：工作区在侧栏转为「等待交互」并显示这句话
-  cofluxd progress "<一句话>"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
-  cofluxd ports           列出本工作区的监听端口及可直接打开的预览 URL
+  跑在 coflux 终端里的 agent 要开终端/读输出/等退出/输入/播报进度/叫人/拿预览 URL，一律走中心的
+  coflux MCP（16 个 tools）：claude mcp add --transport http coflux "$COFLUX_MCP_URL"
+  （Codex：codex mcp add coflux --url "$COFLUX_MCP_URL"）。本 CLI 不再承载任何 agent 能力。
 
 up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
 通用: --version <vX|latest>(不传时 up 沿用已有二进制，update 默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
@@ -1103,9 +963,16 @@ up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
 
 // onboard/reload 已在命令面重梳中移除（用户拍板 2026-07-23，见 plans/035）：onboard 的交互
 // 问答只剩"问设备名"，价值不足以撑一个命令；reload 与幂等化后的 up 语义重复。
+// terminal/notify/progress/ports（plan 074/088 的 agent 命令）自 plan 093 起并入中心 MCP：这里只留
+// 迁移提示而不是「未知命令」——旧 SKILL 或旧记忆驱动的 agent 得拿到去路。四个入口没有任何功能。
+const MCP_JOIN = 'claude mcp add --transport http coflux "$COFLUX_MCP_URL"（Codex：codex mcp add coflux --url "$COFLUX_MCP_URL"）';
 const MIGRATED = {
   onboard: "onboard 已并入 up，直接运行 `cofluxd up`",
   reload: "reload 已并入 up（up 现幂等，会按 settings.json 重装服务并重启），直接运行 `cofluxd up`",
+  terminal: `terminal 已并入 coflux MCP，对应 tool 是 create_terminal / list_terminals / read_terminal / wait_terminal / send_terminal_input（自己的终端 id 是 $COFLUX_TASK_ID，工作区 id 是 $COFLUX_WORKSPACE_ID）；接入：${MCP_JOIN}`,
+  notify: `notify 已并入 coflux MCP，对应 tool 是 notify_user（terminalId 用 $COFLUX_TASK_ID）；接入：${MCP_JOIN}`,
+  progress: `progress 已并入 coflux MCP，对应 tool 是 report_progress（terminalId 用 $COFLUX_TASK_ID）；接入：${MCP_JOIN}`,
+  ports: `ports 已并入 coflux MCP，对应 tool 是 list_ports（workspaceId 用 $COFLUX_WORKSPACE_ID）；接入：${MCP_JOIN}`,
 };
 
 const { values, positionals } = parseArgs({
@@ -1114,12 +981,6 @@ const { values, positionals } = parseArgs({
     server: { type: "string" },
     name: { type: "string" },
     shell: { type: "string" },
-    title: { type: "string" },
-    cmd: { type: "string" },
-    lines: { type: "string" },
-    timeout: { type: "string" },
-    text: { type: "string" },
-    enter: { type: "boolean", default: false },
     version: { type: "string" },
     "bin-dir": { type: "string" },
     "no-start": { type: "boolean", default: false },
@@ -1133,7 +994,7 @@ let cmd = positionals[0];
 if (values.help || cmd === "help") { console.log(HELP); process.exit(0); }
 if (!cmd) cmd = fs.existsSync(SETTINGS) ? "status" : "up"; // 首次裸跑 → 引导
 
-const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall, hook: cmdHook, terminal: cmdTerminal, notify: cmdNotify, progress: cmdProgress, ports: cmdPorts };
+const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall, hook: cmdHook };
 const h = handlers[cmd];
 if (!h) die(`未知命令: ${cmd}${MIGRATED[cmd] ? `\n${MIGRATED[cmd]}` : ""}\n\n${HELP}`);
 await h(values);
