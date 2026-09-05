@@ -35,7 +35,7 @@ export * from "./gen/coflux/v1/device_pb.js";
 export { create };
 
 import { ClientToServerSchema, ServerToClientSchema, type ClientToServer, type ServerToClient } from "./gen/coflux/v1/client_pb.js";
-import { AgentControlResultSchema, DaemonToServerSchema, ServerToDaemonSchema, type DaemonToServer, type ServerToDaemon } from "./gen/coflux/v1/daemon_pb.js";
+import { DaemonToServerSchema, ServerToDaemonSchema, type DaemonToServer, type ServerToDaemon } from "./gen/coflux/v1/daemon_pb.js";
 import { DeviceEnvelopeSchema, type DeviceEnvelope } from "./gen/coflux/v1/device_pb.js";
 
 export const DEFAULT_PORT = 8787;
@@ -75,8 +75,6 @@ export type ServerToDaemonPayload = MessageInitShape<typeof ServerToDaemonSchema
 export type ClientToServerPayload = MessageInitShape<typeof ClientToServerSchema>["payload"];
 export type DaemonToServerPayload = MessageInitShape<typeof DaemonToServerSchema>["payload"];
 export type DeviceEnvelopePayload = MessageInitShape<typeof DeviceEnvelopeSchema>["payload"];
-/** agent 控制回执的结果载荷（plan 074）；同上，供 hub 拼字面量后交 sendDaemon 统一 create。 */
-export type AgentControlResultPayload = MessageInitShape<typeof AgentControlResultSchema>["payload"];
 
 export type AccountId = string;
 export type DaemonId = string;
