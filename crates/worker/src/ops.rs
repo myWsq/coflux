@@ -309,31 +309,32 @@ pub async fn read_file_text(root: &str, rel: &str) -> (bool, String, Option<Stri
     }
 }
 
-/* ------------------- agent 协同控制：命令包装脚本（plan 074） ------------------- */
+/* ------- 命令终端：包装脚本 + 日志汇（plan 074 引入，plan 091 中心也走，plan 094 日志汇有界） ------- */
+//
+// 把 shell 命令行包成一个可执行脚本，让新终端跑一条命令。
+//
+// 为什么要包这一层：supervisor 侧起 PTY 用的是 `CommandBuilder::new(&shell)`，**只接受单个可执行
+// 程序名、不接受 args**（见 `crates/supervisor/src/sessions.rs`），所以要让新终端跑一条命令，唯一
+// 不改 supervisor 的办法就是让 `shell` 字段指向这样一个脚本。supervisor 不走热升级，改它意味着全网
+// daemon 都要用户手动 `cofluxd update && cofluxd restart`，所以这层包装是刻意付出的代价。
+//
+// 脚本用 **login shell** 执行命令：daemon 由 launchd/systemd 拉起，PATH 通常只有系统默认，
+// 不走 login shell 会找不到 pnpm/node 这类装在用户 PATH 里的东西。
+//
+// 命令执行完脚本即退出 → session 退出 → 中心 task 转 EXITED 并带上退出码，这正是 agent 判断
+// 「跑完没有、成没成」的依据。刻意**不**在末尾留交互 shell：那会让 task 永远 RUNNING，侧栏堆满
+// 假的「运行中」，而用户想接管在命令运行期间本来就可以。
+//
+// 输出经 worker 自带的日志汇（`crate::log_sink`，站在 `tee` 原来的位置）同时落一份**有界、保尾**
+// 的日志。**这不是可选的优化**：中心 checkpoint 是 2 秒周期的派生缓存，而 session 一退出
+// supervisor 就把它从 map 里摘掉（见 `crates/supervisor/src/sessions.rs` 的 reaper），所以跑 1 秒的
+// 命令输出永远进不了 checkpoint——而「跑完了看输出」正是 agent 最常用的动作。日志还比 VT 快照更
+// 有用：快照只有一屏，日志是最近 1-2 MiB 的全量。
+//
+// 代价：命令的 stdout 是管道而非 tty，多数程序会因此关掉颜色和进度条。对 agent 读日志反而更干净，
+// 用户接管时仍能在 PTY 上看到实时输出（日志汇透传的那一路）。
 
-/// 把 shell 命令行包成一个可执行脚本，返回其绝对路径。
-///
-/// 为什么要包这一层：supervisor 侧起 PTY 用的是 `CommandBuilder::new(&shell)`，**只接受
-/// 单个可执行程序名、不接受 args**（见 `crates/supervisor/src/sessions.rs`），所以 agent
-/// 想让新终端跑一条命令，唯一不改 supervisor 的办法就是让 `shell` 字段指向这样一个脚本。
-/// supervisor 不走热升级，改它意味着全网 daemon 都要用户手动 `cofluxd update`，所以这层
-/// 包装是刻意付出的代价（见 plans/074 Decisions）。
-///
-/// 脚本用 **login shell** 执行命令：daemon 由 launchd/systemd 拉起，PATH 通常只有系统默认，
-/// 不走 login shell 会找不到 pnpm/node 这类装在用户 PATH 里的东西。
-///
-/// 命令执行完脚本即退出 → session 退出 → 中心 task 转 EXITED 并带上退出码，这正是 agent
-/// 判断「跑完没有、成没成」的依据。刻意**不**在末尾留交互 shell：那会让 task 永远 RUNNING，
-/// 侧栏堆满假的「运行中」，而用户想接管在命令运行期间本来就可以。
-///
-/// 输出经 `tee` 同时落一份日志，返回 `(脚本路径, 日志路径)`。**这不是可选的优化**：中心
-/// checkpoint 是 2 秒周期的派生缓存，而 session 一退出 supervisor 就把它从 map 里摘掉
-/// （见 `crates/supervisor/src/sessions.rs` 的 reaper），所以跑 1 秒的命令输出永远进不了
-/// checkpoint——而「跑完了看输出」正是 agent 最常用的动作。日志还比 VT 快照更有用：快照
-/// 只有一屏，日志是全量。
-///
-/// 代价：命令的 stdout 是管道而非 tty，多数程序会因此关掉颜色和进度条。对 agent 读日志
-/// 反而更干净，用户接管时仍能在 PTY 上看到实时输出（tee 的另一路）。
+/// agent 本地 `terminal new`（plan 074）：脚本名带 pid + 纳秒时间戳，不会撞名。
 pub fn write_command_script(command: &str) -> Result<(String, String), String> {
     let name = format!(
         "cmd-{}-{}.sh",
@@ -370,6 +371,18 @@ pub fn write_operation_command_script(
     write_command_script_named(&name, command)
 }
 
+/// 日志汇程序：worker 自己（`current_exe`，见 `crate::log_sink`）。单测里换成一个 `tee` 替身——
+/// 测试二进制没有 `--log-sink` 分流。
+fn log_sink_program() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(path) = agent_script_tests::sink_override() {
+        return Ok(path);
+    }
+    std::env::current_exe().map_err(|error| format!("定位 worker 可执行文件失败：{error}"))
+}
+
+/// 两条建终端路径共用的模板；**只动模板、不动命名**——`write_operation_command_script` 的文件名
+/// 派生规则是 sessiond 账本的一部分。
 fn write_command_script_named(name: &str, command: &str) -> Result<(String, String), String> {
     let base = std::env::temp_dir().join("coflux-agent-cmd");
     std::fs::create_dir_all(&base).map_err(|error| error.to_string())?;
@@ -380,12 +393,18 @@ fn write_command_script_named(name: &str, command: &str) -> Result<(String, Stri
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/bin/bash".to_string());
-    // bash 而非 sh：管道尾是 tee，命令自己的退出码只能靠 PIPESTATUS 取回，而 agent 判断
-    // 成败全靠它。仓库已假设 bash 存在（supervisor 的默认 shell fallback 就是 /bin/bash）。
+    let sink = log_sink_program()?;
+    // bash 而非 sh：管道尾是日志汇，命令自己的退出码只能靠 PIPESTATUS 取回，而 agent 判断成败
+    // 全靠它。仓库已假设 bash 存在（supervisor 的默认 shell fallback 就是 /bin/bash）。
+    // 日志汇放进 `(trap '' INT QUIT; exec …)` 子 shell：Ctrl-C 打进 PTY 时整个前台进程组都收到
+    // SIGINT，日志汇若随之死掉，还在收尾输出的命令就会吃到 SIGPIPE（`tee -i` 的同一考虑）；
+    // 命令本身不受影响，它退出后管道到 EOF，日志汇自然结束。
     let script = format!(
-        "#!/bin/bash\n{} -lc {} 2>&1 | tee {}\nexit \"${{PIPESTATUS[0]}}\"\n",
+        "#!/bin/bash\n{} -lc {} 2>&1 | (trap '' INT QUIT; exec {} {} {})\nexit \"${{PIPESTATUS[0]}}\"\n",
         sh_quote(&login_shell),
         sh_quote(command),
+        sh_quote(&sink.to_string_lossy()),
+        crate::log_sink::SUBCOMMAND,
         sh_quote(&log.to_string_lossy()),
     );
     std::fs::write(&full, script).map_err(|error| error.to_string())?;
@@ -402,9 +421,27 @@ fn write_command_script_named(name: &str, command: &str) -> Result<(String, Stri
     ))
 }
 
-/// 读命令日志的尾部若干字节，按 UTF-8 lossy 转字符串。截断从字节位置切，首行可能残缺——
-/// agent 读的是终端输出，少半行无害，不值得为它做行边界扫描。
+/// 读命令日志的尾部若干字节（跨轮转段拼接：`<log>.1` 的尾部在前、当前段在后），按 UTF-8 lossy
+/// 转字符串。截断从字节位置切，首行可能残缺——agent 读的是终端输出，少半行无害，不值得为它做
+/// 行边界扫描。当前段与上一段都不存在才返回 None（日志汇 rename→create 之间的微小窗口也可能
+/// 落到这里，调用方退回快照即可）。
 pub fn read_command_log_tail(path: &str, max_bytes: u64) -> Option<String> {
+    let current = read_tail_bytes(Path::new(path), max_bytes);
+    let remaining = max_bytes.saturating_sub(current.as_ref().map_or(0, |bytes| bytes.len() as u64));
+    let previous = if remaining > 0 {
+        read_tail_bytes(&crate::log_sink::rotated_path(Path::new(path)), remaining)
+    } else {
+        None
+    };
+    if current.is_none() && previous.is_none() {
+        return None;
+    }
+    let mut bytes = previous.unwrap_or_default();
+    bytes.extend(current.unwrap_or_default());
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn read_tail_bytes(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -413,7 +450,7 @@ pub fn read_command_log_tail(path: &str, max_bytes: u64) -> Option<String> {
     }
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer).ok()?;
-    Some(String::from_utf8_lossy(&buffer).into_owned())
+    Some(buffer)
 }
 
 /// POSIX shell 单引号转义：整体套单引号，内部的 `'` 换成 `'\''`（收单引号→转义单引号→再开）。
@@ -424,7 +461,39 @@ fn sh_quote(raw: &str) -> String {
 
 #[cfg(test)]
 mod agent_script_tests {
+    use std::cell::RefCell;
+
     use super::*;
+
+    thread_local! {
+        static SINK_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn sink_override() -> Option<PathBuf> {
+        SINK_OVERRIDE.with(|slot| slot.borrow().clone())
+    }
+
+    /// 测试二进制没有 `--log-sink` 分流，用一个 tee 替身顶上：接口同真日志汇（`--log-sink <log>`），
+    /// 只验证脚本模板本身（login shell、2>&1、PIPESTATUS 透传、日志路径）；真日志汇的行为见
+    /// log_sink.rs 的单测与黑盒用例。
+    fn use_stand_in_sink() {
+        let dir = std::env::temp_dir().join("coflux-agent-cmd");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join(format!("stand-in-sink-{}.sh", std::process::id()));
+        std::fs::write(&path, "#!/bin/sh\nexec tee -- \"$2\"\n").expect("write stand-in");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        }
+        SINK_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(path));
+    }
+
+    fn write_test_script(tag: &str, command: &str) -> (String, String) {
+        use_stand_in_sink();
+        write_command_script_named(&format!("test-{tag}-{}.sh", std::process::id()), command)
+            .expect("write script")
+    }
 
     #[test]
     fn sh_quote_survives_embedded_quotes() {
@@ -453,8 +522,8 @@ mod agent_script_tests {
 
     #[test]
     fn script_runs_command_and_propagates_exit_code() {
-        // 管道尾是 tee，退出码必须来自 PIPESTATUS 而非 tee——agent 靠它判断成败
-        let (path, log) = write_command_script("exit 7").expect("write script");
+        // 管道尾是日志汇，退出码必须来自 PIPESTATUS 而非日志汇——agent 靠它判断成败
+        let (path, log) = write_test_script("exit", "exit 7");
         let status = std::process::Command::new(&path)
             .status()
             .expect("run script");
@@ -467,8 +536,7 @@ mod agent_script_tests {
     /// 秒级命令的输出根本进不去。stdout 与 stderr 都要落进去。
     #[test]
     fn script_log_captures_stdout_and_stderr() {
-        let (path, log) =
-            write_command_script("echo 到标准输出; echo 到标准错误 >&2").expect("write script");
+        let (path, log) = write_test_script("stdio", "echo 到标准输出; echo 到标准错误 >&2");
         let output = std::process::Command::new(&path)
             .output()
             .expect("run script");
@@ -482,10 +550,10 @@ mod agent_script_tests {
             captured.contains("到标准错误"),
             "stderr 未落盘: {captured:?}"
         );
-        // tee 的另一路仍然到达调用方（用户接管时才看得到实时输出）
+        // 日志汇的另一路仍然到达调用方（用户接管时才看得到实时输出）
         assert!(
             String::from_utf8_lossy(&output.stdout).contains("到标准输出"),
-            "tee 必须同时输出到 PTY"
+            "日志汇必须同时输出到 PTY"
         );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&log);
@@ -493,8 +561,27 @@ mod agent_script_tests {
 
     /// 中心触发的命令终端：同一 operation_id 两次写出的脚本路径必须完全一致（sessiond 账本的
     /// canonical 含 shell），不同 operation_id 不能撞路径；id 里的奇怪字符不进入文件名。
+    /// 生产模板：管道尾必须是 worker 自己的 `--log-sink`（不是 tee），且日志汇放在忽略 INT/QUIT 的
+    /// 子 shell 里；退出码仍取 PIPESTATUS[0]。只看脚本文本不执行——测试二进制没有这个分流。
+    #[test]
+    fn production_script_pipes_into_worker_log_sink() {
+        SINK_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+        let name = format!("test-prod-{}.sh", std::process::id());
+        let (path, log) = write_command_script_named(&name, "echo hi").expect("write script");
+        let script = std::fs::read_to_string(&path).expect("read script");
+        let exe = std::env::current_exe().expect("current_exe");
+        assert!(script.contains(&sh_quote(&exe.to_string_lossy())), "必须引用 worker 自己: {script}");
+        assert!(script.contains(crate::log_sink::SUBCOMMAND), "{script}");
+        assert!(script.contains(&sh_quote(&log)), "日志路径要传给日志汇: {script}");
+        assert!(script.contains("(trap '' INT QUIT; exec "), "日志汇要忽略 INT/QUIT: {script}");
+        assert!(!script.contains("| tee "), "不再用 tee: {script}");
+        assert!(script.contains("exit \"${PIPESTATUS[0]}\""), "退出码照旧: {script}");
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn operation_script_path_is_derived_from_operation_id() {
+        use_stand_in_sink();
         let (first, first_log) = write_operation_command_script("op/相同 id'x", "echo a").unwrap();
         let (second, second_log) = write_operation_command_script("op/相同 id'x", "echo a").unwrap();
         assert_eq!(first, second, "同 id 必须派生同一路径");
@@ -534,5 +621,24 @@ mod agent_script_tests {
         );
         assert!(read_command_log_tail("/nonexistent/coflux/x.log", 100).is_none());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 轮转后的读法：当前段不够读窗时用上一段的尾部补在前面；读窗被当前段填满时不碰上一段；
+    /// 当前段刚被 rename 走（还没 create 新段）时读上一段。
+    #[test]
+    fn log_tail_spans_rotated_segment() {
+        let dir = std::env::temp_dir().join("coflux-agent-cmd");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join(format!("rotated-test-{}.log", std::process::id()));
+        let previous = crate::log_sink::rotated_path(&path);
+        std::fs::write(&previous, "ABCDEFGHIJ").expect("write .1");
+        std::fs::write(&path, "0123").expect("write current");
+        let key = path.to_string_lossy().into_owned();
+        assert_eq!(read_command_log_tail(&key, 100).unwrap(), "ABCDEFGHIJ0123");
+        assert_eq!(read_command_log_tail(&key, 6).unwrap(), "IJ0123", "上一段只补读窗剩下的部分");
+        assert_eq!(read_command_log_tail(&key, 3).unwrap(), "123", "当前段填满读窗时不碰上一段");
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read_command_log_tail(&key, 100).unwrap(), "ABCDEFGHIJ", "rename→create 窗口内读上一段");
+        let _ = std::fs::remove_file(&previous);
     }
 }
