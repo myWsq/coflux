@@ -10,10 +10,6 @@
 export const DAEMON_CAPABILITY_PREPARED_EXECUTE = "prepared_execute";
 /** 认识 ServerAgentRequest：中心可经 daemon 读命令日志/快照、往终端写输入。 */
 export const DAEMON_CAPABILITY_TERMINAL_IO = "terminal_io";
-/** 认识 ServerAgentRequest 的 terminal_notify / terminal_progress 分支（plan 093）：中心可替 agent 给
- * 自己所在终端的 presence 打「叫人」留言与进度短评。刻意不复用 terminal_io：旧 worker 收到新分支只会回
- * 「未知的中心请求动作」，而不是这里约定的「需要升级」。 */
-export const DAEMON_CAPABILITY_AGENT_ANNOTATE = "agent_annotate";
 
 /** 写 tool 在缺失能力时返回的可读错误；SKILL/文档里以「需要升级」一词指代它。 */
 export function daemonUpgradeRequired(deviceName: string): string {
