@@ -75,9 +75,10 @@ environment 和 npm Trusted Publisher 共同承担。上线前逐项完成：
 - [ ] 在 GitHub Rulesets 为 `v*` 建立两套 tag ruleset：一套限制 **create**，只把发布维护者列入
   bypass；另一套限制 **update/delete**，发布维护者不在 bypass，只有最小 break-glass 管理员集
   可绕过并需定期审计。bypass 对整套 ruleset 生效，不能用同一套规则同时表达这两种权限。
-- [ ] 创建 protected environments `release-signing` 与 `npm-publish`，配置 required
-  reviewers、禁止自审和最小 deployment branch/tag 规则。`release-signing` 只放行 `v*`；
-  `npm-publish` 需考虑下游 `workflow_run` 的 ref 是 `main`，手动补发也只允许 `main`。
+- [x] 创建 protected environments `release-signing` 与 `npm-publish`，配置最小 deployment branch/tag
+  规则：`release-signing` 只放行 `v*`；`npm-publish` 需考虑下游 `workflow_run` 的 ref 是 `main`，手动补发
+  也只允许 `main`。**不配 required reviewers**（2026-09-05 决定：单人维护，人工审批只是每次发版多点一下网页，
+  签出产物的前提仍是「有权创建 `v*` tag 的人推了 tag」，由下面的 tag ruleset 把守）。
 - [ ] 把 `WORKER_SIGNING_KEY`、`MACOS_CERT_P12`、`MACOS_CERT_PASSWORD`、`APPLE_TEAM_ID`、
   `NOTARY_API_KEY_P8`、`NOTARY_KEY_ID`、`NOTARY_ISSUER_ID` 从 repository secrets 迁到
   `release-signing` environment secrets。
