@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use coflux_protocol::logln;
 use coflux_protocol::wire::DeviceRelayDial;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
@@ -30,21 +31,21 @@ pub fn spawn(
         let receiver = match device.open_relay(&dial) {
             Ok(receiver) => receiver,
             Err(error) => {
-                eprintln!("[worker] relay dial 被拒 channel={channel_id}: {error}");
+                logln!("[worker] relay dial 被拒 channel={channel_id}: {error}");
                 return;
             }
         };
         let ws = match connect(&dial.relay_url, connect_timeout_ms).await {
             Ok(ws) => ws,
             Err(error) => {
-                eprintln!("[worker] relay channel {channel_id} 拨号失败: {error}");
+                logln!("[worker] relay channel {channel_id} 拨号失败: {error}");
                 relay_home.probe_now();
                 device.close_relay(&channel_id);
                 return;
             }
         };
         if let Err(error) = run(&device, ws, &channel_id, receiver).await {
-            eprintln!("[worker] relay channel {channel_id} 结束: {error}");
+            logln!("[worker] relay channel {channel_id} 结束: {error}");
         }
         device.close_relay(&channel_id);
     });

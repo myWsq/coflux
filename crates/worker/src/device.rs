@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use coflux_protocol::logln;
 use coflux_protocol::wire::{
     self, daemon_to_server, device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck,
     DeviceP2pChannelGrant, DevicePtyGap, DevicePtyInput, DeviceRelayDial, DeviceScope,
@@ -2029,22 +2030,33 @@ impl DeviceRuntime {
             executed.insert(operation_id.to_string());
         }
         let fail = |code: &str, message: &str| {
-            self.executed_operations.lock().unwrap().remove(operation_id);
+            self.executed_operations
+                .lock()
+                .unwrap()
+                .remove(operation_id);
             self.report_operation(operation_id, &device_error(None, code, message));
         };
         let channel_id = format!("{SERVER_CHANNEL_PREFIX}{operation_id}");
         if channel_id.len() > MAX_FRAME_ID_BYTES {
-            fail("invalid_operation_id", "operationId 过长，无法派生合成 channel");
+            fail(
+                "invalid_operation_id",
+                "operationId 过长，无法派生合成 channel",
+            );
             return;
         }
         let template = {
             let now = epoch_ms();
             let mut prepared = self.prepared.lock().unwrap();
             prepared.retain(|_, record| record.expires_at > now);
-            prepared.get(operation_id).map(|record| record.frame.clone())
+            prepared
+                .get(operation_id)
+                .map(|record| record.frame.clone())
         };
         let Some(template) = template else {
-            fail("prepared_operation_denied", "operation 未由中心 prepare 或已过期");
+            fail(
+                "prepared_operation_denied",
+                "operation 未由中心 prepare 或已过期",
+            );
             return;
         };
         let Some(mut envelope) = decode_device_envelope(&template) else {
@@ -3154,7 +3166,7 @@ impl DeviceRuntime {
             }
             .encode_to_vec();
             if !services.catalogs.publish(logical_request_id.clone(), bytes) {
-                eprintln!("[worker] 完整 catalog 超过 outbox 硬上限 request={logical_request_id}");
+                logln!("[worker] 完整 catalog 超过 outbox 硬上限 request={logical_request_id}");
             }
         }
         drop(catalog_commit);
