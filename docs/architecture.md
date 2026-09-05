@@ -246,6 +246,42 @@ worker 至多每 2 秒请求脏 session 的当前 snapshot，并通过独立 coa
 旧 server xterm live mirror、raw `ptyOutput/ptyReplay`、`TaskAttach/TaskDetached` 与 server-routed exec/fs
 协议已经删除，原字段编号和名称在 protobuf 中永久 `reserved`。
 
+### 7.1 中心发起的 prepared 执行（plan 091）
+
+prepared operation 原本只有 browser 一种发起方：中心 prepare（落库）→ 经控制 WS 把模板装到 daemon →
+安装确认后把帧交给浏览器 → 浏览器经 Device channel 投递 → daemon 校验帧与模板一致后执行 → 结果沿
+`DeviceOperationReport` 回中心收敛。plan 091 让中心（MCP 写 tools）也能做发起方，差别只在「谁触发执行」
+与「结果通知谁」，落库/校验/收敛/广播全部复用：
+
+```text
+MCP tool ──▶ hub 操作层（准入事务 + prepare(metadata.initiator = "server")）
+   │              │ installed / restore→installed
+   │              └──控制 WS──▶ PreparedDeviceOperationExecute{operation_id}
+   │                                worker：取本地已安装模板 → Principal::Server + 合成 channel
+   │                                `__coflux-server-<operation_id>` → 与 browser 同一条分派
+   │              ◀──控制 WS── DeviceOperationReport → 同一个收敛事务落库 / 广播
+   └── 完成原语（按 operationId / taskId 的有界 Deferred）──▶ tool 返回结果或可读错误
+```
+
+- **不做虚拟 channel**：数据帧仍不经中心控制 WS，中心零 channel 状态；只新增逐操作的控制消息。合成 channel
+  不注册进 worker 的 channels 表，往它回的应答按既有逻辑丢弃，只有 OperationAck/Error 经 report 回中心。
+- **幂等**：中心 restore（server 重启 / daemon 重连）会重装模板并再次 Execute；worker 对已执行的 operation_id
+  只重发上次 report、在飞则忽略，绝不二次 `git worktree add` / 二次建会话。
+- **命令终端**：`DeviceSessionCreate.command` 非空时 worker 在 authorize 通过后本地写包装脚本（登录 shell 执行、
+  `tee` 落日志、跑完退出带退出码）并把 `shell` 填成脚本路径；路径按 operation_id 确定性派生，因为 sessiond
+  账本的 canonical 请求含 `shell`，重放时路径若变会被判成 `operation_collision`。
+- **读/写走直发**：`ServerAgentRequest/Result`（server→daemon 请求 + 回执，各带 oneof）承载无落库副作用的动作：
+  读命令日志尾部/本地快照（设备离线退回中心 checkpoint）、经 `agent_send_input` 正门写输入（人类 holder 在场
+  即拒，holder/input_seq/attach 语义零改动）。停止复用 `sessionClose`。
+- **能力门禁**：daemon 认证/登记时宣告 `capabilities`（`prepared_execute`、`terminal_io`），中心按能力名而非版本号
+  判定；缺失时写 tool 在 prepare **之前**返回「该设备的 daemon 需要升级」，不给旧 worker 留下永远不触发的
+  installed 记录。旧 worker 对未知 ServerToDaemon 载荷静默丢弃，这是不能靠超时兜底的原因。
+- **有界等待**：Claude Code 远程 MCP 单请求 60 秒；建/删操作等 30 秒、`wait_terminal` ≤ 50 秒，到期返回
+  「已提交」或当前状态而不是挂着。daemon 断开/换代/撤销、任务删除、中心关闭都以可读错误唤醒等待者。
+
+以后新增「中心自己要驱动 daemon 做事」的需求，先走这条路（prepare + Execute + 收敛），不要再开直发消息；
+直发只留给无落库副作用的动作。
+
 ## 8. 生命周期与故障语义
 
 | 故障 | 行为 |

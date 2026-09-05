@@ -3521,6 +3521,8 @@ export class Hub {
     return { ok: true, value: daemon };
   }
 
+  /** 等待者在 prepareServer 返回后的同一段微任务里登记；daemon 的 installed/report 都要经 WS 事件（宏任务）
+   * 才能到达，因此不会漏掉唤醒。调用方在 timeout 分支仍会按 id 重读一次 DB 兜底。 */
   private async waitOperation(operationId: string, daemonId: DaemonId): Promise<OperationWaitResult> {
     const waiting = this.operationCompletions.wait(operationId, daemonId, OPERATION_WAIT_MS, { case: "timeout" });
     if (!waiting) return { case: "failed", message: "中心等待中的操作过多，请稍后重试" };
@@ -3562,6 +3564,8 @@ export class Hub {
     if (prepared.case === "rejected") return { ok: false, error: prepared.message };
     const outcome = await this.waitOperation(prepared.operation.operationId, project.daemonId);
     if (outcome.case === "timeout") {
+      const late = await this.store.getWorkspace(workspaceId);
+      if (late && late.accountId === accountId) return { ok: true, value: late };
       return { ok: false, error: `工作区创建已提交但 ${OPERATION_WAIT_MS / 1000} 秒内未完成；稍后用 list_workspaces 查看（workspaceId: ${workspaceId}）` };
     }
     if (outcome.case === "failed") return { ok: false, error: `创建工作区失败：${outcome.message}` };
@@ -3702,6 +3706,8 @@ export class Hub {
     this.emitTask(task);
     const outcome = await this.waitOperation(prepared.operation.operationId, initialWorkspace.daemonId);
     if (outcome.case === "timeout") {
+      const late = await this.store.getTask(task.id);
+      if (late && late.accountId === accountId && late.status === TaskStatus.RUNNING) return { ok: true, value: late };
       return { ok: false, error: `终端已创建（terminalId: ${task.id}）但 ${OPERATION_WAIT_MS / 1000} 秒内未收到设备启动回执；稍后用 list_terminals / read_terminal 查看` };
     }
     if (outcome.case === "failed") return { ok: false, error: `终端启动失败（terminalId: ${task.id}，记录仍在，可 remove_terminal 清理）：${outcome.message}` };
