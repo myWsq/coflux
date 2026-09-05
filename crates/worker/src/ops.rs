@@ -335,9 +335,6 @@ pub async fn read_file_text(root: &str, rel: &str) -> (bool, String, Option<Stri
 /// 代价：命令的 stdout 是管道而非 tty，多数程序会因此关掉颜色和进度条。对 agent 读日志
 /// 反而更干净，用户接管时仍能在 PTY 上看到实时输出（tee 的另一路）。
 pub fn write_command_script(command: &str) -> Result<(String, String), String> {
-    let base = std::env::temp_dir().join("coflux-agent-cmd");
-    std::fs::create_dir_all(&base).map_err(|error| error.to_string())?;
-    let dir = std::fs::canonicalize(&base).map_err(|error| error.to_string())?;
     let name = format!(
         "cmd-{}-{}.sh",
         std::process::id(),
@@ -346,7 +343,38 @@ pub fn write_command_script(command: &str) -> Result<(String, String), String> {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     );
-    let full = dir.join(&name);
+    write_command_script_named(&name, command)
+}
+
+/// 中心发起的命令终端（plan 091）：脚本路径由 operation_id **确定性**派生。sessiond 账本的
+/// canonical 请求含 `shell`，同一 operation_id 重放（中心 restore 后重发 Execute）时路径若变会被
+/// 判成 `operation_collision`；同 id 同命令重写同一文件是幂等的。文件名用 sha256 前缀保证
+/// 跨 worker 版本稳定（不用 DefaultHasher：它不承诺跨版本一致），再拼一段清洗过的 id 便于人肉定位。
+pub fn write_operation_command_script(
+    operation_id: &str,
+    command: &str,
+) -> Result<(String, String), String> {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(operation_id.as_bytes());
+    let short = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let readable: String = operation_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(48)
+        .collect();
+    let name = format!("op-{readable}-{short}.sh");
+    write_command_script_named(&name, command)
+}
+
+fn write_command_script_named(name: &str, command: &str) -> Result<(String, String), String> {
+    let base = std::env::temp_dir().join("coflux-agent-cmd");
+    std::fs::create_dir_all(&base).map_err(|error| error.to_string())?;
+    let dir = std::fs::canonicalize(&base).map_err(|error| error.to_string())?;
+    let full = dir.join(name);
     let log = dir.join(format!("{name}.log"));
     let login_shell = std::env::var("SHELL")
         .ok()
@@ -367,7 +395,7 @@ pub fn write_command_script(command: &str) -> Result<(String, String), String> {
         std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o700))
             .map_err(|error| error.to_string())?;
     }
-    cleanup_stale_files(&dir, &name, "");
+    cleanup_stale_files(&dir, name, "");
     Ok((
         full.to_string_lossy().into_owned(),
         log.to_string_lossy().into_owned(),
@@ -461,6 +489,35 @@ mod agent_script_tests {
         );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&log);
+    }
+
+    /// 中心触发的命令终端：同一 operation_id 两次写出的脚本路径必须完全一致（sessiond 账本的
+    /// canonical 含 shell），不同 operation_id 不能撞路径；id 里的奇怪字符不进入文件名。
+    #[test]
+    fn operation_script_path_is_derived_from_operation_id() {
+        let (first, first_log) = write_operation_command_script("op/相同 id'x", "echo a").unwrap();
+        let (second, second_log) = write_operation_command_script("op/相同 id'x", "echo a").unwrap();
+        assert_eq!(first, second, "同 id 必须派生同一路径");
+        assert_eq!(first_log, second_log);
+        let (other, _) = write_operation_command_script("op/另一个 id", "echo a").unwrap();
+        assert_ne!(first, other, "不同 id 不能撞路径");
+        let file_name = std::path::Path::new(&first)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(file_name.starts_with("op-"), "{file_name}");
+        assert!(
+            file_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+            "文件名只含安全字符: {file_name}"
+        );
+        let status = std::process::Command::new(&first).status().expect("run script");
+        assert!(status.success());
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&first_log);
+        let _ = std::fs::remove_file(&other);
     }
 
     #[test]

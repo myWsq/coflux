@@ -16,7 +16,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use coflux_protocol::wire::{self, agent_control_request, agent_control_result, daemon_to_server};
+use coflux_protocol::wire::{
+    self, agent_control_request, agent_control_result, daemon_to_server, server_agent_request,
+    server_agent_result,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use prost::Message as _;
@@ -37,7 +40,12 @@ const MAX_TRACKED_LOGS: usize = 256;
 /// 并发在 20 秒超时窗口内无界堆积。
 const AGENT_PENDING_LIMIT: usize = 128;
 
-fn remember_log(state: &Arc<Mutex<WorkerState>>, task_id: String, log_path: String) {
+/// 单次 ServerTerminalRead 回给中心的字节上限（worker 侧钳制；中心再按行数收窄，与 checkpoint 同级）。
+const MAX_SERVER_READ_BYTES: u64 = 256 * 1024;
+/// ServerTerminalInput 单次写入字节上限：MCP 一次 send 是一行命令或一小段文本，不是文件通道。
+const MAX_SERVER_INPUT_BYTES: usize = 64 * 1024;
+
+pub(crate) fn remember_log(state: &Arc<Mutex<WorkerState>>, task_id: String, log_path: String) {
     let mut s = state.lock().unwrap();
     if s.agent_logs.len() >= MAX_TRACKED_LOGS {
         s.agent_logs.clear();
@@ -466,5 +474,88 @@ mod tests {
             tx
         ));
         assert_eq!(pending.len(), AGENT_PENDING_LIMIT);
+    }
+}
+
+/// 中心发起的终端读/写（plan 091，与 AgentControlRequest 方向相反）。两种动作都是无落库副作用的
+/// 直发请求：读走「命令日志尾部优先、否则 sessiond 当前快照、都没有则 source=none 交中心退回
+/// checkpoint」；写经 [`DeviceRuntime::agent_send_input`] 正门——人类 holder 在场时被拒，错误文案
+/// 原样回中心（同 `cofluxd terminal send` 的人类优先纪律）。每条请求必回一条 result。
+pub async fn handle_server_request(
+    request: wire::ServerAgentRequest,
+    state: &Arc<Mutex<WorkerState>>,
+    device: &Arc<DeviceRuntime>,
+) -> wire::ServerAgentResult {
+    let request_id = request.request_id;
+    let fail = |error: String| wire::ServerAgentResult {
+        request_id: request_id.clone(),
+        ok: false,
+        error: Some(error),
+        payload: None,
+    };
+    match request.payload {
+        Some(server_agent_request::Payload::TerminalRead(read)) => {
+            let max_bytes = u64::from(read.max_bytes).clamp(1, MAX_SERVER_READ_BYTES);
+            let reply = |data: Vec<u8>, source: &str| wire::ServerAgentResult {
+                request_id: request_id.clone(),
+                ok: true,
+                error: None,
+                payload: Some(server_agent_result::Payload::TerminalRead(
+                    wire::ServerTerminalReadResult {
+                        data,
+                        source: source.to_string(),
+                    },
+                )),
+            };
+            let log_path = { state.lock().unwrap().agent_logs.get(&read.task_id).cloned() };
+            if let Some(text) = log_path
+                .as_deref()
+                .and_then(|path| ops::read_command_log_tail(path, max_bytes))
+            {
+                return reply(text.into_bytes(), "log");
+            }
+            // 没有命令日志（用户手开的终端、或 worker 热升级后表已丢）：会话仍活着就取 sessiond
+            // 当前快照。只认中心给的 session 与本地 alive 表一致的情况，不按裸 task 猜。
+            let session_alive = !read.session_id.is_empty()
+                && state
+                    .lock()
+                    .unwrap()
+                    .alive
+                    .get(&read.session_id)
+                    .is_some_and(|(task_id, _)| task_id == &read.task_id);
+            if !session_alive {
+                return reply(Vec::new(), "none");
+            }
+            match device.read_session_snapshot(&read.session_id).await {
+                Ok(mut snapshot) => {
+                    let keep = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+                    if snapshot.len() > keep {
+                        snapshot.drain(..snapshot.len() - keep);
+                    }
+                    reply(snapshot, "snapshot")
+                }
+                Err(error) => fail(error),
+            }
+        }
+        Some(server_agent_request::Payload::TerminalInput(input)) => {
+            if input.data.is_empty() {
+                return fail("输入为空".into());
+            }
+            if input.data.len() > MAX_SERVER_INPUT_BYTES {
+                return fail(format!("单次输入超过 {MAX_SERVER_INPUT_BYTES} 字节上限"));
+            }
+            match device.agent_send_input(&input.session_id, input.data).await {
+                Ok(()) => wire::ServerAgentResult {
+                    request_id: request_id.clone(),
+                    ok: true,
+                    error: None,
+                    payload: Some(server_agent_result::Payload::TerminalInput(
+                        wire::ServerTerminalInputResult {},
+                    )),
+                },
+                Err(message) => fail(message),
+            }
+        }
+        None => fail("未知的中心请求动作（daemon 不认识该 payload）".into()),
     }
 }

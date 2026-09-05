@@ -22,7 +22,7 @@ use coflux_protocol::{
 };
 use prost::Message as _;
 use rand_core::{OsRng, RngCore};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::local_auth::{AuthenticatedLocal, LocalAuth, LocalPrincipal};
 use crate::{Config, WorkerState, WsOut};
@@ -41,6 +41,15 @@ const INTERNAL_CHANNEL_ID: &str = "__coflux-worker";
 // agent 写 PTY（plan 088）用的合成 channel 前缀；仍走 sessiond 的
 // attach/holder/input_seq 正门，不新增任何输入语义。
 const AGENT_CHANNEL_PREFIX: &str = "__coflux-agent-";
+// 中心触发 prepared 执行（plan 091）用的合成 channel 前缀：`__coflux-server-<operation_id>`。
+// 不注册进 channels 表，往它回的应答按既有逻辑丢弃；只有 OperationAck/Error 经 report 回中心。
+// 与 `__coflux-worker` / `__coflux-agent-` 互不重叠，`validate_relay_dial` 对 `__coflux-` 前缀的保留照旧覆盖。
+const SERVER_CHANNEL_PREFIX: &str = "__coflux-server-";
+// 本 runtime 内已触发执行过的 operation_id 上限；满了整表清空——丢失只意味着重复 Execute 会再问
+// 一次 sessiond/worker 账本（它们各自去重），不会二次执行。
+const EXECUTED_OPERATION_LIMIT: usize = 4096;
+// 中心发起的按需快照读取（ServerTerminalRead 的 snapshot 降级）在飞上限。
+const PENDING_SNAPSHOT_READ_LIMIT: usize = 64;
 const AGENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const PENDING_AGENT_IO_LIMIT: usize = 64;
 const AGENT_IO_SESSION_LIMIT: usize = 256;
@@ -414,6 +423,11 @@ struct PendingAgentIo {
     sender: mpsc::Sender<device_envelope::Payload>,
 }
 
+struct PendingSnapshotRead {
+    session_id: String,
+    sender: oneshot::Sender<Result<Vec<u8>, String>>,
+}
+
 struct CallRecord {
     fingerprint: Vec<u8>,
     result: Option<device_envelope::Payload>,
@@ -490,6 +504,10 @@ enum Principal {
         transport_generation: u64,
         scopes: Vec<i32>,
     },
+    /// 中心经控制 WS 触发已安装 prepared 操作时的身份（plan 091）。只对**已安装的 prepared
+    /// 模板**有效（authorize_prepared 按安装模板放行），不持有任何非 prepared 的 Device RPC 权限；
+    /// 没有 client identity，也永远不会出现在 channels 表里。
+    Server,
 }
 
 impl Principal {
@@ -497,6 +515,7 @@ impl Principal {
         match self {
             Self::Local(value) => &value.account_id,
             Self::Relay { account_id, .. } => account_id,
+            Self::Server => "",
         }
     }
 
@@ -506,6 +525,7 @@ impl Principal {
             Self::Relay {
                 client_instance_id, ..
             } => client_instance_id,
+            Self::Server => "",
         }
     }
 
@@ -516,6 +536,7 @@ impl Principal {
                 transport_generation,
                 ..
             } => *transport_generation,
+            Self::Server => 0,
         }
     }
 
@@ -767,6 +788,10 @@ pub struct DeviceRuntime {
     /// generation/seq；只有结果未知时才换 identity，避免 sessiond cursor 随每次 send 增长。
     agent_io_states: Mutex<HashMap<String, AgentIoState>>,
     prepared: Mutex<HashMap<String, PreparedRecord>>,
+    /// 中心已触发执行过的 operation_id（plan 091）：Execute 重发只重放上次 report 或忽略在飞，绝不二次分派。
+    executed_operations: Mutex<HashSet<String>>,
+    /// 中心按需读快照的在飞等待者：内部 request_id → (session_id, 回执)。
+    pending_snapshot_reads: Mutex<HashMap<String, PendingSnapshotRead>>,
     requests: Mutex<CallLedger>,
     operations: Mutex<CallLedger>,
     operation_reports: Mutex<BTreeMap<String, WsOut>>,
@@ -857,6 +882,8 @@ impl DeviceRuntime {
             pending_agent_ios: Mutex::new(HashMap::new()),
             agent_io_states: Mutex::new(HashMap::new()),
             prepared: Mutex::new(HashMap::new()),
+            executed_operations: Mutex::new(HashSet::new()),
+            pending_snapshot_reads: Mutex::new(HashMap::new()),
             requests: Mutex::new(CallLedger::default()),
             operations: Mutex::new(CallLedger::default()),
             operation_reports: Mutex::new(BTreeMap::new()),
@@ -1162,6 +1189,11 @@ impl DeviceRuntime {
         self.agent_io_states.lock().unwrap().remove(session_id);
         self.dirty_sessions.lock().unwrap().remove(session_id);
         self.pending_snapshots
+            .lock()
+            .unwrap()
+            .retain(|_, pending| pending.session_id != session_id);
+        // 按需读快照的等待者随 session 退出即刻收到明确失败，不必等 5 秒超时；sender drop 即失败。
+        self.pending_snapshot_reads
             .lock()
             .unwrap()
             .retain(|_, pending| pending.session_id != session_id);
@@ -1579,6 +1611,59 @@ impl DeviceRuntime {
         }
     }
 
+    /// 中心按需读某会话的当前快照（plan 091 `read_terminal` 的 snapshot 降级）：与 checkpoint
+    /// 循环同一条只读 SessionSnapshotRequest，不注册 subscriber、不读也不改 holder。
+    pub async fn read_session_snapshot(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<Vec<u8>, String> {
+        if !valid_id(session_id) {
+            return Err("sessionId 无效".into());
+        }
+        if !self.supervisor_online.load(Ordering::Acquire) {
+            return Err("sessiond 未连接".into());
+        }
+        let request_id = self.next_internal_id("read");
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut pending = self.pending_snapshot_reads.lock().unwrap();
+            if pending.len() >= PENDING_SNAPSHOT_READ_LIMIT {
+                return Err("按需读快照并发已达上限，请稍后重试".into());
+            }
+            pending.insert(
+                request_id.clone(),
+                PendingSnapshotRead {
+                    session_id: session_id.to_string(),
+                    sender,
+                },
+            );
+        }
+        let sent = self.send_internal(device_envelope::Payload::SessionSnapshotRequest(
+            DeviceSessionSnapshotRequest {
+                request_id: request_id.clone(),
+                session_id: session_id.to_string(),
+            },
+        ));
+        if !sent {
+            self.pending_snapshot_reads
+                .lock()
+                .unwrap()
+                .remove(&request_id);
+            return Err("sessiond 请求队列已满，请重试".into());
+        }
+        match tokio::time::timeout(AGENT_IO_TIMEOUT, receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err("会话已退出，没有本地快照".into()),
+            Err(_) => {
+                self.pending_snapshot_reads
+                    .lock()
+                    .unwrap()
+                    .remove(&request_id);
+                Err("等待 sessiond 快照超时".into())
+            }
+        }
+    }
+
     fn begin_agent_io(&self, session_id: &str) -> Result<AgentIoAttempt, String> {
         let mut states = self.agent_io_states.lock().unwrap();
         if !states.contains_key(session_id) {
@@ -1890,6 +1975,111 @@ impl DeviceRuntime {
         known
     }
 
+    /// 中心触发已安装 prepared 操作的执行（plan 091）。取本地已安装的模板，以合成 channel
+    /// `__coflux-server-<operation_id>` 与 [`Principal::Server`] 走与 browser **完全相同**的分派
+    /// （authorize_prepared → sessiond 路由或 dispatch_worker_request），结果沿既有
+    /// DeviceOperationReport 回中心，中心用同一个收敛事务落库/广播。
+    ///
+    /// 幂等：同一 operation_id 的重复 Execute（中心 restore 后重发）只重发上次 report、在飞时
+    /// 忽略，绝不二次 `git worktree add` / 二次建会话。模板缺失/过期或无法入队时回一条 Error
+    /// report，让中心的完成原语立刻拿到可读错误而不是白等。
+    pub fn execute_prepared_operation(self: &Arc<Self>, operation_id: &str) {
+        if !valid_id(operation_id) {
+            return;
+        }
+        if let Some(report) = self
+            .operation_reports
+            .lock()
+            .unwrap()
+            .get(operation_id)
+            .cloned()
+        {
+            let _ = self.to_server.try_send(report);
+            return;
+        }
+        {
+            let mut executed = self.executed_operations.lock().unwrap();
+            if executed.contains(operation_id) {
+                return;
+            }
+            if executed.len() >= EXECUTED_OPERATION_LIMIT {
+                executed.clear();
+            }
+            executed.insert(operation_id.to_string());
+        }
+        let fail = |code: &str, message: &str| {
+            self.executed_operations.lock().unwrap().remove(operation_id);
+            self.report_operation(operation_id, &device_error(None, code, message));
+        };
+        let channel_id = format!("{SERVER_CHANNEL_PREFIX}{operation_id}");
+        if channel_id.len() > MAX_FRAME_ID_BYTES {
+            fail("invalid_operation_id", "operationId 过长，无法派生合成 channel");
+            return;
+        }
+        let template = {
+            let now = epoch_ms();
+            let mut prepared = self.prepared.lock().unwrap();
+            prepared.retain(|_, record| record.expires_at > now);
+            prepared.get(operation_id).map(|record| record.frame.clone())
+        };
+        let Some(template) = template else {
+            fail("prepared_operation_denied", "operation 未由中心 prepare 或已过期");
+            return;
+        };
+        let Some(mut envelope) = decode_device_envelope(&template) else {
+            fail("prepared_operation_denied", "已安装的 prepared 模板畸形");
+            return;
+        };
+        envelope.channel_id = channel_id.clone();
+        if let Err(error) = self.authorize_prepared(&envelope) {
+            fail("prepared_operation_denied", &error);
+            return;
+        }
+        let Some(payload) = envelope.payload.clone() else {
+            fail("prepared_operation_denied", "prepared 模板 payload 为空");
+            return;
+        };
+        // 命令终端：authorize 通过后、交给 sessiond 前，本地写包装脚本并把 shell 填成脚本路径。
+        // 路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
+        // 会被判成 operation_collision。日志路径按 task 记住，供中心经 ServerTerminalRead 读。
+        if let Some(device_envelope::Payload::SessionCreate(create)) = envelope.payload.as_mut() {
+            if !create.command.is_empty() {
+                match crate::ops::write_operation_command_script(operation_id, &create.command) {
+                    Ok((shell, log_path)) => {
+                        create.shell = Some(shell);
+                        if let Some(services) = &self.services {
+                            crate::agent_ctl::remember_log(
+                                &services.state,
+                                create.task_id.clone(),
+                                log_path,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        fail("command_script_failed", &format!("写命令脚本失败：{error}"));
+                        return;
+                    }
+                }
+            }
+        }
+        if routed_to_sessiond(&payload) {
+            let Ok(frame) = encode_frame(&DataFrame::Device {
+                channel_id,
+                data: encode_device_envelope(&envelope),
+            }) else {
+                fail("invalid_channel_id", "channelId 超过内部 frame 上限");
+                return;
+            };
+            let queued = write_record(&frame)
+                .is_ok_and(|record| self.to_supervisor.try_send(record).is_ok());
+            if !queued {
+                fail("supervisor_busy", "sessiond 请求队列已满，请重试");
+            }
+        } else {
+            self.dispatch_worker_request(channel_id, Principal::Server, envelope);
+        }
+    }
+
     fn authorize_prepared(&self, envelope: &DeviceEnvelope) -> Result<(), String> {
         let payload = envelope
             .payload
@@ -1935,6 +2125,9 @@ impl DeviceRuntime {
                 }
             }
             Principal::Relay { scopes, .. } => scopes.clone(),
+            // 只放行 prepared 类载荷；execute_prepared_operation 已按安装模板校验过，这里的 scope
+            // 只用于 send_payload/response 分派的对称检查（合成 channel 本就不在 channels 表里）。
+            Principal::Server => vec![DeviceScope::Lifecycle as i32],
         }
     }
 
@@ -2465,6 +2658,21 @@ impl DeviceRuntime {
             }
             return;
         }
+        if let Some(operation_id) = channel_id.strip_prefix(SERVER_CHANNEL_PREFIX) {
+            // 中心触发的 prepared 执行（plan 091）：合成 channel 没有 client，只把执行结果沿控制 WS
+            // report 回中心。sessiond 的协议级拒绝（Error，如 operation_collision）同样是终态，
+            // 必须 report，否则中心的完成原语只能等到 TTL。
+            match payload {
+                device_envelope::Payload::OperationAck(ack) if !ack.operation_id.is_empty() => {
+                    self.report_operation(&ack.operation_id, payload);
+                }
+                device_envelope::Payload::Error(_) => {
+                    self.report_operation(operation_id, payload);
+                }
+                _ => {}
+            }
+            return;
+        }
         if let device_envelope::Payload::OperationAck(ack) = payload {
             if !ack.operation_id.is_empty() {
                 self.report_operation(&ack.operation_id, payload);
@@ -2569,6 +2777,16 @@ impl DeviceRuntime {
                 self.handle_catalog_page(catalog);
             }
             device_envelope::Payload::SessionSnapshot(snapshot) => {
+                let read = self
+                    .pending_snapshot_reads
+                    .lock()
+                    .unwrap()
+                    .remove(&snapshot.request_id);
+                if let Some(read) = read {
+                    // 中心按需读（plan 091）：原样交给等待者，不进 checkpoint outbox。
+                    let _ = read.sender.send(Ok(snapshot.ansi_snapshot.clone()));
+                    return;
+                }
                 let Some(expected) = self
                     .pending_snapshots
                     .lock()
@@ -2618,6 +2836,16 @@ impl DeviceRuntime {
             }
             device_envelope::Payload::Error(error) => {
                 if let Some(request_id) = &error.request_id {
+                    let read = self
+                        .pending_snapshot_reads
+                        .lock()
+                        .unwrap()
+                        .remove(request_id);
+                    if let Some(read) = read {
+                        let _ = read
+                            .sender
+                            .send(Err(format!("{}: {}", error.code, error.message)));
+                    }
                     self.pending_snapshots.lock().unwrap().remove(request_id);
                     let mut pending = self.pending_catalogs.lock().unwrap();
                     let logical_request_id = pending
