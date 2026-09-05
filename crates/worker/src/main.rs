@@ -13,7 +13,6 @@ mod gateway;
 mod git;
 mod hook;
 mod local_auth;
-mod log_sink;
 mod observed;
 mod ops;
 mod p2p;
@@ -92,11 +91,13 @@ struct WorkerState {
     /// 等待授权中的链接过期时刻（server 侧 epoch ms）。到期且连接仍在、仍未登记时，
     /// 由 run_server_connection 的定时检查重发 daemon.enrollRequest 换新链接。
     pending_auth_expires_at: Option<f64>,
-    /// 命令终端的日志（plan 074 引入，plan 091 起由中心 prepared 命令终端登记）：taskId -> 日志
-    /// 当前段的绝对路径（上一段是 `<path>.1`，见 log_sink）。读终端时优先用它而不是中心
-    /// checkpoint——checkpoint 是 2 秒周期的派生缓存，秒级命令的输出根本进不去，而日志是最近
-    /// 1-2 MiB 的全量而非一屏。worker 重启（热升级）后此表丢失，read 自动降级回快照/checkpoint。
+    /// agent 自建终端的命令日志（plan 074）：taskId -> 日志绝对路径。读终端时优先用它而不是
+    /// 中心 checkpoint——checkpoint 是 2 秒周期的派生缓存，秒级命令的输出根本进不去，而日志
+    /// 还是全量而非一屏。worker 重启（热升级）后此表丢失，read 自动降级回 checkpoint。
     agent_logs: HashMap<String, String>,
+    /// agent 控制请求的在飞关联表（plan 074）：requestId -> 中心回执的接收端。
+    /// 断开中心连接时整表清空——发送端 drop 会让等待方立刻拿到「连接中断」而不是干等超时。
+    agent_pending: HashMap<String, tokio::sync::oneshot::Sender<wire::AgentControlResult>>,
     /// server 下发的本设备工作区清单：workspace_id -> (worktree 路径, 所属 project 的 default_branch)
     /// （分支监视 + diff 统计基准用）
     workspaces: HashMap<String, (String, String)>,
@@ -475,20 +476,8 @@ async fn consume_hook_events(
     }
 }
 
-fn main() {
-    // 日志汇子命令（plan 093）：命令终端的包装脚本以 `coflux-worker --log-sink <log>` 复用本二进制，
-    // 在建 tokio 运行时之前分流——它随命令活多久就活多久，不该为它起一整套调度线程。
-    if let Some(code) = log_sink::run_if_requested() {
-        std::process::exit(code);
-    }
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("创建 tokio 运行时失败")
-        .block_on(worker_main());
-}
-
-async fn worker_main() {
+#[tokio::main]
+async fn main() {
     // rustls 0.23 要求在任何 TLS 握手前选定 process-level CryptoProvider，
     // 否则连 wss:// 时 panic（"Could not automatically determine the process-level CryptoProvider"）。
     rustls::crypto::ring::default_provider()
@@ -556,6 +545,7 @@ async fn worker_main() {
         credentials,
         pending_auth_expires_at: None,
         agent_logs: HashMap::new(),
+        agent_pending: HashMap::new(),
         workspaces: HashMap::new(),
         last_branches: HashMap::new(),
         last_diffs: HashMap::new(),
@@ -607,7 +597,17 @@ async fn worker_main() {
         to_server_tx.clone(),
     ));
 
-    let local_endpoints = Arc::new(hook::LocalEndpoints { hook_tx });
+    // agent 控制通道（plan 074）：同为 gateway 的 loopback POST 路径，但走独立消费任务——
+    // terminal.* 要等中心回执（最长 20s），不能和 hook 的短回合状态上报挤同一条队列。
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<agent_ctl::AgentRequest>(64);
+    tokio::spawn(agent_ctl::consume_agent_requests(
+        agent_rx,
+        state.clone(),
+        observed.clone(),
+        to_server_tx.clone(),
+        device.clone(),
+    ));
+    let local_endpoints = Arc::new(hook::LocalEndpoints { hook_tx, agent_tx });
 
     // gateway 监听独立于中心 server_loop；热升级时旧 worker 短暂占端口会在后台重试。
     if let Some(auth) = local_auth.clone() {
@@ -1147,6 +1147,9 @@ async fn server_loop(
             let mut state = state.lock().unwrap();
             state.authed = false;
             state.conn_state.reconnecting();
+            // 在飞的 agent 控制请求随连接一起作废：drop 发送端让等待方立刻拿到「连接中断」，
+            // 而不是干等到 20s 超时（plan 074）。
+            state.agent_pending.clear();
         }
         if let Some(auth) = &local_auth {
             auth.set_server_online(false);
@@ -1367,7 +1370,6 @@ async fn run_server_connection(
                             b.as_ref(),
                             cfg,
                             state,
-                            observed,
                             creds_store,
                             to_server_tx,
                             to_sup_tx,
@@ -1402,7 +1404,6 @@ async fn on_server_message(
     bytes: &[u8],
     cfg: &Arc<Config>,
     state: &Arc<Mutex<WorkerState>>,
-    observed: &Arc<ObservedState>,
     creds_store: &Arc<CredStore>,
     to_server_tx: &Sender<WsOut>,
     to_sup_tx: &Sender<Vec<u8>>,
@@ -1643,6 +1644,18 @@ async fn on_server_message(
                     server_to_daemon::Payload::DeviceP2pChannelGrant(grant) => {
                         p2p.handle_channel_grant(grant);
                     }
+                    // agent 控制回执（plan 074）：按 request_id 找到等待中的 agent_ctl 任务。
+                    // 找不到 = 已超时摘除或本就不是本进程发的，静默丢弃。
+                    server_to_daemon::Payload::AgentControlResult(result) => {
+                        let waiter = state
+                            .lock()
+                            .unwrap()
+                            .agent_pending
+                            .remove(&result.request_id);
+                        if let Some(waiter) = waiter {
+                            let _ = waiter.send(result);
+                        }
+                    }
                     server_to_daemon::Payload::SessionCatalogRequest(request) => {
                         device.request_server_catalog(request)
                     }
@@ -1661,23 +1674,15 @@ async fn on_server_message(
                     server_to_daemon::Payload::PreparedDeviceOperationExecute(execute) => {
                         device.execute_prepared_operation(&execute.operation_id);
                     }
-                    // 中心发起的终端读/写/标注（plan 091 + 093）：读日志/快照、经 agent_send_input 正门
-                    // 写入、或给 presence 打 notify/progress 标注（含一次进程树探测），可能等 sessiond 回执
-                    // （最长 5s），另开 task 以免阻塞消息循环；每条必回一条 result。
+                    // 中心发起的终端读/写（plan 091）：读日志/快照或经 agent_send_input 正门写入，
+                    // 可能等 sessiond 回执（最长 5s），另开 task 以免阻塞消息循环；每条必回一条 result。
                     server_to_daemon::Payload::ServerAgentRequest(request) => {
                         let device = device.clone();
                         let state = state.clone();
-                        let observed = observed.clone();
                         let to_server = to_server_tx.clone();
                         tokio::spawn(async move {
-                            let result = agent_ctl::handle_server_request(
-                                request,
-                                &state,
-                                &observed,
-                                &device,
-                                &to_server,
-                            )
-                            .await;
+                            let result =
+                                agent_ctl::handle_server_request(request, &state, &device).await;
                             try_send_d2s(
                                 &to_server,
                                 daemon_to_server::Payload::ServerAgentResult(result),
@@ -1895,6 +1900,7 @@ mod tests {
             credentials: None,
             pending_auth_expires_at: None,
             agent_logs: HashMap::new(),
+            agent_pending: HashMap::new(),
             workspaces: HashMap::new(),
             last_branches: HashMap::new(),
             last_diffs: HashMap::new(),
