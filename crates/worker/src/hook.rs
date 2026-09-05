@@ -23,6 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use coflux_protocol::logln;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -124,7 +125,7 @@ pub async fn serve(mut stream: TcpStream, endpoints: Arc<LocalEndpoints>) -> Res
     let (status, body) = match handle(&mut stream, &endpoints).await {
         Ok(response) => (response.status, response.body),
         Err(RequestError::BadRequest(detail)) => {
-            eprintln!("[worker] local endpoint bad request: {detail}");
+            logln!("[worker] local endpoint bad request: {detail}");
             (
                 "400 Bad Request",
                 r#"{"ok":false,"error":"bad request"}"#.to_string(),

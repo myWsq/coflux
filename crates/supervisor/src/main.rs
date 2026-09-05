@@ -21,6 +21,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
+use coflux_protocol::logln;
 use coflux_protocol::{
     decode_frame, is_frame, DataFrame, RecordParser, Settings, WorkerToSupervisor,
     SUPERVISOR_SOCK_ENV,
@@ -116,7 +117,7 @@ fn main() {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(sibling_worker);
     if worker_cmd.is_empty() {
-        eprintln!(
+        logln!(
             "[supervisor] 找不到 worker 二进制（同目录无 coflux-worker，且未设 COFLUX_WORKER_CMD）"
         );
         std::process::exit(1);
@@ -192,7 +193,7 @@ fn main() {
         ]) {
             thread::spawn(move || {
                 if signals.forever().next().is_some() {
-                    eprintln!("[supervisor] shutdown");
+                    logln!("[supervisor] shutdown");
                     manager.shutdown();
                     sessions.shutdown();
                     let _ = std::fs::remove_file(&sock_path);
@@ -207,17 +208,17 @@ fn main() {
     let listener = match std::os::unix::net::UnixListener::bind(&sock_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[supervisor] bind {sock_path}: {e}");
+            logln!("[supervisor] bind {sock_path}: {e}");
             std::process::exit(1);
         }
     };
     if let Err(error) = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))
     {
-        eprintln!("[supervisor] chmod {sock_path}: {error}");
+        logln!("[supervisor] chmod {sock_path}: {error}");
         let _ = std::fs::remove_file(&sock_path);
         std::process::exit(1);
     }
-    eprintln!("[supervisor] listening {sock_path}");
+    logln!("[supervisor] listening {sock_path}");
 
     let conn_counter = Arc::new(AtomicU64::new(0));
     // read guard 覆盖单条 worker record 的完整 dispatch，write guard 则定义新连接接管点。
@@ -232,7 +233,7 @@ fn main() {
         let writer_stream = match stream.try_clone() {
             Ok(stream) => stream,
             Err(e) => {
-                eprintln!("[supervisor] try_clone: {e}");
+                logln!("[supervisor] try_clone: {e}");
                 continue;
             }
         };
@@ -244,7 +245,7 @@ fn main() {
             sessions.worker_connected(id, writer_stream);
             *current = id;
         }
-        eprintln!("[supervisor] worker connected generation={id}");
+        logln!("[supervisor] worker connected generation={id}");
         let sessions = sessions.clone();
         let manager = manager.clone();
         let current_conn = current_conn.clone();
@@ -257,7 +258,7 @@ fn main() {
             if *current == id {
                 *current = 0;
             }
-            eprintln!("[supervisor] worker disconnected generation={id}");
+            logln!("[supervisor] worker disconnected generation={id}");
         });
     }
 }
@@ -298,9 +299,7 @@ fn handle_worker(
                         dispatch(msg, sessions, manager, generation);
                     }
                 }) {
-                    eprintln!(
-                        "[supervisor] worker UDS record 违规 generation={generation}: {error}"
-                    );
+                    logln!("[supervisor] worker UDS record 违规 generation={generation}: {error}");
                     break;
                 }
             }

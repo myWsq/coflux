@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use coflux_protocol::logln;
 use coflux_protocol::wire::{
     device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck, DeviceOperationAck, DevicePtyGap,
     DevicePtyInput, DevicePtyInputAck, DevicePtyOutput, DevicePtyResize, DeviceSessionAttach,
@@ -618,7 +619,7 @@ impl Sessions {
         if self.send_ctrl(message) {
             return true;
         }
-        eprintln!("[supervisor] control 未入队，断开 worker 触发 resync: {context}");
+        logln!("[supervisor] control 未入队，断开 worker 触发 resync: {context}");
         self.outbound.clear();
         false
     }
@@ -754,13 +755,13 @@ impl Sessions {
         let message = legacy_create_response(session_id, task_id, existing, error);
         match &message {
             SupervisorToWorker::SessionStarted { pid, .. } => {
-                eprintln!("[supervisor] duplicate session create 幂等重放 {session_id} pid={pid}");
+                logln!("[supervisor] duplicate session create 幂等重放 {session_id} pid={pid}");
             }
             SupervisorToWorker::SessionCreateFailed { error, .. } => {
-                eprintln!("[supervisor] session create identity 冲突 {session_id}: {error}");
+                logln!("[supervisor] session create identity 冲突 {session_id}: {error}");
             }
             SupervisorToWorker::SessionExit { .. } => {
-                eprintln!("[supervisor] session create failed {session_id}: {error}");
+                logln!("[supervisor] session create failed {session_id}: {error}");
             }
             _ => unreachable!("legacy create 只生成 session 生命周期回执"),
         }
@@ -876,7 +877,7 @@ impl Sessions {
             self.bump_snapshot_epoch();
             session
         };
-        eprintln!("[supervisor] session started {session_id} pid={pid}");
+        logln!("[supervisor] session started {session_id} pid={pid}");
         self.send_ctrl_or_disconnect(
             &SupervisorToWorker::SessionStarted {
                 session_id: session_id.clone(),
@@ -942,7 +943,7 @@ impl Sessions {
                                 }
                             }
                             Err(error) => {
-                                eprintln!(
+                                logln!(
                                     "[supervisor] PTY input commit 失败 session={session_id} seq={}: {}",
                                     input.input_seq, error.message
                                 );
@@ -972,9 +973,12 @@ impl Sessions {
                                 failure.written, length, failure.error
                             )
                         };
-                        eprintln!(
+                        logln!(
                             "[supervisor] {code} session={session_id} seq={} written={}/{}: {}",
-                            input.input_seq, failure.written, length, failure.error
+                            input.input_seq,
+                            failure.written,
+                            length,
+                            failure.error
                         );
                         let target = {
                             let mut locked = session.lock().unwrap();
@@ -1029,7 +1033,7 @@ impl Sessions {
                         }) {
                             Ok(frame) => frame,
                             Err(error) => {
-                                eprintln!("[supervisor] session dirty frame 编码失败 session={session_id}: {error}");
+                                logln!("[supervisor] session dirty frame 编码失败 session={session_id}: {error}");
                                 return;
                             }
                         };
@@ -1102,7 +1106,7 @@ impl Sessions {
             drop(locked);
 
             if transitioned {
-                eprintln!("[supervisor] session exited {session_id} code={code}");
+                logln!("[supervisor] session exited {session_id} code={code}");
                 for channel_id in channels {
                     this.send_device(
                         &channel_id,
@@ -1597,7 +1601,7 @@ impl Sessions {
                             .state
                             .cancel_input_reservation(&client_instance_id, request.input_seq)
                         {
-                            eprintln!(
+                            logln!(
                                 "[supervisor] input reservation 回滚失败 session={session_id} seq={}",
                                 request.input_seq
                             );

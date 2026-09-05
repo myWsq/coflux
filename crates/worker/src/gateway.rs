@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use coflux_protocol::logln;
 use coflux_protocol::wire::{device_envelope, DeviceEnvelope, LocalAuthResult};
 use coflux_protocol::{
     decode_device_envelope, encode_device_envelope, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
@@ -49,7 +50,7 @@ pub async fn run(
                 continue;
             }
         };
-        eprintln!("[worker] local gateway listening port={port}");
+        logln!("[worker] local gateway listening port={port}");
         status(Some(port));
 
         let mut loops: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = listeners
@@ -113,12 +114,12 @@ async fn accept_loop(
                     if let Err(error) =
                         handle_connection(stream, auth, runtime, daemon_id, endpoints).await
                     {
-                        eprintln!("[worker] local gateway connection closed: {error}");
+                        logln!("[worker] local gateway connection closed: {error}");
                     }
                 });
             }
             Err(error) => {
-                eprintln!("[worker] local gateway accept error: {error}");
+                logln!("[worker] local gateway accept error: {error}");
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
@@ -221,11 +222,9 @@ async fn handle_connection(
         .await
         .map_err(|error| format!("发送 gateway hello: {error}"))?;
 
-    let incoming = tokio::time::timeout(AUTH_TIMEOUT, websocket.next())
-        .await
-        .map_err(|_| "等待 LocalClientHello 超时".to_string())?;
-    let client_hello = match incoming {
-        Some(Ok(Message::Binary(bytes))) => {
+    let client_hello = match wait_first_frame(&mut websocket).await? {
+        FirstFrame::Closed => return Ok(()),
+        FirstFrame::Envelope(bytes) => {
             let envelope = decode_device_envelope(&bytes)
                 .ok_or_else(|| "LocalClientHello envelope 畸形".to_string())?;
             if envelope.protocol_version != DEVICE_PROTOCOL_VERSION
@@ -246,9 +245,6 @@ async fn handle_connection(
                 _ => return Err("首个 payload 不是 LocalClientHello".into()),
             }
         }
-        Some(Ok(_)) => return Err("LocalClientHello 必须是 binary frame".into()),
-        Some(Err(error)) => return Err(format!("读取 LocalClientHello: {error}")),
-        None => return Ok(()),
     };
     let authenticated = match auth.authenticate(&mut challenge, &client_hello) {
         Ok(authenticated) => authenticated,
@@ -645,5 +641,105 @@ mod tests {
         second.abort();
         let _ = second.await;
         std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+/// 客户端首帧的归类结果。
+#[derive(Debug)]
+enum FirstFrame {
+    /// 一个 binary 帧，应是 LocalClientHello 信封。
+    Envelope(Vec<u8>),
+    /// 对端在 hello 之前主动 Close 或直接 EOF：正常收尾，不是错误。
+    Closed,
+}
+
+/// 等客户端首帧（受 [`AUTH_TIMEOUT`] 约束）。Ping/Pong 是控制帧、不算首帧，跳过继续等。
+///
+/// 浏览器收到 LocalGatewayHello 后先校验 gateway 公钥/daemonId 与手里的 grant 是否相符，不符就
+/// 直接 close（见 packages/client device-router 的 loopback 建连）——过期 grant、指向别的 daemon
+/// 的 dev 页面都会这样，且每次重试一次。这是对端的合法决定，与 EOF 同样按正常关闭处理；曾经
+/// 把它记成「LocalClientHello 必须是 binary frame」，一台机器刷了近 9 万行 daemon.log。
+/// 只有 Text 帧才是协议违规，才值得记一行。
+async fn wait_first_frame(
+    websocket: &mut WebSocketStream<TcpStream>,
+) -> Result<FirstFrame, String> {
+    let wait = async {
+        loop {
+            if let Some(frame) = classify_first_frame(websocket.next().await)? {
+                return Ok(frame);
+            }
+        }
+    };
+    tokio::time::timeout(AUTH_TIMEOUT, wait)
+        .await
+        .map_err(|_| "等待 LocalClientHello 超时".to_string())?
+}
+
+/// `Ok(None)` = 控制帧，继续等下一帧。
+fn classify_first_frame(
+    incoming: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+) -> Result<Option<FirstFrame>, String> {
+    match incoming {
+        Some(Ok(Message::Binary(bytes))) => Ok(Some(FirstFrame::Envelope(bytes))),
+        Some(Ok(Message::Ping(_) | Message::Pong(_))) => Ok(None),
+        Some(Ok(Message::Close(_))) | None => Ok(Some(FirstFrame::Closed)),
+        Some(Ok(_)) => Err("LocalClientHello 必须是 binary frame".into()),
+        Some(Err(error)) => Err(format!("读取 LocalClientHello: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod first_frame_tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+
+    #[test]
+    fn close_before_hello_is_a_normal_end() {
+        let close = Message::Close(Some(CloseFrame {
+            code: CloseCode::Normal,
+            reason: "grant mismatch".into(),
+        }));
+        assert!(matches!(
+            classify_first_frame(Some(Ok(close))),
+            Ok(Some(FirstFrame::Closed))
+        ));
+        assert!(matches!(
+            classify_first_frame(Some(Ok(Message::Close(None)))),
+            Ok(Some(FirstFrame::Closed))
+        ));
+        assert!(matches!(
+            classify_first_frame(None),
+            Ok(Some(FirstFrame::Closed))
+        ));
+    }
+
+    #[test]
+    fn control_frames_keep_waiting() {
+        assert!(matches!(
+            classify_first_frame(Some(Ok(Message::Ping(vec![1])))),
+            Ok(None)
+        ));
+        assert!(matches!(
+            classify_first_frame(Some(Ok(Message::Pong(Vec::new())))),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn text_frame_is_a_protocol_error() {
+        let error = classify_first_frame(Some(Ok(Message::Text("{}".into())))).err();
+        assert_eq!(
+            error.as_deref(),
+            Some("LocalClientHello 必须是 binary frame")
+        );
+    }
+
+    #[test]
+    fn binary_frame_is_the_envelope() {
+        match classify_first_frame(Some(Ok(Message::Binary(vec![7, 8, 9])))) {
+            Ok(Some(FirstFrame::Envelope(bytes))) => assert_eq!(bytes, vec![7, 8, 9]),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

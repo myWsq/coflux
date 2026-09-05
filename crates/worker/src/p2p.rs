@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use bytes::BytesMut;
+use coflux_protocol::logln;
 use coflux_protocol::wire::{
     daemon_to_server, DeviceP2pAnswerReport, DeviceP2pChannelGrant, DeviceP2pDial,
 };
@@ -123,7 +124,7 @@ impl P2pRuntime {
             match runtime.dial(dial).await {
                 Ok(sdp) => runtime.report_answer(&connection_id, Some(sdp), None),
                 Err(error) => {
-                    eprintln!("[worker] p2p dial 失败 connection={connection_id}: {error}");
+                    logln!("[worker] p2p dial 失败 connection={connection_id}: {error}");
                     runtime.remove_connection(&connection_id);
                     runtime.report_answer(&connection_id, None, Some(error));
                 }
@@ -228,14 +229,14 @@ impl P2pRuntime {
             .get(&grant.connection_id)
             .cloned()
         else {
-            eprintln!(
+            logln!(
                 "[worker] p2p channel grant 无对应连接 connection={}",
                 grant.connection_id
             );
             return;
         };
         if connection.client_instance_id != grant.client_instance_id {
-            eprintln!(
+            logln!(
                 "[worker] p2p channel grant principal 不符 channel={}",
                 grant.channel_id
             );
@@ -247,7 +248,7 @@ impl P2pRuntime {
                 Some(dc)
             } else {
                 if pending.grants.len() >= MAX_PENDING {
-                    eprintln!(
+                    logln!(
                         "[worker] p2p pending grant 超限 connection={}",
                         grant.connection_id
                     );
@@ -279,7 +280,7 @@ impl P2pRuntime {
                 Some(grant)
             } else {
                 if pending.channels.len() >= MAX_PENDING {
-                    eprintln!("[worker] p2p pending channel 超限 connection={connection_id}");
+                    logln!("[worker] p2p pending channel 超限 connection={connection_id}");
                     None
                 } else {
                     pending.channels.insert(channel_id, dc.clone());
@@ -303,7 +304,7 @@ impl P2pRuntime {
         let receiver = match self.device.open_p2p(&grant) {
             Ok(receiver) => receiver,
             Err(error) => {
-                eprintln!(
+                logln!(
                     "[worker] p2p channel 注册被拒 channel={}: {error}",
                     grant.channel_id
                 );
@@ -325,21 +326,21 @@ impl P2pRuntime {
                 let mut assembler = FrameAssembler::default();
                 'poll: loop {
                     match dc.poll().await {
-                        Some(DataChannelEvent::OnMessage(message)) => match assembler
-                            .push(&message.data)
-                        {
-                            Ok(frames) => {
-                                for frame in frames {
-                                    if !device.handle_p2p_frame(&channel_id, &frame) {
-                                        break 'poll;
+                        Some(DataChannelEvent::OnMessage(message)) => {
+                            match assembler.push(&message.data) {
+                                Ok(frames) => {
+                                    for frame in frames {
+                                        if !device.handle_p2p_frame(&channel_id, &frame) {
+                                            break 'poll;
+                                        }
                                     }
                                 }
+                                Err(error) => {
+                                    logln!("[worker] p2p channel {channel_id} 帧流违规: {error}");
+                                    break;
+                                }
                             }
-                            Err(error) => {
-                                eprintln!("[worker] p2p channel {channel_id} 帧流违规: {error}");
-                                break;
-                            }
-                        },
+                        }
                         Some(DataChannelEvent::OnClose) | None => break,
                         Some(_) => {}
                     }
@@ -354,7 +355,7 @@ impl P2pRuntime {
         let device = self.device.clone();
         tokio::spawn(async move {
             if let Err(error) = pump_out(&dc, &mut { receiver }).await {
-                eprintln!("[worker] p2p channel {channel_id} 结束: {error}");
+                logln!("[worker] p2p channel {channel_id} 结束: {error}");
             }
             device.close_p2p(&channel_id);
             let _ = dc.close().await;

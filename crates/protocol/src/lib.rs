@@ -9,6 +9,7 @@
 //!   编码信封；控制面与数据面（pty/proxy）统一走 oneof payload，不再区分 JSON 文本帧与
 //!   自定义二进制帧。
 //! - [ipc]：worker ↔ supervisor 本地 UDS 消息 + 长度前缀分帧。
+//! - [logline]：daemon 日志行的统一时间戳前缀（[`logln!`]）。
 //!
 //! Client ↔ Server control 协议仍由 TS server/web 持有；端到端 DeviceEnvelope 则由
 //! browser/worker/sessiond 共用。生成代码里未被某端引用的 message/oneof 变体属于正常的
@@ -25,6 +26,7 @@ mod gen {
 
 pub mod frame;
 pub mod ipc;
+pub mod logline;
 pub mod settings;
 
 /// Daemon ↔ Server WS 线协议（prost 生成类型）。真相源：`proto/coflux/v1/{common,daemon}.proto`。

@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use coflux_protocol::logln;
 use coflux_protocol::wire::{self, daemon_to_server};
 use futures_util::future::join_all;
 use rustls::pki_types::ServerName;
@@ -73,7 +74,7 @@ impl RelayHomeSelector {
                 Some(normalized)
             })
             .collect::<Vec<_>>();
-        eprintln!("[worker] relay 节点清单已更新 count={}", nodes.len());
+        logln!("[worker] relay 节点清单已更新 count={}", nodes.len());
         self.nodes.send_replace(Arc::new(nodes));
     }
 
@@ -125,7 +126,7 @@ async fn run_selector(
         };
 
         for measurement in &measurements {
-            eprintln!(
+            logln!(
                 "[worker] relay RTT id={} median_ms={}",
                 measurement.node.id,
                 measurement.rtt.as_millis()
@@ -134,7 +135,7 @@ async fn run_selector(
         if let Some(selected) = choose_home(&measurements, home.as_deref()) {
             if home.as_deref() != Some(selected.node.id.as_str()) {
                 home = Some(selected.node.id.clone());
-                eprintln!("[worker] relay home changed id={}", selected.node.id);
+                logln!("[worker] relay home changed id={}", selected.node.id);
                 send_d2s(
                     &to_server,
                     daemon_to_server::Payload::RelayHome(wire::RelayHome {
@@ -144,7 +145,7 @@ async fn run_selector(
                 .await;
             }
         } else {
-            eprintln!("[worker] relay 探测无健康节点，本轮不上报 home");
+            logln!("[worker] relay 探测无健康节点，本轮不上报 home");
         }
 
         tokio::select! {

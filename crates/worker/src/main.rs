@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use coflux_protocol::logln;
 use coflux_protocol::wire::{daemon_to_server, server_to_daemon};
 use coflux_protocol::{
     decode_frame, is_frame, wire, write_record, DataFrame, RecordParser, Settings,
@@ -466,7 +467,7 @@ async fn consume_hook_events(
             let _ = request.respond.send(hook::HookOutcome::SessionNotFound);
             continue;
         };
-        eprintln!(
+        logln!(
             "[worker] hook event agent={} event={} notification={} bg={} state={hook_state} session={session_id}",
             request.agent, request.event, request.notification, request.background_tasks
         );
@@ -526,13 +527,14 @@ async fn worker_main() {
         local_gateway_port: env_u16("COFLUX_LOCAL_GATEWAY_PORT", LOCAL_GATEWAY_PORT),
     });
     if cfg.sock_path.is_empty() {
-        eprintln!("[worker] 缺少 {SUPERVISOR_SOCK_ENV}");
+        logln!("[worker] 缺少 {SUPERVISOR_SOCK_ENV}");
         std::process::exit(1);
     }
 
-    eprintln!(
+    logln!(
         "[worker] config server={} device={}",
-        cfg.server_url, cfg.device_name
+        cfg.server_url,
+        cfg.device_name
     );
 
     // 写 pid 文件（测试/运维定位 worker 进程）
@@ -579,7 +581,7 @@ async fn worker_main() {
     let local_auth = match local_auth::LocalAuth::load_or_create(&home) {
         Ok(auth) => Some(Arc::new(auth)),
         Err(error) => {
-            eprintln!("[worker] local gateway disabled: {error}");
+            logln!("[worker] local gateway disabled: {error}");
             None
         }
     };
@@ -776,7 +778,7 @@ async fn worker_main() {
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             {
                 sig.recv().await;
-                eprintln!("[worker] shutdown");
+                logln!("[worker] shutdown");
                 let _ = std::fs::remove_file(format!("{home}/worker.pid"));
                 std::process::exit(0);
             }
@@ -819,7 +821,7 @@ async fn supervisor_loop(
     loop {
         match UnixStream::connect(&cfg.sock_path).await {
             Ok(stream) => {
-                eprintln!("[worker] connected to supervisor");
+                logln!("[worker] connected to supervisor");
                 device.supervisor_connected();
                 run_sup_connection(
                     stream,
@@ -901,7 +903,7 @@ async fn run_sup_connection(
                 Ok(n) => {
                     let mut records: Vec<Vec<u8>> = Vec::new();
                     if let Err(error) = parser.push(&buf[..n], |r| records.push(r.to_vec())) {
-                        eprintln!("[worker] supervisor UDS record 违规: {error}");
+                        logln!("[worker] supervisor UDS record 违规: {error}");
                         return;
                     }
                     for rec in records {
@@ -954,7 +956,7 @@ async fn handle_sup_record(
                 device.deliver_from_sessiond(&channel_id, &data);
             }
             // ProxyData 不会从 supervisor→worker 方向出现；畸形/已保留帧同样丢弃，不 panic。
-            Some(_) | None => eprintln!("[worker] 丢弃来自 supervisor 的未知/畸形数据帧"),
+            Some(_) | None => logln!("[worker] 丢弃来自 supervisor 的未知/畸形数据帧"),
         }
         return;
     }
@@ -1000,7 +1002,7 @@ async fn handle_sup_record(
             pid,
         } => {
             if !commit_supervisor_exit(state, &session_id, task_id.as_deref(), pid) {
-                eprintln!(
+                logln!(
                     "[worker] session exit identity 待 catalog 对账 session={session_id} task={task_id:?} pid={pid:?}"
                 );
                 device.request_reconciliation_catalog();
@@ -1017,7 +1019,7 @@ async fn handle_sup_record(
             task_id,
             error,
         } => {
-            eprintln!(
+            logln!(
                 "[worker] session create failed without exit session={session_id} task={task_id}: {error}"
             );
             state.lock().unwrap().ledger.forget(&session_id);
@@ -1067,7 +1069,7 @@ async fn handle_sup_record(
                 device.cancel_session_exit(&session.session_id);
                 device.mark_session_dirty(&session.session_id);
             }
-            eprintln!("[worker] supervisor resync count={}", sessions.len());
+            logln!("[worker] supervisor resync count={}", sessions.len());
             resyncs.publish_current(state);
             device.request_reconciliation_catalog();
         }
@@ -1132,7 +1134,7 @@ async fn server_loop(
         .await
         {
             Ok(Ok((ws, _))) => {
-                eprintln!("[worker] connected to server");
+                logln!("[worker] connected to server");
                 attempts = 0;
                 connection_epoch = connection_epoch.saturating_add(1).max(1);
                 run_server_connection(
@@ -1157,8 +1159,8 @@ async fn server_loop(
                 )
                 .await;
             }
-            Ok(Err(e)) => eprintln!("[worker] server connect error: {e}"),
-            Err(_) => eprintln!(
+            Ok(Err(e)) => logln!("[worker] server connect error: {e}"),
+            Err(_) => logln!(
                 "[worker] server connect timeout ({}ms)",
                 cfg.connect_timeout_ms
             ),
@@ -1274,11 +1276,11 @@ async fn run_server_connection(
             _ = watchdog_tick.tick() => {
                 if let Some(since) = ping_pending_since {
                     if since.elapsed() >= idle_grace {
-                        eprintln!("[worker] 连接 idle 超时（探活 {}ms 内无任何入站帧），判定连接已死，断开重连", idle_grace.as_millis());
+                        logln!("[worker] 连接 idle 超时（探活 {}ms 内无任何入站帧），判定连接已死，断开重连", idle_grace.as_millis());
                         break;
                     }
                 } else if last_inbound.elapsed() >= idle_ping {
-                    eprintln!("[worker] 连接 idle {}ms，发送探活 ping", last_inbound.elapsed().as_millis());
+                    logln!("[worker] 连接 idle {}ms，发送探活 ping", last_inbound.elapsed().as_millis());
                     if !send_server_ws(&mut sink, Message::Ping(Vec::new()), write_timeout).await {
                         break; // 发送本身就失败：连接已经死了，无需再等宽限期
                     }
@@ -1303,7 +1305,7 @@ async fn run_server_connection(
                     }
                 };
                 if expired {
-                    eprintln!("[worker] authorization link expired; requesting a new one");
+                    logln!("[worker] authorization link expired; requesting a new one");
                     let req = daemon_to_server::Payload::DaemonEnrollRequest(wire::DaemonEnrollRequest {
                         name: cfg.device_name.clone(),
                         host: cfg.host.clone(),
@@ -1403,7 +1405,7 @@ async fn run_server_connection(
                     }
                     // WS 上只有 binary message；收到 text/其它帧类型说明对端协议版本不对——
                     // 丢弃并记日志，不 panic（与解码失败的处理原则一致）。
-                    Some(Ok(Message::Text(_))) => eprintln!("[worker] 忽略非 binary 的 WS 消息（协议已切换为 protobuf binary）"),
+                    Some(Ok(Message::Text(_))) => logln!("[worker] 忽略非 binary 的 WS 消息（协议已切换为 protobuf binary）"),
                     Some(Ok(Message::Ping(p))) => {
                         if !send_server_ws(&mut sink, Message::Pong(p), write_timeout).await { break; }
                     }
@@ -1437,12 +1439,12 @@ async fn on_server_message(
     let envelope = match wire::ServerToDaemon::decode(bytes) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("[worker] 丢弃畸形 ServerToDaemon 信封: {e}");
+            logln!("[worker] 丢弃畸形 ServerToDaemon 信封: {e}");
             return;
         }
     };
     let Some(payload) = envelope.payload else {
-        eprintln!("[worker] 丢弃空 payload 的 ServerToDaemon 信封");
+        logln!("[worker] 丢弃空 payload 的 ServerToDaemon 信封");
         return;
     };
     match payload {
@@ -1471,11 +1473,11 @@ async fn on_server_message(
             if daemon_changed {
                 device.close_local_channels();
             }
-            eprintln!("[worker] enrolled {daemon_id}");
+            logln!("[worker] enrolled {daemon_id}");
             on_authed(state, to_server_tx, local_auth, device, resyncs).await;
         }
         server_to_daemon::Payload::DaemonAuthed(wire::DaemonAuthed { daemon_id }) => {
-            eprintln!("[worker] authenticated {daemon_id}");
+            logln!("[worker] authenticated {daemon_id}");
             let daemon_changed = {
                 let mut state = state.lock().unwrap();
                 let changed = state
@@ -1496,7 +1498,7 @@ async fn on_server_message(
         }) => {
             // 等待用户在浏览器确认授权；连接保持打开，server 确认后会在同一连接上直接推 DaemonEnrolled
             // （见上），不会走 exit(1)——这是与 DaemonAuthError{needEnroll:false} 致命路径的关键区别。
-            eprintln!("[worker] waiting for authorization: {url}");
+            logln!("[worker] waiting for authorization: {url}");
             creds_store.save_pending_auth(&PendingAuth { url, expires_at });
             state.lock().unwrap().pending_auth_expires_at = Some(expires_at); // 供续期检查用；到期未确认则重发 enrollRequest
         }
@@ -1504,7 +1506,7 @@ async fn on_server_message(
             message,
             need_enroll,
         }) => {
-            eprintln!("[worker] auth error: {message}");
+            logln!("[worker] auth error: {message}");
             if need_enroll {
                 creds_store.clear();
                 let mut state = state.lock().unwrap();
@@ -1513,7 +1515,7 @@ async fn on_server_message(
                 drop(state);
                 device.close_local_channels();
             } else {
-                eprintln!("[worker] 不可恢复的认证错误，退出");
+                logln!("[worker] 不可恢复的认证错误，退出");
                 std::process::exit(1);
             }
         }
@@ -1578,7 +1580,7 @@ async fn on_server_message(
                     ) => {
                         if let Some(auth) = local_auth {
                             if let Err(error) = auth.configure_origins(origins) {
-                                eprintln!("[worker] local gateway origin 配置被拒: {error}");
+                                logln!("[worker] local gateway origin 配置被拒: {error}");
                             } else {
                                 device.revalidate_local_origins();
                             }
@@ -1649,7 +1651,7 @@ async fn on_server_message(
                             (_, _, None) => Err("daemon 尚未登记".into()),
                         };
                         if let Err(error) = result {
-                            eprintln!("[worker] local lease 安装被拒: {error}");
+                            logln!("[worker] local lease 安装被拒: {error}");
                         }
                     }
                     server_to_daemon::Payload::DeviceRelayDial(dial) => {

@@ -8,3 +8,8 @@ publish.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 prost.workspace = true
+
+# logline：本地时区偏移经 libc::localtime_r 取（std 只有 UTC 纪元秒，无本地时区）；daemon 只跑 unix，
+# 非 unix 目标退回 UTC。libc 已在 tokio 依赖树里，不增加编译面。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

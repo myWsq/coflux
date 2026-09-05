@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use coflux_protocol::logln;
 use coflux_protocol::{SUPERVISOR_SOCK_ENV, SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV};
 use rand_core::{OsRng, RngCore};
 
@@ -110,7 +111,7 @@ impl Manager {
                     .map(|active_release| active_release.is_newer_than(&builtin_release))
                     .unwrap_or(true);
                 if !keep {
-                    eprintln!(
+                    logln!(
                         "[supervisor] bundled worker version={} 不低于已持久 active={}，优先使用 bundled",
                         builtin.version, spec.version
                     );
@@ -120,7 +121,7 @@ impl Manager {
             Err(_) => recovered,
         };
         if let Some(spec) = &recovered {
-            eprintln!(
+            logln!(
                 "[supervisor] 恢复已提交 worker version={}，重新观察健康后启用",
                 spec.version
             );
@@ -132,7 +133,7 @@ impl Manager {
             match crate::upgrade::load_release_floor(&home) {
                 Ok(floor) => (floor, true),
                 Err(error) => {
-                    eprintln!(
+                    logln!(
                         "[supervisor] 读取 worker release floor 失败，远程升级将 fail closed；尝试从安全 active/builtin 重建: {error}"
                     );
                     (None, false)
@@ -153,7 +154,7 @@ impl Manager {
                 Ok(()) => release_floor_durable = true,
                 Err(error) => {
                     release_floor_durable = false;
-                    eprintln!(
+                    logln!(
                         "[supervisor] 持久启动 release floor={} 失败，远程升级禁用: {error}",
                         floor.as_str()
                     );
@@ -202,22 +203,22 @@ impl Manager {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
             Err(error) => {
-                eprintln!("[supervisor] 读取 worker.active 元数据失败，回退 builtin: {error}");
+                logln!("[supervisor] 读取 worker.active 元数据失败，回退 builtin: {error}");
                 return None;
             }
         };
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-            eprintln!("[supervisor] worker.active 不是安全的普通文件，回退 builtin");
+            logln!("[supervisor] worker.active 不是安全的普通文件，回退 builtin");
             return None;
         }
         if metadata.len() > 256 {
-            eprintln!("[supervisor] worker.active 过长，回退 builtin");
+            logln!("[supervisor] worker.active 过长，回退 builtin");
             return None;
         }
         let version = match std::fs::read_to_string(&marker) {
             Ok(value) => value.trim().to_string(),
             Err(error) => {
-                eprintln!("[supervisor] 读取 worker.active 失败，回退 builtin: {error}");
+                logln!("[supervisor] 读取 worker.active 失败，回退 builtin: {error}");
                 return None;
             }
         };
@@ -230,7 +231,7 @@ impl Manager {
         match crate::upgrade::installed_worker_spec(home, &version) {
             Ok(spec) => Some(spec),
             Err(error) => {
-                eprintln!("[supervisor] worker.active={version} 不可恢复，回退 builtin: {error}");
+                logln!("[supervisor] worker.active={version} 不可恢复，回退 builtin: {error}");
                 None
             }
         }
@@ -240,7 +241,7 @@ impl Manager {
         match crate::upgrade::persist_active_version(&self.home, version) {
             Ok(()) => true,
             Err(error) => {
-                eprintln!("[supervisor] 持久化 worker.active={version} 失败: {error}");
+                logln!("[supervisor] 持久化 worker.active={version} 失败: {error}");
                 false
             }
         }
@@ -250,7 +251,7 @@ impl Manager {
         match crate::upgrade::persist_release_floor(&self.home, version) {
             Ok(()) => true,
             Err(error) => {
-                eprintln!(
+                logln!(
                     "[supervisor] 持久 worker.release-floor={} 失败: {error}",
                     version.as_str()
                 );
@@ -327,7 +328,7 @@ impl Manager {
             );
             st.release_floor_durable = true;
         }
-        eprintln!(
+        logln!(
             "[supervisor] worker upgrade committed version={}",
             pending.version
         );
@@ -345,7 +346,7 @@ impl Manager {
             .pending_fallback
             .take()
             .unwrap_or_else(|| st.active.clone());
-        eprintln!(
+        logln!(
             "[supervisor] worker upgrade rollback from={from} to={}",
             fallback.version
         );
@@ -385,16 +386,16 @@ impl Manager {
                 st.running_version = spec.version.clone();
                 st.started_at = Instant::now();
                 st.child = Some(child);
-                eprintln!("[supervisor] worker spawned version={}", spec.version);
+                logln!("[supervisor] worker spawned version={}", spec.version);
             }
             Err(e) => {
-                eprintln!("[supervisor] worker spawn error: {e}");
+                logln!("[supervisor] worker spawn error: {e}");
                 // pending 版本连启动都失败（如坏架构/损坏产物）也计入崩溃预算，达阈值回滚到 active。
                 // 否则 current_spec 恒为 pending，会每 500ms 无限重试同一坏版本、永不回滚 → daemon 砖化。
                 if is_pending {
                     st.pending_crashes += 1;
                     if st.pending_crashes >= MAX_PENDING_CRASHES {
-                        eprintln!(
+                        logln!(
                             "[supervisor] pending worker 无法启动 version={}",
                             spec.version
                         );
@@ -439,11 +440,9 @@ impl Manager {
                             .as_ref()
                             .map(|p| p.version.clone())
                             .unwrap_or_default();
-                        eprintln!(
-                            "[supervisor] pending worker exited version={pv} crashes={crashes}"
-                        );
+                        logln!("[supervisor] pending worker exited version={pv} crashes={crashes}");
                         if crashes >= MAX_PENDING_CRASHES {
-                            eprintln!("[supervisor] pending worker crash-looping version={pv}");
+                            logln!("[supervisor] pending worker crash-looping version={pv}");
                             this.rollback_pending(&mut st, &pv);
                         }
                         st.next_spawn_at = Instant::now() + Duration::from_millis(300);
@@ -453,7 +452,7 @@ impl Manager {
                         }
                         st.restarts += 1;
                         let delay = std::cmp::min(5000, 200 * st.restarts as u64);
-                        eprintln!(
+                        logln!(
                             "[supervisor] worker exited version={exited_version}, restarting in {delay}ms"
                         );
                         st.next_spawn_at = Instant::now() + Duration::from_millis(delay);
@@ -475,7 +474,7 @@ impl Manager {
                             .as_ref()
                             .map(|worker| worker.version.as_str())
                             .unwrap_or("");
-                        eprintln!(
+                        logln!(
                             "[supervisor] pending worker 未在观察期内完成 UDS/resync，终止 version={version}"
                         );
                         if let Some(child) = st.child.as_mut() {
@@ -500,7 +499,7 @@ impl Manager {
         let spec = match self.state.lock().unwrap().known.get(&version) {
             Some(spec) => spec.clone(),
             None => {
-                eprintln!("[supervisor] unknown worker version {version}; ignoring");
+                logln!("[supervisor] unknown worker version {version}; ignoring");
                 return;
             }
         };
@@ -531,7 +530,7 @@ impl Manager {
         {
             let st = self.state.lock().unwrap();
             if let Err(error) = Self::ensure_release_is_newer(&st, &release_version) {
-                eprintln!("[supervisor] {error}");
+                logln!("[supervisor] {error}");
                 return None;
             }
         }
@@ -549,7 +548,7 @@ impl Manager {
         };
         if remote.executor_running {
             if let Some(replaced) = remote.latest.replace(request) {
-                eprintln!(
+                logln!(
                     "[supervisor] 较新升级请求覆盖等待项 old={} new={}",
                     replaced.version,
                     remote.latest.as_ref().unwrap().version
@@ -577,29 +576,29 @@ impl Manager {
                     let st = self.state.lock().unwrap();
                     if let Err(error) = Self::ensure_release_is_newer(&st, &request.release_version)
                     {
-                        eprintln!("[supervisor] 验签后升级已过期（保持当前版本）: {error}");
+                        logln!("[supervisor] 验签后升级已过期（保持当前版本）: {error}");
                         return Self::take_next_remote_upgrade(&mut remote);
                     }
                 }
                 let spec = match staged.install() {
                     Ok(spec) => spec,
                     Err(error) => {
-                        eprintln!("[supervisor] 升级落盘被拒（保持当前版本）: {error}");
+                        logln!("[supervisor] 升级落盘被拒（保持当前版本）: {error}");
                         return Self::take_next_remote_upgrade(&mut remote);
                     }
                 };
                 let mut st = self.state.lock().unwrap();
                 if st.shutting_down {
-                    eprintln!(
+                    logln!(
                         "[supervisor] supervisor 正在关闭，已安装但不切换 version={}",
                         spec.version
                     );
                 } else if let Err(error) =
                     Self::ensure_release_is_newer(&st, &request.release_version)
                 {
-                    eprintln!("[supervisor] 升级落盘后已过期（不切换）: {error}");
+                    logln!("[supervisor] 升级落盘后已过期（不切换）: {error}");
                 } else {
-                    eprintln!(
+                    logln!(
                         "[supervisor] release statement 与产物验签并原子落盘通过，切换到 {}",
                         request.release_version.as_str()
                     );
@@ -608,18 +607,20 @@ impl Manager {
                 }
             }
             Ok(_staged) => {
-                eprintln!(
+                logln!(
                     "[supervisor] 丢弃过期升级下载 version={} generation={}",
-                    request.version, request.generation
+                    request.version,
+                    request.generation
                 );
             }
             Err(error) if is_latest => {
-                eprintln!("[supervisor] 升级被拒（保持当前版本）: {error}");
+                logln!("[supervisor] 升级被拒（保持当前版本）: {error}");
             }
             Err(error) => {
-                eprintln!(
+                logln!(
                     "[supervisor] 过期升级下载失败 version={} generation={}: {error}",
-                    request.version, request.generation
+                    request.version,
+                    request.generation
                 );
             }
         }
@@ -677,7 +678,7 @@ impl Manager {
         ) {
             Ok(release_version) => release_version,
             Err(error) => {
-                eprintln!("[supervisor] 升级请求字段非法（未发起下载）: {error}");
+                logln!("[supervisor] 升级请求字段非法（未发起下载）: {error}");
                 return;
             }
         };
@@ -748,7 +749,7 @@ impl Manager {
         if pending_running && !st.pending_healthy {
             st.pending_healthy = true;
             st.pending_resync_nonce = None;
-            eprintln!(
+            logln!(
                 "[supervisor] pending worker UDS/resync healthy version={} connection_generation={connection_generation}",
                 st.running_version
             );
@@ -772,14 +773,14 @@ impl Manager {
         release: Option<crate::upgrade::ReleaseVersion>,
     ) {
         if st.shutting_down {
-            eprintln!(
+            logln!(
                 "[supervisor] supervisor 正在关闭，忽略切换到 {}",
                 spec.version
             );
             return;
         }
         if spec.version == st.active.version && st.pending.is_none() {
-            eprintln!("[supervisor] already on version {}", spec.version);
+            logln!("[supervisor] already on version {}", spec.version);
             return;
         }
         if st
@@ -787,14 +788,15 @@ impl Manager {
             .as_ref()
             .is_some_and(|pending| pending.version == spec.version)
         {
-            eprintln!("[supervisor] already testing version {}", spec.version);
+            logln!("[supervisor] already testing version {}", spec.version);
             return;
         }
         // 恢复出的 worker 在 probation 真正提交前，绝不能因为它转发了一条异步升级请求
         // 就晋升成新候选的 fallback。保留 pending_fallback=builtin；新候选失败仍回 builtin。
-        eprintln!(
+        logln!(
             "[supervisor] upgrading worker from={} to={}",
-            st.active.version, spec.version
+            st.active.version,
+            spec.version
         );
         st.pending = Some(spec);
         st.pending_release = release;

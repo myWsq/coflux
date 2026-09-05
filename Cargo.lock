@@ -401,6 +401,7 @@ dependencies = [
 name = "coflux-protocol"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "prost",
  "serde",
  "serde_json",
