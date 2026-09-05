@@ -57,6 +57,10 @@ fn server_to_daemon_envelope_dispatches_to_session_create() {
             shell: None,
             cols: 80,
             rows: 24,
+            workspace_id: String::new(),
+            project_id: String::new(),
+            daemon_id: String::new(),
+            mcp_url: String::new(),
         })),
     };
     let bytes = env.encode_to_vec();
