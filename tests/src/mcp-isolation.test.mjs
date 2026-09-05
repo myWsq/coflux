@@ -157,3 +157,30 @@ test("跨账号 token 互不可换：B 的 token 不能冒充 A 读终端", asyn
   const asA = await callTool(BASE, tokenA, "read_terminal", { terminalId: taskId });
   assert.ok(!asA.result.isError);
 });
+
+test("B 用 A 的资产 id 调写 tools 同样得到「不存在或不属于当前账号」，且 A 的资产分毫未动（plan 091）", async () => {
+  const cases = [
+    ["create_workspace", { projectId, branch: "b-steals", createNew: true }],
+    ["rename_workspace", { workspaceId, name: "hijacked" }],
+    ["remove_workspace", { workspaceId }],
+    ["create_terminal", { workspaceId, command: "echo pwned" }],
+    ["send_terminal_input", { terminalId: taskId, text: "echo pwned" }],
+    ["wait_terminal", { terminalId: taskId, timeoutSeconds: 1 }],
+    ["stop_terminal", { terminalId: taskId }],
+    ["remove_terminal", { terminalId: taskId }],
+  ];
+  for (const [name, args] of cases) {
+    const r = await callTool(BASE, tokenB, name, args);
+    assert.equal(r.status, 200, `${name}: ${JSON.stringify(r.json)}`);
+    assert.equal(r.result.isError, true, `${name} 应报错`);
+    assert.ok(r.result.content[0].text.includes("不存在或不属于当前账号"), `${name}: ${r.result.content[0].text}`);
+  }
+  // A 的终端仍在跑、工作区名未变、终端数未增
+  const terminals = (await callTool(BASE, tokenA, "list_terminals", { workspaceId })).result.structuredContent.terminals;
+  const mine = terminals.find((t) => t.id === taskId);
+  assert.equal(mine?.status, "running", "A 的终端不能被 B 停掉/删掉");
+  assert.ok(!terminals.some((t) => t.title === "echo pwned"), "B 不能在 A 的工作区开终端");
+  const workspaces = (await callTool(BASE, tokenA, "list_workspaces", { projectId })).result.structuredContent.workspaces;
+  assert.deepEqual(workspaces.map((w) => w.id), [workspaceId], "B 不能在 A 的项目下建/删工作区");
+  assert.notEqual(workspaces[0].name, "hijacked");
+});

@@ -4,12 +4,12 @@
  * 黑盒：fetch 直接打 OAuth 与 MCP 端点（JSON-RPC over HTTP），确认页那一跳用测试 WS Client 发同款消息。
  * 覆盖：
  *   - 无 token 401 且 WWW-Authenticate 带可解析的 resource_metadata；PRM → AS 元数据可被宿主发现流程消费；
- *   - 完整授权码流程：DCR → authorize 302 → 登录确认 → 换 token → initialize / tools/list → 六个 tools 正向；
+ *   - 完整授权码流程：DCR → authorize 302 → 登录确认 → 换 token → initialize / tools/list → 六个只读 tools 正向；
  *   - 负向：PKCE verifier 不符、授权码二次使用（并整链撤销）、refresh 轮换后旧 refresh 失效、
  *     非 loopback 且未注册的 redirect_uri、拒绝授权回调带 access_denied、坏 token 401。
  *
- * 注意 read_terminal 基于中心 2 秒周期的 checkpoint（过渡实现，091 换经 daemon 读）：先等观察端收到
- * 含 marker 的 sessionCheckpoint 再读。
+ * 注意 read_terminal 自 091 起优先经 daemon 读（用户手开的终端走 sessiond 快照，source=snapshot），
+ * 设备离线才退回中心 checkpoint；这里仍先等观察端收到含 marker 的 sessionCheckpoint 再读，两条路径都稳。
  *
  * 端口：主栈 8866（refresh 复用宽限设 0，保住"重放即整链撤销"断言）；宽限正向用例另起只有 server 的 8868。
  */
@@ -42,7 +42,12 @@ const PORT = 8866;
 const BASE = `http://127.0.0.1:${PORT}`;
 const GRACE_PORT = 8868;
 const GRACE_BASE = `http://127.0.0.1:${GRACE_PORT}`;
-const EXPECTED_TOOLS = ["list_devices", "list_projects", "list_workspaces", "list_terminals", "read_terminal", "list_ports"];
+// 090 的六个只读 + 091 的八个写/等 tools（写 tools 的行为在 mcp-write-tools.test.mjs 验收）
+const EXPECTED_TOOLS = [
+  "list_devices", "list_projects", "list_workspaces", "list_terminals", "read_terminal", "list_ports",
+  "create_workspace", "rename_workspace", "remove_workspace",
+  "create_terminal", "send_terminal_input", "wait_terminal", "stop_terminal", "remove_terminal",
+];
 
 const HTTP_SERVER_SRC = `
 const http = require("http");
@@ -139,7 +144,7 @@ test("完整授权码流程：DCR → authorize 302 → 登录确认 → 换 tok
   tokens = token.json;
 });
 
-test("initialize / tools/list：六个只读 tools 可见", async () => {
+test("initialize / tools/list：六个只读 + 八个写/等 tools 可见", async () => {
   const init = await mcpInitialize(BASE, tokens.access_token);
   assert.equal(init.status, 200, JSON.stringify(init.json));
   assert.equal(init.json.result.serverInfo.name, "coflux");
@@ -263,6 +268,7 @@ test("read_terminal：去 ANSI 的纯文本尾 N 行", async () => {
   assert.equal(out.status, "running");
   assert.equal(out.snapshotAvailable, true);
   assert.ok(out.capturedAt > 0);
+  assert.ok(["snapshot", "checkpoint"].includes(out.source), `用户手开的终端来源是 snapshot（在线）或 checkpoint：${out.source}`);
   assert.ok(out.text.includes("MCP_READ_MARKER_42"), `终端文本含 marker：${JSON.stringify(out.text)}`);
   // eslint-disable-next-line no-control-regex
   assert.ok(!/\x1b/.test(out.text), "已去 ANSI");
