@@ -389,18 +389,18 @@ export type SessionAgentRef = Message<"coflux.v1.SessionAgentRef"> & {
   state: string;
 
   /**
-   * agent 经 MCP `notify_user` 主动留给用户的一句话（plan 074 引入、plan 093 起走 MCP）：
-   * 与 state 同生命周期，后续任一 hook 事件到达即被清空（那时 agent 已换了状态，旧消息就
-   * 过期了）。纯展示、不落库；长度由中心入口与 worker 侧共同钳制。
+   * agent 经 `cofluxd notify` 主动留给用户的一句话（plan 074）：与 state 同生命周期，
+   * 后续任一 hook 事件到达即被清空（那时 agent 已换了状态，旧消息就过期了）。
+   * 纯展示、不落库；长度由 worker 侧钳制。
    *
    * @generated from field: string message = 5;
    */
   message: string;
 
   /**
-   * agent 经 MCP `report_progress` 主动播报的进度短评（plan 088 引入、plan 093 起走 MCP）：
-   * 覆盖式单字段，**跨 hook 事件存活**（与 message 生命周期刻意不同——进度不因 agent 换回合
-   * 而过期），被下一条 progress 覆盖，agent 条目消失时随条目清掉。纯展示、不落库；长度同上。
+   * agent 经 `cofluxd progress` 主动播报的进度短评（plan 088）：覆盖式单字段，**跨 hook
+   * 事件存活**（与 message 生命周期刻意不同——进度不因 agent 换回合而过期），被下一条
+   * progress 覆盖，agent 条目消失时随条目清掉。纯展示、不落库；长度由 worker 侧钳制。
    *
    * @generated from field: string progress = 6;
    */
