@@ -90,16 +90,13 @@ message SessionAgents {
   repeated SessionAgentRef sessions = 1;
 }
 
-// ===== agent 协同控制（plan 074）=====
+// ===== agent 协同控制（plan 074，plan 093 起废弃）=====
 //
-// 跑在 PTY 里的 agent 经 loopback 发起的中心操作。worker 已用调用方 pid 反查进程树确认它
-// 属于 session_id 这个存活会话（树外 pid 在 worker 侧就被拒，永不到达这里）；server 据
-// session_id 反查 task→workspace 完成归属校验，daemon 不自报 workspace。
-//
-// request_id 由 worker 生成，只做响应关联，不承担幂等：terminal_new 有副作用但不做
-// exactly-once 去重——CLI 不自动重试，在飞请求遇断连即把错误交给 agent 自己决定
-// （见 plans/074 Decisions）。这条与 browser 的 prepared operation 不同：daemon 控制 WS
-// 是已认证的可信面，无需 operation_id 模板。
+// plan 093 把 agent 能力面收成中心 MCP 单轨：worker 不再发送 AgentControlRequest，中心也不再
+// 处理它；`cofluxd terminal|notify|progress|ports` 已删。下面这组消息（AgentTerminal* /
+// AgentPorts* / AgentControl*）**没有任何发送方与处理方**，保留定义只因 buf breaking 用 FILE
+// 类别（MESSAGE_NO_DELETE / FIELD_NO_DELETE 连 reserved 也不认），与 common.proto 里的
+// ExecResult / FsListed 同理。以后再给 agent 加能力，唯一入口是 MCP tool + ServerAgentRequest。
 message AgentTerminalNew {
   string title = 1;
   // worker 已写好的临时包装脚本绝对路径，server 原样填进 SessionCreate.shell。
@@ -226,17 +223,22 @@ message DaemonToServer {
     RelayHome relay_home = 29;
     WorkspaceDefaultBranch workspace_default_branch = 30;
     SessionAgents session_agents = 31;
+    // plan 093 起无发送方（见上方「agent 协同控制」段）；不 reserved 是因为 buf breaking 的
+    // FILE 类别对字段删除一律报 FIELD_NO_DELETE。
     AgentControlRequest agent_control_request = 32;
     DeviceP2pAnswerReport device_p2p_answer_report = 33;
     ServerAgentResult server_agent_result = 34;
   }
 }
 
-// ===== 中心发起的终端读/写（plan 091）=====
+// ===== 中心发起的终端读/写/标注（plan 091 + plan 093）=====
 //
-// 与 AgentControlRequest 方向相反：这是中心（MCP 写 tools）问 daemon。一个 request + 一个
-// result，各带 oneof payload，新增动作只加分支不占顶层字段号。两者都是无落库副作用的直发
-// 消息（读日志/快照、经 sessiond 正门写一段输入），有落库副作用的动作走 prepared + Execute。
+// 中心（MCP 写 tools）问 daemon。一个 request + 一个 result，各带 oneof payload，新增动作只加
+// 分支不占顶层字段号。全部是无落库副作用的直发消息（读日志/快照、经 sessiond 正门写一段输入、
+// 给 agent presence 打标注），有落库副作用的动作走 prepared + Execute。
+//
+// 能力门禁：worker 认证时宣告能力名（terminal_read/terminal_input 属 `terminal_io`，
+// terminal_notify/terminal_progress 属 `agent_annotate`），中心缺能力即回「需要升级」，不发送。
 
 // 读某终端的原始输出：优先命令日志尾部（agent/中心建的命令终端才有），否则 sessiond 当前
 // 快照；两者都拿不到时 source=none，由中心退回 checkpoint。data 是原始字节（含 ANSI），
@@ -255,11 +257,33 @@ message ServerTerminalInput {
   bytes data = 2;
 }
 
+// agent 经 MCP `notify_user` 叫人（plan 093）：语义与 074 时代的 `cofluxd notify` 逐字相同——
+// 该会话的 presence 转 "question" 并携带留言，下一个 hook 事件到达即清空（只有 daemon 知道
+// hook 事件何时发生，所以状态留在 worker，中心不叠加）。worker 要求该会话的进程树里现场
+// 探测得到 agent（claude/codex）：没有 presence 的标注会在下一轮扫描被剪掉，必须可读拒绝而不是
+// 静默接受。session_id 由中心从 task 取（RUNNING 且有会话），worker 只认它与本地 alive 表一致的情况。
+message ServerTerminalNotify {
+  string task_id = 1;
+  string session_id = 2;
+  // 长度由中心入口拒绝（>200 字符）且 worker 再钳一次
+  string message = 3;
+}
+
+// agent 经 MCP `report_progress` 播报进度（plan 093）：语义与 `cofluxd progress` 逐字相同——
+// 覆盖式单字段、不改 state、跨 hook 事件存活、被下一条覆盖、随 presence 一起消失。presence 门同上。
+message ServerTerminalProgress {
+  string task_id = 1;
+  string session_id = 2;
+  string message = 3;
+}
+
 message ServerAgentRequest {
   string request_id = 1;
   oneof payload {
     ServerTerminalRead terminal_read = 10;
     ServerTerminalInput terminal_input = 11;
+    ServerTerminalNotify terminal_notify = 12;
+    ServerTerminalProgress terminal_progress = 13;
   }
 }
 
@@ -271,6 +295,10 @@ message ServerTerminalReadResult {
 
 message ServerTerminalInputResult {}
 
+message ServerTerminalNotifyResult {}
+
+message ServerTerminalProgressResult {}
+
 message ServerAgentResult {
   string request_id = 1;
   bool ok = 2;
@@ -278,6 +306,8 @@ message ServerAgentResult {
   oneof payload {
     ServerTerminalReadResult terminal_read = 10;
     ServerTerminalInputResult terminal_input = 11;
+    ServerTerminalNotifyResult terminal_notify = 12;
+    ServerTerminalProgressResult terminal_progress = 13;
   }
 }
 
@@ -369,7 +399,7 @@ message DaemonSetName {
   string name = 1;
 }
 
-// 直发建会话（cofluxd terminal new 走这条）。7 起是会话归属 id（plan 092）：中心只下发 id，
+// 直发建会话（中心 prepared 命令终端 / web 建会话最终都落到这条）。7 起是会话归属 id（plan 092）：中心只下发 id，
 // supervisor 在 create_session 里组装成 COFLUX_* 环境变量注入 PTY；变量名与组装只在 supervisor 一处。
 // 全部可缺省：旧中心不下发、旧 worker 不映射都只是「会话里没有这些变量」，绝不影响建会话。
 message SessionCreate {
@@ -451,6 +481,7 @@ message ServerToDaemon {
     RelayNodeList relay_node_list = 34;
     ProxyData proxy_data = 19;
     WorkspaceList workspace_list = 20;
+    // plan 093 起中心不再发送（同 DaemonToServer.agent_control_request，保留只为过 buf breaking）。
     AgentControlResult agent_control_result = 35;
     DeviceP2pDial device_p2p_dial = 36;
     DeviceP2pChannelGrant device_p2p_channel_grant = 37;
