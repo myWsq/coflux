@@ -228,6 +228,59 @@ export interface SessionCheckpointRecord extends Omit<SessionCheckpointRow, "sna
   snapshotSeq: bigint;
 }
 
+/** OAuth 2.1 动态注册的公共客户端（plan 090）。redirectUris/grantTypes 在 DB 里是 JSON 文本，
+ * metadata 是注册应答全文（RFC 7591 要求原样回显）。 */
+export interface OAuthClientRecord {
+  clientId: string;
+  clientName: string;
+  redirectUris: string[];
+  grantTypes: string[];
+  tokenEndpointAuthMethod: string;
+  metadata: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
+interface OAuthClientRow {
+  clientId: string;
+  clientName: string;
+  redirectUris: string;
+  grantTypes: string;
+  tokenEndpointAuthMethod: string;
+  metadata: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
+function rowToOAuthClient(row: OAuthClientRow): OAuthClientRecord {
+  return { ...row, redirectUris: parseStringList(row.redirectUris), grantTypes: parseStringList(row.grantTypes) };
+}
+
+function parseStringList(raw: string): string[] {
+  try {
+    const value: unknown = JSON.parse(raw);
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export type OAuthTokenKind = "access" | "refresh";
+
+/** OAuth token 行（只存 hash）。同一次授权签出的 access+refresh 共享 grantId，refresh 轮换沿用它。 */
+export interface OAuthTokenRecord {
+  tokenHash: string;
+  kind: OAuthTokenKind;
+  grantId: string;
+  clientId: string;
+  accountId: AccountId;
+  userId: string | null;
+  scope: string;
+  createdAt: number;
+  expiresAt: number;
+  revoked: boolean;
+}
+
 function rowToCheckpoint(row: SessionCheckpointRow): SessionCheckpointRecord {
   return { ...row, snapshotSeq: BigInt(row.snapshotSeq) };
 }
@@ -375,6 +428,11 @@ export class Store {
       WHERE token_hash = ${tokenHash} AND revoked = false AND (expires_at IS NULL OR expires_at > ${now})
     `;
     return rows[0]?.accountId;
+  }
+  /** 会话 token 绑定的登录用户（password 模式才有；local 模式为 NULL）。OAuth 确认页把它写进签发的凭证。 */
+  async userIdForClientToken(tokenHash: string): Promise<string | null> {
+    const rows = await this.sql<{ userId: string | null }[]>`SELECT user_id FROM client_tokens WHERE token_hash = ${tokenHash}`;
+    return rows[0]?.userId ?? null;
   }
   async revokeClientToken(tokenHash: string): Promise<void> {
     await this.sql`UPDATE client_tokens SET revoked = true WHERE token_hash = ${tokenHash}`;
@@ -1034,6 +1092,54 @@ export class Store {
         AND updated_at < ${now - 30 * 24 * 60 * 60 * 1000}
     `;
     return rows[0]?.count ?? 0;
+  }
+
+  /* ------------------------ oauth clients / tokens ------------------------ */
+  async createOAuthClient(client: OAuthClientRecord): Promise<void> {
+    await this.sql`
+      INSERT INTO oauth_clients (client_id, client_name, redirect_uris, grant_types, token_endpoint_auth_method, metadata, created_at, last_used_at)
+      VALUES (
+        ${client.clientId}, ${client.clientName}, ${JSON.stringify(client.redirectUris)}, ${JSON.stringify(client.grantTypes)},
+        ${client.tokenEndpointAuthMethod}, ${client.metadata}, ${client.createdAt}, ${client.lastUsedAt}
+      )
+    `;
+  }
+  async getOAuthClient(clientId: string): Promise<OAuthClientRecord | undefined> {
+    const rows = await this.sql<OAuthClientRow[]>`SELECT * FROM oauth_clients WHERE client_id = ${clientId}`;
+    return rows[0] && rowToOAuthClient(rows[0]);
+  }
+  async touchOAuthClient(clientId: string, ts: number): Promise<void> {
+    await this.sql`UPDATE oauth_clients SET last_used_at = ${ts} WHERE client_id = ${clientId}`;
+  }
+  async countOAuthClients(): Promise<number> {
+    const rows = await this.sql<{ n: number }[]>`SELECT COUNT(*)::int AS n FROM oauth_clients`;
+    return rows[0].n;
+  }
+
+  async insertOAuthToken(token: OAuthTokenRecord): Promise<void> {
+    await this.sql`
+      INSERT INTO oauth_tokens (token_hash, kind, grant_id, client_id, account_id, user_id, scope, created_at, expires_at, revoked)
+      VALUES (
+        ${token.tokenHash}, ${token.kind}, ${token.grantId}, ${token.clientId}, ${token.accountId}, ${token.userId},
+        ${token.scope}, ${token.createdAt}, ${token.expiresAt}, ${token.revoked}
+      )
+    `;
+  }
+  /** 按 hash + 类型取 token 行（含已撤销/已过期的，refresh 重放检测要看到"已撤销"这个事实）。 */
+  async getOAuthToken(tokenHash: string, kind: OAuthTokenKind): Promise<OAuthTokenRecord | undefined> {
+    const rows = await this.sql<OAuthTokenRecord[]>`SELECT * FROM oauth_tokens WHERE token_hash = ${tokenHash} AND kind = ${kind}`;
+    return rows[0];
+  }
+  async revokeOAuthToken(tokenHash: string): Promise<void> {
+    await this.sql`UPDATE oauth_tokens SET revoked = true WHERE token_hash = ${tokenHash}`;
+  }
+  /** 整链撤销：refresh 重放 / 授权码二次使用时把同一 grant 下的全部 token 作废。 */
+  async revokeOAuthGrant(grantId: string): Promise<void> {
+    await this.sql`UPDATE oauth_tokens SET revoked = true WHERE grant_id = ${grantId}`;
+  }
+  /** 清理已撤销 / 已过期的 token，防表无界增长（与 pruneClientTokens 同款，启动时跑）。 */
+  async pruneOAuthTokens(now: number): Promise<void> {
+    await this.sql`DELETE FROM oauth_tokens WHERE revoked = true OR expires_at <= ${now}`;
   }
 
   /* ------------------------- checkpoint cache ------------------------ */

@@ -125,6 +125,19 @@ message TaskRemove {
   string task_id = 1;
 }
 
+// 查询待确认的 OAuth 授权请求（plan 090：MCP 宿主经 /oauth/authorize 发起、302 落到 web 确认页）。
+// 不消费请求，供确认页展示客户端名与回调 host；request_id 由 302 的 query 带来。
+message OAuthAuthorizeInfoRequest {
+  string request_id = 1;
+}
+
+// 确认或拒绝 OAuth 授权请求（一次性：无论确认还是拒绝，请求随即从内存摘除）。
+// approve=true 时 server 以当前登录账号签发授权码；false 时回调带 error=access_denied。
+message OAuthAuthorizeDecide {
+  string request_id = 1;
+  bool approve = 2;
+}
+
 message ClientToServer {
   // 旧 terminal/RPC adapter 已由端到端 DeviceEnvelope 取代；编号与字段名永久保留，
   // 防止旧 bundle 的 raw PTY/RPC 被未来字段误解。29-31 是控制面复用 relay 路径（plan 043
@@ -159,6 +172,8 @@ message ClientToServer {
     DeviceP2pOffer device_p2p_offer = 35;
     DeviceP2pChannelOpen device_p2p_channel_open = 36;
     ProjectSetName project_set_name = 37;
+    OAuthAuthorizeInfoRequest oauth_authorize_info = 38;
+    OAuthAuthorizeDecide oauth_authorize_decide = 39;
   }
 }
 
@@ -259,6 +274,24 @@ message ServerError {
 // apps/server/src/hub.ts handleClientAuth）。
 message ClientOutdated {}
 
+// OAuthAuthorizeInfoRequest 的回应：ok 时带客户端名与回调 host（供确认页展示），否则 error 说明原因
+// （无效/已用/已过期，不区分——同 DeviceAuthorizeInfoResult 的不泄漏原则）。
+message OAuthAuthorizeInfoResult {
+  bool ok = 1;
+  optional string client_name = 2;
+  optional string redirect_host = 3;
+  optional string scope = 4;
+  optional string error = 5;
+}
+
+// OAuthAuthorizeDecide 的回应：ok 时带完整的回调 URL（含 code 与原 state，或 error=access_denied），
+// 确认页直接 location.assign 跳回宿主；请求无效/过期时 ok=false 带 error。
+message OAuthAuthorizeResult {
+  bool ok = 1;
+  optional string redirect_url = 2;
+  optional string error = 3;
+}
+
 message ServerToClient {
   // holder/output/RPC 结果全部封装在 opaque Device relay 内；server 不再理解这些数据。
   // 27-29 是控制面复用 relay 路径（plan 043 改为独立 relay + rendezvous 后删除）。
@@ -292,5 +325,7 @@ message ServerToClient {
     SessionAgentsUpdated session_agents_updated = 34;
     DeviceP2pAnswer device_p2p_answer = 35;
     DeviceP2pChannelResult device_p2p_channel_result = 36;
+    OAuthAuthorizeInfoResult oauth_authorize_info = 37;
+    OAuthAuthorizeResult oauth_authorize_result = 38;
   }
 }

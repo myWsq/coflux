@@ -740,6 +740,41 @@ async function waitBeforeMigrationRetry(attempt: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 }
 
+/** 版本 4（plan 090）：MCP 宿主的 OAuth 2.1 客户端与凭证。
+ * - oauth_clients：动态注册（DCR）的公共客户端；redirect_uris / grant_types 以 JSON 文本存放，
+ *   注册应答原样留在 metadata 里（RFC 7591 要求回显）。
+ * - oauth_tokens：access / refresh 两类 token 只存 sha256 hash；同一次授权签出的 token 共享
+ *   grant_id，refresh 重放检测时按 grant 整链撤销。归属约束写在本迁移里（冻结的 baseline
+ *   与版本 3 的核心表约束一个字都不动）。 */
+const OAUTH_SCHEMA_SQL = `
+  CREATE TABLE coflux.oauth_clients (
+    client_id TEXT PRIMARY KEY,
+    client_name TEXT NOT NULL,
+    redirect_uris TEXT NOT NULL,
+    grant_types TEXT NOT NULL,
+    token_endpoint_auth_method TEXT NOT NULL DEFAULT 'none',
+    metadata TEXT NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL,
+    last_used_at DOUBLE PRECISION
+  );
+
+  CREATE TABLE coflux.oauth_tokens (
+    token_hash TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('access', 'refresh')),
+    grant_id TEXT NOT NULL,
+    client_id TEXT NOT NULL REFERENCES coflux.oauth_clients(client_id) ON DELETE CASCADE,
+    account_id TEXT NOT NULL REFERENCES coflux.accounts(id) ON DELETE CASCADE,
+    user_id TEXT,
+    scope TEXT NOT NULL DEFAULT '',
+    created_at DOUBLE PRECISION NOT NULL,
+    expires_at DOUBLE PRECISION NOT NULL,
+    revoked BOOLEAN NOT NULL DEFAULT false
+  );
+  CREATE INDEX idx_oauth_tokens_account ON coflux.oauth_tokens(account_id);
+  CREATE INDEX idx_oauth_tokens_grant ON coflux.oauth_tokens(grant_id);
+  CREATE INDEX idx_oauth_tokens_expires ON coflux.oauth_tokens(expires_at);
+`;
+
 function checksum(migration: Pick<Migration, "version" | "name" | "definition">): string {
   return createHash("sha256")
     .update(`${migration.version}\n${migration.name}\n${migration.definition}`)
@@ -1201,6 +1236,14 @@ const MIGRATIONS: readonly Migration[] = [
       await sql.unsafe(CORE_PREFLIGHT_LOCK_SQL);
       await runPreflight(sql);
       await sql.unsafe(CORE_INTEGRITY_SQL);
+    },
+  },
+  {
+    version: 4,
+    name: "oauth_clients_and_tokens",
+    definition: OAUTH_SCHEMA_SQL,
+    async apply(sql) {
+      await sql.unsafe(OAUTH_SCHEMA_SQL);
     },
   },
 ];
