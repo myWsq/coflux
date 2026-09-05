@@ -1,49 +1,40 @@
-//! agent 协同控制端点（plan 074）：跑在 coflux PTY 里的 claude/codex 经
-//! `cofluxd terminal|notify|ports` 把自己的工作外化成用户在 web/手机上**看得见、能接管**的
-//! coflux 实体——而不是在自己的 Bash 里后台起一个谁也看不见的进程。
+//! 中心发起的终端读/写/标注（plan 091 + plan 093）：`ServerAgentRequest` 的 daemon 侧处理器。
 //!
-//! **身份不靠凭证靠位置**：调用方把自己的 pid 报上来，worker 反查它落在哪个存活 session 的
-//! 进程树内（[`agents::session_of_pid`]）。树外 pid 一律拒——这既是身份也是权限边界：只有
-//! coflux 自己起的 PTY 里的进程能进来，本机其它进程（含被网页驱动的本地程序）都进不来，
-//! 而且能力天然被钉死在「发起方所属的那个 session」上。agent 侧因此不需要任何凭证。
+//! plan 074/088 曾在这里放过 loopback `/agent` 端点的业务（`cofluxd terminal|notify|progress|ports`，
+//! 按调用方 pid 反查进程树认身份、再把动作转成 AgentControlRequest 交中心）。plan 093 把 agent
+//! 能力面收成中心 MCP 单轨后整条拆除：agent 只经中心 MCP tools 触达 daemon，账号归属校验与能力
+//! 门禁都在中心做，这里只剩「中心问、daemon 答」的四个动作：
+//! - terminal_read：命令日志尾部优先、否则 sessiond 当前快照、都没有则 source=none 交中心退回 checkpoint；
+//! - terminal_input：经 [`DeviceRuntime::agent_send_input`] 正门写 PTY，人类 holder 在场时被拒；
+//! - terminal_notify / terminal_progress：给该会话的 agent presence 打标注。语义与 074 时代的
+//!   `cofluxd notify/progress` 逐字相同（见 [`crate::observed`] 的三个 apply 函数与清空规则），
+//!   **且该会话进程树里现场探测得到 agent 才接受**——presence 报表只给扫到 claude/codex 的会话
+//!   建条目，其余会话的标注在下一轮扫描就被 `merge_annotations` 剪掉，静默接受等于静默丢。
 //!
-//! **notify 在本地闭环**（改 presence 状态后立即上报）；其余动作转成 `AgentControlRequest`
-//! 交给中心，由 server 反查 session→task→workspace 完成归属校验后执行。中心离线时它们必然
-//! 失败——明确报错比默默降级好，因为「让用户看得见」正是这些动作的全部意义。
+//! 每条请求必回一条 result；错误文案原样回中心，由 MCP tool 转给 agent。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use coflux_protocol::wire::{
-    self, agent_control_request, agent_control_result, daemon_to_server, server_agent_request,
-    server_agent_result,
-};
-use tokio::sync::{mpsc, oneshot};
-
-use prost::Message as _;
+use coflux_protocol::wire::{self, server_agent_request, server_agent_result};
+use tokio::sync::mpsc;
 
 use crate::{agents, device::DeviceRuntime, observed::ObservedState, ops, WorkerState, WsOut};
 
-/// 等中心回执的上限：只防在飞请求永久占住 pending 表，CLI 侧自己的超时更短。
-const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
-/// notify 留言长度上限（字符）。它只是侧栏 tooltip 里的一句话，不是日志通道。
-const MAX_NOTIFY_CHARS: usize = 200;
-/// 单次 read 从命令日志尾部取的字节上限；CLI 侧还会再按行数收窄。
-const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
-/// agent_logs 表的条目上限。超出即整表清空——丢失只意味着 read 退回中心 checkpoint，
-/// 没有正确性后果，所以不值得为它做 LRU。
+/// notify/progress 留言长度上限（字符）。它只是侧栏 tooltip 里的一句话，不是日志通道。
+/// 中心入口已按同一上限拒绝（超限即拒，不静默截断），这里是 daemon 侧兜底钳制。
+pub(crate) const MAX_NOTIFY_CHARS: usize = 200;
+/// agent_logs 表的条目上限。超出即整表清空——丢失只意味着 read 退回 sessiond 快照/中心
+/// checkpoint，没有正确性后果，所以不值得为它做 LRU。
 /// ponytail: 粗暴清表，真出现「一个工作区几百个终端」的用法再换 LRU。
 const MAX_TRACKED_LOGS: usize = 256;
-/// 中心回执关联表只保存正在等待的 agent 控制请求；达到上限立即拒绝，不能让本地 HTTP
-/// 并发在 20 秒超时窗口内无界堆积。
-const AGENT_PENDING_LIMIT: usize = 128;
-
 /// 单次 ServerTerminalRead 回给中心的字节上限（worker 侧钳制；中心再按行数收窄，与 checkpoint 同级）。
+/// 命令日志汇的单段容量（[`crate::log_sink::SEGMENT_BYTES`]）不得小于它，否则读窗永远填不满。
 const MAX_SERVER_READ_BYTES: u64 = 256 * 1024;
 /// ServerTerminalInput 单次写入字节上限：MCP 一次 send 是一行命令或一小段文本，不是文件通道。
 const MAX_SERVER_INPUT_BYTES: usize = 64 * 1024;
+
+const _: () = assert!(crate::log_sink::SEGMENT_BYTES >= MAX_SERVER_READ_BYTES);
 
 pub(crate) fn remember_log(state: &Arc<Mutex<WorkerState>>, task_id: String, log_path: String) {
     let mut s = state.lock().unwrap();
@@ -53,438 +44,24 @@ pub(crate) fn remember_log(state: &Arc<Mutex<WorkerState>>, task_id: String, log
     s.agent_logs.insert(task_id, log_path);
 }
 
-/// gateway 解析出的一条 agent 控制请求；`respond` 回填 HTTP 应答。
-pub struct AgentRequest {
-    pub pid: i32,
-    pub ppid: i32,
-    pub action: AgentAction,
-    pub respond: oneshot::Sender<AgentResponse>,
+/// 两种 presence 标注；对应 [`ObservedState::apply_notify`] / [`ObservedState::apply_progress`]。
+#[derive(Clone, Copy)]
+enum Annotation {
+    /// 叫人：state 转 question 并携带留言，下一个 hook 事件即清空
+    Notify,
+    /// 播报：覆盖式单字段，不改 state，跨 hook 事件存活
+    Progress,
 }
 
-pub enum AgentAction {
-    TerminalNew {
-        title: String,
-        command: String,
-    },
-    TerminalList,
-    TerminalRead {
-        task_id: String,
-    },
-    TerminalSend {
-        task_id: String,
-        text: String,
-        enter: bool,
-    },
-    Notify {
-        message: String,
-    },
-    Progress {
-        message: String,
-    },
-    Ports,
-}
-
-pub struct AgentResponse {
-    /// HTTP status line，如 "200 OK"
-    pub status: &'static str,
-    /// JSON 响应体
-    pub body: String,
-}
-
-impl AgentResponse {
-    fn ok(payload: serde_json::Value) -> Self {
-        let mut object = serde_json::Map::new();
-        object.insert("ok".into(), serde_json::Value::Bool(true));
-        if let serde_json::Value::Object(fields) = payload {
-            object.extend(fields);
-        }
-        Self {
-            status: "200 OK",
-            body: serde_json::Value::Object(object).to_string(),
-        }
-    }
-
-    fn err(status: &'static str, message: impl AsRef<str>) -> Self {
-        let body = serde_json::json!({ "ok": false, "error": message.as_ref() });
-        Self {
-            status,
-            body: body.to_string(),
-        }
-    }
-}
-
-/// request_id 的进程内序号；与 pid 一起构成本 daemon 内唯一的关联键（server 只用它做响应
-/// 关联，不承担幂等——见 daemon.proto 里 AgentControlRequest 的契约注释）。
-static NEXT_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
-
-fn next_request_id() -> String {
-    format!(
-        "agent-{}-{}",
-        std::process::id(),
-        NEXT_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
-fn try_insert_agent_pending(
-    pending: &mut HashMap<String, oneshot::Sender<wire::AgentControlResult>>,
-    request_id: String,
-    waiter: oneshot::Sender<wire::AgentControlResult>,
-) -> bool {
-    if pending.len() >= AGENT_PENDING_LIMIT || pending.contains_key(&request_id) {
-        return false;
-    }
-    pending.insert(request_id, waiter);
-    true
-}
-
-/// 消费循环：每条请求先过 pid 身份门，再按动作分派。
-pub async fn consume_agent_requests(
-    mut rx: mpsc::Receiver<AgentRequest>,
-    state: Arc<Mutex<WorkerState>>,
-    observed: Arc<ObservedState>,
-    to_server_tx: mpsc::Sender<WsOut>,
-    device: Arc<DeviceRuntime>,
-) {
-    while let Some(request) = rx.recv().await {
-        let state = state.clone();
-        let observed = observed.clone();
-        let to_server_tx = to_server_tx.clone();
-        let device = device.clone();
-        // 每条请求独立任务：terminal.* 要等中心回执（最长 SERVER_TIMEOUT），不能阻塞后续请求。
-        tokio::spawn(async move {
-            let response = handle(
-                &state,
-                &observed,
-                &to_server_tx,
-                &device,
-                request.pid,
-                request.ppid,
-                request.action,
-            )
-            .await;
-            let _ = request.respond.send(response);
-        });
-    }
-}
-
-async fn handle(
-    state: &Arc<Mutex<WorkerState>>,
-    observed: &ObservedState,
-    to_server_tx: &mpsc::Sender<WsOut>,
-    device: &Arc<DeviceRuntime>,
-    pid: i32,
-    ppid: i32,
-    action: AgentAction,
-) -> AgentResponse {
-    let alive = { state.lock().unwrap().alive.clone() };
-    let session_id = tokio::task::spawn_blocking(move || agents::session_of_pid(&alive, pid, ppid))
-        .await
-        .ok()
-        .flatten();
-    let Some(session_id) = session_id else {
-        return AgentResponse::err(
-            "403 Forbidden",
-            "不在 coflux 终端里：本命令只能由 coflux 会话内的进程调用",
-        );
-    };
-
-    match action {
-        AgentAction::Notify { message } => {
-            let message: String = message.chars().take(MAX_NOTIFY_CHARS).collect();
-            observed.apply_notify(session_id, message);
-            crate::report_agents_if_changed(state, observed, to_server_tx).await;
-            AgentResponse::ok(serde_json::json!({}))
-        }
-        AgentAction::Progress { message } => {
-            // 与 notify 是两条信道：progress 只播报进度，不改 state、不置 question，
-            // 且跨 hook 事件存活（只被下一条覆盖）。同为 daemon 本地闭环。
-            let message: String = message.chars().take(MAX_NOTIFY_CHARS).collect();
-            observed.apply_progress(session_id, message);
-            crate::report_agents_if_changed(state, observed, to_server_tx).await;
-            AgentResponse::ok(serde_json::json!({}))
-        }
-        AgentAction::TerminalNew { title, command } => {
-            let (shell, log_path) = match ops::write_command_script(&command) {
-                Ok(paths) => paths,
-                Err(error) => {
-                    return AgentResponse::err(
-                        "500 Internal Server Error",
-                        format!("写命令脚本失败：{error}"),
-                    )
-                }
-            };
-            let payload = agent_control_request::Payload::TerminalNew(wire::AgentTerminalNew {
-                title,
-                shell,
-            });
-            match ask_server(state, to_server_tx, session_id, payload).await {
-                Err(response) => response,
-                Ok(agent_control_result::Payload::TerminalNew(result)) => {
-                    remember_log(state, result.task_id.clone(), log_path);
-                    AgentResponse::ok(
-                        serde_json::json!({ "taskId": result.task_id, "sessionId": result.session_id }),
-                    )
-                }
-                Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
-            }
-        }
-        AgentAction::TerminalList => {
-            let payload = agent_control_request::Payload::TerminalList(wire::AgentTerminalList {});
-            match ask_server(state, to_server_tx, session_id, payload).await {
-                Err(response) => response,
-                Ok(agent_control_result::Payload::TerminalList(result)) => {
-                    let terminals: Vec<serde_json::Value> = result
-                        .terminals
-                        .into_iter()
-                        .map(|terminal| {
-                            serde_json::json!({
-                                "taskId": terminal.task_id,
-                                "title": terminal.title,
-                                "status": status_name(terminal.status),
-                                "exitCode": terminal.exit_code,
-                                "sessionId": terminal.session_id,
-                                "createdAt": terminal.created_at,
-                            })
-                        })
-                        .collect();
-                    AgentResponse::ok(serde_json::json!({ "terminals": terminals }))
-                }
-                Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
-            }
-        }
-        AgentAction::TerminalRead { task_id } => {
-            // 先问中心：它做归属校验（该 task 必须与发起方同工作区）并给出 status/exit_code。
-            // 内容的**首选**数据源是本地命令日志：中心 checkpoint 是 2 秒周期的派生缓存，
-            // 秒级命令的输出根本进不去，而日志是全量而非一屏。非 agent 自建的终端（用户
-            // 手开的）没有日志，此时退回 checkpoint。
-            let local_log = { state.lock().unwrap().agent_logs.get(&task_id).cloned() };
-            let payload =
-                agent_control_request::Payload::TerminalRead(wire::AgentTerminalRead { task_id });
-            match ask_server(state, to_server_tx, session_id, payload).await {
-                Err(response) => response,
-                Ok(agent_control_result::Payload::TerminalRead(result)) => {
-                    let from_log = local_log
-                        .as_deref()
-                        .and_then(|path| ops::read_command_log_tail(path, MAX_LOG_TAIL_BYTES));
-                    // ANSI 原样带回，去转义在 CLI 侧做（snapshot 同时是 checkpoint 的数据来源，
-                    // 不为 agent 可读性改它的语义）。
-                    let text = from_log.unwrap_or_else(|| {
-                        String::from_utf8_lossy(&result.ansi_snapshot).into_owned()
-                    });
-                    AgentResponse::ok(serde_json::json!({
-                        "ansi": text,
-                        "capturedAt": result.captured_at,
-                        "status": status_name(result.status),
-                        "exitCode": result.exit_code,
-                    }))
-                }
-                Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
-            }
-        }
-        AgentAction::TerminalSend {
-            task_id,
-            text,
-            enter,
-        } => {
-            // 归属寻址复用 terminal.list 的中心校验：清单天然限定在发起方 workspace，
-            // 目标不在清单里 = 不在本工作区或不存在。写入本身在 daemon 本地走 sessiond 正门
-            // （见 DeviceRuntime::agent_send_input 的契约注释），中心不在输入路径上。
-            let payload = agent_control_request::Payload::TerminalList(wire::AgentTerminalList {});
-            match ask_server(state, to_server_tx, session_id, payload).await {
-                Err(response) => response,
-                Ok(agent_control_result::Payload::TerminalList(result)) => {
-                    let Some(target) = result
-                        .terminals
-                        .into_iter()
-                        .find(|terminal| terminal.task_id == task_id)
-                    else {
-                        return AgentResponse::err(
-                            "404 Not Found",
-                            "终端不在本工作区或不存在（用 cofluxd terminal list 查）",
-                        );
-                    };
-                    if status_name(target.status) == "exited" {
-                        return AgentResponse::err(
-                            "409 Conflict",
-                            "终端已退出，不能再输入（要跑新命令用 cofluxd terminal new）",
-                        );
-                    }
-                    let Some(target_session) = target
-                        .session_id
-                        .as_deref()
-                        .filter(|session| !session.is_empty())
-                    else {
-                        return AgentResponse::err("409 Conflict", "终端尚未就绪，稍后重试");
-                    };
-                    let mut data = text.into_bytes();
-                    if enter {
-                        data.push(b'\r');
-                    }
-                    match device.agent_send_input(target_session, data).await {
-                        Ok(()) => AgentResponse::ok(serde_json::json!({})),
-                        Err(message) => AgentResponse::err("409 Conflict", message),
-                    }
-                }
-                Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
-            }
-        }
-        AgentAction::Ports => {
-            let payload = agent_control_request::Payload::PortsList(wire::AgentPortsList {});
-            match ask_server(state, to_server_tx, session_id, payload).await {
-                Err(response) => response,
-                Ok(agent_control_result::Payload::PortsList(result)) => {
-                    let ports: Vec<serde_json::Value> = result
-                        .ports
-                        .into_iter()
-                        .map(|preview| serde_json::json!({ "port": preview.port, "url": preview.url }))
-                        .collect();
-                    AgentResponse::ok(serde_json::json!({ "ports": ports }))
-                }
-                Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
-            }
-        }
-    }
-}
-
-/// 发一条 AgentControlRequest 并等中心回执。失败路径全部转成给 agent 看的 HTTP 错误。
-async fn ask_server(
-    state: &Arc<Mutex<WorkerState>>,
-    to_server_tx: &mpsc::Sender<WsOut>,
-    session_id: String,
-    payload: agent_control_request::Payload,
-) -> Result<agent_control_result::Payload, AgentResponse> {
-    let request_id = next_request_id();
-    let (tx, rx) = oneshot::channel();
-    {
-        let mut s = state.lock().unwrap();
-        if !s.authed {
-            return Err(AgentResponse::err(
-                "503 Service Unavailable",
-                "daemon 未连上中心：这些操作要经中心才能让用户看见",
-            ));
-        }
-        if !try_insert_agent_pending(&mut s.agent_pending, request_id.clone(), tx) {
-            return Err(AgentResponse::err(
-                "429 Too Many Requests",
-                "agent 控制请求并发已达上限，请稍后重试",
-            ));
-        }
-    }
-    // try_send 而非 send，且必须看返回值：出站队列有界，断连期间会满。阻塞会让 agent 干等到
-    // 超时，静默丢弃更糟（同样干等）——满了就立刻说「发不出去」。发送失败要自己摘 pending。
-    let envelope = wire::DaemonToServer {
-        payload: Some(daemon_to_server::Payload::AgentControlRequest(
-            wire::AgentControlRequest {
-                request_id: request_id.clone(),
-                session_id,
-                payload: Some(payload),
-            },
-        )),
-    };
-    if to_server_tx.try_send(envelope.encode_to_vec()).is_err() {
-        state.lock().unwrap().agent_pending.remove(&request_id);
-        return Err(AgentResponse::err(
-            "503 Service Unavailable",
-            "与中心的出站队列已满或已断开，请重试",
-        ));
-    }
-
-    let outcome = tokio::time::timeout(SERVER_TIMEOUT, rx).await;
-    // 无论成败都摘掉 pending：超时/断连后迟到的回执没有接收方，留着就是泄漏。
-    state.lock().unwrap().agent_pending.remove(&request_id);
-    match outcome {
-        Ok(Ok(result)) => {
-            if !result.ok {
-                return Err(AgentResponse::err(
-                    "400 Bad Request",
-                    result.error.unwrap_or_else(|| "中心拒绝了该操作".into()),
-                ));
-            }
-            result
-                .payload
-                .ok_or_else(|| AgentResponse::err("502 Bad Gateway", "中心回执缺少结果"))
-        }
-        // 发送端被丢弃 = 连接断开时清了 pending 表
-        Ok(Err(_)) => Err(AgentResponse::err(
-            "503 Service Unavailable",
-            "与中心的连接中断，请重试",
-        )),
-        Err(_) => Err(AgentResponse::err("504 Gateway Timeout", "中心响应超时")),
-    }
-}
-
-/// TaskStatus → agent 可读的字符串。未知值按 "unknown" 处理而非 panic。
-fn status_name(status: i32) -> &'static str {
-    match wire::TaskStatus::try_from(status) {
-        Ok(wire::TaskStatus::Idle) => "idle",
-        Ok(wire::TaskStatus::Running) => "running",
-        Ok(wire::TaskStatus::Exited) => "exited",
-        _ => "unknown",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn response_shapes_are_agent_readable() {
-        let ok = AgentResponse::ok(serde_json::json!({ "taskId": "t1" }));
-        assert_eq!(ok.status, "200 OK");
-        let parsed: serde_json::Value = serde_json::from_str(&ok.body).expect("ok 体是 JSON");
-        assert_eq!(parsed["ok"], serde_json::json!(true));
-        assert_eq!(parsed["taskId"], serde_json::json!("t1"));
-
-        let err = AgentResponse::err("403 Forbidden", "不在 coflux 终端里");
-        let parsed: serde_json::Value = serde_json::from_str(&err.body).expect("err 体是 JSON");
-        assert_eq!(parsed["ok"], serde_json::json!(false));
-        assert_eq!(parsed["error"], serde_json::json!("不在 coflux 终端里"));
-    }
-
-    #[test]
-    fn status_names_cover_task_states() {
-        assert_eq!(status_name(wire::TaskStatus::Idle as i32), "idle");
-        assert_eq!(status_name(wire::TaskStatus::Running as i32), "running");
-        assert_eq!(status_name(wire::TaskStatus::Exited as i32), "exited");
-        assert_eq!(status_name(999), "unknown");
-    }
-
-    #[test]
-    fn request_ids_are_unique() {
-        let first = next_request_id();
-        let second = next_request_id();
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn pending_agent_controls_stop_at_hard_limit() {
-        let mut pending = HashMap::new();
-        for index in 0..AGENT_PENDING_LIMIT {
-            let (tx, _rx) = oneshot::channel();
-            assert!(try_insert_agent_pending(
-                &mut pending,
-                format!("request-{index}"),
-                tx
-            ));
-        }
-        let (tx, _rx) = oneshot::channel();
-        assert!(!try_insert_agent_pending(
-            &mut pending,
-            "overflow".into(),
-            tx
-        ));
-        assert_eq!(pending.len(), AGENT_PENDING_LIMIT);
-    }
-}
-
-/// 中心发起的终端读/写（plan 091，与 AgentControlRequest 方向相反）。两种动作都是无落库副作用的
-/// 直发请求：读走「命令日志尾部优先、否则 sessiond 当前快照、都没有则 source=none 交中心退回
-/// checkpoint」；写经 [`DeviceRuntime::agent_send_input`] 正门——人类 holder 在场时被拒，错误文案
-/// 原样回中心（同 `cofluxd terminal send` 的人类优先纪律）。每条请求必回一条 result。
-pub async fn handle_server_request(
+/// 中心发起的终端读/写/标注：每条请求必回一条 result。读走「命令日志尾部优先、否则 sessiond 当前
+/// 快照、都没有则 source=none」；写经 [`DeviceRuntime::agent_send_input`] 正门——人类 holder 在场时
+/// 被拒，错误文案原样回中心；标注经 [`annotate_presence`] 的 presence 门后立即触发一次 presence 上报。
+pub(crate) async fn handle_server_request(
     request: wire::ServerAgentRequest,
     state: &Arc<Mutex<WorkerState>>,
+    observed: &ObservedState,
     device: &Arc<DeviceRuntime>,
+    to_server_tx: &mpsc::Sender<WsOut>,
 ) -> wire::ServerAgentResult {
     let request_id = request.request_id;
     let fail = |error: String| wire::ServerAgentResult {
@@ -493,19 +70,22 @@ pub async fn handle_server_request(
         error: Some(error),
         payload: None,
     };
+    let succeed = |payload: server_agent_result::Payload| wire::ServerAgentResult {
+        request_id: request_id.clone(),
+        ok: true,
+        error: None,
+        payload: Some(payload),
+    };
     match request.payload {
         Some(server_agent_request::Payload::TerminalRead(read)) => {
             let max_bytes = u64::from(read.max_bytes).clamp(1, MAX_SERVER_READ_BYTES);
-            let reply = |data: Vec<u8>, source: &str| wire::ServerAgentResult {
-                request_id: request_id.clone(),
-                ok: true,
-                error: None,
-                payload: Some(server_agent_result::Payload::TerminalRead(
+            let reply = |data: Vec<u8>, source: &str| {
+                succeed(server_agent_result::Payload::TerminalRead(
                     wire::ServerTerminalReadResult {
                         data,
                         source: source.to_string(),
                     },
-                )),
+                ))
             };
             let log_path = { state.lock().unwrap().agent_logs.get(&read.task_id).cloned() };
             if let Some(text) = log_path
@@ -545,17 +125,120 @@ pub async fn handle_server_request(
                 return fail(format!("单次输入超过 {MAX_SERVER_INPUT_BYTES} 字节上限"));
             }
             match device.agent_send_input(&input.session_id, input.data).await {
-                Ok(()) => wire::ServerAgentResult {
-                    request_id: request_id.clone(),
-                    ok: true,
-                    error: None,
-                    payload: Some(server_agent_result::Payload::TerminalInput(
-                        wire::ServerTerminalInputResult {},
-                    )),
-                },
+                Ok(()) => succeed(server_agent_result::Payload::TerminalInput(
+                    wire::ServerTerminalInputResult {},
+                )),
+                Err(message) => fail(message),
+            }
+        }
+        Some(server_agent_request::Payload::TerminalNotify(notify)) => {
+            match annotate_presence(
+                state,
+                observed,
+                to_server_tx,
+                &notify.task_id,
+                &notify.session_id,
+                &notify.message,
+                Annotation::Notify,
+            )
+            .await
+            {
+                Ok(()) => succeed(server_agent_result::Payload::TerminalNotify(
+                    wire::ServerTerminalNotifyResult {},
+                )),
+                Err(message) => fail(message),
+            }
+        }
+        Some(server_agent_request::Payload::TerminalProgress(progress)) => {
+            match annotate_presence(
+                state,
+                observed,
+                to_server_tx,
+                &progress.task_id,
+                &progress.session_id,
+                &progress.message,
+                Annotation::Progress,
+            )
+            .await
+            {
+                Ok(()) => succeed(server_agent_result::Payload::TerminalProgress(
+                    wire::ServerTerminalProgressResult {},
+                )),
                 Err(message) => fail(message),
             }
         }
         None => fail("未知的中心请求动作（daemon 不认识该 payload）".into()),
+    }
+}
+
+/// 留言规范化：去首尾空白、按字符钳到上限；空留言返回 None。
+fn clamp_message(raw: &str) -> Option<String> {
+    let message: String = raw.trim().chars().take(MAX_NOTIFY_CHARS).collect();
+    (!message.is_empty()).then_some(message)
+}
+
+/// presence 门 + 标注 + 立即上报（与 074 时代 CLI 路径的处理点相同）。
+///
+/// 门有两道：① 中心给的 session 必须在本地 alive 表里且属于同一 task（不按裸 task 猜）；
+/// ② **现场探测**该会话进程树，必须扫到 claude/codex——用的是与周期扫描完全相同的
+/// [`agents::detect_session_agents`]，所以「这次接受、下一轮被剪掉」不可能发生（除非 agent 恰好
+/// 在两次扫描之间退出，那时留言随 presence 一起消失本就是既定语义）。不用「最近一次已提交的
+/// 报表」：agent 刚起 2 秒内的调用会被误拒。
+async fn annotate_presence(
+    state: &Arc<Mutex<WorkerState>>,
+    observed: &ObservedState,
+    to_server_tx: &mpsc::Sender<WsOut>,
+    task_id: &str,
+    session_id: &str,
+    raw_message: &str,
+    kind: Annotation,
+) -> Result<(), String> {
+    let Some(message) = clamp_message(raw_message) else {
+        return Err("留言不能为空".into());
+    };
+    if session_id.is_empty() {
+        return Err("终端还没有会话，无法标注".into());
+    }
+    let root_pid = state
+        .lock()
+        .unwrap()
+        .alive
+        .get(session_id)
+        .filter(|(task, _)| task == task_id)
+        .map(|(_, pid)| *pid);
+    let Some(root_pid) = root_pid else {
+        return Err("该终端的会话不在本设备的存活会话里（可能刚退出或正在对账），稍后重试".into());
+    };
+    let probe: HashMap<String, (String, i32)> =
+        HashMap::from([(session_id.to_string(), (task_id.to_string(), root_pid))]);
+    let present = tokio::task::spawn_blocking(move || !agents::detect_session_agents(&probe).is_empty())
+        .await
+        .unwrap_or(false);
+    if !present {
+        return Err(
+            "该终端里没有检测到正在运行的 agent（claude/codex）：留言与进度只能标在有 agent presence 的终端上，先确认 terminalId 是不是你自己的 $COFLUX_TASK_ID"
+                .into(),
+        );
+    }
+    match kind {
+        Annotation::Notify => observed.apply_notify(session_id.to_string(), message),
+        Annotation::Progress => observed.apply_progress(session_id.to_string(), message),
+    }
+    crate::report_agents_if_changed(state, observed, to_server_tx).await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_is_trimmed_clamped_and_never_empty() {
+        assert_eq!(clamp_message("  需要你定  ").as_deref(), Some("需要你定"));
+        assert_eq!(clamp_message("   "), None);
+        assert_eq!(clamp_message(""), None);
+        let long: String = "字".repeat(MAX_NOTIFY_CHARS + 50);
+        let clamped = clamp_message(&long).expect("非空");
+        assert_eq!(clamped.chars().count(), MAX_NOTIFY_CHARS, "按字符而非字节钳制");
     }
 }
