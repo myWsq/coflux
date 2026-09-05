@@ -4,6 +4,12 @@
  * 这里只管理“准备记录 → daemon 安装 → client 得到可执行帧”这一段易失运行时状态：
  * 重试定时器、等待安装确认的 client，以及 daemon 重连后的恢复投递。业务结果如何落库、
  * 如何广播仍由 Hub 的收敛事务负责，避免把 transport 生命周期和领域副作用揉成一个对象。
+ *
+ * plan 091 起中心自己也能做发起方（MCP 写 tools）：记录 metadata 带 `initiator: "server"`，
+ * 安装确认后不是把帧交给 client，而是由中心经控制 WS 下发 PreparedDeviceOperationExecute；
+ * server 重启后 restore 重装模板→daemon 再次 installed→再次 Execute（worker 侧幂等）。
+ * 超时/取消对 server 发起的记录经 host.failServerOperation 唤醒 Hub 的完成原语，而不是
+ * 发给不存在的 client。浏览器分支的行为零变化。
  */
 import {
   create,
@@ -31,13 +37,27 @@ function isInstallableState(state: PreparedOperationRecord["state"]): boolean {
   return state === "pending_install" || state === "installed" || state === "install_failed";
 }
 
+/** metadata 里的发起方标记（plan 091）；带它的记录由中心自己触发执行、结果通知完成原语。 */
+export const SERVER_INITIATOR = "server";
+
+/** server 发起（plan 091）：metadata 是 JSON 文本，解析失败按 client 发起处理（不会误触发 Execute）。 */
+export function isServerInitiated(operation: Pick<PreparedOperationRecord, "metadata">): boolean {
+  try {
+    const parsed: unknown = JSON.parse(operation.metadata);
+    return parsed !== null && typeof parsed === "object" && (parsed as Record<string, unknown>).initiator === SERVER_INITIATOR;
+  } catch {
+    return false;
+  }
+}
+
 interface PreparedDaemon {
   info: { daemonId: DaemonId };
   accountId: AccountId;
 }
 
 interface PreparedWaiter<Client> {
-  client: Client;
+  /** null = server 发起（plan 091）：失败时走 host.failServerOperation 而非 sendError。 */
+  client: Client | null;
   timer: ReturnType<typeof setTimeout>;
   operation: Pick<PreparedOperationRecord, "operationId" | "daemonId" | "kind" | "expiresAt">;
 }
@@ -59,12 +79,20 @@ type PrepareAdmission =
 
 export type PreparedOperationAdmissionCheck = (tx: Store) => Promise<string | undefined>;
 
+/** server 发起的 prepare 结果（plan 091）：admission 作为返回值而不是发给 client。 */
+export type PrepareServerOutcome =
+  | { case: "accepted"; operation: PreparedOperationRecord }
+  | { case: "rejected"; message: string };
+
 export interface PreparedOperationHost<Client, Daemon extends PreparedDaemon> {
   getDaemon(daemonId: DaemonId): Daemon | undefined;
   isCurrentDaemon(daemon: Daemon): boolean;
   sendDaemon(daemon: Daemon, payload: ServerToDaemonPayload): boolean;
   sendClient(client: Client, payload: ServerToClientPayload, initialSnapshot: boolean): boolean;
   validControlId(value: string): boolean;
+  /** server 发起的记录在安装阶段失败/超时/被取消：唤醒 Hub 的完成原语（无 client 可通知）。
+   * 可选：只持 client 语义的宿主（单测）不必实现。 */
+  failServerOperation?(operationId: string, message: string): void;
 }
 
 export interface PreparedOperationService<Client, Daemon extends PreparedDaemon> {
@@ -74,6 +102,11 @@ export interface PreparedOperationService<Client, Daemon extends PreparedDaemon>
     operation: NewPreparedOperation,
     admissionCheck?: PreparedOperationAdmissionCheck,
   ): Promise<void>;
+  /** 无 client 入口（plan 091）：同一套 admission；接受后由本服务安装并在 installed 时下发 Execute。 */
+  prepareServer(
+    operation: NewPreparedOperation,
+    admissionCheck?: PreparedOperationAdmissionCheck,
+  ): Promise<PrepareServerOutcome>;
   restore(daemon: Daemon): Promise<void>;
   dispatch(operation: PreparedOperationRecord): void;
   resumeForClient(client: Client, operation: PreparedOperationRecord): Promise<void>;
@@ -173,7 +206,12 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
       reason: message,
     });
     const waiters = waitersByOperation.get(operation.operationId);
-    if (waiters) for (const waiter of waiters) sendError(waiter.client, message);
+    if (waiters) {
+      for (const waiter of waiters) {
+        if (waiter.client) sendError(waiter.client, message);
+        else host.failServerOperation?.(operation.operationId, message);
+      }
+    }
     clearWaiters(operation.operationId);
   };
 
@@ -190,6 +228,9 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
       cancelRetry(operationId);
       if (operation) failWaiters(operation, message);
       else clearWaiters(operationId);
+      // server 发起的记录在 installed→执行中阶段没有 waiter/retry；按 ID 直接唤醒完成原语
+      // （没有等待者时是空操作）。
+      host.failServerOperation?.(operationId, message);
     }
   };
 
@@ -219,7 +260,7 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
 
   const watch = (
     operation: Pick<PreparedOperationRecord, "operationId" | "daemonId" | "kind" | "expiresAt">,
-    client: Client,
+    client: Client | null,
   ): void => {
     if (stopped) return;
     const { operationId } = operation;
@@ -240,7 +281,8 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
             timeoutMs: config.pendingTimeoutMs,
           });
         }
-        sendError(client, "prepared operation 安装确认超时");
+        if (client) sendError(client, "prepared operation 安装确认超时");
+        else host.failServerOperation?.(operationId, "prepared operation 安装确认超时");
       }, config.pendingTimeoutMs),
     };
     waiter.timer.unref?.();
@@ -421,6 +463,28 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
     retriesByOperation.set(operation.operationId, attempt);
   };
 
+  /** server 发起的记录已安装：由中心经控制 WS 触发执行（plan 091）。发送失败不另起 retry——
+   * daemon 断开/换代时 Hub 会以可读错误唤醒完成原语，重连后 restore 再走一遍安装→Execute。 */
+  const sendExecute = (operation: PreparedOperationRecord): void => {
+    if (stopped || operation.completed || operation.state !== "installed" || operation.expiresAt <= Date.now()) return;
+    const daemon = host.getDaemon(operation.daemonId);
+    if (!daemon || daemon.accountId !== operation.accountId) return;
+    host.sendDaemon(daemon, {
+      case: "preparedDeviceOperationExecute",
+      value: { operationId: operation.operationId },
+    });
+  };
+
+  const resumeCurrentForServer = (operation: PreparedOperationRecord): void => {
+    if (stopped) return;
+    if (operation.state === "installed") {
+      sendExecute(operation);
+      return;
+    }
+    watch(operation, null);
+    dispatch(operation);
+  };
+
   const resumeCurrentForClient = (client: Client, operation: PreparedOperationRecord): void => {
     if (stopped) return;
     if (operation.state === "installed") {
@@ -454,15 +518,13 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
     if (current) resumeCurrentForClient(client, current);
   };
 
-  const prepare = async (
-    client: Client,
+  /** prepare / prepareServer 共用的 admission 事务（顺序：device 父行锁 → admissionCheck →
+   * target resume → 并发上限 → insert）。两条入口只差“结果通知谁”。 */
+  const admit = async (
     operation: NewPreparedOperation,
     admissionCheck?: PreparedOperationAdmissionCheck,
-  ): Promise<void> => {
-    await expireDueOperations(Date.now());
-    if (stopped) return;
-    const admissionToken = completionToken;
-    const admission = await store.transaction<PrepareAdmission>(async (tx) => {
+  ): Promise<PrepareAdmission> => {
+    return await store.transaction<PrepareAdmission>(async (tx) => {
       // prepared operation 是 device 的持久子记录。父行既是 admission 的串行化锚点，
       // 也让 count + insert 与 removeDevice 的 revoke/delete 形成同一事务顺序。
       const device = await tx.claimActiveDevice(operation.daemonId, operation.accountId);
@@ -498,24 +560,43 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
       }
       return { case: "conflict" };
     });
+  };
+
+  /** admission 通过后按真实 ID 稳定重读（target resume 可能返回别的 ID；期间 report 完成会推进 token）。 */
+  const stableAdmitted = async (
+    admission: Extract<PrepareAdmission, { case: "resume" | "created" }>,
+    admissionToken: object,
+  ): Promise<PreparedOperationRecord | undefined> => {
+    let current: PreparedOperationRecord | undefined = admission.operation;
+    let observedToken = admissionToken;
+    while (observedToken !== completionToken) {
+      observedToken = completionToken;
+      current = await store.getPreparedOperation(admission.operation.operationId);
+      if (stopped) return undefined;
+    }
+    if (
+      !current ||
+      current.completed ||
+      !isInstallableState(current.state) ||
+      current.expiresAt <= Date.now()
+    ) return undefined;
+    return current;
+  };
+
+  const prepare = async (
+    client: Client,
+    operation: NewPreparedOperation,
+    admissionCheck?: PreparedOperationAdmissionCheck,
+  ): Promise<void> => {
+    await expireDueOperations(Date.now());
+    if (stopped) return;
+    const admissionToken = completionToken;
+    const admission = await admit(operation, admissionCheck);
     // transaction 已提交后才触碰 waiter/timer/WS；shutdown 可在任一 DB await 期间同步置位。
     if (stopped) return;
     if (admission.case === "resume" || admission.case === "created") {
-      let current: PreparedOperationRecord | undefined = admission.operation;
-      let observedToken = admissionToken;
-      // admission 返回的 operationId 可能不是本次请求的新 ID（target resume）。若期间有任意
-      // report 完成，按真实 ID 重读；token 在读取期间再次变化就继续，直到拿到稳定快照。
-      while (observedToken !== completionToken) {
-        observedToken = completionToken;
-        current = await store.getPreparedOperation(admission.operation.operationId);
-        if (stopped) return;
-      }
-      if (
-        !current ||
-        current.completed ||
-        !isInstallableState(current.state) ||
-        current.expiresAt <= Date.now()
-      ) return;
+      const current = await stableAdmitted(admission, admissionToken);
+      if (!current) return;
       resumeCurrentForClient(client, current);
       return;
     }
@@ -539,6 +620,45 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
       return;
     }
     sendError(client, "prepared operation ID 冲突");
+  };
+
+  const prepareServer = async (
+    operation: NewPreparedOperation,
+    admissionCheck?: PreparedOperationAdmissionCheck,
+  ): Promise<PrepareServerOutcome> => {
+    if (!isServerInitiated(operation)) throw new Error("prepareServer 需要 metadata.initiator = server");
+    await expireDueOperations(Date.now());
+    if (stopped) return { case: "rejected", message: "中心正在关闭" };
+    const admissionToken = completionToken;
+    const admission = await admit(operation, admissionCheck);
+    if (stopped) return { case: "rejected", message: "中心正在关闭" };
+    if (admission.case === "resume" || admission.case === "created") {
+      const current = await stableAdmitted(admission, admissionToken);
+      if (!current) return { case: "rejected", message: "prepared operation 已完成或已过期，请重试" };
+      // target resume 命中的可能是 browser 发起的同目标记录：它的帧已交给/将交给浏览器执行，
+      // 中心不再重复触发；调用方仍按 operationId 等完成原语（report 收敛时按 ID 唤醒）。
+      if (isServerInitiated(current)) resumeCurrentForServer(current);
+      else resumeForClientless(current);
+      return { case: "accepted", operation: current };
+    }
+    if (admission.case === "full") {
+      log.warn("prepared operation 达 daemon 并发上限", {
+        daemonId: operation.daemonId,
+        kind: operation.kind,
+        targetId: operation.targetId,
+        limit: MAX_ACTIVE_PREPARED_PER_DAEMON,
+      });
+      return { case: "rejected", message: "该 daemon 的 prepared operation 已达上限，请稍后重试" };
+    }
+    if (admission.case === "unavailable") return { case: "rejected", message: "daemon 已撤销或不属于本账号" };
+    if (admission.case === "rejected") return { case: "rejected", message: admission.message };
+    return { case: "rejected", message: "prepared operation ID 冲突" };
+  };
+
+  /** 复用到 browser 发起的同目标记录时只保证它在投递（安装重试），不接管它的通知。 */
+  const resumeForClientless = (operation: PreparedOperationRecord): void => {
+    if (stopped || operation.state === "installed") return;
+    dispatch(operation);
   };
 
   const restore = async (daemon: Daemon): Promise<void> => {
@@ -571,7 +691,10 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
       if (listedAtToken === completionToken) break;
     }
     // token 检查后到发送结束没有 await，complete 无法在中间插入并复活旧列表。
-    for (const operation of operations) emitToClient(client, operation, initialSnapshot);
+    // server 发起的记录由中心自己 Execute，绝不交给浏览器执行（否则会二次执行）。
+    for (const operation of operations) {
+      if (!isServerInitiated(operation)) emitToClient(client, operation, initialSnapshot);
+    }
   };
 
   const handleInstalled = async (
@@ -595,8 +718,14 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
       failWaiters(operation, error ?? "daemon 拒绝 prepared operation");
       return;
     }
+    if (isServerInitiated(operation)) {
+      // 中心发起：安装确认即触发执行；restore 重装后的再次 installed 也走这里（worker 侧幂等）。
+      clearWaiters(operationId);
+      sendExecute(operation);
+      return;
+    }
     const waiters = waitersByOperation.get(operationId);
-    if (waiters) for (const waiter of waiters) emitToClient(waiter.client, operation);
+    if (waiters) for (const waiter of waiters) if (waiter.client) emitToClient(waiter.client, operation);
     clearWaiters(operationId);
   };
 
@@ -616,7 +745,8 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
       if (!belongsToDaemon) continue;
       for (const waiter of waiters) {
         waiterCount += 1;
-        sendError(waiter.client, message);
+        if (waiter.client) sendError(waiter.client, message);
+        else host.failServerOperation?.(operationId, message);
       }
       clearWaiters(operationId);
     }
@@ -652,6 +782,7 @@ export function createPreparedOperationService<Client, Daemon extends PreparedDa
   return {
     createFrame,
     prepare,
+    prepareServer,
     restore,
     dispatch,
     resumeForClient,
