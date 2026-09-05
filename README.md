@@ -4,7 +4,7 @@
 远端访问由中心完成 rendezvous，再经独立 opaque relay；同机优先 loopback，网络条件允许时可升到
 P2P，terminal 与普通 Device RPC 数据帧不经过中心控制 WS。一机一 daemon，设备模型类似 Tailscale。
 
-> 架构详见 [docs/architecture.md](docs/architecture.md)；认证见 [docs/auth-design.md](docs/auth-design.md)；路线图/TODO 见 [docs/ROADMAP.md](docs/ROADMAP.md)；待讨论项见 [docs/OPEN_QUESTIONS.md](docs/OPEN_QUESTIONS.md)。
+> 架构详见 [docs/architecture.md](docs/architecture.md)；认证见 [docs/auth-design.md](docs/auth-design.md)；路线图/TODO 见 [docs/ROADMAP.md](docs/ROADMAP.md)；待讨论项见 [docs/OPEN_QUESTIONS.md](docs/OPEN_QUESTIONS.md)；生产部署拓扑见 [docs/deployment.md](docs/deployment.md)。
 
 ## Monorepo 结构
 
