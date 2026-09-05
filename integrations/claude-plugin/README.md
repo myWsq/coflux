@@ -12,6 +12,9 @@ agent 会话的 PTY，web/手机上能看到每个工作区的实时回合状态
   `Stop`、`StopFailure`、`Notification` 接到 `cofluxd hook claude` 信使，转发给本机 daemon；daemon 据此判定
   回合状态（active / approval / question / done），显示在 coflux 侧栏。`cofluxd` 未安装或 daemon 未起时
   静默退出，绝不打扰 agent。
+- **scripts/guard-git-worktree.mjs**：PreToolUse hook（只对 Bash）。会话里 `COFLUX_PROJECT_ID` 非空时，拦下
+  `git worktree add|remove|move` 并提示改用 MCP 的 `create_workspace` / `remove_workspace`——自己开的 worktree
+  用户看不见、也开不了终端。`list`/`prune` 等放行；不在 coflux 项目里一律不干预；缺 `node` 静默放行。
 - **skills/coflux/**：教跑在 coflux 终端里的 agent 把长任务、并行工作和求助外化成用户看得见、能接管的
   真实终端。分工只有一条规则：**本地能闭环的一律用零凭证的本地命令**（`cofluxd terminal/progress/notify/ports`），
   只有跨出本工作区（开子工作区、跨工作区/跨设备）才用中心的 `coflux` MCP。
