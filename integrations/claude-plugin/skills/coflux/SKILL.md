@@ -167,6 +167,8 @@ cofluxd ports
   在设备上真的 `git worktree add`，然后 `create_terminal` 在那里跑命令。
 - **看/操作别的工作区、别的设备上的终端**：`list_*` → `read_terminal` / `send_terminal_input`。
 - **不在 coflux 终端里**（比如用户在自己电脑上开的 Claude Code）时接入账号下的一切。
+- **不要自己 `git worktree add`**：在 coflux 项目里插件会拦下 `git worktree add|remove|move` 并提示改用
+  `create_workspace` / `remove_workspace`——自己开的 worktree 用户看不见、也开不了终端。
 
 本工作区内的事不要绕去 MCP：那是多一趟到中心的往返，本地命令一步到位。
 
