@@ -1284,7 +1284,19 @@ export class Hub {
                 case: "sessionCreate",
                 // shell 指向 worker 自己写的命令包装脚本（supervisor 的 CommandBuilder 不接受 args）。
                 // 路径由 daemon 生成、只回到同一个 daemon 执行，server 不解释也不校验它。
-                value: { sessionId, taskId: task.id, cwd: currentWorkspace.path, shell: value.shell, cols: AGENT_TERMINAL_COLS, rows: AGENT_TERMINAL_ROWS },
+                // 会话归属 id + mcpUrl（plan 092）：supervisor 据此注入 COFLUX_* 环境变量；只下发 id，不下发 env map。
+                value: {
+                  sessionId,
+                  taskId: task.id,
+                  cwd: currentWorkspace.path,
+                  shell: value.shell,
+                  cols: AGENT_TERMINAL_COLS,
+                  rows: AGENT_TERMINAL_ROWS,
+                  workspaceId: currentWorkspace.id,
+                  projectId: currentWorkspace.projectId,
+                  daemonId: currentWorkspace.daemonId,
+                  mcpUrl: config.mcpUrl,
+                },
               });
               if (!sent) {
                 const removed = await this.store.removeIdleTaskIfSession(
@@ -3117,9 +3129,22 @@ export class Hub {
     const c = clampDim(cols, 80);
     const r = clampDim(rows, 24);
     const operationId = randomUUID();
+    // 会话归属 id + mcpUrl（plan 092）进入 canonical 帧：都是稳定 id，restore 重放时值一致。
     const frame = this.preparedOperations.createFrame(operationId, {
       case: "sessionCreate",
-      value: { requestId: operationId, operationId, sessionId, taskId: task.id, cwd: ws.path, cols: c, rows: r },
+      value: {
+        requestId: operationId,
+        operationId,
+        sessionId,
+        taskId: task.id,
+        cwd: ws.path,
+        cols: c,
+        rows: r,
+        workspaceId: ws.id,
+        projectId: ws.projectId,
+        daemonId: task.daemonId,
+        mcpUrl: config.mcpUrl,
+      },
     });
     await this.withTaskEffectGuard(task.id, async (effectGuard) => {
       await this.preparedOperations.prepare(client, {
@@ -3651,9 +3676,23 @@ export class Hub {
     const sessionId = randomUUID();
     const operationId = randomUUID();
     const ts = Date.now();
+    // 会话归属 id + mcpUrl（plan 092）进入 canonical 帧：都是稳定 id，restore 重放时值一致。
     const frame = this.preparedOperations.createFrame(operationId, {
       case: "sessionCreate",
-      value: { requestId: operationId, operationId, sessionId, taskId, cwd: initialWorkspace.path, cols: AGENT_TERMINAL_COLS, rows: AGENT_TERMINAL_ROWS, command },
+      value: {
+        requestId: operationId,
+        operationId,
+        sessionId,
+        taskId,
+        cwd: initialWorkspace.path,
+        cols: AGENT_TERMINAL_COLS,
+        rows: AGENT_TERMINAL_ROWS,
+        command,
+        workspaceId: initialWorkspace.id,
+        projectId: initialWorkspace.projectId,
+        daemonId: initialWorkspace.daemonId,
+        mcpUrl: config.mcpUrl,
+      },
     });
     let task: Task | undefined;
     const prepared = await this.withDeviceEffectGuard(initialWorkspace.daemonId, async (effectGuard) =>

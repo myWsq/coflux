@@ -95,6 +95,8 @@ function publicUrl(): string {
   return raw.replace(/\/+$/, "");
 }
 
+const PUBLIC_URL = publicUrl();
+
 export const config = {
   authProvider,
   port: int("COFLUX_PORT", DEFAULT_PORT),
@@ -115,7 +117,10 @@ export const config = {
   /** 中心自身的公网基址（plan 090）：OAuth issuer、PRM/AS 元数据与 `/mcp` 的 resource 全由它拼，
    *  绝不从请求 Host / X-Forwarded-* 推导（生产前面压着两层反代，头部可伪造且各层不一致）。
    *  dev 默认本机监听地址；生产设 COFLUX_PUBLIC_URL=https://api.coflux.dev。 */
-  publicUrl: publicUrl(),
+  publicUrl: PUBLIC_URL,
+  /** 中心 MCP 地址（plan 092）：随每条建会话请求下发给 daemon，supervisor 注入会话 env `COFLUX_MCP_URL`，
+   *  供跑在 coflux 终端里的 agent 告诉用户怎么 `claude mcp add`。与 oauth.ts 的 resource 同源同值。 */
+  mcpUrl: `${PUBLIC_URL}/mcp`,
   /** MCP OAuth 凭证有效期：access 短期（默认 1 小时），refresh 长期且用过即作废（默认与会话 token 同 30 天）。 */
   oauthAccessTtlMs: Math.max(60_000, int("COFLUX_OAUTH_ACCESS_TTL_MS", 60 * 60 * 1000)),
   oauthRefreshTtlMs: Math.max(60_000, int("COFLUX_OAUTH_REFRESH_TTL_MS", int("COFLUX_SESSION_TTL_MS", 30 * 24 * 60 * 60 * 1000))),
