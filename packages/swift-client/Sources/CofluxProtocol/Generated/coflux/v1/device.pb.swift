@@ -1324,8 +1324,19 @@ public struct Coflux_V1_DeviceSessionCreate: Sendable {
   /// 前本地写包装脚本（登录 shell 执行、tee 落日志、跑完退出带退出码）并把 shell 填成脚本路径。
   /// 脚本路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
   /// 会被判成 operation_collision。旧 worker 不认识本字段会起成普通 shell，由中心的能力门禁挡住。
-  /// 092 会在 10 起加 workspace_id/project_id。
   public var command: String = String()
+
+  /// 10 起是会话归属 id（plan 092）：与 daemon.proto SessionCreate 7 起同名同义，supervisor 据此组装
+  /// COFLUX_* 环境变量。它们会进入 sessiond 账本的 canonical 请求，同一 operation 重放时中心组帧的值
+  /// 必须一致（本来就是稳定 id）。全部可缺省，旧中心不下发只是会话里没有这些变量。
+  public var workspaceID: String = String()
+
+  /// 无仓库的目录工作区为空串
+  public var projectID: String = String()
+
+  public var daemonID: String = String()
+
+  public var mcpURL: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -4411,7 +4422,7 @@ extension Coflux_V1_DeviceSessionExited: SwiftProtobuf.Message, SwiftProtobuf._M
 
 extension Coflux_V1_DeviceSessionCreate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceSessionCreate"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}operation_id\0\u{3}session_id\0\u{3}task_id\0\u{1}cwd\0\u{1}shell\0\u{1}cols\0\u{1}rows\0\u{1}command\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}operation_id\0\u{3}session_id\0\u{3}task_id\0\u{1}cwd\0\u{1}shell\0\u{1}cols\0\u{1}rows\0\u{1}command\0\u{3}workspace_id\0\u{3}project_id\0\u{3}daemon_id\0\u{3}mcp_url\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4428,6 +4439,10 @@ extension Coflux_V1_DeviceSessionCreate: SwiftProtobuf.Message, SwiftProtobuf._M
       case 7: try { try decoder.decodeSingularUInt32Field(value: &self.cols) }()
       case 8: try { try decoder.decodeSingularUInt32Field(value: &self.rows) }()
       case 9: try { try decoder.decodeSingularStringField(value: &self.command) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 11: try { try decoder.decodeSingularStringField(value: &self.projectID) }()
+      case 12: try { try decoder.decodeSingularStringField(value: &self.daemonID) }()
+      case 13: try { try decoder.decodeSingularStringField(value: &self.mcpURL) }()
       default: break
       }
     }
@@ -4465,6 +4480,18 @@ extension Coflux_V1_DeviceSessionCreate: SwiftProtobuf.Message, SwiftProtobuf._M
     if !self.command.isEmpty {
       try visitor.visitSingularStringField(value: self.command, fieldNumber: 9)
     }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 10)
+    }
+    if !self.projectID.isEmpty {
+      try visitor.visitSingularStringField(value: self.projectID, fieldNumber: 11)
+    }
+    if !self.daemonID.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonID, fieldNumber: 12)
+    }
+    if !self.mcpURL.isEmpty {
+      try visitor.visitSingularStringField(value: self.mcpURL, fieldNumber: 13)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -4478,6 +4505,10 @@ extension Coflux_V1_DeviceSessionCreate: SwiftProtobuf.Message, SwiftProtobuf._M
     if lhs.cols != rhs.cols {return false}
     if lhs.rows != rhs.rows {return false}
     if lhs.command != rhs.command {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.projectID != rhs.projectID {return false}
+    if lhs.daemonID != rhs.daemonID {return false}
+    if lhs.mcpURL != rhs.mcpURL {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

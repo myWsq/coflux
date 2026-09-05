@@ -480,8 +480,15 @@ message DeviceSessionCreate {
   // 前本地写包装脚本（登录 shell 执行、tee 落日志、跑完退出带退出码）并把 shell 填成脚本路径。
   // 脚本路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
   // 会被判成 operation_collision。旧 worker 不认识本字段会起成普通 shell，由中心的能力门禁挡住。
-  // 092 会在 10 起加 workspace_id/project_id。
   string command = 9;
+  // 10 起是会话归属 id（plan 092）：与 daemon.proto SessionCreate 7 起同名同义，supervisor 据此组装
+  // COFLUX_* 环境变量。它们会进入 sessiond 账本的 canonical 请求，同一 operation 重放时中心组帧的值
+  // 必须一致（本来就是稳定 id）。全部可缺省，旧中心不下发只是会话里没有这些变量。
+  string workspace_id = 10;
+  // 无仓库的目录工作区为空串
+  string project_id = 11;
+  string daemon_id = 12;
+  string mcp_url = 13;
 }
 
 message DeviceOperationAck {

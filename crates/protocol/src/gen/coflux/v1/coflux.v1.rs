@@ -940,9 +940,20 @@ pub struct DeviceSessionCreate {
     /// 前本地写包装脚本（登录 shell 执行、tee 落日志、跑完退出带退出码）并把 shell 填成脚本路径。
     /// 脚本路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
     /// 会被判成 operation_collision。旧 worker 不认识本字段会起成普通 shell，由中心的能力门禁挡住。
-    /// 092 会在 10 起加 workspace_id/project_id。
     #[prost(string, tag="9")]
     pub command: ::prost::alloc::string::String,
+    /// 10 起是会话归属 id（plan 092）：与 daemon.proto SessionCreate 7 起同名同义，supervisor 据此组装
+    /// COFLUX_* 环境变量。它们会进入 sessiond 账本的 canonical 请求，同一 operation 重放时中心组帧的值
+    /// 必须一致（本来就是稳定 id）。全部可缺省，旧中心不下发只是会话里没有这些变量。
+    #[prost(string, tag="10")]
+    pub workspace_id: ::prost::alloc::string::String,
+    /// 无仓库的目录工作区为空串
+    #[prost(string, tag="11")]
+    pub project_id: ::prost::alloc::string::String,
+    #[prost(string, tag="12")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="13")]
+    pub mcp_url: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceOperationAck {
@@ -2416,6 +2427,9 @@ pub struct DaemonSetName {
     #[prost(string, tag="1")]
     pub name: ::prost::alloc::string::String,
 }
+/// 直发建会话（cofluxd terminal new 走这条）。7 起是会话归属 id（plan 092）：中心只下发 id，
+/// supervisor 在 create_session 里组装成 COFLUX_* 环境变量注入 PTY；变量名与组装只在 supervisor 一处。
+/// 全部可缺省：旧中心不下发、旧 worker 不映射都只是「会话里没有这些变量」，绝不影响建会话。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SessionCreate {
     #[prost(string, tag="1")]
@@ -2430,6 +2444,16 @@ pub struct SessionCreate {
     pub cols: u32,
     #[prost(uint32, tag="6")]
     pub rows: u32,
+    #[prost(string, tag="7")]
+    pub workspace_id: ::prost::alloc::string::String,
+    /// 无仓库的目录工作区为空串
+    #[prost(string, tag="8")]
+    pub project_id: ::prost::alloc::string::String,
+    #[prost(string, tag="9")]
+    pub daemon_id: ::prost::alloc::string::String,
+    /// 中心 MCP 地址（<COFLUX_PUBLIC_URL>/mcp），供会话里的 agent 告诉用户怎么接入
+    #[prost(string, tag="10")]
+    pub mcp_url: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SessionClose {

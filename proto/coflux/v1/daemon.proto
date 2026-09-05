@@ -369,6 +369,9 @@ message DaemonSetName {
   string name = 1;
 }
 
+// 直发建会话（cofluxd terminal new 走这条）。7 起是会话归属 id（plan 092）：中心只下发 id，
+// supervisor 在 create_session 里组装成 COFLUX_* 环境变量注入 PTY；变量名与组装只在 supervisor 一处。
+// 全部可缺省：旧中心不下发、旧 worker 不映射都只是「会话里没有这些变量」，绝不影响建会话。
 message SessionCreate {
   string session_id = 1;
   string task_id = 2;
@@ -376,6 +379,12 @@ message SessionCreate {
   optional string shell = 4;
   uint32 cols = 5;
   uint32 rows = 6;
+  string workspace_id = 7;
+  // 无仓库的目录工作区为空串
+  string project_id = 8;
+  string daemon_id = 9;
+  // 中心 MCP 地址（<COFLUX_PUBLIC_URL>/mcp），供会话里的 agent 告诉用户怎么接入
+  string mcp_url = 10;
 }
 
 message SessionClose {
