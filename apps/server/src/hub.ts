@@ -57,8 +57,6 @@ import {
   type DeviceSessionInfo,
   type SessionAgentRef,
   type SessionCheckpoint,
-  type AgentControlRequest,
-  type AgentControlResultPayload,
   type ServerAgentResult,
 } from "@coflux/protocol";
 import { createLogger } from "@coflux/core";
@@ -82,6 +80,7 @@ import {
 } from "./prepared-operation.service.js";
 import { PreparedOperationConvergenceService, type OperationEffect } from "./prepared-operation-convergence.service.js";
 import {
+  DAEMON_CAPABILITY_AGENT_ANNOTATE,
   DAEMON_CAPABILITY_PREPARED_EXECUTE,
   DAEMON_CAPABILITY_TERMINAL_IO,
   daemonUpgradeRequired,
@@ -102,18 +101,19 @@ const MAX_LOGIN_PASSWORD_BYTES = 1024;
 const MAX_CLIENT_TOKEN_BYTES = 512;
 const MAX_RATE_LIMIT_KEYS = 10_000;
 const MAX_SNAPSHOT_BACKLOG_MESSAGES = 4_096;
-/** agent 自建终端的初始视口（plan 074）：没有真实 client 视口可依，取一个比 80×24 宽的默认值——
- * agent 是靠读 checkpoint 文本判断进度的，行太窄会把输出折得难认。用户接管时 xterm 会重新 resize。 */
-/** terminal list 回给 agent 的最大条数（取最近的）：用久的工作区会攒下几十个 exited 终端。 */
-const MAX_AGENT_TERMINAL_LIST = 50;
+/** 命令终端的初始视口（plan 074 引入，091 中心命令终端沿用）：没有真实 client 视口可依，取一个比 80×24 宽的
+ * 默认值——agent 是靠读终端文本判断进度的，行太窄会把输出折得难认。用户接管时 xterm 会重新 resize。 */
 const AGENT_TERMINAL_COLS = 120;
 const AGENT_TERMINAL_ROWS = 40;
 const MAX_AGENT_NAME_BYTES = 64;
 /** 每台 daemon 在单个 Hub 生命周期内最多接受这么多次 supervisor owner 切换。达到上限后
  * 继续接受当前 owner 的递增 epoch，但 fail-closed 拒绝任何新 owner，避免淘汰古老 owner 后重放。 */
 const MAX_RETIRED_RESYNC_OWNERS = 16;
-/** notify 留言的字节兜底（worker 已按字符钳过，这里防伪造/畸形上报） */
+/** notify/progress 留言的字节兜底（worker 已按字符钳过，这里防伪造/畸形上报） */
 const MAX_AGENT_MESSAGE_BYTES = 1024;
+/** notify_user / report_progress 留言的字符上限（plan 093）：与 worker 的 MAX_NOTIFY_CHARS 一致；MCP 有 schema，
+ * 超限在入口拒绝并说明上限，不像 CLI 时代静默截断。 */
+const MAX_ANNOTATION_CHARS = 200;
 /** daemon 宣告的能力名（plan 091）：条数/单条字节上限，超限整条握手拒绝（同其它握手字段）。 */
 const MAX_CAPABILITY_ENTRIES = 32;
 const MAX_CAPABILITY_BYTES = 64;
@@ -122,9 +122,12 @@ const MAX_COMPLETION_WAITERS = 256;
 /** 中心发起的 prepared 操作（建/删 worktree、建会话）的完成等待上限：Claude Code 远程 MCP 单请求
  * 60 秒，到期返回「已提交、稍后用 list_* 查」而不是挂着。 */
 const OPERATION_WAIT_MS = 30_000;
-/** wait_terminal 的默认与上限（同上，≤ 50 秒）。 */
+/** wait_terminal 的默认与上限（plan 093：上限从 50 秒放宽到 600 秒）。这是穿过两层反代的长持 HTTP 请求，越长越脆，
+ * 而到期重调是零成本，600 秒足够覆盖一次测试/构建。宿主的单请求超时（手动 `claude mcp add` 默认 60 秒、coflux 插件
+ * .mcp.json 的 timeout ≥ 600 秒）由 tool 描述提醒 agent。Node 的 requestTimeout 只管收请求体，handler 阶段不受它管——
+ * 黑盒用 mcp-write-tools 里一次 >60 秒的真等待证明。 */
 const TERMINAL_WAIT_DEFAULT_MS = 30_000;
-const TERMINAL_WAIT_MAX_MS = 50_000;
+const TERMINAL_WAIT_MAX_MS = 600_000;
 /** stop_terminal 发出 sessionClose 后等退出的上限；到期按「已在退出中」返回。 */
 const STOP_WAIT_MS = 15_000;
 /** server→daemon 读/写请求的回执超时。写入超时不重发（结果未知，先 read 再决定）。 */
@@ -367,7 +370,9 @@ interface PendingAgentRequest {
 
 type ServerAgentRequestPayload =
   | { case: "terminalRead"; value: { taskId: TaskId; sessionId: SessionId; maxBytes: number } }
-  | { case: "terminalInput"; value: { sessionId: SessionId; data: Uint8Array } };
+  | { case: "terminalInput"; value: { sessionId: SessionId; data: Uint8Array } }
+  | { case: "terminalNotify"; value: { taskId: TaskId; sessionId: SessionId; message: string } }
+  | { case: "terminalProgress"; value: { taskId: TaskId; sessionId: SessionId; message: string } };
 
 /** 固定窗口 + LRU 键上限：既限制单来源请求速率，也不让伪造来源把 limiter 自身撑爆内存。 */
 class FixedWindowLimiter {
@@ -1176,202 +1181,6 @@ export class Hub {
 
   /* ==================== agent 协同控制（plan 074） ==================== */
 
-  /** daemon 转发的 agent 控制请求。worker 已用调用方 pid 反查进程树确认它属于 `sessionId`
-   * 这个存活会话；这里据它反查 task→workspace 完成归属校验——agent 不自报 workspace，
-   * 也无从伪造。走 daemon 控制 WS 而非 browser 那套 prepared operation：后者的最后一跳是
-   * 把 frame 交给 client 转投，而 agent 场景根本没有 client，且 daemon 控制 WS 本身就是
-   * 已认证的可信面。
-   *
-   * 每条请求必回一条 agentControlResult：worker 侧在等，静默丢弃只会让 agent 干等到超时。 */
-  private async handleAgentControl(daemon: DaemonConn, request: AgentControlRequest): Promise<void> {
-    const fail = (error: string) =>
-      this.sendDaemon(daemon, { case: "agentControlResult", value: { requestId: request.requestId, ok: false, error } });
-    // transport 层只会 log 掉 handler 的 rejection（见 transport.ts），而 agent 在等回执——
-    // 不兜底的话一次 DB 抖动就让它干等到超时。异常一律转成明确失败。
-    try {
-      await this.dispatchAgentControl(daemon, request, fail);
-    } catch (error) {
-      log.error("agent control failed", { daemonId: daemon.info.daemonId, err: (error as Error).message });
-      fail("中心处理该请求时出错");
-    }
-  }
-
-  private async dispatchAgentControl(daemon: DaemonConn, request: AgentControlRequest, fail: (error: string) => void): Promise<void> {
-    const reply = (payload: AgentControlResultPayload) =>
-      this.sendDaemon(daemon, { case: "agentControlResult", value: { requestId: request.requestId, ok: true, payload } });
-
-    const originTask = await this.store.getTaskBySession(request.sessionId);
-    if (!originTask || originTask.daemonId !== daemon.info.daemonId || originTask.accountId !== daemon.accountId) {
-      return void fail("发起方会话不属于本设备的任何任务");
-    }
-    const workspace = await this.store.getWorkspace(originTask.workspaceId);
-    if (!workspace || workspace.accountId !== daemon.accountId) return void fail("发起方工作区已不存在");
-
-    switch (request.payload.case) {
-      case "terminalNew": {
-        const value = request.payload.value;
-        const taskId = randomUUID();
-        const sessionId = randomUUID();
-        return await this.withDeviceEffectGuard(daemon.info.daemonId, async (effectGuard) => {
-          return await this.withTaskEffectGuard(taskId, async (taskEffectGuard) => {
-            return await this.withDaemonGenerationGate(daemon.info.daemonId, async () => {
-              if (!this.isCurrentDaemon(daemon)) return void fail("daemon 连接已换代，请重试");
-              const outcome = await this.store.transaction(async (tx) => {
-                // 与 removeDevice 及 browser 侧所有子项写入共用 device 父行锁；
-                // 锁后重读发起 task/workspace，防迟到的 agent 请求在设备删除后插入孤儿任务。
-                const device = await tx.claimActiveDevice(daemon.info.daemonId, daemon.accountId);
-                if (!device) return { ok: false, error: "设备已撤销或不属于本账号" } as const;
-                const currentOrigin = await tx.getTask(originTask.id);
-                if (
-                  !currentOrigin ||
-                  currentOrigin.sessionId !== request.sessionId ||
-                  currentOrigin.daemonId !== daemon.info.daemonId ||
-                  currentOrigin.accountId !== daemon.accountId
-                ) return { ok: false, error: "发起方会话已失效" } as const;
-                const currentWorkspace = await tx.getWorkspace(currentOrigin.workspaceId);
-                if (
-                  !currentWorkspace ||
-                  currentWorkspace.accountId !== daemon.accountId ||
-                  currentWorkspace.daemonId !== daemon.info.daemonId
-                ) return { ok: false, error: "发起方工作区已不存在" } as const;
-                if (!isDirWorkspace(currentWorkspace)) {
-                  const project = await tx.claimActiveProject(currentWorkspace.projectId);
-                  if (
-                    !project ||
-                    project.accountId !== currentWorkspace.accountId ||
-                    project.daemonId !== currentWorkspace.daemonId
-                  ) return { ok: false, error: "项目正在删除，不能再创建终端" } as const;
-                }
-
-                const tasks = await tx.listTasksByWorkspace(currentWorkspace.id);
-                // 统计所有活跃终端而不只是 agent 建的：防的是「侧栏被刷满」，来源无所谓，而区分来源
-                // 要给 Task 加一个只服务于计数的持久字段，不值得。错误信息里说清含用户自己开的。
-                const active = tasks.filter((t) => t.status === TaskStatus.RUNNING).length;
-                if (active >= config.maxAgentTerminalsPerWorkspace) {
-                  return {
-                    ok: false,
-                    error: `本工作区活跃终端已达上限 ${config.maxAgentTerminalsPerWorkspace}（含用户手动开的），先停掉一些再开新的`,
-                  } as const;
-                }
-                const ts = Date.now();
-                // sessionId 建库时就写死：daemon 回 sessionStarted 时按 task.sessionId 匹配才会转 RUNNING。
-                const task: Task = create(TaskSchema, {
-                  id: taskId,
-                  accountId: currentWorkspace.accountId,
-                  daemonId: currentWorkspace.daemonId,
-                  projectId: currentWorkspace.projectId,
-                  workspaceId: currentWorkspace.id,
-                  title: value.title.trim() || "agent 终端",
-                  status: TaskStatus.IDLE,
-                  sessionId,
-                  createdAt: ts,
-                  updatedAt: ts,
-                });
-                await tx.createTask(task);
-                return { ok: true, task, workspace: currentWorkspace, sessionId } as const;
-              });
-              if (!outcome.ok) return void fail(outcome.error);
-              if (effectGuard.cancelled) return void fail("设备已删除，终端创建已取消");
-              if (taskEffectGuard.cancelled) return void fail("工作区或任务已删除，终端创建已取消");
-              const { task, workspace: currentWorkspace } = outcome;
-              if (!this.isCurrentDaemon(daemon)) {
-                await this.store.removeIdleTaskIfSession(task.id, task.accountId, task.daemonId, sessionId);
-                return void fail("daemon 连接已换代，请重试");
-              }
-              // 先确认 control frame 已进入当前 WS 发送队列，再让 task/runtime 对外可见。同步发送
-              // 失败时用完整 incarnation CAS 补偿删除，并广播 removed 覆盖并发订阅快照窗口。
-              const sent = this.sendDaemon(daemon, {
-                case: "sessionCreate",
-                // shell 指向 worker 自己写的命令包装脚本（supervisor 的 CommandBuilder 不接受 args）。
-                // 路径由 daemon 生成、只回到同一个 daemon 执行，server 不解释也不校验它。
-                // 会话归属 id + mcpUrl（plan 092）：supervisor 据此注入 COFLUX_* 环境变量；只下发 id，不下发 env map。
-                value: {
-                  sessionId,
-                  taskId: task.id,
-                  cwd: currentWorkspace.path,
-                  shell: value.shell,
-                  cols: AGENT_TERMINAL_COLS,
-                  rows: AGENT_TERMINAL_ROWS,
-                  workspaceId: currentWorkspace.id,
-                  projectId: currentWorkspace.projectId,
-                  daemonId: currentWorkspace.daemonId,
-                  mcpUrl: config.mcpUrl,
-                },
-              });
-              if (!sent) {
-                const removed = await this.store.removeIdleTaskIfSession(
-                  task.id,
-                  task.accountId,
-                  task.daemonId,
-                  sessionId,
-                );
-                if (removed) {
-                  this.cancelTaskEffects(task.id);
-                  this.broadcast(task.accountId, { case: "taskRemoved", value: { taskId: task.id } });
-                }
-                return void fail("daemon 连接发送失败，终端创建已取消");
-              }
-              // send/current/guard 复核、runtime 安装、taskUpdated 与 reply 之间无 await。
-              this.installSessionRuntime(
-                sessionId,
-                task.id,
-                currentWorkspace.accountId,
-                currentWorkspace.daemonId,
-              );
-              this.emitTask(task);
-              return void reply({ case: "terminalNew", value: { taskId: task.id, sessionId } });
-            });
-          });
-        });
-      }
-      case "terminalList": {
-        const tasks = await this.store.listTasksByWorkspace(workspace.id);
-        // 只给最近的一批：用久的工作区会攒下几十个 exited 终端，全塞给 agent 是纯噪音。
-        const terminals = tasks
-          .slice()
-          .sort((left, right) => left.createdAt - right.createdAt)
-          .slice(-MAX_AGENT_TERMINAL_LIST)
-          .map((task) => ({
-            taskId: task.id,
-            title: task.title,
-            status: task.status,
-            exitCode: task.exitCode,
-            sessionId: task.sessionId,
-            createdAt: task.createdAt,
-          }));
-        return void reply({ case: "terminalList", value: { terminals } });
-      }
-      case "terminalRead": {
-        const target = await this.store.getTask(request.payload.value.taskId);
-        if (!target || target.workspaceId !== workspace.id || target.accountId !== daemon.accountId) {
-          return void fail("该终端不在本工作区");
-        }
-        // 按 task 查而不是按 session：session 退出时 task.sessionId 会被清空，而读已结束的
-        // 终端正是最常用的场景。无 checkpoint（刚建、还没有输出）返回空内容，不算失败。
-        const checkpoint = await this.store.getSessionCheckpointByTask(target.id);
-        return void reply({
-          case: "terminalRead",
-          value: {
-            ansiSnapshot: checkpoint?.ansiSnapshot ?? new Uint8Array(),
-            capturedAt: checkpoint?.capturedAt ?? 0,
-            status: target.status,
-            exitCode: target.exitCode,
-          },
-        });
-      }
-      case "portsList": {
-        // 整个工作区的端口，不只发起方那个终端——agent 常在 A 终端起 dev server、在 B 终端问 URL。
-        const tasks = await this.store.listTasksByWorkspace(workspace.id);
-        const ports = tasks.flatMap((task) =>
-          this.routeTable.portsForTask(task.id).map((route) => ({ port: route.port, url: buildPreviewUrl(route.shortId) })),
-        );
-        return void reply({ case: "portsList", value: { ports } });
-      }
-      default:
-        return void fail("未知的 agent 控制动作");
-    }
-  }
-
   private async acceptSessionCheckpoint(daemon: DaemonConn, checkpoint: SessionCheckpoint): Promise<void> {
     if (
       !validControlId(checkpoint.sessionId) ||
@@ -1901,11 +1710,6 @@ export class Hub {
       case "sessionAgents": {
         const daemon = this.currentDaemon(conn);
         if (daemon) this.acceptSessionAgents(daemon, msg.payload.value.sessions);
-        break;
-      }
-      case "agentControlRequest": {
-        const daemon = this.currentDaemon(conn);
-        if (daemon) await this.handleAgentControl(daemon, msg.payload.value);
         break;
       }
       case "preparedDeviceOperationInstalled": {
@@ -3811,6 +3615,40 @@ export class Hub {
     if (!result) return { ok: false, error: "等待设备写入回执超时，写入结果未知；先 read_terminal 看看再决定是否重发" };
     if (!result.ok) return { ok: false, error: result.error ?? "设备拒绝写入" };
     return { ok: true, value: { bytes: data.byteLength } };
+  }
+
+  /** agent 叫人（plan 093 `notify_user`）：presence 转 question 并携带留言，下一个 hook 事件即清空。状态只在 daemon
+   * （只有它知道 hook 事件何时发生），中心不叠加；worker 还要求该会话进程树里现场探测得到 agent，否则可读拒绝。 */
+  async notifyTerminalForAccount(accountId: AccountId, terminalId: TaskId, message: string): Promise<OperationOutcome<{ terminalId: TaskId }>> {
+    return await this.annotateTerminalForAccount(accountId, terminalId, message, "terminalNotify");
+  }
+
+  /** agent 播报进度（plan 093 `report_progress`）：覆盖式单字段、跨 hook 事件存活、随 presence 一起消失。 */
+  async reportTerminalProgressForAccount(accountId: AccountId, terminalId: TaskId, message: string): Promise<OperationOutcome<{ terminalId: TaskId }>> {
+    return await this.annotateTerminalForAccount(accountId, terminalId, message, "terminalProgress");
+  }
+
+  /** 寻址与归属沿用 sendTerminalInputForAccount 的规则：task 查账号 → RUNNING 且有 sessionId → daemon 在线 + 能力门禁
+   * （agent_annotate，缺则「需要升级」）→ 经 requestDaemonAgent 下发；账号内任何 agent 都能标注账号内任何有 presence 的终端。 */
+  private async annotateTerminalForAccount(
+    accountId: AccountId,
+    terminalId: TaskId,
+    rawMessage: string,
+    kind: "terminalNotify" | "terminalProgress",
+  ): Promise<OperationOutcome<{ terminalId: TaskId }>> {
+    const message = rawMessage.trim();
+    if (!message) return { ok: false, error: "留言不能为空" };
+    if ([...message].length > MAX_ANNOTATION_CHARS) return { ok: false, error: `留言不超过 ${MAX_ANNOTATION_CHARS} 个字符（它是侧栏上的一句话，不是日志通道）` };
+    const task = await this.store.getTask(terminalId);
+    if (!task || task.accountId !== accountId) return { ok: false, error: `终端 ${terminalId} 不存在或不属于当前账号` };
+    if (task.status === TaskStatus.EXITED) return { ok: false, error: "终端已退出，没有可标注的 agent" };
+    if (task.status !== TaskStatus.RUNNING || !task.sessionId) return { ok: false, error: "终端尚未就绪（还没有会话），稍后重试" };
+    const daemon = this.requireOnlineDaemon(task.daemonId, accountId, DAEMON_CAPABILITY_AGENT_ANNOTATE);
+    if (!daemon.ok) return daemon;
+    const result = await this.requestDaemonAgent(daemon.value, { case: kind, value: { taskId: task.id, sessionId: task.sessionId, message } });
+    if (!result) return { ok: false, error: "等待设备回执超时，标注结果未知；稍后重试" };
+    if (!result.ok) return { ok: false, error: result.error ?? "设备拒绝了该标注" };
+    return { ok: true, value: { terminalId: task.id } };
   }
 
   /** 有界等待终端退出：到期返回当前状态而非报错。 */
