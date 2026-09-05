@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "pretest": "CARGO_PROFILE_DEV_DEBUG=0 cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay",
-    "test": "node --import tsx --test --test-concurrency=1 src/*.test.mjs"
+    "test": "node --import tsx --test --test-concurrency=${COFLUX_TEST_CONCURRENCY:-4} src/*.test.mjs"
   },
   "devDependencies": {
     "@coflux/protocol": "workspace:*",

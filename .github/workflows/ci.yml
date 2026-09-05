@@ -163,6 +163,9 @@ jobs:
         run: node scripts/npm-publish-guard.mjs --self-check
 
       - name: 黑盒集成测试（pretest 构建 daemon，跑全量）
+        # 4 vCPU runner 上每路 stack = tsx server + supervisor + worker + relay，4 路会挤压固定超时的用例；2 路稳。
+        env:
+          COFLUX_TEST_CONCURRENCY: "2"
         run: pnpm -C tests test
 
       - name: mobile 构建（冻结端：只保共享层不弄坏它）

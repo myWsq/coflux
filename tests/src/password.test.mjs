@@ -25,7 +25,7 @@ const TSX = join(ROOT, "node_modules", ".bin", "tsx");
 const CREATE_USER_SCRIPT = join(ROOT, "scripts", "create-user.mjs");
 const DEBUG = !!process.env.COFLUX_TEST_DEBUG;
 
-const SERVER_PORT = 8830;
+const SERVER_PORT = 8871;
 
 let stack, testDb, sql;
 

@@ -56,7 +56,7 @@ CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（
 
 ### 形态与哲学
 
-- 位置：`tests/src/`（`harness.mjs` + `*.test.mjs`），`node --test --test-concurrency=1` 顺序跑。
+- 位置：`tests/src/`（`harness.mjs` + `*.test.mjs`），`node --test` 按**文件**并行跑（默认 4 路，`COFLUX_TEST_CONCURRENCY=1` 退回串行便于排查；CI 用 2 路），单个文件内的用例顺序执行。全量约 11 分钟串行、并行后约 3 分钟；开发中只跑相关文件：`node --import tsx --test tests/src/<x>.test.mjs`，提交前再跑全量。并行的前提是各文件端口独占（见下），新文件用 `grep -h "PORT = " tests/src/*.test.mjs | sort -t= -k2 -n` 挑没人用的号。
 - **黑盒**：测试只通过**真实进程 + WebSocket 线协议**驱动，完全不碰应用内部实现 → 跨重构/跨语言重写有效。`harness.mjs` 里那份 pty 帧 codec 是**有意内联的纯 JS**（不 import 应用代码），就是为了不依赖被测物。
 - `startStack()` 起一套独立的 **server(TS, tsx) + daemon(Rust supervisor 二进制，supervisor 再 spawn worker 二进制)**，等 daemon 在线后返回控制句柄；`Client` 是带 `waitFor` 的测试 WS 客户端；`mkRepo()` 造临时 git 仓库。
 - daemon 默认用 `target/debug/coflux-{supervisor,worker}`（`pretest` 会 `cargo build`）；可用 `COFLUX_SUPERVISOR_BIN` / `COFLUX_WORKER_BIN` 覆盖路径。
