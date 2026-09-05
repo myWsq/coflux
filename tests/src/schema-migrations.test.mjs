@@ -313,6 +313,8 @@ test("migration ledger 在两个 server 并发启动时只应用一次，核心 
           "fk_local_grants_device",
           "fk_local_leases_grant",
           "fk_memberships_account",
+          "fk_oauth_tokens_account",
+          "fk_oauth_tokens_client",
           "fk_prepared_operations_device",
           "fk_projects_device",
           "fk_tasks_workspace",
