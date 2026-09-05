@@ -52,6 +52,21 @@ const CATALOG_PAGE_MAX_ENTRIES: usize = 128;
 const CATALOG_LEASE_LIMIT: usize = 1024;
 /// 未 ACK exit fact 不能随中心断线无界增长。超过窗口时只丢最旧精确退出码；下一次完整
 /// catalog 的“live 缺席”仍会把中心 task 收敛为 EXITED，因此不会留下永久僵尸。
+/// 会话归属 id（plan 092）：中心随建会话请求带下来，supervisor 在 [`Sessions::create_session`] 里组装成
+/// `COFLUX_*` 环境变量注入 PTY，让跑在里面的 agent 读环境变量就知道自己在哪台设备/项目/工作区/终端。
+/// 变量名与组装只在 supervisor 一处，中心与 worker 只下发 id，不下发任意 env map。
+/// 缺失（旧中心 / 旧 worker）为空串：对应变量仍然存在、值为空；`session_id` / `task_id` supervisor 自己知道，
+/// 所以 SKILL 的探测规则以 `COFLUX_WORKSPACE_ID` 非空作为「在 coflux 且已升级」的判据。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionContext {
+    pub daemon_id: String,
+    /// 无仓库的目录工作区为空串
+    pub project_id: String,
+    pub workspace_id: String,
+    /// 中心 MCP 地址（`<COFLUX_PUBLIC_URL>/mcp`）
+    pub mcp_url: String,
+}
+
 const EXIT_TOMBSTONE_LIMIT: usize = 4096;
 const EXIT_TOMBSTONE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -706,14 +721,21 @@ impl Sessions {
         shell: String,
         cols: u16,
         rows: u16,
+        context: SessionContext,
     ) {
         if self.respond_to_live_legacy_create_attempt(&session_id, &task_id, "duplicate session id")
         {
             return;
         }
-        if let Err(error) =
-            self.create_session(session_id.clone(), task_id.clone(), cwd, shell, cols, rows)
-        {
+        if let Err(error) = self.create_session(
+            session_id.clone(),
+            task_id.clone(),
+            cwd,
+            shell,
+            cols,
+            rows,
+            context,
+        ) {
             // create_session 在 spawn 后会二次检查 ID；若并发请求抢先插入，这里必须按
             // 最终 live identity 分类，不能把竞争失败降级成 legacy session.exit。
             if !self.respond_to_live_legacy_create_attempt(&session_id, &task_id, &error) {
@@ -753,6 +775,7 @@ impl Sessions {
         shell: String,
         cols: u16,
         rows: u16,
+        context: SessionContext,
     ) -> Result<i32, String> {
         if session_id.as_bytes().len() > MAX_FRAME_ID_BYTES {
             return Err(format!("session id 超过 {MAX_FRAME_ID_BYTES} 字节"));
@@ -794,6 +817,15 @@ impl Sessions {
             command.env(key, value);
         }
         command.env("TERM", "xterm-256color");
+        // plan 092：会话归属 id 以 COFLUX_* 注入，必须写在拷贝 std::env 之后（覆盖语义，supervisor 自身
+        // 环境里的同名变量不能盖掉它）。六个变量总是存在：中心没下发的为空串，session/task id 本地必有。
+        // 变量名是 agent 面向的契约（写进 SKILL.md），只能加不能改。
+        command.env("COFLUX_DEVICE_ID", &context.daemon_id);
+        command.env("COFLUX_PROJECT_ID", &context.project_id);
+        command.env("COFLUX_WORKSPACE_ID", &context.workspace_id);
+        command.env("COFLUX_TASK_ID", &task_id);
+        command.env("COFLUX_SESSION_ID", &session_id);
+        command.env("COFLUX_MCP_URL", &context.mcp_url);
         let mut child = pair
             .slave
             .spawn_command(command)
@@ -1751,6 +1783,12 @@ impl Sessions {
             request.shell.clone().unwrap_or_default(),
             cols,
             rows,
+            SessionContext {
+                daemon_id: request.daemon_id.clone(),
+                project_id: request.project_id.clone(),
+                workspace_id: request.workspace_id.clone(),
+                mcp_url: request.mcp_url.clone(),
+            },
         );
         let ack = match created {
             Ok(pid) => DeviceOperationAck {
@@ -2228,6 +2266,7 @@ mod tests {
                 String::new(),
                 80,
                 24,
+                SessionContext::default(),
             )
             .unwrap();
         assert!(matches!(
@@ -2281,6 +2320,7 @@ mod tests {
                 String::new(),
                 80,
                 24,
+                SessionContext::default(),
             )
             .unwrap();
         assert!(matches!(

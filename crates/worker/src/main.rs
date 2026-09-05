@@ -1782,6 +1782,7 @@ async fn route_authed(
             });
         }
         // PTY → 转给 supervisor；wire 上 cols/rows 是 uint32，UDS/portable-pty 侧是 u16，钳位收窄。
+        // 会话归属 id（plan 092）原样映射到 IPC：空串视为中心没下发，不序列化，旧 supervisor 零感知。
         server_to_daemon::Payload::SessionCreate(wire::SessionCreate {
             session_id,
             task_id,
@@ -1789,7 +1790,12 @@ async fn route_authed(
             shell,
             cols,
             rows,
+            workspace_id,
+            project_id,
+            daemon_id,
+            mcp_url,
         }) => {
+            let non_empty = |value: String| (!value.is_empty()).then_some(value);
             sup_ctrl(
                 to_sup_tx,
                 &WorkerToSupervisor::SessionCreate {
@@ -1799,6 +1805,10 @@ async fn route_authed(
                     shell,
                     cols: clamp_u16(cols),
                     rows: clamp_u16(rows),
+                    workspace_id: non_empty(workspace_id),
+                    project_id: non_empty(project_id),
+                    daemon_id: non_empty(daemon_id),
+                    mcp_url: non_empty(mcp_url),
                 },
             )
             .await;
