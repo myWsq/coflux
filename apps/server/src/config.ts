@@ -119,6 +119,8 @@ export const config = {
   /** MCP OAuth 凭证有效期：access 短期（默认 1 小时），refresh 长期且用过即作废（默认与会话 token 同 30 天）。 */
   oauthAccessTtlMs: Math.max(60_000, int("COFLUX_OAUTH_ACCESS_TTL_MS", 60 * 60 * 1000)),
   oauthRefreshTtlMs: Math.max(60_000, int("COFLUX_OAUTH_REFRESH_TTL_MS", int("COFLUX_SESSION_TTL_MS", 30 * 24 * 60 * 60 * 1000))),
+  /** DCR 注册限速（全局固定窗口，窗口同 authRateWindowMs）：Raven 上下文拿不到来源 IP，只能全局兜底。 */
+  oauthRegisterRateLimit: Math.max(1, int("COFLUX_OAUTH_REGISTER_RATE_LIMIT", 30)),
 
   /** 端口转发预览域：Host 形如 `<shortId>-<proxyHost>` 的请求按反代处理（见 plan 006；2026-08-16
    *  从 `.` 分隔挪为 `-` 分隔——预览域落一级子域，CF 橙云 Universal SSL 的 `*.coflux.dev` 才覆盖）。
