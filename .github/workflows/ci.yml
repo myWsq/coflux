@@ -129,6 +129,11 @@ jobs:
       - name: Git diff 格式检查
         run: git diff --check "$CI_DIFF_BASE" HEAD
 
+      # Claude 插件交付目录（integrations/claude-plugin）由 myWsq/plugins 市场按 commit SHA 整目录收集，
+      # 里面的 SKILL 是 npm 包那份唯一源的拷贝（契约禁止符号链接），两份不许漂移。
+      - name: Claude 插件交付目录与 npm SKILL 一致
+        run: node scripts/sync-claude-plugin.mjs --check
+
       - name: server 类型检查
         run: node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit
 

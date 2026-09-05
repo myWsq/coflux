@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "coflux": {
+      "type": "http",
+      "url": "${COFLUX_MCP_URL:-https://api.coflux.dev/mcp}",
+      "timeout": 660000
+    }
+  }
+}

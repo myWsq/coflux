@@ -1,0 +1,85 @@
+{
+  "description": "Forward Claude Code hook events to the local coflux daemon via the cofluxd messenger. Silent no-op when cofluxd is not installed.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+          }
+        ]
+      }
+    ]
+  }
+}

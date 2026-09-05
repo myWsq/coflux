@@ -10,6 +10,7 @@ coflux：可跑在任意节点上的 **daemon**，本地起 PTY、驱动 Agent�
 - `apps/web`（TS）：Vite + React + xterm 终端。**桌面端，是默认的迭代对象**。
 - `apps/mobile`（TS）：移动随身端（m.coflux.dev，plan 032）。**已冻结**：功能锁定在 2026-07 的形态（列表/详情 + 终端快捷键条 + 简版 diff），"迭代 web"默认指 `apps/web`，不给 mobile 加功能、不同步桌面新特性；仅当共享层（protocol/client）变更弄坏它的构建时做最小修复。
 - `packages/{protocol,core,client}`（TS）：共享的线协议类型、日志、协议 client + store（client 为 web/mobile 双端共享）。
+- `integrations/claude-plugin`：Claude Code 插件的**交付目录**（hooks + skill + `.mcp.json` + manifest），由 `myWsq/plugins` 市场（维护仓库 `myWsq/plugins-builder`）按 commit SHA 整目录收集发布，改完要提升 `.claude-plugin/plugin.json` 的 version 并在 builder 里更新 SHA。SKILL 的唯一源是 `packages/cli/skills/coflux/SKILL.md`，用 `node scripts/sync-claude-plugin.mjs` 同步到这里，CI 校验两份一致。
 - `crates/{protocol,supervisor,worker}`（Rust）：**daemon，全 Rust、零 node 运行时**。
   - `supervisor`：持 PTY(portable-pty) + scrollback + 背压；UDS server；起/管/重启 worker + 版本切换/观察期回滚。极少升级。
   - `worker`（tokio）：连服务器(WS)/认证/重连 + git/exec/fs + 两级 resync。频繁升级（热升级只换它，PTY 在 supervisor 存活）。
