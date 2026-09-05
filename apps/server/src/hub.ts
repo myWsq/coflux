@@ -59,6 +59,7 @@ import {
   type SessionCheckpoint,
   type AgentControlRequest,
   type AgentControlResultPayload,
+  type ServerAgentResult,
 } from "@coflux/protocol";
 import { createLogger } from "@coflux/core";
 import {
@@ -76,9 +77,15 @@ import { OAuthService } from "./oauth.js";
 import {
   createPreparedOperationService,
   MAX_PREPARED_FRAME_BYTES,
+  SERVER_INITIATOR,
   type PreparedOperationService,
 } from "./prepared-operation.service.js";
-import { PreparedOperationConvergenceService } from "./prepared-operation-convergence.service.js";
+import { PreparedOperationConvergenceService, type OperationEffect } from "./prepared-operation-convergence.service.js";
+import {
+  DAEMON_CAPABILITY_PREPARED_EXECUTE,
+  DAEMON_CAPABILITY_TERMINAL_IO,
+  daemonUpgradeRequired,
+} from "./daemon-capabilities.js";
 
 const log = createLogger("hub");
 const MAX_CATALOG_ENTRIES = 4096;
@@ -107,6 +114,30 @@ const MAX_AGENT_NAME_BYTES = 64;
 const MAX_RETIRED_RESYNC_OWNERS = 16;
 /** notify 留言的字节兜底（worker 已按字符钳过，这里防伪造/畸形上报） */
 const MAX_AGENT_MESSAGE_BYTES = 1024;
+/** daemon 宣告的能力名（plan 091）：条数/单条字节上限，超限整条握手拒绝（同其它握手字段）。 */
+const MAX_CAPABILITY_ENTRIES = 32;
+const MAX_CAPABILITY_BYTES = 64;
+/** 完成原语（plan 091）的等待者总上限：MCP 一个请求一个等待者，256 已远超单账号并发。 */
+const MAX_COMPLETION_WAITERS = 256;
+/** 中心发起的 prepared 操作（建/删 worktree、建会话）的完成等待上限：Claude Code 远程 MCP 单请求
+ * 60 秒，到期返回「已提交、稍后用 list_* 查」而不是挂着。 */
+const OPERATION_WAIT_MS = 30_000;
+/** wait_terminal 的默认与上限（同上，≤ 50 秒）。 */
+const TERMINAL_WAIT_DEFAULT_MS = 30_000;
+const TERMINAL_WAIT_MAX_MS = 50_000;
+/** stop_terminal 发出 sessionClose 后等退出的上限；到期按「已在退出中」返回。 */
+const STOP_WAIT_MS = 15_000;
+/** server→daemon 读/写请求的回执超时。写入超时不重发（结果未知，先 read 再决定）。 */
+const AGENT_REQUEST_TIMEOUT_MS = 10_000;
+const MAX_PENDING_AGENT_REQUESTS = 256;
+/** create_terminal 命令与 send_terminal_input 单次输入的字节上限（worker 侧另有同级钳制）。 */
+const MAX_TERMINAL_COMMAND_BYTES = 16 * 1024;
+const MAX_TERMINAL_INPUT_BYTES = 64 * 1024;
+const MAX_TERMINAL_TITLE_BYTES = 256;
+const MAX_BRANCH_BYTES = 255;
+const MAX_WORKSPACE_NAME_BYTES = 256;
+/** read_terminal 经 daemon 读取的字节上限（与 checkpoint 同级）。 */
+const MAX_TERMINAL_READ_BYTES = 256 * 1024;
 
 /** daemon 展示信息：不用生成的 DaemonInfo 消息类型（无需 $typeName）——它只作为其它信封消息的
  * 嵌套字段被构造（nested init 接受纯对象），从不单独序列化，用生成类型纯属多余的仪式。 */
@@ -150,6 +181,8 @@ export interface DaemonConn {
   accountId: AccountId;
   /** 握手上报的 CPU 架构（std::env::consts::ARCH），仅供自动升级编排做 target 映射，不下发给 web。 */
   arch: string;
+  /** 握手宣告的控制面能力名（plan 091）：MCP 写 tools 发送新增控制消息前按它做门禁。纯连接内存态。 */
+  capabilities: ReadonlySet<string>;
   ws: WebSocket;
   /** daemon 探测选出的 home relay；纯连接 presence，重连后由新 worker 重新上报。 */
   homeRelayId?: string;
@@ -196,6 +229,7 @@ interface PendingAuthorization {
   workerVersion: string;
   supervisorVersion: string;
   arch: string;
+  capabilities: readonly string[];
   createdAt: number;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -232,6 +266,109 @@ interface DaemonGenerationGate {
  * 会让已执行的 task 更新随事务回滚；外层只静默终止这份旧代际快照。 */
 class StaleDaemonConnectionError extends Error {}
 
+/** 操作层（plan 091，MCP 写 tools 消费）的统一结果：错误一律是可读文案，不抛。 */
+export type OperationOutcome<T> = { ok: true; value: T } | { ok: false; error: string };
+
+/** prepared 操作（按 operationId）的完成结果：applied 携带收敛 effect；failed 携带可读错误。 */
+export type OperationWaitResult =
+  | { case: "applied"; effect: OperationEffect }
+  | { case: "failed"; message: string }
+  | { case: "timeout" };
+
+/** 任务退出（按 taskId）的等待结果。 */
+export type TaskExitWaitResult =
+  | { case: "exited"; exitCode: number }
+  | { case: "failed"; message: string }
+  | { case: "timeout" };
+
+/** read_terminal 的内容来源：log/snapshot 经 daemon，checkpoint 是中心缓存，none 三者皆无。 */
+export type TerminalReadSource = "log" | "snapshot" | "checkpoint" | "none";
+
+interface CompletionWaiter<T> {
+  daemonId: DaemonId;
+  resolve: (value: T) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * 完成原语（plan 091）：中心发起的 daemon 副作用没有 client 可通知，MCP tool 按 key（operationId /
+ * taskId）在这里等一个有界的结果。唤醒点在 Hub 既有的收敛路径末尾（report 收敛、sessionExit、
+ * catalog exit、任务删除、daemon 断开/换代），不引入新的状态机。等待者有总数上限与超时。
+ */
+class CompletionTable<T> {
+  private readonly waiters = new Map<string, Set<CompletionWaiter<T>>>();
+  private count = 0;
+
+  wait(key: string, daemonId: DaemonId, timeoutMs: number, onTimeout: T): Promise<T> | undefined {
+    if (this.count >= MAX_COMPLETION_WAITERS) return undefined;
+    return new Promise<T>((resolve) => {
+      const set = this.waiters.get(key) ?? new Set<CompletionWaiter<T>>();
+      const waiter: CompletionWaiter<T> = {
+        daemonId,
+        resolve,
+        timer: setTimeout(() => {
+          if (this.remove(key, waiter)) resolve(onTimeout);
+        }, timeoutMs),
+      };
+      waiter.timer.unref?.();
+      set.add(waiter);
+      this.waiters.set(key, set);
+      this.count += 1;
+    });
+  }
+
+  resolve(key: string, value: T): void {
+    const set = this.waiters.get(key);
+    if (!set) return;
+    this.waiters.delete(key);
+    for (const waiter of set) {
+      clearTimeout(waiter.timer);
+      this.count -= 1;
+      waiter.resolve(value);
+    }
+  }
+
+  /** daemon 断开/换代/撤销：该设备上所有等待者以同一可读错误唤醒。 */
+  failDaemon(daemonId: DaemonId, value: T): void {
+    for (const [key, set] of [...this.waiters]) {
+      for (const waiter of [...set]) {
+        if (waiter.daemonId !== daemonId) continue;
+        this.remove(key, waiter);
+        waiter.resolve(value);
+      }
+    }
+  }
+
+  failAll(value: T): void {
+    for (const [key, set] of [...this.waiters]) {
+      for (const waiter of [...set]) {
+        this.remove(key, waiter);
+        waiter.resolve(value);
+      }
+    }
+  }
+
+  private remove(key: string, waiter: CompletionWaiter<T>): boolean {
+    const set = this.waiters.get(key);
+    if (!set?.delete(waiter)) return false;
+    clearTimeout(waiter.timer);
+    this.count -= 1;
+    if (set.size === 0) this.waiters.delete(key);
+    return true;
+  }
+}
+
+/** server→daemon 读/写请求（plan 091）的在飞表项：requestId → 回执等待者。 */
+interface PendingAgentRequest {
+  daemonId: DaemonId;
+  resolve: (result: ServerAgentResult | undefined) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+type ServerAgentRequestPayload =
+  | { case: "terminalRead"; value: { taskId: TaskId; sessionId: SessionId; maxBytes: number } }
+  | { case: "terminalInput"; value: { sessionId: SessionId; data: Uint8Array } };
+
 /** 固定窗口 + LRU 键上限：既限制单来源请求速率，也不让伪造来源把 limiter 自身撑爆内存。 */
 class FixedWindowLimiter {
   private readonly windows = new Map<string, { startedAt: number; count: number }>();
@@ -266,6 +403,11 @@ export class Hub {
   private sessions = new Map<SessionId, RuntimeSession>();
   private clients = new Set<ClientConn>();
   private readonly preparedOperations: PreparedOperationService<ClientConn, DaemonConn>;
+  /** 完成原语（plan 091）：中心发起的 prepared 操作按 operationId、任务退出按 taskId 等结果。 */
+  private readonly operationCompletions = new CompletionTable<OperationWaitResult>();
+  private readonly taskExitCompletions = new CompletionTable<TaskExitWaitResult>();
+  /** server→daemon 读/写请求的在飞表（plan 091）。 */
+  private readonly pendingAgentRequests = new Map<string, PendingAgentRequest>();
   private catalog = new Map<DaemonId, Map<SessionId, DeviceSessionInfo>>();
   /** agent presence（plan 073）：daemon 上报的"会话进程树内检测到的 agent CLI"。派生运行时
    * 事实——纯内存、不落库，daemon 断开即清空并广播；订阅时按设备补发当前全量。 */
@@ -326,6 +468,8 @@ export class Hub {
         ? this.sendClientNow(client, payload)
         : this.sendClient(client, payload),
       validControlId,
+      failServerOperation: (operationId, message) =>
+        this.operationCompletions.resolve(operationId, { case: "failed", message }),
     });
   }
 
@@ -449,7 +593,10 @@ export class Hub {
     closeSession: boolean,
   ): void {
     const retiredTaskIds = new Set(taskIds);
-    for (const taskId of retiredTaskIds) this.cancelTaskEffects(taskId);
+    for (const taskId of retiredTaskIds) {
+      this.cancelTaskEffects(taskId);
+      this.taskExitCompletions.resolve(taskId, { case: "failed", message: "任务已删除" });
+    }
     for (const [sessionId, runtime] of this.sessions) {
       if (
         !retiredTaskIds.has(runtime.taskId) ||
@@ -583,6 +730,7 @@ export class Hub {
     observedInfo: DaemonInfoData,
     accountId: AccountId,
     arch: string,
+    capabilities: readonly string[],
     authSuccess: ServerToDaemonPayload,
   ): Promise<boolean> {
     return await this.withDaemonGenerationGate(observedInfo.daemonId, async () => {
@@ -615,7 +763,7 @@ export class Hub {
         platform: device.platform,
         online: true,
       };
-      const daemon: DaemonConn = { ws: conn.ws, info, accountId: device.accountId, arch };
+      const daemon: DaemonConn = { ws: conn.ws, info, accountId: device.accountId, arch, capabilities: new Set(capabilities) };
       const prev = this.daemons.get(info.daemonId);
       if (prev && prev.ws !== conn.ws) {
         try {
@@ -623,6 +771,9 @@ export class Hub {
         } catch {
           /* ignore */
         }
+        // 连接换代：旧连接上在飞的中心发起操作/读写请求不再有回执可等，以可读错误唤醒；
+        // 已安装的 prepared 记录由下方 restore 在新连接上重装并再次 Execute（worker 侧幂等）。
+        this.failDaemonWaiters(info.daemonId, "daemon 连接已换代，请重试或稍后用 list_* 查看结果");
       }
       conn.daemonId = info.daemonId;
       conn.accountId = device.accountId;
@@ -946,6 +1097,8 @@ export class Hub {
         if (effectGuard.cancelled) return;
         if (convergence?.task) this.emitTask(convergence.task);
         if (ownsRuntime) this.dropSession(exit.sessionId);
+        // tombstone 也是退出事实：sessionExit 控制消息丢失时靠它唤醒 wait_terminal（plan 091）。
+        if (convergence) this.taskExitCompletions.resolve(exit.taskId, { case: "exited", exitCode: exit.exitCode });
       });
       // unknown/orphan tombstone 无需业务映射，但仍可在持久化收敛后 ack 让 sessiond 有界清理。
       ackIds.push(exit.eventId);
@@ -1001,6 +1154,7 @@ export class Hub {
         // 仍广播旧 task 的合法 DB 终态，但绝不能摘掉新 task 的 runtime/端口。
         if (ownsRuntime) this.dropSession(sessionId);
         this.emitTask(updated);
+        this.taskExitCompletions.resolve(task.taskId, { case: "failed", message: "会话已不在设备上（退出码未知），任务已收敛为已退出" });
         convergedTasks.push({ taskId: task.taskId, sessionId });
       });
     }
@@ -1377,6 +1531,18 @@ export class Hub {
         // 业务副作用，也必须先推进投递代际并清 waiter/retry；否则取消 guard 会让并发 ready/
         // restore 查询继续信任提交前拿到的旧 installed 记录。ignored 没有终结所有权，不能清理。
         if (outcome.case !== "ignored") this.preparedOperations.complete(report.operationId);
+        // 完成原语（plan 091）只在 applied/failed 唤醒：中心发起的操作在这里拿到 effect 或可读错误；
+        // ignored（重复 report）既不唤醒也不清理。report 本身 !ok 时 effect 带 error，按失败唤醒。
+        if (outcome.case === "failed") {
+          this.operationCompletions.resolve(report.operationId, { case: "failed", message: outcome.message });
+        } else if (outcome.case === "applied") {
+          this.operationCompletions.resolve(
+            report.operationId,
+            outcome.effect.error
+              ? { case: "failed", message: outcome.effect.error }
+              : { case: "applied", effect: outcome.effect },
+          );
+        }
         if (
           !this.isCurrentDaemon(daemon) ||
           effectGuard.cancelled ||
@@ -1556,7 +1722,8 @@ export class Hub {
           !validBoundedText(value.platform, MAX_ENROLL_PLATFORM_BYTES) ||
           !validBoundedText(value.workerVersion, MAX_ENROLL_VERSION_BYTES, true) ||
           !validBoundedText(value.supervisorVersion, MAX_ENROLL_VERSION_BYTES, true) ||
-          !validBoundedText(value.arch, MAX_ENROLL_ARCH_BYTES, true)
+          !validBoundedText(value.arch, MAX_ENROLL_ARCH_BYTES, true) ||
+          !validCapabilities(value.capabilities)
         ) {
           log.warn("daemon 匿名登记字段无效", { remoteAddress: conn.remoteAddress });
           conn.ws.close(1008, "invalid enroll request");
@@ -1594,6 +1761,7 @@ export class Hub {
           workerVersion: value.workerVersion,
           supervisorVersion: value.supervisorVersion,
           arch: value.arch,
+          capabilities: [...value.capabilities],
           createdAt,
           timer,
         });
@@ -1613,7 +1781,8 @@ export class Hub {
           !validBoundedText(value.deviceToken, MAX_CLIENT_TOKEN_BYTES) ||
           !validBoundedText(value.workerVersion, MAX_ENROLL_VERSION_BYTES, true) ||
           !validBoundedText(value.supervisorVersion, MAX_ENROLL_VERSION_BYTES, true) ||
-          !validBoundedText(value.arch, MAX_ENROLL_ARCH_BYTES, true)
+          !validBoundedText(value.arch, MAX_ENROLL_ARCH_BYTES, true) ||
+          !validCapabilities(value.capabilities)
         ) {
           log.warn("daemon 认证字段无效", { remoteAddress: conn.remoteAddress });
           conn.ws.close(1008, "invalid daemon auth");
@@ -1630,6 +1799,7 @@ export class Hub {
           { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true, workerVersion: value.workerVersion, supervisorVersion: value.supervisorVersion },
           device.accountId,
           value.arch,
+          value.capabilities,
           { case: "daemonAuthed", value: { daemonId: device.id } },
         );
         if (registered) log.info("daemon authed", { daemonId: device.id, name: device.name });
@@ -1649,6 +1819,12 @@ export class Hub {
       case "deviceP2pAnswerReport": {
         const daemon = this.currentDaemon(conn);
         if (daemon) this.handleDeviceP2pAnswerReport(daemon.info.daemonId, msg.payload.value);
+        break;
+      }
+      // 中心发起的终端读/写回执（plan 091）：按 requestId 找到等待中的 tool 调用；找不到 = 已超时摘除。
+      case "serverAgentResult": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) this.resolveAgentRequest(daemon, msg.payload.value);
         break;
       }
       case "relayHome": {
@@ -1908,6 +2084,7 @@ export class Hub {
             if (!updated || effectGuard.cancelled || !ownsRuntime) return;
             this.emitTask(updated);
             this.dropSession(value.sessionId);
+            this.taskExitCompletions.resolve(s.taskId, { case: "exited", exitCode: value.exitCode });
             log.info("session exit", { sessionId: value.sessionId, taskId: s.taskId, exitCode: value.exitCode });
           });
         });
@@ -2139,6 +2316,8 @@ export class Hub {
 
       this.daemons.delete(daemonId);
       this.catalog.delete(daemonId);
+      // 中心发起的操作/读写请求随连接一起失去回执来源（plan 091）：以可读错误唤醒，不让 tool 白等。
+      this.failDaemonWaiters(daemonId, "daemon 连接已断开，请稍后重试或用 list_* 查看结果");
       // agent presence 是在线连接的派生事实：daemon 断开即清空并广播，防琥珀点残留（plan 073）
       if (this.sessionAgents.delete(daemonId)) {
         this.broadcast(accountId, { case: "sessionAgentsUpdated", value: { daemonId, sessions: [] } });
@@ -2515,76 +2694,19 @@ export class Hub {
           return;
         }
         if (isDirWorkspace(ws)) {
-          // 目录工作区：只删记录，绝不进入 worktree.remove（不能对 HOME 跑 git worktree 操作），
-          // daemon 离线也可删。与 terminalCreate/taskCreate/removeDevice 共用 device 父行锁，
-          // 锁后重读并在同一事务内删除全部子项，防并发创建留下 orphan。
-          const removed = await this.store.transaction(async (tx) => {
-            const device = await tx.claimActiveDevice(ws.daemonId, ws.accountId);
-            if (!device) return undefined;
-            const current = await tx.getWorkspace(ws.id);
-            if (
-              !current ||
-              current.accountId !== ws.accountId ||
-              current.daemonId !== ws.daemonId ||
-              current.isMain ||
-              !isDirWorkspace(current)
-            ) return undefined;
-            const removedTaskIds = await tx.removeTasksByWorkspace(current.id);
-            const cancelledPreparedOperationIds: string[] = [];
-            const now = Date.now();
-            for (const taskId of removedTaskIds) {
-              cancelledPreparedOperationIds.push(...await tx.expirePreparedOperationsByTarget(
-                current.accountId,
-                current.daemonId,
-                "session.create",
-                taskId,
-                now,
-              ));
-              await tx.removeSessionCheckpointsByTask(taskId);
-            }
-            await tx.removeWorkspace(current.id);
-            return { workspace: current, removedTaskIds, cancelledPreparedOperationIds };
-          });
-          if (!removed) return;
-          this.cancelWorkspaceEffects(removed.workspace.id);
-          this.retireTaskRuntimes(
-            removed.removedTaskIds,
-            removed.workspace.accountId,
-            removed.workspace.daemonId,
-            true,
-          );
-          this.preparedOperations.cancelMany(
-            removed.cancelledPreparedOperationIds,
-            "工作区已删除，session.create 已取消",
-          );
-          for (const taskId of removed.removedTaskIds) this.broadcast(removed.workspace.accountId, { case: "taskRemoved", value: { taskId } });
-          this.broadcast(removed.workspace.accountId, { case: "workspaceRemoved", value: { workspaceId: removed.workspace.id } });
-          await this.pushWorkspaceList(removed.workspace.daemonId);
+          await this.removeDirWorkspace(ws);
           return;
         }
         const project = await this.store.getProject(ws.projectId);
         if (!project || project.daemonId !== ws.daemonId) return;
         if (!this.daemons.has(ws.daemonId)) return void this.sendClient(client, { case: "error", value: { message: "daemon 不在线" } });
-        const sessionCloses = (await this.store.listTasksByWorkspace(ws.id))
-          .flatMap((task) => task.sessionId ? [{ sessionId: task.sessionId, taskId: task.id }] : []);
-        for (const { sessionId, taskId } of sessionCloses) {
-          if (!this.sessionHasIdentity(sessionId, taskId, ws.accountId, ws.daemonId)) continue;
-          this.routeToSessionDaemon(sessionId, { case: "sessionClose", value: { sessionId } });
-          this.dropSession(sessionId);
-        }
+        await this.closeWorkspaceSessions(ws);
         await this.prepareWorktreeRemoval(client, project, ws, false);
         break;
       }
       case "workspaceSetName": {
         const value = msg.payload.value;
-        await this.withWorkspaceEffectGuard(value.workspaceId, async (workspaceEffectGuard) => {
-          const ws = await this.store.getWorkspace(value.workspaceId);
-          if (!ws || ws.accountId !== client.accountId || workspaceEffectGuard.cancelled) return;
-          // 空名回落分支名；复用 workspaceCreated 广播（web 侧为 upsert），无需新增下行消息
-          const updated = await this.store.updateWorkspaceName(ws.id, value.name.trim() || ws.branch);
-          if (!updated || workspaceEffectGuard.cancelled) return;
-          this.broadcast(updated.accountId, { case: "workspaceCreated", value: { workspace: updated } });
-        });
+        await this.renameWorkspace(client.accountId!, value.workspaceId, value.name);
         break;
       }
       case "projectSetName": {
@@ -2684,41 +2806,125 @@ export class Hub {
       case "taskRemove": {
         const initial = await this.requireTask(client, msg.payload.value.taskId);
         if (!initial) return;
-        const task = await this.store.transaction(async (tx) => {
-          // 与 checkpoint/taskCreate/removeDevice 共用 device 父锁；锁后重读并在
-          // 同一事务删 checkpoint + task，防迟到 checkpoint 在 taskRemove 后插回孤儿。
-          const device = await tx.claimActiveDevice(initial.daemonId, initial.accountId);
-          if (!device) return undefined;
-          const current = await tx.getTask(initial.id);
-          if (
-            !current ||
-            current.accountId !== initial.accountId ||
-            current.daemonId !== initial.daemonId
-          ) return undefined;
-          const cancelledPreparedOperationIds = await tx.expirePreparedOperationsByTarget(
-            current.accountId,
-            current.daemonId,
-            "session.create",
-            current.id,
-            Date.now(),
-          );
-          await tx.removeSessionCheckpointsByTask(current.id);
-          await tx.removeTask(current.id);
-          return { task: current, cancelledPreparedOperationIds };
-        });
-        if (!task) return;
-        // 删除已提交：先取消旧 exit/catalog continuation，再按 task 完整身份摘运行时，
-        // 最后广播 removed。catalog 可能在 taskRemove 锁后重读前已清空 DB session_id，
-        // 所以不能只依赖返回 task.sessionId；内存映射仍保留可核对的 taskId。
-        this.retireTaskRuntime(task.task.id, task.task.accountId, task.task.daemonId, true);
-        this.preparedOperations.cancelMany(
-          task.cancelledPreparedOperationIds,
-          "任务已删除，session.create 已取消",
-        );
-        this.broadcast(task.task.accountId, { case: "taskRemoved", value: { taskId: task.task.id } });
+        await this.removeTaskRecord(initial, false);
         break;
       }
     }
+  }
+
+  /* ==================== 工作区 / 任务的共享写路径（web 与 MCP 同一逻辑，plan 091） ==================== */
+
+  /** 目录工作区：只删记录，绝不进入 worktree.remove（不能对 HOME 跑 git worktree 操作），
+   * daemon 离线也可删。与 terminalCreate/taskCreate/removeDevice 共用 device 父行锁，
+   * 锁后重读并在同一事务内删除全部子项，防并发创建留下 orphan。返回是否真的删掉。 */
+  private async removeDirWorkspace(ws: Workspace): Promise<boolean> {
+    const removed = await this.store.transaction(async (tx) => {
+      const device = await tx.claimActiveDevice(ws.daemonId, ws.accountId);
+      if (!device) return undefined;
+      const current = await tx.getWorkspace(ws.id);
+      if (
+        !current ||
+        current.accountId !== ws.accountId ||
+        current.daemonId !== ws.daemonId ||
+        current.isMain ||
+        !isDirWorkspace(current)
+      ) return undefined;
+      const removedTaskIds = await tx.removeTasksByWorkspace(current.id);
+      const cancelledPreparedOperationIds: string[] = [];
+      const now = Date.now();
+      for (const taskId of removedTaskIds) {
+        cancelledPreparedOperationIds.push(...await tx.expirePreparedOperationsByTarget(
+          current.accountId,
+          current.daemonId,
+          "session.create",
+          taskId,
+          now,
+        ));
+        await tx.removeSessionCheckpointsByTask(taskId);
+      }
+      await tx.removeWorkspace(current.id);
+      return { workspace: current, removedTaskIds, cancelledPreparedOperationIds };
+    });
+    if (!removed) return false;
+    this.cancelWorkspaceEffects(removed.workspace.id);
+    this.retireTaskRuntimes(
+      removed.removedTaskIds,
+      removed.workspace.accountId,
+      removed.workspace.daemonId,
+      true,
+    );
+    this.preparedOperations.cancelMany(
+      removed.cancelledPreparedOperationIds,
+      "工作区已删除，session.create 已取消",
+    );
+    for (const taskId of removed.removedTaskIds) this.broadcast(removed.workspace.accountId, { case: "taskRemoved", value: { taskId } });
+    this.broadcast(removed.workspace.accountId, { case: "workspaceRemoved", value: { workspaceId: removed.workspace.id } });
+    await this.pushWorkspaceList(removed.workspace.daemonId);
+    return true;
+  }
+
+  /** 删 worktree 工作区前先关掉其下所有会话（sessionClose 直发 + 摘运行时），与 projectRemove 同一条。 */
+  private async closeWorkspaceSessions(ws: Workspace): Promise<void> {
+    const sessionCloses = (await this.store.listTasksByWorkspace(ws.id))
+      .flatMap((task) => task.sessionId ? [{ sessionId: task.sessionId, taskId: task.id }] : []);
+    for (const { sessionId, taskId } of sessionCloses) {
+      if (!this.sessionHasIdentity(sessionId, taskId, ws.accountId, ws.daemonId)) continue;
+      this.routeToSessionDaemon(sessionId, { case: "sessionClose", value: { sessionId } });
+      this.dropSession(sessionId);
+    }
+  }
+
+  /** 改名（纯中心记录）：空名回落分支名；复用 workspaceCreated 广播（web 侧为 upsert），无需新增下行消息。
+   * 主工作区也可改名。返回更新后的工作区；不存在/不属于账号/已删除返回 undefined。 */
+  private async renameWorkspace(accountId: AccountId, workspaceId: WorkspaceId, name: string): Promise<Workspace | undefined> {
+    return await this.withWorkspaceEffectGuard(workspaceId, async (workspaceEffectGuard) => {
+      const ws = await this.store.getWorkspace(workspaceId);
+      if (!ws || ws.accountId !== accountId || workspaceEffectGuard.cancelled) return undefined;
+      const updated = await this.store.updateWorkspaceName(ws.id, name.trim() || ws.branch);
+      if (!updated || workspaceEffectGuard.cancelled) return undefined;
+      this.broadcast(updated.accountId, { case: "workspaceCreated", value: { workspace: updated } });
+      return updated;
+    });
+  }
+
+  /** 删任务记录（含 checkpoint）：与 checkpoint/taskCreate/removeDevice 共用 device 父锁；锁后重读并在
+   * 同一事务删 checkpoint + task，防迟到 checkpoint 在 taskRemove 后插回孤儿。web 由 UI 保证只删已退出的；
+   * MCP 传 rejectRunning=true 在同一事务内拒绝仍在运行的终端（plan 091）。 */
+  private async removeTaskRecord(initial: Task, rejectRunning: boolean): Promise<OperationOutcome<TaskId>> {
+    const task = await this.store.transaction(async (tx) => {
+      const device = await tx.claimActiveDevice(initial.daemonId, initial.accountId);
+      if (!device) return { error: "设备已撤销或不属于本账号" } as const;
+      const current = await tx.getTask(initial.id);
+      if (
+        !current ||
+        current.accountId !== initial.accountId ||
+        current.daemonId !== initial.daemonId
+      ) return { error: "任务已不存在" } as const;
+      if (rejectRunning && (current.status === TaskStatus.RUNNING || current.sessionId)) {
+        return { error: "终端仍在运行，先 stop_terminal 再删除" } as const;
+      }
+      const cancelledPreparedOperationIds = await tx.expirePreparedOperationsByTarget(
+        current.accountId,
+        current.daemonId,
+        "session.create",
+        current.id,
+        Date.now(),
+      );
+      await tx.removeSessionCheckpointsByTask(current.id);
+      await tx.removeTask(current.id);
+      return { task: current, cancelledPreparedOperationIds } as const;
+    });
+    if ("error" in task) return { ok: false, error: task.error };
+    // 删除已提交：先取消旧 exit/catalog continuation，再按 task 完整身份摘运行时，
+    // 最后广播 removed。catalog 可能在 taskRemove 锁后重读前已清空 DB session_id，
+    // 所以不能只依赖返回 task.sessionId；内存映射仍保留可核对的 taskId。
+    this.retireTaskRuntime(task.task.id, task.task.accountId, task.task.daemonId, true);
+    this.preparedOperations.cancelMany(
+      task.cancelledPreparedOperationIds,
+      "任务已删除，session.create 已取消",
+    );
+    this.broadcast(task.task.accountId, { case: "taskRemoved", value: { taskId: task.task.id } });
+    return { ok: true, value: task.task.id };
   }
 
   /** 构建版本准入的"允许版本集合"（plan 033）：env 显式覆盖 ∪ 每个 build-id.txt 文件的
@@ -3001,6 +3207,7 @@ export class Hub {
       { daemonId, name: p.name, host: p.host, platform: p.platform, online: true, workerVersion: p.workerVersion, supervisorVersion: p.supervisorVersion },
       accountId,
       p.arch,
+      p.capabilities,
       { case: "daemonEnrolled", value: { daemonId, deviceToken } },
     );
     if (!registered) {
@@ -3227,6 +3434,7 @@ export class Hub {
         true,
       );
       this.preparedOperations.cancelDaemon(daemonId, "设备已撤销，prepared operation 已取消");
+      this.failDaemonWaiters(daemonId, "设备已撤销");
 
       // 先清 origin/撤销 grant 再关闭 control WS；即使 revoke ack 丢失，durable tombstone 仍保留。
       await this.localControl.revokeDevice(daemonId);
@@ -3260,6 +3468,356 @@ export class Hub {
     this.preparedOperations.removeClient(client);
   }
 
+  /* ==================== 中心发起的 daemon 副作用 + MCP 操作层（plan 091） ==================== */
+
+  /** daemon 断开/换代/撤销：该设备上所有完成原语等待者与在飞读写请求以同一可读错误唤醒。 */
+  private failDaemonWaiters(daemonId: DaemonId, message: string): void {
+    this.operationCompletions.failDaemon(daemonId, { case: "failed", message });
+    this.taskExitCompletions.failDaemon(daemonId, { case: "failed", message });
+    for (const [requestId, pending] of [...this.pendingAgentRequests]) {
+      if (pending.daemonId !== daemonId) continue;
+      this.pendingAgentRequests.delete(requestId);
+      clearTimeout(pending.timer);
+      pending.resolve(undefined);
+    }
+  }
+
+  /** server→daemon 读/写请求（plan 091）：有界等待一条 serverAgentResult；超时/断开返回 undefined。 */
+  private requestDaemonAgent(daemon: DaemonConn, payload: ServerAgentRequestPayload): Promise<ServerAgentResult | undefined> {
+    if (this.pendingAgentRequests.size >= MAX_PENDING_AGENT_REQUESTS) return Promise.resolve(undefined);
+    const requestId = randomUUID();
+    return new Promise((resolve) => {
+      const pending: PendingAgentRequest = {
+        daemonId: daemon.info.daemonId,
+        resolve,
+        timer: setTimeout(() => {
+          if (this.pendingAgentRequests.delete(requestId)) resolve(undefined);
+        }, AGENT_REQUEST_TIMEOUT_MS),
+      };
+      pending.timer.unref?.();
+      this.pendingAgentRequests.set(requestId, pending);
+      if (!this.sendDaemon(daemon, { case: "serverAgentRequest", value: { requestId, payload } })) {
+        this.pendingAgentRequests.delete(requestId);
+        clearTimeout(pending.timer);
+        resolve(undefined);
+      }
+    });
+  }
+
+  private resolveAgentRequest(daemon: DaemonConn, result: ServerAgentResult): void {
+    const pending = this.pendingAgentRequests.get(result.requestId);
+    if (!pending || pending.daemonId !== daemon.info.daemonId) return;
+    this.pendingAgentRequests.delete(result.requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(result);
+  }
+
+  /** 能力门禁（plan 091）：按 daemon 认证时宣告的能力名判定，不按版本号。必须在 prepare **之前**
+   * 判定——旧 worker 对安装照常回 ok，却会永远收不到 Execute，留下占并发额度到 TTL 的僵尸记录。 */
+  private requireOnlineDaemon(daemonId: DaemonId, accountId: AccountId, capability: string): OperationOutcome<DaemonConn> {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon || daemon.accountId !== accountId) return { ok: false, error: "设备离线，无法执行该操作" };
+    if (!daemon.capabilities.has(capability)) return { ok: false, error: daemonUpgradeRequired(daemon.info.name) };
+    return { ok: true, value: daemon };
+  }
+
+  private async waitOperation(operationId: string, daemonId: DaemonId): Promise<OperationWaitResult> {
+    const waiting = this.operationCompletions.wait(operationId, daemonId, OPERATION_WAIT_MS, { case: "timeout" });
+    if (!waiting) return { case: "failed", message: "中心等待中的操作过多，请稍后重试" };
+    return await waiting;
+  }
+
+  /** 在某项目下建 worktree 工作区（与 web workspaceCreate 同一条 prepared `worktree.add`，只是发起方是中心）。 */
+  async createWorkspaceForAccount(
+    accountId: AccountId,
+    input: { projectId: ProjectId; branch: string; createNew: boolean; name?: string },
+  ): Promise<OperationOutcome<Workspace>> {
+    const project = await this.store.getProject(input.projectId);
+    if (!project || project.accountId !== accountId) return { ok: false, error: `项目 ${input.projectId} 不存在或不属于当前账号` };
+    const branch = input.branch.trim();
+    if (!validBoundedText(branch, MAX_BRANCH_BYTES) || /\s/.test(branch)) return { ok: false, error: "分支名无效（不能为空、不能含空白或控制字符）" };
+    const name = (input.name ?? "").trim() || branch;
+    if (!validBoundedText(name, MAX_WORKSPACE_NAME_BYTES)) return { ok: false, error: "工作区名称过长或含控制字符" };
+    if (await this.store.isProjectDeleting(project.id)) return { ok: false, error: "项目正在删除，不能再创建工作区" };
+    const daemon = this.requireOnlineDaemon(project.daemonId, accountId, DAEMON_CAPABILITY_PREPARED_EXECUTE);
+    if (!daemon.ok) return daemon;
+
+    const workspaceId = randomUUID();
+    const operationId = randomUUID();
+    const frame = this.preparedOperations.createFrame(operationId, {
+      case: "worktreeAdd",
+      value: { requestId: operationId, operationId, repoPath: project.repoPath, workspaceId, name, branch, createNew: input.createNew },
+    });
+    const prepared = await this.preparedOperations.prepareServer({
+      operationId,
+      accountId,
+      daemonId: project.daemonId,
+      kind: "worktree.add",
+      targetId: workspaceId,
+      targetVersion: null,
+      frame,
+      metadata: JSON.stringify({ projectId: project.id, workspaceId, name, initiator: SERVER_INITIATOR }),
+      expiresAt: Date.now() + config.preparedOperationTtlMs,
+    });
+    if (prepared.case === "rejected") return { ok: false, error: prepared.message };
+    const outcome = await this.waitOperation(prepared.operation.operationId, project.daemonId);
+    if (outcome.case === "timeout") {
+      return { ok: false, error: `工作区创建已提交但 ${OPERATION_WAIT_MS / 1000} 秒内未完成；稍后用 list_workspaces 查看（workspaceId: ${workspaceId}）` };
+    }
+    if (outcome.case === "failed") return { ok: false, error: `创建工作区失败：${outcome.message}` };
+    const workspace = outcome.effect.workspace ?? await this.store.getWorkspace(workspaceId);
+    if (!workspace) return { ok: false, error: "工作区创建已完成但记录不可读，稍后用 list_workspaces 查看" };
+    return { ok: true, value: workspace };
+  }
+
+  async renameWorkspaceForAccount(accountId: AccountId, workspaceId: WorkspaceId, name: string): Promise<OperationOutcome<Workspace>> {
+    const ws = await this.store.getWorkspace(workspaceId);
+    if (!ws || ws.accountId !== accountId) return { ok: false, error: `工作区 ${workspaceId} 不存在或不属于当前账号` };
+    if (!validBoundedText(name, MAX_WORKSPACE_NAME_BYTES, true)) return { ok: false, error: "工作区名称过长或含控制字符" };
+    const updated = await this.renameWorkspace(accountId, ws.id, name);
+    if (!updated) return { ok: false, error: "工作区已被删除" };
+    return { ok: true, value: updated };
+  }
+
+  /** 删工作区：主工作区拒绝；目录工作区只删记录；worktree 工作区先关其下所有会话再 prepared `worktree.remove`（中心发起）。 */
+  async removeWorkspaceForAccount(accountId: AccountId, workspaceId: WorkspaceId): Promise<OperationOutcome<{ workspaceId: WorkspaceId; removedTerminalIds: TaskId[] }>> {
+    const ws = await this.store.getWorkspace(workspaceId);
+    if (!ws || ws.accountId !== accountId) return { ok: false, error: `工作区 ${workspaceId} 不存在或不属于当前账号` };
+    if (ws.isMain) return { ok: false, error: "主工作区不能删除（要删就删整个项目）" };
+    if (isDirWorkspace(ws)) {
+      const removedTaskIds = (await this.store.listTasksByWorkspace(ws.id)).map((task) => task.id);
+      const removed = await this.removeDirWorkspace(ws);
+      if (!removed) return { ok: false, error: "工作区已被删除或设备已撤销" };
+      return { ok: true, value: { workspaceId: ws.id, removedTerminalIds: removedTaskIds } };
+    }
+    const project = await this.store.getProject(ws.projectId);
+    if (!project || project.daemonId !== ws.daemonId || project.accountId !== accountId) return { ok: false, error: "所属项目已不存在" };
+    const daemon = this.requireOnlineDaemon(ws.daemonId, accountId, DAEMON_CAPABILITY_PREPARED_EXECUTE);
+    if (!daemon.ok) return daemon;
+    await this.closeWorkspaceSessions(ws);
+
+    const operationId = randomUUID();
+    const frame = this.preparedOperations.createFrame(operationId, {
+      case: "worktreeRemove",
+      value: { requestId: operationId, operationId, repoPath: project.repoPath, worktreePath: ws.path },
+    });
+    const prepared = await this.preparedOperations.prepareServer({
+      operationId,
+      accountId: ws.accountId,
+      daemonId: ws.daemonId,
+      kind: "worktree.remove",
+      targetId: ws.id,
+      targetVersion: ws.createdAt,
+      frame,
+      metadata: JSON.stringify({ projectId: project.id, workspaceId: ws.id, removeProject: false, initiator: SERVER_INITIATOR }),
+      expiresAt: Date.now() + config.preparedOperationTtlMs,
+    });
+    if (prepared.case === "rejected") return { ok: false, error: prepared.message };
+    const outcome = await this.waitOperation(prepared.operation.operationId, ws.daemonId);
+    if (outcome.case === "timeout") {
+      return { ok: false, error: `工作区删除已提交但 ${OPERATION_WAIT_MS / 1000} 秒内未完成；稍后用 list_workspaces 确认` };
+    }
+    if (outcome.case === "failed") return { ok: false, error: `删除工作区失败：${outcome.message}` };
+    return { ok: true, value: { workspaceId: ws.id, removedTerminalIds: outcome.effect.removedTaskIds ?? [] } };
+  }
+
+  /** 在工作区里开一个跑一条命令的真实终端：同一事务里建 IDLE task（沿用 terminalNew 的准入）并 prepare 带
+   * command 的 `session.create`（中心发起），等收敛到 RUNNING。每工作区活跃终端上限含用户手开的。 */
+  async createTerminalForAccount(
+    accountId: AccountId,
+    input: { workspaceId: WorkspaceId; title: string; command: string },
+  ): Promise<OperationOutcome<Task>> {
+    const initialWorkspace = await this.store.getWorkspace(input.workspaceId);
+    if (!initialWorkspace || initialWorkspace.accountId !== accountId) return { ok: false, error: `工作区 ${input.workspaceId} 不存在或不属于当前账号` };
+    const command = input.command;
+    if (!command.trim() || Buffer.byteLength(command, "utf8") > MAX_TERMINAL_COMMAND_BYTES) {
+      return { ok: false, error: `命令不能为空且不超过 ${MAX_TERMINAL_COMMAND_BYTES} 字节` };
+    }
+    const title = input.title.trim() || command.split("\n")[0]!.slice(0, 64);
+    if (!validBoundedText(title, MAX_TERMINAL_TITLE_BYTES)) return { ok: false, error: "终端标题过长或含控制字符" };
+    const daemon = this.requireOnlineDaemon(initialWorkspace.daemonId, accountId, DAEMON_CAPABILITY_PREPARED_EXECUTE);
+    if (!daemon.ok) return daemon;
+
+    const taskId = randomUUID();
+    const sessionId = randomUUID();
+    const operationId = randomUUID();
+    const ts = Date.now();
+    const frame = this.preparedOperations.createFrame(operationId, {
+      case: "sessionCreate",
+      value: { requestId: operationId, operationId, sessionId, taskId, cwd: initialWorkspace.path, cols: AGENT_TERMINAL_COLS, rows: AGENT_TERMINAL_ROWS, command },
+    });
+    let task: Task | undefined;
+    const prepared = await this.withDeviceEffectGuard(initialWorkspace.daemonId, async (effectGuard) =>
+      await this.withTaskEffectGuard(taskId, async (taskEffectGuard) => {
+        const outcome = await this.preparedOperations.prepareServer({
+          operationId,
+          accountId,
+          daemonId: initialWorkspace.daemonId,
+          kind: "session.create",
+          targetId: taskId,
+          targetVersion: ts,
+          frame,
+          metadata: JSON.stringify({ taskId, sessionId, initiator: SERVER_INITIATOR }),
+          expiresAt: Date.now() + config.preparedOperationTtlMs,
+        }, async (tx) => {
+          // prepare 已持有 device 父行锁；锁后重读 workspace/project，并在同一事务里建 IDLE task，
+          // 与 workspaceRemove/removeDevice 的删除和 prepared expiry 形成一个确定顺序。
+          if (effectGuard.cancelled || taskEffectGuard.cancelled) return "设备或工作区已删除，终端创建已取消";
+          const ws = await tx.getWorkspace(initialWorkspace.id);
+          if (!ws || ws.accountId !== accountId || ws.daemonId !== initialWorkspace.daemonId) return "工作区已被删除";
+          if (!isDirWorkspace(ws)) {
+            const project = await tx.claimActiveProject(ws.projectId);
+            if (!project || project.accountId !== ws.accountId || project.daemonId !== ws.daemonId) return "项目正在删除，不能再创建终端";
+          }
+          // 统计所有活跃终端而不只是 agent 建的：防的是「侧栏被刷满」，来源无所谓（同 terminalNew）。
+          const active = (await tx.listTasksByWorkspace(ws.id)).filter((t) => t.status === TaskStatus.RUNNING).length;
+          if (active >= config.maxAgentTerminalsPerWorkspace) {
+            return `本工作区活跃终端已达上限 ${config.maxAgentTerminalsPerWorkspace}（含用户手动开的），先 stop_terminal 停掉一些再开新的`;
+          }
+          task = create(TaskSchema, {
+            id: taskId,
+            accountId: ws.accountId,
+            daemonId: ws.daemonId,
+            projectId: ws.projectId,
+            workspaceId: ws.id,
+            title,
+            status: TaskStatus.IDLE,
+            createdAt: ts,
+            updatedAt: ts,
+          });
+          await tx.createTask(task);
+          return undefined;
+        });
+        if (outcome.case === "accepted" && effectGuard.cancelled) return { case: "rejected", message: "设备已删除，终端创建已取消" } as const;
+        return outcome;
+      }));
+    if (prepared.case === "rejected") {
+      // admission 通过但 prepared 记录没落成（并发上限/ID 冲突）时同一事务已提交了 IDLE task，
+      // 它从未对外可见，直接删掉，不留孤儿。
+      if (task) await this.store.removeTask(task.id).catch(() => undefined);
+      return { ok: false, error: prepared.message };
+    }
+    if (!task) return { ok: false, error: "终端创建状态未知，请用 list_terminals 查看" };
+    // IDLE 先对外可见（与 web taskCreate + taskStart 的两步一致），收敛到 RUNNING 由 report 广播。
+    this.emitTask(task);
+    const outcome = await this.waitOperation(prepared.operation.operationId, initialWorkspace.daemonId);
+    if (outcome.case === "timeout") {
+      return { ok: false, error: `终端已创建（terminalId: ${task.id}）但 ${OPERATION_WAIT_MS / 1000} 秒内未收到设备启动回执；稍后用 list_terminals / read_terminal 查看` };
+    }
+    if (outcome.case === "failed") return { ok: false, error: `终端启动失败（terminalId: ${task.id}，记录仍在，可 remove_terminal 清理）：${outcome.message}` };
+    const running = outcome.effect.task ?? await this.store.getTask(task.id);
+    if (!running) return { ok: false, error: "终端已启动但记录不可读，稍后用 list_terminals 查看" };
+    return { ok: true, value: running };
+  }
+
+  /** 读终端：daemon 在线且支持 terminal_io → 经 daemon（命令日志尾部优先，否则本地快照）；否则中心 checkpoint。 */
+  async readTerminalForAccount(
+    accountId: AccountId,
+    terminalId: TaskId,
+    maxBytes = MAX_TERMINAL_READ_BYTES,
+  ): Promise<OperationOutcome<{ task: Task; data: Uint8Array; source: TerminalReadSource; capturedAt: number | null; title: string }>> {
+    const task = await this.store.getTask(terminalId);
+    if (!task || task.accountId !== accountId) return { ok: false, error: `终端 ${terminalId} 不存在或不属于当前账号` };
+    const bytes = Math.max(1, Math.min(MAX_TERMINAL_READ_BYTES, Math.floor(maxBytes)));
+    const daemon = this.daemons.get(task.daemonId);
+    if (daemon && daemon.accountId === accountId && daemon.capabilities.has(DAEMON_CAPABILITY_TERMINAL_IO)) {
+      const result = await this.requestDaemonAgent(daemon, {
+        case: "terminalRead",
+        value: { taskId: task.id, sessionId: task.sessionId ?? "", maxBytes: bytes },
+      });
+      if (result?.ok && result.payload.case === "terminalRead" && result.payload.value.source !== "none") {
+        const source: TerminalReadSource = result.payload.value.source === "log" ? "log" : "snapshot";
+        const fresh = await this.store.getTask(task.id) ?? task;
+        return { ok: true, value: { task: fresh, data: result.payload.value.data, source, capturedAt: Date.now(), title: fresh.title } };
+      }
+      if (result && !result.ok) {
+        log.warn("经 daemon 读终端失败，退回 checkpoint", { taskId: task.id, daemonId: task.daemonId, reason: result.error });
+      }
+    }
+    const checkpoint = await this.store.getSessionCheckpointByTask(task.id);
+    return {
+      ok: true,
+      value: {
+        task,
+        data: checkpoint?.ansiSnapshot ?? new Uint8Array(),
+        source: checkpoint ? "checkpoint" : "none",
+        capturedAt: checkpoint ? checkpoint.capturedAt : null,
+        title: checkpoint?.title || task.title,
+      },
+    };
+  }
+
+  /** 往终端写输入：经 daemon 的 agent_send_input 正门；用户正在接管时被拒（文案来自 worker）。 */
+  async sendTerminalInputForAccount(accountId: AccountId, terminalId: TaskId, data: Uint8Array): Promise<OperationOutcome<{ bytes: number }>> {
+    const task = await this.store.getTask(terminalId);
+    if (!task || task.accountId !== accountId) return { ok: false, error: `终端 ${terminalId} 不存在或不属于当前账号` };
+    if (data.byteLength === 0) return { ok: false, error: "输入为空" };
+    if (data.byteLength > MAX_TERMINAL_INPUT_BYTES) return { ok: false, error: `单次输入不超过 ${MAX_TERMINAL_INPUT_BYTES} 字节` };
+    if (task.status === TaskStatus.EXITED) return { ok: false, error: "终端已退出，不能再输入（要跑新命令用 create_terminal）" };
+    if (task.status !== TaskStatus.RUNNING || !task.sessionId) return { ok: false, error: "终端尚未就绪（还没有会话），稍后重试" };
+    const daemon = this.requireOnlineDaemon(task.daemonId, accountId, DAEMON_CAPABILITY_TERMINAL_IO);
+    if (!daemon.ok) return daemon;
+    const result = await this.requestDaemonAgent(daemon.value, { case: "terminalInput", value: { sessionId: task.sessionId, data } });
+    if (!result) return { ok: false, error: "等待设备写入回执超时，写入结果未知；先 read_terminal 看看再决定是否重发" };
+    if (!result.ok) return { ok: false, error: result.error ?? "设备拒绝写入" };
+    return { ok: true, value: { bytes: data.byteLength } };
+  }
+
+  /** 有界等待终端退出：到期返回当前状态而非报错。 */
+  async waitTerminalForAccount(accountId: AccountId, terminalId: TaskId, timeoutMs?: number): Promise<OperationOutcome<{ task: Task; exited: boolean; timedOut: boolean }>> {
+    const initial = await this.store.getTask(terminalId);
+    if (!initial || initial.accountId !== accountId) return { ok: false, error: `终端 ${terminalId} 不存在或不属于当前账号` };
+    const wait = Math.max(1, Math.min(TERMINAL_WAIT_MAX_MS, Math.floor(timeoutMs ?? TERMINAL_WAIT_DEFAULT_MS)));
+    if (initial.status === TaskStatus.EXITED) return { ok: true, value: { task: initial, exited: true, timedOut: false } };
+    // 先登记等待者再重读，避免登记前那一瞬间的退出漏掉。
+    const waiting = this.taskExitCompletions.wait(initial.id, initial.daemonId, wait, { case: "timeout" });
+    if (!waiting) return { ok: false, error: "中心等待中的请求过多，请稍后重试" };
+    const recheck = await this.store.getTask(initial.id);
+    if (!recheck || recheck.accountId !== accountId) {
+      this.taskExitCompletions.resolve(initial.id, { case: "failed", message: "任务已删除" });
+      return { ok: false, error: "终端已被删除" };
+    }
+    if (recheck.status === TaskStatus.EXITED) {
+      this.taskExitCompletions.resolve(initial.id, { case: "exited", exitCode: recheck.exitCode ?? 0 });
+      return { ok: true, value: { task: recheck, exited: true, timedOut: false } };
+    }
+    const result = await waiting;
+    const final = await this.store.getTask(initial.id);
+    if (!final || final.accountId !== accountId) return { ok: false, error: "终端已被删除" };
+    if (result.case === "failed" && final.status !== TaskStatus.EXITED) return { ok: false, error: result.message };
+    return { ok: true, value: { task: final, exited: final.status === TaskStatus.EXITED, timedOut: result.case === "timeout" } };
+  }
+
+  /** 结束终端会话（等价 web 的停止：sessionClose 直发），随后有界等 sessionExit；返回时会话已退出或已在退出中。 */
+  async stopTerminalForAccount(accountId: AccountId, terminalId: TaskId): Promise<OperationOutcome<{ task: Task; exited: boolean }>> {
+    const task = await this.store.getTask(terminalId);
+    if (!task || task.accountId !== accountId) return { ok: false, error: `终端 ${terminalId} 不存在或不属于当前账号` };
+    if (task.status === TaskStatus.EXITED) return { ok: true, value: { task, exited: true } };
+    if (!task.sessionId) return { ok: false, error: "终端还没有会话，无需停止（要删除用 remove_terminal）" };
+    const daemon = this.daemons.get(task.daemonId);
+    if (!daemon || daemon.accountId !== accountId) return { ok: false, error: "设备离线，无法停止终端" };
+    if (!this.sessionHasIdentity(task.sessionId, task.id, task.accountId, task.daemonId)) {
+      return { ok: false, error: "该会话不在设备的当前运行时里（可能正在对账），稍后重试" };
+    }
+    const waiting = this.taskExitCompletions.wait(task.id, task.daemonId, STOP_WAIT_MS, { case: "timeout" });
+    if (!this.sendDaemon(daemon, { case: "sessionClose", value: { sessionId: task.sessionId } })) {
+      if (waiting) this.taskExitCompletions.resolve(task.id, { case: "failed", message: "daemon 连接发送失败" });
+      return { ok: false, error: "daemon 连接发送失败，请重试" };
+    }
+    if (waiting) await waiting;
+    const final = await this.store.getTask(task.id);
+    if (!final || final.accountId !== accountId) return { ok: false, error: "终端已被删除" };
+    return { ok: true, value: { task: final, exited: final.status === TaskStatus.EXITED } };
+  }
+
+  /** 删除终端记录（含 checkpoint）；仍在运行的必须先 stop_terminal。 */
+  async removeTerminalForAccount(accountId: AccountId, terminalId: TaskId): Promise<OperationOutcome<TaskId>> {
+    const task = await this.store.getTask(terminalId);
+    if (!task || task.accountId !== accountId) return { ok: false, error: `终端 ${terminalId} 不存在或不属于当前账号` };
+    if (task.status === TaskStatus.RUNNING || task.sessionId) return { ok: false, error: "终端仍在运行，先 stop_terminal 再删除" };
+    return await this.removeTaskRecord(task, true);
+  }
+
   /** 运行时计数（供 /health 暴露） */
   stats(): { daemons: number; clients: number; sessions: number } {
     return { daemons: this.daemons.size, clients: this.clients.size, sessions: this.sessions.size };
@@ -3275,6 +3833,13 @@ export class Hub {
     this.catalog.clear();
     this.localControl.shutdown();
     this.preparedOperations.shutdown();
+    this.operationCompletions.failAll({ case: "failed", message: "中心正在关闭" });
+    this.taskExitCompletions.failAll({ case: "failed", message: "中心正在关闭" });
+    for (const pending of this.pendingAgentRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve(undefined);
+    }
+    this.pendingAgentRequests.clear();
     for (const p of this.pendingAuthorizations.values()) clearTimeout(p.timer);
     this.pendingAuthorizations.clear();
     this.oauth.shutdown();
@@ -3325,6 +3890,12 @@ function validControlId(value: string): boolean {
     const code = char.charCodeAt(0);
     return code < 32 || code === 127;
   });
+}
+
+/** 握手宣告的能力名（plan 091）：有界、无控制字符；名单外的名字原样保存（前向兼容，门禁只看已知名）。 */
+function validCapabilities(values: readonly string[]): boolean {
+  if (values.length > MAX_CAPABILITY_ENTRIES) return false;
+  return values.every((value) => validBoundedText(value, MAX_CAPABILITY_BYTES));
 }
 
 function validBoundedText(value: string, maxBytes: number, allowEmpty = false, allowControl = false): boolean {
