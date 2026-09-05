@@ -1,21 +1,22 @@
-//! loopback 本地 HTTP 端点：agent 与 daemon 之间的唯一反向通道。两条路径——
+//! loopback 本地 HTTP 端点：`/hook`（plan 073）——`cofluxd hook <agent>` 作为信使把 claude/codex 的
+//! hook 事件送进来，用于判定回合状态。状态对齐 Vibe Island：active / approval / question / done
+//! （空 = 尚无 hook 信号）。
 //!
-//! - `/hook`（plan 073）：`cofluxd hook <agent>` 作为信使把 claude/codex 的 hook 事件送进来，
-//!   用于判定回合状态。状态对齐 Vibe Island：active / approval / question / done
-//!   （空 = 尚无 hook 信号）。
-//! - `/agent`（plan 074）：`cofluxd terminal|notify|ports` 的控制请求，见 [crate::agent_ctl]。
+//! plan 074 曾在同一端点挂过 `/agent`（`cofluxd terminal|notify|progress|ports` 的控制请求），
+//! plan 093 起 agent 能力面收成中心 MCP 单轨，`/agent` 整条拆除：本端点只剩 hook 一条路径，
+//! 只改展示状态、不起任何进程、不写任何 PTY。
 //!
-//! 本模块只负责这条极小 HTTP 的解析与分派，业务分别交给 main 与 agent_ctl 的消费任务。
+//! 本模块只负责这条极小 HTTP 的解析与分派，业务交给 main 的消费任务。
 //!
 //! 契约：响应在 pid→session 反查完成后才发出——调用方收到响应前不退出，保证扫描进程树时
 //! 上报 pid 仍然存活。
 //!
-//! **安全边界（plan 074 起已不再是「纯展示」，勿沿用旧结论）**：本端点无认证，但**能起进程**
-//! （`/agent` 的 terminal.new）。真正的门是 **pid 反查**：调用方报的 pid 必须落在某个存活
-//! session 的进程树内，否则一律拒——只有 coflux 自己起的 PTY 里的进程能用，且能力被钉死在
-//! 它自己所属的 session 上。这道门由 [crate::agents::session_of_pid] 统一裁定，
-//! 两条路径共用。此外仍要求 content-type: application/json——浏览器跨源发不出这种
-//! "非简单请求"（预检必失败），挡掉网页脚本对 localhost 的盲打。
+//! **安全边界（plan 093 起回到「纯展示」）**：本端点无认证，但它能做的只有把某个存活会话的
+//! agent presence 标成 active/approval/question/done——伪造上报最多翻转侧栏上的展示状态，既不起
+//! 进程、不写 PTY，也不碰中心的任何持久数据。pid 反查（[crate::agents::session_of_pid]）仍是门：
+//! 调用方报的 pid 必须落在某个存活 session 的进程树内，树外一律 404，coflux 之外启动的 agent
+//! 进不来。此外仍要求 content-type: application/json——浏览器跨源发不出这种"非简单请求"
+//! （预检必失败），挡掉网页脚本对 localhost 的盲打。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,22 +25,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::agent_ctl::{AgentAction, AgentRequest, AgentResponse};
-
-/// 请求头 + 体的读取上限；载荷最大的是 agent 的命令行，几 KB 足够，超限即拒。
+/// 请求头 + 体的读取上限；hook 载荷只有几个字段，几 KB 足够，超限即拒。
 const MAX_HEAD_BYTES: usize = 8 * 1024;
 const MAX_BODY_BYTES: usize = 4 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 /// 等待 main 消费任务完成 pid 反查的上限（含一次 spawn_blocking 进程树扫描）。
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
-/// agent 控制请求的等待上限：pid 反查之外还要等中心回执，故显著长于 hook
-/// （须大于 agent_ctl::SERVER_TIMEOUT，否则这里先超时、那边的错误信息就丢了）。
-const AGENT_TIMEOUT: Duration = Duration::from_secs(25);
 
-/// gateway 分派到本模块的两个消费端。
+/// gateway 分派到本模块的消费端。
 pub struct LocalEndpoints {
     pub hook_tx: mpsc::Sender<HookRequest>,
-    pub agent_tx: mpsc::Sender<AgentRequest>,
 }
 
 /// 信使上报的事件（已解析）；respond 回填处理结果驱动 HTTP 响应。
@@ -110,6 +105,14 @@ struct HookBody {
     background_tasks: u32,
 }
 
+/// HTTP 应答形态（保持 plan 073 起的原样，黑盒用例按它断言）。
+struct HookResponse {
+    /// HTTP status line，如 "200 OK"
+    status: &'static str,
+    /// JSON 响应体
+    body: String,
+}
+
 /// 处理一条已被 gateway 判定为 `POST ` 开头的连接：解析请求 → 转交消费任务 → 等结果 → 应答。
 /// 所有失败路径都尽力回一个 HTTP 错误响应后关闭连接。
 pub async fn serve(mut stream: TcpStream, endpoints: Arc<LocalEndpoints>) -> Result<(), String> {
@@ -144,11 +147,11 @@ enum RequestError {
 async fn handle(
     stream: &mut TcpStream,
     endpoints: &Arc<LocalEndpoints>,
-) -> Result<AgentResponse, RequestError> {
+) -> Result<HookResponse, RequestError> {
     let (head, mut body) = read_head(stream).await.map_err(RequestError::BadRequest)?;
     let (path, content_length, content_type) =
         parse_head(&head).map_err(RequestError::BadRequest)?;
-    if path != "/hook" && path != "/agent" {
+    if path != "/hook" {
         return Err(RequestError::BadRequest(format!("path {path}")));
     }
     if !content_type
@@ -172,9 +175,6 @@ async fn handle(
         body.extend_from_slice(&chunk[..n]);
     }
     let raw = &body[..content_length];
-    if path == "/agent" {
-        return handle_agent(raw, &endpoints.agent_tx).await;
-    }
 
     let parsed: HookBody = serde_json::from_slice(raw)
         .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
@@ -202,125 +202,16 @@ async fn handle(
     }
 }
 
-/// hook 路径的应答形态（保持 plan 073 起的原样，黑盒用例按它断言）。
-fn hook_response(outcome: HookOutcome) -> AgentResponse {
+fn hook_response(outcome: HookOutcome) -> HookResponse {
     match outcome {
-        HookOutcome::Accepted | HookOutcome::Ignored => AgentResponse {
+        HookOutcome::Accepted | HookOutcome::Ignored => HookResponse {
             status: "200 OK",
             body: r#"{"ok":true}"#.to_string(),
         },
-        HookOutcome::SessionNotFound => AgentResponse {
+        HookOutcome::SessionNotFound => HookResponse {
             status: "404 Not Found",
             body: r#"{"ok":false,"error":"session not found"}"#.to_string(),
         },
-    }
-}
-
-/// `cofluxd terminal|notify|ports` 的请求体。动作名是扁平字符串而非嵌套结构——载荷极小，
-/// CLI 侧一个函数就能发全部动作。
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentBody {
-    action: String,
-    pid: i32,
-    #[serde(default)]
-    ppid: i32,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    command: String,
-    #[serde(default)]
-    task_id: String,
-    #[serde(default)]
-    message: String,
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    enter: bool,
-}
-
-/// 单次 send 的文本上限：一条交互输入（确认、一行命令）用不到更多，超长基本是误把
-/// 文件内容当输入灌，直接拒绝比截断安全。
-const MAX_SEND_TEXT_BYTES: usize = 4096;
-
-async fn handle_agent(
-    raw: &[u8],
-    agent_tx: &mpsc::Sender<AgentRequest>,
-) -> Result<AgentResponse, RequestError> {
-    let parsed: AgentBody = serde_json::from_slice(raw)
-        .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
-    let action = match parsed.action.as_str() {
-        "terminal.new" => {
-            if parsed.command.trim().is_empty() {
-                return Err(RequestError::BadRequest("terminal.new 缺 command".into()));
-            }
-            AgentAction::TerminalNew {
-                title: parsed.title,
-                command: parsed.command,
-            }
-        }
-        "terminal.list" => AgentAction::TerminalList,
-        "terminal.read" => {
-            if parsed.task_id.trim().is_empty() {
-                return Err(RequestError::BadRequest("terminal.read 缺 taskId".into()));
-            }
-            AgentAction::TerminalRead {
-                task_id: parsed.task_id,
-            }
-        }
-        "terminal.send" => {
-            if parsed.task_id.trim().is_empty() {
-                return Err(RequestError::BadRequest("terminal.send 缺 taskId".into()));
-            }
-            if parsed.text.is_empty() && !parsed.enter {
-                return Err(RequestError::BadRequest(
-                    "terminal.send 缺 text（或至少 --enter）".into(),
-                ));
-            }
-            if parsed.text.len() > MAX_SEND_TEXT_BYTES {
-                return Err(RequestError::BadRequest(
-                    "terminal.send text 超长（≤4KB）".into(),
-                ));
-            }
-            AgentAction::TerminalSend {
-                task_id: parsed.task_id,
-                text: parsed.text,
-                enter: parsed.enter,
-            }
-        }
-        "notify" => {
-            if parsed.message.trim().is_empty() {
-                return Err(RequestError::BadRequest("notify 缺 message".into()));
-            }
-            AgentAction::Notify {
-                message: parsed.message,
-            }
-        }
-        "progress" => {
-            if parsed.message.trim().is_empty() {
-                return Err(RequestError::BadRequest("progress 缺 message".into()));
-            }
-            AgentAction::Progress {
-                message: parsed.message,
-            }
-        }
-        "ports" => AgentAction::Ports,
-        other => return Err(RequestError::BadRequest(format!("未知 action {other}"))),
-    };
-    let (respond, outcome_rx) = oneshot::channel();
-    let request = AgentRequest {
-        pid: parsed.pid,
-        ppid: parsed.ppid,
-        action,
-        respond,
-    };
-    agent_tx
-        .send(request)
-        .await
-        .map_err(|_| RequestError::Unavailable)?;
-    match tokio::time::timeout(AGENT_TIMEOUT, outcome_rx).await {
-        Ok(Ok(response)) => Ok(response),
-        _ => Err(RequestError::Unavailable),
     }
 }
 
@@ -437,5 +328,20 @@ mod tests {
         assert_eq!(length, 42);
         assert_eq!(content_type, "application/json");
         assert!(parse_head("GET /hook HTTP/1.1").is_err());
+    }
+
+    /// 应答形态是 `cofluxd hook` 信使与黑盒用例的契约。
+    #[test]
+    fn hook_responses_keep_plan_073_shape() {
+        let accepted = hook_response(HookOutcome::Accepted);
+        assert_eq!(accepted.status, "200 OK");
+        assert_eq!(accepted.body, r#"{"ok":true}"#);
+        let ignored = hook_response(HookOutcome::Ignored);
+        assert_eq!(ignored.status, "200 OK");
+        let missing = hook_response(HookOutcome::SessionNotFound);
+        assert_eq!(missing.status, "404 Not Found");
+        let parsed: serde_json::Value = serde_json::from_str(&missing.body).expect("JSON 体");
+        assert_eq!(parsed["ok"], serde_json::json!(false));
+        assert_eq!(parsed["error"], serde_json::json!("session not found"));
     }
 }

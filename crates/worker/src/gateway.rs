@@ -415,7 +415,6 @@ mod tests {
             }),
             Arc::new(crate::hook::LocalEndpoints {
                 hook_tx: tokio::sync::mpsc::channel(4).0,
-                agent_tx: tokio::sync::mpsc::channel(4).0,
             }),
         ));
         let port = tokio::time::timeout(Duration::from_secs(2), async {
@@ -568,7 +567,6 @@ mod tests {
             }),
             Arc::new(crate::hook::LocalEndpoints {
                 hook_tx: tokio::sync::mpsc::channel(4).0,
-                agent_tx: tokio::sync::mpsc::channel(4).0,
             }),
         ));
         let port = loop {
@@ -607,7 +605,6 @@ mod tests {
             }),
             Arc::new(crate::hook::LocalEndpoints {
                 hook_tx: tokio::sync::mpsc::channel(4).0,
-                agent_tx: tokio::sync::mpsc::channel(4).0,
             }),
         ));
         let port = loop {
@@ -629,7 +626,6 @@ mod tests {
             }),
             Arc::new(crate::hook::LocalEndpoints {
                 hook_tx: tokio::sync::mpsc::channel(4).0,
-                agent_tx: tokio::sync::mpsc::channel(4).0,
             }),
         ));
         let rebound = tokio::time::timeout(Duration::from_secs(2), async {
