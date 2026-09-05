@@ -1665,6 +1665,26 @@ async fn on_server_message(
                             daemon_to_server::Payload::PreparedDeviceOperationInstalled(installed),
                         );
                     }
+                    // 中心触发已安装 prepared 操作的执行（plan 091）：同一条 dispatch，结果经
+                    // DeviceOperationReport 回中心；重复 Execute 幂等（见 execute_prepared_operation）。
+                    server_to_daemon::Payload::PreparedDeviceOperationExecute(execute) => {
+                        device.execute_prepared_operation(&execute.operation_id);
+                    }
+                    // 中心发起的终端读/写（plan 091）：读日志/快照或经 agent_send_input 正门写入，
+                    // 可能等 sessiond 回执（最长 5s），另开 task 以免阻塞消息循环；每条必回一条 result。
+                    server_to_daemon::Payload::ServerAgentRequest(request) => {
+                        let device = device.clone();
+                        let state = state.clone();
+                        let to_server = to_server_tx.clone();
+                        tokio::spawn(async move {
+                            let result =
+                                agent_ctl::handle_server_request(request, &state, &device).await;
+                            try_send_d2s(
+                                &to_server,
+                                daemon_to_server::Payload::ServerAgentResult(result),
+                            );
+                        });
+                    }
                     legacy => route_authed(legacy, cfg, to_server_tx, to_sup_tx, tunnels).await,
                 }
             }
