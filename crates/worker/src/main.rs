@@ -114,6 +114,20 @@ struct WorkerState {
 /// 数据帧统一收敛成这一种。
 pub(crate) type WsOut = Vec<u8>;
 
+/// 本 worker 向中心宣告的控制面能力名（plan 091）。中心的 MCP 写 tools 在发送任何本片新增的
+/// 控制消息前按它做门禁，不比较版本号（dev/测试上报 `builtin`，自动升级也不做 semver）。
+/// 旧 worker 对未知 ServerToDaemon 载荷静默丢弃，没有门禁 agent 会白等到超时。
+/// 能力名是协议契约的一部分：新增控制消息时同步加名字，并与 apps/server 的常量保持一致。
+const CAPABILITY_PREPARED_EXECUTE: &str = "prepared_execute";
+const CAPABILITY_TERMINAL_IO: &str = "terminal_io";
+
+fn daemon_capabilities() -> Vec<String> {
+    vec![
+        CAPABILITY_PREPARED_EXECUTE.to_string(),
+        CAPABILITY_TERMINAL_IO.to_string(),
+    ]
+}
+
 #[derive(Clone)]
 struct PendingResync {
     revision: u64,
@@ -1188,6 +1202,7 @@ async fn run_server_connection(
             worker_version: cfg.worker_version.clone(),
             supervisor_version: cfg.supervisor_version.clone(),
             arch: cfg.arch.clone(),
+            capabilities: daemon_capabilities(),
         }),
         None => daemon_to_server::Payload::DaemonEnrollRequest(wire::DaemonEnrollRequest {
             name: cfg.device_name.clone(),
@@ -1196,6 +1211,7 @@ async fn run_server_connection(
             worker_version: cfg.worker_version.clone(),
             supervisor_version: cfg.supervisor_version.clone(),
             arch: cfg.arch.clone(),
+            capabilities: daemon_capabilities(),
         }),
     };
     let init_bytes = (wire::DaemonToServer {
@@ -1271,6 +1287,7 @@ async fn run_server_connection(
                         worker_version: cfg.worker_version.clone(),
                         supervisor_version: cfg.supervisor_version.clone(),
                         arch: cfg.arch.clone(),
+                        capabilities: daemon_capabilities(),
                     });
                     let bytes = (wire::DaemonToServer { payload: Some(req) }).encode_to_vec();
                     if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; }

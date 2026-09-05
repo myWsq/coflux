@@ -4601,6 +4601,7 @@ mod tests {
                     shell: None,
                     cols: 80,
                     rows: 24,
+                    command: String::new(),
                 },
             )),
         };

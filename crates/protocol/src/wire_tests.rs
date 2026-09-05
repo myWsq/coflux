@@ -298,6 +298,7 @@ fn prepared_device_operation_template_round_trip() {
                 shell: None,
                 cols: 120,
                 rows: 40,
+                command: String::new(),
             },
         )),
     };
@@ -565,6 +566,7 @@ fn auth_error_and_enroll_request_round_trip() {
                 worker_version: "wv2".into(),
                 supervisor_version: "sv2".into(),
                 arch: "x86_64".into(),
+                capabilities: Vec::new(),
             },
         )),
     };
