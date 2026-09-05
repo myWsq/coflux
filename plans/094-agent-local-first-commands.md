@@ -248,6 +248,9 @@ Out of scope:
 - **配套任务（plugins-builder 仓库，独立跟踪）**：coflux 插件换成本仓库的新 SKILL；加 `.mcp.json`，
   `"url": "${COFLUX_MCP_URL:-https://api.coflux.dev/mcp}"`，每服务器 `timeout` ≥ 600000 ms；版本递增并
   发版。Codex 用户：SKILL symlink 到 `~/.codex/skills`，MCP 手动 `codex mcp add`。
+  - 2026-09-06 补记：`${COFLUX_MCP_URL:-…}` 只有 Claude Code 展开，Codex 从同一市场装插件时原样解析、报
+    `invalid MCP server URL`。插件 0.4.1 起 url 写死 `https://api.coflux.dev/mcp`；自托管/本地开发手动
+    `claude mcp add` / `codex mcp add` 到 `$COFLUX_MCP_URL`。
 - **生产生效节奏**：worker 随下一 tag 热升级；CLI 与 SKILL 随 npm `cofluxd` 发版；server 随部署。
   「新 CLI + 旧 worker」下 `terminal.status` 是未知动作，旧 worker 回 `bad request`——可接受的短暂
   组合，`cofluxd update` 即消。

@@ -18,10 +18,14 @@ agent 会话的 PTY，web/手机上能看到每个工作区的实时回合状态
 - **skills/coflux/**：教跑在 coflux 终端里的 agent 把长任务、并行工作和求助外化成用户看得见、能接管的
   真实终端。分工只有一条规则：**本地能闭环的一律用零凭证的本地命令**（`cofluxd terminal/progress/notify/ports`），
   只有跨出本工作区（开子工作区、跨工作区/跨设备）才用中心的 `coflux` MCP。
-- **.mcp.json**：声明中心的 `coflux` MCP server（Streamable HTTP + OAuth 2.1）。地址取
-  `${COFLUX_MCP_URL:-https://api.coflux.dev/mcp}`：在 coflux 开出来的 PTY 里 `COFLUX_MCP_URL` 已由
-  daemon 注入（自托管中心也自动对上），其它环境回落到公共服务。`timeout` 放到 660 秒，够 `wait_terminal`
-  的 600 秒上限。授权要在 Claude Code 的 `/mcp` 菜单里对 `coflux` 点一次 Authenticate，之后自动刷新。
+- **.mcp.json**：声明中心的 `coflux` MCP server（Streamable HTTP + OAuth 2.1），地址固定写公共服务
+  `https://api.coflux.dev/mcp`。这里不能用 `${COFLUX_MCP_URL:-…}` 这类环境变量写法：Claude Code 会展开，
+  但从同一市场装本插件的 Codex 原样当 URL 解析，直接报 `invalid MCP server URL`，整个 MCP 起不来。
+  自托管中心或本地开发要连别的地址，在会话里手动加一个（`COFLUX_MCP_URL` 由 daemon 注入，就是中心地址 + `/mcp`）：
+  `claude mcp add --transport http coflux "$COFLUX_MCP_URL"` / `codex mcp add coflux --url "$COFLUX_MCP_URL"`。
+  Claude Code 里插件条目登记为 `plugin:coflux:coflux`，与手动加的 `coflux` 不重名，公共地址那条不授权放着即可。
+  `timeout` 放到 660 秒，够 `wait_terminal` 的 600 秒上限。授权要在 Claude Code 的 `/mcp` 菜单里对
+  `coflux` 点一次 Authenticate，之后自动刷新。
 
 ## 运行时依赖
 
