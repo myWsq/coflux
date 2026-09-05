@@ -29,23 +29,20 @@ CLI 还会取自身与 worker 的持久 release floor 较大值拒绝远端降�
 
 默认连公共服务 `wss://api.coflux.dev/daemon`（自托管用 `--server` 改；已保存的地址继续生效，非默认时会有醒目提示）。
 
-## 给 agent 用的命令
+## 给 agent 的能力面：只有 MCP
 
-跑在 coflux 终端里的 claude/codex 可以用下面几条，把工作外化成用户在 web/手机上**看得见、能接管**的东西——而不是在自己的 Bash 里后台起一个谁也看不见的进程：
+跑在 coflux 终端里的 claude/codex 把工作外化成用户在 web/手机上**看得见、能接管**的东西——开真实终端跑命令、读输出、等退出、输入、播报进度、叫人、拿预览 URL、开子工作区——**一律经中心托管的 `coflux` MCP（16 个 tools）**，一次 OAuth 授权即可触达整个账号：
 
 ```sh
-cofluxd terminal new --title "跑单测" --cmd "pnpm test"   # 开真实终端，用户可接管
-cofluxd terminal list                                     # 本工作区的终端 + 状态/退出码
-cofluxd terminal read <taskId> [--lines N]                # 读终端内容（纯文本，已退出也能读）
-cofluxd notify "需要你定一下用哪个方案"                    # 叫人：侧栏转「等待交互」
-cofluxd ports                                             # 端口 + 可直接打开的预览 URL
+claude mcp add --transport http coflux "$COFLUX_MCP_URL"   # Claude Code
+codex mcp add coflux --url "$COFLUX_MCP_URL"               # Codex
 ```
 
-不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，**coflux 会话之外的进程一律拒绝**，权限也天然限定在该会话所属的工作区内。
+`cofluxd` 自 plan 093 起**不再承载任何 agent 能力**：`cofluxd terminal/notify/progress/ports` 已删，老入口只打印「已并入 coflux MCP，对应 tool 是 …」并非零退出。保留的 `cofluxd hook <claude|codex>` 只是 hook 事件信使（活动状态判定），不是 agent 命令。
 
-每个 coflux 开出来的 PTY 会话里还注入了一组 `COFLUX_*` 环境变量（由 supervisor 组装，中心只下发 id）：`COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID`（目录工作区为空串）/ `COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` / `COFLUX_MCP_URL`。agent 读它们就知道自己在哪台设备、哪个项目/工作区/终端，值与中心 MCP `list_*` 返回的 id 完全一致，可直接传给 MCP tools。本地命令与 MCP 的分工：本工作区内的开终端/读/等/输入/播报/叫人/端口用上面的零凭证命令；开子工作区、跨工作区/跨设备读写、或从 coflux 之外接入，用中心的 `coflux` MCP（`claude mcp add --transport http coflux "$COFLUX_MCP_URL"`，一次 OAuth 授权）。supervisor 不走热升级，旧机器要 `cofluxd update && cofluxd restart` 之后会话里才有这些变量；skill 里写了变量为空时的降级分支。
+每个 coflux 开出来的 PTY 会话里注入了一组 `COFLUX_*` 环境变量（由 supervisor 组装，中心只下发 id）：`COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID`（目录工作区为空串）/ `COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` / `COFLUX_MCP_URL`。agent 读它们就知道自己在哪台设备、哪个项目/工作区/终端，值与中心 MCP `list_*` 返回的 id 完全一致，直接传给 MCP tools（自己的终端就是 `$COFLUX_TASK_ID`，`notify_user` / `report_progress` 用它寻址）。supervisor 不走热升级，旧机器要 `cofluxd update && cofluxd restart` 之后会话里才有这些变量。
 
-配套的 skill 在 `skills/coflux/SKILL.md`（随包分发），装给 Claude Code：
+配套的 skill 在 `skills/coflux/SKILL.md`（随包分发），装给 Claude Code（coflux 插件用户不用装——插件自带同一份 skill 与 `.mcp.json`）：
 
 ```sh
 mkdir -p ~/.claude/skills && ln -sfn "$(npm root -g)/cofluxd/skills/coflux" ~/.claude/skills/coflux

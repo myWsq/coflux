@@ -48,10 +48,12 @@ cofluxd status / doctor / logs -f / update / down / uninstall
 
 给跑在 coflux 终端里的 agent：每个 PTY 会话里都有 `COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID` /
 `COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` / `COFLUX_MCP_URL` 六个环境变量，
-值与中心 MCP `list_*` 的 id 一致。本工作区内用零凭证的 `cofluxd terminal/progress/notify/ports`；
-开子工作区、跨工作区/跨设备操作用中心 MCP（`claude mcp add --transport http coflux "$COFLUX_MCP_URL"`）。
-supervisor 不走热升级，`cofluxd update && cofluxd restart` 后会话里才有这些变量。分工与纪律见
-`packages/cli/skills/coflux/SKILL.md`（随 `cofluxd` npm 包分发）。
+值与中心 MCP `list_*` 的 id 一致。agent 的全部能力面只有一条轨道——中心托管的 coflux MCP
+（16 个 tools：开终端、读输出、等退出、输入、播报进度 `report_progress`、叫人 `notify_user`、
+端口预览、开子工作区……），`claude mcp add --transport http coflux "$COFLUX_MCP_URL"` 一次 OAuth 接入；
+`cofluxd` 自 plan 093 起不再承载任何 agent 命令（老入口只打印迁移提示）。supervisor 不走热升级，
+`cofluxd update && cofluxd restart` 后会话里才有这些变量。纪律见 `packages/cli/skills/coflux/SKILL.md`
+（随 `cofluxd` npm 包分发）。
 
 ## 快速开始
 
