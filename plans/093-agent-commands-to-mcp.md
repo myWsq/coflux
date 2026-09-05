@@ -18,6 +18,7 @@
 - Category: refactor（含两个新 MCP tool）
 - Execution: subagent fable（出发检查 2026-09-05：写完 plan 立即执行、中途不再向用户确认；STOP/BLOCK 仍停；push/PR/merge 不在授权内）
 - Planned at: `6a0ab63`, 2026-09-05
+- **WITHDRAWN 2026-09-05**：子代理执行到 M3（`84c1153`/`9354a71`/`083c63c`）后用户定下「本地能闭环的 agent 操作不与中心有任何交集」原则，与本 plan「收成中心 MCP 单轨」直接矛盾，整体撤回，三个提交已 revert。可复用的部分：Decisions 里日志汇不变量、wait 上限、协议 reserved 先例，以及 `9354a71` 里的日志汇实现可作参考。
 
 ## Requirement
 
