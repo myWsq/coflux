@@ -101,3 +101,46 @@ daemon: 清 pending-auth.json、落盘 credentials.json
 不经路由库、在 `App()` 顶层按 `location.pathname` 分支决定渲染哪棵组件树——避免
 主 app 的 xterm 初始化/自动重连副作用在授权页上跑起来。复用已有登录态
 （`localStorage` 会话 token）与登录表单，未登录则退回同一套登录 UI。
+
+## OAuth 客户端（MCP，plan 090）
+
+面向**任何机器上的 Claude Code / Codex**：中心托管远程 MCP（`<publicUrl>/mcp`，Streamable HTTP），宿主
+一行接入（`claude mcp add --transport http coflux https://api.coflux.dev/mcp`），凭证由标准 OAuth 2.1
+授权码流程签发，用户只在浏览器确认一次、不手工粘贴任何令牌。中心同时是资源服务器与授权服务器。
+
+| 实体 | 说明 | 持久化 |
+|------|------|--------|
+| **OAuth client** | 宿主经 RFC 7591 动态注册（DCR）得到的公共客户端（`cf_oc_*`，`token_endpoint_auth_method=none`），带注册的 redirect_uris | Postgres `oauth_clients` |
+| **access token** | `cf_oat_*`，短期（`COFLUX_OAUTH_ACCESS_TTL_MS`，默认 1h），`/mcp` 的 bearer | `oauth_tokens` 只存 sha256 hash |
+| **refresh token** | `cf_ort_*`，长期（`COFLUX_OAUTH_REFRESH_TTL_MS`，默认同会话 token 30 天），用过即作废（轮换） | 同上 |
+| **待确认请求 / 授权码** | `cf_oreq_*` / `cf_oac_*`，只在 hub 进程内存（TTL、一次性、上限同 `COFLUX_MAX_PENDING_AUTHORIZATIONS`） | 不落库（同设备授权，见上文「状态只在内存里」） |
+
+凭证与 web 会话彻底分开：`client_tokens` 与浏览器登录/登出绑定，OAuth token 独立签发、独立存储、
+独立过期；MCP transport 无状态，每个请求凭 bearer 独立认身份。
+
+### 流程
+```
+宿主 ──POST /mcp（无 token）──▶ 401 + WWW-Authenticate: Bearer resource_metadata="<publicUrl>/.well-known/oauth-protected-resource/mcp"
+宿主 ──GET  PRM──▶ { resource: <publicUrl>/mcp, authorization_servers: [<publicUrl>] }
+宿主 ──GET  /.well-known/oauth-authorization-server──▶ 端点清单、code_challenge_methods_supported=[S256]、registration_endpoint
+宿主 ──POST /oauth/register（DCR）──▶ client_id
+宿主 ──GET  /oauth/authorize?response_type=code&client_id&redirect_uri&code_challenge&state──▶ 302 <webUrl>/oauth/consent?request=<id>
+浏览器：确认页独立 WS clientAuth（未登录先登录）→ oauth.authorizeInfo{ requestId }（回显客户端名/回调 host）
+        → 用户允许/拒绝 → oauth.authorizeDecide{ requestId, approve }
+server: 摘除待确认请求（一次性）→ 允许则签授权码并回完整回调 URL（code + 原 state + iss）；拒绝则回调带 error=access_denied
+浏览器 location.assign 跳回宿主的回调地址
+宿主 ──POST /oauth/token（authorization_code + code_verifier）──▶ access + refresh
+宿主 ──POST /mcp（Bearer）──▶ tools；到期后 ──POST /oauth/token（refresh_token）──▶ 新 access + 新 refresh，旧 refresh 立即失效
+```
+
+### 校验与失效（黑盒断言见 `tests/src/mcp-oauth.test.mjs`、`mcp-isolation.test.mjs`）
+- **redirect_uri**：loopback（`http://localhost` / `127.0.0.1` / `[::1]`）允许任意端口与路径（RFC 8252，
+  Claude Code 每次随机端口回调）；非 loopback 必须与注册值精确相等。client_id / redirect_uri 不合法时
+  直接 400，绝不往未经校验的地址跳；其余参数错误按规范带 `error` 跳回宿主。
+- **PKCE S256 必填**：verifier 不符 → `invalid_grant`。
+- **授权码一次性**：二次使用 → `invalid_grant`，且首次兑现签出的整链 token 作废。
+- **refresh 轮换**：旧 refresh 再次出现视为泄露信号，整链撤销；`client_id` 不匹配也拒。
+- **隔离**：所有 tools 只按 bearer 解析出的 `accountId` 读取；带 id 的入参不属于当前账号与不存在回同一句错误。
+- URL 全部由 `COFLUX_PUBLIC_URL` 拼，不从请求 `Host` / `X-Forwarded-*` 推导（生产前面压着两层反代）。
+- 未做（后续）：已授权应用列表 / 单个撤销 UI、CIMD 注册、token 内省/撤销端点。
+

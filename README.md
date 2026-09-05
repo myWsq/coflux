@@ -87,6 +87,9 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 | `COFLUX_PASSWORD` | dev 为 `admin`；生产必填 | `local` 模式密码 |
 | `COFLUX_SESSION_TTL_MS` | `2592000000` | 登录后签发的会话 token 有效期（默认 30 天） |
 | `COFLUX_PROXY_HOST` | `p.localhost` | 端口转发预览域：`<shortId>-<该值>` 按反代路由；生产需配好泛解析 + 泛证书 |
+| `COFLUX_PUBLIC_URL` | `http://127.0.0.1:<COFLUX_PORT>` | 中心自身公网基址：OAuth issuer、PRM/AS 元数据与 `/mcp` 资源标识全由它拼（生产 `https://api.coflux.dev`），不从请求头推导 |
+| `COFLUX_OAUTH_ACCESS_TTL_MS` | `3600000` | MCP 宿主 OAuth access token 有效期（默认 1 小时） |
+| `COFLUX_OAUTH_REFRESH_TTL_MS` | 同 `COFLUX_SESSION_TTL_MS` | MCP 宿主 OAuth refresh token 有效期（用过即作废、轮换） |
 | `COFLUX_SERVER` | `ws://localhost:8787/daemon` | daemon 连接的服务器地址 |
 | `COFLUX_DEVICE_NAME` | `<hostname>` | daemon 登记时的设备名 |
 | `COFLUX_HOME` | `~/.coflux` | daemon 凭证存放目录 |
