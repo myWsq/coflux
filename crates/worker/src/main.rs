@@ -13,12 +13,14 @@ mod gateway;
 mod git;
 mod hook;
 mod local_auth;
+mod log_sink;
 mod observed;
 mod ops;
 mod p2p;
 mod ports;
 mod relay_dial;
 mod relay_home;
+mod session_ledger;
 mod tunnel;
 
 use std::collections::HashMap;
@@ -98,6 +100,8 @@ struct WorkerState {
     /// agent 控制请求的在飞关联表（plan 074）：requestId -> 中心回执的接收端。
     /// 断开中心连接时整表清空——发送端 drop 会让等待方立刻拿到「连接中断」而不是干等超时。
     agent_pending: HashMap<String, tokio::sync::oneshot::Sender<wire::AgentControlResult>>,
+    /// 会话账本（plan 094）：agent 本地命令的归属校验与退出码查询不问中心，见 session_ledger.rs。
+    ledger: session_ledger::SessionLedger,
     /// server 下发的本设备工作区清单：workspace_id -> (worktree 路径, 所属 project 的 default_branch)
     /// （分支监视 + diff 统计基准用）
     workspaces: HashMap<String, (String, String)>,
@@ -472,8 +476,20 @@ async fn consume_hook_events(
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // 日志汇子命令（plan 094）：命令终端的包装脚本以 `coflux-worker --log-sink <log>` 复用本二进制，
+    // 在建 tokio 运行时之前分流——它随命令活多久就活多久，不该为它起一整套调度线程。
+    if let Some(code) = log_sink::run_if_requested() {
+        std::process::exit(code);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("创建 tokio 运行时失败")
+        .block_on(worker_main());
+}
+
+async fn worker_main() {
     // rustls 0.23 要求在任何 TLS 握手前选定 process-level CryptoProvider，
     // 否则连 wss:// 时 panic（"Could not automatically determine the process-level CryptoProvider"）。
     rustls::crypto::ring::default_provider()
@@ -542,6 +558,7 @@ async fn main() {
         pending_auth_expires_at: None,
         agent_logs: HashMap::new(),
         agent_pending: HashMap::new(),
+        ledger: session_ledger::SessionLedger::default(),
         workspaces: HashMap::new(),
         last_branches: HashMap::new(),
         last_diffs: HashMap::new(),
@@ -959,6 +976,7 @@ async fn handle_sup_record(
                     .get(&session_id)
                     .is_some_and(|current| current != &next);
                 state.alive.insert(session_id.clone(), next);
+                state.ledger.mark_started(&session_id, &task_id);
                 changed
             };
             if changed_incarnation {
@@ -1002,6 +1020,7 @@ async fn handle_sup_record(
             eprintln!(
                 "[worker] session create failed without exit session={session_id} task={task_id}: {error}"
             );
+            state.lock().unwrap().ledger.forget(&session_id);
             // 新 supervisor 用独立 variant 避免旧 worker 把 duplicate create failure 当退出；
             // 新 worker 同样只对账，不按裸 sessionId 改 alive 或上报 SessionExit。
             device.request_reconciliation_catalog();
@@ -1030,6 +1049,11 @@ async fn handle_sup_record(
                     .map(|(session_id, _)| session_id.clone())
                     .collect::<Vec<_>>();
                 s.alive = next_alive;
+                s.ledger.learn_alive(
+                    sessions
+                        .iter()
+                        .map(|session| (session.session_id.as_str(), session.task_id.as_str())),
+                );
                 s.sup_synced = true;
                 s.sup_resync_nonce = (!nonce.is_empty()).then_some(nonce);
                 s.snapshot_owner_id = snapshot_owner_id.clone();
@@ -1539,6 +1563,15 @@ async fn on_server_message(
         other => {
             let authed = state.lock().unwrap().authed;
             if authed {
+                // 会话账本（plan 094）：直发建会话在 route_authed 里原样透传给 supervisor，那里拿不到
+                // state，先在这里登记归属（workspace_id 空串 = 中心没下发，账本记为归属未知）。
+                if let server_to_daemon::Payload::SessionCreate(create) = &other {
+                    state.lock().unwrap().ledger.remember_create(
+                        &create.session_id,
+                        &create.task_id,
+                        &create.workspace_id,
+                    );
+                }
                 match other {
                     server_to_daemon::Payload::LocalGatewayConfigure(
                         wire::LocalGatewayConfigure { origins },
@@ -1897,6 +1930,7 @@ mod tests {
             pending_auth_expires_at: None,
             agent_logs: HashMap::new(),
             agent_pending: HashMap::new(),
+            ledger: session_ledger::SessionLedger::default(),
             workspaces: HashMap::new(),
             last_branches: HashMap::new(),
             last_diffs: HashMap::new(),

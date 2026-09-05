@@ -1207,6 +1207,15 @@ impl DeviceRuntime {
         let Some(services) = &self.services else {
             return;
         };
+        // 会话账本（plan 094）：精确 control exit 与 catalog tombstone 都经这里，退出码本地留档供
+        // agent 的 wait/read 查询。两条调用路径此刻都不持有 state 锁（见 main.rs 的 SessionExit 分支
+        // 与上面 catalog 提交里的作用域块）。
+        services
+            .state
+            .lock()
+            .unwrap()
+            .ledger
+            .mark_exited(session_id, exit_code);
         let bytes = coflux_protocol::wire::DaemonToServer {
             payload: Some(daemon_to_server::Payload::SessionExit(wire::SessionExit {
                 session_id: session_id.to_string(),
@@ -2043,6 +2052,15 @@ impl DeviceRuntime {
         // 路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
         // 会被判成 operation_collision。日志路径按 task 记住，供中心经 ServerTerminalRead 读。
         if let Some(device_envelope::Payload::SessionCreate(create)) = envelope.payload.as_mut() {
+            // 会话账本（plan 094）：所有 prepared 建会话（用户手开的、中心 MCP 开的）都登记归属，
+            // agent 本地命令据此判「同工作区」而不问中心。
+            if let Some(services) = &self.services {
+                services.state.lock().unwrap().ledger.remember_create(
+                    &create.session_id,
+                    &create.task_id,
+                    &create.workspace_id,
+                );
+            }
             if !create.command.is_empty() {
                 match crate::ops::write_operation_command_script(operation_id, &create.command) {
                     Ok((shell, log_path)) => {
@@ -3761,6 +3779,7 @@ mod tests {
         let state = Arc::new(Mutex::new(WorkerState {
             agent_logs: HashMap::new(),
             agent_pending: HashMap::new(),
+            ledger: crate::session_ledger::SessionLedger::default(),
             authed: true,
             sup_synced: true,
             snapshot_owner_id: "owner-1".into(),

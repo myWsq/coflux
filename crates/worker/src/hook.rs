@@ -3,7 +3,10 @@
 //! - `/hook`（plan 073）：`cofluxd hook <agent>` 作为信使把 claude/codex 的 hook 事件送进来，
 //!   用于判定回合状态。状态对齐 Vibe Island：active / approval / question / done
 //!   （空 = 尚无 hook 信号）。
-//! - `/agent`（plan 074）：`cofluxd terminal|notify|ports` 的控制请求，见 [crate::agent_ctl]。
+//! - `/agent`（plan 074；plan 094 起 local-first）：`cofluxd terminal|notify|progress|ports` 的控制
+//!   请求，见 [crate::agent_ctl]——send/read/wait/notify/progress 在 daemon 本地闭环，new/list/ports
+//!   由 daemon 代问中心。拒绝原因原样回给调用方：细节只是参数校验文案，吞成 `bad request` 只会让
+//!   agent 盲目重试（plan 094）。`/hook` 的应答形态不变。
 //!
 //! 本模块只负责这条极小 HTTP 的解析与分派，业务分别交给 main 与 agent_ctl 的消费任务。
 //!
@@ -26,9 +29,14 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::agent_ctl::{AgentAction, AgentRequest, AgentResponse};
 
-/// 请求头 + 体的读取上限；载荷最大的是 agent 的命令行，几 KB 足够，超限即拒。
+/// 请求头读取上限。
 const MAX_HEAD_BYTES: usize = 8 * 1024;
+/// `/hook` 体上限：hook 载荷只有几个字段，几 KB 足够，超限即拒。
 const MAX_BODY_BYTES: usize = 4 * 1024;
+/// `/agent` 体上限：要装得下 64 KB 的 send 文本或 16 KB 的命令行加 JSON 封包（plan 094，与 MCP 对齐）。
+const MAX_AGENT_BODY_BYTES: usize = 128 * 1024;
+/// `terminal.new` 命令行上限：与中心 `MAX_TERMINAL_COMMAND_BYTES` 同值。
+const MAX_COMMAND_BYTES: usize = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 /// 等待 main 消费任务完成 pid 反查的上限（含一次 spawn_blocking 进程树扫描）。
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -148,7 +156,8 @@ async fn handle(
     let (head, mut body) = read_head(stream).await.map_err(RequestError::BadRequest)?;
     let (path, content_length, content_type) =
         parse_head(&head).map_err(RequestError::BadRequest)?;
-    if path != "/hook" && path != "/agent" {
+    let is_agent = path == "/agent";
+    if !is_agent && path != "/hook" {
         return Err(RequestError::BadRequest(format!("path {path}")));
     }
     if !content_type
@@ -157,7 +166,18 @@ async fn handle(
     {
         return Err(RequestError::BadRequest("content-type 非 json".into()));
     }
-    if content_length > MAX_BODY_BYTES {
+    let body_limit = if is_agent {
+        MAX_AGENT_BODY_BYTES
+    } else {
+        MAX_BODY_BYTES
+    };
+    if content_length > body_limit {
+        if is_agent {
+            return Ok(AgentResponse::err(
+                "400 Bad Request",
+                format!("请求体超过 {body_limit} 字节上限（命令 ≤ 16 KB、send 文本 ≤ 64 KB）"),
+            ));
+        }
         return Err(RequestError::BadRequest("body 超限".into()));
     }
     while body.len() < content_length {
@@ -172,8 +192,15 @@ async fn handle(
         body.extend_from_slice(&chunk[..n]);
     }
     let raw = &body[..content_length];
-    if path == "/agent" {
-        return handle_agent(raw, &endpoints.agent_tx).await;
+    if is_agent {
+        // 拒绝原因回给调用方（plan 094）：都是参数校验文案，不是秘密；吞成 `bad request` 只会让 agent
+        // 盲目重试。`/hook` 仍走下面的统一渲染。
+        return match handle_agent(raw, &endpoints.agent_tx).await {
+            Err(RequestError::BadRequest(detail)) => {
+                Ok(AgentResponse::err("400 Bad Request", detail))
+            }
+            other => other,
+        };
     }
 
     let parsed: HookBody = serde_json::from_slice(raw)
@@ -239,9 +266,9 @@ struct AgentBody {
     enter: bool,
 }
 
-/// 单次 send 的文本上限：一条交互输入（确认、一行命令）用不到更多，超长基本是误把
-/// 文件内容当输入灌，直接拒绝比截断安全。
-const MAX_SEND_TEXT_BYTES: usize = 4096;
+/// 单次 send 的文本上限：与 MCP `send_terminal_input` 的 64 KB 同值（plan 094 对齐）；超长基本是
+/// 误把文件内容当输入灌，直接拒绝比截断安全。
+const MAX_SEND_TEXT_BYTES: usize = 64 * 1024;
 
 async fn handle_agent(
     raw: &[u8],
@@ -254,12 +281,25 @@ async fn handle_agent(
             if parsed.command.trim().is_empty() {
                 return Err(RequestError::BadRequest("terminal.new 缺 command".into()));
             }
+            if parsed.command.len() > MAX_COMMAND_BYTES {
+                return Err(RequestError::BadRequest(format!(
+                    "terminal.new 命令超过 {MAX_COMMAND_BYTES} 字节上限"
+                )));
+            }
             AgentAction::TerminalNew {
                 title: parsed.title,
                 command: parsed.command,
             }
         }
         "terminal.list" => AgentAction::TerminalList,
+        "terminal.status" => {
+            if parsed.task_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.status 缺 taskId".into()));
+            }
+            AgentAction::TerminalStatus {
+                task_id: parsed.task_id,
+            }
+        }
         "terminal.read" => {
             if parsed.task_id.trim().is_empty() {
                 return Err(RequestError::BadRequest("terminal.read 缺 taskId".into()));
@@ -278,9 +318,9 @@ async fn handle_agent(
                 ));
             }
             if parsed.text.len() > MAX_SEND_TEXT_BYTES {
-                return Err(RequestError::BadRequest(
-                    "terminal.send text 超长（≤4KB）".into(),
-                ));
+                return Err(RequestError::BadRequest(format!(
+                    "terminal.send text 超过 {MAX_SEND_TEXT_BYTES} 字节上限"
+                )));
             }
             AgentAction::TerminalSend {
                 task_id: parsed.task_id,

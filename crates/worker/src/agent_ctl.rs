@@ -7,9 +7,12 @@
 //! coflux 自己起的 PTY 里的进程能进来，本机其它进程（含被网页驱动的本地程序）都进不来，
 //! 而且能力天然被钉死在「发起方所属的那个 session」上。agent 侧因此不需要任何凭证。
 //!
-//! **notify 在本地闭环**（改 presence 状态后立即上报）；其余动作转成 `AgentControlRequest`
-//! 交给中心，由 server 反查 session→task→workspace 完成归属校验后执行。中心离线时它们必然
-//! 失败——明确报错比默默降级好，因为「让用户看得见」正是这些动作的全部意义。
+//! **本地能闭环的不碰中心（plan 094）**：send / read / wait(status) / notify / progress 全在 daemon
+//! 本地完成——归属校验（目标与调用方同工作区）与退出码来自 [`crate::session_ledger`]，内容来自
+//! 本地命令日志或 sessiond 快照，presence 标注改 observed 后立即上报（断连期间由重连后的全量补发
+//! 兜底）。它们不要求 daemon 此刻连着中心。只有 new / list / ports 转成 `AgentControlRequest` 交给
+//! 中心：Task 要落库广播、预览 URL 由中心生成，这三条本来就不是本地能闭环的；中心离线时它们明确
+//! 报错——「让用户看得见」正是它们的全部意义。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use prost::Message as _;
 
+use crate::session_ledger::{SessionPhase, SessionRecord};
 use crate::{agents, device::DeviceRuntime, observed::ObservedState, ops, WorkerState, WsOut};
 
 /// 等中心回执的上限：只防在飞请求永久占住 pending 表，CLI 侧自己的超时更短。
@@ -70,6 +74,10 @@ pub enum AgentAction {
     TerminalRead {
         task_id: String,
     },
+    /// `terminal wait` 的轮询原语：只回 status/exitCode，本地账本直接答
+    TerminalStatus {
+        task_id: String,
+    },
     TerminalSend {
         task_id: String,
         text: String,
@@ -92,7 +100,7 @@ pub struct AgentResponse {
 }
 
 impl AgentResponse {
-    fn ok(payload: serde_json::Value) -> Self {
+    pub(crate) fn ok(payload: serde_json::Value) -> Self {
         let mut object = serde_json::Map::new();
         object.insert("ok".into(), serde_json::Value::Bool(true));
         if let serde_json::Value::Object(fields) = payload {
@@ -104,7 +112,7 @@ impl AgentResponse {
         }
     }
 
-    fn err(status: &'static str, message: impl AsRef<str>) -> Self {
+    pub(crate) fn err(status: &'static str, message: impl AsRef<str>) -> Self {
         let body = serde_json::json!({ "ok": false, "error": message.as_ref() });
         Self {
             status,
@@ -253,32 +261,42 @@ async fn handle(
             }
         }
         AgentAction::TerminalRead { task_id } => {
-            // 先问中心：它做归属校验（该 task 必须与发起方同工作区）并给出 status/exit_code。
-            // 内容的**首选**数据源是本地命令日志：中心 checkpoint 是 2 秒周期的派生缓存，
-            // 秒级命令的输出根本进不去，而日志是全量而非一屏。非 agent 自建的终端（用户
-            // 手开的）没有日志，此时退回 checkpoint。
+            // 本地闭环（plan 094）：归属与状态来自会话账本，内容优先本地命令日志尾部；会话仍活着
+            // 则退回 sessiond 当前快照；都没有则为空。不问中心——agent 就跑在这台 daemon 上，中心
+            // checkpoint 只是这里的派生缓存。ANSI 原样带回，去转义在 CLI 侧做。
+            let (target_session, record) =
+                match resolve_local_target(state, &session_id, &task_id) {
+                    Ok(found) => found,
+                    Err(response) => return response,
+                };
             let local_log = { state.lock().unwrap().agent_logs.get(&task_id).cloned() };
-            let payload =
-                agent_control_request::Payload::TerminalRead(wire::AgentTerminalRead { task_id });
-            match ask_server(state, to_server_tx, session_id, payload).await {
+            let from_log = local_log
+                .as_deref()
+                .and_then(|path| ops::read_command_log_tail(path, MAX_LOG_TAIL_BYTES));
+            let text = match from_log {
+                Some(text) => text,
+                None if record.phase == SessionPhase::Running => device
+                    .read_session_snapshot(&target_session)
+                    .await
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
+            AgentResponse::ok(serde_json::json!({
+                "ansi": text,
+                "capturedAt": epoch_ms(),
+                "status": phase_name(&record.phase),
+                "exitCode": exit_code_of(&record.phase),
+            }))
+        }
+        AgentAction::TerminalStatus { task_id } => {
+            match resolve_local_target(state, &session_id, &task_id) {
+                Ok((_, record)) => AgentResponse::ok(serde_json::json!({
+                    "taskId": task_id,
+                    "status": phase_name(&record.phase),
+                    "exitCode": exit_code_of(&record.phase),
+                })),
                 Err(response) => response,
-                Ok(agent_control_result::Payload::TerminalRead(result)) => {
-                    let from_log = local_log
-                        .as_deref()
-                        .and_then(|path| ops::read_command_log_tail(path, MAX_LOG_TAIL_BYTES));
-                    // ANSI 原样带回，去转义在 CLI 侧做（snapshot 同时是 checkpoint 的数据来源，
-                    // 不为 agent 可读性改它的语义）。
-                    let text = from_log.unwrap_or_else(|| {
-                        String::from_utf8_lossy(&result.ansi_snapshot).into_owned()
-                    });
-                    AgentResponse::ok(serde_json::json!({
-                        "ansi": text,
-                        "capturedAt": result.captured_at,
-                        "status": status_name(result.status),
-                        "exitCode": result.exit_code,
-                    }))
-                }
-                Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
             }
         }
         AgentAction::TerminalSend {
@@ -286,46 +304,32 @@ async fn handle(
             text,
             enter,
         } => {
-            // 归属寻址复用 terminal.list 的中心校验：清单天然限定在发起方 workspace，
-            // 目标不在清单里 = 不在本工作区或不存在。写入本身在 daemon 本地走 sessiond 正门
-            // （见 DeviceRuntime::agent_send_input 的契约注释），中心不在输入路径上。
-            let payload = agent_control_request::Payload::TerminalList(wire::AgentTerminalList {});
-            match ask_server(state, to_server_tx, session_id, payload).await {
-                Err(response) => response,
-                Ok(agent_control_result::Payload::TerminalList(result)) => {
-                    let Some(target) = result
-                        .terminals
-                        .into_iter()
-                        .find(|terminal| terminal.task_id == task_id)
-                    else {
-                        return AgentResponse::err(
-                            "404 Not Found",
-                            "终端不在本工作区或不存在（用 cofluxd terminal list 查）",
-                        );
-                    };
-                    if status_name(target.status) == "exited" {
-                        return AgentResponse::err(
-                            "409 Conflict",
-                            "终端已退出，不能再输入（要跑新命令用 cofluxd terminal new）",
-                        );
-                    }
-                    let Some(target_session) = target
-                        .session_id
-                        .as_deref()
-                        .filter(|session| !session.is_empty())
-                    else {
-                        return AgentResponse::err("409 Conflict", "终端尚未就绪，稍后重试");
-                    };
-                    let mut data = text.into_bytes();
-                    if enter {
-                        data.push(b'\r');
-                    }
-                    match device.agent_send_input(target_session, data).await {
-                        Ok(()) => AgentResponse::ok(serde_json::json!({})),
-                        Err(message) => AgentResponse::err("409 Conflict", message),
-                    }
+            // 归属本地判定（plan 094），写入本身走 sessiond 正门（见 DeviceRuntime::agent_send_input
+            // 的契约注释）：人类 holder 在场即拒。中心不在路径上。
+            let (target_session, record) =
+                match resolve_local_target(state, &session_id, &task_id) {
+                    Ok(found) => found,
+                    Err(response) => return response,
+                };
+            match record.phase {
+                SessionPhase::Exited { .. } => {
+                    return AgentResponse::err(
+                        "409 Conflict",
+                        "终端已退出，不能再输入（要跑新命令用 cofluxd terminal new）",
+                    )
                 }
-                Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
+                SessionPhase::Pending => {
+                    return AgentResponse::err("409 Conflict", "终端尚未就绪，稍后重试")
+                }
+                SessionPhase::Running => {}
+            }
+            let mut data = text.into_bytes();
+            if enter {
+                data.push(b'\r');
+            }
+            match device.agent_send_input(&target_session, data).await {
+                Ok(()) => AgentResponse::ok(serde_json::json!({})),
+                Err(message) => AgentResponse::err("409 Conflict", message),
             }
         }
         AgentAction::Ports => {
@@ -344,6 +348,70 @@ async fn handle(
             }
         }
     }
+}
+
+/// 本地命令的目标解析（plan 094）：调用方与目标都必须有已知归属且同工作区。归属只认中心随
+/// SessionCreate 下发的 workspace_id；早于 daemon 升级的会话归属未知，一律可读拒绝，不按 cwd 猜。
+/// 「不在本工作区」与「不存在」同一句错误——不向别的工作区泄漏存在性。
+fn resolve_local_target(
+    state: &Arc<Mutex<WorkerState>>,
+    caller_session: &str,
+    task_id: &str,
+) -> Result<(String, SessionRecord), AgentResponse> {
+    let s = state.lock().unwrap();
+    let Some(caller) = s.ledger.session(caller_session) else {
+        return Err(AgentResponse::err(
+            "409 Conflict",
+            "本终端早于 daemon 升级，缺少工作区归属：重开终端后再用本地命令",
+        ));
+    };
+    if caller.workspace_id.is_empty() {
+        return Err(AgentResponse::err(
+            "409 Conflict",
+            "本终端早于 daemon 升级，缺少工作区归属：重开终端后再用本地命令",
+        ));
+    }
+    let not_found = || {
+        AgentResponse::err(
+            "404 Not Found",
+            "终端不在本工作区或不存在（用 cofluxd terminal list 查）",
+        )
+    };
+    let Some((target_session, target)) = s.ledger.task(task_id) else {
+        return Err(not_found());
+    };
+    if target.workspace_id.is_empty() {
+        return Err(AgentResponse::err(
+            "409 Conflict",
+            "目标终端早于 daemon 升级，缺少工作区归属：重开它后再试",
+        ));
+    }
+    if target.workspace_id != caller.workspace_id {
+        return Err(not_found());
+    }
+    Ok((target_session.to_string(), target.clone()))
+}
+
+fn phase_name(phase: &SessionPhase) -> &'static str {
+    match phase {
+        SessionPhase::Pending => "idle",
+        SessionPhase::Running => "running",
+        SessionPhase::Exited { .. } => "exited",
+    }
+}
+
+fn exit_code_of(phase: &SessionPhase) -> Option<i32> {
+    match phase {
+        SessionPhase::Exited { exit_code } => Some(*exit_code),
+        _ => None,
+    }
+}
+
+fn epoch_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0)
 }
 
 /// 发一条 AgentControlRequest 并等中心回执。失败路径全部转成给 agent 看的 HTTP 错误。
