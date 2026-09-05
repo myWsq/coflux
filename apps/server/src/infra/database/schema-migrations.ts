@@ -745,7 +745,9 @@ async function waitBeforeMigrationRetry(attempt: number): Promise<void> {
  *   注册应答原样留在 metadata 里（RFC 7591 要求回显）。
  * - oauth_tokens：access / refresh 两类 token 只存 sha256 hash；同一次授权签出的 token 共享
  *   grant_id，refresh 重放检测时按 grant 整链撤销。归属约束写在本迁移里（冻结的 baseline
- *   与版本 3 的核心表约束一个字都不动）。 */
+ *   与版本 3 的核心表约束一个字都不动），并沿用版本 3 的生命周期约定：外键显式命名 fk_<表>_<父>、
+ *   NO ACTION + DEFERRABLE INITIALLY DEFERRED，不用 CASCADE——删 account / client 前必须先由代码
+ *   显式删掉其 token（目前两者都还没有删除功能）。 */
 const OAUTH_SCHEMA_SQL = `
   CREATE TABLE coflux.oauth_clients (
     client_id TEXT PRIMARY KEY,
@@ -762,15 +764,19 @@ const OAUTH_SCHEMA_SQL = `
     token_hash TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('access', 'refresh')),
     grant_id TEXT NOT NULL,
-    client_id TEXT NOT NULL REFERENCES coflux.oauth_clients(client_id) ON DELETE CASCADE,
-    account_id TEXT NOT NULL REFERENCES coflux.accounts(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
     user_id TEXT,
     scope TEXT NOT NULL DEFAULT '',
     created_at DOUBLE PRECISION NOT NULL,
     expires_at DOUBLE PRECISION NOT NULL,
     revoked BOOLEAN NOT NULL DEFAULT false,
     -- refresh 被轮换掉的时刻：宽限内再次出现按"同机并发轮换"复用，超过宽限才当泄露整链撤销
-    rotated_at DOUBLE PRECISION
+    rotated_at DOUBLE PRECISION,
+    CONSTRAINT fk_oauth_tokens_client FOREIGN KEY (client_id)
+      REFERENCES coflux.oauth_clients(client_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT fk_oauth_tokens_account FOREIGN KEY (account_id)
+      REFERENCES coflux.accounts(id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
   );
   CREATE INDEX idx_oauth_tokens_account ON coflux.oauth_tokens(account_id);
   CREATE INDEX idx_oauth_tokens_grant ON coflux.oauth_tokens(grant_id);
