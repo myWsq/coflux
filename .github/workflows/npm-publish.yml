@@ -59,7 +59,7 @@ jobs:
       contents: read
       id-token: write # OIDC 换发布凭证用
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # workflow_run 默认会 checkout main；发布必须固定到通过 release 的那个 commit。
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
