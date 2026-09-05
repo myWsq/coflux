@@ -170,7 +170,7 @@ jobs:
 
       # Package.swift 在 Linux 仅暴露跨平台 Protocol/Core；ApplePlatform 由下方
       # macOS + iOS SDK 的 xcodebuild 门覆盖，避免用假 stub 获得虚假的 Linux 绿灯。
-      - uses: swift-actions/setup-swift@7591e4f04c00624cb043783da51a7fd6ee0a6bf6 # v2
+      - uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2
         with:
           # swift-protobuf 1.38.1 的 package tools version 已要求 Swift 6.2。
           swift-version: "6.2"
