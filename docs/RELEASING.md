@@ -139,7 +139,7 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
    - `coflux-worker-<target>`（原始二进制，下载+验签对象）+ `.sig`（legacy raw）+
      `.release.sig`（release statement）
    - `coflux-supervisor-<target>` + `.release.sig`（cofluxd 安装前验签）
-   - `coflux-relay-<linux-target>`（独立 relay 节点部署用；部署流程见运维记录）
+   - `coflux-relay-<linux-target>`（独立 relay 节点部署用；节点形态与升级流程见 [deployment.md](deployment.md)）
    - `coflux-<tag>-<target>.tar.gz`（含 supervisor+worker，人工安装用）
    - `manifest.json` schema 2（顶层 `version`；`worker`/`supervisor` 各 target 的
      `url`/`target`/`sha256`/`size`/`releaseSignature`，worker 另有 legacy `signature`）+

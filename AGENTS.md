@@ -39,6 +39,8 @@ git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编�
 
 CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（tag `v*` 发布）。worker 产物用 ed25519 签名、supervisor 验签，密钥设置见 [docs/RELEASING.md](docs/RELEASING.md)。
 
+生产环境（三台机、域名线路、部署与回滚命令、踩过的坑）见 [docs/deployment.md](docs/deployment.md)。**动生产前先读它**：coflux.dev 下橙云与灰云并存，两台机的 Caddy 上都还压着其他项目的站点。
+
 前置：Node 22+（server 与测试工具链）、pnpm、Rust stable（`rustup`）。
 
 ## 改动纪律

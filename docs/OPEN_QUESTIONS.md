@@ -56,6 +56,7 @@ opaque bytes；旧 `pty.output/input/replay` 与 server-routed RPC 已删除并�
 
 ### B7. 中心服务器部署形态 —— ✅ 已定（2026-07）
 - 单实例自托管（prod-jp），业务数据使用自托管 Postgres；身份层为 `local` 或自建 `password` 模式，Supabase 已退役。
-- TLS：`api.coflux.dev` 反代终结 `wss://`。单实例是当前既定产品形态；没有明确需求前不引入 Redis、
+- TLS：`api.coflux.dev` 反代终结 `wss://`（2026-09-04 起前置一层 owo-jp-gw 入口反代，
+  中心自身仍只绑回环，见 [deployment.md](deployment.md)）。单实例是当前既定产品形态；没有明确需求前不引入 Redis、
   leader election 或共享 presence。若未来改为多实例，pending authorization、在线 daemon 与 relay home
   等内存 authority 必须先设计成可线性化的共享状态，不能只把现有 Map 搬进缓存。
