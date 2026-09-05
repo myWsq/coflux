@@ -46,6 +46,13 @@ cofluxd status / doctor / logs -f / update / down / uninstall
 （`serverUrl`/`deviceName`/`shell`），手改后重跑 `cofluxd up` 生效。发版/签名见
 [docs/RELEASING.md](docs/RELEASING.md)。
 
+给跑在 coflux 终端里的 agent：每个 PTY 会话里都有 `COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID` /
+`COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` / `COFLUX_MCP_URL` 六个环境变量，
+值与中心 MCP `list_*` 的 id 一致。本工作区内用零凭证的 `cofluxd terminal/progress/notify/ports`；
+开子工作区、跨工作区/跨设备操作用中心 MCP（`claude mcp add --transport http coflux "$COFLUX_MCP_URL"`）。
+supervisor 不走热升级，`cofluxd update && cofluxd restart` 后会话里才有这些变量。分工与纪律见
+`packages/cli/skills/coflux/SKILL.md`（随 `cofluxd` npm 包分发）。
+
 ## 快速开始
 
 前置：Node 22+ + pnpm（server/web）、Rust stable（daemon）、Docker（本地 Postgres）。

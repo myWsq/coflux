@@ -43,6 +43,8 @@ cofluxd ports                                             # 端口 + 可直接�
 
 不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，**coflux 会话之外的进程一律拒绝**，权限也天然限定在该会话所属的工作区内。
 
+每个 coflux 开出来的 PTY 会话里还注入了一组 `COFLUX_*` 环境变量（由 supervisor 组装，中心只下发 id）：`COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID`（目录工作区为空串）/ `COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` / `COFLUX_MCP_URL`。agent 读它们就知道自己在哪台设备、哪个项目/工作区/终端，值与中心 MCP `list_*` 返回的 id 完全一致，可直接传给 MCP tools。本地命令与 MCP 的分工：本工作区内的开终端/读/等/输入/播报/叫人/端口用上面的零凭证命令；开子工作区、跨工作区/跨设备读写、或从 coflux 之外接入，用中心的 `coflux` MCP（`claude mcp add --transport http coflux "$COFLUX_MCP_URL"`，一次 OAuth 授权）。supervisor 不走热升级，旧机器要 `cofluxd update && cofluxd restart` 之后会话里才有这些变量；skill 里写了变量为空时的降级分支。
+
 配套的 skill 在 `skills/coflux/SKILL.md`（随包分发），装给 Claude Code：
 
 ```sh
