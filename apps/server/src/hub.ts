@@ -730,8 +730,9 @@ export class Hub {
     observedInfo: DaemonInfoData,
     accountId: AccountId,
     arch: string,
-    capabilities: readonly string[],
     authSuccess: ServerToDaemonPayload,
+    /** 握手宣告的能力名（plan 091）；缺席 = 旧 worker，等价空清单。 */
+    capabilities: readonly string[] = [],
   ): Promise<boolean> {
     return await this.withDaemonGenerationGate(observedInfo.daemonId, async () => {
       if (this.shuttingDown || conn.ws.readyState !== conn.ws.OPEN) return false;
@@ -1761,7 +1762,7 @@ export class Hub {
           workerVersion: value.workerVersion,
           supervisorVersion: value.supervisorVersion,
           arch: value.arch,
-          capabilities: [...value.capabilities],
+          capabilities: [...(value.capabilities ?? [])],
           createdAt,
           timer,
         });
@@ -1799,8 +1800,8 @@ export class Hub {
           { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true, workerVersion: value.workerVersion, supervisorVersion: value.supervisorVersion },
           device.accountId,
           value.arch,
-          value.capabilities,
           { case: "daemonAuthed", value: { daemonId: device.id } },
+          value.capabilities ?? [],
         );
         if (registered) log.info("daemon authed", { daemonId: device.id, name: device.name });
         break;
@@ -2891,17 +2892,20 @@ export class Hub {
    * 同一事务删 checkpoint + task，防迟到 checkpoint 在 taskRemove 后插回孤儿。web 由 UI 保证只删已退出的；
    * MCP 传 rejectRunning=true 在同一事务内拒绝仍在运行的终端（plan 091）。 */
   private async removeTaskRecord(initial: Task, rejectRunning: boolean): Promise<OperationOutcome<TaskId>> {
-    const task = await this.store.transaction(async (tx) => {
+    type RemoveTaskTx =
+      | { case: "error"; message: string }
+      | { case: "removed"; task: Task; cancelledPreparedOperationIds: string[] };
+    const removal = await this.store.transaction<RemoveTaskTx>(async (tx) => {
       const device = await tx.claimActiveDevice(initial.daemonId, initial.accountId);
-      if (!device) return { error: "设备已撤销或不属于本账号" } as const;
+      if (!device) return { case: "error", message: "设备已撤销或不属于本账号" };
       const current = await tx.getTask(initial.id);
       if (
         !current ||
         current.accountId !== initial.accountId ||
         current.daemonId !== initial.daemonId
-      ) return { error: "任务已不存在" } as const;
+      ) return { case: "error", message: "任务已不存在" };
       if (rejectRunning && (current.status === TaskStatus.RUNNING || current.sessionId)) {
-        return { error: "终端仍在运行，先 stop_terminal 再删除" } as const;
+        return { case: "error", message: "终端仍在运行，先 stop_terminal 再删除" };
       }
       const cancelledPreparedOperationIds = await tx.expirePreparedOperationsByTarget(
         current.accountId,
@@ -2912,19 +2916,20 @@ export class Hub {
       );
       await tx.removeSessionCheckpointsByTask(current.id);
       await tx.removeTask(current.id);
-      return { task: current, cancelledPreparedOperationIds } as const;
+      return { case: "removed", task: current, cancelledPreparedOperationIds };
     });
-    if ("error" in task) return { ok: false, error: task.error };
+    if (removal.case === "error") return { ok: false, error: removal.message };
     // 删除已提交：先取消旧 exit/catalog continuation，再按 task 完整身份摘运行时，
     // 最后广播 removed。catalog 可能在 taskRemove 锁后重读前已清空 DB session_id，
     // 所以不能只依赖返回 task.sessionId；内存映射仍保留可核对的 taskId。
-    this.retireTaskRuntime(task.task.id, task.task.accountId, task.task.daemonId, true);
+    const { task } = removal;
+    this.retireTaskRuntime(task.id, task.accountId, task.daemonId, true);
     this.preparedOperations.cancelMany(
-      task.cancelledPreparedOperationIds,
+      removal.cancelledPreparedOperationIds,
       "任务已删除，session.create 已取消",
     );
-    this.broadcast(task.task.accountId, { case: "taskRemoved", value: { taskId: task.task.id } });
-    return { ok: true, value: task.task.id };
+    this.broadcast(task.accountId, { case: "taskRemoved", value: { taskId: task.id } });
+    return { ok: true, value: task.id };
   }
 
   /** 构建版本准入的"允许版本集合"（plan 033）：env 显式覆盖 ∪ 每个 build-id.txt 文件的
@@ -3207,8 +3212,8 @@ export class Hub {
       { daemonId, name: p.name, host: p.host, platform: p.platform, online: true, workerVersion: p.workerVersion, supervisorVersion: p.supervisorVersion },
       accountId,
       p.arch,
-      p.capabilities,
       { case: "daemonEnrolled", value: { daemonId, deviceToken } },
+      p.capabilities,
     );
     if (!registered) {
       this.sendClient(client, {
@@ -3898,8 +3903,10 @@ function validControlId(value: string): boolean {
   });
 }
 
-/** 握手宣告的能力名（plan 091）：有界、无控制字符；名单外的名字原样保存（前向兼容，门禁只看已知名）。 */
-function validCapabilities(values: readonly string[]): boolean {
+/** 握手宣告的能力名（plan 091）：有界、无控制字符；名单外的名字原样保存（前向兼容，门禁只看已知名）。
+ * 字段缺席（旧 worker / 单测手工构造的消息）等价于空清单，不是畸形。 */
+function validCapabilities(values: readonly string[] | undefined): boolean {
+  if (!values) return true;
   if (values.length > MAX_CAPABILITY_ENTRIES) return false;
   return values.every((value) => validBoundedText(value, MAX_CAPABILITY_BYTES));
 }
