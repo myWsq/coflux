@@ -145,4 +145,3 @@ server: 摘除待确认请求（一次性）→ 允许则签授权码并回完�
 - **隔离**：所有 tools 只按 bearer 解析出的 `accountId` 读取；带 id 的入参不属于当前账号与不存在回同一句错误。
 - URL 全部由 `COFLUX_PUBLIC_URL` 拼，不从请求 `Host` / `X-Forwarded-*` 推导（生产前面压着两层反代）。
 - 未做（后续）：已授权应用列表 / 单个撤销 UI、CIMD 注册、token 内省/撤销端点。
-

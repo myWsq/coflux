@@ -139,7 +139,7 @@ ssh root@prod-bj 'curl -sS -o /dev/null -w "ttfb=%{time_starttransfer}\n" https:
 
 | 位置 | 内容 |
 | --- | --- |
-| prod-jp `/etc/coflux/server.env`（600） | `DATABASE_URL`（含库密码）、`COFLUX_RELAY_SIGNING_KEY`（rendezvous 签名种子） |
+| prod-jp `/etc/coflux/server.env`（600） | `DATABASE_URL`（含库密码）、`COFLUX_RELAY_SIGNING_KEY`（rendezvous 签名种子）；非秘密但必须在：`COFLUX_PUBLIC_URL=https://api.coflux.dev`、`COFLUX_INBOUND_QUEUE_MAX_MESSAGES=1024` |
 | prod-jp `/etc/coflux/pg-coflux.pass`（600） | PG 角色口令 |
 | prod-jp `/etc/caddy/cloudflare.env`（600） | CF API token，**仅 coflux.dev zone 的 DNS 编辑权限**——读 zone settings（如 SSL 模式）会返回 `9109 Unauthorized` |
 | relay 节点 `/etc/coflux/relay.env` | `COFLUX_RELAY_PUBKEY`（验签公钥，非秘密） |
@@ -168,5 +168,11 @@ relay 密钥轮换顺序：换中心 seed → 同步新公钥到各 relay 的 `r
 - **本机家宽测线路会失真**：Surge 等工具的 TUN 会接管流量，DNS 返回 `198.18.x.x` fake-IP、
   `nc` 报 OPEN 都是假象。国内视角一律从 prod-bj 打。
 - **发版后 worker 不投递**先查 `COFLUX_AUTOUPDATE_REPO` 是否被注释掉了（有过前科）。
+- **daemon 认证后 2 秒一轮断连重连（`WS 入站队列超过硬上限`）**：v0.29.0 起 server 对每条 WS 连接有入站
+  待处理条数上限（`COFLUX_INBOUND_QUEUE_MAX_MESSAGES`，代码默认 64）。大 daemon（Home：13 工作区 / 21 任务）
+  认证后一口气回报 workspaceBranch/Diff/DefaultBranch、catalog、checkpoint 等 65+ 条，server 逐条 await DB 来不及
+  排空就被判超限断开，daemon 重连再来一遍，形成死循环（2026-09-05 首次把 v0.29.0+ 部署到生产时撞上）。
+  生产 `server.env` 已设 `COFLUX_INBOUND_QUEUE_MAX_MESSAGES=1024`（字节上限 16MB 不变）止血；根因（认证后突发
+  与逐条 await 的排空速度不匹配）待另立 plan 收口，别把这个 env 删掉。
 - 中心轮询 GitHub Release 做升级编排；若中心迁到大陆需注意该链路，
   `COFLUX_AUTOUPDATE_API_BASE` 可指向镜像。
