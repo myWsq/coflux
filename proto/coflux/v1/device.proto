@@ -476,6 +476,12 @@ message DeviceSessionCreate {
   optional string shell = 6;
   uint32 cols = 7;
   uint32 rows = 8;
+  // 非空时该会话是「跑一条命令」的命令终端（plan 091）：worker 在 authorize 通过后、交给 sessiond
+  // 前本地写包装脚本（登录 shell 执行、tee 落日志、跑完退出带退出码）并把 shell 填成脚本路径。
+  // 脚本路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
+  // 会被判成 operation_collision。旧 worker 不认识本字段会起成普通 shell，由中心的能力门禁挡住。
+  // 092 会在 10 起加 workspace_id/project_id。
+  string command = 9;
 }
 
 message DeviceOperationAck {

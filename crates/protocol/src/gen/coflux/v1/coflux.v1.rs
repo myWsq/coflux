@@ -936,6 +936,13 @@ pub struct DeviceSessionCreate {
     pub cols: u32,
     #[prost(uint32, tag="8")]
     pub rows: u32,
+    /// 非空时该会话是「跑一条命令」的命令终端（plan 091）：worker 在 authorize 通过后、交给 sessiond
+    /// 前本地写包装脚本（登录 shell 执行、tee 落日志、跑完退出带退出码）并把 shell 填成脚本路径。
+    /// 脚本路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
+    /// 会被判成 operation_collision。旧 worker 不认识本字段会起成普通 shell，由中心的能力门禁挡住。
+    /// 092 会在 10 起加 workspace_id/project_id。
+    #[prost(string, tag="9")]
+    pub command: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceOperationAck {
@@ -1890,6 +1897,12 @@ pub struct DaemonAuth {
     pub supervisor_version: ::prost::alloc::string::String,
     #[prost(string, tag="4")]
     pub arch: ::prost::alloc::string::String,
+    /// worker 宣告的控制面能力名（plan 091）。中心按能力名而非版本号做门禁：dev/测试的 worker
+    /// 上报 `builtin`，自动升级也刻意不做 semver 比较。旧 worker 不发此字段 → 自然被挡。
+    /// 现有能力名：`prepared_execute`（认识 PreparedDeviceOperationExecute）、
+    /// `terminal_io`（认识 ServerAgentRequest 的读/写）。新增控制消息时同步加能力名。
+    #[prost(string, repeated, tag="5")]
+    pub capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// 本地无凭证（未登记）时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1906,6 +1919,9 @@ pub struct DaemonEnrollRequest {
     pub supervisor_version: ::prost::alloc::string::String,
     #[prost(string, tag="6")]
     pub arch: ::prost::alloc::string::String,
+    /// 同 DaemonAuth.capabilities：首次登记的连接不会再走 DaemonAuth，能力必须随登记一起上报。
+    #[prost(string, repeated, tag="7")]
+    pub capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// 独立于认证消息的 gateway capability announce；保持旧认证构造面完全兼容，worker 可在
 /// authed 后及 gateway identity 变化时重复上报，server 以 daemon 连接身份绑定该 descriptor。
@@ -2142,7 +2158,7 @@ pub struct RelayHome {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -2198,6 +2214,85 @@ pub mod daemon_to_server {
         AgentControlRequest(super::AgentControlRequest),
         #[prost(message, tag="33")]
         DeviceP2pAnswerReport(super::DeviceP2pAnswerReport),
+        #[prost(message, tag="34")]
+        ServerAgentResult(super::ServerAgentResult),
+    }
+}
+// ===== 中心发起的终端读/写（plan 091）=====
+//
+// 与 AgentControlRequest 方向相反：这是中心（MCP 写 tools）问 daemon。一个 request + 一个
+// result，各带 oneof payload，新增动作只加分支不占顶层字段号。两者都是无落库副作用的直发
+// 消息（读日志/快照、经 sessiond 正门写一段输入），有落库副作用的动作走 prepared + Execute。
+
+/// 读某终端的原始输出：优先命令日志尾部（agent/中心建的命令终端才有），否则 sessiond 当前
+/// 快照；两者都拿不到时 source=none，由中心退回 checkpoint。data 是原始字节（含 ANSI），
+/// 去转义/尾 N 行在中心做；worker 按 max_bytes 钳制。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalRead {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+    /// 中心已知的当前 session（task 仍在跑时非空）；worker 只据它取快照，不按裸 task 猜。
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag="3")]
+    pub max_bytes: u32,
+}
+/// 往终端写一段输入：走 worker 的 agent_send_input 正门（attach/holder/input_seq 语义零改动），
+/// 人类 holder 在场时被拒，错误文案原样回中心。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalInput {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="2")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerAgentRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(oneof="server_agent_request::Payload", tags="10, 11")]
+    pub payload: ::core::option::Option<server_agent_request::Payload>,
+}
+/// Nested message and enum types in `ServerAgentRequest`.
+pub mod server_agent_request {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="10")]
+        TerminalRead(super::ServerTerminalRead),
+        #[prost(message, tag="11")]
+        TerminalInput(super::ServerTerminalInput),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalReadResult {
+    #[prost(bytes="vec", tag="1")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+    /// log | snapshot | none
+    #[prost(string, tag="2")]
+    pub source: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalInputResult {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerAgentResult {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(oneof="server_agent_result::Payload", tags="10, 11")]
+    pub payload: ::core::option::Option<server_agent_result::Payload>,
+}
+/// Nested message and enum types in `ServerAgentResult`.
+pub mod server_agent_result {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="10")]
+        TerminalRead(super::ServerTerminalReadResult),
+        #[prost(message, tag="11")]
+        TerminalInput(super::ServerTerminalInputResult),
     }
 }
 /// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
@@ -2372,9 +2467,18 @@ pub mod relay_node_list {
         pub url: ::prost::alloc::string::String,
     }
 }
+/// 中心触发已安装的 prepared operation 执行（plan 091）。中心作为发起方时没有 browser 去投递
+/// 帧：worker 取本地已安装的同 operation_id 模板，以合成 channel `__coflux-server-<operation_id>`
+/// 与 Principal::Server 走与 browser 完全相同的分派；结果沿既有 DeviceOperationReport 回中心。
+/// 重复 Execute（中心 restore 重发）必须幂等：已执行的只重发上次 report，不得二次执行。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PreparedDeviceOperationExecute {
+    #[prost(string, tag="1")]
+    pub operation_id: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 33, 34, 19, 20, 35, 36, 37")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 33, 34, 19, 20, 35, 36, 37, 38, 39")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -2435,6 +2539,10 @@ pub mod server_to_daemon {
         DeviceP2pDial(super::DeviceP2pDial),
         #[prost(message, tag="37")]
         DeviceP2pChannelGrant(super::DeviceP2pChannelGrant),
+        #[prost(message, tag="38")]
+        PreparedDeviceOperationExecute(super::PreparedDeviceOperationExecute),
+        #[prost(message, tag="39")]
+        ServerAgentRequest(super::ServerAgentRequest),
     }
 }
 /// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD

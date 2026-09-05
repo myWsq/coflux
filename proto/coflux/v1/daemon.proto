@@ -15,6 +15,11 @@ message DaemonAuth {
   string worker_version = 2;
   string supervisor_version = 3;
   string arch = 4;
+  // worker 宣告的控制面能力名（plan 091）。中心按能力名而非版本号做门禁：dev/测试的 worker
+  // 上报 `builtin`，自动升级也刻意不做 semver 比较。旧 worker 不发此字段 → 自然被挡。
+  // 现有能力名：`prepared_execute`（认识 PreparedDeviceOperationExecute）、
+  // `terminal_io`（认识 ServerAgentRequest 的读/写）。新增控制消息时同步加能力名。
+  repeated string capabilities = 5;
 }
 
 // 本地无凭证（未登记）时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
@@ -25,6 +30,8 @@ message DaemonEnrollRequest {
   string worker_version = 4;
   string supervisor_version = 5;
   string arch = 6;
+  // 同 DaemonAuth.capabilities：首次登记的连接不会再走 DaemonAuth，能力必须随登记一起上报。
+  repeated string capabilities = 7;
 }
 
 // 独立于认证消息的 gateway capability announce；保持旧认证构造面完全兼容，worker 可在
@@ -221,6 +228,56 @@ message DaemonToServer {
     SessionAgents session_agents = 31;
     AgentControlRequest agent_control_request = 32;
     DeviceP2pAnswerReport device_p2p_answer_report = 33;
+    ServerAgentResult server_agent_result = 34;
+  }
+}
+
+// ===== 中心发起的终端读/写（plan 091）=====
+//
+// 与 AgentControlRequest 方向相反：这是中心（MCP 写 tools）问 daemon。一个 request + 一个
+// result，各带 oneof payload，新增动作只加分支不占顶层字段号。两者都是无落库副作用的直发
+// 消息（读日志/快照、经 sessiond 正门写一段输入），有落库副作用的动作走 prepared + Execute。
+
+// 读某终端的原始输出：优先命令日志尾部（agent/中心建的命令终端才有），否则 sessiond 当前
+// 快照；两者都拿不到时 source=none，由中心退回 checkpoint。data 是原始字节（含 ANSI），
+// 去转义/尾 N 行在中心做；worker 按 max_bytes 钳制。
+message ServerTerminalRead {
+  string task_id = 1;
+  // 中心已知的当前 session（task 仍在跑时非空）；worker 只据它取快照，不按裸 task 猜。
+  string session_id = 2;
+  uint32 max_bytes = 3;
+}
+
+// 往终端写一段输入：走 worker 的 agent_send_input 正门（attach/holder/input_seq 语义零改动），
+// 人类 holder 在场时被拒，错误文案原样回中心。
+message ServerTerminalInput {
+  string session_id = 1;
+  bytes data = 2;
+}
+
+message ServerAgentRequest {
+  string request_id = 1;
+  oneof payload {
+    ServerTerminalRead terminal_read = 10;
+    ServerTerminalInput terminal_input = 11;
+  }
+}
+
+message ServerTerminalReadResult {
+  bytes data = 1;
+  // log | snapshot | none
+  string source = 2;
+}
+
+message ServerTerminalInputResult {}
+
+message ServerAgentResult {
+  string request_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+  oneof payload {
+    ServerTerminalReadResult terminal_read = 10;
+    ServerTerminalInputResult terminal_input = 11;
   }
 }
 
@@ -346,6 +403,14 @@ message RelayNodeList {
   repeated RelayNode nodes = 1;
 }
 
+// 中心触发已安装的 prepared operation 执行（plan 091）。中心作为发起方时没有 browser 去投递
+// 帧：worker 取本地已安装的同 operation_id 模板，以合成 channel `__coflux-server-<operation_id>`
+// 与 Principal::Server 走与 browser 完全相同的分派；结果沿既有 DeviceOperationReport 回中心。
+// 重复 Execute（中心 restore 重发）必须幂等：已执行的只重发上次 report，不得二次执行。
+message PreparedDeviceOperationExecute {
+  string operation_id = 1;
+}
+
 message ServerToDaemon {
   // 旧 replay/input/resize/RPC adapter 已删除；生命周期编排与 proxy control 继续保留。
   // 26-28 是控制面复用 relay 路径（plan 043 改为独立 relay + rendezvous 后删除）。
@@ -380,6 +445,8 @@ message ServerToDaemon {
     AgentControlResult agent_control_result = 35;
     DeviceP2pDial device_p2p_dial = 36;
     DeviceP2pChannelGrant device_p2p_channel_grant = 37;
+    PreparedDeviceOperationExecute prepared_device_operation_execute = 38;
+    ServerAgentRequest server_agent_request = 39;
   }
 }
 
