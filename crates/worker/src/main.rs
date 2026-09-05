@@ -120,11 +120,15 @@ pub(crate) type WsOut = Vec<u8>;
 /// 能力名是协议契约的一部分：新增控制消息时同步加名字，并与 apps/server 的常量保持一致。
 const CAPABILITY_PREPARED_EXECUTE: &str = "prepared_execute";
 const CAPABILITY_TERMINAL_IO: &str = "terminal_io";
+/// 认识 ServerAgentRequest 的 terminal_notify / terminal_progress 分支（plan 093）：中心的
+/// `notify_user` / `report_progress` 只对宣告了它的 daemon 下发。
+const CAPABILITY_AGENT_ANNOTATE: &str = "agent_annotate";
 
 fn daemon_capabilities() -> Vec<String> {
     vec![
         CAPABILITY_PREPARED_EXECUTE.to_string(),
         CAPABILITY_TERMINAL_IO.to_string(),
+        CAPABILITY_AGENT_ANNOTATE.to_string(),
     ]
 }
 

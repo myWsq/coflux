@@ -139,14 +139,14 @@ pub struct SessionAgentRef {
     /// 空 = 尚无 hook 信号。agent 进程退出时随条目一起消失。
     #[prost(string, tag="4")]
     pub state: ::prost::alloc::string::String,
-    /// agent 经 `cofluxd notify` 主动留给用户的一句话（plan 074）：与 state 同生命周期，
-    /// 后续任一 hook 事件到达即被清空（那时 agent 已换了状态，旧消息就过期了）。
-    /// 纯展示、不落库；长度由 worker 侧钳制。
+    /// agent 经 MCP `notify_user` 主动留给用户的一句话（plan 074 引入、plan 093 起走 MCP）：
+    /// 与 state 同生命周期，后续任一 hook 事件到达即被清空（那时 agent 已换了状态，旧消息就
+    /// 过期了）。纯展示、不落库；长度由中心入口与 worker 侧共同钳制。
     #[prost(string, tag="5")]
     pub message: ::prost::alloc::string::String,
-    /// agent 经 `cofluxd progress` 主动播报的进度短评（plan 088）：覆盖式单字段，**跨 hook
-    /// 事件存活**（与 message 生命周期刻意不同——进度不因 agent 换回合而过期），被下一条
-    /// progress 覆盖，agent 条目消失时随条目清掉。纯展示、不落库；长度由 worker 侧钳制。
+    /// agent 经 MCP `report_progress` 主动播报的进度短评（plan 088 引入、plan 093 起走 MCP）：
+    /// 覆盖式单字段，**跨 hook 事件存活**（与 message 生命周期刻意不同——进度不因 agent 换回合
+    /// 而过期），被下一条 progress 覆盖，agent 条目消失时随条目清掉。纯展示、不落库；长度同上。
     #[prost(string, tag="6")]
     pub progress: ::prost::alloc::string::String,
 }
@@ -2012,16 +2012,13 @@ pub struct SessionAgents {
     #[prost(message, repeated, tag="1")]
     pub sessions: ::prost::alloc::vec::Vec<SessionAgentRef>,
 }
-/// ===== agent 协同控制（plan 074）=====
+/// ===== agent 协同控制（plan 074，plan 093 起废弃）=====
 ///
-/// 跑在 PTY 里的 agent 经 loopback 发起的中心操作。worker 已用调用方 pid 反查进程树确认它
-/// 属于 session_id 这个存活会话（树外 pid 在 worker 侧就被拒，永不到达这里）；server 据
-/// session_id 反查 task→workspace 完成归属校验，daemon 不自报 workspace。
-///
-/// request_id 由 worker 生成，只做响应关联，不承担幂等：terminal_new 有副作用但不做
-/// exactly-once 去重——CLI 不自动重试，在飞请求遇断连即把错误交给 agent 自己决定
-/// （见 plans/074 Decisions）。这条与 browser 的 prepared operation 不同：daemon 控制 WS
-/// 是已认证的可信面，无需 operation_id 模板。
+/// plan 093 把 agent 能力面收成中心 MCP 单轨：worker 不再发送 AgentControlRequest，中心也不再
+/// 处理它；`cofluxd terminal|notify|progress|ports` 已删。下面这组消息（AgentTerminal* /
+/// AgentPorts* / AgentControl*）**没有任何发送方与处理方**，保留定义只因 buf breaking 用 FILE
+/// 类别（MESSAGE_NO_DELETE / FIELD_NO_DELETE 连 reserved 也不认），与 common.proto 里的
+/// ExecResult / FsListed 同理。以后再给 agent 加能力，唯一入口是 MCP tool + ServerAgentRequest。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentTerminalNew {
     #[prost(string, tag="1")]
@@ -2221,6 +2218,8 @@ pub mod daemon_to_server {
         WorkspaceDefaultBranch(super::WorkspaceDefaultBranch),
         #[prost(message, tag="31")]
         SessionAgents(super::SessionAgents),
+        /// plan 093 起无发送方（见上方「agent 协同控制」段）；不 reserved 是因为 buf breaking 的
+        /// FILE 类别对字段删除一律报 FIELD_NO_DELETE。
         #[prost(message, tag="32")]
         AgentControlRequest(super::AgentControlRequest),
         #[prost(message, tag="33")]
@@ -2229,11 +2228,14 @@ pub mod daemon_to_server {
         ServerAgentResult(super::ServerAgentResult),
     }
 }
-// ===== 中心发起的终端读/写（plan 091）=====
+// ===== 中心发起的终端读/写/标注（plan 091 + plan 093）=====
 //
-// 与 AgentControlRequest 方向相反：这是中心（MCP 写 tools）问 daemon。一个 request + 一个
-// result，各带 oneof payload，新增动作只加分支不占顶层字段号。两者都是无落库副作用的直发
-// 消息（读日志/快照、经 sessiond 正门写一段输入），有落库副作用的动作走 prepared + Execute。
+// 中心（MCP 写 tools）问 daemon。一个 request + 一个 result，各带 oneof payload，新增动作只加
+// 分支不占顶层字段号。全部是无落库副作用的直发消息（读日志/快照、经 sessiond 正门写一段输入、
+// 给 agent presence 打标注），有落库副作用的动作走 prepared + Execute。
+//
+// 能力门禁：worker 认证时宣告能力名（terminal_read/terminal_input 属 `terminal_io`，
+// terminal_notify/terminal_progress 属 `agent_annotate`），中心缺能力即回「需要升级」，不发送。
 
 /// 读某终端的原始输出：优先命令日志尾部（agent/中心建的命令终端才有），否则 sessiond 当前
 /// 快照；两者都拿不到时 source=none，由中心退回 checkpoint。data 是原始字节（含 ANSI），
@@ -2257,11 +2259,37 @@ pub struct ServerTerminalInput {
     #[prost(bytes="vec", tag="2")]
     pub data: ::prost::alloc::vec::Vec<u8>,
 }
+/// agent 经 MCP `notify_user` 叫人（plan 093）：语义与 074 时代的 `cofluxd notify` 逐字相同——
+/// 该会话的 presence 转 "question" 并携带留言，下一个 hook 事件到达即清空（只有 daemon 知道
+/// hook 事件何时发生，所以状态留在 worker，中心不叠加）。worker 要求该会话的进程树里现场
+/// 探测得到 agent（claude/codex）：没有 presence 的标注会在下一轮扫描被剪掉，必须可读拒绝而不是
+/// 静默接受。session_id 由中心从 task 取（RUNNING 且有会话），worker 只认它与本地 alive 表一致的情况。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalNotify {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    /// 长度由中心入口拒绝（>200 字符）且 worker 再钳一次
+    #[prost(string, tag="3")]
+    pub message: ::prost::alloc::string::String,
+}
+/// agent 经 MCP `report_progress` 播报进度（plan 093）：语义与 `cofluxd progress` 逐字相同——
+/// 覆盖式单字段、不改 state、跨 hook 事件存活、被下一条覆盖、随 presence 一起消失。presence 门同上。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalProgress {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub message: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ServerAgentRequest {
     #[prost(string, tag="1")]
     pub request_id: ::prost::alloc::string::String,
-    #[prost(oneof="server_agent_request::Payload", tags="10, 11")]
+    #[prost(oneof="server_agent_request::Payload", tags="10, 11, 12, 13")]
     pub payload: ::core::option::Option<server_agent_request::Payload>,
 }
 /// Nested message and enum types in `ServerAgentRequest`.
@@ -2272,6 +2300,10 @@ pub mod server_agent_request {
         TerminalRead(super::ServerTerminalRead),
         #[prost(message, tag="11")]
         TerminalInput(super::ServerTerminalInput),
+        #[prost(message, tag="12")]
+        TerminalNotify(super::ServerTerminalNotify),
+        #[prost(message, tag="13")]
+        TerminalProgress(super::ServerTerminalProgress),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2285,6 +2317,12 @@ pub struct ServerTerminalReadResult {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ServerTerminalInputResult {
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalNotifyResult {
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalProgressResult {
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ServerAgentResult {
     #[prost(string, tag="1")]
@@ -2293,7 +2331,7 @@ pub struct ServerAgentResult {
     pub ok: bool,
     #[prost(string, optional, tag="3")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(oneof="server_agent_result::Payload", tags="10, 11")]
+    #[prost(oneof="server_agent_result::Payload", tags="10, 11, 12, 13")]
     pub payload: ::core::option::Option<server_agent_result::Payload>,
 }
 /// Nested message and enum types in `ServerAgentResult`.
@@ -2304,6 +2342,10 @@ pub mod server_agent_result {
         TerminalRead(super::ServerTerminalReadResult),
         #[prost(message, tag="11")]
         TerminalInput(super::ServerTerminalInputResult),
+        #[prost(message, tag="12")]
+        TerminalNotify(super::ServerTerminalNotifyResult),
+        #[prost(message, tag="13")]
+        TerminalProgress(super::ServerTerminalProgressResult),
     }
 }
 /// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
@@ -2427,7 +2469,7 @@ pub struct DaemonSetName {
     #[prost(string, tag="1")]
     pub name: ::prost::alloc::string::String,
 }
-/// 直发建会话（cofluxd terminal new 走这条）。7 起是会话归属 id（plan 092）：中心只下发 id，
+/// 直发建会话（中心 prepared 命令终端 / web 建会话最终都落到这条）。7 起是会话归属 id（plan 092）：中心只下发 id，
 /// supervisor 在 create_session 里组装成 COFLUX_* 环境变量注入 PTY；变量名与组装只在 supervisor 一处。
 /// 全部可缺省：旧中心不下发、旧 worker 不映射都只是「会话里没有这些变量」，绝不影响建会话。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2557,6 +2599,7 @@ pub mod server_to_daemon {
         ProxyData(super::ProxyData),
         #[prost(message, tag="20")]
         WorkspaceList(super::WorkspaceList),
+        /// plan 093 起中心不再发送（同 DaemonToServer.agent_control_request，保留只为过 buf breaking）。
         #[prost(message, tag="35")]
         AgentControlResult(super::AgentControlResult),
         #[prost(message, tag="36")]
