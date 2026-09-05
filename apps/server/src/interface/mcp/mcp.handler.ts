@@ -37,6 +37,8 @@ async function dispatch(principal: OAuthPrincipal, parsedBody: unknown): Promise
     listDaemons: (accountId) => hub.daemonInfoList(accountId),
     routeTable: hub.routeTable,
     buildPreviewUrl,
+    // 写 tools 的操作层（plan 091）：Hub 结构化实现了 McpOperations 的方法集
+    ops: hub,
   });
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   try {
