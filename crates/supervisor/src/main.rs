@@ -27,7 +27,7 @@ use coflux_protocol::{
 };
 
 use manager::{Manager, WorkerSpec};
-use sessions::{Outbound, Sessions};
+use sessions::{Outbound, SessionContext, Sessions};
 
 /// supervisor 自身版本：编译期注入 release tag（`.github/workflows/release.yml` 传
 /// `COFLUX_RELEASE_VERSION=${{ github.ref_name }}`）；本地构建未设该 env 时落 "dev"。
@@ -364,6 +364,10 @@ fn dispatch(
             shell,
             cols,
             rows,
+            workspace_id,
+            project_id,
+            daemon_id,
+            mcp_url,
         } => sessions.create(
             session_id,
             task_id,
@@ -371,6 +375,13 @@ fn dispatch(
             shell.unwrap_or_default(),
             cols,
             rows,
+            // 旧 worker 不带这四个字段 → 空串，会话里对应变量为空（plan 092）
+            SessionContext {
+                daemon_id: daemon_id.unwrap_or_default(),
+                project_id: project_id.unwrap_or_default(),
+                workspace_id: workspace_id.unwrap_or_default(),
+                mcp_url: mcp_url.unwrap_or_default(),
+            },
         ),
         SessionClose { session_id } => sessions.close(&session_id),
         ResyncRequest => {
