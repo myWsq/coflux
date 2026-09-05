@@ -35,6 +35,10 @@ pub struct SessionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all_fields = "camelCase")]
 pub enum WorkerToSupervisor {
+    /// 直发建会话。`workspace_id` 起四个字段是会话归属 id（plan 092），supervisor 据此组装
+    /// COFLUX_* 环境变量注入 PTY。全部可缺省：supervisor 对控制消息用 `if let Ok(...)` 解码、
+    /// 失败静默丢弃整条，任何必填新字段都会让旧 worker 的 session.create 被新 supervisor 整条吞掉；
+    /// 反过来旧 supervisor 的 serde 也会忽略这些未知字段，会话照常起、只是没有变量。
     #[serde(rename = "session.create")]
     SessionCreate {
         session_id: String,
@@ -44,6 +48,15 @@ pub enum WorkerToSupervisor {
         shell: Option<String>,
         cols: u16,
         rows: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        /// 无仓库的目录工作区为 None / 空串
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daemon_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_url: Option<String>,
     },
     #[serde(rename = "session.close")]
     SessionClose { session_id: String },
@@ -447,6 +460,87 @@ mod tests {
                 assert_eq!(signature.as_deref(), Some("11".repeat(64).as_str()));
             }
         }
+    }
+
+    #[test]
+    fn session_create_context_fields_are_optional_and_legacy_parser_ignores_them() {
+        // 新 worker → 旧 supervisor：四个归属 id 以 camelCase 出现，旧 serde 形状忽略它们、会话照常起。
+        let message = WorkerToSupervisor::SessionCreate {
+            session_id: "s1".into(),
+            task_id: "t1".into(),
+            cwd: "/repo".into(),
+            shell: None,
+            cols: 80,
+            rows: 24,
+            workspace_id: Some("ws-1".into()),
+            project_id: Some("proj-1".into()),
+            daemon_id: Some("daemon-1".into()),
+            mcp_url: Some("https://api.example.invalid/mcp".into()),
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains(r#""workspaceId":"ws-1""#));
+        assert!(json.contains(r#""projectId":"proj-1""#));
+        assert!(json.contains(r#""daemonId":"daemon-1""#));
+        assert!(json.contains(r#""mcpUrl":"https://api.example.invalid/mcp""#));
+
+        // 模拟已部署旧 supervisor（plan 092 之前）的 serde 形状：没有这四个字段。
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all_fields = "camelCase")]
+        enum LegacyWorkerToSupervisor {
+            #[serde(rename = "session.create")]
+            SessionCreate {
+                session_id: String,
+                task_id: String,
+                cwd: String,
+                #[serde(default)]
+                shell: Option<String>,
+                cols: u16,
+                rows: u16,
+            },
+        }
+        let legacy: LegacyWorkerToSupervisor = serde_json::from_str(&json).unwrap();
+        match legacy {
+            LegacyWorkerToSupervisor::SessionCreate {
+                session_id,
+                task_id,
+                cwd,
+                shell,
+                cols,
+                rows,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(task_id, "t1");
+                assert_eq!(cwd, "/repo");
+                assert_eq!(shell, None);
+                assert_eq!((cols, rows), (80, 24));
+            }
+        }
+
+        // 旧 worker → 新 supervisor：没有这四个字段的 JSON 必须解码成功（supervisor 解码失败是静默
+        // 丢弃整条，缺省不了就等于吞掉建会话请求），且四个字段为 None、序列化时不出现。
+        let legacy_json =
+            r#"{"type":"session.create","sessionId":"s2","taskId":"t2","cwd":"/x","cols":100,"rows":30}"#;
+        let back: WorkerToSupervisor = serde_json::from_str(legacy_json).unwrap();
+        match &back {
+            WorkerToSupervisor::SessionCreate {
+                session_id,
+                workspace_id,
+                project_id,
+                daemon_id,
+                mcp_url,
+                ..
+            } => {
+                assert_eq!(session_id, "s2");
+                assert_eq!(workspace_id, &None);
+                assert_eq!(project_id, &None);
+                assert_eq!(daemon_id, &None);
+                assert_eq!(mcp_url, &None);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        let reserialized = serde_json::to_string(&back).unwrap();
+        assert!(!reserialized.contains("workspaceId"));
+        assert!(!reserialized.contains("mcpUrl"));
     }
 
     #[test]

@@ -299,6 +299,10 @@ fn prepared_device_operation_template_round_trip() {
                 cols: 120,
                 rows: 40,
                 command: String::new(),
+                workspace_id: String::new(),
+                project_id: String::new(),
+                daemon_id: String::new(),
+                mcp_url: String::new(),
             },
         )),
     };
