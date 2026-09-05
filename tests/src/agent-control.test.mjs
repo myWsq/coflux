@@ -8,7 +8,9 @@
  *   看输出」，而中心 checkpoint 是 2 秒周期缓存、秒级命令根本进不去，故 worker 侧走命令日志）；
  * - `notify` 让 presence 转 question 并带上留言，经中心广播到所有 client；
  * - 安全边界：coflux 会话之外的 pid 一律拒（身份就是「你在谁的进程树里」）；
- * - 每工作区活跃终端硬上限，超限拒绝且错误可读。
+ * - 每工作区活跃终端硬上限，超限拒绝且错误可读；
+ * - plan 094：`/agent` 的拒绝原因回给调用方（超长命令、缺参数都有具体文案，不再是 `bad request`），
+ *   命令 16 KB / send 文本 64 KB 与 MCP 对齐。
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -216,6 +218,26 @@ test("安全边界：coflux 会话之外的 pid 一律拒；非 json 被拒；�
       body: JSON.stringify({ action: "terminal.list", pid: process.pid }),
     });
     assert.equal(plain.status, 400, "非 application/json 必须被拒");
+
+    // plan 094：/agent 的拒绝原因回给调用方。这些校验在 pid 门之前，树外也能验；`/hook` 的形态不变。
+    const post = (body) =>
+      fetch(`http://127.0.0.1:${gatewayPort}/agent`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...body, pid: process.pid, ppid: process.ppid }),
+      });
+    const tooLong = await post({ action: "terminal.new", command: "x".repeat(17 * 1024) });
+    assert.equal(tooLong.status, 400);
+    assert.match((await tooLong.json()).error, /命令超过 16384 字节上限/, "超长命令要给具体原因，不是 bad request");
+    const noTask = await post({ action: "terminal.status" });
+    assert.equal(noTask.status, 400);
+    assert.match((await noTask.json()).error, /terminal\.status 缺 taskId/, "缺参数要指名道姓");
+    const longText = await post({ action: "terminal.send", taskId: "t", text: "y".repeat(64 * 1024 + 1) });
+    assert.equal(longText.status, 400);
+    assert.match((await longText.json()).error, /text 超过 65536 字节上限/, "send 文本上限与 MCP 的 64 KB 对齐");
+    const unknown = await post({ action: "terminal.frobnicate" });
+    assert.equal(unknown.status, 400);
+    assert.match((await unknown.json()).error, /未知 action/);
 
     // 上限：发起方那个终端已占 1 个，再开 1 个到顶，第 3 个必须被拒
     const firstOut = join(home, "first.txt");
