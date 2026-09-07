@@ -105,6 +105,8 @@ message AgentTerminalNew {
   // worker 已写好的临时包装脚本绝对路径，server 原样填进 SessionCreate.shell。
   // server 不解释也不校验它——脚本由 daemon 自己生成、只回到同一个 daemon 执行。
   string shell = 2;
+  // 保存启动方式，退出后从 Web 重开仍启动同一个 launcher。
+  string launcher = 3;
 }
 
 message AgentTerminalList {}

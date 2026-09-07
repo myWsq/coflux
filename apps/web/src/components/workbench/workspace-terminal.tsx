@@ -408,7 +408,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   function createTerminal(launcher = "") {
     if (pendingCreateRef.current) return;
     const tasksNow = currentTasks();
-    const title = launcher === "codex" ? `Codex ${tasksNow.filter(task => task.launcher === "codex").length + 1}` : `终端 ${tasksNow.length + 1}`;
+    const title = launcher ? `${launcher === "claude" ? "Claude" : "Codex"} ${tasksNow.filter(task => task.launcher === launcher).length + 1}` : `终端 ${tasksNow.length + 1}`;
     pendingCreateRef.current = { knownTaskIds: new Set(tasksNow.map((task) => task.id)), title, launcher };
     const pending = { id: `pending-tab-${++pendingTabSeqRef.current}`, title };
     updatePendingTab(pending);
@@ -770,6 +770,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             hasChevron={false}
             items={[
               { label: "Codex", onClick: () => createTerminal("codex") },
+              { label: "Claude", onClick: () => createTerminal("claude") },
               { label: "普通终端", onClick: () => createTerminal() },
             ]}
           />
@@ -832,6 +833,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
               <h2 className="text-base font-medium text-foreground">{isDirWorkspace ? "这台设备还没有终端" : "这个工作区还没有终端"}</h2>
               <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。也可以按 {modPrefix}T 快速新建。</p>
               <Button className="mt-5 mr-2" label="打开 Codex" variant="primary" size="sm" icon={<Bot />} isLoading={creating} onClick={() => createTerminal("codex")} />
+              <Button className="mt-5 mr-2" label="打开 Claude" variant="secondary" size="sm" icon={<Bot />} isLoading={creating} onClick={() => createTerminal("claude")} />
               <Button className="mt-5" label="新建终端" variant="primary" size="sm" icon={<Plus />} isLoading={creating} onClick={() => createTerminal()} />
             </div>
           </div>

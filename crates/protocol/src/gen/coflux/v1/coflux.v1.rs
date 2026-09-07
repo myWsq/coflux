@@ -89,7 +89,7 @@ pub struct Task {
     pub created_at: f64,
     #[prost(double, tag="11")]
     pub updated_at: f64,
-    /// 空串为普通 shell，codex 为直接在 PTY 中启动 Codex CLI。
+    /// 空串为普通 shell，codex / claude 为直接在 PTY 中启动对应 Agent CLI。
     #[prost(string, tag="12")]
     pub launcher: ::prost::alloc::string::String,
 }
@@ -2072,6 +2072,9 @@ pub struct AgentTerminalNew {
     /// server 不解释也不校验它——脚本由 daemon 自己生成、只回到同一个 daemon 执行。
     #[prost(string, tag="2")]
     pub shell: ::prost::alloc::string::String,
+    /// 保存启动方式，退出后从 Web 重开仍启动同一个 launcher。
+    #[prost(string, tag="3")]
+    pub launcher: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentTerminalList {

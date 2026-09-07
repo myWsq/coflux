@@ -1212,6 +1212,7 @@ export class Hub {
     switch (request.payload.case) {
       case "terminalNew": {
         const value = request.payload.value;
+        if (value.launcher && !["codex", "claude"].includes(value.launcher)) return void fail("不支持的终端 launcher");
         const taskId = randomUUID();
         const sessionId = randomUUID();
         return await this.withDeviceEffectGuard(daemon.info.daemonId, async (effectGuard) => {
@@ -1263,7 +1264,8 @@ export class Hub {
                   daemonId: currentWorkspace.daemonId,
                   projectId: currentWorkspace.projectId,
                   workspaceId: currentWorkspace.id,
-                  title: value.title.trim() || "agent 终端",
+                  title: value.title.trim() || (value.launcher === "codex" ? "Codex" : value.launcher === "claude" ? "Claude" : "agent 终端"),
+                  launcher: value.launcher,
                   status: TaskStatus.IDLE,
                   sessionId,
                   createdAt: ts,
@@ -2760,7 +2762,7 @@ export class Hub {
       }
       case "taskCreate": {
         const value = msg.payload.value;
-        if (value.launcher && value.launcher !== "codex") {
+        if (value.launcher && !["codex", "claude"].includes(value.launcher)) {
           this.sendClient(client, { case: "error", value: { message: "不支持的终端启动程序" } });
           return;
         }
@@ -3148,8 +3150,8 @@ export class Hub {
 
     const d = this.daemons.get(task.daemonId);
     if (!d) return void fail(`daemon 不在线：${task.daemonId}`);
-    if (task.launcher === "codex" && !d.capabilities.has("codex_terminal")) {
-      return void fail("该设备尚不支持 Codex 终端，请升级 worker 后重试");
+    if (task.launcher && !d.capabilities.has(`${task.launcher}_terminal`)) {
+      return void fail("该设备尚不支持此 Agent 终端，请升级 worker 后重试");
     }
     const ws = await this.store.getWorkspace(task.workspaceId);
     if (!ws) return void fail("工作区已不存在");
@@ -3692,18 +3694,22 @@ export class Hub {
    * command 的 `session.create`（中心发起），等收敛到 RUNNING。每工作区活跃终端上限含用户手开的。 */
   async createTerminalForAccount(
     accountId: AccountId,
-    input: { workspaceId: WorkspaceId; title: string; command: string },
+    input: { workspaceId: WorkspaceId; title: string; command?: string; launcher?: string },
   ): Promise<OperationOutcome<Task>> {
     const initialWorkspace = await this.store.getWorkspace(input.workspaceId);
     if (!initialWorkspace || initialWorkspace.accountId !== accountId) return { ok: false, error: `工作区 ${input.workspaceId} 不存在或不属于当前账号` };
-    const command = input.command;
-    if (!command.trim() || Buffer.byteLength(command, "utf8") > MAX_TERMINAL_COMMAND_BYTES) {
+    const command = input.command ?? "";
+    const launcher = input.launcher ?? "";
+    if (launcher && !["codex", "claude"].includes(launcher)) return { ok: false, error: "不支持的终端 launcher" };
+    if (launcher && command) return { ok: false, error: "launcher 与 command 不能同时使用" };
+    if ((!launcher && !command.trim()) || Buffer.byteLength(command, "utf8") > MAX_TERMINAL_COMMAND_BYTES) {
       return { ok: false, error: `命令不能为空且不超过 ${MAX_TERMINAL_COMMAND_BYTES} 字节` };
     }
-    const title = input.title.trim() || command.split("\n")[0]!.slice(0, 64);
+    const title = input.title.trim() || (launcher === "codex" ? "Codex" : launcher === "claude" ? "Claude" : command.split("\n")[0]!.slice(0, 64));
     if (!validBoundedText(title, MAX_TERMINAL_TITLE_BYTES)) return { ok: false, error: "终端标题过长或含控制字符" };
     const daemon = this.requireOnlineDaemon(initialWorkspace.daemonId, accountId, DAEMON_CAPABILITY_PREPARED_EXECUTE);
     if (!daemon.ok) return daemon;
+    if (launcher && !daemon.value.capabilities.has(`${launcher}_terminal`)) return { ok: false, error: "该设备尚不支持此 Agent 终端，请升级 worker 后重试" };
 
     const taskId = randomUUID();
     const sessionId = randomUUID();
@@ -3721,6 +3727,7 @@ export class Hub {
         cols: AGENT_TERMINAL_COLS,
         rows: AGENT_TERMINAL_ROWS,
         command,
+        launcher,
         workspaceId: initialWorkspace.id,
         projectId: initialWorkspace.projectId,
         daemonId: initialWorkspace.daemonId,
@@ -3762,6 +3769,7 @@ export class Hub {
             projectId: ws.projectId,
             workspaceId: ws.id,
             title,
+            launcher,
             status: TaskStatus.IDLE,
             createdAt: ts,
             updatedAt: ts,

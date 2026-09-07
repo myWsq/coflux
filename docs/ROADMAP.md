@@ -1,7 +1,7 @@
 # coflux 路线图 / TODO
 
 
-- **Codex 终端入口**（2026-09-08）：工作区新增菜单可直接在普通 PTY Tab 中打开 Codex，渲染和交互沿用现有终端。见 [使用说明](codex-terminal.md)。
+- **Codex / Claude 终端入口**（2026-09-08）：工作区新增菜单可直接在普通 PTY Tab 中打开 Codex / Claude Code，渲染和交互沿用现有终端。见 [使用说明](codex-terminal.md)。
 > 记录已完成的里程碑与待办工作。讨论细节见 [architecture.md](architecture.md) / [auth-design.md](auth-design.md) / [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md)。
 
 ## 已完成

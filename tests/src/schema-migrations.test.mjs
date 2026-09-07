@@ -159,6 +159,7 @@ test("runSchemaMigrations 不依赖 postgres.camel，默认 transform pool 可�
       { version: 3, baseline: false },
       { version: 4, baseline: false },
       { version: 5, baseline: false },
+      { version: 6, baseline: false },
     ]);
   });
 });
@@ -174,6 +175,7 @@ test("canonical 空 migration ledger 无业务表时可安全初始化", async (
       { version: 3, baseline: false },
       { version: 4, baseline: false },
       { version: 5, baseline: false },
+      { version: 6, baseline: false },
     ]);
   });
 });
@@ -298,6 +300,7 @@ test("migration ledger 在两个 server 并发启动时只应用一次，核心 
         { version: 3, name: "core_relational_integrity", baseline: false },
         { version: 4, name: "oauth_clients_and_tokens", baseline: false },
         { version: 5, name: "task_launcher", baseline: false },
+        { version: 6, name: "claude_terminal_launcher", baseline: false },
       ]);
 
       const foreignKeys = await sql.unsafe(`
@@ -426,7 +429,7 @@ test("活跃 writer 反序锁触发 deadlock 时整事务重试，期间不留�
       writerInTransaction = false;
       await migration;
       const ledger = await sql.unsafe(`SELECT version FROM coflux.schema_migrations ORDER BY version`);
-      assert.deepEqual(ledger.map((row) => row.version), [1, 2, 3, 4, 5]);
+      assert.deepEqual(ledger.map((row) => row.version), [1, 2, 3, 4, 5, 6]);
     } finally {
       if (writerInTransaction) await writer.unsafe("ROLLBACK").catch(() => undefined);
       writer.release();
@@ -639,6 +642,7 @@ test("完整 legacy baseline 可建账本，目录 projectId 在 DB NULL 与协�
         { version: 3, baseline: false },
         { version: 4, baseline: false },
       { version: 5, baseline: false },
+      { version: 6, baseline: false },
       ]);
 
       const persisted = await sql.unsafe(`

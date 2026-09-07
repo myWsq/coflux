@@ -996,9 +996,12 @@ function tailLines(text, n) {
 async function cmdTerminal(values) {
   const sub = positionals[1];
   if (sub === "new") {
-    const command = values.cmd;
-    if (!command) die(`terminal new 需要 --cmd "<命令>"`);
-    const result = await agentPost({ action: "terminal.new", title: values.title || "", command });
+    const command = values.cmd || "";
+    const launcher = values.launcher || "";
+    if (launcher && !["codex", "claude"].includes(launcher)) die("--launcher 仅支持 codex 或 claude");
+    if (launcher && command) die("--launcher 与 --cmd 不能同时使用");
+    if (!launcher && !command.trim()) die(`terminal new 需要 --cmd "<命令>" 或 --launcher <codex|claude>`);
+    const result = await agentPost({ action: "terminal.new", title: values.title || (launcher === "codex" ? "Codex" : launcher === "claude" ? "Claude" : ""), command, launcher });
     console.log(`已开终端 ${result.taskId}（用户可在 coflux 侧栏看到并随时接管）`);
     console.log(`看输出：cofluxd terminal read ${result.taskId}`);
   } else if (sub === "list") {
@@ -1087,6 +1090,8 @@ const HELP = `cofluxd —— coflux daemon 管理
 
   cofluxd terminal new --cmd "<命令>" [--title "<标题>"]
                           开一个真实终端跑命令，用户在 coflux 侧栏能看到并随时接管
+  cofluxd terminal new --launcher <codex|claude> [--title "<标题>"]
+                          在本工作区新终端直接运行 Codex / Claude Code（原生 TTY，与 --cmd 互斥）
   cofluxd terminal list   列出本工作区的终端（含 status / 退出码）
   cofluxd terminal read <taskId> [--lines N]
                           读某个终端的内容（纯文本，默认最后 200 行；终端已退出也能读）
@@ -1117,6 +1122,7 @@ const { values, positionals } = parseArgs({
     shell: { type: "string" },
     title: { type: "string" },
     cmd: { type: "string" },
+    launcher: { type: "string" },
     lines: { type: "string" },
     timeout: { type: "string" },
     text: { type: "string" },

@@ -258,6 +258,8 @@ struct AgentBody {
     #[serde(default)]
     command: String,
     #[serde(default)]
+    launcher: String,
+    #[serde(default)]
     task_id: String,
     #[serde(default)]
     message: String,
@@ -279,7 +281,15 @@ async fn handle_agent(
         .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
     let action = match parsed.action.as_str() {
         "terminal.new" => {
-            if parsed.command.trim().is_empty() {
+            if !parsed.launcher.is_empty() && !matches!(parsed.launcher.as_str(), "codex" | "claude") {
+                return Err(RequestError::BadRequest("不支持的终端 launcher".into()));
+            }
+            if !parsed.launcher.is_empty() && !parsed.command.is_empty() {
+                return Err(RequestError::BadRequest(
+                    "launcher 与 command 不能同时使用".into(),
+                ));
+            }
+            if parsed.launcher.is_empty() && parsed.command.trim().is_empty() {
                 return Err(RequestError::BadRequest("terminal.new 缺 command".into()));
             }
             if parsed.command.len() > MAX_COMMAND_BYTES {
@@ -290,6 +300,7 @@ async fn handle_agent(
             AgentAction::TerminalNew {
                 title: parsed.title,
                 command: parsed.command,
+                launcher: parsed.launcher,
             }
         }
         "terminal.list" => AgentAction::TerminalList,

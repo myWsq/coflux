@@ -131,6 +131,7 @@ fn daemon_capabilities() -> Vec<String> {
         CAPABILITY_PREPARED_EXECUTE.to_string(),
         CAPABILITY_TERMINAL_IO.to_string(),
         "codex_terminal".to_string(),
+        "claude_terminal".to_string(),
     ]
 }
 
