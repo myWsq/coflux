@@ -1593,6 +1593,16 @@ pub struct TaskRemove {
     #[prost(string, tag="1")]
     pub task_id: ::prost::alloc::string::String,
 }
+/// 读取一个任务（终端）的最后输出（plan 097）：web 激活已退出的 Tab 时回放用。server 复用
+/// agent read 的三层来源（daemon 命令日志 → daemon 当前快照 → 中心 checkpoint），结果只回给发起连接。
+/// max_bytes 为 0 取服务端默认；超过上限被钳制。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TaskRead {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub max_bytes: u32,
+}
 /// 查询待确认的 OAuth 授权请求（plan 090：MCP 宿主经 /oauth/authorize 发起、302 落到 web 确认页）。
 /// 不消费请求，供确认页展示客户端名与回调 host；request_id 由 302 的 query 带来。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1611,7 +1621,7 @@ pub struct OAuthAuthorizeDecide {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 34, 24, 35, 36, 37, 38, 39")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 34, 24, 35, 36, 37, 38, 39, 40")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -1672,6 +1682,8 @@ pub mod client_to_server {
         OauthAuthorizeInfo(super::OAuthAuthorizeInfoRequest),
         #[prost(message, tag="39")]
         OauthAuthorizeDecide(super::OAuthAuthorizeDecide),
+        #[prost(message, tag="40")]
+        TaskRead(super::TaskRead),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -1829,9 +1841,29 @@ pub struct OAuthAuthorizeResult {
     #[prost(string, optional, tag="3")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
 }
+/// TaskRead 的回应：data 按 source 解释——log 是命令终端的非 tty 纯文本日志尾部（\n 换行）；
+/// snapshot / checkpoint 是规范化 ANSI 屏幕；none 表示没有任何可回放内容（data 为空）。
+/// status / exit_code 取自回应时刻的 Task 真相；error 非空时其余字段无意义（任务不存在或不属于本账号）。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TaskReadResult {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="2")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag="3")]
+    pub source: ::prost::alloc::string::String,
+    #[prost(double, tag="4")]
+    pub captured_at: f64,
+    #[prost(enumeration="TaskStatus", tag="5")]
+    pub status: i32,
+    #[prost(int32, optional, tag="6")]
+    pub exit_code: ::core::option::Option<i32>,
+    #[prost(string, optional, tag="7")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 33, 34, 35, 36, 37, 38")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -1894,6 +1926,8 @@ pub mod server_to_client {
         OauthAuthorizeInfo(super::OAuthAuthorizeInfoResult),
         #[prost(message, tag="38")]
         OauthAuthorizeResult(super::OAuthAuthorizeResult),
+        #[prost(message, tag="39")]
+        TaskReadResult(super::TaskReadResult),
     }
 }
 // ===== Daemon → Server 载荷 =====

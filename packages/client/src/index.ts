@@ -13,6 +13,8 @@ export {
   type FsListResult,
   type ExecResult,
   type FsWriteResult,
+  type TaskReadResult,
+  type TaskReadSource,
   type DeviceTransportOptions,
   type LocalSessionState,
   type SessionAgentState,

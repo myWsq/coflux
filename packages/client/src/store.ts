@@ -97,6 +97,14 @@ export type ClientError = { id: number; message: string };
 export type FsListResult = { ok: boolean; entries: FsEntry[]; error: string; path?: string };
 export type ExecResult = { ok: boolean; exitCode: number; stdout: string; stderr: string; error: string };
 export type FsWriteResult = { ok: boolean; path?: string; error: string };
+const TASK_READ_TIMEOUT_MS = 15_000;
+
+/** 已退出终端的最后输出来源（plan 097）：log = 命令终端的非 tty 纯文本日志尾部；snapshot / checkpoint = 规范化 ANSI
+ * 屏幕（分别来自 daemon 当前画面与中心缓存）；none = 没有任何可回放内容。 */
+export type TaskReadSource = "log" | "snapshot" | "checkpoint" | "none";
+export type TaskReadResult =
+  | { ok: true; taskId: string; data: Uint8Array; source: TaskReadSource; capturedAt: number; status: TaskStatus; exitCode?: number }
+  | { ok: false; error: string };
 type SessionConsumer = (data: Uint8Array, replace: boolean) => void;
 
 export type LocalSessionState = {
@@ -190,6 +198,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
   let controlAuthenticated = false;
   let errorSequence = 0;
   const sessionConsumers = new Map<string, Set<SessionConsumer>>();
+  // plan 097：taskRead 的 pending 表，按 taskId 去重共享（回应不带 request id）。
+  const pendingTaskReads = new Map<string, { promise: Promise<TaskReadResult>; resolve: (result: TaskReadResult) => void; timer: ReturnType<typeof setTimeout> }>();
   // 中心离线期间已在本机 stop、但还没能删除的 catalog task；重连认证后补投（见 removeTask）。
   const pendingTaskRemovals = new Set<string>();
   // 有本地会话 token 时首屏直接进入 authenticating，避免刷新先闪登录页。
@@ -612,6 +622,29 @@ export function createCofluxClient(options: CofluxClientOptions) {
         });
         break;
       }
+      case "taskReadResult": {
+        const value = payload.value;
+        const pending = pendingTaskReads.get(value.taskId);
+        if (!pending) break;
+        clearTimeout(pending.timer);
+        pendingTaskReads.delete(value.taskId);
+        if (value.error) {
+          pending.resolve({ ok: false, error: value.error });
+          break;
+        }
+        const source: TaskReadSource =
+          value.source === "log" || value.source === "snapshot" || value.source === "checkpoint" ? value.source : "none";
+        pending.resolve({
+          ok: true,
+          taskId: value.taskId,
+          data: value.data,
+          source,
+          capturedAt: value.capturedAt,
+          status: value.status,
+          exitCode: value.exitCode,
+        });
+        break;
+      }
       case "error": {
         errorSequence += 1;
         store.setState({ lastError: { id: errorSequence, message: payload.value.message } });
@@ -726,6 +759,25 @@ export function createCofluxClient(options: CofluxClientOptions) {
     }
   }
 
+  /** 读取任务（终端）的最后输出（plan 097）：web 激活已退出的 Tab 时回放。同一 task 的并发请求共享同一份
+   * pending（回应不带 request id、按 task 归属）；结果不进 store（256 KB 级 bytes 不该常驻 zustand），
+   * 15 秒无回应按超时收口，断连期间也靠它兜底。 */
+  function readTask(taskId: string, maxBytes?: number): Promise<TaskReadResult> {
+    const existing = pendingTaskReads.get(taskId);
+    if (existing) return existing.promise;
+    let resolve!: (result: TaskReadResult) => void;
+    const promise = new Promise<TaskReadResult>((res) => {
+      resolve = res;
+    });
+    const timer = setTimeout(() => {
+      pendingTaskReads.delete(taskId);
+      resolve({ ok: false, error: "读取终端输出超时" });
+    }, TASK_READ_TIMEOUT_MS);
+    pendingTaskReads.set(taskId, { promise, resolve, timer });
+    send({ case: "taskRead", value: { taskId, maxBytes: maxBytes ?? 0 } });
+    return promise;
+  }
+
   async function execInWorkspace(workspaceId: string, command: string, args: string[], timeoutMs?: number): Promise<ExecResult> {
     const workspace = store.getState().workspaces.find((item) => item.id === workspaceId);
     if (!workspace) return { ok: false, exitCode: -1, stdout: "", stderr: "", error: "工作区不存在" };
@@ -786,6 +838,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     registerSessionConsumer,
     listDeviceDirectory,
     execInWorkspace,
+    readTask,
     sendFsWrite,
     reportLocalError,
     disconnect,

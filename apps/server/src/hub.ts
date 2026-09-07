@@ -2824,6 +2824,29 @@ export class Hub {
         await this.removeTaskRecord(initial, false);
         break;
       }
+      case "taskRead": {
+        // plan 097：web 回放已退出终端的最后输出。复用 agent read 的三层来源（daemon 日志 → daemon 快照 →
+        // 中心 checkpoint）；错误随结果自带，不走 ServerError——那条广播会触发 web 清 launching 态，串扰无关任务。
+        const value = msg.payload.value;
+        const read = await this.readTerminalForAccount(
+          client.accountId!,
+          value.taskId,
+          value.maxBytes > 0 ? value.maxBytes : undefined,
+        );
+        if (!read.ok) {
+          this.sendClient(client, {
+            case: "taskReadResult",
+            value: { taskId: value.taskId, data: new Uint8Array(), source: "none", capturedAt: 0, status: TaskStatus.UNSPECIFIED, error: read.error },
+          });
+          break;
+        }
+        const { task, data, source, capturedAt } = read.value;
+        this.sendClient(client, {
+          case: "taskReadResult",
+          value: { taskId: task.id, data, source, capturedAt: capturedAt ?? 0, status: task.status, exitCode: task.exitCode },
+        });
+        break;
+      }
     }
   }
 
