@@ -1,236 +1,244 @@
 ---
 name: coflux
-description: 当你运行在 coflux 终端里时，把长任务、并行工作和求助外化成用户在 coflux web/手机上看得见、能随时接管的真实终端。读 COFLUX_* 环境变量知道自己在哪台设备/项目/工作区/终端；本工作区内一律用零凭证的本地 cofluxd 命令（开终端、读、等、输入、播报、叫人、拿预览 URL），只有跨出本工作区（开子工作区、跨工作区/跨设备）才用中心的 coflux MCP。适用于跑测试/构建/dev server 等耗时命令、需要用户接管或决策、想给用户一个可点开的预览 URL、要在隔离的子工作区并行干活的场景。
+description: When you run inside a coflux terminal, externalize long tasks, parallel work and requests for help into real terminals the user can watch and take over from the coflux web/mobile app. Your coordinates (device / project / workspace / terminal) arrive in a <coflux-session> block at session start, or via the COFLUX_* environment variables. Inside your own workspace always use the zero-credential local cofluxd commands (open, read, wait, send, report progress, call the user, get preview URLs); use the center's coflux MCP only to leave this workspace (child workspaces, other workspaces or devices). Use for long-running commands such as tests, builds and dev servers, when the user has to take over or decide, when you want to hand the user a clickable preview URL, or when you need an isolated child workspace for parallel work.
 ---
 
-# 在 coflux 里工作
+# Working inside coflux
 
-你可能正跑在 coflux 的一个终端里。coflux 让用户在浏览器和手机上盯着各台机器上的
-agent 干活，随时接管。这个 skill 让你把自己的工作**变成用户看得见的东西**，并在需要时
-操作账号下的其它工作区和设备。
+You may be running inside a coflux terminal. coflux lets the user watch agents working on many
+machines from a browser or a phone and take over at any time. This skill makes your work
+**visible to the user** and lets you operate the other workspaces and devices under the account
+when you need to.
 
-两条轨道，分工只有一条规则：**本地能闭环的一律用本地命令；只有跨出本工作区才用 MCP。**
+Two tracks, one rule: **whatever closes locally uses local commands; only leaving this
+workspace goes through MCP.**
 
-| 轨道 | 凭证 | 触达范围 | 用在 |
+| Track | Credentials | Reach | Use for |
 |---|---|---|---|
-| 本地命令 `cofluxd terminal/progress/notify/ports` | 零凭证（daemon 按你的进程树认身份） | **你所在的工作区** | 开终端、读、等、输入、播报、叫人、拿预览 URL——首选，最快、不依赖网络 |
-| 中心 MCP `coflux`（14 个 tools） | 用户在宿主里做一次 OAuth 授权 | **整个账号**：所有设备、项目、工作区、终端 | 开子工作区（git worktree）、跨工作区/跨设备读写、从 coflux 之外接入 |
+| Local commands `cofluxd terminal/progress/notify/ports` | none (the daemon identifies you by process tree) | **the workspace you are in** | open, read, wait, send, report progress, call the user, preview URLs: the default, fastest, no network dependency |
+| Center MCP `coflux` | one OAuth authorization by the user in the host | **the whole account**: every device, project, workspace and terminal | child workspaces (git worktrees), cross-workspace / cross-device access, joining from outside coflux |
 
-本地命令里 `send`/`read`/`wait`/`notify`/`progress` 完全在本机 daemon 内完成，不经中心；
-`new`/`list`/`ports` 由 daemon 代你问中心（终端要出现在用户侧栏、预览 URL 由中心生成）。
-你永远只和本机 daemon 说话。
+Of the local commands, `send`/`read`/`wait`/`notify`/`progress` complete entirely inside the
+local daemon and never touch the center; `new`/`list`/`ports` are relayed to the center by the
+daemon on your behalf (terminals must appear in the user's sidebar, preview URLs are minted by
+the center). You only ever talk to the local daemon.
 
-## 先判断自己在哪
+## Figure out where you are first
 
-先看环境变量：
+With the coflux plugin installed, Claude Code and Codex receive a `<coflux-session>` block at
+session start (and again after context compaction). Your coordinates are in it; use them
+directly. Without that block (no plugin, hand-wired hooks, hook not trusted yet), read the
+environment:
 
 ```sh
 env | grep '^COFLUX_'
 ```
 
-- **`COFLUX_WORKSPACE_ID` 非空** → 你在 coflux 终端里，daemon 是新版。下面的变量就是你的坐标，
-  MCP tools 要的 id 直接从这里拿，不用去 `list_*` 里猜：
+- **`COFLUX_WORKSPACE_ID` is non-empty** (or the `<coflux-session>` block is present) → you are in
+  a coflux terminal with an up-to-date daemon. The variables below are your coordinates; pass
+  these ids to MCP tools directly instead of guessing from `list_*`:
 
-  | 变量 | 含义 |
+  | Variable | Meaning |
   |---|---|
-  | `COFLUX_DEVICE_ID` | 你所在机器的设备 id（`list_devices` 的 id） |
-  | `COFLUX_PROJECT_ID` | 所属项目 id；无仓库的目录工作区为空串 |
-  | `COFLUX_WORKSPACE_ID` | 所属工作区 id（`list_workspaces` 的 id） |
-  | `COFLUX_TASK_ID` | 你这个终端的 id（本地命令与 `read_terminal` 用的 taskId / terminalId） |
-  | `COFLUX_SESSION_ID` | 你这个 PTY 会话 id |
-  | `COFLUX_MCP_URL` | 中心 MCP 地址，用户配 MCP 时就用它 |
+  | `COFLUX_DEVICE_ID` | id of the device you run on (the id in `list_devices`) |
+  | `COFLUX_PROJECT_ID` | owning project id; empty string for a directory workspace without a repository |
+  | `COFLUX_WORKSPACE_ID` | owning workspace id (the id in `list_workspaces`) |
+  | `COFLUX_TASK_ID` | id of this terminal (the taskId / terminalId used by local commands and `read_terminal`) |
+  | `COFLUX_SESSION_ID` | id of this PTY session |
+  | `COFLUX_MCP_URL` | the center's MCP URL; the user configures MCP with it |
 
-- **变量为空或不存在** → 当作不在 coflux 里，忘掉这个 skill，照常用你自己的工具（用户已在宿主里配了
-  coflux MCP 的话，MCP tools 照用，只是没有「我在哪」的坐标）。如果用户明确说你就在 coflux 终端里，
-  那是这台机器的 daemon 还没升级：告诉用户 `cofluxd update && cofluxd restart`，重开终端后变量与本地命令
-  就都有了。
+- **Variables empty or absent** → treat yourself as outside coflux: forget this skill and use your
+  own tools as usual (if the user configured the coflux MCP in the host, the MCP tools still work;
+  you just have no "where am I" coordinates). If the user insists you are inside a coflux terminal,
+  this machine's daemon has not been upgraded: tell the user to run `cofluxd update && cofluxd restart`;
+  after reopening the terminal the variables and the local commands are there.
 
-## 什么时候开终端
+## When to open a terminal
 
-**用 `cofluxd terminal new` 而不是自己后台起进程**——只要这条命令满足任一条：
+**Use `cofluxd terminal new` instead of backgrounding a process yourself** whenever the command
+meets any of these:
 
-- 要跑超过十几秒（测试、构建、安装依赖、迁移）
-- 会一直跑下去（dev server、watch、日志跟随）
-- 用户可能想接管（需要交互、可能要中途叫停、失败了要人去调）
+- it runs longer than ten-odd seconds (tests, builds, dependency installs, migrations)
+- it keeps running (dev server, watch mode, log tailing)
+- the user may want to take over (interactive, may need to be stopped midway, needs a human when it fails)
 
-这类工作在你自己的 Bash 里后台跑，用户**什么也看不见**：看不到它在跑、接管不了、
-出问题只能等你转述。开成 coflux 终端，它就是侧栏里一个有标题的条目，用户能点进去、
-能接管、能自己敲命令。
+Backgrounded in your own Bash, the user **sees nothing**: not that it is running, no way to take
+over, and failures only reach them through your retelling. Opened as a coflux terminal, it is a
+titled entry in the sidebar the user can open, take over and type into.
 
-**不要用**在一次性的快命令上（`ls`、`grep`、`git status`、读文件）——你自己的工具更快，
-给用户开一堆一秒就结束的终端只是噪音。
+**Do not use it** for quick one-shot commands (`ls`, `grep`, `git status`, reading files): your
+own tools are faster, and a pile of one-second terminals is just noise to the user.
 
-## 本地命令
+## Local commands
 
-### 开终端跑命令
+### Open a terminal and run a command
 
 ```sh
-cofluxd terminal new --title "跑单测" --cmd "pnpm -C tests test"
+cofluxd terminal new --title "Run unit tests" --cmd "pnpm -C tests test"
 ```
 
-`--title` 是用户在侧栏看到的名字，**认真起**：写「跑单测」「起 dev server」，
-别写「terminal 1」。命令在当前工作区目录下、用登录 shell 执行，命令行最长 16 KB。
+`--title` is the name the user sees in the sidebar; **name it properly**: "Run unit tests",
+"Start dev server", never "terminal 1". The command runs in the current workspace directory
+under the login shell; the command line is capped at 16 KB.
 
-命令跑完终端就退出，任务转 `exited` 并带上退出码——这是你判断成没成的依据。
-所以别指望在同一个终端里接着跑第二条命令，要么写成 `a && b`，要么再开一个。
+The terminal exits when the command finishes and the task becomes `exited` with the exit code:
+that is how you tell success from failure. So do not expect to run a second command in the same
+terminal: write `a && b`, or open another one.
 
-命令的输出会同时落一份本地日志供你回读（保留最近约 1 MB 的尾部），代价是它的 stdout 是管道
-而不是 tty——多数程序会因此关掉颜色和进度条。极少数程序在非 tty 下行为不同（比如不输出进度、
-切成 CI 模式），如果你依赖那种行为，自己在 Bash 里跑。
+The output is also written to a local log for you to read back (roughly the last 1 MB is kept).
+The cost is that stdout is a pipe rather than a tty, so most programs turn off colors and
+progress bars. A few programs behave differently without a tty (no progress output, CI mode);
+if you depend on that behavior, run the command in your own Bash instead.
 
-新开的终端里同样有 `COFLUX_*` 变量（指向它自己的 task/session id，工作区与你相同）。
+The new terminal has the same `COFLUX_*` variables (pointing at its own task/session ids, same
+workspace as you).
 
-### 看跑到哪了
+### See how far it got
 
 ```sh
-cofluxd terminal list                      # 本工作区所有终端：id、状态、退出码、标题
-cofluxd terminal read <taskId>             # 某个终端的内容（纯文本，默认最后 200 行）
+cofluxd terminal list                      # every terminal in this workspace: id, state, exit code, title
+cofluxd terminal read <taskId>             # a terminal's content (plain text, last 200 lines by default)
 cofluxd terminal read <taskId> --lines 50
 ```
 
-`list` 的状态是 `running` / `exited` / `idle`；`exited` 会带 `exit=<码>`。
-**终端已经退出也能 read**——「命令跑完了看输出」正是最常用的场景。`read` 读的是本机日志，
-没有日志的终端（用户手开的）读当前画面，都是即时的。
+`list` states are `running` / `exited` / `idle`; `exited` carries `exit=<code>`.
+**An exited terminal can still be read**: "the command finished, look at the output" is the most
+common case. `read` reads the local log; terminals without a log (opened by the user) return the
+current screen. Both are immediate.
 
-### 等命令跑完
-
-```sh
-cofluxd terminal wait <taskId>               # 阻塞到该终端退出，打印退出码（默认最长等 30 分钟）
-cofluxd terminal wait <taskId> --timeout 300 # 自定超时（秒）；超时会明确报错并非零退出
-```
-
-要等一条命令跑完就用 `wait`，**别自己写轮询循环**——它一条命令阻塞到位，退出码直接给你。
-超时不代表命令失败，只是还没跑完：`read` 看看现场再决定继续等还是处理。
-
-### 往终端里输入
+### Wait for a command to finish
 
 ```sh
-cofluxd terminal send <taskId> --text "y" --enter    # 输入一行并回车
-cofluxd terminal send <taskId> --enter               # 只按一个回车
+cofluxd terminal wait <taskId>               # block until that terminal exits and print the exit code (default cap 30 minutes)
+cofluxd terminal wait <taskId> --timeout 300 # custom timeout in seconds; a timeout fails loudly with a non-zero exit
 ```
 
-用在命令要交互确认（y/N、选项）、或想在跑完的同一 shell 里补一条命令的时候。纪律：
+To wait for a command use `wait`; **do not write your own polling loop**. One command blocks
+until done and hands you the exit code. A timeout does not mean the command failed, only that it
+is still running: `read` to see where it is, then decide whether to keep waiting or act.
 
-- **先 `read` 再 `send`**：看清终端现在在等什么再输入，别盲打。
-- **用户正在接管时会被拒**——这不是错误，是设计：人永远优先。被拒就停手，
-  要沟通用 `notify`，别重试。
-- send 超时后**不要直接重发**：先 `read` 确认刚才那次到底进没进去，重复输入比丢输入更糟。
-- 单次文本最长 64 KB；它是交互输入通道，不是传文件的。
-
-### 播报进度
+### Type into a terminal
 
 ```sh
-cofluxd progress "复现了，正在定位 relay 重连的时序"
+cofluxd terminal send <taskId> --text "y" --enter    # type a line and press Enter
+cofluxd terminal send <taskId> --enter               # just press Enter
 ```
 
-一句话告诉用户你干到哪了，显示在工作区卡片上，被下一条覆盖。在关键节点更新：复现了、
-定位到了、修完在验、卡在哪。它**不打扰用户**，和 `notify` 是两条信道：
+For interactive confirmations (y/N, menus), or to add a command in the same shell after the
+previous one finished. Discipline:
 
-- `progress` = 播报（用户扫一眼就知道进展，不需要回应）
-- `notify` = 叫人（工作区转「等待交互」，用户该来看看了）
+- **`read` before `send`**: see what the terminal is waiting for before typing; never type blind.
+- **Refused while the user is taking over**: that is not an error, it is by design; humans always
+  win. Stop when refused; use `notify` to communicate, do not retry.
+- **After a send timeout do not resend right away**: `read` first to check whether the input
+  actually landed; duplicated input is worse than lost input.
+- A single text is capped at 64 KB; this is an interactive input channel, not a file transfer.
 
-拿不准用哪个：不需要用户做任何事就用 `progress`。
-
-### 叫人
+### Report progress
 
 ```sh
-cofluxd notify "两个方案都能走通，需要你定一下用哪个"
+cofluxd progress "Reproduced; narrowing down the relay reconnect timing"
 ```
 
-用户的侧栏里这个工作区会转成「等待交互」并显示这句话——他在手机上也看得到。
-用在你**真的卡住**的时候：需要用户决策、要密码/权限、发现了必须人来判断的问题。
-一句话说清要什么，别写成日志。
+One sentence telling the user how far you are, shown on the workspace card and replaced by the
+next one. Update it at milestones: reproduced, located, fixed and verifying, stuck on X. It
+**does not interrupt the user**; it is a different channel from `notify`:
 
-（你正常的提问和权限请求已经会自动反映到侧栏状态上，不需要额外 notify。
-这条是给「你要说的事，用户光看状态图标猜不出来」准备的。）
+- `progress` = broadcast (the user glances and knows the state, no response needed)
+- `notify` = call the user (the workspace turns "waiting for interaction", the user should come and look)
 
-### 给用户可点开的预览
+If unsure: when the user does not have to do anything, use `progress`.
+
+### Call the user
+
+```sh
+cofluxd notify "Both approaches work; I need you to pick one"
+```
+
+The user's sidebar switches this workspace to "waiting for interaction" and shows this sentence;
+they see it on the phone too. Use it when you are **really stuck**: a decision is needed, a
+password or a permission, a problem only a human can judge. One sentence saying what you need;
+do not write a log.
+
+(Your normal questions and permission prompts already show up in the sidebar state; they need no
+extra notify. This is for "what you have to say cannot be guessed from the status icon".)
+
+### Hand the user a clickable preview
 
 ```sh
 cofluxd ports
 ```
 
-列出本工作区所有监听端口和对应的公网预览 URL。起了 dev server 之后用它拿 URL 直接
-告诉用户，他点开就能看，不用自己去翻。
+Lists every listening port in this workspace with its public preview URL. After starting a dev
+server, use it to get the URL and tell the user directly; they click it and nobody has to dig.
 
-### 本地命令的错误
+### Errors from local commands
 
-错误都是一句可读的话，照它说的办：「不在 coflux 终端里」= 你不在 coflux 会话内；「终端不在本工作区
-或不存在」= 用 `list` 核对 id；「早于 daemon 升级」= 那个终端是 daemon 升级前开的，重开一个；
-「daemon 未连上中心」只会出现在 `new`/`list`/`ports` 上，等连上再试。
+Errors are one readable sentence; do what they say: "not inside a coflux terminal" = you are not
+in a coflux session; "terminal is not in this workspace or does not exist" = check the id with
+`list`; "predates the daemon upgrade" = that terminal was opened before the daemon upgrade, open a
+new one; "daemon is not connected to the center" only appears on `new`/`list`/`ports`, retry once
+it reconnects.
 
-## 中心 MCP：跨出本工作区
+## Center MCP: leaving this workspace
 
-本地命令只看得见你所在的工作区。**只有**要做下面这些事，才用宿主里名为 `coflux` 的 MCP server：
+Local commands only see the workspace you are in. Use the MCP server named `coflux` in the host
+**only** for these:
 
-- **开一个隔离的子工作区并行干活**：`create_workspace`（项目 id 用 `$COFLUX_PROJECT_ID`）
-  在设备上真的 `git worktree add`，然后 `create_terminal` 在那里跑命令。
-- **看/操作别的工作区、别的设备上的终端**：`list_*` → `read_terminal` / `send_terminal_input`。
-- **不在 coflux 终端里**（比如用户在自己电脑上开的 Claude Code）时接入账号下的一切。
-- **不要自己 `git worktree add`**：在 coflux 项目里插件会拦下 `git worktree add|remove|move` 并提示改用
-  `create_workspace` / `remove_workspace`——自己开的 worktree 用户看不见、也开不了终端。
+- **Open an isolated child workspace to work in parallel**: `create_workspace` (project id from
+  `$COFLUX_PROJECT_ID`) really runs `git worktree add` on the device; then `create_terminal` runs
+  commands there.
+- **Look at or operate terminals in other workspaces or on other devices**: `list_*` →
+  `read_terminal` / `send_terminal_input`.
+- **Join everything under the account when you are not inside a coflux terminal** (for example
+  Claude Code the user started on their own machine).
+- **Never run `git worktree add` yourself**: inside a coflux project the plugin blocks
+  `git worktree add|remove|move` and points you to `create_workspace` / `remove_workspace`; a
+  worktree you create is invisible to the user and cannot host a terminal.
 
-本工作区内的事不要绕去 MCP：那是多一趟到中心的往返，本地命令一步到位。
+Do not detour through MCP for work inside this workspace: that is an extra round trip to the
+center, while a local command does it in one step.
 
-### 没配 MCP 时
+### When MCP is not configured
 
-先 `claude mcp list`（Codex：`codex mcp list`）看有没有 `coflux`。没有就告诉用户一行接入，
-地址用 `$COFLUX_MCP_URL`（它就是中心公网地址 + `/mcp`）：
+Run `claude mcp list` (Codex: `codex mcp list`) to see whether `coflux` is there. If not, give
+the user the one-line setup, with the URL from `$COFLUX_MCP_URL` (it is the center's public URL
++ `/mcp`):
 
 ```sh
 claude mcp add --transport http coflux "$COFLUX_MCP_URL"     # Claude Code
 codex mcp add coflux --url "$COFLUX_MCP_URL"                 # Codex
 ```
 
-之后宿主会引导用户在浏览器完成一次 OAuth 授权（Claude Code 里是 `/mcp`）。授权是用户的事，
-你只需要把地址和命令给他；没配好之前本工作区内的活照样用本地命令干。
+The host then guides the user through a one-time OAuth authorization in the browser (`/mcp` in
+Claude Code). Authorization is the user's job; you only hand over the URL and the command. Until
+it is set up, keep doing the work inside this workspace with local commands.
 
-### 14 个 tools
+### Using the tools
 
-id 优先从 `COFLUX_*` 环境变量拿；跨出本工作区的 id 用 `list_*` 查。
+The tool list and each tool's contract (parameters, limits, what an error means) come from the
+MCP server itself: read the tool descriptions in the host, they are the source of truth and this
+file does not repeat them. Take ids from the `COFLUX_*` variables first; for anything outside this
+workspace, find ids with the `list_*` tools.
 
-| tool | 用途 |
-|---|---|
-| `list_devices` | 账号下的设备（跑着 daemon 的机器）：id、名称、在线、版本 |
-| `list_projects` | 导入的项目（git 仓库）：id、所在设备、仓库路径、默认分支 |
-| `list_workspaces` | 工作区（主工作区 = 仓库本身，其余是 worktree；目录工作区 projectId 为 null），可按 projectId 筛 |
-| `list_terminals` | 终端：id、工作区、标题、状态 idle/running/exited、退出码，可按 workspaceId 筛 |
-| `read_terminal` | 读终端纯文本（去 ANSI，默认尾 200 行）：source=log 是命令终端的日志（退出后仍可读），snapshot 是当前画面，checkpoint 是设备离线时中心的最近快照 |
-| `list_ports` | 终端里检测到的监听端口 + 可直接打开的预览 URL |
-| `create_workspace` | 在项目下新建 git worktree 工作区（可新建分支），设备真在磁盘上建目录 |
-| `rename_workspace` | 改工作区名（纯展示） |
-| `remove_workspace` | 删 worktree 工作区：先关其下所有终端再 `git worktree remove --force`（未提交改动会丢）；主工作区不可删 |
-| `create_terminal` | 在某工作区开真实终端跑一条命令（用户可接管、侧栏可见），跑完带退出码；输出落日志供 `read_terminal` |
-| `send_terminal_input` | 往运行中的终端写文本（默认追加回车） |
-| `wait_terminal` | 有界等待终端退出并拿退出码（默认 30 秒、上限 600 秒，受宿主单请求超时约束） |
-| `stop_terminal` | 结束终端会话（等价 web 上的停止） |
-| `remove_terminal` | 删终端记录；运行中的必须先 `stop_terminal` |
+The local-command disciplines apply to MCP just the same: `read_terminal` before
+`send_terminal_input`, stop when refused because the user is taking over (communicate with
+`cofluxd notify` instead of retrying), `wait_terminal` instead of a polling loop around
+`read_terminal`, and stop on "needs upgrade" (tell the user to run
+`cofluxd update && cofluxd restart` on that device; do not retry or work around it).
 
-### 用 MCP 的三条纪律
+## Boundaries
 
-1. **人类优先**：`send_terminal_input` 在用户正在接管那个终端时会被拒，错误里写明
-   「用户正在接管」——把交互留给用户，不要重试；要沟通用本工作区的 `cofluxd notify`。
-   `send` 之前先 `read_terminal` 看清它在等什么；回执超时先 `read` 再决定要不要重发。
-2. **有界等待**：`wait_terminal` 到期返回 `timedOut=true` 不是错误——需要更久就再调一次，
-   **别自己写轮询循环去 `read_terminal`**。上限 600 秒，但宿主的单请求超时是真正的天花板：手动
-   `claude mcp add` 的 Claude Code 默认 60 秒，此时 `timeoutSeconds` 别超过 50；经 coflux 插件接入的
-   宿主已放宽。`create_workspace` / `create_terminal` 最多等 30 秒启动回执，到期返回「已提交」并附 id，
-   稍后用 `list_*` 查。
-3. **「需要升级」就停**：写 tools 在目标设备的 daemon 太旧时立即返回「该设备的 daemon 需要
-   升级」——这是能力门禁，不是暂时故障。转告用户在那台机器上 `cofluxd update && cofluxd restart`，
-   别重试也别换 tool 绕。
-
-本地命令的纪律（先 read 再 send、被拒即停、`progress` 与 `notify` 分界、用 `wait` 别轮询）
-在 MCP 里同样成立。
-
-## 边界
-
-- 你能开、读、等、输入，但**输入是人类优先的受限写权**：用户正在接管的终端你写不进去
-  （会被明确拒绝），用户随时接管也会把你顶掉。别和人抢终端。
-- 本地命令只看得见**你自己所在的工作区**；别的工作区和别的机器要经 MCP，且限于同一账号。
-- 一个工作区同时活着的终端有上限（默认 8，含用户自己开的）。撞上限先 `list` 看看，
-  多半是有跑完没收的；真是用户占满了，就 `notify` 告诉他，别硬试。
-- `new`/`list`/`ports` 与所有 MCP tools 都要 daemon 连着中心才能用——毕竟「让用户看见」就是它们的
-  全部意义；`send`/`read`/`wait`/`notify`/`progress` 不依赖中心。连不上时会明确报错，不会默默降级。
-- `COFLUX_*` 变量只在 coflux 开出来的 PTY 里有；你自己 `export` 或改它们没有任何效果，
-  中心只认它自己下发的 id。
+- You can open, read, wait and type, but **typing is a restricted write with humans first**: you
+  cannot write into a terminal the user is taking over (you are refused explicitly), and the user
+  taking over at any time displaces you. Do not fight a human for a terminal.
+- Local commands only see **the workspace you are in**; other workspaces and other machines go
+  through MCP and are limited to the same account.
+- A workspace has a cap on concurrently live terminals (default 8, including the user's own).
+  On hitting the cap, `list` first: usually some finished terminals were never collected. If the
+  user really filled it up, `notify` them instead of forcing it.
+- `new`/`list`/`ports` and every MCP tool need the daemon connected to the center; "letting the
+  user see" is their whole point. `send`/`read`/`wait`/`notify`/`progress` do not depend on the
+  center. When disconnected they fail loudly rather than degrade silently.
+- `COFLUX_*` variables exist only in PTYs opened by coflux; exporting or changing them yourself
+  has no effect, the center only trusts the ids it issued.
