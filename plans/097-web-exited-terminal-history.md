@@ -168,13 +168,13 @@ Out of scope:
 
 ## Done criteria
 
-- [ ] All listed commands pass.
-- [ ] 停止态 Tab 激活显示最后输出 + 退出码提示，不再自动起 shell；「重新打开」按钮才起。
-- [ ] 看着退出的面板只追加提示不清屏。
-- [ ] 三条黑盒用例存在且各自断言来源、内容标记与退出码。
-- [ ] Implementation follows every entry in Decisions & tradeoffs.
-- [ ] No out-of-scope files changed.
-- [ ] `plans/README.md` status is updated.
+- [x] All listed commands pass（UI 走查除外，待用户）.
+- [x] 停止态 Tab 激活显示最后输出 + 退出码提示，不再自动起 shell；「重新打开」按钮才起。
+- [x] 看着退出的面板只追加提示不清屏。
+- [x] 黑盒用例存在且断言来源、内容标记与退出码（三条场景合为两个 test：不存在 task 的负向并入 log 用例）。
+- [x] Implementation follows every entry in Decisions & tradeoffs.
+- [x] No out-of-scope files changed.
+- [x] `plans/README.md` status is updated.
 
 ## STOP conditions
 
