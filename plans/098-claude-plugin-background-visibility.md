@@ -155,6 +155,12 @@ Out of scope:
 
 ## Maintenance notes
 
+- **里程碑 3 的前提实测结论（做成了，未降级）**：官方 hooks 文档对这一段是空白（`code.claude.com/docs/en/hooks.md` 只给 `tool_response` 的通用形状，auto-backgrounding 那条路径的字段名一个字没提），所以结论取自本机 Claude Code **2.1.263** 二进制里的实现，四条证据：
+  ① Bash 工具的 output schema 显式声明 `backgroundTaskId: string().optional().describe("ID of the background task if command is running in background")`，同一对象上还有 `timedOutAfterMs` / `backgroundedByUser` / `backgroundedByTurnAbort` / `backgroundedToDeliverMessage`；
+  ② 超时那条返回路径是 `{stdout:"", stderr:"", code:0, interrupted:false, backgroundTaskId, timedOutAfterMs}`，显式后台那条只有 `backgroundTaskId`——官方自己的埋点 `tengu_bash_task_ack` 也正是用 `timedOutAfterMs !== undefined` 判定 `trigger=timeout`，所以这个字段就是「自动后台化」的判据；
+  ③ 工具在自动后台化**那一刻**就 return 结果对象（不等进程退出），因此 PostToolUse 此时触发；
+  ④ PostToolUse 载荷是 `{hook_event_name, tool_name, tool_input, tool_response, tool_use_id, duration_ms}`，`tool_response` 就是上面那个原始结果对象（schema 里是通用 object，不是渲染后的文本块）。
+  取证方式：`strings` 扫二进制 + 定点 grep，没有真触发一次自动后台化。**这些字段是未公开契约**，Claude Code 升级可能改名；探测器认不出时是零动作（不误报），所以退化是安全的，但升级后若发现播报再也不出现，先回来重扫一遍字段名。
 - **发版路径**：改完插件要提 version（本 plan 已提到 0.6.0）、push，再把 SHA 交给 plugins-builder 会话发市场版本。用户侧 `/plugin` 更新后才生效，Codex 需要重新信任新的 hook 条目。
 - **已知缺口（本 plan 不解决）**：① agent 在前台 Bash 里手写 `cmd &` / `nohup` 自行后台化，PreToolUse 的布尔判据看不见，PostToolUse 也拿不到泄漏字段；② 前台超时自动后台化只能播报、无法强制外化；③ deny 之后 agent 若坚持前台硬跑长命令，本 plan 不拦（拦不住——PreToolUse 无从判断时长）。三者的唯一完整封口是 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`，代价是连带废掉 subagent 后台化与 Ctrl+B，已判定太钝；若将来用户愿意接受，可作为可选开关立项。
 - **本机隐患（与本 plan 无关，顺带记录）**：立项调研时发现本机同时跑着四个 daemon 进程（launchd 两个 + `~/.codex/worktrees/3577/coflux/target/debug/` 两个），CLI 连哪个取决于 gateway summary 文件。调试 agent 命令行为时若结果反常，先确认连的是哪个 daemon。
