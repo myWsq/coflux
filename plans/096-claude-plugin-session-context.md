@@ -131,13 +131,13 @@ Out of scope:
 
 ## Done criteria
 
-- [ ] All listed commands pass.
-- [ ] coflux 终端里的会话开始即有 `<coflux-session>` 块，含六个 `COFLUX_*=…` 行、分工规则与 skill 指针。
-- [ ] 不在 coflux 里零输出、退出 0；脚本缺失静默。
-- [ ] 插件目录全英文，SKILL 两份一致且语义与中文版逐条对应。
-- [ ] 插件 0.5.0 已在 `myWsq/plugins@main`。
-- [ ] No out-of-scope files changed.
-- [ ] `plans/README.md` status is updated.
+- [x] All listed commands pass.
+- [x] coflux 终端里的会话开始即有 `<coflux-session>` 块，含六个 `COFLUX_*=…` 行、分工规则与 skill 指针。
+- [x] 不在 coflux 里零输出、退出 0；脚本缺失静默。
+- [x] 插件目录全英文，SKILL 两份一致且语义与中文版逐条对应。
+- [x] 插件 0.5.0 已在 `myWsq/plugins@main`。
+- [x] No out-of-scope files changed.
+- [x] `plans/README.md` status is updated.
 
 ## STOP conditions
 
