@@ -13,11 +13,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const GUARD = `${ROOT}integrations/claude-plugin/scripts/guard-background-bash.mjs`;
+const REPORTER = `${ROOT}integrations/claude-plugin/scripts/report-background-task.mjs`;
 
 function run(script, stdin, env = {}) {
   return new Promise((resolve) => {
@@ -123,6 +126,101 @@ test("不误拦：非 coflux 会话、非 Bash、坏 JSON、非后台调用都�
   await silent("", IN_WORKSPACE, "空 stdin");
 });
 
+/* ---------------- PostToolUse：不可见后台任务的播报器 ---------------- */
+
+// 假 cofluxd：把 argv 记进日志，同时往 stdout 打一行——用来验证 hook 确实把子进程的 stdout 丢掉了。
+function withFakeCofluxd(fn) {
+  const dir = mkdtempSync(join(tmpdir(), "coflux-098-"));
+  try {
+    const log = join(dir, "calls.log");
+    const bin = join(dir, "cofluxd");
+    writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\necho "已广播给用户"\n`);
+    chmodSync(bin, 0o755);
+    return fn({ dir, log });
+  } finally {
+    // 只删 mkdtemp 自己返回的那个路径，且必须在系统临时目录下。
+    if (dir && dir.startsWith(tmpdir())) rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function report(stdin, env = IN_WORKSPACE) {
+  return withFakeCofluxd(async ({ dir, log }) => {
+    const { code, stdout } = await run(REPORTER, stdin, { ...env, PATH: `${dir}:${process.env.PATH}` });
+    assert.equal(code, 0, "PostToolUse hook 退出码必须是 0");
+    assert.equal(stdout, "", `PostToolUse 的 stdout 必须零字节（会被当上下文注入）: ${JSON.stringify(stdout)}`);
+    return existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean) : [];
+  });
+}
+
+const post = (toolResponse, { command = "pnpm build", description = "Build the app" } = {}) => ({
+  hook_event_name: "PostToolUse",
+  tool_name: "Bash",
+  tool_input: { command, description },
+  tool_response: toolResponse,
+  tool_use_id: "toolu_1",
+});
+
+test("前台命令超时被自动后台化：认出泄漏字段，用 progress 播报给用户", async () => {
+  const calls = await report(post({ stdout: "", stderr: "", interrupted: false, backgroundTaskId: "bg_1", timedOutAfterMs: 120000 }));
+  assert.equal(calls.length, 1, `应当只播报一次: ${JSON.stringify(calls)}`);
+  assert.match(calls[0], /^progress /, "必须走 progress（广播），不是 notify（叫人）");
+  assert.match(calls[0], /Build the app/, "要带上 agent 自己写的 description");
+  assert.match(calls[0], /120s/, "超时后台化要说明是超时导致的");
+  assert.match(calls[0], /cannot see|no terminal/i, "要说清这是用户看不见的后台任务");
+});
+
+test("显式后台（绕过了 deny）也播报，但措辞不提超时", async () => {
+  const calls = await report(post({ stdout: "", stderr: "", interrupted: false, backgroundTaskId: "bg_2" }));
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(calls[0], /timeout/i, "没有 timedOutAfterMs 就不该说是超时");
+  assert.match(calls[0], /Build the app/);
+});
+
+test("tool_response 被包成数组时同样认得出", async () => {
+  const calls = await report(post([{ stdout: "", stderr: "", backgroundTaskId: "bg_3", timedOutAfterMs: 5000 }]));
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /5s/);
+});
+
+test("零动作：普通前台结果、用户自己 Ctrl+B、两类豁免命令", async () => {
+  const silent = async (stdin, label, env) => {
+    const calls = await report(stdin, env);
+    assert.deepEqual(calls, [], `${label} 不该调 cofluxd: ${JSON.stringify(calls)}`);
+  };
+  await silent(post({ stdout: "ok", stderr: "", interrupted: false, isImage: false }), "普通前台命令");
+  await silent(post({ stdout: "", stderr: "", backgroundTaskId: "" }), "backgroundTaskId 是空串");
+  await silent(post({ stdout: "", stderr: "", backgroundTaskId: "bg_4", backgroundedByUser: true }), "用户自己按 Ctrl+B 后台化的");
+  await silent(
+    post({ stdout: "", stderr: "", backgroundTaskId: "bg_5" }, { command: "cofluxd terminal wait task-1", description: "Wait" }),
+    "豁免：后台跑 cofluxd terminal wait 正是我们教的配方",
+  );
+  await silent(
+    post({ stdout: "", stderr: "", backgroundTaskId: "bg_6", timedOutAfterMs: 120000 }, { command: "sleep 600", description: "Sleep" }),
+    "豁免：sleep 开头",
+  );
+});
+
+test("PostToolUse 播报器：非 coflux 会话、非 Bash、坏 JSON 一律零输出零动作", async () => {
+  const bgResponse = { stdout: "", stderr: "", backgroundTaskId: "bg_7", timedOutAfterMs: 120000 };
+  assert.deepEqual(await report(post(bgResponse), {}), [], "不在 coflux 工作区里");
+  assert.deepEqual(await report(post(bgResponse), { COFLUX_WORKSPACE_ID: "" }), [], "工作区 id 是空串");
+  assert.deepEqual(await report({ ...post(bgResponse), tool_name: "Task" }), [], "非 Bash 工具");
+  assert.deepEqual(await report({ hook_event_name: "PostToolUse", tool_name: "Bash" }), [], "没有 tool_response");
+  assert.deepEqual(await report({ ...post(bgResponse), tool_response: "moved to background" }), [], "tool_response 不是对象");
+  assert.deepEqual(await report("{not json"), [], "坏 JSON");
+  assert.deepEqual(await report(""), [], "空 stdin");
+});
+
+test("缺 cofluxd 时静默：不报错、stdout 仍是零字节", async () => {
+  const { code, stdout } = await run(
+    REPORTER,
+    post({ stdout: "", stderr: "", backgroundTaskId: "bg_8", timedOutAfterMs: 120000 }),
+    { ...IN_WORKSPACE, PATH: "/nonexistent-coflux-bin" },
+  );
+  assert.equal(code, 0, "PATH 里没有 cofluxd 也必须干净退出");
+  assert.equal(stdout, "", `不该有任何输出: ${JSON.stringify(stdout)}`);
+});
+
 test("插件配置：hooks.json 里 guard-background-bash 与既有条目并存，版本 ≥ 0.6.0", () => {
   const hooks = JSON.parse(readFileSync(`${ROOT}integrations/claude-plugin/hooks/hooks.json`, "utf8"));
   const bashEntries = hooks.hooks.PreToolUse.filter((entry) => entry.matcher === "Bash");
@@ -140,6 +238,11 @@ test("插件配置：hooks.json 里 guard-background-bash 与既有条目并存�
     hooks.hooks.PostToolUse.some((entry) => entry.matcher === undefined && /cofluxd hook claude/.test(entry.hooks[0].command)),
     "PostToolUse 的信使条目不能动",
   );
+  const reporter = hooks.hooks.PostToolUse.find((entry) => entry.matcher === "Bash");
+  assert.ok(reporter, "PostToolUse 里要有 matcher=Bash 的播报器条目");
+  assert.match(reporter.hooks[0].command, /\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/report-background-task\.mjs/);
+  assert.match(reporter.hooks[0].command, /command -v node/, "缺 node 要静默放行");
+  assert.match(hooks.description, /run_in_background/, "description 要说明新行为");
   const manifest = JSON.parse(readFileSync(`${ROOT}integrations/claude-plugin/.claude-plugin/plugin.json`, "utf8"));
   const [major, minor] = manifest.version.split(".").map(Number);
   assert.ok(major > 0 || minor >= 6, `插件版本必须 ≥ 0.6.0: ${manifest.version}`);
@@ -161,6 +264,7 @@ test("插件目录全英文：没有汉字", () => {
     "integrations/claude-plugin/hooks/hooks.json",
     "integrations/claude-plugin/.claude-plugin/plugin.json",
     "integrations/claude-plugin/scripts/guard-background-bash.mjs",
+    "integrations/claude-plugin/scripts/report-background-task.mjs",
     "integrations/claude-plugin/skills/coflux/SKILL.md",
   ];
   for (const file of files) {
