@@ -2760,6 +2760,10 @@ export class Hub {
       }
       case "taskCreate": {
         const value = msg.payload.value;
+        if (value.launcher && value.launcher !== "codex") {
+          this.sendClient(client, { case: "error", value: { message: "不支持的终端启动程序" } });
+          return;
+        }
         const initialWorkspace = await this.store.getWorkspace(value.workspaceId);
         if (!initialWorkspace || initialWorkspace.accountId !== client.accountId) {
           this.sendClient(client, { case: "error", value: { message: "工作区不存在或不属于本账号" } });
@@ -2791,7 +2795,7 @@ export class Hub {
                 }
               }
               const ts = Date.now();
-              const task: Task = create(TaskSchema, { id: taskId, accountId: ws.accountId, daemonId: ws.daemonId, projectId: ws.projectId, workspaceId: ws.id, title: value.title || "未命名任务", status: TaskStatus.IDLE, createdAt: ts, updatedAt: ts });
+              const task: Task = create(TaskSchema, { id: taskId, accountId: ws.accountId, daemonId: ws.daemonId, projectId: ws.projectId, workspaceId: ws.id, title: value.title || "未命名任务", launcher: value.launcher, status: TaskStatus.IDLE, createdAt: ts, updatedAt: ts });
               await tx.createTask(task);
               return { task } as const;
             });
@@ -3144,6 +3148,9 @@ export class Hub {
 
     const d = this.daemons.get(task.daemonId);
     if (!d) return void fail(`daemon 不在线：${task.daemonId}`);
+    if (task.launcher === "codex" && !d.capabilities.has("codex_terminal")) {
+      return void fail("该设备尚不支持 Codex 终端，请升级 worker 后重试");
+    }
     const ws = await this.store.getWorkspace(task.workspaceId);
     if (!ws) return void fail("工作区已不存在");
     if (await this.store.isProjectDeleting(task.projectId)) {
@@ -3169,6 +3176,7 @@ export class Hub {
         projectId: ws.projectId,
         daemonId: task.daemonId,
         mcpUrl: config.mcpUrl,
+        launcher: task.launcher,
       },
     });
     await this.withTaskEffectGuard(task.id, async (effectGuard) => {

@@ -1338,6 +1338,9 @@ public struct Coflux_V1_DeviceSessionCreate: Sendable {
 
   public var mcpURL: String = String()
 
+  /// worker 在 prepared 授权后转换成启动脚本，supervisor 仍只创建普通 PTY。
+  public var launcher: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -4422,7 +4425,7 @@ extension Coflux_V1_DeviceSessionExited: SwiftProtobuf.Message, SwiftProtobuf._M
 
 extension Coflux_V1_DeviceSessionCreate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceSessionCreate"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}operation_id\0\u{3}session_id\0\u{3}task_id\0\u{1}cwd\0\u{1}shell\0\u{1}cols\0\u{1}rows\0\u{1}command\0\u{3}workspace_id\0\u{3}project_id\0\u{3}daemon_id\0\u{3}mcp_url\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}operation_id\0\u{3}session_id\0\u{3}task_id\0\u{1}cwd\0\u{1}shell\0\u{1}cols\0\u{1}rows\0\u{1}command\0\u{3}workspace_id\0\u{3}project_id\0\u{3}daemon_id\0\u{3}mcp_url\0\u{1}launcher\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4443,6 +4446,7 @@ extension Coflux_V1_DeviceSessionCreate: SwiftProtobuf.Message, SwiftProtobuf._M
       case 11: try { try decoder.decodeSingularStringField(value: &self.projectID) }()
       case 12: try { try decoder.decodeSingularStringField(value: &self.daemonID) }()
       case 13: try { try decoder.decodeSingularStringField(value: &self.mcpURL) }()
+      case 14: try { try decoder.decodeSingularStringField(value: &self.launcher) }()
       default: break
       }
     }
@@ -4492,6 +4496,9 @@ extension Coflux_V1_DeviceSessionCreate: SwiftProtobuf.Message, SwiftProtobuf._M
     if !self.mcpURL.isEmpty {
       try visitor.visitSingularStringField(value: self.mcpURL, fieldNumber: 13)
     }
+    if !self.launcher.isEmpty {
+      try visitor.visitSingularStringField(value: self.launcher, fieldNumber: 14)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -4509,6 +4516,7 @@ extension Coflux_V1_DeviceSessionCreate: SwiftProtobuf.Message, SwiftProtobuf._M
     if lhs.projectID != rhs.projectID {return false}
     if lhs.daemonID != rhs.daemonID {return false}
     if lhs.mcpURL != rhs.mcpURL {return false}
+    if lhs.launcher != rhs.launcher {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

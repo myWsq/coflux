@@ -1254,6 +1254,14 @@ const MIGRATIONS: readonly Migration[] = [
       await sql.unsafe(OAUTH_SCHEMA_SQL);
     },
   },
+  {
+    version: 5,
+    name: "task_launcher",
+    definition: "ALTER TABLE tasks ADD COLUMN launcher text NOT NULL DEFAULT '' CHECK (launcher IN ('', 'codex'))",
+    async apply(sql) {
+      await sql.unsafe("ALTER TABLE coflux.tasks ADD COLUMN launcher text NOT NULL DEFAULT '' CHECK (launcher IN ('', 'codex'))");
+    },
+  },
 ];
 
 async function validateLegacyBaseline(sql: MigrationSql): Promise<void> {

@@ -246,6 +246,9 @@ public struct Coflux_V1_Task: Sendable {
 
   public var updatedAt: Double = 0
 
+  /// 空串为普通 shell，codex 为直接在 PTY 中启动 Codex CLI。
+  public var launcher: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -727,7 +730,7 @@ extension Coflux_V1_Workspace: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
 
 extension Coflux_V1_Task: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Task"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}account_id\0\u{3}daemon_id\0\u{3}project_id\0\u{3}workspace_id\0\u{1}title\0\u{1}status\0\u{3}session_id\0\u{3}exit_code\0\u{3}created_at\0\u{3}updated_at\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}account_id\0\u{3}daemon_id\0\u{3}project_id\0\u{3}workspace_id\0\u{1}title\0\u{1}status\0\u{3}session_id\0\u{3}exit_code\0\u{3}created_at\0\u{3}updated_at\0\u{1}launcher\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -746,6 +749,7 @@ extension Coflux_V1_Task: SwiftProtobuf.Message, SwiftProtobuf._MessageImplement
       case 9: try { try decoder.decodeSingularInt32Field(value: &self._exitCode) }()
       case 10: try { try decoder.decodeSingularDoubleField(value: &self.createdAt) }()
       case 11: try { try decoder.decodeSingularDoubleField(value: &self.updatedAt) }()
+      case 12: try { try decoder.decodeSingularStringField(value: &self.launcher) }()
       default: break
       }
     }
@@ -789,6 +793,9 @@ extension Coflux_V1_Task: SwiftProtobuf.Message, SwiftProtobuf._MessageImplement
     if self.updatedAt.bitPattern != 0 {
       try visitor.visitSingularDoubleField(value: self.updatedAt, fieldNumber: 11)
     }
+    if !self.launcher.isEmpty {
+      try visitor.visitSingularStringField(value: self.launcher, fieldNumber: 12)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -804,6 +811,7 @@ extension Coflux_V1_Task: SwiftProtobuf.Message, SwiftProtobuf._MessageImplement
     if lhs._exitCode != rhs._exitCode {return false}
     if lhs.createdAt != rhs.createdAt {return false}
     if lhs.updatedAt != rhs.updatedAt {return false}
+    if lhs.launcher != rhs.launcher {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

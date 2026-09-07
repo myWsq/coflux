@@ -1819,7 +1819,7 @@ impl DeviceRuntime {
             self.send_error(channel_id, None, "frame_too_large", "Device frame 超过上限");
             return;
         }
-        let Some(envelope) = decode_device_envelope(bytes) else {
+        let Some(mut envelope) = decode_device_envelope(bytes) else {
             self.send_error(
                 channel_id,
                 None,
@@ -1944,6 +1944,17 @@ impl DeviceRuntime {
         }
 
         if routed_to_sessiond(payload) {
+            if let Some(device_envelope::Payload::SessionCreate(create)) = envelope.payload.as_mut() {
+                if !create.launcher.is_empty() {
+                    match crate::ops::write_terminal_launcher(&create.operation_id, &create.launcher) {
+                        Ok(shell) => create.shell = Some(shell),
+                        Err(error) => {
+                            self.send_error(channel_id, request_id, "launcher_failed", &error);
+                            return;
+                        }
+                    }
+                }
+            }
             let Ok(frame) = encode_frame(&DataFrame::Device {
                 channel_id: channel_id.to_string(),
                 data: encode_device_envelope(&envelope),
@@ -2085,7 +2096,12 @@ impl DeviceRuntime {
                     &create.workspace_id,
                 );
             }
-            if !create.command.is_empty() {
+            if !create.launcher.is_empty() {
+                match crate::ops::write_terminal_launcher(operation_id, &create.launcher) {
+                    Ok(shell) => create.shell = Some(shell),
+                    Err(error) => { fail("launcher_failed", &error); return; }
+                }
+            } else if !create.command.is_empty() {
                 match crate::ops::write_operation_command_script(operation_id, &create.command) {
                     Ok((shell, log_path)) => {
                         create.shell = Some(shell);
@@ -4864,6 +4880,7 @@ mod tests {
             channel_id: String::new(),
             payload: Some(device_envelope::Payload::SessionCreate(
                 DeviceSessionCreate {
+                    launcher: String::new(),
                     request_id: "create-1".into(),
                     operation_id: "prepared-1".into(),
                     session_id: "session-1".into(),

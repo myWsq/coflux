@@ -369,6 +369,8 @@ public struct Coflux_V1_TaskCreate: Sendable {
 
   public var title: String = String()
 
+  public var launcher: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -2033,7 +2035,7 @@ extension Coflux_V1_DeviceSetName: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Coflux_V1_TaskCreate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskCreate"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}workspace_id\0\u{1}title\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}workspace_id\0\u{1}title\0\u{1}launcher\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2043,6 +2045,7 @@ extension Coflux_V1_TaskCreate: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.launcher) }()
       default: break
       }
     }
@@ -2055,12 +2058,16 @@ extension Coflux_V1_TaskCreate: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     if !self.title.isEmpty {
       try visitor.visitSingularStringField(value: self.title, fieldNumber: 2)
     }
+    if !self.launcher.isEmpty {
+      try visitor.visitSingularStringField(value: self.launcher, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Coflux_V1_TaskCreate, rhs: Coflux_V1_TaskCreate) -> Bool {
     if lhs.workspaceID != rhs.workspaceID {return false}
     if lhs.title != rhs.title {return false}
+    if lhs.launcher != rhs.launcher {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
