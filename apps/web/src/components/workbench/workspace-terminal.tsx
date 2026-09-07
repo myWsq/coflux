@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { Bot, ExternalLink, FileDiff, GitBranch, LoaderCircle, Plus, Router, SquareTerminal, Unplug, X } from "lucide-react";
+import { Bot, ExternalLink, FileDiff, GitBranch, History, LoaderCircle, Plus, Router, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
@@ -155,6 +155,15 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   const pendingCreateRef = useRef<{ knownTaskIds: Set<string> } | null>(null);
   // 完成态看过一次就不再撒花：按 sessionId 记，下一轮又干活时清掉。
   const seenDoneRef = useRef(new Set<string>());
+  // 已退出终端回放（plan 097）的账本：
+  // lastSessionRef：task 最近一次已知的 sessionId（退出时中心会清空 task.sessionId，这里留底）；
+  // liveOutputRef：本面板收到过输出的 sessionId（「看着它退出」的判据——画面已是全量滚屏，只追加提示不清屏）；
+  // historyShownRef：已回放或已写退出提示的那一轮退出（按 task.updatedAt），同一轮不重复请求；
+  // lastStatusRef：上一次看到的状态，用于识别 RUNNING→EXITED 的瞬间。
+  const lastSessionRef = useRef(new Map<string, string>());
+  const liveOutputRef = useRef(new Map<string, string>());
+  const historyShownRef = useRef(new Map<string, number>());
+  const lastStatusRef = useRef(new Map<string, TaskStatus>());
 
   // activeTaskId/controlStates 的同步镜像：imperative 函数需要在 setState 后立即读到"当下"值
   // （对应 Solid 信号的同步读语义），而 React state 变量本身要等下一次渲染才更新，故用 ref 双轨。
@@ -253,12 +262,66 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     activationRequestsRef.current.delete(taskId);
     forcedClaimsRef.current.delete(taskId);
     if (launchingTaskIdsRef.current.has(taskId)) return;
-    // EXITED 任务重启前 reset 终端，避免旧输出与新会话混叠。
-    if (task.status === TaskStatus.EXITED) controller.reset();
+    // EXITED（plan 097）：回放最后输出，不再悄悄重开 shell——重开是横幅上的显式动作（reopenTask）。
+    if (task.status === TaskStatus.EXITED) {
+      showExitedHistory(task, controller);
+      return;
+    }
+    // IDLE（刚创建尚未启动）：自动启动，行为不变。
+    launchTask(taskId, controller);
+  }
+
+  function launchTask(taskId: string, controller: TerminalController) {
     launchingTaskIdsRef.current.add(taskId);
     updateControlState(taskId, "attaching");
     const { cols, rows } = controller.dimensions();
     client.startTask(taskId, cols, rows);
+  }
+
+  /** 横幅「重新打开」（plan 097）：在同一个 Tab 里起新 shell。重启前 reset 终端，避免旧输出与新会话混叠。 */
+  function reopenTask(taskId: string) {
+    const task = currentTasks().find((item) => item.id === taskId);
+    const controller = controllersRef.current.get(taskId);
+    if (!task || !controller || task.status !== TaskStatus.EXITED) return;
+    if (launchingTaskIdsRef.current.has(taskId)) return;
+    controller.reset();
+    launchTask(taskId, controller);
+  }
+
+  function exitedNotice(task: Task): { message: string; tone: "success" | "error" | "warning" } {
+    if (task.exitCode === undefined) return { message: "进程已退出（退出码未知）", tone: "warning" };
+    return { message: `进程已退出（退出码 ${task.exitCode}）`, tone: task.exitCode === 0 ? "success" : "error" };
+  }
+
+  /** 回放已退出终端的最后输出（plan 097）。同一轮退出（task.updatedAt）只做一次；面板若亲眼收到过本轮会话的
+   * 输出，画面已是全量滚屏，只追加退出提示、不用历史覆盖（历史只是当前画面的子集，覆盖会丢 scrollback）。
+   * 其余情况经中心一次 taskRead：log 是命令终端的非 tty 纯文本日志、snapshot/checkpoint 是 ANSI 屏幕。 */
+  function showExitedHistory(task: Task, controller: TerminalController) {
+    const round = task.updatedAt;
+    if (historyShownRef.current.get(task.id) === round) return;
+    historyShownRef.current.set(task.id, round);
+    const notice = exitedNotice(task);
+    const lastSession = lastSessionRef.current.get(task.id);
+    if (lastSession && liveOutputRef.current.get(task.id) === lastSession) {
+      controller.writeSystem(notice.message, notice.tone);
+      return;
+    }
+    void client.readTask(task.id).then((result) => {
+      // 结果晚于「重新打开」到达（task 已 RUNNING 或又换了一轮）或面板已重建时丢弃，不能覆盖新 shell 的画面。
+      const current = currentTasks().find((item) => item.id === task.id);
+      if (!current || current.status !== TaskStatus.EXITED || current.updatedAt !== round) return;
+      if (controllersRef.current.get(task.id) !== controller) return;
+      controller.reset();
+      if (!result.ok) {
+        controller.writeSystem(`读取最后输出失败：${result.error}`, "error");
+      } else if (result.source === "log") {
+        // 命令日志是非 tty 纯文本（\n 换行）；xterm 不开 convertEol（活会话语义），只在这里补 \r。
+        controller.writeRaw(new TextDecoder().decode(result.data).replace(/\r?\n/g, "\r\n"));
+      } else if (result.source !== "none") {
+        controller.writeRaw(result.data);
+      }
+      controller.writeSystem(notice.message, notice.tone);
+    });
   }
 
   function requestActivation(taskId: string, forceClaim = false) {
@@ -298,6 +361,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   }
 
   function handleOutput(taskId: string, sessionId: string) {
+    liveOutputRef.current.set(taskId, sessionId);
     if (controlStatesRef.current[taskId] === "attaching") markOwned(taskId, sessionId);
   }
 
@@ -402,11 +466,31 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       }
     }
 
+    for (const taskId of [...lastStatusRef.current.keys()]) {
+      if (ids.has(taskId)) continue;
+      lastStatusRef.current.delete(taskId);
+      lastSessionRef.current.delete(taskId);
+      liveOutputRef.current.delete(taskId);
+      historyShownRef.current.delete(taskId);
+    }
+
     for (const task of workspaceTasks) {
+      if (task.sessionId) lastSessionRef.current.set(task.id, task.sessionId);
+      const previousStatus = lastStatusRef.current.get(task.id);
+      lastStatusRef.current.set(task.id, task.status);
       if (task.status !== TaskStatus.RUNNING) {
         attachedKeysRef.current.delete(task.id);
         sessionReadyRef.current.delete(task.id);
         if (!launchingTaskIdsRef.current.has(task.id)) updateControlState(task.id, "stopped");
+      }
+      // 看着它退出（plan 097）：RUNNING→EXITED 的瞬间，面板有本轮会话的输出就只追加退出提示；
+      // 没收到过输出但正是当前 Tab 的，立即回放（之后不会再有激活来触发）。其余留到 Tab 被激活时再回放。
+      if (previousStatus === TaskStatus.RUNNING && task.status === TaskStatus.EXITED) {
+        const controller = controllersRef.current.get(task.id);
+        if (!controller) continue;
+        const lastSession = lastSessionRef.current.get(task.id);
+        const sawLive = Boolean(lastSession && liveOutputRef.current.get(task.id) === lastSession);
+        if (sawLive || activeTaskIdRef.current === task.id) showExitedHistory(task, controller);
       }
     }
 
@@ -760,6 +844,19 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
               此终端已被其它客户端接管，当前输入已锁定。
             </span>
             <Button label="重新接管" variant="secondary" size="sm" onClick={() => requestActivation(activeTask.id, true)} />
+          </div>
+        ) : null}
+
+        {/* 已退出终端（plan 097）：画面是回放的最后输出，重开 shell 是显式动作，不再一点 Tab 就悄悄起新会话。 */}
+        {view === "terminal" && activeTask && activeTask.status === TaskStatus.EXITED && activeControlState === "stopped" ? (
+          <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between border-b border-border bg-background/80 px-4 py-2 text-xs text-muted-foreground backdrop-blur">
+            <span className="flex items-center gap-2">
+              <History className="size-3.5" />
+              {activeTask.exitCode === undefined
+                ? "此终端已退出，画面是最后的输出。"
+                : `此终端已退出（退出码 ${activeTask.exitCode}），画面是最后的输出。`}
+            </span>
+            <Button label="重新打开" variant="secondary" size="sm" onClick={() => reopenTask(activeTask.id)} />
           </div>
         ) : null}
 

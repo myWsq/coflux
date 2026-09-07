@@ -17,6 +17,8 @@ export type TerminalController = {
   focus: () => void;
   reset: () => void;
   writeSystem: (message: string, tone?: "warning" | "error" | "success") => void;
+  /** 原样写入（plan 097 回放已退出终端的最后输出用）：不经 session consumer，不 reset。 */
+  writeRaw: (data: Uint8Array | string) => void;
 };
 
 type TerminalPaneProps = {
@@ -261,6 +263,9 @@ export function TerminalPane(props: TerminalPaneProps) {
       writeSystem: (message, tone = "warning") => {
         const color = tone === "error" ? "31" : tone === "success" ? "32" : "33";
         terminal.writeln(`\r\n\x1b[${color}m[${message}]\x1b[0m`);
+      },
+      writeRaw: (data) => {
+        terminal.write(data);
       },
     };
     controllerRef.current = controller;
