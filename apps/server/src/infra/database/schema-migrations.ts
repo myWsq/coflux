@@ -1262,6 +1262,14 @@ const MIGRATIONS: readonly Migration[] = [
       await sql.unsafe("ALTER TABLE coflux.tasks ADD COLUMN launcher text NOT NULL DEFAULT '' CHECK (launcher IN ('', 'codex'))");
     },
   },
+  {
+    version: 6,
+    name: "claude_terminal_launcher",
+    definition: "ALTER TABLE tasks DROP CONSTRAINT tasks_launcher_check; ALTER TABLE tasks ADD CONSTRAINT tasks_launcher_check CHECK (launcher IN ('', 'codex', 'claude'))",
+    async apply(sql) {
+      await sql.unsafe("ALTER TABLE coflux.tasks DROP CONSTRAINT tasks_launcher_check; ALTER TABLE coflux.tasks ADD CONSTRAINT tasks_launcher_check CHECK (launcher IN ('', 'codex', 'claude'))");
+    },
+  },
 ];
 
 async function validateLegacyBaseline(sql: MigrationSql): Promise<void> {

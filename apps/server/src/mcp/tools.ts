@@ -26,7 +26,7 @@ export interface McpOperations {
   createWorkspaceForAccount(accountId: AccountId, input: { projectId: ProjectId; branch: string; createNew: boolean; name?: string }): Promise<OperationOutcome<Workspace>>;
   renameWorkspaceForAccount(accountId: AccountId, workspaceId: WorkspaceId, name: string): Promise<OperationOutcome<Workspace>>;
   removeWorkspaceForAccount(accountId: AccountId, workspaceId: WorkspaceId): Promise<OperationOutcome<{ workspaceId: WorkspaceId; removedTerminalIds: TaskId[] }>>;
-  createTerminalForAccount(accountId: AccountId, input: { workspaceId: WorkspaceId; title: string; command: string }): Promise<OperationOutcome<Task>>;
+  createTerminalForAccount(accountId: AccountId, input: { workspaceId: WorkspaceId; title: string; command?: string; launcher?: string }): Promise<OperationOutcome<Task>>;
   readTerminalForAccount(accountId: AccountId, terminalId: TaskId, maxBytes?: number): Promise<OperationOutcome<{ task: Task; data: Uint8Array; source: TerminalReadSource; capturedAt: number | null; title: string }>>;
   sendTerminalInputForAccount(accountId: AccountId, terminalId: TaskId, data: Uint8Array): Promise<OperationOutcome<{ bytes: number }>>;
   waitTerminalForAccount(accountId: AccountId, terminalId: TaskId, timeoutMs?: number): Promise<OperationOutcome<{ task: Task; exited: boolean; timedOut: boolean }>>;
@@ -100,6 +100,7 @@ const TerminalSchema = z.object({
   projectId: z.string().nullable(),
   deviceId: z.string(),
   title: z.string(),
+  launcher: z.string(),
   status: TerminalStatusSchema,
   exitCode: z.number().nullable(),
   createdAt: z.number(),
@@ -146,6 +147,7 @@ function terminalView(t: Task) {
     projectId: t.projectId || null,
     deviceId: t.daemonId,
     title: t.title,
+    launcher: t.launcher || "",
     status: taskStatusName(t.status),
     exitCode: t.exitCode ?? null,
     createdAt: t.createdAt,
@@ -394,19 +396,20 @@ export function createCofluxMcpServer(principal: OAuthPrincipal, deps: McpToolDe
   server.registerTool(
     "create_terminal",
     {
-      title: "开终端跑一条命令",
+      title: "创建终端",
       description:
-        `在某个工作区目录下开一个真实终端（web 侧栏可见、用户可随时接管）跑一条命令：命令在登录 shell 里执行，跑完终端退出并带退出码；输出同时落设备上的命令日志，用 read_terminal 读（source=log）。想跑交互式程序也可以（例如 \`claude\`），之后用 send_terminal_input 输入、wait_terminal 等退出。受每工作区活跃终端上限约束（含用户手开的），超限时先 stop_terminal 一些。最多等 30 秒启动回执，到期返回「已提交」并附 terminalId。${UPGRADE_NOTE}`,
+        `在某个工作区目录下开一个真实终端（web 侧栏可见、用户可随时接管）跑一条命令：命令在登录 shell 里执行，跑完终端退出并带退出码；输出同时落设备上的命令日志，用 read_terminal 读（source=log）。运行 Codex / Claude Code 时改传 launcher=codex / claude（不传 command），直接使用 PTY、无命令日志，read_terminal 读取终端画面。之后用 send_terminal_input 输入、wait_terminal 等退出。受每工作区活跃终端上限约束（含用户手开的），超限时先 stop_terminal 一些。最多等 30 秒启动回执，到期返回「已提交」并附 terminalId。${UPGRADE_NOTE}`,
       inputSchema: {
         workspaceId: z.string().describe("工作区 id（list_workspaces / create_workspace 的 id）"),
-        command: z.string().describe("要执行的命令（交给登录 shell 的 -lc，可含管道/多条）"),
+        command: z.string().optional().describe("要执行的命令（与 launcher 二选一；交给登录 shell，可含管道/多条）"),
+        launcher: z.enum(["codex", "claude"]).optional().describe("直接在原生 TTY 中运行 Codex 或 Claude Code，与 command 互斥；同工作区优先使用本地 cofluxd terminal new --launcher codex"),
         title: z.string().optional().describe("终端标题（侧栏展示，默认取命令首行）"),
       },
       outputSchema: { terminal: TerminalSchema },
       annotations: mutating,
     },
-    async ({ workspaceId, command, title }) => {
-      const result = await deps.ops.createTerminalForAccount(accountId, { workspaceId, title: title ?? "", command });
+    async ({ workspaceId, command, launcher, title }) => {
+      const result = await deps.ops.createTerminalForAccount(accountId, { workspaceId, title: title ?? "", command, launcher });
       if (!result.ok) return fail(result.error);
       return ok({ terminal: terminalView(result.value) });
     },

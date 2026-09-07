@@ -36,3 +36,21 @@ Codex 使用 login shell 找到设备上的 CLI，直接 exec 并继承 PTY 的�
 - 新增 Codex 终端黑盒覆盖真实 TTY、cwd/归属、重投、输入、重连、worker 重启、退出重开及非法 launcher。
 - 浏览器通过新增入口启动真实 codex-cli 0.153.4，显示原生欢迎/登录 TUI；临时 CODEX_HOME 不使用用户对话或认证。未进行模型调用。
 - 旧结构化界面、Agent RPC、独立运行时及对应测试已撤销；当前 supervisor 源码与基线一致。
+
+## 原有接口补充
+- 根据用户要求，沿用本工作区 CLI、跨工作区/设备 MCP 的分工，只给原有创建终端接口增加 `launcher=codex`，其余终端接口复用。
+- 范围包含 CLI 参数、本地 gateway、AgentTerminalNew 协议和 server/MCP；不增加独立 Agent 工具组。
+- 黑盒覆盖 MCP 创建、读取、输入、停止及参数互斥；CLI 从真实 PTY 调用、继承工作区、保存 launcher 并保持三个标准流为 TTY。
+
+## Claude Code 补齐
+- 用户追加要求支持 Claude：桌面新增菜单与空态、CLI 和 MCP 沿用同一终端 launcher 链路，支持 `claude`。
+- worker 声明独立 `claude_terminal` 能力，使用设备上的 `claude`（可用本机 `COFLUX_CLAUDE_BIN` 覆盖）；保留真实 PTY。
+- 新增 migration 6 扩展 launcher 约束，保留已存在 migration 5 的定义，支持已有数据库升级。
+- 同一套终端生命周期、CLI/MCP 黑盒分别在 Codex 和 Claude launcher 下执行。
+
+## 补齐验收（2026-09-08）
+- Codex、Claude 两组共 6 项终端生命周期及 CLI/MCP 黑盒专项通过。
+- Rust protocol 42、supervisor 63、worker 107 项通过，构建零警告；server 类型检查、web/mobile 构建、client/web 共 73 项单测、Swift 43 项测试通过。
+- 协议 lint、against 3173ce2 的 breaking 检查和三端生成通过。
+- 真实 Claude Code 2.1.263 在隔离 HOME 的 PTY 中输出欢迎界面，随后 Anthropic platform 请求返回 403，未验收登录后的模型对话；未修改用户配置。
+- 最终全量黑盒 296/296 通过（含迁移 ledger 版本 6 的预期）；沿用隔离端口副本验收，测试副本已清理。

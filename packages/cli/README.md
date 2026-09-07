@@ -35,6 +35,8 @@ CLI 还会取自身与 worker 的持久 release floor 较大值拒绝远端降�
 
 ```sh
 cofluxd terminal new --title "跑单测" --cmd "pnpm test"   # 开真实终端，用户可接管
+cofluxd terminal new --launcher codex                    # 本工作区新终端直接启动 Codex
+cofluxd terminal new --launcher claude                   # 同样支持 Claude Code
 cofluxd terminal list                                     # 本工作区的终端 + 状态/退出码
 cofluxd terminal read <taskId> [--lines N]                # 读终端内容（纯文本，已退出也能读）
 cofluxd terminal wait <taskId> [--timeout <秒>]           # 阻塞到退出，打印退出码

@@ -249,7 +249,7 @@ export type Task = Message<"coflux.v1.Task"> & {
   updatedAt: number;
 
   /**
-   * 空串为普通 shell，codex 为直接在 PTY 中启动 Codex CLI。
+   * 空串为普通 shell，codex / claude 为直接在 PTY 中启动对应 Agent CLI。
    *
    * @generated from field: string launcher = 12;
    */

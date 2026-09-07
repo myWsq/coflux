@@ -269,6 +269,9 @@ public struct Coflux_V1_AgentTerminalNew: Sendable {
   /// server 不解释也不校验它——脚本由 daemon 自己生成、只回到同一个 daemon 执行。
   public var shell: String = String()
 
+  /// 保存启动方式，退出后从 Web 重开仍启动同一个 launcher。
+  public var launcher: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -2120,7 +2123,7 @@ extension Coflux_V1_SessionAgents: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Coflux_V1_AgentTerminalNew: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AgentTerminalNew"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}title\0\u{1}shell\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}title\0\u{1}shell\0\u{1}launcher\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2130,6 +2133,7 @@ extension Coflux_V1_AgentTerminalNew: SwiftProtobuf.Message, SwiftProtobuf._Mess
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.title) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.shell) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.launcher) }()
       default: break
       }
     }
@@ -2142,12 +2146,16 @@ extension Coflux_V1_AgentTerminalNew: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if !self.shell.isEmpty {
       try visitor.visitSingularStringField(value: self.shell, fieldNumber: 2)
     }
+    if !self.launcher.isEmpty {
+      try visitor.visitSingularStringField(value: self.launcher, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Coflux_V1_AgentTerminalNew, rhs: Coflux_V1_AgentTerminalNew) -> Bool {
     if lhs.title != rhs.title {return false}
     if lhs.shell != rhs.shell {return false}
+    if lhs.launcher != rhs.launcher {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

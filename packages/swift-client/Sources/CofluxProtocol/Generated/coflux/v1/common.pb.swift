@@ -246,7 +246,7 @@ public struct Coflux_V1_Task: Sendable {
 
   public var updatedAt: Double = 0
 
-  /// 空串为普通 shell，codex 为直接在 PTY 中启动 Codex CLI。
+  /// 空串为普通 shell，codex / claude 为直接在 PTY 中启动对应 Agent CLI。
   public var launcher: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()

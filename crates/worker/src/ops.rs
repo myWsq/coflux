@@ -371,13 +371,13 @@ pub fn write_operation_command_script(
     write_command_script_named(&name, command)
 }
 
-/// 交互式 Codex 直接继承 PTY 的 stdin/stdout/stderr，不能走命令日志管道。
+/// 交互式 Agent 直接继承 PTY 的 stdin/stdout/stderr，不能走命令日志管道。
 /// 固定 launcher 由中心签发；脚本路径按 operation ID 派生，重投不会另起一份会话。
 pub fn write_terminal_launcher(operation_id: &str, launcher: &str) -> Result<String, String> {
     use sha2::{Digest, Sha256};
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    if launcher != "codex" {
+    if !matches!(launcher, "codex" | "claude") {
         return Err("不支持的终端启动程序".into());
     }
     let home = std::env::var("COFLUX_HOME")
@@ -394,8 +394,12 @@ pub fn write_terminal_launcher(operation_id: &str, launcher: &str) -> Result<Str
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/bin/bash".into());
     // 可执行文件覆盖仅来自设备本机环境，网络不能注入命令。
-    let executable = std::env::var("COFLUX_CODEX_BIN").unwrap_or_else(|_| "codex".into());
-    let command = format!("command -v {} >/dev/null 2>&1 || {{ printf '%s\\n' '未找到 Codex，请先在此设备安装 Codex CLI 并配置 PATH。'; exit 127; }}; exec {}", sh_quote(&executable), sh_quote(&executable));
+    let (env_key, label) = match launcher {
+        "claude" => ("COFLUX_CLAUDE_BIN", "Claude Code"),
+        _ => ("COFLUX_CODEX_BIN", "Codex"),
+    };
+    let executable = std::env::var(env_key).unwrap_or_else(|_| launcher.into());
+    let command = format!("command -v {} >/dev/null 2>&1 || {{ printf '%s\\n' '未找到 {label}，请先在此设备安装 {label} CLI 并配置 PATH。'; exit 127; }}; exec {}", sh_quote(&executable), sh_quote(&executable));
     let script = format!(
         "#!/bin/sh\nexec {} -lc {}\n",
         sh_quote(&login_shell),

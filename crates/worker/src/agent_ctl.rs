@@ -69,6 +69,7 @@ pub enum AgentAction {
     TerminalNew {
         title: String,
         command: String,
+        launcher: String,
     },
     TerminalList,
     TerminalRead {
@@ -211,8 +212,25 @@ async fn handle(
             crate::report_agents_if_changed(state, observed, to_server_tx).await;
             AgentResponse::ok(serde_json::json!({}))
         }
-        AgentAction::TerminalNew { title, command } => {
-            let (shell, log_path) = match ops::write_command_script(&command) {
+        AgentAction::TerminalNew {
+            title,
+            command,
+            launcher,
+        } => {
+            let script = if launcher.is_empty() {
+                ops::write_command_script(&command).map(|(shell, log)| (shell, Some(log)))
+            } else {
+                let nonce = format!(
+                    "cli-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+                ops::write_terminal_launcher(&nonce, &launcher).map(|shell| (shell, None))
+            };
+            let (shell, log_path) = match script {
                 Ok(paths) => paths,
                 Err(error) => {
                     return AgentResponse::err(
@@ -224,11 +242,14 @@ async fn handle(
             let payload = agent_control_request::Payload::TerminalNew(wire::AgentTerminalNew {
                 title,
                 shell,
+                launcher,
             });
             match ask_server(state, to_server_tx, session_id, payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalNew(result)) => {
-                    remember_log(state, result.task_id.clone(), log_path);
+                    if let Some(log_path) = log_path {
+                        remember_log(state, result.task_id.clone(), log_path);
+                    }
                     AgentResponse::ok(
                         serde_json::json!({ "taskId": result.task_id, "sessionId": result.session_id }),
                     )
