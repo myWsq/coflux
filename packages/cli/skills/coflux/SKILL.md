@@ -66,6 +66,13 @@ Backgrounded in your own Bash, the user **sees nothing**: not that it is running
 over, and failures only reach them through your retelling. Opened as a coflux terminal, it is a
 titled entry in the sidebar the user can open, take over and type into.
 
+Inside a coflux workspace the plugin enforces this: a `Bash` call with `run_in_background: true` is
+**denied**, and the denial hands you the equivalent `cofluxd terminal new --title=… --cmd=…` to run
+instead. Two things not to do when that happens: do not re-run the same command in the foreground
+(it blocks you, and the host may auto-background it anyway — just as invisible to the user), and do
+not hand-roll a background process inside a foreground command line (`cmd &`, `nohup`). Open the
+terminal; you lose nothing, because you can still be woken up when it finishes (see below).
+
 **Do not use it** for quick one-shot commands (`ls`, `grep`, `git status`, reading files): your
 own tools are faster, and a pile of one-second terminals is just noise to the user.
 
@@ -74,12 +81,15 @@ own tools are faster, and a pile of one-second terminals is just noise to the us
 ### Open a terminal and run a command
 
 ```sh
-cofluxd terminal new --title "Run unit tests" --cmd "pnpm -C tests test"
+cofluxd terminal new --title="Run unit tests" --cmd="pnpm -C tests test"
 ```
 
 `--title` is the name the user sees in the sidebar; **name it properly**: "Run unit tests",
 "Start dev server", never "terminal 1". The command runs in the current workspace directory
 under the login shell; the command line is capped at 16 KB.
+
+Always write `--cmd=<value>` and `--title=<value>` with the `=`, never separated by a space: a
+value that starts with `-` is otherwise taken for another option and the call fails outright.
 
 The terminal exits when the command finishes and the task becomes `exited` with the exit code:
 that is how you tell success from failure. So do not expect to run a second command in the same
@@ -116,6 +126,22 @@ cofluxd terminal wait <taskId> --timeout 300 # custom timeout in seconds; a time
 To wait for a command use `wait`; **do not write your own polling loop**. One command blocks
 until done and hands you the exit code. A timeout does not mean the command failed, only that it
 is still running: `read` to see where it is, then decide whether to keep waiting or act.
+
+`wait` **always exits 0** once the terminal is done: it reports that the command finished, not
+whether it succeeded. Read the result off its output line `# exited exit=<code>` (`list` shows the
+same). A non-zero exit from `wait` itself means the wait timed out or the id was wrong.
+
+**Keep working, and be woken up when it finishes.** `wait` blocks, so put it in *your own background
+Bash* — that is the one backgrounded call the plugin allows, because the work itself is already
+visible to the user in the terminal:
+
+1. `cofluxd terminal new --title="Run the test suite" --cmd="pnpm -C tests test"` → prints a taskId.
+2. Run `cofluxd terminal wait <taskId>` as a backgrounded Bash call, then go do something else.
+3. The host wakes you when that call exits. Check its output for `# exited exit=<code>`, then
+   `cofluxd terminal read <taskId>` to see what actually happened.
+
+That gets you both halves at once: the user watches (and can take over) a real terminal, and you are
+still told the moment it is over, instead of blocking or polling for it.
 
 ### Type into a terminal
 
