@@ -68,6 +68,7 @@ function taskStatusFromDb(status: string): TaskStatus {
 
 /** tasks 表的 DB 行形状（status 是字符串，与 Task 消息的 enum 字段区分开）。 */
 interface TaskRow {
+  launcher: string;
   id: string;
   accountId: string;
   daemonId: string;
@@ -83,6 +84,7 @@ interface TaskRow {
 
 function rowToTask(r: TaskRow): Task {
   return create(TaskSchema, {
+    launcher: r.launcher,
     id: r.id,
     accountId: r.accountId,
     daemonId: r.daemonId,
@@ -791,9 +793,9 @@ export class Store {
     return rows.map(rowToTask);
   }
   async createTask(t: Task): Promise<Task> {
-    const row = { id: t.id, accountId: t.accountId, daemonId: t.daemonId, projectId: t.projectId || null, workspaceId: t.workspaceId, title: t.title, status: taskStatusToDb(t.status), sessionId: t.sessionId ?? null, exitCode: t.exitCode ?? null, createdAt: t.createdAt, updatedAt: t.updatedAt };
+    const row = { launcher: t.launcher || "", id: t.id, accountId: t.accountId, daemonId: t.daemonId, projectId: t.projectId || null, workspaceId: t.workspaceId, title: t.title, status: taskStatusToDb(t.status), sessionId: t.sessionId ?? null, exitCode: t.exitCode ?? null, createdAt: t.createdAt, updatedAt: t.updatedAt };
     await this.sql`
-      INSERT INTO tasks ${this.sql(row, "id", "accountId", "daemonId", "projectId", "workspaceId", "title", "status", "sessionId", "exitCode", "createdAt", "updatedAt")}
+      INSERT INTO tasks ${this.sql(row, "id", "accountId", "daemonId", "projectId", "workspaceId", "title", "status", "sessionId", "exitCode", "createdAt", "updatedAt", "launcher")}
     `;
     return t;
   }

@@ -294,6 +294,7 @@ fn prepared_device_operation_template_round_trip() {
         channel_id: String::new(),
         payload: Some(device_envelope::Payload::SessionCreate(
             DeviceSessionCreate {
+                launcher: String::new(),
                 request_id: "request-create".into(),
                 operation_id: "operation-create".into(),
                 session_id: "session-create".into(),

@@ -66,6 +66,8 @@ message Task {
   optional int32 exit_code = 9;
   double created_at = 10;
   double updated_at = 11;
+  // 空串为普通 shell，codex 为直接在 PTY 中启动 Codex CLI。
+  string launcher = 12;
 }
 
 enum FsEntryKind {

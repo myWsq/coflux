@@ -152,7 +152,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   const launchingTaskIdsRef = useRef(new Set<string>()); // 自己发起启动（非 attach）的任务
   const activationRequestsRef = useRef(new Set<string>());
   const forcedClaimsRef = useRef(new Set<string>());
-  const pendingCreateRef = useRef<{ knownTaskIds: Set<string> } | null>(null);
+  const pendingCreateRef = useRef<{ knownTaskIds: Set<string>; title: string; launcher: string } | null>(null);
   // 完成态看过一次就不再撒花：按 sessionId 记，下一轮又干活时清掉。
   const seenDoneRef = useRef(new Set<string>());
   // 已退出终端回放（plan 097）的账本：
@@ -405,11 +405,11 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   }, [pendingBranch]);
 
   // taskCreate 无请求-响应关联：靠"快照增量中新出现的未知 task id"识别自己创建的任务。
-  function createTerminal() {
+  function createTerminal(launcher = "") {
     if (pendingCreateRef.current) return;
     const tasksNow = currentTasks();
-    const title = `终端 ${tasksNow.length + 1}`;
-    pendingCreateRef.current = { knownTaskIds: new Set(tasksNow.map((task) => task.id)) };
+    const title = launcher === "codex" ? `Codex ${tasksNow.filter(task => task.launcher === "codex").length + 1}` : `终端 ${tasksNow.length + 1}`;
+    pendingCreateRef.current = { knownTaskIds: new Set(tasksNow.map((task) => task.id)), title, launcher };
     const pending = { id: `pending-tab-${++pendingTabSeqRef.current}`, title };
     updatePendingTab(pending);
     setCreating(true);
@@ -422,7 +422,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       setCreating(false);
       dropPendingTab();
     }, PENDING_CREATE_TIMEOUT_MS);
-    client.send({ case: "taskCreate", value: { workspaceId, title } });
+    client.send({ case: "taskCreate", value: { workspaceId, title, launcher } });
   }
 
   function updatePendingTab(next: { id: string; title: string } | null) {
@@ -495,7 +495,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     }
 
     if (pendingCreateRef.current) {
-      const created = workspaceTasks.find((task) => !pendingCreateRef.current!.knownTaskIds.has(task.id));
+      const created = workspaceTasks.find((task) => !pendingCreateRef.current!.knownTaskIds.has(task.id) && task.title === pendingCreateRef.current!.title && task.launcher === pendingCreateRef.current!.launcher);
       if (created) {
         pendingCreateRef.current = null;
         setCreating(false);
@@ -765,15 +765,14 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             </div>
           ) : null}
           {/* 新建按钮跟随最后一个 Tab（浏览器式），不钉在最右 */}
-          <Tooltip content={`新建终端 ${modPrefix}T`} placement="below">
-            <button
-              className="ml-0.5 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-wait disabled:opacity-50"
-              onClick={createTerminal}
-              disabled={creating}
-            >
-              {creating ? <LoaderCircle className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
-            </button>
-          </Tooltip>
+          <DropdownMenu
+            button={{ label: "新增", tooltip: `新建终端 ${modPrefix}T`, icon: <Plus className="size-3.5" />, isIconOnly: true, isDisabled: creating, variant: "ghost", size: "sm" }}
+            hasChevron={false}
+            items={[
+              { label: "Codex", onClick: () => createTerminal("codex") },
+              { label: "普通终端", onClick: () => createTerminal() },
+            ]}
+          />
         </div>
         {activePorts.length > 0 ? (
           <div className="flex shrink-0 items-center gap-1">
@@ -832,7 +831,8 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
               </div>
               <h2 className="text-base font-medium text-foreground">{isDirWorkspace ? "这台设备还没有终端" : "这个工作区还没有终端"}</h2>
               <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。也可以按 {modPrefix}T 快速新建。</p>
-              <Button className="mt-5" label="新建终端" variant="primary" size="sm" icon={<Plus />} isLoading={creating} onClick={createTerminal} />
+              <Button className="mt-5 mr-2" label="打开 Codex" variant="primary" size="sm" icon={<Bot />} isLoading={creating} onClick={() => createTerminal("codex")} />
+              <Button className="mt-5" label="新建终端" variant="primary" size="sm" icon={<Plus />} isLoading={creating} onClick={() => createTerminal()} />
             </div>
           </div>
         ) : null}

@@ -89,6 +89,9 @@ pub struct Task {
     pub created_at: f64,
     #[prost(double, tag="11")]
     pub updated_at: f64,
+    /// 空串为普通 shell，codex 为直接在 PTY 中启动 Codex CLI。
+    #[prost(string, tag="12")]
+    pub launcher: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FsEntry {
@@ -954,6 +957,9 @@ pub struct DeviceSessionCreate {
     pub daemon_id: ::prost::alloc::string::String,
     #[prost(string, tag="13")]
     pub mcp_url: ::prost::alloc::string::String,
+    /// worker 在 prepared 授权后转换成启动脚本，supervisor 仍只创建普通 PTY。
+    #[prost(string, tag="14")]
+    pub launcher: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceOperationAck {
@@ -1569,6 +1575,8 @@ pub struct TaskCreate {
     pub workspace_id: ::prost::alloc::string::String,
     #[prost(string, tag="2")]
     pub title: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub launcher: ::prost::alloc::string::String,
 }
 /// 在设备上新建无 repo 的目录工作区（projectId 为空即目录工作区）+ 一个任务。
 /// path 是 web 经 DeviceFsList{browse_home:true} 从 daemon 拿到的 HOME 绝对路径。

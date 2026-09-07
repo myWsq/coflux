@@ -106,6 +106,7 @@ message DeviceSetName {
 message TaskCreate {
   string workspace_id = 1;
   string title = 2;
+  string launcher = 3;
 }
 
 // 在设备上新建无 repo 的目录工作区（projectId 为空即目录工作区）+ 一个任务。

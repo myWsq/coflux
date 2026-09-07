@@ -489,6 +489,8 @@ message DeviceSessionCreate {
   string project_id = 11;
   string daemon_id = 12;
   string mcp_url = 13;
+  // worker 在 prepared 授权后转换成启动脚本，supervisor 仍只创建普通 PTY。
+  string launcher = 14;
 }
 
 message DeviceOperationAck {

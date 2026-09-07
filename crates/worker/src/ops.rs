@@ -371,6 +371,49 @@ pub fn write_operation_command_script(
     write_command_script_named(&name, command)
 }
 
+/// 交互式 Codex 直接继承 PTY 的 stdin/stdout/stderr，不能走命令日志管道。
+/// 固定 launcher 由中心签发；脚本路径按 operation ID 派生，重投不会另起一份会话。
+pub fn write_terminal_launcher(operation_id: &str, launcher: &str) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if launcher != "codex" {
+        return Err("不支持的终端启动程序".into());
+    }
+    let home = std::env::var("COFLUX_HOME")
+        .unwrap_or_else(|_| format!("{}/.coflux", std::env::var("HOME").unwrap_or_default()));
+    let dir = PathBuf::from(home).join("terminal-launchers");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| e.to_string())?;
+    let digest = hex::encode(Sha256::digest(operation_id.as_bytes()));
+    let full = dir.join(format!("{digest}.sh"));
+    let temporary = dir.join(format!("{digest}.{}-{}.tmp", std::process::id(), SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos()));
+    let login_shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/bash".into());
+    // 可执行文件覆盖仅来自设备本机环境，网络不能注入命令。
+    let executable = std::env::var("COFLUX_CODEX_BIN").unwrap_or_else(|_| "codex".into());
+    let command = format!("command -v {} >/dev/null 2>&1 || {{ printf '%s\\n' '未找到 Codex，请先在此设备安装 Codex CLI 并配置 PATH。'; exit 127; }}; exec {}", sh_quote(&executable), sh_quote(&executable));
+    let script = format!(
+        "#!/bin/sh\nexec {} -lc {}\n",
+        sh_quote(&login_shell),
+        sh_quote(&command)
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o700)
+        .open(&temporary)
+        .map_err(|e| e.to_string())?;
+    file.write_all(script.as_bytes())
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(&temporary, &full).map_err(|e| e.to_string())?;
+    Ok(full.to_string_lossy().into_owned())
+}
+
 /// 日志汇程序：worker 自己（`current_exe`，见 `crate::log_sink`）。单测里换成一个 `tee` 替身——
 /// 测试二进制没有 `--log-sink` 分流。
 fn log_sink_program() -> Result<PathBuf, String> {
