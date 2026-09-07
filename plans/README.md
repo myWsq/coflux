@@ -109,4 +109,5 @@
 （「项目默认分支可改」已由 plan 072 以 daemon 自愈的形式兑现。）
 
 - Claude 插件 worktree guard 仓库归属校验：guard 只看 `COFLUX_PROJECT_ID`，在 coflux 会话里对临时仓库或任何别的仓库开 worktree 也被拒，且提示的 projectId 指向继承来的项目（plugins-builder 会话 2026-09-07 实测，子进程 `claude -p` 继承环境变量必撞）。根治=supervisor 注入 `COFLUX_WORKSPACE_PATH`，guard 拿 stdin `cwd`（含命令里 `git -C <dir>` / `cd <dir> &&`）解析实际仓库主工作区并比对，不一致即放行。
+- Claude 插件 worktree guard 误拦 heredoc/引号字符串：guard 对整段 Bash 命令文本做正则，commit 正文 `git commit -F - <<EOF` 或写文档的 heredoc 里只要出现「git … worktree add/remove/move」字样就被 deny（plugins-builder 会话与本仓库 096 执行时 2026-09-07 各撞一次）。plan 095 当时接受了这种误拦，现在实测代价不小：建议只看命令的可执行部分，至少跳过 heredoc 正文与引号字符串，与仓库归属校验一起立项。
 - `create_workspace` 补可选 `startPoint`：`createNew=true` 时分支基点（当前 HEAD 还是默认分支）未定义，客户端现在得先 `git branch <b> <start>` 再 `createNew=false` 两步；tool 描述写明返回里已有 `path` 字段。
