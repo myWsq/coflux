@@ -1,16 +1,22 @@
 #!/usr/bin/env node
-// Claude Code PreToolUse hook（plan 095）：coflux 项目会话里拦下 `git worktree add|remove|move`，把 agent
-// 引导到中心 MCP 的 create_workspace / remove_workspace——自己 git worktree add 出来的目录用户在侧栏看不见、
-// 也开不了终端。
+// Claude Code PreToolUse hook (plan 095): inside a coflux project session, block `git worktree add|remove|move`
+// and steer the agent to the center MCP's create_workspace / remove_workspace. A worktree the agent creates by
+// itself is invisible in the user's sidebar and cannot host a terminal.
 //
-// 契约（Claude Code hooks）：stdin 是一段 JSON（tool_name / tool_input.command / cwd …）；要拦就往 stdout 写
-// 一段 **纯 JSON** 决策并退出 0；不拦就 **一个字节都不输出**、退出 0（= 无意见，走正常权限流程）。
-// 任何异常（没在 coflux 项目里、stdin 不是 JSON、不是 Bash 工具）都只能是"无意见"，绝不误拦。
-// 调试信息只走 stderr（COFLUX_HOOK_DEBUG=1），stdout 多一个字都会让决策解析失败。
+// Contract (Claude Code hooks): stdin is one JSON document (tool_name / tool_input.command / cwd ...). To block,
+// write one **pure JSON** decision to stdout and exit 0; otherwise write **not a single byte** and exit 0
+// (= no opinion, the normal permission flow applies). Every anomaly (not in a coflux project, stdin not JSON,
+// tool is not Bash) must be "no opinion"; never block by mistake. Debug output goes to stderr only
+// (COFLUX_HOOK_DEBUG=1); one extra byte on stdout breaks decision parsing.
+//
+// Known gap: the check keys on COFLUX_PROJECT_ID alone and does not verify that the repository the command
+// targets belongs to that project, so the same commands against another repository from inside a coflux
+// session are blocked too (see plan 096 maintenance notes).
 
 const STDIN_TIMEOUT_MS = 2000;
-// `git [全局选项…] worktree add|remove|move`：允许 `-C <dir>`、`--git-dir=…`、`--no-pager` 这类全局选项，
-// 允许出现在 `cd x && …`、`;`、`|` 之后。list/lock/unlock/prune/repair 不在表里，放行。
+// `git [global options...] worktree add|remove|move`: allows global options such as `-C <dir>`, `--git-dir=...`
+// and `--no-pager`, and a position after `cd x && ...`, `;` or `|`. list/lock/unlock/prune/repair are not listed
+// and pass through.
 const GUARDED = /\bgit\b(?:\s+-{1,2}[\w-]+(?:=\S+|\s+(?!worktree\b)\S+)?)*\s+worktree\s+(add|remove|move)\b/;
 
 const debug = (...args) => {
@@ -41,14 +47,14 @@ async function readStdinJson() {
 }
 
 function reasonFor(verb, projectId) {
-  const head = `这是 coflux 项目里的会话（COFLUX_PROJECT_ID=${projectId}），worktree 由 coflux 统一管理：自己 \`git worktree ${verb}\` 的结果用户在侧栏看不见、也开不了终端。`;
+  const head = `This session runs inside a coflux project (COFLUX_PROJECT_ID=${projectId}) and coflux manages its worktrees: a worktree you \`git worktree ${verb}\` yourself is invisible in the user's sidebar and cannot host a terminal. `;
   const how =
     verb === "add"
-      ? `改用 MCP tool create_workspace（projectId 用 ${projectId}，branch 按需、createNew 决定是否新建分支），它会在这台设备上真建 worktree 并出现在用户侧栏；然后用 create_terminal 在新工作区里跑命令。`
+      ? `Use the MCP tool create_workspace instead (projectId ${projectId}; set branch as needed and createNew to decide whether the branch is created). It creates the worktree on this device and shows it in the user's sidebar; then run commands there with create_terminal. `
       : verb === "remove"
-        ? `改用 MCP tool remove_workspace（workspaceId 用 list_workspaces 查），它会先关掉该工作区的终端再删 worktree。`
-        : `coflux 不支持移动 worktree：需要换位置就 remove_workspace 后重新 create_workspace。`;
-  return `${head}${how}只想查看现有 worktree 用 git worktree list 或 MCP 的 list_workspaces。`;
+        ? `Use the MCP tool remove_workspace instead (find the workspaceId with list_workspaces); it closes that workspace's terminals first, then removes the worktree. `
+        : `coflux does not support moving worktrees: remove_workspace, then create_workspace at the new location. `;
+  return `${head}${how}To only inspect existing worktrees use git worktree list or the MCP tool list_workspaces.`;
 }
 
 async function main() {

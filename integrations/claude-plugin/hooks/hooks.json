@@ -1,6 +1,17 @@
 {
-  "description": "Forward Claude Code hook events to the local coflux daemon via the cofluxd messenger (silent no-op when cofluxd is not installed), and inside a coflux project session steer `git worktree add|remove|move` to the coflux MCP workspace tools.",
+  "description": "Forward Claude Code hook events to the local coflux daemon through the cofluxd messenger (silent no-op when cofluxd is not installed); at session start, inside a coflux terminal, print the <coflux-session> block with the session's coflux coordinates; inside a coflux project session, steer `git worktree add|remove|move` to the coflux MCP workspace tools.",
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c '[ -r \"$0\" ] && exec sh \"$0\" || :' \"${CLAUDE_PLUGIN_ROOT}/scripts/session-context.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
