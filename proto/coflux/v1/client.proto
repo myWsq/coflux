@@ -125,6 +125,14 @@ message TaskRemove {
   string task_id = 1;
 }
 
+// 读取一个任务（终端）的最后输出（plan 097）：web 激活已退出的 Tab 时回放用。server 复用
+// agent read 的三层来源（daemon 命令日志 → daemon 当前快照 → 中心 checkpoint），结果只回给发起连接。
+// max_bytes 为 0 取服务端默认；超过上限被钳制。
+message TaskRead {
+  string task_id = 1;
+  uint32 max_bytes = 2;
+}
+
 // 查询待确认的 OAuth 授权请求（plan 090：MCP 宿主经 /oauth/authorize 发起、302 落到 web 确认页）。
 // 不消费请求，供确认页展示客户端名与回调 host；request_id 由 302 的 query 带来。
 message OAuthAuthorizeInfoRequest {
@@ -174,6 +182,7 @@ message ClientToServer {
     ProjectSetName project_set_name = 37;
     OAuthAuthorizeInfoRequest oauth_authorize_info = 38;
     OAuthAuthorizeDecide oauth_authorize_decide = 39;
+    TaskRead task_read = 40;
   }
 }
 
@@ -292,6 +301,19 @@ message OAuthAuthorizeResult {
   optional string error = 3;
 }
 
+// TaskRead 的回应：data 按 source 解释——log 是命令终端的非 tty 纯文本日志尾部（\n 换行）；
+// snapshot / checkpoint 是规范化 ANSI 屏幕；none 表示没有任何可回放内容（data 为空）。
+// status / exit_code 取自回应时刻的 Task 真相；error 非空时其余字段无意义（任务不存在或不属于本账号）。
+message TaskReadResult {
+  string task_id = 1;
+  bytes data = 2;
+  string source = 3;
+  double captured_at = 4;
+  TaskStatus status = 5;
+  optional int32 exit_code = 6;
+  optional string error = 7;
+}
+
 message ServerToClient {
   // holder/output/RPC 结果全部封装在 opaque Device relay 内；server 不再理解这些数据。
   // 27-29 是控制面复用 relay 路径（plan 043 改为独立 relay + rendezvous 后删除）。
@@ -327,5 +349,6 @@ message ServerToClient {
     DeviceP2pChannelResult device_p2p_channel_result = 36;
     OAuthAuthorizeInfoResult oauth_authorize_info = 37;
     OAuthAuthorizeResult oauth_authorize_result = 38;
+    TaskReadResult task_read_result = 39;
   }
 }
