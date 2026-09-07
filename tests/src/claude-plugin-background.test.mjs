@@ -128,24 +128,38 @@ test("不误拦：非 coflux 会话、非 Bash、坏 JSON、非后台调用都�
 
 /* ---------------- PostToolUse：不可见后台任务的播报器 ---------------- */
 
-// 假 cofluxd：把 argv 记进日志，同时往 stdout 打一行——用来验证 hook 确实把子进程的 stdout 丢掉了。
-function withFakeCofluxd(fn) {
+// 只删 mkdtemp 自己返回的那个路径，且必须在系统临时目录下。
+function removeTempDir(dir) {
+  if (dir && dir.startsWith(tmpdir())) rmSync(dir, { recursive: true, force: true });
+}
+
+// 一次性的临时 bin 目录。**必须 async + await fn**：fn 是异步的，同步 try/finally 会在 fn 刚返回
+// Promise（hook 子进程还没 spawn）时就把目录删掉，假 cofluxd 于是永远不被调用、日志恒不存在，
+// 断言「调用 0 次」的用例全部假绿，断言「调用 1 次」的全部误红。
+async function withTempBin(makeBin, fn) {
   const dir = mkdtempSync(join(tmpdir(), "coflux-098-"));
   try {
-    const log = join(dir, "calls.log");
-    const bin = join(dir, "cofluxd");
-    writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\necho "已广播给用户"\n`);
-    chmodSync(bin, 0o755);
-    return fn({ dir, log });
+    return await fn({ dir, ...makeBin(dir) });
   } finally {
-    // 只删 mkdtemp 自己返回的那个路径，且必须在系统临时目录下。
-    if (dir && dir.startsWith(tmpdir())) rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 }
 
+// 假 cofluxd：把 argv 记进日志，同时往 stdout 打一行——用来验证 hook 确实把子进程的 stdout 丢掉了。
+function fakeCofluxd(dir) {
+  const log = join(dir, "calls.log");
+  const bin = join(dir, "cofluxd");
+  writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\necho "已广播给用户"\n`);
+  chmodSync(bin, 0o755);
+  return { log };
+}
+
 async function report(stdin, env = IN_WORKSPACE) {
-  return withFakeCofluxd(async ({ dir, log }) => {
-    const { code, stdout } = await run(REPORTER, stdin, { ...env, PATH: `${dir}:${process.env.PATH}` });
+  return withTempBin(fakeCofluxd, async ({ dir, log }) => {
+    // PATH **只有**假目录，绝不拼 process.env.PATH：hook 脚本本身是用 process.execPath 的绝对路径
+    // 起的（不需要 PATH 找 node），脚本内部只用 PATH 找 cofluxd。这样 fixture 一旦再出问题，结果是
+    // 测试红，而不是静悄悄打到本机真 daemon、把播报文案写进用户真实工作区的卡片。
+    const { code, stdout } = await run(REPORTER, stdin, { ...env, PATH: dir });
     assert.equal(code, 0, "PostToolUse hook 退出码必须是 0");
     assert.equal(stdout, "", `PostToolUse 的 stdout 必须零字节（会被当上下文注入）: ${JSON.stringify(stdout)}`);
     return existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean) : [];
@@ -212,13 +226,16 @@ test("PostToolUse 播报器：非 coflux 会话、非 Bash、坏 JSON 一律零�
 });
 
 test("缺 cofluxd 时静默：不报错、stdout 仍是零字节", async () => {
-  const { code, stdout } = await run(
-    REPORTER,
-    post({ stdout: "", stderr: "", backgroundTaskId: "bg_8", timedOutAfterMs: 120000 }),
-    { ...IN_WORKSPACE, PATH: "/nonexistent-coflux-bin" },
-  );
-  assert.equal(code, 0, "PATH 里没有 cofluxd 也必须干净退出");
-  assert.equal(stdout, "", `不该有任何输出: ${JSON.stringify(stdout)}`);
+  // PATH 指向一个确定为空的临时目录，而不是赌真实 PATH 里恰好没有 cofluxd。
+  await withTempBin(() => ({}), async ({ dir }) => {
+    const { code, stdout } = await run(
+      REPORTER,
+      post({ stdout: "", stderr: "", backgroundTaskId: "bg_8", timedOutAfterMs: 120000 }),
+      { ...IN_WORKSPACE, PATH: dir },
+    );
+    assert.equal(code, 0, "PATH 里没有 cofluxd 也必须干净退出");
+    assert.equal(stdout, "", `不该有任何输出: ${JSON.stringify(stdout)}`);
+  });
 });
 
 test("插件配置：hooks.json 里 guard-background-bash 与既有条目并存，版本 ≥ 0.6.0", () => {
