@@ -16,3 +16,7 @@ serde_json = "1"
 # runtime：与 proto/buf.gen.yaml 的 neoeinstein-prost 插件生成的代码（crates/protocol/src/gen）
 # 匹配的 prost 版本，wire 信封编解码用。
 prost = "0.13"
+
+# vt100 0.16.2 单行终端换行修复；详见 vendor/vt100/COFLUX-PATCH.md。
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }

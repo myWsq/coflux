@@ -1,0 +1,91 @@
+{
+  "date": "2026-09-08",
+  "trace": "/tmp/coflux-workbench-metal-1788817586.trace",
+  "pid": 21340,
+  "runID": "switch-benchmark-D119CAA8-5652-4398-8EDC-E26ED983B243",
+  "traceDurationSeconds": 26.245178,
+  "targetGpuEvents": 1832,
+  "phases": [
+    {
+      "loaded": false,
+      "traceStartSeconds": 12.324319124221802,
+      "traceEndSeconds": 15.081378936767578,
+      "fullyCovered": true,
+      "activeEventCount": 402,
+      "gpuActiveUnionMS": 144.32533300000296,
+      "gpuActiveFraction": 0.052347552397398946,
+      "cpuToGpuEventMedianMS": 0.969417,
+      "cpuToGpuEventP95MS": 2.493291
+    },
+    {
+      "loaded": true,
+      "traceStartSeconds": 15.194432020187378,
+      "traceEndSeconds": 17.91703724861145,
+      "fullyCovered": true,
+      "activeEventCount": 1222,
+      "gpuActiveUnionMS": 447.0069989999832,
+      "gpuActiveFraction": 0.16418355269916404,
+      "cpuToGpuEventMedianMS": 0.417833,
+      "cpuToGpuEventP95MS": 1.163166
+    }
+  ],
+  "scope": "单轮Instruments附加；仅目标PID Active GPU事件，合并重叠区间；CPU到GPU延迟为事件统计，不是帧延迟",
+  "limitations": [
+    "准备阶段15秒不计入阶段数据",
+    "阶段边界来自约50ms轮询，有观测误差",
+    "present-request及displayed-surfaces表无数据，不能推算FPS或输入到屏幕延迟",
+    "没有Web GPU对照，采样扰动不能混入正式耗时基准",
+    "未记录potential-hangs不能单独证明没有卡顿"
+  ],
+  "capture": {
+    "pid": 21340,
+    "runID": "switch-benchmark-D119CAA8-5652-4398-8EDC-E26ED983B243",
+    "trace": "/tmp/coflux-workbench-metal-1788817586.trace",
+    "observations": [
+      {
+        "observedAt": 1788817586.0703611,
+        "runID": "switch-benchmark-D119CAA8-5652-4398-8EDC-E26ED983B243",
+        "loaded": false,
+        "state": "preparing",
+        "pid": 21340
+      },
+      {
+        "observedAt": 1788817601.091319,
+        "runID": "switch-benchmark-D119CAA8-5652-4398-8EDC-E26ED983B243",
+        "loaded": false,
+        "state": "sampling",
+        "pid": 21340
+      },
+      {
+        "observedAt": 1788817603.848379,
+        "pid": 21340,
+        "state": "finished",
+        "runID": "switch-benchmark-D119CAA8-5652-4398-8EDC-E26ED983B243",
+        "loaded": false
+      },
+      {
+        "observedAt": 1788817603.961432,
+        "pid": 21340,
+        "state": "sampling",
+        "runID": "switch-benchmark-D119CAA8-5652-4398-8EDC-E26ED983B243",
+        "loaded": true
+      },
+      {
+        "observedAt": 1788817606.6840372,
+        "pid": 21340,
+        "state": "finished",
+        "runID": "switch-benchmark-D119CAA8-5652-4398-8EDC-E26ED983B243",
+        "loaded": true
+      }
+    ],
+    "scope": "受Instruments干扰的隔离采样，不纳入基准",
+    "returnCode": 0
+  },
+  "exports": {
+    "toc": "/tmp/coflux-workbench-metal-toc.xml",
+    "gpu": "/tmp/coflux-metal-metal-gpu-intervals.xml",
+    "displayed": "/tmp/coflux-metal-surfaces.xml",
+    "presentRequests": "/tmp/coflux-metal-ca-client-present-request.xml",
+    "potentialHangs": "/tmp/coflux-metal-potential-hangs.xml"
+  }
+}

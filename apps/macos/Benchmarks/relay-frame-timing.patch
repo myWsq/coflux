@@ -1,0 +1,17 @@
+--- a/crates/relay/src/main.rs
++++ b/crates/relay/src/main.rs
+@@ -463,9 +463,14 @@
+                 if !rate.allow(bytes.len()) {
+                     return Err("frame 速率超限".into());
+                 }
++                let received_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
++                let fingerprint = bytes.iter().fold(14695981039346656037u64, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(1099511628211)) & ((1u64 << 52) - 1);
++                let length = bytes.len();
+                 to.send(Message::Binary(bytes))
+                     .await
+                     .map_err(|error| format!("转发失败: {error}"))?;
++                let sent_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
++                eprintln!("RELAY_FRAME_TIMING {{\"fingerprint\":{fingerprint},\"length\":{length},\"receivedWallMS\":{received_at},\"sentWallMS\":{sent_at}}}");
+             }
+             Some(Ok(Message::Text(_))) => return Err("协议违规：不接受 text frame".into()),
+             Some(Ok(Message::Close(_))) | None => return Ok(()),

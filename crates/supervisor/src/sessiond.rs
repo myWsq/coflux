@@ -1423,6 +1423,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn single_row_terminal_wrap_does_not_panic() {
+        let mut state = TerminalState::new(1, 4, 16);
+        state.feed(b"abcde");
+        assert_eq!(state.parser.screen().contents(), "e");
+        let mut history = state.parser.screen().clone();
+        history.set_scrollback(1);
+        assert_eq!(history.contents(), "abcd");
+        assert!(history.row_wrapped(0), "滚出单行屏幕的历史仍需保留自动换行标记");
+        let mut without_history = TerminalState::new(1, 4, 0);
+        without_history.feed(b"abcde");
+        assert_eq!(without_history.parser.screen().contents(), "e");
+    }
+
     fn restored(state: &TerminalState) -> vt100::Parser {
         let mut parser = vt100::Parser::new(state.rows, state.cols, state.history_row_capacity);
         parser.process(&state.snapshot());

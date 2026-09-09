@@ -18,6 +18,8 @@ enum AuthCredential: Sendable, Equatable {
 public final class CofluxClient {
     public private(set) var status: ConnectionStatus = .disconnected
     public private(set) var authState: AuthState = .needLogin
+    /// 仅使用中心认证结果命名本地配对空间；不以用户输入的账号名推断身份。
+    public private(set) var accountID: String?
     public private(set) var syncState: SyncState = .notSubscribed
     public private(set) var loginError = ""
     public private(set) var daemons: [Coflux_V1_DaemonInfo] = []
@@ -29,6 +31,26 @@ public final class CofluxClient {
     public private(set) var snapshotRevision = 0
     /// 被其它客户端接管的任务（plan 026 旁观语义）：UI 出横幅，仅强制接管可恢复。
     public private(set) var detachedTaskIDs: Set<String> = []
+    /// 仅由显式启动/连接请求进入；后台 RUNNING 不等于正在连接。
+    public private(set) var attachingTaskIDs: Set<String> = []
+    private var attachIndicatorTimers: [String: Task<Void, Never>] = [:]
+    private func finishAttachIndicator(_ taskID: String) {
+        attachIndicatorTimers.removeValue(forKey: taskID)?.cancel()
+        attachingTaskIDs.remove(taskID)
+    }
+    private func clearAttachIndicators() {
+        for id in Array(attachingTaskIDs) { finishAttachIndicator(id) }
+    }
+    private func beginAttachIndicator(_ taskID: String, running: Bool) {
+        finishAttachIndicator(taskID)
+        attachingTaskIDs.insert(taskID)
+        attachIndicatorTimers[taskID] = Task { [weak self] in
+            // 与 Web 的 attach grace 一样只结束视觉反馈，不据此授予输入控制权。
+            try? await Task.sleep(for: running ? .milliseconds(500) : .seconds(15))
+            guard !Task.isCancelled else { return }
+            self?.finishAttachIndicator(taskID)
+        }
+    }
     /// server 侧终端镜像（sessionCheckpoint）：无 live session 时的只读回放来源。
     public private(set) var sessionCheckpoints: [String: Coflux_V1_SessionCheckpoint] = [:]
     /// 输入台账触顶的 session（等待 PTY 累计确认）：UI 提示输入受阻。
@@ -47,6 +69,13 @@ public final class CofluxClient {
             self.session = session
         }
     }
+    public struct LocalSessionInfo: Equatable, Sendable {
+        public var daemonID: String
+        public var session: Coflux_V1_DeviceSessionInfo
+        public var exit: Coflux_V1_DeviceSessionExitTombstone?
+    }
+    public private(set) var localSessions: [LocalSessionInfo] = []
+
     /// sessionId → agent presence；StateSnapshot 后清空，server 随后按 daemon 补全。
     public private(set) var sessionAgents: [String: SessionAgentInfo] = [:]
 
@@ -67,10 +96,14 @@ public final class CofluxClient {
     public struct DeviceTransportInfo: Equatable, Sendable {
         public var relayHost: String?
         public var rttMs: Double?
+        public var mode: String?
+        public var detail: String
 
-        public init(relayHost: String?, rttMs: Double?) {
+        public init(relayHost: String?, rttMs: Double?, mode: String? = nil, detail: String = "") {
             self.relayHost = relayHost
             self.rttMs = rttMs
+            self.mode = mode
+            self.detail = detail
         }
     }
     public private(set) var deviceTransports: [String: DeviceTransportInfo] = [:]
@@ -88,6 +121,13 @@ public final class CofluxClient {
     /// 控制面已认证（store.ts controlAuthenticated 同语义）：device rendezvous 与
     /// taskRemove 的前置门。
     private var controlAuthenticated = false
+    private var pendingTaskRemovals: [String] = []
+    /// 与连接重建分开：同一登录的重连保留记账，显式换凭据则隔离旧异步操作。
+    private var removalEpoch = 0
+    private func resetPendingTaskRemovals() {
+        removalEpoch += 1
+        pendingTaskRemovals.removeAll()
+    }
     private var reconnectAttempts = 0
     /// 连接代际：每次重建/断开自增，旧循环与旧重连计时器以代际不符自行退出。
     private var generation = 0
@@ -108,11 +148,15 @@ public final class CofluxClient {
     /// 设备事实先于中心事实到达的窗口：session 已退出但 server task 还没更新（store.ts:376-384
     /// localSessions 合并语义的最小移植——iOS 无 UI 消费 pid/cwd，只留退出覆盖）。
     private var localExits: [String: Int32] = [:]
+    // 保留中心的原始运行事实，不能用设备退出覆盖后的 UI 状态判断是否可以 durable create。
+    private var serverRunningSessions: [String: String] = [:]
 
     public init(
         configuration: ClientConfiguration,
         transport: any Transport,
         tokenStore: any TokenStore,
+        localDeviceProvider: (any LocalDeviceTransportProvider)? = nil,
+        p2pDeviceProvider: (any P2PDeviceTransportProvider)? = nil,
         logger: any ClientLogger = NoopClientLogger(),
         clock: any ClientClock = SystemClientClock(),
         jitter: any RetryJitterSource = SystemRetryJitterSource()
@@ -141,27 +185,30 @@ public final class CofluxClient {
                 self?.sessionConsumers[sessionID]?(data, false)
             },
             onSessionAttached: { [weak self] _, taskID, _ in
+                self?.finishAttachIndicator(taskID)
                 self?.detachedTaskIDs.remove(taskID)
             },
             onSessionDetached: { [weak self] _, taskID, _, _ in
+                self?.finishAttachIndicator(taskID)
                 self?.detachedTaskIDs.insert(taskID)
             },
-            onSessionExited: { [weak self] _, taskID, sessionID, exitCode in
+            onSessionExited: { [weak self] daemonID, taskID, sessionID, exitCode in
+                self?.finishAttachIndicator(taskID)
+                self?.recordLocalExit(daemonID: daemonID, taskID: taskID, sessionID: sessionID, exitCode: exitCode)
                 self?.markSessionExited(taskID: taskID, sessionID: sessionID, exitCode: exitCode)
             },
-            onCatalog: { [weak self] _, catalog in
-                for exit in catalog.exits {
-                    self?.markSessionExited(taskID: exit.taskID, sessionID: exit.sessionID, exitCode: exit.exitCode)
-                }
+            onCatalog: { [weak self] daemonID, catalog in
+                self?.updateLocalCatalog(daemonID: daemonID, catalog: catalog)
             },
             onError: { [weak self] message in self?.reportLocalError(message) },
             onInputBlocked: { [weak self] sessionID, blocked in
                 if blocked { self?.blockedSessionIDs.insert(sessionID) } else { self?.blockedSessionIDs.remove(sessionID) }
             },
-            onDeviceTransport: { [weak self] daemonID, relayHost, rttMs in
-                self?.deviceTransports[daemonID] = DeviceTransportInfo(relayHost: relayHost, rttMs: rttMs)
+            onDeviceTransport: { [weak self] daemonID, relayHost, rttMs, mode, detail in
+                self?.deviceTransports[daemonID] = relayHost == nil && rttMs == nil && mode == nil
+                    ? nil : DeviceTransportInfo(relayHost: relayHost, rttMs: rttMs, mode: mode, detail: detail)
             }
-        ))
+        ), localProvider: localDeviceProvider, p2pProvider: p2pDeviceProvider)
         if let tokenReadError {
             reportLocalError("无法读取本机会话：\(Self.describeLocalError(tokenReadError))")
         }
@@ -178,11 +225,20 @@ public final class CofluxClient {
     /// 登录：账号密码直发 clientAuth 帧（plan 061——server 侧 local/password 两模式同帧，
     /// 外部 IdP 两跳换票已随 plan 059 退役）。
     public func login(username: String, password: String) {
+        clearAttachIndicators()
+        resetPendingTaskRemovals()
+        deviceRouter.setControlOnline(false)
+        deviceRouter.setAccountID(nil)
         loginError = ""
+        shouldRetry = false
+        authState = .authenticating
         connectAuthenticating(credential: .password(username: username, password: password))
     }
 
     public func logout() {
+        clearAttachIndicators()
+        resetPendingTaskRemovals()
+        accountID = nil
         shouldRetry = false
         token = nil
         lastError = nil
@@ -229,6 +285,8 @@ public final class CofluxClient {
         uploadingSessionIDs = []
         liveSessionIDs = []
         localExits = [:]
+        localSessions = []
+        serverRunningSessions = [:]
         deviceTransports = [:]
         sessionConsumers = [:]
         sessionConsumerTokens = [:]
@@ -238,6 +296,7 @@ public final class CofluxClient {
     /// 进后台：主动断连并取消重连计时器（iOS 不保证后台 WS 存活；会话韧性在 server/daemon 侧）。
     /// 设备通道随控制面一起关（relay 存活依赖中心）；session desired 保留，回前台重挂。
     public func suspend() {
+        clearAttachIndicators()
         guard connectionTask != nil || currentConnection != nil else { return }
         suspendedInBackground = true
         generation += 1
@@ -285,9 +344,10 @@ public final class CofluxClient {
         let stale = currentConnection
         currentConnection = nil
         status = .connecting
-        // 控制面重建期间设备通道一律视为不可用（TS onStatus !connected 同语义）
+        // 网络重连保留既有 session 的有界宽限；新连接和 elevated 能力立即失效。
         controlAuthenticated = false
-        deviceRouter.setControlOnline(false)
+        deviceRouter.setControlDisconnected()
+        armAuthenticationDeadline(generation: gen)
         connectionTask = Task {
             // 换新连接前先关旧的，否则 server 侧残留幽灵连接（connection.ts:75-77）
             await stale?.close()
@@ -305,14 +365,16 @@ public final class CofluxClient {
             currentConnection = connection
             // Swift send 会挂起：必须先武装。否则 send 永不返回时无法自愈，或回包先被
             // receive loop 消费、send 随后返回再误挂一个无人解除的 watchdog。
-            armWatchdog(connection: connection, generation: gen)
             try await connection.send(Wire.encode(.clientAuth(authPayload(credential))))
+            guard generation == gen, !Task.isCancelled else { return }
             status = .connected
             while true {
                 let data = try await connection.receive()
                 guard generation == gen else { return }
-                watchdogTask?.cancel()
-                watchdogTask = nil
+                if controlAuthenticated {
+                    watchdogTask?.cancel()
+                    watchdogTask = nil
+                }
                 if let payload = Wire.decode(data) {
                     apply(payload)
                 }
@@ -321,13 +383,28 @@ public final class CofluxClient {
             // 统一走断线路径：具体错误对控制面无区分价值（TS onclose 同语义）
         }
         guard generation == gen, !Task.isCancelled else { return }
-        currentConnection = nil
-        watchdogTask?.cancel()
-        watchdogTask = nil
-        sendTail = nil
-        status = .disconnected
+        finishFailedConnection(message: "连接已中断，请检查网络后重试。")
+    }
+
+    /// 认证总时限覆盖建连、发送和等待认证结果；无关入站不能解除它。
+    private func armAuthenticationDeadline(generation gen: Int) {
+        let clock = clock
+        watchdogTask = Task { [weak self] in
+            do { try await clock.sleep(seconds: 10) } catch { return }
+            guard let self, !Task.isCancelled, self.generation == gen else { return }
+            self.finishFailedConnection(message: "登录超时，请检查网络后重试。")
+        }
+    }
+
+    private func finishFailedConnection(message: String) {
+        // 先废弃代际并恢复界面，不能依赖底层 close 或 connect 及时返回。
+        closeCurrentConnection()
         controlAuthenticated = false
-        deviceRouter.setControlOnline(false)
+        deviceRouter.setControlDisconnected()
+        if authState == .authenticating {
+            loginError = message
+            authState = .authFailed
+        }
         scheduleReconnect()
     }
 
@@ -360,6 +437,12 @@ public final class CofluxClient {
         if deviceRouter.handleControlPayload(payload) { return }
         switch payload {
         case .authOk(let value):
+            watchdogTask?.cancel()
+            watchdogTask = nil
+            if accountID != nil && accountID != value.accountID { resetPendingTaskRemovals() }
+            accountID = value.accountID.isEmpty ? nil : value.accountID
+            deviceRouter.setAccountID(accountID)
+            deviceRouter.setIceServers(value.iceServers)
             authState = .authed
             syncState = .awaitingSnapshot
             loginError = ""
@@ -376,8 +459,15 @@ public final class CofluxClient {
                 }
             }
             send(.clientSubscribe(Coflux_V1_ClientSubscribe()))
+            let removals = pendingTaskRemovals
+            pendingTaskRemovals.removeAll()
+            for taskID in removals { removeTask(taskID: taskID) }
 
         case .authError:
+            clearAttachIndicators()
+            resetPendingTaskRemovals()
+            accountID = nil
+            deviceRouter.setAccountID(nil)
             // token 已被服务端视为无效：清 token + 停重连（继续退避=凭证风暴，store.ts:341-351）
             token = nil
             do {
@@ -394,6 +484,8 @@ public final class CofluxClient {
             closeCurrentConnection()
 
         case .clientOutdated:
+            clearAttachIndicators()
+            deviceRouter.setAccountID(nil)
             shouldRetry = false
             controlAuthenticated = false
             deviceRouter.setControlOnline(false)
@@ -402,6 +494,12 @@ public final class CofluxClient {
             closeCurrentConnection()
 
         case .stateSnapshot(let value):
+            let incomingDaemonIDs = Set(value.daemons.map(\.daemonID))
+            for daemon in daemons where !incomingDaemonIDs.contains(daemon.daemonID) {
+                deviceRouter.removeDaemon(daemon.daemonID)
+                deviceTransports[daemon.daemonID] = nil
+            }
+            localSessions.removeAll { !incomingDaemonIDs.contains($0.daemonID) }
             let incomingTasks = Dictionary(value.tasks.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
             let staleTasks = tasks.filter { previous in
                 guard let incoming = incomingTasks[previous.id] else { return true }
@@ -413,6 +511,9 @@ public final class CofluxClient {
             daemons = value.daemons
             projects = value.projects
             workspaces = value.workspaces
+            serverRunningSessions = Dictionary(value.tasks.compactMap { task in
+                task.status == .running && task.hasSessionID ? (task.id, task.sessionID) : nil
+            }, uniquingKeysWith: { _, latest in latest })
             tasks = value.tasks.map(applyLocalExit)
             ports = Dictionary(value.ports.map { ($0.taskID, $0.ports) }, uniquingKeysWith: { _, latest in latest })
             sessionAgents = [:]
@@ -427,6 +528,8 @@ public final class CofluxClient {
             upsert(&daemons, value.daemon) { $0.daemonID == value.daemon.daemonID }
 
         case .daemonRemoved(let value):
+            deviceRouter.removeDaemon(value.daemonID)
+            localSessions.removeAll { $0.daemonID == value.daemonID }
             let removedTasks = tasks.filter { $0.daemonID == value.daemonID }
             clearDerivedState(for: removedTasks)
             daemons.removeAll { $0.daemonID == value.daemonID }
@@ -459,6 +562,7 @@ public final class CofluxClient {
 
         case .taskUpdated(let value):
             guard value.hasTask else { break }
+            serverRunningSessions[value.task.id] = value.task.status == .running && value.task.hasSessionID ? value.task.sessionID : nil
             let task = applyLocalExit(value.task)
             if let previous = tasks.first(where: { $0.id == task.id }) {
                 let previousSession = previous.hasSessionID ? previous.sessionID : nil
@@ -471,6 +575,8 @@ public final class CofluxClient {
             if task.status != .running { detachedTaskIDs.remove(task.id) }
 
         case .taskRemoved(let value):
+            finishAttachIndicator(value.taskID)
+            serverRunningSessions[value.taskID] = nil
             let removed = tasks.first { $0.id == value.taskID }
             if let removed { clearDerivedState(for: [removed]) }
             tasks.removeAll { $0.id == value.taskID }
@@ -492,6 +598,7 @@ public final class CofluxClient {
             }
 
         case .error(let value):
+            clearAttachIndicators()
             errorSequence += 1
             lastError = ClientError(id: errorSequence, message: value.message)
 
@@ -509,6 +616,38 @@ public final class CofluxClient {
         adjusted.clearSessionID()
         adjusted.exitCode = exitCode
         return adjusted
+    }
+
+    func updateLocalCatalog(daemonID: String, catalog: Coflux_V1_DeviceSessionCatalog) {
+        for session in catalog.sessions {
+            let entry = LocalSessionInfo(daemonID: daemonID, session: session)
+            if let index = localSessions.firstIndex(where: { $0.daemonID == daemonID && $0.session.sessionID == session.sessionID }) {
+                localSessions[index] = entry
+            } else { localSessions.append(entry) }
+        }
+        for exit in catalog.exits {
+            recordLocalExit(daemonID: daemonID, taskID: exit.taskID, sessionID: exit.sessionID, exitCode: exit.exitCode, tombstone: exit)
+            markSessionExited(taskID: exit.taskID, sessionID: exit.sessionID, exitCode: exit.exitCode)
+        }
+    }
+
+    private func recordLocalExit(daemonID: String, taskID: String, sessionID: String, exitCode: Int32,
+                                 tombstone: Coflux_V1_DeviceSessionExitTombstone? = nil) {
+        let index = localSessions.firstIndex { $0.daemonID == daemonID && $0.session.sessionID == sessionID }
+        var session = index.map { localSessions[$0].session } ?? Coflux_V1_DeviceSessionInfo()
+        session.sessionID = sessionID; session.taskID = taskID
+        var exit = tombstone ?? index.flatMap { localSessions[$0].exit } ?? Coflux_V1_DeviceSessionExitTombstone()
+        exit.sessionID = sessionID; exit.taskID = taskID; exit.exitCode = exitCode
+        if let tombstone { session.outputSeq = tombstone.finalOutputSeq }
+        let entry = LocalSessionInfo(daemonID: daemonID, session: session, exit: exit)
+        if let index { localSessions[index] = entry } else { localSessions.append(entry) }
+    }
+
+    public func orphanSessions(daemonID: String) -> [LocalSessionInfo] {
+        localSessions.filter { item in
+            item.daemonID == daemonID && item.exit == nil &&
+                !tasks.contains { $0.id == item.session.taskID && $0.hasSessionID && $0.sessionID == item.session.sessionID }
+        }
     }
 
     func markSessionExited(taskID: String, sessionID: String, exitCode: Int32) {
@@ -530,6 +669,7 @@ public final class CofluxClient {
     }
 
     private func clearDerivedState(for removedTasks: [Coflux_V1_Task]) {
+        for task in removedTasks { finishAttachIndicator(task.id) }
         for task in removedTasks {
             detachedTaskIDs.remove(task.id)
             ports[task.id] = nil
@@ -562,8 +702,29 @@ public final class CofluxClient {
         send(.taskCreate(create))
     }
 
+    /// 设备先报告退出、中心尚未落库时，等待中心确认后再重启；调用方取消后不再发送。
+    public func startTaskWhenReady(taskID: String, cols: UInt32, rows: UInt32) async throws {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while true {
+            try Task.checkCancellation()
+            guard controlAuthenticated, status == .connected else { throw DeviceRouteError("连接已断开，请重试启动终端") }
+            guard tasks.contains(where: { $0.id == taskID }) else { throw DeviceRouteError("终端已被删除") }
+            guard let session = serverRunningSessions[taskID], localExits[session] != nil else { break }
+            guard ContinuousClock.now < deadline else { throw DeviceRouteError("等待服务器确认终端退出超时，请重试") }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        startTask(taskID: taskID, cols: cols, rows: rows)
+    }
+
     /// RUNNING 的 attach 直接交给 session authority；IDLE/EXITED 由中心 prepare durable create。
     public func startTask(taskID: String, cols: UInt32, rows: UInt32, force: Bool = false) {
+        if let task = tasks.first(where: { $0.id == taskID }), !detachedTaskIDs.contains(taskID) || force {
+            let running = task.status == .running && task.hasSessionID
+            // 已持有当前通道控制权时，重新选择标签不会发起 attach，不应制造连接忙态。
+            if force || !running || !deviceRouter.hasSessionControl(daemonID: task.daemonID, sessionID: task.sessionID) {
+                beginAttachIndicator(taskID, running: running)
+            }
+        }
         if let task = tasks.first(where: { $0.id == taskID }), task.status == .running, task.hasSessionID {
             if force { detachedTaskIDs.remove(taskID) }
             deviceRouter.attachSession(
@@ -580,9 +741,10 @@ public final class CofluxClient {
         send(.taskStart(start))
     }
 
-    /// 停止并删除任务。iOS relay-only：中心离线时设备通道必然也不可达，不做离线记账
-    /// （plan 046 决策：pendingTaskRemovals 不移植），直接报错。
+    /// 先停止设备会话；中心短断时暂存目录删除，恢复认证后补发。
     public func closeTask(_ task: Coflux_V1_Task) async {
+        guard let closingAccount = accountID else { return }
+        let epoch = removalEpoch
         if task.status == .running, task.hasSessionID {
             do {
                 deviceRouter.attachSession(
@@ -591,6 +753,7 @@ public final class CofluxClient {
                 )
                 try await deviceRouter.stopSession(daemonID: task.daemonID, sessionID: task.sessionID)
             } catch let error as DeviceRouteError {
+                guard epoch == removalEpoch, accountID == closingAccount else { return }
                 // session_not_found 是「设备侧已经没有它」的确定答复，继续删 catalog task
                 // 才能收敛（store.ts:583-589）；其余错误中止，不猜测设备状态。
                 guard error.code == "session_not_found" else {
@@ -598,16 +761,18 @@ public final class CofluxClient {
                     return
                 }
             } catch {
+                guard epoch == removalEpoch, accountID == closingAccount else { return }
                 reportLocalError(String(describing: error))
                 return
             }
         }
+        guard epoch == removalEpoch, accountID == closingAccount else { return }
         removeTask(taskID: task.id)
     }
 
     private func removeTask(taskID: String) {
         guard controlAuthenticated else {
-            reportLocalError("中心未连接，无法删除任务")
+            if !pendingTaskRemovals.contains(taskID) { pendingTaskRemovals.append(taskID) }
             return
         }
         var remove = Coflux_V1_TaskRemove()
@@ -617,11 +782,36 @@ public final class CofluxClient {
 
     public func sendInput(sessionID: String, _ text: String) {
         guard let data = text.data(using: .utf8), !data.isEmpty else { return }
+        sendInput(sessionID: sessionID, data: data)
+    }
+
+    /// 原生终端的鼠标/键盘序列按字节透传，不能因 UTF-8 转换失败静默丢弃。
+    public func sendInput(sessionID: String, data: Data) {
+        guard !data.isEmpty else { return }
         guard let task = tasks.first(where: { $0.hasSessionID && $0.sessionID == sessionID }) else {
             reportLocalError("会话不存在，无法发送终端输入")
             return
         }
         deviceRouter.sendInput(daemonID: task.daemonID, sessionID: sessionID, data: data)
+    }
+
+    public func hasSessionControl(sessionID: String) -> Bool {
+        guard let task = tasks.first(where: { $0.status == .running && $0.hasSessionID && $0.sessionID == sessionID }) else { return false }
+        return deviceRouter.hasSessionControl(daemonID: task.daemonID, sessionID: sessionID)
+    }
+
+    /// 桌面上传只返回设备确认的路径；是否使用 bracketed paste 由终端当前模式决定。
+    public func uploadSessionFile(sessionID: String, data: Data, suggestedName: String) async throws -> String {
+        guard let task = tasks.first(where: { $0.status == .running && $0.hasSessionID && $0.sessionID == sessionID }),
+              hasSessionControl(sessionID: sessionID) else {
+            throw DeviceRouteError("未持有控制权，无法上传文件")
+        }
+        let result = try await deviceRouter.fsWrite(daemonID: task.daemonID, workspaceID: task.workspaceID,
+                                                   path: suggestedName, data: data, temp: true)
+        guard result.ok, result.hasPath, !result.path.isEmpty else {
+            throw DeviceRouteError(result.hasError ? result.error : "文件上传失败")
+        }
+        return result.path
     }
 
     public func resizeSession(sessionID: String, cols: UInt32, rows: UInt32) {
@@ -688,8 +878,53 @@ public final class CofluxClient {
     }
 
     public func reportLocalError(_ message: String) {
+        clearAttachIndicators()
         errorSequence += 1
         lastError = ClientError(id: errorSequence, message: message)
+    }
+
+    /// 工作台变更只发既有业务命令，禁止从 UI 绕过认证、订阅与路由状态机。
+    @discardableResult
+    public func sendWorkbenchCommand(_ payload: Coflux_V1_ClientToServer.OneOf_Payload) -> Bool {
+        switch payload {
+        case .projectImport, .projectRemove, .projectSetName, .workspaceCreate, .workspaceRemove,
+             .workspaceSetName, .deviceSetName, .clientRemoveDevice, .terminalCreate:
+            break
+        default:
+            reportLocalError("不支持的工作台操作")
+            return false
+        }
+        guard controlAuthenticated else {
+            reportLocalError("中心未连接，无法执行此操作")
+            return false
+        }
+        send(payload)
+        return true
+    }
+
+    public func listDeviceDirectory(daemonID: String, path: String) async throws -> Coflux_V1_FsListed {
+        try await deviceRouter.listDirectory(daemonID: daemonID, workspaceID: "", path: path, browseHome: true)
+    }
+
+    public func listWorkspaceDirectory(workspaceID: String, path: String) async throws -> Coflux_V1_FsListed {
+        guard let workspace = workspaces.first(where: { $0.id == workspaceID }) else {
+            throw DeviceRouteError("工作区不存在")
+        }
+        return try await deviceRouter.listDirectory(daemonID: workspace.daemonID, workspaceID: workspaceID, path: path, browseHome: false)
+    }
+
+    public func readWorkspaceFile(workspaceID: String, path: String) async throws -> Coflux_V1_FsReadResult {
+        guard let workspace = workspaces.first(where: { $0.id == workspaceID }) else {
+            throw DeviceRouteError("工作区不存在")
+        }
+        return try await deviceRouter.readFile(daemonID: workspace.daemonID, workspaceID: workspaceID, path: path)
+    }
+
+    public func executeInWorkspace(workspaceID: String, command: String, args: [String]) async throws -> Coflux_V1_ExecResult {
+        guard let workspace = workspaces.first(where: { $0.id == workspaceID }) else {
+            throw DeviceRouteError("工作区不存在")
+        }
+        return try await deviceRouter.execute(daemonID: workspace.daemonID, workspaceID: workspaceID, command: command, args: args)
     }
 
     private func send(_ payload: Coflux_V1_ClientToServer.OneOf_Payload) {

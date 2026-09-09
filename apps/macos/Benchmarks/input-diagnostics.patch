@@ -1,0 +1,96 @@
+--- a/apps/macos/Tests/NativeIntegrationTests.swift
++++ b/apps/macos/Tests/NativeIntegrationTests.swift
+@@ -1169,6 +1169,24 @@
+         try await wait("PTY 测量程序进入无本地回显模式") { terminal.readText().contains(ready) }
+         var samples: [Double] = []
+         var observedLoadBytes = 0
++        let diagnosticsEnabled = ProcessInfo.processInfo.environment["COFLUX_INPUT_DIAGNOSTICS"] == "1"
++        let pump = (terminal.sessionCoordinator as? NativeTerminal.Coordinator)?.output
++        var diagnostics: [[String: Any]] = []
++        var firstInputCallback: ContinuousClock.Instant?, lastInputCallback: ContinuousClock.Instant?
++        var callbackBytes = 0
++        let originalInput = terminal.onInput
++        if diagnosticsEnabled {
++            terminal.onInput = { data in
++                if firstInputCallback == nil { firstInputCallback = .now }
++                lastInputCallback = .now; callbackBytes += data.count
++                originalInput?(data)
++            }
++        }
++        defer { if diagnosticsEnabled { terminal.onInput = originalInput } }
++        func milliseconds(_ start: ContinuousClock.Instant, _ end: ContinuousClock.Instant = .now) -> Double {
++            let value = start.duration(to: end)
++            return Double(value.components.seconds) * 1000 + Double(value.components.attoseconds) / 1e15
++        }
+         for index in 0..<31 {
+             // 各探针间让真实 PTY 持续输出，间隔不计入输入往返时间。
+             if outputLoad { try await Task.sleep(for: .milliseconds(20)) }
+@@ -1177,15 +1195,48 @@
+             let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: terminal.window?.windowNumber ?? 0,
+                 context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
++            firstInputCallback = nil; lastInputCallback = nil; callbackBytes = 0
++            var checkedHistory = false
++            let drainBefore = diagnosticsEnabled ? pump?.totalDrainMS ?? 0 : 0
++            let slicesBefore = diagnosticsEnabled ? pump?.sliceCount ?? 0 : 0
+             let start = ContinuousClock.now
+             terminal.insertText(marker, replacementRange: NSRange(location: NSNotFound, length: 0))
+             terminal.keyDown(with: event)
++            let inputEnd = ContinuousClock.now
+             let deadline = start + .seconds(5)
+-            while !terminal.readText(viewport: true).contains(response) {
++            var readMS = 0.0, largestReadMS = 0.0, largestSleepMS = 0.0, polls = 0, maxPending = 0
++            while true {
++                let readStart = ContinuousClock.now
++                let found = terminal.readText(viewport: true).contains(response)
++                if diagnosticsEnabled {
++                    let elapsed = milliseconds(readStart)
++                    readMS += elapsed; largestReadMS = max(largestReadMS, elapsed); polls += 1
++                    maxPending = max(maxPending, pump?.pendingBytes ?? 0)
++                }
++                if found { break }
++                if diagnosticsEnabled, !checkedHistory, milliseconds(start) > 100 {
++                    checkedHistory = true
++                    if terminal.readText().contains(response) {
++                        print("NATIVE_INPUT_MISSED_VIEWPORT index=\(index) elapsedMS=\(milliseconds(start)) callbackBytes=\(callbackBytes) firstCallbackMS=\(firstInputCallback.map { milliseconds(start, $0) } ?? -1) lastCallbackMS=\(lastInputCallback.map { milliseconds(start, $0) } ?? -1)")
++                        XCTFail("PTY 确认已进入历史但视口轮询漏读；本轮不能计入输入延迟")
++                        throw URLError(.cannotParseResponse)
++                    }
++                }
+                 guard ContinuousClock.now < deadline else { XCTFail("原生输入没有收到 PTY 确认"); throw URLError(.timedOut) }
++                let sleepStart = ContinuousClock.now
+                 try await Task.sleep(for: .milliseconds(1))
++                if diagnosticsEnabled { largestSleepMS = max(largestSleepMS, milliseconds(sleepStart)) }
+             }
+             let duration = start.duration(to: .now)
++            if diagnosticsEnabled {
++                diagnostics.append(["index": index, "roundtripMS": milliseconds(start),
++                    "inputSubmissionMS": milliseconds(start, inputEnd), "readTotalMS": readMS,
++                    "firstInputCallbackMS": firstInputCallback.map { milliseconds(start, $0) } ?? -1,
++                    "lastInputCallbackMS": lastInputCallback.map { milliseconds(start, $0) } ?? -1, "callbackBytes": callbackBytes,
++                    "largestReadMS": largestReadMS, "largestSleepMS": largestSleepMS, "pollCount": polls,
++                    "maxObservedPendingBytes": maxPending, "drainMS": (pump?.totalDrainMS ?? 0) - drainBefore,
++                    "drainSlices": (pump?.sliceCount ?? 0) - slicesBefore])
++            }
+             samples.append(Double(duration.components.seconds)*1000 + Double(duration.components.attoseconds)/1e15)
+             if outputLoad {
+                 let content = terminal.readText(viewport: true)
+@@ -1210,6 +1261,9 @@
+         try FileManager.default.createDirectory(at: artifactDirectory, withIntermediateDirectories: true)
+         try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+             .write(to: artifactDirectory.appendingPathComponent(outputLoad ? "native-input-roundtrip-loaded.json" : "native-input-roundtrip.json"))
++        if diagnosticsEnabled {
++            print("NATIVE_INPUT_DIAGNOSTICS \(String(data: try JSONSerialization.data(withJSONObject: ["outputLoad": outputLoad, "samples": diagnostics], options: [.sortedKeys]), encoding: .utf8)!)")
++        }
+         print("NATIVE_INPUT_ROUNDTRIP \(String(data: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), encoding: .utf8)!)")
+     }
+ 
+--- a/apps/macos/project.yml
++++ b/apps/macos/project.yml
+@@ -258,5 +258,6 @@
+         COFLUX_MACOS_TEST: "1"
+         COFLUX_NATIVE_TEST_URL: "$(COFLUX_NATIVE_TEST_URL)"
+         COFLUX_NATIVE_FIXTURE_FILE: "$(COFLUX_NATIVE_FIXTURE_FILE)"
++        COFLUX_INPUT_DIAGNOSTICS: "$(COFLUX_INPUT_DIAGNOSTICS)"
+         COFLUX_SWITCH_METAL_TRACE: "$(COFLUX_SWITCH_METAL_TRACE)"
+       targets: [CofluxTests]

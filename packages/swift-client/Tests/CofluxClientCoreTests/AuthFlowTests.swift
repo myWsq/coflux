@@ -5,6 +5,87 @@ import Testing
 
 @MainActor
 struct AuthFlowTests {
+    @Test func pendingCloseFromPreviousLoginCannotReportErrorOrDeleteNewSession() async throws {
+        let transport = FakeTransport()
+        let client = makeClient(transport: transport, store: InMemoryTokenStore(value: "token"))
+        defer { client.logout() }
+        let first = await transport.nextConnection()
+        var auth = Coflux_V1_AuthOk(); auth.accountID = "account"
+        first.push(.authOk(auth))
+        #expect(await waitUntil { client.authState == .authed })
+        var task = Coflux_V1_Task(); task.id = "task"; task.daemonID = "device"
+        task.sessionID = "session"; task.status = .running
+        var snapshot = Coflux_V1_StateSnapshot(); snapshot.tasks = [task]
+        first.push(.stateSnapshot(snapshot))
+        #expect(await waitUntil { client.tasks.count == 1 })
+        let close = Task { await client.closeTask(task) }
+        #expect(await waitUntil {
+            first.sent.contains { if case .deviceRelayConnect? = decodeClientFrame($0) { return true }; return false }
+        })
+        // 真实发送到申请设备通道这一步，尚未收到 holder；登出使等待中的操作失败。
+        client.logout()
+        client.login(username: "same-user", password: "test")
+        // 不让出 MainActor，先投递同账号新认证；保证旧 continuation 在新登录后才恢复。
+        client.apply(.authOk(auth))
+        client.reportLocalError("新登录的错误")
+        await close.value
+        #expect(client.lastError?.message == "新登录的错误", "旧关闭失败不能覆盖新登录错误")
+        let second = await transport.nextConnection()
+        second.push(.authOk(auth))
+        #expect(await waitUntil { client.authState == .authed })
+        // 订阅作为发送队列的可观察屏障，检查旧任务删除没有进入新连接。
+        #expect(await waitUntil { second.sent.count >= 2 })
+        #expect(!second.sent.contains { if case .taskRemove? = decodeClientFrame($0) { return true }; return false })
+    }
+
+    @Test(arguments: [0, 1, 2])
+    func offlineTaskRemovalResumesOnlyWithinSameLogin(mode: Int) async throws {
+        let logout = mode == 1
+        let shouldReplay = mode == 0
+        let transport = FakeTransport()
+        let client = makeClient(transport: transport, store: InMemoryTokenStore(value: "token"))
+        defer { client.logout() }
+        let first = await transport.nextConnection()
+        var auth = Coflux_V1_AuthOk(); auth.accountID = "account"
+        first.push(.authOk(auth))
+        #expect(await waitUntil { client.authState == .authed })
+        var task = Coflux_V1_Task(); task.id = "closed"; task.status = .exited
+        var snapshot = Coflux_V1_StateSnapshot(); snapshot.tasks = [task]
+        first.push(.stateSnapshot(snapshot))
+        #expect(await waitUntil { client.tasks.count == 1 })
+        client.suspend()
+        await client.closeTask(task)
+        await client.closeTask(task)
+        #expect(client.lastError == nil)
+        #expect(client.tasks.map(\.id) == [task.id], "中心确认前不伪造删除")
+        if logout {
+            client.logout()
+            // 即使重新登录同一账号，也不能补发上一登录的请求。
+            client.login(username: "user", password: "test")
+        } else {
+            client.resume()
+        }
+        let second = await transport.nextConnection()
+        if mode == 2 { auth.accountID = "other-account" }
+        second.push(.authOk(auth))
+        #expect(await waitUntil { second.sent.count >= (shouldReplay ? 3 : 2) })
+        let removals = second.sent.compactMap { data -> String? in
+            if case .taskRemove(let value)? = decodeClientFrame(data) { return value.taskID }
+            return nil
+        }
+        #expect(removals == (shouldReplay ? [task.id] : []), "离线重复关闭去重，登出或换账号清空")
+        if shouldReplay {
+            guard case .clientSubscribe? = decodeClientFrame(second.sent[1]),
+                  case .taskRemove? = decodeClientFrame(second.sent[2]) else {
+                Issue.record("必须先订阅再补发删除"); return
+            }
+            #expect(client.tasks.count == 1)
+            var removed = Coflux_V1_TaskRemoved(); removed.taskID = task.id
+            second.push(.taskRemoved(removed))
+            #expect(await waitUntil { client.tasks.isEmpty })
+        }
+    }
+
     private func makeClient(
         transport: FakeTransport,
         store: InMemoryTokenStore = InMemoryTokenStore()
@@ -44,6 +125,7 @@ struct AuthFlowTests {
         connection.push(.authOk(authOk))
 
         #expect(await waitUntil { client.authState == .authed })
+        #expect(client.accountID == "a1")
         #expect(store.value == "ck_sess_test") // authOk 回带 token 即持久化（store.ts:333-336）
 
         // authOk 后立即 clientSubscribe（store.ts:337）
@@ -52,6 +134,10 @@ struct AuthFlowTests {
             Issue.record("authOk 后第二帧不是 clientSubscribe")
             return
         }
+        client.suspend()
+        #expect(client.accountID == "a1") // 瞬时断线保留已认证域，供离线会话使用。
+        client.logout()
+        #expect(client.accountID == nil)
     }
 
     @Test func authErrorStopsReconnect() async throws {
@@ -255,6 +341,70 @@ struct AuthFlowTests {
         client.logout()
     }
 
+    @Test func loginDisconnectAllowsRetry() async throws {
+        let transport = FakeTransport()
+        let client = makeClient(transport: transport)
+        defer { client.logout() }
+        client.login(username: "dev", password: "secret")
+        let first = await transport.nextConnection()
+        first.finish()
+        #expect(await waitUntil { client.authState == .authFailed })
+        #expect(client.loginError.contains("连接已中断"))
+        client.login(username: "dev", password: "secret")
+        let second = await transport.nextConnection()
+        second.push(.authOk(Coflux_V1_AuthOk()))
+        #expect(await waitUntil { client.authState == .authed })
+        #expect(client.loginError.isEmpty)
+    }
+
+    @Test func unrelatedInboundCannotExtendAuthenticationDeadline() async throws {
+        let transport = FakeTransport()
+        let clock = ManualClock()
+        let client = CofluxClient(
+            configuration: ClientConfiguration(serverURL: URL(string: "ws://fake.test/client")!, buildID: "dev"),
+            transport: transport, tokenStore: InMemoryTokenStore(), clock: clock
+        )
+        defer { client.logout() }
+        client.login(username: "dev", password: "secret")
+        let first = await transport.nextConnection()
+        #expect(await waitUntil { first.sent.count == 1 && clock.waiterCount == 1 })
+        first.push(.stateSnapshot(Coflux_V1_StateSnapshot()))
+        #expect(await waitUntil { client.snapshotRevision == 1 })
+        #expect(clock.waiterCount == 1)
+        clock.wakeAll()
+        #expect(await waitUntil { client.authState == .authFailed && first.closed })
+        #expect(client.loginError.contains("登录超时"))
+        client.login(username: "dev", password: "secret")
+        let second = await transport.nextConnection()
+        first.push(.authError(Coflux_V1_AuthError()))
+        second.push(.authOk(Coflux_V1_AuthOk()))
+        #expect(await waitUntil { client.authState == .authed })
+    }
+
+    @Test func authenticationDeadlineCoversHangingConnectAndRejectsLateConnection() async throws {
+        let transport = SuspendedAuthTransport()
+        let clock = ManualClock()
+        let client = CofluxClient(
+            configuration: ClientConfiguration(serverURL: URL(string: "ws://fake.test/client")!, buildID: "dev"),
+            transport: transport, tokenStore: InMemoryTokenStore(), clock: clock
+        )
+        defer { client.logout() }
+        client.login(username: "dev", password: "secret")
+        for _ in 0..<100 {
+            if await transport.isWaiting { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await transport.isWaiting)
+        #expect(await waitUntil { clock.waiterCount == 1 })
+        clock.wakeAll()
+        #expect(await waitUntil { client.authState == .authFailed })
+        let late = FakeConnection()
+        await transport.complete(late)
+        #expect(await waitUntil { late.closed })
+        #expect(late.sent.isEmpty)
+        #expect(client.status == .disconnected)
+    }
+
     @Test func outboundSilenceClosesSocket() async throws {
         let transport = FakeTransport()
         let clock = ManualClock()
@@ -433,5 +583,19 @@ struct AuthFlowTests {
         #expect(await waitUntil { connection.sent.contains { if case .clientLogout? = decodeClientFrame($0) { true } else { false } } })
         try await Task.sleep(for: .milliseconds(80))
         #expect(await transport.connectCount == 1)
+    }
+}
+
+
+// 有意忽略取消，验证底层迟到返回也不能复活过期认证。
+private actor SuspendedAuthTransport: Transport {
+    private var waiter: CheckedContinuation<any TransportConnection, Never>?
+    var isWaiting: Bool { waiter != nil }
+    func connect(to url: URL) async throws -> any TransportConnection {
+        await withCheckedContinuation { waiter = $0 }
+    }
+    func complete(_ connection: any TransportConnection) {
+        waiter?.resume(returning: connection)
+        waiter = nil
     }
 }
