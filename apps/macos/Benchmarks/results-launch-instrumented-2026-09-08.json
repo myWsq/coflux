@@ -1,0 +1,216 @@
+{
+  "scope": "Performance临时签名副本，独立bundle ID；App Launch Instruments登录页首帧，非冷启动、无网络登录，未做Web对照。",
+  "instrumentVersion": "16.0 (17F113)",
+  "reports": [
+    {
+      "run": 1,
+      "recordExitCode": 54,
+      "endReason": "Time limit reached",
+      "target": {
+        "type": "launched",
+        "return-exit-status": "9",
+        "name": "CofluxLaunchProbe",
+        "pid": "79211",
+        "termination-reason": "SIGKILL"
+      },
+      "firstFrameEndMS": 1498.143375,
+      "stages": [
+        {
+          "startMS": 0.0,
+          "durationMS": 1171.313707,
+          "period": "Initializing - Process Creation"
+        },
+        {
+          "startMS": 1171.313708,
+          "durationMS": 15.099166,
+          "period": "Initializing - System Interface Initialization"
+        },
+        {
+          "startMS": 1171.633916,
+          "durationMS": 17.680584,
+          "period": "Initializing - System Interface Initialization"
+        },
+        {
+          "startMS": 1186.412875,
+          "durationMS": 2.901625,
+          "period": "Initializing - Static Runtime Initialization"
+        },
+        {
+          "startMS": 1239.791041,
+          "durationMS": 0.036042,
+          "period": "Launching - AppKit Initialization"
+        },
+        {
+          "startMS": 1239.827083,
+          "durationMS": 1.124916,
+          "period": "Launching - AppKit Scene Creation"
+        },
+        {
+          "startMS": 1240.952,
+          "durationMS": 48.23654,
+          "period": "Launching - applicationWillFinishLaunching()"
+        },
+        {
+          "startMS": 1289.188541,
+          "durationMS": 139.035999,
+          "period": "Launching - AppKit Scene Creation"
+        },
+        {
+          "startMS": 1428.224541,
+          "durationMS": 0.176208,
+          "period": "Launching - applicationDidFinishLaunching()"
+        },
+        {
+          "startMS": 1428.40075,
+          "durationMS": 69.742625,
+          "period": "Launching - Initial Frame Rendering"
+        }
+      ]
+    },
+    {
+      "run": 2,
+      "recordExitCode": 54,
+      "endReason": "Time limit reached",
+      "target": {
+        "type": "launched",
+        "return-exit-status": "9",
+        "name": "CofluxLaunchProbe",
+        "pid": "86129",
+        "termination-reason": "SIGKILL"
+      },
+      "firstFrameEndMS": 751.78725,
+      "stages": [
+        {
+          "startMS": 0.0,
+          "durationMS": 497.875499,
+          "period": "Initializing - Process Creation"
+        },
+        {
+          "startMS": 497.8755,
+          "durationMS": 12.503124,
+          "period": "Initializing - System Interface Initialization"
+        },
+        {
+          "startMS": 498.284833,
+          "durationMS": 14.505833,
+          "period": "Initializing - System Interface Initialization"
+        },
+        {
+          "startMS": 510.378625,
+          "durationMS": 2.412041,
+          "period": "Initializing - Static Runtime Initialization"
+        },
+        {
+          "startMS": 560.776791,
+          "durationMS": 0.030125,
+          "period": "Launching - AppKit Initialization"
+        },
+        {
+          "startMS": 560.806916,
+          "durationMS": 0.951208,
+          "period": "Launching - AppKit Scene Creation"
+        },
+        {
+          "startMS": 561.758125,
+          "durationMS": 39.46879,
+          "period": "Launching - applicationWillFinishLaunching()"
+        },
+        {
+          "startMS": 601.226916,
+          "durationMS": 121.610999,
+          "period": "Launching - AppKit Scene Creation"
+        },
+        {
+          "startMS": 722.837916,
+          "durationMS": 0.156541,
+          "period": "Launching - applicationDidFinishLaunching()"
+        },
+        {
+          "startMS": 722.994458,
+          "durationMS": 28.792792,
+          "period": "Launching - Initial Frame Rendering"
+        }
+      ]
+    },
+    {
+      "run": 3,
+      "recordExitCode": 54,
+      "endReason": "Time limit reached",
+      "target": {
+        "type": "launched",
+        "return-exit-status": "9",
+        "name": "CofluxLaunchProbe",
+        "pid": "88798",
+        "termination-reason": "SIGKILL"
+      },
+      "firstFrameEndMS": 759.3646249999999,
+      "stages": [
+        {
+          "startMS": 0.0,
+          "durationMS": 466.563999,
+          "period": "Initializing - Process Creation"
+        },
+        {
+          "startMS": 466.564,
+          "durationMS": 14.75654,
+          "period": "Initializing - System Interface Initialization"
+        },
+        {
+          "startMS": 466.9565,
+          "durationMS": 18.206875,
+          "period": "Initializing - System Interface Initialization"
+        },
+        {
+          "startMS": 481.320541,
+          "durationMS": 3.842834,
+          "period": "Initializing - Static Runtime Initialization"
+        },
+        {
+          "startMS": 535.644583,
+          "durationMS": 0.041833,
+          "period": "Launching - AppKit Initialization"
+        },
+        {
+          "startMS": 535.686416,
+          "durationMS": 0.847833,
+          "period": "Launching - AppKit Scene Creation"
+        },
+        {
+          "startMS": 536.53425,
+          "durationMS": 47.233457,
+          "period": "Launching - applicationWillFinishLaunching()"
+        },
+        {
+          "startMS": 583.767708,
+          "durationMS": 144.761082,
+          "period": "Launching - AppKit Scene Creation"
+        },
+        {
+          "startMS": 728.528791,
+          "durationMS": 0.196458,
+          "period": "Launching - applicationDidFinishLaunching()"
+        },
+        {
+          "startMS": 728.72525,
+          "durationMS": 30.639375,
+          "period": "Launching - Initial Frame Rendering"
+        }
+      ]
+    }
+  ],
+  "medianFirstFrameEndMS": 759.3646249999999,
+  "recorderControl": {
+    "command": "App Launch --time-limit 2s --launch /bin/sleep 30",
+    "recordExitCode": 54,
+    "endReason": "Time limit reached",
+    "target": {
+      "arguments": "30",
+      "type": "launched",
+      "return-exit-status": "9",
+      "name": "sleep",
+      "pid": "82859",
+      "termination-reason": "SIGKILL"
+    }
+  },
+  "conclusion": "简单sleep同样到时返回54且目标SIGKILL，故这些字段本身不能证明App启动崩溃。三份轨迹首帧阶段完整；受录制开销、缓存与副本身份影响，不代表正式发布冷启动或终端可交互延迟。"
+}

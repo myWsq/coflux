@@ -1,0 +1,98 @@
+{
+  "date": "2026-09-08",
+  "grid": [
+    142,
+    34
+  ],
+  "terminals": 8,
+  "linesEach": 5000,
+  "totalBytes": 2280096,
+  "scrollbackLines": 10000,
+  "scope": "未挂载窗口或 DOM 的组件处理；不包含可见渲染、网络、启动或输入响应",
+  "nativeLog": "/tmp/coflux-ghostty-comparable-six.log",
+  "native": {
+    "warmup": {
+      "elapsedMS": 23.715792,
+      "largestGapMS": 7.241334,
+      "beats": 5
+    },
+    "samples": [
+      {
+        "elapsedMS": 36.784083,
+        "largestGapMS": 11.709917,
+        "beats": 6
+      },
+      {
+        "elapsedMS": 30.672666,
+        "largestGapMS": 19.049875,
+        "beats": 3
+      },
+      {
+        "elapsedMS": 27.553749999999997,
+        "largestGapMS": 8.9815,
+        "beats": 4
+      },
+      {
+        "elapsedMS": 30.96575,
+        "largestGapMS": 11.479625,
+        "beats": 5
+      },
+      {
+        "elapsedMS": 27.089041,
+        "largestGapMS": 17.464417,
+        "beats": 3
+      }
+    ],
+    "median": {
+      "elapsedMS": 30.672666,
+      "largestGapMS": 11.709917
+    }
+  },
+  "web": {
+    "engine": "xterm 6.0.0",
+    "browser": "Codex in-app browser",
+    "chunkBytes": 4096,
+    "warmup": {
+      "elapsedMS": 71.5,
+      "largestGapMS": 69.19999980926514,
+      "beats": 2,
+      "totalBytes": 2280096
+    },
+    "samples": [
+      {
+        "elapsedMS": 51.299999952316284,
+        "largestGapMS": 51.299999952316284,
+        "beats": 2,
+        "totalBytes": 2280096
+      },
+      {
+        "elapsedMS": 53.299999952316284,
+        "largestGapMS": 48.299999952316284,
+        "beats": 3,
+        "totalBytes": 2280096
+      },
+      {
+        "elapsedMS": 59.700000047683716,
+        "largestGapMS": 47.59999990463257,
+        "beats": 4,
+        "totalBytes": 2280096
+      },
+      {
+        "elapsedMS": 56.40000009536743,
+        "largestGapMS": 44.200000047683716,
+        "beats": 5,
+        "totalBytes": 2280096
+      },
+      {
+        "elapsedMS": 62.299999952316284,
+        "largestGapMS": 50.200000047683716,
+        "beats": 5,
+        "totalBytes": 2280096
+      }
+    ],
+    "median": {
+      "elapsedMS": 56.40000009536743,
+      "largestGapMS": 48.299999952316284
+    }
+  }
+}

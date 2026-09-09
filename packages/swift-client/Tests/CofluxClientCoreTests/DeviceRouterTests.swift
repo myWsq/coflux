@@ -18,10 +18,14 @@ final class DeviceHarness {
     var errors: [String] = []
     var blocked: [(sessionID: String, blocked: Bool)] = []
     var transportEvents: [(daemonID: String, relayHost: String?, rttMs: Double?)] = []
+    var transportModes: [String?] = []
+    var transportDetails: [String] = []
     var nowMS: Double = 1_000_000
     private(set) var router: DeviceRouter!
 
-    init() {
+    init(localProvider: (any LocalDeviceTransportProvider)? = nil, p2pProvider: (any P2PDeviceTransportProvider)? = nil,
+         heartbeatInterval: Duration = .seconds(15), heartbeatTimeout: Duration = .seconds(5),
+         controlGraceDuration: Duration = .seconds(15)) {
         router = DeviceRouter(
             transport: transport,
             callbacks: DeviceRouterCallbacks(
@@ -34,8 +38,10 @@ final class DeviceHarness {
                 onCatalog: { _, _ in },
                 onError: { [weak self] message in self?.errors.append(message) },
                 onInputBlocked: { [weak self] sessionID, isBlocked in self?.blocked.append((sessionID, isBlocked)) },
-                onDeviceTransport: { [weak self] daemonID, relayHost, rttMs in self?.transportEvents.append((daemonID, relayHost, rttMs)) }
+                onDeviceTransport: { [weak self] daemonID, relayHost, rttMs, mode, detail in self?.transportEvents.append((daemonID, relayHost, rttMs)); self?.transportModes.append(mode); self?.transportDetails.append(detail) }
             ),
+            localProvider: localProvider, p2pProvider: p2pProvider,
+            heartbeatInterval: heartbeatInterval, heartbeatTimeout: heartbeatTimeout, controlGraceDuration: controlGraceDuration,
             now: { [weak self] in self?.nowMS ?? 0 }
         )
     }
@@ -121,8 +127,155 @@ final class DeviceHarness {
     }
 }
 
+@MainActor private final class LeaseRouteProvider: LocalDeviceTransportProvider {
+    var expiresAt: Double = 1_010_000
+    var opened: [(connection: FakeConnection, channelID: String, generation: UInt64, clientInstanceID: String)] = []
+    func clearGrants(accountID: String) throws {}
+    func removeGrant(daemonID: String, accountID: String) throws {}
+    func open(daemonID: String, accountID: String, clientInstanceID: String, generation: UInt64, elevated: Bool,
+              authorize: @escaping @MainActor @Sendable (Coflux_V1_ClientToServer.OneOf_Payload) async throws -> Coflux_V1_ServerToClient.OneOf_Payload) async throws -> LocalDeviceChannel {
+        let connection = FakeConnection(), channelID = UUID().uuidString
+        opened.append((connection, channelID, generation, clientInstanceID))
+        return LocalDeviceChannel(connection: connection, channelID: channelID, scopes: [.sessionRead, .sessionControl, .rpc, .lifecycle], leaseExpiresAt: expiresAt)
+    }
+}
+
 @MainActor
 struct DeviceRouterTests {
+    @Test func directDisconnectDiagnosticNamesActualTransport() async throws {
+        let provider = LeaseRouteProvider()
+        let h = DeviceHarness(localProvider: provider)
+        h.router.setAccountID("account"); h.router.setControlOnline(true)
+        defer { h.router.reset() }
+        let release = h.router.retainMeasure(daemonID: "d1")
+        defer { release() }
+        #expect(await waitUntil { h.transportModes.last == "direct" })
+        let active = try #require(provider.opened.first)
+        active.connection.finish()
+        #expect(await waitUntil { h.transportModes.last == "offline" })
+        #expect(h.transportDetails.last == "本机直连 连接已关闭")
+    }
+
+    @Test func transportDiagnosticsTrackProbeFailureRecoveryAndClearStaleRTT() async throws {
+        let harness = DeviceHarness()
+        defer { harness.router.reset() }
+        harness.router.setControlOnline(true)
+        let release = harness.router.retainMeasure(daemonID: "d1")
+        defer { release() }
+        #expect(await waitUntil { harness.lastRelayChannelID != nil })
+        #expect(harness.transportModes.last == "probing")
+        var rejected = Coflux_V1_DeviceRelayGrant()
+        rejected.channelID = harness.lastRelayChannelID!
+        rejected.ok = false; rejected.error = "设备路由授权被拒绝"
+        _ = harness.router.handleControlPayload(.deviceRelayGrant(rejected))
+        #expect(await waitUntil { harness.transportModes.last == "offline" })
+        #expect(harness.transportDetails.last == "设备路由授权被拒绝")
+        let connection = try await harness.grantNextRelay()
+        #expect(await waitUntil { harness.transportModes.last == "relay" })
+        #expect(harness.transportDetails.last == "Device 数据经中心 opaque relay（relay.test）")
+        #expect(await waitUntil { harness.deviceFrames(connection).contains { if case .ping = $0.payload { return true }; return false } })
+        let ping = harness.deviceFrames(connection).compactMap { envelope -> Coflux_V1_DevicePing? in
+            if case .ping(let ping) = envelope.payload { return ping }; return nil
+        }.last!
+        harness.nowMS += 25
+        var pong = Coflux_V1_DevicePong(); pong.requestID = ping.requestID
+        harness.push(connection, channelID: harness.lastRelayChannelID!, .pong(pong))
+        #expect(await waitUntil { harness.transportEvents.last?.rttMs == 25 })
+        connection.finish()
+        #expect(await waitUntil { harness.transportModes.last == "offline" })
+        #expect(harness.transportEvents.last?.rttMs == nil)
+        #expect(harness.transportDetails.last == "relay 连接已关闭")
+    }
+    @Test @MainActor func cancellingOneDirectoryRequestPreservesOtherRequest() async throws {
+        let h = DeviceHarness()
+        defer { h.router.reset() }
+        h.router.setControlOnline(true)
+        let first = Task { try await h.router.listDirectory(daemonID: "d1", workspaceID: "", path: "/cancelled", browseHome: true) }
+        let second = Task { try await h.router.listDirectory(daemonID: "d1", workspaceID: "", path: "/surviving", browseHome: true) }
+        defer { first.cancel(); second.cancel() }
+        let connection = try await h.grantNextRelay()
+        let channelID = try #require(h.lastRelayChannelID)
+        func requests() -> [Coflux_V1_DeviceFsList] {
+            h.deviceFrames(connection).compactMap {
+                if case .fsList(let request) = $0.payload { return request }; return nil
+            }
+        }
+        #expect(await waitUntil { requests().count == 2 })
+        let cancelled = try #require(requests().first { $0.path == "/cancelled" })
+        let surviving = try #require(requests().first { $0.path == "/surviving" })
+        let start = ContinuousClock.now
+        first.cancel()
+        do { _ = try await first.value; Issue.record("取消的请求不能成功返回") }
+        catch { #expect(error is CancellationError) }
+        #expect(start.duration(to: .now) < .seconds(1))
+        // 远端迟到响应不得再次恢复已取消 continuation，也不能结束另一个请求。
+        var late = Coflux_V1_FsListed(); late.requestID = cancelled.requestID; late.ok = true; late.path = "/cancelled"
+        h.push(connection, channelID: channelID, .fsListed(late))
+        var response = Coflux_V1_FsListed(); response.requestID = surviving.requestID; response.ok = true; response.path = "/surviving"
+        h.push(connection, channelID: channelID, .fsListed(response))
+        let result = try await second.value
+        #expect(result.ok)
+        #expect(result.path == "/surviving")
+        #expect(h.relayConnectCount == 1)
+        #expect(h.errors.isEmpty)
+    }
+
+    @Test(arguments: ["expired", "scopeDenied"])
+    func elevatedAuthorizationRecoveryPreservesOperationIdentity(_ reason: String) async throws {
+        let provider = LeaseRouteProvider()
+        let harness = DeviceHarness(localProvider: provider)
+        harness.router.setAccountID("account")
+        harness.router.setControlOnline(true)
+        defer { harness.router.reset() }
+        let first = Task { try await harness.router.execute(daemonID: "d1", workspaceID: "w1", command: "git", args: ["status"]) }
+        #expect(await waitUntil { provider.opened.count == 1 && !provider.opened[0].connection.sent.isEmpty })
+        let old = try #require(provider.opened.first)
+        let original = try #require(harness.deviceFrames(old.connection).compactMap { frame -> Coflux_V1_DeviceExecRun? in
+            if case .execRun(let value) = frame.payload { return value }; return nil
+        }.first)
+        provider.expiresAt = 1_030_000
+        if reason == "expired" { harness.nowMS = 1_009_000 }
+        else {
+            var error = Coflux_V1_DeviceError(); error.requestID = original.requestID; error.code = "scope_denied"; error.message = "lease revoked"
+            harness.push(old.connection, channelID: old.channelID, .error(error))
+        }
+        let second = Task { try await harness.router.execute(daemonID: "d1", workspaceID: "w1", command: "git", args: ["diff"]) }
+        #expect(await waitUntil { provider.opened.count == 2 && harness.deviceFrames(provider.opened[1].connection).filter { if case .execRun = $0.payload { return true }; return false }.count == 2 })
+        let renewed = try #require(provider.opened.last)
+        #expect(renewed.generation > old.generation)
+        #expect(renewed.clientInstanceID == old.clientInstanceID, "授权恢复不能占用新的会话身份")
+        #expect(await waitUntil { old.connection.closed })
+        let replayed = harness.deviceFrames(renewed.connection).compactMap { frame -> Coflux_V1_DeviceExecRun? in
+            if case .execRun(let value) = frame.payload { return value }; return nil
+        }
+        #expect(replayed.first { $0.requestID == original.requestID }?.operationID == original.operationID)
+        for request in replayed {
+            var result = Coflux_V1_ExecResult(); result.requestID = request.requestID; result.stdout = "ok"
+            harness.push(renewed.connection, channelID: renewed.channelID, .execResult(result))
+        }
+        #expect(try await first.value.stdout == "ok")
+        #expect(try await second.value.stdout == "ok")
+    }
+
+    @Test func removedDaemonClosesMeasuredRouteAndCannotRecoverFromLateOutput() async throws {
+        let harness = DeviceHarness()
+        let (connection, channelID) = try await harness.attachAndSnapshot()
+        let release = harness.router.retainMeasure(daemonID: "d1")
+        let previousConnects = harness.relayConnectCount
+        harness.router.removeDaemon("d1")
+        #expect(await waitUntil { connection.closed })
+        #expect(!harness.router.hasSessionControl(daemonID: "d1", sessionID: "s1"))
+        var output = Coflux_V1_DevicePtyOutput()
+        output.sessionID = "s1"; output.fromSeq = 11; output.toSeq = 12; output.data = Data("xx".utf8)
+        harness.push(connection, channelID: channelID, .ptyOutput(output))
+        harness.router.setControlOnline(false)
+        harness.router.setControlOnline(true)
+        release()
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(harness.outputs.isEmpty)
+        #expect(harness.relayConnectCount == previousConnects)
+    }
+
     @Test func attachDeliversSnapshotAndHolder() async throws {
         let harness = DeviceHarness()
         let (connection, channelID) = try await harness.attachAndSnapshot()

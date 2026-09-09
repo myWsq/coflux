@@ -1,0 +1,22 @@
+--- a/crates/supervisor/src/sessions.rs
++++ b/crates/supervisor/src/sessions.rs
+@@ -1535,7 +1535,9 @@
+                 "session 不存在或已退出",
+             );
+         };
++        let started_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
+         let locked = session.lock().unwrap();
++        let locked_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
+         self.send_device(
+             channel_id,
+             device_envelope::Payload::SessionSnapshot(DeviceSessionSnapshot {
+@@ -1548,6 +1550,9 @@
+                 title: locked.state.title().to_string(),
+             }),
+         );
++        let finished_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
++        drop(locked);
++        eprintln!("SUPERVISOR_SNAPSHOT_TIMING {{\"startedWallMS\":{started_at},\"lockedWallMS\":{locked_at},\"finishedWallMS\":{finished_at}}}");
+     }
+ 
+     fn device_input(&self, channel_id: &str, request: DevicePtyInput) {

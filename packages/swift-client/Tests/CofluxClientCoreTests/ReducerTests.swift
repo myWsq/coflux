@@ -3,8 +3,49 @@ import Foundation
 import Testing
 @testable import CofluxClientCore
 
+@MainActor private final class LocalRouteProbe: LocalDeviceTransportProvider {
+    var connections: [FakeConnection] = []
+    var removed: [String] = []
+    var cleared: [String] = []
+    func clearGrants(accountID: String) throws { cleared.append(accountID) }
+    func removeGrant(daemonID: String, accountID: String) throws { removed.append(daemonID) }
+    func open(daemonID: String, accountID: String, clientInstanceID: String, generation: UInt64, elevated: Bool,
+              authorize: @escaping @MainActor @Sendable (Coflux_V1_ClientToServer.OneOf_Payload) async throws -> Coflux_V1_ServerToClient.OneOf_Payload) async throws -> LocalDeviceChannel {
+        let connection = FakeConnection()
+        connections.append(connection)
+        return LocalDeviceChannel(connection: connection, channelID: UUID().uuidString, scopes: [.sessionRead, .sessionControl])
+    }
+}
+
 @MainActor
 struct ReducerTests {
+    @Test func attachIndicatorOnlyTracksRequestsAndClearsWithoutGrantingControl() async throws {
+        let client = makeClient()
+        defer { client.logout() }
+        var auth = Coflux_V1_AuthOk(); auth.accountID = "account"
+        client.apply(.authOk(auth))
+        var state = snapshot(); state.tasks[0].sessionID = "s1"
+        var idle = state.tasks[0]; idle.id = "idle"; idle.status = .idle; idle.clearSessionID()
+        state.tasks.append(idle)
+        client.apply(.stateSnapshot(state))
+        #expect(client.attachingTaskIDs.isEmpty, "快照中的后台任务不应自动旋转")
+        client.startTask(taskID: "t1", cols: 80, rows: 24)
+        #expect(client.attachingTaskIDs == ["t1"])
+        #expect(await waitUntil { !client.attachingTaskIDs.contains("t1") })
+        #expect(!client.hasSessionControl(sessionID: "s1"), "视觉 grace 结束不能假造 holder")
+        client.startTask(taskID: "idle", cols: 80, rows: 24)
+        #expect(client.attachingTaskIDs == ["idle"])
+        client.reportLocalError("启动失败")
+        #expect(client.attachingTaskIDs.isEmpty)
+        client.startTask(taskID: "idle", cols: 80, rows: 24)
+        var removed = Coflux_V1_TaskRemoved(); removed.taskID = "idle"
+        client.apply(.taskRemoved(removed))
+        #expect(client.attachingTaskIDs.isEmpty)
+        client.startTask(taskID: "t1", cols: 80, rows: 24)
+        client.logout()
+        #expect(client.attachingTaskIDs.isEmpty)
+    }
+
     private func makeClient(store: InMemoryTokenStore = InMemoryTokenStore()) -> CofluxClient {
         CofluxClient(
             configuration: ClientConfiguration(
@@ -268,6 +309,34 @@ struct ReducerTests {
         #expect(client.tasks.isEmpty)
     }
 
+    @Test(arguments: ["removed", "snapshot", "authError"])
+    func authoritativeRemovalClosesDirectRouteDespiteMeasurementDemand(_ event: String) async throws {
+        let provider = LocalRouteProbe()
+        let client = CofluxClient(configuration: ClientConfiguration(serverURL: URL(string: "ws://fake.test/client")!, buildID: "dev"),
+                                  transport: FakeTransport(), tokenStore: InMemoryTokenStore(), localDeviceProvider: provider)
+        var auth = Coflux_V1_AuthOk(); auth.accountID = "account"
+        client.apply(.authOk(auth))
+        client.apply(.stateSnapshot(snapshot()))
+        let release = client.retainDeviceMeasure(daemonID: "d1")
+        defer { release(); client.logout() }
+        #expect(await waitUntil { client.deviceTransports["d1"]?.mode == "direct" })
+        let connection = try #require(provider.connections.first)
+        if event == "removed" {
+            var removed = Coflux_V1_DaemonRemoved(); removed.daemonID = "d1"
+            client.apply(.daemonRemoved(removed))
+        } else if event == "snapshot" {
+            client.apply(.stateSnapshot(Coflux_V1_StateSnapshot()))
+        } else {
+            client.apply(.authError(Coflux_V1_AuthError()))
+        }
+        #expect(await waitUntil { connection.closed })
+        #expect(client.deviceTransports["d1"] == nil)
+        if event == "authError" { #expect(provider.cleared == ["account"]) }
+        else { #expect(provider.removed == ["d1"]) }
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(provider.connections.count == 1)
+    }
+
     @Test func missingEmbeddedMessageIsDroppedNotCrashed() {
         let client = makeClient()
         client.apply(.stateSnapshot(snapshot()))
@@ -334,4 +403,74 @@ struct ReducerTests {
             #expect(delay >= ceiling / 2 && delay <= ceiling)
         }
     }
+    @Test(arguments: [false, true])
+    func restartWaitsForCentralExitAndHonorsCancellation(cancel: Bool) async throws {
+        let transport = FakeTransport()
+        let client = CofluxClient(configuration: ClientConfiguration(serverURL: URL(string: "ws://fake.test/client")!, buildID: "dev"),
+                                  transport: transport, tokenStore: InMemoryTokenStore())
+        defer { client.logout() }
+        client.login(username: "dev", password: "secret")
+        let connection = await transport.nextConnection()
+        connection.push(.authOk(Coflux_V1_AuthOk()))
+        #expect(await waitUntil { client.authState == .authed })
+        var initial = snapshot()
+        initial.tasks[0].sessionID = "s1"
+        client.apply(.stateSnapshot(initial))
+        client.markSessionExited(taskID: "t1", sessionID: "s1", exitCode: 0)
+        #expect(client.tasks[0].status == .exited)
+        let restart = Task { try await client.startTaskWhenReady(taskID: "t1", cols: 91, rows: 31) }
+        func starts() -> [Coflux_V1_TaskStart] {
+            connection.sent.compactMap { bytes in
+                if case .taskStart(let value)? = decodeClientFrame(bytes) { return value }
+                return nil
+            }
+        }
+        // 中心旧 RUNNING 消息不能提前放行重启。
+        var update = Coflux_V1_TaskUpdated(); update.task = initial.tasks[0]
+        client.apply(.taskUpdated(update))
+        try await Task.sleep(for: .milliseconds(60))
+        await client.waitForPendingControlSends()
+        #expect(starts().isEmpty)
+        if cancel { restart.cancel() }
+        update.task.status = .exited
+        update.task.clearSessionID()
+        client.apply(.taskUpdated(update))
+        if cancel {
+            do { try await restart.value; Issue.record("取消后不应继续重启") }
+            catch is CancellationError {} catch { Issue.record("错误类型不符：\(error)") }
+        } else { try await restart.value }
+        await client.waitForPendingControlSends()
+        #expect(starts().count == (cancel ? 0 : 1))
+        if !cancel { #expect(starts().first?.cols == 91); #expect(starts().first?.rows == 31) }
+    }
+
+    @Test func localCatalogTracksOrphansAndExitWithoutDroppingOtherSessions() {
+        let client = makeClient()
+        var initial = snapshot(); initial.tasks[0].sessionID = "registered"
+        client.apply(.stateSnapshot(initial))
+        var catalog = Coflux_V1_DeviceSessionCatalog()
+        for id in ["registered", "orphan"] {
+            var session = Coflux_V1_DeviceSessionInfo()
+            session.sessionID = id; session.taskID = "t1"; session.cwd = "/work"; session.pid = 42
+            catalog.sessions.append(session)
+        }
+        client.updateLocalCatalog(daemonID: "d1", catalog: catalog)
+        #expect(client.orphanSessions(daemonID: "d1").map { $0.session.sessionID } == ["orphan"])
+        #expect(client.orphanSessions(daemonID: "other").isEmpty)
+        client.updateLocalCatalog(daemonID: "d1", catalog: Coflux_V1_DeviceSessionCatalog())
+        #expect(client.localSessions.count == 2) // catalog 的缺席不当作退出事件。
+        var exit = Coflux_V1_DeviceSessionExitTombstone()
+        exit.sessionID = "orphan"; exit.taskID = "t1"; exit.exitCode = 7; exit.finalOutputSeq = 99
+        var ended = Coflux_V1_DeviceSessionCatalog(); ended.exits = [exit]
+        client.updateLocalCatalog(daemonID: "d1", catalog: ended)
+        #expect(client.orphanSessions(daemonID: "d1").isEmpty)
+        let local = client.localSessions.first { $0.session.sessionID == "orphan" }
+        #expect(local?.session.cwd == "/work")
+        #expect(local?.session.outputSeq == 99)
+        #expect(local?.exit?.exitCode == 7)
+        #expect(client.tasks[0].status == .running) // 同 task 的旧 session 退出不能结束新 session。
+        client.logout()
+        #expect(client.localSessions.isEmpty)
+    }
+
 }
