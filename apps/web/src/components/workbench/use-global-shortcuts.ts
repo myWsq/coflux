@@ -2,6 +2,7 @@ import { useEffect, type RefObject } from "react";
 
 import { isStandalone } from "@/components/workbench/use-shortcut-modifier";
 import type { WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
+import { getDesktopBridge, type DesktopCommand } from "@/desktop-bridge";
 
 type GlobalShortcutsOptions = {
   /** 当前选中工作区所属项目 id；无选中工作区时为 null，Cmd+Ctrl+N 安静忽略 */
@@ -23,6 +24,9 @@ type GlobalShortcutsOptions = {
  * 数字/字母键用 event.code（物理键位），不用 event.key——避免非 QWERTY 布局下
  * 键位随字符映射漂移（如 Dvorak 下 KeyT 物理位置对应的字符并非 "t"，但拦截的是
  * 物理键位，这与大多数系统级/编辑器快捷键的语义一致）。
+ *
+ * 桌面 app（plan 103）：键位判定与 standalone 相同（纯 ⌘，见 use-shortcut-modifier）；原生菜单项
+ * 不注册 accelerator，点菜单走桥接的 onCommand，与键盘路径共用同一组处理函数。
  */
 export function useGlobalShortcuts({
   selectedProjectId,
@@ -90,5 +94,34 @@ export function useGlobalShortcuts({
 
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp]);
+
+  // 原生菜单命令（桌面 app）：与上面的键位一一对应，浏览器里桥接不存在、effect 空跑。
+  useEffect(() => {
+    const bridge = getDesktopBridge();
+    if (!bridge) return;
+    return bridge.onCommand((command: DesktopCommand) => {
+      const terminal = activeTerminalRef.current;
+      switch (command) {
+        case "create-terminal":
+          terminal?.createTerminal();
+          return;
+        case "close-terminal":
+          terminal?.closeActiveTab();
+          return;
+        case "create-workspace":
+          if (selectedProjectId) onOpenCreateWorkspaceMenu(selectedProjectId);
+          return;
+        case "previous-tab":
+          terminal?.selectRelativeTab(-1);
+          return;
+        case "next-tab":
+          terminal?.selectRelativeTab(1);
+          return;
+        case "toggle-help":
+          onToggleHelp();
+          return;
+      }
+    });
   }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp]);
 }
