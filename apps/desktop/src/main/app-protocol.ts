@@ -7,8 +7,16 @@ import { APP_HOST, APP_SCHEME, RENDERER_CSP, contentTypeFor, resolveRendererAsse
 
 export { APP_HOST, APP_ORIGIN, APP_SCHEME, APP_URL, RENDERER_CSP } from "./app-protocol-pure";
 
+/** 错误响应同样带 CSP：Electron 会对没有 CSP 的（哪怕是错误）页面弹 Insecure Content-Security-Policy 警告。 */
+function errorResponse(status: number, message: string): Response {
+  return new Response(message, {
+    status,
+    headers: { "Content-Type": "text/plain; charset=utf-8", "Content-Security-Policy": RENDERER_CSP, "X-Content-Type-Options": "nosniff" },
+  });
+}
+
 function notFound(): Response {
-  return new Response("not found", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  return errorResponse(404, "not found");
 }
 
 /**
@@ -20,9 +28,7 @@ export function registerAppProtocol(rendererRoot: string): void {
   protocol.handle(APP_SCHEME, async (request) => {
     const url = new URL(request.url);
     if (url.host !== APP_HOST) return notFound();
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      return new Response("method not allowed", { status: 405 });
-    }
+    if (request.method !== "GET" && request.method !== "HEAD") return errorResponse(405, "method not allowed");
     const relative = resolveRendererAsset(url.pathname);
     if (relative === null) return notFound();
     let filePath = join(root, ...relative.split("/"));
@@ -32,7 +38,7 @@ export function registerAppProtocol(rendererRoot: string): void {
       if (!info.isFile()) throw new Error("not a file");
     } catch {
       // 静态资源不存在 → 404；SPA 路径已经在 resolveRendererAsset 回落 index.html，这里不再兜底。
-      if (relative === "index.html") return new Response("renderer bundle missing", { status: 500 });
+      if (relative === "index.html") return errorResponse(500, "renderer bundle missing");
       return notFound();
     }
     const upstream = await net.fetch(pathToFileURL(filePath).toString(), { bypassCustomProtocolHandlers: true });

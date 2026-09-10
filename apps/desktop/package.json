@@ -4,7 +4,7 @@
   "private": true,
   "description": "coflux 桌面客户端：Electron 壳原样打包 apps/web 工作台",
   "type": "module",
-  "main": "./out/main/index.mjs",
+  "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
@@ -20,6 +20,7 @@
   "devDependencies": {
     "@coflux/web": "workspace:*",
     "@tailwindcss/vite": "^4.3.2",
+    "@types/node": "^22.10.2",
     "@vitejs/plugin-react": "^5.2.0",
     "babel-plugin-react-compiler": "^1.0.0",
     "electron": "^44.3.0",

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { app, dialog, Menu, protocol, session, shell, type BrowserWindow } from "electron";
 
 import { IPC } from "../shared/ipc";
@@ -21,6 +22,12 @@ protocol.registerSchemesAsPrivileged([
 // electron-vite dev 注入；打包运行时为空 → 一律走 coflux-app://app/
 const devRendererUrl = process.env.ELECTRON_RENDERER_URL;
 const trusted = { appOrigin: APP_ORIGIN, devRendererUrl };
+
+// electron-vite 惯例：preload / 渲染层产物按主进程模块的相对位置找（out/main → out/preload、out/renderer）。
+// 不用 app 的 appPath：`electron out/main/index.js` 直接启动时它指向 out/main，会多拼一层；
+// 相对主模块的路径在 asar 内、electron-vite dev/preview、直接启动三种方式下都成立。
+const PRELOAD_PATH = fileURLToPath(new URL("../preload/index.cjs", import.meta.url));
+const RENDERER_ROOT = fileURLToPath(new URL("../renderer/", import.meta.url));
 
 let mainWindow: BrowserWindow | null = null;
 let quitting = false;
@@ -97,7 +104,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   void app.whenReady().then(() => {
-    registerAppProtocol(join(app.getAppPath(), "out", "renderer"));
+    registerAppProtocol(RENDERER_ROOT);
     installOriginRewrite();
 
     // 渲染层不需要任何浏览器权限：通知走主进程 Notification，不经 Web Notification API；
@@ -150,7 +157,7 @@ if (!app.requestSingleInstanceLock()) {
     );
 
     mainWindow = createMainWindow({
-      preloadPath: join(app.getAppPath(), "out", "preload", "index.cjs"),
+      preloadPath: PRELOAD_PATH,
       url: devRendererUrl ?? APP_URL,
       trusted,
       isQuitting: () => quitting,

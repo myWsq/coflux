@@ -61,7 +61,9 @@ export function contentTypeFor(relativePath: string): string {
 
 /**
  * URL pathname → 渲染层产物内的 posix 相对路径。`/` 与不带扩展名的路径（SPA 路由）回落 index.html；
- * 带扩展名的按静态资源。解码后规范化，任何试图越出产物根的路径（`..`、绝对路径残留）返回 null。
+ * 带扩展名的按静态资源。解码后先按 `/` 拆段：出现任何 `..` 段（含编码形式）一律拒绝、返回 null——
+ * 不靠 normalize 吞掉开头的 `..`（`posix.normalize("/../x")` 会得到 `/x`），产物内也没有任何需要
+ * `..` 才能引用的资源，保守拒绝没有代价；app-protocol.ts 里的 startsWith(root) 仍是第二道兜底。
  */
 export function resolveRendererAsset(pathname: string): string | null {
   let decoded: string;
@@ -71,9 +73,8 @@ export function resolveRendererAsset(pathname: string): string | null {
     return null;
   }
   if (decoded.includes("\0")) return null;
-  const normalized = posix.normalize(`/${decoded}`);
-  if (normalized.startsWith("/..") || normalized.includes("/../")) return null;
-  const relative = normalized.replace(/^\/+/, "");
+  if (decoded.split("/").includes("..")) return null;
+  const relative = posix.normalize(`/${decoded}`).replace(/^\/+/, "");
   if (relative === "" || !posix.basename(relative).includes(".")) return "index.html";
   return relative;
 }

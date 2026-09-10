@@ -85,6 +85,19 @@ function DesktopAttention({ client, bridge, selectedWorkspaceId }: { client: Cof
     }
   }, [workspaces, daemons, tasks, sessionAgents, projects, bridge, selectedWorkspaceId]);
 
+  // 卸载（登出、掉到 outdated/login 面）时清角标并重置快照：否则 Dock 会停在最后一个数字，
+  // 且重新挂载后旧快照会让本该重新提醒的等待被当成「已提醒过」。
+  useEffect(
+    () => () => {
+      previousRef.current = {};
+      if (badgeRef.current !== 0) {
+        badgeRef.current = 0;
+        bridge.setBadge(0);
+      }
+    },
+    [bridge],
+  );
+
   return null;
 }
 
