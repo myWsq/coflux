@@ -50,7 +50,7 @@ pub fn current_branch(worktree: &str) -> Option<String> {
 ///
 /// `--git-common-dir` 必须显式要绝对路径：默认可能给出相对当前目录的 `.git`，那样两个仓库
 /// 会比成相等。同一仓库的所有 worktree 共享同一个 common dir，这正是「是不是同一个项目」的判据。
-pub async fn repo_facts(path: &str) -> Option<crate::worktree_locate::RepoFacts> {
+pub(crate) async fn repo_facts(path: &str) -> Option<crate::worktree_locate::RepoFacts> {
     if path.trim().is_empty() {
         return None;
     }
