@@ -1,7 +1,8 @@
 import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { defineConfig, type Plugin } from "vite";
+import { fileURLToPath } from "node:url";
+import { defineConfig, type Plugin, type PluginOption } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
@@ -10,7 +11,7 @@ const BACKEND = process.env.COFLUX_BACKEND ?? "http://localhost:8787";
 
 // 构建版本（plan 033）：生产构建取 git short SHA，随 ClientAuth 上报供 server 做版本准入；
 // vite dev 固定 "dev"（server 总放行，本机联调不受影响）。
-function resolveBuildId(command: string): string {
+export function resolveBuildId(command: string): string {
   if (command !== "build") return "dev";
   try {
     return execSync("git rev-parse --short HEAD").toString().trim();
@@ -30,7 +31,13 @@ function writeBuildIdFile(buildId: string): Plugin {
   };
 }
 
-export default defineConfig(({ command }) => {
+/**
+ * Web 渲染层的插件链（react compiler / tailwind / `@` alias / build-id 注入）——UI 单一真相
+ * （plan 103）：apps/desktop 的 electron-vite renderer 直接消费这一份，与浏览器构建零分叉。
+ * webRoot 显式传入而不用 import.meta.url：electron-vite 打包 config 时会按文件注入 import.meta，
+ * 但显式参数不依赖这种细节。
+ */
+export function createWebViteConfig(command: "build" | "serve", webRoot: string) {
   const buildId = resolveBuildId(command);
   return {
     define: {
@@ -44,20 +51,24 @@ export default defineConfig(({ command }) => {
       }),
       tailwindcss(),
       writeBuildIdFile(buildId),
-    ],
+    ] as PluginOption[],
     resolve: {
       alias: {
-        "@": new URL("./src", import.meta.url).pathname,
-      },
-    },
-    server: {
-      host: true, // 监听 0.0.0.0，等价 --host，可局域网访问
-      port: 5273,
-      // 浏览器只连前端同源，由 dev server 把 WS 代理到后端
-      proxy: {
-        "/client": { target: BACKEND, ws: true, changeOrigin: true },
-        "/health": { target: BACKEND, changeOrigin: true },
+        "@": join(webRoot, "src"),
       },
     },
   };
-});
+}
+
+export default defineConfig(({ command }) => ({
+  ...createWebViteConfig(command, fileURLToPath(new URL("./", import.meta.url))),
+  server: {
+    host: true, // 监听 0.0.0.0，等价 --host，可局域网访问
+    port: 5273,
+    // 浏览器只连前端同源，由 dev server 把 WS 代理到后端
+    proxy: {
+      "/client": { target: BACKEND, ws: true, changeOrigin: true },
+      "/health": { target: BACKEND, changeOrigin: true },
+    },
+  },
+}));

@@ -1,0 +1,32 @@
+{
+  "name": "@coflux/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "coflux 桌面客户端：Electron 壳原样打包 apps/web 工作台",
+  "type": "module",
+  "main": "./out/main/index.mjs",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test src/main/*.test.ts test/*.test.ts",
+    "pack": "electron-vite build && electron-builder --mac --dir --publish never",
+    "dist": "electron-vite build && electron-builder --mac --arm64 --publish never",
+    "icon": "node scripts/export-icon.mjs"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "@coflux/web": "workspace:*",
+    "@tailwindcss/vite": "^4.3.2",
+    "@vitejs/plugin-react": "^5.2.0",
+    "babel-plugin-react-compiler": "^1.0.0",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "tailwindcss": "^4.3.2",
+    "vite": "^6.4.3",
+    "yaml": "^2.9.0"
+  }
+}

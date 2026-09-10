@@ -1,0 +1,4 @@
+# electron-vite 产物（main/preload/renderer 三份）；打包产物 dist/ 由根 .gitignore 覆盖
+out/
+# 图标导出的中间产物（iconset），最终 icon.png 提交
+build/*.iconset/
