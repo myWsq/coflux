@@ -66,6 +66,8 @@ pub struct AgentRequest {
 }
 
 pub enum AgentAction {
+    /// `terminal new`：`command` 非空 = 作业终端（跑完即退，带退出码），
+    /// 空 = 会话终端（常驻的登录 shell，全 tty，输入 exit 才结束）——plan 101。
     TerminalNew {
         title: String,
         command: String,
@@ -212,15 +214,28 @@ async fn handle(
             AgentResponse::ok(serde_json::json!({}))
         }
         AgentAction::TerminalNew { title, command } => {
-            let (shell, log_path) = match ops::write_command_script(&command) {
-                Ok(paths) => paths,
-                Err(error) => {
-                    return AgentResponse::err(
-                        "500 Internal Server Error",
-                        format!("写命令脚本失败：{error}"),
-                    )
+            // 两种终端由「命令是否为空」区分（plan 101）：
+            // - 非空 = 作业终端：本地写包装脚本，shell 指向脚本，输出经日志汇落一份供 read 回读；
+            // - 空 = 会话终端：不写脚本、不记日志路径，shell 传空串让 supervisor 取默认登录 shell。
+            //   stdin/stdout 都是真 tty（这正是它存在的理由，套脚本就等于套管道），终端常驻到
+            //   agent 或用户输入 exit 为止；read 因此落到下面的 sessiond 快照回退。
+            let script = if command.trim().is_empty() {
+                None
+            } else {
+                match ops::write_command_script(&command) {
+                    Ok(paths) => Some(paths),
+                    Err(error) => {
+                        return AgentResponse::err(
+                            "500 Internal Server Error",
+                            format!("写命令脚本失败：{error}"),
+                        )
+                    }
                 }
             };
+            let shell = script
+                .as_ref()
+                .map(|(shell, _)| shell.clone())
+                .unwrap_or_default();
             let payload = agent_control_request::Payload::TerminalNew(wire::AgentTerminalNew {
                 title,
                 shell,
@@ -228,7 +243,9 @@ async fn handle(
             match ask_server(state, to_server_tx, session_id, payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalNew(result)) => {
-                    remember_log(state, result.task_id.clone(), log_path);
+                    if let Some((_, log_path)) = script {
+                        remember_log(state, result.task_id.clone(), log_path);
+                    }
                     AgentResponse::ok(
                         serde_json::json!({ "taskId": result.task_id, "sessionId": result.session_id }),
                     )

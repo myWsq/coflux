@@ -996,11 +996,20 @@ function tailLines(text, n) {
 async function cmdTerminal(values) {
   const sub = positionals[1];
   if (sub === "new") {
-    const command = values.cmd;
-    if (!command) die(`terminal new 需要 --cmd "<命令>"`);
+    // 两种终端只看「命令是否为空」（plan 101）：--cmd 缺省与 --cmd= 空白等价，都开会话终端
+    // ——工作区目录下的默认登录 shell，stdin/stdout 都是真 tty，不自动退出。带命令的仍是作业
+    // 终端：命令跑完终端退出并带退出码，语义一字不变。空白在这里统一收敛成空串，好让中心的
+    // 「默认标题取命令首行」落到它自己的兜底。
+    const command = (values.cmd ?? "").trim() ? values.cmd : "";
     const result = await agentPost({ action: "terminal.new", title: values.title || "", command });
     console.log(`已开终端 ${result.taskId}（用户可在 coflux 侧栏看到并随时接管）`);
-    console.log(`看输出：cofluxd terminal read ${result.taskId}`);
+    if (command) {
+      console.log(`看输出：cofluxd terminal read ${result.taskId}`);
+    } else {
+      console.log(`会话终端：常驻的登录 shell（全 tty），不会自己退出`);
+      console.log(`先等提示符：cofluxd terminal read ${result.taskId}`);
+      console.log(`再输命令：cofluxd terminal send ${result.taskId} --text "<命令>" --enter（送 exit 才结束）`);
+    }
   } else if (sub === "list") {
     const { terminals } = await agentPost({ action: "terminal.list" });
     if (!terminals.length) return void console.log("本工作区暂无终端");
@@ -1085,8 +1094,12 @@ const HELP = `cofluxd —— coflux daemon 管理
 
   以下几条供**跑在 coflux 终端里的 agent** 调用，把工作变成用户看得见、能接管的东西：
 
-  cofluxd terminal new --cmd "<命令>" [--title "<标题>"]
-                          开一个真实终端跑命令，用户在 coflux 侧栏能看到并随时接管
+  cofluxd terminal new [--cmd "<命令>"] [--title "<标题>"]
+                          开一个真实终端，用户在 coflux 侧栏能看到并随时接管
+                          带 --cmd = 作业终端：命令在登录 shell 里跑完即退出并带退出码，输出另
+                          落一份日志供 read 回读（代价：stdout 是管道，不是 tty）
+                          不带 --cmd = 会话终端：工作区目录下的常驻登录 shell，stdin/stdout 都是
+                          真 tty（能跑 vim/htop、有颜色），先 read 等提示符再 send，送 exit 才结束
   cofluxd terminal list   列出本工作区的终端（含 status / 退出码）
   cofluxd terminal read <taskId> [--lines N]
                           读某个终端的内容（纯文本，默认最后 200 行；终端已退出也能读）

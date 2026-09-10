@@ -10,6 +10,8 @@
  *     输出且活得够久的命令 → read_terminal 读到输出（source=log）→ send_terminal_input 写入生效 →
  *     wait_terminal 拿到退出码 → remove_terminal → remove_workspace（worktree 从磁盘消失 + workspaceRemoved）；
  *     stop_terminal 结束长命令；rename_workspace。
+ *   - plan 101：create_terminal 不带 command = 会话终端（常驻、全 tty 的登录 shell），read_terminal 只有
+ *     source=snapshot（没有命令日志），空标题落到「agent 终端」兜底，送 exit 才退出；非空超长命令仍被拒。
  *   - 负向：用户 attach 期间 send_terminal_input 被拒且文案含「用户正在接管」；删 running 终端被拒；删主工作区
  *     被拒；超每工作区终端上限被拒；旧 worker（不宣告能力的 rawDaemon）上写 tool 立即回「需要升级」且不等待；
  *     wait_terminal 超时返回状态而非错误；server 重启后中心发起的已安装 prepared 操作仍能完成（restore 续上）。
@@ -225,6 +227,42 @@ test("闭环：create_terminal → read_terminal(log) → send_terminal_input �
   await observer.waitFor((m) => m.case === "taskRemoved" && m.taskId === terminal.id, "web 侧 taskRemoved");
   const missing = await errTool("read_terminal", { terminalId: terminal.id });
   assert.match(missing, /不存在或不属于当前账号/);
+});
+
+test("会话终端（plan 101）：create_terminal 不带 command 开出常驻 shell，read 是快照，送 exit 才退出", async () => {
+  // 命令与标题都不给：标题必须落到「agent 终端」兜底，侧栏不能出现空标题
+  const { terminal } = await okTool("create_terminal", { workspaceId: subWorkspace.id });
+  assert.equal(terminal.status, "running");
+  assert.equal(terminal.title, "agent 终端", "空命令没有首行可取，标题要落到兜底");
+  await observer.waitFor((m) => m.case === "taskUpdated" && m.task.id === terminal.id && m.task.status === TaskStatus.RUNNING, "web 侧 running");
+
+  // 会话终端不套包装脚本，因此没有命令日志：read 只能是设备上会话的当前画面
+  const prompt = await readUntil(terminal.id, (r) => r.source === "snapshot" && r.text.trim().length > 0, "shell 提示符出现在快照里");
+  assert.equal(prompt.source, "snapshot", "会话终端没有命令日志，只有快照");
+  assert.equal(prompt.status, "running", "它不会自己退出");
+
+  // 全 tty：作业终端里 stdout 是管道，`test -t 1` 不成立、这行不会有输出。
+  // 标记里的引号让命令回显（TTY-"OK"-MCP）与命令输出（TTY-OK-MCP）区分得开。
+  await okTool("send_terminal_input", { terminalId: terminal.id, text: 'test -t 0 && test -t 1 && echo TTY-"OK"-MCP' });
+  const screen = await readUntil(terminal.id, (r) => r.text.includes("TTY-OK-MCP"), "会话终端里 stdin/stdout 都是 tty");
+  assert.equal(screen.source, "snapshot");
+  assert.equal(screen.status, "running", "命令跑完了终端也不能退出");
+
+  // 不会自己结束：没送 exit 之前 wait 只能超时（这是超时不是失败）
+  const stillRunning = await okTool("wait_terminal", { terminalId: terminal.id, timeoutSeconds: 2 });
+  assert.equal(stillRunning.exited, false);
+  assert.equal(stillRunning.timedOut, true);
+
+  await okTool("send_terminal_input", { terminalId: terminal.id, text: "exit" });
+  const waited = await okTool("wait_terminal", { terminalId: terminal.id, timeoutSeconds: 30 });
+  assert.equal(waited.exited, true, "送 exit 之后才退出");
+  assert.equal(waited.exitCode, 0, "退出码是 shell 的");
+  await okTool("remove_terminal", { terminalId: terminal.id });
+
+  // 负向：空命令合法了，但非空命令仍受 16 KB 上限，文案不再说「不能为空」
+  const tooLong = await errTool("create_terminal", { workspaceId: subWorkspace.id, command: "x".repeat(17 * 1024) });
+  assert.match(tooLong, /16384 字节/, tooLong);
+  assert.ok(!tooLong.includes("不能为空"), `空命令已是合法输入，文案不该再说「不能为空」: ${tooLong}`);
 });
 
 test("stop_terminal 结束长命令；删 running 终端被拒；wait_terminal 超时返回状态而非错误", async () => {
