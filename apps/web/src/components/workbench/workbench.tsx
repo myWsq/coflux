@@ -16,6 +16,7 @@ import {
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
 import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "@/components/workbench/desktop-attention";
+import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
@@ -30,7 +31,7 @@ import {
   type WorkbenchSelection,
 } from "@/components/workbench/workbench-state";
 import { WORKSPACE_KEY } from "@/config";
-import { getDesktopBridge, type DesktopBridge } from "@/desktop-bridge";
+import { getDesktopBridge, type DesktopBridge, type DesktopUpdateState } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
 
@@ -85,6 +86,47 @@ function DesktopAttention({ client, bridge, selectedWorkspaceId }: { client: Cof
   }, [workspaces, daemons, tasks, sessionAgents, projects, bridge, selectedWorkspaceId]);
 
   return null;
+}
+
+/**
+ * 桌面 app 的版本失配页（plan 103）：中心只接受与部署的 web 同 SHA 的桌面版，被拒不是断线——
+ * 挂载即触发一次更新检查，按 electron-updater 状态显示进度/重启按钮。
+ */
+function DesktopOutdated({ bridge }: { bridge: DesktopBridge }) {
+  const [update, setUpdate] = useState<DesktopUpdateState>({ status: "idle" });
+  useEffect(() => {
+    let disposed = false;
+    const unsubscribe = bridge.onUpdateState((state) => {
+      if (!disposed) setUpdate(state);
+    });
+    void bridge.getUpdateState().then((state) => {
+      if (!disposed) setUpdate(state);
+    });
+    bridge.checkForUpdates();
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
+  }, [bridge]);
+  const prompt = resolveOutdatedPrompt(update);
+  return (
+    <AuthShell>
+      <AuthMessage
+        icon={prompt.busy ? <LoaderCircle className="size-5 animate-spin text-primary" /> : <RefreshCw className="size-5 text-primary" />}
+        title={prompt.title}
+        description={prompt.description}
+      >
+        {prompt.action ? (
+          <Button
+            className="mt-4 w-full"
+            label={prompt.action.label}
+            variant="primary"
+            onClick={() => (prompt.action?.kind === "install" ? bridge.installUpdate() : bridge.checkForUpdates())}
+          />
+        ) : null}
+      </AuthMessage>
+    </AuthShell>
+  );
 }
 
 export function Workbench({ client }: { client: CofluxClient }) {
@@ -406,7 +448,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   // 版本失配、reload 一次仍未拿到新 bundle（plan 033）：不是认证失败，独立展示面，
   // 不复用登录表单的 error 语义（混用会误导用户以为账号/密码有问题）。
+  // 桌面 app 不会 reload（bundle 在 app 里）：改显示「需要更新」并触发自动更新检查。
   if (surface === "outdated") {
+    if (desktop) return <DesktopOutdated bridge={desktop} />;
     return (
       <AuthShell>
         <AuthMessage

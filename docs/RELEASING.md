@@ -156,6 +156,67 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
 `ci.yml`（push/PR 到 main）是质量门：类型检查/前端构建 + Rust 测试与构建（`-D warnings`）+
 全量真实进程黑盒 + Swift/iOS 构建门。
 
+## 桌面客户端（Electron）发版
+
+`apps/desktop` 是 Electron 壳 + 原样打包的 `apps/web`（plan 103）。发版与 daemon **完全独立**：tag 形如
+`desktop-v0.1.0`，触发 `.github/workflows/desktop-release.yml`（macOS runner，arm64 首发）：
+校验 tag → 构建 main/preload/renderer（渲染层 build-id 必须等于 HEAD short SHA）→ electron-builder
+翻 Fuses、Developer ID 签名（hardened runtime + entitlements）、公证 + staple → `codesign`/`stapler`/`spctl`
+校验 → 推 Cloudflare R2（先 dmg/zip/blockmap，最后 `latest-mac.yml`）→ GitHub Release 只放安装包镜像。
+
+### 一次性设置
+
+1. **签名 + 公证复用上面的 6 个 `release-signing` environment secret**（`MACOS_CERT_P12` /
+   `MACOS_CERT_PASSWORD` / `APPLE_TEAM_ID` / `NOTARY_API_KEY_P8` / `NOTARY_KEY_ID` / `NOTARY_ISSUER_ID`）。
+   workflow 只按位置引用：electron-builder 从 `CSC_LINK`/`CSC_KEY_PASSWORD` 读证书，从
+   `APPLE_API_KEY`（写成临时 .p8 文件的路径）/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER`/`APPLE_TEAM_ID` 读公证凭据。
+2. `release-signing` environment 的 deployment tag 规则要**额外放行 `desktop-v*`**（现在只放 `v*`）；
+   `desktop-v*` 也按上面 `v*` 的方式建 create 与 update/delete 两套 tag ruleset。
+3. **更新源 = Cloudflare R2**（用户 2026-09-11 决定）。新增 5 项，都放在 `release-signing` environment：
+
+| 名称 | 类型 | 内容 |
+| --- | --- | --- |
+| `R2_ACCESS_KEY_ID` | secret | R2 API token 的 Access Key ID（对象读写，最好限定到该 bucket） |
+| `R2_SECRET_ACCESS_KEY` | secret | 对应的 Secret Access Key |
+| `R2_ENDPOINT` | variable | S3 兼容端点：`https://<account-id>.r2.cloudflarestorage.com` |
+| `R2_BUCKET` | variable | bucket 名 |
+| `DESKTOP_UPDATE_URL` | variable | bucket 公网自定义域名 + `/desktop` 前缀（workflow 固定上传到 `desktop/`），如 `https://dl.coflux.dev/desktop`；app 内 electron-updater（generic provider）读 `<url>/latest-mac.yml` |
+
+workflow 缺任一项**明确失败**，不静默跳过上传、不回退到别的源。GitHub Release 不是更新源。
+R2 自定义域名要允许公网 GET（不需要签名 URL）；`latest-mac.yml` 上传时带 `no-cache`。
+
+### lockstep：桌面版与 prod 部署必须同 SHA
+
+桌面渲染层的 build-id 就是打包时的 git short SHA（与 `apps/web` 同一套准入，plan 033）；中心只接受
+`COFLUX_BUILD_ID` ∪ 部署的 `dist/build-id.txt`。所以：
+
+- **部署 prod 与打 `desktop-v*` tag 用同一个 SHA**。建议先打 tag（CI 出包 + 推 R2）再把 prod 部署到该
+  SHA；反过来也行，但桌面版会在 CI 出包前被踢——显示「需要更新」并自动检查，更新到位即恢复。
+- 只改 server/daemon、不动 web 的部署同样要对齐 SHA，否则旧桌面版被踢直到下一次桌面发版。
+- 过渡期放行旧桌面版：中心 `COFLUX_BUILD_ID` env 设成旧桌面版的 SHA（单值，与文件里的当前 SHA 取并集），
+  重启 server；桌面版发出来后再去掉。
+- 被踢**不是**断线：桌面 app 不重连、不 reload，停在「需要更新」页直到装上新版本。
+
+### 发一个桌面版本
+
+1. bump `apps/desktop/package.json` 的 `version`（必须与 tag 一致，否则 metadata job 失败），提交到 main。
+2. 与 daemon 发版同样的前置：本地在 `main`、`HEAD == origin/main`、CI 绿。
+3. 打 tag、只推这一个 tag：
+
+```sh
+git tag desktop-v0.1.0
+git push origin refs/tags/desktop-v0.1.0
+```
+
+4. workflow 结束后把 prod 部署到同一 SHA（见 [deployment.md](deployment.md)）。
+
+app 内更新行为：启动 15s 后与每 4 小时检查一次；版本准入被拒时立即检查；发现即下载；下载完成后
+「重启并更新」，不点也会在退出时自动安装。菜单「检查更新…」可手动触发。
+
+本机冒烟：`pnpm -C apps/desktop pack` 出未签名的 `apps/desktop/dist/mac-arm64/coflux.app`（Fuses 已翻、
+ad-hoc 签名）。通知/角标只在签名产物上可信（Electron 42+ 在 macOS 用 UNUserNotification），未签名包上的
+失败不算回归。
+
 ## 升级是怎么落地的
 
 1. server 轮询 GitHub `/releases/latest`（天然排除 prerelease/draft）及该 release 的 schema 2

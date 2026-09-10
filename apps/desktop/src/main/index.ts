@@ -9,6 +9,7 @@ import { buildAppMenu } from "./menu";
 import { setDockBadge, showWorkspaceNotification } from "./notifications";
 import { DESKTOP_ORIGIN, rewriteHandshakeHeaders } from "./origin";
 import { readSettingsFile, resolveServerUrl } from "./settings";
+import { createUpdater } from "./updater";
 import { createMainWindow } from "./window";
 
 // scheme 特权只能在 ready 之前注册一次：standard（有 host、相对路径可解析）+ secure（安全上下文，
@@ -106,6 +107,17 @@ if (!app.requestSingleInstanceLock()) {
     session.defaultSession.setPermissionCheckHandler((_contents, permission) => allowedPermissions.has(permission));
 
     const serverUrl = currentServerUrl();
+
+    // 自动更新：generic provider 读 R2 的 latest-mac.yml（url 由 CI 打包时写入）；状态变化广播给渲染层，
+    // 版本准入被拒的状态页据此显示「需要更新」。quitAndInstall 前把 quitting 置位，close 钩子才放行关窗。
+    const updater = createUpdater({
+      enabled: app.isPackaged,
+      beforeInstall: () => {
+        quitting = true;
+      },
+    });
+    updater.onChange((state) => sendToRenderer(IPC.updateState, state));
+
     registerIpc(
       {
         bootstrap: () => ({ platform: process.platform, version: app.getVersion(), serverUrl, origin: DESKTOP_ORIGIN }),
@@ -116,6 +128,9 @@ if (!app.requestSingleInstanceLock()) {
             sendToRenderer(IPC.focusWorkspace, workspaceId);
           }),
         setBadge: setDockBadge,
+        checkForUpdates: updater.checkForUpdates,
+        installUpdate: updater.installUpdate,
+        getUpdateState: updater.getState,
       },
       trusted,
     );
@@ -127,6 +142,10 @@ if (!app.requestSingleInstanceLock()) {
           sendToRenderer(IPC.command, command);
         },
         showServerInfo: () => void showServerInfo(serverUrl),
+        checkForUpdates: () => {
+          showMainWindow();
+          updater.checkForUpdates();
+        },
       }),
     );
 
