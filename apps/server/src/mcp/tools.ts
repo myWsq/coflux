@@ -444,7 +444,7 @@ export function createCofluxMcpServer(principal: OAuthPrincipal, deps: McpToolDe
     {
       title: "等终端退出",
       description:
-        `阻塞等某个终端退出并返回退出码。有上限：timeoutSeconds 默认 ${WAIT_DEFAULT_SECONDS}、最大 ${WAIT_MAX_SECONDS}；到期返回当前状态（exited=false、timedOut=true），不是错误——需要更久就再调一次。注意宿主的单请求超时是真正的天花板：手动 \`claude mcp add\` 的 Claude Code 默认 60 秒，此时 timeoutSeconds 别超过 50；经 coflux 插件接入的宿主 timeout 已放宽到 600 秒以上。会话终端（create_terminal 不带 command 开的）不会自己退出，对它 wait 只在你已经 send 过 `exit` 之后才有意义，否则必然等到超时。`,
+        `阻塞等某个终端退出并返回退出码。有上限：timeoutSeconds 默认 ${WAIT_DEFAULT_SECONDS}、最大 ${WAIT_MAX_SECONDS}；到期返回当前状态（exited=false、timedOut=true），不是错误——需要更久就再调一次。注意宿主的单请求超时是真正的天花板：手动 \`claude mcp add\` 的 Claude Code 默认 60 秒，此时 timeoutSeconds 别超过 50；经 coflux 插件接入的宿主 timeout 已放宽到 600 秒以上。会话终端（create_terminal 不带 command 开的）不会自己退出，对它 wait 只在你已经 send 过 \`exit\` 之后才有意义，否则必然等到超时。`,
       inputSchema: {
         terminalId: z.string().describe("终端 id"),
         timeoutSeconds: z.number().min(1).max(WAIT_MAX_SECONDS).optional().describe(`最多等多少秒，默认 ${WAIT_DEFAULT_SECONDS}，上限 ${WAIT_MAX_SECONDS}`),
