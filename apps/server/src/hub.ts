@@ -1285,7 +1285,8 @@ export class Hub {
               const sent = this.sendDaemon(daemon, {
                 case: "sessionCreate",
                 // shell 指向 worker 自己写的命令包装脚本（supervisor 的 CommandBuilder 不接受 args）。
-                // 路径由 daemon 生成、只回到同一个 daemon 执行，server 不解释也不校验它。
+                // 路径由 daemon 生成、只回到同一个 daemon 执行，server 不解释也不校验它。agent 不带
+                // 命令时（会话终端，plan 101）它是空串，supervisor 据此起默认登录 shell。
                 // 会话归属 id + mcpUrl（plan 092）：supervisor 据此注入 COFLUX_* 环境变量；只下发 id，不下发 env map。
                 value: {
                   sessionId,
@@ -3680,19 +3681,25 @@ export class Hub {
     return { ok: true, value: { workspaceId: ws.id, removedTerminalIds: outcome.effect.removedTaskIds ?? [] } };
   }
 
-  /** 在工作区里开一个跑一条命令的真实终端：同一事务里建 IDLE task（沿用 terminalNew 的准入）并 prepare 带
-   * command 的 `session.create`（中心发起），等收敛到 RUNNING。每工作区活跃终端上限含用户手开的。 */
+  /** 在工作区里开一个真实终端：同一事务里建 IDLE task（沿用 terminalNew 的准入）并 prepare `session.create`
+   * （中心发起），等收敛到 RUNNING。每工作区活跃终端上限含用户手开的。
+   *
+   * 命令是否为空区分两种终端（plan 101，与本地 `cofluxd terminal new` 同判据）：非空 = 作业终端，worker
+   * 收到后写包装脚本、跑完即退并带退出码；空 = 会话终端，worker 的空命令分支不写脚本，supervisor 起默认
+   * 登录 shell（全 tty，常驻到有人输入 exit）。空白命令在这里收敛成空串——worker 那边判的是 `is_empty()`，
+   * 留着空白会被当成命令套进脚本、开了就退。 */
   async createTerminalForAccount(
     accountId: AccountId,
     input: { workspaceId: WorkspaceId; title: string; command: string },
   ): Promise<OperationOutcome<Task>> {
     const initialWorkspace = await this.store.getWorkspace(input.workspaceId);
     if (!initialWorkspace || initialWorkspace.accountId !== accountId) return { ok: false, error: `工作区 ${input.workspaceId} 不存在或不属于当前账号` };
-    const command = input.command;
-    if (!command.trim() || Buffer.byteLength(command, "utf8") > MAX_TERMINAL_COMMAND_BYTES) {
-      return { ok: false, error: `命令不能为空且不超过 ${MAX_TERMINAL_COMMAND_BYTES} 字节` };
+    const command = input.command.trim() ? input.command : "";
+    if (Buffer.byteLength(command, "utf8") > MAX_TERMINAL_COMMAND_BYTES) {
+      return { ok: false, error: `命令不超过 ${MAX_TERMINAL_COMMAND_BYTES} 字节` };
     }
-    const title = input.title.trim() || command.split("\n")[0]!.slice(0, 64);
+    // 会话终端没有命令可取首行，标题落到与 terminalNew 同一个兜底：侧栏不能出现空标题。
+    const title = input.title.trim() || command.split("\n")[0]!.slice(0, 64).trim() || "agent 终端";
     if (!validBoundedText(title, MAX_TERMINAL_TITLE_BYTES)) return { ok: false, error: "终端标题过长或含控制字符" };
     const daemon = this.requireOnlineDaemon(initialWorkspace.daemonId, accountId, DAEMON_CAPABILITY_PREPARED_EXECUTE);
     if (!daemon.ok) return daemon;
