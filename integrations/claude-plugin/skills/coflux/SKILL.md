@@ -74,8 +74,11 @@ workspace B. From that moment, in B:
   `progress`, `notify` and `ports` still belong to it, whatever your cwd is.
 
 If your cwd is outside every coflux workspace (say `/tmp`), local commands fall back to the owning
-workspace — that is also the case for terminals opened before the daemon was upgraded, which are
-refused with "predates the daemon upgrade" instead.
+workspace.
+
+A terminal opened before the daemon was upgraded is the one case with no owning workspace at all:
+its local commands are refused with "predates the daemon upgrade" whatever your cwd is, because the
+daemon never guesses ownership from a directory. Open a new terminal.
 
 ### Ask where you are
 
