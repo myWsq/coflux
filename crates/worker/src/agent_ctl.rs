@@ -7,8 +7,13 @@
 //! coflux 自己起的 PTY 里的进程能进来，本机其它进程（含被网页驱动的本地程序）都进不来，
 //! 而且能力天然被钉死在「发起方所属的那个 session」上。agent 侧因此不需要任何凭证。
 //!
+//! **跟随调用方 cwd（plan 102）**：agent 可以经 `/cd`、EnterWorktree 把活着的会话挪进同设备的
+//! 另一个 coflux 工作区。每条请求都带调用方 cwd，[`resolve_scope`] 把它解析成**有效工作区**
+//! （[`crate::workspace_match`]），本地动作按它判定归属、经中心的动作把它申报给中心核验。
+//! 会话的**归属**工作区仍只来自账本，永远不按 cwd 猜。
+//!
 //! **本地能闭环的不碰中心（plan 094）**：send / read / wait(status) / notify / progress 全在 daemon
-//! 本地完成——归属校验（目标与调用方同工作区）与退出码来自 [`crate::session_ledger`]，内容来自
+//! 本地完成——归属校验（目标与调用方的有效工作区相同）与退出码来自 [`crate::session_ledger`]，内容来自
 //! 本地命令日志或 sessiond 快照，presence 标注改 observed 后立即上报（断连期间由重连后的全量补发
 //! 兜底）。它们不要求 daemon 此刻连着中心。只有 new / list / ports 转成 `AgentControlRequest` 交给
 //! 中心：Task 要落库广播、预览 URL 由中心生成，这三条本来就不是本地能闭环的；中心离线时它们明确
@@ -28,7 +33,10 @@ use tokio::sync::{mpsc, oneshot};
 use prost::Message as _;
 
 use crate::session_ledger::{SessionPhase, SessionRecord};
-use crate::{agents, device::DeviceRuntime, observed::ObservedState, ops, WorkerState, WsOut};
+use crate::{
+    agents, device::DeviceRuntime, observed::ObservedState, ops, workspace_match, WorkerState,
+    WsOut,
+};
 
 /// 等中心回执的上限：只防在飞请求永久占住 pending 表，CLI 侧自己的超时更短。
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
@@ -61,6 +69,9 @@ pub(crate) fn remember_log(state: &Arc<Mutex<WorkerState>>, task_id: String, log
 pub struct AgentRequest {
     pub pid: i32,
     pub ppid: i32,
+    /// 调用方申报的当前工作目录（plan 102）：CLI 每条请求都带 `process.cwd()`，daemon 据此
+    /// 解析有效工作区。旧 CLI 不带，为空串 = 退回会话的归属工作区（今天的行为）。
+    pub cwd: String,
     pub action: AgentAction,
     pub respond: oneshot::Sender<AgentResponse>,
 }
@@ -92,6 +103,9 @@ pub enum AgentAction {
         message: String,
     },
     Ports,
+    /// `cofluxd workspace`（plan 102）：只读地报出调用方 cwd 对应的有效工作区与会话的归属
+    /// 工作区，让 agent 一眼看出自己有没有「挪窝」。纯本地。
+    WorkspaceCurrent,
 }
 
 pub struct AgentResponse {
@@ -169,6 +183,7 @@ pub async fn consume_agent_requests(
                 &device,
                 request.pid,
                 request.ppid,
+                request.cwd,
                 request.action,
             )
             .await;
@@ -184,6 +199,7 @@ async fn handle(
     device: &Arc<DeviceRuntime>,
     pid: i32,
     ppid: i32,
+    cwd: String,
     action: AgentAction,
 ) -> AgentResponse {
     let alive = { state.lock().unwrap().alive.clone() };
@@ -197,6 +213,9 @@ async fn handle(
             "不在 coflux 终端里：本命令只能由 coflux 会话内的进程调用",
         );
     };
+    // 归属与目标一次算清（plan 102）：归属来自账本，目标看调用方 cwd 落在哪个本地工作区。
+    // canonicalize 要走文件系统，故 resolve_scope 内部先取表再放锁，不在锁里做 syscall。
+    let scope = resolve_scope(state, &session_id, &cwd);
 
     match action {
         AgentAction::Notify { message } => {
@@ -240,7 +259,7 @@ async fn handle(
                 title,
                 shell,
             });
-            match ask_server(state, to_server_tx, session_id, payload).await {
+            match ask_server(state, to_server_tx, session_id, scope.declared(), payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalNew(result)) => {
                     if let Some((_, log_path)) = script {
@@ -255,7 +274,7 @@ async fn handle(
         }
         AgentAction::TerminalList => {
             let payload = agent_control_request::Payload::TerminalList(wire::AgentTerminalList {});
-            match ask_server(state, to_server_tx, session_id, payload).await {
+            match ask_server(state, to_server_tx, session_id, scope.declared(), payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalList(result)) => {
                     let terminals: Vec<serde_json::Value> = result
@@ -281,11 +300,10 @@ async fn handle(
             // 本地闭环（plan 094）：归属与状态来自会话账本，内容优先本地命令日志尾部；会话仍活着
             // 则退回 sessiond 当前快照；都没有则为空。不问中心——agent 就跑在这台 daemon 上，中心
             // checkpoint 只是这里的派生缓存。ANSI 原样带回，去转义在 CLI 侧做。
-            let (target_session, record) =
-                match resolve_local_target(state, &session_id, &task_id) {
-                    Ok(found) => found,
-                    Err(response) => return response,
-                };
+            let (target_session, record) = match resolve_local_target(state, &scope, &task_id) {
+                Ok(found) => found,
+                Err(response) => return response,
+            };
             let local_log = { state.lock().unwrap().agent_logs.get(&task_id).cloned() };
             let from_log = local_log
                 .as_deref()
@@ -307,7 +325,7 @@ async fn handle(
             }))
         }
         AgentAction::TerminalStatus { task_id } => {
-            match resolve_local_target(state, &session_id, &task_id) {
+            match resolve_local_target(state, &scope, &task_id) {
                 Ok((_, record)) => AgentResponse::ok(serde_json::json!({
                     "taskId": task_id,
                     "status": phase_name(&record.phase),
@@ -323,11 +341,10 @@ async fn handle(
         } => {
             // 归属本地判定（plan 094），写入本身走 sessiond 正门（见 DeviceRuntime::agent_send_input
             // 的契约注释）：人类 holder 在场即拒。中心不在路径上。
-            let (target_session, record) =
-                match resolve_local_target(state, &session_id, &task_id) {
-                    Ok(found) => found,
-                    Err(response) => return response,
-                };
+            let (target_session, record) = match resolve_local_target(state, &scope, &task_id) {
+                Ok(found) => found,
+                Err(response) => return response,
+            };
             match record.phase {
                 SessionPhase::Exited { .. } => {
                     return AgentResponse::err(
@@ -350,8 +367,9 @@ async fn handle(
             }
         }
         AgentAction::Ports => {
+            // 端口挂在**本会话进程树**上，与调用方 cwd 在哪个工作区无关：不申报目标工作区。
             let payload = agent_control_request::Payload::PortsList(wire::AgentPortsList {});
-            match ask_server(state, to_server_tx, session_id, payload).await {
+            match ask_server(state, to_server_tx, session_id, String::new(), payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::PortsList(result)) => {
                     let ports: Vec<serde_json::Value> = result
@@ -364,30 +382,103 @@ async fn handle(
                 Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
             }
         }
+        AgentAction::WorkspaceCurrent => match scope.require_effective() {
+            Err(response) => response,
+            Ok(effective) => AgentResponse::ok(serde_json::json!({
+                "workspaceId": effective,
+                "path": scope.effective_path.clone().unwrap_or_default(),
+                "owningWorkspaceId": scope.owning,
+                "moved": scope.moved(),
+                "cwd": cwd,
+            })),
+        },
     }
 }
 
-/// 本地命令的目标解析（plan 094）：调用方与目标都必须有已知归属且同工作区。归属只认中心随
-/// SessionCreate 下发的 workspace_id；早于 daemon 升级的会话归属未知，一律可读拒绝，不按 cwd 猜。
+/// 调用方这一次请求的工作区坐标（plan 102）。
+struct WorkspaceScope {
+    /// **归属工作区**：本会话是在哪个工作区开的（agent 侧的 `COFLUX_WORKSPACE_ID`）。只认中心随
+    /// SessionCreate 下发的 id，空串 = 未知。
+    owning: String,
+    /// **有效工作区**：调用方 cwd 命中的工作区；cwd 不在任何已知工作区内就是归属工作区本身。
+    /// 归属未知时同样为空——cwd 只能把目标**改向**一个已知归属，绝不**补上**缺失的归属。
+    effective: String,
+    /// 有效工作区在本机的路径（工作区表里的登记值）；表里查不到则 None。
+    effective_path: Option<String>,
+}
+
+impl WorkspaceScope {
+    /// 挪窝了：agent 经 `/cd`/EnterWorktree 把会话挪进了同设备的另一个工作区。
+    fn moved(&self) -> bool {
+        !self.effective.is_empty() && self.effective != self.owning
+    }
+
+    /// 经中心的动作要申报的目标工作区：只在挪窝时申报。没挪窝就留空——空 = 中心用发起 task 的
+    /// 工作区，与旧 worker 的请求逐字节等价，常态一点没变。
+    fn declared(&self) -> String {
+        if self.moved() {
+            self.effective.clone()
+        } else {
+            String::new()
+        }
+    }
+
+    /// 本地命令要用的有效工作区；归属未知时给出与 plan 094 同样的可读拒绝。
+    fn require_effective(&self) -> Result<&str, AgentResponse> {
+        if self.effective.is_empty() {
+            return Err(AgentResponse::err(
+                "409 Conflict",
+                "本终端早于 daemon 升级，缺少工作区归属：重开终端后再用本地命令",
+            ));
+        }
+        Ok(&self.effective)
+    }
+}
+
+/// 归属只查账本，目标看 cwd（plan 102）。
+fn resolve_scope(
+    state: &Arc<Mutex<WorkerState>>,
+    caller_session: &str,
+    cwd: &str,
+) -> WorkspaceScope {
+    let (owning, workspaces) = {
+        let s = state.lock().unwrap();
+        let owning = s
+            .ledger
+            .session(caller_session)
+            .map(|record| record.workspace_id.clone())
+            .unwrap_or_default();
+        // 表克隆一份再放锁：下面的最长前缀匹配要 canonicalize，不能在 WorkerState 的锁里做 syscall。
+        (owning, s.workspaces.clone())
+    };
+    if owning.is_empty() {
+        return WorkspaceScope {
+            owning,
+            effective: String::new(),
+            effective_path: None,
+        };
+    }
+    let effective =
+        workspace_match::workspace_for_cwd(&workspaces, cwd).unwrap_or_else(|| owning.clone());
+    let effective_path = workspaces.get(&effective).map(|(path, _)| path.clone());
+    WorkspaceScope {
+        owning,
+        effective,
+        effective_path,
+    }
+}
+
+/// 本地命令的目标解析（plan 094 + 102）：调用方与目标都必须有已知归属，且目标的归属等于调用方的
+/// **有效工作区**（cwd 落在哪个工作区，就对哪个工作区的终端说话）。归属永远不猜——早于 daemon
+/// 升级的会话归属未知，一律可读拒绝；能按申报的 cwd 改向的只是**目标**。
 /// 「不在本工作区」与「不存在」同一句错误——不向别的工作区泄漏存在性。
 fn resolve_local_target(
     state: &Arc<Mutex<WorkerState>>,
-    caller_session: &str,
+    scope: &WorkspaceScope,
     task_id: &str,
 ) -> Result<(String, SessionRecord), AgentResponse> {
+    let effective = scope.require_effective()?;
     let s = state.lock().unwrap();
-    let Some(caller) = s.ledger.session(caller_session) else {
-        return Err(AgentResponse::err(
-            "409 Conflict",
-            "本终端早于 daemon 升级，缺少工作区归属：重开终端后再用本地命令",
-        ));
-    };
-    if caller.workspace_id.is_empty() {
-        return Err(AgentResponse::err(
-            "409 Conflict",
-            "本终端早于 daemon 升级，缺少工作区归属：重开终端后再用本地命令",
-        ));
-    }
     let not_found = || {
         AgentResponse::err(
             "404 Not Found",
@@ -403,7 +494,7 @@ fn resolve_local_target(
             "目标终端早于 daemon 升级，缺少工作区归属：重开它后再试",
         ));
     }
-    if target.workspace_id != caller.workspace_id {
+    if target.workspace_id != effective {
         return Err(not_found());
     }
     Ok((target_session.to_string(), target.clone()))
@@ -432,10 +523,14 @@ fn epoch_ms() -> f64 {
 }
 
 /// 发一条 AgentControlRequest 并等中心回执。失败路径全部转成给 agent 看的 HTTP 错误。
+///
+/// `workspace_id` 是**申报**的目标工作区（plan 102）：只有 agent 挪进同设备另一个工作区时才非空，
+/// 中心核验同账号同设备后以它为目标；空 = 中心用发起 task 的工作区（旧 worker 恒空）。
 async fn ask_server(
     state: &Arc<Mutex<WorkerState>>,
     to_server_tx: &mpsc::Sender<WsOut>,
     session_id: String,
+    workspace_id: String,
     payload: agent_control_request::Payload,
 ) -> Result<agent_control_result::Payload, AgentResponse> {
     let request_id = next_request_id();
@@ -462,6 +557,7 @@ async fn ask_server(
             wire::AgentControlRequest {
                 request_id: request_id.clone(),
                 session_id,
+                workspace_id,
                 payload: Some(payload),
             },
         )),
@@ -532,6 +628,39 @@ mod tests {
         assert_eq!(status_name(wire::TaskStatus::Running as i32), "running");
         assert_eq!(status_name(wire::TaskStatus::Exited as i32), "exited");
         assert_eq!(status_name(999), "unknown");
+    }
+
+    fn scope(owning: &str, effective: &str) -> WorkspaceScope {
+        WorkspaceScope {
+            owning: owning.into(),
+            effective: effective.into(),
+            effective_path: Some("/x/repo".into()),
+        }
+    }
+
+    #[test]
+    fn target_workspace_is_declared_only_after_moving() {
+        // 没挪窝：字段留空，请求与旧 worker 逐字节等价（中心用发起 task 的工作区）
+        assert_eq!(scope("ws-a", "ws-a").declared(), "");
+        assert!(!scope("ws-a", "ws-a").moved());
+        // 挪进了同设备的另一个工作区：申报它，交中心核验
+        assert_eq!(scope("ws-a", "ws-b").declared(), "ws-b");
+        assert!(scope("ws-a", "ws-b").moved());
+    }
+
+    #[test]
+    fn missing_ownership_is_refused_readably_and_never_guessed_from_cwd() {
+        let unknown = WorkspaceScope {
+            owning: String::new(),
+            effective: String::new(),
+            effective_path: None,
+        };
+        assert_eq!(unknown.declared(), "", "归属未知时绝不申报目标");
+        let refused = unknown.require_effective().expect_err("必须拒绝");
+        assert_eq!(refused.status, "409 Conflict");
+        assert!(refused.body.contains("早于 daemon 升级"), "{}", refused.body);
+        // AgentResponse 没有 Debug，用 .ok() 取值而不是 unwrap
+        assert_eq!(scope("ws-a", "ws-b").require_effective().ok(), Some("ws-b"));
     }
 
     #[test]

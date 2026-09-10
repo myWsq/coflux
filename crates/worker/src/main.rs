@@ -22,6 +22,7 @@ mod relay_dial;
 mod relay_home;
 mod session_ledger;
 mod tunnel;
+mod workspace_match;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
