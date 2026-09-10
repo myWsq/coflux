@@ -21,14 +21,17 @@ marketplace and runs the same `hooks/hooks.json` and `.mcp.json`.
     a worktree lands back in it without any tool call, and this is the only moment that can notice), then prints a
     `<coflux-session>` block with the session's six `COFLUX_*` coordinates, the one rule (local commands inside the
     workspace, MCP only to leave it) and a pointer to the skill. The workspace id in the block is the daemon's
-    answer, falling back to the environment variable when `cofluxd` is missing or the daemon is down. It fires on
-    every session source, so the block comes back after context compaction. Outside coflux it prints nothing.
+    answer, falling back to the environment variable when `cofluxd` is missing, the daemon is down, or the locate
+    runs out of its own budget — printing the block always wins over locating, because a hook killed by the host
+    timeout would leave the session with no coordinates at all. It fires on every session source, so the block
+    comes back after context compaction. Outside coflux it prints nothing.
   - `PostToolUse` with `matcher: "EnterWorktree|ExitWorktree"` and `WorktreeRemove` run
     `scripts/worktree-follow.mjs`: coflux follows the agent into a git worktree. The script hands the payload's
     `cwd` (or, on removal, `worktree_path`) to the local `cofluxd workspace locate|forget` command, which moves the
     terminal's owning workspace — registering an unknown worktree as a child workspace of the project first, and
     on removal moving that workspace's terminals back to the project's main workspace and dropping the record. The
-    terminal, its PTY and the conversation are untouched. After a move it returns the new coordinates as
+    path always travels as an argument, never as the child's working directory: on removal the session's directory
+    is usually the worktree that just went away. The terminal, its PTY and the conversation are untouched. After a move it returns the new coordinates as
     `additionalContext` so the agent sees them in the same turn. Anything unusual (not inside coflux, another
     repository, no daemon, a daemon too old for the command) is a silent no-op.
   - `PreToolUse` with `matcher: "Bash"` runs `scripts/guard-git-worktree.mjs`: when `COFLUX_PROJECT_ID` is set it

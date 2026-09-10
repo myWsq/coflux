@@ -7,8 +7,9 @@
  * 纯文本 stdout 在 Claude Code 与 Codex 的 SessionStart 里都直接进模型上下文，所以块必须以 "<" 开头、绝不像 JSON。
  *
  * plan 103 起脚本会先调 `cofluxd workspace locate` 定位当前目录（resume 一个曾进入 worktree 的会话时，
- * SessionStart 是唯一能发现它的时机），并用响应里的 workspaceId 打块；cofluxd 缺失/失败/输出不是 JSON 时
- * 回退到环境变量。
+ * SessionStart 是唯一能发现它的时机），并用响应里的 workspaceId 打块；cofluxd 缺失/失败/输出不是 JSON/
+ * 迟迟不答时回退到环境变量。**打块永远优先于定位**：宿主按秒杀 hook，被杀在半路等于这次会话一个坐标
+ * 都拿不到，比报一个过期 id 坏得多，所以定位有自己的硬预算（shell 看门狗，不指望 timeout(1)）。
  *
  * 夹具纪律（plan 098 的返修教训）：假 cofluxd 单独一个目录并排在 PATH 最前——否则测试会打到真 daemon，
  * 真的把用户某个终端的归属搬走。PATH 里另加 /usr/bin:/bin 只为脚本用得上 sed，真 cofluxd 不装在那儿。
@@ -39,7 +40,15 @@ before(async () => {
   const fake = join(fakeDir, "cofluxd");
   await writeFile(
     fake,
-    ["#!/bin/sh", 'echo "$@" > "$FAKE_MARKER"', 'if [ "$FAKE_FAIL" = "1" ]; then exit 1; fi', 'printf "%s\\n" "$FAKE_OUTPUT"', ""].join("\n"),
+    [
+      "#!/bin/sh",
+      'echo "$@" > "$FAKE_MARKER"',
+      // 先落 marker 再睡：挂死的用例照样验得出「确实调了」
+      'if [ -n "$FAKE_SLEEP" ]; then sleep "$FAKE_SLEEP"; fi',
+      'if [ "$FAKE_FAIL" = "1" ]; then exit 1; fi',
+      'printf "%s\\n" "$FAKE_OUTPUT"',
+      "",
+    ].join("\n"),
   );
   await chmod(fake, 0o755);
 });
@@ -136,6 +145,28 @@ test("daemon 不通就回退环境变量：cofluxd 缺失 / 返回非零 / 输�
   }
 });
 
+test("定位迟迟不答也不能吞掉坐标块：看门狗到点放弃，块照常在 hook 超时内打出来并回退环境变量", async () => {
+  // 中心慢（daemon 连着、中心不答）时 `cofluxd workspace locate` 最坏要等到 daemon 的中心超时；
+  // 假 cofluxd 直接睡 8 秒模拟这一幕——比 hooks.json 里 SessionStart 的 timeout 还长。
+  const hooks = JSON.parse(readFileSync(`${PLUGIN}hooks/hooks.json`, "utf8"));
+  const hookTimeoutS = hooks.hooks.SessionStart[0].hooks[0].timeout;
+  await rm(marker, { force: true });
+  const started = Date.now();
+  const { code, stdout } = await run({ ...INSIDE, FAKE_SLEEP: "8", FAKE_OUTPUT: LOCATED_SAME });
+  const elapsedMs = Date.now() - started;
+  assert.equal(code, 0);
+  assert.ok(stdout.startsWith("<coflux-session>"), `块必须照常打出来: ${JSON.stringify(stdout.slice(0, 60))}`);
+  assert.ok(
+    stdout.split("\n").includes("COFLUX_WORKSPACE_ID=ws-9"),
+    `定位没答上来就回退环境变量: ${stdout}`,
+  );
+  assert.equal((await readFile(marker, "utf8")).trim(), "workspace locate", "确实调过 cofluxd，只是没等到");
+  assert.ok(
+    elapsedMs < hookTimeoutS * 1000 - 2000,
+    `必须明显早于 hook 的 ${hookTimeoutS}s 超时收工，否则宿主会把整个块杀掉；实际 ${elapsedMs}ms`,
+  );
+});
+
 test("目录工作区：COFLUX_PROJECT_ID 为空串照样输出，且该行为空值", async () => {
   const { code, stdout } = await run({ ...INSIDE, COFLUX_PROJECT_ID: "", FAKE_OUTPUT: LOCATED_SAME });
   assert.equal(code, 0);
@@ -167,6 +198,11 @@ test("插件配置：SessionStart 条目无 matcher 且引用该脚本、缺文�
   assert.match(command, /\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/session-context\.sh/);
   assert.match(command, /\[ -r "\$0" \]/, "脚本缺失要静默");
   assert.equal(start[0].hooks[0].type, "command");
+  // 脚本自己的定位预算（看门狗 3s）必须明显小于宿主的 hook 超时，才留得下打块的余量
+  assert.ok(start[0].hooks[0].timeout >= 8, `SessionStart 的 hook 超时要给定位留余量: ${start[0].hooks[0].timeout}`);
+  const script = readFileSync(SCRIPT, "utf8");
+  assert.match(script, /LOCATE_WATCHDOG_S=3\b/, "定位要有自己的硬预算，不能只指望 CLI 的超时");
+  assert.match(script, /COFLUX_AGENT_TIMEOUT_MS/, "同时让 CLI 自己早点放弃，正常路径干净收场");
   for (const event of ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "Stop", "StopFailure", "Notification"]) {
     const messenger = hooks.hooks[event]?.find((entry) => entry.matcher === undefined);
     assert.ok(messenger && /cofluxd hook claude/.test(messenger.hooks[0].command), `${event} 的信使条目不能动`);

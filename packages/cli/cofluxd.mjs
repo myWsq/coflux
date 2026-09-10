@@ -951,6 +951,8 @@ async function cmdHook() {
 // 也刻意不做自动重试：terminal new 有副作用，重试会开出两个终端，失败就把错误交给 agent。
 
 const AGENT_TIMEOUT_MS = 30_000;
+/** 调用方能收窄单次 `/agent` 等待的下限；再低就只够覆盖 node 自己的启动，等于必然超时。 */
+const MIN_AGENT_TIMEOUT_MS = 200;
 const DEFAULT_READ_LINES = 200;
 // wait 的循环必须在 CLI 侧：单次 agentPost 有 25 秒的 loopback 应答上限。默认 30 分钟——编码任务
 // 常跑很久；轮询走 terminal.status（daemon 本地账本直接答，不经中心），3 秒一次对本机 loopback
@@ -965,6 +967,17 @@ function callerCwd() {
   try { return process.cwd(); } catch { return ""; }
 }
 
+// 调用方可以用 COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等待上限（plan 103）。默认 30 秒是为
+// agent 定的——它等得起；hook 脚本等不起：宿主按秒杀 hook（SessionStart 只给几秒），而经中心的
+// 动作最坏要等 daemon 的 20 秒中心超时。被宿主杀在半路比拿不到答案坏得多（连坐标块都印不出来），
+// 所以这类调用方自报一个更小的预算，到点干净失败、让脚本走回退。
+// 只允许收窄不允许放宽：上限仍是 AGENT_TIMEOUT_MS，畸形值一律按默认处理。
+function agentTimeoutMs() {
+  const raw = Number(process.env.COFLUX_AGENT_TIMEOUT_MS);
+  if (!Number.isFinite(raw) || raw <= 0) return AGENT_TIMEOUT_MS;
+  return Math.min(Math.max(Math.floor(raw), MIN_AGENT_TIMEOUT_MS), AGENT_TIMEOUT_MS);
+}
+
 async function agentPost(body) {
   const portResult = localGatewayPort();
   if (!portResult.ok) die(portResult.error);
@@ -974,7 +987,7 @@ async function agentPost(body) {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ...body, pid: process.pid, ppid: process.ppid, cwd: callerCwd() }),
-      signal: AbortSignal.timeout(AGENT_TIMEOUT_MS),
+      signal: AbortSignal.timeout(agentTimeoutMs()),
     });
   } catch (error) {
     die(`连不上本机 daemon：${error?.message || error}（daemon 没在跑？先看 cofluxd status）`);
@@ -1179,6 +1192,9 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd workspace forget <path>
                           该 worktree 已被删掉：其下所有终端搬回项目主工作区、工作区记录消失
                           （不执行 git worktree remove）
+
+agent 命令的环境变量：COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等待上限（默认 30000，只能调小），
+供有硬超时的 hook 脚本用——到点干净失败，好过被宿主杀在半路。
 
 up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
 通用: --version <vX|latest>(不传时 up 沿用已有二进制，update 默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
