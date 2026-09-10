@@ -1,0 +1,225 @@
+name: desktop-release
+
+# 打 tag desktop-v* 触发（plan 103）：构建 apps/desktop → Developer ID 签名 + 公证 → 推 Cloudflare R2
+# （electron-updater 的 generic 源）→ GitHub Release 只放安装包镜像与说明，**不**作更新源。
+# 与 daemon 的 v* / release.yml 完全独立：桌面版本节奏与 daemon SemVer 无关。
+on:
+  push:
+    tags: ["desktop-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    name: 校验 desktop release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: tag
+        name: tag 是严格 SemVer、与 apps/desktop/package.json 一致、可从 origin/main 达到
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#desktop-v}"
+          if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::desktop release tag 不是严格 SemVer：${RELEASE_TAG}"
+            exit 1
+          fi
+          pkg_version=$(node -p "require('./apps/desktop/package.json').version")
+          if [ "$pkg_version" != "$version" ]; then
+            echo "::error::apps/desktop/package.json version=${pkg_version} 与 tag ${RELEASE_TAG} 不一致，先 bump 再打 tag"
+            exit 1
+          fi
+          # lockstep（plan 103）：桌面 build-id 与部署的 web 必须同 SHA；这里只保证 tag 在 main 历史上，
+          # 与 prod 部署的 SHA 是否一致由发版人按 docs/RELEASING.md 的规则负责。
+          remote_main_ref="refs/release-validation/main-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git fetch --force --no-tags origin "+refs/heads/main:${remote_main_ref}"
+          if ! git merge-base --is-ancestor "$EVENT_SHA" "$remote_main_ref"; then
+            echo "::error::release SHA ${EVENT_SHA} 不可从 origin/main 达到"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: 构建 + 签名 + 公证 + 推 R2
+    needs: metadata
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # 签名/公证 secret 与 R2 secret/变量都挂在 release-signing environment；
+    # 该 environment 的 deployment tag 规则必须同时放行 desktop-v*（见 docs/RELEASING.md）。
+    environment: release-signing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 渲染层 build-id 取 git short SHA（apps/web/vite.config.ts）：必须有完整 git 历史与 HEAD
+          fetch-depth: 0
+
+      - name: 发布所需 secret / 变量必须齐全（缺任一项明确失败，不静默跳过、不回退别的源）
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          DESKTOP_UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in MACOS_CERT_P12 MACOS_CERT_PASSWORD APPLE_TEAM_ID NOTARY_API_KEY_P8 NOTARY_KEY_ID NOTARY_ISSUER_ID \
+                      R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET DESKTOP_UPDATE_URL; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::release-signing environment 缺少 ${name}"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ]
+          case "$DESKTOP_UPDATE_URL" in
+            https://*) ;;
+            *) echo "::error::DESKTOP_UPDATE_URL 必须是 https 公网地址（R2 自定义域名下的 desktop/ 前缀）"; exit 1 ;;
+          esac
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: web 类型检查（渲染层就是 apps/web）
+        run: node_modules/.bin/tsc -b apps/web/tsconfig.json
+
+      - name: desktop 类型检查 + 单元测试
+        run: pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test
+
+      - name: 构建 main / preload / renderer（build-id = 当前 SHA）
+        run: |
+          set -euo pipefail
+          pnpm -C apps/desktop build
+          build_id=$(cat apps/desktop/out/renderer/build-id.txt)
+          head_short=$(git rev-parse --short HEAD)
+          if [ "$build_id" != "$head_short" ]; then
+            echo "::error::渲染层 build-id ${build_id} 与 HEAD ${head_short} 不一致——版本准入会拒绝这个包"
+            exit 1
+          fi
+          echo "::notice::桌面渲染层 build-id=${build_id}（prod 部署到同一 SHA 才被中心接受）"
+
+      - name: 写入公证 API key 文件
+        env:
+          NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$NOTARY_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+
+      # electron-builder 顺序：翻 Fuses → 签名（hardened runtime + entitlements）→ 公证 + staple → 出 dmg/zip
+      # → 生成 latest-mac.yml。asar 完整性校验开着，签名后不再碰 app 内任何文件。
+      - name: 打包 + Developer ID 签名 + 公证（electron-builder）
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CERT_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_API_KEY: ${{ runner.temp }}/AuthKey.p8
+          APPLE_API_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.NOTARY_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          DESKTOP_UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
+        run: |
+          set -euo pipefail
+          pnpm -C apps/desktop exec electron-builder --mac --arm64 --publish never \
+            --config.publish.url="$DESKTOP_UPDATE_URL"
+
+      - name: 校验签名 / 公证票据 / Gatekeeper
+        run: |
+          set -euo pipefail
+          app="apps/desktop/dist/mac-arm64/coflux.app"
+          test -d "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -d --entitlements - "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+          ls -la apps/desktop/dist
+          test -f apps/desktop/dist/latest-mac.yml
+          grep -q "coflux-${{ needs.metadata.outputs.version }}-arm64.zip" apps/desktop/dist/latest-mac.yml
+
+      - name: 清理公证 API key 文件
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
+
+      # 先推安装包，最后推 latest-mac.yml：客户端永远不会读到指向尚未上传文件的清单。
+      - name: 推 Cloudflare R2（S3 兼容 API，desktop/ 前缀）
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: "true"
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          cd apps/desktop/dist
+          uploaded=0
+          for file in *.dmg *.zip *.blockmap; do
+            [ -e "$file" ] || continue
+            aws s3 cp "$file" "s3://${R2_BUCKET}/desktop/${file}" --endpoint-url "$R2_ENDPOINT" --no-progress
+            uploaded=$((uploaded + 1))
+          done
+          [ "$uploaded" -ge 2 ] || { echo "::error::安装包上传数异常：${uploaded}"; exit 1; }
+          aws s3 cp latest-mac.yml "s3://${R2_BUCKET}/desktop/latest-mac.yml" --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "no-cache" --content-type "text/yaml" --no-progress
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-release-assets
+          if-no-files-found: error
+          path: |
+            apps/desktop/dist/*.dmg
+            apps/desktop/dist/*.zip
+            apps/desktop/dist/*.blockmap
+            apps/desktop/dist/latest-mac.yml
+
+  release:
+    name: 发布 GitHub Release（安装包镜像，非更新源）
+    needs: [metadata, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-release-assets
+          path: assets
+      - name: 生成 release 说明
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
+        run: |
+          set -euo pipefail
+          {
+            echo "coflux 桌面客户端 v${VERSION}（macOS 13+，Apple Silicon）。"
+            echo
+            echo "- 安装：下载 dmg，拖进 Applications。已签名并经苹果公证。"
+            echo "- 自动更新源是 Cloudflare R2，本 Release 只是安装包镜像。"
+            echo "- 渲染层 build-id 与本 tag 的 commit 同 SHA：中心必须部署到同一 SHA，否则桌面版会被版本准入拒绝直到下次更新。"
+          } > notes.md
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: desktop v${{ needs.metadata.outputs.version }}
+          body_path: notes.md
+          files: |
+            assets/*.dmg
+            assets/*.zip

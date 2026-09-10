@@ -1,0 +1,60 @@
+# electron-builder 26.x（锁 26：27 会改 mac.universal / mac.sign 的配置结构，升级时迁配置）。
+# 正式发版由 .github/workflows/desktop-release.yml 驱动：签名身份来自 CSC_LINK/CSC_KEY_PASSWORD，
+# 公证凭据来自 APPLE_API_KEY/APPLE_API_KEY_ID/APPLE_API_ISSUER/APPLE_TEAM_ID，updater 源 URL 经
+# --config.publish.url 在打包时写入 app-update.yml。本机 `pnpm pack`/`pnpm dist` 用同一份配置。
+appId: dev.coflux.desktop
+productName: coflux
+copyright: Copyright © 2026 Shuaiqi Wang
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**/*
+  - package.json
+asar: true
+
+# Fuses（plan 103 安全基线）：在签名前翻转，Gatekeeper 保证之后翻不回去。
+# 关 RunAsNode 后 child_process.fork 失效（后台任务用 utilityProcess）；开 asar 完整性校验后
+# 任何打包后改 asar 的步骤都会启动即崩——签名/公证顺序见 workflow。
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  grantFileProtocolExtraPrivileges: false
+  # 未签名本机构建（pnpm pack）翻 fuse 后重置 ad-hoc 签名，否则 arm64 上启动即被杀；签名构建无影响
+  resetAdHocDarwinSignature: true
+
+mac:
+  category: public.app-category.developer-tools
+  icon: build/icon.png
+  # arm64 首发；universal 只作为开关保留：需要时把 arch 改成 [universal]（见 Maintenance notes）
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # 走 @electron/notarize（notarytool），凭据只从环境变量读，见 workflow；本机没有凭据时自动跳过
+  notarize: true
+  darkModeSupport: true
+  # Electron 44（Chromium 152）要求 macOS 13+
+  minimumSystemVersion: "13.0"
+  artifactName: coflux-${version}-${arch}.${ext}
+
+dmg:
+  # dmg 不签名（公证对象是 app，dmg 只是容器）；latest-mac.yml 只登记 zip（macOS 更新走 zip）
+  sign: false
+  writeUpdateInfo: false
+
+# updater 源：Cloudflare R2 公网自定义域名（generic provider 读 <url>/latest-mac.yml）。
+# 这里的占位 URL 只是让本机构建也生成 app-update.yml；CI 用 --config.publish.url 覆盖成真实地址。
+publish:
+  provider: generic
+  url: https://desktop-updates.invalid/replaced-by-ci
+  channel: latest

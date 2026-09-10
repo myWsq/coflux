@@ -6,6 +6,7 @@ export type MenuActions = {
   /** 菜单项 → 渲染层命令（与 use-global-shortcuts.ts 的键位语义一一对应） */
   sendCommand: (command: DesktopCommand) => void;
   showServerInfo: () => void;
+  checkForUpdates: () => void;
 };
 
 const WEB_URL = "https://app.coflux.dev";
@@ -33,6 +34,7 @@ export function buildAppMenu(actions: MenuActions): Menu {
       label: app.name,
       submenu: [
         { role: "about" },
+        { label: "检查更新…", click: () => actions.checkForUpdates() },
         { type: "separator" },
         { label: "服务器地址…", click: () => actions.showServerInfo() },
         { type: "separator" },

@@ -1,6 +1,6 @@
 import { ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
 
-import type { DesktopNotification } from "../../../web/src/desktop-bridge";
+import type { DesktopNotification, DesktopUpdateState } from "../../../web/src/desktop-bridge";
 import { IPC, type Bootstrap } from "../shared/ipc";
 import { sanitizeBadgeCount, sanitizeNotification } from "./ipc-sanitize";
 import { isTrustedRendererUrl } from "./ipc-trust";
@@ -11,6 +11,9 @@ export type IpcActions = {
   bootstrap: () => Bootstrap;
   notify: (notification: DesktopNotification) => void;
   setBadge: (count: number) => void;
+  checkForUpdates: () => void;
+  installUpdate: () => void;
+  getUpdateState: () => DesktopUpdateState;
 };
 
 /** 每条 IPC 都先校验发送方 frame 来源；不可信一律忽略。 */
@@ -35,5 +38,18 @@ export function registerIpc(actions: IpcActions, trusted: TrustedSenders): void 
     if (!isTrusted(event)) return;
     const count = sanitizeBadgeCount(payload);
     if (count !== null) actions.setBadge(count);
+  });
+
+  ipcMain.on(IPC.checkForUpdates, (event) => {
+    if (isTrusted(event)) actions.checkForUpdates();
+  });
+
+  ipcMain.on(IPC.installUpdate, (event) => {
+    if (isTrusted(event)) actions.installUpdate();
+  });
+
+  ipcMain.handle(IPC.getUpdateState, (event) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    return actions.getUpdateState();
   });
 }
