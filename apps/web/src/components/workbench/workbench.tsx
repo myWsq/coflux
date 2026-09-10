@@ -17,10 +17,12 @@ import {
 } from "@/components/workbench/dialogs";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
+import { useTerminalAttach } from "@/components/workbench/terminal-attach";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
-import type { WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
+import type { WorkspaceActiveTab, WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 import {
   parseStoredSelection,
+  resolveSelectionAfterTaskMove,
   resolveWorkbenchSelection,
   resolveWorkbenchSurface,
   serializeSelection,
@@ -32,11 +34,15 @@ import { WORKSPACE_KEY } from "@/config";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
 
-// 终端栈（xterm + WorkspaceTerminal/TerminalPane）懒加载，不进首屏主 chunk：
+// 终端栈（xterm + WorkspaceTerminal/TerminalPanes）懒加载，不进首屏主 chunk：
 // 登录页与"未选中工作区"的空状态都不需要它。module 级别声明，保证只 lazy() 一次，
 // 不随 Workbench 重渲染重建（重建会丢已缓存的加载态触发重复 Suspense）。
+// 接管状态机（terminal-attach）只在类型层面依赖 terminal-pane，静态导入不会把 xterm 拖进主 chunk。
 const WorkspaceTerminal = lazy(() =>
   import("@/components/workbench/workspace-terminal").then((module) => ({ default: module.WorkspaceTerminal })),
+);
+const TerminalPanes = lazy(() =>
+  import("@/components/workbench/terminal-panes").then((module) => ({ default: module.TerminalPanes })),
 );
 
 // 乐观创建（plan 078）的本地兜底：服务端既不广播成功也不广播错误时，撤掉 pending 条目，
@@ -82,12 +88,24 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // 只指向当前 active 的 WorkspaceTerminal 实例：ref 只挂在 active===true 的那个元素上（见下方渲染），
   // 保活但隐藏的实例永远拿不到这份 ref，全局快捷键天然只广播给 active 实例。
   const activeTerminalRef = useRef<WorkspaceTerminalHandle | null>(null);
+  // 各工作区当前的活动 Tab（由 WorkspaceTerminal 同步上报，plan 103）：终端面板挂在本层，
+  // 可见面板 = 选中工作区的活动 Tab 且它处在终端视图。ref 双轨的理由同容器内部——
+  // 接管状态机要在 setState 生效之前就读到"当下"值。
+  const [activeTabs, setActiveTabs] = useState<Record<string, WorkspaceActiveTab>>({});
+  const activeTabsRef = useRef(activeTabs);
+  // 终端被搬进某工作区后要求它继续当活动 Tab（plan 103）：一次性，容器消费掉即清。
+  const [followTask, setFollowTask] = useState<{ workspaceId: string; taskId: string } | null>(null);
+  const activeWorkspaceIdRef = useRef<string | null>(null);
+  // 已挂过面板的 task：面板寿命与工作区容器解耦，终端被搬到没访问过的工作区也不重建。
+  const paneTaskIdsRef = useRef(new Set<string>());
 
   const authState = useStore(client.store, (state) => state.authState);
   const loginError = useStore(client.store, (state) => state.loginError);
   const status = useStore(client.store, (state) => state.status);
   const projects = useStore(client.store, (state) => state.projects);
   const workspaces = useStore(client.store, (state) => state.workspaces);
+  // 终端面板挂在本层（plan 103），故这里要全量 tasks：引用只在 task 实体真的变化时才换。
+  const tasks = useStore(client.store, (state) => state.tasks);
   const daemons = useStore(client.store, (state) => state.daemons);
   const lastError = useStore(client.store, (state) => state.lastError);
   const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
@@ -108,6 +126,63 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const activeWorkspaceId = activeWorkspace?.id ?? null;
   // pending 期间继续持有目标设备的 route：创建往返要走它，松开再重连只会更慢。
   const selectedDaemonId = selection?.kind === "device" ? selection.id : (selectedWorkspace?.daemonId ?? pendingSelected?.daemonId);
+
+  // 选中工作区的同步镜像：面板可见性判定由渲染期与上报回调共用，直接闭包捕获会读到过期值。
+  activeWorkspaceIdRef.current = activeWorkspaceId;
+
+  // 接管状态机（plan 103）：与面板一起提升到本层，按 task id 记账、不认工作区。
+  const attach = useTerminalAttach(client, { tasks, activeWorkspaceId });
+
+  /** 可见面板 = 选中工作区的终端视图活动 Tab；同步写进状态机的门禁镜像。 */
+  function syncVisibleTask() {
+    const workspaceId = activeWorkspaceIdRef.current;
+    const entry = workspaceId ? activeTabsRef.current[workspaceId] : undefined;
+    attach.setVisibleTaskId(entry?.viewIsTerminal ? entry.taskId : null);
+  }
+  // 渲染期同步一次：切换工作区时门禁必须立刻跟上（同 WorkspaceTerminal 里 ref 镜像 prop 的写法）。
+  syncVisibleTask();
+  const syncVisibleTaskRef = useRef(syncVisibleTask);
+  syncVisibleTaskRef.current = syncVisibleTask;
+
+  function reportActiveTab(workspaceId: string, next: WorkspaceActiveTab) {
+    const previous = activeTabsRef.current[workspaceId];
+    if (previous && previous.taskId === next.taskId && previous.viewIsTerminal === next.viewIsTerminal) return;
+    activeTabsRef.current = { ...activeTabsRef.current, [workspaceId]: next };
+    setActiveTabs(activeTabsRef.current);
+    syncVisibleTask();
+  }
+
+  const activeTab = activeWorkspaceId ? activeTabs[activeWorkspaceId] : undefined;
+  const visibleTaskId = activeTab?.viewIsTerminal ? activeTab.taskId : null;
+
+  // 终端被搬到别的工作区（plan 103）：用户正看着的终端搬走时选中态跟过去，它在新工作区里
+  // 仍是活动 Tab。这件事必须赶在 React 渲染之前定下来——工作区容器的 tasks effect 先于本组件的
+  // effect 跑（子先于父），等父 effect 再改选中就晚了：新工作区容器会先按"没有活动 Tab"回退去
+  // attach 第一个兄弟 Tab。store 订阅在 setState 中同步触发、与本轮渲染合批，容器读到的就是
+  // 最终结果；面板可见性也在同一帧就位，被搬走的终端不会闪一下。
+  useEffect(() => {
+    return client.store.subscribe((state, previous) => {
+      if (state.tasks === previous.tasks) return;
+      const workspaceId = activeWorkspaceIdRef.current;
+      const entry = workspaceId ? activeTabsRef.current[workspaceId] : undefined;
+      const taskId = entry?.taskId ?? null;
+      const next = resolveSelectionAfterTaskMove({ activeWorkspaceId: workspaceId, activeTaskId: taskId, tasks: state.tasks });
+      if (!next || !taskId) return;
+      activeTabsRef.current = { ...activeTabsRef.current, [next.id]: { taskId, viewIsTerminal: true } };
+      setActiveTabs(activeTabsRef.current);
+      setFollowTask({ workspaceId: next.id, taskId });
+      activeWorkspaceIdRef.current = next.id;
+      setSelection(next);
+      persistSelection(next);
+      syncVisibleTaskRef.current();
+    });
+  }, [client]);
+
+  // 跟随只生效一次：容器已在同一轮 commit 里把它选成活动 Tab，留着会在后续 tasks 变化时
+  // 反复抢走用户自己切过去的 Tab。
+  useEffect(() => {
+    if (followTask) setFollowTask(null);
+  }, [followTask]);
 
   // 冷启动遮罩撤除（plan 078）：首快照到达即撤（snapshotRevision 单调递增，>0 一旦为真
   // 永远为真，断线不会误触发）；need-login/auth-failed 立即让位给登录表单。
@@ -337,6 +412,21 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   // 已删除的工作区随 workspaces 过滤自动卸载；含 activeWorkspaceId 是避免等 visited 效果多一帧空白。
   const terminalWorkspaces = workspaces.filter((workspace) => visitedWorkspaceIds.has(workspace.id) || workspace.id === activeWorkspaceId);
+
+  // 面板寿命与工作区容器解耦（plan 103）：终端被搬进从没访问过的工作区时容器可能压根没挂载过，
+  // 面板必须原样留在原地。挂过面板的 task 只要还在快照里就一直挂着，只有真的被删才收回。
+  const liveTaskIds = new Set(tasks.map((task) => task.id));
+  for (const taskId of paneTaskIdsRef.current) {
+    if (!liveTaskIds.has(taskId)) paneTaskIdsRef.current.delete(taskId);
+  }
+  const paneTasks = tasks
+    .filter((task) => {
+      if (visitedWorkspaceIds.has(task.workspaceId) || task.workspaceId === activeWorkspaceId) paneTaskIdsRef.current.add(task.id);
+      return paneTaskIdsRef.current.has(task.id);
+    })
+    // 顺序必须稳定：快照会整体替换 tasks，按 createdAt/id 排一遍，已挂载的面板就不会被 React
+    // 搬位置（搬位置＝重新插入 DOM，xterm 的 open(host) 绑定与 WebGL 上下文都可能受影响）。
+    .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
   const showError = lastError !== null && lastError.id !== dismissedErrorId;
   const displayError = lastError?.message.replaceAll("任务", "终端");
 
@@ -430,22 +520,37 @@ export function Workbench({ client }: { client: CofluxClient }) {
             </main>
           }
         >
-          {terminalWorkspaces.map((workspace) => {
-            const isActive = workspace.id === activeWorkspaceId;
-            return (
-              // display:contents 让 <section> 仍作为根 flex 行的直接子项参与布局
-              <div key={workspace.id} className={isActive ? "contents" : "hidden"}>
-                <WorkspaceTerminal
-                  // ref 只挂在 active 实例上：非 active 的保活实例传 undefined，永远拿不到命令句柄。
-                  ref={isActive ? activeTerminalRef : undefined}
-                  workspaceId={workspace.id}
-                  active={isActive}
-                  client={client}
-                  onCloseTask={requestCloseTask}
-                />
-              </div>
-            );
-          })}
+          {/* 终端主区（plan 103）：顶栏一行、主体一行的两行网格。工作区容器经 display:contents
+              把自己的顶栏与主体覆盖层放进这两格；终端面板层是它们的兄弟节点，按 task id 常驻，
+              终端换工作区时既不跟着容器重建，也不依赖新工作区的容器是否挂载。
+              未选中工作区时整块隐藏（设备空态 / 引导空态自己占位），面板保持挂载不卸载。 */}
+          <main
+            className={cn(
+              "min-w-0 flex-1 bg-terminal",
+              activeWorkspaceId ? "grid grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)]" : "hidden",
+            )}
+          >
+            {terminalWorkspaces.map((workspace) => {
+              const isActive = workspace.id === activeWorkspaceId;
+              return (
+                // display:contents 让顶栏与主体直接落进上面的两行网格
+                <div key={workspace.id} className={isActive ? "contents" : "hidden"}>
+                  <WorkspaceTerminal
+                    // ref 只挂在 active 实例上：非 active 的保活实例传 undefined，永远拿不到命令句柄。
+                    ref={isActive ? activeTerminalRef : undefined}
+                    workspaceId={workspace.id}
+                    active={isActive}
+                    client={client}
+                    onCloseTask={requestCloseTask}
+                    attach={attach}
+                    followTaskId={followTask?.workspaceId === workspace.id ? followTask.taskId : null}
+                    onActiveTabChange={reportActiveTab}
+                  />
+                </div>
+              );
+            })}
+            <TerminalPanes tasks={paneTasks} visibleTaskId={visibleTaskId} client={client} attach={attach} />
+          </main>
         </Suspense>
       ) : null}
       {selectedDevice && !activeWorkspace ? (
