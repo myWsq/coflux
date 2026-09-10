@@ -1,6 +1,7 @@
 {
   "name": "@coflux/desktop",
   "version": "0.1.0",
+  "productName": "coflux",
   "private": true,
   "description": "coflux 桌面客户端：Electron 壳原样打包 apps/web 工作台",
   "type": "module",

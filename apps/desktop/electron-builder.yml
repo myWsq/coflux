@@ -3,6 +3,8 @@
 # 公证凭据来自 APPLE_API_KEY/APPLE_API_KEY_ID/APPLE_API_ISSUER/APPLE_TEAM_ID，updater 源 URL 经
 # --config.publish.url 在打包时写入 app-update.yml。本机 `pnpm pack`/`pnpm dist` 用同一份配置。
 appId: dev.coflux.desktop
+# 与 package.json 的 productName 保持一致：运行时 app.name / userData 目录（~/Library/Application Support/coflux）
+# 取的是 package.json 那份（缺失会退到 name "@coflux/desktop"），这里只决定 .app 文件名。
 productName: coflux
 copyright: Copyright © 2026 Shuaiqi Wang
 directories:
