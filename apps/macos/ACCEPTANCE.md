@@ -6,7 +6,7 @@
 
 **2026-09-10 用户实测纠正：此前Tooltip“已对齐”结论无效。** 用户指出颜色错误、定位偏移/跳动、缺少对应动画；此前核对漏掉`apps/web/src/main.tsx`的`cofluxTheme.components.tooltip`覆盖。当前修复深色popover/浅色文字/10pt圆角，按真实Web入场参数165ms、0.95缩放、8pt方向位移；默认按钮上方、终端OSC标题下方、侧栏详情右侧。浮层禁用NSHostingView自动窗口尺寸推导，保留hostingView，布局后合并更新锚点，内容高度变化保持对齐。下方历史浅色提示及“已对齐”记录只保留错误过程，不作为当前验收证据。完整Performance工程12项浮层回归通过、0失败（`/tmp/coflux-tooltip-correction-retry.log`），普通App构建通过（`/tmp/coflux-tooltip-corrected-app-build.log`）。产物审计通过，仅App+WebRTC两个Mach-O（`/tmp/coflux-tooltip-corrected-audit.json`）。已通过CUA退出旧App、启动`.coflux-dev/macos-current/CofluxPerformance.app`并重新登录19990，两个原会话恢复；该版本现供用户体验。回归证明定位与内容更新约束，未将程序化悬停等同于物理悬停实测。
 
-更新：2026-09-08。此文件是当前状态索引；按时间累积的 README、099 计划和 VISUAL-PARITY 记录保留历史证据，旧测试数量与 SwiftTerm 结果不代表当前版本。总体目标仍未完成。
+更新：2026-09-08。此文件是当前状态索引；按时间累积的 README、100 计划和 VISUAL-PARITY 记录保留历史证据，旧测试数量与 SwiftTerm 结果不代表当前版本。总体目标仍未完成。
 
 快捷键帮助增量：在 Web 自身 Vite 根目录挂载真实 ShortcutsHelpDialog，读取完整 Tailwind/Astryx 样式：380×248、标题区44、左右与底部16、行间距8、背景#262626。原生已对齐这些布局及28关闭按钮，保留原生键位与原有键帽。Performance临时签名构建通过；帮助渲染和快捷键导航/帮助开关两项通过，0失败（`/tmp/coflux-help-layout-build.log`、`/tmp/coflux-help-layout-tests.log`）；渲染产物`/tmp/coflux-native-shortcut-help.png`已查看。此前205项全套早于这次样式增量，本次未重复全套。首次Benchmarks目录预览缺部分Tailwind工具类，未将其用作最终样式依据。保留19990输入法验收进程，其运行中的旧UI不代表本次新构建。
 
@@ -113,7 +113,7 @@ tmux鼠标补验：19990独立会话完成鼠标切pane、拖动分隔线、中�
 - [Benchmarks/README.md](Benchmarks/README.md)：可复现测量方法、原始数据和边界。
 - [HIGHLIGHT-COVERAGE.md](HIGHLIGHT-COVERAGE.md)：高亮语言覆盖，不要求与 Web 每个 token 相同。
 - [NATIVE-AUDIT.md](NATIVE-AUDIT.md)：原生依赖审查历史；当前产物以最新 audit-bundle.py 结果为准。
-- [093 目标计划](../../plans/099-macos-web-parity.md)：用户完整目标与授权边界。
+- [100 目标计划](../../plans/100-macos-web-parity.md)：用户完整目标与授权边界。
 
 ## 本轮黑盒运行
 
