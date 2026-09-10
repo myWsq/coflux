@@ -16,7 +16,11 @@
 // Which path:
 //   PostToolUse EnterWorktree / ExitWorktree → the payload's `cwd` (already the worktree root after
 //     entering, already the original directory after exiting, per the hooks contract);
-//   WorktreeRemove → the payload's `worktree_path` (the directory is gone by then).
+//   WorktreeRemove → the payload's `worktree_path` (the directory is, or is about to be, gone).
+//
+// The path to act on always travels as an argument, never as the child's working directory: on
+// WorktreeRemove the session's cwd is typically the worktree being deleted, and spawning inside a
+// directory that no longer exists fails before `cofluxd` even starts.
 //
 // Contract (Claude Code hooks): stdin is one JSON document. On PostToolUse, print one **pure JSON**
 // object whose `hookSpecificOutput.additionalContext` carries the new coordinates, so the agent sees
@@ -32,6 +36,8 @@
 // worktree lands on the right coordinates without two hooks racing over the same move.
 
 import { execFile } from "node:child_process";
+import { statSync } from "node:fs";
+import { homedir } from "node:os";
 
 const STDIN_TIMEOUT_MS = 2000;
 const COFLUXD_TIMEOUT_MS = 10000;
@@ -61,6 +67,36 @@ async function readStdinJson() {
   } catch {
     return null;
   }
+}
+
+function isDirectory(path) {
+  if (typeof path !== "string" || !path) return false;
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A directory that surely exists, to spawn `cofluxd` from.
+ *
+ * The payload's cwd is preferred, but on WorktreeRemove it is typically the worktree being deleted
+ * and may already be gone — and `execFile` with a nonexistent `cwd` fails with ENOENT before the
+ * command ever runs, which would silently skip exactly the cleanup this hook exists for. The cwd
+ * carries no meaning for these calls anyway: `cofluxd` is identified by its process tree, the path
+ * to act on is passed as an argument, and the CLI tolerates a vanished `process.cwd()`.
+ */
+function spawnCwd(preferred) {
+  if (isDirectory(preferred)) return preferred;
+  let home;
+  try {
+    home = homedir();
+  } catch {
+    home = undefined;
+  }
+  if (isDirectory(home)) return home;
+  return isDirectory("/") ? "/" : undefined;
 }
 
 /** Run `cofluxd workspace <sub> <path>`; it prints one line of JSON. Always resolves, never throws. */
@@ -121,8 +157,9 @@ async function main() {
     const removed = typeof payload.worktree_path === "string" ? payload.worktree_path.trim() : "";
     if (!removed) return;
     // Silent either way: the workspace record disappears from the sidebar and its terminals move
-    // back to the project's main workspace, but there is no tool result to annotate here.
-    const forgotten = await askCofluxd(["forget", removed], cwd);
+    // back to the project's main workspace, but there is no tool result to annotate here. Never
+    // spawn from the payload cwd unless it still exists — by now it is usually the deleted worktree.
+    const forgotten = await askCofluxd(["forget", removed], spawnCwd(cwd));
     debug("forget", removed, forgotten);
     return;
   }
@@ -131,6 +168,12 @@ async function main() {
   const tool = typeof payload.tool_name === "string" ? payload.tool_name : "";
   if (tool !== "EnterWorktree" && tool !== "ExitWorktree") return;
   if (!cwd) return;
+  // A directory that no longer exists cannot be located, and spawning from it would only fail with
+  // ENOENT: say so explicitly rather than leaning on the spawn error.
+  if (!isDirectory(cwd)) {
+    debug("payload cwd does not exist, nothing to locate", cwd);
+    return;
+  }
   // The hook command runs in the session's current directory, which is not necessarily the payload's
   // cwd: always pass the payload's cwd explicitly and run cofluxd from it.
   const located = await askCofluxd(["locate", cwd], cwd);

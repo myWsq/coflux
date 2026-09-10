@@ -6,6 +6,8 @@
  * - PostToolUse + tool_name ∈ {EnterWorktree, ExitWorktree} → 用**载荷里的 cwd** 调 `cofluxd workspace locate <cwd>`；
  *   归属真的搬了（moved=true）→ stdout 是一段纯 JSON 的 PostToolUse 决策，additionalContext 里带新坐标；
  * - WorktreeRemove → 用载荷里的 worktree_path 调 `cofluxd workspace forget <path>`，stdout 零字节；
+ *   载荷里的 cwd 已经被删掉（那正是刚被清理的 worktree）时照样调得出去——路径永远走参数，子进程的
+ *   工作目录只挑一个还在的；cwd 不存在就把 forget 吞掉，正好漏掉这个 hook 唯一要干的事；
  * - 其它一切情形 → 零字节 stdout、退出 0：没搬（同工作区）、不在 coflux 里、stdin 非 JSON、事件/工具不对、
  *   cofluxd 缺失 / 返回非零（含旧 daemon 的「未知 action」）/ 输出不是 JSON。绝不干扰 agent。
  *
@@ -183,6 +185,39 @@ test("WorktreeRemove：用载荷里的 worktree_path 调 `workspace forget`，st
   const { cwd: calledFrom, args } = await called();
   assert.equal(args, `workspace forget ${removed}`, "要传被删掉的 worktree 路径，而不是 cwd");
   assert.equal(realpathSync(calledFrom), realpathSync(workDir), "仍从载荷里的 cwd 调 cofluxd");
+});
+
+test("载荷里的 cwd 已被删掉：forget 照样发得出去（从一个还在的目录起子进程）", async () => {
+  // Claude Code 清 worktree 时会话的 cwd 通常就是那个刚被删掉的目录。以它作 execFile 的 cwd
+  // 会在命令还没跑起来就 ENOENT，脚本一吞，工作区记录就成了永远没人清的孤儿——正是本 hook 存在的理由。
+  await rm(marker, { force: true });
+  const gone = join(workDir, "already-removed");
+  assert.equal(existsSync(gone), false, "这个目录本来就不该存在");
+  // HOME 显式钉成一个存在的目录，好断言退路选的就是它（os.homedir() 优先看 $HOME）
+  const { code, stdout, stderr } = await run({
+    stdin: worktreeRemove(gone, gone),
+    env: { COFLUX_WORKSPACE_ID: "ws-main", FAKE_OUTPUT: FORGOTTEN, HOME: workDir },
+  });
+  assert.equal(code, 0);
+  assert.equal(stdout, "", JSON.stringify(stdout));
+  assert.equal(stderr, "");
+  const { cwd: calledFrom, args } = await called();
+  assert.equal(args, `workspace forget ${gone}`, "被删掉的路径仍要作为参数传过去");
+  assert.equal(existsSync(calledFrom), true, `退路目录必须真的存在: ${calledFrom}`);
+  assert.notEqual(realpathSync(calledFrom), gone, "子进程不能从一个不存在的目录起");
+  assert.equal(realpathSync(calledFrom), realpathSync(workDir), "退路是 HOME（HOME 也没了才是 /）");
+});
+
+test("PostToolUse 的 cwd 已被删掉：明说不去定位（不存在的目录本来也定位不出什么）", async () => {
+  await rm(marker, { force: true });
+  const gone = join(workDir, "vanished");
+  const { code, stdout } = await run({
+    stdin: postToolUse("EnterWorktree", gone),
+    env: { COFLUX_WORKSPACE_ID: "ws-main", FAKE_OUTPUT: MOVED },
+  });
+  assert.equal(code, 0);
+  assert.equal(stdout, "", JSON.stringify(stdout));
+  assert.equal(existsSync(marker), false, "不存在的 cwd 连子进程都不该起");
 });
 
 test("WorktreeRemove 缺 worktree_path：零字节，且根本不去调 cofluxd", async () => {
