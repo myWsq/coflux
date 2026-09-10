@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "sh -c '[ -r \"$0\" ] && exec sh \"$0\" || :' \"${CLAUDE_PLUGIN_ROOT}/scripts/session-context.sh\"",
-            "timeout": 5
+            "timeout": 8
           }
         ]
       }
