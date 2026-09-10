@@ -45,6 +45,39 @@ pub fn current_branch(worktree: &str) -> Option<String> {
     }
 }
 
+/// 读一个目录的 git 事实（plan 103）：所属 worktree 的根、当前分支、仓库公共目录。
+/// 不是 git 仓库（或裸仓库、git 不可用）返回 None——调用方据此判「不适用」，什么都不做。
+///
+/// `--git-common-dir` 必须显式要绝对路径：默认可能给出相对当前目录的 `.git`，那样两个仓库
+/// 会比成相等。同一仓库的所有 worktree 共享同一个 common dir，这正是「是不是同一个项目」的判据。
+pub(crate) async fn repo_facts(path: &str) -> Option<crate::worktree_locate::RepoFacts> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    let (ok, out, _) = run_git(&["-C", path, "rev-parse", "--show-toplevel"]).await;
+    let root = out.trim().to_string();
+    if !ok || root.is_empty() {
+        return None;
+    }
+    let (ok, out, _) = run_git(&[
+        "-C",
+        &root,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ])
+    .await;
+    let common_dir = out.trim().to_string();
+    if !ok || common_dir.is_empty() {
+        return None;
+    }
+    Some(crate::worktree_locate::RepoFacts {
+        branch: current_branch(&root).unwrap_or_else(|| "HEAD".into()),
+        root,
+        common_dir,
+    })
+}
+
 pub struct DiffStat {
     pub additions: i32,
     pub deletions: i32,

@@ -1,7 +1,12 @@
 #!/usr/bin/env node
-// Claude Code PreToolUse hook (plan 095): inside a coflux project session, block `git worktree add|remove|move`
-// and steer the agent to the center MCP's create_workspace / remove_workspace. A worktree the agent creates by
-// itself is invisible in the user's sidebar and cannot host a terminal.
+// Claude Code PreToolUse hook (plan 095; `add` released in plan 103): inside a coflux project session, block
+// `git worktree remove|move` and steer the agent to the center MCP's remove_workspace. Removing a worktree by hand
+// leaves an orphan workspace record behind — nothing in coflux ever deletes it, because the directory watcher
+// only reports 0/0 for a directory that disappeared.
+//
+// `git worktree add` is allowed since plan 103: coflux now follows the agent into a worktree (EnterWorktree,
+// ExitWorktree, resume and Claude Code's own cleanup all move the terminal's owning workspace, registering an
+// unknown worktree first), so a worktree created here is no longer invisible to the user.
 //
 // Contract (Claude Code hooks): stdin is one JSON document (tool_name / tool_input.command / cwd ...). To block,
 // write one **pure JSON** decision to stdout and exit 0; otherwise write **not a single byte** and exit 0
@@ -14,10 +19,10 @@
 // session are blocked too (see plan 096 maintenance notes).
 
 const STDIN_TIMEOUT_MS = 2000;
-// `git [global options...] worktree add|remove|move`: allows global options such as `-C <dir>`, `--git-dir=...`
-// and `--no-pager`, and a position after `cd x && ...`, `;` or `|`. list/lock/unlock/prune/repair are not listed
-// and pass through.
-const GUARDED = /\bgit\b(?:\s+-{1,2}[\w-]+(?:=\S+|\s+(?!worktree\b)\S+)?)*\s+worktree\s+(add|remove|move)\b/;
+// `git [global options...] worktree remove|move`: allows global options such as `-C <dir>`, `--git-dir=...`
+// and `--no-pager`, and a position after `cd x && ...`, `;` or `|`. add/list/lock/unlock/prune/repair are not
+// listed and pass through.
+const GUARDED = /\bgit\b(?:\s+-{1,2}[\w-]+(?:=\S+|\s+(?!worktree\b)\S+)?)*\s+worktree\s+(remove|move)\b/;
 
 const debug = (...args) => {
   if (process.env.COFLUX_HOOK_DEBUG) console.error("[coflux guard]", ...args);
@@ -47,14 +52,12 @@ async function readStdinJson() {
 }
 
 function reasonFor(verb, projectId) {
-  const head = `This session runs inside a coflux project (COFLUX_PROJECT_ID=${projectId}) and coflux manages its worktrees: a worktree you \`git worktree ${verb}\` yourself is invisible in the user's sidebar and cannot host a terminal. `;
+  const head = `This session runs inside a coflux project (COFLUX_PROJECT_ID=${projectId}) and coflux keeps a workspace record for every worktree it knows about: a worktree you \`git worktree ${verb}\` yourself leaves that record behind as an orphan in the user's sidebar, pointing at a directory that no longer exists. `;
   const how =
-    verb === "add"
-      ? `Use the MCP tool create_workspace instead (projectId ${projectId}; set branch as needed and createNew to decide whether the branch is created). It creates the worktree on this device and shows it in the user's sidebar; then run commands there with create_terminal. `
-      : verb === "remove"
-        ? `Use the MCP tool remove_workspace instead (find the workspaceId with list_workspaces); it closes that workspace's terminals first, then removes the worktree. `
-        : `coflux does not support moving worktrees: remove_workspace, then create_workspace at the new location. `;
-  return `${head}${how}To only inspect existing worktrees use git worktree list or the MCP tool list_workspaces.`;
+    verb === "remove"
+      ? `Use the MCP tool remove_workspace instead (find the workspaceId with list_workspaces); it closes that workspace's terminals first, then removes the worktree and its record. Claude Code's own worktrees need nothing from you: when it cleans one up on exit, coflux moves that workspace's terminals back to the project's main workspace and drops the record by itself. `
+      : `coflux does not support moving worktrees: remove_workspace, then create a fresh worktree at the new location. `;
+  return `${head}${how}Creating a worktree is not blocked: coflux follows you into it (EnterWorktree included) and registers it as a child workspace of this project. To only inspect existing worktrees use git worktree list or the MCP tool list_workspaces.`;
 }
 
 async function main() {

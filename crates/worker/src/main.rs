@@ -23,6 +23,7 @@ mod relay_home;
 mod session_ledger;
 mod tunnel;
 mod workspace_match;
+mod worktree_locate;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

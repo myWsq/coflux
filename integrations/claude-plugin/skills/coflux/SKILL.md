@@ -42,7 +42,7 @@ env | grep '^COFLUX_'
   |---|---|
   | `COFLUX_DEVICE_ID` | id of the device you run on (the id in `list_devices`) |
   | `COFLUX_PROJECT_ID` | owning project id; empty string for a directory workspace without a repository |
-  | `COFLUX_WORKSPACE_ID` | **owning** workspace id (the id in `list_workspaces`): where this terminal was opened. It never changes, even if you move to another workspace — see below |
+  | `COFLUX_WORKSPACE_ID` | the workspace this terminal was **opened** in (the id in `list_workspaces`). The variable is frozen when the terminal starts; the workspace the terminal *belongs to* can still change — see below. `cofluxd workspace` is the authority |
   | `COFLUX_TASK_ID` | id of this terminal (the taskId / terminalId used by local commands and `read_terminal`) |
   | `COFLUX_SESSION_ID` | id of this PTY session |
   | `COFLUX_MCP_URL` | the center's MCP URL; the user configures MCP with it |
@@ -55,23 +55,24 @@ env | grep '^COFLUX_'
 
 ### Two workspaces to keep apart: owning and effective
 
-- **Owning workspace** = `COFLUX_WORKSPACE_ID`: the workspace this terminal was opened in. Fixed for
-  the life of the terminal; it is what the user's sidebar shows this terminal under.
+- **Owning workspace** = the workspace this terminal **belongs to**: what the user's sidebar shows it
+  under, what its turn state, branch and diff stats are attributed to. It starts out as
+  `COFLUX_WORKSPACE_ID` and moves with you when you enter or leave a git worktree (below).
 - **Effective workspace** = the workspace **your current working directory is inside**. This is what
   every local command acts on.
 
-They are the same until you move. `/cd <path>` and EnterWorktree move a *live* session — same
-conversation, no restart — and a coflux child workspace is a normal registered git worktree
-(`~/.coflux/worktrees/<workspace_id>`), so a session opened in workspace A can end up working inside
-workspace B. From that moment, in B:
+They are the same until your cwd wanders off. A plain `cd <path>` moves a *live* session — same
+conversation, no restart — and a coflux child workspace is a normal registered git worktree, so a
+session whose terminal belongs to workspace A can end up working inside workspace B. From that
+moment, in B:
 
 - `cofluxd terminal new` opens the terminal **in B**, under B in the user's sidebar, running in B's
   directory, counting against B's terminal cap;
 - `cofluxd terminal list` lists B's terminals, and A's terminals answer `read` / `wait` / `send`
   with "not in this workspace or does not exist" (`cd` back to A to reach them again);
-- MCP calls need **B's** id as `workspaceId` — `COFLUX_WORKSPACE_ID` still says A;
-- `COFLUX_TASK_ID` and `COFLUX_SESSION_ID` do not change: this terminal itself did not move, and
-  `progress`, `notify` and `ports` still belong to it, whatever your cwd is.
+- MCP calls need **B's** id as `workspaceId`;
+- the terminal itself stays under A, and `progress`, `notify` and `ports` still belong to it,
+  whatever your cwd is; `COFLUX_TASK_ID` and `COFLUX_SESSION_ID` never change.
 
 If your cwd is outside every coflux workspace (say `/tmp`), local commands fall back to the owning
 workspace.
@@ -80,6 +81,31 @@ A terminal opened before the daemon was upgraded is the one case with no owning 
 its local commands are refused with "predates the daemon upgrade" whatever your cwd is, because the
 daemon never guesses ownership from a directory. Open a new terminal.
 
+### coflux follows you into a git worktree
+
+`EnterWorktree` switches this live session into a git worktree (its own, or an existing one you point
+it at), `ExitWorktree` switches back, and resuming a session that had entered one puts you straight
+back in it. **coflux comes along**: the terminal's *owning* workspace moves to the workspace that
+worktree is, and if coflux has never seen that worktree it registers it as a child workspace of this
+project first — a new card appears in the user's sidebar, with its branch and diff stats. Nothing is
+interrupted: same terminal, same PTY, same conversation, and the user keeps watching it where it now
+lives. When Claude Code cleans up its own worktree on exit, that workspace's terminals move back to
+the project's main workspace and the record disappears by itself.
+
+So, after entering or leaving a worktree, owning **and** effective are both the new workspace: pass
+its id to MCP tools and everything local already acts on it. The plugin drops the new id next to the
+tool result, and `cofluxd workspace` always tells you. Two things stay behind on purpose:
+
+- `COFLUX_WORKSPACE_ID` (and the id in the `<coflux-session>` block from earlier in this session)
+  still names where the terminal was *opened*; it is frozen when the PTY starts and cannot be
+  rewritten. Never reuse it after a move.
+- The shell inside this terminal keeps its own directory. That is only about the shell; it does not
+  affect where your work is attributed.
+
+Nothing happens when coflux cannot follow, and nothing is blocked either: another repository, a
+directory that is not a git repository, a terminal opened in a directory workspace (no project), or
+a daemon that is down or too old — the session just carries on with the ownership it had.
+
 ### Ask where you are
 
 ```sh
@@ -87,11 +113,12 @@ cofluxd workspace
 {"workspaceId":"ws-b","path":"/Users/me/.coflux/worktrees/ws-b","owningWorkspaceId":"ws-a","moved":true}
 ```
 
-One line of JSON: `workspaceId` (+ `path`) is the **effective** workspace, `owningWorkspaceId` is
-`COFLUX_WORKSPACE_ID`, and `moved` says whether they differ. With the plugin installed you also get
-a `<coflux-session-moved>` block at the start of every prompt while you are moved — but that block
-only arrives with the **next** user prompt. **Just moved and about to call an MCP tool? Run
-`cofluxd workspace` first** and use the `workspaceId` it prints; do not reuse `COFLUX_WORKSPACE_ID`.
+One line of JSON: `workspaceId` (+ `path`) is the **effective** workspace, `owningWorkspaceId` is the
+workspace this terminal belongs to right now, and `moved` says whether they differ. With the plugin
+installed you also get a `<coflux-session-moved>` block at the start of every prompt while the two
+differ — but that block only arrives with the **next** user prompt. **About to call an MCP tool right
+after a `cd`? Run `cofluxd workspace` first** and use the `workspaceId` it prints; do not reuse
+`COFLUX_WORKSPACE_ID`.
 
 ## When to open a terminal
 
@@ -284,13 +311,15 @@ host **only** for these:
   `read_terminal` / `send_terminal_input`.
 - **Join everything under the account when you are not inside a coflux terminal** (for example
   Claude Code the user started on their own machine).
-- **Never run `git worktree add` yourself**: inside a coflux project the plugin blocks
-  `git worktree add|remove|move` and points you to `create_workspace` / `remove_workspace`; a
-  worktree you create is invisible to the user and cannot host a terminal.
+- **Deleting a workspace**: `remove_workspace` (it closes that workspace's terminals first, then
+  removes the worktree and the record). Inside a coflux project the plugin blocks
+  `git worktree remove|move` run by hand, because that leaves an orphan workspace record in the user's
+  sidebar. Creating a worktree is *not* blocked — coflux follows you into it (see above) — and Claude
+  Code's own worktrees need no cleanup from you at all.
 
-Do not detour through MCP for work inside the workspace you are in — including one you moved
-into with `/cd` or EnterWorktree, where the local commands follow you: that is an extra round trip
-to the center, while a local command does it in one step.
+Do not detour through MCP for work inside the workspace you are in — including one you moved into
+with `cd` or EnterWorktree, where the local commands follow you: that is an extra round trip to the
+center, while a local command does it in one step.
 
 ### When MCP is not configured
 
@@ -336,4 +365,6 @@ The local-command disciplines apply to MCP just the same: `read_terminal` before
   center. When disconnected they fail loudly rather than degrade silently.
 - `COFLUX_*` variables exist only in PTYs opened by coflux; exporting or changing them yourself
   has no effect, the center only trusts the ids it issued. `COFLUX_WORKSPACE_ID` always means the
-  workspace this terminal was **opened** in; "where am I now" is `cofluxd workspace`.
+  workspace this terminal was **opened** in and goes stale the moment coflux follows you into a
+  worktree; both "where does this terminal belong now" and "where am I acting" come from
+  `cofluxd workspace`.

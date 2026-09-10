@@ -18,7 +18,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file coflux/v1/daemon.proto.
  */
 export const file_coflux_v1_daemon: GenFile = /*@__PURE__*/
-  fileDesc("ChZjb2ZsdXgvdjEvZGFlbW9uLnByb3RvEgljb2ZsdXgudjEiegoKRGFlbW9uQXV0aBIUCgxkZXZpY2VfdG9rZW4YASABKAkSFgoOd29ya2VyX3ZlcnNpb24YAiABKAkSGgoSc3VwZXJ2aXNvcl92ZXJzaW9uGAMgASgJEgwKBGFyY2gYBCABKAkSFAoMY2FwYWJpbGl0aWVzGAUgAygJIpsBChNEYWVtb25FbnJvbGxSZXF1ZXN0EgwKBG5hbWUYASABKAkSDAoEaG9zdBgCIAEoCRIQCghwbGF0Zm9ybRgDIAEoCRIWCg53b3JrZXJfdmVyc2lvbhgEIAEoCRIaChJzdXBlcnZpc29yX3ZlcnNpb24YBSABKAkSDAoEYXJjaBgGIAEoCRIUCgxjYXBhYmlsaXRpZXMYByADKAkiSgoUTG9jYWxHYXRld2F5QW5ub3VuY2USMgoHZ2F0ZXdheRgBIAEoCzIhLmNvZmx1eC52MS5Mb2NhbEdhdGV3YXlEZXNjcmlwdG9yImoKDERhZW1vblJlc3luYxInCghzZXNzaW9ucxgBIAMoCzIVLmNvZmx1eC52MS5TZXNzaW9uUmVmEhkKEXNuYXBzaG90X293bmVyX2lkGAIgASgJEhYKDnNuYXBzaG90X2Vwb2NoGAMgASgEIqMBChBQcm9qZWN0VmFsaWRhdGVkEhIKCnJlcXVlc3RfaWQYASABKAkSCgoCb2sYAiABKAgSEQoJcmVwb19wYXRoGAMgASgJEg4KBmJyYW5jaBgEIAEoCRISCgVlcnJvchgFIAEoCUgAiAEBEhsKDnN1Z2dlc3RlZF9uYW1lGAYgASgJSAGIAQFCCAoGX2Vycm9yQhEKD19zdWdnZXN0ZWRfbmFtZSJrCg1Xb3JrdHJlZUFkZGVkEhIKCnJlcXVlc3RfaWQYASABKAkSCgoCb2sYAiABKAgSDAoEcGF0aBgDIAEoCRIOCgZicmFuY2gYBCABKAkSEgoFZXJyb3IYBSABKAlIAIgBAUIICgZfZXJyb3IiQgoOU2Vzc2lvblN0YXJ0ZWQSEgoKc2Vzc2lvbl9pZBgBIAEoCRIPCgd0YXNrX2lkGAIgASgJEgsKA3BpZBgDIAEoBSI0CgtTZXNzaW9uRXhpdBISCgpzZXNzaW9uX2lkGAEgASgJEhEKCWV4aXRfY29kZRgCIAEoBSI4CgtQb3J0c1VwZGF0ZRIpCghzZXNzaW9ucxgBIAMoCzIXLmNvZmx1eC52MS5TZXNzaW9uUG9ydHMiPQoNU2Vzc2lvbkFnZW50cxIsCghzZXNzaW9ucxgBIAMoCzIaLmNvZmx1eC52MS5TZXNzaW9uQWdlbnRSZWYiMAoQQWdlbnRUZXJtaW5hbE5ldxINCgV0aXRsZRgBIAEoCRINCgVzaGVsbBgCIAEoCSITChFBZ2VudFRlcm1pbmFsTGlzdCIkChFBZ2VudFRlcm1pbmFsUmVhZBIPCgd0YXNrX2lkGAEgASgJIhAKDkFnZW50UG9ydHNMaXN0IrICChNBZ2VudENvbnRyb2xSZXF1ZXN0EhIKCnJlcXVlc3RfaWQYASABKAkSEgoKc2Vzc2lvbl9pZBgCIAEoCRIUCgx3b3Jrc3BhY2VfaWQYAyABKAkSMwoMdGVybWluYWxfbmV3GAogASgLMhsuY29mbHV4LnYxLkFnZW50VGVybWluYWxOZXdIABI1Cg10ZXJtaW5hbF9saXN0GAsgASgLMhwuY29mbHV4LnYxLkFnZW50VGVybWluYWxMaXN0SAASNQoNdGVybWluYWxfcmVhZBgMIAEoCzIcLmNvZmx1eC52MS5BZ2VudFRlcm1pbmFsUmVhZEgAEi8KCnBvcnRzX2xpc3QYDSABKAsyGS5jb2ZsdXgudjEuQWdlbnRQb3J0c0xpc3RIAEIJCgdwYXlsb2FkIj0KFkFnZW50VGVybWluYWxOZXdSZXN1bHQSDwoHdGFza19pZBgBIAEoCRISCgpzZXNzaW9uX2lkGAIgASgJIrsBChBBZ2VudFRlcm1pbmFsUmVmEg8KB3Rhc2tfaWQYASABKAkSDQoFdGl0bGUYAiABKAkSJQoGc3RhdHVzGAMgASgOMhUuY29mbHV4LnYxLlRhc2tTdGF0dXMSFgoJZXhpdF9jb2RlGAQgASgFSACIAQESFwoKc2Vzc2lvbl9pZBgFIAEoCUgBiAEBEhIKCmNyZWF0ZWRfYXQYBiABKAFCDAoKX2V4aXRfY29kZUINCgtfc2Vzc2lvbl9pZCJJChdBZ2VudFRlcm1pbmFsTGlzdFJlc3VsdBIuCgl0ZXJtaW5hbHMYASADKAsyGy5jb2ZsdXgudjEuQWdlbnRUZXJtaW5hbFJlZiKSAQoXQWdlbnRUZXJtaW5hbFJlYWRSZXN1bHQSFQoNYW5zaV9zbmFwc2hvdBgBIAEoDBITCgtjYXB0dXJlZF9hdBgCIAEoARIlCgZzdGF0dXMYAyABKA4yFS5jb2ZsdXgudjEuVGFza1N0YXR1cxIWCglleGl0X2NvZGUYBCABKAVIAIgBAUIMCgpfZXhpdF9jb2RlIj0KFEFnZW50UG9ydHNMaXN0UmVzdWx0EiUKBXBvcnRzGAEgAygLMhYuY29mbHV4LnYxLlBvcnRQcmV2aWV3IskCChJBZ2VudENvbnRyb2xSZXN1bHQSEgoKcmVxdWVzdF9pZBgBIAEoCRIKCgJvaxgCIAEoCBISCgVlcnJvchgDIAEoCUgBiAEBEjkKDHRlcm1pbmFsX25ldxgKIAEoCzIhLmNvZmx1eC52MS5BZ2VudFRlcm1pbmFsTmV3UmVzdWx0SAASOwoNdGVybWluYWxfbGlzdBgLIAEoCzIiLmNvZmx1eC52MS5BZ2VudFRlcm1pbmFsTGlzdFJlc3VsdEgAEjsKDXRlcm1pbmFsX3JlYWQYDCABKAsyIi5jb2ZsdXgudjEuQWdlbnRUZXJtaW5hbFJlYWRSZXN1bHRIABI1Cgpwb3J0c19saXN0GA0gASgLMh8uY29mbHV4LnYxLkFnZW50UG9ydHNMaXN0UmVzdWx0SABCCQoHcGF5bG9hZEIICgZfZXJyb3IiSAoLUHJveHlPcGVuZWQSDwoHY29ubl9pZBgBIAEoCRIKCgJvaxgCIAEoCBISCgVlcnJvchgDIAEoCUgAiAEBQggKBl9lcnJvciIeCgtQcm94eUNsb3NlZBIPCgdjb25uX2lkGAEgASgJIh0KCVJlbGF5SG9tZRIQCghyZWxheV9pZBgBIAEoCSLyDAoORGFlbW9uVG9TZXJ2ZXISLAoLZGFlbW9uX2F1dGgYAiABKAsyFS5jb2ZsdXgudjEuRGFlbW9uQXV0aEgAEj8KFWRhZW1vbl9lbnJvbGxfcmVxdWVzdBgDIAEoCzIeLmNvZmx1eC52MS5EYWVtb25FbnJvbGxSZXF1ZXN0SAASMAoNZGFlbW9uX3Jlc3luYxgEIAEoCzIXLmNvZmx1eC52MS5EYWVtb25SZXN5bmNIABI4ChFwcm9qZWN0X3ZhbGlkYXRlZBgFIAEoCzIbLmNvZmx1eC52MS5Qcm9qZWN0VmFsaWRhdGVkSAASMgoOd29ya3RyZWVfYWRkZWQYBiABKAsyGC5jb2ZsdXgudjEuV29ya3RyZWVBZGRlZEgAEjQKD3Nlc3Npb25fc3RhcnRlZBgHIAEoCzIZLmNvZmx1eC52MS5TZXNzaW9uU3RhcnRlZEgAEi4KDHNlc3Npb25fZXhpdBgIIAEoCzIWLmNvZmx1eC52MS5TZXNzaW9uRXhpdEgAEi4KDHBvcnRzX3VwZGF0ZRgJIAEoCzIWLmNvZmx1eC52MS5Qb3J0c1VwZGF0ZUgAEi4KDHByb3h5X29wZW5lZBgKIAEoCzIWLmNvZmx1eC52MS5Qcm94eU9wZW5lZEgAEi4KDHByb3h5X2Nsb3NlZBgLIAEoCzIWLmNvZmx1eC52MS5Qcm94eUNsb3NlZEgAEioKCnByb3h5X2RhdGEYESABKAsyFC5jb2ZsdXgudjEuUHJveHlEYXRhSAASNgoQd29ya3NwYWNlX2JyYW5jaBgSIAEoCzIaLmNvZmx1eC52MS5Xb3Jrc3BhY2VCcmFuY2hIABIyCg53b3Jrc3BhY2VfZGlmZhgUIAEoCzIYLmNvZmx1eC52MS5Xb3Jrc3BhY2VEaWZmSAASMwoPbG9jYWxfZ3JhbnRfYWNrGBUgASgLMhguY29mbHV4LnYxLkxvY2FsR3JhbnRBY2tIABI6ChJzZXNzaW9uX2NoZWNrcG9pbnQYGCABKAsyHC5jb2ZsdXgudjEuU2Vzc2lvbkNoZWNrcG9pbnRIABJDChdkZXZpY2Vfb3BlcmF0aW9uX3JlcG9ydBgZIAEoCzIgLmNvZmx1eC52MS5EZXZpY2VPcGVyYXRpb25SZXBvcnRIABJBChZsb2NhbF9nYXRld2F5X2Fubm91bmNlGBogASgLMh8uY29mbHV4LnYxLkxvY2FsR2F0ZXdheUFubm91bmNlSAASOgoPc2Vzc2lvbl9jYXRhbG9nGBsgASgLMh8uY29mbHV4LnYxLkRldmljZVNlc3Npb25DYXRhbG9nSAASWgojcHJlcGFyZWRfZGV2aWNlX29wZXJhdGlvbl9pbnN0YWxsZWQYHCABKAsyKy5jb2ZsdXgudjEuUHJlcGFyZWREZXZpY2VPcGVyYXRpb25JbnN0YWxsZWRIABIqCgpyZWxheV9ob21lGB0gASgLMhQuY29mbHV4LnYxLlJlbGF5SG9tZUgAEkUKGHdvcmtzcGFjZV9kZWZhdWx0X2JyYW5jaBgeIAEoCzIhLmNvZmx1eC52MS5Xb3Jrc3BhY2VEZWZhdWx0QnJhbmNoSAASMgoOc2Vzc2lvbl9hZ2VudHMYHyABKAsyGC5jb2ZsdXgudjEuU2Vzc2lvbkFnZW50c0gAEj8KFWFnZW50X2NvbnRyb2xfcmVxdWVzdBggIAEoCzIeLmNvZmx1eC52MS5BZ2VudENvbnRyb2xSZXF1ZXN0SAASRAoYZGV2aWNlX3AycF9hbnN3ZXJfcmVwb3J0GCEgASgLMiAuY29mbHV4LnYxLkRldmljZVAycEFuc3dlclJlcG9ydEgAEjsKE3NlcnZlcl9hZ2VudF9yZXN1bHQYIiABKAsyHC5jb2ZsdXgudjEuU2VydmVyQWdlbnRSZXN1bHRIAEIJCgdwYXlsb2FkSgQIARACSgQIDBANSgQIDRAOSgQIDhAPSgQIDxAQSgQIEBARSgQIExAUSgQIFhAXSgQIFxAYUg1kYWVtb25fZW5yb2xsUgtleGVjX3Jlc3VsdFIJZnNfbGlzdGVkUg5mc19yZWFkX3Jlc3VsdFIKcHR5X291dHB1dFIKcHR5X3JlcGxheVIPZnNfd3JpdGVfcmVzdWx0UhJkZXZpY2VfcmVsYXlfZnJhbWVSEmRldmljZV9yZWxheV9jbG9zZSJMChJTZXJ2ZXJUZXJtaW5hbFJlYWQSDwoHdGFza19pZBgBIAEoCRISCgpzZXNzaW9uX2lkGAIgASgJEhEKCW1heF9ieXRlcxgDIAEoDSI3ChNTZXJ2ZXJUZXJtaW5hbElucHV0EhIKCnNlc3Npb25faWQYASABKAkSDAoEZGF0YRgCIAEoDCKlAQoSU2VydmVyQWdlbnRSZXF1ZXN0EhIKCnJlcXVlc3RfaWQYASABKAkSNgoNdGVybWluYWxfcmVhZBgKIAEoCzIdLmNvZmx1eC52MS5TZXJ2ZXJUZXJtaW5hbFJlYWRIABI4Cg50ZXJtaW5hbF9pbnB1dBgLIAEoCzIeLmNvZmx1eC52MS5TZXJ2ZXJUZXJtaW5hbElucHV0SABCCQoHcGF5bG9hZCI4ChhTZXJ2ZXJUZXJtaW5hbFJlYWRSZXN1bHQSDAoEZGF0YRgBIAEoDBIOCgZzb3VyY2UYAiABKAkiGwoZU2VydmVyVGVybWluYWxJbnB1dFJlc3VsdCLaAQoRU2VydmVyQWdlbnRSZXN1bHQSEgoKcmVxdWVzdF9pZBgBIAEoCRIKCgJvaxgCIAEoCBISCgVlcnJvchgDIAEoCUgBiAEBEjwKDXRlcm1pbmFsX3JlYWQYCiABKAsyIy5jb2ZsdXgudjEuU2VydmVyVGVybWluYWxSZWFkUmVzdWx0SAASPgoOdGVybWluYWxfaW5wdXQYCyABKAsyJC5jb2ZsdXgudjEuU2VydmVyVGVybWluYWxJbnB1dFJlc3VsdEgAQgkKB3BheWxvYWRCCAoGX2Vycm9yIjcKD1dvcmtzcGFjZUJyYW5jaBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSDgoGYnJhbmNoGAIgASgJIksKDVdvcmtzcGFjZURpZmYSFAoMd29ya3NwYWNlX2lkGAEgASgJEhEKCWFkZGl0aW9ucxgCIAEoBRIRCglkZWxldGlvbnMYAyABKAUiRgoWV29ya3NwYWNlRGVmYXVsdEJyYW5jaBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSFgoOZGVmYXVsdF9icmFuY2gYAiABKAkiOQoORGFlbW9uRW5yb2xsZWQSEQoJZGFlbW9uX2lkGAEgASgJEhQKDGRldmljZV90b2tlbhgCIAEoCSIhCgxEYWVtb25BdXRoZWQSEQoJZGFlbW9uX2lkGAEgASgJIigKFUxvY2FsR2F0ZXdheUNvbmZpZ3VyZRIPCgdvcmlnaW5zGAEgAygJIjcKD0RhZW1vbkF1dGhFcnJvchIPCgdtZXNzYWdlGAEgASgJEhMKC25lZWRfZW5yb2xsGAIgASgIIjkKFkRhZW1vbkF1dGhvcml6ZVBlbmRpbmcSCwoDdXJsGAEgASgJEhIKCmV4cGlyZXNfYXQYAiABKAEiMwoPUHJvamVjdFZhbGlkYXRlEhIKCnJlcXVlc3RfaWQYASABKAkSDAoEcGF0aBgCIAEoCSJ8CgtXb3JrdHJlZUFkZBISCgpyZXF1ZXN0X2lkGAEgASgJEhEKCXJlcG9fcGF0aBgCIAEoCRIUCgx3b3Jrc3BhY2VfaWQYAyABKAkSDAoEbmFtZRgEIAEoCRIOCgZicmFuY2gYBSABKAkSEgoKY3JlYXRlX25ldxgGIAEoCCI6Cg5Xb3JrdHJlZVJlbW92ZRIRCglyZXBvX3BhdGgYASABKAkSFQoNd29ya3RyZWVfcGF0aBgCIAEoCSKEAgoNV29ya2VyVXBncmFkZRIPCgd2ZXJzaW9uGAEgASgJEhAKA3VybBgCIAEoCUgAiAEBEhMKBnNoYTI1NhgDIAEoCUgBiAEBEhYKCXNpZ25hdHVyZRgEIAEoCUgCiAEBEhMKBnRhcmdldBgFIAEoCUgDiAEBEhoKDWFydGlmYWN0X3NpemUYBiABKARIBIgBARIeChFyZWxlYXNlX3NpZ25hdHVyZRgHIAEoCUgFiAEBQgYKBF91cmxCCQoHX3NoYTI1NkIMCgpfc2lnbmF0dXJlQgkKB190YXJnZXRCEAoOX2FydGlmYWN0X3NpemVCFAoSX3JlbGVhc2Vfc2lnbmF0dXJlIh0KDURhZW1vblNldE5hbWUSDAoEbmFtZRgBIAEoCSLJAQoNU2Vzc2lvbkNyZWF0ZRISCgpzZXNzaW9uX2lkGAEgASgJEg8KB3Rhc2tfaWQYAiABKAkSCwoDY3dkGAMgASgJEhIKBXNoZWxsGAQgASgJSACIAQESDAoEY29scxgFIAEoDRIMCgRyb3dzGAYgASgNEhQKDHdvcmtzcGFjZV9pZBgHIAEoCRISCgpwcm9qZWN0X2lkGAggASgJEhEKCWRhZW1vbl9pZBgJIAEoCRIPCgdtY3BfdXJsGAogASgJQggKBl9zaGVsbCIiCgxTZXNzaW9uQ2xvc2USEgoKc2Vzc2lvbl9pZBgBIAEoCSIqCglQcm94eU9wZW4SDwoHY29ubl9pZBgBIAEoCRIMCgRwb3J0GAIgASgNIh0KClByb3h5Q2xvc2USDwoHY29ubl9pZBgBIAEoCSJoCg1SZWxheU5vZGVMaXN0EjEKBW5vZGVzGAEgAygLMiIuY29mbHV4LnYxLlJlbGF5Tm9kZUxpc3QuUmVsYXlOb2RlGiQKCVJlbGF5Tm9kZRIKCgJpZBgBIAEoCRILCgN1cmwYAiABKAkiNgoeUHJlcGFyZWREZXZpY2VPcGVyYXRpb25FeGVjdXRlEhQKDG9wZXJhdGlvbl9pZBgBIAEoCSLpDgoOU2VydmVyVG9EYWVtb24SNAoPZGFlbW9uX2Vucm9sbGVkGAEgASgLMhkuY29mbHV4LnYxLkRhZW1vbkVucm9sbGVkSAASMAoNZGFlbW9uX2F1dGhlZBgCIAEoCzIXLmNvZmx1eC52MS5EYWVtb25BdXRoZWRIABI3ChFkYWVtb25fYXV0aF9lcnJvchgDIAEoCzIaLmNvZmx1eC52MS5EYWVtb25BdXRoRXJyb3JIABJFChhkYWVtb25fYXV0aG9yaXplX3BlbmRpbmcYBCABKAsyIS5jb2ZsdXgudjEuRGFlbW9uQXV0aG9yaXplUGVuZGluZ0gAEjYKEHByb2plY3RfdmFsaWRhdGUYBSABKAsyGi5jb2ZsdXgudjEuUHJvamVjdFZhbGlkYXRlSAASLgoMd29ya3RyZWVfYWRkGAYgASgLMhYuY29mbHV4LnYxLldvcmt0cmVlQWRkSAASNAoPd29ya3RyZWVfcmVtb3ZlGAcgASgLMhkuY29mbHV4LnYxLldvcmt0cmVlUmVtb3ZlSAASMgoOd29ya2VyX3VwZ3JhZGUYCCABKAsyGC5jb2ZsdXgudjEuV29ya2VyVXBncmFkZUgAEjIKDnNlc3Npb25fY3JlYXRlGAkgASgLMhguY29mbHV4LnYxLlNlc3Npb25DcmVhdGVIABIwCg1zZXNzaW9uX2Nsb3NlGAogASgLMhcuY29mbHV4LnYxLlNlc3Npb25DbG9zZUgAEioKCnByb3h5X29wZW4YDSABKAsyFC5jb2ZsdXgudjEuUHJveHlPcGVuSAASLAoLcHJveHlfY2xvc2UYDiABKAsyFS5jb2ZsdXgudjEuUHJveHlDbG9zZUgAEjMKD2RhZW1vbl9zZXRfbmFtZRgWIAEoCzIYLmNvZmx1eC52MS5EYWVtb25TZXROYW1lSAASOwoTbG9jYWxfZ3JhbnRfaW5zdGFsbBgXIAEoCzIcLmNvZmx1eC52MS5Mb2NhbEdyYW50SW5zdGFsbEgAEjkKEmxvY2FsX2dyYW50X3Jldm9rZRgYIAEoCzIbLmNvZmx1eC52MS5Mb2NhbEdyYW50UmV2b2tlSAASOwoTbG9jYWxfbGVhc2VfaW5zdGFsbBgZIAEoCzIcLmNvZmx1eC52MS5Mb2NhbExlYXNlSW5zdGFsbEgAEkMKF2xvY2FsX2dhdGV3YXlfY29uZmlndXJlGB0gASgLMiAuY29mbHV4LnYxLkxvY2FsR2F0ZXdheUNvbmZpZ3VyZUgAEkkKF3Nlc3Npb25fY2F0YWxvZ19yZXF1ZXN0GB4gASgLMiYuY29mbHV4LnYxLkRldmljZVNlc3Npb25DYXRhbG9nUmVxdWVzdEgAEiwKCGV4aXRfYWNrGB8gASgLMhguY29mbHV4LnYxLkRldmljZUV4aXRBY2tIABJHChlwcmVwYXJlZF9kZXZpY2Vfb3BlcmF0aW9uGCAgASgLMiIuY29mbHV4LnYxLlByZXBhcmVkRGV2aWNlT3BlcmF0aW9uSAASNwoRZGV2aWNlX3JlbGF5X2RpYWwYISABKAsyGi5jb2ZsdXgudjEuRGV2aWNlUmVsYXlEaWFsSAASMwoPcmVsYXlfbm9kZV9saXN0GCIgASgLMhguY29mbHV4LnYxLlJlbGF5Tm9kZUxpc3RIABIqCgpwcm94eV9kYXRhGBMgASgLMhQuY29mbHV4LnYxLlByb3h5RGF0YUgAEjIKDndvcmtzcGFjZV9saXN0GBQgASgLMhguY29mbHV4LnYxLldvcmtzcGFjZUxpc3RIABI9ChRhZ2VudF9jb250cm9sX3Jlc3VsdBgjIAEoCzIdLmNvZmx1eC52MS5BZ2VudENvbnRyb2xSZXN1bHRIABIzCg9kZXZpY2VfcDJwX2RpYWwYJCABKAsyGC5jb2ZsdXgudjEuRGV2aWNlUDJwRGlhbEgAEkQKGGRldmljZV9wMnBfY2hhbm5lbF9ncmFudBglIAEoCzIgLmNvZmx1eC52MS5EZXZpY2VQMnBDaGFubmVsR3JhbnRIABJWCiFwcmVwYXJlZF9kZXZpY2Vfb3BlcmF0aW9uX2V4ZWN1dGUYJiABKAsyKS5jb2ZsdXgudjEuUHJlcGFyZWREZXZpY2VPcGVyYXRpb25FeGVjdXRlSAASPQoUc2VydmVyX2FnZW50X3JlcXVlc3QYJyABKAsyHS5jb2ZsdXgudjEuU2VydmVyQWdlbnRSZXF1ZXN0SABCCQoHcGF5bG9hZEoECAsQDEoECAwQDUoECA8QEEoECBAQEUoECBEQEkoECBIQE0oECBUQFkoECBoQG0oECBsQHEoECBwQHVIOc2Vzc2lvbl9yZXBsYXlSCnB0eV9yZXNpemVSCGV4ZWNfcnVuUgdmc19saXN0Ugdmc19yZWFkUglwdHlfaW5wdXRSCGZzX3dyaXRlUhFkZXZpY2VfcmVsYXlfb3BlblISZGV2aWNlX3JlbGF5X2ZyYW1lUhJkZXZpY2VfcmVsYXlfY2xvc2UiSgoMV29ya3NwYWNlUmVmEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIMCgRwYXRoGAIgASgJEhYKDmRlZmF1bHRfYnJhbmNoGAMgASgJIjwKDVdvcmtzcGFjZUxpc3QSKwoKd29ya3NwYWNlcxgBIAMoCzIXLmNvZmx1eC52MS5Xb3Jrc3BhY2VSZWZiBnByb3RvMw", [file_coflux_v1_common, file_coflux_v1_device]);
+  fileDesc("ChZjb2ZsdXgvdjEvZGFlbW9uLnByb3RvEgljb2ZsdXgudjEiegoKRGFlbW9uQXV0aBIUCgxkZXZpY2VfdG9rZW4YASABKAkSFgoOd29ya2VyX3ZlcnNpb24YAiABKAkSGgoSc3VwZXJ2aXNvcl92ZXJzaW9uGAMgASgJEgwKBGFyY2gYBCABKAkSFAoMY2FwYWJpbGl0aWVzGAUgAygJIpsBChNEYWVtb25FbnJvbGxSZXF1ZXN0EgwKBG5hbWUYASABKAkSDAoEaG9zdBgCIAEoCRIQCghwbGF0Zm9ybRgDIAEoCRIWCg53b3JrZXJfdmVyc2lvbhgEIAEoCRIaChJzdXBlcnZpc29yX3ZlcnNpb24YBSABKAkSDAoEYXJjaBgGIAEoCRIUCgxjYXBhYmlsaXRpZXMYByADKAkiSgoUTG9jYWxHYXRld2F5QW5ub3VuY2USMgoHZ2F0ZXdheRgBIAEoCzIhLmNvZmx1eC52MS5Mb2NhbEdhdGV3YXlEZXNjcmlwdG9yImoKDERhZW1vblJlc3luYxInCghzZXNzaW9ucxgBIAMoCzIVLmNvZmx1eC52MS5TZXNzaW9uUmVmEhkKEXNuYXBzaG90X293bmVyX2lkGAIgASgJEhYKDnNuYXBzaG90X2Vwb2NoGAMgASgEIqMBChBQcm9qZWN0VmFsaWRhdGVkEhIKCnJlcXVlc3RfaWQYASABKAkSCgoCb2sYAiABKAgSEQoJcmVwb19wYXRoGAMgASgJEg4KBmJyYW5jaBgEIAEoCRISCgVlcnJvchgFIAEoCUgAiAEBEhsKDnN1Z2dlc3RlZF9uYW1lGAYgASgJSAGIAQFCCAoGX2Vycm9yQhEKD19zdWdnZXN0ZWRfbmFtZSJrCg1Xb3JrdHJlZUFkZGVkEhIKCnJlcXVlc3RfaWQYASABKAkSCgoCb2sYAiABKAgSDAoEcGF0aBgDIAEoCRIOCgZicmFuY2gYBCABKAkSEgoFZXJyb3IYBSABKAlIAIgBAUIICgZfZXJyb3IiQgoOU2Vzc2lvblN0YXJ0ZWQSEgoKc2Vzc2lvbl9pZBgBIAEoCRIPCgd0YXNrX2lkGAIgASgJEgsKA3BpZBgDIAEoBSI0CgtTZXNzaW9uRXhpdBISCgpzZXNzaW9uX2lkGAEgASgJEhEKCWV4aXRfY29kZRgCIAEoBSI4CgtQb3J0c1VwZGF0ZRIpCghzZXNzaW9ucxgBIAMoCzIXLmNvZmx1eC52MS5TZXNzaW9uUG9ydHMiPQoNU2Vzc2lvbkFnZW50cxIsCghzZXNzaW9ucxgBIAMoCzIaLmNvZmx1eC52MS5TZXNzaW9uQWdlbnRSZWYiMAoQQWdlbnRUZXJtaW5hbE5ldxINCgV0aXRsZRgBIAEoCRINCgVzaGVsbBgCIAEoCSITChFBZ2VudFRlcm1pbmFsTGlzdCIkChFBZ2VudFRlcm1pbmFsUmVhZBIPCgd0YXNrX2lkGAEgASgJIhAKDkFnZW50UG9ydHNMaXN0Il0KFEFnZW50V29ya3NwYWNlTG9jYXRlEgwKBHBhdGgYASABKAkSDgoGYnJhbmNoGAIgASgJEhQKDHdvcmtzcGFjZV9pZBgDIAEoCRIRCglzYW1lX3JlcG8YBCABKAgiOgoUQWdlbnRXb3Jrc3BhY2VGb3JnZXQSDAoEcGF0aBgBIAEoCRIUCgx3b3Jrc3BhY2VfaWQYAiABKAkicAoaQWdlbnRXb3Jrc3BhY2VMb2NhdGVSZXN1bHQSFAoMd29ya3NwYWNlX2lkGAEgASgJEgwKBHBhdGgYAiABKAkSDgoGYnJhbmNoGAMgASgJEg8KB2NyZWF0ZWQYBCABKAgSDQoFbW92ZWQYBSABKAgiewoaQWdlbnRXb3Jrc3BhY2VGb3JnZXRSZXN1bHQSFAoMd29ya3NwYWNlX2lkGAEgASgJEh0KFWZhbGxiYWNrX3dvcmtzcGFjZV9pZBgCIAEoCRIXCg9tb3ZlZF90ZXJtaW5hbHMYAyABKAUSDwoHcmVtb3ZlZBgEIAEoCCKsAwoTQWdlbnRDb250cm9sUmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEhIKCnNlc3Npb25faWQYAiABKAkSFAoMd29ya3NwYWNlX2lkGAMgASgJEjMKDHRlcm1pbmFsX25ldxgKIAEoCzIbLmNvZmx1eC52MS5BZ2VudFRlcm1pbmFsTmV3SAASNQoNdGVybWluYWxfbGlzdBgLIAEoCzIcLmNvZmx1eC52MS5BZ2VudFRlcm1pbmFsTGlzdEgAEjUKDXRlcm1pbmFsX3JlYWQYDCABKAsyHC5jb2ZsdXgudjEuQWdlbnRUZXJtaW5hbFJlYWRIABIvCgpwb3J0c19saXN0GA0gASgLMhkuY29mbHV4LnYxLkFnZW50UG9ydHNMaXN0SAASOwoQd29ya3NwYWNlX2xvY2F0ZRgOIAEoCzIfLmNvZmx1eC52MS5BZ2VudFdvcmtzcGFjZUxvY2F0ZUgAEjsKEHdvcmtzcGFjZV9mb3JnZXQYDyABKAsyHy5jb2ZsdXgudjEuQWdlbnRXb3Jrc3BhY2VGb3JnZXRIAEIJCgdwYXlsb2FkIj0KFkFnZW50VGVybWluYWxOZXdSZXN1bHQSDwoHdGFza19pZBgBIAEoCRISCgpzZXNzaW9uX2lkGAIgASgJIrsBChBBZ2VudFRlcm1pbmFsUmVmEg8KB3Rhc2tfaWQYASABKAkSDQoFdGl0bGUYAiABKAkSJQoGc3RhdHVzGAMgASgOMhUuY29mbHV4LnYxLlRhc2tTdGF0dXMSFgoJZXhpdF9jb2RlGAQgASgFSACIAQESFwoKc2Vzc2lvbl9pZBgFIAEoCUgBiAEBEhIKCmNyZWF0ZWRfYXQYBiABKAFCDAoKX2V4aXRfY29kZUINCgtfc2Vzc2lvbl9pZCJJChdBZ2VudFRlcm1pbmFsTGlzdFJlc3VsdBIuCgl0ZXJtaW5hbHMYASADKAsyGy5jb2ZsdXgudjEuQWdlbnRUZXJtaW5hbFJlZiKSAQoXQWdlbnRUZXJtaW5hbFJlYWRSZXN1bHQSFQoNYW5zaV9zbmFwc2hvdBgBIAEoDBITCgtjYXB0dXJlZF9hdBgCIAEoARIlCgZzdGF0dXMYAyABKA4yFS5jb2ZsdXgudjEuVGFza1N0YXR1cxIWCglleGl0X2NvZGUYBCABKAVIAIgBAUIMCgpfZXhpdF9jb2RlIj0KFEFnZW50UG9ydHNMaXN0UmVzdWx0EiUKBXBvcnRzGAEgAygLMhYuY29mbHV4LnYxLlBvcnRQcmV2aWV3Is8DChJBZ2VudENvbnRyb2xSZXN1bHQSEgoKcmVxdWVzdF9pZBgBIAEoCRIKCgJvaxgCIAEoCBISCgVlcnJvchgDIAEoCUgBiAEBEjkKDHRlcm1pbmFsX25ldxgKIAEoCzIhLmNvZmx1eC52MS5BZ2VudFRlcm1pbmFsTmV3UmVzdWx0SAASOwoNdGVybWluYWxfbGlzdBgLIAEoCzIiLmNvZmx1eC52MS5BZ2VudFRlcm1pbmFsTGlzdFJlc3VsdEgAEjsKDXRlcm1pbmFsX3JlYWQYDCABKAsyIi5jb2ZsdXgudjEuQWdlbnRUZXJtaW5hbFJlYWRSZXN1bHRIABI1Cgpwb3J0c19saXN0GA0gASgLMh8uY29mbHV4LnYxLkFnZW50UG9ydHNMaXN0UmVzdWx0SAASQQoQd29ya3NwYWNlX2xvY2F0ZRgOIAEoCzIlLmNvZmx1eC52MS5BZ2VudFdvcmtzcGFjZUxvY2F0ZVJlc3VsdEgAEkEKEHdvcmtzcGFjZV9mb3JnZXQYDyABKAsyJS5jb2ZsdXgudjEuQWdlbnRXb3Jrc3BhY2VGb3JnZXRSZXN1bHRIAEIJCgdwYXlsb2FkQggKBl9lcnJvciJICgtQcm94eU9wZW5lZBIPCgdjb25uX2lkGAEgASgJEgoKAm9rGAIgASgIEhIKBWVycm9yGAMgASgJSACIAQFCCAoGX2Vycm9yIh4KC1Byb3h5Q2xvc2VkEg8KB2Nvbm5faWQYASABKAkiHQoJUmVsYXlIb21lEhAKCHJlbGF5X2lkGAEgASgJIvIMCg5EYWVtb25Ub1NlcnZlchIsCgtkYWVtb25fYXV0aBgCIAEoCzIVLmNvZmx1eC52MS5EYWVtb25BdXRoSAASPwoVZGFlbW9uX2Vucm9sbF9yZXF1ZXN0GAMgASgLMh4uY29mbHV4LnYxLkRhZW1vbkVucm9sbFJlcXVlc3RIABIwCg1kYWVtb25fcmVzeW5jGAQgASgLMhcuY29mbHV4LnYxLkRhZW1vblJlc3luY0gAEjgKEXByb2plY3RfdmFsaWRhdGVkGAUgASgLMhsuY29mbHV4LnYxLlByb2plY3RWYWxpZGF0ZWRIABIyCg53b3JrdHJlZV9hZGRlZBgGIAEoCzIYLmNvZmx1eC52MS5Xb3JrdHJlZUFkZGVkSAASNAoPc2Vzc2lvbl9zdGFydGVkGAcgASgLMhkuY29mbHV4LnYxLlNlc3Npb25TdGFydGVkSAASLgoMc2Vzc2lvbl9leGl0GAggASgLMhYuY29mbHV4LnYxLlNlc3Npb25FeGl0SAASLgoMcG9ydHNfdXBkYXRlGAkgASgLMhYuY29mbHV4LnYxLlBvcnRzVXBkYXRlSAASLgoMcHJveHlfb3BlbmVkGAogASgLMhYuY29mbHV4LnYxLlByb3h5T3BlbmVkSAASLgoMcHJveHlfY2xvc2VkGAsgASgLMhYuY29mbHV4LnYxLlByb3h5Q2xvc2VkSAASKgoKcHJveHlfZGF0YRgRIAEoCzIULmNvZmx1eC52MS5Qcm94eURhdGFIABI2ChB3b3Jrc3BhY2VfYnJhbmNoGBIgASgLMhouY29mbHV4LnYxLldvcmtzcGFjZUJyYW5jaEgAEjIKDndvcmtzcGFjZV9kaWZmGBQgASgLMhguY29mbHV4LnYxLldvcmtzcGFjZURpZmZIABIzCg9sb2NhbF9ncmFudF9hY2sYFSABKAsyGC5jb2ZsdXgudjEuTG9jYWxHcmFudEFja0gAEjoKEnNlc3Npb25fY2hlY2twb2ludBgYIAEoCzIcLmNvZmx1eC52MS5TZXNzaW9uQ2hlY2twb2ludEgAEkMKF2RldmljZV9vcGVyYXRpb25fcmVwb3J0GBkgASgLMiAuY29mbHV4LnYxLkRldmljZU9wZXJhdGlvblJlcG9ydEgAEkEKFmxvY2FsX2dhdGV3YXlfYW5ub3VuY2UYGiABKAsyHy5jb2ZsdXgudjEuTG9jYWxHYXRld2F5QW5ub3VuY2VIABI6Cg9zZXNzaW9uX2NhdGFsb2cYGyABKAsyHy5jb2ZsdXgudjEuRGV2aWNlU2Vzc2lvbkNhdGFsb2dIABJaCiNwcmVwYXJlZF9kZXZpY2Vfb3BlcmF0aW9uX2luc3RhbGxlZBgcIAEoCzIrLmNvZmx1eC52MS5QcmVwYXJlZERldmljZU9wZXJhdGlvbkluc3RhbGxlZEgAEioKCnJlbGF5X2hvbWUYHSABKAsyFC5jb2ZsdXgudjEuUmVsYXlIb21lSAASRQoYd29ya3NwYWNlX2RlZmF1bHRfYnJhbmNoGB4gASgLMiEuY29mbHV4LnYxLldvcmtzcGFjZURlZmF1bHRCcmFuY2hIABIyCg5zZXNzaW9uX2FnZW50cxgfIAEoCzIYLmNvZmx1eC52MS5TZXNzaW9uQWdlbnRzSAASPwoVYWdlbnRfY29udHJvbF9yZXF1ZXN0GCAgASgLMh4uY29mbHV4LnYxLkFnZW50Q29udHJvbFJlcXVlc3RIABJEChhkZXZpY2VfcDJwX2Fuc3dlcl9yZXBvcnQYISABKAsyIC5jb2ZsdXgudjEuRGV2aWNlUDJwQW5zd2VyUmVwb3J0SAASOwoTc2VydmVyX2FnZW50X3Jlc3VsdBgiIAEoCzIcLmNvZmx1eC52MS5TZXJ2ZXJBZ2VudFJlc3VsdEgAQgkKB3BheWxvYWRKBAgBEAJKBAgMEA1KBAgNEA5KBAgOEA9KBAgPEBBKBAgQEBFKBAgTEBRKBAgWEBdKBAgXEBhSDWRhZW1vbl9lbnJvbGxSC2V4ZWNfcmVzdWx0Uglmc19saXN0ZWRSDmZzX3JlYWRfcmVzdWx0UgpwdHlfb3V0cHV0UgpwdHlfcmVwbGF5Ug9mc193cml0ZV9yZXN1bHRSEmRldmljZV9yZWxheV9mcmFtZVISZGV2aWNlX3JlbGF5X2Nsb3NlIkwKElNlcnZlclRlcm1pbmFsUmVhZBIPCgd0YXNrX2lkGAEgASgJEhIKCnNlc3Npb25faWQYAiABKAkSEQoJbWF4X2J5dGVzGAMgASgNIjcKE1NlcnZlclRlcm1pbmFsSW5wdXQSEgoKc2Vzc2lvbl9pZBgBIAEoCRIMCgRkYXRhGAIgASgMIqUBChJTZXJ2ZXJBZ2VudFJlcXVlc3QSEgoKcmVxdWVzdF9pZBgBIAEoCRI2Cg10ZXJtaW5hbF9yZWFkGAogASgLMh0uY29mbHV4LnYxLlNlcnZlclRlcm1pbmFsUmVhZEgAEjgKDnRlcm1pbmFsX2lucHV0GAsgASgLMh4uY29mbHV4LnYxLlNlcnZlclRlcm1pbmFsSW5wdXRIAEIJCgdwYXlsb2FkIjgKGFNlcnZlclRlcm1pbmFsUmVhZFJlc3VsdBIMCgRkYXRhGAEgASgMEg4KBnNvdXJjZRgCIAEoCSIbChlTZXJ2ZXJUZXJtaW5hbElucHV0UmVzdWx0ItoBChFTZXJ2ZXJBZ2VudFJlc3VsdBISCgpyZXF1ZXN0X2lkGAEgASgJEgoKAm9rGAIgASgIEhIKBWVycm9yGAMgASgJSAGIAQESPAoNdGVybWluYWxfcmVhZBgKIAEoCzIjLmNvZmx1eC52MS5TZXJ2ZXJUZXJtaW5hbFJlYWRSZXN1bHRIABI+Cg50ZXJtaW5hbF9pbnB1dBgLIAEoCzIkLmNvZmx1eC52MS5TZXJ2ZXJUZXJtaW5hbElucHV0UmVzdWx0SABCCQoHcGF5bG9hZEIICgZfZXJyb3IiNwoPV29ya3NwYWNlQnJhbmNoEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIOCgZicmFuY2gYAiABKAkiSwoNV29ya3NwYWNlRGlmZhIUCgx3b3Jrc3BhY2VfaWQYASABKAkSEQoJYWRkaXRpb25zGAIgASgFEhEKCWRlbGV0aW9ucxgDIAEoBSJGChZXb3Jrc3BhY2VEZWZhdWx0QnJhbmNoEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIWCg5kZWZhdWx0X2JyYW5jaBgCIAEoCSI5Cg5EYWVtb25FbnJvbGxlZBIRCglkYWVtb25faWQYASABKAkSFAoMZGV2aWNlX3Rva2VuGAIgASgJIiEKDERhZW1vbkF1dGhlZBIRCglkYWVtb25faWQYASABKAkiKAoVTG9jYWxHYXRld2F5Q29uZmlndXJlEg8KB29yaWdpbnMYASADKAkiNwoPRGFlbW9uQXV0aEVycm9yEg8KB21lc3NhZ2UYASABKAkSEwoLbmVlZF9lbnJvbGwYAiABKAgiOQoWRGFlbW9uQXV0aG9yaXplUGVuZGluZxILCgN1cmwYASABKAkSEgoKZXhwaXJlc19hdBgCIAEoASIzCg9Qcm9qZWN0VmFsaWRhdGUSEgoKcmVxdWVzdF9pZBgBIAEoCRIMCgRwYXRoGAIgASgJInwKC1dvcmt0cmVlQWRkEhIKCnJlcXVlc3RfaWQYASABKAkSEQoJcmVwb19wYXRoGAIgASgJEhQKDHdvcmtzcGFjZV9pZBgDIAEoCRIMCgRuYW1lGAQgASgJEg4KBmJyYW5jaBgFIAEoCRISCgpjcmVhdGVfbmV3GAYgASgIIjoKDldvcmt0cmVlUmVtb3ZlEhEKCXJlcG9fcGF0aBgBIAEoCRIVCg13b3JrdHJlZV9wYXRoGAIgASgJIoQCCg1Xb3JrZXJVcGdyYWRlEg8KB3ZlcnNpb24YASABKAkSEAoDdXJsGAIgASgJSACIAQESEwoGc2hhMjU2GAMgASgJSAGIAQESFgoJc2lnbmF0dXJlGAQgASgJSAKIAQESEwoGdGFyZ2V0GAUgASgJSAOIAQESGgoNYXJ0aWZhY3Rfc2l6ZRgGIAEoBEgEiAEBEh4KEXJlbGVhc2Vfc2lnbmF0dXJlGAcgASgJSAWIAQFCBgoEX3VybEIJCgdfc2hhMjU2QgwKCl9zaWduYXR1cmVCCQoHX3RhcmdldEIQCg5fYXJ0aWZhY3Rfc2l6ZUIUChJfcmVsZWFzZV9zaWduYXR1cmUiHQoNRGFlbW9uU2V0TmFtZRIMCgRuYW1lGAEgASgJIskBCg1TZXNzaW9uQ3JlYXRlEhIKCnNlc3Npb25faWQYASABKAkSDwoHdGFza19pZBgCIAEoCRILCgNjd2QYAyABKAkSEgoFc2hlbGwYBCABKAlIAIgBARIMCgRjb2xzGAUgASgNEgwKBHJvd3MYBiABKA0SFAoMd29ya3NwYWNlX2lkGAcgASgJEhIKCnByb2plY3RfaWQYCCABKAkSEQoJZGFlbW9uX2lkGAkgASgJEg8KB21jcF91cmwYCiABKAlCCAoGX3NoZWxsIiIKDFNlc3Npb25DbG9zZRISCgpzZXNzaW9uX2lkGAEgASgJIioKCVByb3h5T3BlbhIPCgdjb25uX2lkGAEgASgJEgwKBHBvcnQYAiABKA0iHQoKUHJveHlDbG9zZRIPCgdjb25uX2lkGAEgASgJImgKDVJlbGF5Tm9kZUxpc3QSMQoFbm9kZXMYASADKAsyIi5jb2ZsdXgudjEuUmVsYXlOb2RlTGlzdC5SZWxheU5vZGUaJAoJUmVsYXlOb2RlEgoKAmlkGAEgASgJEgsKA3VybBgCIAEoCSI2Ch5QcmVwYXJlZERldmljZU9wZXJhdGlvbkV4ZWN1dGUSFAoMb3BlcmF0aW9uX2lkGAEgASgJIukOCg5TZXJ2ZXJUb0RhZW1vbhI0Cg9kYWVtb25fZW5yb2xsZWQYASABKAsyGS5jb2ZsdXgudjEuRGFlbW9uRW5yb2xsZWRIABIwCg1kYWVtb25fYXV0aGVkGAIgASgLMhcuY29mbHV4LnYxLkRhZW1vbkF1dGhlZEgAEjcKEWRhZW1vbl9hdXRoX2Vycm9yGAMgASgLMhouY29mbHV4LnYxLkRhZW1vbkF1dGhFcnJvckgAEkUKGGRhZW1vbl9hdXRob3JpemVfcGVuZGluZxgEIAEoCzIhLmNvZmx1eC52MS5EYWVtb25BdXRob3JpemVQZW5kaW5nSAASNgoQcHJvamVjdF92YWxpZGF0ZRgFIAEoCzIaLmNvZmx1eC52MS5Qcm9qZWN0VmFsaWRhdGVIABIuCgx3b3JrdHJlZV9hZGQYBiABKAsyFi5jb2ZsdXgudjEuV29ya3RyZWVBZGRIABI0Cg93b3JrdHJlZV9yZW1vdmUYByABKAsyGS5jb2ZsdXgudjEuV29ya3RyZWVSZW1vdmVIABIyCg53b3JrZXJfdXBncmFkZRgIIAEoCzIYLmNvZmx1eC52MS5Xb3JrZXJVcGdyYWRlSAASMgoOc2Vzc2lvbl9jcmVhdGUYCSABKAsyGC5jb2ZsdXgudjEuU2Vzc2lvbkNyZWF0ZUgAEjAKDXNlc3Npb25fY2xvc2UYCiABKAsyFy5jb2ZsdXgudjEuU2Vzc2lvbkNsb3NlSAASKgoKcHJveHlfb3BlbhgNIAEoCzIULmNvZmx1eC52MS5Qcm94eU9wZW5IABIsCgtwcm94eV9jbG9zZRgOIAEoCzIVLmNvZmx1eC52MS5Qcm94eUNsb3NlSAASMwoPZGFlbW9uX3NldF9uYW1lGBYgASgLMhguY29mbHV4LnYxLkRhZW1vblNldE5hbWVIABI7ChNsb2NhbF9ncmFudF9pbnN0YWxsGBcgASgLMhwuY29mbHV4LnYxLkxvY2FsR3JhbnRJbnN0YWxsSAASOQoSbG9jYWxfZ3JhbnRfcmV2b2tlGBggASgLMhsuY29mbHV4LnYxLkxvY2FsR3JhbnRSZXZva2VIABI7ChNsb2NhbF9sZWFzZV9pbnN0YWxsGBkgASgLMhwuY29mbHV4LnYxLkxvY2FsTGVhc2VJbnN0YWxsSAASQwoXbG9jYWxfZ2F0ZXdheV9jb25maWd1cmUYHSABKAsyIC5jb2ZsdXgudjEuTG9jYWxHYXRld2F5Q29uZmlndXJlSAASSQoXc2Vzc2lvbl9jYXRhbG9nX3JlcXVlc3QYHiABKAsyJi5jb2ZsdXgudjEuRGV2aWNlU2Vzc2lvbkNhdGFsb2dSZXF1ZXN0SAASLAoIZXhpdF9hY2sYHyABKAsyGC5jb2ZsdXgudjEuRGV2aWNlRXhpdEFja0gAEkcKGXByZXBhcmVkX2RldmljZV9vcGVyYXRpb24YICABKAsyIi5jb2ZsdXgudjEuUHJlcGFyZWREZXZpY2VPcGVyYXRpb25IABI3ChFkZXZpY2VfcmVsYXlfZGlhbBghIAEoCzIaLmNvZmx1eC52MS5EZXZpY2VSZWxheURpYWxIABIzCg9yZWxheV9ub2RlX2xpc3QYIiABKAsyGC5jb2ZsdXgudjEuUmVsYXlOb2RlTGlzdEgAEioKCnByb3h5X2RhdGEYEyABKAsyFC5jb2ZsdXgudjEuUHJveHlEYXRhSAASMgoOd29ya3NwYWNlX2xpc3QYFCABKAsyGC5jb2ZsdXgudjEuV29ya3NwYWNlTGlzdEgAEj0KFGFnZW50X2NvbnRyb2xfcmVzdWx0GCMgASgLMh0uY29mbHV4LnYxLkFnZW50Q29udHJvbFJlc3VsdEgAEjMKD2RldmljZV9wMnBfZGlhbBgkIAEoCzIYLmNvZmx1eC52MS5EZXZpY2VQMnBEaWFsSAASRAoYZGV2aWNlX3AycF9jaGFubmVsX2dyYW50GCUgASgLMiAuY29mbHV4LnYxLkRldmljZVAycENoYW5uZWxHcmFudEgAElYKIXByZXBhcmVkX2RldmljZV9vcGVyYXRpb25fZXhlY3V0ZRgmIAEoCzIpLmNvZmx1eC52MS5QcmVwYXJlZERldmljZU9wZXJhdGlvbkV4ZWN1dGVIABI9ChRzZXJ2ZXJfYWdlbnRfcmVxdWVzdBgnIAEoCzIdLmNvZmx1eC52MS5TZXJ2ZXJBZ2VudFJlcXVlc3RIAEIJCgdwYXlsb2FkSgQICxAMSgQIDBANSgQIDxAQSgQIEBARSgQIERASSgQIEhATSgQIFRAWSgQIGhAbSgQIGxAcSgQIHBAdUg5zZXNzaW9uX3JlcGxheVIKcHR5X3Jlc2l6ZVIIZXhlY19ydW5SB2ZzX2xpc3RSB2ZzX3JlYWRSCXB0eV9pbnB1dFIIZnNfd3JpdGVSEWRldmljZV9yZWxheV9vcGVuUhJkZXZpY2VfcmVsYXlfZnJhbWVSEmRldmljZV9yZWxheV9jbG9zZSJKCgxXb3Jrc3BhY2VSZWYSFAoMd29ya3NwYWNlX2lkGAEgASgJEgwKBHBhdGgYAiABKAkSFgoOZGVmYXVsdF9icmFuY2gYAyABKAkiPAoNV29ya3NwYWNlTGlzdBIrCgp3b3Jrc3BhY2VzGAEgAygLMhcuY29mbHV4LnYxLldvcmtzcGFjZVJlZmIGcHJvdG8z", [file_coflux_v1_common, file_coflux_v1_device]);
 
 /**
  * @generated from message coflux.v1.DaemonAuth
@@ -430,6 +430,157 @@ export const AgentPortsListSchema: GenMessage<AgentPortsList> = /*@__PURE__*/
   messageDesc(file_coflux_v1_daemon, 13);
 
 /**
+ * 把发起方会话的终端归属定位到某个路径所属的工作区。Enter / Exit / SessionStart 共用一条消息：
+ * ExitWorktree 的目标就是「原目录所在的那个工作区」，同样是定位。
+ *
+ * @generated from message coflux.v1.AgentWorkspaceLocate
+ */
+export type AgentWorkspaceLocate = Message<"coflux.v1.AgentWorkspaceLocate"> & {
+  /**
+   * daemon 规范化后的 worktree 根绝对路径（`git rev-parse --show-toplevel`）。
+   *
+   * @generated from field: string path = 1;
+   */
+  path: string;
+
+  /**
+   * 该 worktree 的当前分支（detached 时是短 sha）；登记新工作区时同时用作分支与默认名称。
+   *
+   * @generated from field: string branch = 2;
+   */
+  branch: string;
+
+  /**
+   * daemon 在本设备工作区表里按规范化路径**相等**比出来的既有工作区 id；空 = 未注册。
+   * 相等而非最长前缀：Claude 自建的 worktree 嵌在主工作区目录下，前缀匹配会把它算进主工作区。
+   *
+   * @generated from field: string workspace_id = 3;
+   */
+  workspaceId: string;
+
+  /**
+   * daemon 已核验该路径与发起方归属工作区同属一个 git 仓库（`git rev-parse --git-common-dir` 相同）。
+   * 只有为真时中心才允许登记新工作区；跨仓库 / 非 git / 目录工作区起步都恒为假。
+   *
+   * @generated from field: bool same_repo = 4;
+   */
+  sameRepo: boolean;
+};
+
+/**
+ * Describes the message coflux.v1.AgentWorkspaceLocate.
+ * Use `create(AgentWorkspaceLocateSchema)` to create a new message.
+ */
+export const AgentWorkspaceLocateSchema: GenMessage<AgentWorkspaceLocate> = /*@__PURE__*/
+  messageDesc(file_coflux_v1_daemon, 14);
+
+/**
+ * Claude Code 已清理掉某个 worktree（WorktreeRemove）：把该工作区下**所有**终端搬回项目主工作区，
+ * 并删掉工作区记录。中心不再让 daemon 去 `git worktree remove` 一个已经不存在的目录。
+ *
+ * @generated from message coflux.v1.AgentWorkspaceForget
+ */
+export type AgentWorkspaceForget = Message<"coflux.v1.AgentWorkspaceForget"> & {
+  /**
+   * daemon 规范化后的 worktree 路径（目录已不在时按字面 + 父目录规范化）。
+   *
+   * @generated from field: string path = 1;
+   */
+  path: string;
+
+  /**
+   * daemon 按路径相等比出来的既有工作区 id；空 = 本地表里没有对应记录。
+   *
+   * @generated from field: string workspace_id = 2;
+   */
+  workspaceId: string;
+};
+
+/**
+ * Describes the message coflux.v1.AgentWorkspaceForget.
+ * Use `create(AgentWorkspaceForgetSchema)` to create a new message.
+ */
+export const AgentWorkspaceForgetSchema: GenMessage<AgentWorkspaceForget> = /*@__PURE__*/
+  messageDesc(file_coflux_v1_daemon, 15);
+
+/**
+ * @generated from message coflux.v1.AgentWorkspaceLocateResult
+ */
+export type AgentWorkspaceLocateResult = Message<"coflux.v1.AgentWorkspaceLocateResult"> & {
+  /**
+   * 定位后的**归属**工作区 id：daemon 据此更新会话账本，agent 据此拿到新坐标。
+   *
+   * @generated from field: string workspace_id = 1;
+   */
+  workspaceId: string;
+
+  /**
+   * @generated from field: string path = 2;
+   */
+  path: string;
+
+  /**
+   * @generated from field: string branch = 3;
+   */
+  branch: string;
+
+  /**
+   * 本次是否新登记了工作区（侧栏会新出现一张卡片）。
+   *
+   * @generated from field: bool created = 4;
+   */
+  created: boolean;
+
+  /**
+   * 归属是否真的变了；false = 本来就在那儿（幂等无操作，正常启动的常态）。
+   *
+   * @generated from field: bool moved = 5;
+   */
+  moved: boolean;
+};
+
+/**
+ * Describes the message coflux.v1.AgentWorkspaceLocateResult.
+ * Use `create(AgentWorkspaceLocateResultSchema)` to create a new message.
+ */
+export const AgentWorkspaceLocateResultSchema: GenMessage<AgentWorkspaceLocateResult> = /*@__PURE__*/
+  messageDesc(file_coflux_v1_daemon, 16);
+
+/**
+ * @generated from message coflux.v1.AgentWorkspaceForgetResult
+ */
+export type AgentWorkspaceForgetResult = Message<"coflux.v1.AgentWorkspaceForgetResult"> & {
+  /**
+   * @generated from field: string workspace_id = 1;
+   */
+  workspaceId: string;
+
+  /**
+   * 终端们搬回的项目主工作区（`is_main`）。
+   *
+   * @generated from field: string fallback_workspace_id = 2;
+   */
+  fallbackWorkspaceId: string;
+
+  /**
+   * @generated from field: int32 moved_terminals = 3;
+   */
+  movedTerminals: number;
+
+  /**
+   * @generated from field: bool removed = 4;
+   */
+  removed: boolean;
+};
+
+/**
+ * Describes the message coflux.v1.AgentWorkspaceForgetResult.
+ * Use `create(AgentWorkspaceForgetResultSchema)` to create a new message.
+ */
+export const AgentWorkspaceForgetResultSchema: GenMessage<AgentWorkspaceForgetResult> = /*@__PURE__*/
+  messageDesc(file_coflux_v1_daemon, 17);
+
+/**
  * @generated from message coflux.v1.AgentControlRequest
  */
 export type AgentControlRequest = Message<"coflux.v1.AgentControlRequest"> & {
@@ -481,6 +632,20 @@ export type AgentControlRequest = Message<"coflux.v1.AgentControlRequest"> & {
      */
     value: AgentPortsList;
     case: "portsList";
+  } | {
+    /**
+     * plan 103：这两条改的是**归属**而不是本次请求的目标，忽略上面的 workspace_id（worker 恒填空）。
+     *
+     * @generated from field: coflux.v1.AgentWorkspaceLocate workspace_locate = 14;
+     */
+    value: AgentWorkspaceLocate;
+    case: "workspaceLocate";
+  } | {
+    /**
+     * @generated from field: coflux.v1.AgentWorkspaceForget workspace_forget = 15;
+     */
+    value: AgentWorkspaceForget;
+    case: "workspaceForget";
   } | { case: undefined; value?: undefined };
 };
 
@@ -489,7 +654,7 @@ export type AgentControlRequest = Message<"coflux.v1.AgentControlRequest"> & {
  * Use `create(AgentControlRequestSchema)` to create a new message.
  */
 export const AgentControlRequestSchema: GenMessage<AgentControlRequest> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 14);
+  messageDesc(file_coflux_v1_daemon, 18);
 
 /**
  * @generated from message coflux.v1.AgentTerminalNewResult
@@ -511,7 +676,7 @@ export type AgentTerminalNewResult = Message<"coflux.v1.AgentTerminalNewResult">
  * Use `create(AgentTerminalNewResultSchema)` to create a new message.
  */
 export const AgentTerminalNewResultSchema: GenMessage<AgentTerminalNewResult> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 15);
+  messageDesc(file_coflux_v1_daemon, 19);
 
 /**
  * 同 workspace 下一个终端的对外视图；status/exit_code 取自中心的 Task 真相。
@@ -555,7 +720,7 @@ export type AgentTerminalRef = Message<"coflux.v1.AgentTerminalRef"> & {
  * Use `create(AgentTerminalRefSchema)` to create a new message.
  */
 export const AgentTerminalRefSchema: GenMessage<AgentTerminalRef> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 16);
+  messageDesc(file_coflux_v1_daemon, 20);
 
 /**
  * @generated from message coflux.v1.AgentTerminalListResult
@@ -572,7 +737,7 @@ export type AgentTerminalListResult = Message<"coflux.v1.AgentTerminalListResult
  * Use `create(AgentTerminalListResultSchema)` to create a new message.
  */
 export const AgentTerminalListResultSchema: GenMessage<AgentTerminalListResult> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 17);
+  messageDesc(file_coflux_v1_daemon, 21);
 
 /**
  * @generated from message coflux.v1.AgentTerminalReadResult
@@ -608,7 +773,7 @@ export type AgentTerminalReadResult = Message<"coflux.v1.AgentTerminalReadResult
  * Use `create(AgentTerminalReadResultSchema)` to create a new message.
  */
 export const AgentTerminalReadResultSchema: GenMessage<AgentTerminalReadResult> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 18);
+  messageDesc(file_coflux_v1_daemon, 22);
 
 /**
  * @generated from message coflux.v1.AgentPortsListResult
@@ -625,7 +790,7 @@ export type AgentPortsListResult = Message<"coflux.v1.AgentPortsListResult"> & {
  * Use `create(AgentPortsListResultSchema)` to create a new message.
  */
 export const AgentPortsListResultSchema: GenMessage<AgentPortsListResult> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 19);
+  messageDesc(file_coflux_v1_daemon, 23);
 
 /**
  * @generated from message coflux.v1.AgentControlResult
@@ -673,6 +838,18 @@ export type AgentControlResult = Message<"coflux.v1.AgentControlResult"> & {
      */
     value: AgentPortsListResult;
     case: "portsList";
+  } | {
+    /**
+     * @generated from field: coflux.v1.AgentWorkspaceLocateResult workspace_locate = 14;
+     */
+    value: AgentWorkspaceLocateResult;
+    case: "workspaceLocate";
+  } | {
+    /**
+     * @generated from field: coflux.v1.AgentWorkspaceForgetResult workspace_forget = 15;
+     */
+    value: AgentWorkspaceForgetResult;
+    case: "workspaceForget";
   } | { case: undefined; value?: undefined };
 };
 
@@ -681,7 +858,7 @@ export type AgentControlResult = Message<"coflux.v1.AgentControlResult"> & {
  * Use `create(AgentControlResultSchema)` to create a new message.
  */
 export const AgentControlResultSchema: GenMessage<AgentControlResult> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 20);
+  messageDesc(file_coflux_v1_daemon, 24);
 
 /**
  * server→daemon ProxyOpen 的回应：隧道连接建立结果
@@ -710,7 +887,7 @@ export type ProxyOpened = Message<"coflux.v1.ProxyOpened"> & {
  * Use `create(ProxyOpenedSchema)` to create a new message.
  */
 export const ProxyOpenedSchema: GenMessage<ProxyOpened> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 21);
+  messageDesc(file_coflux_v1_daemon, 25);
 
 /**
  * 隧道连接（daemon 侧到本地端口的 TCP 连接）关闭，控制面消息
@@ -729,7 +906,7 @@ export type ProxyClosed = Message<"coflux.v1.ProxyClosed"> & {
  * Use `create(ProxyClosedSchema)` to create a new message.
  */
 export const ProxyClosedSchema: GenMessage<ProxyClosed> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 22);
+  messageDesc(file_coflux_v1_daemon, 26);
 
 /**
  * daemon 探测中心下发的 relay 节点后，上报当前 home；仅存于本次在线连接的 presence，
@@ -749,7 +926,7 @@ export type RelayHome = Message<"coflux.v1.RelayHome"> & {
  * Use `create(RelayHomeSchema)` to create a new message.
  */
 export const RelayHomeSchema: GenMessage<RelayHome> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 23);
+  messageDesc(file_coflux_v1_daemon, 27);
 
 /**
  * @generated from message coflux.v1.DaemonToServer
@@ -918,7 +1095,7 @@ export type DaemonToServer = Message<"coflux.v1.DaemonToServer"> & {
  * Use `create(DaemonToServerSchema)` to create a new message.
  */
 export const DaemonToServerSchema: GenMessage<DaemonToServer> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 24);
+  messageDesc(file_coflux_v1_daemon, 28);
 
 /**
  * 读某终端的原始输出：优先命令日志尾部（agent/中心建的命令终端才有），否则 sessiond 当前
@@ -951,7 +1128,7 @@ export type ServerTerminalRead = Message<"coflux.v1.ServerTerminalRead"> & {
  * Use `create(ServerTerminalReadSchema)` to create a new message.
  */
 export const ServerTerminalReadSchema: GenMessage<ServerTerminalRead> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 25);
+  messageDesc(file_coflux_v1_daemon, 29);
 
 /**
  * 往终端写一段输入：走 worker 的 agent_send_input 正门（attach/holder/input_seq 语义零改动），
@@ -976,7 +1153,7 @@ export type ServerTerminalInput = Message<"coflux.v1.ServerTerminalInput"> & {
  * Use `create(ServerTerminalInputSchema)` to create a new message.
  */
 export const ServerTerminalInputSchema: GenMessage<ServerTerminalInput> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 26);
+  messageDesc(file_coflux_v1_daemon, 30);
 
 /**
  * @generated from message coflux.v1.ServerAgentRequest
@@ -1010,7 +1187,7 @@ export type ServerAgentRequest = Message<"coflux.v1.ServerAgentRequest"> & {
  * Use `create(ServerAgentRequestSchema)` to create a new message.
  */
 export const ServerAgentRequestSchema: GenMessage<ServerAgentRequest> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 27);
+  messageDesc(file_coflux_v1_daemon, 31);
 
 /**
  * @generated from message coflux.v1.ServerTerminalReadResult
@@ -1034,7 +1211,7 @@ export type ServerTerminalReadResult = Message<"coflux.v1.ServerTerminalReadResu
  * Use `create(ServerTerminalReadResultSchema)` to create a new message.
  */
 export const ServerTerminalReadResultSchema: GenMessage<ServerTerminalReadResult> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 28);
+  messageDesc(file_coflux_v1_daemon, 32);
 
 /**
  * @generated from message coflux.v1.ServerTerminalInputResult
@@ -1047,7 +1224,7 @@ export type ServerTerminalInputResult = Message<"coflux.v1.ServerTerminalInputRe
  * Use `create(ServerTerminalInputResultSchema)` to create a new message.
  */
 export const ServerTerminalInputResultSchema: GenMessage<ServerTerminalInputResult> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 29);
+  messageDesc(file_coflux_v1_daemon, 33);
 
 /**
  * @generated from message coflux.v1.ServerAgentResult
@@ -1091,7 +1268,7 @@ export type ServerAgentResult = Message<"coflux.v1.ServerAgentResult"> & {
  * Use `create(ServerAgentResultSchema)` to create a new message.
  */
 export const ServerAgentResultSchema: GenMessage<ServerAgentResult> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 30);
+  messageDesc(file_coflux_v1_daemon, 34);
 
 /**
  * worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
@@ -1115,7 +1292,7 @@ export type WorkspaceBranch = Message<"coflux.v1.WorkspaceBranch"> & {
  * Use `create(WorkspaceBranchSchema)` to create a new message.
  */
 export const WorkspaceBranchSchema: GenMessage<WorkspaceBranch> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 31);
+  messageDesc(file_coflux_v1_daemon, 35);
 
 /**
  * worker 周期计算的某 worktree 累积 git diff 行数统计（真相源：设备上的 worktree，DB 只是镜像）
@@ -1144,7 +1321,7 @@ export type WorkspaceDiff = Message<"coflux.v1.WorkspaceDiff"> & {
  * Use `create(WorkspaceDiffSchema)` to create a new message.
  */
 export const WorkspaceDiffSchema: GenMessage<WorkspaceDiff> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 32);
+  messageDesc(file_coflux_v1_daemon, 36);
 
 /**
  * worker 收到工作区清单后核对本地 origin/HEAD，与 server 记录不符时上报纠正（plan 072）。
@@ -1170,7 +1347,7 @@ export type WorkspaceDefaultBranch = Message<"coflux.v1.WorkspaceDefaultBranch">
  * Use `create(WorkspaceDefaultBranchSchema)` to create a new message.
  */
 export const WorkspaceDefaultBranchSchema: GenMessage<WorkspaceDefaultBranch> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 33);
+  messageDesc(file_coflux_v1_daemon, 37);
 
 /**
  * @generated from message coflux.v1.DaemonEnrolled
@@ -1192,7 +1369,7 @@ export type DaemonEnrolled = Message<"coflux.v1.DaemonEnrolled"> & {
  * Use `create(DaemonEnrolledSchema)` to create a new message.
  */
 export const DaemonEnrolledSchema: GenMessage<DaemonEnrolled> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 34);
+  messageDesc(file_coflux_v1_daemon, 38);
 
 /**
  * @generated from message coflux.v1.DaemonAuthed
@@ -1209,7 +1386,7 @@ export type DaemonAuthed = Message<"coflux.v1.DaemonAuthed"> & {
  * Use `create(DaemonAuthedSchema)` to create a new message.
  */
 export const DaemonAuthedSchema: GenMessage<DaemonAuthed> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 35);
+  messageDesc(file_coflux_v1_daemon, 39);
 
 /**
  * loopback gateway 只接受这些精确 Origin；worker 持久化最后一次成功认证下发值，供中心
@@ -1229,7 +1406,7 @@ export type LocalGatewayConfigure = Message<"coflux.v1.LocalGatewayConfigure"> &
  * Use `create(LocalGatewayConfigureSchema)` to create a new message.
  */
 export const LocalGatewayConfigureSchema: GenMessage<LocalGatewayConfigure> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 36);
+  messageDesc(file_coflux_v1_daemon, 40);
 
 /**
  * @generated from message coflux.v1.DaemonAuthError
@@ -1251,7 +1428,7 @@ export type DaemonAuthError = Message<"coflux.v1.DaemonAuthError"> & {
  * Use `create(DaemonAuthErrorSchema)` to create a new message.
  */
 export const DaemonAuthErrorSchema: GenMessage<DaemonAuthError> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 37);
+  messageDesc(file_coflux_v1_daemon, 41);
 
 /**
  * enrollRequest 的回应：一次性授权链接 + 过期时间（ms epoch）。daemon 落盘展示，连接断开即作废
@@ -1275,7 +1452,7 @@ export type DaemonAuthorizePending = Message<"coflux.v1.DaemonAuthorizePending">
  * Use `create(DaemonAuthorizePendingSchema)` to create a new message.
  */
 export const DaemonAuthorizePendingSchema: GenMessage<DaemonAuthorizePending> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 38);
+  messageDesc(file_coflux_v1_daemon, 42);
 
 /**
  * @generated from message coflux.v1.ProjectValidate
@@ -1297,7 +1474,7 @@ export type ProjectValidate = Message<"coflux.v1.ProjectValidate"> & {
  * Use `create(ProjectValidateSchema)` to create a new message.
  */
 export const ProjectValidateSchema: GenMessage<ProjectValidate> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 39);
+  messageDesc(file_coflux_v1_daemon, 43);
 
 /**
  * @generated from message coflux.v1.WorktreeAdd
@@ -1339,7 +1516,7 @@ export type WorktreeAdd = Message<"coflux.v1.WorktreeAdd"> & {
  * Use `create(WorktreeAddSchema)` to create a new message.
  */
 export const WorktreeAddSchema: GenMessage<WorktreeAdd> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 40);
+  messageDesc(file_coflux_v1_daemon, 44);
 
 /**
  * fire-and-forget：移除一个 worktree 目录
@@ -1363,7 +1540,7 @@ export type WorktreeRemove = Message<"coflux.v1.WorktreeRemove"> & {
  * Use `create(WorktreeRemoveSchema)` to create a new message.
  */
 export const WorktreeRemoveSchema: GenMessage<WorktreeRemove> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 41);
+  messageDesc(file_coflux_v1_daemon, 45);
 
 /**
  * 热升级：切到某个 worker 版本。带 url 走"下载+验签"；不带则按版本标签在 supervisor 自有注册表里切换。
@@ -1415,7 +1592,7 @@ export type WorkerUpgrade = Message<"coflux.v1.WorkerUpgrade"> & {
  * Use `create(WorkerUpgradeSchema)` to create a new message.
  */
 export const WorkerUpgradeSchema: GenMessage<WorkerUpgrade> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 42);
+  messageDesc(file_coflux_v1_daemon, 46);
 
 /**
  * 设备重命名：server 通知 daemon 更新本地设备名称
@@ -1434,7 +1611,7 @@ export type DaemonSetName = Message<"coflux.v1.DaemonSetName"> & {
  * Use `create(DaemonSetNameSchema)` to create a new message.
  */
 export const DaemonSetNameSchema: GenMessage<DaemonSetName> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 43);
+  messageDesc(file_coflux_v1_daemon, 47);
 
 /**
  * 直发建会话（cofluxd terminal new 走这条）。7 起是会话归属 id（plan 092）：中心只下发 id，
@@ -1504,7 +1681,7 @@ export type SessionCreate = Message<"coflux.v1.SessionCreate"> & {
  * Use `create(SessionCreateSchema)` to create a new message.
  */
 export const SessionCreateSchema: GenMessage<SessionCreate> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 44);
+  messageDesc(file_coflux_v1_daemon, 48);
 
 /**
  * @generated from message coflux.v1.SessionClose
@@ -1521,7 +1698,7 @@ export type SessionClose = Message<"coflux.v1.SessionClose"> & {
  * Use `create(SessionCloseSchema)` to create a new message.
  */
 export const SessionCloseSchema: GenMessage<SessionClose> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 45);
+  messageDesc(file_coflux_v1_daemon, 49);
 
 /**
  * 打开一条隧道连接：daemon 向本地 port 发起 TCP 连接，字节经 ProxyData 双向透传
@@ -1545,7 +1722,7 @@ export type ProxyOpen = Message<"coflux.v1.ProxyOpen"> & {
  * Use `create(ProxyOpenSchema)` to create a new message.
  */
 export const ProxyOpenSchema: GenMessage<ProxyOpen> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 46);
+  messageDesc(file_coflux_v1_daemon, 50);
 
 /**
  * 关闭一条隧道连接（server 侧发起，例如浏览器断开）
@@ -1564,7 +1741,7 @@ export type ProxyClose = Message<"coflux.v1.ProxyClose"> & {
  * Use `create(ProxyCloseSchema)` to create a new message.
  */
 export const ProxyCloseSchema: GenMessage<ProxyClose> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 47);
+  messageDesc(file_coflux_v1_daemon, 51);
 
 /**
  * 中心静态配置的 relay 节点清单；认证完成后下发一次，首项兼作 daemon 尚未上报 home
@@ -1584,7 +1761,7 @@ export type RelayNodeList = Message<"coflux.v1.RelayNodeList"> & {
  * Use `create(RelayNodeListSchema)` to create a new message.
  */
 export const RelayNodeListSchema: GenMessage<RelayNodeList> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 48);
+  messageDesc(file_coflux_v1_daemon, 52);
 
 /**
  * @generated from message coflux.v1.RelayNodeList.RelayNode
@@ -1606,7 +1783,7 @@ export type RelayNodeList_RelayNode = Message<"coflux.v1.RelayNodeList.RelayNode
  * Use `create(RelayNodeList_RelayNodeSchema)` to create a new message.
  */
 export const RelayNodeList_RelayNodeSchema: GenMessage<RelayNodeList_RelayNode> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 48, 0);
+  messageDesc(file_coflux_v1_daemon, 52, 0);
 
 /**
  * 中心触发已安装的 prepared operation 执行（plan 091）。中心作为发起方时没有 browser 去投递
@@ -1628,7 +1805,7 @@ export type PreparedDeviceOperationExecute = Message<"coflux.v1.PreparedDeviceOp
  * Use `create(PreparedDeviceOperationExecuteSchema)` to create a new message.
  */
 export const PreparedDeviceOperationExecuteSchema: GenMessage<PreparedDeviceOperationExecute> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 49);
+  messageDesc(file_coflux_v1_daemon, 53);
 
 /**
  * @generated from message coflux.v1.ServerToDaemon
@@ -1819,7 +1996,7 @@ export type ServerToDaemon = Message<"coflux.v1.ServerToDaemon"> & {
  * Use `create(ServerToDaemonSchema)` to create a new message.
  */
 export const ServerToDaemonSchema: GenMessage<ServerToDaemon> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 50);
+  messageDesc(file_coflux_v1_daemon, 54);
 
 /**
  * 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD
@@ -1851,7 +2028,7 @@ export type WorkspaceRef = Message<"coflux.v1.WorkspaceRef"> & {
  * Use `create(WorkspaceRefSchema)` to create a new message.
  */
 export const WorkspaceRefSchema: GenMessage<WorkspaceRef> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 51);
+  messageDesc(file_coflux_v1_daemon, 55);
 
 /**
  * @generated from message coflux.v1.WorkspaceList
@@ -1868,5 +2045,5 @@ export type WorkspaceList = Message<"coflux.v1.WorkspaceList"> & {
  * Use `create(WorkspaceListSchema)` to create a new message.
  */
 export const WorkspaceListSchema: GenMessage<WorkspaceList> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_daemon, 52);
+  messageDesc(file_coflux_v1_daemon, 56);
 
