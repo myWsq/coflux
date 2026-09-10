@@ -2050,7 +2050,13 @@ pub struct SessionAgents {
 ///
 /// 跑在 PTY 里的 agent 经 loopback 发起的中心操作。worker 已用调用方 pid 反查进程树确认它
 /// 属于 session_id 这个存活会话（树外 pid 在 worker 侧就被拒，永不到达这里）；server 据
-/// session_id 反查 task→workspace 完成归属校验，daemon 不自报 workspace。
+/// session_id 反查 task→workspace 得到发起方的归属工作区。
+///
+/// 目标工作区是 daemon **提议**、server **核验**（plan 102）：agent 可以经 `/cd`、EnterWorktree
+/// 把活着的会话挪进同设备的另一个 coflux 工作区，worker 把调用方申报的 cwd 在本地工作区表里做
+/// 最长前缀匹配，命中就填进 workspace_id。server 只在它同账号、同设备（仓库工作区还要求所属项目
+/// 未在删除中）时接受，否则可读拒绝——信任模型与 MCP create_terminal 一致，只是那里终端可以落在
+/// 账号的任意设备上，这里必须同设备（终端就在这台机器上跑）。
 ///
 /// request_id 由 worker 生成，只做响应关联，不承担幂等：terminal_new 有副作用但不做
 /// exactly-once 去重——CLI 不自动重试，在飞请求遇断连即把错误交给 agent 自己决定
@@ -2089,6 +2095,11 @@ pub struct AgentControlRequest {
     /// 发起方所属的存活 session，由 worker 认定而非 agent 自报。
     #[prost(string, tag="2")]
     pub session_id: ::prost::alloc::string::String,
+    /// 调用方 cwd 所在的工作区（plan 102）：空 = 发起 task 所在工作区（旧 worker 恒空）。
+    /// 只作用于 terminal_new（终端建在这里、也跑在这里）与 terminal_list（列这里的终端）；
+    /// ports_list 忽略它（端口挂在本会话进程树上，与工作区无关），terminal_read 早已本地闭环。
+    #[prost(string, tag="3")]
+    pub workspace_id: ::prost::alloc::string::String,
     #[prost(oneof="agent_control_request::Payload", tags="10, 11, 12, 13")]
     pub payload: ::core::option::Option<agent_control_request::Payload>,
 }
