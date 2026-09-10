@@ -22,14 +22,18 @@ test("根与 SPA 路径回落 index.html，静态资源按相对路径", () => {
   assert.equal(resolveRendererAsset("/build-id.txt"), "build-id.txt");
 });
 
-test("越出产物根的路径被拒绝：.. 段、编码的 ..、NUL、非法编码", () => {
+test("含 .. 段的路径一律拒绝：开头的 ..、中间的 ..、编码的 ..；NUL 与非法编码同样拒绝", () => {
   assert.equal(resolveRendererAsset("/../package.json"), null);
   assert.equal(resolveRendererAsset("/assets/../../package.json"), null);
   assert.equal(resolveRendererAsset("/%2e%2e/package.json"), null);
+  assert.equal(resolveRendererAsset("/assets/%2e%2e/index.html"), null);
+  // 规范化后仍在根内的 .. 也拒绝（保守）：产物里没有需要 .. 才能引用的资源
+  assert.equal(resolveRendererAsset("/assets/../favicon.svg"), null);
   assert.equal(resolveRendererAsset("/a%00.js"), null);
   assert.equal(resolveRendererAsset("/%zz"), null);
-  // 规范化后仍在根内的 .. 是允许的
-  assert.equal(resolveRendererAsset("/assets/../favicon.svg"), "favicon.svg");
+  // 单个 . 段与重复斜杠只是规范化，不算越界
+  assert.equal(resolveRendererAsset("/./favicon.svg"), "favicon.svg");
+  assert.equal(resolveRendererAsset("//assets//x.js"), "assets/x.js");
 });
 
 test("Content-Type 按扩展名，未知扩展名退到 octet-stream", () => {
@@ -41,12 +45,17 @@ test("Content-Type 按扩展名，未知扩展名退到 octet-stream", () => {
 });
 
 test("CSP：脚本只许 self；连接放行中心 wss/ws 与 loopback；不嵌 frame/object", () => {
-  const directives = new Map(RENDERER_CSP.split("; ").map((item) => [item.split(" ")[0], item]));
-  assert.equal(directives.get("script-src"), "script-src 'self'");
-  assert.match(directives.get("connect-src") ?? "", /\bwss:\b/);
-  assert.match(directives.get("connect-src") ?? "", /\bws:\b/);
-  assert.match(directives.get("connect-src") ?? "", /http:\/\/127\.0\.0\.1:\*/);
-  assert.equal(directives.get("frame-src"), "frame-src 'none'");
-  assert.equal(directives.get("object-src"), "object-src 'none'");
-  assert.doesNotMatch(directives.get("script-src") ?? "", /unsafe/);
+  // 按 "; " 拆指令、再按空格拆 token（`wss:` 后面是空格，`\b` 在冒号与空格之间不成立，不能用正则词边界）
+  const directives = new Map(RENDERER_CSP.split("; ").map((item) => {
+    const [name, ...sources] = item.split(" ");
+    return [name, sources] as const;
+  }));
+  assert.deepEqual(directives.get("script-src"), ["'self'"]);
+  const connect = directives.get("connect-src") ?? [];
+  assert.ok(connect.includes("wss:"), "connect-src 放行 wss:");
+  assert.ok(connect.includes("ws:"), "connect-src 放行 ws:");
+  assert.ok(connect.includes("http://127.0.0.1:*"), "connect-src 放行 loopback");
+  assert.deepEqual(directives.get("frame-src"), ["'none'"]);
+  assert.deepEqual(directives.get("object-src"), ["'none'"]);
+  assert.ok(!(directives.get("script-src") ?? []).some((source) => source.includes("unsafe")));
 });
