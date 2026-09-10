@@ -13,6 +13,8 @@
  *   命令 16 KB / send 文本 64 KB 与 MCP 对齐；
  * - plan 101：不带 `--cmd` 开出的是**会话终端**——常驻、全 tty 的登录 shell，不自己退出，
  *   read 读的是快照（没有命令日志），送 `exit` 才 exited；空命令不再是参数错误。
+ * - plan 102：本地命令跟随**调用方 cwd** 所在的工作区（agent 可以 `/cd` 进同设备的另一个工作区），
+ *   `cofluxd workspace` 报出有效/归属工作区；cwd 在所有工作区之外时落回归属工作区。
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -372,6 +374,129 @@ test("安全边界：coflux 会话之外的 pid 一律拒；非 json 被拒；�
 
   } finally {
     await removeWorkspace(c, ws.id);
+    device.close();
+  }
+});
+
+/**
+ * plan 102：agent 用 `/cd` 或 EnterWorktree 把活着的会话挪进同设备的另一个工作区后，本地命令跟随
+ * 调用方 cwd，而不是继续按会话账本里的归属工作区办事（那是沉默错位：以为在测 B，其实测的是 A）。
+ *
+ * PTY 自己的 cwd 保持在 A，每条命令用子 shell `(cd <B> && …)` 改 cwd——这正是 agent 挪窝后的形态：
+ * 会话没重开、归属没变，变的只是调用方的工作目录。
+ */
+test("跟随 cwd：在 B 的目录里开的终端属 B、跑在 B；list 只见 B；跨工作区 read/send/wait 404；工作区之外落回 A", async () => {
+  const homeA = mkDir();
+  const homeB = mkDir();
+  const outside = mkDir(); // 不注册成工作区：cwd 落在任何工作区之外
+  const device = await openRelayDevice(stack);
+  const c = device.control;
+  const { ws: wsA, task } = await startDirTerminal(c, homeA);
+  const gatewayPort = device.gateway.port;
+  await device.attach(task.sessionId);
+
+  let cdSeq = 0;
+  /** 换个目录跑一条 cofluxd 命令；子 shell 保证 PTY 自己的 cwd 仍在 A。 */
+  const runIn = async (dir, args, predicate, label, timeout = 20000) => {
+    const out = join(homeA, `cli-cd-${cdSeq += 1}.txt`);
+    await device.input(
+      task.sessionId,
+      `(cd ${dir} && COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} node ${COFLUXD} ${args}) > ${out} 2>&1\r`,
+    );
+    return await waitForFile(out, predicate, label, timeout);
+  };
+  /** `cofluxd workspace` 的契约就是「一行 JSON」——解析不出来本身就是失败，且要把原文带出来。 */
+  const whereAmI = async (dir, label) => {
+    const raw = (await runIn(dir, "workspace", (s) => s.includes("workspaceId") || s.includes("✗"), label)).trim();
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new Error(`${label} 没拿到一行 JSON: ${raw}`);
+    }
+  };
+
+  let wsB;
+  try {
+    // B 必须经中心建：daemon 的工作区表只认中心下发的清单，waitWorkspaceReady 等它同步到位
+    c.send({ case: "terminalCreate", daemonId: stack.daemonId, path: homeB });
+    const createdB = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.path === homeB, "B 工作区建好");
+    wsB = createdB.workspace;
+    await device.waitWorkspaceReady(wsB.id, 20000);
+
+    // 1) cofluxd workspace 三种 cwd 下都要说对话
+    const inA = await whereAmI(homeA, "A 的 cwd 下 workspace");
+    assert.deepEqual(
+      { workspaceId: inA.workspaceId, owningWorkspaceId: inA.owningWorkspaceId, moved: inA.moved },
+      { workspaceId: wsA.id, owningWorkspaceId: wsA.id, moved: false },
+      `没挪窝时有效工作区就是归属工作区: ${JSON.stringify(inA)}`,
+    );
+    assert.equal(inA.path, homeA);
+
+    const inB = await whereAmI(homeB, "B 的 cwd 下 workspace");
+    assert.deepEqual(
+      { workspaceId: inB.workspaceId, path: inB.path, owningWorkspaceId: inB.owningWorkspaceId, moved: inB.moved },
+      { workspaceId: wsB.id, path: homeB, owningWorkspaceId: wsA.id, moved: true },
+      `挪进 B 之后有效工作区必须是 B、归属仍是 A: ${JSON.stringify(inB)}`,
+    );
+
+    const inNowhere = await whereAmI(outside, "工作区之外的 cwd 下 workspace");
+    assert.deepEqual(
+      { workspaceId: inNowhere.workspaceId, moved: inNowhere.moved },
+      { workspaceId: wsA.id, moved: false },
+      `cwd 不在任何工作区内要落回归属工作区: ${JSON.stringify(inNowhere)}`,
+    );
+
+    // 2) 在 B 的目录里开终端：task 挂在 B 名下，命令真的在 B 的根目录里跑
+    const newText = await runIn(homeB, `terminal new --title "在 B 跑 pwd" --cmd "pwd"`, (s) => s.includes("已开终端") || s.includes("✗"), "在 B 开终端");
+    assert.match(newText, /已开终端/, `在 B 开终端失败: ${newText}`);
+    const inWsB = await c.waitFor(
+      (m) => m.case === "taskUpdated" && m.task.title === "在 B 跑 pwd",
+      "B 名下出现 agent 建的终端",
+      20000,
+    );
+    assert.equal(inWsB.task.workspaceId, wsB.id, "终端必须挂在 cwd 所在的工作区 B 名下，而不是发起方 A");
+    await c.waitFor(
+      (m) => m.case === "taskUpdated" && m.task.id === inWsB.task.id && m.task.status === TaskStatus.EXITED,
+      "pwd 跑完",
+      20000,
+    );
+    const bReadText = await runIn(homeB, `terminal read ${inWsB.task.id}`, (s) => s.includes("exited"), "读 B 里那个终端");
+    assert.ok(bReadText.includes(homeB), `命令必须在 B 的根目录里跑: ${bReadText}`);
+    assert.ok(!bReadText.includes(homeA), `绝不能落在 A 的 checkout 里（沉默错位）: ${bReadText}`);
+
+    // 3) list 跟随 cwd：B 的目录里只见 B 的终端，A 的发起终端不在其中
+    const listInB = await runIn(homeB, "terminal list", (s) => s.includes(inWsB.task.id), "B 的 cwd 下 list");
+    assert.ok(!listInB.includes(task.id), `B 的 list 里不能有 A 的终端: ${listInB}`);
+    const listInA = await runIn(homeA, "terminal list", (s) => s.includes(task.id), "A 的 cwd 下 list");
+    assert.ok(!listInA.includes(inWsB.task.id), `A 的 list 里不能有 B 的终端: ${listInA}`);
+
+    // 4) 跨工作区的 read/send/wait 一律 404，文案仍是「不在本工作区或不存在」（两个方向对称）
+    for (const [dir, taskId, label] of [
+      [homeB, task.id, "在 B 里读 A 的终端"],
+      [homeA, inWsB.task.id, "在 A 里读 B 的终端"],
+    ]) {
+      const readText = await runIn(dir, `terminal read ${taskId}`, (s) => s.includes("✗"), label);
+      assert.match(readText, /终端不在本工作区或不存在/, `${label} 必须 404: ${readText}`);
+    }
+    const sendText = await runIn(homeB, `terminal send ${task.id} --text "x" --enter`, (s) => s.includes("✗"), "在 B 里往 A 的终端输入");
+    assert.match(sendText, /终端不在本工作区或不存在/, `跨工作区 send 必须 404: ${sendText}`);
+    const waitText = await runIn(homeB, `terminal wait ${task.id} --timeout 5`, (s) => s.includes("✗"), "在 B 里 wait A 的终端");
+    assert.match(waitText, /终端不在本工作区或不存在/, `跨工作区 wait 必须 404: ${waitText}`);
+
+    // 5) cwd 在任何工作区之外 → 落回归属工作区 A（daemon 此时不申报 workspace_id，与旧 daemon 的
+    //    请求逐字节等价，也就顺带证明了「不带字段仍落发起工作区」）
+    const backText = await runIn(outside, `terminal new --title "落回 A" --cmd "pwd"`, (s) => s.includes("已开终端") || s.includes("✗"), "工作区之外开终端");
+    assert.match(backText, /已开终端/, `工作区之外开终端失败: ${backText}`);
+    const backTask = await c.waitFor(
+      (m) => m.case === "taskUpdated" && m.task.title === "落回 A",
+      "落回 A 的终端出现",
+      20000,
+    );
+    assert.equal(backTask.task.workspaceId, wsA.id, "cwd 在工作区之外时必须落回归属工作区 A");
+
+  } finally {
+    if (wsB) await removeWorkspace(c, wsB.id);
+    await removeWorkspace(c, wsA.id);
     device.close();
   }
 });
