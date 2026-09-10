@@ -11,20 +11,31 @@ marketplace and runs the same `hooks/hooks.json` and `.mcp.json`.
 
 ## Components
 
-- **hooks/** — three kinds of hooks in one file:
+- **hooks/** — four kinds of hooks in one file:
   - `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `Stop`, `StopFailure`
     and `Notification` are forwarded to the `cofluxd hook claude` messenger, which relays them to the local daemon;
     the daemon maps events to turn states (active / approval / question / done) shown in the coflux sidebar. When
     `cofluxd` is not installed or the daemon is down, the messenger exits silently and never disturbs the agent.
-  - `SessionStart` runs `scripts/session-context.sh`: inside a coflux terminal (`COFLUX_WORKSPACE_ID` set) it prints
-    a `<coflux-session>` block with the session's six `COFLUX_*` coordinates, the one rule (local commands inside
-    the workspace, MCP only to leave it) and a pointer to the skill. It fires on every session source, so the block
-    comes back after context compaction. Outside coflux it prints nothing.
+  - `SessionStart` runs `scripts/session-context.sh`: inside a coflux terminal (`COFLUX_WORKSPACE_ID` set) it asks
+    the daemon to locate the session's directory (see the worktree hooks below — resuming a session that had entered
+    a worktree lands back in it without any tool call, and this is the only moment that can notice), then prints a
+    `<coflux-session>` block with the session's six `COFLUX_*` coordinates, the one rule (local commands inside the
+    workspace, MCP only to leave it) and a pointer to the skill. The workspace id in the block is the daemon's
+    answer, falling back to the environment variable when `cofluxd` is missing or the daemon is down. It fires on
+    every session source, so the block comes back after context compaction. Outside coflux it prints nothing.
+  - `PostToolUse` with `matcher: "EnterWorktree|ExitWorktree"` and `WorktreeRemove` run
+    `scripts/worktree-follow.mjs`: coflux follows the agent into a git worktree. The script hands the payload's
+    `cwd` (or, on removal, `worktree_path`) to the local `cofluxd workspace locate|forget` command, which moves the
+    terminal's owning workspace — registering an unknown worktree as a child workspace of the project first, and
+    on removal moving that workspace's terminals back to the project's main workspace and dropping the record. The
+    terminal, its PTY and the conversation are untouched. After a move it returns the new coordinates as
+    `additionalContext` so the agent sees them in the same turn. Anything unusual (not inside coflux, another
+    repository, no daemon, a daemon too old for the command) is a silent no-op.
   - `PreToolUse` with `matcher: "Bash"` runs `scripts/guard-git-worktree.mjs`: when `COFLUX_PROJECT_ID` is set it
-    denies `git worktree add|remove|move` and points the agent to the MCP tools `create_workspace` /
-    `remove_workspace` (a self-made worktree is invisible to the user and cannot host a terminal). `list`, `prune`
-    and the other read-only subcommands pass; outside a coflux project it never intervenes; without `node` it stays
-    silent.
+    denies `git worktree remove|move` and points the agent to the MCP tool `remove_workspace` (removing a worktree by
+    hand leaves an orphan workspace record in the sidebar). `add`, `list`, `prune` and the other subcommands pass —
+    creating a worktree is fine now that coflux follows the agent into it; outside a coflux project it never
+    intervenes; without `node` it stays silent.
 - **skills/coflux/** — documents, for an agent running inside a coflux terminal, the terminals the user can see and
   take over, the progress / notify channels and preview URLs, and when each is worth using. One rule for the split: **anything
   that closes locally uses the zero-credential local commands** (`cofluxd terminal/progress/notify/ports`); only
@@ -55,9 +66,11 @@ marketplace and runs the same `hooks/hooks.json` and `.mcp.json`.
 ## Privacy boundary
 
 The messenger hooks forward only the event name, notification type, agent session id, in-flight background task
-count and messenger pid; prompts, replies and notification bodies never leave the machine. The session block is
-built from environment variables only and never calls the daemon. MCP access is scoped to the current account,
-with credentials stored by Claude Code.
+count and messenger pid; prompts, replies and notification bodies never leave the machine. The session block and
+the worktree hooks call only the local daemon on loopback, with no credentials (the daemon identifies the caller
+by its process tree); what they send is a directory path, and the daemon forwards the resolved worktree path and
+branch to the center so the workspace can appear in the user's own sidebar. MCP access is scoped to the current
+account, with credentials stored by Claude Code.
 
 ## Migrating from manual hook configuration
 
