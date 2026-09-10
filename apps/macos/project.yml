@@ -1,0 +1,263 @@
+name: Coflux
+configs:
+  Debug: debug
+  Release: release
+  Performance: release
+options:
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  TreeSitterR:
+    url: https://github.com/r-lib/tree-sitter-r.git
+    exactVersion: 1.3.0
+  TreeSitterIni:
+    url: https://github.com/justinmk/tree-sitter-ini.git
+    exactVersion: 1.3.0
+  TreeSitterSql:
+    url: https://github.com/DerekStride/tree-sitter-sql.git
+    revision: 9853b887c5e4309de273922b681cc7bc09e30c78
+  TreeSitterSCSS:
+    url: https://github.com/tree-sitter-grammars/tree-sitter-scss.git
+    revision: 2ef6d42e3ad7a8208900f9346f4529806ae0f9f9
+  NativeGrammars:
+    path: NativeGrammars
+  TreeSitterHaskell:
+    url: https://github.com/tree-sitter/tree-sitter-haskell.git
+    exactVersion: 0.23.1
+  TreeSitterElixir:
+    url: https://github.com/elixir-lang/tree-sitter-elixir.git
+    exactVersion: 0.3.5
+  TreeSitterKotlin:
+    url: https://github.com/tree-sitter-grammars/tree-sitter-kotlin.git
+    exactVersion: 1.1.0
+  WebRTC:
+    url: https://github.com/stasel/WebRTC.git
+    exactVersion: 152.0.0
+  SwiftTreeSitter:
+    url: https://github.com/ChimeHQ/SwiftTreeSitter.git
+    exactVersion: 0.9.0
+  TreeSitterJavaScript:
+    url: https://github.com/tree-sitter/tree-sitter-javascript.git
+    exactVersion: 0.23.1
+  TreeSitterTypeScript:
+    url: https://github.com/tree-sitter/tree-sitter-typescript.git
+    exactVersion: 0.23.2
+  TreeSitterRust:
+    url: https://github.com/tree-sitter/tree-sitter-rust.git
+    exactVersion: 0.23.2
+  TreeSitterPython:
+    url: https://github.com/tree-sitter/tree-sitter-python.git
+    exactVersion: 0.23.6
+  TreeSitterGo:
+    url: https://github.com/tree-sitter/tree-sitter-go.git
+    exactVersion: 0.23.4
+  TreeSitterJSON:
+    url: https://github.com/tree-sitter/tree-sitter-json.git
+    exactVersion: 0.24.8
+  TreeSitterBash:
+    url: https://github.com/tree-sitter/tree-sitter-bash.git
+    exactVersion: 0.23.3
+  TreeSitterC:
+    url: https://github.com/tree-sitter/tree-sitter-c.git
+    exactVersion: 0.23.4
+  TreeSitterCSS:
+    url: https://github.com/tree-sitter/tree-sitter-css.git
+    exactVersion: 0.23.2
+  TreeSitterPHP:
+    url: https://github.com/tree-sitter/tree-sitter-php.git
+    exactVersion: 0.23.11
+  TreeSitterXML:
+    url: https://github.com/tree-sitter-grammars/tree-sitter-xml.git
+    exactVersion: 0.7.0
+  TreeSitterHTML:
+    url: https://github.com/tree-sitter/tree-sitter-html.git
+    exactVersion: 0.23.2
+  TreeSitterCPP:
+    url: https://github.com/tree-sitter/tree-sitter-cpp.git
+    exactVersion: 0.23.4
+  TreeSitterJava:
+    url: https://github.com/tree-sitter/tree-sitter-java.git
+    exactVersion: 0.23.5
+  TreeSitterYAML:
+    url: https://github.com/tree-sitter-grammars/tree-sitter-yaml.git
+    exactVersion: 0.6.1
+  TreeSitterTOML:
+    url: https://github.com/tree-sitter-grammars/tree-sitter-toml.git
+    exactVersion: 0.7.0
+  TreeSitterSwift:
+    url: https://github.com/alex-pinkus/tree-sitter-swift.git
+    revision: 31d17fe7e818a2048c808b5c6fdc2dc792f4f5b5
+  TreeSitterMarkdown:
+    url: https://github.com/tree-sitter-grammars/tree-sitter-markdown.git
+    exactVersion: 0.3.2
+  TreeSitterRuby:
+    url: https://github.com/tree-sitter/tree-sitter-ruby.git
+    exactVersion: 0.23.1
+  TreeSitterLua:
+    url: https://github.com/tree-sitter-grammars/tree-sitter-lua.git
+    exactVersion: 0.2.0
+  TreeSitterCSharp:
+    url: https://github.com/tree-sitter/tree-sitter-c-sharp.git
+    exactVersion: 0.23.1
+  TreeSitterDockerfile:
+    url: https://github.com/camdencheek/tree-sitter-dockerfile.git
+    exactVersion: 0.2.0
+  TreeSitterMake:
+    url: https://github.com/tree-sitter-grammars/tree-sitter-make.git
+    exactVersion: 1.1.1
+  Client:
+    path: ../../packages/swift-client
+settings:
+  configs:
+    Debug:
+      CODE_SIGN_IDENTITY: "-"
+      CODE_SIGN_STYLE: Manual
+      DEVELOPMENT_TEAM: ""
+      ENABLE_HARDENED_RUNTIME: NO
+    Performance:
+      CODE_SIGN_IDENTITY: "-"
+      CODE_SIGN_STYLE: Manual
+      DEVELOPMENT_TEAM: ""
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 0.1.0
+targets:
+  Coflux:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+      - path: Ghostty/terminal.conf
+        buildPhase: resources
+    info:
+      path: Coflux-Info.plist
+      properties:
+        CofluxDebugServerURL: $(COFLUX_DEBUG_SERVER_URL)
+        CofluxBuildID: $(COFLUX_BUILD_ID)
+    preBuildScripts:
+      - name: 校验正式客户端版本标识
+        script: 'sh "$SRCROOT/scripts/validate-build-id.sh"'
+        basedOnDependencyAnalysis: false
+    dependencies:
+      - package: WebRTC
+      - package: SwiftTreeSitter
+        product: SwiftTreeSitter
+      - package: TreeSitterJavaScript
+      - package: TreeSitterTypeScript
+      - package: TreeSitterRust
+      - package: TreeSitterPython
+      - package: TreeSitterGo
+      - package: TreeSitterJSON
+      - package: TreeSitterBash
+      - package: TreeSitterC
+      - package: TreeSitterCSS
+      - package: TreeSitterHTML
+      - package: TreeSitterXML
+      - package: TreeSitterPHP
+      - package: TreeSitterCPP
+      - package: TreeSitterJava
+      - package: NativeGrammars
+        product: TreeSitterProto
+      - package: NativeGrammars
+        product: TreeSitterJSON5
+      - package: NativeGrammars
+        product: TreeSitterGraphQL
+      - package: NativeGrammars
+        product: TreeSitterErlang
+      - package: TreeSitterHaskell
+      - package: NativeGrammars
+        product: TreeSitterDart
+      - package: TreeSitterR
+      - package: TreeSitterIni
+      - package: TreeSitterSql
+      - package: NativeGrammars
+        product: TreeSitterLess
+      - package: NativeGrammars
+        product: TreeSitterVue
+      - package: NativeGrammars
+        product: TreeSitterSvelte
+      - package: NativeGrammars
+        product: TreeSitterPowershell
+      - package: NativeGrammars
+        product: TreeSitterPerl
+      - package: NativeGrammars
+        product: TreeSitterGroovy
+      - package: NativeGrammars
+        product: TreeSitterZsh
+      - package: TreeSitterSCSS
+      - package: TreeSitterElixir
+      - package: TreeSitterKotlin
+      - package: TreeSitterYAML
+      - package: TreeSitterTOML
+      - package: TreeSitterSwift
+      - package: TreeSitterMarkdown
+      - package: TreeSitterRuby
+      - package: TreeSitterCSharp
+      - package: TreeSitterDockerfile
+      - package: TreeSitterMake
+      - package: TreeSitterLua
+      - package: Client
+        product: CofluxClientCore
+      - package: Client
+        product: CofluxApplePlatform
+      - framework: ../../.coflux-dev/ghostty/GhosttyKit.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreText.framework
+      - sdk: Carbon.framework
+      - sdk: IOKit.framework
+      - sdk: libc++.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.coflux.desktop
+        PRODUCT_MODULE_NAME: Coflux
+        COFLUX_DEBUG_SERVER_URL: ws://127.0.0.1:19873/client
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: 连接你授权的本机和局域网设备。
+        ENABLE_HARDENED_RUNTIME: YES
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Automatic
+        Debug:
+          # 临时签名没有 Team ID，开发版不启用动态库团队校验。
+          ENABLE_HARDENED_RUNTIME: NO
+        Performance:
+          PRODUCT_NAME: CofluxPerformance
+          PRODUCT_BUNDLE_IDENTIFIER: dev.coflux.desktop.performance
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) COFLUX_PERFORMANCE"
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+          SWIFT_COMPILATION_MODE: wholemodule
+          CODE_SIGN_IDENTITY: "-"
+          # 本机临时签名无 Team ID，不能通过 hardened runtime 的动态库团队校验。
+          # 仅性能测试配置关闭；正式 Release 仍要求完整签名和 hardened runtime。
+          ENABLE_HARDENED_RUNTIME: NO
+  CofluxTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [Tests]
+    dependencies:
+      - target: Coflux
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.coflux.desktop.tests
+        GENERATE_INFOPLIST_FILE: YES
+      configs:
+        Performance:
+          TEST_HOST: "$(BUILT_PRODUCTS_DIR)/CofluxPerformance.app/Contents/MacOS/CofluxPerformance"
+schemes:
+  Coflux:
+    build:
+      targets:
+        Coflux: all
+    test:
+      environmentVariables:
+        COFLUX_MACOS_TEST: "1"
+        COFLUX_NATIVE_TEST_URL: "$(COFLUX_NATIVE_TEST_URL)"
+        COFLUX_NATIVE_FIXTURE_FILE: "$(COFLUX_NATIVE_FIXTURE_FILE)"
+        COFLUX_INPUT_TRACE: "$(COFLUX_INPUT_TRACE)"
+        COFLUX_SWITCH_METAL_TRACE: "$(COFLUX_SWITCH_METAL_TRACE)"
+      targets: [CofluxTests]

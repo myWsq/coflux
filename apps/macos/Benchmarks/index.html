@@ -1,0 +1,7 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>终端组件同负载基准</title>
+<style>body{font:14px system-ui;max-width:960px;margin:40px auto;background:#171717;color:#eee}button{padding:10px}pre{white-space:pre-wrap}table{border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #555}</style>
+<h1>终端组件同负载基准</h1>
+<p>8 个终端，142×34 网格，10000 行历史；每个 5000 行中文、emoji、ANSI 文本。可选择显示其中一个。计时终点为输出处理完成，不代表 GPU 呈现完成，不含网络。</p>
+<label><input id="visible" type="checkbox">显示一个终端，其余后台</label><div id="terminal" style="width:1000px;height:600px;display:none;overflow:hidden"></div>
+<button id="run">运行 1 次预热 + 5 次采样</button><p id="status">未运行</p><pre id="result"></pre>
+<script type="module" src="/benchmark.mjs"></script></html>
