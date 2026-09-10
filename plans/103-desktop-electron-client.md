@@ -308,7 +308,8 @@ Out of scope:
 - Electron 每 8 周一个大版本、只支持最近三个；升级要看 breaking-changes（44 已把 `clipboard` 从
   渲染进程移除）。electron-builder 27 会改 `mac.universal` 配置结构，升级时迁配置。
 - 桌面 Origin 字符串一旦发布就是 grant 绑定的一部分，改它等于让所有桌面 grant 失效——执行者把最终值
-  写在这里：`<待填>`。
+  写在这里：`https://desktop.coflux.dev`（`apps/desktop/src/main/origin.ts` 的 `DESKTOP_ORIGIN`；主进程
+  对渲染层发起的每条 WebSocket 握手都改写，含 relay，非 WebSocket 请求不动）。
 - lockstep 规则：部署 prod 前先打 `desktop-v*` tag（同一 SHA），或接受桌面版在 CI 出包前被踢；
   过渡期用 `COFLUX_BUILD_ID` env 并集放行。
 - 升级 `@xterm/xterm` 须复验中文 IME 标点（`terminal-pane.tsx` 的 `patchImeCommittedInput`）。

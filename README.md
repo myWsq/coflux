@@ -15,6 +15,7 @@ P2P，terminal 与普通 Device RPC 数据帧不经过中心控制 WS。一机�
 | `packages/protocol` | Buf 生成的 TS 共享线协议（真相源在 `proto/`） |
 | `apps/server` | 中心服务器（TS）：认证/编排 + relay rendezvous + checkpoint + Postgres |
 | `apps/web` | Web Client（TS）：Vite + React + xterm.js |
+| `apps/desktop` | macOS 桌面客户端：Electron 壳原样打包 `apps/web`（原生菜单/通知/角标/签名公证/自动更新），`pnpm -C apps/desktop dev` |
 | `apps/mobile` | 冻结的移动 Web Client；仅在共享层破坏构建时做最小修复 |
 | `apps/ios` | 原生 iOS Client（SwiftUI + SwiftTerm）；使用共享 Swift Client Core |
 | `packages/swift-client` | Buf 生成的 Swift 协议、共享 Client Core 与 Apple 平台 transport |
