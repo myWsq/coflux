@@ -56,7 +56,7 @@ env | grep '^COFLUX_'
 ## When to open a terminal
 
 A coflux terminal is a process the user can see: a titled entry in their sidebar that they can
-open, take over and type into, with its output kept in a local log you can read back at any time.
+open, take over and type into, whose output you can read back at any time.
 Whether a command runs in your own Bash or in a coflux terminal is your call; a coflux terminal is
 worth it when the user's view of the process matters:
 
@@ -71,27 +71,49 @@ own tools are faster, and a pile of one-second terminals is just noise to the us
 
 ## Local commands
 
-### Open a terminal and run a command
+### Open a terminal
+
+There are two kinds, told apart by one single thing: **whether you pass a command**.
 
 ```sh
-cofluxd terminal new --title="Run unit tests" --cmd="pnpm -C tests test"
+cofluxd terminal new --title="Run unit tests" --cmd="pnpm -C tests test"   # job terminal
+cofluxd terminal new --title="Debug shell"                                 # session terminal
 ```
 
 `--title` is the name the user sees in the sidebar; **name it properly**: "Run unit tests",
-"Start dev server", never "terminal 1". The command runs in the current workspace directory
-under the login shell; the command line is capped at 16 KB.
+"Start dev server", never "terminal 1". Either kind runs in the current workspace directory.
 
 Always write `--cmd=<value>` and `--title=<value>` with the `=`, never separated by a space: a
 value that starts with `-` is otherwise taken for another option and the call fails outright.
 
-The terminal exits when the command finishes and the task becomes `exited` with the exit code:
-that is how you tell success from failure. So do not expect to run a second command in the same
-terminal: write `a && b`, or open another one.
+**Job terminal — with `--cmd=...`.** It runs that one command under the login shell (command line
+capped at 16 KB). The terminal exits when the command finishes and the task becomes `exited` with
+the exit code: that is how you tell success from failure. So do not expect to run a second command
+in the same terminal: write `a && b`, or open another one. The output is also written to a local
+log for you to read back (roughly the last 1 MB is kept). The cost is that the command's stdout is
+a pipe rather than a tty: most programs turn off colors and progress bars, full-screen programs
+(vim, htop, less) do not work at all, and a few switch to a different "CI" behavior.
 
-The output is also written to a local log for you to read back (roughly the last 1 MB is kept).
-The cost is that stdout is a pipe rather than a tty, so most programs turn off colors and
-progress bars. A few programs behave differently without a tty (no progress output, CI mode);
-if you depend on that behavior, run the command in your own Bash instead.
+**Session terminal — no `--cmd` at all.** You get exactly what the user gets by clicking "new
+terminal" in the sidebar: the default login shell in the workspace directory, with stdin **and**
+stdout on a real tty. It runs nothing by itself and **never exits on its own** — it lives until
+`exit` is typed into it (by you with `send`, or by the user), or the user stops it. Reach for it
+when you need several commands in the same shell, a TUI or a program whose colors and progress
+bars matter, or simply a terminal the user can step into and keep using. There is no command log
+for it: `read` returns the current screen (one screenful, no history), so you judge how it went
+from what is on screen, and `wait` is only meaningful after you have sent `exit`.
+
+Driving a session terminal:
+
+1. `cofluxd terminal new --title="Debug shell"` → prints a taskId.
+2. `cofluxd terminal read <taskId>` until you see the shell prompt. The shell needs a moment to
+   start and the first read can come back empty — **never `send` before you have seen a prompt**.
+3. `cofluxd terminal send <taskId> --text="pnpm build" --enter`, then `read` again to see what
+   happened. One send per command; nothing signals you when a command finished, so read until the
+   prompt is back. To make that unambiguous, end the command with a marker of your own
+   (`pnpm build; echo DONE-$?`) and read until the marker shows up.
+4. `cofluxd terminal send <taskId> --text="exit" --enter` when you are done; the terminal then
+   becomes `exited` with the shell's exit code.
 
 The new terminal has the same `COFLUX_*` variables (pointing at its own task/session ids, same
 workspace as you).
@@ -106,8 +128,9 @@ cofluxd terminal read <taskId> --lines 50
 
 `list` states are `running` / `exited` / `idle`; `exited` carries `exit=<code>`.
 **An exited terminal can still be read**: "the command finished, look at the output" is the most
-common case. `read` reads the local log; terminals without a log (opened by the user) return the
-current screen. Both are immediate.
+common case. `read` reads the local log of a job terminal; terminals that have no log (session
+terminals, and the ones the user opened) return the current screen instead — one screenful, no
+history, and empty for the first moments after opening. Both are immediate.
 
 ### Wait for a command to finish
 
@@ -123,6 +146,11 @@ is still running: `read` to see where it is, then decide whether to keep waiting
 `wait` **always exits 0** once the terminal is done: it reports that the command finished, not
 whether it succeeded. Read the result off its output line `# exited exit=<code>` (`list` shows the
 same). A non-zero exit from `wait` itself means the wait timed out or the id was wrong.
+
+**Do not `wait` on a session terminal** unless you have already sent it `exit`: it never finishes
+by itself, so the wait can only end in the 30-minute timeout — a timeout there means the shell is
+still sitting at its prompt, nothing more. Its exit code, when it finally exits, is the shell's and
+not any command's: check what a command did by reading the screen.
 
 **Keep working, and be woken up when it finishes.** `wait` blocks, so run it as a backgrounded Bash
 call of your own:
@@ -146,6 +174,7 @@ For interactive confirmations (y/N, menus), or to add a command in the same shel
 previous one finished. Discipline:
 
 - **`read` before `send`**: see what the terminal is waiting for before typing; never type blind.
+  On a freshly opened session terminal this also means waiting for the shell prompt to appear.
 - **Refused while the user is taking over**: that is not an error, it is by design; humans always
   win. Stop when refused; use `notify` to communicate, do not retry.
 - **After a send timeout do not resend right away**: `read` first to check whether the input
@@ -195,8 +224,10 @@ server, use it to get the URL and tell the user directly; they click it and nobo
 Errors are one readable sentence; do what they say: "not inside a coflux terminal" = you are not
 in a coflux session; "terminal is not in this workspace or does not exist" = check the id with
 `list`; "predates the daemon upgrade" = that terminal was opened before the daemon upgrade, open a
-new one; "daemon is not connected to the center" only appears on `new`/`list`/`ports`, retry once
-it reconnects.
+new one; a `new` without `--cmd` refused for a missing command = this machine's daemon is older
+than session terminals, tell the user to run `cofluxd update && cofluxd restart` (or pass a command
+and use a job terminal); "daemon is not connected to the center" only appears on
+`new`/`list`/`ports`, retry once it reconnects.
 
 ## Center MCP: leaving this workspace
 
@@ -205,7 +236,8 @@ Local commands only see the workspace you are in. Use the MCP server named `cofl
 
 - **Open an isolated child workspace to work in parallel**: `create_workspace` (project id from
   `$COFLUX_PROJECT_ID`) really runs `git worktree add` on the device; then `create_terminal` runs
-  commands there.
+  commands there. The same two kinds apply: `create_terminal` with a `command` opens a
+  job terminal, without one it opens a session terminal.
 - **Look at or operate terminals in other workspaces or on other devices**: `list_*` →
   `read_terminal` / `send_terminal_input`.
 - **Join everything under the account when you are not inside a coflux terminal** (for example

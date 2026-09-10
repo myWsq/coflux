@@ -262,7 +262,7 @@ export function createCofluxMcpServer(principal: OAuthPrincipal, deps: McpToolDe
     {
       title: "读取终端内容",
       description:
-        "读取某个终端的输出纯文本（已去 ANSI，默认最后 200 行，最多 2000 行）以及状态/退出码。来源（source）按优先级：log = 该终端是 create_terminal 开的命令终端，读的是设备上的完整命令日志尾部（秒级命令的输出也在，退出后仍可读）；snapshot = 设备上会话的当前画面；checkpoint = 设备离线或不支持时退回中心缓存的最近快照（最多约 2 秒延迟、只有一屏）；none = 什么都没有（刚创建还没输出）。",
+        "读取某个终端的输出纯文本（已去 ANSI，默认最后 200 行，最多 2000 行）以及状态/退出码。来源（source）按优先级：log = 该终端是带 command 开的作业终端（create_terminal 给了命令），读的是设备上的完整命令日志尾部（秒级命令的输出也在，退出后仍可读）；snapshot = 设备上会话的当前画面（会话终端、用户手开的终端只有这个：一屏，没有命令日志，这是设计不是缺陷）；checkpoint = 设备离线或不支持时退回中心缓存的最近快照（最多约 2 秒延迟、只有一屏）；none = 什么都没有（刚创建还没输出——会话终端刚开出来的头几百毫秒就是这样，稍等再读）。",
       inputSchema: {
         terminalId: z.string().describe("终端 id（list_terminals / create_terminal 的 id）"),
         lines: z.number().int().min(1).max(MAX_READ_LINES).optional().describe(`返回最后多少行，默认 ${DEFAULT_READ_LINES}`),
@@ -394,19 +394,24 @@ export function createCofluxMcpServer(principal: OAuthPrincipal, deps: McpToolDe
   server.registerTool(
     "create_terminal",
     {
-      title: "开终端跑一条命令",
+      title: "开终端（跑一条命令，或开一个常驻 shell）",
       description:
-        `在某个工作区目录下开一个真实终端（web 侧栏可见、用户可随时接管）跑一条命令：命令在登录 shell 里执行，跑完终端退出并带退出码；输出同时落设备上的命令日志，用 read_terminal 读（source=log）。想跑交互式程序也可以（例如 \`claude\`），之后用 send_terminal_input 输入、wait_terminal 等退出。受每工作区活跃终端上限约束（含用户手开的），超限时先 stop_terminal 一些。最多等 30 秒启动回执，到期返回「已提交」并附 terminalId。${UPGRADE_NOTE}`,
+        `在某个工作区目录下开一个真实终端（web 侧栏可见、用户可随时接管）。**给不给 command 决定开哪种终端**：
+
+- **带 command = 作业终端**：命令在登录 shell 里执行，跑完终端退出并带退出码；输出同时落设备上的命令日志，用 read_terminal 读（source=log），退出后仍可读。代价是命令的 stdout 是管道不是 tty，多数程序会关掉颜色和进度条，vim/htop/less 这类全屏程序用不了；一条命令跑完终端就没了，要再跑一条得重开（或写成 \`a && b\`）。
+- **不带 command（或留空）= 会话终端**：等价于用户自己在侧栏点「新建终端」——工作区目录下的默认登录 shell，stdin/stdout 都是真 tty，**不会自己退出**，直到你 send_terminal_input 一个 \`exit\`（或用户在里面退出、或 stop_terminal）。用它跑多条命令、跑 TUI/需要颜色的程序、或留一个用户随时能接管继续的终端。没有命令日志，read_terminal 读到的是当前画面（source=snapshot，只有一屏）；成败要自己从画面判断，wait_terminal 只有在你送了 exit 之后才有意义。**首次 send_terminal_input 之前先 read_terminal 等提示符出现**。
+
+两种都受每工作区活跃终端上限约束（含用户手开的），超限时先 stop_terminal 一些。最多等 30 秒启动回执，到期返回「已提交」并附 terminalId。${UPGRADE_NOTE}`,
       inputSchema: {
         workspaceId: z.string().describe("工作区 id（list_workspaces / create_workspace 的 id）"),
-        command: z.string().describe("要执行的命令（交给登录 shell 的 -lc，可含管道/多条）"),
-        title: z.string().optional().describe("终端标题（侧栏展示，默认取命令首行）"),
+        command: z.string().optional().describe("要执行的命令（交给登录 shell 的 -lc，可含管道/多条）；不传或留空 = 开一个常驻的会话终端（全 tty，输入 exit 才结束）"),
+        title: z.string().optional().describe("终端标题（侧栏展示，默认取命令首行；会话终端默认「agent 终端」）"),
       },
       outputSchema: { terminal: TerminalSchema },
       annotations: mutating,
     },
     async ({ workspaceId, command, title }) => {
-      const result = await deps.ops.createTerminalForAccount(accountId, { workspaceId, title: title ?? "", command });
+      const result = await deps.ops.createTerminalForAccount(accountId, { workspaceId, title: title ?? "", command: command ?? "" });
       if (!result.ok) return fail(result.error);
       return ok({ terminal: terminalView(result.value) });
     },
@@ -439,7 +444,7 @@ export function createCofluxMcpServer(principal: OAuthPrincipal, deps: McpToolDe
     {
       title: "等终端退出",
       description:
-        `阻塞等某个终端退出并返回退出码。有上限：timeoutSeconds 默认 ${WAIT_DEFAULT_SECONDS}、最大 ${WAIT_MAX_SECONDS}；到期返回当前状态（exited=false、timedOut=true），不是错误——需要更久就再调一次。注意宿主的单请求超时是真正的天花板：手动 \`claude mcp add\` 的 Claude Code 默认 60 秒，此时 timeoutSeconds 别超过 50；经 coflux 插件接入的宿主 timeout 已放宽到 600 秒以上。`,
+        `阻塞等某个终端退出并返回退出码。有上限：timeoutSeconds 默认 ${WAIT_DEFAULT_SECONDS}、最大 ${WAIT_MAX_SECONDS}；到期返回当前状态（exited=false、timedOut=true），不是错误——需要更久就再调一次。注意宿主的单请求超时是真正的天花板：手动 \`claude mcp add\` 的 Claude Code 默认 60 秒，此时 timeoutSeconds 别超过 50；经 coflux 插件接入的宿主 timeout 已放宽到 600 秒以上。会话终端（create_terminal 不带 command 开的）不会自己退出，对它 wait 只在你已经 send 过 \`exit\` 之后才有意义，否则必然等到超时。`,
       inputSchema: {
         terminalId: z.string().describe("终端 id"),
         timeoutSeconds: z.number().min(1).max(WAIT_MAX_SECONDS).optional().describe(`最多等多少秒，默认 ${WAIT_DEFAULT_SECONDS}，上限 ${WAIT_MAX_SECONDS}`),

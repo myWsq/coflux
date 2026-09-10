@@ -34,7 +34,8 @@ CLI 还会取自身与 worker 的持久 release floor 较大值拒绝远端降�
 跑在 coflux 终端里的 claude/codex 可以用下面几条，把工作外化成用户在 web/手机上**看得见、能接管**的东西——而不是在自己的 Bash 里后台起一个谁也看不见的进程：
 
 ```sh
-cofluxd terminal new --title "跑单测" --cmd "pnpm test"   # 开真实终端，用户可接管
+cofluxd terminal new --title "跑单测" --cmd "pnpm test"   # 作业终端：跑完即退，带退出码
+cofluxd terminal new --title "调试 shell"                 # 会话终端：不带命令 = 常驻登录 shell
 cofluxd terminal list                                     # 本工作区的终端 + 状态/退出码
 cofluxd terminal read <taskId> [--lines N]                # 读终端内容（纯文本，已退出也能读）
 cofluxd terminal wait <taskId> [--timeout <秒>]           # 阻塞到退出，打印退出码
@@ -43,6 +44,8 @@ cofluxd progress "复现了，正在定位"                        # 播报进�
 cofluxd notify "需要你定一下用哪个方案"                    # 叫人：侧栏转「等待交互」
 cofluxd ports                                             # 端口 + 可直接打开的预览 URL
 ```
+
+`terminal new` 带不带 `--cmd` 是两种终端：带命令是**作业终端**，命令包成脚本交登录 shell 跑，跑完终端退出并带退出码，输出另落一份日志供 `read` 回读（代价是命令的 stdout 是管道而非 tty，颜色/进度条/全屏程序都没有）；不带命令是**会话终端**，等价于用户在侧栏点「新建终端」——工作区目录下的默认登录 shell，stdin/stdout 都是真 tty，不会自己退出，直到 agent 或用户输入 `exit`。会话终端没有命令日志，`read` 读的是当前画面（一屏），首次 `send` 前要先 `read` 等提示符。
 
 不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，**coflux 会话之外的进程一律拒绝**，权限也天然限定在该会话所属的工作区内。**local-first**：send/read/wait/notify/progress 在 daemon 本地闭环、不经中心（归属与退出码来自 daemon 自己的会话账本，内容来自本地命令日志或 sessiond 快照）；只有 new/list/ports 由 daemon 代问中心——Task 要落库广播、预览 URL 由中心生成。早于 daemon 升级开出来的终端缺归属信息，本地命令会明确拒绝，重开即可。
 
