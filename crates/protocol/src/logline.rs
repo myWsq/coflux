@@ -73,7 +73,10 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// 该时刻本地时区相对 UTC 的偏移（秒）。`localtime_r` 线程安全且尊重 DST；失败退回 0（即 UTC）。
 #[cfg(unix)]
 fn local_offset_seconds(epoch_secs: i64) -> i32 {
-    let time: libc::time_t = epoch_secs as libc::time_t;
+    // 不显式写 `libc::time_t`：musl 目标上 libc crate 把该别名标成 deprecated（1.2.0 起改 64 位），
+    // release 的 `-D warnings` 会让它直接编译失败（v0.31.0 两个 linux-musl job 就死在这）；
+    // 类型由下面 `localtime_r` 的签名推断即可。
+    let time = epoch_secs as _;
     // SAFETY: `tm` 是 plain-old-data，全零是合法初值；`localtime_r` 只写入我们独占的 `tm`，
     // 返回空指针即失败，不读 `tm`。
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
