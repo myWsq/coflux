@@ -129,6 +129,24 @@ export type DeviceTransportOptions = {
   origin?: string;
 };
 
+export type OfflineCatalogStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+/**
+ * 离线目录缓存（plan 103，桌面 app 用）：中心离线也能冷启动看本机终端。开启后每次中心目录变化都把
+ * 渲染工作台所需的目录（daemons / projects / workspaces / tasks / ports / sessionAgents）写进 storage；
+ * 冷启动有 token 但首连拿不到 authOk（连不上、authOk 前断开、或超时）时装载缓存进 store 并置 authed，
+ * 连接状态保持非 connected（重连横幅照常显示），RUNNING 终端经缓存的 loopback grant attach
+ * （session read/control 是 offline grant scope，不需要中心签发的 lease）。中心随后连上并 authOk 时，
+ * 真实 snapshot 照旧覆盖缓存。登出 / 认证失败 / 换账号时清掉。浏览器不传、行为零变化。
+ */
+export type OfflineCatalogOptions = {
+  storage: OfflineCatalogStorage;
+  /** 按服务器地址区分，换中心不串目录 */
+  key: string;
+  /** 首连在此时限内没拿到 authOk 就装载缓存（默认 5000ms） */
+  timeoutMs?: number;
+};
+
 export type CofluxClientOptions = {
   /** /client WS 端点地址（含协议与路径）。 */
   serverUrl: string;
@@ -142,7 +160,46 @@ export type CofluxClientOptions = {
    * 桌面 app（plan 103）的渲染层随 app 打包，reload 永远拿不到新 bundle：传 false 直接进入 outdated
    * 状态页，由 app 触发自动更新检查。两种情况都停止重连——版本拒绝不是可重试的断线。 */
   reloadOnOutdated?: boolean;
+  /** 离线目录缓存；不传 = 不缓存、不装载（浏览器）。 */
+  offlineCatalog?: OfflineCatalogOptions;
 };
+
+const OFFLINE_CATALOG_VERSION = 1;
+const OFFLINE_CATALOG_TIMEOUT_MS = 5000;
+
+type OfflineCatalog = {
+  version: number;
+  savedAt: number;
+  daemons: DaemonInfo[];
+  projects: Project[];
+  workspaces: Workspace[];
+  tasks: Task[];
+  ports: Record<string, PortPreview[]>;
+  sessionAgents: Record<string, SessionAgentState>;
+};
+
+function parseOfflineCatalog(raw: string | null): OfflineCatalog | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const catalog = parsed as Partial<OfflineCatalog>;
+    if (catalog.version !== OFFLINE_CATALOG_VERSION) return null;
+    if (![catalog.daemons, catalog.projects, catalog.workspaces, catalog.tasks].every(Array.isArray)) return null;
+    return {
+      version: OFFLINE_CATALOG_VERSION,
+      savedAt: typeof catalog.savedAt === "number" ? catalog.savedAt : 0,
+      daemons: catalog.daemons as DaemonInfo[],
+      projects: catalog.projects as Project[],
+      workspaces: catalog.workspaces as Workspace[],
+      tasks: catalog.tasks as Task[],
+      ports: catalog.ports && typeof catalog.ports === "object" ? catalog.ports : {},
+      sessionAgents: catalog.sessionAgents && typeof catalog.sessionAgents === "object" ? catalog.sessionAgents : {},
+    };
+  } catch {
+    return null;
+  }
+}
 
 export type CofluxState = {
   status: ConnectionStatus;
@@ -230,6 +287,81 @@ export function createCofluxClient(options: CofluxClientOptions) {
   // 与 web/mobile 各自 token key 一致，避免同源双 app 互相踩）——首次 reload 拿新 bundle；
   // reload 后仍失配（如 index.html 被缓存）则不再 reload，改停止重连 + 提示强制刷新。
   const outdatedReloadKey = `${options.tokenStorageKey}_outdated_reloaded_for`;
+
+  // 离线目录缓存（plan 103）：只在 controlAuthenticated 期间写（写的是中心确认过的目录）；
+  // 装载只发生一次、且只在「有 token、还没拿到过任何 snapshot」的冷启动窗口里。
+  const offlineCatalog = options.offlineCatalog;
+  let offlineHydrated = false;
+  let offlinePersistQueued = false;
+  let offlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function persistOfflineCatalog(): void {
+    if (!offlineCatalog || !controlAuthenticated || offlinePersistQueued) return;
+    // 同一轮消息突发（snapshot + 各设备的 sessionAgentsUpdated）合并成一次写
+    offlinePersistQueued = true;
+    queueMicrotask(() => {
+      offlinePersistQueued = false;
+      if (!controlAuthenticated) return;
+      const state = store.getState();
+      const catalog: OfflineCatalog = {
+        version: OFFLINE_CATALOG_VERSION,
+        savedAt: Date.now(),
+        daemons: state.daemons,
+        projects: state.projects,
+        workspaces: state.workspaces,
+        tasks: state.tasks,
+        ports: state.ports,
+        sessionAgents: state.sessionAgents,
+      };
+      try {
+        offlineCatalog.storage.setItem(offlineCatalog.key, JSON.stringify(catalog));
+      } catch {
+        /* storage 满或不可用：缓存只是离线兜底，不影响在线路径 */
+      }
+    });
+  }
+
+  function clearOfflineCatalog(): void {
+    if (!offlineCatalog) return;
+    try {
+      offlineCatalog.storage.removeItem(offlineCatalog.key);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function clearOfflineTimer(): void {
+    if (offlineTimer === undefined) return;
+    clearTimeout(offlineTimer);
+    offlineTimer = undefined;
+  }
+
+  /** 首连失败 / 超时：把缓存目录装进 store 并置 authed；连接状态不动，重连照常。 */
+  function hydrateOfflineCatalog(): void {
+    clearOfflineTimer();
+    if (!offlineCatalog || offlineHydrated || !token) return;
+    const current = store.getState();
+    if (current.authState !== "authenticating" || current.snapshotRevision > 0) return;
+    let raw: string | null;
+    try {
+      raw = offlineCatalog.storage.getItem(offlineCatalog.key);
+    } catch {
+      return;
+    }
+    const catalog = parseOfflineCatalog(raw);
+    if (!catalog) return;
+    offlineHydrated = true;
+    store.setState((state) => ({
+      authState: "authed",
+      daemons: catalog.daemons,
+      projects: catalog.projects,
+      workspaces: catalog.workspaces,
+      tasks: catalog.tasks,
+      ports: catalog.ports,
+      sessionAgents: catalog.sessionAgents,
+      snapshotRevision: state.snapshotRevision + 1,
+    }));
+  }
 
   const liveSessionIds = new Set<string>();
 
@@ -360,6 +492,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
         // TCP/WS transport 断开不等于账号授权已撤销，也不等于 worker 那条独立控制 WS 已断。
         // Router 会立即禁用新 rendezvous/高权限能力，但给既有 remote session lane 一个有界宽限。
         deviceRouter.setControlDisconnected();
+        // 冷启动首连失败（连不上 / authOk 前被关）：离线目录缓存接管；已 authed 或没缓存时是空操作。
+        if (status === "disconnected") hydrateOfflineCatalog();
       }
     },
     onMessage: handleServerMessage,
@@ -438,6 +572,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         deviceRouter.setControlOnline(false);
         token = "";
         localStorage.removeItem(options.tokenStorageKey);
+        clearOfflineCatalog();
         store.setState({
           loginError: "登录失败：用户名或密码错误",
           authState: "auth-failed",
@@ -658,6 +793,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       default:
         break;
     }
+    persistOfflineCatalog();
   }
 
   function connect(credential: AuthCredential) {
@@ -672,6 +808,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
 
   async function login(username: string, password: string) {
     store.setState({ loginError: "" });
+    // 显式登录 = 可能换账号：旧账号的目录缓存不得带到新账号，authOk 后按新快照重写
+    clearOfflineCatalog();
     connect({ username, password });
   }
 
@@ -679,6 +817,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     shouldRetry = false;
     controlAuthenticated = false;
     pendingTaskRemovals.clear();
+    clearOfflineTimer();
+    clearOfflineCatalog();
     void deviceRouter.reset(true);
     send({ case: "clientLogout", value: {} });
     token = "";
@@ -821,10 +961,16 @@ export function createCofluxClient(options: CofluxClientOptions) {
     store.setState({ lastError: { id: errorSequence, message } });
   }
 
-  if (token) connection.connect({ token });
+  if (token) {
+    connection.connect({ token });
+    // 有界等待：链路半死（连上但 authOk 石沉大海）时也不能把人锁在 authenticating 页；
+    // 超时装载缓存，authOk 随后到达照样覆盖。
+    if (offlineCatalog) offlineTimer = setTimeout(hydrateOfflineCatalog, offlineCatalog.timeoutMs ?? OFFLINE_CATALOG_TIMEOUT_MS);
+  }
 
   function disconnect() {
     controlAuthenticated = false;
+    clearOfflineTimer();
     deviceRouter.destroy();
     connection.stop();
     sessionConsumers.clear();
