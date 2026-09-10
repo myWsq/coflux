@@ -25,6 +25,6 @@ printf '%s\n' \
   "COFLUX_SESSION_ID=${COFLUX_SESSION_ID:-}" \
   "COFLUX_MCP_URL=${COFLUX_MCP_URL:-}" \
   '(COFLUX_TASK_ID is this terminal. An empty COFLUX_PROJECT_ID means a directory workspace without a git repository.)' \
-  'Rule: inside this workspace use the zero-credential local commands `cofluxd terminal new|list|read|wait|send`, `cofluxd progress`, `cofluxd notify` and `cofluxd ports` (run anything long or interactive in a terminal the user can see, read/wait/type, report progress, call the user, get preview URLs). Use the center MCP server `coflux` only to leave this workspace (child workspaces, other workspaces or devices). Never run `git worktree add` yourself; use the MCP tool create_workspace.' \
+  'Rule: inside this workspace use the zero-credential local commands `cofluxd terminal new|list|read|wait|send`, `cofluxd progress`, `cofluxd notify` and `cofluxd ports` (open a terminal the user can watch and take over, read/wait/type, report progress, call the user, get preview URLs). Use the center MCP server `coflux` only to leave this workspace (child workspaces, other workspaces or devices). Never run `git worktree add` yourself; use the MCP tool create_workspace.' \
   'Load the `coflux` skill for the full playbook.' \
   '</coflux-session>'

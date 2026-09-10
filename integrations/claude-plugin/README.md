@@ -25,8 +25,8 @@ marketplace and runs the same `hooks/hooks.json` and `.mcp.json`.
     `remove_workspace` (a self-made worktree is invisible to the user and cannot host a terminal). `list`, `prune`
     and the other read-only subcommands pass; outside a coflux project it never intervenes; without `node` it stays
     silent.
-- **skills/coflux/** — teaches an agent running inside a coflux terminal to externalize long tasks, parallel work
-  and requests for help into real terminals the user can see and take over. One rule for the split: **anything
+- **skills/coflux/** — documents, for an agent running inside a coflux terminal, the terminals the user can see and
+  take over, the progress / notify channels and preview URLs, and when each is worth using. One rule for the split: **anything
   that closes locally uses the zero-credential local commands** (`cofluxd terminal/progress/notify/ports`); only
   leaving the workspace (child workspaces, other workspaces or devices) goes through the center's `coflux` MCP
   server.

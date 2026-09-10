@@ -1,14 +1,14 @@
 ---
 name: coflux
-description: When you run inside a coflux terminal, externalize long tasks, parallel work and requests for help into real terminals the user can watch and take over from the coflux web/mobile app. Your coordinates (device / project / workspace / terminal) arrive in a <coflux-session> block at session start, or via the COFLUX_* environment variables. Inside your own workspace always use the zero-credential local cofluxd commands (open, read, wait, send, report progress, call the user, get preview URLs); use the center's coflux MCP only to leave this workspace (child workspaces, other workspaces or devices). Use for long-running commands such as tests, builds and dev servers, when the user has to take over or decide, when you want to hand the user a clickable preview URL, or when you need an isolated child workspace for parallel work.
+description: When you run inside a coflux terminal, this skill documents the local cofluxd commands that open terminals the user can watch and take over from the coflux web/mobile app, report progress, call the user and hand out preview URLs, plus the center MCP for reaching other workspaces and devices. Your coordinates (device / project / workspace / terminal) arrive in a <coflux-session> block at session start, or via the COFLUX_* environment variables. Inside your own workspace always use the zero-credential local cofluxd commands (open, read, wait, send, report progress, call the user, get preview URLs); use the center's coflux MCP only to leave this workspace (child workspaces, other workspaces or devices). Use when the user should be able to watch, step into or stop a command (interactive steps, dev servers, a job they are waiting on), when the user has to decide something, when you want to hand the user a clickable preview URL, or when you need an isolated child workspace for parallel work.
 ---
 
 # Working inside coflux
 
 You may be running inside a coflux terminal. coflux lets the user watch agents working on many
-machines from a browser or a phone and take over at any time. This skill makes your work
-**visible to the user** and lets you operate the other workspaces and devices under the account
-when you need to.
+machines from a browser or a phone and take over at any time. This skill gives you terminals the
+user can see and take over, a progress line and a call button on the workspace card, preview URLs,
+and a way to operate the other workspaces and devices under the account when you need to.
 
 Two tracks, one rule: **whatever closes locally uses local commands; only leaving this
 workspace goes through MCP.**
@@ -55,23 +55,16 @@ env | grep '^COFLUX_'
 
 ## When to open a terminal
 
-**Use `cofluxd terminal new` instead of backgrounding a process yourself** whenever the command
-meets any of these:
+A coflux terminal is a process the user can see: a titled entry in their sidebar that they can
+open, take over and type into, with its output kept in a local log you can read back at any time.
+Whether a command runs in your own Bash or in a coflux terminal is your call; a coflux terminal is
+worth it when the user's view of the process matters:
 
-- it runs longer than ten-odd seconds (tests, builds, dependency installs, migrations)
-- it keeps running (dev server, watch mode, log tailing)
-- the user may want to take over (interactive, may need to be stopped midway, needs a human when it fails)
-
-Backgrounded in your own Bash, the user **sees nothing**: not that it is running, no way to take
-over, and failures only reach them through your retelling. Opened as a coflux terminal, it is a
-titled entry in the sidebar the user can open, take over and type into.
-
-Inside a coflux workspace the plugin enforces this: a `Bash` call with `run_in_background: true` is
-**denied**, and the denial hands you the equivalent `cofluxd terminal new --title=… --cmd=…` to run
-instead. Two things not to do when that happens: do not re-run the same command in the foreground
-(it blocks you, and the host may auto-background it anyway — just as invisible to the user), and do
-not hand-roll a background process inside a foreground command line (`cmd &`, `nohup`). Open the
-terminal; you lose nothing, because you can still be woken up when it finishes (see below).
+- the user may want to step in: interactive steps, confirmations, something they may need to stop
+  midway or rescue when it fails
+- it keeps running and the user will want to find it later (dev server, watch mode, log tailing)
+- you want to hand the user something to look at (a test run they asked to watch, a build they are
+  waiting on)
 
 **Do not use it** for quick one-shot commands (`ls`, `grep`, `git status`, reading files): your
 own tools are faster, and a pile of one-second terminals is just noise to the user.
@@ -131,9 +124,8 @@ is still running: `read` to see where it is, then decide whether to keep waiting
 whether it succeeded. Read the result off its output line `# exited exit=<code>` (`list` shows the
 same). A non-zero exit from `wait` itself means the wait timed out or the id was wrong.
 
-**Keep working, and be woken up when it finishes.** `wait` blocks, so put it in *your own background
-Bash* — that is the one backgrounded call the plugin allows, because the work itself is already
-visible to the user in the terminal:
+**Keep working, and be woken up when it finishes.** `wait` blocks, so run it as a backgrounded Bash
+call of your own:
 
 1. `cofluxd terminal new --title="Run the test suite" --cmd="pnpm -C tests test"` → prints a taskId.
 2. Run `cofluxd terminal wait <taskId>` as a backgrounded Bash call, then go do something else.
