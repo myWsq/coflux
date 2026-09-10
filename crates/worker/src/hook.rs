@@ -36,7 +36,7 @@ const MAX_HEAD_BYTES: usize = 8 * 1024;
 const MAX_BODY_BYTES: usize = 4 * 1024;
 /// `/agent` 体上限：要装得下 64 KB 的 send 文本或 16 KB 的命令行加 JSON 封包（plan 094，与 MCP 对齐）。
 const MAX_AGENT_BODY_BYTES: usize = 128 * 1024;
-/// `terminal.new` 命令行上限：与中心 `MAX_TERMINAL_COMMAND_BYTES` 同值。
+/// `terminal.new` 命令行上限：与中心 `MAX_TERMINAL_COMMAND_BYTES` 同值（空命令 = 会话终端，不受此限）。
 const MAX_COMMAND_BYTES: usize = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 /// 等待 main 消费任务完成 pid 反查的上限（含一次 spawn_blocking 进程树扫描）。
@@ -279,9 +279,8 @@ async fn handle_agent(
         .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
     let action = match parsed.action.as_str() {
         "terminal.new" => {
-            if parsed.command.trim().is_empty() {
-                return Err(RequestError::BadRequest("terminal.new 缺 command".into()));
-            }
+            // 命令为空 = 会话终端（plan 101）：不带命令即开一个常驻、全 tty 的登录 shell，
+            // 直到有人输入 exit 才结束；带命令的作业终端语义不变，上限只对非空命令生效。
             if parsed.command.len() > MAX_COMMAND_BYTES {
                 return Err(RequestError::BadRequest(format!(
                     "terminal.new 命令超过 {MAX_COMMAND_BYTES} 字节上限"
