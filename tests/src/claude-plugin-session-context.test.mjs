@@ -18,13 +18,17 @@ const PLUGIN = `${ROOT}integrations/claude-plugin/`;
 const SCRIPT = `${PLUGIN}scripts/session-context.sh`;
 
 function run(env = {}) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = execFile(
       "sh",
       [SCRIPT],
       { env: { PATH: process.env.PATH, ...env }, timeout: 10000 },
       (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr }),
     );
+    // 脚本只读环境变量，可能在 stdin 写入前退出；仍以进程退出码和输出判定结果。
+    child.stdin.on("error", (error) => {
+      if (error.code !== "EPIPE") reject(error);
+    });
     child.stdin.end(JSON.stringify({ hook_event_name: "SessionStart", source: "startup", session_id: "s-1", cwd: "/repo" }));
   });
 }
