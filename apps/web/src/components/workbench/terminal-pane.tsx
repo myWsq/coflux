@@ -450,8 +450,13 @@ export function TerminalPane(props: TerminalPaneProps) {
   }, [props.active]);
 
   // Tab 切换用 display 隐藏而非卸载：卸载 xterm 会丢 scrollback 与选区。
+  // pointer-events-auto：面板层整体是 pointer-events-none（plan 103，见 terminal-panes.tsx），
+  // 只有当前可见的面板把鼠标事件（选区、链接、拖拽上传）收回来。
   return (
-    <div className={props.active ? "absolute inset-0 block" : "absolute inset-0 hidden"} aria-hidden={!props.active}>
+    <div
+      className={props.active ? "pointer-events-auto absolute inset-0 block" : "absolute inset-0 hidden"}
+      aria-hidden={!props.active}
+    >
       <div ref={hostRef} className={`h-full w-full pb-3 pl-3 pt-2${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
       {isDraggingFile ? (
         <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-lg border border-warning/20 bg-warning/10 text-sm font-medium text-warning backdrop-blur">
