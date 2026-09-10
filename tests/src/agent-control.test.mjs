@@ -24,7 +24,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
-import { startStack } from "./harness.mjs";
+import { mkRepo, startStack } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
 
 const PORT = 8857;
@@ -384,11 +384,16 @@ test("安全边界：coflux 会话之外的 pid 一律拒；非 json 被拒；�
  *
  * PTY 自己的 cwd 保持在 A，每条命令用子 shell `(cd <B> && …)` 改 cwd——这正是 agent 挪窝后的形态：
  * 会话没重开、归属没变，变的只是调用方的工作目录。
+ *
+ * A 是目录工作区（terminalCreate），B 只能是**仓库工作区**：terminalCreate 按设备幂等，每台设备至多
+ * 一个目录工作区（hub.ts 的 dir 工作区复用），第二次 terminalCreate 会静默复用 A 而不是建 B。导一个
+ * 真 git 仓库进来，它的主工作区就是同设备上的另一个工作区，且照样进 daemon 的工作区清单。
  */
 test("跟随 cwd：在 B 的目录里开的终端属 B、跑在 B；list 只见 B；跨工作区 read/send/wait 404；工作区之外落回 A", async () => {
   const homeA = mkDir();
-  const homeB = mkDir();
   const outside = mkDir(); // 不注册成工作区：cwd 落在任何工作区之外
+  const repoB = mkRepo();
+  let homeB; // B 工作区在中心登记的路径（= repoB.dir；mkRepo 不做 realpath，正好验证两边规范化）
   const device = await openRelayDevice(stack);
   const c = device.control;
   const { ws: wsA, task } = await startDirTerminal(c, homeA);
@@ -417,10 +422,12 @@ test("跟随 cwd：在 B 的目录里开的终端属 B、跑在 B；list 只见 
 
   let wsB;
   try {
-    // B 必须经中心建：daemon 的工作区表只认中心下发的清单，waitWorkspaceReady 等它同步到位
-    c.send({ case: "terminalCreate", daemonId: stack.daemonId, path: homeB });
-    const createdB = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.path === homeB, "B 工作区建好");
+    // B 经中心建：导入一个真仓库，它的主工作区就是同设备上的第二个工作区（目录工作区一台设备只有一个）。
+    // waitWorkspaceReady 等它进 daemon 的工作区表——cwd 解析就是查那张表。
+    c.send({ case: "projectImport", daemonId: stack.daemonId, path: repoB.dir });
+    const createdB = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "B 主工作区建好", 30000);
     wsB = createdB.workspace;
+    homeB = wsB.path;
     await device.waitWorkspaceReady(wsB.id, 20000);
 
     // 1) cofluxd workspace 三种 cwd 下都要说对话
@@ -461,8 +468,16 @@ test("跟随 cwd：在 B 的目录里开的终端属 B、跑在 B；list 只见 
       20000,
     );
     const bReadText = await runIn(homeB, `terminal read ${inWsB.task.id}`, (s) => s.includes("exited"), "读 B 里那个终端");
-    assert.ok(bReadText.includes(homeB), `命令必须在 B 的根目录里跑: ${bReadText}`);
-    assert.ok(!bReadText.includes(homeA), `绝不能落在 A 的 checkout 里（沉默错位）: ${bReadText}`);
+    // macOS 的临时目录是 /var → /private/var 的符号链接：登记路径与 shell 里 pwd 打出来的物理路径
+    // 可能是同一目录的两种写法，两种都算数（daemon 的匹配本来就两边规范化）。
+    const bPhysical = realpathSync(homeB);
+    assert.ok(
+      bReadText.includes(homeB) || bReadText.includes(bPhysical),
+      `命令必须在 B 的根目录里跑（登记路径 ${homeB} / 物理路径 ${bPhysical}）: ${bReadText}`,
+    );
+    // A 独有的标记（临时目录名前缀）不能出现——出现就说明命令落回了 A 的 checkout，正是本 plan 要根治的沉默错位
+    const aMarker = homeA.slice(homeA.lastIndexOf("/") + 1);
+    assert.ok(!bReadText.includes(aMarker), `绝不能落在 A 的 checkout 里（沉默错位）: ${bReadText}`);
 
     // 3) list 跟随 cwd：B 的目录里只见 B 的终端，A 的发起终端不在其中
     const listInB = await runIn(homeB, "terminal list", (s) => s.includes(inWsB.task.id), "B 的 cwd 下 list");
@@ -495,8 +510,18 @@ test("跟随 cwd：在 B 的目录里开的终端属 B、跑在 B；list 只见 
     assert.equal(backTask.task.workspaceId, wsA.id, "cwd 在工作区之外时必须落回归属工作区 A");
 
   } finally {
-    if (wsB) await removeWorkspace(c, wsB.id);
-    await removeWorkspace(c, wsA.id);
-    device.close();
+    // 主工作区不能单删（"主工作区不能删除（要删就删整个项目）"），走 projectRemove 整项目删。
+    // 再套一层 finally：B 的清理失败也不能带走 A 的清理——目录工作区按设备幂等，漏清理会让后续用例
+    // 拿到复用路径而级联超时。
+    try {
+      if (wsB) {
+        c.send({ case: "projectRemove", projectId: wsB.projectId });
+        await c.waitFor((m) => m.case === "projectRemoved" && m.projectId === wsB.projectId, "cleanup B 项目删掉", 30000);
+      }
+    } finally {
+      await removeWorkspace(c, wsA.id);
+      device.close();
+      repoB.cleanup();
+    }
   }
 });
