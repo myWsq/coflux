@@ -19,6 +19,9 @@ export function MainPage() {
       buildId: BUILD_ID,
       // 桌面渲染层随 app 打包，reload 拿不到新 bundle：版本失配直接进 outdated 状态页，由 app 触发更新检查。
       reloadOnOutdated: desktop === null,
+      // 中心离线也能冷启动看本机终端（plan 103）：桌面把最近一次目录快照落 localStorage（按服务器地址分 key），
+      // 首连拿不到 authOk 时装载缓存进工作台，RUNNING 终端经缓存的 loopback grant attach。浏览器不传、行为零变化。
+      offlineCatalog: desktop ? { storage: localStorage, key: `coflux_offline_catalog:${SERVER_URL}` } : undefined,
       deviceTransport: {
         enableLocalTransport: true,
         identityDatabaseName: "coflux-web-device-v1",

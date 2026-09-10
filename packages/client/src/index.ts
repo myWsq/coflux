@@ -16,6 +16,8 @@ export {
   type TaskReadResult,
   type TaskReadSource,
   type DeviceTransportOptions,
+  type OfflineCatalogOptions,
+  type OfflineCatalogStorage,
   type LocalSessionState,
   type SessionAgentState,
   type WorkspaceActivity,
