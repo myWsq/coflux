@@ -13,15 +13,13 @@ import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/
 import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
 import { ClawdGlyph } from "@/components/workbench/clawd-glyph";
-import { TerminalPane, type TerminalController, type TerminalControlState } from "@/components/workbench/terminal-pane";
+import type { TerminalAttach } from "@/components/workbench/terminal-attach";
+import type { TerminalControlState } from "@/components/workbench/terminal-pane";
 import {
   resolveActiveTaskId,
   resolveActiveTaskIdAfterPendingDrop,
   shouldActivateChangesView,
 } from "@/components/workbench/workbench-state";
-
-// attach 后即使无 ptyOutput 回放（空 scrollback）也要在 500ms 后判定 owned；有输出则立即 owned。
-const ATTACH_GRACE_MS = 500;
 
 // 乐观 tab（plan 078）的本地兜底：taskCreate 既没广播成功也没广播错误时撤掉 pending tab，
 // 避免永久滞留。
@@ -59,12 +57,21 @@ function AgentGlyph({
 }
 
 
+/** 活动 Tab 上报（plan 103）：面板可见性与 attach 门禁都在 Workbench 层判定，
+ * 容器每次改动活动 Tab / 视图都要同步告诉它。 */
+export type WorkspaceActiveTab = { taskId: string | null; viewIsTerminal: boolean };
+
 type WorkspaceTerminalProps = {
   workspaceId: string;
   /** 是否为当前显示的工作区：隐藏时保持挂载与 attach，仅切回时 fit + focus。 */
   active: boolean;
   client: CofluxClient;
   onCloseTask: (task: Task) => void;
+  /** 终端面板与接管状态机已提升到 Workbench（plan 103）：容器只借它读控制态、发起激活。 */
+  attach: TerminalAttach;
+  /** 被搬进本工作区、必须继续当活动 Tab 的终端（plan 103）；一次性，Workbench 下发后即清除。 */
+  followTaskId: string | null;
+  onActiveTabChange: (workspaceId: string, active: WorkspaceActiveTab) => void;
 };
 
 /**
@@ -83,7 +90,7 @@ export type WorkspaceTerminalHandle = {
 };
 
 export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTerminalProps>(function WorkspaceTerminal(
-  { workspaceId, active, client, onCloseTask },
+  { workspaceId, active, client, onCloseTask, attach, followTaskId, onActiveTabChange },
   ref,
 ) {
   const workspace = useStore(client.store, (state) => state.workspaces.find((item) => item.id === workspaceId));
@@ -99,7 +106,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       state.tasks.filter((task) => task.workspaceId === workspaceId).sort((left, right) => left.createdAt - right.createdAt),
     ),
   );
-  const detachedTaskIds = useStore(client.store, (state) => state.detachedTaskIds);
   const daemons = useStore(client.store, (state) => state.daemons);
   const modPrefix = shortcutModifierPrefix(useIsStandalone());
   const lastError = useStore(client.store, (state) => state.lastError);
@@ -131,59 +137,43 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   const [view, setView] = useState<"terminal" | "changes">("terminal");
   /** 切换分支中：目标分支名（按钮 pending 态；成功由 daemon 上报驱动 branch 变更后自动清除） */
   const [pendingBranch, setPendingBranch] = useState<string | null>(null);
-  const [controlStates, setControlStatesState] = useState<Record<string, TerminalControlState>>({});
   const [creating, setCreating] = useState(false);
   // 乐观终端 tab（plan 078）：taskCreate 发出后下一帧即出现并被选中。只动视图态——
-  // 不进 activationRequestsRef / attach 状态机、不挂 TerminalPane，假 id 不产生任何请求。
+  // 不进接管状态机、不挂 TerminalPane（面板按真实 task id 挂在 Workbench 层），假 id 不产生任何请求。
   // createTerminal 有 pendingCreateRef 单发门禁，同一工作区同一时刻至多一个 pending tab。
   const [pendingTab, setPendingTab] = useState<{ id: string; title: string } | null>(null);
   const pendingTabRef = useRef<{ id: string; title: string } | null>(null);
   const pendingTabTimerRef = useRef<number | undefined>(undefined);
   const pendingTabSeqRef = useRef(0);
 
-  // 接管状态机的非响应式内部账本：只驱动副作用，不驱动渲染（landmine 17：
-  // Solid 组件体只跑一次、这些 Map/Set 天然是长生命周期闭包；React 每次渲染都跑组件体，
-  // 必须挪进 useRef 才能跨渲染保持同一份引用）。
-  const controllersRef = useRef(new Map<string, TerminalController>());
-  const sessionReadyRef = useRef(new Map<string, string>()); // taskId -> 已注册 consumer 的 sessionId
-  const attachedKeysRef = useRef(new Map<string, string>()); // taskId -> attach 去重 key
-  const attachTimersRef = useRef(new Map<string, number>());
-  const attachSequenceRef = useRef(0);
-  const launchingTaskIdsRef = useRef(new Set<string>()); // 自己发起启动（非 attach）的任务
-  const activationRequestsRef = useRef(new Set<string>());
-  const forcedClaimsRef = useRef(new Set<string>());
   const pendingCreateRef = useRef<{ knownTaskIds: Set<string> } | null>(null);
   // 完成态看过一次就不再撒花：按 sessionId 记，下一轮又干活时清掉。
   const seenDoneRef = useRef(new Set<string>());
-  // 已退出终端回放（plan 097）的账本：
-  // lastSessionRef：task 最近一次已知的 sessionId（退出时中心会清空 task.sessionId，这里留底）；
-  // liveOutputRef：本面板收到过输出的 sessionId（「看着它退出」的判据——画面已是全量滚屏，只追加提示不清屏）；
-  // historyShownRef：已回放或已写退出提示的那一轮退出（按 task.updatedAt），同一轮不重复请求；
-  // lastStatusRef：上一次看到的状态，用于识别 RUNNING→EXITED 的瞬间。
-  const lastSessionRef = useRef(new Map<string, string>());
-  const liveOutputRef = useRef(new Map<string, string>());
-  const historyShownRef = useRef(new Map<string, number>());
-  const lastStatusRef = useRef(new Map<string, TaskStatus>());
 
-  // activeTaskId/controlStates 的同步镜像：imperative 函数需要在 setState 后立即读到"当下"值
+  // activeTaskId/view 的同步镜像：imperative 函数需要在 setState 后立即读到"当下"值
   // （对应 Solid 信号的同步读语义），而 React state 变量本身要等下一次渲染才更新，故用 ref 双轨。
+  // 上报给 Workbench 的活动 Tab 也读这两份 ref：面板可见性与 attach 门禁靠它，慢一拍就会误判。
   const activeTaskIdRef = useRef<string | null>(null);
-  const controlStatesRef = useRef<Record<string, TerminalControlState>>({});
-  // active prop 的镜像：handleSessionReady 等回调由子组件 effect 在任意渲染代触发，
-  // 直接闭包捕获 active 会读到过期值（landmine），渲染期同步赋值即可，无需 useEffect。
-  const activeRef = useRef(active);
-  activeRef.current = active;
+  const viewRef = useRef<"terminal" | "changes">("terminal");
+  // onActiveTabChange 的镜像：上报由 effect / 定时器在任意渲染代触发，直接闭包捕获会读到过期的 prop
+  // （同 landmine：React 每次渲染都换一份闭包）。
+  const reportRef = useRef(onActiveTabChange);
+  reportRef.current = onActiveTabChange;
+
+  function reportActiveTab() {
+    reportRef.current(workspaceId, { taskId: activeTaskIdRef.current, viewIsTerminal: viewRef.current === "terminal" });
+  }
 
   function updateActiveTaskId(taskId: string | null) {
     activeTaskIdRef.current = taskId;
     setActiveTaskIdState(taskId);
+    reportActiveTab();
   }
 
-  function updateControlState(taskId: string, state: TerminalControlState) {
-    if (controlStatesRef.current[taskId] === state) return;
-    const next = { ...controlStatesRef.current, [taskId]: state };
-    controlStatesRef.current = next;
-    setControlStatesState(next);
+  function updateView(next: "terminal" | "changes") {
+    viewRef.current = next;
+    setView(next);
+    reportActiveTab();
   }
 
   // untrack(workspaceTasks) 的对应物：直接读 store 当下状态，不经由本次渲染闭包捕获的
@@ -195,174 +185,11 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       .sort((left, right) => left.createdAt - right.createdAt);
   }
 
-  function clearAttachTimer(taskId: string) {
-    const timer = attachTimersRef.current.get(taskId);
-    if (timer !== undefined) window.clearTimeout(timer);
-    attachTimersRef.current.delete(taskId);
-  }
-
-  // 拿到控制权后必须 fit + focus + ptyResize：把本端尺寸推给 PTY，
-  // 否则远端 PTY 保持上一个 holder 的尺寸导致排版错乱。
-  function markOwned(taskId: string, sessionId: string) {
-    const task = currentTasks().find((item) => item.id === taskId);
-    if (!task || task.status !== TaskStatus.RUNNING || task.sessionId !== sessionId) return;
-    if (controlStatesRef.current[taskId] === "detached") return;
-    clearAttachTimer(taskId);
-    updateControlState(taskId, "owned");
-    if (activeTaskIdRef.current === taskId) {
-      const controller = controllersRef.current.get(taskId);
-      if (!controller) return;
-      controller.fit();
-      controller.focus();
-      const { cols, rows } = controller.dimensions();
-      client.resizeSession(sessionId, cols, rows);
-    }
-  }
-
-  // DeviceRouter 自行处理 direct/relay generation 迁移；组件只按 session 去重用户级 attach。
-  // 强制接管用递增序列 key 绕过去重，且显式传给 router 清除 detached 门闩。
-  function beginAttach(task: Task, controller: TerminalController, force = false) {
-    if (task.status !== TaskStatus.RUNNING || !task.sessionId) return;
-    if (sessionReadyRef.current.get(task.id) !== task.sessionId) return;
-    const attachKey = force
-      ? `claim:${++attachSequenceRef.current}:${task.sessionId}`
-      : `session:${task.sessionId}`;
-    if (!force && attachedKeysRef.current.get(task.id) === attachKey) return;
-
-    attachedKeysRef.current.set(task.id, attachKey);
-    updateControlState(task.id, "attaching");
-    const { cols, rows } = controller.dimensions();
-    client.startTask(task.id, cols, rows, force);
-    clearAttachTimer(task.id);
-    attachSequenceRef.current += 1;
-    const timer = window.setTimeout(() => {
-      if (controlStatesRef.current[task.id] === "attaching") markOwned(task.id, task.sessionId!);
-    }, ATTACH_GRACE_MS);
-    attachTimersRef.current.set(task.id, timer);
-  }
-
-  function performActivation(taskId: string) {
-    const task = currentTasks().find((item) => item.id === taskId);
-    const controller = controllersRef.current.get(taskId);
-    if (!task || !controller) return;
-
-    controller.fit();
-    controller.focus();
-    if (task.status === TaskStatus.RUNNING && task.sessionId) {
-      if (sessionReadyRef.current.get(taskId) !== task.sessionId) return;
-      activationRequestsRef.current.delete(taskId);
-      const force = forcedClaimsRef.current.delete(taskId) || controlStatesRef.current[taskId] === "detached";
-      // 隐藏实例的自动激活（workspaceTasks 效果里"无 currentActive 时选第一个任务"）也会
-      // 走到这里：本实例不可见时不申请控制权，否则旁观端打开页面会把每个隐藏工作区的
-      // 第一个任务都抢一遍。点击 Tab / 快捷键触发的 performActivation 只可能发生在可见实例，不受影响。
-      if (activeRef.current) beginAttach(task, controller, force);
-      return;
-    }
-
-    activationRequestsRef.current.delete(taskId);
-    forcedClaimsRef.current.delete(taskId);
-    if (launchingTaskIdsRef.current.has(taskId)) return;
-    // EXITED（plan 097）：回放最后输出，不再悄悄重开 shell——重开是横幅上的显式动作（reopenTask）。
-    if (task.status === TaskStatus.EXITED) {
-      showExitedHistory(task, controller);
-      return;
-    }
-    // IDLE（刚创建尚未启动）：自动启动，行为不变。
-    launchTask(taskId, controller);
-  }
-
-  function launchTask(taskId: string, controller: TerminalController) {
-    launchingTaskIdsRef.current.add(taskId);
-    updateControlState(taskId, "attaching");
-    const { cols, rows } = controller.dimensions();
-    client.startTask(taskId, cols, rows);
-  }
-
-  /** 横幅「重新打开」（plan 097）：在同一个 Tab 里起新 shell。重启前 reset 终端，避免旧输出与新会话混叠。 */
-  function reopenTask(taskId: string) {
-    const task = currentTasks().find((item) => item.id === taskId);
-    const controller = controllersRef.current.get(taskId);
-    if (!task || !controller || task.status !== TaskStatus.EXITED) return;
-    if (launchingTaskIdsRef.current.has(taskId)) return;
-    controller.reset();
-    launchTask(taskId, controller);
-  }
-
-  function exitedNotice(task: Task): { message: string; tone: "success" | "error" | "warning" } {
-    if (task.exitCode === undefined) return { message: "进程已退出（退出码未知）", tone: "warning" };
-    return { message: `进程已退出（退出码 ${task.exitCode}）`, tone: task.exitCode === 0 ? "success" : "error" };
-  }
-
-  /** 回放已退出终端的最后输出（plan 097）。同一轮退出（task.updatedAt）只做一次；面板若亲眼收到过本轮会话的
-   * 输出，画面已是全量滚屏，只追加退出提示、不用历史覆盖（历史只是当前画面的子集，覆盖会丢 scrollback）。
-   * 其余情况经中心一次 taskRead：log 是命令终端的非 tty 纯文本日志、snapshot/checkpoint 是 ANSI 屏幕。 */
-  function showExitedHistory(task: Task, controller: TerminalController) {
-    const round = task.updatedAt;
-    if (historyShownRef.current.get(task.id) === round) return;
-    historyShownRef.current.set(task.id, round);
-    const notice = exitedNotice(task);
-    const lastSession = lastSessionRef.current.get(task.id);
-    if (lastSession && liveOutputRef.current.get(task.id) === lastSession) {
-      controller.writeSystem(notice.message, notice.tone);
-      return;
-    }
-    void client.readTask(task.id).then((result) => {
-      // 结果晚于「重新打开」到达（task 已 RUNNING 或又换了一轮）或面板已重建时丢弃，不能覆盖新 shell 的画面。
-      const current = currentTasks().find((item) => item.id === task.id);
-      if (!current || current.status !== TaskStatus.EXITED || current.updatedAt !== round) return;
-      if (controllersRef.current.get(task.id) !== controller) return;
-      controller.reset();
-      if (!result.ok) {
-        controller.writeSystem(`读取最后输出失败：${result.error}`, "error");
-      } else if (result.source === "log") {
-        // 命令日志是非 tty 纯文本（\n 换行）；xterm 不开 convertEol（活会话语义），只在这里补 \r。
-        controller.writeRaw(new TextDecoder().decode(result.data).replace(/\r?\n/g, "\r\n"));
-      } else if (result.source !== "none") {
-        controller.writeRaw(result.data);
-      }
-      controller.writeSystem(notice.message, notice.tone);
-    });
-  }
-
+  /** 激活某个终端 Tab：选中态归本容器，接管/回放归提升到 Workbench 的状态机（plan 103）。 */
   function requestActivation(taskId: string, forceClaim = false) {
-    setView("terminal"); // 任何终端 Tab 的激活（点击/键盘/新建）都切回终端视图，与「变更」互斥
+    updateView("terminal"); // 任何终端 Tab 的激活（点击/键盘/新建）都切回终端视图，与「变更」互斥
     updateActiveTaskId(taskId);
-    activationRequestsRef.current.add(taskId);
-    if (forceClaim) forcedClaimsRef.current.add(taskId);
-    requestAnimationFrame(() => performActivation(taskId));
-  }
-
-  function handleTerminalReady(taskId: string, controller: TerminalController) {
-    controllersRef.current.set(taskId, controller);
-    if (activationRequestsRef.current.has(taskId)) performActivation(taskId);
-  }
-
-  function handleTerminalDispose(taskId: string, controller: TerminalController) {
-    if (controllersRef.current.get(taskId) === controller) controllersRef.current.delete(taskId);
-    sessionReadyRef.current.delete(taskId);
-    clearAttachTimer(taskId);
-  }
-
-  // durable create 完成后仍需做第一次 live attach；startTask 看到 RUNNING task 会走本地 lane，
-  // 不会再次请求中心创建。
-  function handleSessionReady(taskId: string, sessionId: string, controller: TerminalController) {
-    sessionReadyRef.current.set(taskId, sessionId);
-    const task = currentTasks().find((item) => item.id === taskId);
-    if (!task || task.sessionId !== sessionId || task.status !== TaskStatus.RUNNING) return;
-
-    if (launchingTaskIdsRef.current.delete(taskId)) {
-      beginAttach(task, controller, false);
-    } else if (activeRef.current && activeTaskIdRef.current === taskId) {
-      // 只有本实例可见（用户正在看这个工作区）且该任务是激活 Tab 时才主动申请控制权；
-      // 后台面板 / 隐藏工作区 / 旁观页面里的非激活任务不发 taskStart，不抢占对端 holder。
-      beginAttach(task, controller, false);
-    }
-    if (activationRequestsRef.current.has(taskId)) performActivation(taskId);
-  }
-
-  function handleOutput(taskId: string, sessionId: string) {
-    liveOutputRef.current.set(taskId, sessionId);
-    if (controlStatesRef.current[taskId] === "attaching") markOwned(taskId, sessionId);
+    attach.requestActivation(taskId, forceClaim);
   }
 
   // 分支切换：checkout 在本 worktree 内经 Device exec 完成，成功后同步元数据（workspaceSetBranch）。
@@ -414,8 +241,8 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     updatePendingTab(pending);
     setCreating(true);
     // 乐观选中：任何终端 Tab 的激活都切回终端视图；不调用 requestActivation——
-    // 那会进 activationRequestsRef 并在 rAF 里 performActivation，假 id 绝不能碰那条路。
-    setView("terminal");
+    // 那会进接管状态机的 activationRequests 并在 rAF 里 performActivation，假 id 绝不能碰那条路。
+    updateView("terminal");
     updateActiveTaskId(pending.id);
     pendingTabTimerRef.current = window.setTimeout(() => {
       pendingCreateRef.current = null;
@@ -454,46 +281,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   }
 
   useEffect(() => {
-    const ids = new Set(workspaceTasks.map((task) => task.id));
-    for (const taskId of [...attachedKeysRef.current.keys()]) {
-      if (!ids.has(taskId)) {
-        attachedKeysRef.current.delete(taskId);
-        sessionReadyRef.current.delete(taskId);
-        launchingTaskIdsRef.current.delete(taskId);
-        activationRequestsRef.current.delete(taskId);
-        forcedClaimsRef.current.delete(taskId);
-        clearAttachTimer(taskId);
-      }
-    }
-
-    for (const taskId of [...lastStatusRef.current.keys()]) {
-      if (ids.has(taskId)) continue;
-      lastStatusRef.current.delete(taskId);
-      lastSessionRef.current.delete(taskId);
-      liveOutputRef.current.delete(taskId);
-      historyShownRef.current.delete(taskId);
-    }
-
-    for (const task of workspaceTasks) {
-      if (task.sessionId) lastSessionRef.current.set(task.id, task.sessionId);
-      const previousStatus = lastStatusRef.current.get(task.id);
-      lastStatusRef.current.set(task.id, task.status);
-      if (task.status !== TaskStatus.RUNNING) {
-        attachedKeysRef.current.delete(task.id);
-        sessionReadyRef.current.delete(task.id);
-        if (!launchingTaskIdsRef.current.has(task.id)) updateControlState(task.id, "stopped");
-      }
-      // 看着它退出（plan 097）：RUNNING→EXITED 的瞬间，面板有本轮会话的输出就只追加退出提示；
-      // 没收到过输出但正是当前 Tab 的，立即回放（之后不会再有激活来触发）。其余留到 Tab 被激活时再回放。
-      if (previousStatus === TaskStatus.RUNNING && task.status === TaskStatus.EXITED) {
-        const controller = controllersRef.current.get(task.id);
-        if (!controller) continue;
-        const lastSession = lastSessionRef.current.get(task.id);
-        const sawLive = Boolean(lastSession && liveOutputRef.current.get(task.id) === lastSession);
-        if (sawLive || activeTaskIdRef.current === task.id) showExitedHistory(task, controller);
-      }
-    }
-
     if (pendingCreateRef.current) {
       const created = workspaceTasks.find((task) => !pendingCreateRef.current!.knownTaskIds.has(task.id));
       if (created) {
@@ -511,30 +298,20 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       currentActive,
       workspaceTasks.map((task) => task.id),
       pendingTabRef.current?.id ?? null,
+      followTaskId,
     );
     if (nextActive === currentActive) return;
+    // 活动 Tab 被搬去别的工作区（plan 103）也走这条回退：此时本工作区已经不可见（选中态跟着
+    // 终端过去了），提升后的状态机按"面板可见"门禁，绝不会顺手 attach 这里的兄弟 Tab。
     if (nextActive) requestActivation(nextActive);
     else updateActiveTaskId(null);
     // 只跟踪 workspaceTasks（对应 Solid `on(workspaceTasks, ...)` 的显式单一依赖），
-    // 回调内其余状态一律读 ref/store 当下值，不纳入依赖数组。
+    // 回调内其余状态一律读 ref/store 当下值，不纳入依赖数组；followTaskId 与 workspaceTasks
+    // 同批到达（Workbench 在 store 订阅里同步定下跟随），本次运行读到的就是最终值。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceTasks]);
 
-  // Device holder 被他端接管 → 置 detached、清 attach key、终端内写系统提示行。
-  // 重新接管走 force claim（Tab 点击或横幅按钮）。
-  useEffect(() => {
-    for (const taskId of detachedTaskIds) {
-      const task = currentTasks().find((item) => item.id === taskId);
-      if (!task || controlStatesRef.current[taskId] === "detached") continue;
-      clearAttachTimer(taskId);
-      attachedKeysRef.current.delete(taskId);
-      updateControlState(taskId, "detached");
-      controllersRef.current.get(taskId)?.writeSystem("控制权已被其它客户端接管，点击此 Tab 可重新接管");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detachedTaskIds]);
-
-  // error 消息到达时清 pending 创建态与 launching 态（taskCreate/taskStart 失败兜底）。
+  // error 消息到达时清 pending 创建态（taskCreate 失败兜底）；launching 态归提升后的状态机清。
   useEffect(() => {
     if (!lastError) return;
     if (pendingCreateRef.current) {
@@ -542,51 +319,16 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
       setCreating(false);
     }
     dropPendingTab();
-    for (const taskId of launchingTaskIdsRef.current) updateControlState(taskId, "stopped");
-    launchingTaskIdsRef.current.clear();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastError]);
 
-  // 工作区从隐藏切回显示：重新 fit（隐藏期间尺寸为 0，ResizeObserver 的 fit 被 no-op 掉）并聚焦；
-  // 激活 Tab 若隐藏期间从未 attach，在此补一次 beginAttach。transport 重连由 DeviceRouter
-  // 自己迁移，不再借中心 snapshotRevision 重抢 holder。detached 显式排除：必须用户点击。
-  useEffect(() => {
-    if (!active) return;
-    const frame = requestAnimationFrame(() => {
-      const taskId = activeTaskIdRef.current;
-      if (!taskId) return;
-      const controller = controllersRef.current.get(taskId);
-      controller?.fit();
-      controller?.focus();
-      const task = currentTasks().find((item) => item.id === taskId);
-      if (
-        task &&
-        controller &&
-        task.status === TaskStatus.RUNNING &&
-        task.sessionId &&
-        sessionReadyRef.current.get(taskId) === task.sessionId &&
-        controlStatesRef.current[taskId] !== "detached"
-      ) {
-        beginAttach(task, controller, false);
-      }
-    });
-    return () => cancelAnimationFrame(frame);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active]);
-
   useEffect(() => {
     return () => {
-      for (const timer of attachTimersRef.current.values()) window.clearTimeout(timer);
-      attachTimersRef.current.clear();
       if (pendingTabTimerRef.current !== undefined) window.clearTimeout(pendingTabTimerRef.current);
     };
   }, []);
 
-  // RUNNING 且尚未（且可能永不）发起 attach 的任务（后台面板 / 隐藏工作区 / 旁观页面）
-  // 回落为 "idle"：Tab 图标呈中性终端图标，不是永转的 attaching spinner。
-  function stateOf(task: Task): TerminalControlState {
-    return controlStates[task.id] ?? (task.status === TaskStatus.RUNNING ? "idle" : "stopped");
-  }
+  const stateOf = attach.stateOf;
 
   const activeTask = workspaceTasks.find((task) => task.id === activeTaskId) ?? null;
   const activeControlState: TerminalControlState = activeTask ? stateOf(activeTask) : "stopped";
@@ -611,11 +353,14 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     },
   }));
 
+  // 容器只出顶栏与主体覆盖层，终端面板由 Workbench 层统一挂（plan 103）。外层包一层
+  // display:contents（见 workbench.tsx），这两块直接落进工作台的两行网格：顶栏一行、主体一行，
+  // 主体与面板层共用同一个网格单元。
   return (
-    <section className="flex min-w-0 flex-1 flex-col bg-terminal">
+    <>
       {/* 单栏顶栏：名称（如有）＋ 可点的分支按钮 │ 终端 Tabs（Tab 用间距而非竖线分隔）＋ 新建/端口。
           目录工作区（设备详情，plan 048）保留 Tabs/新建/端口，不渲染分支按钮与「变更」tab。 */}
-      <header className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-background px-3">
+      <header className="col-start-1 row-start-1 flex h-9 min-w-0 items-center gap-2 border-b border-border bg-background px-3">
         {isDirWorkspace ? null : (
           <>
             <BranchMenu
@@ -647,7 +392,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                   ? "bg-accent text-foreground"
                   : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
               )}
-              onClick={() => setView("changes")}
+              onClick={() => updateView("changes")}
             >
               <FileDiff className={cn("size-3 shrink-0", view === "changes" ? "opacity-90" : "opacity-50")} />
               <span>变更</span>
@@ -755,7 +500,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
               <button
                 className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left"
                 onClick={() => {
-                  setView("terminal");
+                  updateView("terminal");
                   updateActiveTaskId(pendingTab.id);
                 }}
               >
@@ -793,27 +538,9 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
         ) : null}
       </header>
 
-      <div className="relative min-h-0 flex-1 bg-terminal">
-        {/* 面板按 taskId 建立稳定身份（React key）：任务实体更新不重建 xterm（重建会丢 scrollback）。 */}
-        {workspaceTasks.map((task) => (
-          <TerminalPane
-            key={task.id}
-            taskId={task.id}
-            sessionId={task.sessionId ?? null}
-            workspaceId={workspaceId}
-            active={view === "terminal" && task.id === activeTaskId}
-            controlState={stateOf(task)}
-            registerSessionConsumer={client.registerSessionConsumer}
-            sendInput={client.sendInput}
-            sendResize={client.resizeSession}
-            sendFsWrite={client.sendFsWrite}
-            onReady={handleTerminalReady}
-            onDispose={handleTerminalDispose}
-            onSessionReady={handleSessionReady}
-            onOutput={handleOutput}
-          />
-        ))}
-
+      {/* 主体：与面板层同占网格第二行（面板层在 DOM 上排在后面、整层 pointer-events-none，
+          故这里的空态/横幅/「变更」视图照常收得到点击）。 */}
+      <div className="relative col-start-1 row-start-2 min-h-0 min-w-0 bg-terminal">
         {view === "terminal" && pendingTab && activeTaskId === pendingTab.id ? (
           // pending tab 的主区（plan 078）：不挂 TerminalPane（假 id 不产生请求），只显示创建中。
           <div className="absolute inset-0 flex items-center justify-center">
@@ -856,7 +583,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                 ? "此终端已退出，画面是最后的输出。"
                 : `此终端已退出（退出码 ${activeTask.exitCode}），画面是最后的输出。`}
             </span>
-            <Button label="重新打开" variant="secondary" size="sm" onClick={() => reopenTask(activeTask.id)} />
+            <Button label="重新打开" variant="secondary" size="sm" onClick={() => attach.reopenTask(activeTask.id)} />
           </div>
         ) : null}
 
@@ -875,7 +602,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           </div>
         )}
       </div>
-
-    </section>
+    </>
   );
 });
