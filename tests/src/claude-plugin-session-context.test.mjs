@@ -9,7 +9,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -100,4 +101,22 @@ test("插件配置：SessionStart 条目无 matcher 且引用该脚本、缺文�
   assert.ok(major > 0 || minor >= 5, `插件版本必须 ≥ 0.5.0: ${manifest.version}`);
   const skill = readFileSync(`${PLUGIN}skills/coflux/SKILL.md`, "utf8");
   assert.match(skill, /<coflux-session>/, "SKILL 要告诉 agent 坐标在 <coflux-session> 块里");
+});
+
+// 096 定下的约定：插件交付目录（被市场按 SHA 原样收集）里的一切文案全英文。递归扫整个目录而不是列文件名，
+// 新增/删除脚本不用回来改这条用例（098 时这条用例硬编码了文件清单，099 删脚本后就失效了）。
+function walk(dir) {
+  return readdirSync(dir).flatMap((name) => {
+    const path = join(dir, name);
+    return statSync(path).isDirectory() ? walk(path) : [path];
+  });
+}
+
+test("插件目录全英文：没有汉字", () => {
+  const files = walk(PLUGIN);
+  assert.ok(files.some((file) => file.endsWith("hooks.json")) && files.some((file) => file.endsWith("SKILL.md")), "扫描范围要覆盖 hooks.json 与 SKILL.md");
+  for (const file of files) {
+    const text = readFileSync(file, "utf8");
+    assert.doesNotMatch(text, /[一-鿿]/, `${file.slice(ROOT.length)} 里不能有汉字（096 定的插件目录全英文约定）`);
+  }
 });

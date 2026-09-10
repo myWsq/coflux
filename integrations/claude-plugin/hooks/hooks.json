@@ -1,5 +1,5 @@
 {
-  "description": "Forward Claude Code hook events to the local coflux daemon through the cofluxd messenger (silent no-op when cofluxd is not installed); at session start, inside a coflux terminal, print the <coflux-session> block with the session's coflux coordinates; inside a coflux project session, steer `git worktree add|remove|move` to the coflux MCP workspace tools; inside a coflux workspace, deny `Bash(run_in_background: true)` and hand back the equivalent `cofluxd terminal new` so long-running work stays visible in the user's sidebar, and broadcast a `cofluxd progress` line whenever a Bash call still ends up as a background task the user cannot see.",
+  "description": "Forward Claude Code hook events to the local coflux daemon through the cofluxd messenger (silent no-op when cofluxd is not installed); at session start, inside a coflux terminal, print the <coflux-session> block with the session's coflux coordinates; inside a coflux project session, steer `git worktree add|remove|move` to the coflux MCP workspace tools.",
   "hooks": {
     "SessionStart": [
       {
@@ -40,16 +40,6 @@
             "timeout": 10
           }
         ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'command -v node >/dev/null 2>&1 && exec node \"$0\" || :' \"${CLAUDE_PLUGIN_ROOT}/scripts/guard-background-bash.mjs\"",
-            "timeout": 10
-          }
-        ]
       }
     ],
     "PostToolUse": [
@@ -58,16 +48,6 @@
           {
             "type": "command",
             "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'command -v node >/dev/null 2>&1 && exec node \"$0\" || :' \"${CLAUDE_PLUGIN_ROOT}/scripts/report-background-task.mjs\"",
-            "timeout": 10
           }
         ]
       }
