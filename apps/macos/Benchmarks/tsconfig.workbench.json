@@ -1,0 +1,43 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "noEmit": true,
+    "types": [],
+    "paths": {
+      "@/*": [
+        "../../web/src/*"
+      ],
+      "react": [
+        "../../web/node_modules/@types/react"
+      ],
+      "react/*": [
+        "../../web/node_modules/@types/react/*"
+      ],
+      "react-dom/*": [
+        "../../web/node_modules/@types/react-dom/*"
+      ],
+      "*": [
+        "../../web/node_modules/*"
+      ],
+      "@astryxdesign/core/theme": [
+        "../../web/node_modules/@astryxdesign/core/dist/theme/index.d.ts"
+      ],
+      "@astryxdesign/core/Layer": [
+        "../../web/node_modules/@astryxdesign/core/dist/Layer/index.d.ts"
+      ],
+      "@astryxdesign/theme-neutral/built": [
+        "../../web/node_modules/@astryxdesign/theme-neutral/dist/neutral.d.ts"
+      ]
+    }
+  },
+  "include": [
+    "workbench.tsx",
+    "../../web/src/vite-env.d.ts"
+  ]
+}

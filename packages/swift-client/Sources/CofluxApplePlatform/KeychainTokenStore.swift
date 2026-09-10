@@ -35,7 +35,7 @@ public struct KeychainTokenStore: TokenStore, Sendable {
         attributes[kSecReturnData as String] = true
         attributes[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(attributes as CFDictionary, &item)
+        let status = KeychainAccess.perform { SecItemCopyMatching(attributes as CFDictionary, &item) }
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else {
             throw KeychainTokenStoreError(operation: "read", status: status)
@@ -51,13 +51,12 @@ public struct KeychainTokenStore: TokenStore, Sendable {
         var attributes = query
         attributes[kSecValueData as String] = data
         attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let addStatus = SecItemAdd(attributes as CFDictionary, nil)
+        let addStatus = KeychainAccess.perform { SecItemAdd(attributes as CFDictionary, nil) }
         if addStatus == errSecSuccess { return }
         if addStatus == errSecDuplicateItem {
-            let updateStatus = SecItemUpdate(
-                query as CFDictionary,
-                [kSecValueData as String: data] as CFDictionary
-            )
+            let updateStatus = KeychainAccess.perform {
+                SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            }
             guard updateStatus == errSecSuccess else {
                 throw KeychainTokenStoreError(operation: "update", status: updateStatus)
             }
@@ -67,7 +66,7 @@ public struct KeychainTokenStore: TokenStore, Sendable {
     }
 
     public func clear() throws {
-        let status = SecItemDelete(query as CFDictionary)
+        let status = KeychainAccess.perform { SecItemDelete(query as CFDictionary) }
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainTokenStoreError(operation: "clear", status: status)
         }

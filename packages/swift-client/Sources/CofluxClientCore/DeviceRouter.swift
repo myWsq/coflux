@@ -16,7 +16,8 @@ enum DeviceProtocol {
     }
 }
 
-struct DeviceRouteError: Error {
+struct DeviceRouteError: LocalizedError {
+    var errorDescription: String? { message }
     let message: String
     let code: String
     init(_ message: String, code: String = "route_unavailable") {
@@ -39,15 +40,14 @@ struct DeviceRouterCallbacks {
     var onInputBlocked: (_ sessionID: String, _ blocked: Bool) -> Void
     /// 设备面板（plan 077）：session lane 的传输可观测状态——relay 节点 host 与最近一次
     /// RTT。lane 建立/心跳/关闭时上报；nil = 对应读数当前不可得。
-    var onDeviceTransport: (_ daemonID: String, _ relayHost: String?, _ rttMs: Double?) -> Void
+    var onDeviceTransport: (_ daemonID: String, _ relayHost: String?, _ rttMs: Double?, _ mode: String?, _ detail: String) -> Void
 }
 
-/// relay-only Device 数据路由（plan 046）。语义基准 `packages/client/src/device-router.ts` 的
-/// relay 子集：per-daemon route（session/elevated 两条 lane）、transport generation 单调、
+/// Device 数据路由（plan 046/093）。默认 relay，macOS 可注入原生 loopback provider。
+/// 语义基准 `packages/client/src/device-router.ts`：per-daemon route（session/elevated 两条 lane）、transport generation 单调、
 /// attach 三重匹配 + snapshot/resume、输入/resize 台账与累计 ACK 重投、prepared operation
-/// 台账、按需建连与空闲释放。direct/loopback、pair/lease、心跳、fsList/fsRead/execRun 不移植
-/// （iOS 永不与 daemon 同机；ceiling 见 plan 046 Maintenance）；fsWrite 已移植（plan 071，
-/// 终端文件/图片上传经它落盘取回绝对路径）。
+/// 台账、按需建连与空闲释放。原生 provider 处理 pair/lease 与认证；路由负责竞争、提升和回退。
+/// 未注入 provider 的客户端保留 relay 行为；macOS 可注入原生 WebRTC/P2P。
 ///
 /// 与 CofluxClient 同在 MainActor：单线程状态机与 TS 版一一对应；网络 IO 在子 Task，
 /// 回 MainActor 提交状态。
@@ -64,10 +64,6 @@ final class DeviceRouter {
     private static let relayConnectTimeout: Duration = .seconds(10)
     private static let recoverBaseMS = 350.0
     private static let recoverMaxMS = 5_000.0
-    /// 设备面板 RTT 心跳（plan 077）：页面在场时 10s 一发；超时远短于普通 RPC 20s——
-    /// 心跳测的是链路好坏，等满毫无意义（web HEARTBEAT_TIMEOUT 同理）。
-    private static let pingInterval: Duration = .seconds(10)
-    private static let pingTimeout: Duration = .seconds(5)
     private static let inputRetry: Duration = .milliseconds(500)
     private static let catalogInterval: Duration = .seconds(3)
     private static let maxRetainedInputs = 256
@@ -95,17 +91,23 @@ final class DeviceRouter {
         let connection: any TransportConnection
         /// rendezvous URL 的 host（如 relay-bj.…），供设备面板展示实际经过的节点（plan 065/077）。
         let relayHost: String?
+        let local: Bool
+        let p2p: Bool
+        let scopes: Set<Coflux_V1_DeviceScope>
+        let leaseExpiresAt: Double?
         var closed = false
         var receiveTask: Task<Void, Never>?
         /// 串行发送链：input_seq 连续性契约要求帧不乱序（plan 042）。
         var sendChain: Task<Void, Never>?
 
-        init(channelID: String, generation: UInt64, lane: LaneKind, connection: any TransportConnection, relayHost: String?) {
+        init(channelID: String, generation: UInt64, lane: LaneKind, connection: any TransportConnection, relayHost: String?, local: Bool = false, p2p: Bool = false, scopes: Set<Coflux_V1_DeviceScope> = [.sessionRead, .sessionControl, .rpc, .lifecycle], leaseExpiresAt: Double? = nil) {
             self.channelID = channelID
             self.generation = generation
             self.lane = lane
             self.connection = connection
             self.relayHost = relayHost
+            self.local = local; self.scopes = scopes; self.leaseExpiresAt = leaseExpiresAt
+            self.p2p = p2p
         }
     }
 
@@ -168,6 +170,7 @@ final class DeviceRouter {
         var attempt: Task<Channel, any Error>?
         var recoveryAttempts = 0
         var recoveryTask: Task<Void, Never>?
+        var promotionTask: Task<Void, Never>?
 
         init(kind: LaneKind) { self.kind = kind }
     }
@@ -185,8 +188,16 @@ final class DeviceRouter {
         /// ping 之间 pendingRequests 清空会触发 idle 释放，每轮心跳都重新 rendezvous。
         var measureCount = 0
         var relayHost: String?
+        var mode: String?
+        var detail = ""
         var rttMs: Double?
         var pingTask: Task<Void, Never>?
+        var p2pBlockedUntil = 0.0
+        var p2pRetryAttempts = 0
+        var pendingPing: (id: String, generation: UInt64, startedAt: Double)?
+        var heartbeatTimeoutTask: Task<Void, Never>?
+        var heartbeatMisses = 0
+        var heartbeatUnsupported = false
 
         init(daemonID: String) { self.daemonID = daemonID }
     }
@@ -197,10 +208,31 @@ final class DeviceRouter {
         var timeoutTask: Task<Void, Never>?
     }
 
+    private struct TransportControlWaiter {
+        let continuation: CheckedContinuation<Coflux_V1_ServerToClient.OneOf_Payload, any Error>
+        let timeout: Task<Void, Never>
+    }
+    private final class ChannelRace: @unchecked Sendable {
+        var continuation: CheckedContinuation<Channel, any Error>?
+        var tasks: [Task<Void, Never>] = []
+        var failures = 0
+        var candidates = 2
+    }
+    private let localProvider: (any LocalDeviceTransportProvider)?
+    private let p2pProvider: (any P2PDeviceTransportProvider)?
+    private var iceServers: [String] = []
+    private var accountID: String?
+    private var transportWaiters: [String: TransportControlWaiter] = [:]
     private let transport: any Transport
     private let callbacks: DeviceRouterCallbacks
     /// epoch ms，可注入（prepared operation 过期判定；测试注入假时钟）。
     private let now: () -> Double
+    private let heartbeatInterval: Duration
+    private let heartbeatTimeout: Duration
+    private let controlGraceDuration: Duration
+    private var controlGeneration = 0
+    private var controlGraceTask: Task<Void, Never>?
+    private var graceChannels: [String: Channel] = [:]
 
     private var routes: [String: Route] = [:]
     /// generation 属于 logical client/daemon 而非可释放的 route：reset/重建都不能回退
@@ -214,11 +246,21 @@ final class DeviceRouter {
     init(
         transport: any Transport,
         callbacks: DeviceRouterCallbacks,
+        localProvider: (any LocalDeviceTransportProvider)? = nil,
+        p2pProvider: (any P2PDeviceTransportProvider)? = nil,
+        heartbeatInterval: Duration = .seconds(15),
+        heartbeatTimeout: Duration = .seconds(5),
+        controlGraceDuration: Duration = .seconds(15),
         now: @escaping () -> Double = { Date().timeIntervalSince1970 * 1000 }
     ) {
         self.transport = transport
         self.callbacks = callbacks
+        self.localProvider = localProvider
+        self.p2pProvider = p2pProvider
         self.now = now
+        self.heartbeatInterval = heartbeatInterval
+        self.heartbeatTimeout = heartbeatTimeout
+        self.controlGraceDuration = controlGraceDuration
     }
 
     // MARK: - 控制面接线
@@ -226,6 +268,14 @@ final class DeviceRouter {
     /// 消费控制面里属于 device 域的负载；返回 true 表示已消费（store.ts:324 同构）。
     func handleControlPayload(_ payload: Coflux_V1_ServerToClient.OneOf_Payload) -> Bool {
         switch payload {
+        case .deviceP2PAnswer(let result):
+            completeTransportControl(result.connectionID, payload: payload); return true
+        case .deviceP2PChannelResult(let result):
+            completeTransportControl(result.channelID, payload: payload); return true
+        case .localPairResult(let result):
+            completeTransportControl(result.requestID, payload: payload); return true
+        case .localLeaseResult(let result):
+            completeTransportControl(result.requestID, payload: payload); return true
         case .deviceRelayGrant(let grant):
             guard let waiter = relayWaiters.removeValue(forKey: grant.channelID) else { return true }
             waiter.timeoutTask?.cancel()
@@ -243,19 +293,70 @@ final class DeviceRouter {
         }
     }
 
-    func setControlOnline(_ online: Bool) {
-        guard controlOnline != online else { return }
-        controlOnline = online
-        if !online {
-            // rendezvous 与 relay 存活都依赖中心：中心断线立即关掉一切，不留半死管道
-            // （device-router.ts:2196-2209）。
-            rejectRelayWaiters("中心连接已断开")
-            for route in routes.values {
-                if let channel = route.sessionLane.active { loseChannel(route, channel, reason: "中心 relay 已断开") }
-                if let channel = route.elevatedLane.active { loseChannel(route, channel, reason: "中心 relay 已断开") }
+    private func clearControlGrace() {
+        controlGraceTask?.cancel(); controlGraceTask = nil
+        graceChannels.removeAll()
+    }
+
+    private func invalidateOnlineControl() {
+        rejectRelayWaiters("中心连接已断开")
+        rejectTransportControl()
+        for route in routes.values {
+            let session = route.sessionLane
+            session.promotionTask?.cancel(); session.promotionTask = nil
+            session.attempt?.cancel(); session.attempt = nil
+            session.recoveryTask?.cancel(); session.recoveryTask = nil
+            session.token += 1
+            closeLane(route, route.elevatedLane, reason: "中心在线授权已失效")
+        }
+    }
+
+    private func closeRemoteSessions() {
+        for route in routes.values {
+            if let channel = route.sessionLane.active, !channel.local {
+                loseChannel(route, channel, reason: "中心授权宽限已结束", penalizeP2P: false)
             }
+        }
+        p2pProvider?.closeAll()
+    }
+
+    /// 仅网络断开使用宽限；重复 connecting/disconnected 不得延长已有窗口。
+    func setControlDisconnected() {
+        guard controlOnline else { return }
+        controlOnline = false
+        controlGeneration += 1
+        let generation = controlGeneration
+        invalidateOnlineControl()
+        clearControlGrace()
+        for route in routes.values {
+            if let channel = route.sessionLane.active, !channel.local {
+                graceChannels[channel.channelID] = channel
+            }
+        }
+        controlGraceTask = Task { [weak self] in
+            guard let self else { return }
+            do { try await Task.sleep(for: self.controlGraceDuration) } catch { return }
+            guard !self.controlOnline, self.controlGeneration == generation else { return }
+            self.controlGraceTask = nil
+            self.graceChannels.removeAll()
+            self.closeRemoteSessions()
+        }
+    }
+
+    /// false 是明确撤权：即使已经处于网络断线宽限，也必须立即关闭远端 session。
+    func setControlOnline(_ online: Bool) {
+        if !online {
+            controlOnline = false
+            controlGeneration += 1
+            clearControlGrace()
+            invalidateOnlineControl()
+            closeRemoteSessions()
             return
         }
+        guard !controlOnline else { return }
+        controlOnline = true
+        controlGeneration += 1
+        clearControlGrace()
         for route in routes.values {
             if sessionLaneDemand(route) { kickLane(route, route.sessionLane) }
             if elevatedLaneDemand(route) { kickLane(route, route.elevatedLane) }
@@ -264,12 +365,36 @@ final class DeviceRouter {
 
     /// 登出：关全部通道 + 更换 logical client identity（旧 clientInstanceID 的 input 游标
     /// 在 sessiond 侧有累计账，复用会碰撞，device-router.ts:2228-2238）。
+    func setAccountID(_ value: String?) {
+        guard accountID != value else { return }
+        reset()
+        accountID = value
+    }
+
+    func setIceServers(_ value: [String]) { iceServers = value }
+
     func reset() {
+        controlGeneration += 1
+        clearControlGrace()
+        p2pProvider?.closeAll()
+        if let accountID { do { try localProvider?.clearGrants(accountID: accountID) } catch { callbacks.onError(error.localizedDescription) } }
+        accountID = nil
+        rejectTransportControl()
         rejectRelayWaiters("Device router 已重置")
         for route in routes.values { closeRoute(route, reason: "Device router 已重置") }
         routes.removeAll()
         clientInstanceID = UUID().uuidString
         generations.removeAll()
+    }
+
+    /// 中心明确移除设备时撤销其全部本地路由需求，迟到的重连任务不能重新建立通道。
+    func removeDaemon(_ daemonID: String) {
+        p2pProvider?.remove(daemonID: daemonID)
+        if let route = routes.removeValue(forKey: daemonID) { closeRoute(route, reason: "设备已移除") }
+        if let accountID {
+            do { try localProvider?.removeGrant(daemonID: daemonID, accountID: accountID) }
+            catch { callbacks.onError(error.localizedDescription) }
+        }
     }
 
     // MARK: - Session 对外操作（store.ts / device-router.ts 对外面）
@@ -323,6 +448,13 @@ final class DeviceRouter {
         }
         route.sessions[sessionID] = nil
         releaseIdle(route)
+    }
+
+    func hasSessionControl(daemonID: String, sessionID: String) -> Bool {
+        guard let route = routes[daemonID], let session = route.sessions[sessionID],
+              let channel = route.sessionLane.active, usable(channel) else { return false }
+        return session.desired && !session.detached && session.holderEpoch != nil
+            && session.attachedGeneration == channel.generation
     }
 
     @discardableResult
@@ -416,6 +548,43 @@ final class DeviceRouter {
         }
     }
 
+    // MARK: - 桌面工作台远端浏览与 Git
+
+    func listDirectory(daemonID: String, workspaceID: String, path: String, browseHome: Bool) async throws -> Coflux_V1_FsListed {
+        var value = Coflux_V1_DeviceFsList()
+        value.requestID = UUID().uuidString
+        value.workspaceID = workspaceID
+        value.path = path
+        value.browseHome = browseHome
+        let result = try await request(routeFor(daemonID), lane: .elevated, requestID: value.requestID, payload: .fsList(value))
+        guard case .fsListed(let listed) = result else { throw DeviceRouteError("目录响应类型错误") }
+        return listed
+    }
+
+    func readFile(daemonID: String, workspaceID: String, path: String) async throws -> Coflux_V1_FsReadResult {
+        var value = Coflux_V1_DeviceFsRead()
+        value.requestID = UUID().uuidString
+        value.workspaceID = workspaceID
+        value.path = path
+        let result = try await request(routeFor(daemonID), lane: .elevated, requestID: value.requestID, payload: .fsRead(value))
+        guard case .fsReadResult(let read) = result else { throw DeviceRouteError("文件响应类型错误") }
+        return read
+    }
+
+    func execute(daemonID: String, workspaceID: String, command: String, args: [String]) async throws -> Coflux_V1_ExecResult {
+        var value = Coflux_V1_DeviceExecRun()
+        value.requestID = UUID().uuidString
+        value.operationID = UUID().uuidString
+        value.workspaceID = workspaceID
+        value.command = command
+        value.args = args
+        value.timeoutMs = 20_000
+        let result = try await request(routeFor(daemonID), lane: .elevated, requestID: value.requestID,
+                                       payload: .execRun(value), timeout: .seconds(25))
+        guard case .execResult(let execution) = result else { throw DeviceRouteError("命令响应类型错误") }
+        return execution
+    }
+
     // MARK: - fs 上传（plan 071）
 
     /// temp=true 落 daemon 侧系统临时目录，回带绝对路径供 client 直接注入 PTY，不自行拼装
@@ -451,12 +620,11 @@ final class DeviceRouter {
 
     /// 「只测量」持有（web measureOnly 同概念，device-router.ts:284-287）：把 session lane
     /// 拉起来周期 ping 测 RTT，但不 attach 任何 session；返回的闭包释放持有，计数归零即
-    /// 停测并允许 lane 空闲释放。设备页 onAppear 起、onDisappear 停——不常驻耗电。
+    /// 允许 lane 空闲释放；有终端需求的现存连接继续探活，不依赖面板可见性。
     func retainMeasure(daemonID: String) -> @MainActor () -> Void {
         let route = routeFor(daemonID)
         route.measureCount += 1
         kickLane(route, route.sessionLane)
-        startPingLoop(route)
         var released = false
         return { [weak self] in
             guard let self, !released else { return }
@@ -464,43 +632,59 @@ final class DeviceRouter {
             guard self.routes[daemonID] === route else { return }
             route.measureCount = max(0, route.measureCount - 1)
             guard route.measureCount == 0 else { return }
-            route.pingTask?.cancel()
-            route.pingTask = nil
-            if route.rttMs != nil {
-                route.rttMs = nil
-                self.callbacks.onDeviceTransport(daemonID, route.relayHost, nil)
-            }
             self.releaseIdle(route)
         }
     }
 
+    private func stopHeartbeat(_ route: Route) {
+        route.pingTask?.cancel(); route.pingTask = nil
+        route.heartbeatTimeoutTask?.cancel(); route.heartbeatTimeoutTask = nil
+        route.pendingPing = nil
+        route.heartbeatMisses = 0
+    }
+
     private func startPingLoop(_ route: Route) {
-        guard route.pingTask == nil else { return }
+        guard route.pingTask == nil, route.sessionLane.active != nil, !route.heartbeatUnsupported else { return }
         route.pingTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, !self.destroyed else { return }
-                await self.pingOnce(route)
-                try? await Task.sleep(for: Self.pingInterval)
+                self.pingOnce(route)
+                do { try await Task.sleep(for: self.heartbeatInterval) } catch { return }
             }
         }
     }
 
-    private func pingOnce(_ route: Route) async {
-        guard route.measureCount > 0, controlOnline, routes[route.daemonID] === route else { return }
+    /// 不登记 pendingRequests：探活不能自己构成 lane demand，妨碍空闲释放。
+    private func pingOnce(_ route: Route) {
+        guard !route.heartbeatUnsupported, route.pendingPing == nil,
+              routes[route.daemonID] === route,
+              let channel = route.sessionLane.active, usable(channel) else { return }
         var ping = Coflux_V1_DevicePing()
         ping.requestID = UUID().uuidString
-        let started = now()
-        do {
-            let response = try await request(
-                route, lane: .session, requestID: ping.requestID, payload: .ping(ping), timeout: Self.pingTimeout
-            )
-            guard case .pong = response else { return }
-            route.rttMs = now() - started
-        } catch {
-            // 旧 worker 不识 ping / 通道波动：清读数不清 host，下一轮再试（通道恢复由既有机制负责）。
+        route.pendingPing = (ping.requestID, channel.generation, now())
+        sendOn(route, channel, .ping(ping))
+        route.heartbeatTimeoutTask = Task { [weak self] in
+            guard let self else { return }
+            do { try await Task.sleep(for: self.heartbeatTimeout) } catch { return }
+            guard self.routes[route.daemonID] === route, route.sessionLane.active === channel,
+                  route.pendingPing?.id == ping.requestID else { return }
+            route.pendingPing = nil
+            route.heartbeatTimeoutTask = nil
             route.rttMs = nil
+            route.heartbeatMisses += 1
+            if route.heartbeatMisses >= 2 {
+                self.loseChannel(route, channel, reason: "心跳连续无响应")
+            } else {
+                self.callbacks.onDeviceTransport(route.daemonID, route.relayHost, nil, route.mode, route.detail)
+                self.pingOnce(route)
+            }
         }
-        callbacks.onDeviceTransport(route.daemonID, route.relayHost, route.rttMs)
+    }
+
+    private func blockP2P(_ route: Route) {
+        let delay = min(300_000.0, 5_000 * pow(2, Double(min(route.p2pRetryAttempts, 6))))
+        route.p2pRetryAttempts = min(route.p2pRetryAttempts + 1, 6)
+        route.p2pBlockedUntil = now() + delay
     }
 
     // MARK: - Lane 生命周期
@@ -539,36 +723,222 @@ final class DeviceRouter {
 
     private func ensureLane(_ route: Route, _ lane: Lane) async throws -> Channel {
         if destroyed { throw DeviceRouteError("Device router 已停止") }
-        if let active = lane.active, !active.closed { return active }
+        guard routes[route.daemonID] === route else { throw DeviceRouteError("设备路由已移除") }
+        if let active = lane.active {
+            if usable(active) { schedulePromotion(route, lane); return active }
+            loseChannel(route, active, reason: "连接授权已失效")
+        }
         if let attempt = lane.attempt { return try await attempt.value }
-        guard controlOnline else { throw DeviceRouteError("中心 rendezvous 不可用") }
+        guard controlOnline || (lane.kind == .session && localProvider != nil && accountID != nil) else { throw DeviceRouteError("中心 rendezvous 不可用") }
 
+        if lane.kind == .session { publishDiagnostic(route, mode: "probing", detail: "正在选择直连或中心 relay") }
         lane.token += 1
         let token = lane.token
         // 激活在 attempt 内部完成（TS acceptCandidate 先 activate 再 resolve 同语义）：
         // 所有并发等待者恢复时 lane.active 必已就位，不会误判无通道再开一条。
         let attempt = Task<Channel, any Error> { [weak self] in
             guard let self else { throw DeviceRouteError("Device router 已停止") }
-            let channel = try await self.openRelayChannel(route, lane)
+            let channel = try await self.openPreferredChannel(route, lane)
             // 竞态守卫：等待期间 lane 被 close/重建则丢弃本次结果
             guard !self.destroyed, self.routes[route.daemonID] === route, lane.token == token else {
                 self.closeChannel(channel)
                 throw DeviceRouteError("lane 已重建")
             }
+            guard self.usable(channel), !Task.isCancelled else { self.closeChannel(channel); throw CancellationError() }
             self.activate(route, lane, channel)
             return channel
         }
         lane.attempt = attempt
         defer { if lane.token == token { lane.attempt = nil } }
-        return try await attempt.value
+        do { return try await attempt.value }
+        catch {
+            if lane.kind == .session, lane.token == token, routes[route.daemonID] === route, !(error is CancellationError) {
+                publishDiagnostic(route, mode: "offline", detail: error.localizedDescription)
+            }
+            throw error
+        }
+    }
+
+    private func publishDiagnostic(_ route: Route, mode: String, detail: String) {
+        route.mode = mode; route.detail = detail; route.rttMs = nil; route.relayHost = nil
+        callbacks.onDeviceTransport(route.daemonID, nil, nil, mode, detail)
+    }
+
+    private func usable(_ channel: Channel) -> Bool {
+        guard !channel.closed else { return false }
+        if !channel.local {
+            return controlOnline || (channel.lane == .session && graceChannels[channel.channelID] === channel)
+        }
+        if channel.lane == .session { return channel.scopes.isSuperset(of: [.sessionRead, .sessionControl]) }
+        return controlOnline && channel.scopes.isSuperset(of: [.rpc, .lifecycle]) && (channel.leaseExpiresAt ?? 0) > now() + 2000
+    }
+
+    private func completeTransportControl(_ id: String, payload: Coflux_V1_ServerToClient.OneOf_Payload) {
+        guard let waiter = transportWaiters.removeValue(forKey: id) else { return }
+        waiter.timeout.cancel(); waiter.continuation.resume(returning: payload)
+    }
+    private func rejectTransportControl() {
+        let pending = transportWaiters; transportWaiters.removeAll()
+        for waiter in pending.values {
+            waiter.timeout.cancel(); waiter.continuation.resume(throwing: DeviceRouteError("设备传输授权请求已取消"))
+        }
+    }
+    private func requestTransportControl(_ payload: Coflux_V1_ClientToServer.OneOf_Payload) async throws -> Coflux_V1_ServerToClient.OneOf_Payload {
+        guard controlOnline else { throw DeviceRouteError("中心离线，无法申请设备传输授权") }
+        let id: String
+        switch payload {
+        case .localPairRequest(let value): id = value.requestID
+        case .localLeaseRequest(let value): id = value.requestID
+        case .deviceP2POffer(let value): id = value.connectionID
+        case .deviceP2PChannelOpen(let value): id = value.channelID
+        default: throw DeviceRouteError("不支持的设备传输授权请求")
+        }
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                let timeout = Task { [weak self] in
+                    do { try await Task.sleep(for: Self.controlRequestTimeout) } catch { return }
+                    guard let waiter = self?.transportWaiters.removeValue(forKey: id) else { return }
+                    waiter.continuation.resume(throwing: DeviceRouteError("设备传输授权请求超时"))
+                }
+                transportWaiters[id] = TransportControlWaiter(continuation: continuation, timeout: timeout)
+                callbacks.sendControl(payload)
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let waiter = self?.transportWaiters.removeValue(forKey: id) else { return }
+                waiter.timeout.cancel(); waiter.continuation.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    private func openDirectChannel(_ route: Route, _ lane: Lane) async throws -> Channel {
+        guard let localProvider, let accountID else { throw DeviceRouteError("本机直连未启用") }
+        let generation = nextGeneration(route.daemonID)
+        let opened = try await localProvider.open(daemonID: route.daemonID, accountID: accountID, clientInstanceID: clientInstanceID,
+            generation: generation, elevated: lane.kind == .elevated, authorize: { [weak self] payload in
+                guard let self else { throw CancellationError() }
+                return try await self.requestTransportControl(payload)
+            })
+        let channel = Channel(channelID: opened.channelID, generation: generation, lane: lane.kind, connection: opened.connection,
+                              relayHost: nil, local: true, scopes: Set(opened.scopes), leaseExpiresAt: opened.leaseExpiresAt)
+        guard !Task.isCancelled, usable(channel) else { closeChannel(channel); throw DeviceRouteError("本机连接授权不足或已过期") }
+        return channel
+    }
+
+    private func openP2PChannel(_ route: Route, _ lane: Lane) async throws -> Channel {
+        guard controlOnline, let p2pProvider, let accountID, now() >= route.p2pBlockedUntil else {
+            throw DeviceRouteError("P2P 暂不可用")
+        }
+        let generation = nextGeneration(route.daemonID)
+        do {
+            let opened = try await p2pProvider.open(daemonID: route.daemonID, accountID: accountID,
+                clientInstanceID: clientInstanceID, generation: generation, iceServers: iceServers,
+                authorize: { [weak self] payload in
+                    guard let self else { throw CancellationError() }
+                    return try await self.requestTransportControl(payload)
+                })
+            let channel = Channel(channelID: opened.channelID, generation: generation, lane: lane.kind,
+                connection: opened.connection, relayHost: nil, p2p: true)
+            guard !Task.isCancelled, usable(channel), routes[route.daemonID] === route else {
+                closeChannel(channel); throw CancellationError()
+            }
+            return channel
+        } catch {
+            if !Task.isCancelled { blockP2P(route) }
+            throw error
+        }
+    }
+
+    private func finishRace(_ race: ChannelRace, _ result: Result<Channel, any Error>) {
+        guard let continuation = race.continuation else {
+            if case .success(let channel) = result { closeChannel(channel) }
+            return
+        }
+        switch result {
+        case .success(let channel):
+            race.continuation = nil
+            for task in race.tasks { task.cancel() }
+            continuation.resume(returning: channel)
+        case .failure(let error):
+            race.failures += 1
+            if race.failures == race.candidates { race.continuation = nil; continuation.resume(throwing: error) }
+        }
+    }
+    private func openPreferredChannel(_ route: Route, _ lane: Lane) async throws -> Channel {
+        guard (localProvider != nil || p2pProvider != nil), accountID != nil else { return try await openRelayChannel(route, lane) }
+        if !controlOnline { return try await openDirectChannel(route, lane) }
+        let race = ChannelRace()
+        race.candidates = 1 + (localProvider != nil ? 1 : 0) + (p2pProvider != nil ? 1 : 0)
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                race.continuation = continuation
+                race.tasks = []
+                if localProvider != nil { race.tasks.append(Task { [weak self] in
+                    guard let self else { return }
+                    do { self.finishRace(race, .success(try await self.openDirectChannel(route, lane))) }
+                    catch { self.finishRace(race, .failure(error)) }
+                }) }
+                if p2pProvider != nil { race.tasks.append(Task { [weak self] in
+                    guard let self else { return }
+                    do { self.finishRace(race, .success(try await self.openP2PChannel(route, lane))) }
+                    catch { self.finishRace(race, .failure(error)) }
+                }) }
+                race.tasks.append(Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        try await Task.sleep(for: .milliseconds(250))
+                        self.finishRace(race, .success(try await self.openRelayChannel(route, lane)))
+                    } catch { self.finishRace(race, .failure(error)) }
+                })
+            }
+        } onCancel: {
+            Task { @MainActor in
+                let continuation = race.continuation; race.continuation = nil
+                for task in race.tasks { task.cancel() }
+                continuation?.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    private func schedulePromotion(_ route: Route, _ lane: Lane) {
+        guard (localProvider != nil || p2pProvider != nil), controlOnline, let current = lane.active, !current.local,
+              lane.promotionTask == nil else { return }
+        let token = lane.token
+        lane.promotionTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if lane.token == token { lane.promotionTask = nil } }
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            while !Task.isCancelled, self.controlOnline, lane.token == token, lane.active === current {
+                do {
+                    let channel: Channel
+                    if self.localProvider != nil, let direct = try? await self.openDirectChannel(route, lane) { channel = direct }
+                    else if !current.p2p { channel = try await self.openP2PChannel(route, lane) }
+                    else { throw DeviceRouteError("暂无更优连接") }
+                    guard !Task.isCancelled, lane.token == token, lane.active === current, self.routes[route.daemonID] === route else {
+                        self.closeChannel(channel); return
+                    }
+                    self.activate(route, lane, channel)
+                    return
+                } catch {
+                    let delay = self.p2pProvider != nil && !current.p2p
+                        ? max(350, min(30_000, route.p2pBlockedUntil - self.now())) : 30_000
+                    do { try await Task.sleep(for: .milliseconds(delay)) } catch { return }
+                }
+            }
+        }
     }
 
     /// relay rendezvous（plan 043）：deviceRelayConnect → deviceRelayGrant（带 token 的完整
     /// wss URL，**单次有效**——失败重试必须重新 rendezvous，不得复用 URL）→ 拨 relay WS。
     private func openRelayChannel(_ route: Route, _ lane: Lane) async throws -> Channel {
+        guard controlOnline else { throw DeviceRouteError("中心 relay 不可用") }
+        try Task.checkCancellation()
         let channelID = "relay-\(UUID().uuidString)"
         let generation = nextGeneration(route.daemonID)
-        let relayURL: String = try await withCheckedThrowingContinuation { continuation in
+        let relayURL: String = try await withTaskCancellationHandler {
+          try await withCheckedThrowingContinuation { continuation in
             var waiter = RelayWaiter(daemonID: route.daemonID, continuation: continuation, timeoutTask: nil)
             waiter.timeoutTask = Task { [weak self] in
                 try? await Task.sleep(for: Self.controlRequestTimeout)
@@ -584,7 +954,14 @@ final class DeviceRouter {
             connect.transportGeneration = generation
             connect.protocolVersion = DeviceProtocol.version
             callbacks.sendControl(.deviceRelayConnect(connect))
+          }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let waiter = self?.relayWaiters.removeValue(forKey: channelID) else { return }
+                waiter.timeoutTask?.cancel(); waiter.continuation.resume(throwing: CancellationError())
+            }
         }
+        try Task.checkCancellation()
         guard let url = URL(string: relayURL) else {
             throw DeviceRouteError("relay URL 无效")
         }
@@ -607,7 +984,8 @@ final class DeviceRouter {
                 }
             } catch {
                 guard let self, !Task.isCancelled else { return }
-                self.loseChannel(route, channel, reason: "relay 连接已关闭")
+                let transportName = channel.local ? "本机直连" : channel.p2p ? "P2P" : "relay"
+                self.loseChannel(route, channel, reason: "\(transportName) 连接已关闭")
             }
         }
     }
@@ -642,7 +1020,14 @@ final class DeviceRouter {
             sendCatalogRequest(route)
             maintainCatalogTimer(route)
             route.relayHost = channel.relayHost
-            callbacks.onDeviceTransport(route.daemonID, route.relayHost, route.rttMs)
+            route.mode = channel.local ? "direct" : channel.p2p ? "p2p" : "relay"
+            route.detail = channel.local ? "同机 Device 数据直连本地 daemon"
+                : channel.p2p ? "Device 数据经 P2P 端到端直连（WebRTC），不经中间节点"
+                : "Device 数据经中心 opaque relay" + (channel.relayHost.map { "（\($0)）" } ?? "")
+            stopHeartbeat(route)
+            route.rttMs = nil
+            startPingLoop(route)
+            callbacks.onDeviceTransport(route.daemonID, route.relayHost, route.rttMs, route.mode, route.detail)
         } else {
             for requestID in route.pendingRequests.keys where route.pendingRequests[requestID]?.lane == .elevated {
                 route.pendingRequests[requestID]?.sentGeneration = nil
@@ -653,6 +1038,7 @@ final class DeviceRouter {
             flushLane(route, .elevated)
         }
         if let previous, previous !== channel { closeChannel(previous) }
+        schedulePromotion(route, lane)
     }
 
     private func closeChannel(_ channel: Channel) {
@@ -663,13 +1049,18 @@ final class DeviceRouter {
         Task { await connection.close() }
     }
 
-    private func loseChannel(_ route: Route, _ channel: Channel, reason: String) {
+    private func loseChannel(_ route: Route, _ channel: Channel, reason: String, penalizeP2P: Bool = true) {
         guard !channel.closed else { return }
         let lane = channel.lane == .session ? route.sessionLane : route.elevatedLane
         closeChannel(channel)
         guard lane.active === channel else { return }
+        if channel.p2p && penalizeP2P { blockP2P(route) }
+        lane.promotionTask?.cancel()
+        lane.promotionTask = nil
         lane.active = nil
         if lane.kind == .session {
+            stopHeartbeat(route)
+            publishDiagnostic(route, mode: "offline", detail: reason)
             for requestID in route.pendingRequests.keys where route.pendingRequests[requestID]?.lane == .session {
                 route.pendingRequests[requestID]?.sentGeneration = nil
             }
@@ -690,9 +1081,12 @@ final class DeviceRouter {
     }
 
     private func closeLane(_ route: Route, _ lane: Lane, reason: String) {
+        if lane.kind == .session { stopHeartbeat(route) }
         lane.token += 1
         lane.recoveryTask?.cancel()
         lane.recoveryTask = nil
+        lane.promotionTask?.cancel()
+        lane.promotionTask = nil
         lane.attempt?.cancel()
         lane.attempt = nil
         if let active = lane.active {
@@ -706,10 +1100,12 @@ final class DeviceRouter {
                 session.attachedGeneration = nil
             }
             // 传输读数与 lane 同生命周期：lane 没了就没有「正在走的路」，不展示陈值。
-            if route.relayHost != nil || route.rttMs != nil {
+            if route.relayHost != nil || route.rttMs != nil || route.mode != nil {
                 route.relayHost = nil
                 route.rttMs = nil
-                callbacks.onDeviceTransport(route.daemonID, nil, nil)
+                route.mode = nil
+                route.detail = ""
+                callbacks.onDeviceTransport(route.daemonID, nil, nil, nil, "")
             }
         }
     }
@@ -718,7 +1114,7 @@ final class DeviceRouter {
     /// 中心离线时不空转——setControlOnline(true) 会统一重踢。
     private func scheduleRecovery(_ route: Route, _ lane: Lane) {
         let needed = lane.kind == .session ? sessionLaneDemand(route) : elevatedLaneDemand(route)
-        guard !destroyed, controlOnline, lane.recoveryTask == nil, needed else { return }
+        guard !destroyed, routes[route.daemonID] === route, (controlOnline || (lane.kind == .session && localProvider != nil && accountID != nil)), lane.recoveryTask == nil, needed else { return }
         let base = min(Self.recoverMaxMS, Self.recoverBaseMS * pow(2, Double(min(lane.recoveryAttempts, 4))))
         let delayMS = base * (1 + Double.random(in: 0 ... 0.2))
         lane.recoveryAttempts += 1
@@ -772,6 +1168,8 @@ final class DeviceRouter {
     }
 
     private func closeRoute(_ route: Route, reason: String) {
+        route.pingTask?.cancel()
+        route.pingTask = nil
         route.catalogTask?.cancel()
         route.catalogTask = nil
         closeLane(route, route.sessionLane, reason: reason)
@@ -800,15 +1198,18 @@ final class DeviceRouter {
 
     /// 帧入串行发送链保序发出；发送失败按通道丢失处理（TS sendOn=false 同收敛路径）。
     private func sendOn(_ route: Route, _ channel: Channel, _ payload: Coflux_V1_DeviceEnvelope.OneOf_Payload) {
-        guard !channel.closed, let frame = encodeFrame(channel, payload) else { return }
+        guard usable(channel) else { loseChannel(route, channel, reason: "连接授权已失效"); return }
+        guard let frame = encodeFrame(channel, payload) else { return }
         let connection = channel.connection
         let previous = channel.sendChain
         channel.sendChain = Task { [weak self] in
             await previous?.value
+            guard let self else { return }
+            guard self.usable(channel) else { self.loseChannel(route, channel, reason: "连接授权已失效"); return }
             do {
                 try await connection.send(frame)
             } catch {
-                guard let self, !channel.closed else { return }
+                guard !channel.closed else { return }
                 self.loseChannel(route, channel, reason: "Device 帧发送失败")
             }
         }
@@ -1044,21 +1445,34 @@ final class DeviceRouter {
         payload: Coflux_V1_DeviceEnvelope.OneOf_Payload,
         timeout: Duration = DeviceRouter.deviceRequestTimeout
     ) async throws -> Coflux_V1_DeviceEnvelope.OneOf_Payload {
-        try await withCheckedThrowingContinuation { continuation in
-            var pending = PendingRequest(
-                requestID: requestID, lane: lane, payload: payload,
-                sentGeneration: nil, continuation: continuation, timeoutTask: nil
-            )
-            pending.timeoutTask = Task { [weak self] in
-                try? await Task.sleep(for: timeout)
-                guard !Task.isCancelled, let self else { return }
-                self.finishPending(route, requestID: requestID,
-                                   with: .failure(DeviceRouteError("Device request 超时", code: "request_timeout")))
+        guard lane != .elevated || controlOnline else { throw DeviceRouteError("中心离线时不允许高权限 Device RPC", code: "lease_offline") }
+        let daemonID = route.daemonID
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                var pending = PendingRequest(
+                    requestID: requestID, lane: lane, payload: payload,
+                    sentGeneration: nil, continuation: continuation, timeoutTask: nil
+                )
+                pending.timeoutTask = Task { [weak self] in
+                    try? await Task.sleep(for: timeout)
+                    guard !Task.isCancelled, let self else { return }
+                    self.finishPending(route, requestID: requestID,
+                                       with: .failure(DeviceRouteError("Device request 超时", code: "request_timeout")))
+                }
+                route.pendingRequests[requestID] = pending
+                let laneRef = lane == .session ? route.sessionLane : route.elevatedLane
+                ensureLaneThen(route, laneRef) { [weak self] in
+                    self?.flushLane(route, lane)
+                }
             }
-            route.pendingRequests[requestID] = pending
-            let laneRef = lane == .session ? route.sessionLane : route.elevatedLane
-            ensureLaneThen(route, laneRef) { [weak self] in
-                self?.flushLane(route, lane)
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, let route = self.routes[daemonID],
+                      let pending = route.pendingRequests.removeValue(forKey: requestID) else { return }
+                pending.timeoutTask?.cancel()
+                pending.continuation.resume(throwing: CancellationError())
+                self.releaseIdle(route)
             }
         }
     }
@@ -1092,6 +1506,16 @@ final class DeviceRouter {
 
     private func handleDevicePayload(_ route: Route, _ channel: Channel, _ payload: Coflux_V1_DeviceEnvelope.OneOf_Payload) {
         switch payload {
+        case .pong(let pong):
+            guard let pending = route.pendingPing, pending.id == pong.requestID,
+                  pending.generation == channel.generation, route.sessionLane.active === channel else { return }
+            route.rttMs = max(0, now() - pending.startedAt)
+            route.pendingPing = nil
+            route.heartbeatTimeoutTask?.cancel(); route.heartbeatTimeoutTask = nil
+            route.heartbeatMisses = 0
+            if channel.p2p { route.p2pRetryAttempts = 0; route.p2pBlockedUntil = 0 }
+            callbacks.onDeviceTransport(route.daemonID, route.relayHost, route.rttMs, route.mode, route.detail)
+            return
         case .sessionCatalog(let catalog):
             callbacks.onCatalog(route.daemonID, catalog)
             let eventIDs = catalog.exits.map(\.eventID).filter { !$0.isEmpty }
@@ -1156,6 +1580,15 @@ final class DeviceRouter {
 
     /// 错误码分支语义对照 device-router.ts:1385-1485（relay-only：无心跳/lease 分支）。
     private func handleDeviceError(_ route: Route, _ channel: Channel, requestID: String?, code: String, message: String) -> Bool {
+        if let pending = route.pendingPing, route.sessionLane.active === channel,
+           (code == "empty_payload" || code == "unsupported_payload"),
+           (requestID == nil || requestID == pending.id) {
+            stopHeartbeat(route)
+            route.heartbeatUnsupported = true
+            route.rttMs = nil
+            callbacks.onDeviceTransport(route.daemonID, route.relayHost, nil, route.mode, route.detail)
+            return true
+        }
         if let requestID {
             for session in route.sessions.values {
                 if session.attachRequestID == requestID {
@@ -1265,6 +1698,12 @@ final class DeviceRouter {
         case .sessionStop(let value): return value.requestID
         case .sessionCreate(let value): return value.requestID
         case .fsWrite(let value): return value.requestID
+        case .fsList(let value): return value.requestID
+        case .fsRead(let value): return value.requestID
+        case .execRun(let value): return value.requestID
+        case .projectValidate(let value): return value.requestID
+        case .worktreeAdd(let value): return value.requestID
+        case .worktreeRemove(let value): return value.requestID
         default: return nil
         }
     }
@@ -1276,6 +1715,9 @@ final class DeviceRouter {
         case .sessionSnapshot(let value): return value.requestID
         case .operationAck(let value): return value.requestID
         case .fsWriteResult(let value): return value.requestID
+        case .fsListed(let value): return value.requestID
+        case .fsReadResult(let value): return value.requestID
+        case .execResult(let value): return value.requestID
         case .pong(let value): return value.requestID
         case .error(let value): return value.hasRequestID ? value.requestID : nil
         default: return nil
