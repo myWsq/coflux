@@ -4,3 +4,9 @@ packages:
   - 'tests'
 allowBuilds:
   esbuild: true
+  # Electron 42+ 的 postinstall 不再下载二进制（首次运行才懒下载），但 pnpm 11 默认拦截依赖 build 脚本，
+  # 不放行会让 electron 包处于半安装态、报错不直观（plan 103）。
+  electron: true
+  # electron-builder 的 Windows 安装器依赖：本项目只发 macOS，显式拒绝其 build 脚本，否则 pnpm 11 把
+  # 「未审批的 build 脚本」当作 install 失败。
+  electron-winstaller: false

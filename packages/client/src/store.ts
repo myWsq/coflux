@@ -138,6 +138,10 @@ export type CofluxClientOptions = {
   buildId: string;
   /** 所有客户端统一走 DeviceTransport；是否尝试 loopback direct 由 enableLocalTransport 决定。 */
   deviceTransport: DeviceTransportOptions;
+  /** 版本失配（clientOutdated）时是否先 reload 一次拿新 bundle（plan 033 的浏览器语义，默认 true）。
+   * 桌面 app（plan 103）的渲染层随 app 打包，reload 永远拿不到新 bundle：传 false 直接进入 outdated
+   * 状态页，由 app 触发自动更新检查。两种情况都停止重连——版本拒绝不是可重试的断线。 */
+  reloadOnOutdated?: boolean;
 };
 
 export type CofluxState = {
@@ -446,7 +450,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
         deviceRouter.setControlOnline(false);
         // server 判定本连接的构建版本失配（plan 033）：token 不清（无感升级），只判断是否已为
         // 当前 buildId reload 过，避免 index.html 被缓存导致 reload 后仍失配的无限刷新循环。
-        if (sessionStorage.getItem(outdatedReloadKey) !== options.buildId) {
+        // reloadOnOutdated=false（桌面 app）跳过 reload：bundle 在 app 里，刷新不会变新。
+        if ((options.reloadOnOutdated ?? true) && sessionStorage.getItem(outdatedReloadKey) !== options.buildId) {
           sessionStorage.setItem(outdatedReloadKey, options.buildId);
           location.reload();
         } else {
