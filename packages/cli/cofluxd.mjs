@@ -1080,15 +1080,53 @@ async function cmdProgress() {
   console.log("已更新进度（显示在工作区卡片上，被下一条覆盖）");
 }
 
-// 只读的「我在哪」（plan 102）：一行 JSON，字段稳定——插件的挪窝脚本按它比对，agent 也直接读。
+// 「我在哪」与「跟着我搬」（plan 102 / 103）。三条都打一行 JSON，字段稳定——插件脚本按它比对，
+// agent 也直接读。
+//
+//   cofluxd workspace                 只读：cwd 所在的有效工作区 + 本终端的归属工作区
+//   cofluxd workspace locate [path]   把本终端的**归属**搬到 path 所属的工作区（未登记先登记）
+//   cofluxd workspace forget <path>   该 worktree 已被删掉：其下终端搬回主工作区、记录消失
+//
+// locate/forget 是插件在 SessionStart / PostToolUse(EnterWorktree|ExitWorktree) / WorktreeRemove
+// 上调的，同样零凭证（daemon 按进程树认身份）。daemon 旧到不认识这两个动作时它会回
+// 「未知 action …」，agentPost 原样报错并非零退出——脚本据此静默放弃，不干扰会话。
 async function cmdWorkspace() {
-  const result = await agentPost({ action: "workspace.current" });
-  console.log(JSON.stringify({
-    workspaceId: result.workspaceId,
-    path: result.path,
-    owningWorkspaceId: result.owningWorkspaceId,
-    moved: Boolean(result.moved),
-  }));
+  const sub = positionals[1];
+  if (!sub) {
+    const result = await agentPost({ action: "workspace.current" });
+    return void console.log(JSON.stringify({
+      workspaceId: result.workspaceId,
+      path: result.path,
+      owningWorkspaceId: result.owningWorkspaceId,
+      moved: Boolean(result.moved),
+    }));
+  }
+  if (sub === "locate") {
+    // 路径缺省取调用方 cwd；插件脚本一律显式传 hook 载荷里的 cwd（hook 在会话当前目录执行，
+    // 与载荷里的 cwd 未必相同）。
+    const path = positionals[2] || callerCwd();
+    if (!path) die("workspace locate 需要 <path>（取不到当前目录）");
+    const result = await agentPost({ action: "workspace.locate", path });
+    return void console.log(JSON.stringify({
+      workspaceId: result.workspaceId,
+      path: result.path,
+      branch: result.branch,
+      created: Boolean(result.created),
+      moved: Boolean(result.moved),
+    }));
+  }
+  if (sub === "forget") {
+    const path = positionals[2];
+    if (!path) die("workspace forget 需要 <path>（被删掉的 worktree 目录）");
+    const result = await agentPost({ action: "workspace.forget", path });
+    return void console.log(JSON.stringify({
+      workspaceId: result.workspaceId,
+      fallbackWorkspaceId: result.fallbackWorkspaceId,
+      movedTerminals: result.movedTerminals ?? 0,
+      removed: Boolean(result.removed),
+    }));
+  }
+  die(`workspace 的子命令只有 locate | forget（不带子命令 = 报出我在哪）`);
 }
 
 async function cmdPorts() {
@@ -1131,9 +1169,16 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd progress "<一句话>"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
   cofluxd ports           列出本工作区的监听端口及可直接打开的预览 URL
   cofluxd workspace       一行 JSON 报出「我在哪」：workspaceId（cwd 所在的有效工作区，本地命令
-                          都落在它上面）、path、owningWorkspaceId（本终端开在哪，即
-                          COFLUX_WORKSPACE_ID）、moved。用 /cd 或 EnterWorktree 挪进另一个 coflux
-                          工作区后用它确认目标，调 MCP 时也传这个 workspaceId
+                          都落在它上面）、path、owningWorkspaceId（本终端此刻归属哪个工作区）、
+                          moved。用 /cd 挪进另一个 coflux 工作区后用它确认目标，调 MCP 时也传这个
+                          workspaceId
+  cofluxd workspace locate [path]
+                          把本终端的**归属**搬到 path（缺省=当前目录）所属的工作区：进入/离开
+                          worktree 后 coflux 跟着走，未登记的同仓库 worktree 先登记出一个子工作区。
+                          插件自动调，一般不用手敲
+  cofluxd workspace forget <path>
+                          该 worktree 已被删掉：其下所有终端搬回项目主工作区、工作区记录消失
+                          （不执行 git worktree remove）
 
 up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
 通用: --version <vX|latest>(不传时 up 沿用已有二进制，update 默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
