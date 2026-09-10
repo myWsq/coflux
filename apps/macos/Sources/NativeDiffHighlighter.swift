@@ -67,7 +67,8 @@ actor NativeDiffHighlighter {
     func highlight(_ file: DiffFile) async throws -> [Int: [SyntaxSpan]] {
         var result: [Int: [SyntaxSpan]] = [:]
         var hunk: [DiffLine] = []
-        func flush() async throws {
+        // 以 inout 传入而不是捕获：Swift 6 区域隔离检查把「actor 方法里的本地函数捕获可变局部变量」判为跨隔离共享。
+        func flush(hunk: inout [DiffLine], result: inout [Int: [SyntaxSpan]]) async throws {
             guard !hunk.isEmpty else { return }
             for old in [true, false] {
                 let lines = hunk.filter { $0.kind == " " || $0.kind == (old ? "-" : "+") }
@@ -99,10 +100,10 @@ actor NativeDiffHighlighter {
         }
         for (index, line) in file.lines.enumerated() {
             if index % 256 == 0 { await Task.yield(); try Task.checkCancellation() }
-            if line.kind == "@" { try await flush() }
+            if line.kind == "@" { try await flush(hunk: &hunk, result: &result) }
             else if ["+", "-", " "].contains(line.kind) { hunk.append(line) }
         }
-        try await flush()
+        try await flush(hunk: &hunk, result: &result)
         return result
     }
 
