@@ -1,11 +1,14 @@
 /**
- * plan 102：Claude 插件的 UserPromptSubmit 挪窝脚本（integrations/claude-plugin/scripts/session-moved.mjs）。
+ * plan 102 / 103：Claude 插件的 UserPromptSubmit 挪窝脚本（integrations/claude-plugin/scripts/session-moved.mjs）。
  * 纯单元，不起栈：子进程跑脚本，喂 env + stdin JSON，PATH 上只放一个**假 cofluxd**，看 stdout。
  *
- * 契约：`$COFLUX_WORKSPACE_ID`（归属工作区）与 `cofluxd workspace` 报出的有效工作区不同 → stdout 是一个
+ * 契约：`cofluxd workspace` 报出的**有效**工作区与**归属**工作区不同 → stdout 是一个
  * <coflux-session-moved>…</coflux-session-moved> 纯文本块，含两个工作区 id、有效工作区路径，并说明本地命令
  * 会落到哪、MCP 该传哪个 workspaceId、COFLUX_TASK_ID/COFLUX_SESSION_ID 不变；其它一切情形（两者相同、
  * 不在 coflux 里、stdin 非 JSON、cofluxd 缺失或失败）→ 零字节 stdout、退出 0。
+ *
+ * plan 103 起两个 id **都**来自 cofluxd：`$COFLUX_WORKSPACE_ID` 只当「在不在 coflux 里」的门。coflux 跟随
+ * agent 进 worktree 之后归属真的会变，那个环境变量就过期了——拿它当归属比对，会在搬完之后每条 prompt 误报。
  *
  * 夹具纪律（plan 098 的返修教训）：假 cofluxd 单独一个目录，PATH 只含它——否则测试会打到真 daemon，
  * 把测试文案写进用户自己的工作区卡片。假 cofluxd 顺手把自己的 cwd 写进 marker，用来证明脚本是按
@@ -107,8 +110,7 @@ test("挪窝了：输出 <coflux-session-moved> 块，两个工作区 id、路�
   );
 });
 
-test("挪窝判据是 $COFLUX_WORKSPACE_ID 与有效工作区不同，不看 cofluxd 回的 moved 字段", async () => {
-  // 模型上下文里的坐标就是那个环境变量，脚本按它比对才不会和模型看到的对不上
+test("判据是 cofluxd 报的两个 id，不看 moved 字段", async () => {
   const { code, stdout } = await run({
     stdin: prompt(workDir),
     env: {
@@ -118,6 +120,21 @@ test("挪窝判据是 $COFLUX_WORKSPACE_ID 与有效工作区不同，不看 cof
   });
   assert.equal(code, 0);
   assert.ok(stdout.startsWith("<coflux-session-moved>"), stdout);
+});
+
+test("plan 103：归属来自 cofluxd 而不是 $COFLUX_WORKSPACE_ID——coflux 跟随进 worktree 后不再误报", async () => {
+  // 终端开在 ws-a，coflux 已经跟着 agent 把归属搬到 ws-b：环境变量还是 ws-a（spawn 时写死，改不了），
+  // 但有效 == 归属 == ws-b，脚本必须闭嘴。拿 env 当归属就会在搬完之后每条 prompt 都喊一次「挪窝了」。
+  const { code, stdout, stderr } = await run({
+    stdin: prompt(workDir),
+    env: {
+      COFLUX_WORKSPACE_ID: "ws-a",
+      FAKE_OUTPUT: JSON.stringify({ workspaceId: "ws-b", path: "/x", owningWorkspaceId: "ws-b", moved: false }),
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(stdout, "", `归属已搬到 ws-b，不该报挪窝: ${JSON.stringify(stdout)}`);
+  assert.equal(stderr, "");
 });
 
 test("没挪窝：有效工作区就是归属工作区 → 零字节、退出 0", async () => {
@@ -163,7 +180,8 @@ test("cofluxd 不在/失败/输出不是 JSON：一律零字节、退出 0，绝
     ["cofluxd 不在 PATH 上", { PATH: join(fakeDir, "empty"), COFLUX_WORKSPACE_ID: "ws-a", FAKE_OUTPUT: MOVED }],
     ["cofluxd 返回非零", { COFLUX_WORKSPACE_ID: "ws-a", FAKE_FAIL: "1", FAKE_OUTPUT: MOVED }],
     ["cofluxd 输出不是 JSON", { COFLUX_WORKSPACE_ID: "ws-a", FAKE_OUTPUT: "daemon 没在跑" }],
-    ["cofluxd 回的 workspaceId 为空", { COFLUX_WORKSPACE_ID: "ws-a", FAKE_OUTPUT: JSON.stringify({ workspaceId: "" }) }],
+    ["cofluxd 回的 workspaceId 为空", { COFLUX_WORKSPACE_ID: "ws-a", FAKE_OUTPUT: JSON.stringify({ workspaceId: "", owningWorkspaceId: "ws-a" }) }],
+    ["cofluxd 回的 owningWorkspaceId 为空（旧 daemon）", { COFLUX_WORKSPACE_ID: "ws-a", FAKE_OUTPUT: JSON.stringify({ workspaceId: "ws-b", path: "/x" }) }],
   ];
   for (const [label, env] of cases) {
     const { code, stdout } = await run({ stdin: prompt(workDir), env });
@@ -172,7 +190,7 @@ test("cofluxd 不在/失败/输出不是 JSON：一律零字节、退出 0，绝
   }
 });
 
-test("插件配置：UserPromptSubmit 里信使在前、挪窝脚本在后且缺 node 静默；版本 ≥ 0.9.0；SKILL 讲清两种工作区", () => {
+test("插件配置：UserPromptSubmit 里信使在前、挪窝脚本在后且缺 node 静默；版本 ≥ 0.10.0；SKILL 讲清两种工作区", () => {
   const hooks = JSON.parse(readFileSync(`${PLUGIN}hooks/hooks.json`, "utf8"));
   const entries = hooks.hooks.UserPromptSubmit;
   assert.ok(Array.isArray(entries) && entries.length === 2, "UserPromptSubmit 两条：信使 + 挪窝脚本");
@@ -185,7 +203,7 @@ test("插件配置：UserPromptSubmit 里信使在前、挪窝脚本在后且缺
 
   const manifest = JSON.parse(readFileSync(`${PLUGIN}.claude-plugin/plugin.json`, "utf8"));
   const [major, minor] = manifest.version.split(".").map(Number);
-  assert.ok(major > 0 || minor >= 9, `插件版本必须 ≥ 0.9.0: ${manifest.version}`);
+  assert.ok(major > 0 || minor >= 10, `插件版本必须 ≥ 0.10.0: ${manifest.version}`);
 
   for (const path of [`${PLUGIN}skills/coflux/SKILL.md`, `${ROOT}packages/cli/skills/coflux/SKILL.md`]) {
     const skill = readFileSync(path, "utf8");
@@ -194,7 +212,7 @@ test("插件配置：UserPromptSubmit 里信使在前、挪窝脚本在后且缺
     assert.match(skill, /EnterWorktree/, `${path} 要说明 /cd 与 EnterWorktree 会挪窝`);
     assert.match(skill, /effective/i, `${path} 要区分归属工作区与有效工作区`);
   }
-  // 坐标块的措辞改成以 cwd 所在工作区为准
+  // 坐标块要指向 cofluxd workspace，而不是让 agent 自己拿环境变量当归属
   const context = readFileSync(`${PLUGIN}scripts/session-context.sh`, "utf8");
   assert.match(context, /cwd/, "SessionStart 块要以 cwd 所在的工作区为准");
   assert.match(context, /cofluxd workspace/, "SessionStart 块要指向 cofluxd workspace");

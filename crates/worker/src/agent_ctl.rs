@@ -12,6 +12,11 @@
 //! （[`crate::workspace_match`]），本地动作按它判定归属、经中心的动作把它申报给中心核验。
 //! 会话的**归属**工作区仍只来自账本，永远不按 cwd 猜。
 //!
+//! **跟随进入 worktree（plan 103）**：纯 `cd` 只改**目标**（上一段），显式的 EnterWorktree /
+//! ExitWorktree / resume / WorktreeRemove 则真的搬**归属**——[`AgentAction::WorkspaceLocate`]
+//! 与 [`AgentAction::WorkspaceForget`] 在本地解析 worktree 身份（见 [`crate::worktree_locate`]）、
+//! 交中心核验落库，再按中心的响应更新账本。账本仍然只从中心学，只是多了这一个学的时机。
+//!
 //! **本地能闭环的不碰中心（plan 094）**：send / read / wait(status) / notify / progress 全在 daemon
 //! 本地完成——归属校验（目标与调用方的有效工作区相同）与退出码来自 [`crate::session_ledger`]，内容来自
 //! 本地命令日志或 sessiond 快照，presence 标注改 observed 后立即上报（断连期间由重连后的全量补发
@@ -34,8 +39,8 @@ use prost::Message as _;
 
 use crate::session_ledger::{SessionPhase, SessionRecord};
 use crate::{
-    agents, device::DeviceRuntime, observed::ObservedState, ops, workspace_match, WorkerState,
-    WsOut,
+    agents, device::DeviceRuntime, observed::ObservedState, ops, workspace_match, worktree_locate,
+    WorkerState, WsOut,
 };
 
 /// 等中心回执的上限：只防在飞请求永久占住 pending 表，CLI 侧自己的超时更短。
@@ -106,6 +111,12 @@ pub enum AgentAction {
     /// `cofluxd workspace`（plan 102）：只读地报出调用方 cwd 对应的有效工作区与会话的归属
     /// 工作区，让 agent 一眼看出自己有没有「挪窝」。纯本地。
     WorkspaceCurrent,
+    /// `cofluxd workspace locate <path>`（plan 103）：把本会话终端的**归属**搬到 path 所属的
+    /// 工作区（未登记的同仓库 worktree 先登记）。Enter / Exit / SessionStart 共用它。
+    WorkspaceLocate { path: String },
+    /// `cofluxd workspace forget <path>`（plan 103）：Claude Code 已清理掉该 worktree，
+    /// 其下所有终端搬回项目主工作区、工作区记录消失。
+    WorkspaceForget { path: String },
 }
 
 pub struct AgentResponse {
@@ -392,6 +403,128 @@ async fn handle(
                 "cwd": cwd,
             })),
         },
+        AgentAction::WorkspaceLocate { path } => {
+            locate_workspace(state, to_server_tx, &session_id, &scope, &path).await
+        }
+        AgentAction::WorkspaceForget { path } => {
+            forget_workspace(state, to_server_tx, &session_id, &scope, &path).await
+        }
+    }
+}
+
+/// 把本会话终端的归属定位到 `path` 所属的工作区（plan 103）。
+///
+/// 身份解析全在本地（只有 daemon 手里有 git 和真实路径），落库全在中心（归属的唯一真相）。
+/// 「不适用」的三种情形（目录工作区起步、目标非 git、跨仓库）在本地就止步，一条消息都不发。
+async fn locate_workspace(
+    state: &Arc<Mutex<WorkerState>>,
+    to_server_tx: &mpsc::Sender<WsOut>,
+    session_id: &str,
+    scope: &WorkspaceScope,
+    path: &str,
+) -> AgentResponse {
+    if path.trim().is_empty() {
+        return AgentResponse::err("400 Bad Request", "workspace locate 缺 path");
+    }
+    let owning = match scope.require_owning() {
+        Ok(owning) => owning.to_string(),
+        Err(response) => return response,
+    };
+    // 表克隆一份再放锁：下面要 canonicalize 并起 git 子进程，不能在 WorkerState 的锁里做。
+    let workspaces = { state.lock().unwrap().workspaces.clone() };
+    let Some((owning_path, _)) = workspaces.get(&owning).cloned() else {
+        return AgentResponse::err(
+            "409 Conflict",
+            "本终端的归属工作区还没同步到 daemon，稍后重试",
+        );
+    };
+    let owning_facts = crate::git::repo_facts(&owning_path).await;
+    let target_facts = crate::git::repo_facts(path).await;
+    let (workspace_id, root, branch) =
+        match worktree_locate::decide(&workspaces, owning_facts.as_ref(), target_facts.as_ref()) {
+            worktree_locate::Locate::Existing {
+                workspace_id,
+                root,
+                branch,
+            } => (workspace_id, root, branch),
+            worktree_locate::Locate::Register { root, branch } => (String::new(), root, branch),
+            worktree_locate::Locate::NotApplicable(reason) => {
+                return AgentResponse::err("409 Conflict", reason)
+            }
+        };
+    let payload =
+        agent_control_request::Payload::WorkspaceLocate(wire::AgentWorkspaceLocate {
+            path: root,
+            branch,
+            workspace_id,
+            // 走到这里 decide 已核验过同仓库；跨仓库/非 git 在上面就返回了
+            same_repo: true,
+        });
+    // 申报的**目标**留空：这条消息改的是归属，不是本次请求打到哪个工作区（plan 102 的字段）。
+    match ask_server(state, to_server_tx, session_id.to_string(), String::new(), payload).await {
+        Err(response) => response,
+        Ok(agent_control_result::Payload::WorkspaceLocate(result)) => {
+            // 账本只从中心的响应学（plan 094/103）：跟上之后 102 的 resolve_scope 才会得出
+            // 有效 == 归属，挪窝块自然归于沉默。
+            state
+                .lock()
+                .unwrap()
+                .ledger
+                .move_workspace(session_id, &result.workspace_id);
+            AgentResponse::ok(serde_json::json!({
+                "workspaceId": result.workspace_id,
+                "path": result.path,
+                "branch": result.branch,
+                "created": result.created,
+                "moved": result.moved,
+            }))
+        }
+        Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
+    }
+}
+
+/// Claude Code 清理掉了 `path` 这个 worktree（plan 103）：中心把该工作区下所有终端搬回项目
+/// 主工作区并删掉记录。daemon 绝不在这条路径上执行 `git worktree remove`——目录已经没了。
+async fn forget_workspace(
+    state: &Arc<Mutex<WorkerState>>,
+    to_server_tx: &mpsc::Sender<WsOut>,
+    session_id: &str,
+    scope: &WorkspaceScope,
+    path: &str,
+) -> AgentResponse {
+    if path.trim().is_empty() {
+        return AgentResponse::err("400 Bad Request", "workspace forget 缺 path");
+    }
+    if let Err(response) = scope.require_owning() {
+        return response;
+    }
+    let workspaces = { state.lock().unwrap().workspaces.clone() };
+    let workspace_id = worktree_locate::workspace_at_root(&workspaces, path).unwrap_or_default();
+    if workspace_id.is_empty() {
+        // 从来没登记过（Claude 建了又删、coflux 一直不知道它）：本来就没有记录要删。
+        return AgentResponse::err("404 Not Found", "该 worktree 不是 coflux 登记过的工作区");
+    }
+    let payload = agent_control_request::Payload::WorkspaceForget(wire::AgentWorkspaceForget {
+        path: worktree_locate::normalize_display(path),
+        workspace_id,
+    });
+    match ask_server(state, to_server_tx, session_id.to_string(), String::new(), payload).await {
+        Err(response) => response,
+        Ok(agent_control_result::Payload::WorkspaceForget(result)) => {
+            // 搬回主工作区的不只发起方这一个会话：该工作区下的每个终端都跟着回去了。
+            state
+                .lock()
+                .unwrap()
+                .ledger
+                .move_all_workspaces(&result.workspace_id, &result.fallback_workspace_id);
+            AgentResponse::ok(serde_json::json!({
+                "workspaceId": result.workspace_id,
+                "fallbackWorkspaceId": result.fallback_workspace_id,
+                "movedTerminals": result.moved_terminals,
+                "removed": result.removed,
+            }))
+        }
+        Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
     }
 }
 
@@ -432,6 +565,17 @@ impl WorkspaceScope {
             ));
         }
         Ok(&self.effective)
+    }
+
+    /// 改归属的动作（plan 103）要的是**归属**本身：没有归属就没有可搬的东西，也绝不按 cwd 补。
+    fn require_owning(&self) -> Result<&str, AgentResponse> {
+        if self.owning.is_empty() {
+            return Err(AgentResponse::err(
+                "409 Conflict",
+                "本终端早于 daemon 升级，缺少工作区归属：重开终端后 coflux 才能跟随 worktree",
+            ));
+        }
+        Ok(&self.owning)
     }
 }
 
@@ -661,6 +805,20 @@ mod tests {
         assert!(refused.body.contains("早于 daemon 升级"), "{}", refused.body);
         // AgentResponse 没有 Debug，用 .ok() 取值而不是 unwrap
         assert_eq!(scope("ws-a", "ws-b").require_effective().ok(), Some("ws-b"));
+    }
+
+    #[test]
+    fn following_a_worktree_needs_ownership_not_the_cwd_target() {
+        // 改归属的动作要的是归属本身：cwd 挪到哪都不影响「谁在搬」
+        assert_eq!(scope("ws-a", "ws-b").require_owning().ok(), Some("ws-a"));
+        let unknown = WorkspaceScope {
+            owning: String::new(),
+            effective: String::new(),
+            effective_path: None,
+        };
+        let refused = unknown.require_owning().expect_err("必须拒绝");
+        assert_eq!(refused.status, "409 Conflict");
+        assert!(refused.body.contains("跟随 worktree"), "{}", refused.body);
     }
 
     #[test]
