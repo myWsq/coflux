@@ -10,7 +10,9 @@
  * - 安全边界：coflux 会话之外的 pid 一律拒（身份就是「你在谁的进程树里」）；
  * - 每工作区活跃终端硬上限，超限拒绝且错误可读；
  * - plan 094：`/agent` 的拒绝原因回给调用方（超长命令、缺参数都有具体文案，不再是 `bad request`），
- *   命令 16 KB / send 文本 64 KB 与 MCP 对齐。
+ *   命令 16 KB / send 文本 64 KB 与 MCP 对齐；
+ * - plan 101：不带 `--cmd` 开出的是**会话终端**——常驻、全 tty 的登录 shell，不自己退出，
+ *   read 读的是快照（没有命令日志），送 `exit` 才 exited；空命令不再是参数错误。
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -75,6 +77,32 @@ async function waitForFile(path, predicate, label, timeout = 20000) {
   throw new Error(`${label} 超时；最后内容: ${JSON.stringify(last)}`);
 }
 
+let cliSeq = 0;
+
+/** 在会话里跑一条 cofluxd 命令并等它的输出满足条件；每次换新文件，可安全重复调用。 */
+async function runCli(device, sessionId, gatewayPort, home, args, predicate, label, timeout = 20000) {
+  const out = join(home, `cli-${cliSeq += 1}.txt`);
+  await device.input(sessionId, cliCmd(gatewayPort, args, out));
+  return await waitForFile(out, predicate, label, timeout);
+}
+
+/** 轮询 `terminal read` 直到画面满足条件：会话终端只有快照，shell 起来、命令跑完都要等一会儿
+ * （刚开出来的头几百毫秒快照可能还是空的），所以一次 read 读不到不代表失败。 */
+async function readScreenUntil(device, sessionId, gatewayPort, home, taskId, predicate, label, timeout = 40000) {
+  const deadline = Date.now() + timeout;
+  let last = "";
+  while (Date.now() < deadline) {
+    try {
+      last = await runCli(device, sessionId, gatewayPort, home, `terminal read ${taskId}`, (s) => s.includes("#"), `${label} 的单次 read`, 8000);
+      if (predicate(last)) return last;
+    } catch {
+      // 这一轮没写出来（PTY 还在忙上一条）：下一轮再试
+    }
+    await sleep(500);
+  }
+  throw new Error(`${label} 超时；最后画面: ${JSON.stringify(last)}`);
+}
+
 before(async () => {
   stack = await startStack({ port: PORT, serverEnv: { COFLUX_MAX_AGENT_TERMINALS: String(MAX_TERMINALS) } });
 });
@@ -131,6 +159,89 @@ test("terminal new：中心真建出任务、命令真在 PTY 里跑、跑完带
     const listText = await waitForFile(listOut, (s) => s.includes(created.task.id), "terminal list 输出");
     assert.match(listText, new RegExp(`${created.task.id}\\s+exited exit=3\\s+跑单测`), `list 形状不符: ${listText}`);
     assert.ok(listText.includes(task.id), "同工作区的其它终端也要列出来");
+
+  } finally {
+    await removeWorkspace(c, ws.id);
+    device.close();
+  }
+});
+
+test("会话终端（plan 101）：不带 --cmd 开出常驻的全 tty 登录 shell，read 读快照，送 exit 才退出", async () => {
+  const home = mkDir();
+  const device = await openRelayDevice(stack);
+  const c = device.control;
+  const { ws, task } = await startDirTerminal(c, home);
+  const gatewayPort = device.gateway.port;
+  await device.attach(task.sessionId);
+
+  try {
+    // 不带 --cmd：与用户在侧栏点「新建终端」等价，一个不会自己退出的登录 shell
+    const newOut = join(home, "shell-new.txt");
+    await device.input(task.sessionId, cliCmd(gatewayPort, `terminal new --title "调试 shell"`, newOut));
+
+    const created = await c.waitFor(
+      (m) =>
+        m.case === "taskUpdated" &&
+        m.task.workspaceId === ws.id &&
+        m.task.title === "调试 shell" &&
+        m.task.status === TaskStatus.RUNNING,
+      "会话终端出现在侧栏并跑起来",
+      20000,
+    );
+    const shellId = created.task.id;
+    const newText = await waitForFile(newOut, (s) => s.includes(shellId), "terminal new 输出");
+    assert.match(newText, /已开终端/, "输出与作业终端同形");
+    assert.match(newText, /会话终端/, `不带 --cmd 时要提示这是会话终端: ${newText}`);
+
+    // 先 read 等提示符：会话终端没有命令日志，read 拿到的是 sessiond 的当前画面
+    await readScreenUntil(
+      device,
+      task.sessionId,
+      gatewayPort,
+      home,
+      shellId,
+      (s) => s.includes("# running") && !s.includes("（暂无输出）"),
+      "等 shell 提示符出现",
+    );
+
+    // 全 tty 是这种终端存在的理由：作业终端的 stdout 是管道，`test -t 1` 不成立、这行不会有输出。
+    // 标记里的引号让「命令回显」和「命令输出」区分得开（回显里是 TTY-"OK"-101）。
+    await device.input(
+      task.sessionId,
+      cliCmd(gatewayPort, `terminal send ${shellId} --text 'test -t 0 && test -t 1 && echo TTY-"OK"-101' --enter`, join(home, "shell-send.txt")),
+    );
+    const screen = await readScreenUntil(
+      device,
+      task.sessionId,
+      gatewayPort,
+      home,
+      shellId,
+      (s) => s.includes("TTY-OK-101"),
+      "会话终端里 stdin/stdout 都是 tty",
+    );
+    assert.match(screen, /# running/, "命令跑完了终端也不能退出——它是常驻的");
+
+    const listText = await runCli(device, task.sessionId, gatewayPort, home, "terminal list", (s) => s.includes(shellId), "terminal list 输出");
+    assert.match(listText, new RegExp(`${shellId}\\s+running\\s+调试 shell`), `会话终端在 list 里应是 running: ${listText}`);
+
+    // 送 exit 才结束，退出码是 shell 的（上一条命令成功，故为 0）
+    await device.input(task.sessionId, cliCmd(gatewayPort, `terminal send ${shellId} --text "exit" --enter`, join(home, "shell-exit.txt")));
+    await c.waitFor(
+      (m) => m.case === "taskUpdated" && m.task.id === shellId && m.task.status === TaskStatus.EXITED,
+      "送 exit 后会话终端才退出",
+      30000,
+    );
+    const waitText = await runCli(
+      device,
+      task.sessionId,
+      gatewayPort,
+      home,
+      `terminal wait ${shellId} --timeout 60`,
+      (s) => s.includes("# exited"),
+      "wait 到会话终端退出",
+      60000,
+    );
+    assert.match(waitText, /# exited exit=0/, `wait 要报 shell 自己的退出码: ${waitText}`);
 
   } finally {
     await removeWorkspace(c, ws.id);
@@ -229,6 +340,12 @@ test("安全边界：coflux 会话之外的 pid 一律拒；非 json 被拒；�
     const tooLong = await post({ action: "terminal.new", command: "x".repeat(17 * 1024) });
     assert.equal(tooLong.status, 400);
     assert.match((await tooLong.json()).error, /命令超过 16384 字节上限/, "超长命令要给具体原因，不是 bad request");
+    // plan 101：空命令是合法输入（会话终端），不再被参数校验拦下——它只会撞上 pid 门
+    const emptyCommand = await post({ action: "terminal.new", command: "" });
+    assert.equal(emptyCommand.status, 403, "空命令不再是 400：它是会话终端，只该被 pid 门拦下");
+    assert.match((await emptyCommand.json()).error, /不在 coflux 终端里/);
+    const blankCommand = await post({ action: "terminal.new", command: "   " });
+    assert.equal(blankCommand.status, 403, "空白命令与缺省等价，同样不是参数错误");
     const noTask = await post({ action: "terminal.status" });
     assert.equal(noTask.status, 400);
     assert.match((await noTask.json()).error, /terminal\.status 缺 taskId/, "缺参数要指名道姓");
