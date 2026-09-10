@@ -100,6 +100,7 @@
 		8D6BD358BD0B2BF5799C393D /* TreeSitterHaskell in Frameworks */ = {isa = PBXBuildFile; productRef = DA941AD7BDBEC3F33C04DEAE /* TreeSitterHaskell */; };
 		8F211D089FE528571083777D /* DiffTextDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59372E35273EAD61D64C97CB /* DiffTextDocumentTests.swift */; };
 		8FDC2F99C69428F69A3C8A77 /* TreeSitterLess in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0E2AADBAA8F3B0C4D6F3B7 /* TreeSitterLess */; };
+		909CA0613F79D7D9E7EB5AC0 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 6BD7D154D9EE885DBD9D65C5 /* AppIcon.icon */; };
 		909F3BA872650CF6B577FB70 /* TerminalUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B1B1784B34B3B4AEA039C8A /* TerminalUpload.swift */; };
 		9266F3FA0743C18DFC1E23AB /* SocketTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB54F390546AB25EC494C3D3 /* SocketTransport.swift */; };
 		9649ABF2B3C860F47415E0CE /* TreeSitterSql in Frameworks */ = {isa = PBXBuildFile; productRef = DC1DFBA9BE8BBE3F998CD6C6 /* TreeSitterSql */; };
@@ -246,6 +247,7 @@
 		67ADE047BB15865A26D7B6CC /* LocalRouterIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalRouterIntegrationTests.swift; sourceTree = "<group>"; };
 		6A4E488C73CF6ACA7DA00B69 /* NativeLocalDeviceProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLocalDeviceProvider.swift; sourceTree = "<group>"; };
 		6A9C7C880F13BC248F75BB92 /* powershell-highlights.scm */ = {isa = PBXFileReference; path = "powershell-highlights.scm"; sourceTree = "<group>"; };
+		6BD7D154D9EE885DBD9D65C5 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		6C623B676C11A9B936A8A955 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		6F01988B170DCB373E37DB05 /* libc++.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = "libc++.tbd"; path = "usr/lib/libc++.tbd"; sourceTree = SDKROOT; };
 		6FD7CEF707402C3EA02A9B75 /* javascript-highlights.scm */ = {isa = PBXFileReference; path = "javascript-highlights.scm"; sourceTree = "<group>"; };
@@ -539,6 +541,7 @@
 			children = (
 				AA9634947F2FDEA2D98EA8D2 /* AgentGlyph.swift */,
 				6C623B676C11A9B936A8A955 /* App.swift */,
+				6BD7D154D9EE885DBD9D65C5 /* AppIcon.icon */,
 				9AF526333F9C8AFC4059CB27 /* Assets.xcassets */,
 				2B934ED0FE34959D09917E43 /* BranchChoices.swift */,
 				F66F1A06F30E3FF47F7BFBB2 /* ChangesView.swift */,
@@ -736,6 +739,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				909CA0613F79D7D9E7EB5AC0 /* AppIcon.icon in Resources */,
 				57AAF10EE490D90874DC544F /* Assets.xcassets in Resources */,
 				CDCA067FF044EB74D916672C /* SwiftTreeSitter-LICENSE.txt in Resources */,
 				EA9D4F8C52FF0A54B3B4DE26 /* ThirdPartyNotices.txt in Resources */,

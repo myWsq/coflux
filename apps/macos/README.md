@@ -126,6 +126,11 @@ Diff 解析使用临时 Git 仓库验证中文/换行/tab/引号路径、删除�
 `node apps/macos/scripts/sync-icons.mjs` 从当前 Web 锁定的 lucide-react 导出 SVG Asset Catalog。
 App 中按 template vector 渲染；许可见 `LUCIDE-LICENSE`。不把 JS runtime 打包进 App。
 
+App 图标是 `Sources/AppIcon.icon`（Icon Composer 文档，Xcode 26 的 actool 直接编译）：底色取 Web manifest 的 `#111214`（浅色外观略提亮），
+记号层 `Assets/glyph.svg` 是 `apps/web/public/favicon.svg` 的「>-」放大两倍，开 glass/specular，与 Web/iOS 同一个标记。
+macOS 26 起按分层实时渲染（含 Clear/Tinted 外观）；macOS 14/15 用 actool 生成的扁平 icns 回退。改图标用 Icon Composer 打开该目录即可，
+`project.yml` 的 `Sources` 整目录已包含它，改完不用动 pbxproj。
+
 ## 原生实现审查与高亮
 
 见 [NATIVE-AUDIT.md](NATIVE-AUDIT.md)。已清理重建验证 App 无 JS/HTML/WASM 资源、
