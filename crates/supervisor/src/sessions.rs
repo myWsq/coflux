@@ -29,6 +29,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use rand_core::{OsRng, RngCore};
 
 use crate::sessiond::{ControlError, InputAdmission, SequencedDecision, SessionState};
+use crate::shell_integration;
 
 /// 把 `segment` 放到 PATH 首段（plan 112）：原 PATH 为空/缺失时就只有这一段；其余段顺序不变；
 /// 原本已含该段（不论在哪个位置）则去重后仍只出现一次、在首位。空段（`::`）照原样保留。
@@ -847,6 +848,19 @@ impl Sessions {
         command.env("COFLUX_TASK_ID", &task_id);
         command.env("COFLUX_SESSION_ID", &session_id);
         command.env("COFLUX_MCP_URL", &context.mcp_url);
+        // plan 115：shell 集成——按 shell 的 basename 分派，给 shell 塞一段我们自己的 rc，由它在用户 rc
+        // 全部跑完之后定义 claude 函数，把 COFLUX_CLAUDE_PLUGIN_DIR 翻译成 `claude --plugin-dir <dir>`。
+        // ZDOTDIR / XDG_DATA_DIRS 是覆盖语义，与上面两段同理必须写在拷贝 std::env 之后（用户原来的
+        // ZDOTDIR 由 plan() 从 supervisor 自身环境里读出来，交给 rc 转发）。认不出的 shell（含命令终端
+        // 那种指向包装脚本的 shell）不注入，行为与今天逐字相同。
+        if let Some(injection) =
+            shell_integration::plan(&shell, &self.home, |key| std::env::var(key).ok())
+        {
+            for (key, value) in injection.envs {
+                command.env(key, value);
+            }
+            command.args(injection.args);
+        }
         let mut child = pair
             .slave
             .spawn_command(command)

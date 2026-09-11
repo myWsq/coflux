@@ -77,7 +77,11 @@ snapshot、input、resize 与 stop；不承诺中心离线后的刷新/冷启动
 daemon 全 Rust、零 Node 运行时，分成两个进程：
 
 - `coflux-supervisor`：极少升级；持有 PTY、VT/history、holder/sequence、exit tombstone；管理 worker
-  版本与观察期回滚。
+  版本与观察期回滚。每个 PTY 会话的环境也由它组装：`COFLUX_*` 归属 id、PATH 首段的 `<COFLUX_HOME>/bin`，
+  以及 shell 集成（plan 115）——按 shell 注入一份自带的 rc（zsh 改 `ZDOTDIR`、bash 用 `--init-file`、fish
+  经 `XDG_DATA_DIRS` 的 vendor conf；认不出的 shell 不注入），它在用户原来的 rc 链原样跑完之后定义一个
+  `claude` 函数，把注入方（macOS 上是 Coflux.app 的 LaunchAgent）给的 `COFLUX_CLAUDE_PLUGIN_DIR` 翻译成
+  `claude --plugin-dir <dir>`，变量为空或目录不存在时退回与今天逐字相同的 `claude`。
 - `coflux-worker`：频繁热升级；负责中心 WS、loopback gateway、本地授权、git/exec/fs、Device RPC、
   relay 与 checkpoint。
 

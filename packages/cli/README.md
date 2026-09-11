@@ -51,6 +51,8 @@ cofluxd ports                                             # 端口 + 可直接�
 
 每个 coflux 开出来的 PTY 会话里还注入了一组 `COFLUX_*` 环境变量（由 supervisor 组装，中心只下发 id）：`COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID`（目录工作区为空串）/ `COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` / `COFLUX_MCP_URL`。agent 读它们就知道自己在哪台设备、哪个项目/工作区/终端，值与中心 MCP `list_*` 返回的 id 完全一致，可直接传给 MCP tools。本地命令与 MCP 的分工只有一条规则：**本地能闭环的一律本地命令**（本工作区内的开终端/读/等/输入/播报/叫人/端口）；只有跨出本工作区——开子工作区、跨工作区/跨设备读写、或从 coflux 之外接入——才用中心的 `coflux` MCP（`claude mcp add --transport http coflux "$COFLUX_MCP_URL"`，一次 OAuth 授权）。supervisor 不走热升级，旧机器要 `cofluxd update && cofluxd restart` 之后会话里才有这些变量；skill 里写了变量为空时的降级分支。
 
+还有一个只读不写的约定变量 `COFLUX_CLAUDE_PLUGIN_DIR`（plan 115）：**值由注入方决定**，supervisor 不解析、不校验、不落盘，只按 shell 注入一段集成 rc，把它翻译成 `claude --plugin-dir <dir>`——coflux 终端里手敲 `claude` 就自动带上那份插件（hooks / `.mcp.json` / skill 全生效，`/plugin` 里看不到，因为这是会话级加载而非安装）。**npm 这条线不写这个变量**：macOS 上写它的是 Coflux.app 的 LaunchAgent（值指向 app 包内那份插件，随 app 更新）；Linux/自建可以在自己的 systemd unit 里设同一个变量指向任意插件目录，supervisor 侧的 shell 集成照样生效。变量为空、或指向的目录不存在时，`claude` 的行为与没有这个集成时完全一致——这既是退化行为，也是关掉它的办法。
+
 配套的 skill 在 `skills/coflux/SKILL.md`（随包分发），装给 Claude Code：
 
 ```sh
