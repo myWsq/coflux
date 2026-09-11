@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, opendirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { setInterval } from "node:timers";
 
-import type { DesktopDaemonBusy, DesktopDaemonState } from "../shared/desktop-bridge";
+import type { DesktopDaemonBusy, DesktopDaemonFda, DesktopDaemonState } from "../shared/desktop-bridge";
 import type { DaemonBundle } from "./daemon-bundle";
 import { buildDaemonSettings, daemonServerUrl, daemonSettingsJson, parseCredentialsDaemonId, parseFdaStatus, parsePendingAuth, parseSupervisorVersion } from "./daemon-files";
 import { LAUNCHD_LABEL, type DaemonHomePaths } from "./daemon-paths";
@@ -49,6 +50,15 @@ export function execCommand(file: string, args: readonly string[]): Promise<{ co
 }
 function readText(path: string): string | null { try { return readFileSync(path, "utf8"); } catch { return null; } }
 
+/** 权限授予主应用，由主进程重新探测；不能沿用跨更新存活内核的启动时缓存。只打开目录，不读取内容。 */
+function appFdaStatus(): DesktopDaemonFda {
+  try { opendirSync(join(homedir(), "Library/Safari")).closeSync(); return "granted"; }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "EACCES" || code === "EPERM" ? "denied" : "unknown";
+  }
+}
+
 /** 桌面拥有生命周期，托管实例可跨更新存活。旧 LaunchAgent 仅用于有确认的迁移。 */
 export function createDaemonManager(options: DaemonManagerOptions): DaemonManager {
   const { paths, bundle, commands, log } = options;
@@ -58,6 +68,7 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
   let runtime: RuntimeStatus | null = null;
   let busy: DesktopDaemonBusy | undefined;
   let error: DaemonFacts["error"];
+  let refreshError: DaemonFacts["error"];
   let disposed = false;
   let action: Promise<void> | null = null;
   let state = derive();
@@ -71,19 +82,19 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
       registered, daemonId: registered ? parseCredentialsDaemonId(readText(paths.credentials)) : null,
       pendingAuth: registered ? null : parsePendingAuth(readText(paths.pendingAuth)),
       running: runtime !== null,
-      fda: parseFdaStatus(readText(paths.fdaStatus)),
+      fda: options.platform === "darwin" ? appFdaStatus() : parseFdaStatus(readText(paths.fdaStatus)),
       runningVersion: runtime?.version ?? parseSupervisorVersion(readText(paths.supervisorVersion)),
       binDir: paths.binDir,
       updateReadyOverride: !!(runtime && desiredId && runtime.runtimeId !== desiredId),
-      ...(busy ? { busy } : {}), ...(error ? { error } : {}),
+      ...(busy ? { busy } : {}), ...((error ?? refreshError) ? { error: error ?? refreshError } : {}),
     };
     return { ...deriveDaemonState(facts), runningTerminals: runtime?.sessions.length ?? 0,
       legacyInstallation: !installed && existsSync(paths.plist) };
   }
   function emit(): void { if (!disposed) { state = derive(); for (const listener of listeners) listener(state); } }
   async function refresh(): Promise<void> {
-    try { runtime = await runtimeStatus(paths.home); }
-    catch (failure) { error = { action: "start", message: failure instanceof Error ? failure.message : String(failure) }; }
+    try { runtime = await runtimeStatus(paths.home); refreshError = undefined; }
+    catch (failure) { refreshError = { action: "start", message: failure instanceof Error ? failure.message : String(failure) }; }
     emit();
   }
   async function run(kind: DesktopDaemonBusy, body: () => Promise<void>): Promise<void> {

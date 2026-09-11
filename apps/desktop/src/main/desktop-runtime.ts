@@ -41,7 +41,7 @@ export function runtimeRequest(socketPath: string, request: { op: "status" | "st
       try { finish(undefined, JSON.parse(data.slice(0, end))); }
       catch { finish(new Error("本机运行组件响应无效")); }
     });
-    socket.once("end", () => finish(new Error("本机运行组件响应不完整")));
+    socket.once("end", () => finish(Object.assign(new Error("本机运行组件响应不完整"), { code: "ERR_RUNTIME_INCOMPLETE" })));
   });
 }
 
@@ -63,12 +63,19 @@ export async function runtimeStatus(home: string): Promise<RuntimeStatus | null>
 }
 
 export async function stopRuntime(home: string, status: RuntimeStatus): Promise<void> {
-  const result = await runtimeRequest(join(home, "runtime.sock"), { op: "stop", instanceId: status.instanceId }) as { ok?: boolean };
-  if (result?.ok !== true) throw new Error("本机运行状态已变化，请重新确认");
+  // 停止会关闭 UDS；ack 或紧随其后的 status 都可能遇到 EOF。只能重查同一实例是否
+  // 消失，不能把 EOF 直接当成功，也不能向可能已替换的新实例重发 stop。
+  const stoppingConnection = (error: unknown) => ["ERR_RUNTIME_INCOMPLETE", "ECONNRESET", "EPIPE", "ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "");
+  try {
+    const result = await runtimeRequest(join(home, "runtime.sock"), { op: "stop", instanceId: status.instanceId }) as { ok?: boolean };
+    if (result?.ok !== true) throw new Error("本机运行状态已变化，请重新确认");
+  } catch (error) { if (!stoppingConnection(error)) throw error; }
   for (let i = 0; i < 100; i++) {
-    const current = await runtimeStatus(home);
-    if (!current) return;
-    if (current.instanceId !== status.instanceId) throw new Error("本机出现新运行实例，已保留，请重新确认");
+    try {
+      const current = await runtimeStatus(home);
+      if (!current) return;
+      if (current.instanceId !== status.instanceId) throw new Error("本机出现新运行实例，已保留，请重新确认");
+    } catch (error) { if (!stoppingConnection(error)) throw error; }
     await delay(50);
   }
   throw new Error("本机终端尚未结束，已取消退出");

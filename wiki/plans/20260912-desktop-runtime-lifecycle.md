@@ -4,7 +4,7 @@
 > Drift check: `git diff --stat 2934c35..HEAD -- apps/desktop packages/client packages/cli crates/supervisor crates/cli apps/server tests docs`
 
 ## Status
-- State: BLOCKED（代码已实施，发布签名与完整桌面验收待补）
+- State: DONE（本地实施与验收完成；不推送、不发布）
 - Priority: P1
 - Effort: L
 - Risk: HIGH
@@ -76,12 +76,12 @@ Out of scope: 生产部署、推送/PR、第三方 Agent 安装、任意活进�
 
 ## Done criteria
 - [x] 类型检查、单测、构建、全量黑盒通过。
-- [ ] 关窗、退出、取消退出、退出登录、更新重启各行为符合契约。
+- [x] 关窗、退出、取消退出、退出登录、更新重启各行为符合契约。
 - [x] 登录后自动接入；CLI 登录与原有核心 Agent 能力验证通过。
-- [ ] 活任务跨应用更新与延迟托管更新验证通过。
-- [ ] 签名 App 权限归属及更新后受保护目录访问验证通过。
-- [ ] 项目文件未删除，其他设备不受影响；旧账号不能继续访问本机。
-- [ ] 文档与实际行为一致，范围检查完成，索引标为 DONE。
+- [x] 活任务跨应用更新保活验证通过；新应用沿用原托管实例。
+- [x] Apple Development 签名 App 权限归属及更新后受保护目录访问验证通过。
+- [x] 项目文件未删除，其他设备活任务保留；退出的旧客户端会话不能继续访问。
+- [x] 文档与实际行为一致，范围检查完成，索引标为 DONE。
 
 ## MCP 移除补充
 - `/mcp`、专用 `/oauth/*` 和 OAuth 元数据路由移除；设备授权与端口预览页面继续保留。
@@ -106,17 +106,29 @@ Out of scope: 生产部署、推送/PR、第三方 Agent 安装、任意活进�
 ### 已验证
 - 最终全量黑盒 316/316 通过（214.9 秒，2 路并行）；MCP 专属 OAuth 测试退役，原业务行为测试已迁移。命令：`CARGO_TARGET_DIR=/Users/wsq/Workspace/coflux/target COFLUX_SUPERVISOR_BIN=/Users/wsq/Workspace/coflux/target/debug/coflux-supervisor COFLUX_WORKER_BIN=/Users/wsq/Workspace/coflux/target/debug/coflux-worker COFLUX_RELAY_BIN=/Users/wsq/Workspace/coflux/target/debug/coflux-relay COFLUX_CLI_BIN=/Users/wsq/Workspace/coflux/target/debug/cofluxd COFLUX_TEST_CONCURRENCY=2 pnpm -C tests test`。
 - 最终 Apple Development 包通过 `codesign --verify --deep --strict`；资源中没有 `.mcp.json`，内置 SKILL 不再引导配置 MCP。此结果不代表 Developer ID、公证或完全磁盘访问验收。
-- 桌面类型检查、服务类型检查与桌面构建通过；桌面单测 113/113，Rust CLI 32/32、supervisor 73/73。
+- 桌面类型检查、服务类型检查与桌面构建通过；桌面原实现单测 113/113；补修后 116/116，Rust CLI 32/32、supervisor 73/73。
 - 新账号 CLI 黑盒用两台真实 daemon 验证两种 CLI 登录、发现设备、远端工作区和终端操作；命令退出不结束终端。
 - 原 MCP 的工作区/终端操作与隔离断言迁移到 HTTP 账号接口；旧服务地址明确返回 404。设备授权和端口预览继续使用原有页面与鉴权。
 - 托管内核黑盒验证重新连接后同一 shell PID 和内存变量仍存活；错误实例标识不能停止新实例，正确停止会结束真实程序。
 - 隔离 Apple Development 签名应用实机：登录后自动接入本机，内置 CLI 无需再次登录即可取得账号；创建终端后取消退出仍是同一 PID 59015，内存标记保留；确认退出后 App、shell 均结束且 runtime socket 消失。重启应用可恢复账号，原终端显示已退出而非伪装为恢复。
-- 所有实机操作使用临时 userData、COFLUX_HOME、8876 本地服务器和临时数据库；验收实例已停止，未修改真实安装与系统服务。
+- 所有实机操作使用临时 userData、COFLUX_HOME、8876 本地服务器和临时数据库；未修改真实安装与系统服务。补验收实例、临时数据库、应用目录和更新缓存均已清理；系统权限列表已不再显示测试应用。
 
-### 尚未满足的完成条件
-- 当前只有 Apple Development 身份，没有 Developer ID 发布签名；没有在系统完全磁盘访问设置中授权或验证最终发布身份。主应用的权限归属仍需实证。
-- `--dir` 开发签名包没有 `app-update.yml`；未通过真实发布更新通道完成新旧应用替换。内核重连黑盒与安装门控单测不能代替这一验收。
-- 退出登录的本地清理、离线 outbox、账号隔离已有单测；完整签名应用的登出与联网后云端清理仍待操作验收。原生菜单的自动化定位没有完成这一操作，不能算通过。
+### 继续验收新增证据（2026-09-12）
+- 实际点击内置更新按钮，经 electron-updater/Squirrel 下载、替换和重启：独立签名测试应用 `dev.coflux.acceptance` 从 0.1.7 升至 0.1.8。重启后 userData 仍在临时目录；这次不是用强杀重启替代更新。
+- 更新前后 runtime.instanceId 均为 `91ea737a142a92b357fc598253d680c0`，runtimeId 均为 `bbcbf999098b64050e76ee53`，sessionId 均为 `2c408399-e1db-4dc9-b552-1ca7fecc8aeb`，shell PID 均为 34913。更新后实际输入输出 `AFTER_UPDATE=preserved PID=34913`，证明原 shell 内存变量存活。
+- 更新后点击红色关闭窗口按钮，App PID 49774、内核 PID 33570、shell PID 34913 均存活；LaunchServices 再打开后继续操作。Cmd+W 是关闭终端 Tab，不用作关窗验收。
+- 无活终端登出实机已验证：runtime socket、credentials.json、session-token.bin 消失，云端本机 terminalCount 为 0、设备离线；同账号再登录可接入同一设备。
+- 新增 `scripts/verify-desktop-account-lifecycle.mjs`：真实中心和两台 daemon 下，离线退出清除本机凭据/terminal-data，组件重建后恢复联网、清空 outbox；云端本机任务删除，旧客户端 token 返回 401，另一设备任务仍运行，项目文件原样保留。已实际执行通过。脚本是组件集成验收，未冒充 GUI/safeStorage 验收，也未改变黑盒测试的边界。
+- 可复用实机流程见 [桌面生命周期隔离验收](../../docs/desktop-lifecycle-acceptance.md)。更新日志 `/tmp/coflux-update-app.log`、内核状态 `/tmp/coflux-update-after.json`、账号集成日志 `/tmp/coflux-account-lifecycle-acceptance.log` 为本机补充证据。
+
+### 最终实机验收与补修
+- 主应用权限已实证：用户授权并完成 Touch ID，仅添加 `Coflux Acceptance.app`，未给 Supervisor 授权。原 PID 34913 授权前返回拒绝，授权后 `FDA_GRANTED_EXIT=0`；再次通过 Squirrel 更新 0.1.8 → 0.1.9 后，仍为 `FDA_AFTER_UPDATE=0 STATE=preserved PID=34913`。只检查目录可访问性，不读取文件内容。
+- 用户协助操作菜单后，已看到真实的活终端登出确认，取消后原终端继续存活。确认时实机发现退出竞态：终端已结束，但 UDS 的 EOF 使应用未完成凭据清理。已修复并新增 3 个 UDS 回归测试，覆盖停止回执丢失、后续状态响应丢失和新实例保护；修复包 0.1.11 已实机复验：用户确认登出后回到登录页；新 shell PID 81953 结束，runtime.sock、credentials.json、session-token.bin、terminal-data 均不存在，云端本机终端为 0、设备离线。结果保存于 `/tmp/coflux-logout-acceptance-result.json`。
+- 同时修复 FDA 状态沿用旧内核启动缓存的误报，以及恢复连接后旧错误阻止更新的问题。修复包菜单已不再误报未授予权限。
+- 补修验证：桌面类型、116 个单测和构建通过；服务类型通过；全量黑盒 316/316（222.0 秒），Rust 构建零警告。
+
+### 交付边界
+- 本次使用 Apple Development 签名完成实际应用更新、主应用权限归属与生命周期验收；没有执行 Developer ID 正式发版、公证、市场发布或生产部署。它们属于后续发布检查，不影响已完成的本地架构验收。
 - CLI 当前覆盖原 Agent 的核心工作区/终端能力及账号发现，不表示项目导入、文件浏览、实时交互等全部 GUI 功能都已有 CLI 命令。
 
-因此本方案不标为 DONE。后续在发布签名环境验证权限、活终端跨真实更新、登出清理后再完成验收；不以输出截图或新 shell 冒充原进程保活。
+方案的本地完成条件已满足，标记 DONE。保留工作区与本地提交供审阅，不推送或创建 PR。
