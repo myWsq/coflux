@@ -212,7 +212,7 @@ git push origin refs/tags/desktop-v0.1.0
 app 内更新行为：启动 15s 后与每 4 小时检查一次；版本准入被拒时立即检查；发现即下载；下载完成后
 「重启并更新」，不点也会在退出时自动安装。菜单「检查更新…」可手动触发。
 
-本机冒烟：`pnpm -C apps/desktop pack` 出未签名的 `apps/desktop/dist/mac-arm64/coflux.app`（Fuses 已翻、
+本机冒烟：`pnpm -C apps/desktop pack` 出未签名的 `apps/desktop/dist/mac-arm64/Coflux.app`（Fuses 已翻、
 ad-hoc 签名）。通知/角标只在签名产物上可信（Electron 42+ 在 macOS 用 UNUserNotification），未签名包上的
 失败不算回归。
 

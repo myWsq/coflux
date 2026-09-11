@@ -21,6 +21,8 @@ type Builder = {
     notarize: boolean;
     icon: string;
     minimumSystemVersion: string;
+    extendInfo?: Record<string, string>;
+    extraResources?: { from: string; to: string }[];
   };
   publish: { provider: string; url: string; channel: string };
 };
@@ -34,7 +36,9 @@ test("electron-builder.yml：签名公证、Fuses、arm64 dmg+zip、generic 更�
   assert.ok(existsSync(resolve(desktopRoot, config.mac.entitlements)));
   assert.ok(existsSync(resolve(desktopRoot, config.mac.entitlementsInherit)));
   assert.ok(existsSync(resolve(desktopRoot, config.mac.icon)));
-  assert.ok(config.mac.minimumSystemVersion >= "13.0");
+  assert.equal(config.mac.minimumSystemVersion, "26.0"); // 只支持 macOS 26+，不做向下兼容
+  assert.equal(config.mac.extendInfo?.CFBundleIconName, "AppIcon"); // Liquid Glass 分层图标走 Assets.car
+  assert.ok(config.mac.extraResources?.some((item) => item.to === "Assets.car" && existsSync(resolve(desktopRoot, item.from))));
 
   const targets = Object.fromEntries(config.mac.target.map((item) => [item.target, item.arch]));
   assert.deepEqual(targets.dmg, ["arm64"]);
