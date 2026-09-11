@@ -142,10 +142,11 @@ jobs:
 
       # electron-builder 顺序：翻 Fuses → 签名（hardened runtime + entitlements）→ 公证 + staple → 出 dmg/zip
       # → 生成 latest-mac.yml。asar 完整性校验开着，签名后不再碰 app 内任何文件。
-      # 不设 CSC_LINK：身份从上一步的 keychain（CSC_KEYCHAIN）按 CSC_NAME 找。
+      # 不设 CSC_LINK：身份从上一步的 keychain（CSC_KEYCHAIN）按 CSC_NAME 找。CSC_NAME 不带
+      # 「Developer ID Application:」前缀——electron-builder 按目标自动选证书类型，带前缀它直接报错。
       - name: 打包 + Developer ID 签名 + 公证（electron-builder）
         env:
-          CSC_NAME: "Developer ID Application: Shuaiqi Wang (${{ secrets.APPLE_TEAM_ID }})"
+          CSC_NAME: "Shuaiqi Wang (${{ secrets.APPLE_TEAM_ID }})"
           APPLE_API_KEY: ${{ runner.temp }}/AuthKey.p8
           APPLE_API_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.NOTARY_ISSUER_ID }}
