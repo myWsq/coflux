@@ -225,7 +225,7 @@ Out of scope:
 
 ## Spike 结论
 
-截至编排者对 `b6d074c` 的验证反馈：**原生构建、50 轮 smoke、50 轮 addon 压力、队列单测和桌面 test/build 通过；类型检查与 G6 曾失败，本轮修订尚未验证，不能据此批准正式替换 xterm。**
+截至编排者对 `63f42d4` 的第二轮验证反馈：**类型检查、桌面测试、资源补丁测试、50 轮 smoke、addon 压力及 G4/G6 脚本通过；原生重复构建仍因目标 bundle 只读失败，本轮修复待重跑，不能据此批准正式替换 xterm。**
 开关为 `COFLUX_GHOSTTY=1`，性能观测独立用 `COFLUX_TERMINAL_METRICS=1`；默认路径不加载原生库。
 本轮遵守执行器/编排者分工：不运行类型检查、测试、应用构建、pack、原生冒烟、GPU/WindowServer 程序。
 
@@ -234,23 +234,31 @@ M1 证据来自编排者：`ca87e59` 的隐藏窗口冒烟在沙箱外 exit 0，
 执行器此前的 `metal=false` 是 seatbelt 权限限制，M1 并未因此被否决。
 编排者对 `b6d074c` 提供的新证据：
 
-- `node apps/desktop/native/ghostty/build.mjs`：exit 0，Build complete! 9.98s（手工 chmod 资源文件后；本轮修复该前置缺陷）。
+- `node apps/desktop/native/ghostty/build.mjs`：exit 0，Build complete! 9.98s（当时手工 chmod 资源文件后；该缺陷已在 `63f42d4` 修复）。
 - `apps/desktop/native/ghostty/build/ghostty-smoke`：exit 0，50 rounds。
 - `node --import tsx --test apps/desktop/src/main/ghostty-queue.test.ts`：exit 0，8 pass / 0 fail。
 - `pnpm -C apps/desktop test`：exit 0，109 pass / 0 fail；`pnpm -C apps/desktop build`：exit 0。
 - scope check：无 `apps/desktop/**` 与本计划之外的变更。
-- typecheck：5 个 TS2339，均来自 key 守卫丢失额外字段；本轮让守卫保留 unknown 字段并增加完整 create 守卫，待重跑。
+- 当时 typecheck 的 5 个 TS2339 来自 key 守卫丢失额外字段，已在 `63f42d4` 修复；第二轮 typecheck exit 0。
 
-本轮新增 grid 诊断 ABI、修改 G6 断言及 checkout 权限处理，未运行任何验证；以上通过结果不能替代本轮重跑。
+编排者对 `63f42d4` 的第二轮证据：
+
+- `node --test apps/desktop/native/ghostty/patch-resources.test.mjs`：exit 0，2/2 通过。
+- `pnpm -C apps/desktop typecheck`：exit 0；`pnpm -C apps/desktop test`：exit 0，109/109 通过。
+- 原生 build 连续两次 exit 1：目标 `build/GhosttyKit_GhosttyTerminal.bundle/terminfo/67` 报 EACCES。编排者删除生成的 bundle 后重建 exit 0，0.30s。
+- smoke exit 0，50 rounds；g4.mjs exit 0；stress.mjs 50 exit 0，50 轮、peakRss=147898368，零崩溃、无 crash report。
+- 上述手工清理并重建后 g6.mjs exit 0；真实网格和 CPR 结果确认旧失败为（c）dump 表示伪影。
+
+本轮只在复制前清理生成目录中的目标 bundle，dylib 复制及 addon 构建保持原样；执行器未运行验证，待编排者在已有构建产物的树上连续运行两次 build。
 
 | 门 | 结论 | 当前证据 / 待补证据 | 对正式 plan 范围的影响 |
 | --- | --- | --- | --- |
 | G1 快照 grapheme | 未验证 | 已提供五项 fixture、按真实 consumer 注销/attach 的恢复入口、viewport dump 与 compare-g1 脚本；待 live/resumed 文本、两次截图及逐项结果 | 任一项不过：**正式 plan 必须扩到 daemon 快照兼容**；本分支未改 daemon |
-| G2 稳定性 | 过（addon 压力） | 编排者 `stress.mjs 50` exit 0；rounds=50，peakRss=147898368，durationMs=11552.394583，pid=72152，无 crash report；queue 8/8 通过。Electron 实际 Tab 压力仍待人工补充，本轮 ABI 修订待重跑 | 反复原生崩溃且一轮定位无法归因即否决，不增加 JS 崩溃重试 |
+| G2 稳定性 | 过（addon 压力 50 轮） | 编排者 `stress.mjs 50` exit 0；rounds=50，peakRss=147898368，durationMs=11552.394583，pid=72152，无 crash report；queue 8/8 通过。第二轮压力再次 exit 0，零崩溃、无 crash report；真实桌面 50 轮仍未验证 | 反复原生崩溃且一轮定位无法归因即否决，不增加 JS 崩溃重试 |
 | G3 中文 IME | 未验证 | 已实现取消 composition、双侧 epoch 输入门禁；checklist 列出候选/提交/切 Tab/失去控制权步骤，待实际字节记录与截图 | 不通过需扩大原生输入与焦点适配范围 |
-| G4 快捷键与焦点 | 未验证 | 原生物理 keyCode 消费并分发工作台命令，按 timestamp 去重且抑制对应 keyUp；菜单复制粘贴显式路由，g4.mjs 覆盖重复分发/keyUp，编排者 g4.mjs exit 0，keys=12、actionsPerKey=1、remoteByteCallbacks=0；实际菜单、IME 与 Electron first responder 人工验收仍待补充 | 不通过需补 AppKit/Electron 菜单与 first responder 协调 |
+| G4 快捷键与焦点 | 自动部分过 / 人工部分未验证 | 原生物理 keyCode 消费并分发工作台命令，按 timestamp 去重且抑制对应 keyUp；菜单复制粘贴显式路由，g4.mjs 覆盖重复分发/keyUp，编排者 g4.mjs exit 0，keys=12、actionsPerKey=1、remoteByteCallbacks=0；实际菜单、IME 与 Electron first responder 人工验收仍待补充 | 不通过需补 AppKit/Electron 菜单与 first responder 协调 |
 | G5 几何 | 未验证 | CSS px × zoomFactor → AppKit point；Metal 使用 backingScaleFactor，横幅布局与 dialog/changes 遮挡处理已写；待全屏/跨屏/拖宽/隐藏/睡眠及缩放记录 | 若 DOM 叠层体验不可接受，应另立 sharedTexture 方案 |
-| G6 重连与 resize | 未验证（旧断言失败，诊断修订待重跑） | 旧 g6.mjs:32 在 59 列得到第一行 58 个 X 加“界”，预期仅 58 个 X。锁定源码证实 selection 会跨 spacer_head 提取下一行宽字，属于（c）表示伪影，不能据此判换行错误。新增真实网格前后对照、第二行文本和 CPR 2;4、ASCII 边界 CPR 2;2 断言；待完整脚本输出及真实 relay 结果 | 栅栏/快照/replay 任何失败都须先解决，不能以延迟或丢字节掩盖 |
+| G6 重连与 resize | 过（脚本层） | 编排者 g6.mjs exit 0：半截 UTF-8/CSI、replacement 清半截 CSI/UTF-8、alt screen 与旧文本、replay 无 DA/DSR 回写均通过。宽度 420/630/350 对应 59/89/49 列、18 行，fence/before/after 一致；第一行 dump 带“界”，第二行是“界Z”，CPR 均为 ESC[2;4R；ASCII 精确列边界 CPR 为 ESC[2;2R。确认（c）selection 表示伪影。真实 relay 的 fixture.mjs boundaries、resize/断网重连/切 Tab 仍未验证 | 脚本结果不替代真实 relay 验收；后续栅栏/快照/replay 失败仍须定位，不能以延迟或丢字节掩盖 |
 | G7 签名与交付 | 未验证 | 独立 pack:ghostty 显式 asarUnpack、mac.binaries、实体资源 bundle；待 ad-hoc codesign/otool、移走构建目录的启动记录、Developer ID 和干净机器 | **Developer ID: unverified, needs CI cert**；不能以 ad-hoc 代替该门 |
 | G8 性能 | 未验证 | 同一输出 fixture、两种引擎 sendInput→解析 P95、main loop、rAF、队列峰值和进程内存/CPU 采样装置已写；待至少三轮两列表与 Instruments 的实际呈现/Metal 数据 | 根据数据决定 IPC 额度、批大小、隐藏 Tab 调度与资源预算，当前不能宣称优于 xterm |
 
@@ -273,9 +281,9 @@ M1 证据来自编排者：`ca87e59` 的隐藏窗口冒烟在沙箱外 exit 0，
 - 打包使用独立 `scripts/ghostty-builder.cjs`，默认 electron-builder.yml 与 release 流水线不加原生路径。
 - 超额不是成功消费：注销最后一个 consumer 清除 router outputSeq 后重新 attach；每代一次恢复信号，5 秒内再次失败停在显式错误页。
   超过 8MiB 的快照仍需正式方案决定最大尺寸/流式协议，不声称无限容量。
-- 编排者已提交 M1 为 `ca87e59`、M2–M4 为 `b6d074c`；本轮修订只暂存，不 commit。
+- 编排者已提交 M1 为 `ca87e59`、M2–M4 为 `b6d074c`、首轮修订为 `63f42d4`；本轮修订只暂存，不 commit。
 - G6 修订依据：锁定上游 `src/terminal/Screen.zig` 的 `Screen: selectionString wide char with header` 用例选第一行仍返回下一行宽字；`src/Surface.zig::dumpTextLocked` 与包 `InMemoryTerminalSession.readViewportText()` 走此 selection 路径。新增 `grid()` 直接读 `ghostty_surface_size`，不借用栅栏缓存；结合真实 CPR 验证物理列位置，未放宽尺寸正确性要求。如果新断言失败，G6 必须判不过并定位栅栏或宽字放置问题。
-- 资源补丁保留源码形状硬错误和幂等入口；本轮增加临时 owner write 与 finally 恢复 mode，解决全新 SwiftPM 只读 checkout 的 EACCES。
+- 资源补丁保留源码形状硬错误和幂等入口；首轮修订增加临时 owner write 与 finally 恢复 mode，第二轮补丁测试 2/2 通过。本轮另外在复制 bundle 前删除 gitignored 目标 bundle，避免覆盖其中只读文件，不修改 SwiftPM 源资源。
 
 可复现命令、G3/G4/G5/G7 人工步骤和采样方法见
 `apps/desktop/native/ghostty/README.md` 与 `apps/desktop/native/ghostty/checklist.md`。

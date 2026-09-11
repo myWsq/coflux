@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,7 +22,10 @@ patchResources(root);
 run("swift", ["build", "--disable-sandbox", "-c", "release", "--arch", "arm64", "-Xswiftc", "-enable-testing"]);
 mkdirSync(join(root, "build"), { recursive: true });
 cpSync(join(root, ".build/arm64-apple-macosx/release/libCofluxGhostty.dylib"), join(root, "build/libCofluxGhostty.dylib"));
-cpSync(join(root, ".build/arm64-apple-macosx/release/GhosttyKit_GhosttyTerminal.bundle"), join(root, "build/GhosttyKit_GhosttyTerminal.bundle"), { recursive: true });
+// SwiftPM 资源文件只读，不能覆盖上次复制的文件；仅清理生成目录中的目标 bundle。
+const bundleDestination = join(root, "build/GhosttyKit_GhosttyTerminal.bundle");
+rmSync(bundleDestination, { recursive: true, force: true });
+cpSync(join(root, ".build/arm64-apple-macosx/release/GhosttyKit_GhosttyTerminal.bundle"), bundleDestination, { recursive: true });
 const common = ["clang++", "-std=c++17", "-arch", "arm64", "-isysroot", sdk, "-mmacosx-version-min=26.0", "-framework", "AppKit", "-L.build/arm64-apple-macosx/release", "-lCofluxGhostty"];
 run("xcrun", [...common, "smoke.mm", "-Wl,-rpath,@executable_path", "-o", "build/ghostty-smoke"]);
 run("xcrun", [...common, "-bundle", "-undefined", "dynamic_lookup", "-DNAPI_VERSION=8", "-DNODE_GYP_MODULE_NAME=coflux_ghostty", `-I${nodeHeaders}`, "addon.mm", "-Wl,-rpath,@loader_path", "-o", "build/coflux_ghostty.node"]);
