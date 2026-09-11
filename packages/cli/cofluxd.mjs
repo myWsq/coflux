@@ -945,6 +945,8 @@ async function cmdHook() {
 // 不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，树外一律拒。
 // local-first（plan 094）：send/read/wait/notify/progress 在 daemon 本地闭环，不经中心；只有
 // new/list/ports 由 daemon 代问中心（Task 要落库广播、预览 URL 由中心生成）。
+// 跟随 cwd（plan 102）：请求都带 process.cwd()，agent 挪进同设备另一个 coflux 工作区后，这些
+// 命令就对那个工作区办事（notify/progress/ports 除外，它们挂在本会话上，与工作区无关）。
 // 与 `hook` 子命令的约定**相反**：这些命令必须写 stdout——输出就是给 agent 读的返回值。
 // 也刻意不做自动重试：terminal new 有副作用，重试会开出两个终端，失败就把错误交给 agent。
 
@@ -956,6 +958,13 @@ const DEFAULT_READ_LINES = 200;
 const DEFAULT_WAIT_TIMEOUT_S = 1800;
 const WAIT_POLL_MS = 3000;
 
+// 每条请求都带调用方 cwd（plan 102）：agent 可以经 `/cd` 或 EnterWorktree 把活着的会话挪进同
+// 设备的另一个 coflux 工作区，daemon 据此把本次请求的**目标**解析到 cwd 所在的工作区（会话的
+// 归属工作区不变）。目录被删掉时 process.cwd() 会抛，按"报不出来"处理，daemon 退回归属工作区。
+function callerCwd() {
+  try { return process.cwd(); } catch { return ""; }
+}
+
 async function agentPost(body) {
   const portResult = localGatewayPort();
   if (!portResult.ok) die(portResult.error);
@@ -964,7 +973,7 @@ async function agentPost(body) {
     res = await fetch(`http://127.0.0.1:${portResult.port}/agent`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...body, pid: process.pid, ppid: process.ppid }),
+      body: JSON.stringify({ ...body, pid: process.pid, ppid: process.ppid, cwd: callerCwd() }),
       signal: AbortSignal.timeout(AGENT_TIMEOUT_MS),
     });
   } catch (error) {
@@ -1071,6 +1080,17 @@ async function cmdProgress() {
   console.log("已更新进度（显示在工作区卡片上，被下一条覆盖）");
 }
 
+// 只读的「我在哪」（plan 102）：一行 JSON，字段稳定——插件的挪窝脚本按它比对，agent 也直接读。
+async function cmdWorkspace() {
+  const result = await agentPost({ action: "workspace.current" });
+  console.log(JSON.stringify({
+    workspaceId: result.workspaceId,
+    path: result.path,
+    owningWorkspaceId: result.owningWorkspaceId,
+    moved: Boolean(result.moved),
+  }));
+}
+
 async function cmdPorts() {
   const { ports } = await agentPost({ action: "ports" });
   if (!ports.length) return void console.log("本工作区暂无监听端口");
@@ -1110,6 +1130,10 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd notify "<一句话>"  叫人：工作区在侧栏转为「等待交互」并显示这句话
   cofluxd progress "<一句话>"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
   cofluxd ports           列出本工作区的监听端口及可直接打开的预览 URL
+  cofluxd workspace       一行 JSON 报出「我在哪」：workspaceId（cwd 所在的有效工作区，本地命令
+                          都落在它上面）、path、owningWorkspaceId（本终端开在哪，即
+                          COFLUX_WORKSPACE_ID）、moved。用 /cd 或 EnterWorktree 挪进另一个 coflux
+                          工作区后用它确认目标，调 MCP 时也传这个 workspaceId
 
 up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
 通用: --version <vX|latest>(不传时 up 沿用已有二进制，update 默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
@@ -1147,7 +1171,7 @@ let cmd = positionals[0];
 if (values.help || cmd === "help") { console.log(HELP); process.exit(0); }
 if (!cmd) cmd = fs.existsSync(SETTINGS) ? "status" : "up"; // 首次裸跑 → 引导
 
-const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall, hook: cmdHook, terminal: cmdTerminal, notify: cmdNotify, progress: cmdProgress, ports: cmdPorts };
+const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall, hook: cmdHook, terminal: cmdTerminal, notify: cmdNotify, progress: cmdProgress, ports: cmdPorts, workspace: cmdWorkspace };
 const h = handlers[cmd];
 if (!h) die(`未知命令: ${cmd}${MIGRATED[cmd] ? `\n${MIGRATED[cmd]}` : ""}\n\n${HELP}`);
 await h(values);

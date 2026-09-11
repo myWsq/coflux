@@ -4,7 +4,11 @@
 //! 来源只有两处：中心随 SessionCreate（直发与 prepared 两条路径，plan 092 起带 `workspace_id`）
 //! 下发的会话归属，以及 worker 自己经手的 SessionStarted / SessionExit。热升级后新 worker 从
 //! sessiond 对账清单学来的存活会话没有 `workspace_id`（空串 = 归属未知）——对它们的本地命令一律
-//! 可读拒绝，**不按 cwd 猜**：那是第二份可能与中心不一致的推断（plans/094 Decisions）。
+//! 可读拒绝：**归属不猜**，那是第二份可能与中心不一致的推断（plans/094 Decisions）。
+//!
+//! 这里存的是**归属**（会话在哪个工作区开的），不是「agent 此刻在哪」。agent 可以经 `/cd`、
+//! EnterWorktree 把活着的会话挪进同设备的另一个工作区：那时本地命令的**目标**按调用方申报的
+//! cwd 改向（[`crate::workspace_match`]，plan 102），归属仍是这里这一份、依旧不猜。
 //!
 //! 与 `WorkerState.alive` 分开：alive 被 presence/端口扫描与 079 对账逻辑按 (task_id, pid) 精确
 //! 匹配，账本只消费它的生命周期事件，不改它的形状。
