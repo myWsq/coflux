@@ -93,6 +93,7 @@ type SidebarProps = {
   /** 本机 daemon 状态（plan 113）：账号菜单「本机 daemon」一行；null = 还没拿到 */
   daemonState: DesktopDaemonState | null;
   onOpenDaemonPanel: () => void;
+  onOpenExecutorSettings: () => void;
 };
 
 export function Sidebar(props: SidebarProps) {
@@ -663,7 +664,12 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       {/* 账号脚部（plan 110）：固定在滚动区之外，不随项目/设备列表滚动；不声明拖拽区。 */}
-      <AccountFooter client={client} daemonState={props.daemonState} onOpenDaemonPanel={props.onOpenDaemonPanel} />
+      <AccountFooter
+        client={client}
+        daemonState={props.daemonState}
+        onOpenDaemonPanel={props.onOpenDaemonPanel}
+        onOpenExecutorSettings={props.onOpenExecutorSettings}
+      />
 
       <div
         className="group/resize absolute inset-y-0 -right-[3px] z-20 w-1.5 cursor-col-resize touch-none"

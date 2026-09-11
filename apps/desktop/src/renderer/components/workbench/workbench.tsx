@@ -17,6 +17,7 @@ import {
 } from "@/components/workbench/dialogs";
 import { DaemonOnboardingDialog } from "@/components/workbench/daemon-onboarding";
 import { DaemonPanelDialog } from "@/components/workbench/daemon-panel";
+import { ExecutorSettingsDialog } from "@/components/workbench/executor-settings";
 import { countLocalRunningTerminals, shouldOfferOnboarding } from "@/components/workbench/daemon-view";
 import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "@/components/workbench/desktop-attention";
 import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
@@ -25,6 +26,7 @@ import { ImportProjectWizard } from "@/components/workbench/import-project-wizar
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useTerminalAttach } from "@/components/workbench/terminal-attach";
 import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon";
+import { useExecutorBridge } from "@/components/workbench/use-executor-bridge";
 import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import type { WorkspaceActiveTab, WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
@@ -199,7 +201,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // 本机 daemon（plan 113）：状态对象一份订阅，驱动账号菜单一行、面板与接入引导；引导只在登录成功
   // （中心已连上）后按状态自动弹一次，之后从账号菜单再进。
   const daemonState = useDesktopDaemonState(desktop);
+  // executor（plan 116）：渲染层只把本机 daemon 的 device 通道两头接上，作业表在主进程。
+  useExecutorBridge(client, daemonState?.daemonId);
   const [daemonDialog, setDaemonDialog] = useState<"onboarding" | "panel" | null>(null);
+  const [executorSettingsOpen, setExecutorSettingsOpen] = useState(false);
   const onboardingOfferedRef = useRef(false);
   // 乐观工作区条目（plan 078）：存组件层、渲染时与 store 数据合并，不进共享 store——
   // 快照对 workspaces 是整体替换，注入的假条目会被无声抹掉；共享包也不该背 web 专有语义。
@@ -651,7 +656,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
         pendingWorkspaces={pendingWorkspaces}
         daemonState={daemonState}
         onOpenDaemonPanel={() => setDaemonDialog("panel")}
+        onOpenExecutorSettings={() => setExecutorSettingsOpen(true)}
       />
+
+      <ExecutorSettingsDialog open={executorSettingsOpen} onOpenChange={setExecutorSettingsOpen} bridge={desktop} />
 
       {terminalWorkspaces.length > 0 ? (
         <Suspense

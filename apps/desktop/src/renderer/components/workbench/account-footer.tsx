@@ -4,7 +4,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { Divider } from "@astryxdesign/core/Divider";
 import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
 import { StatusDot } from "@astryxdesign/core/StatusDot";
-import { ArrowUp, Cog, LogOut, Monitor, RefreshCw, Server } from "lucide-react";
+import { ArrowUp, Bot, Cog, LogOut, Monitor, RefreshCw, Server } from "lucide-react";
 import type { CofluxClient } from "@coflux/client";
 
 import { accountIdentity, resolveAccountFooter, serverHostLabel } from "@/components/workbench/account-footer-view";
@@ -30,11 +30,13 @@ export function AccountFooter({
   client,
   daemonState,
   onOpenDaemonPanel,
+  onOpenExecutorSettings,
 }: {
   client: CofluxClient;
   /** null = 还没拿到第一份状态 */
   daemonState: DesktopDaemonState | null;
   onOpenDaemonPanel: () => void;
+  onOpenExecutorSettings: () => void;
 }) {
   const loginName = useStore(client.store, (state) => state.loginName);
   const update = useDesktopUpdateState(desktop);
@@ -89,6 +91,12 @@ export function AccountFooter({
           endContent={daemonLine ? <StatusDot variant={daemonLine.tone} label={daemonLine.label} isPulsing={daemonLine.pulsing} /> : undefined}
           isDisabled={!daemonState}
           onClick={onOpenDaemonPanel}
+        />
+        <DropdownMenuItem
+          icon={<Bot className="size-3.5" />}
+          label="Executor 设置…"
+          description="agent 甩给 coflux 执行的任务用哪个模型"
+          onClick={onOpenExecutorSettings}
         />
         <Divider />
         <DropdownMenuItem icon={<LogOut className="size-3.5" />} label="登出" onClick={() => client.logout()} />
