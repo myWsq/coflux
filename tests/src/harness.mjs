@@ -10,7 +10,7 @@
  * wire（plan 009）：WS 上只有 binary message，每条 = 一个 protobuf 编码的信封
  * （/daemon：DaemonToServer/ServerToDaemon；/client：ClientToServer/ServerToClient）。
  * 本文件 import 生成代码与 `@coflux/protocol` 的信封编解码 helper——它们源自 proto 真相源
- * （buf generate 产物），而非应用（apps/server、apps/web）的实现逻辑，黑盒性质因此保持
+ * （buf generate 产物），而非应用（apps/server、apps/desktop）的实现逻辑，黑盒性质因此保持
  * （仍然完全不 import apps/* 的任何代码）。
  */
 import { spawn, execFileSync } from "node:child_process";
