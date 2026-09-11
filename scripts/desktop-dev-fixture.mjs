@@ -6,9 +6,9 @@
  * 就能在本机验证 direct / P2P / relay 三路（direct 用 lsof 看 Electron 与 coflux-worker 的
  * 127.0.0.1 ESTABLISHED）与中心停掉后的冷启动 attach。测试账号 admin/admin。Ctrl-C 完整清理。
  *
- * 环境变量：COFLUX_DESKTOP_TEST_PORT（默认 19873）、COFLUX_DESKTOP_WEB_URL（授权页所在 Web，默认
- * 本机 vite 5273）、COFLUX_DESKTOP_PREVIEW_FIXTURE=1（额外在终端里起一个 HTTP 服务验证端口预览）、
- * COFLUX_DESKTOP_FIXTURE_FILE（fixture JSON 落盘位置）。
+ * 环境变量：COFLUX_DESKTOP_TEST_PORT（默认 19873）、COFLUX_DESKTOP_PREVIEW_FIXTURE=1（额外在终端里起一个
+ * HTTP 服务验证端口预览）、COFLUX_DESKTOP_FIXTURE_FILE（fixture JSON 落盘位置）。授权 / 同意 / 门禁三张页面
+ * 由这套隔离中心自己直出（plan 107），地址是 `http://127.0.0.1:<port>/...`，不再需要单独的 Web。
  */
 import { startStack, mkRepo } from "../tests/src/harness.mjs";
 import { openRelayDevice } from "../tests/src/device-harness.mjs";
@@ -16,7 +16,6 @@ import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const port = Number(process.env.COFLUX_DESKTOP_TEST_PORT ?? 19873);
-const webURL = process.env.COFLUX_DESKTOP_WEB_URL ?? "http://127.0.0.1:5273";
 const repo = mkRepo();
 let stack;
 let client;
@@ -39,12 +38,11 @@ try {
     // 自动化宿主的 NO_COLOR=1 只针对工具日志，不能污染交互终端的颜色验收。
     daemonEnv: { NO_COLOR: undefined },
     // harness 默认不是 COFLUX_DEV，不能依赖服务端的生产 HTTPS 默认值。
-    // 本隔离服务器只有 HTTP；预览门禁仍保留，认证页指向同一隔离 Web。
+    // 本隔离服务器只有 HTTP；预览门禁仍保留，门禁页由 server 自己直出（COFLUX_PUBLIC_URL 默认即本机监听地址）。
     serverEnv: {
       COFLUX_PROXY_SCHEME: "http",
       COFLUX_PROXY_HOST: "p.localhost",
       COFLUX_PROXY_PORT: String(port),
-      COFLUX_WEB_URL: webURL,
     },
   });
   device = await openRelayDevice(stack);
@@ -69,7 +67,7 @@ try {
     await device.input(running.task.sessionId, "node preview-server.cjs\r");
     await client.waitFor((message) => message.case === "portsUpdated" && message.taskId === task.id && message.ports.some((item) => item.port === 18091), "预览端口发现", 20000);
   }
-  const fixture = { port, webURL, serverURL: `ws://127.0.0.1:${port}/client`, gatewayPort: device.gateway.port, daemonId, projectId: project.id, workspaceId: workspace.id, taskId: task.id };
+  const fixture = { port, serverURL: `ws://127.0.0.1:${port}/client`, gatewayPort: device.gateway.port, daemonId, projectId: project.id, workspaceId: workspace.id, taskId: task.id };
   writeFileSync(resolve(process.env.COFLUX_DESKTOP_FIXTURE_FILE ?? "/tmp/coflux-desktop-103-fixture.json"), JSON.stringify(fixture, null, 2));
   console.log(JSON.stringify(fixture));
   console.log(`隔离联调环境已就绪：桌面 app 用 COFLUX_SERVER_URL=ws://127.0.0.1:${port}/client pnpm -C apps/desktop dev 连上；测试账号 admin/admin。Ctrl-C 完整清理。`);

@@ -112,11 +112,11 @@ export const config = {
   accountId: "default",
   /** daemon 连接地址，展示在 web「添加设备」命令里；反代/公网部署时用 COFLUX_DAEMON_URL 覆盖 */
   daemonUrl: process.env.COFLUX_DAEMON_URL ?? `ws://127.0.0.1:${int("COFLUX_PORT", DEFAULT_PORT)}/daemon`,
-  /** web 控制台地址：拼进 daemon.authorizePending 下发的授权链接；反代/公网部署时用 COFLUX_WEB_URL 覆盖 */
-  webUrl: process.env.COFLUX_WEB_URL ?? "http://127.0.0.1:5273",
   /** 中心自身的公网基址（plan 090）：OAuth issuer、PRM/AS 元数据与 `/mcp` 的 resource 全由它拼，
    *  绝不从请求 Host / X-Forwarded-* 推导（生产前面压着两层反代，头部可伪造且各层不一致）。
-   *  dev 默认本机监听地址；生产设 COFLUX_PUBLIC_URL=https://api.coflux.dev。 */
+   *  自 plan 107 起，设备授权链接、OAuth 同意页与端口预览门禁三张页面也由 server 直出并挂在它下面
+   *  （`/authorize/<token>`、`/oauth/consent`、`/proxy-auth`）。dev 默认本机监听地址；
+   *  生产设 COFLUX_PUBLIC_URL=https://api.coflux.dev。 */
   publicUrl: PUBLIC_URL,
   /** 中心 MCP 地址（plan 092）：随每条建会话请求下发给 daemon，supervisor 注入会话 env `COFLUX_MCP_URL`，
    *  供跑在 coflux 终端里的 agent 告诉用户怎么 `claude mcp add`。与 oauth.ts 的 resource 同源同值。 */
