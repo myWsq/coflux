@@ -57,7 +57,7 @@
 
 `docs/auth-design.md:138` 按决策改口。
 
-Validation：`grep -l "apps/server/src" tests/src/*.test.mjs` → 无输出；`ls tests/src/*.test.mjs | wc -l` → 51；`node --import tsx --test tests/src/claude-plugin-guard.test.mjs tests/src/claude-plugin-session-context.test.mjs` → exit 0（不起栈的两份，证明 glob 与 harness 加载未坏）。
+Validation：`grep -n "from .*apps/server\|import(.*apps/server" tests/src/*.test.mjs` → 无输出（字面 grep `apps/server/src` 会命中 `authorize.test.mjs:30`、`mcp-write-tools.test.mjs:43` 两处注释，不算）；`ls tests/src/*.test.mjs | wc -l` → 50（基线 59 − 9）；`node --import tsx --test tests/src/claude-plugin-guard.test.mjs tests/src/claude-plugin-session-context.test.mjs` → exit 0（不起栈的两份，证明 glob 与 harness 加载未坏）。
 
 ### Milestone 2：桌面单测去重述
 
@@ -82,7 +82,7 @@ Validation：`grep -l "apps/server/src" tests/src/*.test.mjs` → 无输出；`l
 
 删用例后清理不再使用的 import。**不改 `apps/desktop/package.json` 的 test 脚本**：四段 glob 删后各段仍有文件（见 Landmines）。
 
-Validation：`pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test` → exit 0，用例总数 101 − 28 = 73。
+Validation：`pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test` → exit 0，用例总数 101 − 28 = 73（执行者若为 destructive 确认另起最小用例则为 74；实际落地 74）。
 
 ### Milestone 3：Rust inline 去重述
 
