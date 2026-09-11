@@ -2,7 +2,7 @@
 
 coflux 唯一的前端与默认迭代对象（plan 106）：`src/main` 是 Electron 主进程，`src/preload` 是 sandbox preload，
 `src/renderer` 是 React 19 + xterm.js 工作台（index.html / public / 组件都在这一份里，`@` 别名指向它）。
-桌面能力（服务器地址、Origin、通知、角标、菜单命令、更新提示、会话 token）经 preload 暴露的
+桌面能力（服务器地址与「服务器地址…」对话框、Origin、通知、角标、菜单命令、更新提示、会话 token）经 preload 暴露的
 `window.cofluxDesktop` 桥接提供，渲染层假定它必定存在（缺失即启动期报错），类型真相源在
 `src/shared/desktop-bridge.ts`。新机器授权 / MCP OAuth 同意 / 端口预览门禁三张页面在系统浏览器里由冻结的
 线上 web 承担，不在这里。
@@ -12,7 +12,7 @@ coflux 唯一的前端与默认迭代对象（plan 106）：`src/main` 是 Elect
 ```sh
 pnpm -C apps/desktop dev         # electron-vite dev：渲染层 5274（HMR），主进程连 ws://localhost:8787/client
 pnpm -C apps/desktop typecheck   # tsc 两份：tsconfig.json（main / preload / shared / 配置 / 测试）+ tsconfig.renderer.json（渲染层）
-pnpm -C apps/desktop test        # node --test：主进程纯函数（Origin / 渲染层路径与 CSP / IPC 来源与载荷 / 设置 / 更新状态 / token 存储 / 窗口 bounds）+ 渲染层纯函数（桥接必选 / token 迁移 / 变更视图刷新 / 通知去重 / 工作台状态）+ 发布配置
+pnpm -C apps/desktop test        # node --test：主进程纯函数（Origin / 渲染层路径与 CSP / IPC 来源与载荷 / 设置 / 更新状态 / token 存储 / 窗口 bounds）+ 渲染层纯函数（桥接必选 / token 迁移 / 变更视图刷新 / 通知去重 / 工作台状态 / 账号脚部展示映射）+ 发布配置
 pnpm -C apps/desktop build       # electron-vite build → out/{main,preload,renderer}
 pnpm -C apps/desktop pack        # 未签名 .app（dist/mac-arm64/），本机冒烟用；通知/角标在未签名包上不可信
 pnpm -C apps/desktop dist        # 本机出 dmg/zip（需 Developer ID 证书在钥匙串里，否则只签 ad-hoc）
@@ -47,6 +47,8 @@ pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/ico
   这个字符串是 loopback grant 绑定的一部分，改它等于让所有桌面 grant 失效。
 - **服务器地址**：`--server=wss://…/client` > 环境变量 `COFLUX_SERVER_URL` > `~/Library/Application Support/Coflux/settings.json`（未打包的 dev 实例用 `Coflux-dev` 目录，与安装版互不可见）
   的 `serverUrl` > 默认（打包版 `wss://api.coflux.dev/client`，dev `ws://localhost:8787/client`）。
+  应用菜单与侧栏底部账号菜单的「服务器地址…」是同一个主进程原生对话框（plan 110 起渲染层经桥接唤起，
+  桥接面没有因此长出 fs / shell 能力）。
 - **版本准入**（plan 105）：登录时上报 `clientKind=desktop` 与 `CONTROL_PROTOCOL_VERSION`，中心只在协议版本低于其最低支持版本时拒绝；build-id 只作标识。部署 prod 不会踢旧桌面版，electron-updater 在后台升级；被拒显示「需要更新」并触发更新检查，不当作断线。
 - **快捷键**：纯 ⌘ 前缀（⌘T/⌘W/⌘N/⌘1-9/⌘[ ]/⌘/），原生菜单项只展示键位不注册 accelerator，键落到页面处理。
 - **安全基线**：sandbox/contextIsolation 开、nodeIntegration 关、Fuses 关 RunAsNode 等、响应带 CSP、

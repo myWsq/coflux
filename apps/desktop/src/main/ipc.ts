@@ -11,6 +11,8 @@ export type IpcActions = {
   bootstrap: () => Bootstrap;
   notify: (notification: DesktopNotification) => void;
   setBadge: (count: number) => void;
+  /** 「服务器地址…」原生对话框（plan 110）：与原生菜单项同一个实现 */
+  showServerInfo: () => void;
   checkForUpdates: () => void;
   installUpdate: () => void;
   getUpdateState: () => DesktopUpdateState;
@@ -42,6 +44,10 @@ export function registerIpc(actions: IpcActions, trusted: TrustedSenders): void 
     if (!isTrusted(event)) return;
     const count = sanitizeBadgeCount(payload);
     if (count !== null) actions.setBadge(count);
+  });
+
+  ipcMain.on(IPC.showServerInfo, (event) => {
+    if (isTrusted(event)) actions.showServerInfo();
   });
 
   ipcMain.on(IPC.checkForUpdates, (event) => {

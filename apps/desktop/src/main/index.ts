@@ -157,6 +157,8 @@ if (!app.requestSingleInstanceLock()) {
             sendToRenderer(IPC.focusWorkspace, workspaceId);
           }),
         setBadge: setDockBadge,
+        // 侧栏账号菜单的「服务器地址…」（plan 110）：与原生菜单项走同一个对话框
+        showServerInfo: () => void showServerInfo(serverUrl),
         checkForUpdates: updater.checkForUpdates,
         installUpdate: updater.installUpdate,
         getUpdateState: updater.getState,
