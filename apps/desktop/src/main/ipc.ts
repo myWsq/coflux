@@ -1,6 +1,6 @@
 import { ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
 
-import type { DesktopNotification, DesktopUpdateState } from "../shared/desktop-bridge";
+import type { DesktopDaemonState, DesktopNotification, DesktopUpdateState } from "../shared/desktop-bridge";
 import { IPC, type Bootstrap } from "../shared/ipc";
 import { sanitizeBadgeCount, sanitizeNotification, sanitizeSessionToken } from "./ipc-sanitize";
 import { isTrustedRendererUrl } from "./ipc-trust";
@@ -20,6 +20,14 @@ export type IpcActions = {
   getSessionToken: () => string;
   setSessionToken: (token: string) => void;
   clearSessionToken: () => void;
+  /** 本机 daemon（plan 113）：一个状态对象 + 无参窄动词，载荷为空，来源校验即全部校验 */
+  getDaemonState: () => DesktopDaemonState;
+  daemonEnroll: () => void;
+  daemonRestart: () => void;
+  daemonStop: () => void;
+  daemonRemove: () => void;
+  daemonOpenFdaGuide: () => void;
+  daemonDismissError: () => void;
 };
 
 /** 每条 IPC 都先校验发送方 frame 来源；不可信一律忽略。 */
@@ -77,4 +85,23 @@ export function registerIpc(actions: IpcActions, trusted: TrustedSenders): void 
   ipcMain.on(IPC.clearSessionToken, (event) => {
     if (isTrusted(event)) actions.clearSessionToken();
   });
+
+  ipcMain.handle(IPC.daemonGetState, (event) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    return actions.getDaemonState();
+  });
+
+  const daemonVerbs: [string, () => void][] = [
+    [IPC.daemonEnroll, actions.daemonEnroll],
+    [IPC.daemonRestart, actions.daemonRestart],
+    [IPC.daemonStop, actions.daemonStop],
+    [IPC.daemonRemove, actions.daemonRemove],
+    [IPC.daemonOpenFdaGuide, actions.daemonOpenFdaGuide],
+    [IPC.daemonDismissError, actions.daemonDismissError],
+  ];
+  for (const [channel, verb] of daemonVerbs) {
+    ipcMain.on(channel, (event) => {
+      if (isTrusted(event)) verb();
+    });
+  }
 }
