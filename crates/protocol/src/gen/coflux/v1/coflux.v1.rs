@@ -2088,6 +2088,80 @@ pub struct AgentTerminalRead {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentPortsList {
 }
+// ===== 跟随 agent 进入 worktree（plan 104）=====
+//
+// Claude Code 的 EnterWorktree / ExitWorktree 会把**活着的会话**切进（切出）一个 git worktree，
+// `--resume` 一个曾进入 worktree 的会话则在启动时直接把它放回去。coflux 跟着走：终端的**归属**
+// 工作区搬到 cwd 对应的那个工作区，未注册的（Claude 自建在 `<主工作区>/.claude/worktrees/<name>`）
+// 先登记再搬。PTY、会话、turn 状态一概不动，只改 task 的归属。
+//
+// 与上面 `AgentControlRequest.workspace_id`（plan 102 的「本次请求的**目标**」）是两层，不能混：
+// 那个字段只改一次请求打到哪个工作区，归属不变；这里改的是归属本身。纯 `cd` 只走 102，显式的
+// 进入/离开 worktree、resume、worktree 被删才走这里。
+//
+// 信任模型与 102 一致：**daemon 解析身份、中心核验落库、归属的唯一真相在中心**。路径是不是一个
+// worktree 根、它和发起方是不是同一个 git 仓库、当前分支是什么，都只有 daemon 能答（中心手里的
+// 路径是用户原始写法，且中心没有 git）；中心只核验同账号、同设备、同项目，并决定复用还是登记。
+// daemon 的会话账本随响应更新归属，仍然不按 cwd 猜。
+
+/// 把发起方会话的终端归属定位到某个路径所属的工作区。Enter / Exit / SessionStart 共用一条消息：
+/// ExitWorktree 的目标就是「原目录所在的那个工作区」，同样是定位。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentWorkspaceLocate {
+    /// daemon 规范化后的 worktree 根绝对路径（`git rev-parse --show-toplevel`）。
+    #[prost(string, tag="1")]
+    pub path: ::prost::alloc::string::String,
+    /// 该 worktree 的当前分支（detached 时是短 sha）；登记新工作区时同时用作分支与默认名称。
+    #[prost(string, tag="2")]
+    pub branch: ::prost::alloc::string::String,
+    /// daemon 在本设备工作区表里按规范化路径**相等**比出来的既有工作区 id；空 = 未注册。
+    /// 相等而非最长前缀：Claude 自建的 worktree 嵌在主工作区目录下，前缀匹配会把它算进主工作区。
+    #[prost(string, tag="3")]
+    pub workspace_id: ::prost::alloc::string::String,
+    /// daemon 已核验该路径与发起方归属工作区同属一个 git 仓库（`git rev-parse --git-common-dir` 相同）。
+    /// 只有为真时中心才允许登记新工作区；跨仓库 / 非 git / 目录工作区起步都恒为假。
+    #[prost(bool, tag="4")]
+    pub same_repo: bool,
+}
+/// Claude Code 已清理掉某个 worktree（WorktreeRemove）：把该工作区下**所有**终端搬回项目主工作区，
+/// 并删掉工作区记录。中心不再让 daemon 去 `git worktree remove` 一个已经不存在的目录。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentWorkspaceForget {
+    /// daemon 规范化后的 worktree 路径（目录已不在时按字面 + 父目录规范化）。
+    #[prost(string, tag="1")]
+    pub path: ::prost::alloc::string::String,
+    /// daemon 按路径相等比出来的既有工作区 id；空 = 本地表里没有对应记录。
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentWorkspaceLocateResult {
+    /// 定位后的**归属**工作区 id：daemon 据此更新会话账本，agent 据此拿到新坐标。
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub branch: ::prost::alloc::string::String,
+    /// 本次是否新登记了工作区（侧栏会新出现一张卡片）。
+    #[prost(bool, tag="4")]
+    pub created: bool,
+    /// 归属是否真的变了；false = 本来就在那儿（幂等无操作，正常启动的常态）。
+    #[prost(bool, tag="5")]
+    pub moved: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentWorkspaceForgetResult {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+    /// 终端们搬回的项目主工作区（`is_main`）。
+    #[prost(string, tag="2")]
+    pub fallback_workspace_id: ::prost::alloc::string::String,
+    #[prost(int32, tag="3")]
+    pub moved_terminals: i32,
+    #[prost(bool, tag="4")]
+    pub removed: bool,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentControlRequest {
     #[prost(string, tag="1")]
@@ -2100,7 +2174,7 @@ pub struct AgentControlRequest {
     /// ports_list 忽略它（端口挂在本会话进程树上，与工作区无关），terminal_read 早已本地闭环。
     #[prost(string, tag="3")]
     pub workspace_id: ::prost::alloc::string::String,
-    #[prost(oneof="agent_control_request::Payload", tags="10, 11, 12, 13")]
+    #[prost(oneof="agent_control_request::Payload", tags="10, 11, 12, 13, 14, 15")]
     pub payload: ::core::option::Option<agent_control_request::Payload>,
 }
 /// Nested message and enum types in `AgentControlRequest`.
@@ -2115,6 +2189,11 @@ pub mod agent_control_request {
         TerminalRead(super::AgentTerminalRead),
         #[prost(message, tag="13")]
         PortsList(super::AgentPortsList),
+        /// plan 104：这两条改的是**归属**而不是本次请求的目标，忽略上面的 workspace_id（worker 恒填空）。
+        #[prost(message, tag="14")]
+        WorkspaceLocate(super::AgentWorkspaceLocate),
+        #[prost(message, tag="15")]
+        WorkspaceForget(super::AgentWorkspaceForget),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2172,7 +2251,7 @@ pub struct AgentControlResult {
     pub ok: bool,
     #[prost(string, optional, tag="3")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(oneof="agent_control_result::Payload", tags="10, 11, 12, 13")]
+    #[prost(oneof="agent_control_result::Payload", tags="10, 11, 12, 13, 14, 15")]
     pub payload: ::core::option::Option<agent_control_result::Payload>,
 }
 /// Nested message and enum types in `AgentControlResult`.
@@ -2187,6 +2266,10 @@ pub mod agent_control_result {
         TerminalRead(super::AgentTerminalReadResult),
         #[prost(message, tag="13")]
         PortsList(super::AgentPortsListResult),
+        #[prost(message, tag="14")]
+        WorkspaceLocate(super::AgentWorkspaceLocateResult),
+        #[prost(message, tag="15")]
+        WorkspaceForget(super::AgentWorkspaceForgetResult),
     }
 }
 /// server→daemon ProxyOpen 的回应：隧道连接建立结果

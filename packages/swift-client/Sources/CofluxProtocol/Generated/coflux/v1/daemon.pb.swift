@@ -318,6 +318,92 @@ public struct Coflux_V1_AgentPortsList: Sendable {
   public init() {}
 }
 
+/// 把发起方会话的终端归属定位到某个路径所属的工作区。Enter / Exit / SessionStart 共用一条消息：
+/// ExitWorktree 的目标就是「原目录所在的那个工作区」，同样是定位。
+public struct Coflux_V1_AgentWorkspaceLocate: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// daemon 规范化后的 worktree 根绝对路径（`git rev-parse --show-toplevel`）。
+  public var path: String = String()
+
+  /// 该 worktree 的当前分支（detached 时是短 sha）；登记新工作区时同时用作分支与默认名称。
+  public var branch: String = String()
+
+  /// daemon 在本设备工作区表里按规范化路径**相等**比出来的既有工作区 id；空 = 未注册。
+  /// 相等而非最长前缀：Claude 自建的 worktree 嵌在主工作区目录下，前缀匹配会把它算进主工作区。
+  public var workspaceID: String = String()
+
+  /// daemon 已核验该路径与发起方归属工作区同属一个 git 仓库（`git rev-parse --git-common-dir` 相同）。
+  /// 只有为真时中心才允许登记新工作区；跨仓库 / 非 git / 目录工作区起步都恒为假。
+  public var sameRepo: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Claude Code 已清理掉某个 worktree（WorktreeRemove）：把该工作区下**所有**终端搬回项目主工作区，
+/// 并删掉工作区记录。中心不再让 daemon 去 `git worktree remove` 一个已经不存在的目录。
+public struct Coflux_V1_AgentWorkspaceForget: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// daemon 规范化后的 worktree 路径（目录已不在时按字面 + 父目录规范化）。
+  public var path: String = String()
+
+  /// daemon 按路径相等比出来的既有工作区 id；空 = 本地表里没有对应记录。
+  public var workspaceID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_AgentWorkspaceLocateResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// 定位后的**归属**工作区 id：daemon 据此更新会话账本，agent 据此拿到新坐标。
+  public var workspaceID: String = String()
+
+  public var path: String = String()
+
+  public var branch: String = String()
+
+  /// 本次是否新登记了工作区（侧栏会新出现一张卡片）。
+  public var created: Bool = false
+
+  /// 归属是否真的变了；false = 本来就在那儿（幂等无操作，正常启动的常态）。
+  public var moved: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_AgentWorkspaceForgetResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var workspaceID: String = String()
+
+  /// 终端们搬回的项目主工作区（`is_main`）。
+  public var fallbackWorkspaceID: String = String()
+
+  public var movedTerminals: Int32 = 0
+
+  public var removed: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_AgentControlRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -367,6 +453,23 @@ public struct Coflux_V1_AgentControlRequest: Sendable {
     set {payload = .portsList(newValue)}
   }
 
+  /// plan 104：这两条改的是**归属**而不是本次请求的目标，忽略上面的 workspace_id（worker 恒填空）。
+  public var workspaceLocate: Coflux_V1_AgentWorkspaceLocate {
+    get {
+      if case .workspaceLocate(let v)? = payload {return v}
+      return Coflux_V1_AgentWorkspaceLocate()
+    }
+    set {payload = .workspaceLocate(newValue)}
+  }
+
+  public var workspaceForget: Coflux_V1_AgentWorkspaceForget {
+    get {
+      if case .workspaceForget(let v)? = payload {return v}
+      return Coflux_V1_AgentWorkspaceForget()
+    }
+    set {payload = .workspaceForget(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -374,6 +477,9 @@ public struct Coflux_V1_AgentControlRequest: Sendable {
     case terminalList(Coflux_V1_AgentTerminalList)
     case terminalRead(Coflux_V1_AgentTerminalRead)
     case portsList(Coflux_V1_AgentPortsList)
+    /// plan 104：这两条改的是**归属**而不是本次请求的目标，忽略上面的 workspace_id（worker 恒填空）。
+    case workspaceLocate(Coflux_V1_AgentWorkspaceLocate)
+    case workspaceForget(Coflux_V1_AgentWorkspaceForget)
 
   }
 
@@ -540,6 +646,22 @@ public struct Coflux_V1_AgentControlResult: Sendable {
     set {payload = .portsList(newValue)}
   }
 
+  public var workspaceLocate: Coflux_V1_AgentWorkspaceLocateResult {
+    get {
+      if case .workspaceLocate(let v)? = payload {return v}
+      return Coflux_V1_AgentWorkspaceLocateResult()
+    }
+    set {payload = .workspaceLocate(newValue)}
+  }
+
+  public var workspaceForget: Coflux_V1_AgentWorkspaceForgetResult {
+    get {
+      if case .workspaceForget(let v)? = payload {return v}
+      return Coflux_V1_AgentWorkspaceForgetResult()
+    }
+    set {payload = .workspaceForget(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -547,6 +669,8 @@ public struct Coflux_V1_AgentControlResult: Sendable {
     case terminalList(Coflux_V1_AgentTerminalListResult)
     case terminalRead(Coflux_V1_AgentTerminalReadResult)
     case portsList(Coflux_V1_AgentPortsListResult)
+    case workspaceLocate(Coflux_V1_AgentWorkspaceLocateResult)
+    case workspaceForget(Coflux_V1_AgentWorkspaceForgetResult)
 
   }
 
@@ -2232,9 +2356,184 @@ extension Coflux_V1_AgentPortsList: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
+extension Coflux_V1_AgentWorkspaceLocate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentWorkspaceLocate"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}path\0\u{1}branch\0\u{3}workspace_id\0\u{3}same_repo\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.branch) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.sameRepo) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 1)
+    }
+    if !self.branch.isEmpty {
+      try visitor.visitSingularStringField(value: self.branch, fieldNumber: 2)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 3)
+    }
+    if self.sameRepo != false {
+      try visitor.visitSingularBoolField(value: self.sameRepo, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentWorkspaceLocate, rhs: Coflux_V1_AgentWorkspaceLocate) -> Bool {
+    if lhs.path != rhs.path {return false}
+    if lhs.branch != rhs.branch {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.sameRepo != rhs.sameRepo {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentWorkspaceForget: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentWorkspaceForget"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}path\0\u{3}workspace_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 1)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentWorkspaceForget, rhs: Coflux_V1_AgentWorkspaceForget) -> Bool {
+    if lhs.path != rhs.path {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentWorkspaceLocateResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentWorkspaceLocateResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}workspace_id\0\u{1}path\0\u{1}branch\0\u{1}created\0\u{1}moved\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.branch) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.created) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.moved) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 1)
+    }
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 2)
+    }
+    if !self.branch.isEmpty {
+      try visitor.visitSingularStringField(value: self.branch, fieldNumber: 3)
+    }
+    if self.created != false {
+      try visitor.visitSingularBoolField(value: self.created, fieldNumber: 4)
+    }
+    if self.moved != false {
+      try visitor.visitSingularBoolField(value: self.moved, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentWorkspaceLocateResult, rhs: Coflux_V1_AgentWorkspaceLocateResult) -> Bool {
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.path != rhs.path {return false}
+    if lhs.branch != rhs.branch {return false}
+    if lhs.created != rhs.created {return false}
+    if lhs.moved != rhs.moved {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentWorkspaceForgetResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentWorkspaceForgetResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}workspace_id\0\u{3}fallback_workspace_id\0\u{3}moved_terminals\0\u{1}removed\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.fallbackWorkspaceID) }()
+      case 3: try { try decoder.decodeSingularInt32Field(value: &self.movedTerminals) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.removed) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 1)
+    }
+    if !self.fallbackWorkspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.fallbackWorkspaceID, fieldNumber: 2)
+    }
+    if self.movedTerminals != 0 {
+      try visitor.visitSingularInt32Field(value: self.movedTerminals, fieldNumber: 3)
+    }
+    if self.removed != false {
+      try visitor.visitSingularBoolField(value: self.removed, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentWorkspaceForgetResult, rhs: Coflux_V1_AgentWorkspaceForgetResult) -> Bool {
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.fallbackWorkspaceID != rhs.fallbackWorkspaceID {return false}
+    if lhs.movedTerminals != rhs.movedTerminals {return false}
+    if lhs.removed != rhs.removed {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_AgentControlRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AgentControlRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}workspace_id\0\u{4}\u{7}terminal_new\0\u{3}terminal_list\0\u{3}terminal_read\0\u{3}ports_list\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}workspace_id\0\u{4}\u{7}terminal_new\0\u{3}terminal_list\0\u{3}terminal_read\0\u{3}ports_list\0\u{3}workspace_locate\0\u{3}workspace_forget\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2297,6 +2596,32 @@ extension Coflux_V1_AgentControlRequest: SwiftProtobuf.Message, SwiftProtobuf._M
           self.payload = .portsList(v)
         }
       }()
+      case 14: try {
+        var v: Coflux_V1_AgentWorkspaceLocate?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .workspaceLocate(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .workspaceLocate(v)
+        }
+      }()
+      case 15: try {
+        var v: Coflux_V1_AgentWorkspaceForget?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .workspaceForget(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .workspaceForget(v)
+        }
+      }()
       default: break
       }
     }
@@ -2332,6 +2657,14 @@ extension Coflux_V1_AgentControlRequest: SwiftProtobuf.Message, SwiftProtobuf._M
     case .portsList?: try {
       guard case .portsList(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
+    }()
+    case .workspaceLocate?: try {
+      guard case .workspaceLocate(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 14)
+    }()
+    case .workspaceForget?: try {
+      guard case .workspaceForget(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
     }()
     case nil: break
     }
@@ -2553,7 +2886,7 @@ extension Coflux_V1_AgentPortsListResult: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Coflux_V1_AgentControlResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AgentControlResult"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{4}\u{7}terminal_new\0\u{3}terminal_list\0\u{3}terminal_read\0\u{3}ports_list\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{4}\u{7}terminal_new\0\u{3}terminal_list\0\u{3}terminal_read\0\u{3}ports_list\0\u{3}workspace_locate\0\u{3}workspace_forget\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2616,6 +2949,32 @@ extension Coflux_V1_AgentControlResult: SwiftProtobuf.Message, SwiftProtobuf._Me
           self.payload = .portsList(v)
         }
       }()
+      case 14: try {
+        var v: Coflux_V1_AgentWorkspaceLocateResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .workspaceLocate(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .workspaceLocate(v)
+        }
+      }()
+      case 15: try {
+        var v: Coflux_V1_AgentWorkspaceForgetResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .workspaceForget(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .workspaceForget(v)
+        }
+      }()
       default: break
       }
     }
@@ -2651,6 +3010,14 @@ extension Coflux_V1_AgentControlResult: SwiftProtobuf.Message, SwiftProtobuf._Me
     case .portsList?: try {
       guard case .portsList(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
+    }()
+    case .workspaceLocate?: try {
+      guard case .workspaceLocate(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 14)
+    }()
+    case .workspaceForget?: try {
+      guard case .workspaceForget(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
     }()
     case nil: break
     }

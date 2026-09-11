@@ -17,6 +17,7 @@
  */
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import type { WebSocket } from "ws";
 import {
   create,
@@ -59,6 +60,8 @@ import {
   type SessionCheckpoint,
   type AgentControlRequest,
   type AgentControlResultPayload,
+  type AgentWorkspaceLocate,
+  type AgentWorkspaceForget,
   type ServerAgentResult,
 } from "@coflux/protocol";
 import { createLogger } from "@coflux/core";
@@ -1212,10 +1215,10 @@ export class Hub {
     // 目标工作区：daemon 提议（agent 经 /cd、EnterWorktree 挪进了同设备的另一个工作区，daemon 按
     // 调用方 cwd 解析出来），中心核验（plan 102）。字段为空 = 发起 task 所在工作区，旧 daemon 恒空。
     // 只作用于 terminalNew / terminalList；portsList 与 terminalRead 一律用发起方工作区。
+    // workspaceLocate / workspaceForget（plan 104）也不看它：那两条改的是**归属**而不是本次请求的
+    // 目标，路径与既有工作区 id 在各自的 payload 里，worker 也恒把这个字段留空。
     let target = workspace;
-    // `?? ""`：proto 解码会把缺省字段填成空串，但单测夹具直接构造普通对象、字段根本不存在——
-    // 这里一旦抛异常就绕过了 reply/fail，调用方只能干等到超时。缺字段与空串一律按「没申报」处理。
-    const declared = (request.workspaceId ?? "").trim();
+    const declared = agentText(request.workspaceId);
     if (declared && declared !== workspace.id) {
       const proposed = await this.store.getWorkspace(declared);
       // 必须同账号**同设备**：终端要在这台机器上跑（MCP create_terminal 只查账号，那里终端可以
@@ -1289,7 +1292,7 @@ export class Hub {
                   daemonId: currentWorkspace.daemonId,
                   projectId: currentWorkspace.projectId,
                   workspaceId: currentWorkspace.id,
-                  title: value.title.trim() || "agent 终端",
+                  title: agentText(value.title) || "agent 终端",
                   status: TaskStatus.IDLE,
                   sessionId,
                   createdAt: ts,
@@ -1398,9 +1401,198 @@ export class Hub {
         );
         return void reply({ case: "portsList", value: { ports } });
       }
+      case "workspaceLocate":
+        return await this.locateAgentWorkspace(daemon, originTask, workspace, request.payload.value, reply, fail);
+      case "workspaceForget":
+        return await this.forgetAgentWorkspace(daemon, originTask, workspace, request.payload.value, reply, fail);
       default:
         return void fail("未知的 agent 控制动作");
     }
+  }
+
+  /** 跟随 agent 进入/离开 worktree（plan 104）：把发起方终端的**归属**搬到 daemon 定位出的工作区，
+   * 目标未登记且 daemon 已核验同仓库时先登记一个子工作区。
+   *
+   * 分工与 102 一致：路径是不是 worktree 根、和发起方是不是同一个 git 仓库，只有 daemon 答得出
+   * （中心手里的路径是用户原始写法，且中心没有 git）；中心核验同账号、同设备、同项目，并决定
+   * 复用还是登记。归属的唯一真相在中心，daemon 的账本只从这条响应学。
+   *
+   * 广播次序：登记时 workspaceCreated 先于 taskUpdated——各端按 id upsert，先有工作区卡片才不会
+   * 出现「终端指向一个还不存在的工作区」的中间态。TaskUpdated 已带整条 Task，无需新的下行消息。 */
+  private async locateAgentWorkspace(
+    daemon: DaemonConn,
+    originTask: Task,
+    originWorkspace: Workspace,
+    value: AgentWorkspaceLocate,
+    reply: (payload: AgentControlResultPayload) => void,
+    fail: (error: string) => void,
+  ): Promise<void> {
+    const path = agentText(value.path);
+    if (!path) return void fail("定位请求缺少路径");
+    // 目录工作区没有项目，谈不上「同一个项目下的另一个 worktree」：不适用，零副作用。
+    if (isDirWorkspace(originWorkspace)) {
+      return void fail("本终端开在目录工作区（无项目），coflux 不跟随 worktree");
+    }
+    const branch = agentText(value.branch);
+    if (branch && (!validBoundedText(branch, MAX_BRANCH_BYTES) || /\s/.test(branch))) {
+      return void fail("worktree 分支名无效");
+    }
+    const declared = agentText(value.workspaceId);
+    const createdWorkspaceId = declared ? "" : randomUUID();
+
+    const outcome = await this.store.transaction(async (tx) => {
+      // 与 removeDevice / terminalNew 共用 device 父行锁；项目行锁让并发的两次定位串行化，
+      // 这正是「同一个 worktree 两次定位不能出两条记录」的保证（工作区路径没有唯一约束）。
+      const device = await tx.claimActiveDevice(daemon.info.daemonId, daemon.accountId);
+      if (!device) return { ok: false, error: "设备已撤销或不属于本账号" } as const;
+      const currentOrigin = await tx.getTask(originTask.id);
+      if (
+        !currentOrigin ||
+        currentOrigin.sessionId !== originTask.sessionId ||
+        currentOrigin.daemonId !== daemon.info.daemonId ||
+        currentOrigin.accountId !== daemon.accountId
+      ) return { ok: false, error: "发起方会话已失效" } as const;
+      const project = await tx.claimActiveProject(currentOrigin.projectId);
+      if (
+        !project ||
+        project.accountId !== daemon.accountId ||
+        project.daemonId !== daemon.info.daemonId
+      ) return { ok: false, error: "项目正在删除，不能再跟随 worktree" } as const;
+
+      // 先按 daemon 报的既有 id 认，认不出再按规范化 path 在本项目内查重；两条都空才登记。
+      let target: Workspace | undefined;
+      if (declared) {
+        const proposed = await tx.getWorkspace(declared);
+        if (
+          !proposed ||
+          proposed.accountId !== daemon.accountId ||
+          proposed.daemonId !== daemon.info.daemonId ||
+          proposed.projectId !== project.id
+        ) return { ok: false, error: `工作区 ${declared} 不存在或不属于本项目` } as const;
+        target = proposed;
+      } else {
+        target = (await tx.listWorkspacesByProject(project.id)).find((ws) => ws.path === path);
+      }
+      let created = false;
+      if (!target) {
+        // 只有 daemon 核验过「同一个 git 仓库」才登记。它为假就是跨仓库/非 git，什么都不建。
+        if (!value.sameRepo) return { ok: false, error: "目标目录不是本项目的 git worktree" } as const;
+        const name = branch || basename(path);
+        if (!validBoundedText(name, MAX_WORKSPACE_NAME_BYTES)) {
+          return { ok: false, error: "worktree 名称过长或含控制字符" } as const;
+        }
+        // 命名沿用 create_workspace 的规则：名称默认就是分支名。
+        target = create(WorkspaceSchema, {
+          id: createdWorkspaceId,
+          accountId: daemon.accountId,
+          daemonId: daemon.info.daemonId,
+          projectId: project.id,
+          name,
+          path,
+          branch,
+          isMain: false,
+          createdAt: Date.now(),
+        });
+        await tx.createWorkspace(target);
+        created = true;
+      }
+      if (currentOrigin.workspaceId === target.id) {
+        // 幂等：cwd 就是当前归属（正常启动的常态），一行都不改、一条都不广播。
+        return { ok: true, workspace: target, created, task: undefined } as const;
+      }
+      const moved = await tx.moveTaskToWorkspace(
+        currentOrigin.id,
+        daemon.accountId,
+        daemon.info.daemonId,
+        currentOrigin.workspaceId,
+        target.id,
+        target.projectId,
+      );
+      if (!moved) return { ok: false, error: "发起方终端的归属已被并发改动，请重试" } as const;
+      return { ok: true, workspace: target, created, task: moved } as const;
+    });
+    if (!outcome.ok) return void fail(outcome.error);
+
+    if (outcome.created) {
+      this.broadcast(outcome.workspace.accountId, { case: "workspaceCreated", value: { workspace: outcome.workspace } });
+      // 新工作区要进 daemon 的工作区表：102 的 cwd 解析、分支/diff 轮询、下一次定位都查它。
+      await this.pushWorkspaceList(daemon.info.daemonId);
+    }
+    if (outcome.task) this.emitTask(outcome.task);
+    return void reply({
+      case: "workspaceLocate",
+      value: {
+        workspaceId: outcome.workspace.id,
+        path: outcome.workspace.path,
+        branch: outcome.workspace.branch,
+        created: outcome.created,
+        moved: Boolean(outcome.task),
+      },
+    });
+  }
+
+  /** Claude Code 已清理掉自建的 worktree（plan 104）：该工作区下**所有**终端搬回项目主工作区，
+   * 记录消失。刻意不复用 worktree.remove 的 prepared 流程——那条会让 daemon 去
+   * `git worktree remove` 一个已经不存在的目录。终端本身不动：会话、PTY、turn 状态一概不断。
+   *
+   * 广播次序与登记相反：先 taskUpdated（终端已在主工作区名下）再 workspaceRemoved，各端收到
+   * workspaceRemoved 时会连带丢掉该工作区的 tasks，反过来就会先把还没搬的终端从界面上抹掉。 */
+  private async forgetAgentWorkspace(
+    daemon: DaemonConn,
+    originTask: Task,
+    originWorkspace: Workspace,
+    value: AgentWorkspaceForget,
+    reply: (payload: AgentControlResultPayload) => void,
+    fail: (error: string) => void,
+  ): Promise<void> {
+    const workspaceId = agentText(value.workspaceId);
+    if (!workspaceId) return void fail("worktree 已删的请求缺少工作区 id");
+    if (isDirWorkspace(originWorkspace)) {
+      return void fail("本终端开在目录工作区（无项目），coflux 不跟随 worktree");
+    }
+    const outcome = await this.store.transaction(async (tx) => {
+      const device = await tx.claimActiveDevice(daemon.info.daemonId, daemon.accountId);
+      if (!device) return { ok: false, error: "设备已撤销或不属于本账号" } as const;
+      const currentOrigin = await tx.getTask(originTask.id);
+      if (
+        !currentOrigin ||
+        currentOrigin.daemonId !== daemon.info.daemonId ||
+        currentOrigin.accountId !== daemon.accountId
+      ) return { ok: false, error: "发起方会话已失效" } as const;
+      const project = await tx.claimActiveProject(currentOrigin.projectId);
+      if (
+        !project ||
+        project.accountId !== daemon.accountId ||
+        project.daemonId !== daemon.info.daemonId
+      ) return { ok: false, error: "项目正在删除，不必再清理工作区" } as const;
+      const workspaces = await tx.listWorkspacesByProject(project.id);
+      const target = workspaces.find((ws) => ws.id === workspaceId);
+      if (!target || target.accountId !== daemon.accountId || target.daemonId !== daemon.info.daemonId) {
+        return { ok: false, error: `工作区 ${workspaceId} 不存在或不属于本项目` } as const;
+      }
+      if (target.isMain) return { ok: false, error: "主工作区不会被 worktree 清理删掉" } as const;
+      const main = workspaces.find((ws) => ws.isMain);
+      if (!main) return { ok: false, error: "本项目没有主工作区，终端无处可搬" } as const;
+      const tasks = await tx.moveTasksToWorkspace(target.id, main.id, main.projectId);
+      await tx.removeWorkspace(target.id);
+      return { ok: true, workspace: target, fallback: main, tasks } as const;
+    });
+    if (!outcome.ok) return void fail(outcome.error);
+
+    // 在飞的「往这个工作区里建终端」必须作废，否则会插出指向已删工作区的孤儿任务。
+    this.cancelWorkspaceEffects(outcome.workspace.id);
+    for (const task of outcome.tasks) this.emitTask(task);
+    this.broadcast(outcome.workspace.accountId, { case: "workspaceRemoved", value: { workspaceId: outcome.workspace.id } });
+    await this.pushWorkspaceList(daemon.info.daemonId);
+    return void reply({
+      case: "workspaceForget",
+      value: {
+        workspaceId: outcome.workspace.id,
+        fallbackWorkspaceId: outcome.fallback.id,
+        movedTerminals: outcome.tasks.length,
+        removed: true,
+      },
+    });
   }
 
   private async acceptSessionCheckpoint(daemon: DaemonConn, checkpoint: SessionCheckpoint): Promise<void> {
@@ -3962,6 +4154,16 @@ export class Hub {
 /** 目录工作区（无 repo 终端，plan 045）：projectId 为空即目录工作区，判定收敛在此一处 */
 function isDirWorkspace(ws: Workspace): boolean {
   return !ws.projectId;
+}
+
+/** agent 控制载荷里的字符串字段：缺席按空串处理（plan 104 返修 R3）。
+ *
+ * 真实链路上这些字段永远存在——protobuf 解码给每个 string 补默认空串。但手工构造的载荷
+ * （单元测试、将来别的内部调用方）可以整个漏掉一个字段，那时 `undefined.trim()` 会把整条请求
+ * 变成一个异常：调用方等不到回执，只能干等到超时。缺字段的语义本来就等同于空串，让它显式等同。
+ * 有值时行为一字不变。 */
+function agentText(value: string | undefined | null): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function validOperationResult(operation: PreparedOperationRecord, report: DeviceOperationReport, payload: DeviceEnvelope["payload"]): boolean {

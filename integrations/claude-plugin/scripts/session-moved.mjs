@@ -1,12 +1,19 @@
 #!/usr/bin/env node
-// Claude Code UserPromptSubmit hook (plan 102): tell the agent when its working directory has moved
-// into a *different* coflux workspace than the one this terminal was opened in.
+// Claude Code UserPromptSubmit hook (plan 102; ownership from the daemon since plan 104): tell the
+// agent when its working directory sits in a *different* coflux workspace than the one this terminal
+// currently belongs to.
 //
-// `/cd <path>` and EnterWorktree move a live session (same conversation, no restart) to another
-// directory, and a coflux child workspace is just a registered git worktree, so a session opened in
+// A plain `cd <path>` moves a live session (same conversation, no restart) to another directory, and
+// a coflux child workspace is just a registered git worktree, so a session whose terminal belongs to
 // workspace A can end up working inside workspace B. From then on the local `cofluxd` commands act on
-// B (the daemon resolves the caller's cwd), while COFLUX_WORKSPACE_ID and the <coflux-session> block
-// still name A. Without this block the agent would keep passing A's id to the coflux MCP tools.
+// B (the daemon resolves the caller's cwd) while the terminal still hangs under A in the sidebar.
+// Without this block the agent would keep passing A's id to the coflux MCP tools.
+//
+// Both ids come from `cofluxd workspace`, never from $COFLUX_WORKSPACE_ID: that variable is frozen
+// when the PTY is spawned and only means "where this terminal was opened", so it goes stale as soon
+// as coflux follows the agent into a worktree (plan 104) — comparing against it would report a move
+// on every prompt forever after. The variable is used for one thing only: telling whether this
+// session is inside a coflux terminal at all.
 //
 // Contract (Claude Code hooks): stdin is one JSON document (cwd / prompt / session_id ...); a
 // UserPromptSubmit hook's stdout is added to the model context, so print the block as plain text
@@ -79,10 +86,10 @@ function askCofluxd(cwd) {
 function block(effective, path, owning) {
   return [
     "<coflux-session-moved>",
-    "Your working directory has moved into a different coflux workspace than the one this terminal was opened in.",
+    "Your working directory is in a different coflux workspace than the one this terminal belongs to.",
     `effective workspace id: ${effective} (your cwd is inside it)`,
     `effective workspace path: ${path}`,
-    `owning workspace id: ${owning} (COFLUX_WORKSPACE_ID, unchanged: where this terminal was opened)`,
+    `owning workspace id: ${owning} (where this terminal hangs in the user's sidebar)`,
     `Local cofluxd commands (terminal new|list|read|wait|send) now act on ${effective}: a terminal you open lands there and runs in its directory, list shows its terminals, and terminals of ${owning} read back as not found.`,
     `Pass ${effective} as workspaceId to coflux MCP tools.`,
     "COFLUX_TASK_ID and COFLUX_SESSION_ID are unchanged: this terminal itself did not move.",
@@ -92,14 +99,15 @@ function block(effective, path, owning) {
 }
 
 async function main() {
-  const owning = (process.env.COFLUX_WORKSPACE_ID || "").trim();
-  if (!owning) return;
+  // The variable is only the "am I inside coflux" gate; both ids below come from the daemon.
+  if (!(process.env.COFLUX_WORKSPACE_ID || "").trim()) return;
   const payload = await readStdinJson();
   const cwd = typeof payload?.cwd === "string" ? payload.cwd.trim() : "";
   if (!cwd) return;
   const current = await askCofluxd(cwd);
   const effective = typeof current?.workspaceId === "string" ? current.workspaceId.trim() : "";
-  if (!effective || effective === owning) return;
+  const owning = typeof current?.owningWorkspaceId === "string" ? current.owningWorkspaceId.trim() : "";
+  if (!effective || !owning || effective === owning) return;
   debug("moved", { owning, effective });
   const text = block(effective, typeof current.path === "string" ? current.path : "", owning);
   await new Promise((resolve) => process.stdout.write(`${text}\n`, resolve));
