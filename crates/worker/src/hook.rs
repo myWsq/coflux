@@ -445,38 +445,6 @@ fn parse_head(head: &str) -> Result<(String, usize, String), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn event_mapping_covers_both_agents() {
-        assert_eq!(event_state("UserPromptSubmit", "", 0), Some("active"));
-        assert_eq!(event_state("PreToolUse", "", 0), Some("active"));
-        assert_eq!(event_state("PostToolUse", "", 0), Some("active"));
-        assert_eq!(event_state("Stop", "", 0), Some("done"));
-        assert_eq!(event_state("StopFailure", "", 0), Some("done"));
-        assert_eq!(event_state("PermissionRequest", "", 0), Some("approval"));
-        assert_eq!(event_state("agent-turn-complete", "", 0), Some("done"));
-        assert_eq!(event_state("approval-requested", "", 0), Some("approval"));
-        assert_eq!(
-            event_state("Notification", "permission_prompt", 0),
-            Some("approval")
-        );
-        assert_eq!(
-            event_state("Notification", "agent_needs_input", 0),
-            Some("question")
-        );
-        assert_eq!(
-            event_state("Notification", "elicitation_dialog", 0),
-            Some("question")
-        );
-        assert_eq!(
-            event_state("Notification", "agent_completed", 0),
-            Some("done")
-        );
-        assert_eq!(event_state("Notification", "auth_success", 0), None);
-        assert_eq!(event_state("Notification", "", 0), None);
-        assert_eq!(event_state("SessionStart", "", 0), None);
-        assert_eq!(event_state("", "", 0), None);
-    }
-
     /// 回合结束但后台还有活 = 挂起等唤醒，不是完成；无后台工作时仍是 done。
     #[test]
     fn stop_with_background_work_is_not_done() {

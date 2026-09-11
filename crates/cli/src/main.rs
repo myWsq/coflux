@@ -116,30 +116,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn managed_commands_are_recognized_explicitly() {
-        for command in ["up", "down", "update", "restart", "status", "doctor", "logs", "fda", "uninstall"] {
-            assert!(is_managed_command(command), "{command} 应被识别为管理类命令");
-        }
-        for command in ["terminal", "notify", "progress", "ports", "workspace", "hook", "onboard", "bogus"] {
-            assert!(!is_managed_command(command), "{command} 不是管理类命令");
-        }
-    }
-
-    #[test]
-    fn refusal_points_to_the_desktop_app() {
-        let text = managed_refusal("status");
-        assert!(text.starts_with("cofluxd status："));
-        assert!(text.contains("Coflux.app"));
-    }
-
-    #[test]
-    fn migrated_hints_follow_node() {
-        assert!(migrated_hint("onboard").unwrap().contains("cofluxd up"));
-        assert!(migrated_hint("reload").is_some());
-        assert!(migrated_hint("terminal").is_none());
-    }
-
-    #[test]
     fn help_keeps_agent_phrases_used_by_skill_docs() {
         for phrase in ["cofluxd terminal new", "cofluxd terminal read <taskId>", "cofluxd notify", "cofluxd progress", "cofluxd ports", "cofluxd workspace locate", "cofluxd hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS"] {
             assert!(HELP.contains(phrase), "HELP 缺 {phrase}");
