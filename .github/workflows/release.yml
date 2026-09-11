@@ -294,7 +294,8 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.ref_name }}
-          target_commitish: ${{ github.sha }}
+          # 不传 target_commitish：tag 已存在且上一步已校验它绑定事件 SHA；action-gh-release v3 会把它原样带进
+          # create-release 请求，撞上 v* tag 的不可变 ruleset 后 GITHUB_TOKEN 拿到 403（v0.32.0 首次发版实测）。
           files: signed-release/artifacts/*
           # 自建 note 取代 generate_release_notes：本仓库直接 push main，GitHub 的自动汇总
           # 只认 PR，产出永远是光秃秃一行 compare 链接。
