@@ -273,6 +273,9 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: desktop v${{ needs.metadata.outputs.version }}
+          # 绝不让桌面 release 成为仓库 latest：中心的 daemon 自动更新只看 /releases/latest 上的 manifest.json
+          # （apps/server/src/auto-update.ts），桌面版抢走 latest 会让 worker 热推整体停摆（desktop-v0.1.6 曾实际发生）。
+          make_latest: false
           body_path: notes.md
           files: |
             assets/*.dmg

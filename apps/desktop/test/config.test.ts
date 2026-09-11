@@ -147,6 +147,10 @@ test("desktop-release.yml：并行 daemon job 同 SHA cargo build 三件、版�
 test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 secret 明确失败、先产物后清单", () => {
   const workflow = parse(readFileSync(resolve(repoRoot, ".github/workflows/desktop-release.yml"), "utf8")) as Workflow;
   assert.deepEqual(workflow.on.push.tags, ["desktop-v*"]);
+  // 桌面 release 绝不能成为仓库 latest（plan 113 发版时发现）：中心 daemon 自动更新只看 /releases/latest 的 manifest.json，
+  // desktop-v0.1.6 抢走 latest 后 worker 热推曾整体停摆。softprops v3 的 make_latest 显式 false。
+  const ghRelease = workflow.jobs.release.steps.find((step) => step.uses?.startsWith("softprops/action-gh-release@"));
+  assert.equal(String(ghRelease?.with?.make_latest), "false", "桌面 release 必须 make_latest: false");
   assert.equal(workflow.permissions.contents, "read");
 
   const build = workflow.jobs.build;
