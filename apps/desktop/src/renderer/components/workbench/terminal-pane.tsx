@@ -1,10 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useToast } from "@astryxdesign/core/Toast";
 import type { FsWriteResult } from "@coflux/client";
+
+import { desktop } from "@/config";
+import { TerminalLatencyProbe } from "../../../shared/terminal-metrics";
+import { GhosttySender } from "../../../shared/ghostty-sender";
+import type { GhosttyEvent, GhosttyRect, GhosttyState, SurfaceKey } from "../../../shared/ghostty";
 
 import { shouldOpenTerminalLink } from "@/components/workbench/terminal-link-activation";
 
@@ -37,6 +42,8 @@ type TerminalPaneProps = {
   onDispose: (taskId: string, controller: TerminalController) => void;
   onSessionReady: (taskId: string, sessionId: string, controller: TerminalController) => void;
   onOutput: (taskId: string, sessionId: string) => void;
+  /** consumer 注销清除 router 续传序号后重新 attach，不强制抢占控制权。 */
+  resumeSession?: (taskId: string, cols: number, rows: number) => void;
 };
 
 // 终端贴图（plan 014）的压缩目标独立于文件上传上限，保持 3.5MB 以节省截图传输带宽。
@@ -149,8 +156,14 @@ async function compressToBudget(blob: Blob, budget: number): Promise<Uint8Array>
 }
 
 export function TerminalPane(props: TerminalPaneProps) {
+  return desktop.ghostty.enabled ? <GhosttyTerminalPane {...props} /> : <XtermTerminalPane {...props} />;
+}
+
+function XtermTerminalPane(props: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
+  const metricsRef = useRef<TerminalLatencyProbe | null>(null);
+  const metricQueue = useRef({ bytes: 0, peak: 0 });
   const controllerRef = useRef<TerminalController | null>(null);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   // 上传中用光标转圈表达进行态；成功不打扰，只在失败时弹 toast 告知原因——不写进终端画面避免污染 claude 会话。
@@ -189,6 +202,18 @@ export function TerminalPane(props: TerminalPaneProps) {
     const host = hostRef.current;
     if (!host) return;
 
+    let metricsCleanup = () => {};
+    if (desktop.terminalMetrics.enabled) {
+      const probe = new TerminalLatencyProbe((latency) => window.dispatchEvent(new CustomEvent("coflux:terminal-latency", { detail: { taskId: props.taskId, engine: "xterm", latency } })));
+      metricsRef.current = probe;
+      const input = (event: Event) => {
+        const id = (event as CustomEvent<{ id: string }>).detail?.id;
+        const current = liveRef.current;
+        if (typeof id === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(id) && current.active && current.controlState === "owned" && current.sessionId) current.sendInput(current.sessionId, probe.input(id));
+      };
+      window.addEventListener("coflux:terminal-probe", input);
+      metricsCleanup = () => { window.removeEventListener("coflux:terminal-probe", input); metricsRef.current = null; };
+    }
     const terminal = new Terminal({
       allowProposedApi: false,
       convertEol: false,
@@ -420,6 +445,7 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     return () => {
       disposed = true;
+      metricsCleanup();
       observer.disconnect();
       dprQuery?.removeEventListener("change", onDprChange);
       host.removeEventListener("paste", handlePaste, { capture: true });
@@ -444,7 +470,13 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (!sessionId || !terminal || !controller) return;
     const unregister = props.registerSessionConsumer(sessionId, (data, replace) => {
       if (replace) terminal.reset();
-      terminal.write(data);
+      if (metricsRef.current) {
+        const probe = metricsRef.current;
+        metricQueue.current.bytes += data.byteLength;
+        metricQueue.current.peak = Math.max(metricQueue.current.peak, metricQueue.current.bytes);
+        if (hostRef.current) hostRef.current.dataset.ghosttyPeakBytes = String(metricQueue.current.peak);
+        terminal.write(data, () => { metricQueue.current.bytes -= data.byteLength; probe.parsed(data); });
+      } else terminal.write(data);
       props.onOutput(props.taskId, sessionId);
     });
     props.onSessionReady(props.taskId, sessionId, controller);
@@ -477,4 +509,257 @@ export function TerminalPane(props: TerminalPaneProps) {
       ) : null}
     </div>
   );
+}
+
+
+let ghosttyGeneration = 0;
+
+/** 原生路径自成组件，开关关闭时 xterm 的 effect、consumer 与输入行为保持原样。 */
+function GhosttyTerminalPane(props: TerminalPaneProps) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const live = useRef(props);
+  live.current = props;
+  const showToast = useToast();
+  const toast = useRef(showToast); toast.current = showToast;
+  const [mounted, setMounted] = useState(props.active);
+  useLayoutEffect(() => { if (props.active) setMounted(true); }, [props.active]);
+  const [incarnation, setIncarnation] = useState(0);
+  const [ready, setReady] = useState(0);
+  const [error, setError] = useState("");
+  const senderRef = useRef<GhosttySender | null>(null);
+  const controllerRef = useRef<TerminalController | null>(null);
+  const unregisterRef = useRef<(() => void) | null>(null);
+  const syncRef = useRef<(() => void) | null>(null);
+  const resumeNeeded = useRef(false);
+  const lastRecovery = useRef(0);
+  const gateRef = useRef<GhosttyState>({ active: false, owned: false, occluded: true, focus: false, epoch: 0 });
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !mounted) return;
+    const key: SurfaceKey = { surfaceId: props.taskId, generation: ++ghosttyGeneration };
+    let disposed = false, recovering = false, initialized = false;
+    let frame = 0;
+    let dims = { cols: 80, rows: 24 };
+    let focusWanted = true;
+    let lastRect = "";
+    let lastState = "";
+    let observedRegion: Element | null = null;
+    let decoder = new TextDecoder();
+    const metrics = desktop.terminalMetrics.enabled ? new TerminalLatencyProbe((latency) => window.dispatchEvent(new CustomEvent("coflux:terminal-latency", { detail: { taskId: props.taskId, engine: "ghostty", latency } }))) : null;
+    const parsedTail = new Map<number, Uint8Array>();
+    const region = () => document.querySelector<HTMLElement>(`[data-ghostty-terminal-region="${CSS.escape(live.current.taskId)}"]`) ?? host;
+    const getRect = (): GhosttyRect => {
+      const box = region().getBoundingClientRect();
+      return { x: box.left + 12, y: box.top + 8, width: Math.max(1, box.width - 12), height: Math.max(1, box.height - 20), dpr: window.devicePixelRatio };
+    };
+    const hasDialog = () => [...document.querySelectorAll<HTMLElement>('dialog[open], [popover]:popover-open, [role="dialog"]:not(dialog), [role="alertdialog"]:not(dialog)')]
+      .some((element) => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden");
+    const fail = (reason: string) => {
+      if (disposed || recovering) return;
+      recovering = true;
+      resumeNeeded.current = true;
+      // 立即停止消费；避免当前 Set 的 consumer 遍历过程中同步添加新 consumer。
+      queueMicrotask(() => {
+        unregisterRef.current?.(); unregisterRef.current = null;
+        if (disposed) return;
+        const now = Date.now();
+        if (now - lastRecovery.current < 5000) {
+          sender.destroy();
+          void desktop.ghostty.destroy(key).catch(() => undefined);
+          setError(`${reason}；已暂停，请手动重建视图`);
+          return;
+        }
+        lastRecovery.current = now;
+        setIncarnation((value) => value + 1);
+      });
+    };
+    const sender = new GhosttySender(key, (messages) => desktop.ghostty.send(messages), fail);
+    senderRef.current = sender;
+    const syncState = () => {
+      if (!initialized || disposed || recovering) return;
+      const box = region().getBoundingClientRect();
+      const occluded = hasDialog() || document.hidden || box.width <= 0 || box.height <= 0;
+      const next = { active: live.current.active, owned: live.current.controlState === "owned", occluded, focus: focusWanted && !occluded };
+      const serialized = JSON.stringify(next);
+      if (serialized === lastState) return;
+      lastState = serialized;
+      gateRef.current = { ...next, epoch: gateRef.current.epoch + 1 };
+      decoder = new TextDecoder();
+      sender.control({ kind: "state", state: gateRef.current });
+    };
+    const sync = () => {
+      if (!initialized || disposed || recovering) return;
+      syncState();
+      if (!live.current.active) return;
+      const target = region();
+      if (observedRegion !== target) {
+        if (observedRegion) observer.unobserve(observedRegion);
+        observedRegion = target; observer.observe(target);
+      }
+      const box = target.getBoundingClientRect();
+      if (box.width <= 0 || box.height <= 0) return;
+      const rect = getRect(); const serialized = JSON.stringify(rect);
+      if (serialized !== lastRect) { lastRect = serialized; sender.control({ kind: "frame", rect }); }
+    };
+    const schedule = () => {
+      syncState();
+      if (frame) return;
+      frame = requestAnimationFrame(() => { frame = 0; sync(); });
+    };
+    syncRef.current = () => { focusWanted = live.current.active; sync(); };
+    const controller: TerminalController = {
+      dimensions: () => dims,
+      fit: sync,
+      focus: () => { focusWanted = true; syncState(); },
+      reset: () => { sender.output(new Uint8Array(), true); sender.flush(); },
+      writeRaw: (data) => { sender.output(typeof data === "string" ? new TextEncoder().encode(data) : data, false, true); },
+      writeSystem: (message, tone = "warning") => {
+        const color = tone === "error" ? 31 : tone === "success" ? 32 : 33;
+        sender.output(new TextEncoder().encode(`\r\n\x1b[${color}m${message}\x1b[0m\r\n`), false, true);
+      },
+    };
+    controllerRef.current = controller;
+    const unsubscribe = desktop.ghostty.onEvent((event: GhosttyEvent) => {
+      if (disposed || event.surfaceId !== key.surfaceId || event.generation !== key.generation) return;
+      sender.ack(event);
+      const current = live.current;
+      const gate = gateRef.current;
+      const allowed = current.active && current.controlState === "owned" && !gate.occluded && !recovering;
+      switch (event.kind) {
+        case "resume": fail(event.reason); break;
+        case "input":
+          if (allowed && current.sessionId && event.epoch === gate.epoch) {
+            const text = decoder.decode(event.bytes, { stream: true });
+            if (text) current.sendInput(current.sessionId, text);
+          }
+          break;
+        case "resize":
+          dims = { cols: event.cols, rows: event.rows };
+          if (allowed && current.sessionId && event.epoch === gate.epoch && event.cols > 0 && event.rows > 0) current.sendResize(current.sessionId, event.cols, event.rows);
+          break;
+        case "url": window.open(event.url, "_blank", "noopener"); break;
+        case "command":
+          if (current.active && !gate.occluded) window.dispatchEvent(new CustomEvent("coflux:ghostty-command", { detail: event.command }));
+          break;
+        case "notice": toast.current({ body: event.message, type: "error" }); break;
+        case "dump": window.dispatchEvent(new CustomEvent("coflux:ghostty-dump-result", { detail: event })); break;
+        case "ack":
+          { const data = parsedTail.get(event.sequence); if (data) { metrics?.parsed(data); parsedTail.delete(event.sequence); } }
+          host.dataset.ghosttyQueuedBytes = String(sender.queuedBytes);
+          host.dataset.ghosttyPeakBytes = String(Math.max(sender.peakBytes, event.peakBytes));
+          break;
+      }
+    });
+    const observer = new ResizeObserver(schedule);
+    observer.observe(host);
+    const mutations = new MutationObserver(() => { if (live.current.active) schedule(); });
+    mutations.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["open", "class", "style", "hidden", "aria-hidden", "data-ghostty-terminal-region"] });
+    const onFocus = (event: FocusEvent) => {
+      if (event.target instanceof HTMLElement && !host.contains(event.target)) { focusWanted = false; syncState(); }
+    };
+    const onDump = (event: Event) => {
+      const detail = (event as CustomEvent<{ taskId?: string; requestId?: string }>).detail;
+      if (!live.current.active || (detail?.taskId && detail.taskId !== live.current.taskId)) return;
+      sender.control({ kind: "dump", requestId: detail?.requestId ?? crypto.randomUUID() });
+    };
+    const onResume = () => { if (live.current.active) fail("人工触发完整恢复"); };
+    const onProbe = (event: Event) => {
+      const id = (event as CustomEvent<{ id: string }>).detail?.id;
+      const current = live.current;
+      if (metrics && typeof id === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(id) && current.active && current.controlState === "owned" && !gateRef.current.occluded && current.sessionId) current.sendInput(current.sessionId, metrics.input(id));
+    };
+    // 测量时保留当前额度内的输出引用，与解析 ack 对齐；关闭测量时不保留。
+    const onQueued = (event: Event) => {
+      const detail = (event as CustomEvent<{ generation: number; sequence: number; bytes: Uint8Array }>).detail;
+      if (metrics && detail?.generation === key.generation) parsedTail.set(detail.sequence, detail.bytes);
+    };
+    const onDrop = (event: DragEvent) => {
+      if (!live.current.active) return;
+      event.preventDefault(); toast.current({ body: "Ghostty 试验暂不支持拖拽上传", type: "error" });
+    };
+    const onPaste = (event: ClipboardEvent) => {
+      if (!live.current.active || !event.clipboardData?.files.length) return;
+      event.preventDefault(); toast.current({ body: "Ghostty 试验暂不支持文件和图片粘贴", type: "error" });
+    };
+    window.addEventListener("resize", schedule);
+    window.addEventListener("scroll", schedule, true);
+    window.visualViewport?.addEventListener("resize", schedule);
+    window.visualViewport?.addEventListener("scroll", schedule);
+    document.addEventListener("visibilitychange", schedule);
+    document.addEventListener("focusin", onFocus);
+    window.addEventListener("coflux:ghostty-dump", onDump);
+    window.addEventListener("coflux:ghostty-resume", onResume);
+    if (metrics) { window.addEventListener("coflux:terminal-probe", onProbe); window.addEventListener("coflux:ghostty-queued", onQueued); }
+    host.addEventListener("drop", onDrop);
+    host.addEventListener("dragover", onDrop);
+    host.addEventListener("paste", onPaste, true);
+    let dprQuery: MediaQueryList;
+    const watchDpr = () => {
+      dprQuery = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      dprQuery.addEventListener("change", onDpr, { once: true });
+    };
+    const onDpr = () => { schedule(); watchDpr(); }; watchDpr();
+    const initial = getRect();
+    // 隐藏 Tab 也可预建，但不 attach；使用非零初始尺寸，激活时按实际布局重排。
+    if (initial.width <= 1 || initial.height <= 1) { initial.width = 800; initial.height = 480; }
+    void desktop.ghostty.create({ ...key, rect: initial }).then((size) => {
+      if (disposed) { void desktop.ghostty.destroy(key).catch(() => undefined); return; }
+      dims = size; initialized = true;
+      host.dataset.ghosttySurfaceId = key.surfaceId;
+      host.dataset.ghosttyGeneration = String(key.generation);
+      setError(""); sync();
+      live.current.onReady(live.current.taskId, controller);
+      setReady(key.generation);
+    }).catch((reason: unknown) => { if (!disposed) setError(`Ghostty 创建失败：${String(reason)}`); });
+    return () => {
+      disposed = true;
+      unregisterRef.current?.(); unregisterRef.current = null;
+      observer.disconnect(); mutations.disconnect(); unsubscribe();
+      cancelAnimationFrame(frame); dprQuery?.removeEventListener("change", onDpr);
+      window.removeEventListener("resize", schedule); window.removeEventListener("scroll", schedule, true);
+      window.visualViewport?.removeEventListener("resize", schedule); window.visualViewport?.removeEventListener("scroll", schedule);
+      document.removeEventListener("visibilitychange", schedule); document.removeEventListener("focusin", onFocus);
+      window.removeEventListener("coflux:ghostty-dump", onDump);
+      window.removeEventListener("coflux:ghostty-resume", onResume);
+      window.removeEventListener("coflux:terminal-probe", onProbe); window.removeEventListener("coflux:ghostty-queued", onQueued);
+      host.removeEventListener("drop", onDrop); host.removeEventListener("dragover", onDrop); host.removeEventListener("paste", onPaste, true);
+      sender.destroy(); senderRef.current = null; controllerRef.current = null; syncRef.current = null;
+      live.current.onDispose(live.current.taskId, controller);
+      void desktop.ghostty.destroy(key).catch(() => undefined);
+    };
+    // 每代只创建一次；运行期 props 经 live 获取。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incarnation, mounted]);
+
+  useEffect(() => {
+    const sessionId = props.sessionId, sender = senderRef.current, controller = controllerRef.current;
+    if (!sessionId || !ready || !sender || !controller || sender.key.generation !== ready) return;
+    const unregister = props.registerSessionConsumer(sessionId, (data, replace) => {
+      if (sender.output(data, replace)) {
+        if (desktop.terminalMetrics.enabled) window.dispatchEvent(new CustomEvent("coflux:ghostty-queued", { detail: { generation: sender.key.generation, sequence: sender.lastSequence, bytes: data } }));
+        props.onOutput(props.taskId, sessionId);
+      }
+    });
+    unregisterRef.current = unregister;
+    props.onSessionReady(props.taskId, sessionId, controller);
+    return () => { unregister(); if (unregisterRef.current === unregister) unregisterRef.current = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.sessionId, ready]);
+
+  useLayoutEffect(() => { syncRef.current?.(); }, [props.active, props.controlState, props.sessionId, ready]);
+  useEffect(() => {
+    if (!resumeNeeded.current || !props.active || props.controlState === "detached" || !props.sessionId || !ready) return;
+    if (senderRef.current?.key.generation !== ready || !controllerRef.current) return;
+    resumeNeeded.current = false;
+    const { cols, rows } = controllerRef.current.dimensions();
+    props.resumeSession?.(props.taskId, cols, rows);
+  }, [props.active, props.controlState, props.sessionId, props.resumeSession, props.taskId, ready]);
+
+  return <div className={props.active ? "pointer-events-auto absolute inset-0 block" : "absolute inset-0 hidden"} aria-hidden={!props.active}>
+    <div ref={hostRef} className="h-full w-full" />
+    {error ? <div className="absolute inset-4 flex flex-col items-center justify-center gap-3 bg-terminal text-sm text-warning">
+      <p>{error}</p><button type="button" className="rounded border border-border px-3 py-1" onClick={() => { lastRecovery.current = 0; resumeNeeded.current = true; setIncarnation((value) => value + 1); }}>重建终端视图</button>
+    </div> : null}
+  </div>;
 }

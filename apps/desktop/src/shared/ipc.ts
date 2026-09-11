@@ -2,6 +2,12 @@
 export const IPC = {
   /** preload 启动时同步取一次的引导数据（serverUrl / origin / version / platform） */
   bootstrap: "desktop:bootstrap",
+  terminalMetricsRequest: "desktop:terminal-metrics-request",
+  terminalMetricsSample: "desktop:terminal-metrics-sample",
+  ghosttyCreate: "desktop:ghostty-create",
+  ghosttyDestroy: "desktop:ghostty-destroy",
+  ghosttySend: "desktop:ghostty-send",
+  ghosttyEvent: "desktop:ghostty-event",
   notify: "desktop:notify",
   setBadge: "desktop:set-badge",
   /** 「服务器地址…」原生对话框（plan 110）：settings.json 路径与「打开设置文件」只有主进程有 */
@@ -29,6 +35,8 @@ export const IPC = {
 } as const;
 
 export type Bootstrap = {
+  ghosttyEnabled?: boolean;
+  terminalMetricsEnabled?: boolean;
   platform: string;
   version: string;
   serverUrl: string;

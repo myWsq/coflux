@@ -1,3 +1,4 @@
+import { desktop } from "@/config";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
@@ -554,7 +555,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
 
       {/* 主体：与面板层同占网格第二行（面板层在 DOM 上排在后面、整层 pointer-events-none，
           故这里的空态/横幅/「变更」视图照常收得到点击）。 */}
-      <div className="relative col-start-1 row-start-2 min-h-0 min-w-0 bg-terminal">
+      <div className={cn("relative col-start-1 row-start-2 min-h-0 min-w-0 bg-terminal", desktop.ghostty.enabled && "flex flex-col")}>
         {view === "terminal" && pendingTab && activeTaskId === pendingTab.id ? (
           // pending tab 的主区（plan 078）：不挂 TerminalPane（假 id 不产生请求），只显示创建中。
           <div className="absolute inset-0 flex items-center justify-center">
@@ -579,7 +580,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
         ) : null}
 
         {view === "terminal" && activeTask && activeControlState === "detached" ? (
-          <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between border-b border-warning/20 bg-warning/10 px-4 py-2 text-xs text-warning backdrop-blur">
+          <div className={cn(desktop.ghostty.enabled ? "relative shrink-0" : "absolute inset-x-0 top-0", "z-10 flex items-center justify-between border-b border-warning/20 bg-warning/10 px-4 py-2 text-xs text-warning backdrop-blur")}>
             <span className="flex items-center gap-2">
               <Unplug className="size-3.5" />
               此终端已被其它客户端接管，当前输入已锁定。
@@ -590,7 +591,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
 
         {/* 已退出终端（plan 097）：画面是回放的最后输出，重开 shell 是显式动作，不再一点 Tab 就悄悄起新会话。 */}
         {view === "terminal" && activeTask && activeTask.status === TaskStatus.EXITED && activeControlState === "stopped" ? (
-          <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between border-b border-border bg-background/80 px-4 py-2 text-xs text-muted-foreground backdrop-blur">
+          <div className={cn(desktop.ghostty.enabled ? "relative shrink-0" : "absolute inset-x-0 top-0", "z-10 flex items-center justify-between border-b border-border bg-background/80 px-4 py-2 text-xs text-muted-foreground backdrop-blur")}>
             <span className="flex items-center gap-2">
               <History className="size-3.5" />
               {activeTask.exitCode === undefined
@@ -600,6 +601,8 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             <Button label="重新打开" variant="secondary" size="sm" onClick={() => attach.reopenTask(activeTask.id)} />
           </div>
         ) : null}
+
+        {desktop.ghostty.enabled && view === "terminal" && activeTask ? <div data-ghostty-terminal-region={activeTask.id} className="min-h-0 flex-1" /> : null}
 
         {/* 「变更」视图：与终端面板同保活模式（隐藏不卸载），折叠态/已拉取数据才不随切换丢失。
             目录工作区无 git 语义，整个视图不渲染（顶栏已隐藏，view 也不可能切到 changes）。 */}

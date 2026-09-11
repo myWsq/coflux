@@ -17,6 +17,18 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const bridge: DesktopBridge = {
+  terminalMetrics: {
+    enabled: boot.terminalMetricsEnabled === true,
+    sample: (requestId) => ipcRenderer.send(IPC.terminalMetricsRequest, requestId),
+    onSample: (listener) => subscribe(IPC.terminalMetricsSample, listener),
+  },
+  ghostty: {
+    enabled: boot.ghosttyEnabled === true,
+    create: (request) => ipcRenderer.invoke(IPC.ghosttyCreate, request),
+    destroy: (key) => ipcRenderer.invoke(IPC.ghosttyDestroy, key),
+    send: (messages) => ipcRenderer.send(IPC.ghosttySend, messages),
+    onEvent: (listener) => subscribe(IPC.ghosttyEvent, listener),
+  },
   platform: boot.platform,
   version: boot.version,
   serverUrl: boot.serverUrl,

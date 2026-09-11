@@ -90,32 +90,26 @@ export function useGlobalShortcuts({
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
   }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp]);
 
-  // 原生菜单命令：与上面的键位一一对应。
-  useEffect(
-    () =>
-      desktop.onCommand((command: DesktopCommand) => {
-        const terminal = activeTerminalRef.current;
-        switch (command) {
-          case "create-terminal":
-            terminal?.createTerminal();
-            return;
-          case "close-terminal":
-            terminal?.closeActiveTab();
-            return;
-          case "create-workspace":
-            if (selectedProjectId) onOpenCreateWorkspaceMenu(selectedProjectId);
-            return;
-          case "previous-tab":
-            terminal?.selectRelativeTab(-1);
-            return;
-          case "next-tab":
-            terminal?.selectRelativeTab(1);
-            return;
-          case "toggle-help":
-            onToggleHelp();
-            return;
-        }
-      }),
-    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp],
-  );
+  // 菜单点击与 Ghostty first-responder 回调共用分发；网页 keydown 保持原来的物理键路径。
+  useEffect(() => {
+    const dispatch = (command: string) => {
+      const terminal = activeTerminalRef.current;
+      if (/^tab:[0-8]$/.test(command)) { terminal?.selectTabByIndex(Number(command.slice(4))); return; }
+      switch (command as DesktopCommand) {
+        case "create-terminal": terminal?.createTerminal(); return;
+        case "close-terminal": terminal?.closeActiveTab(); return;
+        case "create-workspace": if (selectedProjectId) onOpenCreateWorkspaceMenu(selectedProjectId); return;
+        case "previous-tab": terminal?.selectRelativeTab(-1); return;
+        case "next-tab": terminal?.selectRelativeTab(1); return;
+        case "toggle-help": onToggleHelp(); return;
+      }
+    };
+    const unsubscribe = desktop.onCommand(dispatch);
+    const nativeCommand = (event: Event) => {
+      const value: unknown = (event as CustomEvent).detail;
+      if (typeof value === "string") dispatch(value);
+    };
+    if (desktop.ghostty.enabled) window.addEventListener("coflux:ghostty-command", nativeCommand);
+    return () => { unsubscribe(); window.removeEventListener("coflux:ghostty-command", nativeCommand); };
+  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp]);
 }

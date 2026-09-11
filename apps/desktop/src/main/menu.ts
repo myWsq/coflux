@@ -1,4 +1,4 @@
-import { app, Menu, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, Menu, type MenuItemConstructorOptions } from "electron";
 
 import type { DesktopCommand } from "../shared/desktop-bridge";
 
@@ -7,6 +7,8 @@ export type MenuActions = {
   sendCommand: (command: DesktopCommand) => void;
   showServerInfo: () => void;
   checkForUpdates: () => void;
+  /** 开关打开时先交给原生 first responder，返回 false 时仍走网页编辑。 */
+  ghosttyClipboard?: (paste: boolean) => boolean;
 };
 
 /**
@@ -62,8 +64,16 @@ export function buildAppMenu(actions: MenuActions): Menu {
         { role: "redo" },
         { type: "separator" },
         { role: "cut" },
-        { role: "copy" },
-        { role: "paste" },
+        actions.ghosttyClipboard ? {
+          label: "复制", accelerator: "CmdOrCtrl+C", click: () => {
+            if (!actions.ghosttyClipboard?.(false)) BrowserWindow.getFocusedWindow()?.webContents.copy();
+          },
+        } : { role: "copy" },
+        actions.ghosttyClipboard ? {
+          label: "粘贴", accelerator: "CmdOrCtrl+V", click: () => {
+            if (!actions.ghosttyClipboard?.(true)) BrowserWindow.getFocusedWindow()?.webContents.paste();
+          },
+        } : { role: "paste" },
         { role: "selectAll" },
       ],
     },

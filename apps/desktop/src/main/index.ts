@@ -10,12 +10,14 @@ import { locateDaemonBundle, resolveDaemonBundleDir } from "./daemon-bundle";
 import { createDaemonManager, execCommand, type DaemonManager } from "./daemon-manager";
 import { daemonHomePaths } from "./daemon-paths";
 import { registerIpc } from "./ipc";
+import { registerGhosttyIpc, routeGhosttyClipboard } from "./ghostty-ipc";
 import { log } from "./log";
 import { buildAppMenu } from "./menu";
 import { setDockBadge, showWorkspaceNotification } from "./notifications";
 import { DESKTOP_ORIGIN, rewriteHandshakeHeaders } from "./origin";
 import { readSettingsFile, resolveServerUrl } from "./settings";
 import { createTokenStore } from "./token-store";
+import { registerTerminalMetrics } from "./terminal-metrics";
 import { createUpdater } from "./updater";
 import { createMainWindow } from "./window";
 
@@ -28,6 +30,7 @@ protocol.registerSchemesAsPrivileged([
 // electron-vite dev 注入；打包运行时为空 → 一律走 coflux-app://app/
 const devRendererUrl = process.env.ELECTRON_RENDERER_URL;
 const trusted = { appOrigin: APP_ORIGIN, devRendererUrl };
+const ghosttyEnabled = process.env.COFLUX_GHOSTTY === "1" && process.platform === "darwin" && process.arch === "arm64";
 
 // 未打包（electron-vite dev / preview、本机 pack 之外的直接启动）与安装版不共用 userData：token、IndexedDB
 // 身份与 loopback grant 互不可见，本机联调不污染日常使用的安装版。必须在 requestSingleInstanceLock 之前设置
@@ -177,9 +180,12 @@ if (!app.requestSingleInstanceLock()) {
     daemonManager = daemon;
     daemon.onChange((state) => sendToRenderer(IPC.daemonState, state));
 
+    const terminalMetricsEnabled = process.env.COFLUX_TERMINAL_METRICS === "1";
+    registerTerminalMetrics(terminalMetricsEnabled, trusted);
+    registerGhosttyIpc(ghosttyEnabled, trusted);
     registerIpc(
       {
-        bootstrap: () => ({ platform: process.platform, version: app.getVersion(), serverUrl, origin: DESKTOP_ORIGIN }),
+        bootstrap: () => ({ platform: process.platform, version: app.getVersion(), serverUrl, origin: DESKTOP_ORIGIN, ghosttyEnabled, terminalMetricsEnabled }),
         // 点通知：把窗口带到前台并让渲染层选中该工作区
         notify: (notification) =>
           showWorkspaceNotification(notification, (workspaceId) => {
@@ -214,6 +220,7 @@ if (!app.requestSingleInstanceLock()) {
 
     Menu.setApplicationMenu(
       buildAppMenu({
+        ghosttyClipboard: ghosttyEnabled ? routeGhosttyClipboard : undefined,
         sendCommand: (command) => {
           showMainWindow();
           sendToRenderer(IPC.command, command);

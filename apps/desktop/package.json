@@ -14,7 +14,12 @@
     "stage-daemon": "node scripts/stage-daemon.mjs",
     "pack": "node scripts/stage-daemon.mjs && electron-vite build && electron-builder --mac --dir --publish never",
     "dist": "node scripts/stage-daemon.mjs && electron-vite build && electron-builder --mac --arm64 --publish never",
-    "icon": "node scripts/export-icon.mjs"
+    "icon": "node scripts/export-icon.mjs",
+    "ghostty:native": "node native/ghostty/build.mjs",
+    "ghostty:smoke": "native/ghostty/build/ghostty-smoke",
+    "ghostty:g6": "node scripts/ghostty/g6.mjs",
+    "ghostty:stress": "node scripts/ghostty/stress.mjs",
+    "pack:ghostty": "node scripts/stage-daemon.mjs && electron-vite build && electron-builder --config scripts/ghostty-builder.cjs --mac --dir --publish never"
   },
   "dependencies": {
     "electron-log": "^5.4.4",

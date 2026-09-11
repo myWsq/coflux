@@ -38,6 +38,7 @@ export function TerminalPanes({
           registerSessionConsumer={client.registerSessionConsumer}
           sendInput={client.sendInput}
           sendResize={client.resizeSession}
+          resumeSession={(taskId, cols, rows) => client.startTask(taskId, cols, rows)}
           sendFsWrite={client.sendFsWrite}
           onReady={attach.handleTerminalReady}
           onDispose={attach.handleTerminalDispose}

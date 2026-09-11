@@ -186,10 +186,13 @@ Out of scope:
 | Renderer/main build | `pnpm -C apps/desktop build` | exit 0 |
 | Native build | `node apps/desktop/native/ghostty/build.mjs` | exit 0 |
 | Native smoke (M1) | `apps/desktop/native/ghostty/build/ghostty-smoke` | exit 0，≥ 50 轮 |
-| G1/G6 用例集 | 执行者补入 | exit 0 |
-| G2 压力 | 执行者补入 | exit 0，零崩溃 |
-| G8 测量 | 执行者补入 | 输出两列数字表 |
+| G1/G6 用例集 | `node apps/desktop/scripts/ghostty/fixture.mjs grapheme`（试验终端内）；`node apps/desktop/scripts/ghostty/compare-g1.mjs live.txt resumed.txt`；`node apps/desktop/scripts/ghostty/g6.mjs` | 对照/脚本 exit 0；fixture 用 Ctrl-C 结束 |
+| G4 原生快捷键 | `node apps/desktop/scripts/ghostty/g4.mjs` | 编排者运行，单次动作且无输入字节 |
+| G2 压力 | `node apps/desktop/scripts/ghostty/stress.mjs 50` | exit 0，零崩溃 |
+| G8 测量 | 按 `apps/desktop/native/ghostty/checklist.md` 采样；`node apps/desktop/scripts/ghostty/compare-perf.mjs xterm.json ghostty.json` | 输出两列数字表 |
 | Pack (acceptance) | `COFLUX_DESKTOP_DAEMON_DIR=<dir> pnpm -C apps/desktop run pack` | exit 0，产物可启动 |
+| Ghostty pack (acceptance) | `COFLUX_GHOSTTY_ADHOC=1 COFLUX_DESKTOP_DAEMON_DIR=<dir> pnpm -C apps/desktop run pack:ghostty` | 编排者运行，独立配置不影响默认 release |
+| Ghostty 签名证据 (acceptance) | `node apps/desktop/scripts/ghostty/sign-evidence.mjs apps/desktop/dist/mac-arm64/Coflux.app` | 编排者记录 codesign / otool 输出 |
 | G7 签名检查 (acceptance) | `codesign -dvv --verbose=4 <app>`、`otool -L <addon.node>`、`spctl -a -vv <app>`（有 Developer ID 证书时） | 记录输出到结论 |
 
 ## Done criteria
@@ -218,3 +221,51 @@ Out of scope:
 - 若叠层体验（DOM 弹层被盖、焦点切换）不可接受，备选路线是 Electron sharedTexture（Ghostty 导出纹理进网页合成），需要另立 plan。
 - libghostty 完整嵌入 API 上游未稳定；升级该包 revision 时按锁定信息重跑 M1 冒烟与 G2 压力。
 - docs/ROADMAP.md:101 的"评估 ghostty-web"待办与本 plan 是两条路线：ghostty-web 是 WASM + Canvas，本 plan 是原生 Metal。
+
+
+## Spike 结论
+
+截至本轮实现交付：**M2/M3/M4 代码和验收装置已编写，新增代码未验证；不能据此批准正式替换 xterm。**
+开关为 `COFLUX_GHOSTTY=1`，性能观测独立用 `COFLUX_TERMINAL_METRICS=1`；默认路径不加载原生库。
+本轮遵守执行器/编排者分工：不运行类型检查、测试、应用构建、pack、原生冒烟、GPU/WindowServer 程序。
+
+M1 证据来自编排者：`ca87e59` 的隐藏窗口冒烟在沙箱外 exit 0，输出
+`round=50 created/written/destroyed`，250 条 tear down 生命周期日志、无崩溃。
+执行器此前的 `metal=false` 是 seatbelt 权限限制，M1 并未因此被否决。
+本轮扩展了 native ABI/资源加载/resize 栅栏，**编排者仍须重新构建并运行新增装置**，原 M1 结果不覆盖这些改动。
+
+| 门 | 结论 | 当前证据 / 待补证据 | 对正式 plan 范围的影响 |
+| --- | --- | --- | --- |
+| G1 快照 grapheme | 未验证 | 已提供五项 fixture、按真实 consumer 注销/attach 的恢复入口、viewport dump 与 compare-g1 脚本；待 live/resumed 文本、两次截图及逐项结果 | 任一项不过：**正式 plan 必须扩到 daemon 快照兼容**；本分支未改 daemon |
+| G2 稳定性 | 未验证 | 原 M1 50 轮由编排者确认通过；新增 stress.mjs 经真实 addon 持续输出、在解析中销毁，TS 测试覆盖晚到 completion；待新脚本 exit code、Electron 50 轮及 crash log 记录 | 反复原生崩溃且一轮定位无法归因即否决，不增加 JS 崩溃重试 |
+| G3 中文 IME | 未验证 | 已实现取消 composition、双侧 epoch 输入门禁；checklist 列出候选/提交/切 Tab/失去控制权步骤，待实际字节记录与截图 | 不通过需扩大原生输入与焦点适配范围 |
+| G4 快捷键与焦点 | 未验证 | 原生物理 keyCode 消费并分发工作台命令，按 timestamp 去重且抑制对应 keyUp；菜单复制粘贴显式路由，g4.mjs 覆盖重复分发/keyUp，待脚本与人工动作计数和远端无字节记录 | 不通过需补 AppKit/Electron 菜单与 first responder 协调 |
+| G5 几何 | 未验证 | CSS px × zoomFactor → AppKit point；Metal 使用 backingScaleFactor，横幅布局与 dialog/changes 遮挡处理已写；待全屏/跨屏/拖宽/隐藏/睡眠及缩放记录 | 若 DOM 叠层体验不可接受，应另立 sharedTexture 方案 |
+| G6 重连与 resize | 未验证 | g6.mjs 覆盖 UTF-8/CSI、replacement 清旧状态、resize 首块及 replay 无 DA/DSR；queue 测试覆盖串行、generation、额度与 ack；待脚本及真实 relay 结果 | 栅栏/快照/replay 任何失败都须先解决，不能以延迟或丢字节掩盖 |
+| G7 签名与交付 | 未验证 | 独立 pack:ghostty 显式 asarUnpack、mac.binaries、实体资源 bundle；待 ad-hoc codesign/otool、移走构建目录的启动记录、Developer ID 和干净机器 | **Developer ID: unverified, needs CI cert**；不能以 ad-hoc 代替该门 |
+| G8 性能 | 未验证 | 同一输出 fixture、两种引擎 sendInput→解析 P95、main loop、rAF、队列峰值和进程内存/CPU 采样装置已写；待至少三轮两列表与 Instruments 的实际呈现/Metal 数据 | 根据数据决定 IPC 额度、批大小、隐藏 Tab 调度与资源预算，当前不能宣称优于 xterm |
+
+性能数字尚未提供，保持空白而不将缺失值当 0：
+
+| 指标 | xterm | Ghostty |
+| --- | --- | --- |
+| sendInput→PONG 解析 P95 / 实际像素呈现延迟 | 未验证 / 未验证 | 未验证 / 未验证 |
+| 主进程 loop 卡顿 / renderer rAF | 未验证 | 未验证 |
+| 未解析队列峰值 | 未验证 | 未验证 |
+| 主进程 RSS / 总工作集 | 未验证 | 未验证 |
+| Metal 内存 | 待 Instruments | 待采 MTLDevice 总额并用 Instruments 复核 |
+| 10 个隐藏 Tab CPU | 未验证 | 未验证 |
+
+实现取舍与偏离：
+
+- 已接受的偏离：`@testable`/`-enable-testing` 依赖锁定 Swift 包的内部 surface API。
+- 新增适配：`native/ghostty/patch-resources.mjs` 对锁定 checkout 的资源入口施加窄补丁，让打包资源从
+  Contents/Resources 加载，避免依赖编译机路径；未改预编译 XCFramework，checksum 不变。正式方案须公开 API 或维护该补丁。
+- 打包使用独立 `scripts/ghostty-builder.cjs`，默认 electron-builder.yml 与 release 流水线不加原生路径。
+- 超额不是成功消费：注销最后一个 consumer 清除 router outputSeq 后重新 attach；每代一次恢复信号，5 秒内再次失败停在显式错误页。
+  超过 8MiB 的快照仍需正式方案决定最大尺寸/流式协议，不声称无限容量。
+- 编排者已提交 M1 为 `ca87e59`；依其后续指示，执行器仅暂存 M2–M4，不再尝试 commit。
+
+可复现命令、G3/G4/G5/G7 人工步骤和采样方法见
+`apps/desktop/native/ghostty/README.md` 与 `apps/desktop/native/ghostty/checklist.md`。
+当前没有足够证据判断存在或不存在一票否决；正式立项必须先取得 G1 结果，再依据其余七门收敛范围。

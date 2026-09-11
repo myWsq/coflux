@@ -1,0 +1,11 @@
+import { readFileSync } from "node:fs";
+import assert from "node:assert/strict";
+const [livePath, resumedPath] = process.argv.slice(2);
+if (!livePath || !resumedPath) throw new Error("用法：compare-g1.mjs live.txt resumed.txt（来自同尺寸 surface dump）");
+const live = readFileSync(livePath, "utf8"), resumed = readFileSync(resumedPath, "utf8");
+const cases = [["ZWJ 家庭", "👨‍👩‍👧"], ["旗帜", "🇯🇵"], ["肤色", "👋🏽"], ["组合音标", "e\u0301"], ["行尾宽字符", "界Z"]];
+const rows = cases.map(([name, text]) => ({ name, live: live.includes(text), resumed: resumed.includes(text) }));
+console.table(rows);
+const same = live === resumed;
+console.log(JSON.stringify({ gate: "G1", same, rows, impact: same ? "待结合截图确认" : "正式 plan 必须扩到 daemon 快照兼容" }));
+assert.ok(rows.every((row) => row.live && row.resumed) && same, "实时与重新 attach 的画面文本不一致：正式 plan 必须扩到 daemon 快照兼容");

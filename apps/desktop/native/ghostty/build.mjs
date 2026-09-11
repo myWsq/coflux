@@ -1,8 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { patchResources } from "./patch-resources.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const sdk = process.env.COFLUX_GHOSTTY_SDK ?? "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk";
@@ -15,8 +17,12 @@ function run(command, args) {
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
+run("swift", ["package", "--disable-sandbox", "resolve"]);
+patchResources(root);
 run("swift", ["build", "--disable-sandbox", "-c", "release", "--arch", "arm64", "-Xswiftc", "-enable-testing"]);
 mkdirSync(join(root, "build"), { recursive: true });
+cpSync(join(root, ".build/arm64-apple-macosx/release/libCofluxGhostty.dylib"), join(root, "build/libCofluxGhostty.dylib"));
+cpSync(join(root, ".build/arm64-apple-macosx/release/GhosttyKit_GhosttyTerminal.bundle"), join(root, "build/GhosttyKit_GhosttyTerminal.bundle"), { recursive: true });
 const common = ["clang++", "-std=c++17", "-arch", "arm64", "-isysroot", sdk, "-mmacosx-version-min=26.0", "-framework", "AppKit", "-L.build/arm64-apple-macosx/release", "-lCofluxGhostty"];
-run("xcrun", [...common, "smoke.mm", "-Wl,-rpath,@executable_path/../.build/arm64-apple-macosx/release", "-o", "build/ghostty-smoke"]);
-run("xcrun", [...common, "-bundle", "-undefined", "dynamic_lookup", "-DNAPI_VERSION=8", "-DNODE_GYP_MODULE_NAME=coflux_ghostty", `-I${nodeHeaders}`, "addon.mm", "-Wl,-rpath,@loader_path/../.build/arm64-apple-macosx/release", "-o", "build/coflux_ghostty.node"]);
+run("xcrun", [...common, "smoke.mm", "-Wl,-rpath,@executable_path", "-o", "build/ghostty-smoke"]);
+run("xcrun", [...common, "-bundle", "-undefined", "dynamic_lookup", "-DNAPI_VERSION=8", "-DNODE_GYP_MODULE_NAME=coflux_ghostty", `-I${nodeHeaders}`, "addon.mm", "-Wl,-rpath,@loader_path", "-o", "build/coflux_ghostty.node"]);

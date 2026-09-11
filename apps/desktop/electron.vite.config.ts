@@ -41,6 +41,7 @@ export default defineConfig(({ command }) => {
       build: {
         rollupOptions: {
           input: resolve(__dirname, "src/main/index.ts"),
+          external: (id) => id.endsWith(".node"),
         },
       },
     },
