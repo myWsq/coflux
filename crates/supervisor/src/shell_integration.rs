@@ -596,8 +596,8 @@ mod tests {
         );
         let claude_sh = dir(home_str).join("claude.sh");
 
-        // 用户自己的函数：我们让位，他的定义原样生效。
-        // （脚本按**行**给：别名的定义与使用写在同一行时不会被展开，那是 shell 的解析时机，不是本文件要验的事。）
+        // 用户自己的函数：我们让位，他的定义原样生效。函数是**运行期**查找，所以怎么喂给 shell 都行，
+        // 这一半直接用 `-c`。（别名不行，见下一半。）
         let script = format!(
             "claude() {{ print USER_FUNCTION; }}\nsource {}\nclaude go\n",
             sh_quote(&claude_sh.to_string_lossy())
@@ -619,13 +619,21 @@ mod tests {
         );
         assert!(!home.join("argv.txt").exists(), "让位就不该执行到真 claude");
 
-        // 用户自己的别名：连解析都不能碰（`claude() {` 在命令位会被别名展开成语法错误）
-        let script = format!(
-            "alias claude='print USER_ALIAS'\nsource {}\nclaude\n",
-            sh_quote(&claude_sh.to_string_lossy())
-        );
+        // 用户自己的别名：连解析都不能碰（`claude() {` 在命令位会被别名展开成语法错误）。
+        // 别名是**解析期**展开的，所以脚本必须落成文件再跑：`-c` 的整串是一个解析单位，在同一串里
+        // 定义的别名对后面几行不生效（真实 rc 链不是这样——rc 文件与用户后来敲的那行是两个解析单位，
+        // zsh 读脚本文件同样是一条命令一条命令地解析）。拿 `-c` 验别名等于验 shell 的解析时机，不是本文件的事。
+        let script_path = home.join("user-alias.zsh");
+        fs::write(
+            &script_path,
+            format!(
+                "alias claude='print USER_ALIAS'\nsource {}\nclaude\n",
+                sh_quote(&claude_sh.to_string_lossy())
+            ),
+        )
+        .unwrap();
         let output = Command::new(&zsh)
-            .args(["-d", "-f", "-c", script.as_str()])
+            .args(["-d", "-f", script_path.to_str().unwrap()])
             .env("PATH", &path)
             .env("HOME", home_str)
             .env("TERM", "dumb")
@@ -639,6 +647,8 @@ mod tests {
             "USER_ALIAS",
             "用户已有 claude 别名时必须让位，且不能出语法错误"
         );
+        // 这条才分得清「让位」与「悄悄跑了真 claude」：别名生效就不该有任何进程执行到 PATH 上的 claude
+        assert!(!home.join("argv.txt").exists(), "让位就不该执行到真 claude");
 
         fs::remove_dir_all(&home).ok();
     }
