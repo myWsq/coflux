@@ -135,7 +135,9 @@ pub enum Effect {
     ReportAck { channel_id: String, run_id: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+// `reconcile_deadline` 是 epoch 毫秒、按仓库既有约定用 f64（见 local_auth.rs 的 `now_ms: f64`），
+// 而 f64 没有 Eq——故这里只 derive PartialEq，不 derive Eq。
+#[derive(Clone, Debug, PartialEq)]
 pub struct RegisterOutcome {
     /// 需要 host 逐条重报的 run（重连对账）
     pub reconcile_run_ids: Vec<String>,
