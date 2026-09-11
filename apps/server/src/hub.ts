@@ -1213,7 +1213,9 @@ export class Hub {
     // 调用方 cwd 解析出来），中心核验（plan 102）。字段为空 = 发起 task 所在工作区，旧 daemon 恒空。
     // 只作用于 terminalNew / terminalList；portsList 与 terminalRead 一律用发起方工作区。
     let target = workspace;
-    const declared = request.workspaceId.trim();
+    // `?? ""`：proto 解码会把缺省字段填成空串，但单测夹具直接构造普通对象、字段根本不存在——
+    // 这里一旦抛异常就绕过了 reply/fail，调用方只能干等到超时。缺字段与空串一律按「没申报」处理。
+    const declared = (request.workspaceId ?? "").trim();
     if (declared && declared !== workspace.id) {
       const proposed = await this.store.getWorkspace(declared);
       // 必须同账号**同设备**：终端要在这台机器上跑（MCP create_terminal 只查账号，那里终端可以
