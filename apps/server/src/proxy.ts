@@ -627,9 +627,10 @@ function rejectUpgrade(socket: Duplex, code: number, message: string): void {
   }
 }
 
+/** 无门禁 cookie：302 到 server 直出的门禁页（plan 107，`<publicUrl>/proxy-auth`），带上原始完整 URL。 */
 function redirectToAuth(res: ServerResponse, hostHeader: string, pathAndQuery: string): void {
   const original = `${config.proxyScheme}://${hostHeader}${pathAndQuery}`;
-  const location = `${config.webUrl}/proxy-auth?to=${encodeURIComponent(original)}`;
+  const location = `${config.publicUrl}/proxy-auth?to=${encodeURIComponent(original)}`;
   res.writeHead(302, { Location: location });
   res.end();
 }
