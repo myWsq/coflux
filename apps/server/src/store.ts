@@ -377,6 +377,12 @@ export class Store {
     const rows = await this.sql<User[]>`SELECT * FROM users WHERE email = ${email}`;
     return rows[0];
   }
+  /** 按 id 读用户（普通读取，不加锁）：authOk 的登录身份显示串（plan 110）用它。
+   * 建号/首次 provision 的串行化仍必须走 claimUser（FOR UPDATE，且须在 transaction() 内）。 */
+  async getUserById(id: string): Promise<User | undefined> {
+    const rows = await this.sql<User[]>`SELECT * FROM users WHERE id = ${id}`;
+    return rows[0];
+  }
   /** 必须在 transaction() 内调用：锁住稳定的 user 父行，串行化该用户首次建个人账号。
    * uq_memberships_user 是最终防线；父行锁让并发请求复用 canonical account，而不是撞唯一约束。 */
   async claimUser(id: string): Promise<User | undefined> {

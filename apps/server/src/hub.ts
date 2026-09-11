@@ -3274,6 +3274,8 @@ export class Hub {
     let accountId: AccountId | undefined;
     let issued: string | undefined;
     let tokenHash: string | undefined;
+    // 登录身份（plan 110）：密码路径当场就知道 userId；token 路径只知道 tokenHash，等认证通过后再回查。
+    let loginUserId: string | null = null;
 
     if (typeof msg.clientToken === "string" && msg.clientToken) {
       // 重连：已签发的会话 token（校验未撤销且未过期）
@@ -3285,6 +3287,7 @@ export class Hub {
       if (checked.case === "busy") return void reject("登录服务繁忙，请稍后重试", 1013, "password verification busy");
       if (checked.case === "ok") {
         accountId = checked.accountId;
+        loginUserId = checked.userId;
         issued = genToken("ck_sess");
         tokenHash = hashToken(issued);
         await this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs, checked.userId);
@@ -3340,7 +3343,25 @@ export class Hub {
 
     client.accountId = accountId;
     client.tokenHash = tokenHash;
-    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, iceServers: config.stunUrls } });
+    const loginName = await this.resolveLoginName(loginUserId, tokenHash);
+    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, iceServers: config.stunUrls, loginName } });
+  }
+
+  /** authOk 回带的「登录身份显示串」（plan 110）：local 模式恒为 env 用户名；password 模式按
+   * userId 读 users.email（token 重连先由 tokenHash 回查 userId）。查不到（user_id 为 NULL 的旧
+   * token、用户已删）或查询抛错一律返回 undefined = 字段不设——身份查询绝不是新的拒绝路径，
+   * 调用点已在认证通过之后。 */
+  private async resolveLoginName(userId: string | null, tokenHash: string | undefined): Promise<string | undefined> {
+    if (config.authProvider !== "password") return config.username;
+    try {
+      const resolvedId = userId ?? (tokenHash ? await this.store.userIdForClientToken(tokenHash) : null);
+      if (!resolvedId) return undefined;
+      const user = await this.store.getUserById(resolvedId);
+      return user?.email;
+    } catch (error) {
+      log.warn("登录身份查询失败，authOk 不带 login_name", { error: String(error) });
+      return undefined;
+    }
   }
 
   /** 用户名 + 密码的凭证校验核心（不签任何 token），WS clientAuth 与页面登录（plan 107）共用：
