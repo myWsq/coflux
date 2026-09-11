@@ -141,7 +141,10 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
         if (watchTimer) return;
         watchTimer = setTimeout(() => {
           watchTimer = null;
-          emit();
+          // 上次 launchctl 还说没在跑、但目录里有动静（pending-auth / fda-status 刚落盘）：多半是刚起来，
+          // 顺带查一次 pid，别让进度页等到 30s 轮询才推进；其余情况只读文件
+          if (!running && existsSync(paths.plist)) void refresh();
+          else emit();
         }, WATCH_DEBOUNCE_MS);
       });
       watcher.on("error", (watchError) => {
