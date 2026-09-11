@@ -53,14 +53,21 @@ test("electron-builder.yml：签名公证、Fuses、arm64 dmg+zip、generic 更�
 
   assert.equal(config.publish.provider, "generic");
   assert.equal(config.publish.channel, "latest");
-  // 占位 URL 由 CI 覆盖；不许把真实域名写死在仓库配置里（R2 域名属于用户提供的变量）
-  assert.match(config.publish.url, /\.invalid\//);
+  // 更新源是仓库 desktop-updates 分支上的清单（release workflow 推），安装包在 GitHub Release
+  assert.equal(config.publish.url, "https://raw.githubusercontent.com/myWsq/coflux/desktop-updates");
 });
 
 type Workflow = {
   on: { push: { tags: string[] } };
   permissions: { contents: string };
-  jobs: Record<string, { environment?: string; permissions?: { contents?: string }; steps: { name?: string; env?: Record<string, string>; run?: string; uses?: string }[] }>;
+  jobs: Record<
+    string,
+    {
+      environment?: string;
+      permissions?: { contents?: string };
+      steps: { name?: string; env?: Record<string, string>; run?: string; uses?: string; with?: Record<string, string> }[];
+    }
+  >;
 };
 
 test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 secret 明确失败、先产物后清单", () => {
@@ -79,11 +86,6 @@ test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 sec
     "NOTARY_API_KEY_P8",
     "NOTARY_KEY_ID",
     "NOTARY_ISSUER_ID",
-    "R2_ACCESS_KEY_ID",
-    "R2_SECRET_ACCESS_KEY",
-    "R2_ENDPOINT",
-    "R2_BUCKET",
-    "DESKTOP_UPDATE_URL",
   ];
   for (const name of required) {
     assert.ok(guard.env?.[name] !== undefined, `齐全性检查未引用 ${name}`);
@@ -92,22 +94,26 @@ test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 sec
 
   const pack = build.steps.find((step) => step.run?.includes("electron-builder --mac"));
   assert.ok(pack?.run, "缺少 electron-builder 打包步骤");
-  assert.match(pack.run, /--publish never/); // 上传由独立步骤做，builder 不直接发布
-  assert.match(pack.run, /--config\.publish\.url=/);
+  assert.match(pack.run, /--publish never/); // 发布由 release job 做，builder 不直接发布
+  assert.doesNotMatch(pack.run, /--config\.publish/); // 更新源 URL 写死在 electron-builder.yml，CI 不覆盖
   assert.equal(pack.env?.CSC_LINK, "${{ secrets.MACOS_CERT_P12 }}");
   assert.equal(pack.env?.APPLE_API_KEY_ID, "${{ secrets.NOTARY_KEY_ID }}");
   assert.equal(pack.env?.APPLE_API_ISSUER, "${{ secrets.NOTARY_ISSUER_ID }}");
+  assert.ok(!build.steps.some((step) => step.name?.includes("R2")), "R2 上传已撤，不该再有");
 
-  const upload = build.steps.find((step) => step.name?.includes("R2"));
-  assert.ok(upload?.run, "缺少 R2 上传步骤");
-  const manifestIndex = upload.run.indexOf("latest-mac.yml");
-  const artifactsIndex = upload.run.indexOf("*.dmg *.zip");
-  assert.ok(artifactsIndex >= 0 && manifestIndex > artifactsIndex, "latest-mac.yml 必须在安装包之后上传");
-  assert.match(upload.run, /--endpoint-url/);
-
+  // release job：先把安装包 + blockmap 上 Release，再改写清单为绝对地址、推 desktop-updates 分支——
+  // 清单永远不会先于它指向的文件出现。
   const release = workflow.jobs.release;
   assert.equal(release.permissions?.contents, "write");
-  assert.ok(release.steps.some((step) => step.uses?.startsWith("softprops/action-gh-release@")));
+  const publishIndex = release.steps.findIndex((step) => step.uses?.startsWith("softprops/action-gh-release@"));
+  assert.ok(publishIndex >= 0, "缺少 GitHub Release 步骤");
+  assert.match(release.steps[publishIndex].with?.files ?? "", /blockmap/); // 差分更新要 blockmap 也在 Release 上
+  const rewriteIndex = release.steps.findIndex((step) => step.run?.includes("releases/download"));
+  const pushIndex = release.steps.findIndex((step) => step.run?.includes("desktop-updates"));
+  assert.ok(rewriteIndex > publishIndex, "清单改写必须在 Release 上传之后");
+  assert.ok(pushIndex > rewriteIndex, "推分支必须在清单改写之后");
+  assert.match(release.steps[pushIndex].run ?? "", /latest-mac\.yml/);
+  assert.match(release.steps[pushIndex].env?.GH_TOKEN ?? "", /github\.token/);
 });
 
 test("ci.yml 带 desktop 质量门", () => {

@@ -26,8 +26,8 @@ export type UpdaterOptions = {
 };
 
 /**
- * 自动更新（plan 103）：electron-updater generic provider 读 R2 公网域名的 latest-mac.yml
- * （publish.url 由 CI 在打包时写入 app-update.yml）。发现即下载、退出时自动安装；渲染层可显式
+ * 自动更新（plan 103）：electron-updater generic provider 读仓库 `desktop-updates` 分支上的 latest-mac.yml
+ * （raw.githubusercontent.com，publish.url 写死在 electron-builder.yml；安装包在 GitHub Release，清单里是绝对下载地址）。发现即下载、退出时自动安装；渲染层可显式
  * 触发检查（版本准入被拒时）并请求立即重启安装。
  */
 export function createUpdater(options: UpdaterOptions): Updater {

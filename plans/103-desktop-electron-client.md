@@ -314,3 +314,7 @@ Out of scope:
   过渡期用 `COFLUX_BUILD_ID` env 并集放行。
 - 升级 `@xterm/xterm` 须复验中文 IME 标点（`terminal-pane.tsx` 的 `patchImeCommittedInput`）。
 - 通知/Keychain 类行为只在签名产物上可信；本机 ad-hoc 构建的失败不算回归。
+
+## 收尾变更（2026-09-11）
+
+- 更新源由 R2 改为 GitHub（用户收尾时决定）：安装包与 blockmap 放 GitHub Release，workflow 把 `latest-mac.yml` 的文件名改写成该 Release 的绝对下载地址后推到仓库 `desktop-updates` 分支，app 用 generic provider 读 `https://raw.githubusercontent.com/myWsq/coflux/desktop-updates`。不用 electron-updater 的 `github` provider：它看仓库 `releases/latest`，而本仓库 daemon 的 `v*` 与桌面的 `desktop-v*` 混在一起。零新增 secret。

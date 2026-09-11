@@ -162,7 +162,8 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
 `desktop-v0.1.0`，触发 `.github/workflows/desktop-release.yml`（macOS runner，arm64 首发）：
 校验 tag → 构建 main/preload/renderer（渲染层 build-id 必须等于 HEAD short SHA）→ electron-builder
 翻 Fuses、Developer ID 签名（hardened runtime + entitlements）、公证 + staple → `codesign`/`stapler`/`spctl`
-校验 → 推 Cloudflare R2（先 dmg/zip/blockmap，最后 `latest-mac.yml`）→ GitHub Release 只放安装包镜像。
+校验 → GitHub Release 放 dmg/zip/blockmap → 把 `latest-mac.yml` 改成该 Release 的绝对下载地址后推到仓库
+`desktop-updates` 分支（app 的更新源）。
 
 ### 一次性设置
 
@@ -172,25 +173,23 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
    `APPLE_API_KEY`（写成临时 .p8 文件的路径）/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER`/`APPLE_TEAM_ID` 读公证凭据。
 2. `release-signing` environment 的 deployment tag 规则要**额外放行 `desktop-v*`**（现在只放 `v*`）；
    `desktop-v*` 也按上面 `v*` 的方式建 create 与 update/delete 两套 tag ruleset。
-3. **更新源 = Cloudflare R2**（用户 2026-09-11 决定）。新增 5 项，都放在 `release-signing` environment：
+3. **更新源 = GitHub**（2026-09-11 收尾时定，替代最初的 R2 方案，零新增 secret）：安装包与 blockmap 在
+   GitHub Release；`latest-mac.yml` 由 release job 改写成该 Release 的绝对下载地址后推到仓库
+   `desktop-updates` 分支，app 内 electron-updater 用 generic provider 读
+   `https://raw.githubusercontent.com/myWsq/coflux/desktop-updates/latest-mac.yml`（URL 写死在
+   `apps/desktop/electron-builder.yml`）。不用 electron-updater 自带的 `github` provider：它看仓库
+   `releases/latest`，而本仓库 daemon 的 `v*` 与桌面的 `desktop-v*` 混在一起，多半指向 daemon 的 release。
+   release job 用 `GITHUB_TOKEN` 建 Release 与推分支；`desktop-updates` 分支只有这一个文件，不要手改。
+   raw.githubusercontent.com 有几分钟缓存，新版本发出后 app 最多晚几分钟看到。
 
-| 名称 | 类型 | 内容 |
-| --- | --- | --- |
-| `R2_ACCESS_KEY_ID` | secret | R2 API token 的 Access Key ID（对象读写，最好限定到该 bucket） |
-| `R2_SECRET_ACCESS_KEY` | secret | 对应的 Secret Access Key |
-| `R2_ENDPOINT` | variable | S3 兼容端点：`https://<account-id>.r2.cloudflarestorage.com` |
-| `R2_BUCKET` | variable | bucket 名 |
-| `DESKTOP_UPDATE_URL` | variable | bucket 公网自定义域名 + `/desktop` 前缀（workflow 固定上传到 `desktop/`），如 `https://dl.coflux.dev/desktop`；app 内 electron-updater（generic provider）读 `<url>/latest-mac.yml` |
-
-workflow 缺任一项**明确失败**，不静默跳过上传、不回退到别的源。GitHub Release 不是更新源。
-R2 自定义域名要允许公网 GET（不需要签名 URL）；`latest-mac.yml` 上传时带 `no-cache`。
+签名/公证 secret 缺任一项 workflow **明确失败**，不静默跳过。
 
 ### lockstep：桌面版与 prod 部署必须同 SHA
 
 桌面渲染层的 build-id 就是打包时的 git short SHA（与 `apps/web` 同一套准入，plan 033）；中心只接受
 `COFLUX_BUILD_ID` ∪ 部署的 `dist/build-id.txt`。所以：
 
-- **部署 prod 与打 `desktop-v*` tag 用同一个 SHA**。建议先打 tag（CI 出包 + 推 R2）再把 prod 部署到该
+- **部署 prod 与打 `desktop-v*` tag 用同一个 SHA**。建议先打 tag（CI 出包 + 推清单）再把 prod 部署到该
   SHA；反过来也行，但桌面版会在 CI 出包前被踢——显示「需要更新」并自动检查，更新到位即恢复。
 - 只改 server/daemon、不动 web 的部署同样要对齐 SHA，否则旧桌面版被踢直到下一次桌面发版。
 - 过渡期放行旧桌面版：中心 `COFLUX_BUILD_ID` env 设成旧桌面版的 SHA（单值，与文件里的当前 SHA 取并集），
