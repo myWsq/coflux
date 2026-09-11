@@ -9,10 +9,10 @@
 ## 1. 产品形态
 
 coflux 在用户任意节点运行 daemon，在本机 PTY 中驱动 Claude Code、Codex CLI、Vim 等终端程序。
-web client 既可以经中心触达远端 daemon，也可以在 client 与 daemon 同机时直接连接 daemon：
+桌面客户端（Electron，`apps/desktop`）既可以经中心触达远端 daemon，也可以在 client 与 daemon 同机时直接连接 daemon：
 
 ```text
-Web ── /client control WS ──▶ Server ──(rendezvous：签 token / 转 SDP+通知拨号)──▶ Worker
+Desktop ── /client control WS ──▶ Server ──(rendezvous：签 token / 转 SDP+通知拨号)──▶ Worker
  │                              ├─ Postgres：账号/设备/项目/task            │
  │        直连均不可用           └─ 最近一个派生 checkpoint                 │ UDS
  ├── wss://relay/…?token ──▶ coflux-relay ◀── wss 拨号 ───────────────────┤
@@ -96,9 +96,9 @@ worker 重启时 supervisor 与 PTY 不动；新 worker 通过 resync/catalog �
 direct 槽位内部有两个候选，优先级 loopback > P2P；槽位整体与 relay 竞争（hedge + generation
 promotion，见 5.2）。
 
-**loopback**：desktop web 默认尝试 `ws://127.0.0.1:8788`。首次配对由已认证中心连接协助安装
-Origin 绑定的持久 grant；之后浏览器身份、grant 与 generation 可在中心离线时复用。Electron 桌面版
-（`apps/desktop`，plan 103）走同一条链路：渲染层跑在自定义 scheme 下，主进程把 `/client` 与
+**loopback**：桌面客户端默认尝试 `ws://127.0.0.1:8788`。首次配对由已认证中心连接协助安装
+Origin 绑定的持久 grant；之后设备身份（IndexedDB 里的 P-256 密钥）、grant 与 generation 可在中心离线时复用。
+Electron 桌面版（`apps/desktop`，plan 103）的链路：渲染层跑在自定义 scheme 下，主进程把 `/client` 与
 `/device` 握手的 Origin 改写成稳定的 `https://desktop.coflux.dev`，自报 origin 同值，grant 列表里
 与浏览器的 `https://app.coflux.dev` 可区分；server/daemon 的 Origin 校验零放宽。gateway 只
 接受精确 Origin，握手校验签名、nonce、期限和速率限制。cached direct 的 terminal 与普通
@@ -185,8 +185,8 @@ COFLUX_STUN_URLS=stun:relay-jp.coflux.dev:3478
 所在 VPS 的防火墙需放行**出站已建立的 UDP 会话**（ICE 的 UDP socket 是 ephemeral 端口；
 worker 主动向 client candidate 发起 check，conntrack 放行回包即可，无需入站白名单）。
 
-mobile 已冻结，不启用 loopback direct；它使用同一 DeviceRouter 的 relay-only 配置，因此没有旧
-`taskAttach/ptyInput/ptyOutput/clientExec/clientFs*` 兼容路径。
+冻结的线上 mobile（源码已出仓，plan 106）不启用 loopback direct，只用 DeviceRouter 的 relay-only 配置；
+仓库里没有旧 `taskAttach/ptyInput/ptyOutput/clientExec/clientFs*` 兼容路径。
 
 ### 5.3 顺序、去重与背压
 
@@ -403,9 +403,7 @@ read/control 仍可用`（未 republish，直连本身正常）；缓存 grant �
 
 ```text
 apps/server       中心 control / relay rendezvous / checkpoint / Postgres
-apps/web          desktop React + xterm.js（默认迭代对象，启用 direct）
-apps/desktop      Electron 壳：原样打包 apps/web 的 macOS 客户端（菜单/通知/角标/自动更新）
-apps/mobile       冻结的 relay-only client
+apps/desktop      macOS 客户端（唯一前端，默认迭代对象）：Electron 主进程 + React/xterm 渲染层（src/renderer），启用 direct
 apps/ios          原生 iOS client（SwiftUI + SwiftTerm）
 packages/core     TS 共享日志等基础设施
 packages/client   control store + DeviceRouter
@@ -420,7 +418,7 @@ tests             真实进程 + WebSocket 黑盒 harness
 ```
 
 协议真相源是 `proto/`，Buf 生成 TS/Rust/Swift。自动发布门包括 Buf lint/codegen、TS/Swift client
-状态机、server/web typecheck、web/mobile/desktop build、iOS build-for-testing、Rust test/build、独立 VT
+状态机、server/desktop typecheck、desktop test/build、iOS build-for-testing、Rust test/build、独立 VT
 oracle、全黑盒和 `git diff --check`；benchmark 与当前 Chrome 实机门仍需发布前人工签字。Safari/
 Firefox 当前不是阻断门且可用性未知，原生 iOS 真机生产验收仍待用户。黑盒只用临时
 `COFLUX_HOME`、端口、数据库与进程组，不触碰真实 daemon。

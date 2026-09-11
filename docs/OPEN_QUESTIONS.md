@@ -13,7 +13,7 @@
 | A3 | daemon resync + 完整 Device catalog/tombstone 对账 | 服务器重启可重挂已知 task，unknown live session 保留为 orphan，不伪造 exit | 仅 sessionId（无法可靠收敛生命周期） |
 | A4 | 任务状态机 `idle / running / exited`；对 `exited` 的 task 再 `task.start` = **重跑**（起新 session） | 简单够用 | 显式 restart 语义 / 保留多次运行历史 |
 | A5 | PTY 与普通 RPC 统一走端到端 **DeviceEnvelope** | direct/relay 共用语义，中心不解析 raw terminal | 中心 protobuf PTY（已删除并 reserved） |
-| A6 | Web 已迁正式工作台与导入/任务交互 | desktop web 是默认迭代对象 | `window.prompt` 原型（已删除） |
+| A6 | 正式工作台与导入/任务交互在 Electron 桌面客户端（`apps/desktop`） | 桌面 app 是唯一前端与默认迭代对象；线上 web/mobile 已冻结 | `window.prompt` 原型、独立维护的 web 子项目（均已删除） |
 | A7 | daemon 每设备凭证、client 账号会话 token | daemonId 由服务器绑定，账号隔离 | 单一共享 token（已删除） |
 | A8 | sessiond 单 holder + 显式 takeover | detach、epoch、sequence 在唯一 authority 裁决 | server viewer/holder（已删除） |
 
@@ -42,7 +42,7 @@
 
 ### B4. task 与 terminal 的基数 —— ✅ 已定
 一个 workspace 可有多个 task/终端 Tab；一个 task 的一次运行对应一个 live session，退出后重跑会创建
-新 session。desktop web 已落地，mobile 保持冻结形态。
+新 session。桌面客户端已落地；线上 web/mobile 保持冻结形态。
 
 ### B5. Agent 集成（V2）
 通路已通，下一步接 Agent 时：

@@ -96,11 +96,12 @@ daemon: 清 pending-auth.json、落盘 credentials.json
   （`COFLUX_AUTHORIZE_MAX_FAILURES`，默认 10），超过后统一回"尝试次数过多"，不再泄漏
   token 是否存在。因 token 本身是 128bit 随机值、爆破不可行，限速是纵深防御而非主防线。
 
-### Web 侧
-`/authorize/<token>` 是 `apps/web/src/App.tsx` 里的独立组件（`AuthorizePage`），
-不经路由库、在 `App()` 顶层按 `location.pathname` 分支决定渲染哪棵组件树——避免
-主 app 的 xterm 初始化/自动重连副作用在授权页上跑起来。复用已有登录态
-（`localStorage` 会话 token）与登录表单，未登录则退回同一套登录 UI。
+### 浏览器侧（冻结的线上 web，plan 106）
+`/authorize/<token>` 由冻结的线上 web bundle 承担（源码在 git 历史 `ce7026b` 的 web 子项目 `App.tsx`，
+独立组件 `AuthorizePage`），不经路由库、在 `App()` 顶层按 `location.pathname` 分支决定渲染哪棵组件树——避免
+主 app 的 xterm 初始化/自动重连副作用在授权页上跑起来。复用浏览器里已有的登录态
+（`localStorage` 会话 token）与登录表单，未登录则退回同一套登录 UI。桌面 app 不承载这条流，
+把它收进 server 是放弃 web 端的第二片。
 
 ## OAuth 客户端（MCP，plan 090）
 
