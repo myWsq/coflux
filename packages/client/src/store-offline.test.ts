@@ -123,20 +123,23 @@ test("(a) 开启选项：authOk + snapshot 后目录落缓存；登出清缓存"
   try {
     const socket = FakeWebSocket.latest();
     socket.open();
-    socket.receive({ case: "authOk", value: { accountId: "a1", iceServers: [] } });
+    socket.receive({ case: "authOk", value: { accountId: "a1", iceServers: [], loginName: "wsq@example.com" } });
     socket.receive(snapshot);
     await flushMicrotasks();
 
     const raw = storage.getItem(CACHE_KEY);
     assert.ok(raw, "snapshot 后应写入缓存");
-    const cached = JSON.parse(raw) as { version: number; projects: { id: string }[]; tasks: { id: string; sessionId?: string }[] };
+    const cached = JSON.parse(raw) as { version: number; loginName?: string; projects: { id: string }[]; tasks: { id: string; sessionId?: string }[] };
     assert.equal(cached.version, 1);
     assert.deepEqual(cached.projects.map((project) => project.id), ["p1"]);
     assert.equal(cached.tasks[0]?.sessionId, "s1");
     assert.equal(client.store.getState().authState, "authed");
+    assert.equal(client.store.getState().loginName, "wsq@example.com", "authOk 的登录身份进 store（plan 110）");
+    assert.equal(cached.loginName, "wsq@example.com", "登录身份随目录一起落盘");
 
     client.logout();
     assert.equal(storage.getItem(CACHE_KEY), null, "登出必须清掉离线目录");
+    assert.equal(client.store.getState().loginName, "", "登出清空登录身份");
   } finally {
     client.disconnect();
   }
@@ -219,6 +222,45 @@ test("(b'') 认证失败清缓存；坏掉的缓存（版本不对）不装载",
     assert.equal(storage2.getItem(CACHE_KEY), null, "authError 必须清缓存");
   } finally {
     client2.disconnect();
+  }
+});
+
+test("(d) 离线冷启动：缓存里的登录身份一并恢复；旧缓存缺该字段按空串兼容且不作废（plan 110）", async () => {
+  const base = {
+    version: 1,
+    savedAt: 1,
+    daemons: [],
+    projects: [{ id: "p-cached", daemonId: "d1", name: "cached" }],
+    workspaces: [],
+    tasks: [],
+    ports: {},
+    sessionAgents: {},
+  };
+
+  const storage = installLocalStorage("tok");
+  storage.setItem(CACHE_KEY, JSON.stringify({ ...base, loginName: "wsq@example.com" }));
+  const client = newClient(true);
+  try {
+    FakeWebSocket.latest().fail();
+    const state = client.store.getState();
+    assert.equal(state.authState, "authed");
+    assert.equal(state.loginName, "wsq@example.com", "冷启动装载后仍认得出「我是谁」");
+  } finally {
+    client.disconnect();
+  }
+
+  // plan 110 之前写的缓存没有 loginName：版本号仍是 1，必须照常装载，身份退回空串。
+  const legacyStorage = installLocalStorage("tok");
+  legacyStorage.setItem(CACHE_KEY, JSON.stringify(base));
+  const legacyClient = newClient(true);
+  try {
+    FakeWebSocket.latest().fail();
+    const state = legacyClient.store.getState();
+    assert.equal(state.authState, "authed", "旧缓存不得因缺字段作废");
+    assert.deepEqual(state.projects.map((project) => project.id), ["p-cached"]);
+    assert.equal(state.loginName, "", "缺字段按空串");
+  } finally {
+    legacyClient.disconnect();
   }
 });
 
