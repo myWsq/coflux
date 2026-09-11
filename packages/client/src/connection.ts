@@ -1,4 +1,5 @@
 import {
+  CONTROL_PROTOCOL_VERSION,
   create,
   encodeClientToServer,
   decodeServerToClient,
@@ -44,10 +45,14 @@ export interface ConnectionSocket {
   close: () => void;
 }
 
+/** 客户端类型（plan 105）：desktop 走协议版本准入；web/mobile（及不传）走 build-id 精确准入。 */
+export type ClientKind = "web" | "mobile" | "desktop";
+
 type ConnectionOptions = {
   url: string;
   /** 构建版本（git short SHA；vite dev 固定 "dev"）：随每次认证上报，供 server 做版本准入（plan 033）。 */
   buildId: string;
+  clientKind?: ClientKind;
   onStatus: (status: ConnectionStatus) => void;
   onMessage: (payload: ServerPayload) => void;
   /** 返回 null 表示当前不应自动重连（未登录 / 已登出 / 认证失败）。 */
@@ -56,10 +61,12 @@ type ConnectionOptions = {
   createSocket?: (url: string) => ConnectionSocket;
 };
 
-export function buildAuthPayload(credential: AuthCredential, buildId: string): ClientToServerPayload {
+/** 认证包：build-id 照旧上报；clientKind 与控制面协议版本一并带上（plan 105），server 按 kind 选准入规则。 */
+export function buildAuthPayload(credential: AuthCredential, buildId: string, clientKind?: ClientKind): ClientToServerPayload {
+  const version = { clientVersion: buildId, clientKind, controlProtocolVersion: CONTROL_PROTOCOL_VERSION };
   return "token" in credential
-    ? { case: "clientAuth", value: { clientToken: credential.token, clientVersion: buildId } }
-    : { case: "clientAuth", value: { username: credential.username, password: credential.password, clientVersion: buildId } };
+    ? { case: "clientAuth", value: { clientToken: credential.token, ...version } }
+    : { case: "clientAuth", value: { username: credential.username, password: credential.password, ...version } };
 }
 
 /**
@@ -150,7 +157,7 @@ export function createConnection(options: ConnectionOptions) {
     ws.onopen = () => {
       if (socket !== ws) return;
       options.onStatus("connected");
-      ws.send(encodeClientToServer(create(ClientToServerSchema, { payload: buildAuthPayload(credential, options.buildId) })));
+      ws.send(encodeClientToServer(create(ClientToServerSchema, { payload: buildAuthPayload(credential, options.buildId, options.clientKind) })));
       // 认证包同样纳入看门狗：链路若在握手后立刻被掐，认证回执一样石沉大海——那正是
       // "刷新后能用一会儿又不行"里下一轮的起点，得让它自己重连而不是靠用户再刷一次。
       armWatchdog();

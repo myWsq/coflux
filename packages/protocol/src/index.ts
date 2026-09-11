@@ -43,6 +43,10 @@ export const DEFAULT_PORT = 8787;
 export const LOCAL_GATEWAY_PORT = 8788;
 /** browser/worker/sessiond 共用的 DeviceEnvelope 语义版本。 */
 export const DEVICE_PROTOCOL_VERSION = 1;
+
+/** 控制面（/client WS）协议版本（plan 105）：desktop 登录时上报，server 只在低于其支持的最低版本时拒绝。
+ * 只在做破坏性协议改动时递增（CI 的 buf breaking 把关兼容性）；web/mobile 仍按 build-id 精确准入。 */
+export const CONTROL_PROTOCOL_VERSION = 1;
 /** PTY 创建/resize 的共享尺寸边界；Rust sessiond 使用同值，避免 transport 间行为漂移。 */
 export const MIN_TERMINAL_DIMENSION = 1;
 export const MAX_TERMINAL_DIMENSION = 1000;

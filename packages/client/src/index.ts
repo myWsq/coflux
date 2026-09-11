@@ -1,4 +1,4 @@
-export type { AuthCredential, ConnectionStatus } from "./connection";
+export type { AuthCredential, ClientKind, ConnectionStatus } from "./connection";
 export {
   createCofluxClient,
   isDirWorkspace,

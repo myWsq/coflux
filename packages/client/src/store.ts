@@ -80,7 +80,7 @@ export function workspaceProgress(
   return undefined;
 }
 
-import { createConnection, type AuthCredential, type ConnectionStatus, type ServerPayload } from "./connection";
+import { createConnection, type AuthCredential, type ClientKind, type ConnectionStatus, type ServerPayload } from "./connection";
 import {
   createDeviceRouter,
   type DeviceInputState,
@@ -154,6 +154,8 @@ export type CofluxClientOptions = {
   tokenStorageKey: string;
   /** 构建版本（git short SHA；vite dev 固定 "dev"），随认证上报供 server 做版本准入（plan 033）。 */
   buildId: string;
+  /** 客户端类型（plan 105）：desktop 由 server 按控制面协议版本准入（不看 build-id）；不传 = web。 */
+  clientKind?: ClientKind;
   /** 所有客户端统一走 DeviceTransport；是否尝试 loopback direct 由 enableLocalTransport 决定。 */
   deviceTransport: DeviceTransportOptions;
   /** 版本失配（clientOutdated）时是否先 reload 一次拿新 bundle（plan 033 的浏览器语义，默认 true）。
@@ -485,6 +487,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
   connection = createConnection({
     url: options.serverUrl,
     buildId: options.buildId,
+    clientKind: options.clientKind,
     onStatus: (status) => {
       store.setState({ status });
       if (status !== "connected") {

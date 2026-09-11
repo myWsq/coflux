@@ -213,6 +213,9 @@ export const config = {
   autoUpdatePollMs: int("COFLUX_AUTOUPDATE_POLL_MS", 10 * 60 * 1000),
   autoUpdateMaxAttempts: int("COFLUX_AUTOUPDATE_MAX_ATTEMPTS", 3),
 
+  /** 桌面客户端准入（plan 105）：server 支持的最低控制面协议版本，默认 1（当前 CONTROL_PROTOCOL_VERSION）。
+   * 桌面不看 build-id——打包分发有发布时差。只在做破坏性协议改动、要把旧桌面版挡在门外时改默认值或用 env 临时抬高。 */
+  minControlProtocolVersion: Number.parseInt(process.env.COFLUX_MIN_CONTROL_PROTOCOL_VERSION ?? "1", 10) || 1,
   /** 构建版本准入（plan 033）：显式覆盖口，黑盒测试用；生产改用 buildIdFiles 自举，通常不设。 */
   buildId: process.env.COFLUX_BUILD_ID ?? "",
   /** 构建版本准入（plan 033，2026-07-23 修订）：逗号分隔的 build-id.txt 文件路径（web/mobile

@@ -116,10 +116,8 @@ ssh root@prod-jp 'cd /opt/coflux && git fetch --tags && git checkout <tag> \
 
 mobile 若随共享层变更需重建：`pnpm --filter @coflux/mobile build`。
 
-**桌面版 lockstep（plan 103）**：Electron 桌面版的渲染层 build-id 也是 git short SHA，中心只接受与部署的
-web 同 SHA 的桌面版。部署 prod 到某个 SHA 时，`desktop-v*` tag 也要打在同一 SHA（顺序见
-[RELEASING.md](RELEASING.md#lockstep桌面版与-prod-部署必须同-sha)），否则在线桌面版被踢到「需要更新」页直到
-新版本出包。过渡期用 `COFLUX_BUILD_ID=<旧桌面 SHA>` 放行。
+**桌面版准入（plan 105）**：桌面按控制面协议版本准入，不看 build-id，部署 prod 不需要与 `desktop-v*` 对齐、
+不会踢在线桌面版；只有破坏性协议改动那次要先发桌面版再部署（见 [RELEASING.md](RELEASING.md)）。
 
 改 Caddy：编辑 → `caddy validate` → `systemctl reload caddy`。
 在 prod-jp 上 validate 必须先 `set -a; . /etc/caddy/cloudflare.env; set +a`，

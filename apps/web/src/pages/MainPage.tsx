@@ -17,6 +17,8 @@ export function MainPage() {
       serverUrl: SERVER_URL,
       tokenStorageKey: TOKEN_KEY,
       buildId: BUILD_ID,
+      // 桌面按控制面协议版本准入（plan 105），不再要求 build-id 与 server 同 SHA；浏览器仍走 build-id。
+      clientKind: desktop ? "desktop" : "web",
       // 桌面渲染层随 app 打包，reload 拿不到新 bundle：版本失配直接进 outdated 状态页，由 app 触发更新检查。
       reloadOnOutdated: desktop === null,
       // 中心离线也能冷启动看本机终端（plan 103）：桌面把最近一次目录快照落 localStorage（按服务器地址分 key），

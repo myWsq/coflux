@@ -87,7 +87,7 @@
 - [x] Electron 壳 + 自定义 scheme 从 asar 提供渲染层：中心离线也能冷启动看本机终端（loopback direct）
 - [x] 原生菜单 + 纯 ⌘ 快捷键（≡ PWA standalone 键位）、系统通知 + Dock 角标（agent 等待批准/回答）、
       点通知聚焦工作区、外链一律系统浏览器
-- [x] 版本准入 lockstep：桌面 build-id 与部署的 web 同 SHA 才被接受，被拒显示「需要更新」并触发
+- [x] 版本准入按控制面协议版本（plan 105，取代首发当天的 lockstep）：只有破坏性协议改动才让旧桌面版看到「需要更新」并触发 electron-updater；`desktop-v*` tag → 签名公证 → GitHub Release + `desktop-updates` 分支清单作更新源
       electron-updater；`desktop-v*` tag → 签名公证 → Cloudflare R2 更新源
 - [ ] 首发验收待用户：CI 签名产物过 Gatekeeper、三路联调（direct 用 lsof 证明）、通知/角标在签名包上
 - [ ] 后续：universal（x64）构建开关、深链接（`coflux://` 已预留）、Windows/Linux 可移植性

@@ -160,7 +160,7 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
 
 `apps/desktop` 是 Electron 壳 + 原样打包的 `apps/web`（plan 103）。发版与 daemon **完全独立**：tag 形如
 `desktop-v0.1.0`，触发 `.github/workflows/desktop-release.yml`（macOS runner，arm64 首发）：
-校验 tag → 构建 main/preload/renderer（渲染层 build-id 必须等于 HEAD short SHA）→ electron-builder
+校验 tag → 构建 main/preload/renderer → electron-builder
 翻 Fuses、Developer ID 签名（hardened runtime + entitlements）、公证 + staple → `codesign`/`stapler`/`spctl`
 校验 → GitHub Release 放 dmg/zip/blockmap → 把 `latest-mac.yml` 改成该 Release 的绝对下载地址后推到仓库
 `desktop-updates` 分支（app 的更新源）。
@@ -184,17 +184,18 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
 
 签名/公证 secret 缺任一项 workflow **明确失败**，不静默跳过。
 
-### lockstep：桌面版与 prod 部署必须同 SHA
+### 版本准入：桌面按控制面协议版本，不与 prod 部署绑定（plan 105）
 
-桌面渲染层的 build-id 就是打包时的 git short SHA（与 `apps/web` 同一套准入，plan 033）；中心只接受
-`COFLUX_BUILD_ID` ∪ 部署的 `dist/build-id.txt`。所以：
+桌面登录时上报 `client_kind=desktop` 与 `control_protocol_version`（`packages/protocol` 的
+`CONTROL_PROTOCOL_VERSION`）；中心只在它低于 `COFLUX_MIN_CONTROL_PROTOCOL_VERSION`（默认 1）时拒绝，
+build-id 只作标识、不参与准入。web/mobile 仍按 build-id 精确准入——浏览器 reload 一次就拿到新 bundle，
+桌面是打包分发、有发布时差，最初的「桌面 build-id 与 prod 同 SHA」lockstep 方案在首发当天就证明不可用。
 
-- **部署 prod 与打 `desktop-v*` tag 用同一个 SHA**。建议先打 tag（CI 出包 + 推清单）再把 prod 部署到该
-  SHA；反过来也行，但桌面版会在 CI 出包前被踢——显示「需要更新」并自动检查，更新到位即恢复。
-- 只改 server/daemon、不动 web 的部署同样要对齐 SHA，否则旧桌面版被踢直到下一次桌面发版。
-- 过渡期放行旧桌面版：中心 `COFLUX_BUILD_ID` env 设成旧桌面版的 SHA（单值，与文件里的当前 SHA 取并集），
-  重启 server；桌面版发出来后再去掉。
-- 被踢**不是**断线：桌面 app 不重连、不 reload，停在「需要更新」页直到装上新版本。
+- 平时部署 prod **不会**踢旧桌面版；它们由 electron-updater 在后台升到最新（启动 15s 后与每 4 小时检查）。
+- 做破坏性协议改动时：`CONTROL_PROTOCOL_VERSION` +1、server 的最低版本默认值同步抬高（应急可先用 env），
+  **先发桌面版、再部署 prod**，旧桌面版会看到「需要更新」并自动升级。`buf breaking` 在 CI 把关，
+  它放行的改动不需要动版本号。
+- 「需要更新」页**只**在协议过旧时出现，不是断线；app 不重连、不 reload，停在该页直到装上新版本。
 
 ### 发一个桌面版本
 
@@ -207,7 +208,7 @@ git tag desktop-v0.1.0
 git push origin refs/tags/desktop-v0.1.0
 ```
 
-4. workflow 结束后把 prod 部署到同一 SHA（见 [deployment.md](deployment.md)）。
+4. 不需要与 prod 部署对齐（plan 105）；只有破坏性协议改动那次要先发桌面版再部署 prod。
 
 app 内更新行为：启动 15s 后与每 4 小时检查一次；版本准入被拒时立即检查；发现即下载；下载完成后
 「重启并更新」，不点也会在退出时自动安装。菜单「检查更新…」可手动触发。

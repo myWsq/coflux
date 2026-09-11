@@ -97,17 +97,12 @@ jobs:
       - name: desktop 类型检查 + 单元测试
         run: pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test
 
-      - name: 构建 main / preload / renderer（build-id = 当前 SHA）
+      - name: 构建 main / preload / renderer
         run: |
           set -euo pipefail
           pnpm -C apps/desktop build
-          build_id=$(cat apps/desktop/out/renderer/build-id.txt)
-          head_short=$(git rev-parse --short HEAD)
-          if [ "$build_id" != "$head_short" ]; then
-            echo "::error::渲染层 build-id ${build_id} 与 HEAD ${head_short} 不一致——版本准入会拒绝这个包"
-            exit 1
-          fi
-          echo "::notice::桌面渲染层 build-id=${build_id}（prod 部署到同一 SHA 才被中心接受）"
+          # build-id 只作标识上报（桌面按控制面协议版本准入，plan 105），不再要求与部署的 server 同 SHA
+          echo "::notice::桌面渲染层 build-id=$(cat apps/desktop/out/renderer/build-id.txt)"
 
       # 证书导入沿用 release.yml 里已验证的做法：自己建临时 keychain、import、set-key-partition-list、加进搜索列表。
       # 不把 p12 交给 electron-builder 的 CSC_LINK：它自建 keychain 的 set-key-partition-list 在 GitHub runner 上报
@@ -206,7 +201,7 @@ jobs:
             echo
             echo "- 安装：下载 dmg，拖进 Applications。已签名并经苹果公证。"
             echo "- 自动更新：app 读仓库 desktop-updates 分支的 latest-mac.yml，安装包从本 Release 下载。"
-            echo "- 渲染层 build-id 与本 tag 的 commit 同 SHA：中心必须部署到同一 SHA，否则桌面版会被版本准入拒绝直到下次更新。"
+            echo "- 版本准入按控制面协议版本（plan 105）：中心部署新版本不会踢旧桌面版，只有破坏性协议改动才要求更新。"
           } > notes.md
       # 安装包与 blockmap 先上 Release：清单随后才指向它们，客户端永远不会读到指向尚未上传文件的清单。
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3

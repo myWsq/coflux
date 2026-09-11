@@ -1452,6 +1452,14 @@ pub struct ClientAuth {
     /// 认证阶段的版本准入（plan 033）。缺失本字段是"旧 bundle"的检测信号本身，不可伪造更早语义。
     #[prost(string, optional, tag="5")]
     pub client_version: ::core::option::Option<::prost::alloc::string::String>,
+    /// 客户端类型（plan 105）："web" / "mobile" / "desktop"。缺失按 web 处理（旧客户端与 iOS）。只有 "desktop"
+    /// 走协议版本准入：打包分发的客户端有发布时差，不能像浏览器那样靠 reload 立刻拿到新 bundle。
+    #[prost(string, optional, tag="6")]
+    pub client_kind: ::core::option::Option<::prost::alloc::string::String>,
+    /// 控制面协议版本（plan 105，常量 CONTROL_PROTOCOL_VERSION）：desktop 低于 server 支持的最低版本才被拒；
+    /// 平时部署 server 不再踢旧桌面版，它们由 electron-updater 在后台升级。
+    #[prost(uint32, optional, tag="7")]
+    pub control_protocol_version: ::core::option::Option<u32>,
 }
 /// 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地）
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1809,9 +1817,9 @@ pub struct ServerError {
     pub message: ::prost::alloc::string::String,
 }
 /// build 版本失配（新客户端跑旧代码判定的对称面，plan 033）：认证阶段 server 比对
-/// client_version 与 COFLUX_BUILD_ID 不一致时下发本消息后关闭连接。旧 bundle（缺失
-/// client_version）走 AuthError 而非本消息——本消息对它是无法理解的未知 case（见
-/// apps/server/src/hub.ts handleClientAuth）。
+/// web/mobile：client_version 与 COFLUX_BUILD_ID 不一致时下发本消息后关闭连接；desktop（plan 105）：
+/// control_protocol_version 低于 server 支持的最低版本时下发。旧 bundle（缺失 client_version）走 AuthError
+/// 而非本消息——本消息对它是无法理解的未知 case（见 apps/server/src/hub.ts handleClientAuth）。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientOutdated {
 }
