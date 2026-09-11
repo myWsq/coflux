@@ -133,6 +133,8 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
       copyFileSync(join(bundle.dir, "coflux"), temporary);
       chmodSync(temporary, 0o755);
       renameSync(temporary, paths.cliBin);
+      // 清掉旧桌面注入的同名操作工具，避免它在 PATH 中遮住 npm 的宿主入口。
+      rmSync(join(paths.binDir, "cofluxd"), { force: true });
     } finally { rmSync(temporary, { force: true }); }
   }
   async function start(): Promise<void> {
