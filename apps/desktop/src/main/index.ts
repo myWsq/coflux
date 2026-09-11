@@ -23,6 +23,11 @@ protocol.registerSchemesAsPrivileged([
 const devRendererUrl = process.env.ELECTRON_RENDERER_URL;
 const trusted = { appOrigin: APP_ORIGIN, devRendererUrl };
 
+// 未打包（electron-vite dev / preview、本机 pack 之外的直接启动）与安装版不共用 userData：token、IndexedDB
+// 身份与 loopback grant 互不可见，本机联调不污染日常使用的安装版。必须在 requestSingleInstanceLock 之前设置
+// （单实例锁文件就在 userData 里），否则 dev 与安装版还会互相抢锁。
+if (!app.isPackaged) app.setPath("userData", `${app.getPath("userData")}-dev`);
+
 // electron-vite 惯例：preload / 渲染层产物按主进程模块的相对位置找（out/main → out/preload、out/renderer）。
 // 不用 app 的 appPath：`electron out/main/index.js` 直接启动时它指向 out/main，会多拼一层；
 // 相对主模块的路径在 asar 内、electron-vite dev/preview、直接启动三种方式下都成立。
