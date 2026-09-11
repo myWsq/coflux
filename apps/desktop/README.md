@@ -14,7 +14,7 @@ pnpm -C apps/desktop dev         # electron-vite dev：渲染层 5274（HMR）�
 pnpm -C apps/desktop typecheck   # tsc 两份：tsconfig.json（main / preload / shared / 配置 / 测试）+ tsconfig.renderer.json（渲染层）
 pnpm -C apps/desktop test        # node --test：主进程纯函数（Origin / 渲染层路径与 CSP / IPC 来源与载荷 / 设置 / 更新状态 / token 存储 / 窗口 bounds）+ 渲染层纯函数（桥接必选 / token 迁移 / 变更视图刷新 / 通知去重 / 工作台状态 / 账号脚部展示映射）+ 发布配置
 pnpm -C apps/desktop build       # electron-vite build → out/{main,preload,renderer}
-pnpm -C apps/desktop pack        # 未签名 .app（dist/mac-arm64/），本机冒烟用；通知/角标在未签名包上不可信
+pnpm -C apps/desktop run pack    # 未签名 .app（dist/mac-arm64/），本机冒烟用；通知/角标在未签名包上不可信
 pnpm -C apps/desktop dist        # 本机出 dmg/zip（需 Developer ID 证书在钥匙串里，否则只签 ad-hoc）
 pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/icon.png（仅 macOS）
 ```
