@@ -6,6 +6,8 @@ import "@xterm/xterm/css/xterm.css";
 import { useToast } from "@astryxdesign/core/Toast";
 import type { FsWriteResult } from "@coflux/client";
 
+import { shouldOpenTerminalLink } from "@/components/workbench/terminal-link-activation";
+
 /** 控制权状态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。
  * idle = RUNNING 但本端未申请控制权（旁观 / 后台面板），仅用于 Tab 图标呈现为中性态，
  * 输入门控与 attaching/stopped 一致（下方 owned 判等），不需要单独处理。 */
@@ -214,7 +216,17 @@ export function TerminalPane(props: TerminalPaneProps) {
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
-    terminal.loadAddon(new WebLinksAddon()); // 输出中的 URL 可点击（默认 window.open 新开 Tab）
+    // 输出中的 URL：⌘（或 Ctrl）+点击在系统浏览器打开，普通点击只聚焦终端（plan 109）。
+    // 必须传自定义激活函数——插件默认的那个先调无 URL 的 window.open()、再赋 location.href，
+    // 主进程对 window.open 一律 deny 且只放行 http(s) 的 URL，收到 about:blank 直接丢弃，表现为点了没反应。
+    // 这里带 URL 调 window.open，主进程的 setWindowOpenHandler 拿到真实 URL 交 shell.openExternal；
+    // 返回值在桌面版恒为 null（deny），不据此分支。
+    terminal.loadAddon(
+      new WebLinksAddon((event, uri) => {
+        if (!shouldOpenTerminalLink(event)) return;
+        window.open(uri, "_blank", "noopener");
+      }),
+    );
     terminal.open(host);
     patchImeCommittedInput(terminal);
     terminalRef.current = terminal;
