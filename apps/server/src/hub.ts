@@ -1209,6 +1209,29 @@ export class Hub {
     const workspace = await this.store.getWorkspace(originTask.workspaceId);
     if (!workspace || workspace.accountId !== daemon.accountId) return void fail("发起方工作区已不存在");
 
+    // 目标工作区：daemon 提议（agent 经 /cd、EnterWorktree 挪进了同设备的另一个工作区，daemon 按
+    // 调用方 cwd 解析出来），中心核验（plan 102）。字段为空 = 发起 task 所在工作区，旧 daemon 恒空。
+    // 只作用于 terminalNew / terminalList；portsList 与 terminalRead 一律用发起方工作区。
+    let target = workspace;
+    // `?? ""`：proto 解码会把缺省字段填成空串，但单测夹具直接构造普通对象、字段根本不存在——
+    // 这里一旦抛异常就绕过了 reply/fail，调用方只能干等到超时。缺字段与空串一律按「没申报」处理。
+    const declared = (request.workspaceId ?? "").trim();
+    if (declared && declared !== workspace.id) {
+      const proposed = await this.store.getWorkspace(declared);
+      // 必须同账号**同设备**：终端要在这台机器上跑（MCP create_terminal 只查账号，那里终端可以
+      // 落在账号的任意设备上）。不存在与不属于本设备同一句错误，不泄漏别处工作区的存在性。
+      if (!proposed || proposed.accountId !== daemon.accountId || proposed.daemonId !== daemon.info.daemonId) {
+        return void fail(`工作区 ${declared} 不存在或不在本设备的本账号下`);
+      }
+      if (!isDirWorkspace(proposed)) {
+        const project = await this.store.getProject(proposed.projectId);
+        if (!project || project.accountId !== proposed.accountId || project.daemonId !== proposed.daemonId) {
+          return void fail("目标工作区所属项目正在删除，不能在它下面操作");
+        }
+      }
+      target = proposed;
+    }
+
     switch (request.payload.case) {
       case "terminalNew": {
         const value = request.payload.value;
@@ -1230,12 +1253,15 @@ export class Hub {
                   currentOrigin.daemonId !== daemon.info.daemonId ||
                   currentOrigin.accountId !== daemon.accountId
                 ) return { ok: false, error: "发起方会话已失效" } as const;
-                const currentWorkspace = await tx.getWorkspace(currentOrigin.workspaceId);
+                // 锁后重读的是**目标**工作区（挪窝时 ≠ 发起方工作区）：下面的 task.workspaceId、
+                // 活跃终端上限、project 活跃检查与 SessionCreate 的 cwd 全都引用它，一处都不能漏，
+                // 否则就是「task 挂在 B、命令跑在 A」的新错位。
+                const currentWorkspace = await tx.getWorkspace(target.id);
                 if (
                   !currentWorkspace ||
                   currentWorkspace.accountId !== daemon.accountId ||
                   currentWorkspace.daemonId !== daemon.info.daemonId
-                ) return { ok: false, error: "发起方工作区已不存在" } as const;
+                ) return { ok: false, error: "目标工作区已不存在" } as const;
                 if (!isDirWorkspace(currentWorkspace)) {
                   const project = await tx.claimActiveProject(currentWorkspace.projectId);
                   if (
@@ -1328,7 +1354,8 @@ export class Hub {
         });
       }
       case "terminalList": {
-        const tasks = await this.store.listTasksByWorkspace(workspace.id);
+        // 列的是目标工作区（agent 挪进 B 就列 B 的终端），与 read/send 的本地判定同一个边界
+        const tasks = await this.store.listTasksByWorkspace(target.id);
         // 只给最近的一批：用久的工作区会攒下几十个 exited 终端，全塞给 agent 是纯噪音。
         const terminals = tasks
           .slice()
@@ -1364,6 +1391,7 @@ export class Hub {
       }
       case "portsList": {
         // 整个工作区的端口，不只发起方那个终端——agent 常在 A 终端起 dev server、在 B 终端问 URL。
+        // 这里恒用发起方工作区：端口挂在会话进程树上，与 agent 此刻 cd 到哪无关（daemon 也不申报）。
         const tasks = await this.store.listTasksByWorkspace(workspace.id);
         const ports = tasks.flatMap((task) =>
           this.routeTable.portsForTask(task.id).map((route) => ({ port: route.port, url: buildPreviewUrl(route.shortId) })),

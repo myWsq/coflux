@@ -1,6 +1,6 @@
 {
   "name": "coflux",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Connect Claude Code to the coflux agent command center: hooks report live turn states and inject the session's coflux coordinates at start, the coflux skill documents the local commands for terminals the user can watch and take over, and the bundled MCP config wires up the center's coflux MCP server.",
   "author": {
     "name": "Shuaiqi Wang",

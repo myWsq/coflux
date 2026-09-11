@@ -265,6 +265,10 @@ struct AgentBody {
     text: String,
     #[serde(default)]
     enter: bool,
+    /// 调用方的当前工作目录（plan 102）：CLI 每条请求都带 `process.cwd()`，daemon 据此把
+    /// 请求的**目标**解析到 cwd 所在的工作区。旧 CLI 不带，缺省空串 = 退回归属工作区。
+    #[serde(default)]
+    cwd: String,
 }
 
 /// 单次 send 的文本上限：与 MCP `send_terminal_input` 的 64 KB 同值（plan 094 对齐）；超长基本是
@@ -345,12 +349,14 @@ async fn handle_agent(
             }
         }
         "ports" => AgentAction::Ports,
+        "workspace.current" => AgentAction::WorkspaceCurrent,
         other => return Err(RequestError::BadRequest(format!("未知 action {other}"))),
     };
     let (respond, outcome_rx) = oneshot::channel();
     let request = AgentRequest {
         pid: parsed.pid,
         ppid: parsed.ppid,
+        cwd: parsed.cwd,
         action,
         respond,
     };
