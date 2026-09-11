@@ -184,8 +184,8 @@ Out of scope:
 | Typecheck | `pnpm -C apps/desktop typecheck` | exit 0 |
 | Unit tests | `pnpm -C apps/desktop test` | exit 0 |
 | Renderer/main build | `pnpm -C apps/desktop build` | exit 0 |
-| Native build | 执行者补入（SwiftPM + node-gyp/Node-API 的具体命令，写进 `apps/desktop/native/**` 的 README 与 package.json scripts） | exit 0 |
-| Native smoke (M1) | 执行者补入 | exit 0，≥ 50 轮 |
+| Native build | `node apps/desktop/native/ghostty/build.mjs` | exit 0 |
+| Native smoke (M1) | `apps/desktop/native/ghostty/build/ghostty-smoke` | exit 0，≥ 50 轮 |
 | G1/G6 用例集 | 执行者补入 | exit 0 |
 | G2 压力 | 执行者补入 | exit 0，零崩溃 |
 | G8 测量 | 执行者补入 | 输出两列数字表 |
