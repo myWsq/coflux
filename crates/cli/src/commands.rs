@@ -238,7 +238,10 @@ pub fn run_terminal(args: &ParsedArgs) {
                 crate::die("terminal wait 需要 <taskId>（用 cofluxd terminal list 查）");
             };
             let timeout_secs = wait_timeout_secs(args.string("timeout"));
-            let deadline = Instant::now() + Duration::from_secs_f64(timeout_secs);
+            // 极大的 --timeout（Duration/Instant 装不下）等价于「不设 deadline」，与 node 版一样不报错。
+            let deadline = Duration::try_from_secs_f64(timeout_secs)
+                .ok()
+                .and_then(|timeout| Instant::now().checked_add(timeout));
             loop {
                 // 按 taskId 直接问本地账本；目标不存在/不在本工作区时 daemon 回可读错误，agent_post 直接 die。
                 let status = gateway::agent_post(with(body("terminal.status"), "taskId", task_id));
@@ -246,7 +249,7 @@ pub fn run_terminal(args: &ParsedArgs) {
                     println!("{}", render_wait_exited(&status));
                     return;
                 }
-                if Instant::now() >= deadline {
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     crate::die(&render_wait_timeout(
                         timeout_secs,
                         task_id,
