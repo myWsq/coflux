@@ -14,6 +14,8 @@ import { log } from "./log";
 import { buildAppMenu } from "./menu";
 import { setDockBadge, showWorkspaceNotification } from "./notifications";
 import { DESKTOP_ORIGIN, rewriteHandshakeHeaders } from "./origin";
+import { createExecutorConfigStore } from "./executor-config";
+import { createExecutorHost, type ExecutorHost } from "./executor-host";
 import { readSettingsFile, resolveServerUrl } from "./settings";
 import { createTokenStore } from "./token-store";
 import { createUpdater } from "./updater";
@@ -43,6 +45,8 @@ const RENDERER_ROOT = fileURLToPath(new URL("../renderer/", import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 let quitting = false;
 let daemonManager: DaemonManager | null = null;
+// executor（plan 116）：before-quit 要够得着它，故提到模块级。
+let executorHost: ExecutorHost | null = null;
 
 function showMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -61,6 +65,9 @@ function sendToRenderer(channel: string, payload: unknown): void {
 const settingsPath = () => join(app.getPath("userData"), "settings.json");
 const tokenPath = () => join(app.getPath("userData"), "session-token.bin");
 const windowStatePath = () => join(app.getPath("userData"), "window-state.json");
+// executor（plan 116）：非敏感项与 API key 分两个文件，后者同样 safeStorage 加密。
+const executorSettingsPath = () => join(app.getPath("userData"), "executor.json");
+const executorKeyPath = () => join(app.getPath("userData"), "executor-key.bin");
 
 function currentServerUrl(): string {
   return resolveServerUrl({
@@ -109,6 +116,9 @@ if (!app.requestSingleInstanceLock()) {
   app.on("before-quit", () => {
     quitting = true;
     daemonManager?.dispose();
+    // executor（plan 116）：在跑的任务必须落明确终态并停掉工具进程组。
+    // 「app 关了任务就中断」是已接受的产品约束，但静默消失不是——CLI 那头会永久轮询。
+    executorHost?.shutdown();
     log.info("退出");
   });
 
@@ -142,6 +152,21 @@ if (!app.requestSingleInstanceLock()) {
       onError: (stage, error) => log.warn(`会话 token ${stage} 失败，按未登录处理`, error),
     });
     if (!safeStorage.isEncryptionAvailable()) log.warn("safeStorage 加密不可用：会话 token 不落盘，每次启动需重新登录");
+
+    // executor（plan 116）：配置 + 作业表 + runner 全在主进程；渲染层只当 device 通道的信使。
+    const executorConfig = createExecutorConfigStore({
+      settingsPath: executorSettingsPath(),
+      keyPath: executorKeyPath(),
+      codec: safeStorage,
+      onError: (stage, error) => log.warn(`executor 配置 ${stage} 失败`, error),
+    });
+    const executor = createExecutorHost({
+      config: executorConfig,
+      runnerPath: join(__dirname, "executor-runner.js"),
+      sendToRenderer,
+      log: (message) => log.info(message),
+    });
+    executorHost = executor;
 
     // 自动更新：generic provider 读仓库 desktop-updates 分支的 latest-mac.yml；状态变化广播给渲染层，
     // 版本准入被拒的状态页据此显示「需要更新」。quitAndInstall 前把 quitting 置位，close 钩子才放行关窗。
@@ -208,6 +233,11 @@ if (!app.requestSingleInstanceLock()) {
         daemonRemove: () => void daemon.remove(),
         daemonOpenFdaGuide: daemon.openFdaGuide,
         daemonDismissError: daemon.dismissError,
+        getExecutorSettings: executor.getSettings,
+        setExecutorModel: executor.setModel,
+        setExecutorApiKey: executor.setApiKey,
+        executorInbound: executor.inbound,
+        executorChannel: executor.setChannel,
       },
       trusted,
     );
