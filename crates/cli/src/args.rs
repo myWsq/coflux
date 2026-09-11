@@ -9,8 +9,10 @@ use std::collections::{HashMap, HashSet};
 
 const STRING_OPTIONS: &[&str] = &[
     "server", "name", "shell", "title", "cmd", "lines", "timeout", "text", "version", "bin-dir",
+    // executor（plan 116）：入参只有 prompt 与读写模式两样，不给 model 覆盖
+    "prompt",
 ];
-const BOOL_OPTIONS: &[&str] = &["enter", "no-start", "purge", "follow", "help"];
+const BOOL_OPTIONS: &[&str] = &["enter", "no-start", "purge", "follow", "help", "write"];
 const SHORT_OPTIONS: &[(char, &str)] = &[('f', "follow"), ('h', "help")];
 
 #[derive(Debug, Default, PartialEq)]

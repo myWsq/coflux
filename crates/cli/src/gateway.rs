@@ -160,23 +160,36 @@ pub fn post_json(port: u16, path: &str, body: &str, timeout: Duration) -> Result
     parse_response(&raw)
 }
 
-/// 发一条 `/agent` 请求并返回 daemon 的 JSON 应答；失败即 `die`（文案对齐 node 版 `agentPost`）。
-/// 请求体自动补 pid / ppid / cwd 三个字段。刻意不做自动重试：terminal new 有副作用。
-pub fn agent_post(mut body: Map<String, Value>) -> Value {
-    let port = match local_gateway_port() {
-        Ok(port) => port,
-        Err(error) => crate::die(&error),
-    };
+/// `/agent` 请求的两类失败。分开是为了 executor 的提交：**只有** Transport 才允许用同一个
+/// submissionId 重投（daemon 侧按它去重），Refused 重投没有任何意义。
+pub enum AgentError {
+    /// 连不上 / 写不出去 / 读超时——请求是否已被执行**未知**
+    Transport(String),
+    /// daemon 明确拒绝（含配置错误）：原样是给 agent 看的一句话
+    Refused(String),
+}
+
+impl AgentError {
+    /// 落到 stderr 的最终文案（对齐 node 版 `agentPost`）。
+    pub fn message(&self) -> String {
+        match self {
+            Self::Transport(error) => {
+                format!("连不上本机 daemon：{error}（daemon 没在跑？先看 cofluxd status）")
+            }
+            Self::Refused(error) => error.clone(),
+        }
+    }
+}
+
+/// 发一条 `/agent` 请求并返回 daemon 的 JSON 应答。请求体自动补 pid / ppid / cwd 三个字段。
+/// 刻意不在这里做自动重试：terminal new 有副作用；要重投的调用方自己决定（见 executor submit）。
+pub fn agent_post_result(mut body: Map<String, Value>) -> Result<Value, AgentError> {
+    let port = local_gateway_port().map_err(AgentError::Refused)?;
     body.insert("pid".into(), Value::from(pid()));
     body.insert("ppid".into(), Value::from(ppid()));
     body.insert("cwd".into(), Value::from(caller_cwd()));
     let payload = Value::Object(body).to_string();
-    let response = match post_json(port, "/agent", &payload, agent_timeout()) {
-        Ok(response) => response,
-        Err(error) => crate::die(&format!(
-            "连不上本机 daemon：{error}（daemon 没在跑？先看 cofluxd status）"
-        )),
-    };
+    let response = post_json(port, "/agent", &payload, agent_timeout()).map_err(AgentError::Transport)?;
     let parsed: Option<Value> = serde_json::from_slice(&response.body).ok();
     let is_ok = parsed
         .as_ref()
@@ -191,9 +204,17 @@ pub fn agent_post(mut body: Map<String, Value>) -> Value {
             .filter(|text| !text.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| format!("daemon 返回 {}", response.status));
-        crate::die(&error);
+        return Err(AgentError::Refused(error));
     }
-    parsed.unwrap_or(Value::Null)
+    Ok(parsed.unwrap_or(Value::Null))
+}
+
+/// 发一条 `/agent` 请求；失败即 `die`（文案对齐 node 版 `agentPost`）。
+pub fn agent_post(body: Map<String, Value>) -> Value {
+    match agent_post_result(body) {
+        Ok(value) => value,
+        Err(error) => crate::die(&error.message()),
+    }
 }
 
 #[cfg(test)]
