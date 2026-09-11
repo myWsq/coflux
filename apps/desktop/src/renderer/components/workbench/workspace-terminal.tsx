@@ -9,6 +9,7 @@ import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { ChangesView } from "@/components/workbench/changes-view";
+import { DRAG_REGION_STYLE, NO_DRAG_REGION_STYLE } from "@/components/workbench/drag-region";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
@@ -359,8 +360,14 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   return (
     <>
       {/* 单栏顶栏：名称（如有）＋ 可点的分支按钮 │ 终端 Tabs（Tab 用间距而非竖线分隔）＋ 新建/端口。
-          目录工作区（设备详情，plan 048）保留 Tabs/新建/端口，不渲染分支按钮与「变更」tab。 */}
-      <header className="col-start-1 row-start-1 flex h-9 min-w-0 items-center gap-2 border-b border-border bg-background px-3">
+          目录工作区（设备详情，plan 048）保留 Tabs/新建/端口，不渲染分支按钮与「变更」tab。
+          顶栏整条是窗口拖拽区（plan 108）：空白处按住能拖窗口、双击走 macOS 标题栏双击偏好。
+          代价是拖拽区吞掉指针事件——以后往顶栏里加任何可点/可悬浮的元素，都必须给它带上
+          NO_DRAG_REGION_STYLE，否则在桌面版里点不到、Tooltip 也不出（见 drag-region.ts）。 */}
+      <header
+        className="col-start-1 row-start-1 flex h-9 min-w-0 items-center gap-2 border-b border-border bg-background px-3"
+        style={DRAG_REGION_STYLE}
+      >
         {isDirWorkspace ? null : (
           <>
             <BranchMenu
@@ -371,8 +378,9 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                 isDisabled: Boolean(pendingBranch),
                 variant: "ghost",
                 size: "sm",
-                // ghost 默认色偏亮、内边距偏大：压到与顶栏辅助元素一致（内联样式压 StyleX）
-                style: { color: "var(--secondary-foreground)", height: 24, paddingInline: 6, gap: 6 },
+                // ghost 默认色偏亮、内边距偏大：压到与顶栏辅助元素一致（内联样式压 StyleX）。
+                // Astryx Button 把 style 合到 <button> 本身、不套包裹层，no-drag 落点正确。
+                style: { color: "var(--secondary-foreground)", height: 24, paddingInline: 6, gap: 6, ...NO_DRAG_REGION_STYLE },
               }}
               listBranches={listBranches}
               takenBranches={takenBranches}
@@ -392,6 +400,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                   ? "bg-accent text-foreground"
                   : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
               )}
+              style={NO_DRAG_REGION_STYLE}
               onClick={() => updateView("changes")}
             >
               <FileDiff className={cn("size-3 shrink-0", view === "changes" ? "opacity-90" : "opacity-50")} />
@@ -429,6 +438,8 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                   "group flex h-7 max-w-52 shrink-0 items-center rounded-md text-sm transition-colors",
                   isActive ? "bg-accent text-foreground" : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
                 )}
+                // 整个 tab 项挖出拖拽区，内部的切换按钮 / 端口菜单 / 关闭按钮都落在这块 no-drag 矩形里
+                style={NO_DRAG_REGION_STYLE}
               >
                   <button
                     className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left"
@@ -496,6 +507,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                   ? "bg-accent text-foreground"
                   : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
               )}
+              style={NO_DRAG_REGION_STYLE}
             >
               <button
                 className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left"
@@ -513,6 +525,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           <Tooltip content={`新建终端 ${modPrefix}T`} placement="below">
             <button
               className="ml-0.5 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-wait disabled:opacity-50"
+              style={NO_DRAG_REGION_STYLE}
               onClick={createTerminal}
               disabled={creating}
             >
@@ -529,6 +542,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex h-5 items-center gap-1 rounded px-1.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                style={NO_DRAG_REGION_STYLE}
               >
                 :{preview.port}
                 <ExternalLink className="size-2.5" />
