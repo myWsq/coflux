@@ -2,10 +2,13 @@ import { setInterval, setTimeout } from "node:timers";
 import electronUpdater from "electron-updater";
 
 import type { DesktopUpdateState } from "../shared/desktop-bridge";
+import { log } from "./log";
 import { INITIAL_UPDATE_STATE, reduceUpdateState, type UpdaterEvent } from "./update-state";
 
 // electron-updater 是 CommonJS（autoUpdater 经 getter 惰性导出）：从 ESM 主进程用默认导入再解构最稳。
 const { autoUpdater } = electronUpdater;
+// 更新检查/下载的过程日志与主进程同一份文件（plan 106）
+autoUpdater.logger = log;
 
 /** 周期检查间隔；另在启动后延迟一次。版本准入被拒时渲染层还会主动触发一次。 */
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;

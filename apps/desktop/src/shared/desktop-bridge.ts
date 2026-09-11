@@ -4,7 +4,7 @@
  * 三方都只从这里 type-import；文件里只有类型，不带任何运行时代码。
  *
  * 桥接面刻意最小：服务器地址 / 自报 Origin / 通知 / Dock 角标 / 「聚焦工作区」回调 / 原生菜单命令 /
- * 更新提示。不暴露 Node、fs、shell 之类通用能力。
+ * 更新提示 / 会话 token 存取。不暴露 Node、fs、shell 之类通用能力。
  */
 
 export type DesktopUpdateStatus = "idle" | "checking" | "available" | "downloading" | "downloaded" | "not-available" | "error";
@@ -46,4 +46,11 @@ export type DesktopBridge = {
   installUpdate(): void;
   getUpdateState(): Promise<DesktopUpdateState>;
   onUpdateState(listener: (state: DesktopUpdateState) => void): () => void;
+  /**
+   * 会话 token（plan 106）：主进程用 safeStorage 加密落 userData，渲染层不落任何明文。
+   * 读不到（加密不可用 / 文件损坏 / 解密失败）返回空串 = 未登录。
+   */
+  getSessionToken(): Promise<string>;
+  setSessionToken(token: string): void;
+  clearSessionToken(): void;
 };

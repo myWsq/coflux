@@ -49,6 +49,15 @@ const bridge: DesktopBridge = {
   onUpdateState(listener) {
     return subscribe<DesktopUpdateState>(IPC.updateState, listener);
   },
+  getSessionToken() {
+    return (ipcRenderer.invoke(IPC.getSessionToken) as Promise<unknown>).then((token) => (typeof token === "string" ? token : ""));
+  },
+  setSessionToken(token: string) {
+    ipcRenderer.send(IPC.setSessionToken, String(token));
+  },
+  clearSessionToken() {
+    ipcRenderer.send(IPC.clearSessionToken);
+  },
 };
 
 contextBridge.exposeInMainWorld("cofluxDesktop", bridge);

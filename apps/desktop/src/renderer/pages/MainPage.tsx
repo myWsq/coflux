@@ -1,25 +1,18 @@
 import { useEffect, useState } from "react";
 
 import { Workbench } from "@/components/workbench/workbench";
-import { createCofluxClient, type TokenStorage } from "@coflux/client";
-import { BUILD_ID, SERVER_URL, TOKEN_KEY, desktop } from "@/config";
+import { createCofluxClient } from "@coflux/client";
+import { BUILD_ID, SERVER_URL, desktop } from "@/config";
+import { createBridgeTokenStorage } from "@/session-token";
 
-/** 会话 token 的存取（plan 106 第一片先落 localStorage，第二片换成主进程 safeStorage）。 */
-function createTokenStorage(): TokenStorage {
-  return {
-    read: () => localStorage.getItem(TOKEN_KEY) ?? "",
-    write: (token) => localStorage.setItem(TOKEN_KEY, token),
-    clear: () => localStorage.removeItem(TOKEN_KEY),
-  };
-}
-
-export function MainPage() {
+export function MainPage({ initialToken }: { initialToken: string }) {
   // 一次性初始化（组件体每次渲染都跑，createCofluxClient 内部含副作用/命令式资源，
   // 必须用 useState 惰性初始化保证只创建一次）。
   const [client] = useState(() =>
     createCofluxClient({
       serverUrl: SERVER_URL,
-      tokenStorage: createTokenStorage(),
+      // 会话 token 的真相在主进程 safeStorage（plan 106）：启动时已经取回，这里只在内存持有并把变化转发回去。
+      tokenStorage: createBridgeTokenStorage(desktop, initialToken),
       buildId: BUILD_ID,
       // 桌面按控制面协议版本准入（plan 105），build-id 只作标识。
       clientKind: "desktop",

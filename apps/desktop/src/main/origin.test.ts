@@ -10,10 +10,11 @@ const baseHeaders = {
   "User-Agent": "coflux-desktop",
 };
 
-test("桌面 Origin 是稳定的 https 值，且与 Web 的 app.coflux.dev 不同", () => {
+test("桌面 Origin 是稳定的 https 值：发布后即 grant 绑定的一部分，不能变", () => {
   assert.equal(new URL(DESKTOP_ORIGIN).protocol, "https:");
   assert.equal(new URL(DESKTOP_ORIGIN).origin, DESKTOP_ORIGIN);
-  assert.notEqual(DESKTOP_ORIGIN, "https://app.coflux.dev");
+  // 与冻结的线上 web 的 Origin（app 子域）不同，grant 列表里能区分桌面 app
+  assert.equal(DESKTOP_ORIGIN, "https://desktop.coflux.dev");
 });
 
 test("中心 /client 与 loopback /device 的握手都改：Origin 换成桌面值，其余头原样", () => {

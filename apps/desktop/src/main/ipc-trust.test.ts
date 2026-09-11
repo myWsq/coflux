@@ -15,7 +15,7 @@ test("dev 渲染层同源可信；其它 host / scheme / 空值都不可信", ()
   assert.equal(isTrustedRendererUrl("http://localhost:5274/", trusted), true);
   assert.equal(isTrustedRendererUrl("http://localhost:5274/x", trusted), true);
   assert.equal(isTrustedRendererUrl("http://localhost:5273/", trusted), false);
-  assert.equal(isTrustedRendererUrl("https://app.coflux.dev/", trusted), false);
+  assert.equal(isTrustedRendererUrl("https://example.com/", trusted), false);
   assert.equal(isTrustedRendererUrl("coflux-app://evil/", trusted), false);
   assert.equal(isTrustedRendererUrl("coflux-app://app.evil/", trusted), false);
   assert.equal(isTrustedRendererUrl("", trusted), false);
