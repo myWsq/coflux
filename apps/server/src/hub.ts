@@ -1218,7 +1218,7 @@ export class Hub {
     // workspaceLocate / workspaceForget（plan 103）也不看它：那两条改的是**归属**而不是本次请求的
     // 目标，路径与既有工作区 id 在各自的 payload 里，worker 也恒把这个字段留空。
     let target = workspace;
-    const declared = request.workspaceId.trim();
+    const declared = agentText(request.workspaceId);
     if (declared && declared !== workspace.id) {
       const proposed = await this.store.getWorkspace(declared);
       // 必须同账号**同设备**：终端要在这台机器上跑（MCP create_terminal 只查账号，那里终端可以
@@ -1292,7 +1292,7 @@ export class Hub {
                   daemonId: currentWorkspace.daemonId,
                   projectId: currentWorkspace.projectId,
                   workspaceId: currentWorkspace.id,
-                  title: value.title.trim() || "agent 终端",
+                  title: agentText(value.title) || "agent 终端",
                   status: TaskStatus.IDLE,
                   sessionId,
                   createdAt: ts,
@@ -1427,17 +1427,17 @@ export class Hub {
     reply: (payload: AgentControlResultPayload) => void,
     fail: (error: string) => void,
   ): Promise<void> {
-    const path = value.path.trim();
+    const path = agentText(value.path);
     if (!path) return void fail("定位请求缺少路径");
     // 目录工作区没有项目，谈不上「同一个项目下的另一个 worktree」：不适用，零副作用。
     if (isDirWorkspace(originWorkspace)) {
       return void fail("本终端开在目录工作区（无项目），coflux 不跟随 worktree");
     }
-    const branch = value.branch.trim();
+    const branch = agentText(value.branch);
     if (branch && (!validBoundedText(branch, MAX_BRANCH_BYTES) || /\s/.test(branch))) {
       return void fail("worktree 分支名无效");
     }
-    const declared = value.workspaceId.trim();
+    const declared = agentText(value.workspaceId);
     const createdWorkspaceId = declared ? "" : randomUUID();
 
     const outcome = await this.store.transaction(async (tx) => {
@@ -1545,7 +1545,7 @@ export class Hub {
     reply: (payload: AgentControlResultPayload) => void,
     fail: (error: string) => void,
   ): Promise<void> {
-    const workspaceId = value.workspaceId.trim();
+    const workspaceId = agentText(value.workspaceId);
     if (!workspaceId) return void fail("worktree 已删的请求缺少工作区 id");
     if (isDirWorkspace(originWorkspace)) {
       return void fail("本终端开在目录工作区（无项目），coflux 不跟随 worktree");
@@ -4154,6 +4154,16 @@ export class Hub {
 /** 目录工作区（无 repo 终端，plan 045）：projectId 为空即目录工作区，判定收敛在此一处 */
 function isDirWorkspace(ws: Workspace): boolean {
   return !ws.projectId;
+}
+
+/** agent 控制载荷里的字符串字段：缺席按空串处理（plan 103 返修 R3）。
+ *
+ * 真实链路上这些字段永远存在——protobuf 解码给每个 string 补默认空串。但手工构造的载荷
+ * （单元测试、将来别的内部调用方）可以整个漏掉一个字段，那时 `undefined.trim()` 会把整条请求
+ * 变成一个异常：调用方等不到回执，只能干等到超时。缺字段的语义本来就等同于空串，让它显式等同。
+ * 有值时行为一字不变。 */
+function agentText(value: string | undefined | null): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function validOperationResult(operation: PreparedOperationRecord, report: DeviceOperationReport, payload: DeviceEnvelope["payload"]): boolean {
