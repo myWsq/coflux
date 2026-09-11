@@ -5,6 +5,7 @@ import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, LoaderCircle, MessageSquare, Monitor, Package, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
+import { AccountFooter } from "@/components/workbench/account-footer";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { ActivityDots } from "@/components/workbench/pending-dots";
@@ -222,8 +223,10 @@ export function Sidebar(props: SidebarProps) {
       .sort((left, right) => (left.isMain === right.isMain ? left.createdAt - right.createdAt : left.isMain ? -1 : 1));
 
   return (
+    // 高度跟随父容器而不是 h-screen：断线横幅出现时根容器加 pt-7，写死一屏高会把底部 28px
+    // （正好是账号脚部那一行）裁掉。横幅本身不动。
     <aside
-      className="relative flex h-screen shrink-0 flex-col border-r border-border bg-sidebar text-base"
+      className="relative flex h-full min-h-0 shrink-0 flex-col border-r border-border bg-sidebar text-base"
       style={{ width: sidebarWidth }}
     >
       {/* 红绿灯（x=14,y=14）内嵌在这条空白带里，它同时是侧栏的窗口拖拽带（见 drag-region.ts）。 */}
@@ -654,6 +657,10 @@ export function Sidebar(props: SidebarProps) {
           </div>
         </section>
       </div>
+
+      {/* 账号脚部（plan 110）：固定在滚动区之外，不随项目/设备列表滚动；不声明拖拽区。 */}
+      <AccountFooter client={client} />
+
       <div
         className="group/resize absolute inset-y-0 -right-[3px] z-20 w-1.5 cursor-col-resize touch-none"
         onDoubleClick={resetSidebarWidth}
