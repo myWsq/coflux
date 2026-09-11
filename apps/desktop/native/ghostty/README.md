@@ -3,6 +3,21 @@
 只面向 arm64 / macOS 26+。默认关闭：`COFLUX_GHOSTTY=1` 才会延迟加载 Node-API addon；
 默认 xterm 路径不加载原生库。此分支不是产品发布，所有新增验收由编排者在会话外执行。
 
+## 本地预览（编排者 2026-09-12 实测）
+
+```sh
+COFLUX_GHOSTTY=1 COFLUX_TERMINAL_METRICS=1 COFLUX_SERVER_URL=wss://api.coflux.dev/client pnpm -C apps/desktop dev
+```
+
+两个会卡住人的环境事实：
+
+- 新 worktree 的 `node_modules` 里没有 Electron 二进制（pnpm 跳过 postinstall），`pnpm dev` 直接报
+  `Error: Electron uninstall`。用
+  `node node_modules/.pnpm/electron@44.3.0/node_modules/electron/install.js` 从
+  `~/Library/Caches/electron` 的缓存 zip 解压，不需要联网。
+- dev 默认服务器是 `ws://localhost:8787/client`（`src/main/settings.ts` 的 `DEV_SERVER_URL`）。要连生产就按上面传
+  `COFLUX_SERVER_URL`；未打包实例的 userData 是 `Coflux-dev`，与安装版不共用 token，需要重新登录一次。
+
 ## 构建与命令
 
 从仓库根目录执行，以下命令本轮未运行：
