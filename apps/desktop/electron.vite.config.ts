@@ -40,7 +40,15 @@ export default defineConfig(({ command }) => {
       plugins: [externalizeDepsPlugin()],
       build: {
         rollupOptions: {
-          input: resolve(__dirname, "src/main/index.ts"),
+          // 两个入口：主进程本体，以及 executor runner（plan 116）。
+          // runner 是 utilityProcess 的子进程入口，必须是独立产物——主进程 fork 的是文件路径，
+          // 不是模块。名字要稳定，主进程按 out/main/executor-runner.js 定位它。
+          // pi 由 externalizeDepsPlugin 保持 external，运行时从 node_modules 解析（它在 dependencies 里，
+          // 会被 electron-builder 打进 asar）。
+          input: {
+            index: resolve(__dirname, "src/main/index.ts"),
+            "executor-runner": resolve(__dirname, "src/main/executor-runner.ts"),
+          },
         },
       },
     },
