@@ -2,3 +2,5 @@
 out/
 # 图标导出的中间产物（iconset），最终 icon.png 提交
 build/*.iconset/
+# 内置 daemon 三件 + VERSION 的落位目录（scripts/stage-daemon.mjs 生成，electron-builder extraResources 源）
+build/daemon/
