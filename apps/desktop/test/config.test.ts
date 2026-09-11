@@ -109,7 +109,8 @@ test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 sec
   assert.ok(publishIndex >= 0, "缺少 GitHub Release 步骤");
   assert.match(release.steps[publishIndex].with?.files ?? "", /blockmap/); // 差分更新要 blockmap 也在 Release 上
   const rewriteIndex = release.steps.findIndex((step) => step.run?.includes("releases/download"));
-  const pushIndex = release.steps.findIndex((step) => step.run?.includes("desktop-updates"));
+  // release 说明那步也提到 desktop-updates，按「git push + 分支名」定位真正的推送步
+  const pushIndex = release.steps.findIndex((step) => step.run?.includes("git push") && step.run.includes("desktop-updates"));
   assert.ok(rewriteIndex > publishIndex, "清单改写必须在 Release 上传之后");
   assert.ok(pushIndex > rewriteIndex, "推分支必须在清单改写之后");
   assert.match(release.steps[pushIndex].run ?? "", /latest-mac\.yml/);
