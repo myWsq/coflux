@@ -11,6 +11,13 @@
 
 ## Status
 
+- **ARCHIVED（2026-09-12 用户决定：不合入 main，不再推进）**。代码全部留在分支
+  `dev/20260911-desktop-ghostty-spike`（`ca87e59` → `1ca52ec`，43 文件 +2282 行），main 无任何改动。
+  spike 的**自动化门全部通过**（见下方「Spike 结论」），未判的是 G1 快照 grapheme、G3 中文 IME、
+  G5 几何、G7 签名交付、G8 性能这五道需要人眼与真机的门。**归档不等于此路不通**：本 plan 证明了
+  「Electron 主进程 addon 叠 Ghostty 原生视图 + relay 字节改道」在 Electron 44 上可跑通且 50 轮压力
+  零崩溃（plan 100 那次未定位的崩溃没有复现）。将来若重启这条路线，从本分支的
+  `apps/desktop/native/ghostty/README.md` 与本文件的结论读起，不必重做调研与地基。
 - Priority: P2
 - Effort: L
 - Risk: HIGH（主进程原生 addon：崩溃带走整个 app；libghostty 嵌入 API 上游未稳定；plan 100 的原生路线曾死于 Ghostty 崩溃根因未定位）
