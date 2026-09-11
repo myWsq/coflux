@@ -236,8 +236,10 @@ Validation: `cargo build -p coflux-supervisor -p coflux-worker` -> exit 0；`nod
 ## Scope
 
 In scope:
-- `proto/coflux/v1/device.proto`
-- `crates/worker/src/agent_ctl.rs`、`crates/worker/src/device.rs`、`crates/worker/src/gateway.rs`（executor 通路所需的最小改动）
+- `proto/coflux/v1/device.proto` 及其三端生成产物（`crates/protocol/src/gen/**`、`packages/protocol/src/gen/**`、
+  `packages/swift-client/Sources/CofluxProtocol/Generated/**`）——生成产物由 buf 重新生成，不手改
+- `crates/worker/src/agent_ctl.rs`（或拆成 `agent_ctl/` 模块目录）、`crates/worker/src/device.rs`、
+  `crates/worker/src/gateway.rs`、`crates/worker/src/hook.rs`（`/agent` 端点解析与分发新 action）——executor 通路所需的最小改动
 - `crates/cli/src/commands.rs`、`crates/cli/src/main.rs`、`crates/cli/src/args.rs`
 - `apps/desktop/src/main/**`（host 注册、作业表、写锁、runner、Seatbelt profile、配置与凭证）
 - `apps/desktop/src/preload/**`、`apps/desktop/src/shared/**`（窄桥接类型）
