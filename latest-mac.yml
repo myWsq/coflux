@@ -1,8 +1,8 @@
-version: 0.1.8
+version: 1.0.0
 files:
-  - url: https://github.com/myWsq/coflux/releases/download/desktop-v0.1.8/coflux-0.1.8-arm64.zip
-    sha512: Ph+zcNANbu5kAedHegY/IBy0ChbYST0JSbCDaB54F4r7X4HAeolqLacY87x+C5xGCxD6ck54Zt4KR9pmDw/o4Q==
-    size: 135238604
-path: https://github.com/myWsq/coflux/releases/download/desktop-v0.1.8/coflux-0.1.8-arm64.zip
-sha512: Ph+zcNANbu5kAedHegY/IBy0ChbYST0JSbCDaB54F4r7X4HAeolqLacY87x+C5xGCxD6ck54Zt4KR9pmDw/o4Q==
-releaseDate: '2026-09-11T17:30:08.207Z'
+  - url: https://github.com/myWsq/coflux/releases/download/v1.0.0/coflux-1.0.0-arm64.zip
+    sha512: IA3FXkd64UNCt85choQHpDzpMfZP6KeKwamu2OHnSmKSRLxPGhO8JtACO2M/bfXu0hTrUot53JQGPp8Ww8yTYw==
+    size: 136296654
+path: https://github.com/myWsq/coflux/releases/download/v1.0.0/coflux-1.0.0-arm64.zip
+sha512: IA3FXkd64UNCt85choQHpDzpMfZP6KeKwamu2OHnSmKSRLxPGhO8JtACO2M/bfXu0hTrUot53JQGPp8Ww8yTYw==
+releaseDate: '2026-09-11T20:24:10.239Z'
