@@ -7,10 +7,9 @@ import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { ActivityDots } from "@/components/workbench/pending-dots";
-import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
+import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
-import { isDesktop } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 
 /** 心跳往返低于此值算「快」（绿），否则「慢」（黄）。局域网直连通常个位数到几十 ms，
@@ -32,7 +31,7 @@ function ActivityIcon({ activity, labeled }: { activity: WorkspaceActivity; labe
 }
 
 /** 桌面 app（plan 103）隐藏了系统标题栏，红绿灯（x=14,y=14）内嵌到侧栏顶部：这条空白带既给红绿灯让位，
- * 也是唯一的窗口拖拽区（-webkit-app-region: drag）。浏览器里不渲染。 */
+ * 也是唯一的窗口拖拽区（-webkit-app-region: drag）。 */
 const DESKTOP_TITLEBAR_HEIGHT = 38;
 const DESKTOP_DRAG_REGION_STYLE = { height: DESKTOP_TITLEBAR_HEIGHT, WebkitAppRegion: "drag" } as CSSProperties;
 
@@ -122,7 +121,7 @@ export function Sidebar(props: SidebarProps) {
   } | null>(null);
   const createMenuProjectId = props.createMenuProjectId;
   const setCreateMenuProjectId = props.onCreateMenuProjectIdChange;
-  const modPrefix = shortcutModifierPrefix(useIsStandalone());
+  const modPrefix = SHORTCUT_MODIFIER_PREFIX;
 
   function updateSidebarWidth(width: number) {
     const nextWidth = clampSidebarWidth(width);
@@ -231,7 +230,7 @@ export function Sidebar(props: SidebarProps) {
       className="relative flex h-screen shrink-0 flex-col border-r border-border bg-sidebar text-base"
       style={{ width: sidebarWidth }}
     >
-      {isDesktop() ? <div className="shrink-0" style={DESKTOP_DRAG_REGION_STYLE} /> : null}
+      <div className="shrink-0" style={DESKTOP_DRAG_REGION_STYLE} />
       <div className="flex min-h-0 flex-1 flex-col pt-1.5">
         <section className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           <div className="mb-1.5 flex h-7 items-center px-2">

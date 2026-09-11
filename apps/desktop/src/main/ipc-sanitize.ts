@@ -1,4 +1,4 @@
-import type { DesktopNotification } from "../../../web/src/desktop-bridge";
+import type { DesktopNotification } from "../shared/desktop-bridge";
 
 // 渲染层 IPC 载荷的校验（纯函数，不 import electron，供 ipc.ts 与单测共用）。
 

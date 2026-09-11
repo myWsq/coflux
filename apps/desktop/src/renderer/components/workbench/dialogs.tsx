@@ -9,7 +9,7 @@ import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from "@astryxdesi
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 
-import { shortcutModifiers, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
+import { SHORTCUT_MODIFIERS } from "@/components/workbench/shortcut-modifier";
 
 type WorkspaceRenameDialogProps = {
   workspace: Workspace | null;
@@ -254,9 +254,9 @@ export type ConfirmAction = {
 };
 
 /** 键位展示：物理键位组合，纯展示不做输入解析（解析逻辑见 use-global-shortcuts.ts）。
- * 修饰键顺序遵循 macOS 菜单惯例：⌃⌥⇧⌘。前缀随 PWA standalone 环境变（⌃⌘ ↔ ⌘）。 */
-function shortcutRows(standalone: boolean): { keys: string[]; description: string }[] {
-  const mod = shortcutModifiers(standalone);
+ * 修饰键顺序遵循 macOS 菜单惯例：⌃⌥⇧⌘。 */
+function shortcutRows(): { keys: string[]; description: string }[] {
+  const mod = SHORTCUT_MODIFIERS;
   return [
     { keys: [...mod, "T"], description: "新建终端" },
     { keys: [...mod, "W"], description: "关闭当前终端" },
@@ -278,7 +278,7 @@ function KeyCap({ label }: { label: string }) {
 
 /** 快捷键帮助面板：Cmd+/ 打开，再按一次或 Esc 关闭；键位表硬编码（6 条快捷键不值得配置化）。 */
 export function ShortcutsHelpDialog(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  const rows = shortcutRows(useIsStandalone());
+  const rows = shortcutRows();
   return (
     <AstryxDialog isOpen={props.open} onOpenChange={props.onOpenChange} width={380}>
       <Layout

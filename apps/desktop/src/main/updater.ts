@@ -1,7 +1,7 @@
 import { setInterval, setTimeout } from "node:timers";
 import electronUpdater from "electron-updater";
 
-import type { DesktopUpdateState } from "../../../web/src/desktop-bridge";
+import type { DesktopUpdateState } from "../shared/desktop-bridge";
 import { INITIAL_UPDATE_STATE, reduceUpdateState, type UpdaterEvent } from "./update-state";
 
 // electron-updater 是 CommonJS（autoUpdater 经 getter 惰性导出）：从 ESM 主进程用默认导入再解构最稳。

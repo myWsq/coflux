@@ -9,7 +9,7 @@ import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { ChangesView } from "@/components/workbench/changes-view";
-import { shortcutModifierPrefix, useIsStandalone } from "@/components/workbench/use-shortcut-modifier";
+import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
 import { ClawdGlyph } from "@/components/workbench/clawd-glyph";
@@ -107,7 +107,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     ),
   );
   const daemons = useStore(client.store, (state) => state.daemons);
-  const modPrefix = shortcutModifierPrefix(useIsStandalone());
+  const modPrefix = SHORTCUT_MODIFIER_PREFIX;
   const lastError = useStore(client.store, (state) => state.lastError);
   const ports = useStore(client.store, (state) => state.ports);
   // agent presence（plan 073/075）：引用只在实际变化时更新（worker 变化才发），直接订阅。

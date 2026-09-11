@@ -1,8 +1,8 @@
-import type { DesktopUpdateState } from "../../../web/src/desktop-bridge";
+import type { DesktopUpdateState } from "../shared/desktop-bridge";
 
 /**
  * 自动更新的状态机（plan 103）：electron-updater 事件 → 渲染层可展示的状态。纯函数，主进程
- * updater.ts 驱动它并把结果广播给渲染层；Web 的 outdated 状态页按它渲染「需要更新」提示。
+ * updater.ts 驱动它并把结果广播给渲染层；渲染层的 outdated 状态页按它渲染「需要更新」提示。
  */
 export type UpdaterEvent =
   | { type: "checking" }

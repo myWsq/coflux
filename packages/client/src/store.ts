@@ -89,7 +89,7 @@ import {
 } from "./device-router";
 
 export type { AuthCredential, ConnectionStatus } from "./connection";
-// "outdated"：构建版本失配，reload 一次仍未拿到新 bundle（plan 033）——不是认证失败，
+// "outdated"：版本准入被拒（plan 033 / 105：桌面按控制面协议版本）——不是认证失败，
 // UI 须走独立展示面，不与 auth-failed 的 loginError 混用（语义不同，混用会误导用户）。
 export type AuthState = "need-login" | "authenticating" | "authed" | "auth-failed" | "outdated";
 export type PortPreview = { port: number; url: string };
@@ -123,21 +123,34 @@ export type LocalSessionState = {
 };
 
 export type DeviceTransportOptions = {
-  /** desktop 为 true；mobile 为 false，只使用中心 opaque relay。 */
+  /** 是否尝试 loopback direct；false 只使用中心 opaque relay。 */
   enableLocalTransport: boolean;
   identityDatabaseName: string;
-  origin?: string;
+  /** 自报 Origin（loopback grant 绑定的一部分）：client 不推导 location，由调用方给出。 */
+  origin: string;
 };
 
 export type OfflineCatalogStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 /**
- * 离线目录缓存（plan 103，桌面 app 用）：中心离线也能冷启动看本机终端。开启后每次中心目录变化都把
+ * 会话 token 的持久化（plan 106）：client 不知道 token 落在哪（桌面是主进程 safeStorage 加密文件），
+ * 只经这三个同步方法读写。read 在创建 client 时调用一次——调用方须保证此时 token 已就绪；
+ * write 在登录成功（authOk 带新 token）时调用，clear 在登出 / 认证失败时调用。
+ */
+export type TokenStorage = {
+  /** 没有 token 返回空串 */
+  read(): string;
+  write(token: string): void;
+  clear(): void;
+};
+
+/**
+ * 离线目录缓存（plan 103）：中心离线也能冷启动看本机终端。开启后每次中心目录变化都把
  * 渲染工作台所需的目录（daemons / projects / workspaces / tasks / ports / sessionAgents）写进 storage；
  * 冷启动有 token 但首连拿不到 authOk（连不上、authOk 前断开、或超时）时装载缓存进 store 并置 authed，
  * 连接状态保持非 connected（重连横幅照常显示），RUNNING 终端经缓存的 loopback grant attach
  * （session read/control 是 offline grant scope，不需要中心签发的 lease）。中心随后连上并 authOk 时，
- * 真实 snapshot 照旧覆盖缓存。登出 / 认证失败 / 换账号时清掉。浏览器不传、行为零变化。
+ * 真实 snapshot 照旧覆盖缓存。登出 / 认证失败 / 换账号时清掉。不传 = 不缓存、不装载。
  */
 export type OfflineCatalogOptions = {
   storage: OfflineCatalogStorage;
@@ -150,19 +163,15 @@ export type OfflineCatalogOptions = {
 export type CofluxClientOptions = {
   /** /client WS 端点地址（含协议与路径）。 */
   serverUrl: string;
-  /** 会话 token 的 localStorage key，两端（web/移动）各自命名空间。 */
-  tokenStorageKey: string;
-  /** 构建版本（git short SHA；vite dev 固定 "dev"），随认证上报供 server 做版本准入（plan 033）。 */
+  /** 会话 token 的存取；创建 client 时同步 read 一次。 */
+  tokenStorage: TokenStorage;
+  /** 构建版本（git short SHA；dev 固定 "dev"），随认证上报供 server 做版本准入（plan 033）。 */
   buildId: string;
-  /** 客户端类型（plan 105）：desktop 由 server 按控制面协议版本准入（不看 build-id）；不传 = web。 */
+  /** 客户端类型（plan 105）：desktop 由 server 按控制面协议版本准入（不看 build-id）；不传 = web（冻结的线上 web 仍在上报）。 */
   clientKind?: ClientKind;
   /** 所有客户端统一走 DeviceTransport；是否尝试 loopback direct 由 enableLocalTransport 决定。 */
   deviceTransport: DeviceTransportOptions;
-  /** 版本失配（clientOutdated）时是否先 reload 一次拿新 bundle（plan 033 的浏览器语义，默认 true）。
-   * 桌面 app（plan 103）的渲染层随 app 打包，reload 永远拿不到新 bundle：传 false 直接进入 outdated
-   * 状态页，由 app 触发自动更新检查。两种情况都停止重连——版本拒绝不是可重试的断线。 */
-  reloadOnOutdated?: boolean;
-  /** 离线目录缓存；不传 = 不缓存、不装载（浏览器）。 */
+  /** 离线目录缓存；不传 = 不缓存、不装载。 */
   offlineCatalog?: OfflineCatalogOptions;
 };
 
@@ -252,7 +261,7 @@ function withoutSetValue(values: Set<string>, value: string): Set<string> {
  * 连接生命周期需要与调用方显式配对 disconnect()。
  */
 export function createCofluxClient(options: CofluxClientOptions) {
-  let token = localStorage.getItem(options.tokenStorageKey) ?? "";
+  let token = options.tokenStorage.read();
   // 本地已有会话 token = 之前认证成功过，首条连接就该纳入自动重连。此前初值是 false，
   // 于是刷新后的第一条连接若在 authOk 到达前断掉（链路被静默掐、或 server 的 authDeadline
   // 关闭），reconnectCredential() 返回 null，连接永久停在断开态等用户再刷一次。
@@ -284,11 +293,6 @@ export function createCofluxClient(options: CofluxClientOptions) {
     lastError: null,
     snapshotRevision: 0,
   }));
-
-  // 版本失配 reload 防循环（plan 033）：一次性守卫（key 带 tokenStorageKey 命名空间，
-  // 与 web/mobile 各自 token key 一致，避免同源双 app 互相踩）——首次 reload 拿新 bundle；
-  // reload 后仍失配（如 index.html 被缓存）则不再 reload，改停止重连 + 提示强制刷新。
-  const outdatedReloadKey = `${options.tokenStorageKey}_outdated_reloaded_for`;
 
   // 离线目录缓存（plan 103）：只在 controlAuthenticated 期间写（写的是中心确认过的目录）；
   // 装载只发生一次、且只在「有 token、还没拿到过任何 snapshot」的冷启动窗口里。
@@ -452,7 +456,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
   const deviceRouter: DeviceRouter = createDeviceRouter({
     enableLocalTransport: options.deviceTransport.enableLocalTransport,
     identityDatabaseName: options.deviceTransport.identityDatabaseName,
-    origin: options.deviceTransport.origin ?? location.origin,
+    origin: options.deviceTransport.origin,
     sendControl: (payload) => connection.send(payload),
     onTransportState: (daemonId, transport) => {
       store.setState((state) => ({ deviceTransports: { ...state.deviceTransports, [daemonId]: transport } }));
@@ -564,7 +568,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         connection.resetBackoff();
         if (value.clientToken) {
           token = value.clientToken;
-          localStorage.setItem(options.tokenStorageKey, value.clientToken);
+          options.tokenStorage.write(value.clientToken);
         }
         send({ case: "clientSubscribe", value: {} });
         flushPendingTaskRemovals();
@@ -574,7 +578,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         controlAuthenticated = false;
         deviceRouter.setControlOnline(false);
         token = "";
-        localStorage.removeItem(options.tokenStorageKey);
+        options.tokenStorage.clear();
         clearOfflineCatalog();
         store.setState({
           loginError: "登录失败：用户名或密码错误",
@@ -586,18 +590,11 @@ export function createCofluxClient(options: CofluxClientOptions) {
       case "clientOutdated": {
         controlAuthenticated = false;
         deviceRouter.setControlOnline(false);
-        // server 判定本连接的构建版本失配（plan 033）：token 不清（无感升级），只判断是否已为
-        // 当前 buildId reload 过，避免 index.html 被缓存导致 reload 后仍失配的无限刷新循环。
-        // reloadOnOutdated=false（桌面 app）跳过 reload：bundle 在 app 里，刷新不会变新。
-        if ((options.reloadOnOutdated ?? true) && sessionStorage.getItem(outdatedReloadKey) !== options.buildId) {
-          sessionStorage.setItem(outdatedReloadKey, options.buildId);
-          location.reload();
-        } else {
-          // reload 后仍失配（如 index.html 被缓存）：停止重连，进入专用状态页（非认证失败，
-          // 不设 loginError——auth-failed 展示面语义是"账号/密码错了"，混用会误导用户）。
-          shouldRetry = false;
-          store.setState({ authState: "outdated" });
-        }
+        // server 判定本连接版本过旧（plan 033 / 105）：token 不清（升级后无感续用），停止重连——版本拒绝
+        // 不是可重试的断线；进入专用状态页（非认证失败，不设 loginError——auth-failed 展示面语义是
+        // "账号/密码错了"，混用会误导用户），由 app 触发自动更新检查。
+        shouldRetry = false;
+        store.setState({ authState: "outdated" });
         break;
       }
       case "stateSnapshot": {
@@ -825,7 +822,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     void deviceRouter.reset(true);
     send({ case: "clientLogout", value: {} });
     token = "";
-    localStorage.removeItem(options.tokenStorageKey);
+    options.tokenStorage.clear();
     connection.stop();
     store.setState({
       authState: "need-login",

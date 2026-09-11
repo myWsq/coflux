@@ -1,9 +1,9 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
-import type { DesktopBridge, DesktopCommand, DesktopNotification, DesktopUpdateState } from "../../../web/src/desktop-bridge";
+import type { DesktopBridge, DesktopCommand, DesktopNotification, DesktopUpdateState } from "../shared/desktop-bridge";
 import { IPC, type Bootstrap } from "../shared/ipc";
 
-// 桥接对象的类型真相源在 apps/web/src/desktop-bridge.ts（web 拥有契约），这里只实现它。
+// 桥接对象的类型真相源在 ../shared/desktop-bridge.ts，这里只实现它。
 // sandbox preload：只能是 CommonJS、只有 electron 的 contextBridge/ipcRenderer 可用，没有 Node 能力可泄露。
 
 const boot = ipcRenderer.sendSync(IPC.bootstrap) as Bootstrap;

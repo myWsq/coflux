@@ -32,8 +32,8 @@ import {
   taskCloseNeedsConfirmation,
   type WorkbenchSelection,
 } from "@/components/workbench/workbench-state";
-import { WORKSPACE_KEY } from "@/config";
-import { getDesktopBridge, type DesktopBridge, type DesktopUpdateState } from "@/desktop-bridge";
+import { WORKSPACE_KEY, desktop } from "@/config";
+import type { DesktopBridge, DesktopUpdateState } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
 
@@ -63,7 +63,7 @@ function persistSelection(selection: WorkbenchSelection | null) {
 }
 
 /**
- * 桌面通知 + Dock 角标的驱动器（plan 103）：只在桌面 app 里挂载，自己订阅 store（tasks/sessionAgents
+ * 桌面通知 + Dock 角标的驱动器（plan 103）：自己订阅 store（tasks/sessionAgents
  * 高频变化，不让根 Workbench 跟着重渲染），按两次快照的差分决定「新进入等待」才通知；角标按当前
  * 等待数设置、恢复即减。主进程只执行，不另起连接。渲染 null。
  */
@@ -108,7 +108,7 @@ function DesktopAttention({ client, bridge, selectedWorkspaceId }: { client: Cof
 }
 
 /**
- * 桌面 app 的版本失配页（plan 103）：中心只接受与部署的 web 同 SHA 的桌面版，被拒不是断线——
+ * 版本准入被拒页（plan 103 / 105）：只在 app 的控制面协议版本低于中心最低支持版本时出现，被拒不是断线——
  * 挂载即触发一次更新检查，按 electron-updater 状态显示进度/重启按钮。
  */
 function DesktopOutdated({ bridge }: { bridge: DesktopBridge }) {
@@ -149,8 +149,6 @@ function DesktopOutdated({ bridge }: { bridge: DesktopBridge }) {
 }
 
 export function Workbench({ client }: { client: CofluxClient }) {
-  // 桌面 app 桥接（plan 103）：存在即桌面；浏览器里为 null，下面所有桌面分支都不生效。
-  const desktop = getDesktopBridge();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [selection, setSelection] = useState<WorkbenchSelection | null>(readStoredSelection);
@@ -334,12 +332,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   // 点系统通知 → 主进程把窗口带到前台并回传工作区 id → 选中它（工作区已删则安静忽略）。
   useEffect(() => {
-    if (!desktop) return;
     return desktop.onFocusWorkspace((workspaceId) => {
       if (client.store.getState().workspaces.some((workspace) => workspace.id === workspaceId)) selectWorkspace(workspaceId);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [desktop, client]);
+  }, [client]);
 
   function selectDevice(daemonId: string) {
     const next: WorkbenchSelection = { kind: "device", id: daemonId };
@@ -549,23 +546,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
     );
   }
 
-  // 版本失配、reload 一次仍未拿到新 bundle（plan 033）：不是认证失败，独立展示面，
-  // 不复用登录表单的 error 语义（混用会误导用户以为账号/密码有问题）。
-  // 桌面 app 不会 reload（bundle 在 app 里）：改显示「需要更新」并触发自动更新检查。
-  if (surface === "outdated") {
-    if (desktop) return <DesktopOutdated bridge={desktop} />;
-    return (
-      <AuthShell>
-        <AuthMessage
-          icon={<RefreshCw className="size-5 text-primary" />}
-          title="客户端已更新"
-          description="服务器已部署新版本，请刷新页面获取；若刷新后仍看到此页，请强制刷新（忽略缓存）后重试。"
-        >
-          <Button className="mt-4 w-full" label="刷新页面" variant="primary" onClick={() => location.reload()} />
-        </AuthMessage>
-      </AuthShell>
-    );
-  }
+  // 版本准入被拒（协议过旧，plan 105）：不是认证失败，独立展示面，不复用登录表单的 error 语义
+  // （混用会误导用户以为账号/密码有问题）。bundle 在 app 里、reload 不会变新：显示「需要更新」并触发自动更新检查。
+  if (surface === "outdated") return <DesktopOutdated bridge={desktop} />;
 
   if (surface === "login") {
     return (
@@ -594,7 +577,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         showReconnectBanner && "pt-7",
       )}
     >
-      {desktop ? <DesktopAttention client={client} bridge={desktop} selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null} /> : null}
+      <DesktopAttention client={client} bridge={desktop} selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null} />
       <Sidebar
         client={client}
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
