@@ -44,6 +44,9 @@ mac:
     # 内置 daemon 三件 + VERSION（plan 113）：由 scripts/stage-daemon.mjs 从显式输入目录落到 build/daemon/，
     # 进 Contents/Resources/daemon/（不进 asar——asar 完整性校验开着，二进制只能走 extraResources）。
     # 目录名与 src/main/daemon-paths.ts 的 DAEMON_RESOURCE_DIR 同值。
+    # 同一条 extraResources 还顺带带上 build/daemon/claude-plugin/（plan 115：stage 脚本从仓库
+    # integrations/claude-plugin 整目录拷来），落成 Contents/Resources/daemon/claude-plugin——
+    # coflux 终端里的 claude 经 LaunchAgent 的 COFLUX_CLAUDE_PLUGIN_DIR 自动加载的就是它，不需要新的 from/to。
     - from: build/daemon
       to: daemon
   # 内置三件是 Resources 下的裸可执行文件，@electron/osx-sign 默认不会扫到：显式列出让它们也拿到

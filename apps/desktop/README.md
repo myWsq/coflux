@@ -29,6 +29,11 @@ pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/ico
 三件经 `mac.binaries` 拿 Developer ID + hardened runtime 签名并进公证。未打包的 dev 实例也从 `build/daemon` 找三件，
 没跑过 stage 脚本时状态对象报「本构建不带 daemon」，只能看状态、不能接入。
 
+**内置 coflux 插件（plan 115）**：同一个 stage 脚本还把**仓库内**的 `integrations/claude-plugin` 整目录逐字节拷到
+`build/daemon/claude-plugin/`（不做任何改写，`.mcp.json` 的中心地址照旧写死；来源缺失或缺 `.claude-plugin/plugin.json`
+**直接失败**，与三件同一口径，CI 不需要新输入），随同一条 `extraResources` 进 `Contents/Resources/daemon/claude-plugin/`。
+插件是 node / sh 脚本，**不进** `mac.binaries`、不做 ad-hoc 重签、不落 `~/.coflux`。app 更新原地替换包内这份，不做版本目录。
+
 依赖分类：electron-builder 只打 `out/**` 与 `dependencies`。渲染层用的库（react / xterm / astryx / shiki / zustand /
 `@coflux/client` 等）由 Vite 打进 `out/renderer`，因此放 devDependencies；主进程运行时按 `externalizeDepsPlugin`
 外置、需要在 asar 的 node_modules 里的（`electron-updater`、`electron-log`）才放 dependencies。
@@ -72,5 +77,14 @@ pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/ico
   判定 / 文本 / 版本比较 / 状态派生都是无 Electron 依赖的纯模块（`src/main/daemon-*.ts`），只有 `daemon-manager.ts` 碰
   launchctl / codesign / fs.watch；桥接面只多一个状态对象和六个无参窄动词。主进程日志只记事件，不写凭证文件内容。
   未打包的 dev 实例接管的是同一个真实 daemon（`~/.coflux` 全机唯一）。
+- **coflux 终端里的 claude 自动带插件**（plan 115）：LaunchAgent plist 的 `EnvironmentVariables` 除 `COFLUX_HOME` 外多一个
+  `COFLUX_CLAUDE_PLUGIN_DIR`，值是本 app 包内 `Contents/Resources/daemon/claude-plugin` 的绝对路径（含空格照写，`&`/`<` 做 XML 转义）；
+  supervisor 把它拷进会话环境，会话的 shell 集成据此给 `claude` 加 `--plugin-dir`。契约只有这个变量名，daemon 不解析、不校验、不落盘；
+  变量缺失、为空或目录不存在时 `claude` 的行为与今天完全一致（这也是逃生口）。没有任何设置页与开关。
+  plist 何时写：接入流程之外，**app 启动时**若渲染结果与磁盘上的不同（npm 接入的机器、旧版 app 写的没有这个键、app 换了位置）
+  **只重写文件**，不调 launchctl、不重启 daemon——reload 会结束本机所有终端；新值在下一次 supervisor 启动（面板点「重启」、
+  「重启并更新」、开机）时生效。plist 不存在（未接入）时不凭空创建；**本构建不带插件时启动期一律不碰 plist**——
+  没跑过 stage 脚本的 dev 实例渲染出的是 npm 形态，照写会把安装版写进去的 `COFLUX_CLAUDE_PLUGIN_DIR` 抹掉（同一台 Mac 上两者共用 `~/.coflux`）；
+  接入流程是用户的显式动作，不受这条约束。除这一个键外 plist 与 npm 版 `cofluxd` 逐字同构，两边仍可互换。
 - **安全基线**：sandbox/contextIsolation 开、nodeIntegration 关、Fuses 关 RunAsNode 等、响应带 CSP、
   权限默认拒绝、IPC 校验发送方来源与载荷；新窗口/外链一律系统浏览器。桥接面不暴露 Node / fs / shell。

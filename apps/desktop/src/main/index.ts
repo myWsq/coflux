@@ -6,7 +6,7 @@ import { app, dialog, Menu, protocol, safeStorage, session, shell, type BrowserW
 
 import { IPC } from "../shared/ipc";
 import { APP_ORIGIN, APP_SCHEME, APP_URL, registerAppProtocol } from "./app-protocol";
-import { locateDaemonBundle, resolveDaemonBundleDir } from "./daemon-bundle";
+import { locateClaudePluginDir, locateDaemonBundle, resolveDaemonBundleDir } from "./daemon-bundle";
 import { createDaemonManager, execCommand, type DaemonManager } from "./daemon-manager";
 import { daemonHomePaths } from "./daemon-paths";
 import { registerIpc } from "./ipc";
@@ -160,9 +160,14 @@ if (!app.requestSingleInstanceLock()) {
     const daemonBundleDir = resolveDaemonBundleDir({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() });
     const daemonBundle = locateDaemonBundle(daemonBundleDir);
     log.info("内置 daemon", daemonBundle ? { dir: daemonBundle.dir, version: daemonBundle.version } : { dir: daemonBundleDir, bundled: false });
+    // 内置 coflux 插件（plan 115）：与三件同在资源目录下，经 LaunchAgent 的 COFLUX_CLAUDE_PLUGIN_DIR 注入给
+    // supervisor，coflux 终端里的 claude 由 supervisor 的 shell 集成翻成 --plugin-dir 自动带上；不带就什么都不注入。
+    const claudePluginDir = locateClaudePluginDir(daemonBundleDir);
+    log.info("内置 coflux 插件", claudePluginDir ? { dir: claudePluginDir } : { bundled: false });
     const daemon = createDaemonManager({
       paths: daemonHomePaths(homedir(), process.env),
       bundle: daemonBundle,
+      claudePluginDir,
       clientServerUrl: serverUrl,
       hostname: hostname(),
       uid: process.getuid?.() ?? 0,

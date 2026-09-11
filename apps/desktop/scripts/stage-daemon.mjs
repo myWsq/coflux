@@ -2,6 +2,8 @@
 // 内置 daemon 三件的落位脚本（plan 113）：把 coflux-supervisor / coflux-worker / cofluxd 与版本戳 VERSION
 // 从一个显式给出的产物目录复制到 build/daemon/——electron-builder.yml 的 extraResources 只认这个固定目录，
 // 主进程未打包时也从这里找（src/main/daemon-bundle.ts）。
+// 同时（plan 115）把仓库里的 integrations/claude-plugin 整目录逐字节拷到 build/daemon/claude-plugin/，
+// 随同一个 extraResources 进 Contents/Resources/daemon/claude-plugin——coflux 终端里的 claude 自动带上的就是它。
 //
 // 输入（二选一，缺失即失败，绝不静默出一个不带 daemon 的包）：
 //   node scripts/stage-daemon.mjs --from <dir>
@@ -12,14 +14,20 @@
 // COFLUX_RELEASE_VERSION 同一个值。
 //
 // 复制后统一 chmod 0755：GitHub artifact 不保留执行位，launchd 起不来的二进制比没有更糟。
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DESKTOP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-// 与 src/main/daemon-paths.ts 的 DAEMON_BINARIES / DAEMON_VERSION_FILE 同值；test/config.test.ts 守住两边一致
+const REPO_ROOT = resolve(DESKTOP_ROOT, "..", "..");
+// 与 src/main/daemon-paths.ts 的 DAEMON_BINARIES / DAEMON_VERSION_FILE / CLAUDE_PLUGIN_RESOURCE_DIR 同值；
+// test/config.test.ts 守住两边一致
 const BINARIES = ["coflux-supervisor", "coflux-worker", "cofluxd"];
 const VERSION_FILE = "VERSION";
+const CLAUDE_PLUGIN_DIR = "claude-plugin";
+// 插件来源在仓库里（不是 CI 的新输入），与三件同一口径：缺失即失败
+const CLAUDE_PLUGIN_SOURCE = resolve(REPO_ROOT, "integrations", "claude-plugin");
+const CLAUDE_PLUGIN_MANIFEST = resolve(CLAUDE_PLUGIN_SOURCE, ".claude-plugin", "plugin.json");
 const STAGE_DIR = resolve(DESKTOP_ROOT, "build", "daemon");
 
 function fail(message) {
@@ -55,7 +63,15 @@ function resolveVersion(sourceDir) {
   return "dev";
 }
 
+function checkClaudePluginSource() {
+  if (!existsSync(CLAUDE_PLUGIN_SOURCE) || !statSync(CLAUDE_PLUGIN_SOURCE).isDirectory()) {
+    fail(`插件目录不存在或不是目录: ${CLAUDE_PLUGIN_SOURCE}（仓库内 integrations/claude-plugin）`);
+  }
+  if (!existsSync(CLAUDE_PLUGIN_MANIFEST)) fail(`插件目录缺少 .claude-plugin/plugin.json: ${CLAUDE_PLUGIN_SOURCE}`);
+}
+
 const sourceDir = resolveSourceDir();
+checkClaudePluginSource();
 const missing = BINARIES.filter((name) => {
   const path = resolve(sourceDir, name);
   return !existsSync(path) || !statSync(path).isFile() || statSync(path).size === 0;
@@ -72,4 +88,11 @@ for (const name of BINARIES) {
   chmodSync(target, 0o755);
 }
 writeFileSync(resolve(STAGE_DIR, VERSION_FILE), `${version}\n`);
-console.log(`✓ stage-daemon: ${BINARIES.join(", ")} + ${VERSION_FILE}(${version}) ← ${sourceDir} → ${STAGE_DIR}`);
+// 插件整目录原样拷（.claude-plugin / hooks / scripts / skills / .mcp.json / README / LICENSE 全带，
+// 一个字节都不改写：.mcp.json 的中心地址写死，不产生第二份插件变体）。脚本经 sh / node 调用，不需要执行位，
+// 也不进 mac.binaries（不是 Mach-O）。
+cpSync(CLAUDE_PLUGIN_SOURCE, resolve(STAGE_DIR, CLAUDE_PLUGIN_DIR), { recursive: true });
+console.log(
+  `✓ stage-daemon: ${BINARIES.join(", ")} + ${VERSION_FILE}(${version}) ← ${sourceDir} → ${STAGE_DIR}\n` +
+    `✓ stage-daemon: ${CLAUDE_PLUGIN_DIR}/ ← ${CLAUDE_PLUGIN_SOURCE}`,
+);
