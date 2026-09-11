@@ -110,7 +110,7 @@ test("内置 coflux 插件目录随 daemon 资源目录进包、不进 mac.binar
 
   // 来源目录在仓库里且是那份交付目录（改写它等于改插件，stage 只搬运）
   const source = resolve(repoRoot, "integrations/claude-plugin");
-  for (const entry of [".claude-plugin/plugin.json", "hooks/hooks.json", ".mcp.json", "skills/coflux/SKILL.md"]) {
+  for (const entry of [".claude-plugin/plugin.json", "hooks/hooks.json", "skills/coflux/SKILL.md"]) {
     assert.ok(existsSync(resolve(source, entry)), `插件交付目录缺少 ${entry}`);
   }
 

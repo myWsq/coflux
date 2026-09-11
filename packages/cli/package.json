@@ -8,6 +8,7 @@
   },
   "files": [
     "cofluxd.mjs",
+    "account-client.mjs",
     "release-pubkey.hex",
     "release-trust.mjs",
     "README.md",

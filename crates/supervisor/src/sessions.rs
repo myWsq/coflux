@@ -847,7 +847,7 @@ impl Sessions {
         command.env("COFLUX_WORKSPACE_ID", &context.workspace_id);
         command.env("COFLUX_TASK_ID", &task_id);
         command.env("COFLUX_SESSION_ID", &session_id);
-        command.env("COFLUX_MCP_URL", &context.mcp_url);
+        command.env_remove("COFLUX_MCP_URL");
         // plan 115：shell 集成——按 shell 的 basename 分派，给 shell 塞一段我们自己的 rc，由它在用户 rc
         // 全部跑完之后定义 claude 函数，把 COFLUX_CLAUDE_PLUGIN_DIR 翻译成 `claude --plugin-dir <dir>`。
         // ZDOTDIR / XDG_DATA_DIRS 是覆盖语义，与上面两段同理必须写在拷贝 std::env 之后（用户原来的
@@ -1863,6 +1863,24 @@ impl Sessions {
         self.outbound.disconnect(generation);
     }
 
+    /// 桌面退出确认直接读取本机事实，不依赖网络中的任务快照。
+    pub fn desktop_sessions(&self) -> Vec<serde_json::Value> {
+        let handles: Vec<_> = self
+            .map
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, session)| (id.clone(), session.clone()))
+            .collect();
+        handles
+            .into_iter()
+            .map(|(id, session)| {
+                let session = session.lock().unwrap();
+                serde_json::json!({"id":id,"taskId":session.task_id,"pid":session.pid})
+            })
+            .collect()
+    }
+
     pub fn shutdown(&self) {
         let sessions: Vec<SessionHandle> = self.map.lock().unwrap().values().cloned().collect();
         for session in sessions {
@@ -1904,8 +1922,14 @@ mod tests {
     #[test]
     fn prepend_path_segment_handles_empty_existing_and_multi_segment_paths() {
         // 空 / 缺失：只有这一段
-        assert_eq!(prepend_path_segment("/h/.coflux/bin", None), "/h/.coflux/bin");
-        assert_eq!(prepend_path_segment("/h/.coflux/bin", Some("")), "/h/.coflux/bin");
+        assert_eq!(
+            prepend_path_segment("/h/.coflux/bin", None),
+            "/h/.coflux/bin"
+        );
+        assert_eq!(
+            prepend_path_segment("/h/.coflux/bin", Some("")),
+            "/h/.coflux/bin"
+        );
         // 多段：前置，其余顺序不变
         assert_eq!(
             prepend_path_segment("/h/.coflux/bin", Some("/usr/local/bin:/usr/bin:/bin")),

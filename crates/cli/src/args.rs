@@ -8,9 +8,9 @@
 use std::collections::{HashMap, HashSet};
 
 const STRING_OPTIONS: &[&str] = &[
-    "server", "name", "shell", "title", "cmd", "lines", "timeout", "text", "version", "bin-dir",
+    "username", "workspace", "device", "project", "branch", "server", "name", "shell", "title", "cmd", "lines", "timeout", "text", "version", "bin-dir",
 ];
-const BOOL_OPTIONS: &[&str] = &["enter", "no-start", "purge", "follow", "help"];
+const BOOL_OPTIONS: &[&str] = &["password-stdin", "remote", "existing-branch", "json", "enter", "no-start", "purge", "follow", "help"];
 const SHORT_OPTIONS: &[(char, &str)] = &[('f', "follow"), ('h', "help")];
 
 #[derive(Debug, Default, PartialEq)]

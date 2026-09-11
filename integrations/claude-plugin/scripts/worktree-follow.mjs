@@ -136,7 +136,7 @@ function block(located) {
   if (located.branch) lines.push(`branch: ${located.branch}`);
   if (located.created) lines.push("This worktree was not known to coflux and has just been registered as a child workspace; it now shows in the user's sidebar.");
   lines.push(
-    `Pass ${located.workspaceId} as workspaceId to coflux MCP tools; COFLUX_WORKSPACE_ID still names the workspace this terminal was opened in and is now stale.`,
+    `Pass ${located.workspaceId} as workspaceId to coflux account CLI commands; COFLUX_WORKSPACE_ID still names the workspace this terminal was opened in and is now stale.`,
     "COFLUX_TASK_ID, COFLUX_SESSION_ID and COFLUX_PROJECT_ID are unchanged: the terminal itself did not move, only its workspace.",
     "The shell inside this terminal still sits in its original directory; that is expected and affects nothing you do.",
     "Run `cofluxd workspace` at any time to check where you are.",

@@ -84,14 +84,14 @@ export function AccountFooter({
         <DropdownMenuItem icon={<Server className="size-3.5" />} label="服务器地址…" onClick={() => desktop.showServerInfo()} />
         <DropdownMenuItem
           icon={<Monitor className="size-3.5" />}
-          label="本机 daemon"
+          label="这台 Mac"
           description={daemonLine ? (daemonLine.detail ? `${daemonLine.label} · ${daemonLine.detail}` : daemonLine.label) : "正在读取状态…"}
           endContent={daemonLine ? <StatusDot variant={daemonLine.tone} label={daemonLine.label} isPulsing={daemonLine.pulsing} /> : undefined}
           isDisabled={!daemonState}
           onClick={onOpenDaemonPanel}
         />
         <Divider />
-        <DropdownMenuItem icon={<LogOut className="size-3.5" />} label="登出" onClick={() => client.logout()} />
+        <DropdownMenuItem icon={<LogOut className="size-3.5" />} label="登出" onClick={() => { void desktop.logoutLocal().then((confirmed) => { if (confirmed) client.logout(false); }); }} />
       </DropdownMenu>
 
       {view.tail === "install" ? (

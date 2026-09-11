@@ -1,8 +1,8 @@
 /**
- * plan 090：MCP tools 的跨账号隔离（password 模式，两个用户）。
+ * 账号 API 的跨账号隔离（password 模式，两个用户）。
  *
  * 用户 A 拥有本栈的 daemon（startStack 以 A 的邮箱/密码起栈并授权设备），并导入项目、开终端；
- * 用户 B 走同一套 OAuth 流程拿到自己的 token。断言：B 的 token 看不到 A 的任何资产，且用 A 的资产 id
+ * 用户 B 走同一套 账号登录 流程拿到自己的 token。断言：B 的 token 看不到 A 的任何资产，且用 A 的资产 id
  * 调 tools 得到明确错误（与"不存在"同一句，不泄漏存在性）；A 自己的 token 能读到。
  *
  * 建用户走真实的管理员建号脚本（子进程），与 password.test.mjs 同一手法；DATABASE_URL 由本文件
@@ -17,7 +17,7 @@ import postgres from "postgres";
 import { TaskStatus } from "@coflux/protocol";
 import { ADMIN_PG_URL, startStack, mkRepo } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
-import { callTool, consentClient, obtainTokens } from "./oauth-harness.mjs";
+import { callOperation as callTool, loginAccount } from "./account-harness.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..", "..");
 const TSX = join(ROOT, "node_modules", ".bin", "tsx");
@@ -42,7 +42,7 @@ let workspaceId;
 let taskId;
 
 async function createTestDatabase() {
-  const name = `coflux_test_mcp_${randomUUID().replace(/-/g, "")}`;
+  const name = `coflux_test_account_${randomUUID().replace(/-/g, "")}`;
   const admin = postgres(ADMIN_PG_URL, { max: 1, ssl: "prefer" });
   try {
     await admin.unsafe(`CREATE DATABASE ${name}`);
@@ -95,10 +95,8 @@ before(async () => {
   c.send({ case: "taskStart", taskId, cols: 80, rows: 24 });
   await c.waitFor((m) => m.case === "taskUpdated" && m.task.id === taskId && m.task.status === TaskStatus.RUNNING, "task running", 15000);
 
-  wsA = await consentClient(stack, USER_A.email, USER_A.password);
-  wsB = await consentClient(stack, USER_B.email, USER_B.password);
-  tokenA = (await obtainTokens(BASE, wsA)).access_token;
-  tokenB = (await obtainTokens(BASE, wsB)).access_token;
+  tokenA = await loginAccount(BASE, USER_A.email, USER_A.password);
+  tokenB = await loginAccount(BASE, USER_B.email, USER_B.password);
 });
 
 after(async () => {
@@ -137,9 +135,6 @@ test("B 的 token 看不到 A 的任何资产", async () => {
 
 test("B 用 A 的资产 id 调 tools 得到明确错误", async () => {
   const cases = [
-    ["list_workspaces", { projectId }],
-    ["list_terminals", { workspaceId }],
-    ["list_ports", { workspaceId }],
     ["read_terminal", { terminalId: taskId }],
   ];
   for (const [name, args] of cases) {
@@ -183,4 +178,41 @@ test("B 用 A 的资产 id 调写 tools 同样得到「不存在或不属于当�
   const workspaces = (await callTool(BASE, tokenA, "list_workspaces", { projectId })).result.structuredContent.workspaces;
   assert.deepEqual(workspaces.map((w) => w.id), [workspaceId], "B 不能在 A 的项目下建/删工作区");
   assert.notEqual(workspaces[0].name, "hijacked");
+});
+
+test("账号 CLI 接口复用归属规则，拒绝另一账号操作及不支持的协议版本", async () => {
+  const login = await fetch(`${BASE}/api/client/login`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ protocolVersion: 1, username: USER_B.email, password: USER_B.password }),
+  });
+  assert.equal(login.status, 200);
+  const result = await login.json();
+  const command = async (value, protocolVersion = 1) => fetch(`${BASE}/api/client/command`, {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${result.value.token}` },
+    body: JSON.stringify({ protocolVersion, command: value }),
+  });
+  const snapshot = await (await command({ op: "snapshot" })).json();
+  assert.deepEqual(snapshot.value.devices, []);
+  assert.deepEqual(snapshot.value.workspaces, []);
+  for (const value of [
+    { op: "terminal.read", terminalId: taskId },
+    { op: "terminal.send", terminalId: taskId, text: "must-not-run" },
+    { op: "terminal.stop", terminalId: taskId },
+    { op: "workspace.remove", workspaceId },
+  ]) {
+    const response = await (await command(value)).json();
+    assert.equal(response.ok, false);
+    assert.match(response.error, /不存在或不属于/);
+  }
+  assert.equal((await command({ op: "snapshot" }, 999)).status, 400);
+  await command({ op: "logout" });
+  assert.equal((await command({ op: "snapshot" })).status, 401);
+});
+
+// 旧协议地址不再提供授权或工具服务，防止遗留入口绕过账号 API。
+test("MCP 与专用 OAuth 入口已移除", async () => {
+  for (const [method, path] of [["POST", "/mcp"], ["GET", "/mcp"], ["DELETE", "/mcp"], ["POST", "/oauth/register"], ["POST", "/oauth/token"], ["GET", "/oauth/authorize"], ["GET", "/oauth/consent"], ["GET", "/.well-known/oauth-authorization-server"], ["GET", "/.well-known/oauth-protected-resource"]]) {
+    const response = await fetch(`${BASE}${path}`, { method, redirect: "manual" });
+    assert.equal(response.status, 404, `${method} ${path}`);
+  }
 });

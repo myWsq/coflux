@@ -26,6 +26,8 @@ export type DesktopDaemonBusy = "install" | "start" | "restart" | "stop" | "remo
 export type DesktopDaemonFda = "granted" | "denied" | "unknown";
 
 export type DesktopDaemonState = {
+  runningTerminals?: number;
+  legacyInstallation?: boolean;
   status: DesktopDaemonStatus;
   /** 本构建是否自带三件；false（未打包 dev 实例没跑 stage 脚本）时「接入」「重启换新」都不可用，只能看状态 */
   bundled: boolean;
@@ -85,6 +87,8 @@ export type DesktopBridge = {
    * 渲染层自己弹不了——settings.json 路径与「打开设置文件」动作只有主进程有。
    */
   showServerInfo(): void;
+  connectLocal(): Promise<void>;
+  logoutLocal(): Promise<boolean>;
   notify(notification: DesktopNotification): void;
   /** 待处理工作区数；0 清除角标 */
   setBadge(count: number): void;

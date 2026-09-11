@@ -16,3 +16,6 @@ coflux-protocol = { path = "../protocol" }
 serde_json.workspace = true
 # getppid：/agent 与 /hook 请求体都带 ppid，worker 用调用方进程反查会话归属。
 libc = "0.2"
+# 账号命令使用系统独立的 HTTPS 通道，不要求 Node 或 MCP 宿主。
+ureq = { version = "2", features = ["json"] }
+url = "2"

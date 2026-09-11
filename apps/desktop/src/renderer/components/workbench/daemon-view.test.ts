@@ -143,7 +143,7 @@ test("引导三步：安装 → 启动 → 授权 依次推进；失败落到对
   const authorizing = resolveOnboardingSteps(PENDING, local);
   assert.deepEqual([authorizing.install, authorizing.start, authorizing.authorize], ["done", "done", "active"]);
   assert.equal(authorizeStepDetail(PENDING, local), "授权中…（用当前登录账号）");
-  assert.match(authorizeStepDetail({ ...PENDING, authToken: undefined }, local), /等待 daemon/);
+  assert.match(authorizeStepDetail({ ...PENDING, authToken: undefined }, local), /正在连接账号服务器/);
 
   const done = resolveOnboardingSteps(RUNNING, local);
   assert.deepEqual([done.install, done.start, done.authorize], ["done", "done", "done"]);

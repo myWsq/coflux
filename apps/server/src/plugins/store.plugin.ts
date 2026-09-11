@@ -47,7 +47,6 @@ async function bootstrap(store: Store) {
   // 获得确定的 GC 触发点，不能只依赖请求流量。
   const now = Date.now();
   await store.pruneClientTokens(now);
-  await store.pruneOAuthTokens(now);
   await store.expirePreparedOperations(now);
 
   log.info("bootstrap ready", { authProvider: config.authProvider });

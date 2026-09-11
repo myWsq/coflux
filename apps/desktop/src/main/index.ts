@@ -1,6 +1,9 @@
+import { startClientBroker } from "./client-broker";
+import { createHash } from "node:crypto";
+import { createDesktopAccount } from "./desktop-account";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, dialog, Menu, protocol, safeStorage, session, shell, type BrowserWindow } from "electron";
 
@@ -32,7 +35,9 @@ const trusted = { appOrigin: APP_ORIGIN, devRendererUrl };
 // 未打包（electron-vite dev / preview、本机 pack 之外的直接启动）与安装版不共用 userData：token、IndexedDB
 // 身份与 loopback grant 互不可见，本机联调不污染日常使用的安装版。必须在 requestSingleInstanceLock 之前设置
 // （单实例锁文件就在 userData 里），否则 dev 与安装版还会互相抢锁。
-if (!app.isPackaged) app.setPath("userData", `${app.getPath("userData")}-dev`);
+if (process.env.COFLUX_DESKTOP_USER_DATA) {
+  app.setPath("userData", resolve(process.env.COFLUX_DESKTOP_USER_DATA));
+} else if (!app.isPackaged) app.setPath("userData", `${app.getPath("userData")}-dev`);
 
 // electron-vite 惯例：preload / 渲染层产物按主进程模块的相对位置找（out/main → out/preload、out/renderer）。
 // 不用 app 的 appPath：`electron out/main/index.js` 直接启动时它指向 out/main，会多拼一层；
@@ -43,6 +48,7 @@ const RENDERER_ROOT = fileURLToPath(new URL("../renderer/", import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 let quitting = false;
 let daemonManager: DaemonManager | null = null;
+let localConnect: Promise<void> | null = null;
 
 function showMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -106,10 +112,20 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on("second-instance", showMainWindow);
 
-  app.on("before-quit", () => {
-    quitting = true;
-    daemonManager?.dispose();
-    log.info("退出");
+  let exitInFlight = false;
+  app.on("before-quit", (event) => {
+    if (quitting || !daemonManager) {
+      daemonManager?.dispose();
+      return;
+    }
+    event.preventDefault();
+    if (exitInFlight) return;
+    exitInFlight = true;
+    void daemonManager.stopForExit("quit").then((confirmed) => {
+      if (confirmed) { quitting = true; app.quit(); }
+    }).catch((error) => {
+      void dialog.showMessageBox({ type: "error", message: "未能退出 Coflux", detail: String(error), buttons: ["好"] });
+    }).finally(() => { exitInFlight = false; });
   });
 
   app.on("activate", () => {
@@ -147,31 +163,54 @@ if (!app.requestSingleInstanceLock()) {
     // 版本准入被拒的状态页据此显示「需要更新」。quitAndInstall 前把 quitting 置位，close 钩子才放行关窗。
     const updater = createUpdater({
       enabled: app.isPackaged,
-      beforeInstall: () => {
+      beforeInstall: async () => {
+        if (exitInFlight) return false;
+        exitInFlight = true;
+        // 等正在接入的操作收敛，避免应用退出后才启动新的本机实例。
+        if (localConnect) await localConnect;
+        await daemonManager?.refresh();
+        if (daemonManager?.getState().error) { exitInFlight = false; return false; }
         quitting = true;
+        return true;
       },
+      onInstallError: () => { quitting = false; exitInFlight = false; },
     });
     updater.onChange((state) => sendToRenderer(IPC.updateState, state));
 
     // 本机 daemon（plan 113）：内置三件在 Resources/daemon（dev 实例是仓库内 build/daemon，同 stage 脚本落位），
-    // 找不到时状态对象表达「本构建不带 daemon」而不崩。~/.coflux 与 LaunchAgent 全机唯一——dev 实例接管的
-    // 是同一个真实 daemon，尊重 COFLUX_HOME 让开发者能指到别处。判定 / 文本 / 版本比较全在纯模块，这里只接
-    // launchctl / codesign / shell 两跳。
+    // 找不到时通过状态提示。开发实例使用独立目录；打包实例尊重 COFLUX_HOME，便于隔离验收。
+    // 应用直接启动托管内核，只有迁移旧安装时才处理 LaunchAgent。
     const daemonBundleDir = resolveDaemonBundleDir({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() });
     const daemonBundle = locateDaemonBundle(daemonBundleDir);
     log.info("内置 daemon", daemonBundle ? { dir: daemonBundle.dir, version: daemonBundle.version } : { dir: daemonBundleDir, bundled: false });
-    // 内置 coflux 插件（plan 115）：与三件同在资源目录下，经 LaunchAgent 的 COFLUX_CLAUDE_PLUGIN_DIR 注入给
+    // 内置 coflux 插件（plan 115）：与三件同在资源目录下，经子进程环境 COFLUX_CLAUDE_PLUGIN_DIR 注入给
     // supervisor，coflux 终端里的 claude 由 supervisor 的 shell 集成翻成 --plugin-dir 自动带上；不带就什么都不注入。
     const claudePluginDir = locateClaudePluginDir(daemonBundleDir);
     log.info("内置 coflux 插件", claudePluginDir ? { dir: claudePluginDir } : { bundled: false });
+    const localPaths = daemonHomePaths(app.isPackaged && !process.env.COFLUX_HOME ? homedir() : app.getPath("userData"), app.isPackaged ? process.env : { ...process.env, COFLUX_HOME: join(app.getPath("userData"), "runtime") });
+    mkdirSync(localPaths.home, { recursive: true, mode: 0o700 });
+    const accountKey = createHash("sha256").update(serverUrl).digest("hex").slice(0, 16);
+    const localAccount = createDesktopAccount(localPaths.home, serverUrl, createTokenStore({
+      filePath: join(app.getPath("userData"), `desktop-account-${accountKey}.bin`), codec: safeStorage,
+      onError: (stage) => log.warn("本机账号安全存储失败", { stage }),
+    }));
     const daemon = createDaemonManager({
-      paths: daemonHomePaths(homedir(), process.env),
+      paths: localPaths,
       bundle: daemonBundle,
       claudePluginDir,
       clientServerUrl: serverUrl,
       hostname: hostname(),
       uid: process.getuid?.() ?? 0,
       platform: process.platform,
+      appPath: resolve(process.execPath, "../../.."),
+      confirmStop: async (reason, count) => {
+        const label = reason === "logout" ? "退出登录" : reason === "quit" ? "退出 Coflux" : reason === "restart" ? "重新启动本机终端" : reason === "migrate" ? "切换到 Coflux 应用管理" : "停止本机终端";
+        const result = await dialog.showMessageBox({ type: "warning", message: `${label}？`,
+          detail: count === null ? "切换会结束旧版本在这台 Mac 上的全部终端。项目文件不受影响。" : `这将结束本机 ${count} 个正在运行的终端及其中的程序。其他设备上的任务不受影响。`,
+          buttons: ["取消", label], defaultId: 0, cancelId: 0,
+        });
+        return result.response === 1;
+      },
       commands: {
         exec: execCommand,
         openExternal: (url) => void shell.openExternal(url),
@@ -181,9 +220,53 @@ if (!app.requestSingleInstanceLock()) {
     });
     daemonManager = daemon;
     daemon.onChange((state) => sendToRenderer(IPC.daemonState, state));
+    async function connectLocal(): Promise<void> {
+      if (exitInFlight || quitting) return;
+      if (localConnect) return localConnect;
+      localConnect = (async () => {
+        try {
+          const token = tokenStore.read();
+          if (!token) throw new Error("请先登录 Coflux");
+          await localAccount.connect(token);
+          if (exitInFlight || quitting) return;
+          await daemon.enroll();
+        } catch (error) {
+          log.warn("本机接入失败", String(error));
+          await dialog.showMessageBox({ type: "error", message: "本机暂未接入", detail: String(error), buttons: ["好"] });
+        } finally { localConnect = null; }
+      })();
+      return localConnect;
+    }
+    async function logoutLocal(): Promise<boolean> {
+      if (exitInFlight || quitting) return false;
+      exitInFlight = true;
+      try {
+        if (localConnect) await localConnect;
+        if (!await daemon.stopForExit("logout")) return false;
+        localAccount.logout(tokenStore.read());
+        if (!tokenStore.clear()) throw new Error("无法清除本机登录凭据，请重试退出登录");
+        // 本机已停止且 outbox 已持久化；断网不会阻止退出登录。
+        void localAccount.drain().catch(() => log.info("退出登录的云端清理将在联网后重试"));
+        return true;
+      } catch (error) {
+        await dialog.showMessageBox({ type: "error", message: "未能完成退出登录", detail: String(error), buttons: ["好"] });
+        return false;
+      } finally { exitInFlight = false; }
+    }
+    const closeClientBroker = startClientBroker(localPaths.home, serverUrl, () =>
+      !exitInFlight && !quitting && localAccount.accountId() ? tokenStore.read() : "",
+    );
+    app.once("will-quit", closeClientBroker);
+    const cleanupTimer = setInterval(() => {
+      if (!localConnect && !exitInFlight && localAccount.hasPending()) void localAccount.drain().catch(() => undefined);
+    }, 30000);
+    cleanupTimer.unref();
+
 
     registerIpc(
       {
+        connectLocal,
+        logoutLocal,
         bootstrap: () => ({ platform: process.platform, version: app.getVersion(), serverUrl, origin: DESKTOP_ORIGIN }),
         // 点通知：把窗口带到前台并让渲染层选中该工作区
         notify: (notification) =>
@@ -207,7 +290,7 @@ if (!app.requestSingleInstanceLock()) {
           void daemon.refresh();
           return daemon.getState();
         },
-        daemonEnroll: () => void daemon.enroll(),
+        daemonEnroll: () => void connectLocal(),
         daemonRestart: () => void daemon.restart(),
         daemonStop: () => void daemon.stop(),
         daemonRemove: () => void daemon.remove(),

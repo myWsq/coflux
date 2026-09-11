@@ -26,7 +26,7 @@
 # write anything else to stdout, and keep the block starting with "<" so no host mistakes it for
 # JSON. Everything about the daemon is best effort: no cofluxd, daemon down, daemon too old for the
 # locate command, a locate that runs out of budget, or an answer that is not JSON all fall back to
-# the environment variable. The six COFLUX_* variables are injected by the coflux daemon into every
+# the environment variable. The five COFLUX_* variables are injected by the coflux daemon into every
 # PTY it opens; they are passed to printf as arguments, never as a format string.
 
 [ -n "${COFLUX_WORKSPACE_ID:-}" ] || exit 0
@@ -62,16 +62,15 @@ fi
 printf '%s\n' \
   '<coflux-session>' \
   'You are running inside a coflux terminal. The user watches it from the coflux web/mobile app and can take it over at any time.' \
-  'Your coordinates (pass these ids to coflux MCP tools directly; do not look them up):' \
+  'Your coordinates (pass these ids to account CLI commands directly; do not look them up):' \
   "COFLUX_DEVICE_ID=${COFLUX_DEVICE_ID:-}" \
   "COFLUX_PROJECT_ID=${COFLUX_PROJECT_ID:-}" \
   "COFLUX_WORKSPACE_ID=${WORKSPACE_ID}" \
   "COFLUX_TASK_ID=${COFLUX_TASK_ID:-}" \
   "COFLUX_SESSION_ID=${COFLUX_SESSION_ID:-}" \
-  "COFLUX_MCP_URL=${COFLUX_MCP_URL:-}" \
   '(COFLUX_TASK_ID is this terminal. An empty COFLUX_PROJECT_ID means a directory workspace without a git repository.)' \
-  'Rule: for the workspace your cwd is in, use the zero-credential local commands `cofluxd terminal new|list|read|wait|send`, `cofluxd progress`, `cofluxd notify` and `cofluxd ports` (open a terminal the user can watch and take over, read/wait/type, report progress, call the user, get preview URLs). Use the center MCP server `coflux` only to reach beyond it (other workspaces or devices, or create_workspace for an isolated child workspace).' \
+  'Rule: in the current workspace use local `cofluxd terminal new|list|read|wait|send`, `cofluxd progress`, `cofluxd notify` and `cofluxd ports`. Across workspaces or devices use account CLI: `cofluxd workspace list/new`, `cofluxd terminal new --workspace <id>` and `cofluxd terminal read/send/wait <id> --remote`.' \
   'The workspace id above is where this terminal belongs right now. Enter a git worktree and coflux follows you: the terminal moves under that worktree in the sidebar, registering it as a child workspace if needed. Plain `cd` does not move it, but the local commands still act on the workspace your cwd is in: `cofluxd workspace` prints both.' \
-  'To delete a workspace use the MCP tool remove_workspace, or just let Claude Code clean up its own worktree on exit; never `git worktree remove` it yourself.' \
+  'Delete a workspace with `cofluxd workspace remove <id>`, or let Claude Code clean up its own worktree; never delete worktrees manually.' \
   'Load the `coflux` skill for the full playbook.' \
   '</coflux-session>'

@@ -7,7 +7,7 @@
 // a coflux child workspace is just a registered git worktree, so a session whose terminal belongs to
 // workspace A can end up working inside workspace B. From then on the local `cofluxd` commands act on
 // B (the daemon resolves the caller's cwd) while the terminal still hangs under A in the sidebar.
-// Without this block the agent would keep passing A's id to the coflux MCP tools.
+// Without this block the agent would keep passing A's id to the coflux account CLI commands.
 //
 // Both ids come from `cofluxd workspace`, never from $COFLUX_WORKSPACE_ID: that variable is frozen
 // when the PTY is spawned and only means "where this terminal was opened", so it goes stale as soon
@@ -23,7 +23,7 @@
 //
 // Stateless on purpose: while the session stays moved the block is printed on every prompt, so it
 // also comes back after a context compaction. The cost is that the block arrives with the *next*
-// prompt, not in the turn that moved: an agent that has to call an MCP tool right after moving runs
+// prompt, not in the turn that moved: an agent that has to call an account CLI command right after moving runs
 // `cofluxd workspace` itself (see the coflux skill).
 
 import { execFile } from "node:child_process";
@@ -91,7 +91,7 @@ function block(effective, path, owning) {
     `effective workspace path: ${path}`,
     `owning workspace id: ${owning} (where this terminal hangs in the user's sidebar)`,
     `Local cofluxd commands (terminal new|list|read|wait|send) now act on ${effective}: a terminal you open lands there and runs in its directory, list shows its terminals, and terminals of ${owning} read back as not found.`,
-    `Pass ${effective} as workspaceId to coflux MCP tools.`,
+    `Pass ${effective} as workspaceId to coflux account CLI commands.`,
     "COFLUX_TASK_ID and COFLUX_SESSION_ID are unchanged: this terminal itself did not move.",
     "Run `cofluxd workspace` at any time to check where you are.",
     "</coflux-session-moved>",

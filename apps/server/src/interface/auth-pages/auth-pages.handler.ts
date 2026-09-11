@@ -9,12 +9,9 @@ import { REMOTE_ADDRESS_HEADER } from "../../transport.js";
 import type { PageRequest } from "../../auth-pages.js";
 import {
   GetAuthorizePageContract,
-  GetOAuthConsentPageContract,
   GetProxyAuthPageContract,
   PostAuthorizeConfirmContract,
   PostAuthorizeLoginContract,
-  PostOAuthConsentDecideContract,
-  PostOAuthConsentLoginContract,
   PostProxyAuthLoginContract,
 } from "./auth-pages.contract.js";
 
@@ -33,18 +30,6 @@ export const PostAuthorizeLoginHandler = withSchema(PostAuthorizeLoginContract.s
 
 export const PostAuthorizeConfirmHandler = withSchema(PostAuthorizeConfirmContract.schemas, async () =>
   HubState.getOrFailed().authPages.authorizeConfirm(pageRequest(), RavenContext.getOrFailed().params.token ?? ""),
-);
-
-export const GetOAuthConsentPageHandler = withSchema(GetOAuthConsentPageContract.schemas, async () =>
-  HubState.getOrFailed().authPages.consentPage(pageRequest(), RavenContext.getOrFailed().query.request),
-);
-
-export const PostOAuthConsentLoginHandler = withSchema(PostOAuthConsentLoginContract.schemas, async () =>
-  HubState.getOrFailed().authPages.consentLogin(pageRequest()),
-);
-
-export const PostOAuthConsentDecideHandler = withSchema(PostOAuthConsentDecideContract.schemas, async () =>
-  HubState.getOrFailed().authPages.consentDecide(pageRequest()),
 );
 
 export const GetProxyAuthPageHandler = withSchema(GetProxyAuthPageContract.schemas, async () =>

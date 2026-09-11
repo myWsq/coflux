@@ -1,9 +1,9 @@
 /**
  * plan 092：每个 coflux PTY 会话注入 COFLUX_* 环境变量。
  *
- * 黑盒：中心只随建会话请求下发 id，supervisor 在 create_session 里组装六个变量。三条建会话路径各开一个
- * 终端、在里面把变量打出来，断言值与中心（MCP `list_*` / 广播里的 task）的 id 完全一致：
- *   ① MCP `create_terminal`（中心发起的 prepared session.create）：项目工作区六个变量齐全；
+ * 黑盒：中心只随建会话请求下发 id，supervisor 在 create_session 里组装五个变量。三条建会话路径各开一个
+ * 终端、在里面把变量打出来，断言值与中心（账号 API `list_*` / 广播里的 task）的 id 完全一致：
+ *   ① 账号 API `create_terminal`（中心发起的 prepared session.create）：项目工作区五个变量齐全；
  *      目录工作区 `COFLUX_PROJECT_ID` 存在但为空串；
  *   ② web 手开的终端（taskCreate + taskStart 的 prepared session.create，经 device-harness 自动执行）：
  *      attach 后输入 printf，经 read_terminal 读到；
@@ -30,11 +30,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo, CLI_BIN } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
-import { callTool, consentClient, obtainTokens } from "./oauth-harness.mjs";
+import { callOperation as callTool, loginAccount } from "./account-harness.mjs";
 
 const PORT = 8870;
 const BASE = `http://127.0.0.1:${PORT}`;
-const MCP_URL = `${BASE}/mcp`;
 const COFLUXD = fileURLToPath(new URL("../../packages/cli/cofluxd.mjs", import.meta.url));
 /** Rust 版 cofluxd（plan 112）：与 node 版同一组子命令、同样的 stdout 短语。 */
 const COFLUXD_RUST = CLI_BIN;
@@ -45,7 +44,6 @@ const ENV_NAMES = [
   "COFLUX_WORKSPACE_ID",
   "COFLUX_TASK_ID",
   "COFLUX_SESSION_ID",
-  "COFLUX_MCP_URL",
 ];
 const DUMP_ENV = "env | grep '^COFLUX_' | sort";
 
@@ -53,7 +51,6 @@ let stack;
 let repo;
 let device;
 let observer;
-let consentWs;
 let token;
 let projectId;
 let mainWorkspaceId;
@@ -119,7 +116,7 @@ function hasAllEnv(text) {
   return ENV_NAMES.every((name) => Object.hasOwn(env, name));
 }
 
-/** 断言六个变量齐全且与中心 id 一致。 */
+/** 断言五个变量齐全且与中心 id 一致。 */
 function assertEnv(env, expected) {
   for (const name of ENV_NAMES) assert.ok(Object.hasOwn(env, name), `${name} 必须存在（哪怕为空串）: ${JSON.stringify(env)}`);
   assert.equal(env.COFLUX_DEVICE_ID, expected.deviceId, "COFLUX_DEVICE_ID = 本机 daemon 的设备 id");
@@ -127,7 +124,7 @@ function assertEnv(env, expected) {
   assert.equal(env.COFLUX_WORKSPACE_ID, expected.workspaceId, "COFLUX_WORKSPACE_ID = 所属工作区 id");
   assert.equal(env.COFLUX_TASK_ID, expected.taskId, "COFLUX_TASK_ID = 本终端的任务 id");
   assert.equal(env.COFLUX_SESSION_ID, expected.sessionId, "COFLUX_SESSION_ID = 本 PTY 会话 id");
-  assert.equal(env.COFLUX_MCP_URL, MCP_URL, "COFLUX_MCP_URL = <COFLUX_PUBLIC_URL>/mcp");
+  assert.equal(env.COFLUX_MCP_URL, undefined, "新终端不再注入 账号 API 地址");
 }
 
 /** 从广播里拿某任务的 sessionId（建库时就写死，第一条 taskUpdated 就带）。 */
@@ -192,8 +189,7 @@ function initialEnvFile(sessionId) {
 before(async () => {
   const shellWrapper = writeShellWrapper(mkDir("coflux-env-shell-"));
   stack = await startStack({ port: PORT, serverEnv: { COFLUX_PUBLIC_URL: BASE }, daemonEnv: { COFLUX_SHELL: shellWrapper } });
-  consentWs = await consentClient(stack);
-  token = (await obtainTokens(BASE, consentWs)).access_token;
+  token = await loginAccount(BASE);
 
   repo = mkRepo();
   device = await openRelayDevice(stack);
@@ -206,14 +202,13 @@ before(async () => {
 });
 
 after(async () => {
-  consentWs?.close();
   device?.close();
   await stack?.stop();
   repo?.cleanup();
   for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
 });
 
-test("路径①：MCP create_terminal 开的命令终端里六个 COFLUX_* 齐全，值与中心 id 一致", async () => {
+test("路径①：账号 API create_terminal 开的命令终端里五个 COFLUX_* 齐全，值与中心 id 一致", async () => {
   const { terminal } = await okTool("create_terminal", { workspaceId: mainWorkspaceId, title: "坐标", command: DUMP_ENV });
   assert.equal(terminal.workspaceId, mainWorkspaceId);
   const sessionId = await sessionIdOf(terminal.id);
@@ -225,7 +220,7 @@ test("路径①：MCP create_terminal 开的命令终端里六个 COFLUX_* 齐�
   const env = parseEnv(read.text);
   assertEnv(env, { deviceId: stack.daemonId, projectId, workspaceId: mainWorkspaceId, taskId: terminal.id, sessionId });
 
-  // 与 MCP 自己的 list_* 交叉核对：agent 把这些值直接传给 tools 就能命中
+  // 与 账号 API 自己的 list_* 交叉核对：agent 把这些值直接传给 tools 就能命中
   const { devices } = await okTool("list_devices", {});
   assert.ok(devices.some((d) => d.id === env.COFLUX_DEVICE_ID && d.online), `list_devices 里必须有在线的 ${env.COFLUX_DEVICE_ID}`);
   const { projects } = await okTool("list_projects", {});
@@ -282,7 +277,7 @@ test("路径②：web 手开的终端（taskCreate + taskStart）里也有 COFLU
   assert.ok(lines.includes(`S=${sessionId}`), `COFLUX_SESSION_ID 不符: ${read.text}`);
   assert.ok(lines.includes(`D=${stack.daemonId}`), `COFLUX_DEVICE_ID 不符: ${read.text}`);
   assert.ok(lines.includes(`P=${projectId}`), `COFLUX_PROJECT_ID 不符: ${read.text}`);
-  assert.ok(lines.includes(`M=${MCP_URL}`), `COFLUX_MCP_URL 不符: ${read.text}`);
+  assert.ok(lines.includes("M="), `COFLUX_MCP_URL 不符: ${read.text}`);
 
   await device.input(sessionId, "exit\r");
   await observer.waitFor((m) => m.case === "taskUpdated" && m.task.id === task.id && m.task.status === TaskStatus.EXITED, "手开终端退出", 20000);

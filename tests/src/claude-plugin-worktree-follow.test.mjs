@@ -314,12 +314,12 @@ test("插件配置：PostToolUse 里信使在前、跟随脚本 matcher=EnterWor
   assert.ok(major > 0 || minor >= 10, `插件版本必须 ≥ 0.10.0: ${manifest.version}`);
 });
 
-test("SKILL 唯一源与插件副本都讲清「进 worktree coflux 会跟随、删仍走 remove_workspace」", () => {
+test("SKILL 唯一源与插件副本都讲清「进 worktree coflux 会跟随、删除走账号 CLI」", () => {
   for (const path of [`${PLUGIN}skills/coflux/SKILL.md`, `${ROOT}packages/cli/skills/coflux/SKILL.md`]) {
     const skill = readFileSync(path, "utf8");
     assert.match(skill, /EnterWorktree/, `${path} 要说明 EnterWorktree 会让 coflux 跟随`);
     assert.match(skill, /follows you into a git worktree/i, `${path} 要有「coflux 跟随进 worktree」这一节`);
-    assert.match(skill, /remove_workspace/, `${path} 要把删工作区引导到 remove_workspace`);
+    assert.match(skill, /cofluxd workspace remove/, `${path} 要把删工作区引导到 cofluxd workspace remove`);
     assert.match(skill, /cofluxd workspace/, `${path} 要写 cofluxd workspace 的用法`);
     assert.doesNotMatch(
       skill,

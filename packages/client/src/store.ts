@@ -166,6 +166,8 @@ export type OfflineCatalogOptions = {
 };
 
 export type CofluxClientOptions = {
+  /** 只在真实认证成功后通知桌面层；缓存的离线状态不触发。 */
+  onAuthenticated?: () => void;
   /** /client WS 端点地址（含协议与路径）。 */
   serverUrl: string;
   /** 会话 token 的存取；创建 client 时同步 read 一次。 */
@@ -601,6 +603,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         }
         send({ case: "clientSubscribe", value: {} });
         flushPendingTaskRemovals();
+        options.onAuthenticated?.();
         break;
       }
       case "authError": {
@@ -866,7 +869,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     connect({ username, password });
   }
 
-  function logout() {
+  function logout(revoke = true) {
     shouldRetry = false;
     controlAuthenticated = false;
     settleDeviceAuthorize({ ok: false, error: "已登出" });
@@ -874,7 +877,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     clearOfflineTimer();
     clearOfflineCatalog();
     void deviceRouter.reset(true);
-    send({ case: "clientLogout", value: {} });
+    if (revoke) send({ case: "clientLogout", value: {} });
     token = "";
     options.tokenStorage.clear();
     connection.stop();

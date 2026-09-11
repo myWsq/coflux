@@ -50,14 +50,14 @@ test("coflux 项目会话里 git worktree remove/move 被 deny，理由可操作
     assert.equal(decision.hookSpecificOutput.permissionDecision, "deny", command);
     const reason = decision.hookSpecificOutput.permissionDecisionReason;
     assert.match(reason, /proj-123/, "理由要带项目 id，agent 能直接填");
-    assert.match(reason, /remove_workspace/, "理由要指向替代做法");
+    assert.match(reason, /cofluxd workspace remove/, "理由要指向替代做法");
   }
   const remove = JSON.parse((await run(bash("git worktree remove ../feat"), IN_PROJECT)).stdout);
   const removeReason = remove.hookSpecificOutput.permissionDecisionReason;
-  assert.match(removeReason, /remove_workspace/);
+  assert.match(removeReason, /cofluxd workspace remove/);
   assert.match(removeReason, /orphan/i, "理由要说清为什么不能手工删：留下孤儿记录");
   const move = JSON.parse((await run(bash("git worktree move ../a ../b"), IN_PROJECT)).stdout);
-  assert.match(move.hookSpecificOutput.permissionDecisionReason, /remove_workspace/);
+  assert.match(move.hookSpecificOutput.permissionDecisionReason, /cofluxd workspace remove/);
 });
 
 test("plan 104：git worktree add 一律放行——coflux 会跟着 agent 进去，不再需要拦", async () => {

@@ -1,5 +1,5 @@
 /**
- * server 直出的三张浏览器页面契约（plan 107）：设备授权、MCP 宿主 OAuth 同意页、端口预览门禁。
+ * server 直出的浏览器页面契约：设备授权、端口预览门禁。
  * schemas 全部留空：输入是路径参数 / query / urlencoded 表单，输出是 HTML 或 302/303，错误也必须是
  * 页面而非 Raven 校验信封，故 handler 自己取输入并直接构造 Response。
  *
@@ -26,26 +26,6 @@ export const PostAuthorizeLoginContract = defineContract({
 export const PostAuthorizeConfirmContract = defineContract({
   method: "POST",
   path: "/authorize/:token/confirm",
-  schemas: {},
-});
-
-/** OAuth 同意页：`/oauth/authorize` 302 到这里（`?request=<id>`）。 */
-export const GetOAuthConsentPageContract = defineContract({
-  method: "GET",
-  path: "/oauth/consent",
-  schemas: {},
-});
-
-export const PostOAuthConsentLoginContract = defineContract({
-  method: "POST",
-  path: "/oauth/consent/login",
-  schemas: {},
-});
-
-/** 「允许访问」/「拒绝」：一次性摘除待确认请求，302 回宿主回调。 */
-export const PostOAuthConsentDecideContract = defineContract({
-  method: "POST",
-  path: "/oauth/consent/decide",
   schemas: {},
 });
 

@@ -1,7 +1,7 @@
 /**
- * plan 091：中心托管 MCP 第二片——中心发起的 daemon 副作用 + 工作区/终端写 tools。
+ * 账号 API：工作区与终端操作——中心发起的 daemon 副作用 + 工作区/终端写 tools。
  *
- * 黑盒：经 090 的 OAuth 拿 token 后直接调 MCP tools（JSON-RPC over HTTP），用订阅了的 web 测试 client
+ * 黑盒：通过账号登录拿 token 后直接调用 HTTP 账号接口，用订阅了的 web 测试 client
  * 观察广播（侧栏反应必须与用户亲手做完全一致），用 device-harness 的 attach 造「用户正在接管」的人类
  * holder，用 harness 的 rawDaemon 登记假设备模拟旧 worker / 可控的 worker。
  *
@@ -15,7 +15,7 @@
  *   - 负向：用户 attach 期间 send_terminal_input 被拒且文案含「用户正在接管」；删 running 终端被拒；删主工作区
  *     被拒；超每工作区终端上限被拒；旧 worker（不宣告能力的 rawDaemon）上写 tool 立即回「需要升级」且不等待；
  *     wait_terminal 超时返回状态而非错误；server 重启后中心发起的已安装 prepared 操作仍能完成（restore 续上）。
- *   - 跨账号 id 被拒见 mcp-isolation.test.mjs（那里已有两账号栈）。
+ *   - 跨账号 id 被拒见 account-isolation.test.mjs（那里已有两账号栈）。
  *
  * 端口：8869（独占）。每工作区活跃终端上限压到 2，上限用例才跑得快。
  */
@@ -35,7 +35,7 @@ import {
 } from "@coflux/protocol";
 import { startStack, mkRepo, rawDaemon, tokenFromUrl } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
-import { callTool, consentClient, obtainTokens } from "./oauth-harness.mjs";
+import { callOperation as callTool, loginAccount } from "./account-harness.mjs";
 
 const PORT = 8869;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -47,7 +47,6 @@ let stack;
 let repo;
 let device;
 let observer;
-let consentWs;
 let token;
 let projectId;
 let mainWorkspaceId;
@@ -142,8 +141,7 @@ async function dirWorkspaceOn(daemonId, path) {
 
 before(async () => {
   stack = await startStack({ port: PORT, serverEnv: { COFLUX_PUBLIC_URL: BASE, COFLUX_MAX_AGENT_TERMINALS: String(MAX_TERMINALS) } });
-  consentWs = await consentClient(stack);
-  token = (await obtainTokens(BASE, consentWs)).access_token;
+  token = await loginAccount(BASE);
 
   repo = mkRepo();
   device = await openRelayDevice(stack);
@@ -155,7 +153,6 @@ before(async () => {
 });
 
 after(async () => {
-  consentWs?.close();
   device?.close();
   await stack?.stop();
   repo?.cleanup();
@@ -163,9 +160,9 @@ after(async () => {
 });
 
 test("create_workspace：worktree 真在磁盘上，web 收到 workspaceCreated；rename_workspace 改名同步广播", async () => {
-  const { workspace } = await okTool("create_workspace", { projectId, branch: "mcp-sub", createNew: true, name: "子任务" });
+  const { workspace } = await okTool("create_workspace", { projectId, branch: "account-sub", createNew: true, name: "子任务" });
   assert.equal(workspace.projectId, projectId);
-  assert.equal(workspace.branch, "mcp-sub");
+  assert.equal(workspace.branch, "account-sub");
   assert.equal(workspace.name, "子任务");
   assert.equal(workspace.isMain, false);
   assert.ok(existsSync(workspace.path), `worktree 目录必须真在磁盘上: ${workspace.path}`);
@@ -189,7 +186,7 @@ test("闭环：create_terminal → read_terminal(log) → send_terminal_input �
   const { terminal } = await okTool("create_terminal", {
     workspaceId: subWorkspace.id,
     title: "闭环",
-    command: "echo MCP_T1_START; read line; echo GOT:$line; exit 7",
+    command: "echo ACCOUNT_T1_START; read line; echo GOT:$line; exit 7",
   });
   assert.equal(terminal.workspaceId, subWorkspace.id);
   assert.equal(terminal.status, "running");
@@ -197,7 +194,7 @@ test("闭环：create_terminal → read_terminal(log) → send_terminal_input �
   await observer.waitFor((m) => m.case === "taskUpdated" && m.task.id === terminal.id && m.task.status === TaskStatus.RUNNING, "web 侧 running");
 
   // 日志与 PTY 输出由 tee 同时写出：只认 source=log 的那次读，避免撞上「快照先有、日志晚一瞬」的窗口
-  const started = await readUntil(terminal.id, (r) => r.source === "log" && r.text.includes("MCP_T1_START"), "命令输出落到日志");
+  const started = await readUntil(terminal.id, (r) => r.source === "log" && r.text.includes("ACCOUNT_T1_START"), "命令输出落到日志");
   assert.equal(started.source, "log", "命令终端优先读命令日志");
   assert.equal(started.status, "running");
   assert.ok(!started.text.includes("GOT:"), "输入前不该有 GOT");
@@ -242,9 +239,9 @@ test("会话终端（plan 101）：create_terminal 不带 command 开出常驻 s
   assert.equal(prompt.status, "running", "它不会自己退出");
 
   // 全 tty：作业终端里 stdout 是管道，`test -t 1` 不成立、这行不会有输出。
-  // 标记里的引号让命令回显（TTY-"OK"-MCP）与命令输出（TTY-OK-MCP）区分得开。
-  await okTool("send_terminal_input", { terminalId: terminal.id, text: 'test -t 0 && test -t 1 && echo TTY-"OK"-MCP' });
-  const screen = await readUntil(terminal.id, (r) => r.text.includes("TTY-OK-MCP"), "会话终端里 stdin/stdout 都是 tty");
+  // 标记里的引号让命令回显（TTY-"OK"-ACCOUNT）与命令输出（TTY-OK-ACCOUNT）区分得开。
+  await okTool("send_terminal_input", { terminalId: terminal.id, text: 'test -t 0 && test -t 1 && echo TTY-"OK"-ACCOUNT' });
+  const screen = await readUntil(terminal.id, (r) => r.text.includes("TTY-OK-ACCOUNT"), "会话终端里 stdin/stdout 都是 tty");
   assert.equal(screen.source, "snapshot");
   assert.equal(screen.status, "running", "命令跑完了终端也不能退出");
 
@@ -365,7 +362,7 @@ test("remove_workspace：主工作区被拒；子工作区删除后 worktree 从
 test("旧 worker 门禁：不宣告能力的设备上，写 tool 立即返回「需要升级」且不等待", async () => {
   const fake = await enrollFakeDaemon("legacy-worker", []);
   try {
-    const wsId = await dirWorkspaceOn(fake.daemonId, mkDir("coflux-mcp-legacy-"));
+    const wsId = await dirWorkspaceOn(fake.daemonId, mkDir("coflux-account-legacy-"));
     const t0 = Date.now();
     const rejected = await errTool("create_terminal", { workspaceId: wsId, title: "x", command: "echo hi" });
     assert.match(rejected, /需要升级/, rejected);
@@ -392,7 +389,7 @@ test("server 重启后，中心发起的已安装 prepared 操作经 restore 续
   let pendingCall;
   let reconnected;
   try {
-    const wsId = await dirWorkspaceOn(fake.daemonId, mkDir("coflux-mcp-resume-"));
+    const wsId = await dirWorkspaceOn(fake.daemonId, mkDir("coflux-account-resume-"));
     pendingCall = callTool(BASE, token, "create_terminal", { workspaceId: wsId, title: "跨重启", command: "echo resumed" }).catch(() => null);
     const install = await daemon.waitFor((m) => m.case === "preparedDeviceOperation", "首次安装");
     const template = decodeDeviceEnvelope(install.frame);
@@ -446,7 +443,7 @@ test("server 重启后，中心发起的已安装 prepared 操作经 restore 续
     }
     const terminals = await okTool("list_terminals", { workspaceId: wsId });
     const mine = terminals.terminals.find((t) => t.id === template.payload.value.taskId);
-    assert.equal(mine?.status, "running", "MCP 也看到它已 running");
+    assert.equal(mine?.status, "running", "账号 API 也看到它已 running");
   } finally {
     reconnected?.close();
     daemon.close();

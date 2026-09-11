@@ -2,10 +2,11 @@
 //!
 //! 与 npm 版 `packages/cli/cofluxd.mjs` 同名并存：coflux 终端里靠 supervisor 前置的
 //! `$COFLUX_HOME/bin` 命中本二进制（零 node 依赖，供桌面版内置，plan 113），用户自己的终端里命中
-//! npm 版。node 版仍是行为与文案的真相源——本 crate 只含 agent 侧命令，逐命令对齐它的请求体、
+//! npm 版。两版共享账号 API；本 crate 提供账号登录、跨设备操作与本地 Agent 命令，逐命令对齐请求体、
 //! stdout 短语与退出码；管理类子命令（up/down/update/restart/status/doctor/logs/fda/uninstall）
 //! 不重写，打到这里时明确拒绝并指向 Coflux.app（exit 2），与「未知命令」（exit 1）区分。
 
+mod account;
 mod args;
 mod commands;
 mod gateway;
@@ -37,11 +38,24 @@ pub fn is_managed_command(command: &str) -> bool {
 
 pub fn managed_refusal(command: &str) -> String {
     format!(
-        "cofluxd {command}：本机 daemon 由 Coflux.app 管理——启动/停止/更新/状态/诊断请在 Coflux.app 里操作\n（这份 cofluxd 是 app 内置的 agent 命令版，只含 terminal / notify / progress / ports / workspace / hook；见 cofluxd --help）"
+        "cofluxd {command}：本机 daemon 由 Coflux.app 管理——启动/停止/更新/状态/诊断请在 Coflux.app 里操作\n（这份 cofluxd 是 app 内置的 agent 命令版，支持 login / logout / whoami / device / project / workspace / terminal / notify / progress / ports / hook；见 cofluxd --help）"
     )
 }
 
-const HELP: &str = "cofluxd —— coflux agent 命令（Coflux.app 内置版）
+const HELP: &str = "账号命令（JSON 输出，不依赖 MCP）：
+  cofluxd login --username <账号> --password-stdin [--server https://…]
+  cofluxd whoami | logout
+  cofluxd device list | project list | workspace list
+  cofluxd workspace new --project <id> --branch <分支> [--existing-branch]
+  cofluxd workspace rename <id> --name <名称> | workspace remove <id>
+  cofluxd terminal new --workspace <id> [--cmd <命令>] [--title <标题>]
+  cofluxd terminal list [--device <id>] [--workspace <id>]
+  cofluxd terminal read|wait|send|stop|remove <id> --remote
+  cofluxd ports --remote
+  在 Coflux 应用已登录时自动使用应用账号；独立 CLI 可自行登录。
+  命令退出或升级 CLI 不会结束已运行的终端。
+
+cofluxd —— coflux agent 命令（Coflux.app 内置版）
 
   本机 daemon 的安装/启动/停止/更新/状态由 Coflux.app 管理；up / down / update / restart / status /
   doctor / logs / fda / uninstall 在这份 cofluxd 里不可用（Linux / 无头机请用 npm 版 cofluxd）。
@@ -93,6 +107,10 @@ fn main() {
         return;
     }
     let command = command.unwrap_or_default();
+    if account::handles(&parsed) {
+        if let Err(error) = account::run(&parsed) { die(&error); }
+        return;
+    }
     if is_managed_command(command) {
         eprintln!("✗ {}", managed_refusal(command));
         std::process::exit(2);

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, LoaderCircle, MessageSquare, Monitor, Package, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { AccountFooter } from "@/components/workbench/account-footer";
@@ -580,9 +580,6 @@ export function Sidebar(props: SidebarProps) {
               // 布局照 Cursor：一行标题说结论（走哪条路 + 多快），下面是图标条目列表铺上下文。
               const tooltipRows: { icon: LucideIcon; text: string }[] = [
                 { icon: Monitor, text: `${daemon.host} / ${daemon.platform}` },
-                ...(daemon.workerVersion ? [{ icon: Package, text: `worker ${daemon.workerVersion}` }] : []),
-                ...(daemon.supervisorVersion ? [{ icon: Cog, text: `supervisor ${daemon.supervisorVersion}` }] : []),
-                ...(transport?.detail ? [{ icon: Info, text: transport.detail }] : []),
               ];
               const tooltipContent = (
                 <div className="flex flex-col gap-1">

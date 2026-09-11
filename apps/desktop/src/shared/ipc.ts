@@ -2,6 +2,8 @@
 export const IPC = {
   /** preload 启动时同步取一次的引导数据（serverUrl / origin / version / platform） */
   bootstrap: "desktop:bootstrap",
+  connectLocal: "desktop:connect-local",
+  logoutLocal: "desktop:logout-local",
   notify: "desktop:notify",
   setBadge: "desktop:set-badge",
   /** 「服务器地址…」原生对话框（plan 110）：settings.json 路径与「打开设置文件」只有主进程有 */

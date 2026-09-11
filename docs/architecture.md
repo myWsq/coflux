@@ -27,6 +27,23 @@ daemon 仍主动外连中心，因此 NAT 后的远端设备不需要开放入�
 不会把 daemon 暴露到 LAN 或公网；P2P 的 UDP socket 由 ICE/DTLS 保护，只与信令认证过的对端
 握手。
 
+### 桌面、CLI 与运行内核
+
+桌面面向人，CLI 面向 Agent，二者操作同一账号内的工作区与终端。CLI 账号操作通过
+`/api/client/login`、`/api/client/command` 进入现有 Hub account operations；任务事务、
+prepared execution、终端读写与人类优先规则共用，CLI 是 Agent 的统一入口，MCP 已移除。
+桌面实时画面继续使用上述 DeviceRouter；不为 CLI 新建第二套 PTY authority。
+
+主应用直接启动本机托管进程，运行目录按内容保存于 `COFLUX_HOME/desktop-runtimes/`，
+更新 .app 不改动存活进程所用的文件。`runtime.sock` 提供版本、实例标识、活会话查询和停止；
+`runtime.lock` 防止重复启动。停止携带实例随机标识，避免确认期间进程换代造成误停。
+`client.sock` 由应用持有，供同一系统用户的 CLI 复用登录态，不返回会话凭据。
+
+关窗隐藏；主动退出确认后停本机；更新重启保留本机。退出登录先结束本机，再保存加密清理记录，
+清设备凭据及本轮终端临时数据，恢复联网后删除云端本机终端记录并撤销退出的客户端会话。
+项目目录与其他设备不在清理范围。开发版使用独立运行目录；旧 LaunchAgent 迁移需要明确提示。
+权限引导指向主应用，正式签名下的 TCC 归属和更新继承必须经过系统验收，不能靠父子进程关系推断。
+
 ## 2. Authority 边界
 
 | 状态 | 唯一 authority | 其它层职责 |
@@ -80,7 +97,7 @@ daemon 全 Rust、零 Node 运行时，分成两个进程：
   版本与观察期回滚。每个 PTY 会话的环境也由它组装：`COFLUX_*` 归属 id、PATH 首段的 `<COFLUX_HOME>/bin`，
   以及 shell 集成（plan 115）——按 shell 注入一份自带的 rc（zsh 改 `ZDOTDIR`、bash 用 `--init-file`、fish
   经 `XDG_DATA_DIRS` 的 vendor conf；认不出的 shell 不注入），它在用户原来的 rc 链原样跑完之后定义一个
-  `claude` 函数，把注入方（macOS 上是 Coflux.app 的 LaunchAgent）给的 `COFLUX_CLAUDE_PLUGIN_DIR` 翻译成
+  `claude` 函数，把注入方（macOS 上是 Coflux 主应用）给的 `COFLUX_CLAUDE_PLUGIN_DIR` 翻译成
   `claude --plugin-dir <dir>`，变量为空或目录不存在时退回与今天逐字相同的 `claude`。
 - `coflux-worker`：频繁热升级；负责中心 WS、loopback gateway、本地授权、git/exec/fs、Device RPC、
   relay 与 checkpoint。
@@ -257,11 +274,11 @@ worker 至多每 2 秒请求脏 session 的当前 snapshot，并通过独立 coa
 
 prepared operation 原本只有 browser 一种发起方：中心 prepare（落库）→ 经控制 WS 把模板装到 daemon →
 安装确认后把帧交给浏览器 → 浏览器经 Device channel 投递 → daemon 校验帧与模板一致后执行 → 结果沿
-`DeviceOperationReport` 回中心收敛。plan 091 让中心（MCP 写 tools）也能做发起方，差别只在「谁触发执行」
+`DeviceOperationReport` 回中心收敛。plan 091 让中心（账号 CLI）也能做发起方，差别只在「谁触发执行」
 与「结果通知谁」，落库/校验/收敛/广播全部复用：
 
 ```text
-MCP tool ──▶ hub 操作层（准入事务 + prepare(metadata.initiator = "server")）
+账号 CLI ──▶ hub 操作层（准入事务 + prepare(metadata.initiator = "server")）
    │              │ installed / restore→installed
    │              └──控制 WS──▶ PreparedDeviceOperationExecute{operation_id}
    │                                worker：取本地已安装模板 → Principal::Server + 合成 channel
@@ -283,7 +300,7 @@ MCP tool ──▶ hub 操作层（准入事务 + prepare(metadata.initiator = "
 - **能力门禁**：daemon 认证/登记时宣告 `capabilities`（`prepared_execute`、`terminal_io`），中心按能力名而非版本号
   判定；缺失时写 tool 在 prepare **之前**返回「该设备的 daemon 需要升级」，不给旧 worker 留下永远不触发的
   installed 记录。旧 worker 对未知 ServerToDaemon 载荷静默丢弃，这是不能靠超时兜底的原因。
-- **有界等待**：Claude Code 远程 MCP 单请求 60 秒；建/删操作等 30 秒、`wait_terminal` ≤ 50 秒，到期返回
+- **有界等待**：建/删操作等 30 秒、`terminal wait` ≤ 600 秒，到期返回
   「已提交」或当前状态而不是挂着。daemon 断开/换代/撤销、任务删除、中心关闭都以可读错误唤醒等待者。
 
 以后新增「中心自己要驱动 daemon 做事」的需求，先走这条路（prepare + Execute + 收敛），不要再开直发消息；

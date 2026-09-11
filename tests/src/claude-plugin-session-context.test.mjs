@@ -92,7 +92,7 @@ const INSIDE = {
 };
 const LOCATED_SAME = JSON.stringify({ workspaceId: "ws-9", path: "/repo", branch: "main", created: false, moved: false });
 
-test("coflux 终端里：输出 <coflux-session> 块，六个坐标逐行、带分工规则与 skill 指针", async () => {
+test("coflux 终端里：输出 <coflux-session> 块，五个坐标逐行、带分工规则与 skill 指针", async () => {
   const { code, stdout, stderr } = await run({ ...INSIDE, FAKE_OUTPUT: LOCATED_SAME });
   assert.equal(code, 0);
   assert.equal(stderr, "", "不该有 stderr");
@@ -101,13 +101,14 @@ test("coflux 终端里：输出 <coflux-session> 块，六个坐标逐行、带�
   assert.equal(lines.at(-2), "</coflux-session>", "块必须以闭合标签结尾");
   assert.equal(lines.at(-1), "", "以换行结尾");
   for (const [key, value] of Object.entries(INSIDE)) {
+    if (key === "COFLUX_MCP_URL") continue;
     assert.ok(lines.includes(`${key}=${value}`), `缺 ${key}=${value} 这一行: ${stdout}`);
   }
   assert.match(stdout, /cofluxd terminal/, "要点名本地命令");
   assert.match(stdout, /cofluxd progress|cofluxd notify|cofluxd ports/, "要点名播报/叫人/端口命令");
-  assert.match(stdout, /MCP/, "要说明什么时候用 MCP");
-  assert.match(stdout, /create_workspace/, "要把「开隔离子工作区」引导到 create_workspace");
-  assert.match(stdout, /remove_workspace/, "要把删工作区引导到 remove_workspace");
+  assert.doesNotMatch(stdout, /MCP/, "不再注入已移除的 MCP 指引");
+  assert.match(stdout, /cofluxd workspace list\/new/, "要把跨工作区能力引导到账号 CLI");
+  assert.match(stdout, /cofluxd workspace remove/, "要把删工作区引导到 cofluxd workspace remove");
   assert.match(stdout, /worktree/, "要告诉 agent 进 worktree 时 coflux 会跟随");
   assert.match(stdout, /coflux.*skill/i, "要指向 coflux skill");
   assert.doesNotMatch(stdout.trimStart(), /^[[{]/, "stdout 不能像 JSON");

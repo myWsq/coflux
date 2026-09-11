@@ -404,6 +404,8 @@ dependencies = [
  "coflux-protocol",
  "libc",
  "serde_json",
+ "ureq",
+ "url",
 ]
 
 [[package]]
@@ -442,6 +444,7 @@ dependencies = [
  "portable-pty",
  "rand_core 0.6.4",
  "semver",
+ "serde",
  "serde_json",
  "sha2",
  "signal-hook",
@@ -2686,6 +2689,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]

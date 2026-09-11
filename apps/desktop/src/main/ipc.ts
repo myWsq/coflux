@@ -9,6 +9,8 @@ export type TrustedSenders = { appOrigin: string; devRendererUrl?: string };
 
 export type IpcActions = {
   bootstrap: () => Bootstrap;
+  connectLocal: () => Promise<void>;
+  logoutLocal: () => Promise<boolean>;
   notify: (notification: DesktopNotification) => void;
   setBadge: (count: number) => void;
   /** 「服务器地址…」原生对话框（plan 110）：与原生菜单项同一个实现 */
@@ -34,6 +36,14 @@ export type IpcActions = {
 export function registerIpc(actions: IpcActions, trusted: TrustedSenders): void {
   const isTrusted = (event: IpcMainEvent | IpcMainInvokeEvent) => isTrustedRendererUrl(event.senderFrame?.url, trusted);
 
+  ipcMain.handle(IPC.connectLocal, (event) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    return actions.connectLocal();
+  });
+  ipcMain.handle(IPC.logoutLocal, (event) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    return actions.logoutLocal();
+  });
   ipcMain.on(IPC.bootstrap, (event) => {
     if (!isTrusted(event)) {
       event.returnValue = null;

@@ -11,7 +11,8 @@ import { bundledSupervisorIsNewer } from "./daemon-version";
 export type DaemonFacts = {
   /** 内置三件；null = 本构建不带 daemon。version 是 VERSION sidecar 原文（可能是 dev） */
   bundle: { version: string | null } | null;
-  plistExists: boolean;
+  installationExists: boolean;
+  updateReadyOverride?: boolean;
   supervisorExists: boolean;
   workerExists: boolean;
   /** credentials.json 存在 */
@@ -27,8 +28,8 @@ export type DaemonFacts = {
   error?: { action: DesktopDaemonBusy; message: string };
 };
 
-export function deriveDaemonStatus(facts: Pick<DaemonFacts, "plistExists" | "supervisorExists" | "workerExists" | "registered" | "running"> & { updateReady: boolean }): DesktopDaemonStatus {
-  const installed = facts.plistExists && facts.supervisorExists && facts.workerExists;
+export function deriveDaemonStatus(facts: Pick<DaemonFacts, "installationExists" | "supervisorExists" | "workerExists" | "registered" | "running"> & { updateReady: boolean }): DesktopDaemonStatus {
+  const installed = facts.installationExists && facts.supervisorExists && facts.workerExists;
   if (!installed) return "not-installed";
   if (!facts.running) return "stopped";
   if (!facts.registered) return "pending-auth";
@@ -36,8 +37,8 @@ export function deriveDaemonStatus(facts: Pick<DaemonFacts, "plistExists" | "sup
 }
 
 export function deriveDaemonState(facts: DaemonFacts): DesktopDaemonState {
-  const installed = facts.plistExists && facts.supervisorExists && facts.workerExists;
-  const updateReady = facts.bundle !== null && bundledSupervisorIsNewer(facts.bundle.version, facts.runningVersion);
+  const installed = facts.installationExists && facts.supervisorExists && facts.workerExists;
+  const updateReady = facts.updateReadyOverride ?? (facts.bundle !== null && bundledSupervisorIsNewer(facts.bundle.version, facts.runningVersion));
   const state: DesktopDaemonState = {
     status: deriveDaemonStatus({ ...facts, updateReady }),
     bundled: facts.bundle !== null,

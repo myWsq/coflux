@@ -1,7 +1,7 @@
 /**
  * server 直出页面（plan 107）的纯函数进程内单测：HTML 转义、页面 cookie 的解析/拼装、csrf 核对、
  * 页面会话的 TTL / 流程隔离 / 上限、来源纵深校验、有界表单读取。不经 hub、不起进程；
- * 三条 HTTP 流的黑盒在 authorize / mcp-oauth / proxy 三份测试里。
+ * 两条 HTTP 流的黑盒在 authorize / proxy 两份测试里。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,7 +18,6 @@ const {
   readForm,
   readPageCookie,
   renderAuthorizeConfirm,
-  renderConsentConfirm,
   renderLoginForm,
   renderPage,
 } = await import("../../apps/server/src/auth-pages.ts");
@@ -28,16 +27,11 @@ test("escapeHtml 转义五个 HTML 敏感字符，其余原样", () => {
   assert.equal(escapeHtml("中文 · plain-text_ok"), "中文 · plain-text_ok");
 });
 
-test("页面模板：设备名 / 应用名 / scope / 回填参数全部经转义，不出现裸标签", () => {
+test("页面模板：设备名 / 回填参数全部经转义，不出现裸标签", () => {
   const device = renderAuthorizeConfirm("/authorize/t/confirm", "c", { name: "<script>alert(1)</script>", host: "h<b>", platform: '"p"' });
   assert.ok(!device.includes("<script>"), "设备名里的 <script> 不能原样进 HTML");
   assert.ok(device.includes("&lt;script&gt;alert(1)&lt;/script&gt;"));
   assert.ok(device.includes("h&lt;b&gt;") && device.includes("&quot;p&quot;"));
-
-  const consent = renderConsentConfirm("/oauth/consent/decide", "c", 'req"><img src=x onerror=1>', { clientName: "<img src=x>", redirectHost: "localhost:1", scope: "<s>" });
-  assert.ok(!consent.includes("<img"), "应用名与 request id 里的标签必须被转义");
-  assert.ok(consent.includes('value="req&quot;&gt;&lt;img src=x onerror=1&gt;"'));
-  assert.ok(consent.includes("scope: &lt;s&gt;"));
 
   const login = renderLoginForm({ action: "/proxy-auth/login", title: "访问端口预览", description: "d", submitLabel: "登录并访问", hidden: { to: 'http://x/"><script>' } }, "csrf-1", "登录失败：用户名或密码错误");
   assert.ok(login.includes('name="to" value="http://x/&quot;&gt;&lt;script&gt;"'));
@@ -55,7 +49,7 @@ test("页面 cookie：拼装带 HttpOnly/SameSite=Lax/Path/Max-Age，Secure 只�
   const cookie = buildPageCookie("cf_pgs_abc", "/authorize", 600_000, false);
   assert.equal(cookie, "cf_page=cf_pgs_abc; Path=/authorize; HttpOnly; SameSite=Lax; Max-Age=600");
   assert.ok(buildPageCookie("v", "/proxy-auth", 1000, true).endsWith("; Secure"));
-  assert.equal(clearPageCookie("/oauth/consent", false), "cf_page=; Path=/oauth/consent; HttpOnly; SameSite=Lax; Max-Age=0");
+  assert.equal(clearPageCookie("/proxy-auth", false), "cf_page=; Path=/proxy-auth; HttpOnly; SameSite=Lax; Max-Age=0");
   assert.equal(PAGE_COOKIE_NAME, "cf_page");
 });
 
@@ -90,7 +84,7 @@ test("页面会话：TTL 到期即失效、流程不串用、删除后拿不到"
   assert.ok(session?.token.startsWith("cf_pgs_"));
   assert.equal(session.failures, 0);
   assert.equal(store.get(session.token, "authorize", t0 + 999), session);
-  assert.equal(store.get(session.token, "consent", t0 + 999), undefined, "authorize 的会话不能用于同意页");
+  assert.equal(store.get(session.token, "proxy", t0 + 999), undefined, "authorize 的会话不能用于预览页");
   assert.equal(store.get(session.token, "authorize", t0 + 1_000), undefined, "TTL 到期后须重新登录");
   assert.equal(store.size, 0, "过期项已被摘除");
 
@@ -103,11 +97,11 @@ test("页面会话：TTL 到期即失效、流程不串用、删除后拿不到"
 test("页面会话：满额拒绝新建、不淘汰仍有效项；过期项让位", () => {
   const store = new PageSessionStore(1_000, 2, Buffer.alloc(32, 4));
   const t0 = 5_000;
-  const first = store.create("consent", { accountId: "a", userId: null }, t0);
-  const second = store.create("consent", { accountId: "b", userId: null }, t0);
-  assert.equal(store.create("consent", { accountId: "c", userId: null }, t0), undefined, "满额应 fail closed");
-  assert.ok(store.get(first.token, "consent", t0) && store.get(second.token, "consent", t0));
-  const third = store.create("consent", { accountId: "c", userId: null }, t0 + 1_000);
+  const first = store.create("proxy", { accountId: "a", userId: null }, t0);
+  const second = store.create("proxy", { accountId: "b", userId: null }, t0);
+  assert.equal(store.create("proxy", { accountId: "c", userId: null }, t0), undefined, "满额应 fail closed");
+  assert.ok(store.get(first.token, "proxy", t0) && store.get(second.token, "proxy", t0));
+  const third = store.create("proxy", { accountId: "c", userId: null }, t0 + 1_000);
   assert.ok(third, "过期项清掉后可以新建");
   assert.equal(store.size, 1);
 });

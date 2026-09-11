@@ -88,8 +88,8 @@ for (const name of BINARIES) {
   chmodSync(target, 0o755);
 }
 writeFileSync(resolve(STAGE_DIR, VERSION_FILE), `${version}\n`);
-// 插件整目录原样拷（.claude-plugin / hooks / scripts / skills / .mcp.json / README / LICENSE 全带，
-// 一个字节都不改写：.mcp.json 的中心地址写死，不产生第二份插件变体）。脚本经 sh / node 调用，不需要执行位，
+// 插件整目录原样拷（.claude-plugin / hooks / scripts / skills / README / LICENSE 全带，
+// 一个字节都不改写，不产生第二份插件变体）。脚本经 sh / node 调用，不需要执行位，
 // 也不进 mac.binaries（不是 Mach-O）。
 cpSync(CLAUDE_PLUGIN_SOURCE, resolve(STAGE_DIR, CLAUDE_PLUGIN_DIR), { recursive: true });
 console.log(

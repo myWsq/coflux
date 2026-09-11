@@ -209,7 +209,7 @@ test("会话终端（plan 101）：不带 --cmd 开出常驻的全 tty 登录 sh
       20000,
     );
     const shellId = created.task.id;
-    const newText = await waitForFile(newOut, (s) => s.includes(shellId), "terminal new 输出");
+    const newText = await waitForFile(newOut, (s) => s.includes(shellId) && s.includes("会话终端"), "terminal new 完整输出");
     assert.match(newText, /已开终端/, "输出与作业终端同形");
     assert.match(newText, /会话终端/, `不带 --cmd 时要提示这是会话终端: ${newText}`);
 

@@ -2,6 +2,7 @@
 // cofluxd —— coflux daemon 管理 CLI。
 // daemon 是两个 Rust 二进制（supervisor 持 PTY + worker 频繁热升级，零 node 运行时）；
 // 本 CLI 只负责装/起/停/升级（用一下，不常驻）。systemd(Linux user) / launchd(macOS LaunchAgent)。
+import { handlesAccountCommand, runAccountCommand } from "./account-client.mjs";
 import { parseArgs } from "node:util";
 import { homedir, hostname, platform, arch } from "node:os";
 import { join, dirname } from "node:path";
@@ -1196,6 +1197,18 @@ const HELP = `cofluxd —— coflux daemon 管理
 agent 命令的环境变量：COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等待上限（默认 30000，只能调小），
 供有硬超时的 hook 脚本用——到点干净失败，好过被宿主杀在半路。
 
+账号命令（JSON 输出、不依赖 MCP）：
+  cofluxd login --username <账号> --password-stdin [--server https://…]
+  cofluxd whoami | logout
+  cofluxd device list | project list | workspace list
+  cofluxd workspace new --project <id> --branch <分支> [--existing-branch]
+  cofluxd workspace rename <id> --name <名称> | workspace remove <id>
+  cofluxd terminal new --workspace <id> [--cmd <命令>]
+  cofluxd terminal read|send|wait|stop|remove <id> --remote
+  cofluxd terminal list [--device <id>] [--workspace <id>]
+  cofluxd ports --remote
+  已登录的 Coflux 应用可供 CLI 直接使用；独立 CLI 可自行登录。
+
 up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
 通用: --version <vX|latest>(不传时 up 沿用已有二进制，update 默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
 配置都在 ~/.coflux/settings.json（serverUrl/deviceName/shell），daemon 直接读；改后重跑 cofluxd up 生效。`;
@@ -1210,6 +1223,15 @@ const MIGRATED = {
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
+    username: { type: "string" },
+    workspace: { type: "string" },
+    device: { type: "string" },
+    project: { type: "string" },
+    branch: { type: "string" },
+    remote: { type: "boolean" },
+    json: { type: "boolean" },
+    "password-stdin": { type: "boolean" },
+    "existing-branch": { type: "boolean" },
     server: { type: "string" },
     name: { type: "string" },
     shell: { type: "string" },
@@ -1231,6 +1253,11 @@ const { values, positionals } = parseArgs({
 let cmd = positionals[0];
 if (values.help || cmd === "help") { console.log(HELP); process.exit(0); }
 if (!cmd) cmd = fs.existsSync(SETTINGS) ? "status" : "up"; // 首次裸跑 → 引导
+
+if (handlesAccountCommand(positionals, values, HOME)) {
+  try { await runAccountCommand(positionals, values, HOME); } catch (error) { die(error.message); }
+  process.exit(0);
+}
 
 const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall, hook: cmdHook, terminal: cmdTerminal, notify: cmdNotify, progress: cmdProgress, ports: cmdPorts, workspace: cmdWorkspace };
 const h = handlers[cmd];

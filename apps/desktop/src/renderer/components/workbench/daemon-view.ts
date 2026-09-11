@@ -4,7 +4,7 @@ import { TaskStatus, type Task } from "@coflux/protocol";
 import type { DesktopDaemonBusy, DesktopDaemonState } from "@/desktop-bridge";
 
 /**
- * 本机 daemon（plan 113）在渲染层的纯展示映射：状态对象 → 账号菜单一行的文案 / 面板里的可见动作 /
+ * 本机终端（plan 113）在渲染层的纯展示映射：状态对象 → 账号菜单一行的文案 / 面板里的可见动作 /
  * 接入引导当前该在哪一页、三步各是什么态。全是纯函数（照 account-footer-view.ts 先例），便于 node --test；
  * JSX 里不散 switch。
  */
@@ -75,12 +75,12 @@ export type DaemonAction = {
 
 /** 「会结束本机 N 个终端」：重启 / 停止 / 换新的后果说明。 */
 export function terminalsImpact(runningTerminals: number): string {
-  return runningTerminals > 0 ? `会结束本机 ${runningTerminals} 个正在运行的终端（PTY 随 supervisor 退出）。` : "本机当前没有正在运行的终端。";
+  return runningTerminals > 0 ? `会结束本机 ${runningTerminals} 个正在运行的终端及其中的程序。` : "本机当前没有正在运行的终端。";
 }
 
 const REMOVE_CONFIRM = {
   title: "移除这台 Mac 的接入？",
-  description: "会停止后台服务、删除 LaunchAgent 与 ~/.coflux/bin 里的三个二进制；凭证、配置与日志保留，之后可再次接入。",
+  description: "会停止本机终端并暂停接入，项目文件不受影响。",
   confirmLabel: "移除接入",
 };
 
@@ -95,7 +95,7 @@ export function resolveDaemonActions(state: DesktopDaemonState, runningTerminals
     id: "stop",
     label: "停止",
     kind: "secondary",
-    ...(runningTerminals > 0 ? { confirm: { title: "停止本机 daemon？", description: impact, confirmLabel: "停止" } } : {}),
+    ...(runningTerminals > 0 ? { confirm: { title: "停止本机终端？", description: impact, confirmLabel: "停止" } } : {}),
   };
   const remove: DaemonAction = { id: "remove", label: "移除接入", kind: "destructive", confirm: REMOVE_CONFIRM };
   const fda: DaemonAction[] = state.fda === "granted" ? [] : [{ id: "fda", label: "完全磁盘访问…", kind: "secondary" }];
@@ -113,7 +113,7 @@ export function resolveDaemonActions(state: DesktopDaemonState, runningTerminals
           id: "restart",
           label: "重启",
           kind: "secondary",
-          ...(runningTerminals > 0 ? { confirm: { title: "重启本机 daemon？", description: impact, confirmLabel: "重启" } } : {}),
+          ...(runningTerminals > 0 ? { confirm: { title: "重启本机终端？", description: impact, confirmLabel: "重启" } } : {}),
         },
         stop,
         remove,
@@ -125,7 +125,7 @@ export function resolveDaemonActions(state: DesktopDaemonState, runningTerminals
           label: "重启并更新",
           kind: "primary",
           confirm: {
-            title: `更新本机 daemon 到 ${state.bundledVersion ?? "内置版本"}？`,
+            title: `更新本机终端 到 ${state.bundledVersion ?? "内置版本"}？`,
             description: `${impact} 更新只在你点这里时发生，从不自动重启。`,
             confirmLabel: "重启并更新",
           },
@@ -220,5 +220,5 @@ export function resolveOnboardingSteps(state: DesktopDaemonState, local: Onboard
 export function authorizeStepDetail(state: DesktopDaemonState, local: OnboardingLocal): string {
   if (state.registered) return "已用当前登录账号完成";
   if (local.authError) return local.authError;
-  return state.authToken ? "授权中…（用当前登录账号）" : "等待 daemon 连上服务器、拿到授权链接…";
+  return state.authToken ? "授权中…（用当前登录账号）" : "正在连接账号服务器…";
 }

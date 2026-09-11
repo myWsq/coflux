@@ -10,12 +10,11 @@ This directory is the plugin's **delivery directory**: self-contained and loadab
 
 - **Inside a coflux terminal: automatically, nothing to install.** Coflux.app ships this directory verbatim in its
   app bundle (`Contents/Resources/daemon/claude-plugin`) and hands that absolute path to the machine's daemon
-  through the LaunchAgent variable `COFLUX_CLAUDE_PLUGIN_DIR`; the supervisor's shell integration turns it into
+  through the child process variable `COFLUX_CLAUDE_PLUGIN_DIR`; the supervisor's shell integration turns it into
   `claude --plugin-dir <dir>` for terminals coflux opens (desktop app, `cofluxd terminal new`, iOS, the center's
-  MCP). Loading is per session, not an installation: the hooks, the `coflux` skill and the `coflux` MCP server are
-  all in effect and visible under `/hooks` and `/mcp`, while `/plugin` does not list the plugin. The copy travels
-  with the app, so it updates when Coflux.app updates; `~/.claude` is never written to and no plugin files are
-  placed in `~/.coflux`. A session-loaded plugin fully shadows a marketplace-installed copy of the same name, so
+  CLI). Loading is per session, not an installation: the hooks, the `coflux` skill and account CLI commands are
+  all in effect and visible under `/hooks`, while `/plugin` does not list the plugin. The copy travels
+  with the app, so it updates when Coflux.app updates; `~/.claude` is never written to and active sessions retain a stable plugin copy under the runtime directory. A session-loaded plugin fully shadows a marketplace-installed copy of the same name, so
   users who already installed `coflux@plugins` need to do nothing and hooks never fire twice. If the variable is
   unset or empty, or the directory it names is gone, `claude` starts exactly as it would without coflux — that is
   also the escape hatch.
@@ -23,7 +22,7 @@ This directory is the plugin's **delivery directory**: self-contained and loadab
   terminal, a machine without Coflux.app, Codex — install the plugin the usual way: the `myWsq/plugins`
   marketplace collects the whole directory at a pinned commit SHA (maintained in `myWsq/plugins-builder`);
   installers only need the marketplace. Codex installs the same plugin from the same marketplace and runs the same
-  `hooks/hooks.json` and `.mcp.json`.
+  `hooks/hooks.json`.
 
 ## Components
 
@@ -35,8 +34,8 @@ This directory is the plugin's **delivery directory**: self-contained and loadab
   - `SessionStart` runs `scripts/session-context.sh`: inside a coflux terminal (`COFLUX_WORKSPACE_ID` set) it asks
     the daemon to locate the session's directory (see the worktree hooks below — resuming a session that had entered
     a worktree lands back in it without any tool call, and this is the only moment that can notice), then prints a
-    `<coflux-session>` block with the session's six `COFLUX_*` coordinates, the one rule (local commands inside the
-    workspace, MCP only to leave it) and a pointer to the skill. The workspace id in the block is the daemon's
+    `<coflux-session>` block with the session's five `COFLUX_*` coordinates, the one rule (local commands inside the
+    workspace, account CLI across workspaces/devices) and a pointer to the skill. The workspace id in the block is the daemon's
     answer, falling back to the environment variable when `cofluxd` is missing, the daemon is down, or the locate
     runs out of its own budget — printing the block always wins over locating, because a hook killed by the host
     timeout would leave the session with no coordinates at all. It fires on every session source, so the block
@@ -51,34 +50,21 @@ This directory is the plugin's **delivery directory**: self-contained and loadab
     `additionalContext` so the agent sees them in the same turn. Anything unusual (not inside coflux, another
     repository, no daemon, a daemon too old for the command) is a silent no-op.
   - `PreToolUse` with `matcher: "Bash"` runs `scripts/guard-git-worktree.mjs`: when `COFLUX_PROJECT_ID` is set it
-    denies `git worktree remove|move` and points the agent to the MCP tool `remove_workspace` (removing a worktree by
+    denies `git worktree remove|move` and points the agent to `cofluxd workspace remove <workspaceId>` (removing a worktree by
     hand leaves an orphan workspace record in the sidebar). `add`, `list`, `prune` and the other subcommands pass —
     creating a worktree is fine now that coflux follows the agent into it; outside a coflux project it never
     intervenes; without `node` it stays silent.
 - **skills/coflux/** — documents, for an agent running inside a coflux terminal, the terminals the user can see and
   take over, the progress / notify channels and preview URLs, and when each is worth using. One rule for the split: **anything
   that closes locally uses the zero-credential local commands** (`cofluxd terminal/progress/notify/ports`); only
-  leaving the workspace (child workspaces, other workspaces or devices) goes through the center's `coflux` MCP
-  server.
-- **.mcp.json** — declares the center's `coflux` MCP server (Streamable HTTP + OAuth 2.1) with the public URL
-  `https://api.coflux.dev/mcp` hard-coded. Do not write `${COFLUX_MCP_URL:-…}` here: Claude Code expands it, but
-  Codex (installing this plugin from the same marketplace) parses it verbatim as the URL and fails with
-  `invalid MCP server URL`, taking the whole MCP server down. For a self-hosted center or local development add a
-  server by hand (`COFLUX_MCP_URL` is injected by the daemon and is the center URL + `/mcp`):
-  `claude mcp add --transport http coflux "$COFLUX_MCP_URL"` / `codex mcp add coflux --url "$COFLUX_MCP_URL"`.
-  In Claude Code the plugin's entry is named `plugin:coflux:coflux`, so it does not collide with a hand-added
-  `coflux`; leave the public one unauthorized in that case. `timeout` is 660 s to cover `wait_terminal`'s 600 s
-  ceiling. Authorization is one click on Authenticate for `coflux` in Claude Code's `/mcp` menu; tokens refresh
-  automatically afterwards.
-
+  use the account CLI across workspaces/devices..
 ## Runtime requirements
 
 - The [`cofluxd`](https://www.npmjs.com/package/cofluxd) CLI installed globally (`npm i -g cofluxd`) and
   registered (`cofluxd up`). Without it the messenger hooks are silent no-ops and the local commands are
   unavailable. Inside a coflux terminal this is already true: the machine's daemon put `cofluxd` on the session's
   `PATH`, whether it was enrolled by Coflux.app or by npm.
-- One OAuth authorization for MCP: Claude Code does not open the browser by itself; pick `coflux` in the `/mcp`
-  menu and choose Authenticate, after which tokens refresh automatically.
+- Account CLI access uses the desktop login or `cofluxd login`.
 - `COFLUX_*` variables appear in sessions only after the machine's daemon has been upgraded
   (`cofluxd update && cofluxd restart`).
 - Codex asks the user to trust each new hook entry once; until then that entry does not run.
@@ -89,8 +75,8 @@ The messenger hooks forward only the event name, notification type, agent sessio
 count and messenger pid; prompts, replies and notification bodies never leave the machine. The session block and
 the worktree hooks call only the local daemon on loopback, with no credentials (the daemon identifies the caller
 by its process tree); what they send is a directory path, and the daemon forwards the resolved worktree path and
-branch to the center so the workspace can appear in the user's own sidebar. MCP access is scoped to the current
-account, with credentials stored by Claude Code.
+branch to the center so the workspace can appear in the user's own sidebar. Account CLI access is scoped to the current
+account, using the desktop login or the CLI session stored by Coflux.
 
 ## Migrating from manual hook configuration
 

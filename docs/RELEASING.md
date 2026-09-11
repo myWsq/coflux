@@ -167,7 +167,7 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
 
 ### 内置 daemon（plan 113）：桌面发版从此隐含 Rust 构建
 
-app 自带 `coflux-supervisor` / `coflux-worker` / Rust 版 `cofluxd` 三件（`Contents/Resources/daemon/`），登录后一键接入本机，
+app 自带 `coflux-supervisor` / `coflux-worker` / Rust 版 `cofluxd` 三件（`Contents/Resources/daemon/`），登录后自动准备本机，
 不再要求用户装 Node 与 npm 版 cofluxd。workflow 多一个与「构建 + 签名 + 公证」**并行**的 `daemon` job：同一 SHA 上
 `cargo build --release --target aarch64-apple-darwin -p coflux-supervisor -p coflux-worker -p coflux-cli`（`RUSTFLAGS=-D warnings`，
 不挂 `release-signing`、不需要 secret），产物经 artifact 交给打包 job，由 `scripts/stage-daemon.mjs` 落到 `build/daemon/`
@@ -178,11 +178,13 @@ app 自带 `coflux-supervisor` / `coflux-worker` / Rust 版 `cofluxd` 三件（`
   sidecar。它是 supervisor `ReleaseVersion::parse` 接受的 prerelease SemVer，且**低于一切正式 `v*`**：中心 auto-update 见
   `workerVersion ≠ latest` 会立刻把 worker 热推成正式版（内置 worker 只是引导版）；supervisor 永远是内置版；npm 装过正式
   supervisor 的机器不会被提示换成内置版。不能留默认 `dev`（app 对解析不了的内置版本永不提示升级）。
-- **升级**：新版 app 带更新的 supervisor 时，app 只在账号菜单提示「有更新待重启」（文案带本机运行中终端数），用户点了才换
-  `~/.coflux/bin` 三件并 `launchctl unload/load`；从不自动重启。
+- **升级**：主应用直接启动经过原签名的运行组件，复制后不再 ad-hoc 重签。组件保存在内容寻址的稳定目录；
+  普通 app 更新仅重新连接存活实例，独立替换 CLI。内核更新由用户在任务结束后确认重启，不再经 launchctl。
+- **验收**：正式签名 App 必须验证 FDA 列表仅需 Coflux、活 shell PID/内存变量跨更新保持不变、更新后仍能访问受保护目录。
+  开发签名与 socket 黑盒通过不能替代此验收。`COFLUX_DESKTOP_USER_DATA` 与 `COFLUX_HOME` 可隔离验收实例。
 - 本机 `pnpm -C apps/desktop run pack` 必须用 `COFLUX_DESKTOP_DAEMON_DIR` 指向本地 cargo 产物目录（见 apps/desktop/README.md），
   输入缺失或三件不全直接失败。
-- macOS 上从此推荐用户走 Coflux.app 接入；`npm i -g cofluxd` 仍是 Linux 与「别的机器」的路径，两者写出的文件完全同构可互换。
+- macOS 上从此推荐用户走 Coflux.app 接入；`npm i -g cofluxd` 仍是 Linux 与「别的机器」的路径，旧服务迁移由应用提示后完成，不能在启动时静默终止既有会话。
 
 ### 一次性设置
 

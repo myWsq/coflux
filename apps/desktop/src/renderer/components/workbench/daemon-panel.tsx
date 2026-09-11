@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import { Dialog as AstryxDialog, DialogHeader as AstryxDialogHeader } from "@astryxdesign/core/Dialog";
 import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from "@astryxdesign/core/Layout";
@@ -6,7 +5,6 @@ import { StatusDot } from "@astryxdesign/core/StatusDot";
 import { Text } from "@astryxdesign/core/Text";
 
 import { daemonStatusLine, resolveDaemonActions, type DaemonAction } from "@/components/workbench/daemon-view";
-import { ConfirmActionDialog, type ConfirmAction } from "@/components/workbench/dialogs";
 import type { DesktopBridge, DesktopDaemonState } from "@/desktop-bridge";
 
 type DaemonPanelDialogProps = {
@@ -26,7 +24,6 @@ type DaemonPanelDialogProps = {
  */
 export function DaemonPanelDialog(props: DaemonPanelDialogProps) {
   const { state, bridge } = props;
-  const [confirm, setConfirm] = useState<ConfirmAction | null>(null);
   const line = daemonStatusLine(state);
   const actions = resolveDaemonActions(state, props.runningTerminals);
 
@@ -57,19 +54,11 @@ export function DaemonPanelDialog(props: DaemonPanelDialogProps) {
     }
   }
 
-  function trigger(action: DaemonAction) {
-    if (!action.confirm) {
-      execute(action);
-      return;
-    }
-    setConfirm({ ...action.confirm, onConfirm: () => execute(action) });
-  }
-
   return (
     <>
       <AstryxDialog isOpen={props.open} onOpenChange={(next) => !next && close()} width={440}>
         <Layout
-          header={<AstryxDialogHeader title="本机 daemon" onOpenChange={(next) => !next && close()} hasDivider={false} />}
+          header={<AstryxDialogHeader title="这台 Mac" onOpenChange={(next) => !next && close()} hasDivider={false} />}
           content={
             <LayoutContent>
               <VStack gap={3} hAlign="stretch">
@@ -83,13 +72,10 @@ export function DaemonPanelDialog(props: DaemonPanelDialogProps) {
                   ) : null}
                 </HStack>
                 <VStack gap={1} hAlign="stretch">
-                  <Text type="supporting">
-                    二进制目录 <Text type="code">{state.binDir}</Text>
-                  </Text>
-                  <Text type="supporting">想在自己的终端里直接用 cofluxd 就把它加进 PATH；coflux 里开的终端已自动带上，不改你的 shell 配置。</Text>
-                  {state.runningVersion ? <Text type="supporting">在跑 supervisor：{state.runningVersion}</Text> : null}
-                  {state.bundledVersion ? <Text type="supporting">app 内置：{state.bundledVersion}</Text> : null}
-                  {!state.bundled ? <Text type="supporting">本构建不带内置 daemon：只能查看状态，接入 / 更新走 npm i -g cofluxd。</Text> : null}
+                  <Text type="supporting">关闭窗口后继续在线；退出 Coflux 会结束本机终端。</Text>
+                  <Text type="supporting">正在运行的终端：{state.runningTerminals ?? props.runningTerminals}</Text>
+                  {state.status === "update-ready" ? <Text type="supporting">本机终端更新已就绪，可以等当前任务结束后再安装。</Text> : null}
+                  {!state.bundled ? <Text type="supporting">此构建缺少本机运行组件，请安装完整的 Coflux 应用。</Text> : null}
                 </VStack>
               </VStack>
             </LayoutContent>
@@ -99,14 +85,13 @@ export function DaemonPanelDialog(props: DaemonPanelDialogProps) {
               <HStack gap={2} hAlign="end">
                 {actions.length === 0 && state.busy ? <Text type="supporting">{line.label}</Text> : null}
                 {actions.map((action) => (
-                  <AstryxButton key={action.id} label={action.label} variant={action.kind} onClick={() => trigger(action)} />
+                  <AstryxButton key={action.id} label={action.label} variant={action.kind} onClick={() => execute(action)} />
                 ))}
               </HStack>
             </LayoutFooter>
           }
         />
       </AstryxDialog>
-      <ConfirmActionDialog action={confirm} onCancel={() => setConfirm(null)} />
     </>
   );
 }

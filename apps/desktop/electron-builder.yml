@@ -46,12 +46,12 @@ mac:
     # 目录名与 src/main/daemon-paths.ts 的 DAEMON_RESOURCE_DIR 同值。
     # 同一条 extraResources 还顺带带上 build/daemon/claude-plugin/（plan 115：stage 脚本从仓库
     # integrations/claude-plugin 整目录拷来），落成 Contents/Resources/daemon/claude-plugin——
-    # coflux 终端里的 claude 经 LaunchAgent 的 COFLUX_CLAUDE_PLUGIN_DIR 自动加载的就是它，不需要新的 from/to。
+    # coflux 终端里的 claude 经主应用注入的 COFLUX_CLAUDE_PLUGIN_DIR 自动加载的就是它，不需要新的 from/to。
     - from: build/daemon
       to: daemon
   # 内置三件是 Resources 下的裸可执行文件，@electron/osx-sign 默认不会扫到：显式列出让它们也拿到
   # Developer ID + hardened runtime 签名并进公证。相对路径按 .app 根解析（electron-builder 26 的
-  # MacTargetHelper.buildSignOptions）。落到 ~/.coflux/bin 后主进程还会 ad-hoc 重签，见 daemon-manager.ts。
+  # MacTargetHelper.buildSignOptions）。主进程复制到稳定运行目录后保留原签名，见 daemon-manager.ts。
   binaries:
     - Contents/Resources/daemon/coflux-supervisor
     - Contents/Resources/daemon/coflux-worker

@@ -21,6 +21,8 @@ type DaemonOnboardingDialogProps = {
   onOpenChange: (open: boolean) => void;
   state: DesktopDaemonState;
   client: CofluxClient;
+  authError: string | null;
+  onRetryAuthorize: () => void;
   bridge: DesktopBridge;
   /** 说明页点「暂不」：记住不再自动弹（之后只从账号菜单再进） */
   onDismiss: () => void;
@@ -54,31 +56,21 @@ function StepRow({ state, label, detail }: { state: OnboardingStepState; label: 
  * 每个 token 只试一次，失败显示红字 + 重试；daemon 断线换新链接时 token 变了会自动再试。
  */
 export function DaemonOnboardingDialog(props: DaemonOnboardingDialogProps) {
-  const { open, state, client, bridge } = props;
+  const { open, state, bridge } = props;
   const [local, setLocal] = useState<OnboardingLocal>({ started: false, authError: null, fdaSettled: false });
-  const [attemptedToken, setAttemptedToken] = useState<string | null>(null);
+
 
   // 打开时按当下状态定起点：从账号菜单以「等待授权」进来直接是进度页；引导重新打开不沿用上次的标记
   useEffect(() => {
     if (!open) return;
     setLocal({ started: state.status !== "not-installed", authError: null, fdaSettled: false });
-    setAttemptedToken(null);
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const page = resolveOnboardingPage(state, local);
-  const steps = resolveOnboardingSteps(state, local);
-
-  // 授权：每个 token 只兑现一次（成功后 daemon 会清文件，registered 变 true）
-  const token = state.status === "pending-auth" ? state.authToken : undefined;
-  useEffect(() => {
-    if (!open || page !== "progress" || !token || token === attemptedToken) return;
-    setAttemptedToken(token);
-    setLocal((previous) => ({ ...previous, authError: null }));
-    void client.authorizeDevice(token).then((result) => {
-      if (!result.ok) setLocal((previous) => ({ ...previous, authError: result.error }));
-    });
-  }, [open, page, token, attemptedToken, client]);
+  const current = { ...local, authError: props.authError };
+  const page = resolveOnboardingPage(state, current);
+  const steps = resolveOnboardingSteps(state, current);
 
   function close() {
     bridge.daemonDismissError();
@@ -93,8 +85,8 @@ export function DaemonOnboardingDialog(props: DaemonOnboardingDialogProps) {
 
   function retry() {
     if (steps.retry === "authorize") {
-      // 换回未尝试：effect 会用当前 token 再发一次
-      setAttemptedToken(null);
+      props.onRetryAuthorize();
+
       setLocal((previous) => ({ ...previous, authError: null }));
       return;
     }
@@ -107,10 +99,10 @@ export function DaemonOnboardingDialog(props: DaemonOnboardingDialogProps) {
   }
 
   const header = {
-    intro: { title: "把这台 Mac 接入 coflux", subtitle: "会在本机常驻一个后台服务（开机自启），你和 agent 才能在这台机器上开终端。" },
-    progress: { title: "正在接入这台 Mac", subtitle: "组件落在 ~/.coflux/bin，服务由 launchd 常驻；授权用当前登录账号在这里完成，不开浏览器。" },
+    intro: { title: "把这台 Mac 接入 coflux", subtitle: "登录后即可使用本机终端。关闭窗口继续在线，退出 Coflux 会结束本机终端。" },
+    progress: { title: "正在接入这台 Mac", subtitle: "正在为当前账号准备本机终端，请稍候。" },
     fda: { title: "完全磁盘访问", subtitle: "终端里访问桌面 / 文稿 / 下载会被系统弹窗卡住，建议现在授予。" },
-    done: { title: "这台 Mac 已上线", subtitle: "之后从账号菜单的「本机 daemon」查看状态、重启或移除接入。" },
+    done: { title: "这台 Mac 已上线", subtitle: "可以在本机创建终端，也可以操作同账号的其他在线设备。" },
   }[page];
 
   return (
@@ -129,24 +121,24 @@ export function DaemonOnboardingDialog(props: DaemonOnboardingDialogProps) {
             ) : null}
             {page === "progress" ? (
               <VStack gap={3} hAlign="stretch">
-                <StepRow state={steps.install} label="安装组件" detail={state.error?.action === "install" ? state.error.message : undefined} />
-                <StepRow state={steps.start} label="启动服务" detail={state.error?.action === "start" ? state.error.message : undefined} />
-                <StepRow state={steps.authorize} label="授权" detail={steps.authorize === "pending" ? undefined : authorizeStepDetail(state, local)} />
+                <StepRow state={steps.install} label="准备本机" detail={state.error?.action === "install" ? state.error.message : undefined} />
+                <StepRow state={steps.start} label="启动终端" detail={state.error?.action === "start" ? state.error.message : undefined} />
+                <StepRow state={steps.authorize} label="授权" detail={steps.authorize === "pending" ? undefined : authorizeStepDetail(state, current)} />
                 {steps.failure ? <p className="text-sm leading-5 text-destructive">{steps.failure}</p> : null}
               </VStack>
             ) : null}
             {page === "fda" ? (
               <VStack gap={2} hAlign="stretch">
                 <Text type="body" size="sm">
-                  macOS 不允许程序自动弹出这个授权：点「打开系统设置」后，把 Finder 里定位到的 <Text type="code">coflux-supervisor</Text> 拖进「完全磁盘访问权限」列表并勾选，再回来点「我已勾选，重启服务」。
+                  macOS 不允许程序自动弹出这个授权：点「打开系统设置」后，把 Finder 里定位到的 <Text type="code">Coflux.app</Text> 拖进「完全磁盘访问权限」列表并勾选，再回来点「我已勾选，重新启动」。
                 </Text>
-                <Text type="supporting">授权对已在运行的进程不生效，必须重启服务；当前状态：{state.fda === "denied" ? "未授予" : state.fda === "granted" ? "已授予" : "未知"}。</Text>
+                <Text type="supporting">授权后可能需要退出并重新打开 Coflux；当前状态：{state.fda === "denied" ? "未授予" : state.fda === "granted" ? "已授予" : "未知"}。</Text>
               </VStack>
             ) : null}
             {page === "done" ? (
               <VStack gap={2} hAlign="stretch">
                 <Text type="body" size="sm">
-                  设备会出现在左侧列表里；想在自己的终端里直接用 <Text type="code">cofluxd</Text>，把 <Text type="code">{state.binDir}</Text> 加进 PATH（coflux 里开的终端已自动带上）。
+                  设备会出现在左侧列表里，终端中的 Agent 可以直接使用 Coflux 提供的命令。
                 </Text>
               </VStack>
             ) : null}
@@ -172,7 +164,7 @@ export function DaemonOnboardingDialog(props: DaemonOnboardingDialogProps) {
                   <AstryxButton label="跳过" variant="secondary" onClick={() => setLocal((previous) => ({ ...previous, fdaSettled: true }))} />
                   <AstryxButton label="打开系统设置" variant="secondary" onClick={() => bridge.daemonOpenFdaGuide()} />
                   <AstryxButton
-                    label="我已勾选，重启服务"
+                    label="我已勾选，重新启动"
                     variant="primary"
                     isDisabled={Boolean(state.busy)}
                     onClick={() => {

@@ -30,9 +30,10 @@ supervisor/OS 重启后恢复活进程。详见 [架构与 tmux 边界](docs/arc
 
 ## 用户侧：安装 daemon
 
-**macOS 直接用 Coflux.app**（plan 113）：app 自带 daemon 三件，登录后按引导一键接入本机（落盘、起 launchd 服务、用登录态授权、
-完全磁盘访问引导），之后从账号菜单「本机 daemon」查看状态、重启或移除；不需要 Node。下面的 npm 路径给 Linux 与别的机器，
-两者写出的文件完全同构，可互换。
+**macOS 直接用 Coflux.app**：安装并登录后自动准备本机终端，不要求另装 CLI 或 Node。
+关闭窗口保持在线；主动退出会提示并结束本机活终端；退出登录还清理本机终端与授权。
+权限引导只指向 Coflux.app。应用更新重启会保留终端托管进程，组件自身的更新可延后。
+正式签名的权限归属与完整更新验收状态见 [实施方案](wiki/plans/20260912-desktop-runtime-lifecycle.md)。
 
 daemon 是预编译的 Rust 二进制，用 `cofluxd`（npm）装成系统服务（崩溃/开机自启）。默认连公共服务 `wss://api.coflux.dev/daemon`（自托管用 `--server` 改）。
 
@@ -51,12 +52,14 @@ cofluxd status / doctor / logs -f / update / down / uninstall
 [docs/RELEASING.md](docs/RELEASING.md)。
 
 给跑在 coflux 终端里的 agent：每个 PTY 会话里都有 `COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID` /
-`COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` / `COFLUX_MCP_URL` 六个环境变量，
-值与中心 MCP `list_*` 的 id 一致。分工只有一条规则：**本地能闭环的一律用零凭证的
+`COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` 五个环境变量，
+值与账号 CLI 返回的 id 一致。分工只有一条规则：**本地能闭环的一律用零凭证的
 `cofluxd terminal/progress/notify/ports`**（send/read/wait/notify/progress 在 daemon 本地完成，不经中心）；
-只有跨出本工作区——开子工作区、跨工作区/跨设备操作——才用中心 MCP（`claude mcp add --transport http coflux "$COFLUX_MCP_URL"`）。
-supervisor 不走热升级，`cofluxd update && cofluxd restart` 后会话里才有这些变量。分工与纪律见
-`packages/cli/skills/coflux/SKILL.md`（随 `cofluxd` npm 包分发）。
+跨工作区、跨设备使用账号 CLI：`cofluxd device list`、`cofluxd workspace list`、
+`cofluxd terminal new --workspace <id>`、`cofluxd terminal read <id> --remote`。
+桌面内置 CLI 通过本机通道复用应用登录；独立 CLI 用 `cofluxd login --username <账号> --password-stdin`。
+账号命令输出 JSON，跨设备操作统一通过 CLI，不再提供 MCP。详见
+[CLI 文档](packages/cli/README.md)。
 
 ## 快速开始
 
@@ -99,10 +102,7 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 | `COFLUX_PASSWORD` | dev 为 `admin`；生产必填 | `local` 模式密码 |
 | `COFLUX_SESSION_TTL_MS` | `2592000000` | 登录后签发的会话 token 有效期（默认 30 天） |
 | `COFLUX_PROXY_HOST` | `p.localhost` | 端口转发预览域：`<shortId>-<该值>` 按反代路由；生产需配好泛解析 + 泛证书 |
-| `COFLUX_PUBLIC_URL` | `http://127.0.0.1:<COFLUX_PORT>` | 中心自身公网基址：OAuth issuer、PRM/AS 元数据、`/mcp` 资源标识与 server 直出的三张浏览器页面（`/authorize/<token>`、`/oauth/consent`、`/proxy-auth`）全由它拼（生产 `https://api.coflux.dev`），不从请求头推导 |
-| `COFLUX_OAUTH_ACCESS_TTL_MS` | `3600000` | MCP 宿主 OAuth access token 有效期（默认 1 小时） |
-| `COFLUX_OAUTH_REFRESH_TTL_MS` | 同 `COFLUX_SESSION_TTL_MS` | MCP 宿主 OAuth refresh token 有效期（用过即作废、轮换） |
-| `COFLUX_OAUTH_REFRESH_REUSE_GRACE_MS` | `60000` | 刚被轮换掉的 refresh token 在此宽限内再次出现按同机并发轮换复用（同 grant 再签一对）；超过宽限才当泄露整链撤销；`0` = 无宽限 |
+| `COFLUX_PUBLIC_URL` | `http://127.0.0.1:<COFLUX_PORT>` | 中心自身公网基址：设备授权与端口预览页面（`/authorize/<token>`、`/proxy-auth`）由它拼（生产 `https://api.coflux.dev`），不从请求头推导 |
 | `COFLUX_SERVER` | `ws://localhost:8787/daemon` | daemon 连接的服务器地址 |
 | `COFLUX_DEVICE_NAME` | `<hostname>` | daemon 登记时的设备名 |
 | `COFLUX_HOME` | `~/.coflux` | daemon 凭证存放目录 |

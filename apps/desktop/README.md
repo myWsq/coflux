@@ -4,8 +4,7 @@ coflux 唯一的前端与默认迭代对象（plan 106）：`src/main` 是 Elect
 `src/renderer` 是 React 19 + xterm.js 工作台（index.html / public / 组件都在这一份里，`@` 别名指向它）。
 桌面能力（服务器地址与「服务器地址…」对话框、Origin、通知、角标、菜单命令、更新提示、会话 token）经 preload 暴露的
 `window.cofluxDesktop` 桥接提供，渲染层假定它必定存在（缺失即启动期报错），类型真相源在
-`src/shared/desktop-bridge.ts`。新机器授权 / MCP OAuth 同意 / 端口预览门禁三张页面在系统浏览器里由冻结的
-线上 web 承担，不在这里。
+`src/shared/desktop-bridge.ts`。新机器授权 / 端口预览门禁两张页面由 `apps/server` 直出，在系统浏览器里打开。
 
 ## 命令
 
@@ -30,7 +29,7 @@ pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/ico
 没跑过 stage 脚本时状态对象报「本构建不带 daemon」，只能看状态、不能接入。
 
 **内置 coflux 插件（plan 115）**：同一个 stage 脚本还把**仓库内**的 `integrations/claude-plugin` 整目录逐字节拷到
-`build/daemon/claude-plugin/`（不做任何改写，`.mcp.json` 的中心地址照旧写死；来源缺失或缺 `.claude-plugin/plugin.json`
+`build/daemon/claude-plugin/`（不做任何改写；来源缺失或缺 `.claude-plugin/plugin.json`
 **直接失败**，与三件同一口径，CI 不需要新输入），随同一条 `extraResources` 进 `Contents/Resources/daemon/claude-plugin/`。
 插件是 node / sh 脚本，**不进** `mac.binaries`、不做 ad-hoc 重签、不落 `~/.coflux`。app 更新原地替换包内这份，不做版本目录。
 
