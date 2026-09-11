@@ -222,6 +222,14 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
   send({ type: "running" });
 
   let lastAssistantText = "";
+  /**
+   * **`prompt()` 返回不等于成功。** pi 把模型侧的失败报在最终 AssistantMessage 的 `stopReason` 上
+   * （`"error"` / `"aborted"`，附 `errorMessage`），而不是抛异常——冒烟时用一把无效 key 跑，
+   * `prompt()` 照样正常返回，早先那版据此报了 succeeded。终态必须从这里读。
+   */
+  let lastStopReason = "";
+  let lastErrorMessage = "";
+
   session.subscribe((event: { type: string; [key: string]: unknown }) => {
     if (event.type === "message_update") {
       const inner = event.assistantMessageEvent as { type?: string; delta?: string } | undefined;
@@ -230,7 +238,10 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
       const name = (event as { toolName?: string }).toolName ?? "tool";
       send({ type: "progress", note: `正在执行 ${name}` });
       transcript("tool", `→ ${name}`);
-    } else if (event.type === "message_end") {
+    } else if (event.type === "message_end" || event.type === "turn_end") {
+      const message = (event.message ?? {}) as { stopReason?: string; errorMessage?: string };
+      if (message.stopReason) lastStopReason = message.stopReason;
+      if (message.errorMessage) lastErrorMessage = message.errorMessage;
       if (lastAssistantText) transcript("assistant", lastAssistantText);
     }
   });
@@ -242,9 +253,41 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
     clearTimeout(timeout);
   }
 
-  // pi 的 prompt() 返回不等于成功：失败可能以事件/消息形式报出来。这里只把「跑完了」当跑完了，
-  // 成功与否交给上层看 summary 与 changedFiles。
+  // 先停干净再落终态：写锁是靠「这条 run 还没终结」挡住下一个写手的，提前终结等于提前放锁。
   await stopAllGroups();
+
+  if (lastStopReason === "error") {
+    transcript("error", lastErrorMessage || "模型调用失败");
+    send({
+      type: "done",
+      outcome: "model_error",
+      summary: lastAssistantText.trim(),
+      changedFiles: [...changedFiles],
+      error: lastErrorMessage || "模型调用失败，且未给出原因",
+    });
+    return;
+  }
+  if (lastStopReason === "aborted") {
+    send({
+      type: "done",
+      outcome: "cancelled",
+      summary: lastAssistantText.trim(),
+      changedFiles: [...changedFiles],
+      error: lastErrorMessage || "任务被中断",
+    });
+    return;
+  }
+  // 一次事件都没收到就返回（模型没产出任何消息）同样不算成功——多半是会话根本没跑起来。
+  if (!lastStopReason) {
+    send({
+      type: "done",
+      outcome: "model_error",
+      summary: "",
+      changedFiles: [...changedFiles],
+      error: "executor 没有产出任何模型回复；检查桌面里配的 provider 与模型是否可用",
+    });
+    return;
+  }
   send({
     type: "done",
     outcome: "succeeded",
