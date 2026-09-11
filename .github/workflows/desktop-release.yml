@@ -159,7 +159,7 @@ jobs:
       - name: 校验签名 / 公证票据 / Gatekeeper
         run: |
           set -euo pipefail
-          app="apps/desktop/dist/mac-arm64/coflux.app"
+          app="apps/desktop/dist/mac-arm64/Coflux.app"
           test -d "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -d --entitlements - "$app"
@@ -202,7 +202,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "coflux 桌面客户端 v${VERSION}（macOS 13+，Apple Silicon）。"
+            echo "Coflux 桌面客户端 v${VERSION}（macOS 26+，Apple Silicon）。"
             echo
             echo "- 安装：下载 dmg，拖进 Applications。已签名并经苹果公证。"
             echo "- 自动更新：app 读仓库 desktop-updates 分支的 latest-mac.yml，安装包从本 Release 下载。"

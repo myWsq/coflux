@@ -31,7 +31,7 @@ pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/ico
 - **Origin**：主进程在渲染层发起的每条 WebSocket 握手上把 Origin 改写为 `https://desktop.coflux.dev`
   （`src/main/origin.ts`），Web 侧经 `deviceTransport.origin` 上报同值；server/daemon 校验零放宽。
   这个字符串是 loopback grant 绑定的一部分，改它等于让所有桌面 grant 失效。
-- **服务器地址**：`--server=wss://…/client` > 环境变量 `COFLUX_SERVER_URL` > `~/Library/Application Support/coflux/settings.json`（未打包的 dev 实例用 `coflux-dev` 目录，与安装版互不可见）
+- **服务器地址**：`--server=wss://…/client` > 环境变量 `COFLUX_SERVER_URL` > `~/Library/Application Support/Coflux/settings.json`（未打包的 dev 实例用 `Coflux-dev` 目录，与安装版互不可见）
   的 `serverUrl` > 默认（打包版 `wss://api.coflux.dev/client`，dev `ws://localhost:8787/client`）。
 - **版本准入**：渲染层 build-id 与浏览器构建同一套（git short SHA），中心只接受与部署的 web 同 SHA 的桌面版；
   被拒时显示「需要更新」并触发 electron-updater 检查，不当作断线。
