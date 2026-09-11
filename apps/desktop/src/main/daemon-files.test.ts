@@ -99,4 +99,3 @@ test("credentials.json 只取 daemonId，deviceToken 不出函数", () => {
   assert.equal(parseCredentialsDaemonId("garbage"), null);
   assert.equal(parseCredentialsDaemonId(null), null);
 });
-

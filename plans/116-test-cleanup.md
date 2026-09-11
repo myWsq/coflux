@@ -1,4 +1,4 @@
-# Plan 115：按测试原则清理测试代码——黑盒目录去白盒、桌面与 Rust 单测去「重述实现」、删陈旧 worktree
+# Plan 116：按测试原则清理测试代码——黑盒目录去白盒、桌面与 Rust 单测去「重述实现」、删陈旧 worktree
 
 > 本 plan 是结果契约，不是逐步脚本。理解需求与已定决策，对着活代码自己设计改法。
 > 只有当你同时是验证者时才边做边跑里程碑验证——被委派的执行者只实现，验证在其会话之外。
@@ -124,7 +124,7 @@ In scope:
 - `docs/auth-design.md`（一句改口）
 - `apps/desktop/src/main/*.test.ts`、`apps/desktop/src/renderer/*.test.ts`、`apps/desktop/src/renderer/components/workbench/*.test.ts`
 - `crates/cli/src/{main,commands}.rs`、`crates/protocol/src/logline.rs`、`crates/worker/src/{agent_ctl,device,gateway,hook,ops}.rs`（只动 `#[cfg(test)]` 模块）
-- `plans/README.md`、`plans/115-test-cleanup.md`
+- `plans/README.md`、`plans/116-test-cleanup.md`
 
 Out of scope:
 - 任何生产代码（含 `terminal-link-activation.ts` 内联）——用户决定本次不动
