@@ -57,7 +57,7 @@ jobs:
     needs: metadata
     runs-on: macos-latest
     timeout-minutes: 60
-    # 签名/公证 secret 与 R2 secret/变量都挂在 release-signing environment；
+    # 签名/公证 secret 挂在 release-signing environment；
     # 该 environment 的 deployment tag 规则必须同时放行 desktop-v*（见 docs/RELEASING.md）。
     environment: release-signing
     steps:
@@ -109,6 +109,29 @@ jobs:
           fi
           echo "::notice::桌面渲染层 build-id=${build_id}（prod 部署到同一 SHA 才被中心接受）"
 
+      # 证书导入沿用 release.yml 里已验证的做法：自己建临时 keychain、import、set-key-partition-list、加进搜索列表。
+      # 不把 p12 交给 electron-builder 的 CSC_LINK：它自建 keychain 的 set-key-partition-list 在 GitHub runner 上报
+      # 「passphrase 不正确」（2026-09-11 首发实测），改由 CSC_KEYCHAIN + CSC_NAME 指到现成的 keychain 与身份。
+      - name: 导入 Developer ID 证书到临时 keychain
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          KEYCHAIN="$RUNNER_TEMP/desktop-build.keychain"
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          echo -n "$MACOS_CERT_P12" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT_PATH" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
+          rm -f -- "$CERT_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -c 'Developer ID Application' >/dev/null
+          echo "CSC_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
       - name: 写入公证 API key 文件
         env:
           NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
@@ -119,16 +142,17 @@ jobs:
 
       # electron-builder 顺序：翻 Fuses → 签名（hardened runtime + entitlements）→ 公证 + staple → 出 dmg/zip
       # → 生成 latest-mac.yml。asar 完整性校验开着，签名后不再碰 app 内任何文件。
+      # 不设 CSC_LINK：身份从上一步的 keychain（CSC_KEYCHAIN）按 CSC_NAME 找。
       - name: 打包 + Developer ID 签名 + 公证（electron-builder）
         env:
-          CSC_LINK: ${{ secrets.MACOS_CERT_P12 }}
-          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          CSC_NAME: Developer ID Application: Shuaiqi Wang (${{ secrets.APPLE_TEAM_ID }})
           APPLE_API_KEY: ${{ runner.temp }}/AuthKey.p8
           APPLE_API_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.NOTARY_ISSUER_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          test -n "${CSC_KEYCHAIN:-}"
           pnpm -C apps/desktop exec electron-builder --mac --arm64 --publish never
 
       - name: 校验签名 / 公证票据 / Gatekeeper
@@ -144,9 +168,11 @@ jobs:
           test -f apps/desktop/dist/latest-mac.yml
           grep -q "coflux-${{ needs.metadata.outputs.version }}-arm64.zip" apps/desktop/dist/latest-mac.yml
 
-      - name: 清理公证 API key 文件
+      - name: 清理公证 API key 文件与临时 keychain
         if: always()
-        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
+        run: |
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/cert.p12"
+          security delete-keychain "$RUNNER_TEMP/desktop-build.keychain" >/dev/null 2>&1 || true
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
