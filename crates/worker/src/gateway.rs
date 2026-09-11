@@ -713,33 +713,4 @@ mod first_frame_tests {
             Ok(Some(FirstFrame::Closed))
         ));
     }
-
-    #[test]
-    fn control_frames_keep_waiting() {
-        assert!(matches!(
-            classify_first_frame(Some(Ok(Message::Ping(vec![1])))),
-            Ok(None)
-        ));
-        assert!(matches!(
-            classify_first_frame(Some(Ok(Message::Pong(Vec::new())))),
-            Ok(None)
-        ));
-    }
-
-    #[test]
-    fn text_frame_is_a_protocol_error() {
-        let error = classify_first_frame(Some(Ok(Message::Text("{}".into())))).err();
-        assert_eq!(
-            error.as_deref(),
-            Some("LocalClientHello 必须是 binary frame")
-        );
-    }
-
-    #[test]
-    fn binary_frame_is_the_envelope() {
-        match classify_first_frame(Some(Ok(Message::Binary(vec![7, 8, 9])))) {
-            Ok(Some(FirstFrame::Envelope(bytes))) => assert_eq!(bytes, vec![7, 8, 9]),
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
 }

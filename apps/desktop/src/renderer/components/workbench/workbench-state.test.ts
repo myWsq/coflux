@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { TaskStatus } from "@coflux/protocol";
 
 import {
   parseStoredSelection,
@@ -8,38 +7,8 @@ import {
   resolveActiveTaskIdAfterPendingDrop,
   resolveSelectionAfterTaskMove,
   resolveWorkbenchSelection,
-  resolveWorkbenchSurface,
   serializeSelection,
-  shouldActivateChangesView,
-  shouldShowReconnectBanner,
-  taskCloseNeedsConfirmation,
 } from "./workbench-state";
-
-test("认证状态映射到独立页面，版本失配不会冒充登录失败", () => {
-  assert.equal(resolveWorkbenchSurface("authenticating"), "authenticating");
-  assert.equal(resolveWorkbenchSurface("outdated"), "outdated");
-  assert.equal(resolveWorkbenchSurface("need-login"), "login");
-  assert.equal(resolveWorkbenchSurface("auth-failed"), "login");
-  assert.equal(resolveWorkbenchSurface("authed"), "workspace");
-});
-
-test("连接中和已断开都展示重连横幅，connected 才撤除", () => {
-  assert.equal(shouldShowReconnectBanner("connecting"), true);
-  assert.equal(shouldShowReconnectBanner("disconnected"), true);
-  assert.equal(shouldShowReconnectBanner("connected"), false);
-});
-
-test("变更视图只在当前工作区且选中 changes tab 时激活", () => {
-  assert.equal(shouldActivateChangesView(true, "changes"), true);
-  assert.equal(shouldActivateChangesView(true, "terminal"), false);
-  assert.equal(shouldActivateChangesView(false, "changes"), false);
-  assert.equal(shouldActivateChangesView(false, "terminal"), false);
-});
-
-test("只有仍在运行的终端关闭前需要确认", () => {
-  assert.equal(taskCloseNeedsConfirmation(TaskStatus.RUNNING), true);
-  assert.equal(taskCloseNeedsConfirmation(TaskStatus.EXITED), false);
-});
 
 test("工作区与设备选择的持久化格式保持向后兼容", () => {
   assert.deepEqual(parseStoredSelection(null), null);

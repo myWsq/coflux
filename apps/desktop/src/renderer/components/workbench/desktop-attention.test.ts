@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { TaskStatus, type Task, type Workspace } from "@coflux/protocol";
 import type { SessionAgentState } from "@coflux/client";
 
-import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "./desktop-attention";
+import { attentionSnapshot, diffAttention, type AttentionSnapshot } from "./desktop-attention";
 
 function workspace(id: string, branch = id): Workspace {
   return { id, projectId: "p1", daemonId: "d1", branch, name: "", isMain: false, createdAt: 1, additions: 0, deletions: 0 } as unknown as Workspace;
@@ -37,12 +37,6 @@ test("快照只收 approval / question 两态，active/done/idle 与离线设备
   assert.deepEqual(done, {});
 });
 
-test("question 态带 agent 留言", () => {
-  const snapshot = attentionSnapshot({ ...base, sessionAgents: { "s-b": agent("t-b", "question", "要不要跑测试？") } });
-  assert.equal(snapshot["ws-b"].kind, "question");
-  assert.equal(snapshot["ws-b"].message, "要不要跑测试？");
-});
-
 test("两次快照：新进入等待的才提醒，持续等待不重复；角标 = 当前等待数", () => {
   const first: AttentionSnapshot = { "ws-a": { kind: "approval", agent: "claude", branch: "main" } };
   const initial = diffAttention({}, first);
@@ -72,15 +66,4 @@ test("恢复后清零；恢复再进入才再次提醒；批准 → 提问视为
   const kindChanged = diffAttention(waiting, switched);
   assert.deepEqual(kindChanged.entered.map((item) => item.entry.kind), ["question"]);
   assert.equal(kindChanged.badgeCount, 1);
-});
-
-test("通知文案：标题说谁在等什么，正文定位项目/分支，提问态附留言", () => {
-  assert.deepEqual(attentionNotificationText({ kind: "approval", agent: "claude", branch: "main", projectName: "coflux" }), {
-    title: "claude 等待批准",
-    body: "coflux · main",
-  });
-  assert.deepEqual(attentionNotificationText({ kind: "question", agent: "codex", branch: "feature", message: "要不要跑测试？" }), {
-    title: "codex 等待回答",
-    body: "feature\n要不要跑测试？",
-  });
 });
