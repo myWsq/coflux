@@ -287,6 +287,18 @@ M1 证据来自编排者：`ca87e59` 的隐藏窗口冒烟在沙箱外 exit 0，
 - G6 修订依据：锁定上游 `src/terminal/Screen.zig` 的 `Screen: selectionString wide char with header` 用例选第一行仍返回下一行宽字；`src/Surface.zig::dumpTextLocked` 与包 `InMemoryTerminalSession.readViewportText()` 走此 selection 路径。新增 `grid()` 直接读 `ghostty_surface_size`，不借用栅栏缓存；结合真实 CPR 验证物理列位置，未放宽尺寸正确性要求。如果新断言失败，G6 必须判不过并定位栅栏或宽字放置问题。
 - 资源补丁保留源码形状硬错误和幂等入口；首轮修订增加临时 owner write 与 finally 恢复 mode，第二轮补丁测试 2/2 通过。本轮另外在复制 bundle 前删除 gitignored 目标 bundle，避免覆盖其中只读文件，不修改 SwiftPM 源资源。
 
+### 编排者补记（2026-09-12，本地预览）
+
+黑屏修复后的功能性证据（CDP 注入 `browser-probe.js` 取得，非肉眼走查）：终端 viewport dump 有真实会话内容、
+`metalAllocatedBytes` 稳定在 44,859,392、renderer rAF 中位 16.7ms、队列峰值 176,707 字节且 `queuedBytes` 归零。
+本机 `screencapture` 无屏幕录制权限，像素级走查仍须用户人眼完成。
+
+**已知隐患（推断，未实际触发）**：设计系统的通知宿主实测是右下角 32×32 的盒子（`x=1248,y=788`），
+与终端区域矩形（`x=260,y=36,1020×784`）相交。空宿主已被 `emptyHost` 豁免，但**一旦真的弹出 toast，
+该宿主不再为空，几何判据会判定遮挡，整块终端会在 toast 存续期间隐藏**。这是叠层方案「原生视图盖住 DOM」的
+固有代价的一种表现：要么容忍闪隐，要么把 toast 改成原生绘制，或把遮挡判据细化到「真正不透明且覆盖面积超阈值」。
+正式 plan 必须给出选择；本 spike 不改。
+
 可复现命令、G3/G4/G5/G7 人工步骤和采样方法见
 `apps/desktop/native/ghostty/README.md` 与 `apps/desktop/native/ghostty/checklist.md`。
 当前没有足够证据判断存在或不存在一票否决；正式立项必须先取得 G1 结果，再依据其余七门收敛范围。
