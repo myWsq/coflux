@@ -5,7 +5,17 @@
  */
 import type { DesktopBridge } from "../shared/desktop-bridge";
 
-export type { DesktopBridge, DesktopCommand, DesktopNotification, DesktopUpdateState, DesktopUpdateStatus } from "../shared/desktop-bridge";
+export type {
+  DesktopBridge,
+  DesktopCommand,
+  DesktopDaemonBusy,
+  DesktopDaemonFda,
+  DesktopDaemonState,
+  DesktopDaemonStatus,
+  DesktopNotification,
+  DesktopUpdateState,
+  DesktopUpdateStatus,
+} from "../shared/desktop-bridge";
 
 declare global {
   interface Window {

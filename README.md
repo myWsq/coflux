@@ -30,6 +30,10 @@ supervisor/OS 重启后恢复活进程。详见 [架构与 tmux 边界](docs/arc
 
 ## 用户侧：安装 daemon
 
+**macOS 直接用 Coflux.app**（plan 113）：app 自带 daemon 三件，登录后按引导一键接入本机（落盘、起 launchd 服务、用登录态授权、
+完全磁盘访问引导），之后从账号菜单「本机 daemon」查看状态、重启或移除；不需要 Node。下面的 npm 路径给 Linux 与别的机器，
+两者写出的文件完全同构，可互换。
+
 daemon 是预编译的 Rust 二进制，用 `cofluxd`（npm）装成系统服务（崩溃/开机自启）。默认连公共服务 `wss://api.coflux.dev/daemon`（自托管用 `--server` 改）。
 
 ```bash

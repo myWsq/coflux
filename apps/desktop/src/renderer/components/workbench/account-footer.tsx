@@ -3,12 +3,15 @@ import { Avatar } from "@astryxdesign/core/Avatar";
 import { Button } from "@astryxdesign/core/Button";
 import { Divider } from "@astryxdesign/core/Divider";
 import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
-import { ArrowUp, Cog, LogOut, RefreshCw, Server } from "lucide-react";
+import { StatusDot } from "@astryxdesign/core/StatusDot";
+import { ArrowUp, Cog, LogOut, Monitor, RefreshCw, Server } from "lucide-react";
 import type { CofluxClient } from "@coflux/client";
 
 import { accountIdentity, resolveAccountFooter, serverHostLabel } from "@/components/workbench/account-footer-view";
+import { daemonStatusLine } from "@/components/workbench/daemon-view";
 import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { SERVER_URL, desktop } from "@/config";
+import type { DesktopDaemonState } from "@/desktop-bridge";
 
 /**
  * 侧栏底部的账号脚部（plan 110，Cursor 左下角那一行）：头像 + 登录身份 + 所连服务器 host + 尾部按钮。
@@ -19,14 +22,27 @@ import { SERVER_URL, desktop } from "@/config";
  *
  * 只有「新版本已下载」时尾部齿轮换成强调色「更新」按钮，此时它作为触发按钮的兄弟节点渲染，整行
  * 仍能打开菜单。脚部**不**触发更新检查（见 use-desktop-update.ts）。
+ *
+ * 「本机 daemon」一行（plan 113）：状态点 + 状态短语 + 副文案，点开面板看路径提示与动作；状态对象由
+ * Workbench 订阅后传下来（同一份也驱动接入引导的自动弹出）。
  */
-export function AccountFooter({ client }: { client: CofluxClient }) {
+export function AccountFooter({
+  client,
+  daemonState,
+  onOpenDaemonPanel,
+}: {
+  client: CofluxClient;
+  /** null = 还没拿到第一份状态 */
+  daemonState: DesktopDaemonState | null;
+  onOpenDaemonPanel: () => void;
+}) {
   const loginName = useStore(client.store, (state) => state.loginName);
   const update = useDesktopUpdateState(desktop);
 
   const identity = accountIdentity(loginName);
   const host = serverHostLabel(SERVER_URL);
   const view = resolveAccountFooter(update, desktop.version);
+  const daemonLine = daemonState ? daemonStatusLine(daemonState) : null;
 
   return (
     <div className="flex shrink-0 items-center gap-1 border-t border-border px-2 py-2">
@@ -66,6 +82,14 @@ export function AccountFooter({ client }: { client: CofluxClient }) {
           onClick={() => (view.updateItem.action === "install" ? desktop.installUpdate() : desktop.checkForUpdates())}
         />
         <DropdownMenuItem icon={<Server className="size-3.5" />} label="服务器地址…" onClick={() => desktop.showServerInfo()} />
+        <DropdownMenuItem
+          icon={<Monitor className="size-3.5" />}
+          label="本机 daemon"
+          description={daemonLine ? (daemonLine.detail ? `${daemonLine.label} · ${daemonLine.detail}` : daemonLine.label) : "正在读取状态…"}
+          endContent={daemonLine ? <StatusDot variant={daemonLine.tone} label={daemonLine.label} isPulsing={daemonLine.pulsing} /> : undefined}
+          isDisabled={!daemonState}
+          onClick={onOpenDaemonPanel}
+        />
         <Divider />
         <DropdownMenuItem icon={<LogOut className="size-3.5" />} label="登出" onClick={() => client.logout()} />
       </DropdownMenu>
