@@ -12,12 +12,22 @@ coflux 唯一的前端与默认迭代对象（plan 106）：`src/main` 是 Elect
 ```sh
 pnpm -C apps/desktop dev         # electron-vite dev：渲染层 5274（HMR），主进程连 ws://localhost:8787/client
 pnpm -C apps/desktop typecheck   # tsc 两份：tsconfig.json（main / preload / shared / 配置 / 测试）+ tsconfig.renderer.json（渲染层）
-pnpm -C apps/desktop test        # node --test：主进程纯函数（Origin / 渲染层路径与 CSP / IPC 来源与载荷 / 设置 / 更新状态 / token 存储 / 窗口 bounds）+ 渲染层纯函数（桥接必选 / token 迁移 / 变更视图刷新 / 通知去重 / 工作台状态 / 账号脚部展示映射）+ 发布配置
+pnpm -C apps/desktop test        # node --test：主进程纯函数（Origin / 渲染层路径与 CSP / IPC 来源与载荷 / 设置 / 更新状态 / token 存储 / 窗口 bounds / 本机 daemon 的路径、文本、版本比较、状态派生、内置定位）+ 渲染层纯函数（桥接必选 / token 迁移 / 变更视图刷新 / 通知去重 / 工作台状态 / 账号脚部展示映射 / daemon 状态行、动作与引导分页）+ 发布配置
 pnpm -C apps/desktop build       # electron-vite build → out/{main,preload,renderer}
-pnpm -C apps/desktop run pack    # 未签名 .app（dist/mac-arm64/），本机冒烟用；通知/角标在未签名包上不可信
-pnpm -C apps/desktop dist        # 本机出 dmg/zip（需 Developer ID 证书在钥匙串里，否则只签 ad-hoc）
+COFLUX_DESKTOP_DAEMON_DIR=../../target/debug pnpm -C apps/desktop run pack   # 未签名 .app（dist/mac-arm64/），本机冒烟用；通知/角标在未签名包上不可信
+COFLUX_DESKTOP_DAEMON_DIR=../../target/debug pnpm -C apps/desktop dist       # 本机出 dmg/zip（需 Developer ID 证书在钥匙串里，否则只签 ad-hoc）
+pnpm -C apps/desktop run stage-daemon --from ../../target/debug             # 只落位内置 daemon 三件到 build/daemon（dev 实例也从这里找）
 pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/icon.png（仅 macOS）
 ```
+
+**内置 daemon 三件（plan 113）**：`pack` / `dist` 先跑 `scripts/stage-daemon.mjs`，它从一个**显式**给出的产物目录
+（环境变量 `COFLUX_DESKTOP_DAEMON_DIR` 或 `--from <dir>`；本机通常是仓库根的 `target/debug`，先 `cargo build -p coflux-supervisor -p coflux-worker -p coflux-cli`）
+把 `coflux-supervisor` / `coflux-worker` / `cofluxd` 复制到 `build/daemon/`（gitignored）并写版本戳 `VERSION`；输入缺失或三件不全**直接失败**，
+不会静默出一个不带 daemon 的包。`VERSION` 取 `<dir>/VERSION`，缺失退到 `COFLUX_DESKTOP_DAEMON_VERSION`，再缺失落 `dev`
+（本机 debug 产物编译期就是 dev，app 对解析不了的内置版本永不提示升级）。CI 在 `desktop-release.yml` 的并行 daemon job 里
+写 `v0.0.0-desktop.<桌面版本>`。electron-builder 把 `build/daemon` 整目录放进 `Contents/Resources/daemon/`（不进 asar），
+三件经 `mac.binaries` 拿 Developer ID + hardened runtime 签名并进公证。未打包的 dev 实例也从 `build/daemon` 找三件，
+没跑过 stage 脚本时状态对象报「本构建不带 daemon」，只能看状态、不能接入。
 
 依赖分类：electron-builder 只打 `out/**` 与 `dependencies`。渲染层用的库（react / xterm / astryx / shiki / zustand /
 `@coflux/client` 等）由 Vite 打进 `out/renderer`，因此放 devDependencies；主进程运行时按 `externalizeDepsPlugin`
@@ -51,5 +61,16 @@ pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/ico
   桥接面没有因此长出 fs / shell 能力）。
 - **版本准入**（plan 105）：登录时上报 `clientKind=desktop` 与 `CONTROL_PROTOCOL_VERSION`，中心只在协议版本低于其最低支持版本时拒绝；build-id 只作标识。部署 prod 不会踢旧桌面版，electron-updater 在后台升级；被拒显示「需要更新」并触发更新检查，不当作断线。
 - **快捷键**：纯 ⌘ 前缀（⌘T/⌘W/⌘N/⌘1-9/⌘[ ]/⌘/），原生菜单项只展示键位不注册 accelerator，键落到页面处理。
+- **本机 daemon**（plan 113）：app 就是这台 Mac 的 daemon 安装器与管理器。落盘布局与 LaunchAgent 与 npm 版
+  `cofluxd` 逐字同构（`~/.coflux/bin/{coflux-supervisor,coflux-worker,cofluxd}`、`~/Library/LaunchAgents/com.coflux.daemon.plist`、
+  `~/.coflux/settings.json` 的 serverUrl = app 地址把 `/client` 换成 `/daemon`；尊重 `COFLUX_HOME`），npm 装过的机器被识别为
+  「已接入」直接接管。落盘后对三件 ad-hoc 重签（新落盘二进制带 provenance，launchd 顶层 spawn 被 AMFI 静默杀）。
+  登录成功（中心已连上）后本机未接入就弹接入引导（可「暂不」，之后从账号菜单「本机 daemon」再进）：安装组件 → 启动服务 →
+  用当前登录态 `client.authorizeDevice(token)` 兑现 `~/.coflux/pending-auth.json` 里的链接（不开浏览器）→ 完全磁盘访问引导。
+  内置 supervisor 比在跑的新只提示「有更新待重启」（文案带本机运行中终端数），用户点「重启」才换二进制并 unload/load，从不自动重启；
+  比较用 `Resources/daemon/VERSION` 与 `~/.coflux/supervisor-version`，在跑的是 dev 或缺文件视为旧，内置解析不了永不提示。
+  判定 / 文本 / 版本比较 / 状态派生都是无 Electron 依赖的纯模块（`src/main/daemon-*.ts`），只有 `daemon-manager.ts` 碰
+  launchctl / codesign / fs.watch；桥接面只多一个状态对象和六个无参窄动词。主进程日志只记事件，不写凭证文件内容。
+  未打包的 dev 实例接管的是同一个真实 daemon（`~/.coflux` 全机唯一）。
 - **安全基线**：sandbox/contextIsolation 开、nodeIntegration 关、Fuses 关 RunAsNode 等、响应带 CSP、
   权限默认拒绝、IPC 校验发送方来源与载荷；新窗口/外链一律系统浏览器。桥接面不暴露 Node / fs / shell。

@@ -1,10 +1,14 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, dialog, Menu, protocol, safeStorage, session, shell, type BrowserWindow } from "electron";
 
 import { IPC } from "../shared/ipc";
 import { APP_ORIGIN, APP_SCHEME, APP_URL, registerAppProtocol } from "./app-protocol";
+import { locateDaemonBundle, resolveDaemonBundleDir } from "./daemon-bundle";
+import { createDaemonManager, execCommand, type DaemonManager } from "./daemon-manager";
+import { daemonHomePaths } from "./daemon-paths";
 import { registerIpc } from "./ipc";
 import { log } from "./log";
 import { buildAppMenu } from "./menu";
@@ -38,6 +42,7 @@ const RENDERER_ROOT = fileURLToPath(new URL("../renderer/", import.meta.url));
 
 let mainWindow: BrowserWindow | null = null;
 let quitting = false;
+let daemonManager: DaemonManager | null = null;
 
 function showMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -103,6 +108,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on("before-quit", () => {
     quitting = true;
+    daemonManager?.dispose();
     log.info("退出");
   });
 
@@ -147,6 +153,30 @@ if (!app.requestSingleInstanceLock()) {
     });
     updater.onChange((state) => sendToRenderer(IPC.updateState, state));
 
+    // 本机 daemon（plan 113）：内置三件在 Resources/daemon（dev 实例是仓库内 build/daemon，同 stage 脚本落位），
+    // 找不到时状态对象表达「本构建不带 daemon」而不崩。~/.coflux 与 LaunchAgent 全机唯一——dev 实例接管的
+    // 是同一个真实 daemon，尊重 COFLUX_HOME 让开发者能指到别处。判定 / 文本 / 版本比较全在纯模块，这里只接
+    // launchctl / codesign / shell 两跳。
+    const daemonBundleDir = resolveDaemonBundleDir({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() });
+    const daemonBundle = locateDaemonBundle(daemonBundleDir);
+    log.info("内置 daemon", daemonBundle ? { dir: daemonBundle.dir, version: daemonBundle.version } : { dir: daemonBundleDir, bundled: false });
+    const daemon = createDaemonManager({
+      paths: daemonHomePaths(homedir(), process.env),
+      bundle: daemonBundle,
+      clientServerUrl: serverUrl,
+      hostname: hostname(),
+      uid: process.getuid?.() ?? 0,
+      platform: process.platform,
+      commands: {
+        exec: execCommand,
+        openExternal: (url) => void shell.openExternal(url),
+        showItemInFolder: (path) => shell.showItemInFolder(path),
+      },
+      log,
+    });
+    daemonManager = daemon;
+    daemon.onChange((state) => sendToRenderer(IPC.daemonState, state));
+
     registerIpc(
       {
         bootstrap: () => ({ platform: process.platform, version: app.getVersion(), serverUrl, origin: DESKTOP_ORIGIN }),
@@ -167,6 +197,17 @@ if (!app.requestSingleInstanceLock()) {
           tokenStore.write(token);
         },
         clearSessionToken: tokenStore.clear,
+        // 渲染层主动拉取（账号菜单挂载时）顺带触发一次含 launchctl 的全量刷新：用户驱动、低频
+        getDaemonState: () => {
+          void daemon.refresh();
+          return daemon.getState();
+        },
+        daemonEnroll: () => void daemon.enroll(),
+        daemonRestart: () => void daemon.restart(),
+        daemonStop: () => void daemon.stop(),
+        daemonRemove: () => void daemon.remove(),
+        daemonOpenFdaGuide: daemon.openFdaGuide,
+        daemonDismissError: daemon.dismissError,
       },
       trusted,
     );

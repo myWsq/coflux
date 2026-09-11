@@ -39,6 +39,16 @@ const SUPERVISOR_VERSION: &str = match option_env!("COFLUX_RELEASE_VERSION") {
     None => "dev",
 };
 
+/// 把 `SUPERVISOR_VERSION` **原文**（不是解析后的形式）加换行写到 `<home>/supervisor-version`
+/// （plan 112）。这是 Coflux.app（plan 113）的读取契约：纯文本、一行、内容等于握手上报的版本。
+/// 照 `fda::write_status` 的纪律：辅助能力，不 panic、失败静默。
+fn write_version_file(home: &str) {
+    let _ = std::fs::write(
+        format!("{home}/supervisor-version"),
+        format!("{SUPERVISOR_VERSION}\n"),
+    );
+}
+
 const DEFAULT_HISTORY_LINE_LIMIT: usize = 2_000;
 /// history 会按逻辑行上限再乘 wrap 余量建立 VT scrollback；环境变量不能把单 session
 /// 的常驻内存放大到任意值，也不能用 0 意外关闭历史边界。
@@ -96,6 +106,7 @@ fn main() {
         .unwrap_or_else(|_| format!("{}/.coflux", std::env::var("HOME").unwrap_or_default()));
     let settings = Settings::load(&home);
     fda::write_status(&home); // macOS: 探测完全磁盘访问权限并落盘,供 cofluxd status/fda 展示引导；非 macOS 空操作
+    write_version_file(&home); // plan 112：自身版本落盘，桌面版据此判断「app 内置的 supervisor 比在跑的新」
     let shell = std::env::var("COFLUX_SHELL")
         .ok()
         .filter(|s| !s.is_empty())

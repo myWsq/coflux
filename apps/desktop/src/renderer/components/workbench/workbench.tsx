@@ -15,12 +15,16 @@ import {
   WorkspaceRenameDialog,
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
+import { DaemonOnboardingDialog } from "@/components/workbench/daemon-onboarding";
+import { DaemonPanelDialog } from "@/components/workbench/daemon-panel";
+import { countLocalRunningTerminals, shouldOfferOnboarding } from "@/components/workbench/daemon-view";
 import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "@/components/workbench/desktop-attention";
 import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useTerminalAttach } from "@/components/workbench/terminal-attach";
+import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon";
 import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import type { WorkspaceActiveTab, WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
@@ -34,7 +38,7 @@ import {
   taskCloseNeedsConfirmation,
   type WorkbenchSelection,
 } from "@/components/workbench/workbench-state";
-import { WORKSPACE_KEY, desktop } from "@/config";
+import { DAEMON_ONBOARDING_DISMISSED_KEY, WORKSPACE_KEY, desktop } from "@/config";
 import type { DesktopBridge } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
@@ -76,6 +80,23 @@ function persistSelection(selection: WorkbenchSelection | null) {
   const serialized = serializeSelection(selection);
   if (serialized === null) localStorage.removeItem(WORKSPACE_KEY);
   else localStorage.setItem(WORKSPACE_KEY, serialized);
+}
+
+/** 接入引导点过「暂不」（plan 113）：之后不再自动弹，只从账号菜单再进。localStorage 不可用时按没点过。 */
+function readOnboardingDismissed(): boolean {
+  try {
+    return localStorage.getItem(DAEMON_ONBOARDING_DISMISSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistOnboardingDismissed() {
+  try {
+    localStorage.setItem(DAEMON_ONBOARDING_DISMISSED_KEY, "1");
+  } catch {
+    // 记不住就下次登录再弹一次，无害
+  }
 }
 
 /**
@@ -175,6 +196,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // 新建工作区菜单当前打开的项目：Sidebar 的 + 按钮/右键菜单与 Cmd+Ctrl+N 快捷键共用同一份受控状态。
   const [createMenuProjectId, setCreateMenuProjectId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  // 本机 daemon（plan 113）：状态对象一份订阅，驱动账号菜单一行、面板与接入引导；引导只在登录成功
+  // （中心已连上）后按状态自动弹一次，之后从账号菜单再进。
+  const daemonState = useDesktopDaemonState(desktop);
+  const [daemonDialog, setDaemonDialog] = useState<"onboarding" | "panel" | null>(null);
+  const onboardingOfferedRef = useRef(false);
   // 乐观工作区条目（plan 078）：存组件层、渲染时与 store 数据合并，不进共享 store——
   // 快照对 workspaces 是整体替换，注入的假条目会被无声抹掉；共享包也不该背 web 专有语义。
   const [pendingWorkspaces, setPendingWorkspaces] = useState<PendingWorkspace[]>([]);
@@ -278,6 +304,27 @@ export function Workbench({ client }: { client: CofluxClient }) {
   useEffect(() => {
     if (followTask) setFollowTask(null);
   }, [followTask]);
+
+  // 登录成功后检测本机（plan 113）：中心连上的 authed + 未接入 + 本构建带 daemon + 没点过「暂不」→ 弹接入引导；
+  // 离线冷启动的 authed 来自缓存（status 不是 connected），不弹。每次登录最多弹一次，登出后复位。
+  useEffect(() => {
+    if (authState !== "authed") {
+      onboardingOfferedRef.current = false;
+      return;
+    }
+    if (
+      shouldOfferOnboarding({
+        authState,
+        connection: status,
+        state: daemonState,
+        dismissed: readOnboardingDismissed(),
+        alreadyOffered: onboardingOfferedRef.current,
+      })
+    ) {
+      onboardingOfferedRef.current = true;
+      setDaemonDialog("onboarding");
+    }
+  }, [authState, status, daemonState]);
 
   // 冷启动遮罩撤除（plan 078）：首快照到达即撤（snapshotRevision 单调递增，>0 一旦为真
   // 永远为真，断线不会误触发）；need-login/auth-failed 立即让位给登录表单。
@@ -602,6 +649,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
         createMenuProjectId={createMenuProjectId}
         onCreateMenuProjectIdChange={setCreateMenuProjectId}
         pendingWorkspaces={pendingWorkspaces}
+        daemonState={daemonState}
+        onOpenDaemonPanel={() => setDaemonDialog("panel")}
       />
 
       {terminalWorkspaces.length > 0 ? (
@@ -760,6 +809,27 @@ export function Workbench({ client }: { client: CofluxClient }) {
       <ConfirmActionDialog action={confirmAction} onCancel={() => setConfirmAction(null)} />
       <ShortcutsHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
       <EnrollmentDialog open={enrollmentOpen} onOpenChange={setEnrollmentOpen} />
+      {/* 本机 daemon（plan 113）：面板与接入引导互斥；状态没到之前两者都不渲染 */}
+      {daemonState ? (
+        <>
+          <DaemonPanelDialog
+            open={daemonDialog === "panel"}
+            onOpenChange={(open) => !open && setDaemonDialog(null)}
+            state={daemonState}
+            runningTerminals={countLocalRunningTerminals(tasks, daemonState.daemonId)}
+            bridge={desktop}
+            onOpenOnboarding={() => setDaemonDialog("onboarding")}
+          />
+          <DaemonOnboardingDialog
+            open={daemonDialog === "onboarding"}
+            onOpenChange={(open) => !open && setDaemonDialog(null)}
+            state={daemonState}
+            client={client}
+            bridge={desktop}
+            onDismiss={persistOnboardingDismissed}
+          />
+        </>
+      ) : null}
     </div>
   );
 }

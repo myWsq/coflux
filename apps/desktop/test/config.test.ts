@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
 
+import { DAEMON_BINARIES, DAEMON_RESOURCE_DIR, DAEMON_VERSION_FILE } from "../src/main/daemon-paths";
+
 // 发布配置（electron-builder.yml）与发布 workflow 能被解析且守住 plan 103 的硬约束。
 const desktopRoot = resolve(import.meta.dirname, "..");
 const repoRoot = resolve(desktopRoot, "../..");
@@ -23,6 +25,7 @@ type Builder = {
     minimumSystemVersion: string;
     extendInfo?: Record<string, string>;
     extraResources?: { from: string; to: string }[];
+    binaries?: string[];
   };
   publish: { provider: string; url: string; channel: string };
 };
@@ -61,18 +64,85 @@ test("electron-builder.yml：签名公证、Fuses、arm64 dmg+zip、generic 更�
   assert.equal(config.publish.url, "https://raw.githubusercontent.com/myWsq/coflux/desktop-updates");
 });
 
+test("electron-builder.yml：内置 daemon 三件经 extraResources 进 Resources/daemon、mac.binaries 显式签名（plan 113）", () => {
+  const config = parse(readFileSync(resolve(desktopRoot, "electron-builder.yml"), "utf8")) as Builder;
+  // 三件 + VERSION 只能走 extraResources（asar 完整性校验开着，files 只打 out/** 与 package.json）
+  const daemon = config.mac.extraResources?.find((item) => item.to === DAEMON_RESOURCE_DIR);
+  assert.ok(daemon, "extraResources 缺少内置 daemon 目录");
+  assert.equal(daemon.from, "build/daemon"); // scripts/stage-daemon.mjs 的固定落位目录
+  assert.ok(!config.files.some((pattern) => pattern.includes("daemon")), "内置产物不得混进 files/asar");
+  // 三件都在 mac.binaries 里（Resources 下的裸可执行文件，osx-sign 默认扫不到），路径按 .app 根解析
+  for (const name of DAEMON_BINARIES) {
+    assert.ok(config.mac.binaries?.includes(`Contents/Resources/${DAEMON_RESOURCE_DIR}/${name}`), `mac.binaries 缺少 ${name}`);
+  }
+  assert.equal(config.mac.binaries?.length, DAEMON_BINARIES.length);
+
+  // stage 脚本与主进程常量同值：脚本里的字面量不能漂
+  const stage = readFileSync(resolve(desktopRoot, "scripts/stage-daemon.mjs"), "utf8");
+  for (const name of DAEMON_BINARIES) assert.match(stage, new RegExp(`"${name}"`));
+  assert.match(stage, new RegExp(`"${DAEMON_VERSION_FILE}"`));
+  assert.match(stage, /"build", "daemon"/);
+  assert.match(stage, /COFLUX_DESKTOP_DAEMON_DIR/); // 显式输入：缺失即失败，不静默出无 daemon 的包
+  assert.match(stage, /process\.exit\(1\)/);
+
+  // pack / dist 都先跑 stage 脚本
+  const pkg = JSON.parse(readFileSync(resolve(desktopRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  assert.match(pkg.scripts.pack, /^node scripts\/stage-daemon\.mjs && /);
+  assert.match(pkg.scripts.dist, /^node scripts\/stage-daemon\.mjs && /);
+  assert.equal(pkg.scripts["stage-daemon"], "node scripts/stage-daemon.mjs");
+});
+
 type Workflow = {
   on: { push: { tags: string[] } };
   permissions: { contents: string };
   jobs: Record<
     string,
     {
+      needs?: string | string[];
       environment?: string;
       permissions?: { contents?: string };
       steps: { name?: string; env?: Record<string, string>; run?: string; uses?: string; with?: Record<string, string> }[];
     }
   >;
 };
+
+test("desktop-release.yml：并行 daemon job 同 SHA cargo build 三件、版本戳 v0.0.0-desktop.*、打包 job 落位并校验签名（plan 113）", () => {
+  const workflow = parse(readFileSync(resolve(repoRoot, ".github/workflows/desktop-release.yml"), "utf8")) as Workflow;
+  const daemon = workflow.jobs.daemon;
+  assert.ok(daemon, "缺少 daemon job");
+  assert.equal(daemon.environment, undefined, "daemon job 不需要签名 secret，不得挂 release-signing");
+  assert.equal(daemon.needs, "metadata");
+  const cargo = daemon.steps.find((step) => step.run?.includes("cargo build"));
+  assert.ok(cargo?.run, "缺少 cargo build 步骤");
+  assert.match(cargo.run, /--release --target aarch64-apple-darwin/);
+  for (const pkg of ["coflux-supervisor", "coflux-worker", "coflux-cli"]) assert.match(cargo.run, new RegExp(`-p ${pkg}\\b`));
+  assert.equal(cargo.env?.RUSTFLAGS, "-D warnings");
+  // 版本戳：可解析的 prerelease SemVer、低于一切正式 v*；不能留默认 dev
+  assert.equal(cargo.env?.COFLUX_RELEASE_VERSION, "v0.0.0-desktop.${{ needs.metadata.outputs.version }}");
+  const stage = daemon.steps.find((step) => step.run?.includes("VERSION"));
+  assert.ok(stage?.run, "缺少写 VERSION 的整理步骤");
+  assert.equal(stage.env?.COFLUX_RELEASE_VERSION, cargo.env?.COFLUX_RELEASE_VERSION, "VERSION 与编译期版本戳必须同值");
+  for (const name of DAEMON_BINARIES) assert.match(stage.run, new RegExp(name));
+  const upload = daemon.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@"));
+  assert.equal(upload?.with?.name, "desktop-daemon-bundle");
+
+  const build = workflow.jobs.build;
+  assert.deepEqual(build.needs, ["metadata", "daemon"]);
+  const download = build.steps.findIndex((step) => step.uses?.startsWith("actions/download-artifact@") && step.with?.name === "desktop-daemon-bundle");
+  const stageIndex = build.steps.findIndex((step) => step.run?.includes("stage-daemon"));
+  const packIndex = build.steps.findIndex((step) => step.run?.includes("electron-builder --mac"));
+  assert.ok(download >= 0, "打包 job 未下载 daemon 产物");
+  assert.ok(stageIndex > download && stageIndex < packIndex, "stage 脚本必须在下载之后、打包之前");
+  assert.equal(build.steps[stageIndex].env?.COFLUX_DESKTOP_DAEMON_DIR, "${{ runner.temp }}/daemon-bundle");
+  // 校验步骤：三件存在 + codesign --verify --strict + Developer ID + VERSION 匹配
+  const verify = build.steps.find((step) => step.run?.includes("stapler validate"));
+  assert.ok(verify?.run, "缺少校验步骤");
+  assert.match(verify.run, new RegExp(`Contents/Resources/${DAEMON_RESOURCE_DIR}`));
+  for (const name of DAEMON_BINARIES) assert.match(verify.run, new RegExp(name));
+  assert.match(verify.run, /codesign --verify --strict[^\n]*\$daemon\/\$name/);
+  assert.match(verify.run, /Authority=Developer ID Application/);
+  assert.match(verify.run, new RegExp(`v0\\.0\\.0-desktop\\.[^\\n]*\\$daemon/${DAEMON_VERSION_FILE}`));
+});
 
 test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 secret 明确失败、先产物后清单", () => {
   const workflow = parse(readFileSync(resolve(repoRoot, ".github/workflows/desktop-release.yml"), "utf8")) as Workflow;
