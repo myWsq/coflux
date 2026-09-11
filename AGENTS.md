@@ -8,6 +8,7 @@ coflux：可跑在任意节点上的 **daemon**，本地起 PTY、驱动 Agent�
 
 - `apps/server`（TS）：账号/设备认证 + 编排路由 + Postgres 持久化。
 - `apps/web`（TS）：Vite + React + xterm 终端。**桌面端，是默认的迭代对象**。
+- `apps/desktop`（TS）：macOS 桌面客户端 = Electron 壳 **原样打包 `apps/web`**（plan 103；renderer root 直指 apps/web，不复制 UI）。桌面差异一律经 preload 桥接 `window.cofluxDesktop` 运行时探测（类型在 `apps/web/src/desktop-bridge.ts`），不做编译期分叉；主进程改写 WebSocket 握手 Origin 为 `https://desktop.coflux.dev`，server/daemon 校验零放宽。发版走 `desktop-v*` tag（签名公证 + Cloudflare R2 更新源），桌面 build-id 与部署的 web 必须同 SHA。原生 Swift 版 `apps/macos` 已删除（可从 git 历史找回）。
 - `apps/mobile`（TS）：移动随身端（m.coflux.dev，plan 032）。**已冻结**：功能锁定在 2026-07 的形态（列表/详情 + 终端快捷键条 + 简版 diff），"迭代 web"默认指 `apps/web`，不给 mobile 加功能、不同步桌面新特性；仅当共享层（protocol/client）变更弄坏它的构建时做最小修复。
 - `packages/{protocol,core,client}`（TS）：共享的线协议类型、日志、协议 client + store（client 为 web/mobile 双端共享）。
 - `integrations/claude-plugin`：Claude Code 插件的**交付目录**（hooks + skill + `.mcp.json` + manifest），由 `myWsq/plugins` 市场（维护仓库 `myWsq/plugins-builder`）按 commit SHA 整目录收集发布，改完要提升 `.claude-plugin/plugin.json` 的 version 并在 builder 里更新 SHA。SKILL 的唯一源是 `packages/cli/skills/coflux/SKILL.md`，用 `node scripts/sync-claude-plugin.mjs` 同步到这里，CI 校验两份一致。
@@ -26,6 +27,8 @@ cargo test -p coflux-protocol      # Rust 单元测试（帧 codec / serde 线�
 cargo build -p coflux-supervisor -p coflux-worker   # 构建 daemon 二进制
 node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit   # server 类型检查
 node_modules/.bin/tsc -b apps/web/tsconfig.json               # web 类型检查
+pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test && pnpm -C apps/desktop build   # 桌面壳类型检查/单测/构建
+pnpm -C apps/desktop dev / pack                     # 桌面 app 开发（连本机 8787）/ 出未签名 .app 冒烟
 pnpm dev:pg                                         # 本地独立 Postgres（compose，127.0.0.1:5432）
 pnpm dev:server / dev:web / dev:daemon              # 本地起三端
 node packages/cli/cofluxd.mjs up --server ... --bin-dir target/release   # 用 cofluxd CLI 装/起 daemon（用户侧：npm i -g cofluxd && cofluxd up）
@@ -38,7 +41,7 @@ git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编�
 - **web dev 页面「能打开但卡住连不上」= 8787 没跑**：vite（5273）把 `/client` WS 和 `/health` 代理到 `localhost:8787`（见 `apps/web/vite.config.ts`），dev server 不在时页面 HTML/JS 照常加载、但 WS 永远连不上。此时 console 里往往只看到 manifest/CORS 之类的噪音报错，真因不是它们。自查一条命令：`curl localhost:5273/health` 应 200。
 - **经生产 `p.coflux.dev` 端口转发访问本机 dev web**：完整链路是 浏览器 → 生产 server → 本机生产 daemon → 5273 vite → 8787 dev server，后两个进程都得活着。5273 要出现在转发列表里，vite 需在 coflux 终端（生产 daemon 的 PTY 进程树）里启动。manifest 请求经门禁需带凭据，`index.html` 的 manifest link 已带 `crossorigin="use-credentials"`，勿删。
 
-CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（tag `v*` 发布）。worker 产物用 ed25519 签名、supervisor 验签，密钥设置见 [docs/RELEASING.md](docs/RELEASING.md)。
+CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（tag `v*` 发布 daemon）、`desktop-release.yml`（tag `desktop-v*` 发布桌面 app：签名公证 + 推 R2）。worker 产物用 ed25519 签名、supervisor 验签，密钥设置见 [docs/RELEASING.md](docs/RELEASING.md)。
 
 生产环境（三台机、域名线路、部署与回滚命令、踩过的坑）见 [docs/deployment.md](docs/deployment.md)。**动生产前先读它**：coflux.dev 下橙云与灰云并存，两台机的 Caddy 上都还压着其他项目的站点。
 

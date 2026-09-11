@@ -15,6 +15,8 @@ import {
   WorkspaceRenameDialog,
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
+import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "@/components/workbench/desktop-attention";
+import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
@@ -29,6 +31,7 @@ import {
   type WorkbenchSelection,
 } from "@/components/workbench/workbench-state";
 import { WORKSPACE_KEY } from "@/config";
+import { getDesktopBridge, type DesktopBridge, type DesktopUpdateState } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
 
@@ -53,7 +56,95 @@ function persistSelection(selection: WorkbenchSelection | null) {
   else localStorage.setItem(WORKSPACE_KEY, serialized);
 }
 
+/**
+ * 桌面通知 + Dock 角标的驱动器（plan 103）：只在桌面 app 里挂载，自己订阅 store（tasks/sessionAgents
+ * 高频变化，不让根 Workbench 跟着重渲染），按两次快照的差分决定「新进入等待」才通知；角标按当前
+ * 等待数设置、恢复即减。主进程只执行，不另起连接。渲染 null。
+ */
+function DesktopAttention({ client, bridge, selectedWorkspaceId }: { client: CofluxClient; bridge: DesktopBridge; selectedWorkspaceId: string | null }) {
+  const workspaces = useStore(client.store, (state) => state.workspaces);
+  const daemons = useStore(client.store, (state) => state.daemons);
+  const tasks = useStore(client.store, (state) => state.tasks);
+  const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
+  const projects = useStore(client.store, (state) => state.projects);
+  const previousRef = useRef<AttentionSnapshot>({});
+  const badgeRef = useRef(0);
+
+  useEffect(() => {
+    const next = attentionSnapshot({ workspaces, daemons, tasks, sessionAgents, projects });
+    const { entered, badgeCount } = diffAttention(previousRef.current, next);
+    previousRef.current = next;
+    if (badgeCount !== badgeRef.current) {
+      badgeRef.current = badgeCount;
+      bridge.setBadge(badgeCount);
+    }
+    for (const { workspaceId, entry } of entered) {
+      // 正看着这个工作区且窗口有焦点：人已经在现场，只留角标不弹通知
+      if (workspaceId === selectedWorkspaceId && document.hasFocus()) continue;
+      bridge.notify({ workspaceId, ...attentionNotificationText(entry) });
+    }
+  }, [workspaces, daemons, tasks, sessionAgents, projects, bridge, selectedWorkspaceId]);
+
+  // 卸载（登出、掉到 outdated/login 面）时清角标并重置快照：否则 Dock 会停在最后一个数字，
+  // 且重新挂载后旧快照会让本该重新提醒的等待被当成「已提醒过」。
+  useEffect(
+    () => () => {
+      previousRef.current = {};
+      if (badgeRef.current !== 0) {
+        badgeRef.current = 0;
+        bridge.setBadge(0);
+      }
+    },
+    [bridge],
+  );
+
+  return null;
+}
+
+/**
+ * 桌面 app 的版本失配页（plan 103）：中心只接受与部署的 web 同 SHA 的桌面版，被拒不是断线——
+ * 挂载即触发一次更新检查，按 electron-updater 状态显示进度/重启按钮。
+ */
+function DesktopOutdated({ bridge }: { bridge: DesktopBridge }) {
+  const [update, setUpdate] = useState<DesktopUpdateState>({ status: "idle" });
+  useEffect(() => {
+    let disposed = false;
+    const unsubscribe = bridge.onUpdateState((state) => {
+      if (!disposed) setUpdate(state);
+    });
+    void bridge.getUpdateState().then((state) => {
+      if (!disposed) setUpdate(state);
+    });
+    bridge.checkForUpdates();
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
+  }, [bridge]);
+  const prompt = resolveOutdatedPrompt(update);
+  return (
+    <AuthShell>
+      <AuthMessage
+        icon={prompt.busy ? <LoaderCircle className="size-5 animate-spin text-primary" /> : <RefreshCw className="size-5 text-primary" />}
+        title={prompt.title}
+        description={prompt.description}
+      >
+        {prompt.action ? (
+          <Button
+            className="mt-4 w-full"
+            label={prompt.action.label}
+            variant="primary"
+            onClick={() => (prompt.action?.kind === "install" ? bridge.installUpdate() : bridge.checkForUpdates())}
+          />
+        ) : null}
+      </AuthMessage>
+    </AuthShell>
+  );
+}
+
 export function Workbench({ client }: { client: CofluxClient }) {
+  // 桌面 app 桥接（plan 103）：存在即桌面；浏览器里为 null，下面所有桌面分支都不生效。
+  const desktop = getDesktopBridge();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [selection, setSelection] = useState<WorkbenchSelection | null>(readStoredSelection);
@@ -165,6 +256,15 @@ export function Workbench({ client }: { client: CofluxClient }) {
     setSelection(next);
     persistSelection(next);
   }
+
+  // 点系统通知 → 主进程把窗口带到前台并回传工作区 id → 选中它（工作区已删则安静忽略）。
+  useEffect(() => {
+    if (!desktop) return;
+    return desktop.onFocusWorkspace((workspaceId) => {
+      if (client.store.getState().workspaces.some((workspace) => workspace.id === workspaceId)) selectWorkspace(workspaceId);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [desktop, client]);
 
   function selectDevice(daemonId: string) {
     const next: WorkbenchSelection = { kind: "device", id: daemonId };
@@ -361,7 +461,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   // 版本失配、reload 一次仍未拿到新 bundle（plan 033）：不是认证失败，独立展示面，
   // 不复用登录表单的 error 语义（混用会误导用户以为账号/密码有问题）。
+  // 桌面 app 不会 reload（bundle 在 app 里）：改显示「需要更新」并触发自动更新检查。
   if (surface === "outdated") {
+    if (desktop) return <DesktopOutdated bridge={desktop} />;
     return (
       <AuthShell>
         <AuthMessage
@@ -402,6 +504,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         showReconnectBanner && "pt-7",
       )}
     >
+      {desktop ? <DesktopAttention client={client} bridge={desktop} selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null} /> : null}
       <Sidebar
         client={client}
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}

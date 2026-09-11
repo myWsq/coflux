@@ -140,8 +140,13 @@ jobs:
       - name: web production 构建
         run: pnpm -C apps/web build
 
-      - name: web 单元测试（变更视图刷新/缓存）
+      - name: web 单元测试（变更视图刷新/缓存/桌面桥接）
         run: pnpm test:web
+
+      # Electron 壳（plan 103）：渲染层就是 apps/web，这里只保主进程/preload/配置不坏；
+      # 打包与签名在 desktop-release.yml。electron-vite build 不需要 Electron 二进制。
+      - name: desktop 类型检查 + 单元测试 + 构建
+        run: pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test && pnpm -C apps/desktop build
 
       - name: Rust 单元测试（protocol/supervisor/worker/relay）
         env:

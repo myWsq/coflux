@@ -35,7 +35,8 @@
 ### 1. Web 客户端产品化（主客户端，2026-07-16 确认）
 
 > 2026-07-15 曾立项"弃 Web 转 macOS 原生"，次日复议撤回：web 是当前唯一在用的日常客户端，
-> 先把它做好；macOS 原生一度降级为后续增强，2026-08-25 二次立项后又于次日撤回（见条目 4）。
+> 先把它做好；macOS 原生 2026-08-25 二次立项后次日撤回，2026-09-05 三次立项也未到 parity；
+> 2026-09-11 起 macOS 客户端改为 Electron 版原样打包 Web（见条目 4）。
 > 产品定位已定：**Agent 指挥中心**——
 > 围绕"在各设备的工作区里跑 claude/codex 任务，人监督、随时接管"组织功能与交互，
 > 终端仍是核心界面，但组织逻辑是任务而非连接。功能/交互细化待产品设计讨论产出。
@@ -75,11 +76,18 @@
   4 用例。STUN 部署（coturn on relay 节点）见 architecture.md，实机开通与打洞成功率生产
   实测待用户；iOS/浏览器实机矩阵与 trickle ICE 为后续迭代
 
-### 4. macOS 原生客户端（已撤回，2026-08-26）
+### 4. macOS 客户端 = Electron 版（plan 103，2026-09-11）
 
-> 2026-08-25 二次立项（plans 082–086），Phase 0 三项架构门（SwiftTerm snapshot 契约、
-> `stasel/WebRTC` M151 ↔ `webrtc-rs` 互通、CryptoKit P-256 + Keychain 与现有安全模型互通）
-> 通过并取得开发 GO；2026-08-26 用户决定撤回整个项目，不再做。macOS app 目录（083 可行性门
-> 产物与 085 Foundation 半成品）已随 plan 087 移除，可从 git 历史找回；084 产出的共享
-> Swift Client Core（`packages/swift-client`）保留，现为 iOS 专属。可行性结论不因删除失效，
-> 将来重启参考 `plans/083-macos-native-client-feasibility-gates.md`。
+> 原生 Swift 路线三次立项均未到 parity（2026-07-15 / 2026-08-25 / 2026-09-05；第三次的 `apps/macos`
+> 于 2026-09-10 合入 main、plan 100 未完成），2026-09-11 用户决定改为 Electron 版：`apps/desktop`
+> 把 **当前 `apps/web` 原样打包**进 app（渲染层 root 直指 apps/web，UI 单一真相），桌面差异靠运行时
+> 探测的桥接对象注入；server/daemon 校验零放宽（主进程改写 WebSocket 握手 Origin 为
+> `https://desktop.coflux.dev`）。`apps/macos` 已随 plan 103 整目录删除，可从 git 历史找回；
+> `packages/swift-client` 保留，现为 iOS 专属。
+- [x] Electron 壳 + 自定义 scheme 从 asar 提供渲染层：中心离线也能冷启动看本机终端（loopback direct）
+- [x] 原生菜单 + 纯 ⌘ 快捷键（≡ PWA standalone 键位）、系统通知 + Dock 角标（agent 等待批准/回答）、
+      点通知聚焦工作区、外链一律系统浏览器
+- [x] 版本准入 lockstep：桌面 build-id 与部署的 web 同 SHA 才被接受，被拒显示「需要更新」并触发
+      electron-updater；`desktop-v*` tag → 签名公证 → Cloudflare R2 更新源
+- [ ] 首发验收待用户：CI 签名产物过 Gatekeeper、三路联调（direct 用 lsof 证明）、通知/角标在签名包上
+- [ ] 后续：universal（x64）构建开关、深链接（`coflux://` 已预留）、Windows/Linux 可移植性
