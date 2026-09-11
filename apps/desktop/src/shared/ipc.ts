@@ -13,10 +13,19 @@ export const IPC = {
   getSessionToken: "desktop:get-session-token",
   setSessionToken: "desktop:set-session-token",
   clearSessionToken: "desktop:clear-session-token",
+  /** 本机 daemon（plan 113）：状态拉取 + 无参窄动词 */
+  daemonGetState: "desktop:daemon-get-state",
+  daemonEnroll: "desktop:daemon-enroll",
+  daemonRestart: "desktop:daemon-restart",
+  daemonStop: "desktop:daemon-stop",
+  daemonRemove: "desktop:daemon-remove",
+  daemonOpenFdaGuide: "desktop:daemon-open-fda-guide",
+  daemonDismissError: "desktop:daemon-dismiss-error",
   /** 主进程 → 渲染层 */
   focusWorkspace: "desktop:focus-workspace",
   command: "desktop:command",
   updateState: "desktop:update-state",
+  daemonState: "desktop:daemon-state",
 } as const;
 
 export type Bootstrap = {
