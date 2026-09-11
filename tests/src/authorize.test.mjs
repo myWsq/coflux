@@ -22,6 +22,10 @@ import { openRelayDevice, utf8 } from "./device-harness.mjs";
 const PORT = 8830;
 // server 直出的授权页（plan 107）挂在 COFLUX_PUBLIC_URL 下；黑盒不设它，默认即本机监听地址。
 const BASE = `http://127.0.0.1:${PORT}`;
+// 本文件另起短 TTL / 限速 server 的派生端口段。黑盒全量是多文件并行跑的，派生端口必须避开所有文件的
+// `const PORT`（PORT+1…+6 = 8831–8836 正是 proxy / fs-device / offline-view / dec-modes-replay / auto-update /
+// workspace-diff 的基址，曾撞出 EADDRINUSE）；改号前用 `grep -h "const PORT = " tests/src/*.test.mjs | sort` 核对。
+const EXTRA_PORT_BASE = 8880;
 // startServer 不像 startStack 会带默认的 password；local 认证模式下这是必需的秘密类配置
 // （见 apps/server/src/config.ts 的 secret()/fail-closed），显式给一份弱默认值，仅供测试用。
 const LOCAL_ENV = { COFLUX_PASSWORD: "admin" };
@@ -116,7 +120,7 @@ test("授权成功端到端：匿名 daemon 拿链接 → client 授权 → daem
 });
 
 test("授权码 TTL 过期后被拒", async () => {
-  const short = await startServer({ port: PORT + 1, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_TTL_MS: "300" } });
+  const short = await startServer({ port: EXTRA_PORT_BASE, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_TTL_MS: "300" } });
   try {
     const d = rawDaemon(short.port);
     await d.ready;
@@ -183,7 +187,7 @@ test("daemon 断线后待授权 token 立即作废", async () => {
 test("TTL 过期后 worker 自动换新链接：旧 token 作废、新 token 可授权", async () => {
   // 续期是 worker 的逻辑（裸 WS 模拟覆盖不到），必须起真实 daemon + 短 TTL server。
   // TTL 2s + worker 1s 粒度的续期检查 → 第二个链接应在 ~3s 内出现。
-  const short = await startServer({ port: PORT + 3, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_TTL_MS: "2000" } });
+  const short = await startServer({ port: EXTRA_PORT_BASE + 1, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_TTL_MS: "2000" } });
   const home = mkdtempSync(join(tmpdir(), "coflux-test-renewhome-"));
   const daemonEnv = { ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${short.port}/daemon`, COFLUX_HOME: home, COFLUX_DEVICE_NAME: "renew-dev" };
   const daemonProc = spawnDaemon(daemonEnv);
@@ -245,7 +249,7 @@ test("TTL 过期后 worker 自动换新链接：旧 token 作废、新 token 可
 });
 
 test("device.authorize 暴力尝试被限速", async () => {
-  const limited = await startServer({ port: PORT + 2, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_MAX_FAILURES: "3" } });
+  const limited = await startServer({ port: EXTRA_PORT_BASE + 2, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_MAX_FAILURES: "3" } });
   try {
     const c = limited.makeClient();
     await c.authSubscribe();
@@ -272,7 +276,7 @@ test("等待授权的 daemon 不被 auth deadline 踢；未发 enrollRequest 的
   // 生产实测踩过的 bug：auth deadline（默认 15s）把等待浏览器授权的 daemon 当未认证连接
   // 反复踢掉 → 每次重连换发新链接，用户手里的链接永远在变。修复 = 持有 pending 授权的
   // 连接豁免 deadline（transport 的 canWaitAuth）。此处用 1s deadline 复现两侧行为。
-  const short = await startServer({ port: PORT + 4, env: { ...LOCAL_ENV, COFLUX_AUTH_DEADLINE_MS: "1000" } });
+  const short = await startServer({ port: EXTRA_PORT_BASE + 3, env: { ...LOCAL_ENV, COFLUX_AUTH_DEADLINE_MS: "1000" } });
   try {
     // 裸连接：什么都不发，到点应被 4008 关闭（deadline 机制本身必须仍然生效）
     const idle = rawDaemon(short.port);
@@ -467,7 +471,7 @@ test("HTTP 授权页：未登录 GET 不区分 token 是否有效；无效 token
 });
 
 test("HTTP 授权页：登录 POST 按来源限速", async () => {
-  const limited = await startServer({ port: PORT + 5, env: { ...LOCAL_ENV, COFLUX_LOGIN_RATE_LIMIT: "2" } });
+  const limited = await startServer({ port: EXTRA_PORT_BASE + 4, env: { ...LOCAL_ENV, COFLUX_LOGIN_RATE_LIMIT: "2" } });
   try {
     const url = `http://127.0.0.1:${limited.port}/authorize/cf_authz_whatever`;
     const jar = new CookieJar();
@@ -484,7 +488,7 @@ test("HTTP 授权页：登录 POST 按来源限速", async () => {
 });
 
 test("HTTP 授权页：token 猜测失败按页面会话计数，达上限后统一报「尝试次数过多」", async () => {
-  const limited = await startServer({ port: PORT + 6, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_MAX_FAILURES: "3" } });
+  const limited = await startServer({ port: EXTRA_PORT_BASE + 5, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_MAX_FAILURES: "3" } });
   try {
     const base = `http://127.0.0.1:${limited.port}`;
     const jar = new CookieJar();
