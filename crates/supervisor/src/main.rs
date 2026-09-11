@@ -10,6 +10,7 @@ mod fda;
 mod manager;
 mod sessiond;
 mod sessions;
+mod shell_integration;
 mod upgrade;
 
 use std::collections::HashMap;
@@ -107,6 +108,7 @@ fn main() {
     let settings = Settings::load(&home);
     fda::write_status(&home); // macOS: 探测完全磁盘访问权限并落盘,供 cofluxd status/fda 展示引导；非 macOS 空操作
     write_version_file(&home); // plan 112：自身版本落盘，桌面版据此判断「app 内置的 supervisor 比在跑的新」
+    shell_integration::write_files(&home); // plan 115：会话 shell 集成的 rc 落盘（幂等覆盖，随二进制更新）
     let shell = std::env::var("COFLUX_SHELL")
         .ok()
         .filter(|s| !s.is_empty())
