@@ -1,125 +1,94 @@
-# daemon 自动热升级设计（方案 A）
+# Automatic daemon hot-upgrade design (Option A)
 
-> 状态：已落地。daemon 是 `coflux-supervisor` + `coflux-worker` 两个 Rust 二进制，零 Node 运行时；
-> worker 可自动下载、校验双 ed25519 签名、做持久 anti-rollback、观察期切换和崩溃回滚，升级时
-> PTY/Agent 会话存活。
-> supervisor 自身仍由 `cofluxd update` 人工升级；cofluxd 在安装前用同一发布根验证
-> supervisor/worker，并持久拒绝远端降级。
+> Status: implemented. The daemon consists of two Rust binaries, `coflux-supervisor` and `coflux-worker`, with no Node runtime. Worker upgrades support automatic downloads, dual ed25519 signature verification, persistent rollback prevention, observation-period switching, and crash rollback while preserving PTY/agent sessions. The supervisor itself is still upgraded manually through `cofluxd update`; cofluxd verifies both components against the same release trust root before installation and persistently rejects remote downgrades.
 
-## 客户端更新与运行组件更新
+## Client updates and runtime-component updates
 
-桌面应用更新只重启界面与账号客户端，继续连接已有 `runtime.sock`，不重启持有终端的进程。
-新版 CLI 可独立原子替换；内核使用的 worker 与插件来自稳定版本目录，不随 .app 替换消失。
-检测到内核产物变化时提示延后安装；只有用户明确选择重启本机终端，才结束活任务并换新组件。
-Linux CLI 的 `update` 同样只准备二进制，显式 `restart` 才中断终端。
+Updating the desktop app restarts only its interface and account client. It reconnects to the existing `runtime.sock` without restarting the process that owns terminals. The CLI can be replaced atomically on its own. The runtime's worker and plugins live in stable version directories and do not disappear when the `.app` is replaced. When runtime artifacts change, the app offers deferred installation. Only an explicit user choice to restart local terminals ends live tasks and replaces runtime components. Linux CLI `update` likewise only prepares binaries; explicit `restart` interrupts terminals.
 
-这不是活进程恢复：持有 PTY 的组件或操作系统真正重启后，不承诺恢复程序内存状态。
+This is not live-process recovery: if the PTY-owning component or operating system actually restarts, program memory is not guaranteed to survive.
 
-## 1. 为什么拆两个进程
+## 1. Why split into two processes?
 
-PTY 是持有它的进程的资源。若把网络、协议和 PTY 都放在一个频繁升级的进程里，更换代码就会杀死
-正在运行的 shell/Agent。方案 A 把稳定 session authority 与频繁变化的 transport adapter 分开：
+A PTY is a resource of the process that owns it. Putting networking, protocol handling, and PTYs in one frequently upgraded process would kill running shells/agents whenever its code is replaced. Option A separates stable session authority from the frequently changing transport adapter:
 
 ```text
-┌──────────────────────────────────────────────────────────┐
-│ coflux-supervisor（极少升级）                              │
-│ · portable-pty + sessiond：PTY、VT/history、holder/seq     │
-│ · UDS server                                              │
-│ · spawn/监控 worker、版本注册表、观察期与回滚               │
-│ · 下载 + 双签名验真 + SemVer anti-rollback                │
-└──────────────────────▲───────────────────────────────────┘
-                       │ 本地 UDS
+┌────────────────────────────────────────────────────────────┐
+│ coflux-supervisor (rarely upgraded)                         │
+│ · portable-pty + sessiond: PTY, VT/history, holder/sequence   │
+│ · UDS server                                               │
+│ · worker spawning/monitoring, versions, observation/rollback│
+│ · downloads, dual signatures, SemVer rollback prevention    │
+└──────────────────────▲─────────────────────────────────────┘
+                       │ local UDS
                        │ control JSON + DeviceEnvelope frame
-┌──────────────────────┴───────────────────────────────────┐
-│ coflux-worker（频繁升级）                                  │
-│ · 中心 WS、认证、重连、loopback gateway                    │
-│ · direct/opaque relay、git/exec/fs、checkpoint             │
-└──────────────────────▲───────────────────────────────────┘
+┌──────────────────────┴─────────────────────────────────────┐
+│ coflux-worker (frequently upgraded)                         │
+│ · center WS, authentication, reconnect, loopback gateway    │
+│ · direct/opaque relay, git/exec/fs, checkpoint               │
+└──────────────────────▲─────────────────────────────────────┘
                        │ /daemon protobuf WS
-                    中心服务器
+                    Central server
 ```
 
-worker 崩溃、升级或与中心断线时，supervisor 继续读 PTY、推进 VT/history，并保留 sessiond 中的
-logical holder/sequence；本地/relay channel transport 由新 worker 重建。transport 永远没有暂停全部
-PTY 的裁决权。
+When the worker crashes, upgrades, or disconnects from the center, the supervisor continues reading PTYs, advancing VT/history, and retaining sessiond's logical holder/sequence. The replacement worker rebuilds local/relay channel transports. A transport never has authority to pause all PTYs.
 
-## 2. UDS 与两级对账
+## 2. UDS and two-level reconciliation
 
-UDS 是长度前缀 record stream：控制消息用 JSON，数据消息用首字节 frame kind 区分。当前 terminal
-input/resize/output 全部在 DeviceEnvelope 内由 sessiond 裁决；旧 input/replay frame 编号 2/3 已保留但
-拒绝解码。kind 1 只通知 worker 某 session 的 checkpoint 已脏，不携带 raw PTY。
+UDS carries a length-prefixed record stream: control messages use JSON; data messages are distinguished by a frame-kind first byte. All terminal input/resize/output now live inside DeviceEnvelope and are adjudicated by sessiond. Legacy input/replay frame numbers 2/3 remain reserved but are rejected during decoding. Kind 1 only notifies the worker that a session checkpoint is dirty; it carries no raw PTY data.
 
-worker 启动后分两级恢复：
+Recovery after worker startup has two levels:
 
-1. 连接 supervisor，发送 `resync.request`，取得存活 `SessionInfo(sessionId, taskId, pid)`；
-2. 建立/恢复中心连接，上报 daemon resync 与完整 Device catalog；
-3. 重建 checkpoint dirty 集合、本地 gateway 和 relay channel；
-4. client 以更高 transport generation reattach，logical holder 与未确认 input 可继续。
+1. Connect to the supervisor and send `resync.request` to obtain live `SessionInfo(sessionId, taskId, pid)` records.
+2. Establish/restore the central connection and report daemon resync plus the complete device catalog.
+3. Rebuild the dirty-checkpoint set, local gateway, and relay channels.
+4. Clients reattach with a higher transport generation, retaining their logical holder and unacknowledged input.
 
-Session 缺席不直接等于 exit；sessiond tombstone/catalog 才是退出事实。中心也不会因为 worker/server 重启
-杀死 unknown orphan。
+A missing session does not automatically mean exit; sessiond tombstones/catalogs establish exit facts. The center does not kill unknown orphans because the worker or server restarted.
 
-## 3. 升级流程
+## 3. Upgrade flow
 
-1. release workflow 为四个平台构建 supervisor/worker，生成 schema 2 manifest，并用同一 ed25519
-   私钥签原始 worker，以及 worker/supervisor 各自 domain-separated 的 release statement。statement
-   精确绑定 `version`、Rust `target`、sha256 原始 32 字节和 artifact size；URL 只表示下载位置，不签入。
-2. server 轮询 stable GitHub Release；daemon 握手或轮询发现版本落后时，下发
-   `worker.upgrade {version,url,target,sha256,artifactSize,signature,releaseSignature}`。
-3. worker 把升级请求经 UDS 交给 supervisor。
-4. supervisor 要求规范严格 SemVer 与本机 target，并先按本地 `worker.release-floor` 拒绝降级/重放；
-   再有界下载到 `COFLUX_HOME/workers/` 临时目标，核对已签名 size、sha256、legacy raw 签名与 release
-   statement 签名。任一不符都删除/拒绝候选，保持当前 worker。
-5. 验证通过后切换版本并启动观察期。新 worker 连接 UDS、完成两级对账，PTY 全程不动。
-6. 观察期内连续崩溃达到阈值，supervisor 自动回退上一版；稳定通过后先持久 `worker.active`，再持久
-   `worker.release-floor` 才提交。pending 不推进 floor；active→floor 之间崩溃时，重启从安全恢复的
-   active SemVer 重建 floor。floor 持久失败则不提交并禁用新的远程升级。
+1. The release workflow builds supervisor/worker for four platforms and creates a schema 2 manifest. One ed25519 private key signs the raw worker binary and separate, domain-separated worker/supervisor release statements. Statements bind `version`, Rust `target`, raw 32-byte SHA-256, and artifact size exactly. The URL is only a download location and is not signed.
+2. The server polls stable GitHub Releases. On daemon handshake or polling, a detected outdated version triggers `worker.upgrade {version,url,target,sha256,artifactSize,signature,releaseSignature}`.
+3. The worker forwards the request to the supervisor over UDS.
+4. The supervisor requires canonical strict SemVer and a matching local target, first rejecting downgrades/replays against local `worker.release-floor`. It then performs a bounded download to a temporary destination under `COFLUX_HOME/workers/` and checks signed size, SHA-256, the legacy raw signature, and the release-statement signature. Any mismatch deletes/rejects the candidate and preserves the current worker.
+5. After successful verification, switch versions and begin the observation period. The new worker connects to UDS and completes both reconciliation levels; PTYs remain untouched throughout.
+6. Repeated candidate crashes reaching the threshold during observation trigger automatic rollback. On stable completion, persist `worker.active`, then `worker.release-floor`, before committing. Pending candidates do not advance the floor. If a crash occurs between active and floor persistence, restart reconstructs the floor from the safely recovered active SemVer. Failure to persist the floor prevents commit and disables further remote upgrades.
 
-同一坏版本的 server 推送还有 daemon/版本级退避上限，避免反复切换。
+Server pushes also have a per-daemon/version backoff cap to prevent repeated switching to the same bad version.
 
-## 4. 安全边界
+## 4. Security boundaries
 
-- ed25519 把“发布 daemon 二进制”的权限与中心、下载源分开：未持发布私钥者不能把任意字节冒充
-  合法升级产物。它不是中心控制面的权限隔离；已控制中心的攻击者仍可编排系统现有的 exec/session
-  能力，不能把这层验签表述成“中心失陷后无 RCE”。公钥编译进 supervisor 并随 cofluxd npm 包分发；
-  发布私钥只在 protected environment secret 中。
-- 测试可用 `COFLUX_WORKER_PUBKEY` 注入临时公钥，因为本地可信方已拥有机器权限；远端中心无法设置
-  本机 env，不削弱生产威胁模型。
-- legacy raw 签名保留给旧 supervisor；新 supervisor 还必须验证带 domain separation 的 release
-  statement，防止把一份合法二进制重标成其它版本/架构/大小。新字段通过 protobuf unknown field 与
-  serde 忽略未知字段实现“新 server/worker → 旧 supervisor”滚动兼容；raw-only 请求对新 supervisor
-  fail closed。
-- `worker.release-floor` 采用严格 SemVer precedence，等于 floor（包括仅 build metadata 不同）也按重放
-  拒绝。它只约束远程发布请求；supervisor 内部仍可回滚到旧 active，本地已知版本切换也由管理员负责。
-- sha256 用于 manifest/传输完整性，双签名用于产物及发布元数据的来源真实性，全部必须通过。
-- 下载失败、hash 错、签名错、无法落盘或候选崩溃，都不能破坏当前 worker 和 PTY。
-- supervisor 升级不热切换：它持有 authority，必须由 `cofluxd update` 明确重启，届时不承诺活 session
-  保留。cofluxd 会先验证 supervisor/worker 的 component-separated statement，再从同一暂存代替换；
-  `cofluxd.release-floor` 与 `worker.release-floor` 的较大者阻止下载源重放旧的合法 release。
+- ed25519 separates permission to publish daemon binaries from control of the center or download source. Without the release private key, arbitrary bytes cannot impersonate a valid upgrade artifact. This is not isolation from central control-plane authority: an attacker controlling the center can still orchestrate existing exec/session capabilities. Do not describe signature verification as preventing RCE after central compromise. The public key is compiled into the supervisor and distributed in the cofluxd npm package; the private key exists only in a protected environment secret.
+- Tests may inject a temporary public key through `COFLUX_WORKER_PUBKEY` because the trusted local party already controls the machine. A remote center cannot set the local environment, so this does not weaken the production threat model.
+- Legacy raw signatures remain for older supervisors. New supervisors also require domain-separated release statements to prevent relabeling valid binaries with a different version, architecture, or size. Protobuf unknown-field handling and serde's ignored unknown fields allow rolling compatibility from newer servers/workers to older supervisors. New supervisors fail closed on raw-only requests.
+- `worker.release-floor` uses strict SemVer precedence. Equal precedence, including differences only in build metadata, is rejected as replay. It constrains remote release requests only; the supervisor can still roll back internally to the previous active version, and local administrators remain responsible for switching known local versions.
+- SHA-256 verifies manifest/transport integrity; dual signatures authenticate artifacts and release metadata. Every check must pass.
+- Download failure, hash/signature mismatch, persistence failure, or a candidate crash must not damage the current worker or PTYs.
+- Supervisor upgrades are not hot swaps because the supervisor owns session authority. They require explicit maintenance through `cofluxd update` and a restart; live sessions are not guaranteed to survive that restart. cofluxd first verifies component-separated statements for both binaries, then replaces them from one staging generation. The greater of `cofluxd.release-floor` and `worker.release-floor` prevents a download source from replaying an older valid release.
 
-## 5. 与本地优先数据面的关系
+## 5. Relationship to the local-first data plane
 
-升级目标不是“让中心继续 replay PTY”。最终架构中：
+The upgrade design does not rely on the center replaying PTY data. In the final architecture:
 
-- raw PTY 永不发送到中心；
-- direct/relay 都承载相同 DeviceEnvelope，holder/sequence 在 sessiond；
-- worker 重启导致 channel/generation 重建，client 自动重投未 ACK input；sessiond 去重保证 effect once；
-- output 若产生 gap，client 重新 attach 取 sessiond snapshot；
-- checkpoint 是可丢弃、按 session 合并的派生状态，不会反压 PTY。
+- Raw PTY data is never sent to the center.
+- Direct and relay paths carry the same DeviceEnvelope; holder/sequence authority resides in sessiond.
+- Worker restarts rebuild channels/generations. Clients automatically resend unacknowledged input; sessiond deduplication ensures each effect occurs once.
+- Output gaps trigger reattachment for a sessiond snapshot.
+- Checkpoints are disposable derived state, coalesced per session, and never backpressure PTYs.
 
-因此“worker 可替换”和“中心不在本地 terminal 热路径”是同一 authority 切分的两个结果。
+Worker replaceability and keeping the center out of the local terminal hot path are consequences of the same authority split.
 
-## 6. 验收
+## 6. Acceptance
 
-黑盒 harness 直接启动真实 server、supervisor、worker，并用临时 `COFLUX_HOME` 隔离：
+The black-box harness launches real server, supervisor, and worker processes, isolated with temporary `COFLUX_HOME`:
 
-- 杀 worker：PTY 存活，重启后 catalog/attach 恢复；
-- 切到合法新版本：观察期提交，会话存活；
-- 候选崩溃循环：自动回滚，会话存活；
-- 合法签名：远程下载升级成功；
-- sha256、size、version、target 或任一签名被篡改：必须拒绝且保持当前版本；
-- 已提交版本在 supervisor 重启后仍拒绝降级与同 precedence 重放；
-- worker 重启期间 direct/relay holder、input ACK 与 output snapshot 自愈不产生重复 effect。
+- Killing the worker preserves PTYs; catalog/attach recover after restart.
+- Switching to a valid new version commits after observation and preserves sessions.
+- A candidate crash loop triggers automatic rollback and preserves sessions.
+- Valid signatures allow remote-download upgrades.
+- Tampering with SHA-256, size, version, target, or either signature must be rejected while retaining the current version.
+- Committed versions continue rejecting downgrades and equal-precedence replays after supervisor restart.
+- Direct/relay holder recovery, input ACK recovery, and output snapshot recovery during worker restarts produce no duplicate effects.
 
-发布与密钥操作见 [RELEASING.md](RELEASING.md)，最终 authority/transport 设计见
-[architecture.md](architecture.md)。
+See [RELEASING.md](RELEASING.md) for release/key operations and [architecture.md](architecture.md) for the final authority/transport design.

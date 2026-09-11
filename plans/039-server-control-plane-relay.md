@@ -1,7 +1,9 @@
-# Plan 039: server 收敛为控制面 + relay
+# Plan 039: Reduce the server to the control plane and relay
 
-> 本计划是 outcome contract，不是逐函数脚本。理解需求与已记录决策后，针对实时代码自行
-> 设计实现。遇到 STOP condition 必须停止。完成后更新 `plans/README.md`。
+> This plan is an outcome contract, not a function-by-function script. Understand
+> the requirements and recorded decisions, then design the implementation against
+> the live code. Stop on any
+> STOP condition. When complete, update `plans/README.md`.
 >
 > Drift check: `git diff --stat febdd62..HEAD -- apps/server proto/coflux/v1 packages/protocol/src apps/server/src/mirror.ts apps/server/src/hub.ts apps/server/src/store.ts`
 
@@ -17,86 +19,57 @@
 
 ## Requirement
 
-把中心从设备操作与 session holder 的语义执行者收敛为账号/设备认证、发现、项目/task 元数据、
-browser pairing、短期 online lease、prepared operation、opaque Device relay 与 checkpoint cache。
-direct 与 relay 必须共用同一 Device frame；中心故障不得影响已配对同机页面接管存活 session，
-但离线期间仍不允许项目/task CRUD 或高权限 daemon RPC。
+Reduce the center from an executor of device operations and session-holder semantics to account/device authentication, discovery, project/task metadata, browser pairing, short-lived online leases, prepared operations, opaque Device relay, and checkpoint caching. Direct and relay share identical Device frames. Central failure must not prevent a paired page on the same machine from taking control of a surviving session, but project/task CRUD and elevated daemon RPC remain unavailable offline.
 
 ## Decisions & tradeoffs
 
-- **中心保留业务元数据 truth，放弃活 session truth**：project/workspace/task 与授权记录仍在
-  Postgres；sessiond catalog 对 PTY 是否活着、seq、holder/exit 是权威。拒绝双主离线 CRUD。
-- **relay 只做 channel 级鉴权/路由**：server 校验 client account 与 daemon 归属、payload 大小/
-  rate/version，然后原样转发 Device envelope；不再为 exec/fs/terminal 各维护 pending registry。
-  当前语义中继集中在 `apps/server/src/hub.ts:130-139`, `apps/server/src/hub.ts:460-474`。
-- **配对由中心背书但不掌握 browser 私钥**：持久化 browser public key/grant 元数据，在线时把
-  grant 安装/撤销到指定 daemon，并向 client 返回可信 gateway public key/端口/协议版本。
-- **online lease 短期滚动**：只对当前已认证 client、在线且属于同账号的 daemon 签发/安装；
-  server/daemon channel 断开即不再续期。拒绝长期全权限 local grant。
-- **跨面 mutation 先持久 prepare**：start/stop/worktree 等用不可复用 op ID 和目标版本/CAS；
-  direct/relay 可重投同一 operation，只有 daemon fact/ack 才完成状态。拒绝只放内存
-  `PendingRegistry`，当前 registry 会随 server 重启消失（`apps/server/src/hub.ts:136-139`）。
-- **resync 不再杀未知活 PTY**：已知 task 按 catalog/tombstone 收敛；unknown/mismatched session
-  保留为 local orphan，不自动建业务 task，也不发 `sessionClose`。当前实现会关闭它
-  （`apps/server/src/hub.ts:500-505`），与本地 authority 冲突。
-- **holder 从 server 删除**：task attach/input/resize 的最终裁决来自 Device channel；server 不再
-  比较 `RuntimeSession.holder`（现状 `apps/server/src/hub.ts:876-895`）。
-- **mirror 变 checkpoint cache**：server 存最后一个验证过 daemon/session/seq 的有界 ANSI
-  checkpoint，daemon 离线 attach 仍可只读查看；cache 可丢、可过期，不解析 live bytes。
-  拒绝每 session 常驻 `@xterm/headless`（`apps/server/src/mirror.ts:20-39`）。
-- **旧路径只作迁移兼容**：同一部署版本已有 build skew 门禁，可按计划组一次切换；不得长期维护
-  两套 holder/relay authority。
+- **The center owns business metadata, not live session state**: project/workspace/task and authorization records remain in Postgres. sessiond catalog is authoritative for PTY liveness, sequences, holders, and exits. Reject dual-master offline CRUD.
+- **Relay authenticates and routes at channel level only**: verify client account, daemon ownership, payload size, rate, and version, then forward Device envelopes unchanged. Do not retain separate pending registries for exec/fs/terminal. Current semantic relays live in `apps/server/src/hub.ts:130-139` and `apps/server/src/hub.ts:460-474`.
+- **The center endorses pairing without handling browser private keys**: persist browser public keys and grant metadata. Install/revoke grants on the specified daemon while online, and return the trusted gateway public key, port, and protocol version to the client.
+- **Renew short-lived online leases**: issue/install leases only for currently authenticated clients and online daemons in the same account. Stop renewing if the server/daemon channel disconnects. Reject permanent local grants with full privileges.
+- **Persist mutations spanning control and device state first**: start/stop/worktree operations persist a non-reusable op ID and target version/CAS before execution. Direct/relay may resubmit the same operation; only daemon facts/acknowledgments complete it. Reject memory-only `PendingRegistry`, which disappears on server restart (`apps/server/src/hub.ts:136-139`).
+- **Resync no longer kills unknown live PTYs**: reconcile known tasks from catalog/tombstones. Leave unknown or mismatched sessions as local orphans; neither create business tasks automatically nor send `sessionClose`. The current implementation closes them (`apps/server/src/hub.ts:500-505`), conflicting with local authority.
+- **Remove server-side holder authority**: Device channels make the final attach/input/resize decision. The server no longer compares `RuntimeSession.holder` (`apps/server/src/hub.ts:876-895`).
+- **Replace mirrors with checkpoint caches**: store the latest verified, bounded ANSI checkpoint for daemon/session/seq. Offline daemon attach can still show a read-only display. Caches may expire or be lost; do not parse live terminal bytes. Reject persistent per-session `@xterm/headless` instances (`apps/server/src/mirror.ts:20-39`).
+- **Old paths exist only for migration compatibility**: build-skew admission already permits switching this plan group in one deployment version. Do not maintain two holder/relay authorities indefinitely.
 
 ## Direction
 
-### Milestone 1: pairing、grant 与 lease 控制面
+### Milestone 1: pairing, grant and lease control plane
 
-持久化模型、账号隔离、安装/撤销 ack、gateway identity 与 lease 生命周期具备正负测试；删除设备/
-登出能在在线时收敛授权，离线撤销延迟被明确记录。Validation:
-`node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` -> exit 0。
+Positive/negative tests cover persistence, account isolation, installation/revocation acknowledgments, gateway identity, and lease lifetime. Device deletion/logout converges authorization while online, with offline revocation delay documented explicitly. Validation: `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` exits 0.
 
 ### Milestone 2: opaque relay channel
 
-client/daemon channel open/close/frame 在 account、daemon、client connection 生命周期内正确清理；
-server 不解析 Device RPC 业务 oneof，非法大小/归属/版本拒绝。Validation:
-`node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` -> exit 0。
+Clean up client/daemon channel open/close/frame state throughout account, daemon, and client-connection lifetimes. The server does not parse Device RPC business oneofs; reject invalid size, ownership, or version. Validation: `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` exits 0.
 
-### Milestone 3: durable prepare 与 reconciliation
+### Milestone 3: durable prepare and reconciliation
 
-start/stop 等 operation 经 server restart、direct/relay 重投、late ack 与 daemon full catalog 都能
-幂等收敛；unknown live session 不被杀，offline exit tombstone 恢复真实 exit fact。Validation:
-`node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` -> exit 0；行为测试留给 plan 041 黑盒。
+Start/stop operations converge idempotently across server restarts, direct/relay resubmission, delayed acknowledgments, and full daemon catalogs. Never kill unknown live sessions; offline exit tombstones restore actual exit facts. Validation: `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` exits 0; plan 041 covers black-box behavior.
 
 ### Milestone 4: checkpoint cache
 
-只接受目标 daemon 对活 session 的单调 checkpoint；过旧/跨账号/超限 payload 拒绝；daemon
-离线时可下发最后只读画面，server restart/cache miss 安全降级。Validation:
-`node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` -> exit 0；行为测试留给 plan 041 黑盒。
+Accept only monotonically advancing checkpoints for live sessions from the correct daemon. Reject stale, cross-account, and oversized payloads. Serve the last read-only display while the daemon is offline, and degrade safely after server restart or cache misses. Validation: `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` exits 0; plan 041 covers black-box behavior.
 
 ## Landmines
 
-- `RuntimeSession` 当前把 route、holder、closing、start timeout 与 mirror 混在一个内存对象
-  （`apps/server/src/hub.ts:112-124`）；不能一次删除而漏掉 task timeout/端口路由清理。
-- start 当前先发 daemon 再立即把 task 标 running（`apps/server/src/hub.ts:1105-1117`）；prepared
-  op 必须重新定义 crash window，而不是在其外再套 request ID。
-- daemon close 当前保留 runtime session 以支持 mirror；改成 checkpoint 后仍要维护 task/port 的
-  可见语义，不能把“离线”误当“已退出”。
-- token 数据库只存 hash（`apps/server/src/store.ts:3-5`）；browser public key 不是 bearer secret，
-  但 grant/lease ID 与撤销语义仍需明确，不能把私钥或 raw clientToken 落库。
-- public preview TCP tunnel 目前依赖 server 语义路由；本计划不把它误包装成 web Device channel，
-  现有外部 URL 必须保持可用。
+- `RuntimeSession` combines routing, holder, closing, startup timeout, and mirror state (`apps/server/src/hub.ts:112-124`). Removing it must preserve task-timeout and port-route cleanup.
+- Start currently sends to the daemon and immediately marks the task running (`apps/server/src/hub.ts:1105-1117`). Prepared operations must redefine the crash window, not merely wrap it in a request ID.
+- Daemon disconnect currently retains runtime sessions for the mirror. Checkpoint migration must preserve visible task/port semantics: offline is not exited.
+- Token storage retains only hashes (`apps/server/src/store.ts:3-5`). Browser public keys are not bearer secrets, but grant/lease IDs and revocation semantics still need explicit definitions. Never persist browser private keys or raw clientToken.
+- Public preview TCP tunnels currently depend on server semantic routing. Do not mistakenly move them into web Device channels; existing external URLs must continue working.
 
 ## Scope
 
 In scope:
 - `apps/server/src/**`
-- `apps/server/package.json` 中 server mirror/runtime 依赖调整
+- Server mirror/runtime dependency adjustment in `apps/server/package.json`
 
 Out of scope:
-- supervisor/worker 实现
-- web loopback/WebCrypto 实现
-- public preview URL 与 proxy gate 迁出中心
-- 离线项目/task CRUD
+- supervisor/worker implementation
+- web loopback/WebCrypto implementation
+- moving public preview URLs and proxy access control away from the center
+- Offline project/task CRUD
 
 ## Commands
 
@@ -108,25 +81,24 @@ Out of scope:
 
 ## Done criteria
 
-- [ ] 所有非 acceptance commands 通过；acceptance 留给 plan 041。
-- [ ] relay 不含逐 RPC 业务分支，account/daemon/channel 校验完整。
-- [ ] pairing/grant/lease 可持久、可撤销且绝不处理 browser 私钥。
-- [ ] prepared op 与 full catalog/tombstone 在重启/重投后幂等收敛。
-- [ ] unknown live session 不被中心自动关闭。
-- [ ] server 不再拥有 holder 或实时 VT parser；checkpoint 只是有界缓存。
-- [ ] public preview 与现有远程 relay 没有行为回退。
-- [ ] 实现遵循所有 Decisions & tradeoffs。
-- [ ] 未修改 out-of-scope 文件。
-- [ ] `plans/README.md` 状态已更新。
+- [ ] All non-acceptance commands pass; acceptance is left to plan 041.
+- [ ] relay does not include per-RPC business branches, and account/daemon/channel verification is complete.
+- [ ] pairing/grant/lease is durable, revocable and never handles browser private keys.
+- [ ] prepared op and full catalog/tombstone converge idempotently after restart/resubmission.
+- [ ] unknown live session is not automatically closed by the center.
+- [ ] The server no longer has a holder or real-time VT parser; checkpoints are just bounded caches.
+- [ ] public preview and existing remote relay behavior have no regressions.
+- [ ] Implementation follows every Decisions & tradeoffs entry.
+- [ ] No out-of-scope files changed.
+- [ ] `plans/README.md` status updated.
 
 ## STOP conditions
 
-- 设备归属无法在不解析 Device payload 的前提下于 channel open 阶段可靠绑定。
-- prepared operation 需要破坏既有 task 数据且没有安全迁移路径。
-- checkpoint 替换 mirror 会不可避免地移除现有 daemon 离线只读画面。
-- validation 在一次合理修复后连续失败两次。
+- Device ownership cannot be reliably bound in the channel open phase without parsing the Device payload.
+- Prepared operation requires destroying existing task data and has no safe migration path.
+- Checkpoint replacement of the mirror will inevitably remove the existing daemon offline read-only screen.
+- Validation fails twice in a row after a reasonable fix.
 
 ## Maintenance notes
 
-中心仍是可信控制面，不等于它必须在每个 byte 的因果链上。未来新增 daemon RPC 时只扩 Device
-协议和 endpoint handler；server relay 不应再次长出对应 pending/dispatch 分支。
+The center remains a trusted control plane without being required on the causal path of every byte. New daemon RPCs should extend the Device protocol and endpoint handlers; server relay must not grow corresponding pending/dispatch branches again.

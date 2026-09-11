@@ -1,4 +1,4 @@
-# Plan 024: 工作区 git diff 统计展示（+X −Y）
+# Plan 024: Display workspace Git diff statistics (+X −Y)
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -21,181 +21,98 @@
 
 ## Requirement
 
-产品定位是「Agent 指挥中心」：用户在多台设备的多个工作区里跑 claude/codex 任务，
-需要扫一眼就知道每个工作区（worktree）的 agent 总共改了多少代码。第一步先做
-行数统计：每个 workspace 展示 `+X −Y`（新增/删除行数）。
+As an Agent Command Center, coflux runs Claude/Codex tasks across workspaces and devices. Users need to see at a glance how much code each agent changed. Start with workspace-level `+X −Y` counts of added/deleted lines.
 
-做完后成立的事实：
-- daemon worker 周期计算每个 workspace 相对项目默认分支的累积 diff 行数
-  （已提交 + 未提交 + untracked 新文件），变化才上报 server。
-- server 落库（DB 只是镜像，真相源在设备侧，与 branch 同语义）并广播给所有
-  client；client 刷新/重连后能拿到最后已知值，设备离线时亦然。
-- web 在 sidebar 工作区行和终端顶栏 BranchMenu 旁各展示 `+X −Y` 小字；
-  X=Y=0 时两处都不渲染（不显示 `+0 −0`）。
+Required outcomes:
 
-正确解 vs 相邻错误解的分界：统计基准是 **merge-base(default_branch, HEAD) 到
-工作树** 的累积 diff——agent 自己 commit 之后数字**不归零**；只统计未提交脏改动
-（`git diff HEAD`）的实现是错的。untracked 新文件行数计入 additions——纯
-`git diff --shortstat` 不含 untracked 的实现是不完整的。
+- The worker periodically computes each workspace’s cumulative diff against its project’s default branch, including committed, uncommitted, and untracked changes, and reports changes.
+- The server persists and broadcasts these values. The DB is only a mirror of device truth, like branch metadata; refresh/reconnect returns the last known value even when the device is offline.
+- Show small `+X −Y` text in sidebar workspace rows and beside the terminal top-bar BranchMenu. Hide both when X=Y=0; never show `+0 −0`.
+
+Correctness boundary: count the cumulative diff from **merge-base(default_branch, HEAD) to the working tree**. Agent commits must not reset counts. `git diff HEAD` counts only dirty changes and is wrong; shortstat alone is incomplete because untracked-file lines must contribute to additions.
 
 ## Decisions & tradeoffs
 
-- **diff 基准**：`git diff --shortstat <merge-base(default_branch, HEAD)>`
-  （单 rev 参数 = base 对比工作树，一条命令同时涵盖已提交与未提交改动）。
-  Rejected: `git diff --shortstat HEAD`（仅未提交）—— agent commit 后归零，
-  不符合任务视角；用户已在 explore 阶段明确选择累积语义。
-  主工作区正在 default_branch 上时 merge-base = HEAD，自然退化为未提交改动，无需特判。
-  merge-base 解析失败（孤儿分支、default_branch 已删）时回退 `git diff --shortstat HEAD`。
-  Based on: 用户 2026-07-22 grill 确认；`proto/coflux/v1/common.proto:27` 项目已有 `default_branch` 字段。
-
-- **untracked 文件计入 additions**：`git ls-files --others --exclude-standard -z`
-  拿列表后由 worker 直接读文件统计行数（无尾随换行的末行也算 1 行，对齐 git numstat
-  语义）；内容含 NUL 字节视为二进制跳过（对齐 git 行为）；单文件 >1MB 跳过行数统计
-  （防大产物文件拖慢轮询）。deletions 不涉及 untracked。
-  Rejected: 不计 untracked —— agent 未 commit 的新建文件完全不可见，系统性低估；
-  用户已明确选择计入。Rejected: 对每个 untracked 文件起 `git diff --no-index`
-  子进程 —— N 个子进程无必要，Rust 读文件即可。
-  Based on: 用户 2026-07-22 grill 确认。
-
-- **worker 侧 default_branch 来源**：扩展 `WorkspaceRef`（server→daemon 的
-  工作区清单）加 `default_branch` 字段，`pushWorkspaceList` 从所属 project 带出。
-  Rejected: worker 自己猜默认分支（origin/HEAD 等）—— server DB 已有权威值，
-  猜测会与项目导入时落库的值漂移。
-  Based on: `proto/coflux/v1/daemon.proto:278-286` WorkspaceRef 现只有
-  workspace_id + path；`crates/worker/src/main.rs:641-643` worker 收
-  WorkspaceList 存 `HashMap<id, path>`，需扩为携带 default_branch。
-
-- **上报机制**：复用现有分支监视循环的形态（周期轮询、内存缓存上次值、变化才发），
-  并入 `crates/worker/src/main.rs:245-278` 的 3 秒循环或同构新任务均可（executor
-  自定）；但轮询间隔必须 ≤5 秒——黑盒测试靠 waitFor 等广播，间隔过长会拖慢/超时。
-  新增 daemon→server 消息 `WorkspaceDiff { workspace_id, additions, deletions }`
-  （oneof 编号取下一个未用号；注意 `daemon.proto` 的 DaemonToServer oneof 编号
-  不连续，19 已被 fs_write_result 占用）。
-  Rejected: 每 tick 无条件上报 —— 与现有 branch/ports 的「变化才发」约定不一致。
-  Based on: `crates/worker/src/main.rs:245-278`（branch 监视循环）、
-  `proto/coflux/v1/daemon.proto:96-117`（DaemonToServer oneof）。
-
-- **server 落库而非内存态**：workspaces 表加 `additions`/`deletions` 两列
-  （INTEGER NOT NULL DEFAULT 0），hub 收到 workspaceDiff 后仿 `workspaceBranch`
-  case：校验 daemon 归属 → 值未变则跳过 → 更新 DB → `broadcast workspaceCreated`。
-  Workspace proto 实体加 `additions`/`deletions` 字段（int32），全链路自然带到 web。
-  建表 DDL 是幂等 CREATE，生产已有表不会得到新列——必须同时在 `migrate()` 挂载点
-  补 `ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS ...`（该方法注释即为此预留）。
-  Rejected: hub 内存 Map —— server 重启后值丢失且 daemon 不重报（变化才发），
-  出现无限期陈旧窗口；落库与 branch 镜像语义一致且代码最少。
-  Based on: `apps/server/src/hub.ts:371-382`（workspaceBranch 处理）、
-  `apps/server/src/store.ts:107`（幂等 DDL）、`apps/server/src/store.ts:235-239`
-  （migrate() no-op 挂载点，注释明确"information_schema 查列补列"思路）、
-  `apps/server/src/store.ts:447-453`（updateWorkspaceBranch 可仿写）。
-
-- **web 展示位置与形态**：两处——sidebar 工作区行（branch 名右侧）与终端顶栏
-  BranchMenu 旁，各一个 `+X −Y` 小字（等宽字体、加色/删色区分，颜色用主题 token
-  不用裸 hex，遵循 `apps/web/.claude/CLAUDE.md` 的 astryx/token 约定）；
-  X=Y=0 时不渲染。数据直接读 store 里 workspace 的新字段，无新增状态管理。
-  Rejected: 仅一处 —— 用户已明确选两处都放；指挥中心视角需要 sidebar 总览。
-  Based on: 用户 2026-07-22 grill 确认；`apps/web/src/components/workbench/sidebar.tsx:299-303`
-  （工作区行 branch 展示）、`apps/web/src/components/workbench/workspace-terminal.tsx:397-413`
-  （顶栏 BranchMenu）。
-
-- **黑盒测试为主要验收**（decided while planning）：新增或扩展一个 `*.test.mjs`：
-  mkRepo 导入项目后，在工作区改一个已跟踪文件、新建一个 untracked 文件，
-  waitFor `workspaceCreated` 广播携带期望的 additions/deletions；再验证 agent
-  commit 后数字不归零（累积语义）。worker 内的行数统计纯函数（NUL 判二进制、
-  末行无换行计数）加 Rust 单测。新测试文件须独占端口（见各 test 顶部 PORT 约定）。
-  Based on: `AGENTS.md` 测试哲学；`tests/src/lifecycle.test.mjs:42-48`
-  （workspaceCreated 断言模式可仿）。
+- **Base the diff on `git diff --shortstat <merge-base(default_branch, HEAD)>`.** A single revision compares that base to the working tree, covering committed and uncommitted changes together. Reject HEAD-only diff, which resets after commit and violates the user’s cumulative-task perspective (confirmed 2026-07-22). For a main workspace on default_branch, merge-base naturally equals HEAD. If merge-base fails, such as an orphan branch or removed default_branch, fall back to `git diff --shortstat HEAD`. The project already exposes default_branch (`proto/coflux/v1/common.proto:27`).
+- **Include untracked lines in additions.** List them with `git ls-files --others --exclude-standard -z`, then read/count directly in Rust. Count a final unterminated line as one, matching numstat; skip NUL-containing binary data and files larger than 1MB so generated artifacts cannot stall polling. Untracked files do not affect deletions. Excluding them systematically hides new agent files; the user explicitly required inclusion on 2026-07-22. Do not spawn git diff --no-index separately for every file.
+- **Send default_branch in `WorkspaceRef`.** Extend the server-to-worker workspace list and have pushWorkspaceList obtain the value from the owning project. Guessing origin/HEAD on the worker can drift from the authoritative DB value captured at import. Evidence: `proto/coflux/v1/daemon.proto:278-286` currently has only workspace_id/path; worker WorkspaceList storage is `HashMap<id, path>` at `crates/worker/src/main.rs:641-643` and must carry the branch too.
+- **Follow branch monitoring: poll, cache, and report only changes.** Reuse the 3s loop in `crates/worker/src/main.rs:245-278` or add an equivalent task; keep the interval at most 5s so black-box waitFor does not become slow or time out. Add daemon-to-server `WorkspaceDiff { workspace_id, additions, deletions }` with a genuinely unused oneof tag. DaemonToServer tags are not sequential; 19 already belongs to fs_write_result. Unconditional reports violate existing branch/port change-only conventions. Evidence: `proto/coflux/v1/daemon.proto:96-117`.
+- **Persist counts rather than keeping only hub memory.** Add workspaces additions/deletions as INTEGER NOT NULL DEFAULT 0. Follow workspaceBranch handling: verify daemon ownership, skip unchanged values, update DB, and broadcast workspaceCreated. Add int32 additions/deletions to the Workspace proto entity. Updating idempotent CREATE DDL alone affects only new databases; also add `ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS ...` through migrate(). A memory-only mirror would lose counts after server restart while unchanged daemons might never resend, leaving an indefinite stale window. Persistence matches branch semantics with minimal code. Evidence: `apps/server/src/hub.ts:371-382`, `apps/server/src/store.ts:107`, migrate() at `apps/server/src/store.ts:235-239`, and updateWorkspaceBranch at `apps/server/src/store.ts:447-453`.
+- **Render in both the sidebar workspace row and top-bar BranchMenu area.** Use small monospace text, separate addition/deletion colors from theme tokens, and no raw hex, following apps/web/.claude/CLAUDE.md. Read workspace fields directly from the store with no new state layer; hide 0/0. The user selected both locations on 2026-07-22 because the sidebar provides a command-center overview. Evidence: `apps/web/src/components/workbench/sidebar.tsx:299-303`, `apps/web/src/components/workbench/workspace-terminal.tsx:397-413`.
+- **Use black-box acceptance, decided during planning.** After mkRepo/import, modify a tracked file and add an untracked file. Assert workspaceCreated broadcasts the expected counts, then commit and assert counts remain cumulative. Add Rust unit tests for NUL detection and final unterminated lines. Give new test files exclusive ports. Follow AGENTS.md and workspaceCreated assertions at `tests/src/lifecycle.test.mjs:42-48`.
 
 ## Direction
 
-数据流与既有 branch 镜像链路完全同构：
-worker 周期计算（git 子进程 + 文件读）→ 变化才发 `WorkspaceDiff` → hub 校验落库
-→ `workspaceCreated` 广播 → web store upsert → 两处 UI 渲染。
+Follow the branch-mirror pipeline: worker Git/file calculations → change-only WorkspaceDiff → hub ownership check/persistence → workspaceCreated broadcast → web store upsert → both displays.
 
-协议改动横跨 `proto/`（唯一真相源，`buf generate` 出 TS/Rust，禁止手写镜像），
-Rust 与 TS 生成产物都要重新生成并提交。
+Proto is the sole source of truth. Run buf generate and commit generated Rust/TS bindings; never maintain handwritten mirrors.
 
-### Milestone 1: 协议扩展
+### Milestone 1: Protocol extensions
 
-`common.proto` Workspace 加 additions/deletions；`daemon.proto` 加 WorkspaceDiff
-消息进 DaemonToServer oneof、WorkspaceRef 加 default_branch。`buf generate` 后
-三端生成产物更新。Validation: `cd proto && buf lint && buf generate` 后
-`git status` 无未预期改动、`cargo build -p coflux-protocol` exit 0、
-`node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` exit 0。
+Add additions/deletions to common.proto Workspace, WorkspaceDiff to daemon.proto and DaemonToServer, and default_branch to WorkspaceRef. Regenerate all three languages. Validation: `cd proto && buf lint && buf generate` produces no unexpected status changes; `cargo build -p coflux-protocol` and `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` → exit 0.
 
-### Milestone 2: worker 计算与上报
+### Milestone 2: Worker calculation and reporting
 
-worker 收 WorkspaceList 保存 default_branch；周期计算各 workspace 的
-+X/−Y（merge-base 累积 + untracked），变化才发 WorkspaceDiff。行数统计纯函数
-带 Rust 单测。Validation: `cargo build -p coflux-worker`（零警告）、
-`cargo test -p coflux-worker` exit 0。
+Store default_branch from WorkspaceList. Periodically compute cumulative merge-base diff plus untracked additions and send WorkspaceDiff only on change. Unit-test the pure line counter. Validation: `cargo build -p coflux-worker` with zero warnings and `cargo test -p coflux-worker` → exit 0.
 
-### Milestone 3: server 落库广播
+### Milestone 3: Server persistence and broadcast
 
-workspaces 表新列 + migrate() 补列；hub 处理 workspaceDiff（归属校验、
-值未变跳过、落库、广播）。Validation: `node_modules/.bin/tsc -p
-apps/server/tsconfig.json --noEmit` exit 0。
+Add columns to initial DDL and migrate(). Handle workspaceDiff with ownership checks, unchanged-value skipping, persistence, and broadcast. Validation: `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` → exit 0.
 
-### Milestone 4: web 展示
+### Milestone 4: Web display
 
-sidebar 工作区行 + 终端顶栏各加 `+X −Y`（0/0 隐藏）。
-Validation: `node_modules/.bin/tsc -b apps/web/tsconfig.json` exit 0。
+Show `+X −Y` in sidebar workspace rows and the terminal top bar, hiding 0/0. Validation: `node_modules/.bin/tsc -b apps/web/tsconfig.json` → exit 0.
 
-### Milestone 5: 黑盒验收
+### Milestone 5: Black-box acceptance
 
-按 Decisions 所述新增黑盒用例（含 commit 后不归零断言）。
-Validation: `pnpm -C tests test` exit 0（acceptance，见 Commands）。
+Add the specified tests, including counts surviving commit. Validation: `pnpm -C tests test` → exit 0 (acceptance; see Commands).
 
 ## Landmines
 
-- `DaemonToServer` oneof 编号不连续：数据面消息占了 15-18，`fs_write_result = 19`
-  插在中间（`proto/coflux/v1/daemon.proto:96-117`）。新消息编号必须取全 oneof
-  实际未用的下一个号，不能看末尾字段想当然。
-- 生产 DB 已存在 workspaces 表，`SCHEMA_DDL` 是 `CREATE TABLE IF NOT EXISTS`
-  幂等块（`apps/server/src/store.ts:107`）——只改 CREATE 块新库才有新列，
-  生产/本地既有库必须靠 `migrate()`（`store.ts:235-239`）补列，否则上线即 500。
-- 本机跑黑盒测试必须 `COFLUX_TEST_PG_URL` 指向 54322 直连口；5432 是 supavisor
-  会报 tenant 错（本机 selfhost Supabase 环境特性）。
-- `hub.ts` 的 branch 更新广播复用的是 `workspaceCreated` case（upsert 语义，
-  `hub.ts:380`），不存在单独的 workspaceUpdated —— diff 更新沿用同一广播,
-  不要发明新 client 消息。
-- web 的 `apps/web/.claude/CLAUDE.md` 有 astryx 设计系统约束（no raw hex、
-  token 优先）；两处 UI 都是现有组件内加小 span，不需要新组件。
-- 分支监视循环在 `authed` 前跳过（`crates/worker/src/main.rs:256-258`），
-  diff 轮询须同样处理，否则未认证时空跑子进程。
+- DaemonToServer tags are not sequential: data-plane messages use 15–18, and `fs_write_result = 19` appears mid-list (`daemon.proto:96-117`). Inspect the entire oneof before choosing an unused tag.
+- Production workspaces already exists. `SCHEMA_DDL` uses CREATE TABLE IF NOT EXISTS (`store.ts:107`), so new columns require migrate() (`store.ts:235-239`) for existing production/local databases or deployment will produce 500s.
+- Local black-box tests need COFLUX_TEST_PG_URL at direct port 54322. Port 5432 is Supavisor and produces tenant errors in this self-hosted Supabase setup.
+- Branch changes already broadcast workspaceCreated as an upsert (`hub.ts:380`); there is no workspaceUpdated. Reuse that message for diff updates.
+- Follow apps/web/.claude/CLAUDE.md token/Astryx rules. These are small spans in existing components, not new component infrastructure.
+- Branch monitoring skips work before authed (`crates/worker/src/main.rs:256-258`). Diff polling must do the same to avoid needless subprocesses.
 
 ## Scope
 
 In scope:
-- `proto/coflux/v1/{common,daemon}.proto` 及 `proto/gen/`、TS/Rust 生成产物目录
+- `proto/coflux/v1/{common,daemon}.proto` and `proto/gen/`, TS/Rust generated output directories
 - `crates/worker/src/{main,git}.rs`
 - `apps/server/src/{hub,store}.ts`
 - `apps/web/src/components/workbench/{sidebar,workspace-terminal}.tsx`
-- `tests/src/`（新增或扩展一个 `*.test.mjs`）
-- `plans/README.md`、`docs/ROADMAP.md`（勾掉「git diff 的展示」条目）
+- `tests/src/` (add or extend a `*.test.mjs`)
+
+- `plans/README.md`, `docs/ROADMAP.md` (check off the "git diff display" entry)
 
 Out of scope:
-- 文件级 diff 明细 / diff 内容查看 —— 本计划只做行数统计，明细是后续迭代
-- `crates/supervisor` —— diff 全在 worker 侧，不碰 PTY/supervisor
-- task/session 粒度的 diff 归因 —— diff 是 workspace（worktree）属性
-- swift 生成产物消费方 —— 无 swift 客户端在用，`buf generate` 带出的更新照常提交即可
+- File-level diff details/diff content viewing - This plan only counts the number of lines, and the details are for subsequent iterations
+
+- `crates/supervisor` — diff is all on the worker side, without touching PTY/supervisor
+
+- Task/session granular diff attribution - diff is a workspace (worktree) attribute
+
+- swift generates product consumers - no swift client is in use, updates brought out by `buf generate` can be submitted as usual
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| proto 校验+生成 | `cd proto && buf lint && buf generate` | exit 0，生成产物与提交一致 |
-| Rust 构建 | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0，零警告 |
-| Rust 单测 | `cargo test -p coflux-protocol -p coflux-worker` | exit 0 |
-| server 类型检查 | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
-| web 类型检查 | `node_modules/.bin/tsc -b apps/web/tsconfig.json` | exit 0 |
-| 黑盒测试 (acceptance) | `COFLUX_TEST_PG_URL=<54322 直连口> pnpm -C tests test` | exit 0 |
+| proto verification + generation | `cd proto && buf lint && buf generate` | exit 0, generated artifacts match the committed files |
+| Rust build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0, zero warnings |
+| Rust unit test | `cargo test -p coflux-protocol -p coflux-worker` | exit 0 |
+| server type check | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
+| web type checking | `node_modules/.bin/tsc -b apps/web/tsconfig.json` | exit 0 |
+| Black-box testing (acceptance) | `COFLUX_TEST_PG_URL=<54322 direct connection URL> pnpm -C tests test` | exit 0 |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] 在工作区改已跟踪文件 + 新建 untracked 文件后，web 两处（sidebar 行、
-      终端顶栏）在一个轮询周期内出现正确的 `+X −Y`；全部还原后消失（0/0 隐藏）。
-- [ ] agent/用户 commit 改动后统计不归零（累积语义），黑盒用例断言了这一点。
+- [ ] Modifying tracked files and adding untracked files updates both sidebar and top-bar `+X −Y` within one polling interval; restoring all changes hides 0/0.
+
+- [ ] Statistics do not regress to zero after agent/user commit changes (cumulative semantics), the black-box test case asserts this.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
 - [ ] `plans/README.md` status is updated.
@@ -205,14 +122,10 @@ Out of scope:
 - A fact cited under Decisions & tradeoffs no longer holds.
 - The outcome requires out-of-scope files.
 - A validation command fails twice after one reasonable fix.
-- `buf breaking` 报不兼容（本计划全部是加字段/加消息，理论上不触发；触发即说明
-  改动方式错了）。
+- `buf breaking` reports incompatibility. Only additive fields/messages are planned, so this indicates the change was implemented incorrectly.
 
 ## Maintenance notes
 
-- diff 数值是设备侧真相的镜像，与 branch 同语义：server/DB 永远不主动改它，
-  只接受 daemon 上报。排查「数字不对」先看设备侧 worker 日志，不是 DB。
-- 轮询每周期对每个 workspace 起 2-3 个 git 子进程；工作区数量大或超大 repo
-  时若成为负担，升级路径是先 `git status --porcelain` 判脏再算 diff，或拉长间隔。
-- untracked 大文件（>1MB）行数不计入，展示值可能略低于 `git add -A` 后的真实值，
-  是刻意取舍。
+- Counts mirror device truth like branches: the server/DB never originates changes. Investigate wrong numbers in worker logs before the DB.
+- Each polling cycle starts two or three Git subprocesses per workspace. If many workspaces or large repositories make this costly, first check dirty state using git status --porcelain or increase the interval.
+- Untracked files larger than 1MB are deliberately excluded; displayed counts may be lower than those after git add -A.

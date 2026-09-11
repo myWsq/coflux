@@ -1,4 +1,4 @@
-# Plan 014: web 终端剪贴板贴图 —— 图片上传远程 worktree 并注入路径给 agent
+# Plan 014: Web terminal clipboard image - upload the image to the remote worktree and inject the path to the agent
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -21,140 +21,93 @@
 
 ## Requirement
 
-web 终端连的是远程 daemon 上的 Claude Code / Codex CLI。本地终端里"⌘V 贴图"
-靠 CLI 自己读本机 OS 剪贴板实现——远程场景该机制天然断裂（剪贴板在浏览器所在机，
-CLI 在 daemon 所在机）。本计划打通:用户在 web 终端 ⌘V 粘贴剪贴板中的图片时,
-图片字节经 server 中继上传到该任务 worktree 内 `.coflux/pastes/`,成功后把落盘
-文件路径作为文本注入 PTY 输入,Claude Code / Codex 会把 prompt 里的图片路径识别
-为图片读取。
+The web terminal connects to Claude Code / Codex CLI on a remote daemon. Local-terminal ⌘V image paste relies on the CLI reading the local OS clipboard, which cannot work remotely: the browser and CLI run on different machines. Enable browser image paste by relaying image bytes to the task worktree’s `.coflux/pastes/` directory, then injecting the saved path as PTY text. Claude Code / Codex recognizes the image path in the prompt and reads the file.
 
-正确性判据(区分"对的实现"与"相邻的错的实现"):
-- 粘贴**文本**的行为完全不变(仍走 xterm 原生粘贴);只有剪贴板含 image/* 时走上传流。
-- 图片字节**原样**落盘(≤限内时不重编码);超限才压缩。
-- 注入只发生在该终端 `active && controlState === "owned" && sessionId` 时(与
-  既有手敲输入同一安全门,`terminal-pane.tsx:136-138`);非 owned 时不上传不注入,
-  给出终端内提示。
-- 上传失败/超时不得静默:用 `TerminalController.writeSystem` 报错(`terminal-pane.tsx:127`)。
-- 远端写文件必须锚定 worktree root 且防越界(与 fsRead 同级的安全语义)。
+Correctness criteria:
+
+- Preserve native xterm **text** paste; intercept only image/* clipboard items.
+- Write image bytes unchanged when within the limit; compress only oversized images.
+- Upload/inject only with `active && controlState === "owned" && sessionId`, the same gate as typed input (`terminal-pane.tsx:136-138`). Without ownership, do neither and show an in-terminal notice.
+- Report upload failures/timeouts through `TerminalController.writeSystem` (`terminal-pane.tsx:127`).
+- Anchor remote writes to the worktree root and prevent path escape, matching fsRead security.
 
 ## Decisions & tradeoffs
 
-- **落盘位置**(2026-07-19 修订,用户 informed override): 远程机**系统临时目录**
-  `std::env::temp_dir()/coflux-pastes/`(API 解析,不硬编码 `/tmp`),协议加 `temp` 标志,
-  temp 模式下 path 仅允许单段文件名,回包带绝对路径。原方案(worktree 内
-  `.coflux/pastes/` + `*` .gitignore)已实现后被用户否决——代价换位:接受
-  "cwd 外读文件"可能的权限确认,换取完全不碰用户仓库目录。root 锚定的 fs.write
-  通用原语保留且行为不变(向后兼容)。Based on: fs 中继 root 恒为 `ws.path`
-  (`apps/server/src/hub.ts:888-899`)。
-- **大图策略**: 客户端压缩,不提 server 限。图片编码后若超过预算(4MB maxPayload
-  减去信封余量,web 侧常量取 3.5MB)则浏览器端 canvas 重编码:先保分辨率走 JPEG
-  质量阶梯(0.9 起逐档降),仍超限再减半降采样,直到限内——文字截图的可读性
-  "先降质量后降分辨率"损失最小。限内图片一字节不动直传。用户明确否决了
-  "提限到 16MB"与"超限报错"两案。Based on: `apps/server/src/config.ts:81`
-  (`COFLUX_MAX_PAYLOAD` 默认 4MB)。(压缩阶梯细节为 planning 期决定,执行者可在
-  "先质量后分辨率"原则内调参。)
-- **协议形态**: 新增 `ClientFsWrite`(client.proto)→ `FsWrite`(daemon.proto)与对应
-  `FsWriteResult` 回包,字段与路由完全照抄 fsRead 一族的模式:client 带
-  `request_id/workspace_id/path/data(bytes)`,server 经 `workspaceForClient` 校验归属
-  + `pendingRelays` 关联回包 + 换 `request_id` 下发 daemon(root=`ws.path`)。
-  Rejected: 复用 `ClientExec` 塞 base64 —— ExecRun 无 stdin,argv 有平台上限,MB 级
-  图片放不下。Based on: `apps/server/src/hub.ts:853-899`(clientExec/clientFsList/
-  clientFsRead 三个现成中继范本)、`proto/coflux/v1/daemon.proto:206-216`。
-- **注入方式**: 上传成功后调 xterm 的 `terminal.paste("路径前后各一空格")`——它自动
-  按远端应用是否开启 bracketed-paste mode 决定是否包 ESC[200~/201~,且走
-  `onData` → 既有 `sendInput` 链,天然复用 active/owned 门控。Rejected: 直接
-  `sendInput` 手拼 ESC 序列 —— 绕过门控且需自己判断 mode 2004。Based on:
-  `terminal-pane.tsx:136-138`(onData 门控)、`store.ts:111-112`(sendInput)。
-- **请求-响应关联(web 侧)**: 照抄 store.ts 既有 pending-map 模式(`pendingFsLists`
-  / `pendingExecs`,断线统一失败结清),新增 `pendingFsWrites`。Based on:
-  `apps/web/src/client/store.ts:66-100,346-356`。
-- **清理策略**: worker 每次写入 pastes 目录时顺手删除该目录下 mtime 超 7 天的文件。
-  Rejected: 独立定时任务 —— 为低频清理引入常驻调度,不值。
-- **文件命名**: `paste-<epoch毫秒>-<短随机>.<按 MIME 定后缀:png/jpg/gif/webp>`,
-  由 web 侧生成相对路径 `.coflux/pastes/<name>` 传入。非 image/* 的粘贴不拦截。
+- **Storage location (revised 2026-07-19 with informed user override): use the remote system temporary directory**, `std::env::temp_dir()/coflux-pastes/`, resolved through the API rather than hard-coded `/tmp`. Add a protocol `temp` flag. In temp mode, accept only a single filename segment and return an absolute path. The initial worktree `.coflux/pastes/` plus `*` .gitignore implementation was rejected by the user. The revised tradeoff accepts possible permission prompts for reads outside cwd in exchange for leaving the repository untouched. Retain the root-anchored fs.write primitive unchanged for compatibility. Evidence: fs relay root is always `ws.path` (`apps/server/src/hub.ts:888-899`).
+- **Compress oversized images in the browser; do not raise server limits.** The web budget is 3.5MB, leaving envelope space below the 4MB maxPayload. If exceeded, re-encode via canvas: keep resolution while decreasing JPEG quality from 0.9 in steps, then halve dimensions repeatedly if still too large. Reducing quality before resolution best preserves screenshot text. Send in-budget images byte-for-byte. The user rejected both a 16MB limit and simply rejecting oversized images. Evidence: `COFLUX_MAX_PAYLOAD` defaults to 4MB (`apps/server/src/config.ts:81`). The executor may tune the ladder while preserving quality-before-resolution ordering.
+- **Add `ClientFsWrite` (client.proto) → `FsWrite` (daemon.proto), with `FsWriteResult` replies.** Follow fsRead routing: client fields `request_id/workspace_id/path/data(bytes)`; server `workspaceForClient` ownership checks; `pendingRelays` correlation; rewritten `request_id`; daemon root `ws.path`. Rejected: base64 through `ClientExec`, because ExecRun has no stdin and platform argv limits cannot accommodate megabyte images. Evidence: the three relay templates in `apps/server/src/hub.ts:853-899` and `proto/coflux/v1/daemon.proto:206-216`.
+- **After upload, call `terminal.paste(" <path with surrounding spaces> ")`.** xterm selects bracketed-paste framing according to remote ESC[200~/201~ mode and sends through `onData` → existing `sendInput`, preserving active/owned gating. Hand-assembling ESC sequences in `sendInput` would bypass that gate and require independently tracking mode 2004. Evidence: `terminal-pane.tsx:136-138`, `store.ts:111-112`.
+- **Add `pendingFsWrites` using the existing request map pattern.** Follow `pendingFsLists`/`pendingExecs`, including rejecting and clearing requests on disconnection (`apps/web/src/client/store.ts:66-100,346-356`).
+- **Clean opportunistically:** each worker write to the pastes directory removes files with mtime older than seven days. A resident timer is unjustified for infrequent cleanup.
+- **Name files `paste-<epoch milliseconds>-<short random>.<MIME-derived suffix: png/jpg/gif/webp>`.** The original path convention has the web generate `.coflux/pastes/<name>`. Do not intercept non-image/* paste.
 
 ## Direction
 
-数据流:xterm textarea paste 事件(capture)发现 image/* → 读 Blob →(超预算则
-canvas 压缩)→ `clientFsWrite` → server 校验/中继 → worker 落盘 + 回包 →
-web 收 `fsWriteResult` → `terminal.paste(" <绝对或相对路径> ")` → PTY。
-注入路径用**落盘的 worktree 相对路径**(如 `.coflux/pastes/paste-xxx.png`)即可,
-agent cwd 即 worktree root;worker 回包里带最终相对路径,web 不自行拼装真相。
+Data flow: capture paste on the xterm textarea → find image/* → read Blob → canvas-compress if over budget → `clientFsWrite` → server ownership check/relay → worker write/reply → web `fsWriteResult` → `terminal.paste(" <absolute or relative path> ")` → PTY.
 
-### Milestone 1: 协议消息对 + 双端代码生成
+The original direction uses a saved worktree-relative path such as `.coflux/pastes/paste-xxx.png`, with the agent’s cwd at the worktree root. The worker returns the final path; the web must not invent it independently.
 
-proto 两文件新增 ClientFsWrite / FsWrite / FsWriteResult(daemon→server 与
-server→client 两个方向的回包都要),`cd proto && buf generate` 后 TS/Rust 产物
-零手改编译通过。Validation: `node_modules/.bin/tsc -p apps/server/tsconfig.json
---noEmit` 与 `cargo build -p coflux-worker`(零警告)-> exit 0。
+### Milestone 1: Protocol message pair and generation
 
-### Milestone 2: worker 落盘 + server 中继
+Add ClientFsWrite, FsWrite, and FsWriteResult to both proto files, including replies in daemon→server and server→client envelopes. Run `cd proto && buf generate`; TS/Rust generated code compiles without manual edits. Validation: `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` and `cargo build -p coflux-worker` → exit 0 with zero warnings.
 
-worker 处理 FsWrite:确保 `.coflux/pastes/` 与其 `*` .gitignore、写字节、7 天
-清理、防越界、错误回包;server hub.ts 新增 `clientFsWrite` case(归属校验、
-在线校验、pendingRelays、超时)。Validation: `pnpm -C tests test` 全绿(含新增
-黑盒用例:上传字节与落盘内容一致、`..` 越界路径被拒、非归属 workspace 被拒)。
+### Milestone 2: Worker writes and server relay
 
-### Milestone 3: web 端粘贴拦截 + 压缩 + 注入
+The worker handles FsWrite, creates `.coflux/pastes/` and its `*` .gitignore, writes bytes, cleans files older than seven days, prevents traversal, and reports errors. Add the hub.ts `clientFsWrite` branch with ownership/online checks, pendingRelays, and timeout handling. Validation: `pnpm -C tests test` passes, including byte-for-byte upload verification, rejection of `..` escape, and rejection of another account’s workspace.
 
-terminal-pane 拦截 image 粘贴(文本粘贴行为不变),store 增 `sendFsWrite`
-pending-map,超预算 canvas 压缩,成功 `terminal.paste`,失败 `writeSystem`;
-非 owned 时 writeSystem 提示且不上传。Validation: `node_modules/.bin/tsc -b
-apps/web/tsconfig.json` -> exit 0。
+### Milestone 3: Browser interception, compression, and injection
+
+Intercept image paste in terminal-pane without affecting text paste. Add store `sendFsWrite` and its pending map, canvas compression, successful `terminal.paste`, and failure `writeSystem`. Without ownership, show a notice and do not upload. Validation: `node_modules/.bin/tsc -b apps/web/tsconfig.json` → exit 0.
 
 ## Landmines
 
-- **`safe_resolve` 对不存在的目标返回 None**(`crates/worker/src/ops.rs:63-74`
-  canonicalize 目标本身):写新文件不能直接复用它——需先确保/解析**父目录**
-  (canonicalize 到已存在的 worktree root,再逐段拼接并校验不越界),否则永远写不进去。
-  文件名段须拒绝 `/` 与 `..`。
-- **回包 oneof 两跳都要加**:`DaemonToServer.payload` 与 `ServerToClient.payload`
-  各自的下一个空闲 tag 不同(见 `daemon.proto:80-103`、`client.proto:259-283`),
-  照抄 fsReadResult 在两个信封里的挂法,漏一跳则 server 收到回包无处转发。
-- **AGENTS.md 与现状漂移**:AGENTS 写"sqlite 持久化",实际已迁 Postgres(plan 002);
-  本机跑黑盒测试须 `COFLUX_TEST_PG_URL` 指向 **54322 直连口**(5432 是 supavisor,
-  会报 tenant 错)。
-- **黑盒测试端口独占**:`tests/src/*.test.mjs` 每文件独占端口,新增用例需选未占用
-  端口(见 AGENTS.md 测试 harness 节)。
-- **worker WS 客户端未显式配 max message size**(`crates/worker/src/main.rs:413`
-  connect_async 默认配置,tungstenite 默认 64MiB):4MB 级消息可过,不要顺手加限。
+- **`safe_resolve` returns None for nonexistent targets** because it canonicalizes the target itself (`crates/worker/src/ops.rs:63-74`). New files require resolving/creating the **parent directory** first: canonicalize the existing worktree root, append segments, and verify containment. Reject `/` and `..` in the filename segment.
+- **Add replies to both oneof envelopes:** `DaemonToServer.payload` and `ServerToClient.payload` have different next available tags (`daemon.proto:80-103`, `client.proto:259-283`). Follow fsReadResult; omitting either hop leaves a reply the server cannot forward.
+- **AGENTS.md is stale:** it still says SQLite, but plan 002 migrated to Postgres. Local black-box tests require `COFLUX_TEST_PG_URL` at direct port **54322**; 5432 is Supavisor and reports a tenant error.
+- **Test files own exclusive ports.** Choose an unused port for a new `tests/src/*.test.mjs` file, following the AGENTS.md harness section.
+- **The worker has no explicit WS message-size override:** `connect_async` at `crates/worker/src/main.rs:413` uses tungstenite’s 64MiB default, which already accepts 4MB messages. Do not raise it without need.
 
 ## Scope
 
 In scope:
-- `proto/coflux/v1/client.proto`、`proto/coflux/v1/daemon.proto` 及 buf 生成产物
-  (`packages/protocol/src/gen/`、`crates/protocol/src/gen/`、`proto/gen/swift/`)
-- `apps/server/src/hub.ts`(新 case;如需常量则 `apps/server/src/config.ts`)
-- `crates/worker/src/main.rs`、`crates/worker/src/ops.rs`
-- `apps/web/src/client/store.ts`、`apps/web/src/components/workbench/terminal-pane.tsx`、
-  `apps/web/src/components/workbench/workspace-terminal.tsx`(传递 workspaceId 等接线)
-- `tests/src/`(新增黑盒用例)
+- `proto/coflux/v1/client.proto`, `proto/coflux/v1/daemon.proto` and buf-generated artifacts (`packages/protocol/src/gen/`, `crates/protocol/src/gen/`, `proto/gen/swift/`)
+- `apps/server/src/hub.ts` (new case; if constant is required, `apps/server/src/config.ts`)
+- `crates/worker/src/main.rs`, `crates/worker/src/ops.rs`
+- `apps/web/src/client/store.ts`, `apps/web/src/components/workbench/terminal-pane.tsx`, `apps/web/src/components/workbench/workspace-terminal.tsx` (pass workspaceId and other wiring)
+
+- `tests/src/` (new black-box test case)
 
 Out of scope:
-- 拖拽文件上传、通用文件(非图片)上传 —— 同管道可后续复用,本计划不做。
-- `COFLUX_MAX_PAYLOAD` 默认值调整 —— 用户已否决提限。
-- `crates/supervisor`、`packages/cli` —— 数据面不经它们改动。
-- server 侧持久化 —— 图片不进 DB,不留元数据。
+- Drag and drop file upload, general file (non-image) upload - the same pipeline can be reused later, but this plan does not do it.
+
+- `COFLUX_MAX_PAYLOAD` default value adjustment - the user has rejected the limit increase.
+
+- `crates/supervisor`, `packages/cli` — the data plane is not modified by them.
+
+- Server-side persistence - pictures are not entered into the DB and no metadata is retained.
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| server 类型检查 | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
-| web 类型检查 | `node_modules/.bin/tsc -b apps/web/tsconfig.json` | exit 0 |
-| daemon 构建 | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0,零警告 |
-| Rust 单测 | `cargo test -p coflux-protocol` | exit 0 |
-| 黑盒集成 | `COFLUX_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:54322/postgres pnpm -C tests test` | exit 0 |
-| proto 生成 | `cd proto && buf generate`(需网络拉 remote 插件) | 产物 diff 仅新增消息 |
-| 真机贴图 (acceptance) | dev 三端起齐后 web 终端 ⌘V 贴图,agent 收到路径可读图 | 人工确认 |
+| server type check | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
+| web type checking | `node_modules/.bin/tsc -b apps/web/tsconfig.json` | exit 0 |
+| daemon build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0, zero warnings |
+| Rust unit test | `cargo test -p coflux-protocol` | exit 0 |
+| Black-box integration | `COFLUX_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:54322/postgres pnpm -C tests test` | exit 0 |
+| proto generation | `cd proto && buf generate` (requires network to pull remote plug-in) | generated-code diff only new information |
+| Manual image paste (acceptance) | After the dev three ends are connected, the web terminal ⌘V image paste, the agent receives the path readable image | Manual confirmation |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] web 终端 ⌘V 图片:限内原样落盘 `.coflux/pastes/`,路径注入 PTY;文本粘贴行为不变。
-- [ ] 超预算图片被压缩到限内后上传成功(可用大图人工验证或单测覆盖压缩函数)。
-- [ ] 越界路径/非归属 workspace/daemon 离线/非 owned 四类失败路径都有明确报错,无静默。
-- [ ] 黑盒测试覆盖上传一致性与越界拒绝,断言有意义。
+- [ ] web terminal ⌘V picture: Place `.coflux/pastes/` as it is within the limit, and inject PTY into the path; the text pasting behavior remains unchanged.
+
+- [ ] Over-budget images are uploaded successfully after being compressed within the limit (you can manually verify the large image or test the compression function in a unit test).
+
+- [ ] Out-of-bounds paths/non-owned workspace/daemon offline/non-owned. The four types of failed paths have clear errors and no silence.
+
+- [ ] Black-box testing covers upload consistency and out-of-bounds rejection, and the assertions are meaningful.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
 - [ ] `plans/README.md` status is updated.
@@ -164,13 +117,10 @@ Out of scope:
 - A fact cited under Decisions & tradeoffs no longer holds.
 - The outcome requires out-of-scope files.
 - A validation command fails twice after one reasonable fix.
-- `buf generate` 无法运行(网络/插件不可达)且无法用仓库既有方式再生产物。
+- `buf generate` cannot be run (network/plug-in is unreachable) and the product cannot be reproduced using the existing methods of the repository.
 
 ## Maintenance notes
 
-- 贴图落远程机 `temp_dir()/coflux-pastes/`(2026-07-19 修订):agent 读图是 cwd 外
-  绝对路径,若各 CLI 的权限确认成为高频摩擦,可考虑引导用户配 allow 规则或回退
-  worktree 内方案(root 锚定写入原语仍在,回退只动 web 侧与 temp 标志)。
-- 通用文件上传/拖拽若要做,直接复用 FsWrite 管道,只改 web 侧入口。
-- 压缩预算常量(3.5MB)与 server `COFLUX_MAX_PAYLOAD` 默认 4MB 存在隐式耦合,
-  若日后调 maxPayload 需同步 web 侧常量。
+- Image paste uses remote `temp_dir()/coflux-pastes/` after the 2026-07-19 revision, so the agent reads an absolute path outside cwd. If CLI permission prompts become frequent friction, guide users to allow rules or consider the worktree fallback. The root-anchored write primitive remains; fallback changes only the web entry and temp flag.
+- General file upload and drag/drop can reuse FsWrite with a new web entry point.
+- The 3.5MB compression budget is coupled to server `COFLUX_MAX_PAYLOAD` default 4MB. Keep them synchronized if maxPayload changes.

@@ -1,4 +1,4 @@
-# Plan 020: 从 Git remote 推导 project 名称
+# Plan 020: Deriving project name from Git remote
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -21,49 +21,49 @@
 
 ## Requirement
 
-当前 project 导入时，Web 不传 `name`，server 因而直接取用户输入路径的最后一段；这既无法表达远端 namespace，也会在用户从仓库子目录发起导入时得到错误名称。完成后，未显式命名的 project 优先使用 Git remote 推导出的完整仓库标识，例如本仓库的 `https://github.com/myWsq/coflux.git` 应得到 `myWsq/coflux`。
+The web import flow omits name, so the server uses the final segment of the entered path. This loses remote namespaces and misnames imports started in repository subdirectories. For imports without an explicit name, derive the complete Git remote identity: this repository’s `https://github.com/myWsq/coflux.git` should produce `myWsq/coflux`.
 
-最终优先级必须是：请求中非空的显式 `name` > `origin` 中可解析的仓库标识 > 其他 remote 中首个可解析的仓库标识 > Git 识别出的仓库根目录 basename。无 remote、remote URL 不受支持、老 worker 未返回新字段等情况均不得导致导入失败。
+Naming priority: nonblank explicit `name` → resolvable origin identity → first resolvable identity from other remotes → basename of the canonical repository root returned by Git. Missing/unsupported remotes and old workers without the new field must not fail import.
 
 ## Decisions & tradeoffs
 
-- **显式名称保留最高优先级**：`projectImport.name` 经 trim 后非空即作为用户覆盖，不被 remote 替换。Rejected: remote 永远覆盖显式名称 —— 会破坏协议已有的手动命名能力。Based on: `proto/coflux/v1/client.proto:58-63` 已把 name 定义为 optional；`apps/server/src/hub.ts:725` 当前明确优先采用非空显式 name。
-- **remote 优先级为 origin，再按 Git 返回顺序尝试其他 remote**：第一个成功解析的标识胜出；remote 名称本身不参与结果。Rejected: 只读 origin —— 对没有 origin 但有其他有效 remote 的仓库回退过早；upstream 优先 —— 不符合用户确认的日常 clone 语义。
-- **保留完整 namespace 路径并移除末尾 `.git`**：GitHub `owner/repo.git` 得到 `owner/repo`；GitLab `group/subgroup/repo.git` 得到 `group/subgroup/repo`。Rejected: 只留末两段或首层加项目 —— 多层 namespace 会丢失身份信息。
-- **remote 读取与名称推导发生在 worker，server 只执行优先级与持久化**：daemon 所在机器才拥有仓库和 Git 配置，worker 应仅回传推导后的名称候选，不把完整 remote URL 暴露给中心 server。Rejected: server 自行读取或解析 remote —— server 无法访问设备文件系统；把原始 URL 上传后再解析 —— 不必要地扩大敏感信息传输。Based on: `crates/worker/src/git.rs:53-71` 是现有仓库校验真相点，`crates/worker/src/main.rs:675-680` 将结果发回 server。
-- **协议新增字段必须可选并保持滚动兼容**：新 server 收到老 worker 缺失的候选名称时回退仓库根目录；老 server 会忽略新 worker 的未知 protobuf 字段。Rejected: 把名称设为必填或缺失时报错 —— 会破坏 worker 热升级/版本错位期间的项目导入。Based on: `proto/coflux/v1/daemon.proto:45-52` 的 `ProjectValidated` 是 worker → server 边界；项目支持 worker 频繁热升级。
-- **目录回退取校验后的仓库根目录**：从仓库子目录导入也使用 repo root basename。Rejected: 保持取原始输入路径 —— 当前 `apps/server/src/hub.ts:725` 会把子目录误当项目名，而 `crates/worker/src/git.rs:59-63` 已拿到 `git rev-parse --show-toplevel` 的根目录。
-- **支持常见网络 remote 形态，解析失败即跳过**（decided while planning）：覆盖 HTTPS/HTTP/SSH/git URL 与 SCP-like `git@host:namespace/project.git`，保留多层路径；本地路径、`file:` remote、空路径或不能安全形成 namespace/project 的值视为不可解析并继续回退。Rejected: 为所有 Git 允许的奇异 remote 语法强行产出名称 —— 容易把本机绝对路径或凭据误当 project 名。
+- **Explicit names always win.** A trimmed-nonempty projectImport.name is the user override and must not be replaced by remote identity. Evidence: `proto/coflux/v1/client.proto:58-63` already makes name optional, and `apps/server/src/hub.ts:725` already prioritizes nonempty explicit names.
+- **Try origin first, then other remotes in Git’s returned order.** The first resolvable identity wins; remote names do not appear in the result. Origin-only would unnecessarily fall back when another remote is valid; upstream-first conflicts with the user’s normal clone semantics.
+- **Preserve the full namespace path and remove trailing `.git`.** GitHub owner/repo.git becomes owner/repo; GitLab group/subgroup/repo.git becomes group/subgroup/repo. Keeping only two segments or the first namespace plus project loses nested identity.
+- **Read and parse remotes in the worker; the server only selects priority and persists the result.** Only the daemon machine has the repository/Git config. Return the derived candidate, never the complete remote URL. Server-side filesystem access is unavailable, and uploading URLs unnecessarily spreads sensitive data. Evidence: `crates/worker/src/git.rs:53-71` validates repositories; `crates/worker/src/main.rs:675-680` returns results.
+- **Keep the new protocol field optional for rolling compatibility.** New servers fall back to the repository root when old workers omit it; old servers ignore the unknown field. Required candidates would break imports during worker hot upgrades/version skew. Evidence: worker-to-server `ProjectValidated` in `proto/coflux/v1/daemon.proto:45-52`.
+- **Use the verified repository root for the directory fallback.** Imports from subdirectories must still use the root basename. The current input-path fallback at `apps/server/src/hub.ts:725` is wrong; `crates/worker/src/git.rs:59-63` already obtains `git rev-parse --show-toplevel`.
+- **Support common network remotes and skip unparseable values (decided during planning).** Handle HTTPS/HTTP/SSH/git URLs and SCP-like `git@host:namespace/project.git`, including nested namespaces. Treat local paths, file: remotes, empty paths, and unsafe namespace/project values as unresolved and continue fallback. Supporting every exotic Git syntax risks mistaking local paths or credentials for names.
 
 ## Direction
 
-协议真相源增加 worker 可选返回的 remote 仓库名称候选，并同步所有受版本控制的生成绑定。worker 在现有仓库校验期间读取 remote、按既定优先级解析候选；server 将显式 name 保留到异步校验完成，再按契约选择最终 project name。测试同时覆盖纯解析边界、protobuf 往返和真实进程黑盒导入行为。
+Add an optional worker-derived remote-name candidate to the proto source of truth and regenerate all checked-in bindings. Read/parse remotes during existing repository validation. Preserve the explicit name until asynchronous validation completes, then apply the naming contract. Cover parser boundaries, protobuf round trips, and real-process imports.
 
-### Milestone 1: 协议表达可选的 remote 名称候选
+### Milestone 1: Protocol expression optional remote name candidate
 
-worker → server 的仓库校验结果能够携带可选候选名，TS、Rust、Swift 生成绑定与 proto 真相源一致，Rust wire round-trip 覆盖有值和缺失两种情况。
+The repository verification result of worker → server can carry optional candidate names. The generated bindings of TS, Rust and Swift are consistent with the proto source of truth. The Rust wire round-trip covers both the value and missing situations.
 
-验证：`cd proto && buf lint && buf generate && git diff --exit-code -- ../packages/protocol/src/gen ../crates/protocol/src/gen gen/swift` -> exit 0；`cargo test -p coflux-protocol` -> exit 0。
+Verification: `cd proto && buf lint && buf generate && git diff --exit-code -- ../packages/protocol/src/gen ../crates/protocol/src/gen gen/swift`→ exit 0; `cargo test -p coflux-protocol`→ exit 0.
 
-### Milestone 2: worker 稳健推导 remote 仓库标识
+### Milestone 2: Worker robustly deduces remote repository identity
 
-有效仓库校验结果可按 origin 优先规则返回完整 namespace/project；缺失或不支持的 remote 不影响仓库校验成功。解析测试覆盖 HTTPS、SSH URL、SCP-like、多层 namespace、`.git`/末尾斜杠、无效及本地路径，并验证 remote 回退顺序。
+Valid repository verification results can return the complete namespace/project according to origin priority rules; missing or unsupported remote does not affect the success of repository verification. Parsing tests cover HTTPS, SSH URLs, SCP-like, multi-layer namespaces, `.git`/ trailing slash, invalid and local paths, and verify remote fallback order.
 
-验证：`cargo test -p coflux-worker` -> exit 0；`cargo build -p coflux-supervisor -p coflux-worker` -> exit 0 且零警告。
+Verification: `cargo test -p coflux-worker`→ exit 0; `cargo build -p coflux-supervisor -p coflux-worker`→ exit 0 with zero warnings.
 
-### Milestone 3: server 应用最终命名优先级并完成黑盒验收
+### Milestone 3: server applies final naming priority and completes black-box acceptance
 
-server 以显式 name、worker 候选、规范 repo root basename 的顺序落库。真实 stack 导入带 origin 的仓库后观察到 namespace/project 名；显式 name 仍覆盖 remote；无有效 remote 时回退 repo root 目录名。
+The server persists the project name in the order of explicit name, worker candidate, and canonical repo root basename. The namespace/project name is observed after the real stack imports the repository with origin; the explicit name still overrides the remote candidate; when there is no valid remote, it falls back to the repo root directory name.
 
-验证：`node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` -> exit 0；最终黑盒套件见 Commands 的 acceptance 项。
+Verification: `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit`→ exit 0; see the acceptance item of Commands for the final black-box package.
 
 ## Landmines
 
-- `OpData` 当前把 project import 的名称定义为必填 `string`，并在发出 daemon 校验前就用输入路径确定（`apps/server/src/hub.ts:125-127,725-730`）；要保留“是否显式命名”的语义，不能继续把目录 fallback 提前混入同一字符串。
-- `ProjectValidated` 是 protobuf 跨语言边界（`proto/coflux/v1/daemon.proto:45-52`）；按仓库纪律必须修改 proto 真相源并运行 `buf generate`，不能手改任一生成文件。CI 会用生成后零 diff 拦截漂移（`.github/workflows/ci.yml:39-51`）。
-- remote URL 可能含用户名、token 或主机信息；日志、错误和协议中只允许出现解析后的 namespace/project，不得回传或打印原始 URL。
-- Git 命令失败、remote 缺失或单个 remote 不可解析，都只是“没有候选名称”，不是“无效仓库”；不得改变现有 `rev-parse --show-toplevel` 成功判定。
-- 黑盒 harness 会直接构建并运行 Rust supervisor/worker；测试必须使用临时仓库和本地 Git 配置，不访问外网，也不得依赖本机全局 Git remote。
+- `OpData` currently requires a string name and fills it from the input path before daemon validation (`apps/server/src/hub.ts:125-127,725-730`). Keep explicit-name presence distinct until validation finishes instead of prematurely mixing in a directory fallback.
+- `ProjectValidated` is a protobuf that crosses language boundaries (`proto/coflux/v1/daemon.proto:45-52`); according to repository discipline, you must modify the proto source of truth and run `buf generate`, and you cannot manually modify any generated file. CI will intercept drift with post-generation zero diff (`.github/workflows/ci.yml:39-51`).
+- The remote URL may contain username, token or host information; only the parsed namespace/project is allowed to appear in logs, errors and protocols, and the original URL is not allowed to be returned or printed.
+- Git-command failure, missing remotes, and parse failures mean no candidate, not an invalid repository. Preserve the existing success check based on `rev-parse --show-toplevel`.
+- The black-box harness will directly build and run the Rust supervisor/worker; the test must use the temporary repository and local Git configuration, do not access the external network, and must not rely on the local global Git remote.
 
 ## Scope
 
@@ -79,10 +79,10 @@ In scope:
 - `tests/src/lifecycle.test.mjs`
 
 Out of scope:
-- `proto/coflux/v1/client.proto` 与 Web 导入 UI —— 已有 optional 显式 name，Web 无需新增输入框。
-- project 重命名能力 —— 本需求只改变导入时默认名称。
-- 已存在 project 的数据迁移或批量改名 —— 新规则只作用于之后的导入。
-- 把 Git host 加入名称 —— 目标格式是 namespace/project，不是 host/namespace/project。
+- `proto/coflux/v1/client.proto` and Web import UI - there is already an optional explicit name, and there is no need to add a new input box for Web.
+- Project renaming ability - This requirement only changes the default name when importing.
+- Data migration or batch rename of existing projects - the new rules only apply to subsequent imports.
+- Add Git host to the name - the target format is namespace/project, not host/namespace/project.
 
 ## Commands
 
@@ -92,29 +92,29 @@ Out of scope:
 | Rust protocol tests | `cargo test -p coflux-protocol` | exit 0 |
 | Worker unit tests | `cargo test -p coflux-worker` | exit 0 |
 | Server typecheck | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
-| Daemon build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0，零警告 |
-| Full black-box suite (acceptance) | `pnpm -C tests test` | exit 0；项目名称优先级由真实 server + Rust daemon 验收 |
+| Daemon build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0, zero warnings |
+| Full black-box suite (acceptance) | `pnpm -C tests test` | exit 0; project name priority is accepted by the real server + Rust daemon |
 
 ## Done criteria
 
-- [ ] 本仓库 remote `https://github.com/myWsq/coflux.git` 按同一解析规则得到 `myWsq/coflux`。
-- [ ] 非空显式 name 覆盖所有 remote 候选。
-- [ ] 未显式命名时，origin 优先；origin 缺失/不可解析后尝试其他 remote 的首个可解析值。
-- [ ] GitLab 多层 namespace 完整保留，常见 HTTPS/SSH/SCP-like URL 均有测试。
-- [ ] 无有效 remote 候选或老 worker 缺字段时，使用规范 repo root basename，项目导入仍成功。
-- [ ] 原始 remote URL 不进入 worker → server 消息、日志或用户错误。
-- [ ] proto 与三端生成绑定一致，相关单测、类型检查、构建和全量黑盒测试全部通过。
-- [ ] 实现遵循 Decisions & tradeoffs 的每项约定，未改动 scope 外文件。
-- [ ] `plans/README.md` 状态已更新。
+- [ ] This repository's remote `https://github.com/myWsq/coflux.git` obtains `myWsq/coflux` according to the same parsing rules.
+- [ ] Non-empty explicit name covers all remote candidates.
+- [ ] When not explicitly named, origin takes precedence; if origin is missing/unresolvable, the first resolvable value of other remotes is tried.
+- [ ] GitLab multi-layer namespace is fully retained, and common HTTPS/SSH/SCP-like URLs are tested.
+- [ ] When there is no valid remote candidate or the old worker has missing fields, use the standard repo root basename and the project import will still be successful.
+- [ ] Original remote URL does not enter worker → server messages, logs or user errors.
+- [ ] proto is consistent with the generated bindings for all three languages, and all related unit tests, type checks, construction and full black-box tests have passed.
+- [ ] Implementation follows every convention of Decisions & tradeoffs, without changing files outside scope.
+- [ ] `plans/README.md` status updated.
 
 ## STOP conditions
 
-- Decisions & tradeoffs 引用的协议或导入链路事实已不成立。
-- 正确实现需要修改 scope 外文件。
-- 需要把原始 remote URL 发送到 server 才能完成推导。
-- 任一验证命令在一次合理修复后连续失败两次。
+- Decisions & tradeoffs refer to protocol or import link facts that are no longer established.
+- Correct implementation requires modifying files outside the scope.
+- The original remote URL needs to be sent to the server to complete the derivation.
+- Any verification command fails twice in a row after a reasonable fix.
 
 ## Maintenance notes
 
-- 将来若要显示 host，应新增独立字段或显示策略，不要改变这里的稳定 project name 语义。
-- 新增 remote URL 形态时，应优先扩充 worker 的纯解析测试，并保持“解析失败只是回退”原则。
+- If you want to display the host in the future, you should add a separate field or display strategy, and do not change the stable project name semantics here.
+- When adding a new remote URL form, priority should be given to expanding the pure parsing test of the worker, and maintaining the principle of "only fallback if parsing fails".

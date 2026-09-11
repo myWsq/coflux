@@ -1,96 +1,105 @@
 # AGENTS.md
 
-给在本仓库工作的 agent / 贡献者的导引。注释、文档、commit message 用中文（与现有风格一致）。
+Guidance for agents and contributors working in this repository.
 
-## 这是什么
+## Language policy
 
-coflux：可跑在任意节点上的 **daemon**，本地起 PTY、驱动 Agent（claude/codex CLI），主动外连**中心服务器**；**client**（Electron 桌面 app）连服务器即可触达任意 daemon。模型类 Tailscale（账号 → 设备 → 项目 → 工作区 → 任务 → 会话）。
+- Write all project documentation in English, including this `AGENTS.md`, other contributor and agent instructions, READMEs, `docs/`, design documents, and implementation plans.
+- Write release titles and release notes in English, both in the repository and on GitHub Releases.
+- Write commit subjects and bodies in English. Preserve technical identifiers and attribution trailers.
+- Write new or updated code comments in English.
+- Preserve literal protocol values, commands, paths, and intentional localization or non-English test examples when documenting them.
+- Conversation with the user follows their preferred language; the repository language policy does not require English conversation.
 
-- `apps/server`（TS）：账号/设备认证 + 编排路由 + Postgres 持久化。
-- `apps/desktop`（TS）：**唯一前端、默认迭代对象**（plan 106）。Electron 主进程（`src/main`）+ sandbox preload（`src/preload`）+ React 19 / xterm 渲染层（`src/renderer`，`@` 别名指向它）。桌面能力经 preload 桥接 `window.cofluxDesktop` 提供（类型在 `src/shared/desktop-bridge.ts`），渲染层假定桥接必定存在、没有浏览器分支；主进程改写 WebSocket 握手 Origin 为 `https://desktop.coflux.dev`，server/daemon 校验零放宽。会话 token 经 safeStorage 加密落 userData，窗口 bounds 记忆，主进程日志在 `~/Library/Logs/Coflux/main.log`。桌面、CLI 与内核统一走 `v*` tag（签名公证 + GitHub Release，更新清单推 `desktop-updates` 分支），按控制面协议版本准入（plan 105），不与 prod 部署绑定。线上 `app.coflux.dev` / `m.coflux.dev` 是**冻结**的分割前构建（源码在 git 历史 `ce7026b`），只剩历史工作台、不再迭代，server 不再生成指向它们的链接；新机器授权 / 端口预览门禁两张页面由 `apps/server` 直出（plan 107，`apps/server/src/auth-pages.ts`），挂在 `COFLUX_PUBLIC_URL` 下。原生 Swift 版 `apps/macos` 同样只在历史里。
-- `packages/{protocol,core,client}`（TS）：共享的线协议类型、日志、协议 client + store（client 无 React、不依赖 Electron，是唯一的 TS client 真相源；`ClientKind` 里的 `"web"` 是为冻结的线上 web 保留的 server 契约）。
-- `integrations/claude-plugin`：Claude Code 插件的**交付目录**（hooks + skill + manifest），由 `myWsq/plugins` 市场（维护仓库 `myWsq/plugins-builder`）按 commit SHA 整目录收集发布，改完要提升 `.claude-plugin/plugin.json` 的 version 并在 builder 里更新 SHA。SKILL 的唯一源是 `packages/cli/skills/coflux/SKILL.md`，用 `node scripts/sync-claude-plugin.mjs` 同步到这里，CI 校验两份一致。
-- `packages/cli` 与 `crates/cli`：Agent 的统一 CLI 入口；账号登录与跨工作区、跨设备操作走 `/api/client/*`，桌面内置 CLI 可经本机 broker 复用应用账号。MCP 及专用 OAuth 入口已移除。
-- `crates/{protocol,supervisor,worker}`（Rust）：**daemon，全 Rust、零 node 运行时**。
-  - `supervisor`：持 PTY(portable-pty) + scrollback + 背压；UDS server；起/管/重启 worker + 版本切换/观察期回滚。极少升级。
-  - `worker`（tokio）：连服务器(WS)/认证/重连 + git/exec/fs + 两级 resync。频繁升级（热升级只换它，PTY 在 supervisor 存活）。
-  - 详见 [docs/architecture.md](docs/architecture.md)、[docs/hot-upgrade-design.md](docs/hot-upgrade-design.md)、[docs/ROADMAP.md](docs/ROADMAP.md)。
-  - 改桌面 UI 先看 [docs/design-guidelines.md](docs/design-guidelines.md)（悬浮提示用 Tooltip 组件不用原生 title 等约定）。
+## What this project is
 
-`cofluxd` 是无界面设备宿主入口，仅负责安装、在线与内核生命周期；`coflux` 是账号与本地/远端业务操作工具。npm 的 `cofluxd` 包交付两个入口，桌面自带 Rust `coflux` 并注入终端 PATH。两者不提供旧命令转发。
+coflux runs a **daemon** on any node. The daemon hosts local PTYs, drives agents (Claude/Codex CLI), and connects outbound to a **central server**. The **client** (an Electron desktop app) connects to the server to reach any daemon. The model resembles Tailscale: account → device → project → workspace → task → session.
 
-## 常用命令
+- `apps/server` (TS): account/device authentication, orchestration and routing, and Postgres persistence.
+- `apps/desktop` (TS): **the only frontend and the default iteration target** (plan 106). It contains the Electron main process (`src/main`), sandboxed preload (`src/preload`), and React 19 / xterm renderer (`src/renderer`; the `@` alias points here). Desktop capabilities are exposed through the preload bridge, `window.cofluxDesktop` (types in `src/shared/desktop-bridge.ts`). The renderer assumes the bridge exists and has no browser fallback. The main process rewrites the WebSocket handshake Origin to `https://desktop.coflux.dev`; server/daemon validation remains strict. Session tokens are encrypted with safeStorage in userData; window bounds persist; main-process logs live at `~/Library/Logs/Coflux/main.log`. Desktop, CLI, and daemon components share `v*` release tags (signing, notarization, and GitHub Releases; update manifests are pushed to the `desktop-updates` branch). Admission uses the control-plane protocol version (plan 105), independently of production deployments. The live `app.coflux.dev` / `m.coflux.dev` sites are **frozen** builds from before the split (source at historical commit `ce7026b`), retained only as legacy workbenches. The server no longer generates links to them. Device authorization and port-preview access pages are served directly by `apps/server` (plan 107, `apps/server/src/auth-pages.ts`) under `COFLUX_PUBLIC_URL`. The native Swift `apps/macos` client also exists only in Git history.
+- `packages/{protocol,core,client}` (TS): shared wire-protocol types, logging, and the protocol client/store. The client package has no React or Electron dependency and is the sole TS client source of truth. The `"web"` value in `ClientKind` remains part of the server contract for the frozen web client.
+- `integrations/claude-plugin`: the Claude Code plugin **delivery directory** (hooks, skill, and manifest). The `myWsq/plugins` marketplace (maintained in `myWsq/plugins-builder`) publishes the entire directory pinned by commit SHA. After changes, bump `.claude-plugin/plugin.json` and update the SHA in the builder. The skill's sole source is `packages/cli/skills/coflux/SKILL.md`; synchronize it here with `node scripts/sync-claude-plugin.mjs`. CI verifies that both copies match.
+- `packages/cli` and `crates/cli`: the unified CLI entry point for agents. Account login and operations across workspaces/devices use `/api/client/*`. The desktop-bundled CLI can reuse the app account through the local broker. MCP and its dedicated OAuth entry points have been removed.
+- `crates/{protocol,supervisor,worker}` (Rust): the **daemon, entirely Rust, with no Node runtime**.
+  - `supervisor`: owns PTYs (portable-pty), scrollback, and backpressure; serves UDS; starts, manages, and restarts the worker; switches versions and rolls back during the observation period. Upgraded rarely.
+  - `worker` (tokio): server WS connection, authentication and reconnection, git/exec/fs, and two-level resync. Upgraded frequently; hot upgrades replace only the worker, leaving PTYs alive in the supervisor.
+  - See [docs/architecture.md](docs/architecture.md), [docs/hot-upgrade-design.md](docs/hot-upgrade-design.md), and [docs/ROADMAP.md](docs/ROADMAP.md).
+  - Before changing desktop UI, read [docs/design-guidelines.md](docs/design-guidelines.md), including the requirement to use the Tooltip component instead of native `title` tooltips.
 
-```sh
-pnpm install                       # TS 依赖
-pnpm -C tests test                 # 黑盒集成测试（pretest 自动 cargo build daemon 二进制）
-cargo test -p coflux-protocol      # Rust 单元测试（帧 codec / serde 线格式）
-cargo build -p coflux-supervisor -p coflux-worker   # 构建 daemon 二进制
-node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit   # server 类型检查
-pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test && pnpm -C apps/desktop build   # 桌面类型检查（主进程 + 渲染层）/单测/构建
-pnpm -C apps/desktop dev / pack                     # 桌面 app 开发（连本机 8787）/ 出未签名 .app 冒烟
-pnpm dev:pg                                         # 本地独立 Postgres（compose，127.0.0.1:5432）
-pnpm dev:server / dev:desktop / dev:daemon          # 本地起三端（`pnpm dev` = server + desktop 并行）
-node packages/cli/cofluxd.mjs up --server ... --bin-dir target/release   # 用 cofluxd CLI 装/起 daemon（用户侧：npm i -g cofluxd && cofluxd up）
-git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编译 + 签名 worker + GitHub Release（见 docs/RELEASING.md）
-```
+`cofluxd` is the headless device-host entry point, responsible only for installation, connectivity, and daemon lifecycle. `coflux` provides account and local/remote business operations. The npm `cofluxd` package ships both entry points. Desktop bundles the Rust `coflux` binary and adds it to terminal PATH. Neither entry point forwards legacy commands.
 
-### 本地开发环境的坑
-
-- **本机 Postgres**：`pnpm dev:pg` 起独立实例（`compose.yaml`，`127.0.0.1:5432`）。`pnpm dev:server` 与黑盒测试默认都连 `postgres://postgres:postgres@127.0.0.1:5432/postgres`，不必再设 `DATABASE_URL` / `COFLUX_TEST_PG_URL`。不要用本机残留的 Supabase 容器（54322 / 5432 池化口）。
-- **桌面 dev 工作台「能打开但卡住连不上」= 8787 没跑**：`pnpm dev:desktop` 的主进程默认给渲染层 `ws://localhost:8787/client`（不经 vite 代理，渲染层 HMR 在 5274），dev server 不在时页面照常加载、但 WS 永远连不上。自查一条命令：`curl localhost:8787/health` 应 200。dev 实例的 userData 是 `Coflux-dev` 目录，与安装版的 token / 窗口位置互不可见。
-
-CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（tag `v*` 统一发布桌面与内核，再发布同版本 npm 包）、`desktop-release.yml`（仅由统一流程调用，负责桌面签名公证构建）。worker 产物用 ed25519 签名、supervisor 验签，密钥设置见 [docs/RELEASING.md](docs/RELEASING.md)。
-
-生产环境（三台机、域名线路、部署与回滚命令、踩过的坑）见 [docs/deployment.md](docs/deployment.md)。**动生产前先读它**：coflux.dev 下橙云与灰云并存，两台机的 Caddy 上都还压着其他项目的站点。
-
-前置：Node 22+（server 与测试工具链）、pnpm、Rust stable（`rustup`）。
-
-## 改动纪律
-
-- **改协议**：`crates/protocol`（Rust 真相侧，daemon 用）与 `packages/protocol`（TS，server/web 用）两边都要改且保持线格式一致（内部标签 `type` + camelCase；数据面是二进制帧）。黑盒测试会抓行为漂移。
-- **提交前必须绿**：相关 `tsc --noEmit` + `cargo build`（零警告）+ `pnpm -C tests test` 全过，再 commit。
-- commit message 结尾带 `Co-Authored-By: Claude ...`。
-
-## 测试 harness（重要）
-
-这是本仓库质量的核心，且**刻意做成黑盒**，所以历经"TS daemon → 全 Rust daemon"的重写，同一套测试一路验证、无需改动。新功能优先用它验收。
-
-### 形态与哲学
-
-- 位置：`tests/src/`（`harness.mjs` + `*.test.mjs`），`node --test` 按**文件**并行跑（默认 4 路，`COFLUX_TEST_CONCURRENCY=1` 退回串行便于排查；CI 用 2 路），单个文件内的用例顺序执行。全量约 11 分钟串行、并行后约 3 分钟；开发中只跑相关文件：`node --import tsx --test tests/src/<x>.test.mjs`，提交前再跑全量。并行的前提是各文件端口独占（见下），新文件用 `grep -h "PORT = " tests/src/*.test.mjs | sort -t= -k2 -n` 挑没人用的号。
-- **黑盒**：测试只通过**真实进程 + WebSocket 线协议**驱动，完全不碰应用内部实现 → 跨重构/跨语言重写有效。`harness.mjs` 里那份 pty 帧 codec 是**有意内联的纯 JS**（不 import 应用代码），就是为了不依赖被测物。
-- `startStack()` 起一套独立的 **server(TS, tsx) + daemon(Rust supervisor 二进制，supervisor 再 spawn worker 二进制)**，等 daemon 在线后返回控制句柄；`Client` 是带 `waitFor` 的测试 WS 客户端；`mkRepo()` 造临时 git 仓库。
-- daemon 默认用 `target/debug/coflux-{supervisor,worker}`（`pretest` 会 `cargo build`）；可用 `COFLUX_SUPERVISOR_BIN` / `COFLUX_WORKER_BIN` 覆盖路径。
-
-### 隔离 / 不污染本地（关键约束）
-
-每个 stack 都自带隔离，跑完即清，**绝不碰你真实环境**：
-
-- **临时 HOME**：`COFLUX_HOME` 指向 `mkdtemp` 临时目录 → 设备凭证、`worker.pid`、下载产物等全落临时目录，不碰真实 `~/.coflux`。
-- **临时 DB + 临时端口**：每个 stack 在本机测试 Postgres 中创建独立临时 database，结束时强制断开并删除；各测试文件另占独立端口（见各 `*.test.mjs` 顶部 `const PORT`，新增测试请选未占用端口）。
-- **直接 spawn 二进制，不跑安装器**：harness 直接拉起 supervisor 二进制，**从不执行 `cofluxd`/安装服务** → 不写系统目录、不注册 systemd/launchd、不动真实系统服务。
-- **进程组清理**：daemon 以 `detached` 起在自己的进程组，`stop()` 用 `kill(-pid)` 杀整组（supervisor + worker + 其 PTY 子进程），再删临时目录。
-- 调试：`COFLUX_TEST_DEBUG=1` 把 server/daemon 的 stdio 直通到终端。
-
-### 签名 + 远程下载的验收（已实现，见 `tests/src/signed-upgrade.test.mjs`）
-
-热升级"远程下载 + ed25519 验签"的验收，**头等用例是负向**：被篡改的产物（签名/sha256 不符）必须被拒、supervisor 保持当前版本。本地跑且不污染的隔离办法：
-
-- **网络**：测试内起 `127.0.0.1` 临时 HTTP server（Node `http`，随机端口）服务测试产物；`worker.upgrade.url` 指向它。零外网。
-- **密钥**：每次测试临时生成一对 ed25519（Node `crypto`，活在临时目录/内存）；公钥经 **env 注入** supervisor（`COFLUX_WORKER_PUBKEY`），覆盖二进制里 baked-in 的 prod 占位公钥。
-  - *为何 env 注入不削弱产物校验*：签名把“发布 worker 二进制”的权限与下载源/中心分开；远端无法设置本机 env，测试中的覆盖只代表本地管理员选择了另一把信任根。它不把已控制中心的攻击者降权为“无 RCE”——中心本来就能编排现有 exec/session 能力。
-  - 跨语言：ed25519 / sha256 是标准的，Node `crypto`（原始 32B 公钥 + 64B 签名）与 Rust `ed25519-dalek` / `sha2` 互通。
-- **文件系统/服务**：下载产物落临时 `COFLUX_HOME/workers/`；不跑 launcher → 不碰系统。
-
-## Docker（更强隔离 / 可复现）
-
-临时目录隔离已足够日常用；要**完全不碰宿主**或要**可复现环境**（CI、验收）时，用容器把整套（server + Rust daemon + 测试 + 临时 HTTP 产物 server）关在里面跑：
+## Common commands
 
 ```sh
-docker build -t coflux-test .                 # 构建测试环境镜像（node22 + rust + pnpm + 源码）
-docker run --rm coflux-test                    # 默认 CMD = pnpm -C tests test，全套在容器内跑
-docker run --rm coflux-test cargo test -p coflux-protocol   # 也可跑别的
+pnpm install                       # TS dependencies
+pnpm -C tests test                 # Black-box integration tests; pretest builds daemon binaries
+cargo test -p coflux-protocol      # Rust unit tests: frame codec and serde wire format
+cargo build -p coflux-supervisor -p coflux-worker   # Build daemon binaries
+node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit   # Server type checking
+pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test && pnpm -C apps/desktop build   # Desktop types, tests, and build
+pnpm -C apps/desktop dev / pack                     # Develop against local port 8787 / package an unsigned .app for smoke testing
+pnpm dev:pg                                         # Dedicated local Postgres: compose, 127.0.0.1:5432
+pnpm dev:server / dev:desktop / dev:daemon          # Start each component; pnpm dev runs server and desktop concurrently
+node packages/cli/cofluxd.mjs up --server ... --bin-dir target/release   # Install/start the daemon; users run npm i -g cofluxd && cofluxd up
+git tag v1.2.3 && git push origin v1.2.3            # Release: cross-compile, sign worker, publish GitHub Release; see docs/RELEASING.md
 ```
 
-容器内 127.0.0.1、临时目录、进程全独立，宿主的文件系统/网络/进程零改动。镜像把源码 COPY 进去构建（非挂载），故宿主工作树也不会被写入 `target/`、`node_modules/`。改了代码重建镜像即可（toolchain/依赖层有缓存）。
+### Local development pitfalls
+
+- **Local Postgres**: `pnpm dev:pg` starts a dedicated instance (`compose.yaml`, `127.0.0.1:5432`). Both `pnpm dev:server` and black-box tests default to `postgres://postgres:postgres@127.0.0.1:5432/postgres`; setting `DATABASE_URL` / `COFLUX_TEST_PG_URL` is unnecessary. Do not use leftover local Supabase containers (54322 / pooled port 5432).
+- **Desktop dev opens but never connects: port 8787 is not running.** The `pnpm dev:desktop` main process gives the renderer `ws://localhost:8787/client` directly, without the Vite proxy; renderer HMR uses 5274. The page loads without the dev server, but WS cannot connect. Check that `curl localhost:8787/health` returns 200. Dev userData uses `Coflux-dev`, separate from the installed app's tokens and window position.
+
+CI/releases: `.github/workflows/ci.yml` gates pushes and PRs; `release.yml` publishes desktop and daemon components together for `v*` tags, then publishes npm packages at the same version; `desktop-release.yml` is called only by the unified workflow and handles signed, notarized desktop builds. Worker artifacts use ed25519 signatures verified by the supervisor. Key configuration is documented in [docs/RELEASING.md](docs/RELEASING.md).
+
+For production infrastructure (three machines, domain routing, deployment and rollback commands, and known pitfalls), see [docs/deployment.md](docs/deployment.md). **Read it before touching production.** Domains under coflux.dev mix proxied and DNS-only Cloudflare records, and Caddy on two machines also serves other projects.
+
+Prerequisites: Node 22+ (server and test tooling), pnpm, and Rust stable (`rustup`).
+
+## Change discipline
+
+- **Protocol changes**: update both `crates/protocol` (Rust source of truth used by the daemon) and `packages/protocol` (TS, used by server/web). Keep wire formats identical: internally tagged `type`, camelCase, and binary data-plane frames. Black-box tests detect behavioral drift.
+- **Before committing, all checks must pass**: relevant `tsc --noEmit`, `cargo build` with zero warnings, and the complete `pnpm -C tests test` suite.
+- End commit messages with a `Co-Authored-By: Claude ...` trailer.
+
+## Test harness (important)
+
+This is the repository's core quality mechanism and is **deliberately black-box**. The same suite validated the rewrite from a TS daemon to an entirely Rust daemon without modification. Prefer it for accepting new functionality.
+
+### Structure and philosophy
+
+- Location: `tests/src/` (`harness.mjs` and `*.test.mjs`). `node --test` runs **files** concurrently (four by default; `COFLUX_TEST_CONCURRENCY=1` enables serial troubleshooting; CI uses two). Tests within each file run sequentially. The full suite takes roughly 11 minutes serially or 3 minutes concurrently. During development, run relevant files with `node --import tsx --test tests/src/<x>.test.mjs`; run the full suite before committing. Parallel execution requires exclusive ports per file. Choose an unused port for a new file using `grep -h "PORT = " tests/src/*.test.mjs | sort -t= -k2 -n`.
+- **Black-box**: tests drive **real processes through the WebSocket wire protocol**, never application internals, so they survive refactoring and language rewrites. The PTY frame codec in `harness.mjs` is **intentionally inline pure JS**, importing no application code, to remain independent of the system under test.
+- `startStack()` launches an independent **TS server (tsx) and Rust supervisor daemon**, which spawns the Rust worker. It waits for the daemon to come online before returning control handles. `Client` is a test WS client with `waitFor`; `mkRepo()` creates temporary Git repositories.
+- Default daemon binaries: `target/debug/coflux-{supervisor,worker}` (built by `pretest`). Override them with `COFLUX_SUPERVISOR_BIN` / `COFLUX_WORKER_BIN`.
+
+### Isolation: keep the local environment clean
+
+Each stack supplies its own isolation and cleans up afterward, **without touching the real environment**:
+
+- **Temporary HOME**: `COFLUX_HOME` points to an `mkdtemp` directory. Device credentials, `worker.pid`, downloads, and other files stay there, never in the real `~/.coflux`.
+- **Temporary database and ports**: each stack creates a dedicated temporary database in local test Postgres, forcibly disconnects clients, and drops it on shutdown. Each test file also owns an exclusive port (`const PORT` near the top of each `*.test.mjs`); choose an unused port for new tests.
+- **Spawn binaries directly; never run the installer**: the harness starts the supervisor directly and **never runs `cofluxd` or installs services**. It writes no system directories, registers no systemd/launchd jobs, and leaves real services untouched.
+- **Process-group cleanup**: the daemon starts with `detached` in its own process group. `stop()` uses `kill(-pid)` to terminate the entire group (supervisor, worker, and PTY children), then deletes temporary directories.
+- Debugging: `COFLUX_TEST_DEBUG=1` forwards server/daemon stdio to the terminal.
+
+### Signature and remote-download acceptance tests
+
+Implemented in `tests/src/signed-upgrade.test.mjs`. For hot upgrades involving remote downloads and ed25519 verification, **negative cases are first-class**: tampered artifacts (signature or SHA-256 mismatch) must be rejected while the supervisor retains the current version. Local isolation works as follows:
+
+- **Network**: tests start a temporary HTTP server on `127.0.0.1` (Node `http`, random port) to serve artifacts. `worker.upgrade.url` points to it. No external network is used.
+- **Keys**: each test generates a temporary ed25519 key pair with Node `crypto`, held in memory/temporary storage. The supervisor receives the public key **through an environment variable**, `COFLUX_WORKER_PUBKEY`, overriding the production placeholder key baked into the binary.
+  - *Why environment injection does not weaken artifact validation*: signing separates permission to publish worker binaries from the download source and central server. A remote party cannot set the local environment; the test override represents a local administrator choosing a different trust root. This does not turn a compromised central server into an attacker without RCE: the center can already orchestrate existing exec/session capabilities.
+  - Cross-language interoperability: ed25519 and SHA-256 are standards. Node `crypto` (raw 32-byte public key and 64-byte signature) interoperates with Rust `ed25519-dalek` / `sha2`.
+- **Filesystem/services**: downloads stay under temporary `COFLUX_HOME/workers/`. No launcher runs, so the system remains untouched.
+
+## Docker: stronger isolation and reproducibility
+
+Temporary-directory isolation is sufficient for everyday work. For **no host interaction from the test stack** or a **reproducible environment** (CI/acceptance), run the entire stack—server, Rust daemon, tests, and temporary artifact HTTP server—inside a container:
+
+```sh
+docker build -t coflux-test .                 # Build test image: Node 22, Rust, pnpm, and source
+docker run --rm coflux-test                    # Default CMD: pnpm -C tests test; full suite inside the container
+docker run --rm coflux-test cargo test -p coflux-protocol   # Other commands also work
+```
+
+The container's loopback network, temporary directories, and processes are isolated from the host filesystem, network, and processes. Source is copied into the image rather than bind-mounted, so the host checkout receives no writes to `target/` or `node_modules/`. Rebuild after changing source; toolchain and dependency layers are cached.

@@ -1,6 +1,6 @@
-# 实施方案
+# Implementation plans
 
-| 方案 | 状态 | 执行 | 依赖 |
+| Plan | Status | Execution | Dependencies |
 | --- | --- | --- | --- |
-| [统一桌面生命周期与设备接入](20260912-desktop-runtime-lifecycle.md) | DONE：实施、实机验收与补修完成 | self | 无 |
-| [统一产品版本与发布入口](20260912-unified-release-version.md) | IN_PROGRESS | self | 桌面生命周期方案 |
+| [Unified desktop lifecycle and device onboarding](20260912-desktop-runtime-lifecycle.md) | DONE: implementation, real-machine acceptance, and follow-up fixes complete | self | None |
+| [Unified product version and release entry point](20260912-unified-release-version.md) | IN_PROGRESS | self | Desktop lifecycle plan |

@@ -1,4 +1,4 @@
-# Plan 070: 对讲蒙层微信式三件套——半圆底座 + 贴弧肩圆按钮
+# Plan 070: WeChat-style dictation overlay with an arched base and two round shoulder buttons
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -14,109 +14,59 @@
 - Priority: P2
 - Effort: S
 - Risk: LOW
-- Depends on: none（迭代 068/069，回答 068 遗留的"要不要画弧"）
+- Depends on: none (iterates on 068/069 and answers 068's unresolved arc question)
 - Category: feature
 - Execution: subagent sonnet
 - Planned at: `9538a03`, 2026-08-03
 
 ## Requirement
 
-068 定案后对讲蒙层只剩两颗贴屏幕左右边缘、凭空悬浮的 112×52 胶囊——用户观感是
-"突然的两个按钮"，没有视觉锚点。068 的 executor 当时留了问题待拍板（见
-plans/README.md 068 行：微信弧感来自三颗不等高按钮，中间那颗被砍后未画弧）。
-用户 2026-08-03 拍板：照微信"按住说话"操作台补齐三件套——
+After plan 068, the dictation overlay has two 112×52 capsules floating at the left and right screen edges with no visual anchor. The user described them as “two buttons appearing out of nowhere.” The 068 executor left the arc unresolved (see its plans/README.md entry): WeChat's arc appeared to come from three buttons at different heights, but the middle button had been removed. On 2026-08-03 the user chose three visual elements modeled on WeChat's hold-to-talk controls:
 
-1. **半圆底座**：屏幕底部全宽、向上凸的大弧形拱顶（微信观感是超宽弧，非严格
-   半圆；内放声波/麦克风图标）。纯视觉锚点：进行中手指处于"原地"（未滑入任何
-   按钮）时底座整体高亮，提示语（"松开确认"等）悬在拱顶上方。
-2. **两颗圆形按钮**：贴底座弧肩左右（不再贴屏幕边缘），左 ✕ 取消 / 右 ↑ 发送。
-   图标在圆内，文字标签悬在圆上方（不再塞进按钮里）。进行中为低对比角标圆，
-   手指滑入变大高亮；确认态原位原形变实体可点（右主色实底 / 左玻璃 ✕），
-   底座保留作视觉锚。
-3. **转写气泡**：居中定格照旧，不动。
+1. **Arched base**: a full-width, upward-bulging arch at the screen bottom. WeChat uses a very wide arc rather than a strict semicircle; place a waveform/microphone icon inside. This is purely a visual anchor. While the finger stays in place without entering a button, highlight the whole base and position the instruction, such as “Release to confirm,” above its crest.
+2. **Two circular buttons**: cancel ✕ at the left shoulder and send ↑ at the right shoulder of the arch, inset from the screen edges. Put the icons inside the circles and the labels above them. During listening, use low-contrast circular markers that enlarge and highlight when entered. In confirmation, keep their position and shape but make them tappable controls: a solid primary-colored send button and a glass cancel button. Retain the base as an anchor.
+3. **Transcription bubble**: keep the existing centered, stationary bubble.
 
-视觉参考（微信原图，Mobbin）：
-- 滑到取消（左圆变大变白高亮、标签在圆上）：
-  https://mobbin.com/screens/bca1a25e-8b1b-4565-8cef-3e4fa9077f96
-- 手指在底座（底座整体亮起、"松开 发送"悬拱顶上）：
-  https://mobbin.com/screens/fd891c97-d90e-46aa-b2f5-d091fdf2ac12
+Visual references (WeChat screenshots, Mobbin):
+- Sliding to cancel, with the left circle enlarged and white and its label above: https://mobbin.com/screens/bca1a25e-8b1b-4565-8cef-3e4fa9077f96
+- Finger on the base, with the entire base highlighted and “Release to send” above the arch: https://mobbin.com/screens/fd891c97-d90e-46aa-b2f5-d091fdf2ac12
 
-正确解 vs 相邻错解：这是**换皮不换语义**。068 的交互定案（原地松手=进确认态、
-finalizing 不出按钮、留驻示错态点任意处关闭）与 069 乐观启动一律不动；任何
-把"松手在底座=直接发送"搬进来的实现都是错的——那是被推翻的 067 语义。
+This changes appearance only. Preserve plan 068's release-in-place confirmation, hidden buttons during finalizing, and tap-anywhere dismissal of persistent errors, as well as plan 069's optimistic start. Releasing on the base must not send immediately: that was plan 067's superseded behavior.
 
 ## Decisions & tradeoffs
 
-- **底座纯视觉，松手语义不变**：手指在底座区亮起只是把既有的 `.none` 区可视化，
-  松手仍进 068 确认态。Rejected: 照搬微信"松开=发送"——2026-08-01 用户已推翻
-  （coflux 纯转文字无语音兜底），本次出发确认再次确认不改。
-  Based on: DictationOverlay.swift:11-13（`.none` = 松手进确认态）。
-- **不新增命中区**：底座高亮条件 = `stage == .listening && zone == .none`，
-  复用现有三值 `DictationZone`。Rejected: 给底座建第三个命中区——松手语义在
-  底座内外完全相同，判定没有意义，白加几何。
-  Based on: DictationOverlay.swift:30-36（hit() 只区分 cancel/send/none）。
-- **圆按钮替换胶囊，标签外提**：`DictationZone.size` 从 112×52 胶囊改为圆
-  （直径量级参考微信 ~56-64pt，executor 定），图标入圆、文字标签悬圆上方；
-  命中区仍可用方框外扩 tolerance（不必做几何圆判定）。位置从贴屏幕左右边缘
-  改为贴底座弧肩（水平内移，executor 按弧形定 x）。
-  Rejected: 保留胶囊只加底座——"贴着弧肩的圆"正是用户点名的微信形态。
-- **确认态原位变实体、底座保留**：两颗圆原位原形变可点实体（右 `Theme.primary`
-  实底 ↑ 主操作 / 左玻璃 ✕ 次操作，沿用 068 的主次配色语义），底座不淡出——
-  空间连续，松手前后画面不跳。Rejected: 底座淡出（按钮又失去锚点，回到"突然
-  两个按钮"）；确认态切回胶囊（两套形态切换突兀）。
-  Based on: DictationOverlay.swift:185-197（confirming 分支的主次配色）。
-- **占位条隔离约束保持**：命中区下沿距蒙层底边 ≥ 200pt 的规则不变（占位条
-  顶边 ~178pt + 22pt 余量），即新几何须满足
-  `lift - 命中半高 - tolerance ≥ 200`。圆按钮想贴低就得缩 tolerance 或缩圆，
-  不得吃掉这 22pt——手指静止按在占位条上（含最左/最右边缘）必判 `.none`。
-  Based on: DictationOverlay.swift:17-24（lift/tolerance 推导注释）。
-- **绘制/命中同源常量模式保持**：底座与圆按钮的几何全部进 `DictationZone`
-  （或同文件同级常量组），绘制对齐蒙层底边、判定用全局框，改一处两边同变。
-  调用点接口不变。
-  Based on: DictationOverlay.swift:28-29、WorkspaceDetailView.swift:147
-  （`DictationZone.hit($0, in: dictationBounds)`）。
-- **相位可见性沿用 068**：listening/confirming 出三件套；finalizing 不出按钮
-  （底座作为纯视觉可留可去，executor 定，倾向留——手指刚离开，画面别抽走）；
-  resting 留驻示错态三件套全隐（维持点任意处关闭的 064 语义）。
-  Based on: DictationOverlay.swift:125-127（`if !resting, stage != .finalizing`）。
-- **(decided while planning) 提示语与 footer 上移**：现 footer 贴底
-  （padding.bottom 48）会被底座压住；进行中提示语按微信位挪到拱顶上方，
-  permissionDenied / modelDownloading / failed 等 footer 内容同样不得与底座
-  重叠（上移或隐底座，executor 定）。
-  Based on: DictationOverlay.swift:122-123（footer padding.bottom 48）。
+- **The base is visual only**. Highlighting it visualizes the existing `.none` zone; release still enters confirmation. Rejected: WeChat's release-to-send behavior, overturned by the user on 2026-08-01 because coflux only transcribes and has no voice-message fallback. The user reconfirmed that decision before this plan. Based on DictationOverlay.swift:11-13.
+- **No additional hit zone**. Highlight the base when `stage == .listening && zone == .none`, reusing the three-valued `DictationZone`. Release semantics are identical inside and outside the base, so a third geometric target adds no meaning. Based on DictationOverlay.swift:30-36, where hit() distinguishes cancel/send/none.
+- **Replace capsules with circles and move labels above**. Change `DictationZone.size` from 112×52 to a circle roughly 56–64pt in diameter; the executor chooses the exact size. A rectangular hit box expanded by tolerance remains sufficient. Move x positions inward onto the arch shoulders, with exact coordinates chosen to fit the curve. Rejected: adding a base while retaining capsules; the user explicitly requested circles on the shoulders.
+- **Confirmation preserves position, shape, and base**. Use solid `Theme.primary` ↑ for the primary action and glass ✕ for the secondary action, preserving plan 068's hierarchy. Do not fade the base or return to capsules: either loses the anchor or creates a jarring transition. Based on DictationOverlay.swift:185-197.
+- **Preserve placeholder-bar isolation**. The lower hit-box edge must stay at least 200pt above the overlay bottom: approximately 178pt for the placeholder top plus 22pt margin. Require `lift - hitHalfHeight - tolerance >= 200`. Lower circles require a smaller diameter or tolerance, never loss of the margin. A stationary finger anywhere on the placeholder, including its far edges, must remain `.none`. Based on the lift/tolerance derivation at DictationOverlay.swift:17-24.
+- **Share geometry between drawing and hit testing**. Put base and button geometry in `DictationZone` or an adjacent constant group in the same file. Draw relative to the overlay bottom and hit-test against its global frame so both change together. Keep call-site interfaces unchanged. Based on DictationOverlay.swift:28-29 and WorkspaceDetailView.swift:147, `DictationZone.hit($0, in: dictationBounds)`.
+- **Keep plan 068's phase visibility**. Listening and confirming show all three elements. Finalizing has no buttons; the executor may keep or remove the purely visual base, preferably keep it to avoid abruptly removing the scene on release. Resting error states hide all three and retain plan 064's tap-anywhere dismissal. Based on DictationOverlay.swift:125-127, `if !resting, stage != .finalizing`.
+- **Move instructions and footer upward (decided while planning)**. Existing bottom padding of 48 would put the footer behind the base. Put listening instructions above the arch. permissionDenied/modelDownloading/failed footer content must also avoid overlap, either by moving it or hiding the base. Based on DictationOverlay.swift:122-123.
 
 ## Direction
 
-单文件 UI 改动，全部在 DictationOverlay.swift：`DictationZone` 常量与 hit 几何
-换圆并加底座绘制常量；`buttons` 重画为三件套；`pill` 两分支（角标/实体）改圆形
-+外提标签；footer/提示语避让底座。`DictationStage`、`DictationSession`、
-手势接线、`.allowsHitTesting`、`sensoryFeedback` 均不动。
+Limit the UI change to DictationOverlay.swift: revise `DictationZone` constants/hit geometry for circles and the base; redraw `buttons`; change both marker/solid branches of `pill` to circles with external labels; move footer/instructions out of the base. Do not change `DictationStage`, `DictationSession`, gesture wiring, `.allowsHitTesting`, or `sensoryFeedback`.
 
-### Milestone 1: 三件套成形（进行中态）
+### Milestone 1: Listening appearance
 
-底座 + 两圆 + 外提标签替换两颗胶囊；手指原地=底座高亮+提示语悬拱顶，滑入圆=
-该圆变大高亮；命中几何与绘制同源，占位条隔离约束满足。
-Validation: `cd apps/ios && xcodebuild -project Coflux.xcodeproj -scheme Coflux -destination 'generic/platform=iOS Simulator' build` → exit 0。
+Replace capsules with the base, two circles, and external labels. Highlight the base while the finger stays in place; enlarge/highlight the entered circle. Use shared drawing/hit geometry and preserve placeholder isolation.
 
-### Milestone 2: 确认态与其余相位
+Validation: `cd apps/ios && xcodebuild -project Coflux.xcodeproj -scheme Coflux -destination 'generic/platform=iOS Simulator' build` → exit 0.
 
-确认态两圆原位变实体（右主色实底/左玻璃）、底座保留、"点文字可编辑"等提示
-不与底座重叠；finalizing 无按钮、resting 全隐点任意处关闭——068 语义逐项无回归。
-Validation: 同上 xcodebuild → exit 0。
+### Milestone 2: Confirmation and other phases
+
+Turn the circles into tappable solid-primary/glass controls in place, retain the base, and avoid overlap with “Tap text to edit” and other instructions. Finalizing has no buttons; resting hides the controls and allows dismissal anywhere. Verify every plan 068 behavior remains intact.
+
+Validation: the same xcodebuild command → exit 0.
 
 ## Landmines
 
-- **占位条静止手指隔离**：DictationOverlay.swift:17-24 的 22pt 余量推导是
-  068 真机验收过的硬约束，新几何逾越会让"按住不动"误判成滑入按钮。
-- **hit-testing 整层一条**：DictationOverlay.swift:132
-  `.allowsHitTesting(stage == .settled)` 是 066 老坑的解，底座/标签等新视图
-  别单独加手势或 hitTesting 修饰，避免相位漏触摸。
-- **绘制对齐蒙层自身底边、判定用全局框**：DictationOverlay.swift:28-29 两边
-  同源才不漂移；底座若用 `ignoresSafeArea` 贴物理屏底，命中常量的参照系
-  （蒙层底边）必须跟着核对。
-- **失败但有字并入确认态**：DictationOverlay.swift:91-93、114-120，错误标注
-  显示在气泡下方——重排 footer 时别丢这条通路。
-- **xcodeproj 不动**：不新增文件（067 教训：加文件要改 xcodeproj，超 scope）。
+- The 22pt placeholder margin at DictationOverlay.swift:17-24 was accepted on a physical device in 068. Violating it misclassifies a stationary hold as entering a button.
+- Keep the single overlay-level `.allowsHitTesting(stage == .settled)` at DictationOverlay.swift:132, which fixed plan 066's touch issue. Do not add separate gestures/hit-testing modifiers to new base/label views and leak touches across phases.
+- Drawing and hit testing share the overlay-bottom reference (DictationOverlay.swift:28-29). If `ignoresSafeArea` moves the base to the physical screen bottom, recheck the hit constants' coordinate system.
+- Failed recognition with text joins confirmation; its error label appears below the bubble (DictationOverlay.swift:91-93, 114-120). Preserve this path when moving the footer.
+- Add no files and do not change xcodeproj. Plan 067 showed that new files require project changes outside this scope.
 
 ## Scope
 
@@ -124,28 +74,24 @@ In scope:
 - `apps/ios/Coflux/Speech/DictationOverlay.swift`
 
 Out of scope:
-- `apps/ios/Coflux/Views/WorkspaceDetailView.swift` —— 接口（传全局框判定）
-  不变即无需动；如实现中发现必须微调，STOP 报告而非顺手改。
-- `apps/ios/Coflux/Views/TerminalInputArea.swift`（占位条）、
-  `DictationSession`/`AudioCapture` 等逻辑层 —— 换皮不换逻辑。
-- `Coflux.xcodeproj` —— 不加新文件。
+- `apps/ios/Coflux/Views/WorkspaceDetailView.swift`: its global-frame interface stays unchanged. STOP and report if implementation requires even a small change.
+- `apps/ios/Coflux/Views/TerminalInputArea.swift` (placeholder), `DictationSession`, `AudioCapture`, and other logic.
+- `Coflux.xcodeproj`: no new files.
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| 构建 | `cd apps/ios && xcodebuild -project Coflux.xcodeproj -scheme Coflux -destination 'generic/platform=iOS Simulator' build` | exit 0 |
-| 真机手感 (acceptance) | 用户真机验收（惯例：UI 走查不由 Claude 做） | 用户拍板 |
+| Build | `cd apps/ios && xcodebuild -project Coflux.xcodeproj -scheme Coflux -destination 'generic/platform=iOS Simulator' build` | exit 0 |
+| Physical-device interaction acceptance | User walkthrough on a physical device; by convention Claude does not perform UI acceptance | User approval |
 
 ## Done criteria
 
-- [ ] xcodebuild 构建通过。
-- [ ] 进行中：底座常驻、原地=底座高亮+提示语悬拱顶；滑入左/右圆该圆变大高亮、
-      标签悬圆上方；松手原地仍进确认态（零语义变化）。
-- [ ] 确认态：两圆原位实体可点（右主色实底 ↑ / 左玻璃 ✕）、底座保留、
-      草稿可点进编辑、错误标注通路健在。
-- [ ] finalizing 无按钮、resting 全隐可点任意处关闭。
-- [ ] 命中区下沿 ≥ 200pt 约束在新几何下成立（常量注释更新推导）。
+- [ ] xcodebuild passes.
+- [ ] Listening retains the base, highlights it for a stationary finger, and shows instructions above the arch. Entering either circle enlarges/highlights it with its label above. Release in place still enters confirmation.
+- [ ] Confirmation has tappable circles in place (solid primary ↑ and glass ✕), retains the base, supports tapping the draft to edit, and preserves the error-label path.
+- [ ] Finalizing has no buttons; resting hides all three elements and permits tap-anywhere dismissal.
+- [ ] Hit-box lower edges remain at least 200pt above the overlay bottom; update the derivation comments for the new constants.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
 - [ ] `plans/README.md` status is updated.
@@ -153,12 +99,10 @@ Out of scope:
 ## STOP conditions
 
 - A fact cited under Decisions & tradeoffs no longer holds.
-- 实现必须改动 WorkspaceDetailView.swift 或其它 out-of-scope 文件。
-- xcodebuild 同一错误修复一次后仍失败。
+- Implementation requires WorkspaceDetailView.swift or another out-of-scope file.
+- xcodebuild still fails after one attempt to fix the same error.
 
 ## Maintenance notes
 
-- 底座是 068 遗留问题（"要不要画弧"）的正式答案：弧感靠底座本体，不靠三颗
-  不等高按钮。后续再调按钮数量/位置，先看 `DictationZone` 同源常量组。
-- 对讲交互语义的决策链：067 松手直发（已推翻）→ 068 确认态（真机验收过）→
-  069 乐观启动 → 本 plan 纯视觉换皮。改语义前先读 068 的复议记录。
+- The base formally answers plan 068's unresolved arc question. The curve comes from the base itself, not three buttons at different heights. Review the shared `DictationZone` constants before changing button count or placement.
+- Interaction history: 067 immediate send on release (overturned) → 068 confirmation (accepted on device) → 069 optimistic start → this purely visual change. Read 068's reconsideration record before changing semantics.

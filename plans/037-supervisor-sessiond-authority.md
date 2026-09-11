@@ -1,7 +1,9 @@
-# Plan 037: supervisor 演进为本机 sessiond
+# Plan 037: Evolve the supervisor into a native sessiond
 
-> 本计划是 outcome contract，不是逐函数脚本。理解需求与已记录决策后，针对实时代码自行
-> 设计实现。遇到 STOP condition 必须停止。完成后更新 `plans/README.md`。
+> This plan is an outcome contract, not a function-by-function script. Understand
+> the requirements and recorded decisions, then design the implementation against
+> the live code. Stop on any
+> STOP condition. When complete, update `plans/README.md`.
 >
 > Drift check: `git diff --stat febdd62..HEAD -- crates/supervisor/src crates/supervisor/Cargo.toml crates/protocol/src/ipc.rs crates/worker/src/dec_modes.rs tests/src/dec-modes-replay.test.mjs`
 
@@ -17,113 +19,83 @@
 
 ## Requirement
 
-把 supervisor 从“PTY + 200KB raw scrollback + 全局 pause”提升为真正的本机 sessiond：无论
-worker、中心或 client 是否存在，都持续消费 PTY、维护可恢复的 VT grid/history、session
-catalog、单调 output sequence、单 holder lease 与 exit tombstone。attach 必须原子返回
-规范化 ANSI snapshot 与无缝后续 delta；任何慢 transport 都不能冻结 Agent 进程。
+Evolve the supervisor from “PTY + 200KB raw scrollback + global pause” into a native sessiond. Independently of the worker, center, or client, it continuously consumes PTY output and maintains recoverable VT grid/history, a session catalog, monotonic output sequences, a single-holder lease, and exit tombstones. Attach atomically returns a normalized ANSI snapshot followed seamlessly by deltas. No slow transport may freeze the Agent process.
 
 ## Decisions & tradeoffs
 
-- **结构化终端状态取代 byte ring**：使用成熟 Rust VT parser，保存有界 logical-line history、
-  viewport、光标、SGR、alt screen 与输入模式。拒绝继续 raw ring；它会任意裁剪 UTF-8/escape
-  （`crates/supervisor/src/sessions.rs:114-121`），现有 worker 只补 DEC 私有模式且明确忽略 SGR
-  （`crates/worker/src/dec_modes.rs:1-7`, `crates/worker/src/dec_modes.rs:143-147`）。
-- **先做兼容性实证再锁 parser**：首选 plan 036 冻结的轻量 parser 依赖，但必须用 xterm/Agent
-  语料验证 wide/combining chars、truecolor、cursor、wrap、erase、alt-screen、bracketed paste、
-  resize；不通过不得以手写补丁堆成半套模拟器。
-- **按完整行有界保留**：history 行上限可配置，并有全局内存预算；默认值由多 session 内存与
-  attach benchmark 决定。拒绝无限落盘和按字节裁剪。
-- **每 session 串行 authority**：PTY 输出解析、sequence 推进、attach 注册、holder 变更与
-  input 去重必须在同一串行边界内完成，避免“取完快照才订阅”的 gap。当前全局
-  `Mutex<HashMap<...>>`（`crates/supervisor/src/sessions.rs:27-35`）不是新并发语义的依据。
-- **慢消费者丢 delta、绝不 pause PTY**：每个 logical channel 有有界投递状态；溢出后标记 gap
-  并要求 snapshot。移除 worker queue 反压到全部 PTY 的机制，当前 pause 会在
-  `crates/supervisor/src/sessions.rs:102-109` 停住所有 reader。
-- **holder 绑定 logical client 而非 socket**：不同 client 才抢占并递增 epoch；同 client 的
-  更高 transport generation 迁移 channel，旧 generation 后续 input/resize 被拒。
-- **worker 重启不丢状态**：catalog、holder、sequence、近期 whole-frame retransmit ring 与未 ack
-  exit tombstone 都在 supervisor；worker resync 后可重建本地/relay channel。基于现有 worker
-  restart 保活保证（`tests/src/worker-restart.test.mjs:9-10`）。
-- **tmux 存活边界**：只承诺 supervisor 与 PTY 活着时恢复；supervisor/机器退出后不恢复活进程，
-  不新增磁盘录像或 CRIU。
+- **Structured terminal state replaces the byte ring**: use a mature Rust VT parser to retain bounded logical-line history, viewport, cursor, SGR, alternate screen, and input modes. Reject keeping the raw ring, which truncates UTF-8/escape sequences arbitrarily (`crates/supervisor/src/sessions.rs:114-121`). The worker currently restores only DEC private modes and explicitly ignores SGR (`crates/worker/src/dec_modes.rs:1-7`, `crates/worker/src/dec_modes.rs:143-147`).
+- **Validate compatibility before committing to a parser**: prefer the lightweight parser dependency frozen by plan 036, but verify wide/combining characters, truecolor, cursor, wrapping, erase, alternate screen, bracketed paste, and resize using xterm/Agent corpora. If it fails, do not build a partial emulator by piling on handwritten patches.
+- **Bound retention by complete logical lines**: make the history limit configurable and impose a global memory budget. Choose defaults from multi-session memory and attach benchmarks. Reject unlimited disk persistence and byte-wise trimming.
+- **Serialize authority per session**: PTY parsing, sequence advancement, attach registration, holder changes, and input deduplication share one serialized boundary, eliminating the gap between snapshot capture and subscription. The current global `Mutex<HashMap<...>>` (`crates/supervisor/src/sessions.rs:27-35`) is not the foundation for these concurrency semantics.
+- **Slow consumers lose deltas; PTYs never pause**: bound delivery state per logical channel, mark a gap on overflow, and request a snapshot. Remove global PTY backpressure driven by worker queues. The current pause path stops every reader (`crates/supervisor/src/sessions.rs:102-109`).
+- **Bind holders to logical clients, not sockets**: a different client takes over and increments the epoch. A higher transport generation for the same client migrates the channel; reject later input/resize from the old generation.
+- **Preserve state across worker restarts**: the supervisor owns catalog, holder, sequence, a recent whole-frame retransmission ring, and unacknowledged exit tombstones. Rebuild local/relay channels after worker resync. This extends existing worker-restart survival guarantees (`tests/src/worker-restart.test.mjs:9-10`).
+- **tmux-like survival boundary**: recovery is guaranteed only while supervisor and PTY remain alive. Do not restore processes after supervisor/machine exit; add no disk recordings or CRIU support.
 
 ## Direction
 
-### Milestone 1: VT snapshot 等价性
+### Milestone 1: VT snapshot equivalence
 
-给终端状态层建立纯 Rust 单测与录制语料；任意 chunk 边界喂入后生成的 ANSI snapshot 写入
-参考终端时，viewport、history tail、光标与关键模式等价。Validation:
-`cargo test -p coflux-supervisor sessiond_vt` -> exit 0。
+Add pure Rust unit tests and recorded corpora for terminal state. Feed recordings at arbitrary chunk boundaries, serialize an ANSI snapshot, and write it into a reference terminal. Viewport, history tail, cursor, and key modes must match. Validation: `cargo test -p coflux-supervisor sessiond_vt` exits 0.
 
-### Milestone 2: catalog、sequence 与原子 attach
+### Milestone 2: catalog, sequence and atomic attach
 
-活 session 的 catalog 包含可自证字段与当前 sequence；attach 在同一 authority 临界区取得
-snapshot@N 并注册 N+1，delta 有连续 byte offset，gap 可显式恢复。Validation:
-`cargo test -p coflux-supervisor sessiond_attach` -> exit 0。
+The live-session catalog carries self-verifiable fields and the current sequence. In one authority critical section, attach captures snapshot@N and subscribes from N+1. Deltas use contiguous byte offsets, and gaps trigger explicit recovery. Validation: `cargo test -p coflux-supervisor sessiond_attach` exits 0.
 
-### Milestone 3: holder 与幂等输入
+### Milestone 3: holder and idempotent input
 
-跨 logical client handoff、同 client transport migration、stale generation/epoch 拒绝、input
-重投去重和 resize latest-wins 均有确定结果。Validation:
-`cargo test -p coflux-supervisor sessiond_holder` -> exit 0。
+Verify cross-client handoff, same-client transport migration, stale generation/epoch rejection, input retransmission/deduplication, and latest-wins resize with acknowledged outcomes. Validation: `cargo test -p coflux-supervisor sessiond_holder` exits 0.
 
-### Milestone 4: 故障与背压隔离
+### Milestone 4: Fault and Backpressure Isolation
 
-无 worker、worker 写端堵塞或单 channel 队列满时，PTY 仍持续被解析到 bounded grid；worker
-重连可从 catalog/snapshot 恢复，退出码 tombstone 在确认前不丢。Validation:
-`cargo test -p coflux-supervisor sessiond_backpressure` -> exit 0。
+With the worker absent, its writer blocked, or one channel queue full, PTY parsing continues into bounded terminal state. Worker reconnection recovers through catalog/snapshot; retain exit-code tombstones until acknowledged. Validation: `cargo test -p coflux-supervisor sessiond_backpressure` exits 0.
 
 ## Landmines
 
-- 当前 supervisor outbound 是无界 `std::sync::mpsc` 且只有一个可替换 worker 写端
-  （`crates/supervisor/src/main.rs:81-100`）；仅删除 `PtyPause` 会把冻结问题变成无界内存问题。
-- `portable-pty` reader、writer、master、child 的所有权被拆在不同线程/对象；重构不能在 resize、
-  close 与 EOF wait 之间制造双重 remove（`crates/supervisor/src/sessions.rs:42-87`）。
-- 当前 UDS 最新连接会直接替换 worker 写端（`crates/supervisor/src/main.rs:136-148`）；迁移期必须
-  保证旧连接的输出不会清掉新连接。
-- 规范化 ANSI snapshot 必须先 reset 并恢复 input modes；现有 server serializer 的行为可作参考
-  （`apps/server/src/mirror.ts:56-60`），但不能把 Node/xterm 引入 supervisor。
-- 图像/sixel 等无法可靠物化的序列可以 live passthrough 并记录能力缺口，但不得谎称可恢复。
+- Supervisor outbound delivery currently uses unbounded `std::sync::mpsc` and one replaceable worker writer (`crates/supervisor/src/main.rs:81-100`). Simply deleting `PtyPause` would replace freezing with unbounded memory growth.
+- Ownership of `portable-pty` readers, writers, masters, and children is split across threads/objects. Refactoring must avoid duplicate removal across resize, close, and EOF handling (`crates/supervisor/src/sessions.rs:42-87`).
+- A new UDS connection directly replaces the worker writer (`crates/supervisor/src/main.rs:136-148`). During migration, an old connection exiting must not clear the new connection.
+- Normalized ANSI snapshots must first reset and restore input modes. The server serializer is a reference (`apps/server/src/mirror.ts:56-60`), but do not introduce Node/xterm into the supervisor.
+- Sequences such as images/sixels that cannot be faithfully materialized may pass through live, with documented capability gaps. Never claim they are recoverable.
 
 ## Scope
 
 In scope:
 - `crates/supervisor/src/**`
-- plan 036 已冻结依赖下的 supervisor 单元/夹具
+- Supervisor unit tests/fixtures within plan 036’s frozen dependencies
 
 Out of scope:
-- loopback TCP/WS、browser pairing、中心 relay
-- `crates/worker/src/**`、`apps/server/**`、`packages/client/**`
-- supervisor/OS 重启后的活进程恢复
+- loopback TCP/WS, browser pairing, central relay
+- `crates/worker/src/**`, `apps/server/**`, `packages/client/**`
+- Live process recovery after supervisor/OS restart
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Supervisor tests | `cargo test -p coflux-supervisor` | exit 0，零 warning |
+| Supervisor tests | `cargo test -p coflux-supervisor` | exit 0, zero warnings |
 | Protocol tests | `cargo test -p coflux-protocol` | exit 0 |
-| Daemon build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0，零 warning |
+| Daemon build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0, zero warnings |
 
 ## Done criteria
 
-- [ ] 所有列出的 commands 通过。
-- [ ] snapshot@N 与 N+1 delta 无 gap/duplicate 的单测成立。
-- [ ] history 只在完整 logical line 边界裁剪，内存有明确上限。
-- [ ] stale holder/transport/input 被拒且不会写入 PTY。
-- [ ] worker/consumer 缺失或堵塞不会暂停 PTY reader。
-- [ ] catalog 与 exit tombstone 足以让 worker 完成离线 reconciliation。
-- [ ] 实现遵循所有 Decisions & tradeoffs。
-- [ ] 未修改 out-of-scope 文件。
-- [ ] `plans/README.md` 状态已更新。
+- [ ] All listed commands pass.
+- [ ] Unit tests prove snapshot@N plus delta from N+1 has no gaps or duplicates.
+- [ ] History trims only at complete logical-line boundaries and has an explicit memory bound.
+- [ ] stale holder/transport/input is rejected and will not be written to the PTY.
+- [ ] Missing or blocked worker/consumer will not pause the PTY reader.
+- [ ] The catalog and exit tombstones provide enough information for worker offline reconciliation.
+- [ ] Implementation follows every Decisions & tradeoffs entry.
+- [ ] No out-of-scope files changed.
+- [ ] `plans/README.md` status updated.
 
 ## STOP conditions
 
-- 候选 VT parser 无法通过核心 Agent/TUI 语料，且替换依赖会破坏 plan 036 合同。
-- 为保证正确性必须把网络/auth 逻辑放入稳定 supervisor。
-- portable-pty 无法在不中断现有会话的前提下承载新 authority 生命周期。
-- validation 在一次合理修复后连续失败两次。
+- Candidate VT parser fails the core Agent/TUI corpus, and replacing dependencies would break the plan 036 contract.
+- To ensure correctness, the network/auth logic must be put into the stable supervisor.
+- portable-pty cannot host new authority lifecycles without disrupting existing sessions.
+- Validation fails twice in a row after a reasonable fix.
 
 ## Maintenance notes
 
-sessiond 的价值是“当前状态可重建”，不是“保证每个历史原始字节永不丢”。未来多写端应扩展
-holder policy，不能绕过 epoch/generation/input-sequence 三层防线。
+sessiond guarantees reconstructable current state, not preservation of every historical raw byte. Future multiple-writer support must extend holder policy without bypassing epoch, generation, or input-sequence checks.
