@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
 
-import { DAEMON_BINARIES, DAEMON_RESOURCE_DIR, DAEMON_VERSION_FILE } from "../src/main/daemon-paths";
+import { CLAUDE_PLUGIN_ENV, CLAUDE_PLUGIN_RESOURCE_DIR, DAEMON_BINARIES, DAEMON_RESOURCE_DIR, DAEMON_VERSION_FILE } from "../src/main/daemon-paths";
 
 // 发布配置（electron-builder.yml）与发布 workflow 能被解析且守住 plan 103 的硬约束。
 const desktopRoot = resolve(import.meta.dirname, "..");
@@ -90,6 +90,32 @@ test("electron-builder.yml：内置 daemon 三件经 extraResources 进 Resource
   assert.match(pkg.scripts.pack, /^node scripts\/stage-daemon\.mjs && /);
   assert.match(pkg.scripts.dist, /^node scripts\/stage-daemon\.mjs && /);
   assert.equal(pkg.scripts["stage-daemon"], "node scripts/stage-daemon.mjs");
+});
+
+test("内置 coflux 插件目录随 daemon 资源目录进包、不进 mac.binaries（plan 115）", () => {
+  const config = parse(readFileSync(resolve(desktopRoot, "electron-builder.yml"), "utf8")) as Builder;
+  // 插件跟着 build/daemon 整目录走同一条 extraResources，不需要新的 from/to
+  const daemon = config.mac.extraResources?.find((item) => item.to === DAEMON_RESOURCE_DIR);
+  assert.equal(daemon?.from, "build/daemon");
+  assert.ok(!config.mac.extraResources?.some((item) => item.to.includes(CLAUDE_PLUGIN_RESOURCE_DIR)), "插件不另立 extraResources 条目");
+  // node / sh 脚本不是 Mach-O：进了 mac.binaries 会让签名步骤直接失败（binaries 数量 == 三件已在上一条守住）
+  assert.ok(!config.mac.binaries?.some((path) => path.includes(CLAUDE_PLUGIN_RESOURCE_DIR)), "插件目录不得进 mac.binaries");
+
+  // stage 脚本与主进程常量同值，且从仓库内的 integrations/claude-plugin 取（不是 CI 的新输入），缺失即失败
+  const stage = readFileSync(resolve(desktopRoot, "scripts/stage-daemon.mjs"), "utf8");
+  assert.match(stage, new RegExp(`"${CLAUDE_PLUGIN_RESOURCE_DIR}"`));
+  assert.match(stage, /"integrations", "claude-plugin"/);
+  assert.match(stage, /cpSync\(/); // 整目录逐字节拷，不做任何改写
+  assert.match(stage, /插件目录不存在/);
+
+  // 来源目录在仓库里且是那份交付目录（改写它等于改插件，stage 只搬运）
+  const source = resolve(repoRoot, "integrations/claude-plugin");
+  for (const entry of [".claude-plugin/plugin.json", "hooks/hooks.json", ".mcp.json", "skills/coflux/SKILL.md"]) {
+    assert.ok(existsSync(resolve(source, entry)), `插件交付目录缺少 ${entry}`);
+  }
+
+  // 变量名是 supervisor 侧 shell 集成认的那一个契约，别漂
+  assert.equal(CLAUDE_PLUGIN_ENV, "COFLUX_CLAUDE_PLUGIN_DIR");
 });
 
 type Workflow = {

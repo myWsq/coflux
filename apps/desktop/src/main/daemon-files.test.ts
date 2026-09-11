@@ -11,6 +11,7 @@ import {
   parseFdaStatus,
   parsePendingAuth,
   parseSupervisorVersion,
+  shouldRewritePlist,
 } from "./daemon-files";
 import { daemonHomePaths, resolveCofluxHome } from "./daemon-paths";
 
@@ -34,9 +35,8 @@ test("路径：默认 ~/.coflux；COFLUX_HOME 设了就尊重；plist 固定在 
   assert.equal(paths.plist, "/Users/alice/Library/LaunchAgents/com.coflux.daemon.plist");
 });
 
-test("LaunchAgent plist 与 cofluxd.mjs 的 plistXml 逐字同构", () => {
-  const paths = daemonHomePaths(HOME_DIR, {});
-  const expected = `<?xml version="1.0" encoding="UTF-8"?>
+// cofluxd.mjs 的 plistXml() 逐字原文（npm 线不动）：app 写出的 plist = 这份 + 一个 COFLUX_CLAUDE_PLUGIN_DIR 键
+const NPM_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -52,7 +52,45 @@ test("LaunchAgent plist 与 cofluxd.mjs 的 plistXml 逐字同构", () => {
 </dict>
 </plist>
 `;
-  assert.equal(launchAgentPlist(paths), expected);
+
+test("LaunchAgent plist 不带插件目录时与 cofluxd.mjs 的 plistXml 逐字同构", () => {
+  const paths = daemonHomePaths(HOME_DIR, {});
+  assert.equal(launchAgentPlist(paths), NPM_PLIST);
+  assert.equal(launchAgentPlist(paths, {}), NPM_PLIST);
+  assert.equal(launchAgentPlist(paths, { claudePluginDir: null }), NPM_PLIST);
+  assert.equal(launchAgentPlist(paths, { claudePluginDir: "   " }), NPM_PLIST); // 空白值等于没有，一个字符都不多写
+});
+
+test("带内置插件目录时 = npm 版 + 一个 COFLUX_CLAUDE_PLUGIN_DIR 键（plan 115）", () => {
+  const paths = daemonHomePaths(HOME_DIR, {});
+  // app 包路径可能含空格：值原样落在 <string> 里，不加引号、不转义空格
+  const dir = "/Applications/My Apps/Coflux.app/Contents/Resources/daemon/claude-plugin";
+  const expected = NPM_PLIST.replace(
+    "<string>/Users/alice/.coflux</string></dict>",
+    `<string>/Users/alice/.coflux</string><key>COFLUX_CLAUDE_PLUGIN_DIR</key><string>${dir}</string></dict>`,
+  );
+  assert.equal(launchAgentPlist(paths, { claudePluginDir: dir }), expected);
+  // 除这个键外与 npm 版逐字同构：删掉该键就回到原文
+  assert.equal(expected.replace(`<key>COFLUX_CLAUDE_PLUGIN_DIR</key><string>${dir}</string>`, ""), NPM_PLIST);
+});
+
+test("插件目录值做 XML 转义：未转义的 & / < 会让 launchd 整份 plist 解析失败（plan 115）", () => {
+  const paths = daemonHomePaths(HOME_DIR, {});
+  const nasty = "/Users/alice/A & B/<x>/Coflux.app/Contents/Resources/daemon/claude-plugin";
+  const plist = launchAgentPlist(paths, { claudePluginDir: nasty });
+  assert.match(plist, /<key>COFLUX_CLAUDE_PLUGIN_DIR<\/key><string>\/Users\/alice\/A &amp; B\/&lt;x&gt;\/Coflux\.app\/Contents\/Resources\/daemon\/claude-plugin<\/string>/);
+  assert.ok(!plist.includes("A & B"));
+  assert.ok(!plist.includes("<x>"));
+});
+
+test("启动期只在已接入且内容不同时重写 plist，且从不 launchctl（plan 115）", () => {
+  const paths = daemonHomePaths(HOME_DIR, {});
+  const next = launchAgentPlist(paths, { claudePluginDir: "/Applications/Coflux.app/Contents/Resources/daemon/claude-plugin" });
+  assert.equal(shouldRewritePlist(null, next), false); // 未接入的机器不凭空创建 plist
+  assert.equal(shouldRewritePlist(next, next), false); // 内容一致：不写盘
+  assert.equal(shouldRewritePlist(NPM_PLIST, next), true); // npm 接入 / 旧版 app 写的没有这个键
+  assert.equal(shouldRewritePlist(launchAgentPlist(paths), next), true);
+  assert.equal(shouldRewritePlist("", next), true);
 });
 
 test("daemon 地址跟随 app：/client 换 /daemon，其他路径直接落 /daemon，去掉 query", () => {

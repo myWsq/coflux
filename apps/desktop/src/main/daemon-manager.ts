@@ -14,6 +14,7 @@ import {
   parseFdaStatus,
   parsePendingAuth,
   parseSupervisorVersion,
+  shouldRewritePlist,
 } from "./daemon-files";
 import { DAEMON_BINARIES, LAUNCHD_LABEL, type DaemonBinaryName, type DaemonHomePaths } from "./daemon-paths";
 import { deriveDaemonState, type DaemonFacts } from "./daemon-state";
@@ -38,6 +39,11 @@ export type DaemonManagerOptions = {
   paths: DaemonHomePaths;
   /** null = 本构建不带 daemon：只能看状态，接入 / 换新不可用 */
   bundle: DaemonBundle | null;
+  /**
+   * 内置 coflux 插件目录的绝对路径（plan 115），经 plist 的 COFLUX_CLAUDE_PLUGIN_DIR 注入给 supervisor；
+   * null = 本构建不带插件，plist 就不写这个键。这里只当字符串搬运，不解析、不落盘。
+   */
+  claudePluginDir: string | null;
   /** app 的 /client 地址；写 settings.json 时换成 /daemon */
   clientServerUrl: string;
   hostname: string;
@@ -217,9 +223,29 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
     chmodSync(paths.settings, 0o600);
   }
 
+  function renderPlist(): string {
+    return launchAgentPlist(paths, { claudePluginDir: options.claudePluginDir });
+  }
+
   function writePlist(): void {
     mkdirSync(dirname(paths.plist), { recursive: true });
-    writeFileSync(paths.plist, launchAgentPlist(paths));
+    writeFileSync(paths.plist, renderPlist());
+  }
+
+  /**
+   * 启动期 plist 同步（plan 115）：已接入的机器上，磁盘内容与当前 app 渲染出的不同就**只重写文件**——
+   * npm 接入的机器、旧版 app 写的没有 COFLUX_CLAUDE_PLUGIN_DIR、app 换了位置都走这条。
+   * 不碰 launchctl（reload 会结束本机所有终端），新值在下一次 supervisor 启动时生效；
+   * 未接入的机器（plist 不存在）不凭空创建。失败只记日志，不影响状态。
+   */
+  function syncPlistOnStart(): void {
+    try {
+      if (!shouldRewritePlist(readText(paths.plist), renderPlist())) return;
+      writePlist();
+      log.info("LaunchAgent plist 已按当前 app 重写，下次 daemon 启动生效（不自动重启）");
+    } catch (syncError) {
+      log.warn("LaunchAgent plist 重写失败，沿用磁盘上的旧内容", errorMessage(syncError));
+    }
   }
 
   async function launchctl(action: "load" | "unload"): Promise<{ code: number; stderr: string }> {
@@ -310,6 +336,7 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
     emit();
   }
 
+  syncPlistOnStart();
   const poll = setInterval(() => void refresh(), POLL_INTERVAL_MS);
   poll.unref();
   void refresh();
