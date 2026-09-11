@@ -16,10 +16,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
-import { startServer, rawDaemon, mkRepo, spawnDaemon, killTree, tokenFromUrl } from "./harness.mjs";
+import { startServer, rawDaemon, mkRepo, spawnDaemon, killTree, tokenFromUrl, CookieJar, pageGet, formPost, pageLogin } from "./harness.mjs";
 import { openRelayDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8830;
+// server 直出的授权页（plan 107）挂在 COFLUX_PUBLIC_URL 下；黑盒不设它，默认即本机监听地址。
+const BASE = `http://127.0.0.1:${PORT}`;
 // startServer 不像 startStack 会带默认的 password；local 认证模式下这是必需的秘密类配置
 // （见 apps/server/src/config.ts 的 secret()/fail-closed），显式给一份弱默认值，仅供测试用。
 const LOCAL_ENV = { COFLUX_PASSWORD: "admin" };
@@ -296,5 +298,210 @@ test("等待授权的 daemon 不被 auth deadline 踢；未发 enrollRequest 的
     d.close();
   } finally {
     await short.stop();
+  }
+});
+
+/* ============================ server 直出的授权页（plan 107，HTTP 流） ============================ */
+
+test("HTTP 授权页端到端：链接落在 publicUrl → 登录 → 确认 → daemon 上线且能跑任务", async () => {
+  const home = mkdtempSync(join(tmpdir(), "coflux-test-authpage-"));
+  const deviceName = "auth-page-dev";
+  const daemonEnv = {
+    ...process.env,
+    COFLUX_SERVER: `ws://127.0.0.1:${PORT}/daemon`,
+    COFLUX_HOME: home,
+    COFLUX_DEVICE_NAME: deviceName,
+    COFLUX_LOCAL_GATEWAY_PORT: "0",
+  };
+  const daemonProc = spawnDaemon(daemonEnv);
+  const repo = mkRepo();
+  try {
+    const pendingPath = join(home, "pending-auth.json");
+    let pending;
+    for (let i = 0; i < 80 && !pending; i++) {
+      if (existsSync(pendingPath)) {
+        try {
+          pending = JSON.parse(readFileSync(pendingPath, "utf8"));
+        } catch {
+          /* 文件可能正在被写，重试 */
+        }
+      }
+      if (!pending) await sleep(250);
+    }
+    assert.ok(pending?.url, "daemon 落地了待授权链接");
+    assert.ok(pending.url.startsWith(`${BASE}/authorize/`), `授权链接由 publicUrl 拼出：${pending.url}`);
+
+    // 未登录：登录表单 + 匿名 nonce cookie（HttpOnly、SameSite=Lax、按 /authorize 隔离、http 下不带 Secure）
+    const jar = new CookieJar();
+    const first = await pageGet(pending.url, jar);
+    assert.equal(first.status, 200);
+    assert.ok(first.html.includes("授权新设备") && first.html.includes("先登录你的账号，再确认这台设备的信息"));
+    assert.ok(first.hidden.csrf, "登录表单带 csrf 隐藏字段");
+    const anon = first.headers.getSetCookie().find((c) => c.startsWith("cf_page="));
+    assert.ok(anon && /cf_page=cf_pgan_/.test(anon), `登录前发匿名 nonce cookie：${anon}`);
+    assert.ok(anon.includes("Path=/authorize") && anon.includes("HttpOnly") && anon.includes("SameSite=Lax") && !anon.includes("Secure"));
+    assert.ok(!first.html.includes("<script"), "页面不含 JS 也能走通");
+
+    // 登录 → 303 回同一 GET，cookie 换成页面会话
+    const login = await pageLogin(pending.url, jar);
+    assert.equal(login.status, 303, login.html);
+    assert.equal(login.location, `/authorize/${tokenFromUrl(pending.url)}`);
+    const sess = login.headers.getSetCookie().find((c) => c.startsWith("cf_page="));
+    assert.ok(sess && /cf_page=cf_pgs_/.test(sess) && sess.includes("HttpOnly") && sess.includes("SameSite=Lax") && !sess.includes("Secure"), `登录只签短命页面会话：${sess}`);
+
+    // 有会话的 GET：设备卡片
+    const confirm = await pageGet(pending.url, jar);
+    assert.equal(confirm.status, 200);
+    assert.ok(confirm.html.includes("确认设备") && confirm.html.includes(deviceName) && confirm.html.includes("授权此设备"));
+    assert.equal(confirm.action, `/authorize/${tokenFromUrl(pending.url)}/confirm`);
+
+    // 授权此设备 → 完成页，会话作废
+    const done = await formPost(new URL(confirm.action, BASE).toString(), confirm.hidden, jar);
+    assert.equal(done.status, 200, done.html);
+    assert.ok(done.html.includes("设备已授权") && done.html.includes("可以关闭此页面"));
+    assert.ok(done.headers.getSetCookie().some((c) => c.startsWith("cf_page=;") && c.includes("Max-Age=0")), "流程结束即清页面会话 cookie");
+    const after = await pageGet(pending.url, jar);
+    assert.ok(after.html.includes("授权新设备"), "会话已作废，再打开须重新登录");
+
+    // 与 WS 授权完全相同的结果：daemon 在线、能导入项目、起任务、走 PTY
+    const c = server.makeClient();
+    const snap = await c.authSubscribe();
+    let daemon = snap.daemons.find((d) => d.name === deviceName);
+    if (!daemon?.online) {
+      const upd = await c.waitFor((m) => m.case === "daemonUpdated" && m.daemon.name === deviceName && m.daemon.online, "daemon.updated", 15000);
+      daemon = upd.daemon;
+    }
+    const daemonId = daemon.daemonId;
+    const device = await openRelayDevice({ ...server, daemonId });
+    const control = device.control;
+    control.send({ case: "projectImport", daemonId, path: repo.dir });
+    const main = await control.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main ws");
+    control.send({ case: "taskCreate", workspaceId: main.workspace.id, title: "authpage-task" });
+    const idle = await control.waitFor((m) => m.case === "taskUpdated" && m.task.title === "authpage-task", "idle");
+    control.send({ case: "taskStart", taskId: idle.task.id, cols: 80, rows: 24 });
+    const run = await control.waitFor((m) => m.case === "taskUpdated" && m.task.id === idle.task.id && m.task.status === TaskStatus.RUNNING, "running");
+    await device.attach(run.task.sessionId);
+    const from = device.mark();
+    await device.input(run.task.sessionId, "echo PAGE_$((7*6))\r");
+    await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("PAGE_42"), "PTY 回流", 10000, from);
+    assert.ok(existsSync(join(home, "credentials.json")), "授权后 daemon 落地 credentials.json");
+    device.close();
+    c.close();
+  } finally {
+    killTree(daemonProc);
+    repo.cleanup();
+    await sleep(200);
+    try {
+      rmSync(home, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
+test("HTTP 授权页：未登录 GET 不区分 token 是否有效；无效 token 登录后才报不可用；csrf / 跨站 POST 被拒；设备名经转义", async () => {
+  const d = rawDaemon(PORT);
+  await d.ready;
+  d.send({ case: "daemonEnrollRequest", name: "<script>alert(1)</script>", host: "h<b>", platform: "test" });
+  const pending = await d.waitFor((m) => m.case === "daemonAuthorizePending", "authorizePending");
+  const bogusUrl = `${BASE}/authorize/cf_authz_definitely-not-a-token`;
+
+  // 登录前：有效与无效 token 的响应无差别（都是登录表单），不给 oracle
+  const validPage = await pageGet(pending.url, new CookieJar());
+  const bogusPage = await pageGet(bogusUrl, new CookieJar());
+  assert.equal(validPage.status, 200);
+  assert.equal(bogusPage.status, 200);
+  for (const page of [validPage, bogusPage]) {
+    assert.ok(page.html.includes("授权新设备"));
+    assert.ok(!page.html.includes("授权链接不可用") && !page.html.includes("确认设备"));
+  }
+  const strip = (html) => html.replace(/name="csrf" value="[^"]+"/, "").replace(/action="[^"]+"/, "");
+  assert.equal(strip(validPage.html), strip(bogusPage.html), "登录前的页面除 csrf/action 外完全一致");
+
+  // 登录 POST：csrf 不符 403；密码错 401 只说「用户名或密码错误」
+  const jar = new CookieJar();
+  const page = await pageGet(pending.url, jar);
+  const badCsrf = await formPost(new URL(page.action, BASE).toString(), { ...page.hidden, csrf: "forged", username: "admin", password: "admin" }, jar);
+  assert.equal(badCsrf.status, 403);
+  assert.ok(badCsrf.html.includes("页面已过期"));
+  const badPassword = await formPost(new URL(page.action, BASE).toString(), { ...page.hidden, username: "admin", password: "wrong" }, jar);
+  assert.equal(badPassword.status, 401);
+  assert.ok(badPassword.html.includes("登录失败：用户名或密码错误"));
+  assert.ok(!badPassword.html.includes("授权链接") && badPassword.html.includes("授权新设备"), "登录失败页不泄漏 token 状态");
+
+  // 登录成功后：无效 token → 授权链接不可用；有效 token → 设备卡片且设备名/主机经转义
+  const login = await pageLogin(pending.url, jar);
+  assert.equal(login.status, 303, login.html);
+  const bogus = await pageGet(bogusUrl, jar);
+  assert.equal(bogus.status, 404);
+  assert.ok(bogus.html.includes("授权链接不可用") && bogus.html.includes("授权链接无效或已过期"));
+  const confirm = await pageGet(pending.url, jar);
+  assert.equal(confirm.status, 200);
+  assert.ok(confirm.html.includes("&lt;script&gt;alert(1)&lt;/script&gt;") && confirm.html.includes("h&lt;b&gt;"), "设备名与主机经转义");
+  assert.ok(!confirm.html.includes("<script>"), "设备名里的 <script> 绝不能原样进页面");
+
+  // 确认 POST：csrf 不符 / 跨站 Origin / 跨站 Sec-Fetch-Site 都被拒，token 仍有效
+  const confirmUrl = new URL(confirm.action, BASE).toString();
+  const forged = await formPost(confirmUrl, { csrf: "forged" }, jar);
+  assert.equal(forged.status, 403);
+  const crossSite = await formPost(confirmUrl, confirm.hidden, jar, { origin: "https://evil.example" });
+  assert.equal(crossSite.status, 403);
+  const secFetch = await formPost(confirmUrl, confirm.hidden, jar, { "sec-fetch-site": "cross-site" });
+  assert.equal(secFetch.status, 403);
+  const stillValid = await pageGet(pending.url, jar);
+  assert.equal(stillValid.status, 200, "被拒的 POST 不消费 token");
+  assert.ok(stillValid.html.includes("确认设备"));
+
+  // 正确的确认（同源 Origin 放行）：daemon 收到 enrolled；同一 token 二次使用报不可用
+  const done = await formPost(confirmUrl, stillValid.hidden, jar, { origin: BASE });
+  assert.equal(done.status, 200, done.html);
+  assert.ok(done.html.includes("设备已授权"));
+  const enrolled = await d.waitFor((m) => m.case === "daemonEnrolled", "enrolled");
+  assert.ok(enrolled.deviceToken);
+  const again = new CookieJar();
+  assert.equal((await pageLogin(pending.url, again)).status, 303);
+  const consumed = await pageGet(pending.url, again);
+  assert.equal(consumed.status, 404, "已兑现的 token 再打开应报不可用");
+  assert.ok(consumed.html.includes("授权链接不可用"));
+  d.close();
+});
+
+test("HTTP 授权页：登录 POST 按来源限速", async () => {
+  const limited = await startServer({ port: PORT + 5, env: { ...LOCAL_ENV, COFLUX_LOGIN_RATE_LIMIT: "2" } });
+  try {
+    const url = `http://127.0.0.1:${limited.port}/authorize/cf_authz_whatever`;
+    const jar = new CookieJar();
+    const page = await pageGet(url, jar);
+    const attempt = (password) => formPost(new URL(page.action, url).toString(), { ...page.hidden, username: "admin", password }, jar);
+    assert.equal((await attempt("wrong-1")).status, 401);
+    assert.equal((await attempt("wrong-2")).status, 401);
+    const third = await attempt("admin");
+    assert.equal(third.status, 429, "窗口内第 3 次登录应被来源限速，正确密码也不例外");
+    assert.ok(third.html.includes("登录尝试过于频繁"));
+  } finally {
+    await limited.stop();
+  }
+});
+
+test("HTTP 授权页：token 猜测失败按页面会话计数，达上限后统一报「尝试次数过多」", async () => {
+  const limited = await startServer({ port: PORT + 6, env: { ...LOCAL_ENV, COFLUX_AUTHORIZE_MAX_FAILURES: "3" } });
+  try {
+    const base = `http://127.0.0.1:${limited.port}`;
+    const jar = new CookieJar();
+    assert.equal((await pageLogin(`${base}/authorize/garbage-0`, jar)).status, 303);
+    for (let i = 1; i <= 3; i++) {
+      const r = await pageGet(`${base}/authorize/garbage-${i}`, jar);
+      assert.equal(r.status, 404, `第 ${i} 次仍是普通失败`);
+      assert.ok(!r.html.includes("过多"));
+    }
+    const capped = await pageGet(`${base}/authorize/garbage-final`, jar);
+    assert.equal(capped.status, 429);
+    assert.ok(capped.html.includes("尝试次数过多"), "第 4 次触发限速");
+    // 另一个页面会话不受连坐（按页面会话计数，不按来源地址）
+    const fresh = new CookieJar();
+    assert.equal((await pageLogin(`${base}/authorize/garbage-x`, fresh)).status, 303);
+    assert.equal((await pageGet(`${base}/authorize/garbage-x`, fresh)).status, 404);
+  } finally {
+    await limited.stop();
   }
 });

@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { TaskStatus } from "@coflux/protocol";
-import { startStack, startServer, mkRepo } from "./harness.mjs";
+import { startStack, startServer, mkRepo, CookieJar, pageGet, formPost, pageLogin } from "./harness.mjs";
 import { openRelayDevice, utf8 } from "./device-harness.mjs";
 import {
   callTool,
@@ -422,6 +422,90 @@ test("负向：拒绝授权 → 回调带 error=access_denied 与原 state", asy
   assert.equal(back.origin + back.pathname, "http://localhost:40003/cb");
   assert.equal(back.searchParams.get("error"), "access_denied");
   assert.equal(back.searchParams.get("state"), "deny-1");
+  assert.equal(back.searchParams.get("code"), null);
+});
+
+/* ============================ server 直出的同意页（plan 107，HTTP 流） ============================ */
+
+test("HTTP 同意页：authorize 302 落到 <publicUrl>/oauth/consent；登录 → 允许 → 302 回宿主带 code 可换 token；二次决定被拒", async () => {
+  const { verifier, challenge } = pkce();
+  const redirectUri = "http://localhost:51235/callback";
+  const auth = await startAuthorization(BASE, { clientId, redirectUri, challenge, state: "page-1", scope: "read", resource: `${BASE}/mcp` });
+  assert.equal(auth.status, 302);
+  assert.ok(auth.location.startsWith(`${BASE}/oauth/consent?request=`), `302 落到 server 直出的同意页：${auth.location}`);
+  const requestId = requestIdFromConsentUrl(auth.location);
+
+  // 缺 request 参数 → 直接说明；未登录 GET 不区分 request 是否有效
+  const missing = await pageGet(`${BASE}/oauth/consent`, new CookieJar());
+  assert.equal(missing.status, 400);
+  assert.ok(missing.html.includes("链接缺少授权请求 id"));
+  const bogus = await pageGet(`${BASE}/oauth/consent?request=cf_oreq_nope`, new CookieJar());
+  assert.equal(bogus.status, 200);
+  assert.ok(bogus.html.includes("授权应用访问") && !bogus.html.includes("授权请求不可用"), "登录前不给 request 是否有效的 oracle");
+
+  const jar = new CookieJar();
+  const first = await pageGet(auth.location, jar);
+  assert.equal(first.status, 200);
+  assert.ok(first.html.includes("授权应用访问") && first.html.includes("先登录你的账号，再决定是否允许该应用访问"));
+  assert.equal(first.hidden.request, requestId, "登录表单回填 request id");
+  const cookie = first.headers.getSetCookie().find((c) => c.startsWith("cf_page="));
+  assert.ok(cookie?.includes("Path=/oauth/consent") && cookie.includes("HttpOnly"), `同意页 cookie 按 Path 隔离：${cookie}`);
+
+  const login = await pageLogin(auth.location, jar);
+  assert.equal(login.status, 303, login.html);
+  assert.equal(login.location, `/oauth/consent?request=${encodeURIComponent(requestId)}`);
+
+  const confirm = await pageGet(auth.location, jar);
+  assert.equal(confirm.status, 200);
+  assert.ok(confirm.html.includes("Claude Code (test) 请求访问你的 coflux 账号"));
+  assert.ok(confirm.html.includes("授权完成后跳回 localhost:51235") && confirm.html.includes("scope: read"));
+  assert.ok(confirm.html.includes("允许访问") && confirm.html.includes("拒绝"));
+  assert.equal(confirm.action, "/oauth/consent/decide");
+  assert.equal(confirm.hidden.request, requestId);
+
+  // csrf 不符被拒，请求仍在
+  const forged = await formPost(`${BASE}/oauth/consent/decide`, { ...confirm.hidden, csrf: "forged", decision: "allow" }, jar);
+  assert.equal(forged.status, 403);
+  assert.equal((await pageGet(auth.location, jar)).status, 200, "被拒的决定不消费请求");
+
+  const allowed = await formPost(`${BASE}/oauth/consent/decide`, { ...confirm.hidden, decision: "allow" }, jar);
+  assert.equal(allowed.status, 302, allowed.html);
+  assert.ok(allowed.location.startsWith(`${redirectUri}?`), `允许后直接 302 回宿主回调：${allowed.location}`);
+  const callback = new URL(allowed.location);
+  assert.equal(callback.searchParams.get("state"), "page-1");
+  assert.equal(callback.searchParams.get("iss"), BASE);
+  const code = callback.searchParams.get("code");
+  assert.ok(code);
+  assert.ok(allowed.headers.getSetCookie().some((c) => c.startsWith("cf_page=;") && c.includes("Max-Age=0")), "决定后页面会话作废");
+
+  const token = await exchangeCode(BASE, { code, clientId, verifier, redirectUri });
+  assert.equal(token.status, 200, JSON.stringify(token.json));
+  assert.equal((await mcpListTools(BASE, token.json.access_token)).status, 200, "页面流签出的 code 换到可用的 token");
+
+  // 二次决定：需重新登录，且请求已被消费
+  const again = new CookieJar();
+  assert.equal((await pageLogin(auth.location, again)).status, 303);
+  const consumed = await pageGet(auth.location, again);
+  assert.equal(consumed.status, 404);
+  assert.ok(consumed.html.includes("授权请求不可用"));
+  const twice = await formPost(`${BASE}/oauth/consent/decide`, { ...confirm.hidden, csrf: consumed.hidden.csrf ?? "", decision: "allow" }, again);
+  assert.ok([403, 404].includes(twice.status), `二次决定被拒：${twice.status}`);
+});
+
+test("HTTP 同意页：拒绝 → 302 带 error=access_denied 与原 state", async () => {
+  const { challenge } = pkce();
+  const auth = await startAuthorization(BASE, { clientId, redirectUri: "http://localhost:40004/cb", challenge, state: "page-deny" });
+  assert.equal(auth.status, 302);
+  const jar = new CookieJar();
+  assert.equal((await pageLogin(auth.location, jar)).status, 303);
+  const confirm = await pageGet(auth.location, jar);
+  assert.equal(confirm.status, 200);
+  const denied = await formPost(`${BASE}/oauth/consent/decide`, { ...confirm.hidden, decision: "deny" }, jar);
+  assert.equal(denied.status, 302, denied.html);
+  const back = new URL(denied.location);
+  assert.equal(back.origin + back.pathname, "http://localhost:40004/cb");
+  assert.equal(back.searchParams.get("error"), "access_denied");
+  assert.equal(back.searchParams.get("state"), "page-deny");
   assert.equal(back.searchParams.get("code"), null);
 });
 
