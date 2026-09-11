@@ -125,7 +125,7 @@ ssh root@prod-jp 'cd /opt/coflux && git fetch --tags && git checkout <tag> \
 `app.coflux.dev` 与 `m.coflux.dev` 继续服务**分割前最后一次构建**：不再更新、不做下载页、`/` 的行为不变。
 它们只剩历史工作台（日常工作台在桌面 app；三张浏览器页面已由 server 承担，见上一节，冻结 bundle 里的旧页面
 仍能手动打开但没有任何链接指向它们）。源码在 git 历史 `ce7026b`（分割基线，含最后一份 web / mobile 子项目源码）；
-生产当前跑的冻结构建对应的 SHA：`<待填>`。
+生产当前跑的冻结构建对应的 SHA：`e32103b`（2026-09-11 部署，dist/build-id.txt 同值）。
 
 **下一次从分割后的提交部署 prod 之前，必须先做这一步（一次性）。** `git checkout <tag>` 不会清掉被忽略的
 dist（检出目录 `apps/` 下的 `web/dist`、`mobile/dist`），所以冻结站在分割后的检出里会「碰巧」继续活着——但那是靠忽略文件没被清理，
