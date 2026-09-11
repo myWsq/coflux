@@ -132,12 +132,9 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
    supervisor 只把 domain 换成 `"coflux-supervisor-release-v1\0"`，其余字段相同；`version`/`target`
    按 UTF-8 编码。下载 URL 不属于发布身份，只是可替换的下载位置，因此不签入。relay 产物不签名
    （人工 ssh 部署、不走自动下载验签），只进 `SHA256SUMS` 供部署校验。
-3. **生成 release note**（`scripts/release-notes.mjs`）：取上一个 `v*` tag 到本 tag 的 commit，按
-   type 分组（新功能 / 修复 / 重构与内部改动 / 其他），剥掉冗余的 type 前缀、scope 加粗，剔除
-   `chore(0xx)`/`plan(0xx)` 这类计划文档流转，末尾附桌面、运行内核与 coflux/cofluxd 的升级须知（CLI 版本
-   没变就不印那句指令）。**不用 GitHub 的 `generate_release_notes`**——它只汇总 PR，而本仓库直接
-   push main，产出永远是光秃秃一行 compare 链接。这也意味着 **commit message 就是 changelog**：
-   写清楚 scope 和一句人话结论，发版时零加工直接见人。生成器自带 `--self-check`，挂在 ci.yml。
+3. **生成英文 release note**（`scripts/release-notes.mjs`）：发版前编写并提交 `docs/releases/X.Y.Z.md`，
+   必须以 `# Coflux X.Y.Z` 开头，写清用户收益、安装方式和升级影响。CI 检查对应版本文件、英文正文与未完成占位符。
+   发布时从精确 tag 读取该文件并追加 compare 链接，不再把中文 commit message 当作公开 changelog。
 4. **构建桌面**：调用 `desktop-release.yml` 完成同 SHA 的签名、公证与产物检查。
 5. **发布统一 Release**：内核和桌面全部成功后才发布，资产含：
    - 桌面 dmg/zip/blockmap 与 `latest-mac.yml`
@@ -226,7 +223,7 @@ app 启动 15s 后与每 4 小时检查，协议准入失败时立即检查；�
 用户显式点击「重启并更新」才安装并重连存活内核；普通退出不自动安装，而是按退出确认结束本机终端。
 菜单「检查更新…」可手动触发。运行内核自身重启可能结束终端，需另行确认并可延后。
 
-本机冒烟：`pnpm -C apps/desktop pack` 出未签名的 `apps/desktop/dist/mac-arm64/Coflux.app`（Fuses 已翻、
+本机冒烟：`pnpm -C apps/desktop run pack` 出未签名的 `apps/desktop/dist/mac-arm64/Coflux.app`（Fuses 已翻、
 ad-hoc 签名）。通知/角标只在签名产物上可信（Electron 42+ 在 macOS 用 UNUserNotification），未签名包上的
 失败不算回归。
 

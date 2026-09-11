@@ -1,6 +1,6 @@
 {
   "name": "coflux",
-  "version": "0.34.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.6.0",
@@ -20,5 +20,6 @@
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",
     "typescript": "^7.0.2"
-  }
+  },
+  "license": "MIT"
 }

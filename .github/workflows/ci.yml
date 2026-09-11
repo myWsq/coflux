@@ -127,6 +127,7 @@ jobs:
       - name: 统一产品版本与发布约束
         run: |
           node scripts/product-version.mjs --check
+          node scripts/release-notes.mjs --check
           node --test scripts/product-version.test.mjs
 
       - run: pnpm install --frozen-lockfile

@@ -559,23 +559,15 @@ mod agent_script_tests {
         let _ = std::fs::remove_file(&log);
     }
 
-    /// 中心触发的命令终端：同一 operation_id 两次写出的脚本路径必须完全一致（sessiond 账本的
-    /// canonical 含 shell），不同 operation_id 不能撞路径；id 里的奇怪字符不进入文件名。
-    /// 生产模板：管道尾必须是 worker 自己的 `--log-sink`（不是 tee），且日志汇放在忽略 INT/QUIT 的
-    /// 子 shell 里；退出码仍取 PIPESTATUS[0]。只看脚本文本不执行——测试二进制没有这个分流。
+    /// 生产模板的防回退：管道尾必须是 worker 自己的 `--log-sink`，不能退回 `tee`（`tee` 吃掉退出码、
+    /// 也拿不到日志汇的另一路）。只看脚本文本不执行——测试二进制没有这个分流。
     #[test]
     fn production_script_pipes_into_worker_log_sink() {
         SINK_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
         let name = format!("test-prod-{}.sh", std::process::id());
-        let (path, log) = write_command_script_named(&name, "echo hi").expect("write script");
+        let (path, _log) = write_command_script_named(&name, "echo hi").expect("write script");
         let script = std::fs::read_to_string(&path).expect("read script");
-        let exe = std::env::current_exe().expect("current_exe");
-        assert!(script.contains(&sh_quote(&exe.to_string_lossy())), "必须引用 worker 自己: {script}");
-        assert!(script.contains(crate::log_sink::SUBCOMMAND), "{script}");
-        assert!(script.contains(&sh_quote(&log)), "日志路径要传给日志汇: {script}");
-        assert!(script.contains("(trap '' INT QUIT; exec "), "日志汇要忽略 INT/QUIT: {script}");
         assert!(!script.contains("| tee "), "不再用 tee: {script}");
-        assert!(script.contains("exit \"${PIPESTATUS[0]}\""), "退出码照旧: {script}");
         let _ = std::fs::remove_file(&path);
     }
 

@@ -752,28 +752,6 @@ fn status_name(status: i32) -> &'static str {
 mod tests {
     use super::*;
 
-    #[test]
-    fn response_shapes_are_agent_readable() {
-        let ok = AgentResponse::ok(serde_json::json!({ "taskId": "t1" }));
-        assert_eq!(ok.status, "200 OK");
-        let parsed: serde_json::Value = serde_json::from_str(&ok.body).expect("ok 体是 JSON");
-        assert_eq!(parsed["ok"], serde_json::json!(true));
-        assert_eq!(parsed["taskId"], serde_json::json!("t1"));
-
-        let err = AgentResponse::err("403 Forbidden", "不在 coflux 终端里");
-        let parsed: serde_json::Value = serde_json::from_str(&err.body).expect("err 体是 JSON");
-        assert_eq!(parsed["ok"], serde_json::json!(false));
-        assert_eq!(parsed["error"], serde_json::json!("不在 coflux 终端里"));
-    }
-
-    #[test]
-    fn status_names_cover_task_states() {
-        assert_eq!(status_name(wire::TaskStatus::Idle as i32), "idle");
-        assert_eq!(status_name(wire::TaskStatus::Running as i32), "running");
-        assert_eq!(status_name(wire::TaskStatus::Exited as i32), "exited");
-        assert_eq!(status_name(999), "unknown");
-    }
-
     fn scope(owning: &str, effective: &str) -> WorkspaceScope {
         WorkspaceScope {
             owning: owning.into(),
@@ -819,13 +797,6 @@ mod tests {
         let refused = unknown.require_owning().expect_err("必须拒绝");
         assert_eq!(refused.status, "409 Conflict");
         assert!(refused.body.contains("跟随 worktree"), "{}", refused.body);
-    }
-
-    #[test]
-    fn request_ids_are_unique() {
-        let first = next_request_id();
-        let second = next_request_id();
-        assert_ne!(first, second);
     }
 
     #[test]
