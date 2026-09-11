@@ -1,11 +1,11 @@
 import { useEffect, type RefObject } from "react";
 
-import { isStandalone } from "@/components/workbench/use-shortcut-modifier";
 import type { WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
-import { getDesktopBridge, type DesktopCommand } from "@/desktop-bridge";
+import { desktop } from "@/config";
+import type { DesktopCommand } from "@/desktop-bridge";
 
 type GlobalShortcutsOptions = {
-  /** 当前选中工作区所属项目 id；无选中工作区时为 null，Cmd+Ctrl+N 安静忽略 */
+  /** 当前选中工作区所属项目 id；无选中工作区时为 null，⌘N 安静忽略 */
   selectedProjectId: string | null;
   /** 只指向 active 的 WorkspaceTerminal 实例（见 workbench.tsx 的 ref 挂载方式），
    * 保活但隐藏的实例永远读不到这份 ref，天然满足"只有 active 实例响应"的约束 */
@@ -15,7 +15,7 @@ type GlobalShortcutsOptions = {
 };
 
 /**
- * 全局快捷键（plan 015）：Cmd+Ctrl 前缀 + Cmd+/ 帮助面板。
+ * 全局快捷键（plan 015）：纯 ⌘ 前缀 + ⌘/ 帮助面板。
  *
  * 挂在 window capture 阶段而非某个 xterm 的 attachCustomKeyEventHandler：capture 先于
  * xterm 隐藏 textarea 的 target 阶段触发，preventDefault + stopPropagation 能在组合键
@@ -25,8 +25,8 @@ type GlobalShortcutsOptions = {
  * 键位随字符映射漂移（如 Dvorak 下 KeyT 物理位置对应的字符并非 "t"，但拦截的是
  * 物理键位，这与大多数系统级/编辑器快捷键的语义一致）。
  *
- * 桌面 app（plan 103）：键位判定与 standalone 相同（纯 ⌘，见 use-shortcut-modifier）；原生菜单项
- * 不注册 accelerator，点菜单走桥接的 onCommand，与键盘路径共用同一组处理函数。
+ * 桌面 app（plan 103）：原生菜单项不注册 accelerator（只展示键位），键全部落到页面；点菜单
+ * 走桥接的 onCommand，与键盘路径共用同一组处理函数。
  */
 export function useGlobalShortcuts({
   selectedProjectId,
@@ -36,20 +36,16 @@ export function useGlobalShortcuts({
 }: GlobalShortcutsOptions) {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      // Cmd+/：不带 Ctrl，与下面的 Cmd+Ctrl 前缀互斥；再按一次由调用方 toggle 关闭。
-      if (event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.code === "Slash") {
+      // 单修饰 ⌘ 前缀：⌘/ 与下面的字母/数字键共用同一判定；再按一次 ⌘/ 由调用方 toggle 关闭。
+      const hasPrefix = event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+      if (!hasPrefix) return;
+
+      if (event.code === "Slash") {
         event.preventDefault();
         event.stopPropagation();
         onToggleHelp();
         return;
       }
-
-      // 前缀：PWA standalone 下浏览器无 tab 栏，⌘T/⌘W/… 释放给页面，前缀降级为纯 ⌘；
-      // 浏览器 tab 模式仍用 ⌃⌘（Cmd 单修饰在 tab 下被 chrome 层硬保留，网页拦不住）。
-      const hasPrefix = isStandalone()
-        ? event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
-        : event.metaKey && event.ctrlKey;
-      if (!hasPrefix) return;
 
       const terminal = activeTerminalRef.current;
       switch (event.code) {
@@ -59,8 +55,6 @@ export function useGlobalShortcuts({
           terminal?.createTerminal();
           return;
         case "KeyW":
-          // ponytail: standalone 下纯 ⌘W 可能仍被 OS/浏览器抢去关 PWA 窗口（无 Keyboard Lock 时
-          // preventDefault 拦不住）——需在真机 PWA 验证；拦不住则此键退回 ⌃⌘W。
           event.preventDefault();
           event.stopPropagation();
           terminal?.closeActiveTab();
@@ -96,32 +90,32 @@ export function useGlobalShortcuts({
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
   }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp]);
 
-  // 原生菜单命令（桌面 app）：与上面的键位一一对应，浏览器里桥接不存在、effect 空跑。
-  useEffect(() => {
-    const bridge = getDesktopBridge();
-    if (!bridge) return;
-    return bridge.onCommand((command: DesktopCommand) => {
-      const terminal = activeTerminalRef.current;
-      switch (command) {
-        case "create-terminal":
-          terminal?.createTerminal();
-          return;
-        case "close-terminal":
-          terminal?.closeActiveTab();
-          return;
-        case "create-workspace":
-          if (selectedProjectId) onOpenCreateWorkspaceMenu(selectedProjectId);
-          return;
-        case "previous-tab":
-          terminal?.selectRelativeTab(-1);
-          return;
-        case "next-tab":
-          terminal?.selectRelativeTab(1);
-          return;
-        case "toggle-help":
-          onToggleHelp();
-          return;
-      }
-    });
-  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp]);
+  // 原生菜单命令：与上面的键位一一对应。
+  useEffect(
+    () =>
+      desktop.onCommand((command: DesktopCommand) => {
+        const terminal = activeTerminalRef.current;
+        switch (command) {
+          case "create-terminal":
+            terminal?.createTerminal();
+            return;
+          case "close-terminal":
+            terminal?.closeActiveTab();
+            return;
+          case "create-workspace":
+            if (selectedProjectId) onOpenCreateWorkspaceMenu(selectedProjectId);
+            return;
+          case "previous-tab":
+            terminal?.selectRelativeTab(-1);
+            return;
+          case "next-tab":
+            terminal?.selectRelativeTab(1);
+            return;
+          case "toggle-help":
+            onToggleHelp();
+            return;
+        }
+      }),
+    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp],
+  );
 }

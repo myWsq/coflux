@@ -18,6 +18,7 @@ export {
   type DeviceTransportOptions,
   type OfflineCatalogOptions,
   type OfflineCatalogStorage,
+  type TokenStorage,
   type LocalSessionState,
   type SessionAgentState,
   type WorkspaceActivity,

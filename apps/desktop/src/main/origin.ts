@@ -4,7 +4,7 @@
  * 渲染层跑在自定义 scheme `coflux-app://app` 下，浏览器会把它作为 Origin 头发出；而中心
  * `validOrigin` 只接受 http/https（apps/server/src/local-control.ts）、hub 要求 pair 自报 origin 与
  * `/client` 握手 Origin 精确相等、daemon 按中心下发的 origin 白名单拒绝 loopback 握手——三处零放宽。
- * 于是由主进程在渲染层发起的每一条 WebSocket 握手上写入同一个稳定的 https Origin，Web 侧经
+ * 于是由主进程在渲染层发起的每一条 WebSocket 握手上写入同一个稳定的 https Origin，渲染层经
  * deviceTransport.origin 上报同值；relay 握手一并改写（relay 不看 Origin，但同一身份更一致）。
  *
  * 纯函数，不 import electron，便于单测。

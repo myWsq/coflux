@@ -22,7 +22,7 @@ export function openExternalIfHttp(url: string): void {
 }
 
 /**
- * 主窗口（plan 103）：隐藏标题栏 + 红绿灯内嵌到侧栏顶部（IDE 式，Web 侧在桌面下给侧栏留出拖拽区）。
+ * 主窗口（plan 103）：隐藏标题栏 + 红绿灯内嵌到侧栏顶部（IDE 式，渲染层给侧栏留出拖拽区）。
  * 安全基线：sandbox / contextIsolation 默认开，nodeIntegration 关，webview 关；新窗口一律拒绝、
  * 外链交系统浏览器；离开 app 自身来源的导航拦下（授权页 / OAuth 同意页 / 端口预览都在系统浏览器）。
  */

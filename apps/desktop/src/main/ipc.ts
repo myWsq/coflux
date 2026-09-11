@@ -1,6 +1,6 @@
 import { ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
 
-import type { DesktopNotification, DesktopUpdateState } from "../../../web/src/desktop-bridge";
+import type { DesktopNotification, DesktopUpdateState } from "../shared/desktop-bridge";
 import { IPC, type Bootstrap } from "../shared/ipc";
 import { sanitizeBadgeCount, sanitizeNotification } from "./ipc-sanitize";
 import { isTrustedRendererUrl } from "./ipc-trust";

@@ -4,7 +4,6 @@ import { TaskStatus } from "@coflux/protocol";
 
 import {
   parseStoredSelection,
-  requestWorkbenchExitConfirmation,
   resolveActiveTaskId,
   resolveActiveTaskIdAfterPendingDrop,
   resolveSelectionAfterTaskMove,
@@ -35,21 +34,6 @@ test("变更视图只在当前工作区且选中 changes tab 时激活", () => {
   assert.equal(shouldActivateChangesView(true, "terminal"), false);
   assert.equal(shouldActivateChangesView(false, "changes"), false);
   assert.equal(shouldActivateChangesView(false, "terminal"), false);
-});
-
-test("离开工作台会阻止默认卸载并设置浏览器兼容字段", () => {
-  let prevented = false;
-  const event = {
-    returnValue: "unchanged",
-    preventDefault() {
-      prevented = true;
-    },
-  };
-
-  requestWorkbenchExitConfirmation(event);
-
-  assert.equal(prevented, true);
-  assert.equal(event.returnValue, "");
 });
 
 test("只有仍在运行的终端关闭前需要确认", () => {

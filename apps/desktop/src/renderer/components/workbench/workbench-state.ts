@@ -24,14 +24,6 @@ export function shouldActivateChangesView(
   return workspaceActive && view === "changes";
 }
 
-/** 浏览器离开工作台前必须触发原生确认；浏览器不允许自定义提示文案。 */
-export function requestWorkbenchExitConfirmation(
-  event: Pick<BeforeUnloadEvent, "preventDefault" | "returnValue">,
-): void {
-  event.preventDefault();
-  event.returnValue = "";
-}
-
 /** 仍在运行的终端先确认；已退出的历史 Tab 可直接关闭。 */
 export function taskCloseNeedsConfirmation(status: TaskStatus): boolean {
   return status === TaskStatus.RUNNING;
