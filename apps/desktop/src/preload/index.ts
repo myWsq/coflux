@@ -31,6 +31,9 @@ const bridge: DesktopBridge = {
   setBadge(count: number) {
     ipcRenderer.send(IPC.setBadge, Number(count));
   },
+  showServerInfo() {
+    ipcRenderer.send(IPC.showServerInfo);
+  },
   onFocusWorkspace(listener) {
     return subscribe<string>(IPC.focusWorkspace, listener);
   },

@@ -4,6 +4,8 @@ export const IPC = {
   bootstrap: "desktop:bootstrap",
   notify: "desktop:notify",
   setBadge: "desktop:set-badge",
+  /** 「服务器地址…」原生对话框（plan 110）：settings.json 路径与「打开设置文件」只有主进程有 */
+  showServerInfo: "desktop:show-server-info",
   checkForUpdates: "desktop:check-for-updates",
   installUpdate: "desktop:install-update",
   getUpdateState: "desktop:get-update-state",

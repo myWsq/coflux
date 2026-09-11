@@ -3,8 +3,8 @@
  * 渲染层假定它必定存在（缺失即启动期报错，见 renderer/desktop-bridge.ts）。主进程 / preload / 渲染层
  * 三方都只从这里 type-import；文件里只有类型，不带任何运行时代码。
  *
- * 桥接面刻意最小：服务器地址 / 自报 Origin / 通知 / Dock 角标 / 「聚焦工作区」回调 / 原生菜单命令 /
- * 更新提示 / 会话 token 存取。不暴露 Node、fs、shell 之类通用能力。
+ * 桥接面刻意最小：服务器地址（含「服务器地址…」原生对话框）/ 自报 Origin / 通知 / Dock 角标 /
+ * 「聚焦工作区」回调 / 原生菜单命令 / 更新提示 / 会话 token 存取。不暴露 Node、fs、shell 之类通用能力。
  */
 
 export type DesktopUpdateStatus = "idle" | "checking" | "available" | "downloading" | "downloaded" | "not-available" | "error";
@@ -37,6 +37,11 @@ export type DesktopBridge = {
   readonly serverUrl: string;
   /** 主进程在 WebSocket 握手上改写的稳定 https Origin；渲染层经 deviceTransport.origin 上报同值 */
   readonly origin: string;
+  /**
+   * 打开主进程的「服务器地址…」原生对话框（plan 110）：与原生菜单同一个入口，无参、fire-and-forget。
+   * 渲染层自己弹不了——settings.json 路径与「打开设置文件」动作只有主进程有。
+   */
+  showServerInfo(): void;
   notify(notification: DesktopNotification): void;
   /** 待处理工作区数；0 清除角标 */
   setBadge(count: number): void;

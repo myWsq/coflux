@@ -181,6 +181,8 @@ const OFFLINE_CATALOG_TIMEOUT_MS = 5000;
 type OfflineCatalog = {
   version: number;
   savedAt: number;
+  /** 登录身份显示串（plan 110）：离线冷启动也要认得出「我是谁」。旧缓存没有此字段，按空串兼容 */
+  loginName: string;
   daemons: DaemonInfo[];
   projects: Project[];
   workspaces: Workspace[];
@@ -200,6 +202,8 @@ function parseOfflineCatalog(raw: string | null): OfflineCatalog | null {
     return {
       version: OFFLINE_CATALOG_VERSION,
       savedAt: typeof catalog.savedAt === "number" ? catalog.savedAt : 0,
+      // 缺字段的旧缓存（plan 110 之前写的）只是没有身份，不该整份作废——版本号仍是 1。
+      loginName: typeof catalog.loginName === "string" ? catalog.loginName : "",
       daemons: catalog.daemons as DaemonInfo[],
       projects: catalog.projects as Project[],
       workspaces: catalog.workspaces as Workspace[],
@@ -216,6 +220,10 @@ export type CofluxState = {
   status: ConnectionStatus;
   authState: AuthState;
   loginError: string;
+  /** 当前连接的登录身份显示串（plan 110）：password 模式是 email、local 模式是用户名。
+   * 由 authOk 下发（旧 server 不回 = 空串），随离线目录缓存落盘，登出 / 认证失败清空。
+   * 展示用，别拿它当账号主键。 */
+  loginName: string;
   daemons: DaemonInfo[];
   projects: Project[];
   workspaces: Workspace[];
@@ -279,6 +287,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     status: token ? "connecting" : "disconnected",
     authState: token ? "authenticating" : "need-login",
     loginError: "",
+    loginName: "",
     daemons: [],
     projects: [],
     workspaces: [],
@@ -312,6 +321,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       const catalog: OfflineCatalog = {
         version: OFFLINE_CATALOG_VERSION,
         savedAt: Date.now(),
+        loginName: state.loginName,
         daemons: state.daemons,
         projects: state.projects,
         workspaces: state.workspaces,
@@ -359,6 +369,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     offlineHydrated = true;
     store.setState((state) => ({
       authState: "authed",
+      loginName: catalog.loginName,
       daemons: catalog.daemons,
       projects: catalog.projects,
       workspaces: catalog.workspaces,
@@ -563,7 +574,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         controlAuthenticated = true;
         deviceRouter.setIceServers(value.iceServers);
         deviceRouter.setControlOnline(true);
-        store.setState({ authState: "authed", loginError: "" });
+        store.setState({ authState: "authed", loginError: "", loginName: value.loginName ?? "" });
         shouldRetry = true;
         connection.resetBackoff();
         if (value.clientToken) {
@@ -582,6 +593,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         clearOfflineCatalog();
         store.setState({
           loginError: "登录失败：用户名或密码错误",
+          loginName: "",
           authState: "auth-failed",
         });
         shouldRetry = false;
@@ -826,6 +838,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     connection.stop();
     store.setState({
       authState: "need-login",
+      loginName: "",
       daemons: [],
       projects: [],
       workspaces: [],

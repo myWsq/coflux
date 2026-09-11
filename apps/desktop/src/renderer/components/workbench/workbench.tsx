@@ -21,6 +21,7 @@ import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useTerminalAttach } from "@/components/workbench/terminal-attach";
+import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import type { WorkspaceActiveTab, WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 import {
@@ -34,7 +35,7 @@ import {
   type WorkbenchSelection,
 } from "@/components/workbench/workbench-state";
 import { WORKSPACE_KEY, desktop } from "@/config";
-import type { DesktopBridge, DesktopUpdateState } from "@/desktop-bridge";
+import type { DesktopBridge } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
 
@@ -127,20 +128,10 @@ function DesktopAttention({ client, bridge, selectedWorkspaceId }: { client: Cof
  * 挂载即触发一次更新检查，按 electron-updater 状态显示进度/重启按钮。
  */
 function DesktopOutdated({ bridge }: { bridge: DesktopBridge }) {
-  const [update, setUpdate] = useState<DesktopUpdateState>({ status: "idle" });
+  // 订阅 + 补拉一次由共用 hook 负责（侧栏账号脚部同款）；「挂载即检查」是本页独有的，留在这里。
+  const update = useDesktopUpdateState(bridge);
   useEffect(() => {
-    let disposed = false;
-    const unsubscribe = bridge.onUpdateState((state) => {
-      if (!disposed) setUpdate(state);
-    });
-    void bridge.getUpdateState().then((state) => {
-      if (!disposed) setUpdate(state);
-    });
     bridge.checkForUpdates();
-    return () => {
-      disposed = true;
-      unsubscribe();
-    };
   }, [bridge]);
   const prompt = resolveOutdatedPrompt(update);
   return (
