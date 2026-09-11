@@ -1707,6 +1707,12 @@ pub struct AuthOk {
     /// client 建 RTCPeerConnection（发 offer 之前）需要它。
     #[prost(string, repeated, tag="3")]
     pub ice_servers: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// 本连接的「登录身份显示串」（plan 110）：password 模式 = 该会话 token 绑定用户的 email，
+    /// local 模式 = COFLUX_USERNAME。客户端拿它显示「我是谁」（桌面版侧栏脚部），不得当主键用。
+    /// optional 是为了把「旧 server 不回」与「回了空串」分开：查不到用户（user_id 为 NULL 的旧
+    /// token、用户已删）就不设本字段，认证照常成功——身份查询永远不是拒绝理由。
+    #[prost(string, optional, tag="4")]
+    pub login_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthError {
