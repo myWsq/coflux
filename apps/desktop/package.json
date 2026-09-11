@@ -17,6 +17,7 @@
     "icon": "node scripts/export-icon.mjs"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.9"
   },
