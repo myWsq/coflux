@@ -97,7 +97,10 @@ direct 槽位内部有两个候选，优先级 loopback > P2P；槽位整体与 
 promotion，见 5.2）。
 
 **loopback**：desktop web 默认尝试 `ws://127.0.0.1:8788`。首次配对由已认证中心连接协助安装
-Origin 绑定的持久 grant；之后浏览器身份、grant 与 generation 可在中心离线时复用。gateway 只
+Origin 绑定的持久 grant；之后浏览器身份、grant 与 generation 可在中心离线时复用。Electron 桌面版
+（`apps/desktop`，plan 103）走同一条链路：渲染层跑在自定义 scheme 下，主进程把 `/client` 与
+`/device` 握手的 Origin 改写成稳定的 `https://desktop.coflux.dev`，自报 origin 同值，grant 列表里
+与浏览器的 `https://app.coflux.dev` 可区分；server/daemon 的 Origin 校验零放宽。gateway 只
 接受精确 Origin，握手校验签名、nonce、期限和速率限制。cached direct 的 terminal 与普通
 Device RPC 不等待中心：browser → loopback gateway → worker → UDS → sessiond。中心仍可并行
 承载低频 control 和 checkpoint，但不在热路径上。
@@ -401,6 +404,7 @@ read/control 仍可用`（未 republish，直连本身正常）；缓存 grant �
 ```text
 apps/server       中心 control / relay rendezvous / checkpoint / Postgres
 apps/web          desktop React + xterm.js（默认迭代对象，启用 direct）
+apps/desktop      Electron 壳：原样打包 apps/web 的 macOS 客户端（菜单/通知/角标/自动更新）
 apps/mobile       冻结的 relay-only client
 apps/ios          原生 iOS client（SwiftUI + SwiftTerm）
 packages/core     TS 共享日志等基础设施
@@ -416,7 +420,7 @@ tests             真实进程 + WebSocket 黑盒 harness
 ```
 
 协议真相源是 `proto/`，Buf 生成 TS/Rust/Swift。自动发布门包括 Buf lint/codegen、TS/Swift client
-状态机、server/web typecheck、web/mobile build、iOS build-for-testing、Rust test/build、独立 VT
+状态机、server/web typecheck、web/mobile/desktop build、iOS build-for-testing、Rust test/build、独立 VT
 oracle、全黑盒和 `git diff --check`；benchmark 与当前 Chrome 实机门仍需发布前人工签字。Safari/
 Firefox 当前不是阻断门且可用性未知，原生 iOS 真机生产验收仍待用户。黑盒只用临时
 `COFLUX_HOME`、端口、数据库与进程组，不触碰真实 daemon。

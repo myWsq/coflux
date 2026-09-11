@@ -1,0 +1,54 @@
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+
+import type { DesktopBridge, DesktopCommand, DesktopNotification, DesktopUpdateState } from "../../../web/src/desktop-bridge";
+import { IPC, type Bootstrap } from "../shared/ipc";
+
+// 桥接对象的类型真相源在 apps/web/src/desktop-bridge.ts（web 拥有契约），这里只实现它。
+// sandbox preload：只能是 CommonJS、只有 electron 的 contextBridge/ipcRenderer 可用，没有 Node 能力可泄露。
+
+const boot = ipcRenderer.sendSync(IPC.bootstrap) as Bootstrap;
+
+function subscribe<T>(channel: string, listener: (payload: T) => void): () => void {
+  const handler = (_event: IpcRendererEvent, payload: T) => listener(payload);
+  ipcRenderer.on(channel, handler);
+  return () => {
+    ipcRenderer.removeListener(channel, handler);
+  };
+}
+
+const bridge: DesktopBridge = {
+  platform: boot.platform,
+  version: boot.version,
+  serverUrl: boot.serverUrl,
+  origin: boot.origin,
+  notify(notification: DesktopNotification) {
+    ipcRenderer.send(IPC.notify, {
+      workspaceId: String(notification.workspaceId),
+      title: String(notification.title),
+      body: String(notification.body),
+    });
+  },
+  setBadge(count: number) {
+    ipcRenderer.send(IPC.setBadge, Number(count));
+  },
+  onFocusWorkspace(listener) {
+    return subscribe<string>(IPC.focusWorkspace, listener);
+  },
+  onCommand(listener) {
+    return subscribe<DesktopCommand>(IPC.command, listener);
+  },
+  checkForUpdates() {
+    ipcRenderer.send(IPC.checkForUpdates);
+  },
+  installUpdate() {
+    ipcRenderer.send(IPC.installUpdate);
+  },
+  getUpdateState() {
+    return ipcRenderer.invoke(IPC.getUpdateState) as Promise<DesktopUpdateState>;
+  },
+  onUpdateState(listener) {
+    return subscribe<DesktopUpdateState>(IPC.updateState, listener);
+  },
+};
+
+contextBridge.exposeInMainWorld("cofluxDesktop", bridge);

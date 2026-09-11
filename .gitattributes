@@ -1,9 +1,2 @@
-# 上游生成的语法表与 vendored 库默认折叠，便于审查宿主实现。
-apps/macos/NativeGrammars/**/src/parser.c linguist-generated=true
+# vendored 库默认折叠，便于审查宿主实现。
 vendor/vt100/** linguist-vendored=true
-# 原始许可与查询保留上游字节；补丁中的空白上下文也是有效内容。
-apps/macos/Ghostty/THIRD-PARTY-LICENSES.txt -whitespace
-apps/macos/Sources/ThirdPartyNotices.txt -whitespace
-apps/macos/licenses/** -whitespace
-apps/macos/Sources/Resources/*-highlights.scm -whitespace
-apps/macos/Benchmarks/*.patch -whitespace
