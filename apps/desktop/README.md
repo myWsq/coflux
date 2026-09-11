@@ -83,6 +83,8 @@ pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/ico
   变量缺失、为空或目录不存在时 `claude` 的行为与今天完全一致（这也是逃生口）。没有任何设置页与开关。
   plist 何时写：接入流程之外，**app 启动时**若渲染结果与磁盘上的不同（npm 接入的机器、旧版 app 写的没有这个键、app 换了位置）
   **只重写文件**，不调 launchctl、不重启 daemon——reload 会结束本机所有终端；新值在下一次 supervisor 启动（面板点「重启」、
-  「重启并更新」、开机）时生效。plist 不存在（未接入）时不凭空创建。除这一个键外 plist 与 npm 版 `cofluxd` 逐字同构，两边仍可互换。
+  「重启并更新」、开机）时生效。plist 不存在（未接入）时不凭空创建；**本构建不带插件时启动期一律不碰 plist**——
+  没跑过 stage 脚本的 dev 实例渲染出的是 npm 形态，照写会把安装版写进去的 `COFLUX_CLAUDE_PLUGIN_DIR` 抹掉（同一台 Mac 上两者共用 `~/.coflux`）；
+  接入流程是用户的显式动作，不受这条约束。除这一个键外 plist 与 npm 版 `cofluxd` 逐字同构，两边仍可互换。
 - **安全基线**：sandbox/contextIsolation 开、nodeIntegration 关、Fuses 关 RunAsNode 等、响应带 CSP、
   权限默认拒绝、IPC 校验发送方来源与载荷；新窗口/外链一律系统浏览器。桥接面不暴露 Node / fs / shell。

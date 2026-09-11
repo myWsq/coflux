@@ -42,11 +42,18 @@ export function launchAgentPlist(paths: DaemonHomePaths, options: { claudePlugin
 }
 
 /**
- * app 启动时的 plist 同步判定（plan 115）：只有本机已接入（plist 已在磁盘上）且内容与当前渲染结果不同才重写。
- * 未接入的机器不凭空创建 plist；重写只动文件，绝不 launchctl reload——那会结束本机所有终端，与 plan 113
- * 「从不自动重启」矛盾。新值在下一次 supervisor 启动（面板点「重启」、开机、「重启并更新」）时生效。
+ * app 启动时的 plist 同步判定（plan 115）：三个条件同时成立才重写——
+ * 1. **本构建带插件**（claudePluginDir 非空）。不带插件的构建（没跑过 stage 脚本、用 `electron .` 起的 dev 实例）
+ *    渲染出的是 npm 形态的 plist，若照写就会把打包版 app 写进去的 COFLUX_CLAUDE_PLUGIN_DIR 抹掉，
+ *    下次 daemon 重启插件就没了（同一台 Mac 上 dev 实例与安装版共用 ~/.coflux）。启动期一律不碰。
+ *    接入流程是用户的显式动作，不受这条约束，照旧按本构建渲染。
+ * 2. 本机**已接入**（plist 已在磁盘上）：未接入的机器不凭空创建 plist。
+ * 3. 内容确实不同。
+ * 重写只动文件，绝不 launchctl reload——那会结束本机所有终端，与 plan 113「从不自动重启」矛盾；
+ * 新值在下一次 supervisor 启动（面板点「重启」、开机、「重启并更新」）时生效。
  */
-export function shouldRewritePlist(existing: string | null, next: string): boolean {
+export function shouldRewritePlist(existing: string | null, next: string, claudePluginDir: string | null | undefined): boolean {
+  if (!claudePluginDir?.trim()) return false;
   return existing !== null && existing !== next;
 }
 

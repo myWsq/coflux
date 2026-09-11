@@ -85,12 +85,26 @@ test("插件目录值做 XML 转义：未转义的 & / < 会让 launchd 整份 p
 
 test("启动期只在已接入且内容不同时重写 plist，且从不 launchctl（plan 115）", () => {
   const paths = daemonHomePaths(HOME_DIR, {});
-  const next = launchAgentPlist(paths, { claudePluginDir: "/Applications/Coflux.app/Contents/Resources/daemon/claude-plugin" });
-  assert.equal(shouldRewritePlist(null, next), false); // 未接入的机器不凭空创建 plist
-  assert.equal(shouldRewritePlist(next, next), false); // 内容一致：不写盘
-  assert.equal(shouldRewritePlist(NPM_PLIST, next), true); // npm 接入 / 旧版 app 写的没有这个键
-  assert.equal(shouldRewritePlist(launchAgentPlist(paths), next), true);
-  assert.equal(shouldRewritePlist("", next), true);
+  const pluginDir = "/Applications/Coflux.app/Contents/Resources/daemon/claude-plugin";
+  const next = launchAgentPlist(paths, { claudePluginDir: pluginDir });
+  assert.equal(shouldRewritePlist(null, next, pluginDir), false); // 未接入的机器不凭空创建 plist
+  assert.equal(shouldRewritePlist(next, next, pluginDir), false); // 内容一致：不写盘
+  assert.equal(shouldRewritePlist(NPM_PLIST, next, pluginDir), true); // npm 接入 / 旧版 app 写的没有这个键
+  assert.equal(shouldRewritePlist(launchAgentPlist(paths), next, pluginDir), true);
+  assert.equal(shouldRewritePlist("", next, pluginDir), true);
+});
+
+test("本构建不带插件时启动期一律不碰 plist：不抹掉打包版写进去的键（plan 115）", () => {
+  const paths = daemonHomePaths(HOME_DIR, {});
+  // dev 实例（`electron .` 没跑过 stage 脚本）渲染出的就是 npm 形态；磁盘上是安装版写的带键版本
+  const bundled = launchAgentPlist(paths, { claudePluginDir: "/Applications/Coflux.app/Contents/Resources/daemon/claude-plugin" });
+  const devRendered = launchAgentPlist(paths);
+  assert.notEqual(bundled, devRendered);
+  assert.equal(shouldRewritePlist(bundled, devRendered, null), false);
+  assert.equal(shouldRewritePlist(bundled, devRendered, undefined), false);
+  assert.equal(shouldRewritePlist(bundled, devRendered, "   "), false);
+  // 连「磁盘上是 npm 形态、要换成 npm 形态」这种无害情形也一并跳过：启动期不带插件就完全不写盘
+  assert.equal(shouldRewritePlist("garbage", devRendered, null), false);
 });
 
 test("daemon 地址跟随 app：/client 换 /daemon，其他路径直接落 /daemon，去掉 query", () => {

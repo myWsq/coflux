@@ -236,11 +236,12 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
    * 启动期 plist 同步（plan 115）：已接入的机器上，磁盘内容与当前 app 渲染出的不同就**只重写文件**——
    * npm 接入的机器、旧版 app 写的没有 COFLUX_CLAUDE_PLUGIN_DIR、app 换了位置都走这条。
    * 不碰 launchctl（reload 会结束本机所有终端），新值在下一次 supervisor 启动时生效；
-   * 未接入的机器（plist 不存在）不凭空创建。失败只记日志，不影响状态。
+   * 未接入的机器（plist 不存在）不凭空创建；**本构建不带插件时整条跳过**，绝不把打包版写进去的
+   * COFLUX_CLAUDE_PLUGIN_DIR 抹掉（判定在 shouldRewritePlist 里）。失败只记日志，不影响状态。
    */
   function syncPlistOnStart(): void {
     try {
-      if (!shouldRewritePlist(readText(paths.plist), renderPlist())) return;
+      if (!shouldRewritePlist(readText(paths.plist), renderPlist(), options.claudePluginDir)) return;
       writePlist();
       log.info("LaunchAgent plist 已按当前 app 重写，下次 daemon 启动生效（不自动重启）");
     } catch (syncError) {
