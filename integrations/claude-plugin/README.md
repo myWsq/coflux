@@ -4,10 +4,26 @@ Connects Claude Code to the [coflux](https://github.com/myWsq/coflux) agent comm
 machine runs the PTYs that host agent sessions, and the web/mobile app shows every workspace's live turn state
 so a human can supervise many parallel agents and take over at any time.
 
-This directory is the plugin's **delivery directory**: self-contained and installable as is. The
-`myWsq/plugins` marketplace collects the whole directory at a pinned commit SHA (maintained in
-`myWsq/plugins-builder`); installers only need the marketplace. Codex installs the same plugin from the same
-marketplace and runs the same `hooks/hooks.json` and `.mcp.json`.
+This directory is the plugin's **delivery directory**: self-contained and loadable as is.
+
+## How it gets loaded
+
+- **Inside a coflux terminal: automatically, nothing to install.** Coflux.app ships this directory verbatim in its
+  app bundle (`Contents/Resources/daemon/claude-plugin`) and hands that absolute path to the machine's daemon
+  through the LaunchAgent variable `COFLUX_CLAUDE_PLUGIN_DIR`; the supervisor's shell integration turns it into
+  `claude --plugin-dir <dir>` for terminals coflux opens (desktop app, `cofluxd terminal new`, iOS, the center's
+  MCP). Loading is per session, not an installation: the hooks, the `coflux` skill and the `coflux` MCP server are
+  all in effect and visible under `/hooks` and `/mcp`, while `/plugin` does not list the plugin. The copy travels
+  with the app, so it updates when Coflux.app updates; `~/.claude` is never written to and no plugin files are
+  placed in `~/.coflux`. A session-loaded plugin fully shadows a marketplace-installed copy of the same name, so
+  users who already installed `coflux@plugins` need to do nothing and hooks never fire twice. If the variable is
+  unset or empty, or the directory it names is gone, `claude` starts exactly as it would without coflux — that is
+  also the escape hatch.
+- **Everywhere else: from the marketplace.** For sessions outside coflux terminals — your own iTerm or VS Code
+  terminal, a machine without Coflux.app, Codex — install the plugin the usual way: the `myWsq/plugins`
+  marketplace collects the whole directory at a pinned commit SHA (maintained in `myWsq/plugins-builder`);
+  installers only need the marketplace. Codex installs the same plugin from the same marketplace and runs the same
+  `hooks/hooks.json` and `.mcp.json`.
 
 ## Components
 
@@ -59,7 +75,8 @@ marketplace and runs the same `hooks/hooks.json` and `.mcp.json`.
 
 - The [`cofluxd`](https://www.npmjs.com/package/cofluxd) CLI installed globally (`npm i -g cofluxd`) and
   registered (`cofluxd up`). Without it the messenger hooks are silent no-ops and the local commands are
-  unavailable.
+  unavailable. Inside a coflux terminal this is already true: the machine's daemon put `cofluxd` on the session's
+  `PATH`, whether it was enrolled by Coflux.app or by npm.
 - One OAuth authorization for MCP: Claude Code does not open the browser by itself; pick `coflux` in the `/mcp`
   menu and choose Authenticate, after which tokens refresh automatically.
 - `COFLUX_*` variables appear in sessions only after the machine's daemon has been upgraded
