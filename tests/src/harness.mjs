@@ -10,7 +10,7 @@
  * wire（plan 009）：WS 上只有 binary message，每条 = 一个 protobuf 编码的信封
  * （/daemon：DaemonToServer/ServerToDaemon；/client：ClientToServer/ServerToClient）。
  * 本文件 import 生成代码与 `@coflux/protocol` 的信封编解码 helper——它们源自 proto 真相源
- * （buf generate 产物），而非应用（apps/server、apps/web）的实现逻辑，黑盒性质因此保持
+ * （buf generate 产物），而非应用（apps/server、apps/desktop）的实现逻辑，黑盒性质因此保持
  * （仍然完全不 import apps/* 的任何代码）。
  */
 import { spawn, execFileSync } from "node:child_process";
@@ -604,9 +604,98 @@ export function rawDaemon(port) {
   };
 }
 
-/** 从 daemon.authorizePending 的 url（`<webUrl>/authorize/<token>`）里取 token。 */
+/** 从 daemon.authorizePending 的 url（`<publicUrl>/authorize/<token>`）里取 token。 */
 export function tokenFromUrl(url) {
   return url.split("/").filter(Boolean).pop();
+}
+
+/* ============================ server 直出页面（plan 107）的 HTTP 助手 ============================ */
+
+/** 极简 cookie 罐：按 (name, Path) 记值并按 RFC 6265 的路径前缀匹配回带；Max-Age=0 即删除。
+ * 黑盒只打同一个 origin，不做 Domain 匹配；Secure 属性也不看（黑盒里 publicUrl 是 http，server 不会加）。 */
+export class CookieJar {
+  constructor() {
+    this.cookies = new Map();
+  }
+  absorb(res) {
+    for (const line of res.headers.getSetCookie()) {
+      const [pair, ...rest] = line.split(";");
+      const eq = pair.indexOf("=");
+      const name = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1).trim();
+      const attrs = rest.map((a) => a.trim());
+      const attr = (k) => attrs.find((a) => a.toLowerCase().startsWith(`${k}=`))?.slice(k.length + 1);
+      const path = attr("path") ?? "/";
+      const key = `${name}|${path}`;
+      const maxAge = attr("max-age");
+      if (maxAge !== undefined && Number(maxAge) <= 0) this.cookies.delete(key);
+      else this.cookies.set(key, { name, value, path });
+    }
+  }
+  /** 该 URL 应回带的 Cookie 头值（路径匹配：等于 Path，或以 `Path/` 开头）。 */
+  header(url) {
+    const pathname = new URL(url).pathname;
+    return [...this.cookies.values()]
+      .filter((c) => pathname === c.path || pathname.startsWith(c.path.endsWith("/") ? c.path : `${c.path}/`))
+      .map((c) => `${c.name}=${c.value}`)
+      .join("; ");
+  }
+  get(name) {
+    return [...this.cookies.values()].find((c) => c.name === name)?.value;
+  }
+}
+
+function cookieHeaders(jar, url) {
+  const cookie = jar?.header(url);
+  return cookie ? { cookie } : {};
+}
+
+function unescapeHtml(text) {
+  return text.replace(/&(amp|lt|gt|quot|#39);/g, (_, name) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" })[name]);
+}
+
+/** 页面里的隐藏字段（csrf、request、to 一类），值已反转义。 */
+export function hiddenFieldsFrom(html) {
+  const out = {};
+  for (const m of html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) out[m[1]] = unescapeHtml(m[2]);
+  return out;
+}
+
+/** 页面里第一张 POST 表单的 action（相对路径，值已反转义）。 */
+export function formActionFrom(html) {
+  const m = /<form method="post" action="([^"]+)"/.exec(html);
+  return m ? unescapeHtml(m[1]) : null;
+}
+
+async function pageResult(res, jar) {
+  jar?.absorb(res);
+  const html = await res.text();
+  return { status: res.status, location: res.headers.get("location"), html, hidden: hiddenFieldsFrom(html), action: formActionFrom(html), headers: res.headers };
+}
+
+/** GET 一张 server 直出页面（不跟随跳转），Set-Cookie 收进罐里；返回 { status, location, html, hidden, action, headers }。 */
+export async function pageGet(url, jar) {
+  const res = await fetch(url, { redirect: "manual", headers: cookieHeaders(jar, url) });
+  return pageResult(res, jar);
+}
+
+/** 提交一张 server 直出页面的表单（不跟随跳转）。fields 是普通对象；extraHeaders 可加 Origin 之类。 */
+export async function formPost(url, fields, jar, extraHeaders = {}) {
+  const res = await fetch(url, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded", ...cookieHeaders(jar, url), ...extraHeaders },
+    body: new URLSearchParams(fields),
+  });
+  return pageResult(res, jar);
+}
+
+/** 走一张页面的登录：GET 拿匿名 nonce + csrf + 隐藏字段 → 按表单 action POST 账号密码。返回登录 POST 的结果
+ * （成功是 303 回同一 GET；失败是带错误横幅的登录页）。 */
+export async function pageLogin(url, jar, { username = "admin", password = "admin" } = {}) {
+  const page = await pageGet(url, jar);
+  if (page.status !== 200 || !page.action) throw new Error(`login page unexpected: ${page.status} ${page.html.slice(0, 200)}`);
+  return formPost(new URL(page.action, url).toString(), { ...page.hidden, username, password }, jar);
 }
 
 /** 驱动一次浏览器授权确认：等 daemon 把待授权链接落到 `<home>/pending-auth.json`

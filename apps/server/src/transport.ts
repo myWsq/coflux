@@ -47,6 +47,22 @@ export function requestAddress(request: IncomingMessage): string {
   return first && isIP(first) !== 0 ? first : direct;
 }
 
+/** 来源地址内部头（plan 107）：Raven 上下文只有标准 Fetch Request、拿不到 socket，HTTP 页面的登录限速
+ * 只能由 index.ts 在交给 fetch 适配器之前把 requestAddress 的结果写进这个头。handler 只读它。 */
+export const REMOTE_ADDRESS_HEADER = "x-coflux-remote-address";
+
+/** 覆盖写入来源地址内部头：入站同名头一律丢弃（客户端可随意伪造），再写入 requestAddress 的判定结果。
+ * @hono/node-server 用 `rawHeaders` 构造 Fetch Headers，只改 `headers` 对象不生效，两处都要改。 */
+export function stampRemoteAddress(request: IncomingMessage): void {
+  const address = requestAddress(request);
+  const raw = request.rawHeaders;
+  for (let i = raw.length - 2; i >= 0; i -= 2) {
+    if (raw[i]?.toLowerCase() === REMOTE_ADDRESS_HEADER) raw.splice(i, 2);
+  }
+  raw.push(REMOTE_ADDRESS_HEADER, address);
+  request.headers[REMOTE_ADDRESS_HEADER] = address;
+}
+
 export function attachEndpoint<Ctx, Msg>(wss: WebSocketServer, opts: EndpointOptions<Ctx, Msg>): Endpoint {
   const alive = new WeakSet<WebSocket>();
 

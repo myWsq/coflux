@@ -5,13 +5,16 @@ import test from "node:test";
 
 import { create, encodeServerToClient, ServerToClientSchema, TaskStatus, type ServerToClientPayload } from "@coflux/protocol";
 
-// store 依赖浏览器全局（localStorage / sessionStorage / window 定时器 / WebSocket）：这里用最小假件顶上，
-// 只为把「离线目录缓存」（plan 103）的三条契约钉死——写缓存/清缓存、首连失败装载、不传选项零变化。
+// store 依赖浏览器全局（window 定时器 / WebSocket）：这里用最小假件顶上；token 与离线目录都经注入的
+// 存储接口（plan 106），不碰 localStorage。只为把「离线目录缓存」（plan 103）的三条契约钉死——
+// 写缓存/清缓存、首连失败装载、不传选项零变化。
 // enableLocalTransport=false 让 DeviceRouter 不碰 IndexedDB；每个测试文件独立进程，全局替换不串扰。
 
 class FakeStorage {
   private items = new Map<string, string>();
   setItemCalls = 0;
+  /** 注入给 tokenStorage 的会话 token；与目录缓存的 items 分开，setItemCalls 只计目录写入 */
+  token = "";
   getItem(key: string): string | null {
     return this.items.get(key) ?? null;
   }
@@ -65,28 +68,37 @@ class FakeWebSocket {
 const globals = globalThis as unknown as Record<string, unknown>;
 globals.window = { setTimeout: globalThis.setTimeout.bind(globalThis), clearTimeout: globalThis.clearTimeout.bind(globalThis) };
 globals.WebSocket = FakeWebSocket;
-globals.sessionStorage = new FakeStorage();
 
 const { createCofluxClient } = await import("./store");
 
-const TOKEN_KEY = "coflux_token_test";
 const CACHE_KEY = "coflux_offline_catalog:ws://127.0.0.1:1/client";
+
+/** 下一次 newClient 注入的存储（token + 目录缓存共用一个假件） */
+let currentStorage = new FakeStorage();
 
 function installLocalStorage(token: string | null): FakeStorage {
   const storage = new FakeStorage();
-  if (token) storage.setItem(TOKEN_KEY, token);
-  storage.setItemCalls = 0;
-  globals.localStorage = storage;
+  storage.token = token ?? "";
+  currentStorage = storage;
   return storage;
 }
 
 function newClient(offline: boolean, timeoutMs?: number) {
+  const storage = currentStorage;
   return createCofluxClient({
     serverUrl: "ws://127.0.0.1:1/client",
-    tokenStorageKey: TOKEN_KEY,
+    tokenStorage: {
+      read: () => storage.token,
+      write: (token) => {
+        storage.token = token;
+      },
+      clear: () => {
+        storage.token = "";
+      },
+    },
     buildId: "dev",
     deviceTransport: { enableLocalTransport: false, identityDatabaseName: "test", origin: "https://desktop.coflux.dev" },
-    offlineCatalog: offline ? { storage: globals.localStorage as FakeStorage, key: CACHE_KEY, timeoutMs } : undefined,
+    offlineCatalog: offline ? { storage, key: CACHE_KEY, timeoutMs } : undefined,
   });
 }
 

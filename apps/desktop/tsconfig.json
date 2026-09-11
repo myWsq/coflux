@@ -3,7 +3,10 @@
   "compilerOptions": {
     "lib": ["ES2023", "DOM"],
     "types": ["node", "electron-vite/node"],
+    "paths": {
+      "@/*": ["./src/renderer/*"]
+    },
     "noEmit": true
   },
-  "include": ["src", "test", "electron.vite.config.ts"]
+  "include": ["src/main", "src/preload", "src/shared", "test", "electron.vite.config.ts"]
 }

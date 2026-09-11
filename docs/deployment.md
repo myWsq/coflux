@@ -71,9 +71,8 @@ daemon 跑在各用户自己的机器上，不在任何一台服务器（prod-bj
   （issuer 与所有元数据 URL 由它拼，不看请求 Host）。宿主接入地址 `https://api.coflux.dev/mcp`；
   端点 `/.well-known/oauth-protected-resource[/mcp]`、`/.well-known/oauth-authorization-server`、
   `/oauth/{register,authorize,token}` 全部随 api 站反代到 8787，无需单独 handle。上线检查：
-  owo-jp-gw 与 prod-jp 的 api 站块没有别的 `.well-known` handle（HTTP-01 只占 `acme-challenge`）；
-  确认页在 `app.coflux.dev/oauth/consent`（SPA 兜底即可）；web 与 server 须同批部署（新 client 消息 +
-  版本准入）。
+  owo-jp-gw 与 prod-jp 的 api 站块没有别的 `.well-known` handle（HTTP-01 只占 `acme-challenge`）。
+  同意页 `api.coflux.dev/oauth/consent` 由 server 直出（plan 107），同样随 api 站反代，不依赖 web。
 
 ## owo-jp-gw —— 公网入口 + jp relay
 
@@ -105,16 +104,49 @@ daemon 跑在各用户自己的机器上，不在任何一台服务器（prod-bj
 
 ## 常规部署
 
-只改 web 可省重启（静态替换零停机，不打断在线 daemon/会话）；只改 server 可省构建。
+部署只换 server（web/mobile 已冻结，见下一节，不再随代码重建）：
 
 ```sh
 ssh root@prod-jp 'cd /opt/coflux && git fetch --tags && git checkout <tag> \
   && pnpm install --frozen-lockfile \
-  && pnpm --filter @coflux/web build \
   && systemctl restart coflux-server'
 ```
 
-mobile 若随共享层变更需重建：`pnpm --filter @coflux/mobile build`。
+## 浏览器页面由 server 直出（plan 107）
+
+三条在系统浏览器里完成的流——新机器登记（`cofluxd up` 打印的 `/authorize/<token>`）、MCP 宿主 OAuth 同意页
+（`/oauth/consent`）、端口预览门禁（`/proxy-auth`）——由 server 直出 HTML，地址在 `COFLUX_PUBLIC_URL` 下
+（生产 `https://api.coflux.dev/...`），随 api 站整站反代到 8787，Caddy 无需改动。server 不再生成任何指向
+`app.coflux.dev` 的链接，也不再读任何「web 控制台地址」配置——`server.env` 里旧的那个 web 地址变量已是死变量，
+删掉即可。
+
+## web 冻结（plan 106）
+
+`app.coflux.dev` 与 `m.coflux.dev` 继续服务**分割前最后一次构建**：不再更新、不做下载页、`/` 的行为不变。
+它们只剩历史工作台（日常工作台在桌面 app；三张浏览器页面已由 server 承担，见上一节，冻结 bundle 里的旧页面
+仍能手动打开但没有任何链接指向它们）。源码在 git 历史 `ce7026b`（分割基线，含最后一份 web / mobile 子项目源码）；
+生产当前跑的冻结构建对应的 SHA：`e32103b`（2026-09-11 部署，dist/build-id.txt 同值）。
+
+**下一次从分割后的提交部署 prod 之前，必须先做这一步（一次性）。** `git checkout <tag>` 不会清掉被忽略的
+dist（检出目录 `apps/` 下的 `web/dist`、`mobile/dist`），所以冻结站在分割后的检出里会「碰巧」继续活着——但那是靠忽略文件没被清理，
+不是自动兼容：一次 `git clean`、换目录检出、或任何人按新仓库结构整理目录都会让它消失，`COFLUX_BUILD_ID_FILE`
+指的路径也随之失效。把冻结 dist 挪到仓库外的固定目录，Caddy root 与 server.env 指过去：
+
+```sh
+ssh root@prod-jp 'mkdir -p /opt/coflux-web-frozen \
+  && cd /opt/coflux/apps \
+  && cp -a web/dist /opt/coflux-web-frozen/app \
+  && cp -a mobile/dist /opt/coflux-web-frozen/m'
+# Caddyfile：app.coflux.dev / m.coflux.dev 两个站的 root 改为 /opt/coflux-web-frozen/app 与 /m（`/client` 反代不动）
+#   → caddy validate → systemctl reload caddy
+# /etc/coflux/server.env：
+#   COFLUX_BUILD_ID_FILE=/opt/coflux-web-frozen/app/build-id.txt,/opt/coflux-web-frozen/m/build-id.txt
+#   → systemctl restart coflux-server（server 每次认证现读文件，只有改 env 才需重启）
+```
+
+做完后 `/opt/coflux/apps` 里残留的 `web` / `mobile` 目录可以删。冻结 bundle 仍按 build-id 精确准入（server 契约
+未变，plan 105 只放宽了 `client_kind=desktop`），所以 `COFLUX_BUILD_ID_FILE` 要跟着挪：server 读不到文件时静默忽略，
+允许集合为空 + `COFLUX_BUILD_ID` 未设 = 浏览器端的版本检查被整个跳过、任何 build-id 都放行——不是故障，但准入门就没了。
 
 **桌面版准入（plan 105）**：桌面按控制面协议版本准入，不看 build-id，部署 prod 不需要与 `desktop-v*` 对齐、
 不会踢在线桌面版；只有破坏性协议改动那次要先发桌面版再部署（见 [RELEASING.md](RELEASING.md)）。
@@ -156,7 +188,7 @@ relay 密钥轮换顺序：换中心 seed → 同步新公钥到各 relay 的 `r
 删掉 `api`/`app`/`m` 三条 A 记录（泛记录自动接管）→ 裸域改回 `82.40.34.55` + 橙云 →
 撤掉 prod-jp 四站的 `tls internal`。
 
-**代码**：`git checkout` 回上一个 tag，重装依赖重建 web 重启 server。
+**代码**：`git checkout` 回上一个 tag，重装依赖重启 server（冻结的 web 不参与回滚）。
 
 ## 坑
 
@@ -165,8 +197,8 @@ relay 密钥轮换顺序：换中心 seed → 同步新公钥到各 relay 的 `r
   握手直接失败、上游报 **502**。`header_up Host` 只改 HTTP 头，改不了 SNI。
 - **`coflux.dev` 裸域必须有人持证书**，否则 CF 回源 SNI 握手报 **525**。prod-jp 上那个
   只做 301 的 block，存在意义就是持证书，别因为"只是个跳转"而省掉。
-- **`app.coflux.dev` 的 `/client` 反代不能丢**：web 前端连同源 `wss://{location.host}/client`，
-  漏了这段会一直卡"连接中"。重写 Caddyfile 时最容易丢。
+- **`app.coflux.dev` 的 `/client` 反代不能丢**：冻结的 web 前端连同源 `wss://{location.host}/client`，
+  漏了这段授权页/同意页会一直卡"连接中"。重写 Caddyfile 时最容易丢。
 - **ICMP 不是判据**：prod-jp 与 owo-jp-gw 都 ping 不通，但 TCP 正常。判连通性用 TCP。
 - **本机家宽测线路会失真**：Surge 等工具的 TUN 会接管流量，DNS 返回 `198.18.x.x` fake-IP、
   `nc` 报 OPEN 都是假象。国内视角一律从 prod-bj 打。

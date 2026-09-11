@@ -16,7 +16,7 @@ import { app } from "./app.js";
 import { StoreState } from "./plugins/store.plugin.js";
 import { HubState } from "./plugins/hub.plugin.js";
 import type { ClientConn, DaemonCtx } from "./hub.js";
-import { attachEndpoint, requestAddress } from "./transport.js";
+import { attachEndpoint, requestAddress, stampRemoteAddress } from "./transport.js";
 import { matchProxyHost, handleProxyRequest, handleProxyUpgrade, type ProxyServerContext } from "./proxy.js";
 import { AutoUpdater } from "./auto-update.js";
 
@@ -41,6 +41,8 @@ const httpServer = http.createServer((req, res) => {
     void handleProxyRequest(proxyCtx, req, res);
     return;
   }
+  // 来源地址只有这里能算（信任规则需要 socket）：写进内部头后 Raven handler（页面登录限速，plan 107）只读它。
+  stampRemoteAddress(req);
   void listener(req, res);
 });
 

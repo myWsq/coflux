@@ -1,9 +1,9 @@
 import SwiftUI
 import UIKit
 
-/// 配色 token —— 真相源是 web 的 `apps/web/src/index.css` :root（plan 051）。
-/// Cursor 式暖调近黑、低对比分层、无彩强调；十六进制与 web 逐字对齐，
-/// web 换色时此处手工同步（同 lucide 图标策略，见 plan 048/051）。
+/// 配色 token —— 真相源是桌面渲染层的 `apps/desktop/src/renderer/index.css` :root（plan 051；plan 106 起 web 已并入桌面）。
+/// Cursor 式暖调近黑、低对比分层、无彩强调；十六进制与桌面逐字对齐，
+/// 桌面换色时此处手工同步（同 lucide 图标策略，见 plan 048/051）。
 /// 三层地面（由深至浅）：terminal(#0a0a0a) < background(#0f0f0f) < surface(#151514)。
 enum Theme {
     // 地面

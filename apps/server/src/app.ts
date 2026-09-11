@@ -27,6 +27,26 @@ import {
 } from "./interface/oauth/oauth.handler.js";
 import { DeleteMcpContract, GetMcpContract, PostMcpContract } from "./interface/mcp/mcp.contract.js";
 import { DeleteMcpHandler, GetMcpHandler, PostMcpHandler } from "./interface/mcp/mcp.handler.js";
+import {
+  GetAuthorizePageContract,
+  GetOAuthConsentPageContract,
+  GetProxyAuthPageContract,
+  PostAuthorizeConfirmContract,
+  PostAuthorizeLoginContract,
+  PostOAuthConsentDecideContract,
+  PostOAuthConsentLoginContract,
+  PostProxyAuthLoginContract,
+} from "./interface/auth-pages/auth-pages.contract.js";
+import {
+  GetAuthorizePageHandler,
+  GetOAuthConsentPageHandler,
+  GetProxyAuthPageHandler,
+  PostAuthorizeConfirmHandler,
+  PostAuthorizeLoginHandler,
+  PostOAuthConsentDecideHandler,
+  PostOAuthConsentLoginHandler,
+  PostProxyAuthLoginHandler,
+} from "./interface/auth-pages/auth-pages.handler.js";
 import { oauthErrorResponse } from "./oauth.js";
 
 const log = createLogger("server");
@@ -41,6 +61,8 @@ app.register(storePlugin()).register(hubPlugin());
 // Response，这里只兜框架自己抛出来的那几种。
 app.onError((error) => {
   const pathname = RavenContext.get()?.url.pathname ?? "";
+  // `/oauth/consent*` 是 server 直出的浏览器页面（plan 107），不是 OAuth 客户端读的端点，走 Raven 默认信封。
+  if (pathname.startsWith("/oauth/consent")) return undefined;
   if (!(pathname.startsWith("/oauth/") || pathname === "/mcp" || pathname.startsWith("/.well-known/"))) return undefined;
   if (error.message === "Not Found") return oauthErrorResponse(404, "invalid_request", "未知的端点");
   if (isRavenError(error) && error.code === "ERR_BAD_REQUEST") return oauthErrorResponse(400, "invalid_request", "请求体不是合法 JSON");
@@ -62,3 +84,13 @@ registerContractRoute(app, PostOAuthTokenContract, PostOAuthTokenHandler);
 registerContractRoute(app, PostMcpContract, PostMcpHandler);
 registerContractRoute(app, GetMcpContract, GetMcpHandler);
 registerContractRoute(app, DeleteMcpContract, DeleteMcpHandler);
+
+// server 直出的三张浏览器页面（plan 107）：设备授权 / OAuth 同意 / 端口预览门禁，纯 HTML 表单 PRG
+registerContractRoute(app, GetAuthorizePageContract, GetAuthorizePageHandler);
+registerContractRoute(app, PostAuthorizeLoginContract, PostAuthorizeLoginHandler);
+registerContractRoute(app, PostAuthorizeConfirmContract, PostAuthorizeConfirmHandler);
+registerContractRoute(app, GetOAuthConsentPageContract, GetOAuthConsentPageHandler);
+registerContractRoute(app, PostOAuthConsentLoginContract, PostOAuthConsentLoginHandler);
+registerContractRoute(app, PostOAuthConsentDecideContract, PostOAuthConsentDecideHandler);
+registerContractRoute(app, GetProxyAuthPageContract, GetProxyAuthPageHandler);
+registerContractRoute(app, PostProxyAuthLoginContract, PostProxyAuthLoginHandler);

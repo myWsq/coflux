@@ -1,6 +1,6 @@
 import { app, Notification } from "electron";
 
-import type { DesktopNotification } from "../../../web/src/desktop-bridge";
+import type { DesktopNotification } from "../shared/desktop-bridge";
 
 /**
  * 系统通知 + Dock 角标（plan 103）：主进程只执行，状态判定在渲染层（desktop-attention.ts）。

@@ -77,6 +77,7 @@ import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, selectRelayNode, 
 import { LocalControlPlane } from "./local-control.js";
 import { verifyPassword } from "./auth.js";
 import { OAuthService } from "./oauth.js";
+import { AuthPages } from "./auth-pages.js";
 import {
   createPreparedOperationService,
   MAX_PREPARED_FRAME_BYTES,
@@ -274,6 +275,25 @@ class StaleDaemonConnectionError extends Error {}
 /** 操作层（plan 091，MCP 写 tools 消费）的统一结果：错误一律是可读文案，不抛。 */
 export type OperationOutcome<T> = { ok: true; value: T } | { ok: false; error: string };
 
+/** 用户名 + 密码凭证校验的结果（WS clientAuth 与页面登录共用，plan 107）：busy = scrypt 并发已满。 */
+export type CredentialCheck =
+  | { case: "ok"; accountId: AccountId; userId: string | null }
+  | { case: "invalid" }
+  | { case: "busy" };
+
+/** 待授权设备的展示信息（授权页与 WS deviceAuthorizeInfo 同款字段）。 */
+export interface PendingDeviceInfo {
+  name: string;
+  host: string;
+  platform: string;
+}
+
+/** 设备授权兑现结果：失败文案与 WS deviceAuthorizeInfo{ ok:false } 完全一致。 */
+export type DeviceAuthorizeOutcome = { ok: true } | { ok: false; error: string };
+
+/** 端口预览门禁签发结果：成功即浏览器要跳转的回调 URL。 */
+export type ProxyAuthOutcome = { ok: true; url: string } | { ok: false; error: string };
+
 /** prepared 操作（按 operationId）的完成结果：applied 携带收敛 effect；failed 携带可读错误。 */
 export type OperationWaitResult =
   | { case: "applied"; effect: OperationEffect }
@@ -425,6 +445,9 @@ export class Hub {
   /** MCP 宿主的 OAuth 授权服务器（plan 090）：待确认请求/授权码在它的内存里，与设备授权同款生命周期；
    * HTTP 端点经 HubState 取它，确认页的两条 client 消息在下方 handleClientMessage 里落地。 */
   readonly oauth: OAuthService;
+  /** server 直出的三张浏览器页面（plan 107）：设备授权 / OAuth 同意 / 端口预览门禁。页面会话与 csrf 在它的
+   * 内存里；业务核心（凭证校验、待授权 token、OAuth 决定、预览 code）全部经本 Hub 的共用方法，与 WS 分支同源。 */
+  readonly authPages: AuthPages;
   private readonly enrollLimiter = new FixedWindowLimiter(config.enrollRateLimit, config.authRateWindowMs);
   private readonly daemonAuthLimiter = new FixedWindowLimiter(config.daemonAuthRateLimit, config.authRateWindowMs);
   private readonly loginLimiter = new FixedWindowLimiter(config.loginRateLimit, config.authRateWindowMs);
@@ -458,6 +481,7 @@ export class Hub {
 
   constructor(private store: Store) {
     this.oauth = new OAuthService(store);
+    this.authPages = new AuthPages(this);
     this.localControl = new LocalControlPlane(
       store,
       (daemonId) => this.daemons.get(daemonId),
@@ -2002,7 +2026,8 @@ export class Hub {
           timer,
         });
         conn.pendingAuthToken = token;
-        this.sendRaw(conn.ws, { case: "daemonAuthorizePending", value: { url: `${config.webUrl}/authorize/${token}`, expiresAt: createdAt + config.authorizeTtlMs } });
+        // 授权页自 plan 107 起由 server 直出（interface/auth-pages），链接挂在中心公网基址下。
+        this.sendRaw(conn.ws, { case: "daemonAuthorizePending", value: { url: `${config.publicUrl}/authorize/${token}`, expiresAt: createdAt + config.authorizeTtlMs } });
         log.info("daemon authorize requested", { name: value.name.trim(), host: value.host.trim() });
         break;
       }
@@ -2481,18 +2506,21 @@ export class Hub {
     return [...byTask.entries()].map(([taskId, ports]) => ({ taskId, ports }));
   }
 
-  /** 端口转发版 proxy.issueAuth：校验 redirect 的 host 命中 <shortId>-<proxyHost> 且该 shortId
-   * 当前路由属于本账号（跨账号严拒），签发一次性 code，拼出浏览器要跳转的回调 URL。 */
+  /** 端口转发版 proxy.issueAuth（WS 入口）：核心在 issueProxyAuth，这里只把结果回给 client。 */
   private handleProxyIssueAuth(client: ClientConn, redirect: string): void {
+    const outcome = this.issueProxyAuth(client.accountId!, redirect);
+    this.sendClient(client, { case: "proxyAuth", value: outcome.ok ? { ok: true, url: outcome.url } : { ok: false, error: outcome.error } });
+  }
+
+  /** WS `proxyIssueAuth` 与门禁页（plan 107）共用：校验 redirect 的 host 命中 <shortId>-<proxyHost> 且该
+   * shortId 当前路由属于本账号（跨账号严拒），签发一次性 code，拼出浏览器要跳转的回调 URL。 */
+  issueProxyAuth(accountId: AccountId, redirect: string): ProxyAuthOutcome {
     const parsed = parseProxyRedirect(redirect);
-    if (!parsed) return void this.sendClient(client, { case: "proxyAuth", value: { ok: false, error: "目标地址无效" } });
+    if (!parsed) return { ok: false, error: "目标地址无效" };
     const route = this.routeTable.get(parsed.shortId);
-    if (!route || route.accountId !== client.accountId) {
-      return void this.sendClient(client, { case: "proxyAuth", value: { ok: false, error: "预览链接不存在或不属于当前账号" } });
-    }
-    const code = this.proxyGate.issueAuthCode(client.accountId!);
-    const url = buildAuthCallbackUrl(parsed.host, code, parsed.pathAndQuery);
-    this.sendClient(client, { case: "proxyAuth", value: { ok: true, url } });
+    if (!route || route.accountId !== accountId) return { ok: false, error: "预览链接不存在或不属于当前账号" };
+    const code = this.proxyGate.issueAuthCode(accountId);
+    return { ok: true, url: buildAuthCallbackUrl(parsed.host, code, parsed.pathAndQuery) };
   }
 
   /** session 终结的统一出口：除 this.sessions 外，一并摘除端口路由表条目、关闭在途隧道连接、
@@ -3246,39 +3274,20 @@ export class Hub {
     let accountId: AccountId | undefined;
     let issued: string | undefined;
     let tokenHash: string | undefined;
-    let userId: string | null = null;
 
     if (typeof msg.clientToken === "string" && msg.clientToken) {
       // 重连：已签发的会话 token（校验未撤销且未过期）
       tokenHash = hashToken(msg.clientToken);
       accountId = await this.store.accountForClientToken(tokenHash, now);
-    } else if (config.authProvider === "password" && typeof msg.username === "string" && typeof msg.password === "string") {
-      // 登录：邮箱（username 字段承载）+ 密码 → 查 users 表 → scrypt 校验 → 查/建个人账号 → 签发会话 token
-      if (this.activePasswordChecks >= config.maxConcurrentPasswordChecks) {
-        log.warn("password 校验达到并发上限", { limit: config.maxConcurrentPasswordChecks });
-        return void reject("登录服务繁忙，请稍后重试", 1013, "password verification busy");
-      }
-      this.activePasswordChecks += 1;
-      try {
-        const email = msg.username.trim().toLowerCase();
-        const user = email ? await this.store.getUserByEmail(email) : undefined;
-        if (user && (await verifyPassword(msg.password, user.passwordHash))) {
-          accountId = await this.resolveAccountForUser({ userId: user.id, email: user.email });
-          userId = user.id;
-          issued = genToken("ck_sess");
-          tokenHash = hashToken(issued);
-          await this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs, userId);
-        }
-      } finally {
-        this.activePasswordChecks -= 1;
-      }
-    } else if (config.authProvider === "local" && typeof msg.username === "string" && typeof msg.password === "string") {
-      // 登录：用户名 + 密码（单租户，对照配置）→ 签发带有效期的会话 token
-      if (verifyLogin(msg.username, msg.password)) {
-        accountId = config.accountId;
+    } else if (typeof msg.username === "string" && typeof msg.password === "string") {
+      // 登录：凭证校验与页面登录（plan 107）共用 checkCredentials；只有 WS 会话才签 30 天 client token。
+      const checked = await this.checkCredentials(msg.username, msg.password);
+      if (checked.case === "busy") return void reject("登录服务繁忙，请稍后重试", 1013, "password verification busy");
+      if (checked.case === "ok") {
+        accountId = checked.accountId;
         issued = genToken("ck_sess");
         tokenHash = hashToken(issued);
-        await this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs, null);
+        await this.store.upsertClientToken(tokenHash, accountId, now, now + config.sessionTtlMs, checked.userId);
       }
     }
 
@@ -3332,6 +3341,46 @@ export class Hub {
     client.accountId = accountId;
     client.tokenHash = tokenHash;
     this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, iceServers: config.stunUrls } });
+  }
+
+  /** 用户名 + 密码的凭证校验核心（不签任何 token），WS clientAuth 与页面登录（plan 107）共用：
+   *   - password 模式：邮箱（username 字段承载）+ 密码 → 查 users 表 → scrypt 校验（并发上限）→ 查/建个人账号；
+   *   - local 模式：对照 env 用户名 + 密码（单租户），账号恒为 default。
+   * 调用方须先做 validBoundedText 字段校验。 */
+  private async checkCredentials(username: string, password: string): Promise<CredentialCheck> {
+    if (config.authProvider === "password") {
+      if (this.activePasswordChecks >= config.maxConcurrentPasswordChecks) {
+        log.warn("password 校验达到并发上限", { limit: config.maxConcurrentPasswordChecks });
+        return { case: "busy" };
+      }
+      this.activePasswordChecks += 1;
+      try {
+        const email = username.trim().toLowerCase();
+        const user = email ? await this.store.getUserByEmail(email) : undefined;
+        if (user && (await verifyPassword(password, user.passwordHash))) {
+          const accountId = await this.resolveAccountForUser({ userId: user.id, email: user.email });
+          return { case: "ok", accountId, userId: user.id };
+        }
+      } finally {
+        this.activePasswordChecks -= 1;
+      }
+      return { case: "invalid" };
+    }
+    if (verifyLogin(username, password)) return { case: "ok", accountId: config.accountId, userId: null };
+    return { case: "invalid" };
+  }
+
+  /** 页面登录（plan 107）的来源限速：与 WS 登录共用同一个 loginLimiter（同一来源、同一窗口、同一阈值）。 */
+  allowLogin(remoteAddress: string): boolean {
+    return this.loginLimiter.allow(remoteAddress);
+  }
+
+  /** 页面登录（plan 107）的凭证校验：字段边界与 WS clientAuth 一致，不签 client token、不写 client_tokens。 */
+  async verifyLoginCredentials(username: string, password: string): Promise<CredentialCheck> {
+    if (!validBoundedText(username, MAX_LOGIN_NAME_BYTES) || !validBoundedText(password, MAX_LOGIN_PASSWORD_BYTES, true, true)) {
+      return { case: "invalid" };
+    }
+    return this.checkCredentials(username, password);
   }
 
   /** 口令校验通过的合法用户：查已有个人账号，无则 lazy 建号 + owner membership。
@@ -3467,14 +3516,36 @@ export class Hub {
     return p;
   }
 
-  /** 兑现一次授权：摘除 pending（一次性）、把设备绑进当前登录账号，走 createDevice +
-   * registerDaemonConn 路径。 */
+  /** WS `deviceAuthorize`：兑现核心在 redeemPendingAuthorization，这里只把结果回给 client。 */
   private async completeDeviceAuthorize(client: ClientConn, p: PendingAuthorization): Promise<void> {
+    const outcome = await this.redeemPendingAuthorization(p, client.accountId!);
+    if (!outcome.ok) {
+      this.sendClient(client, { case: "deviceAuthorizeInfo", value: { ok: false, error: outcome.error } });
+      return;
+    }
+    this.sendClient(client, { case: "deviceAuthorized", value: {} });
+  }
+
+  /** 授权页（plan 107）查待授权设备：不消费。未命中不区分"过期"与"从未存在"，失败计数由调用方按页面会话记。 */
+  describePendingAuthorization(token: string): PendingDeviceInfo | undefined {
+    const p = this.pendingAuthorizations.get(token);
+    return p ? { name: p.name, host: p.host, platform: p.platform } : undefined;
+  }
+
+  /** 授权页（plan 107）兑现授权：token 未命中返回 undefined（调用方计一次猜测失败），命中即消费并返回兑现结果。 */
+  async authorizeDevice(token: string, accountId: AccountId): Promise<DeviceAuthorizeOutcome | undefined> {
+    const p = this.pendingAuthorizations.get(token);
+    if (!p) return undefined;
+    return this.redeemPendingAuthorization(p, accountId);
+  }
+
+  /** 兑现一次授权（WS 与页面共用核心）：摘除 pending（一次性）、把设备绑进当前登录账号，走 createDevice +
+   * registerDaemonConn 路径；设备数超限时给 daemon 发 daemonAuthError 并断连。只返回结果，不碰任何 client。 */
+  private async redeemPendingAuthorization(p: PendingAuthorization, accountId: AccountId): Promise<DeviceAuthorizeOutcome> {
     this.pendingAuthorizations.delete(p.token);
     clearTimeout(p.timer);
     if (p.conn.pendingAuthToken === p.token) p.conn.pendingAuthToken = undefined;
 
-    const accountId = client.accountId!;
     if ((await this.store.countDevices(accountId)) >= config.maxDevicesPerAccount) {
       // 设备数超限是致命错误，daemon 侧直接退出（needEnroll:false）。
       this.sendRaw(p.conn.ws, { case: "daemonAuthError", value: { message: "账号设备数已达上限", needEnroll: false } });
@@ -3483,8 +3554,7 @@ export class Hub {
       } catch {
         /* ignore */
       }
-      this.sendClient(client, { case: "deviceAuthorizeInfo", value: { ok: false, error: "账号设备数已达上限" } });
-      return;
+      return { ok: false, error: "账号设备数已达上限" };
     }
 
     const daemonId = randomUUID();
@@ -3499,15 +3569,9 @@ export class Hub {
       { case: "daemonEnrolled", value: { daemonId, deviceToken } },
       p.capabilities,
     );
-    if (!registered) {
-      this.sendClient(client, {
-        case: "deviceAuthorizeInfo",
-        value: { ok: false, error: "设备在授权完成前已失效，请重新发起" },
-      });
-      return;
-    }
+    if (!registered) return { ok: false, error: "设备在授权完成前已失效，请重新发起" };
     log.info("daemon authorized", { daemonId, name: p.name, host: p.host, accountId });
-    this.sendClient(client, { case: "deviceAuthorized", value: {} });
+    return { ok: true };
   }
 
   /** relay rendezvous（plan 043）：校验归属 → 两端各签短时单次 token → 通知 daemon 拨号。

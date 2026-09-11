@@ -32,11 +32,10 @@
 
 ## 待办
 
-### 1. Web 客户端产品化（主客户端，2026-07-16 确认）
+### 1. 桌面客户端产品化（主客户端 = `apps/desktop`，2026-09-11 起）
 
-> 2026-07-15 曾立项"弃 Web 转 macOS 原生"，次日复议撤回：web 是当前唯一在用的日常客户端，
-> 先把它做好；macOS 原生 2026-08-25 二次立项后次日撤回，2026-09-05 三次立项也未到 parity；
-> 2026-09-11 起 macOS 客户端改为 Electron 版原样打包 Web（见条目 4）。
+> 日常客户端是 Electron 桌面 app（`apps/desktop`，唯一前端，见条目 4）；线上 web/mobile 已冻结，
+> 只承担新机器授权 / MCP OAuth 同意 / 端口预览门禁三张页面。
 > 产品定位已定：**Agent 指挥中心**——
 > 围绕"在各设备的工作区里跑 claude/codex 任务，人监督、随时接管"组织功能与交互，
 > 终端仍是核心界面，但组织逻辑是任务而非连接。功能/交互细化待产品设计讨论产出。
@@ -79,15 +78,17 @@
 ### 4. macOS 客户端 = Electron 版（plan 103，2026-09-11）
 
 > 原生 Swift 路线三次立项均未到 parity（2026-07-15 / 2026-08-25 / 2026-09-05；第三次的 `apps/macos`
-> 于 2026-09-10 合入 main、plan 100 未完成），2026-09-11 用户决定改为 Electron 版：`apps/desktop`
-> 把 **当前 `apps/web` 原样打包**进 app（渲染层 root 直指 apps/web，UI 单一真相），桌面差异靠运行时
-> 探测的桥接对象注入；server/daemon 校验零放宽（主进程改写 WebSocket 握手 Origin 为
-> `https://desktop.coflux.dev`）。`apps/macos` 已随 plan 103 整目录删除，可从 git 历史找回；
+> 于 2026-09-10 合入 main、plan 100 未完成），2026-09-11 用户决定改为 Electron 版，并在同日 plan 106 定案
+> **只迭代桌面版**：`apps/desktop` 是唯一前端，渲染层就在 `src/renderer`（React 19 + xterm，`@` 别名），桥接
+> `window.cofluxDesktop` 必选、没有浏览器分支；server/daemon 校验零放宽（主进程改写 WebSocket 握手 Origin 为
+> `https://desktop.coflux.dev`）。`apps/macos` 与 web / mobile 两个子项目都只在 git 历史里（分割基线 `ce7026b`）；
 > `packages/swift-client` 保留，现为 iOS 专属。
 - [x] Electron 壳 + 自定义 scheme 从 asar 提供渲染层：中心离线也能冷启动看本机终端（loopback direct）
-- [x] 原生菜单 + 纯 ⌘ 快捷键（≡ PWA standalone 键位）、系统通知 + Dock 角标（agent 等待批准/回答）、
-      点通知聚焦工作区、外链一律系统浏览器
+- [x] 原生菜单 + 纯 ⌘ 快捷键、系统通知 + Dock 角标（agent 等待批准/回答）、点通知聚焦工作区、外链一律系统浏览器
 - [x] 版本准入按控制面协议版本（plan 105，取代首发当天的 lockstep）：只有破坏性协议改动才让旧桌面版看到「需要更新」并触发 electron-updater；`desktop-v*` tag → 签名公证 → GitHub Release + `desktop-updates` 分支清单作更新源
-      electron-updater；`desktop-v*` tag → 签名公证 → Cloudflare R2 更新源
+- [x] 放弃 web 端第一片（plan 106）：渲染层并入 `apps/desktop`、web/mobile 源码出仓、桥接必选；会话 token 进 safeStorage、
+      窗口大小/位置记忆、electron-log 主进程日志、帮助菜单无网页版入口
+- [ ] 第二片：三张卫星页面（`/authorize`、`/oauth/consent`、`/proxy-auth`）收进 server，退役冻结的 web bundle
+- [ ] 第三片：桌面原生化升级——`coflux://` 深链接、本机 daemon 走 UDS、终端渲染器、server 侧准入精简、下载页
 - [ ] 首发验收待用户：CI 签名产物过 Gatekeeper、三路联调（direct 用 lsof 证明）、通知/角标在签名包上
-- [ ] 后续：universal（x64）构建开关、深链接（`coflux://` 已预留）、Windows/Linux 可移植性
+- [ ] 后续：universal（x64）构建开关、Windows/Linux 可移植性
