@@ -4,6 +4,8 @@ import { LayerProvider } from "@astryxdesign/core/Layer";
 import { neutralTheme } from "@astryxdesign/theme-neutral/built";
 
 import { App } from "./App";
+import { LEGACY_TOKEN_KEY, desktop } from "./config";
+import { loadSessionToken } from "./session-token";
 import "./index.css";
 
 // tooltip 全局样式：默认那版在深色面上贴得太紧、层次不足。照 Cursor 的做法——略微抬起的
@@ -38,14 +40,22 @@ const cofluxTheme = defineTheme({
   },
 });
 
-// 不启用 StrictMode：WS 单连接、xterm 实例、consumer 注册均为命令式资源，
-// StrictMode 双挂载的排错成本没有回报（decided while planning，plan 011）。
-// Astryx Theme 固定 dark：coflux 是深色优先的 IDE 工具面。
-createRoot(document.getElementById("root")!).render(
-  <Theme theme={cofluxTheme} mode="dark">
-    {/* LayerProvider 让 useToast 走正规 viewport 并继承 dark 主题；缺它时 toast 自挂浅色兜底 viewport，定位与配色都不对。 */}
-    <LayerProvider>
-      <App />
-    </LayerProvider>
-  </Theme>,
-);
+// 会话 token 先经桥接从主进程取回（plan 106：safeStorage 真相源，含一次性 localStorage 迁移），
+// 再挂 React——createCofluxClient 创建时 token 必须已就绪。冷启动遮罩盖住这段等待。
+async function boot(): Promise<void> {
+  const initialToken = await loadSessionToken(desktop, localStorage, LEGACY_TOKEN_KEY);
+
+  // 不启用 StrictMode：WS 单连接、xterm 实例、consumer 注册均为命令式资源，
+  // StrictMode 双挂载的排错成本没有回报（decided while planning，plan 011）。
+  // Astryx Theme 固定 dark：coflux 是深色优先的 IDE 工具面。
+  createRoot(document.getElementById("root")!).render(
+    <Theme theme={cofluxTheme} mode="dark">
+      {/* LayerProvider 让 useToast 走正规 viewport 并继承 dark 主题；缺它时 toast 自挂浅色兜底 viewport，定位与配色都不对。 */}
+      <LayerProvider>
+        <App initialToken={initialToken} />
+      </LayerProvider>
+    </Theme>,
+  );
+}
+
+void boot();

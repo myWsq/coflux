@@ -1,4 +1,4 @@
-import { app, Menu, shell, type MenuItemConstructorOptions } from "electron";
+import { app, Menu, type MenuItemConstructorOptions } from "electron";
 
 import type { DesktopCommand } from "../shared/desktop-bridge";
 
@@ -8,8 +8,6 @@ export type MenuActions = {
   showServerInfo: () => void;
   checkForUpdates: () => void;
 };
-
-const WEB_URL = "https://app.coflux.dev";
 
 /**
  * 原生菜单（plan 103）。⌘T/⌘W/⌘N/⌘[ ]/⌘/ 这些由页面处理的键：菜单项展示键位但 **不注册**
@@ -91,11 +89,7 @@ export function buildAppMenu(actions: MenuActions): Menu {
     {
       label: "帮助",
       role: "help",
-      submenu: [
-        pageShortcut("快捷键", "CmdOrCtrl+/", "toggle-help"),
-        { type: "separator" },
-        { label: "打开网页版", click: () => void shell.openExternal(WEB_URL) },
-      ],
+      submenu: [pageShortcut("快捷键", "CmdOrCtrl+/", "toggle-help")],
     },
   ];
 

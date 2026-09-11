@@ -11,7 +11,7 @@
  */
 
 /**
- * 桌面 app 的稳定 Origin。要求：https、跨版本不变、与 Web 的 https://app.coflux.dev 不同（grant 列表
+ * 桌面 app 的稳定 Origin。要求：https、跨版本不变、与冻结的线上 web 的 Origin 不同（grant 列表
  * 里能区分桌面 app）、不要求可解析。一旦发布即 grant 绑定的一部分：改它 = 所有桌面 loopback grant 失效。
  */
 export const DESKTOP_ORIGIN = "https://desktop.coflux.dev";

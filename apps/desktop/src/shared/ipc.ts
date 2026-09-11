@@ -7,6 +7,10 @@ export const IPC = {
   checkForUpdates: "desktop:check-for-updates",
   installUpdate: "desktop:install-update",
   getUpdateState: "desktop:get-update-state",
+  /** 会话 token（plan 106）：主进程 safeStorage 加密落盘 */
+  getSessionToken: "desktop:get-session-token",
+  setSessionToken: "desktop:set-session-token",
+  clearSessionToken: "desktop:clear-session-token",
   /** 主进程 → 渲染层 */
   focusWorkspace: "desktop:focus-workspace",
   command: "desktop:command",
