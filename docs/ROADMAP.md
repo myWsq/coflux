@@ -88,7 +88,20 @@
 - [x] 版本准入按控制面协议版本（plan 105，取代首发当天的 lockstep）：只有破坏性协议改动才让旧桌面版看到「需要更新」并触发 electron-updater；`desktop-v*` tag → 签名公证 → GitHub Release + `desktop-updates` 分支清单作更新源
 - [x] 放弃 web 端第一片（plan 106）：渲染层并入 `apps/desktop`、web/mobile 源码出仓、桥接必选；会话 token 进 safeStorage、
       窗口大小/位置记忆、electron-log 主进程日志、帮助菜单无网页版入口
-- [ ] 第二片：三张卫星页面（`/authorize`、`/oauth/consent`、`/proxy-auth`）收进 server，退役冻结的 web bundle
-- [ ] 第三片：桌面原生化升级——`coflux://` 深链接、本机 daemon 走 UDS、终端渲染器、server 侧准入精简、下载页
+- [x] 第二片（plan 107，2026-09-11）：三张卫星页面（`/authorize/<token>`、`/oauth/consent`、`/proxy-auth`）由 server 直出
+      HTML（短命内存页面会话 + csrf + PRG，登录按来源限速），链接全由 `COFLUX_PUBLIC_URL` 拼，`COFLUX_WEB_URL` 退役；
+      冻结的 web bundle 只剩历史工作台，server 不再链接到它
+- [ ] **第三片：桌面原生化升级**（各自立 plan，互不依赖，按需挑；前两片已把"唯一前端 = Electron"坐实，这些都是
+      只有桌面才做得到的事）
+  - [ ] `coflux://` 深链接：`cofluxd up` 打印的授权链接、通知点击、MCP 同意页的「回到 app」都能直接唤起桌面 app；
+        授权流可在 app 内完成（server 直出页面保留为无 app 时的兜底）。plan 103 已把 `coflux://` scheme 预留未占用
+  - [ ] 本机 daemon 改走主进程 UDS：同机时渲染层经主进程直连 supervisor 的 UDS（与 `cofluxd` 零凭证本地命令同一条信任边界），
+        不再为 loopback WS 维护浏览器身份 + grant；远端 daemon 仍走 relay / P2P。安全边界要单独论证，
+        不能顺手放宽 server/daemon 对 Origin 的校验
+  - [ ] 终端渲染器：评估 ghostty-web 或其它原生级渲染替代 xterm.js + WebGL（长期待办，见 docs/OPEN_QUESTIONS）；
+        前提是中文 IME 补丁（`terminal-pane.tsx` 的 `patchImeCommittedInput`）有等价物
+  - [ ] server 侧准入精简：web/mobile 已冻结，`COFLUX_BUILD_ID` / `COFLUX_BUILD_ID_FILE` 那套按 build-id 的浏览器准入只剩
+        冻结站在用；等冻结站退场时连同 `client_kind=web` 分支一起收掉，只留控制面协议版本准入
+  - [ ] `app.coflux.dev` 下载页：冻结工作台退场后把 `/` 换成桌面版下载 / 更新说明页（静态，Caddy 直出）
 - [ ] 首发验收待用户：CI 签名产物过 Gatekeeper、三路联调（direct 用 lsof 证明）、通知/角标在签名包上
 - [ ] 后续：universal（x64）构建开关、Windows/Linux 可移植性
