@@ -165,6 +165,25 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
 校验 → GitHub Release 放 dmg/zip/blockmap → 把 `latest-mac.yml` 改成该 Release 的绝对下载地址后推到仓库
 `desktop-updates` 分支（app 的更新源）。
 
+### 内置 daemon（plan 113）：桌面发版从此隐含 Rust 构建
+
+app 自带 `coflux-supervisor` / `coflux-worker` / Rust 版 `cofluxd` 三件（`Contents/Resources/daemon/`），登录后一键接入本机，
+不再要求用户装 Node 与 npm 版 cofluxd。workflow 多一个与「构建 + 签名 + 公证」**并行**的 `daemon` job：同一 SHA 上
+`cargo build --release --target aarch64-apple-darwin -p coflux-supervisor -p coflux-worker -p coflux-cli`（`RUSTFLAGS=-D warnings`，
+不挂 `release-signing`、不需要 secret），产物经 artifact 交给打包 job，由 `scripts/stage-daemon.mjs` 落到 `build/daemon/`
+（artifact 不保留执行位，脚本补 0755），electron-builder 用 `mac.binaries` 给三件签 Developer ID + hardened runtime 并纳入公证；
+校验步骤对三件断言存在、`codesign --verify --strict`、`Authority=Developer ID Application`。
+
+- **版本戳**：`COFLUX_RELEASE_VERSION=v0.0.0-desktop.<桌面版本>`（如 `v0.0.0-desktop.0.1.7`），同值写进与三件同目录的 `VERSION`
+  sidecar。它是 supervisor `ReleaseVersion::parse` 接受的 prerelease SemVer，且**低于一切正式 `v*`**：中心 auto-update 见
+  `workerVersion ≠ latest` 会立刻把 worker 热推成正式版（内置 worker 只是引导版）；supervisor 永远是内置版；npm 装过正式
+  supervisor 的机器不会被提示换成内置版。不能留默认 `dev`（app 对解析不了的内置版本永不提示升级）。
+- **升级**：新版 app 带更新的 supervisor 时，app 只在账号菜单提示「有更新待重启」（文案带本机运行中终端数），用户点了才换
+  `~/.coflux/bin` 三件并 `launchctl unload/load`；从不自动重启。
+- 本机 `pnpm -C apps/desktop run pack` 必须用 `COFLUX_DESKTOP_DAEMON_DIR` 指向本地 cargo 产物目录（见 apps/desktop/README.md），
+  输入缺失或三件不全直接失败。
+- macOS 上从此推荐用户走 Coflux.app 接入；`npm i -g cofluxd` 仍是 Linux 与「别的机器」的路径，两者写出的文件完全同构可互换。
+
 ### 一次性设置
 
 1. **签名 + 公证复用上面的 6 个 `release-signing` environment secret**（`MACOS_CERT_P12` /

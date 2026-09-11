@@ -12,6 +12,7 @@ import { ActivityDots } from "@/components/workbench/pending-dots";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
+import type { DesktopDaemonState } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 
 /** 心跳往返低于此值算「快」（绿），否则「慢」（黄）。局域网直连通常个位数到几十 ms，
@@ -89,6 +90,9 @@ type SidebarProps = {
   onCreateMenuProjectIdChange: (projectId: string | null) => void;
   /** 乐观创建中的工作区（plan 078）：渲染在对应项目的工作区列表末尾 */
   pendingWorkspaces: PendingWorkspace[];
+  /** 本机 daemon 状态（plan 113）：账号菜单「本机 daemon」一行；null = 还没拿到 */
+  daemonState: DesktopDaemonState | null;
+  onOpenDaemonPanel: () => void;
 };
 
 export function Sidebar(props: SidebarProps) {
@@ -659,7 +663,7 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       {/* 账号脚部（plan 110）：固定在滚动区之外，不随项目/设备列表滚动；不声明拖拽区。 */}
-      <AccountFooter client={client} />
+      <AccountFooter client={client} daemonState={props.daemonState} onOpenDaemonPanel={props.onOpenDaemonPanel} />
 
       <div
         className="group/resize absolute inset-y-0 -right-[3px] z-20 w-1.5 cursor-col-resize touch-none"

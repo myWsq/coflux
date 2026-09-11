@@ -10,17 +10,21 @@
  *   ③ 在 coflux 终端里跑 `cofluxd terminal new`（直发 IPC 路径），`terminal read` 里能看到。
  * 旧 worker / 旧 supervisor 的兼容（缺字段不报错）由 crates/protocol/src/ipc.rs 的 Legacy 单测覆盖。
  *
+ * plan 112（同一套会话环境，加在一起验）：supervisor 把 `<COFLUX_HOME>/bin` 前置进每个会话的 PATH 首段、
+ * 启动时把自身版本写到 `<COFLUX_HOME>/supervisor-version`；Rust 版 `cofluxd`（target/debug/cofluxd）在同一个
+ * coflux 终端里走路径③，输出短语与 node 版一致。
+ *
  * 端口：8870（独占）。
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
-import { startStack, mkRepo } from "./harness.mjs";
+import { startStack, mkRepo, CLI_BIN } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
 import { callTool, consentClient, obtainTokens } from "./oauth-harness.mjs";
 
@@ -28,6 +32,8 @@ const PORT = 8870;
 const BASE = `http://127.0.0.1:${PORT}`;
 const MCP_URL = `${BASE}/mcp`;
 const COFLUXD = fileURLToPath(new URL("../../packages/cli/cofluxd.mjs", import.meta.url));
+/** Rust 版 cofluxd（plan 112）：与 node 版同一组子命令、同样的 stdout 短语。 */
+const COFLUXD_RUST = CLI_BIN;
 /** 与 crates/supervisor/src/sessions.rs 的注入清单一致：变量名是 agent 面向的契约，只能加不能改。 */
 const ENV_NAMES = [
   "COFLUX_DEVICE_ID",
@@ -159,8 +165,29 @@ function cliCmd(gatewayPort, args, outFile) {
   return `COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} node ${COFLUXD} ${args} > ${outFile} 2>&1\r`;
 }
 
+/** 同上，但执行 Rust 版二进制（plan 112）。 */
+function cliCmdRust(gatewayPort, args, outFile) {
+  return `COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} ${COFLUXD_RUST} ${args} > ${outFile} 2>&1\r`;
+}
+
+/** 会话 shell **启动时**拿到的环境（不是跑命令那一刻的 `$PATH`——rc 文件可能已经改过它）：daemon 的 COFLUX_SHELL
+ * 指向一个包装脚本，它先把 `env` 原样落到 `<COFLUX_HOME>/initial-env-<COFLUX_SESSION_ID>.txt`，再 exec 真实 shell
+ * 并原样转发参数——对本文件其它用例透明。（macOS 不让看别的进程的环境，/proc、ps -E 那套拿不到。） */
+function writeShellWrapper(dir) {
+  const realShell = process.env.SHELL || "/bin/zsh";
+  const script = join(dir, "coflux-test-shell");
+  writeFileSync(script, `#!/bin/sh\nenv > "$COFLUX_HOME/initial-env-$COFLUX_SESSION_ID.txt"\nexec ${realShell} "$@"\n`);
+  chmodSync(script, 0o755);
+  return script;
+}
+
+function initialEnvFile(sessionId) {
+  return join(stack.home, `initial-env-${sessionId}.txt`);
+}
+
 before(async () => {
-  stack = await startStack({ port: PORT, serverEnv: { COFLUX_PUBLIC_URL: BASE } });
+  const shellWrapper = writeShellWrapper(mkDir("coflux-env-shell-"));
+  stack = await startStack({ port: PORT, serverEnv: { COFLUX_PUBLIC_URL: BASE }, daemonEnv: { COFLUX_SHELL: shellWrapper } });
   consentWs = await consentClient(stack);
   token = (await obtainTokens(BASE, consentWs)).access_token;
 
@@ -290,6 +317,78 @@ test("路径③：在 coflux 终端里 `cofluxd terminal new`（直发 IPC 路�
     // 新终端拿到的是它自己的 task/session，不是发起方的
     assert.notEqual(env.COFLUX_TASK_ID, origin.id);
     assert.notEqual(env.COFLUX_SESSION_ID, origin.sessionId);
+  } finally {
+    await removeWorkspace(ws.id);
+  }
+});
+
+/** 握手上报的 supervisor 版本：首个 stateSnapshot 或其后的 daemonUpdated 里带非空 supervisorVersion 的那条。 */
+async function reportedSupervisorVersion() {
+  const hit = await observer.waitFor(
+    (m) =>
+      (m.case === "stateSnapshot" && m.daemons.some((d) => d.daemonId === stack.daemonId && d.supervisorVersion)) ||
+      (m.case === "daemonUpdated" && m.daemon?.daemonId === stack.daemonId && !!m.daemon.supervisorVersion),
+    "握手上报的 supervisorVersion",
+    20000,
+  );
+  return hit.case === "stateSnapshot" ? hit.daemons.find((d) => d.daemonId === stack.daemonId).supervisorVersion : hit.daemon.supervisorVersion;
+}
+
+test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变）；supervisor-version 落盘等于握手上报的版本；Rust 版 cofluxd 走路径③输出与 node 版一致", async () => {
+  // ① supervisor-version：启动即落盘，纯文本一行 = 握手上报的原文 + 换行（桌面版 plan 113 的读取契约）
+  const version = await reportedSupervisorVersion();
+  const versionFile = join(stack.home, "supervisor-version");
+  assert.ok(existsSync(versionFile), `supervisor 启动后必须写出 ${versionFile}`);
+  assert.equal(readFileSync(versionFile, "utf8"), `${version}\n`, "文件内容 = 握手上报的 supervisor 版本原文 + 换行");
+
+  const home = mkDir("coflux-env-rust-");
+  const { ws, task: idle } = await dirWorkspace(home);
+  const gatewayPort = device.gateway.port;
+  try {
+    const origin = await startTask(idle.id);
+    await device.attach(origin.sessionId);
+
+    // ② PATH：看 shell 启动时拿到的初始环境（包装脚本在 exec 真实 shell 之前落盘的 env；rc 文件改过的 $PATH 不算），
+    //    首段必须是 <COFLUX_HOME>/bin，其余段就是 supervisor 自己的 PATH（黑盒里 = 本测试进程的 PATH）按原顺序、去掉重复的那一段
+    const envText = await waitForFile(initialEnvFile(origin.sessionId), (s) => /^PATH=/m.test(s), "会话初始环境落盘");
+    const initialPath = envText.split("\n").find((line) => line.startsWith("PATH=")).slice("PATH=".length);
+    const binDir = join(stack.home, "bin");
+    const segments = initialPath.split(":");
+    assert.equal(segments[0], binDir, `PATH 首段必须是 <COFLUX_HOME>/bin: ${initialPath}`);
+    assert.deepEqual(
+      segments.slice(1),
+      (process.env.PATH ?? "").split(":").filter((segment) => segment !== binDir),
+      "其余段 = supervisor 继承的 PATH，顺序不变、不重复",
+    );
+
+    // ③ Rust 版 cofluxd 在同一个终端里走路径③：开终端、读输出——短语与 node 版逐字一致
+    const newOut = join(home, "new.txt");
+    await device.input(origin.sessionId, cliCmdRust(gatewayPort, `terminal new --title "Rust 坐标" --cmd "${DUMP_ENV}"`, newOut));
+    const created = await observer.waitFor(
+      (m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "Rust 坐标" && !!m.task.sessionId,
+      "Rust 版建的任务出现在侧栏",
+      20000,
+    );
+    assert.notEqual(created.task.id, origin.id, "必须是新任务");
+    const exited = await observer.waitFor(
+      (m) => m.case === "taskUpdated" && m.task.id === created.task.id && m.task.status === TaskStatus.EXITED,
+      "命令跑完 → EXITED",
+      20000,
+    );
+    assert.equal(exited.task.exitCode, 0);
+    // 输出文件边写边读：等最后一行 `看输出：` 出现（或 `✗`）再比对，只等首行会读到半截
+    const newText = await waitForFile(newOut, (s) => s.includes("看输出：") || s.includes("✗"), "Rust 版 terminal new 输出");
+    assert.ok(
+      newText.includes(`已开终端 ${created.task.id}（用户可在 coflux 侧栏看到并随时接管）`) && newText.includes(`看输出：cofluxd terminal read ${created.task.id}`),
+      `Rust 版 terminal new 的短语必须与 node 版逐字一致: ${JSON.stringify(newText)}`,
+    );
+
+    const readOut = join(home, "read.txt");
+    await device.input(origin.sessionId, cliCmdRust(gatewayPort, `terminal read ${created.task.id}`, readOut));
+    const readText = await waitForFile(readOut, hasAllEnv, "Rust 版 terminal read 输出");
+    assert.ok(readText.startsWith("# exited exit=0\n"), `read 首行是状态 + 退出码: ${JSON.stringify(readText.split("\n")[0])}`);
+    const env = parseEnv(readText);
+    assertEnv(env, { deviceId: stack.daemonId, projectId: "", workspaceId: ws.id, taskId: created.task.id, sessionId: created.task.sessionId });
   } finally {
     await removeWorkspace(ws.id);
   }

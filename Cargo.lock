@@ -398,6 +398,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "coflux-cli"
+version = "0.0.0"
+dependencies = [
+ "coflux-protocol",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "coflux-protocol"
 version = "0.0.0"
 dependencies = [

@@ -204,7 +204,8 @@ type EnrollmentDialogProps = {
   onOpenChange: (open: boolean) => void;
 };
 
-/** 添加设备：静态安装引导（无凭证生成——登记走浏览器授权，daemon 自己打印链接）。 */
+/** 添加设备：给「别的机器」看的静态安装引导（无凭证生成——登记走浏览器授权，daemon 自己打印链接）。
+ * 这台 Mac 自己走账号菜单里的「本机 daemon」接入（plan 113），不放回这里。 */
 export function EnrollmentDialog(props: EnrollmentDialogProps) {
   return (
     <AstryxDialog isOpen={props.open} onOpenChange={props.onOpenChange} purpose="form" width={480}>
@@ -212,7 +213,7 @@ export function EnrollmentDialog(props: EnrollmentDialogProps) {
         header={
           <AstryxDialogHeader
             title="添加设备"
-            subtitle="在要接入的机器上安装并启动 daemon，然后在浏览器里完成一次授权。"
+            subtitle="在要接入的另一台机器上安装并启动 daemon，然后在浏览器里完成一次授权。这台 Mac 用账号菜单里的「本机 daemon」接入。"
             onOpenChange={props.onOpenChange}
             hasDivider={false}
           />

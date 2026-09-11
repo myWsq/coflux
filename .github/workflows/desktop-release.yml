@@ -52,9 +52,53 @@ jobs:
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
+  # 内置 daemon 三件（plan 113）：与「构建 + 签名 + 公证」并行，在同一 SHA 上 cargo build supervisor / worker /
+  # Rust 版 cofluxd，经 artifact 交给打包 job 进 Contents/Resources/daemon/。不需要签名 secret，不挂
+  # release-signing environment——签名在打包 job 由 electron-builder 的 mac.binaries 统一做。
+  #
+  # 版本戳 COFLUX_RELEASE_VERSION 打成 v0.0.0-desktop.<桌面版本>：能被 supervisor 的 ReleaseVersion::parse
+  # 接受（v 前缀 + prerelease），且低于一切正式 v*——中心 auto-update 见 workerVersion ≠ latest 会立刻把 worker
+  # 热推成正式版（内置 worker 只是引导版）；npm 装过正式 supervisor 的机器不会被提示换成内置版。不能留默认 dev。
+  daemon:
+    name: 构建内置 daemon（supervisor / worker / cofluxd）
+    needs: metadata
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: cargo build（release，aarch64-apple-darwin）
+        env:
+          COFLUX_RELEASE_VERSION: v0.0.0-desktop.${{ needs.metadata.outputs.version }}
+          RUSTFLAGS: -D warnings
+        run: cargo build --release --target aarch64-apple-darwin -p coflux-supervisor -p coflux-worker -p coflux-cli
+      - name: 整理 daemon 产物目录（三件 + VERSION 版本戳）
+        env:
+          COFLUX_RELEASE_VERSION: v0.0.0-desktop.${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          bin="target/aarch64-apple-darwin/release"
+          mkdir -p daemon-bundle
+          for name in coflux-supervisor coflux-worker cofluxd; do
+            test -x "$bin/$name"
+            cp "$bin/$name" "daemon-bundle/$name"
+          done
+          # VERSION 与编译期 COFLUX_RELEASE_VERSION 同值：主进程拿它与 ~/.coflux/supervisor-version 比较
+          printf '%s\n' "$COFLUX_RELEASE_VERSION" > daemon-bundle/VERSION
+          ls -la daemon-bundle
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-daemon-bundle
+          if-no-files-found: error
+          path: daemon-bundle
+
   build:
     name: 构建 + 签名 + 公证
-    needs: metadata
+    needs: [metadata, daemon]
     runs-on: macos-latest
     timeout-minutes: 60
     # 签名/公证 secret 挂在 release-signing environment；
@@ -93,6 +137,20 @@ jobs:
 
       - name: desktop 类型检查（主进程 / preload / 渲染层）+ 单元测试
         run: pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test
+
+      # 内置 daemon 三件（plan 113）：artifact 不保留执行位，stage 脚本复制到 build/daemon/ 时统一补 0755；
+      # 缺任一件脚本直接失败，不会静默出一个不带 daemon 的包。
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-daemon-bundle
+          path: ${{ runner.temp }}/daemon-bundle
+      - name: 内置 daemon 三件 + VERSION 落到 build/daemon（electron-builder extraResources 源）
+        env:
+          COFLUX_DESKTOP_DAEMON_DIR: ${{ runner.temp }}/daemon-bundle
+        run: |
+          set -euo pipefail
+          pnpm -C apps/desktop run stage-daemon
+          grep -qx "v0.0.0-desktop.${{ needs.metadata.outputs.version }}" apps/desktop/build/daemon/VERSION
 
       - name: 构建 main / preload / renderer
         run: |
@@ -158,6 +216,15 @@ jobs:
           codesign -d --entitlements - "$app"
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose=4 "$app"
+          # 内置 daemon 三件（plan 113）：存在、可执行、各自带 Developer ID 签名（mac.binaries 让它们进签名与公证）
+          daemon="$app/Contents/Resources/daemon"
+          for name in coflux-supervisor coflux-worker cofluxd; do
+            test -x "$daemon/$name"
+            codesign --verify --strict --verbose=2 "$daemon/$name"
+            codesign -dv --verbose=2 "$daemon/$name" 2>&1 | grep -q 'Authority=Developer ID Application'
+          done
+          test -s "$daemon/VERSION"
+          grep -qx "v0.0.0-desktop.${{ needs.metadata.outputs.version }}" "$daemon/VERSION"
           ls -la apps/desktop/dist
           test -f apps/desktop/dist/latest-mac.yml
           grep -q "coflux-${{ needs.metadata.outputs.version }}-arm64.zip" apps/desktop/dist/latest-mac.yml
