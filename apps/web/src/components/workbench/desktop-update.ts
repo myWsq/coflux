@@ -1,8 +1,8 @@
 import type { DesktopUpdateState } from "@/desktop-bridge";
 
 /**
- * 版本准入被拒（clientOutdated）在桌面 app 里的展示（plan 103）：不是断线也不是登录失败，
- * 而是「需要更新」——把 electron-updater 的状态映射成一段文案 + 至多一个动作。纯函数，便于单测。
+ * 版本准入被拒（clientOutdated）在桌面 app 里的展示（plan 103 / 105）：只在 app 的控制面协议版本低于
+ * server 支持的最低版本时发生（破坏性协议改动），不是断线也不是登录失败，而是「需要更新」——把 electron-updater 的状态映射成一段文案 + 至多一个动作。纯函数，便于单测。
  */
 export type OutdatedPrompt = {
   title: string;
@@ -17,7 +17,7 @@ export function resolveOutdatedPrompt(update: DesktopUpdateState): OutdatedPromp
   switch (update.status) {
     case "idle":
     case "checking":
-      return { title, description: "服务器已部署新版本，正在检查桌面版更新…", busy: true, action: null };
+      return { title, description: "这个版本的 Coflux 已不被服务器支持，正在检查更新…", busy: true, action: null };
     case "available":
       return { title, description: `发现 v${update.version ?? ""}，正在下载…`, busy: true, action: null };
     case "downloading":
@@ -27,7 +27,7 @@ export function resolveOutdatedPrompt(update: DesktopUpdateState): OutdatedPromp
     case "not-available":
       return {
         title,
-        description: "还没有与服务器匹配的桌面版；发布通常在几分钟内完成，请稍后重试。",
+        description: "还没有可安装的新版本；稍后重试，或到 GitHub Releases 手动下载最新版。",
         busy: false,
         action: { label: "重新检查", kind: "check" },
       };

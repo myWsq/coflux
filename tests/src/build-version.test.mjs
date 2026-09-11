@@ -130,3 +130,69 @@ describe("COFLUX_BUILD_ID_FILE：构建产物自举", () => {
     await closed;
   });
 });
+
+describe("桌面客户端：按控制面协议版本准入，不看 build-id（plan 105）", () => {
+  const PORT = 8853;
+  // server 设了 build-id 允许集合：web 失配会被踢，desktop 不看它
+  const LOCAL_ENV = { COFLUX_ENROLL_KEY: "dev-enroll", COFLUX_PASSWORD: "admin", COFLUX_BUILD_ID: "server-build-xyz" };
+
+  let stack;
+  before(async () => { stack = await startServer({ port: PORT, env: LOCAL_ENV }); });
+  after(async () => { await stack?.stop(); });
+
+  test("desktop + 协议版本 1 + build-id 与 server 不同 → authOk（部署 prod 不踢旧桌面版）", async () => {
+    const c = stack.makeClient();
+    await c.ready;
+    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "desktop-build-old", clientKind: "desktop", controlProtocolVersion: 1 });
+    await c.waitFor((m) => m.case === "authOk", "auth.ok");
+    c.send({ case: "clientSubscribe" });
+    await c.waitFor((m) => m.case === "stateSnapshot", "snapshot");
+    c.close();
+  });
+
+  test("desktop 不带协议版本（按 0 处理）→ clientOutdated，连接关闭，不发 authError", async () => {
+    const c = stack.makeClient();
+    await c.ready;
+    const closed = onceClosed(c);
+    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "server-build-xyz", clientKind: "desktop" });
+    await c.waitFor((m) => m.case === "clientOutdated", "client.outdated");
+    await closed;
+    assert.ok(!c.log.some((m) => m.case === "authOk"));
+    assert.ok(!c.log.some((m) => m.case === "authError"));
+  });
+
+  test("web kind 不受影响：build-id 失配仍 clientOutdated，即使带了协议版本", async () => {
+    const c = stack.makeClient();
+    await c.ready;
+    const closed = onceClosed(c);
+    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "web-build-old", clientKind: "web", controlProtocolVersion: 1 });
+    await c.waitFor((m) => m.case === "clientOutdated", "client.outdated");
+    await closed;
+  });
+});
+
+describe("COFLUX_MIN_CONTROL_PROTOCOL_VERSION：破坏性协议改动时抬高最低版本挡旧桌面版", () => {
+  const PORT = 8854;
+  const LOCAL_ENV = { COFLUX_ENROLL_KEY: "dev-enroll", COFLUX_PASSWORD: "admin", COFLUX_MIN_CONTROL_PROTOCOL_VERSION: "2" };
+
+  let stack;
+  before(async () => { stack = await startServer({ port: PORT, env: LOCAL_ENV }); });
+  after(async () => { await stack?.stop(); });
+
+  test("desktop 协议版本 1 < 最低 2 → clientOutdated", async () => {
+    const c = stack.makeClient();
+    await c.ready;
+    const closed = onceClosed(c);
+    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "x", clientKind: "desktop", controlProtocolVersion: 1 });
+    await c.waitFor((m) => m.case === "clientOutdated", "client.outdated");
+    await closed;
+  });
+
+  test("desktop 协议版本 2 → authOk", async () => {
+    const c = stack.makeClient();
+    await c.ready;
+    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "x", clientKind: "desktop", controlProtocolVersion: 2 });
+    await c.waitFor((m) => m.case === "authOk", "auth.ok");
+    c.close();
+  });
+});

@@ -3,9 +3,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decodeClientToServer } from "@coflux/protocol";
+import { CONTROL_PROTOCOL_VERSION, decodeClientToServer } from "@coflux/protocol";
 
-import { createConnection, type ConnectionSocket, type ConnectionStatus } from "./connection";
+import { buildAuthPayload, createConnection, type ConnectionSocket, type ConnectionStatus } from "./connection";
 
 // 连接生命周期全是定时器驱动的（退避重连），且分支多在"链路出状况"那一侧——真实 WS 与
 // 真实时钟都复现不了。这里注入假时钟 + 假 socket，把时序断言钉死在毫秒上。
@@ -328,4 +328,20 @@ test("被替换的旧 socket 事件不再影响新连接", () => {
   assert.equal(h.statuses.length, before, "旧 socket 的 onclose 不该改变状态");
   h.clock.advance(60_000);
   assert.equal(h.sockets.length, 2, "旧 socket 的 onclose 不该触发重连");
+});
+
+test("buildAuthPayload（plan 105）：build-id 照旧上报，desktop 带 clientKind，控制面协议版本总是带上", () => {
+  const desktop = buildAuthPayload({ token: "t" }, "abc1234", "desktop");
+  assert.equal(desktop.case, "clientAuth");
+  const desktopValue = desktop.case === "clientAuth" ? desktop.value : undefined;
+  assert.equal(desktopValue?.clientToken, "t");
+  assert.equal(desktopValue?.clientVersion, "abc1234");
+  assert.equal(desktopValue?.clientKind, "desktop");
+  assert.equal(desktopValue?.controlProtocolVersion, CONTROL_PROTOCOL_VERSION);
+
+  const web = buildAuthPayload({ username: "u", password: "p" }, "dev");
+  const webValue = web.case === "clientAuth" ? web.value : undefined;
+  assert.equal(webValue?.username, "u");
+  assert.equal(webValue?.clientKind, undefined);
+  assert.equal(webValue?.controlProtocolVersion, CONTROL_PROTOCOL_VERSION);
 });

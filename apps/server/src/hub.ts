@@ -3291,7 +3291,20 @@ export class Hub {
     // 允许集合为空（COFLUX_BUILD_ID 与 COFLUX_BUILD_ID_FILE 均未设，本机开发 / 黑盒测试）
     // 完全跳过；client 上报 "dev"（vite dev）总放行。
     const allowedBuildIds = this.allowedBuildIds();
-    if (allowedBuildIds.length > 0 && msg.clientVersion !== "dev") {
+    if (msg.clientKind === "desktop") {
+      // 桌面客户端（plan 105）：按控制面协议版本准入，不看 build-id——打包分发有发布时差，不能像浏览器那样
+      // reload 立刻拿到新 bundle。只有低于 server 支持的最低协议版本（破坏性协议改动）才拒；平时部署不踢旧桌面版，
+      // 它们由 electron-updater 在后台升级。
+      if ((msg.controlProtocolVersion ?? 0) < config.minControlProtocolVersion) {
+        this.sendClient(client, { case: "clientOutdated", value: {} });
+        try {
+          client.ws.close(4001, "control protocol too old");
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+    } else if (allowedBuildIds.length > 0 && msg.clientVersion !== "dev") {
       if (!msg.clientVersion) {
         // 缺失版本 = 旧 bundle（协议里从未有过该字段）：唯一对它生效的杠杆是它已理解的
         // authError（清 token、停止重连、退回登录页）。不发 clientOutdated——旧代码不认识它。

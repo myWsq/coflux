@@ -33,7 +33,7 @@ pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/ico
   这个字符串是 loopback grant 绑定的一部分，改它等于让所有桌面 grant 失效。
 - **服务器地址**：`--server=wss://…/client` > 环境变量 `COFLUX_SERVER_URL` > `~/Library/Application Support/Coflux/settings.json`（未打包的 dev 实例用 `Coflux-dev` 目录，与安装版互不可见）
   的 `serverUrl` > 默认（打包版 `wss://api.coflux.dev/client`，dev `ws://localhost:8787/client`）。
-- **版本准入**：渲染层 build-id 与浏览器构建同一套（git short SHA），中心只接受与部署的 web 同 SHA 的桌面版；
+- **版本准入**（plan 105）：登录时上报 `clientKind=desktop` 与 `CONTROL_PROTOCOL_VERSION`，中心只在协议版本低于其最低支持版本时拒绝；build-id 只作标识。部署 prod 不会踢旧桌面版，electron-updater 在后台升级；被拒显示「需要更新」并触发更新检查。
   被拒时显示「需要更新」并触发 electron-updater 检查，不当作断线。
 - **安全基线**：sandbox/contextIsolation 开、nodeIntegration 关、Fuses 关 RunAsNode 等、响应带 CSP、
   权限默认拒绝、IPC 校验发送方来源；新窗口/外链一律系统浏览器。

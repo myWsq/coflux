@@ -8,7 +8,7 @@ coflux：可跑在任意节点上的 **daemon**，本地起 PTY、驱动 Agent�
 
 - `apps/server`（TS）：账号/设备认证 + 编排路由 + Postgres 持久化。
 - `apps/web`（TS）：Vite + React + xterm 终端。**桌面端，是默认的迭代对象**。
-- `apps/desktop`（TS）：macOS 桌面客户端 = Electron 壳 **原样打包 `apps/web`**（plan 103；renderer root 直指 apps/web，不复制 UI）。桌面差异一律经 preload 桥接 `window.cofluxDesktop` 运行时探测（类型在 `apps/web/src/desktop-bridge.ts`），不做编译期分叉；主进程改写 WebSocket 握手 Origin 为 `https://desktop.coflux.dev`，server/daemon 校验零放宽。发版走 `desktop-v*` tag（签名公证 + GitHub Release，更新清单推 `desktop-updates` 分支），桌面 build-id 与部署的 web 必须同 SHA。原生 Swift 版 `apps/macos` 已删除（可从 git 历史找回）。
+- `apps/desktop`（TS）：macOS 桌面客户端 = Electron 壳 **原样打包 `apps/web`**（plan 103；renderer root 直指 apps/web，不复制 UI）。桌面差异一律经 preload 桥接 `window.cofluxDesktop` 运行时探测（类型在 `apps/web/src/desktop-bridge.ts`），不做编译期分叉；主进程改写 WebSocket 握手 Origin 为 `https://desktop.coflux.dev`，server/daemon 校验零放宽。发版走 `desktop-v*` tag（签名公证 + GitHub Release，更新清单推 `desktop-updates` 分支），桌面按控制面协议版本准入（plan 105），不与 prod 部署绑定。原生 Swift 版 `apps/macos` 已删除（可从 git 历史找回）。
 - `apps/mobile`（TS）：移动随身端（m.coflux.dev，plan 032）。**已冻结**：功能锁定在 2026-07 的形态（列表/详情 + 终端快捷键条 + 简版 diff），"迭代 web"默认指 `apps/web`，不给 mobile 加功能、不同步桌面新特性；仅当共享层（protocol/client）变更弄坏它的构建时做最小修复。
 - `packages/{protocol,core,client}`（TS）：共享的线协议类型、日志、协议 client + store（client 为 web/mobile 双端共享）。
 - `integrations/claude-plugin`：Claude Code 插件的**交付目录**（hooks + skill + `.mcp.json` + manifest），由 `myWsq/plugins` 市场（维护仓库 `myWsq/plugins-builder`）按 commit SHA 整目录收集发布，改完要提升 `.claude-plugin/plugin.json` 的 version 并在 builder 里更新 SHA。SKILL 的唯一源是 `packages/cli/skills/coflux/SKILL.md`，用 `node scripts/sync-claude-plugin.mjs` 同步到这里，CI 校验两份一致。

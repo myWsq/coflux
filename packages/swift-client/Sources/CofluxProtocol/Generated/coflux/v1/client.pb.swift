@@ -83,6 +83,28 @@ public struct Coflux_V1_ClientAuth: Sendable {
   /// Clears the value of `clientVersion`. Subsequent reads from it will return its default value.
   public mutating func clearClientVersion() {self._clientVersion = nil}
 
+  /// 客户端类型（plan 105）："web" / "mobile" / "desktop"。缺失按 web 处理（旧客户端与 iOS）。只有 "desktop"
+  /// 走协议版本准入：打包分发的客户端有发布时差，不能像浏览器那样靠 reload 立刻拿到新 bundle。
+  public var clientKind: String {
+    get {_clientKind ?? String()}
+    set {_clientKind = newValue}
+  }
+  /// Returns true if `clientKind` has been explicitly set.
+  public var hasClientKind: Bool {self._clientKind != nil}
+  /// Clears the value of `clientKind`. Subsequent reads from it will return its default value.
+  public mutating func clearClientKind() {self._clientKind = nil}
+
+  /// 控制面协议版本（plan 105，常量 CONTROL_PROTOCOL_VERSION）：desktop 低于 server 支持的最低版本才被拒；
+  /// 平时部署 server 不再踢旧桌面版，它们由 electron-updater 在后台升级。
+  public var controlProtocolVersion: UInt32 {
+    get {_controlProtocolVersion ?? 0}
+    set {_controlProtocolVersion = newValue}
+  }
+  /// Returns true if `controlProtocolVersion` has been explicitly set.
+  public var hasControlProtocolVersion: Bool {self._controlProtocolVersion != nil}
+  /// Clears the value of `controlProtocolVersion`. Subsequent reads from it will return its default value.
+  public mutating func clearControlProtocolVersion() {self._controlProtocolVersion = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -92,6 +114,8 @@ public struct Coflux_V1_ClientAuth: Sendable {
   fileprivate var _clientToken: String? = nil
   fileprivate var _supabaseToken: String? = nil
   fileprivate var _clientVersion: String? = nil
+  fileprivate var _clientKind: String? = nil
+  fileprivate var _controlProtocolVersion: UInt32? = nil
 }
 
 /// 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地）
@@ -1068,9 +1092,9 @@ public struct Coflux_V1_ServerError: Sendable {
 }
 
 /// build 版本失配（新客户端跑旧代码判定的对称面，plan 033）：认证阶段 server 比对
-/// client_version 与 COFLUX_BUILD_ID 不一致时下发本消息后关闭连接。旧 bundle（缺失
-/// client_version）走 AuthError 而非本消息——本消息对它是无法理解的未知 case（见
-/// apps/server/src/hub.ts handleClientAuth）。
+/// web/mobile：client_version 与 COFLUX_BUILD_ID 不一致时下发本消息后关闭连接；desktop（plan 105）：
+/// control_protocol_version 低于 server 支持的最低版本时下发。旧 bundle（缺失 client_version）走 AuthError
+/// 而非本消息——本消息对它是无法理解的未知 case（见 apps/server/src/hub.ts handleClientAuth）。
 public struct Coflux_V1_ClientOutdated: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1498,7 +1522,7 @@ fileprivate let _protobuf_package = "coflux.v1"
 
 extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientAuth"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}username\0\u{1}password\0\u{3}client_token\0\u{3}supabase_token\0\u{3}client_version\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}username\0\u{1}password\0\u{3}client_token\0\u{3}supabase_token\0\u{3}client_version\0\u{3}client_kind\0\u{3}control_protocol_version\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1511,6 +1535,8 @@ extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
       case 3: try { try decoder.decodeSingularStringField(value: &self._clientToken) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self._supabaseToken) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self._clientVersion) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self._clientKind) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self._controlProtocolVersion) }()
       default: break
       }
     }
@@ -1536,6 +1562,12 @@ extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     try { if let v = self._clientVersion {
       try visitor.visitSingularStringField(value: v, fieldNumber: 5)
     } }()
+    try { if let v = self._clientKind {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 6)
+    } }()
+    try { if let v = self._controlProtocolVersion {
+      try visitor.visitSingularUInt32Field(value: v, fieldNumber: 7)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1545,6 +1577,8 @@ extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     if lhs._clientToken != rhs._clientToken {return false}
     if lhs._supabaseToken != rhs._supabaseToken {return false}
     if lhs._clientVersion != rhs._clientVersion {return false}
+    if lhs._clientKind != rhs._clientKind {return false}
+    if lhs._controlProtocolVersion != rhs._controlProtocolVersion {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
