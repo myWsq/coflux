@@ -46,6 +46,7 @@ export type GhosttyNative = {
   replay(id: number, bytes: Uint8Array): boolean;
   reset(id: number): void;
   dump(id: number): string;
+  grid(id: number): { columns: number; rows: number };
   pump(): void;
   copy(id: number): void;
   paste(id: number): void;

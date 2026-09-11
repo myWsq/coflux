@@ -253,6 +253,17 @@ public func reset(_ id: UInt64) {
     if host.view.surface == nil { host.emit(5, data: Data("replacement surface 创建失败".utf8)) }
 }
 
+// 验收诊断直接读 surface 网格，不复用 resize 回调缓存。
+@_cdecl("coflux_ghostty_grid") @MainActor
+public func grid(_ id: UInt64, _ columns: UnsafeMutablePointer<Int32>?, _ rows: UnsafeMutablePointer<Int32>?) -> Int32 {
+    precondition(Thread.isMainThread)
+    guard let host = hosts[id], !host.closed, !host.busy, let raw = host.view.surface?.rawValue else { return 0 }
+    let size = ghostty_surface_size(raw)
+    columns?.pointee = Int32(size.columns)
+    rows?.pointee = Int32(size.rows)
+    return 1
+}
+
 @_cdecl("coflux_ghostty_dump") @MainActor
 public func dump(_ id: UInt64, _ buffer: UnsafeMutablePointer<UInt8>?, _ capacity: Int32) -> Int32 {
     precondition(Thread.isMainThread)

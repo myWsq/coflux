@@ -93,6 +93,15 @@ static napi_value dispatch(napi_env env, napi_callback_info info) {
         else coflux_ghostty_focus(id, value);
     } else if (op == 7) {
         coflux_ghostty_reset(id);
+    } else if (op == 16) {
+        int32_t columns, rows;
+        if (!coflux_ghostty_grid(id, &columns, &rows)) return fail(env, "surface 正忙或已销毁");
+        napi_create_object(env, &result);
+        napi_value value;
+        napi_create_int32(env, columns, &value);
+        napi_set_named_property(env, result, "columns", value);
+        napi_create_int32(env, rows, &value);
+        napi_set_named_property(env, result, "rows", value);
     } else if (op == 9) {
         const int32_t size = coflux_ghostty_dump(id, nullptr, 0);
         if (size < 0 || size > 16 * 1024 * 1024) return fail(env, "surface 正忙或文本过大");
@@ -140,8 +149,8 @@ static void cleanup(void* data) {
     }
 }
 static napi_value init(napi_env env, napi_value exports) {
-    const char* names[] = {"create", "destroy", "setFrame", "setVisible", "setFocus", "write", "replay", "reset", "pump", "dump", "setAccess", "copy", "paste", "hasFocus", "allocatedBytes", "testCommandKey"};
-    for (uintptr_t i = 0; i < 16; ++i) {
+    const char* names[] = {"create", "destroy", "setFrame", "setVisible", "setFocus", "write", "replay", "reset", "pump", "dump", "setAccess", "copy", "paste", "hasFocus", "allocatedBytes", "testCommandKey", "grid"};
+    for (uintptr_t i = 0; i < 17; ++i) {
         napi_value method;
         napi_create_function(env, names[i], NAPI_AUTO_LENGTH, dispatch, reinterpret_cast<void*>(i), &method);
         napi_set_named_property(env, exports, names[i], method);

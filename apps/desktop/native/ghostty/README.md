@@ -91,3 +91,22 @@ Developer ID: unverified, needs CI cert。
 250 条 tear down 生命周期日志、无崩溃。此前执行器的 `metal=false` 来自 seatbelt，不能判定 native 不可行。
 本轮扩大了 ABI/栅栏/门禁/资源加载，新增代码未构建或验证，必须重新跑原生构建和验收装置。
 八道门清单见 `checklist.md`；最终状态记录在 plan 114 的「Spike 结论」。
+
+## G6 文本提取与物理位置（修订）
+
+锁定 `Ghostty.ref` 的 `82938b633ba646db38591d969c3c526332bd7e65` 中，
+`src/Surface.zig` 的 `dumpTextLocked` 调用 `selectionString`；
+`src/terminal/Screen.zig` 的 `Screen: selectionString wide char with header` 用例明确规定：
+5 列写入 `1ABC⚡`，只选择第一行 0–4 列仍返回 `1ABC⚡`。
+包的 `InMemoryTerminalSession.readViewportText()` 逐行使用同样的非矩形 selection，
+因此选到行末 spacer_head 会带出下一行宽字，文本行不是逐格原始数据。
+
+G6 不再用第一行是否包含“界”判断换行。新增 `grid(id)` 直接读取
+`ghostty_surface_size`，与栅栏 cols/rows 在首块前后比较；三种宽度的首块写入
+`X × (columns - 1) + 界Z` 后，必须同时满足第二行文本为 `界Z`、真实 CPR 为 `ESC[2;4R`。
+独立 ASCII 首块 `X × columns + Y` 必须得到第一行恰好 columns 个 X、第二行 Y、CPR `ESC[2;2R`。
+错报列数、宽字单列或仍用旧网格解析不能仅凭 selection 的扩展通过这些断言。
+源码说明支持 dump 表示伪影（c），但新诊断未运行前不能判定 G6 通过。
+
+资源补丁写入时临时增加 owner write，并在 finally 恢复原 mode；重复运行不再写入，
+源码形状不符仍硬失败。编排者须从只读、未打补丁的 checkout 重跑 build，再运行第二次确认幂等。

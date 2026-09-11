@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** 固定 revision 的 SwiftPM Bundle.module 默认找 .app 根，动态宿主应找 Contents/Resources。 */
@@ -16,5 +16,13 @@ export function patchResources(root) {
         }
         return Bundle.module
     }`;
-  writeFileSync(path, source.replace("public enum GhosttyRuntimeResources {", replacement).replaceAll("Bundle.module.url", "cofluxResourceBundle.url"));
+  const patched = source.replace("public enum GhosttyRuntimeResources {", replacement).replaceAll("Bundle.module.url", "cofluxResourceBundle.url");
+  // SwiftPM checkout 默认只读；只在写入期间增加 owner write，并保留原权限。
+  const mode = statSync(path).mode & 0o7777;
+  try {
+    if (!(mode & 0o200)) chmodSync(path, mode | 0o200);
+    writeFileSync(path, patched);
+  } finally {
+    chmodSync(path, mode);
+  }
 }

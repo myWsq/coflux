@@ -21,9 +21,12 @@ function loadNative(): GhosttyNative {
   return native ??= requireNative(path) as GhosttyNative;
 }
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object"; }
-function key(value: unknown): value is SurfaceKey {
+function key(value: unknown): value is SurfaceKey & Record<string, unknown> {
   return object(value) && typeof value.surfaceId === "string" && value.surfaceId.length > 0 && value.surfaceId.length <= 160
     && Number.isSafeInteger(value.generation) && Number(value.generation) > 0;
+}
+function isGhosttyCreate(value: unknown): value is GhosttyCreate {
+  return key(value) && rect(value.rect);
 }
 function rect(value: unknown): value is GhosttyRect {
   if (!object(value)) return false;
@@ -92,8 +95,8 @@ export function registerGhosttyIpc(enabled: boolean, trusted: { appOrigin: strin
   };
   ipcMain.handle(IPC.ghosttyCreate, async (event, request: unknown): Promise<GhosttyReady> => {
     const window = trustedWindow(event);
-    if (!key(request) || !object(request) || !rect(request.rect)) throw new Error("无效 Ghostty create");
-    const input = request as GhosttyCreate;
+    if (!isGhosttyCreate(request)) throw new Error("无效 Ghostty create");
+    const input = request;
     const ownerId = event.sender.id;
     let owner = owners.get(ownerId);
     if (!owner) {
