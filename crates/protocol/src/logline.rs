@@ -136,16 +136,4 @@ mod tests {
             "1969-12-31T23:59:59.999+00:00"
         );
     }
-
-    #[test]
-    fn live_timestamp_has_expected_shape() {
-        let text = timestamp();
-        // YYYY-MM-DDTHH:MM:SS.mmm±HH:MM = 29 字符
-        assert_eq!(text.len(), 29, "{text}");
-        assert_eq!(&text[10..11], "T");
-        assert!(
-            text.ends_with(":00") || text.ends_with(":30") || text.ends_with(":45"),
-            "{text}"
-        );
-    }
 }

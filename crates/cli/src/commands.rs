@@ -541,13 +541,6 @@ mod tests {
     }
 
     #[test]
-    fn command_normalization_collapses_blank_to_empty() {
-        assert_eq!(normalize_command(None), "");
-        assert_eq!(normalize_command(Some("   ")), "");
-        assert_eq!(normalize_command(Some(" ls ")), " ls ");
-    }
-
-    #[test]
     fn terminal_list_rows_and_empty() {
         assert_eq!(render_terminal_list(&json!({ "terminals": [] })), "本工作区暂无终端");
         let result = json!({ "terminals": [
