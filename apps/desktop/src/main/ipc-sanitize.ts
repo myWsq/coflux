@@ -1,10 +1,12 @@
-import type { DesktopNotification } from "../../../web/src/desktop-bridge";
+import type { DesktopNotification } from "../shared/desktop-bridge";
 
 // 渲染层 IPC 载荷的校验（纯函数，不 import electron，供 ipc.ts 与单测共用）。
 
 const MAX_ID = 128;
 const MAX_TITLE = 200;
 const MAX_BODY = 1000;
+/** 中心签发的会话 token 是短字符串；超长视为形状不对，丢弃而不是截断（截断会存下一个永远无效的 token）。 */
+const MAX_TOKEN = 4096;
 
 /** 渲染层来的载荷只当数据：字段类型与长度都校验，超长截断，形状不对丢弃。 */
 export function sanitizeNotification(payload: unknown): DesktopNotification | null {
@@ -18,4 +20,13 @@ export function sanitizeNotification(payload: unknown): DesktopNotification | nu
 export function sanitizeBadgeCount(payload: unknown): number | null {
   if (typeof payload !== "number" || !Number.isFinite(payload)) return null;
   return Math.min(999, Math.max(0, Math.floor(payload)));
+}
+
+/** 会话 token：非空、不超长、不含控制字符/空白的字符串才落盘。 */
+export function sanitizeSessionToken(payload: unknown): string | null {
+  if (typeof payload !== "string") return null;
+  if (payload.length === 0 || payload.length > MAX_TOKEN) return null;
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f\s]/.test(payload)) return null;
+  return payload;
 }

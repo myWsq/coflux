@@ -1,15 +1,17 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, dialog, Menu, protocol, session, shell, type BrowserWindow } from "electron";
+import { app, dialog, Menu, protocol, safeStorage, session, shell, type BrowserWindow } from "electron";
 
 import { IPC } from "../shared/ipc";
 import { APP_ORIGIN, APP_SCHEME, APP_URL, registerAppProtocol } from "./app-protocol";
 import { registerIpc } from "./ipc";
+import { log } from "./log";
 import { buildAppMenu } from "./menu";
 import { setDockBadge, showWorkspaceNotification } from "./notifications";
 import { DESKTOP_ORIGIN, rewriteHandshakeHeaders } from "./origin";
 import { readSettingsFile, resolveServerUrl } from "./settings";
+import { createTokenStore } from "./token-store";
 import { createUpdater } from "./updater";
 import { createMainWindow } from "./window";
 
@@ -49,7 +51,11 @@ function sendToRenderer(channel: string, payload: unknown): void {
   mainWindow.webContents.send(channel, payload);
 }
 
+// userData 下的三份文件：settings.json 是用户手编的配置；session-token.bin 是 safeStorage 加密的会话 token；
+// window-state.json 是窗口 bounds（plan 106）。后两份由 app 自己维护，不与 settings.json 混放。
 const settingsPath = () => join(app.getPath("userData"), "settings.json");
+const tokenPath = () => join(app.getPath("userData"), "session-token.bin");
+const windowStatePath = () => join(app.getPath("userData"), "window-state.json");
 
 function currentServerUrl(): string {
   return resolveServerUrl({
@@ -97,6 +103,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on("before-quit", () => {
     quitting = true;
+    log.info("退出");
   });
 
   app.on("activate", () => {
@@ -109,6 +116,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   void app.whenReady().then(() => {
+    log.info("启动", { version: app.getVersion(), packaged: app.isPackaged, electron: process.versions.electron, userData: app.getPath("userData") });
     registerAppProtocol(RENDERER_ROOT);
     installOriginRewrite();
 
@@ -119,8 +127,17 @@ if (!app.requestSingleInstanceLock()) {
     session.defaultSession.setPermissionCheckHandler((_contents, permission) => allowedPermissions.has(permission));
 
     const serverUrl = currentServerUrl();
+    log.info("服务器地址", serverUrl);
 
-    // 自动更新：generic provider 读 R2 的 latest-mac.yml（url 由 CI 打包时写入）；状态变化广播给渲染层，
+    // 会话 token（plan 106）：safeStorage 加密落 userData/session-token.bin；失败态归一为未登录（见 token-store.ts）。
+    const tokenStore = createTokenStore({
+      filePath: tokenPath(),
+      codec: safeStorage,
+      onError: (stage, error) => log.warn(`会话 token ${stage} 失败，按未登录处理`, error),
+    });
+    if (!safeStorage.isEncryptionAvailable()) log.warn("safeStorage 加密不可用：会话 token 不落盘，每次启动需重新登录");
+
+    // 自动更新：generic provider 读仓库 desktop-updates 分支的 latest-mac.yml；状态变化广播给渲染层，
     // 版本准入被拒的状态页据此显示「需要更新」。quitAndInstall 前把 quitting 置位，close 钩子才放行关窗。
     const updater = createUpdater({
       enabled: app.isPackaged,
@@ -143,6 +160,11 @@ if (!app.requestSingleInstanceLock()) {
         checkForUpdates: updater.checkForUpdates,
         installUpdate: updater.installUpdate,
         getUpdateState: updater.getState,
+        getSessionToken: tokenStore.read,
+        setSessionToken: (token) => {
+          tokenStore.write(token);
+        },
+        clearSessionToken: tokenStore.clear,
       },
       trusted,
     );
@@ -166,6 +188,8 @@ if (!app.requestSingleInstanceLock()) {
       url: devRendererUrl ?? APP_URL,
       trusted,
       isQuitting: () => quitting,
+      windowStatePath: windowStatePath(),
+      onStateError: (error) => log.warn("窗口位置写盘失败", error),
     });
   });
 }

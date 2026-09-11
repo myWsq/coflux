@@ -149,8 +149,9 @@ export class OAuthService {
   get resourceMetadataUrl(): string {
     return `${config.publicUrl}/.well-known/oauth-protected-resource/mcp`;
   }
+  /** 同意页自 plan 107 起由 server 直出（interface/auth-pages），与 issuer 同基址。 */
   get consentUrlBase(): string {
-    return `${config.webUrl}/oauth/consent`;
+    return `${config.publicUrl}/oauth/consent`;
   }
 
   /* ------------------------------ 元数据 ------------------------------ */

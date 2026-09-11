@@ -1,6 +1,7 @@
-import { BrowserWindow, shell } from "electron";
+import { BrowserWindow, screen, shell } from "electron";
 
 import { isTrustedRendererUrl } from "./ipc-trust";
+import { DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, readWindowBounds, resolveWindowBounds, writeWindowBounds } from "./window-state";
 
 export type MainWindowOptions = {
   preloadPath: string;
@@ -9,6 +10,10 @@ export type MainWindowOptions = {
   trusted: { appOrigin: string; devRendererUrl?: string };
   /** app 正在退出（before-quit 之后）：此时关窗才真的关，否则只隐藏（保住连接与通知） */
   isQuitting: () => boolean;
+  /** 窗口大小/位置记忆文件（userData/window-state.json，plan 106） */
+  windowStatePath: string;
+  /** bounds 写盘失败只记日志 */
+  onStateError?: (error: unknown) => void;
 };
 
 /** 只有 http(s) 外链交给系统浏览器；其它 scheme（javascript:、file:、自定义）一律丢弃。 */
@@ -22,16 +27,24 @@ export function openExternalIfHttp(url: string): void {
 }
 
 /**
- * 主窗口（plan 103）：隐藏标题栏 + 红绿灯内嵌到侧栏顶部（IDE 式，Web 侧在桌面下给侧栏留出拖拽区）。
+ * 主窗口（plan 103）：隐藏标题栏 + 红绿灯内嵌到侧栏顶部（IDE 式，渲染层给侧栏留出拖拽区）。
  * 安全基线：sandbox / contextIsolation 默认开，nodeIntegration 关，webview 关；新窗口一律拒绝、
  * 外链交系统浏览器；离开 app 自身来源的导航拦下（授权页 / OAuth 同意页 / 端口预览都在系统浏览器）。
+ * 大小/位置（plan 106）：上次关窗/退出时保存的 bounds 若仍落在某个显示器上就恢复，否则默认尺寸居中。
  */
 export function createMainWindow(options: MainWindowOptions): BrowserWindow {
+  const restored = resolveWindowBounds(
+    readWindowBounds(options.windowStatePath),
+    screen.getAllDisplays().map((display) => display.workArea),
+  );
   const window = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 1024,
-    minHeight: 640,
+    width: restored?.width ?? DEFAULT_WINDOW_SIZE.width,
+    height: restored?.height ?? DEFAULT_WINDOW_SIZE.height,
+    // x/y 不给时 Electron 默认居中（首次启动与离屏回退都走这条）
+    x: restored?.x,
+    y: restored?.y,
+    minWidth: MIN_WINDOW_SIZE.width,
+    minHeight: MIN_WINDOW_SIZE.height,
     show: false,
     titleBarStyle: "hidden",
     trafficLightPosition: { x: 14, y: 14 },
@@ -63,6 +76,8 @@ export function createMainWindow(options: MainWindowOptions): BrowserWindow {
   window.once("ready-to-show", () => window.show());
 
   window.on("close", (event) => {
+    // 关窗（隐藏）与退出都经这里：先记下常规态 bounds（全屏/最大化时取的是还原后的尺寸）
+    if (!window.isDestroyed()) writeWindowBounds(options.windowStatePath, window.getNormalBounds(), options.onStateError);
     if (options.isQuitting()) return;
     // macOS 惯例：关窗不退出。这里进一步选择「隐藏」而非销毁——保住中心连接与通知/角标，
     // Dock 点击或通知点击即恢复，不用重新登录/重新 attach。

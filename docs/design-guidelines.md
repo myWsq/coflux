@@ -1,6 +1,6 @@
-# Web UI 设计规范
+# 桌面 UI 设计规范
 
-`apps/web` 的界面约定。改 UI 前过一遍；新增条目保持"一条规则 + 为什么"的密度。
+`apps/desktop/src/renderer`（Electron 桌面客户端的 React 渲染层）的界面约定。改 UI 前过一遍；新增条目保持"一条规则 + 为什么"的密度。
 
 ## 悬浮提示：用 `Tooltip` 组件，不用原生 `title`
 
@@ -21,6 +21,6 @@ Unicode 盲文、不要 lucide 状态图标占这个槽。
 
 ## 图标：lucide-react，跨端语义对齐
 
-同一语义在 web 与 iOS 用同族图标（web lucide ↔ iOS SF Symbols 就近映射，如
+同一语义在桌面与 iOS 用同族图标（桌面 lucide ↔ iOS SF Symbols 就近映射，如
 `GitBranch` ↔ `arrow.branch`、`Folder` ↔ `folder`）。新图标先查 `sidebar.tsx`
 既有 import 有没有可复用的。

@@ -1,6 +1,6 @@
-import { app, Menu, shell, type MenuItemConstructorOptions } from "electron";
+import { app, Menu, type MenuItemConstructorOptions } from "electron";
 
-import type { DesktopCommand } from "../../../web/src/desktop-bridge";
+import type { DesktopCommand } from "../shared/desktop-bridge";
 
 export type MenuActions = {
   /** 菜单项 → 渲染层命令（与 use-global-shortcuts.ts 的键位语义一一对应） */
@@ -9,12 +9,10 @@ export type MenuActions = {
   checkForUpdates: () => void;
 };
 
-const WEB_URL = "https://app.coflux.dev";
-
 /**
  * 原生菜单（plan 103）。⌘T/⌘W/⌘N/⌘[ ]/⌘/ 这些由页面处理的键：菜单项展示键位但 **不注册**
- * accelerator（registerAccelerator: false）——键落到页面，由 use-global-shortcuts 按 standalone
- * 语义处理，与 Web 键位零差异；点菜单项才走 sendCommand。关窗改成 ⇧⌘W，把 ⌘W 让给「关闭终端」。
+ * accelerator（registerAccelerator: false）——键落到页面，由 use-global-shortcuts 按纯 ⌘
+ * 前缀处理；点菜单项才走 sendCommand。关窗改成 ⇧⌘W，把 ⌘W 让给「关闭终端」。
  * 编辑菜单的 role 是剪贴板快捷键在 Electron/macOS 上生效的前提，不能省。
  */
 export function buildAppMenu(actions: MenuActions): Menu {
@@ -91,11 +89,7 @@ export function buildAppMenu(actions: MenuActions): Menu {
     {
       label: "帮助",
       role: "help",
-      submenu: [
-        pageShortcut("快捷键", "CmdOrCtrl+/", "toggle-help"),
-        { type: "separator" },
-        { label: "打开网页版", click: () => void shell.openExternal(WEB_URL) },
-      ],
+      submenu: [pageShortcut("快捷键", "CmdOrCtrl+/", "toggle-help")],
     },
   ];
 

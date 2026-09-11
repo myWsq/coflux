@@ -153,12 +153,12 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
 > 提到 latest 校验之前，会让新 CLI release 在 registry 状态异常时静默成功。遇到此情况先
 > 人工诊断/修复 npm latest；只有在引入可验证的 rerun context 与对应反例测试后才放宽。
 
-`ci.yml`（push/PR 到 main）是质量门：类型检查/前端构建 + Rust 测试与构建（`-D warnings`）+
+`ci.yml`（push/PR 到 main）是质量门：类型检查/桌面构建 + Rust 测试与构建（`-D warnings`）+
 全量真实进程黑盒 + Swift/iOS 构建门。
 
 ## 桌面客户端（Electron）发版
 
-`apps/desktop` 是 Electron 壳 + 原样打包的 `apps/web`（plan 103）。发版与 daemon **完全独立**：tag 形如
+`apps/desktop` 是 Electron 主进程 + React/xterm 渲染层（`src/renderer`，plan 103 / 106）。发版与 daemon **完全独立**：tag 形如
 `desktop-v0.1.0`，触发 `.github/workflows/desktop-release.yml`（macOS runner，arm64 首发）：
 校验 tag → 构建 main/preload/renderer → electron-builder
 翻 Fuses、Developer ID 签名（hardened runtime + entitlements）、公证 + staple → `codesign`/`stapler`/`spctl`
@@ -188,8 +188,9 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
 
 桌面登录时上报 `client_kind=desktop` 与 `control_protocol_version`（`packages/protocol` 的
 `CONTROL_PROTOCOL_VERSION`）；中心只在它低于 `COFLUX_MIN_CONTROL_PROTOCOL_VERSION`（默认 1）时拒绝，
-build-id 只作标识、不参与准入。web/mobile 仍按 build-id 精确准入——浏览器 reload 一次就拿到新 bundle，
-桌面是打包分发、有发布时差，最初的「桌面 build-id 与 prod 同 SHA」lockstep 方案在首发当天就证明不可用。
+build-id 只作标识、不参与准入。冻结的线上 web/mobile 仍按 build-id 精确准入（`COFLUX_BUILD_ID_FILE` 指向冻结
+dist，见 deployment.md「web 冻结」）——桌面是打包分发、有发布时差，最初的「桌面 build-id 与 prod 同 SHA」
+lockstep 方案在首发当天就证明不可用。
 
 - 平时部署 prod **不会**踢旧桌面版；它们由 electron-updater 在后台升到最新（启动 15s 后与每 4 小时检查）。
 - 做破坏性协议改动时：`CONTROL_PROTOCOL_VERSION` +1、server 的最低版本默认值同步抬高（应急可先用 env），
