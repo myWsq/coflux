@@ -17,7 +17,7 @@ pnpm -C apps/desktop dist        # 本机出 dmg/zip（需 Developer ID 证书�
 pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/icon.png（仅 macOS）
 ```
 
-正式发版走 `desktop-v*` tag 触发的 `.github/workflows/desktop-release.yml`（签名 + 公证 + 推 R2），见
+正式发版走 `desktop-v*` tag 触发的 `.github/workflows/desktop-release.yml`（签名 + 公证 + GitHub Release + 更新清单推 `desktop-updates` 分支），见
 [docs/RELEASING.md](../../docs/RELEASING.md)。
 
 ## 运行时约定

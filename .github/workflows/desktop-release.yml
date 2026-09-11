@@ -1,8 +1,9 @@
 name: desktop-release
 
-# 打 tag desktop-v* 触发（plan 103）：构建 apps/desktop → Developer ID 签名 + 公证 → 推 Cloudflare R2
-# （electron-updater 的 generic 源）→ GitHub Release 只放安装包镜像与说明，**不**作更新源。
-# 与 daemon 的 v* / release.yml 完全独立：桌面版本节奏与 daemon SemVer 无关。
+# 打 tag desktop-v* 触发（plan 103）：构建 apps/desktop → Developer ID 签名 + 公证 → GitHub Release 放安装包
+# → 把 latest-mac.yml 改成该 Release 的绝对下载地址后推到 desktop-updates 分支（electron-updater 的 generic 源读
+# raw.githubusercontent.com）。不用 electron-updater 的 github provider：它看仓库 releases/latest，而本仓库 daemon
+# 的 v* 与桌面的 desktop-v* 混在一起。与 daemon 的 v* / release.yml 完全独立：桌面版本节奏与 daemon SemVer 无关。
 on:
   push:
     tags: ["desktop-v*"]
@@ -65,7 +66,7 @@ jobs:
           # 渲染层 build-id 取 git short SHA（apps/web/vite.config.ts）：必须有完整 git 历史与 HEAD
           fetch-depth: 0
 
-      - name: 发布所需 secret / 变量必须齐全（缺任一项明确失败，不静默跳过、不回退别的源）
+      - name: 发布所需 secret 必须齐全（缺任一项明确失败，不静默跳过签名或公证）
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -73,26 +74,16 @@ jobs:
           NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-          DESKTOP_UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
         run: |
           set -euo pipefail
           missing=0
-          for name in MACOS_CERT_P12 MACOS_CERT_PASSWORD APPLE_TEAM_ID NOTARY_API_KEY_P8 NOTARY_KEY_ID NOTARY_ISSUER_ID \
-                      R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET DESKTOP_UPDATE_URL; do
+          for name in MACOS_CERT_P12 MACOS_CERT_PASSWORD APPLE_TEAM_ID NOTARY_API_KEY_P8 NOTARY_KEY_ID NOTARY_ISSUER_ID; do
             if [ -z "${!name:-}" ]; then
               echo "::error::release-signing environment 缺少 ${name}"
               missing=1
             fi
           done
           [ "$missing" = 0 ]
-          case "$DESKTOP_UPDATE_URL" in
-            https://*) ;;
-            *) echo "::error::DESKTOP_UPDATE_URL 必须是 https 公网地址（R2 自定义域名下的 desktop/ 前缀）"; exit 1 ;;
-          esac
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -136,11 +127,9 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.NOTARY_ISSUER_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          DESKTOP_UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
         run: |
           set -euo pipefail
-          pnpm -C apps/desktop exec electron-builder --mac --arm64 --publish never \
-            --config.publish.url="$DESKTOP_UPDATE_URL"
+          pnpm -C apps/desktop exec electron-builder --mac --arm64 --publish never
 
       - name: 校验签名 / 公证票据 / Gatekeeper
         run: |
@@ -159,28 +148,6 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/AuthKey.p8"
 
-      # 先推安装包，最后推 latest-mac.yml：客户端永远不会读到指向尚未上传文件的清单。
-      - name: 推 Cloudflare R2（S3 兼容 API，desktop/ 前缀）
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          AWS_EC2_METADATA_DISABLED: "true"
-          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          cd apps/desktop/dist
-          uploaded=0
-          for file in *.dmg *.zip *.blockmap; do
-            [ -e "$file" ] || continue
-            aws s3 cp "$file" "s3://${R2_BUCKET}/desktop/${file}" --endpoint-url "$R2_ENDPOINT" --no-progress
-            uploaded=$((uploaded + 1))
-          done
-          [ "$uploaded" -ge 2 ] || { echo "::error::安装包上传数异常：${uploaded}"; exit 1; }
-          aws s3 cp latest-mac.yml "s3://${R2_BUCKET}/desktop/latest-mac.yml" --endpoint-url "$R2_ENDPOINT" \
-            --cache-control "no-cache" --content-type "text/yaml" --no-progress
-
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: desktop-release-assets
@@ -192,7 +159,7 @@ jobs:
             apps/desktop/dist/latest-mac.yml
 
   release:
-    name: 发布 GitHub Release（安装包镜像，非更新源）
+    name: 发布 GitHub Release + 推送更新清单
     needs: [metadata, build]
     runs-on: ubuntu-latest
     permissions:
@@ -205,16 +172,16 @@ jobs:
       - name: 生成 release 说明
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
-          UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
         run: |
           set -euo pipefail
           {
             echo "coflux 桌面客户端 v${VERSION}（macOS 13+，Apple Silicon）。"
             echo
             echo "- 安装：下载 dmg，拖进 Applications。已签名并经苹果公证。"
-            echo "- 自动更新源是 Cloudflare R2，本 Release 只是安装包镜像。"
+            echo "- 自动更新：app 读仓库 desktop-updates 分支的 latest-mac.yml，安装包从本 Release 下载。"
             echo "- 渲染层 build-id 与本 tag 的 commit 同 SHA：中心必须部署到同一 SHA，否则桌面版会被版本准入拒绝直到下次更新。"
           } > notes.md
+      # 安装包与 blockmap 先上 Release：清单随后才指向它们，客户端永远不会读到指向尚未上传文件的清单。
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -223,3 +190,35 @@ jobs:
           files: |
             assets/*.dmg
             assets/*.zip
+            assets/*.blockmap
+      - name: 更新清单：latest-mac.yml 的相对文件名改成本 Release 的绝对下载地址
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/${REPO}/releases/download/${TAG}"
+          sed -E -e "s#^([[:space:]]*-?[[:space:]]*url: )(coflux-[^[:space:]]+)#\1${base}/\2#" \
+                 -e "s#^(path: )(coflux-[^[:space:]]+)#\1${base}/\2#" assets/latest-mac.yml > latest-mac.yml
+          grep -q "${base}/coflux-" latest-mac.yml
+          cat latest-mac.yml
+      - name: 推送清单到 desktop-updates 分支（app 的 generic 更新源读 raw.githubusercontent.com）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          git init -q updates
+          cd updates
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          if git fetch -q origin desktop-updates 2>/dev/null; then
+            git checkout -q -B desktop-updates FETCH_HEAD
+          else
+            git checkout -q --orphan desktop-updates
+          fi
+          cp ../latest-mac.yml latest-mac.yml
+          git add latest-mac.yml
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "desktop v${VERSION}: latest-mac.yml"
+          git push -q origin desktop-updates

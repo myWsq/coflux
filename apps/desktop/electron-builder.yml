@@ -54,9 +54,10 @@ dmg:
   sign: false
   writeUpdateInfo: false
 
-# updater 源：Cloudflare R2 公网自定义域名（generic provider 读 <url>/latest-mac.yml）。
-# 这里的占位 URL 只是让本机构建也生成 app-update.yml；CI 用 --config.publish.url 覆盖成真实地址。
+# updater 源：仓库 desktop-updates 分支上的 latest-mac.yml（generic provider 读 <url>/latest-mac.yml），由
+# desktop-release.yml 在 GitHub Release 上传安装包后把清单改写成绝对下载地址推上去；安装包本身在 GitHub Release。
+# 不用 electron-updater 的 github provider：它看仓库 releases/latest，而 daemon 的 v* 与桌面的 desktop-v* 混在一个仓库里。
 publish:
   provider: generic
-  url: https://desktop-updates.invalid/replaced-by-ci
+  url: https://raw.githubusercontent.com/myWsq/coflux/desktop-updates
   channel: latest
