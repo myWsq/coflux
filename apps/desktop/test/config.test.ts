@@ -98,7 +98,9 @@ test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 sec
   assert.doesNotMatch(pack.run, /--config\.publish/); // 更新源 URL 写死在 electron-builder.yml，CI 不覆盖
   // 证书不经 CSC_LINK 交给 electron-builder（它自建 keychain 在 runner 上失败）：自己导入 keychain，按 CSC_NAME 找身份
   assert.equal(pack.env?.CSC_LINK, undefined);
-  assert.match(pack.env?.CSC_NAME ?? "", /^Developer ID Application: /);
+  // electron-builder 要求 CSC_NAME 不带「Developer ID Application:」前缀（带了直接报错，2026-09-11 实测）
+  assert.match(pack.env?.CSC_NAME ?? "", /^Shuaiqi Wang \(/);
+  assert.doesNotMatch(pack.env?.CSC_NAME ?? "", /Developer ID Application/);
   const packIndex = build.steps.indexOf(pack);
   const keychainIndex = build.steps.findIndex((step) => step.run?.includes("security import") && step.run.includes("CSC_KEYCHAIN="));
   assert.ok(keychainIndex >= 0 && keychainIndex < packIndex, "证书导入 keychain 必须在打包之前");
