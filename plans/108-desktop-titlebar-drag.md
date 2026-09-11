@@ -1,4 +1,4 @@
-# Plan 107: 桌面版终端顶栏与空态主区顶部成为窗口拖拽区（拖动 + 系统双击动作）
+# Plan 108: 桌面版终端顶栏与空态主区顶部成为窗口拖拽区（拖动 + 系统双击动作）
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -14,7 +14,7 @@
 - Priority: P2
 - Effort: S
 - Risk: LOW
-- Depends on: 106（DONE 在分支 `dev/20260911-desktop-only-merge`，未合 main；本 plan 基于其尖端 `c1e82cc`，合回顺序 106 → 107）
+- Depends on: 106（DONE 在分支 `dev/20260911-desktop-only-merge`，未合 main；本 plan 基于其尖端 `c1e82cc`，合回顺序 106 → 107（卫星页面）→ 108；原编号 107 与同日「卫星页面收进 server」plan 撞号后改号）
 - Category: bug
 - Execution: subagent（宿主通用子 agent，`model: opus`；出发检查 2026-09-11 记录，全自动推进，不再确认）
 - Planned at: `c1e82cc`, 2026-09-11
@@ -111,7 +111,7 @@ Validation: `pnpm -C apps/desktop typecheck` → exit 0；`pnpm -C apps/desktop 
 - **新 worktree 无依赖**：`dev:execute-plan` 预检时在 worktree 根 `pnpm install --frozen-lockfile`；渲染层
   测试路径见 `apps/desktop/package.json` 的 `test` 脚本（含 `src/renderer/**/*.test.ts`）。
 - **基线是 106 分支不是 main**：渲染层路径是 `apps/desktop/src/renderer/...`，main 上仍是 `apps/web`。
-  不要参考 main 的路径与内容；本分支合回顺序是先 106 后 107。
+  不要参考 main 的路径与内容；本分支合回顺序是先 106 后 108。
 
 ## Scope
 
@@ -120,7 +120,7 @@ In scope:
 - `apps/desktop/src/renderer/components/workbench/workbench.tsx`
 - `apps/desktop/src/renderer/components/workbench/sidebar.tsx`（仅当抽取共享拖拽常量时）
 - `apps/desktop/src/renderer/components/workbench/` 下新增的共享常量模块（可选，执行者定名）
-- `plans/107-desktop-titlebar-drag.md`、`plans/README.md`
+- `plans/108-desktop-titlebar-drag.md`、`plans/README.md`
 
 Out of scope:
 - `apps/desktop/src/main/**`、`apps/desktop/src/preload/**`、`apps/desktop/src/shared/**` — 双击与拖动都由

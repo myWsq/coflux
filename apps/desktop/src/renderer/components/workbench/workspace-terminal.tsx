@@ -361,7 +361,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     <>
       {/* 单栏顶栏：名称（如有）＋ 可点的分支按钮 │ 终端 Tabs（Tab 用间距而非竖线分隔）＋ 新建/端口。
           目录工作区（设备详情，plan 048）保留 Tabs/新建/端口，不渲染分支按钮与「变更」tab。
-          顶栏整条是窗口拖拽区（plan 107）：空白处按住能拖窗口、双击走 macOS 标题栏双击偏好。
+          顶栏整条是窗口拖拽区（plan 108）：空白处按住能拖窗口、双击走 macOS 标题栏双击偏好。
           代价是拖拽区吞掉指针事件——以后往顶栏里加任何可点/可悬浮的元素，都必须给它带上
           NO_DRAG_REGION_STYLE，否则在桌面版里点不到、Tooltip 也不出（见 drag-region.ts）。 */}
       <header
