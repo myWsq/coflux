@@ -182,7 +182,7 @@ jobs:
             echo "- 渲染层 build-id 与本 tag 的 commit 同 SHA：中心必须部署到同一 SHA，否则桌面版会被版本准入拒绝直到下次更新。"
           } > notes.md
       # 安装包与 blockmap 先上 Release：清单随后才指向它们，客户端永远不会读到指向尚未上传文件的清单。
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.ref_name }}
           name: desktop v${{ needs.metadata.outputs.version }}
