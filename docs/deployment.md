@@ -71,9 +71,8 @@ daemon 跑在各用户自己的机器上，不在任何一台服务器（prod-bj
   （issuer 与所有元数据 URL 由它拼，不看请求 Host）。宿主接入地址 `https://api.coflux.dev/mcp`；
   端点 `/.well-known/oauth-protected-resource[/mcp]`、`/.well-known/oauth-authorization-server`、
   `/oauth/{register,authorize,token}` 全部随 api 站反代到 8787，无需单独 handle。上线检查：
-  owo-jp-gw 与 prod-jp 的 api 站块没有别的 `.well-known` handle（HTTP-01 只占 `acme-challenge`）；
-  确认页在 `app.coflux.dev/oauth/consent`（SPA 兜底即可）；web 与 server 须同批部署（新 client 消息 +
-  版本准入）。
+  owo-jp-gw 与 prod-jp 的 api 站块没有别的 `.well-known` handle（HTTP-01 只占 `acme-challenge`）。
+  同意页 `api.coflux.dev/oauth/consent` 由 server 直出（plan 107），同样随 api 站反代，不依赖 web。
 
 ## owo-jp-gw —— 公网入口 + jp relay
 
@@ -113,12 +112,20 @@ ssh root@prod-jp 'cd /opt/coflux && git fetch --tags && git checkout <tag> \
   && systemctl restart coflux-server'
 ```
 
+## 浏览器页面由 server 直出（plan 107）
+
+三条在系统浏览器里完成的流——新机器登记（`cofluxd up` 打印的 `/authorize/<token>`）、MCP 宿主 OAuth 同意页
+（`/oauth/consent`）、端口预览门禁（`/proxy-auth`）——由 server 直出 HTML，地址在 `COFLUX_PUBLIC_URL` 下
+（生产 `https://api.coflux.dev/...`），随 api 站整站反代到 8787，Caddy 无需改动。server 不再生成任何指向
+`app.coflux.dev` 的链接，也不再读任何「web 控制台地址」配置——`server.env` 里旧的那个 web 地址变量已是死变量，
+删掉即可。
+
 ## web 冻结（plan 106）
 
 `app.coflux.dev` 与 `m.coflux.dev` 继续服务**分割前最后一次构建**：不再更新、不做下载页、`/` 的行为不变。
-它们只剩三条在系统浏览器里完成的流——新机器登记（`cofluxd up` 打印的 `/authorize/<token>`）、MCP 宿主 OAuth
-同意页（`/oauth/consent`）、端口预览门禁（`/proxy-auth`）；日常工作台在桌面 app。源码在 git 历史
-`ce7026b`（分割基线，含最后一份 web / mobile 子项目源码）；生产当前跑的冻结构建对应的 SHA：`<待填>`。
+它们只剩历史工作台（日常工作台在桌面 app；三张浏览器页面已由 server 承担，见上一节，冻结 bundle 里的旧页面
+仍能手动打开但没有任何链接指向它们）。源码在 git 历史 `ce7026b`（分割基线，含最后一份 web / mobile 子项目源码）；
+生产当前跑的冻结构建对应的 SHA：`<待填>`。
 
 **下一次从分割后的提交部署 prod 之前，必须先做这一步（一次性）。** `git checkout <tag>` 不会清掉被忽略的
 dist（检出目录 `apps/` 下的 `web/dist`、`mobile/dist`），所以冻结站在分割后的检出里会「碰巧」继续活着——但那是靠忽略文件没被清理，

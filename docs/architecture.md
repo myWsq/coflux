@@ -305,9 +305,10 @@ Task 创建和首次 session create 属于中心编排；本地 stop 是 session
 
 ## 9. 端口预览
 
-worker 只探测 PTY 进程树内的 LISTEN 端口，上报中心生成 `<shortId>-<proxyHost>`。浏览器先换一次性授权
-code，再由账号 cookie 进入代理。HTTP/SSE/WebSocket 都通过 `ProxyData` 隧道；这类远端端口流量明确
-经过中心，不属于 local-first terminal/RPC 热路径。
+worker 只探测 PTY 进程树内的 LISTEN 端口，上报中心生成 `<shortId>-<proxyHost>`。预览域无门禁 cookie 时
+302 到 server 直出的门禁页（`<publicUrl>/proxy-auth?to=`，plan 107）：登录（几分钟的页面会话）后由 server
+签一次性授权 code 并 302 回预览域回调，回调种下账号 cookie 后进入代理。HTTP/SSE/WebSocket 都通过
+`ProxyData` 隧道；这类远端端口流量明确经过中心，不属于 local-first terminal/RPC 热路径。
 
 ## 10. 认证与安全边界
 

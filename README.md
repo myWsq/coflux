@@ -39,7 +39,8 @@ cofluxd up               # 幂等：零参数即可装/起；已装则按当前�
 cofluxd status / doctor / logs -f / update / down / uninstall
 ```
 
-登记走浏览器授权：`cofluxd up` 打印一次性授权链接，在已登录账号中确认即可。`cofluxd doctor`
+登记走浏览器授权：`cofluxd up` 打印一次性授权链接（`https://api.coflux.dev/authorize/<token>`，server 直出的
+页面），在任意浏览器打开、登录账号后确认即可。`cofluxd doctor`
 分别检查中心 DNS/TCP/TLS/WS、gateway bind、持久 grant、loopback WS 与 daemon→中心状态；本地失败只
 表示 direct 降级，不等于 daemon 离线。**所有配置都在 `~/.coflux/settings.json`**
 （`serverUrl`/`deviceName`/`shell`），手改后重跑 `cofluxd up` 生效。发版/签名见
@@ -94,7 +95,7 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 | `COFLUX_PASSWORD` | dev 为 `admin`；生产必填 | `local` 模式密码 |
 | `COFLUX_SESSION_TTL_MS` | `2592000000` | 登录后签发的会话 token 有效期（默认 30 天） |
 | `COFLUX_PROXY_HOST` | `p.localhost` | 端口转发预览域：`<shortId>-<该值>` 按反代路由；生产需配好泛解析 + 泛证书 |
-| `COFLUX_PUBLIC_URL` | `http://127.0.0.1:<COFLUX_PORT>` | 中心自身公网基址：OAuth issuer、PRM/AS 元数据与 `/mcp` 资源标识全由它拼（生产 `https://api.coflux.dev`），不从请求头推导 |
+| `COFLUX_PUBLIC_URL` | `http://127.0.0.1:<COFLUX_PORT>` | 中心自身公网基址：OAuth issuer、PRM/AS 元数据、`/mcp` 资源标识与 server 直出的三张浏览器页面（`/authorize/<token>`、`/oauth/consent`、`/proxy-auth`）全由它拼（生产 `https://api.coflux.dev`），不从请求头推导 |
 | `COFLUX_OAUTH_ACCESS_TTL_MS` | `3600000` | MCP 宿主 OAuth access token 有效期（默认 1 小时） |
 | `COFLUX_OAUTH_REFRESH_TTL_MS` | 同 `COFLUX_SESSION_TTL_MS` | MCP 宿主 OAuth refresh token 有效期（用过即作废、轮换） |
 | `COFLUX_OAUTH_REFRESH_REUSE_GRACE_MS` | `60000` | 刚被轮换掉的 refresh token 在此宽限内再次出现按同机并发轮换复用（同 grant 再签一对）；超过宽限才当泄露整链撤销；`0` = 无宽限 |

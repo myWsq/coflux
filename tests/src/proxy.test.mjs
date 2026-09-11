@@ -41,10 +41,12 @@ import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { WebSocket } from "ws";
 import { TaskStatus } from "@coflux/protocol";
-import { startStack, mkRepo } from "./harness.mjs";
+import { startStack, mkRepo, CookieJar, pageGet, pageLogin } from "./harness.mjs";
 import { openRelayDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8831;
+// server 直出的门禁页（plan 107）挂在 COFLUX_PUBLIC_URL 下；黑盒不设它，默认即本机监听地址。
+const BASE = `http://127.0.0.1:${PORT}`;
 const TESTS_ROOT = resolve(import.meta.dirname, "..");
 
 let stack;
@@ -341,6 +343,75 @@ test("门禁：无 cookie 302 到授权页；issueAuth 换回调 URL；回调种
   c.send({ case: "proxyIssueAuth", redirect: "https://evil.com/" });
   const rejected = await waitForSince(c, sinceReject, (msg) => msg.case === "proxyAuth", "proxy.auth（外部 redirect）");
   assert.equal(rejected.ok, false, "issueAuth 对外部域名的 redirect 应拒绝（ok:false）");
+
+  device.close();
+});
+
+/* ============================ 门禁页 HTTP 流（plan 107，server 直出） ============================ */
+
+test("门禁 HTTP 页：无 cookie 302 到 <publicUrl>/proxy-auth?to=；登录 → 302 到预览域回调 → 回调种 cookie → 带 cookie 200；坏 to 与不存在的预览被拒", async () => {
+  const device = await openRelayDevice(stack);
+  const c = device.control;
+  const { taskId, sessionId } = await startTaskRunning(device, workspaceId, "gate-page-task");
+  const sinceStart = c.log.length;
+  await device.input(sessionId, "node server-gate.js\r");
+  const m = await waitPtyMatch(device, sessionId, /PORT=(\d+)/);
+  const port = Number(m[1]);
+  const updated = await waitPortsUpdated(c, sinceStart, (msg) => msg.taskId === taskId && msg.ports.some((p) => p.port === port), "gate page task port reported");
+  const host = new URL(updated.ports.find((p) => p.port === port).url).host;
+
+  const first = await rawRequest(PORT, { host, path: "/" });
+  assert.equal(first.status, 302, "无 cookie 请求应被 302 到门禁页");
+  const loc = new URL(first.headers.location);
+  assert.equal(loc.origin, BASE, "门禁页由 publicUrl 拼出，不再指向冻结的 web");
+  assert.equal(loc.pathname, "/proxy-auth");
+  const to = loc.searchParams.get("to");
+  assert.ok(to?.startsWith(`http://${host}/`), `to 是原始完整 URL：${to}`);
+
+  // 坏 to / 缺 to：登录前就说明，不进登录
+  const missing = await pageGet(`${BASE}/proxy-auth`, new CookieJar());
+  assert.equal(missing.status, 400);
+  assert.ok(missing.html.includes("预览链接无效") && missing.html.includes("链接缺少跳转目标"));
+  const evil = await pageGet(`${BASE}/proxy-auth?to=${encodeURIComponent("https://evil.com/")}`, new CookieJar());
+  assert.equal(evil.status, 400, "host 不是 <shortId>-<proxyHost> 形状的 to 被拒");
+
+  // 登录表单回填 to；登录 → 303 回同一 GET；有会话的 GET 直接签 code 并 302 到预览域回调
+  const jar = new CookieJar();
+  const page = await pageGet(first.headers.location, jar);
+  assert.equal(page.status, 200);
+  assert.ok(page.html.includes("访问端口预览") && page.html.includes("登录并访问"));
+  assert.equal(page.hidden.to, to);
+  const login = await pageLogin(first.headers.location, jar, { username: stack.username, password: stack.password });
+  assert.equal(login.status, 303, login.html);
+  assert.equal(login.location, `/proxy-auth?to=${encodeURIComponent(to)}`);
+  const issued = await pageGet(first.headers.location, jar);
+  assert.equal(issued.status, 302, issued.html);
+  const cb = new URL(issued.location);
+  assert.equal(cb.host, host, "302 落到预览域自己的回调");
+  assert.equal(cb.pathname, "/__cf_proxy_auth");
+  assert.ok(cb.searchParams.get("code"), "回调带一次性 code");
+  assert.equal(cb.searchParams.get("to"), "/");
+  assert.ok(issued.headers.getSetCookie().some((x) => x.startsWith("cf_page=;") && x.includes("Max-Age=0")), "签发后页面会话作废");
+  assert.ok(!issued.headers.getSetCookie().some((x) => x.startsWith("cf_proxy_session=")), "门禁 cookie 由预览域回调种，不在中心页面上");
+
+  // 回调种 cf_proxy_session（与 WS 路径完全一致）→ 带 cookie 200 拿到真实响应
+  const callback = await rawRequest(PORT, { host: cb.host, path: cb.pathname + cb.search });
+  assert.equal(callback.status, 302);
+  assert.equal(callback.headers.location, "/");
+  const setCookie = [].concat(callback.headers["set-cookie"] ?? [])[0];
+  const cookieMatch = /cf_proxy_session=([^;]+)/.exec(setCookie ?? "");
+  assert.ok(cookieMatch, "回调应种下 cf_proxy_session");
+  const ok = await rawRequest(PORT, { host, path: "/", headers: { Cookie: `cf_proxy_session=${cookieMatch[1]}` } });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body, "GATE-OK");
+
+  // 形状对但不存在的预览：登录后报「无法打开预览」
+  const ghost = `${BASE}/proxy-auth?to=${encodeURIComponent("http://no-such-route-1-p.localhost/")}`;
+  const ghostJar = new CookieJar();
+  assert.equal((await pageLogin(ghost, ghostJar, { username: stack.username, password: stack.password })).status, 303);
+  const denied = await pageGet(ghost, ghostJar);
+  assert.equal(denied.status, 403);
+  assert.ok(denied.html.includes("无法打开预览") && denied.html.includes("预览链接不存在或不属于当前账号"));
 
   device.close();
 });
