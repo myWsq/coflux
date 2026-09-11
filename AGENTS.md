@@ -4,19 +4,17 @@
 
 ## 这是什么
 
-coflux：可跑在任意节点上的 **daemon**，本地起 PTY、驱动 Agent（claude/codex CLI），主动外连**中心服务器**；**client**（web）连服务器即可触达任意 daemon。模型类 Tailscale（账号 → 设备 → 项目 → 工作区 → 任务 → 会话）。
+coflux：可跑在任意节点上的 **daemon**，本地起 PTY、驱动 Agent（claude/codex CLI），主动外连**中心服务器**；**client**（Electron 桌面 app）连服务器即可触达任意 daemon。模型类 Tailscale（账号 → 设备 → 项目 → 工作区 → 任务 → 会话）。
 
 - `apps/server`（TS）：账号/设备认证 + 编排路由 + Postgres 持久化。
-- `apps/web`（TS）：Vite + React + xterm 终端。**桌面端，是默认的迭代对象**。
-- `apps/desktop`（TS）：macOS 桌面客户端 = Electron 壳 **原样打包 `apps/web`**（plan 103；renderer root 直指 apps/web，不复制 UI）。桌面差异一律经 preload 桥接 `window.cofluxDesktop` 运行时探测（类型在 `apps/web/src/desktop-bridge.ts`），不做编译期分叉；主进程改写 WebSocket 握手 Origin 为 `https://desktop.coflux.dev`，server/daemon 校验零放宽。发版走 `desktop-v*` tag（签名公证 + GitHub Release，更新清单推 `desktop-updates` 分支），桌面按控制面协议版本准入（plan 105），不与 prod 部署绑定。原生 Swift 版 `apps/macos` 已删除（可从 git 历史找回）。
-- `apps/mobile`（TS）：移动随身端（m.coflux.dev，plan 032）。**已冻结**：功能锁定在 2026-07 的形态（列表/详情 + 终端快捷键条 + 简版 diff），"迭代 web"默认指 `apps/web`，不给 mobile 加功能、不同步桌面新特性；仅当共享层（protocol/client）变更弄坏它的构建时做最小修复。
-- `packages/{protocol,core,client}`（TS）：共享的线协议类型、日志、协议 client + store（client 为 web/mobile 双端共享）。
+- `apps/desktop`（TS）：**唯一前端、默认迭代对象**（plan 106）。Electron 主进程（`src/main`）+ sandbox preload（`src/preload`）+ React 19 / xterm 渲染层（`src/renderer`，`@` 别名指向它）。桌面能力经 preload 桥接 `window.cofluxDesktop` 提供（类型在 `src/shared/desktop-bridge.ts`），渲染层假定桥接必定存在、没有浏览器分支；主进程改写 WebSocket 握手 Origin 为 `https://desktop.coflux.dev`，server/daemon 校验零放宽。会话 token 经 safeStorage 加密落 userData，窗口 bounds 记忆，主进程日志在 `~/Library/Logs/Coflux/main.log`。发版走 `desktop-v*` tag（签名公证 + GitHub Release，更新清单推 `desktop-updates` 分支），按控制面协议版本准入（plan 105），不与 prod 部署绑定。线上 `app.coflux.dev` / `m.coflux.dev` 是**冻结**的分割前构建（源码在 git 历史 `ce7026b`），只承担新机器授权 / MCP OAuth 同意 / 端口预览门禁三张页面，不再迭代；原生 Swift 版 `apps/macos` 同样只在历史里。
+- `packages/{protocol,core,client}`（TS）：共享的线协议类型、日志、协议 client + store（client 无 React、不依赖 Electron，是唯一的 TS client 真相源；`ClientKind` 里的 `"web"` 是为冻结的线上 web 保留的 server 契约）。
 - `integrations/claude-plugin`：Claude Code 插件的**交付目录**（hooks + skill + `.mcp.json` + manifest），由 `myWsq/plugins` 市场（维护仓库 `myWsq/plugins-builder`）按 commit SHA 整目录收集发布，改完要提升 `.claude-plugin/plugin.json` 的 version 并在 builder 里更新 SHA。SKILL 的唯一源是 `packages/cli/skills/coflux/SKILL.md`，用 `node scripts/sync-claude-plugin.mjs` 同步到这里，CI 校验两份一致。
 - `crates/{protocol,supervisor,worker}`（Rust）：**daemon，全 Rust、零 node 运行时**。
   - `supervisor`：持 PTY(portable-pty) + scrollback + 背压；UDS server；起/管/重启 worker + 版本切换/观察期回滚。极少升级。
   - `worker`（tokio）：连服务器(WS)/认证/重连 + git/exec/fs + 两级 resync。频繁升级（热升级只换它，PTY 在 supervisor 存活）。
   - 详见 [docs/architecture.md](docs/architecture.md)、[docs/hot-upgrade-design.md](docs/hot-upgrade-design.md)、[docs/ROADMAP.md](docs/ROADMAP.md)。
-  - 改 web UI 先看 [docs/design-guidelines.md](docs/design-guidelines.md)（悬浮提示用 Tooltip 组件不用原生 title 等约定）。
+  - 改桌面 UI 先看 [docs/design-guidelines.md](docs/design-guidelines.md)（悬浮提示用 Tooltip 组件不用原生 title 等约定）。
 
 ## 常用命令
 
@@ -26,11 +24,10 @@ pnpm -C tests test                 # 黑盒集成测试（pretest 自动 cargo b
 cargo test -p coflux-protocol      # Rust 单元测试（帧 codec / serde 线格式）
 cargo build -p coflux-supervisor -p coflux-worker   # 构建 daemon 二进制
 node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit   # server 类型检查
-node_modules/.bin/tsc -b apps/web/tsconfig.json               # web 类型检查
-pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test && pnpm -C apps/desktop build   # 桌面壳类型检查/单测/构建
+pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test && pnpm -C apps/desktop build   # 桌面类型检查（主进程 + 渲染层）/单测/构建
 pnpm -C apps/desktop dev / pack                     # 桌面 app 开发（连本机 8787）/ 出未签名 .app 冒烟
 pnpm dev:pg                                         # 本地独立 Postgres（compose，127.0.0.1:5432）
-pnpm dev:server / dev:web / dev:daemon              # 本地起三端
+pnpm dev:server / dev:desktop / dev:daemon          # 本地起三端（`pnpm dev` = server + desktop 并行）
 node packages/cli/cofluxd.mjs up --server ... --bin-dir target/release   # 用 cofluxd CLI 装/起 daemon（用户侧：npm i -g cofluxd && cofluxd up）
 git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编译 + 签名 worker + GitHub Release（见 docs/RELEASING.md）
 ```
@@ -38,8 +35,7 @@ git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编�
 ### 本地开发环境的坑
 
 - **本机 Postgres**：`pnpm dev:pg` 起独立实例（`compose.yaml`，`127.0.0.1:5432`）。`pnpm dev:server` 与黑盒测试默认都连 `postgres://postgres:postgres@127.0.0.1:5432/postgres`，不必再设 `DATABASE_URL` / `COFLUX_TEST_PG_URL`。不要用本机残留的 Supabase 容器（54322 / 5432 池化口）。
-- **web dev 页面「能打开但卡住连不上」= 8787 没跑**：vite（5273）把 `/client` WS 和 `/health` 代理到 `localhost:8787`（见 `apps/web/vite.config.ts`），dev server 不在时页面 HTML/JS 照常加载、但 WS 永远连不上。此时 console 里往往只看到 manifest/CORS 之类的噪音报错，真因不是它们。自查一条命令：`curl localhost:5273/health` 应 200。
-- **经生产 `p.coflux.dev` 端口转发访问本机 dev web**：完整链路是 浏览器 → 生产 server → 本机生产 daemon → 5273 vite → 8787 dev server，后两个进程都得活着。5273 要出现在转发列表里，vite 需在 coflux 终端（生产 daemon 的 PTY 进程树）里启动。manifest 请求经门禁需带凭据，`index.html` 的 manifest link 已带 `crossorigin="use-credentials"`，勿删。
+- **桌面 dev 工作台「能打开但卡住连不上」= 8787 没跑**：`pnpm dev:desktop` 的主进程默认给渲染层 `ws://localhost:8787/client`（不经 vite 代理，渲染层 HMR 在 5274），dev server 不在时页面照常加载、但 WS 永远连不上。自查一条命令：`curl localhost:8787/health` 应 200。dev 实例的 userData 是 `Coflux-dev` 目录，与安装版的 token / 窗口位置互不可见。
 
 CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（tag `v*` 发布 daemon）、`desktop-release.yml`（tag `desktop-v*` 发布桌面 app：签名公证 + GitHub Release + 更新清单分支）。worker 产物用 ed25519 签名、supervisor 验签，密钥设置见 [docs/RELEASING.md](docs/RELEASING.md)。
 

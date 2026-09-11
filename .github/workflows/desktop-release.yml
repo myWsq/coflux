@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # 渲染层 build-id 取 git short SHA（apps/web/vite.config.ts）：必须有完整 git 历史与 HEAD
+          # 渲染层 build-id 取 git short SHA（apps/desktop/electron.vite.config.ts）：必须有完整 git 历史与 HEAD
           fetch-depth: 0
 
       - name: 发布所需 secret 必须齐全（缺任一项明确失败，不静默跳过签名或公证）
@@ -91,18 +91,16 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
 
-      - name: web 类型检查（渲染层就是 apps/web）
-        run: node_modules/.bin/tsc -b apps/web/tsconfig.json
-
-      - name: desktop 类型检查 + 单元测试
+      - name: desktop 类型检查（主进程 / preload / 渲染层）+ 单元测试
         run: pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test
 
       - name: 构建 main / preload / renderer
         run: |
           set -euo pipefail
           pnpm -C apps/desktop build
-          # build-id 只作标识上报（桌面按控制面协议版本准入，plan 105），不再要求与部署的 server 同 SHA
-          echo "::notice::桌面渲染层 build-id=$(cat apps/desktop/out/renderer/build-id.txt)"
+          # build-id 只作标识上报（桌面按控制面协议版本准入，plan 105），不再要求与部署的 server 同 SHA；
+          # 它就是构建时的 git short SHA（electron.vite.config.ts 的 define 注入）
+          echo "::notice::桌面渲染层 build-id=$(git rev-parse --short HEAD)"
 
       # 证书导入沿用 release.yml 里已验证的做法：自己建临时 keychain、import、set-key-partition-list、加进搜索列表。
       # 不把 p12 交给 electron-builder 的 CSC_LINK：它自建 keychain 的 set-key-partition-list 在 GitHub runner 上报

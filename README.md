@@ -11,12 +11,10 @@ P2P，terminal 与普通 Device RPC 数据帧不经过中心控制 WS。一机�
 | 包 | 说明 |
 |----|------|
 | `packages/core` | TS 共享基础设施（日志等），供 server/client 复用 |
-| `packages/client` | Web/mobile 共享的 control client、store 与 DeviceRouter |
+| `packages/client` | 无 React 的 control client、store 与 DeviceRouter（桌面渲染层用） |
 | `packages/protocol` | Buf 生成的 TS 共享线协议（真相源在 `proto/`） |
 | `apps/server` | 中心服务器（TS）：认证/编排 + relay rendezvous + checkpoint + Postgres |
-| `apps/web` | Web Client（TS）：Vite + React + xterm.js |
-| `apps/desktop` | macOS 桌面客户端：Electron 壳原样打包 `apps/web`（原生菜单/通知/角标/签名公证/自动更新），`pnpm -C apps/desktop dev` |
-| `apps/mobile` | 冻结的移动 Web Client；仅在共享层破坏构建时做最小修复 |
+| `apps/desktop` | macOS 桌面客户端（唯一前端）：Electron 主进程 + React 19 / xterm.js 渲染层（原生菜单/通知/角标/safeStorage 会话/签名公证/自动更新），`pnpm -C apps/desktop dev` |
 | `apps/ios` | 原生 iOS Client（SwiftUI + SwiftTerm）；使用共享 Swift Client Core |
 | `packages/swift-client` | Buf 生成的 Swift 协议、共享 Client Core 与 Apple 平台 transport |
 | `crates/protocol` | Buf 生成的 Rust 协议 + UDS frame/IPC |
@@ -25,7 +23,7 @@ P2P，terminal 与普通 Device RPC 数据帧不经过中心控制 WS。一机�
 | `crates/worker` | gateway、direct/relay、git/exec/fs、checkpoint 与中心连接（频繁升级） |
 | `packages/cli` | `cofluxd`：用户侧管理 CLI（npm，零依赖 node）——装/起/停/升级 daemon + doctor 连通性自检 |
 
-server/web 是 TypeScript（pnpm workspace）；**daemon 全 Rust**（Cargo workspace，零 node 运行时）。daemon
+server/desktop 是 TypeScript（pnpm workspace）；**daemon 全 Rust**（Cargo workspace，零 node 运行时）。daemon
 拆成 supervisor + worker：升级只换 worker，PTY 在 supervisor 里存活。supervisor/sessiond 的角色类似
 tmux server——client 断开不影响进程，重新 attach 取当前 ANSI snapshot 与连续 output；但不承诺
 supervisor/OS 重启后恢复活进程。详见 [架构与 tmux 边界](docs/architecture.md#3-为什么像-tmux又不等于-tmux)。
@@ -57,19 +55,19 @@ supervisor 不走热升级，`cofluxd update && cofluxd restart` 后会话里才
 
 ## 快速开始
 
-前置：Node 22+ + pnpm（server/web）、Rust stable（daemon）、Docker（本地 Postgres）。
+前置：Node 22+ + pnpm（server/desktop）、Rust stable（daemon）、Docker（本地 Postgres）。
 
 ```bash
 pnpm install          # 安装 TS 依赖
 pnpm dev:pg           # 独立 Postgres（127.0.0.1:5432，与 CI / 开发默认连接串一致）
 
-# 分终端跑（dev = server + web；daemon 单独，因为它是 Rust 二进制）：
+# 分终端跑（dev = server + desktop；daemon 单独，因为它是 Rust 二进制）：
 pnpm dev:server
-pnpm dev:web          # Web，打开 http://localhost:5273；/client 代理到 :8787
+pnpm dev:desktop      # Electron 桌面 app（渲染层 HMR 在 5274，主进程直连 ws://localhost:8787/client）
 pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 spawn worker）；走浏览器授权登记，凭证存 ~/.coflux
 ```
 
-1. 打开网页；dev 默认用用户名/密码 `admin` / `admin` 登录（弱默认只在 `COFLUX_DEV=1` 生效）。
+1. 桌面 app 弹出后登录；dev 默认用用户名/密码 `admin` / `admin`（弱默认只在 `COFLUX_DEV=1` 生效）。
 2. 从在线设备导入该机器上已有的 git 仓库，再按需创建 worktree 工作区。
 3. 在工作区中新建终端，直接启动 `claude` / `codex`；同机优先显示 direct transport，失败自动 relay。
 
@@ -105,7 +103,7 @@ pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 sp
 | `COFLUX_HOME` | `~/.coflux` | daemon 凭证存放目录 |
 | `COFLUX_SHELL` | `$SHELL` | PTY 使用的 shell |
 | `COFLUX_LOCAL_GATEWAY_PORT` | `8788` | loopback Device gateway；`0` 仅供 dev/test 随机端口 |
-| `VITE_COFLUX_SERVER` | `ws://localhost:8787/client` | web 连接的服务器地址 |
+| `COFLUX_SERVER_URL` | 打包版 `wss://api.coflux.dev/client`；dev `ws://localhost:8787/client` | 桌面 app 连接的服务器地址（也可 `--server=` 或 userData/settings.json） |
 
 ## 当前状态
 

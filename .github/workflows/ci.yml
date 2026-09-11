@@ -137,14 +137,8 @@ jobs:
       - name: server 类型检查
         run: node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit
 
-      - name: web production 构建
-        run: pnpm -C apps/web build
-
-      - name: web 单元测试（变更视图刷新/缓存/桌面桥接）
-        run: pnpm test:web
-
-      # Electron 壳（plan 103）：渲染层就是 apps/web，这里只保主进程/preload/配置不坏；
-      # 打包与签名在 desktop-release.yml。electron-vite build 不需要 Electron 二进制。
+      # 桌面客户端（plan 103 / 106）：typecheck 覆盖主进程 + preload + 渲染层两份 tsconfig，test 覆盖主进程与渲染层单测，
+      # build 出 main/preload/renderer 三份产物；打包与签名在 desktop-release.yml。electron-vite build 不需要 Electron 二进制。
       - name: desktop 类型检查 + 单元测试 + 构建
         run: pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test && pnpm -C apps/desktop build
 
@@ -172,9 +166,6 @@ jobs:
         env:
           COFLUX_TEST_CONCURRENCY: "2"
         run: pnpm -C tests test
-
-      - name: mobile 构建（冻结端：只保共享层不弄坏它）
-        run: pnpm -C apps/mobile build
 
       # Package.swift 在 Linux 仅暴露跨平台 Protocol/Core；ApplePlatform 由下方
       # macOS + iOS SDK 的 xcodebuild 门覆盖，避免用假 stub 获得虚假的 Linux 绿灯。
