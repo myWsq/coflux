@@ -30,6 +30,16 @@ use rand_core::{OsRng, RngCore};
 
 use crate::sessiond::{ControlError, InputAdmission, SequencedDecision, SessionState};
 
+/// 把 `segment` 放到 PATH 首段（plan 112）：原 PATH 为空/缺失时就只有这一段；其余段顺序不变；
+/// 原本已含该段（不论在哪个位置）则去重后仍只出现一次、在首位。空段（`::`）照原样保留。
+pub fn prepend_path_segment(segment: &str, current: Option<&str>) -> String {
+    let mut parts = vec![segment];
+    if let Some(rest) = current.filter(|path| !path.is_empty()) {
+        parts.extend(rest.split(':').filter(|part| *part != segment));
+    }
+    parts.join(":")
+}
+
 const OPERATION_LEDGER_LIMIT: usize = 4096;
 /// create/stop ledger 除条数外还必须按实际持有的字符串容量计费；典型记录仅数百字节，4 MiB
 /// 足以保留远多于正常重试窗口的结果，同时阻止大 cwd/error 等字段把 4096 条放大成无界内存。
@@ -818,6 +828,16 @@ impl Sessions {
             command.env(key, value);
         }
         command.env("TERM", "xterm-256color");
+        // plan 112：`<COFLUX_HOME>/bin` 前置进 PATH 首段——agent 与 Claude 插件 hook 在 coflux 终端里零安装
+        // 命中 app 内置的 Rust 版 cofluxd（用户自己的终端不受影响，不改用户 shell 配置）。必须写在拷贝
+        // std::env 之后，否则被 supervisor 自身的 PATH 覆盖回去。所有平台都做。
+        command.env(
+            "PATH",
+            prepend_path_segment(
+                &format!("{}/bin", self.home),
+                std::env::var("PATH").ok().as_deref(),
+            ),
+        );
         // plan 092：会话归属 id 以 COFLUX_* 注入，必须写在拷贝 std::env 之后（覆盖语义，supervisor 自身
         // 环境里的同名变量不能盖掉它）。六个变量总是存在：中心没下发的为空串，session/task id 本地必有。
         // 变量名是 agent 面向的契约（写进 SKILL.md），只能加不能改。
@@ -1866,6 +1886,29 @@ fn request_id_of(payload: &device_envelope::Payload) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepend_path_segment_handles_empty_existing_and_multi_segment_paths() {
+        // 空 / 缺失：只有这一段
+        assert_eq!(prepend_path_segment("/h/.coflux/bin", None), "/h/.coflux/bin");
+        assert_eq!(prepend_path_segment("/h/.coflux/bin", Some("")), "/h/.coflux/bin");
+        // 多段：前置，其余顺序不变
+        assert_eq!(
+            prepend_path_segment("/h/.coflux/bin", Some("/usr/local/bin:/usr/bin:/bin")),
+            "/h/.coflux/bin:/usr/local/bin:/usr/bin:/bin"
+        );
+        // 已含该段（中间 / 首位）：去重后仍只出现一次且在首位
+        assert_eq!(
+            prepend_path_segment("/h/.coflux/bin", Some("/usr/bin:/h/.coflux/bin:/bin")),
+            "/h/.coflux/bin:/usr/bin:/bin"
+        );
+        assert_eq!(
+            prepend_path_segment("/h/.coflux/bin", Some("/h/.coflux/bin:/usr/bin")),
+            "/h/.coflux/bin:/usr/bin"
+        );
+        // 空段照原样保留（PATH 里的空段有"当前目录"语义，不替用户清理）
+        assert_eq!(prepend_path_segment("/x", Some("/a::/b")), "/x:/a::/b");
+    }
 
     fn exit_tombstone(index: usize, padding: usize) -> DeviceSessionExitTombstone {
         DeviceSessionExitTombstone {
