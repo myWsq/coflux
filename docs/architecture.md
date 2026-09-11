@@ -310,6 +310,30 @@ worker 只探测 PTY 进程树内的 LISTEN 端口，上报中心生成 `<shortI
 签一次性授权 code 并 302 回预览域回调，回调种下账号 cookie 后进入代理。HTTP/SSE/WebSocket 都通过
 `ProxyData` 隧道；这类远端端口流量明确经过中心，不属于 local-first terminal/RPC 热路径。
 
+## 9.1 executor（plan 116）
+
+agent 在终端里 `cofluxd executor run --prompt=… [--write]`，把一段边界清楚的子任务甩给 coflux 内置的
+pi agent。全程本地闭环，不经中心。
+
+**进程住在桌面 app 里，不在 daemon 里**，三条硬理由：桌面打包关掉了 `runAsNode` fuse（plan 103 安全基线，
+签名前翻转、Gatekeeper 保证翻不回去），复用 Electron 二进制当 Node 这条路不通，daemon 方案得另交付一份
+签名公证的 Node；worker 热升级直接 `Child::kill()`（见 hot-upgrade-design.md），跑几分钟的子进程挂它下面
+必成孤儿，改挂 supervisor 又是把最需要迭代的代码塞进「极少升级」的组件；provider 密钥在桌面 safeStorage 里，
+daemon 侧读不到。代价是 **executor 只服务桌面 app 所在这台机器，app 退出任务即中断**（会落明确终态，
+不让 CLI 永久轮询）。
+
+通路复用既有能力，没有新造反向 RPC：daemon 往已连通道推 `ExecutorAssign`（和 `pty_output` 同一种推送），
+桌面用普通上行 `ExecutorReport` 回报。daemon 只认 loopback 通道上来的 executor 帧（`Principal::Local`），
+远端 client 即使持有 SESSION_CONTROL 也抢不走本机工单。**作业表与写锁的真相在桌面主进程**——worker 内存态
+热升级即丢；daemon 侧只留供 CLI 轮询的状态与终态，不做调度、不重派。掉线重连靠 host 注册时的对账清单
+逐条重报，daemon 没被重报的判 `unknown`，**绝不自动重跑**：租约失效不证明旧 writer 已停。
+
+沙箱是两层互补的：bash 的每条命令套 `sandbox-exec`（工作区外不可写、git 元数据只读因而不提交、
+嵌套的其他 worktree 逐条挖掉、`(deny network*)` 同时封住 loopback 与 unix socket）；结构化文件工具跑在
+runner 进程内、进不了 Seatbelt，由 pi 的内联扩展在 `tool_call` 上查路径。网络那条封的是一整类逃逸——
+daemon 的 `/agent` 认调用方靠请求体自报的 pid，工具进程只要能打回环就能借 `terminal.new` 让不受约束的
+daemon 代执行。**档位是「防失误」不是「防敌手」**：Mach/XPC 与 Apple Events 未收口，不要把它说成完整隔离。
+
 ## 10. 认证与安全边界
 
 - daemon 通过浏览器一次性授权换取服务器签发的每设备凭证；token 在 server 只存 sha256 hash。

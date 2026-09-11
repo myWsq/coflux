@@ -244,8 +244,9 @@ In scope:
 - `apps/desktop/src/main/**`（host 注册、作业表、写锁、runner、Seatbelt profile、配置与凭证）
 - `apps/desktop/src/preload/**`、`apps/desktop/src/shared/**`（窄桥接类型）
 - `apps/desktop/src/renderer/components/workbench/account-footer.tsx`、`workbench.tsx`（菜单项与常驻 retain）
-- `apps/desktop/package.json`（pi 依赖）
-- `packages/client/src/device-router.ts`（executor 消息分派）
+- `apps/desktop/package.json`（pi 依赖）、`apps/desktop/electron.vite.config.ts`（runner 第二入口）、
+  `pnpm-workspace.yaml` 的 `allowBuilds`（pi 传递依赖的 build 脚本表态，不表态 pnpm 11 视为 install 失败）
+- `packages/client/src/device-router.ts`、`packages/client/src/store.ts`（executor 消息分派与订阅面）
 - `packages/cli/skills/coflux/SKILL.md` 与同步产物、`integrations/claude-plugin/.claude-plugin/plugin.json`
 - `docs/architecture.md`、`plans/README.md`
 - 对应单测与黑盒用例
