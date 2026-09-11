@@ -135,7 +135,7 @@ csrf：登录前浏览器先拿到一个匿名 nonce cookie（无状态），登
 所有插值（设备名 / 主机 / 平台、应用名 / 回调 host / scope、token / request id 回填）经转义；响应
 `Cache-Control: no-store`、`X-Frame-Options: DENY`、CSP `default-src 'none'`。页面会话与 csrf 密钥是纯内存态、
 单实例前提（同 `pendingAuthorizations` / `ProxyGate`）。黑盒：`tests/src/authorize.test.mjs`、
-`mcp-oauth.test.mjs`、`proxy.test.mjs` 各有 HTTP 流用例；纯函数单测在 `tests/src/auth-pages.test.mjs`。
+`mcp-oauth.test.mjs`、`proxy.test.mjs` 各有 HTTP 流用例。
 
 ## OAuth 客户端（MCP，plan 090）
 

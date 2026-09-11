@@ -658,14 +658,14 @@ function unescapeHtml(text) {
 }
 
 /** 页面里的隐藏字段（csrf、request、to 一类），值已反转义。 */
-export function hiddenFieldsFrom(html) {
+function hiddenFieldsFrom(html) {
   const out = {};
   for (const m of html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) out[m[1]] = unescapeHtml(m[2]);
   return out;
 }
 
 /** 页面里第一张 POST 表单的 action（相对路径，值已反转义）。 */
-export function formActionFrom(html) {
+function formActionFrom(html) {
   const m = /<form method="post" action="([^"]+)"/.exec(html);
   return m ? unescapeHtml(m[1]) : null;
 }
