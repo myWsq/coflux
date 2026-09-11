@@ -96,7 +96,12 @@ test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 sec
   assert.ok(pack?.run, "缺少 electron-builder 打包步骤");
   assert.match(pack.run, /--publish never/); // 发布由 release job 做，builder 不直接发布
   assert.doesNotMatch(pack.run, /--config\.publish/); // 更新源 URL 写死在 electron-builder.yml，CI 不覆盖
-  assert.equal(pack.env?.CSC_LINK, "${{ secrets.MACOS_CERT_P12 }}");
+  // 证书不经 CSC_LINK 交给 electron-builder（它自建 keychain 在 runner 上失败）：自己导入 keychain，按 CSC_NAME 找身份
+  assert.equal(pack.env?.CSC_LINK, undefined);
+  assert.match(pack.env?.CSC_NAME ?? "", /^Developer ID Application: /);
+  const packIndex = build.steps.indexOf(pack);
+  const keychainIndex = build.steps.findIndex((step) => step.run?.includes("security import") && step.run.includes("CSC_KEYCHAIN="));
+  assert.ok(keychainIndex >= 0 && keychainIndex < packIndex, "证书导入 keychain 必须在打包之前");
   assert.equal(pack.env?.APPLE_API_KEY_ID, "${{ secrets.NOTARY_KEY_ID }}");
   assert.equal(pack.env?.APPLE_API_ISSUER, "${{ secrets.NOTARY_ISSUER_ID }}");
   assert.ok(!build.steps.some((step) => step.name?.includes("R2")), "R2 上传已撤，不该再有");
