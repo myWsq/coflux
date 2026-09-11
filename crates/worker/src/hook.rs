@@ -1,9 +1,9 @@
 //! loopback 本地 HTTP 端点：agent 与 daemon 之间的唯一反向通道。两条路径——
 //!
-//! - `/hook`（plan 073）：`cofluxd hook <agent>` 作为信使把 claude/codex 的 hook 事件送进来，
+//! - `/hook`（plan 073）：`coflux hook <agent>` 作为信使把 claude/codex 的 hook 事件送进来，
 //!   用于判定回合状态。状态对齐 Vibe Island：active / approval / question / done
 //!   （空 = 尚无 hook 信号）。
-//! - `/agent`（plan 074；plan 094 起 local-first）：`cofluxd terminal|notify|progress|ports` 的控制
+//! - `/agent`（plan 074；plan 094 起 local-first）：`coflux terminal|notify|progress|ports` 的控制
 //!   请求，见 [crate::agent_ctl]——send/read/wait/notify/progress 在 daemon 本地闭环，new/list/ports
 //!   由 daemon 代问中心。拒绝原因原样回给调用方：细节只是参数校验文案，吞成 `bad request` 只会让
 //!   agent 盲目重试（plan 094）。`/hook` 的应答形态不变。
@@ -244,7 +244,7 @@ fn hook_response(outcome: HookOutcome) -> AgentResponse {
     }
 }
 
-/// `cofluxd terminal|notify|ports` 的请求体。动作名是扁平字符串而非嵌套结构——载荷极小，
+/// `coflux terminal|notify|ports` 的请求体。动作名是扁平字符串而非嵌套结构——载荷极小，
 /// CLI 侧一个函数就能发全部动作。
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

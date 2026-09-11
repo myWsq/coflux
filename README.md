@@ -21,7 +21,7 @@ P2P，terminal 与普通 Device RPC 数据帧不经过中心控制 WS。一机�
 | `crates/relay` | 独立 opaque 数据面：短时单次 token 验证 + channel 配对，不连账号数据库 |
 | `crates/supervisor` | PTY/sessiond authority：VT/history/holder/sequence + worker 管理（极少升级） |
 | `crates/worker` | gateway、direct/relay、git/exec/fs、checkpoint 与中心连接（频繁升级） |
-| `packages/cli` | `cofluxd`：用户侧管理 CLI（npm，零依赖 node）——装/起/停/升级 daemon + doctor 连通性自检 |
+| `packages/cli` | 一个 npm 包交付两个入口：`cofluxd` 管无界面宿主，`coflux` 管账号、工作区和本地/远端终端 |
 
 server/desktop 是 TypeScript（pnpm workspace）；**daemon 全 Rust**（Cargo workspace，零 node 运行时）。daemon
 拆成 supervisor + worker：升级只换 worker，PTY 在 supervisor 里存活。supervisor/sessiond 的角色类似
@@ -54,10 +54,10 @@ cofluxd status / doctor / logs -f / update / down / uninstall
 给跑在 coflux 终端里的 agent：每个 PTY 会话里都有 `COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID` /
 `COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` 五个环境变量，
 值与账号 CLI 返回的 id 一致。分工只有一条规则：**本地能闭环的一律用零凭证的
-`cofluxd terminal/progress/notify/ports`**（send/read/wait/notify/progress 在 daemon 本地完成，不经中心）；
-跨工作区、跨设备使用账号 CLI：`cofluxd device list`、`cofluxd workspace list`、
-`cofluxd terminal new --workspace <id>`、`cofluxd terminal read <id> --remote`。
-桌面内置 CLI 通过本机通道复用应用登录；独立 CLI 用 `cofluxd login --username <账号> --password-stdin`。
+`coflux terminal/progress/notify/ports`**（send/read/wait/notify/progress 在 daemon 本地完成，不经中心）；
+跨工作区、跨设备使用账号 CLI：`coflux device list`、`coflux workspace list`、
+`coflux terminal new --workspace <id>`、`coflux terminal read <id> --remote`。
+桌面内置 CLI 通过本机通道复用应用登录；独立 CLI 用 `coflux login --username <账号> --password-stdin`。
 账号命令输出 JSON，跨设备操作统一通过 CLI，不再提供 MCP。详见
 [CLI 文档](packages/cli/README.md)。
 

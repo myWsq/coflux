@@ -114,7 +114,7 @@ export function DaemonOnboardingDialog(props: DaemonOnboardingDialogProps) {
             {page === "intro" ? (
               <VStack gap={2} hAlign="stretch">
                 <Text type="body" size="sm">
-                  接入后 coflux 终端里自动带上 <Text type="code">cofluxd</Text>，agent 在里面跑 <Text type="code">cofluxd progress</Text> 就能出现在侧栏。
+                  接入后 coflux 终端里自动带上 <Text type="code">cofluxd</Text>，agent 在里面跑 <Text type="code">coflux progress</Text> 就能出现在侧栏。
                 </Text>
                 <Text type="supporting">已经用 npm 装过 cofluxd 的机器不会重复接入。</Text>
               </VStack>

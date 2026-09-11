@@ -1,5 +1,5 @@
 //! agent 协同控制端点（plan 074）：跑在 coflux PTY 里的 claude/codex 经
-//! `cofluxd terminal|notify|ports` 把自己的工作外化成用户在 web/手机上**看得见、能接管**的
+//! `coflux terminal|notify|ports` 把自己的工作外化成用户在 web/手机上**看得见、能接管**的
 //! coflux 实体——而不是在自己的 Bash 里后台起一个谁也看不见的进程。
 //!
 //! **身份不靠凭证靠位置**：调用方把自己的 pid 报上来，worker 反查它落在哪个存活 session 的
@@ -108,13 +108,13 @@ pub enum AgentAction {
         message: String,
     },
     Ports,
-    /// `cofluxd workspace`（plan 102）：只读地报出调用方 cwd 对应的有效工作区与会话的归属
+    /// `coflux workspace`（plan 102）：只读地报出调用方 cwd 对应的有效工作区与会话的归属
     /// 工作区，让 agent 一眼看出自己有没有「挪窝」。纯本地。
     WorkspaceCurrent,
-    /// `cofluxd workspace locate <path>`（plan 104）：把本会话终端的**归属**搬到 path 所属的
+    /// `coflux workspace locate <path>`（plan 104）：把本会话终端的**归属**搬到 path 所属的
     /// 工作区（未登记的同仓库 worktree 先登记）。Enter / Exit / SessionStart 共用它。
     WorkspaceLocate { path: String },
-    /// `cofluxd workspace forget <path>`（plan 104）：Claude Code 已清理掉该 worktree，
+    /// `coflux workspace forget <path>`（plan 104）：Claude Code 已清理掉该 worktree，
     /// 其下所有终端搬回项目主工作区、工作区记录消失。
     WorkspaceForget { path: String },
 }
@@ -360,7 +360,7 @@ async fn handle(
                 SessionPhase::Exited { .. } => {
                     return AgentResponse::err(
                         "409 Conflict",
-                        "终端已退出，不能再输入（要跑新命令用 cofluxd terminal new）",
+                        "终端已退出，不能再输入（要跑新命令用 coflux terminal new）",
                     )
                 }
                 SessionPhase::Pending => {
@@ -626,7 +626,7 @@ fn resolve_local_target(
     let not_found = || {
         AgentResponse::err(
             "404 Not Found",
-            "终端不在本工作区或不存在（用 cofluxd terminal list 查）",
+            "终端不在本工作区或不存在（用 coflux terminal list 查）",
         )
     };
     let Some((target_session, target)) = s.ledger.task(task_id) else {
@@ -852,7 +852,7 @@ mod tests {
 /// 中心发起的终端读/写（plan 091，与 AgentControlRequest 方向相反）。两种动作都是无落库副作用的
 /// 直发请求：读走「命令日志尾部优先、否则 sessiond 当前快照、都没有则 source=none 交中心退回
 /// checkpoint」；写经 [`DeviceRuntime::agent_send_input`] 正门——人类 holder 在场时被拒，错误文案
-/// 原样回中心（同 `cofluxd terminal send` 的人类优先纪律）。每条请求必回一条 result。
+/// 原样回中心（同 `coflux terminal send` 的人类优先纪律）。每条请求必回一条 result。
 pub async fn handle_server_request(
     request: wire::ServerAgentRequest,
     state: &Arc<Mutex<WorkerState>>,

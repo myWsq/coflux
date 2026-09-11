@@ -164,9 +164,9 @@ interface SessionAgentData {
   agent: string;
   /** hook 上报的回合状态：active / approval / question / done，空 = 无 hook 信号 */
   state: string;
-  /** `cofluxd notify` 的留言（plan 074）：与 state 同生命周期，纯展示 */
+  /** `coflux notify` 的留言（plan 074）：与 state 同生命周期，纯展示 */
   message: string;
-  /** `cofluxd progress` 的进度短评（plan 088）：跨 hook 事件存活，覆盖式，纯展示 */
+  /** `coflux progress` 的进度短评（plan 088）：跨 hook 事件存活，覆盖式，纯展示 */
   progress: string;
 }
 
@@ -3983,7 +3983,7 @@ export class Hub {
   /** 在工作区里开一个真实终端：同一事务里建 IDLE task（沿用 terminalNew 的准入）并 prepare `session.create`
    * （中心发起），等收敛到 RUNNING。每工作区活跃终端上限含用户手开的。
    *
-   * 命令是否为空区分两种终端（plan 101，与本地 `cofluxd terminal new` 同判据）：非空 = 作业终端，worker
+   * 命令是否为空区分两种终端（plan 101，与本地 `coflux terminal new` 同判据）：非空 = 作业终端，worker
    * 收到后写包装脚本、跑完即退并带退出码；空 = 会话终端，worker 的空命令分支不写脚本，supervisor 起默认
    * 登录 shell（全 tty，常驻到有人输入 exit）。空白命令在这里收敛成空串——worker 那边判的是 `is_empty()`，
    * 留着空白会被当成命令套进脚本、开了就退。 */

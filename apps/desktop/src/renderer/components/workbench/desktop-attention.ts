@@ -10,7 +10,7 @@ export type AttentionKind = "approval" | "question";
 export type AttentionEntry = {
   kind: AttentionKind;
   agent: string;
-  /** question 态 agent 留的话（cofluxd notify），没有则空 */
+  /** question 态 agent 留的话（coflux notify），没有则空 */
   message?: string;
   projectName?: string;
   branch: string;

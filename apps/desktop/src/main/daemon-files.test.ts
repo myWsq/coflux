@@ -25,7 +25,7 @@ test("路径：默认 ~/.coflux；COFLUX_HOME 设了就尊重；plist 固定在 
   assert.equal(paths.binDir, "/tmp/cf/bin");
   assert.equal(paths.supervisorBin, "/tmp/cf/bin/coflux-supervisor");
   assert.equal(paths.workerBin, "/tmp/cf/bin/coflux-worker");
-  assert.equal(paths.cliBin, "/tmp/cf/bin/cofluxd");
+  assert.equal(paths.cliBin, "/tmp/cf/bin/coflux");
   assert.equal(paths.settings, "/tmp/cf/settings.json");
   assert.equal(paths.logFile, "/tmp/cf/daemon.log");
   assert.equal(paths.credentials, "/tmp/cf/credentials.json");

@@ -1,7 +1,7 @@
 //! agent 侧子命令（plan 112）：`terminal new|list|read|wait|send`、`notify`、`progress`、
 //! `ports`、`workspace [locate|forget]`、`hook <claude|codex>`。
 //!
-//! 请求体、stdout 文案与退出码逐命令对齐 node 版 `packages/cli/cofluxd.mjs`（`cmdTerminal` /
+//! 请求体、stdout 文案与退出码逐命令对齐 node 版 `packages/cli/coflux.mjs`（`cmdTerminal` /
 //! `cmdNotify` / `cmdProgress` / `cmdWorkspace` / `cmdPorts` / `cmdHook`）——SKILL.md 与黑盒用例引用
 //! 的输出短语（如 `已开终端 <taskId>`）逐字保留。渲染逻辑抽成纯函数以便单测，I/O 只在 `run_*` 里。
 //!
@@ -120,12 +120,12 @@ pub fn render_terminal_new(result: &Value, command: &str) -> String {
     let task_id = field_str(result, "taskId");
     let mut lines = vec![format!("已开终端 {task_id}（用户可在 coflux 侧栏看到并随时接管）")];
     if !command.is_empty() {
-        lines.push(format!("看输出：cofluxd terminal read {task_id}"));
+        lines.push(format!("看输出：coflux terminal read {task_id}"));
     } else {
         lines.push("会话终端：常驻的登录 shell（全 tty），不会自己退出".to_string());
-        lines.push(format!("先等提示符：cofluxd terminal read {task_id}"));
+        lines.push(format!("先等提示符：coflux terminal read {task_id}"));
         lines.push(format!(
-            "再输命令：cofluxd terminal send {task_id} --text \"<命令>\" --enter（送 exit 才结束）"
+            "再输命令：coflux terminal send {task_id} --text \"<命令>\" --enter（送 exit 才结束）"
         ));
     }
     lines.join("\n")
@@ -171,7 +171,7 @@ pub fn render_terminal_read(result: &Value, lines: usize) -> String {
 }
 
 pub fn render_terminal_send(task_id: &str) -> String {
-    format!("已写入终端 {task_id}（用 cofluxd terminal read {task_id} 核对效果）")
+    format!("已写入终端 {task_id}（用 coflux terminal read {task_id} 核对效果）")
 }
 
 /// `--timeout`：正数（可带小数）才生效，其余取默认 1800 秒。
@@ -187,7 +187,7 @@ pub fn render_wait_exited(status: &Value) -> String {
 
 pub fn render_wait_timeout(timeout_secs: f64, task_id: &str, status: &str) -> String {
     format!(
-        "等待超时（{}s）：终端 {task_id} 仍是 {status}。可加大 --timeout，或 cofluxd terminal read {task_id} 看现场",
+        "等待超时（{}s）：终端 {task_id} 仍是 {status}。可加大 --timeout，或 coflux terminal read {task_id} 看现场",
         js_number(&Value::from(timeout_secs))
     )
 }
@@ -210,7 +210,7 @@ pub fn run_terminal(args: &ParsedArgs) {
         }
         Some("read") => {
             let Some(task_id) = args.positional(2) else {
-                crate::die("terminal read 需要 <taskId>（用 cofluxd terminal list 查）");
+                crate::die("terminal read 需要 <taskId>（用 coflux terminal list 查）");
             };
             let lines = read_lines(args.string("lines"));
             let result = gateway::agent_post(with(body("terminal.read"), "taskId", task_id));
@@ -218,7 +218,7 @@ pub fn run_terminal(args: &ParsedArgs) {
         }
         Some("send") => {
             let Some(task_id) = args.positional(2) else {
-                crate::die("terminal send 需要 <taskId>（用 cofluxd terminal list 查）");
+                crate::die("terminal send 需要 <taskId>（用 coflux terminal list 查）");
             };
             let text = args.string("text").unwrap_or("");
             let enter = args.flag("enter");
@@ -235,7 +235,7 @@ pub fn run_terminal(args: &ParsedArgs) {
         }
         Some("wait") => {
             let Some(task_id) = args.positional(2) else {
-                crate::die("terminal wait 需要 <taskId>（用 cofluxd terminal list 查）");
+                crate::die("terminal wait 需要 <taskId>（用 coflux terminal list 查）");
             };
             let timeout_secs = wait_timeout_secs(args.string("timeout"));
             // 极大的 --timeout（Duration/Instant 装不下）等价于「不设 deadline」，与 node 版一样不报错。
@@ -280,7 +280,7 @@ pub fn joined_message(args: &ParsedArgs) -> String {
 pub fn run_notify(args: &ParsedArgs) {
     let message = joined_message(args);
     if message.is_empty() {
-        crate::die("notify 需要一句话，例如：cofluxd notify \"两个方案拿不准，需要你定\"");
+        crate::die("notify 需要一句话，例如：coflux notify \"两个方案拿不准，需要你定\"");
     }
     gateway::agent_post(with(body("notify"), "message", message));
     println!("已通知用户（工作区在侧栏转为「等待交互」）");
@@ -289,7 +289,7 @@ pub fn run_notify(args: &ParsedArgs) {
 pub fn run_progress(args: &ParsedArgs) {
     let message = joined_message(args);
     if message.is_empty() {
-        crate::die("progress 需要一句话，例如：cofluxd progress \"复现了，正在定位 relay 重连\"");
+        crate::die("progress 需要一句话，例如：coflux progress \"复现了，正在定位 relay 重连\"");
     }
     gateway::agent_post(with(body("progress"), "message", message));
     println!("已更新进度（显示在工作区卡片上，被下一条覆盖）");
@@ -386,7 +386,7 @@ pub fn run_ports() {
 }
 
 /* ---------------------------------- hook --------------------------------- */
-// `cofluxd hook <claude|codex>`：信使。读 stdin/argv 的 hook 事件 JSON，只取事件名与进程坐标转发到
+// `coflux hook <claude|codex>`：信使。读 stdin/argv 的 hook 事件 JSON，只取事件名与进程坐标转发到
 // `/hook`——payload 里的 prompt / 回答原文 / 通知正文一律不出机（隐私边界）。
 //
 // 纪律：绝不能干扰 agent 本体——任何失败都静默退出 0（claude 把 Stop hook 的非零退出码解释为
@@ -403,7 +403,7 @@ fn hook_debug_enabled() -> bool {
 
 fn hook_debug(enabled: bool, message: &str) {
     if enabled {
-        eprintln!("[cofluxd hook] {message}");
+        eprintln!("[coflux hook] {message}");
     }
 }
 
@@ -532,12 +532,12 @@ mod tests {
         let result = json!({ "ok": true, "taskId": "t-1" });
         assert_eq!(
             render_terminal_new(&result, "pnpm test"),
-            "已开终端 t-1（用户可在 coflux 侧栏看到并随时接管）\n看输出：cofluxd terminal read t-1"
+            "已开终端 t-1（用户可在 coflux 侧栏看到并随时接管）\n看输出：coflux terminal read t-1"
         );
         let session = render_terminal_new(&result, "");
         assert!(session.starts_with("已开终端 t-1（用户可在 coflux 侧栏看到并随时接管）\n会话终端：常驻的登录 shell（全 tty），不会自己退出\n"));
-        assert!(session.contains("先等提示符：cofluxd terminal read t-1\n"));
-        assert!(session.ends_with("再输命令：cofluxd terminal send t-1 --text \"<命令>\" --enter（送 exit 才结束）"));
+        assert!(session.contains("先等提示符：coflux terminal read t-1\n"));
+        assert!(session.ends_with("再输命令：coflux terminal send t-1 --text \"<命令>\" --enter（送 exit 才结束）"));
     }
 
     #[test]
@@ -587,13 +587,13 @@ mod tests {
         assert_eq!(render_wait_exited(&json!({ "status": "exited" })), "# exited");
         assert_eq!(
             render_wait_timeout(90.0, "t-1", "running"),
-            "等待超时（90s）：终端 t-1 仍是 running。可加大 --timeout，或 cofluxd terminal read t-1 看现场"
+            "等待超时（90s）：终端 t-1 仍是 running。可加大 --timeout，或 coflux terminal read t-1 看现场"
         );
         assert_eq!(
             render_wait_timeout(2.5, "t-1", "running"),
-            "等待超时（2.5s）：终端 t-1 仍是 running。可加大 --timeout，或 cofluxd terminal read t-1 看现场"
+            "等待超时（2.5s）：终端 t-1 仍是 running。可加大 --timeout，或 coflux terminal read t-1 看现场"
         );
-        assert_eq!(render_terminal_send("t-1"), "已写入终端 t-1（用 cofluxd terminal read t-1 核对效果）");
+        assert_eq!(render_terminal_send("t-1"), "已写入终端 t-1（用 coflux terminal read t-1 核对效果）");
     }
 
     #[test]

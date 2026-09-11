@@ -1,23 +1,15 @@
 name: desktop-release
 
-# 打 tag desktop-v* 触发（plan 103）：构建 apps/desktop → Developer ID 签名 + 公证 → GitHub Release 放安装包
-# → 把 latest-mac.yml 改成该 Release 的绝对下载地址后推到 desktop-updates 分支（electron-updater 的 generic 源读
-# raw.githubusercontent.com）。不用 electron-updater 的 github provider：它看仓库 releases/latest，而本仓库 daemon
-# 的 v* 与桌面的 desktop-v* 混在一起。与 daemon 的 v* / release.yml 完全独立：桌面版本节奏与 daemon SemVer 无关。
+# 由统一 v* 发布调用，只构建并上传桌面产物，不创建独立 release 或更新清单。
 on:
-  push:
-    tags: ["desktop-v*"]
+  workflow_call:
 
 permissions:
   contents: read
 
-concurrency:
-  group: desktop-release
-  cancel-in-progress: false
-
 jobs:
   metadata:
-    name: 校验 desktop release tag
+    name: 校验统一 release tag
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.tag.outputs.version }}
@@ -26,41 +18,16 @@ jobs:
         with:
           fetch-depth: 0
       - id: tag
-        name: tag 是严格 SemVer、与 apps/desktop/package.json 一致、可从 origin/main 达到
+        name: 校验统一产品版本
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-          EVENT_SHA: ${{ github.sha }}
         run: |
-          set -euo pipefail
-          version="${RELEASE_TAG#desktop-v}"
-          if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::desktop release tag 不是严格 SemVer：${RELEASE_TAG}"
-            exit 1
-          fi
-          pkg_version=$(node -p "require('./apps/desktop/package.json').version")
-          if [ "$pkg_version" != "$version" ]; then
-            echo "::error::apps/desktop/package.json version=${pkg_version} 与 tag ${RELEASE_TAG} 不一致，先 bump 再打 tag"
-            exit 1
-          fi
-          # lockstep（plan 103）：桌面 build-id 与部署的 web 必须同 SHA；这里只保证 tag 在 main 历史上，
-          # 与 prod 部署的 SHA 是否一致由发版人按 docs/RELEASING.md 的规则负责。
-          remote_main_ref="refs/release-validation/main-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          git fetch --force --no-tags origin "+refs/heads/main:${remote_main_ref}"
-          if ! git merge-base --is-ancestor "$EVENT_SHA" "$remote_main_ref"; then
-            echo "::error::release SHA ${EVENT_SHA} 不可从 origin/main 达到"
-            exit 1
-          fi
+          version=$(node scripts/product-version.mjs --check "$RELEASE_TAG")
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
-  # 内置 daemon 三件（plan 113）：与「构建 + 签名 + 公证」并行，在同一 SHA 上 cargo build supervisor / worker /
-  # Rust 版 cofluxd，经 artifact 交给打包 job 进 Contents/Resources/daemon/。不需要签名 secret，不挂
-  # release-signing environment——签名在打包 job 由 electron-builder 的 mac.binaries 统一做。
-  #
-  # 版本戳 COFLUX_RELEASE_VERSION 打成 v0.0.0-desktop.<桌面版本>：能被 supervisor 的 ReleaseVersion::parse
-  # 接受（v 前缀 + prerelease），且低于一切正式 v*——中心 auto-update 见 workerVersion ≠ latest 会立刻把 worker
-  # 热推成正式版（内置 worker 只是引导版）；npm 装过正式 supervisor 的机器不会被提示换成内置版。不能留默认 dev。
+  # 内置组件与桌面使用同一提交和正式产品版本，签名由打包步骤统一完成。
   daemon:
-    name: 构建内置 daemon（supervisor / worker / cofluxd）
+    name: 构建内置 daemon（supervisor / worker / coflux）
     needs: metadata
     runs-on: macos-latest
     timeout-minutes: 45
@@ -73,17 +40,17 @@ jobs:
           targets: aarch64-apple-darwin
       - name: cargo build（release，aarch64-apple-darwin）
         env:
-          COFLUX_RELEASE_VERSION: v0.0.0-desktop.${{ needs.metadata.outputs.version }}
+          COFLUX_RELEASE_VERSION: v${{ needs.metadata.outputs.version }}
           RUSTFLAGS: -D warnings
         run: cargo build --release --target aarch64-apple-darwin -p coflux-supervisor -p coflux-worker -p coflux-cli
       - name: 整理 daemon 产物目录（三件 + VERSION 版本戳）
         env:
-          COFLUX_RELEASE_VERSION: v0.0.0-desktop.${{ needs.metadata.outputs.version }}
+          COFLUX_RELEASE_VERSION: v${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
           bin="target/aarch64-apple-darwin/release"
           mkdir -p daemon-bundle
-          for name in coflux-supervisor coflux-worker cofluxd; do
+          for name in coflux-supervisor coflux-worker coflux; do
             test -x "$bin/$name"
             cp "$bin/$name" "daemon-bundle/$name"
           done
@@ -102,7 +69,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     # 签名/公证 secret 挂在 release-signing environment；
-    # 该 environment 的 deployment tag 规则必须同时放行 desktop-v*（见 docs/RELEASING.md）。
+    # 复用统一 release-signing environment，发布 tag 为 v*。
     environment: release-signing
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -150,7 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           pnpm -C apps/desktop run stage-daemon
-          grep -qx "v0.0.0-desktop.${{ needs.metadata.outputs.version }}" apps/desktop/build/daemon/VERSION
+          grep -qx "v${{ needs.metadata.outputs.version }}" apps/desktop/build/daemon/VERSION
 
       - name: 构建 main / preload / renderer
         run: |
@@ -218,15 +185,22 @@ jobs:
           spctl --assess --type execute --verbose=4 "$app"
           # 内置 daemon 三件（plan 113）：存在、可执行、各自带 Developer ID 签名（mac.binaries 让它们进签名与公证）
           daemon="$app/Contents/Resources/daemon"
-          for name in coflux-supervisor coflux-worker cofluxd; do
+          for name in coflux-supervisor coflux-worker coflux; do
             test -x "$daemon/$name"
             codesign --verify --strict --verbose=2 "$daemon/$name"
             codesign -dv --verbose=2 "$daemon/$name" 2>&1 | grep -q 'Authority=Developer ID Application'
           done
           test -s "$daemon/VERSION"
-          grep -qx "v0.0.0-desktop.${{ needs.metadata.outputs.version }}" "$daemon/VERSION"
+          grep -qx "v${{ needs.metadata.outputs.version }}" "$daemon/VERSION"
           ls -la apps/desktop/dist
+          # prerelease 可能生成 beta-mac.yml 等，仅规范化 artifact 文件名；父流程不会更新稳定源。
+          if [ ! -f apps/desktop/dist/latest-mac.yml ]; then
+            manifests=(apps/desktop/dist/*-mac.yml)
+            test "${#manifests[@]}" -eq 1
+            cp "${manifests[0]}" apps/desktop/dist/latest-mac.yml
+          fi
           test -f apps/desktop/dist/latest-mac.yml
+          grep -qx "version: ${{ needs.metadata.outputs.version }}" apps/desktop/dist/latest-mac.yml
           grep -q "coflux-${{ needs.metadata.outputs.version }}-arm64.zip" apps/desktop/dist/latest-mac.yml
 
       - name: 清理公证 API key 文件与临时 keychain
@@ -244,71 +218,3 @@ jobs:
             apps/desktop/dist/*.zip
             apps/desktop/dist/*.blockmap
             apps/desktop/dist/latest-mac.yml
-
-  release:
-    name: 发布 GitHub Release + 推送更新清单
-    needs: [metadata, build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: desktop-release-assets
-          path: assets
-      - name: 生成 release 说明
-        env:
-          VERSION: ${{ needs.metadata.outputs.version }}
-        run: |
-          set -euo pipefail
-          {
-            echo "Coflux 桌面客户端 v${VERSION}（macOS 26+，Apple Silicon）。"
-            echo
-            echo "- 安装：下载 dmg，拖进 Applications。已签名并经苹果公证。"
-            echo "- 自动更新：app 读仓库 desktop-updates 分支的 latest-mac.yml，安装包从本 Release 下载。"
-            echo "- 版本准入按控制面协议版本（plan 105）：中心部署新版本不会踢旧桌面版，只有破坏性协议改动才要求更新。"
-          } > notes.md
-      # 安装包与 blockmap 先上 Release：清单随后才指向它们，客户端永远不会读到指向尚未上传文件的清单。
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: desktop v${{ needs.metadata.outputs.version }}
-          # 绝不让桌面 release 成为仓库 latest：中心的 daemon 自动更新只看 /releases/latest 上的 manifest.json
-          # （apps/server/src/auto-update.ts），桌面版抢走 latest 会让 worker 热推整体停摆（desktop-v0.1.6 曾实际发生）。
-          make_latest: false
-          body_path: notes.md
-          files: |
-            assets/*.dmg
-            assets/*.zip
-            assets/*.blockmap
-      - name: 更新清单：latest-mac.yml 的相对文件名改成本 Release 的绝对下载地址
-        env:
-          TAG: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          base="https://github.com/${REPO}/releases/download/${TAG}"
-          sed -E -e "s#^([[:space:]]*-?[[:space:]]*url: )(coflux-[^[:space:]]+)#\1${base}/\2#" \
-                 -e "s#^(path: )(coflux-[^[:space:]]+)#\1${base}/\2#" assets/latest-mac.yml > latest-mac.yml
-          grep -q "${base}/coflux-" latest-mac.yml
-          cat latest-mac.yml
-      - name: 推送清单到 desktop-updates 分支（app 的 generic 更新源读 raw.githubusercontent.com）
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          VERSION: ${{ needs.metadata.outputs.version }}
-        run: |
-          set -euo pipefail
-          git init -q updates
-          cd updates
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-          if git fetch -q origin desktop-updates 2>/dev/null; then
-            git checkout -q -B desktop-updates FETCH_HEAD
-          else
-            git checkout -q --orphan desktop-updates
-          fi
-          cp ../latest-mac.yml latest-mac.yml
-          git add latest-mac.yml
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -q -m "desktop v${VERSION}: latest-mac.yml"
-          git push -q origin desktop-updates

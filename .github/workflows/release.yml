@@ -1,6 +1,6 @@
 name: release
 
-# 打 tag v* 触发：交叉编译 supervisor + worker → 签名 daemon 产物 → 发布 GitHub Release（含 manifest）。
+# 唯一产品发布入口：v* 同时构建桌面、内核及 CLI；完整产物发布后推进桌面清单和 npm。
 on:
   push:
     tags: ["v*"]
@@ -43,6 +43,10 @@ jobs:
             echo "::error::release tag 必须打在当前 origin/main tip：${origin_main_sha}（事件 SHA：${EVENT_SHA}）"
             exit 1
           fi
+      - name: 校验桌面、CLI 与产品版本一致
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/product-version.mjs --check "$RELEASE_TAG"
       - id: tag
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -87,6 +91,14 @@ jobs:
           }
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `prerelease=${current.prerelease ? "true" : "false"}\n`);
           NODE
+
+  desktop:
+    name: 构建桌面安装包
+    needs: [metadata, quality]
+    uses: ./.github/workflows/desktop-release.yml
+    secrets: inherit
+    permissions:
+      contents: read
 
   # tag 发布的唯一完整质量门；npm-publish 只在本 workflow 全部成功后接力。
   quality:
@@ -227,6 +239,7 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          pattern: dist-*
           path: artifacts
           merge-multiple: true
 
@@ -253,7 +266,7 @@ jobs:
 
   release:
     name: 发布 GitHub Release
-    needs: [metadata, sign]
+    needs: [metadata, sign, desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -266,6 +279,11 @@ jobs:
         with:
           name: signed-release-assets
           path: signed-release
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-release-assets
+          path: desktop-assets
 
       - name: 发布前确认远程 tag 仍绑定事件 SHA
         env:
@@ -296,8 +314,50 @@ jobs:
           tag_name: ${{ github.ref_name }}
           # 不传 target_commitish：tag 已存在且上一步已校验它绑定事件 SHA；action-gh-release v3 会把它原样带进
           # create-release 请求，撞上 v* tag 的不可变 ruleset 后 GITHUB_TOKEN 拿到 403（v0.32.0 首次发版实测）。
-          files: signed-release/artifacts/*
+          name: Coflux ${{ github.ref_name }}
+          files: |
+            signed-release/artifacts/*
+            desktop-assets/*.dmg
+            desktop-assets/*.zip
+            desktop-assets/*.blockmap
+            desktop-assets/latest-mac.yml
           # 自建 note 取代 generate_release_notes：本仓库直接 push main，GitHub 的自动汇总
           # 只认 PR，产出永远是光秃秃一行 compare 链接。
           body_path: signed-release/release-notes.md
           prerelease: ${{ needs.metadata.outputs.prerelease }}
+
+  desktop-updates:
+    name: 更新稳定桌面更新源
+    needs: [metadata, release]
+    if: ${{ needs.metadata.outputs.prerelease == 'false' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-release-assets
+          path: assets
+      - name: 推送清单到 desktop-updates 分支（app 的 generic 更新源读 raw.githubusercontent.com）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git init -q updates
+          cd updates
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          if git fetch -q origin desktop-updates 2>/dev/null; then
+            git checkout -q -B desktop-updates FETCH_HEAD
+          else
+            git checkout -q --orphan desktop-updates
+          fi
+          node ../scripts/desktop-update-feed.mjs "$VERSION" "$REPO" ../assets/latest-mac.yml latest-mac.yml > "$RUNNER_TEMP/latest-mac.yml"
+          cp "$RUNNER_TEMP/latest-mac.yml" latest-mac.yml
+          git add latest-mac.yml
+          if git diff --cached --quiet; then exit 0; fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Coflux ${VERSION}: latest-mac.yml"
+          git push -q origin desktop-updates

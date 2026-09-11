@@ -1,6 +1,6 @@
 ---
 name: coflux
-description: Use cofluxd to open visible terminals, read, wait, type, report progress, notify the user and obtain preview URLs. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
+description: Use coflux to open visible terminals, read, wait, type, report progress, notify the user and obtain preview URLs. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
 ---
 
 # Working inside coflux
@@ -14,8 +14,8 @@ and a way to operate the other workspaces and devices under the account when you
 
 | Track | Credentials | Reach | Use for |
 |---|---|---|---|
-| Local commands `cofluxd terminal/progress/notify/ports` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, read, wait, send, report progress, call the user, preview URLs: the default, fastest, no network dependency |
-| Account CLI | app login or `cofluxd login` | all devices and workspaces in the account | child workspaces and remote terminals; JSON output |
+| Local commands `coflux terminal/progress/notify/ports` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, read, wait, send, report progress, call the user, preview URLs: the default, fastest, no network dependency |
+| Account CLI | app login or `coflux login` | all devices and workspaces in the account | child workspaces and remote terminals; JSON output |
 
 Of the local commands, `send`/`read`/`wait`/`notify`/`progress` complete entirely inside the
 local daemon and never touch the center; `new`/`list`/`ports` are relayed to the center by the
@@ -41,11 +41,11 @@ env | grep '^COFLUX_'
   |---|---|
   | `COFLUX_DEVICE_ID` | id of the device you run on (the id in `list_devices`) |
   | `COFLUX_PROJECT_ID` | owning project id; empty string for a directory workspace without a repository |
-  | `COFLUX_WORKSPACE_ID` | the workspace this terminal was **opened** in (the id in `list_workspaces`). The variable is frozen when the terminal starts; the workspace the terminal *belongs to* can still change — see below. `cofluxd workspace` is the authority |
+  | `COFLUX_WORKSPACE_ID` | the workspace this terminal was **opened** in (the id in `list_workspaces`). The variable is frozen when the terminal starts; the workspace the terminal *belongs to* can still change — see below. `coflux workspace` is the authority |
   | `COFLUX_TASK_ID` | id of this terminal (the taskId / terminalId used by local commands and `read_terminal`) |
   | `COFLUX_SESSION_ID` | id of this PTY session |
 
-- **Variables empty or absent**: there is no local terminal context. Use `cofluxd whoami` to check
+- **Variables empty or absent**: there is no local terminal context. Use `coflux whoami` to check
   account access and the account CLI to discover workspaces. Ask the user to log in when needed;
   never fabricate COFLUX_* coordinates.
 
@@ -62,9 +62,9 @@ conversation, no restart — and a coflux child workspace is a normal registered
 session whose terminal belongs to workspace A can end up working inside workspace B. From that
 moment, in B:
 
-- `cofluxd terminal new` opens the terminal **in B**, under B in the user's sidebar, running in B's
+- `coflux terminal new` opens the terminal **in B**, under B in the user's sidebar, running in B's
   directory, counting against B's terminal cap;
-- `cofluxd terminal list` lists B's terminals, and A's terminals answer `read` / `wait` / `send`
+- `coflux terminal list` lists B's terminals, and A's terminals answer `read` / `wait` / `send`
   with "not in this workspace or does not exist" (`cd` back to A to reach them again);
 - Account CLI calls need **B's** id as `workspaceId`;
 - the terminal itself stays under A, and `progress`, `notify` and `ports` still belong to it,
@@ -90,7 +90,7 @@ the project's main workspace and the record disappears by itself.
 
 So, after entering or leaving a worktree, owning **and** effective are both the new workspace: pass
 its id to account CLI commands and everything local already acts on it. The plugin drops the new id next to the
-tool result, and `cofluxd workspace` always tells you. Two things stay behind on purpose:
+tool result, and `coflux workspace` always tells you. Two things stay behind on purpose:
 
 - `COFLUX_WORKSPACE_ID` (and the id in the `<coflux-session>` block from earlier in this session)
   still names where the terminal was *opened*; it is frozen when the PTY starts and cannot be
@@ -105,7 +105,7 @@ a daemon that is down or too old — the session just carries on with the owners
 ### Ask where you are
 
 ```sh
-cofluxd workspace
+coflux workspace
 {"workspaceId":"ws-b","path":"/Users/me/.coflux/worktrees/ws-b","owningWorkspaceId":"ws-a","moved":true}
 ```
 
@@ -113,7 +113,7 @@ One line of JSON: `workspaceId` (+ `path`) is the **effective** workspace, `owni
 workspace this terminal belongs to right now, and `moved` says whether they differ. With the plugin
 installed you also get a `<coflux-session-moved>` block at the start of every prompt while the two
 differ — but that block only arrives with the **next** user prompt. **About to call an account command right
-after a `cd`? Run `cofluxd workspace` first** and use the `workspaceId` it prints; do not reuse
+after a `cd`? Run `coflux workspace` first** and use the `workspaceId` it prints; do not reuse
 `COFLUX_WORKSPACE_ID`.
 
 ## When to open a terminal
@@ -139,8 +139,8 @@ own tools are faster, and a pile of one-second terminals is just noise to the us
 There are two kinds, told apart by one single thing: **whether you pass a command**.
 
 ```sh
-cofluxd terminal new --title="Run unit tests" --cmd="pnpm -C tests test"   # job terminal
-cofluxd terminal new --title="Debug shell"                                 # session terminal
+coflux terminal new --title="Run unit tests" --cmd="pnpm -C tests test"   # job terminal
+coflux terminal new --title="Debug shell"                                 # session terminal
 ```
 
 `--title` is the name the user sees in the sidebar; **name it properly**: "Run unit tests",
@@ -169,14 +169,14 @@ from what is on screen, and `wait` is only meaningful after you have sent `exit`
 
 Driving a session terminal:
 
-1. `cofluxd terminal new --title="Debug shell"` → prints a taskId.
-2. `cofluxd terminal read <taskId>` until you see the shell prompt. The shell needs a moment to
+1. `coflux terminal new --title="Debug shell"` → prints a taskId.
+2. `coflux terminal read <taskId>` until you see the shell prompt. The shell needs a moment to
    start and the first read can come back empty — **never `send` before you have seen a prompt**.
-3. `cofluxd terminal send <taskId> --text="pnpm build" --enter`, then `read` again to see what
+3. `coflux terminal send <taskId> --text="pnpm build" --enter`, then `read` again to see what
    happened. One send per command; nothing signals you when a command finished, so read until the
    prompt is back. To make that unambiguous, end the command with a marker of your own
    (`pnpm build; echo DONE-$?`) and read until the marker shows up.
-4. `cofluxd terminal send <taskId> --text="exit" --enter` when you are done; the terminal then
+4. `coflux terminal send <taskId> --text="exit" --enter` when you are done; the terminal then
    becomes `exited` with the shell's exit code.
 
 The new terminal has the same `COFLUX_*` variables (pointing at its own task/session ids, same
@@ -185,9 +185,9 @@ workspace as you).
 ### See how far it got
 
 ```sh
-cofluxd terminal list                      # every terminal in the workspace your cwd is in: id, state, exit code, title
-cofluxd terminal read <taskId>             # a terminal's content (plain text, last 200 lines by default)
-cofluxd terminal read <taskId> --lines 50
+coflux terminal list                      # every terminal in the workspace your cwd is in: id, state, exit code, title
+coflux terminal read <taskId>             # a terminal's content (plain text, last 200 lines by default)
+coflux terminal read <taskId> --lines 50
 ```
 
 `list` states are `running` / `exited` / `idle`; `exited` carries `exit=<code>`.
@@ -199,8 +199,8 @@ history, and empty for the first moments after opening. Both are immediate.
 ### Wait for a command to finish
 
 ```sh
-cofluxd terminal wait <taskId>               # block until that terminal exits and print the exit code (default cap 30 minutes)
-cofluxd terminal wait <taskId> --timeout 300 # custom timeout in seconds; a timeout fails loudly with a non-zero exit
+coflux terminal wait <taskId>               # block until that terminal exits and print the exit code (default cap 30 minutes)
+coflux terminal wait <taskId> --timeout 300 # custom timeout in seconds; a timeout fails loudly with a non-zero exit
 ```
 
 To wait for a command use `wait`; **do not write your own polling loop**. One command blocks
@@ -219,10 +219,10 @@ not any command's: check what a command did by reading the screen.
 **Keep working, and be woken up when it finishes.** `wait` blocks, so run it as a backgrounded Bash
 call of your own:
 
-1. `cofluxd terminal new --title="Run the test suite" --cmd="pnpm -C tests test"` → prints a taskId.
-2. Run `cofluxd terminal wait <taskId>` as a backgrounded Bash call, then go do something else.
+1. `coflux terminal new --title="Run the test suite" --cmd="pnpm -C tests test"` → prints a taskId.
+2. Run `coflux terminal wait <taskId>` as a backgrounded Bash call, then go do something else.
 3. The host wakes you when that call exits. Check its output for `# exited exit=<code>`, then
-   `cofluxd terminal read <taskId>` to see what actually happened.
+   `coflux terminal read <taskId>` to see what actually happened.
 
 That gets you both halves at once: the user watches (and can take over) a real terminal, and you are
 still told the moment it is over, instead of blocking or polling for it.
@@ -230,8 +230,8 @@ still told the moment it is over, instead of blocking or polling for it.
 ### Type into a terminal
 
 ```sh
-cofluxd terminal send <taskId> --text "y" --enter    # type a line and press Enter
-cofluxd terminal send <taskId> --enter               # just press Enter
+coflux terminal send <taskId> --text "y" --enter    # type a line and press Enter
+coflux terminal send <taskId> --enter               # just press Enter
 ```
 
 For interactive confirmations (y/N, menus), or to add a command in the same shell after the
@@ -248,7 +248,7 @@ previous one finished. Discipline:
 ### Report progress
 
 ```sh
-cofluxd progress "Reproduced; narrowing down the relay reconnect timing"
+coflux progress "Reproduced; narrowing down the relay reconnect timing"
 ```
 
 One sentence telling the user how far you are, shown on the workspace card and replaced by the
@@ -263,7 +263,7 @@ If unsure: when the user does not have to do anything, use `progress`.
 ### Call the user
 
 ```sh
-cofluxd notify "Both approaches work; I need you to pick one"
+coflux notify "Both approaches work; I need you to pick one"
 ```
 
 The user's sidebar switches this workspace to "waiting for interaction" and shows this sentence;
@@ -277,7 +277,7 @@ extra notify. This is for "what you have to say cannot be guessed from the statu
 ### Hand the user a clickable preview
 
 ```sh
-cofluxd ports
+coflux ports
 ```
 
 Lists every listening port in this workspace with its public preview URL. After starting a dev
@@ -288,7 +288,7 @@ server, use it to get the URL and tell the user directly; they click it and nobo
 Errors are one readable sentence; do what they say: "not inside a coflux terminal" = you are not
 in a coflux session; "terminal is not in this workspace or does not exist" = check the id with
 `list`, and if you moved into another workspace that is exactly what a terminal of the other one
-looks like (`cofluxd workspace` to confirm, `cd` back to reach it); "predates the daemon upgrade" =
+looks like (`coflux workspace` to confirm, `cd` back to reach it); "predates the daemon upgrade" =
 that terminal was opened before the daemon upgrade, open a new one; a `new` without `--cmd` refused for a missing command = this machine's daemon is older
 than session terminals, tell the user to run `cofluxd update && cofluxd restart` (or pass a command
 and use a job terminal); "daemon is not connected to the center" only appears on
@@ -297,29 +297,29 @@ and use a job terminal); "daemon is not connected to the center" only appears on
 ## Account CLI: across workspaces and devices
 
 The bundled CLI can use the desktop app's login without receiving its token. For a standalone CLI,
-use `cofluxd login --username <account> --password-stdin`; the user supplies the password safely,
+use `coflux login --username <account> --password-stdin`; the user supplies the password safely,
 never as a command argument. Account commands return JSON. A workspace ID identifies its device.
 
 ```sh
-cofluxd device list
-cofluxd project list --device <deviceId>
-cofluxd workspace list --device <deviceId>
-cofluxd workspace new --project <projectId> --branch <branch>
-cofluxd terminal new --workspace <workspaceId> --title <title> [--cmd <command>]
-cofluxd terminal list --workspace <workspaceId>
-cofluxd terminal read <terminalId> --remote
-cofluxd terminal send <terminalId> --remote --text <text> [--enter]
-cofluxd terminal wait <terminalId> --remote --timeout 30
-cofluxd terminal stop <terminalId> --remote
-cofluxd terminal remove <terminalId> --remote
-cofluxd workspace rename <workspaceId> --name <name>
-cofluxd workspace remove <workspaceId>
-cofluxd ports --remote --device <deviceId>
+coflux device list
+coflux project list --device <deviceId>
+coflux workspace list --device <deviceId>
+coflux workspace new --project <projectId> --branch <branch>
+coflux terminal new --workspace <workspaceId> --title <title> [--cmd <command>]
+coflux terminal list --workspace <workspaceId>
+coflux terminal read <terminalId> --remote
+coflux terminal send <terminalId> --remote --text <text> [--enter]
+coflux terminal wait <terminalId> --remote --timeout 30
+coflux terminal stop <terminalId> --remote
+coflux terminal remove <terminalId> --remote
+coflux workspace rename <workspaceId> --name <name>
+coflux workspace remove <workspaceId>
+coflux ports --remote --device <deviceId>
 ```
 
 `--remote` selects account access, including other workspaces on this machine. Read before sending;
 stop immediately when the user takes over. If a write times out, inspect the result before retrying.
-Exiting the CLI does not stop its terminals. Delete workspaces through `cofluxd workspace remove`
+Exiting the CLI does not stop its terminals. Delete workspaces through `coflux workspace remove`
 so the filesystem and workspace records stay consistent.
 
 ## Boundaries
@@ -327,7 +327,7 @@ so the filesystem and workspace records stay consistent.
 - You can open, read, wait and type, but **typing is a restricted write with humans first**: you
   cannot write into a terminal the user is taking over (you are refused explicitly), and the user
   taking over at any time displaces you. Do not fight a human for a terminal.
-- Local commands only see **the workspace your cwd is in** (`cofluxd workspace` says which one);
+- Local commands only see **the workspace your cwd is in** (`coflux workspace` says which one);
   use the account CLI for other workspaces and machines in the same account.
 - A workspace has a cap on concurrently live terminals (default 8, including the user's own).
   On hitting the cap, `list` first: usually some finished terminals were never collected. If the
@@ -339,4 +339,4 @@ so the filesystem and workspace records stay consistent.
   has no effect, the center only trusts the ids it issued. `COFLUX_WORKSPACE_ID` always means the
   workspace this terminal was **opened** in and goes stale the moment coflux follows you into a
   worktree; both "where does this terminal belong now" and "where am I acting" come from
-  `cofluxd workspace`.
+  `coflux workspace`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 内置 daemon 三件的落位脚本（plan 113）：把 coflux-supervisor / coflux-worker / cofluxd 与版本戳 VERSION
+// 内置 daemon 三件的落位脚本（plan 113）：把 coflux-supervisor / coflux-worker / coflux 与版本戳 VERSION
 // 从一个显式给出的产物目录复制到 build/daemon/——electron-builder.yml 的 extraResources 只认这个固定目录，
 // 主进程未打包时也从这里找（src/main/daemon-bundle.ts）。
 // 同时（plan 115）把仓库里的 integrations/claude-plugin 整目录逐字节拷到 build/daemon/claude-plugin/，
@@ -10,7 +10,7 @@
 //   COFLUX_DESKTOP_DAEMON_DIR=<dir> node scripts/stage-daemon.mjs
 // <dir> 必须含三件二进制；VERSION 取 <dir>/VERSION，缺失时退到环境变量 COFLUX_DESKTOP_DAEMON_VERSION，
 // 再缺失落 "dev"（本机 target/debug 产物编译期就是 dev；主进程对解析不了的内置版本永不提示升级）。
-// CI（desktop-release.yml）在 daemon job 里把 v0.0.0-desktop.<桌面版本> 写进 VERSION，与编译期
+// CI（desktop-release.yml）在 daemon job 里把 vX.Y.Z 写进 VERSION，与编译期
 // COFLUX_RELEASE_VERSION 同一个值。
 //
 // 复制后统一 chmod 0755：GitHub artifact 不保留执行位，launchd 起不来的二进制比没有更糟。
@@ -22,7 +22,7 @@ const DESKTOP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = resolve(DESKTOP_ROOT, "..", "..");
 // 与 src/main/daemon-paths.ts 的 DAEMON_BINARIES / DAEMON_VERSION_FILE / CLAUDE_PLUGIN_RESOURCE_DIR 同值；
 // test/config.test.ts 守住两边一致
-const BINARIES = ["coflux-supervisor", "coflux-worker", "cofluxd"];
+const BINARIES = ["coflux-supervisor", "coflux-worker", "coflux"];
 const VERSION_FILE = "VERSION";
 const CLAUDE_PLUGIN_DIR = "claude-plugin";
 // 插件来源在仓库里（不是 CI 的新输入），与三件同一口径：缺失即失败

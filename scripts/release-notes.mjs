@@ -72,11 +72,12 @@ function build(version, prevArg) {
   const prevCli = prev ? cliAt(prev) : null;
 
   lines.push("## 升级", "");
-  lines.push("- **daemon**：在线设备由中心自动推送升级（worker 验签后热切换），无需手动操作。");
+  lines.push("- **桌面**：在应用内检查更新，下载后点击重启并更新；普通客户端更新保留运行中的终端。");
+  lines.push("- **运行内核**：在线设备自动验签并热更新 Worker；持有终端的 Supervisor 可延后至任务结束后再重启。");
   lines.push(
     cliVersion === prevCli
-      ? `- **cofluxd CLI**：本版无变化（\`${cliVersion}\`）。`
-      : `- **cofluxd CLI**：\`npm i -g cofluxd@latest\`（\`${prevCli ?? "—"}\` → \`${cliVersion}\`）。`,
+      ? `- **命令行 coflux / cofluxd**：本版无变化（\`${cliVersion}\`）。`
+      : `- **命令行 coflux / cofluxd**：\`npm i -g cofluxd@latest\`（\`${prevCli ?? "—"}\` → \`${cliVersion}\`）。`,
   );
   lines.push("");
   lines.push(

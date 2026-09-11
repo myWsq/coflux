@@ -5,7 +5,7 @@
  * 验收核心（在真栈上驱动，命令都从 A 的 PTY 里发出，与 agent 的形态一致）：
  * - 定位到仓库里一个**未注册**的 worktree W（测试自己用 git 建的，模拟 Claude Code 自建的
  *   `<主工作区>/.claude/worktrees/<name>`）→ 中心先广播 workspaceCreated（path = W 的规范化根）
- *   再广播 taskUpdated（同一个 task，workspaceId 变成新工作区）；PTY 里 `cofluxd workspace` 报出的
+ *   再广播 taskUpdated（同一个 task，workspaceId 变成新工作区）；PTY 里 `coflux workspace` 报出的
  *   owningWorkspaceId 就是新 id；
  * - 定位回 A → taskUpdated 回 A，W 的工作区记录还在（ExitWorktree 不删子工作区）；
  * - 定位到一个**已注册**的子工作区 B → 只搬不新建；
@@ -31,7 +31,7 @@ import { mkRepo, startStack } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
 
 const PORT = 8873;
-const COFLUXD = fileURLToPath(new URL("../../packages/cli/cofluxd.mjs", import.meta.url));
+const COFLUXD = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
 
 let stack;
 const repos = [];
@@ -75,7 +75,7 @@ test("跟随进 worktree：未注册的先登记再搬、回来不删记录、�
   const c = device.control;
   const gatewayPort = device.gateway.port;
 
-  /** 在 A 的 PTY 里跑一条 cofluxd 命令，输出重定向到文件——比解析 PTY 分块输出可靠得多。 */
+  /** 在 A 的 PTY 里跑一条 coflux 命令，输出重定向到文件——比解析 PTY 分块输出可靠得多。 */
   const runCli = async (sessionId, args, predicate, label, timeout = 25000) => {
     const file = join(out, `cli-${cliSeq += 1}.txt`);
     await device.input(

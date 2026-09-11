@@ -1,5 +1,5 @@
 {
-  "description": "Forward Claude Code hook events to the local coflux daemon through the cofluxd messenger (silent no-op when cofluxd is not installed); at session start, inside a coflux terminal, print the <coflux-session> block with the session's coflux coordinates; on every prompt, print a <coflux-session-moved> block when the working directory sits in a different coflux workspace than the terminal does; follow the agent into git worktrees (EnterWorktree, ExitWorktree, resume and Claude Code's own cleanup move the terminal's owning workspace, registering an unknown worktree first); inside a coflux project session, steer `git worktree remove|move` to the coflux account CLI workspace commands.",
+  "description": "Forward Claude Code hook events to the local coflux daemon through the coflux messenger (silent no-op when coflux is not installed); at session start, inside a coflux terminal, print the <coflux-session> block with the session's coflux coordinates; on every prompt, print a <coflux-session-moved> block when the working directory sits in a different coflux workspace than the terminal does; follow the agent into git worktrees (EnterWorktree, ExitWorktree, resume and Claude Code's own cleanup move the terminal's owning workspace, registering an unknown worktree first); inside a coflux project session, steer `git worktree remove|move` to the coflux account CLI workspace commands.",
   "hooks": {
     "SessionStart": [
       {
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
           }
         ]
       },
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
           }
         ]
       },
@@ -56,7 +56,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
           }
         ]
       },
@@ -87,7 +87,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
           }
         ]
       }
@@ -97,7 +97,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
           }
         ]
       }
@@ -107,7 +107,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
           }
         ]
       }
@@ -117,7 +117,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
           }
         ]
       }
@@ -127,7 +127,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'command -v cofluxd >/dev/null 2>&1 && exec cofluxd hook claude || :'"
+            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
           }
         ]
       }

@@ -21,10 +21,10 @@ pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/ico
 
 **内置 daemon 三件（plan 113）**：`pack` / `dist` 先跑 `scripts/stage-daemon.mjs`，它从一个**显式**给出的产物目录
 （环境变量 `COFLUX_DESKTOP_DAEMON_DIR` 或 `--from <dir>`；本机通常是仓库根的 `target/debug`，先 `cargo build -p coflux-supervisor -p coflux-worker -p coflux-cli`）
-把 `coflux-supervisor` / `coflux-worker` / `cofluxd` 复制到 `build/daemon/`（gitignored）并写版本戳 `VERSION`；输入缺失或三件不全**直接失败**，
+把 `coflux-supervisor` / `coflux-worker` / `coflux` 复制到 `build/daemon/`（gitignored）并写版本戳 `VERSION`；输入缺失或三件不全**直接失败**，
 不会静默出一个不带 daemon 的包。`VERSION` 取 `<dir>/VERSION`，缺失退到 `COFLUX_DESKTOP_DAEMON_VERSION`，再缺失落 `dev`
 （本机 debug 产物编译期就是 dev，app 对解析不了的内置版本永不提示升级）。CI 在 `desktop-release.yml` 的并行 daemon job 里
-写 `v0.0.0-desktop.<桌面版本>`。electron-builder 把 `build/daemon` 整目录放进 `Contents/Resources/daemon/`（不进 asar），
+写 与产品 tag 相同的 `vX.Y.Z`。electron-builder 把 `build/daemon` 整目录放进 `Contents/Resources/daemon/`（不进 asar），
 三件经 `mac.binaries` 拿 Developer ID + hardened runtime 签名并进公证。未打包的 dev 实例也从 `build/daemon` 找三件，
 没跑过 stage 脚本时状态对象报「本构建不带 daemon」，只能看状态、不能接入。
 
@@ -37,7 +37,7 @@ pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/ico
 `@coflux/client` 等）由 Vite 打进 `out/renderer`，因此放 devDependencies；主进程运行时按 `externalizeDepsPlugin`
 外置、需要在 asar 的 node_modules 里的（`electron-updater`、`electron-log`）才放 dependencies。
 
-正式发版走 `desktop-v*` tag 触发的 `.github/workflows/desktop-release.yml`（签名 + 公证 + GitHub Release + 更新清单推 `desktop-updates` 分支），见
+正式发版走 统一 `v*` tag 触发的 `.github/workflows/release.yml`（复用 `desktop-release.yml` 构建桌面）（签名 + 公证 + GitHub Release + 更新清单推 `desktop-updates` 分支），见
 [docs/RELEASING.md](../../docs/RELEASING.md)。
 
 ## 运行时约定
@@ -66,7 +66,7 @@ pnpm -C apps/desktop icon        # 从 build/AppIcon.icon 重新导出 build/ico
 - **版本准入**（plan 105）：登录时上报 `clientKind=desktop` 与 `CONTROL_PROTOCOL_VERSION`，中心只在协议版本低于其最低支持版本时拒绝；build-id 只作标识。部署 prod 不会踢旧桌面版，electron-updater 在后台升级；被拒显示「需要更新」并触发更新检查，不当作断线。
 - **快捷键**：纯 ⌘ 前缀（⌘T/⌘W/⌘N/⌘1-9/⌘[ ]/⌘/），原生菜单项只展示键位不注册 accelerator，键落到页面处理。
 - **本机 daemon**（plan 113）：app 就是这台 Mac 的 daemon 安装器与管理器。落盘布局与 LaunchAgent 与 npm 版
-  `cofluxd` 逐字同构（`~/.coflux/bin/{coflux-supervisor,coflux-worker,cofluxd}`、`~/Library/LaunchAgents/com.coflux.daemon.plist`、
+  `cofluxd` 逐字同构（`~/.coflux/bin/{coflux-supervisor,coflux-worker,coflux}`、`~/Library/LaunchAgents/com.coflux.daemon.plist`、
   `~/.coflux/settings.json` 的 serverUrl = app 地址把 `/client` 换成 `/daemon`；尊重 `COFLUX_HOME`），npm 装过的机器被识别为
   「已接入」直接接管。落盘后对三件 ad-hoc 重签（新落盘二进制带 provenance，launchd 顶层 spawn 被 AMFI 静默杀）。
   登录成功（中心已连上）后本机未接入就弹接入引导（可「暂不」，之后从账号菜单「本机 daemon」再进）：安装组件 → 启动服务 →

@@ -347,7 +347,7 @@ export function Sidebar(props: SidebarProps) {
                         // workspaceActivity（packages/client），UI 只做呈现。
                         const activity = workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents);
                         const activityText = activityLabel(activity);
-                        // agent 经 `cofluxd progress` 播报的进度短评（plan 088）：与活动状态是两个
+                        // agent 经 `coflux progress` 播报的进度短评（plan 088）：与活动状态是两个
                         // 维度（状态 hooks 自动判定，短评 agent 主动播报），跨 hook 事件存活。
                         const progress = workspaceProgress(workspace.id, tasks, sessionAgents);
                         // 工作区详情 tooltip（需求勘误：原 plan 048-task-tab-tooltip 做到了任务 Tab 上，
@@ -365,7 +365,7 @@ export function Sidebar(props: SidebarProps) {
                                   <span className="truncate">{activityText}</span>
                                 </span>
                               ) : null}
-                              {/* agent 经 `cofluxd notify` 主动留的话（plan 074）：状态图标只能表达
+                              {/* agent 经 `coflux notify` 主动留的话（plan 074）：状态图标只能表达
                                   「它在等你」，具体等什么得由 agent 自己说。不 truncate——留言就是
                                   要读的内容，worker 侧已按 200 字符钳过。 */}
                               {activity.status === "question" && activity.message ? (

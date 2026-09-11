@@ -51,10 +51,10 @@ test("缺任一件、空文件、目录不存在 → null（本构建不带 daem
   withTempDir((dir) => {
     assert.equal(locateDaemonBundle(join(dir, "missing")), null);
     for (const name of DAEMON_BINARIES) writeFileSync(join(dir, name), "x");
-    writeFileSync(join(dir, "cofluxd"), "");
+    writeFileSync(join(dir, "coflux"), "");
     assert.equal(locateDaemonBundle(dir), null, "空文件不算");
-    rmSync(join(dir, "cofluxd"));
-    mkdirSync(join(dir, "cofluxd"));
+    rmSync(join(dir, "coflux"));
+    mkdirSync(join(dir, "coflux"));
     assert.equal(locateDaemonBundle(dir), null, "同名目录不算");
   });
 });

@@ -7,7 +7,7 @@
 coflux：可跑在任意节点上的 **daemon**，本地起 PTY、驱动 Agent（claude/codex CLI），主动外连**中心服务器**；**client**（Electron 桌面 app）连服务器即可触达任意 daemon。模型类 Tailscale（账号 → 设备 → 项目 → 工作区 → 任务 → 会话）。
 
 - `apps/server`（TS）：账号/设备认证 + 编排路由 + Postgres 持久化。
-- `apps/desktop`（TS）：**唯一前端、默认迭代对象**（plan 106）。Electron 主进程（`src/main`）+ sandbox preload（`src/preload`）+ React 19 / xterm 渲染层（`src/renderer`，`@` 别名指向它）。桌面能力经 preload 桥接 `window.cofluxDesktop` 提供（类型在 `src/shared/desktop-bridge.ts`），渲染层假定桥接必定存在、没有浏览器分支；主进程改写 WebSocket 握手 Origin 为 `https://desktop.coflux.dev`，server/daemon 校验零放宽。会话 token 经 safeStorage 加密落 userData，窗口 bounds 记忆，主进程日志在 `~/Library/Logs/Coflux/main.log`。发版走 `desktop-v*` tag（签名公证 + GitHub Release，更新清单推 `desktop-updates` 分支），按控制面协议版本准入（plan 105），不与 prod 部署绑定。线上 `app.coflux.dev` / `m.coflux.dev` 是**冻结**的分割前构建（源码在 git 历史 `ce7026b`），只剩历史工作台、不再迭代，server 不再生成指向它们的链接；新机器授权 / 端口预览门禁两张页面由 `apps/server` 直出（plan 107，`apps/server/src/auth-pages.ts`），挂在 `COFLUX_PUBLIC_URL` 下。原生 Swift 版 `apps/macos` 同样只在历史里。
+- `apps/desktop`（TS）：**唯一前端、默认迭代对象**（plan 106）。Electron 主进程（`src/main`）+ sandbox preload（`src/preload`）+ React 19 / xterm 渲染层（`src/renderer`，`@` 别名指向它）。桌面能力经 preload 桥接 `window.cofluxDesktop` 提供（类型在 `src/shared/desktop-bridge.ts`），渲染层假定桥接必定存在、没有浏览器分支；主进程改写 WebSocket 握手 Origin 为 `https://desktop.coflux.dev`，server/daemon 校验零放宽。会话 token 经 safeStorage 加密落 userData，窗口 bounds 记忆，主进程日志在 `~/Library/Logs/Coflux/main.log`。桌面、CLI 与内核统一走 `v*` tag（签名公证 + GitHub Release，更新清单推 `desktop-updates` 分支），按控制面协议版本准入（plan 105），不与 prod 部署绑定。线上 `app.coflux.dev` / `m.coflux.dev` 是**冻结**的分割前构建（源码在 git 历史 `ce7026b`），只剩历史工作台、不再迭代，server 不再生成指向它们的链接；新机器授权 / 端口预览门禁两张页面由 `apps/server` 直出（plan 107，`apps/server/src/auth-pages.ts`），挂在 `COFLUX_PUBLIC_URL` 下。原生 Swift 版 `apps/macos` 同样只在历史里。
 - `packages/{protocol,core,client}`（TS）：共享的线协议类型、日志、协议 client + store（client 无 React、不依赖 Electron，是唯一的 TS client 真相源；`ClientKind` 里的 `"web"` 是为冻结的线上 web 保留的 server 契约）。
 - `integrations/claude-plugin`：Claude Code 插件的**交付目录**（hooks + skill + manifest），由 `myWsq/plugins` 市场（维护仓库 `myWsq/plugins-builder`）按 commit SHA 整目录收集发布，改完要提升 `.claude-plugin/plugin.json` 的 version 并在 builder 里更新 SHA。SKILL 的唯一源是 `packages/cli/skills/coflux/SKILL.md`，用 `node scripts/sync-claude-plugin.mjs` 同步到这里，CI 校验两份一致。
 - `packages/cli` 与 `crates/cli`：Agent 的统一 CLI 入口；账号登录与跨工作区、跨设备操作走 `/api/client/*`，桌面内置 CLI 可经本机 broker 复用应用账号。MCP 及专用 OAuth 入口已移除。
@@ -16,6 +16,8 @@ coflux：可跑在任意节点上的 **daemon**，本地起 PTY、驱动 Agent�
   - `worker`（tokio）：连服务器(WS)/认证/重连 + git/exec/fs + 两级 resync。频繁升级（热升级只换它，PTY 在 supervisor 存活）。
   - 详见 [docs/architecture.md](docs/architecture.md)、[docs/hot-upgrade-design.md](docs/hot-upgrade-design.md)、[docs/ROADMAP.md](docs/ROADMAP.md)。
   - 改桌面 UI 先看 [docs/design-guidelines.md](docs/design-guidelines.md)（悬浮提示用 Tooltip 组件不用原生 title 等约定）。
+
+`cofluxd` 是无界面设备宿主入口，仅负责安装、在线与内核生命周期；`coflux` 是账号与本地/远端业务操作工具。npm 的 `cofluxd` 包交付两个入口，桌面自带 Rust `coflux` 并注入终端 PATH。两者不提供旧命令转发。
 
 ## 常用命令
 
@@ -38,7 +40,7 @@ git tag v1.2.3 && git push origin v1.2.3            # 发版：触发交叉编�
 - **本机 Postgres**：`pnpm dev:pg` 起独立实例（`compose.yaml`，`127.0.0.1:5432`）。`pnpm dev:server` 与黑盒测试默认都连 `postgres://postgres:postgres@127.0.0.1:5432/postgres`，不必再设 `DATABASE_URL` / `COFLUX_TEST_PG_URL`。不要用本机残留的 Supabase 容器（54322 / 5432 池化口）。
 - **桌面 dev 工作台「能打开但卡住连不上」= 8787 没跑**：`pnpm dev:desktop` 的主进程默认给渲染层 `ws://localhost:8787/client`（不经 vite 代理，渲染层 HMR 在 5274），dev server 不在时页面照常加载、但 WS 永远连不上。自查一条命令：`curl localhost:8787/health` 应 200。dev 实例的 userData 是 `Coflux-dev` 目录，与安装版的 token / 窗口位置互不可见。
 
-CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（tag `v*` 发布 daemon）、`desktop-release.yml`（tag `desktop-v*` 发布桌面 app：签名公证 + GitHub Release + 更新清单分支）。worker 产物用 ed25519 签名、supervisor 验签，密钥设置见 [docs/RELEASING.md](docs/RELEASING.md)。
+CI/发版：`.github/workflows/ci.yml`（push/PR 质量门）、`release.yml`（tag `v*` 统一发布桌面与内核，再发布同版本 npm 包）、`desktop-release.yml`（仅由统一流程调用，负责桌面签名公证构建）。worker 产物用 ed25519 签名、supervisor 验签，密钥设置见 [docs/RELEASING.md](docs/RELEASING.md)。
 
 生产环境（三台机、域名线路、部署与回滚命令、踩过的坑）见 [docs/deployment.md](docs/deployment.md)。**动生产前先读它**：coflux.dev 下橙云与灰云并存，两台机的 Caddy 上都还压着其他项目的站点。
 

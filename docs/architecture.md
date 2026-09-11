@@ -29,6 +29,25 @@ daemon 仍主动外连中心，因此 NAT 后的远端设备不需要开放入�
 
 ### 桌面、CLI 与运行内核
 
+```text
+设备宿主入口                         统一操作工具
++---------------------+             +----------------------+
+| Coflux.app（桌面）   |             | coflux（人 / Agent） |
+| cofluxd（无界面）    |             | 登录 / 工作区 / 终端 |
++----------+----------+             +----------+-----------+
+           | 启动、停止、更新                    | 本地通道 / 账号 API
+           v                                   v
++---------------------------------------------------------+
+| 运行内核：Worker（网络 / 业务） <-> Supervisor（持有 PTY） |
++---------------------------------------------------------+
+```
+
+`cofluxd` 仅管理无界面设备宿主，不再接受登录、终端、工作区等操作命令。
+`coflux` 是统一业务入口，桌面终端注入的也叫 `coflux`；跨设备能力与桌面使用同一套账号权限。
+npm `cofluxd` 包同时交付这两个入口；桌面内置零 Node 依赖的 Rust `coflux`。
+桌面、npm 包与内置组件使用一个产品版本和 `vX.Y.Z` 发布 tag。
+升级操作工具不影响已运行终端；升级持有 PTY 的 Supervisor 可延后，重启不承诺恢复原进程。
+
 桌面面向人，CLI 面向 Agent，二者操作同一账号内的工作区与终端。CLI 账号操作通过
 `/api/client/login`、`/api/client/command` 进入现有 Hub account operations；任务事务、
 prepared execution、终端读写与人类优先规则共用，CLI 是 Agent 的统一入口，MCP 已移除。
@@ -431,7 +450,7 @@ packages/core     TS 共享日志等基础设施
 packages/client   control store + DeviceRouter
 packages/protocol TS protobuf 绑定
 packages/swift-client Swift protobuf、Client Core 与 Apple 平台 transport
-packages/cli      cofluxd 安装/服务管理/doctor CLI
+packages/cli      cofluxd 无界面宿主管理 + coflux 账号与本地/远端操作
 crates/protocol   Rust protobuf、UDS frame/IPC
 crates/supervisor PTY/sessiond authority
 crates/worker     gateway、relay 拨号、RPC、checkpoint、升级 adapter

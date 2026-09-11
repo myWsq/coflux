@@ -7,11 +7,11 @@
  *      目录工作区 `COFLUX_PROJECT_ID` 存在但为空串；
  *   ② web 手开的终端（taskCreate + taskStart 的 prepared session.create，经 device-harness 自动执行）：
  *      attach 后输入 printf，经 read_terminal 读到；
- *   ③ 在 coflux 终端里跑 `cofluxd terminal new`（直发 IPC 路径），`terminal read` 里能看到。
+ *   ③ 在 coflux 终端里跑 `coflux terminal new`（直发 IPC 路径），`terminal read` 里能看到。
  * 旧 worker / 旧 supervisor 的兼容（缺字段不报错）由 crates/protocol/src/ipc.rs 的 Legacy 单测覆盖。
  *
  * plan 112（同一套会话环境，加在一起验）：supervisor 把 `<COFLUX_HOME>/bin` 前置进每个会话的 PATH 首段、
- * 启动时把自身版本写到 `<COFLUX_HOME>/supervisor-version`；Rust 版 `cofluxd`（target/debug/cofluxd）在同一个
+ * 启动时把自身版本写到 `<COFLUX_HOME>/supervisor-version`；Rust 版 `coflux`（target/debug/coflux）在同一个
  * coflux 终端里走路径③，输出短语与 node 版一致。
  *
  * plan 115（同一套会话环境的第三件）：supervisor 给会话 shell 注入 shell 集成，把 `COFLUX_CLAUDE_PLUGIN_DIR`
@@ -34,8 +34,8 @@ import { callOperation as callTool, loginAccount } from "./account-harness.mjs";
 
 const PORT = 8870;
 const BASE = `http://127.0.0.1:${PORT}`;
-const COFLUXD = fileURLToPath(new URL("../../packages/cli/cofluxd.mjs", import.meta.url));
-/** Rust 版 cofluxd（plan 112）：与 node 版同一组子命令、同样的 stdout 短语。 */
+const COFLUXD = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
+/** Rust 版 coflux（plan 112）：与 node 版同一组子命令、同样的 stdout 短语。 */
 const COFLUXD_RUST = CLI_BIN;
 /** 与 crates/supervisor/src/sessions.rs 的注入清单一致：变量名是 agent 面向的契约，只能加不能改。 */
 const ENV_NAMES = [
@@ -161,7 +161,7 @@ async function removeWorkspace(workspaceId) {
   await observer.waitFor((m) => m.case === "workspaceRemoved" && m.workspaceId === workspaceId, "cleanup ws removed", 20000);
 }
 
-/** 在会话里跑一条 cofluxd 命令，输出重定向到文件——比解析 PTY 分块输出可靠得多。 */
+/** 在会话里跑一条 coflux 命令，输出重定向到文件——比解析 PTY 分块输出可靠得多。 */
 function cliCmd(gatewayPort, args, outFile) {
   return `COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} node ${COFLUXD} ${args} > ${outFile} 2>&1\r`;
 }
@@ -284,7 +284,7 @@ test("路径②：web 手开的终端（taskCreate + taskStart）里也有 COFLU
   await okTool("remove_terminal", { terminalId: task.id });
 });
 
-test("路径③：在 coflux 终端里 `cofluxd terminal new`（直发 IPC 路径）开出的终端也有 COFLUX_*，terminal read 里能看到", async () => {
+test("路径③：在 coflux 终端里 `coflux terminal new`（直发 IPC 路径）开出的终端也有 COFLUX_*，terminal read 里能看到", async () => {
   const home = mkDir("coflux-env-cli-");
   const { ws, task: idle } = await dirWorkspace(home);
   const gatewayPort = device.gateway.port;
@@ -333,7 +333,7 @@ async function reportedSupervisorVersion() {
   return hit.case === "stateSnapshot" ? hit.daemons.find((d) => d.daemonId === stack.daemonId).supervisorVersion : hit.daemon.supervisorVersion;
 }
 
-test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变）；supervisor-version 落盘等于握手上报的版本；Rust 版 cofluxd 走路径③输出与 node 版一致", async () => {
+test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变）；supervisor-version 落盘等于握手上报的版本；Rust 版 coflux 走路径③输出与 node 版一致", async () => {
   // ① supervisor-version：启动即落盘，纯文本一行 = 握手上报的原文 + 换行（桌面版 plan 113 的读取契约）
   const version = await reportedSupervisorVersion();
   const versionFile = join(stack.home, "supervisor-version");
@@ -360,7 +360,7 @@ test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变
       "其余段 = supervisor 继承的 PATH，顺序不变、不重复",
     );
 
-    // ③ Rust 版 cofluxd 在同一个终端里走路径③：开终端、读输出——短语与 node 版逐字一致
+    // ③ Rust 版 coflux 在同一个终端里走路径③：开终端、读输出——短语与 node 版逐字一致
     const newOut = join(home, "new.txt");
     await device.input(origin.sessionId, cliCmdRust(gatewayPort, `terminal new --title "Rust 坐标" --cmd "${DUMP_ENV}"`, newOut));
     const created = await observer.waitFor(
@@ -378,7 +378,7 @@ test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变
     // 输出文件边写边读：等最后一行 `看输出：` 出现（或 `✗`）再比对，只等首行会读到半截
     const newText = await waitForFile(newOut, (s) => s.includes("看输出：") || s.includes("✗"), "Rust 版 terminal new 输出");
     assert.ok(
-      newText.includes(`已开终端 ${created.task.id}（用户可在 coflux 侧栏看到并随时接管）`) && newText.includes(`看输出：cofluxd terminal read ${created.task.id}`),
+      newText.includes(`已开终端 ${created.task.id}（用户可在 coflux 侧栏看到并随时接管）`) && newText.includes(`看输出：coflux terminal read ${created.task.id}`),
       `Rust 版 terminal new 的短语必须与 node 版逐字一致: ${JSON.stringify(newText)}`,
     );
 

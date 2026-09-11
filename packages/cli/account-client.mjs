@@ -23,7 +23,7 @@ function broker(home, body, timeout) {
     let text = "";
     socket.setEncoding("utf8");
     socket.setTimeout(timeout, () => socket.destroy(new Error("账号请求超时，请查询操作结果")));
-    socket.on("error", (error) => reject(error.code === "ENOENT" || error.code === "ECONNREFUSED" ? new Error("请先登录 Coflux 应用或运行 cofluxd login") : error));
+    socket.on("error", (error) => reject(error.code === "ENOENT" || error.code === "ECONNREFUSED" ? new Error("请先登录 Coflux 应用或运行 coflux login") : error));
     socket.on("connect", () => socket.write(JSON.stringify(body) + "\n"));
     socket.on("data", (chunk) => { text += chunk; if (Buffer.byteLength(text) > 8 * 1024 * 1024) socket.destroy(new Error("响应过大")); });
     socket.on("end", () => { try { resolve(unwrap(JSON.parse(text))); } catch (error) { reject(error); } });

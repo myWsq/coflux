@@ -1579,7 +1579,7 @@ impl DeviceRuntime {
         data: Vec<u8>,
     ) -> Result<(), String> {
         if self.human_holder_present(session_id) {
-            return Err("用户正在接管这个终端：把交互留给用户；要沟通用 cofluxd notify".into());
+            return Err("用户正在接管这个终端：把交互留给用户；要沟通用 coflux notify".into());
         }
         let attempt = self.begin_agent_io(session_id)?;
         let (tx, mut rx) = mpsc::channel::<device_envelope::Payload>(8);

@@ -55,9 +55,9 @@ function reasonFor(verb, projectId) {
   const head = `This session runs inside a coflux project (COFLUX_PROJECT_ID=${projectId}) and coflux keeps a workspace record for every worktree it knows about: a worktree you \`git worktree ${verb}\` yourself leaves that record behind as an orphan in the user's sidebar, pointing at a directory that no longer exists. `;
   const how =
     verb === "remove"
-      ? `Use cofluxd workspace remove <workspaceId> instead (find the id with cofluxd workspace list); it closes that workspace's terminals first, then removes the worktree and its record. Claude Code's own worktrees need nothing from you: when it cleans one up on exit, coflux moves that workspace's terminals back to the project's main workspace and drops the record by itself. `
-      : `coflux does not support moving worktrees: cofluxd workspace remove <workspaceId>, then create a fresh worktree at the new location. `;
-  return `${head}${how}Creating a worktree is not blocked: coflux follows you into it (EnterWorktree included) and registers it as a child workspace of this project. To only inspect existing worktrees use git worktree list or cofluxd workspace list.`;
+      ? `Use coflux workspace remove <workspaceId> instead (find the id with coflux workspace list); it closes that workspace's terminals first, then removes the worktree and its record. Claude Code's own worktrees need nothing from you: when it cleans one up on exit, coflux moves that workspace's terminals back to the project's main workspace and drops the record by itself. `
+      : `coflux does not support moving worktrees: coflux workspace remove <workspaceId>, then create a fresh worktree at the new location. `;
+  return `${head}${how}Creating a worktree is not blocked: coflux follows you into it (EnterWorktree included) and registers it as a child workspace of this project. To only inspect existing worktrees use git worktree list or coflux workspace list.`;
 }
 
 async function main() {

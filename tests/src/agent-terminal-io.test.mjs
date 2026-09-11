@@ -5,7 +5,7 @@
  * - `terminal wait` 阻塞到目标终端退出并打印退出码；超时明确报错（非零退出），不误报成功；
  * - `terminal send` 在无人接管时经 sessiond 正门写入 PTY（命令真收到输入），
  *   **用户正在 attach 时被拒**且错误可读——人类优先是本片的硬边界；
- * - `cofluxd progress` 的短评经中心广播到 client，**跨 hook 事件存活**（与 notify 的
+ * - `coflux progress` 的短评经中心广播到 client，**跨 hook 事件存活**（与 notify 的
  *   「hook 事件即清空」刻意不同），被下一条覆盖；
  * - plan 094（local-first）：wait/read/send 按 taskId 直接问 daemon 本地账本——目标已退出时 wait 立即
  *   给退出码，目标被 `terminal list` 的 50 条窗口挤出去也照样命中；命令日志有界保尾，输出远超一段
@@ -23,7 +23,7 @@ import { startStack } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
 
 const PORT = 8861;
-const COFLUXD = fileURLToPath(new URL("../../packages/cli/cofluxd.mjs", import.meta.url));
+const COFLUXD = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
 let stack;
 const dirs = [];
 

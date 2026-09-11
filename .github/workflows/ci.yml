@@ -124,6 +124,11 @@ jobs:
         with:
           node-version: 22
       - run: corepack enable
+      - name: 统一产品版本与发布约束
+        run: |
+          node scripts/product-version.mjs --check
+          node --test scripts/product-version.test.mjs
+
       - run: pnpm install --frozen-lockfile
 
       - name: Git diff 格式检查

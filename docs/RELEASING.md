@@ -1,7 +1,9 @@
 # 发版流程
 
-daemon = 两个 Rust 二进制：`coflux-supervisor`（装为系统服务）+ `coflux-worker`（热升级对象）。
-发版 = 交叉编译 → 分域签名 supervisor/worker → 发 GitHub Release（含 `manifest.json`，server 据此下发 worker 升级，cofluxd 据此验安装包）。
+桌面、CLI 与运行内核共用一个产品版本。内核包含 `coflux-supervisor`（持有终端）和 `coflux-worker`（可热升级）。
+桌面直接托管内核；无界面设备由 `cofluxd` 管理系统服务，业务操作统一使用 `coflux`。
+发版 = 同一 tag 构建内核与桌面 → 签名、公证 → 发布完整 GitHub Release → 推进桌面更新源 → 发布同版本 npm 包。
+Release 包含 `manifest.json`，server 据此下发 Worker 升级，cofluxd 据此验证安装包。
 
 ## 一次性设置（签名密钥）
 
@@ -76,8 +78,7 @@ environment 和 npm Trusted Publisher 共同承担。上线前逐项完成：
   bypass；另一套限制 **update/delete**，发布维护者不在 bypass，只有最小 break-glass 管理员集
   可绕过并需定期审计。bypass 对整套 ruleset 生效，不能用同一套规则同时表达这两种权限。
 - [x] 创建 protected environments `release-signing` 与 `npm-publish`，配置最小 deployment branch/tag
-  规则：`release-signing` 只放行 `v*`；`npm-publish` 需考虑下游 `workflow_run` 的 ref 是 `main`，手动补发
-  也只允许 `main`。**不配 required reviewers**（2026-09-05 决定：单人维护，人工审批只是每次发版多点一下网页，
+  规则：`release-signing` 只放行 `v*`；`npm-publish` 需考虑下游 `workflow_run` 的 ref 是 `main`，仅允许这一来源。**不配 required reviewers**（2026-09-05 决定：单人维护，人工审批只是每次发版多点一下网页，
   签出产物的前提仍是「有权创建 `v*` tag 的人推了 tag」，由下面的 tag ruleset 把守）。
 - [ ] 把 `WORKER_SIGNING_KEY`、`MACOS_CERT_P12`、`MACOS_CERT_PASSWORD`、`APPLE_TEAM_ID`、
   `NOTARY_API_KEY_P8`、`NOTARY_KEY_ID`、`NOTARY_ISSUER_ID` 从 repository secrets 迁到
@@ -101,9 +102,9 @@ environment 和 npm Trusted Publisher 共同承担。上线前逐项完成：
 1. 本地必须在 `main` 且 `HEAD == origin/main`；release metadata 会 fresh-fetch 再做同样的硬门。
    这只防在旧/分叉 commit 上误打新 tag，不替代上面的 `v*` ruleset。
 2. **main 的 CI 必须是绿的**（ci.yml 是质量门，黑盒测试依赖其内置的 Postgres service）。
-3. `packages/cli` 若有改动，**提前 bump `package.json` 版本**——打 tag 时 `npm-publish.yml`
-   会自动把它发到 npm（Trusted Publishing/OIDC，无 token；版本已存在则幂等跳过）。
-   CLI 单独出修复时可在 Actions 页手动 dispatch 该 workflow。
+3. 用 `pnpm release:version X.Y.Z` 同步根、桌面与 CLI 三份版本，提交并合入 main；
+   `pnpm release:check vX.Y.Z` 检查一致性。根 `package.json.version` 是唯一产品版本来源。
+   npm 仍由完整 release 成功后自动发布；取消独立手动发包入口，失败后重跑同一 npm workflow，不能单独提升 CLI 版本。
 4. 确认没有正在运行或 pending 的 `release` / `npm-publish`；每次只推一个 tag，
    等 GitHub Release 和下游 npm workflow 都结束后再发下一个。
 
@@ -111,6 +112,7 @@ environment 和 npm Trusted Publisher 共同承担。上线前逐项完成：
 git fetch --prune origin
 test "$(git branch --show-current)" = main
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+pnpm release:check v1.2.3
 git tag v1.2.3
 git push origin refs/tags/v1.2.3
 ```
@@ -132,11 +134,13 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
    （人工 ssh 部署、不走自动下载验签），只进 `SHA256SUMS` 供部署校验。
 3. **生成 release note**（`scripts/release-notes.mjs`）：取上一个 `v*` tag 到本 tag 的 commit，按
    type 分组（新功能 / 修复 / 重构与内部改动 / 其他），剥掉冗余的 type 前缀、scope 加粗，剔除
-   `chore(0xx)`/`plan(0xx)` 这类计划文档流转，末尾附 daemon 与 cofluxd CLI 的升级须知（CLI 版本
+   `chore(0xx)`/`plan(0xx)` 这类计划文档流转，末尾附桌面、运行内核与 coflux/cofluxd 的升级须知（CLI 版本
    没变就不印那句指令）。**不用 GitHub 的 `generate_release_notes`**——它只汇总 PR，而本仓库直接
    push main，产出永远是光秃秃一行 compare 链接。这也意味着 **commit message 就是 changelog**：
    写清楚 scope 和一句人话结论，发版时零加工直接见人。生成器自带 `--self-check`，挂在 ci.yml。
-4. **发布 Release**，资产含：
+4. **构建桌面**：调用 `desktop-release.yml` 完成同 SHA 的签名、公证与产物检查。
+5. **发布统一 Release**：内核和桌面全部成功后才发布，资产含：
+   - 桌面 dmg/zip/blockmap 与 `latest-mac.yml`
    - `coflux-worker-<target>`（原始二进制，下载+验签对象）+ `.sig`（legacy raw）+
      `.release.sig`（release statement）
    - `coflux-supervisor-<target>` + `.release.sig`（cofluxd 安装前验签）
@@ -158,26 +162,24 @@ GitHub concurrency 在此只有 one-running/one-pending；第三个 burst run �
 
 ## 桌面客户端（Electron）发版
 
-`apps/desktop` 是 Electron 主进程 + React/xterm 渲染层（`src/renderer`，plan 103 / 106）。发版与 daemon **完全独立**：tag 形如
-`desktop-v0.1.0`，触发 `.github/workflows/desktop-release.yml`（macOS runner，arm64 首发）：
-校验 tag → 构建 main/preload/renderer → electron-builder
-翻 Fuses、Developer ID 签名（hardened runtime + entitlements）、公证 + staple → `codesign`/`stapler`/`spctl`
-校验 → GitHub Release 放 dmg/zip/blockmap → 把 `latest-mac.yml` 改成该 Release 的绝对下载地址后推到仓库
-`desktop-updates` 分支（app 的更新源）。
+`vX.Y.Z` 是唯一发布 tag，桌面、CLI 与运行内核使用同一版本、同一提交。
+`desktop-release.yml` 只接受 `workflow_call`，负责构建、Developer ID 签名、公证、staple 与
+`codesign`/`stapler`/`spctl` 验证，上传 artifact 后交给父 `release.yml` 汇总发布。
+完整 GitHub Release 发布成功后再推进 `desktop-updates`；npm 随后由 Trusted Publishing 发布。
+这些外部系统不是原子事务：任一步失败须重试对应步骤，不能把 GitHub Release 成功当作 npm 已发布。
+预发布不更新稳定桌面 feed，也不发布到 npm latest。feed 拒绝版本倒退及同版本内容漂移。
 
 ### 内置 daemon（plan 113）：桌面发版从此隐含 Rust 构建
 
-app 自带 `coflux-supervisor` / `coflux-worker` / Rust 版 `cofluxd` 三件（`Contents/Resources/daemon/`），登录后自动准备本机，
-不再要求用户装 Node 与 npm 版 cofluxd。workflow 多一个与「构建 + 签名 + 公证」**并行**的 `daemon` job：同一 SHA 上
+app 自带 `coflux-supervisor` / `coflux-worker` / Rust 版 `coflux` 三件（`Contents/Resources/daemon/`），登录后自动准备本机，
+不再要求用户装 Node 与 npm 版 cofluxd。可复用 workflow 先执行 `daemon` job，再打包签名：同一 SHA 上
 `cargo build --release --target aarch64-apple-darwin -p coflux-supervisor -p coflux-worker -p coflux-cli`（`RUSTFLAGS=-D warnings`，
 不挂 `release-signing`、不需要 secret），产物经 artifact 交给打包 job，由 `scripts/stage-daemon.mjs` 落到 `build/daemon/`
 （artifact 不保留执行位，脚本补 0755），electron-builder 用 `mac.binaries` 给三件签 Developer ID + hardened runtime 并纳入公证；
 校验步骤对三件断言存在、`codesign --verify --strict`、`Authority=Developer ID Application`。
 
-- **版本戳**：`COFLUX_RELEASE_VERSION=v0.0.0-desktop.<桌面版本>`（如 `v0.0.0-desktop.0.1.7`），同值写进与三件同目录的 `VERSION`
-  sidecar。它是 supervisor `ReleaseVersion::parse` 接受的 prerelease SemVer，且**低于一切正式 `v*`**：中心 auto-update 见
-  `workerVersion ≠ latest` 会立刻把 worker 热推成正式版（内置 worker 只是引导版）；supervisor 永远是内置版；npm 装过正式
-  supervisor 的机器不会被提示换成内置版。不能留默认 `dev`（app 对解析不了的内置版本永不提示升级）。
+- **版本戳**：`COFLUX_RELEASE_VERSION=vX.Y.Z`，与产品 tag 完全相同；同值写进 `VERSION` sidecar。
+  桌面内置 Worker 不再使用低版本引导号。统一版本不要求正在持有终端的 Supervisor 立即重启。
 - **升级**：主应用直接启动经过原签名的运行组件，复制后不再 ad-hoc 重签。组件保存在内容寻址的稳定目录；
   普通 app 更新仅重新连接存活实例，独立替换 CLI。内核更新由用户在任务结束后确认重启，不再经 launchctl。
 - **验收**：正式签名 App 必须验证 FDA 列表仅需 Coflux、活 shell PID/内存变量跨更新保持不变、更新后仍能访问受保护目录。
@@ -192,14 +194,12 @@ app 自带 `coflux-supervisor` / `coflux-worker` / Rust 版 `cofluxd` 三件（`
    `MACOS_CERT_PASSWORD` / `APPLE_TEAM_ID` / `NOTARY_API_KEY_P8` / `NOTARY_KEY_ID` / `NOTARY_ISSUER_ID`）。
    workflow 只按位置引用：electron-builder 从 `CSC_LINK`/`CSC_KEY_PASSWORD` 读证书，从
    `APPLE_API_KEY`（写成临时 .p8 文件的路径）/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER`/`APPLE_TEAM_ID` 读公证凭据。
-2. `release-signing` environment 的 deployment tag 规则要**额外放行 `desktop-v*`**（现在只放 `v*`）；
-   `desktop-v*` 也按上面 `v*` 的方式建 create 与 update/delete 两套 tag ruleset。
+2. `release-signing` environment 与 tag ruleset 仅放行统一的 `v*`。
 3. **更新源 = GitHub**（2026-09-11 收尾时定，替代最初的 R2 方案，零新增 secret）：安装包与 blockmap 在
    GitHub Release；`latest-mac.yml` 由 release job 改写成该 Release 的绝对下载地址后推到仓库
    `desktop-updates` 分支，app 内 electron-updater 用 generic provider 读
    `https://raw.githubusercontent.com/myWsq/coflux/desktop-updates/latest-mac.yml`（URL 写死在
-   `apps/desktop/electron-builder.yml`）。不用 electron-updater 自带的 `github` provider：它看仓库
-   `releases/latest`，而本仓库 daemon 的 `v*` 与桌面的 `desktop-v*` 混在一起，多半指向 daemon 的 release。
+   `apps/desktop/electron-builder.yml`）。继续使用固定 generic feed；统一 Release 包含桌面与内核全部产物。
    release job 用 `GITHUB_TOKEN` 建 Release 与推分支；`desktop-updates` 分支只有这一个文件，不要手改。
    raw.githubusercontent.com 有几分钟缓存，新版本发出后 app 最多晚几分钟看到。
 
@@ -219,21 +219,12 @@ lockstep 方案在首发当天就证明不可用。
   它放行的改动不需要动版本号。
 - 「需要更新」页**只**在协议过旧时出现，不是断线；app 不重连、不 reload，停在该页直到装上新版本。
 
-### 发一个桌面版本
+### 安装桌面更新
 
-1. bump `apps/desktop/package.json` 的 `version`（必须与 tag 一致，否则 metadata job 失败），提交到 main。
-2. 与 daemon 发版同样的前置：本地在 `main`、`HEAD == origin/main`、CI 绿。
-3. 打 tag、只推这一个 tag：
-
-```sh
-git tag desktop-v0.1.0
-git push origin refs/tags/desktop-v0.1.0
-```
-
-4. 不需要与 prod 部署对齐（plan 105）；只有破坏性协议改动那次要先发桌面版再部署 prod。
-
-app 内更新行为：启动 15s 后与每 4 小时检查一次；版本准入被拒时立即检查；发现即下载；下载完成后
-「重启并更新」，不点也会在退出时自动安装。菜单「检查更新…」可手动触发。
+桌面没有单独发版入口，使用上面的统一版本流程。无需与 prod 部署对齐；破坏性协议变更须先发布客户端。
+app 启动 15s 后与每 4 小时检查，协议准入失败时立即检查；发现更新后下载。
+用户显式点击「重启并更新」才安装并重连存活内核；普通退出不自动安装，而是按退出确认结束本机终端。
+菜单「检查更新…」可手动触发。运行内核自身重启可能结束终端，需另行确认并可延后。
 
 本机冒烟：`pnpm -C apps/desktop pack` 出未签名的 `apps/desktop/dist/mac-arm64/Coflux.app`（Fuses 已翻、
 ad-hoc 签名）。通知/角标只在签名产物上可信（Electron 42+ 在 macOS 用 UNUserNotification），未签名包上的
@@ -290,7 +281,7 @@ timedatectl   # 确认 System clock synchronized: yes
 
 ## cofluxd 首次安装 / 升级 supervisor 自身
 
-supervisor 不走热升级（它持有 PTY）。用 `cofluxd update` 重下 supervisor 与随包 worker 并重启服务——
+supervisor 不走热升级（它持有 PTY）。用 `cofluxd update` 下载 supervisor 与随包 worker，再在任务结束后用 `cofluxd restart` 重启服务——
 很罕见。cofluxd npm 包内置与 supervisor 相同的 ed25519 公钥；远端安装必须先取得精确 SemVer tag 的
 schema 2 manifest，严格匹配 version/target/size/sha256，并分别验证 worker/supervisor 的 release
 statement（worker 还验证 legacy raw 签名）。两个文件都通过后才从同一暂存代替换；macOS 的本地

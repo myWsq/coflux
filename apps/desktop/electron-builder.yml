@@ -55,7 +55,7 @@ mac:
   binaries:
     - Contents/Resources/daemon/coflux-supervisor
     - Contents/Resources/daemon/coflux-worker
-    - Contents/Resources/daemon/cofluxd
+    - Contents/Resources/daemon/coflux
   # arm64 首发；universal 只作为开关保留：需要时把 arch 改成 [universal]（见 Maintenance notes）
   target:
     - target: dmg

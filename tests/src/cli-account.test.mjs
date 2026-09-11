@@ -12,7 +12,7 @@ const PORT = 8875;
 const ROOT = resolve(import.meta.dirname, "../..");
 function cli(kind, home, args, input = "") {
   return new Promise((resolve, reject) => {
-    const child = spawn(kind === "rust" ? CLI_BIN : process.execPath, kind === "rust" ? args : [join(ROOT, "packages/cli/cofluxd.mjs"), ...args], {
+    const child = spawn(kind === "rust" ? CLI_BIN : process.execPath, kind === "rust" ? args : [join(ROOT, "packages/cli/coflux.mjs"), ...args], {
       env: { ...process.env, COFLUX_HOME: home, COFLUX_TASK_ID: "" }, stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "", stderr = "";
@@ -86,4 +86,27 @@ test("两种 CLI 共用账号能力：跨设备/工作区操作、短命令保�
     rmSync(remoteHome, { recursive: true, force: true });
     rmSync(clientHome, { recursive: true, force: true });
   }
+});
+
+// 入口拒绝越权职责时必须在触碰服务、凭据或网络之前失败。
+test("coflux/cofluxd 职责分离：错误入口不执行旧命令，也不修改本机状态", async () => {
+  const home = mkdtempSync(join(tmpdir(), "coflux-cli-boundary-"));
+  try {
+    const { spawnSync } = await import("node:child_process");
+    const { readdirSync } = await import("node:fs");
+    const env = { ...process.env, COFLUX_HOME: home };
+    for (const command of ["login", "terminal", "workspace", "hook"]) {
+      const result = spawnSync(process.execPath, [join(ROOT, "packages/cli/cofluxd.mjs"), command], { env, encoding: "utf8", timeout: 5000 });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /登录与终端操作请使用 coflux/);
+    }
+    for (const command of ["up", "down", "update", "restart", "uninstall"]) {
+      for (const kind of ["rust", "node"]) {
+        const result = await cli(kind, home, [command]);
+        assert.equal(result.code, 1, result.stderr);
+        assert.match(result.stderr, /Coflux\.app 或 cofluxd/);
+      }
+    }
+    assert.deepEqual(readdirSync(home), [], "错误入口不应落凭据或启动宿主");
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });

@@ -45,7 +45,7 @@ export type DesktopDaemonState = {
   fda: DesktopDaemonFda;
   /** 本机设备在目录里的身份（credentials.json 的 daemonId），渲染层据此数本机运行中终端 */
   daemonId?: string;
-  /** ~/.coflux/bin：给想在自己终端里直接用 cofluxd 的人看的路径提示（不改用户 shell 配置） */
+  /** ~/.coflux/bin：给想在自己终端里直接用 coflux 的人看的路径提示（不改用户 shell 配置） */
   binDir: string;
   busy?: DesktopDaemonBusy;
   /** 上一次动作失败的步骤与原因；渲染层显示后可 daemonDismissError 清掉 */

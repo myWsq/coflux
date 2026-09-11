@@ -130,7 +130,7 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
     mkdirSync(paths.binDir, { recursive: true });
     const temporary = `${paths.cliBin}.staged-${process.pid}`;
     try {
-      copyFileSync(join(bundle.dir, "cofluxd"), temporary);
+      copyFileSync(join(bundle.dir, "coflux"), temporary);
       chmodSync(temporary, 0o755);
       renameSync(temporary, paths.cliBin);
     } finally { rmSync(temporary, { force: true }); }

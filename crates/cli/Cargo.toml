@@ -4,10 +4,9 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
-# 二进制名必须是 cofluxd：Claude 插件的 hooks.json / SKILL.md 全部写死这个名字（plan 112）。
-# 与 npm 版 packages/cli/cofluxd.mjs 并存——coflux 终端里靠 supervisor 前置的 $COFLUX_HOME/bin 命中本二进制。
+# 与 npm coflux 提供相同操作契约；桌面内置此零 Node 依赖版本。
 [[bin]]
-name = "cofluxd"
+name = "coflux"
 path = "src/main.rs"
 
 [dependencies]

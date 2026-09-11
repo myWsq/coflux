@@ -92,7 +92,7 @@ fn save(value: &Value) -> Result<(), String> {
 }
 fn broker(command: &Value, timeout: u64) -> Result<Value, String> {
     let mut stream = UnixStream::connect(home().join("client.sock"))
-        .map_err(|_| "请先登录 Coflux 应用或运行 cofluxd login")?;
+        .map_err(|_| "请先登录 Coflux 应用或运行 coflux login")?;
     stream
         .set_read_timeout(Some(Duration::from_secs(timeout)))
         .map_err(|e| e.to_string())?;

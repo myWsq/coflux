@@ -21,9 +21,9 @@ export type SessionAgentState = {
   taskId: string;
   agent: string;
   state: string;
-  /** `cofluxd notify` 的留言（plan 074），空 = agent 没留话 */
+  /** `coflux notify` 的留言（plan 074），空 = agent 没留话 */
   message: string;
-  /** `cofluxd progress` 的进度短评（plan 088）：跨 hook 事件存活，覆盖式，空 = 没播报过 */
+  /** `coflux progress` 的进度短评（plan 088）：跨 hook 事件存活，覆盖式，空 = 没播报过 */
   progress: string;
 };
 

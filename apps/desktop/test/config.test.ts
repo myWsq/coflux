@@ -132,7 +132,7 @@ type Workflow = {
   >;
 };
 
-test("desktop-release.yml：并行 daemon job 同 SHA cargo build 三件、版本戳 v0.0.0-desktop.*、打包 job 落位并校验签名（plan 113）", () => {
+test("desktop-release.yml：并行 daemon job 同 SHA cargo build 三件、统一产品版本戳、打包 job 落位并校验签名（plan 113）", () => {
   const workflow = parse(readFileSync(resolve(repoRoot, ".github/workflows/desktop-release.yml"), "utf8")) as Workflow;
   const daemon = workflow.jobs.daemon;
   assert.ok(daemon, "缺少 daemon job");
@@ -143,8 +143,8 @@ test("desktop-release.yml：并行 daemon job 同 SHA cargo build 三件、版�
   assert.match(cargo.run, /--release --target aarch64-apple-darwin/);
   for (const pkg of ["coflux-supervisor", "coflux-worker", "coflux-cli"]) assert.match(cargo.run, new RegExp(`-p ${pkg}\\b`));
   assert.equal(cargo.env?.RUSTFLAGS, "-D warnings");
-  // 版本戳：可解析的 prerelease SemVer、低于一切正式 v*；不能留默认 dev
-  assert.equal(cargo.env?.COFLUX_RELEASE_VERSION, "v0.0.0-desktop.${{ needs.metadata.outputs.version }}");
+  // 桌面编译期版本与统一产品 tag 一致。
+  assert.equal(cargo.env?.COFLUX_RELEASE_VERSION, "v${{ needs.metadata.outputs.version }}");
   const stage = daemon.steps.find((step) => step.run?.includes("VERSION"));
   assert.ok(stage?.run, "缺少写 VERSION 的整理步骤");
   assert.equal(stage.env?.COFLUX_RELEASE_VERSION, cargo.env?.COFLUX_RELEASE_VERSION, "VERSION 与编译期版本戳必须同值");
@@ -167,16 +167,17 @@ test("desktop-release.yml：并行 daemon job 同 SHA cargo build 三件、版�
   for (const name of DAEMON_BINARIES) assert.match(verify.run, new RegExp(name));
   assert.match(verify.run, /codesign --verify --strict[^\n]*\$daemon\/\$name/);
   assert.match(verify.run, /Authority=Developer ID Application/);
-  assert.match(verify.run, new RegExp(`v0\\.0\\.0-desktop\\.[^\\n]*\\$daemon/${DAEMON_VERSION_FILE}`));
+  assert.ok(verify.run.includes("v${{ needs.metadata.outputs.version }}"));
 });
 
-test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 secret 明确失败、先产物后清单", () => {
+test("统一发布：桌面仅受调用、release-signing 环境、缺 secret 明确失败、先产物后清单", () => {
   const workflow = parse(readFileSync(resolve(repoRoot, ".github/workflows/desktop-release.yml"), "utf8")) as Workflow;
-  assert.deepEqual(workflow.on.push.tags, ["desktop-v*"]);
-  // 桌面 release 绝不能成为仓库 latest（plan 113 发版时发现）：中心 daemon 自动更新只看 /releases/latest 的 manifest.json，
-  // desktop-v0.1.6 抢走 latest 后 worker 热推曾整体停摆。softprops v3 的 make_latest 显式 false。
-  const ghRelease = workflow.jobs.release.steps.find((step) => step.uses?.startsWith("softprops/action-gh-release@"));
-  assert.equal(String(ghRelease?.with?.make_latest), "false", "桌面 release 必须 make_latest: false");
+  assert.ok(Object.hasOwn(workflow.on, "workflow_call"));
+  assert.equal(workflow.on.push, undefined);
+  assert.equal(workflow.jobs.release, undefined);
+  const unified = parse(readFileSync(resolve(repoRoot, ".github/workflows/release.yml"), "utf8")) as Workflow;
+  assert.deepEqual(unified.on.push.tags, ["v*"]);
+  assert.deepEqual(unified.jobs.release.needs, ["metadata", "sign", "desktop"]);
   assert.equal(workflow.permissions.contents, "read");
 
   const build = workflow.jobs.build;
@@ -212,20 +213,18 @@ test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 sec
   assert.equal(pack.env?.APPLE_API_ISSUER, "${{ secrets.NOTARY_ISSUER_ID }}");
   assert.ok(!build.steps.some((step) => step.name?.includes("R2")), "R2 上传已撤，不该再有");
 
-  // release job：先把安装包 + blockmap 上 Release，再改写清单为绝对地址、推 desktop-updates 分支——
-  // 清单永远不会先于它指向的文件出现。
-  const release = workflow.jobs.release;
+  // 所有产物先统一发布，稳定桌面清单随后推进。
+  const release = unified.jobs.release;
   assert.equal(release.permissions?.contents, "write");
-  const publishIndex = release.steps.findIndex((step) => step.uses?.startsWith("softprops/action-gh-release@"));
-  assert.ok(publishIndex >= 0, "缺少 GitHub Release 步骤");
-  assert.match(release.steps[publishIndex].with?.files ?? "", /blockmap/); // 差分更新要 blockmap 也在 Release 上
-  const rewriteIndex = release.steps.findIndex((step) => step.run?.includes("releases/download"));
-  // release 说明那步也提到 desktop-updates，按「git push + 分支名」定位真正的推送步
-  const pushIndex = release.steps.findIndex((step) => step.run?.includes("git push") && step.run.includes("desktop-updates"));
-  assert.ok(rewriteIndex > publishIndex, "清单改写必须在 Release 上传之后");
-  assert.ok(pushIndex > rewriteIndex, "推分支必须在清单改写之后");
-  assert.match(release.steps[pushIndex].run ?? "", /latest-mac\.yml/);
-  assert.match(release.steps[pushIndex].env?.GH_TOKEN ?? "", /github\.token/);
+  const publish = release.steps.find(step => step.uses?.startsWith("softprops/action-gh-release@"));
+  assert.match(publish?.with?.files ?? "", /signed-release\/artifacts/);
+  assert.match(publish?.with?.files ?? "", /desktop-assets\/\*\.blockmap/);
+  const feed = unified.jobs["desktop-updates"];
+  assert.deepEqual(feed.needs, ["metadata", "release"]);
+  const push = feed.steps.find(step => step.run?.includes("git push"));
+  assert.match(push?.run ?? "", /desktop-update-feed\.mjs/);
+  assert.match(push?.env?.GH_TOKEN ?? "", /github\.token/);
+
 });
 
 test("ci.yml 带 desktop 质量门", () => {

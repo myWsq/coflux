@@ -2,7 +2,7 @@
 //!
 //! 只打回环明文 HTTP，故不引 TLS/异步栈——`std::net::TcpStream` 手写最小 HTTP/1.1
 //! （worker 侧 `crates/worker/src/hook.rs` 也是手写的极小 HTTP 服务端）。请求体、端点、
-//! 超时与错误文案以 node 版 `packages/cli/cofluxd.mjs` 的 `agentPost` / `localGatewayPort` /
+//! 超时与错误文案以 node 版 `packages/cli/coflux.mjs` 的 `agentPost` / `localGatewayPort` /
 //! `agentTimeoutMs` 为参照。
 //!
 //! 注意：请求必须由本进程直接发出、收到响应才退出——worker 用请求体里的 pid 反查进程树认会话，
