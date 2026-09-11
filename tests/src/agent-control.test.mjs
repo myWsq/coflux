@@ -24,11 +24,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
-import { mkRepo, startStack } from "./harness.mjs";
+import { mkRepo, startStack, CLI_BIN } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
 
 const PORT = 8857;
 const COFLUXD = fileURLToPath(new URL("../../packages/cli/cofluxd.mjs", import.meta.url));
+/** 两种 cofluxd 的启动方式：node 版（既有用例的默认）与 Rust 版二进制（plan 112，crates/cli）。 */
+const NODE_LAUNCHER = `node ${COFLUXD}`;
+const RUST_LAUNCHER = CLI_BIN;
 // 上限压到 2：验证「超限被拒」不必真开 8 个终端
 const MAX_TERMINALS = 2;
 let stack;
@@ -60,9 +63,10 @@ async function removeWorkspace(c, workspaceId) {
   await c.waitFor((m) => m.case === "workspaceRemoved" && m.workspaceId === workspaceId, "cleanup ws removed");
 }
 
-/** 在会话里跑一条 cofluxd 命令，输出重定向到文件——比解析 PTY 分块输出可靠得多。 */
-function cliCmd(gatewayPort, args, outFile) {
-  return `COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} node ${COFLUXD} ${args} > ${outFile} 2>&1\r`;
+/** 在会话里跑一条 cofluxd 命令，输出重定向到文件——比解析 PTY 分块输出可靠得多。
+ * launcher 缺省 = node 版；Rust 版用例传 RUST_LAUNCHER，其余一字不变。 */
+function cliCmd(gatewayPort, args, outFile, launcher = NODE_LAUNCHER) {
+  return `COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} ${launcher} ${args} > ${outFile} 2>&1\r`;
 }
 
 /** 轮询等待文件出现且满足条件，返回内容。 */
@@ -82,10 +86,24 @@ async function waitForFile(path, predicate, label, timeout = 20000) {
 let cliSeq = 0;
 
 /** 在会话里跑一条 cofluxd 命令并等它的输出满足条件；每次换新文件，可安全重复调用。 */
-async function runCli(device, sessionId, gatewayPort, home, args, predicate, label, timeout = 20000) {
+async function runCli(device, sessionId, gatewayPort, home, args, predicate, label, timeout = 20000, launcher = NODE_LAUNCHER) {
   const out = join(home, `cli-${cliSeq += 1}.txt`);
-  await device.input(sessionId, cliCmd(gatewayPort, args, out));
+  await device.input(sessionId, cliCmd(gatewayPort, args, out, launcher));
   return await waitForFile(out, predicate, label, timeout);
+}
+
+/** Rust 版专用：跑一条命令并把退出码追加成最后一行 `exit=<code>`——非零退出路径（管理类拒绝 / 未知命令 /
+ * hook 静默 0）要连退出码一起核对。文件写完的判据就是出现了 `exit=`。 */
+async function runRustWithExit(device, sessionId, gatewayPort, home, args, label, stdin) {
+  const out = join(home, `cli-rust-${cliSeq += 1}.txt`);
+  const pipe = stdin ? `printf '%s' '${stdin}' | ` : "";
+  await device.input(
+    sessionId,
+    `${pipe}COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} ${RUST_LAUNCHER} ${args} > ${out} 2>&1; echo "exit=$?" >> ${out}\r`,
+  );
+  const text = await waitForFile(out, (s) => /^exit=\d+\s*$/m.test(s), label);
+  const exit = Number(/^exit=(\d+)\s*$/m.exec(text)[1]);
+  return { text: text.replace(/^exit=\d+\s*$/m, "").trimEnd(), exit };
 }
 
 /** 轮询 `terminal read` 直到画面满足条件：会话终端只有快照，shell 起来、命令跑完都要等一会儿
@@ -523,5 +541,95 @@ test("跟随 cwd：在 B 的目录里开的终端属 B、跑在 B；list 只见 
       device.close();
       repoB.cleanup();
     }
+  }
+});
+
+test("plan 112：Rust 版 cofluxd 对同一组子命令给出与 node 版相同的 stdout 短语与退出码；管理类子命令被明确拒绝（exit 2）、未知命令沿用用法提示（exit 1）、hook 永远静默 0", async () => {
+  const home = mkDir();
+  const device = await openRelayDevice(stack);
+  const c = device.control;
+  const { ws, task } = await startDirTerminal(c, home);
+  const gatewayPort = device.gateway.port;
+  await device.attach(task.sessionId);
+  const rust = (args, predicate, label, timeout) => runCli(device, task.sessionId, gatewayPort, home, args, predicate, label, timeout, RUST_LAUNCHER);
+
+  try {
+    // terminal new（作业终端）：短语逐字对齐 node 版；退出码经中心透传
+    const newText = await rust(`terminal new --title "rust 作业" --cmd "echo HELLO-FROM-RUST; exit 3"`, (s) => s.includes("已开终端") || s.includes("✗"), "Rust terminal new");
+    const created = await c.waitFor((m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "rust 作业", "Rust 版建的任务出现在侧栏", 20000);
+    assert.equal(
+      newText.trim(),
+      `已开终端 ${created.task.id}（用户可在 coflux 侧栏看到并随时接管）\n看输出：cofluxd terminal read ${created.task.id}`,
+      "terminal new 的两行输出与 node 版逐字一致",
+    );
+
+    // terminal wait：轮询到退出并打印退出码
+    const waitText = await rust(`terminal wait ${created.task.id} --timeout 30`, (s) => s.includes("exited") || s.includes("✗"), "Rust terminal wait", 40000);
+    assert.equal(waitText.trim(), "# exited exit=3");
+
+    // terminal read：状态行 + 纯文本
+    const readText = await rust(`terminal read ${created.task.id}`, (s) => s.includes("HELLO-FROM-RUST"), "Rust terminal read");
+    assert.ok(readText.startsWith("# exited exit=3\n"), `read 首行: ${JSON.stringify(readText)}`);
+
+    // terminal list：`<taskId>  <status> exit=<code>  <title>`
+    const listText = await rust("terminal list", (s) => s.includes(created.task.id), "Rust terminal list");
+    assert.ok(listText.split("\n").includes(`${created.task.id}  exited exit=3  rust 作业`), `list 形状不符: ${listText}`);
+
+    // 会话终端 + send：不带 --cmd 的提示三行；send 的回执短语；送 exit 真的退出
+    const shellText = await rust(`terminal new --title "rust shell"`, (s) => s.includes("已开终端") || s.includes("✗"), "Rust 会话终端");
+    const shell = await c.waitFor((m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "rust shell" && m.task.status === TaskStatus.RUNNING, "会话终端跑起来", 20000);
+    assert.ok(shellText.includes("会话终端：常驻的登录 shell（全 tty），不会自己退出"), `会话终端提示: ${shellText}`);
+    assert.ok(shellText.includes(`再输命令：cofluxd terminal send ${shell.task.id} --text "<命令>" --enter（送 exit 才结束）`), `send 提示: ${shellText}`);
+    // 先等提示符（快照非空）再 send——与既有会话终端用例同一纪律；这里等待本身用 node 版，不是被测对象
+    await readScreenUntil(device, task.sessionId, gatewayPort, home, shell.task.id, (s) => s.includes("# running") && !s.includes("（暂无输出）"), "等 Rust 会话终端的提示符");
+    const sendText = await rust(`terminal send ${shell.task.id} --text "exit" --enter`, (s) => s.includes("已写入") || s.includes("✗"), "Rust terminal send");
+    assert.equal(sendText.trim(), `已写入终端 ${shell.task.id}（用 cofluxd terminal read ${shell.task.id} 核对效果）`);
+    await c.waitFor((m) => m.case === "taskUpdated" && m.task.id === shell.task.id && m.task.status === TaskStatus.EXITED, "会话终端收到 exit 后退出", 30000);
+
+    // workspace：一行 JSON，字段与 node 版同名同序
+    const wsText = await rust("workspace", (s) => s.includes("workspaceId") || s.includes("✗"), "Rust workspace");
+    assert.deepEqual(JSON.parse(wsText.trim()), { workspaceId: ws.id, path: home, owningWorkspaceId: ws.id, moved: false });
+
+    // progress / notify：回执短语 + 真的经中心广播出去
+    const progressText = await rust(`progress "rust 进度"`, (s) => s.includes("已更新进度") || s.includes("✗"), "Rust progress");
+    assert.equal(progressText.trim(), "已更新进度（显示在工作区卡片上，被下一条覆盖）");
+    const notifyText = await rust(`notify "rust 叫人"`, (s) => s.includes("已通知") || s.includes("✗"), "Rust notify");
+    assert.equal(notifyText.trim(), "已通知用户（工作区在侧栏转为「等待交互」）");
+    await c.waitFor(
+      (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === task.sessionId && s.state === "question" && s.message === "rust 叫人"),
+      "notify → question + 留言",
+      20000,
+    );
+
+    // ports：空态短语或 `<port>  <url>` 行
+    const portsText = await rust("ports", (s) => s.trim().length > 0, "Rust ports");
+    assert.ok(portsText.trim() === "本工作区暂无监听端口" || /^\d+  /m.test(portsText), `ports 输出形状: ${portsText}`);
+
+    // hook：stdin 事件 JSON 转发到 /hook，永远退出 0、不写 stdout；到达即清掉 notify 的留言
+    const hook = await runRustWithExit(device, task.sessionId, gatewayPort, home, "hook claude", "Rust hook", '{"hook_event_name":"PreToolUse"}');
+    assert.deepEqual(hook, { text: "", exit: 0 }, "hook 必须静默且退出 0");
+    await c.waitFor(
+      (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === task.sessionId && s.state === "active" && s.message === ""),
+      "hook 事件清掉过期留言",
+      20000,
+    );
+    const hookNoDaemon = await runRustWithExit(device, task.sessionId, gatewayPort, home, "hook bogus-agent", "Rust hook 未知 agent");
+    assert.deepEqual(hookNoDaemon, { text: "", exit: 0 }, "未知 agent 也静默 0，不干扰宿主");
+
+    // 管理类子命令：明确拒绝并指向 Coflux.app（exit 2）；未知命令：用法提示（exit 1）
+    for (const managed of ["status", "up", "update"]) {
+      const refused = await runRustWithExit(device, task.sessionId, gatewayPort, home, managed, `Rust ${managed}`);
+      assert.equal(refused.exit, 2, `${managed} 应以 2 退出: ${refused.text}`);
+      assert.match(refused.text, /Coflux\.app/, `${managed} 的提示要指向 Coflux.app: ${refused.text}`);
+    }
+    const unknown = await runRustWithExit(device, task.sessionId, gatewayPort, home, "bogus", "Rust 未知命令");
+    assert.equal(unknown.exit, 1);
+    assert.match(unknown.text, /未知命令: bogus/);
+    const help = await runRustWithExit(device, task.sessionId, gatewayPort, home, "--help", "Rust --help");
+    assert.equal(help.exit, 0);
+    assert.match(help.text, /cofluxd terminal new/);
+  } finally {
+    await removeWorkspace(c, ws.id);
+    device.close();
   }
 });
