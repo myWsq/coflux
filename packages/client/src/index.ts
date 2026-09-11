@@ -13,6 +13,7 @@ export {
   type FsListResult,
   type ExecResult,
   type FsWriteResult,
+  type DeviceAuthorizeResult,
   type TaskReadResult,
   type TaskReadSource,
   type DeviceTransportOptions,

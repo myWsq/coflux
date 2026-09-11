@@ -97,7 +97,12 @@ export type ClientError = { id: number; message: string };
 export type FsListResult = { ok: boolean; entries: FsEntry[]; error: string; path?: string };
 export type ExecResult = { ok: boolean; exitCode: number; stdout: string; stderr: string; error: string };
 export type FsWriteResult = { ok: boolean; path?: string; error: string };
+/** 设备授权兑现结果（plan 112；与桌面版 plan 113 的契约）：失败文案来自服务端 `deviceAuthorizeInfo{ ok:false }`
+ * 或本地（未登录 / 连接未就绪 / 断连 / 超时）。 */
+export type DeviceAuthorizeResult = { ok: true } | { ok: false; error: string };
 const TASK_READ_TIMEOUT_MS = 15_000;
+/** deviceAuthorize 的等待上限：服务端要把 DaemonEnrolled 送达 daemon 并等它上线才回 deviceAuthorized。 */
+const DEVICE_AUTHORIZE_TIMEOUT_MS = 20_000;
 
 /** 已退出终端的最后输出来源（plan 097）：log = 命令终端的非 tty 纯文本日志尾部；snapshot / checkpoint = 规范化 ANSI
  * 屏幕（分别来自 daemon 当前画面与中心缓存）；none = 没有任何可回放内容。 */
@@ -282,6 +287,17 @@ export function createCofluxClient(options: CofluxClientOptions) {
   const pendingTaskReads = new Map<string, { promise: Promise<TaskReadResult>; resolve: (result: TaskReadResult) => void; timer: ReturnType<typeof setTimeout> }>();
   // 中心离线期间已在本机 stop、但还没能删除的 catalog task；重连认证后补投（见 removeTask）。
   const pendingTaskRemovals = new Set<string>();
+  // plan 112：在飞的 deviceAuthorize（回应不带 request id，一次只允许一个在飞）。
+  let pendingDeviceAuthorize: { resolve: (result: DeviceAuthorizeResult) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+
+  /** 收口在飞的设备授权：成功 / 服务端拒绝 / 本地失败（断连、登出、超时）都走这里，只结算一次。 */
+  function settleDeviceAuthorize(result: DeviceAuthorizeResult): void {
+    const pending = pendingDeviceAuthorize;
+    if (!pending) return;
+    pendingDeviceAuthorize = null;
+    clearTimeout(pending.timer);
+    pending.resolve(result);
+  }
   // 有本地会话 token 时首屏直接进入 authenticating，避免刷新先闪登录页。
   const store: StoreApi<CofluxState> = createStore<CofluxState>(() => ({
     status: token ? "connecting" : "disconnected",
@@ -507,6 +523,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
       store.setState({ status });
       if (status !== "connected") {
         controlAuthenticated = false;
+        // 回应不会再来了：在飞的设备授权立即失败而不是挂到超时（plan 112）
+        settleDeviceAuthorize({ ok: false, error: "与服务器的连接已断开，请重试" });
         // TCP/WS transport 断开不等于账号授权已撤销，也不等于 worker 那条独立控制 WS 已断。
         // Router 会立即禁用新 rendezvous/高权限能力，但给既有 remote session lane 一个有界宽限。
         deviceRouter.setControlDisconnected();
@@ -802,10 +820,33 @@ export function createCofluxClient(options: CofluxClientOptions) {
         store.setState({ lastError: { id: errorSequence, message: payload.value.message } });
         break;
       }
+      // plan 112：设备授权兑现的两种回音。deviceAuthorized = 成功；deviceAuthorizeInfo{ ok:false } = 拒绝（无效/已用/
+      // 已过期/限速，服务端不区分）。ok:true 的 info 只属于 deviceAuthorizeInfo 查询——本库不发它，到了也不结算。
+      case "deviceAuthorized": {
+        settleDeviceAuthorize({ ok: true });
+        break;
+      }
+      case "deviceAuthorizeInfo": {
+        if (!payload.value.ok) settleDeviceAuthorize({ ok: false, error: payload.value.error || "授权链接无效或已过期" });
+        break;
+      }
       default:
         break;
     }
     persistOfflineCatalog();
+  }
+
+  /** 用桌面的登录态兑现 daemon 打印的一次性授权 token（plan 112）：把该 token 对应的设备绑到当前账号。
+   * 可等待：成功 / 服务端拒绝（带原因）/ 未登录或连接未就绪（立即失败，不挂起）。一次只允许一个在飞。 */
+  function authorizeDevice(token: string): Promise<DeviceAuthorizeResult> {
+    if (!controlAuthenticated) return Promise.resolve({ ok: false, error: "尚未登录或与服务器的连接未就绪" });
+    if (!token.trim()) return Promise.resolve({ ok: false, error: "授权 token 为空" });
+    if (pendingDeviceAuthorize) return Promise.resolve({ ok: false, error: "上一次设备授权还在进行中" });
+    return new Promise<DeviceAuthorizeResult>((resolve) => {
+      const timer = setTimeout(() => settleDeviceAuthorize({ ok: false, error: "设备授权超时，请重试" }), DEVICE_AUTHORIZE_TIMEOUT_MS);
+      pendingDeviceAuthorize = { resolve, timer };
+      send({ case: "deviceAuthorize", value: { token } });
+    });
   }
 
   function connect(credential: AuthCredential) {
@@ -828,6 +869,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
   function logout() {
     shouldRetry = false;
     controlAuthenticated = false;
+    settleDeviceAuthorize({ ok: false, error: "已登出" });
     pendingTaskRemovals.clear();
     clearOfflineTimer();
     clearOfflineCatalog();
@@ -983,6 +1025,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
 
   function disconnect() {
     controlAuthenticated = false;
+    settleDeviceAuthorize({ ok: false, error: "客户端已断开" });
     clearOfflineTimer();
     deviceRouter.destroy();
     connection.stop();
@@ -1004,6 +1047,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     execInWorkspace,
     readTask,
     sendFsWrite,
+    authorizeDevice,
     reportLocalError,
     disconnect,
   };
