@@ -125,3 +125,5 @@ G6 不再用第一行是否包含“界”判断换行。新增 `grid(id)` 直�
 
 资源补丁写入时临时增加 owner write，并在 finally 恢复原 mode；重复运行不再写入，
 源码形状不符仍硬失败。编排者须从只读、未打补丁的 checkout 重跑 build，再运行第二次确认幂等。
+
+设计系统的空通知 region 使用始终打开的 `popover="manual"`；不能以“任意 popover 打开”判定遮挡。Ghostty 忽略空通知宿主，仅当可见弹层具有非零面积且与终端区域实际相交时隐藏，popover toggle 时重新计算。

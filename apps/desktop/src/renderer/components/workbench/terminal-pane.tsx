@@ -8,6 +8,7 @@ import type { FsWriteResult } from "@coflux/client";
 
 import { desktop } from "@/config";
 import { TerminalLatencyProbe } from "../../../shared/terminal-metrics";
+import { isGhosttyOccluded, type OcclusionRect } from "../../../shared/ghostty-occlusion";
 import { GhosttySender } from "../../../shared/ghostty-sender";
 import type { GhosttyEvent, GhosttyRect, GhosttyState, SurfaceKey } from "../../../shared/ghostty";
 
@@ -553,8 +554,17 @@ function GhosttyTerminalPane(props: TerminalPaneProps) {
       const box = region().getBoundingClientRect();
       return { x: box.left + 12, y: box.top + 8, width: Math.max(1, box.width - 12), height: Math.max(1, box.height - 20), dpr: window.devicePixelRatio };
     };
-    const hasDialog = () => [...document.querySelectorAll<HTMLElement>('dialog[open], [popover]:popover-open, [role="dialog"]:not(dialog), [role="alertdialog"]:not(dialog)')]
-      .some((element) => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden");
+    const hasDialog = (terminal: OcclusionRect) => isGhosttyOccluded(terminal,
+      [...document.querySelectorAll<HTMLElement>('dialog[open], [popover]:popover-open, [role="dialog"]:not(dialog), [role="alertdialog"]:not(dialog)')]
+        .map((element) => {
+          const style = getComputedStyle(element);
+          // 通知 region 常驻 top layer；空宿主即使有布局矩形，也没有要保护的内容。
+          const emptyHost = element.matches('[popover="manual"][role="region"]')
+            && element.children.length === 0 && !element.textContent?.trim();
+          return { rect: element.getBoundingClientRect(), emptyHost,
+            visible: element.getClientRects().length > 0 && style.visibility !== "hidden"
+              && style.visibility !== "collapse" && style.display !== "none" && Number(style.opacity) !== 0 };
+        }));
     const fail = (reason: string) => {
       if (disposed || recovering) return;
       recovering = true;
@@ -579,7 +589,7 @@ function GhosttyTerminalPane(props: TerminalPaneProps) {
     const syncState = () => {
       if (!initialized || disposed || recovering) return;
       const box = region().getBoundingClientRect();
-      const occluded = hasDialog() || document.hidden || box.width <= 0 || box.height <= 0;
+      const occluded = hasDialog(box) || document.hidden || box.width <= 0 || box.height <= 0;
       const next = { active: live.current.active, owned: live.current.controlState === "owned", occluded, focus: focusWanted && !occluded };
       const serialized = JSON.stringify(next);
       if (serialized === lastState) return;
@@ -687,6 +697,7 @@ function GhosttyTerminalPane(props: TerminalPaneProps) {
     window.visualViewport?.addEventListener("resize", schedule);
     window.visualViewport?.addEventListener("scroll", schedule);
     document.addEventListener("visibilitychange", schedule);
+    document.addEventListener("toggle", schedule, true);
     document.addEventListener("focusin", onFocus);
     window.addEventListener("coflux:ghostty-dump", onDump);
     window.addEventListener("coflux:ghostty-resume", onResume);
@@ -719,6 +730,7 @@ function GhosttyTerminalPane(props: TerminalPaneProps) {
       cancelAnimationFrame(frame); dprQuery?.removeEventListener("change", onDpr);
       window.removeEventListener("resize", schedule); window.removeEventListener("scroll", schedule, true);
       window.visualViewport?.removeEventListener("resize", schedule); window.visualViewport?.removeEventListener("scroll", schedule);
+      document.removeEventListener("toggle", schedule, true);
       document.removeEventListener("visibilitychange", schedule); document.removeEventListener("focusin", onFocus);
       window.removeEventListener("coflux:ghostty-dump", onDump);
       window.removeEventListener("coflux:ghostty-resume", onResume);
