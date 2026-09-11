@@ -18,7 +18,7 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -170,12 +170,24 @@ function cliCmdRust(gatewayPort, args, outFile) {
   return `COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} ${COFLUXD_RUST} ${args} > ${outFile} 2>&1\r`;
 }
 
-/** 会话 shell **启动时**拿到的环境（不是跑命令那一刻的 `$PATH`——rc 文件可能已经改过它）：Linux 读
- * /proc/$$/environ，macOS 用 `ps -Eww` 打印本进程的环境。两者给的都是 supervisor 注入的原始值。 */
-const DUMP_INITIAL_PATH = `{ tr '\\0' '\\n' < /proc/$$/environ 2>/dev/null || ps -Eww -o command= -p $$ | tr ' ' '\\n'; } | grep '^PATH='`;
+/** 会话 shell **启动时**拿到的环境（不是跑命令那一刻的 `$PATH`——rc 文件可能已经改过它）：daemon 的 COFLUX_SHELL
+ * 指向一个包装脚本，它先把 `env` 原样落到 `<COFLUX_HOME>/initial-env-<COFLUX_SESSION_ID>.txt`，再 exec 真实 shell
+ * 并原样转发参数——对本文件其它用例透明。（macOS 不让看别的进程的环境，/proc、ps -E 那套拿不到。） */
+function writeShellWrapper(dir) {
+  const realShell = process.env.SHELL || "/bin/zsh";
+  const script = join(dir, "coflux-test-shell");
+  writeFileSync(script, `#!/bin/sh\nenv > "$COFLUX_HOME/initial-env-$COFLUX_SESSION_ID.txt"\nexec ${realShell} "$@"\n`);
+  chmodSync(script, 0o755);
+  return script;
+}
+
+function initialEnvFile(sessionId) {
+  return join(stack.home, `initial-env-${sessionId}.txt`);
+}
 
 before(async () => {
-  stack = await startStack({ port: PORT, serverEnv: { COFLUX_PUBLIC_URL: BASE } });
+  const shellWrapper = writeShellWrapper(mkDir("coflux-env-shell-"));
+  stack = await startStack({ port: PORT, serverEnv: { COFLUX_PUBLIC_URL: BASE }, daemonEnv: { COFLUX_SHELL: shellWrapper } });
   consentWs = await consentClient(stack);
   token = (await obtainTokens(BASE, consentWs)).access_token;
 
@@ -336,12 +348,10 @@ test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变
     const origin = await startTask(idle.id);
     await device.attach(origin.sessionId);
 
-    // ② PATH：看 shell 启动时拿到的初始环境（rc 文件改过的 $PATH 不算），首段必须是 <COFLUX_HOME>/bin，
-    //    其余段就是 supervisor 自己的 PATH（黑盒里 = 本测试进程的 PATH）按原顺序、去掉重复的那一段
-    const pathOut = join(home, "path.txt");
-    await device.input(origin.sessionId, `${DUMP_INITIAL_PATH} > ${pathOut} 2>&1\r`);
-    const pathText = await waitForFile(pathOut, (s) => s.includes("PATH="), "会话初始 PATH");
-    const initialPath = pathText.split("\n").find((line) => line.startsWith("PATH=")).slice("PATH=".length);
+    // ② PATH：看 shell 启动时拿到的初始环境（包装脚本在 exec 真实 shell 之前落盘的 env；rc 文件改过的 $PATH 不算），
+    //    首段必须是 <COFLUX_HOME>/bin，其余段就是 supervisor 自己的 PATH（黑盒里 = 本测试进程的 PATH）按原顺序、去掉重复的那一段
+    const envText = await waitForFile(initialEnvFile(origin.sessionId), (s) => /^PATH=/m.test(s), "会话初始环境落盘");
+    const initialPath = envText.split("\n").find((line) => line.startsWith("PATH=")).slice("PATH=".length);
     const binDir = join(stack.home, "bin");
     const segments = initialPath.split(":");
     assert.equal(segments[0], binDir, `PATH 首段必须是 <COFLUX_HOME>/bin: ${initialPath}`);
@@ -366,7 +376,8 @@ test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变
       20000,
     );
     assert.equal(exited.task.exitCode, 0);
-    const newText = await waitForFile(newOut, (s) => s.includes(created.task.id), "Rust 版 terminal new 输出");
+    // 输出文件边写边读：等最后一行 `看输出：` 出现（或 `✗`）再比对，只等首行会读到半截
+    const newText = await waitForFile(newOut, (s) => s.includes("看输出：") || s.includes("✗"), "Rust 版 terminal new 输出");
     assert.ok(
       newText.includes(`已开终端 ${created.task.id}（用户可在 coflux 侧栏看到并随时接管）`) && newText.includes(`看输出：cofluxd terminal read ${created.task.id}`),
       `Rust 版 terminal new 的短语必须与 node 版逐字一致: ${JSON.stringify(newText)}`,

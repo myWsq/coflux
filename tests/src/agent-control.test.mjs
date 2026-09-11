@@ -554,8 +554,9 @@ test("plan 112：Rust 版 cofluxd 对同一组子命令给出与 node 版相同�
   const rust = (args, predicate, label, timeout) => runCli(device, task.sessionId, gatewayPort, home, args, predicate, label, timeout, RUST_LAUNCHER);
 
   try {
-    // terminal new（作业终端）：短语逐字对齐 node 版；退出码经中心透传
-    const newText = await rust(`terminal new --title "rust 作业" --cmd "echo HELLO-FROM-RUST; exit 3"`, (s) => s.includes("已开终端") || s.includes("✗"), "Rust terminal new");
+    // terminal new（作业终端）：短语逐字对齐 node 版；退出码经中心透传。
+    // 输出文件是边写边读的：等最后一行 `看输出：` 出现（或 `✗`）再整段比对，只等首行会读到半截。
+    const newText = await rust(`terminal new --title "rust 作业" --cmd "echo HELLO-FROM-RUST; exit 3"`, (s) => s.includes("看输出：") || s.includes("✗"), "Rust terminal new");
     const created = await c.waitFor((m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "rust 作业", "Rust 版建的任务出现在侧栏", 20000);
     assert.equal(
       newText.trim(),
@@ -576,7 +577,8 @@ test("plan 112：Rust 版 cofluxd 对同一组子命令给出与 node 版相同�
     assert.ok(listText.split("\n").includes(`${created.task.id}  exited exit=3  rust 作业`), `list 形状不符: ${listText}`);
 
     // 会话终端 + send：不带 --cmd 的提示三行；send 的回执短语；送 exit 真的退出
-    const shellText = await rust(`terminal new --title "rust shell"`, (s) => s.includes("已开终端") || s.includes("✗"), "Rust 会话终端");
+    // 会话终端的提示是四行：等最后一行 `送 exit 才结束` 出现（或 `✗`）再比对
+    const shellText = await rust(`terminal new --title "rust shell"`, (s) => s.includes("送 exit 才结束") || s.includes("✗"), "Rust 会话终端");
     const shell = await c.waitFor((m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "rust shell" && m.task.status === TaskStatus.RUNNING, "会话终端跑起来", 20000);
     assert.ok(shellText.includes("会话终端：常驻的登录 shell（全 tty），不会自己退出"), `会话终端提示: ${shellText}`);
     assert.ok(shellText.includes(`再输命令：cofluxd terminal send ${shell.task.id} --text "<命令>" --enter（送 exit 才结束）`), `send 提示: ${shellText}`);
@@ -589,6 +591,19 @@ test("plan 112：Rust 版 cofluxd 对同一组子命令给出与 node 版相同�
     // workspace：一行 JSON，字段与 node 版同名同序
     const wsText = await rust("workspace", (s) => s.includes("workspaceId") || s.includes("✗"), "Rust workspace");
     assert.deepEqual(JSON.parse(wsText.trim()), { workspaceId: ws.id, path: home, owningWorkspaceId: ws.id, moved: false });
+
+    // presence 的存活门是「进程树里有 agent」：CLI 自己不是 agent，notify 的 question 态与 hook 的
+    // active 态都只为有 agent 进程的会话广播——与既有 notify 用例同一做法，先挂一个假 claude 并等 presence 就位
+    const fakeClaude = join(home, "claude");
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    writeFileSync(fakeClaude, "#!/bin/sh\nsleep 300\n");
+    chmodSync(fakeClaude, 0o755);
+    await device.input(task.sessionId, "./claude &\r");
+    await c.waitFor(
+      (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === task.sessionId),
+      "presence 就位",
+      20000,
+    );
 
     // progress / notify：回执短语 + 真的经中心广播出去
     const progressText = await rust(`progress "rust 进度"`, (s) => s.includes("已更新进度") || s.includes("✗"), "Rust progress");
