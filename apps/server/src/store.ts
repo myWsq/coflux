@@ -891,6 +891,47 @@ export class Store {
     return rows[0] && rowToTask(rows[0]);
   }
   /** 删除并原样返回被删任务的 id（单语句 DELETE ... RETURNING，天然原子，无需先查后删）。 */
+  /** 归属搬动（plan 104）：agent 进入/离开 git worktree 后终端换一个工作区落脚。
+   * workspace_id 与 project_id **必须在同一条 UPDATE 里**改：双列外键
+   * fk_tasks_workspace_project 与启动 preflight 的 task_workspace_mismatch 都会拦下
+   * 「工作区已换、项目还是旧的」的中间态。刻意不走 updateTask——它的 patch 类型只允许
+   * status/sessionId/exitCode/title，归属不属于那组随手可改的字段。
+   * 账号/设备/当前工作区三个判据留在同一条语句里：并发的删除或另一次搬动落在前面时，
+   * 这里读到 0 行而不是把已经搬走的终端又拉回来。 */
+  async moveTaskToWorkspace(
+    id: TaskId,
+    accountId: AccountId,
+    daemonId: DaemonId,
+    fromWorkspaceId: WorkspaceId,
+    toWorkspaceId: WorkspaceId,
+    projectId: ProjectId,
+  ): Promise<Task | undefined> {
+    const rows = await this.sql<TaskRow[]>`
+      UPDATE tasks
+      SET workspace_id = ${toWorkspaceId}, project_id = ${projectId || null}, updated_at = ${Date.now()}
+      WHERE id = ${id}
+        AND account_id = ${accountId}
+        AND daemon_id = ${daemonId}
+        AND workspace_id = ${fromWorkspaceId}
+      RETURNING *
+    `;
+    return rows[0] && rowToTask(rows[0]);
+  }
+  /** 整个工作区的终端一起换归属（plan 104：Claude Code 清掉自建 worktree 时全部搬回主工作区）。
+   * 同样是单条 UPDATE 双列同改；返回搬完之后的 Task 供逐条广播 taskUpdated。 */
+  async moveTasksToWorkspace(
+    fromWorkspaceId: WorkspaceId,
+    toWorkspaceId: WorkspaceId,
+    projectId: ProjectId,
+  ): Promise<Task[]> {
+    const rows = await this.sql<TaskRow[]>`
+      UPDATE tasks
+      SET workspace_id = ${toWorkspaceId}, project_id = ${projectId || null}, updated_at = ${Date.now()}
+      WHERE workspace_id = ${fromWorkspaceId}
+      RETURNING *
+    `;
+    return rows.map(rowToTask);
+  }
   async removeTasksByWorkspace(workspaceId: WorkspaceId): Promise<TaskId[]> {
     const rows = await this.sql<{ id: TaskId }[]>`DELETE FROM tasks WHERE workspace_id = ${workspaceId} RETURNING id`;
     return rows.map((r) => r.id);

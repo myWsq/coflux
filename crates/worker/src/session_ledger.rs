@@ -130,6 +130,34 @@ impl SessionLedger {
         }
     }
 
+    /// 归属搬动（plan 104）：agent 进入/离开 worktree 后中心把 task 的 workspace_id 改了，
+    /// 账本按**中心的响应**跟上。仍然不按 cwd 猜——参数只能来自 AgentWorkspaceLocateResult。
+    /// 账本不跟上就是 102 的 `resolve_scope` 恒判「挪窝」，挪窝块会在每条 prompt 上误报。
+    pub fn move_workspace(&mut self, session_id: &str, workspace_id: &str) {
+        if workspace_id.is_empty() {
+            return;
+        }
+        if let Some(record) = self.by_session.get_mut(session_id) {
+            record.workspace_id = workspace_id.to_string();
+        }
+    }
+
+    /// 整个工作区消失（Claude Code 清理掉自建 worktree）：其下所有会话的归属改到中心指定的
+    /// 主工作区。返回改了几条，只为日志与响应好读。
+    pub fn move_all_workspaces(&mut self, from: &str, to: &str) -> usize {
+        if from.is_empty() || to.is_empty() || from == to {
+            return 0;
+        }
+        let mut moved = 0;
+        for record in self.by_session.values_mut() {
+            if record.workspace_id == from {
+                record.workspace_id = to.to_string();
+                moved += 1;
+            }
+        }
+        moved
+    }
+
     pub fn session(&self, session_id: &str) -> Option<&SessionRecord> {
         self.by_session.get(session_id)
     }
@@ -234,6 +262,39 @@ mod tests {
         assert!(exited <= MAX_EXITED_RECORDS, "已退出条目必须有界: {exited}");
         let last = format!("t{}", MAX_EXITED_RECORDS + 49);
         assert!(ledger.task(&last).is_some(), "最新退出的必须还在");
+    }
+
+    #[test]
+    fn ownership_moves_only_from_the_center_response() {
+        let mut ledger = SessionLedger::default();
+        ledger.remember_create("s1", "t1", "ws-a");
+        ledger.mark_started("s1", "t1");
+        // 空 id（中心没给）绝不覆盖已知归属
+        ledger.move_workspace("s1", "");
+        assert_eq!(ledger.session("s1").unwrap().workspace_id, "ws-a");
+        // EnterWorktree 之后中心报回新归属：账本跟上，102 的 resolve_scope 才不会恒判「挪窝」
+        ledger.move_workspace("s1", "ws-b");
+        assert_eq!(ledger.session("s1").unwrap().workspace_id, "ws-b");
+        assert_eq!(ledger.session("s1").unwrap().phase, SessionPhase::Running, "只改归属，不动生死");
+        // 未知会话不凭空造条目
+        ledger.move_workspace("ghost", "ws-b");
+        assert!(ledger.session("ghost").is_none());
+    }
+
+    #[test]
+    fn removing_a_worktree_moves_every_session_of_it_back() {
+        let mut ledger = SessionLedger::default();
+        ledger.remember_create("s1", "t1", "ws-b");
+        ledger.remember_create("s2", "t2", "ws-b");
+        ledger.remember_create("s3", "t3", "ws-a");
+        assert_eq!(ledger.move_all_workspaces("ws-b", "ws-a"), 2);
+        assert_eq!(ledger.session("s1").unwrap().workspace_id, "ws-a");
+        assert_eq!(ledger.session("s2").unwrap().workspace_id, "ws-a");
+        assert_eq!(ledger.session("s3").unwrap().workspace_id, "ws-a");
+        // 幂等 / 空参数不动任何东西
+        assert_eq!(ledger.move_all_workspaces("ws-b", "ws-a"), 0);
+        assert_eq!(ledger.move_all_workspaces("", "ws-a"), 0);
+        assert_eq!(ledger.move_all_workspaces("ws-a", "ws-a"), 0);
     }
 
     #[test]

@@ -269,6 +269,11 @@ struct AgentBody {
     /// 请求的**目标**解析到 cwd 所在的工作区。旧 CLI 不带，缺省空串 = 退回归属工作区。
     #[serde(default)]
     cwd: String,
+    /// 跟随 worktree 的动作要定位的绝对路径（plan 104）：locate 是 hook 载荷里的 `cwd`，
+    /// forget 是 WorktreeRemove 载荷里的 `worktree_path`。与上面的 `cwd`（调用方进程的工作
+    /// 目录）刻意分开——插件脚本在会话当前目录里执行，两者未必相同。
+    #[serde(default)]
+    path: String,
 }
 
 /// 单次 send 的文本上限：与 MCP `send_terminal_input` 的 64 KB 同值（plan 094 对齐）；超长基本是
@@ -350,6 +355,18 @@ async fn handle_agent(
         }
         "ports" => AgentAction::Ports,
         "workspace.current" => AgentAction::WorkspaceCurrent,
+        "workspace.locate" => {
+            if parsed.path.trim().is_empty() {
+                return Err(RequestError::BadRequest("workspace.locate 缺 path".into()));
+            }
+            AgentAction::WorkspaceLocate { path: parsed.path }
+        }
+        "workspace.forget" => {
+            if parsed.path.trim().is_empty() {
+                return Err(RequestError::BadRequest("workspace.forget 缺 path".into()));
+            }
+            AgentAction::WorkspaceForget { path: parsed.path }
+        }
         other => return Err(RequestError::BadRequest(format!("未知 action {other}"))),
     };
     let (respond, outcome_rx) = oneshot::channel();
