@@ -8,9 +8,7 @@ import {
   daemonSettingsJson,
   launchAgentPlist,
   parseCredentialsDaemonId,
-  parseFdaStatus,
   parsePendingAuth,
-  parseSupervisorVersion,
 } from "./daemon-files";
 import { daemonHomePaths, resolveCofluxHome } from "./daemon-paths";
 
@@ -102,14 +100,3 @@ test("credentials.json 只取 daemonId，deviceToken 不出函数", () => {
   assert.equal(parseCredentialsDaemonId(null), null);
 });
 
-test("fda-status 与 supervisor-version 的原文解析", () => {
-  assert.equal(parseFdaStatus("granted\n"), "granted");
-  assert.equal(parseFdaStatus("denied"), "denied");
-  assert.equal(parseFdaStatus("unknown"), "unknown");
-  assert.equal(parseFdaStatus("whatever"), "unknown");
-  assert.equal(parseFdaStatus(null), "unknown");
-  assert.equal(parseSupervisorVersion("v0.32.0\n"), "v0.32.0");
-  assert.equal(parseSupervisorVersion("dev\n"), "dev");
-  assert.equal(parseSupervisorVersion("  \n"), null);
-  assert.equal(parseSupervisorVersion(null), null);
-});

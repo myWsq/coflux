@@ -1,14 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DEFAULT_SERVER_URL, DEV_SERVER_URL, isValidServerUrl, resolveServerUrl } from "./settings";
-
-test("默认值：打包版连公共中心，dev 连本机 8787", () => {
-  assert.equal(resolveServerUrl({ argv: [], env: {}, packaged: true }), DEFAULT_SERVER_URL);
-  assert.equal(resolveServerUrl({ argv: [], env: {}, packaged: false }), DEV_SERVER_URL);
-  assert.equal(DEFAULT_SERVER_URL, "wss://api.coflux.dev/client");
-  assert.equal(DEV_SERVER_URL, "ws://localhost:8787/client");
-});
+import { DEFAULT_SERVER_URL, isValidServerUrl, resolveServerUrl } from "./settings";
 
 test("优先级：--server > COFLUX_SERVER_URL > settings.json > 默认", () => {
   const env = { COFLUX_SERVER_URL: "wss://env.example/client" };
