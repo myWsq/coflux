@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { AlertCircle, FolderGit2, LoaderCircle, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
 import { type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
@@ -17,6 +17,7 @@ import {
 } from "@/components/workbench/dialogs";
 import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "@/components/workbench/desktop-attention";
 import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
+import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useTerminalAttach } from "@/components/workbench/terminal-attach";
@@ -51,6 +52,20 @@ const TerminalPanes = lazy(() =>
 // 乐观创建（plan 078）的本地兜底：服务端既不广播成功也不广播错误时，撤掉 pending 条目，
 // 避免永久滞留。与遮罩的 8s 无关——工作区创建含 daemon 侧 git worktree add，慢链路可能更长。
 const PENDING_CREATE_TIMEOUT_MS = 15_000;
+
+/**
+ * 无顶栏的空态主区（plan 108）：顶部留一条与侧栏空白带等高的窗口拖拽带，没有终端顶栏时
+ * 也能从主区顶部拖动 / 双击窗口；空态内容在余下区域里继续垂直居中，按钮不落进拖拽带
+ * （拖拽区吞指针事件，见 drag-region.ts）。
+ */
+function EmptyMain({ className, children }: { className?: string; children: ReactNode }) {
+  return (
+    <main className="flex min-w-0 flex-1 flex-col bg-terminal">
+      <div className="shrink-0" style={DESKTOP_DRAG_BAND_STYLE} />
+      <div className={cn("flex min-h-0 flex-1 items-center justify-center", className)}>{children}</div>
+    </main>
+  );
+}
 
 function readStoredSelection(): WorkbenchSelection | null {
   return parseStoredSelection(localStorage.getItem(WORKSPACE_KEY));
@@ -601,9 +616,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
       {terminalWorkspaces.length > 0 ? (
         <Suspense
           fallback={
-            <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal text-muted-foreground">
+            <EmptyMain className="text-muted-foreground">
               <LoaderCircle className="size-5 animate-spin" />
-            </main>
+            </EmptyMain>
           }
         >
           {/* 终端主区（plan 104）：顶栏一行、主体一行的两行网格。工作区容器经 display:contents
@@ -642,7 +657,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       {selectedDevice && !activeWorkspace ? (
         // 设备详情空态（plan 048）：这台设备还没有目录工作区，首次新建走 fsList(~) + terminalCreate；
         // 创建成功后 canonical 解析让终端自然出现，本空态随之卸载。
-        <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
+        <EmptyMain>
           <div className="flex max-w-sm flex-col items-center text-center">
             <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
               <SquareTerminal className="size-5" />
@@ -665,28 +680,28 @@ export function Workbench({ client }: { client: CofluxClient }) {
             />
             {deviceTerminalError ? <p className="mt-3 text-sm leading-5 text-destructive">{deviceTerminalError}</p> : null}
           </div>
-        </main>
+        </EmptyMain>
       ) : null}
       {pendingSelected ? (
         // 乐观工作区的主区（plan 078）：pending 条目不进 attach/终端状态机、不产生任何
         // 指向假 id 的请求，主区只显示创建中提示；广播到达后由上面的识别效果原地转正。
-        <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
+        <EmptyMain>
           <div className="flex max-w-sm flex-col items-center text-center">
             <LoaderCircle className="size-5 animate-spin text-muted-foreground" />
             <h1 className="mt-4 text-base font-medium">正在创建工作区「{pendingSelected.branch}」</h1>
             <p className="mt-1.5 text-sm leading-5 text-muted-foreground">正在设备上准备 git worktree，完成后会自动切换过去。</p>
           </div>
-        </main>
+        </EmptyMain>
       ) : null}
       {!pendingSelected && !selectedDevice && !activeWorkspace ? (
         snapshotRevision === 0 ? (
           // 首快照未到：数据没到 ≠ 数据为空（plan 078 第③跳），不得误报引导空态。
           // 遮罩正常会盖住这里；遮罩兜底撤除后（中心不可达）这里配合断线横幅语义成立。
-          <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal text-muted-foreground">
+          <EmptyMain className="text-muted-foreground">
             <LoaderCircle className="size-5 animate-spin" />
-          </main>
+          </EmptyMain>
         ) : (
-        <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
+        <EmptyMain>
           <div className="flex max-w-sm flex-col items-center text-center">
             <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
               <FolderGit2 className="size-5" />
@@ -699,7 +714,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
               <Button className="mt-5" label="导入项目" variant="primary" size="sm" onClick={() => setImportOpen(true)} />
             ) : null}
           </div>
-        </main>
+        </EmptyMain>
         )
       ) : null}
 
