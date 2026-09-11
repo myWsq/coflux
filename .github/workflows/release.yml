@@ -119,7 +119,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - if: matrix.cross
-        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2
+        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
         with:
           tool: cross
 
