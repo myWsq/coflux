@@ -63,6 +63,9 @@ coflux —— 账号与终端操作
                           都落在它上面）、path、owningWorkspaceId（本终端此刻归属哪个工作区）、
                           moved。用 /cd 挪进另一个 coflux 工作区后用它确认目标，跨工作区操作时也传这个
                           workspaceId
+  coflux workspace enter <path>
+                          进入同仓库工作区并迁移当前终端；受管 Codex 会话记住选择供恢复/压缩使用。
+                          后续工具必须显式使用返回路径；不会改变宿主默认 cwd 或沙箱权限
   coflux workspace locate [path]
                           把本终端的**归属**搬到 path（缺省=当前目录）所属的工作区：进入/离开
                           worktree 后 coflux 跟着走，未登记的同仓库 worktree 先登记出一个子工作区。

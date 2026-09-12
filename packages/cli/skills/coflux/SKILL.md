@@ -1,6 +1,6 @@
 ---
 name: coflux
-description: Use coflux to open terminals the user can see and take over, run commands in them, wait for those commands, read their scrollback, type into them, report progress, notify the user and obtain preview URLs. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
+description: Use coflux to enter workspaces, open terminals the user can see and take over, run commands in them, wait for those commands, read their scrollback, type into them, report progress, notify the user and obtain preview URLs. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
 ---
 
 # Working inside coflux
@@ -71,10 +71,9 @@ env | grep '^COFLUX_'
 - **Effective workspace** = the workspace **your current working directory is inside**. This is what
   every local command acts on.
 
-They are the same until your cwd wanders off. A plain `cd <path>` moves a *live* session — same
-conversation, no restart — and a coflux child workspace is a normal registered git worktree, so a
-session whose terminal belongs to workspace A can end up working inside workspace B. From that
-moment, in B:
+They are the same until your cwd wanders off. A coflux child workspace is a normal registered Git
+worktree. Running a command with cwd B (or `cd <path>` inside that command) changes that command's
+effective workspace, but does not move the terminal or change later tools' default cwd. In B:
 
 - `coflux terminal new` opens the terminal **in B**, under B in the user's sidebar, running in B's
   directory, counting against B's terminal cap;
@@ -91,7 +90,40 @@ A terminal opened before the daemon was upgraded is the one case with no owning 
 its local commands are refused with "predates the daemon upgrade" whatever your cwd is, because the
 daemon never guesses ownership from a directory. Open a new terminal.
 
-### coflux follows you into a git worktree
+### Explicitly enter a workspace
+
+Use this workflow when the task should move into another worktree, particularly in Codex, which
+does not provide Claude's `EnterWorktree` tool:
+
+1. Select an existing worktree from `coflux workspace list --device <deviceId>`, or create one with
+   `coflux workspace new --project <projectId> --branch <branch>`. Use the returned workspace path.
+2. Run `coflux workspace enter <path>`. This uses the existing workspace-locate operation: the
+   daemon verifies the same Git repository, registers an unknown worktree, and moves the current
+   terminal's owning workspace. The terminal, PTY and conversation continue without restarting.
+3. Use the returned absolute `path` explicitly as `workdir`/`cwd` for subsequent task commands,
+   including local `coflux` commands. Use absolute file paths for tools with no working-directory
+   argument. Read the target directory's applicable `AGENTS.md` before editing. Run `coflux workspace`
+   **in that directory** and use its workspace ID for account operations.
+
+`hostCwdChanged: false` is intentional: neither this command nor a one-off shell `cd` can change
+Codex's default directory or sandbox permissions. A successful terminal move is not proof that
+later tools operate there. Keep the selected path in task context and verify it before editing.
+Use the same enter command with the original path to return; returning does not delete a worktree.
+Temporary reads, checks or commands elsewhere do not change the explicit selection.
+
+For a device-managed Codex session, `resumeSupported: true` means the selection is saved by native
+conversation ID. Hooks inject the selected path after the switch and restore it after compaction
+or resume, including resume in another Coflux terminal of the same project and device. A new
+conversation does not inherit the selection. If the saved path is missing or cannot be verified,
+the hook reports it; do not silently resume edits in the original directory. Select a valid
+workspace explicitly, or retry after connectivity returns. Plain terminals and Claude receive
+`resumeSupported: false`; Claude's native directory tools provide its session directory behavior.
+
+The enter command requires the current native CLI. The npm CLI delegates it to the pinned native
+integration, or the installed device CLI outside a managed agent. If unavailable, update the
+device; do not claim that a shell `cd` supplied the missing persistence behavior.
+
+### Claude: coflux follows you into a git worktree
 
 `EnterWorktree` switches this live session into a git worktree (its own, or an existing one you point
 it at), `ExitWorktree` switches back, and resuming a session that had entered one puts you straight

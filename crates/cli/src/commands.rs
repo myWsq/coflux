@@ -413,6 +413,15 @@ pub fn run_workspace(args: &ParsedArgs) {
             let result = gateway::agent_post(body("workspace.current"));
             println!("{}", render_workspace_current(&result));
         }
+        Some("enter") => {
+            let Some(path) = args.positional(2).filter(|_| args.positional(3).is_none()) else {
+                crate::die("Usage: coflux workspace enter <path>");
+            };
+            match crate::integration::enter_workspace(path) {
+                Ok(result) => println!("{result}"),
+                Err(error) => crate::die(&error),
+            }
+        }
         Some("locate") => {
             // 路径缺省取调用方 cwd；插件脚本一律显式传 hook 载荷里的 cwd。
             let path = args
@@ -432,7 +441,7 @@ pub fn run_workspace(args: &ParsedArgs) {
             let result = gateway::agent_post(with(body("workspace.forget"), "path", path));
             println!("{}", render_workspace_forget(&result));
         }
-        Some(_) => crate::die("workspace 的子命令只有 locate | forget（不带子命令 = 报出我在哪）"),
+        Some(_) => crate::die("workspace 的子命令只有 enter | locate | forget（不带子命令 = 报出我在哪）"),
     }
 }
 
