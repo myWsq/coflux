@@ -65,6 +65,7 @@ export class NativeTailcatTransport {
           const message = decodeServerToClient(new Uint8Array(bytes as Buffer));
           if (!message) { socket.terminate(); return; }
           if (message.payload.case === "authOk") {
+            if (message.payload.value.controlProtocolVersion < CONTROL_PROTOCOL_VERSION) { clearTimeout(timeout); this.online = false; reject(new Error("服务器协议版本不兼容")); this.close(); return; }
             authed = true; this.controlAuthed = true; this.retry = 0; clearTimeout(timeout);
             if (this.online) { clearTimeout(this.grace); this.grace = undefined; }
             clearInterval(this.heartbeat);

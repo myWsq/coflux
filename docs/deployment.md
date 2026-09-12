@@ -1,10 +1,62 @@
 # Production deployment
 
-This document records **the current production layout**. Update it after every topology-changing plan: plans describe what changed; this document describes what exists now.
+This document separates the source migration runbook from the last recorded production layout. Tailcat retirement changes are not a production deployment. Verify live services before executing a rollout, and record the deployed tag and topology afterward.
 
 See [RELEASING.md](RELEASING.md) for releases and [architecture.md](architecture.md) for architectural principles.
 
-## Topology
+## Native transport migration runbook
+
+This source requires Tailcat for remote Desktop/Linux connections and a matching
+`coflux-transport` beside each worker. The custom relay service is retired from
+builds and release artifacts. The legacy host inventory below describes the
+pre-migration deployment only; it is not a command to recreate those services.
+
+1. Release and validate matching Desktop, CLI, supervisor, worker, and transport
+   artifacts. Existing supervisors need `cofluxd update` and an explicit daemon
+   restart to acquire `transport_pair_v1` before paired hot upgrades. Preserve
+   previous complete worker/helper releases for rollback.
+2. Provision pinned upstream stock `derper` on the selected existing relay hosts,
+   with publicly trusted TLS certificates, persistent DERP node keys, HTTPS access,
+   and upstream STUN/UDP requirements. Do not reuse custom relay query-token
+   paths or signing-key configuration. Pin the same Tailscale revision as
+   `transport/tailcat/go.mod`; stock DERP is operated independently of product
+   release artifacts.
+3. Set `COFLUX_DERP_REGIONS` on the center to 1–8 upstream region descriptors,
+   containing unique positive `RegionID` values and matching node IDs/hostnames.
+   Both ends use the worker-selected region; helper replacement rotates regions.
+4. Set `COFLUX_DERP_ADMISSION_PORT` on the center. The listener binds loopback
+   only. Reach `/verify` from remote DERP hosts through authenticated private
+   forwarding. Start stock DERP with `-verify-client-url <private-verify-url>`
+   and **`-verify-client-url-fail-open=false`**; the upstream default is fail-open.
+   Never route `/verify` through the public app proxy. Keep unrelated sites on
+   these shared hosts intact.
+5. Verify registered-node access, unknown-node rejection, admission outage
+   rejection and recovery against real stock DERP. Check `/derp/probe`, actual
+   application traffic, helper crashes, region outages, control disconnects,
+   and existing PTY continuity. Local benchmark or fixture results do not prove
+   real network latency or production readiness.
+6. Deploy the center with control protocol floor 2 after clients and runtime
+   bootstrap are ready. Versions below 2 are rejected; newer compatible peers
+   remain allowed. DeviceEnvelope version stays 1. Frozen browser clients and
+   current Swift/iOS remote paths are unavailable after this switch; use Desktop.
+7. Remove obsolete custom-relay services and keys only as part of the authorized
+   production cutover after native traffic is verified. This implementation task
+   has not performed that cleanup or changed production.
+
+Example region shape (replace the hostname with an operated DERP endpoint):
+
+```json
+[{"RegionID":901,"RegionCode":"private-jp","Nodes":[{"Name":"private-jp-1","RegionID":901,"HostName":"derp.example.com","DERPPort":443,"STUNPort":3478}]}]
+```
+
+Rollback requires a compatible server/client/runtime set. Rolling back only the
+center to control version 1 causes current clients and workers to reject it.
+For runtime regressions, restore the previous immutable worker/helper pair;
+supervisor PTYs survive worker rollback. Keep DNS/Caddy rollback distinct from
+application/runtime rollback.
+
+## Last recorded pre-migration topology
+
 
 Three machines, with one central instance—the agreed B7 product model in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md).
 
@@ -71,13 +123,13 @@ Connect with `ssh owo-jp-gw`. Debian 13, two cores, same datacenter as prod-jp w
 
 Connect with `ssh root@prod-bj`. Ubuntu 24.04, SA3.LARGE8, same service layout as JP relay. Central `COFLUX_RELAY_NODES` **currently assigns only this node**; JP is idle pending removal. Its IP previously suffered GFW interference from mainland networks, where the daemons reside.
 
-Channels use daemon-reported `homeRelayId`, falling back to `nodes[0]`. Therefore **the first entry must always remain reachable** when changing the node list; see `apps/server/src/relay-rendezvous.ts`.
+The recorded deployment used custom home-relay selection. That source has been removed; follow the native migration runbook before deploying this branch.
 
 This is also the mainland observation point. Test routing from here: local residential connections may be proxied and distort results.
 
-## Routine deployment
+## Server deployment after native migration prerequisites
 
-Deploy server only. Web/mobile are frozen and are not rebuilt with source updates:
+After the native cutover prerequisites above are satisfied, update the server tag. Web/mobile assets remain frozen but their version-1 remote protocol cannot authenticate to this source:
 
 ```sh
 ssh root@prod-jp 'cd /opt/coflux && git fetch --tags && git checkout <tag> \
@@ -124,7 +176,7 @@ curl -i --http1.1 -H "Connection: Upgrade" -H "Upgrade: websocket" \
 ssh root@prod-bj 'curl -sS -o /dev/null -w "ttfb=%{time_starttransfer}\n" https://app.coflux.dev/'
 ```
 
-End-to-end smoke: `scripts/prod-smoke.mjs`, using the real protocol and independent relay path.
+End-to-end smoke: `scripts/prod-smoke.mjs`, using real DeviceEnvelope traffic through the native helper. It makes production changes and is run only during an authorized smoke test.
 
 ## Secrets
 
@@ -137,7 +189,7 @@ Record only locations/types, never values.
 | prod-jp `/etc/caddy/cloudflare.env` (600) | Cloudflare API token with **DNS edit permission only for the coflux.dev zone**. Reading zone settings such as SSL mode returns `9109 Unauthorized`. |
 | Relay nodes `/etc/coflux/relay.env` | `COFLUX_RELAY_PUBKEY`, a non-secret verification public key |
 
-Relay-key rotation: replace the central seed, distribute the new public key to every relay.env, then restart both ends. The current single-public-key implementation has a brief relay outage during transition.
+The relay key locations above belong to the pre-migration inventory. Native DERP uses node identities and fail-closed admission; it does not read those signing keys. Retire obsolete credentials during the authorized cutover.
 
 ## Rollback
 

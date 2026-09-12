@@ -13,13 +13,12 @@ import { mkRepo, startStack } from "./harness.mjs";
 import { TailcatTestHelper } from "./tailcat-harness.mjs";
 
 const PORT = 8896;
-const enabled = process.env.COFLUX_TEST_TAILCAT === "1";
 async function freePort() { const server = net.createServer(); await new Promise(r => server.listen(0, "127.0.0.1", r)); const port = server.address().port; await new Promise(r => server.close(r)); return port; }
 
-test("native grant authorizes real DeviceEnvelope traffic and central revocation closes it", { skip: !enabled, timeout: 120_000 }, async () => {
+test("native grant authorizes real DeviceEnvelope traffic and central revocation closes it", { timeout: 120_000 }, async () => {
   const binary = resolve(process.env.COFLUX_TRANSPORT_BIN || resolve(import.meta.dirname, "../../target/debug/coflux-transport"));
-  const derperBinary = process.env.COFLUX_TEST_DERPER_BIN;
-  assert(existsSync(binary), "build the native helper beside the worker first"); assert(derperBinary && existsSync(derperBinary), "COFLUX_TEST_DERPER_BIN must name the pinned stock DERP binary");
+  const derperBinary = process.env.COFLUX_TEST_DERPER_BIN || resolve(import.meta.dirname, "../../target/debug/coflux-test-derper");
+  assert(existsSync(binary), "build the native helper beside the worker first"); assert(derperBinary && existsSync(derperBinary), "build the pinned stock DERP test binary first");
   const dir = mkdtempSync(join(tmpdir(), "coflux-tailcat-test-"));
   let derper, stack, control, helper, repo;
   try {
@@ -33,7 +32,7 @@ test("native grant authorizes real DeviceEnvelope traffic and central revocation
     }
     const pin = createHash("sha256").update(new X509Certificate(readFileSync(join(dir, "127.0.0.1.crt"))).raw).digest("hex");
     const region = { RegionID: 901, RegionCode: "test", Nodes: [{ Name: "test", RegionID: 901, HostName: "127.0.0.1", IPv4: "127.0.0.1", IPv6: "none", DERPPort: port, STUNPort: -1, CertName: `sha256-raw:${pin}` }] };
-    stack = await startStack({ port: PORT, strictCleanup: true, serverEnv: { COFLUX_DERP_REGIONS: JSON.stringify([region]) }, daemonEnv: { COFLUX_TAILCAT: "1" } });
+    stack = await startStack({ port: PORT, strictCleanup: true, serverEnv: { COFLUX_DERP_REGIONS: JSON.stringify([region]) }, daemonEnv: {} });
     control = stack.makeClient(); await control.authSubscribe();
     helper = new TailcatTestHelper(binary); await helper.request("hello", { version: 1 });
     const connection = randomUUID(); const { publicKey } = await helper.request("prepare", { connection });

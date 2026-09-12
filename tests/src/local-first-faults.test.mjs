@@ -100,7 +100,7 @@ async function input(device, sessionId, holderEpoch, inputSeq, marker) {
 
 test("worker 重启保留 logical holder；另一 client takeover 后旧 client 不会自动抢回", async () => {
   const first = await DeviceClient.pair(stack);
-  await first.openRelay();
+  await first.openNative();
   const running = await createRunningSession(first, "faults");
   const attached = await first.attach(running.sessionId);
   const originalEpoch = attached.holderEpoch;
@@ -113,7 +113,7 @@ test("worker 重启保留 logical holder；另一 client takeover 后旧 client 
   await stack.waitDaemonOnline();
 
   const reconnectFrom = first.mark();
-  await first.openRelay();
+  await first.openNative();
   const reattached = await first.attach(running.sessionId);
   assert.equal(reattached.holderEpoch, originalEpoch, "worker 重启后同 logical client 的 holderEpoch 不变");
   assert.equal(
@@ -124,7 +124,7 @@ test("worker 重启保留 logical holder；另一 client takeover 后旧 client 
   await input(first, running.sessionId, originalEpoch, 2n, "AFTER_WORKER_RESTART");
 
   const second = await first.fork();
-  await second.openRelay();
+  await second.openNative();
   const takeoverFrom = first.mark();
   const taken = await second.attach(running.sessionId);
   assert.equal(taken.holderEpoch, originalEpoch + 1n, "另一 logical client attach 原子递增 holderEpoch");
@@ -156,7 +156,7 @@ test("worker 重启保留 logical holder；另一 client takeover 后旧 client 
 
   // 旧 logical client 只重连 transport，不发 attach：重连本身不能夺回 holder。
   const noTakeoverFrom = first.mark();
-  await first.openRelay();
+  await first.openNative();
   await sleep(150);
   assert.equal(
     first.log.slice(noTakeoverFrom).some((message) => message.case === "sessionAttached" && message.sessionId === running.sessionId),
@@ -171,7 +171,7 @@ test("worker 重启保留 logical holder；另一 client takeover 后旧 client 
 
 test("PTY stdin 阻塞不挡 worker 接管、holder takeover 与 stop；连续输入按序 ACK", async () => {
   const first = await DeviceClient.pair(stack);
-  await first.openRelay();
+  await first.openNative();
   const running = await createRunningSession(first, "blocked-pty-writer");
   const attached = await first.attach(running.sessionId);
   const epoch = attached.holderEpoch;
@@ -259,7 +259,7 @@ test("PTY stdin 阻塞不挡 worker 接管、holder takeover 与 stop；连续�
   await stack.waitDaemonOnline();
 
   const second = await first.fork();
-  await second.openRelay();
+  await second.openNative();
   const taken = await second.attach(running.sessionId);
   assert.equal(taken.holderEpoch, epoch + 1n, "阻塞 writer 不持 session mutex，另一 logical client 可 takeover");
 

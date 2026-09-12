@@ -46,24 +46,17 @@ export const DEVICE_PROTOCOL_VERSION = 1;
 
 /** 控制面（/client WS）协议版本（plan 105）：desktop 登录时上报，server 只在低于其支持的最低版本时拒绝。
  * 只在做破坏性协议改动时递增（CI 的 buf breaking 把关兼容性）；web/mobile 仍按 build-id 精确准入。 */
-export const CONTROL_PROTOCOL_VERSION = 1;
+export const CONTROL_PROTOCOL_VERSION = 2;
 /** PTY 创建/resize 的共享尺寸边界；Rust sessiond 使用同值，避免 transport 间行为漂移。 */
 export const MIN_TERMINAL_DIMENSION = 1;
 export const MAX_TERMINAL_DIMENSION = 1000;
 /** worker ↔ supervisor 内部 frame 的 idLen 只有一个字节；会进入该字段的 ID 共用此上限。 */
 export const MAX_FRAME_ID_BYTES = 255;
-/** relay/local Device frame 上限；保留现有 30MiB 文件写入能力。 */
+/** Native and local Device frame limit; preserves 30 MiB file writes. */
 export const MAX_DEVICE_FRAME_BYTES = 30 * 1024 * 1024;
 /** 中心 checkpoint 只保存有界 terminal state，不承载完整 Device frame 上限。 */
 export const MAX_SESSION_CHECKPOINT_BYTES = 512 * 1024;
-/**
- * P2P DataChannel 分片流格式（plan 076，线上契约——改动需带版本协商）：
- * 每个 DeviceEnvelope 帧封为 [u32 BE 帧长][帧字节]，整体按 ≤ P2P_CHUNK_BYTES 切成
- * DataChannel messages；SCTP reliable+ordered 下等价字节流，接收端按前缀重组。
- * 16KiB 取双端接收上限的交集：webrtc-rs 0.20 的 poll OnMessage 上限 16384，
- * Chrome 宣告 256KiB——两者都是接收侧硬限，不可协商放大。
- */
-export const P2P_CHUNK_BYTES = 16 * 1024;
+
 
 /**
  * 信封 oneof 载荷的"构造态"类型（供发送方构造消息用）。

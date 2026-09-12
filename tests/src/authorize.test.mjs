@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startServer, rawDaemon, mkRepo, spawnDaemon, killTree, tokenFromUrl, CookieJar, pageGet, formPost, pageLogin } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8830;
 // server 直出的授权页（plan 107）挂在 COFLUX_PUBLIC_URL 下；黑盒不设它，默认即本机监听地址。
@@ -85,7 +85,7 @@ test("授权成功端到端：匿名 daemon 拿链接 → client 授权 → daem
     const upd = await c.waitFor((m) => m.case === "daemonUpdated" && m.daemon.name === deviceName, "daemon.updated", 15000);
     assert.ok(upd.daemon.online, "授权后 daemon 在线");
     const daemonId = upd.daemon.daemonId;
-    const device = await openRelayDevice({ ...server, daemonId });
+    const device = await openNativeDevice({ ...server, daemonId });
     const control = device.control;
 
     // 授权后即是一台正常设备：能真正导入项目、起任务、走 PTY
@@ -376,7 +376,7 @@ test("HTTP 授权页端到端：链接落在 publicUrl → 登录 → 确认 →
       daemon = upd.daemon;
     }
     const daemonId = daemon.daemonId;
-    const device = await openRelayDevice({ ...server, daemonId });
+    const device = await openNativeDevice({ ...server, daemonId });
     const control = device.control;
     control.send({ case: "projectImport", daemonId, path: repo.dir });
     const main = await control.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main ws");

@@ -5,7 +5,9 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const [target, destination] = process.argv.slice(2);
+const hostArchitecture = { arm64: "aarch64", x64: "x86_64" }[process.arch];
+const hostPlatform = { darwin: "apple-darwin", linux: "unknown-linux-musl" }[process.platform];
+const [target = `${hostArchitecture}-${hostPlatform}`, destination = resolve(root, "target/release")] = process.argv.slice(2);
 const platforms = {
   "aarch64-apple-darwin": ["darwin", "arm64"],
   "x86_64-apple-darwin": ["darwin", "amd64"],

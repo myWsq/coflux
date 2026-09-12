@@ -123,7 +123,7 @@ test("(a) 开启选项：authOk + snapshot 后目录落缓存；登出清缓存"
   try {
     const socket = FakeWebSocket.latest();
     socket.open();
-    socket.receive({ case: "authOk", value: { accountId: "a1", iceServers: [], loginName: "wsq@example.com" } });
+    socket.receive({ case: "authOk", value: { accountId: "a1", controlProtocolVersion: 2, loginName: "wsq@example.com" } });
     socket.receive(snapshot);
     await flushMicrotasks();
 
@@ -191,7 +191,7 @@ test("(b') 连上但 authOk 在时限内没来 → 超时装载缓存；随后�
     assert.equal(client.store.getState().authState, "authed");
     assert.deepEqual(client.store.getState().projects.map((project) => project.id), ["p-cached"]);
 
-    socket.receive({ case: "authOk", value: { accountId: "a1", iceServers: [] } });
+    socket.receive({ case: "authOk", value: { accountId: "a1", controlProtocolVersion: 2 } });
     socket.receive(snapshot);
     assert.deepEqual(client.store.getState().projects.map((project) => project.id), ["p1"]);
     assert.equal(client.store.getState().snapshotRevision, 2);
@@ -282,12 +282,25 @@ test("(c) 不传选项：既有行为不变——不写缓存、连接失败仍�
   try {
     const socket = FakeWebSocket.latest();
     socket.open();
-    socket.receive({ case: "authOk", value: { accountId: "a1", iceServers: [] } });
+    socket.receive({ case: "authOk", value: { accountId: "a1", controlProtocolVersion: 2 } });
     socket.receive(snapshot);
     await flushMicrotasks();
     assert.equal(storage2.setItemCalls, 0, "浏览器路径不得写离线目录");
     assert.equal(storage2.getItem(CACHE_KEY), null);
   } finally {
     client2.disconnect();
+  }
+});
+
+
+test("control protocol rejects obsolete servers and accepts newer compatible servers", async () => {
+  for (const version of [0, 1, 2, 3]) {
+    installLocalStorage("tok"); const client = newClient(true);
+    try {
+      const socket = FakeWebSocket.latest(); socket.open();
+      socket.receive({ case: "authOk", value: { accountId: "a1", controlProtocolVersion: version } });
+      await flushMicrotasks();
+      assert.equal(client.store.getState().authState, version < 2 ? "outdated" : "authed");
+    } finally { client.disconnect(); }
   }
 });

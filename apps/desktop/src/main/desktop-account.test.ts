@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createDesktopAccount, type accountControl } from "./desktop-account";
+import { createDesktopAccount, accountControl } from "./desktop-account";
 
 function fixture() {
   const home = mkdtempSync(join(tmpdir(), "coflux-account-"));
@@ -63,4 +63,35 @@ test("离线退出保留持久清理记录，重启后重试只删除本机终�
     assert.deepEqual(calls, [{ token: "old-session", accountId: "owner", daemonId: "local", revoke: true }]);
     assert.equal(restored.hasPending(), false);
   } finally { f.dispose(); }
+});
+
+
+test("account control rejects obsolete server versions before subscription or cleanup", async () => {
+  const { WebSocketServer } = await import("ws");
+  const { create, decodeClientToServer, encodeServerToClient, ServerToClientSchema } = await import("@coflux/protocol");
+  for (const version of [0, 1, 2, 3]) {
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>(resolve => server.once("listening", resolve));
+    const received: string[] = [];
+    server.on("connection", socket => {
+      socket.on("message", bytes => {
+        const message = decodeClientToServer(new Uint8Array(bytes as Buffer));
+        if (!message?.payload.case) return;
+        received.push(message.payload.case);
+        if (message.payload.case === "clientAuth") socket.send(encodeServerToClient(create(ServerToClientSchema, { payload: { case: "authOk", value: { accountId: "owner", controlProtocolVersion: version } } })));
+        if (message.payload.case === "clientSubscribe") socket.send(encodeServerToClient(create(ServerToClientSchema, { payload: { case: "stateSnapshot", value: {} } })));
+      });
+    });
+    try {
+      const address = server.address(); assert(address && typeof address !== "string");
+      const result = accountControl(`ws://127.0.0.1:${address.port}`, "session");
+      if (version < 2) {
+        await assert.rejects(result, /服务器需要升级/);
+        assert.deepEqual(received, ["clientAuth"]);
+      } else {
+        assert.equal((await result).accountId, "owner");
+        assert.deepEqual(received, ["clientAuth", "clientSubscribe"]);
+      }
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  }
 });

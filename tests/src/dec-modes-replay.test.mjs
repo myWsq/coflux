@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8834;
 let stack;
@@ -15,7 +15,7 @@ after(async () => { await stack?.stop(); repos.forEach((r) => r.cleanup()); });
 test("输出环挤掉 bracketed-paste 原始转义后，sessiond snapshot 仍恢复模式状态", async () => {
   const repo = mkRepo();
   repos.push(repo);
-  const first = await openRelayDevice(stack);
+  const first = await openNativeDevice(stack);
   const a = first.control;
   a.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await a.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
@@ -37,7 +37,7 @@ test("输出环挤掉 bracketed-paste 原始转义后，sessiond snapshot 仍恢
   // ACK 证明命令已写入 PTY；随后断开 subscriber，让大输出不受浏览器/relay 消费速度影响。
   first.closeTransport();
   await sleep(300);
-  await first.openRelay();
+  await first.openNative();
   const deadline = Date.now() + 30000;
   let completed = false;
   while (Date.now() < deadline) {
@@ -46,7 +46,7 @@ test("输出环挤掉 bracketed-paste 原始转义后，sessiond snapshot 仍恢
       current = await first.attach(sessionId, { timeout: 3000 });
     } catch (error) {
       if (!String(error).includes("transport send failed") && !String(error).includes("sessionAttached")) throw error;
-      await first.openRelay();
+      await first.openNative();
       continue;
     }
     if (utf8(current.ansiSnapshot ?? new Uint8Array()).includes("FLOOD_DONE")) {
@@ -62,7 +62,7 @@ test("输出环挤掉 bracketed-paste 原始转义后，sessiond snapshot 仍恢
   await stack.restartServer();
   await stack.waitDaemonOnline();
 
-  const second = await openRelayDevice(stack);
+  const second = await openNativeDevice(stack);
   const snap = second.control.log.find((message) => message.case === "stateSnapshot");
   const rec = snap.tasks.find((t) => t.id === taskId);
   assert.ok(rec, "重启后任务记录仍在");

@@ -101,7 +101,7 @@ jobs:
 
           if git cat-file -e "${base_sha}:proto/buf.yaml" 2>/dev/null; then
             echo "::notice::协议 breaking 基线：${base_ref} (${base_sha})"
-            buf breaking --against "../.git#ref=${base_sha},subdir=proto"
+            node ../scripts/check-protocol-breaking.mjs "../.git#ref=${base_sha},subdir=proto"
           else
             echo "::notice::基线 ${base_ref} 尚无 proto/buf.yaml，跳过 breaking 检查"
           fi
@@ -128,7 +128,7 @@ jobs:
         run: |
           node scripts/product-version.mjs --check
           node scripts/release-notes.mjs --check
-          node --test scripts/product-version.test.mjs
+          node --test scripts/product-version.test.mjs scripts/check-protocol-breaking.test.mjs
 
       - run: pnpm install --frozen-lockfile
 
@@ -165,15 +165,15 @@ jobs:
       - name: Native grant coordinator tests
         run: node --import tsx --test apps/server/src/tailcat-rendezvous.test.ts
 
-      - name: Rust 单元测试（protocol/supervisor/worker/relay/cli）
+      - name: Rust 单元测试（protocol/supervisor/worker/cli）
         env:
           RUSTFLAGS: -D warnings
-        run: cargo test -p coflux-protocol -p coflux-supervisor -p coflux-worker -p coflux-relay -p coflux-cli
+        run: cargo test -p coflux-protocol -p coflux-supervisor -p coflux-worker -p coflux-cli
 
       - name: Rust 构建
         env:
           RUSTFLAGS: -D warnings
-        run: cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay -p coflux-cli
+        run: cargo build -p coflux-supervisor -p coflux-worker -p coflux-cli
 
       - name: client 状态机测试（DeviceRouter transport/holder/ACK）
         run: node --import tsx --test packages/client/src/*.test.ts
@@ -185,10 +185,10 @@ jobs:
         run: node scripts/npm-publish-guard.mjs --self-check
 
       - name: 黑盒集成测试（pretest 构建 daemon，跑全量）
-        # 4 vCPU runner 上每路 stack = tsx server + supervisor + worker + relay，4 路会挤压固定超时的用例；2 路稳。
+        # 4 vCPU runner 上每路 stack = tsx server + supervisor + worker + native helper + DERP，4 路会挤压固定超时的用例；2 路稳。
         env:
           COFLUX_TEST_CONCURRENCY: "2"
-        run: COFLUX_TEST_TAILCAT=1 COFLUX_TEST_DERPER_BIN="$PWD/target/debug/coflux-test-derper" pnpm -C tests test
+        run: pnpm -C tests test
 
       # Package.swift 在 Linux 仅暴露跨平台 Protocol/Core；ApplePlatform 由下方
       # macOS + iOS SDK 的 xcodebuild 门覆盖，避免用假 stub 获得虚假的 Linux 绿灯。

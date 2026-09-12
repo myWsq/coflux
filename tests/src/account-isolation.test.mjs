@@ -16,7 +16,7 @@ import { join, resolve } from "node:path";
 import postgres from "postgres";
 import { TaskStatus } from "@coflux/protocol";
 import { ADMIN_PG_URL, startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 import { callOperation as callTool, loginAccount } from "./account-harness.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..", "..");
@@ -83,7 +83,7 @@ before(async () => {
 
   // A 的资产：项目 + 运行中的终端
   repo = mkRepo();
-  device = await openRelayDevice(stack);
+  device = await openNativeDevice(stack);
   const c = device.control;
   c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const created = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main workspace", 20000);

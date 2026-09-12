@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { startStack, mkRepo, spawnDaemon, authorizeDaemon, killTree, CLI_BIN } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8875;
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -42,7 +42,7 @@ test("两种 CLI 共用账号能力：跨设备/工作区操作、短命令保�
     remote = spawnDaemon({ ...process.env, COFLUX_SERVER: `ws://127.0.0.1:${PORT}/daemon`, COFLUX_HOME: remoteHome, COFLUX_DEVICE_NAME: "remote-cli-device", COFLUX_LOCAL_GATEWAY_PORT: "0" });
     await authorizeDaemon(PORT, remoteHome, { username: stack.username, password: stack.password });
     const remoteId = JSON.parse(readFileSync(join(remoteHome, "credentials.json"), "utf8")).daemonId;
-    device = await openRelayDevice(stack, { daemonId: remoteId });
+    device = await openNativeDevice(stack, { daemonId: remoteId });
     device.control.send({ case: "projectImport", daemonId: remoteId, path: repo.dir });
     const main = await device.control.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain && m.workspace.daemonId === remoteId, "remote project");
     for (const kind of ["rust", "node"]) {
@@ -69,7 +69,7 @@ test("两种 CLI 共用账号能力：跨设备/工作区操作、短命令保�
       assert.notEqual(deniedInput.code, 0);
       assert.match(deniedInput.stderr, /用户正在接管/);
       device.close();
-      device = await openRelayDevice(stack, { daemonId: remoteId });
+      device = await openNativeDevice(stack, { daemonId: remoteId });
       const waited = await ok(kind, clientHome, ["terminal", "wait", terminal.id, "--timeout", "0", "--remote"]);
       assert.equal(waited.exited, false, "CLI 进程已退出，任务仍应运行");
       await ok(kind, clientHome, ["terminal", "stop", terminal.id, "--remote"]);

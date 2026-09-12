@@ -76,7 +76,7 @@ class FakeClock implements DeviceRouterClock {
 }
 
 interface OpenCall {
-  kind: "direct" | "p2p" | "relay";
+  kind: "direct" | "remote";
   options: DeviceTransportOpenOptions & { grant?: CachedLocalGrant; lease?: OnlineDeviceLease };
   channelId: string;
   sent: Uint8Array<ArrayBuffer>[];
@@ -146,14 +146,8 @@ class FakeAdapter implements DeviceRouterAdapter {
     return this.open("direct", options);
   }
 
-  openRelay(options: DeviceTransportOpenOptions): Promise<OpenedDeviceTransport> {
-    return this.open("relay", options);
-  }
-
-  // 默认模拟无 WebRTC 的环境（node/旧浏览器）：立即拒绝，竞争落回 relay。
-  // P2P 状态机用例见 P2pFakeAdapter。
-  async openP2p(_options: DeviceTransportOpenOptions, _reuseOnly?: boolean): Promise<OpenedDeviceTransport> {
-    throw new Error("环境不支持 WebRTC");
+  openRemote(options: DeviceTransportOpenOptions): Promise<OpenedDeviceTransport> {
+    return this.open("remote", options);
   }
 
   async removeGrant(daemonId: string): Promise<void> {
@@ -172,7 +166,7 @@ class FakeAdapter implements DeviceRouterAdapter {
 
   resolve(call: OpenCall, lease?: OnlineDeviceLease): void {
     const scopes = call.options.scope === DeviceScope.RPC || call.options.scope === DeviceScope.LIFECYCLE
-      ? new Set([DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE])
+      ? new Set(call.kind === "direct" ? [DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE] : [DeviceScope.RPC, DeviceScope.LIFECYCLE])
       : new Set([DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL]);
     call.resolve({
       channelId: call.channelId,
@@ -203,7 +197,7 @@ class FakeAdapter implements DeviceRouterAdapter {
   }
 
   protected open(
-    kind: "direct" | "p2p" | "relay",
+    kind: "direct" | "remote",
     options: DeviceTransportOpenOptions & { grant?: CachedLocalGrant; lease?: OnlineDeviceLease },
   ): Promise<OpenedDeviceTransport> {
     return new Promise((resolve, reject) => {
@@ -224,13 +218,6 @@ class FakeAdapter implements DeviceRouterAdapter {
       }, { once: true });
       this.opens.push(call);
     });
-  }
-}
-
-/** P2P 可用的环境：openP2p 与 direct/relay 一样进入 pending 队列，由测试手动 resolve。 */
-class P2pFakeAdapter extends FakeAdapter {
-  override openP2p(options: DeviceTransportOpenOptions): Promise<OpenedDeviceTransport> {
-    return this.open("p2p", options);
   }
 }
 
@@ -275,7 +262,7 @@ function harness(adapter = new FakeAdapter(grant()), clock = new FakeClock(), na
   let uuid = 0;
   const router = createDeviceRouter({
     enableLocalTransport: true,
-    nativeRemote: native ? { open: (options) => adapter.openRelay(options), control: () => {}, close: () => {} } : undefined,
+    nativeRemote: native ? { open: (options) => adapter.openRemote(options), control: () => {}, close: () => {} } : undefined,
     identityDatabaseName: "unused-test-db",
     origin: "https://p.coflux.dev",
     sendControl: () => undefined,
@@ -296,7 +283,7 @@ function harness(adapter = new FakeAdapter(grant()), clock = new FakeClock(), na
   return { router, adapter, clock, states, snapshots, outputs, detached, inputStates, errors };
 }
 
-function latestOpen(adapter: FakeAdapter, kind: "direct" | "p2p" | "relay", scope = DeviceScope.SESSION_CONTROL): OpenCall {
+function latestOpen(adapter: FakeAdapter, kind: "direct" | "remote", scope = DeviceScope.SESSION_CONTROL): OpenCall {
   const call = [...adapter.opens].reverse().find((item) => item.kind === kind && item.options.scope === scope);
   if (!call) throw new Error(`missing ${kind} open for scope ${scope}`);
   return call;
@@ -387,7 +374,7 @@ async function runSharedRouterTrace(trace: SharedRouterTrace): Promise<void> {
     h.router.setControlOnline(true);
     h.router.attachSession(trace.daemonId, trace.taskId, trace.sessionId, 80, 24);
     await flush();
-    active = latestOpen(adapter, "relay");
+    active = latestOpen(adapter, "remote");
     adapter.resolve(active);
     await flush();
 
@@ -440,7 +427,7 @@ async function runSharedRouterTrace(trace: SharedRouterTrace): Promise<void> {
           }
           break;
         case "reopenSession": {
-          const reopened = latestOpen(adapter, "relay");
+          const reopened = latestOpen(adapter, "remote");
           assert.notEqual(reopened, active, `${trace.id}: control 恢复后必须建立新 relay`);
           adapter.resolve(reopened);
           await flush();
@@ -544,14 +531,14 @@ test("cached grant 从 t=0 直连，且 relay 严格延迟到 200ms hedge", asyn
   await flush();
   assert.equal(h.adapter.pairCalls, 0);
   assert.equal(h.adapter.opens.filter((call) => call.kind === "direct").length, 1);
-  assert.equal(h.adapter.opens.filter((call) => call.kind === "relay").length, 0);
+  assert.equal(h.adapter.opens.filter((call) => call.kind === "remote").length, 0);
 
   h.clock.advance(199);
   await flush();
-  assert.equal(h.adapter.opens.filter((call) => call.kind === "relay").length, 0);
+  assert.equal(h.adapter.opens.filter((call) => call.kind === "remote").length, 0);
   h.clock.advance(1);
   await flush();
-  assert.equal(h.adapter.opens.filter((call) => call.kind === "relay").length, 1);
+  assert.equal(h.adapter.opens.filter((call) => call.kind === "remote").length, 1);
   h.router.destroy();
 });
 
@@ -563,10 +550,10 @@ test("relay 先赢后不发送双路业务，迟到 direct 以新 generation 自
   const firstDirect = latestOpen(h.adapter, "direct");
   h.clock.advance(200);
   await flush();
-  const relay = latestOpen(h.adapter, "relay");
+  const relay = latestOpen(h.adapter, "remote");
   h.adapter.resolve(relay);
   await flush();
-  assert.equal(h.states.at(-1)?.mode, "relay");
+  assert.equal(h.states.at(-1)?.mode, "remote");
 
   h.adapter.resolve(firstDirect);
   await flush();
@@ -590,10 +577,10 @@ test("无缓存时 relay 立即工作，pair 后后台迁回 direct", async () =
   h.router.retainDevice("daemon-1");
   await flush();
   assert.equal(adapter.pairCalls, 1);
-  const relay = latestOpen(adapter, "relay");
+  const relay = latestOpen(adapter, "remote");
   adapter.resolve(relay);
   await flush();
-  assert.equal(h.states.at(-1)?.mode, "relay");
+  assert.equal(h.states.at(-1)?.mode, "remote");
   h.clock.advance(350);
   await flush();
   const direct = latestOpen(adapter, "direct");
@@ -634,7 +621,7 @@ test("elevated lane 的 direct/relay 失败不会关闭健康 session lane", asy
   const elevatedDirect = latestOpen(h.adapter, "direct", DeviceScope.RPC);
   h.adapter.fail(elevatedDirect);
   await flush();
-  const elevatedRelay = latestOpen(h.adapter, "relay", DeviceScope.RPC);
+  const elevatedRelay = latestOpen(h.adapter, "remote", DeviceScope.RPC);
   h.adapter.fail(elevatedRelay);
   await assert.rejects(pending, /高权限 Device lane 不可用/);
   assert.equal(session.closed, false);
@@ -961,7 +948,7 @@ test("初始 direct 与 relay 都失败后发布 offline 并进入有界恢复",
   const direct = latestOpen(h.adapter, "direct");
   h.clock.advance(200);
   await flush();
-  const relay = latestOpen(h.adapter, "relay");
+  const relay = latestOpen(h.adapter, "remote");
   h.adapter.fail(direct, "gateway down");
   h.adapter.fail(relay, "relay down");
   await flush();
@@ -1019,7 +1006,7 @@ test("release 会立即取消并清除后台 pair，下一次 demand 可重新�
   const release = h.router.retainDevice("daemon-1");
   await flush();
   assert.equal(adapter.pairCalls, 1);
-  const firstRelay = latestOpen(adapter, "relay");
+  const firstRelay = latestOpen(adapter, "remote");
   adapter.resolve(firstRelay);
   await flush();
 
@@ -1073,7 +1060,7 @@ test("direct 先赢后迟到 relay 不能覆盖，release 后无重试与轮询�
   const direct = latestOpen(h.adapter, "direct");
   h.clock.advance(200);
   await flush();
-  const relay = latestOpen(h.adapter, "relay");
+  const relay = latestOpen(h.adapter, "remote");
   h.adapter.resolve(direct);
   await flush();
   h.adapter.resolve(relay);
@@ -1232,204 +1219,57 @@ test("旧 daemon 对 ping 回 unsupported_payload 时静默降级，不弹错误
   h.router.destroy();
 });
 
-test("measureOnly 持有只建 relay：不读 grant、不试 direct、不配对、不轮询 catalog", async () => {
-  const h = harness();
-  h.router.setControlOnline(true);
+test("sidebar measurement does not open local or native channels", async () => {
+  const h = harness(); h.router.setControlOnline(true);
   const release = h.router.retainDevice("daemon-1", { measureOnly: true });
-  await flush();
-
-  // 本机有 cached grant（harness 默认给了），完整持有本会从 t=0 抢 direct；measureOnly 必须
-  // 跳过整条本地路径——direct 走 loopback，只有与浏览器同机的设备可能命中，为侧栏一个读数
-  // 去敲它，对其余设备就是每 5s 一次注定失败的重试。
-  assert.equal(h.adapter.opens.filter((call) => call.kind === "direct").length, 0, "不该尝试 direct");
-  assert.equal(h.adapter.pairCalls, 0, "不该发起本机配对");
-  const relay = latestOpen(h.adapter, "relay");
-  h.adapter.resolve(relay);
-  await flush();
-
-  // 该有的还得有：心跳照发，否则侧栏拿不到读数，这层持有就没意义了。
-  assert.ok(payloads(relay).some((payload) => payload?.case === "ping"), "measureOnly 仍须发心跳");
-  // 不该有的：catalog 轮询是给真正在用这台设备的人的。
-  assert.equal(payloads(relay).filter((payload) => payload?.case === "sessionCatalogRequest").length, 0, "不该轮询 catalog");
-
-  h.clock.advance(30_000);
-  await flush();
-  assert.equal(h.adapter.opens.filter((call) => call.kind === "direct").length, 0, "30s 内也不该冒出 direct 重试");
-  assert.equal(h.adapter.pairCalls, 0, "30s 内也不该冒出配对");
-
-  release();
-  h.router.destroy();
+  await flush(); h.clock.advance(60_000); await flush();
+  assert.equal(h.adapter.opens.length, 0); assert.equal(h.adapter.pairCalls, 0);
+  release(); h.router.destroy();
 });
 
-test("measureOnly 之上叠加完整持有会立即提升 direct，且释放完整持有后连接仍在", async () => {
-  const h = harness();
-  h.router.setControlOnline(true);
-  const releaseMeasure = h.router.retainDevice("daemon-1", { measureOnly: true });
-  await flush();
-  h.adapter.resolve(latestOpen(h.adapter, "relay"));
-  await flush();
-  assert.equal(h.states.at(-1)?.mode, "relay");
-
-  // 进项目：此时 lane 已是测量期建好的 relay，它当时刻意跳过了 direct。不补这一下，
-  // 本机设备会一直用着 relay，永远升不回 direct。
-  const releaseFull = h.router.retainDevice("daemon-1");
-  h.clock.advance(1); // immediate 提升排的是 delay=0 的 timer，FakeClock 要走一步才触发
-  await flush();
-  const direct = latestOpen(h.adapter, "direct");
-  assert.ok(direct, "完整持有必须立即触发 direct 提升");
-  h.adapter.resolve(direct);
-  await flush();
+test("full demand opens local transport and releasing it leaves measurement idle", async () => {
+  const h = harness(); h.router.setControlOnline(true);
+  const measurement = h.router.retainDevice("daemon-1", { measureOnly: true });
+  await flush(); assert.equal(h.adapter.opens.length, 0);
+  const full = h.router.retainDevice("daemon-1"); await flush();
+  const local = latestOpen(h.adapter, "direct"); h.adapter.resolve(local); await flush();
   assert.equal(h.states.at(-1)?.mode, "direct");
+  full(); await flush(); assert.equal(local.closed, true);
+  const count = h.adapter.opens.length; h.clock.advance(60_000); await flush();
+  assert.equal(h.adapter.opens.length, count); measurement(); h.router.destroy();
+});
 
-  // 退出项目：measureOnly 还在，连接不该被拆掉（侧栏还要读数）。
-  releaseFull();
-  await flush();
-  assert.equal(h.states.at(-1)?.mode, "direct", "measureOnly 仍持有时不该掉线");
-  releaseMeasure();
+test("native path changes update observation without replacing the logical lane", async () => {
+  const adapter = new DeferredPairAdapter(); const h = harness(adapter);
+  h.router.setControlOnline(true); h.router.retainDevice("daemon-1"); await flush();
+  const remote = latestOpen(adapter, "remote"); adapter.resolve(remote); await flush();
+  const generation = h.states.at(-1)?.generation;
+  remote.options.onPath?.("direct", 2); assert.equal(h.states.at(-1)?.mode, "peer");
+  remote.options.onPath?.("relay", 30); assert.equal(h.states.at(-1)?.mode, "relay");
+  assert.equal(h.states.at(-1)?.generation, generation); assert.equal(remote.closed, false);
+  assert.equal(adapter.opens.filter(call => call.kind === "remote").length, 1);
   h.router.destroy();
 });
 
-test("无 grant 设备 P2P 参与直连槽位：relay 先赢，迟到 P2P 经重试自动升迁", async () => {
-  const adapter = new P2pFakeAdapter(undefined);
-  const h = harness(adapter);
-  h.router.setControlOnline(true);
-  h.router.retainDevice("daemon-1");
-  await flush();
-  const firstP2p = latestOpen(adapter, "p2p");
-  h.clock.advance(200);
-  await flush();
-  const relay = latestOpen(adapter, "relay");
-  adapter.resolve(relay);
-  await flush();
-  assert.equal(h.states.at(-1)?.mode, "relay");
-
-  // 迟到的 P2P generation 落后于 relay winner：关闭并立即以新 generation 重试（与 direct 同语义）。
-  adapter.resolve(firstP2p);
-  await flush();
-  assert.equal(firstP2p.closed, true);
-  h.clock.advance(0);
-  await flush();
-  // pair 在后台已成功（中心协助配对不验证同机），升级 probe 先撞 loopback；
-  // 远程设备上它连不通，随后才轮到 P2P——这正是非同机设备的真实序列。
-  const retryDirect = latestOpen(adapter, "direct");
-  retryDirect.reject(new Error("connection refused"));
-  await flush();
-  const promoted = latestOpen(adapter, "p2p");
-  assert.notEqual(promoted, firstP2p);
-  assert.ok(promoted.options.generation > relay.options.generation);
-  adapter.resolve(promoted);
-  await flush();
-  assert.equal(h.states.at(-1)?.mode, "p2p");
-  assert.equal(payloads(relay).filter((payload) => payload?.case === "sessionAttach").length, 0);
+test("silent native lane is retired after heartbeat misses and reconnects", async () => {
+  const adapter = new DeferredPairAdapter(); const h = harness(adapter);
+  h.router.setControlOnline(true); h.router.retainDevice("daemon-1"); await flush();
+  const first = latestOpen(adapter, "remote"); adapter.resolve(first); await flush();
+  h.clock.advance(5_000); await flush(); h.clock.advance(5_000); await flush();
+  assert.equal(first.closed, true);
+  h.clock.advance(5_000); await flush();
+  const next = latestOpen(adapter, "remote"); assert.notEqual(next, first);
+  adapter.resolve(next); await flush(); assert.equal(h.states.at(-1)?.mode, "remote");
   h.router.destroy();
 });
 
-// 事故复现（2026-08-17）：P2P 靠 promotion 顶掉正常工作的 relay，随后 DataChannel 崩掉，
-// 而 webrtc 的 onclose 要等 ~30s ICE 超时才来——那 30s 里用户的每次按键都发进黑洞。
-// 心跳判死把这个窗口压到 ~10s，并让 relay 重新接管。
-test("P2P 建成后静默停止响应：心跳判死摘掉它，relay 重新接管", async () => {
-  const adapter = new P2pFakeAdapter(undefined);
-  const h = harness(adapter);
-  h.router.setControlOnline(true);
-  h.router.retainDevice("daemon-1");
-  await flush();
-  const firstP2p = latestOpen(adapter, "p2p");
-  h.clock.advance(200);
-  await flush();
-  const relay = latestOpen(adapter, "relay");
-  adapter.resolve(relay);
-  await flush();
-  assert.equal(h.states.at(-1)?.mode, "relay");
-
-  // 迟到的 P2P 以新 generation 升迁，顶掉正在工作的 relay（plan 076 的既有设计）。
-  adapter.resolve(firstP2p);
-  await flush();
-  h.clock.advance(0);
-  await flush();
-  latestOpen(adapter, "direct").reject(new Error("connection refused"));
-  await flush();
-  const promoted = latestOpen(adapter, "p2p");
-  adapter.resolve(promoted);
-  await flush();
-  assert.equal(h.states.at(-1)?.mode, "p2p", "前置：P2P 已接管");
-
-  // 此刻 DataChannel 静默死亡：不回 pong，也不触发 onclose（正是 WebRTC 的实际行为）。
-  h.clock.advance(5_000);
-  await flush();
-  assert.equal(promoted.closed, false, "一次无响应不判死");
-  h.clock.advance(5_000);
-  await flush();
-  assert.equal(promoted.closed, true, "连续两次无响应即摘掉这条 P2P");
-
-  // recovery 重新竞速：loopback 依旧不通，relay 再次接管。
-  h.clock.advance(1_000);
-  await flush();
-  latestOpen(adapter, "direct").reject(new Error("connection refused"));
-  await flush();
-  h.clock.advance(200);
-  await flush();
-  const relay2 = latestOpen(adapter, "relay");
-  assert.notEqual(relay2, relay, "应建一条新的 relay 通道");
-  adapter.resolve(relay2);
-  await flush();
-  assert.equal(h.states.at(-1)?.mode, "relay", "P2P 判死后必须回落 relay——这正是事故里没发生的事");
-  h.router.destroy();
-});
-
-test("P2P 判死后进入退避：重新竞速时不再发起，relay 稳住不被反复抢占", async () => {
-  const adapter = new P2pFakeAdapter(undefined);
-  const h = harness(adapter);
-  h.router.setControlOnline(true);
-  h.router.retainDevice("daemon-1");
-  await flush();
-  const firstP2p = latestOpen(adapter, "p2p");
-  h.clock.advance(200);
-  await flush();
-  adapter.resolve(latestOpen(adapter, "relay"));
-  await flush();
-  adapter.resolve(firstP2p);
-  await flush();
-  h.clock.advance(0);
-  await flush();
-  latestOpen(adapter, "direct").reject(new Error("connection refused"));
-  await flush();
-  const promoted = latestOpen(adapter, "p2p");
-  adapter.resolve(promoted);
-  await flush();
-  assert.equal(h.states.at(-1)?.mode, "p2p", "前置：P2P 已接管");
-
-  // 静默死亡 → 判死
-  h.clock.advance(5_000);
-  await flush();
-  h.clock.advance(5_000);
-  await flush();
-  assert.equal(promoted.closed, true);
-  const p2pOpensAtDeath = adapter.opens.filter((call) => call.kind === "p2p").length;
-
-  // recovery 重新竞速：loopback 仍不通，relay 接管。
-  h.clock.advance(1_000);
-  await flush();
-  latestOpen(adapter, "direct").reject(new Error("connection refused"));
-  await flush();
-  h.clock.advance(200);
-  await flush();
-  adapter.resolve(latestOpen(adapter, "relay"));
-  await flush();
-  assert.equal(h.states.at(-1)?.mode, "relay");
-  assert.equal(
-    adapter.opens.filter((call) => call.kind === "p2p").length,
-    p2pOpensAtDeath,
-    "退避期内一次都不该再发起 P2P——否则它建成就 promotion 抢走 relay，崩一次抢一次",
-  );
-
-  // 退避到期前始终不发起：再推一段仍在窗口内的时间，并触发一次直连重试。
-  h.clock.advance(3_000);
-  await flush();
-  assert.equal(
-    adapter.opens.filter((call) => call.kind === "p2p").length,
-    p2pOpensAtDeath,
-    "退避未到期就不该重新发起",
-  );
+test("native recovery uses one remote contender with bounded retry", async () => {
+  const adapter = new DeferredPairAdapter(); const h = harness(adapter);
+  h.router.setControlOnline(true); h.router.retainDevice("daemon-1"); await flush();
+  const first = latestOpen(adapter, "remote"); adapter.fail(first); await flush();
+  const before = adapter.opens.length; await flush(); assert.equal(adapter.opens.length, before);
+  h.clock.advance(5_000); await flush();
+  assert.equal(adapter.opens.filter(call => call.kind === "remote").length, 2);
   h.router.destroy();
 });
 
@@ -1443,13 +1283,13 @@ test("client 控制面在 15s 宽限内恢复时保留同一条 relay", async ()
   h.router.setControlOnline(true);
   h.router.retainDevice("daemon-1");
   await flush();
-  const relay = latestOpen(adapter, "relay");
+  const relay = latestOpen(adapter, "remote");
   adapter.resolve(relay);
   await flush();
   // 关闭心跳，避免本用例推进 15s 时把“未模拟 pong”误当成数据面故障；本用例只测控制面。
   adapter.emit(relay, { case: "error", value: { code: "unsupported_payload", message: "old daemon" } });
   await flush();
-  const relayOpenCount = adapter.opens.filter((call) => call.kind === "relay").length;
+  const relayOpenCount = adapter.opens.filter((call) => call.kind === "remote").length;
 
   h.router.setControlDisconnected();
   h.clock.advance(14_999);
@@ -1461,7 +1301,7 @@ test("client 控制面在 15s 宽限内恢复时保留同一条 relay", async ()
   await flush();
   assert.equal(relay.closed, false, "authOk 在宽限内到达后应继续使用同一条 relay");
   assert.equal(
-    adapter.opens.filter((call) => call.kind === "relay").length,
+    adapter.opens.filter((call) => call.kind === "remote").length,
     relayOpenCount,
     "短暂抖动不得经历 loseChannel → 新 relay 竞速",
   );
@@ -1474,7 +1314,7 @@ test("client 控制面断开超过 15s 后关闭保留的 relay", async () => {
   h.router.setControlOnline(true);
   h.router.retainDevice("daemon-1");
   await flush();
-  const relay = latestOpen(adapter, "relay");
+  const relay = latestOpen(adapter, "remote");
   adapter.resolve(relay);
   await flush();
   adapter.emit(relay, { case: "error", value: { code: "unsupported_payload", message: "old daemon" } });
@@ -1496,7 +1336,7 @@ test("hard revoke 不经过 transient grace，立即关闭 relay", async () => {
   h.router.setControlOnline(true);
   h.router.retainDevice("daemon-1");
   await flush();
-  const relay = latestOpen(adapter, "relay");
+  const relay = latestOpen(adapter, "remote");
   adapter.resolve(relay);
   await flush();
 
@@ -1513,13 +1353,13 @@ test("断线前发起、断线后才完成的 relay continuation 不能跨控制
   h.router.setControlOnline(true);
   h.router.retainDevice("daemon-1");
   await flush();
-  const stale = latestOpen(adapter, "relay");
+  const stale = latestOpen(adapter, "remote");
 
   h.router.setControlDisconnected();
   adapter.resolve(stale); // 模拟 relay WS open 与断线同时完成，continuation 迟到
   await flush();
   assert.equal(stale.closed, true, "旧控制代际签出的异步 open 结果必须被关闭");
-  assert.notEqual(h.states.at(-1)?.mode, "relay", "旧 continuation 不得成为 active lane");
+  assert.notEqual(h.states.at(-1)?.mode, "remote", "旧 continuation 不得成为 active lane");
   h.router.destroy();
 });
 
@@ -1529,7 +1369,7 @@ test("旧 control grace timer 不会误关恢复后新建的 relay", async () =>
   h.router.setControlOnline(true);
   h.router.retainDevice("daemon-1");
   await flush();
-  const first = latestOpen(adapter, "relay");
+  const first = latestOpen(adapter, "remote");
   adapter.resolve(first);
   await flush();
   adapter.emit(first, { case: "error", value: { code: "unsupported_payload", message: "old daemon" } });
@@ -1541,7 +1381,7 @@ test("旧 control grace timer 不会误关恢复后新建的 relay", async () =>
   first.options.onClose("relay test close");
   h.clock.advance(350);
   await flush();
-  const recovered = latestOpen(adapter, "relay");
+  const recovered = latestOpen(adapter, "remote");
   assert.notEqual(recovered, first, "前置：在线后已恢复出一条新 relay");
   adapter.resolve(recovered);
   await flush();
@@ -1552,27 +1392,27 @@ test("旧 control grace timer 不会误关恢复后新建的 relay", async () =>
   h.router.destroy();
 });
 
-test("中心授权 hard revoke 时 active P2P channel 立即失效，不等对端关闭事件", async () => {
-  const adapter = new P2pFakeAdapter(undefined);
+test("中心授权 hard revoke 时 active native channel 立即失效，不等对端关闭事件", async () => {
+  const adapter = new DeferredPairAdapter(undefined);
   const h = harness(adapter);
   h.router.setControlOnline(true);
   h.router.retainDevice("daemon-1");
   await flush();
-  const p2p = latestOpen(adapter, "p2p");
+  const p2p = latestOpen(adapter, "remote");
   adapter.resolve(p2p);
   await flush();
-  assert.equal(h.states.at(-1)?.mode, "p2p");
+  assert.equal(h.states.at(-1)?.mode, "remote");
 
   h.router.setControlOnline(false);
   await flush();
-  assert.equal(p2p.closed, true, "明确授权失效必须立即关闭 P2P channel");
-  assert.notEqual(h.states.at(-1)?.mode, "p2p");
+  assert.equal(p2p.closed, true, "明确授权失效必须立即关闭 native channel");
+  assert.notEqual(h.states.at(-1)?.mode, "remote");
   h.router.destroy();
 });
 
 
-test("native sidebar measurement stays idle and demand never starts WebRTC", async () => {
-  const adapter = new P2pFakeAdapter();
+test("native sidebar measurement stays idle until actual demand", async () => {
+  const adapter = new DeferredPairAdapter();
   const h = harness(adapter, new FakeClock(), true);
   h.router.setControlOnline(true);
   const releaseMeasure = h.router.retainDevice("daemon-1", { measureOnly: true });
@@ -1580,9 +1420,9 @@ test("native sidebar measurement stays idle and demand never starts WebRTC", asy
   assert.equal(adapter.opens.length, 0);
   const releaseDemand = h.router.retainDevice("daemon-1");
   await flush(); h.clock.advance(250); await flush();
-  assert.equal(adapter.opens.filter(call => call.kind === "p2p").length, 0);
-  assert.equal(adapter.opens.filter(call => call.kind === "relay").length, 1);
-  const active = latestOpen(adapter, "relay"); adapter.resolve(active); await flush();
+  assert.equal(adapter.opens.filter(call => call.kind === "direct").length, 0);
+  assert.equal(adapter.opens.filter(call => call.kind === "remote").length, 1);
+  const active = latestOpen(adapter, "remote"); adapter.resolve(active); await flush();
   releaseDemand(); await flush(); assert.equal(active.closed, true);
   const count = adapter.opens.length; h.clock.advance(60_000); await flush();
   assert.equal(adapter.opens.length, count, "idle measurement must not reconnect native devices");

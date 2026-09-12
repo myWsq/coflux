@@ -4,14 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "pretest": "CARGO_PROFILE_DEV_DEBUG=0 cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay -p coflux-cli",
+    "pretest": "CARGO_PROFILE_DEV_DEBUG=0 cargo build -p coflux-supervisor -p coflux-worker -p coflux-cli && node ../scripts/build-test-transports.mjs",
     "test": "node --import tsx --test --test-concurrency=${COFLUX_TEST_CONCURRENCY:-4} src/*.test.mjs"
   },
   "devDependencies": {
     "@coflux/protocol": "workspace:*",
     "@xterm/headless": "^6.0.0",
     "postgres": "^3.4.9",
-    "werift": "^0.24.4",
     "ws": "^8.18.0"
   }
 }

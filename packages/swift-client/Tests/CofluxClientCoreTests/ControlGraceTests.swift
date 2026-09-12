@@ -16,7 +16,7 @@ import Testing
             _ = try await h.router.execute(daemonID: "d1", workspaceID: "w1", command: "git", args: ["status"])
             Issue.record("断线宽限不能执行 RPC")
         } catch let error as DeviceRouteError { #expect(error.code == "lease_offline") }
-        #expect(h.relayConnectCount == 1)
+        #expect(h.localConnectCount == 1)
         #expect(!connection.closed)
     }
 
@@ -30,27 +30,28 @@ import Testing
         try await Task.sleep(for: .milliseconds(250))
         #expect(!connection.closed)
         #expect(h.router.hasSessionControl(daemonID: "d1", sessionID: "s1"))
-        #expect(h.relayConnectCount == 1)
+        #expect(h.localConnectCount == 1)
     }
 
-    @Test func repeatedDisconnectDoesNotExtendDeadline() async throws {
+    @Test func authorizedLocalSessionOutlivesRemoteGraceDeadline() async throws {
         let h = DeviceHarness(controlGraceDuration: .milliseconds(300))
         defer { h.router.reset() }
         let (connection, _) = try await h.attachAndSnapshot()
         h.router.setControlDisconnected()
         try await Task.sleep(for: .milliseconds(150))
         h.router.setControlDisconnected()
-        #expect(await waitUntil(timeout: .milliseconds(220)) { connection.closed })
-        #expect(!h.router.hasSessionControl(daemonID: "d1", sessionID: "s1"))
-        #expect(h.relayConnectCount == 1)
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(!connection.closed)
+        #expect(h.router.hasSessionControl(daemonID: "d1", sessionID: "s1"))
+        #expect(h.localConnectCount == 1)
     }
 
-    @Test func hardRevocationDuringGraceClosesImmediately() async throws {
+    @Test func accountRevocationClosesLocalSessionImmediately() async throws {
         let h = DeviceHarness(controlGraceDuration: .seconds(10))
         defer { h.router.reset() }
         let (connection, _) = try await h.attachAndSnapshot()
         h.router.setControlDisconnected()
-        h.router.setControlOnline(false)
+        h.router.setAccountID(nil)
         #expect(await waitUntil { connection.closed })
         #expect(!h.router.hasSessionControl(daemonID: "d1", sessionID: "s1"))
     }
@@ -60,7 +61,7 @@ import Testing
         defer { h.router.reset() }
         let (session, _) = try await h.attachAndSnapshot()
         let request = Task { try await h.router.execute(daemonID: "d1", workspaceID: "w1", command: "git", args: ["status"]) }
-        let elevated = try await h.grantNextRelay()
+        let elevated = try await h.openNextLocal()
         h.router.setControlDisconnected()
         #expect(await waitUntil { elevated.closed })
         #expect(!session.closed)

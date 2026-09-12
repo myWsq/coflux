@@ -21,9 +21,6 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # 固定 rustls 只用 ring provider，关掉默认 aws-lc-rs：交叉编译（musl）友好、无需 C 工具链；
 # 且避免依赖树里两个 provider 并存时 rustls 无法自动选定而 panic。
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-# relay /healthz 的 HTTPS GET 复用同一 rustls + Mozilla 根证书栈；不引 OpenSSL。
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
-webpki-roots = "0.26"
 futures-util = "0.3"
 base64 = "0.22"
 hex = "0.4"
@@ -31,11 +28,6 @@ p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 sha2 = "0.10"
 hmac = "0.12"
-webrtc = "0.20.2"
-async-trait = "0.1.92"
-bytes = "1.12.1"
-if-addrs = "0.15.0"
-rtc = "0.20"
 
 # 端口探测（005）仅 macOS 侧需要：同 uid 无特权枚举进程 fd/socket 信息（listpidinfo/pidfdinfo），
 # 不需要 root、不 fork lsof 子进程。Linux 手撸 /proc，其余平台空实现，故只在 macOS target 引入。

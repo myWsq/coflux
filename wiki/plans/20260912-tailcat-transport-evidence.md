@@ -1,6 +1,16 @@
 # Tailcat transport migration evidence
 
-## Current outcome
+## Current execution
+
+The supported Desktop/Linux source now uses Tailcat by default. Active custom
+relay/WebRTC implementations, signaling, dependencies, and release artifacts have
+been removed under the user's explicit retirement authorization. Local loopback
+and DeviceEnvelope version 1 remain; control protocol version 2 is the compatibility
+floor. This is a source migration, not a production rollout. The final complete black-box suite passed **222/222**, with zero failures and
+zero skips, in **189.11 seconds**. The prior latency failure and external
+acceptance gaps remain open.
+
+## Candidate outcome before retirement
 
 The opt-in candidate is implemented and locally validated; migration promotion is **not complete**. `COFLUX_TAILCAT=1` selects it, and the old supported transport remains the default. The final full black-box suite passed **220/220**, with zero failures/skips, in **141.21 s**. Final fault recovery measured **16.83 s** for the initial unreachable region, **5.03 s** after helper crash, and **13.15 s** after active-region loss, with unchanged PTY identity. Client grace and stale requests after worker control loss also passed.
 
@@ -183,3 +193,99 @@ The final Linux amd64 supervisor/worker/CLI snapshot also built successfully in 
 ### Completed thirty-minute application soak
 
 The frozen M2 application stack completed 1,801,946 ms of continuous PTY activity (179 acknowledged commands with actual-output matching and catalog PID checks). PTY PID `44428` and its session ID stayed unchanged. Active client/server helper FD records remained at 13 throughout sampling. After both lanes closed, backend drop, and a further 60 seconds idle, the client helper returned to 9 FD records (its initial count), 26,656 KiB RSS, and 0% CPU. The whole fixture passed in 1,868,674 ms; the supervisor, worker, both helpers, and PTY processes were confirmed absent afterward. No monotonically growing active RSS trend was observed. This does not cover subsequent M3 delivery or channel-invalidation changes.
+
+## Retirement: stock DERP admission verification
+
+Before the runtime cleanup was complete, the orchestrator ran the pinned stock
+`derper` binary with `-verify-client-url` pointing at the real Coflux
+`startDerpAdmission` listener and `-verify-client-url-fail-open=false`. An
+independent Go DERP client generated a fresh node key per attempt, validated the
+temporary TLS certificate, and waited for DERP's `ServerInfoMessage` rather than
+interpreting a TCP/TLS connection as admission. Results:
+
+- Registered node accepted; the Coflux verifier received one request.
+- Unregistered node rejected; the verifier received one request.
+- Verifier listener stopped: a registered node was rejected (fail closed).
+- Verifier listener restored: a fresh registered node was accepted.
+
+All four checks passed. The test used a loopback registry callback, not the full
+account/device grant lifecycle or a deployed private tunnel; those boundaries
+remain separate acceptance claims. Temporary DERP/client processes and
+certificates were cleaned up. Log: `/tmp/coflux-tailcat-admission-probe.log`.
+
+## Default migration verification (2026-09-12)
+
+The first retirement full suite finished with 197/221 passing and 24 failures.
+The failures exposed migration mistakes in test setup: missing gateway pairing,
+session stop/exit acknowledgments assigned to the elevated lane, obsolete control
+version fixtures, and worker-only upgrade layouts without a matching companion.
+Those fixtures were migrated while retaining their original business and negative
+signature assertions. The focused rerun passed 59/61; its remaining two automatic
+upgrade failures came from a missing `transport.target` in the mock manifest.
+The production parser correctly rejected it. After fixing the fixture, both
+automatic-upgrade tests passed in 20.44 seconds. Debug logs confirmed manifest
+rejection before the correction; no production validation was relaxed.
+
+Verified on the retirement source:
+
+- Rust build: zero warnings. Rust units: CLI 28, protocol 41, supervisor 75,
+  worker 114; all 258 passed.
+- Server types passed. Shared client and native coordinator tests: 76/76 passed.
+- Desktop main/preload/renderer types passed; Desktop tests: 96/96 passed;
+  production renderer/main build passed. A real WebSocket fixture verifies that
+  the auxiliary account connection rejects server versions 0/1 before subscribing
+  and accepts compatible versions 2/3.
+- Swift package tests: 65 passed. The iOS app and test targets passed unsigned
+  simulator `build-for-testing`; this is compile acceptance, not iOS remote
+  transport support. Swift preserves local sessions and reports unsupported
+  remote operations immediately.
+- Go backend/helper/IPC units, all-package vet, and all-package build passed with
+  `CGO_ENABLED=0`. The default-CGO command again failed on the host's incompatible
+  macOS SDK/linker; the shipping CGO-free configuration was used for acceptance.
+- Protocol lint and regeneration passed with zero generated-file changes.
+  Strict breaking checks passed against both `67b5175` and `7f52cd4`. Four wrapper
+  tests passed. Independent temporary-proto mutations confirmed rejection of an
+  unrelated field type change, removal of a reserved number, and removal of a
+  reserved name. Only the 26 explicitly reviewed FILE removals are excepted;
+  WIRE_JSON compatibility remains unfiltered.
+- Product-version tests and release version check passed. All seven release
+  signing/installation tests passed, including mandatory companion rejection.
+- Permanent real-stock-DERP admission fixture passed: registered node allowed,
+  unknown node denied, verifier outage denied, and recovery allowed. It uses
+  the production verifier listener and a fresh independent DERP client per probe.
+- Desktop account lifecycle acceptance passed: offline local cleanup, persisted
+  retry after reconstruction, old-session revocation, and preservation of a
+  different device's running terminal and project files.
+- Unsigned macOS arm64 packaging passed with automatic signing discovery disabled.
+  All four packaged runtime binaries, notices, and VERSION match the staged
+  inputs byte-for-byte. The full-suite prebuild subsequently rebuilt debug
+  artifacts with debug info disabled, so artifact identity was checked against
+  the frozen staging inputs, not the later contents of `target/debug`.
+
+Remaining release acceptance is explicitly separate: real internet/NAT endpoints,
+the complete application resource matrix at 0/1/10 demanded devices, packaged GUI
+and keychain lifecycle, and Developer ID/notarization are not established. The
+planned standalone `tests/acceptance/tailcat-network.mjs` is not delivered; prior
+container fault probes and current permanent application fault tests are the
+available evidence, not a complete reproducible container matrix. The previous
+latency budget remains failed. No push, PR, merge, release, or production change
+was performed.
+
+### Final regression result
+
+The complete retirement black-box invocation passed **222 tests, zero failures,
+zero skips**, in **189.106 seconds**. It ran the default native harness without
+any opt-in flag. Fault recovery measured 16.918 seconds for unreachable initial
+DERP, 5.029 seconds for serving-helper crash, and 13.126 seconds for active-region
+failure, preserving PTY identity and enforcing independent client/worker control
+loss. Paired upgrade acceptance and the 8 MiB application roundtrip also passed.
+The configured Desktop floor test was strengthened to floor 3: client version 2
+is rejected and version 3 succeeds, independently of the global version-2 floor.
+That final test-only revision passed separately; the only subsequent Rust change
+was macro indentation, followed by a fresh zero-warning build.
+
+The local code migration is implemented and regression-verified. The original
+full release-acceptance checklist is deliberately not marked DONE. Logs from the
+failed and successful iterations remain under `/tmp/coflux-tailcat-retirement-*`;
+temporary fixture credentials, subprocesses, databases, and build-only scratch
+resources are cleaned up after verification.

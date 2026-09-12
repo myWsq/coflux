@@ -266,7 +266,7 @@ if (!app.requestSingleInstanceLock()) {
     cleanupTimer.unref();
 
 
-    const tailcatEnabled = process.env.COFLUX_TAILCAT === "1" && !!daemonBundle;
+    const tailcatEnabled = !!daemonBundle;
     const nativeTransport = tailcatEnabled ? new NativeTailcatTransport(join(daemonBundle!.dir, "coflux-transport"), serverUrl, tokenStore.read, (event) => sendToRenderer(IPC.tailcatEvent, event), app.getVersion()) : undefined;
     if(nativeTransport) registerTailcatIpc(nativeTransport, trusted);
     app.once("will-quit", () => nativeTransport?.setControl(false, true));

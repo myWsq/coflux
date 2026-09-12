@@ -8,13 +8,13 @@
     "dev:pg": "docker compose up -d",
     "dev:server": "pnpm --filter @coflux/server dev",
     "dev:desktop": "pnpm --filter @coflux/desktop dev",
-    "dev:daemon": "cargo build -p coflux-supervisor -p coflux-worker && COFLUX_HOME=\"$PWD/.coflux-dev\" COFLUX_WORKER_CMD=\"$PWD/target/debug/coflux-worker\" ./target/debug/coflux-supervisor",
-    "dev:relay": "cargo build -p coflux-relay && COFLUX_RELAY_LISTEN=127.0.0.1:8790 COFLUX_RELAY_PUBKEY=37ae65ed9043f7d09ccbd7818368f7d417f9fdbaa65a73c8782d83478a15d686 ./target/debug/coflux-relay",
+    "dev:daemon": "cargo build -p coflux-supervisor -p coflux-worker && node scripts/build-test-transports.mjs && COFLUX_HOME=\"$PWD/.coflux-dev\" COFLUX_WORKER_CMD=\"$PWD/target/debug/coflux-worker\" ./target/debug/coflux-supervisor",
     "dev": "pnpm -r --parallel --filter @coflux/server --filter @coflux/desktop dev",
-    "build": "pnpm -r build && cargo build --release",
-    "build:daemon": "cargo build --release -p coflux-supervisor -p coflux-worker",
+    "build": "pnpm -r build && cargo build --release && node scripts/build-transport.mjs",
+    "build:daemon": "cargo build --release -p coflux-supervisor -p coflux-worker && node scripts/build-transport.mjs",
     "release:version": "node scripts/product-version.mjs --set",
-    "release:check": "node scripts/product-version.mjs --check"
+    "release:check": "node scripts/product-version.mjs --check",
+    "build:transport": "node scripts/build-transport.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

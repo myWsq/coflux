@@ -23,7 +23,8 @@ Run checks relevant to your change, plus the full integration suite before mergi
 pnpm -C apps/desktop typecheck
 pnpm -C apps/desktop test
 pnpm -C apps/desktop build
-cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay -p coflux-cli
+cargo build -p coflux-supervisor -p coflux-worker -p coflux-cli
+node scripts/build-test-transports.mjs
 pnpm -C tests test
 ```
 

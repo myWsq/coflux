@@ -28,7 +28,7 @@ Coding agents use the same capabilities through `coflux`: create a workspace, op
 - **Reach your development machines.** Connect a Linux host or another Mac and operate its workspaces and terminals from the same account.
 - **Give agents tools you can see.** Claude Code, Codex, and other terminal tools run in real PTYs. Agents can share progress and hand control back to you.
 - **Keep sessions through client updates.** App updates reconnect to the running terminal runtime. Network-facing runtime updates preserve terminal processes too.
-- **Work directly when possible.** Local connections use loopback; remote connections can use peer-to-peer transport, with a relay fallback.
+- **Work directly when possible.** Local connections use loopback; remote connections use the embedded Tailcat/Tailscale stack, with self-hosted DERP fallback.
 
 ## Quick start
 
@@ -104,7 +104,7 @@ A long-lived **Supervisor** owns the PTYs, screen state, and terminal history. A
 
 Updating or restarting the Supervisor itself is different: defer it until your tasks finish. Coflux does not claim to restore live processes after a Supervisor or OS restart.
 
-The server coordinates authentication, device discovery, and workspaces. Terminal traffic travels over direct or relayed device channels rather than the central control connection. See [architecture](docs/architecture.md) and [authentication](docs/auth-design.md) for the details; internal design documents are currently in Chinese.
+The server coordinates authentication, device discovery, and workspaces. Terminal traffic travels over direct or relayed device channels rather than the central control connection. See [architecture](docs/architecture.md) and [authentication](docs/auth-design.md) for the details; project documentation is maintained in English.
 
 ## Development
 
@@ -144,7 +144,7 @@ Integration tests run real servers, runtimes, and WebSocket clients with tempora
 | `crates/supervisor` | PTYs, screen state, history, and Worker lifecycle |
 | `crates/worker` | Networking, Git, filesystem, and device operations |
 | `crates/cli` | Native `coflux` bundled with the desktop app |
-| `crates/relay` | Independent relay transport |
+| `transport/tailcat` | Pinned native remote networking helper; stock DERP is self-hosted |
 | `packages/cli` | npm delivery of `coflux` and `cofluxd` |
 | `packages/client` | Shared TypeScript client and state |
 | `packages/swift-client` | Shared Swift client and transport |

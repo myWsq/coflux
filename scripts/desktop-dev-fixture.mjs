@@ -1,9 +1,9 @@
 /**
  * 桌面 app 联调 fixture（plan 103，自 apps/macos/scripts/dev-fixture.mjs 迁出）：起一套隔离的真实
- * 中心 + daemon + relay（严格沿用黑盒 harness 的临时 HOME/DB/端口/进程组隔离，不碰真实环境），
+ * 中心 + daemon + 原生 helper + stock DERP（严格沿用黑盒 harness 的临时 HOME/DB/端口/进程组隔离，不碰真实环境），
  * 导入一个临时仓库、开一个终端，然后打印 fixture 信息。桌面 app 用
  * `pnpm -C apps/desktop dev` 配合 `COFLUX_SERVER_URL=ws://127.0.0.1:<port>/client` 连上来，
- * 就能在本机验证 direct / P2P / relay 三路（direct 用 lsof 看 Electron 与 coflux-worker 的
+ * 就能在本机验证 本机 loopback 与原生远程连接（direct 用 lsof 看 Electron 与 coflux-worker 的
  * 127.0.0.1 ESTABLISHED）与中心停掉后的冷启动 attach。测试账号 admin/admin。Ctrl-C 完整清理。
  *
  * 环境变量：COFLUX_DESKTOP_TEST_PORT（默认 19873）、COFLUX_DESKTOP_PREVIEW_FIXTURE=1（额外在终端里起一个
@@ -11,7 +11,7 @@
  * 由这套隔离中心自己直出（plan 107），地址是 `http://127.0.0.1:<port>/...`，不再需要单独的 Web。
  */
 import { startStack, mkRepo } from "../tests/src/harness.mjs";
-import { openRelayDevice } from "../tests/src/device-harness.mjs";
+import { openNativeDevice } from "../tests/src/device-harness.mjs";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -45,7 +45,7 @@ try {
       COFLUX_PROXY_PORT: String(port),
     },
   });
-  device = await openRelayDevice(stack);
+  device = await openNativeDevice(stack);
   client = device.control;
   client.subscribe((message) => { if (message.case === "error") console.error("fixture:", message.message); });
   const daemonId = stack.daemonId;

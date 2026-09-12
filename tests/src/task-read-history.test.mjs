@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8872;
 const COFLUXD = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
@@ -82,7 +82,7 @@ after(async () => {
 
 test("taskRead：用户手开的 shell 退出后回放最后一屏（checkpoint），带状态与退出码", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   try {
@@ -117,7 +117,7 @@ test("taskRead：用户手开的 shell 退出后回放最后一屏（checkpoint�
 
 test("taskRead：命令终端跑完退出后回放完整命令日志（log）；不存在的 task 回 error 且连接照常", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;

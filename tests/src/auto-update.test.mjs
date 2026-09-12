@@ -8,8 +8,8 @@ import { platform, arch } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo, rawDaemon, tokenFromUrl } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
-import { workerReleaseStatement } from "../../scripts/release-statement.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
+import { workerReleaseStatement, transportReleaseStatement } from "../../scripts/release-statement.mjs";
 
 // server 自动编排（plan 015）：本地 http server 同时扮演 GitHub releases API 与产物下载端，
 // server 以 COFLUX_AUTOUPDATE_API_BASE/COFLUX_AUTOUPDATE_REPO 指向它。断言两件事：
@@ -25,6 +25,7 @@ const PUBKEY_HEX = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url
 const sign = (buf) => crypto.sign(null, buf, privateKey).toString("hex");
 const sha256hex = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
 
+const HELPER = readFileSync(process.env.COFLUX_TRANSPORT_BIN || join(ROOT, "target/debug/coflux-transport"));
 const ARTIFACT = readFileSync(WORKER_BIN); // 用真 worker 二进制当"新版本产物"
 
 // server 侧 auto-update.ts 的 rustTarget(platform, arch) 用 Rust 命名（macos/linux、aarch64/x86_64）；
@@ -82,6 +83,8 @@ before(async () => {
       const body = JSON.stringify({
         schemaVersion: 2,
         version: release.tag,
+        transport: { [TARGET]: { target: TARGET, url: `${baseUrl}/helper`, sha256: sha256hex(HELPER), size: HELPER.length,
+          releaseSignature: sign(transportReleaseStatement({ version: release.tag, target: TARGET, sha256: sha256hex(HELPER), size: HELPER.length })) } },
         worker: {
           [TARGET]: {
             url: release.url,
@@ -95,6 +98,7 @@ before(async () => {
       });
       return void res.writeHead(200, { "content-type": "application/json" }).end(body);
     }
+    if (url.pathname === "/helper") return void res.writeHead(200).end(HELPER);
     if (url.pathname === "/good") return void res.writeHead(200).end(ARTIFACT);
     res.writeHead(404).end();
   });
@@ -161,6 +165,7 @@ async function openUpgradeDispatchObserver(workerVersion) {
       platform: HOST.platform,
       workerVersion,
       supervisorVersion: "test-supervisor",
+      capabilities: ["transport_pair_v1"],
       arch: HOST.arch,
     });
     const pending = await daemon.waitFor((m) => m.case === "daemonAuthorizePending", "observer authorizePending");
@@ -178,7 +183,7 @@ async function openUpgradeDispatchObserver(workerVersion) {
 async function runTaskWithMarker(marker) {
   const repo = mkRepo();
   repos.push(repo);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const a = device.control;
   a.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await a.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
@@ -205,7 +210,7 @@ test("release 发布后在线 daemon 无需手动触发即自动升级，会话�
   assert.ok(await waitActive("v1.2.3"), "server 自动轮询到 release 后无手动 clientUpgradeDaemon 也推送并提交升级");
   assert.ok(await isOnline(), "升级后 daemon 仍在线");
 
-  await device.openRelay();
+  await device.openNative();
   const restored = await device.attach(sessionId);
   assert.equal(restored.holderEpoch, holderEpoch);
   assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("AUTOUP_MARK"), "自动升级后 snapshot 保留历史");

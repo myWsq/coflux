@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8833;
 let stack;
@@ -16,7 +16,7 @@ test("daemon 离线后中心仍提供最近一个有界 checkpoint 画面", asyn
   const repo = mkRepo();
   repos.push(repo);
 
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const A = device.control;
   A.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await A.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");

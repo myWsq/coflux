@@ -97,10 +97,10 @@ struct DevicesView: View {
     private func thirdLine(_ daemon: Coflux_V1_DaemonInfo, transport: CofluxClient.DeviceTransportInfo?) -> some View {
         HStack(spacing: 8) {
             if daemon.online {
-                // iOS 现阶段恒 relay（云）；transport 三分语汇与 web 同套，P2P/direct 枚举留给后续立项。
+                // Remote devices require the desktop client until iOS has a native provider.
                 HStack(spacing: 4) {
                     Image(systemName: "cloud.fill").font(.system(size: 9))
-                    Text(relayNodeLabel(transport?.relayHost))
+                    Text(transport?.mode == "direct" ? "本机连接" : "远程连接暂不可用")
                 }
                 .font(Theme.Fonts.meta)
                 .foregroundStyle(Theme.mutedForeground)
@@ -132,12 +132,6 @@ struct DevicesView: View {
     private func rttTone(_ rtt: Double?) -> Color {
         guard let rtt else { return Theme.mutedForeground }
         return rtt < Self.rttGoodMS ? Theme.success : Theme.warning
-    }
-
-    /// relay 节点短名：host 首段（relay-bj.coflux.… → relay-bj）；lane 未建时占位。
-    private func relayNodeLabel(_ host: String?) -> String {
-        guard let host, !host.isEmpty else { return "relay …" }
-        return host.split(separator: ".").first.map(String.init) ?? host
     }
 
     private func versionLabel(_ daemon: Coflux_V1_DaemonInfo) -> String {

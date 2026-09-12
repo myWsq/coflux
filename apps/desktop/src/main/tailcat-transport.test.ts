@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { WebSocketServer, type WebSocket } from "ws";
-import { create, decodeClientToServer, encodeServerToClient, ServerToClientSchema } from "@coflux/protocol";
+import { create, decodeClientToServer, encodeServerToClient, ServerToClientSchema, CONTROL_PROTOCOL_VERSION } from "@coflux/protocol";
 import { NativeTailcatTransport } from "./tailcat-transport";
 import type { NativeEvent, NativeOpen } from "../shared/native-transport";
 
@@ -104,7 +104,7 @@ test("central native close disposes its lane and a stale channel cannot close it
     peer = socket;
     socket.on("message", raw => {
       const message = decodeClientToServer(new Uint8Array(raw as Buffer));
-      if (message?.payload.case === "clientAuth") socket.send(encodeServerToClient(create(ServerToClientSchema, { payload: { case: "authOk", value: {} } })));
+      if (message?.payload.case === "clientAuth") socket.send(encodeServerToClient(create(ServerToClientSchema, { payload: { case: "authOk", value: { controlProtocolVersion: CONTROL_PROTOCOL_VERSION } } })));
       if (message?.payload.case === "deviceTailcatConnect") socket.send(encodeServerToClient(create(ServerToClientSchema, { payload: { case: "deviceTailcatResult", value: { channelId: message.payload.value.channelId, ok: true, address: "private", proofKey: new Uint8Array(32), expiresAt: BigInt(Date.now() + 30_000), scopes: [1, 2] } } })));
     });
   });

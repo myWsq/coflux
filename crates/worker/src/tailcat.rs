@@ -57,9 +57,6 @@ impl TailcatRuntime {
     }
     pub fn start(self: &Arc<Self>, daemon: String) {
         self.close_all();
-        if std::env::var("COFLUX_TAILCAT").as_deref() != Ok("1") {
-            return;
-        }
         let epoch = self.epoch.load(Ordering::Acquire);
         let runtime = self.clone();
         tokio::spawn(async move {

@@ -34,7 +34,7 @@ import {
   TaskStatus,
 } from "@coflux/protocol";
 import { startStack, mkRepo, rawDaemon, tokenFromUrl } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 import { callOperation as callTool, loginAccount } from "./account-harness.mjs";
 
 const PORT = 8869;
@@ -144,7 +144,7 @@ before(async () => {
   token = await loginAccount(BASE);
 
   repo = mkRepo();
-  device = await openRelayDevice(stack);
+  device = await openNativeDevice(stack);
   observer = device.control;
   observer.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const created = await observer.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main workspace", 20000);

@@ -2,7 +2,8 @@
 
 > This plan is an outcome contract, not a step-by-step script. Design against
 > the live code and preserve the decisions below. Validate feasibility before
-> retiring the existing transport. Stop on a STOP condition; do not turn a
+> retiring the existing transport. The user-authorized retirement amendment below
+> supersedes the original ordering gate. Do not turn a
 > successful loopback demonstration into a production-readiness claim.
 >
 > Drift check: `git diff --stat 67b5175..HEAD -- AGENTS.md Cargo.toml Cargo.lock apps packages crates proto scripts tests .github Dockerfile docs wiki/plans`
@@ -19,6 +20,32 @@
 - Workspace: isolated — `/Users/wsq/.coflux/worktrees/b4ccca3f-d348-414a-8291-7147ba79de2a`, branch `dev/20260912-tailcat-transport`.
 - Planned at: `67b51751c0e33e5742312975d9876dd83cbd0664`, 2026-09-12.
 - Planning checks: source inspection only; no implementation, builds, dependency installation, network benchmark, or deployment performed. The prescribed `dev:advisor` model (`fable`) is unavailable in this host; no advisor review is claimed.
+
+## Retirement authorization amendment (2026-09-12)
+
+After reviewing the opt-in candidate and its recorded acceptance gaps, the user
+explicitly authorized deleting the old code ("旧代码可删"). Resume implementation
+from `7f52cd466bb78d00508c468591dcde5fe96ebd16`: make Tailcat the supported remote
+default and remove active WebRTC/custom-relay code and delivery dependencies.
+This supersedes decision 8 and milestone 4's original requirement to retain the
+old default until every promotion gate passes. It also supersedes STOP clauses
+that would require retaining candidate status or the legacy implementation solely
+because the already documented latency and external-acceptance gates are open.
+The failed latency budget and missing external evidence remain explicit; this
+approval is not evidence that those checks passed. Preserve equivalent business,
+authorization, lifecycle, and recovery coverage while replacing test transports.
+The Swift compatibility cleanup may also edit `packages/swift-client/` sources,
+tests, and package manifests to remove retired transports while preserving local
+loopback and an explicit unsupported-remote result; this does not add iOS support.
+This compatibility cleanup also covers existing iOS diagnostics and integration
+tests, plus CONTRIBUTING, ROADMAP, and desktop lifecycle documentation affected
+by the retired transport; it does not expand the supported product surface.
+Production changes, publication, pushes, PRs, and merges remain out of scope.
+
+Execution status: IMPLEMENTED — default migration and legacy retirement verified;
+external release acceptance remains pending (see evidence).
+The final report must distinguish completed code migration from external release
+acceptance; do not mark the full original acceptance checklist passed by consent.
 
 ## Requirement
 
@@ -318,7 +345,7 @@ databases, ports, and temporary files on both success and failure.
 
 - [ ] Every milestone's outcome and command passes; evidence identifies exact
   Coflux/Tailcat/toolchain versions and distinguishes automated from manual checks.
-- [ ] Real terminal attach/input/output/resize and a large binary file roundtrip
+- [x] Real terminal attach/input/output/resize and a large binary file roundtrip
   work across the native helper and worker, not just an echo server.
 - [ ] Container-isolated cases demonstrate direct UDP, forced DERP with direct
   UDP unavailable, path change during traffic, unreachable initial relay, same-
@@ -351,7 +378,7 @@ databases, ports, and temporary files on both success and failure.
   component integrity metadata, and requires no user-installed Go/Tailscale.
   macOS packaged-app launch/signature/lifecycle acceptance is recorded separately
   from a development build. No production signing/release success is inferred.
-- [ ] Old active WebRTC/custom-relay implementation is retired for the supported
+- [x] Old active WebRTC/custom-relay implementation is retired for the supported
   release path; local direct, shared session tests, and in-tree generated consumers
   remain intact. Historical documentation is not rewritten for cleanup alone.
 - [ ] Only in-scope files changed, relevant architecture/docs are accurate, and

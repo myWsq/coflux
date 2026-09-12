@@ -26,7 +26,7 @@ coflux runs a **daemon** on any node. The daemon hosts local PTYs, drives agents
   - See [docs/architecture.md](docs/architecture.md), [docs/hot-upgrade-design.md](docs/hot-upgrade-design.md), and [docs/ROADMAP.md](docs/ROADMAP.md).
   - Before changing desktop UI, read [docs/design-guidelines.md](docs/design-guidelines.md), including the requirement to use the Tooltip component instead of native `title` tooltips.
 
-- `transport/tailcat` (Go): the pinned Tailcat/Tailscale networking helper, built as `coflux-transport` with Go 1.27.1 and `CGO_ENABLED=0`. It is included with the worker in release artifacts, CLI installation, and Desktop bundles; end users need no Go toolchain. It owns no PTYs or business authority and communicates with its Rust worker or Electron-main owner through private inherited stdio. Tailcat remains an opt-in candidate: set `COFLUX_TAILCAT=1` in worker and Desktop-main environments and configure private DERP regions on the server. The default custom relay/WebRTC stack remains in place. Shipping the companion does not complete promotion or legacy retirement (M4); see [docs/tailcat-transport.md](docs/tailcat-transport.md).
+- `transport/tailcat` (Go): the pinned Tailcat/Tailscale networking helper, built as `coflux-transport` with Go 1.27.1 and `CGO_ENABLED=0`. It is included with the worker in release artifacts, CLI installation, and Desktop bundles; end users need no Go toolchain. It owns no PTYs or business authority and communicates with its Rust worker or Electron-main owner through private inherited stdio. Tailcat is the default supported remote transport; configure self-hosted stock DERP regions on the server. The custom relay/WebRTC implementation is retired. CONTROL_PROTOCOL_VERSION is 2 while DEVICE_PROTOCOL_VERSION remains 1; obsolete remote peers require an upgrade. Swift/iOS retains loopback provider support and explicitly reports remote connections unavailable. See [docs/tailcat-transport.md](docs/tailcat-transport.md).
 
 `cofluxd` is the headless device-host entry point, responsible only for installation, connectivity, and daemon lifecycle. `coflux` provides account and local/remote business operations. The npm `cofluxd` package ships both entry points. Desktop bundles the Rust `coflux` binary and adds it to terminal PATH. Neither entry point forwards legacy commands.
 
@@ -36,7 +36,7 @@ coflux runs a **daemon** on any node. The daemon hosts local PTYs, drives agents
 pnpm install                       # TS dependencies
 pnpm -C tests test                 # Black-box integration tests; pretest builds daemon binaries
 cargo test -p coflux-protocol      # Rust unit tests: frame codec and serde wire format
-cargo build -p coflux-supervisor -p coflux-worker   # Build daemon binaries
+pnpm build:daemon                 # Build release daemon binaries and paired native helper
 node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit   # Server type checking
 pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test && pnpm -C apps/desktop build   # Desktop types, tests, and build
 pnpm -C apps/desktop dev / pack                     # Develop against local port 8787 / package an unsigned .app for smoke testing

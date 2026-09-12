@@ -156,7 +156,6 @@ public final class CofluxClient {
         transport: any Transport,
         tokenStore: any TokenStore,
         localDeviceProvider: (any LocalDeviceTransportProvider)? = nil,
-        p2pDeviceProvider: (any P2PDeviceTransportProvider)? = nil,
         logger: any ClientLogger = NoopClientLogger(),
         clock: any ClientClock = SystemClientClock(),
         jitter: any RetryJitterSource = SystemRetryJitterSource()
@@ -208,7 +207,7 @@ public final class CofluxClient {
                 self?.deviceTransports[daemonID] = relayHost == nil && rttMs == nil && mode == nil
                     ? nil : DeviceTransportInfo(relayHost: relayHost, rttMs: rttMs, mode: mode, detail: detail)
             }
-        ), localProvider: localDeviceProvider, p2pProvider: p2pDeviceProvider)
+        ), localProvider: localDeviceProvider)
         if let tokenReadError {
             reportLocalError("无法读取本机会话：\(Self.describeLocalError(tokenReadError))")
         }
@@ -437,12 +436,16 @@ public final class CofluxClient {
         if deviceRouter.handleControlPayload(payload) { return }
         switch payload {
         case .authOk(let value):
+            guard value.controlProtocolVersion >= 2 else {
+                apply(.clientOutdated(Coflux_V1_ClientOutdated()))
+                loginError = "服务器需要升级后才能连接"
+                return
+            }
             watchdogTask?.cancel()
             watchdogTask = nil
             if accountID != nil && accountID != value.accountID { resetPendingTaskRemovals() }
             accountID = value.accountID.isEmpty ? nil : value.accountID
             deviceRouter.setAccountID(accountID)
-            deviceRouter.setIceServers(value.iceServers)
             authState = .authed
             syncState = .awaitingSnapshot
             loginError = ""
@@ -987,6 +990,7 @@ public final class CofluxClient {
     private func authPayload(_ credential: AuthCredential) -> Coflux_V1_ClientAuth {
         var auth = Coflux_V1_ClientAuth()
         auth.clientVersion = configuration.buildID
+        auth.controlProtocolVersion = 2
         switch credential {
         case .token(let value):
             auth.clientToken = value

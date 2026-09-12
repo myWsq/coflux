@@ -132,7 +132,7 @@ describe("COFLUX_BUILD_ID_FILE：构建产物自举", () => {
 });
 
 describe("桌面客户端：按控制面协议版本准入，不看 build-id（plan 105）", () => {
-  const PORT = 8853;
+  const PORT = 8899;
   // server 设了 build-id 允许集合：web 失配会被踢，desktop 不看它
   const LOCAL_ENV = { COFLUX_ENROLL_KEY: "dev-enroll", COFLUX_PASSWORD: "admin", COFLUX_BUILD_ID: "server-build-xyz" };
 
@@ -140,10 +140,10 @@ describe("桌面客户端：按控制面协议版本准入，不看 build-id（p
   before(async () => { stack = await startServer({ port: PORT, env: LOCAL_ENV }); });
   after(async () => { await stack?.stop(); });
 
-  test("desktop + 协议版本 1 + build-id 与 server 不同 → authOk（部署 prod 不踢旧桌面版）", async () => {
+  test("desktop + 协议版本 2 + build-id 与 server 不同 → authOk（部署 prod 不踢旧桌面版）", async () => {
     const c = stack.makeClient();
     await c.ready;
-    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "desktop-build-old", clientKind: "desktop", controlProtocolVersion: 1 });
+    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "desktop-build-old", clientKind: "desktop", controlProtocolVersion: 2 });
     await c.waitFor((m) => m.case === "authOk", "auth.ok");
     c.send({ case: "clientSubscribe" });
     await c.waitFor((m) => m.case === "stateSnapshot", "snapshot");
@@ -154,7 +154,7 @@ describe("桌面客户端：按控制面协议版本准入，不看 build-id（p
     const c = stack.makeClient();
     await c.ready;
     const closed = onceClosed(c);
-    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "server-build-xyz", clientKind: "desktop" });
+    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "server-build-xyz", clientKind: "desktop", controlProtocolVersion: 0 });
     await c.waitFor((m) => m.case === "clientOutdated", "client.outdated");
     await closed;
     assert.ok(!c.log.some((m) => m.case === "authOk"));
@@ -165,33 +165,33 @@ describe("桌面客户端：按控制面协议版本准入，不看 build-id（p
     const c = stack.makeClient();
     await c.ready;
     const closed = onceClosed(c);
-    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "web-build-old", clientKind: "web", controlProtocolVersion: 1 });
+    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "web-build-old", clientKind: "web", controlProtocolVersion: 2 });
     await c.waitFor((m) => m.case === "clientOutdated", "client.outdated");
     await closed;
   });
 });
 
 describe("COFLUX_MIN_CONTROL_PROTOCOL_VERSION：破坏性协议改动时抬高最低版本挡旧桌面版", () => {
-  const PORT = 8854;
-  const LOCAL_ENV = { COFLUX_ENROLL_KEY: "dev-enroll", COFLUX_PASSWORD: "admin", COFLUX_MIN_CONTROL_PROTOCOL_VERSION: "2" };
+  const PORT = 8900;
+  const LOCAL_ENV = { COFLUX_ENROLL_KEY: "dev-enroll", COFLUX_PASSWORD: "admin", COFLUX_MIN_CONTROL_PROTOCOL_VERSION: "3" };
 
   let stack;
   before(async () => { stack = await startServer({ port: PORT, env: LOCAL_ENV }); });
   after(async () => { await stack?.stop(); });
 
-  test("desktop 协议版本 1 < 最低 2 → clientOutdated", async () => {
+  test("desktop protocol 2 meets the global floor but is rejected by configured floor 3", async () => {
     const c = stack.makeClient();
     await c.ready;
     const closed = onceClosed(c);
-    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "x", clientKind: "desktop", controlProtocolVersion: 1 });
+    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "x", clientKind: "desktop", controlProtocolVersion: 2 });
     await c.waitFor((m) => m.case === "clientOutdated", "client.outdated");
     await closed;
   });
 
-  test("desktop 协议版本 2 → authOk", async () => {
+  test("desktop protocol 3 meets configured floor 3 and authenticates", async () => {
     const c = stack.makeClient();
     await c.ready;
-    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "x", clientKind: "desktop", controlProtocolVersion: 2 });
+    c.send({ case: "clientAuth", username: "admin", password: "admin", clientVersion: "x", clientKind: "desktop", controlProtocolVersion: 3 });
     await c.waitFor((m) => m.case === "authOk", "auth.ok");
     c.close();
   });

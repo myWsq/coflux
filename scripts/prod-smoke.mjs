@@ -1,17 +1,17 @@
 /**
- * 生产冒烟：走真实 wire 协议 + Device opaque relay 驱动一轮最小端到端流程。
+ * 生产冒烟：走真实 wire 协议 + native Device 驱动一轮最小端到端流程。
  *
  * 用法：
  *   COFLUX_SMOKE_TOKEN=<clientToken> [COFLUX_SMOKE_URL=wss://api.coflux.dev/client] \
  *   [COFLUX_SMOKE_DAEMON=<daemon 名>] [COFLUX_SMOKE_REPO=/opt/coflux] \
  *   node --import tsx scripts/prod-smoke.mjs
  *
- * 步骤：auth → subscribe → 等 daemon 在线 → 开 Device relay 通道 → 导入项目（prepared
+ * 步骤：auth → subscribe → 等 daemon 在线 → 开 native Device 通道 → 导入项目（prepared
  * projectValidate 由本客户端执行）→ 建任务 → 启动 session（prepared sessionCreate）→
  * sessiond catalog/attach 断言 → 输入回显 → resize 落到 PTY → 第二 logical client 接管
  * （断言 snapshot 续接 + 原端 detached）→ stop → 清理任务与项目。任一步失败即非零退出。
  *
- * 只用 relay：不做 loopback pair，因此不在生产留下 local grant（grant 只有 direct 需要）。
+ * 只用原生远程传输：不做 loopback pair，因此不在生产留下 local grant（grant 只有 direct 需要）。
  * 结束时也不发 clientLogout——那会撤销 token 本身（见 hub.ts clientLogout），冒烟要能反复跑。
  *
  * 复用黑盒的两份客户端实现（harness.Client 控制面 + device-harness.DeviceClient Device 面），
@@ -28,7 +28,7 @@ const USER = process.env.COFLUX_SMOKE_USER; // 本地账号模式备选（token 
 const PASS = process.env.COFLUX_SMOKE_PASS;
 const DAEMON_NAME = process.env.COFLUX_SMOKE_DAEMON; // 缺省取任一在线 daemon
 const REPO = process.env.COFLUX_SMOKE_REPO ?? "/opt/coflux";
-// Device relay 不校验 origin（那是 loopback gateway 的事），但 server 会记录，用可辨识的值。
+// native Device 不校验 origin（那是 loopback gateway 的事），但 server 会记录，用可辨识的值。
 const ORIGIN = process.env.COFLUX_SMOKE_ORIGIN ?? "https://smoke.coflux.dev";
 if (!TOKEN && !(USER && PASS)) {
   console.error("缺 COFLUX_SMOKE_TOKEN（或 COFLUX_SMOKE_USER/PASS）");
@@ -49,10 +49,10 @@ async function connect(label) {
   return { client, snapshot };
 }
 
-/** relay-only Device：不调 initialize()（那会 pair 并落一条 grant），只开中心 relay 通道。 */
-async function openRelay(control, daemonId) {
+/** Native-only Device：不调 initialize()（那会 pair 并落一条 grant），只开原生远程通道。 */
+async function openNative(control, daemonId) {
   const device = new DeviceClient({}, { control, daemonId, origin: ORIGIN });
-  await device.openRelay();
+  await device.openNative();
   device.enablePreparedAutoExecution();
   return device;
 }
@@ -80,8 +80,8 @@ if (!daemon) {
 }
 console.log(`  daemon: ${daemon.name} (${daemon.daemonId})`);
 
-step("打开 Device opaque relay 通道");
-const A = await openRelay(c1, daemon.daemonId);
+step("打开 native Device 通道");
+const A = await openNative(c1, daemon.daemonId);
 
 step(`导入项目 ${REPO}`);
 const projectName = "smoke-" + Date.now();
@@ -122,7 +122,7 @@ await A.waitFor(() => outputSince(A, from, sessionId).includes("40 100"), "stty 
 
 step("第二 logical client 接管");
 const { client: c2 } = await connect("c2");
-const B = await openRelay(c2, daemon.daemonId);
+const B = await openNative(c2, daemon.daemonId);
 from = A.mark();
 const takeover = await B.attach(sessionId, { cols: 100, rows: 40 });
 if (!utf8(takeover.ansiSnapshot ?? new Uint8Array()).includes(marker)) throw new Error("接管方 snapshot 未续接接管前画面");

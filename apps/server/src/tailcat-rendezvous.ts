@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { DEVICE_PROTOCOL_VERSION, DeviceScope, type DeviceTailcatConnect, type ServerToClientPayload, type ServerToDaemonPayload } from "@coflux/protocol";
 import type { ClientConn, DaemonConn } from "./hub.js";
-import { allowRendezvous, validRelayId } from "./relay-rendezvous.js";
+import { MAX_FRAME_ID_BYTES } from "@coflux/protocol";
 
 type Region = { RegionID: number; RegionCode?: string; Nodes: { Name: string; RegionID: number; HostName: string; DERPPort?: number; InsecureForTests?: boolean }[] };
 type Endpoint = { daemon: DaemonConn; key: string; address?: string; region: Region };
@@ -63,7 +63,7 @@ export class TailcatRendezvous {
     const daemon = this.getDaemon(request.daemonId);
     const endpoint = this.endpoints.get(request.daemonId);
     if (!client.accountId || this.closing.has(client) || !daemon || daemon.accountId !== client.accountId || endpoint?.daemon !== daemon || !endpoint.address) return fail("设备尚未提供原生远程连接");
-    if (!validRelayId(request.channelId) || request.channelId.startsWith("__coflux-") || !validRelayId(request.clientInstanceId) || request.transportGeneration <= 0n || request.protocolVersion !== DEVICE_PROTOCOL_VERSION || !nodeKey(request.nodePublicKey) || ![...sessionScopes,...elevatedScopes].includes(request.scope)) return fail("远程连接参数无效");
+    if (!validNativeId(request.channelId) || request.channelId.startsWith("__coflux-") || !validNativeId(request.clientInstanceId) || request.transportGeneration <= 0n || request.protocolVersion !== DEVICE_PROTOCOL_VERSION || !nodeKey(request.nodePublicKey) || ![...sessionScopes,...elevatedScopes].includes(request.scope)) return fail("远程连接参数无效");
     if (!allowRendezvous(client) || this.channels.size >= 4096 || this.channels.has(request.channelId)) return fail("远程连接请求过多");
     const proof = randomBytes(32), expires = Date.now() + 30_000;
     const scopes=sessionScopes.includes(request.scope)?sessionScopes:elevatedScopes;
@@ -132,4 +132,16 @@ export class TailcatRendezvous {
     return false;
   }
   shutdown(): void { for (const id of [...this.channels.keys()]) this.removeChannel(id); for (const timer of this.closing.values()) clearTimeout(timer); this.closing.clear(); this.endpoints.clear(); }
+}
+
+
+function validNativeId(value: string): boolean {
+  return value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_FRAME_ID_BYTES && ![...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
+}
+const rendezvousWindows = new WeakMap<object, { startedAt: number; count: number }>();
+function allowRendezvous(connection: object): boolean {
+  const now = Date.now();
+  let window = rendezvousWindows.get(connection);
+  if (!window || now - window.startedAt >= 1000) { window = { startedAt: now, count: 0 }; rendezvousWindows.set(connection, window); }
+  return ++window.count <= 32;
 }

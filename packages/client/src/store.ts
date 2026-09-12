@@ -1,6 +1,7 @@
 import { createStore, type StoreApi } from "zustand/vanilla";
 import {
   TaskStatus,
+  CONTROL_PROTOCOL_VERSION,
   type ClientToServerPayload,
   type DaemonInfo,
   type DeviceSessionCatalog,
@@ -593,8 +594,15 @@ export function createCofluxClient(options: CofluxClientOptions) {
     switch (payload.case) {
       case "authOk": {
         const value = payload.value;
+        if (value.controlProtocolVersion < CONTROL_PROTOCOL_VERSION) {
+          controlAuthenticated = false;
+          shouldRetry = false;
+          deviceRouter.setControlOnline(false);
+          connection.stop();
+          store.setState({ authState: "outdated", loginError: "服务器版本需要升级" });
+          return;
+        }
         controlAuthenticated = true;
-        deviceRouter.setIceServers(value.iceServers);
         deviceRouter.setControlOnline(true);
         store.setState({ authState: "authed", loginError: "", loginName: value.loginName ?? "" });
         shouldRetry = true;

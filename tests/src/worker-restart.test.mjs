@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 // supervisor/worker 拆分的核心保证：杀掉 worker，PTY 在 supervisor 存活，
 // worker 重启后两级 resync（连 supervisor 取回会话 + 连 server resync）重挂会话。
@@ -23,7 +23,7 @@ function readWorkerPid() {
 test("worker 重启：PTY 在 supervisor 存活，两级 resync 重挂会话", async () => {
   const repo = mkRepo();
   repos.push(repo);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const a = device.control;
   a.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await a.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
@@ -69,7 +69,7 @@ test("worker 重启：PTY 在 supervisor 存活，两级 resync 重挂会话", a
   probe.close();
 
   // 同 logical Device client 迁到新 relay；holder epoch 不变，snapshot 来自 supervisor/sessiond。
-  await device.openRelay();
+  await device.openNative();
   const attached = await device.attach(sessionId);
   assert.equal(attached.holderEpoch, initial.holderEpoch, "worker transport 重建不触发 holder takeover");
   assert.ok(utf8(attached.ansiSnapshot ?? new Uint8Array()).includes("SURVIVE_MARKER"), "重启后 sessiond snapshot 历史存活");

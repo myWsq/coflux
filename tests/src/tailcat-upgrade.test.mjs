@@ -9,15 +9,14 @@ import { arch, platform } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 import { workerReleaseStatement, transportReleaseStatement } from "../../scripts/release-statement.mjs";
 const PORT = 8897;
 const ROOT = resolve(import.meta.dirname, "../..");
-const enabled = process.env.COFLUX_TEST_TAILCAT === "1";
 const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
 async function until(predicate, label, timeout = 20_000) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { try { if (await predicate()) return; } catch {} await sleep(100); } throw new Error(`timeout: ${label}`); }
 
-test("signed worker/helper pair activates together and rejects tamper or failed helper without losing PTYs", { skip: !enabled, timeout: 100_000 }, async () => {
+test("signed worker/helper pair activates together and rejects tamper or failed helper without losing PTYs", { timeout: 100_000 }, async () => {
   const worker = readFileSync(process.env.COFLUX_WORKER_BIN || join(ROOT, "target/debug/coflux-worker"));
   const helper = readFileSync(process.env.COFLUX_TRANSPORT_BIN || join(ROOT, "target/debug/coflux-transport"));
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
@@ -32,7 +31,7 @@ test("signed worker/helper pair activates together and rejects tamper or failed 
   let stack, device, repo;
   try {
     stack = await startStack({ port: PORT, strictCleanup: true, daemonEnv: { COFLUX_WORKER_PUBKEY: publicHex, COFLUX_WORKER_PROBATION_MS: "2000" } });
-    device = await openRelayDevice(stack); repo = mkRepo();
+    device = await openNativeDevice(stack); repo = mkRepo();
     const control = device.control;
     control.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
     const workspace = (await control.waitFor(m => m.case === "workspaceCreated" && m.workspace.isMain, "paired workspace")).workspace;
@@ -51,7 +50,7 @@ test("signed worker/helper pair activates together and rejects tamper or failed 
     servedHelper = helper; send(release("v2.0.0")); await until(() => active() === "v2.0.0", "complete pair activation");
     assert.equal(hash(readFileSync(join(stack.home, "workers/v2.0.0/coflux-transport"))), hash(helper));
     assert(existsSync(join(stack.home, "workers/v2.0.0/transport-pair.json")));
-    await device.openRelay(); await device.attach(running.sessionId);
+    await device.openNative(); await device.attach(running.sessionId);
     assert.equal((await device.catalog()).sessions.find(s => s.sessionId === running.sessionId)?.pid, originalPid);
     // A correctly signed executable that cannot speak helper IPC fails local
     // probation, so the prior complete release remains the active fallback.
@@ -59,7 +58,7 @@ test("signed worker/helper pair activates together and rejects tamper or failed 
     send(release("v3.0.0", servedHelper));
     await until(() => existsSync(join(stack.home, "workers/v3.0.0/transport-pair.json")), "bad helper pair staged");
     await sleep(5000); assert.equal(active(), "v2.0.0");
-    await device.openRelay(); const restored = await device.attach(running.sessionId);
+    await device.openNative(); const restored = await device.attach(running.sessionId);
     assert(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("PAIR_BEFORE"));
     assert.equal((await device.catalog()).sessions.find(s => s.sessionId === running.sessionId)?.pid, originalPid);
     const from = device.mark(); await device.input(running.sessionId, "echo PAIR_AFTER\r");

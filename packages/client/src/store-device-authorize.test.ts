@@ -82,7 +82,7 @@ function authedClient() {
   const client = newClient("tok");
   const socket = FakeWebSocket.latest();
   socket.open();
-  socket.receive({ case: "authOk", value: { accountId: "a1", iceServers: [], loginName: "wsq@example.com" } });
+  socket.receive({ case: "authOk", value: { accountId: "a1", controlProtocolVersion: 2, loginName: "wsq@example.com" } });
   assert.equal(client.store.getState().authState, "authed");
   return { client, socket };
 }

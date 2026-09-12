@@ -8,8 +8,8 @@ import { platform, arch } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
-import { workerReleaseStatement } from "../../scripts/release-statement.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
+import { workerReleaseStatement, transportReleaseStatement } from "../../scripts/release-statement.mjs";
 
 // 远程下载 + ed25519 验签的验收。头等用例是负向：被篡改 / 签名不符的产物必须被拒、保持当前版本。
 // 隔离：临时 127.0.0.1 HTTP server 服务产物（零外网）；临时 ed25519，公钥经 env 注入 supervisor；
@@ -43,12 +43,15 @@ function signedRelease(version, artifact = ARTIFACT, target = TARGET) {
     target,
     artifactSize: BigInt(size),
     releaseSignature: sign(workerReleaseStatement({ version, target, sha256, size })),
+    transport: { url: `${baseUrl}/helper`, sha256: sha256hex(HELPER), size: BigInt(HELPER.length),
+      releaseSignature: sign(transportReleaseStatement({ version, target, sha256: sha256hex(HELPER), size: HELPER.length })) },
   };
 }
 
 // pretest 关闭 debug info：Linux 的 DWARF 会让调试二进制超过生产下载 128 MiB 硬上限，
 // 这里仍使用可执行的真 worker 验收升级链，不能为了 fixture 放宽生产上限。
 const ARTIFACT = readFileSync(WORKER_BIN); // 用真 worker 二进制当"新版本产物"
+const HELPER = readFileSync(process.env.COFLUX_TRANSPORT_BIN || join(ROOT, "target/debug/coflux-transport"));
 const TAMPERED = Buffer.from(ARTIFACT);
 TAMPERED[0] ^= 0xff; // 改一个字节
 
@@ -62,6 +65,7 @@ const requestHits = new Map();
 before(async () => {
   httpServer = http.createServer((req, res) => {
     requestHits.set(req.url, (requestHits.get(req.url) ?? 0) + 1);
+    if (req.url === "/helper") return void res.writeHead(200).end(HELPER);
     if (req.url === "/good") return void res.writeHead(200).end(ARTIFACT);
     if (req.url === "/slow-old") {
       slowDownloadHits++;
@@ -132,7 +136,7 @@ async function waitDaemonVersion(version, tries = 80) {
 async function runTaskWithMarker(marker) {
   const repo = mkRepo();
   repos.push(repo);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const a = device.control;
   a.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await a.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
@@ -170,7 +174,7 @@ test("远程下载 + 验签：合法签名产物升级成功、会话存活", as
   }
   assert.ok(committed, "验签产物升级提交，worker.active=v1.0.0");
 
-  await device.openRelay();
+  await device.openNative();
   const restored = await device.attach(sessionId);
   assert.equal(restored.holderEpoch, holderEpoch);
   assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("SIGNED_OK"), "升级后 snapshot 保留历史");

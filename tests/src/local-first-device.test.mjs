@@ -55,7 +55,7 @@ async function waitForFile(path, timeout = 5000) {
 
 test("本地优先：direct/relay 重投 exactly-once，中心停止后完整控制 session", async () => {
   const device = await DeviceClient.pair(stack);
-  await device.openRelay();
+  await device.openNative();
   const running = await runningSession(device, "local-first");
   await device.openDirect();
 
@@ -101,7 +101,7 @@ test("本地优先：direct/relay 重投 exactly-once，中心停止后完整控
   await waitForFile(exactlyOncePath);
   device.closeTransport(true);
 
-  await device.openRelay();
+  await device.openNative();
   const relayAttached = await device.attach(running.sessionId);
   assert.equal(relayAttached.holderEpoch, originalEpoch, "同 logical client 切到 relay 不触发 takeover");
   const replayFrom = device.mark();

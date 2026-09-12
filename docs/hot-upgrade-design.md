@@ -25,13 +25,13 @@ A PTY is a resource of the process that owns it. Putting networking, protocol ha
 ┌──────────────────────┴─────────────────────────────────────┐
 │ coflux-worker (frequently upgraded)                         │
 │ · center WS, authentication, reconnect, loopback gateway    │
-│ · direct/opaque relay, git/exec/fs, checkpoint               │
+│ · local/native transport, git/exec/fs, checkpoint               │
 └──────────────────────▲─────────────────────────────────────┘
                        │ /daemon protobuf WS
                     Central server
 ```
 
-When the worker crashes, upgrades, or disconnects from the center, the supervisor continues reading PTYs, advancing VT/history, and retaining sessiond's logical holder/sequence. The replacement worker rebuilds local/relay channel transports. A transport never has authority to pause all PTYs.
+When the worker crashes, upgrades, or disconnects from the center, the supervisor continues reading PTYs, advancing VT/history, and retaining sessiond's logical holder/sequence. The replacement worker rebuilds local/native channel transports. A transport never has authority to pause all PTYs.
 
 ## 2. UDS and two-level reconciliation
 
@@ -41,7 +41,7 @@ Recovery after worker startup has two levels:
 
 1. Connect to the supervisor and send `resync.request` to obtain live `SessionInfo(sessionId, taskId, pid)` records.
 2. Establish/restore the central connection and report daemon resync plus the complete device catalog.
-3. Rebuild the dirty-checkpoint set, local gateway, and relay channels.
+3. Rebuild the dirty-checkpoint set, local gateway, and native channels.
 4. Clients reattach with a higher transport generation, retaining their logical holder and unacknowledged input.
 
 A missing session does not automatically mean exit; sessiond tombstones/catalogs establish exit facts. The center does not kill unknown orphans because the worker or server restarted.
@@ -72,7 +72,7 @@ Server pushes also have a per-daemon/version backoff cap to prevent repeated swi
 The upgrade design does not rely on the center replaying PTY data. In the final architecture:
 
 - Raw PTY data is never sent to the center.
-- Direct and relay paths carry the same DeviceEnvelope; holder/sequence authority resides in sessiond.
+- Local and native paths carry the same DeviceEnvelope; holder/sequence authority resides in sessiond.
 - Worker restarts rebuild channels/generations. Clients automatically resend unacknowledged input; sessiond deduplication ensures each effect occurs once.
 - Output gaps trigger reattachment for a sessiond snapshot.
 - Checkpoints are disposable derived state, coalesced per session, and never backpressure PTYs.
@@ -89,6 +89,6 @@ The black-box harness launches real server, supervisor, and worker processes, is
 - Valid signatures allow remote-download upgrades.
 - Tampering with SHA-256, size, version, target, or either signature must be rejected while retaining the current version.
 - Committed versions continue rejecting downgrades and equal-precedence replays after supervisor restart.
-- Direct/relay holder recovery, input ACK recovery, and output snapshot recovery during worker restarts produce no duplicate effects.
+- Local/native holder recovery, input ACK recovery, and output snapshot recovery during worker restarts produce no duplicate effects.
 
 See [RELEASING.md](RELEASING.md) for release/key operations and [architecture.md](architecture.md) for the final authority/transport design.

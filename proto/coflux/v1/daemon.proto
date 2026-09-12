@@ -11,6 +11,7 @@ import "coflux/v1/device.proto";
 // ===== Daemon → Server 载荷 =====
 
 message DaemonAuth {
+  uint32 control_protocol_version = 6;
   string device_token = 1;
   string worker_version = 2;
   string supervisor_version = 3;
@@ -24,6 +25,7 @@ message DaemonAuth {
 
 // 本地无凭证（未登记）时：申请一次性授权链接（Tailscale 式，见 docs/auth-design.md）
 message DaemonEnrollRequest {
+  uint32 control_protocol_version = 8;
   string name = 1;
   string host = 2;
   string platform = 3;
@@ -264,13 +266,10 @@ message ProxyClosed {
   string conn_id = 1;
 }
 
-// daemon 探测中心下发的 relay 节点后，上报当前 home；仅存于本次在线连接的 presence，
-// 重连后必须重报。relay_id 必须来自最近一次 RelayNodeList。
-message RelayHome {
-  string relay_id = 1;
-}
-
 message DaemonToServer {
+  // Removed custom relay/WebRTC transport fields are never reused.
+  reserved 29, 33;
+  reserved "relay_home", "device_p2p_answer_report";
   // 旧 raw PTY mirror 与 server-routed exec/fs 已由 DeviceEnvelope 取代。
   // 22-23 是控制面复用 relay 路径（plan 043 改为独立 relay + rendezvous 后删除）。
   reserved 1, 12, 13, 14, 15, 16, 19, 22, 23;
@@ -297,11 +296,9 @@ message DaemonToServer {
     // sessiond truth 的完整 reconciliation snapshot；server 不得据此关闭 unknown live session。
     DeviceSessionCatalog session_catalog = 27;
     PreparedDeviceOperationInstalled prepared_device_operation_installed = 28;
-    RelayHome relay_home = 29;
     WorkspaceDefaultBranch workspace_default_branch = 30;
     SessionAgents session_agents = 31;
     AgentControlRequest agent_control_request = 32;
-    DeviceP2pAnswerReport device_p2p_answer_report = 33;
     ServerAgentResult server_agent_result = 34;
     DeviceTailcatIdentity device_tailcat_identity = 35;
     DeviceTailcatEndpoint device_tailcat_endpoint = 36;
@@ -383,11 +380,13 @@ message WorkspaceDefaultBranch {
 // ===== Server → Daemon 载荷 =====
 
 message DaemonEnrolled {
+  uint32 control_protocol_version = 3;
   string daemon_id = 1;
   string device_token = 2;
 }
 
 message DaemonAuthed {
+  uint32 control_protocol_version = 2;
   string daemon_id = 1;
 }
 
@@ -481,16 +480,6 @@ message ProxyClose {
   string conn_id = 1;
 }
 
-// 中心静态配置的 relay 节点清单；认证完成后下发一次，首项兼作 daemon 尚未上报 home
-// 时的 rendezvous 回退节点。url 是 ws/wss 对外基址，不含 /v1/pipe。
-message RelayNodeList {
-  message RelayNode {
-    string id = 1;
-    string url = 2;
-  }
-  repeated RelayNode nodes = 1;
-}
-
 // 中心触发已安装的 prepared operation 执行（plan 091）。中心作为发起方时没有 browser 去投递
 // 帧：worker 取本地已安装的同 operation_id 模板，以合成 channel `__coflux-server-<operation_id>`
 // 与 Principal::Server 走与 browser 完全相同的分派；结果沿既有 DeviceOperationReport 回中心。
@@ -500,6 +489,9 @@ message PreparedDeviceOperationExecute {
 }
 
 message ServerToDaemon {
+  // Removed custom relay/WebRTC transport fields are never reused.
+  reserved 33, 34, 36, 37;
+  reserved "device_relay_dial", "relay_node_list", "device_p2p_dial", "device_p2p_channel_grant";
   // 旧 replay/input/resize/RPC adapter 已删除；生命周期编排与 proxy control 继续保留。
   // 26-28 是控制面复用 relay 路径（plan 043 改为独立 relay + rendezvous 后删除）。
   reserved 11, 12, 15, 16, 17, 18, 21, 26, 27, 28;
@@ -526,13 +518,9 @@ message ServerToDaemon {
     DeviceSessionCatalogRequest session_catalog_request = 30;
     DeviceExitAck exit_ack = 31;
     PreparedDeviceOperation prepared_device_operation = 32;
-    DeviceRelayDial device_relay_dial = 33;
-    RelayNodeList relay_node_list = 34;
     ProxyData proxy_data = 19;
     WorkspaceList workspace_list = 20;
     AgentControlResult agent_control_result = 35;
-    DeviceP2pDial device_p2p_dial = 36;
-    DeviceP2pChannelGrant device_p2p_channel_grant = 37;
     PreparedDeviceOperationExecute prepared_device_operation_execute = 38;
     ServerAgentRequest server_agent_request = 39;
     DeviceTailcatConfigure device_tailcat_configure = 40;

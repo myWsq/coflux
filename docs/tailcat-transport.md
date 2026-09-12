@@ -1,11 +1,16 @@
 # Native Tailcat transport contract
 
-This is the candidate transport contract. The Go companion is included in
-release artifacts and Desktop bundles, but native networking still requires
-`COFLUX_TAILCAT=1` in both worker and Desktop-main environments. The existing
-custom relay/WebRTC transport remains the default. Promotion and legacy
-retirement (M4) are not complete; local test success does not waive the plan's
-performance, real-network, or packaged-delivery gates.
+Tailcat is the default remote transport on supported Desktop and Linux runtimes.
+The Go companion is included in release artifacts and Desktop bundles; no opt-in
+flag is required. The custom relay and WebRTC implementations have been retired.
+Local loopback remains available. Swift/iOS currently has only its local provider
+boundary and reports remote connections unavailable.
+
+Control protocol version 2 rejects obsolete clients and workers; DeviceEnvelope
+version 1, local grants, and supervisor semantics are unchanged. This source
+migration does not assert that production has been deployed or that the earlier
+cold-attach latency gate passed. Historical evidence and remaining external
+acceptance belong to the implementation plan.
 
 ## Ownership and dependency boundary
 
@@ -126,8 +131,7 @@ the candidate or authorize retiring the legacy transport.
 
 ## Region recovery and private DERP operations
 
-Enable the candidate with `COFLUX_TAILCAT=1` in the worker and desktop-main
-process environments. The server receives `COFLUX_DERP_REGIONS`, a JSON array
+Native networking starts automatically after authentication. The server requires `COFLUX_DERP_REGIONS`, a JSON array
 of 1–8 private DERP region descriptors. Each must contain at least one reachable
 DERP node, matching `RegionID` values, and a valid TLS hostname or certificate
 pin. An initial unavailable region and a later region outage use the same
@@ -198,12 +202,10 @@ DERP reachability or grant availability.
 
 ## Reproducible application acceptance
 
-Build `coflux-transport` beside the debug worker and a stock DERP binary from the
-pinned module. Then run:
+The pretest step builds the debug runtime, native helper, notices, and pinned
+stock DERP tools automatically:
 
 ```sh
-COFLUX_TEST_TAILCAT=1 \
-COFLUX_TEST_DERPER_BIN="$PWD/target/debug/coflux-test-derper" \
 pnpm -C tests test
 ```
 
@@ -220,3 +222,19 @@ and rejection of stale-channel requests. CI and the repository Docker test
 image enable these fixtures.
 Candidate promotion still requires the plan's real NAT/fault, packaged-app,
 signed-artifact, capacity and latency gates; green local tests do not waive them.
+
+## Local build and test commands
+
+`pnpm build:daemon` builds the release supervisor, worker, native helper, and
+third-party notices together. `pnpm build` does the same after package builds.
+`pnpm build:transport` builds the host helper and notices in `target/release`;
+explicit cross-target builds use the command in the delivery section.
+`pnpm dev:daemon` and `pnpm -C tests test` prepare debug helpers and stock DERP
+fixtures automatically. End users never install Go.
+
+The integration harness launches isolated stock DERP instances with temporary
+SAN certificates, ports, databases, and HOME directories. Native transport is
+always exercised, without a feature flag. `derp-admission.test.mjs` also drives
+real stock DERP with an independent Go client and verifies registered-key
+admission, unregistered rejection, verifier outage fail-closed behavior, and
+recovery. No production services are installed by these tests.

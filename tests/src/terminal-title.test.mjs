@@ -10,7 +10,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8858;
 let stack;
@@ -23,7 +23,7 @@ test("OSC 标题无 subscriber 也随 checkpoint 上报，新订阅补发仍带 
   const repo = mkRepo();
   repos.push(repo);
 
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const A = device.control;
   A.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await A.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");

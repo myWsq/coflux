@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8874;
 function request(home, message) {
@@ -34,7 +34,7 @@ test("桌面托管：控制端重连保留同一 PTY，旧实例停止请求被�
     assert.equal(first.protocol, 1);
     assert.equal(first.runtimeId, "test-old-app");
     assert.deepEqual(first.sessions, []);
-    device = await openRelayDevice(stack);
+    device = await openNativeDevice(stack);
     const c = device.control;
     c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
     const main = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "workspace");
@@ -51,7 +51,7 @@ test("桌面托管：控制端重连保留同一 PTY，旧实例停止请求被�
     assert.equal(running.instanceId, first.instanceId);
     const pid = running.sessions[0].pid;
     device.close();
-    device = await openRelayDevice(stack);
+    device = await openNativeDevice(stack);
     await device.attach(live.task.sessionId);
     const after = device.mark();
     await device.input(live.task.sessionId, 'printf "PROBE-%s\\n" "$COFLUX_SURVIVAL_PROBE"\r');

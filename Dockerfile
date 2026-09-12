@@ -21,9 +21,9 @@ WORKDIR /work
 COPY . .
 RUN pnpm install --frozen-lockfile \
     && cargo build -p coflux-supervisor -p coflux-worker \
-    && (cd transport/tailcat && go test ./... && go build -mod=readonly -o ../../target/debug/coflux-transport ./cmd/coflux-transport && go build -mod=readonly -o ../../target/debug/coflux-test-derper tailscale.com/cmd/derper) \
+    && (cd transport/tailcat && go test ./...) \
+    && node scripts/build-test-transports.mjs \
     && chmod +x scripts/docker-test-entrypoint.sh
-ENV COFLUX_TEST_TAILCAT=1 COFLUX_TEST_DERPER_BIN=/work/target/debug/coflux-test-derper
 
 # 每次容器启动都在自身临时目录拉起 loopback Postgres；测试建出的 database 与进程随容器销毁。
 ENTRYPOINT ["/work/scripts/docker-test-entrypoint.sh"]

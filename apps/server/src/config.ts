@@ -13,48 +13,6 @@ function int(name: string, def: number): number {
 const isDev = process.env.COFLUX_DEV === "1";
 const missingSecrets: string[] = [];
 
-export interface RelayNodeConfig {
-  id: string;
-  url: string;
-}
-
-function parseRelayNodes(raw: string | undefined, fallbackUrl: string): RelayNodeConfig[] {
-  if (raw === undefined || raw.trim() === "") {
-    return fallbackUrl ? [{ id: "default", url: fallbackUrl }] : [];
-  }
-
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new Error("COFLUX_RELAY_NODES 必须是合法 JSON 数组");
-  }
-  if (!Array.isArray(value)) throw new Error("COFLUX_RELAY_NODES 必须是 JSON 数组");
-
-  const ids = new Set<string>();
-  return value.map((entry, index) => {
-    if (!entry || typeof entry !== "object") throw new Error(`COFLUX_RELAY_NODES[${index}] 必须是对象`);
-    const { id, url } = entry as { id?: unknown; url?: unknown };
-    if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
-      throw new Error(`COFLUX_RELAY_NODES[${index}].id 必须是 1-64 位字母、数字、_ 或 -`);
-    }
-    if (ids.has(id)) throw new Error(`COFLUX_RELAY_NODES 中 relay id 重复: ${id}`);
-    ids.add(id);
-    if (typeof url !== "string" || !url) throw new Error(`COFLUX_RELAY_NODES[${index}].url 必须是非空字符串`);
-
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      throw new Error(`COFLUX_RELAY_NODES[${index}].url 不是合法 URL`);
-    }
-    if ((parsed.protocol !== "ws:" && parsed.protocol !== "wss:") || parsed.username || parsed.password || parsed.search || parsed.hash) {
-      throw new Error(`COFLUX_RELAY_NODES[${index}].url 必须是无凭证、query、fragment 的 ws/wss 基址`);
-    }
-    return { id, url: url.replace(/\/+$/, "") };
-  });
-}
-
 // 身份提供方：local（默认，env 用户名+密码单账号）| password（自建邮箱密码多账号）。
 // 见 plans/059（Supabase 已全面退役，历史决策见 plans/001）。local 模式行为与历史完全一致；
 // password 模式把「你是谁」外包给自建 users 表的 scrypt 口令校验，会话/数据/授权全部由
@@ -66,8 +24,6 @@ if (authRaw !== "local" && authRaw !== "password") {
 }
 const authProvider: "local" | "password" = authRaw;
 const isLocal = authProvider === "local";
-const relayUrl = process.env.COFLUX_RELAY_URL ?? (isDev ? "ws://127.0.0.1:8790" : "");
-const relayNodes = parseRelayNodes(process.env.COFLUX_RELAY_NODES, relayUrl);
 
 /** 秘密类配置：生产必须由环境变量提供；开发回落到 devDefault（弱值，仅本地用）。
  * required=false 的项（如 password 模式下的 env 口令）不参与 fail-closed 校验。 */
@@ -143,30 +99,6 @@ export const config = {
   /** local gateway 的 elevated lease 很短且不跨 daemon control WS 重连恢复。 */
   localLeaseTtlMs: Math.max(10_000, Math.min(120_000, int("COFLUX_LOCAL_LEASE_TTL_MS", 45_000))),
 
-  /** 独立 relay（plan 043）：token 签名种子（秘密，hex 裸 32B ed25519 seed）。对应公钥经
-   * `COFLUX_RELAY_PUBKEY` 注入 relay 进程；轮换时先双公钥并存再撤旧（见 plans/043 维护注记）。 */
-  relaySigningKeySeed: secret("COFLUX_RELAY_SIGNING_KEY", "636f666c75782d6465762d72656c61792d7369676e696e672d73656564212121"),
-  /** 旧单节点入口；未配置 COFLUX_RELAY_NODES 时用它合成 id=default 的单节点清单，
-   * dev 默认仍指向 `pnpm dev:relay` 的本机明文端口。 */
-  relayUrl,
-  /** relay 对外节点静态清单；列表首项是 daemon 未上报 home 时的 rendezvous 回退节点。 */
-  relayNodes,
-  /** relay token TTL：上限 120s 必须 ≤ relay 侧 tombstone 窗口，保证 token 重放必然失败。 */
-  relayTokenTtlMs: Math.max(10_000, Math.min(120_000, int("COFLUX_RELAY_TOKEN_TTL_MS", 60_000))),
-  /** P2P 直连（plan 076）总开关。设 `0` 即停用：中心直接拒掉 P2P 信令，client 收到拒绝会
-   * **立刻**回落 relay（不必空等 15s 建连超时）。
-   * 2026-08-17 生产止血用：P2P 通道建成后崩掉需 ~30s ICE 超时才被对端感知（plan 076 已知
-   * 限制），而 client 侧心跳发现链路无响应时只抹 RTT 读数、不摘通道（device-router.ts 的
-   * sendHeartbeat），于是这 30s 内用户输入全进黑洞——现场表现是"设备在线但终端点不动"。
-   * 待 client 补上"心跳判死 → 摘通道 → 回落 relay"后再打开。 */
-  p2pEnabled: (process.env.COFLUX_P2P_ENABLED ?? "1") !== "0",
-  /** P2P 直连（plan 076）：STUN URL 列表（逗号分隔，形如 `stun:host:3478`），随 authOk 下发
-   * client、随 deviceP2pDial 下发 daemon。空 = 纯 host candidate（daemon 有公网 IP / 同 LAN
-   * 场景已可用），STUN 只为跨 NAT 打洞增益。 */
-  stunUrls: (process.env.COFLUX_STUN_URLS ?? "")
-    .split(",")
-    .map((url) => url.trim())
-    .filter((url) => url.startsWith("stun:") || url.startsWith("stuns:")),
   /** lifecycle prepared template 的投递/执行窗口；过期 frame 会被 worker 拒绝。 */
   preparedOperationTtlMs: Math.max(30_000, Math.min(30 * 60_000, int("COFLUX_PREPARED_OPERATION_TTL_MS", 5 * 60_000))),
 
@@ -197,9 +129,9 @@ export const config = {
   autoUpdatePollMs: int("COFLUX_AUTOUPDATE_POLL_MS", 10 * 60 * 1000),
   autoUpdateMaxAttempts: int("COFLUX_AUTOUPDATE_MAX_ATTEMPTS", 3),
 
-  /** 桌面客户端准入（plan 105）：server 支持的最低控制面协议版本，默认 1（当前 CONTROL_PROTOCOL_VERSION）。
-   * 桌面不看 build-id——打包分发有发布时差。只在做破坏性协议改动、要把旧桌面版挡在门外时改默认值或用 env 临时抬高。 */
-  minControlProtocolVersion: Number.parseInt(process.env.COFLUX_MIN_CONTROL_PROTOCOL_VERSION ?? "1", 10) || 1,
+  /** Additional Desktop control-protocol floor, default 2. Desktop admission ignores build IDs.
+   * This setting may raise the minimum; it cannot lower the global CONTROL_PROTOCOL_VERSION floor. */
+  minControlProtocolVersion: Number.parseInt(process.env.COFLUX_MIN_CONTROL_PROTOCOL_VERSION ?? "2", 10) || 2,
   /** 构建版本准入（plan 033）：显式覆盖口，黑盒测试用；生产改用 buildIdFiles 自举，通常不设。 */
   buildId: process.env.COFLUX_BUILD_ID ?? "",
   /** 构建版本准入（plan 033，2026-07-23 修订）：逗号分隔的 build-id.txt 文件路径（web/mobile

@@ -4,7 +4,12 @@ export class TailcatTestHelper {
   constructor(binary) {
     this.child = spawn(binary, [], { stdio: ["pipe", "pipe", "ignore"] });
     this.listeners = new Map(); this.next = 1; this.pending = new Map(); this.frames = []; this.waiters = []; this.buffer = Buffer.alloc(0);
-    this.child.stdin.on("error", () => {});
+    this.disposals = new Set();
+    this.exited = new Promise(resolve => {
+      this.child.once("exit", (code, signal) => { this.failPending(new Error(`native helper exited (${code ?? signal})`)); resolve(); });
+      this.child.once("error", error => { this.failPending(error); resolve(); });
+    });
+    this.child.stdin.on("error", error => this.failPending(error));
     this.child.stdout.on("data", bytes => {
       this.buffer = Buffer.concat([this.buffer, bytes]);
       while (this.buffer.length >= 9) {
@@ -15,7 +20,7 @@ export class TailcatTestHelper {
         this.buffer = this.buffer.subarray(size + 4);
         const event = kind === 1 ? JSON.parse(payload) : undefined;
         const pending = event?.id && this.pending.get(event.id);
-        if (pending) { this.pending.delete(event.id); pending(event); continue; }
+        if (pending) { this.pending.delete(event.id); pending.resolve(event); continue; }
         const frame = { kind, stream: event?.stream ?? stream, payload, event };
         if (kind === 2 && this.listeners.has(stream)) { this.listeners.get(stream)(payload); continue; }
         const index = this.waiters.findIndex(w => w.match(frame));
@@ -25,22 +30,27 @@ export class TailcatTestHelper {
   }
   subscribe(stream, listener) { this.listeners.set(stream, listener); return () => this.listeners.delete(stream); }
   send(stream, bytes) { this.write(2, stream, bytes); }
-  write(kind, stream, bytes) { const header = Buffer.alloc(9); header.writeUInt32BE(bytes.length + 5); header[4] = kind; header.writeUInt32BE(stream, 5); this.child.stdin.write(header); this.child.stdin.write(bytes); }
+  write(kind, stream, bytes) { if (this.stoppedError) throw this.stoppedError; const header = Buffer.alloc(9); header.writeUInt32BE(bytes.length + 5); header[4] = kind; header.writeUInt32BE(stream, 5); this.child.stdin.write(header); this.child.stdin.write(bytes); }
   request(op, fields = {}) {
+    if (this.stoppedError) return Promise.reject(this.stoppedError);
     const id = this.next++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${op} timed out`)); }, 25_000);
-      this.pending.set(id, event => { clearTimeout(timer); event.ok ? resolve(event) : reject(new Error(`${op} rejected`)); });
+      this.pending.set(id, {
+        resolve: event => { clearTimeout(timer); event.ok ? resolve(event) : reject(new Error(`${op} rejected`)); },
+        reject: error => { clearTimeout(timer); reject(error); },
+      });
       this.write(1, 0, Buffer.from(JSON.stringify({ id, op, ...fields })));
     });
   }
   wait(match, timeout = 15_000, signal) {
+    if (this.stoppedError) return Promise.reject(this.stoppedError);
     if (signal?.aborted) return Promise.reject(signal.reason);
     const index = this.frames.findIndex(match);
     if (index >= 0) return Promise.resolve(this.frames.splice(index, 1)[0]);
     return new Promise((resolve, reject) => {
       const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); this.waiters = this.waiters.filter(w => w !== waiter); };
-      const waiter = { match, resolve: frame => { cleanup(); resolve(frame); } };
+      const waiter = { match, resolve: frame => { cleanup(); resolve(frame); }, reject: error => { cleanup(); reject(error); } };
       const abort = () => { cleanup(); reject(signal.reason); };
       const timer = setTimeout(() => { cleanup(); reject(new Error("native frame timeout")); }, timeout);
       signal?.addEventListener("abort", abort, { once: true });
@@ -48,13 +58,29 @@ export class TailcatTestHelper {
     });
   }
 
-  async stop() {
-    if (this.child.exitCode !== null) return;
+  trackDisposal(promise) {
+    this.disposals.add(promise);
+    void promise.finally(() => this.disposals.delete(promise)).catch(() => {});
+    return promise;
+  }
+  failPending(error) {
+    this.stoppedError ??= error;
+    for (const pending of this.pending.values()) pending.reject(this.stoppedError);
+    this.pending.clear();
+    for (const waiter of [...this.waiters]) waiter.reject(this.stoppedError);
+    this.listeners.clear(); this.frames = [];
+  }
+  stop() { return this.stopping ??= this.stopOnce(); }
+  async stopOnce() {
+    this.failPending(new Error("native helper owner closed"));
+    await Promise.allSettled([...this.disposals]);
+    if (this.child.exitCode !== null || this.child.signalCode !== null) return;
+    let forced = false;
+    const timer = setTimeout(() => { forced = true; this.child.kill("SIGKILL"); }, 3000);
     this.child.stdin.end();
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.child.kill("SIGKILL"); reject(new Error("helper survived owner EOF")); }, 3000);
-      this.child.once("exit", () => { clearTimeout(timer); resolve(); });
-    });
+    await this.exited;
+    clearTimeout(timer);
+    if (forced) throw new Error("helper survived owner EOF and required SIGKILL");
   }
 }
 
@@ -85,7 +111,7 @@ export async function openNativeTestDevice(stack, helper, options = {}) {
         const reason = new Error(`native channel ${channelId} was closed`);
         cancellation.abort(reason); rejectCancelled(reason); rejectGrant(reason);
         clearTimeout(grantTimer); unsubscribeControl(); unsubscribeData();
-        disposal = helper.request("close", { stream }).then(() => helper.request("drop", { connection }));
+        disposal = helper.trackDisposal(helper.request("close", { stream }).then(() => helper.request("drop", { connection })));
         void disposal.catch(() => {});
       }
       return disposal;
@@ -101,7 +127,7 @@ export async function openNativeTestDevice(stack, helper, options = {}) {
       const { publicKey } = await step(() => helper.request("prepare", { connection }));
       checkLive();
       grantTimer = setTimeout(() => rejectGrant(new Error("native fault grant timed out")), 10_000);
-      control.send({ case: "deviceTailcatConnect", daemonId: stack.daemonId, channelId, clientInstanceId, transportGeneration: generation, protocolVersion: DEVICE_PROTOCOL_VERSION, nodePublicKey: publicKey, scope });
+      control.send({ case: "deviceTailcatConnect", daemonId: options.daemonId ?? stack.daemonId, channelId, clientInstanceId, transportGeneration: generation, protocolVersion: DEVICE_PROTOCOL_VERSION, nodePublicKey: publicKey, scope });
       const grant = await step(() => granted);
       if (!grant.ok) throw new Error(grant.error);
       await step(() => helper.request("open", { connection, stream, address: grant.address }));
@@ -113,12 +139,12 @@ export async function openNativeTestDevice(stack, helper, options = {}) {
       if ((await helper.wait(f => f.kind === 2 && f.stream === stream, 15_000, cancellation.signal)).payload.toString() !== "ok") throw new Error("invalid worker acceptance");
       checkLive();
       const device = new DeviceClient(stack, { control, clientInstanceId });
-      unsubscribeData = helper.subscribe(stream, bytes => { const envelope = decodeDeviceEnvelope(bytes); if (envelope) device.receive(envelope, "tailcat", channelId); });
-      device.replaceTransport({ channelId, generation, send: bytes => { if (cancellation.signal.aborted) return false; helper.send(stream, bytes); return true; }, unsubscribe: unsubscribeData, close: () => { void dispose(); } });
+      unsubscribeData = helper.subscribe(stream, bytes => { const envelope = decodeDeviceEnvelope(bytes); if (envelope) { device.receive(envelope, "tailcat", channelId); options.onEnvelope?.(envelope, channelId); } });
+      device.replaceTransport({ channelId, generation, scopes: grant.scopes, get closed() { return cancellation.signal.aborted; }, send: bytes => { if (cancellation.signal.aborted) return false; helper.send(stream, bytes); return true; }, unsubscribe: unsubscribeData, close: () => { void dispose(); } });
       return Object.assign(device, { nativeStream: stream, nativeConnection: connection, nativeChannelId: channelId, disposeNative: dispose });
     } catch (error) {
       last = error; control.send({ case: "deviceTailcatClose", channelId });
-      await dispose(); await sleep(100);
+      await dispose().catch(() => {}); if (helper.stoppedError) throw error; await sleep(100);
     }
   }
   throw last || new Error("native connection timed out");

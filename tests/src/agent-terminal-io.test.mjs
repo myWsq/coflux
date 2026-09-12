@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8861;
 const COFLUXD = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
@@ -90,7 +90,7 @@ after(async () => {
 
 test("terminal wait：阻塞到退出并打印退出码；超时明确报错不误报", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;
@@ -147,7 +147,7 @@ test("terminal wait：阻塞到退出并打印退出码；超时明确报错不�
 
 test("terminal send：无人接管时写得进（命令真收到输入）；用户 attach 期间被拒且错误可读", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;
@@ -205,7 +205,7 @@ test("terminal send：无人接管时写得进（命令真收到输入）；用�
 
 test("progress：短评经中心广播、跨 hook 事件存活、被下一条覆盖", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;
@@ -265,7 +265,7 @@ test("progress：短评经中心广播、跨 hook 事件存活、被下一条覆
 
 test("命令日志有界保尾（plan 094）：输出远超一段容量后 read 仍返回最新尾行、退出码正确，磁盘占用有界", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;

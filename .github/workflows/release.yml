@@ -150,10 +150,8 @@ jobs:
           COFLUX_RELEASE_VERSION: ${{ github.ref_name }}
           RUSTFLAGS: -D warnings
         run: |
-          # relay 只随 linux 矩阵发布（部署对象是 Linux 服务器节点，plan 043）；
-          # macOS 不产 relay，也就不进签名/公证循环。
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker -p coflux-relay -p coflux-cli
+            cross build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker -p coflux-cli
           else
             cargo build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker -p coflux-cli
           fi
@@ -223,10 +221,6 @@ jobs:
           cp "$bin/TRANSPORT-NOTICES.txt" "dist/coflux-transport-NOTICES-${{ matrix.target }}.txt"
           cp "$bin/TRANSPORT-MODULES.txt" "dist/coflux-transport-MODULES-${{ matrix.target }}.txt"
           cp "$bin/coflux" "dist/coflux-cli-${{ matrix.target }}"
-          # 独立 relay（plan 043，仅 linux 矩阵产出）：服务器节点手动部署，稳定命名同上
-          if [ -f "$bin/coflux-relay" ]; then
-            cp "$bin/coflux-relay" "dist/coflux-relay-${{ matrix.target }}"
-          fi
           # tar.gz contains supervisor, worker and the native CLI for manual installation
           tar -C "$bin" -czf "dist/coflux-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" coflux-supervisor coflux-worker coflux coflux-transport TRANSPORT-NOTICES.txt TRANSPORT-MODULES.txt
 

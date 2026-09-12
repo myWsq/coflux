@@ -1,0 +1,132 @@
+[
+  {
+    "path": "coflux/v1/client.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"33\" with name \"device_relay_connect\" on message \"ClientToServer\" was deleted."
+  },
+  {
+    "path": "coflux/v1/client.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"35\" with name \"device_p2p_offer\" on message \"ClientToServer\" was deleted."
+  },
+  {
+    "path": "coflux/v1/client.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"36\" with name \"device_p2p_channel_open\" on message \"ClientToServer\" was deleted."
+  },
+  {
+    "path": "coflux/v1/client.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"3\" with name \"ice_servers\" on message \"AuthOk\" was deleted."
+  },
+  {
+    "path": "coflux/v1/client.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"33\" with name \"device_relay_grant\" on message \"ServerToClient\" was deleted."
+  },
+  {
+    "path": "coflux/v1/client.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"35\" with name \"device_p2p_answer\" on message \"ServerToClient\" was deleted."
+  },
+  {
+    "path": "coflux/v1/client.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"36\" with name \"device_p2p_channel_result\" on message \"ServerToClient\" was deleted."
+  },
+  {
+    "path": "coflux/v1/daemon.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"RelayHome\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/daemon.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"RelayNodeList\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/daemon.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"RelayNodeList.RelayNode\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/daemon.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"29\" with name \"relay_home\" on message \"DaemonToServer\" was deleted."
+  },
+  {
+    "path": "coflux/v1/daemon.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"33\" with name \"device_p2p_answer_report\" on message \"DaemonToServer\" was deleted."
+  },
+  {
+    "path": "coflux/v1/daemon.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"33\" with name \"device_relay_dial\" on message \"ServerToDaemon\" was deleted."
+  },
+  {
+    "path": "coflux/v1/daemon.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"34\" with name \"relay_node_list\" on message \"ServerToDaemon\" was deleted."
+  },
+  {
+    "path": "coflux/v1/daemon.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"36\" with name \"device_p2p_dial\" on message \"ServerToDaemon\" was deleted."
+  },
+  {
+    "path": "coflux/v1/daemon.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"37\" with name \"device_p2p_channel_grant\" on message \"ServerToDaemon\" was deleted."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"DeviceP2pAnswer\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"DeviceP2pAnswerReport\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"DeviceP2pChannelGrant\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"DeviceP2pChannelOpen\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"DeviceP2pChannelResult\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"DeviceP2pDial\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"DeviceP2pOffer\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"DeviceRelayConnect\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"DeviceRelayDial\" was deleted from file."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "MESSAGE_NO_DELETE",
+    "message": "Previously present message \"DeviceRelayGrant\" was deleted from file."
+  }
+]

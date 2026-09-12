@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { mkRepo, startStack, CLI_BIN } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8857;
 const COFLUXD = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
@@ -133,7 +133,7 @@ after(async () => {
 
 test("terminal new：中心真建出任务、命令真在 PTY 里跑、跑完带退出码；read 拿得到已退出终端的纯文本输出", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;
@@ -188,7 +188,7 @@ test("terminal new：中心真建出任务、命令真在 PTY 里跑、跑完带
 
 test("会话终端（plan 101）：不带 --cmd 开出常驻的全 tty 登录 shell，read 读快照，送 exit 才退出", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;
@@ -271,7 +271,7 @@ test("会话终端（plan 101）：不带 --cmd 开出常驻的全 tty 登录 sh
 
 test("notify：presence 转 question 并携带留言，经中心广播", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;
@@ -326,7 +326,7 @@ test("notify：presence 转 question 并携带留言，经中心广播", async (
 
 test("安全边界：coflux 会话之外的 pid 一律拒；非 json 被拒；超上限拒绝且错误可读", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;
@@ -412,7 +412,7 @@ test("跟随 cwd：在 B 的目录里开的终端属 B、跑在 B；list 只见 
   const outside = mkDir(); // 不注册成工作区：cwd 落在任何工作区之外
   const repoB = mkRepo();
   let homeB; // B 工作区在中心登记的路径（= repoB.dir；mkRepo 不做 realpath，正好验证两边规范化）
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws: wsA, task } = await startDirTerminal(c, homeA);
   const gatewayPort = device.gateway.port;
@@ -546,7 +546,7 @@ test("跟随 cwd：在 B 的目录里开的终端属 B、跑在 B；list 只见 
 
 test("plan 112：Rust 版 coflux 对同一组子命令给出与 node 版相同的 stdout 短语与退出码；管理类子命令被明确拒绝（exit 1）、未知命令沿用用法提示（exit 1）、hook 永远静默 0", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;

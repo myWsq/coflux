@@ -24,6 +24,7 @@ import {
   clampDim,
   decodeDeviceEnvelope,
   DEVICE_PROTOCOL_VERSION,
+  CONTROL_PROTOCOL_VERSION,
   encodeServerToDaemon,
   encodeServerToClient,
   MAX_FRAME_ID_BYTES,
@@ -36,10 +37,6 @@ import {
   DeviceScope,
   type AccountId,
   type DaemonId,
-  type DeviceRelayConnect,
-  type DeviceP2pOffer,
-  type DeviceP2pChannelOpen,
-  type DeviceP2pAnswerReport,
   type DaemonToServer,
   type ClientToServer,
   type ServerToDaemonPayload,
@@ -73,7 +70,6 @@ import {
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
 import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
-import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, selectRelayNode, supportsP2pDial, supportsRelayDial, validRelayId } from "./relay-rendezvous.js";
 import { TailcatRendezvous, privateTailcatRegions } from "./tailcat-rendezvous.js";
 import { LocalControlPlane } from "./local-control.js";
 import { verifyPassword } from "./auth.js";
@@ -188,8 +184,6 @@ export interface DaemonConn {
   /** 握手宣告的控制面能力名（plan 091）：账号接口 发送新增控制消息前按它做门禁。纯连接内存态。 */
   capabilities: ReadonlySet<string>;
   ws: WebSocket;
-  /** daemon 探测选出的 home relay；纯连接 presence，重连后由新 worker 重新上报。 */
-  homeRelayId?: string;
   /** 只接受当前 server WS 主动索要的完整 catalog；候选集冻结在请求发出前，避免请求后的
    * 新 session 因不可能出现在旧快照里而被误判缺席。旧连接/outbox 的 requestId 不能提交。 */
   catalogRequest?: {
@@ -436,8 +430,6 @@ export class Hub {
    * 事实——纯内存、不落库，daemon 断开即清空并广播；订阅时按设备补发当前全量。 */
   private sessionAgents = new Map<DaemonId, { accountId: AccountId; sessions: SessionAgentData[] }>();
   private readonly localControl: LocalControlPlane<ClientConn, DaemonConn>;
-  /** 独立 relay 的 token 签发（plan 043）；server 不再承载 relay 数据面。 */
-  private readonly relayTokens: RelayTokenSigner;
   /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
   /** 设备授权和端口预览页面；页面会话与 CSRF 独立，业务校验复用本 Hub。 */
@@ -484,7 +476,6 @@ export class Hub {
       (daemon, payload) => this.sendDaemon(daemon, payload),
       (client, payload) => this.sendClient(client, payload),
     );
-    this.relayTokens = new RelayTokenSigner(config.relaySigningKeySeed);
     this.preparedOperations = createPreparedOperationService(store, {
       getDaemon: (daemonId) => this.daemons.get(daemonId),
       isCurrentDaemon: (daemon) => this.isCurrentDaemon(daemon),
@@ -818,7 +809,6 @@ export class Hub {
       // 旧连接的 restore continuation 可能在新连接上线后撤销新 lease、覆盖 gateway，或重装
       // 旧 prepared timer；后继连接必须等当前 generation 完成初始化后才能接管。
       // 新 oneof 对旧 worker 会按 protobuf unknown field 解成空 payload 并忽略；无需版本门。
-      this.sendDaemon(daemon, { case: "relayNodeList", value: { nodes: config.relayNodes } });
       this.broadcast(device.accountId, { case: "daemonUpdated", value: { daemon: info } });
       await this.pushWorkspaceList(info.daemonId, daemon);
       if (!this.isCurrentDaemon(daemon)) return false;
@@ -1968,6 +1958,7 @@ export class Hub {
     switch (msg.payload.case) {
       case "daemonEnrollRequest": {
         const value = msg.payload.value;
+        if (value.controlProtocolVersion < CONTROL_PROTOCOL_VERSION) { this.sendRaw(conn.ws, { case: "daemonAuthError", value: { message: "Device control protocol requires an update", needEnroll: false } }); conn.ws.close(1008, "incompatible control protocol"); return; }
         if (!this.enrollLimiter.allow(conn.remoteAddress)) {
           log.warn("daemon 匿名登记触发来源限速", { remoteAddress: conn.remoteAddress });
           conn.ws.close(1013, "enroll rate limit");
@@ -2030,6 +2021,7 @@ export class Hub {
       }
       case "daemonAuth": {
         const value = msg.payload.value;
+        if (value.controlProtocolVersion < CONTROL_PROTOCOL_VERSION) { this.sendRaw(conn.ws, { case: "daemonAuthError", value: { message: "Device control protocol requires an update", needEnroll: false } }); conn.ws.close(1008, "incompatible control protocol"); return; }
         if (!this.daemonAuthLimiter.allow(conn.remoteAddress)) {
           log.warn("daemon token 认证触发来源限速", { remoteAddress: conn.remoteAddress });
           conn.ws.close(1013, "daemon auth rate limit");
@@ -2057,7 +2049,7 @@ export class Hub {
           { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true, workerVersion: value.workerVersion, supervisorVersion: value.supervisorVersion },
           device.accountId,
           value.arch,
-          { case: "daemonAuthed", value: { daemonId: device.id } },
+          { case: "daemonAuthed", value: { daemonId: device.id, controlProtocolVersion: CONTROL_PROTOCOL_VERSION } },
           value.capabilities ?? [],
         );
         if (registered) log.info("daemon authed", { daemonId: device.id, name: device.name });
@@ -2094,29 +2086,10 @@ export class Hub {
         if (daemon?.ws === conn.ws) this.tailcat.installed(daemon, msg.payload.value.channelId, msg.payload.value.ok);
         break;
       }
-      case "deviceP2pAnswerReport": {
-        const daemon = this.currentDaemon(conn);
-        if (daemon) this.handleDeviceP2pAnswerReport(daemon.info.daemonId, msg.payload.value);
-        break;
-      }
       // 中心发起的终端读/写回执（plan 091）：按 requestId 找到等待中的 tool 调用；找不到 = 已超时摘除。
       case "serverAgentResult": {
         const daemon = this.currentDaemon(conn);
         if (daemon) this.resolveAgentRequest(daemon, msg.payload.value);
-        break;
-      }
-      case "relayHome": {
-        const daemon = this.currentDaemon(conn);
-        if (!daemon) break;
-        const relayId = msg.payload.value.relayId;
-        if (!config.relayNodes.some((node) => node.id === relayId)) {
-          log.warn("daemon reported unknown home relay", { daemonId: daemon.info.daemonId, relayId });
-          break;
-        }
-        if (daemon.homeRelayId !== relayId) {
-          daemon.homeRelayId = relayId;
-          log.info("daemon home relay changed", { daemonId: daemon.info.daemonId, relayId });
-        }
         break;
       }
       case "localGatewayAnnounce": {
@@ -2733,18 +2706,6 @@ export class Hub {
         this.tailcat.closeChannel(client, msg.payload.value.channelId);
         break;
       }
-      case "deviceRelayConnect": {
-        this.handleDeviceRelayConnect(client, msg.payload.value);
-        break;
-      }
-      case "deviceP2pOffer": {
-        this.handleDeviceP2pOffer(client, msg.payload.value);
-        break;
-      }
-      case "deviceP2pChannelOpen": {
-        this.handleDeviceP2pChannelOpen(client, msg.payload.value);
-        break;
-      }
       case "clientRemoveDevice": {
         await this.removeDevice(client, msg.payload.value.daemonId);
         break;
@@ -3307,6 +3268,11 @@ export class Hub {
     // 允许集合为空（COFLUX_BUILD_ID 与 COFLUX_BUILD_ID_FILE 均未设，本机开发 / 黑盒测试）
     // 完全跳过；client 上报 "dev"（vite dev）总放行。
     const allowedBuildIds = this.allowedBuildIds();
+    if ((msg.controlProtocolVersion ?? 0) < CONTROL_PROTOCOL_VERSION) {
+      this.sendClient(client, { case: "clientOutdated", value: {} });
+      client.ws.close(4001, "incompatible control protocol");
+      return;
+    }
     if (msg.clientKind === "desktop") {
       // 桌面客户端（plan 105）：按控制面协议版本准入，不看 build-id——打包分发有发布时差，不能像浏览器那样
       // reload 立刻拿到新 bundle。只有低于 server 支持的最低协议版本（破坏性协议改动）才拒；平时部署不踢旧桌面版，
@@ -3348,7 +3314,7 @@ export class Hub {
     client.accountId = accountId;
     client.tokenHash = tokenHash;
     const loginName = await this.resolveLoginName(loginUserId, tokenHash);
-    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, iceServers: config.stunUrls, loginName } });
+    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION } });
   }
 
   /** authOk 回带的「登录身份显示串」（plan 110）：local 模式恒为 env 用户名；password 模式按
@@ -3613,185 +3579,12 @@ export class Hub {
       { daemonId, name: p.name, host: p.host, platform: p.platform, online: true, workerVersion: p.workerVersion, supervisorVersion: p.supervisorVersion },
       accountId,
       p.arch,
-      { case: "daemonEnrolled", value: { daemonId, deviceToken } },
+      { case: "daemonEnrolled", value: { daemonId, deviceToken, controlProtocolVersion: CONTROL_PROTOCOL_VERSION } },
       p.capabilities,
     );
     if (!registered) return { ok: false, error: "设备在授权完成前已失效，请重新发起" };
     log.info("daemon authorized", { daemonId, name: p.name, host: p.host, accountId });
     return { ok: true };
-  }
-
-  /** relay rendezvous（plan 043）：校验归属 → 两端各签短时单次 token → 通知 daemon 拨号。
-   * 校验语义沿用旧 DeviceRelayRouter.open；server 从此不持 channel 状态，channel 的
-   * 生死由 relay 配对/两端 WS 收敛，断开即由 client 重新 rendezvous。 */
-  private handleDeviceRelayConnect(client: ClientConn, request: DeviceRelayConnect): void {
-    const fail = (error: string) => {
-      log.warn("relay rendezvous 被拒", {
-        daemonId: validRelayId(request.daemonId) ? request.daemonId : "<invalid>",
-        channelId: validRelayId(request.channelId) ? request.channelId : "<invalid>",
-        reason: error,
-      });
-      this.sendClient(client, { case: "deviceRelayGrant", value: { channelId: request.channelId, ok: false, error } });
-    };
-
-    if (!client.accountId) return void fail("client 未认证");
-    if (
-      request.protocolVersion !== DEVICE_PROTOCOL_VERSION ||
-      !validRelayId(request.daemonId) ||
-      !validRelayId(request.channelId) ||
-      request.channelId.startsWith("__coflux-") ||
-      !validRelayId(request.clientInstanceId) ||
-      request.transportGeneration <= 0n
-    ) {
-      return void fail("relay channel/principal/version 无效");
-    }
-    if (config.relayNodes.length === 0) return void fail("中心未配置 relay 节点");
-    if (!allowRendezvous(client)) return void fail("rendezvous 频率超限");
-
-    const daemon = this.daemons.get(request.daemonId);
-    if (!daemon || daemon.accountId !== client.accountId) return void fail("daemon 不在线或不属于本账号");
-    if (!supportsRelayDial(daemon.info.workerVersion)) {
-      return void fail(`设备 worker 版本过旧（${daemon.info.workerVersion}），不支持按需拨号；在该设备上运行 \`cofluxd update && cofluxd restart\` 后重试`);
-    }
-
-    const relayNode = selectRelayNode(config.relayNodes, daemon.homeRelayId);
-    if (!relayNode) return void fail("中心未配置 relay 节点");
-    const ttl = config.relayTokenTtlMs;
-    this.sendDaemon(daemon, {
-      case: "deviceRelayDial",
-      value: {
-        channelId: request.channelId,
-        relayUrl: buildRelayPipeUrl(relayNode.url, this.relayTokens.sign(request.channelId, "daemon", ttl)),
-        accountId: client.accountId,
-        clientInstanceId: request.clientInstanceId,
-        transportGeneration: request.transportGeneration,
-        scopes: [DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE],
-        protocolVersion: DEVICE_PROTOCOL_VERSION,
-      },
-    });
-    this.sendClient(client, {
-      case: "deviceRelayGrant",
-      value: {
-        channelId: request.channelId,
-        ok: true,
-        relayUrl: buildRelayPipeUrl(relayNode.url, this.relayTokens.sign(request.channelId, "client", ttl)),
-      },
-    });
-  }
-
-  /** P2P 信令（plan 076）：中心只做归属校验 + SDP 转发，不签 token、不持连接状态。
-   * 唯一的短时状态是 answer 回程路由（connectionId → 发起 client），TTL 内未回即弃；
-   * 中心重启丢 pending 只导致 client 超时回落 relay。 */
-  private readonly p2pPending = new Map<string, { client: ClientConn; daemonId: DaemonId; at: number }>();
-
-  private handleDeviceP2pOffer(client: ClientConn, request: DeviceP2pOffer): void {
-    const fail = (error: string) => {
-      log.warn("P2P 信令被拒", {
-        daemonId: validRelayId(request.daemonId) ? request.daemonId : "<invalid>",
-        connectionId: validRelayId(request.connectionId) ? request.connectionId : "<invalid>",
-        reason: error,
-      });
-      this.sendClient(client, { case: "deviceP2pAnswer", value: { connectionId: request.connectionId, ok: false, error } });
-    };
-
-    // 总开关（config.p2pEnabled）：拒在信令入口，client 的 candidateDone("p2p", error) 会即刻
-    // 触发 startRelay()，比等 15s 建连超时快得多。关掉时行为等价于 plan 076 上线前。
-    if (!config.p2pEnabled) return void fail("P2P 直连已停用");
-    if (!client.accountId) return void fail("client 未认证");
-    if (
-      request.protocolVersion !== DEVICE_PROTOCOL_VERSION ||
-      !validRelayId(request.daemonId) ||
-      !validRelayId(request.connectionId) ||
-      request.connectionId.startsWith("__coflux-") ||
-      !validRelayId(request.clientInstanceId) ||
-      request.sdp.length === 0 ||
-      request.sdp.length > 64 * 1024
-    ) {
-      return void fail("p2p connection/principal/version 无效");
-    }
-    if (!allowRendezvous(client)) return void fail("rendezvous 频率超限");
-
-    const daemon = this.daemons.get(request.daemonId);
-    if (!daemon || daemon.accountId !== client.accountId) return void fail("daemon 不在线或不属于本账号");
-    if (!supportsP2pDial(daemon.info.workerVersion)) {
-      return void fail(`设备 worker 版本过旧（${daemon.info.workerVersion}），不支持 P2P 直连；在该设备上运行 \`cofluxd update && cofluxd restart\` 后重试`);
-    }
-
-    // lazy sweep：借每次 offer 清过期 pending，无独立定时器。
-    const now = Date.now();
-    for (const [id, entry] of this.p2pPending) {
-      if (now - entry.at > config.relayTokenTtlMs) this.p2pPending.delete(id);
-    }
-    if (this.p2pPending.size >= 256) return void fail("p2p 信令待处理数超限");
-    this.p2pPending.set(request.connectionId, { client, daemonId: request.daemonId, at: now });
-
-    this.sendDaemon(daemon, {
-      case: "deviceP2pDial",
-      value: {
-        connectionId: request.connectionId,
-        accountId: client.accountId,
-        clientInstanceId: request.clientInstanceId,
-        sdp: request.sdp,
-        iceServers: config.stunUrls,
-        protocolVersion: DEVICE_PROTOCOL_VERSION,
-      },
-    });
-  }
-
-  private handleDeviceP2pAnswerReport(daemonId: DaemonId, report: DeviceP2pAnswerReport): void {
-    const pending = this.p2pPending.get(report.connectionId);
-    if (!pending || pending.daemonId !== daemonId) return;
-    this.p2pPending.delete(report.connectionId);
-    this.sendClient(pending.client, {
-      case: "deviceP2pAnswer",
-      value: { connectionId: report.connectionId, ok: report.ok, sdp: report.sdp, error: report.error },
-    });
-  }
-
-  /** channel 级授权与 relay rendezvous 同语义：scopes 由中心全量授予、daemon 信任控制面。
-   * 授权通过但 worker 侧连接已消亡时不再有补充消息——client 靠 DataChannel open 超时回落。 */
-  private handleDeviceP2pChannelOpen(client: ClientConn, request: DeviceP2pChannelOpen): void {
-    const fail = (error: string) => {
-      log.warn("P2P channel 授权被拒", {
-        daemonId: validRelayId(request.daemonId) ? request.daemonId : "<invalid>",
-        channelId: validRelayId(request.channelId) ? request.channelId : "<invalid>",
-        reason: error,
-      });
-      this.sendClient(client, { case: "deviceP2pChannelResult", value: { channelId: request.channelId, ok: false, error } });
-    };
-
-    // 与 offer 同门：关掉 P2P 后，任何残留 PeerConnection 想开新 channel 一律拒。
-    if (!config.p2pEnabled) return void fail("P2P 直连已停用");
-    if (!client.accountId) return void fail("client 未认证");
-    if (
-      request.protocolVersion !== DEVICE_PROTOCOL_VERSION ||
-      !validRelayId(request.daemonId) ||
-      !validRelayId(request.connectionId) ||
-      !validRelayId(request.channelId) ||
-      request.channelId.startsWith("__coflux-") ||
-      !validRelayId(request.clientInstanceId) ||
-      request.transportGeneration <= 0n
-    ) {
-      return void fail("p2p channel/principal/version 无效");
-    }
-    if (!allowRendezvous(client)) return void fail("rendezvous 频率超限");
-
-    const daemon = this.daemons.get(request.daemonId);
-    if (!daemon || daemon.accountId !== client.accountId) return void fail("daemon 不在线或不属于本账号");
-
-    this.sendDaemon(daemon, {
-      case: "deviceP2pChannelGrant",
-      value: {
-        connectionId: request.connectionId,
-        channelId: request.channelId,
-        accountId: client.accountId,
-        clientInstanceId: request.clientInstanceId,
-        transportGeneration: request.transportGeneration,
-        scopes: [DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE],
-        protocolVersion: DEVICE_PROTOCOL_VERSION,
-      },
-    });
-    this.sendClient(client, { case: "deviceP2pChannelResult", value: { channelId: request.channelId, ok: true } });
   }
 
   private async removeDevice(client: ClientConn, daemonId: DaemonId): Promise<void> {

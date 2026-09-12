@@ -43,6 +43,7 @@ export function accountControl(serverUrl: string, token: string, cleanup?: { dae
         if (!decoded) return finish(new Error("账号服务响应无效"));
         const payload = decoded.payload;
         if (payload.case === "authOk") {
+          if (payload.value.controlProtocolVersion < CONTROL_PROTOCOL_VERSION) return finish(new Error("服务器需要升级后才能连接"));
           accountId = payload.value.accountId;
           if (cleanup?.accountId && cleanup.accountId !== accountId) return finish(new Error("账号归属不匹配，拒绝清理"));
           send({ case: "clientSubscribe", value: {} });

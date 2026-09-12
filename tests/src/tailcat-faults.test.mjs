@@ -15,8 +15,8 @@ const ROOT = resolve(import.meta.dirname, "../..");
 async function freePort() { const server = net.createServer(); await new Promise(r => server.listen(0, "127.0.0.1", r)); const port = server.address().port; await new Promise(r => server.close(r)); return port; }
 async function stopProcess(child) { if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return; await new Promise(resolve => { const force = setTimeout(() => child.kill("SIGKILL"), 2000); child.once("exit", () => { clearTimeout(force); resolve(); }); child.kill("SIGTERM"); }); }
 
-test("native initial-region outage, serving helper crash, region failover and control grace preserve PTYs", { skip: process.env.COFLUX_TEST_TAILCAT !== "1", timeout: 180_000 }, async () => {
-  assert(process.env.COFLUX_TEST_DERPER_BIN, "stock DERP binary is required for fault acceptance");
+test("native initial-region outage, serving helper crash, region failover and control grace preserve PTYs", { timeout: 180_000 }, async () => {
+  const derperBinary = process.env.COFLUX_TEST_DERPER_BIN || join(ROOT, "target/debug/coflux-test-derper");
   const dir = mkdtempSync(join(tmpdir(), "coflux-native-fault-"));
   const derpers = []; const controls = []; let stack, helper, repo;
   const phase = message => console.log(`[native faults ${new Date().toISOString()}] ${message}`);
@@ -41,7 +41,7 @@ test("native initial-region outage, serving helper crash, region failover and co
       if (!ports.includes(port)) ports.push(port);
     }
     const startDerper = async (index) => {
-      const child = spawn(process.env.COFLUX_TEST_DERPER_BIN, ["-a", `127.0.0.1:${ports[index]}`, "-http-port", "-1", "-stun=false", "-hostname", "127.0.0.1", "-certmode", "manual", "-certdir", dir, "-c", join(dir, `derper-${index}.json`)], { stdio: ["ignore", "ignore", "pipe"] });
+      const child = spawn(derperBinary, ["-a", `127.0.0.1:${ports[index]}`, "-http-port", "-1", "-stun=false", "-hostname", "127.0.0.1", "-certmode", "manual", "-certdir", dir, "-c", join(dir, `derper-${index}.json`)], { stdio: ["ignore", "ignore", "pipe"] });
       derpers[index] = child;
       let output = "";
       let spawnError;
@@ -66,7 +66,7 @@ test("native initial-region outage, serving helper crash, region failover and co
     const regions = ports.map((port, index) => ({ RegionID: 901 + index, RegionCode: `test${index}`, Nodes: [{ Name: `node${index}`, RegionID: 901 + index, HostName: "127.0.0.1", IPv4: "127.0.0.1", IPv6: "none", DERPPort: port, STUNPort: -1, CertName: `sha256-raw:${pin}` }] }));
     phase("start stack with first DERP unreachable");
     const started = Date.now();
-    stack = await startStack({ port: PORT, strictCleanup: true, serverEnv: { COFLUX_DERP_REGIONS: JSON.stringify(regions) }, daemonEnv: { COFLUX_TAILCAT: "1" } });
+    stack = await startStack({ port: PORT, strictCleanup: true, serverEnv: { COFLUX_DERP_REGIONS: JSON.stringify(regions) }, daemonEnv: {} });
     const login = async () => { const control = stack.makeClient(); controls.push(control); await control.authSubscribe(); return control; };
     let control = await login();
     helper = new TailcatTestHelper(process.env.COFLUX_TRANSPORT_BIN || join(ROOT, "target/debug/coflux-transport")); await helper.request("hello", { version: 1 });

@@ -23,7 +23,7 @@ import Testing
                                   transport: transport, tokenStore: InMemoryTokenStore(value: "token"), localDeviceProvider: provider)
         defer { client.logout() }
         let control = await transport.nextConnection()
-        var auth = Coflux_V1_AuthOk(); auth.accountID = "account"
+        var auth = Coflux_V1_AuthOk(); auth.controlProtocolVersion = 2; auth.accountID = "account"
         control.push(.authOk(auth))
         #expect(await waitUntil { client.authState == .authed })
         var task = Coflux_V1_Task(); task.id = "task"; task.daemonID = "device"; task.status = .running; task.sessionID = "session"
