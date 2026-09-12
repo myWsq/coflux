@@ -107,7 +107,19 @@ afterEach(async () => {
   }
 });
 
-/** 轮询 read_terminal 直到文本满足条件（命令日志是异步落盘的）。 */
+/** 轮询 list_terminals 直到某终端的条目满足条件：命令状态（busy / lastCommandExitCode）随 checkpoint 到中心，滞后最多两秒。 */
+async function listedUntil(terminalId, predicate, label, timeout = 10000) {
+  const deadline = Date.now() + timeout;
+  let last;
+  while (Date.now() < deadline) {
+    last = (await okTool("list_terminals", {})).terminals.find((t) => t.id === terminalId);
+    if (last && predicate(last)) return last;
+    await sleep(300);
+  }
+  throw new Error(`${label} 超时；最后一次: ${JSON.stringify(last)}`);
+}
+
+/** 轮询 read_terminal 直到文本满足条件（快照有周期，输出不一定立刻上屏）。 */
 async function readUntil(terminalId, predicate, label, timeout = 20000) {
   const deadline = Date.now() + timeout;
   let last;
@@ -248,9 +260,9 @@ test("闭环：create_terminal --cmd（do-script）→ read_terminal(snapshot) �
   assert.equal(finished.source, "snapshot");
   assert.equal(finished.status, "running");
 
-  // 账号 API 的 list 里，跑着的终端带命令状态：空闲 + 上一条退出码
-  const listed = (await okTool("list_terminals", { workspaceId: subWorkspace.id })).terminals.find((t) => t.id === terminal.id);
-  assert.ok(listed, "list_terminals 能看到");
+  // 账号 API 的 list 里，跑着的终端带命令状态：空闲 + 上一条退出码。这份视图由 checkpoint 喂（2 秒周期），
+  // 比 wait 的即时回执晚一拍，得轮询到字段出现为止。
+  const listed = await listedUntil(terminal.id, (t) => t.busy !== undefined, "list_terminals 带上命令状态");
   assert.equal(listed.busy, false, JSON.stringify(listed));
   assert.equal(listed.lastCommandExitCode, 7, JSON.stringify(listed));
 

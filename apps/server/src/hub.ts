@@ -4155,7 +4155,10 @@ export class Hub {
     return { ok: true, value: Number(result.payload.value.commandSeq) };
   }
 
-  /** 读终端：daemon 在线且支持 terminal_io → 经 daemon（活会话的 sessiond 快照：滚动缓冲 + 当前屏）；否则中心 checkpoint。 */
+  /** 读终端的来源顺序：task 已 EXITED → 只答中心 checkpoint（不问 daemon：会话退出时设备面的 exit 先于
+   * supervisor 摘掉会话与 worker 记账本到达中心，那一瞬 daemon 还会把已退出 shell 的画面当成活快照答回来）；
+   * 否则 daemon 在线且支持 terminal_io → 经 daemon（活会话的 sessiond 快照：滚动缓冲 + 当前屏，daemon 自己
+   * 也对已退出会话答 none）；否则中心 checkpoint。已退出的终端只剩中心缓存的最后一屏——这是既定的回退。 */
   async readTerminalForAccount(
     accountId: AccountId,
     terminalId: TaskId,
@@ -4165,7 +4168,7 @@ export class Hub {
     if (!task || task.accountId !== accountId) return { ok: false, error: `终端 ${terminalId} 不存在或不属于当前账号` };
     const bytes = Math.max(1, Math.min(MAX_TERMINAL_READ_BYTES, Math.floor(maxBytes)));
     const daemon = this.daemons.get(task.daemonId);
-    if (daemon && daemon.accountId === accountId && daemon.capabilities.has(DAEMON_CAPABILITY_TERMINAL_IO)) {
+    if (task.status !== TaskStatus.EXITED && daemon && daemon.accountId === accountId && daemon.capabilities.has(DAEMON_CAPABILITY_TERMINAL_IO)) {
       const result = await this.requestDaemonAgent(daemon, {
         case: "terminalRead",
         value: { taskId: task.id, sessionId: task.sessionId ?? "", maxBytes: bytes },

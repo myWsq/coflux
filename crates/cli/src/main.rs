@@ -25,7 +25,7 @@ const HELP: &str = "账号命令（JSON 输出）：
   coflux workspace new --project <id> --branch <分支> [--existing-branch]
   coflux workspace rename <id> --name <名称> | workspace remove <id>
   coflux terminal new --workspace <id> [--cmd <命令>] [--title <标题>]
-  coflux terminal list [--device <id>] [--workspace <id>]
+  coflux terminal list [--device <id>] [--workspace <id>]（跑着的终端带 busy / lastCommandExitCode，经 checkpoint 滞后 ≤2 秒）
   coflux terminal run|read|wait|send|stop|remove <id> --remote
   coflux ports --remote
   在 Coflux 应用已登录时自动使用应用账号；独立 CLI 可自行登录。

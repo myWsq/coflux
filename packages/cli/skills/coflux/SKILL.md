@@ -350,7 +350,9 @@ coflux ports --remote --device <deviceId>
 `--remote` selects account access, including other workspaces on this machine. The semantics are the
 same as the local commands: `--cmd` and `run` type a command in after the prompt is ready, `wait`
 returns `finished` with the command's exit code (or `exited` with the shell's) and `timedOut` on the
-deadline, `list` shows `busy` and `lastCommandExitCode` for live terminals, and `stop` is `close`.
+deadline, `list` shows `busy` and `lastCommandExitCode` for live terminals (fed by the device's
+checkpoints, so this view lags a couple of seconds behind reality; the local `coflux terminal list`
+is immediate), and `stop` is `close`.
 Read before sending; stop immediately when the user takes over. If a write times out, inspect the
 result before retrying. Exiting the CLI does not stop its terminals. Delete workspaces through
 `coflux workspace remove` so the filesystem and workspace records stay consistent.

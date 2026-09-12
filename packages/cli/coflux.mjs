@@ -406,7 +406,7 @@ agent 命令的环境变量：COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等�
   coflux workspace rename <id> --name <名称> | workspace remove <id>
   coflux terminal new --workspace <id> [--cmd <命令>]
   coflux terminal run|read|send|wait|stop|remove <id> --remote
-  coflux terminal list [--device <id>] [--workspace <id>]
+  coflux terminal list [--device <id>] [--workspace <id>]（跑着的终端带 busy / lastCommandExitCode，经 checkpoint 滞后 ≤2 秒）
   coflux ports --remote
   已登录的 Coflux 应用可供 CLI 直接使用；独立 CLI 可自行登录。
 `;
