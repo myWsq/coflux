@@ -69,6 +69,8 @@ export type DesktopUpdateState = {
 export type DesktopCommand = "create-terminal" | "close-terminal" | "create-workspace" | "previous-tab" | "next-tab" | "toggle-help" | "open-settings";
 
 export type DesktopNotification = {
+  notificationId?: string;
+  taskId?: string;
   /** 点击通知后主进程回传给渲染层的工作区 id，用于选中该工作区 */
   workspaceId: string;
   title: string;
@@ -92,8 +94,9 @@ export type DesktopBridge = {
   connectLocal(): Promise<void>;
   logoutLocal(): Promise<boolean>;
   notify(notification: DesktopNotification): void;
-  /** 待处理工作区数；0 清除角标 */
+  /** Combined automatic attention and unread inbox count; zero clears the badge. */
   setBadge(count: number): void;
+  onFocusNotification(listener: (notification: DesktopNotification) => void): () => void;
   onFocusWorkspace(listener: (workspaceId: string) => void): () => void;
   onCommand(listener: (command: DesktopCommand) => void): () => void;
   checkForUpdates(): void;

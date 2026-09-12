@@ -1227,6 +1227,18 @@ export class Hub {
     const reply = (payload: AgentControlResultPayload) =>
       this.sendDaemon(daemon, { case: "agentControlResult", value: { requestId: request.requestId, ok: true, payload } });
 
+    if (request.payload.case === "notify") {
+      const { notificationId, message } = request.payload.value;
+      if (!notificationId || notificationId.length > 128 || !message.trim() || [...message].length > 2000) {
+        return void fail("通知需要有效的请求标识和 1–2000 字的内容");
+      }
+      if (!this.isCurrentDaemon(daemon)) return void fail("daemon 连接已换代，请重试");
+      const result = await this.store.createNotification(daemon.accountId, daemon.info.daemonId, request.sessionId, notificationId, message.trim(), randomUUID());
+      if (result.created) this.broadcast(daemon.accountId, { case: "notificationChanged", value: result });
+      reply({ case: "notify", value: { notificationId: result.notification.id } });
+      return;
+    }
+
     const originTask = await this.store.getTaskBySession(request.sessionId);
     if (!originTask || originTask.daemonId !== daemon.info.daemonId || originTask.accountId !== daemon.accountId) {
       return void fail("发起方会话不属于本设备的任何任务");
@@ -2664,22 +2676,26 @@ export class Hub {
         let workspaces: Workspace[];
         let tasks: Task[];
         let checkpoints: SessionCheckpointRecord[];
+        let inbox: Awaited<ReturnType<Store["notificationPage"]>>;
         try {
-          [daemons, projects, workspaces, tasks, checkpoints] = await Promise.all([
+          [daemons, projects, workspaces, tasks, checkpoints, inbox] = await Promise.all([
             this.daemonInfoList(accountId),
             this.store.listProjects(accountId),
             this.store.listWorkspaces(accountId),
             this.store.listTasks(accountId),
             this.store.listSessionCheckpoints(accountId),
+            this.store.notificationPage(accountId),
           ]);
         } catch (error) {
           client.snapshotBacklog = undefined;
           client.subscribed = false;
           this.clients.delete(client);
+          client.ws.close(1011, "snapshot failed");
           throw error;
         }
         if (backlog.overflowed) return;
         this.sendClientNow(client, { case: "stateSnapshot", value: { daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) } });
+        this.sendClientNow(client, { case: "notificationPage", value: { ...inbox, requestId: "initial" } });
         for (const checkpoint of checkpoints) this.sendCheckpoint(client, checkpoint, true);
         // agent presence 补发（plan 073）：client 的 stateSnapshot handler 会清空本地 presence，
         // 这里按设备补发当前全量——顺序在快照之后、与 checkpoint 同批，天然落在乱序防护序列内。
@@ -2694,6 +2710,7 @@ export class Hub {
           client.snapshotBacklog = undefined;
           client.subscribed = false;
           this.clients.delete(client);
+          client.ws.close(1011, "snapshot failed");
           throw error;
         }
         // 上面的稳定查询引入了新的 await；期间 backlog 仍负责接住广播，但慢 client 可能已被
@@ -2702,6 +2719,29 @@ export class Hub {
         client.snapshotBacklog = undefined;
         for (const frame of backlog.frames) {
           if (!this.sendWs(client.ws, frame, "client")) break;
+        }
+        break;
+      }
+      case "notificationList": {
+        const { requestId, beforeSequence } = msg.payload.value;
+        try {
+          if (!Number.isSafeInteger(beforeSequence) || beforeSequence < 0) throw new Error("通知分页位置无效");
+          const page = await this.store.notificationPage(client.accountId!, beforeSequence);
+          this.sendClient(client, { case: "notificationPage", value: { requestId, ...page } });
+        } catch (error) {
+          this.sendClient(client, { case: "notificationPage", value: { requestId, error: (error as Error).message } });
+        }
+        break;
+      }
+      case "notificationRead": {
+        const { requestId, id, throughSequence } = msg.payload.value;
+        try {
+          if (!Number.isSafeInteger(throughSequence) || throughSequence < 0) throw new Error("通知已读位置无效");
+          const result = await this.store.readNotifications(client.accountId!, id, throughSequence);
+          this.broadcast(client.accountId!, { case: "notificationChanged", value: { ...result, requestId } });
+          if (!client.subscribed) this.sendClient(client, { case: "notificationChanged", value: { ...result, requestId } });
+        } catch (error) {
+          this.sendClient(client, { case: "notificationChanged", value: { requestId, error: (error as Error).message } });
         }
         break;
       }
@@ -3341,7 +3381,7 @@ export class Hub {
     client.accountId = accountId;
     client.tokenHash = tokenHash;
     const loginName = await this.resolveLoginName(loginUserId, tokenHash);
-    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION } });
+    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true } });
   }
 
   /** authOk 回带的「登录身份显示串」（plan 110）：local 模式恒为 env 用户名；password 模式按

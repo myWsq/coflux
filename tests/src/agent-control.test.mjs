@@ -7,7 +7,7 @@
  * - `terminal read` 是去 ANSI 的纯文本，取的是滚动缓冲的尾部（`--lines` 超过一屏也读得到）；
  * - `run` 在命令还在跑时被拒（busy）；已结束的命令再 wait 立即拿到退出码；用户/agent 往跑着的命令里
  *   打字不影响退出码；远端/嵌套 shell 的裸 OSC 133 标记不会提前结束 wait；
- * - `notify` 让 presence 转 question 并带上留言，经中心广播到所有 client；
+ * - Explicit notify is persisted to the account inbox independently of hook presence.
  * - 安全边界：coflux 会话之外的 pid 一律拒（身份就是「你在谁的进程树里」）；
  * - 每工作区活跃终端硬上限，超限拒绝且错误可读；
  * - plan 094：`/agent` 的拒绝原因回给调用方（超长命令、缺参数都有具体文案，不再是 `bad request`），
@@ -277,55 +277,29 @@ test("终端只有一种：不带 --cmd 只开常驻 shell；run 等提示符后
   }
 });
 
-test("notify：presence 转 question 并携带留言，经中心广播", async () => {
+test("notify persists from a plain owned shell and survives hook updates", async () => {
   const home = mkDir();
   const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;
   await device.attach(task.sessionId);
-
   try {
-    // presence 的存活门是「进程树里有 agent」：CLI 自己不是 agent，故先挂一个假 claude
-    const script = join(home, "claude");
-    const { writeFileSync, chmodSync } = await import("node:fs");
-    writeFileSync(script, "#!/bin/sh\nsleep 300\n");
-    chmodSync(script, 0o755);
-    await device.input(task.sessionId, "./claude &\r");
-    await c.waitFor(
-      (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === task.sessionId),
-      "presence 就位",
-      20000,
-    );
-
     const notifyOut = join(home, "notify.txt");
     await device.input(task.sessionId, cliCmd(gatewayPort, `notify "两个方案拿不准，需要你定"`, notifyOut));
-    // 先断言 CLI 自己成功了——否则下面等 presence 会白等 20 秒再报一个没信息量的超时
-    const notifyText = await waitForFile(notifyOut, (s) => s.trim().length > 0, "notify CLI 输出");
-    assert.match(notifyText, /已通知用户/, `notify 命令失败: ${notifyText}`);
-
-    const notified = await c.waitFor(
-      (m) =>
-        m.case === "sessionAgentsUpdated" &&
-        m.sessions.some((s) => s.sessionId === task.sessionId && s.state === "question" && s.message === "两个方案拿不准，需要你定"),
-      "notify → question + 留言",
-      20000,
-    );
-    assert.equal(notified.sessions.find((s) => s.sessionId === task.sessionId).agent, "claude", "留言不能把 agent 名弄丢");
-
-    // 后续任一 hook 事件到达即清掉留言（agent 已换状态，旧留言过期）
-    await device.input(
-      task.sessionId,
-      `printf '%s' '{"hook_event_name":"PreToolUse"}' | COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} node ${COFLUXD} hook claude\r`,
-    );
-    await c.waitFor(
-      (m) =>
-        m.case === "sessionAgentsUpdated" &&
-        m.sessions.some((s) => s.sessionId === task.sessionId && s.state === "active" && s.message === ""),
-      "hook 事件清掉过期留言",
-      20000,
-    );
-
+    const notifyText = await waitForFile(notifyOut, (s) => s.trim().length > 0, "notify output");
+    assert.match(notifyText, /通知已发送/, notifyText);
+    const notified = await c.waitFor((m) => m.case === "notificationChanged" && m.created && m.notification?.taskId === task.id, "durable notification");
+    assert.equal(notified.notification.message, "两个方案拿不准，需要你定");
+    assert.equal(notified.notification.workspaceId, ws.id);
+    assert.equal(notified.notification.readAt, 0);
+    const hookOut = join(home, "hook-finished.txt");
+    await device.input(task.sessionId, `printf '%s' '{"hook_event_name":"PostToolUse"}' | COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} node ${COFLUXD} hook claude; printf done > ${hookOut}\r`);
+    await waitForFile(hookOut, (s) => s === "done", "hook completion");
+    c.send({ case: "notificationList", requestId: "after-hook" });
+    const page = await c.waitFor((m) => m.case === "notificationPage" && m.requestId === "after-hook", "inbox after hook");
+    assert.equal(page.notifications.find((item) => item.id === notified.notification.id)?.message, notified.notification.message);
+    assert.ok(!c.log.some((m) => m.case === "sessionAgentsUpdated" && m.sessions.some((entry) => entry.sessionId === task.sessionId && entry.message === notified.notification.message)));
   } finally {
     await removeWorkspace(c, ws.id);
     device.close();
@@ -635,11 +609,11 @@ test("plan 112：Rust 版 coflux 对同一组子命令给出与 node 版相同�
     // progress / notify：回执短语 + 真的经中心广播出去
     const progressText = await rust(`progress "rust 进度"`, (s) => s.includes("已更新进度") || s.includes("✗"), "Rust progress");
     assert.equal(progressText.trim(), "已更新进度（显示在工作区卡片上，被下一条覆盖）");
-    const notifyText = await rust(`notify "rust 叫人"`, (s) => s.includes("已通知") || s.includes("✗"), "Rust notify");
-    assert.equal(notifyText.trim(), "已通知用户（工作区在侧栏转为「等待交互」）");
+    const notifyText = await rust(`notify "rust 叫人"`, (s) => s.includes("通知已发送") || s.includes("✗"), "Rust notify");
+    assert.equal(notifyText.trim(), "通知已发送（已保存到账号通知中心）");
     await c.waitFor(
-      (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === task.sessionId && s.state === "question" && s.message === "rust 叫人"),
-      "notify → question + 留言",
+      (m) => m.case === "notificationChanged" && m.notification?.taskId === task.id && m.notification.message === "rust 叫人",
+      "notify delivered to durable inbox",
       20000,
     );
 

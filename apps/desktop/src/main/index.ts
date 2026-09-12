@@ -313,12 +313,16 @@ if (!app.requestSingleInstanceLock()) {
         connectLocal,
         logoutLocal,
         bootstrap: () => ({ tailcat: tailcatEnabled, platform: process.platform, version: app.getVersion(), serverUrl, origin: DESKTOP_ORIGIN }),
-        // 点通知：把窗口带到前台并让渲染层选中该工作区
-        notify: (notification) =>
-          showWorkspaceNotification(notification, (workspaceId) => {
+        // Activate the window on click, then route legacy attention to its workspace or
+        // an inbox notification to its exact notification and terminal IDs.
+        notify: (notification) => {
+          if (notification.notificationId && mainWindow?.isFocused() && mainWindow.isVisible() && !mainWindow.isMinimized()) return;
+          showWorkspaceNotification(notification, (target) => {
             showMainWindow();
-            sendToRenderer(IPC.focusWorkspace, workspaceId);
-          }),
+            if (target.notificationId) sendToRenderer(IPC.focusNotification, target);
+            else sendToRenderer(IPC.focusWorkspace, target.workspaceId);
+          });
+        },
         setBadge: setDockBadge,
         // 侧栏账号菜单的「服务器地址…」（plan 110）：与原生菜单项走同一个对话框
         showServerInfo: () => void showServerInfo(serverUrl),

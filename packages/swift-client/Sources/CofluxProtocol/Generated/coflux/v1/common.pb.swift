@@ -532,6 +532,39 @@ public struct Coflux_V1_TransportArtifact: Sendable {
   public init() {}
 }
 
+/// Immutable source snapshots survive deletion of the original target.
+public struct Coflux_V1_AccountNotification: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var id: String = String()
+
+  public var sequence: Double = 0
+
+  public var message: String = String()
+
+  public var daemonID: String = String()
+
+  public var deviceName: String = String()
+
+  public var workspaceID: String = String()
+
+  public var workspaceName: String = String()
+
+  public var taskID: String = String()
+
+  public var terminalTitle: String = String()
+
+  public var createdAt: Double = 0
+
+  public var readAt: Double = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
 fileprivate let _protobuf_package = "coflux.v1"
@@ -1349,6 +1382,86 @@ extension Coflux_V1_TransportArtifact: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.sha256 != rhs.sha256 {return false}
     if lhs.size != rhs.size {return false}
     if lhs.releaseSignature != rhs.releaseSignature {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AccountNotification: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AccountNotification"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}sequence\0\u{1}message\0\u{3}daemon_id\0\u{3}device_name\0\u{3}workspace_id\0\u{3}workspace_name\0\u{3}task_id\0\u{3}terminal_title\0\u{3}created_at\0\u{3}read_at\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularDoubleField(value: &self.sequence) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.message) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.daemonID) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.deviceName) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.workspaceName) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.terminalTitle) }()
+      case 10: try { try decoder.decodeSingularDoubleField(value: &self.createdAt) }()
+      case 11: try { try decoder.decodeSingularDoubleField(value: &self.readAt) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.id.isEmpty {
+      try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
+    }
+    if self.sequence.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.sequence, fieldNumber: 2)
+    }
+    if !self.message.isEmpty {
+      try visitor.visitSingularStringField(value: self.message, fieldNumber: 3)
+    }
+    if !self.daemonID.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonID, fieldNumber: 4)
+    }
+    if !self.deviceName.isEmpty {
+      try visitor.visitSingularStringField(value: self.deviceName, fieldNumber: 5)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 6)
+    }
+    if !self.workspaceName.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceName, fieldNumber: 7)
+    }
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 8)
+    }
+    if !self.terminalTitle.isEmpty {
+      try visitor.visitSingularStringField(value: self.terminalTitle, fieldNumber: 9)
+    }
+    if self.createdAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.createdAt, fieldNumber: 10)
+    }
+    if self.readAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.readAt, fieldNumber: 11)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AccountNotification, rhs: Coflux_V1_AccountNotification) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.sequence != rhs.sequence {return false}
+    if lhs.message != rhs.message {return false}
+    if lhs.daemonID != rhs.daemonID {return false}
+    if lhs.deviceName != rhs.deviceName {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.workspaceName != rhs.workspaceName {return false}
+    if lhs.taskID != rhs.taskID {return false}
+    if lhs.terminalTitle != rhs.terminalTitle {return false}
+    if lhs.createdAt != rhs.createdAt {return false}
+    if lhs.readAt != rhs.readAt {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

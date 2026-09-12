@@ -1217,6 +1217,30 @@ async function runPreflight(sql: MigrationSql): Promise<void> {
   }
 }
 
+const NOTIFICATION_SCHEMA_SQL = `
+CREATE SEQUENCE coflux.notification_revision;
+CREATE TABLE coflux.account_notifications (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES coflux.accounts(id) ON DELETE CASCADE,
+  daemon_id TEXT NOT NULL,
+  request_key TEXT NOT NULL,
+  source_session_id TEXT NOT NULL,
+  sequence DOUBLE PRECISION NOT NULL DEFAULT nextval('coflux.notification_revision'),
+  revision DOUBLE PRECISION NOT NULL,
+  message TEXT NOT NULL,
+  device_name TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  workspace_name TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  terminal_title TEXT NOT NULL,
+  created_at DOUBLE PRECISION NOT NULL,
+  read_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+  UNIQUE (account_id, daemon_id, request_key)
+);
+CREATE INDEX account_notifications_history ON coflux.account_notifications(account_id, sequence DESC);
+CREATE INDEX account_notifications_unread ON coflux.account_notifications(account_id, sequence) WHERE read_at = 0;
+`;
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -1253,6 +1277,12 @@ const MIGRATIONS: readonly Migration[] = [
     async apply(sql) {
       await sql.unsafe(OAUTH_SCHEMA_SQL);
     },
+  },
+  {
+    version: 5,
+    name: "account_notification_inbox",
+    definition: NOTIFICATION_SCHEMA_SQL,
+    async apply(sql) { await sql.unsafe(NOTIFICATION_SCHEMA_SQL); },
   },
 ];
 

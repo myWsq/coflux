@@ -36,3 +36,12 @@ test("会话 token：非空、不超长、无空白/控制字符的字符串才�
   assert.equal(sanitizeSessionToken({ token: "x" }), null);
   assert.equal(sanitizeSessionToken(null), null);
 });
+
+
+test("inbox notification routing preserves IDs and rejects malformed targets", () => {
+  const value = { workspaceId: "workspace", taskId: "terminal", notificationId: "notification", title: "Review", body: "Please review" };
+  assert.deepEqual(sanitizeNotification(value), value);
+  for (const field of ["taskId", "notificationId"]) {
+    for (const invalid of [42, "", "x".repeat(129), null]) assert.equal(sanitizeNotification({ ...value, [field]: invalid }), null);
+  }
+});

@@ -41,6 +41,7 @@ export const IPC = {
   /** 渲染层 → 主进程：本机 daemon 的 device 通道可用 / 断开 */
   executorChannel: "desktop:executor-channel",
   /** 主进程 → 渲染层 */
+  focusNotification: "desktop:focus-notification",
   focusWorkspace: "desktop:focus-workspace",
   command: "desktop:command",
   updateState: "desktop:update-state",

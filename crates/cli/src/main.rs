@@ -56,7 +56,7 @@ coflux —— 账号与终端操作
   coflux terminal list   列出本工作区的终端（含 status / 退出码，跑着的还带 busy|idle 与上一条命令的退出码）
   coflux terminal close <taskId>
                           结束该终端（等价账号 CLI 的 stop）
-  coflux notify \"<一句话>\"  叫人：工作区在侧栏转为「等待交互」并显示这句话
+  coflux notify \"<一句话>\"  发送站内通知；服务器保存后确认送达
   coflux progress \"<一句话>\"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
   coflux ports           列出本工作区的监听端口及可直接打开的预览 URL
   coflux executor run --prompt=\"<任务>\" [--write] [--timeout <秒>]

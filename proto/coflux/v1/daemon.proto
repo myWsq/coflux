@@ -189,6 +189,13 @@ message AgentWorkspaceForgetResult {
   bool removed = 4;
 }
 
+message AgentNotify {
+  string message = 1;
+  // Stable across retries of one send, scoped to the authenticated device.
+  string notification_id = 2;
+}
+message AgentNotifyResult { string notification_id = 1; }
+
 message AgentControlRequest {
   string request_id = 1;
   // 发起方所属的存活 session，由 worker 认定而非 agent 自报。
@@ -205,6 +212,7 @@ message AgentControlRequest {
     // plan 104：这两条改的是**归属**而不是本次请求的目标，忽略上面的 workspace_id（worker 恒填空）。
     AgentWorkspaceLocate workspace_locate = 14;
     AgentWorkspaceForget workspace_forget = 15;
+    AgentNotify notify = 16;
   }
 }
 
@@ -252,6 +260,7 @@ message AgentControlResult {
     AgentPortsListResult ports_list = 13;
     AgentWorkspaceLocateResult workspace_locate = 14;
     AgentWorkspaceForgetResult workspace_forget = 15;
+    AgentNotifyResult notify = 16;
   }
 }
 

@@ -232,6 +232,32 @@ pub struct TransportArtifact {
     #[prost(string, tag="4")]
     pub release_signature: ::prost::alloc::string::String,
 }
+/// Immutable source snapshots survive deletion of the original target.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AccountNotification {
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(double, tag="2")]
+    pub sequence: f64,
+    #[prost(string, tag="3")]
+    pub message: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub device_name: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub workspace_name: ::prost::alloc::string::String,
+    #[prost(string, tag="8")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(string, tag="9")]
+    pub terminal_title: ::prost::alloc::string::String,
+    #[prost(double, tag="10")]
+    pub created_at: f64,
+    #[prost(double, tag="11")]
+    pub read_at: f64,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum TaskStatus {
@@ -1791,14 +1817,14 @@ pub struct OAuthAuthorizeDecide {
     #[prost(bool, tag="2")]
     pub approve: bool,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
 pub mod client_to_server {
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Payload {
         #[prost(message, tag="1")]
         ClientAuth(super::ClientAuth),
@@ -1851,12 +1877,16 @@ pub mod client_to_server {
         #[prost(message, tag="40")]
         TaskRead(super::TaskRead),
         #[prost(message, tag="41")]
-        DeviceTailcatConnect(super::DeviceTailcatConnect),
+        NotificationList(super::NotificationList),
         #[prost(message, tag="42")]
-        DeviceTailcatClose(super::DeviceTailcatClose),
+        NotificationRead(super::NotificationRead),
         #[prost(message, tag="43")]
-        DeviceTailcatControl(super::DeviceTailcatControl),
+        DeviceTailcatConnect(super::DeviceTailcatConnect),
         #[prost(message, tag="44")]
+        DeviceTailcatClose(super::DeviceTailcatClose),
+        #[prost(message, tag="45")]
+        DeviceTailcatControl(super::DeviceTailcatControl),
+        #[prost(message, tag="46")]
         DeviceTailcatFailed(super::DeviceTailcatFailed),
     }
 }
@@ -1864,7 +1894,7 @@ pub mod client_to_server {
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthOk {
-    #[prost(uint32, tag="5")]
+    #[prost(uint32, tag="6")]
     pub control_protocol_version: u32,
     #[prost(string, tag="1")]
     pub account_id: ::prost::alloc::string::String,
@@ -1876,6 +1906,8 @@ pub struct AuthOk {
     /// token、用户已删）就不设本字段，认证照常成功——身份查询永远不是拒绝理由。
     #[prost(string, optional, tag="4")]
     pub login_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, tag="5")]
+    pub notification_inbox: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthError {
@@ -2040,7 +2072,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -2100,10 +2132,70 @@ pub mod server_to_client {
         #[prost(message, tag="39")]
         TaskReadResult(super::TaskReadResult),
         #[prost(message, tag="40")]
-        DeviceTailcatResult(super::DeviceTailcatResult),
+        NotificationPage(super::NotificationPage),
         #[prost(message, tag="41")]
+        NotificationChanged(super::NotificationChanged),
+        #[prost(message, tag="42")]
+        DeviceTailcatResult(super::DeviceTailcatResult),
+        #[prost(message, tag="43")]
         DeviceTailcatClosed(super::DeviceTailcatClosed),
     }
+}
+/// Bounded newest-first history. Zero before_sequence requests the first page.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NotificationList {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(double, tag="2")]
+    pub before_sequence: f64,
+}
+/// Empty id marks all entries through the supplied sequence read, including unloaded pages.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NotificationRead {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(double, tag="3")]
+    pub through_sequence: f64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NotificationPage {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub notifications: ::prost::alloc::vec::Vec<AccountNotification>,
+    #[prost(double, tag="3")]
+    pub next_before_sequence: f64,
+    #[prost(uint32, tag="4")]
+    pub unread_count: u32,
+    #[prost(double, tag="5")]
+    pub revision: f64,
+    #[prost(double, tag="6")]
+    pub latest_sequence: f64,
+    #[prost(string, tag="7")]
+    pub error: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NotificationChanged {
+    #[prost(message, optional, tag="1")]
+    pub notification: ::core::option::Option<AccountNotification>,
+    #[prost(double, tag="2")]
+    pub read_through_sequence: f64,
+    #[prost(double, tag="3")]
+    pub read_at: f64,
+    #[prost(uint32, tag="4")]
+    pub unread_count: u32,
+    #[prost(double, tag="5")]
+    pub revision: f64,
+    #[prost(double, tag="6")]
+    pub latest_sequence: f64,
+    #[prost(bool, tag="7")]
+    pub created: bool,
+    #[prost(string, tag="8")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="9")]
+    pub error: ::prost::alloc::string::String,
 }
 // ===== Daemon → Server 载荷 =====
 
@@ -2343,6 +2435,19 @@ pub struct AgentWorkspaceForgetResult {
     pub removed: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentNotify {
+    #[prost(string, tag="1")]
+    pub message: ::prost::alloc::string::String,
+    /// Stable across retries of one send, scoped to the authenticated device.
+    #[prost(string, tag="2")]
+    pub notification_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentNotifyResult {
+    #[prost(string, tag="1")]
+    pub notification_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentControlRequest {
     #[prost(string, tag="1")]
     pub request_id: ::prost::alloc::string::String,
@@ -2354,7 +2459,7 @@ pub struct AgentControlRequest {
     /// ports_list 忽略它（端口挂在本会话进程树上，与工作区无关），terminal_read 早已本地闭环。
     #[prost(string, tag="3")]
     pub workspace_id: ::prost::alloc::string::String,
-    #[prost(oneof="agent_control_request::Payload", tags="10, 11, 12, 13, 14, 15")]
+    #[prost(oneof="agent_control_request::Payload", tags="10, 11, 12, 13, 14, 15, 16")]
     pub payload: ::core::option::Option<agent_control_request::Payload>,
 }
 /// Nested message and enum types in `AgentControlRequest`.
@@ -2374,6 +2479,8 @@ pub mod agent_control_request {
         WorkspaceLocate(super::AgentWorkspaceLocate),
         #[prost(message, tag="15")]
         WorkspaceForget(super::AgentWorkspaceForget),
+        #[prost(message, tag="16")]
+        Notify(super::AgentNotify),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2431,7 +2538,7 @@ pub struct AgentControlResult {
     pub ok: bool,
     #[prost(string, optional, tag="3")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(oneof="agent_control_result::Payload", tags="10, 11, 12, 13, 14, 15")]
+    #[prost(oneof="agent_control_result::Payload", tags="10, 11, 12, 13, 14, 15, 16")]
     pub payload: ::core::option::Option<agent_control_result::Payload>,
 }
 /// Nested message and enum types in `AgentControlResult`.
@@ -2450,6 +2557,8 @@ pub mod agent_control_result {
         WorkspaceLocate(super::AgentWorkspaceLocateResult),
         #[prost(message, tag="15")]
         WorkspaceForget(super::AgentWorkspaceForgetResult),
+        #[prost(message, tag="16")]
+        Notify(super::AgentNotifyResult),
     }
 }
 /// server→daemon ProxyOpen 的回应：隧道连接建立结果

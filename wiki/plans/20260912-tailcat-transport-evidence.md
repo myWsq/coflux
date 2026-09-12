@@ -360,3 +360,32 @@ The full suite was rerun with diagnostic logging and CI's two-file concurrency:
 All temporary databases were confirmed removed. Logs are retained at
 `/tmp/coflux-tailcat-ci-fix-full.log` and
 `/tmp/coflux-tailcat-ci-fix-full-retry.log`.
+
+## Notification-main integration (2026-09-12)
+
+While the CI correction was being verified, main advanced to `3e9b0476` with the
+notification inbox. Its new fields overlapped the unpublished Tailcat candidate's
+field numbers. The integration preserves main's notification tags and allocates
+Tailcat ClientToServer tags 43–46, ServerToClient tags 42–43, and AuthOk control
+version tag 6 (notification support remains tag 5). No released Tailcat wire
+contract exists; earlier candidate clients must be rebuilt. Generated Rust, TS,
+and Swift consumers were regenerated together. Strict FILE/WIRE_JSON compatibility
+against the new main passed with only the existing retirement allowlist.
+
+The merge retains native bootstrap, control-version admission, notification
+capability advertising, and notification routing/state. New notification black-box
+coverage uses native transport on its own port 8901; notification store fixtures
+now authenticate with the required control version.
+
+Server/Desktop typechecks and Desktop build passed. Rust build had zero warnings;
+278 Rust units, 177 Desktop tests, 83 shared client/coordinator tests, and eight
+protocol-wrapper/product-version tests passed. Swift's initial incremental test
+process exited with signal 11 after the generated layout changed; a fresh isolated
+scratch build passed all 65 tests without source changes. The plugin synchronization
+check passed and no test port duplicates remain.
+
+The integrated complete black-box suite passed **231/231**, zero failures,
+cancellations, or skips, in **390.743 seconds** with two-file concurrency.
+The new notification lifecycle case and all native fault phases passed. Its
+isolated PostgreSQL databases were removed. Log:
+`/tmp/coflux-tailcat-notifications-full.log`.

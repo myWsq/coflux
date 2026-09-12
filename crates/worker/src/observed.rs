@@ -89,14 +89,15 @@ impl ObservedState {
         }
     }
 
-    /// hook 事件代表 agent 已换回合：更新状态并清掉上一条 notify，progress 刻意保留。
+    /// Update hook state and discard legacy presence annotations; durable inbox messages are independent.
     pub(crate) fn apply_hook_state(&self, session_id: String, state: &'static str) {
         let mut inner = self.inner.lock().unwrap();
         inner.hook_states.insert(session_id.clone(), state);
         inner.hook_messages.remove(&session_id);
     }
 
-    /// notify 是一个原子 annotation：presence 同时转为 question 并携带留言。
+    /// Legacy annotation fixture for compatibility tests; explicit notify no longer uses presence.
+    #[cfg(test)]
     pub(crate) fn apply_notify(&self, session_id: String, message: String) {
         let mut inner = self.inner.lock().unwrap();
         inner.hook_states.insert(session_id.clone(), "question");

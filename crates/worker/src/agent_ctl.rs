@@ -17,12 +17,9 @@
 //! 与 [`AgentAction::WorkspaceForget`] 在本地解析 worktree 身份（见 [`crate::worktree_locate`]）、
 //! 交中心核验落库，再按中心的响应更新账本。账本仍然只从中心学，只是多了这一个学的时机。
 //!
-//! **本地能闭环的不碰中心（plan 094）**：send / run / read / wait / close / notify / progress 全在 daemon
-//! 本地完成——归属校验（目标与调用方的有效工作区相同）、命令状态与退出码来自 [`crate::session_ledger`]，
-//! 内容来自 sessiond 快照（滚动缓冲 + 当前屏），presence 标注改 observed 后立即上报（断连期间由重连后的
-//! 全量补发兜底）。它们不要求 daemon 此刻连着中心。只有 new / list / ports 转成 `AgentControlRequest` 交给
-//! 中心：Task 要落库广播、预览 URL 由中心生成，这三条本来就不是本地能闭环的；中心离线时它们明确
-//! 报错——「让用户看得见」正是它们的全部意义。
+//! Local read/send/run/wait/close/progress operations stay on the daemon. Terminal creation/listing,
+//! preview URLs, workspace ownership changes, and durable notifications require the server.
+//! Notify is independent of observed agent state: success requires a persistence acknowledgement.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,7 +44,7 @@ use crate::{
 
 /// 等中心回执的上限：只防在飞请求永久占住 pending 表，CLI 侧自己的超时更短。
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
-/// notify 留言长度上限（字符）。它只是侧栏 tooltip 里的一句话，不是日志通道。
+/// Maximum progress annotation length; inbox messages have their own 2000-character limit.
 const MAX_NOTIFY_CHARS: usize = 200;
 /// 中心回执关联表只保存正在等待的 agent 控制请求；达到上限立即拒绝，不能让本地 HTTP
 /// 并发在 20 秒超时窗口内无界堆积。
@@ -121,6 +118,7 @@ pub enum AgentAction {
         enter: bool,
     },
     Notify {
+        notification_id: String,
         message: String,
     },
     Progress {
@@ -261,15 +259,26 @@ async fn handle(
     let scope = resolve_scope(state, &session_id, &cwd);
 
     match action {
-        AgentAction::Notify { message } => {
-            let message: String = message.chars().take(MAX_NOTIFY_CHARS).collect();
-            observed.apply_notify(session_id, message);
-            crate::report_agents_if_changed(state, observed, to_server_tx).await;
-            AgentResponse::ok(serde_json::json!({}))
+        AgentAction::Notify { notification_id, message } => {
+            if message.trim().is_empty() || message.chars().count() > 2000 {
+                return AgentResponse::err("400 Bad Request", "通知内容需要 1–2000 字");
+            }
+            let notification_id = if notification_id.is_empty() {
+                use rand_core::RngCore;
+                let mut bytes = [0u8; 24];
+                rand_core::OsRng.fill_bytes(&mut bytes);
+                hex::encode(bytes)
+            } else { notification_id };
+            let payload = agent_control_request::Payload::Notify(wire::AgentNotify { notification_id, message });
+            match ask_server(state, to_server_tx, session_id, String::new(), payload).await {
+                Ok(agent_control_result::Payload::Notify(result)) => AgentResponse::ok(
+                    serde_json::json!({ "notificationId": result.notification_id })),
+                Ok(_) => AgentResponse::err("502 Bad Gateway", "中心不支持持久通知或回执无效，未确认送达"),
+                Err(response) => response,
+            }
         }
         AgentAction::Progress { message } => {
-            // 与 notify 是两条信道：progress 只播报进度，不改 state、不置 question，
-            // 且跨 hook 事件存活（只被下一条覆盖）。同为 daemon 本地闭环。
+            // Progress stays local and only replaces its annotation; it never changes hook state or inbox history.
             let message: String = message.chars().take(MAX_NOTIFY_CHARS).collect();
             observed.apply_progress(session_id, message);
             crate::report_agents_if_changed(state, observed, to_server_tx).await;

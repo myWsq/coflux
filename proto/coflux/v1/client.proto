@@ -190,10 +190,12 @@ message ClientToServer {
     OAuthAuthorizeInfoRequest oauth_authorize_info = 38;
     OAuthAuthorizeDecide oauth_authorize_decide = 39;
     TaskRead task_read = 40;
-    DeviceTailcatConnect device_tailcat_connect = 41;
-    DeviceTailcatClose device_tailcat_close = 42;
-    DeviceTailcatControl device_tailcat_control = 43;
-    DeviceTailcatFailed device_tailcat_failed = 44;
+    NotificationList notification_list = 41;
+    NotificationRead notification_read = 42;
+    DeviceTailcatConnect device_tailcat_connect = 43;
+    DeviceTailcatClose device_tailcat_close = 44;
+    DeviceTailcatControl device_tailcat_control = 45;
+    DeviceTailcatFailed device_tailcat_failed = 46;
   }
 }
 
@@ -202,7 +204,7 @@ message ClientToServer {
 message AuthOk {
   reserved 3;
   reserved "ice_servers";
-  uint32 control_protocol_version = 5;
+  uint32 control_protocol_version = 6;
   string account_id = 1;
   optional string client_token = 2;
   // 本连接的「登录身份显示串」（plan 110）：password 模式 = 该会话 token 绑定用户的 email，
@@ -210,6 +212,7 @@ message AuthOk {
   // optional 是为了把「旧 server 不回」与「回了空串」分开：查不到用户（user_id 为 NULL 的旧
   // token、用户已删）就不设本字段，认证照常成功——身份查询永远不是拒绝理由。
   optional string login_name = 4;
+  bool notification_inbox = 5;
 }
 
 message AuthError {
@@ -365,7 +368,34 @@ message ServerToClient {
     OAuthAuthorizeInfoResult oauth_authorize_info = 37;
     OAuthAuthorizeResult oauth_authorize_result = 38;
     TaskReadResult task_read_result = 39;
-    DeviceTailcatResult device_tailcat_result = 40;
-    DeviceTailcatClosed device_tailcat_closed = 41;
+    NotificationPage notification_page = 40;
+    NotificationChanged notification_changed = 41;
+    DeviceTailcatResult device_tailcat_result = 42;
+    DeviceTailcatClosed device_tailcat_closed = 43;
   }
+}
+
+// Bounded newest-first history. Zero before_sequence requests the first page.
+message NotificationList { string request_id = 1; double before_sequence = 2; }
+// Empty id marks all entries through the supplied sequence read, including unloaded pages.
+message NotificationRead { string request_id = 1; string id = 2; double through_sequence = 3; }
+message NotificationPage {
+  string request_id = 1;
+  repeated AccountNotification notifications = 2;
+  double next_before_sequence = 3;
+  uint32 unread_count = 4;
+  double revision = 5;
+  double latest_sequence = 6;
+  string error = 7;
+}
+message NotificationChanged {
+  optional AccountNotification notification = 1;
+  double read_through_sequence = 2;
+  double read_at = 3;
+  uint32 unread_count = 4;
+  double revision = 5;
+  double latest_sequence = 6;
+  bool created = 7;
+  string request_id = 8;
+  string error = 9;
 }
