@@ -16,7 +16,8 @@
 - Risk: MED
 - Depends on: none
 - Category: feature
-- Execution: deferred — resolve at the departure check of `dev:execute-plan` (the user decides mode and executor per plan; see memory `subagent-model`)
+- Execution: subagent fable (user decision at the departure check), verification by the orchestrator
+- Current state: DONE on `dev/20260912-interactive-terminal-model` (implementation `3ea00ea`..`a0e559f`, three review rounds). Verified: daemon build zero warnings; `cargo test` supervisor 78 / worker 105 / cli 28 / protocol green; server tsc; desktop typecheck + tests; SKILL sync check; plugin tests; black-box 212/212 (every file except `agent-activity`, which false-fails on the installed-Coflux machine); the rendered zsh rc probed under the user's real `~/.zshrc` emits secret-bearing marks with correct exit codes and leaks no secret. Not done: real-machine acceptance through a packaged daemon/desktop (user), merge to main, release.
 - Stop after: implementation — the user answered "开干" to the exploration report
 - Workspace: isolated — `.claude/worktrees/20260912-interactive-terminal-model`, branch `dev/20260912-interactive-terminal-model`, cut from main `3526788`; main worktree carries two unrelated uncommitted files (`apps/server/src/auth-pages.ts`, `tests/src/authorize.test.mjs`, another session's referrer-policy fix) that stay untouched
 - Planned at: `3526788`, 2026-09-12
