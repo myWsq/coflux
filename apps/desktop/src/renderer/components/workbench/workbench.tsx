@@ -1,3 +1,4 @@
+import { NotificationInbox } from "./notification-inbox";
 import { lazy, Suspense, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { AlertCircle, FolderGit2, LoaderCircle, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
@@ -105,12 +106,14 @@ function DesktopAttention({ client, bridge, selectedWorkspaceId }: { client: Cof
   const tasks = useStore(client.store, (state) => state.tasks);
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
   const projects = useStore(client.store, (state) => state.projects);
+  const unreadCount = useStore(client.store, (state) => state.notificationInbox.unreadCount);
   const previousRef = useRef<AttentionSnapshot>({});
   const badgeRef = useRef(0);
 
   useEffect(() => {
     const next = attentionSnapshot({ workspaces, daemons, tasks, sessionAgents, projects });
-    const { entered, badgeCount } = diffAttention(previousRef.current, next);
+    const { entered, badgeCount: waitingCount } = diffAttention(previousRef.current, next);
+    const badgeCount = waitingCount + unreadCount;
     previousRef.current = next;
     if (badgeCount !== badgeRef.current) {
       badgeRef.current = badgeCount;
@@ -121,7 +124,7 @@ function DesktopAttention({ client, bridge, selectedWorkspaceId }: { client: Cof
       if (workspaceId === selectedWorkspaceId && document.hasFocus()) continue;
       bridge.notify({ workspaceId, ...attentionNotificationText(entry) });
     }
-  }, [workspaces, daemons, tasks, sessionAgents, projects, bridge, selectedWorkspaceId]);
+  }, [workspaces, daemons, tasks, sessionAgents, projects, bridge, selectedWorkspaceId, unreadCount]);
 
   // 卸载（登出、掉到 outdated/login 面）时清角标并重置快照：否则 Dock 会停在最后一个数字，
   // 且重新挂载后旧快照会让本该重新提醒的等待被当成「已提醒过」。
@@ -219,6 +222,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [activeTabs, setActiveTabs] = useState<Record<string, WorkspaceActiveTab>>({});
   const activeTabsRef = useRef(activeTabs);
   // 终端被搬进某工作区后要求它继续当活动 Tab（plan 104）：一次性，容器消费掉即清。
+  const [notificationOpen, setNotificationOpen] = useState(false);
   const [followTask, setFollowTask] = useState<{ workspaceId: string; taskId: string } | null>(null);
   const activeWorkspaceIdRef = useRef<string | null>(null);
   // 已挂过面板的 task：面板寿命与工作区容器解耦，终端被搬到没访问过的工作区也不重建。
@@ -381,6 +385,17 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const next: WorkbenchSelection = { kind: "workspace", id: workspaceId };
     setSelection(next);
     persistSelection(next);
+  }
+
+  function navigateNotificationTask(taskId: string): boolean {
+    const state = client.store.getState();
+    const task = state.tasks.find((item) => item.id === taskId);
+    if (!task || !state.workspaces.some((item) => item.id === task.workspaceId)) return false;
+    activeTabsRef.current = { ...activeTabsRef.current, [task.workspaceId]: { taskId, viewIsTerminal: true } };
+    setActiveTabs(activeTabsRef.current);
+    setFollowTask({ workspaceId: task.workspaceId, taskId });
+    selectWorkspace(task.workspaceId);
+    return true;
   }
 
   // 点系统通知 → 主进程把窗口带到前台并回传工作区 id → 选中它（工作区已删则安静忽略）。
@@ -635,7 +650,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
       )}
     >
       <DesktopAttention client={client} bridge={desktop} selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null} />
+      <NotificationInbox client={client} open={notificationOpen} onOpen={() => setNotificationOpen(true)} onClose={() => setNotificationOpen(false)} onNavigate={navigateNotificationTask} />
       <Sidebar
+        onOpenNotifications={() => setNotificationOpen((open) => !open)}
         client={client}
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
         onSelectWorkspace={selectWorkspace}

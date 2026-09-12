@@ -1,6 +1,8 @@
+import { emptyNotificationInbox, applyNotificationPage, applyNotificationChange, type NotificationInbox } from "./notifications";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import {
   TaskStatus,
+  type AccountNotification,
   type ClientToServerPayload,
   type DaemonInfo,
   type DeviceSessionCatalog,
@@ -224,6 +226,7 @@ function parseOfflineCatalog(raw: string | null): OfflineCatalog | null {
 }
 
 export type CofluxState = {
+  notificationInbox: NotificationInbox;
   status: ConnectionStatus;
   authState: AuthState;
   loginError: string;
@@ -284,6 +287,29 @@ export function createCofluxClient(options: CofluxClientOptions) {
   let shouldRetry = token !== "";
   let controlAuthenticated = false;
   let errorSequence = 0;
+  let notificationAccount = "";
+  let notificationSupported = false;
+  let notificationInitialCutoff = Infinity;
+  let notificationRequest = 0;
+  const notificationRequestPrefix = crypto.randomUUID();
+  let notificationPageRequestId = "initial";
+  let notificationTimer: ReturnType<typeof setTimeout> | undefined;
+  const notificationListeners = new Set<(item: AccountNotification) => void>();
+  const notificationReadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const notifiedIds = new Set<string>();
+  function clearNotificationTimers() {
+    clearTimeout(notificationTimer);
+    notificationTimer = undefined;
+    for (const timer of notificationReadTimers.values()) clearTimeout(timer);
+    notificationReadTimers.clear();
+  }
+  function waitForNotificationPage() {
+    clearTimeout(notificationTimer);
+    notificationTimer = setTimeout(() => {
+      store.setState((state) => ({ notificationInbox: { ...state.notificationInbox, loading: false, error: "通知同步超时，请重试" } }));
+    }, 15000);
+  }
+
   const sessionConsumers = new Map<string, Set<SessionConsumer>>();
   // plan 097：taskRead 的 pending 表，按 taskId 去重共享（回应不带 request id）。
   const pendingTaskReads = new Map<string, { promise: Promise<TaskReadResult>; resolve: (result: TaskReadResult) => void; timer: ReturnType<typeof setTimeout> }>();
@@ -317,6 +343,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     localSessions: [],
     sessionCheckpoints: {},
     sessionAgents: {},
+    notificationInbox: emptyNotificationInbox(),
     lastError: null,
     snapshotRevision: 0,
   }));
@@ -553,6 +580,10 @@ export function createCofluxClient(options: CofluxClientOptions) {
       store.setState({ status });
       if (status !== "connected") {
         controlAuthenticated = false;
+        const hadNotificationReads = notificationReadTimers.size > 0;
+        clearNotificationTimers();
+        store.setState((state) => ({ notificationInbox: { ...state.notificationInbox, loading: false,
+          error: hadNotificationReads ? "标记已读未获确认，重连后请检查" : state.notificationInbox.error } }));
         // 回应不会再来了：在飞的设备授权立即失败而不是挂到超时（plan 112）
         settleDeviceAuthorize({ ok: false, error: "与服务器的连接已断开，请重试" });
         // TCP/WS transport 断开不等于账号授权已撤销，也不等于 worker 那条独立控制 WS 已断。
@@ -620,6 +651,18 @@ export function createCofluxClient(options: CofluxClientOptions) {
       case "authOk": {
         const value = payload.value;
         controlAuthenticated = true;
+        clearNotificationTimers();
+        if (notificationAccount !== value.accountId) {
+          notificationAccount = value.accountId;
+          notifiedIds.clear();
+          store.setState({ notificationInbox: emptyNotificationInbox() });
+        }
+        notificationSupported = value.notificationInbox;
+        notificationInitialCutoff = Infinity;
+        notificationPageRequestId = "initial";
+        store.setState((state) => ({ notificationInbox: { ...state.notificationInbox, loading: notificationSupported,
+          error: notificationSupported ? "" : "服务器尚不支持通知中心，请升级服务器" } }));
+        if (notificationSupported) waitForNotificationPage();
         deviceRouter.setIceServers(value.iceServers);
         deviceRouter.setControlOnline(true);
         store.setState({ authState: "authed", loginError: "", loginName: value.loginName ?? "" });
@@ -635,6 +678,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
         break;
       }
       case "authError": {
+        clearNotificationTimers();
+        store.setState({ notificationInbox: emptyNotificationInbox() });
         controlAuthenticated = false;
         deviceRouter.setControlOnline(false);
         token = "";
@@ -656,6 +701,32 @@ export function createCofluxClient(options: CofluxClientOptions) {
         // "账号/密码错了"，混用会误导用户），由 app 触发自动更新检查。
         shouldRetry = false;
         store.setState({ authState: "outdated" });
+        break;
+      }
+      case "notificationPage": {
+        const value = payload.value;
+        if (value.requestId !== notificationPageRequestId) break;
+        clearTimeout(notificationTimer);
+        const firstPage = !Number.isFinite(notificationInitialCutoff) && !value.error;
+        if (firstPage) notificationInitialCutoff = value.latestSequence;
+        store.setState((state) => ({ notificationInbox: applyNotificationPage(state.notificationInbox,
+          firstPage ? { ...value, requestId: "initial" } : value) }));
+        break;
+      }
+      case "notificationChanged": {
+        const value = payload.value;
+        const timer = notificationReadTimers.get(value.requestId);
+        if (timer) { clearTimeout(timer); notificationReadTimers.delete(value.requestId); }
+        const previous = store.getState().notificationInbox;
+        const item = value.notification;
+        const next = applyNotificationChange(previous, value);
+        store.setState({ notificationInbox: next });
+        const mergedItem = item && next.items.find((entry) => entry.id === item.id);
+        if (value.created && item && item.sequence > notificationInitialCutoff && !mergedItem?.readAt &&
+            !notifiedIds.has(item.id) && !previous.items.some((entry) => entry.id === item.id)) {
+          notifiedIds.add(item.id);
+          for (const listener of notificationListeners) listener(item);
+        }
         break;
       }
       case "stateSnapshot": {
@@ -899,6 +970,10 @@ export function createCofluxClient(options: CofluxClientOptions) {
 
   function logout(revoke = true) {
     shouldRetry = false;
+    clearNotificationTimers();
+    notificationAccount = "";
+    notifiedIds.clear();
+    store.setState({ notificationInbox: emptyNotificationInbox() });
     controlAuthenticated = false;
     settleDeviceAuthorize({ ok: false, error: "已登出" });
     pendingTaskRemovals.clear();
@@ -1054,7 +1129,35 @@ export function createCofluxClient(options: CofluxClientOptions) {
     if (offlineCatalog) offlineTimer = setTimeout(hydrateOfflineCatalog, offlineCatalog.timeoutMs ?? OFFLINE_CATALOG_TIMEOUT_MS);
   }
 
+  function loadNotifications(older = false) {
+    if (!controlAuthenticated || !notificationSupported) return;
+    const inbox = store.getState().notificationInbox;
+    if (inbox.loading) return;
+    store.setState({ notificationInbox: { ...inbox, loading: true, error: "" } });
+    waitForNotificationPage();
+    notificationPageRequestId = `${notificationRequestPrefix}-page-${++notificationRequest}`;
+    send({ case: "notificationList", value: { requestId: notificationPageRequestId, beforeSequence: older ? inbox.nextBeforeSequence : 0 } });
+  }
+  function markNotificationRead(id = "") {
+    if (!controlAuthenticated || !notificationSupported) {
+      store.setState((state) => ({ notificationInbox: { ...state.notificationInbox, error: "尚未连接，无法标记已读" } }));
+      return;
+    }
+    const requestId = `${notificationRequestPrefix}-read-${++notificationRequest}`;
+    notificationReadTimers.set(requestId, setTimeout(() => {
+      notificationReadTimers.delete(requestId);
+      store.setState((state) => ({ notificationInbox: { ...state.notificationInbox, error: "标记已读未获确认，请重试" } }));
+    }, 15000));
+    send({ case: "notificationRead", value: { requestId, id, throughSequence: store.getState().notificationInbox.latestSequence } });
+  }
+  function onNotification(listener: (item: AccountNotification) => void) {
+    notificationListeners.add(listener);
+    return () => { notificationListeners.delete(listener); };
+  }
+
   function disconnect() {
+    clearNotificationTimers();
+    notificationListeners.clear();
     controlAuthenticated = false;
     settleDeviceAuthorize({ ok: false, error: "客户端已断开" });
     clearOfflineTimer();
@@ -1064,6 +1167,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
   }
 
   return {
+    loadNotifications,
+    markNotificationRead,
+    onNotification,
     store,
     login,
     logout,

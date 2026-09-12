@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // coflux：账号与本地、跨设备业务操作；不负责宿主生命周期。
 import { handlesAccountCommand, runAccountCommand } from "./account-client.mjs";
+import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -124,10 +125,9 @@ async function cmdHook() {
 // **看得见、能接管**的 coflux 实体——而不是在自己的 Bash 里后台起一个谁也看不见的进程。
 //
 // 不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，树外一律拒。
-// local-first（plan 094）：send/read/wait/notify/progress 在 daemon 本地闭环，不经中心；只有
-// new/list/ports 由 daemon 代问中心（Task 要落库广播、预览 URL 由中心生成）。
-// 跟随 cwd（plan 102）：请求都带 process.cwd()，agent 挪进同设备另一个 coflux 工作区后，这些
-// 命令就对那个工作区办事（notify/progress/ports 除外，它们挂在本会话上，与工作区无关）。
+// Local read/send/run/wait/close/progress stay on the daemon. Notify, new/list/ports and ownership
+// changes require a server acknowledgement. Scope follows cwd except terminal-owned
+// notify/progress/ports, whose source remains the owning session.
 // 与 `hook` 子命令的约定**相反**：这些命令必须写 stdout——输出就是给 agent 读的返回值。
 // 也刻意不做自动重试：terminal new 有副作用，重试会开出两个终端，失败就把错误交给 agent。
 
@@ -304,8 +304,9 @@ async function cmdTerminal(values) {
 async function cmdNotify() {
   const message = positionals.slice(1).join(" ").trim();
   if (!message) die(`notify 需要一句话，例如：coflux notify "两个方案拿不准，需要你定"`);
-  await agentPost({ action: "notify", message });
-  console.log("已通知用户（工作区在侧栏转为「等待交互」）");
+  const result = await agentPost({ action: "notify", notificationId: randomUUID(), message });
+  if (!result.notificationId) die("daemon 不支持持久通知，请升级；未确认送达");
+  console.log("通知已发送（已保存到账号通知中心）");
 }
 
 async function cmdProgress() {
@@ -495,7 +496,7 @@ const HELP = `coflux —— 账号与终端操作
   coflux terminal list   列出本工作区的终端（含 status / 退出码，跑着的还带 busy|idle 与上一条命令的退出码）
   coflux terminal close <taskId>
                           结束该终端（等价账号 CLI 的 stop）
-  coflux notify "<一句话>"  叫人：工作区在侧栏转为「等待交互」并显示这句话
+  coflux notify "<一句话>"  发送站内通知；服务器保存后确认送达
   coflux progress "<一句话>"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
   coflux ports           列出本工作区的监听端口及可直接打开的预览 URL
   coflux executor run --prompt="<任务>" [--write] [--timeout <秒>]

@@ -76,6 +76,8 @@ coflux notify 'Ready for your review.'
 
 Every terminal is the workspace's default login shell on a real tty, alive until `exit` or `close`; `--cmd` and `run` only type a command in after the shell has signalled that its prompt is ready, and `wait` reports that command's exit code while the terminal stays open.
 
+`coflux notify` sends a persistent notification to your account inbox from the owning terminal. It needs a server connection and reports success only after the server saves it. Desktop shows an in-app hint in the foreground and additionally requests a system notification in the background. Reading a notification clears its unread state, while history survives hooks, terminal exit, and source deletion.
+
 The CLI bundled with the desktop app can reuse the app's login through a local channel. Independently installed CLIs can sign in themselves. See `coflux --help`, `cofluxd --help`, and the [agent skill](skills/coflux/SKILL.md).
 
 ## Upgrades and terminal lifetime

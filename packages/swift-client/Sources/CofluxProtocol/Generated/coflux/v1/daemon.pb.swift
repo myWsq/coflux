@@ -405,6 +405,33 @@ public struct Coflux_V1_AgentWorkspaceForgetResult: Sendable {
   public init() {}
 }
 
+public struct Coflux_V1_AgentNotify: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var message: String = String()
+
+  /// Stable across retries of one send, scoped to the authenticated device.
+  public var notificationID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_AgentNotifyResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var notificationID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_AgentControlRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -471,6 +498,14 @@ public struct Coflux_V1_AgentControlRequest: Sendable {
     set {payload = .workspaceForget(newValue)}
   }
 
+  public var notify: Coflux_V1_AgentNotify {
+    get {
+      if case .notify(let v)? = payload {return v}
+      return Coflux_V1_AgentNotify()
+    }
+    set {payload = .notify(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -481,6 +516,7 @@ public struct Coflux_V1_AgentControlRequest: Sendable {
     /// plan 104：这两条改的是**归属**而不是本次请求的目标，忽略上面的 workspace_id（worker 恒填空）。
     case workspaceLocate(Coflux_V1_AgentWorkspaceLocate)
     case workspaceForget(Coflux_V1_AgentWorkspaceForget)
+    case notify(Coflux_V1_AgentNotify)
 
   }
 
@@ -663,6 +699,14 @@ public struct Coflux_V1_AgentControlResult: Sendable {
     set {payload = .workspaceForget(newValue)}
   }
 
+  public var notify: Coflux_V1_AgentNotifyResult {
+    get {
+      if case .notify(let v)? = payload {return v}
+      return Coflux_V1_AgentNotifyResult()
+    }
+    set {payload = .notify(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -672,6 +716,7 @@ public struct Coflux_V1_AgentControlResult: Sendable {
     case portsList(Coflux_V1_AgentPortsListResult)
     case workspaceLocate(Coflux_V1_AgentWorkspaceLocateResult)
     case workspaceForget(Coflux_V1_AgentWorkspaceForgetResult)
+    case notify(Coflux_V1_AgentNotifyResult)
 
   }
 
@@ -2651,9 +2696,74 @@ extension Coflux_V1_AgentWorkspaceForgetResult: SwiftProtobuf.Message, SwiftProt
   }
 }
 
+extension Coflux_V1_AgentNotify: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentNotify"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}message\0\u{3}notification_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.message) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.notificationID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.message.isEmpty {
+      try visitor.visitSingularStringField(value: self.message, fieldNumber: 1)
+    }
+    if !self.notificationID.isEmpty {
+      try visitor.visitSingularStringField(value: self.notificationID, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentNotify, rhs: Coflux_V1_AgentNotify) -> Bool {
+    if lhs.message != rhs.message {return false}
+    if lhs.notificationID != rhs.notificationID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AgentNotifyResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AgentNotifyResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}notification_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.notificationID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.notificationID.isEmpty {
+      try visitor.visitSingularStringField(value: self.notificationID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AgentNotifyResult, rhs: Coflux_V1_AgentNotifyResult) -> Bool {
+    if lhs.notificationID != rhs.notificationID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_AgentControlRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AgentControlRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}workspace_id\0\u{4}\u{7}terminal_new\0\u{3}terminal_list\0\u{3}terminal_read\0\u{3}ports_list\0\u{3}workspace_locate\0\u{3}workspace_forget\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}workspace_id\0\u{4}\u{7}terminal_new\0\u{3}terminal_list\0\u{3}terminal_read\0\u{3}ports_list\0\u{3}workspace_locate\0\u{3}workspace_forget\0\u{1}notify\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2742,6 +2852,19 @@ extension Coflux_V1_AgentControlRequest: SwiftProtobuf.Message, SwiftProtobuf._M
           self.payload = .workspaceForget(v)
         }
       }()
+      case 16: try {
+        var v: Coflux_V1_AgentNotify?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .notify(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .notify(v)
+        }
+      }()
       default: break
       }
     }
@@ -2785,6 +2908,10 @@ extension Coflux_V1_AgentControlRequest: SwiftProtobuf.Message, SwiftProtobuf._M
     case .workspaceForget?: try {
       guard case .workspaceForget(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
+    }()
+    case .notify?: try {
+      guard case .notify(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 16)
     }()
     case nil: break
     }
@@ -3006,7 +3133,7 @@ extension Coflux_V1_AgentPortsListResult: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Coflux_V1_AgentControlResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AgentControlResult"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{4}\u{7}terminal_new\0\u{3}terminal_list\0\u{3}terminal_read\0\u{3}ports_list\0\u{3}workspace_locate\0\u{3}workspace_forget\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{4}\u{7}terminal_new\0\u{3}terminal_list\0\u{3}terminal_read\0\u{3}ports_list\0\u{3}workspace_locate\0\u{3}workspace_forget\0\u{1}notify\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3095,6 +3222,19 @@ extension Coflux_V1_AgentControlResult: SwiftProtobuf.Message, SwiftProtobuf._Me
           self.payload = .workspaceForget(v)
         }
       }()
+      case 16: try {
+        var v: Coflux_V1_AgentNotifyResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .notify(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .notify(v)
+        }
+      }()
       default: break
       }
     }
@@ -3138,6 +3278,10 @@ extension Coflux_V1_AgentControlResult: SwiftProtobuf.Message, SwiftProtobuf._Me
     case .workspaceForget?: try {
       guard case .workspaceForget(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
+    }()
+    case .notify?: try {
+      guard case .notify(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 16)
     }()
     case nil: break
     }

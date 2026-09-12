@@ -216,3 +216,28 @@ test("MCP 与专用 OAuth 入口已移除", async () => {
     assert.equal(response.status, 404, `${method} ${path}`);
   }
 });
+
+
+test("account inbox delivery and read mutation are isolated", async () => {
+  const owner = stack.makeClient();
+  const other = stack.makeClient();
+  await owner.authTokenSubscribe(tokenA);
+  await other.authTokenSubscribe(tokenB);
+  try {
+    const running = device.control.log.find((m) => m.case === "taskUpdated" && m.task.id === taskId && m.task.status === TaskStatus.RUNNING).task;
+    await device.attach(running.sessionId);
+    await device.input(running.sessionId, `COFLUX_LOCAL_GATEWAY_PORT=${device.gateway.port} node ${join(ROOT, "packages/cli/coflux.mjs")} notify 'Owner only notification'\r`);
+    const event = await owner.waitFor((m) => m.case === "notificationChanged" && m.notification?.message === "Owner only notification", "owner notification");
+    other.send({ case: "notificationList", requestId: "other-history" });
+    const page = await other.waitFor((m) => m.case === "notificationPage" && m.requestId === "other-history", "other empty inbox");
+    assert.equal(page.notifications.length, 0);
+    assert.equal(page.unreadCount, 0);
+    other.send({ case: "notificationRead", id: event.notification.id, requestId: "foreign-read" });
+    const denied = await other.waitFor((m) => m.case === "notificationChanged" && m.requestId === "foreign-read", "foreign read denied");
+    assert.match(denied.error, /不存在或不属于/);
+    owner.send({ case: "notificationList", requestId: "owner-still-unread" });
+    const unchanged = await owner.waitFor((m) => m.case === "notificationPage" && m.requestId === "owner-still-unread", "owner read unchanged");
+    assert.equal(unchanged.notifications.find((item) => item.id === event.notification.id).readAt, 0);
+    assert.ok(!other.log.some((m) => m.case === "notificationChanged" && m.notification?.id === event.notification.id));
+  } finally { owner.close(); other.close(); }
+});

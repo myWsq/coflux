@@ -260,6 +260,8 @@ struct AgentBody {
     #[serde(default)]
     message: String,
     #[serde(default)]
+    notification_id: String,
+    #[serde(default)]
     text: String,
     #[serde(default)]
     enter: bool,
@@ -400,6 +402,7 @@ async fn handle_agent(
                 return Err(RequestError::BadRequest("notify 缺 message".into()));
             }
             AgentAction::Notify {
+                notification_id: parsed.notification_id,
                 message: parsed.message,
             }
         }

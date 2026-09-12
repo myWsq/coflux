@@ -11,10 +11,13 @@ const MAX_TOKEN = 4096;
 /** 渲染层来的载荷只当数据：字段类型与长度都校验，超长截断，形状不对丢弃。 */
 export function sanitizeNotification(payload: unknown): DesktopNotification | null {
   if (!payload || typeof payload !== "object") return null;
-  const { workspaceId, title, body } = payload as Record<string, unknown>;
+  const { workspaceId, title, body, notificationId, taskId } = payload as Record<string, unknown>;
   if (typeof workspaceId !== "string" || typeof title !== "string" || typeof body !== "string") return null;
   if (!workspaceId || !title) return null;
-  return { workspaceId: workspaceId.slice(0, MAX_ID), title: title.slice(0, MAX_TITLE), body: body.slice(0, MAX_BODY) };
+  if (notificationId !== undefined && (typeof notificationId !== "string" || !notificationId || notificationId.length > MAX_ID)) return null;
+  if (taskId !== undefined && (typeof taskId !== "string" || !taskId || taskId.length > MAX_ID)) return null;
+  return { workspaceId: workspaceId.slice(0, MAX_ID), title: title.slice(0, MAX_TITLE), body: body.slice(0, MAX_BODY),
+    ...(typeof notificationId === "string" ? { notificationId } : {}), ...(typeof taskId === "string" ? { taskId } : {}) };
 }
 
 export function sanitizeBadgeCount(payload: unknown): number | null {
