@@ -1,15 +1,18 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, LoaderCircle, MessageSquare, Monitor, Package, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
+import { AccountFooter } from "@/components/workbench/account-footer";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
+import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { ActivityDots } from "@/components/workbench/pending-dots";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
 import { SIDEBAR_WIDTH_KEY } from "@/config";
+import type { DesktopDaemonState } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 
 /** 心跳往返低于此值算「快」（绿），否则「慢」（黄）。局域网直连通常个位数到几十 ms，
@@ -29,11 +32,6 @@ function ActivityIcon({ activity, labeled }: { activity: WorkspaceActivity; labe
   if (activity.status === "idle") return null;
   return <ActivityDots status={activity.status} label={labeled ? activityLabel(activity) : undefined} />;
 }
-
-/** 桌面 app（plan 103）隐藏了系统标题栏，红绿灯（x=14,y=14）内嵌到侧栏顶部：这条空白带既给红绿灯让位，
- * 也是唯一的窗口拖拽区（-webkit-app-region: drag）。 */
-const DESKTOP_TITLEBAR_HEIGHT = 38;
-const DESKTOP_DRAG_REGION_STYLE = { height: DESKTOP_TITLEBAR_HEIGHT, WebkitAppRegion: "drag" } as CSSProperties;
 
 const DEFAULT_SIDEBAR_WIDTH = 260;
 const MIN_SIDEBAR_WIDTH = 200;
@@ -92,6 +90,9 @@ type SidebarProps = {
   onCreateMenuProjectIdChange: (projectId: string | null) => void;
   /** 乐观创建中的工作区（plan 078）：渲染在对应项目的工作区列表末尾 */
   pendingWorkspaces: PendingWorkspace[];
+  /** 本机 daemon 状态（plan 113）：账号菜单「本机 daemon」一行；null = 还没拿到 */
+  daemonState: DesktopDaemonState | null;
+  onOpenDaemonPanel: () => void;
 };
 
 export function Sidebar(props: SidebarProps) {
@@ -226,11 +227,14 @@ export function Sidebar(props: SidebarProps) {
       .sort((left, right) => (left.isMain === right.isMain ? left.createdAt - right.createdAt : left.isMain ? -1 : 1));
 
   return (
+    // 高度跟随父容器而不是 h-screen：断线横幅出现时根容器加 pt-7，写死一屏高会把底部 28px
+    // （正好是账号脚部那一行）裁掉。横幅本身不动。
     <aside
-      className="relative flex h-screen shrink-0 flex-col border-r border-border bg-sidebar text-base"
+      className="relative flex h-full min-h-0 shrink-0 flex-col border-r border-border bg-sidebar text-base"
       style={{ width: sidebarWidth }}
     >
-      <div className="shrink-0" style={DESKTOP_DRAG_REGION_STYLE} />
+      {/* 红绿灯（x=14,y=14）内嵌在这条空白带里，它同时是侧栏的窗口拖拽带（见 drag-region.ts）。 */}
+      <div className="shrink-0" style={DESKTOP_DRAG_BAND_STYLE} />
       <div className="flex min-h-0 flex-1 flex-col pt-1.5">
         <section className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           <div className="mb-1.5 flex h-7 items-center px-2">
@@ -343,7 +347,7 @@ export function Sidebar(props: SidebarProps) {
                         // workspaceActivity（packages/client），UI 只做呈现。
                         const activity = workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents);
                         const activityText = activityLabel(activity);
-                        // agent 经 `cofluxd progress` 播报的进度短评（plan 088）：与活动状态是两个
+                        // agent 经 `coflux progress` 播报的进度短评（plan 088）：与活动状态是两个
                         // 维度（状态 hooks 自动判定，短评 agent 主动播报），跨 hook 事件存活。
                         const progress = workspaceProgress(workspace.id, tasks, sessionAgents);
                         // 工作区详情 tooltip（需求勘误：原 plan 048-task-tab-tooltip 做到了任务 Tab 上，
@@ -361,7 +365,7 @@ export function Sidebar(props: SidebarProps) {
                                   <span className="truncate">{activityText}</span>
                                 </span>
                               ) : null}
-                              {/* agent 经 `cofluxd notify` 主动留的话（plan 074）：状态图标只能表达
+                              {/* agent 经 `coflux notify` 主动留的话（plan 074）：状态图标只能表达
                                   「它在等你」，具体等什么得由 agent 自己说。不 truncate——留言就是
                                   要读的内容，worker 侧已按 200 字符钳过。 */}
                               {activity.status === "question" && activity.message ? (
@@ -576,9 +580,6 @@ export function Sidebar(props: SidebarProps) {
               // 布局照 Cursor：一行标题说结论（走哪条路 + 多快），下面是图标条目列表铺上下文。
               const tooltipRows: { icon: LucideIcon; text: string }[] = [
                 { icon: Monitor, text: `${daemon.host} / ${daemon.platform}` },
-                ...(daemon.workerVersion ? [{ icon: Package, text: `worker ${daemon.workerVersion}` }] : []),
-                ...(daemon.supervisorVersion ? [{ icon: Cog, text: `supervisor ${daemon.supervisorVersion}` }] : []),
-                ...(transport?.detail ? [{ icon: Info, text: transport.detail }] : []),
               ];
               const tooltipContent = (
                 <div className="flex flex-col gap-1">
@@ -657,6 +658,10 @@ export function Sidebar(props: SidebarProps) {
           </div>
         </section>
       </div>
+
+      {/* 账号脚部（plan 110）：固定在滚动区之外，不随项目/设备列表滚动；不声明拖拽区。 */}
+      <AccountFooter client={client} daemonState={props.daemonState} onOpenDaemonPanel={props.onOpenDaemonPanel} />
+
       <div
         className="group/resize absolute inset-y-0 -right-[3px] z-20 w-1.5 cursor-col-resize touch-none"
         onDoubleClick={resetSidebarWidth}

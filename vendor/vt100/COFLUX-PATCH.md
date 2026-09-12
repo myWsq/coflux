@@ -1,5 +1,5 @@
-# vt100 单行终端修复
+# vt100 single-row terminal fix
 
-基于 crates.io vt100 0.16.2，保留上游 LICENSE。唯一产品源码修改为 src/grid.rs 的 col_wrap：单行屏幕自动换行后，上一行可能已经滚入历史，不能对其行号无符号减法；保留历史行的 wrap 标记。
+Based on vt100 0.16.2 from crates.io, retaining the upstream LICENSE. The only production-source change is to `col_wrap` in `src/grid.rs`: after a single-row screen wraps automatically, the preceding row may already have moved into history. Avoid unsigned subtraction on its row index and preserve the historical row's wrap flag.
 
-复现及回归在 crates/supervisor/src/sessiond.rs 的 single_row_terminal_wrap_does_not_panic。后续升级上游时，应核对该边界已修复后再移除本地补丁。
+The reproduction and regression test is `single_row_terminal_wrap_does_not_panic` in `crates/supervisor/src/sessiond.rs`. When upgrading upstream, verify that this edge case has been fixed before removing the local patch.

@@ -24,7 +24,7 @@ export type TokenStore = {
   read(): string;
   /** 加密不可用时不落盘（不回退明文），返回 false；空串等同 clear */
   write(token: string): boolean;
-  clear(): void;
+  clear(): boolean;
 };
 
 export type TokenStoreOptions = {
@@ -38,11 +38,13 @@ export function createTokenStore(options: TokenStoreOptions): TokenStore {
   const { filePath, codec } = options;
   const report = (stage: TokenStoreStage, error: unknown) => options.onError?.(stage, error);
 
-  function clear(): void {
+  function clear(): boolean {
     try {
       if (existsSync(filePath)) unlinkSync(filePath);
+      return true;
     } catch (error) {
       report("clear", error);
+      return false;
     }
   }
 
@@ -60,8 +62,7 @@ export function createTokenStore(options: TokenStoreOptions): TokenStore {
     },
     write(token) {
       if (token === "") {
-        clear();
-        return true;
+        return clear();
       }
       try {
         if (!codec.isEncryptionAvailable()) return false;

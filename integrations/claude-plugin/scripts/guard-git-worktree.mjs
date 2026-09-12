@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Claude Code PreToolUse hook (plan 095; `add` released in plan 104): inside a coflux project session, block
-// `git worktree remove|move` and steer the agent to the center MCP's remove_workspace. Removing a worktree by hand
+// `git worktree remove|move` and steer the agent to the account CLI workspace removal. Removing a worktree by hand
 // leaves an orphan workspace record behind — nothing in coflux ever deletes it, because the directory watcher
 // only reports 0/0 for a directory that disappeared.
 //
@@ -55,9 +55,9 @@ function reasonFor(verb, projectId) {
   const head = `This session runs inside a coflux project (COFLUX_PROJECT_ID=${projectId}) and coflux keeps a workspace record for every worktree it knows about: a worktree you \`git worktree ${verb}\` yourself leaves that record behind as an orphan in the user's sidebar, pointing at a directory that no longer exists. `;
   const how =
     verb === "remove"
-      ? `Use the MCP tool remove_workspace instead (find the workspaceId with list_workspaces); it closes that workspace's terminals first, then removes the worktree and its record. Claude Code's own worktrees need nothing from you: when it cleans one up on exit, coflux moves that workspace's terminals back to the project's main workspace and drops the record by itself. `
-      : `coflux does not support moving worktrees: remove_workspace, then create a fresh worktree at the new location. `;
-  return `${head}${how}Creating a worktree is not blocked: coflux follows you into it (EnterWorktree included) and registers it as a child workspace of this project. To only inspect existing worktrees use git worktree list or the MCP tool list_workspaces.`;
+      ? `Use coflux workspace remove <workspaceId> instead (find the id with coflux workspace list); it closes that workspace's terminals first, then removes the worktree and its record. Claude Code's own worktrees need nothing from you: when it cleans one up on exit, coflux moves that workspace's terminals back to the project's main workspace and drops the record by itself. `
+      : `coflux does not support moving worktrees: coflux workspace remove <workspaceId>, then create a fresh worktree at the new location. `;
+  return `${head}${how}Creating a worktree is not blocked: coflux follows you into it (EnterWorktree included) and registers it as a child workspace of this project. To only inspect existing worktrees use git worktree list or coflux workspace list.`;
 }
 
 async function main() {

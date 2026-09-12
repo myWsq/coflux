@@ -1,4 +1,4 @@
-# Plan 065: 独立 relay 第二片 —— 多节点就近：中心下发列表、daemon 探测选 home、rendezvous 按 home 指路
+# Plan 065: Multi-node relay—center supplies nodes, daemon chooses home, rendezvous follows it
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -14,185 +14,101 @@
 - Priority: P1
 - Effort: M
 - Risk: MED
-- Depends on: none（前置 043 独立 relay 第一片已 DONE）
+- Depends on: none (the first standalone-relay slice, 043, is DONE)
 - Category: feature
 - Execution: agent:codex
 - Planned at: `bd88f86`, 2026-07-29
 
 ## Requirement
 
-plan 043 把 relay 数据面剥离成了独立单二进制（`crates/relay`），但生产只有一个
-relay 节点：中心 rendezvous 从单一 `COFLUX_RELAY_URL`（`apps/server/src/config.ts:79`）
-取地址签 token。用户在多地时，远端 client↔daemon 仍可能绕远路。
+Plan 043 separated relay into a standalone binary, but production has one COFLUX_RELAY_URL (config.ts:79), causing detours for geographically distributed use. Adopt a Tailscale home-DERP-like model:
 
-本片完成后（Tailscale home-DERP 同款模型）：
+1. Center sends static relay list after daemon authentication.
+2. Daemon measures HTTPS RTT, selects/reports nearest home, probes periodically and immediately after dial failure.
+3. Rendezvous sends both peers to daemon home; without report use first node. A channel's peers must share node because pairing is by channelId with no mesh.
+4. Client/Web/iOS remain unchanged, consuming one relay_url.
 
-1. 中心配置**多个** relay 节点（静态列表），经 daemon 控制 WS 在认证完成后下发。
-2. daemon 对各节点做 HTTPS RTT 探测，选最近的作为自己的 **home relay** 上报中心；
-   周期性重探，拨号失败立即重探。
-3. rendezvous 时中心把 client 和 daemon 都指到**该 daemon 的 home relay**——一条
-   channel 两端必须落同一节点（relay 按 channelId 配对、节点间无互联），home 模型
-   天然满足；daemon 未上报时回退列表首项。
-4. client/web/iOS **零改动**：它们只消费 rendezvous 返回的 `relay_url`。
-
-判别正确与相邻错误：改完后若「client 侧需要探测或收到节点列表」或「rendezvous
-响应从单 URL 变成候选列表」或「relay 之间出现互联/转发」或「relay 节点信息进了
-DB」，即为走错方向。单节点配置（只配 `COFLUX_RELAY_URL`）下行为必须与今天完全
-一致。
+Client probing/list delivery, candidate-array grants, inter-relay forwarding, or DB node records are wrong directions. Existing single COFLUX_RELAY_URL behavior must remain identical.
 
 ## Decisions & tradeoffs
 
-- **选点模型 = daemon home relay**：daemon 探测选 home 并上报，rendezvous 把两端
-  都指到 daemon 的 home。Rejected: 双端探测+中心裁决（plan 043:223 的草案）——
-  client 是浏览器/iOS，探测时机与缓存复杂，且 relay 贴 daemon 端时总延迟
-  client→relay→daemon 已接近 client→daemon 直线，双端裁决收益极小。Rejected:
-  relay mesh（DERP 完整形态）——多一跳、relay 不再零状态、要维护节点间拓扑。
-  Based on: relay 按 channelId 配对两条 WS、无节点互联（`crates/relay/src/main.rs`）。
-- **清单来源 = 中心静态配置**：新增 env `COFLUX_RELAY_NODES`（JSON 数组
-  `[{id, url}]`，id 短稳定、url 为对外 wss 基址）；未配置时由既有
-  `COFLUX_RELAY_URL` 合成单节点列表，行为与今天完全一致（含 dev 默认
-  `ws://127.0.0.1:8790`）。列表首项 = 回退用主节点，文档写明。Rejected: DB 表 +
-  管理界面——自用产品、节点个位数，过度设计。Rejected: relay 自注册——打破
-  「relay 与中心之间没有任何连接/依赖」的既有架构性质
-  （`docs/architecture.md:112-114`）。Based on: `apps/server/src/config.ts:79`。
-- **探测机制 = relay 新增 `/healthz` + HTTPS GET 计时**：daemon 对每个节点的
-  `/healthz` 计时、多次取中位数选最小；切换 home 需显著更优（滞后防抖，阈值执行
-  者定，建议 ≥20ms 且 ≥20% 量级）；周期性重探（分钟级），relay 拨号失败立即触发
-  重探。Rejected: TCP connect 计时——Caddy 活着而 relay 进程死了会误报健康。
-  Rejected: 对 `/v1/pipe` 发无效 WS 握手计时——靠错误路径当探测，日志噪声。
-  Based on: relay 现仅认 `/v1/pipe`，其余路径握手期 404（`crates/relay/src/main.rs:205`）。
-- **故障切换 = 探测自愈、单 URL**：`DeviceRelayDial` / `DeviceRelayGrant` 协议
-  **不动**（`proto/coflux/v1/device.proto:180-205`），rendezvous 仍下发单个
-  relay_url。home 挂 → daemon 探测发现后切换并上报，下次 rendezvous 自动指新节
-  点，自愈窗口≈探测周期；期间 client 重试 rendezvous 即可。Rejected: 下发有序候
-  选列表两端按序尝试——proto/client/daemon 三处都要加一致性逻辑（两端必须落同一
-  候选），复杂度明显上升，自用场景 relay 挂机是罕见事件。
-- **下发/上报通道 = 既有 daemon 控制 WS**：`ServerToDaemon` oneof 新增节点列表消
-  息（认证完成后下发一次；中心改配置=重启=全体 daemon 重连自动拿新列表，不需要热
-  推送）；`DaemonToServer` oneof 新增 home 上报消息（home relay id，可附各节点
-  RTT 供日志/展示；daemon 重连后重报）。home 存 `DaemonConn` 内存态
-  （`apps/server/src/hub.ts:96-101`），零 DB、零新表。Based on: 信封定义
-  `proto/coflux/v1/daemon.proto:88,216`；注册路径 `hub.ts:248 registerDaemonConn`。
-- **兼容回退**：daemon 未上报 home（旧版本 worker、或探测尚未完成）→ rendezvous
-  用列表首项。旧 worker 收到新 oneof 消息按 prost 未知字段语义忽略（执行时验证这
-  一点，若旧 worker 会因未知 payload 断连则需版本门，先例：`supportsRelayDial`，
-  `apps/server/src/relay-rendezvous.ts`）。
-- **密钥 = 全节点共用**：所有 relay 节点用同一 `COFLUX_RELAY_PUBKEY`，中心一个签
-  名种子，token 不绑节点。Rejected: per-node 密钥——token 已短时（TTL≤120s）+
-  绑 channelId，节点级隔离无实际威胁模型收益，轮换成本翻倍。Based on:
-  `apps/server/src/config.ts` relaySigningKeySeed 注释、`crates/relay/src/main.rs:133`。
-- **worker 探测的 HTTP 实现保持 rustls 栈**：不引 openssl（交叉编译约束：
-  `Cross.toml` + release 产物矩阵）。用最小可行方案（reqwest rustls feature 或手
-  写 GET 均可，执行者定，倾向最小依赖）。Based on: worker 现无 HTTP client 依赖，
-  WS 栈为 tokio-tungstenite rustls（`crates/worker/Cargo.toml`）。
-- **(decided while planning) 探测地址推导**：探测 URL 由节点 `url`（ws/wss 基址）
-  换 scheme 为 http/https 拼 `/healthz` 推导，不单独配探测地址——少一个配置项，
-  且生产链路（Caddy 终结 TLS）下二者天然同源。
+- **Daemon home selection**. Two-sided probing/center arbitration from 043:223 complicates browser/iOS timing/cache for little benefit when relay near daemon keeps total path near direct distance. Mesh adds hop/state/topology. Relay currently pairs two WS by channelId only.
+- **COFLUX_RELAY_NODES JSON [{id,url}]**, stable short IDs and external wss bases. If unset, synthesize one node from COFLUX_RELAY_URL, including dev ws://127.0.0.1:8790. First node is documented primary fallback. No DB/admin UI for single-digit personal nodes, nor self-registration that breaks relay's independence from center (architecture:112-114).
+- **Add /healthz; timed HTTPS GET**. Probe multiple times, compare medians; switch only with meaningful hysteresis, suggested ≥20ms and ≥20%, executor chooses. Minute-scale periodic probes plus immediate dial-failure probe. TCP alone mistakes live Caddy/dead relay for healthy; invalid pipe handshakes create noisy error-based health checks. Existing relay recognizes only /v1/pipe at main.rs:205.
+- **Probe-driven failover; one URL**. DeviceRelayDial/Grant unchanged (device.proto:180-205). On home failure, daemon probes/reports new home and next rendezvous follows; window roughly probe interval, clients may retry meanwhile. Candidate lists would require three-sided consistent selection logic for a rare failure.
+- **Existing daemon control WS** adds server list and daemon home-report oneofs. Send once after auth; config changes require center restart, naturally refreshing all reconnects. Report home ID, optionally node RTT for logs/display; re-report after reconnect. Store in DaemonConn memory (hub:96-101), no DB. Envelopes daemon.proto:88,216; registerDaemonConn hub:248.
+- **Old-worker fallback**: no report means first node. Verify prost unknown-oneof ignore behavior; if disconnecting, gate by version using supportsRelayDial precedent in relay-rendezvous.ts.
+- **Shared keys across nodes**: same COFLUX_RELAY_PUBKEY and one center signing seed; tokens not node-bound. Short TTL≤120s and channelId binding make per-node isolation unhelpful while multiplying rotation work. config signing comment/relay main.rs:133.
+- **Rustls-only worker HTTP**, no OpenSSL for Cross.toml release portability. Minimal reqwest-rustls or handwritten GET, executor chooses. Existing WS uses tokio-tungstenite rustls, no HTTP client.
+- **Derive health URL** by ws/wss→http/https plus /healthz, no extra setting; production Caddy provides same-origin TLS termination.
 
 ## Direction
 
-数据流：中心启动解析节点列表 → daemon 认证完成后收到列表 → 探测循环选 home →
-上报 → 中心存 presence → rendezvous 按 daemon home 签发两端 URL。分四个里程碑：
+Center parses list→authenticated daemon receives/probes/reports→center stores presence→rendezvous gives both peers home URL.
 
-### Milestone 1: relay 支持 `/healthz`
+### Milestone 1: Health
 
-relay 对明文 HTTP GET `/healthz` 返回 200（生产由 Caddy 终结 TLS 转明文；探测与
-监控共用）。`/v1/pipe` 行为不变。
-Validation: `cargo test -p coflux-relay` -> exit 0（含 healthz 响应与 pipe 回归
-用例）。
+Plain HTTP GET /healthz returns 200 behind Caddy TLS; pipe behavior unchanged. cargo test -p coflux-relay passes with health/pipe regression.
 
-### Milestone 2: proto + 中心侧
+### Milestone 2: Proto/center
 
-`daemon.proto` 新增两条消息并再生成产物；中心解析 `COFLUX_RELAY_NODES`（未配置
-回退 `COFLUX_RELAY_URL` 单节点）、认证后下发列表、接收 home 上报入 presence、
-rendezvous 按 home（无上报→首项）签发 URL。
-Validation: `pnpm --filter @coflux/server build` -> exit 0；
-`cd tests && node --import tsx --test src/relay-token.test.mjs src/relay-dial-version.test.mjs` -> exit 0（既有回归）。
+Add two daemon messages/generate outputs, parse list/fallback, send after auth, accept home presence, route grants. Server build and relay-token/relay-dial-version tests pass.
 
-### Milestone 3: worker 侧探测与上报
+### Milestone 3: Worker
 
-worker 收列表起探测循环（多次取中位数、滞后防抖、周期重探、拨号失败立即重探），
-选 home 上报；列表为空或全部探测失败时不上报（中心自然回退首项）。
-Validation: `cargo test -p coflux-worker && cargo build -p coflux-worker` -> exit 0。
+Probe medians/hysteresis/periodic and dial-failure triggers, report chosen home. Empty list/all probes fail means no report and center fallback. Worker test/build pass.
 
-### Milestone 4: 黑盒验收 + 文档
+### Milestone 4: Black-box/docs
 
-新增黑盒用例覆盖：双 relay 节点下 daemon 上报 home 且 rendezvous 双端 URL 指向
-home；kill home 节点后探测自愈切换、下次 rendezvous 指向存活节点；未上报 home
-（模拟旧 worker）回退列表首项。`docs/architecture.md` 更新多节点形态与
-`COFLUX_RELAY_NODES` 部署说明（多地 VPS：coflux-relay 二进制 + Caddy + 同一公
-钥）。
-Validation: `cd tests && node --import tsx --test src/relay-multi-node.test.mjs`
--> exit 0（新用例文件名执行者可调整，README 状态行注明实际文件）。
+Two-node test proves both rendezvous URLs match reported home; killing home changes report/next rendezvous to survivor; old-worker/no-report uses first. Document multi-VPS relay binary+Caddy+shared key and COFLUX_RELAY_NODES. relay-multi-node.test.mjs passes; executor may rename and record actual path.
 
 ## Landmines
 
-- relay 的连接处理走 tokio-tungstenite WS 握手回调（`crates/relay/src/main.rs:199-206`），
-  普通 HTTP GET 不是 Upgrade 请求——`/healthz` 需要在 WS accept 之前识别明文
-  HTTP（peek/手解首行），不能指望握手回调天然放行。
-- relay token TTL 上限 120s 必须 ≤ relay 侧 tombstone 窗口（`apps/server/src/config.ts`
-  relayTokenTtlMs 注释）——本片不要动 TTL 相关常量。
-- 旧 worker 对新 `ServerToDaemon` payload 的行为要实测：若未知 oneof 导致断连而
-  非忽略，必须按 `supportsRelayDial`（`apps/server/src/relay-rendezvous.ts`）先例
-  加版本门再下发列表。
-- `pnpm dev:relay`（`package.json:12`）单节点 127.0.0.1:8790；黑盒双节点场景需在
-  harness 里起第二个端口实例（参照 `tests/src/device-harness.mjs` 起 relay 的方
-  式），不要改动既有 dev 脚本语义。
-- proto 生成产物入库（`proto/gen/swift/` 可见 device.pb.swift）：改 `daemon.proto`
-  后按仓库既有 codegen 流程再生成全部产物一并提交；iOS 不消费 daemon.proto，行为
-  零影响，但生成物过期会脏 drift check。
+- Ordinary HTTP is not WS Upgrade. Recognize /healthz before tungstenite accept, e.g. peek/parse first line; handshake callback alone (:199-206) is insufficient.
+- Preserve token TTL≤120s within relay tombstone window; no TTL changes.
+- Measure old-worker unknown payload, gate if needed.
+- Keep pnpm dev:relay single 127.0.0.1:8790. Harness starts second instance using device-harness pattern; do not alter dev semantics.
+- Regenerate/commit all tracked outputs after daemon.proto, including Swift; iOS does not consume daemon messages but stale outputs fail drift checks.
 
 ## Scope
 
-In scope:
+In scope: relay health; worker list/probes/report/minimal rustls dependency; server config/hub/rendezvous; daemon.proto/generated outputs; relay tests; architecture/README.
 
-- `crates/relay/`（healthz）
-- `crates/worker/`（列表接收、探测、上报；`Cargo.toml` 允许为探测加最小 rustls 系依赖）
-- `apps/server/src/`（config、hub、relay-rendezvous）
-- `proto/coflux/v1/daemon.proto` 及其生成产物（TS/swift）
-- `tests/src/`（新增多节点黑盒 + 既有 relay 用例回归性修补）
-- `docs/architecture.md`、`plans/README.md`
-
-Out of scope:
-
-- `packages/client/`、`apps/web/`、`mobile/`、`ios/` —— client 零改动是本方向的判别条件
-- `proto/coflux/v1/device.proto` 的 `DeviceRelayDial`/`DeviceRelayGrant` 语义 —— 协议不变
-- relay 节点间互联/转发、P2P —— 记录在 ROADMAP 的后续方向
-- DB schema —— home 是纯内存 presence
-- 生产多地 VPS 的实际开通与 DNS —— 部署文档到位即可，实机操作由用户执行
+Out of scope: client/Web/mobile/iOS; DeviceRelayDial/Grant semantics; relay mesh/P2P; DB; actual multi-region VPS/DNS operations, performed by user from docs.
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Rust 构建+单测 | `cargo build --workspace && cargo test -p coflux-relay -p coflux-worker` | exit 0 |
-| server typecheck | `pnpm --filter @coflux/server build` | exit 0 |
-| 定向黑盒（relay） | `cd tests && node --import tsx --test src/relay-*.test.mjs` | exit 0 |
-| 全量黑盒 (acceptance) | `pnpm --dir tests test` | exit 0（既有已知 flaky 基线见 plan 059 状态行） |
+| Rust | `cargo build --workspace && cargo test -p coflux-relay -p coflux-worker` | exit 0 |
+| Server | `pnpm --filter @coflux/server build` | exit 0 |
+| Relay black-box | `cd tests && node --import tsx --test src/relay-*.test.mjs` | exit 0 |
+| Full acceptance | `pnpm --dir tests test` | exit 0; known flaky baseline in 059 status |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] 双节点黑盒：rendezvous 双端 URL 指向 daemon 上报的 home；kill home 后自愈
-      切换；未上报回退首项。
-- [ ] 只配 `COFLUX_RELAY_URL`（不配 NODES）时行为与 bd88f86 完全一致。
-- [ ] client/web/iOS 无任何文件变更。
+- [ ] Two-node black-box tests prove both rendezvous URLs use the daemon-reported home, killing home triggers automatic failover, and missing reports fall back to the first entry.
+- [ ] Configuring only COFLUX_RELAY_URL without NODES behaves exactly as bd88f86.
+- [ ] No client/web/iOS files changed.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
 - [ ] `plans/README.md` status is updated.
 
 ## STOP conditions
 
-- A fact cited under Decisions & tradeoffs no longer holds.
-- The outcome requires out-of-scope files.
-- A validation command fails twice after one reasonable fix.
-- 旧 worker 收到新 payload 断连且版本门方案也无法兼容在线存量 daemon。
+- Cited fact changes, excluded edits required, validation fails twice after one reasonable fix.
+- Old workers disconnect on new payload and version gate cannot support deployed fleet.
 
 ## Maintenance notes
 
-- 加/换 relay 节点 = 改中心 `COFLUX_RELAY_NODES` 重启中心；daemon 重连自动拿新列
-  表并重探。节点 `id` 保持稳定（上报与日志以 id 对账）。
-- 列表首项兼有「未上报回退」职责，应始终配置为最稳的主节点。
-- 公钥轮换流程沿用 plan 043 维护注记（先双公钥并存再撤旧），多节点时逐节点滚动。
-- 自愈窗口 ≈ 探测周期；若未来觉得分钟级太慢，再考虑 rendezvous 下发候选列表（当
-  时被拒的方案，复议入口在此）。
+- Change center list/restart to update nodes; daemons reconnect/reprobe. Keep IDs stable for reports/logs.
+- First node should be most reliable fallback.
+- Follow 043 dual-public-key rotation, rolling nodes individually.
+- If minute-scale recovery becomes too slow, revisit the rejected candidate-list approach explicitly.
+
+Milestone validations retain `cd tests && node --import tsx --test src/relay-token.test.mjs src/relay-dial-version.test.mjs`, `cargo test -p coflux-worker && cargo build -p coflux-worker`, and `cd tests && node --import tsx --test src/relay-multi-node.test.mjs`.
+
+### Original source references
+
+`apps/server/src/config.ts:79`, `docs/architecture.md:112-114`, `crates/relay/src/main.rs:205`, `proto/coflux/v1/device.proto:180-205`, `apps/server/src/hub.ts:96-101`, `proto/coflux/v1/daemon.proto:88,216`, `crates/relay/src/main.rs:133`, `crates/relay/src/main.rs:199-206`, `package.json:12`.

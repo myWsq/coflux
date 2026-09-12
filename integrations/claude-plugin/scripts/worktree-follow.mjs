@@ -8,7 +8,7 @@
 // sidebar, the turn state, the diff stats and "which branch" all point at the wrong place, and the
 // worktree itself does not exist for coflux at all.
 //
-// This script hands the path to the local, zero-credential `cofluxd` command; the daemon resolves
+// This script hands the path to the local, zero-credential `coflux` command; the daemon resolves
 // the worktree's identity, the center verifies it and moves the terminal's *owning* workspace,
 // registering the worktree as a child workspace first when it is not known yet. The PTY, the
 // session and the turn state are untouched — only the ownership moves.
@@ -20,13 +20,13 @@
 //
 // The path to act on always travels as an argument, never as the child's working directory: on
 // WorktreeRemove the session's cwd is typically the worktree being deleted, and spawning inside a
-// directory that no longer exists fails before `cofluxd` even starts.
+// directory that no longer exists fails before `coflux` even starts.
 //
 // Contract (Claude Code hooks): stdin is one JSON document. On PostToolUse, print one **pure JSON**
 // object whose `hookSpecificOutput.additionalContext` carries the new coordinates, so the agent sees
 // them beside the tool result in the very turn that moved. In every other case write **not a single
 // byte** and exit 0: not inside coflux, stdin not JSON, an unexpected event, the ownership did not
-// actually change (`ExitWorktree` back to where the terminal already is, a normal startup), `cofluxd`
+// actually change (`ExitWorktree` back to where the terminal already is, a normal startup), `coflux`
 // missing, the daemon down or too old to know the command, the center refusing (another repository,
 // a directory workspace, not a git directory). Never disturb the agent. Debug output goes to stderr
 // only (COFLUX_HOOK_DEBUG=1).
@@ -79,12 +79,12 @@ function isDirectory(path) {
 }
 
 /**
- * A directory that surely exists, to spawn `cofluxd` from.
+ * A directory that surely exists, to spawn `coflux` from.
  *
  * The payload's cwd is preferred, but on WorktreeRemove it is typically the worktree being deleted
  * and may already be gone — and `execFile` with a nonexistent `cwd` fails with ENOENT before the
  * command ever runs, which would silently skip exactly the cleanup this hook exists for. The cwd
- * carries no meaning for these calls anyway: `cofluxd` is identified by its process tree, the path
+ * carries no meaning for these calls anyway: `coflux` is identified by its process tree, the path
  * to act on is passed as an argument, and the CLI tolerates a vanished `process.cwd()`.
  */
 function spawnCwd(preferred) {
@@ -99,18 +99,18 @@ function spawnCwd(preferred) {
   return isDirectory("/") ? "/" : undefined;
 }
 
-/** Run `cofluxd workspace <sub> <path>`; it prints one line of JSON. Always resolves, never throws. */
+/** Run `coflux workspace <sub> <path>`; it prints one line of JSON. Always resolves, never throws. */
 function askCofluxd(args, cwd) {
   return new Promise((resolve) => {
     execFile(
-      "cofluxd",
+      "coflux",
       ["workspace", ...args],
       { cwd, timeout: COFLUXD_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
       (error, stdout) => {
         if (error) {
-          // cofluxd missing, daemon down, daemon too old for this command, or the center said no:
+          // coflux missing, daemon down, daemon too old for this command, or the center said no:
           // all of them mean "coflux does not follow this time", never "block the agent".
-          debug("cofluxd failed", error.message);
+          debug("coflux failed", error.message);
           return resolve(null);
         }
         const line = String(stdout).trim().split("\n").filter(Boolean).pop();
@@ -118,7 +118,7 @@ function askCofluxd(args, cwd) {
         try {
           resolve(JSON.parse(line));
         } catch {
-          debug("cofluxd did not print JSON", line.slice(0, 120));
+          debug("coflux did not print JSON", line.slice(0, 120));
           resolve(null);
         }
       },
@@ -136,10 +136,10 @@ function block(located) {
   if (located.branch) lines.push(`branch: ${located.branch}`);
   if (located.created) lines.push("This worktree was not known to coflux and has just been registered as a child workspace; it now shows in the user's sidebar.");
   lines.push(
-    `Pass ${located.workspaceId} as workspaceId to coflux MCP tools; COFLUX_WORKSPACE_ID still names the workspace this terminal was opened in and is now stale.`,
+    `Pass ${located.workspaceId} as workspaceId to coflux account CLI commands; COFLUX_WORKSPACE_ID still names the workspace this terminal was opened in and is now stale.`,
     "COFLUX_TASK_ID, COFLUX_SESSION_ID and COFLUX_PROJECT_ID are unchanged: the terminal itself did not move, only its workspace.",
     "The shell inside this terminal still sits in its original directory; that is expected and affects nothing you do.",
-    "Run `cofluxd workspace` at any time to check where you are.",
+    "Run `coflux workspace` at any time to check where you are.",
     "</coflux-workspace-changed>",
   );
   return lines.join("\n");
@@ -175,7 +175,7 @@ async function main() {
     return;
   }
   // The hook command runs in the session's current directory, which is not necessarily the payload's
-  // cwd: always pass the payload's cwd explicitly and run cofluxd from it.
+  // cwd: always pass the payload's cwd explicitly and run coflux from it.
   const located = await askCofluxd(["locate", cwd], cwd);
   if (!located || typeof located.workspaceId !== "string" || !located.workspaceId) return;
   if (!located.moved) {

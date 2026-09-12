@@ -112,24 +112,8 @@ export const config = {
   accountId: "default",
   /** daemon 连接地址，展示在 web「添加设备」命令里；反代/公网部署时用 COFLUX_DAEMON_URL 覆盖 */
   daemonUrl: process.env.COFLUX_DAEMON_URL ?? `ws://127.0.0.1:${int("COFLUX_PORT", DEFAULT_PORT)}/daemon`,
-  /** 中心自身的公网基址（plan 090）：OAuth issuer、PRM/AS 元数据与 `/mcp` 的 resource 全由它拼，
-   *  绝不从请求 Host / X-Forwarded-* 推导（生产前面压着两层反代，头部可伪造且各层不一致）。
-   *  自 plan 107 起，设备授权链接、OAuth 同意页与端口预览门禁三张页面也由 server 直出并挂在它下面
-   *  （`/authorize/<token>`、`/oauth/consent`、`/proxy-auth`）。dev 默认本机监听地址；
-   *  生产设 COFLUX_PUBLIC_URL=https://api.coflux.dev。 */
+  /** 设备授权与端口预览的固定公网基址，不从请求头推导。 */
   publicUrl: PUBLIC_URL,
-  /** 中心 MCP 地址（plan 092）：随每条建会话请求下发给 daemon，supervisor 注入会话 env `COFLUX_MCP_URL`，
-   *  供跑在 coflux 终端里的 agent 告诉用户怎么 `claude mcp add`。与 oauth.ts 的 resource 同源同值。 */
-  mcpUrl: `${PUBLIC_URL}/mcp`,
-  /** MCP OAuth 凭证有效期：access 短期（默认 1 小时），refresh 长期且用过即作废（默认与会话 token 同 30 天）。 */
-  oauthAccessTtlMs: Math.max(60_000, int("COFLUX_OAUTH_ACCESS_TTL_MS", 60 * 60 * 1000)),
-  oauthRefreshTtlMs: Math.max(60_000, int("COFLUX_OAUTH_REFRESH_TTL_MS", int("COFLUX_SESSION_TTL_MS", 30 * 24 * 60 * 60 * 1000))),
-  /** refresh 轮换的复用宽限：同机多个宿主进程共用一份 token 时会拿同一个 refresh 并发去换，
-   *  刚被轮换掉的 refresh 在宽限内再次出现 → 同一 grant 下再签一对新 token、不撤链；超过宽限才当泄露整链撤销。
-   *  设 0 即无宽限（任何复用都整链撤销）。 */
-  oauthRefreshReuseGraceMs: Math.max(0, int("COFLUX_OAUTH_REFRESH_REUSE_GRACE_MS", 60_000)),
-  /** DCR 注册限速（全局固定窗口，窗口同 authRateWindowMs）：Raven 上下文拿不到来源 IP，只能全局兜底。 */
-  oauthRegisterRateLimit: Math.max(1, int("COFLUX_OAUTH_REGISTER_RATE_LIMIT", 30)),
 
   /** 端口转发预览域：Host 形如 `<shortId>-<proxyHost>` 的请求按反代处理（见 plan 006；2026-08-16
    *  从 `.` 分隔挪为 `-` 分隔——预览域落一级子域，CF 橙云 Universal SSL 的 `*.coflux.dev` 才覆盖）。

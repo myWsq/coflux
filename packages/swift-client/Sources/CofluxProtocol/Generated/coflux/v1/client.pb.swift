@@ -443,7 +443,7 @@ public struct Coflux_V1_TaskRemove: Sendable {
 }
 
 /// 读取一个任务（终端）的最后输出（plan 097）：web 激活已退出的 Tab 时回放用。server 复用
-/// agent read 的三层来源（daemon 命令日志 → daemon 当前快照 → 中心 checkpoint），结果只回给发起连接。
+/// agent read 的两层来源（daemon 当前快照 → 中心 checkpoint），结果只回给发起连接。
 /// max_bytes 为 0 取服务端默认；超过上限被钳制。
 public struct Coflux_V1_TaskRead: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
@@ -778,11 +778,25 @@ public struct Coflux_V1_AuthOk: Sendable {
   /// client 建 RTCPeerConnection（发 offer 之前）需要它。
   public var iceServers: [String] = []
 
+  /// 本连接的「登录身份显示串」（plan 110）：password 模式 = 该会话 token 绑定用户的 email，
+  /// local 模式 = COFLUX_USERNAME。客户端拿它显示「我是谁」（桌面版侧栏脚部），不得当主键用。
+  /// optional 是为了把「旧 server 不回」与「回了空串」分开：查不到用户（user_id 为 NULL 的旧
+  /// token、用户已删）就不设本字段，认证照常成功——身份查询永远不是拒绝理由。
+  public var loginName: String {
+    get {_loginName ?? String()}
+    set {_loginName = newValue}
+  }
+  /// Returns true if `loginName` has been explicitly set.
+  public var hasLoginName: Bool {self._loginName != nil}
+  /// Clears the value of `loginName`. Subsequent reads from it will return its default value.
+  public mutating func clearLoginName() {self._loginName = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _clientToken: String? = nil
+  fileprivate var _loginName: String? = nil
 }
 
 public struct Coflux_V1_AuthError: Sendable {
@@ -1195,8 +1209,8 @@ public struct Coflux_V1_OAuthAuthorizeResult: Sendable {
   fileprivate var _error: String? = nil
 }
 
-/// TaskRead 的回应：data 按 source 解释——log 是命令终端的非 tty 纯文本日志尾部（\n 换行）；
-/// snapshot / checkpoint 是规范化 ANSI 屏幕；none 表示没有任何可回放内容（data 为空）。
+/// TaskRead 的回应：data 按 source 解释——snapshot / checkpoint 是规范化 ANSI 屏幕（分别来自 daemon
+/// 当前画面与中心缓存）；none 表示没有任何可回放内容（data 为空）。
 /// status / exit_code 取自回应时刻的 Task 真相；error 非空时其余字段无意义（任务不存在或不属于本账号）。
 public struct Coflux_V1_TaskReadResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
@@ -2816,7 +2830,7 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AuthOk"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}client_token\0\u{3}ice_servers\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}client_token\0\u{3}ice_servers\0\u{3}login_name\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2827,6 +2841,7 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
       case 1: try { try decoder.decodeSingularStringField(value: &self.accountID) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self._clientToken) }()
       case 3: try { try decoder.decodeRepeatedStringField(value: &self.iceServers) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self._loginName) }()
       default: break
       }
     }
@@ -2846,6 +2861,9 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     if !self.iceServers.isEmpty {
       try visitor.visitRepeatedStringField(value: self.iceServers, fieldNumber: 3)
     }
+    try { if let v = self._loginName {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 4)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2853,6 +2871,7 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     if lhs.accountID != rhs.accountID {return false}
     if lhs._clientToken != rhs._clientToken {return false}
     if lhs.iceServers != rhs.iceServers {return false}
+    if lhs._loginName != rhs._loginName {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

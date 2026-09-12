@@ -87,6 +87,7 @@ test("首次登录：lazy 建个人账号并回带会话 token", async () => {
   assert.equal(ok.case, "authOk", "认证成功");
   assert.ok(ok.accountId, "得到 accountId");
   assert.ok(typeof ok.clientToken === "string" && ok.clientToken.startsWith("ck_sess"), "回带 coflux 会话 token");
+  assert.equal(ok.loginName, "first@x.com", "authOk 回带登录身份（plan 110）");
   c.send({ case: "clientSubscribe" });
   const snap = await c.waitFor((m) => m.case === "stateSnapshot", "snapshot");
   assert.equal(snap.daemons.length, 0, "新账号无设备");
@@ -210,6 +211,24 @@ test("两个不同用户账号隔离：互相看不到设备", async () => {
   b.close();
 });
 
+test("authOk 回带登录身份（plan 110）：密码登录与 token 重连两条路径都带归一化后的 email", async () => {
+  // 大小写混写的邮箱：server 归一化成小写存库，两条路径回带的都必须是归一化后的值。
+  createUser("Identity@X.com", "secret-identity");
+
+  const c1 = stack.makeClient();
+  const ok1 = await authWith(c1, { username: "Identity@X.com", password: "secret-identity" });
+  assert.equal(ok1.case, "authOk");
+  assert.equal(ok1.loginName, "identity@x.com", "密码登录路径回带 email（小写归一）");
+  const token = ok1.clientToken;
+  c1.close();
+
+  const c2 = stack.makeClient();
+  const ok2 = await authWith(c2, { clientToken: token });
+  assert.equal(ok2.case, "authOk");
+  assert.equal(ok2.loginName, "identity@x.com", "token 重连路径同样回带 email");
+  c2.close();
+});
+
 test("会话 token 独立性：签发后该用户从 users 表被删，重连仍成立", async () => {
   createUser("reconn@x.com", "secret3");
   const c1 = stack.makeClient();
@@ -226,5 +245,7 @@ test("会话 token 独立性：签发后该用户从 users 表被删，重连仍
   const ok2 = await authWith(c2, { clientToken: token });
   assert.equal(ok2.case, "authOk", "会话 token 重连成功");
   assert.equal(ok2.accountId, ok1.accountId, "重连回到同一账号");
+  // 用户已删 ⇒ 身份查不到：authOk 不设 login_name，但认证照常成功（plan 110）。
+  assert.equal(ok2.loginName, undefined, "查不到用户时不设 login_name，且不因此拒绝认证");
   c2.close();
 });

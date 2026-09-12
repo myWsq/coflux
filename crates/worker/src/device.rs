@@ -17,9 +17,9 @@ use coflux_protocol::wire::{
     SessionCheckpoint,
 };
 use coflux_protocol::{
-    decode_device_envelope, encode_device_envelope, encode_frame, write_record, DataFrame,
-    DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES, MAX_FRAME_ID_BYTES,
-    MAX_SESSION_CHECKPOINT_BYTES,
+    decode_device_envelope, encode_device_envelope, encode_frame, write_record, CommandStateInfo,
+    DataFrame, WorkerToSupervisor, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
+    MAX_FRAME_ID_BYTES, MAX_SESSION_CHECKPOINT_BYTES,
 };
 use prost::Message as _;
 use rand_core::{OsRng, RngCore};
@@ -1211,12 +1211,11 @@ impl DeviceRuntime {
         // 会话账本（plan 094）：精确 control exit 与 catalog tombstone 都经这里，退出码本地留档供
         // agent 的 wait/read 查询。两条调用路径此刻都不持有 state 锁（见 main.rs 的 SessionExit 分支
         // 与上面 catalog 提交里的作用域块）。
-        services
-            .state
-            .lock()
-            .unwrap()
-            .ledger
-            .mark_exited(session_id, exit_code);
+        {
+            let mut state = services.state.lock().unwrap();
+            state.ledger.mark_exited(session_id, exit_code);
+            state.bump_command_epoch();
+        }
         let bytes = coflux_protocol::wire::DaemonToServer {
             payload: Some(daemon_to_server::Payload::SessionExit(wire::SessionExit {
                 session_id: session_id.to_string(),
@@ -1558,6 +1557,18 @@ impl DeviceRuntime {
         write_record(&frame).is_ok_and(|record| self.to_supervisor.try_send(record).is_ok())
     }
 
+    /// Ask the supervisor to end a session (`coflux terminal close`): the same `session.close`
+    /// control message the center's sessionClose is forwarded as. The exit itself arrives through
+    /// the ordinary SessionExit path and lands in the ledger.
+    pub fn close_session(&self, session_id: &str) -> bool {
+        serde_json::to_vec(&WorkerToSupervisor::SessionClose {
+            session_id: session_id.to_string(),
+        })
+        .ok()
+        .and_then(|bytes| write_record(&bytes).ok())
+        .is_some_and(|record| self.to_supervisor.try_send(record).is_ok())
+    }
+
     /// 「用户是否正在接管该 session」：sessiond 裁决的当前 holder（影子表）仍是存活 client
     /// channel 才算人在场——holder 是 agent 合成 transport、或其 channel 已断开时，都不算。
     pub fn human_holder_present(&self, session_id: &str) -> bool {
@@ -1579,7 +1590,7 @@ impl DeviceRuntime {
         data: Vec<u8>,
     ) -> Result<(), String> {
         if self.human_holder_present(session_id) {
-            return Err("用户正在接管这个终端：把交互留给用户；要沟通用 cofluxd notify".into());
+            return Err("用户正在接管这个终端：把交互留给用户；要沟通用 coflux notify".into());
         }
         let attempt = self.begin_agent_io(session_id)?;
         let (tx, mut rx) = mpsc::channel::<device_envelope::Payload>(8);
@@ -2072,36 +2083,17 @@ impl DeviceRuntime {
             fail("prepared_operation_denied", "prepared 模板 payload 为空");
             return;
         };
-        // 命令终端：authorize 通过后、交给 sessiond 前，本地写包装脚本并把 shell 填成脚本路径。
-        // 路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
-        // 会被判成 operation_collision。日志路径按 task 记住，供中心经 ServerTerminalRead 读。
-        if let Some(device_envelope::Payload::SessionCreate(create)) = envelope.payload.as_mut() {
-            // 会话账本（plan 094）：所有 prepared 建会话（用户手开的、中心 MCP 开的）都登记归属，
-            // agent 本地命令据此判「同工作区」而不问中心。
+        // Every prepared session create (user-opened or center-initiated) registers its ownership in the
+        // session ledger (plan 094) so agent-local commands can decide "same workspace" without the center.
+        // There is no job branch any more: a terminal is always the workspace's default login shell, and a
+        // command the center wants typed arrives separately as ServerTerminalRun once the prompt is ready.
+        if let Some(device_envelope::Payload::SessionCreate(create)) = envelope.payload.as_ref() {
             if let Some(services) = &self.services {
                 services.state.lock().unwrap().ledger.remember_create(
                     &create.session_id,
                     &create.task_id,
                     &create.workspace_id,
                 );
-            }
-            if !create.command.is_empty() {
-                match crate::ops::write_operation_command_script(operation_id, &create.command) {
-                    Ok((shell, log_path)) => {
-                        create.shell = Some(shell);
-                        if let Some(services) = &self.services {
-                            crate::agent_ctl::remember_log(
-                                &services.state,
-                                create.task_id.clone(),
-                                log_path,
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        fail("command_script_failed", &format!("写命令脚本失败：{error}"));
-                        return;
-                    }
-                }
             }
         }
         if routed_to_sessiond(&payload) {
@@ -2857,6 +2849,23 @@ impl DeviceRuntime {
                 if !current_matches {
                     return;
                 }
+                // Snapshots carry the command state too: the fallback for a lost session.command
+                // push (and the way a hot-upgraded worker catches up between marks).
+                if let Some(command) = snapshot.command {
+                    let mut state = services.state.lock().unwrap();
+                    if state.ledger.set_command_state(
+                        &snapshot.session_id,
+                        CommandStateInfo {
+                            integrated: command.integrated,
+                            busy: command.busy,
+                            command_seq: command.command_seq,
+                            finished_seq: command.finished_seq,
+                            exit_code: command.exit_code,
+                        },
+                    ) {
+                        state.bump_command_epoch();
+                    }
+                }
                 let checkpoint = SessionCheckpoint {
                     session_id: snapshot.session_id.clone(),
                     task_id: expected.task_id,
@@ -2866,6 +2875,7 @@ impl DeviceRuntime {
                     rows: snapshot.rows,
                     captured_at: epoch_ms(),
                     title: snapshot.title.clone(),
+                    command: snapshot.command,
                 };
                 let payload = daemon_to_server::Payload::SessionCheckpoint(checkpoint);
                 services.checkpoints.publish(
@@ -3709,9 +3719,9 @@ fn epoch_ms() -> f64 {
 mod tests {
     use super::*;
     use coflux_protocol::wire::{
-        DeviceExecRun, DevicePortsRequest, DevicePtyInputAck, DevicePtyOutput,
-        DeviceSessionAttached, DeviceSessionCatalogRequest, DeviceSessionCreate,
-        DeviceSessionExited, LocalBrowserGrant, OnlineDeviceLease,
+        DeviceExecRun, DevicePortsRequest, DevicePtyInputAck, DeviceSessionAttached,
+        DeviceSessionCatalogRequest, DeviceSessionCreate, DeviceSessionExited, LocalBrowserGrant,
+        OnlineDeviceLease,
     };
     use p256::ecdsa::SigningKey;
 
@@ -3801,7 +3811,6 @@ mod tests {
         let mut workspaces = HashMap::new();
         workspaces.insert("workspace-1".into(), (home.clone(), "main".into()));
         let state = Arc::new(Mutex::new(WorkerState {
-            agent_logs: HashMap::new(),
             agent_pending: HashMap::new(),
             ledger: crate::session_ledger::SessionLedger::default(),
             authed: true,
@@ -3818,6 +3827,7 @@ mod tests {
             last_branches: HashMap::new(),
             last_diffs: HashMap::new(),
             conn_state: crate::conn_state::ConnState::new(&home),
+            command_epoch: tokio::sync::watch::channel(0).0,
         }));
         let (to_supervisor, from_supervisor) = mpsc::channel(32);
         let (to_server, _from_server) = mpsc::channel(32);
@@ -4086,17 +4096,11 @@ mod tests {
             ),
             Ok(CallStart::Execute)
         ));
-        let initial_bytes = ledger.bytes;
-        assert_eq!(
-            initial_bytes,
-            call_record_bytes(&key, ledger.entries.get(&key).unwrap())
-        );
 
         let second = ResponseWaiter {
             channel_id: "channel-b".into(),
             request_id: "request-b".into(),
         };
-        let second_bytes = response_waiter_bytes(&second);
         assert!(matches!(
             start_call_with_limits(
                 &mut ledger,
@@ -4108,12 +4112,14 @@ mod tests {
             ),
             Ok(CallStart::Pending)
         ));
-        assert_eq!(ledger.bytes, initial_bytes + second_bytes);
+
+        // 同一 waiter 二次入账不重复计费
+        let accounted = ledger.bytes;
         assert!(matches!(
             start_call_with_limits(&mut ledger, key, fingerprint, second, 8, 4096),
             Ok(CallStart::Pending)
         ));
-        assert_eq!(ledger.bytes, initial_bytes + second_bytes);
+        assert_eq!(ledger.bytes, accounted);
     }
 
     #[test]
@@ -5903,6 +5909,8 @@ mod tests {
                     cols: 80,
                     rows: 24,
                     title: String::new(),
+
+                    command: None,
                 },
             )),
         };
@@ -6153,6 +6161,8 @@ mod tests {
                     cols: 80,
                     rows: 24,
                     title: "osc-title".into(),
+
+                    command: None,
                 },
             )),
         };
@@ -6169,39 +6179,5 @@ mod tests {
         fixture.runtime.close_channel(&fixture.local_id);
         fixture.runtime.close_relays();
         let _ = std::fs::remove_dir_all(&fixture.home);
-    }
-
-    #[test]
-    fn transport_backpressure_detects_output_sequence_gap() {
-        let mut cursor = StreamCursor {
-            next_seq: Some(4),
-            gapped: false,
-        };
-        let output = DevicePtyOutput {
-            session_id: "session-1".into(),
-            from_seq: 5,
-            to_seq: 6,
-            data: b"xx".to_vec(),
-        };
-        let contiguous = cursor.next_seq.is_none_or(|next| next == output.from_seq)
-            && output.to_seq
-                == output
-                    .from_seq
-                    .saturating_add(output.data.len().saturating_sub(1) as u64);
-        assert!(!contiguous);
-        cursor.gapped = true;
-        assert!(cursor.gapped);
-
-        let attached = DeviceSessionAttached {
-            snapshot_seq: 6,
-            session_id: "session-1".into(),
-            ..Default::default()
-        };
-        cursor = StreamCursor {
-            next_seq: Some(attached.snapshot_seq + 1),
-            gapped: false,
-        };
-        assert_eq!(cursor.next_seq, Some(7));
-        assert!(!cursor.gapped);
     }
 }

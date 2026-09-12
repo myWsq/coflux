@@ -5,7 +5,7 @@
  * （含 agent 名与 session/task 归属）；进程退出 → presence 清空；纯 shell 绝不误报；
  * 新订阅的客户端（页面刷新路径）订阅即拿到当前全量补发，无需等下一次变化。
  *
- * hook 化后的回合状态：`cofluxd hook` 信使在会话进程树内 POST /hook → worker 用 pid
+ * hook 化后的回合状态：`coflux hook` 信使在会话进程树内 POST /hook → worker 用 pid
  * 反查归属 session → presence 条目携带 state（waiting/active）立即广播；树外 pid 被拒。
  */
 import { test, before, after } from "node:test";
@@ -20,7 +20,7 @@ import { startStack } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
 
 const PORT = 8856;
-const COFLUXD = fileURLToPath(new URL("../../packages/cli/cofluxd.mjs", import.meta.url));
+const COFLUXD = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
 let stack;
 const dirs = [];
 

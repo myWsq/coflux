@@ -5,7 +5,7 @@
  * 重试定时器、等待安装确认的 client，以及 daemon 重连后的恢复投递。业务结果如何落库、
  * 如何广播仍由 Hub 的收敛事务负责，避免把 transport 生命周期和领域副作用揉成一个对象。
  *
- * plan 091 起中心自己也能做发起方（MCP 写 tools）：记录 metadata 带 `initiator: "server"`，
+ * plan 091 起中心自己也能做发起方（账号 CLI）：记录 metadata 带 `initiator: "server"`，
  * 安装确认后不是把帧交给 client，而是由中心经控制 WS 下发 PreparedDeviceOperationExecute；
  * server 重启后 restore 重装模板→daemon 再次 installed→再次 Execute（worker 侧幂等）。
  * 超时/取消对 server 发起的记录经 host.failServerOperation 唤醒 Hub 的完成原语，而不是

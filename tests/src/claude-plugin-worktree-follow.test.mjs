@@ -1,18 +1,18 @@
 /**
  * plan 104：Claude 插件的 worktree 跟随脚本（integrations/claude-plugin/scripts/worktree-follow.mjs）。
- * 纯单元，不起栈：子进程跑脚本，喂 env + stdin JSON，PATH 上只放一个**假 cofluxd**，看 stdout。
+ * 纯单元，不起栈：子进程跑脚本，喂 env + stdin JSON，PATH 上只放一个**假 coflux**，看 stdout。
  *
  * 契约：
- * - PostToolUse + tool_name ∈ {EnterWorktree, ExitWorktree} → 用**载荷里的 cwd** 调 `cofluxd workspace locate <cwd>`；
+ * - PostToolUse + tool_name ∈ {EnterWorktree, ExitWorktree} → 用**载荷里的 cwd** 调 `coflux workspace locate <cwd>`；
  *   归属真的搬了（moved=true）→ stdout 是一段纯 JSON 的 PostToolUse 决策，additionalContext 里带新坐标；
- * - WorktreeRemove → 用载荷里的 worktree_path 调 `cofluxd workspace forget <path>`，stdout 零字节；
+ * - WorktreeRemove → 用载荷里的 worktree_path 调 `coflux workspace forget <path>`，stdout 零字节；
  *   载荷里的 cwd 已经被删掉（那正是刚被清理的 worktree）时照样调得出去——路径永远走参数，子进程的
  *   工作目录只挑一个还在的；cwd 不存在就把 forget 吞掉，正好漏掉这个 hook 唯一要干的事；
  * - 其它一切情形 → 零字节 stdout、退出 0：没搬（同工作区）、不在 coflux 里、stdin 非 JSON、事件/工具不对、
- *   cofluxd 缺失 / 返回非零（含旧 daemon 的「未知 action」）/ 输出不是 JSON。绝不干扰 agent。
+ *   coflux 缺失 / 返回非零（含旧 daemon 的「未知 action」）/ 输出不是 JSON。绝不干扰 agent。
  *
- * 夹具纪律（plan 098 的返修教训）：假 cofluxd 单独一个目录、PATH 只含它——否则测试会打到真 daemon，
- * 真的把用户某个终端的归属搬走、甚至删掉一个工作区记录。假 cofluxd 顺手把自己的 cwd 与参数写进 marker，
+ * 夹具纪律（plan 098 的返修教训）：假 coflux 单独一个目录、PATH 只含它——否则测试会打到真 daemon，
+ * 真的把用户某个终端的归属搬走、甚至删掉一个工作区记录。假 coflux 顺手把自己的 cwd 与参数写进 marker，
  * 用来证明脚本是按载荷里的 cwd 调它，而不是脚本自己的 process.cwd()。
  */
 import { test, before, after } from "node:test";
@@ -28,11 +28,11 @@ const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const PLUGIN = `${ROOT}integrations/claude-plugin/`;
 const SCRIPT = `${PLUGIN}scripts/worktree-follow.mjs`;
 
-/** 假 cofluxd 的**唯一**所在目录；测试里 PATH 就是它 */
+/** 假 coflux 的**唯一**所在目录；测试里 PATH 就是它 */
 let fakeDir;
 /** 载荷里的 cwd：与脚本自己的 cwd（ROOT）刻意不同 */
 let workDir;
-/** 假 cofluxd 把「被调用时的 cwd」与「收到的参数」写在这里 */
+/** 假 coflux 把「被调用时的 cwd」与「收到的参数」写在这里 */
 let marker;
 
 const MOVED = JSON.stringify({
@@ -56,7 +56,7 @@ before(async () => {
   fakeDir = await mkdtemp(join(tmpdir(), "coflux-follow-bin-"));
   workDir = await mkdtemp(join(tmpdir(), "coflux-follow-cwd-"));
   marker = join(fakeDir, "called.txt");
-  const fake = join(fakeDir, "cofluxd");
+  const fake = join(fakeDir, "coflux");
   await writeFile(
     fake,
     [
@@ -129,7 +129,7 @@ test("EnterWorktree 搬了归属：用载荷里的 cwd 调 `workspace locate`，
   assert.equal(
     realpathSync(calledFrom),
     realpathSync(workDir),
-    "必须用载荷里的 cwd 调 cofluxd，而不是脚本自己的 process.cwd()",
+    "必须用载荷里的 cwd 调 coflux，而不是脚本自己的 process.cwd()",
   );
   assert.equal(args, `workspace locate ${workDir}`, "路径也要显式传，不能指望子进程 cwd");
 
@@ -184,7 +184,7 @@ test("WorktreeRemove：用载荷里的 worktree_path 调 `workspace forget`，st
   assert.equal(stderr, "");
   const { cwd: calledFrom, args } = await called();
   assert.equal(args, `workspace forget ${removed}`, "要传被删掉的 worktree 路径，而不是 cwd");
-  assert.equal(realpathSync(calledFrom), realpathSync(workDir), "仍从载荷里的 cwd 调 cofluxd");
+  assert.equal(realpathSync(calledFrom), realpathSync(workDir), "仍从载荷里的 cwd 调 coflux");
 });
 
 test("载荷里的 cwd 已被删掉：forget 照样发得出去（从一个还在的目录起子进程）", async () => {
@@ -220,7 +220,7 @@ test("PostToolUse 的 cwd 已被删掉：明说不去定位（不存在的目录
   assert.equal(existsSync(marker), false, "不存在的 cwd 连子进程都不该起");
 });
 
-test("WorktreeRemove 缺 worktree_path：零字节，且根本不去调 cofluxd", async () => {
+test("WorktreeRemove 缺 worktree_path：零字节，且根本不去调 coflux", async () => {
   await rm(marker, { force: true });
   for (const payload of [
     { hook_event_name: "WorktreeRemove", session_id: "s-1", cwd: workDir },
@@ -234,7 +234,7 @@ test("WorktreeRemove 缺 worktree_path：零字节，且根本不去调 cofluxd"
   assert.equal(existsSync(marker), false, "没有路径就不该起子进程");
 });
 
-test("不相干的事件与工具：零字节，且不去调 cofluxd", async () => {
+test("不相干的事件与工具：零字节，且不去调 coflux", async () => {
   await rm(marker, { force: true });
   for (const [label, payload] of [
     ["别的工具", postToolUse("Bash", workDir)],
@@ -251,7 +251,7 @@ test("不相干的事件与工具：零字节，且不去调 cofluxd", async () 
   assert.equal(existsSync(marker), false, "这些情形连子进程都不该起");
 });
 
-test("不在 coflux 里：没有 COFLUX_WORKSPACE_ID → 零字节，且根本不去调 cofluxd", async () => {
+test("不在 coflux 里：没有 COFLUX_WORKSPACE_ID → 零字节，且根本不去调 coflux", async () => {
   await rm(marker, { force: true });
   for (const [label, env] of [
     ["无任何 COFLUX_* 变量", { FAKE_OUTPUT: MOVED }],
@@ -277,13 +277,13 @@ test("载荷坏了：非 JSON、空 stdin 都零字节", async () => {
   }
 });
 
-test("cofluxd 不在 / 失败 / 旧 daemon / 输出不是 JSON：一律零字节、退出 0，绝不干扰 agent", async () => {
+test("coflux 不在 / 失败 / 旧 daemon / 输出不是 JSON：一律零字节、退出 0，绝不干扰 agent", async () => {
   for (const [label, env] of [
-    ["cofluxd 不在 PATH 上", { PATH: join(fakeDir, "empty"), COFLUX_WORKSPACE_ID: "ws-main", FAKE_OUTPUT: MOVED }],
+    ["coflux 不在 PATH 上", { PATH: join(fakeDir, "empty"), COFLUX_WORKSPACE_ID: "ws-main", FAKE_OUTPUT: MOVED }],
     ["中心拒绝（别的仓库 / 非 git / 目录工作区）", { COFLUX_WORKSPACE_ID: "ws-main", FAKE_FAIL: "1", FAKE_OUTPUT: "✗ 目标 worktree 属于另一个 git 仓库" }],
     ["daemon 旧到不认识该动作", { COFLUX_WORKSPACE_ID: "ws-main", FAKE_FAIL: "1", FAKE_OUTPUT: "✗ 未知 action workspace.locate" }],
-    ["cofluxd 输出不是 JSON", { COFLUX_WORKSPACE_ID: "ws-main", FAKE_OUTPUT: "daemon 没在跑" }],
-    ["cofluxd 回的 workspaceId 为空", { COFLUX_WORKSPACE_ID: "ws-main", FAKE_OUTPUT: JSON.stringify({ workspaceId: "", moved: true }) }],
+    ["coflux 输出不是 JSON", { COFLUX_WORKSPACE_ID: "ws-main", FAKE_OUTPUT: "daemon 没在跑" }],
+    ["coflux 回的 workspaceId 为空", { COFLUX_WORKSPACE_ID: "ws-main", FAKE_OUTPUT: JSON.stringify({ workspaceId: "", moved: true }) }],
   ]) {
     const { code, stdout } = await run({ stdin: postToolUse("EnterWorktree", workDir), env });
     assert.equal(code, 0, label);
@@ -295,7 +295,7 @@ test("插件配置：PostToolUse 里信使在前、跟随脚本 matcher=EnterWor
   const hooks = JSON.parse(readFileSync(`${PLUGIN}hooks/hooks.json`, "utf8"));
   const post = hooks.hooks.PostToolUse;
   assert.ok(Array.isArray(post) && post.length === 2, "PostToolUse 两条：信使 + 跟随脚本");
-  assert.match(post[0].hooks[0].command, /cofluxd hook claude/, "信使必须仍是第一条（既有用例按 find 取它）");
+  assert.match(post[0].hooks[0].command, /coflux hook claude/, "信使必须仍是第一条（既有用例按 find 取它）");
   assert.equal(post[0].matcher, undefined);
   const follow = post[1];
   assert.equal(follow.matcher, "EnterWorktree|ExitWorktree", "只在这两个工具上触发；Codex 没有它们，天然零影响");
@@ -314,13 +314,13 @@ test("插件配置：PostToolUse 里信使在前、跟随脚本 matcher=EnterWor
   assert.ok(major > 0 || minor >= 10, `插件版本必须 ≥ 0.10.0: ${manifest.version}`);
 });
 
-test("SKILL 唯一源与插件副本都讲清「进 worktree coflux 会跟随、删仍走 remove_workspace」", () => {
+test("SKILL 唯一源与插件副本都讲清「进 worktree coflux 会跟随、删除走账号 CLI」", () => {
   for (const path of [`${PLUGIN}skills/coflux/SKILL.md`, `${ROOT}packages/cli/skills/coflux/SKILL.md`]) {
     const skill = readFileSync(path, "utf8");
     assert.match(skill, /EnterWorktree/, `${path} 要说明 EnterWorktree 会让 coflux 跟随`);
     assert.match(skill, /follows you into a git worktree/i, `${path} 要有「coflux 跟随进 worktree」这一节`);
-    assert.match(skill, /remove_workspace/, `${path} 要把删工作区引导到 remove_workspace`);
-    assert.match(skill, /cofluxd workspace/, `${path} 要写 cofluxd workspace 的用法`);
+    assert.match(skill, /coflux workspace remove/, `${path} 要把删工作区引导到 coflux workspace remove`);
+    assert.match(skill, /coflux workspace/, `${path} 要写 coflux workspace 的用法`);
     assert.doesNotMatch(
       skill,
       /Never run `git worktree add` yourself/,

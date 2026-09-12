@@ -18,17 +18,28 @@ use coflux_protocol::wire::{
     DevicePtyInput, DevicePtyInputAck, DevicePtyOutput, DevicePtyResize, DeviceSessionAttach,
     DeviceSessionAttached, DeviceSessionCatalog, DeviceSessionCatalogRequest, DeviceSessionCreate,
     DeviceSessionExitTombstone, DeviceSessionExited, DeviceSessionInfo, DeviceSessionSnapshot,
-    DeviceSessionSnapshotRequest, DeviceSessionStop,
+    DeviceSessionSnapshotRequest, DeviceSessionStop, TerminalCommandState,
 };
 use coflux_protocol::{
-    decode_device_envelope, encode_device_envelope, encode_frame, write_record, DataFrame,
-    SessionInfo, SupervisorToWorker, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
+    decode_device_envelope, encode_device_envelope, encode_frame, write_record, CommandStateInfo,
+    DataFrame, SessionInfo, SupervisorToWorker, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
     MAX_FRAME_ID_BYTES, MAX_TERMINAL_DIMENSION, MIN_TERMINAL_DIMENSION,
 };
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use rand_core::{OsRng, RngCore};
 
 use crate::sessiond::{ControlError, InputAdmission, SequencedDecision, SessionState};
+use crate::shell_integration;
+
+/// 把 `segment` 放到 PATH 首段（plan 112）：原 PATH 为空/缺失时就只有这一段；其余段顺序不变；
+/// 原本已含该段（不论在哪个位置）则去重后仍只出现一次、在首位。空段（`::`）照原样保留。
+pub fn prepend_path_segment(segment: &str, current: Option<&str>) -> String {
+    let mut parts = vec![segment];
+    if let Some(rest) = current.filter(|path| !path.is_empty()) {
+        parts.extend(rest.split(':').filter(|part| *part != segment));
+    }
+    parts.join(":")
+}
 
 const OPERATION_LEDGER_LIMIT: usize = 4096;
 /// create/stop ledger 除条数外还必须按实际持有的字符串容量计费；典型记录仅数百字节，4 MiB
@@ -54,6 +65,22 @@ const CATALOG_LEASE_LIMIT: usize = 1024;
 /// 未 ACK exit fact 不能随中心断线无界增长。超过窗口时只丢最旧精确退出码；下一次完整
 /// catalog 的“live 缺席”仍会把中心 task 收敛为 EXITED，因此不会留下永久僵尸。
 /// 会话归属 id（plan 092）：中心随建会话请求带下来，supervisor 在 [`Sessions::create_session`] 里组装成
+/// Environment variable through which the supervisor hands the per-session mark secret to the
+/// shell. coflux's own rc copies it into a shell-scoped variable and unsets it before anything
+/// else runs, so nested and remote shells never carry it (see `shell/*`).
+pub const TERMINAL_SECRET_ENV: &str = "COFLUX_TERMINAL_SECRET";
+
+/// `wire::TerminalCommandState` view of the sessiond command state.
+fn wire_command_state(state: CommandStateInfo) -> TerminalCommandState {
+    TerminalCommandState {
+        integrated: state.integrated,
+        busy: state.busy,
+        command_seq: state.command_seq,
+        finished_seq: state.finished_seq,
+        exit_code: state.exit_code,
+    }
+}
+
 /// `COFLUX_*` 环境变量注入 PTY，让跑在里面的 agent 读环境变量就知道自己在哪台设备/项目/工作区/终端。
 /// 变量名与组装只在 supervisor 一处，中心与 worker 只下发 id，不下发任意 env map。
 /// 缺失（旧中心 / 旧 worker）为空串：对应变量仍然存在、值为空；`session_id` / `task_id` supervisor 自己知道，
@@ -818,6 +845,17 @@ impl Sessions {
             command.env(key, value);
         }
         command.env("TERM", "xterm-256color");
+        command.env("COFLUX_HOME", &self.home);
+        // plan 112：`<COFLUX_HOME>/bin` 前置进 PATH 首段——agent 与 Claude 插件 hook 在 coflux 终端里零安装
+        // 命中 app 内置的 Rust 版 coflux（用户自己的终端不受影响，不改用户 shell 配置）。必须写在拷贝
+        // std::env 之后，否则被 supervisor 自身的 PATH 覆盖回去。所有平台都做。
+        command.env(
+            "PATH",
+            prepend_path_segment(
+                &format!("{}/bin", self.home),
+                std::env::var("PATH").ok().as_deref(),
+            ),
+        );
         // plan 092：会话归属 id 以 COFLUX_* 注入，必须写在拷贝 std::env 之后（覆盖语义，supervisor 自身
         // 环境里的同名变量不能盖掉它）。六个变量总是存在：中心没下发的为空串，session/task id 本地必有。
         // 变量名是 agent 面向的契约（写进 SKILL.md），只能加不能改。
@@ -826,7 +864,27 @@ impl Sessions {
         command.env("COFLUX_WORKSPACE_ID", &context.workspace_id);
         command.env("COFLUX_TASK_ID", &task_id);
         command.env("COFLUX_SESSION_ID", &session_id);
-        command.env("COFLUX_MCP_URL", &context.mcp_url);
+        command.env_remove("COFLUX_MCP_URL");
+        // plan 115：shell 集成——按 shell 的 basename 分派，给 shell 塞一段我们自己的 rc，由它在用户 rc
+        // 全部跑完之后定义 claude 函数，把 COFLUX_CLAUDE_PLUGIN_DIR 翻译成 `claude --plugin-dir <dir>`。
+        // ZDOTDIR / XDG_DATA_DIRS 是覆盖语义，与上面两段同理必须写在拷贝 std::env 之后（用户原来的
+        // ZDOTDIR 由 plan() 从 supervisor 自身环境里读出来，交给 rc 转发）。认不出的 shell（如 /bin/sh
+        // 或黑盒用例里的包装脚本）不注入，行为与今天逐字相同。
+        // Shell-integration marks (interactive-only terminal model): only an instrumented shell gets
+        // the per-session secret; sessiond accepts OSC 133 marks solely when they present it.
+        let mut mark_secret = String::new();
+        if let Some(injection) =
+            shell_integration::plan(&shell, &self.home, |key| std::env::var(key).ok())
+        {
+            for (key, value) in injection.envs {
+                command.env(key, value);
+            }
+            command.args(injection.args);
+            let mut raw = [0u8; 16];
+            OsRng.fill_bytes(&mut raw);
+            mark_secret = hex::encode(raw);
+            command.env(TERMINAL_SECRET_ENV, &mark_secret);
+        }
         let mut child = pair
             .slave
             .spawn_command(command)
@@ -871,7 +929,8 @@ impl Sessions {
                 cwd,
                 pid,
                 started_at: now_ms(),
-                state: SessionState::new(rows, cols, self.history_line_limit),
+                state: SessionState::new(rows, cols, self.history_line_limit)
+                    .with_mark_secret(mark_secret),
             }));
             map.insert(session_id.clone(), session.clone());
             self.bump_snapshot_epoch();
@@ -1025,6 +1084,16 @@ impl Sessions {
                         let mut locked = session.lock().unwrap();
                         let pending = locked.state.feed(chunk);
 
+                        // A coflux mark moved the command state: push it so the worker's `wait`
+                        // and do-script wake immediately (snapshots carry the same state as a
+                        // fallback). Best effort — a dropped push is repaired by the next snapshot.
+                        if let Some(state) = locked.state.take_command_change() {
+                            let _ = this.send_ctrl(&SupervisorToWorker::SessionCommand {
+                                session_id: session_id.clone(),
+                                state,
+                            });
+                        }
+
                         // 只通知 worker 该 session 的派生 checkpoint 已脏；PTY 原始字节不离开
                         // supervisor/sessiond。保留旧 output frame 编号便于跨版本 worker 忽略 payload。
                         let dirty = match encode_frame(&DataFrame::Output {
@@ -1169,6 +1238,7 @@ impl Sessions {
                     session_id,
                     task_id: locked.task_id.clone(),
                     pid: locked.pid,
+                    command: Some(locked.state.command_state()),
                 }
             })
             .collect();
@@ -1550,6 +1620,7 @@ impl Sessions {
                 cols: u32::from(locked.state.cols()),
                 rows: u32::from(locked.state.rows()),
                 title: locked.state.title().to_string(),
+                command: Some(wire_command_state(locked.state.command_state())),
             }),
         );
     }
@@ -1829,6 +1900,24 @@ impl Sessions {
         self.outbound.disconnect(generation);
     }
 
+    /// 桌面退出确认直接读取本机事实，不依赖网络中的任务快照。
+    pub fn desktop_sessions(&self) -> Vec<serde_json::Value> {
+        let handles: Vec<_> = self
+            .map
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, session)| (id.clone(), session.clone()))
+            .collect();
+        handles
+            .into_iter()
+            .map(|(id, session)| {
+                let session = session.lock().unwrap();
+                serde_json::json!({"id":id,"taskId":session.task_id,"pid":session.pid})
+            })
+            .collect()
+    }
+
     pub fn shutdown(&self) {
         let sessions: Vec<SessionHandle> = self.map.lock().unwrap().values().cloned().collect();
         for session in sessions {
@@ -1866,6 +1955,35 @@ fn request_id_of(payload: &device_envelope::Payload) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepend_path_segment_handles_empty_existing_and_multi_segment_paths() {
+        // 空 / 缺失：只有这一段
+        assert_eq!(
+            prepend_path_segment("/h/.coflux/bin", None),
+            "/h/.coflux/bin"
+        );
+        assert_eq!(
+            prepend_path_segment("/h/.coflux/bin", Some("")),
+            "/h/.coflux/bin"
+        );
+        // 多段：前置，其余顺序不变
+        assert_eq!(
+            prepend_path_segment("/h/.coflux/bin", Some("/usr/local/bin:/usr/bin:/bin")),
+            "/h/.coflux/bin:/usr/local/bin:/usr/bin:/bin"
+        );
+        // 已含该段（中间 / 首位）：去重后仍只出现一次且在首位
+        assert_eq!(
+            prepend_path_segment("/h/.coflux/bin", Some("/usr/bin:/h/.coflux/bin:/bin")),
+            "/h/.coflux/bin:/usr/bin:/bin"
+        );
+        assert_eq!(
+            prepend_path_segment("/h/.coflux/bin", Some("/h/.coflux/bin:/usr/bin")),
+            "/h/.coflux/bin:/usr/bin"
+        );
+        // 空段照原样保留（PATH 里的空段有"当前目录"语义，不替用户清理）
+        assert_eq!(prepend_path_segment("/x", Some("/a::/b")), "/x:/a::/b");
+    }
 
     fn exit_tombstone(index: usize, padding: usize) -> DeviceSessionExitTombstone {
         DeviceSessionExitTombstone {

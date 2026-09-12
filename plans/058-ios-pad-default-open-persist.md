@@ -1,4 +1,4 @@
-# Plan 058: iOS 控制板默认展开 + 每工作区持久化 + 浮键列序修正（复议 053/057）
+# Plan 058: Expand pad by default, remember per workspace, stabilize floating controls—revisiting 053/057
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -19,81 +19,56 @@
 
 ## Requirement
 
-现状：进入任务台控制板默认折叠成气泡（`inputCollapsed = true`，2026-07-26
-定案「阅读优先」）。用户真机复议（2026-07-28）：默认展开更好用；且展开/
-收起状态应**按工作区**本地持久化——退出工作区再进入，恢复上次离开时的
-状态；从无记录的工作区（纯新）默认展开。
+The workbench currently starts collapsed (inputCollapsed=true), based on the 2026-07-26 reading-first decision. Device feedback on 2026-07-28 reverses that: expand by default and remember expanded/collapsed state locally **per workspace** across reentry. Previously unseen workspaces start expanded.
 
-完成后为真：首次进入任一工作区控制板展开；用户收起后退出再进，该工作区
-保持收起；另一个没动过的工作区仍默认展开。持久化只在本机（UserDefaults
-级别），不跨设备同步。
+After collapse/leave/return, that workspace stays collapsed; another untouched workspace still expands. UserDefaults only, no cross-device sync.
 
-附带复议 057 浮键列序（同日真机反馈）：滚到底键是瞬态键，放列中间浮现/
-消失会把新建键顶来顶去。改为列顶：滚到底（浮现，列向上生长）→ 新建 →
-键盘（守底），两个常驻键位置恒定不被撑动。
+The same feedback revises 057 order: a transient middle scroll-to-bottom button moves New when appearing. Put it at top so the bottom-aligned column grows upward: conditional bottom shortcut→New→keyboard. Persistent controls stay fixed.
 
 ## Decisions & tradeoffs
 
-- **默认值 = 展开**：复议并推翻 2026-07-26「默认折叠」定案。Based on:
-  `apps/ios/Coflux/Views/WorkspaceDetailView.swift:16`（`@State private var
-  inputCollapsed = true` 及注释）。
-- **持久化粒度 = 工作区**：UserDefaults，key 含 `workspace.id`。Rejected:
-  按任务粒度——任务生灭频繁、状态碎片化，用户口径也是「项目」；Rejected:
-  全局单值——用户明确要按项目记忆。
-- **UserDefaults.bool 缺省即语义**（decided while planning）：`bool(forKey:)`
-  无记录返回 false，恰好 = 展开（collapsed=false），无需 object/nil 三态
-  判断。Rejected: 存「expanded」正字段——缺省 false 会变成默认折叠，还得
-  绕一层取反。
-- **瞬态键置列顶**：滚到底键排最上，浮键列 bottom 对齐时向上生长，常驻键
-  （新建/键盘）零位移。Rejected: 保持 057 的居中位——浮现即顶动新建键，
-  用户明确不接受。Based on: `WorkspaceDetailView.swift` 浮键列 VStack
-  （057 序：新建→滚到底→键盘）。
-- **初值在 init 播种**（decided while planning）：自定义 init 里
-  `State(initialValue:)` 读回，不用 onAppear 赋值——onAppear 在首帧后翻转
-  会引发可见跳变 + 一次多余 resize（终端行列随面板高度变，SIGWINCH 无谓
-  抖动）。Based on: `WorkspaceDetailView.swift:31`（terminalLift 由
-  inputCollapsed 派生，直接驱动终端 offset 与面板渲染）。
+- **Default expanded**, explicitly reversing prior decision. Source WorkspaceDetailView.swift:16's inputCollapsed=true/comment.
+- **Per-workspace UserDefaults key includes workspace.id**. Per-task state fragments across frequent creation/removal; one global value contradicts user-requested per-project memory.
+- **Store collapsed Boolean**. bool(forKey:) defaults false, naturally expanded, without optional/three-state logic. Storing expanded would make missing false mean collapsed and require inversion.
+- **Transient shortcut first**, so bottom alignment grows upward without moving New/keyboard. User rejected 057's middle position.
+- **Seed State(initialValue:) in custom init**, not onAppear. Post-first-frame assignment causes visible jump and unnecessary terminal resize/SIGWINCH. terminalLift at :31 derives directly from inputCollapsed.
 
 ## Direction
 
-### Milestone 1: 默认展开 + 按工作区记忆
+### Milestone 1: Expanded default and workspace memory
 
-进入工作区时 inputCollapsed 从 UserDefaults（key 含 workspace.id）播种，
-变更时写回；`:16` 旧注释同步为新定案。
-Validation: 构建 exit 0。
+Initialize inputCollapsed from workspace-keyed UserDefaults, write on change, and update old :16 comment. Apply stable column ordering. Build passes.
 
 ## Scope
 
-In scope:
-- `apps/ios/Coflux/Views/WorkspaceDetailView.swift`
+In scope: Views/WorkspaceDetailView.swift.
 
-Out of scope:
-- 跨设备同步（iCloud KVS）— 自用单机，YAGNI
-- 成文层草稿持久化 — 未提出，不顺手加
+Out of scope: iCloud KVS/cross-device sync; composer-draft persistence, not requested.
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| 构建 | `xcodebuild -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0' build CODE_SIGNING_ALLOWED=NO` | BUILD SUCCEEDED |
-| 真机验收 (acceptance) | 新工作区进入即展开；收起→退出→再进保持收起；另一工作区不受影响；杀 app 重启后记忆仍在 | 用户人工确认 |
+| Build | `xcodebuild -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0' build CODE_SIGNING_ALLOWED=NO` | BUILD SUCCEEDED |
+| Device acceptance | Fresh workspace expands; collapse/leave/return retains state; other workspace unaffected; app restart retains memory | User confirmation |
 
 ## Done criteria
 
-- [ ] 构建通过。
-- [ ] 默认展开；状态按工作区持久化并在重进/重启后恢复。
-- [ ] 浮键列序：滚到底（顶，浮现）→ 新建 → 键盘；浮现不位移常驻键。
+- [ ] The build passes.
+- [ ] The pad defaults to expanded; state persists per workspace and restores on reentry/restart.
+- [ ] Floating controls run top to bottom: conditional Scroll to Bottom → New → Keyboard. Showing the conditional control does not move persistent controls.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
 - [ ] `plans/README.md` status is updated.
 
 ## STOP conditions
 
-- A fact cited under Decisions & tradeoffs no longer holds.
-- The outcome requires out-of-scope files.
-- A validation command fails twice after one reasonable fix.
+- Cited facts change, excluded changes required, or validation fails twice after one reasonable fix.
 
 ## Maintenance notes
 
-- key 前缀 `terminalPadCollapsed.`；工作区删除后残留的 UserDefaults 条目
-  体积可忽略，不做清理（YAGNI）。
+- Prefix terminalPadCollapsed. Remaining keys after workspace removal are negligible; no cleanup needed.
+
+### Original source references
+
+`apps/ios/Coflux/Views/WorkspaceDetailView.swift:16`, `WorkspaceDetailView.swift:31`.

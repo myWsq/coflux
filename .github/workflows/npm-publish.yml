@@ -1,7 +1,7 @@
 name: npm-publish
 
 # 发布 packages/cli（cofluxd）到 npm：稳定版 release workflow 全部成功后发布；
-# workflow_dispatch 手动补发会自行先跑质量门。保留本 workflow 文件名以匹配
+# 失败后重跑本 workflow；不再提供独立发包入口。保留本 workflow 文件名以匹配
 # npm Trusted Publisher 的绑定。
 # 幂等：package.json 的版本已在 npm 上则跳过，不会重复发布/报错。
 # 认证走 npm Trusted Publishing（OIDC，无 token）：npmjs.com 上 cofluxd 包需配置
@@ -11,7 +11,6 @@ on:
   workflow_run:
     workflows: ["release"]
     types: [completed]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,34 +24,18 @@ concurrency:
 jobs:
   quality:
     # workflow_run 的 github.sha/ref 指向默认分支，必须显式检查上游 release head_sha。
-    # OIDC 手动补发只允许默认主干，禁止选功能分支发包。
-    if: >-
-      ${{
-        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
-        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
-      }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     name: npm 发布质量门
     uses: ./.github/workflows/ci.yml
     with:
-      checkout_ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+      checkout_ref: ${{ github.event.workflow_run.head_sha }}
     permissions:
       contents: read
 
   publish:
     needs: quality
-    # 两种事件都必须等当前 ci.yml 对实际待发 SHA 验收成功。
-    if: >-
-      ${{
-        always() &&
-        needs.quality.result == 'success' &&
-        (
-          (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
-          (
-            github.event_name == 'workflow_dispatch' &&
-            github.ref == 'refs/heads/main'
-          )
-        )
-      }}
+    # 必须等质量门对上游 release SHA 验收成功。
+    if: ${{ needs.quality.result == 'success' && github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment: npm-publish
     permissions:
@@ -62,11 +45,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # workflow_run 默认会 checkout main；发布必须固定到通过 release 的那个 commit。
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
       - name: 解析触发 release 的 tag
-        if: ${{ github.event_name == 'workflow_run' }}
         id: release_tag
         env:
           RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
@@ -120,6 +102,13 @@ jobs:
       # Trusted Publishing 需要 npm >= 11.5.1
       - if: ${{ steps.release_tag.outputs.publish != 'false' }}
         run: npm install -g npm@11.6.2
+
+      - name: 校验统一产品版本
+        if: ${{ steps.release_tag.outputs.publish != 'false' }}
+        env:
+          RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          node scripts/product-version.mjs --check "$RELEASE_TAG"
 
       - name: 发布（版本已存在则跳过）
         if: ${{ steps.release_tag.outputs.publish != 'false' }}

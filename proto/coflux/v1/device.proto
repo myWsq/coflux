@@ -387,6 +387,23 @@ message DeviceSessionSnapshotRequest {
   string session_id = 2;
 }
 
+// Command state of a live shell, derived by sessiond from the OSC 133 marks that coflux's own
+// rc chain emits together with the per-session secret. Marks without that secret (remote hosts
+// reached over ssh, nested shells, prompt frameworks) are ignored, so a nested shell or an ssh
+// session looks like one long-running command from the outside.
+message TerminalCommandState {
+  // At least one accepted mark has arrived: the shell is zsh/bash/fish started through coflux's
+  // rc chain and its prompt has been drawn at least once.
+  bool integrated = 1;
+  // A command has started and not finished yet.
+  bool busy = 2;
+  // Monotonic count of commands started in this shell; 0 = none yet.
+  uint64 command_seq = 3;
+  // Sequence of the last finished command (0 = none) and its exit status.
+  uint64 finished_seq = 4;
+  optional int32 exit_code = 5;
+}
+
 message DeviceSessionSnapshot {
   string request_id = 1;
   string session_id = 2;
@@ -397,6 +414,8 @@ message DeviceSessionSnapshot {
   // PTY 内程序经 OSC 0/2 设置的终端标题（plan 075）：sessiond 的 vt100 回调捕获、
   // 源头截断；空 = 从未设置或旧 supervisor 不支持，消费方一律回落自身默认。
   string title = 7;
+  // Shell-integration command state at snapshot time; absent from old supervisors.
+  TerminalCommandState command = 8;
 }
 
 message DevicePtyOutput {
@@ -473,13 +492,14 @@ message DeviceSessionCreate {
   string session_id = 3;
   string task_id = 4;
   string cwd = 5;
+  // Unused: the supervisor always starts the workspace's default login shell (a real tty that
+  // lives until exit). Kept for wire compatibility; the center never fills it.
   optional string shell = 6;
   uint32 cols = 7;
   uint32 rows = 8;
-  // 非空时该会话是「跑一条命令」的命令终端（plan 091）：worker 在 authorize 通过后、交给 sessiond
-  // 前本地写包装脚本（登录 shell 执行、tee 落日志、跑完退出带退出码）并把 shell 填成脚本路径。
-  // 脚本路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
-  // 会被判成 operation_collision。旧 worker 不认识本字段会起成普通 shell，由中心的能力门禁挡住。
+  // Unused since the interactive-only terminal model: a command the center wants typed in is sent
+  // separately (ServerTerminalRun) once the shell has signalled prompt readiness. Kept for wire
+  // compatibility; always empty.
   string command = 9;
   // 10 起是会话归属 id（plan 092）：与 daemon.proto SessionCreate 7 起同名同义，supervisor 据此组装
   // COFLUX_* 环境变量。它们会进入 sessiond 账本的 canonical 请求，同一 operation 重放时中心组帧的值
@@ -657,6 +677,8 @@ message SessionCheckpoint {
   double captured_at = 7;
   // OSC 0/2 终端标题（plan 075），随 snapshot 原样透传；语义同 DeviceSessionSnapshot.title。
   string title = 8;
+  // Command state (busy / sequence / last exit) carried along with the snapshot; absent from old daemons.
+  TerminalCommandState command = 9;
 }
 
 message DeviceEnvelope {

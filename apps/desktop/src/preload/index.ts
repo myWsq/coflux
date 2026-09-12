@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
-import type { DesktopBridge, DesktopCommand, DesktopNotification, DesktopUpdateState } from "../shared/desktop-bridge";
+import type { DesktopBridge, DesktopCommand, DesktopDaemonState, DesktopNotification, DesktopUpdateState } from "../shared/desktop-bridge";
 import { IPC, type Bootstrap } from "../shared/ipc";
 
 // 桥接对象的类型真相源在 ../shared/desktop-bridge.ts，这里只实现它。
@@ -17,6 +17,8 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const bridge: DesktopBridge = {
+  connectLocal: () => ipcRenderer.invoke(IPC.connectLocal),
+  logoutLocal: () => ipcRenderer.invoke(IPC.logoutLocal),
   platform: boot.platform,
   version: boot.version,
   serverUrl: boot.serverUrl,
@@ -30,6 +32,9 @@ const bridge: DesktopBridge = {
   },
   setBadge(count: number) {
     ipcRenderer.send(IPC.setBadge, Number(count));
+  },
+  showServerInfo() {
+    ipcRenderer.send(IPC.showServerInfo);
   },
   onFocusWorkspace(listener) {
     return subscribe<string>(IPC.focusWorkspace, listener);
@@ -57,6 +62,30 @@ const bridge: DesktopBridge = {
   },
   clearSessionToken() {
     ipcRenderer.send(IPC.clearSessionToken);
+  },
+  getDaemonState() {
+    return ipcRenderer.invoke(IPC.daemonGetState) as Promise<DesktopDaemonState>;
+  },
+  onDaemonState(listener) {
+    return subscribe<DesktopDaemonState>(IPC.daemonState, listener);
+  },
+  daemonEnroll() {
+    ipcRenderer.send(IPC.daemonEnroll);
+  },
+  daemonRestart() {
+    ipcRenderer.send(IPC.daemonRestart);
+  },
+  daemonStop() {
+    ipcRenderer.send(IPC.daemonStop);
+  },
+  daemonRemove() {
+    ipcRenderer.send(IPC.daemonRemove);
+  },
+  daemonOpenFdaGuide() {
+    ipcRenderer.send(IPC.daemonOpenFdaGuide);
+  },
+  daemonDismissError() {
+    ipcRenderer.send(IPC.daemonDismissError);
   },
 };
 

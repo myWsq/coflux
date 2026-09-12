@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { AlertCircle, FolderGit2, LoaderCircle, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
 import { type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
@@ -15,11 +15,17 @@ import {
   WorkspaceRenameDialog,
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
+import { DaemonOnboardingDialog } from "@/components/workbench/daemon-onboarding";
+import { DaemonPanelDialog } from "@/components/workbench/daemon-panel";
+import { countLocalRunningTerminals } from "@/components/workbench/daemon-view";
 import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "@/components/workbench/desktop-attention";
 import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
+import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useTerminalAttach } from "@/components/workbench/terminal-attach";
+import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon";
+import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import type { WorkspaceActiveTab, WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 import {
@@ -32,8 +38,8 @@ import {
   taskCloseNeedsConfirmation,
   type WorkbenchSelection,
 } from "@/components/workbench/workbench-state";
-import { WORKSPACE_KEY, desktop } from "@/config";
-import type { DesktopBridge, DesktopUpdateState } from "@/desktop-bridge";
+import { DAEMON_ONBOARDING_DISMISSED_KEY, WORKSPACE_KEY, desktop } from "@/config";
+import type { DesktopBridge } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
 
@@ -52,6 +58,20 @@ const TerminalPanes = lazy(() =>
 // 避免永久滞留。与遮罩的 8s 无关——工作区创建含 daemon 侧 git worktree add，慢链路可能更长。
 const PENDING_CREATE_TIMEOUT_MS = 15_000;
 
+/**
+ * 无顶栏的空态主区（plan 108）：顶部留一条与侧栏空白带等高的窗口拖拽带，没有终端顶栏时
+ * 也能从主区顶部拖动 / 双击窗口；空态内容在余下区域里继续垂直居中，按钮不落进拖拽带
+ * （拖拽区吞指针事件，见 drag-region.ts）。
+ */
+function EmptyMain({ className, children }: { className?: string; children: ReactNode }) {
+  return (
+    <main className="flex min-w-0 flex-1 flex-col bg-terminal">
+      <div className="shrink-0" style={DESKTOP_DRAG_BAND_STYLE} />
+      <div className={cn("flex min-h-0 flex-1 items-center justify-center", className)}>{children}</div>
+    </main>
+  );
+}
+
 function readStoredSelection(): WorkbenchSelection | null {
   return parseStoredSelection(localStorage.getItem(WORKSPACE_KEY));
 }
@@ -60,6 +80,15 @@ function persistSelection(selection: WorkbenchSelection | null) {
   const serialized = serializeSelection(selection);
   if (serialized === null) localStorage.removeItem(WORKSPACE_KEY);
   else localStorage.setItem(WORKSPACE_KEY, serialized);
+}
+
+/** 接入引导点过「暂不」（plan 113）：之后不再自动弹，只从账号菜单再进。localStorage 不可用时按没点过。 */
+function persistOnboardingDismissed() {
+  try {
+    localStorage.setItem(DAEMON_ONBOARDING_DISMISSED_KEY, "1");
+  } catch {
+    // 记不住就下次登录再弹一次，无害
+  }
 }
 
 /**
@@ -112,20 +141,10 @@ function DesktopAttention({ client, bridge, selectedWorkspaceId }: { client: Cof
  * 挂载即触发一次更新检查，按 electron-updater 状态显示进度/重启按钮。
  */
 function DesktopOutdated({ bridge }: { bridge: DesktopBridge }) {
-  const [update, setUpdate] = useState<DesktopUpdateState>({ status: "idle" });
+  // 订阅 + 补拉一次由共用 hook 负责（侧栏账号脚部同款）；「挂载即检查」是本页独有的，留在这里。
+  const update = useDesktopUpdateState(bridge);
   useEffect(() => {
-    let disposed = false;
-    const unsubscribe = bridge.onUpdateState((state) => {
-      if (!disposed) setUpdate(state);
-    });
-    void bridge.getUpdateState().then((state) => {
-      if (!disposed) setUpdate(state);
-    });
     bridge.checkForUpdates();
-    return () => {
-      disposed = true;
-      unsubscribe();
-    };
   }, [bridge]);
   const prompt = resolveOutdatedPrompt(update);
   return (
@@ -169,6 +188,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // 新建工作区菜单当前打开的项目：Sidebar 的 + 按钮/右键菜单与 Cmd+Ctrl+N 快捷键共用同一份受控状态。
   const [createMenuProjectId, setCreateMenuProjectId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  // 本机 daemon（plan 113）：状态对象一份订阅，驱动账号菜单一行、面板与接入引导；引导只在登录成功
+  // （中心已连上）后按状态自动弹一次，之后从账号菜单再进。
+  const daemonState = useDesktopDaemonState(desktop);
+  const [daemonDialog, setDaemonDialog] = useState<"onboarding" | "panel" | null>(null);
+  const attemptedAuthToken = useRef<string | null>(null);
+  const [localAuthError, setLocalAuthError] = useState<string | null>(null);
+  const [authRetry, setAuthRetry] = useState(0);
   // 乐观工作区条目（plan 078）：存组件层、渲染时与 store 数据合并，不进共享 store——
   // 快照对 workspaces 是整体替换，注入的假条目会被无声抹掉；共享包也不该背 web 专有语义。
   const [pendingWorkspaces, setPendingWorkspaces] = useState<PendingWorkspace[]>([]);
@@ -272,6 +298,23 @@ export function Workbench({ client }: { client: CofluxClient }) {
   useEffect(() => {
     if (followTask) setFollowTask(null);
   }, [followTask]);
+
+  // 自动接入不依赖对话框打开；仍通过已登录客户端兑现一次性设备授权。
+  const localAuthToken = daemonState?.status === "pending-auth" ? daemonState.authToken : undefined;
+  useEffect(() => {
+    if (authState !== "authed" || status !== "connected" || !localAuthToken || attemptedAuthToken.current === localAuthToken) return;
+    attemptedAuthToken.current = localAuthToken;
+    setLocalAuthError(null);
+    void client.authorizeDevice(localAuthToken).then((result) => {
+      if (!result.ok) {
+        setLocalAuthError(result.error);
+        setDaemonDialog("onboarding");
+      }
+    }).catch((error) => {
+      setLocalAuthError(String(error));
+      setDaemonDialog("onboarding");
+    });
+  }, [authState, status, localAuthToken, client, authRetry]);
 
   // 冷启动遮罩撤除（plan 078）：首快照到达即撤（snapshotRevision 单调递增，>0 一旦为真
   // 永远为真，断线不会误触发）；need-login/auth-failed 立即让位给登录表单。
@@ -596,14 +639,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
         createMenuProjectId={createMenuProjectId}
         onCreateMenuProjectIdChange={setCreateMenuProjectId}
         pendingWorkspaces={pendingWorkspaces}
+        daemonState={daemonState}
+        onOpenDaemonPanel={() => setDaemonDialog("panel")}
       />
 
       {terminalWorkspaces.length > 0 ? (
         <Suspense
           fallback={
-            <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal text-muted-foreground">
+            <EmptyMain className="text-muted-foreground">
               <LoaderCircle className="size-5 animate-spin" />
-            </main>
+            </EmptyMain>
           }
         >
           {/* 终端主区（plan 104）：顶栏一行、主体一行的两行网格。工作区容器经 display:contents
@@ -642,7 +687,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       {selectedDevice && !activeWorkspace ? (
         // 设备详情空态（plan 048）：这台设备还没有目录工作区，首次新建走 fsList(~) + terminalCreate；
         // 创建成功后 canonical 解析让终端自然出现，本空态随之卸载。
-        <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
+        <EmptyMain>
           <div className="flex max-w-sm flex-col items-center text-center">
             <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
               <SquareTerminal className="size-5" />
@@ -665,28 +710,28 @@ export function Workbench({ client }: { client: CofluxClient }) {
             />
             {deviceTerminalError ? <p className="mt-3 text-sm leading-5 text-destructive">{deviceTerminalError}</p> : null}
           </div>
-        </main>
+        </EmptyMain>
       ) : null}
       {pendingSelected ? (
         // 乐观工作区的主区（plan 078）：pending 条目不进 attach/终端状态机、不产生任何
         // 指向假 id 的请求，主区只显示创建中提示；广播到达后由上面的识别效果原地转正。
-        <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
+        <EmptyMain>
           <div className="flex max-w-sm flex-col items-center text-center">
             <LoaderCircle className="size-5 animate-spin text-muted-foreground" />
             <h1 className="mt-4 text-base font-medium">正在创建工作区「{pendingSelected.branch}」</h1>
             <p className="mt-1.5 text-sm leading-5 text-muted-foreground">正在设备上准备 git worktree，完成后会自动切换过去。</p>
           </div>
-        </main>
+        </EmptyMain>
       ) : null}
       {!pendingSelected && !selectedDevice && !activeWorkspace ? (
         snapshotRevision === 0 ? (
           // 首快照未到：数据没到 ≠ 数据为空（plan 078 第③跳），不得误报引导空态。
           // 遮罩正常会盖住这里；遮罩兜底撤除后（中心不可达）这里配合断线横幅语义成立。
-          <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal text-muted-foreground">
+          <EmptyMain className="text-muted-foreground">
             <LoaderCircle className="size-5 animate-spin" />
-          </main>
+          </EmptyMain>
         ) : (
-        <main className="flex min-w-0 flex-1 items-center justify-center bg-terminal">
+        <EmptyMain>
           <div className="flex max-w-sm flex-col items-center text-center">
             <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
               <FolderGit2 className="size-5" />
@@ -699,7 +744,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
               <Button className="mt-5" label="导入项目" variant="primary" size="sm" onClick={() => setImportOpen(true)} />
             ) : null}
           </div>
-        </main>
+        </EmptyMain>
         )
       ) : null}
 
@@ -754,6 +799,29 @@ export function Workbench({ client }: { client: CofluxClient }) {
       <ConfirmActionDialog action={confirmAction} onCancel={() => setConfirmAction(null)} />
       <ShortcutsHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
       <EnrollmentDialog open={enrollmentOpen} onOpenChange={setEnrollmentOpen} />
+      {/* 本机 daemon（plan 113）：面板与接入引导互斥；状态没到之前两者都不渲染 */}
+      {daemonState ? (
+        <>
+          <DaemonPanelDialog
+            open={daemonDialog === "panel"}
+            onOpenChange={(open) => !open && setDaemonDialog(null)}
+            state={daemonState}
+            runningTerminals={countLocalRunningTerminals(tasks, daemonState.daemonId)}
+            bridge={desktop}
+            onOpenOnboarding={() => setDaemonDialog("onboarding")}
+          />
+          <DaemonOnboardingDialog
+            open={daemonDialog === "onboarding"}
+            onOpenChange={(open) => !open && setDaemonDialog(null)}
+            state={daemonState}
+            client={client}
+            bridge={desktop}
+            authError={localAuthError}
+            onRetryAuthorize={() => { attemptedAuthToken.current = null; setAuthRetry((value) => value + 1); }}
+            onDismiss={persistOnboardingDismissed}
+          />
+        </>
+      ) : null}
     </div>
   );
 }

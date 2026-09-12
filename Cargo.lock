@@ -398,6 +398,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "coflux-cli"
+version = "0.0.0"
+dependencies = [
+ "coflux-protocol",
+ "libc",
+ "regex",
+ "serde_json",
+ "sha2",
+ "signal-hook",
+ "tungstenite",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "coflux-protocol"
 version = "0.0.0"
 dependencies = [
@@ -433,6 +448,7 @@ dependencies = [
  "portable-pty",
  "rand_core 0.6.4",
  "semver",
+ "serde",
  "serde_json",
  "sha2",
  "signal-hook",
@@ -2677,6 +2693,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]

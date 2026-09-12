@@ -1,7 +1,6 @@
-# Plan 084: 唯一共享 Swift Client Core——协议模块化、控制面契约与 iOS 无退化迁移
+# Plan 084: One shared Swift client core, modular protocols, control-plane contracts, and regression-free iOS migration
 
-> 本 plan 是结果契约，不是逐步脚本。理解需求与已定决策后，对照活代码自行设计实现；执行者在每个
-> 里程碑后运行快速验证并提交，命中 STOP 条件即停。完成后更新本 plan 与 `plans/README.md`。
+> This plan is an outcome contract, not a step-by-step script. Understand requirements and decisions, then implement against live code. Run quick validation and commit after each milestone; stop on any STOP condition. Update this plan and `plans/README.md` when complete.
 >
 > Drift check: `git diff --stat 5942465..HEAD -- proto/buf.gen.yaml proto/gen/swift/ packages/swift-client/ apps/ios/Coflux/ apps/ios/CofluxTests/ apps/ios/Coflux.xcodeproj/ docs/ROADMAP.md`
 
@@ -12,213 +11,128 @@
 - Risk: HIGH
 - Depends on: `plans/083-macos-native-client-feasibility-gates.md`
 - Category: refactor
-- Execution: self-execution（沿用 plan 082 departure check）
+- Execution: self-execution (continues plan 082 departure check)
 - Planned at: `5942465`, 2026-08-25
-- Outcome: DONE（`a402d90` / `0923ddd` / `00e5c7a`）
+- Outcome: DONE (`a402d90` / `0923ddd` / `00e5c7a`)
 
-### 执行结果（2026-08-26）
+### Execution results (2026-08-26)
 
-- Milestone 1：`a402d90` 建立 `packages/swift-client` 唯一物理边界与
-  `CofluxProtocol` / `CofluxClientCore` / `CofluxApplePlatform` 三产品；Swift protobuf 只生成到
-  `CofluxProtocol/Generated`，SwiftProtobuf 精确固定 `1.38.1`。
-- Milestone 2：`0923ddd` 迁移唯一控制面与 relay Router，实现并测试首握手重连、generation 隔离、
-  控制帧串行、10 秒 outbound watchdog、三维状态、完整快照替换/增量/级联清理、TokenStore 错误可见及
-  terminal auth fail-closed。共享包最终为 41 个 Swift Testing 用例 + 3 个 XCTest 全过。
-- Milestone 3–4：`00e5c7a` 将 iOS App/Test 切到 repo-local package，删除 App 内旧
-  Client/Router/Wire/Transport/Keychain 与重复 reducer/router/auth 测试；App 保留原
-  `dev.coflux.Coflux` / `clientToken` namespace 和显式 `buildID = "dev"`，首次 snapshot 前显示同步态，
-  重连保留已有快照。hosted XCTest 通过 TestAction 专属环境注入空 TokenStore，避免测试启动 App 时读取、
-  使用或清除正式 token；Keychain roundtrip 使用随机 service/account。
-- 验收：Buf lint/generate 零漂移；package 44/44；Rust protocol 26/26；iOS generic simulator build
-  通过；iOS 全量测试 5 过、2 个既有环境 probe 按契约 skip；core 平台 import、旧实现/ProtoGen/直接
-  SwiftProtobuf、scope 与 diff hygiene 扫描均通过。两轮独立复审发现并关闭测试 target 冗余 Protocol
-  依赖与 hosted-test 正式 Keychain 污染风险，最终均 APPROVE。
-- 本 plan 没有修改 `apps/mobile`、server、worker、Web 或生产部署。LAN/TCC、Intel、macOS 14 实机与
-  Developer ID 发布矩阵仍按 plan 082 保留为 Phase 6–7 发布资格门，本结果不代表这些后置门已通过。
+- M1: a402d90 establishes the single packages/swift-client boundary and CofluxProtocol/CofluxClientCore/CofluxApplePlatform products. Swift protobuf generates only into CofluxProtocol/Generated; SwiftProtobuf is pinned exactly to 1.38.1.
+- M2: 0923ddd migrates the single control plane and relay Router, implementing/testing initial-handshake reconnect, generation isolation, serialized control frames, ten-second outbound watchdog, three-dimensional state, snapshot replacement/incremental/cascade cleanup, visible TokenStore errors, and fail-closed terminal auth. Final package passes 41 Swift Testing cases and three XCTest cases.
+- M3–4: 00e5c7a moves iOS App/Test to the repo-local package, deleting old in-app Client/Router/Wire/Transport/Keychain and duplicate reducer/router/auth tests. App preserves dev.coflux.Coflux / clientToken namespaces and explicit buildID=dev. It shows synchronization before first snapshot and retains existing snapshots while reconnecting. Hosted XCTest injects an empty TokenStore through TestAction-only environment, preventing app startup from reading/using/deleting production tokens. Keychain roundtrips use random service/account.
+- Acceptance: Buf lint/generate without drift; package 44/44; Rust protocol 26/26; generic iOS simulator build; full iOS tests five pass and two existing environmental probes contractually skipped. Core platform-import, old implementation/ProtoGen/direct SwiftProtobuf, scope, and diff-hygiene scans pass. Two independent reviews found and closed redundant Protocol test-target dependency and hosted-test production-Keychain contamination; final verdicts both APPROVE.
+- No mobile/server/worker/web/production changes. LAN/TCC, Intel, real macOS 14 hardware, and Developer ID remain plan 082 Phase 6–7 release-qualification gates; these results do not claim those gates passed.
 
 ## Requirement
 
-建立 iOS/macOS 唯一消费的 repo-local Swift Package，结束 Swift protobuf 与客户端状态机由各 App target
-直接编译或复制的形态。完成后：
+Create the single repo-local Swift package consumed by iOS/macOS, ending direct compilation/copying of Swift protobuf and state machines in app targets. Outcomes:
 
-- Swift protobuf 只有一个生成与编译真相侧；
-- 认证、连接、重连、控制面 reducer 和现有 relay DeviceRouter 只有一份 Swift 实现；
-- iOS 改为通过 public module API 消费共享核心，现有 UI、终端、上传和设备面板行为不退化；
-- 平台 WebSocket、Keychain、Bundle/config 和 UI 生命周期通过小接口注入，core 可在 macOS 14 编译；
-- Foundation 修掉已确认的首握手不重连、控制帧发送无保序、Keychain 错误静默与“未收快照=空账号”漂移。
+- One Swift protobuf generation/compilation source of truth.
+- One Swift implementation of auth, connections/reconnect, control reducer, and current relay DeviceRouter.
+- iOS consumes public modules without UI/terminal/upload/device-panel regressions.
+- Small injected interfaces separate platform WebSocket, Keychain, Bundle/config, and UI lifecycle; core compiles for macOS 14.
+- Foundation fixes initial-handshake no-retry, unordered control sends, silent Keychain errors, and treating no snapshot as an empty account.
 
-相邻错误解包括：复制一份 macOS `CofluxClient`、让 package import SwiftUI/UIKit/AppKit/SwiftTerm/
-WebRTC、继续硬编码 `buildID = "dev"`、把 iOS 26 `NetworkConnection<WebSocket>` 编入 macOS 14 core，
-或在 Phase 1 就把当前 relay-only Router API 冻结成未来 direct/P2P 公共契约。
+Incorrect alternatives: another macOS CofluxClient copy; package imports of SwiftUI/UIKit/AppKit/SwiftTerm/WebRTC; continued implicit buildID=dev; iOS 26 NetworkConnection<WebSocket> in macOS 14 core; freezing today's relay-only Router as Phase 1's future direct/P2P public contract.
 
 ## Decisions & tradeoffs
 
-- **唯一物理边界固定为 `packages/swift-client`**，产品为 `CofluxProtocol`、`CofluxClientCore` 与
-  `CofluxApplePlatform`。Rejected: 两个 Xcode 工程各自添加同一批 source path——没有独立模块/API
-  边界，仍会出现编译设置与依赖漂移。Based on: `apps/ios/Coflux/Client/CofluxClient.swift:1-37`、
-  `apps/macos/project.yml:47-58`。
-
-- **Swift protobuf 移入 `CofluxProtocol/Generated`，Buf 的 `clean: true` 只清专用 Generated 目录**。
-  Rejected: 把 `Package.swift` 或手写 core 放在 Buf 输出目录——下一次生成会删除手写文件；Rejected:
-  App/Test 继续直接编译 `proto/gen/swift`——会形成重复 module 真相侧。Based on:
-  `proto/buf.gen.yaml:1-13`。
-
-- **`CofluxClientCore` 只依赖 Foundation、Observation 和 `CofluxProtocol`**；SwiftTerm、Opus、WebRTC、
-  Security、Network 与任何 UI framework 不得进入该 target。Rejected: 为迁移方便保留 concrete 默认
-  依赖——现有 `NetworkTransport` 使用 iOS 26 API，无法满足 macOS 14。Based on:
-  `apps/ios/Coflux/Client/Transport.swift:20-29`、`apps/macos/project.yml:5-6`。
-
-- **现有 DeviceRouter 随 core 迁移但保持 package/internal，不冻结 Phase 2 public API**。
-  `CofluxClient` 可继续用它维持 iOS 行为；macOS Foundation 只消费只读控制面。Rejected: 留在 iOS
-  App——会让共享 facade 反向依赖 App；Rejected: 立即公开 direct/P2P API——当前实现明确是 relay-only
-  子集，接口必然漂移。Based on: `apps/ios/Coflux/Client/DeviceRouter.swift:44-54`。
-
-- **public 注入契约固定为显式 `ClientConfiguration`、`Transport`/`TransportConnection`、
-  `TokenStore`、`ClientLogger`、clock/jitter source 与 build identity**；core 内不得读 `Bundle.main`、
-  环境变量、Security、真实随机/时钟服务或平台日志。发送必须串行、`receive()` 同时只允许一个 waiter、
-  `close()` 幂等。
-  Rejected: 保留当前默认参数——它把包绑死到 iOS App composition root。Based on:
-  `apps/ios/Coflux/Client/CofluxClient.swift:97-105`、`apps/ios/Coflux/Client/KeychainTokenStore.swift:9-14`。
-
-- **外部状态明确区分 connection/auth/sync 三个维度**。首个 `StateSnapshot` 前是 loading，不渲染空账号；
-  已认证掉线保留最后快照并显示 offline；重新订阅后的全量快照替换旧集合并递增 revision。为 iOS
-  迁移可保留现有 `status`/`authState` 命名，但不能继续只靠二者猜同步状态。Rejected: 收到 AuthOk
-  就把空数组当最终状态——会在冷启动制造错误空态。Based on:
-  `packages/client/src/store.ts:423-449`、`apps/ios/Coflux/Client/CofluxClient.swift:323-331`。
-
-- **认证/重连以 Web 的安全边界补齐现有 iOS 漂移**：存量 token 的首次 auth 前断线仍应退避重连；
-  `AuthError` 清 token 并停重连，`ClientOutdated` 保留 token 并停重连；AuthOk 后订阅；有 outbound 后
-  长时间无任何 inbound 的 socket 主动判死；旧 generation 不得污染新连接。Rejected: 原样搬现有文件——
-  构造期 `shouldRetry = false` 会让首握手失败永久停住。Based on:
-  `apps/ios/Coflux/Client/CofluxClient.swift:72-75,138-142,270-279`、
-  `packages/client/src/connection.ts:90-112`。
-
-- **控制帧发送必须有单一保序队列，不能每帧裸起独立 Task**。Rejected: 依赖当前 executor 调度“通常
-  有序”——auth/subscribe/logout 与后续 operation 的因果顺序属于协议正确性。Based on:
-  `apps/ios/Coflux/Client/CofluxClient.swift:566-568`、
-  `apps/ios/Coflux/Client/DeviceRouter.swift:800-813`。
-
-- **TokenStore 错误可观测且 service/account 显式注入**。密码永不持久化，只有 AuthOk 返回的新 token
-  才写入；token-auth 的 AuthOk 没有新 token 时保留旧值。Rejected: 吞掉 Security OSStatus——UI 会把
-  “重启后丢登录”伪装成成功。Based on: `apps/ios/Coflux/Client/KeychainTokenStore.swift:24-49`、
-  `apps/server/src/hub.ts:1755-1777`。
-
-- **build ID 由 App 显式注入，core 无默认值**。Debug composition 与当前 iOS 兼容 composition 可以
-  明确传 `dev`，避免在 native 独立准入建立前破坏现有 iOS 发布；macOS Release provider 在 plan 085
-  必须产生非空、非 `dev` 的 identity，Phase 6 再迁移 iOS 并建立独立 native 准入/升级文案。Rejected:
-  把 `dev` 留在 core 内作为隐式全局绕过——正式 macOS 产物不可审计。Based on:
-  `apps/ios/Coflux/Client/CofluxClient.swift:65-67,573`、
-  `apps/server/src/hub.ts:1793-1807`。
-
-- **Swift public API 只冻结 App 已消费的 facade/state/actions 与注入协议**；`Wire`、`apply`、raw callbacks
-  和 Router 结构保持 internal/package。iOS 源码显式 import `CofluxProtocol` 和 `CofluxClientCore`，不使用
-  `@_exported import`。Rejected: 为少改 import 暴露整个实现——会把 Phase 2 重构变成破坏性 API 迁移。
+- **Physical boundary is packages/swift-client**, with CofluxProtocol, CofluxClientCore, CofluxApplePlatform products. Rejected: adding identical source paths to both Xcode projects leaves no independent API/module boundary and permits settings/dependency drift. Evidence: iOS CofluxClient.swift:1-37, macOS project.yml:47-58.
+- **Move Swift protobuf into CofluxProtocol/Generated; Buf clean:true cleans only that dedicated folder.** Never put Package.swift/handwritten core in generated output or regeneration deletes them. App/Test cannot keep compiling proto/gen/swift directly, creating duplicate module truth. Evidence: proto/buf.gen.yaml:1-13.
+- **Core depends only on Foundation, Observation, and CofluxProtocol.** Exclude SwiftTerm, Opus, WebRTC, Security, Network, and UI frameworks. Rejected: concrete defaults for convenience; current NetworkTransport uses iOS 26 APIs unavailable to macOS 14. Evidence: iOS Transport.swift:20-29, macOS project.yml:5-6.
+- **Move DeviceRouter with core, keeping package/internal visibility.** CofluxClient uses it for iOS; macOS Foundation consumes only read-only control state. Rejected: leaving Router in iOS reverses dependencies; exposing direct/P2P now freezes a relay-only subset certain to change. Evidence: DeviceRouter.swift:44-54.
+- **Explicit injection contracts**: ClientConfiguration, Transport/TransportConnection, TokenStore, ClientLogger, clock/jitter source, and build identity. Core never reads Bundle.main, environment, Security, real random/clock services, or platform logging. Sends serialize; receive permits one waiter; close is idempotent. Rejected: current defaults bind package to iOS composition. Evidence: CofluxClient.swift:97-105, KeychainTokenStore.swift:9-14.
+- **Expose connection/auth/sync separately.** Before first StateSnapshot show loading, never an empty account. Authenticated disconnect retains last snapshot and shows offline. Resubscription snapshots replace old collections and increment revision. Existing status/authState names may remain for migration but cannot substitute for sync state. Rejected: treating AuthOk's empty arrays as final data causes false cold-start emptiness. Evidence: TS client store.ts:423-449, Swift CofluxClient.swift:323-331.
+- **Align auth/retry with web security boundaries.** Existing-token disconnection before first auth still backs off/retries; AuthError clears token/stops retry; ClientOutdated retains token/stops retry; subscribe after AuthOk; long silence after outbound marks socket dead; old generations cannot mutate new connections. Rejected: moving files unchanged retains initial shouldRetry=false and permanent first-handshake failure. Evidence: CofluxClient.swift:72-75,138-142,270-279; TS connection.ts:90-112.
+- **One ordered control-send queue, not a raw Task per frame.** Executor scheduling that is usually ordered cannot guarantee protocol causality for auth/subscribe/logout/operations. Evidence: CofluxClient.swift:566-568, DeviceRouter.swift:800-813.
+- **Observable TokenStore errors and explicit service/account.** Never persist passwords; write only new tokens from AuthOk. Token-auth AuthOk without a new token retains the old one. Rejected: swallowed Security OSStatus falsely reports success while login disappears on restart. Evidence: KeychainTokenStore.swift:24-49, server hub.ts:1755-1777.
+- **App injects build ID; core has no default.** Debug and current compatible iOS composition may explicitly pass dev until independent native admission exists. Plan 085 macOS Release must provide nonempty/non-dev identity; Phase 6 migrates iOS and adds native admission/update messaging. Rejected: implicit core-wide dev bypass makes production macOS identity unauditable. Evidence: CofluxClient.swift:65-67,573; hub.ts:1793-1807.
+- **Freeze only consumed facade/state/actions and injection protocols.** Wire, apply, raw callbacks, and Router structure stay internal/package. iOS explicitly imports CofluxProtocol/CofluxClientCore, without @_exported import. Rejected: exposing implementation merely to reduce import edits turns Phase 2 refactors into breaking public-API migrations.
 
 ## Direction
 
-### Milestone 1：可重复生成的 Swift Package 与协议真相侧
+### Milestone 1: Reproducible Swift package and protocol truth
 
-Package 能在 macOS 14+/iOS 26+ 语义下独立解析与编译；SwiftProtobuf runtime 精确 pin，现有 Buf
-plugin 保持可审计 pin；四份生成文件只存在于 `CofluxProtocol/Generated`，TS/Rust 生成物无线格式漂移。
+Independently resolve/build for macOS 14+/iOS 26+. Pin SwiftProtobuf exactly and retain auditable Buf plugin pin. Four generated files exist only in CofluxProtocol/Generated; no TS/Rust wire drift.
+Validation: swift test --package-path packages/swift-client exits 0; cd proto && buf lint && buf generate exits 0 without second-generation drift.
 
-Milestone validation: `swift test --package-path packages/swift-client` → exit 0；
-`cd proto && buf lint && buf generate` → exit 0，生成物无二次漂移。
+### Milestone 2: Shared control plane and relay Router
 
-### Milestone 2：共享控制面与 relay Router 契约
+Fake core tests cover auth, failed initial handshake reconnect, backoff/generation/watchdog, serialized sends, sync state, full snapshot replacement, daemon/project/workspace/task upserts and cascades, ports/checkpoints/sessionAgents, malformed embedded messages, TokenStore failure, and logout. Move deterministic relay Router tests into package with unchanged behavior.
+Validation: all package core/router tests pass.
 
-Core fake tests覆盖认证、首握手失败重连、退避/generation/watchdog、串行发送、同步状态、快照全替换、
-daemon/project/workspace/task upsert 与级联删除、ports/checkpoint/sessionAgents、畸形 embedded message、
-TokenStore 失败和 logout。现有 relay Router 的确定性测试迁入 package 并保持行为。
+### Milestone 3: Apple adapters and sole iOS consumption
 
-Milestone validation: `swift test --package-path packages/swift-client` → 所有 core/router 用例通过。
+Inject iOS concrete Network transport and Keychain/config through CofluxApplePlatform/app root. App/tests no longer compile old Client or Swift protobuf directly. UI consumes public modules; scene lifecycle maps to neutral suspend/resume. Signed-host Keychain roundtrip uses random service/account, never real tokens.
+Validation: generic iOS Simulator xcodebuild exits 0.
 
-### Milestone 3：Apple adapter 与 iOS 唯一消费迁移
+### Milestone 4: iOS regression and boundary audit
 
-iOS concrete Network transport、Keychain/config composition 通过 `CofluxApplePlatform`/App root 注入；
-App 和测试不再直接编译旧 Client 或 Swift protobuf。所有 UI 消费 public module，scene lifecycle 映射到
-平台中立 suspend/resume；签名 host Keychain roundtrip 使用随机 service/account，不接触真实 token。
-
-Milestone validation: `xcodebuild build -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'generic/platform=iOS Simulator'` → exit 0。
-
-### Milestone 4：iOS 无退化回归与边界审计
-
-iOS 既有非环境测试全过；环境/音频 probe 只能按原契约 skip。共享 core 无 UI/终端/WebRTC import，
-`apps/mobile`、server、worker、Web 与生产部署零改动。
-
-Milestone validation: iOS Simulator 全量测试通过；静态边界扫描无禁用 import。
+All existing nonenvironmental iOS tests pass; environment/audio probes may skip only under their existing contracts. Core has no UI/terminal/WebRTC imports. No mobile/server/worker/web/production changes.
+Validation: full iOS Simulator tests and forbidden-import scan pass.
 
 ## Landmines
 
-- iOS 工程使用 file-system synchronized groups；移走生成源码后必须同时移除 ProtoGen 构建成员和直接
-  SwiftProtobuf product，不能留下同名类型双编译：`apps/ios/Coflux.xcodeproj/project.pbxproj:31-45,93-102`。
-- Swift 6 并发设置不能只继承 iOS 的 Approachable Concurrency；package 在 macOS 独立编译时也必须
-  对 `@MainActor`、`@unchecked Sendable` 和单 consumer 假设给出证据：
-  `apps/ios/Coflux.xcodeproj/project.pbxproj:269-272`、`DeviceRouter.swift:88-100`。
-- `ProjectCreated` / `WorkspaceCreated` 是 upsert，不是 append-only；重命名/default branch/diff 增量复用
-  它们：`apps/server/src/hub.ts:1158-1185,1645-1658`。
-- project 删除不得误删 `projectID == ""` 的目录工作区；protobuf 内嵌 message 缺失必须丢帧而非构造
-  默认空对象。
-- `buf generate` 为 clean 模式；输出目录若包含手写文件必须 STOP。
-- Keychain 测试在 `CODE_SIGNING_ALLOWED=NO` 下会产生假失败，只能在签名 app host 验收。
-- package 测试通过不代表 iOS UI 可编译；protobuf 离开 App module 后所有使用处都需显式 import。
+- iOS uses filesystem-synchronized groups. Moving generated files also requires removing ProtoGen membership and direct SwiftProtobuf product to prevent duplicate type compilation: project.pbxproj:31-45,93-102.
+- Swift 6 concurrency cannot merely inherit iOS Approachable Concurrency settings. Standalone macOS package builds need evidence for @MainActor, @unchecked Sendable, and single-consumer assumptions: project.pbxproj:269-272, DeviceRouter.swift:88-100.
+- ProjectCreated/WorkspaceCreated are upserts, reused for rename/default-branch/diff deltas, not append-only: hub.ts:1158-1185,1645-1658.
+- Project deletion must not remove directory workspaces with projectID=="". Missing embedded protobuf messages must drop the frame rather than create default empty objects.
+- Buf cleans output; STOP if handwritten files share it.
+- Keychain tests false-fail with CODE_SIGNING_ALLOWED=NO; accept only in a signed app host.
+- Passing package tests does not prove UI builds; every protobuf consumer needs explicit import after leaving the app module.
 
 ## Scope
 
 In scope:
-
-- `packages/swift-client/**`
-- `proto/buf.gen.yaml`、`proto/gen/swift/**`
-- `apps/ios/Coflux/Client/**`、为 module import/composition 所需的 `apps/ios/Coflux/**/*.swift`
-- `apps/ios/CofluxTests/**`
-- `apps/ios/Coflux.xcodeproj/**`
-- `docs/ROADMAP.md` 中“开发 GO 已允许 Foundation、发布矩阵仍后置”的最小同步
-- `plans/084-shared-swift-client-core.md`、`plans/README.md`
+- packages/swift-client/**
+- proto/buf.gen.yaml and proto/gen/swift/**
+- iOS Client/** and other Coflux/**/*.swift needed for imports/composition
+- iOS CofluxTests/** and Coflux.xcodeproj/**
+- Minimal ROADMAP correction: development GO permits Foundation; release matrix remains deferred
+- This plan and index
 
 Out of scope:
-
-- `apps/macos/**` 产品 Foundation——plan 085 消费本 plan 的稳定模块
-- `apps/server/**` 订阅窗口原子性——plan 086 单独修复与黑盒验收
-- direct/loopback/P2P、pair/grant/lease 与 Router public API——Phase 2
-- native 正式版本 allowlist、更新 URL、最低版本治理——Phase 6
-- iOS UI 新功能、`apps/mobile`、Web/daemon 功能改动
-- LAN/TCC、Intel、macOS 14 实机与 Developer ID 发布验收——Phase 6–7
+- macOS product Foundation, plan 085
+- Server subscription-window atomicity, plan 086
+- direct/loopback/P2P, pair/grant/lease, public Router API, Phase 2
+- Native release allowlist/update URLs/minimum-version governance, Phase 6
+- New iOS UI features or mobile/web/daemon feature changes
+- LAN/TCC, Intel, real macOS 14 hardware, Developer ID acceptance, Phases 6–7
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Package tests | `swift test --package-path packages/swift-client` | exit 0；core/router 全过 |
-| Proto lint/generate | `cd proto && buf lint && buf generate` | exit 0；TS/Rust wire 无漂移，Swift 只落新 Generated 目录 |
+| Package tests | `swift test --package-path packages/swift-client` | exit 0, all core/router cases |
+| Proto lint/generate | `cd proto && buf lint && buf generate` | No TS/Rust wire drift; Swift only in new Generated folder |
 | iOS build | `xcodebuild build -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'generic/platform=iOS Simulator'` | exit 0 |
-| iOS regression (acceptance) | `xcodebuild test -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max,OS=latest'` | 非环境用例全过，环境 probe 按契约 skip |
-| Core boundary | `rg -n 'import (UIKit|SwiftUI|AppKit|SwiftTerm|WebRTC|Security|Network)' packages/swift-client/Sources/CofluxClientCore` | 无输出 |
-| Rust protocol guard | `cargo test -p coflux-protocol` | exit 0，零警告 |
+| iOS acceptance | `xcodebuild test -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max,OS=latest'` | Nonenvironmental cases pass; probes skip only per contract |
+| Core boundary | `rg -n 'import (UIKit|SwiftUI|AppKit|SwiftTerm|WebRTC|Security|Network)' packages/swift-client/Sources/CofluxClientCore` | No output |
+| Rust protocol | `cargo test -p coflux-protocol` | exit 0, no warnings |
 | Diff hygiene | `git diff --check` | exit 0 |
 
 ## Done criteria
 
-- [x] 所有 listed commands 通过。
-- [x] iOS 只通过同一 package 产品消费 Swift 协议与客户端核心；package 本身在 macOS 14 目标可编译。
-  macOS App 的实际唯一消费由 plan 085 验收。
-- [x] Core 无平台默认依赖、固定 `dev`、无序控制帧发送或未同步空态。
-- [x] 存量 token 首次握手失败会重连；auth error/outdated/logout 的 token 与重连语义有负向测试。
-- [x] reducer 覆盖完整 snapshot 和 Phase 1 所列增量/级联删除，畸形输入 fail closed。
-- [x] iOS 现有非环境测试、终端、上传、设备面板与后台恢复行为不退化。
-- [x] `apps/mobile`、server、worker、Web 和生产部署无改动。
-- [x] `docs/ROADMAP.md` 不再错误声称 Foundation 被外部 LAN/发布矩阵阻塞，且未把后置门写成已通过。
-- [x] `plans/README.md` 状态已更新。
+- [x] All listed commands pass.
+- [x] iOS consumes one package's protocol/core products; package compiles targeting macOS 14. Actual macOS app consumption is accepted in 085.
+- [x] No platform defaults, fixed dev identity, unordered sends, or unsynchronized empty state in core.
+- [x] Existing-token initial handshake failure retries; auth error/outdated/logout token/retry behavior has negative tests.
+- [x] Reducer covers full snapshots and Phase 1 deltas/cascades; malformed inputs fail closed.
+- [x] Existing iOS tests, terminals, upload, device panel, and background recovery do not regress.
+- [x] No mobile/server/worker/web/production changes.
+- [x] ROADMAP no longer incorrectly blocks Foundation on external LAN/release matrix and does not claim deferred gates passed.
+- [x] Index updated.
 
 ## STOP conditions
 
-- package 需要 import UI、SwiftTerm、WebRTC 或把 iOS 26 concrete Network API暴露给 macOS 14 core。
-- 为迁移 iOS 必须公开当前 DeviceRouter 内部状态机或改变线协议。
-- Buf 迁移产生 TS/Rust wire 格式变化，而不是纯 Swift 输出路径变化。
-- iOS 既有业务测试在一次合理修复后仍连续失败两次，或只能删除/弱化测试变绿。
-- 需要触及 `apps/mobile`、server/worker/Web 功能或 Phase 2 transport 才能完成。
+- Package requires UI/SwiftTerm/WebRTC imports or exposes iOS 26 Network APIs to macOS 14 core.
+- iOS migration requires exposing Router internals or wire changes.
+- Buf migration changes TS/Rust wire format rather than only Swift output path.
+- Existing iOS business tests fail twice after one reasonable fix, or only pass by deletion/weakening.
+- Completion requires mobile/server/worker/web features or Phase 2 transport.
 
 ## Maintenance notes
 
-- 共享 package 是实现唯一性边界，不代表 macOS/iOS UI 或生命周期应趋同。
-- 任何新增控制面消息都应同时更新 reducer fixture/测试；任何新增 platform import 先判断是否应留 adapter。
-- Phase 2 可以重构 Router internals，但不得复制第二份 Swift Router；若未来做 Windows/Linux，再重开
-  Swift core vs Rust core 决策。
+- Shared package means one implementation, not identical iOS/macOS UI/lifecycle.
+- New control messages need reducer fixtures/tests; new platform imports should first be considered for adapters.
+- Phase 2 may refactor Router internals but never copy another Swift Router. Reopen Swift-versus-Rust-core decisions if Windows/Linux becomes a target.

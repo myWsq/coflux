@@ -1,90 +1,91 @@
-# cofluxd
+# Coflux CLI
 
-coflux daemon 的管理 CLI。daemon 是预编译的 Rust 二进制（supervisor 持 PTY + worker 频繁热升级，**零 node 运行时**）；本 CLI 只负责装/起/停/升级——node 仅在你偶尔跑命令时用一下。
+Operate local and remote terminals from one account. This package provides two distinct commands:
 
-## 安装
+| Command | Purpose |
+| --- | --- |
+| `cofluxd` | Manage a headless device: install, start, stop, diagnose, and update its runtime |
+| `coflux` | Sign in and operate devices, workspaces, and terminals |
 
-```sh
-npm i -g cofluxd
-```
+Desktop, CLI, and runtime releases share the same version. The macOS desktop app includes its own native `coflux` binary and does not require this npm package or Node.js.
 
-## 用法
+## Codex skill discovery in Coflux terminals
 
-```sh
-cofluxd                 # 首次=up（起服务后打印浏览器授权链接），之后=看状态
-cofluxd up              # 幂等：零参数即可装/起；已装则按当前配置重装服务并重启
-cofluxd status          # 服务器/登记（含"等待授权"）/服务/连接状态
-cofluxd doctor          # 中心网络 + gateway/grant/loopback + daemon 状态分层自检
-cofluxd logs -f         # 看 daemon 日志
-cofluxd update          # 下载新二进制（不重启；supervisor 有变化时提示用 restart 应用）
-cofluxd restart         # 重启 daemon 应用新 supervisor（⚠ 结束本机所有活会话）
-cofluxd down            # 停止
-cofluxd uninstall [--purge]   # 卸载（--purge 连二进制/配置/凭证一并删）
-```
+Interactive `codex`, `codex resume`, and `codex fork` invocations use a private
+Codex app-server. The native CLI registers the invocation's immutable Coflux skill
+directory through `skills/extraRoots/set` before connecting the TUI over a private
+Unix socket. Coflux appears in `/skills` and the `$` skill selector, and Codex loads
+the skill body on demand. The session hook continues to supply current terminal
+and workspace coordinates.
 
-从 `cofluxd@0.12.0` 起，远端安装/更新会用 npm 包内置的 ed25519 公钥同时验证
-supervisor 与 worker 的 version/target/size/sha256/release statement；两个文件全部通过后才替换。
-CLI 还会取自身与 worker 的持久 release floor 较大值拒绝远端降级。`--bin-dir` 仍是本机管理员
-显式信任本地产物的开发/救援入口。
+No skill is installed in the user's skill directories and no plugin or marketplace
+registration is written to their configuration. The extra root belongs only to
+this app-server process; concurrent invocations keep their own skill versions.
+The launcher monitors the terminal UI, and a lifetime-pipe watchdog cleans up the
+backend and socket when the launcher exits, including when the terminal is killed.
 
-默认连公共服务 `wss://api.coflux.dev/daemon`（自托管用 `--server` 改；已保存的地址继续生效，非默认时会有醒目提示）。
+This requires a Codex version supporting `--remote unix://PATH` and
+`skills/extraRoots/set` (verified with Codex CLI 0.154.0). If startup or skill
+discovery fails, the launcher reports the error instead of claiming integration
+is ready. `COFLUX_AGENT_INTEGRATION=off codex` bypasses managed integration.
+Profile-selected invocations (`--profile` / `-p`) retain the native runtime and
+print an explanatory notice: Codex app-server cannot load profiles, and using the
+remote TUI would lose profile fields such as `developer_instructions`. Explicit
+`--remote` endpoints, administrative commands, and noninteractive commands
+such as `codex exec` retain the existing launch path; they do not receive this
+process-local skill registration. Existing hook injection remains unchanged.
 
-## 给 agent 用的命令
+For remote resume/fork, `--yolo`, `--sandbox`, `--ask-for-approval`, and permission
+config overrides are applied to the private backend; Codex rejects these options
+on the remote TUI itself. New sessions retain the native TUI permission flags.
 
-跑在 coflux 终端里的 claude/codex 可以用下面几条，把工作外化成用户在 web/手机上**看得见、能接管**的东西——而不是在自己的 Bash 里后台起一个谁也看不见的进程：
+## Install
 
-```sh
-cofluxd terminal new --title "跑单测" --cmd "pnpm test"   # 作业终端：跑完即退，带退出码
-cofluxd terminal new --title "调试 shell"                 # 会话终端：不带命令 = 常驻登录 shell
-cofluxd terminal list                                     # 本工作区的终端 + 状态/退出码
-cofluxd terminal read <taskId> [--lines N]                # 读终端内容（纯文本，已退出也能读）
-cofluxd terminal wait <taskId> [--timeout <秒>]           # 阻塞到退出，打印退出码
-cofluxd terminal send <taskId> --text "y" --enter         # 往终端输入；用户正在接管时被拒
-cofluxd progress "复现了，正在定位"                        # 播报进度：显示在工作区卡片上
-cofluxd notify "需要你定一下用哪个方案"                    # 叫人：侧栏转「等待交互」
-cofluxd ports                                             # 端口 + 可直接打开的预览 URL
-```
-
-`terminal new` 带不带 `--cmd` 是两种终端：带命令是**作业终端**，命令包成脚本交登录 shell 跑，跑完终端退出并带退出码，输出另落一份日志供 `read` 回读（代价是命令的 stdout 是管道而非 tty，颜色/进度条/全屏程序都没有）；不带命令是**会话终端**，等价于用户在侧栏点「新建终端」——工作区目录下的默认登录 shell，stdin/stdout 都是真 tty，不会自己退出，直到 agent 或用户输入 `exit`。会话终端没有命令日志，`read` 读的是当前画面（一屏），首次 `send` 前要先 `read` 等提示符。
-
-不需要任何凭证：daemon 用调用方 pid 反查进程树确认它属于哪个会话，**coflux 会话之外的进程一律拒绝**，权限也天然限定在该会话所属的工作区内。**local-first**：send/read/wait/notify/progress 在 daemon 本地闭环、不经中心（归属与退出码来自 daemon 自己的会话账本，内容来自本地命令日志或 sessiond 快照）；只有 new/list/ports 由 daemon 代问中心——Task 要落库广播、预览 URL 由中心生成。早于 daemon 升级开出来的终端缺归属信息，本地命令会明确拒绝，重开即可。
-
-每个 coflux 开出来的 PTY 会话里还注入了一组 `COFLUX_*` 环境变量（由 supervisor 组装，中心只下发 id）：`COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID`（目录工作区为空串）/ `COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` / `COFLUX_MCP_URL`。agent 读它们就知道自己在哪台设备、哪个项目/工作区/终端，值与中心 MCP `list_*` 返回的 id 完全一致，可直接传给 MCP tools。本地命令与 MCP 的分工只有一条规则：**本地能闭环的一律本地命令**（本工作区内的开终端/读/等/输入/播报/叫人/端口）；只有跨出本工作区——开子工作区、跨工作区/跨设备读写、或从 coflux 之外接入——才用中心的 `coflux` MCP（`claude mcp add --transport http coflux "$COFLUX_MCP_URL"`，一次 OAuth 授权）。supervisor 不走热升级，旧机器要 `cofluxd update && cofluxd restart` 之后会话里才有这些变量；skill 里写了变量为空时的降级分支。
-
-配套的 skill 在 `skills/coflux/SKILL.md`（随包分发），装给 Claude Code：
+Requires Node.js 20 or later.
 
 ```sh
-mkdir -p ~/.claude/skills && ln -sfn "$(npm root -g)/cofluxd/skills/coflux" ~/.claude/skills/coflux
+npm install -g cofluxd
+cofluxd up
 ```
 
-`cofluxd up` 起服务后会打印一个一次性授权链接，在浏览器用已登录的账号打开确认即可（链接可在任意设备打开，包括无头设备），无需先去 web 控制台生成密钥。已登记设备重跑 `up` 不会重新触发授权。
+Follow the authorization link to connect the host to your account. Use `cofluxd status`, `cofluxd doctor`, or `cofluxd logs -f` to inspect it.
 
-## 本地优先与 doctor
+## Operate your workspaces
 
-desktop web 与 daemon 同机时，terminal/普通 Device RPC 优先连接本机固定 gateway（默认
-`127.0.0.1:8788`）；失败会自动走中心 opaque relay。远端访问始终可走 relay。`cofluxd doctor` 把两条
-路径分开诊断：
-
-```text
-中心：DNS → TCP → TLS → WebSocket
-本地：gateway bind → 持久 grant/Origin → loopback WebSocket
-状态：daemon → 中心的实际连接状态
+```sh
+# Supply the password through stdin, not in a command-line argument.
+coflux login --username <account> --password-stdin
+coflux device list
+coflux workspace list
+coflux terminal new --workspace <id> --cmd 'git status'
+coflux terminal read <terminal-id> --remote
 ```
 
-- 本地项失败：结论是“直连降级”，只影响同机低延迟路径；中心 relay 正常时 daemon 仍在线可用。
-- 中心项失败：已经加载、已经配对且 cached direct 可用的页面仍能控制存活 session；刷新/冷启动不保证。
-- 网络层都通但 daemon 未连接：查看 `cofluxd logs`，通常是认证、版本或服务进程问题。
+Account commands return JSON. Inside a Coflux terminal, local commands automatically use the current workspace:
 
-doctor 只读取 gateway store 的结构、grant/Origin 数量和 bind 状态，不打印 browser 私钥、grant id、
-device token 或其它凭证。它的 loopback 检查只做主机侧 WebSocket upgrade；浏览器自身的 LNA/permission
-仍以 Chrome/Safari/Firefox 页面实测为准。
+```sh
+coflux terminal new --title 'Tests' --cmd 'pnpm test'   # a persistent shell; the command is typed in once its prompt is ready
+coflux terminal wait <terminal-id>                      # blocks until that command finishes and prints its exit code
+coflux terminal run <terminal-id> --cmd 'pnpm lint'     # type another command into the same shell
+coflux terminal read <terminal-id>                      # the tail of the terminal's scrollback
+coflux terminal list
+coflux terminal close <terminal-id>
+coflux progress 'Reviewing the changes.'
+coflux notify 'Ready for your review.'
+```
 
-> `onboard`、`reload` 命令已移除：onboard 并入零参数 `up`，reload 并入幂等化后的 `up`（重跑 `up` 即按 settings.json 重装服务并重启）。
+Every terminal is the workspace's default login shell on a real tty, alive until `exit` or `close`; `--cmd` and `run` only type a command in after the shell has signalled that its prompt is ready, and `wait` reports that command's exit code while the terminal stays open.
 
-## 配置
+The CLI bundled with the desktop app can reuse the app's login through a local channel. Independently installed CLIs can sign in themselves. See `coflux --help`, `cofluxd --help`, and the [agent skill](skills/coflux/SKILL.md).
 
-所有配置在 `~/.coflux/settings.json`（`serverUrl` / `deviceName` / `shell`），**daemon 直接读这个文件**。手改后重跑 `cofluxd up` 生效。
+## Upgrades and terminal lifetime
 
-支持 macOS（launchd）/ Linux（systemd user service）；服务崩溃自启、开机自启。
+Updating this npm package does not end running terminals. `cofluxd update` downloads runtime artifacts without restarting the Supervisor that owns the PTYs. Apply that update with `cofluxd restart` after your tasks finish.
 
-更多见 [coflux 仓库](https://github.com/myWsq/coflux)。
+`cofluxd restart` and `cofluxd down` end local terminal processes. The desktop app stays online in the background; fully quitting or signing out ends its local terminals after confirmation.
+
+Starting with 1.0, operation commands such as `cofluxd terminal` and `cofluxd login` have been removed. Use `coflux terminal` and `coflux login`. The MCP interface has also been removed in favor of the CLI.
+
+[GitHub](https://github.com/myWsq/coflux) · [Releases](https://github.com/myWsq/coflux/releases) · [Issues](https://github.com/myWsq/coflux/issues)
+
+MIT © 2026 Shuaiqi Wang.

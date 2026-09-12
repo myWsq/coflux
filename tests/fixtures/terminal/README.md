@@ -1,19 +1,11 @@
 # Terminal ANSI fixtures
 
-这三份 fixture 是二进制安全的 base64 ANSI 录制，供独立 xterm.js oracle 回放；可见内容已经
-替换成固定假路径、假文件名和无业务含义的文本，未保留账号、token、prompt、仓库内容或模型对话。
+These three fixtures are binary-safe base64 ANSI recordings for the independent xterm.js oracle. Visible contents have been replaced with fixed fictional paths, filenames, and text without business meaning. No accounts, tokens, prompts, repository contents, or model conversations are retained.
 
-- `claude-cli.json`：按 Claude Code 2.1.220 的空项目交互布局脱敏，保留正常屏/alternate
-  screen、持续 tool 输出、状态栏和 resize 的控制序列形态。
-- `codex-cli.json`：按 Codex CLI 0.145.0 的空项目交互/patch review 布局脱敏，保留 diff
-  颜色、normal↔alternate 切换、长行和 resize。
-- `tui-vim.json`：按 Vim 9 的临时无敏感文件会话脱敏，保留全屏 TUI、光标寻址、宽字和样式。
+- `claude-cli.json`: sanitized from Claude Code 2.1.220's empty-project interaction layout, retaining control-sequence patterns for normal/alternate screens, ongoing tool output, status bars, and resizing.
+- `codex-cli.json`: sanitized from Codex CLI 0.145.0's empty-project interaction/patch-review layout, retaining diff colors, normal/alternate switching, long lines, and resizing.
+- `tui-vim.json`: sanitized from a Vim 9 session with temporary, nonsensitive files, retaining full-screen TUI behavior, cursor addressing, wide characters, and styling.
 
-录制只保留发布契约内的 Unicode 宽字/组合字、逻辑行与 wrap、cursor 位置/可见性、正常/备用
-屏、application cursor/keypad、bracketed paste、16/256/RGB 色与 bold/dim/italic/underline/
-inverse。文本替换后逐段回放并在 barrier 处 resize；`player.mjs` 不连接外网、不读取 fixture
-目录以外的用户数据。
+Recordings retain only the release-contract features: wide/combining Unicode, logical lines and wrapping, cursor position/visibility, normal/alternate screens, application cursor/keypad, bracketed paste, 16/256/RGB colors, and bold/dim/italic/underline/inverse. After text replacement, segments are replayed with resizing at barriers. `player.mjs` neither connects externally nor reads user data outside the fixture directory.
 
-`snapshots/*.json` 是同一份语料经真实 Rust sessiond 生成的固定 ANSI snapshot。可用
-`COFLUX_VT_EXPORT_DIR=<dir> node --import tsx --test tests/src/local-first-vt-oracle.test.mjs`
-重新导出。（曾另有 macOS SwiftTerm 结构化比较门消费同一语料，已随 plan 087 撤回。）
+`snapshots/*.json` contains fixed ANSI snapshots generated from the same corpus by real Rust sessiond. Re-export with `COFLUX_VT_EXPORT_DIR=<dir> node --import tsx --test tests/src/local-first-vt-oracle.test.mjs`. A former macOS SwiftTerm structural-comparison gate consumed the same corpus; it was withdrawn with plan 087.

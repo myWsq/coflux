@@ -3,9 +3,54 @@
  * 渲染层假定它必定存在（缺失即启动期报错，见 renderer/desktop-bridge.ts）。主进程 / preload / 渲染层
  * 三方都只从这里 type-import；文件里只有类型，不带任何运行时代码。
  *
- * 桥接面刻意最小：服务器地址 / 自报 Origin / 通知 / Dock 角标 / 「聚焦工作区」回调 / 原生菜单命令 /
- * 更新提示 / 会话 token 存取。不暴露 Node、fs、shell 之类通用能力。
+ * 桥接面刻意最小：服务器地址（含「服务器地址…」原生对话框）/ 自报 Origin / 通知 / Dock 角标 /
+ * 「聚焦工作区」回调 / 原生菜单命令 / 更新提示 / 会话 token 存取 / 本机 daemon 的状态对象与窄动词。
+ * 不暴露 Node、fs、shell 之类通用能力。
  */
+
+/**
+ * 本机 daemon（plan 113）的可见状态。主进程按 ~/.coflux 与 launchd 的事实派生（main/daemon-state.ts），
+ * 渲染层只消费：
+ * - not-installed：plist 或二进制缺失（不分 npm / app 来源）
+ * - stopped：已接入但 launchd 里没有活进程
+ * - pending-auth：在跑、还没有 credentials.json（authToken 有值时可用当前登录态兑现）
+ * - running：在跑、已登记
+ * - update-ready：在跑、已登记、内置 supervisor 比在跑的新（只提示，点「重启」才换二进制）
+ * 完全磁盘访问单独用 fda 表达，与上面任一状态可叠加。
+ */
+export type DesktopDaemonStatus = "not-installed" | "stopped" | "pending-auth" | "running" | "update-ready";
+
+/** 主进程正在执行的动作；接入拆成 install（落盘三件 + settings + plist）与 start（launchctl load）两步 */
+export type DesktopDaemonBusy = "install" | "start" | "restart" | "stop" | "remove";
+
+export type DesktopDaemonFda = "granted" | "denied" | "unknown";
+
+export type DesktopDaemonState = {
+  runningTerminals?: number;
+  legacyInstallation?: boolean;
+  status: DesktopDaemonStatus;
+  /** 本构建是否自带三件；false（未打包 dev 实例没跑 stage 脚本）时「接入」「重启换新」都不可用，只能看状态 */
+  bundled: boolean;
+  /** 内置 supervisor 的版本戳原文（VERSION sidecar；解析不了如 dev 时永不提示升级） */
+  bundledVersion?: string;
+  /** 在跑的 supervisor 写的 ~/.coflux/supervisor-version 原文；缺失 = 112 之前的老版本 */
+  runningVersion?: string;
+  installed: boolean;
+  running: boolean;
+  registered: boolean;
+  /** 等待授权时 pending-auth.json 链接里的一次性 token；渲染层用 client.authorizeDevice(token) 兑现 */
+  authToken?: string;
+  /** 该链接的过期时刻（ms epoch）；daemon 到期会自动换新链接 */
+  authExpiresAt?: number;
+  fda: DesktopDaemonFda;
+  /** 本机设备在目录里的身份（credentials.json 的 daemonId），渲染层据此数本机运行中终端 */
+  daemonId?: string;
+  /** ~/.coflux/bin：给想在自己终端里直接用 coflux 的人看的路径提示（不改用户 shell 配置） */
+  binDir: string;
+  busy?: DesktopDaemonBusy;
+  /** 上一次动作失败的步骤与原因；渲染层显示后可 daemonDismissError 清掉 */
+  error?: { action: DesktopDaemonBusy; message: string };
+};
 
 export type DesktopUpdateStatus = "idle" | "checking" | "available" | "downloading" | "downloaded" | "not-available" | "error";
 
@@ -37,6 +82,13 @@ export type DesktopBridge = {
   readonly serverUrl: string;
   /** 主进程在 WebSocket 握手上改写的稳定 https Origin；渲染层经 deviceTransport.origin 上报同值 */
   readonly origin: string;
+  /**
+   * 打开主进程的「服务器地址…」原生对话框（plan 110）：与原生菜单同一个入口，无参、fire-and-forget。
+   * 渲染层自己弹不了——settings.json 路径与「打开设置文件」动作只有主进程有。
+   */
+  showServerInfo(): void;
+  connectLocal(): Promise<void>;
+  logoutLocal(): Promise<boolean>;
   notify(notification: DesktopNotification): void;
   /** 待处理工作区数；0 清除角标 */
   setBadge(count: number): void;
@@ -53,4 +105,22 @@ export type DesktopBridge = {
   getSessionToken(): Promise<string>;
   setSessionToken(token: string): void;
   clearSessionToken(): void;
+  /**
+   * 本机 daemon（plan 113）：一个状态对象 + 几个无参窄动词，主进程只做 ~/.coflux 落盘、launchctl、
+   * codesign 与 FDA 引导两跳，桥接面不因此长出 fs / shell / 任意命令能力。
+   * 「授权」在渲染层用 client.authorizeDevice(state.authToken) 完成；「暂不」是渲染层本地状态；
+   * 「我已勾选 FDA，重启服务」就是 daemonRestart()。
+   */
+  getDaemonState(): Promise<DesktopDaemonState>;
+  onDaemonState(listener: (state: DesktopDaemonState) => void): () => void;
+  /** 接入这台 Mac：落盘三件 + settings.json + LaunchAgent，然后 launchctl load */
+  daemonEnroll(): void;
+  /** 重启服务；内置 supervisor 更新时先换二进制再重启（会结束本机所有终端） */
+  daemonRestart(): void;
+  daemonStop(): void;
+  /** 移除接入：unload 并删 plist 与三个二进制，保留凭证 / 配置 / 日志（cofluxd uninstall 无 --purge 语义） */
+  daemonRemove(): void;
+  /** 打开系统设置的完全磁盘访问面板并在 Finder 定位 supervisor 二进制 */
+  daemonOpenFdaGuide(): void;
+  daemonDismissError(): void;
 };

@@ -1,4 +1,4 @@
-# Plan 025: 工作区「变更」tab + diff 查看视图
+# Plan 025: Workspace "Changes" tab and diff viewer
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -14,196 +14,98 @@
 - Priority: P2
 - Effort: M
 - Risk: LOW
-- Depends on: none（024 已 DONE，其数据链路是本 plan 的信号源）
+- Depends on: none (024 is DONE, its data link is the signal source of this plan)
 - Category: feature
 - Execution: subagent sonnet
 - Planned at: `e152ebb`, 2026-07-23
 
 ## Requirement
 
-产品定位是「Agent 指挥中心」：024 已让用户扫一眼知道每个工作区改了多少行
-（+X −Y），下一步是**看到改了什么**。在工作区顶栏 BranchMenu（分支按钮）右侧
-增加一个**常驻「变更」tab**，携带 +X −Y 徽标；点击切换主面板到变更视图，
-展示该工作区所有文件的 git diff（交互参考 Codex web 的 Diff tab 与 Cursor
-的文件卡片）。
+Plan 024 gives this Agent Command Center an overview of workspace changes through +X −Y. Next, show what changed: add a permanent **Changes tab** with those counts to the right of BranchMenu, switching the main panel to a workspace diff view inspired by Codex web’s Diff tab and Cursor’s file cards.
 
-做完后成立的事实：
-- 顶栏 BranchMenu 右侧、竖线分隔符左侧有一个常驻「变更」tab：有变更时显示
-  `+X −Y` 徽标，X=Y=0 时徽标隐藏但 tab 仍在；原顶栏独立的 +X −Y span 被
-  移除（并入徽标）；sidebar 工作区行的统计**保留不动**。
-- 点击「变更」tab 主面板切到变更视图；点击任意终端会话 tab 切回终端。
-  两种视图选中态互斥（「变更」激活时终端 tab 均不高亮）。终端实例保活
-  （显隐切换，不卸载）。
-- 变更视图：顶部汇总条（N 个文件、总 +X −Y）+ 单列可折叠文件卡片（卡片头 =
-  文件路径 + 该文件 +X −Y，可点击折叠/展开），正文为 unified diff，代码按
-  文件语言经 shiki 语法高亮，增/删行有可区分的背景与颜色（token 色）。
-- diff 范围与 024 统计**同一基准**：merge-base(default_branch, HEAD) 到
-  工作树的累积 diff，untracked 新文件以「全新增」形式展示。tab 徽标数字与
-  页面内容一致。
-- 视图打开期间，工作区 additions/deletions 广播值变化时自动重拉 diff，
-  文件卡片折叠状态按路径保留。
-- 无变更时显示空态；daemon 离线或 exec 失败时显示错误提示（不白屏、不 spin
-  卡死）。
+Required outcomes:
+- Place Changes between BranchMenu and the vertical separator. Show its +X −Y badge only for nonzero counts, while keeping the tab visible at 0/0. Remove the standalone top-bar counts now incorporated into the badge. Preserve sidebar statistics.
+- Clicking Changes opens the diff panel; clicking any terminal tab returns to that terminal. Selected states are mutually exclusive. Keep terminal instances mounted and toggle visibility.
+- Show a summary (N files, total +X −Y), then one column of collapsible file cards. Headers contain path and per-file counts; bodies show unified diff with Shiki language highlighting and token-based addition/deletion backgrounds and colors.
+- Match plan 024’s cumulative merge-base(default_branch, HEAD)-to-working-tree range, including untracked files as additions. Badge numbers and displayed content must agree.
+- While Changes is active, refetch when broadcast additions/deletions change. Preserve each card’s collapsed state by path.
+- Show an empty state for no changes and explicit errors for offline daemons or failed exec, never a blank screen or endless spinner.
 
-正确解 vs 相邻错误解的分界：
-- diff 基准必须与 024 一致（merge-base 累积 + untracked）。只展示
-  `git diff`（未提交脏改动）的实现是错的——agent commit 后页面变空但
-  tab 数字非零，自相矛盾。
-- untracked 文件必须出现在文件列表中（渲染为全新增），否则数字对不上。
-- 后端（proto/worker/server）**零改动**。新增任何 proto 消息或 worker
-  计算路径都是错的——现有 exec RPC 已覆盖。
+The boundary between correct solution vs plausible but incorrect solutions:
+- The diff base must be consistent with 024 (merge-base + untracked). Show only the implementation of `git diff` (dirty changes not committed) is wrong - the page becomes empty after agent commit but the tab number is non-zero, which is contradictory.
+- The untracked file must appear in the file list (rendered as newly added), otherwise the numbers will not match.
+- Backend (proto/worker/server) **zero changes**. Add any proto messages or workers the calculated paths are all wrong - the existing exec RPC already covers these operations.
 
 ## Decisions & tradeoffs
 
-- **数据获取：复用现有 exec RPC，后端零改动**。web 端用
-  `execInWorkspace(workspaceId, command, args)`（注意函数名，探索期笔记里
-  误记为 sendExec）按需跑 git 命令拿 diff 文本。
-  Rejected: 新增 `WorkspaceDiffContent` proto + worker 计算 —— exec 链路
-  已有请求关联（crypto.randomUUID）、超时、断线清理与黑盒测试覆盖，新链路
-  纯属重复。
-  Based on: `apps/web/src/client/store.ts:369-374`（execInWorkspace）、
-  `apps/server/src/hub.ts:929-935`（clientExec relay）、
-  `crates/worker/src/ops.rs:28`（run_command）、`tests/src/contract.test.mjs`
-  （exec relay 已有黑盒覆盖）。
+- **Use existing exec RPC with no backend changes.** Call `execInWorkspace(workspaceId, command, args)` — exploration notes incorrectly called it sendExec—to run Git as needed. A WorkspaceDiffContent proto/worker path would duplicate request IDs, timeout/disconnect handling, and existing black-box coverage. Evidence: `apps/web/src/client/store.ts:369-374`, `apps/server/src/hub.ts:929-935`, `crates/worker/src/ops.rs:28`, and `tests/src/contract.test.mjs`.
 
-- **diff 基准与 024 完全一致**：以 web store 中该 workspace 所属 project 的
-  `defaultBranch` 为准（protocol 类型已带该字段），exec
-  `git merge-base <defaultBranch> HEAD` 求 base；解析失败（孤儿分支等）回退
-  HEAD 作 base——与 worker 侧 `diff_stat` 的回退语义相同。正文用
-  `git diff <base>`（单 rev = base 对比工作树），untracked 列表用
-  `git ls-files --others --exclude-standard`。per-file 统计用
-  `git diff --numstat <base>`。
-  Rejected: `git diff HEAD` —— 仅未提交改动，与 024 累积语义矛盾（见
-  Requirement 分界）。Rejected: web 端自己猜默认分支 —— project 实体有
-  权威值。
-  Based on: `crates/worker/src/git.rs:48`（024 的 diff_stat 基准与回退）、
-  `packages/protocol/src/gen/coflux/v1/common_pb.ts:102`（Project.defaultBranch）。
+- **Match plan 024’s exact base.** Read the project’s authoritative defaultBranch from the web store, run `git merge-base <defaultBranch> HEAD`, and fall back to HEAD on failure, matching worker diff_stat. Use `git diff <base>` for tracked content, `git ls-files --others --exclude-standard` for untracked files, and `git diff --numstat <base>` for per-file counts. Reject `git diff HEAD` and guessing the default branch. Evidence: `crates/worker/src/git.rs:48`, `packages/protocol/src/gen/coflux/v1/common_pb.ts:102`.
 
-- **shiki 按文件语言高亮，语言按需加载，单暗色主题**。用户明确选择 shiki
-  （拒绝了纯行级着色方案）。约束：①按文件扩展名映射语言高亮代码内容，
-  未知扩展名/无语言降级纯文本渲染；②语言资源必须按需懒加载，不得把全部
-  语言打进主 bundle（fine-grained `shiki/core` 或 `shiki/bundle/web` 均可，
-  executor 自定）；③只需一套暗色主题——web 是纯暗色应用，无主题切换。
-  ④增/删行的背景与 +/− 颜色用现有 token（`text-success`/`text-destructive`
-  等），不用 shiki 主题色或裸 hex。
-  Rejected: `lang='diff'` 整体高亮 —— 只给 +/− 行着色、代码本身无语言
-  token，达不到用户选 shiki 的意图（接近 Cursor/GitHub 档次）。
-  Rejected: dual themes / CSS variables 主题 —— 应用无亮色模式，纯增复杂度。
-  Based on: `apps/web/src/index.css:30`（`color-scheme: dark` 固定，无
-  主题切换代码）、`apps/web/package.json`（现无任何高亮/diff 依赖）。
+- **Use Shiki with file-language highlighting, on-demand languages, and one dark theme.** Map extensions to languages; fall back to plain text for unknown types. Lazy-load languages through shiki/core or shiki/bundle/web as the executor chooses; never bundle every language into the main chunk. Use existing tokens such as text-success/text-destructive for added/deleted line backgrounds and markers, not raw hex or theme-specific diff colors. The user rejected line-only coloring: `lang='diff'` does not syntax-highlight the code itself. Dual themes/CSS-variable theme machinery is unnecessary in this `color-scheme: dark` app. Evidence: `apps/web/src/index.css:30` and apps/web/package.json, which currently has no highlighting/diff dependencies.
 
-- **视图切换是 WorkspaceTerminal 内部本地 state（"terminal" | "changes"），
-  非路由**。项目无 react-router，一切视图切换靠 state 显隐；终端面板保持
-  现有保活模式（隐藏不卸载）。「变更」激活时终端 tab 去高亮；点终端 tab
-  回 terminal 视图并激活该 task。
-  Rejected: 引入路由 —— 项目既有约定是 state 显隐（workbench 工作区切换
-  即此模式），路由是无端新范式。
-  Based on: `apps/web/src/components/workbench/workspace-terminal.tsx:511-529`
-  （TerminalPane 按 active 显隐保活）、`workbench.tsx:258-273`（同模式）。
+- **Keep local WorkspaceTerminal state (`"terminal" | "changes"`), without routing.** Preserve mounted terminals, remove their selected highlight while Changes is active, and switch back/activate on terminal-tab clicks. Routing would add a new paradigm to the existing state-driven workspace visibility model. Evidence: `apps/web/src/components/workbench/workspace-terminal.tsx:511-529`, `workbench.tsx:258-273`.
 
-- **刷新信号：监听 store 里该 workspace 的 additions/deletions**（024 的
-  worker 3s 轮询 → 变化才广播 → store 更新，信号免费），值变化且变更视图
-  处于激活态时重拉 diff；**非激活时不拉取**（切到 changes 视图时拉当次）。
-  折叠状态按文件路径保留，刷新不重置。
-  Rejected: 变更视图自己起轮询 —— 与 024「变化才动」的约定重复且浪费。
-  Rejected: 后台常拉（视图未打开也拉）—— 每工作区 3s 一次全量 diff 文本
-  relay，纯浪费。
-  Based on: `apps/server/src/hub.ts:386-393`（workspaceDiff → 广播）、
-  `workspace-terminal.tsx:415-423`（web 已实时持有 additions/deletions）。
+- **Use store additions/deletions as the refresh signal.** Plan 024 already polls every 3s and broadcasts only changes. Refetch only while Changes is active, including on entry; keep collapsed states by file path. Do not duplicate polling or transfer full diff text in the background. Evidence: `apps/server/src/hub.ts:386-393`, `workspace-terminal.tsx:415-423`.
 
-- **顶栏统计移入徽标，sidebar 统计保留**（decided while planning，用户在
-  departure check 确认「统计放在 tab 上」指顶栏一处；sidebar 是指挥中心
-  总览，024 明确要的，本需求未触及）。
-  Based on: `workspace-terminal.tsx:415-423`（待移除的顶栏 span）、
-  `apps/web/src/components/workbench/sidebar.tsx:305-311`（保留）。
+- **Move top-bar counts into the badge; retain sidebar counts.** Preflight confirmed that "put statistics on the tab" refers only to the top bar; plan 024’s sidebar overview remains. Evidence: remove `workspace-terminal.tsx:415-423`, retain `apps/web/src/components/workbench/sidebar.tsx:305-311`.
 
-- **空态与错误态**（decided while planning）：additions=deletions=0 时直接
-  渲染空态（「无变更」），不发 exec；exec 返回 `ok=false` 或 `error` 非空
-  （含 relay 超时「超时」、「daemon 掉线」）时显示错误提示与重试按钮。
-  Based on: `apps/web/src/client/store.ts:288-292`（execResult resolve 形态，
-  错误也走 resolve 不 reject）、`apps/server/src/hub.ts:181-185,653`
-  （relayError 回包）。
+- **Empty/error states (decided during planning):** if additions=deletions=0, render no changes without exec. If exec returns ok=false or nonempty error, including timeout/daemon disconnected, show the error and Retry. execResult resolves even for errors rather than rejecting. Evidence: `apps/web/src/client/store.ts:288-292`, `apps/server/src/hub.ts:181-185,653`.
 
-- **不新增自动化测试**（decided while planning）：本 plan 后端零改动，全部
-  改动在 web 展示层；项目无前端单测基建（无 vitest/jest），黑盒测试只覆盖
-  协议/服务端行为且 exec relay 已有覆盖。验收靠 typecheck+build 与
-  acceptance 手验。
-  Based on: `apps/web/package.json`（无测试 script）、
-  `tests/src/contract.test.mjs`（exec relay 既有覆盖）。
+- **No new automated tests (decided during planning).** This is a web-only presentation change; the project has no vitest/jest infrastructure, and tests/src/contract.test.mjs already covers exec relay. Use typecheck/build and manual acceptance.
 
 ## Direction
 
-### Milestone 1: 「变更」tab 与视图骨架
+### Milestone 1: "Change" tab and view skeleton
 
-顶栏出现常驻「变更」tab（含徽标、0 值隐藏数字），点击切换到变更视图占位，
-与终端 tab 选中态互斥，终端保活；原顶栏 +X −Y span 移除。
-Validation: `pnpm --filter @coflux/web build` -> exit 0。
+Add the permanent Changes tab with a badge hidden at 0/0. Switch to its placeholder panel, keep terminal tabs mutually exclusive and mounted, and remove the old standalone top-bar counts. Validation: `pnpm --filter @coflux/web build` → exit 0.
 
-### Milestone 2: diff 拉取与文件卡片渲染
+### Milestone 2: diff pulling and file card rendering
 
-变更视图经 exec RPC 拿 merge-base 基准的累积 diff + untracked，渲染汇总条 +
-可折叠文件卡片 + shiki 高亮正文；空态/错误态可达。
-Validation: `pnpm --filter @coflux/web build` -> exit 0。
+Fetch cumulative merge-base diff plus untracked files via exec. Render summary, collapsible cards, Shiki content, and reachable empty/error states. Validation: `pnpm --filter @coflux/web build` → exit 0.
 
-### Milestone 3: 自动刷新与状态保留
+### Milestone 3: Automatic refresh and state retention
 
-additions/deletions 变化触发重拉（仅视图激活时），折叠态按路径保留。
-Validation: `pnpm --filter @coflux/web build` -> exit 0。
+Refetch on additions/deletions changes only while active, preserving collapse by path. Validation: `pnpm --filter @coflux/web build` → exit 0.
 
 ## Landmines
 
-- **exec 不走 shell**：`run_command` 直接 spawn command+args
-  （`crates/worker/src/ops.rs:28-38`），不能用管道、`&&`、`$()`。多条 git
-  命令 = 多次 execInWorkspace 调用。
-- **非 ASCII 路径转义**：git 默认把中文等路径转义成 `\346\226\207` 八进制。
-  跑 diff/ls-files 时带 `-c core.quotepath=false`，否则文件名显示乱码且
-  路径匹配（折叠态、untracked 合并）失效。
-- **`git diff --no-index` 有差异时 exit code 为 1**：若用它渲染 untracked
-  文件内容，exit 1 + `ok=true` 是正常成功，不能当错误处理
-  （`ops.rs:44-48` 会原样回带 exit_code）。
-- **exec 超时上限在 server**：`execTimeout = min(execMaxTimeoutMs, 请求值||默认)`
-  （`apps/server/src/hub.ts:933`），worker 默认 60s（`ops.rs:12`）。大仓库
-  diff 文本可达数 MB，stdout 无截断，全量走 relay——正常规模没问题，但
-  不要逐 untracked 文件起几十次 exec（一次 ls-files 拿列表后合并处理）。
-- **顶栏 BranchMenu 的 ghost 按钮有内联样式压 StyleX 的既有 hack**
-  （`workspace-terminal.tsx:404-410`），新 tab 按钮样式跟随顶栏现有手写
-  Tailwind + token 风格（`apps/web/.claude/CLAUDE.md` 约定：禁裸 hex/px，
-  终端工作台区域按现状走 Tailwind 原子类而非强套 Astryx 页面组件）。
-- **workspace.additions/deletions 是 int32 恒有值**（024 落库默认 0），
-  判空态用 `=== 0`，不要当 optional 处理。
+- **exec does not run through a shell**: `run_command` directly spawn command+args (`crates/worker/src/ops.rs:28-38`), pipes, `&&`, `$()` cannot be used. Multiple git command = multiple execInWorkspace calls.
+- **Non-ASCII path escaping**: git escapes Chinese and other paths into `\346\226\207` octal by default. Run diff/ls-files with `-c core.quotepath=false`, otherwise the file name will be garbled and Path matching (collapsed state, untracked merge) fails.
+- **`git diff --no-index` exit code is 1** when there is a difference: if it is used to render untracked File content, exit 1 +`ok=true` is a normal success and cannot be treated as an error. (`ops.rs:44-48` will bring back exit_code unchanged).
+- **exec timeout upper limit is on server**: `execTimeout = min(execMaxTimeoutMs, requested value || default)` (`apps/server/src/hub.ts:933`), worker defaults to 60s (`ops.rs:12`). large repository the diff text can be up to several MB, stdout is not truncated, and the entire amount is relayed - normal scale is no problem, but do not execute untracked files dozens of times one by one (use ls-files once to get the list and then merge it).
+- **BranchMenu’s ghost button already uses inline styles to suppress a StyleX issue** (`workspace-terminal.tsx:404-410`). Follow the existing handwritten Tailwind/token top-bar style, per apps/web/.claude/CLAUDE.md; no raw hex/px or forced Astryx page layout.
+- **workspace.additions/deletions are int32 fields, defaulting to zero in plan 024’s DB.** Test `=== 0`; do not treat them as optional.
 
 ## Scope
 
 In scope:
 - `apps/web/src/components/workbench/workspace-terminal.tsx`
-- `apps/web/src/components/workbench/` 下新增变更视图组件文件
-- `apps/web/package.json`、`pnpm-lock.yaml`（新增 shiki 依赖）
-- `apps/web/src/index.css`（如需少量 diff 渲染样式）
+- Added change view component file under `apps/web/src/components/workbench/`
+- `apps/web/package.json`, `pnpm-lock.yaml` (new shiki dependency)
+- `apps/web/src/index.css` (if a small amount of diff rendering style is required)
 
 Out of scope:
-- `proto/`、`crates/`、`apps/server/`、`packages/protocol/` —— 后端零改动是
-  本 plan 的决策红线
-- `apps/web/src/components/workbench/sidebar.tsx` —— 统计保留原样
-- diff 的 review/评论/勾选文件等交互 —— 本期只读查看
-- 亮色主题适配 —— 应用无亮色模式
+- `proto/`, `crates/`, `apps/server/`, `packages/protocol/` — Zero changes to the backend are the decision-making red line of this plan
+- `apps/web/src/components/workbench/sidebar.tsx` — Leave statistics as is
+- diff's review/comment/check file and other interactions - this issue is read-only
+- Bright color theme adaptation - apply no bright color mode
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
 | Typecheck + build | `pnpm --filter @coflux/web build` | exit 0 |
-| 黑盒回归（后端未动，跑通即可） | `cd tests && COFLUX_TEST_PG_URL=<54322 直连口> pnpm test` | exit 0 (acceptance) |
-| Playwright 手验变更视图 | 本机 `pnpm dev` + daemon 后浏览器操作 | 视图/徽标/刷新符合 Requirement (acceptance) |
+| Black-box regression (the backend is not touched, just run through) | `cd tests && COFLUX_TEST_PG_URL=<54322 direct connection URL> pnpm test` | exit 0 (acceptance) |
+| Playwright manual change view | Native `pnpm dev`+ daemon post-browser operation | View/logo/refresh meets Requirement (acceptance) |
 
 ## Done criteria
 
-- [ ] `pnpm --filter @coflux/web build` 通过。
-- [ ] 顶栏常驻「变更」tab + 徽标行为符合 Requirement（0 值隐藏数字）；原顶栏
-      独立统计 span 已移除；sidebar 统计未动。
-- [ ] 变更视图展示与 024 同基准的累积 diff（含 untracked 全新增），shiki
-      按语言高亮，文件卡片可折叠，汇总条正确。
-- [ ] additions/deletions 变化时激活态视图自动重拉，折叠态保留。
-- [ ] 空态与错误态可达且不卡死。
+- [ ] `pnpm --filter @coflux/web build` passed.
+- [ ] The behavior of the permanent "Change" tab + logo in the top bar complies with Requirement (0 value hides the number); the original top bar the independent statistics span has been removed; the sidebar statistics remain unchanged.
+- [ ] Change the view to display the cumulative diff on the same basis as 024 (including untracked newly added), shiki Highlighting by language, file cards collapsible, summary bars correct.
+- [ ] When additions/deletions change, the active state view is automatically redrawn, and the collapsed state is retained.
+- [ ] The empty state and error state are reachable and not stuck.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
 - [ ] `plans/README.md` status is updated.
@@ -211,18 +113,12 @@ Out of scope:
 ## STOP conditions
 
 - A fact cited under Decisions & tradeoffs no longer holds.
-- The outcome requires out-of-scope files（尤其：发现必须改 proto/worker/server
-  才能实现——停下报告，不得越线）。
+- The outcome requires out-of-scope files (especially: it is found that proto/worker/server must be changed to achieve this - stop and report, do not cross the line).
 - A validation command fails twice after one reasonable fix.
-- shiki 无法在语言懒加载约束下集成（主 bundle 不可避免地全量膨胀）——停下
-  报告，不得擅自降级为无高亮方案。
+- shiki cannot be integrated under language lazy loading constraints (the main bundle is inevitably fully bloated) - stop Report, and may not be downgraded to a non-highlighted plan without authorization.
 
 ## Maintenance notes
 
-- 变更视图的 diff 基准逻辑（merge-base + 回退 HEAD + untracked）与
-  `crates/worker/src/git.rs` 的 `diff_stat` 是**语义镜像**：一侧改基准语义，
-  另一侧必须同步，否则 tab 数字与页面内容漂移。
-- exec 拉全量 diff 文本在超大 diff（数十 MB）下会变慢；若未来遇到，升级
-  方向是按文件懒拉（先 numstat 列表，展开卡片时再拉单文件 diff），不需要
-  动协议。
-- shiki 语言 chunk 由构建器代码分割产生，dist 文件数量增多是预期行为。
+- The view’s merge-base/HEAD-fallback/untracked logic semantically mirrors diff_stat in crates/worker/src/git.rs. Change both together or badge counts and content drift.
+- Full diff snapshots become slow at tens of megabytes. If needed later, fetch numstat first and load each file’s diff on expansion; no protocol change is required.
+- shiki language chunks are generated by builder code splitting, increasing the number of dist files is expected behavior.

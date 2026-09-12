@@ -124,6 +124,12 @@ jobs:
         with:
           node-version: 22
       - run: corepack enable
+      - name: 统一产品版本与发布约束
+        run: |
+          node scripts/product-version.mjs --check
+          node scripts/release-notes.mjs --check
+          node --test scripts/product-version.test.mjs
+
       - run: pnpm install --frozen-lockfile
 
       - name: Git diff 格式检查
@@ -142,15 +148,15 @@ jobs:
       - name: desktop 类型检查 + 单元测试 + 构建
         run: pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test && pnpm -C apps/desktop build
 
-      - name: Rust 单元测试（protocol/supervisor/worker/relay）
+      - name: Rust 单元测试（protocol/supervisor/worker/relay/cli）
         env:
           RUSTFLAGS: -D warnings
-        run: cargo test -p coflux-protocol -p coflux-supervisor -p coflux-worker -p coflux-relay
+        run: cargo test -p coflux-protocol -p coflux-supervisor -p coflux-worker -p coflux-relay -p coflux-cli
 
       - name: Rust 构建
         env:
           RUSTFLAGS: -D warnings
-        run: cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay
+        run: cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay -p coflux-cli
 
       - name: client 状态机测试（DeviceRouter transport/holder/ACK）
         run: node --import tsx --test packages/client/src/*.test.ts

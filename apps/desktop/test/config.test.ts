@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
 
+import { CLAUDE_PLUGIN_ENV, CLAUDE_PLUGIN_RESOURCE_DIR, DAEMON_BINARIES, DAEMON_RESOURCE_DIR, DAEMON_VERSION_FILE } from "../src/main/daemon-paths";
+
 // 发布配置（electron-builder.yml）与发布 workflow 能被解析且守住 plan 103 的硬约束。
 const desktopRoot = resolve(import.meta.dirname, "..");
 const repoRoot = resolve(desktopRoot, "../..");
@@ -23,6 +25,7 @@ type Builder = {
     minimumSystemVersion: string;
     extendInfo?: Record<string, string>;
     extraResources?: { from: string; to: string }[];
+    binaries?: string[];
   };
   publish: { provider: string; url: string; channel: string };
 };
@@ -61,12 +64,67 @@ test("electron-builder.yml：签名公证、Fuses、arm64 dmg+zip、generic 更�
   assert.equal(config.publish.url, "https://raw.githubusercontent.com/myWsq/coflux/desktop-updates");
 });
 
+test("electron-builder.yml：内置 daemon 三件经 extraResources 进 Resources/daemon、mac.binaries 显式签名（plan 113）", () => {
+  const config = parse(readFileSync(resolve(desktopRoot, "electron-builder.yml"), "utf8")) as Builder;
+  // 三件 + VERSION 只能走 extraResources（asar 完整性校验开着，files 只打 out/** 与 package.json）
+  const daemon = config.mac.extraResources?.find((item) => item.to === DAEMON_RESOURCE_DIR);
+  assert.ok(daemon, "extraResources 缺少内置 daemon 目录");
+  assert.equal(daemon.from, "build/daemon"); // scripts/stage-daemon.mjs 的固定落位目录
+  assert.ok(!config.files.some((pattern) => pattern.includes("daemon")), "内置产物不得混进 files/asar");
+  // 三件都在 mac.binaries 里（Resources 下的裸可执行文件，osx-sign 默认扫不到），路径按 .app 根解析
+  for (const name of DAEMON_BINARIES) {
+    assert.ok(config.mac.binaries?.includes(`Contents/Resources/${DAEMON_RESOURCE_DIR}/${name}`), `mac.binaries 缺少 ${name}`);
+  }
+  assert.equal(config.mac.binaries?.length, DAEMON_BINARIES.length);
+
+  // stage 脚本与主进程常量同值：脚本里的字面量不能漂
+  const stage = readFileSync(resolve(desktopRoot, "scripts/stage-daemon.mjs"), "utf8");
+  for (const name of DAEMON_BINARIES) assert.match(stage, new RegExp(`"${name}"`));
+  assert.match(stage, new RegExp(`"${DAEMON_VERSION_FILE}"`));
+  assert.match(stage, /"build", "daemon"/);
+  assert.match(stage, /COFLUX_DESKTOP_DAEMON_DIR/); // 显式输入：缺失即失败，不静默出无 daemon 的包
+  assert.match(stage, /process\.exit\(1\)/);
+
+  // pack / dist 都先跑 stage 脚本
+  const pkg = JSON.parse(readFileSync(resolve(desktopRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  assert.match(pkg.scripts.pack, /^node scripts\/stage-daemon\.mjs && /);
+  assert.match(pkg.scripts.dist, /^node scripts\/stage-daemon\.mjs && /);
+  assert.equal(pkg.scripts["stage-daemon"], "node scripts/stage-daemon.mjs");
+});
+
+test("内置 coflux 插件目录随 daemon 资源目录进包、不进 mac.binaries（plan 115）", () => {
+  const config = parse(readFileSync(resolve(desktopRoot, "electron-builder.yml"), "utf8")) as Builder;
+  // 插件跟着 build/daemon 整目录走同一条 extraResources，不需要新的 from/to
+  const daemon = config.mac.extraResources?.find((item) => item.to === DAEMON_RESOURCE_DIR);
+  assert.equal(daemon?.from, "build/daemon");
+  assert.ok(!config.mac.extraResources?.some((item) => item.to.includes(CLAUDE_PLUGIN_RESOURCE_DIR)), "插件不另立 extraResources 条目");
+  // node / sh 脚本不是 Mach-O：进了 mac.binaries 会让签名步骤直接失败（binaries 数量 == 三件已在上一条守住）
+  assert.ok(!config.mac.binaries?.some((path) => path.includes(CLAUDE_PLUGIN_RESOURCE_DIR)), "插件目录不得进 mac.binaries");
+
+  // stage 脚本与主进程常量同值，且从仓库内的 integrations/claude-plugin 取（不是 CI 的新输入），缺失即失败
+  const stage = readFileSync(resolve(desktopRoot, "scripts/stage-daemon.mjs"), "utf8");
+  assert.match(stage, new RegExp(`"${CLAUDE_PLUGIN_RESOURCE_DIR}"`));
+  assert.match(stage, /"integrations", "claude-plugin"/);
+  assert.match(stage, /cpSync\(/); // 整目录逐字节拷，不做任何改写
+  assert.match(stage, /插件目录不存在/);
+
+  // 来源目录在仓库里且是那份交付目录（改写它等于改插件，stage 只搬运）
+  const source = resolve(repoRoot, "integrations/claude-plugin");
+  for (const entry of [".claude-plugin/plugin.json", "hooks/hooks.json", "skills/coflux/SKILL.md"]) {
+    assert.ok(existsSync(resolve(source, entry)), `插件交付目录缺少 ${entry}`);
+  }
+
+  // 变量名是 supervisor 侧 shell 集成认的那一个契约，别漂
+  assert.equal(CLAUDE_PLUGIN_ENV, "COFLUX_CLAUDE_PLUGIN_DIR");
+});
+
 type Workflow = {
   on: { push: { tags: string[] } };
   permissions: { contents: string };
   jobs: Record<
     string,
     {
+      needs?: string | string[];
       environment?: string;
       permissions?: { contents?: string };
       steps: { name?: string; env?: Record<string, string>; run?: string; uses?: string; with?: Record<string, string> }[];
@@ -74,9 +132,52 @@ type Workflow = {
   >;
 };
 
-test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 secret 明确失败、先产物后清单", () => {
+test("desktop-release.yml：并行 daemon job 同 SHA cargo build 三件、统一产品版本戳、打包 job 落位并校验签名（plan 113）", () => {
   const workflow = parse(readFileSync(resolve(repoRoot, ".github/workflows/desktop-release.yml"), "utf8")) as Workflow;
-  assert.deepEqual(workflow.on.push.tags, ["desktop-v*"]);
+  const daemon = workflow.jobs.daemon;
+  assert.ok(daemon, "缺少 daemon job");
+  assert.equal(daemon.environment, undefined, "daemon job 不需要签名 secret，不得挂 release-signing");
+  assert.equal(daemon.needs, "metadata");
+  const cargo = daemon.steps.find((step) => step.run?.includes("cargo build"));
+  assert.ok(cargo?.run, "缺少 cargo build 步骤");
+  assert.match(cargo.run, /--release --target aarch64-apple-darwin/);
+  for (const pkg of ["coflux-supervisor", "coflux-worker", "coflux-cli"]) assert.match(cargo.run, new RegExp(`-p ${pkg}\\b`));
+  assert.equal(cargo.env?.RUSTFLAGS, "-D warnings");
+  // 桌面编译期版本与统一产品 tag 一致。
+  assert.equal(cargo.env?.COFLUX_RELEASE_VERSION, "v${{ needs.metadata.outputs.version }}");
+  const stage = daemon.steps.find((step) => step.run?.includes("VERSION"));
+  assert.ok(stage?.run, "缺少写 VERSION 的整理步骤");
+  assert.equal(stage.env?.COFLUX_RELEASE_VERSION, cargo.env?.COFLUX_RELEASE_VERSION, "VERSION 与编译期版本戳必须同值");
+  for (const name of DAEMON_BINARIES) assert.match(stage.run, new RegExp(name));
+  const upload = daemon.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@"));
+  assert.equal(upload?.with?.name, "desktop-daemon-bundle");
+
+  const build = workflow.jobs.build;
+  assert.deepEqual(build.needs, ["metadata", "daemon"]);
+  const download = build.steps.findIndex((step) => step.uses?.startsWith("actions/download-artifact@") && step.with?.name === "desktop-daemon-bundle");
+  const stageIndex = build.steps.findIndex((step) => step.run?.includes("stage-daemon"));
+  const packIndex = build.steps.findIndex((step) => step.run?.includes("electron-builder --mac"));
+  assert.ok(download >= 0, "打包 job 未下载 daemon 产物");
+  assert.ok(stageIndex > download && stageIndex < packIndex, "stage 脚本必须在下载之后、打包之前");
+  assert.equal(build.steps[stageIndex].env?.COFLUX_DESKTOP_DAEMON_DIR, "${{ runner.temp }}/daemon-bundle");
+  // 校验步骤：三件存在 + codesign --verify --strict + Developer ID + VERSION 匹配
+  const verify = build.steps.find((step) => step.run?.includes("stapler validate"));
+  assert.ok(verify?.run, "缺少校验步骤");
+  assert.match(verify.run, new RegExp(`Contents/Resources/${DAEMON_RESOURCE_DIR}`));
+  for (const name of DAEMON_BINARIES) assert.match(verify.run, new RegExp(name));
+  assert.match(verify.run, /codesign --verify --strict[^\n]*\$daemon\/\$name/);
+  assert.match(verify.run, /Authority=Developer ID Application/);
+  assert.ok(verify.run.includes("v${{ needs.metadata.outputs.version }}"));
+});
+
+test("统一发布：桌面仅受调用、release-signing 环境、缺 secret 明确失败、先产物后清单", () => {
+  const workflow = parse(readFileSync(resolve(repoRoot, ".github/workflows/desktop-release.yml"), "utf8")) as Workflow;
+  assert.ok(Object.hasOwn(workflow.on, "workflow_call"));
+  assert.equal(workflow.on.push, undefined);
+  assert.equal(workflow.jobs.release, undefined);
+  const unified = parse(readFileSync(resolve(repoRoot, ".github/workflows/release.yml"), "utf8")) as Workflow;
+  assert.deepEqual(unified.on.push.tags, ["v*"]);
+  assert.deepEqual(unified.jobs.release.needs, ["metadata", "sign", "desktop"]);
   assert.equal(workflow.permissions.contents, "read");
 
   const build = workflow.jobs.build;
@@ -112,20 +213,18 @@ test("desktop-release.yml：desktop-v* 触发、release-signing 环境、缺 sec
   assert.equal(pack.env?.APPLE_API_ISSUER, "${{ secrets.NOTARY_ISSUER_ID }}");
   assert.ok(!build.steps.some((step) => step.name?.includes("R2")), "R2 上传已撤，不该再有");
 
-  // release job：先把安装包 + blockmap 上 Release，再改写清单为绝对地址、推 desktop-updates 分支——
-  // 清单永远不会先于它指向的文件出现。
-  const release = workflow.jobs.release;
+  // 所有产物先统一发布，稳定桌面清单随后推进。
+  const release = unified.jobs.release;
   assert.equal(release.permissions?.contents, "write");
-  const publishIndex = release.steps.findIndex((step) => step.uses?.startsWith("softprops/action-gh-release@"));
-  assert.ok(publishIndex >= 0, "缺少 GitHub Release 步骤");
-  assert.match(release.steps[publishIndex].with?.files ?? "", /blockmap/); // 差分更新要 blockmap 也在 Release 上
-  const rewriteIndex = release.steps.findIndex((step) => step.run?.includes("releases/download"));
-  // release 说明那步也提到 desktop-updates，按「git push + 分支名」定位真正的推送步
-  const pushIndex = release.steps.findIndex((step) => step.run?.includes("git push") && step.run.includes("desktop-updates"));
-  assert.ok(rewriteIndex > publishIndex, "清单改写必须在 Release 上传之后");
-  assert.ok(pushIndex > rewriteIndex, "推分支必须在清单改写之后");
-  assert.match(release.steps[pushIndex].run ?? "", /latest-mac\.yml/);
-  assert.match(release.steps[pushIndex].env?.GH_TOKEN ?? "", /github\.token/);
+  const publish = release.steps.find(step => step.uses?.startsWith("softprops/action-gh-release@"));
+  assert.match(publish?.with?.files ?? "", /signed-release\/artifacts/);
+  assert.match(publish?.with?.files ?? "", /desktop-assets\/\*\.blockmap/);
+  const feed = unified.jobs["desktop-updates"];
+  assert.deepEqual(feed.needs, ["metadata", "release"]);
+  const push = feed.steps.find(step => step.run?.includes("git push"));
+  assert.match(push?.run ?? "", /desktop-update-feed\.mjs/);
+  assert.match(push?.env?.GH_TOKEN ?? "", /github\.token/);
+
 });
 
 test("ci.yml 带 desktop 质量门", () => {

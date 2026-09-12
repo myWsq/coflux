@@ -11,6 +11,7 @@ export function MainPage({ initialToken }: { initialToken: string }) {
   const [client] = useState(() =>
     createCofluxClient({
       serverUrl: SERVER_URL,
+      onAuthenticated: () => { void desktop.connectLocal().catch((error) => console.error("本机接入失败", error)); },
       // 会话 token 的真相在主进程 safeStorage（plan 106）：启动时已经取回，这里只在内存持有并把变化转发回去。
       tokenStorage: createBridgeTokenStorage(desktop, initialToken),
       buildId: BUILD_ID,

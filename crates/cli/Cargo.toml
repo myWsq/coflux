@@ -1,0 +1,24 @@
+[package]
+name = "coflux-cli"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+# 与 npm coflux 提供相同操作契约；桌面内置此零 Node 依赖版本。
+[[bin]]
+name = "coflux"
+path = "src/main.rs"
+
+[dependencies]
+# 只为 LOCAL_GATEWAY_PORT 常量（与 worker / npm 版 CLI 同一真相源）。
+coflux-protocol = { path = "../protocol" }
+serde_json.workspace = true
+# getppid：/agent 与 /hook 请求体都带 ppid，worker 用调用方进程反查会话归属。
+libc = "0.2"
+# 账号命令使用系统独立的 HTTPS 通道，不要求 Node 或 MCP 宿主。
+ureq = { version = "2", features = ["json"] }
+url = "2"
+sha2 = "0.10"
+regex = "1"
+signal-hook = "0.3"
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }

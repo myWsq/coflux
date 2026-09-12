@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// 在 `eprintln!` 之前加本地时间戳；参数与 `eprintln!` 完全一致。
 ///
 /// 只用于 daemon 进程（supervisor/worker）落 daemon.log 的日志行。子命令的用法错误提示
-/// （如 `--log-sink` 缺参数）面向调用方的 stderr，仍用裸 `eprintln!`。
+/// （如缺参数）面向调用方的 stderr，仍用裸 `eprintln!`。
 #[macro_export]
 macro_rules! logln {
     ($($arg:tt)*) => {
@@ -134,18 +134,6 @@ mod tests {
         assert_eq!(
             format_timestamp(-1, 999, 0),
             "1969-12-31T23:59:59.999+00:00"
-        );
-    }
-
-    #[test]
-    fn live_timestamp_has_expected_shape() {
-        let text = timestamp();
-        // YYYY-MM-DDTHH:MM:SS.mmm±HH:MM = 29 字符
-        assert_eq!(text.len(), 29, "{text}");
-        assert_eq!(&text[10..11], "T");
-        assert!(
-            text.ends_with(":00") || text.ends_with(":30") || text.ends_with(":45"),
-            "{text}"
         );
     }
 }

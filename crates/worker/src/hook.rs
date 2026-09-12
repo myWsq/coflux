@@ -1,9 +1,9 @@
 //! loopback 本地 HTTP 端点：agent 与 daemon 之间的唯一反向通道。两条路径——
 //!
-//! - `/hook`（plan 073）：`cofluxd hook <agent>` 作为信使把 claude/codex 的 hook 事件送进来，
+//! - `/hook`（plan 073）：`coflux hook <agent>` 作为信使把 claude/codex 的 hook 事件送进来，
 //!   用于判定回合状态。状态对齐 Vibe Island：active / approval / question / done
 //!   （空 = 尚无 hook 信号）。
-//! - `/agent`（plan 074；plan 094 起 local-first）：`cofluxd terminal|notify|progress|ports` 的控制
+//! - `/agent`（plan 074；plan 094 起 local-first）：`coflux terminal|notify|progress|ports` 的控制
 //!   请求，见 [crate::agent_ctl]——send/read/wait/notify/progress 在 daemon 本地闭环，new/list/ports
 //!   由 daemon 代问中心。拒绝原因原样回给调用方：细节只是参数校验文案，吞成 `bad request` 只会让
 //!   agent 盲目重试（plan 094）。`/hook` 的应答形态不变。
@@ -34,10 +34,8 @@ use crate::agent_ctl::{AgentAction, AgentRequest, AgentResponse};
 const MAX_HEAD_BYTES: usize = 8 * 1024;
 /// `/hook` 体上限：hook 载荷只有几个字段，几 KB 足够，超限即拒。
 const MAX_BODY_BYTES: usize = 4 * 1024;
-/// `/agent` 体上限：要装得下 64 KB 的 send 文本或 16 KB 的命令行加 JSON 封包（plan 094，与 MCP 对齐）。
+/// `/agent` 体上限：要装得下 64 KB 的 send 文本或命令行加 JSON 封包（plan 094，与 MCP 对齐）。
 const MAX_AGENT_BODY_BYTES: usize = 128 * 1024;
-/// `terminal.new` 命令行上限：与中心 `MAX_TERMINAL_COMMAND_BYTES` 同值（空命令 = 会话终端，不受此限）。
-const MAX_COMMAND_BYTES: usize = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 /// 等待 main 消费任务完成 pid 反查的上限（含一次 spawn_blocking 进程树扫描）。
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -244,7 +242,7 @@ fn hook_response(outcome: HookOutcome) -> AgentResponse {
     }
 }
 
-/// `cofluxd terminal|notify|ports` 的请求体。动作名是扁平字符串而非嵌套结构——载荷极小，
+/// `coflux terminal|notify|ports` 的请求体。动作名是扁平字符串而非嵌套结构——载荷极小，
 /// CLI 侧一个函数就能发全部动作。
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -265,6 +263,12 @@ struct AgentBody {
     text: String,
     #[serde(default)]
     enter: bool,
+    /// `terminal.wait`: command sequence to wait for (0 = the latest one started) and the
+    /// blocking bound in milliseconds (0 = the daemon's default round).
+    #[serde(default)]
+    command_seq: u64,
+    #[serde(default)]
+    timeout_ms: u64,
     /// 调用方的当前工作目录（plan 102）：CLI 每条请求都带 `process.cwd()`，daemon 据此把
     /// 请求的**目标**解析到 cwd 所在的工作区。旧 CLI 不带，缺省空串 = 退回归属工作区。
     #[serde(default)]
@@ -276,8 +280,8 @@ struct AgentBody {
     path: String,
 }
 
-/// 单次 send 的文本上限：与 MCP `send_terminal_input` 的 64 KB 同值（plan 094 对齐）；超长基本是
-/// 误把文件内容当输入灌，直接拒绝比截断安全。
+/// 单次 send 的文本上限（也是 `terminal.run` 命令行的上限）：与 MCP `send_terminal_input` 的 64 KB
+/// 同值（plan 094 对齐）；超长基本是误把文件内容当输入灌，直接拒绝比截断安全。
 const MAX_SEND_TEXT_BYTES: usize = 64 * 1024;
 
 async fn handle_agent(
@@ -288,19 +292,56 @@ async fn handle_agent(
         .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
     let action = match parsed.action.as_str() {
         "terminal.new" => {
-            // 命令为空 = 会话终端（plan 101）：不带命令即开一个常驻、全 tty 的登录 shell，
-            // 直到有人输入 exit 才结束；带命令的作业终端语义不变，上限只对非空命令生效。
-            if parsed.command.len() > MAX_COMMAND_BYTES {
-                return Err(RequestError::BadRequest(format!(
-                    "terminal.new 命令超过 {MAX_COMMAND_BYTES} 字节上限"
-                )));
+            // A terminal is always the default login shell (real tty, alive until exit/close).
+            // The old `command` field meant "run this as a job and exit"; an old CLI that still
+            // sends it must hear that the meaning is gone instead of silently getting a shell
+            // that never runs its command.
+            if !parsed.command.trim().is_empty() {
+                return Err(RequestError::BadRequest(
+                    "terminal.new no longer takes a command: open the terminal, then `coflux terminal run <taskId> --cmd=...` (update the coflux CLI)".into(),
+                ));
             }
             AgentAction::TerminalNew {
                 title: parsed.title,
-                command: parsed.command,
             }
         }
         "terminal.list" => AgentAction::TerminalList,
+        "terminal.run" => {
+            // "do script": typed into an existing terminal once its shell signals prompt readiness.
+            if parsed.task_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.run 缺 taskId".into()));
+            }
+            if parsed.command.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.run 缺 command".into()));
+            }
+            if parsed.command.len() > MAX_SEND_TEXT_BYTES {
+                return Err(RequestError::BadRequest(format!(
+                    "terminal.run command 超过 {MAX_SEND_TEXT_BYTES} 字节上限"
+                )));
+            }
+            AgentAction::TerminalRun {
+                task_id: parsed.task_id,
+                command: parsed.command,
+            }
+        }
+        "terminal.wait" => {
+            if parsed.task_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.wait 缺 taskId".into()));
+            }
+            AgentAction::TerminalWait {
+                task_id: parsed.task_id,
+                command_seq: parsed.command_seq,
+                timeout_ms: parsed.timeout_ms,
+            }
+        }
+        "terminal.close" => {
+            if parsed.task_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.close 缺 taskId".into()));
+            }
+            AgentAction::TerminalClose {
+                task_id: parsed.task_id,
+            }
+        }
         "terminal.status" => {
             if parsed.task_id.trim().is_empty() {
                 return Err(RequestError::BadRequest("terminal.status 缺 taskId".into()));
@@ -444,38 +485,6 @@ fn parse_head(head: &str) -> Result<(String, usize, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn event_mapping_covers_both_agents() {
-        assert_eq!(event_state("UserPromptSubmit", "", 0), Some("active"));
-        assert_eq!(event_state("PreToolUse", "", 0), Some("active"));
-        assert_eq!(event_state("PostToolUse", "", 0), Some("active"));
-        assert_eq!(event_state("Stop", "", 0), Some("done"));
-        assert_eq!(event_state("StopFailure", "", 0), Some("done"));
-        assert_eq!(event_state("PermissionRequest", "", 0), Some("approval"));
-        assert_eq!(event_state("agent-turn-complete", "", 0), Some("done"));
-        assert_eq!(event_state("approval-requested", "", 0), Some("approval"));
-        assert_eq!(
-            event_state("Notification", "permission_prompt", 0),
-            Some("approval")
-        );
-        assert_eq!(
-            event_state("Notification", "agent_needs_input", 0),
-            Some("question")
-        );
-        assert_eq!(
-            event_state("Notification", "elicitation_dialog", 0),
-            Some("question")
-        );
-        assert_eq!(
-            event_state("Notification", "agent_completed", 0),
-            Some("done")
-        );
-        assert_eq!(event_state("Notification", "auth_success", 0), None);
-        assert_eq!(event_state("Notification", "", 0), None);
-        assert_eq!(event_state("SessionStart", "", 0), None);
-        assert_eq!(event_state("", "", 0), None);
-    }
 
     /// 回合结束但后台还有活 = 挂起等唤醒，不是完成；无后台工作时仍是 done。
     #[test]

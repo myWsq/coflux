@@ -1,641 +1,496 @@
-# 099：重新实现 macOS 客户端，以当前 Web 为验收基准
+# 099: Reimplement the macOS client using current Web as the acceptance baseline
+
+Status: In progress. Reauthorized by the user on 2026-09-05; do not consult, restore, or reuse code or conclusions from previous native attempts.
+
+User clarification: App changes are authorized, and **functionality, not only UI, must fully match current Web**. Continue development/local validation autonomously; do not declare a prototype or functional subset complete.
+
+User adjustment on 2026-09-07: login needs correct behavior, error feedback, and usability, not visual parity. Screen-by-screen visual acceptance focuses on workbench, terminals, Changes, and their action panels. Other functional/performance goals remain.
+
+## Goal
+
+A genuinely native macOS client preserving current desktop Web UI, layout, copy, state, and interaction, while improving speed, smoothness, and system integration. Web remains usable; mobile features remain frozen. The main window does not use WebView, Electron, or browser rendering.
+
+Current sources of truth: apps/web/src/index.css, components/workbench, components/auth, packages/client, and proto. Review/verify the current shared Swift protocol/client as live dependencies; do not duplicate protocol models. Base implementation and judgments on current source and measurements from this effort.
+
+## Implementation and acceptance checklist
+
+- [ ] Native project, runnable app, development configuration, login/errors/version/logout, isolated Keychain.
+- [ ] Project/workspace/device sidebar, resizable persisted width, tree collapse, Tooltip, activity dots, progress/diff counts.
+- [ ] Workbench header, terminal tabs, create/close confirmation, shortcuts, cross-workspace persistence, selection restoration.
+- [ ] Native terminal input, IME, copy/paste, scroll, search, mouse, ANSI, disconnected snapshot recovery, control ownership/takeover.
+- [ ] Project import device/path wizard, branch list/switch/create, rename/delete, device authorization/install guidance.
+- [ ] Git changes/files/unified diff/highlighting, refresh/empty states, large files without main-thread stalls.
+- [ ] File/image drag/drop and paste uploads, port list/browser preview, native menus/accessibility.
+- [ ] Direct/relay and other connectivity matching current Web, with behavioral evidence for network failure/reconnection.
+- [ ] Same-data/same-logical-size Web/native screenshot comparison for every screen; record and eliminate differences.
+- [ ] Measure startup, switching latency, frame stability, CPU/memory under identical output loads; native technology alone does not prove speed.
+- [ ] Real local-service integration, relevant regressions, distributable signed build and runtime validation.
+
+The overall goal is complete only with current evidence for every item. Partial milestones do not replace the full goal. Record platform differences such as font rasterization separately; they do not automatically exempt UI/interaction gaps.
+
+## Progress in this effort
+
+- Xcode 26.6 and XcodeGen are available; this worktree began clean.
+- Current Web: minimum content 1024×640, sidebar 260 (range 200–480), header 36; base type sizes 13/12/11.
+- First connect newly written native login/workbench/terminal, then expand through the checklist.
+- All integration uses harness temporary DB, temporary COFLUX_HOME, and exclusive ports, never production accounts/devices.
+- Newly created apps/macos builds/runs natively. Same-size login/workbench screenshots exist; actual theme, sidebar width, icon assets, and footer differences were corrected. Overall acceptance remains incomplete.
+- Real integration passed login failure/success, directory browsing/file errors, Git, project import, worktree create/branch switch/rename/delete, terminal I/O, two-terminal object persistence, and continued output after reconnect.
+- Latest macOS full suite: 33 tests passed; shared Swift passed. Reproducible commands/gaps are in apps/macos/README.md. These results do not establish signed distribution, full parity, or speed over Web.
+- Uploads/OSC titles are connected. Real multifile uploads matched remote content, and switching tabs left paths in the original terminal. Eligibility checks active-channel generation and device-confirmed holder; reject disconnection. Paste follows current bracketed-paste mode. Real OS drag/drop, ordinary text/IME, oversized images, and control contention still need acceptance.
+- Current Web review: use-global-shortcuts.ts standalone uses plain Command with physical keys; terminal has no SearchAddon. Search is not a current-Web parity gap; future enhancement needs separate recording.
+- Added ⌘N workspace creation, menu/help copy, and window-scoped physical-key interception. Eleven macOS tests passed, including queued real AppKit keyboard events creating a terminal with differing physical key/character. This does not establish all shortcut/IME/window behavior.
+- Explicit tab activation now retakes control after contention and restarts exited terminals. Two isolated real clients verified handoff, ordinary snapshot refresh not reclaiming control, resumed input, and new session creation. Startup timeout clears busy state and waits for explicit retry. Changes views persist per workspace and refresh only when visible; visual acceptance remains.
+- Git diff path parsing handles C quoting/UTF-8 octal, deleted paths, and pure renames without treating body +++ as a header. Temporary real repositories cover both quotepath settings, special paths, and binaries; 12 tests passed. Rename-source headers, binary hints, and body line height follow Web; highlighting/full visual acceptance remain.
+
+## Native-first implementation decisions (explicit user correction)
+
+Match overall UI/interactions/full functionality. Reasonable local differences in tokenization/system controls are allowed. Prefer mature native libraries and smooth system behavior; do not introduce JS/browser runtime for exact local pixels/tokens. The JavaScriptCore highlighting experiment was withdrawn in favor of Tree-sitter C parsers and Swift wrappers.
+
+- apps/macos/NATIVE-AUDIT.md records full removal of the JS highlighting attempt. Clean-build scans of Mach-O/resources show no direct JavaScriptCore/WebKit links or JS/HTML/WASM.
+- Native Tree-sitter supports JS/TS/JSX/TSX; 13 tests passed including Chinese, emoji, and multiline comments. Real Changes colors observed; short-diff centering fixed. Other languages/load performance remain.
+- Branch selection now trims queries, places creation first, allows current branch selection, skips occupied branches, and supports load retry. AppKit command callbacks handle arrows/Return/Esc while allowing marked text. Fifteen regressions passed; actual keyboard/IME and import navigation remain.
+- Separate draft import path from device-confirmed directory; import only after successful navigation. Segmented paths/keyboard navigation connected.
+- Native NSTextView field editor entered a branch name and dispatched Return; real-device worktree creation passed. Sixteen regressions passed; marked text, complete wizard keyboard flow, and long-list scrolling remain.
+- Import requires online device, center connection, and confirmed home directory. Disable stale entries while loading. Keyboard selection scrolls into view; hidden-file toggles/device changes reconcile selection. Sixteen regressions passed, not a substitute for full UI acceptance.
+- CUA ran the actual native app through device selection by Return, path entry, and ⌘Return submission; temporary project appeared. Invalid paths/duplicate imports disable submission; Esc steps back.
+- Real use exposed unstable path-edit focus. After AppKit input replacement, editing selects the path and confirmed navigation returns focus to filtering. Sixteen regressions still pass. Debug defaults to this isolated service to avoid accidental production reconnect on restart.
+
+## Batched terminal output and backpressure (2026-09-05)
+
+- SwiftTerm processes at most 4KiB per feed and yields after roughly 4ms. Snapshot replacement cancels old queues; closing releases backlog.
+- At 4MiB aggregate terminal backlog, native device WebSocket pauses its next read until consumption. Center /client control traffic/sends are unaffected. Removed synchronous draining after exceeding the limit.
+- 4MiB is a receive threshold, not process-memory cap: each connection may already have an in-flight frame, and Foundation buffers/scrollback are excluded. Device RPC reception may briefly wait behind terminal backlog.
+- Same Debug measurement: 345,016 bytes/5,000 lines fed once took ~138ms; 29 batches peaked ~5.7ms each and ~155ms total. Continuous 8,480,000-byte test peaked ~6.9ms/batch, 4,720,848-byte backlog, ~6.04s total. This demonstrates shorter continuous main-thread occupation, not guaranteed frame rate or superiority to Web.
+- Twenty-one tests passed, adding split-frame UTF-8/emoji/ANSI comparison to synchronous results, nonzero Data indices, over-limit waiting/cancellation/snapshot recovery, and sustained drain checks.
+- Real integration intermittently timed out restarting exited terminals, reproduced later; handling/evidence follows.
+- Artifact review again found no JS/HTML/WASM resources or direct JavaScriptCore/WebKit links.
+
+## Exited-terminal restart timing correction (2026-09-05)
+
+- Fixed a race: device exit notification makes UI show EXITED before center stops reporting RUNNING; immediate taskStart is rejected.
+- Shared Swift retains center's original running session. macOS waits up to 10 seconds for center-confirmed exit before restart. Cancellation, close, disconnect, or deletion prevents sending; if another client starts a new session, attach to latest facts.
+- Auto-attach bound sessions only when RUNNING and foreground/locally starting, avoiding background claims. Foreground return attaches once per binding. Cancel unrendered old output before restart.
+- Controlled tests cover device-first exit, delayed/stale center RUNNING, exactly one start after confirmation, and no start after cancellation. Shared Swift: 44 Swift Testing cases (this test has two parameters) and three XCTest passed.
+- macOS 21 tests passed. After final connection-condition adjustment, real login/switch/upload/reconnect/two-client handoff/exit-restart passed ten consecutive runs. iOS Simulator build passed.
+- Original intermittent server errors were obscured by startup-timeout copy, so not all timeouts are attributed to this race. Preserve task/error/activation-count failure diagnostics for future investigation.
+
+## Workspace details and local-session hints (2026-09-05)
+
+- Match approval > question > active > done aggregation; legacy waiting means this turn completed. Hide activity offline. Progress uses first nonempty RUNNING-session comment independently of priority.
+- Sidebar details include agent name/status/full message/progress/path/device status/correct diff base. Use native macOS help/accessibility values, retaining message newlines; native tooltip typography may differ.
+- Shared core consumes live device catalog entries/exit tombstones. Device rows compare taskID+sessionID against center tasks and show Local N plus ids for unregistered live sessions. Hint only, as Web does; no kill/delete actions.
+- Tests cover priorities, offline/progress independence, waiting, messages, diff bases, device isolation, empty catalogs not implying exit, retained tombstone metadata, and old-session exit not altering a new session.
+- macOS 23, shared Swift 45 Swift Testing plus three XCTest, and iOS build passed.
+- CUA after app restart/login confirmed native Help includes path/device. Actual hover with messages/progress/nonzero orphans remains; agent glyph/completion-read status not yet implemented.
+
+## Agent icons and read completion (2026-09-05)
+
+- Tabs use agent presence: current Web Clawd for Claude, Lucide Bot for others, and priority Unplug when control is taken. Approval/question warning and done completion colors match Web.
+- `python3 apps/macos/scripts/sync-clawd.py` expands Web gym/flag/confetti SVG into 62 static vector frames. Preserve clawd-glyph.tsx attribution to ayotomcs.me/claude-mascot and brand #D97757. Asset Catalog compiles resources; Swift Task plays Web frame order/timings, without SVG animation interpreter, JS, or WebView.
+- Mark completion read only when its terminal is displayed in the current workspace, not in Changes. Next active/approval/question clears it; remove disappeared sessions. Read Claude shows a static standing pose.
+- Reduced motion/inactive scenes use static frames; pose changes/view removal cancel old animation tasks.
+- macOS 26 passed; subsequent native-window pixel comparison and four AgentGlyphTests prove active frames change/inactive stay still. All 62 resources load and rendered image was manually inspected at /tmp/coflux-native-agent-glyphs.png. Actual system Reduce Motion toggling remains.
+- Real agent-hook continuity for read/reset has not been validated; local rendering tests do not replace full UI acceptance.
+
+## Immediate workspace-creation feedback (2026-09-05)
+
+- After submission, show a spinning sidebar placeholder, expand/select its project, and display worktree preparation. Placeholder never enters shared store, terminal binding, network parameters, or persisted fake ids.
+- Match success broadcasts using project/device/target branch/preexisting workspace ids, avoiding other-branch results. Duplicate same-project/same-branch submission reuses placeholder.
+- Switch to the real workspace only while placeholder remains selected; preserve user navigation otherwise. This improves native behavior over Web's unconditional success selection.
+- Errors/project deletion/logout/15-second timeout clear placeholders/timers. Without valid selection, use existing restoration rules. No protocol correlation id exists, so errors clear pending creations like Web and cannot be precisely assigned concurrently.
+- macOS 28 passed, then expanded real-device lifecycle tests passed immediate placeholder, success replacement, invalid-branch cleanup, no fake persisted ids, duplicate submission, and background success without selection theft. Extra test worktrees were deleted in the isolated case. Real no-response timeout and placeholder screen comparison remain.
 
-状态：进行中。2026-09-05 用户重新授权；不查阅、恢复或沿用以前原生化尝试的代码与结论。
+## Native loopback handshake (2026-09-05)
 
-用户补充确认：已授权修改 App；不仅 UI，**功能也必须完整对齐当前 Web**。
-开发与本机验证继续自主推进，不能把阶段原型或功能子集宣布为完成。
-
-2026-09-07 用户调整：登录页不要求视觉对齐，只保证登录、错误反馈与使用体验正确。
-逐屏视觉验收重点为工作台、终端、变更页及其操作面板；其余功能对齐与性能目标保持。
-
-## 目标
-
-真正的 macOS 原生客户端，完整保留当前桌面 Web 的 UI、布局、文案、状态与交互体验，
-在此基础上提升速度、流畅度与系统集成。Web 保持可用；mobile 功能冻结。
-客户端窗口不以 WebView、Electron 或浏览器渲染主界面。
-
-当前真相源：apps/web/src/index.css、components/workbench、components/auth、
-packages/client、proto。现行共享 Swift 协议和客户端作为正在使用的依赖审查、验证，
-不复制另一份协议模型。实现与判断均来自当前源码和本次测量。
-
-## 实施与验收清单
-
-- [ ] 原生工程、可启动应用、开发配置、登录/错误/版本/退出登录、Keychain 隔离。
-- [ ] 项目/工作区/设备侧栏、宽度拖拽与持久化、树折叠、Tooltip、活动点阵、进度与差异数字。
-- [ ] 工作台顶栏、终端标签、新建/关闭确认、快捷键、跨工作区保活、选择恢复。
-- [ ] 原生终端输入、IME、复制粘贴、滚动、搜索、鼠标、ANSI、断线快照恢复、控制权与接管。
-- [ ] 项目导入设备/路径向导、分支列表/切换/新建、重命名/删除、设备授权与安装指引。
-- [ ] Git 变更/文件/统一 diff/高亮、刷新与空态；大文件不卡住主线程。
-- [ ] 文件/图片拖放和粘贴上传、端口列表/浏览器预览、原生菜单和辅助功能。
-- [ ] 直连/中继等连接能力与现行 Web 对齐；网络失败和重新连接有行为证据。
-- [ ] 相同测试数据、相同逻辑尺寸，逐屏 Web/native 截图对照；差异登记并消除。
-- [ ] 相同输出负载的启动、切换延迟、帧稳定性、CPU/内存实测，不能以原生技术栈推断更快。
-- [ ] 本机实际服务集成、现有相关回归、可分发签名构建及运行验证。
-
-上述各项全部有当前证据后才完成总体目标。子阶段可交付，不能替代完整目标。
-字体栅格等平台差异单列证据，不自动豁免任何 UI/交互缺口。
-
-## 本次进展
-
-- 本机 Xcode 26.6 与 XcodeGen 可用；本工作树初始干净。
-- 当前 Web：最小内容 1024×640、侧栏 260（200–480）、顶栏 36；基础字阶 13、12、11。
-- 先贯通本次新写的原生登录/工作台/终端，再按以上清单逐项扩展。
-- 所有联调使用 harness 临时 DB、临时 COFLUX_HOME 与独立端口，不使用生产账号或设备。
-- 本次新建 `apps/macos`，macOS 原生可构建运行。登录页与工作台已有同尺寸截图，并修正了
-  实际组件主题、侧栏宽度、图标资产和底栏差异；尚未完成整体验收。
-- 真实集成验证已通过：登录失败/成功、目录浏览/文件错误响应、Git 执行、项目导入、
-  worktree 创建/分支切换/重命名/删除、终端输入输出、双终端对象保活、重连后继续输出。
-- macOS 最近一次全套 33 项测试通过；共享 Swift 测试通过。可复现命令与具体剩余缺口见
-  `apps/macos/README.md`。这些结果不涵盖正式签名、完整功能 parity 或性能优于 Web。
-
-- 上传与 OSC 标题已接入；真实多文件上传已核对远端内容，并验证切到其他标签后路径留在原终端。
-  上传资格直接检查活动通道代际与设备确认的 holder；断线拒绝。粘贴使用终端当前 bracketed paste 模式。
-  系统真实拖放、普通文本/IME、超大图片与控制权竞争仍需验收。
-
-- 核对当前 Web：`use-global-shortcuts.ts` 的 standalone 模式使用纯 Command + 物理键位；
-  终端内没有接入 SearchAddon。搜索不作为现有 Web 对齐缺项，后续若增强需另行记录。
-
-- 已补齐 ⌘N 新建工作区、菜单/帮助文案及窗口范围内的物理键位拦截。
-  macOS 11 项通过，含真实 AppKit 入队键盘事件创建终端（物理键和字符不同），
-  此阶段仍不等同于所有快捷键、输入法和窗口行为的完整验收。
-
-- 终端标签显式激活已接通：设备控制权竞争后点击标签重新接管；退出后点击重启。
-  两个隔离真实客户端验证了交接、普通快照刷新不抢回、重新输入和新 session 创建。
-  启动超时释放忙态并等待显式重试；变更视图按工作区保活，仅可见时刷新（视觉验收待补）。
-
-- Git diff 路径解析已支持 C 风格引用/UTF-8 八进制、删除路径与纯重命名，避免正文 +++ 被当作文件头。
-  真实临时 Git 仓库覆盖两种 quotepath 配置及特殊路径、二进制路径；macOS 12 项测试通过。
-  文件头重命名来源与二进制提示、正文行高按当前 Web 调整；语法高亮和逐屏验收仍未完成。
-
-## 原生优先的实现取舍（用户明确修正）
-
-整体 UI、交互和完整功能对齐 Web；高亮分词、系统控件等局部细节允许合理差异。
-优先成熟原生库和流畅的系统体验，不为局部像素或分词百分之百相同引入 JS/网页运行层。
-高亮的 JavaScriptCore 尝试已撤回，改用 Tree-sitter C 解析器与 Swift 封装。
-
-- 本次原生审查见 `apps/macos/NATIVE-AUDIT.md`：高亮绕回 JS 的尝试已彻底撤回，
-  clean build 后检查全部 Mach-O 与资源，无 JavaScriptCore/WebKit 直接链接或 JS/HTML/WASM。
-- 原生 Tree-sitter 已接入 JS/TS/JSX/TSX，13 项测试通过（含中文、emoji、跨行注释）；
-  已看到真实变更页颜色输出，并修复短 diff 居中问题；其余语言与负载性能仍需补齐。
-
-- 分支选择按现行 Web 补齐查询去空白、新建置顶、当前分支可点/占用分支跳过、加载重试；
-  输入框使用 AppKit 命令回调处理上下/回车/Esc，并放行输入法组合文本。15 项回归通过。
-  该面板真实键盘/IME、导入路径导航仍待继续验收。
-
-- 导入路径草稿与设备确认目录分离，导航成功才允许导入；分段路径及键盘导航已接入。
-- 原生 NSTextView field editor 输入分支名并分派回车，真实设备 worktree 创建通过；
-  16 项回归通过。输入法组合文本、导入向导完整键盘流程和长列表滚动仍待验收。
-
-- 导入按钮增加设备在线、中心连接、家目录确认条件；加载期间禁用旧列表项。
-  设备/目录列表键盘选择会滚动到可视区域，隐藏项切换和设备列表变化重新校正选中项。
-  16 项现有回归通过；这些检查不替代完整导入 UI 操作验收。
-
-- 已通过 CUA 实际运行原生 App 验证导入主路径：回车选设备、输入路径、⌘回车提交，
-  临时项目在侧栏出现；错误路径与重复导入禁止提交，Esc 逐步返回。
-- 实操发现路径编辑焦点不稳定，改用 AppKit 输入控件后验证编辑自动选中路径、
-  确认目录后回到过滤框。16 项回归仍通过。Debug 默认连接本次隔离服务，避免自动重启误连生产。
-
-
-## 终端分批输出与背压（2026-09-05）
-
-- SwiftTerm 每次最多处理 4 KiB，约 4 ms 后让出主线程；快照替换取消旧队列，关闭终端释放积压。
-- 所有终端合计积压达到 4 MiB 时，原生设备 WebSocket 暂停下一次读取，消费后恢复；
-  中心 `/client` 控制面和发送不受该门控影响。移除了超限后同步排空的兜底。
-- 4 MiB 是接收门槛，不是进程内存硬上限：每条设备连接可能已有一帧在途，
-  Foundation 自身缓冲及终端 scrollback 也不计入该数字。设备 RPC 接收可能随终端积压短暂等待。
-- 同次 Debug 测量：345,016 bytes / 5000 行，单次 feed 约 138 ms；
-  分成 29 批后最长一批约 5.7 ms，总耗时约 155 ms。
-  持续 8,480,000 bytes 测试最长一批约 6.9 ms、积压峰值 4,720,848 bytes，总耗时约 6.04 s。
-  这是减少连续主线程占用的证据，不是实时帧率保证，也不证明比 Web 快。
-- 21 项全套通过，新增跨帧 UTF-8/emoji/ANSI 与同步终端结果比较、非零 Data 索引、
-  超限等待/取消/快照恢复、持续输出排空检查。
-- 真实集成曾出现「退出后点击重启」超时，后续重复测试再次复现；处理与证据见下节。
-- 本次测试产物复查未发现 JS/HTML/WASM 资源或 JavaScriptCore/WebKit 直接链接。
-
-
-## 退出后重启的时序修正（2026-09-05）
-
-- 修正一条可导致重启超时的竞态：设备退出通知先到达，UI 已显示 EXITED，
-  中心仍保留旧 RUNNING 事实，此时直接 taskStart 会被中心拒绝。
-- 共享 Swift 核心保留中心的原始运行会话；macOS 的重启等待中心确认退出后再发起，
-  最多等待 10 秒。取消、关闭终端、连接断开或任务删除后不再发送；
-  如果另一客户端已启动新会话，则按最新事实连接它。
-- 绑定会话仅在 RUNNING 且前台/本机正在启动时自动 attach，避免后台抢控制权；
-  回到前台会补 attach，同一轮绑定不重复发送。重启前取消尚未渲染的旧输出。
-- 可控测试覆盖设备先退出、中心迟到/旧 RUNNING 回放、最终确认后只发一次启动、
-  取消后确认也不发送。共享 Swift 44 项 Swift Testing（其中该项含两种参数）与 3 项 XCTest 通过。
-- macOS 全套 21 项通过；最终连接条件调整后，真实登录/终端切换/上传/重连/
-  双客户端控制权交接/退出重启用例连续 10 次通过。iOS Simulator 构建回归通过。
-- 原始偶发日志中的服务器错误已被启动超时提示覆盖，未把所有可能的超时都归结于同一原因；
-  已保留失败时任务、错误和激活计数的诊断输出，便于后续定位。
-
-
-## 工作区状态详情与本地会话提示（2026-09-05）
-
-- 对齐当前 Web 的 approval > question > active > done 聚合；旧 waiting 映射为本轮完成。
-  设备离线隐藏活动状态，进度取 RUNNING 会话的第一条非空短评，独立于活动优先级。
-- 侧栏工作区详情包含 Agent 名称、状态、完整留言/进度、路径、设备在线状态和正确的 diff 基准。
-  使用 macOS 原生 help 悬停提示与辅助功能值；长消息保留换行。采用原生提示的排版差异。
-- 共享核心接入设备 catalog 的存活记录与退出墓碑；设备行按 taskID + sessionID 对照中心任务，
-  显示未登记存活会话的「本地 N」和会话 ID 详情。与 Web 一致只提示，不新增终止/删除操作。
-- 回归覆盖状态优先级、离线/进度独立、waiting、留言、diff 基准、跨设备隔离、
-  空 catalog 不推断退出、墓碑保留元数据及旧 session 退出不误改新 session。
-- macOS 23 项、共享 Swift 45 项 Swift Testing + 3 项 XCTest 通过，iOS Simulator 构建回归通过。
-- 实际重启 App 并登录隔离服务后，CUA 确认工作区原生 Help 已包含路径和设备信息。
-  有 Agent 留言/进度与非零 orphan 的实际悬停视觉仍待验证；Agent glyph 和完成已读状态尚未补齐。
-
-
-## Agent 图标与完成已读（2026-09-05）
-
-- 终端标签接入 Agent presence：Claude 使用当前 Web 的 Clawd 插画，其他 Agent 使用 Lucide Bot，
-  控制权被接管时优先显示 Unplug。approval/question 警示色、done 完成色与 Web 对齐。
-- `python3 apps/macos/scripts/sync-clawd.py` 将 Web 的 gym/flag/confetti SVG 展开为 62 帧静态矢量资源。
-  原始插画来源沿用 Web `clawd-glyph.tsx` 的 ayotomcs.me/claude-mascot 说明；品牌橙保持 #D97757。
-  资源经过 Asset Catalog 编译，Swift Task 按 Web 的帧顺序/延时播放，无 SVG 动画解释器、JS 或 WebView。
-- 只有当前工作区正在显示的终端完成状态才记为已读；切到变更页不算已读，
-  下一轮 active/approval/question 清除已读，消失的 session 清理记录。已读 Claude 显示静止站姿。
-- 系统减少动态效果、非活动场景显示静帧；姿态切换或视图移除取消旧播放任务。
-- macOS 26 项全套通过；随后补充实际原生窗口像素比较，4 项 AgentGlyphTests 通过，
-  证明活动场景图像发生帧变化、非活动场景保持静止。62 个资源均可加载，渲染图已人工检查。
-  测试图 `/tmp/coflux-native-agent-glyphs.png`。系统减少动态效果的真实设置切换仍待实操验证。
-- 尚未用真实 Agent hook 连贯操作验证标签已读/重置流程，不能以局部渲染测试替代完整 UI 验收。
+- LocalGatewayConnector uses CryptoKit P-256 ECDSA-SHA256, uncompressed SEC1 public key, and 64-byte P1363 signature. Encode domain+NUL and u32-BE length-prefixed fields; connection generation uses full u64 BE, matching Web/device.proto.
+- Dial only 127.0.0.1 at descriptor port. Validate protocol/device/Origin/pinned gateway key/nonce/signature. Outer channelID must be empty before authentication; return actual channelID/scopes afterward. Reads timeout at three seconds; cancellation closes connection.
+- Three targeted tests passed invalid Origin/device/key/nonce/signature rejection, cancellation release, and real isolated center pairing→Rust verification→direct session catalog. No lease means no RPC; forged lease yields LEASE_INVALID; center-signed lease grants RPC/lifecycle.
+- Tests create in-memory identities/temporary isolated grants, unpair and verify cleanup, without touching persistent user pairings.
+- Handshake/persistent identity now connect to workbench routing, with acceptance below; native P2P remains absent.
 
+## Persistent direct identity and pairing storage (2026-09-05)
 
-## 工作区创建中的即时反馈（2026-09-05）
+- LocalIdentityStore keeps P-256 identity/pairings in ThisDeviceOnly Keychain. Service namespace hashes length-prefixed full server URL, authenticated accountID, and Origin. Never write private keys to files/UserDefaults or fall back to ephemeral identity on storage failure.
+- First SecItemAdd uses unique service/account; on duplicate, read persisted winner rather than overwrite. Pairing binds identity public key and validates protocol/port/P-256 gateway key. Remove one/all pairings independently while keeping identity.
+- Concurrent tests hit macOS legacy Keychain lock waits. Sampling led to shared KeychainAccess serializing Security calls for login/direct credentials; unique Keychain keys still arbitrate across processes.
+- Eight concurrent creators got one public key. Reconstructed stores restored signing; server/account/Origin isolation, invalid gateway preserving prior pairing, and pairing deletion preserving identity passed. Restored identity/pairing authenticated and validated leases with real Rust gateway.
+- Client exposes authenticated accountID, retaining it across temporary disconnect and clearing on logout/auth failure for provider namespaces. macOS 33, shared Swift 45 plus three XCTest, and iOS build passed.
+- Tests use UUID namespaces. Temporary in-app cleanup removed interrupted-test records, verified no remnants, then removed cleanup code.
+- App now uses store/connector through NativeLocalDeviceProvider; full transport parity remains incomplete.
 
-- 创建提交成功后侧栏立即显示旋转占位、展开项目并选中占位，主区提示正在准备 git worktree。
-  本地占位不进入共享 store、终端绑定或网络工作区参数，也不持久化假 ID。
-- 按项目、设备、目标分支和提交前的工作区 ID 集合识别成功广播；
-  避免把同项目另一分支的新工作区认作本次结果。同项目同分支重复提交复用占位。
-- 占位仍被选中时自动切到真实工作区；用户已切走时保留其选择。
-  这是对当前 Web 成功后无条件切回行为的原生体验改进。
-- 错误、项目删除、登出和 15 秒超时清理占位/计时器；无有效选择时沿用工作台选择恢复规则。
-  协议没有请求关联 ID，错误事件仍按当前 Web 的方式清理未完成创建，不能精确归属并发错误。
-- macOS 28 项全套通过；之后扩展真实设备生命周期用例并通过：
-  回车提交即时占位、成功转正、非法分支失败清理、偏好不落假 ID、重复提交、后台成功不抢选择。
-  测试创建的额外 worktree 已在同一隔离用例中删除。真实 15 秒无响应和占位逐屏视觉仍待验收。
+## Native workbench routing (2026-09-05)
+
+- App injects native provider by default with Keychain identity/center pairing and leases. Shared clients without injection remain relay-only.
+- Direct starts immediately; relay races after 250ms. Once relay activates, promotion starts after two seconds and retries every 30 seconds on failure.
+- Separate session/elevated lanes. Center disconnect preserves authenticated direct session, closes relay/elevated; RPC/lifecycle require an online valid lease.
+- Real isolated Rust integration passed relay output→direct promotion preserving output→input during center disconnect→Git RPC after recovery→direct loss/fallback relay input→direct promotion→task close/logout.
+- Connection loss immediately cancels stale promotion. Disconnection banner explains local terminals remain usable.
+- Lease expiry, real revocation, more generation races, and WebRTC/P2P remain. These successful paths do not complete all connectivity.
+- Regression: macOS 34, shared Swift 45 plus three XCTest, and iOS build passed. Twenty Mach-O including test frameworks showed no direct JSCore/WebKit links or JS/HTML/WASM resources.
+
+## Pairing concurrency and device removal (2026-09-05)
+
+- NativeLocalDeviceProvider shares first pairing by account/device: eight waiters send one request. One cancellation preserves others; all canceled/device removed cancels request.
+- Late success after cancellation cannot repersist a grant; stale auth failure removes only the grant it used, preserving newer pairing.
+- daemonRemoved or absence in a recovery snapshot closes all lanes, measurement/catalog polling, pending requests, and pairing. Auth invalidation closes router and account pairings.
+- Tests found/fixed late ping repopulating removed-device state. Expired routes cannot reconnect; entirely empty connection details are removed.
+- Real Keychain tests cover pairing cancellation/late responses; shared injected-control tests cover removal/snapshot/auth invalidation. Real server unpair, natural lease expiry, and more races remain.
+- Final regression: macOS 37, shared Swift 47 (removal has three parameter cases), three XCTest, and iOS build passed.
+
+## Authorization recovery and real revocation acceptance (2026-09-05)
+
+- Added shared-router recovery cases for injected time advancing within the lease's two-second safety margin and device scope_denied. Both close old connections, increase generation, and complete two pending Git requests, preserving original requestID/operationID on replay.
+- Real isolated Rust gateway localUnpair closes established session/elevated connections and prevents old-grant reconnect. Removing the last pairing for an Origin also removes its center allowlist entry, so HTTP upgrade may reject; with another same-Origin pairing, authentication may return grantUnknown.
+- Shared Swift 48 (recovery has two parameters), three XCTest, and three targeted macOS gateway tests passed. This round added acceptance tests only, no app runtime changes.
+- Natural lease-expiry end-to-end timing remains unproven, P2P absent, and old-pairing cache recovery after HTTP-upgrade rejection needs evaluation. Full connectivity remains unchecked.
+
+## Startup address validation (2026-09-05)
+
+- COFLUX_SERVER_URL uses the build default only when unset. Explicit empty values, relative paths, non-WebSocket schemes, credentials, fragments, and invalid ports stop initialization.
+- Show native Invalid Server Address without constructing CofluxClient, reading tokens, falling back to another environment, or exposing potentially sensitive raw URL text. Correct environment and restart.
+- Two tests cover defaults, invalid configuration, custom paths, IPv4/IPv6. CUA launched with invalid input and verified error/quit; restarting against isolated service restored workbench/terminals/local-direct indicator.
+- All 39 macOS tests passed after startup changes.
+
+## Native highlighting language expansion (2026-09-05)
+
+- Added official Tree-sitter Rust 0.23.2, Python 0.23.6, Go 0.23.4, JSON 0.24.8, Bash 0.23.3, C 0.23.4 alongside JS/TS/JSX/TSX, all ABI 14 compatible.
+- Extensions: rs, py/pyi/pyw, go, json/jsonc, sh/bash, c/h, plus .bashrc/.bash_profile/.profile. JSONC uses tolerant JSON parsing; complete JSONC extensions are not promised.
+- Pin packages/queries/licenses together. App downloads no language code and executes no highlighted source.
+- Highlight semantics/Unicode-range tests passed. CUA inspected real six-language Changes colors/scrolling in the isolated repo, then removed samples. Twenty Mach-O including tests/resources had no direct JSCore/WebKit or JS/HTML/WASM.
+- All 40 macOS tests passed.
+
+## Separate old/new diff syntax (2026-09-05)
+
+- Fixed parsing removed/added lines as one source. Parse old deletion/context and new addition/context independently, then map to diff line ids. Deleted lines choose language using the pre-rename path.
+- Parse disjoint hunks separately so missing-context unterminated strings do not contaminate later hunks. Only diff fragments are available, not full-file syntax context.
+- Move line projection/token-overlap sorting to highlighting actor. Main creates attributed text, yielding/checking cancellation every 64 lines. Keep plain text visible until complete-file results publish.
+- Tests passed old/new multiline Python strings, following return keyword, and separate hunks.
+- Debug synthetic 6,000-line Rust diff: background parse/mapping ~329ms, 111 executions of a 2ms main-thread heartbeat, all keyword mappings correct. Excludes SwiftUI layout/scrolling and does not compare Web. All 42 macOS tests passed.
+
+## Development credential isolation and port entries (2026-09-06)
+
+- User reported Keychain prompts after resigning dev app. Debug now defaults to memory-only login without persistent identity provider, using relay for routine UI integration. Only COFLUX_KEYCHAIN_DEV=1 enables dev credentials/persistent direct identity. Release retains Keychain/native provider.
+- Keychain integration tests skip by default and run only with COFLUX_KEYCHAIN_TESTS=1. Never count skips as passes. No old Keychain records accessed/deleted/modified.
+- Match Web: every tab has an independent port menu, allowing background preview without activation; right side lists active-terminal ports. Show decimal ports without grouping separators.
+- CUA login/ports showed no Keychain prompts. A real isolated terminal served 18089 with HTTP 200; after switching tabs, the first tab's menu still opened the browser.
+- Test server generated HTTPS localhost preview URLs without TLS configured, so loading failed. No security bypass; end-to-end preview remains unaccepted. Test service/extra terminal/browser page cleaned up.
+- Default regression: 42 tests, 35 passed, seven explicit Keychain skips, zero failures.
+
+## IME commit and ordinary paste (2026-09-06)
+
+- SwiftTerm 1.15 insertText handles NSString only, while AppKit can supply NSAttributedString. UploadTerminalView converts to plain text before superclass handling, retaining marked-text cleanup and keyboard protocol.
+- AppKit callback tests show attributed candidates are not sent early; committing the intentional sample `你好😀` sends UTF-8 once, clears marked text, and allows subsequent input.
+- CUA system-pasted a printf command and pressed Return; real PTY displayed the intentional sample `原生粘贴😀`. Tool reported clipboard timeout, but screenshot proved paste, so it was not repeated.
+- This does not establish specific Chinese IME candidate selection/cancel or complex shortcuts. Routine testing still avoids Keychain.
+- Regression: 36 passed, seven Keychain skips, zero failures.
+
+## Sidebar width restoration (2026-09-06)
+
+- Web keeps project collapse only for the current run, persists width, and resets to 260 on divider double-click. Native now resets/persists similarly, keeping 200–480 range.
+- Build passed. CUA widened sidebar, logged out/in, confirmed restoration, then double-clicked to default. Dev used temporary sessions without Keychain.
+
+## Add Device and P2P framing preparation (2026-09-06)
+
+- Add Device matches Web's `npm i -g cofluxd && cofluxd up`, copy entry, explanation, and Done. Build/layout/Return/Esc close passed. Clipboard content not yet tested; installer command not executed.
+- Added shared Swift P2PFraming/P2PFrameAssembler matching Web/Rust u32-BE length prefix, 16KiB messages, and 30MiB frame limit. Accumulate arriving bytes; invalid length permanently invalidates assembler and requires channel close.
+- Six tests cover handwritten wire format, every two-part split, bytewise input, nonzero Data indices, 300KiB frames, trailing partial frames, invalid lengths, and complete 30MiB frames. Shared Swift 54 plus three XCTest passed without Keychain.
+- Framing is not yet runtime-integrated. Native WebRTC, SDP, backpressure, transport racing/fallback, and real P2P integration remain; framing alone is not P2P delivery.
+
+## Native WebRTC negotiation verification (2026-09-06)
 
+- Added stasel/WebRTC 152.0.0, pinning SPM revision/binary checksum. Preserve upstream/distribution licenses in resources; complete binary dependency notices review still required before distribution.
+- NativeRTCPeer uses reliable/ordered data-only channel and vanilla ICE with one SDP exchange after gathering. Close is idempotent; negotiation errors/cancel close peer. No audio/video tracks or Keychain access.
+- Four native XCTest passed real local peers without STUN/TURN: identical 300KiB chunks/Chinese-emoji response and observable remote close, plus invalid SDP/closed-object/cancel cases. SDP has application/candidate and no audio/video m-lines.
+- This only proves library/framing cooperation. TransportConnection send backpressure/receive queue, center offer/channel authorization, device peer reuse, transport races/fallback, and real Rust integration remain.
+- Full macOS: 47 tests, 40 passed, seven Keychain skips, zero failures. Build passed; WebRTC has no direct JSCore/WebKit link.
 
-## 原生 loopback 握手（2026-09-05）
+## Native DataChannel transport adapter (2026-09-06)
 
-- `LocalGatewayConnector` 使用 CryptoKit P-256 ECDSA-SHA256，SEC1 非压缩公钥和 64-byte P1363 签名。
-  domain + NUL + 每字段 u32 BE 长度前缀，连接代际使用完整 u64 BE，与当前 Web/device.proto 相同。
-- 固定拨号 127.0.0.1 的中心描述符端口，校验协议、设备、Origin、固定网关公钥、随机数和签名；
-  认证前外层 channelID 必须为空，认证后返回实际 channelID/scopes。握手读取有 3 秒超时，取消会主动关闭连接。
-- 3 项定向测试通过：错误 Origin/设备/公钥/随机数/签名拒绝、取消释放等待，
-  以及真实隔离中心配对 → Rust gateway 验签 → direct session catalog。
-  未带 lease 不获 RPC 权限，伪造 lease 返回 LEASE_INVALID，真实中心签发 lease 获 RPC/lifecycle 权限。
-- 测试只创建内存身份和隔离服务的临时 grant，结束时发送 unpair 并验证成功；没有访问用户持久配对。
-- 握手和持久身份现已接入工作台路由，验证范围见下方路由验收；原生 P2P 仍未实现。
+- NativeRTCConnection implements shared TransportConnection with a dedicated background serial queue for framing/assembly/continuations. Concurrent sends serialize whole frames without interleaved fragments.
+- Pause at 1MiB SCTP buffered amount, yield after at most 256KiB per round, bound queued bytes/frame count. Account receive data before callback enqueue, bound backlog/unconsumed frames, close on overflow. Limits cover adapter buffers only, not WebRTC/system/app total memory.
+- Canceled sends may leave partial frames, so close stream and end all send/receive waits. Invalid prefixes, nonbinary messages, and send errors also close to avoid desynchronization.
+- Five real native tests passed 30MiB plus later Chinese/emoji and reverse frames, eight concurrent full frames, invalid prefix rejection, cancel pending send ending receive, and 4,097 unconsumed small frames closing at limit.
+- Center authorization/routing remain unconnected; next steps are offer/answer/channel messages, peer reuse, and transport races/fallback. Product P2P parity is not established.
+- Full macOS: 52 tests, 45 passed, seven Keychain skips, zero failures.
 
+## P2P negotiation and authorization provider (2026-09-06)
+
+- Added shared P2PDeviceTransportProvider and native provider. Reuse peer by account/daemon/clientInstance; create first channel before generating offer. Each channel independently requests authorization with generation.
+- Strictly match answer.connectionID, channelResult.channelID, and success before returning TransportConnection. Injected authorize handles center timeout/cancel; connection/DataChannel open separately wait at most 10 seconds.
+- Closing each channel releases its reference; last closes peer. closeAll/remove invalidates old peers and late authorization cannot revive them. NativeRTCPeer gains usability checks.
+- Four tests with real peers/controlled center responses passed two channels/one negotiation/two authorizations/independent close, bad channelID, late authorization after removal followed by fresh peer, and one canceled authorization leaving another usable. Shared Swift 54 plus three XCTest passed.
+- Provider is not injected into App/DeviceRouter yet. Real center/worker signaling, correlation, disconnect cleanup, races/promotions/fallback, and end-to-end acceptance remain. No Keychain access.
 
-## 直连持久身份与配对存储（2026-09-05）
+## P2P routing and real Rust integration (2026-09-06)
+
+- CofluxClient accepts provider and authOk ICE servers; DeviceRouter correlates offer/answer/channel responses. Center disconnect/account reset/device removal clears provider/pending requests.
+- Integrated direct/P2P/relay races, relay promotion, and failure fallback; P2P failures initially back off 30 seconds. Sidebar uses Web Radio icon/P2P hint. App enables native P2P by default; Debug still avoids Keychain/persistent loopback identity.
+- Three shared tests cover authorized activation, disconnect closure, relay fallback/promotion, later P2P failure, and cancellation during removal.
+- Real isolated center/Rust worker passed native P2P PTY I/O/Git RPC. Closing peer falls back to relay in the same terminal, preserving output and accepting input. Test terminal closed/cleaned.
+- macOS 57: 50 passed/seven skipped/zero failed; shared Swift 57 plus three XCTest passed. Fourteen Mach-O/resources had no direct JSCore/WebKit or JS/HTML/WASM.
+- Full network parity remains: silent-link heartbeat, Web exponential backoff/stability window, unreachable-STUN fallback, cross-network NAT, and more three-way races. Local integration is not cross-network acceptance.
+- iOS Simulator build passed without iOS/mobile feature changes.
 
-- `LocalIdentityStore` 把 P-256 身份与配对记录保存在 ThisDeviceOnly Keychain，
-  service 用服务器完整 URL、已认证 accountID 和 Origin 的长度前缀编码哈希隔离。
-  私钥不写文件或 UserDefaults；存储失败抛错，不改用临时身份。
-- 首次 SecItemAdd 使用唯一 service/account，重复项回读已持久化的胜出者，不覆盖身份。
-  配对记录绑定身份公钥，校验协议版本、端口和有效 P-256 网关公钥；可独立删除单台配对或全部配对，保留身份。
-- 并发验证曾触发 macOS legacy Keychain 内部锁等待，采样确认后增加共享 `KeychainAccess`，
-  登录 token 与直连凭据的 Security 调用统一串行化，跨进程仍由 Keychain 唯一键裁决。
-- 8 路首次创建取得相同公钥；重新构造 store 恢复身份签名、不同服务器/账号/Origin 隔离、
-  无效网关不覆盖配对、清除配对保留身份均通过。恢复的身份/配对与真实 Rust 网关完成直连认证和 lease 校验。
-- 客户端公开中心认证返回的 accountID，暂时断线保留、登出/认证失败清除，
-  为后续 provider 创建命名空间提供已认证依据。macOS 33 项全套、共享 Swift 45 项 + 3 项 XCTest、iOS 构建通过。
-- 测试使用 UUID 隔离命名空间；中断测试遗留记录由应用内临时清理用例删除，随后确认无测试记录残留，临时用例已移除。
-- 当前 App 已通过 NativeLocalDeviceProvider 使用该 store 和 connector；完整连接能力尚未对齐 Web。
+## Silent-link liveness and P2P backoff (2026-09-06)
 
+- Probe session lane immediately on activation then every 15 seconds. After five seconds without pong, retry immediately; two misses remove/recover connection. Heartbeats no longer depend on sidebar measurements or enter pendingRequests, avoiding pinned idle lanes.
+- Match pong requestID/generation/current active connection. New connections inherit no timeout/miss. Old-worker empty_payload/unsupported_payload disables heartbeat for that device rather than endless false reconnects.
+- P2P backoff now 5/10/20/40/80/160/300 seconds, reset by valid current-P2P pong; promotion waits remaining backoff. Current Web uses pong recovery, not the extra stability window previously described broadly.
+- Four injected-short-timer tests cover silent P2P fallback without measurements, wrong pong not clearing timeout/correct pong clearing, quiet old-worker degradation, and in-flight heartbeat not blocking idle release.
+- Shared Swift 61 plus three XCTest passed; macOS 50 passed/seven skipped/zero failed, including real P2P PTY/Git/fallback. No Keychain access.
+- Review found Web preserves remote session channels for 15 seconds during brief center disconnect, while native still closes relay/P2P immediately. Align next. Unreachable STUN, real silent packet loss, cross-NAT remain.
+- iOS App/test build-for-testing passed.
 
-## 原生工作台路由接入（2026-09-05）
+## Session grace period for brief center disconnect (2026-09-06)
 
-- App 默认注入原生 provider，使用 Keychain 身份和中心 pair/lease；未注入的共享客户端维持 relay。
-- direct 立即尝试，relay 延迟 250 ms 竞争；relay 激活后 2 秒尝试提升，失败每 30 秒重试。
-- session/elevated 分 lane：中心断线保留已认证 direct session，关闭 relay 与 elevated；RPC/lifecycle 要求有效在线 lease。
-- 真实隔离 Rust 联调通过：relay 输出 → direct 提升保留输出 → 中心断线继续输入 → 恢复后 Git RPC → direct 失联回退 relay 继续输入 → 再提升 direct → 关闭任务和登出。
-- 连接丢失立即取消旧提升任务；断线横幅会注明当前工作区的本机终端仍可使用。
-- 仍待验证和完善：lease 到期、服务端真实撤权与传输竞争代际的更多边界；WebRTC/P2P 尚未实现。上述路径通过不代表全部连接能力交付。
+- setControlDisconnected preserves existing relay/P2P session channels for up to 15 seconds on ordinary network loss. Only channels already active may continue I/O; new connections/elevated RPC/lifecycle fail immediately. Repeated disconnect/connecting does not extend grace.
+- Successful reauthentication cancels timer and reuses channels; expiry closes remote channels/peers. Authenticated local-direct sessions retain offline semantics.
+- setControlOnline(false) always explicitly revokes, even during grace. Credential changes/logout/authError/outdated get no grace; explicit suspend still immediately closes remote channels.
+- Five shared tests cover grace I/O/RPC rejection, same-channel reconnect, no extension, explicit revocation, and immediate elevated closure. Shared Swift 66 plus three XCTest passed.
+- Real isolated center/Rust test disconnects only client-center WS and blocks redial. Native P2P receives `grace:survived`, remains usable after recovery, then falls back to relay after P2P loss. Banner distinguishes center loss with usable terminals.
+- iOS App/test build-for-testing passed, no Keychain access. macOS 50 passed/seven skipped/zero failed.
 
-- 路由接入后回归：macOS 34 项、共享 Swift 45 项 + 3 项 XCTest 全过，iOS Simulator 构建成功。当前测试 App 的 20 个 Mach-O（含测试框架）未见 JavaScriptCore/WebKit 直接链接，未发现 JS/HTML/WASM 资源。
+## Keep gathered candidates when STUN is silent (2026-09-06)
 
+- NativeRTCPeer matches Web: wait at most three seconds for ICE, then continue with existing local SDP rather than fail on STUN timeout. Cancel/close/SDP errors still clean up.
+- Real test binds a random local UDP port without replying and confirms receipt of STUN datagrams. After ~3 seconds, host-candidate SDP allows real peers to connect and transfer complete Chinese/emoji frames, without public STUN.
+- macOS 58: 51 passed/seven skipped/zero failed; shared core/iOS unchanged.
+- Host-candidate success does not prove cross-NAT. Return focus to full UI/interaction comparisons and same-load performance while retaining network gaps.
 
-## 配对并发和设备移除（2026-09-05）
+## Changes empty state and batched untracked reads (2026-09-06)
 
-- NativeLocalDeviceProvider 按账号和设备共享首次配对；8 个等待者只发送一次请求。单个取消不影响其他等待者，全部取消或设备移除会撤销请求。
-- 取消后迟到的成功响应不能重新持久化 grant；旧认证失败仅删除它实际使用的 grant，避免误删新配对。
-- 中心 daemonRemoved、恢复快照中消失的设备均关闭全部 lane、测量/目录轮询和未完成请求，清除对应配对。认证失效仍关闭整个 router 并清账号配对。
-- 测试捕获并修复迟到 ping 结果重新写回已移除设备状态的问题；过期路由不能重连，全部为空的连接信息会删除。
-- 验证包括配对取消/迟到响应的真实 Keychain 测试，以及共享核心注入控制事件的移除/快照/认证失效测试。服务端真实解绑、lease 自然到期和更多传输竞争仍需独立验收。
+- CUA compared same-workspace Web/native empty states. Native refresh becomes a transparent text button with progress/disabled repeat click while loading. Window sizes were not yet identical, so not full pixel evidence.
+- Read at most eight untracked files concurrently, matching Web, and merge in original path order. Preserve NUL separators/argv for newline/space names. One disappearing file does not hide other changes.
+- Three tests passed 19 Unicode/newline paths peaking at eight requests, reverse results retaining order, single-file failure skip, and cancellation preventing later batches. No full regression this round.
+- Restarted app CUA checked empty button. Real repo with 19 samples showed 19 files/+38 and file-18 after scrolling, with Chinese/emoji colors. Removed sample directory; UI returned to empty/refresh works. Fast local requests prevented loading screenshot.
+- No same-load latency/frame comparison, so no speed claim. Preserve Web comparison page and continue full matrix/performance acceptance.
 
-- 本轮最终回归：macOS 37 项、共享 Swift 47 项（其中移除测试含 3 个参数用例）及 3 项 XCTest 均通过；iOS Simulator 构建成功。
+## Changes refresh and collapse acceptance (2026-09-06)
 
+- Web changes-refresh.ts confirms added/deleted counts are not a content version; reactivation/manual refresh must fetch again.
+- Real CUA: two-line Python sample changed REFRESH_PHASE_A to B at constant +2/−0. Collapse, switch to terminal, edit, return: collapse preserved and expansion showed B.
+- While active, change to C with unchanged counts; refresh shows C. Remove sample directory; automatic empty state returns.
+- Existing behavior already matched; no refresh implementation change. Evidence covers this untracked text case, not full UI/performance.
+- Full macOS 61: 54 passed/seven skipped/zero failed, including batch reads and real P2P/PTY/Git/fallback. Log `/tmp/coflux-macos-093-refresh-full.log`.
 
-## 授权恢复和真实撤权验收（2026-09-05）
+## Sidebar trailing removal controls (2026-09-06)
 
-- 共享路由新增两种授权恢复用例：注入时钟推进至 lease 的 2 秒安全余量内，以及设备返回 scope_denied。均确认旧连接关闭、新连接 generation 增大、两个未完成 Git 请求成功完成；重投保留原 requestID/operationID。
-- 真实隔离 Rust 网关用例新增 localUnpair：已建立的 session/elevated 连接均主动关闭，旧 grant 无法重连。最后一个 Origin 配对被撤销时，中心同步移除 Origin allowlist，网关可在 HTTP upgrade 阶段拒绝；有其他同 Origin 配对时可在认证阶段返回 grantUnknown。
-- 共享 Swift 全套 48 项（授权恢复含 2 个参数用例）与 3 项 XCTest 通过；macOS 网关定向 3 项通过。本轮仅增加验收测试，未更改 App 运行时代码。
-- 仍未证明真实 lease 自然到期的端到端时序，未实现 P2P；HTTP upgrade 拒绝后的旧配对缓存恢复也需后续评估。不能据此勾选完整连接能力对齐。
+- Added nonmain-workspace X and device Trash2 from Web sidebar, using same Lucide assets/existing confirmations. Main workspace has no remove action.
+- Workspace hover fades trailing text; device rows reserve space. Icons appear on hover/keyboard focus, retaining accessible names/hit targets.
+- Debug build passed. CUA clicked both entries for the sample native-client workspace/local-dev device, canceled, and verified both remain. No deletion performed; main-workspace AX has no delete button.
+- Hover screenshots/Tab-focus acceptance remain. Only build/real entry/cancel verified; previous 54/seven result predates this change.
 
+## Branch selection as anchored popover (2026-09-06)
 
-## 启动地址校验（2026-09-05）
+- Replace modal sheet with native SwiftUI popover matching Web's 320px dropdown, anchored to project plus/workbench branch button. Buttons/context menu/shortcuts share controlled target; stale close callbacks clear only their target.
+- Remove modal title bar; fixed search top, list height by item count capped at 240pt. Keep occupied disabled/current selectable and search/arrows/Return/cancel.
+- CUA: plus opens AX popover below button without window overlay; search auto-focus, native-popover-check creation option, Esc close. ⌘N reopens/reset query. Switch menu shows current native-ui and occupied main; Return closes current branch without change.
+- Initial short-list screenshot showed unnecessary scrollbar from height estimate. Set 28pt rows/2pt gap and 30pt per item. No workspace created or branch changed; final tweak initially awaited observation.
+- Final CUA showed both entries and no AX scrollbar. Full macOS 61: 54 passed/seven skipped/zero failed, including sidebar/menu changes. Log `/tmp/coflux-macos-093-popover-full.log`.
 
-- COFLUX_SERVER_URL 仅在未设置时使用构建默认地址；显式提供空值、相对路径、非 WebSocket 协议、用户凭据、fragment 或无效端口均停止初始化。
-- 错误配置显示原生“服务器地址无效”页，不构造 CofluxClient、不读取 token、不回退连接其他环境，也不显示原始地址中的潜在敏感信息。修正环境配置后重新启动即可。
-- 2 项地址测试覆盖默认值、非法配置、自定义服务器路径、IPv4/IPv6。CUA 实际启动非法地址确认错误页和退出按钮；重新以隔离服务地址启动，确认原有工作台、终端和本机直连标识恢复。
+## Terminal-close confirmation copy and shortcut (2026-09-06)
 
-- 启动入口修改后 macOS 全套 39 项测试通过。
+- Match Web requestCloseTask: title includes catalog terminal name, falling back to Terminal. Explain shell termination, permanent tab removal, and no retained output. Button becomes Stop and Close. Mechanism unchanged.
+- Debug build passed. CUA close button showed Terminal 1 in title/full explanation; Esc preserved terminal. ⌘W opened same confirmation; Cancel preserved window/terminal.
+- No actual termination/deletion, new tests, or full regression. Different background names/empty-name fallback await real UI samples.
 
+## Tab close visibility and long-title hints (2026-09-06)
 
-## 原生高亮语言扩展（2026-09-05）
+- Match Web: close icon appears on tab hover or close-button keyboard focus. Keep hit target/accessibility, add stable tab.close id, use 60% accent on inactive hover.
+- Use native full-title tooltip, avoiding clipping of custom overlays inside horizontal ScrollView. This is a native overflow-hint difference without JS. OSC nonempty override/empty fallback unchanged.
+- Debug build passed; CUA shows icon hidden when unhovered while AX button remains. Clicking opens correct confirmation; cancel preserves session.
+- Real hover/focus visibility/long-OSC tooltip acceptance remains; no full suite repeat or inference from build success.
 
-- 在现有 JS/TS/JSX/TSX 基础上，接入官方 Tree-sitter Rust 0.23.2、Python 0.23.6、Go 0.23.4、JSON 0.24.8、Bash 0.23.3、C 0.23.4；均使用 ABI 14，与当前原生解析器兼容。
-- 支持 rs、py/pyi/pyw、go、json/jsonc、sh/bash、c/h，以及 .bashrc/.bash_profile/.profile。JSONC 使用 JSON 语法容错，尚未承诺覆盖所有 JSONC 扩展。
-- 包、查询规则与许可证同步锁定；App 无需下载语言代码、不执行被高亮文件。
+## Preserve image orientation during reencoding (2026-09-06)
 
-- 高亮语义与 Unicode 范围测试通过；CUA 在隔离导入仓库实际检查六种语言变更页的颜色和滚动，样例文件已清理。App 20 个 Mach-O（含测试框架）及资源扫描未发现 JavaScriptCore/WebKit 直接链接或 JS/HTML/WASM 资源。
+- Web createImageBitmap versus ImageIO review found native CGImage-only reencoding dropped EXIF and rotated portrait uploads incorrectly. Apply full-size ImageIO rotation/mirroring for orientations 2–8 before PNG/JPEG. Supported under-budget formats remain byte-preserved with metadata.
+- Two tests: orientation-6 120×80 TIFF becomes 80×120 PNG; deterministic-noise 1800×1200 JPEG >3.5MB compresses within budget at 1200×1800. Assert input orientation to avoid false conclusions.
+- Initial large-image test inferred dictionary orientation as Double, which ImageIO dropped. Explicit [CFString: Any] fixed metadata and output assertions.
+- Six TerminalUploadTests passed, including IME/bracketed-paste/file limits/TIFF. Log `/tmp/coflux-macos-093-orientation.log`. No user images/clipboard; real drag/drop/remote viewing and mirrored pixel checks for 2–5/7–8 remain.
 
-- 语言扩展后 macOS 全套 40 项测试通过。
+## Real image upload and background-tab integration (2026-09-06)
 
+- Expanded isolated center/Rust test starts orientation-6 TIFF conversion/upload through UploadTerminalView callback, immediately switches tabs, and confirms result stays with original coordinator.
+- Read PNG back through real exec/base64; ImageIO verifies 80×120. Returning to original terminal clears pending path and displays it there. Remove uploaded file and Ctrl-U input, never execute the image path.
+- First contiguous-string assertion failed at visual wrapping of a long path. Diagnostics confirmed cleared pending/valid control/echoed path. Test alone now ignores visual breaks in that UUID path; upload behavior unchanged.
+- Real targeted integration passed in 3.667 seconds, retaining switch/upload/OSC/reconnect/takeover/restart coverage. Log `/tmp/coflux-macos-093-image-integration.log`. No user clipboard; does not prove OS drag/paste events or full regression.
 
-## diff 两版语法隔离（2026-09-05）
+## Background cancellation during upload preparation (2026-09-06)
 
-- 修复把删除行与新增行拼成一份源代码解析的问题：旧版包含删除/上下文，新版包含新增/上下文，分别查询后映射回 diff 行 ID；删除行使用重命名前的路径选择语言。
-- 不连续 hunk 独立解析，避免缺失上下文时前一段未闭合字符串污染后续段；仍只拥有 diff 片段，不能声称等同于完整文件的语法上下文。
-- 行范围投影和重叠 token 排序移入高亮 actor；主线程只创建属性文本，每 64 行让出执行并检查取消。完整文件发布前仍保留普通文本，可继续查看变更。
-- 多行 Python 字符串的旧/新版本、后续 return 关键字和分离 hunk 测试通过。
+- Hold explicit detached task and forward cancellation with withTaskCancellationHandler. Previously terminal close prevented sending but could keep compressing the entire image.
+- Cooperative checks before/after file reads, after decode/orientation, each resize/JPEG encode, and caller cancellation after background return prevent late uploads.
+- Individual ImageIO/FileHandle calls cannot be interrupted until they return; this does not cancel already-sent remote RPC.
+- Deterministic test starts work, cancels caller, then releases gate, asserting background Task.isCancelled and caller CancellationError rather than merely discarding output. No clipboard/Keychain.
+- Full macOS 64: 57 passed/seven skipped/zero failed, covering cancellation/large-image orientation/budget/real upload-switch. Log `/tmp/coflux-macos-093-upload-cancel-full.log`.
 
-- Debug 合成 6000 行 Rust diff：后台解析/范围映射约 329 ms，期间主线程 2 ms 心跳执行 111 次，全部行关键字映射通过。这不包含 SwiftUI 布局/滚动，也不是相对 Web 的性能结论。macOS 全套 42 项测试通过。
+## Device HOME-terminal creation busy state (2026-09-06)
 
+- Match Web's device entry centered on HOME terminal. Add per-device reentrancy guard, busy/disabled button, HOME error/offline explanation. Stop simultaneously showing Select a Workspace in device empty state.
+- Busy spans HOME query to directory-workspace arrival, with 15-second retryable timeout using async sleep. Center errors converge via global lastError like Web; no creation correlation id exists. Account changes prevent the post-query create request.
+- Debug build passed. Real center/Rust concurrent creation test confirms two calls create one task, clear busy/no error, and clean up task. Log `/tmp/coflux-macos-093-device-create-test.log`.
+- Existing isolated HOME workspace opens directly; it was not deleted to force empty state. First-empty busy screenshot, timeout/offline retry, and full regression remain.
 
-## 开发凭据隔离与端口入口（2026-09-06）
+## Preview-fixture protocol configuration (2026-09-06)
 
-- 用户反馈重签名开发 App 弹钥匙串授权。Debug 默认使用不落盘的登录会话，不构造持久身份 provider，因此常规 UI 联调走 relay；只有明确设置 COFLUX_KEYCHAIN_DEV=1 才开启开发凭据/直连持久化。Release 仍使用 Keychain 和原生 provider。
-- 钥匙串相关集成用例默认跳过，仅 COFLUX_KEYCHAIN_TESTS=1 显式执行；后续不得把跳过计为通过。此次未访问、删除或修改旧钥匙串记录。
-- 对齐当前 Web：每个终端标签独立提供端口菜单，后台标签无需激活即可打开其预览；右侧直接列出活动终端的端口链接。端口以不带千分位的十进制显示。
-- CUA 临时会话登录和端口操作未出现钥匙串提示；真实隔离终端启动 18089 服务，本地 HTTP 返回 200，切到第二标签后仍能从第一标签菜单打开系统浏览器。
-- 浏览器收到的是测试服务器生成的 HTTPS localhost 预览 URL，隔离服务未配置 TLS，页面加载失败；未绕过安全校验，端到端预览尚未验收。测试服务、额外终端和浏览器页均已清理。
+- Harness lacked COFLUX_DEV, making preview default HTTPS despite HTTP listener. Like proxy.test.mjs, dev-fixture now explicitly sets COFLUX_PROXY_SCHEME=http, p.localhost, and isolated port.
+- Point preview authentication at the same isolated Web, default http://127.0.0.1:15273 with COFLUX_NATIVE_WEB_URL override; record webURL in metadata. Preserve gate/one-time code/account checks; no production changes/security bypass.
+- node --check passed. Existing fixture was not restarted, so new configuration applies next launch. Native-click-to-browser success is not yet claimed; preserve/clean existing samples and restart isolated environment for acceptance.
 
-- 本轮默认回归：42 项中 35 项通过、7 项钥匙串用例显式跳过、零失败。
+## Separate preview environment and browser authorization (2026-09-06)
 
+- Original 19873 service remains healthy but its fixture parent exited. Preserve it and start center 19874/Web 15274. Add COFLUX_NATIVE_FIXTURE_FILE to avoid overwriting old metadata.
+- Optional COFLUX_NATIVE_PREVIEW_FIXTURE=1 starts a real task-PTY HTTP sample on 18091 and waits for portsUpdated before ready. Fixture exit uses harness cleanup. Start with node --import tsx; plain node fails TS protocol .js import resolution.
+- After CUA login to 15274, main workspace shows :18091 and actual URL http://device-18091-p.localhost:19874. Navigating that observed URL first showed preview authorization, then reused login and displayed the intentional test text `原生端口预览已连通` and PREVIEW_NATIVE_093. No certificate/gate bypass or cookie injection.
+- Web link clicking did not create a tab in the controlled browser list, so validation used the observed URL directly. This is not native-app click acceptance; next connect native to 19874 and test controls.
+- Metadata /tmp/coflux-native-093-preview-fixture.json; fixture exec session 47943, Vite 8514; browser id=1, tab 2 Web/tab 3 preview preserved for continuation. Old 19873/15273 remain running.
 
-## 输入法提交与普通粘贴（2026-09-06）
+## Native port button to system browser acceptance (2026-09-06)
 
-- SwiftTerm 1.15 的 insertText 仅处理 NSString，AppKit 可提供 NSAttributedString；UploadTerminalView 将其转换为纯文本再交回基类，保留组合态清理和终端键盘协议。
-- AppKit 输入回调测试：带属性候选不提前发送，提交“你好😀”只发一次 UTF-8、清除 marked text，后续普通文本可继续输入。
-- CUA 实际系统粘贴 printf 命令并回车，在隔离真实 PTY 看到了“原生粘贴😀”输出。工具报告剪贴板等待超时，但截图确认已成功粘贴，未重复发送。
-- 该证据不替代具体中文输入法的候选窗口/选词/撤销与复杂快捷键完整验收；常规验证继续不访问钥匙串。
+- Debug build setting COFLUX_DEBUG_SERVER_URL passes through generated Coflux-Info.plist, defaulting to 19873; environment COFLUX_SERVER_URL wins. Release ignores debug key. This build uses 19874, verified in final plist, without changing production address.
+- CUA native login showed real 18091. Clicking Open Port 18091 launched Safari at 15274/proxy-auth. Isolated admin/admin login reached device-18091-p.localhost:19874 with the test confirmation text and PREVIEW_NATIVE_093.
+- Chose Later on Safari password prompt, saving no test password. Closed only the newly created preview tab. No gate/certificate bypass or cookies injected.
+- Evidence covers active-terminal right button→system browser→isolated auth→real PTY HTTP. Background menus, disappearing ports, production HTTPS/HMR remain. Running app uses 19874; next unoverridden build returns to 19873.
+- Build log /tmp/coflux-macos-093-preview-build.log; no full regression yet after explicit plist addition.
 
-- 本轮回归：36 项通过、7 项钥匙串用例跳过、零失败。
+## Background-terminal port menu browser acceptance (2026-09-06)
 
+- Created/kept Terminal 2 active in native 19874, id d0372db8-b306-4799-ba54-83e236d98440; selected :18091 from background Terminal 1's forwarded-port menu.
+- New Safari tab displayed the real test confirmation/PREVIEW_NATIVE_093 using existing authentication. After closing it, native screenshot still highlighted Terminal 2 and right side lacked Terminal 1's active-port entry. Preview did not activate the background tab.
+- Preserve second tab in isolated preview fixture for switching/disappearance acceptance, leaving old 19873 untouched. Production HTTPS/HMR and entry removal after process stop remain.
+- Full macOS 65: 58 passed/seven Keychain skips/zero failed, including device reentrancy/upload/network integration and explicit plist/debug configuration. Log `/tmp/coflux-macos-093-preview-full.log`.
 
-## 侧栏宽度恢复（2026-09-06）
+## Preview port stop and recovery (2026-09-06)
 
-- 对照 Web sidebar.tsx，项目折叠仅在本次运行保留；侧栏宽度持久化，双击分隔线恢复 260。原生补齐双击重置及其持久化，保持 200–480 的既有范围。
-- 构建通过；CUA 实际拖宽侧栏、退出并重新登录，确认宽度恢复，再双击分隔线确认恢复默认。开发版使用临时会话，未访问钥匙串。
+- CUA Ctrl-C stopped preview-server.cjs in isolated Terminal 1. After direct 18091 failed, AX confirmed both tab menu and right-side Open Port 18091 disappeared automatically.
+- Rerunning node preview-server.cjs restored HTTP and both entries. Clicking the restored right entry displayed PREVIEW_NATIVE_093 in Safari, proving rediscovered links work.
+- No product changes or repeated suite. Covers process stop/restart only; daemon disconnect, production HTTPS/HMR, other network edges remain.
+- Attempting to close this Safari tab reported changed browser state; closure was not confirmed and no other tabs were touched. Isolated preview service is running again.
 
+## No-terminal empty state and takeover warning (2026-09-06)
 
-## 添加设备与 P2P 分帧准备（2026-09-06）
+- Match Web workspace-terminal.tsx titles/shell explanation/⌘T hint for empty workspace/device. Use a true 20pt icon in a 40pt outlined rounded frame; font previously did not resize a fixed-size icon.
+- Add Unplug, warning foreground/10% background/20% bottom border, and right-aligned recovery button after takeover, matching Web semantics/layout without changing takeover/restart.
+- Debug build passed. CUA opened empty native-ui workspace at 19874; AX/screenshot showed title/explanation/icon/create button. No terminals created/deleted.
+- Warning only compile-checked so far, without new two-client visual capture/full regression. Previous 58/seven predates this presentation change.
 
-- 添加设备面板对齐当前 Web 的安装命令 `npm i -g cofluxd && cofluxd up`、复制入口、说明和完成按钮。构建及实际布局检查通过，CUA 回车与 Esc 关闭均通过；尚未点击验证剪贴板内容，未执行安装命令。
-- 新增共享 Swift `P2PFraming` / `P2PFrameAssembler`：按当前 Web 与 Rust worker 的 u32 大端长度前缀、16 KiB 消息、30 MiB 帧上限编码和重组。接收按到达字节累积，非法长度使当前重组器永久失效，必须关闭通道。
-- 6 项新测试覆盖手写线格式、所有两段切分位置、逐字节输入、非零 Data 索引、300 KiB 帧、尾部半帧、非法长度和完整 30 MiB 帧。共享 Swift 全套 54 项 Swift Testing 与 3 项 XCTest 通过；未访问钥匙串。
-- 此分帧层尚未接入运行时。原生 WebRTC 库、SDP 信令、DataChannel 背压、路由竞争/回退及真实 P2P 联调仍未完成，不能视为 P2P 功能已实现。
+## Takeover warning and real input from both clients (2026-09-06)
 
+- In the same 19874 terminal, Web Retake Control immediately produced native warning/Unplug/right recovery button, confirmed by screenshot.
+- Native Ctrl-C while lacking control left HTTP serving PREVIEW_NATIVE_093. Native Retake Control removed warning and locked Web input. Native Ctrl-C then made 18091 fail, proving PTY input control returned rather than merely hiding a banner.
+- Restarted node preview-server.cjs and verified HTTP recovery. No code/unit-test changes. This proves local Web/direct/native handoff, not cross-NAT/loss behavior.
 
-## 原生 WebRTC 协商验证（2026-09-06）
+## Reclaim UI state for deleted entities (2026-09-06)
 
-- macOS 工程接入 stasel/WebRTC 152.0.0，SPM 锁定提交与二进制 checksum；上游和分发包许可证随 App 资源保留。正式分发前仍需完成整个二进制依赖的 notices 审核。
-- 新增 NativeRTCPeer：纯数据 reliable/ordered channel、vanilla ICE 收集后一次交换 SDP；关闭幂等，协商错误/取消关闭 peer。未创建音视频轨道，未访问钥匙串。
-- 4 项原生 XCTest 通过：两个真实 WebRTC peer 在本机无 STUN/TURN 条件下建立连接，300 KiB 分片数据和中文 emoji 回包完全一致，远端关闭可观察；另验证非法 SDP、已关闭对象、取消协商。SDP 检查包含 application/candidate，不含 audio/video m-line。
-- 这仅证明原生库与分帧可协作。尚未接入生产运行路径：TransportConnection 的发送背压/接收队列、中心 offer/channel 授权、设备级 peer 复用、direct/P2P/relay 竞争回退和真实 Rust worker 联调仍需完成。
-- 加入 WebRTC 后 macOS 全套回归：47 项中 40 项通过、7 项钥匙串测试跳过、零失败。构建成功；WebRTC framework 未直接链接 JavaScriptCore/WebKit。
+- reconcile now prunes terminalTitles, activeTasks, showingChanges, upload/drop sets, removed-project collapse, and device errors against current task/workspace/session catalogs. Previously only visited sets/activation requests converged, leaving stale records after repeated creation/deletion.
+- Preserve surviving background tasks/sessions by id across tab changes. Prune only after a catalog snapshot, never interpret initial unloaded login as deletion.
+- Expanded real lifecycle test closes second task, injects old session/workspace state, reconciles it away, and retains live title. Full login/switch/upload/reconnect/takeover/restart case passed in 3.632 seconds. Log `/tmp/coflux-macos-093-state-pruning.log`.
+- No long memory curve/full regression. State convergence does not prove leak freedom or speed over Web.
 
+## Logout cleanup and stale-request isolation (2026-09-06)
 
-## 原生 DataChannel 传输适配（2026-09-06）
+- Logout clears titles, uploads/drops, pending branches, project collapse, device busy/errors, close confirmation/dialogs, retaining window preferences such as sidebar width.
+- HOME requests capture login generation; late response/error/defer after logout cannot alter a later login, even same account.
+- Eight WorkbenchStateTests passed, log `/tmp/coflux-macos-093-logout-race.log`. New test pauses device request at relay authorization, logs out/reinjects same-account auth/snapshot, and verifies stale completion cannot clear new busy/overwrite new errors. Also verifies cleared identity and retained 320pt width.
+- Injected-control test uses no external connection/Keychain and does not replace real login UI/full regression/separate late-success acceptance.
 
-- 新增 NativeRTCConnection，符合共享 TransportConnection：专用后台串行队列进行分片、重组和 continuation 管理；并发 send 的完整帧串行发送，不交叉分片。
-- 发送按 1 MiB SCTP 缓冲水位暂停，每轮最多 256 KiB 后让出队列；发送队列限制字节和帧数。接收在回调入队前记账，限制积压字节和未消费帧数，超限关闭通道。该上限只覆盖适配层缓存，不代表 WebRTC/系统或 App 总内存上限。
-- 取消发送可能已留下半帧，因此关闭整条流并结束所有 send/receive 等待；非法前缀、非二进制消息、发送失败也关闭，避免失步后继续使用。
-- 5 项真实原生 DataChannel 测试通过：30 MiB 帧及后续中文 emoji/反向回包、8 路并发完整帧、非法前缀拒绝、取消待发送帧同时结束接收、4097 条未消费小帧触发上限关闭。
-- 仍未接入中心授权与设备路由；不能据此认定产品的 P2P 功能已对齐。下一步接 offer/answer/channel 控制消息、peer 复用与 direct/P2P/relay 竞争回退。
-- 最新 macOS 全套：52 项中 45 项通过、7 项钥匙串测试跳过、零失败。
+## Port-menu icon alignment (2026-09-06)
 
+- CUA found native Menu used router asset's intrinsic size, ignoring SwiftUI 12pt frame, and added a chevron. Web uses 12px Router/20px button/hasChevron=false.
+- Keep native AppKit menu; use a separate copied template NSImage with intrinsic 12pt, 20pt button, hidden chevron, and Forwarded Ports accessibility description. Do not mutate shared asset.
+- Debug build passed with SwiftTerm bundle incremental-node warning, log `/tmp/coflux-macos-093-port-icon.log`. After restart, screenshot showed correct icon/no chevron; AX named it. With Terminal 2 active, Terminal 1 menu listed :18091; Esc preserved Terminal 2 selection.
+- Covers icon/menu open-cancel/background selection, not repeated browser/full-suite acceptance. Full screen comparison remains.
 
-## P2P 协商与授权 provider（2026-09-06）
+## Diff long lines and row layout (2026-09-06)
 
-- 新增共享 P2PDeviceTransportProvider 接口及 macOS NativeP2PDeviceProvider。按 account/daemon/clientInstance 复用 peer，首次 channel 创建后才生成 offer；每条 channel 独立携带 generation 请求授权。
-- 严格匹配 answer.connectionID、channelResult.channelID 和成功状态，授权后才返回 TransportConnection。中心控制请求的超时/取消由注入的 authorize 实现负责；连接和 DataChannel 打开另有 10 秒等待上限。
-- 每条通道关闭释放自己的引用，最后一条关闭才清理 peer；closeAll/remove 使旧 peer 失效，迟到授权不能复活。NativeRTCPeer 新增可用状态检查。
-- 4 项测试使用真实原生对端和可控中心响应：双通道一次协商/两次授权且独立关闭；错误 channelID 拒绝；设备移除后的迟到授权拒绝、重试创建新 peer；取消一条待授权通道后另一条仍可发送。共享 Swift 全套 54 项 Swift Testing 与 3 项 XCTest 通过。
-- 尚未把 provider 注入 App 或 DeviceRouter。当前测试不代表真实中心/worker 信令联调；后续需接控制消息关联、中心断线清理、竞争提升/回退与端到端数据面验收。未访问钥匙串。
+- Match Web changes-view.tsx by removing extra two-column line numbers, left-aligning hunk headers, and restoring separate 12pt +/- slots/semantic colors.
+- Fixed native Text wrapping and leading clipping after fixedSize-only changes. Measure parsed content width once off-main with native monospace font and give lazy rows explicit horizontal width, keeping single lines without JS.
+- Debug build passed, log `/tmp/coflux-macos-093-diff-lines.log`. CUA showed preview-server.cjs from leading require through trailing listen(18091,"127.0.0.1") after horizontal scroll, with colors intact.
+- Horizontal scroll still applies to the whole file column, unlike Web's per-file content. Long-file performance/multifile widths/refresh style/full regression remain; no full Changes parity claim.
 
+## Independent per-file horizontal scrolling (2026-09-06)
 
-## P2P 路由接线与真实 Rust 联调（2026-09-06）
+- Outer Changes scroll is vertical only; each file's code scrolls horizontally, with header/collapse/statistics fixed to card width. Long filenames middle-truncate with full tooltip.
+- Explicit row heights size nested horizontal areas to content, avoiding short files filling the viewport. Keep LazyVStack; large-file performance remains unmeasured.
+- Debug build passed, log `/tmp/coflux-macos-093-diff-scroll.log`. Added a second isolated long-line file: first scroll=1 while second=0; screenshot showed first tail/second start with both headers/stats visible.
+- Collapse second and refresh preserves collapse/first scroll. Temporary file deleted without affecting preview service. No full regression or large-diff performance claim.
 
-- CofluxClient 接收 P2P provider 并传递 authOk 的 ICE servers；DeviceRouter 关联 offer/answer/channel 授权响应，中心断线、账号重置和设备移除清理 provider 与待决请求。
-- 接入 direct/P2P/relay 建连竞争、中继提升与失败回退；P2P 失败后暂退避 30 秒。侧栏补当前 Web 的 Radio 图标和 P2P 直连提示。App 默认启用原生 P2P；Debug 仍不访问 Keychain、不启用持久化 loopback 身份。
-- 3 项新增共享路由测试验证授权后 P2P 激活、中心断线关闭、失败回退 relay、relay 提升 P2P、P2P 再次断开退回 relay、移除期间的协商撤销。
-- 真实隔离中心 + Rust worker 联调通过：原生 P2P PTY 输入输出、Git RPC；关闭 WebRTC peer 后，同一终端回退 relay 并继续输入，保留此前输出。测试终端已关闭清理。
-- macOS 全套 57 项中 50 项通过、7 项钥匙串跳过、零失败；共享 Swift 57 项 Swift Testing + 3 项 XCTest 通过。当前 App 扫描 14 个 Mach-O，无 WebKit/JavaScriptCore 直接链接，也无 JS/HTML/WASM 资源。
-- 尚未完成完整网络 parity：静默 P2P 通道探活、Web 的指数退避与稳定窗口、不可达 STUN 的候选降级、跨网络 NAT 打洞和更多三路竞争场景仍需处理；不能把本机联调当作跨网络验收。
-- iOS Simulator 构建通过；未修改 iOS/mobile 功能。
+## Full regression and artifact review after Changes updates (2026-09-06)
 
+- Full macOS XCTest 67: 60 passed/seven explicit Keychain skips/zero failures. Covers latest logout/generation races, image upload, native highlighting/P2P, and real terminal lifecycle. Log `/tmp/coflux-macos-093-diff-full.log`.
+- Debug test-host scan deduplicated real paths: 14 Mach-O including XCTest, no direct WebKit/JavaScriptCore or JS/MJS/CJS/HTML/HTM/WASM resources. Report `/tmp/coflux-macos-093-artifact-audit.json`. No system indirect-dependency scan; not Release acceptance.
+- Full current-suite regression does not cover every UI/feature. Real long-diff scrolling, cross-NAT, screen comparison, and distribution remain.
 
-## 静默链路探活与 P2P 退避（2026-09-06）
+## Diagnosing 5,000-line diff stalls and rendering visible rows (2026-09-06)
 
-- session lane 激活即探活，之后每 15 秒一次；5 秒无 pong 立即补发，连续两次无响应摘掉连接并恢复。探活不再依赖侧栏测量，也不登记 pendingRequests，避免把空闲 lane 钉住。
-- pong 必须匹配 requestID、通道 generation 和当前 active；新连接不继承旧连接的超时或 miss。旧 worker 返回 empty_payload/unsupported_payload 时停止该设备的心跳，避免无限误判和重连。
-- P2P 失败退避改为 5/10/20/40/80/160/300 秒封顶；当前 P2P 的有效 pong 清零。提升循环按剩余退避时间继续尝试。当前 Web 使用 pong 恢复，并没有此前文档笼统提及的额外稳定窗口。
-- 新增四项注入短计时的行为测试：无侧栏测量的静默 P2P 回退 relay、错误 pong 不清超时/正确 pong 清除、旧 worker 安静降级、在途心跳不妨碍空闲释放。
-- 共享 Swift 61 项 Swift Testing 与 3 项 XCTest 通过；macOS 全套 50 项通过、7 项钥匙串跳过、零失败，包括真实 P2P PTY/Git/回退联调。未访问钥匙串。
-- 本次核对发现当前 Web 还有中心控制连接短断时保留远端 session 数据通道 15 秒的宽限；原生仍立即关闭 relay/P2P，需继续对齐。不可达 STUN 的候选降级、真实网络静默丢包与跨 NAT 打洞也仍需验收。
-- iOS Simulator 的 App 与测试目标 build-for-testing 通过。
+- A real 5,000-line Rust file with Chinese/emoji made old nested LazyVStack time out CUA reads. Sampling showed main-thread SwiftUI/AppKit layout: 100% CPU/RSS 574176KiB, later 856944KiB. Sample `/tmp/coflux-macos-093-large-diff.sample.txt`.
+- Use cumulative row heights/binary search for visible range, preserving full file height/per-file horizontal scroll and creating rows only within viewport plus 100pt overscan. Update geometry with outer vertical scrolling, not instantiate all rows based on horizontal-container height.
+- DiffRowLayout test traverses 5,000 rows with differing-height hunks every 100, asserting at most 47 rows in a 700pt viewport, no gaps, and end/empty boundaries. Three UnifiedDiffTests passed, log `/tmp/coflux-macos-093-diff-window-tests.log`.
+- Same real file opened/paged through CUA: initial AX ~40 nearby rows, page moved near 0028–0076 continuously. Post-fix idle snapshot CPU 1.4%, RSS 174368KiB. Debug snapshots are not rigorous benchmarks or same-load Web comparisons. Bottom scrolling/highlight latency/frame rate/full regression remain.
+- Temporary large file deleted, preview sample kept. Prior 60/seven full suite predates visible-row changes.
 
+## Long-diff tail and deletion convergence (2026-09-06)
 
-## 中心短断的会话宽限（2026-09-06）
+- CUA scrolled 5,000 lines to bottom, showing continuous ~4963–4999 with Chinese/emoji/colors. Following preview-server.cjs joined correctly and scrolled independently.
+- Removing the large file at bottom exposed outer LazyVStack height caching, leaving toolbar/blank page. Since rows are already viewport-controlled, replace outer file container with VStack for deterministic height while retaining row-demand rendering.
+- Debug build passed, log `/tmp/coflux-macos-093-diff-shrink.log`. Repeated load→bottom→delete→refresh restored short file at top without blankness. Test file cleaned.
+- No full suite repeat. Many-file layout cost/continuous frames/same-condition Web comparison remain.
 
-- 新增 setControlDisconnected，普通网络断开最多保留 15 秒既有 relay/P2P session 通道。只允许断线时已经激活的通道继续输入/输出；新连接和 elevated RPC/lifecycle 立即失效。重复断线/connecting 不延长窗口。
-- 重新认证成功撤销定时关闭，复用原通道；宽限到期关闭远端通道及 P2P peer。本机已认证 direct session 仍按既有离线语义保留。
-- setControlOnline(false) 始终是明确撤权，即使已在宽限中也立即收敛；登录换凭据、登出、authError/outdated 不获得宽限。显式 suspend 保持原先立即关闭远端通道的行为。
-- 五项共享测试覆盖宽限内输入与 RPC 拒绝、重连后同通道继续、重复断线不延长、宽限中明确撤权、elevated 立即关闭。共享 Swift 66 项 Swift Testing 与 3 项 XCTest 通过。
-- 真实隔离中心/Rust worker 联调新增只断客户端中心 WS：阻止重新拨中心期间，原生 P2P 终端收到 `grace:survived` 命令输出；恢复中心后仍可用，随后 P2P 断开回退 relay 也通过。工作台横幅区分暂时断中心但终端可用的状态。
-- iOS Simulator App 与测试目标 build-for-testing 通过。未访问钥匙串。
-- macOS 全套回归：50 项通过、7 项钥匙串测试跳过、零失败。
+## Changes refresh and error-recovery presentation (2026-09-06)
 
+- Refresh now uses same-source 14pt Lucide refresh-cw/24pt button/Refresh Changes hint. Add circle-alert, centered muted error, and busy/disabled Retry. SVG sync is build-time only, no runtime script.
+- Trim Git errors, prefer error then stderr, and fall back to exit-code copy if both empty, preventing empty errors leaving apparent loading.
+- Debug build passed, log `/tmp/coflux-macos-093-diff-controls.log`. CUA confirmed icons; temporarily setting isolated repo core.bare=true produced real must be run in a work tree with icon/text/retry. Retrying still showed error.
+- Restored/read back core.bare=false. Catalog statistics triggered automatic refresh and restored preview-server.cjs before manual retry, so do not record manual recovery success. Busy visual duration/full regression not tested.
 
-## STUN 无响应时保留已有候选（2026-09-06）
+## Cooperative cancellation during diff preparation (2026-09-06)
 
-- NativeRTCPeer 对齐当前 Web：ICE 收集最多等待 3 秒，截止后使用现有 local SDP 继续协商，不把 STUN 超时直接判为建连失败。取消、关闭和 SDP 错误仍按失败清理。
-- 新增真实测试：绑定本机随机 UDP 端口并保持不回复，确认实际收到 STUN 数据报；约 3 秒后返回含 host candidate 的 SDP，两端原生 WebRTC 继续建连并完整传输中文/emoji 帧。测试不依赖公网 STUN。
-- macOS 全套 58 项中 51 项通过、7 项钥匙串跳过、零失败。此轮未修改共享核心或 iOS。
-- 本机 host candidate 的成功不能替代跨 NAT 打洞验收。后续重心回到完整 UI/交互状态对照与相同负载的性能测量，同时保留未验收网络边界。
+- Direct await detached.value did not cancel background parsing/measurement when the page task canceled. Extract existing upload BackgroundPreparation to retain handles/forward cancellation through handler; migrate upload callers without behavior change.
+- Add throwing cancellation entry to UnifiedDiff, checking at start/per line; measurement checks per file/line. Existing synchronous parse remains nonthrowing for callers.
+- Eleven UnifiedDiffTests/TerminalUploadTests passed, log `/tmp/coflux-macos-093-background-cancel.log`: background observes parent cancel, 5,000-line parse stops at check 32, and upload/image/IME cases remain.
+- String splitting/font measurement system calls must return to checkpoints before stopping. No new switching-latency/full-suite measurement; no instant-cancel-at-any-scale claim.
 
+## System clipboard multiline-text acceptance (2026-09-06)
 
-## 变更空态与未跟踪文件批量读取（2026-09-06）
+- CUA native paste through system clipboard into isolated 19874 Terminal 2 pasted printf with Chinese, emoji, two lines, and trailing newline.
+- Tool timed out awaiting clipboard-read confirmation, but screenshot showed complete text in zsh bracketed-paste selection. Did not resend. Output file absent before Return proves trailing newline did not execute early.
+- After Return, prompt recovered. Independent output read matched all 32 UTF-8 bytes, including intentional `第一行中文😀`, English second line, and newlines. Test file deleted.
+- Proves system text paste, not image paste/file drop/real IME candidate selection. Tool timeout is not tool success; app behavior is supported by screenshot/bytes. No business-code changes or suite rerun.
 
-- CUA 对照同一隔离工作区的 Web/native 变更空态；原生空态刷新改为无底色文本按钮，加载时显示进度且禁用重复点击。两次截图窗口尺寸尚未统一，不作为完整像素对齐证据。
-- 未跟踪文件改为每批最多 8 个并发 Git 请求，与当前 Web 一致；按原路径次序合并。保留 NUL 路径分隔及 argv 传参，文件名含换行/空格不被破坏。单个文件在列表读取后消失，不遮住其他变更。
-- 3 项新增测试通过：19 条含 Unicode/换行路径的请求峰值为 8、逆序返回仍按路径顺序合并；单文件失败跳过；取消后不启动后续批次。此次未重复全套 macOS 回归。
-- 最新 App 重启后 CUA 检查空态按钮；真实隔离仓库创建 19 个样例文件，UI 显示 19 文件/+38，滚动至 file-18，中文/emoji 高亮正常；样例目录已完整清理，UI 自动恢复空态，刷新可用。快速本机请求未捕获到加载中的截图。
-- 未做同负载 Web/native 延迟和帧率对比，不能宣称已经更快。Web 对照页已保留，继续进行完整 UI 状态矩阵和性能验收。
+## Clear drag overlay when permissions change (2026-09-06)
 
+- Web uses drop uploads for files and primarily image paste; no extra file-paste semantics added. Prepared Finder test window was closed/cleaned; full cross-window drag still incomplete.
+- Fixed overlay persisting when control is lost/upload starts and draggingUpdated rejects. Entry/update/final preparation re-evaluate current permission/file pasteboard and clear hint on rejection.
+- Eight TerminalUploadTests passed, log `/tmp/coflux-macos-093-drag-revoke.log`. Named private NSPasteboard test accepts file→rejects revoked permission→accepts recovery→rejects text, with hints true/false/true/false. User general clipboard untouched.
+- Covers shared actual acceptance logic, not full NSDraggingSession or successful cross-window upload; real acceptance remains.
 
-## 变更页刷新与折叠状态验收（2026-09-06）
+## Latest full regression and login-draft fix (2026-09-06)
 
-- 对照当前 Web 的 changes-refresh.ts：增删行数不是正文版本，重新激活标签与手动刷新都必须重新拉取内容。
-- 最新原生 App 的真实 CUA 验收：两行 Python 样例从 REFRESH_PHASE_A 改为 B，始终保持 +2/−0；先折叠、切到终端、修改文件、再回变更页，折叠状态保留，展开显示 B。
-- 保持变更页激活，将标记改为 C，统计仍不变；点击刷新后正文显示 C。清理本轮样例目录后，变更页自动恢复空态。
-- 此轮行为已符合，无需修改刷新实现。证据仅覆盖该未跟踪文本文件的刷新、折叠与空态，不代表完整逐屏 UI 或性能验收。
-- 随后 macOS 全套回归成功：61 项中 54 项通过、7 项钥匙串用例跳过、零失败，包含新增批量读取测试及真实 P2P/PTY/Git/回退联调。日志：`/tmp/coflux-macos-093-refresh-full.log`。
+- Full macOS XCTest 70: 63 passed/seven Keychain skips/zero failed, log `/tmp/coflux-macos-093-latest-full.log`. Includes prior diff viewport/cancel/upload/drag permission changes; following login changes occurred afterward.
+- Review found replacing LoginView during auth destroyed account-local state, requiring reentry on failure; Web keeps draft outside. Move native account draft to RootView binding: failure preserves account, clears password, focuses password.
+- Debug build passed, log `/tmp/coflux-macos-093-login-draft.log`. CUA wrong-password admin login showed retained admin/empty focused password after real rejection; correct password plus Return entered workbench.
+- No TODO/FIXME/unimplemented placeholder found in native source, which does not prove completeness. Screen comparison/system image paste/drop/real IME/network/signed distribution remain.
 
+## System Preview image copy and terminal paste (2026-09-06)
 
-## 侧栏行尾移除入口（2026-09-06）
+- Created 32×24 RGBA gradient PNG, opened in Preview, selected/copied, then actual Command-V in isolated Terminal 2 read system image clipboard, uploaded to daemon, and inserted returned paste-UUID.png path.
+- Screenshot showed bracketed-paste input without execution. ImageIO/CoreGraphics decoded source/upload with identical sRGB RGBA; both 32×24 and byte-identical pixels. Script `/tmp/coflux-image-check-093.swift` cannot rerun directly because test input was cleaned.
+- Ctrl-U cleared input, Preview test window closed, source/upload deleted. No other images/uploads accessed/deleted.
+- Proves actual system image copy/paste, not merely onImage callback. Oversized images, IME candidates, Finder cross-window drop remain. No business-code changes/full-suite repeat.
 
-- 对照当前 Web sidebar.tsx 补齐非主工作区行尾 X 与设备行尾 Trash2；使用相同 Lucide 矢量资源，复用既有移除确认对话框。主工作区不创建删除入口。
-- 工作区悬停时遮淡末尾文字，设备行保留按钮空间；图标随悬停/键盘聚焦显示，按钮本身保留可访问名称与点击区域。
-- 最新 Debug 构建成功。CUA 分别点击两个新入口，确认目标为“原生客户端”工作区与“本机开发设备”，取消后两者仍在列表中；未执行实际删除。主工作区 AX 树中没有删除按钮。
-- 自动化没有捕获悬停显隐截图，键盘 Tab 聚焦也尚未完成专项验收；不能据此宣称这两项视觉/键盘行为已验证。此次仅构建及真实入口/取消验收，未重复全套测试；此前 54 通过/7 跳过是本次侧栏修改前的结果。
+## Bundle third-party licenses (2026-09-06)
 
+- Added scripts/sync-notices.py to verify checkout full revisions against current Package.resolved and collect original LICENSE/NOTICE files, including dependency subdirectories, WebRTC binary framework license, and original Lucide license.
+- Generated 14 pinned dependencies including build tools, WebRTC framework, and icons: 83764 bytes in Sources/ThirdPartyNotices.txt, bundled as resources. Help offers Third-Party Licenses through system text viewer.
+- Debug build, generator --check, and byte comparison of bundled/source notices passed; log `/tmp/coflux-macos-093-notices.log`. No full regression or actual menu click.
+- Complete WebRTC internal component distribution notices and current Web illustration source/license still need verification; collecting resources is not completed distribution review.
 
-## 分支选择改为按钮锚定菜单（2026-09-06）
+Regenerate: `python3 apps/macos/scripts/sync-notices.py --source-packages /tmp/coflux-macos-093-build/SourcePackages`; add --check to detect stale notices after upgrades.
 
-- 当前 Web 使用 320px 宽的分支下拉菜单；原生此前使用模态 sheet，现改为 SwiftUI 原生 popover，分别锚定项目加号和工作台分支按钮。按钮、右键入口和快捷键仍共用同一受控目标；旧菜单关闭回调仅清除自己的目标。
-- 去除模态标题栏，搜索固定在顶部，列表按条目数自适应高度并在 240pt 封顶；已占用分支禁用、当前分支可选、搜索/方向键/回车/取消逻辑沿用。
-- 最新 App CUA：加号打开后 AX 为 popover，截图确认位于按钮下方且未遮罩整窗；搜索自动聚焦，输入 native-popover-check 出现新建选项，Escape 关闭；⌘N 重新打开同一项目菜单且查询重置。切分支菜单显示当前 native-ui 与被占用的 main，回车关闭当前分支菜单且不改变分支。
-- 初次截图发现短列表行高估算不足导致滚动条，随后固定行高 28pt/间距 2pt，容器按每项 30pt 计算。该最终微调需要重新观察，尚未据此声称完整视觉对齐。此轮未创建新工作区或修改现有分支。
-- 最终产物再次 CUA 观察：两项分支完整可见，AX 不再出现滚动条，截图确认短列表多余滚动条已消失。macOS 全套 61 项中 54 通过、7 钥匙串跳过、零失败；日志 `/tmp/coflux-macos-093-popover-full.log`，覆盖本轮菜单与上一轮侧栏改动后的构建。
+## Optimized Release build and reproducible artifact audit (2026-09-06)
 
-
-## 终端关闭确认文案与快捷键（2026-09-06）
-
-- 对照当前 Web workbench.tsx 的 requestCloseTask，原生确认标题补入 catalog 终端名称（空名称回退“终端”），说明明确 shell 停止、Tab 永久删除及历史输出不保留；按钮改为“停止并关闭”。关闭机制未改动。
-- Debug 构建成功；最新产物 CUA 点击标签关闭按钮，显示“关闭终端「终端 1」？”与完整说明，Escape 取消后同一终端仍在。随后 ⌘W 打开相同确认，点击取消后窗口与终端均保留。
-- 本轮没有执行实际终止/删除，也没有增加测试或重复全套回归；仅验证该文案变更的构建与两个 UI 入口。后台不同名称标签、空名称回退尚未追加真实 UI 样例。
-
-
-## 终端标签关闭显隐与长标题提示（2026-09-06）
-
-- 对照当前 Web workspace-terminal.tsx，关闭图标改为标签悬停或关闭按钮键盘聚焦时显示；保留按钮命中区域和可访问名称，增加稳定 tab.close ID。非活动标签悬停使用 60% accent 背景。
-- 标签标题增加系统全文提示，避免放在横向 ScrollView 内的自绘浮层被裁剪；这是原生文本溢出提示的实现差异，没有引入 JS。OSC 非空覆盖与空标题回退规则保持原样。
-- 最新 Debug 构建成功；CUA 截图确认未悬停时关闭图标隐藏，AX 关闭按钮仍存在。点击该按钮进入正确终端确认，取消后原会话保留。
-- 悬停显示、键盘聚焦显隐以及长 OSC 标题提示弹出仍需真实专项验收；此次未重复全套测试，不把构建通过当作这些交互已通过。
-
-
-## 图片重编码保留方向（2026-09-06）
-
-- 核对 Web createImageBitmap 与原生 ImageIO 的解码差异：原生重编码此前只取 CGImage 像素，丢弃 EXIF 方向后会上传横躺的竖拍图片。现在对方向 2–8 使用 ImageIO 原尺寸旋转/镜像，再进入 PNG 转换或 JPEG 压缩；预算内支持格式仍原样传输，保留原始元数据。
-- 新增两个行为测试：方向 6 的 120×80 TIFF 转 PNG 后为 80×120；1800×1200 确定性噪声 JPEG 大于 3.5MB，压缩后在预算内且为 1200×1800。测试显式核对输入元数据，避免无方向标记的样例产生伪结论。
-- 首次大图用例暴露测试字典类型推断将方向值写成 Double，ImageIO 未保留该方向；改为明确的 [CFString: Any] 后，输入方向断言与输出断言均通过。
-- TerminalUploadTests 共 6 项通过，日志 `/tmp/coflux-macos-093-orientation.log`；包含既有 IME 提交、bracketed paste、文件上限和 TIFF 转换。本轮没有使用用户图片/剪贴板，也未验证真实拖放或远端查看图片；方向 2–5/7–8 的镜像像素仍未单独覆盖。
-
-
-## 图片上传与后台标签的真实设备联调（2026-09-06）
-
-- 扩展已有隔离中心/Rust worker 集成用例，通过 UploadTerminalView 图片回调启动带方向 6 的 TIFF 转换与上传；立即切到另一终端，确认结果路径留在原 coordinator，另一终端没有收到路径。
-- 通过真实设备 exec/base64 回读 PNG 字节，用 ImageIO 验证落盘图片为 80×120；返回原终端后，待插入路径清空且该路径出现在原终端。测试移除其图片文件并用 Ctrl-U 清空输入行，不执行图片路径。
-- 首次连续字符串断言在长路径视觉折行处失败，诊断确认 pending 已清空、控制权有效、路径已回显；仅调整测试以忽略该 UUID 路径的视觉换行，没有修改上传机制。
-- 最终定向真实集成通过（3.667 秒），同时继续覆盖既有终端切换、上传、OSC、重连、接管和重启；日志 `/tmp/coflux-macos-093-image-integration.log`。没有读写用户剪贴板，不等同于真实系统拖放/粘贴事件已验收，也未重复完整 macOS 测试集。
-
-
-## 上传准备的后台取消（2026-09-06）
-
-- 上传准备改为持有显式 detached task 句柄，并用 withTaskCancellationHandler 将上传任务的取消转发到后台任务。此前关闭终端仅阻止发送，仍可能继续压缩整张图片。
-- 文件读取前后、图片解码/方向变换之后、每轮缩放和每次 JPEG 编码前后加入协作取消检查；后台返回后再检查调用方取消，防止迟到结果继续上传。
-- 单次 ImageIO 解码/编码或 FileHandle 读取仍不可被此逻辑中断，必须等待该系统调用返回；不宣称取消已发送的远端 RPC。
-- 新增确定性测试先让后台准备进入工作状态，再取消调用方并释放工作门控；显式验证后台 Task.isCancelled 为 true 且调用方收到 CancellationError，避免仅丢弃返回值的实现蒙混通过。测试不触碰真实剪贴板或钥匙串。
-- 最新 macOS 全套回归成功：64 项中 57 通过、7 钥匙串用例跳过、零失败，含后台取消、大图方向/预算和真实图片上传/切换链路。日志 `/tmp/coflux-macos-093-upload-cancel-full.log`。
-
-
-## 设备 HOME 终端创建忙态（2026-09-06）
-
-- 对照当前 Web：设备入口以 HOME 目录终端为主。原生补齐同设备创建防重入、按钮忙态/禁用、HOME 解析错误与离线说明；不再在设备空态同时显示“选择一个工作区”。
-- 忙态覆盖 HOME 查询到目录工作区出现；最多等待 15 秒并提供可重试错误。等待使用异步 sleep，不阻塞主线程。中心错误目前与 Web 一样按全局 lastError 收敛，协议尚无该创建操作的请求 ID；账号变化后不再发送查询后的创建请求。
-- Debug 构建成功；真实隔离中心/Rust worker 新增并发创建测试，两次同时调用仅新增一个任务，忙态清除且无错误，本次新增任务清理成功。日志 `/tmp/coflux-macos-093-device-create-test.log`。
-- 当前 CUA 隔离设备已有 HOME 工作区，点击设备直接进入既有终端；未删除它来强造空态。因此首次空态的忙态截图、超时和离线后的重试仍需验收；本轮未重复全套 macOS 回归。
-
-
-## 预览验收环境的协议配置（2026-09-06）
-
-- 核对发现 harness 未设置 COFLUX_DEV，server 的预览 scheme 因而默认为 HTTPS，而隔离监听器实际为 HTTP。与现有 proxy.test.mjs 同样，dev-fixture 显式设置 COFLUX_PROXY_SCHEME=http、p.localhost 与当前隔离端口。
-- 预览门禁认证页改指向同一隔离 Web，默认 http://127.0.0.1:15273，可用 COFLUX_NATIVE_WEB_URL 覆盖；fixture 元数据记录 webURL。门禁、一次性授权 code 与账号校验均保留，没有改生产配置或绕过浏览器安全提示。
-- node --check 通过。当前既有 fixture 进程没有重启，新配置要在下一次启动时生效；尚未据此宣称原生点击预览到浏览器页面加载已通过。后续需在保留/清理现有 UI 样例后重启隔离环境继续验收。
-
-
-## 独立预览环境与浏览器门禁联调（2026-09-06）
-
-- 原 19873 服务仍健康，但管理 fixture 的父进程已退出；保留旧对照环境，另起 19874 中心和 15274 Web。fixture 支持 COFLUX_NATIVE_FIXTURE_FILE，避免覆盖旧环境元数据。
-- 新增可选 COFLUX_NATIVE_PREVIEW_FIXTURE=1：在真实任务 PTY 内启动 18091 HTTP 样例，等 portsUpdated 确认后才宣布就绪；退出 fixture 沿用 harness 清理。脚本需要 node --import tsx 启动（直接 node 会因协议 TS 的 .js 导入解析失败）。
-- CUA 登录 15274 后主工作区显示 :18091，真实链接为 http://device-18091-p.localhost:19874。浏览器直接打开这个已观察到的地址，先显示访问端口预览认证页，随后自动使用已登录状态完成门禁，最终显示“原生端口预览已连通”及 PREVIEW_NATIVE_093。没有绕过证书提示、门禁或注入 cookie。
-- Web 链接点击未在受控浏览器 tab 列表新增页面，因此用已观察地址导航验证；不能把此结果记为原生 App 点击链路已通过。下一步需让原生 App 接入 19874，验证端口菜单/按钮。
-- 新环境元数据 /tmp/coflux-native-093-preview-fixture.json；本轮 fixture exec session 47943、Vite session 8514。浏览器 id=1，tab 2 为 Web，tab 3 为预览页面，均标记后续继续。旧 19873 及 15273 没有停止。
-
-
-## 原生按钮到系统浏览器的预览验收（2026-09-06）
-
-- Debug 支持构建设置 COFLUX_DEBUG_SERVER_URL，经生成的 Coflux-Info.plist 传入；默认仍为 19873，环境 COFLUX_SERVER_URL 优先，Release 不读取调试键。本轮以 19874 构建并检查最终 Info.plist，未修改正式服务器地址。
-- CUA 登录原生 App 后，主工作区显示真实 18091 端口；点击“打开端口 18091”启动系统 Safari，进入 15274/proxy-auth。输入隔离 admin/admin 后，Safari 显示 device-18091-p.localhost:19874 的“原生端口预览已连通”与 PREVIEW_NATIVE_093。
-- Safari 保存密码提示选择“以后”，没有保存测试密码；只关闭本次创建的预览标签，未操作原有标签。链路未绕过门禁、证书警告，也未注入 cookie。
-- 本证据覆盖原生活动终端右侧端口按钮→系统浏览器→隔离认证→真实 PTY HTTP 服务；后台标签端口菜单、端口消失后的行为和生产 HTTPS/HMR 仍需补验。当前运行 App 指向 19874，常规不带覆盖的下次构建恢复 19873。
-- 构建日志 /tmp/coflux-macos-093-preview-build.log；新增显式 plist 后尚未做完整测试集回归。
-
-
-## 后台终端端口菜单的浏览器验收（2026-09-06）
-
-- 当前 19874 原生客户端新建“终端 2”（d0372db8-b306-4799-ba54-83e236d98440）并保持激活，从后台“终端 1”的转发端口菜单选择 :18091。
-- Safari 新标签成功显示真实服务“原生端口预览已连通”及 PREVIEW_NATIVE_093，复用此前认证，无需重新输入凭据。关闭本次 Safari 标签后，原生截图确认仍高亮终端 2，右侧没有终端 1 的活动端口入口；没有因打开后台端口而激活终端 1。
-- 第二标签保留在独立预览 fixture 中供后续切换/端口消失验收，不触碰旧 19873 环境。生产 HTTPS/HMR、端口进程停止后入口撤销仍待验证。
-- 最新 macOS 全套回归成功：65 项中 58 通过、7 钥匙串测试跳过、零失败，包含设备创建防重入、上传与真实网络联调；显式 Info.plist 和调试服务器构建配置也已纳入此次构建。日志 `/tmp/coflux-macos-093-preview-full.log`。
-
-
-## 预览端口停止与恢复（2026-09-06）
-
-- CUA 在 19874 隔离原生终端 1 按 Ctrl-C 停止本次 preview-server.cjs；直连 18091 连接失败后，AX 确认标签端口菜单和右侧“打开端口 18091”同时自动移除。
-- 在同一 PTY 重新运行 node preview-server.cjs，HTTP 返回测试页面，原生两个端口入口自动恢复。点击恢复后的右侧入口，Safari 成功显示 PREVIEW_NATIVE_093，证明重新发现后的链接可用。
-- 此轮无需修改产品逻辑，未重复测试集。仅覆盖服务进程停止/重启；daemon 断线、生产 HTTPS/HMR 与更多网络边界仍未完成。
-- 尝试关闭本轮 Safari 预览标签时工具报告浏览器状态被改变，未确认标签是否关闭；没有继续操作其他标签。隔离预览服务已恢复运行。
-
-
-## 无终端空态与接管警示呈现（2026-09-06）
-
-- 对照 Web workspace-terminal.tsx 补齐无终端工作区/设备的标题、shell 启动说明和 ⌘T 提示；终端图标改为实际 20pt，置于 40pt 描边圆角框（此前 font 不会改变固定尺寸图标）。
-- 被其他客户端接管时补 Unplug 图标、warning 前景/10% 背景/20% 底边，恢复按钮靠右，与当前 Web 警示横幅语义及布局一致；接管和重启机制未改。
-- 最新 Debug 构建通过；CUA 打开 19874 的 native-ui 空工作区，AX 与截图确认新标题、说明、图标框和创建按钮完整显示。没有创建或删除终端。
-- 警示横幅此次仅编译检查，尚未追加真实双客户端接管后的视觉截图；未重复全套回归。上轮 58 通过/7 跳过为本次呈现调整前结果。
-
-
-## 接管警示与双端真实输入验收（2026-09-06）
-
-- 使用 19874 同一终端，CUA 从 Web 点击“重新接管”，原生立即显示 warning 横幅、Unplug 图标和靠右的恢复按钮，截图确认完整呈现。
-- 原生失去控制权时按 Ctrl-C，HTTP 样例继续返回 PREVIEW_NATIVE_093；原生点“重新接管”后横幅消失，Web 出现输入锁定横幅。原生再次 Ctrl-C 后 18091 连接失败，验证恢复了真实 PTY 输入权限，而非仅隐藏提示。
-- 随后原生重新运行 node preview-server.cjs，HTTP 再次成功，测试服务已恢复。本次没有改动代码或重复单元测试；证据针对本机 Web/direct 与原生客户端的控制权交接，不替代跨 NAT/丢包验收。
-
-
-## 已删除实体的界面状态回收（2026-09-06）
-
-- reconcile 按当前任务/工作区/会话目录清理 terminalTitles、activeTasks、showingChanges、上传/拖放集合，以及已移除项目的折叠状态与设备错误。此前仅 visited 集合和激活请求会收敛，长期创建/删除可能留下旧标题等记录。
-- 仍存在的后台任务/会话按 ID 保留，不因切换标签清理。回收只在已有目录快照后执行，不把首次登录未加载视为删除。
-- 真实终端生命周期测试扩展：关闭第二任务后注入旧会话/工作区状态，reconcile 后旧记录消失，仍存活会话标题保留；完整登录/切换/上传/重连/接管/重启用例通过（3.632 秒）。日志 `/tmp/coflux-macos-093-state-pruning.log`。
-- 本轮未进行长时间内存曲线测量或完整测试集回归；只能证明这些状态记录收敛，不能据此宣称进程无内存泄漏或已快于 Web。
-
-
-## 退出登录清理与旧请求隔离（2026-09-06）
-
-- 退出时补齐清理终端标题、上传/拖放、分支等待、项目折叠、设备创建忙态/错误、关闭确认和弹窗；保留侧栏宽度等窗口偏好。
-- 设备 HOME 创建请求捕获登录代次，退出后的旧响应、异常和 defer 均不能写回新一轮登录的界面状态；同账号重登也隔离。
-- WorkbenchStateTests 当前 8 项全通过，日志 `/tmp/coflux-macos-093-logout-race.log`。新增用例将设备请求停在等待 relay 授权阶段，退出并重新投递同账号认证/快照，验证旧请求退出不会清除新忙态或覆盖新错误；另验证账号展示清空、320pt 侧栏偏好保留。
-- 竞态用例通过注入控制面事件运行，不建立外部连接、不使用钥匙串；不替代真实登录 UI、完整回归或迟到成功响应的独立验收。
-
-
-## 端口菜单图标对齐（2026-09-06）
-
-- CUA 发现原生 Menu 把 router 资源按固有尺寸呈现，忽略 SwiftUI label 的 12pt frame，并额外显示下拉箭头；Web 使用 12px Router、20px 按钮且 hasChevron=false。
-- 菜单保持 AppKit 原生实现，改用独立复制且固有尺寸为 12pt 的模板 NSImage，按钮设为 20pt 并隐藏菜单箭头；图像可访问描述为“转发端口”，不修改共享资源对象。
-- Debug 构建通过（日志 `/tmp/coflux-macos-093-port-icon.log`，有 SwiftTerm bundle 增量构建节点警告）。重启 App 后 CUA 截图确认图标不再放大、无多余箭头；AX 显示“转发端口”。切到终端 2，打开终端 1 菜单得到 :18091，Escape 关闭后终端 2 仍高亮。
-- 本轮验收覆盖图标呈现、菜单打开/取消及后台标签选择保持；没有重复浏览器跳转验收或全套测试。完整逐屏对照仍未完成。
-
-
-## 差异长行与行布局（2026-09-06）
-
-- 对照当前 Web changes-view.tsx，移除额外双列行号，分块标题单独左对齐，增删标记恢复独立 12pt 槽位及语义色。
-- 修复原生 Text 自动折行以及仅设 fixedSize 后行首被裁切的问题。解析后在后台按原生等宽字体一次测量内容宽度，为惰性行容器提供明确横向宽度，代码保持单行且无需 JS。
-- Debug 构建成功，日志 `/tmp/coflux-macos-093-diff-lines.log`。CUA 验证 preview-server.cjs 从 require 行首显示；横向滚动条到末端后可见 listen(18091,"127.0.0.1") 结尾，语法颜色保留。
-- 当前横向滚动仍作用于整列文件卡片，Web 是各文件内容独立横向滚动；长文件性能、多文件宽度、刷新按钮样式与完整回归仍待验收，本轮不宣称差异页完全对齐。
-
-
-## 各文件独立横向滚动（2026-09-06）
-
-- 差异页外层只纵向滚动，各文件代码内容独立横向滚动；标题、折叠按钮、增删统计保持在卡片固定宽度内。长文件名中间截断并提供全文提示。
-- 每行采用明确高度，嵌套横向滚动区按内容高度呈现，避免短文件占满视口；仍保留 LazyVStack，长文件实际性能尚需测量。
-- Debug 构建通过，日志 `/tmp/coflux-macos-093-diff-scroll.log`。CUA 在隔离仓库加入第二个长行文件：第一文件滚动位置到 1 时第二文件仍为 0，截图确认第一文件显示末尾、第二文件显示行首，两个标题及统计保持可见。
-- 第二文件折叠后点击刷新，折叠状态及第一文件滚动位置保持。验收临时文件已删除，不影响原预览服务。未重复完整回归，也未据此宣称大 diff 性能达到目标。
-
-
-## 差异页调整后的完整回归与产物复核（2026-09-06）
-
-- 完整 macOS XCTest 67 项：60 通过、7 项钥匙串用例显式跳过、0 失败。覆盖最新退出清理/代次竞态、图片上传、原生高亮、原生 P2P 与隔离真实终端生命周期等现有用例；日志 `/tmp/coflux-macos-093-diff-full.log`。
-- 对当前 Debug 测试宿主重新扫描：按真实路径去重后 14 个 Mach-O（含 XCTest 框架），无 WebKit/JavaScriptCore 直接链接，无 JS/MJS/CJS/HTML/HTM/WASM 资源。报告 `/tmp/coflux-macos-093-artifact-audit.json`。未扫描系统间接依赖，不是正式 Release 产物验收。
-- 这是现有测试集的完整回归，不等于所有 UI/功能均已覆盖；长差异真实滚动性能、跨 NAT、逐屏对照及正式分发仍未完成。
-
-
-## 5000 行差异卡顿定位与可见行渲染（2026-09-06）
-
-- 真实隔离仓库新增 5000 行含中文/emoji 的 Rust 文件，旧版嵌套 LazyVStack 导致 CUA 界面读取超时；采样见主线程 SwiftUI/AppKit 布局，进程曾为 100% CPU / RSS 574176 KiB，后续 RSS 856944 KiB。采样 `/tmp/coflux-macos-093-large-diff.sample.txt`。
-- 改为累积行高 + 二分查找可见范围，保留整份文件高度与每文件横向滚动，只创建视口上下 100pt 预取范围内的行视图。几何坐标随外层纵向滚动更新，不按整份横向容器高度实例化所有行。
-- 新 DiffRowLayout 测试遍历 5000 行（含每 100 行一个不同高度的 hunk），验证 700pt 视口最多 47 行、无覆盖缺口、末尾/空文件边界。UnifiedDiffTests 3 项全通过，日志 `/tmp/coflux-macos-093-diff-window-tests.log`。
-- 同一实际文件 CUA 打开与翻页成功，初始 AX 仅附近约 40 行，翻页更新到 0028–0076 附近，截图内容连续；修复后静止快照 CPU 1.4%、RSS 174368 KiB。两次为 Debug 观察快照，不是严谨性能基准，也未与 Web 同负载对比；底部真实滚动、高亮完成时延、帧率及完整回归仍待验证。
-- 本次临时大文件已删除，预览样例仍保留。上一轮完整 60 通过/7 跳过是这次可见行渲染修改之前的结果。
-
-
-## 长差异末尾与删除收敛（2026-09-06）
-
-- CUA 将 5000 行文件滚动到最底端，确认 4963–4999 附近行连续呈现，中文、emoji、语法颜色正常；下一份 preview-server.cjs 正确衔接且可独立横向滚动。
-- 发现旧外层 LazyVStack 在底部删除大文件后保留高度缓存，界面仅剩工具栏和空白。行已有显式视口范围控制，因此外层文件容器改用 VStack 确定总高度，保留行级按需渲染。
-- Debug 构建通过，日志 `/tmp/coflux-macos-093-diff-shrink.log`。重启后重复“加载 5000 行 → 滚到底 → 删除测试文件 → 刷新”，短文件立即恢复到顶部，不再空白；测试文件已清理。
-- 本轮未重复完整测试集；大量文件数量的布局成本、连续滚动帧率、与 Web 的同条件比较仍待验证。
-
-
-## 差异页刷新与错误恢复呈现（2026-09-06）
-
-- 刷新改为同源 Lucide refresh-cw 14pt 图标、24pt 按钮与“刷新变更”提示；新增 circle-alert 错误图标、居中灰色错误文本，重试带忙态并在加载时禁用。SVG 仅构建时同步，App 不引入脚本运行时。
-- Git 失败信息去除空白，优先 error 再 stderr，均空时提供带退出码的兜底，避免空错误让界面误留加载态。
-- Debug 构建通过，日志 `/tmp/coflux-macos-093-diff-controls.log`。CUA 截图确认图标正常；隔离测试仓库 core.bare 临时设 true，真实 Git 返回 must be run in a work tree，错误图标/文本/重试按钮完整呈现，点击重试仍显示错误。
-- 已恢复并读回 core.bare=false；目录统计更新自动触发刷新并恢复 preview-server.cjs 内容。自动恢复先于手动重试点击，故不把该路径记作手动重试成功。未测试忙态停留的视觉时长，也未重复完整回归。
-
-
-## 差异准备阶段的协作取消（2026-09-06）
-
-- 差异解析/宽度测量原先直接 await detached.value，页面任务取消不会取消后台任务本身。抽出已有上传路径的 BackgroundPreparation，统一保留任务句柄并通过 cancellation handler 传递取消；上传调用方一同迁移，行为保持。
-- UnifiedDiff 提供可抛出的取消检查入口，解析开始和逐行检查；宽度测量逐文件/逐行检查。普通同步解析入口仍不要求调用方处理异常。
-- UnifiedDiffTests + TerminalUploadTests 11 项全通过，日志 `/tmp/coflux-macos-093-background-cancel.log`。包括后台任务确实观察到父任务取消、5000 行解析第 32 个检查点抛出后不再遍历、上传/图片/IME 既有用例。
-- 单次字符串切分及字体测量等系统调用仍需返回到检查点后才能停止；本轮未重新测量 UI 切换耗时或完整回归，不能宣称任何规模都可瞬时取消。
-
-
-## 系统剪贴板多行文本验收（2026-09-06）
-
-- 在 19874 隔离环境的终端 2 空提示符，通过 CUA 原生 paste（系统剪贴板路径）粘贴包含中文、emoji、两行文本及末尾换行的 printf 命令。
-- paste 工具报告等待应用读取剪贴板确认超时，但截图已显示完整粘贴及 zsh 的 bracketed-paste 选中状态，因此没有重复发送。回车前磁盘测试文件不存在，证明末尾换行没有提前执行命令。
-- 按 Return 后提示符恢复；独立读取输出文件，32 个 UTF-8 字节与预期完全一致，含“第一行中文😀”、英文第二行及换行。测试文件已删除。
-- 这是实际系统文本粘贴路径验收，不替代系统图片粘贴/文件拖放或真实 IME 候选选词。工具确认超时不算工具调用成功，应用粘贴行为以截图和字节校验为证据；本轮未改业务代码、未重复测试集。
-
-
-## 拖放权限变化时的遮罩清理（2026-09-06）
-
-- 核对 Web：普通文件使用拖放上传，粘贴主要处理图片；未添加额外文件粘贴语义。Finder 测试文件窗口已准备后关闭并清理，完整跨窗口系统拖放仍未完成。
-- 修复原生拖入后丢失控制权/开始上传，draggingUpdated 拒绝但遮罩未撤销的问题。进入、更新与最终准备均按当前权限和文件 pasteboard 重新决定接受状态，拒绝时同步清除拖放提示。
-- TerminalUploadTests 8 项通过，日志 `/tmp/coflux-macos-093-drag-revoke.log`。新增独立命名 NSPasteboard 用例：文件接受 → 权限撤销拒绝 → 恢复接受 → 文本替换拒绝，提示状态依次 true/false/true/false；不修改用户通用剪贴板。
-- 该用例覆盖实际接受判定共享路径，不模拟完整 NSDraggingSession 或证明系统跨窗口上传成功；尚需该项真实验收。
-
-
-## 当前完整回归与登录草稿修复（2026-09-06）
-
-- 最新完整 macOS XCTest 70 项：63 通过、7 项钥匙串测试跳过、0 失败，日志 `/tmp/coflux-macos-093-latest-full.log`。覆盖此前差异可见行/取消、上传、拖放权限变化等代码；以下登录展示修改发生在该回归之后。
-- 功能审查发现原生认证中替换 LoginView 会销毁账号局部状态，失败后要求重填；Web 账号草稿保留在外层。将原生账号草稿移至 RootView 并绑定，失败返回时账号保留、密码仍清空，焦点在密码框。
-- Debug 构建通过，日志 `/tmp/coflux-macos-093-login-draft.log`。CUA 使用隔离 admin 配错误密码，真实拒绝后 AX/截图确认账号仍为 admin、密码为空且获得焦点；只输入正确密码并回车即成功进入工作台。
-- 原生源码未搜索到 TODO/FIXME/未实现占位入口，但这不证明功能完整；逐屏对照、系统图片粘贴/拖放、真实 IME、跨网络与正式签名分发等缺口仍未完成。
-
-
-## 系统预览图片复制与终端粘贴（2026-09-06）
-
-- 创建 32×24 RGBA 渐变 PNG 测试图，在系统 Preview 中打开、全选、复制；原生隔离终端 2 通过真实 Command-V 读取系统图像剪贴板、上传到 daemon，并插入设备返回的 paste-UUID.png 路径。
-- 截图确认路径处于 bracketed paste 输入状态，未执行。ImageIO/CoreGraphics 按同一 sRGB RGBA 解码源图与上传文件，二者均 32×24、像素数据逐字节一致。检查脚本 `/tmp/coflux-image-check-093.swift`（输入测试图已清理，不可直接重复运行）。
-- Ctrl-U 清空终端中的路径输入，关闭 Preview 测试窗口并删除本次源图和上传图。未访问或删除其他图片/上传产物。
-- 本轮证明系统图片复制粘贴的真实链路，非仅调用 onImage 回调；超大图、输入法候选、Finder 跨窗口拖放仍有独立验收缺口。未改业务代码或重复完整测试。
-
-
-## 第三方许可随应用打包（2026-09-06）
-
-- 新增 scripts/sync-notices.py，根据当前 Package.resolved 核对 checkout 的完整 revision，收集每项依赖及其子目录原始 LICENSE/NOTICE 文本；另包含 WebRTC 二进制框架附带许可与 Lucide 原始许可。
-- 当前生成 14 项锁定依赖（含构建工具）+ WebRTC 框架许可 + 图标许可，共 83764 字节，保存于 Sources/ThirdPartyNotices.txt 并加入 App Resources。Help 菜单提供“第三方许可”入口，使用系统文本查看器打开。
-- Debug 构建、生成脚本 --check、App 内资源与源码逐字节比对通过；日志 `/tmp/coflux-macos-093-notices.log`。本轮未重复完整回归或实际点击菜单。
-- 仍需核实 WebRTC 二进制内部第三方组件的完整分发说明及现行 Web 插画的来源/许可；当前资源收集不等于正式分发审查已完成。
-
-重新生成：`python3 apps/macos/scripts/sync-notices.py --source-packages /tmp/coflux-macos-093-build/SourcePackages`；加 `--check` 验证依赖升级后说明未过期。
-
-
-## Release 优化构建与可复现产物审查（2026-09-06）
-
-- 首次本次 Release 优化构建通过，使用 CODE_SIGN_IDENTITY=- 临时签名，不调用开发者证书、不启动 Release 的持久凭据路径。最终日志 `/tmp/coflux-macos-093-release.log`。
-- 修正 Release 编译暴露的两处源码警告：Optional.map 尾随闭包歧义、导入向导未使用的绑定。重建无上述源码警告，仍有 Xcode AppIntents 元数据跳过与 SwiftTerm 资源 bundle 增量节点警告。
-- 新增 scripts/audit-bundle.py：按真实路径去重 Mach-O，检查脚本资源、WebKit/JavaScriptCore 直接链接、许可文本与源码一致、codesign 完整性。当前 Release 主程序同时包含 x86_64 与 arm64，2 个独立 Mach-O（主程序/WebRTC），各项通过。报告 `/tmp/coflux-macos-093-release-audit.json`。
-- 命令：`python3 apps/macos/scripts/audit-bundle.py /tmp/coflux-macos-093-build/Build/Products/Release/Coflux.app`。检查不证明 Developer ID、公证、系统间接依赖或运行行为，不代替正式分发验收。
-- WebRTC 152.0.0 官方仓库发布元数据指向上游提交 6f37672d358475cd17544121a12494da454d85fb（branch-heads/7977）；发布附件只有 xcframework 与 dSYM，构建脚本仅拷贝顶层 LICENSE。其内部组件许可仍未补齐。插画来源已从当前 Web 源码确认是 ayotomcs.me/claude-mascot，具体许可仍待核实。
+- First optimized Release build in this effort passed with temporary CODE_SIGN_IDENTITY=-, without developer certificates or launching persistent Release credentials. Final log `/tmp/coflux-macos-093-release.log`.
+- Fixed two Release-exposed source warnings: Optional.map trailing-closure ambiguity and unused import-wizard binding. Rebuild removed them; Xcode AppIntents metadata-skip and SwiftTerm resource-bundle incremental-node warnings remain.
+- Added scripts/audit-bundle.py: real-path deduplicate Mach-O, inspect script resources/direct WebKit/JavaScriptCore links, compare notices to source, verify codesign integrity. Current Release main contains x86_64/arm64; two unique Mach-O (main/WebRTC) passed. Report `/tmp/coflux-macos-093-release-audit.json`.
+- Command: `python3 apps/macos/scripts/audit-bundle.py /tmp/coflux-macos-093-build/Build/Products/Release/Coflux.app`. Does not establish Developer ID/notarization/system indirect dependencies/runtime behavior or replace distribution acceptance.
+- Official WebRTC 152.0.0 release metadata points to upstream 6f37672d358475cd17544121a12494da454d85fb (branch-heads/7977). Assets contain only xcframework/dSYM; build scripts copy top-level LICENSE only. Internal component notices remain incomplete. Current Web confirms illustration source ayotomcs.me/claude-mascot; exact license remains unverified.
