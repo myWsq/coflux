@@ -7,7 +7,10 @@
  *      目录工作区 `COFLUX_PROJECT_ID` 存在但为空串；
  *   ② web 手开的终端（taskCreate + taskStart 的 prepared session.create，经 device-harness 自动执行）：
  *      attach 后输入 printf，经 read_terminal 读到；
- *   ③ 在 coflux 终端里跑 `coflux terminal new`（直发 IPC 路径），`terminal read` 里能看到。
+ *   ③ 在 coflux 终端里跑 `coflux terminal new`（直发 IPC 路径），`terminal send` 打入命令后 `terminal read` 里能看到。
+ * 主栈的 COFLUX_SHELL 是包装脚本（见 writeShellWrapper）：按 basename 判成未知 shell、不注入 shell 集成，因此
+ * 这里的终端**没有**提示符标记——do-script（`--cmd` / run）与 wait 必须可读地失败而不是干等或盲打，这正是
+ * 「coflux 无法插桩的 shell」的验收现场（路径①与③各验一次）；变量本身用 send 打命令来看。
  * 旧 worker / 旧 supervisor 的兼容（缺字段不报错）由 crates/protocol/src/ipc.rs 的 Legacy 单测覆盖。
  *
  * plan 112（同一套会话环境，加在一起验）：supervisor 把 `<COFLUX_HOME>/bin` 前置进每个会话的 PATH 首段、
@@ -208,15 +211,25 @@ after(async () => {
   for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
 });
 
-test("路径①：账号 API create_terminal 开的命令终端里五个 COFLUX_* 齐全，值与中心 id 一致", async () => {
-  const { terminal } = await okTool("create_terminal", { workspaceId: mainWorkspaceId, title: "坐标", command: DUMP_ENV });
-  assert.equal(terminal.workspaceId, mainWorkspaceId);
+test("路径①：账号 API create_terminal 开的终端里五个 COFLUX_* 齐全，值与中心 id 一致；无法插桩的 shell 上 --cmd 可读失败、终端仍开着", async () => {
+  // 包装脚本 shell 没有提示符标记：--cmd 不能盲打，必须一句话说清命令没打入、指向 send；终端本身已开好
+  const refused = await errTool("create_terminal", { workspaceId: mainWorkspaceId, title: "坐标", command: DUMP_ENV });
+  assert.match(refused, /命令未打入/, refused);
+  assert.match(refused, /never signalled prompt readiness/, refused);
+  assert.match(refused, /send/, refused);
+  const opened = (await okTool("list_terminals", { workspaceId: mainWorkspaceId })).terminals.find((t) => t.title === "坐标");
+  assert.ok(opened, "命令没打入不等于终端没开：list_terminals 里必须有它");
+  assert.equal(opened.status, "running");
+  const terminal = opened;
   const sessionId = await sessionIdOf(terminal.id);
-  const waited = await okTool("wait_terminal", { terminalId: terminal.id, timeoutSeconds: 30 });
-  assert.equal(waited.exited, true);
-  assert.equal(waited.exitCode, 0, "grep 必须命中：会话里没有 COFLUX_* 就是没注入");
+  // wait 在这种 shell 上同样可读失败而不是挂住
+  const noMarks = await errTool("wait_terminal", { terminalId: terminal.id, timeoutSeconds: 5 });
+  assert.match(noMarks, /never signalled prompt readiness/, noMarks);
 
-  const read = await readUntil(terminal.id, (r) => r.source === "log" && hasAllEnv(r.text), "命令日志里的 COFLUX_*");
+  // 变量本身：send 是这种 shell 上的回退路径
+  await readUntil(terminal.id, (r) => r.source === "snapshot" && r.text.trim().length > 0, "提示符出现在快照里");
+  await okTool("send_terminal_input", { terminalId: terminal.id, text: DUMP_ENV });
+  const read = await readUntil(terminal.id, (r) => r.source === "snapshot" && hasAllEnv(r.text), "快照里的 COFLUX_*");
   const env = parseEnv(read.text);
   assertEnv(env, { deviceId: stack.daemonId, projectId, workspaceId: mainWorkspaceId, taskId: terminal.id, sessionId });
 
@@ -230,6 +243,8 @@ test("路径①：账号 API create_terminal 开的命令终端里五个 COFLUX_
   const { terminals } = await okTool("list_terminals", { workspaceId: env.COFLUX_WORKSPACE_ID });
   assert.ok(terminals.some((t) => t.id === env.COFLUX_TASK_ID), "list_terminals 里必须有 COFLUX_TASK_ID");
 
+  await okTool("stop_terminal", { terminalId: terminal.id });
+  await observer.waitFor((m) => m.case === "taskUpdated" && m.task.id === terminal.id && m.task.status === TaskStatus.EXITED, "坐标终端停掉", 30000);
   await okTool("remove_terminal", { terminalId: terminal.id });
 });
 
@@ -237,15 +252,17 @@ test("路径①（目录工作区）：COFLUX_PROJECT_ID 存在但为空串，�
   const { ws } = await dirWorkspace(mkDir("coflux-env-dir-"));
   assert.equal(ws.projectId, "", "目录工作区没有项目");
   try {
-    const { terminal } = await okTool("create_terminal", { workspaceId: ws.id, title: "目录坐标", command: DUMP_ENV });
+    const { terminal } = await okTool("create_terminal", { workspaceId: ws.id, title: "目录坐标" });
     const sessionId = await sessionIdOf(terminal.id);
-    const waited = await okTool("wait_terminal", { terminalId: terminal.id, timeoutSeconds: 30 });
-    assert.equal(waited.exited, true);
+    await readUntil(terminal.id, (r) => r.source === "snapshot" && r.text.trim().length > 0, "提示符出现在快照里");
+    await okTool("send_terminal_input", { terminalId: terminal.id, text: DUMP_ENV });
 
-    const read = await readUntil(terminal.id, (r) => r.source === "log" && hasAllEnv(r.text), "目录工作区命令日志里的 COFLUX_*");
+    const read = await readUntil(terminal.id, (r) => r.source === "snapshot" && hasAllEnv(r.text), "目录工作区快照里的 COFLUX_*");
     const env = parseEnv(read.text);
     assertEnv(env, { deviceId: stack.daemonId, projectId: "", workspaceId: ws.id, taskId: terminal.id, sessionId });
     assert.equal(env.COFLUX_PROJECT_ID, "", "变量存在但为空串，不是缺失");
+    await okTool("stop_terminal", { terminalId: terminal.id });
+    await observer.waitFor((m) => m.case === "taskUpdated" && m.task.id === terminal.id && m.task.status === TaskStatus.EXITED, "目录坐标终端停掉", 30000);
     await okTool("remove_terminal", { terminalId: terminal.id });
   } finally {
     await removeWorkspace(ws.id);
@@ -284,7 +301,26 @@ test("路径②：web 手开的终端（taskCreate + taskStart）里也有 COFLU
   await okTool("remove_terminal", { terminalId: task.id });
 });
 
-test("路径③：在 coflux 终端里 `coflux terminal new`（直发 IPC 路径）开出的终端也有 COFLUX_*，terminal read 里能看到", async () => {
+/** 轮询 `terminal read` 直到画面满足条件（刚开出来的头几百毫秒快照可能还是空的）。 */
+async function readScreenUntil(sessionId, gatewayPort, home, taskId, predicate, label, timeout = 40000) {
+  const deadline = Date.now() + timeout;
+  let seq = 0;
+  let last = "";
+  while (Date.now() < deadline) {
+    const out = join(home, `read-${taskId}-${seq += 1}.txt`);
+    await device.input(sessionId, cliCmd(gatewayPort, `terminal read ${taskId}`, out));
+    try {
+      last = await waitForFile(out, (s) => s.includes("#"), `${label} 的单次 read`, 8000);
+      if (predicate(last)) return last;
+    } catch {
+      // 这一轮没写出来（PTY 还在忙上一条）：下一轮再试
+    }
+    await sleep(500);
+  }
+  throw new Error(`${label} 超时；最后画面: ${JSON.stringify(last)}`);
+}
+
+test("路径③：在 coflux 终端里 `coflux terminal new`（直发 IPC 路径）开出的终端也有 COFLUX_*，send 打入后 terminal read 里能看到；无法插桩的 shell 上 --cmd / wait 可读失败", async () => {
   const home = mkDir("coflux-env-cli-");
   const { ws, task: idle } = await dirWorkspace(home);
   const gatewayPort = device.gateway.port;
@@ -292,6 +328,7 @@ test("路径③：在 coflux 终端里 `coflux terminal new`（直发 IPC 路径
     const origin = await startTask(idle.id);
     await device.attach(origin.sessionId);
 
+    // 包装脚本 shell 没有提示符标记：`new --cmd` 仍开出终端，但命令不能盲打——一句话说清并指向 send
     const newOut = join(home, "new.txt");
     await device.input(origin.sessionId, cliCmd(gatewayPort, `terminal new --title "坐标" --cmd "${DUMP_ENV}"`, newOut));
     const created = await observer.waitFor(
@@ -300,17 +337,22 @@ test("路径③：在 coflux 终端里 `coflux terminal new`（直发 IPC 路径
       20000,
     );
     assert.notEqual(created.task.id, origin.id, "必须是新任务");
-    const exited = await observer.waitFor(
-      (m) => m.case === "taskUpdated" && m.task.id === created.task.id && m.task.status === TaskStatus.EXITED,
-      "命令跑完 → EXITED",
-      20000,
-    );
-    assert.equal(exited.task.exitCode, 0, "grep 必须命中：会话里没有 COFLUX_* 就是没注入");
-    await waitForFile(newOut, (s) => s.includes(created.task.id), "terminal new 输出");
+    const newText = await waitForFile(newOut, (s) => s.includes("✗") || s.includes("已打入命令"), "terminal new 输出", 30000);
+    assert.match(newText, /已开终端/, `终端本身要开出来: ${newText}`);
+    assert.match(newText, /✗/, `无法插桩的 shell 上命令不能盲打: ${newText}`);
+    assert.match(newText, /never signalled prompt readiness/, newText);
+    assert.match(newText, /coflux terminal send/, "失败要指向 send 这条回退路");
+    assert.ok(!newText.includes("已打入命令"), "命令没打入就不能说打入了");
+    const waitOut = join(home, "wait.txt");
+    await device.input(origin.sessionId, cliCmd(gatewayPort, `terminal wait ${created.task.id} --timeout 5`, waitOut));
+    const waitText = await waitForFile(waitOut, (s) => s.trim().length > 0, "wait 输出");
+    assert.match(waitText, /✗/, `wait 也要可读失败而不是挂住: ${waitText}`);
+    assert.match(waitText, /never signalled prompt readiness/, waitText);
 
-    const readOut = join(home, "read.txt");
-    await device.input(origin.sessionId, cliCmd(gatewayPort, `terminal read ${created.task.id}`, readOut));
-    const readText = await waitForFile(readOut, hasAllEnv, "terminal read 输出");
+    // 回退路：先等提示符，再 send 打命令，read 里看变量
+    await readScreenUntil(origin.sessionId, gatewayPort, home, created.task.id, (s) => s.includes("# running") && !s.includes("（暂无输出）"), "等提示符");
+    await device.input(origin.sessionId, cliCmd(gatewayPort, `terminal send ${created.task.id} --text "${DUMP_ENV}" --enter`, join(home, "send.txt")));
+    const readText = await readScreenUntil(origin.sessionId, gatewayPort, home, created.task.id, hasAllEnv, "terminal read 里的 COFLUX_*");
     const env = parseEnv(readText);
     assertEnv(env, { deviceId: stack.daemonId, projectId: "", workspaceId: ws.id, taskId: created.task.id, sessionId: created.task.sessionId });
     // 新终端拿到的是它自己的 task/session，不是发起方的
@@ -360,32 +402,34 @@ test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变
       "其余段 = supervisor 继承的 PATH，顺序不变、不重复",
     );
 
-    // ③ Rust 版 coflux 在同一个终端里走路径③：开终端、读输出——短语与 node 版逐字一致
+    // ③ Rust 版 coflux 在同一个终端里走路径③：开终端、send 打命令、读输出——短语与 node 版逐字一致
     const newOut = join(home, "new.txt");
-    await device.input(origin.sessionId, cliCmdRust(gatewayPort, `terminal new --title "Rust 坐标" --cmd "${DUMP_ENV}"`, newOut));
+    await device.input(origin.sessionId, cliCmdRust(gatewayPort, `terminal new --title "Rust 坐标"`, newOut));
     const created = await observer.waitFor(
       (m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "Rust 坐标" && !!m.task.sessionId,
       "Rust 版建的任务出现在侧栏",
       20000,
     );
     assert.notEqual(created.task.id, origin.id, "必须是新任务");
-    const exited = await observer.waitFor(
-      (m) => m.case === "taskUpdated" && m.task.id === created.task.id && m.task.status === TaskStatus.EXITED,
-      "命令跑完 → EXITED",
-      20000,
-    );
-    assert.equal(exited.task.exitCode, 0);
-    // 输出文件边写边读：等最后一行 `看输出：` 出现（或 `✗`）再比对，只等首行会读到半截
-    const newText = await waitForFile(newOut, (s) => s.includes("看输出：") || s.includes("✗"), "Rust 版 terminal new 输出");
+    // 输出文件边写边读：等最后一行 `结束：` 出现（或 `✗`）再比对，只等首行会读到半截
+    const newText = await waitForFile(newOut, (s) => s.includes("结束：") || s.includes("✗"), "Rust 版 terminal new 输出");
     assert.ok(
-      newText.includes(`已开终端 ${created.task.id}（用户可在 coflux 侧栏看到并随时接管）`) && newText.includes(`看输出：coflux terminal read ${created.task.id}`),
+      newText.includes(`已开终端 ${created.task.id}（用户可在 coflux 侧栏看到并随时接管）`) &&
+        newText.includes(`跑命令：coflux terminal run ${created.task.id} --cmd="<命令>"`) &&
+        newText.includes(`看输出：coflux terminal read ${created.task.id}；结束：coflux terminal close ${created.task.id}`),
       `Rust 版 terminal new 的短语必须与 node 版逐字一致: ${JSON.stringify(newText)}`,
     );
 
+    await readScreenUntil(origin.sessionId, gatewayPort, home, created.task.id, (s) => s.includes("# running") && !s.includes("（暂无输出）"), "等 Rust 终端的提示符");
+    const sendOut = join(home, "send.txt");
+    await device.input(origin.sessionId, cliCmdRust(gatewayPort, `terminal send ${created.task.id} --text "${DUMP_ENV}" --enter`, sendOut));
+    const sendText = await waitForFile(sendOut, (s) => s.trim().length > 0, "Rust 版 terminal send 输出");
+    assert.equal(sendText.trim(), `已写入终端 ${created.task.id}（用 coflux terminal read ${created.task.id} 核对效果）`);
+    await readScreenUntil(origin.sessionId, gatewayPort, home, created.task.id, hasAllEnv, "变量打出来");
     const readOut = join(home, "read.txt");
     await device.input(origin.sessionId, cliCmdRust(gatewayPort, `terminal read ${created.task.id}`, readOut));
     const readText = await waitForFile(readOut, hasAllEnv, "Rust 版 terminal read 输出");
-    assert.ok(readText.startsWith("# exited exit=0\n"), `read 首行是状态 + 退出码: ${JSON.stringify(readText.split("\n")[0])}`);
+    assert.ok(readText.startsWith("# running\n"), `read 首行是状态: ${JSON.stringify(readText.split("\n")[0])}`);
     const env = parseEnv(readText);
     assertEnv(env, { deviceId: stack.daemonId, projectId: "", workspaceId: ws.id, taskId: created.task.id, sessionId: created.task.sessionId });
   } finally {
