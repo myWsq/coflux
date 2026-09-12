@@ -3,6 +3,8 @@ import { Avatar } from "@astryxdesign/core/Avatar";
 import { Button } from "@astryxdesign/core/Button";
 import { Divider } from "@astryxdesign/core/Divider";
 import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
+import { Kbd } from "@astryxdesign/core/Kbd";
+import { HStack } from "@astryxdesign/core/Layout";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { ArrowUp, Cog, LogOut, RefreshCw } from "lucide-react";
 import type { CofluxClient } from "@coflux/client";
@@ -23,6 +25,9 @@ import { desktop } from "@/config";
  *
  * 尾部的设置按钮是独立按钮（不是画在触发器内部的图标），因此有正常的按钮 hover 效果，点击直接
  * 进设置页；它必须 `stopPropagation`，否则点它会顺带掀开账号菜单。
+ *
+ * 设置按钮的 tooltip 带 ⌘,：这条键在 use-global-shortcuts 与应用菜单里都真的接着（macOS 的
+ * 「偏好设置」惯例），tooltip 只是把它说出来。
  *
  * 只有「新版本已下载」时尾部换成强调色「更新」按钮，设置按钮让位——此时最该点的是更新。
  * 脚部**不**触发更新检查（见 use-desktop-update.ts）。
@@ -89,7 +94,14 @@ export function AccountFooter({
           onClick={() => desktop.installUpdate()}
         />
       ) : (
-        <Tooltip content="设置">
+        <Tooltip
+          content={
+            <HStack gap={2} vAlign="center">
+              <span>设置</span>
+              <Kbd keys="mod+," />
+            </HStack>
+          }
+        >
           <button
             aria-label="设置"
             className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"

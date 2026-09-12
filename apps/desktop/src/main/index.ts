@@ -348,7 +348,6 @@ if (!app.requestSingleInstanceLock()) {
           showMainWindow();
           sendToRenderer(IPC.command, command);
         },
-        showServerInfo: () => void showServerInfo(serverUrl),
         checkForUpdates: () => {
           showMainWindow();
           updater.checkForUpdates();

@@ -1,9 +1,9 @@
 import { useStore } from "zustand";
-import { Button as AstryxButton } from "@astryxdesign/core/Button";
-import { HStack, VStack } from "@astryxdesign/core/Layout";
-import { Text } from "@astryxdesign/core/Text";
+import { Button } from "@astryxdesign/core/Button";
+import { VStack } from "@astryxdesign/core/Layout";
 import type { CofluxClient } from "@coflux/client";
 
+import { SettingsGroup, SettingsRow } from "@/components/settings/settings-group";
 import { accountIdentity, resolveAccountFooter, serverHostLabel } from "@/components/workbench/account-footer-view";
 import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { SERVER_URL, desktop } from "@/config";
@@ -24,34 +24,30 @@ export function GeneralSection({ client }: { client: CofluxClient }) {
 
   return (
     <VStack gap={5} hAlign="stretch">
-      <VStack gap={1} hAlign="stretch">
-        <Text type="label">账号</Text>
-        <Text type="body">{identity.label}</Text>
-      </VStack>
+      <SettingsGroup title="账号">
+        <SettingsRow label={identity.label} description="当前登录的账号" />
+        <SettingsRow
+          label={serverHostLabel(SERVER_URL)}
+          description="所连服务器。切换会退出当前登录。"
+          control={<Button label="修改…" variant="secondary" size="sm" onClick={() => desktop.showServerInfo()} />}
+        />
+      </SettingsGroup>
 
-      <VStack gap={1} hAlign="stretch">
-        <Text type="label">服务器</Text>
-        <HStack gap={2} vAlign="center">
-          <Text type="body">{serverHostLabel(SERVER_URL)}</Text>
-          <AstryxButton label="修改…" variant="ghost" size="sm" onClick={() => desktop.showServerInfo()} />
-        </HStack>
-        <Text type="supporting">切换服务器会退出当前登录。</Text>
-      </VStack>
-
-      <VStack gap={1} hAlign="stretch">
-        <Text type="label">版本</Text>
-        <HStack gap={2} vAlign="center">
-          <Text type="body">{desktop.version ? `v${desktop.version}` : "开发版"}</Text>
-          <AstryxButton
-            label={view.updateItem.label}
-            variant={view.updateItem.action === "install" ? "primary" : "ghost"}
-            size="sm"
-            isDisabled={view.updateItem.isDisabled}
-            onClick={() => (view.updateItem.action === "install" ? desktop.installUpdate() : desktop.checkForUpdates())}
-          />
-        </HStack>
-        {view.updateItem.detail ? <Text type="supporting">{view.updateItem.detail}</Text> : null}
-      </VStack>
+      <SettingsGroup title="更新">
+        <SettingsRow
+          label={desktop.version ? `Coflux v${desktop.version}` : "Coflux 开发版"}
+          description={view.updateItem.detail || view.updateItem.label}
+          control={
+            <Button
+              label={view.updateItem.action === "install" ? "重启并更新" : "检查更新"}
+              variant={view.updateItem.action === "install" ? "primary" : "secondary"}
+              size="sm"
+              isDisabled={view.updateItem.isDisabled}
+              onClick={() => (view.updateItem.action === "install" ? desktop.installUpdate() : desktop.checkForUpdates())}
+            />
+          }
+        />
+      </SettingsGroup>
     </VStack>
   );
 }

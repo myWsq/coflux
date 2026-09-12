@@ -582,6 +582,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     activeTerminalRef,
     onOpenCreateWorkspaceMenu: setCreateMenuProjectId,
     onToggleHelp: () => setHelpOpen((open) => !open),
+    onOpenSettings: () => setSettingsOpen(true),
     // 设置页盖住工作台时终端既看不见也点不到，⌘T/⌘W/⌘1 之类再落到终端上就是盲操作；
     // 原生菜单项走同一条挂起开关。
     isSuspended: settingsOpen,

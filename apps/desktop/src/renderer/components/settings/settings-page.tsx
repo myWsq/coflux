@@ -3,7 +3,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { Layout, LayoutContent, LayoutPanel, VStack } from "@astryxdesign/core/Layout";
 import { List, ListItem } from "@astryxdesign/core/List";
 import { Heading, Text } from "@astryxdesign/core/Text";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Bot, Monitor, Settings2, type LucideIcon } from "lucide-react";
 import type { CofluxClient } from "@coflux/client";
 
 import { ExecutorSection } from "@/components/settings/executor-section";
@@ -11,15 +11,23 @@ import { GeneralSection } from "@/components/settings/general-section";
 import { MachineSection } from "@/components/settings/machine-section";
 import {
   DEFAULT_SETTINGS_SECTION,
-  SETTINGS_SECTIONS,
   resolveSettingsSection,
+  settingsSectionGroups,
   type SettingsSectionId,
 } from "@/components/settings/settings-nav";
+import { AccountFooter } from "@/components/workbench/account-footer";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
 import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-width";
 import { desktop } from "@/config";
 import type { DesktopDaemonState } from "@/desktop-bridge";
+
+/** 导航项图标：与分区一一对应，缺一个都会让那一行看起来是另一种东西。 */
+const SECTION_ICONS: Record<SettingsSectionId, LucideIcon> = {
+  general: Settings2,
+  machine: Monitor,
+  executor: Bot,
+};
 
 type SettingsPageProps = {
   client: CofluxClient;
@@ -38,7 +46,8 @@ type SettingsPageProps = {
 
 /**
  * 独立设置页：Astryx 的 Layout + 左侧 LayoutPanel 导航（官方 settings 范式，见
- * `astryx template LayoutSidebarLayout`），整页覆盖在工作台之上。
+ * `astryx template LayoutSidebarLayout`），排法照 Cursor——左栏「返回」在最上、分组的带图标导航项
+ * 在中间、账号行在最下；右栏是标题加若干「小标题 + 卡片」的设置组。
  *
  * **是覆盖层而不是页面切换**：终端面板按 task id 常驻挂载（见 workbench.tsx 的终端主区注释），
  * 把工作台换掉会连带卸载 xterm 实例、丢掉回放缓冲。覆盖层让底下那棵树原样活着，关掉设置页就回到
@@ -46,8 +55,8 @@ type SettingsPageProps = {
  *
  * 层级压在断线横幅（z-50）与错误吐司（z-40）之下：设置页开着的时候，中心断了仍然要看得见。
  *
- * 左栏宽度与工作台侧栏是**同一份** control（见 use-sidebar-width.ts），拖拽手柄也是同一个组件：
- * 设置页盖上来时侧栏既不会跳宽也不会跳窄，在这儿拖完回到工作台也还是这个宽度。
+ * 左栏与工作台侧栏是同一条侧栏的两副面孔：**同一份宽度 control**（见 use-sidebar-width.ts）、
+ * 同一个拖拽手柄、同一个账号脚部。开设置页时侧栏既不跳宽，也不少掉底下那一行。
  *
  * 两个裸元素是有意为之，都不是布局用途：最外层那个只做 fixed 定位（Electron 窗口内的覆盖层锚点，
  * 设计系统不管窗口层），两条拖拽带是 `-webkit-app-region` 的载体，给红绿灯让位并让顶部能拖动窗口
@@ -80,12 +89,13 @@ export function SettingsPage(props: SettingsPageProps) {
             label="设置分区"
             width={props.widthControl.width}
             padding={0}
+            isScrollable={false}
             // 分隔线走 border-border 而不是 hasDivider：工作台侧栏用的就是这个 token，
             // 两条侧栏的右边框必须同色，否则一开设置页就看得出换了一条。
-            className="relative border-r border-border bg-sidebar text-base"
+            className="relative flex h-full flex-col border-r border-border bg-sidebar text-base"
           >
             <div style={DESKTOP_DRAG_BAND_STYLE} />
-            <VStack gap={1} hAlign="stretch" padding={2}>
+            <VStack gap={3} hAlign="stretch" padding={2} isScrollable>
               {/* 靠左对齐：撑满一栏宽的按钮把「返回」摆在正中，和它下面左对齐的分区列表对不上。 */}
               <Button
                 label="返回"
@@ -95,17 +105,26 @@ export function SettingsPage(props: SettingsPageProps) {
                 className="justify-start"
                 onClick={onClose}
               />
-              <List density="compact">
-                {SETTINGS_SECTIONS.map((item) => (
-                  <ListItem
-                    key={item.id}
-                    label={item.label}
-                    isSelected={item.id === section.id}
-                    onClick={() => setSectionId(item.id)}
-                  />
-                ))}
-              </List>
+              {settingsSectionGroups().map((group) => (
+                <List key={group[0]!.id} density="compact">
+                  {group.map((item) => {
+                    const Icon = SECTION_ICONS[item.id];
+                    return (
+                      <ListItem
+                        key={item.id}
+                        label={item.label}
+                        startContent={<Icon className="size-4" />}
+                        isSelected={item.id === section.id}
+                        onClick={() => setSectionId(item.id)}
+                      />
+                    );
+                  })}
+                </List>
+              ))}
             </VStack>
+            {/* 账号脚部与工作台侧栏是同一个组件：设置页开着的时候，左下角那一行不该凭空消失。
+                这里的齿轮回到默认分区——人已经在设置页里了，没有别处可去。 */}
+            <AccountFooter client={props.client} onOpenSettings={() => setSectionId(DEFAULT_SETTINGS_SECTION)} />
             <SidebarResizeHandle control={props.widthControl} />
           </LayoutPanel>
         }
@@ -113,7 +132,7 @@ export function SettingsPage(props: SettingsPageProps) {
           <LayoutContent padding={0}>
             {/* 右侧同高的拖拽带：设置页没有 tab 栏，这条带子让整页顶部都能拖动窗口。 */}
             <div style={DESKTOP_DRAG_BAND_STYLE} />
-            <VStack gap={5} hAlign="stretch" padding={6}>
+            <VStack gap={6} hAlign="stretch" padding={8} maxWidth={860}>
               <VStack gap={1} hAlign="stretch">
                 <Heading level={3}>{section.label}</Heading>
                 <Text type="supporting">{section.description}</Text>

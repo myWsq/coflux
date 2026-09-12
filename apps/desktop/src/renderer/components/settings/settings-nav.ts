@@ -13,26 +13,42 @@ export type SettingsSection = {
   label: string;
   /** 右侧内容区标题下的一句说明（左栏不显示） */
   description: string;
+  /** 同一组的分区在左栏里连着排，组与组之间空一行（照 Cursor 的分法） */
+  group: number;
 };
 
-/** 顺序即左栏的显示顺序：先账号所在的「通用」，再本机，最后按需配置的 executor。 */
+/** 顺序即左栏的显示顺序：先账号所在的「通用」，再本机与 executor 这两项运行时设置。 */
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: "general",
     label: "通用",
     description: "当前账号连接的服务器，以及桌面版本与更新。",
+    group: 0,
   },
   {
     id: "machine",
     label: "这台 Mac",
     description: "本机运行组件的状态：终端在这台机器上由它拉起并保持在线。",
+    group: 1,
   },
   {
     id: "executor",
     label: "Executor",
     description: "agent 甩给 coflux 执行的任务用哪个模型，以及对应的凭据。",
+    group: 1,
   },
 ];
+
+/** 左栏按组切开渲染，组间空一行；组内顺序就是 SETTINGS_SECTIONS 的顺序。 */
+export function settingsSectionGroups(): SettingsSection[][] {
+  const groups: SettingsSection[][] = [];
+  for (const section of SETTINGS_SECTIONS) {
+    const last = groups[groups.length - 1];
+    if (last && last[0]!.group === section.group) last.push(section);
+    else groups.push([section]);
+  }
+  return groups;
+}
 
 export const DEFAULT_SETTINGS_SECTION: SettingsSectionId = "general";
 

@@ -5,6 +5,7 @@ import {
   DEFAULT_SETTINGS_SECTION,
   SETTINGS_SECTIONS,
   resolveSettingsSection,
+  settingsSectionGroups,
 } from "./settings-nav";
 
 test("默认分区在目录里，且解析空值时退回它", () => {
@@ -31,5 +32,21 @@ test("每个分区都有非空标题与说明，id 不重复", () => {
     assert.ok(section.description.trim().length > 0, `${section.id} 缺说明`);
     assert.equal(ids.has(section.id), false, `${section.id} 重复`);
     ids.add(section.id);
+  }
+});
+
+test("分组保留原顺序、不丢分区，同组的连在一起", () => {
+  const groups = settingsSectionGroups();
+  assert.deepEqual(
+    groups.flat().map((section) => section.id),
+    SETTINGS_SECTIONS.map((section) => section.id),
+  );
+  for (const group of groups) {
+    assert.ok(group.length > 0);
+    assert.equal(new Set(group.map((section) => section.group)).size, 1);
+  }
+  // 相邻两组的组号必须不同，否则本该连着排的被空行劈开了。
+  for (let i = 1; i < groups.length; i += 1) {
+    assert.notEqual(groups[i - 1]![0]!.group, groups[i]![0]!.group);
   }
 });
