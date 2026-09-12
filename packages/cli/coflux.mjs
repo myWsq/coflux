@@ -2,9 +2,22 @@
 // coflux：账号与本地、跨设备业务操作；不负责宿主生命周期。
 import { handlesAccountCommand, runAccountCommand } from "./account-client.mjs";
 import { parseArgs } from "node:util";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 const HOME = process.env.COFLUX_HOME || join(homedir(), ".coflux");
+// Delegate integration to the native CLI shipped with this device's runtime.
+if (process.argv[2] === "agent") {
+  const native = join(HOME, "bin", "coflux");
+  if (!existsSync(native)) {
+    console.error("Coflux integration is unavailable. Update this device with cofluxd update.");
+    process.exit(1);
+  }
+  const result = spawnSync(native, process.argv.slice(2), { stdio: "inherit" });
+  if (result.error) console.error(result.error.message);
+  process.exit(result.status ?? 1);
+}
 const DEFAULT_LOCAL_GATEWAY_PORT = 8788;
 const die = (message) => { console.error("✗ " + message); process.exit(1); };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

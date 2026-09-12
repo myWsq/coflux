@@ -408,7 +408,7 @@ fn hook_debug(enabled: bool, message: &str) {
 }
 
 /// 非 TTY 时最多等 300ms 读 stdin：到点用已读到的部分（对齐 node 版 `Promise.race` 的语义）。
-fn read_stdin_json() -> Option<Value> {
+pub(crate) fn read_stdin_json() -> Option<Value> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
         return None;

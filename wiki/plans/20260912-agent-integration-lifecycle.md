@@ -103,50 +103,64 @@ Exact loader mechanics, filenames, retained-version collection, event schema and
 
 Worktree: `/Users/wsq/Workspace/coflux/.claude/worktrees/20260912-agent-integration-lifecycle`.
 Branch: `dev/20260912-agent-integration-lifecycle`. Baseline: `062df3f`.
-The main worktree was clean before creating this worktree.
+The main worktree was clean before creating this worktree. Plan commit: `6e22eff`.
 
-### Successful checks
+### Implementation
 
-- `pnpm install --frozen-lockfile`: successful, lockfile unchanged.
-- `CARGO_PROFILE_DEV_DEBUG=0 cargo build -p coflux-supervisor -p coflux-worker -p coflux-cli -p coflux-relay`: exit 0, no warnings, 67 seconds.
-- Server `tsc --noEmit` and desktop `typecheck`: exit 0.
-- Earlier exploration ran all four plugin script files: 33/33 passed; skill synchronization passed.
+- Native `coflux agent run/prepare/hook/status` embeds the shared skill and generates
+  a full-content-checked immutable bundle. Each agent pins its hooks and CLI.
+- zsh/bash/fish resolve the stable device CLI at every invocation; aliases and
+  functions remain user-owned. Supervisor supplies the authoritative COFLUX_HOME.
+- Claude loads a session plugin; Codex loads session hooks with a skill-file pointer.
+  Both preserve native host arguments and need no additional interpreter.
+- Hook acknowledgement and local API compatibility determine readiness. Context is
+  refreshed on start/resume/compact and workspace changes without repeating unchanged
+  prompt context. Delayed approval can recover on the next prompt.
+- CLI release artifacts use a separate signature domain. macOS/Linux release jobs
+  build the CLI; cofluxd verifies all supplied artifacts before replacing them.
+  Older two-artifact releases remain compatible with the installer.
+- Desktop already updates the stable CLI atomically when retaining its running
+  runtime; the new launcher makes that existing path update integration as well.
+- External skill delivery was synchronized and its Claude plugin version incremented.
+  No marketplace publication or builder update was performed.
 
-### Codex host feasibility
+### Validation
 
-Installed host: `codex-cli 0.154.0`. Claude was detected as `2.1.269`; Claude lifecycle acceptance was not performed after the Codex blocker.
+- Zero-warning build: CLI, supervisor, worker and relay.
+- Rust tests: CLI 28, protocol 41, supervisor 73; all pass.
+- Server typecheck and desktop typecheck: pass.
+- Desktop tests: 89/89; desktop build: pass.
+- Skill synchronization check: pass.
+- Full black-box suite, concurrency 2: **215/215 pass**, 231 seconds, no skips.
+  This includes new native hook/immutability and three-artifact installer tests.
+- `python3 tests/acceptance/agent-launch.py`: pass. Same live shell observes a
+  replaced launcher; previous bundle bytes and executable remain usable; arguments,
+  bypass and damaged-bundle fallback are preserved. Available zsh/fish entry points
+  are checked too.
+- `python3 tests/acceptance/agent-hosts.py`: pass against Claude Code 2.1.269 and
+  Codex CLI 0.154.0, in disposable homes with a loopback synthetic provider.
+  Actual model requests contain current context after native approval, resume and
+  compaction. Unrelated Codex user hooks remain active. A changed executable creates
+  a new delivery identity, requires native review again and injects context afterward.
+- Native compaction detail: Codex runs compact-source SessionStart immediately before
+  the next model request, not at the moment its UI displays “Context compacted”.
+  The probe verifies that continuation request. Claude's native `/compact` emits
+  compact_boundary and runs another SessionStart.
+- Initial baseline concurrency-4 signed-upgrade failures were not reproduced in its
+  isolated 9/9 rerun or the concurrency-2 213/213 baseline. No unrelated fix was made.
+- Diff and scope reviewed; no production, global agent settings or old Codex plugins
+  were modified. Real Linux execution and publication are not claimed; release
+  workflow changes and signed installer fixtures are validated locally.
 
-All probes used disposable temporary directories and a subprocess-only isolated environment. They did not read real account credentials or change real user configuration. A local HTTP server captured only synthetic requests and deliberately returned HTTP 400 with `Intentional local probe stop`, so no model was invoked. All temporary probe files and processes were removed.
+### Operational boundaries
 
-1. `codex app-server --stdio -c 'hooks.SessionStart=[{hooks=[{type="command",command="/bin/echo COFLUX_PROBE",timeout=2}]}]'` followed by `initialize` and `hooks/list` showed `source=sessionFlags`, `isManaged=false`, `trustStatus=untrusted`. Session hook discovery and native review are supported.
-2. `-c 'skills.config=[{path="<bundle>/coflux",enabled=true}]'` did not discover a skill outside standard roots. The option is enablement, not a demonstrated additional skill search root.
-3. Session `marketplaces.*` and `plugins.*.enabled=true` flags alone did not discover the local bundle's skills/hooks, including after `thread/start`. No config file or cached plugin was produced.
-4. A synthetic local marketplace was installed into the disposable Codex home with `codex plugin add coflux@coflux-runtime --json`. It contained a skill with description `LEGACY_COFLUX_CONTEXT_SENTINEL` and a benign SessionStart hook. The normal app-server listed its hook and skill.
-5. Restarting app-server with `-c 'plugins."coflux@coflux-runtime".enabled=false'` still listed the hook as enabled and still discovered the skill. The config file remained byte-identical.
-6. To exclude a listing-only issue, two actual `codex exec --skip-git-repo-check --ephemeral --json 'Say okay.'` invocations used a synthetic `probe` model provider pointing at `127.0.0.1`, first normally, then with the same disable flag. **Each made one local request, and each request contained `LEGACY_COFLUX_CONTEXT_SENTINEL`.** Both terminated on the expected local HTTP 400. The config file remained byte-identical.
+The first rollout needs a new-wrapper shell (or explicit `coflux agent run`). A shell
+running the pre-integration function cannot acquire a new function retroactively.
+Once installed, the wrapper supports later updates from already-open shells.
+Existing bundles are retained deliberately; deletion belongs to explicit device
+uninstall after agents have stopped. Readiness is exposed through terminal guidance
+and `coflux agent status`, independently of work activity. Details and commands are
+in `docs/agent-integration.md`.
 
-Conclusion: the candidate session-flag plugin loading/suppression path is disproved for this host. This is not proof that every possible Codex adapter is impossible. It is insufficient to ship a duplicate-free adapter under the approved no-global-configuration boundary. Do not fall back to replacing CODEX_HOME, writing user config, suppressing every plugin, or bypassing trust without revisiting that boundary. Native profile files live under CODEX_HOME and profile names cannot be arbitrary paths according to https://developers.openai.com/codex/config-advanced; they are not a demonstrated external immutable config overlay.
-
-### Baseline acceptance failure
-
-The complete unmodified black-box suite finished in 258.7 seconds: **213 tests, 211 pass, 2 fail**. No tests were cancelled or skipped.
-
-- `tests/src/signed-upgrade.test.mjs:212`: concurrent remote upgrades, assertion `新请求先完成并提交`, actual false, expected true.
-- `tests/src/signed-upgrade.test.mjs:223`: anti-rollback persistence, assertion `重启后恢复已提交 release`, actual false, expected true. This test follows the failed version-commit test and may be dependent fallout; that causal link was not proven.
-
-The suite exited 1. No source fixes or reruns were attempted because the host-feasibility STOP had already been reached. These are baseline failures, not regressions from this work. No worktree-specific server/daemon processes remained after harness cleanup.
-
-### Handoff state
-
-Plan and index are intentionally uncommitted: repository commit policy requires a green full suite. Product implementation has not begun. Resume by revising/verifying the Codex adapter candidate and resolving or explicitly accounting for the baseline failures; all previous product decisions and Self/autopilot authorization remain in force. No further general permission confirmation is required.
-
-### Scope correction from the user
-
-The user explicitly stated that they will handle old Codex plugins. Legacy suppression, migration and coexistence are removed from acceptance and must not block new integration. The failed suppression probe remains historical evidence only. Resume new-plugin loading and update implementation under existing Self/autopilot authorization.
-
-### Resumed validation
-
-- Signed-upgrade baseline rerun alone with debug logging: 9/9 pass (27.8 s).
-- Full baseline rerun with concurrency 2: 213/213 pass (199.4 s). Initial parallel failure is not treated as a reproduced product defect.
-- Native Codex TUI, isolated config and benign `/bin/echo` hook: displayed `Hooks need review`; selecting native `Trust all and continue` saved a trusted hash under `hooks.state` and continued normally. Coflux does not write trust records.
-- Implementation choice: Codex built-in integration uses session-level hooks and a pointer to the immutable shipped skill file, rather than requiring a globally installed plugin or adding a skill discovery root. The external plugin remains optional.
+The user owns old Codex plugin management; removal, migration and coexistence with
+those old plugins are excluded. No push, PR, merge or release was performed.

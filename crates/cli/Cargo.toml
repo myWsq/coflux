@@ -18,3 +18,5 @@ libc = "0.2"
 # 账号命令使用系统独立的 HTTPS 通道，不要求 Node 或 MCP 宿主。
 ureq = { version = "2", features = ["json"] }
 url = "2"
+sha2 = "0.10"
+regex = "1"

@@ -144,9 +144,9 @@ jobs:
           # relay 只随 linux 矩阵发布（部署对象是 Linux 服务器节点，plan 043）；
           # macOS 不产 relay，也就不进签名/公证循环。
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker -p coflux-relay
+            cross build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker -p coflux-relay -p coflux-cli
           else
-            cargo build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker
+            cargo build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker -p coflux-cli
           fi
 
       # macOS 专属：cargo 交叉/原生编译产物只有 ad-hoc 签名，launchd 直接 spawn 的新鲜下载二进制
@@ -186,7 +186,7 @@ jobs:
 
           SIGN_ID="Developer ID Application: Shuaiqi Wang (${APPLE_TEAM_ID})"
           bin="target/${{ matrix.target }}/release"
-          for name in coflux-supervisor coflux-worker; do
+          for name in coflux-supervisor coflux-worker coflux; do
             codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$bin/$name"
             ditto -c -k --keepParent "$bin/$name" "$RUNNER_TEMP/$name.zip"
             SUBMIT_OUT=$(xcrun notarytool submit "$RUNNER_TEMP/$name.zip" \
@@ -210,12 +210,13 @@ jobs:
           # worker 另保留 supervisor 热升级所需的原始二进制签名。
           cp "$bin/coflux-supervisor" "dist/coflux-supervisor-${{ matrix.target }}"
           cp "$bin/coflux-worker" "dist/coflux-worker-${{ matrix.target }}"
+          cp "$bin/coflux" "dist/coflux-cli-${{ matrix.target }}"
           # 独立 relay（plan 043，仅 linux 矩阵产出）：服务器节点手动部署，稳定命名同上
           if [ -f "$bin/coflux-relay" ]; then
             cp "$bin/coflux-relay" "dist/coflux-relay-${{ matrix.target }}"
           fi
-          # tar.gz：含两个二进制，供人工安装
-          tar -C "$bin" -czf "dist/coflux-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" coflux-supervisor coflux-worker
+          # tar.gz contains supervisor, worker and the native CLI for manual installation
+          tar -C "$bin" -czf "dist/coflux-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" coflux-supervisor coflux-worker coflux
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

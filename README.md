@@ -85,7 +85,7 @@ coflux terminal new --workspace <workspace-id> --cmd "git status"
 coflux terminal read <terminal-id> --remote
 ```
 
-Account commands return JSON. Local commands use the terminal's existing context. The desktop CLI can reuse the app's login without exposing its credentials. See the [CLI guide](packages/cli/README.md) and [agent skill](packages/cli/skills/coflux/SKILL.md).
+Account commands return JSON. Local commands use the terminal's existing context. The desktop CLI can reuse the app's login without exposing its credentials. See the [CLI guide](packages/cli/README.md), [agent skill](packages/cli/skills/coflux/SKILL.md), and [managed agent integration](docs/agent-integration.md).
 
 ## How it fits together
 

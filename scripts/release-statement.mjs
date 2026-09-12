@@ -4,5 +4,6 @@ export {
   SUPERVISOR_RELEASE_STATEMENT_DOMAIN,
   assertReleaseVersion,
   supervisorReleaseStatement,
+  cliReleaseStatement,
   workerReleaseStatement,
 } from "../packages/cli/release-trust.mjs";

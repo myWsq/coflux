@@ -1,22 +1,13 @@
-//! 会话 shell 集成（plan 115）：让 coflux 终端里手敲的 `claude` 自动带上注入方指定的插件目录。
+//! Shell entry points for device-managed Claude Code and Codex integration.
 //!
-//! 契约只有一个环境变量名 `COFLUX_CLAUDE_PLUGIN_DIR`——值由注入方决定（macOS 上是 Coflux.app 经
-//! LaunchAgent 的 `EnvironmentVariables` 写进 supervisor 自己的环境，指向 app 包内那份插件；Linux
-//! 用户可以在 systemd unit 里设同一个变量指向任意目录）。supervisor 不解析、不校验、不落盘这个值，
-//! 它随 `sessions.rs` 拷贝 supervisor 全量环境这一步自然到达会话 shell；本模块只负责把它**翻译**成
-//! `claude --plugin-dir <dir>`。
+//! zsh/bash load a wrapper after user startup files; fish uses vendor configuration.
+//! Wrappers resolve `<COFLUX_HOME>/bin/coflux` on each invocation so existing shells
+//! can launch updated integration. The native CLI pins immutable hooks and skill
+//! files for each agent. User aliases/functions keep precedence.
 //!
-//! 翻译的做法与 VS Code 的 shell integration 同款：起会话 shell 时按 shell 的 basename 分派，
-//! 用各 shell 自己的启动钩子加一段我们的 rc（zsh 改 `ZDOTDIR`、bash 用 `--init-file`、fish 经
-//! `XDG_DATA_DIRS` 的 vendor conf），rc 先把用户原来的启动文件按原顺序、原作用域跑一遍，末尾才定义
-//! 一个 `claude` 函数。不做 PATH 垫片——用户 rc 往往会把自己的 bin 目录重新前置，垫片必被遮住；
-//! 也不动用户的 `~/.claude` 或 `~/.coflux` 里的任何文件。
-//!
-//! 认不出的 shell（含命令终端那种「shell 字段指向包装脚本」的情况，见 crates/worker/src/ops.rs）
-//! 一律不注入，行为与今天逐字相同。
-//!
-//! rc 内容随 supervisor 二进制走（`include_str!`），启动时写到 `<COFLUX_HOME>/shell-integration/`
-//! （幂等覆盖，与 `supervisor-version`、`fda-status` 同类的 daemon 自有文件）。
+//! Installations without the native CLI retain the legacy Claude plugin-directory
+//! fallback. Unknown shells can call `coflux agent run` explicitly. Templates are
+//! embedded in supervisor and staged under `<COFLUX_HOME>/shell-integration`.
 
 use std::path::{Path, PathBuf};
 

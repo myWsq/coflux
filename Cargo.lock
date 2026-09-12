@@ -403,7 +403,9 @@ version = "0.0.0"
 dependencies = [
  "coflux-protocol",
  "libc",
+ "regex",
  "serde_json",
+ "sha2",
  "ureq",
  "url",
 ]

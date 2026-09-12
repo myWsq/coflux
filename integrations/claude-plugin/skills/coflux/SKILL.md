@@ -22,6 +22,20 @@ local daemon and never touch the center; `new`/`list`/`ports` are relayed to the
 daemon on your behalf (terminals must appear in the user's sidebar, preview URLs are minted by
 the center). You only ever talk to the local daemon.
 
+## Managed terminal integration
+
+Coflux terminals automatically load this capability for Claude Code and Codex. Use
+`coflux agent status` to inspect this terminal's integration acknowledgements; an
+unconfirmed run has not successfully executed its context hook. It does not prove
+that approval is pending. Codex asks for native hook review when needed; use `/hooks`
+to review it. Do not edit trust hashes or the user's global configuration.
+
+Each agent keeps its own immutable CLI and skill files. Relaunching the agent selects
+the installed device version, including from an already-open supported shell. Use
+`COFLUX_AGENT_INTEGRATION=off claude` or `COFLUX_AGENT_INTEGRATION=off codex` to bypass
+managed integration for one invocation. Use `coflux agent run <claude|codex> -- ...`
+when a custom shell alias takes precedence over automatic integration.
+
 ## Figure out where you are first
 
 With the coflux plugin installed, Claude Code and Codex receive a `<coflux-session>` block at

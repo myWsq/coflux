@@ -829,6 +829,7 @@ impl Sessions {
             command.env(key, value);
         }
         command.env("TERM", "xterm-256color");
+        command.env("COFLUX_HOME", &self.home);
         // plan 112：`<COFLUX_HOME>/bin` 前置进 PATH 首段——agent 与 Claude 插件 hook 在 coflux 终端里零安装
         // 命中 app 内置的 Rust 版 coflux（用户自己的终端不受影响，不改用户 shell 配置）。必须写在拷贝
         // std::env 之后，否则被 supervisor 自身的 PATH 覆盖回去。所有平台都做。

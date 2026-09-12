@@ -9,6 +9,7 @@ mod account;
 mod args;
 mod commands;
 mod gateway;
+mod integration;
 mod text;
 
 /// `✗ <msg>` 到 stderr 并以 1 退出（node 版 `die`）。
@@ -71,6 +72,11 @@ agent 命令的环境变量：COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等�
 供有硬超时的 hook 脚本用——到点干净失败，好过被宿主杀在半路。";
 
 fn main() {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().is_some_and(|arg| arg == "agent") {
+        if let Err(error) = integration::run(&raw[1..]) { die(&error); }
+        return;
+    }
     let parsed = match args::parse(std::env::args().skip(1)) {
         Ok(parsed) => parsed,
         Err(error) => die(&format!("参数错误：{error}\n\n{HELP}")),
