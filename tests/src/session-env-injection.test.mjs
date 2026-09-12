@@ -23,7 +23,7 @@
  *
  * 端口：8870（独占）；plan 115 的第二套栈用 8874（同样独占）。
  */
-import { test, before, after } from "node:test";
+import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -77,6 +77,33 @@ async function okTool(name, args) {
   assert.ok(!result.isError, `${name} 应成功: ${result.content?.[0]?.text}`);
   return result.structuredContent;
 }
+
+async function errTool(name, args) {
+  const result = await tool(name, args);
+  assert.equal(result.isError, true, `${name} 应失败: ${JSON.stringify(result.structuredContent)}`);
+  return result.content[0].text;
+}
+
+/** Terminals opened in the shared main workspace by the current test: shells never exit on their own,
+ * so a test failing midway must not leave one running for the next test to trip over the cap. */
+const openedTerminals = new Set();
+
+afterEach(async () => {
+  const leftovers = [...openedTerminals];
+  openedTerminals.clear();
+  for (const terminalId of leftovers) {
+    try {
+      await callTool(BASE, token, "stop_terminal", { terminalId });
+    } catch {
+      // already gone
+    }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const removed = await callTool(BASE, token, "remove_terminal", { terminalId }).catch(() => null);
+      if (!removed || !removed.result?.isError || /不存在或不属于当前账号/.test(removed.result.content?.[0]?.text ?? "")) break;
+      await sleep(500);
+    }
+  }
+});
 
 /** 轮询 read_terminal 直到文本满足条件（命令日志异步落盘、快照有周期）。 */
 async function readUntil(terminalId, predicate, label, timeout = 20000) {
@@ -219,6 +246,7 @@ test("路径①：账号 API create_terminal 开的终端里五个 COFLUX_* 齐�
   assert.match(refused, /send/, refused);
   const opened = (await okTool("list_terminals", { workspaceId: mainWorkspaceId })).terminals.find((t) => t.title === "坐标");
   assert.ok(opened, "命令没打入不等于终端没开：list_terminals 里必须有它");
+  openedTerminals.add(opened.id);
   assert.equal(opened.status, "running");
   const terminal = opened;
   const sessionId = await sessionIdOf(terminal.id);
@@ -277,6 +305,7 @@ test("路径②：web 手开的终端（taskCreate + taskStart）里也有 COFLU
     20000,
   );
   const task = await startTask(idle.task.id);
+  openedTerminals.add(task.id);
   const sessionId = task.sessionId;
   await device.attach(sessionId);
 

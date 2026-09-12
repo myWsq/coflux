@@ -247,8 +247,8 @@ test("终端只有一种：不带 --cmd 只开常驻 shell；run 等提示符后
     assert.match(sendText, /已写入终端/, sendText);
     const typed = await cli(`terminal wait ${shellId} --timeout 30`, (s) => s.includes("#") || s.includes("✗"), "wait read", 40000);
     assert.match(typed, /# finished exit=5/, `打字进去的命令也要给它自己的退出码: ${typed}`);
-    const gotText = await readScreenUntil(device, task.sessionId, gatewayPort, home, shellId, (s) => s.includes("GOT:typed-in"), "输入真的到了命令");
-    assert.match(gotText, /GOT:typed-in/);
+    const gotText = await readScreenUntil(device, task.sessionId, gatewayPort, home, shellId, (s) => /^GOT:typed-in$/m.test(s), "输入真的到了命令");
+    assert.match(gotText, /^GOT:typed-in$/m);
 
     // 远端 / 嵌套 shell 的裸 OSC 133 标记不带本会话的秘密：wait 不会被它提前结束
     const foreign = await cli(`terminal run ${shellId} --cmd "printf '\\\\033]133;D;0\\\\007'; printf '\\\\033]133;A\\\\007'; sleep 3; (exit 4)"`, (s) => s.includes("已打入命令") || s.includes("✗"), "run foreign marks");

@@ -175,7 +175,8 @@ test("terminal send：无人接管时写得进（命令真收到输入，退出�
     // ⚠ $line 必须写成 \$line：--cmd "…" 是打进**发起方 shell** 的，双引号内不转义的话
     // $line 会被发起方先展开成空串。先打 READY、等它出现再 send，同时演练 SKILL.md 的「先 read 再 send」纪律。
     const target = await newAgentTerminal(c, device, task, ws, gatewayPort, home, "等输入", "echo READY; read line; echo GOT:\\$line; (exit 6)");
-    await readScreenUntil(device, task.sessionId, gatewayPort, home, target.id, (s) => s.includes("READY"), "READY 探测");
+    // 真 tty 回显命令行本身（含 `echo READY`）：只认行首的产出
+    await readScreenUntil(device, task.sessionId, gatewayPort, home, target.id, (s) => /^READY$/m.test(s), "READY 探测");
 
     const sendText = await runCli(device, task.sessionId, gatewayPort, home, `terminal send ${target.id} --text "ping" --enter`, (s) => s.trim().length > 0, "terminal send 输出");
     assert.match(sendText, /已写入终端/, `send 命令失败: ${sendText}`);
@@ -183,8 +184,8 @@ test("terminal send：无人接管时写得进（命令真收到输入，退出�
     // 打字进去的命令照样有自己的退出码：wait 拿到 (exit 6)
     const waitText = await runCli(device, task.sessionId, gatewayPort, home, `terminal wait ${target.id} --timeout 30`, (s) => s.includes("#") || s.includes("✗"), "收到输入后命令结束", 40000);
     assert.match(waitText, /# finished exit=6/, waitText);
-    const readText = await readScreenUntil(device, task.sessionId, gatewayPort, home, target.id, (s) => s.includes("GOT:"), "send 后 read 输出");
-    assert.match(readText, /GOT:ping/, `命令必须真收到输入: ${readText}`);
+    const readText = await readScreenUntil(device, task.sessionId, gatewayPort, home, target.id, (s) => /^GOT:ping$/m.test(s), "send 后 read 输出");
+    assert.match(readText, /^GOT:ping$/m, `命令必须真收到输入（回显里的 GOT:$line 不算）: ${readText}`);
 
     // 人类优先：用户 attach 目标终端期间，send / run 必须被拒且错误可读；wait / read 不受接管影响
     const held = await newAgentTerminal(c, device, task, ws, gatewayPort, home, "被接管", "sleep 60");

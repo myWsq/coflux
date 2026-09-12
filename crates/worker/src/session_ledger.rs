@@ -140,8 +140,10 @@ impl SessionLedger {
         true
     }
 
-    /// `terminal.run` typed a command: reserve the sequence it will carry once its command-start
-    /// mark arrives, so a `wait` issued in between targets it and not the previous command.
+    /// `terminal.run` is about to type a command: reserve the sequence it will carry once its
+    /// command-start mark arrives, so a `wait` issued in between targets it and not the previous
+    /// command. Reserved *before* the keystrokes go out, so the mark can only ever land on an
+    /// already-promised sequence whatever order the input ack and the mark are handled in.
     pub fn promise_run(&mut self, session_id: &str) -> u64 {
         let Some(entry) = self.by_session.get_mut(session_id) else {
             return 0;
@@ -149,6 +151,17 @@ impl SessionLedger {
         let next = entry.latest_command_seq().saturating_add(1);
         entry.promised_seq = next;
         next
+    }
+
+    /// The keystrokes for `seq` never reached the PTY: give the reservation back. A promise made
+    /// after this one (impossible while the busy check holds, but cheap to respect) stays.
+    pub fn withdraw_run(&mut self, session_id: &str, seq: u64) {
+        let Some(entry) = self.by_session.get_mut(session_id) else {
+            return;
+        };
+        if entry.promised_seq == seq {
+            entry.promised_seq = seq.saturating_sub(1);
+        }
     }
 
     /// 精确 control exit 与 catalog tombstone 共用：只对已知会话记退出码，未知的不凭空造条目。

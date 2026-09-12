@@ -738,8 +738,14 @@ fn command_fields(record: &SessionRecord) -> serde_json::Map<String, serde_json:
 type RunError = (&'static str, String);
 
 /// "do script" into a live session: wait (bounded) for the shell's prompt-ready mark, refuse while a
-/// command is still running, then type the command through the humans-first front door and reserve
-/// the sequence it will carry. Never types blind: no mark, no keystrokes.
+/// command is still running, reserve the sequence the command will carry, then type it through the
+/// humans-first front door. Never types blind: no mark, no keystrokes.
+///
+/// The busy check and the reservation happen under one ledger lock, and the reservation precedes
+/// the keystrokes: the shell's command-start mark (handled by the supervisor reader task) and the
+/// input ack (handled here) race on separate tasks, so a mark that arrives first must find its
+/// sequence already promised — otherwise `promise_run` would reserve one past it and the terminal
+/// would look busy forever. A failed send gives the reservation back.
 async fn run_in_session(
     state: &Arc<Mutex<WorkerState>>,
     device: &Arc<DeviceRuntime>,
@@ -748,34 +754,40 @@ async fn run_in_session(
 ) -> Result<u64, RunError> {
     let mut epoch = state.lock().unwrap().command_epoch.subscribe();
     let deadline = Instant::now() + PROMPT_WAIT;
-    loop {
+    let command_seq = loop {
         // Mark the epoch as seen *before* reading the ledger so a change in between wakes us.
         epoch.borrow_and_update();
-        let record = state.lock().unwrap().ledger.session(session_id).cloned();
-        let Some(record) = record else {
-            return Err(("404 Not Found", "终端不在本工作区或不存在（用 coflux terminal list 查）".into()));
-        };
-        match record.phase {
-            SessionPhase::Exited { .. } => {
-                return Err((
-                    "409 Conflict",
-                    "终端已退出，不能再输入（要跑新命令用 coflux terminal new）".into(),
-                ))
-            }
-            SessionPhase::Pending => {}
-            SessionPhase::Running if record.command.integrated => {
-                if record.command.busy || record.promised_seq > record.command.command_seq {
+        {
+            let mut s = state.lock().unwrap();
+            let Some(record) = s.ledger.session(session_id) else {
+                return Err(("404 Not Found", "终端不在本工作区或不存在（用 coflux terminal list 查）".into()));
+            };
+            match record.phase {
+                SessionPhase::Exited { .. } => {
                     return Err((
                         "409 Conflict",
-                        format!(
-                            "busy: command #{} is still running in this terminal; `coflux terminal wait` for it or `coflux terminal read` the screen first",
-                            record.latest_command_seq()
-                        ),
-                    ));
+                        "终端已退出，不能再输入（要跑新命令用 coflux terminal new）".into(),
+                    ))
                 }
-                break;
+                SessionPhase::Pending => {}
+                SessionPhase::Running if record.command.integrated => {
+                    if record.command.busy || record.promised_seq > record.command.command_seq {
+                        return Err((
+                            "409 Conflict",
+                            format!(
+                                "busy: command #{} is still running in this terminal; `coflux terminal wait` for it or `coflux terminal read` the screen first",
+                                record.latest_command_seq()
+                            ),
+                        ));
+                    }
+                    // Idle and instrumented: reserve under the same lock the check ran under, so a
+                    // concurrent run sees this terminal as busy from now on.
+                    let seq = s.ledger.promise_run(session_id);
+                    s.bump_command_epoch();
+                    break seq;
+                }
+                SessionPhase::Running => {}
             }
-            SessionPhase::Running => {}
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -785,19 +797,15 @@ async fn run_in_session(
             ));
         }
         let _ = tokio::time::timeout(remaining, epoch.changed()).await;
-    }
+    };
     let mut data = command.as_bytes().to_vec();
     data.push(b'\r');
-    device
-        .agent_send_input(session_id, data)
-        .await
-        .map_err(|message| ("409 Conflict", message))?;
-    let command_seq = {
+    if let Err(message) = device.agent_send_input(session_id, data).await {
         let mut s = state.lock().unwrap();
-        let seq = s.ledger.promise_run(session_id);
+        s.ledger.withdraw_run(session_id, command_seq);
         s.bump_command_epoch();
-        seq
-    };
+        return Err(("409 Conflict", message));
+    }
     Ok(command_seq)
 }
 
@@ -1011,6 +1019,23 @@ async fn ask_server(
     }
 }
 
+/// The ledger has the session and does not know it as exited (unknown sessions count as running:
+/// the alive-table check is the identity gate, this one only closes the exit race).
+fn session_running(state: &Arc<Mutex<WorkerState>>, session_id: &str) -> bool {
+    state
+        .lock()
+        .unwrap()
+        .ledger
+        .session(session_id)
+        .is_none_or(|record| !matches!(record.phase, SessionPhase::Exited { .. }))
+}
+
+/// A snapshot read failed because the supervisor no longer has the session (tombstoned, or the
+/// waiter was dropped by the session exit) rather than because of a transport problem.
+fn snapshot_gone(error: &str) -> bool {
+    error.starts_with("session_not_found") || error.contains("会话已退出")
+}
+
 /// The center-named session is alive locally and belongs to the task the center says it does.
 fn session_matches(state: &Arc<Mutex<WorkerState>>, session_id: &str, task_id: &str) -> bool {
     !session_id.is_empty()
@@ -1138,17 +1163,27 @@ pub async fn handle_server_request(
             };
             // A live session answers with the sessiond snapshot (scrollback + screen); only the
             // session the center names is trusted, and only while the local alive table agrees.
-            if !session_matches(state, &read.session_id, &read.task_id) {
+            // An exited session — by the ledger, or because the supervisor no longer has it —
+            // answers `none` so the center falls back to its checkpoint (the invariant the plan
+            // keeps for exited terminals), never an empty or stale "snapshot".
+            if !session_matches(state, &read.session_id, &read.task_id)
+                || !session_running(state, &read.session_id)
+            {
                 return reply(Vec::new(), "none");
             }
             match device.read_session_snapshot(&read.session_id).await {
                 Ok(mut snapshot) => {
+                    // The exit can land while the read is in flight; re-check before answering.
+                    if !session_running(state, &read.session_id) {
+                        return reply(Vec::new(), "none");
+                    }
                     let keep = usize::try_from(max_bytes).unwrap_or(usize::MAX);
                     if snapshot.len() > keep {
                         snapshot.drain(..snapshot.len() - keep);
                     }
                     reply(snapshot, "snapshot")
                 }
+                Err(error) if snapshot_gone(&error) => reply(Vec::new(), "none"),
                 Err(error) => fail(error),
             }
         }

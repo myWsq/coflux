@@ -19,7 +19,7 @@
  *
  * 端口：8869（独占）。每工作区活跃终端上限压到 2，上限用例才跑得快。
  */
-import { test, before, after } from "node:test";
+import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -77,6 +77,35 @@ async function errTool(name, args) {
   assert.equal(result.isError, true, `${name} 应失败: ${JSON.stringify(result.structuredContent)}`);
   return result.content[0].text;
 }
+
+/** Terminals opened by the current test. Shells never exit on their own any more, so a test that
+ * fails midway would otherwise leave them running and every later test would hit the per-workspace
+ * cap: afterEach stops and removes whatever is left, ignoring terminals the test already cleaned. */
+const openedTerminals = new Set();
+
+/** create_terminal that registers the terminal for afterEach cleanup. */
+async function openTerminal(args) {
+  const value = await okTool("create_terminal", args);
+  openedTerminals.add(value.terminal.id);
+  return value;
+}
+
+afterEach(async () => {
+  const leftovers = [...openedTerminals];
+  openedTerminals.clear();
+  for (const terminalId of leftovers) {
+    try {
+      await callTool(BASE, token, "stop_terminal", { terminalId });
+    } catch {
+      // offline device or already gone: nothing to stop
+    }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const removed = await callTool(BASE, token, "remove_terminal", { terminalId }).catch(() => null);
+      if (!removed || !removed.result?.isError || /不存在或不属于当前账号/.test(removed.result.content?.[0]?.text ?? "")) break;
+      await sleep(500);
+    }
+  }
+});
 
 /** 轮询 read_terminal 直到文本满足条件（命令日志是异步落盘的）。 */
 async function readUntil(terminalId, predicate, label, timeout = 20000) {
@@ -183,7 +212,7 @@ test("create_workspace：worktree 真在磁盘上，web 收到 workspaceCreated�
 });
 
 test("闭环：create_terminal --cmd（do-script）→ read_terminal(snapshot) → send_terminal_input → wait_terminal 命令退出码 → stop → remove_terminal", async () => {
-  const { terminal } = await okTool("create_terminal", {
+  const { terminal } = await openTerminal({
     workspaceId: subWorkspace.id,
     title: "闭环",
     command: "echo ACCOUNT_T1_START; read line; echo GOT:$line; (exit 7)",
@@ -193,10 +222,11 @@ test("闭环：create_terminal --cmd（do-script）→ read_terminal(snapshot) �
   assert.equal(terminal.title, "闭环");
   await observer.waitFor((m) => m.case === "taskUpdated" && m.task.id === terminal.id && m.task.status === TaskStatus.RUNNING, "web 侧 running");
 
-  // 命令在提示符就绪后才打入：输出出现在设备快照里（滚动缓冲 + 当前屏）
-  const started = await readUntil(terminal.id, (r) => r.source === "snapshot" && r.text.includes("ACCOUNT_T1_START"), "命令输出出现在快照里");
+  // 命令在提示符就绪后才打入：输出出现在设备快照里（滚动缓冲 + 当前屏）。真 tty 会回显命令行本身
+  // （含 `echo ACCOUNT_T1_START` 与 `GOT:$line`），所以只认**行首**的产出，不认回显。
+  const started = await readUntil(terminal.id, (r) => r.source === "snapshot" && /^ACCOUNT_T1_START$/m.test(r.text), "命令输出出现在快照里");
   assert.equal(started.status, "running");
-  assert.ok(!started.text.includes("GOT:"), "输入前不该有 GOT");
+  assert.ok(!/^GOT:ping/m.test(started.text), "输入前不该有 GOT:ping");
 
   const sent = await okTool("send_terminal_input", { terminalId: terminal.id, text: "ping" });
   assert.equal(sent.terminalId, terminal.id);
@@ -214,7 +244,7 @@ test("闭环：create_terminal --cmd（do-script）→ read_terminal(snapshot) �
   assert.equal(again.finished, true);
   assert.equal(again.exitCode, 7);
 
-  const finished = await readUntil(terminal.id, (r) => r.text.includes("GOT:ping"), "输入生效后的快照");
+  const finished = await readUntil(terminal.id, (r) => /^GOT:ping$/m.test(r.text), "输入生效后的快照");
   assert.equal(finished.source, "snapshot");
   assert.equal(finished.status, "running");
 
@@ -230,7 +260,7 @@ test("闭环：create_terminal --cmd（do-script）→ read_terminal(snapshot) �
   const second = await okTool("wait_terminal", { terminalId: terminal.id, timeoutSeconds: 30 });
   assert.equal(second.finished, true);
   assert.equal(second.exitCode, 0);
-  await readUntil(terminal.id, (r) => r.text.includes("SECOND-RUN"), "第二条命令的输出");
+  await readUntil(terminal.id, (r) => /^SECOND-RUN$/m.test(r.text), "第二条命令的输出（不是回显）");
 
   const stopped = await okTool("stop_terminal", { terminalId: terminal.id });
   if (!stopped.exited) {
@@ -252,7 +282,7 @@ test("闭环：create_terminal --cmd（do-script）→ read_terminal(snapshot) �
 
 test("终端只有一种：create_terminal 不带 command 开出常驻 shell，read 是快照，wait 没命令时可读拒绝，送 exit 才退出", async () => {
   // 命令与标题都不给：标题必须落到「agent 终端」兜底，侧栏不能出现空标题
-  const { terminal } = await okTool("create_terminal", { workspaceId: subWorkspace.id });
+  const { terminal } = await openTerminal({ workspaceId: subWorkspace.id });
   assert.equal(terminal.status, "running");
   assert.equal(terminal.title, "agent 终端", "没给标题时要落到兜底");
   await observer.waitFor((m) => m.case === "taskUpdated" && m.task.id === terminal.id && m.task.status === TaskStatus.RUNNING, "web 侧 running");
@@ -267,7 +297,7 @@ test("终端只有一种：create_terminal 不带 command 开出常驻 shell，r
 
   // 全 tty：标记里的引号让命令回显（TTY-"OK"-ACCOUNT）与命令输出（TTY-OK-ACCOUNT）区分得开。
   await okTool("send_terminal_input", { terminalId: terminal.id, text: 'test -t 0 && test -t 1 && echo TTY-"OK"-ACCOUNT' });
-  const screen = await readUntil(terminal.id, (r) => r.text.includes("TTY-OK-ACCOUNT"), "终端里 stdin/stdout 都是 tty");
+  const screen = await readUntil(terminal.id, (r) => /^TTY-OK-ACCOUNT$/m.test(r.text), "终端里 stdin/stdout 都是 tty");
   assert.equal(screen.source, "snapshot");
   assert.equal(screen.status, "running", "命令跑完了终端也不能退出");
   // 手敲（send）的命令同样被标记观测到：wait 立即拿到它的退出码
@@ -283,7 +313,7 @@ test("终端只有一种：create_terminal 不带 command 开出常驻 shell，r
 });
 
 test("stop_terminal 结束长命令；删 running 终端被拒；wait_terminal 超时返回状态而非错误", async () => {
-  const { terminal } = await okTool("create_terminal", { workspaceId: subWorkspace.id, title: "长跑", command: "sleep 60" });
+  const { terminal } = await openTerminal({ workspaceId: subWorkspace.id, title: "长跑", command: "sleep 60" });
   assert.equal(terminal.status, "running");
 
   const rejected = await errTool("remove_terminal", { terminalId: terminal.id });
@@ -312,7 +342,7 @@ test("stop_terminal 结束长命令；删 running 终端被拒；wait_terminal �
 });
 
 test("人类优先：用户 attach 期间 send_terminal_input 被拒且文案含「用户正在接管」，用户没被踢下线", async () => {
-  const { terminal } = await okTool("create_terminal", { workspaceId: subWorkspace.id, title: "被接管", command: "read line; echo GOT:$line" });
+  const { terminal } = await openTerminal({ workspaceId: subWorkspace.id, title: "被接管", command: "read line; echo GOT:$line" });
   const sessionId = await runningSessionId(terminal.id);
   const attached = await device.attach(sessionId);
   assert.ok(attached.holderEpoch > 0n);
@@ -325,9 +355,9 @@ test("人类优先：用户 attach 期间 send_terminal_input 被拒且文案含
   const waited = await okTool("wait_terminal", { terminalId: terminal.id, timeoutSeconds: 30 });
   assert.equal(waited.finished, true, JSON.stringify(waited));
   assert.equal(waited.exitCode, 0);
-  const out = await readUntil(terminal.id, (r) => r.text.includes("GOT:"), "用户输入生效");
-  assert.ok(out.text.includes("GOT:from-user"), out.text);
-  assert.ok(!out.text.includes("GOT:x"), "被拒的 agent 输入不能写进去");
+  // 回显里也有 `GOT:$line`：只认行首的产出
+  const out = await readUntil(terminal.id, (r) => /^GOT:from-user$/m.test(r.text), "用户输入生效");
+  assert.ok(!/^GOT:x/m.test(out.text), "被拒的 agent 输入不能写进去");
   await okTool("stop_terminal", { terminalId: terminal.id });
   await observer.waitFor((m) => m.case === "taskUpdated" && m.task.id === terminal.id && m.task.status === TaskStatus.EXITED, "被接管的终端停掉", 30000);
   await okTool("remove_terminal", { terminalId: terminal.id });
@@ -336,7 +366,7 @@ test("人类优先：用户 attach 期间 send_terminal_input 被拒且文案含
 test("每工作区活跃终端上限（含用户手开的）：超限被拒", async () => {
   const opened = [];
   for (let i = 0; i < MAX_TERMINALS; i += 1) {
-    const { terminal } = await okTool("create_terminal", { workspaceId: subWorkspace.id, title: `占位${i}`, command: "sleep 60" });
+    const { terminal } = await openTerminal({ workspaceId: subWorkspace.id, title: `占位${i}`, command: "sleep 60" });
     opened.push(terminal.id);
   }
   const rejected = await errTool("create_terminal", { workspaceId: subWorkspace.id, title: "超限", command: "sleep 60" });
@@ -354,7 +384,7 @@ test("每工作区活跃终端上限（含用户手开的）：超限被拒", as
 
 test("wait_terminal 上限 600 秒（plan 094）：一次超过 60 秒的等待穿过真实 HTTP 完整返回，不被中心掐断", async () => {
   // Node 的 requestTimeout 默认 5 分钟只管收请求体，handler 阶段不受它管——但要用真实请求证明，不凭文档。
-  const { terminal } = await okTool("create_terminal", { workspaceId: subWorkspace.id, title: "慢退出", command: "sleep 65; (exit 0)" });
+  const { terminal } = await openTerminal({ workspaceId: subWorkspace.id, title: "慢退出", command: "sleep 65; (exit 0)" });
   const t0 = Date.now();
   const waited = await okTool("wait_terminal", { terminalId: terminal.id, timeoutSeconds: 120 });
   const elapsed = Date.now() - t0;
@@ -372,7 +402,7 @@ test("remove_workspace：主工作区被拒；子工作区删除后 worktree 从
   assert.match(mainRejected, /主工作区/);
 
   // 留一个已退出的终端，验证随工作区一起清理
-  const { terminal } = await okTool("create_terminal", { workspaceId: subWorkspace.id, title: "遗留", command: "true" });
+  const { terminal } = await openTerminal({ workspaceId: subWorkspace.id, title: "遗留", command: "true" });
   const ran = await okTool("wait_terminal", { terminalId: terminal.id, timeoutSeconds: 30 });
   assert.equal(ran.finished, true);
   await okTool("stop_terminal", { terminalId: terminal.id });
