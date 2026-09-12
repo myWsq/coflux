@@ -298,7 +298,20 @@ fn prepare_version_dir(home: &Path, version: &str) -> Result<(PathBuf, PathBuf),
 
 /// 已验签并 fsync 的候选文件。Drop 会删除未晋升的临时文件，所以过期 generation、
 /// supervisor 正常拒绝和安装失败都不会污染正式 `coflux-worker`。
+struct StagedTransport {
+    temp: Option<PathBuf>,
+    metadata: coflux_protocol::TransportArtifact,
+}
+impl Drop for StagedTransport {
+    fn drop(&mut self) {
+        if let Some(path) = self.temp.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
 pub struct StagedWorker {
+    transport: Option<StagedTransport>,
+    pair_staging: Option<PathBuf>,
     version: String,
     digest: [u8; 32],
     temp_path: Option<PathBuf>,
@@ -311,6 +324,72 @@ impl StagedWorker {
     /// 在 manager 的 generation 临界区内调用。rename 与目标位于同一目录，晋升原子；
     /// 文件本体、版本目录和 workers 目录都同步后才返回可执行 spec。
     pub fn install(mut self) -> Result<WorkerSpec, String> {
+        if let Some(mut companion) = self.transport.take() {
+            let staging = self
+                .pair_staging
+                .as_ref()
+                .ok_or("paired release lacks private staging directory")?
+                .clone();
+            std::fs::rename(
+                self.temp_path.as_ref().ok_or("missing staged worker")?,
+                staging.join("coflux-worker"),
+            )
+            .map_err(|_| "stage worker failed")?;
+            self.temp_path = None;
+            std::fs::rename(
+                companion.temp.as_ref().ok_or("missing staged companion")?,
+                staging.join("coflux-transport"),
+            )
+            .map_err(|_| "stage companion failed")?;
+            companion.temp = None;
+            let marker = serde_json::json!({"workerSha256":hex::encode(self.digest),"transport":companion.metadata});
+            persist_marker(
+                staging.to_str().ok_or("invalid staging directory")?,
+                "transport-pair.json",
+                &marker.to_string(),
+            )?;
+            sync_dir(&staging)?;
+            if self.version_dir.exists() {
+                // Existing versions are immutable, including legacy worker-only
+                // directories. Never add a companion or marker in place.
+                let existing = installed_worker_spec(
+                    self.workers_dir
+                        .parent()
+                        .and_then(Path::to_str)
+                        .ok_or("invalid home")?,
+                    &self.version,
+                )?;
+                if !self.version_dir.join("transport-pair.json").is_file() {
+                    return Err("existing version is not a complete native pair".into());
+                }
+                let bytes = read_bounded(
+                    File::open(&existing.cmd).map_err(|_| "installed worker unreadable")?,
+                    None,
+                )?;
+                if <[u8; 32]>::from(Sha256::digest(&bytes)) != self.digest {
+                    return Err("immutable worker digest differs".into());
+                }
+                verify_companion_file(
+                    &self.version_dir.join("coflux-transport"),
+                    &companion.metadata,
+                )?;
+            } else {
+                std::fs::rename(&staging, &self.version_dir)
+                    .map_err(|_| "atomic native pair publication failed")?;
+                self.pair_staging = None;
+            }
+            sync_dir(&self.workers_dir)?;
+            return Ok(WorkerSpec {
+                version: self.version.clone(),
+                cmd: self.final_path.to_string_lossy().into_owned(),
+                args: vec![],
+            });
+        } else if self.pair_staging.is_some()
+            || self.version_dir.join("transport-pair.json").exists()
+        {
+            return Err("paired release cannot be installed without its companion".into());
+        }
+
         if self.final_path.exists() {
             let metadata = std::fs::symlink_metadata(&self.final_path).map_err(|error| {
                 format!(
@@ -371,6 +450,9 @@ impl StagedWorker {
 
 impl Drop for StagedWorker {
     fn drop(&mut self) {
+        if let Some(path) = self.pair_staging.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
         if let Some(path) = self.temp_path.take() {
             let _ = std::fs::remove_file(path);
         }
@@ -386,6 +468,8 @@ pub(crate) fn stage_verified_bytes(
     let (workers_dir, version_dir) = prepare_version_dir(home, version)?;
     let (mut file, temp_path) = create_temp_file(&version_dir, "coflux-worker")?;
     let staged = StagedWorker {
+        transport: None,
+        pair_staging: None,
         version: version.to_string(),
         digest,
         final_path: version_dir.join("coflux-worker"),
@@ -403,6 +487,44 @@ pub(crate) fn stage_verified_bytes(
     Ok(staged)
 }
 
+fn stage_pair_worker(
+    home: &Path,
+    version: &str,
+    body: &[u8],
+    digest: [u8; 32],
+) -> Result<StagedWorker, String> {
+    validate_version(version)?;
+    let workers_dir = home.join("workers");
+    if ensure_real_dir(&workers_dir)? {
+        sync_dir(home)?;
+    }
+    let staging = workers_dir.join(format!(
+        ".pair-{}-{}",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&staging).map_err(|_| "native pair staging unavailable")?;
+    let version_dir = workers_dir.join(version);
+    let mut staged = StagedWorker {
+        transport: None,
+        pair_staging: Some(staging.clone()),
+        version: version.into(),
+        digest,
+        temp_path: None,
+        final_path: version_dir.join("coflux-worker"),
+        workers_dir,
+        version_dir,
+    };
+    let (mut file, temp) = create_temp_file(&staging, "coflux-worker")?;
+    staged.temp_path = Some(temp);
+    file.write_all(body)
+        .map_err(|_| "paired worker write failed")?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o755))
+        .map_err(|_| "paired worker chmod failed")?;
+    file.sync_all().map_err(|_| "paired worker sync failed")?;
+    Ok(staged)
+}
+
 /// 下载、校验并写入 fsync 过的临时文件；不会改动正式产物路径。
 pub fn download_verify_stage(
     url: &str,
@@ -413,6 +535,7 @@ pub fn download_verify_stage(
     target: &str,
     artifact_size: u64,
     release_signature_hex: &str,
+    transport: Option<&coflux_protocol::TransportArtifact>,
 ) -> Result<StagedWorker, String> {
     validate_upgrade_request(
         version,
@@ -475,7 +598,90 @@ pub fn download_verify_stage(
     vk.verify(&statement, &release_sig)
         .map_err(|_| "release statement 签名校验失败（发布元数据被篡改）".to_string())?;
 
-    stage_verified_bytes(Path::new(home), version, &body, digest)
+    let mut staged = if transport.is_some() {
+        stage_pair_worker(Path::new(home), version, &body, digest)?
+    } else {
+        stage_verified_bytes(Path::new(home), version, &body, digest)?
+    };
+    if let Some(metadata) = transport {
+        validate_upgrade_request(
+            version,
+            &metadata.url,
+            &metadata.sha256,
+            &"00".repeat(64),
+            target,
+            metadata.size,
+            &metadata.release_signature,
+        )?;
+        let response = ureq::get(&metadata.url)
+            .timeout(Duration::from_secs(60))
+            .call()
+            .map_err(|_| "transport download failed")?;
+        let announced = response
+            .header("Content-Length")
+            .and_then(|value| value.parse::<u64>().ok());
+        if announced.is_some_and(|size| size != metadata.size) {
+            return Err("transport Content-Length mismatch".into());
+        }
+        let data = read_bounded_with_limit(response.into_reader(), announced, metadata.size)?;
+        if data.len() as u64 != metadata.size
+            || hex::encode(Sha256::digest(&data)) != metadata.sha256.to_lowercase()
+        {
+            return Err("transport size/digest mismatch".into());
+        }
+        let digest: [u8; 32] = Sha256::digest(&data).into();
+        let signature = Signature::from_slice(
+            &hex::decode(&metadata.release_signature).map_err(|_| "invalid transport signature")?,
+        )
+        .map_err(|_| "invalid transport signature")?;
+        let mut statement = b"coflux-transport-release-v1\0".to_vec();
+        append_len_prefixed(&mut statement, version.as_bytes());
+        append_len_prefixed(&mut statement, target.as_bytes());
+        statement.extend_from_slice(&digest);
+        statement.extend_from_slice(&metadata.size.to_be_bytes());
+        vk.verify(&statement, &signature)
+            .map_err(|_| "transport release signature rejected")?;
+        let (mut file, temp) = create_temp_file(
+            staged
+                .pair_staging
+                .as_ref()
+                .ok_or("missing pair staging directory")?,
+            "coflux-transport",
+        )?;
+        let companion = StagedTransport {
+            temp: Some(temp),
+            metadata: metadata.clone(),
+        };
+        file.write_all(&data)
+            .map_err(|_| "transport write failed")?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .map_err(|_| "transport chmod failed")?;
+        file.sync_all().map_err(|_| "transport sync failed")?;
+        staged.transport = Some(companion);
+    }
+    Ok(staged)
+}
+
+fn verify_companion_file(
+    path: &Path,
+    metadata: &coflux_protocol::TransportArtifact,
+) -> Result<(), String> {
+    let stat = std::fs::symlink_metadata(path).map_err(|_| "transport file missing")?;
+    if !stat.is_file()
+        || stat.file_type().is_symlink()
+        || stat.len() != metadata.size
+        || stat.permissions().mode() & 0o111 == 0
+    {
+        return Err("invalid transport file".into());
+    }
+    let data = read_bounded(
+        File::open(path).map_err(|_| "transport file unreadable")?,
+        Some(stat.len()),
+    )?;
+    if hex::encode(Sha256::digest(&data)) != metadata.sha256.to_lowercase() {
+        return Err("transport file digest mismatch".into());
+    }
+    Ok(())
 }
 
 /// marker 统一用同目录临时文件 + fsync + rename，避免断电/进程退出留下空文件。
@@ -549,6 +755,27 @@ pub fn installed_worker_spec(home: &str, version: &str) -> Result<WorkerSpec, St
     if metadata.permissions().mode() & 0o111 == 0 {
         return Err(format!("{} 没有执行权限", path.display()));
     }
+    let pair = version_dir.join("transport-pair.json");
+    if pair.exists() {
+        let stat = std::fs::symlink_metadata(&pair).map_err(|_| "pair metadata missing")?;
+        if !stat.is_file() || stat.file_type().is_symlink() || stat.len() > 32768 {
+            return Err("invalid pair metadata".into());
+        }
+        let marker: serde_json::Value =
+            serde_json::from_reader(File::open(pair).map_err(|_| "pair metadata unreadable")?)
+                .map_err(|_| "invalid pair metadata")?;
+        let companion: coflux_protocol::TransportArtifact =
+            serde_json::from_value(marker["transport"].clone())
+                .map_err(|_| "invalid companion metadata")?;
+        verify_companion_file(&version_dir.join("coflux-transport"), &companion)?;
+        let bytes = read_bounded(
+            File::open(&path).map_err(|_| "worker unreadable")?,
+            Some(metadata.len()),
+        )?;
+        if marker["workerSha256"].as_str() != Some(hex::encode(Sha256::digest(&bytes)).as_str()) {
+            return Err("paired worker digest mismatch".into());
+        }
+    }
     Ok(WorkerSpec {
         version: version.to_string(),
         cmd: path.to_string_lossy().into_owned(),
@@ -604,6 +831,72 @@ mod tests {
         std::fs::remove_dir_all(home).unwrap();
     }
 
+    fn pair_fixture(home: &Path, version: &str, worker: &[u8], helper: &[u8]) -> StagedWorker {
+        let mut staged =
+            stage_pair_worker(home, version, worker, Sha256::digest(worker).into()).unwrap();
+        let (mut file, path) =
+            create_temp_file(staged.pair_staging.as_ref().unwrap(), "coflux-transport").unwrap();
+        file.write_all(helper).unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        file.sync_all().unwrap();
+        staged.transport = Some(StagedTransport {
+            temp: Some(path),
+            metadata: coflux_protocol::TransportArtifact {
+                url: "https://example.invalid/helper".into(),
+                sha256: hex::encode(Sha256::digest(helper)),
+                size: helper.len() as u64,
+                release_signature: "00".repeat(64),
+            },
+        });
+        staged
+    }
+    #[test]
+    fn pair_publication_is_one_directory_and_drop_never_exposes_partial_version() {
+        let home = test_home("atomic-pair");
+        let staged = pair_fixture(&home, "v2.0.0", b"worker", b"helper");
+        let staging = staged.pair_staging.clone().unwrap();
+        assert!(!home.join("workers/v2.0.0").exists());
+        drop(staged);
+        assert!(!staging.exists());
+        assert!(!home.join("workers/v2.0.0").exists());
+        pair_fixture(&home, "v2.0.0", b"worker", b"helper")
+            .install()
+            .unwrap();
+        assert!(installed_worker_spec(home.to_str().unwrap(), "v2.0.0").is_ok());
+        pair_fixture(&home, "v2.0.0", b"worker", b"helper")
+            .install()
+            .unwrap();
+        assert!(pair_fixture(&home, "v2.0.0", b"worker", b"different")
+            .install()
+            .is_err());
+        assert_eq!(
+            std::fs::read(home.join("workers/v2.0.0/coflux-transport")).unwrap(),
+            b"helper"
+        );
+        std::fs::remove_file(home.join("workers/v2.0.0/coflux-transport")).unwrap();
+        assert!(installed_worker_spec(home.to_str().unwrap(), "v2.0.0").is_err());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn pair_install_cannot_mutate_an_existing_worker_only_version() {
+        let home = test_home("legacy-pair");
+        let worker = b"worker";
+        stage_verified_bytes(&home, "v2.0.0", worker, Sha256::digest(worker).into())
+            .unwrap()
+            .install()
+            .unwrap();
+        assert!(pair_fixture(&home, "v2.0.0", worker, b"helper")
+            .install()
+            .is_err());
+        assert!(!home.join("workers/v2.0.0/coflux-transport").exists());
+        assert!(!home.join("workers/v2.0.0/transport-pair.json").exists());
+        assert_eq!(
+            std::fs::read(home.join("workers/v2.0.0/coflux-worker")).unwrap(),
+            worker
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
     #[test]
     fn staged_worker_only_appears_at_final_path_after_atomic_install() {
         let home = test_home("atomic-install");

@@ -464,6 +464,7 @@ dependencies = [
  "coflux-protocol",
  "futures-util",
  "hex",
+ "hmac",
  "if-addrs",
  "libc",
  "libproc",

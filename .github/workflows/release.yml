@@ -135,6 +135,15 @@ jobs:
         with:
           tool: cross
 
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: transport/tailcat/go.sum
+      - name: Build native transport and notices
+        env:
+          COFLUX_RELEASE_VERSION: ${{ github.ref_name }}
+        run: node scripts/build-transport.mjs ${{ matrix.target }} target/${{ matrix.target }}/release
+
       - name: 构建
         env:
           # supervisor 编译期版本注入（见 crates/supervisor/src/main.rs::SUPERVISOR_VERSION、build.rs）。
@@ -186,7 +195,7 @@ jobs:
 
           SIGN_ID="Developer ID Application: Shuaiqi Wang (${APPLE_TEAM_ID})"
           bin="target/${{ matrix.target }}/release"
-          for name in coflux-supervisor coflux-worker coflux; do
+          for name in coflux-supervisor coflux-worker coflux coflux-transport; do
             codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$bin/$name"
             ditto -c -k --keepParent "$bin/$name" "$RUNNER_TEMP/$name.zip"
             SUBMIT_OUT=$(xcrun notarytool submit "$RUNNER_TEMP/$name.zip" \
@@ -210,13 +219,16 @@ jobs:
           # worker 另保留 supervisor 热升级所需的原始二进制签名。
           cp "$bin/coflux-supervisor" "dist/coflux-supervisor-${{ matrix.target }}"
           cp "$bin/coflux-worker" "dist/coflux-worker-${{ matrix.target }}"
+          cp "$bin/coflux-transport" "dist/coflux-transport-${{ matrix.target }}"
+          cp "$bin/TRANSPORT-NOTICES.txt" "dist/coflux-transport-NOTICES-${{ matrix.target }}.txt"
+          cp "$bin/TRANSPORT-MODULES.txt" "dist/coflux-transport-MODULES-${{ matrix.target }}.txt"
           cp "$bin/coflux" "dist/coflux-cli-${{ matrix.target }}"
           # 独立 relay（plan 043，仅 linux 矩阵产出）：服务器节点手动部署，稳定命名同上
           if [ -f "$bin/coflux-relay" ]; then
             cp "$bin/coflux-relay" "dist/coflux-relay-${{ matrix.target }}"
           fi
           # tar.gz contains supervisor, worker and the native CLI for manual installation
-          tar -C "$bin" -czf "dist/coflux-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" coflux-supervisor coflux-worker coflux
+          tar -C "$bin" -czf "dist/coflux-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" coflux-supervisor coflux-worker coflux coflux-transport TRANSPORT-NOTICES.txt TRANSPORT-MODULES.txt
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

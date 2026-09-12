@@ -128,6 +128,7 @@ export type LocalSessionState = {
 };
 
 export type DeviceTransportOptions = {
+  nativeRemote?: import("./device-router").NativeRemoteTransport;
   /** 是否尝试 loopback direct；false 只使用中心 opaque relay。 */
   enableLocalTransport: boolean;
   identityDatabaseName: string;
@@ -483,6 +484,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
 
   let connection!: ReturnType<typeof createConnection>;
   const deviceRouter: DeviceRouter = createDeviceRouter({
+    nativeRemote: options.deviceTransport.nativeRemote,
     enableLocalTransport: options.deviceTransport.enableLocalTransport,
     identityDatabaseName: options.deviceTransport.identityDatabaseName,
     origin: options.deviceTransport.origin,

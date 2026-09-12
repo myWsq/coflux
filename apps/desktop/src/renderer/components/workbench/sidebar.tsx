@@ -535,7 +535,9 @@ export function Sidebar(props: SidebarProps) {
                 : transport?.mode === "p2p"
                   ? "P2P 直连"
                   : transport?.mode === "relay"
-                    ? "中心 relay"
+                    ? "中继连接"
+                    : transport?.mode === "remote"
+                      ? "远程连接"
                     : transport?.mode === "probing"
                       ? "正在探测"
                       : transport?.mode === "offline"
@@ -546,7 +548,7 @@ export function Sidebar(props: SidebarProps) {
               // 而不是并排两个图标；离线是空心圈。
               // 规则：状态差异走色相或形状，绝不走透明度（6px 圆点上 alpha 差肉眼等同）。
               const rttMs = transport?.rttMs;
-              const connected = transport?.mode === "direct" || transport?.mode === "p2p" || transport?.mode === "relay";
+              const connected = transport?.mode === "direct" || transport?.mode === "p2p" || transport?.mode === "relay" || transport?.mode === "remote";
               // tone 只管颜色，让圆点（bg-*）与闪电（text-*）共用同一套延迟分档。
               const tone = transport?.mode === "probing"
                 ? "primary"
@@ -572,7 +574,7 @@ export function Sidebar(props: SidebarProps) {
                 ? "text-success"
                 : tone === "warning" ? "text-warning" : "text-muted-foreground";
               // 形状语汇：direct=闪电、p2p=电波、relay=云。
-              const RouteIcon = transport?.mode === "direct" ? Zap : transport?.mode === "p2p" ? Radio : transport?.mode === "relay" ? Cloud : null;
+              const RouteIcon = transport?.mode === "direct" ? Zap : transport?.mode === "p2p" ? Radio : (transport?.mode === "relay" || transport?.mode === "remote") ? Cloud : null;
               const rttText = rttMs === undefined ? "" : ` · ${Math.round(rttMs)}ms`;
               // 挂在整行而非那个 12px 图标上：图标太小，只挂它等于挂了个瞄不准的靶子。
               // 用组件库 Tooltip 而非原生 title：原生要悬停约 1s 才弹，且弹出后内容不再随

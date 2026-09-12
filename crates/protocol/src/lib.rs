@@ -42,7 +42,7 @@ pub use frame::{
 };
 pub use ipc::{
     is_frame, write_record, RecordParseError, RecordParser, RecordWriteError, SessionInfo,
-    SupervisorToWorker, WorkerToSupervisor, MAX_IPC_RECORD_BYTES, SUPERVISOR_SOCK_ENV,
+    SupervisorToWorker, WorkerToSupervisor, TransportArtifact, MAX_IPC_RECORD_BYTES, SUPERVISOR_SOCK_ENV,
     SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
 };
 pub use wire::{DaemonToServer, FsEntry, FsEntryKind, ServerToDaemon, SessionPorts, SessionRef};

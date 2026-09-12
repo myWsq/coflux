@@ -20,11 +20,13 @@ coflux runs a **daemon** on any node. The daemon hosts local PTYs, drives agents
 - `packages/{protocol,core,client}` (TS): shared wire-protocol types, logging, and the protocol client/store. The client package has no React or Electron dependency and is the sole TS client source of truth. The `"web"` value in `ClientKind` remains part of the server contract for the frozen web client.
 - `integrations/claude-plugin`: the Claude Code plugin **delivery directory** (hooks, skill, and manifest). The `myWsq/plugins` marketplace (maintained in `myWsq/plugins-builder`) publishes the entire directory pinned by commit SHA. After changes, bump `.claude-plugin/plugin.json` and update the SHA in the builder. The skill's sole source is `packages/cli/skills/coflux/SKILL.md`; synchronize it here with `node scripts/sync-claude-plugin.mjs`. CI verifies that both copies match.
 - `packages/cli` and `crates/cli`: the unified CLI entry point for agents. Account login and operations across workspaces/devices use `/api/client/*`. The desktop-bundled CLI can reuse the app account through the local broker. MCP and its dedicated OAuth entry points have been removed.
-- `crates/{protocol,supervisor,worker}` (Rust): the **daemon, entirely Rust, with no Node runtime**.
+- `crates/{protocol,supervisor,worker}` (Rust): the **Rust daemon core, with no Node runtime**.
   - `supervisor`: owns PTYs (portable-pty), scrollback, and backpressure; serves UDS; starts, manages, and restarts the worker; switches versions and rolls back during the observation period. Upgraded rarely.
-  - `worker` (tokio): server WS connection, authentication and reconnection, git/exec/fs, and two-level resync. Upgraded frequently; hot upgrades replace only the worker, leaving PTYs alive in the supervisor.
+  - `worker` (tokio): server WS connection, authentication and reconnection, git/exec/fs, and two-level resync. Upgraded frequently; hot upgrades replace the worker and its paired transport helper, leaving PTYs alive in the supervisor.
   - See [docs/architecture.md](docs/architecture.md), [docs/hot-upgrade-design.md](docs/hot-upgrade-design.md), and [docs/ROADMAP.md](docs/ROADMAP.md).
   - Before changing desktop UI, read [docs/design-guidelines.md](docs/design-guidelines.md), including the requirement to use the Tooltip component instead of native `title` tooltips.
+
+- `transport/tailcat` (Go): the pinned Tailcat/Tailscale networking helper, built as `coflux-transport` with Go 1.27.1 and `CGO_ENABLED=0`. It is included with the worker in release artifacts, CLI installation, and Desktop bundles; end users need no Go toolchain. It owns no PTYs or business authority and communicates with its Rust worker or Electron-main owner through private inherited stdio. Tailcat remains an opt-in candidate: set `COFLUX_TAILCAT=1` in worker and Desktop-main environments and configure private DERP regions on the server. The default custom relay/WebRTC stack remains in place. Shipping the companion does not complete promotion or legacy retirement (M4); see [docs/tailcat-transport.md](docs/tailcat-transport.md).
 
 `cofluxd` is the headless device-host entry point, responsible only for installation, connectivity, and daemon lifecycle. `coflux` provides account and local/remote business operations. The npm `cofluxd` package ships both entry points. Desktop bundles the Rust `coflux` binary and adds it to terminal PATH. Neither entry point forwards legacy commands.
 
@@ -53,7 +55,7 @@ CI/releases: `.github/workflows/ci.yml` gates pushes and PRs; `release.yml` publ
 
 For production infrastructure (three machines, domain routing, deployment and rollback commands, and known pitfalls), see [docs/deployment.md](docs/deployment.md). **Read it before touching production.** Domains under coflux.dev mix proxied and DNS-only Cloudflare records, and Caddy on two machines also serves other projects.
 
-Prerequisites: Node 22+ (server and test tooling), pnpm, and Rust stable (`rustup`).
+Prerequisites: Node 22+ (server and test tooling), pnpm, and Rust stable (`rustup`). Building the bundled transport helper also requires Go 1.27.1.
 
 ## Change discipline
 

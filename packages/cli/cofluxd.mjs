@@ -17,7 +17,7 @@ import {
   assertReleaseVersion,
   compareReleaseVersions,
   createReleasePublicKey,
-  installStagedPair,
+  installNativeRelease,
   parseReleaseManifestEntry,
   verifyReleaseArtifact,
 } from "./release-trust.mjs";
@@ -254,7 +254,7 @@ async function resolveLatestTag() {
 async function ensureBinaries({ version, binDir, skipIfPresent }) {
   fs.mkdirSync(BIN_DIR, { recursive: true });
   if (binDir) {
-    const localArtifacts = ["coflux-supervisor", "coflux-worker", ...(fs.existsSync(join(binDir, "coflux")) ? ["coflux"] : [])].map((name) => ({
+    const localArtifacts = ["coflux-supervisor", "coflux-worker", ...(fs.existsSync(join(binDir, "coflux")) ? ["coflux"] : []), ...(fs.existsSync(join(binDir, "coflux-transport")) ? ["coflux-transport"] : [])].map((name) => ({
       name,
       path: join(binDir, name),
     }));
@@ -275,7 +275,12 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
         staged.push({ source, destination });
       }
       resignMacBinaries(staged.map(({ source }) => source));
-      installStagedPair(staged);
+      if (localArtifacts.some(artifact => artifact.name === "coflux-transport")) {
+        const source = join(stageDir, "TRANSPORT-NOTICES.txt");
+        fs.copyFileSync(join(binDir, "TRANSPORT-NOTICES.txt"), source);
+        staged.push({ source, destination: join(BIN_DIR, "TRANSPORT-NOTICES.txt") });
+      }
+      installNativeRelease(staged);
     } catch (error) {
       localFailure = error;
     } finally {
@@ -336,7 +341,7 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
     }
     const publicKey = loadReleasePublicKey();
     const staged = [];
-    for (const component of ["supervisor", "worker", ...(manifest.cli ? ["cli"] : [])]) {
+    for (const component of ["supervisor", "worker", ...(manifest.cli ? ["cli"] : []), ...(manifest.transport ? ["transport"] : [])]) {
       const entry = parseReleaseManifestEntry(manifest, component, releaseVersion, target);
       const artifactName = `coflux-${component}-${target}`;
       process.stdout.write(`下载并验签 ${artifactName} … `);
@@ -351,18 +356,25 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
       fs.chmodSync(source, 0o755);
       staged.push({
         source,
-        destination: component === "cli" ? join(BIN_DIR, "coflux") : component === "supervisor" ? SUP_BIN : WRK_BIN,
+        destination: component === "cli" ? join(BIN_DIR, "coflux") : component === "supervisor" ? SUP_BIN : component === "transport" ? join(BIN_DIR, "coflux-transport") : WRK_BIN,
       });
       console.log("✓");
     }
     // 两个远端产物均通过同一发布根的验签后，才允许做本地平台变换与替换。
     resignMacBinaries(staged.map(({ source }) => source));
+    if (manifest.transport) {
+      const source = join(stageDir, "TRANSPORT-NOTICES.txt");
+      const notices = await fetchBounded(`${base}/coflux-transport-NOTICES-${target}.txt`, 2 * 1024 * 1024, "native transport notices");
+      if (notices.length === 0) throw new Error("Native transport notices are empty");
+      fs.writeFileSync(source, notices, { mode: 0o644 });
+      staged.push({ source, destination: join(BIN_DIR, "TRANSPORT-NOTICES.txt") });
+    }
     // floor 先于 pair 提交：若其后进程崩溃，最多是旧二进制配更高 floor；重跑同版仍允许，
     // 但任何旧的合法 release 都不能趁窗口降级。
     if (!releaseFloor || compareReleaseVersions(releaseVersion, releaseFloor) > 0) {
       persistCliReleaseFloor(releaseVersion);
     }
-    installStagedPair(staged);
+    installNativeRelease(staged);
   } catch (error) {
     failure = error;
   } finally {

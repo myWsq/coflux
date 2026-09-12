@@ -553,6 +553,7 @@ impl Principal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransportKind {
     Local,
+    Tailcat,
     Relay,
     // P2P DataChannel（plan 076）。授权与生命周期语义与 Relay 相同（中心逐 channel 授
     // scopes、中心断开即全关），只是帧由 p2p 泵送往 DataChannel 而非 relay WS。
@@ -959,6 +960,18 @@ impl DeviceRuntime {
             grant.transport_generation,
             &grant.scopes,
         )
+    }
+
+    /// Admit only after the worker consumed a fresh central channel proof.
+    pub fn open_tailcat(self: &Arc<Self>, grant: &wire::DeviceTailcatGrant) -> Result<ChannelReceiver, String> {
+        self.open_remote(TransportKind::Tailcat, &grant.channel_id, &grant.account_id,
+            &grant.client_instance_id, grant.transport_generation, &grant.scopes)
+    }
+
+    pub fn close_tailcat(&self, channel_id: &str) { self.close_remote(TransportKind::Tailcat, channel_id); }
+    pub fn close_tailcats(&self) { self.close_remote_all(TransportKind::Tailcat); }
+    pub fn handle_tailcat_frame(self: &Arc<Self>, channel_id: &str, bytes: &[u8]) -> bool {
+        self.handle_remote_frame(TransportKind::Tailcat, channel_id, bytes)
     }
 
     fn open_remote(

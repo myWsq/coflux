@@ -74,6 +74,7 @@ import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
 import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
 import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, selectRelayNode, supportsP2pDial, supportsRelayDial, validRelayId } from "./relay-rendezvous.js";
+import { TailcatRendezvous, privateTailcatRegions } from "./tailcat-rendezvous.js";
 import { LocalControlPlane } from "./local-control.js";
 import { verifyPassword } from "./auth.js";
 import { AuthPages } from "./auth-pages.js";
@@ -472,6 +473,9 @@ export class Hub {
     },
   });
 
+  readonly tailcat = new TailcatRendezvous(privateTailcatRegions(), (id) => this.daemons.get(id),
+    (daemon, payload) => this.sendDaemon(daemon, payload), (client, payload) => this.sendClient(client, payload));
+
   constructor(private store: Store) {
     this.authPages = new AuthPages(this);
     this.localControl = new LocalControlPlane(
@@ -851,10 +855,11 @@ export class Hub {
       target: string;
       artifactSize: bigint;
       releaseSignature: string;
+      transport?: { url: string; sha256: string; size: bigint; releaseSignature: string };
     },
   ): boolean {
     const d = this.daemons.get(daemonId);
-    if (!d) return false;
+    if (!d || (payload.transport && !d.capabilities.has("transport_pair_v1"))) return false;
     return this.sendDaemon(d, { case: "workerUpgrade", value: payload });
   }
 
@@ -2069,6 +2074,26 @@ export class Hub {
         await this.reconcileDaemonSessions(daemon, sessions);
         break;
       }
+      case "deviceTailcatIdentity": {
+        const daemon = conn.daemonId ? this.daemons.get(conn.daemonId) : undefined;
+        if (daemon?.ws === conn.ws) this.tailcat.identity(daemon, msg.payload.value.nodePublicKey, msg.payload.value.transportVersion);
+        break;
+      }
+      case "deviceTailcatEndpoint": {
+        const daemon = conn.daemonId ? this.daemons.get(conn.daemonId) : undefined;
+        if (daemon?.ws === conn.ws) this.tailcat.endpoint(daemon, msg.payload.value.nodePublicKey, msg.payload.value.address, msg.payload.value.transportVersion);
+        break;
+      }
+      case "deviceTailcatOpened": {
+        const daemon=conn.daemonId?this.daemons.get(conn.daemonId):undefined;
+        if(daemon?.ws===conn.ws)this.tailcat.opened(daemon,msg.payload.value.channelId);
+        break;
+      }
+      case "deviceTailcatInstalled": {
+        const daemon = conn.daemonId ? this.daemons.get(conn.daemonId) : undefined;
+        if (daemon?.ws === conn.ws) this.tailcat.installed(daemon, msg.payload.value.channelId, msg.payload.value.ok);
+        break;
+      }
       case "deviceP2pAnswerReport": {
         const daemon = this.currentDaemon(conn);
         if (daemon) this.handleDeviceP2pAnswerReport(daemon.info.daemonId, msg.payload.value);
@@ -2570,6 +2595,7 @@ export class Hub {
       const current = this.daemons.get(daemonId);
       if (!current || current.ws !== conn.ws) return;
 
+      this.tailcat.removeDaemon(daemonId);
       this.daemons.delete(daemonId);
       this.catalog.delete(daemonId);
       // 中心发起的操作/读写请求随连接一起失去回执来源（plan 091）：以可读错误唤醒，不让 tool 白等。
@@ -2620,7 +2646,7 @@ export class Hub {
       case "clientLogout": {
         // 服务器侧撤销本连接的会话 token（不止清本地），撤销后该 token 重连即失败。
         await this.localControl.logout(client);
-        if (client.tokenHash) await this.store.revokeClientToken(client.tokenHash);
+        if (client.tokenHash) { await this.store.revokeClientToken(client.tokenHash); this.tailcat.revokeToken(client.accountId!, client.tokenHash); }
         client.ws.close(4001, "logout");
         break;
       }
@@ -2691,6 +2717,22 @@ export class Hub {
         await this.localControl.unpair(client, msg.payload.value);
         break;
       }
+      case "deviceTailcatConnect": {
+        this.tailcat.connect(client, msg.payload.value);
+        break;
+      }
+      case "deviceTailcatControl": {
+        this.tailcat.control(client,msg.payload.value.online,msg.payload.value.hardRevoke);
+        break;
+      }
+      case "deviceTailcatFailed": {
+        this.tailcat.failed(client, msg.payload.value.channelId);
+        break;
+      }
+      case "deviceTailcatClose": {
+        this.tailcat.closeChannel(client, msg.payload.value.channelId);
+        break;
+      }
       case "deviceRelayConnect": {
         this.handleDeviceRelayConnect(client, msg.payload.value);
         break;
@@ -2729,6 +2771,7 @@ export class Hub {
         if (!device || device.accountId !== client.accountId) return;
         const d = this.daemons.get(value.daemonId);
         if (!d) return void this.sendClient(client, { case: "error", value: { message: "daemon 不在线" } });
+        if (value.transport && !d.capabilities.has("transport_pair_v1")) return void this.sendClient(client, { case: "error", value: { message: "请先运行 cofluxd update，再显式重启 daemon 以更新 supervisor" } });
         this.sendDaemon(d, {
           case: "workerUpgrade",
           value: {
@@ -2739,6 +2782,7 @@ export class Hub {
             target: value.target,
             artifactSize: value.artifactSize,
             releaseSignature: value.releaseSignature,
+            transport: value.transport,
           },
         });
         log.info("worker upgrade dispatched", { daemonId: value.daemonId, version: value.version, download: !!value.url });
@@ -3364,6 +3408,7 @@ export class Hub {
 
   async revokeClientSession(accountId: AccountId, tokenHash: string): Promise<void> {
     await this.store.revokeClientToken(tokenHash);
+    this.tailcat.revokeToken(accountId, tokenHash);
     for (const client of this.clients) {
       if (client.accountId === accountId && client.tokenHash === tokenHash) {
         await this.localControl.logout(client);
@@ -3801,7 +3846,8 @@ export class Hub {
         } catch {
           /* ignore */
         }
-        this.daemons.delete(daemonId);
+        this.tailcat.removeDaemon(daemonId);
+      this.daemons.delete(daemonId);
       }
       this.catalog.delete(daemonId);
       this.daemonResyncAuthorities.delete(daemonId);
@@ -3817,6 +3863,7 @@ export class Hub {
   }
 
   handleClientClose(client: ClientConn): void {
+    this.tailcat.closeClient(client);
     this.clients.delete(client);
     client.snapshotBacklog = undefined;
     client.subscribed = false;
@@ -4212,6 +4259,7 @@ export class Hub {
     const daemons = [...this.daemons.values()];
     this.daemons.clear();
     this.catalog.clear();
+    this.tailcat.shutdown();
     this.localControl.shutdown();
     this.preparedOperations.shutdown();
     this.operationCompletions.failAll({ case: "failed", message: "中心正在关闭" });

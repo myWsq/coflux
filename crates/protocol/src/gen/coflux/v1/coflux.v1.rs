@@ -220,6 +220,18 @@ pub struct ProxyData {
     #[prost(bytes="vec", tag="2")]
     pub data: ::prost::alloc::vec::Vec<u8>,
 }
+/// Independently signed native companion for the exact enclosing worker release.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TransportArtifact {
+    #[prost(string, tag="1")]
+    pub url: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub sha256: ::prost::alloc::string::String,
+    #[prost(uint64, tag="3")]
+    pub size: u64,
+    #[prost(string, tag="4")]
+    pub release_signature: ::prost::alloc::string::String,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum TaskStatus {
@@ -286,6 +298,133 @@ impl FsEntryKind {
             _ => None,
         }
     }
+}
+/// Native Tailcat candidate transport. These messages are distinct from legacy
+/// relay URLs and WebRTC signaling; DeviceEnvelope remains unchanged.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatIdentity {
+    #[prost(string, tag="1")]
+    pub node_public_key: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub transport_version: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatConfigure {
+    #[prost(bytes="vec", tag="1")]
+    pub region_json: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag="2")]
+    pub transport_version: u32,
+    #[prost(string, tag="3")]
+    pub account_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="4")]
+    pub refresh_only: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatEndpoint {
+    #[prost(string, tag="1")]
+    pub node_public_key: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub address: ::prost::alloc::string::String,
+    #[prost(uint32, tag="3")]
+    pub transport_version: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatConnect {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="4")]
+    pub transport_generation: u64,
+    #[prost(uint32, tag="5")]
+    pub protocol_version: u32,
+    #[prost(string, tag="6")]
+    pub node_public_key: ::prost::alloc::string::String,
+    #[prost(enumeration="DeviceScope", tag="7")]
+    pub scope: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatGrant {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub account_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="5")]
+    pub transport_generation: u64,
+    #[prost(enumeration="DeviceScope", repeated, tag="6")]
+    pub scopes: ::prost::alloc::vec::Vec<i32>,
+    #[prost(uint64, tag="7")]
+    pub expires_at: u64,
+    #[prost(bytes="vec", tag="8")]
+    pub proof_key: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag="9")]
+    pub node_public_key: ::prost::alloc::string::String,
+    #[prost(uint32, tag="10")]
+    pub protocol_version: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatInstalled {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatResult {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub address: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bytes="vec", tag="4")]
+    pub proof_key: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag="5")]
+    pub expires_at: u64,
+    #[prost(enumeration="DeviceScope", repeated, tag="6")]
+    pub scopes: ::prost::alloc::vec::Vec<i32>,
+    #[prost(string, optional, tag="7")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatRevoke {
+    #[prost(string, repeated, tag="1")]
+    pub channel_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatClose {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+}
+/// Report only an actual native dial failure, never cancellation or auth failure.
+/// Central revocation of an opaque channel. Channel IDs are unique per attempt.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatClosed {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatFailed {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatOpened {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceTailcatControl {
+    #[prost(bool, tag="1")]
+    pub online: bool,
+    #[prost(bool, tag="2")]
+    pub hard_revoke: bool,
 }
 /// worker 在认证完成后通过独立 announce 上报持久 gateway identity。public_key_sec1 是 P-256
 /// uncompressed SEC1 point（65 bytes）；private key 永不离开 daemon。
@@ -1514,6 +1653,8 @@ pub struct ClientUpgradeDaemon {
     pub artifact_size: ::core::option::Option<u64>,
     #[prost(string, optional, tag="8")]
     pub release_signature: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag="9")]
+    pub transport: ::core::option::Option<TransportArtifact>,
 }
 /// 导入一个 git 仓库为 project（自动创建主工作区）
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1629,7 +1770,7 @@ pub struct OAuthAuthorizeDecide {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 34, 24, 35, 36, 37, 38, 39, 40")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 33, 34, 24, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -1692,6 +1833,14 @@ pub mod client_to_server {
         OauthAuthorizeDecide(super::OAuthAuthorizeDecide),
         #[prost(message, tag="40")]
         TaskRead(super::TaskRead),
+        #[prost(message, tag="41")]
+        DeviceTailcatConnect(super::DeviceTailcatConnect),
+        #[prost(message, tag="42")]
+        DeviceTailcatClose(super::DeviceTailcatClose),
+        #[prost(message, tag="43")]
+        DeviceTailcatControl(super::DeviceTailcatControl),
+        #[prost(message, tag="44")]
+        DeviceTailcatFailed(super::DeviceTailcatFailed),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -1877,7 +2026,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -1942,6 +2091,10 @@ pub mod server_to_client {
         OauthAuthorizeResult(super::OAuthAuthorizeResult),
         #[prost(message, tag="39")]
         TaskReadResult(super::TaskReadResult),
+        #[prost(message, tag="40")]
+        DeviceTailcatResult(super::DeviceTailcatResult),
+        #[prost(message, tag="41")]
+        DeviceTailcatClosed(super::DeviceTailcatClosed),
     }
 }
 // ===== Daemon → Server 载荷 =====
@@ -2311,7 +2464,7 @@ pub struct RelayHome {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -2369,6 +2522,14 @@ pub mod daemon_to_server {
         DeviceP2pAnswerReport(super::DeviceP2pAnswerReport),
         #[prost(message, tag="34")]
         ServerAgentResult(super::ServerAgentResult),
+        #[prost(message, tag="35")]
+        DeviceTailcatIdentity(super::DeviceTailcatIdentity),
+        #[prost(message, tag="36")]
+        DeviceTailcatEndpoint(super::DeviceTailcatEndpoint),
+        #[prost(message, tag="37")]
+        DeviceTailcatInstalled(super::DeviceTailcatInstalled),
+        #[prost(message, tag="38")]
+        DeviceTailcatOpened(super::DeviceTailcatOpened),
     }
 }
 // ===== 中心发起的终端读/写（plan 091）=====
@@ -2562,6 +2723,8 @@ pub struct WorkerUpgrade {
     pub artifact_size: ::core::option::Option<u64>,
     #[prost(string, optional, tag="7")]
     pub release_signature: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag="8")]
+    pub transport: ::core::option::Option<TransportArtifact>,
 }
 /// 设备重命名：server 通知 daemon 更新本地设备名称
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2644,7 +2807,7 @@ pub struct PreparedDeviceOperationExecute {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 33, 34, 19, 20, 35, 36, 37, 38, 39")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 33, 34, 19, 20, 35, 36, 37, 38, 39, 40, 41, 42")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -2709,6 +2872,12 @@ pub mod server_to_daemon {
         PreparedDeviceOperationExecute(super::PreparedDeviceOperationExecute),
         #[prost(message, tag="39")]
         ServerAgentRequest(super::ServerAgentRequest),
+        #[prost(message, tag="40")]
+        DeviceTailcatConfigure(super::DeviceTailcatConfigure),
+        #[prost(message, tag="41")]
+        DeviceTailcatGrant(super::DeviceTailcatGrant),
+        #[prost(message, tag="42")]
+        DeviceTailcatRevoke(super::DeviceTailcatRevoke),
     }
 }
 /// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD

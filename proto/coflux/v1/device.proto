@@ -8,6 +8,81 @@ package coflux.v1;
 
 import "coflux/v1/common.proto";
 
+// Native Tailcat candidate transport. These messages are distinct from legacy
+// relay URLs and WebRTC signaling; DeviceEnvelope remains unchanged.
+message DeviceTailcatIdentity {
+  string node_public_key = 1;
+  uint32 transport_version = 2;
+}
+message DeviceTailcatConfigure {
+  bytes region_json = 1;
+  uint32 transport_version = 2;
+  string account_id = 3;
+  bool refresh_only = 4;
+}
+message DeviceTailcatEndpoint {
+  string node_public_key = 1;
+  string address = 2;
+  uint32 transport_version = 3;
+}
+message DeviceTailcatConnect {
+  string daemon_id = 1;
+  string channel_id = 2;
+  string client_instance_id = 3;
+  uint64 transport_generation = 4;
+  uint32 protocol_version = 5;
+  string node_public_key = 6;
+  DeviceScope scope = 7;
+}
+message DeviceTailcatGrant {
+  string channel_id = 1;
+  string account_id = 2;
+  string daemon_id = 3;
+  string client_instance_id = 4;
+  uint64 transport_generation = 5;
+  repeated DeviceScope scopes = 6;
+  uint64 expires_at = 7;
+  bytes proof_key = 8;
+  string node_public_key = 9;
+  uint32 protocol_version = 10;
+}
+message DeviceTailcatInstalled {
+  string channel_id = 1;
+  bool ok = 2;
+}
+message DeviceTailcatResult {
+  string channel_id = 1;
+  bool ok = 2;
+  optional string address = 3;
+  bytes proof_key = 4;
+  uint64 expires_at = 5;
+  repeated DeviceScope scopes = 6;
+  optional string error = 7;
+}
+message DeviceTailcatRevoke {
+  repeated string channel_ids = 1;
+}
+message DeviceTailcatClose {
+  string channel_id = 1;
+}
+// Report only an actual native dial failure, never cancellation or auth failure.
+// Central revocation of an opaque channel. Channel IDs are unique per attempt.
+message DeviceTailcatClosed {
+  string channel_id = 1;
+}
+
+message DeviceTailcatFailed {
+  string channel_id = 1;
+}
+message DeviceTailcatOpened {
+  string channel_id = 1;
+}
+message DeviceTailcatControl {
+  bool online = 1;
+  bool hard_revoke = 2;
+}
+
+
 // Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
 // 常量；wire 握手必须显式带版本，所有 cols/rows 在 authority 边界钳制为 [1, 1000]。
 // 本文件全部 created_at/started_at/exited_at/captured_at/expires_at 均为 Unix epoch milliseconds。

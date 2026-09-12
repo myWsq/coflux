@@ -1,3 +1,4 @@
+import type { NativeTransportBridge } from "./native-transport";
 /**
  * 桌面桥接的类型真相源（plan 106）：preload 经 contextBridge 把实现挂到 `window.cofluxDesktop`，
  * 渲染层假定它必定存在（缺失即启动期报错，见 renderer/desktop-bridge.ts）。主进程 / preload / 渲染层
@@ -75,6 +76,7 @@ export type DesktopNotification = {
 };
 
 export type DesktopBridge = {
+  readonly nativeTransport?: NativeTransportBridge;
   readonly platform: string;
   /** app 版本（package.json version），与渲染层的 BUILD_ID 是两个维度 */
   readonly version: string;

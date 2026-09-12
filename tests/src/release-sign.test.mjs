@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 
 import {
   cliReleaseStatement,
+  transportReleaseStatement,
   supervisorReleaseStatement,
   workerReleaseStatement,
 } from "../../scripts/release-statement.mjs";
@@ -33,6 +34,7 @@ test("release-sign 为 worker/supervisor 产生相互隔离且绑定元数据的
     writeFileSync(join(dir, workerName), workerArtifact);
     writeFileSync(join(dir, supervisorName), supervisorArtifact);
     writeFileSync(join(dir, `coflux-cli-${target}`), workerArtifact);
+    writeFileSync(join(dir, `coflux-transport-${target}`), workerArtifact);
     const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
     const pem = privateKey.export({ format: "pem", type: "pkcs8" });
 
@@ -51,6 +53,10 @@ test("release-sign 为 worker/supervisor 产生相互隔离且绑定元数据的
     verifyReleaseArtifact({component:"cli",version:manifest.version,entry:cliEntry,data:workerArtifact,publicKey});
     assert.equal(crypto.verify(null, cliReleaseStatement({version:manifest.version,...cliEntry}), publicKey, Buffer.from(cliEntry.releaseSignature,"hex")), true);
     assert.throws(() => verifyReleaseArtifact({component:"worker",version:manifest.version,entry:cliEntry,data:workerArtifact,publicKey}));
+    const helperEntry = parseReleaseManifestEntry(manifest, "transport", manifest.version, target);
+    verifyReleaseArtifact({component:"transport",version:manifest.version,entry:helperEntry,data:workerArtifact,publicKey});
+    assert.equal(crypto.verify(null, transportReleaseStatement({version:manifest.version,...helperEntry}),publicKey,Buffer.from(helperEntry.releaseSignature,"hex")),true);
+    assert.throws(() => verifyReleaseArtifact({component:"cli",version:manifest.version,entry:helperEntry,data:workerArtifact,publicKey}));
     const entry = manifest.worker[target];
     const supervisorEntry = manifest.supervisor[target];
     assert.equal(manifest.schemaVersion, 2);
@@ -141,6 +147,7 @@ test("release-sign 缺少同 target supervisor 时 fail closed", () => {
   const dir = mkdtempSync(join(tmpdir(), "coflux-release-sign-incomplete-"));
   try {
     writeFileSync(join(dir, "coflux-worker-x86_64-unknown-linux-musl"), "worker");
+    writeFileSync(join(dir, "coflux-transport-x86_64-unknown-linux-musl"), "helper");
     const { privateKey } = crypto.generateKeyPairSync("ed25519");
     assert.throws(
       () => execFileSync(
@@ -308,4 +315,14 @@ test("staged pair 第二项替换失败时恢复第一项旧版本", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+test("release-sign refuses an entire missing transport component", () => {
+  const dir = mkdtempSync(join(tmpdir(), "coflux-release-no-helper-"));
+  try {
+    for (const component of ["worker", "supervisor", "cli"]) writeFileSync(join(dir, `coflux-${component}-x86_64-unknown-linux-musl`), component);
+    const { privateKey } = crypto.generateKeyPairSync("ed25519");
+    assert.throws(() => execFileSync(process.execPath, [join(ROOT, "scripts/release-sign.mjs"), dir, "v2.0.0"], {env: {...process.env, GITHUB_REPOSITORY: "acme/coflux", WORKER_SIGNING_KEY: privateKey.export({format:"pem",type:"pkcs8"})},stdio:"pipe"}),error => error.status === 1 && /mandatory native transport/.test(error.stderr.toString()));
+  } finally { rmSync(dir,{recursive:true,force:true}); }
 });

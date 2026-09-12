@@ -21,6 +21,9 @@ mod ports;
 mod relay_dial;
 mod relay_home;
 mod session_ledger;
+mod tailcat;
+mod tailcat_auth;
+mod tailcat_ipc;
 mod tunnel;
 mod workspace_match;
 mod worktree_locate;
@@ -129,10 +132,9 @@ const CAPABILITY_PREPARED_EXECUTE: &str = "prepared_execute";
 const CAPABILITY_TERMINAL_IO: &str = "terminal_io";
 
 fn daemon_capabilities() -> Vec<String> {
-    vec![
-        CAPABILITY_PREPARED_EXECUTE.to_string(),
-        CAPABILITY_TERMINAL_IO.to_string(),
-    ]
+    let mut capabilities = vec![CAPABILITY_PREPARED_EXECUTE.to_string(), CAPABILITY_TERMINAL_IO.to_string()];
+    if std::env::var("COFLUX_TRANSPORT_PAIR").as_deref() == Ok("1") { capabilities.push("transport_pair_v1".into()); }
+    capabilities
 }
 
 #[derive(Clone)]
@@ -528,6 +530,16 @@ async fn worker_main() {
         connect_timeout_ms: env_u64("COFLUX_CONNECT_TIMEOUT_MS", 15_000),
         local_gateway_port: env_u16("COFLUX_LOCAL_GATEWAY_PORT", LOCAL_GATEWAY_PORT),
     });
+    let release_requires_transport = option_env!("COFLUX_RELEASE_VERSION").is_some_and(|version| version.starts_with('v')) || std::env::var("COFLUX_TRANSPORT_REQUIRED").as_deref() == Ok("1");
+    if release_requires_transport {
+        if std::env::var("COFLUX_TRANSPORT_PAIR").as_deref() != Ok("1") {
+            logln!("[worker] native companion requires a newer supervisor; run cofluxd update, then explicitly restart the daemon");
+            std::process::exit(1);
+        }
+        let path = std::env::current_exe().ok().and_then(|path| path.parent().map(|dir| dir.join("coflux-transport")));
+        let result = match path { Some(path) => tailcat_ipc::Helper::spawn(&path).await, None => Err("transport path unavailable".into()) };
+        match result { Ok((helper, _, _)) => helper.close(), Err(_) => { logln!("[worker] local native companion handshake failed; refusing candidate startup"); std::process::exit(1); } }
+    }
     if cfg.sock_path.is_empty() {
         logln!("[worker] 缺少 {SUPERVISOR_SOCK_ENV}");
         std::process::exit(1);
@@ -603,6 +615,7 @@ async fn worker_main() {
     );
     // P2P runtime 跨重连存活（plan 076）；每次中心断开 close_all 清空全部 PeerConnection。
     let p2p = p2p::P2pRuntime::new(device.clone(), to_server_tx.clone());
+    let tailcat = tailcat::TailcatRuntime::new(device.clone());
 
     // hook 事件通道：gateway 收 POST /hook 解析后经此转交，消费侧做 pid→session 反查与上报。
     // gateway 未起（无 local_auth）时 tx 直接掉落，消费任务随之退出。
@@ -805,6 +818,7 @@ async fn worker_main() {
         device,
         relay_home,
         p2p,
+        tailcat,
     )
     .await;
 }
@@ -1121,6 +1135,7 @@ async fn server_loop(
     device: Arc<device::DeviceRuntime>,
     relay_home: relay_home::RelayHomeSelector,
     p2p: Arc<p2p::P2pRuntime>,
+    tailcat: Arc<tailcat::TailcatRuntime>,
 ) {
     let mut attempts: u32 = 0;
     let mut connection_epoch = 0u64;
@@ -1158,6 +1173,7 @@ async fn server_loop(
                     &device,
                     &relay_home,
                     &p2p,
+                    &tailcat,
                 )
                 .await;
             }
@@ -1180,6 +1196,7 @@ async fn server_loop(
         }
         device.close_relays();
         p2p.close_all();
+        tailcat.close_all();
         relay_home.clear();
         attempts += 1;
         tokio::time::sleep(backoff(attempts, &cfg)).await;
@@ -1205,6 +1222,7 @@ async fn run_server_connection(
     device: &Arc<device::DeviceRuntime>,
     relay_home: &relay_home::RelayHomeSelector,
     p2p: &Arc<p2p::P2pRuntime>,
+    tailcat: &Arc<tailcat::TailcatRuntime>,
 ) {
     let (mut sink, mut stream) = ws.split();
     let write_timeout = Duration::from_millis(cfg.idle_grace_ms.max(1_000));
@@ -1218,6 +1236,7 @@ async fn run_server_connection(
     }
     device.close_relays();
     p2p.close_all();
+    tailcat.close_all();
     // 隧道状态绑定单次 server 连接生命周期：不跨重连恢复（浏览器侧 TCP 早已断，恢复无意义）
     let tunnels = tunnel::TunnelSet::new(to_server_tx.clone());
 
@@ -1321,6 +1340,9 @@ async fn run_server_connection(
                     if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; }
                 }
             }
+            report = tailcat.next_report(), if connection_authed => {
+                if !send_server_ws(&mut sink, Message::binary(report), write_timeout).await { break; }
+            }
             out = to_server_rx.recv(), if connection_authed => {
                 match out {
                     Some(bytes) => if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; },
@@ -1402,6 +1424,7 @@ async fn run_server_connection(
                             device,
                             relay_home,
                             p2p,
+        tailcat,
                             resyncs,
                         ).await;
                     }
@@ -1436,6 +1459,7 @@ async fn on_server_message(
     device: &Arc<device::DeviceRuntime>,
     relay_home: &relay_home::RelayHomeSelector,
     p2p: &Arc<p2p::P2pRuntime>,
+    tailcat: &Arc<tailcat::TailcatRuntime>,
     resyncs: &Arc<ResyncOutbox>,
 ) {
     let envelope = match wire::ServerToDaemon::decode(bytes) {
@@ -1477,6 +1501,9 @@ async fn on_server_message(
             }
             logln!("[worker] enrolled {daemon_id}");
             on_authed(state, to_server_tx, local_auth, device, resyncs).await;
+            if let Some(daemon) = state.lock().unwrap().daemon_id.clone() {
+                tailcat.start(daemon);
+            }
         }
         server_to_daemon::Payload::DaemonAuthed(wire::DaemonAuthed { daemon_id }) => {
             logln!("[worker] authenticated {daemon_id}");
@@ -1493,7 +1520,13 @@ async fn on_server_message(
                 device.close_local_channels();
             }
             on_authed(state, to_server_tx, local_auth, device, resyncs).await;
+            if let Some(daemon) = state.lock().unwrap().daemon_id.clone() {
+                tailcat.start(daemon);
+            }
         }
+        server_to_daemon::Payload::DeviceTailcatConfigure(value) => tailcat.configure(value),
+        server_to_daemon::Payload::DeviceTailcatGrant(value) => tailcat.grant(value),
+        server_to_daemon::Payload::DeviceTailcatRevoke(value) => tailcat.revoke(value.channel_ids),
         server_to_daemon::Payload::DaemonAuthorizePending(wire::DaemonAuthorizePending {
             url,
             expires_at,
@@ -1861,7 +1894,11 @@ async fn route_authed(
             target,
             artifact_size,
             release_signature,
+            transport,
         }) => {
+            if transport.is_some() && std::env::var("COFLUX_TRANSPORT_PAIR").as_deref() != Ok("1") {
+                logln!("[worker] paired upgrade requires explicit supervisor bootstrap"); return;
+            }
             sup_ctrl(
                 to_sup_tx,
                 &WorkerToSupervisor::WorkerUpgrade {
@@ -1872,6 +1909,7 @@ async fn route_authed(
                     target,
                     artifact_size,
                     release_signature,
+                    transport: transport.map(|value| coflux_protocol::TransportArtifact { url: value.url, sha256: value.sha256, size: value.size, release_signature: value.release_signature }),
                 },
             )
             .await;

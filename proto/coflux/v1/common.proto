@@ -167,3 +167,12 @@ message ProxyData {
   string conn_id = 1;
   bytes data = 2;
 }
+
+
+// Independently signed native companion for the exact enclosing worker release.
+message TransportArtifact {
+  string url = 1;
+  string sha256 = 2;
+  uint64 size = 3;
+  string release_signature = 4;
+}

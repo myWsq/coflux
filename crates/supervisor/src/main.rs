@@ -428,6 +428,7 @@ fn dispatch(
             target,
             artifact_size,
             release_signature,
+            transport,
         } => match url {
             // 带 url：下载 + 验签（线程内），通过才切换
             Some(url) => manager.install_from_url(
@@ -438,6 +439,7 @@ fn dispatch(
                 target.unwrap_or_default(),
                 artifact_size.unwrap_or_default(),
                 release_signature.unwrap_or_default(),
+                transport,
             ),
             // 不带 url：本地已知版本切换
             None => manager.switch_worker(version),

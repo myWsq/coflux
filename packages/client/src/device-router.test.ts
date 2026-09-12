@@ -265,7 +265,7 @@ async function flush(rounds = 12): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await Promise.resolve();
 }
 
-function harness(adapter = new FakeAdapter(grant()), clock = new FakeClock()) {
+function harness(adapter = new FakeAdapter(grant()), clock = new FakeClock(), native = false) {
   const states: DeviceTransportState[] = [];
   const snapshots: Uint8Array[] = [];
   const outputs: Uint8Array[] = [];
@@ -275,6 +275,7 @@ function harness(adapter = new FakeAdapter(grant()), clock = new FakeClock()) {
   let uuid = 0;
   const router = createDeviceRouter({
     enableLocalTransport: true,
+    nativeRemote: native ? { open: (options) => adapter.openRelay(options), control: () => {}, close: () => {} } : undefined,
     identityDatabaseName: "unused-test-db",
     origin: "https://p.coflux.dev",
     sendControl: () => undefined,
@@ -1567,4 +1568,23 @@ test("中心授权 hard revoke 时 active P2P channel 立即失效，不等对�
   assert.equal(p2p.closed, true, "明确授权失效必须立即关闭 P2P channel");
   assert.notEqual(h.states.at(-1)?.mode, "p2p");
   h.router.destroy();
+});
+
+
+test("native sidebar measurement stays idle and demand never starts WebRTC", async () => {
+  const adapter = new P2pFakeAdapter();
+  const h = harness(adapter, new FakeClock(), true);
+  h.router.setControlOnline(true);
+  const releaseMeasure = h.router.retainDevice("daemon-1", { measureOnly: true });
+  await flush(); h.clock.advance(60_000); await flush();
+  assert.equal(adapter.opens.length, 0);
+  const releaseDemand = h.router.retainDevice("daemon-1");
+  await flush(); h.clock.advance(250); await flush();
+  assert.equal(adapter.opens.filter(call => call.kind === "p2p").length, 0);
+  assert.equal(adapter.opens.filter(call => call.kind === "relay").length, 1);
+  const active = latestOpen(adapter, "relay"); adapter.resolve(active); await flush();
+  releaseDemand(); await flush(); assert.equal(active.closed, true);
+  const count = adapter.opens.length; h.clock.advance(60_000); await flush();
+  assert.equal(adapter.opens.length, count, "idle measurement must not reconnect native devices");
+  releaseMeasure(); h.router.destroy();
 });

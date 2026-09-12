@@ -303,6 +303,10 @@ message DaemonToServer {
     AgentControlRequest agent_control_request = 32;
     DeviceP2pAnswerReport device_p2p_answer_report = 33;
     ServerAgentResult server_agent_result = 34;
+    DeviceTailcatIdentity device_tailcat_identity = 35;
+    DeviceTailcatEndpoint device_tailcat_endpoint = 36;
+    DeviceTailcatInstalled device_tailcat_installed = 37;
+    DeviceTailcatOpened device_tailcat_opened = 38;
   }
 }
 
@@ -436,6 +440,7 @@ message WorkerUpgrade {
   optional string target = 5;
   optional uint64 artifact_size = 6;
   optional string release_signature = 7;
+  TransportArtifact transport = 8;
 }
 
 // 设备重命名：server 通知 daemon 更新本地设备名称
@@ -530,6 +535,9 @@ message ServerToDaemon {
     DeviceP2pChannelGrant device_p2p_channel_grant = 37;
     PreparedDeviceOperationExecute prepared_device_operation_execute = 38;
     ServerAgentRequest server_agent_request = 39;
+    DeviceTailcatConfigure device_tailcat_configure = 40;
+    DeviceTailcatGrant device_tailcat_grant = 41;
+    DeviceTailcatRevoke device_tailcat_revoke = 42;
   }
 }
 

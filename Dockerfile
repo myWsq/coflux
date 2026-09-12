@@ -1,9 +1,13 @@
 # coflux 测试/验收用隔离环境：node22 + rust + pnpm + 源码。
 # 整套（server + Rust daemon + 黑盒测试 + 临时 HTTP 产物 server）都在容器内跑，宿主零改动。
 # 源码 COPY 进镜像构建（非挂载）→ 宿主工作树不会被写入 target/ 或 node_modules/。
+FROM golang:1.27.1-bookworm AS transport-go
 FROM node:22-bookworm
+COPY --from=transport-go /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+ENV CGO_ENABLED=0 GOTOOLCHAIN=go1.27.1
 
-RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates postgresql \
+RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates postgresql openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust toolchain（minimal）
@@ -17,7 +21,9 @@ WORKDIR /work
 COPY . .
 RUN pnpm install --frozen-lockfile \
     && cargo build -p coflux-supervisor -p coflux-worker \
+    && (cd transport/tailcat && go test ./... && go build -mod=readonly -o ../../target/debug/coflux-transport ./cmd/coflux-transport && go build -mod=readonly -o ../../target/debug/coflux-test-derper tailscale.com/cmd/derper) \
     && chmod +x scripts/docker-test-entrypoint.sh
+ENV COFLUX_TEST_TAILCAT=1 COFLUX_TEST_DERPER_BIN=/work/target/debug/coflux-test-derper
 
 # 每次容器启动都在自身临时目录拉起 loopback Postgres；测试建出的 database 与进程随容器销毁。
 ENTRYPOINT ["/work/scripts/docker-test-entrypoint.sh"]

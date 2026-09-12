@@ -25,6 +25,7 @@ export {
   type WorkspaceActivity,
 } from "./store";
 export {
+  type NativeRemoteTransport,
   type DeviceInputState,
   type DeviceTransportMode,
   type DeviceTransportState,

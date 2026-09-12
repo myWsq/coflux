@@ -1,14 +1,14 @@
 # Release process
 
-Desktop, CLI, and runtime components share one product version. The runtime consists of `coflux-supervisor` (which owns terminals) and `coflux-worker` (which supports hot upgrades). Desktop hosts the runtime directly; on headless devices, `cofluxd` manages the system service, while `coflux` handles business operations.
+Desktop, CLI, and runtime components share one product version. The runtime consists of `coflux-supervisor` (which owns terminals), `coflux-worker`, and its paired Go `coflux-transport` companion. Worker/helper pairs support hot upgrades. The companion is bundled for all targets, but Tailcat networking remains opt-in through `COFLUX_TAILCAT=1`; the default custom relay/WebRTC stack is retained. Desktop hosts the runtime directly; on headless devices, `cofluxd` manages the system service, while `coflux` handles business operations.
 
 A release builds runtime and desktop from one tag, signs and notarizes them, publishes a complete GitHub Release, advances the desktop update feed, and publishes npm packages at the same version. The Release includes `manifest.json`, which the server uses to dispatch worker upgrades and cofluxd uses to verify installation artifacts.
 
 ## One-time setup: signing keys
 
-Daemon artifacts are signed with an ed25519 release private key. Workers retain both a raw-binary signature for rolling compatibility with older supervisors and a domain-separated release statement. Supervisors and native CLIs have their own statement domains. All statements bind the version, Rust target, SHA-256, and artifact size; separate domains isolate components.
+Daemon artifacts are signed with an ed25519 release private key. Workers retain both a raw-binary signature for rolling compatibility with older supervisors and a domain-separated release statement. Supervisors, native CLIs, and transport helpers have their own statement domains. All statements bind the version, Rust target, SHA-256, and artifact size; separate domains isolate components.
 
-The supervisor verifies worker hot upgrades. The npm package's cofluxd uses the same public key to verify supervisor, worker, and the native CLI before installation. This separates release authority from the center/download source: without the private key, an attacker can neither replace artifacts nor relabel valid artifacts as another component, version, or architecture. This is not a sandbox for the central control plane, which already has exec/session orchestration capabilities.
+The supervisor verifies worker hot upgrades. The npm package's cofluxd uses the same public key to verify supervisor, worker, native CLI, and transport helper before installation. This separates release authority from the center/download source: without the private key, an attacker can neither replace artifacts nor relabel valid artifacts as another component, version, or architecture. This is not a sandbox for the central control plane, which already has exec/session orchestration capabilities.
 
 ```sh
 node scripts/gen-keypair.mjs
@@ -88,17 +88,18 @@ git push origin refs/tags/v1.2.3
 
 A `v*` tag triggers `.github/workflows/release.yml`:
 
-1. **Build matrix**: cross-compile supervisor, worker, and the native CLI for `x86_64`/`aarch64` linux-musl (static, using `cross`) and native macOS `aarch64`/`x86_64`. Linux builds also produce the standalone `coflux-relay` for server nodes (plan 043); macOS builds do not.
-2. **Sign and generate manifests** with `scripts/release-sign.mjs` and `WORKER_SIGNING_KEY`. The signing job has only `contents:read`, separate from the final GitHub Release job with `contents:write`. Each `coflux-worker-<target>` receives a legacy raw-binary signature and worker release-statement signature; each `coflux-supervisor-<target>` receives a supervisor release-statement signature. The exact worker transcript is `"coflux-worker-release-v1\0" || BE32(len(version)) || version || BE32(len(target)) || target || sha256(raw 32B) || size(BE64)`. The supervisor substitutes domain `"coflux-supervisor-release-v1\0"`, and the native CLI uses `"coflux-cli-release-v1\0"`; other fields are identical. `version` and `target` use UTF-8. URLs are replaceable download locations, not release identity, and are unsigned. Relay artifacts are unsigned because deployment is manual over SSH rather than automatic download/verification; they appear in `SHA256SUMS` for deployment checks.
+1. **Build matrix**: cross-compile supervisor, worker, and the native CLI for `x86_64`/`aarch64` linux-musl (static, using `cross`) and native macOS `aarch64`/`x86_64`. Build the CGO-free transport companion for all four targets with pinned Go 1.27.1. Linux builds also produce the standalone `coflux-relay` for server nodes (plan 043); macOS builds do not.
+2. **Sign and generate manifests** with `scripts/release-sign.mjs` and `WORKER_SIGNING_KEY`. The signing job has only `contents:read`, separate from the final GitHub Release job with `contents:write`. Each `coflux-worker-<target>` receives a legacy raw-binary signature and worker release-statement signature; each `coflux-supervisor-<target>` receives a supervisor release-statement signature. The exact worker transcript is `"coflux-worker-release-v1\0" || BE32(len(version)) || version || BE32(len(target)) || target || sha256(raw 32B) || size(BE64)`. The supervisor substitutes domain `"coflux-supervisor-release-v1\0"`, the native CLI uses `"coflux-cli-release-v1\0"`, and the companion uses `"coflux-transport-release-v1\0"`; other fields are identical. `version` and `target` use UTF-8. URLs are replaceable download locations, not release identity, and are unsigned. Relay artifacts are unsigned because deployment is manual over SSH rather than automatic download/verification; they appear in `SHA256SUMS` for deployment checks.
 3. **Generate English release notes** with `scripts/release-notes.mjs`. Before release, write and commit `docs/releases/X.Y.Z.md`, beginning with `# Coflux X.Y.Z` and explaining user benefits, installation, and upgrade implications. CI checks the matching version file, English text, and unfinished placeholders. Publication reads the file from the exact tag and appends a compare link; commit messages are no longer copied into the public changelog.
 4. **Build desktop** through `desktop-release.yml`, signing, notarizing, and checking artifacts at the same SHA.
 5. **Publish one unified Release**, only after runtime and desktop both succeed, containing:
    - Desktop dmg/zip/blockmap and `latest-mac.yml`.
    - `coflux-worker-<target>` raw binaries plus `.sig` (legacy raw) and `.release.sig` (release statement).
    - `coflux-supervisor-<target>` and `coflux-cli-<target>` plus `.release.sig`, verified by cofluxd before installation.
+   - `coflux-transport-<target>` plus `.release.sig`, and transport dependency notices.
    - `coflux-relay-<linux-target>` for standalone relay-node deployment; see [deployment.md](deployment.md).
-   - `coflux-<tag>-<target>.tar.gz` with supervisor, worker, and `coflux` for manual installation.
-   - Schema 2 `manifest.json`: top-level `version`; per-target `worker` / `supervisor` / `cli` entries with `url`, `target`, `sha256`, `size`, and `releaseSignature`; workers also include legacy `signature`. Also `SHA256SUMS`.
+   - `coflux-<tag>-<target>.tar.gz` with supervisor, worker, `coflux`, transport helper, and notices for manual installation.
+   - Schema 2 `manifest.json`: top-level `version`; per-target `worker` / `supervisor` / `cli` / `transport` entries with `url`, `target`, `sha256`, `size`, and `releaseSignature`; workers also include legacy `signature`. Also `SHA256SUMS`.
 
 > **P2 / TODO: npm old-run idempotency versus fail-closed behavior.** `npm-publish-guard.mjs` strictly validates registry `dist-tags.latest` and its corresponding version entries before checking whether the requested version already exists. If latest is missing/corrupt, an old run fails even when its exact version exists, rather than skipping idempotently. This is intentional fail-closed behavior: the guard lacks reliable context proving it is only an old-release replay. Moving the exact-existing check ahead of latest validation could silently accept a new CLI release when registry state is invalid. Diagnose/repair npm latest manually first; relax this only after adding verifiable rerun context and corresponding negative tests.
 
@@ -110,13 +111,13 @@ A `v*` tag triggers `.github/workflows/release.yml`:
 
 Advance `desktop-updates` only after the complete GitHub Release succeeds; npm follows through Trusted Publishing. These systems do not form an atomic transaction: retry the failed step, and never infer npm publication solely from GitHub Release success. Prereleases do not update the stable desktop feed or npm latest. The feed rejects version regression and content changes for an existing version.
 
-### Bundled daemon (plan 113): desktop releases include Rust builds
+### Bundled daemon: desktop releases include Rust components and the Go helper
 
-The app bundles `coflux-supervisor`, `coflux-worker`, and Rust `coflux` under `Contents/Resources/daemon/`, preparing the local device automatically after login. Users no longer need Node or npm cofluxd. The reusable workflow runs its `daemon` job before packaging/signing, building from the same SHA:
+The app bundles `coflux-supervisor`, `coflux-worker`, Rust `coflux`, and Go `coflux-transport` under `Contents/Resources/daemon/`, preparing the local device automatically after login. Users no longer need Node or npm cofluxd. The reusable workflow runs its `daemon` job before packaging/signing, building from the same SHA:
 
 `cargo build --release --target aarch64-apple-darwin -p coflux-supervisor -p coflux-worker -p coflux-cli`
 
-It uses `RUSTFLAGS=-D warnings` without `release-signing` or secrets. Artifacts pass to the packaging job; `scripts/stage-daemon.mjs` installs them under `build/daemon/` and restores mode 0755, since artifact transfer does not retain executable bits. electron-builder's `mac.binaries` applies Developer ID signing and hardened runtime to all three and includes them in notarization. Verification checks existence, `codesign --verify --strict`, and `Authority=Developer ID Application` for each.
+The workflow also runs `scripts/build-transport.mjs` for the same target and version, producing the helper and dependency notices. Rust builds use `RUSTFLAGS=-D warnings` without `release-signing` or secrets. Artifacts pass to the packaging job; `scripts/stage-daemon.mjs` installs them under `build/daemon/` and restores mode 0755, since artifact transfer does not retain executable bits. electron-builder's `mac.binaries` applies Developer ID signing and hardened runtime to all four executables and includes them in notarization. Verification checks existence, `codesign --verify --strict`, and `Authority=Developer ID Application` for each.
 
 - **Version stamp**: `COFLUX_RELEASE_VERSION=vX.Y.Z`, exactly matching the product tag, also written to the `VERSION` sidecar. The bundled worker no longer uses a lower bootstrap version. Unified versions do not force an immediate restart of a supervisor holding terminals.
 - **Updates**: the main app launches runtime components with their original signatures; copying no longer triggers ad-hoc resigning. Components live in stable content-addressed directories. Normal app updates reconnect to the live instance and replace the CLI separately. Runtime updates require user-confirmed restart after tasks finish, without launchctl.
@@ -150,8 +151,17 @@ Local smoke testing: `pnpm -C apps/desktop run pack` produces unsigned `apps/des
 
 ## How upgrades are applied
 
+Paired updates require a supervisor advertising `transport_pair_v1`. Devices
+without that capability must first install the complete release with
+`cofluxd update` and explicitly restart the daemon when live terminals can be
+stopped. Subsequent worker/helper updates preserve supervisor PTYs. Both
+artifacts must verify before their complete immutable version directory is
+published; candidate startup also requires a matching local helper handshake.
+See [Native Tailcat delivery and rollback](tailcat-transport.md#delivery-bootstrap-and-rollback).
+Bundling and upgrading the helper does not enable Tailcat or complete M4.
+
 1. The server polls GitHub `/releases/latest`, which excludes prereleases/drafts, and the release's schema 2 `manifest.json`. It caches only when the release tag, top-level manifest version, and every target entry's shape agree.
-2. Each online daemon is compared immediately at handshake when reporting `workerVersion` / `platform` / `arch`; a new release triggers another scan of all online daemons. The server still pushes on version inequality, sending `worker.upgrade{version,url,target,sha256,artifactSize,signature,releaseSignature}`. Each supervisor's persistent local state enforces actual version monotonicity.
+2. Each online daemon is compared immediately at handshake when reporting `workerVersion` / `platform` / `arch`; a new release triggers another scan of all online daemons. The server still pushes on version inequality, sending `worker.upgrade{version,url,target,sha256,artifactSize,signature,releaseSignature,transport}` for paired releases. Each supervisor's persistent local state enforces actual version monotonicity.
 3. New supervisors require canonical strict SemVer with a `v` prefix and a matching local Rust target. Before any network request, they reject versions below or equal to the committed floor. They then download with bounds and check signed size, SHA-256, the legacy raw signature, and release-statement signature. Only after every check passes is the artifact atomically installed under `~/.coflux/workers/<version>/`. Any failure preserves the current worker.
 4. A candidate becomes healthy during observation only after taking over UDS, reconnecting to the center, and completing resync. Commit first atomically persists `worker.active`, then `worker.release-floor`. Floor-write failure prevents declaring commit and disables further remote upgrades for that process. A crash between the two writes is recovered by reconstructing/persisting the floor from the safely recovered active SemVer.
 5. `worker.release-floor` is the monotonic high-water mark of committed remote releases. It advances only after observation commits, never merely after download, verification, disk installation, or a failed pending candidate. SemVer build metadata does not affect precedence, so another build string at the same precedence is replay. Candidate failure still permits internal rollback to the old active version: the floor constrains subsequent **remote requests**, not safe rollback or local administrator switching.

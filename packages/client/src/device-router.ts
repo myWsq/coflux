@@ -86,7 +86,7 @@ const MAX_RETAINED_INPUT_BYTES = 1024 * 1024;
 
 type TimerHandle = ReturnType<typeof globalThis.setTimeout>;
 
-export type DeviceTransportMode = "idle" | "probing" | "direct" | "p2p" | "relay" | "offline";
+export type DeviceTransportMode = "idle" | "probing" | "direct" | "p2p" | "relay" | "remote" | "offline";
 
 export interface DeviceTransportState {
   mode: DeviceTransportMode;
@@ -115,7 +115,14 @@ export interface DeviceRouterClock {
   clearInterval: (timer: TimerHandle) => void;
 }
 
+export interface NativeRemoteTransport {
+  open(options: DeviceTransportOpenOptions): Promise<OpenedDeviceTransport>;
+  control(online: boolean, hard: boolean): void;
+  close(): void;
+}
+
 export interface OpenedDeviceTransport {
+  nativeRemote?: boolean;
   channelId: string;
   scopes: ReadonlySet<DeviceScope>;
   leaseExpiresAt?: number;
@@ -135,6 +142,7 @@ export interface DeviceTransportOpenOptions {
   signal: AbortSignal;
   onFrame: (frame: Uint8Array) => void;
   onClose: (reason: string) => void;
+  onPath?: (mode: "direct" | "relay" | "unknown", rttMs?: number) => void;
 }
 
 /**
@@ -158,6 +166,7 @@ export interface DeviceRouterAdapter {
 }
 
 export interface DeviceRouterOptions {
+  nativeRemote?: NativeRemoteTransport;
   enableLocalTransport: boolean;
   identityDatabaseName: string;
   origin: string;
@@ -186,6 +195,8 @@ type LaneKind = "session" | "elevated";
 type ChannelKind = "direct" | "p2p" | "relay";
 
 interface DeviceChannel {
+  nativeRemote?: boolean;
+  nativePath?: "direct" | "relay" | "unknown";
   kind: ChannelKind;
   daemonId: string;
   channelId: string;
@@ -459,8 +470,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         throw error;
       }
     },
-    openRelay: openRelayTransport,
-    openP2p: openP2pTransport,
+    openRelay: options.nativeRemote ? (open) => options.nativeRemote!.open(open) : openRelayTransport,
+    openP2p: options.nativeRemote ? async () => { throw new DeviceRouteError("原生网络自行选择远程路径"); } : openP2pTransport,
     async removeGrant(daemonId) {
       await identityStore?.removeGrant(daemonId);
     },
@@ -468,6 +479,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       await identityStore?.clearGrants();
     },
     close() {
+      options.nativeRemote?.close();
       identityStore?.close();
     },
   };
@@ -537,6 +549,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
   function publish(route: DeviceRoute, mode: DeviceTransportMode, detail: string, channel = route.sessionLane.active): void {
+    if (channel?.nativeRemote && mode === "relay") { mode = channel.nativePath === "direct" ? "p2p" : channel.nativePath === "relay" ? "relay" : "remote"; detail = channel.nativePath === "direct" ? "设备间直接连接" : channel.nativePath === "relay" ? "已通过 DERP 中继连接设备" : "远程连接已建立，正在测量路径"; }
     route.lastPublished = { mode, detail };
     // transport 不在（idle/offline）时 rtt 必须清掉：留着上一次的读数会让一条已断的链路
     // 在 UI 上继续显示"12ms"，比没有读数更糟。
@@ -1021,6 +1034,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         if (channel) receiveFrame(route, channel, frame);
         else earlyFrames.push(copyBytes(frame));
       },
+      onPath(mode, rttMs) { if (channel) { channel.nativePath = mode; if (route.sessionLane.active === channel) { route.rttMs = rttMs; publish(route, "relay", "", channel); } } },
       onClose(reason) {
         if (channel) loseChannel(route, channel, reason);
         else earlyClose = reason;
@@ -1044,6 +1058,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
     if (kind === "direct" && transport.lease) route.lease = transport.lease;
     channel = {
+      nativeRemote: transport.nativeRemote,
+      nativePath: "unknown",
       kind,
       daemonId: route.daemonId,
       channelId: transport.channelId,
@@ -1136,6 +1152,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     if (channelCovers(route.sessionLane.active, DeviceScope.SESSION_READ)) {
       return Promise.resolve(route.sessionLane.active);
     }
+    if (options.nativeRemote && !routeHasFullDemand(route)) return Promise.reject(new DeviceRouteError("选择设备后建立远程连接"));
     if (route.sessionLane.attempt) return route.sessionLane.attempt.ready;
 
     const lane = route.sessionLane;
@@ -1258,7 +1275,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     // P2P 建连 1-3s，慢于 relay hedge——竞争模型是 relay 先赢、P2P 后到经 generation
     // promotion 升级（acceptCandidate 的非 relay 分支），用户无感。
     const startP2p = () => {
-      if (!valid() || attempt.p2pStarted || !controlOnline) return;
+      if (options.nativeRemote || !valid() || attempt.p2pStarted || !controlOnline) return;
       // 退避期内根本不发起：P2P 一旦建成就会 promotion 顶掉正在工作的 relay，不拦在这里
       // 就会「崩一次抢一次」地震荡，每次抢走都让用户再吃一轮判死延迟。
       if (clock.now() < (route.p2pBlockedUntil ?? 0)) return;
@@ -1536,7 +1553,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
 
   function scheduleRecovery(route: DeviceRoute, lane: DeviceLane): void {
     const needed = lane.kind === "session" ? sessionLaneDemand(route) : elevatedLaneDemand(route);
-    if (destroyed || lane.recoveryTimer !== undefined || !needed) return;
+    if (destroyed || lane.recoveryTimer !== undefined || !needed || (options.nativeRemote && !routeHasFullDemand(route))) return;
     const base = Math.min(RECOVER_MAX_MS, RECOVER_BASE_MS * 2 ** Math.min(lane.recoveryAttempts, 4));
     const delayMs = Math.round(base * (1 + clock.random() * 0.2));
     lane.recoveryAttempts += 1;
@@ -1555,7 +1572,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
   function sessionLaneDemand(route: DeviceRoute): boolean {
-    if (route.retainCount > 0 || route.transientDemand > 0 || route.measureCount > 0) return true;
+    if (route.retainCount > 0 || route.transientDemand > 0 || (!options.nativeRemote && route.measureCount > 0)) return true;
     if ([...route.sessions.values()].some((session) => session.desired)) return true;
     return [...route.pendingRequests.values()].some(
       (pending) => pending.scope === DeviceScope.SESSION_READ || pending.scope === DeviceScope.SESSION_CONTROL,
@@ -2309,9 +2326,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
 
   /** measureOnly：只要一条 relay lane 用来跑心跳（侧栏对每台在线设备）。它照样把连接建起来，
    * 所以之后真进这台设备时是热的——只是不碰 loopback，见 routeHasFullDemand。 */
-  function retainDevice(daemonId: string, options?: { measureOnly?: boolean }): () => void {
+  function retainDevice(daemonId: string, retainOptions?: { measureOnly?: boolean }): () => void {
     const route = routeFor(daemonId);
-    const measureOnly = options?.measureOnly === true;
+    const measureOnly = retainOptions?.measureOnly === true;
     if (measureOnly) route.measureCount += 1;
     else {
       route.retainCount += 1;
@@ -2319,7 +2336,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       // direct。这里补一次立即提升，否则这条 relay 会一直用到底，本机设备永远升不回 direct。
       if (route.sessionLane.active?.kind === "relay") scheduleDirectRetry(route, true);
     }
-    void ensureSessionLane(route).catch(() => scheduleRecovery(route, route.sessionLane));
+    if (!options.nativeRemote || routeHasFullDemand(route)) void ensureSessionLane(route).catch(() => scheduleRecovery(route, route.sessionLane));
     let released = false;
     return () => {
       if (released) return;
@@ -2670,6 +2687,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
    * lane 一个有界存活窗口。该信号不等于账号授权被撤销，也不等于 worker 的独立控制 WS 已断。
    * 重复的 connecting/disconnected 状态不得延长窗口。 */
   function setControlDisconnected(): void {
+    options.nativeRemote?.control(false, false);
     if (!controlOnline) return;
     controlOnline = false;
     const generation = ++controlStateGeneration;
@@ -2688,6 +2706,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
    * 立即恢复原有 fail-closed 语义。保留 boolean API 是为了既有调用与跨端共享 trace；其中
    * false 始终表示 hard revoke，普通网络断开必须调用 setControlDisconnected()。 */
   function setControlOnline(online: boolean): void {
+    options.nativeRemote?.control(online, !online);
     if (!online) {
       controlOnline = false;
       controlStateGeneration += 1;

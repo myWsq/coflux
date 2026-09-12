@@ -188,6 +188,241 @@ public enum Coflux_V1_LocalAuthErrorCode: SwiftProtobuf.Enum, Swift.CaseIterable
 
 }
 
+/// Native Tailcat candidate transport. These messages are distinct from legacy
+/// relay URLs and WebRTC signaling; DeviceEnvelope remains unchanged.
+public struct Coflux_V1_DeviceTailcatIdentity: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var nodePublicKey: String = String()
+
+  public var transportVersion: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_DeviceTailcatConfigure: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var regionJson: Data = Data()
+
+  public var transportVersion: UInt32 = 0
+
+  public var accountID: String = String()
+
+  public var refreshOnly: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_DeviceTailcatEndpoint: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var nodePublicKey: String = String()
+
+  public var address: String = String()
+
+  public var transportVersion: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_DeviceTailcatConnect: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var daemonID: String = String()
+
+  public var channelID: String = String()
+
+  public var clientInstanceID: String = String()
+
+  public var transportGeneration: UInt64 = 0
+
+  public var protocolVersion: UInt32 = 0
+
+  public var nodePublicKey: String = String()
+
+  public var scope: Coflux_V1_DeviceScope = .unspecified
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_DeviceTailcatGrant: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var channelID: String = String()
+
+  public var accountID: String = String()
+
+  public var daemonID: String = String()
+
+  public var clientInstanceID: String = String()
+
+  public var transportGeneration: UInt64 = 0
+
+  public var scopes: [Coflux_V1_DeviceScope] = []
+
+  public var expiresAt: UInt64 = 0
+
+  public var proofKey: Data = Data()
+
+  public var nodePublicKey: String = String()
+
+  public var protocolVersion: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_DeviceTailcatInstalled: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var channelID: String = String()
+
+  public var ok: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_DeviceTailcatResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var channelID: String = String()
+
+  public var ok: Bool = false
+
+  public var address: String {
+    get {_address ?? String()}
+    set {_address = newValue}
+  }
+  /// Returns true if `address` has been explicitly set.
+  public var hasAddress: Bool {self._address != nil}
+  /// Clears the value of `address`. Subsequent reads from it will return its default value.
+  public mutating func clearAddress() {self._address = nil}
+
+  public var proofKey: Data = Data()
+
+  public var expiresAt: UInt64 = 0
+
+  public var scopes: [Coflux_V1_DeviceScope] = []
+
+  public var error: String {
+    get {_error ?? String()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _address: String? = nil
+  fileprivate var _error: String? = nil
+}
+
+public struct Coflux_V1_DeviceTailcatRevoke: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var channelIds: [String] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_DeviceTailcatClose: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var channelID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Report only an actual native dial failure, never cancellation or auth failure.
+/// Central revocation of an opaque channel. Channel IDs are unique per attempt.
+public struct Coflux_V1_DeviceTailcatClosed: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var channelID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_DeviceTailcatFailed: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var channelID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_DeviceTailcatOpened: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var channelID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_DeviceTailcatControl: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var online: Bool = false
+
+  public var hardRevoke: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 /// worker 在认证完成后通过独立 announce 上报持久 gateway identity。public_key_sec1 是 P-256
 /// uncompressed SEC1 point（65 bytes）；private key 永不离开 daemon。
 public struct Coflux_V1_LocalGatewayDescriptor: Sendable {
@@ -2258,6 +2493,545 @@ extension Coflux_V1_DeviceTransportKind: SwiftProtobuf._ProtoNameProviding {
 
 extension Coflux_V1_LocalAuthErrorCode: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0LOCAL_AUTH_ERROR_CODE_UNSPECIFIED\0\u{1}LOCAL_AUTH_ERROR_CODE_VERSION_MISMATCH\0\u{1}LOCAL_AUTH_ERROR_CODE_ORIGIN_DENIED\0\u{1}LOCAL_AUTH_ERROR_CODE_GRANT_UNKNOWN\0\u{1}LOCAL_AUTH_ERROR_CODE_KEY_MISMATCH\0\u{1}LOCAL_AUTH_ERROR_CODE_SIGNATURE_INVALID\0\u{1}LOCAL_AUTH_ERROR_CODE_NONCE_INVALID\0\u{1}LOCAL_AUTH_ERROR_CODE_LEASE_INVALID\0\u{1}LOCAL_AUTH_ERROR_CODE_RATE_LIMITED\0")
+}
+
+extension Coflux_V1_DeviceTailcatIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatIdentity"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}node_public_key\0\u{3}transport_version\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.nodePublicKey) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.transportVersion) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.nodePublicKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.nodePublicKey, fieldNumber: 1)
+    }
+    if self.transportVersion != 0 {
+      try visitor.visitSingularUInt32Field(value: self.transportVersion, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatIdentity, rhs: Coflux_V1_DeviceTailcatIdentity) -> Bool {
+    if lhs.nodePublicKey != rhs.nodePublicKey {return false}
+    if lhs.transportVersion != rhs.transportVersion {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatConfigure: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatConfigure"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}region_json\0\u{3}transport_version\0\u{3}account_id\0\u{3}refresh_only\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.regionJson) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.transportVersion) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.accountID) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.refreshOnly) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.regionJson.isEmpty {
+      try visitor.visitSingularBytesField(value: self.regionJson, fieldNumber: 1)
+    }
+    if self.transportVersion != 0 {
+      try visitor.visitSingularUInt32Field(value: self.transportVersion, fieldNumber: 2)
+    }
+    if !self.accountID.isEmpty {
+      try visitor.visitSingularStringField(value: self.accountID, fieldNumber: 3)
+    }
+    if self.refreshOnly != false {
+      try visitor.visitSingularBoolField(value: self.refreshOnly, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatConfigure, rhs: Coflux_V1_DeviceTailcatConfigure) -> Bool {
+    if lhs.regionJson != rhs.regionJson {return false}
+    if lhs.transportVersion != rhs.transportVersion {return false}
+    if lhs.accountID != rhs.accountID {return false}
+    if lhs.refreshOnly != rhs.refreshOnly {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatEndpoint: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatEndpoint"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}node_public_key\0\u{1}address\0\u{3}transport_version\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.nodePublicKey) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.address) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.transportVersion) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.nodePublicKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.nodePublicKey, fieldNumber: 1)
+    }
+    if !self.address.isEmpty {
+      try visitor.visitSingularStringField(value: self.address, fieldNumber: 2)
+    }
+    if self.transportVersion != 0 {
+      try visitor.visitSingularUInt32Field(value: self.transportVersion, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatEndpoint, rhs: Coflux_V1_DeviceTailcatEndpoint) -> Bool {
+    if lhs.nodePublicKey != rhs.nodePublicKey {return false}
+    if lhs.address != rhs.address {return false}
+    if lhs.transportVersion != rhs.transportVersion {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatConnect: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatConnect"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_id\0\u{3}channel_id\0\u{3}client_instance_id\0\u{3}transport_generation\0\u{3}protocol_version\0\u{3}node_public_key\0\u{1}scope\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.daemonID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.clientInstanceID) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.transportGeneration) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.protocolVersion) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.nodePublicKey) }()
+      case 7: try { try decoder.decodeSingularEnumField(value: &self.scope) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.daemonID.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonID, fieldNumber: 1)
+    }
+    if !self.channelID.isEmpty {
+      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 2)
+    }
+    if !self.clientInstanceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.clientInstanceID, fieldNumber: 3)
+    }
+    if self.transportGeneration != 0 {
+      try visitor.visitSingularUInt64Field(value: self.transportGeneration, fieldNumber: 4)
+    }
+    if self.protocolVersion != 0 {
+      try visitor.visitSingularUInt32Field(value: self.protocolVersion, fieldNumber: 5)
+    }
+    if !self.nodePublicKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.nodePublicKey, fieldNumber: 6)
+    }
+    if self.scope != .unspecified {
+      try visitor.visitSingularEnumField(value: self.scope, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatConnect, rhs: Coflux_V1_DeviceTailcatConnect) -> Bool {
+    if lhs.daemonID != rhs.daemonID {return false}
+    if lhs.channelID != rhs.channelID {return false}
+    if lhs.clientInstanceID != rhs.clientInstanceID {return false}
+    if lhs.transportGeneration != rhs.transportGeneration {return false}
+    if lhs.protocolVersion != rhs.protocolVersion {return false}
+    if lhs.nodePublicKey != rhs.nodePublicKey {return false}
+    if lhs.scope != rhs.scope {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatGrant: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatGrant"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0\u{3}account_id\0\u{3}daemon_id\0\u{3}client_instance_id\0\u{3}transport_generation\0\u{1}scopes\0\u{3}expires_at\0\u{3}proof_key\0\u{3}node_public_key\0\u{3}protocol_version\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.accountID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.daemonID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.clientInstanceID) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.transportGeneration) }()
+      case 6: try { try decoder.decodeRepeatedEnumField(value: &self.scopes) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.expiresAt) }()
+      case 8: try { try decoder.decodeSingularBytesField(value: &self.proofKey) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.nodePublicKey) }()
+      case 10: try { try decoder.decodeSingularUInt32Field(value: &self.protocolVersion) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.channelID.isEmpty {
+      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
+    }
+    if !self.accountID.isEmpty {
+      try visitor.visitSingularStringField(value: self.accountID, fieldNumber: 2)
+    }
+    if !self.daemonID.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonID, fieldNumber: 3)
+    }
+    if !self.clientInstanceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.clientInstanceID, fieldNumber: 4)
+    }
+    if self.transportGeneration != 0 {
+      try visitor.visitSingularUInt64Field(value: self.transportGeneration, fieldNumber: 5)
+    }
+    if !self.scopes.isEmpty {
+      try visitor.visitPackedEnumField(value: self.scopes, fieldNumber: 6)
+    }
+    if self.expiresAt != 0 {
+      try visitor.visitSingularUInt64Field(value: self.expiresAt, fieldNumber: 7)
+    }
+    if !self.proofKey.isEmpty {
+      try visitor.visitSingularBytesField(value: self.proofKey, fieldNumber: 8)
+    }
+    if !self.nodePublicKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.nodePublicKey, fieldNumber: 9)
+    }
+    if self.protocolVersion != 0 {
+      try visitor.visitSingularUInt32Field(value: self.protocolVersion, fieldNumber: 10)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatGrant, rhs: Coflux_V1_DeviceTailcatGrant) -> Bool {
+    if lhs.channelID != rhs.channelID {return false}
+    if lhs.accountID != rhs.accountID {return false}
+    if lhs.daemonID != rhs.daemonID {return false}
+    if lhs.clientInstanceID != rhs.clientInstanceID {return false}
+    if lhs.transportGeneration != rhs.transportGeneration {return false}
+    if lhs.scopes != rhs.scopes {return false}
+    if lhs.expiresAt != rhs.expiresAt {return false}
+    if lhs.proofKey != rhs.proofKey {return false}
+    if lhs.nodePublicKey != rhs.nodePublicKey {return false}
+    if lhs.protocolVersion != rhs.protocolVersion {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatInstalled: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatInstalled"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0\u{1}ok\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.channelID.isEmpty {
+      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatInstalled, rhs: Coflux_V1_DeviceTailcatInstalled) -> Bool {
+    if lhs.channelID != rhs.channelID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0\u{1}ok\0\u{1}address\0\u{3}proof_key\0\u{3}expires_at\0\u{1}scopes\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._address) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.proofKey) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.expiresAt) }()
+      case 6: try { try decoder.decodeRepeatedEnumField(value: &self.scopes) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.channelID.isEmpty {
+      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    try { if let v = self._address {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    if !self.proofKey.isEmpty {
+      try visitor.visitSingularBytesField(value: self.proofKey, fieldNumber: 4)
+    }
+    if self.expiresAt != 0 {
+      try visitor.visitSingularUInt64Field(value: self.expiresAt, fieldNumber: 5)
+    }
+    if !self.scopes.isEmpty {
+      try visitor.visitPackedEnumField(value: self.scopes, fieldNumber: 6)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 7)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatResult, rhs: Coflux_V1_DeviceTailcatResult) -> Bool {
+    if lhs.channelID != rhs.channelID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs._address != rhs._address {return false}
+    if lhs.proofKey != rhs.proofKey {return false}
+    if lhs.expiresAt != rhs.expiresAt {return false}
+    if lhs.scopes != rhs.scopes {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatRevoke: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatRevoke"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_ids\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedStringField(value: &self.channelIds) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.channelIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.channelIds, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatRevoke, rhs: Coflux_V1_DeviceTailcatRevoke) -> Bool {
+    if lhs.channelIds != rhs.channelIds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatClose: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatClose"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.channelID.isEmpty {
+      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatClose, rhs: Coflux_V1_DeviceTailcatClose) -> Bool {
+    if lhs.channelID != rhs.channelID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatClosed: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatClosed"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.channelID.isEmpty {
+      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatClosed, rhs: Coflux_V1_DeviceTailcatClosed) -> Bool {
+    if lhs.channelID != rhs.channelID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatFailed: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatFailed"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.channelID.isEmpty {
+      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatFailed, rhs: Coflux_V1_DeviceTailcatFailed) -> Bool {
+    if lhs.channelID != rhs.channelID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatOpened: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatOpened"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.channelID.isEmpty {
+      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatOpened, rhs: Coflux_V1_DeviceTailcatOpened) -> Bool {
+    if lhs.channelID != rhs.channelID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceTailcatControl: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceTailcatControl"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}online\0\u{3}hard_revoke\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBoolField(value: &self.online) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.hardRevoke) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.online != false {
+      try visitor.visitSingularBoolField(value: self.online, fieldNumber: 1)
+    }
+    if self.hardRevoke != false {
+      try visitor.visitSingularBoolField(value: self.hardRevoke, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceTailcatControl, rhs: Coflux_V1_DeviceTailcatControl) -> Bool {
+    if lhs.online != rhs.online {return false}
+    if lhs.hardRevoke != rhs.hardRevoke {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
 }
 
 extension Coflux_V1_LocalGatewayDescriptor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {

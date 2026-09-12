@@ -1,6 +1,6 @@
 # coflux architecture
 
-> Status: local-first architecture is implemented. The relay data plane is a standalone service supporting multiple nodes (plans 043/065). Devices on different machines can connect directly through end-to-end WebRTC DataChannels (plan 076). Supervisor/sessiond is the sole authority for PTYs, VT, history, holders, and sequences. Same-machine web clients prefer the loopback gateway. The center owns only accounts, devices, project/task orchestration, relay/P2P rendezvous, and bounded checkpoints. When loopback/P2P is unavailable, traffic automatically uses independently deployed `coflux-relay` nodes.
+> Status: local-first architecture is implemented. The default remote paths remain custom relay/WebRTC. A pinned Go `coflux-transport` companion is now included in the release pipeline, but Tailcat remains opt-in through `COFLUX_TAILCAT=1`; default promotion and legacy retirement (M4) are not complete. The relay data plane is a standalone service supporting multiple nodes (plans 043/065). Devices on different machines can connect directly through end-to-end WebRTC DataChannels (plan 076). Supervisor/sessiond is the sole authority for PTYs, VT, history, holders, and sequences. Same-machine web clients prefer the loopback gateway. The center owns only accounts, devices, project/task orchestration, relay/P2P rendezvous, and bounded checkpoints. When loopback/P2P is unavailable, traffic automatically uses independently deployed `coflux-relay` nodes.
 
 ## 1. Product model
 
@@ -86,12 +86,14 @@ The product boundary: a loaded, paired page can still catalog, attach, snapshot,
 
 ## 4. Processes and local IPC
 
-The daemon is entirely Rust, with no Node runtime, split into two processes:
+The daemon core uses Rust without a Node runtime, split into two authority-owning processes:
 
 - `coflux-supervisor`: rarely upgraded; owns PTYs, VT/history, holder/sequence, and exit tombstones; manages worker versions and observation-period rollback. It assembles each PTY environment: `COFLUX_*` ownership IDs, `<COFLUX_HOME>/bin` first in PATH, and shell integration (plan 115). It injects a bundled rc by shell: zsh via `ZDOTDIR`, bash via `--init-file`, fish via vendor conf in `XDG_DATA_DIRS`; unknown shells receive none. After the original user rc chain runs unchanged, it defines a `claude` function translating the injector's `COFLUX_CLAUDE_PLUGIN_DIR` into `claude --plugin-dir <dir>`. On macOS the injector is the Coflux main app. An empty variable or missing directory falls back to the original `claude` behavior.
 - `coflux-worker`: frequently hot-upgraded; handles central WS, loopback gateway, local authorization, git/exec/fs, Device RPC, relay, and checkpoints.
 
-They communicate over a mode-`0600` UDS. Internal frame kinds:
+A separate Go `coflux-transport` executable embeds pinned Tailcat/Tailscale networking. Release artifacts and Desktop bundles include this companion; paired hot updates verify and publish worker/helper together, then retain the previous immutable pair for rollback. Released workers validate the local helper handshake even when the candidate network path is disabled. Networking itself starts only with `COFLUX_TAILCAT=1`. The helper owns no PTYs or business authority, needs no installed Go runtime, and communicates only through inherited stdio with its worker or Electron-main owner. See [Native Tailcat transport](tailcat-transport.md) for the pinned build, bootstrap requirement, and delivery contract.
+
+Supervisor and worker communicate over a mode-`0600` UDS. Internal frame kinds:
 
 - Kind 1: session-dirty notification, containing only session ID, never raw PTY.
 - Kinds 2/3: removed input/replay numbers, permanently reserved and rejected by decoders.
@@ -100,6 +102,22 @@ They communicate over a mode-`0600` UDS. Internal frame kinds:
 Worker restart leaves supervisor/PTYS intact. The new worker restores transports and derived caches through resync/catalog.
 
 ## 5. DeviceTransport
+
+The direct/P2P/relay paths below describe the retained default stack. With
+`COFLUX_TAILCAT=1` on both worker and Desktop main, the candidate uses the Go
+helper and self-hosted stock DERP for remote transport; local loopback remains
+available. Electron main retains keys, grant proofs, and the native control
+socket. The renderer receives opaque frames and handles. Coflux still owns
+account permissions, per-channel grants, and worker challenge validation.
+
+For native channels, endpoint replacement sends `deviceTailcatClosed` over
+central control. The owner cancels the matching pending dial or live stream;
+an obsolete channel cannot close its replacement. Client control loss retains
+only already-open session lanes for up to 15 seconds. Worker control loss
+retires the serving helper and remote authority immediately, without relying
+on the remote client observing a TCP FIN. Neither case terminates supervisor
+PTYs. Local acceptance passing does not waive the outstanding performance,
+real-network, and packaged-delivery promotion gates.
 
 ### 5.1 Direct slot: loopback and P2P
 

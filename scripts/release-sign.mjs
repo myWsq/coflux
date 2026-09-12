@@ -12,6 +12,7 @@ import {
   assertReleaseVersion,
   supervisorReleaseStatement,
   cliReleaseStatement,
+  transportReleaseStatement,
   workerReleaseStatement,
 } from "./release-statement.mjs";
 
@@ -102,6 +103,21 @@ if (cliNames.length) {
   if (Object.keys(manifest.cli).sort().join("\n") !== [...targetsByComponent.worker].sort().join("\n")) {
     throw new Error("CLI targets must match worker targets");
   }
+}
+
+// Companion artifacts retain their own signing domain and the exact worker target set.
+const transportNames = readdirSync(dir).filter(name => name.startsWith("coflux-transport-") && !name.includes("."));
+if (!transportNames.length) throw new Error("Release is missing the mandatory native transport component");
+if (transportNames.length) {
+  manifest.transport = {};
+  for (const name of transportNames) {
+    const target = name.slice("coflux-transport-".length), data = readFileSync(join(dir, name));
+    const sha256 = crypto.createHash("sha256").update(data).digest("hex"), size = data.byteLength;
+    const releaseSignature = crypto.sign(null, transportReleaseStatement({ version, target, sha256, size }), key).toString("hex");
+    writeFileSync(join(dir, `${name}.release.sig`), releaseSignature); sums.push(`${sha256}  ${name}`);
+    manifest.transport[target] = { target, sha256, size, releaseSignature, url: `https://github.com/${repo}/releases/download/${version}/${name}` };
+  }
+  if (Object.keys(manifest.transport).sort().join("\n") !== [...targetsByComponent.worker].sort().join("\n")) throw new Error("Transport targets must match worker targets");
 }
 
 const workerTargets = [...targetsByComponent.worker].sort();

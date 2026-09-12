@@ -38,6 +38,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: aarch64-apple-darwin
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: transport/tailcat/go.sum
+      - name: Build native transport and notices
+        env:
+          COFLUX_RELEASE_VERSION: v${{ needs.metadata.outputs.version }}
+        run: node scripts/build-transport.mjs aarch64-apple-darwin target/aarch64-apple-darwin/release
       - name: cargo build（release，aarch64-apple-darwin）
         env:
           COFLUX_RELEASE_VERSION: v${{ needs.metadata.outputs.version }}
@@ -50,10 +58,11 @@ jobs:
           set -euo pipefail
           bin="target/aarch64-apple-darwin/release"
           mkdir -p daemon-bundle
-          for name in coflux-supervisor coflux-worker coflux; do
+          for name in coflux-supervisor coflux-worker coflux coflux-transport; do
             test -x "$bin/$name"
             cp "$bin/$name" "daemon-bundle/$name"
           done
+          cp "$bin/TRANSPORT-NOTICES.txt" daemon-bundle/TRANSPORT-NOTICES.txt
           # VERSION 与编译期 COFLUX_RELEASE_VERSION 同值：主进程拿它与 ~/.coflux/supervisor-version 比较
           printf '%s\n' "$COFLUX_RELEASE_VERSION" > daemon-bundle/VERSION
           ls -la daemon-bundle
@@ -185,7 +194,7 @@ jobs:
           spctl --assess --type execute --verbose=4 "$app"
           # 内置 daemon 三件（plan 113）：存在、可执行、各自带 Developer ID 签名（mac.binaries 让它们进签名与公证）
           daemon="$app/Contents/Resources/daemon"
-          for name in coflux-supervisor coflux-worker coflux; do
+          for name in coflux-supervisor coflux-worker coflux coflux-transport; do
             test -x "$daemon/$name"
             codesign --verify --strict --verbose=2 "$daemon/$name"
             codesign -dv --verbose=2 "$daemon/$name" 2>&1 | grep -q 'Authority=Developer ID Application'
