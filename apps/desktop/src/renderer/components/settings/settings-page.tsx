@@ -23,14 +23,13 @@ import { desktop } from "@/config";
 import type { DesktopDaemonState } from "@/desktop-bridge";
 
 /**
- * 导航项与「返回」按钮的对齐口径：同高、同横向内边距、同字重、同字号。返回按钮是 Astryx Button
- * （sm），导航项是 ListItem，两者默认规格不一样，不拉齐就会看出上下两块是两套东西。
+ * 导航项与「返回」按钮的对齐口径：同高、同横向内边距、同字重。返回按钮是 Astryx Button（sm），
+ * 导航项是 ListItem，两者默认规格不一样，不拉齐就会看出上下两块是两套东西。
  *
- * 字号要走 `[&_span]` 打到内部那层：ListItem 的文字是组件自己渲染的 span，上面钉着
- * `--text-body-size`，外层类盖不到它（按钮那边用的是 `--text-label-size`，两个 token 本可以
- * 不同值）。导航项没有 description，这个后代选择器只会命中 label 那一个 span。
+ * 字号不用管：主题里 `--text-label-size` 与 `--text-body-size` 都落在同一档正文字号上
+ * （main.tsx 的 defineTheme tokens）。
  */
-const SETTINGS_NAV_ITEM_CLASS = "h-7 px-3 py-0 font-medium [&_span]:text-base";
+const SETTINGS_NAV_ITEM_CLASS = "h-7 px-3 py-0 font-medium";
 
 /** 导航项图标：与分区一一对应，缺一个都会让那一行看起来是另一种东西。 */
 const SECTION_ICONS: Record<SettingsSectionId, LucideIcon> = {
@@ -116,7 +115,7 @@ export function SettingsPage(props: SettingsPageProps) {
                 variant="ghost"
                 size="sm"
                 icon={<ArrowLeft className="size-4" />}
-                className="justify-start text-base"
+                className="justify-start"
                 onClick={onClose}
               />
               {settingsSectionGroups().map((group) => (

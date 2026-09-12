@@ -98,34 +98,8 @@
   --text-lg--line-height: 1.4;
 }
 
-/* 覆盖 theme-neutral 的 14px base + Figtree，与 Tailwind 字阶对齐 */
-@layer astryx-theme {
-  @scope ([data-astryx-theme="neutral"]) to ([data-astryx-theme]) {
-    :scope {
-      --font-family-body: var(--coflux-font-sans);
-      --font-family-heading: var(--coflux-font-sans);
-      --font-family-code: var(--coflux-font-mono);
-      --font-size-2xs: var(--coflux-text-2xs);
-      --font-size-xs: var(--coflux-text-xs);
-      --font-size-sm: var(--coflux-text-sm);
-      --font-size-base: var(--coflux-text-base);
-      --font-size-lg: var(--coflux-text-lg);
-      --font-size-xl: var(--coflux-text-xl);
-      --font-size-2xl: var(--coflux-text-2xl);
-      --text-body-size: var(--font-size-base);
-      --text-label-size: var(--font-size-base);
-      --text-code-size: var(--font-size-base);
-      --text-supporting-size: var(--font-size-sm);
-      --text-large-size: var(--font-size-lg);
-      --text-heading-1-size: var(--font-size-2xl);
-      --text-heading-2-size: var(--font-size-xl);
-      --text-heading-3-size: var(--font-size-lg);
-      --text-heading-4-size: var(--font-size-base);
-      --text-heading-5-size: var(--font-size-sm);
-      --text-heading-6-size: var(--font-size-xs);
-    }
-  }
-}
+/* Astryx 的字阶与字体族改在主题定义里（main.tsx 的 defineTheme tokens），不在这儿覆盖：
+ * 主题 token 是运行时注入的，同层且排在本文件之后，从 CSS 这侧压不过去。 */
 
 /* assistant-ui DotMatrix：每颗点自己闪；hi/lo 按状态设，静态态 hi=lo 看起来不动 */
 @property --coflux-dot-hi {

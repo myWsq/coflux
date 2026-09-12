@@ -14,6 +14,37 @@ import "./index.css";
 const cofluxTheme = defineTheme({
   name: "coflux",
   extends: neutralTheme,
+  // 字阶与字体族：theme-neutral 是 14px + Figtree，本项目正文是 13px + Inter（--coflux-text-*，
+  // 与 Tailwind 字阶同一份真相源，见 index.css）。两套并存的话，Astryx 组件的字会整体比手写的
+  // 部分大一号——菜单、列表、设置页哪儿都对不上。
+  //
+  // 必须写在这里、而不是在 CSS 里覆盖：主题 token 由 Theme 运行时注入成
+  // `@layer astryx-theme { @scope ([data-astryx-theme="coflux"]) … }`，位置在 index.css 之后，
+  // 同层同特异性下后来者赢。曾经 index.css 里有一份同样的覆盖，作用域根写的是 `="neutral"`——
+  // DOM 上的属性值是主题名 coflux，那份从来没匹配上，也就从来没生效过。
+  tokens: {
+    "--font-family-body": "var(--coflux-font-sans)",
+    "--font-family-heading": "var(--coflux-font-sans)",
+    "--font-family-code": "var(--coflux-font-mono)",
+    "--font-size-2xs": "var(--coflux-text-2xs)",
+    "--font-size-xs": "var(--coflux-text-xs)",
+    "--font-size-sm": "var(--coflux-text-sm)",
+    "--font-size-base": "var(--coflux-text-base)",
+    "--font-size-lg": "var(--coflux-text-lg)",
+    "--font-size-xl": "var(--coflux-text-xl)",
+    "--font-size-2xl": "var(--coflux-text-2xl)",
+    "--text-body-size": "var(--font-size-base)",
+    "--text-label-size": "var(--font-size-base)",
+    "--text-code-size": "var(--font-size-base)",
+    "--text-supporting-size": "var(--font-size-sm)",
+    "--text-large-size": "var(--font-size-lg)",
+    "--text-heading-1-size": "var(--font-size-2xl)",
+    "--text-heading-2-size": "var(--font-size-xl)",
+    "--text-heading-3-size": "var(--font-size-lg)",
+    "--text-heading-4-size": "var(--font-size-base)",
+    "--text-heading-5-size": "var(--font-size-sm)",
+    "--text-heading-6-size": "var(--font-size-xs)",
+  },
   components: {
     tooltip: {
       base: {
@@ -21,8 +52,7 @@ const cofluxTheme = defineTheme({
         // 前景必须跟着背景一起改：默认 tooltip 在 dark 下是反色（浅底深字），只换底色
         // 会留下深底深字看不清——尤其那些没有自带文字类的 tooltip。
         color: "var(--color-text-primary)",
-        // astryx 的 --font-size-base 是 14px，比本项目正文（--coflux-text-base 13px）还大
-        // 一号，tooltip 作为附注不该比正文更响；退到 12px。
+        // tooltip 作为附注不该和正文一样响：退一档到 12px（--font-size-sm）。
         fontSize: "var(--font-size-sm)",
         borderRadius: "var(--radius-element)",
         boxShadow: "var(--shadow-high)",
