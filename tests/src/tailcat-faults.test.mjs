@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createHash, randomUUID, X509Certificate } from "node:crypto";
 import net from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -23,7 +23,14 @@ test("native initial-region outage, serving helper crash, region failover and co
   const servingHelperPid = () => {
     const workerPid = readFileSync(join(stack.home, "worker.pid"), "utf8").trim();
     const children = spawnSync("pgrep", ["-P", workerPid], { encoding: "utf8" }).stdout.trim().split(/\s+/).filter(Boolean);
-    const pid = children.find(pid => /coflux-transport$/.test(spawnSync("ps", ["-p", pid, "-o", "comm="], { encoding: "utf8" }).stdout.trim()));
+    // Linux comm truncates this executable name to 15 bytes. Match the worker's
+    // sibling executable through procfs, still considering only its own children.
+    const expected = process.platform === "linux" ? join(dirname(readlinkSync(`/proc/${workerPid}/exe`)), "coflux-transport") : undefined;
+    const pid = children.find(pid => {
+      if (!expected) return /coflux-transport$/.test(spawnSync("ps", ["-p", pid, "-o", "comm="], { encoding: "utf8" }).stdout.trim());
+      try { return readlinkSync(`/proc/${pid}/exe`) === expected; }
+      catch (error) { if (error.code === "ENOENT" || error.code === "ESRCH") return false; throw error; }
+    });
     assert(pid, "isolated serving helper must be identifiable");
     return Number(pid);
   };

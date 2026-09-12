@@ -336,3 +336,27 @@ run, the independent version-admission rerun, and the successful complete rerun.
 These results resolve the main-integration gap; they do not replace the outstanding
 internet/NAT, resource matrix, packaged GUI/keychain, signing/notarization, or
 published-artifact acceptance. The previously failed latency budget remains open.
+
+## Linux CI helper discovery correction (2026-09-12)
+
+GitHub run 34698859911 failed in the fault fixture before helper-crash injection:
+`isolated serving helper must be identifiable`. Linux truncates `ps -o comm`
+to 15 bytes, so `coflux-transport` appeared as `coflux-transpor`. The failure was
+reproduced with a real Linux process in an isolated Node container.
+
+On Linux the fixture now compares `/proc/<pid>/exe` with the helper next to its
+isolated worker executable. Candidate PIDs still come only from that worker's
+immediate children; exited children are ignored. The macOS lookup and every
+fault, permission, recovery, and PTY-continuity assertion remain unchanged.
+An isolated Linux probe using the actual revised lookup selected the correct
+helper even with another child sharing the same truncated process name.
+
+Server typechecking and the zero-warning Rust pretest build passed. The first
+four-way local suite passed 219/229; ten account-write tests failed from a shared
+setup error, `native fault grant timed out`, independently of the revised fault
+fixture, which passed. No unrelated fixture or production behavior was changed.
+The full suite was rerun with diagnostic logging and CI's two-file concurrency:
+**229/229 passed**, zero failures, cancellations, or skips, in **367.712 seconds**.
+All temporary databases were confirmed removed. Logs are retained at
+`/tmp/coflux-tailcat-ci-fix-full.log` and
+`/tmp/coflux-tailcat-ci-fix-full-retry.log`.
