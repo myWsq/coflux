@@ -18,8 +18,8 @@ use coflux_protocol::wire::{
 };
 use coflux_protocol::{
     decode_device_envelope, encode_device_envelope, encode_frame, write_record, CommandStateInfo,
-    DataFrame, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES, MAX_FRAME_ID_BYTES,
-    MAX_SESSION_CHECKPOINT_BYTES,
+    DataFrame, WorkerToSupervisor, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
+    MAX_FRAME_ID_BYTES, MAX_SESSION_CHECKPOINT_BYTES,
 };
 use prost::Message as _;
 use rand_core::{OsRng, RngCore};
@@ -1555,6 +1555,18 @@ impl DeviceRuntime {
             return false;
         };
         write_record(&frame).is_ok_and(|record| self.to_supervisor.try_send(record).is_ok())
+    }
+
+    /// Ask the supervisor to end a session (`coflux terminal close`): the same `session.close`
+    /// control message the center's sessionClose is forwarded as. The exit itself arrives through
+    /// the ordinary SessionExit path and lands in the ledger.
+    pub fn close_session(&self, session_id: &str) -> bool {
+        serde_json::to_vec(&WorkerToSupervisor::SessionClose {
+            session_id: session_id.to_string(),
+        })
+        .ok()
+        .and_then(|bytes| write_record(&bytes).ok())
+        .is_some_and(|record| self.to_supervisor.try_send(record).is_ok())
     }
 
     /// 「用户是否正在接管该 session」：sessiond 裁决的当前 holder（影子表）仍是存活 client
@@ -3815,6 +3827,7 @@ mod tests {
             last_branches: HashMap::new(),
             last_diffs: HashMap::new(),
             conn_state: crate::conn_state::ConnState::new(&home),
+            command_epoch: tokio::sync::watch::channel(0).0,
         }));
         let (to_supervisor, from_supervisor) = mpsc::channel(32);
         let (to_server, _from_server) = mpsc::channel(32);

@@ -132,6 +132,10 @@ const TERMINAL_WAIT_MAX_MS = 600_000;
 const STOP_WAIT_MS = 15_000;
 /** server→daemon 读/写请求的回执超时。写入超时不重发（结果未知，先 read 再决定）。 */
 const AGENT_REQUEST_TIMEOUT_MS = 10_000;
+/** terminal_run 的回执超时：daemon 侧最多等 10 秒提示符就绪（PROMPT_WAIT）再拒绝，这里留出余量。 */
+const TERMINAL_RUN_TIMEOUT_MS = 15_000;
+/** terminal_wait 单轮在 daemon 侧的阻塞上限（daemon 另有 8 秒钳制）；中心按总超时循环发起多轮。 */
+const TERMINAL_WAIT_ROUND_MS = 8_000;
 const MAX_PENDING_AGENT_REQUESTS = 256;
 /** send_terminal_input 单次输入（也是 create_terminal 要打入的命令）的字节上限（worker 侧另有同级钳制）。 */
 const MAX_TERMINAL_INPUT_BYTES = 64 * 1024;
@@ -388,7 +392,13 @@ interface PendingAgentRequest {
 
 type ServerAgentRequestPayload =
   | { case: "terminalRead"; value: { taskId: TaskId; sessionId: SessionId; maxBytes: number } }
-  | { case: "terminalInput"; value: { sessionId: SessionId; data: Uint8Array } };
+  | { case: "terminalInput"; value: { sessionId: SessionId; data: Uint8Array } }
+  | { case: "terminalRun"; value: { taskId: TaskId; sessionId: SessionId; command: string } }
+  | { case: "terminalWait"; value: { taskId: TaskId; sessionId: SessionId; commandSeq: bigint; timeoutMs: number } };
+
+/** Shell-integration command state of a live terminal as last carried by its checkpoint (≤2 s lag):
+ * what the account CLI's `terminal list` shows next to `running`. */
+export type TerminalCommandView = { integrated: boolean; busy: boolean; commandSeq: number; lastCommandExitCode: number | null };
 
 /** 固定窗口 + LRU 键上限：既限制单来源请求速率，也不让伪造来源把 limiter 自身撑爆内存。 */
 class FixedWindowLimiter {
@@ -422,6 +432,8 @@ export class Hub {
    * 必须保留 owner/epoch 与退休 owner；仅设备被撤销或 Hub 结束时清理。 */
   private daemonResyncAuthorities = new Map<DaemonId, DaemonResyncAuthority>();
   private sessions = new Map<SessionId, RuntimeSession>();
+  /** Command state of live sessions from their checkpoints (interactive-only terminal model); dropped with the session. */
+  private readonly commandStates = new Map<SessionId, TerminalCommandView>();
   private clients = new Set<ClientConn>();
   private readonly preparedOperations: PreparedOperationService<ClientConn, DaemonConn>;
   /** 完成原语（plan 091）：中心发起的 prepared 操作按 operationId、任务退出按 taskId 等结果。 */
@@ -1636,6 +1648,17 @@ export class Hub {
       ? live.taskId === checkpoint.taskId
       : runtime?.daemonId === daemon.info.daemonId && runtime.taskId === checkpoint.taskId;
     if (!matchesKnownSession) return;
+    // Command state rides along the checkpoint (interactive-only terminal model) and only lives in
+    // memory: the Task record stays as it is, the view is dropped with the session.
+    if (checkpoint.command) {
+      const command = checkpoint.command;
+      this.commandStates.set(checkpoint.sessionId, {
+        integrated: command.integrated,
+        busy: command.busy,
+        commandSeq: Number(command.commandSeq),
+        lastCommandExitCode: command.finishedSeq > 0n && command.exitCode !== undefined ? command.exitCode : null,
+      });
+    }
     await this.withDeviceEffectGuard(daemon.info.daemonId, async (effectGuard) => {
       const stored = await this.store.transaction(async (tx) => {
         // checkpoint 也是 device 子记录：父锁后重读 task，与 removeDevice 的
@@ -2541,9 +2564,15 @@ export class Hub {
     return true;
   }
 
+  /** Command state (busy / last exit) of a live terminal, or nothing when no checkpoint carried one yet. */
+  terminalCommandState(sessionId: SessionId): TerminalCommandView | undefined {
+    return this.commandStates.get(sessionId);
+  }
+
   private dropSession(sessionId: SessionId): void {
     const s = this.sessions.get(sessionId);
     this.sessions.delete(sessionId);
+    this.commandStates.delete(sessionId);
     const released = this.routeTable.releaseSession(sessionId);
     if (!released) return;
     for (const shortId of released.shortIds) this.tunnels.closeAllForShortId(shortId);
@@ -3836,7 +3865,7 @@ export class Hub {
   }
 
   /** server→daemon 读/写请求（plan 091）：有界等待一条 serverAgentResult；超时/断开返回 undefined。 */
-  private requestDaemonAgent(daemon: DaemonConn, payload: ServerAgentRequestPayload): Promise<ServerAgentResult | undefined> {
+  private requestDaemonAgent(daemon: DaemonConn, payload: ServerAgentRequestPayload, timeoutMs = AGENT_REQUEST_TIMEOUT_MS): Promise<ServerAgentResult | undefined> {
     if (this.pendingAgentRequests.size >= MAX_PENDING_AGENT_REQUESTS) return Promise.resolve(undefined);
     const requestId = randomUUID();
     return new Promise((resolve) => {
@@ -3845,7 +3874,7 @@ export class Hub {
         resolve,
         timer: setTimeout(() => {
           if (this.pendingAgentRequests.delete(requestId)) resolve(undefined);
-        }, AGENT_REQUEST_TIMEOUT_MS),
+        }, timeoutMs),
       };
       pending.timer.unref?.();
       this.pendingAgentRequests.set(requestId, pending);
@@ -4077,15 +4106,53 @@ export class Hub {
     // IDLE 先对外可见（与 web taskCreate + taskStart 的两步一致），收敛到 RUNNING 由 report 广播。
     this.emitTask(task);
     const outcome = await this.waitOperation(prepared.operation.operationId, initialWorkspace.daemonId);
+    let running: Task | undefined;
     if (outcome.case === "timeout") {
       const late = await this.store.getTask(task.id);
-      if (late && late.accountId === accountId && late.status === TaskStatus.RUNNING) return { ok: true, value: late };
-      return { ok: false, error: `终端已创建（terminalId: ${task.id}）但 ${OPERATION_WAIT_MS / 1000} 秒内未收到设备启动回执；稍后用 list_terminals / read_terminal 查看` };
+      if (!late || late.accountId !== accountId || late.status !== TaskStatus.RUNNING) {
+        return { ok: false, error: `终端已创建（terminalId: ${task.id}）但 ${OPERATION_WAIT_MS / 1000} 秒内未收到设备启动回执；稍后用 list_terminals / read_terminal 查看` };
+      }
+      running = late;
+    } else {
+      if (outcome.case === "failed") return { ok: false, error: `终端启动失败（terminalId: ${task.id}，记录仍在，可 remove_terminal 清理）：${outcome.message}` };
+      running = outcome.effect.task ?? await this.store.getTask(task.id);
     }
-    if (outcome.case === "failed") return { ok: false, error: `终端启动失败（terminalId: ${task.id}，记录仍在，可 remove_terminal 清理）：${outcome.message}` };
-    const running = outcome.effect.task ?? await this.store.getTask(task.id);
     if (!running) return { ok: false, error: "终端已启动但记录不可读，稍后用 list_terminals 查看" };
-    return { ok: true, value: running };
+    if (!command) return { ok: true, value: running };
+    // "do script": the daemon types the command only after the shell's prompt-ready mark. The
+    // terminal is open whatever happens next, so a refusal names it and points at send_terminal_input.
+    const typed = await this.typeIntoTerminal(accountId, running, command);
+    if (!typed.ok) return { ok: false, error: `终端已开（terminalId: ${running.id}）但命令未打入：${typed.error}；可用 send_terminal_input 手动输入` };
+    return { ok: true, value: await this.store.getTask(running.id) ?? running };
+  }
+
+  /** `terminal.run`: type a command into an existing live terminal once its shell is at the prompt (do-script). */
+  async runTerminalCommandForAccount(accountId: AccountId, terminalId: TaskId, command: string): Promise<OperationOutcome<{ terminalId: TaskId; commandSeq: number }>> {
+    const task = await this.store.getTask(terminalId);
+    if (!task || task.accountId !== accountId) return { ok: false, error: `终端 ${terminalId} 不存在或不属于当前账号` };
+    if (!command.trim()) return { ok: false, error: "命令为空" };
+    if (Buffer.byteLength(command, "utf8") > MAX_TERMINAL_INPUT_BYTES) return { ok: false, error: `命令不超过 ${MAX_TERMINAL_INPUT_BYTES} 字节` };
+    if (task.status === TaskStatus.EXITED) return { ok: false, error: "终端已退出，不能再输入（要跑新命令用 create_terminal）" };
+    if (task.status !== TaskStatus.RUNNING || !task.sessionId) return { ok: false, error: "终端尚未就绪（还没有会话），稍后重试" };
+    const typed = await this.typeIntoTerminal(accountId, task, command);
+    if (!typed.ok) return typed;
+    return { ok: true, value: { terminalId: task.id, commandSeq: typed.value } };
+  }
+
+  /** Shared do-script path: ask the daemon to type `command` after the prompt mark; returns the command sequence. */
+  private async typeIntoTerminal(accountId: AccountId, task: Task, command: string): Promise<OperationOutcome<number>> {
+    if (!task.sessionId) return { ok: false, error: "终端尚未就绪（还没有会话），稍后重试" };
+    const daemon = this.requireOnlineDaemon(task.daemonId, accountId, DAEMON_CAPABILITY_TERMINAL_IO);
+    if (!daemon.ok) return daemon;
+    const result = await this.requestDaemonAgent(
+      daemon.value,
+      { case: "terminalRun", value: { taskId: task.id, sessionId: task.sessionId, command } },
+      TERMINAL_RUN_TIMEOUT_MS,
+    );
+    if (!result) return { ok: false, error: "等待设备回执超时，命令是否打入未知；先 read_terminal 看看再决定是否重发" };
+    if (!result.ok) return { ok: false, error: result.error ?? "设备拒绝打入命令" };
+    if (result.payload.case !== "terminalRun") return { ok: false, error: "设备回执类型不匹配" };
+    return { ok: true, value: Number(result.payload.value.commandSeq) };
   }
 
   /** 读终端：daemon 在线且支持 terminal_io → 经 daemon（活会话的 sessiond 快照：滚动缓冲 + 当前屏）；否则中心 checkpoint。 */
@@ -4141,29 +4208,51 @@ export class Hub {
     return { ok: true, value: { bytes: data.byteLength } };
   }
 
-  /** 有界等待终端退出：到期返回当前状态而非报错。 */
-  async waitTerminalForAccount(accountId: AccountId, terminalId: TaskId, timeoutMs?: number): Promise<OperationOutcome<{ task: Task; exited: boolean; timedOut: boolean }>> {
+  /** Bounded wait for the terminal's current (or most recently started) command to finish, Terminal.app
+   * style: the daemon blocks on its command-state watch one round at a time and answers the moment the
+   * command ends (`finished` + its exit code) or the shell exits (`exited` + the shell's status); the
+   * deadline returns `timedOut` with the current state rather than an error. A shell that never signalled
+   * prompt readiness or has not run a command yet is refused readably by the daemon. */
+  async waitTerminalForAccount(
+    accountId: AccountId,
+    terminalId: TaskId,
+    timeoutMs?: number,
+  ): Promise<OperationOutcome<{ task: Task; exited: boolean; finished: boolean; timedOut: boolean; commandSeq: number | null; exitCode: number | null }>> {
     const initial = await this.store.getTask(terminalId);
     if (!initial || initial.accountId !== accountId) return { ok: false, error: `终端 ${terminalId} 不存在或不属于当前账号` };
     const wait = Math.max(1, Math.min(TERMINAL_WAIT_MAX_MS, Math.floor(timeoutMs ?? TERMINAL_WAIT_DEFAULT_MS)));
-    if (initial.status === TaskStatus.EXITED) return { ok: true, value: { task: initial, exited: true, timedOut: false } };
-    // 先登记等待者再重读，避免登记前那一瞬间的退出漏掉。
-    const waiting = this.taskExitCompletions.wait(initial.id, initial.daemonId, wait, { case: "timeout" });
-    if (!waiting) return { ok: false, error: "中心等待中的请求过多，请稍后重试" };
-    const recheck = await this.store.getTask(initial.id);
-    if (!recheck || recheck.accountId !== accountId) {
-      this.taskExitCompletions.resolve(initial.id, { case: "failed", message: "任务已删除" });
-      return { ok: false, error: "终端已被删除" };
+    const deadline = Date.now() + wait;
+    let task = initial;
+    for (;;) {
+      if (task.status === TaskStatus.EXITED) {
+        return { ok: true, value: { task, exited: true, finished: false, timedOut: false, commandSeq: null, exitCode: task.exitCode ?? null } };
+      }
+      if (task.status !== TaskStatus.RUNNING || !task.sessionId) return { ok: false, error: "终端尚未就绪（还没有会话），稍后重试" };
+      const daemon = this.requireOnlineDaemon(task.daemonId, accountId, DAEMON_CAPABILITY_TERMINAL_IO);
+      if (!daemon.ok) return daemon;
+      const round = Math.max(1, Math.min(TERMINAL_WAIT_ROUND_MS, deadline - Date.now()));
+      const result = await this.requestDaemonAgent(daemon.value, {
+        case: "terminalWait",
+        value: { taskId: task.id, sessionId: task.sessionId, commandSeq: 0n, timeoutMs: round },
+      });
+      if (!result) return { ok: false, error: "等待设备回执超时，请重试" };
+      if (!result.ok) return { ok: false, error: result.error ?? "设备拒绝等待" };
+      if (result.payload.case !== "terminalWait") return { ok: false, error: "设备回执类型不匹配" };
+      const observed = result.payload.value;
+      const fresh = await this.store.getTask(task.id);
+      if (!fresh || fresh.accountId !== accountId) return { ok: false, error: "终端已被删除" };
+      task = fresh;
+      const commandSeq = observed.commandSeq > 0n ? Number(observed.commandSeq) : null;
+      if (observed.state === "finished") {
+        return { ok: true, value: { task, exited: false, finished: true, timedOut: false, commandSeq, exitCode: observed.exitCode ?? null } };
+      }
+      if (observed.state === "exited") {
+        return { ok: true, value: { task, exited: true, finished: false, timedOut: false, commandSeq: null, exitCode: observed.exitCode ?? task.exitCode ?? null } };
+      }
+      if (Date.now() >= deadline) {
+        return { ok: true, value: { task, exited: false, finished: false, timedOut: true, commandSeq, exitCode: null } };
+      }
     }
-    if (recheck.status === TaskStatus.EXITED) {
-      this.taskExitCompletions.resolve(initial.id, { case: "exited", exitCode: recheck.exitCode ?? 0 });
-      return { ok: true, value: { task: recheck, exited: true, timedOut: false } };
-    }
-    const result = await waiting;
-    const final = await this.store.getTask(initial.id);
-    if (!final || final.accountId !== accountId) return { ok: false, error: "终端已被删除" };
-    if (result.case === "failed" && final.status !== TaskStatus.EXITED) return { ok: false, error: result.message };
-    return { ok: true, value: { task: final, exited: final.status === TaskStatus.EXITED, timedOut: result.case === "timeout" } };
   }
 
   /** 结束终端会话（等价 web 的停止：sessionClose 直发），随后有界等 sessionExit；返回时会话已退出或已在退出中。 */

@@ -263,6 +263,12 @@ struct AgentBody {
     text: String,
     #[serde(default)]
     enter: bool,
+    /// `terminal.wait`: command sequence to wait for (0 = the latest one started) and the
+    /// blocking bound in milliseconds (0 = the daemon's default round).
+    #[serde(default)]
+    command_seq: u64,
+    #[serde(default)]
+    timeout_ms: u64,
     /// 调用方的当前工作目录（plan 102）：CLI 每条请求都带 `process.cwd()`，daemon 据此把
     /// 请求的**目标**解析到 cwd 所在的工作区。旧 CLI 不带，缺省空串 = 退回归属工作区。
     #[serde(default)]
@@ -274,8 +280,8 @@ struct AgentBody {
     path: String,
 }
 
-/// 单次 send 的文本上限：与 MCP `send_terminal_input` 的 64 KB 同值（plan 094 对齐）；超长基本是
-/// 误把文件内容当输入灌，直接拒绝比截断安全。
+/// 单次 send 的文本上限（也是 `terminal.run` 命令行的上限）：与 MCP `send_terminal_input` 的 64 KB
+/// 同值（plan 094 对齐）；超长基本是误把文件内容当输入灌，直接拒绝比截断安全。
 const MAX_SEND_TEXT_BYTES: usize = 64 * 1024;
 
 async fn handle_agent(
@@ -300,6 +306,42 @@ async fn handle_agent(
             }
         }
         "terminal.list" => AgentAction::TerminalList,
+        "terminal.run" => {
+            // "do script": typed into an existing terminal once its shell signals prompt readiness.
+            if parsed.task_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.run 缺 taskId".into()));
+            }
+            if parsed.command.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.run 缺 command".into()));
+            }
+            if parsed.command.len() > MAX_SEND_TEXT_BYTES {
+                return Err(RequestError::BadRequest(format!(
+                    "terminal.run command 超过 {MAX_SEND_TEXT_BYTES} 字节上限"
+                )));
+            }
+            AgentAction::TerminalRun {
+                task_id: parsed.task_id,
+                command: parsed.command,
+            }
+        }
+        "terminal.wait" => {
+            if parsed.task_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.wait 缺 taskId".into()));
+            }
+            AgentAction::TerminalWait {
+                task_id: parsed.task_id,
+                command_seq: parsed.command_seq,
+                timeout_ms: parsed.timeout_ms,
+            }
+        }
+        "terminal.close" => {
+            if parsed.task_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.close 缺 taskId".into()));
+            }
+            AgentAction::TerminalClose {
+                task_id: parsed.task_id,
+            }
+        }
         "terminal.status" => {
             if parsed.task_id.trim().is_empty() {
                 return Err(RequestError::BadRequest("terminal.status 缺 taskId".into()));
