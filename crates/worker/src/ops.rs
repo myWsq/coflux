@@ -308,4 +308,3 @@ pub async fn read_file_text(root: &str, rel: &str) -> (bool, String, Option<Stri
         }
     }
 }
-
