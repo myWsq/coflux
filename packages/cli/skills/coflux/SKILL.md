@@ -14,12 +14,12 @@ and a way to operate the other workspaces and devices under the account when you
 
 | Track | Credentials | Reach | Use for |
 |---|---|---|---|
-| Local commands `coflux terminal/progress/notify/ports/executor` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, hand a bounded sub-task to the built-in executor: the default, fastest, no network dependency |
+| Local commands `coflux terminal/progress/notify/ports/executor` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, hand a bounded sub-task to the built-in executor: the default; some actions require a server connection |
 | Account CLI | app login or `coflux login` | all devices and workspaces in the account | child workspaces and remote terminals; JSON output |
 
-Of the local commands, `run`/`wait`/`read`/`send`/`close`/`notify`/`progress`/`executor` complete
-entirely inside the local daemon and never touch the center; `new`/`list`/`ports` are relayed to the
-center by the daemon on your behalf (terminals must appear in the user's sidebar, preview URLs are
+Of the local commands, `run`/`wait`/`read`/`send`/`close`/`progress`/`executor` complete
+entirely inside the local daemon and never touch the center; `new`/`list`/`ports`/`notify` are relayed to the
+center by the daemon on your behalf (terminals and notification history are persisted centrally; preview URLs are
 minted by the center). You only ever talk to the local daemon.
 
 ## Managed terminal integration
@@ -313,7 +313,7 @@ next one. Update it at milestones: reproduced, located, fixed and verifying, stu
 **does not interrupt the user**; it is a different channel from `notify`:
 
 - `progress` = broadcast (the user glances and knows the state, no response needed)
-- `notify` = call the user (the workspace turns "waiting for interaction", the user should come and look)
+- `notify` = send a persistent account notification asking the user to look or respond
 
 If unsure: when the user does not have to do anything, use `progress`.
 
@@ -323,13 +323,19 @@ If unsure: when the user does not have to do anything, use `progress`.
 coflux notify "Both approaches work; I need you to pick one"
 ```
 
-The user's sidebar switches this workspace to "waiting for interaction" and shows this sentence;
-they see it on the phone too. Use it when you are **really stuck**: a decision is needed, a
-password or a permission, a problem only a human can judge. One sentence saying what you need;
-do not write a log.
+This creates an unread notification in the account inbox, with this terminal and its owning
+workspace as the source. It works from any owned Coflux shell, even without an agent process.
+The desktop shows an in-app hint while foregrounded, including when the source workspace is
+already selected; when backgrounded it also requests a system notification. Clicking opens the
+source terminal and marks the notification read. History remains after reading, hooks, agent
+exit, or source deletion. An application that is fully quit syncs history on next launch.
 
-(Your normal questions and permission prompts already show up in the sidebar state; they need no
-extra notify. This is for "what you have to say cannot be guessed from the status icon".)
+Success means the server has saved the notification. A disconnected daemon, unsupported server,
+or timeout reports failure rather than silently falling back to workspace state. A transport retry
+of the same request is deduplicated; a separate invocation is a new notification. Keep the message
+concise (at most 2000 characters). Use this for decisions, blocked work, or review requests; use
+`progress` for updates that need no response. Automatic approval/question indicators remain
+separate and do not create inbox entries.
 
 ### Hand the user a clickable preview
 
@@ -394,7 +400,7 @@ there: the terminal is open all the same, use `read` and `send` with it; "busy" 
 still running in that terminal, `wait` for it or `read` first; "unknown action terminal.run" = this
 machine's daemon is older than the CLI, tell the user to run `cofluxd update && cofluxd restart`
 (the terminal was opened as a plain shell, nothing was run); "daemon is not connected to the
-center" only appears on `new`/`list`/`ports`, retry once it reconnects.
+center" only appears on `new`/`list`/`ports`/`notify`, retry once it reconnects.
 
 ## Account CLI: across workspaces and devices
 
@@ -441,8 +447,8 @@ result before retrying. Exiting the CLI does not stop its terminals. Delete work
 - A workspace has a cap on concurrently live terminals (default 8, including the user's own).
   On hitting the cap, `list` first: usually some finished terminals were never collected. If the
   user really filled it up, `notify` them instead of forcing it.
-- `new`/`list`/`ports` and account commands need the daemon connected to the center; "letting the
-  user see" is their whole point. `run`/`wait`/`read`/`send`/`close`/`notify`/`progress` do not
+- `new`/`list`/`ports`/`notify` and account commands need the daemon connected to the center; "letting the
+  user see" is their whole point. `run`/`wait`/`read`/`send`/`close`/`progress` do not
   depend on the center. When disconnected they fail loudly rather than degrade silently.
 - `COFLUX_*` variables exist only in PTYs opened by coflux; exporting or changing them yourself
   has no effect, the center only trusts the ids it issued. `COFLUX_WORKSPACE_ID` always means the

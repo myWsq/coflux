@@ -167,3 +167,18 @@ message ProxyData {
   string conn_id = 1;
   bytes data = 2;
 }
+
+// Immutable source snapshots survive deletion of the original target.
+message AccountNotification {
+  string id = 1;
+  double sequence = 2;
+  string message = 3;
+  string daemon_id = 4;
+  string device_name = 5;
+  string workspace_id = 6;
+  string workspace_name = 7;
+  string task_id = 8;
+  string terminal_title = 9;
+  double created_at = 10;
+  double read_at = 11;
+}

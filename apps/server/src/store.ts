@@ -18,6 +18,8 @@ import postgres from "postgres";
 import { runSchemaMigrations } from "./infra/database/schema-migrations.js";
 import {
   create,
+  AccountNotificationSchema,
+  type AccountNotification,
   TaskStatus,
   ProjectSchema,
   WorkspaceSchema,
@@ -274,6 +276,79 @@ export class Store {
     // UnwrapPromiseArray<T> 助手类型，那个类型对泛型 T 不可靠地推导为"与 T 无关的任意类型"）。
     const result = await this.sql.begin<T>((txSql) => fn(new Store(txSql as unknown as postgres.Sql<{}>)));
     return result as T;
+  }
+
+  // Serialize inbox reads and writes per account. This gives pages and unread counts
+  // a coherent revision even when multiple clients act concurrently.
+  async lockNotificationInbox(accountId: string): Promise<void> {
+    await this.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`inbox:${accountId}`}, 0))`;
+  }
+
+  async notificationSummary(accountId: string) {
+    const [row] = await this.sql<{ unreadCount: number; revision: number; latestSequence: number }[]>`
+      SELECT count(*) FILTER (WHERE read_at = 0)::int AS unread_count,
+        coalesce(max(revision), 0) AS revision, coalesce(max(sequence), 0) AS latest_sequence
+      FROM account_notifications WHERE account_id = ${accountId}`;
+    return row;
+  }
+
+  async notificationPage(accountId: string, before = 0) {
+    return this.transaction(async (tx) => {
+      await tx.lockNotificationInbox(accountId);
+      const rows = await tx.sql<AccountNotification[]>`
+        SELECT * FROM account_notifications WHERE account_id = ${accountId}
+          AND (${before}::double precision = 0 OR sequence < ${before})
+        ORDER BY sequence DESC LIMIT 51`;
+      const notifications = rows.slice(0, 50).map((row) => create(AccountNotificationSchema, row));
+      return { notifications, nextBeforeSequence: rows.length > 50 ? notifications.at(-1)!.sequence : 0,
+        ...await tx.notificationSummary(accountId) };
+    });
+  }
+
+  async createNotification(accountId: string, daemonId: string, sessionId: string, requestKey: string, message: string, id: string) {
+    return this.transaction(async (tx) => {
+      await tx.lockNotificationInbox(accountId);
+      const existing = await tx.sql<(AccountNotification & { sourceSessionId: string })[]>`SELECT * FROM account_notifications
+        WHERE account_id = ${accountId} AND daemon_id = ${daemonId} AND request_key = ${requestKey}`;
+      if (existing[0]) {
+        if (existing[0].message !== message || existing[0].sourceSessionId !== sessionId) throw new Error("通知请求标识已用于其他内容");
+        return { notification: create(AccountNotificationSchema, existing[0]), created: false, ...await tx.notificationSummary(accountId) };
+      }
+      const device = await tx.claimActiveDevice(daemonId, accountId);
+      const task = await tx.getTaskBySession(sessionId);
+      if (!device || !task || task.accountId !== accountId || task.daemonId !== daemonId) throw new Error("通知来源会话已失效");
+      const workspace = await tx.getWorkspace(task.workspaceId);
+      if (!workspace || workspace.accountId !== accountId || workspace.daemonId !== daemonId) throw new Error("通知来源工作区已失效");
+      const [row] = await tx.sql<AccountNotification[]>`INSERT INTO account_notifications
+        (id, account_id, daemon_id, request_key, source_session_id, revision, message, device_name, workspace_id, workspace_name, task_id, terminal_title, created_at)
+        VALUES (${id}, ${accountId}, ${daemonId}, ${requestKey}, ${sessionId}, nextval('notification_revision'), ${message},
+          ${device.name}, ${workspace.id}, ${workspace.name || workspace.branch || workspace.path}, ${task.id}, ${task.title}, ${Date.now()}) RETURNING *`;
+      return { notification: create(AccountNotificationSchema, row), created: true, ...await tx.notificationSummary(accountId) };
+    });
+  }
+
+  async readNotifications(accountId: string, id: string, throughSequence: number) {
+    return this.transaction(async (tx) => {
+      await tx.lockNotificationInbox(accountId);
+      const now = Date.now();
+      let notification: AccountNotification | undefined;
+      const summary = await tx.notificationSummary(accountId);
+      const cutoff = Math.min(throughSequence, summary.latestSequence);
+      if (id) {
+        const rows = await tx.sql<AccountNotification[]>`UPDATE account_notifications SET
+          read_at = CASE WHEN read_at = 0 THEN ${now} ELSE read_at END,
+          revision = nextval('notification_revision')
+          WHERE account_id = ${accountId} AND id = ${id} RETURNING *`;
+        if (!rows.length) throw new Error("通知不存在或不属于本账号");
+        notification = create(AccountNotificationSchema, rows[0]);
+      } else {
+        // Bulk reads must not materialize the entire notification history in memory.
+        await tx.sql`UPDATE account_notifications SET read_at = ${now}, revision = nextval('notification_revision')
+          WHERE account_id = ${accountId} AND sequence <= ${cutoff} AND read_at = 0`;
+      }
+      return { notification, readThroughSequence: id ? 0 : cutoff, readAt: now,
+        ...await tx.notificationSummary(accountId) };
+    });
   }
 
   /** 轻量探活（供 /health） */

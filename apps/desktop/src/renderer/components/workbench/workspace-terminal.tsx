@@ -1,11 +1,10 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { Bot, ExternalLink, FileDiff, GitBranch, History, LoaderCircle, Plus, Router, SquareTerminal, Unplug, X } from "lucide-react";
+import { Bot, FileDiff, GitBranch, History, LoaderCircle, Plus, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
-import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { ChangesView } from "@/components/workbench/changes-view";
@@ -110,7 +109,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
   const daemons = useStore(client.store, (state) => state.daemons);
   const modPrefix = SHORTCUT_MODIFIER_PREFIX;
   const lastError = useStore(client.store, (state) => state.lastError);
-  const ports = useStore(client.store, (state) => state.ports);
   // agent presence（plan 073/075）：引用只在实际变化时更新（worker 变化才发），直接订阅。
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
   // OSC 终端标题（plan 075）：checkpoint 每 ~2s 换引用（有输出即上报），必须用选择器把
@@ -333,7 +331,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
 
   const activeTask = workspaceTasks.find((task) => task.id === activeTaskId) ?? null;
   const activeControlState: TerminalControlState = activeTask ? stateOf(activeTask) : "stopped";
-  const activePorts = activeTask ? (ports[activeTask.id] ?? []) : [];
 
   useImperativeHandle(ref, () => ({
     createTerminal,
@@ -365,7 +362,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
           代价是拖拽区吞掉指针事件——以后往顶栏里加任何可点/可悬浮的元素，都必须给它带上
           NO_DRAG_REGION_STYLE，否则在桌面版里点不到、Tooltip 也不出（见 drag-region.ts）。 */}
       <header
-        className="col-start-1 row-start-1 flex h-9 min-w-0 items-center gap-2 border-b border-border bg-background px-3"
+        className="col-start-1 row-start-1 flex h-9 min-w-0 items-center gap-2 border-b border-border bg-background pl-3 pr-20"
         style={DRAG_REGION_STYLE}
       >
         {isDirWorkspace ? null : (
@@ -389,7 +386,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             <div className="h-4 w-px shrink-0 bg-border" />
           </>
         )}
-        <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto pr-6 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {/* 常驻「变更」tab（plan 025）：与终端 Tab 同级同组、选中态互斥；
               统计徽标并入 tab，X=Y=0 时数字隐藏，min-w 对齐「终端 N」默认标题 Tab 的实际宽度（≈96px）避免显得过窄，内容靠左。 */}
           {isDirWorkspace ? null : (
@@ -416,7 +413,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             const state = stateOf(task);
             // 「变更」视图激活时终端 Tab 一律去高亮，两种视图选中态互斥（plan 025）。
             const isActive = view === "terminal" && task.id === activeTaskId;
-            const taskPorts = ports[task.id] ?? [];
             const daemon = daemons.find((item) => item.daemonId === task.daemonId);
             const agentEntry = task.sessionId ? sessionAgents[task.sessionId] : undefined;
             const sessionId = task.sessionId;
@@ -438,7 +434,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                   "group flex h-7 max-w-52 shrink-0 items-center rounded-md text-sm transition-colors",
                   isActive ? "bg-accent text-foreground" : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
                 )}
-                // 整个 tab 项挖出拖拽区，内部的切换按钮 / 端口菜单 / 关闭按钮都落在这块 no-drag 矩形里
+                // Keep tab selection and close controls outside the native drag region.
                 style={NO_DRAG_REGION_STYLE}
               >
                   <button
@@ -468,25 +464,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                       </Tooltip>
                     )}
                   </button>
-                {taskPorts.length > 0 ? (
-                  <DropdownMenu
-                    button={{
-                      label: "转发端口",
-                      tooltip: "转发端口",
-                      icon: <Router className="size-3" />,
-                      isIconOnly: true,
-                      variant: "ghost",
-                      size: "sm",
-                      className:
-                        "mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-70 transition-colors hover:bg-muted hover:text-foreground",
-                    }}
-                    hasChevron={false}
-                    items={taskPorts.map((preview) => ({
-                      label: `:${preview.port}`,
-                      onClick: () => window.open(preview.url, "_blank", "noreferrer"),
-                    }))}
-                  />
-                ) : null}
                 <Tooltip content={`关闭终端 ${modPrefix}W`} placement="below">
                   <button
                     className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
@@ -533,23 +510,6 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             </button>
           </Tooltip>
         </div>
-        {activePorts.length > 0 ? (
-          <div className="flex shrink-0 items-center gap-1">
-            {activePorts.map((preview) => (
-              <a
-                key={preview.port}
-                href={preview.url}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex h-5 items-center gap-1 rounded px-1.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                style={NO_DRAG_REGION_STYLE}
-              >
-                :{preview.port}
-                <ExternalLink className="size-2.5" />
-              </a>
-            ))}
-          </div>
-        ) : null}
       </header>
 
       {/* 主体：与面板层同占网格第二行（面板层在 DOM 上排在后面、整层 pointer-events-none，

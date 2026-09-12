@@ -371,8 +371,17 @@ pub fn run_notify(args: &ParsedArgs) {
     if message.is_empty() {
         crate::die("notify 需要一句话，例如：coflux notify \"两个方案拿不准，需要你定\"");
     }
-    gateway::agent_post(with(body("notify"), "message", message));
-    println!("已通知用户（工作区在侧栏转为「等待交互」）");
+    use std::io::Read;
+    let mut bytes = [0u8; 24];
+    if std::fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(&mut bytes)).is_err() {
+        crate::die("无法生成通知请求标识");
+    }
+    let notification_id: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let result = gateway::agent_post(with(with(body("notify"), "message", message), "notificationId", notification_id));
+    if result.get("notificationId").and_then(serde_json::Value::as_str).filter(|id| !id.is_empty()).is_none() {
+        crate::die("daemon 不支持持久通知，请升级；未确认送达");
+    }
+    println!("通知已发送（已保存到账号通知中心）");
 }
 
 pub fn run_progress(args: &ParsedArgs) {

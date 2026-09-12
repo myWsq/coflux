@@ -3,18 +3,19 @@ import { app, Notification } from "electron";
 import type { DesktopNotification } from "../shared/desktop-bridge";
 
 /**
- * 系统通知 + Dock 角标（plan 103）：主进程只执行，状态判定在渲染层（desktop-attention.ts）。
- * Electron 42+ 在 macOS 用 UNUserNotification：未签名构建上直接失败，这里不做「退回 HTML5
- * Notification」的分叉——通知/角标只在签名产物上验收。
+ * Native notifications and Dock badges. The renderer derives attention events and counts;
+ * the main-process caller checks actual window focus and visibility before showing explicit
+ * inbox notifications. Electron 42+ uses UNUserNotification on macOS, which requires a signed
+ * build. Verify native delivery with a signed package; there is no HTML5 Notification fallback.
  */
-export function showWorkspaceNotification(notification: DesktopNotification, onClick: (workspaceId: string) => void): void {
+export function showWorkspaceNotification(notification: DesktopNotification, onClick: (notification: DesktopNotification) => void): void {
   if (!Notification.isSupported()) return;
   const native = new Notification({ title: notification.title, body: notification.body });
-  native.on("click", () => onClick(notification.workspaceId));
+  native.on("click", () => onClick(notification));
   native.show();
 }
 
-/** 待处理工作区数；0 清空。非 macOS 没有 dock，安静忽略。 */
+/** Combined waiting-workspace and unread-inbox count; zero clears the badge. No-op without a Dock. */
 export function setDockBadge(count: number): void {
   app.dock?.setBadge(count > 0 ? String(count) : "");
 }

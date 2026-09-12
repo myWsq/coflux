@@ -1,3 +1,5 @@
+import { PortMenu } from "./port-menu";
+import { NotificationInbox } from "./notification-inbox";
 import { lazy, Suspense, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { AlertCircle, FolderGit2, LoaderCircle, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
@@ -21,7 +23,7 @@ import { useSettingsTooltipControl } from "@/components/workbench/account-footer
 import { countLocalRunningTerminals } from "@/components/workbench/daemon-view";
 import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "@/components/workbench/desktop-attention";
 import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
-import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
+import { DESKTOP_DRAG_BAND_STYLE, NO_DRAG_REGION_STYLE } from "@/components/workbench/drag-region";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useTerminalAttach } from "@/components/workbench/terminal-attach";
@@ -105,12 +107,14 @@ function DesktopAttention({ client, bridge, selectedWorkspaceId }: { client: Cof
   const tasks = useStore(client.store, (state) => state.tasks);
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
   const projects = useStore(client.store, (state) => state.projects);
+  const unreadCount = useStore(client.store, (state) => state.notificationInbox.unreadCount);
   const previousRef = useRef<AttentionSnapshot>({});
   const badgeRef = useRef(0);
 
   useEffect(() => {
     const next = attentionSnapshot({ workspaces, daemons, tasks, sessionAgents, projects });
-    const { entered, badgeCount } = diffAttention(previousRef.current, next);
+    const { entered, badgeCount: waitingCount } = diffAttention(previousRef.current, next);
+    const badgeCount = waitingCount + unreadCount;
     previousRef.current = next;
     if (badgeCount !== badgeRef.current) {
       badgeRef.current = badgeCount;
@@ -121,7 +125,7 @@ function DesktopAttention({ client, bridge, selectedWorkspaceId }: { client: Cof
       if (workspaceId === selectedWorkspaceId && document.hasFocus()) continue;
       bridge.notify({ workspaceId, ...attentionNotificationText(entry) });
     }
-  }, [workspaces, daemons, tasks, sessionAgents, projects, bridge, selectedWorkspaceId]);
+  }, [workspaces, daemons, tasks, sessionAgents, projects, bridge, selectedWorkspaceId, unreadCount]);
 
   // 卸载（登出、掉到 outdated/login 面）时清角标并重置快照：否则 Dock 会停在最后一个数字，
   // 且重新挂载后旧快照会让本该重新提醒的等待被当成「已提醒过」。
@@ -219,6 +223,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [activeTabs, setActiveTabs] = useState<Record<string, WorkspaceActiveTab>>({});
   const activeTabsRef = useRef(activeTabs);
   // 终端被搬进某工作区后要求它继续当活动 Tab（plan 104）：一次性，容器消费掉即清。
+  const [notificationOpen, setNotificationOpen] = useState(false);
   const [followTask, setFollowTask] = useState<{ workspaceId: string; taskId: string } | null>(null);
   const activeWorkspaceIdRef = useRef<string | null>(null);
   // 已挂过面板的 task：面板寿命与工作区容器解耦，终端被搬到没访问过的工作区也不重建。
@@ -381,6 +386,18 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const next: WorkbenchSelection = { kind: "workspace", id: workspaceId };
     setSelection(next);
     persistSelection(next);
+  }
+
+  function navigateNotificationTask(taskId: string): boolean {
+    const state = client.store.getState();
+    const task = state.tasks.find((item) => item.id === taskId);
+    if (!task || !state.workspaces.some((item) => item.id === task.workspaceId)) return false;
+    activeTabsRef.current = { ...activeTabsRef.current, [task.workspaceId]: { taskId, viewIsTerminal: true } };
+    setActiveTabs(activeTabsRef.current);
+    setFollowTask({ workspaceId: task.workspaceId, taskId });
+    setSettingsOpen(false);
+    selectWorkspace(task.workspaceId);
+    return true;
   }
 
   // 点系统通知 → 主进程把窗口带到前台并回传工作区 id → 选中它（工作区已删则安静忽略）。
@@ -630,11 +647,22 @@ export function Workbench({ client }: { client: CofluxClient }) {
     // 点不到切换/关闭终端（padding 改变容器高度，终端 fit 由 ResizeObserver 跟随）。
     <div
       className={cn(
-        "flex h-screen min-h-[640px] min-w-[1024px] overflow-hidden bg-background text-foreground",
+        "relative flex h-screen min-h-[640px] min-w-[1024px] overflow-hidden bg-background text-foreground",
         showReconnectBanner && "pt-7",
       )}
     >
       <DesktopAttention client={client} bridge={desktop} selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null} />
+      {/* A single action dock stays outside all workspace tab scrollers, including empty views. */}
+      <div
+        role="group"
+        aria-label="终端栏操作"
+        className="absolute right-0 z-30 flex h-9 w-20 items-center justify-center gap-2 border-b border-border bg-background"
+        style={{ top: showReconnectBanner ? 28 : 0, ...NO_DRAG_REGION_STYLE }}
+      >
+        <div aria-hidden className="pointer-events-none absolute inset-y-0 right-full w-6 bg-gradient-to-r from-transparent to-background" />
+        <PortMenu key={activeWorkspaceId ?? "none"} client={client} workspaceId={activeWorkspaceId} />
+        <NotificationInbox client={client} open={notificationOpen} onOpen={() => { setSettingsOpen(false); setNotificationOpen(true); }} onClose={() => setNotificationOpen(false)} onNavigate={navigateNotificationTask} />
+      </div>
       <Sidebar
         client={client}
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}

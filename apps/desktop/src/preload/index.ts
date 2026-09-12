@@ -35,6 +35,8 @@ const bridge: DesktopBridge = {
   notify(notification: DesktopNotification) {
     ipcRenderer.send(IPC.notify, {
       workspaceId: String(notification.workspaceId),
+      notificationId: notification.notificationId,
+      taskId: notification.taskId,
       title: String(notification.title),
       body: String(notification.body),
     });
@@ -44,6 +46,9 @@ const bridge: DesktopBridge = {
   },
   showServerInfo() {
     ipcRenderer.send(IPC.showServerInfo);
+  },
+  onFocusNotification(listener) {
+    return subscribe<DesktopNotification>(IPC.focusNotification, listener);
   },
   onFocusWorkspace(listener) {
     return subscribe<string>(IPC.focusWorkspace, listener);
