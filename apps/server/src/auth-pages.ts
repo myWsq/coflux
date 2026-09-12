@@ -154,7 +154,9 @@ export function readPageCookie(cookieHeader: string | null | undefined): string 
 /** 来源纵深校验：`Sec-Fetch-Site` / `Origin` 存在且不是同源就拒；缺失放行（Node fetch 不带 Origin，黑盒才跑得通）。 */
 export function crossSiteRequest(headers: { get(name: string): string | null }, publicOrigin: string): boolean {
   const site = headers.get("sec-fetch-site");
-  if (site && site !== "same-origin" && site !== "none") return true;
+  // 浏览器已声明同源（或用户直接发起），以它为准：同源表单 POST 的 Origin 在部分 referrer 策略下会被
+  // 浏览器序列化成字面量 "null"（Fetch 规范），再拿它和 publicOrigin 比就会把真人误拒。
+  if (site) return site !== "same-origin" && site !== "none";
   const origin = headers.get("origin");
   if (origin && origin !== publicOrigin) return true;
   return false;
@@ -295,7 +297,8 @@ const PAGE_HEADERS: Record<string, string> = {
   "cache-control": "no-store",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
-  "referrer-policy": "no-referrer",
+  // same-origin 而非 no-referrer：no-referrer 会让同源表单 POST 的 Origin 头变成 "null"，没有 Sec-Fetch-Site 的浏览器就过不了来源校验
+  "referrer-policy": "same-origin",
   "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
 };
 

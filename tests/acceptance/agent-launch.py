@@ -19,7 +19,8 @@ with tempfile.TemporaryDirectory(prefix='coflux-launch-') as temp:
         fixture = home / 'hosts' / host
         fixture.write_text('#!/bin/sh\nprintf "%s\\n" "$COFLUX_AGENT_BUNDLE"\nprintf "%s\\n" "$@"\n')
         fixture.chmod(0o755)
-    env = {**os.environ, 'COFLUX_HOME': str(home), 'HOME': str(home), 'COFLUX_SESSION_ID': 'launch-probe',
+    env = {**{key: value for key, value in os.environ.items() if not key.startswith('COFLUX_')},
+           'COFLUX_HOME': str(home), 'HOME': str(home), 'COFLUX_SESSION_ID': 'launch-probe',
            'PATH': str(home / 'hosts') + ':' + os.environ['PATH']}
     def run(args, overrides=None):
         return subprocess.run(args, env={**env, **(overrides or {})}, text=True, capture_output=True, check=True).stdout
@@ -27,7 +28,8 @@ with tempfile.TemporaryDirectory(prefix='coflux-launch-') as temp:
     # The same live shell reads the stable launcher again after an atomic executable update.
     shell = subprocess.Popen(['/bin/bash', '--noprofile', '--norc'], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     try:
-        shell.stdin.write(f'source "{ROOT}/crates/supervisor/src/shell/claude.sh"\nclaude "argument with spaces"\necho END\n')
+        # A self-referencing user alias keeps its arguments and still reaches the wrapper.
+        shell.stdin.write(f'shopt -s expand_aliases\nalias codex="codex --yolo"\nsource "{ROOT}/crates/supervisor/src/shell/claude.sh"\nclaude "argument with spaces"\necho END\n')
         shell.stdin.flush()
         lines = []
         while (line := shell.stdout.readline().strip()) != 'END':
@@ -43,17 +45,18 @@ with tempfile.TemporaryDirectory(prefix='coflux-launch-') as temp:
             with replacement.open('ab') as f:
                 f.write(b'\ncoflux-acceptance-next-release\n')
         replacement.replace(stable)
-        shell.stdin.write('codex "next invocation"\necho END\n')
+        shell.stdin.write('codex exec "next invocation"\necho END\n')
         shell.stdin.flush()
         lines = []
         while (line := shell.stdout.readline().strip()) != 'END':
             lines.append(line)
         second = lines[0]
         assert second != first and Path(second).is_dir(), lines
+        assert lines[-3:] == ['--yolo', 'exec', 'next invocation'], lines
         for host_shell, wrapper in [('zsh', 'claude.sh'), ('fish', 'coflux.fish')]:
             executable = shutil.which(host_shell)
             if executable:
-                output = run([executable, '-c', 'source ' + shlex.quote(str(ROOT / 'crates/supervisor/src/shell' / wrapper)) + '; codex "argument with spaces"'])
+                output = run([executable, '-c', 'source ' + shlex.quote(str(ROOT / 'crates/supervisor/src/shell' / wrapper)) + '; codex exec "argument with spaces"'])
                 assert output.splitlines()[0] == second and output.splitlines()[-1] == 'argument with spaces'
         assert (Path(first) / 'coflux').read_bytes() == original
         assert json.loads(run([str(Path(first) / 'coflux'), 'agent', 'prepare']))['directory'] == first

@@ -71,9 +71,10 @@ The npm package installs **two distinct commands**. The desktop app also bundles
 
 ```sh
 # Inside a Coflux terminal: operate on the current workspace.
-coflux terminal new --title "Tests" --cmd "pnpm test"
-coflux terminal list
-coflux terminal read <terminal-id>
+coflux terminal new --title "Tests" --cmd "pnpm test"   # a persistent shell; the command is typed in once its prompt is ready
+coflux terminal wait <terminal-id>                      # blocks until that command finishes and prints its exit code
+coflux terminal read <terminal-id>                      # the tail of the terminal's scrollback
+coflux terminal close <terminal-id>
 coflux progress "Tests passed; reviewing the diff."
 
 # From a separately installed CLI: sign in, then reach another workspace.

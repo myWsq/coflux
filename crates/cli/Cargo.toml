@@ -20,3 +20,5 @@ ureq = { version = "2", features = ["json"] }
 url = "2"
 sha2 = "0.10"
 regex = "1"
+signal-hook = "0.3"
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }

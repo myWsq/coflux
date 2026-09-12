@@ -18,11 +18,11 @@ use coflux_protocol::wire::{
     DevicePtyInput, DevicePtyInputAck, DevicePtyOutput, DevicePtyResize, DeviceSessionAttach,
     DeviceSessionAttached, DeviceSessionCatalog, DeviceSessionCatalogRequest, DeviceSessionCreate,
     DeviceSessionExitTombstone, DeviceSessionExited, DeviceSessionInfo, DeviceSessionSnapshot,
-    DeviceSessionSnapshotRequest, DeviceSessionStop,
+    DeviceSessionSnapshotRequest, DeviceSessionStop, TerminalCommandState,
 };
 use coflux_protocol::{
-    decode_device_envelope, encode_device_envelope, encode_frame, write_record, DataFrame,
-    SessionInfo, SupervisorToWorker, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
+    decode_device_envelope, encode_device_envelope, encode_frame, write_record, CommandStateInfo,
+    DataFrame, SessionInfo, SupervisorToWorker, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
     MAX_FRAME_ID_BYTES, MAX_TERMINAL_DIMENSION, MIN_TERMINAL_DIMENSION,
 };
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -65,6 +65,22 @@ const CATALOG_LEASE_LIMIT: usize = 1024;
 /// 未 ACK exit fact 不能随中心断线无界增长。超过窗口时只丢最旧精确退出码；下一次完整
 /// catalog 的“live 缺席”仍会把中心 task 收敛为 EXITED，因此不会留下永久僵尸。
 /// 会话归属 id（plan 092）：中心随建会话请求带下来，supervisor 在 [`Sessions::create_session`] 里组装成
+/// Environment variable through which the supervisor hands the per-session mark secret to the
+/// shell. coflux's own rc copies it into a shell-scoped variable and unsets it before anything
+/// else runs, so nested and remote shells never carry it (see `shell/*`).
+pub const TERMINAL_SECRET_ENV: &str = "COFLUX_TERMINAL_SECRET";
+
+/// `wire::TerminalCommandState` view of the sessiond command state.
+fn wire_command_state(state: CommandStateInfo) -> TerminalCommandState {
+    TerminalCommandState {
+        integrated: state.integrated,
+        busy: state.busy,
+        command_seq: state.command_seq,
+        finished_seq: state.finished_seq,
+        exit_code: state.exit_code,
+    }
+}
+
 /// `COFLUX_*` 环境变量注入 PTY，让跑在里面的 agent 读环境变量就知道自己在哪台设备/项目/工作区/终端。
 /// 变量名与组装只在 supervisor 一处，中心与 worker 只下发 id，不下发任意 env map。
 /// 缺失（旧中心 / 旧 worker）为空串：对应变量仍然存在、值为空；`session_id` / `task_id` supervisor 自己知道，
@@ -852,8 +868,11 @@ impl Sessions {
         // plan 115：shell 集成——按 shell 的 basename 分派，给 shell 塞一段我们自己的 rc，由它在用户 rc
         // 全部跑完之后定义 claude 函数，把 COFLUX_CLAUDE_PLUGIN_DIR 翻译成 `claude --plugin-dir <dir>`。
         // ZDOTDIR / XDG_DATA_DIRS 是覆盖语义，与上面两段同理必须写在拷贝 std::env 之后（用户原来的
-        // ZDOTDIR 由 plan() 从 supervisor 自身环境里读出来，交给 rc 转发）。认不出的 shell（含命令终端
-        // 那种指向包装脚本的 shell）不注入，行为与今天逐字相同。
+        // ZDOTDIR 由 plan() 从 supervisor 自身环境里读出来，交给 rc 转发）。认不出的 shell（如 /bin/sh
+        // 或黑盒用例里的包装脚本）不注入，行为与今天逐字相同。
+        // Shell-integration marks (interactive-only terminal model): only an instrumented shell gets
+        // the per-session secret; sessiond accepts OSC 133 marks solely when they present it.
+        let mut mark_secret = String::new();
         if let Some(injection) =
             shell_integration::plan(&shell, &self.home, |key| std::env::var(key).ok())
         {
@@ -861,6 +880,10 @@ impl Sessions {
                 command.env(key, value);
             }
             command.args(injection.args);
+            let mut raw = [0u8; 16];
+            OsRng.fill_bytes(&mut raw);
+            mark_secret = hex::encode(raw);
+            command.env(TERMINAL_SECRET_ENV, &mark_secret);
         }
         let mut child = pair
             .slave
@@ -906,7 +929,8 @@ impl Sessions {
                 cwd,
                 pid,
                 started_at: now_ms(),
-                state: SessionState::new(rows, cols, self.history_line_limit),
+                state: SessionState::new(rows, cols, self.history_line_limit)
+                    .with_mark_secret(mark_secret),
             }));
             map.insert(session_id.clone(), session.clone());
             self.bump_snapshot_epoch();
@@ -1060,6 +1084,16 @@ impl Sessions {
                         let mut locked = session.lock().unwrap();
                         let pending = locked.state.feed(chunk);
 
+                        // A coflux mark moved the command state: push it so the worker's `wait`
+                        // and do-script wake immediately (snapshots carry the same state as a
+                        // fallback). Best effort — a dropped push is repaired by the next snapshot.
+                        if let Some(state) = locked.state.take_command_change() {
+                            let _ = this.send_ctrl(&SupervisorToWorker::SessionCommand {
+                                session_id: session_id.clone(),
+                                state,
+                            });
+                        }
+
                         // 只通知 worker 该 session 的派生 checkpoint 已脏；PTY 原始字节不离开
                         // supervisor/sessiond。保留旧 output frame 编号便于跨版本 worker 忽略 payload。
                         let dirty = match encode_frame(&DataFrame::Output {
@@ -1204,6 +1238,7 @@ impl Sessions {
                     session_id,
                     task_id: locked.task_id.clone(),
                     pid: locked.pid,
+                    command: Some(locked.state.command_state()),
                 }
             })
             .collect();
@@ -1585,6 +1620,7 @@ impl Sessions {
                 cols: u32::from(locked.state.cols()),
                 rows: u32::from(locked.state.rows()),
                 title: locked.state.title().to_string(),
+                command: Some(wire_command_state(locked.state.command_state())),
             }),
         );
     }

@@ -104,9 +104,9 @@ const TASK_READ_TIMEOUT_MS = 15_000;
 /** deviceAuthorize 的等待上限：服务端要把 DaemonEnrolled 送达 daemon 并等它上线才回 deviceAuthorized。 */
 const DEVICE_AUTHORIZE_TIMEOUT_MS = 20_000;
 
-/** 已退出终端的最后输出来源（plan 097）：log = 命令终端的非 tty 纯文本日志尾部；snapshot / checkpoint = 规范化 ANSI
- * 屏幕（分别来自 daemon 当前画面与中心缓存）；none = 没有任何可回放内容。 */
-export type TaskReadSource = "log" | "snapshot" | "checkpoint" | "none";
+/** 已退出终端的最后输出来源（plan 097）：snapshot / checkpoint = 规范化 ANSI 屏幕（分别来自 daemon 当前画面与
+ * 中心缓存）；none = 没有任何可回放内容。 */
+export type TaskReadSource = "snapshot" | "checkpoint" | "none";
 export type TaskReadResult =
   | { ok: true; taskId: string; data: Uint8Array; source: TaskReadSource; capturedAt: number; status: TaskStatus; exitCode?: number }
   | { ok: false; error: string };
@@ -834,7 +834,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           break;
         }
         const source: TaskReadSource =
-          value.source === "log" || value.source === "snapshot" || value.source === "checkpoint" ? value.source : "none";
+          value.source === "snapshot" || value.source === "checkpoint" ? value.source : "none";
         pending.resolve({
           ok: true,
           taskId: value.taskId,

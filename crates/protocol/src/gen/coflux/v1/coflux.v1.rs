@@ -797,6 +797,28 @@ pub struct DeviceSessionSnapshotRequest {
     #[prost(string, tag="2")]
     pub session_id: ::prost::alloc::string::String,
 }
+/// Command state of a live shell, derived by sessiond from the OSC 133 marks that coflux's own
+/// rc chain emits together with the per-session secret. Marks without that secret (remote hosts
+/// reached over ssh, nested shells, prompt frameworks) are ignored, so a nested shell or an ssh
+/// session looks like one long-running command from the outside.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TerminalCommandState {
+    /// At least one accepted mark has arrived: the shell is zsh/bash/fish started through coflux's
+    /// rc chain and its prompt has been drawn at least once.
+    #[prost(bool, tag="1")]
+    pub integrated: bool,
+    /// A command has started and not finished yet.
+    #[prost(bool, tag="2")]
+    pub busy: bool,
+    /// Monotonic count of commands started in this shell; 0 = none yet.
+    #[prost(uint64, tag="3")]
+    pub command_seq: u64,
+    /// Sequence of the last finished command (0 = none) and its exit status.
+    #[prost(uint64, tag="4")]
+    pub finished_seq: u64,
+    #[prost(int32, optional, tag="5")]
+    pub exit_code: ::core::option::Option<i32>,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceSessionSnapshot {
     #[prost(string, tag="1")]
@@ -815,6 +837,9 @@ pub struct DeviceSessionSnapshot {
     /// 源头截断；空 = 从未设置或旧 supervisor 不支持，消费方一律回落自身默认。
     #[prost(string, tag="7")]
     pub title: ::prost::alloc::string::String,
+    /// Shell-integration command state at snapshot time; absent from old supervisors.
+    #[prost(message, optional, tag="8")]
+    pub command: ::core::option::Option<TerminalCommandState>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DevicePtyOutput {
@@ -930,16 +955,17 @@ pub struct DeviceSessionCreate {
     pub task_id: ::prost::alloc::string::String,
     #[prost(string, tag="5")]
     pub cwd: ::prost::alloc::string::String,
+    /// Unused: the supervisor always starts the workspace's default login shell (a real tty that
+    /// lives until exit). Kept for wire compatibility; the center never fills it.
     #[prost(string, optional, tag="6")]
     pub shell: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(uint32, tag="7")]
     pub cols: u32,
     #[prost(uint32, tag="8")]
     pub rows: u32,
-    /// 非空时该会话是「跑一条命令」的命令终端（plan 091）：worker 在 authorize 通过后、交给 sessiond
-    /// 前本地写包装脚本（登录 shell 执行、tee 落日志、跑完退出带退出码）并把 shell 填成脚本路径。
-    /// 脚本路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
-    /// 会被判成 operation_collision。旧 worker 不认识本字段会起成普通 shell，由中心的能力门禁挡住。
+    /// Unused since the interactive-only terminal model: a command the center wants typed in is sent
+    /// separately (ServerTerminalRun) once the shell has signalled prompt readiness. Kept for wire
+    /// compatibility; always empty.
     #[prost(string, tag="9")]
     pub command: ::prost::alloc::string::String,
     /// 10 起是会话归属 id（plan 092）：与 daemon.proto SessionCreate 7 起同名同义，supervisor 据此组装
@@ -1213,6 +1239,9 @@ pub struct SessionCheckpoint {
     /// OSC 0/2 终端标题（plan 075），随 snapshot 原样透传；语义同 DeviceSessionSnapshot.title。
     #[prost(string, tag="8")]
     pub title: ::prost::alloc::string::String,
+    /// Command state (busy / sequence / last exit) carried along with the snapshot; absent from old daemons.
+    #[prost(message, optional, tag="9")]
+    pub command: ::core::option::Option<TerminalCommandState>,
 }
 /// client→daemon：把本 client 登记成本机 executor host（可重复发送 = 幂等更新）。
 /// 同一 daemon 只认一个 host：host_id 稳定标识桌面实例，host_epoch 是同一 host 的连接换代号
@@ -1762,7 +1791,7 @@ pub struct TaskRemove {
     pub task_id: ::prost::alloc::string::String,
 }
 /// 读取一个任务（终端）的最后输出（plan 097）：web 激活已退出的 Tab 时回放用。server 复用
-/// agent read 的三层来源（daemon 命令日志 → daemon 当前快照 → 中心 checkpoint），结果只回给发起连接。
+/// agent read 的两层来源（daemon 当前快照 → 中心 checkpoint），结果只回给发起连接。
 /// max_bytes 为 0 取服务端默认；超过上限被钳制。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TaskRead {
@@ -2015,8 +2044,8 @@ pub struct OAuthAuthorizeResult {
     #[prost(string, optional, tag="3")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// TaskRead 的回应：data 按 source 解释——log 是命令终端的非 tty 纯文本日志尾部（\n 换行）；
-/// snapshot / checkpoint 是规范化 ANSI 屏幕；none 表示没有任何可回放内容（data 为空）。
+/// TaskRead 的回应：data 按 source 解释——snapshot / checkpoint 是规范化 ANSI 屏幕（分别来自 daemon
+/// 当前画面与中心缓存）；none 表示没有任何可回放内容（data 为空）。
 /// status / exit_code 取自回应时刻的 Task 真相；error 非空时其余字段无意义（任务不存在或不属于本账号）。
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TaskReadResult {
@@ -2240,18 +2269,19 @@ pub struct SessionAgents {
 pub struct AgentTerminalNew {
     #[prost(string, tag="1")]
     pub title: ::prost::alloc::string::String,
-    /// worker 已写好的临时包装脚本绝对路径，server 原样填进 SessionCreate.shell。
-    /// server 不解释也不校验它——脚本由 daemon 自己生成、只回到同一个 daemon 执行。
+    /// Unused since the interactive-only terminal model: every terminal is the workspace's default
+    /// login shell, and a command to type in travels separately (terminal.run on the daemon's local
+    /// /agent surface). The worker always sends an empty string; the server ignores the field.
     #[prost(string, tag="2")]
     pub shell: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentTerminalList {
 }
-/// 读某个终端当前内容。取的是中心缓存的 checkpoint 而非 daemon 本地 snapshot：本地 snapshot
-/// 在 session 退出后就没了，而「命令跑完了看输出」恰恰是 agent 最常用的场景（见 plans/074
-/// 执行期偏离记录）。中心 checkpoint 滞后 ≤2s（CHECKPOINT_INTERVAL），且经 server 天然完成
-/// 「该 task 与发起方同 workspace」的归属校验。
+/// Read a terminal's content from the center's cached checkpoint (the daemon's own snapshot is gone
+/// once the session has exited; a live terminal is read locally by the daemon instead — plan 094).
+/// The checkpoint lags by at most CHECKPOINT_INTERVAL (2s) and the server checks that the task
+/// belongs to the caller's workspace.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentTerminalRead {
     #[prost(string, tag="1")]
@@ -2533,13 +2563,14 @@ pub mod daemon_to_server {
 }
 // ===== 中心发起的终端读/写（plan 091）=====
 //
-// 与 AgentControlRequest 方向相反：这是中心（MCP 写 tools）问 daemon。一个 request + 一个
+// 与 AgentControlRequest 方向相反：这是中心（账号 API 的终端操作）问 daemon。一个 request + 一个
 // result，各带 oneof payload，新增动作只加分支不占顶层字段号。两者都是无落库副作用的直发
-// 消息（读日志/快照、经 sessiond 正门写一段输入），有落库副作用的动作走 prepared + Execute。
+// 消息（读快照、经 sessiond 正门写一段输入 / 打入一条命令、等命令结束），有落库副作用的动作走 prepared + Execute。
 
-/// 读某终端的原始输出：优先命令日志尾部（agent/中心建的命令终端才有），否则 sessiond 当前
-/// 快照；两者都拿不到时 source=none，由中心退回 checkpoint。data 是原始字节（含 ANSI），
-/// 去转义/尾 N 行在中心做；worker 按 max_bytes 钳制。
+/// Read a terminal's raw output: the sessiond snapshot of a live session (scrollback plus the
+/// current screen); source=none when the session is gone, and the center falls back to its
+/// checkpoint. data is raw bytes (ANSI included); stripping and the last-N-lines cut happen in
+/// the center; the worker clamps to max_bytes.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ServerTerminalRead {
     #[prost(string, tag="1")]
@@ -2563,7 +2594,7 @@ pub struct ServerTerminalInput {
 pub struct ServerAgentRequest {
     #[prost(string, tag="1")]
     pub request_id: ::prost::alloc::string::String,
-    #[prost(oneof="server_agent_request::Payload", tags="10, 11")]
+    #[prost(oneof="server_agent_request::Payload", tags="10, 11, 12, 13")]
     pub payload: ::core::option::Option<server_agent_request::Payload>,
 }
 /// Nested message and enum types in `ServerAgentRequest`.
@@ -2574,18 +2605,65 @@ pub mod server_agent_request {
         TerminalRead(super::ServerTerminalRead),
         #[prost(message, tag="11")]
         TerminalInput(super::ServerTerminalInput),
+        #[prost(message, tag="12")]
+        TerminalRun(super::ServerTerminalRun),
+        #[prost(message, tag="13")]
+        TerminalWait(super::ServerTerminalWait),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ServerTerminalReadResult {
     #[prost(bytes="vec", tag="1")]
     pub data: ::prost::alloc::vec::Vec<u8>,
-    /// log | snapshot | none
+    /// snapshot | none — snapshot is the sessiond rendering of a live session (scrollback plus the
+    /// current screen); none means the session is gone and the center falls back to its checkpoint.
     #[prost(string, tag="2")]
     pub source: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ServerTerminalInputResult {
+}
+/// "do script": type `command` (plus Enter) into a live terminal once its shell has emitted the
+/// prompt-ready mark. Refused readably when a command is still running, when the shell never
+/// signalled readiness (integration not active), or when a human holder is present.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalRun {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub command: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalRunResult {
+    /// Sequence the typed command will carry in TerminalCommandState (wait targets it).
+    #[prost(uint64, tag="1")]
+    pub command_seq: u64,
+}
+/// Block until the targeted command (0 = the latest one started) has finished or the shell has
+/// exited, or until timeout_ms (bounded by the worker) elapses.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalWait {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="3")]
+    pub command_seq: u64,
+    #[prost(uint32, tag="4")]
+    pub timeout_ms: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerTerminalWaitResult {
+    /// finished | running | exited — running means the timeout elapsed first.
+    #[prost(string, tag="1")]
+    pub state: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub command_seq: u64,
+    /// The command's exit status (finished) or the shell's (exited).
+    #[prost(int32, optional, tag="3")]
+    pub exit_code: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ServerAgentResult {
@@ -2595,7 +2673,7 @@ pub struct ServerAgentResult {
     pub ok: bool,
     #[prost(string, optional, tag="3")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(oneof="server_agent_result::Payload", tags="10, 11")]
+    #[prost(oneof="server_agent_result::Payload", tags="10, 11, 12, 13")]
     pub payload: ::core::option::Option<server_agent_result::Payload>,
 }
 /// Nested message and enum types in `ServerAgentResult`.
@@ -2606,6 +2684,10 @@ pub mod server_agent_result {
         TerminalRead(super::ServerTerminalReadResult),
         #[prost(message, tag="11")]
         TerminalInput(super::ServerTerminalInputResult),
+        #[prost(message, tag="12")]
+        TerminalRun(super::ServerTerminalRunResult),
+        #[prost(message, tag="13")]
+        TerminalWait(super::ServerTerminalWaitResult),
     }
 }
 /// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
@@ -2740,6 +2822,8 @@ pub struct SessionCreate {
     pub task_id: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub cwd: ::prost::alloc::string::String,
+    /// Unused: the supervisor always starts the workspace's default login shell. Kept only so old
+    /// daemons keep decoding the message; the server never fills it.
     #[prost(string, optional, tag="4")]
     pub shell: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(uint32, tag="5")]

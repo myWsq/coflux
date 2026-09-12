@@ -206,9 +206,6 @@ export function useTerminalAttach(
       controller.reset();
       if (!result.ok) {
         controller.writeSystem(`读取最后输出失败：${result.error}`, "error");
-      } else if (result.source === "log") {
-        // 命令日志是非 tty 纯文本（\n 换行）；xterm 不开 convertEol（活会话语义），只在这里补 \r。
-        controller.writeRaw(new TextDecoder().decode(result.data).replace(/\r?\n/g, "\r\n"));
       } else if (result.source !== "none") {
         controller.writeRaw(result.data);
       }

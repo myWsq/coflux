@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 const STRING_OPTIONS: &[&str] = &[
-    "username", "workspace", "device", "project", "branch", "server", "name", "title", "cmd", "lines", "timeout", "text",
+    "username", "workspace", "device", "project", "branch", "server", "name", "title", "cmd", "lines", "timeout", "text", "seq",
     // executor: the only free-form input is the prompt; the model is configured once in Coflux.app.
     "prompt",
 ];

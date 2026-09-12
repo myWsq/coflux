@@ -17,17 +17,17 @@
 //! 与 [`AgentAction::WorkspaceForget`] 在本地解析 worktree 身份（见 [`crate::worktree_locate`]）、
 //! 交中心核验落库，再按中心的响应更新账本。账本仍然只从中心学，只是多了这一个学的时机。
 //!
-//! **本地能闭环的不碰中心（plan 094）**：send / read / wait(status) / notify / progress 全在 daemon
-//! 本地完成——归属校验（目标与调用方的有效工作区相同）与退出码来自 [`crate::session_ledger`]，内容来自
-//! 本地命令日志或 sessiond 快照，presence 标注改 observed 后立即上报（断连期间由重连后的全量补发
-//! 兜底）。它们不要求 daemon 此刻连着中心。只有 new / list / ports 转成 `AgentControlRequest` 交给
+//! **本地能闭环的不碰中心（plan 094）**：send / run / read / wait / close / notify / progress 全在 daemon
+//! 本地完成——归属校验（目标与调用方的有效工作区相同）、命令状态与退出码来自 [`crate::session_ledger`]，
+//! 内容来自 sessiond 快照（滚动缓冲 + 当前屏），presence 标注改 observed 后立即上报（断连期间由重连后的
+//! 全量补发兜底）。它们不要求 daemon 此刻连着中心。只有 new / list / ports 转成 `AgentControlRequest` 交给
 //! 中心：Task 要落库广播、预览 URL 由中心生成，这三条本来就不是本地能闭环的；中心离线时它们明确
 //! 报错——「让用户看得见」正是它们的全部意义。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use coflux_protocol::wire::{
     self, agent_control_request, agent_control_result, daemon_to_server, server_agent_request,
@@ -41,7 +41,7 @@ pub mod executor;
 
 use crate::session_ledger::{SessionPhase, SessionRecord};
 use crate::{
-    agents, device::DeviceRuntime, observed::ObservedState, ops, workspace_match, worktree_locate,
+    agents, device::DeviceRuntime, observed::ObservedState, workspace_match, worktree_locate,
     WorkerState, WsOut,
 };
 
@@ -49,28 +49,29 @@ use crate::{
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
 /// notify 留言长度上限（字符）。它只是侧栏 tooltip 里的一句话，不是日志通道。
 const MAX_NOTIFY_CHARS: usize = 200;
-/// 单次 read 从命令日志尾部取的字节上限；CLI 侧还会再按行数收窄。
-const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
-/// agent_logs 表的条目上限。超出即整表清空——丢失只意味着 read 退回中心 checkpoint，
-/// 没有正确性后果，所以不值得为它做 LRU。
-/// ponytail: 粗暴清表，真出现「一个工作区几百个终端」的用法再换 LRU。
-const MAX_TRACKED_LOGS: usize = 256;
 /// 中心回执关联表只保存正在等待的 agent 控制请求；达到上限立即拒绝，不能让本地 HTTP
 /// 并发在 20 秒超时窗口内无界堆积。
 const AGENT_PENDING_LIMIT: usize = 128;
+
+/// How long a `run` waits for the shell's prompt-ready mark before failing readably: the shell of a
+/// freshly opened terminal needs a moment to reach its first prompt, and a shell that never emits
+/// a mark (not zsh/bash/fish through coflux's rc chain) must not hold the caller longer than this.
+const PROMPT_WAIT: Duration = Duration::from_secs(10);
+/// Upper bound of one blocking `wait` round on the local surface. The CLI loops until its own
+/// deadline; the loopback HTTP endpoint answers within `hook::AGENT_TIMEOUT` (25 s), so a round
+/// must end comfortably before that.
+const WAIT_ROUND_MAX: Duration = Duration::from_secs(20);
+/// Upper bound of a center-initiated `wait` round (the server's per-request timeout is 10 s).
+const SERVER_WAIT_ROUND_MAX: Duration = Duration::from_secs(8);
+/// How long `close` waits for the shell to actually exit before answering "still exiting".
+const CLOSE_WAIT: Duration = Duration::from_secs(10);
+/// The one readable sentence for a shell coflux cannot instrument.
+const NOT_INSTRUMENTED: &str = "this terminal's shell never signalled prompt readiness (not zsh/bash/fish started through coflux's rc chain, or the integration was bypassed)";
 
 /// 单次 ServerTerminalRead 回给中心的字节上限（worker 侧钳制；中心再按行数收窄，与 checkpoint 同级）。
 const MAX_SERVER_READ_BYTES: u64 = 256 * 1024;
 /// ServerTerminalInput 单次写入字节上限：MCP 一次 send 是一行命令或一小段文本，不是文件通道。
 const MAX_SERVER_INPUT_BYTES: usize = 64 * 1024;
-
-pub(crate) fn remember_log(state: &Arc<Mutex<WorkerState>>, task_id: String, log_path: String) {
-    let mut s = state.lock().unwrap();
-    if s.agent_logs.len() >= MAX_TRACKED_LOGS {
-        s.agent_logs.clear();
-    }
-    s.agent_logs.insert(task_id, log_path);
-}
 
 /// gateway 解析出的一条 agent 控制请求；`respond` 回填 HTTP 应答。
 pub struct AgentRequest {
@@ -84,17 +85,33 @@ pub struct AgentRequest {
 }
 
 pub enum AgentAction {
-    /// `terminal new`：`command` 非空 = 作业终端（跑完即退，带退出码），
-    /// 空 = 会话终端（常驻的登录 shell，全 tty，输入 exit 才结束）——plan 101。
+    /// `terminal new`: the workspace's default login shell on a real tty, alive until `exit`
+    /// or `close`. There is only this one kind of terminal; a command to type in after the
+    /// prompt is a separate `terminal.run` request.
     TerminalNew {
         title: String,
-        command: String,
     },
     TerminalList,
     TerminalRead {
         task_id: String,
     },
-    /// `terminal wait` 的轮询原语：只回 status/exitCode，本地账本直接答
+    /// `terminal run`: "do script" — type `command` into a live terminal once the shell has
+    /// emitted its prompt-ready mark; returns the command sequence `wait` targets.
+    TerminalRun {
+        task_id: String,
+        command: String,
+    },
+    /// `terminal wait`: block (bounded) until the targeted command finishes or the shell exits.
+    TerminalWait {
+        task_id: String,
+        command_seq: u64,
+        timeout_ms: u64,
+    },
+    /// `terminal close`: end the terminal (Terminal.app `close`; same effect as the account CLI's stop).
+    TerminalClose {
+        task_id: String,
+    },
+    /// Cheap status probe: phase, exit code and command state from the local ledger.
     TerminalStatus {
         task_id: String,
     },
@@ -258,39 +275,18 @@ async fn handle(
             crate::report_agents_if_changed(state, observed, to_server_tx).await;
             AgentResponse::ok(serde_json::json!({}))
         }
-        AgentAction::TerminalNew { title, command } => {
-            // 两种终端由「命令是否为空」区分（plan 101）：
-            // - 非空 = 作业终端：本地写包装脚本，shell 指向脚本，输出经日志汇落一份供 read 回读；
-            // - 空 = 会话终端：不写脚本、不记日志路径，shell 传空串让 supervisor 取默认登录 shell。
-            //   stdin/stdout 都是真 tty（这正是它存在的理由，套脚本就等于套管道），终端常驻到
-            //   agent 或用户输入 exit 为止；read 因此落到下面的 sessiond 快照回退。
-            let script = if command.trim().is_empty() {
-                None
-            } else {
-                match ops::write_command_script(&command) {
-                    Ok(paths) => Some(paths),
-                    Err(error) => {
-                        return AgentResponse::err(
-                            "500 Internal Server Error",
-                            format!("写命令脚本失败：{error}"),
-                        )
-                    }
-                }
-            };
-            let shell = script
-                .as_ref()
-                .map(|(shell, _)| shell.clone())
-                .unwrap_or_default();
+        AgentAction::TerminalNew { title } => {
+            // The center records the Task and hands the create to this daemon; the supervisor
+            // starts the default login shell in the target workspace (stdin and stdout on a real
+            // tty). Nothing is typed here: `terminal.run` does that once the prompt mark arrives.
             let payload = agent_control_request::Payload::TerminalNew(wire::AgentTerminalNew {
                 title,
-                shell,
+                // Unused wire field (see daemon.proto): always empty.
+                shell: String::new(),
             });
             match ask_server(state, to_server_tx, session_id, scope.declared(), payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalNew(result)) => {
-                    if let Some((_, log_path)) = script {
-                        remember_log(state, result.task_id.clone(), log_path);
-                    }
                     AgentResponse::ok(
                         serde_json::json!({ "taskId": result.task_id, "sessionId": result.session_id }),
                     )
@@ -303,18 +299,31 @@ async fn handle(
             match ask_server(state, to_server_tx, session_id, scope.declared(), payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalList(result)) => {
+                    // The center knows the Task truth (status, exit code, title); the command
+                    // state (busy / last exit) is local truth and is merged in from the ledger.
+                    let s = state.lock().unwrap();
                     let terminals: Vec<serde_json::Value> = result
                         .terminals
                         .into_iter()
                         .map(|terminal| {
-                            serde_json::json!({
+                            let mut entry = serde_json::json!({
                                 "taskId": terminal.task_id,
                                 "title": terminal.title,
                                 "status": status_name(terminal.status),
                                 "exitCode": terminal.exit_code,
                                 "sessionId": terminal.session_id,
                                 "createdAt": terminal.created_at,
-                            })
+                            });
+                            let record = terminal
+                                .session_id
+                                .as_deref()
+                                .and_then(|session_id| s.ledger.session(session_id));
+                            if let (Some(record), Some(object)) = (record, entry.as_object_mut()) {
+                                if record.phase == SessionPhase::Running {
+                                    object.extend(command_fields(record));
+                                }
+                            }
+                            entry
                         })
                         .collect();
                     AgentResponse::ok(serde_json::json!({ "terminals": terminals }))
@@ -323,25 +332,23 @@ async fn handle(
             }
         }
         AgentAction::TerminalRead { task_id } => {
-            // 本地闭环（plan 094）：归属与状态来自会话账本，内容优先本地命令日志尾部；会话仍活着
-            // 则退回 sessiond 当前快照；都没有则为空。不问中心——agent 就跑在这台 daemon 上，中心
-            // checkpoint 只是这里的派生缓存。ANSI 原样带回，去转义在 CLI 侧做。
+            // Local-first (plan 094): ownership and status come from the session ledger, the
+            // content is the sessiond snapshot of a live session — the rendered scrollback plus
+            // the current screen, up to the supervisor's history limit — and empty once the
+            // shell has exited. The center is not asked; its checkpoint is a derived cache of
+            // this very snapshot. ANSI is returned as is; the CLI strips it.
             let (target_session, record) = match resolve_local_target(state, &scope, &task_id) {
                 Ok(found) => found,
                 Err(response) => return response,
             };
-            let local_log = { state.lock().unwrap().agent_logs.get(&task_id).cloned() };
-            let from_log = local_log
-                .as_deref()
-                .and_then(|path| ops::read_command_log_tail(path, MAX_LOG_TAIL_BYTES));
-            let text = match from_log {
-                Some(text) => text,
-                None if record.phase == SessionPhase::Running => device
+            let text = if record.phase == SessionPhase::Running {
+                device
                     .read_session_snapshot(&target_session)
                     .await
                     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                    .unwrap_or_default(),
-                None => String::new(),
+                    .unwrap_or_default()
+            } else {
+                String::new()
             };
             AgentResponse::ok(serde_json::json!({
                 "ansi": text,
@@ -352,13 +359,75 @@ async fn handle(
         }
         AgentAction::TerminalStatus { task_id } => {
             match resolve_local_target(state, &scope, &task_id) {
-                Ok((_, record)) => AgentResponse::ok(serde_json::json!({
-                    "taskId": task_id,
-                    "status": phase_name(&record.phase),
-                    "exitCode": exit_code_of(&record.phase),
-                })),
+                Ok((_, record)) => {
+                    let mut status = serde_json::json!({
+                        "taskId": task_id,
+                        "status": phase_name(&record.phase),
+                        "exitCode": exit_code_of(&record.phase),
+                    });
+                    if let Some(object) = status.as_object_mut() {
+                        object.extend(command_fields(&record));
+                    }
+                    AgentResponse::ok(status)
+                }
                 Err(response) => response,
             }
+        }
+        AgentAction::TerminalRun { task_id, command } => {
+            let (target_session, _) = match resolve_local_target(state, &scope, &task_id) {
+                Ok(found) => found,
+                Err(response) => return response,
+            };
+            match run_in_session(state, device, &target_session, &command).await {
+                Ok(command_seq) => {
+                    AgentResponse::ok(serde_json::json!({ "taskId": task_id, "commandSeq": command_seq }))
+                }
+                Err((status, message)) => AgentResponse::err(status, message),
+            }
+        }
+        AgentAction::TerminalWait {
+            task_id,
+            command_seq,
+            timeout_ms,
+        } => {
+            let (target_session, _) = match resolve_local_target(state, &scope, &task_id) {
+                Ok(found) => found,
+                Err(response) => return response,
+            };
+            let timeout = if timeout_ms == 0 {
+                WAIT_ROUND_MAX
+            } else {
+                Duration::from_millis(timeout_ms).min(WAIT_ROUND_MAX)
+            };
+            match wait_in_session(state, &target_session, command_seq, timeout).await {
+                Ok(outcome) => AgentResponse::ok(outcome.to_json(&task_id)),
+                Err((status, message)) => AgentResponse::err(status, message),
+            }
+        }
+        AgentAction::TerminalClose { task_id } => {
+            let (target_session, record) = match resolve_local_target(state, &scope, &task_id) {
+                Ok(found) => found,
+                Err(response) => return response,
+            };
+            if let SessionPhase::Exited { exit_code } = record.phase {
+                return AgentResponse::ok(
+                    serde_json::json!({ "taskId": task_id, "exited": true, "exitCode": exit_code }),
+                );
+            }
+            if !device.close_session(&target_session) {
+                return AgentResponse::err(
+                    "503 Service Unavailable",
+                    "sessiond 请求队列已满或未连接，请重试",
+                );
+            }
+            // The exit arrives through the ordinary SessionExit path; give it a bounded moment so
+            // the caller usually learns the shell's status in the same call.
+            let exited = wait_for_exit(state, &target_session, CLOSE_WAIT).await;
+            AgentResponse::ok(serde_json::json!({
+                "taskId": task_id,
+                "exited": exited.is_some(),
+                "exitCode": exited,
+            }))
         }
         AgentAction::TerminalSend {
             task_id,
@@ -684,6 +753,218 @@ fn resolve_local_target(
     Ok((target_session.to_string(), target.clone()))
 }
 
+/// The command-state fields every status view carries for a live terminal: `integrated`, `busy`,
+/// `commandSeq` (latest started or promised) and `lastCommandExitCode` (null until one finished).
+fn command_fields(record: &SessionRecord) -> serde_json::Map<String, serde_json::Value> {
+    let mut fields = serde_json::Map::new();
+    let command = &record.command;
+    fields.insert("integrated".into(), command.integrated.into());
+    // A promised run whose command-start mark has not arrived yet already counts as busy.
+    let busy = command.busy || record.promised_seq > command.command_seq;
+    fields.insert("busy".into(), busy.into());
+    fields.insert("commandSeq".into(), record.latest_command_seq().into());
+    fields.insert(
+        "lastCommandExitCode".into(),
+        if command.finished_seq > 0 {
+            serde_json::Value::from(command.exit_code)
+        } else {
+            serde_json::Value::Null
+        },
+    );
+    fields
+}
+
+/// A `run` refusal or failure: HTTP status + one readable sentence.
+type RunError = (&'static str, String);
+
+/// "do script" into a live session: wait (bounded) for the shell's prompt-ready mark, refuse while a
+/// command is still running, reserve the sequence the command will carry, then type it through the
+/// humans-first front door. Never types blind: no mark, no keystrokes.
+///
+/// The busy check and the reservation happen under one ledger lock, and the reservation precedes
+/// the keystrokes: the shell's command-start mark (handled by the supervisor reader task) and the
+/// input ack (handled here) race on separate tasks, so a mark that arrives first must find its
+/// sequence already promised — otherwise `promise_run` would reserve one past it and the terminal
+/// would look busy forever. A failed send gives the reservation back.
+async fn run_in_session(
+    state: &Arc<Mutex<WorkerState>>,
+    device: &Arc<DeviceRuntime>,
+    session_id: &str,
+    command: &str,
+) -> Result<u64, RunError> {
+    let mut epoch = state.lock().unwrap().command_epoch.subscribe();
+    let deadline = Instant::now() + PROMPT_WAIT;
+    let command_seq = loop {
+        // Mark the epoch as seen *before* reading the ledger so a change in between wakes us.
+        epoch.borrow_and_update();
+        {
+            let mut s = state.lock().unwrap();
+            let Some(record) = s.ledger.session(session_id) else {
+                return Err(("404 Not Found", "终端不在本工作区或不存在（用 coflux terminal list 查）".into()));
+            };
+            match record.phase {
+                SessionPhase::Exited { .. } => {
+                    return Err((
+                        "409 Conflict",
+                        "终端已退出，不能再输入（要跑新命令用 coflux terminal new）".into(),
+                    ))
+                }
+                SessionPhase::Pending => {}
+                SessionPhase::Running if record.command.integrated => {
+                    if record.command.busy || record.promised_seq > record.command.command_seq {
+                        return Err((
+                            "409 Conflict",
+                            format!(
+                                "busy: command #{} is still running in this terminal; `coflux terminal wait` for it or `coflux terminal read` the screen first",
+                                record.latest_command_seq()
+                            ),
+                        ));
+                    }
+                    // Idle and instrumented: reserve under the same lock the check ran under, so a
+                    // concurrent run sees this terminal as busy from now on.
+                    let seq = s.ledger.promise_run(session_id);
+                    s.bump_command_epoch();
+                    break seq;
+                }
+                SessionPhase::Running => {}
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err((
+                "409 Conflict",
+                format!("{NOT_INSTRUMENTED}: the command was not typed; use `coflux terminal send` instead"),
+            ));
+        }
+        let _ = tokio::time::timeout(remaining, epoch.changed()).await;
+    };
+    let mut data = command.as_bytes().to_vec();
+    data.push(b'\r');
+    if let Err(message) = device.agent_send_input(session_id, data).await {
+        let mut s = state.lock().unwrap();
+        s.ledger.withdraw_run(session_id, command_seq);
+        s.bump_command_epoch();
+        return Err(("409 Conflict", message));
+    }
+    Ok(command_seq)
+}
+
+/// What a bounded `wait` round observed.
+enum WaitOutcome {
+    /// The targeted command finished with this exit status (`None` when the shell gave none).
+    Finished { command_seq: u64, exit_code: Option<i32> },
+    /// The shell itself exited (the generic session exit path).
+    Exited { exit_code: i32 },
+    /// The round elapsed while the targeted command was still running.
+    Running { command_seq: u64 },
+}
+
+impl WaitOutcome {
+    fn to_json(&self, task_id: &str) -> serde_json::Value {
+        match self {
+            WaitOutcome::Finished { command_seq, exit_code } => serde_json::json!({
+                "taskId": task_id, "state": "finished", "commandSeq": command_seq, "exitCode": exit_code,
+            }),
+            WaitOutcome::Exited { exit_code } => serde_json::json!({
+                "taskId": task_id, "state": "exited", "exitCode": exit_code,
+            }),
+            WaitOutcome::Running { command_seq } => serde_json::json!({
+                "taskId": task_id, "state": "running", "commandSeq": command_seq,
+            }),
+        }
+    }
+}
+
+/// Wait (bounded) for command `target_seq` (0 = the latest started or promised) to finish, or for
+/// the shell to exit. A completion is never lost: a command that finished before the call answers
+/// immediately with its stored exit code. Idle with no command ever run answers readably instead of
+/// blocking, and so does a shell that never emitted a mark.
+async fn wait_in_session(
+    state: &Arc<Mutex<WorkerState>>,
+    session_id: &str,
+    target_seq: u64,
+    timeout: Duration,
+) -> Result<WaitOutcome, RunError> {
+    let mut epoch = state.lock().unwrap().command_epoch.subscribe();
+    let deadline = Instant::now() + timeout;
+    loop {
+        epoch.borrow_and_update();
+        let record = state.lock().unwrap().ledger.session(session_id).cloned();
+        let Some(record) = record else {
+            return Err(("404 Not Found", "终端不在本工作区或不存在（用 coflux terminal list 查）".into()));
+        };
+        let target = if target_seq == 0 { record.latest_command_seq() } else { target_seq };
+        if let SessionPhase::Exited { exit_code } = record.phase {
+            // The command's own completion wins when it arrived before the shell went away.
+            if target > 0 && record.command.finished_seq == target {
+                return Ok(WaitOutcome::Finished {
+                    command_seq: target,
+                    exit_code: record.command.exit_code,
+                });
+            }
+            return Ok(WaitOutcome::Exited { exit_code });
+        }
+        if target == 0 {
+            let reason = if record.command.integrated {
+                "no command has run in this terminal yet: nothing to wait for (start one with `coflux terminal run`)".to_string()
+            } else {
+                format!("{NOT_INSTRUMENTED}: wait cannot observe commands here; use `coflux terminal read`")
+            };
+            return Err(("409 Conflict", reason));
+        }
+        if record.command.finished_seq >= target {
+            if record.command.finished_seq == target {
+                return Ok(WaitOutcome::Finished {
+                    command_seq: target,
+                    exit_code: record.command.exit_code,
+                });
+            }
+            return Err((
+                "409 Conflict",
+                format!(
+                    "command #{target} has been superseded by #{}; its exit code is gone (read the screen instead)",
+                    record.command.finished_seq
+                ),
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(WaitOutcome::Running { command_seq: target });
+        }
+        let _ = tokio::time::timeout(remaining, epoch.changed()).await;
+    }
+}
+
+/// Wait (bounded) for the session to reach the exited phase; `Some(exit_code)` when it did.
+async fn wait_for_exit(
+    state: &Arc<Mutex<WorkerState>>,
+    session_id: &str,
+    timeout: Duration,
+) -> Option<i32> {
+    let mut epoch = state.lock().unwrap().command_epoch.subscribe();
+    let deadline = Instant::now() + timeout;
+    loop {
+        epoch.borrow_and_update();
+        let phase = state
+            .lock()
+            .unwrap()
+            .ledger
+            .session(session_id)
+            .map(|record| record.phase.clone());
+        match phase {
+            Some(SessionPhase::Exited { exit_code }) => return Some(exit_code),
+            // Forgotten from the ledger = gone; nothing more will arrive.
+            None => return None,
+            Some(_) => {}
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let _ = tokio::time::timeout(remaining, epoch.changed()).await;
+    }
+}
+
 fn phase_name(phase: &SessionPhase) -> &'static str {
     match phase {
         SessionPhase::Pending => "idle",
@@ -778,6 +1059,34 @@ async fn ask_server(
     }
 }
 
+/// The ledger has the session and does not know it as exited (unknown sessions count as running:
+/// the alive-table check is the identity gate, this one only closes the exit race).
+fn session_running(state: &Arc<Mutex<WorkerState>>, session_id: &str) -> bool {
+    state
+        .lock()
+        .unwrap()
+        .ledger
+        .session(session_id)
+        .is_none_or(|record| !matches!(record.phase, SessionPhase::Exited { .. }))
+}
+
+/// A snapshot read failed because the supervisor no longer has the session (tombstoned, or the
+/// waiter was dropped by the session exit) rather than because of a transport problem.
+fn snapshot_gone(error: &str) -> bool {
+    error.starts_with("session_not_found") || error.contains("会话已退出")
+}
+
+/// The center-named session is alive locally and belongs to the task the center says it does.
+fn session_matches(state: &Arc<Mutex<WorkerState>>, session_id: &str, task_id: &str) -> bool {
+    !session_id.is_empty()
+        && state
+            .lock()
+            .unwrap()
+            .alive
+            .get(session_id)
+            .is_some_and(|(alive_task, _)| alive_task == task_id)
+}
+
 /// TaskStatus → agent 可读的字符串。未知值按 "unknown" 处理而非 panic。
 fn status_name(status: i32) -> &'static str {
     match wire::TaskStatus::try_from(status) {
@@ -860,10 +1169,12 @@ mod tests {
     }
 }
 
-/// 中心发起的终端读/写（plan 091，与 AgentControlRequest 方向相反）。两种动作都是无落库副作用的
-/// 直发请求：读走「命令日志尾部优先、否则 sessiond 当前快照、都没有则 source=none 交中心退回
-/// checkpoint」；写经 [`DeviceRuntime::agent_send_input`] 正门——人类 holder 在场时被拒，错误文案
-/// 原样回中心（同 `coflux terminal send` 的人类优先纪律）。每条请求必回一条 result。
+/// Center-initiated terminal reads and writes (plan 091, the opposite direction of
+/// AgentControlRequest). Both are direct requests without durable side effects: a read answers
+/// with the sessiond snapshot of a live session (otherwise `source=none`, and the center falls
+/// back to its checkpoint); a write goes through the [`DeviceRuntime::agent_send_input`] front
+/// door — refused while a human holder is present, the message forwarded verbatim (the same
+/// humans-first rule as `coflux terminal send`). Every request gets exactly one result.
 pub async fn handle_server_request(
     request: wire::ServerAgentRequest,
     state: &Arc<Mutex<WorkerState>>,
@@ -890,33 +1201,29 @@ pub async fn handle_server_request(
                     },
                 )),
             };
-            let log_path = { state.lock().unwrap().agent_logs.get(&read.task_id).cloned() };
-            if let Some(text) = log_path
-                .as_deref()
-                .and_then(|path| ops::read_command_log_tail(path, max_bytes))
+            // A live session answers with the sessiond snapshot (scrollback + screen); only the
+            // session the center names is trusted, and only while the local alive table agrees.
+            // An exited session — by the ledger, or because the supervisor no longer has it —
+            // answers `none` so the center falls back to its checkpoint (the invariant the plan
+            // keeps for exited terminals), never an empty or stale "snapshot".
+            if !session_matches(state, &read.session_id, &read.task_id)
+                || !session_running(state, &read.session_id)
             {
-                return reply(text.into_bytes(), "log");
-            }
-            // 没有命令日志（用户手开的终端、或 worker 热升级后表已丢）：会话仍活着就取 sessiond
-            // 当前快照。只认中心给的 session 与本地 alive 表一致的情况，不按裸 task 猜。
-            let session_alive = !read.session_id.is_empty()
-                && state
-                    .lock()
-                    .unwrap()
-                    .alive
-                    .get(&read.session_id)
-                    .is_some_and(|(task_id, _)| task_id == &read.task_id);
-            if !session_alive {
                 return reply(Vec::new(), "none");
             }
             match device.read_session_snapshot(&read.session_id).await {
                 Ok(mut snapshot) => {
+                    // The exit can land while the read is in flight; re-check before answering.
+                    if !session_running(state, &read.session_id) {
+                        return reply(Vec::new(), "none");
+                    }
                     let keep = usize::try_from(max_bytes).unwrap_or(usize::MAX);
                     if snapshot.len() > keep {
                         snapshot.drain(..snapshot.len() - keep);
                     }
                     reply(snapshot, "snapshot")
                 }
+                Err(error) if snapshot_gone(&error) => reply(Vec::new(), "none"),
                 Err(error) => fail(error),
             }
         }
@@ -937,6 +1244,85 @@ pub async fn handle_server_request(
                     )),
                 },
                 Err(message) => fail(message),
+            }
+        }
+        Some(server_agent_request::Payload::TerminalRun(run)) => {
+            // Same identity discipline as reads: only the session the center names, and only while
+            // the local alive table agrees it belongs to that task.
+            if !session_matches(state, &run.session_id, &run.task_id) {
+                return fail("该会话不在设备的当前运行时里（可能正在对账），稍后重试".into());
+            }
+            if run.command.trim().is_empty() {
+                return fail("命令为空".into());
+            }
+            if run.command.len() > MAX_SERVER_INPUT_BYTES {
+                return fail(format!("命令超过 {MAX_SERVER_INPUT_BYTES} 字节上限"));
+            }
+            match run_in_session(state, device, &run.session_id, &run.command).await {
+                Ok(command_seq) => wire::ServerAgentResult {
+                    request_id: request_id.clone(),
+                    ok: true,
+                    error: None,
+                    payload: Some(server_agent_result::Payload::TerminalRun(
+                        wire::ServerTerminalRunResult { command_seq },
+                    )),
+                },
+                Err((_, message)) => fail(message),
+            }
+        }
+        Some(server_agent_request::Payload::TerminalWait(wait)) => {
+            if !session_matches(state, &wait.session_id, &wait.task_id) {
+                // The session may have exited already: answer from the ledger before refusing.
+                let exited = state
+                    .lock()
+                    .unwrap()
+                    .ledger
+                    .session(&wait.session_id)
+                    .and_then(|record| exit_code_of(&record.phase));
+                return match exited {
+                    Some(exit_code) => wire::ServerAgentResult {
+                        request_id: request_id.clone(),
+                        ok: true,
+                        error: None,
+                        payload: Some(server_agent_result::Payload::TerminalWait(
+                            wire::ServerTerminalWaitResult {
+                                state: "exited".into(),
+                                command_seq: 0,
+                                exit_code: Some(exit_code),
+                            },
+                        )),
+                    },
+                    None => fail("该会话不在设备的当前运行时里（可能正在对账），稍后重试".into()),
+                };
+            }
+            let timeout = if wait.timeout_ms == 0 {
+                SERVER_WAIT_ROUND_MAX
+            } else {
+                Duration::from_millis(u64::from(wait.timeout_ms)).min(SERVER_WAIT_ROUND_MAX)
+            };
+            match wait_in_session(state, &wait.session_id, wait.command_seq, timeout).await {
+                Ok(outcome) => {
+                    let (state_name, command_seq, exit_code) = match outcome {
+                        WaitOutcome::Finished { command_seq, exit_code } => {
+                            ("finished", command_seq, exit_code)
+                        }
+                        WaitOutcome::Exited { exit_code } => ("exited", 0, Some(exit_code)),
+                        WaitOutcome::Running { command_seq } => ("running", command_seq, None),
+                    };
+                    wire::ServerAgentResult {
+                        request_id: request_id.clone(),
+                        ok: true,
+                        error: None,
+                        payload: Some(server_agent_result::Payload::TerminalWait(
+                            wire::ServerTerminalWaitResult {
+                                state: state_name.into(),
+                                command_seq,
+                                exit_code,
+                            },
+                        )),
+                    }
+                }
+                Err((_, message)) => fail(message),
             }
         }
         None => fail("未知的中心请求动作（daemon 不认识该 payload）".into()),
