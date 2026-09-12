@@ -86,7 +86,15 @@ export function SettingsPage(props: SettingsPageProps) {
           >
             <div style={DESKTOP_DRAG_BAND_STYLE} />
             <VStack gap={1} hAlign="stretch" padding={2}>
-              <Button label="返回" variant="ghost" size="sm" icon={<ArrowLeft className="size-4" />} onClick={onClose} />
+              {/* 靠左对齐：撑满一栏宽的按钮把「返回」摆在正中，和它下面左对齐的分区列表对不上。 */}
+              <Button
+                label="返回"
+                variant="ghost"
+                size="sm"
+                icon={<ArrowLeft className="size-4" />}
+                className="justify-start"
+                onClick={onClose}
+              />
               <List density="compact">
                 {SETTINGS_SECTIONS.map((item) => (
                   <ListItem
