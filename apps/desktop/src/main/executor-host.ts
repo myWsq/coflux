@@ -19,6 +19,7 @@ import { utilityProcess } from "electron";
 import type { DesktopExecutorInbound, DesktopExecutorOutbound, DesktopExecutorSettings } from "../shared/desktop-bridge";
 import { IPC } from "../shared/ipc";
 import { EXECUTOR_SYSTEM_PROMPT, type ExecutorConfigStore } from "./executor-config";
+import { executorCancelReason, type ExecutorStopTrigger } from "./executor-lifecycle";
 import { ExecutorManager, type RunnerHandle } from "./executor-manager";
 import type { ExecutorRunnerOutbound } from "./executor-runner-protocol";
 
@@ -33,8 +34,11 @@ export type ExecutorHost = {
   inbound(message: DesktopExecutorInbound): void;
   /** 空串 = 通道断开 */
   setChannel(daemonId: string): void;
-  /** app 退出前调；把未终结的 run 落成明确终态 */
-  shutdown(): void;
+  /**
+   * Something that looks like a local-runtime shutdown happened. The trigger decides whether runs
+   * are actually cancelled — see `executor-lifecycle`. Safe to call for triggers that keep them.
+   */
+  stopRuns(trigger: ExecutorStopTrigger): void;
 };
 
 export type ExecutorHostOptions = {
@@ -144,8 +148,11 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
       // 断开时**不**动作业表：任务还在跑，重连后靠对账补状态。断线就重派 writer 会造成双写。
       else options.log("[executor] 本机 daemon 的 device 通道断开；在跑的任务继续，等重连对账");
     },
-    shutdown() {
-      manager.shutdown();
+    stopRuns(trigger) {
+      const reason = executorCancelReason(trigger);
+      if (!reason) return;
+      options.log(`[executor] ${reason}：正在把未终结的任务落成 cancelled`);
+      manager.cancelAll(reason);
     },
   };
 }

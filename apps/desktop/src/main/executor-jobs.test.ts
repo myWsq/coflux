@@ -166,17 +166,21 @@ test("对账不会把 unknown 变成重跑：只报状态，不产生 start", ()
   assert.equal(starts(t.reconcile(["gone"])).length, 0);
 });
 
-test("app 退出：未终结的 run 落 cancelled 并请求停止，不留悬空", () => {
+test("本机运行时停止：未终结的 run 落 cancelled 并请求停止，不留悬空", () => {
   const t = table();
   t.assign(assignment({ runId: "a" }));
   t.assign(assignment({ runId: "b", workspaceId: "ws-b" }));
   t.finish("b", { state: "succeeded" });
   t.ack("b");
-  const effects = t.shutdown();
+  const effects = t.cancelAll("退出 Coflux，任务被中断");
   assert.equal(effects.filter((e) => e.kind === "stop").length, 1);
   const terminal = reports(effects).find((e) => e.kind === "report" && e.runId === "a");
   assert.equal(terminal?.kind === "report" && terminal.state, "cancelled");
+  // 终态必须带上「是哪个动作中断了它」，CLI 那头照原文打给用户
+  assert.equal(terminal?.kind === "report" && terminal.outcome?.error, "退出 Coflux，任务被中断");
   assert.equal(t.activeRunIds().length, 0);
+  // 幂等：再来一次没有任何 effect
+  assert.deepEqual(t.cancelAll("退出 Coflux，任务被中断"), []);
 });
 
 test("activeRunIds 只含未终结的", () => {

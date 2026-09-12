@@ -263,20 +263,18 @@ export class ExecutorJobTable {
   }
 
   /**
-   * app 要退出了：把所有未终结的 run 落成 cancelled 并请求停止。
-   * 「app 关了任务就中断」是已接受的产品约束，但**必须给出明确终态**，不能让 CLI 侧永久轮询。
+   * The local runtime is going away: every unfinished run becomes `cancelled` and is asked to stop.
+   *
+   * "The runtime stopped, so the job stopped" is an accepted product constraint, but a **definite
+   * terminal state is not optional** — without one the CLI on the other end polls forever. The
+   * caller passes the sentence saying which user action ended the run (see `executor-lifecycle`).
    */
-  shutdown(): ExecutorEffect[] {
+  cancelAll(error: string): ExecutorEffect[] {
     const effects: ExecutorEffect[] = [];
     for (const job of this.all()) {
       if (isTerminal(job.state)) continue;
       effects.push({ kind: "stop", runId: job.assignment.runId });
-      effects.push(
-        ...this.finish(job.assignment.runId, {
-          state: "cancelled",
-          error: "桌面 app 退出，任务被中断",
-        }),
-      );
+      effects.push(...this.finish(job.assignment.runId, { state: "cancelled", error }));
     }
     return effects;
   }

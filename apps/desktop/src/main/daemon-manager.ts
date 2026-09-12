@@ -27,6 +27,13 @@ export type DaemonManagerOptions = {
   platform: NodeJS.Platform;
   appPath: string;
   confirmStop: (reason: StopReason, count: number | null) => Promise<boolean>;
+  /**
+   * Every outcome of a local-runtime stop, confirmed or not. The single choke point for anything
+   * that must react to the runtime going away — today the executor host, which cancels its running
+   * jobs (see `executor-lifecycle`). Declined stops are reported too, so the listener can tell "the
+   * user backed out" from "it never happened"; it must not be used to infer a stop on its own.
+   */
+  onStopOutcome?: (reason: StopReason, confirmed: boolean) => void;
   commands: DaemonCommands;
   log: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void };
 };
@@ -156,13 +163,18 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
     runtime = await startRuntime(paths.home, directory, desiredId, paths.logFile);
   }
   async function stopConfirmed(reason: StopReason): Promise<boolean> {
+    const outcome = (confirmed: boolean): boolean => {
+      options.onStopOutcome?.(reason, confirmed);
+      return confirmed;
+    };
     runtime = await runtimeStatus(paths.home);
-    if (!runtime) return true;
-    if (runtime.sessions.length && !await options.confirmStop(reason, runtime.sessions.length)) return false;
+    // Nothing to stop, but the caller still proceeds with the stop; report it as confirmed.
+    if (!runtime) return outcome(true);
+    if (runtime.sessions.length && !await options.confirmStop(reason, runtime.sessions.length)) return outcome(false);
     await stopRuntime(paths.home, runtime);
     runtime = null;
     emit();
-    return true;
+    return outcome(true);
   }
   const poll = setInterval(() => { if (!action) void refresh(); }, 1500);
   poll.unref();

@@ -111,9 +111,13 @@ export class ExecutorManager {
     this.apply(this.table.reconcile(daemonRunIds));
   }
 
-  /** app 要退出了：所有未终结的 run 落明确终态，不留给 CLI 侧永久轮询。 */
-  shutdown(): void {
-    this.apply(this.table.shutdown());
+  /**
+   * The local runtime is going away: every unfinished run reaches a definite terminal state and
+   * every tool process group is stopped, so the write lock is released and no CLI polls forever.
+   * Idempotent — a second call finds nothing unfinished and nothing live.
+   */
+  cancelAll(error: string): void {
+    this.apply(this.table.cancelAll(error));
     for (const [, run] of this.live) run.handle.kill();
     this.live.clear();
   }

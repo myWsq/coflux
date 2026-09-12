@@ -129,7 +129,7 @@ if (!app.requestSingleInstanceLock()) {
     // the CLI on the other end would poll forever.
     if (quitting || !daemonManager) {
       daemonManager?.dispose();
-      executorHost?.shutdown();
+      executorHost?.stopRuns({ kind: "app-exit" });
       return;
     }
     event.preventDefault();
@@ -240,6 +240,10 @@ if (!app.requestSingleInstanceLock()) {
         });
         return result.response === 1;
       },
+      // Executor runs end exactly when the user confirms a local-runtime stop — quit, logout, and
+      // the panel's stop / remove. A dismissed dialog, a restart, and a dropped device channel all
+      // leave them running; `executorCancelReason` owns that whole decision.
+      onStopOutcome: (reason, confirmed) => executorHost?.stopRuns({ kind: "runtime-stop", reason, confirmed }),
       commands: {
         exec: execCommand,
         openExternal: (url) => void shell.openExternal(url),
@@ -266,6 +270,10 @@ if (!app.requestSingleInstanceLock()) {
       })();
       return localConnect;
     }
+    // Logout clears account state only. `executor.json` and `executor-key.bin` are global app
+    // configuration — the provider and model the user picked once, not something an account owns —
+    // so they deliberately survive: signing back in must not mean configuring the executor again.
+    // Running executor jobs do end here, through the confirmed `logout` stop (see `onStopOutcome`).
     async function logoutLocal(): Promise<boolean> {
       if (exitInFlight || quitting) return false;
       exitInFlight = true;

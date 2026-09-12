@@ -187,13 +187,14 @@ test("取消先给 runner 发 abort，不是上来就杀", () => {
   }
 });
 
-test("app 退出：未终结的 run 落 cancelled 且 runner 被杀", () => {
+test("本机运行时停止：未终结的 run 落 cancelled 且 runner 被杀", () => {
   const h = harness();
   try {
     h.manager.onAssign(assignment(h.root));
-    h.manager.shutdown();
+    h.manager.cancelAll("退出登录，任务被中断");
     assert.equal(h.runners[0].killed, true);
     assert.equal(h.reports.at(-1)?.state, "cancelled");
+    assert.equal(h.reports.at(-1)?.error, "退出登录，任务被中断");
     assert.deepEqual(h.manager.activeRunIds(), []);
   } finally {
     h.cleanup();
