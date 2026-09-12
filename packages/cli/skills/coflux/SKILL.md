@@ -320,8 +320,10 @@ you what you meant. Say what done looks like and how to check it.
 
 Its boundaries, enforced by a kernel sandbox — count on them, and tell it what it needs up front:
 
-- **Only the originating workspace is writable.** Everything outside is unreadable and unwritable.
-  Without `--write` even that workspace is read-only, which is the right mode for investigations.
+- **Only the originating workspace is writable.** Writes anywhere outside it are refused by the
+  kernel. Reads are not restricted, so it can still see system files, toolchains and the rest of the
+  machine — the sandbox stops it from changing things, not from looking. Without `--write` even that
+  workspace is read-only, which is the right mode for investigations.
 - **Git metadata is read-only, so it never commits.** It leaves changes in the working tree;
   reviewing and committing them is yours. `git status` and `git diff` work fine for it.
 - **Its tool processes have no network.** `npm install`, `cargo fetch` and friends fail. Install

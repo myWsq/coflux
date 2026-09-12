@@ -31,7 +31,7 @@ When this is done, coflux ships a small built-in executor. An agent starts it wi
 coflux executor run --prompt="Fix every clippy warning in crates/worker" --write
 ```
 
-The command blocks until the task ends, then prints the executor's final reply and which files it changed. The executor is one-shot: no session, no follow-up; to change something, send another run. It works inside **the workspace that started it**, confined by a kernel sandbox to that workspace's directory, unable to touch any file outside it and unable to reach the local daemon's loopback endpoint. The model is configured once, globally, by the user in the desktop app (provider / model / API key); the system prompt is fixed by coflux; the agent may pass only a prompt and a read/write mode.
+The command blocks until the task ends, then prints the executor's final reply and which files it changed. The executor is one-shot: no session, no follow-up; to change something, send another run. It works inside **the workspace that started it**, confined by a kernel sandbox to that workspace's directory, unable to modify any file outside it and unable to reach the local daemon's loopback endpoint. The model is configured once, globally, by the user in the desktop app (provider / model / API key); the system prompt is fixed by coflux; the agent may pass only a prompt and a read/write mode.
 
 ### Product conclusions (confirmed with the user item by item during exploration; do not reopen, do not change)
 
