@@ -1,4 +1,3 @@
-import { NotificationButton } from "./notification-inbox";
 import { useState } from "react";
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
@@ -44,7 +43,6 @@ export type PendingWorkspace = {
 };
 
 type SidebarProps = {
-  onOpenNotifications: () => void;
   client: CofluxClient;
   selectedWorkspaceId: string | null;
   onSelectWorkspace: (workspaceId: string) => void;
@@ -560,7 +558,6 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       {/* 账号脚部（plan 110）：固定在滚动区之外，不随项目/设备列表滚动；不声明拖拽区。 */}
-      <NotificationButton client={client} onOpen={props.onOpenNotifications} />
       <AccountFooter
         client={client}
         isSettingsOpen={false}

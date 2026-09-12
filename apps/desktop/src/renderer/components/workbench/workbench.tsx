@@ -1,3 +1,4 @@
+import { PortMenu } from "./port-menu";
 import { NotificationInbox } from "./notification-inbox";
 import { lazy, Suspense, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
@@ -22,7 +23,7 @@ import { useSettingsTooltipControl } from "@/components/workbench/account-footer
 import { countLocalRunningTerminals } from "@/components/workbench/daemon-view";
 import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "@/components/workbench/desktop-attention";
 import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
-import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
+import { DESKTOP_DRAG_BAND_STYLE, NO_DRAG_REGION_STYLE } from "@/components/workbench/drag-region";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useTerminalAttach } from "@/components/workbench/terminal-attach";
@@ -394,6 +395,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     activeTabsRef.current = { ...activeTabsRef.current, [task.workspaceId]: { taskId, viewIsTerminal: true } };
     setActiveTabs(activeTabsRef.current);
     setFollowTask({ workspaceId: task.workspaceId, taskId });
+    setSettingsOpen(false);
     selectWorkspace(task.workspaceId);
     return true;
   }
@@ -645,14 +647,23 @@ export function Workbench({ client }: { client: CofluxClient }) {
     // 点不到切换/关闭终端（padding 改变容器高度，终端 fit 由 ResizeObserver 跟随）。
     <div
       className={cn(
-        "flex h-screen min-h-[640px] min-w-[1024px] overflow-hidden bg-background text-foreground",
+        "relative flex h-screen min-h-[640px] min-w-[1024px] overflow-hidden bg-background text-foreground",
         showReconnectBanner && "pt-7",
       )}
     >
       <DesktopAttention client={client} bridge={desktop} selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null} />
-      <NotificationInbox client={client} open={notificationOpen} onOpen={() => setNotificationOpen(true)} onClose={() => setNotificationOpen(false)} onNavigate={navigateNotificationTask} />
+      {/* A single action dock stays outside all workspace tab scrollers, including empty views. */}
+      <div
+        role="group"
+        aria-label="终端栏操作"
+        className="absolute right-0 z-30 flex h-9 w-20 items-center justify-center gap-2 border-b border-border bg-background"
+        style={{ top: showReconnectBanner ? 28 : 0, ...NO_DRAG_REGION_STYLE }}
+      >
+        <div aria-hidden className="pointer-events-none absolute inset-y-0 right-full w-6 bg-gradient-to-r from-transparent to-background" />
+        <PortMenu key={activeWorkspaceId ?? "none"} client={client} workspaceId={activeWorkspaceId} />
+        <NotificationInbox client={client} open={notificationOpen} onOpen={() => { setSettingsOpen(false); setNotificationOpen(true); }} onClose={() => setNotificationOpen(false)} onNavigate={navigateNotificationTask} />
+      </div>
       <Sidebar
-        onOpenNotifications={() => setNotificationOpen((open) => !open)}
         client={client}
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
         onSelectWorkspace={selectWorkspace}

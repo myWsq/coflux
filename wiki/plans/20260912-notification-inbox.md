@@ -8,14 +8,14 @@
 - Depends on: none
 - Category: feature
 - Execution: subagent — host-supported default from dev:execute-plan; one dependent implementation unit.
-- Stop after: implementation — user explicitly requested implementation.
+- Delivery: implementation and pull request, explicitly requested by the user.
 - Workspace: isolated — user requested a separate Coflux workspace.
 - Planned at: `67b51751c0e33e5742312975d9876dd83cbd0664`, 2026-09-12.
 - Branch: `dev/20260912-notification-inbox`.
 - Commit policy: repository AGENTS.md requires all checks before commits; defer plan and implementation commits until checks pass.
 
 ## Requirement
-Replace explicit `coflux notify`'s transient presence annotation with durable account-owned notifications. Users receive notifications from all their devices/workspaces. A notification has unread/read state, not a task-completion workflow. The desktop has an always-accessible notification entry beside the sidebar account area with an unread count, a newest-first history list, and mark-all-read. Each item shows message, source device/workspace/terminal and time. Clicking it marks it read and selects the source terminal. Closing a transient hint does not mark read. Missing/deleted targets retain readable history and explain why navigation is unavailable. Loading, empty, failed and disconnected states remain intelligible.
+Replace explicit `coflux notify`'s transient presence annotation with durable account-owned notifications. Users receive notifications from all their devices/workspaces. A notification has unread/read state, not a task-completion workflow. The desktop has an always-accessible bell in the fixed top-right terminal toolbar action area, with an unread dot and a newest-first history list. Each item shows a message clamped to two lines, followed by source project/workspace/terminal/device information. The menu has no header, timestamp or footer actions; scrolling loads older notifications. Clicking it marks it read and selects the source terminal. Closing a transient hint does not mark read. Missing/deleted targets retain readable history and explain why navigation is unavailable. Loading, empty, failed and disconnected states remain intelligible.
 
 Every newly received explicit notify shows an in-app hint when Coflux is foreground, even when the source workspace is selected; it must not steal focus. When this desktop is backgrounded, also show a native system notification. Clicking it activates the app and opens the source notification/terminal. Hidden/minimized windows count as background. Fully quit applications sync history on next launch; OS push to terminated apps is out of scope. Initial/reconnect history does not cause a burst of native or in-app alerts.
 
@@ -31,7 +31,7 @@ Read state syncs across clients on the same account. Hook updates, agent exit an
 - **Explicit notify only**: automatic approval/question hooks keep their existing attention behavior; do not turn every state transition into inbox history. Compose Dock badge ownership in one place so existing waiting state and unread inbox drivers cannot overwrite each other.
 - **Compatibility**: preserve existing protobuf field numbers and migrate additively; older capability/unsupported-server paths must fail explicitly rather than silently reverting to transient notifications.
 - **English project prose**: docs/comments/plan in English; intentionally Chinese UI copy follows current app language.
-- **Plugin delivery**: sync canonical CLI skill to integrations copy. No marketplace publication, production deployment, release, push, PR, or main-branch merge is authorized.
+- **Plugin delivery**: sync canonical CLI skill to integrations copy. Commit, branch push and pull request are authorized. Marketplace publication, production deployment, release and main-branch merge remain out of scope.
 
 ## Direction
 One implementation unit; milestones are sequential and share protocol/store surfaces.
@@ -94,3 +94,25 @@ Keep bounded history fetching, account authorization, stable pagination/read cut
 - Isolated Electron and real temporary server/daemon/database: empty inbox, foreground notification in the source terminal without stealing input focus, persistent unread count after hint expiry, history/source labels, single-item read clearing the badge, and notification navigation from the device view back to the source terminal were exercised through the UI.
 - Mark-all-read, stale/out-of-order events, reconnect history suppression and precise native IPC payloads passed automated coverage. Native OS presentation/click and Dock appearance were not accepted on this unsigned Electron instance; verify them using a signed desktop artifact before release. The attempted minimize scenario did not establish native delivery evidence.
 - No production deployment, external publication, push, PR, or merge. Existing unrelated changes in the main checkout were left untouched.
+
+## Toolbar menu revision (2026-09-12)
+
+The user selected the terminal tab bar's fixed top-right corner for global actions. The action dock sits outside workspace tab scrollers, with an opaque background and a 24px fade on its leading edge. The tab strip reserves trailing space so its last tab and creation button remain reachable. Empty views retain the notification entry, and the reconnect banner shifts the action dock with the tab bar.
+
+Notification history now uses the same Astryx DropdownMenu, DropdownMenuItem and Text components as workspace creation, including its 320px menu width, keyboard navigation and dismissal. Custom panel framing, close button, row borders and selected backgrounds were removed. Toolbar buttons match the new-terminal control in the same tab bar: 24px button and 14px icon, vertically centered in the 36px header.
+
+Forwarded ports from the current workspace are collected into an adjacent Router menu, deduplicated by preview URL and sorted by port. The button shows a count badge when ports exist; the menu identifies each source terminal and opens the existing preview URL. Inline links and per-tab port menus were removed.
+
+Validation: desktop typecheck, all 90 desktop tests, production build and whitespace checks passed. The live isolated preview contains two persisted notifications, overflowing tabs and two real HTTP listeners detected by the daemon. UI verification confirmed the two toolbar buttons, notification menu semantics, Escape dismissal, port count and both port menu entries. Preview remains running for user review. Delivery semantics are unchanged.
+
+## Main rebase (2026-09-12)
+
+Rebased the notification commit onto `origin/main` at `7386591`; the rewritten notification commit is `b924fa5`. Preserved the main branch's interactive terminal model, executor integration, Codex skills, settings page and shared sidebar resize control. Resolved CLI/skill help and test conflicts by retaining those features alongside durable notification semantics; regenerated the shared protocol outputs and advanced the plugin delivery version to 0.15.1.
+
+The uncommitted toolbar/menu revision was restored after rebase. Opening a notification also dismisses the newly introduced settings overlay so source navigation remains visible. Server and desktop typechecks, desktop production build, protocol lint/compatibility and skill synchronization passed. Rust build completed without warnings; the complete black-box suite passed 223 tests, desktop passed 170 tests, and shared client passed 78 tests. No push or main-branch mutation was performed.
+
+## Final menu refinement and PR delivery (2026-09-12)
+
+Notification items show a two-line message followed by source information, with no leading status dot, timestamps, header or footer actions. Scrolling near the bottom requests older history. The bell retains the account unread indicator. The port menu is 220px wide and places each port and source terminal on one line, truncating long terminal names. It has no header, divider or external-link icon. The user reviewed successive builds in the isolated desktop preview and requested a pull request.
+
+PR validation passed: server and desktop typechecks, desktop build, 170 desktop tests, 78 shared-client tests, Rust build without warnings, and all 223 black-box tests (0 failures/skips, approximately 121 seconds). Protocol lint/compatibility, canonical/plugin skill synchronization, staged whitespace and secret checks passed. Signed native notification delivery remains a release acceptance check.
