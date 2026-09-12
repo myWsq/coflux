@@ -63,8 +63,8 @@ type SidebarProps = {
   onCreateMenuProjectIdChange: (projectId: string | null) => void;
   /** 乐观创建中的工作区（plan 078）：渲染在对应项目的工作区列表末尾 */
   pendingWorkspaces: PendingWorkspace[];
-  /** 账号脚部尾部的设置按钮：打开独立设置页 */
-  onOpenSettings: () => void;
+  /** 账号脚部尾部的设置按钮：开关独立设置页（工作台可见时它总是关着的） */
+  onToggleSettings: () => void;
   /** 侧栏宽度：与设置页左栏共用同一份，见 use-sidebar-width.ts */
   widthControl: SidebarWidthControl;
 };
@@ -556,7 +556,7 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       {/* 账号脚部（plan 110）：固定在滚动区之外，不随项目/设备列表滚动；不声明拖拽区。 */}
-      <AccountFooter client={client} onOpenSettings={props.onOpenSettings} />
+      <AccountFooter client={client} isSettingsOpen={false} onToggleSettings={props.onToggleSettings} />
 
       <SidebarResizeHandle control={props.widthControl} />
     </aside>

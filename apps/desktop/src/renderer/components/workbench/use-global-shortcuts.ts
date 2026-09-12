@@ -12,8 +12,8 @@ type GlobalShortcutsOptions = {
   activeTerminalRef: RefObject<WorkspaceTerminalHandle | null>;
   onOpenCreateWorkspaceMenu: (projectId: string) => void;
   onToggleHelp: () => void;
-  /** ⌘, 与应用菜单的「设置…」：打开设置页，幂等，挂起期间照样受理 */
-  onOpenSettings: () => void;
+  /** ⌘, 与应用菜单的「设置…」：开关设置页；挂起期间照样受理 */
+  onToggleSettings: () => void;
   /** 挂起时键盘与原生菜单命令都不再作用于终端：设置页这类整页覆盖层盖住工作台时传 true，
    * 否则 ⌘T/⌘W/⌘1 会落到一个看不见也点不到的终端上。 */
   isSuspended?: boolean;
@@ -38,7 +38,7 @@ export function useGlobalShortcuts({
   activeTerminalRef,
   onOpenCreateWorkspaceMenu,
   onToggleHelp,
-  onOpenSettings,
+  onToggleSettings,
   isSuspended = false,
 }: GlobalShortcutsOptions) {
   useEffect(() => {
@@ -47,12 +47,12 @@ export function useGlobalShortcuts({
       const hasPrefix = event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
       if (!hasPrefix) return;
 
-      // ⌘,（macOS 的「偏好设置」惯例）不受挂起影响：打开设置页是幂等的，人在设置页里按它
-      // 也该什么都不坏——挂起是为了别让终端快捷键落到看不见的终端上，与这条无关。
+      // ⌘,（macOS 的「偏好设置」惯例）不受挂起影响：它开关的就是那个覆盖层本身，人在设置页里
+      // 按它应当关掉设置页——挂起是为了别让终端快捷键落到看不见的终端上，与这条无关。
       if (event.code === "Comma") {
         event.preventDefault();
         event.stopPropagation();
-        onOpenSettings();
+        onToggleSettings();
         return;
       }
 
@@ -106,7 +106,7 @@ export function useGlobalShortcuts({
 
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onOpenSettings, isSuspended]);
+  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onToggleSettings, isSuspended]);
 
   // 原生菜单命令：与上面的键位一一对应。
   useEffect(
@@ -114,7 +114,7 @@ export function useGlobalShortcuts({
       desktop.onCommand((command: DesktopCommand) => {
         // 与键盘同一口径：菜单里的「设置…」任何时候都受理，其余命令在覆盖层打开时挂起。
         if (command === "open-settings") {
-          onOpenSettings();
+          onToggleSettings();
           return;
         }
         if (isSuspended) return;
@@ -140,6 +140,6 @@ export function useGlobalShortcuts({
             return;
         }
       }),
-    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onOpenSettings, isSuspended],
+    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onToggleSettings, isSuspended],
   );
 }

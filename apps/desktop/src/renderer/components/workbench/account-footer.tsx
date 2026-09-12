@@ -12,6 +12,10 @@ import type { CofluxClient } from "@coflux/client";
 import { accountIdentity, resolveAccountFooter } from "@/components/workbench/account-footer-view";
 import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { desktop } from "@/config";
+import { cn } from "@/lib/utils";
+
+/** 账号菜单定宽。跟着侧栏宽度走的话，侧栏拖宽菜单就跟着变成一大片空白。 */
+const ACCOUNT_MENU_WIDTH = 200;
 
 /**
  * 侧栏底部的账号脚部（plan 110，Cursor 左下角那一行）：头像 + 登录身份，尾部一个设置按钮。
@@ -23,33 +27,37 @@ import { desktop } from "@/config";
  * 一整条，在侧栏底部显得又重又脏。这里把按钮自己的 hover/active 背景全部关掉，只留
  * `group-hover` 让用户名那几个字变色——点击范围一点没变，变的只是反馈的落点。
  *
- * 尾部的设置按钮是独立按钮（不是画在触发器内部的图标），因此有正常的按钮 hover 效果，点击直接
- * 进设置页；它必须 `stopPropagation`，否则点它会顺带掀开账号菜单。
- *
- * 设置按钮的 tooltip 带 ⌘,：这条键在 use-global-shortcuts 与应用菜单里都真的接着（macOS 的
- * 「偏好设置」惯例），tooltip 只是把它说出来。
+ * 尾部的设置按钮是独立按钮（不是画在触发器内部的图标），因此有正常的按钮 hover 效果；它必须
+ * `stopPropagation`，否则点它会顺带掀开账号菜单。设置页开着时它自己处于按下态，再点就是关掉——
+ * 所以它和菜单里那一项都是 **toggle**，文案随状态改口，tooltip 与菜单项都带 ⌘,（这条键在
+ * use-global-shortcuts 与应用菜单里都真的接着，macOS 的「偏好设置」惯例）。
  *
  * 只有「新版本已下载」时尾部换成强调色「更新」按钮，设置按钮让位——此时最该点的是更新。
  * 脚部**不**触发更新检查（见 use-desktop-update.ts）。
  */
 export function AccountFooter({
   client,
-  onOpenSettings,
+  isSettingsOpen,
+  onToggleSettings,
 }: {
   client: CofluxClient;
-  onOpenSettings: () => void;
+  /** 设置页是否开着：决定齿轮的按下态与两处文案的口径 */
+  isSettingsOpen: boolean;
+  onToggleSettings: () => void;
 }) {
   const loginName = useStore(client.store, (state) => state.loginName);
   const update = useDesktopUpdateState(desktop);
 
   const identity = accountIdentity(loginName);
   const view = resolveAccountFooter(update, desktop.version);
+  const settingsLabel = isSettingsOpen ? "关闭设置" : "设置";
 
   return (
     <div className="flex shrink-0 items-center gap-1 border-t border-border px-2 py-1.5">
       <DropdownMenu
         placement="above"
-        menuWidth={240}
+        menuWidth={ACCOUNT_MENU_WIDTH}
+        className="w-[200px]"
         hasChevron={false}
         button={{
           // children 覆盖可见内容，label 仍是无障碍名
@@ -64,10 +72,7 @@ export function AccountFooter({
           children: (
             <span className="flex min-w-0 items-center gap-2">
               <Avatar name={identity.avatarName} size="xsmall" />
-              <span
-                className={identityClassName(identity.isPlaceholder)}
-                title={identity.label}
-              >
+              <span className={identityClassName(identity.isPlaceholder)} title={identity.label}>
                 {identity.label}
               </span>
             </span>
@@ -80,6 +85,12 @@ export function AccountFooter({
           description={view.updateItem.detail || undefined}
           isDisabled={view.updateItem.isDisabled}
           onClick={() => (view.updateItem.action === "install" ? desktop.installUpdate() : desktop.checkForUpdates())}
+        />
+        <DropdownMenuItem
+          icon={<Cog className="size-3.5" />}
+          label={settingsLabel}
+          endContent={<Kbd keys="mod+," />}
+          onClick={onToggleSettings}
         />
         <Divider />
         <DropdownMenuItem icon={<LogOut className="size-3.5" />} label="登出" onClick={() => { void desktop.logoutLocal().then((confirmed) => { if (confirmed) client.logout(false); }); }} />
@@ -99,17 +110,23 @@ export function AccountFooter({
         <Tooltip
           content={
             <HStack gap={2} vAlign="center">
-              <span>设置</span>
+              <span>{settingsLabel}</span>
               <Kbd keys="mod+," />
             </HStack>
           }
         >
           <button
-            aria-label="设置"
-            className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            aria-label={settingsLabel}
+            aria-pressed={isSettingsOpen}
+            className={cn(
+              "flex size-7 shrink-0 items-center justify-center rounded-md transition-colors",
+              isSettingsOpen
+                ? "bg-accent text-foreground"
+                : "text-muted-foreground hover:bg-accent hover:text-foreground",
+            )}
             onClick={(event) => {
               event.stopPropagation();
-              onOpenSettings();
+              onToggleSettings();
             }}
           >
             <Cog className="size-4" />

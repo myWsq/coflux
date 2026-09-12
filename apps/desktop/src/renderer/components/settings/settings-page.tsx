@@ -125,8 +125,8 @@ export function SettingsPage(props: SettingsPageProps) {
               ))}
             </VStack>
             {/* 账号脚部与工作台侧栏是同一个组件：设置页开着的时候，左下角那一行不该凭空消失。
-                这里的齿轮回到默认分区——人已经在设置页里了，没有别处可去。 */}
-            <AccountFooter client={props.client} onOpenSettings={() => setSectionId(DEFAULT_SETTINGS_SECTION)} />
+                这里齿轮处于按下态，再点就是关掉设置页——和 ⌘, 同一个开关语义。 */}
+            <AccountFooter client={props.client} isSettingsOpen onToggleSettings={onClose} />
             <SidebarResizeHandle control={props.widthControl} />
           </LayoutPanel>
         }
