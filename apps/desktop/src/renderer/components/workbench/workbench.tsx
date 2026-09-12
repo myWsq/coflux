@@ -17,6 +17,7 @@ import {
 } from "@/components/workbench/dialogs";
 import { DaemonOnboardingDialog } from "@/components/workbench/daemon-onboarding";
 import { SettingsPage } from "@/components/settings/settings-page";
+import { useSettingsTooltipControl } from "@/components/workbench/account-footer";
 import { countLocalRunningTerminals } from "@/components/workbench/daemon-view";
 import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "@/components/workbench/desktop-attention";
 import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
@@ -199,6 +200,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   // 侧栏宽度在这里持有一份，工作台侧栏与设置页左栏共用，避免设置页盖上来时宽度突变。
   const sidebarWidth = useSidebarWidth();
+  // 齿轮 tooltip 的压制开关同理：点一下齿轮就换了一个脚部实例接管同一个位置，状态必须在它们之上。
+  const settingsTooltip = useSettingsTooltipControl();
   const attemptedAuthToken = useRef<string | null>(null);
   const [localAuthError, setLocalAuthError] = useState<string | null>(null);
   const [authRetry, setAuthRetry] = useState(0);
@@ -652,6 +655,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         pendingWorkspaces={pendingWorkspaces}
         onToggleSettings={() => setSettingsOpen((open) => !open)}
         widthControl={sidebarWidth}
+        settingsTooltip={settingsTooltip}
       />
 
       {terminalWorkspaces.length > 0 ? (
@@ -817,6 +821,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
           runningTerminals={daemonState ? countLocalRunningTerminals(tasks, daemonState.daemonId) : 0}
           hasTopBanner={showReconnectBanner}
           widthControl={sidebarWidth}
+          settingsTooltip={settingsTooltip}
           onClose={() => setSettingsOpen(false)}
           onOpenOnboarding={() => {
             setSettingsOpen(false);

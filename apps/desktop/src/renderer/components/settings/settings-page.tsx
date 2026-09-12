@@ -15,7 +15,7 @@ import {
   settingsSectionGroups,
   type SettingsSectionId,
 } from "@/components/settings/settings-nav";
-import { AccountFooter } from "@/components/workbench/account-footer";
+import { AccountFooter, type SettingsTooltipControl } from "@/components/workbench/account-footer";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
 import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-width";
@@ -42,6 +42,8 @@ type SettingsPageProps = {
   onOpenOnboarding: () => void;
   /** 与工作台侧栏共用的同一份宽度：设置页盖上来时侧栏不能突然变宽变窄 */
   widthControl: SidebarWidthControl;
+  /** 齿轮 tooltip 的压制开关，与工作台那个脚部共用 */
+  settingsTooltip: SettingsTooltipControl;
 };
 
 /**
@@ -126,7 +128,12 @@ export function SettingsPage(props: SettingsPageProps) {
             </VStack>
             {/* 账号脚部与工作台侧栏是同一个组件：设置页开着的时候，左下角那一行不该凭空消失。
                 这里齿轮处于按下态，再点就是关掉设置页——和 ⌘, 同一个开关语义。 */}
-            <AccountFooter client={props.client} isSettingsOpen onToggleSettings={onClose} />
+            <AccountFooter
+              client={props.client}
+              isSettingsOpen
+              onToggleSettings={onClose}
+              tooltipControl={props.settingsTooltip}
+            />
             <SidebarResizeHandle control={props.widthControl} />
           </LayoutPanel>
         }

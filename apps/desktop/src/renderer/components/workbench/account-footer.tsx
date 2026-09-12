@@ -1,3 +1,4 @@
+import { useCallback, useMemo, useState } from "react";
 import { useStore } from "zustand";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Button } from "@astryxdesign/core/Button";
@@ -32,6 +33,30 @@ const COMPACT_KBD = "[&_kbd]:h-4 [&_kbd]:min-w-4 [&_kbd]:border-b [&_kbd]:px-1 [
 const SETTINGS_SHORTCUT_TEXT = `${SHORTCUT_MODIFIER_PREFIX},`;
 
 /**
+ * 设置按钮 tooltip 的压制开关。
+ *
+ * 按下齿轮的那一刻 tooltip 就该收走，别在原地把「设置」换成「关闭设置」——原位改字会先闪一下再
+ * 冒出来，像是弹了个新东西。收走之后要等鼠标真的离开按钮再解除，下次移入才重新提示。
+ *
+ * 状态放在 Workbench 而不是脚部内部：工作台和设置页各挂着一个脚部，点一下齿轮正好是**换一个实例**
+ * 接管同一个屏幕位置，各存各的就压不住新挂上来的那个。
+ */
+export type SettingsTooltipControl = {
+  isSuppressed: boolean;
+  /** 点了齿轮：收走 tooltip */
+  suppress: () => void;
+  /** 指针离开或失焦：下次移入可以再提示 */
+  release: () => void;
+};
+
+export function useSettingsTooltipControl(): SettingsTooltipControl {
+  const [isSuppressed, setIsSuppressed] = useState(false);
+  const suppress = useCallback(() => setIsSuppressed(true), []);
+  const release = useCallback(() => setIsSuppressed(false), []);
+  return useMemo(() => ({ isSuppressed, suppress, release }), [isSuppressed, suppress, release]);
+}
+
+/**
  * 侧栏底部的账号脚部（plan 110，Cursor 左下角那一行）：头像 + 登录身份，尾部一个设置按钮。
  *
  * 身份只显示一行用户名。所连服务器不再挂在名字下面当副标题——它是设置项，挪进了设置页的「通用」，
@@ -53,11 +78,14 @@ export function AccountFooter({
   client,
   isSettingsOpen,
   onToggleSettings,
+  tooltipControl,
 }: {
   client: CofluxClient;
   /** 设置页是否开着：决定齿轮的按下态与两处文案的口径 */
   isSettingsOpen: boolean;
   onToggleSettings: () => void;
+  /** 齿轮 tooltip 的压制开关，工作台与设置页两个脚部共用一份 */
+  tooltipControl: SettingsTooltipControl;
 }) {
   const loginName = useStore(client.store, (state) => state.loginName);
   const update = useDesktopUpdateState(desktop);
@@ -126,6 +154,8 @@ export function AccountFooter({
         />
       ) : (
         <Tooltip
+          // 受控只用来「强制隐藏」，其余时候交回给 hover/focus 自己管（undefined = 不受控）。
+          isOpen={tooltipControl.isSuppressed ? false : undefined}
           content={
             <HStack gap={2} vAlign="center">
               <span>{settingsLabel}</span>
@@ -136,6 +166,8 @@ export function AccountFooter({
           <button
             aria-label={settingsLabel}
             aria-pressed={isSettingsOpen}
+            onPointerLeave={tooltipControl.release}
+            onBlur={tooltipControl.release}
             // 尺寸对齐侧栏里其它图标按钮（24px 命中区 + 14px 图标），此前这颗大了一号。
             className={cn(
               "flex size-6 shrink-0 items-center justify-center rounded-md transition-colors",
@@ -145,6 +177,7 @@ export function AccountFooter({
             )}
             onClick={(event) => {
               event.stopPropagation();
+              tooltipControl.suppress();
               onToggleSettings();
             }}
           >

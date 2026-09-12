@@ -5,7 +5,7 @@ import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
-import { AccountFooter } from "@/components/workbench/account-footer";
+import { AccountFooter, type SettingsTooltipControl } from "@/components/workbench/account-footer";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { ActivityDots } from "@/components/workbench/pending-dots";
@@ -65,6 +65,8 @@ type SidebarProps = {
   pendingWorkspaces: PendingWorkspace[];
   /** 账号脚部尾部的设置按钮：开关独立设置页（工作台可见时它总是关着的） */
   onToggleSettings: () => void;
+  /** 齿轮 tooltip 的压制开关，与设置页那个脚部共用 */
+  settingsTooltip: SettingsTooltipControl;
   /** 侧栏宽度：与设置页左栏共用同一份，见 use-sidebar-width.ts */
   widthControl: SidebarWidthControl;
 };
@@ -556,7 +558,12 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       {/* 账号脚部（plan 110）：固定在滚动区之外，不随项目/设备列表滚动；不声明拖拽区。 */}
-      <AccountFooter client={client} isSettingsOpen={false} onToggleSettings={props.onToggleSettings} />
+      <AccountFooter
+        client={client}
+        isSettingsOpen={false}
+        onToggleSettings={props.onToggleSettings}
+        tooltipControl={props.settingsTooltip}
+      />
 
       <SidebarResizeHandle control={props.widthControl} />
     </aside>
