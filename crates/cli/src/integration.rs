@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod workspace;
+
+pub use workspace::enter as enter_workspace;
+
 const SKILL: &str = include_str!("../../../packages/cli/skills/coflux/SKILL.md");
 const EVENTS: &[&str] = &[
     "SessionStart",
@@ -137,7 +141,10 @@ fn codex_args(root: &Path) -> Vec<String> {
         .collect()
 }
 fn local(action: &str, path: Option<&str>) -> Result<Value, String> {
-    let mut body = json!({"action":action,"pid":crate::gateway::pid(),"ppid":crate::gateway::ppid(),"cwd":crate::gateway::caller_cwd()});
+    local_at(action, path, &crate::gateway::caller_cwd())
+}
+fn local_at(action: &str, path: Option<&str>, cwd: &str) -> Result<Value, String> {
+    let mut body = json!({"action":action,"pid":crate::gateway::pid(),"ppid":crate::gateway::ppid(),"cwd":cwd});
     if let Some(path) = path {
         body["path"] = Value::from(path);
     }
@@ -181,16 +188,18 @@ fn record(state: &str, host: &str) {
     if private_dir(&status_root()).is_err() {
         return;
     }
-    let previous = fs::read(&path)
+    let mut previous = fs::read(&path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .unwrap_or(json!({}));
-    let _ = atomic_json(
-        &path,
-        &json!({"agent":host,"state":state,
-        "pid":previous["pid"].as_u64().unwrap_or(std::process::id() as u64),
-        "integration":env("COFLUX_AGENT_BUNDLE"),"workspaceId":previous["workspaceId"],"updatedAt":now().to_string()}),
-    );
+    previous["pid"] = json!(previous["pid"]
+        .as_u64()
+        .unwrap_or(std::process::id() as u64));
+    previous["agent"] = json!(host);
+    previous["state"] = json!(state);
+    previous["integration"] = json!(env("COFLUX_AGENT_BUNDLE"));
+    previous["updatedAt"] = json!(now().to_string());
+    let _ = atomic_json(&path, &previous);
 }
 fn emit_context(root: &Path, workspace: &Value, host: &str, event: &str) {
     let workspace_id = workspace["workspaceId"].as_str().unwrap_or_default();
@@ -198,11 +207,21 @@ fn emit_context(root: &Path, workspace: &Value, host: &str, event: &str) {
         if let Ok(bytes) = fs::read(&path) {
             if let Ok(mut status) = serde_json::from_slice::<Value>(&bytes) {
                 status["workspaceId"] = Value::from(workspace_id);
+                status["workspacePath"] = workspace["path"].clone();
                 let _ = atomic_json(&path, &status);
             }
         }
     }
-    let context = format!("<coflux-session>\nYou are in a Coflux terminal. The user can watch and take over.\nDevice: {}\nProject: {}\nWorkspace: {}\nTerminal: {}\nSession: {}\nUse `coflux` for local terminal/progress/notify/ports operations and account operations across devices. Query `coflux workspace` after changing directories; these coordinates are a snapshot.\nIntegration: {}\nRead {} for the complete Coflux skill.\n</coflux-session>",env("COFLUX_DEVICE_ID"),env("COFLUX_PROJECT_ID"),workspace_id,env("COFLUX_TASK_ID"),env("COFLUX_SESSION_ID"),root.file_name().unwrap_or_default().to_string_lossy(),root.join("skills/coflux/SKILL.md").display());
+    let selection = if workspace["explicitSelection"] == true {
+        format!(
+            "\nSelected working directory: {}\n{}",
+            json!(workspace["path"]),
+            workspace::DIRECTORY_INSTRUCTION
+        )
+    } else {
+        String::new()
+    };
+    let context = format!("<coflux-session>\nYou are in a Coflux terminal. The user can watch and take over.\nDevice: {}\nProject: {}\nWorkspace: {}\nTerminal: {}\nSession: {}\nUse `coflux` for local terminal/progress/notify/ports operations and account operations across devices. Query `coflux workspace` after changing directories; these coordinates are a snapshot.{}\nIntegration: {}\nRead {} for the complete Coflux skill.\n</coflux-session>",env("COFLUX_DEVICE_ID"),env("COFLUX_PROJECT_ID"),workspace_id,env("COFLUX_TASK_ID"),env("COFLUX_SESSION_ID"),selection,root.file_name().unwrap_or_default().to_string_lossy(),root.join("skills/coflux/SKILL.md").display());
     if event == "SessionStart" {
         println!("{context}");
     } else if host == "claude" || host == "codex" {
@@ -249,7 +268,9 @@ fn hook(host: &str) {
             );
         }
     }
-    if event == "SessionStart" {
+    if host == "codex" && workspace::hook(&root, &payload) {
+        // Explicit selections are independent of the host's original cwd.
+    } else if event == "SessionStart" {
         let located = local("workspace.locate", Some(&string(&payload, "cwd")))
             .or_else(|_| local("workspace.current", None));
         match located {

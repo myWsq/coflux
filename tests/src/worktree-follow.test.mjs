@@ -27,7 +27,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
-import { mkRepo, startStack } from "./harness.mjs";
+import { mkRepo, startStack, CLI_BIN } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
 
 const PORT = 8873;
@@ -65,7 +65,7 @@ after(async () => {
 
 let cliSeq = 0;
 
-test("跟随进 worktree：未注册的先登记再搬、回来不删记录、已注册的只搬、跨仓库不适用、删掉后终端回主工作区", async () => {
+for (const mode of ['locate', 'enter']) test(`${mode}: register and move workspaces without interrupting the PTY; reject unrelated paths and return on cleanup`, async () => {
   const repoA = newRepo();
   const outsideRepo = newRepo(); // 另一个仓库：定位过去必须「不适用」
   const notGit = mkDir(); // 非 git 目录：同样「不适用」
@@ -80,7 +80,7 @@ test("跟随进 worktree：未注册的先登记再搬、回来不删记录、�
     const file = join(out, `cli-${cliSeq += 1}.txt`);
     await device.input(
       sessionId,
-      `COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} node ${COFLUXD} ${args} > ${file} 2>&1\r`,
+      `COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} ${mode === 'enter' ? CLI_BIN : `node ${COFLUXD}`} ${args.replace(/^workspace locate /, `workspace ${mode} `)} > ${file} 2>&1\r`,
     );
     const deadline = Date.now() + timeout;
     let last = "";
@@ -142,6 +142,11 @@ test("跟随进 worktree：未注册的先登记再搬、回来不删记录、�
   try {
     // ---- ① 定位到未注册的 W：先登记（workspaceCreated），再搬归属（taskUpdated） ----
     const located = await json(sessionId, `workspace locate ${worktreeW}`, "定位到 W");
+    if (mode === 'enter') {
+      assert.equal(located.hostCwdChanged, false);
+      assert.equal(located.resumeSupported, false, 'plain terminals have no Codex conversation identity');
+      assert.match(located.instruction, /workdir\/cwd/);
+    }
     assert.equal(located.created, true, `W 未注册过，必须新登记: ${JSON.stringify(located)}`);
     assert.equal(located.moved, true, `归属必须真的搬了: ${JSON.stringify(located)}`);
     assert.equal(located.branch, "worktree-fix-a", `分支要取 W 自己的: ${JSON.stringify(located)}`);
