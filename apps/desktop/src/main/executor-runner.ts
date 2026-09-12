@@ -21,6 +21,10 @@
  *      and killing the pid does not kill the group it spawned.
  *   4. **No session on disk**: `SessionManager.inMemory()`, leaving the user's existing `~/.pi` state
  *      untouched.
+ *   5. **A fully private pi configuration**: auth, models, settings and the `getAgentDir()` fallback
+ *      all point into this task's scratch dir, and settings are in-memory defaults. The executor
+ *      never shares a byte of configuration with a pi the user installed themselves, and a
+ *      workspace's `.pi/` directory cannot reconfigure it either.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -150,13 +154,37 @@ function relativeToWorkspace(root: string, absolute: string): string {
 }
 
 async function run(start: ExecutorRunnerStart): Promise<void> {
+  // This task's private pi configuration directory, inside the scratch dir, deleted with it.
+  const agentDir = `${start.scratchDir}/pi-agent`;
+  mkdirSync(agentDir, { recursive: true });
+
+  /**
+   * The executor's pi shares **nothing** with a pi the user may have installed themselves.
+   *
+   * Every explicit path below (auth, models, settings, sessions, resources) already points into this
+   * task's scratch dir, but pi resolves any path it is *not* handed explicitly through
+   * `getAgentDir()`, which falls back to the user's real `~/.pi/agent`. These two variables are that
+   * fallback, so a code path we did not enumerate still lands inside the scratch dir instead of in the
+   * user's configuration. Set before pi is loaded so nothing evaluates the default first.
+   * They also reach the sandboxed tool shells through the environment; that is harmless (the scratch
+   * dir is the one place those shells may write anyway).
+   */
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  process.env.PI_CODING_AGENT_SESSION_DIR = `${agentDir}/sessions`;
+
   // pi is loaded here and not earlier: a load failure has to be reportable as startupFailed instead
   // of killing the whole process silently.
   const pi = await import("@earendil-works/pi-coding-agent");
 
-  // This task's private pi configuration directory, inside the scratch dir, deleted with it.
-  const agentDir = `${start.scratchDir}/pi-agent`;
-  mkdirSync(agentDir, { recursive: true });
+  /**
+   * Settings are in-memory defaults, never read from disk. Left to its default,
+   * `createAgentSession` builds `SettingsManager.create(cwd, agentDir)`, which merges the **workspace's
+   * `.pi/settings.json`** over the global one — so a file dropped into the workspace could change the
+   * executor's thinking level, transport, retry policy or provider headers. The executor's behaviour
+   * is coflux's to define, not the workspace's, and the model itself is fixed by the desktop
+   * configuration; nothing in a settings file is wanted.
+   */
+  const settingsManager = pi.SettingsManager.inMemory();
 
   /**
    * ModelRuntime must be pointed **explicitly** at this task's isolated directory.
@@ -232,6 +260,7 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
     // Points at this task's scratch dir rather than the user's ~/.pi: their existing state is
     // neither read nor written.
     agentDir,
+    settingsManager,
     noExtensions: true,
     noSkills: true,
     noPromptTemplates: true,
@@ -245,6 +274,7 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
   const { session } = await pi.createAgentSession({
     cwd: start.workspaceRoot,
     agentDir,
+    settingsManager,
     modelRuntime: runtime,
     model,
     sessionManager: pi.SessionManager.inMemory(start.workspaceRoot),
