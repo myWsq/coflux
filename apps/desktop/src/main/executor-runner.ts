@@ -18,7 +18,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 import { guardToolCall } from "./executor-guard";
@@ -143,8 +143,29 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
   // pi 在这里才加载：加载失败要能报 startupFailed，而不是让整个进程静默死掉。
   const pi = await import("@earendil-works/pi-coding-agent");
 
-  const runtime = await pi.ModelRuntime.create({ allowModelNetwork: false });
-  runtime.setRuntimeApiKey(start.model.provider, start.apiKey); // 只在内存里，不落 auth.json
+  // 本次任务私有的 pi 配置目录，落在 scratch 里，任务结束随 scratch 一起删。
+  const agentDir = `${start.scratchDir}/pi-agent`;
+  mkdirSync(agentDir, { recursive: true });
+
+  /**
+   * ModelRuntime 必须**显式指向本次任务的隔离目录**。
+   *
+   * 它的默认 `authPath` 是 `getAgentDir()/auth.json`，而 `getAgentDir()` 在没有 `PI_CODING_AGENT_DIR`
+   * 时就是用户真实的 `~/.pi/agent`。只给 ResourceLoader 与 session 传 agentDir 是不够的——runtime 是
+   * 另一条路径解析。不隔离会有两个后果，都违反「不读用户既有 ~/.pi 状态」：
+   *   - 用户若在自己的 pi 里登过同一个 provider（OAuth / 订阅），executor 可能**用那份凭证**而不是
+   *     桌面里配的 key，用户既看不见也没同意；
+   *   - 用户 `models.json` 里的自定义 provider 会被一并加载，executor 的模型面因此不可预期。
+   * 代价：自定义 base URL 的 OpenAI 兼容端点在 v1 用不了，模型面只有 pi 内置那批。
+   */
+  const runtime = await pi.ModelRuntime.create({
+    allowModelNetwork: false,
+    authPath: `${agentDir}/auth.json`,
+    modelsPath: `${agentDir}/models.json`,
+    modelsStorePath: `${agentDir}/models-store.json`,
+  });
+  // 必须 await：它是异步的，且内部走凭证操作队列。不等就可能在 key 落位前发出第一次请求。
+  await runtime.setRuntimeApiKey(start.model.provider, start.apiKey);
 
   const model = runtime.getModel(start.model.provider, start.model.id);
   if (!model) {
@@ -188,7 +209,6 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
   // `createAgentSession` 没有 `resourceLoaderOptions` 这个入参（那是 createAgentSessionServices 上的），
   // 传了会被静默忽略——于是磁盘扩展发现照常打开，工作区里一个 `.pi/` 就能执行任意代码。
   // 这里刻意不加类型断言，让编译器替我们盯住这件事。
-  const agentDir = `${start.scratchDir}/pi-agent`;
   const resourceLoader = new pi.DefaultResourceLoader({
     cwd: start.workspaceRoot,
     // 指向本次任务的 scratch，而不是用户的 ~/.pi：不读也不写用户既有状态
