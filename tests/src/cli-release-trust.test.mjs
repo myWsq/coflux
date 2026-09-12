@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 
 import {
   cliReleaseStatement,
+  transportReleaseStatement,
   supervisorReleaseStatement,
   workerReleaseStatement,
 } from "../../scripts/release-statement.mjs";
@@ -29,22 +30,22 @@ function rawPublicKeyHex(publicKey) {
   return Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("hex");
 }
 
-function releaseFixture(withCli = false) {
+function releaseFixture(withCli = false, withTransport = false) {
   const target = rustTarget();
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
   // macOS 正向路径会在验签后执行真实 ad-hoc codesign；用一个可签名/可执行的本机 Mach-O
   // fixture（Linux 上同样是小型 ELF），避免测试靠跳过安全步骤获得假绿灯。
   const executable = readFileSync("/usr/bin/true");
-  const artifacts = { supervisor: executable, worker: executable, cli: executable };
+  const artifacts = { supervisor: executable, worker: executable, cli: executable, transport: executable };
   const manifest = { schemaVersion: 2, version: VERSION, worker: {}, supervisor: {} };
-  for (const component of ["supervisor", "worker", ...(withCli ? ["cli"] : [])]) {
+  for (const component of ["supervisor", "worker", ...(withCli ? ["cli"] : []), ...(withTransport ? ["transport"] : [])]) {
     manifest[component] ??= {};
     const data = artifacts[component];
     const sha256 = crypto.createHash("sha256").update(data).digest("hex");
     const metadata = { version: VERSION, target, sha256, size: data.byteLength };
     const releaseStatement = component === "worker"
       ? workerReleaseStatement(metadata)
-      : component === "cli" ? cliReleaseStatement(metadata) : supervisorReleaseStatement(metadata);
+      : component === "cli" ? cliReleaseStatement(metadata) : component === "transport" ? transportReleaseStatement(metadata) : supervisorReleaseStatement(metadata);
     manifest[component][target] = {
       url: `https://example.invalid/${component}`,
       target,
@@ -68,6 +69,8 @@ async function serveRelease(fixture) {
       [`${prefix}/coflux-supervisor-${fixture.target}`, fixture.artifacts.supervisor],
       [`${prefix}/coflux-worker-${fixture.target}`, fixture.artifacts.worker],
       [`${prefix}/coflux-cli-${fixture.target}`, fixture.artifacts.cli],
+      [`${prefix}/coflux-transport-${fixture.target}`, fixture.artifacts.transport],
+      [`${prefix}/coflux-transport-NOTICES-${fixture.target}.txt`, Buffer.from("test dependency notices")],
     ]);
     const body = routes.get(req.url);
     if (!body) {
@@ -288,5 +291,26 @@ test("cofluxd：新版交付三份可执行文件，CLI 验签失败保留完整
       await endpoint.close();
       rmSync(home, {recursive: true, force: true});
     }
+  }
+});
+
+
+test("cofluxd installs four signed components and notices, rejecting a damaged companion atomically", async () => {
+  for (const damaged of [false, true]) {
+    const fixture = releaseFixture(true, true);
+    if (damaged) fixture.artifacts.transport = Buffer.from("damaged helper");
+    const endpoint = await serveRelease(fixture), home = makeInstallHome();
+    writeFileSync(join(home, "bin/coflux-transport"), "old helper");
+    try {
+      if (damaged) {
+        await assert.rejects(runUpdate(home, fixture, endpoint));
+        assert.equal(readFileSync(join(home, "bin/coflux-worker"), "utf8"), "old worker\n");
+        assert.equal(readFileSync(join(home, "bin/coflux-transport"), "utf8"), "old helper");
+      } else {
+        await runUpdate(home, fixture, endpoint);
+        assert.equal(spawnSync(join(home, "bin/coflux-transport")).status, 0);
+        assert.equal(readFileSync(join(home, "bin/TRANSPORT-NOTICES.txt"), "utf8"), "test dependency notices");
+      }
+    } finally { await endpoint.close(); rmSync(home, { recursive: true, force: true }); }
   }
 });

@@ -16,7 +16,7 @@ import { performance } from "node:perf_hooks";
 import { randomUUID } from "node:crypto";
 import XTermHeadless from "@xterm/headless";
 import { TaskStatus } from "@coflux/protocol";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 import { mkRepo, startStack } from "./harness.mjs";
 
 const PORT = Number(process.env.COFLUX_BENCH_PORT ?? 8848);
@@ -43,8 +43,8 @@ function outputSince(device, from, sessionId) {
 // timed direct path 的"零 relay 帧"改为观测 device 在 relay transport 上的双向累计计数，
 // 字段名沿用旧报告口径：clientToServer=client→relay 发出、serverToClient=relay→client 收到。
 function relayFrameSnapshot(device) {
-  const clientToServer = device.relayFramesSent;
-  const serverToClient = device.relayEnvelopesReceived;
+  const clientToServer = device.remoteFramesSent;
+  const serverToClient = device.remoteEnvelopesReceived;
   return { clientToServer, serverToClient, total: clientToServer + serverToClient };
 }
 
@@ -163,7 +163,7 @@ async function main() {
       port: PORT,
       daemonEnv: { COFLUX_HISTORY_LINES: String(HISTORY_LINES) },
     });
-    device = await openRelayDevice(stack);
+    device = await openNativeDevice(stack);
     const sessionId = await createRunningSession(stack, device, repo);
     await device.attach(sessionId, { cols: COLS, rows: ROWS });
     const seededSnapshot = await fillDefaultHistory(device, sessionId);

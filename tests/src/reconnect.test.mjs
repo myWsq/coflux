@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8822;
 let stack;
@@ -14,7 +14,7 @@ after(async () => { await stack?.stop(); repos.forEach((r) => r.cleanup()); });
 test("服务器重启：DB 持久化 + daemon catalog 重挂任务 + sessiond snapshot 存活", async () => {
   const repo = mkRepo();
   repos.push(repo);
-  const first = await openRelayDevice(stack);
+  const first = await openNativeDevice(stack);
   const a = first.control;
   a.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await a.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
@@ -34,7 +34,7 @@ test("服务器重启：DB 持久化 + daemon catalog 重挂任务 + sessiond sn
   await stack.restartServer();
   await stack.waitDaemonOnline();
 
-  const second = await openRelayDevice(stack);
+  const second = await openNativeDevice(stack);
   const snap = second.control.log.find((message) => message.case === "stateSnapshot");
   const rec = snap.tasks.find((t) => t.id === taskId);
   assert.ok(rec, "重启后任务记录仍在（DB 持久化）");

@@ -24,6 +24,7 @@ struct RemoteUpgradeRequest {
     target: String,
     artifact_size: u64,
     release_signature: String,
+    transport: Option<coflux_protocol::TransportArtifact>,
 }
 
 #[derive(Default)]
@@ -374,6 +375,26 @@ impl Manager {
         let mut cmd = Command::new(&spec.cmd);
         cmd.args(&spec.args)
             .env(SUPERVISOR_SOCK_ENV, &self.sock_path)
+            .env("COFLUX_TRANSPORT_PAIR", "1")
+            .env(
+                "COFLUX_TRANSPORT_REQUIRED",
+                if std::path::Path::new(&spec.cmd)
+                    .parent()
+                    .is_some_and(|dir| dir.join("transport-pair.json").exists())
+                {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "COFLUX_TRANSPORT_PROBATION_MS",
+                if is_pending {
+                    self.probation.as_millis().to_string()
+                } else {
+                    "0".into()
+                },
+            )
             // worker 完全不知自身版本——这是 supervisor 侧概念，每次 spawn 都经 env 告知当前跑的
             // 版本 + supervisor 自身版本；worker 握手消息据此上报（见 plans/015）。
             .env(WORKER_VERSION_ENV, &spec.version)
@@ -525,6 +546,7 @@ impl Manager {
         target: String,
         artifact_size: u64,
         release_signature: String,
+        transport: Option<coflux_protocol::TransportArtifact>,
     ) -> Option<RemoteUpgradeRequest> {
         let mut remote = self.remote_upgrade.lock().unwrap();
         {
@@ -545,6 +567,7 @@ impl Manager {
             target,
             artifact_size,
             release_signature,
+            transport,
         };
         if remote.executor_running {
             if let Some(replaced) = remote.latest.replace(request) {
@@ -648,6 +671,7 @@ impl Manager {
                 &request.target,
                 request.artifact_size,
                 &request.release_signature,
+                request.transport.as_ref(),
             );
             match self.finish_remote_upgrade(request, result) {
                 Some(next) => request = next,
@@ -666,6 +690,7 @@ impl Manager {
         target: String,
         artifact_size: u64,
         release_signature: String,
+        transport: Option<coflux_protocol::TransportArtifact>,
     ) {
         let release_version = match crate::upgrade::validate_upgrade_request(
             &version,
@@ -682,6 +707,22 @@ impl Manager {
                 return;
             }
         };
+        if let Some(companion) = transport.as_ref() {
+            if crate::upgrade::validate_upgrade_request(
+                &version,
+                &companion.url,
+                &companion.sha256,
+                &"00".repeat(64),
+                &target,
+                companion.size,
+                &companion.release_signature,
+            )
+            .is_err()
+            {
+                logln!("[supervisor] invalid native companion metadata; download refused");
+                return;
+            }
+        }
         let Some(request) = self.enqueue_remote_upgrade(
             release_version,
             version,
@@ -691,6 +732,7 @@ impl Manager {
             target,
             artifact_size,
             release_signature,
+            transport,
         ) else {
             return;
         };
@@ -860,6 +902,7 @@ mod tests {
             crate::upgrade::current_release_target().into(),
             1,
             "22".repeat(64),
+            None,
         )
     }
 

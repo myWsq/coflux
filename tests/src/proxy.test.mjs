@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { WebSocket } from "ws";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo, CookieJar, pageGet, pageLogin } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8831;
 // server 直出的门禁页（plan 107）挂在 COFLUX_PUBLIC_URL 下；黑盒不设它，默认即本机监听地址。
@@ -253,7 +253,7 @@ before(async () => {
   writeFileSync(join(repo.dir, "server-slow.js"), SLOW_SERVER_SRC);
   writeFileSync(join(repo.dir, "ws-echo.js"), WS_ECHO_SERVER_SRC);
 
-  const setupDevice = await openRelayDevice(stack);
+  const setupDevice = await openNativeDevice(stack);
   const setup = setupDevice.control;
   setup.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await setup.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main workspace", 15000);
@@ -269,7 +269,7 @@ after(async () => {
 /* ============================ Requirement 1：探测 + 撤销 + 安全边界 ============================ */
 
 test("端口探测：PTY 内服务端口出现在 ports.updated；停任务后撤销为空集；非 PTY 端口绝不上报", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
 
   // 安全边界对照组：测试进程自己开一个监听端口（不在任何 daemon PTY 进程树下）。
@@ -318,7 +318,7 @@ test("端口探测：PTY 内服务端口出现在 ports.updated；停任务后�
 /* ============================ Requirement 2：门禁 ============================ */
 
 test("门禁：无 cookie 302 到授权页；issueAuth 换回调 URL；回调种 cookie 并 302 回原路径；带 cookie 200 拿到真实响应；伪造 cookie 与外部 redirect 均被拒", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { taskId, sessionId } = await startTaskRunning(device, workspaceId, "gate-task");
   const sinceStart = c.log.length;
@@ -350,7 +350,7 @@ test("门禁：无 cookie 302 到授权页；issueAuth 换回调 URL；回调种
 /* ============================ 门禁页 HTTP 流（plan 107，server 直出） ============================ */
 
 test("门禁 HTTP 页：无 cookie 302 到 <publicUrl>/proxy-auth?to=；登录 → 302 到预览域回调 → 回调种 cookie → 带 cookie 200；坏 to 与不存在的预览被拒", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { taskId, sessionId } = await startTaskRunning(device, workspaceId, "gate-page-task");
   const sinceStart = c.log.length;
@@ -419,7 +419,7 @@ test("门禁 HTTP 页：无 cookie 302 到 <publicUrl>/proxy-auth?to=；登录 �
 /* ============================ Requirement 3：WS 透传 ============================ */
 
 test("WS 透传：代理一个 PTY 内的 WebSocket echo 服务，伪造 Host + 合法 cookie 完成 upgrade 并 echo 往返", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { taskId, sessionId } = await startTaskRunning(device, workspaceId, "ws-task");
   const sinceStart = c.log.length;
@@ -456,7 +456,7 @@ test("WS 透传：代理一个 PTY 内的 WebSocket echo 服务，伪造 Host + 
 /* ============================ Requirement 4：生命周期 ============================ */
 
 test("生命周期：daemon 断线使在途代理请求失败并触发路由撤销；重连后端口重新上报、新链接可再次打通", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { taskId, sessionId } = await startTaskRunning(device, workspaceId, "lifecycle-task");
   const sinceStart = c.log.length;

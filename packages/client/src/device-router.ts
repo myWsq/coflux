@@ -33,7 +33,6 @@ import {
   type BrowserIdentity,
   type CachedLocalGrant,
 } from "./browser-identity";
-import { P2pFrameAssembler, p2pFrameChunks } from "./p2p-framing";
 
 type ServerPayload = ServerToClient["payload"];
 type RuntimeDevicePayload = DeviceEnvelope["payload"];
@@ -43,20 +42,10 @@ const DEVICE_REQUEST_TIMEOUT_MS = 20_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 const TRANSPORT_DEADLINE_MARGIN_MS = 5_000;
 const DIRECT_CONNECT_TIMEOUT_MS = 2_500;
-/** relay 可能跨洲：比 loopback 宽松，但仍要有限时失败以便重新 rendezvous。 */
-const RELAY_CONNECT_TIMEOUT_MS = 10_000;
+
 const RECOVER_BASE_MS = 350;
 const RECOVER_MAX_MS = 5_000;
 const DIRECT_HEDGE_MS = 200;
-/** P2P 建连（信令 + ICE/DTLS + channel 授权各阶段共用）：跨洲 + 打洞最坏情况的上界；
- * 超时只意味着这次落 relay，promotion 稍后再试。 */
-const P2P_CONNECT_TIMEOUT_MS = 15_000;
-/** vanilla ICE gathering 兜底：配了不可达 STUN 时不无限等，带 host candidates 继续。 */
-const P2P_GATHER_TIMEOUT_MS = 3_000;
-/** DataChannel 发送水位：Chrome 内部发送缓冲约 16MB、超限 send() 抛异常，高水位取足够
- * 余量；低于低水位恢复排水。 */
-const P2P_SEND_HIGH_WATER = 4 * 1024 * 1024;
-const P2P_SEND_LOW_WATER = 1024 * 1024;
 const INPUT_RETRY_MS = 500;
 const CATALOG_INTERVAL_MS = 3_000;
 /** device 心跳周期：够密到 UI 上的延迟读数不显陈旧，够疏到对空闲连接几乎无成本
@@ -64,24 +53,9 @@ const CATALOG_INTERVAL_MS = 3_000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 /** 心跳超时远短于普通 RPC 的 20s：心跳测的是链路好坏，等满 20s 才判失败毫无意义。 */
 const HEARTBEAT_TIMEOUT_MS = 5_000;
-/** 连续多少次心跳无响应就判通道已死。取 2：第一次超时立刻补发一发（不等完整周期），
- * 于是判死落在 ~10s——既远快于 WebRTC 的 ~30s ICE 超时（DataChannel 崩掉后 onclose 要
- * 等它才来），又留了一次容忍偶发丢包的机会。生产实测最慢链路 relay-jp RTT 180ms，
- * 5s 超时对它仍有 27 倍余量，正常慢链路不会被误判。 */
+
 const HEARTBEAT_MAX_MISSES = 2;
-/** P2P 失败后的退避（plan 080）。P2P 会靠 generation promotion 顶掉正在工作的 relay，
- * 所以一条不稳的 P2P 若不退避，就会「崩一次抢一次」地和 relay 来回震荡——每次抢走都
- * 意味着用户再吃一轮判死延迟。基数取 5s（短暂抖动后仍能较快恢复直连），逐次翻倍，
- * 封顶 5 分钟。收到 pong 即证明这条 P2P 真的能用，届时清零。 */
-const P2P_RETRY_BASE_MS = 5_000;
-const P2P_RETRY_MAX_MS = 5 * 60_000;
-/** 浏览器控制 WS 短暂断开时，既有 relay/P2P session lane 的存活宽限。
- *
- * `/client` 与 worker 的 `/daemon` 是两条独立控制连接：浏览器一侧被中间网络静默掐断，
- * 不代表 worker 一侧也失去中心授权。事故中 worker 控制面全程在线，真正把可用数据面摧毁的
- * 是 client 自己在 `onclose` 后立即关 channel。这里给既有远端 session channel 一个有界窗口，
- * 覆盖 10s 静默判死后的首轮重连 + 认证；窗口内不允许新 rendezvous、高权限 RPC 或 lifecycle。
- * worker 控制面若也断开，worker 仍按自己的在线授权语义立即关闭 channel。 */
+
 const CONTROL_DATA_GRACE_MS = 15_000;
 const LEASE_EXPIRY_MARGIN_MS = 2_000;
 const MAX_RETAINED_INPUTS = 256;
@@ -89,7 +63,7 @@ const MAX_RETAINED_INPUT_BYTES = 1024 * 1024;
 
 type TimerHandle = ReturnType<typeof globalThis.setTimeout>;
 
-export type DeviceTransportMode = "idle" | "probing" | "direct" | "p2p" | "relay" | "offline";
+export type DeviceTransportMode = "idle" | "probing" | "direct" | "peer" | "relay" | "remote" | "offline";
 
 export interface DeviceTransportState {
   mode: DeviceTransportMode;
@@ -118,14 +92,20 @@ export interface DeviceRouterClock {
   clearInterval: (timer: TimerHandle) => void;
 }
 
+export interface NativeRemoteTransport {
+  open(options: DeviceTransportOpenOptions): Promise<OpenedDeviceTransport>;
+  control(online: boolean, hard: boolean): void;
+  close(): void;
+}
+
 export interface OpenedDeviceTransport {
+  nativeRemote?: boolean;
   channelId: string;
   scopes: ReadonlySet<DeviceScope>;
   leaseExpiresAt?: number;
   /** direct handshake 因 LEASE_INVALID 内部续签时，把实际采用的 lease 回写给 route。 */
   lease?: OnlineDeviceLease;
-  /** relay transport 专用：rendezvous URL 的 host（如 relay-jp.coflux.dev），供 UI 展示实际经过的节点（plan 065 多节点）。 */
-  relayHost?: string;
+
   send: (frame: Uint8Array<ArrayBuffer>) => boolean;
   close: () => void;
 }
@@ -138,12 +118,10 @@ export interface DeviceTransportOpenOptions {
   signal: AbortSignal;
   onFrame: (frame: Uint8Array) => void;
   onClose: (reason: string) => void;
+  onPath?: (mode: "direct" | "relay" | "unknown", rttMs?: number) => void;
 }
 
-/**
- * Router 与 browser/WS 的窄边界。生产实现仍是 IndexedDB + loopback/relay；测试可注入纯内存
- * adapter，确定性推进 hedge、promotion、close 与 ACK，而不伪造浏览器全局对象。
- */
+
 export interface DeviceRouterAdapter {
   readGrant: (daemonId: string) => Promise<CachedLocalGrant | undefined>;
   pair: (daemonId: string, signal: AbortSignal) => Promise<CachedLocalGrant>;
@@ -151,16 +129,14 @@ export interface DeviceRouterAdapter {
   openDirect: (
     options: DeviceTransportOpenOptions & { grant: CachedLocalGrant; lease?: OnlineDeviceLease },
   ) => Promise<OpenedDeviceTransport>;
-  openRelay: (options: DeviceTransportOpenOptions) => Promise<OpenedDeviceTransport>;
-  /** P2P WebRTC 直连（plan 076）。reuseOnly 时只允许复用已建立的 PeerConnection——
-   * elevated lane 不为一次高权限请求冷付 1-3s 的 ICE/DTLS 建连成本。 */
-  openP2p: (options: DeviceTransportOpenOptions, reuseOnly?: boolean) => Promise<OpenedDeviceTransport>;
+  openRemote: (options: DeviceTransportOpenOptions) => Promise<OpenedDeviceTransport>;
   removeGrant: (daemonId: string) => Promise<void>;
   clearGrants: () => Promise<void>;
   close: () => void;
 }
 
 export interface DeviceRouterOptions {
+  nativeRemote?: NativeRemoteTransport;
   enableLocalTransport: boolean;
   identityDatabaseName: string;
   origin: string;
@@ -192,19 +168,19 @@ export interface DeviceRouterOptions {
 
 type LaneKind = "session" | "elevated";
 
-/** direct=loopback；p2p=WebRTC DataChannel。竞争与 promotion 里两者同属「非 relay」阵营
- * （优于 relay），但授权语义不同：direct 走 loopback grant/lease，p2p 与 relay 一样由
- * 中心在线授权（见 channelCovers 与 worker 侧「中心断开即全关」）。 */
-type ChannelKind = "direct" | "p2p" | "relay";
+
+/** Local authority uses cached grants; native remote authority requires central control. */
+type ChannelKind = "direct" | "remote";
 
 interface DeviceChannel {
+  nativeRemote?: boolean;
+  nativePath?: "direct" | "relay" | "unknown";
   kind: ChannelKind;
   daemonId: string;
   channelId: string;
   generation: bigint;
   scopes: Set<DeviceScope>;
   leaseExpiresAt?: number;
-  relayHost?: string;
   lane: LaneKind;
   closed: boolean;
   send: (frame: Uint8Array<ArrayBuffer>) => boolean;
@@ -293,11 +269,9 @@ interface LaneAttempt {
   pending: number;
   cachePending: boolean;
   directStarted: boolean;
-  p2pStarted: boolean;
-  relayStarted: boolean;
+  remoteStarted: boolean;
   hedgeTimer?: TimerHandle;
-  startRelay?: () => void;
-  startP2p?: () => void;
+  startRemote?: () => void;
 }
 
 interface DeviceRoute {
@@ -319,10 +293,6 @@ interface DeviceRoute {
   directProbeController?: AbortController;
   directRetryTimer?: TimerHandle;
   directRetryAttempts: number;
-  /** P2P 连续失败次数与退避到期时刻（plan 080）：退避期内根本不发起 P2P，
-   * 拦在发起侧而非 acceptCandidate——后者会白付一次建连成本才丢弃。 */
-  p2pRetryAttempts: number;
-  p2pBlockedUntil?: number;
   catalogTimer?: TimerHandle;
   heartbeatTimer?: TimerHandle;
   /** 在途那一发心跳的超时闸；到点仍无 pong 即记一次 miss（见 heartbeatMisses）。 */
@@ -340,9 +310,7 @@ interface DeviceRoute {
   lastPublished?: { mode: DeviceTransportMode; detail: string };
   retainCount: number;
   transientDemand: number;
-  /** 「只测量」持有数（侧栏用）：够格把 relay lane 拉起来测心跳，但**不**够格触发本机配对
-   * 与 direct 提升——对不在本机的设备，那两样是对 loopback 的永久无效重试，且会在浏览器
-   * 控制台刷满连不上的 WS 错误（浏览器强制打印，代码抑制不掉）。 */
+
   measureCount: number;
 }
 
@@ -351,22 +319,6 @@ interface ControlWaiter<T> {
   reject: (error: Error) => void;
   timer: TimerHandle;
   abort?: () => void;
-}
-
-/** rendezvous 等待者：resolve 值为中心签好 token 的完整 relay 拨号 URL（plan 043）。 */
-interface RelayOpenWaiter extends ControlWaiter<string> {
-  daemonId: string;
-}
-
-/** per-daemon P2P PeerConnection（plan 076）。established = 信令完成（answer 已应用）；
- * negotiation 由首个 DataChannel 创建后显式启动（offer 必须晚于 createDataChannel，
- * 否则缺 application m-line）。channels 仅作观测，pc 常驻等复用，断由状态回调清理。 */
-interface P2pPeerState {
-  connectionId: string;
-  pc: RTCPeerConnection;
-  established: Promise<void>;
-  startNegotiation: () => void;
-  channels: number;
 }
 
 class DeviceRouteError extends Error {
@@ -381,10 +333,7 @@ class LocalAuthFailure extends Error {
   }
 }
 
-/**
- * 每台 daemon 一个 logical Device route。direct 与 relay 只负责承载同一 DeviceEnvelope；
- * request/op/input identity 全部保存在 route/session 账本里，因此换 transport 时原样重投。
- */
+
 export function createDeviceRouter(options: DeviceRouterOptions) {
   const clock: DeviceRouterClock = options.clock ?? {
     now: () => Date.now(),
@@ -404,17 +353,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   const generations = new Map<string, bigint>();
   const pairWaiters = new Map<string, ControlWaiter<{ grantId: string; gateway: LocalGatewayDescriptor }>>();
   const leaseWaiters = new Map<string, ControlWaiter<OnlineDeviceLease>>();
-  const relayOpenWaiters = new Map<string, RelayOpenWaiter>();
-  const relayChannels = new Map<string, { route: DeviceRoute; channel: DeviceChannel }>();
-  // p2p answer/channel 授权等待者：requestId 分别是 connectionId / channelId。
-  const p2pAnswerWaiters = new Map<string, ControlWaiter<string>>();
-  const p2pChannelWaiters = new Map<string, ControlWaiter<void>>();
-  // p2p channel 与 relay 同为「中心在线授权」：中心断开时同步 lose，不等 worker 的关闭传来。
-  const p2pChannels = new Map<string, { route: DeviceRoute; channel: DeviceChannel }>();
-  /** per-daemon 常驻 PeerConnection（有 full demand 时建立）；DataChannel 按 logical channel。 */
-  const p2pPeers = new Map<string, P2pPeerState>();
-  /** authOk 下发的 STUN 列表；空 = 纯 host candidate。 */
-  let iceServers: string[] = [];
+  const remoteChannels = new Map<string, { route: DeviceRoute; channel: DeviceChannel }>();
   let controlOnline = false;
   /** 每次 transient disconnect / 恢复 / hard revoke 都推进；宽限定时器只可提交自己的代际。 */
   let controlStateGeneration = 0;
@@ -471,8 +410,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         throw error;
       }
     },
-    openRelay: openRelayTransport,
-    openP2p: openP2pTransport,
+    openRemote: async (open) => {
+      if (!options.nativeRemote) throw new DeviceRouteError("当前客户端缺少原生远程组件");
+      return options.nativeRemote.open(open);
+    },
     async removeGrant(daemonId) {
       await identityStore?.removeGrant(daemonId);
     },
@@ -480,6 +421,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       await identityStore?.clearGrants();
     },
     close() {
+      options.nativeRemote?.close();
       identityStore?.close();
     },
   };
@@ -537,7 +479,6 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         localFailure: "",
         grantLoaded: !options.enableLocalTransport,
         directRetryAttempts: 0,
-        p2pRetryAttempts: 0,
         retainCount: 0,
         transientDemand: 0,
         measureCount: 0,
@@ -549,6 +490,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
   function publish(route: DeviceRoute, mode: DeviceTransportMode, detail: string, channel = route.sessionLane.active): void {
+    if (channel?.kind === "remote" && mode === "remote") { mode = channel.nativePath === "direct" ? "peer" : channel.nativePath === "relay" ? "relay" : "remote"; detail = channel.nativePath === "direct" ? "设备间直接连接" : channel.nativePath === "relay" ? "已通过 DERP 中继连接设备" : "远程连接已建立，正在测量路径"; }
     route.lastPublished = { mode, detail };
     // transport 不在（idle/offline）时 rtt 必须清掉：留着上一次的读数会让一条已断的链路
     // 在 UI 上继续显示"12ms"，比没有读数更糟。
@@ -572,7 +514,6 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   function channelCovers(channel: DeviceChannel | undefined, scope: DeviceScope): channel is DeviceChannel {
     if (!channel || channel.closed || !channel.scopes.has(scope)) return false;
     if (scope === DeviceScope.RPC || scope === DeviceScope.LIFECYCLE) {
-      // relay 与 p2p 同为中心在线授权（无 lease）；只有 loopback direct 要查 lease 有效期。
       if (channel.kind !== "direct") return controlOnline;
       return controlOnline && (channel.leaseExpiresAt ?? 0) > clock.now() + LEASE_EXPIRY_MARGIN_MS;
     }
@@ -697,316 +638,6 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
   }
 
-  /** plan 043：中心只做 rendezvous（归属校验 + token 签发 + 通知 daemon 拨号），
-   * 数据帧走本函数拨出的 channel 专属 relay WS，不再经中心控制 WS。
-   * rendezvous 超时/中止无需通知中心——中心无 channel 状态，daemon 侧靠配对超时自愈。 */
-  async function openRelayTransport(openOptions: DeviceTransportOpenOptions): Promise<OpenedDeviceTransport> {
-    if (!controlOnline) throw new DeviceRouteError("中心 rendezvous 不可用");
-    const channelId = `relay-${randomUUID()}`;
-    const relayUrl = await new Promise<string>((resolve, reject) => {
-      if (openOptions.signal.aborted) return reject(abortError());
-      const timer = clock.setTimeout(() => {
-        const waiter = relayOpenWaiters.get(channelId);
-        if (!waiter) return;
-        relayOpenWaiters.delete(channelId);
-        waiter.abort?.();
-        reject(new DeviceRouteError("中心 relay rendezvous 超时"));
-      }, CONTROL_REQUEST_TIMEOUT_MS);
-      const aborted = () => {
-        const waiter = relayOpenWaiters.get(channelId);
-        if (!waiter) return;
-        relayOpenWaiters.delete(channelId);
-        clock.clearTimeout(timer);
-        reject(abortError());
-      };
-      openOptions.signal.addEventListener("abort", aborted, { once: true });
-      relayOpenWaiters.set(channelId, {
-        daemonId: openOptions.daemonId,
-        resolve: (url) => {
-          openOptions.signal.removeEventListener("abort", aborted);
-          resolve(url);
-        },
-        reject: (error) => {
-          openOptions.signal.removeEventListener("abort", aborted);
-          reject(error);
-        },
-        timer,
-        abort: () => openOptions.signal.removeEventListener("abort", aborted),
-      });
-      options.sendControl({
-        case: "deviceRelayConnect",
-        value: {
-          daemonId: openOptions.daemonId,
-          channelId,
-          clientInstanceId: openOptions.clientInstanceId,
-          transportGeneration: openOptions.generation,
-          protocolVersion: DEVICE_PROTOCOL_VERSION,
-        },
-      });
-    });
-
-    const socket = new WebSocket(relayUrl);
-    socket.binaryType = "arraybuffer";
-    const abortSocket = () => {
-      try { socket.close(); } catch { /* ignore */ }
-    };
-    openOptions.signal.addEventListener("abort", abortSocket, { once: true });
-    try {
-      await waitForOpen(socket, RELAY_CONNECT_TIMEOUT_MS, openOptions.signal);
-    } catch (error) {
-      openOptions.signal.removeEventListener("abort", abortSocket);
-      try { socket.close(); } catch { /* ignore */ }
-      throw error;
-    }
-
-    let relayHost: string | undefined;
-    try {
-      relayHost = new URL(relayUrl).host;
-    } catch {
-      // relayUrl 由中心 rendezvous 拼出，理论必为合法 URL；解析失败只丢展示信息，不影响管道。
-    }
-    const transport: OpenedDeviceTransport = {
-      channelId,
-      scopes: new Set([DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE]),
-      relayHost,
-      send(frame) {
-        if (socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > MAX_DEVICE_FRAME_BYTES) return false;
-        socket.send(frame);
-        return true;
-      },
-      close() {
-        openOptions.signal.removeEventListener("abort", abortSocket);
-        try { socket.close(); } catch { /* ignore */ }
-      },
-    };
-    socket.onmessage = (event) => {
-      if (!(event.data instanceof ArrayBuffer)) return;
-      openOptions.onFrame(new Uint8Array(event.data));
-    };
-    socket.onclose = () => openOptions.onClose("relay 连接已关闭");
-    socket.onerror = () => {
-      // 与 direct 同理：close 是唯一状态迁移出口，error 通常紧跟 close。
-    };
-    return transport;
-  }
-
-  /** P2P WebRTC 直连（plan 076）：vanilla ICE（等 gathering 完成一次性交换 SDP），信令
-   * 照 relay rendezvous 三角走中心控制 WS；数据帧经分片流过 DataChannel，不经任何中间
-   * 节点。授权与 relay 同语义（中心逐 channel 授 scopes），故与 relay 一样依赖中心在线。 */
-  async function openP2pTransport(openOptions: DeviceTransportOpenOptions, reuseOnly = false): Promise<OpenedDeviceTransport> {
-    if (!controlOnline) throw new DeviceRouteError("中心信令不可用，无法建立 P2P");
-    if (typeof globalThis.RTCPeerConnection !== "function") throw new DeviceRouteError("环境不支持 WebRTC", "p2p_unsupported");
-    const { daemonId, signal } = openOptions;
-    let peer = p2pPeers.get(daemonId);
-    if (peer && (peer.pc.connectionState === "failed" || peer.pc.connectionState === "closed")) {
-      p2pPeers.delete(daemonId);
-      peer = undefined;
-    }
-    if (!peer) {
-      if (reuseOnly) throw new DeviceRouteError("没有已建立的 P2P 连接", "p2p_no_connection");
-      peer = createP2pPeer(daemonId);
-      p2pPeers.set(daemonId, peer);
-    }
-    const channelId = `p2p-${randomUUID()}`;
-    // createDataChannel 必须先于 negotiation（首个 channel 给 offer 提供 m-line）；
-    // 已建立的连接上新开 channel 走 DCEP in-band，无需重新信令。
-    const dataChannel = peer.pc.createDataChannel(channelId);
-    dataChannel.binaryType = "arraybuffer";
-    peer.startNegotiation();
-    try {
-      await raceSignal(peer.established, signal, P2P_CONNECT_TIMEOUT_MS, "P2P 建连超时");
-      throwIfAborted(signal);
-      await controlRequest(p2pChannelWaiters, channelId, signal, () => {
-        options.sendControl({
-          case: "deviceP2pChannelOpen",
-          value: {
-            daemonId,
-            connectionId: peer.connectionId,
-            channelId,
-            clientInstanceId: openOptions.clientInstanceId,
-            transportGeneration: openOptions.generation,
-            protocolVersion: DEVICE_PROTOCOL_VERSION,
-          },
-        });
-      });
-      await waitForDataChannelOpen(dataChannel, P2P_CONNECT_TIMEOUT_MS, signal);
-    } catch (error) {
-      try { dataChannel.close(); } catch { /* ignore */ }
-      throw error;
-    }
-    peer.channels += 1;
-    const assembler = new P2pFrameAssembler();
-    // Chrome 的 DataChannel 内部发送缓冲约 16MB，超限 send() 直接抛异常——30MB 帧不能
-    // 同步灌入（半帧失步 = 分片流报废）。改为整帧原子入队 + 后台按水位排水；send 返回
-    // false 的背压语义与 loopback WS 的 bufferedAmount 检查一致（上层丢帧靠重投恢复）。
-    const sendQueue: Uint8Array<ArrayBuffer>[] = [];
-    let queuedBytes = 0;
-    let draining = false;
-    const drain = async () => {
-      if (draining) return;
-      draining = true;
-      try {
-        while (sendQueue.length > 0) {
-          if (dataChannel.readyState !== "open") {
-            sendQueue.length = 0;
-            queuedBytes = 0;
-            return;
-          }
-          if (dataChannel.bufferedAmount > P2P_SEND_HIGH_WATER) {
-            // bufferedamountlow 事件 + 短轮询兜底（事件丢失或 close 期间也能推进循环）。
-            await new Promise<void>((resolve) => {
-              const timer = clock.setTimeout(resolve, 200);
-              dataChannel.bufferedAmountLowThreshold = P2P_SEND_LOW_WATER;
-              dataChannel.onbufferedamountlow = () => {
-                clock.clearTimeout(timer);
-                dataChannel.onbufferedamountlow = null;
-                resolve();
-              };
-            });
-            continue;
-          }
-          const chunk = sendQueue.shift()!;
-          queuedBytes -= chunk.byteLength;
-          dataChannel.send(chunk);
-        }
-      } catch {
-        // send 抛出（channel 正在关闭/缓冲异常）：分片流已不可信，关 channel 收敛。
-        sendQueue.length = 0;
-        queuedBytes = 0;
-        try { dataChannel.close(); } catch { /* ignore */ }
-      } finally {
-        draining = false;
-      }
-    };
-    const transport: OpenedDeviceTransport = {
-      channelId,
-      // scopes 与 relay 相同：中心 ChannelGrant 全量授予，RPC/LIFECYCLE 的可用性仍由
-      // channelCovers 按 controlOnline 把关。
-      scopes: new Set([DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL, DeviceScope.RPC, DeviceScope.LIFECYCLE]),
-      send(frame) {
-        if (dataChannel.readyState !== "open") return false;
-        if (queuedBytes + dataChannel.bufferedAmount > MAX_DEVICE_FRAME_BYTES) return false;
-        for (const chunk of p2pFrameChunks(frame)) {
-          sendQueue.push(chunk);
-          queuedBytes += chunk.byteLength;
-        }
-        void drain();
-        return true;
-      },
-      close() {
-        peer.channels = Math.max(0, peer.channels - 1);
-        sendQueue.length = 0;
-        queuedBytes = 0;
-        try { dataChannel.close(); } catch { /* ignore */ }
-      },
-    };
-    dataChannel.onmessage = (event) => {
-      if (!(event.data instanceof ArrayBuffer)) return;
-      let frames: Uint8Array<ArrayBuffer>[];
-      try {
-        frames = assembler.push(new Uint8Array(event.data));
-      } catch {
-        try { dataChannel.close(); } catch { /* ignore */ }
-        return;
-      }
-      for (const frame of frames) openOptions.onFrame(frame);
-    };
-    dataChannel.onclose = () => openOptions.onClose("P2P DataChannel 已关闭");
-    return transport;
-  }
-
-  function createP2pPeer(daemonId: string): P2pPeerState {
-    const connectionId = `p2p-${randomUUID()}`;
-    const pc = new RTCPeerConnection(iceServers.length > 0 ? { iceServers: [{ urls: iceServers }] } : {});
-    let startNegotiation!: () => void;
-    const negotiationStarted = new Promise<void>((resolve) => {
-      startNegotiation = resolve;
-    });
-    const state: P2pPeerState = {
-      connectionId,
-      pc,
-      startNegotiation,
-      channels: 0,
-      established: (async () => {
-        await negotiationStarted;
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await waitForIceGathering(pc, P2P_GATHER_TIMEOUT_MS);
-        const sdp = pc.localDescription?.sdp;
-        if (!sdp) throw new DeviceRouteError("P2P offer 生成失败");
-        // answer 等待不绑定单个 channel 的 signal：established 是连接级的，可被后续 channel 复用。
-        const answerSdp = await controlRequest(p2pAnswerWaiters, connectionId, new AbortController().signal, () => {
-          options.sendControl({
-            case: "deviceP2pOffer",
-            value: { daemonId, connectionId, clientInstanceId, sdp, protocolVersion: DEVICE_PROTOCOL_VERSION },
-          });
-        });
-        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-      })(),
-    };
-    const evict = () => {
-      if (p2pPeers.get(daemonId) === state) p2pPeers.delete(daemonId);
-      try { pc.close(); } catch { /* ignore */ }
-    };
-    // 信令失败即弃连接；rejection 也会传给所有 await established 的 openP2p 调用方。
-    state.established.catch(evict);
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") evict();
-    };
-    return state;
-  }
-
-  function waitForIceGathering(pc: RTCPeerConnection, timeoutMs: number): Promise<void> {
-    if (pc.iceGatheringState === "complete") return Promise.resolve();
-    return new Promise((resolve) => {
-      // 超时是兜底不是失败：配了不可达 STUN 时带着已收的 host candidates 继续。
-      const timer = clock.setTimeout(done, timeoutMs);
-      function done() {
-        clock.clearTimeout(timer);
-        pc.removeEventListener("icegatheringstatechange", check);
-        resolve();
-      }
-      function check() {
-        if (pc.iceGatheringState === "complete") done();
-      }
-      pc.addEventListener("icegatheringstatechange", check);
-    });
-  }
-
-  function waitForDataChannelOpen(dataChannel: RTCDataChannel, timeoutMs: number, signal: AbortSignal): Promise<void> {
-    if (dataChannel.readyState === "open") return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      const timer = clock.setTimeout(() => finish(new DeviceRouteError("P2P DataChannel open 超时")), timeoutMs);
-      const aborted = () => finish(abortError());
-      function finish(error?: Error) {
-        clock.clearTimeout(timer);
-        signal.removeEventListener("abort", aborted);
-        dataChannel.onopen = null;
-        dataChannel.onclose = null;
-        if (error) reject(error);
-        else resolve();
-      }
-      signal.addEventListener("abort", aborted, { once: true });
-      dataChannel.onopen = () => finish();
-      dataChannel.onclose = () => finish(new DeviceRouteError("P2P DataChannel 在建立期间关闭"));
-    });
-  }
-
-  function raceSignal<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs: number, timeoutMessage: string): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const timer = clock.setTimeout(() => finish(undefined, new DeviceRouteError(timeoutMessage)), timeoutMs);
-      const aborted = () => finish(undefined, abortError());
-      function finish(value?: T, error?: Error) {
-        clock.clearTimeout(timer);
-        signal.removeEventListener("abort", aborted);
-        if (error) reject(error);
-        else resolve(value as T);
-      }
-      signal.addEventListener("abort", aborted, { once: true });
-      promise.then((value) => finish(value), (error) => finish(undefined, error instanceof Error ? error : new DeviceRouteError(String(error))));
-    });
-  }
-
   async function openChannel(
     route: DeviceRoute,
     lane: LaneKind,
@@ -1017,8 +648,6 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     lease?: OnlineDeviceLease,
   ): Promise<DeviceChannel> {
     const generation = nextGeneration(route);
-    // relay/P2P 的 grant 来自当前这代已认证控制面。异步拨号可能在 disconnect/hard revoke
-    // 之后才完成；只在 closeRemoteSessionChannels 里扫已登记 map 会漏掉这种迟到 continuation。
     const remoteControlGeneration = kind === "direct" ? undefined : controlStateGeneration;
     let channel: DeviceChannel | undefined;
     const earlyFrames: Uint8Array[] = [];
@@ -1033,6 +662,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         if (channel) receiveFrame(route, channel, frame);
         else earlyFrames.push(copyBytes(frame));
       },
+      onPath(mode, rttMs) { if (channel) { channel.nativePath = mode; if (route.sessionLane.active === channel) { route.rttMs = rttMs; publish(route, "remote", "", channel); } } },
       onClose(reason) {
         if (channel) loseChannel(route, channel, reason);
         else earlyClose = reason;
@@ -1040,9 +670,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     };
     const transport = kind === "direct"
       ? await adapter.openDirect({ ...openOptions, grant: grant!, lease })
-      : kind === "p2p"
-        ? await adapter.openP2p(openOptions, lane === "elevated")
-        : await adapter.openRelay(openOptions);
+      : await adapter.openRemote(openOptions);
     if (
       signal.aborted ||
       destroyed ||
@@ -1056,26 +684,25 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
     if (kind === "direct" && transport.lease) route.lease = transport.lease;
     channel = {
+      nativeRemote: transport.nativeRemote,
+      nativePath: "unknown",
       kind,
       daemonId: route.daemonId,
       channelId: transport.channelId,
       generation,
       scopes: new Set(transport.scopes),
       leaseExpiresAt: transport.leaseExpiresAt ?? transport.lease?.expiresAt ?? lease?.expiresAt,
-      relayHost: transport.relayHost,
       lane,
       closed: false,
       send: transport.send,
       close() {
         if (channel!.closed) return;
         channel!.closed = true;
-        if (kind === "relay") relayChannels.delete(channel!.channelId);
-        if (kind === "p2p") p2pChannels.delete(channel!.channelId);
+        if (kind === "remote") remoteChannels.delete(channel!.channelId);
         transport.close();
       },
     };
-    if (kind === "relay") relayChannels.set(channel.channelId, { route, channel });
-    if (kind === "p2p") p2pChannels.set(channel.channelId, { route, channel });
+    if (kind === "remote") remoteChannels.set(channel.channelId, { route, channel });
     if (earlyClose) {
       channel.close();
       throw new DeviceRouteError(earlyClose);
@@ -1126,7 +753,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         route.grant = grant;
         route.grantLoaded = true;
         route.localFailure = "";
-        if (route.sessionLane.active?.kind === "relay") scheduleDirectRetry(route, true);
+        if (route.sessionLane.active?.kind === "remote") scheduleDirectRetry(route, true);
         return grant;
       })
       .catch((error) => {
@@ -1148,6 +775,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     if (channelCovers(route.sessionLane.active, DeviceScope.SESSION_READ)) {
       return Promise.resolve(route.sessionLane.active);
     }
+    if (!routeHasFullDemand(route)) return Promise.reject(new DeviceRouteError("选择设备后建立远程连接"));
     if (route.sessionLane.attempt) return route.sessionLane.attempt.ready;
 
     const lane = route.sessionLane;
@@ -1171,11 +799,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       pending: 0,
       cachePending: options.enableLocalTransport,
       directStarted: false,
-      p2pStarted: false,
-      relayStarted: false,
+      remoteStarted: false,
     };
     lane.attempt = attempt;
-    publish(route, "probing", "正在选择直连或中心 relay");
+    publish(route, "probing", "正在连接设备");
 
     const valid = () => (
       !destroyed &&
@@ -1199,7 +826,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         publish(route, "offline", reason);
         attempt.reject(new DeviceRouteError(reason));
       }
-      if (lane.active?.kind === "relay") scheduleDirectRetry(route);
+      if (lane.active?.kind === "remote") scheduleDirectRetry(route);
     };
     const acceptCandidate = (channel: DeviceChannel) => {
       if (!valid() || !sessionLaneDemand(route)) {
@@ -1210,13 +837,13 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       if (!active) {
         activateSessionLane(route, channel);
         settleWinner(channel);
-        if (channel.kind !== "relay" && attempt.hedgeTimer !== undefined) {
+        if (channel.kind !== "remote" && attempt.hedgeTimer !== undefined) {
           clock.clearTimeout(attempt.hedgeTimer);
           attempt.hedgeTimer = undefined;
         }
         return;
       }
-      if (channel.kind !== "relay" && active.kind === "relay") {
+      if (channel.kind !== "remote" && active.kind === "remote") {
         if (channel.generation > active.generation) {
           activateSessionLane(route, channel);
         } else {
@@ -1241,52 +868,27 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
           void adapter.removeGrant(route.daemonId).catch(() => undefined);
           pairInBackground(route);
         }
-        // loopback 失败后仍可能 P2P 直连本机 daemon；relay 同时兜底。
-        attempt.startP2p?.();
-        attempt.startRelay?.();
-      }
-      if (error && kind === "p2p" && !isAbortError(error)) {
-        blockP2p(route);
-        attempt.startRelay?.();
+        attempt.startRemote?.();
       }
       finish();
     };
-    const startRelay = () => {
-      if (!valid() || attempt.relayStarted || !controlOnline) return;
-      attempt.relayStarted = true;
+    // Tailcat owns direct-versus-DERP selection inside this single remote lane.
+    const startRemote = () => {
+      if (!valid() || attempt.remoteStarted || !controlOnline) return;
+      attempt.remoteStarted = true;
       if (attempt.hedgeTimer !== undefined) {
         clock.clearTimeout(attempt.hedgeTimer);
         attempt.hedgeTimer = undefined;
       }
       attempt.pending += 1;
-      void openChannel(route, "session", "relay", DeviceScope.SESSION_CONTROL, controller.signal)
+      void openChannel(route, "session", "remote", DeviceScope.SESSION_CONTROL, controller.signal)
         .then(acceptCandidate)
         .catch((error) => {
           if (!isAbortError(error)) route.localFailure ||= errorMessage(error);
         })
-        .finally(() => candidateDone("relay"));
+        .finally(() => candidateDone("remote"));
     };
-    attempt.startRelay = startRelay;
-    // P2P 建连 1-3s，慢于 relay hedge——竞争模型是 relay 先赢、P2P 后到经 generation
-    // promotion 升级（acceptCandidate 的非 relay 分支），用户无感。
-    const startP2p = () => {
-      if (!valid() || attempt.p2pStarted || !controlOnline) return;
-      // 退避期内根本不发起：P2P 一旦建成就会 promotion 顶掉正在工作的 relay，不拦在这里
-      // 就会「崩一次抢一次」地震荡，每次抢走都让用户再吃一轮判死延迟。
-      if (clock.now() < (route.p2pBlockedUntil ?? 0)) return;
-      attempt.p2pStarted = true;
-      attempt.pending += 1;
-      void (async () => {
-        try {
-          const channel = await openChannel(route, "session", "p2p", DeviceScope.SESSION_CONTROL, controller.signal);
-          acceptCandidate(channel);
-          candidateDone("p2p");
-        } catch (error) {
-          candidateDone("p2p", error);
-        }
-      })();
-    };
-    attempt.startP2p = startP2p;
+    attempt.startRemote = startRemote;
     const startDirect = (grant: CachedLocalGrant) => {
       if (!valid() || attempt.directStarted) return;
       attempt.directStarted = true;
@@ -1304,22 +906,17 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       })();
     };
 
-    // 纯 relay 短路：本地直连整体关闭时，或本 route 只有「测量」需求（侧栏对每台在线设备）
-    // 时都走这里——跳过读 grant、direct hedge、本机配对与 P2P（为一个侧栏读数给每台设备建
-    // PeerConnection 代价不成比例；loopback 更是只有同机设备可能命中）。
     if (!options.enableLocalTransport || !routeHasFullDemand(route)) {
       attempt.cachePending = false;
-      startRelay();
+      startRemote();
       finish();
       return ready;
     }
 
-    // 从 t=0 读缓存并准备 direct 槽位（loopback 或 P2P）；中心 relay 只在 200ms hedge 窗口
-    // 后加入竞争。P2P 建连慢于 hedge，通常 relay 先赢、P2P 就绪后自动 promotion。
     if (controlOnline) {
       attempt.hedgeTimer = clock.setTimeout(() => {
         attempt.hedgeTimer = undefined;
-        startRelay();
+        startRemote();
         finish();
       }, DIRECT_HEDGE_MS);
     }
@@ -1328,9 +925,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       attempt.cachePending = false;
       if (grant) startDirect(grant);
       else {
-        // 无 loopback grant 的设备（通常不与浏览器同机）：P2P 是它的直连主路径。
-        startP2p();
-        startRelay();
+        startRemote();
         pairInBackground(route);
       }
       finish();
@@ -1364,8 +959,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       pending: 1,
       cachePending: false,
       directStarted: false,
-      p2pStarted: false,
-      relayStarted: false,
+      remoteStarted: false,
     };
     lane.attempt = attempt;
     const epoch = route.epoch;
@@ -1402,31 +996,17 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         pairInBackground(route);
       }
       if (!valid()) throw abortError();
-      // loopback 不可用时先试复用已建立的 P2P 连接（openChannel 对 elevated lane 自动
-      // reuseOnly——不为一次高权限请求冷付建连成本），没有现成连接立刻落 relay。
       try {
-        const p2p = await openChannel(route, "elevated", "p2p", scope, controller.signal);
+        const remote = await openChannel(route, "elevated", "remote", scope, controller.signal);
         if (!valid()) {
-          p2p.close();
+          remote.close();
           throw abortError();
         }
-        activateElevatedLane(route, p2p);
-        return p2p;
-      } catch (error) {
-        if (isAbortError(error)) throw error;
-      }
-      if (!valid()) throw abortError();
-      try {
-        const relay = await openChannel(route, "elevated", "relay", scope, controller.signal);
-        if (!valid()) {
-          relay.close();
-          throw abortError();
-        }
-        activateElevatedLane(route, relay);
-        return relay;
-      } catch (relayError) {
+        activateElevatedLane(route, remote);
+        return remote;
+      } catch (remoteError) {
         throw new DeviceRouteError(
-          `高权限 Device lane 不可用：${errorMessage(directError ?? relayError)}`,
+          `高权限 Device lane 不可用：${errorMessage(directError ?? remoteError)}`,
           "elevated_unavailable",
         );
       }
@@ -1463,18 +1043,12 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     lane.recoveryAttempts = 0;
     if (lane.recoveryTimer !== undefined) clock.clearTimeout(lane.recoveryTimer);
     lane.recoveryTimer = undefined;
-    // relay 节点名来自 rendezvous URL（plan 065 多节点就近）：展示实际经过的节点而非 daemon 偏好。
-    const relayVia = channel.relayHost ? `（${channel.relayHost}）` : "";
     publish(
       route,
       channel.kind,
       channel.kind === "direct"
         ? "同机 Device 数据直连本地 daemon"
-        : channel.kind === "p2p"
-          ? "Device 数据经 P2P 端到端直连（WebRTC），不经中间节点"
-          : route.localFailure
-            ? `直连不可用，已回退中心 relay${relayVia}：${route.localFailure}`
-            : `Device 数据经中心 opaque relay${relayVia}`,
+        : "已连接远程设备",
       channel,
     );
 
@@ -1494,7 +1068,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     maintainCatalogTimer(route);
     maintainHeartbeatTimer(route);
     if (previous && previous !== channel) previous.close();
-    if (channel.kind === "relay") scheduleDirectRetry(route);
+    if (channel.kind === "remote") scheduleDirectRetry(route);
     else {
       route.directRetryAttempts = 0;
       if (route.directRetryTimer !== undefined) clock.clearTimeout(route.directRetryTimer);
@@ -1548,7 +1122,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
 
   function scheduleRecovery(route: DeviceRoute, lane: DeviceLane): void {
     const needed = lane.kind === "session" ? sessionLaneDemand(route) : elevatedLaneDemand(route);
-    if (destroyed || lane.recoveryTimer !== undefined || !needed) return;
+    if (destroyed || lane.recoveryTimer !== undefined || !needed || (!routeHasFullDemand(route))) return;
     const base = Math.min(RECOVER_MAX_MS, RECOVER_BASE_MS * 2 ** Math.min(lane.recoveryAttempts, 4));
     const delayMs = Math.round(base * (1 + clock.random() * 0.2));
     lane.recoveryAttempts += 1;
@@ -1566,8 +1140,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }, delayMs);
   }
 
+  // Sidebar measurement alone never opens or retains a network connection.
   function sessionLaneDemand(route: DeviceRoute): boolean {
-    if (route.retainCount > 0 || route.transientDemand > 0 || route.measureCount > 0) return true;
+    if (route.retainCount > 0 || route.transientDemand > 0) return true;
     if ([...route.sessions.values()].some((session) => session.desired)) return true;
     return [...route.pendingRequests.values()].some(
       (pending) => pending.scope === DeviceScope.SESSION_READ || pending.scope === DeviceScope.SESSION_CONTROL,
@@ -1586,10 +1161,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     return sessionLaneDemand(route) || elevatedLaneDemand(route);
   }
 
-  /** 「完整」需求：除只测量之外的任何持有。本机配对、direct 提升、会话 catalog 轮询都只为
-   * 它服务——只测量的 route（侧栏对每台在线设备）只要一条 relay lane 和心跳，别的一概不做。
-   * direct 走的是 loopback，只有与浏览器同机的那台设备可能命中，为一个读数去敲它，对其余
-   * 设备是每 5s 一次注定失败的重试，还会把浏览器控制台刷满连不上的 WS 错误。 */
+
   function routeHasFullDemand(route: DeviceRoute): boolean {
     if (route.retainCount > 0 || route.transientDemand > 0) return true;
     if ([...route.sessions.values()].some((session) => session.desired)) return true;
@@ -1753,11 +1325,6 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         route.pendingPing = undefined;
         route.heartbeatMisses = 0;
         clearHeartbeatTimeout(route);
-        // 能回 pong 就证明这条 P2P 真的能用，清掉此前累积的退避。
-        if (route.sessionLane.active?.kind === "p2p") {
-          route.p2pRetryAttempts = 0;
-          route.p2pBlockedUntil = undefined;
-        }
         if (route.lastPublished) publish(route, route.lastPublished.mode, route.lastPublished.detail);
         break;
       }
@@ -2033,15 +1600,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     route.catalogTimer ??= clock.setInterval(() => sendCatalogRequest(route), CATALOG_INTERVAL_MS);
   }
 
-  /** 一次心跳：纯 echo 的 ping/pong 往返，用时即 rtt。刻意不走 request()——那条路会登记
-   * pendingRequests，而 pendingRequests 非空即构成 lane demand，会把本该按需释放的连接
-   * 永久钉住（plan 043 的按需拨号就此失效）。这里照 sendCatalogRequest 的样子直接发。
-   *
-   * 心跳同时承担探活（plan 080）：连续 HEARTBEAT_MAX_MISSES 次无响应即摘掉通道，交给既有
-   * scheduleRecovery 重新竞速。此前这里只抹 rtt 读数、把判死甩给"既有恢复逻辑"，而那套
-   * 逻辑依赖 channel 的 onclose——只对 WebSocket（relay/loopback）成立，对 WebRTC
-   * DataChannel 要等 ~30s ICE 超时才来。2026-08-17 事故中用户对着一条已死但状态仍是 open
-   * 的通道敲键盘，每一次按键都发进黑洞。 */
+
   function sendHeartbeat(route: DeviceRoute): void {
     // 走 session lane：它是常在的那条（elevated 只在有 RPC/生命周期操作时按需建），
     // 也正是终端数据实际走的路——侧栏那个读数要回答的就是"我用这台设备卡不卡"。
@@ -2061,9 +1620,6 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       route.heartbeatMisses = (route.heartbeatMisses ?? 0) + 1;
       if (route.heartbeatMisses >= HEARTBEAT_MAX_MISSES) {
         route.heartbeatMisses = 0;
-        // 死掉的是 P2P 就同时拉起退避，否则紧接着的重新竞速里它又会 promotion 抢回去。
-        if (channel.kind === "p2p") blockP2p(route);
-        // 只摘通道、不动控制面：recovery 会重新竞速，可用的那条（通常是 relay）随即接管。
         loseChannel(route, channel, "心跳连续无响应，判定通道已死");
         return;
       }
@@ -2076,13 +1632,6 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   function clearHeartbeatTimeout(route: DeviceRoute): void {
     if (route.heartbeatTimeoutTimer !== undefined) clock.clearTimeout(route.heartbeatTimeoutTimer);
     route.heartbeatTimeoutTimer = undefined;
-  }
-
-  /** P2P 失败（建连失败或建成后被判死）后拉长退避窗口，逐次翻倍、封顶 P2P_RETRY_MAX_MS。 */
-  function blockP2p(route: DeviceRoute): void {
-    const backoff = Math.min(P2P_RETRY_MAX_MS, P2P_RETRY_BASE_MS * 2 ** Math.min(route.p2pRetryAttempts, 6));
-    route.p2pRetryAttempts += 1;
-    route.p2pBlockedUntil = clock.now() + backoff;
   }
 
   /** 心跳只在 transport 真正活着时转：按需拨号下 idle 的设备根本没有连接，无从 ping，
@@ -2111,7 +1660,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       !options.enableLocalTransport ||
       destroyed ||
       routes.get(route.daemonId) !== route ||
-      route.sessionLane.active?.kind !== "relay" ||
+      route.sessionLane.active?.kind !== "remote" ||
       !routeHasFullDemand(route) ||
       route.directProbe ||
       (route.sessionLane.attempt && !immediate)
@@ -2134,7 +1683,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   function probeDirectPromotion(route: DeviceRoute): void {
     if (
       route.directProbe ||
-      route.sessionLane.active?.kind !== "relay" ||
+      route.sessionLane.active?.kind !== "remote" ||
       !routeHasFullDemand(route) ||
       destroyed
     ) return;
@@ -2142,8 +1691,6 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     const controller = new AbortController();
     route.directProbeController = controller;
     route.directProbe = (async () => {
-      // 升级 probe 与首连同序：loopback（有 grant）优先，失败或无 grant 再试 P2P；
-      // 两者都不通才留在 relay 上按退避重试。
       let channel: DeviceChannel | undefined;
       let loopbackError: unknown;
       const grant = await loadGrant(route);
@@ -2157,18 +1704,12 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       } else {
         pairInBackground(route);
       }
-      if (!channel) {
-        try {
-          channel = await openChannel(route, "session", "p2p", DeviceScope.SESSION_CONTROL, controller.signal);
-        } catch (error) {
-          throw loopbackError ?? error;
-        }
-      }
+      if (!channel) throw loopbackError ?? new DeviceRouteError("本地直连尚未可用");
       if (
         destroyed ||
         routes.get(route.daemonId) !== route ||
         route.epoch !== epoch ||
-        route.sessionLane.active?.kind !== "relay" ||
+        route.sessionLane.active?.kind !== "remote" ||
         !sessionLaneDemand(route)
       ) {
         channel.close();
@@ -2194,7 +1735,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       if (routes.get(route.daemonId) !== route || route.directProbeController !== controller) return;
       route.directProbe = undefined;
       route.directProbeController = undefined;
-      if (route.sessionLane.active?.kind === "relay" && sessionLaneDemand(route)) scheduleDirectRetry(route);
+      if (route.sessionLane.active?.kind === "remote" && sessionLaneDemand(route)) scheduleDirectRetry(route);
     });
   }
 
@@ -2332,19 +1873,16 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
   }
 
-  /** measureOnly：只要一条 relay lane 用来跑心跳（侧栏对每台在线设备）。它照样把连接建起来，
-   * 所以之后真进这台设备时是热的——只是不碰 loopback，见 routeHasFullDemand。 */
-  function retainDevice(daemonId: string, options?: { measureOnly?: boolean }): () => void {
+
+  function retainDevice(daemonId: string, retainOptions?: { measureOnly?: boolean }): () => void {
     const route = routeFor(daemonId);
-    const measureOnly = options?.measureOnly === true;
+    const measureOnly = retainOptions?.measureOnly === true;
     if (measureOnly) route.measureCount += 1;
     else {
       route.retainCount += 1;
-      // 从「只测量」升级成完整需求时，lane 可能已经是测量期建好的 relay——它当时刻意跳过了
-      // direct。这里补一次立即提升，否则这条 relay 会一直用到底，本机设备永远升不回 direct。
-      if (route.sessionLane.active?.kind === "relay") scheduleDirectRetry(route, true);
+      if (route.sessionLane.active?.kind === "remote") scheduleDirectRetry(route, true);
     }
-    void ensureSessionLane(route).catch(() => scheduleRecovery(route, route.sessionLane));
+    if (routeHasFullDemand(route)) void ensureSessionLane(route).catch(() => scheduleRecovery(route, route.sessionLane));
     let released = false;
     return () => {
       if (released) return;
@@ -2417,13 +1955,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     });
   }
 
-  /**
-   * executor（plan 116）的两条上行。走当前 session lane 的活跃通道。
-   *
-   * daemon 那边**只认 loopback（direct）通道**上来的 executor 帧（`Principal::Local`），远端 client
-   * 即使持有 SESSION_CONTROL 也会被拒。这里不自行判断本机与否：判据在 daemon，客户端猜一遍只会两边漂移。
-   * 走 relay 时注册会被拒，daemon 回 `executorHostRegistered { ok: false }`，调用方据此不接单——
-   * 失败是可读的、自纠正的，好过客户端自作聪明。
+  /** Executor host registration and reports use the active session lane.
+   * The worker additionally requires loopback identity; native remote channels
+   * receive executor_host_denied even when they have SESSION_CONTROL scope.
    */
   function sendExecutorHostRegister(
     daemonId: string,
@@ -2651,36 +2185,6 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         else waiter.reject(new DeviceRouteError(payload.value.error ?? "online lease 签发失败"));
         return true;
       }
-      case "deviceRelayGrant": {
-        const waiter = relayOpenWaiters.get(payload.value.channelId);
-        if (!waiter) return true;
-        relayOpenWaiters.delete(payload.value.channelId);
-        clock.clearTimeout(waiter.timer);
-        waiter.abort?.();
-        if (payload.value.ok && payload.value.relayUrl) waiter.resolve(payload.value.relayUrl);
-        else waiter.reject(new DeviceRouteError(payload.value.error ?? "relay rendezvous 失败"));
-        return true;
-      }
-      case "deviceP2pAnswer": {
-        const waiter = p2pAnswerWaiters.get(payload.value.connectionId);
-        if (!waiter) return true;
-        p2pAnswerWaiters.delete(payload.value.connectionId);
-        clock.clearTimeout(waiter.timer);
-        waiter.abort?.();
-        if (payload.value.ok && payload.value.sdp) waiter.resolve(payload.value.sdp);
-        else waiter.reject(new DeviceRouteError(payload.value.error ?? "P2P 信令失败"));
-        return true;
-      }
-      case "deviceP2pChannelResult": {
-        const waiter = p2pChannelWaiters.get(payload.value.channelId);
-        if (!waiter) return true;
-        p2pChannelWaiters.delete(payload.value.channelId);
-        clock.clearTimeout(waiter.timer);
-        waiter.abort?.();
-        if (payload.value.ok) waiter.resolve(undefined);
-        else waiter.reject(new DeviceRouteError(payload.value.error ?? "P2P channel 授权失败"));
-        return true;
-      }
       case "preparedDeviceOperation":
         executePrepared(payload.value);
         return true;
@@ -2709,22 +2213,17 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
   function closeRemoteSessionChannels(reason: string): void {
-    for (const { route, channel } of [...relayChannels.values()]) loseChannel(route, channel, reason);
-    for (const { route, channel } of [...p2pChannels.values()]) loseChannel(route, channel, reason);
-    closeP2pPeers();
+    for (const { route, channel } of [...remoteChannels.values()]) loseChannel(route, channel, reason);
   }
 
-  /** 浏览器 `/client` transport 断开：控制面能力立即降权，但给已经工作的 relay/P2P session
-   * lane 一个有界存活窗口。该信号不等于账号授权被撤销，也不等于 worker 的独立控制 WS 已断。
-   * 重复的 connecting/disconnected 状态不得延长窗口。 */
+
   function setControlDisconnected(): void {
+    options.nativeRemote?.control(false, false);
     if (!controlOnline) return;
     controlOnline = false;
     const generation = ++controlStateGeneration;
     invalidateOnlineControl("中心连接已断开");
     clearControlDataGrace();
-    // 即使 map 眼下为空也要排期：relay/P2P 的异步 open continuation 可能已越过控制 waiter、
-    // 尚未来得及登记到 map。openChannel 的 generation gate 会拒掉它；本 timer 是第二道收敛闸。
     controlDataGraceTimer = clock.setTimeout(() => {
       if (controlOnline || generation !== controlStateGeneration) return;
       controlDataGraceTimer = undefined;
@@ -2736,6 +2235,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
    * 立即恢复原有 fail-closed 语义。保留 boolean API 是为了既有调用与跨端共享 trace；其中
    * false 始终表示 hard revoke，普通网络断开必须调用 setControlDisconnected()。 */
   function setControlOnline(online: boolean): void {
+    options.nativeRemote?.control(online, !online);
     if (!online) {
       controlOnline = false;
       controlStateGeneration += 1;
@@ -2749,7 +2249,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     controlStateGeneration += 1;
     clearControlDataGrace();
     for (const route of routes.values()) {
-      route.sessionLane.attempt?.startRelay?.();
+      route.sessionLane.attempt?.startRemote?.();
       if (sessionLaneDemand(route)) {
         void ensureSessionLane(route)
           .then(() => flushLane(route, "session"))
@@ -2761,7 +2261,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
           .catch(() => scheduleRecovery(route, route.elevatedLane));
       }
       if (!route.grantLoaded || !route.grant) pairInBackground(route);
-      if (route.sessionLane.active?.kind === "relay") scheduleDirectRetry(route, true);
+      if (route.sessionLane.active?.kind === "remote") scheduleDirectRetry(route, true);
     }
   }
 
@@ -2789,9 +2289,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       closeRoute(route, reason);
     }
     routes.clear();
-    relayChannels.clear();
-    p2pChannels.clear();
-    closeP2pPeers();
+    remoteChannels.clear();
   }
 
   function closeLane(route: DeviceRoute, lane: DeviceLane, reason: string): void {
@@ -2890,39 +2388,12 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       }
       map.clear();
     }
-    for (const waiter of relayOpenWaiters.values()) {
-      clock.clearTimeout(waiter.timer);
-      waiter.abort?.();
-      waiter.reject(error);
-    }
-    relayOpenWaiters.clear();
-    for (const map of [p2pAnswerWaiters, p2pChannelWaiters] as const) {
-      for (const waiter of map.values()) {
-        clock.clearTimeout(waiter.timer);
-        waiter.abort?.();
-        waiter.reject(error);
-      }
-      map.clear();
-    }
-  }
-
-  function closeP2pPeers(): void {
-    for (const peer of p2pPeers.values()) {
-      try { peer.pc.close(); } catch { /* ignore */ }
-    }
-    p2pPeers.clear();
-  }
-
-  /** authOk 携带的 STUN 列表；影响之后新建的 PeerConnection，已建立的连接不动。 */
-  function setIceServers(urls: string[]): void {
-    iceServers = urls.filter((url) => url.startsWith("stun:") || url.startsWith("stuns:"));
   }
 
   return {
     handleControlPayload,
     setControlOnline,
     setControlDisconnected,
-    setIceServers,
     probeDevice,
     retainDevice,
     attachSession,

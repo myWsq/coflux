@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, CLI_BIN } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8876;
 const COFLUX_MJS = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
@@ -93,7 +93,7 @@ after(async () => {
 
 test("没有桌面 executor host 时，executor run 立刻非零退出并指向 Coflux.app（两版 CLI 一致）", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;
@@ -156,4 +156,22 @@ test("没有桌面 executor host 时，executor run 立刻非零退出并指向 
     await removeWorkspace(c, ws.id);
     device.close();
   }
+});
+
+
+test("native session authority cannot register or report as the local executor host", async () => {
+  const device = await openNativeDevice(stack);
+  try {
+    for (const [payload, value] of [
+      ["executorHostRegister", { hostId: "remote-host", hostEpoch: 1n, capabilities: [], ready: true, notReadyReason: "" }],
+      ["executorReport", { runId: "remote-run", state: 1, note: "", changedFiles: [], reportedAt: Date.now() }],
+    ]) {
+      const from = device.mark();
+      device.send(payload, value);
+      const denied = await device.waitFor(message => message.case === "error", "remote executor denial", 10000, from);
+      assert.equal(denied.code, "executor_host_denied", "session scope alone cannot establish loopback identity");
+      assert.match(denied.message, /loopback/);
+    }
+    assert(Array.isArray((await device.catalog()).sessions), "denial does not break the native session lane");
+  } finally { device.close(); }
 });

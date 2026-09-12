@@ -9,8 +9,8 @@ import { desktop } from "@/config";
  * The job table, the write lock, the runner and the credentials all live in the main process. This
  * holds no run state and makes no decisions. It does three things:
  *   1. Takes an **independent, permanent retain** on the local daemon. The workbench otherwise only
- *      does `measureOnly` for non-selected devices, and that lane deliberately skips direct in favour
- *      of relay, while the daemon accepts executor frames only from a loopback channel. The executor
+ *      does `measureOnly` for non-selected devices, which creates no connection demand,
+ *      while the daemon accepts executor frames only from a loopback channel. The executor
  *      service also must not depend on which workspace the user happens to be looking at.
  *   2. Relays the four frames the daemon pushes into the main process.
  *   3. Sends the two frames the main process produces out over the device channel.
@@ -26,7 +26,7 @@ export function useExecutorBridge(client: CofluxClient, localDaemonId: string | 
       return;
     }
 
-    // Not measureOnly: this needs a real direct lane, not the relay used for measurement.
+    // Executor hosting requires real connection demand; sidebar observation alone opens no lane.
     const release = client.retainDevice(localDaemonId);
 
     const unsubscribeInbound = client.subscribeExecutor((event) => {

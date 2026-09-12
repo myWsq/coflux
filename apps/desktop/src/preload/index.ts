@@ -10,6 +10,7 @@ import type {
   DesktopNotification,
   DesktopUpdateState,
 } from "../shared/desktop-bridge";
+import type { NativeEvent, NativeTransportBridge } from "../shared/native-transport";
 import { IPC, type Bootstrap } from "../shared/ipc";
 
 // 桥接对象的类型真相源在 ../shared/desktop-bridge.ts，这里只实现它。
@@ -25,7 +26,30 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
   };
 }
 
+let nativeSendingBytes = 0;
+let nativeSendingRecords = 0;
+const nativeSending = new Map<string, number>();
+const nativeListeners = new Set<(event: NativeEvent) => void>();
+const nativeTransport: NativeTransportBridge | undefined = boot.tailcat ? {
+  open: (request) => ipcRenderer.invoke(IPC.tailcatOpen, request),
+  send(handle, frame) {
+    const pending = nativeSending.get(handle) ?? 0;
+    if (!(frame instanceof Uint8Array) || frame.byteLength === 0 || frame.byteLength > 30 * 1024 * 1024 || frame.byteLength + pending > 32 * 1024 * 1024 || frame.byteLength + nativeSendingBytes > 128 * 1024 * 1024 || nativeSendingRecords >= 1024) return false;
+    const bytes = frame.byteLength; nativeSending.set(handle, pending + bytes); nativeSendingBytes += bytes; nativeSendingRecords++;
+    void ipcRenderer.invoke(IPC.tailcatSend, handle, frame).then((ok) => { if (!ok) { ipcRenderer.send(IPC.tailcatClose, handle); for (const listener of nativeListeners) listener({ kind: "closed", handle }); } }).catch(() => { for (const listener of nativeListeners) listener({ kind: "closed", handle }); }).finally(() => { nativeSending.set(handle, (nativeSending.get(handle) ?? bytes) - bytes); if (!nativeSending.get(handle)) nativeSending.delete(handle); nativeSendingBytes -= bytes; nativeSendingRecords--; });
+    return true;
+  },
+  close: (handle) => ipcRenderer.send(IPC.tailcatClose, handle),
+  control: (online, hard) => ipcRenderer.send(IPC.tailcatControl, online, hard),
+  onEvent(listener) { nativeListeners.add(listener); return () => nativeListeners.delete(listener); },
+} : undefined;
+if (nativeTransport) ipcRenderer.on(IPC.tailcatEvent, (_event, event: NativeEvent) => {
+  try { for (const listener of nativeListeners) listener(event); }
+  finally { if (event.kind === "frame") ipcRenderer.send(IPC.tailcatAck, event.handle, event.frame.byteLength); }
+});
+
 const bridge: DesktopBridge = {
+  nativeTransport,
   connectLocal: () => ipcRenderer.invoke(IPC.connectLocal),
   logoutLocal: () => ipcRenderer.invoke(IPC.logoutLocal),
   platform: boot.platform,

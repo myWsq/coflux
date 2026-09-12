@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 // 热升级：升级投递（client.upgradeDaemon → server → worker.upgrade → supervisor）
 // + 切换 + 观察期/回滚。会话全程在 supervisor 存活。不接下载/验签（按安全约束，仅在
@@ -142,7 +142,7 @@ async function waitWorkerReconnect(prevPid, expectedVersion, trigger, label) {
 async function runTaskWithMarker(marker) {
   const repo = mkRepo();
   repos.push(repo);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const a = device.control;
   a.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await a.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
@@ -181,7 +181,7 @@ test("热升级成功：切到 good2、观察期通过提交，会话存活", as
   assert.ok(committed, "升级提交后 worker.active=good2");
 
   // 会话存活：新 worker 上建立更高 generation relay，sessiond holder 与 snapshot 均保留。
-  await device.openRelay();
+  await device.openNative();
   const restored = await device.attach(sessionId);
   assert.equal(restored.holderEpoch, holderEpoch);
   assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("UP_OK_MARK"), "升级后 snapshot 保留历史");
@@ -208,7 +208,7 @@ test("坏版本回滚：切到 bad2 崩溃循环 → 自动回滚，会话存活
   // active 未变（bad2 从未通过观察期提交）
   assert.equal(readActive(), activeBefore, "回滚后 worker.active 仍是升级前版本");
 
-  await device.openRelay();
+  await device.openNative();
   const restored = await device.attach(sessionId);
   assert.equal(restored.holderEpoch, holderEpoch);
   assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("ROLLBACK_MARK"), "回滚后 snapshot 保留历史");

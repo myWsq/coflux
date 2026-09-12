@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8856;
 const COFLUXD = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
@@ -63,7 +63,7 @@ test("agent presence：出现/退出、新订阅补发与 server 重启 force �
   writeFileSync(script, "#!/bin/sh\nsleep 300\n");
   chmodSync(script, 0o755);
 
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const sessionId = task.sessionId;
@@ -101,7 +101,7 @@ test("agent presence：出现/退出、新订阅补发与 server 重启 force �
   device.close();
   await stack.restartServer();
   await stack.waitDaemonOnline();
-  const reconnected = await openRelayDevice(stack);
+  const reconnected = await openNativeDevice(stack);
   const reconnectedControl = reconnected.control;
   const forced = await reconnectedControl.waitFor(
     (m) => m.case === "sessionAgentsUpdated" && m.sessions.some((s) => s.sessionId === sessionId && s.agent === "claude"),
@@ -129,7 +129,7 @@ test("hook 回合状态：Stop→done、后台在飞的 Stop→active、Permissi
   writeFileSync(script, "#!/bin/sh\nsleep 300\n");
   chmodSync(script, 0o755);
 
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const sessionId = task.sessionId;
@@ -212,7 +212,7 @@ test("hook 回合状态：Stop→done、后台在飞的 Stop→active、Permissi
 
 test("负向：纯 shell（含普通子进程）不产生 presence", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const sessionId = task.sessionId;

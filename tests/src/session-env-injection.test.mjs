@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo, CLI_BIN } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 import { callOperation as callTool, loginAccount } from "./account-harness.mjs";
 
 const PORT = 8870;
@@ -222,7 +222,7 @@ before(async () => {
   token = await loginAccount(BASE);
 
   repo = mkRepo();
-  device = await openRelayDevice(stack);
+  device = await openNativeDevice(stack);
   observer = device.control;
   observer.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const created = await observer.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main workspace", 20000);
@@ -520,7 +520,7 @@ test("plan 115：真 shell 起的 coflux 会话里 `claude` 自动带 --plugin-d
   });
   let plugDevice;
   try {
-    plugDevice = await openRelayDevice(plugged);
+    plugDevice = await openNativeDevice(plugged);
     const control = plugDevice.control;
     control.send({ case: "terminalCreate", daemonId: plugged.daemonId, path: wsPath });
     const created = await control.waitFor(

@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8862;
 let stack;
@@ -14,7 +14,7 @@ after(async () => { await stack?.stop(); repos.forEach((repo) => repo.cleanup())
 test("daemon 整树重启丢失 PTY 与 tombstone 后，catalog 将僵尸 task 收敛为 EXITED", async () => {
   const repo = mkRepo();
   repos.push(repo);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const control = device.control;
 
   control.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });

@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { mkRepo, startStack, CLI_BIN } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8873;
 const COFLUXD = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
@@ -71,7 +71,7 @@ for (const mode of ['locate', 'enter']) test(`${mode}: register and move workspa
   const notGit = mkDir(); // 非 git 目录：同样「不适用」
   const out = mkDir(); // CLI 输出落盘的地方（不注册成工作区）
 
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const gatewayPort = device.gateway.port;
 

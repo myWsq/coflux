@@ -1,3 +1,5 @@
+import { NativeTailcatTransport } from "./tailcat-transport";
+import { registerTailcatIpc } from "./tailcat-ipc";
 import { startClientBroker } from "./client-broker";
 import { createHash } from "node:crypto";
 import { createDesktopAccount } from "./desktop-account";
@@ -280,6 +282,7 @@ if (!app.requestSingleInstanceLock()) {
       try {
         if (localConnect) await localConnect;
         if (!await daemon.stopForExit("logout")) return false;
+        nativeTransport?.setControl(false, true);
         localAccount.logout(tokenStore.read());
         if (!tokenStore.clear()) throw new Error("无法清除本机登录凭据，请重试退出登录");
         // 本机已停止且 outbox 已持久化；断网不会阻止退出登录。
@@ -300,11 +303,16 @@ if (!app.requestSingleInstanceLock()) {
     cleanupTimer.unref();
 
 
+    const tailcatEnabled = !!daemonBundle;
+    const nativeTransport = tailcatEnabled ? new NativeTailcatTransport(join(daemonBundle!.dir, "coflux-transport"), serverUrl, tokenStore.read, (event) => sendToRenderer(IPC.tailcatEvent, event), app.getVersion()) : undefined;
+    if(nativeTransport) registerTailcatIpc(nativeTransport, trusted);
+    app.once("will-quit", () => nativeTransport?.setControl(false, true));
+
     registerIpc(
       {
         connectLocal,
         logoutLocal,
-        bootstrap: () => ({ platform: process.platform, version: app.getVersion(), serverUrl, origin: DESKTOP_ORIGIN }),
+        bootstrap: () => ({ tailcat: tailcatEnabled, platform: process.platform, version: app.getVersion(), serverUrl, origin: DESKTOP_ORIGIN }),
         // Activate the window on click, then route legacy attention to its workspace or
         // an inbox notification to its exact notification and terminal IDs.
         notify: (notification) => {
@@ -323,9 +331,10 @@ if (!app.requestSingleInstanceLock()) {
         getUpdateState: updater.getState,
         getSessionToken: tokenStore.read,
         setSessionToken: (token) => {
+          if(token !== tokenStore.read())nativeTransport?.setControl(false,true);
           tokenStore.write(token);
         },
-        clearSessionToken: tokenStore.clear,
+        clearSessionToken: () => { nativeTransport?.setControl(false, true); tokenStore.clear(); },
         // 渲染层主动拉取（账号菜单挂载时）顺带触发一次含 launchctl 的全量刷新：用户驱动、低频
         getDaemonState: () => {
           void daemon.refresh();

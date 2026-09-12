@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { FsEntryKind } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8826;
 let stack;
@@ -31,7 +31,7 @@ async function importWorkspace(device) {
 }
 
 test("exec：在工作区里跑命令，结构化回带 stdout/exitCode", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const ws = await importWorkspace(device);
   const r = await device.request("execRun", "execResult", {
@@ -48,7 +48,7 @@ test("exec：在工作区里跑命令，结构化回带 stdout/exitCode", async 
 });
 
 test("exec：非零退出码被如实回带", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const ws = await importWorkspace(device);
   const r = await device.request("execRun", "execResult", {
@@ -63,7 +63,7 @@ test("exec：非零退出码被如实回带", async () => {
 });
 
 test("fs.list / fs.read：列目录、读文件（按 root 锚定）", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const ws = await importWorkspace(device);
   const list = await device.request("fsList", "fsListed", {
@@ -85,7 +85,7 @@ test("fs.list / fs.read：列目录、读文件（按 root 锚定）", async () 
 });
 
 test("fs：路径穿越被拒（锚定在 root 内）", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const ws = await importWorkspace(device);
   const read = await device.request("fsRead", "fsReadResult", {
@@ -99,7 +99,7 @@ test("fs：路径穿越被拒（锚定在 root 内）", async () => {
 });
 
 test("fs.write：root 锚定通用原语——上传字节原样落盘，内容一致且自带 .gitignore", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const ws = await importWorkspace(device);
   const content = "fake-image-bytes-\x01\x02\x03-payload";
@@ -121,7 +121,7 @@ test("fs.write：root 锚定通用原语——上传字节原样落盘，内容�
 });
 
 test("fs.write：'..' 越界路径被拒", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const ws = await importWorkspace(device);
   const r = await device.request("fsWrite", "fsWriteResult", {
@@ -137,7 +137,7 @@ test("fs.write：'..' 越界路径被拒", async () => {
 });
 
 test("fs.write：非归属（不存在的）workspace 被拒", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const r = await device.request("fsWrite", "fsWriteResult", {
     requestId: "w3",
@@ -153,7 +153,7 @@ test("fs.write：非归属（不存在的）workspace 被拒", async () => {
 });
 
 test("fs.write：temp 模式——终端贴图落 daemon 侧系统临时目录，回带绝对路径", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const ws = await importWorkspace(device);
   const content = "fake-image-bytes-\x01\x02\x03-payload";
@@ -174,7 +174,7 @@ test("fs.write：temp 模式——终端贴图落 daemon 侧系统临时目录�
 });
 
 test("fs.write：temp 模式下多段路径 / 越界文件名被拒", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const ws = await importWorkspace(device);
   const r1 = await device.request("fsWrite", "fsWriteResult", {
@@ -200,7 +200,7 @@ test("fs.write：temp 模式下多段路径 / 越界文件名被拒", async () =
 });
 
 test("fs：root 内指向 root 外的符号链接被拒（realpath 锚定）", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   const repo = mkRepo();
   repos.push(repo);

@@ -5,11 +5,12 @@ Passing automation does not establish that permissions, native confirmation dial
 ## Account cleanup and network recovery
 
 ```sh
-cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay
+cargo build -p coflux-supervisor -p coflux-worker
+node scripts/build-test-transports.mjs
 node --import tsx scripts/verify-desktop-account-lifecycle.mjs
 ```
 
-The script uses the harness to create a temporary database, two real daemons, and temporary directories. The center listens on 8878; override it with `COFLUX_ACCOUNT_ACCEPTANCE_PORT`. Binary paths accept the same overrides as black-box tests: `COFLUX_SUPERVISOR_BIN`, `COFLUX_WORKER_BIN`, and `COFLUX_RELAY_BIN`.
+The script uses the harness to create a temporary database, two real daemons, and temporary directories. The center listens on 8878; override it with `COFLUX_ACCOUNT_ACCEPTANCE_PORT`. Binary paths accept the same overrides as black-box tests: `COFLUX_SUPERVISOR_BIN`, `COFLUX_WORKER_BIN`, and `COFLUX_TRANSPORT_BIN` / `COFLUX_TEST_DERPER_BIN`.
 
 It verifies real WebSocket account control, offline local cleanup, outbox retries after recreating components, old-token revocation, and preservation of another device's live terminals and project files. It assembles desktop account components directly and uses a storage test double. Consequently, it is not part of the `tests/src` black-box suite and does not replace GUI logout confirmation or safeStorage acceptance.
 

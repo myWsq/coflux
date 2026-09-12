@@ -17,13 +17,15 @@ import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import http from "node:http";
 import { WebSocket } from "ws";
 import postgres from "postgres";
+import { spawnDerp } from "./derp-harness.mjs";
 import {
   create,
+  CONTROL_PROTOCOL_VERSION,
   ClientToServerSchema,
   ServerToClientSchema,
   DaemonToServerSchema,
@@ -311,60 +313,6 @@ export function spawnDaemon(env) {
   child.cofluxProcessGroupId = child.pid;
   return child;
 }
-// 独立 relay（plan 043）：每套 stack 生成一对临时 ed25519 密钥——seed(hex) 给 server 签
-// rendezvous token，公钥(hex) 经 env 注入 relay 验签（同 COFLUX_WORKER_PUBKEY 的注入惯例）。
-// relay 用随机端口并在 stdout 打就绪行，这里解析实际端口，遵守"各测试文件独占端口"纪律。
-const RELAY_BIN = process.env.COFLUX_RELAY_BIN || join(ROOT, "target/debug/coflux-relay");
-
-export function makeRelayKeys() {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const seedHex = Buffer.from(privateKey.export({ format: "jwk" }).d, "base64url").toString("hex");
-  const pubHex = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("hex");
-  return { seedHex, pubHex };
-}
-
-export async function spawnRelay(pubHex, ms = 8000, signal, onSpawn) {
-  const child = spawn(RELAY_BIN, [], {
-    env: { ...process.env, COFLUX_RELAY_LISTEN: "127.0.0.1:0", COFLUX_RELAY_PUBKEY: pubHex },
-    stdio: ["ignore", "pipe", DEBUG ? "inherit" : "ignore"],
-    detached: true,
-  });
-  child.cofluxProcessGroupId = child.pid;
-  onSpawn?.(child);
-  const port = await new Promise((resolvePort, rejectPort) => {
-    let buffer = "";
-    let settled = false;
-    const finish = (error, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", aborted);
-      if (error) {
-        killTree(child);
-        rejectPort(error);
-      } else {
-        resolvePort(value);
-      }
-    };
-    const aborted = () => finish(stackAbortError("relay spawn"));
-    const timer = setTimeout(() => finish(new Error("relay did not report listening line")), ms);
-    child.stdout.on("data", (chunk) => {
-      buffer += chunk.toString();
-      const match = buffer.match(/coflux-relay listening on [^\s:]*:(\d+)/);
-      if (match) {
-        if (DEBUG) process.stdout.write(buffer);
-        finish(undefined, Number(match[1]));
-      }
-    });
-    child.once("exit", () => {
-      finish(new Error("relay exited before listening"));
-    });
-    signal?.addEventListener("abort", aborted, { once: true });
-    if (signal?.aborted) aborted();
-  });
-  return { process: child, port };
-}
-
 function detachedProcessGroupId(child) {
   const groupId = child?.cofluxProcessGroupId ?? child?.pid;
   return Number.isSafeInteger(groupId) && groupId > 1 ? groupId : undefined;
@@ -505,52 +453,44 @@ export function mkRepo({ strictCleanup = false } = {}) {
 }
 
 /**
- * 只起 server（不起 Rust daemon），用于 password 模式等需要自定认证/装配的测试。
- * opts.env 追加/覆盖 server 环境变量（如 COFLUX_AUTH）；manageRelay=false 时调用方自行
- * 装配 relay 与签名配置（多节点测试用），stop() 不接管这些外部 relay。
+ * Start an isolated server and stock DERP without a Rust daemon.
+ * opts.env overrides server configuration for authentication and region tests.
  */
 export async function startServer(opts = {}) {
   const port = opts.port;
   if (!port) throw new Error("startServer requires a port");
   const testDb = await createTestDatabase();
-  // 测试栈总是配一个 relay 进程（随机端口 + 每栈临时密钥），rendezvous 才有落点；
-  // 这只是测试装配——生产上 relay 独立部署（自有主机/域名），与中心零连接、只共享密钥对。
-  // config 对 COFLUX_RELAY_SIGNING_KEY 也是 fail-closed。
-  const manageRelay = opts.manageRelay !== false;
-  const relayKeys = manageRelay ? makeRelayKeys() : null;
   const ref = {};
-  let relayPort;
+  let derp;
+  const nativeHelpers = new Set();
   let serverEnv;
   try {
-    if (manageRelay) {
-      const relay = await spawnRelay(relayKeys.pubHex);
-      ref.relay = relay.process;
-      relayPort = relay.port;
-    }
+    derp = await spawnDerp({ onSpawn: child => { ref.derp = child; } });
     serverEnv = {
       ...process.env,
       COFLUX_PORT: String(port),
       DATABASE_URL: testDb.url,
-      ...(manageRelay ? {
-        COFLUX_RELAY_SIGNING_KEY: relayKeys.seedHex,
-        COFLUX_RELAY_URL: `ws://127.0.0.1:${relayPort}`,
-      } : {}),
+      COFLUX_DERP_REGIONS: JSON.stringify([derp.region]),
       ...(opts.env ?? {}),
     };
     ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
     await waitHealth(port);
-  } catch (e) {
-    // 建库之后、句柄（含 stop()）交还调用方之前失败：就地清理，别泄漏测试库
+  } catch (error) {
+    // Preserve the startup failure while attempting every acquired-resource cleanup.
+    const errors = [error];
     killTree(ref.server);
-    killTree(ref.relay);
-    await dropTestDatabaseLoudly(testDb.name);
-    throw e;
+    killTree(ref.derp);
+    try { derp?.cleanup(); } catch (cleanupError) { errors.push(cleanupError); }
+    try { await dropTestDatabaseLoudly(testDb.name); } catch (cleanupError) { errors.push(cleanupError); }
+    if (errors.length > 1) throw new AggregateError(errors, "server fixture startup and cleanup failed", { cause: error });
+    throw error;
   }
   return {
     port,
     /** 仅供需要用 PG 锁制造确定性并发窗口的黑盒测试；业务断言仍必须走公开 wire。 */
     databaseUrl: testDb.url,
-    relayPort,
+    derp,
+    nativeHelpers,
     makeClient: (options) => new Client(port, options),
     rawDaemon: () => rawDaemon(port),
     async restartServer() {
@@ -561,10 +501,14 @@ export async function startServer(opts = {}) {
       await waitHealth(port);
     },
     async stop() {
+      const errors = (await Promise.allSettled([...nativeHelpers].map(helper => helper.stop())))
+        .filter(result => result.status === "rejected").map(result => result.reason);
       killTree(ref.server);
-      killTree(ref.relay);
+      killTree(ref.derp);
       await sleep(150);
-      await dropTestDatabaseLoudly(testDb.name);
+      try { derp?.cleanup(); } catch (error) { errors.push(error); }
+      try { await dropTestDatabaseLoudly(testDb.name); } catch (error) { errors.push(error); }
+      if (errors.length) throw new AggregateError(errors, "server fixture cleanup failed");
     },
   };
 }
@@ -596,6 +540,7 @@ export function rawDaemon(port) {
     log,
     send: (m) => {
       const { case: c, ...fields } = m;
+      if (c === "daemonAuth" || c === "daemonEnrollRequest") fields.controlProtocolVersion ??= CONTROL_PROTOCOL_VERSION;
       ws.send(encodeDaemonToServer(create(DaemonToServerSchema, { payload: { case: c, value: toWireValue(fields) } })));
     },
     waitFor: (pred, label = "?", t = 8000) => {
@@ -780,17 +725,18 @@ export async function startStack(opts = {}) {
   const password = opts.password ?? "admin";
   const signal = opts.signal;
   const strictCleanup = opts.strictCleanup === true;
-  const ref = { server: null, daemon: null, relay: null };
+  const ref = { server: null, daemon: null, derp: null };
   const retiredProcessTrees = new Set();
   let testDb;
   let home;
-  let relayPort;
+  let derp;
+  const nativeHelpers = new Set();
   let cleanupPromise;
   const onAbort = () => {
     // 先同步杀掉已取得句柄的 detached 进程；异步删库/删目录由同一个幂等 cleanup 收口。
     killTree(ref.daemon);
     killTree(ref.server);
-    killTree(ref.relay);
+    killTree(ref.derp);
     for (const child of retiredProcessTrees) killTree(child);
     if (testDb || home) void cleanupResources().catch(() => undefined);
   };
@@ -798,12 +744,14 @@ export async function startStack(opts = {}) {
     if (cleanupPromise) return cleanupPromise;
     cleanupPromise = (async () => {
       signal?.removeEventListener("abort", onAbort);
-      const processes = [...retiredProcessTrees, ref.daemon, ref.server, ref.relay];
+      const processes = [...retiredProcessTrees, ref.daemon, ref.server, ref.derp];
       retiredProcessTrees.clear();
       ref.daemon = null;
       ref.server = null;
-      ref.relay = null;
+      ref.derp = null;
       const errors = [];
+      const helperResults = await Promise.allSettled([...nativeHelpers].map(helper => helper.stop()));
+      for (const result of helperResults) if (result.status === "rejected") errors.push(result.reason);
       try {
         await stopProcessTrees(processes, { strict: strictCleanup });
       } catch (error) {
@@ -834,17 +782,9 @@ export async function startStack(opts = {}) {
     testDb = await createTestDatabase({ signal });
     throwIfStackAborted(signal);
     home = mkdtempSync(join(tmpdir(), "coflux-test-home-"));
-    const relayKeys = makeRelayKeys();
     throwIfStackAborted(signal);
-    // relay 先起（随机端口），server env 才能带上它的 URL。
-    const relay = await spawnRelay(
-      relayKeys.pubHex,
-      8000,
-      signal,
-      (child) => { ref.relay = child; },
-    );
-    ref.relay = relay.process;
-    relayPort = relay.port;
+    derp = await spawnDerp({ directory: home, signal, onSpawn: child => { ref.derp = child; } });
+    ref.derp = derp.process;
     throwIfStackAborted(signal);
     // opts.serverEnv：额外/覆盖 server 侧 env（如 proxy.test.mjs 显式钉死 COFLUX_PROXY_SCHEME，
     // 避免测试环境未设 COFLUX_DEV 时 isDev=false 导致 proxyScheme 默认落到 https，门禁/cookie 断言随之漂移）。
@@ -854,8 +794,7 @@ export async function startStack(opts = {}) {
       DATABASE_URL: testDb.url,
       COFLUX_USERNAME: username,
       COFLUX_PASSWORD: password,
-      COFLUX_RELAY_SIGNING_KEY: relayKeys.seedHex,
-      COFLUX_RELAY_URL: `ws://127.0.0.1:${relay.port}`,
+      COFLUX_DERP_REGIONS: JSON.stringify([derp.region]),
       ...(opts.serverEnv ?? {}),
     };
     const daemonEnv = {
@@ -892,7 +831,8 @@ export async function startStack(opts = {}) {
     username,
     password,
     home,
-    relayPort,
+    derp,
+    nativeHelpers,
     daemonId: null,
     makeClient: (options) => new Client(port, options),
     /** 真正停止中心进程，但保留 daemon、临时数据库与 loopback gateway。 */
@@ -1015,6 +955,7 @@ export class Client {
   send(m) {
     if (this.ws.readyState !== WebSocket.OPEN) return;
     const { case: c, ...fields } = m;
+    if (c === "clientAuth") fields.controlProtocolVersion ??= CONTROL_PROTOCOL_VERSION;
     this.ws.send(encodeClientToServer(create(ClientToServerSchema, { payload: { case: c, value: toWireValue(fields) } })));
   }
   waitFor(pred, label = "?", timeout = 10000) {

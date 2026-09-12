@@ -2,6 +2,7 @@ import { emptyNotificationInbox, applyNotificationPage, applyNotificationChange,
 import { createStore, type StoreApi } from "zustand/vanilla";
 import {
   TaskStatus,
+  CONTROL_PROTOCOL_VERSION,
   type AccountNotification,
   type ClientToServerPayload,
   type DaemonInfo,
@@ -130,6 +131,7 @@ export type LocalSessionState = {
 };
 
 export type DeviceTransportOptions = {
+  nativeRemote?: import("./device-router").NativeRemoteTransport;
   /** 是否尝试 loopback direct；false 只使用中心 opaque relay。 */
   enableLocalTransport: boolean;
   identityDatabaseName: string;
@@ -515,6 +517,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
    */
   let executorListener: ((event: ExecutorClientEvent) => void) | undefined;
   const deviceRouter: DeviceRouter = createDeviceRouter({
+    nativeRemote: options.deviceTransport.nativeRemote,
     enableLocalTransport: options.deviceTransport.enableLocalTransport,
     identityDatabaseName: options.deviceTransport.identityDatabaseName,
     origin: options.deviceTransport.origin,
@@ -650,6 +653,14 @@ export function createCofluxClient(options: CofluxClientOptions) {
     switch (payload.case) {
       case "authOk": {
         const value = payload.value;
+        if (value.controlProtocolVersion < CONTROL_PROTOCOL_VERSION) {
+          controlAuthenticated = false;
+          shouldRetry = false;
+          deviceRouter.setControlOnline(false);
+          connection.stop();
+          store.setState({ authState: "outdated", loginError: "服务器版本需要升级" });
+          return;
+        }
         controlAuthenticated = true;
         clearNotificationTimers();
         if (notificationAccount !== value.accountId) {
@@ -663,7 +674,6 @@ export function createCofluxClient(options: CofluxClientOptions) {
         store.setState((state) => ({ notificationInbox: { ...state.notificationInbox, loading: notificationSupported,
           error: notificationSupported ? "" : "服务器尚不支持通知中心，请升级服务器" } }));
         if (notificationSupported) waitForNotificationPage();
-        deviceRouter.setIceServers(value.iceServers);
         deviceRouter.setControlOnline(true);
         store.setState({ authState: "authed", loginError: "", loginName: value.loginName ?? "" });
         shouldRetry = true;

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo, rawDaemon } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8865;
 const RESYNC_ENTRY_LIMIT = 4096;
@@ -120,7 +120,7 @@ async function exitTerminal(daemon, terminal, exitCode, label) {
 test("resync authority 跨 WS 保留、owner 集有界且 exit fact 不可逆", async () => {
   const repo = mkRepo();
   repos.push(repo);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const control = device.control;
 
   control.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });

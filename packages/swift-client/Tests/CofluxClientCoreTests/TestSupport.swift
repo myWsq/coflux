@@ -363,3 +363,7 @@ func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool) async -
 func decodeClientFrame(_ data: Data) -> Coflux_V1_ClientToServer.OneOf_Payload? {
     (try? Coflux_V1_ClientToServer(serializedBytes: data))?.payload
 }
+
+func currentAuthOK() -> Coflux_V1_AuthOk {
+    var value = Coflux_V1_AuthOk(); value.controlProtocolVersion = 2; return value
+}

@@ -7,10 +7,11 @@ import Testing
 struct AuthFlowTests {
     @Test func pendingCloseFromPreviousLoginCannotReportErrorOrDeleteNewSession() async throws {
         let transport = FakeTransport()
-        let client = makeClient(transport: transport, store: InMemoryTokenStore(value: "token"))
+        let local = ControlledLocalProvider()
+        let client = makeClient(transport: transport, store: InMemoryTokenStore(value: "token"), localProvider: local)
         defer { client.logout() }
         let first = await transport.nextConnection()
-        var auth = Coflux_V1_AuthOk(); auth.accountID = "account"
+        var auth = Coflux_V1_AuthOk(); auth.controlProtocolVersion = 2; auth.accountID = "account"
         first.push(.authOk(auth))
         #expect(await waitUntil { client.authState == .authed })
         var task = Coflux_V1_Task(); task.id = "task"; task.daemonID = "device"
@@ -20,7 +21,7 @@ struct AuthFlowTests {
         #expect(await waitUntil { client.tasks.count == 1 })
         let close = Task { await client.closeTask(task) }
         #expect(await waitUntil {
-            first.sent.contains { if case .deviceRelayConnect? = decodeClientFrame($0) { return true }; return false }
+            local.openCount > 0
         })
         // 真实发送到申请设备通道这一步，尚未收到 holder；登出使等待中的操作失败。
         client.logout()
@@ -46,7 +47,7 @@ struct AuthFlowTests {
         let client = makeClient(transport: transport, store: InMemoryTokenStore(value: "token"))
         defer { client.logout() }
         let first = await transport.nextConnection()
-        var auth = Coflux_V1_AuthOk(); auth.accountID = "account"
+        var auth = Coflux_V1_AuthOk(); auth.controlProtocolVersion = 2; auth.accountID = "account"
         first.push(.authOk(auth))
         #expect(await waitUntil { client.authState == .authed })
         var task = Coflux_V1_Task(); task.id = "closed"; task.status = .exited
@@ -88,7 +89,8 @@ struct AuthFlowTests {
 
     private func makeClient(
         transport: FakeTransport,
-        store: InMemoryTokenStore = InMemoryTokenStore()
+        store: InMemoryTokenStore = InMemoryTokenStore(),
+        localProvider: (any LocalDeviceTransportProvider)? = nil
     ) -> CofluxClient {
         CofluxClient(
             configuration: ClientConfiguration(
@@ -96,7 +98,8 @@ struct AuthFlowTests {
                 buildID: "dev"
             ),
             transport: transport,
-            tokenStore: store
+            tokenStore: store,
+            localDeviceProvider: localProvider
         )
     }
 
@@ -119,7 +122,7 @@ struct AuthFlowTests {
         #expect(auth.password == "secret")
         #expect(auth.clientVersion == "dev")
 
-        var authOk = Coflux_V1_AuthOk()
+        var authOk = Coflux_V1_AuthOk(); authOk.controlProtocolVersion = 2
         authOk.accountID = "a1"
         authOk.clientToken = "ck_sess_test"
         connection.push(.authOk(authOk))
@@ -203,7 +206,7 @@ struct AuthFlowTests {
 
         client.login(username: "dev", password: "secret")
         let first = await transport.nextConnection()
-        var authOk = Coflux_V1_AuthOk()
+        var authOk = Coflux_V1_AuthOk(); authOk.controlProtocolVersion = 2
         authOk.accountID = "a1"
         authOk.clientToken = "ck_sess_test"
         first.push(.authOk(authOk))
@@ -276,7 +279,7 @@ struct AuthFlowTests {
         client.login(username: "second", password: "secret-2")
         #expect(await waitUntil { current.sent.count == 1 })
 
-        var staleAuth = Coflux_V1_AuthOk()
+        var staleAuth = Coflux_V1_AuthOk(); staleAuth.controlProtocolVersion = 2
         staleAuth.accountID = "stale-account"
         staleAuth.clientToken = "stale-token"
         stale.push(.authOk(staleAuth))
@@ -285,7 +288,7 @@ struct AuthFlowTests {
         #expect(store.value == nil)
         #expect(current.sent.count == 1)
 
-        var currentAuth = Coflux_V1_AuthOk()
+        var currentAuth = Coflux_V1_AuthOk(); currentAuth.controlProtocolVersion = 2
         currentAuth.accountID = "current-account"
         currentAuth.clientToken = "current-token"
         current.push(.authOk(currentAuth))
@@ -300,7 +303,7 @@ struct AuthFlowTests {
         let client = makeClient(transport: transport, store: store)
         let connection = await transport.nextConnection()
 
-        var authOk = Coflux_V1_AuthOk()
+        var authOk = Coflux_V1_AuthOk(); authOk.controlProtocolVersion = 2
         authOk.accountID = "a1"
         connection.push(.authOk(authOk))
 
@@ -323,7 +326,7 @@ struct AuthFlowTests {
 
         client.login(username: "dev", password: "secret")
         #expect(await waitUntil { connection.sentFrames.count == 1 })
-        var authOk = Coflux_V1_AuthOk()
+        var authOk = Coflux_V1_AuthOk(); authOk.controlProtocolVersion = 2
         authOk.accountID = "a1"
         connection.push(.authOk(authOk))
         #expect(await waitUntil { client.authState == .authed })
@@ -352,7 +355,7 @@ struct AuthFlowTests {
         #expect(client.loginError.contains("连接已中断"))
         client.login(username: "dev", password: "secret")
         let second = await transport.nextConnection()
-        second.push(.authOk(Coflux_V1_AuthOk()))
+        second.push(.authOk(currentAuthOK()))
         #expect(await waitUntil { client.authState == .authed })
         #expect(client.loginError.isEmpty)
     }
@@ -377,7 +380,7 @@ struct AuthFlowTests {
         client.login(username: "dev", password: "secret")
         let second = await transport.nextConnection()
         first.push(.authError(Coflux_V1_AuthError()))
-        second.push(.authOk(Coflux_V1_AuthOk()))
+        second.push(.authOk(currentAuthOK()))
         #expect(await waitUntil { client.authState == .authed })
     }
 
@@ -444,7 +447,7 @@ struct AuthFlowTests {
         #expect(await waitUntil { connection.sent.count == 1 && clock.waiterCount == 1 && clock.sleepStartCount == 1 })
 
         // AuthOk 是入站证明：解除认证帧的 watchdog；subscribe 成为新的第一条未回应 outbound。
-        var authOk = Coflux_V1_AuthOk()
+        var authOk = Coflux_V1_AuthOk(); authOk.controlProtocolVersion = 2
         authOk.accountID = "a1"
         authOk.clientToken = "ck_sess_test"
         connection.push(.authOk(authOk))
@@ -478,7 +481,7 @@ struct AuthFlowTests {
 
         client.login(username: "dev", password: "secret")
         #expect(await waitUntil { connection.sent.count == 1 && clock.waiterCount == 1 })
-        connection.push(.authOk(Coflux_V1_AuthOk()))
+        connection.push(.authOk(currentAuthOK()))
 
         // subscribe send 已经挂起，但本次 outbound 的 watchdog 必须先处于 active。
         #expect(await waitUntil {
@@ -504,7 +507,7 @@ struct AuthFlowTests {
 
         client.login(username: "dev", password: "secret")
         #expect(await waitUntil { connection.sent.count == 1 && clock.waiterCount == 1 })
-        connection.push(.authOk(Coflux_V1_AuthOk()))
+        connection.push(.authOk(currentAuthOK()))
         #expect(await waitUntil {
             connection.blockedSendCount == 1 && clock.waiterCount == 1 && clock.sleepStartCount == 2
         })
@@ -543,7 +546,7 @@ struct AuthFlowTests {
         )
         writeClient.login(username: "dev", password: "secret")
         let connection = await writeTransport.nextConnection()
-        var authOk = Coflux_V1_AuthOk()
+        var authOk = Coflux_V1_AuthOk(); authOk.controlProtocolVersion = 2
         authOk.clientToken = "must-not-appear-in-error"
         connection.push(.authOk(authOk))
         #expect(await waitUntil { writeClient.lastError?.message.contains("无法保存本机会话") == true })
@@ -569,7 +572,7 @@ struct AuthFlowTests {
 
         client.login(username: "dev", password: "secret")
         let connection = await transport.nextConnection()
-        var authOk = Coflux_V1_AuthOk()
+        var authOk = Coflux_V1_AuthOk(); authOk.controlProtocolVersion = 2
         authOk.accountID = "a1"
         authOk.clientToken = "ck_sess_test"
         connection.push(.authOk(authOk))

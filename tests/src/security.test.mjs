@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import { create, ClientToServerSchema, encodeClientToServer, TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo, rawDaemon, tokenFromUrl } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8824;
 let stack;
@@ -15,7 +15,7 @@ after(async () => { await stack?.stop(); repos.forEach((r) => r.cleanup()); });
 test("跨 daemon 劫持被拒：resync/session.exit 对他设备的任务无效", async () => {
   const repo = mkRepo();
   repos.push(repo);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const a = device.control;
   a.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await a.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");

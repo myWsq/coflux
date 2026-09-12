@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import test from "node:test";
-import { create, decodeClientToServer, encodeServerToClient, ServerToClientSchema, type ServerToClientPayload } from "@coflux/protocol";
+import { create, CONTROL_PROTOCOL_VERSION, decodeClientToServer, encodeServerToClient, ServerToClientSchema, type ServerToClientPayload } from "@coflux/protocol";
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -76,7 +76,7 @@ function ready() {
   const client = newClient("token");
   const socket = FakeWebSocket.latest();
   socket.open();
-  socket.receive({ case: "authOk", value: { accountId: "owner", notificationInbox: true } });
+  socket.receive({ case: "authOk", value: { accountId: "owner", controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true } });
   return { client, socket };
 }
 const entry = (sequence: number) => ({ id: `n-${sequence}`, sequence, readAt: 0, message: "Please review" });
@@ -98,7 +98,7 @@ test("initial and reconnect history are silent; live notification alerts exactly
     live(socket, 6);
     live(socket, 6);
     assert.deepEqual(alerts, ["n-6"]);
-    socket.receive({ case: "authOk", value: { accountId: "owner", notificationInbox: true } });
+    socket.receive({ case: "authOk", value: { accountId: "owner", controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true } });
     history(socket, 10);
     live(socket, 10);
     assert.deepEqual(alerts, ["n-6"]);

@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8860;
 let stack;
@@ -13,7 +13,7 @@ after(async () => { await stack?.stop(); repos.forEach((r) => r.cleanup()); });
 test("项目重命名：改名后双客户端广播可见且落库持久", async () => {
   const repo = mkRepo();
   repos.push(repo);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c1 = device.control;
   c1.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const proj = await c1.waitFor((m) => m.case === "projectCreated", "project.created");

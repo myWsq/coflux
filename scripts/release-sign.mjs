@@ -12,6 +12,7 @@ import {
   assertReleaseVersion,
   supervisorReleaseStatement,
   cliReleaseStatement,
+  transportReleaseStatement,
   workerReleaseStatement,
 } from "./release-statement.mjs";
 
@@ -104,6 +105,21 @@ if (cliNames.length) {
   }
 }
 
+// Companion artifacts retain their own signing domain and the exact worker target set.
+const transportNames = readdirSync(dir).filter(name => name.startsWith("coflux-transport-") && !name.includes("."));
+if (!transportNames.length) throw new Error("Release is missing the mandatory native transport component");
+if (transportNames.length) {
+  manifest.transport = {};
+  for (const name of transportNames) {
+    const target = name.slice("coflux-transport-".length), data = readFileSync(join(dir, name));
+    const sha256 = crypto.createHash("sha256").update(data).digest("hex"), size = data.byteLength;
+    const releaseSignature = crypto.sign(null, transportReleaseStatement({ version, target, sha256, size }), key).toString("hex");
+    writeFileSync(join(dir, `${name}.release.sig`), releaseSignature); sums.push(`${sha256}  ${name}`);
+    manifest.transport[target] = { target, sha256, size, releaseSignature, url: `https://github.com/${repo}/releases/download/${version}/${name}` };
+  }
+  if (Object.keys(manifest.transport).sort().join("\n") !== [...targetsByComponent.worker].sort().join("\n")) throw new Error("Transport targets must match worker targets");
+}
+
 const workerTargets = [...targetsByComponent.worker].sort();
 const supervisorTargets = [...targetsByComponent.supervisor].sort();
 if (
@@ -116,12 +132,6 @@ if (
     `supervisor=${supervisorTargets.join(",") || "<空>"}`,
   );
   process.exit(1);
-}
-// relay 产物（plan 043，仅 linux 矩阵）：不签名（人工 ssh 部署，不走自动下载验签），但进 SHA256SUMS 供部署校验。
-for (const name of readdirSync(dir)) {
-  if (!name.startsWith("coflux-relay-") || name.includes(".")) continue;
-  const sha256 = crypto.createHash("sha256").update(readFileSync(join(dir, name))).digest("hex");
-  sums.push(`${sha256}  ${name}`);
 }
 writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 writeFileSync(join(dir, "SHA256SUMS"), sums.join("\n") + "\n");

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDesktopAccount } from "../apps/desktop/src/main/desktop-account.ts";
 import { startStack, spawnDaemon, authorizeDaemon, killTree, mkRepo } from "../tests/src/harness.mjs";
-import { openRelayDevice } from "../tests/src/device-harness.mjs";
+import { openNativeDevice } from "../tests/src/device-harness.mjs";
 import { loginAccount } from "../tests/src/account-harness.mjs";
 
 const port = Number(process.env.COFLUX_ACCOUNT_ACCEPTANCE_PORT || 8878);
@@ -28,7 +28,7 @@ async function command(token, op) {
   return { status: response.status, body: await response.json() };
 }
 async function terminal(daemonId, path, token) {
-  const device = await openRelayDevice(stack, { daemonId });
+  const device = await openNativeDevice(stack, { daemonId });
   clients.push(device);
   device.control.send({ case: "projectImport", daemonId, path });
   const { workspace } = await device.control.waitFor(m => m.case === "workspaceCreated" && m.workspace.isMain && m.workspace.daemonId === daemonId, "workspace");

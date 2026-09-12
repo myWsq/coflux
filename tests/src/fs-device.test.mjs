@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FsEntryKind } from "@coflux/protocol";
 import { startStack } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8832;
 let stack;
@@ -29,7 +29,7 @@ after(async () => {
 });
 
 test("设备模式默认 ~：列 HOME，并回传绝对 path", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
 
   const root = await device.request("fsList", "fsListed", { requestId: "d1", workspaceId: "", path: "~", browseHome: true });
   assert.equal(root.ok, true);
@@ -49,7 +49,7 @@ test("设备模式默认 ~：列 HOME，并回传绝对 path", async () => {
 });
 
 test("设备 HOME 浏览不能上钻到 /（Device authority 固定根）", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const r = await device.request("fsList", "fsListed", { requestId: "d3", workspaceId: "", path: "/", browseHome: true });
   assert.equal(r.ok, false);
   assert.match(r.error ?? "", /越界|root/i);
@@ -57,7 +57,7 @@ test("设备 HOME 浏览不能上钻到 /（Device authority 固定根）", asyn
 });
 
 test("HOME 浏览不接受 workspaceId（Device channel 已绑定 daemon）", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const r = await device.request("fsList", "fsListed", {
     requestId: "d4",
     workspaceId: "00000000-0000-0000-0000-000000000000",
@@ -70,7 +70,7 @@ test("HOME 浏览不接受 workspaceId（Device channel 已绑定 daemon）", as
 });
 
 test("workspace 模式不回归：省略 daemonId 仍按 worktree 锚定", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   // fakeHome 里造一个 git 仓库导入，验证 workspace 模式照旧
   const repoDir = join(fakeHome, "Workspace", "proj-a");

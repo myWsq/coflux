@@ -92,7 +92,7 @@ async function waitWorkspaceReady(device, workspaceId) {
 // plan 043：relay 数据面走独立 relay WS（中心控制 WS 上已无 relay 帧消息），
 // "零 relay 帧经手"改为观测 device 在 relay transport 上双向累计的帧数。
 function relayFrameCount(device) {
-  return device.relayFramesSent + device.relayEnvelopesReceived;
+  return device.remoteFramesSent + device.remoteEnvelopesReceived;
 }
 
 test("普通 Device RPC 在 direct/relay 等价，direct 热路径不产生中心 relay frame", async () => {
@@ -101,7 +101,7 @@ test("普通 Device RPC 在 direct/relay 等价，direct 热路径不产生中�
   repos.push(relayRepo, directRepo);
 
   const device = await DeviceClient.pair(stack);
-  await device.openRelay();
+  await device.openNative();
   const relayImport = await importProject(device, relayRepo, "relay-import");
   const relayWorktree = await createWorktree(device, relayImport.project.id, "relay-wt", "relay-wt");
   assert.equal(relayWorktree.branch, "relay-wt", "worktree prepared operation 可经 relay 完成");
@@ -166,7 +166,7 @@ test("普通 Device RPC 在 direct/relay 等价，direct 热路径不产生中�
   await sleep(100);
   assert.equal(relayFrameCount(device), directFramesBefore, "direct terminal/RPC frame 不经过中心 relay");
 
-  await device.openRelay();
+  await device.openNative();
   const relayExec = await request(device, "execRun", "execResult", {
     workspaceId: directImport.workspace.id,
     command: "/bin/sh",

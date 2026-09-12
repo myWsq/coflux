@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo, rawDaemon, tokenFromUrl } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8821;
 let stack;
@@ -35,7 +35,7 @@ test("项目制：导入 git 仓库 → 主工作区=仓库本身 → worktree �
   const repo = mkRepo();
   repos.push(repo);
   execFileSync("git", ["-C", repo.dir, "remote", "add", "origin", "https://github.com/myWsq/coflux.git"]);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
 
   c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
@@ -68,7 +68,7 @@ test("导入项目：显式名称覆盖 remote 推导名称", async () => {
   const repo = mkRepo();
   repos.push(repo);
   execFileSync("git", ["-C", repo.dir, "remote", "add", "origin", "https://github.com/myWsq/coflux.git"]);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
 
   c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir, name: "  我的项目  " });
@@ -83,7 +83,7 @@ test("导入项目：无有效 remote 时从规范仓库根目录取名称", asy
   const subdir = join(repo.dir, "nested", "directory");
   mkdirSync(subdir, { recursive: true });
   execFileSync("git", ["-C", repo.dir, "remote", "add", "origin", repo.dir]);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
 
   c.send({ case: "projectImport", daemonId: stack.daemonId, path: subdir });
@@ -103,7 +103,7 @@ test("导入项目：默认分支取 origin/HEAD 而非导入时恰好所在的�
   execFileSync("git", ["clone", "-q", origin.dir, clone]);
   execFileSync("git", ["-C", clone, "checkout", "-q", "feat-x"]);
 
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   c.send({ case: "projectImport", daemonId: stack.daemonId, path: clone });
   const proj = await c.waitFor((m) => m.case === "projectCreated", "cloned project.created");
@@ -123,7 +123,7 @@ test("默认分支自愈：导入后仓库补上 origin/HEAD，下发工作区�
   repos.push(repo);
   execFileSync("git", ["-C", repo.dir, "checkout", "-q", "-b", "feat-y"]);
 
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const proj = await c.waitFor((m) => m.case === "projectCreated", "no-remote project.created");
@@ -148,7 +148,7 @@ test("默认分支自愈：导入后仓库补上 origin/HEAD，下发工作区�
 test("主工作区不可删除", async () => {
   const repo = mkRepo();
   repos.push(repo);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main ws");
@@ -160,7 +160,7 @@ test("主工作区不可删除", async () => {
 test("关闭终端：Device stop 后删除中心任务，删除后不复活", async () => {
   const repo = mkRepo();
   repos.push(repo);
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   c.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await c.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main ws");

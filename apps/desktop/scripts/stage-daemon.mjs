@@ -22,7 +22,7 @@ const DESKTOP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = resolve(DESKTOP_ROOT, "..", "..");
 // 与 src/main/daemon-paths.ts 的 DAEMON_BINARIES / DAEMON_VERSION_FILE / CLAUDE_PLUGIN_RESOURCE_DIR 同值；
 // test/config.test.ts 守住两边一致
-const BINARIES = ["coflux-supervisor", "coflux-worker", "coflux"];
+const BINARIES = ["coflux-supervisor", "coflux-worker", "coflux", "coflux-transport"];
 const VERSION_FILE = "VERSION";
 const CLAUDE_PLUGIN_DIR = "claude-plugin";
 // 插件来源在仓库里（不是 CI 的新输入），与三件同一口径：缺失即失败
@@ -78,6 +78,8 @@ const missing = BINARIES.filter((name) => {
 });
 if (missing.length > 0) fail(`产物目录 ${sourceDir} 缺少或为空: ${missing.join(", ")}`);
 const version = resolveVersion(sourceDir);
+const notices = resolve(sourceDir, "TRANSPORT-NOTICES.txt");
+if (!existsSync(notices) || statSync(notices).size === 0) fail("Native transport dependency notices are missing");
 
 // STAGE_DIR 是常量路径（apps/desktop/build/daemon），不是可能为空的变量
 rmSync(STAGE_DIR, { recursive: true, force: true });
@@ -87,6 +89,7 @@ for (const name of BINARIES) {
   copyFileSync(resolve(sourceDir, name), target);
   chmodSync(target, 0o755);
 }
+copyFileSync(notices, resolve(STAGE_DIR, "TRANSPORT-NOTICES.txt"));
 writeFileSync(resolve(STAGE_DIR, VERSION_FILE), `${version}\n`);
 // 插件整目录原样拷（.claude-plugin / hooks / scripts / skills / README / LICENSE 全带，
 // 一个字节都不改写，不产生第二份插件变体）。脚本经 sh / node 调用，不需要执行位，

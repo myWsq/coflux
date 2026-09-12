@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8854;
 let stack;
@@ -28,7 +28,7 @@ after(async () => {
 
 test("terminalCreate：目录工作区 + 任务同建，PTY 打开在传入目录", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
 
   c.send({ case: "terminalCreate", daemonId: stack.daemonId, path: home });
@@ -56,7 +56,7 @@ test("terminalCreate：目录工作区 + 任务同建，PTY 打开在传入目�
 
 test("terminalCreate：同设备幂等复用目录工作区，第二次只建任务（plan 048）", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
 
   c.send({ case: "terminalCreate", daemonId: stack.daemonId, path: home });
@@ -81,7 +81,7 @@ test("terminalCreate：同设备幂等复用目录工作区，第二次只建任
 
 test("terminalCreate：多 client 并发首次创建只产生一个 canonical 目录工作区", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const observer = device.control;
   const extraClients = Array.from({ length: 7 }, () => stack.makeClient());
   let workspaceId;
@@ -142,7 +142,7 @@ test("terminalCreate：多 client 并发首次创建只产生一个 canonical �
 
 test("workspaceRemove：目录工作区连带任务删除，目录本身不被触碰", async () => {
   const home = mkDir();
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
 
   c.send({ case: "terminalCreate", daemonId: stack.daemonId, path: home });
@@ -161,7 +161,7 @@ test("workspaceRemove：目录工作区连带任务删除，目录本身不被�
 });
 
 test("terminalCreate：空 path 拒绝", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   const c = device.control;
   c.send({ case: "terminalCreate", daemonId: stack.daemonId, path: "  " });
   await c.waitFor((m) => m.case === "error" && m.message.includes("路径"), "空 path 报错");

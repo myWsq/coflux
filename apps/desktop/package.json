@@ -19,7 +19,8 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.85.1",
     "electron-log": "^5.4.4",
-    "electron-updater": "^6.8.9"
+    "electron-updater": "^6.8.9",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@astryxdesign/cli": "^0.1.6",
@@ -52,6 +53,7 @@
     "tailwindcss": "^4.3.2",
     "vite": "^6.4.3",
     "yaml": "^2.9.0",
-    "zustand": "^5.0.14"
+    "zustand": "^5.0.14",
+    "@types/ws": "^8.5.13"
   }
 }

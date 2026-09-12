@@ -6,6 +6,7 @@
  * WS 升级（/daemon、/client）→ 心跳 → 信号/兜底。
  */
 import http from "node:http";
+import { startDerpAdmission } from "./derp-admission.js";
 import { WebSocketServer, type WebSocket } from "ws";
 import { getRequestListener } from "@hono/node-server";
 import { currentAppStorage } from "@raven.js/core";
@@ -32,6 +33,7 @@ const { store, hub } = currentAppStorage.run(app, () => ({
 // hub 结构性满足 ProxyServerContext（routeTable/proxyGate/tunnels 三个只读字段）；proxy.ts 不反向导入 Hub，
 // 避免 hub.ts ⇄ proxy.ts 循环依赖（见 plan 006 决策：依赖倒置）。
 const proxyCtx: ProxyServerContext = hub;
+const derpAdmission = process.env.COFLUX_DERP_ADMISSION_PORT ? startDerpAdmission((key) => hub.tailcat.admitted(key), Number(process.env.COFLUX_DERP_ADMISSION_PORT)) : undefined;
 
 const listener = getRequestListener(fetchHandler);
 const httpServer = http.createServer((req, res) => {
@@ -128,6 +130,7 @@ async function shutdown(reason: string, code = 0) {
   } catch {
     /* ignore */
   }
+  derpAdmission?.close();
   hub.shutdown();
   await store.close();
   setTimeout(() => process.exit(code), 300).unref();

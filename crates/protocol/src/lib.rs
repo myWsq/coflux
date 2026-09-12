@@ -42,8 +42,8 @@ pub use frame::{
 };
 pub use ipc::{
     is_frame, write_record, CommandStateInfo, RecordParseError, RecordParser, RecordWriteError,
-    SessionInfo, SupervisorToWorker, WorkerToSupervisor, MAX_IPC_RECORD_BYTES, SUPERVISOR_SOCK_ENV,
-    SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
+    SessionInfo, SupervisorToWorker, TransportArtifact, WorkerToSupervisor, MAX_IPC_RECORD_BYTES,
+    SUPERVISOR_SOCK_ENV, SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
 };
 pub use wire::{DaemonToServer, FsEntry, FsEntryKind, ServerToDaemon, SessionPorts, SessionRef};
 
@@ -59,21 +59,16 @@ pub fn decode_device_envelope(bytes: &[u8]) -> Option<wire::DeviceEnvelope> {
 
 /// Browser/worker/sessiond 共用的 DeviceEnvelope 语义版本。
 pub const DEVICE_PROTOCOL_VERSION: u32 = 1;
+pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
 /// 本机 gateway 的生产固定端口；dev/test 可经 worker 配置覆盖。
 pub const LOCAL_GATEWAY_PORT: u16 = 8788;
 /// PTY 创建/resize 的共享尺寸边界；TS `clampDim` 使用同值。
 pub const MIN_TERMINAL_DIMENSION: u16 = 1;
 pub const MAX_TERMINAL_DIMENSION: u16 = 1000;
-/// relay/local Device frame 上限；保留现有 30MiB 文件写入能力。
+/// Native and local Device frame limit; preserves 30 MiB file writes.
 pub const MAX_DEVICE_FRAME_BYTES: usize = 30 * 1024 * 1024;
 /// 中心 checkpoint 的 ANSI snapshot 上限。
 pub const MAX_SESSION_CHECKPOINT_BYTES: usize = 512 * 1024;
-/// P2P DataChannel 分片流格式（plan 076，线上契约——改动需带版本协商）：
-/// 每个 DeviceEnvelope 帧封为 [u32 BE 帧长][帧字节]，整体按 ≤ P2P_CHUNK_BYTES 切成
-/// DataChannel messages；SCTP reliable+ordered 下等价字节流，接收端按前缀重组。
-/// 16KiB 取双端接收上限的交集：webrtc-rs 0.20 的 poll OnMessage 上限 16384，
-/// Chrome 宣告 256KiB——两者都是接收侧硬限，不可协商放大。
-pub const P2P_CHUNK_BYTES: usize = 16 * 1024;
 
 #[cfg(test)]
 mod wire_tests;

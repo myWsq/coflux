@@ -4,7 +4,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
-import { openRelayDevice, utf8 } from "./device-harness.mjs";
+import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8823;
 let stack;
@@ -17,7 +17,7 @@ test("sessiond holder handoff：第二个 Device client 接管，原控制端被
   const repo = mkRepo();
   repos.push(repo);
 
-  const A = await openRelayDevice(stack);
+  const A = await openNativeDevice(stack);
   const control = A.control;
   control.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const main = await control.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "main");
@@ -34,7 +34,7 @@ test("sessiond holder handoff：第二个 Device client 接管，原控制端被
   await sleep(200);
 
   // B 接管
-  const B = await openRelayDevice(stack);
+  const B = await openNativeDevice(stack);
   from = A.mark();
   const attached = await B.attach(sess);
   assert.ok(utf8(attached.ansiSnapshot ?? new Uint8Array()).includes("AAA"), "B snapshot 包含接管前输出");

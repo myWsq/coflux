@@ -25,6 +25,7 @@ interface ManifestWorkerEntry {
   target: string;
   size: number;
   releaseSignature: string;
+  transport?: { url: string; sha256: string; size: bigint; releaseSignature: string };
 }
 interface LatestRelease {
   version: string;
@@ -45,7 +46,7 @@ function isStrictReleaseVersion(version: string): boolean {
 export function parseManifestWorkers(manifest: unknown, tag: string): Record<string, ManifestWorkerEntry> | undefined {
   if (!isStrictReleaseVersion(tag)) return undefined;
   if (!manifest || typeof manifest !== "object") return undefined;
-  const value = manifest as { schemaVersion?: unknown; version?: unknown; worker?: unknown };
+  const value = manifest as { schemaVersion?: unknown; version?: unknown; worker?: unknown; transport?: unknown };
   if (
     value.schemaVersion !== 2 ||
     value.version !== tag ||
@@ -76,8 +77,16 @@ export function parseManifestWorkers(manifest: unknown, tag: string): Record<str
     ) {
       return undefined;
     }
+    let transport: ManifestWorkerEntry["transport"];
+    if (value.transport !== undefined) {
+      if (!value.transport || typeof value.transport !== "object" || Array.isArray(value.transport)) return undefined;
+      const helper = (value.transport as Record<string, Record<string, unknown>>)[target];
+      if (!helper || helper.target !== target || typeof helper.url !== "string" || !/^https?:\/\//.test(helper.url) || typeof helper.sha256 !== "string" || !SHA256_HEX.test(helper.sha256) || typeof helper.releaseSignature !== "string" || !ED25519_SIGNATURE_HEX.test(helper.releaseSignature) || typeof helper.size !== "number" || !Number.isSafeInteger(helper.size) || helper.size <= 0 || helper.size > MAX_WORKER_BYTES) return undefined;
+      transport = { url: helper.url, sha256: helper.sha256.toLowerCase(), size: BigInt(helper.size), releaseSignature: helper.releaseSignature.toLowerCase() };
+    }
     parsed[target] = {
       target,
+      ...(transport ? { transport } : {}),
       url: entry.url,
       sha256: entry.sha256.toLowerCase(),
       signature: entry.signature.toLowerCase(),
@@ -197,6 +206,7 @@ export class AutoUpdater {
       target: entry.target,
       artifactSize: BigInt(entry.size),
       releaseSignature: entry.releaseSignature,
+      transport: entry.transport,
     });
     if (!ok) return;
     const next = rec ?? { count: 0, gaveUp: false };

@@ -82,15 +82,16 @@ private func traceUInt64(_ value: String?, traceID: String, field: String) throw
     return parsed
 }
 
-/// 与 TypeScript 测试解释同一份语义 trace。Swift 保持 relay-only 产品边界；fixture 因而只描述
-/// 两端共有的 session/relay 行为，不把 Web 独有的 direct/P2P promotion 反向扩散到 iOS。
+/// Shared business traces that apply to the supported local transport.
 @MainActor
 struct DeviceRouterParityTests {
     @Test func sharedBehaviorTraces() async throws {
         let fixture = try loadSharedRouterTraceFixture()
         #expect(fixture.schemaVersion == 1)
         #expect(!fixture.traces.isEmpty)
-        for trace in fixture.traces {
+        // Swift currently has only loopback transport. Remote control-grace and
+        // reconnect traces are exercised by the TypeScript native router suite.
+        for trace in fixture.traces where !trace.steps.contains(where: { $0.event == "setControlOnline" }) {
             try await run(trace)
         }
     }
@@ -106,8 +107,8 @@ struct DeviceRouterParityTests {
             rows: 24
         )
 
-        var activeConnection = try await harness.grantNextRelay()
-        guard let firstChannelID = harness.lastRelayChannelID else {
+        var activeConnection = try await harness.openNextLocal()
+        guard let firstChannelID = harness.lastLocalChannelID else {
             throw DeviceRouteError("\(trace.id): 初始 relay 缺少 channelId")
         }
         var activeChannelID = firstChannelID
@@ -187,8 +188,8 @@ struct DeviceRouterParityTests {
                 }
 
             case "reopenSession":
-                let reopened = try await harness.grantNextRelay()
-                guard let reopenedChannelID = harness.lastRelayChannelID else {
+                let reopened = try await harness.openNextLocal()
+                guard let reopenedChannelID = harness.lastLocalChannelID else {
                     throw DeviceRouteError("\(trace.id): 重连 relay 缺少 channelId")
                 }
                 #expect(reopened !== activeConnection, "\(trace.id): control 恢复后必须建立新 relay")

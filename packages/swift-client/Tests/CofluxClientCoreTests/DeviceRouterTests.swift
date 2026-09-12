@@ -3,12 +3,51 @@ import Foundation
 import Testing
 @testable import CofluxClientCore
 
+@MainActor
+final class ControlledLocalProvider: LocalDeviceTransportProvider {
+    struct Pending {
+        let channelID: String
+        let continuation: CheckedContinuation<LocalDeviceChannel, any Error>
+    }
+    var pending: [Pending] = []
+    var lastChannelID: String?
+    var openCount = 0
+    func clearGrants(accountID: String) throws {}
+    func removeGrant(daemonID: String, accountID: String) throws {}
+    func open(daemonID: String, accountID: String, clientInstanceID: String, generation: UInt64, elevated: Bool,
+              authorize: @escaping @MainActor @Sendable (Coflux_V1_ClientToServer.OneOf_Payload) async throws -> Coflux_V1_ServerToClient.OneOf_Payload) async throws -> LocalDeviceChannel {
+        let id = UUID().uuidString
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lastChannelID = id; openCount += 1
+                pending.append(Pending(channelID: id, continuation: continuation))
+            }
+        } onCancel: {
+            Task { @MainActor in
+                guard let index = self.pending.firstIndex(where: { $0.channelID == id }) else { return }
+                self.pending.remove(at: index).continuation.resume(throwing: CancellationError())
+            }
+        }
+    }
+    func acceptNext() async throws -> FakeConnection {
+        guard await waitUntil({ !self.pending.isEmpty }) else { throw DeviceRouteError("No local connection request") }
+        let request = pending.removeFirst(), connection = FakeConnection()
+        request.continuation.resume(returning: LocalDeviceChannel(connection: connection, channelID: request.channelID,
+            scopes: [.sessionRead, .sessionControl, .rpc, .lifecycle], leaseExpiresAt: Double.greatestFiniteMagnitude))
+        return connection
+    }
+    func rejectNext(_ message: String) {
+        pending.removeFirst().continuation.resume(throwing: DeviceRouteError(message))
+    }
+}
+
 /// Device 数据面状态机（plan 046）：fake transport 注入，覆盖 attach 三重匹配、
 /// resume 拒绝转 snapshot、输出 gap recovery、输入台账 ACK/重投、detach/接管、
 /// prepared operation、控制面离线关通道。语义基准 packages/client/src/device-router.ts。
 @MainActor
 final class DeviceHarness {
     let transport = FakeTransport()
+    let controlledLocal = ControlledLocalProvider()
     var controlSent: [Coflux_V1_ClientToServer.OneOf_Payload] = []
     var snapshots: [(sessionID: String, data: Data)] = []
     var outputs: [(sessionID: String, data: Data)] = []
@@ -23,7 +62,7 @@ final class DeviceHarness {
     var nowMS: Double = 1_000_000
     private(set) var router: DeviceRouter!
 
-    init(localProvider: (any LocalDeviceTransportProvider)? = nil, p2pProvider: (any P2PDeviceTransportProvider)? = nil,
+    init(localProvider: (any LocalDeviceTransportProvider)? = nil,
          heartbeatInterval: Duration = .seconds(15), heartbeatTimeout: Duration = .seconds(5),
          controlGraceDuration: Duration = .seconds(15)) {
         router = DeviceRouter(
@@ -40,40 +79,16 @@ final class DeviceHarness {
                 onInputBlocked: { [weak self] sessionID, isBlocked in self?.blocked.append((sessionID, isBlocked)) },
                 onDeviceTransport: { [weak self] daemonID, relayHost, rttMs, mode, detail in self?.transportEvents.append((daemonID, relayHost, rttMs)); self?.transportModes.append(mode); self?.transportDetails.append(detail) }
             ),
-            localProvider: localProvider, p2pProvider: p2pProvider,
+            localProvider: localProvider ?? controlledLocal,
             heartbeatInterval: heartbeatInterval, heartbeatTimeout: heartbeatTimeout, controlGraceDuration: controlGraceDuration,
             now: { [weak self] in self?.nowMS ?? 0 }
         )
+        router.setAccountID("test-account")
     }
 
-    /// 最近一次 rendezvous 请求的 channelId。
-    var lastRelayChannelID: String? {
-        for payload in controlSent.reversed() {
-            if case .deviceRelayConnect(let connect) = payload { return connect.channelID }
-        }
-        return nil
-    }
-
-    var relayConnectCount: Int {
-        controlSent.count { if case .deviceRelayConnect = $0 { return true } else { return false } }
-    }
-
-    /// 等下一个 rendezvous 请求出现 → 签发 grant → 返回随之建立的 fake 连接。
-    /// 须在触发动作（attach/executePrepared/setControlOnline）之后同步调用：
-    /// seen 基线在任何挂起点之前读取。
-    func grantNextRelay() async throws -> FakeConnection {
-        let seen = relayConnectCount
-        guard await waitUntil({ self.relayConnectCount > seen }) else {
-            throw DeviceRouteError("rendezvous 请求未出现")
-        }
-        guard let channelID = lastRelayChannelID else { throw DeviceRouteError("无 channelId") }
-        var grant = Coflux_V1_DeviceRelayGrant()
-        grant.channelID = channelID
-        grant.ok = true
-        grant.relayURL = "wss://relay.test/pipe?token=once"
-        _ = router.handleControlPayload(.deviceRelayGrant(grant))
-        return await transport.nextConnection()
-    }
+    var lastLocalChannelID: String? { controlledLocal.lastChannelID }
+    var localConnectCount: Int { controlledLocal.openCount }
+    func openNextLocal() async throws -> FakeConnection { try await controlledLocal.acceptNext() }
 
     func deviceFrames(_ connection: FakeConnection) -> [Coflux_V1_DeviceEnvelope] {
         connection.sent.compactMap { try? Coflux_V1_DeviceEnvelope(serializedBytes: $0) }
@@ -105,8 +120,8 @@ final class DeviceHarness {
     ) async throws -> (FakeConnection, String) {
         router.setControlOnline(true)
         router.attachSession(daemonID: "d1", taskID: taskID, sessionID: sessionID, cols: 80, rows: 24)
-        let connection = try await grantNextRelay()
-        let channelID = lastRelayChannelID!
+        let connection = try await openNextLocal()
+        let channelID = lastLocalChannelID!
         guard await waitUntil({ !self.attachFrames(connection).isEmpty }) else {
             throw DeviceRouteError("attach 帧未发出")
         }
@@ -142,6 +157,28 @@ final class DeviceHarness {
 
 @MainActor
 struct DeviceRouterTests {
+    @Test func absentNativeProviderReportsRemoteUnavailableImmediately() async throws {
+        let client = CofluxClient(configuration: ClientConfiguration(serverURL: URL(string: "ws://fake.test/client")!, buildID: "dev"), transport: FakeTransport(), tokenStore: InMemoryTokenStore())
+        defer { client.logout() }
+        do {
+            _ = try await client.listDeviceDirectory(daemonID: "remote", path: "/")
+            Issue.record("Remote access without a native provider must fail")
+        } catch let error as DeviceRouteError {
+            #expect(error.code == "remote_unavailable")
+            #expect(error.message.contains("桌面客户端"))
+        }
+    }
+
+    @Test func healthyLocalSessionLaneIsReusedForAnotherAttach() async throws {
+        let h = DeviceHarness()
+        defer { h.router.reset() }
+        let (connection, _) = try await h.attachAndSnapshot()
+        h.router.attachSession(daemonID: "d1", taskID: "t2", sessionID: "s2", cols: 80, rows: 24)
+        #expect(await waitUntil { h.attachFrames(connection).contains { $0.sessionID == "s2" } })
+        #expect(h.localConnectCount == 1)
+        #expect(!connection.closed)
+    }
+
     @Test func directDisconnectDiagnosticNamesActualTransport() async throws {
         let provider = LeaseRouteProvider()
         let h = DeviceHarness(localProvider: provider)
@@ -162,29 +199,26 @@ struct DeviceRouterTests {
         harness.router.setControlOnline(true)
         let release = harness.router.retainMeasure(daemonID: "d1")
         defer { release() }
-        #expect(await waitUntil { harness.lastRelayChannelID != nil })
+        #expect(await waitUntil { harness.lastLocalChannelID != nil })
         #expect(harness.transportModes.last == "probing")
-        var rejected = Coflux_V1_DeviceRelayGrant()
-        rejected.channelID = harness.lastRelayChannelID!
-        rejected.ok = false; rejected.error = "设备路由授权被拒绝"
-        _ = harness.router.handleControlPayload(.deviceRelayGrant(rejected))
+        harness.controlledLocal.rejectNext("设备路由授权被拒绝")
         #expect(await waitUntil { harness.transportModes.last == "offline" })
         #expect(harness.transportDetails.last == "设备路由授权被拒绝")
-        let connection = try await harness.grantNextRelay()
-        #expect(await waitUntil { harness.transportModes.last == "relay" })
-        #expect(harness.transportDetails.last == "Device 数据经中心 opaque relay（relay.test）")
+        let connection = try await harness.openNextLocal()
+        #expect(await waitUntil { harness.transportModes.last == "direct" })
+        #expect(harness.transportDetails.last == "同机 Device 数据直连本地 daemon")
         #expect(await waitUntil { harness.deviceFrames(connection).contains { if case .ping = $0.payload { return true }; return false } })
         let ping = harness.deviceFrames(connection).compactMap { envelope -> Coflux_V1_DevicePing? in
             if case .ping(let ping) = envelope.payload { return ping }; return nil
         }.last!
         harness.nowMS += 25
         var pong = Coflux_V1_DevicePong(); pong.requestID = ping.requestID
-        harness.push(connection, channelID: harness.lastRelayChannelID!, .pong(pong))
+        harness.push(connection, channelID: harness.lastLocalChannelID!, .pong(pong))
         #expect(await waitUntil { harness.transportEvents.last?.rttMs == 25 })
         connection.finish()
         #expect(await waitUntil { harness.transportModes.last == "offline" })
         #expect(harness.transportEvents.last?.rttMs == nil)
-        #expect(harness.transportDetails.last == "relay 连接已关闭")
+        #expect(harness.transportDetails.last == "本机直连 连接已关闭")
     }
     @Test @MainActor func cancellingOneDirectoryRequestPreservesOtherRequest() async throws {
         let h = DeviceHarness()
@@ -193,8 +227,8 @@ struct DeviceRouterTests {
         let first = Task { try await h.router.listDirectory(daemonID: "d1", workspaceID: "", path: "/cancelled", browseHome: true) }
         let second = Task { try await h.router.listDirectory(daemonID: "d1", workspaceID: "", path: "/surviving", browseHome: true) }
         defer { first.cancel(); second.cancel() }
-        let connection = try await h.grantNextRelay()
-        let channelID = try #require(h.lastRelayChannelID)
+        let connection = try await h.openNextLocal()
+        let channelID = try #require(h.lastLocalChannelID)
         func requests() -> [Coflux_V1_DeviceFsList] {
             h.deviceFrames(connection).compactMap {
                 if case .fsList(let request) = $0.payload { return request }; return nil
@@ -216,7 +250,7 @@ struct DeviceRouterTests {
         let result = try await second.value
         #expect(result.ok)
         #expect(result.path == "/surviving")
-        #expect(h.relayConnectCount == 1)
+        #expect(h.localConnectCount == 1)
         #expect(h.errors.isEmpty)
     }
 
@@ -261,7 +295,7 @@ struct DeviceRouterTests {
         let harness = DeviceHarness()
         let (connection, channelID) = try await harness.attachAndSnapshot()
         let release = harness.router.retainMeasure(daemonID: "d1")
-        let previousConnects = harness.relayConnectCount
+        let previousConnects = harness.localConnectCount
         harness.router.removeDaemon("d1")
         #expect(await waitUntil { connection.closed })
         #expect(!harness.router.hasSessionControl(daemonID: "d1", sessionID: "s1"))
@@ -273,7 +307,7 @@ struct DeviceRouterTests {
         release()
         try await Task.sleep(for: .milliseconds(500))
         #expect(harness.outputs.isEmpty)
-        #expect(harness.relayConnectCount == previousConnects)
+        #expect(harness.localConnectCount == previousConnects)
     }
 
     @Test func attachDeliversSnapshotAndHolder() async throws {
@@ -321,8 +355,8 @@ struct DeviceRouterTests {
         let (connection, _) = try await harness.attachAndSnapshot(snapshotSeq: 10)
         // 通道断开 → 有界恢复 → 新 rendezvous；重挂应请求 resume_from_seq=10
         connection.finish()
-        let second = try await harness.grantNextRelay()
-        let secondChannelID = harness.lastRelayChannelID!
+        let second = try await harness.openNextLocal()
+        let secondChannelID = harness.lastLocalChannelID!
         #expect(await waitUntil { !harness.attachFrames(second).isEmpty })
         let resume = harness.attachFrames(second).first!
         #expect(resume.hasResumeFromSeq && resume.resumeFromSeq == 10)
@@ -352,8 +386,8 @@ struct DeviceRouterTests {
         #expect(await waitUntil { harness.blocked.count > inputStateUpdatesBeforeAck })
         // 换通道重挂后 replay：只重投未确认前缀（seq=2），且序号不重排
         connection.finish()
-        let second = try await harness.grantNextRelay()
-        let secondChannelID = harness.lastRelayChannelID!
+        let second = try await harness.openNextLocal()
+        let secondChannelID = harness.lastLocalChannelID!
         #expect(await waitUntil { !harness.attachFrames(second).isEmpty })
         let attach = harness.attachFrames(second).last!
         var response = Coflux_V1_DeviceSessionAttached()
@@ -381,13 +415,13 @@ struct DeviceRouterTests {
         #expect(harness.detached.first?.reason == "taken over")
         // 被接管期间输入被拒、普通 attach 静默不动作（plan 026 旁观语义）
         #expect(harness.router.sendInput(daemonID: "d1", sessionID: "s1", data: Data("x".utf8)) == false)
-        let framesBefore = harness.relayConnectCount
+        let framesBefore = harness.localConnectCount
         harness.router.attachSession(daemonID: "d1", taskID: "t1", sessionID: "s1", cols: 80, rows: 24)
         try? await Task.sleep(for: .milliseconds(50))
-        #expect(harness.relayConnectCount == framesBefore)
+        #expect(harness.localConnectCount == framesBefore)
         // force 接管：holder 清零重新 attach（session lane 已因 detach 释放，重新 rendezvous）
         harness.router.attachSession(daemonID: "d1", taskID: "t1", sessionID: "s1", cols: 80, rows: 24, force: true)
-        let second = try await harness.grantNextRelay()
+        let second = try await harness.openNextLocal()
         #expect(await waitUntil { !harness.attachFrames(second).isEmpty })
     }
 
@@ -421,8 +455,8 @@ struct DeviceRouterTests {
         operation.expiresAt = harness.nowMS + 60_000
         operation.frame = try template.serializedBytes()
         harness.router.executePrepared(operation)
-        let connection = try await harness.grantNextRelay()
-        let channelID = harness.lastRelayChannelID!
+        let connection = try await harness.openNextLocal()
+        let channelID = harness.lastLocalChannelID!
         #expect(await waitUntil { !harness.deviceFrames(connection).isEmpty })
         let frame = harness.deviceFrames(connection).first!
         #expect(frame.channelID == channelID)
@@ -441,19 +475,17 @@ struct DeviceRouterTests {
         #expect(await waitUntil { harness.errors.count == 1 })  // 无新增错误
     }
 
-    @Test func controlOfflineClosesChannelsAndOnlineRekicksDemand() async throws {
+    @Test func controlOfflinePreservesAuthorizedLocalSession() async throws {
         let harness = DeviceHarness()
-        let (_, _) = try await harness.attachAndSnapshot(snapshotSeq: 10)
-        let rendezvousBefore = harness.relayConnectCount
+        defer { harness.router.reset() }
+        let (connection, _) = try await harness.attachAndSnapshot(snapshotSeq: 10)
+        let before = harness.localConnectCount
         harness.router.setControlOnline(false)
         try? await Task.sleep(for: .milliseconds(50))
-        // 离线期间不空转重连
-        #expect(harness.relayConnectCount == rendezvousBefore)
-        // 回线：session 仍 desired → 自动重新 rendezvous 并重挂（带 resume）
+        #expect(!connection.closed)
+        #expect(harness.localConnectCount == before)
         harness.router.setControlOnline(true)
-        let second = try await harness.grantNextRelay()
-        #expect(await waitUntil { !harness.attachFrames(second).isEmpty })
-        #expect(harness.attachFrames(second).first!.resumeFromSeq == 10)
+        #expect(harness.localConnectCount == before)
     }
 
     @Test func fsWriteSendsFrameAndResolvesResult() async throws {
@@ -464,8 +496,8 @@ struct DeviceRouterTests {
                 daemonID: "d1", workspaceID: "w1", path: "paste-1.png", data: Data([1, 2, 3]), temp: true
             )
         }
-        let connection = try await harness.grantNextRelay()
-        let channelID = harness.lastRelayChannelID!
+        let connection = try await harness.openNextLocal()
+        let channelID = harness.lastLocalChannelID!
         guard await waitUntil({ !harness.deviceFrames(connection).isEmpty }) else {
             Issue.record("fsWrite 帧未发出")
             return
@@ -501,8 +533,8 @@ struct DeviceRouterTests {
                 daemonID: "d1", workspaceID: "w1", path: "paste-1.png", data: Data([1]), temp: true
             )
         }
-        let connection = try await harness.grantNextRelay()
-        let channelID = harness.lastRelayChannelID!
+        let connection = try await harness.openNextLocal()
+        let channelID = harness.lastLocalChannelID!
         guard await waitUntil({ !harness.deviceFrames(connection).isEmpty }) else {
             Issue.record("fsWrite 帧未发出")
             return
@@ -538,7 +570,7 @@ struct DeviceRouterTests {
             #expect(routeError.code == "upload_too_large")
         }
         // 前置拒绝：不该建任何 relay 通道
-        #expect(harness.relayConnectCount == 0)
+        #expect(harness.localConnectCount == 0)
     }
 
     @Test func suspendReleasesLaneWhenNoDemand() async throws {

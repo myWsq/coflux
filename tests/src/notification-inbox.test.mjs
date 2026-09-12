@@ -4,9 +4,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo, rawDaemon } from "./harness.mjs";
-import { openRelayDevice } from "./device-harness.mjs";
+import { openNativeDevice } from "./device-harness.mjs";
 
-const PORT = 8876;
+const PORT = 8901;
 let stack;
 let repo;
 before(async () => { stack = await startStack({ port: PORT }); repo = mkRepo(); });
@@ -24,7 +24,7 @@ async function notify(daemon, sessionId, notificationId, message = "Please revie
 }
 
 test("durable ACK, idempotent retry, bounded history, read sync, restart and deletion", async () => {
-  const device = await openRelayDevice(stack);
+  const device = await openNativeDevice(stack);
   let client = device.control;
   client.send({ case: "projectImport", daemonId: stack.daemonId, path: repo.dir });
   const created = await client.waitFor((m) => m.case === "workspaceCreated" && m.workspace.isMain, "workspace");

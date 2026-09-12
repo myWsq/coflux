@@ -11,8 +11,8 @@ use prost::Message;
 
 use crate::wire::{
     daemon_to_server, device_envelope, server_to_daemon, DaemonAuthError, DaemonEnrollRequest,
-    DaemonToServer, DeviceEnvelope, DeviceExecRun, DevicePtyInputAck, DevicePtyOutput,
-    DeviceRelayDial, DeviceScope, DeviceSessionAttached, DeviceSessionCreate, FsEntry, FsEntryKind,
+    DaemonToServer, DeviceEnvelope, DeviceExecRun, DevicePtyInputAck, DevicePtyOutput, DeviceScope,
+    DeviceSessionAttached, DeviceSessionCreate, DeviceTailcatGrant, FsEntry, FsEntryKind,
     LocalClientHello, PreparedDeviceOperation, ProjectValidated, ServerToDaemon, SessionCreate,
     SessionPorts,
 };
@@ -183,15 +183,15 @@ fn device_envelope_bytes_roundtrip_for_opaque_relay() {
     }
 }
 
-/// rendezvous 拨号指令（plan 043）：ServerToDaemon 携带 DeviceRelayDial，scopes 枚举、
+/// rendezvous 拨号指令（plan 043）：ServerToDaemon 携带 DeviceTailcatGrant，scopes 枚举、
 /// URL 与 generation 必须原样往返——daemon 信任控制面授予的 scopes，错一位就是权限错位。
 #[test]
-fn server_to_daemon_relay_dial_roundtrips() {
+fn server_to_daemon_native_grant_roundtrips() {
     let env = ServerToDaemon {
-        payload: Some(server_to_daemon::Payload::DeviceRelayDial(
-            DeviceRelayDial {
+        payload: Some(server_to_daemon::Payload::DeviceTailcatGrant(
+            DeviceTailcatGrant {
                 channel_id: "relay-abc".into(),
-                relay_url: "wss://relay.example/v1/pipe?token=p.s".into(),
+
                 account_id: "acct-1".into(),
                 client_instance_id: "client-1".into(),
                 transport_generation: u64::from(u32::MAX) + 11,
@@ -202,14 +202,15 @@ fn server_to_daemon_relay_dial_roundtrips() {
                     DeviceScope::Lifecycle as i32,
                 ],
                 protocol_version: DEVICE_PROTOCOL_VERSION,
+                ..Default::default()
             },
         )),
     };
     let decoded = ServerToDaemon::decode(env.encode_to_vec().as_slice()).unwrap();
     match decoded.payload {
-        Some(server_to_daemon::Payload::DeviceRelayDial(dial)) => {
+        Some(server_to_daemon::Payload::DeviceTailcatGrant(dial)) => {
             assert_eq!(dial.channel_id, "relay-abc");
-            assert_eq!(dial.relay_url, "wss://relay.example/v1/pipe?token=p.s");
+
             assert_eq!(dial.account_id, "acct-1");
             assert_eq!(dial.client_instance_id, "client-1");
             assert_eq!(dial.transport_generation, u64::from(u32::MAX) + 11);
@@ -575,6 +576,7 @@ fn auth_error_and_enroll_request_round_trip() {
                 supervisor_version: "sv2".into(),
                 arch: "x86_64".into(),
                 capabilities: Vec::new(),
+                control_protocol_version: crate::CONTROL_PROTOCOL_VERSION,
             },
         )),
     };

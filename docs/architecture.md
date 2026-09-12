@@ -1,24 +1,25 @@
 # coflux architecture
 
-> Status: local-first architecture is implemented. The relay data plane is a standalone service supporting multiple nodes (plans 043/065). Devices on different machines can connect directly through end-to-end WebRTC DataChannels (plan 076). Supervisor/sessiond is the sole authority for PTYs, VT, history, holders, and sequences. Same-machine web clients prefer the loopback gateway. The center owns only accounts, devices, project/task orchestration, relay/P2P rendezvous, and bounded checkpoints. When loopback/P2P is unavailable, traffic automatically uses independently deployed `coflux-relay` nodes.
+> Status: local-first architecture is implemented. Native remote networking now uses the pinned Go Tailcat/Tailscale companion with self-hosted stock DERP; custom relay and WebRTC are retired. Supervisor/sessiond remains the sole authority for PTYs, VT, history, holders, and sequences. The center owns accounts, devices, orchestration, native rendezvous, and bounded checkpoints. This describes the source architecture, not a claim of production deployment.
 
 ## 1. Product model
 
 coflux runs daemons on users' nodes and drives terminal programs such as Claude Code, Codex CLI, and Vim in local PTYs. The Electron desktop client, `apps/desktop`, reaches remote daemons through the center or connects directly when client and daemon share a machine:
 
 ```text
-Desktop ── /client control WS ──▶ Server ── rendezvous: tokens / SDP + dial notification ──▶ Worker
- │                              ├─ Postgres: accounts/devices/projects/tasks                 │
- │   direct unavailable         └─ latest derived checkpoint                                 │ UDS
- ├── wss://relay/…?token ──▶ coflux-relay ◀── outbound wss ────────────────────────────────────┤
- │   one WS per channel; opaque DeviceEnvelope bytes, no parsing                             ▼
- ├──── WebRTC DataChannel ── end-to-end P2P, no intermediate nodes ─────────────────────▶ Supervisor
- │                                                                                      / sessiond
- └──── ws://127.0.0.1:8788 ── direct Device channel on the same machine ─────────────────▶    │
-                                                                                           └─ PTY + VT + history
+Desktop main ── control WS ── Server ── control WS ── Worker
+  │                           │                       │
+  │                       Postgres                    │ UDS
+  │                                                   ▼
+  ├─ native helper ── Tailcat direct / stock DERP ── serving helper
+  │                                                   │
+  └─ same-machine loopback gateway ──────────────── Worker ── Supervisor
+                                                               └─ PTY + VT + history
 ```
 
-Daemons still connect outbound to the center, so remote devices behind NAT need no inbound ports. The loopback gateway listens only locally, exposing nothing to LAN/public networks. P2P UDP sockets use ICE/DTLS and handshake only with peers authenticated through signaling.
+Daemons connect outbound to central control. Tailcat handles native peer
+connectivity and DERP fallback. Coflux validates application authority separately
+on every channel. The loopback gateway listens only locally.
 
 ### Desktop, CLI, and runtime
 
@@ -59,7 +60,7 @@ Sandboxing is two complementary layers. Every bash command is wrapped in `sandbo
 |---|---|---|
 | PTY processes, VT, history, output sequence | Supervisor/sessiond | Worker forwards DeviceEnvelope; server receives no raw PTY |
 | Holder, holder epoch, input cursor | Supervisor/sessiond | Client retains unacknowledged input; transport is replaceable |
-| Device RPC and mutation deduplication | Current worker runtime / sessiond within current supervisor runtime | Direct and relay share logical client and request/operation IDs; lifecycle limits in 5.3 |
+| Device RPC and mutation deduplication | Current worker runtime / sessiond within current supervisor runtime | Local and native channels share logical client and request/operation IDs; lifecycle limits in 5.3 |
 | Accounts, devices, projects, workspaces, tasks | Server/Postgres | Daemon catalogs reconcile local facts without inventing exits |
 | Offline-visible screen | Latest server checkpoint | Display only; cannot decide holder or replace initial live snapshot |
 | Browser terminal rendering | xterm.js | Apply contiguous output deltas after attach snapshot |
@@ -86,7 +87,7 @@ coflux maps `supervisor/sessiond` to the tmux server and the browser to an attac
 |---|---|---|
 | Session authority | Local tmux server | Local supervisor/sessiond |
 | Local attach | Unix socket | Loopback WebSocket + DeviceEnvelope |
-| Remote attach | Usually SSH first | Central rendezvous + independent opaque relay, no inbound ports |
+| Remote attach | Usually SSH first | Central grants + native Tailcat transport, no application listener ports |
 | Reconnection view | tmux grid/history | sessiond ANSI snapshot + sequence deltas |
 | Write control | Multiple interactive clients possible | One logical holder; others must explicitly take over |
 | Central dependency | None | Initial login/pairing, cold start, orchestration; unnecessary for cached-direct hot path |
@@ -96,12 +97,14 @@ The product boundary: a loaded, paired page can still catalog, attach, snapshot,
 
 ## 4. Processes and local IPC
 
-The daemon is entirely Rust, with no Node runtime, split into two processes:
+The daemon core uses Rust without a Node runtime, split into two authority-owning processes:
 
 - `coflux-supervisor`: rarely upgraded; owns PTYs, VT/history, holder/sequence, and exit tombstones; manages worker versions and observation-period rollback. It assembles each PTY environment: `COFLUX_*` ownership IDs, `<COFLUX_HOME>/bin` first in PATH, and shell integration (plan 115). It injects a bundled rc by shell: zsh via `ZDOTDIR`, bash via `--init-file`, fish via vendor conf in `XDG_DATA_DIRS`; unknown shells receive none. After the original user rc chain runs unchanged, it defines a `claude` function translating the injector's `COFLUX_CLAUDE_PLUGIN_DIR` into `claude --plugin-dir <dir>`. On macOS the injector is the Coflux main app. An empty variable or missing directory falls back to the original `claude` behavior.
-- `coflux-worker`: frequently hot-upgraded; handles central WS, loopback gateway, local authorization, git/exec/fs, Device RPC, relay, and checkpoints.
+- `coflux-worker`: frequently hot-upgraded; handles central WS, loopback gateway, local authorization, git/exec/fs, Device RPC, native helper ownership, and checkpoints.
 
-They communicate over a mode-`0600` UDS. Internal frame kinds:
+A separate Go `coflux-transport` executable embeds pinned Tailcat/Tailscale networking. Release artifacts and Desktop bundles include this companion; paired hot updates verify and publish worker/helper together, then retain the previous immutable pair for rollback. Released workers validate the local helper handshake before probation succeeds. Networking starts automatically after control authentication. The helper owns no PTYs or business authority, needs no installed Go runtime, and communicates only through inherited stdio with its worker or Electron-main owner. See [Native Tailcat transport](tailcat-transport.md) for the pinned build, bootstrap requirement, and delivery contract.
+
+Supervisor and worker communicate over a mode-`0600` UDS. Internal frame kinds:
 
 - Kind 1: session-dirty notification, containing only session ID, never raw PTY.
 - Kinds 2/3: removed input/replay numbers, permanently reserved and rejected by decoders.
@@ -111,59 +114,57 @@ Worker restart leaves supervisor/PTYS intact. The new worker restores transports
 
 ## 5. DeviceTransport
 
-### 5.1 Direct slot: loopback and P2P
+Tailcat/Tailscale supplies the default remote network stack through the private
+`coflux-transport` Go companion. Coflux owns account/device authorization,
+per-channel scopes, DeviceEnvelope routing, and PTY lifecycle. Stock self-hosted
+DERP supplies fallback forwarding; upstream networking chooses direct peers when
+available. The custom relay binary, WebRTC signaling, ICE configuration, and
+fragmentation code have been retired.
 
-The direct slot prioritizes loopback over P2P. The slot competes with relay through hedging and generation promotion (5.2).
+### 5.1 Local loopback
 
-**Loopback**: desktop tries `ws://127.0.0.1:8788` by default. Initial pairing uses an authenticated central connection to install a persistent Origin-bound grant. Thereafter, device identity (P-256 key in IndexedDB), grant, and generation remain reusable offline. In Electron (`apps/desktop`, plan 103), the renderer uses a custom scheme; main rewrites `/client` and `/device` handshake Origins to stable `https://desktop.coflux.dev`, matching the self-reported origin. Grants distinguish it from browser `https://app.coflux.dev`. Server/daemon Origin validation is unchanged. Gateway accepts exact Origins and checks signatures, nonces, expiry, and rate limits. Cached-direct terminals and regular Device RPC do not wait for the center: browser → loopback gateway → worker → UDS → sessiond. Low-frequency control/checkpoints may continue through the center in parallel, outside the hot path.
+Desktop can connect directly to `ws://127.0.0.1:8788`. Initial pairing installs a
+persistent Origin-bound grant through authenticated central control. The local
+provider retains identity and grants; the gateway validates signatures, nonces,
+expiry, and exact Origins. Desktop main uses `https://desktop.coflux.dev` for
+both control and gateway handshakes. Cached local session read/control can
+survive center outages; RPC/lifecycle requires an online lease. Supervisor PTYs
+remain independent of worker and transport replacement.
 
-**P2P (WebRTC DataChannel, plan 076)** is the main direct path across machines. Signaling follows the relay rendezvous triangle through central control WS: client sends a complete offer SDP, center validates ownership and forwards account/scopes, worker returns an answer. Vanilla ICE waits for complete gathering on both ends and exchanges once, without trickle. Relay-first behavior and promotion hide the 1–3 second setup. The center signs no P2P token: authenticated signaling and SDP DTLS fingerprints bind peer identity. PeerConnections persist per daemon, created when the client has full demand. Each logical channel uses a DataChannel whose label equals channelId; the center still grants channel-specific scopes. Frames use length-prefixed fragmented streams, with `P2P_CHUNK_BYTES = 16KiB`, within both webrtc-rs receive limits and Chrome's 256KiB limit; outbound SCTP buffering applies backpressure.
+### 5.2 Native remote channels and self-hosted DERP
 
-**P2P requires online authorization.** Worker `/daemon` control disconnection immediately closes every PeerConnection, like relay. It has no offline survival equivalent to loopback grants. Browser `/client` is a separate control connection: a brief transport outage does not prove worker authorization is invalid. Client immediately stops new rendezvous, revokes online leases/control waiters/elevated lanes, but permits existing relay/P2P session lanes a bounded 15-second grace period. `authOk` with the same credentials within that window reuses channels. Timeout or hard revocation—authError, clientOutdated, changed credentials, reset/destroy/logout—closes them immediately.
+Worker owns one serving helper per authenticated control epoch; Desktop main
+owns a client helper with at most 16 demanded device backends. Helpers use
+inherited private stdio, never a public proxy. Central grants bind account,
+device, client instance, generation, scopes, node key, and a 30-second pending
+expiry. Worker issues a nonce and consumes a single-use HMAC proof. Session
+read/control and RPC/lifecycle use separate grants and lanes.
 
-The worker uses `webrtc` (webrtc-rs) as answerer, enumerating all non-loopback interfaces (LAN/Tailscale/public IPv4/IPv6) for host candidates. The library does not enumerate interfaces itself; candidates reflect bound addresses. The answer explicitly uses passive DTLS, making the peer the client for best interoperability. The center distributes `COFLUX_STUN_URLS` to both sides in authOk/deviceP2pDial; default empty means host candidates only.
+Endpoint replacement sends `deviceTailcatClosed` over central control, cancelling
+only the matching pending/live channel. Client control loss preserves already
+open session lanes for at most 15 seconds and immediately retires elevated
+lanes. Worker control loss immediately retires its serving helper and authority.
+Neither depends on observing a remote TCP FIN, and neither terminates PTYs.
 
-Expected behavior: daemons on public-IP VPSs should connect nearly always through client outbound connectivity checks; same-LAN peers connect through host candidates; successful CN↔CN hole punching keeps traffic domestic, avoiding hairpinning and the GFW. **P2P does not solve GFW interference**: disrupted cross-border routes affect the same IP paths as relay. Symmetric NAT/CGNAT failures automatically fall back to relay without losing functionality. Production hole-punch success rates remain to be measured.
+The server supplies 1–8 private regions through `COFLUX_DERP_REGIONS`. Both ends
+of each connection use the worker's selected region. Worker probes stock
+`/derp/probe`; three failures trigger helper replacement and central rotation
+to the next configured region. A client failed-dial report can nudge an owned
+pending channel's health check without rotating a healthy endpoint. See the
+[native transport contract](tailcat-transport.md) for probe timings and grants,
+and [deployment](deployment.md) for private DERP admission and migration.
 
-Historical evidence: a 2026-08-25 macOS native probe verified M151 libwebrtc offerer interoperability with a `webrtc-rs 0.20.2` worker. That project was withdrawn on 2026-08-26; see `plans/083-macos-native-client-feasibility-gates.md` and Git history. Its still-applicable finding—that Router liveness must use both control disconnect and application ping/timeout, not transport callbacks alone—was implemented through plan 080 heartbeats.
-
-### 5.2 Relay and automatic switching
-
-With no cache, occupied fixed ports, denied Origin/LNA/loopback permission, or direct-slot failures, DeviceRouter immediately uses relay. P2P setup exceeds the 200ms hedge, so relay normally wins first and P2P promotes automatically with a higher generation when ready.
-
-Relay is the independently deployed `crates/relay` binary (plan 043). During rendezvous, the center validates account/daemon ownership and issues each side a short-lived (≤120s), single-use ed25519 token and complete dial URL. Client and worker each dial one channel-specific WS. Relay pairs by channelId into an opaque byte pipe without parsing DeviceEnvelope or holding an account database; rate/capacity limits match the former embedded relay. Data no longer crosses central control WS. The center holds no channel state; clients rendezvous again after channel loss. Daemons have no standing relay connection, dialing only on demand. Worker central-control disconnection closes all relay channels. Restored direct connectivity promotes with a higher transport generation, retaining logical client, holder, and input queue.
-
-Multiple nodes use a daemon-home-relay model. After daemon authentication, the center sends a static node list. Worker converts each ws/wss base to http/https and probes `/healthz`, selecting a home from median RTT across multiple samples with hysteresis. It reprobes periodically and immediately after relay dial failures. Once daemon reports a home ID, the center directs **both** ends of a channel to that node; until then, it uses the first list entry. Relay nodes neither interconnect nor forward between one another. Client/web/iOS receive no list and perform no probing; they consume one rendezvous `relay_url`. Home is in-memory online presence, never database state.
-
-Production can run one `coflux-relay` per regional VPS, with local Caddy terminating TLS and proxying `/healthz` and `/v1/pipe` to its plaintext listener. All nodes receive the same `COFLUX_RELAY_PUBKEY`; the center retains the matching `COFLUX_RELAY_SIGNING_KEY` and a fallback-ordered list:
-
-```sh
-COFLUX_RELAY_NODES='[{"id":"jp","url":"wss://relay-jp.example.com"},{"id":"us","url":"wss://relay-us.example.com"}]'
-```
-
-IDs should be short, stable, and unique. The first entry must be the most reliable primary: older workers and newly connected workers still probing fall back to it. Restart the center after list changes; daemons receive the new list when control WS reconnects. Single-node deployments may still use only `COFLUX_RELAY_URL`; the center synthesizes `id=default` with unchanged dialing behavior. Relays do not register with the center or hold account/node databases. There is no connection between them and the center; shared signing keys are the coupling.
-
-**Optional STUN deployment** improves NAT traversal. Without STUN, host candidates already support public-IP VPS daemons and same-LAN peers. STUN is needed when both sides are behind NAT. Run standard coturn beside a relay node such as owo-jp-gw:
-
-```sh
-apt install coturn
-# /etc/turnserver.conf needs only these two lines for unauthenticated STUN without relay:
-#   stun-only
-#   listening-port=3478
-systemctl enable --now coturn
-# Allow UDP 3478 in the VPS firewall; configure and restart the center:
-COFLUX_STUN_URLS=stun:relay-jp.coflux.dev:3478
-```
-
-The center sends this list to clients in authOk and daemons in deviceP2pDial. Both query reflected addresses to create srflx candidates. There is no TURN: coflux relay already provides fallback. The daemon VPS firewall must permit **established outbound UDP sessions**. ICE sockets use ephemeral ports; worker initiates checks to client candidates, and conntrack can allow replies without inbound allowlists.
-
-Frozen online mobile (source removed in plan 106) disables loopback direct and uses relay-only DeviceRouter. The repository has no legacy `taskAttach/ptyInput/ptyOutput/clientExec/clientFs*` compatibility path.
+Control protocol version 2 is the compatibility floor for clients and workers;
+newer compatible versions are accepted. DeviceEnvelope remains version 1. Swift
+and iOS currently expose local provider support and explicitly report remote
+connections unavailable. Frozen browser clients cannot use the removed remote
+protocol and require the current Desktop client.
 
 ### 5.3 Ordering, deduplication, and backpressure
 
 - Input includes `holderEpoch + inputSeq`. Sessiond applies it sequentially, returns cumulative ACKs for duplicates, and never skips gaps.
 - Client clears input only through cumulative `PtyInputAck.appliedThroughSeq`. After lost ACKs, it resends in original order over the replacement transport.
-- Deduplication is not generic exactly-once across arbitrary failures. Its boundary is the ledger-owning authority: sessiond deduplicates PTY input and session create/stop across direct/relay and worker replacement, but not supervisor/OS restart. Other worker mutations—project/worktree/exec/fs—deduplicate only within the current worker runtime. After replacement, the same operation ID cannot be relied upon to prevent repeated external effects.
+- Deduplication is not generic exactly-once across arbitrary failures. Its boundary is the ledger-owning authority: sessiond deduplicates PTY input and session create/stop across local/native and worker replacement, but not supervisor/OS restart. Other worker mutations—project/worktree/exec/fs—deduplicate only within the current worker runtime. After replacement, the same operation ID cannot be relied upon to prevent repeated external effects.
 - `execRun` may have started or completed an external command before a worker crash prevented result recording. The outcome is unknown: callers must not automatically retry non-idempotent commands or claim exactly-once execution.
 - `fs.write` to a stable path fully overwrites contents. Retrying identical path/data after an unknown outcome converges to the same content: outcome idempotency, not exactly one execution.
 - Worktree operations can define dedicated probing/recovery using stable paths and Git state. Such semantics belong to each operation, not the generic ledger.
@@ -237,11 +238,11 @@ Future server-driven daemon actions should use prepare + Execute + reconciliatio
 
 | Failure | Behavior |
 |---|---|
-| Brief browser `/client` control outage | Cached direct continues. Existing relay/P2P session lanes survive up to 15 seconds and reuse same-credential `authOk`; online leases, elevated lanes, new rendezvous, and business orchestration stop immediately. Timeout/hard revoke closes remote lanes. |
-| Worker `/daemon` control outage | Close relay/P2P channels immediately; supervisor/PTYS survive and rebuild after control recovery. |
-| Direct failure/permission denial | Try P2P after loopback failure, then rendezvous+relay; do not misreport daemon offline. |
-| P2P traversal failure/interruption | Fall back to relay; once stable, retry loopback→P2P promotion with backoff. |
-| Relay/center failure | Established loopback direct continues catalog/attach/input/resize/stop. No new relay/P2P channels while center is offline because rendezvous/signaling require it. Existing remote channels follow the two independent control-connection rules above. |
+| Brief browser `/client` control outage | Cached direct continues. Existing native remote session lanes survive up to 15 seconds and reuse same-credential `authOk`; online leases, elevated lanes, new rendezvous, and business orchestration stop immediately. Timeout/hard revoke closes remote lanes. |
+| Worker `/daemon` control outage | Close native remote channels immediately; supervisor/PTYS survive and rebuild after control recovery. |
+| Direct failure/permission denial | Use native remote transport while retrying local loopback; do not misreport the daemon offline. |
+| Native peer traversal failure/interruption | Upstream Tailcat uses DERP fallback; the owner monitors application liveness and reconnects with bounded backoff. |
+| Relay/center failure | Established loopback direct continues catalog/attach/input/resize/stop. No new native remote channels while center is offline because rendezvous/signaling require it. Existing remote channels follow the two independent control-connection rules above. |
 | Worker restart | Supervisor/PTYS survive; increment generation and rebuild channel/catalog. |
 | Server restart | Reconcile Postgres metadata with daemon catalogs/checkpoints; preserve unknown orphans. |
 | Slow center | Relay/checkpoints may lag or be discarded; local PTYS/direct channels continue. |
@@ -272,7 +273,7 @@ Worker detects only LISTEN ports within PTY process trees and reports them so th
 4. Host-side loopback WebSocket reachability.
 5. Daemon-to-center connection state.
 
-Local failure means direct is degraded while central relay remains available. Central failure with healthy local state explicitly reports cached-direct availability.
+Local failure means direct is degraded while native remote transport remains available. Central failure with healthy local state explicitly reports cached-direct availability.
 
 Reproducible benchmark on 2026-07-25: Apple M1 Pro, `a3592ff` debug daemon, default 2,000 history lines, maximum snapshot 98,939 bytes; Node v26.3.0 and `@xterm/headless` 6 without DOM rendering; 20 warmups, 100 samples, `performance.now()`:
 
@@ -320,9 +321,9 @@ Playwright simulation cannot replace these results: all six scenarios ran agains
 ## 12. Repository structure and verification
 
 ```text
-apps/server          Central control / relay rendezvous / checkpoints / Postgres
+apps/server          Central control / native rendezvous / checkpoints / Postgres
 apps/desktop         Sole frontend/default target: Electron main + React/xterm renderer (src/renderer), direct enabled
-apps/ios             Native iOS client: SwiftUI + SwiftTerm
+apps/ios             SwiftUI + SwiftTerm; remote transport unavailable pending a native provider
 packages/core        Shared TS infrastructure such as logging
 packages/client      Control store + DeviceRouter
 packages/protocol    TS protobuf bindings
@@ -330,8 +331,8 @@ packages/swift-client Swift protobuf, client core, Apple-platform transports
 packages/cli         Headless cofluxd host management + coflux account/local/remote operations
 crates/protocol      Rust protobuf and UDS frames/IPC
 crates/supervisor    PTY/sessiond authority
-crates/worker        Gateway, relay dialing, RPC, checkpoints, upgrade adapter
-crates/relay         Standalone token verification, channel pairing, opaque pipes
+crates/worker        Gateway, native helper ownership, RPC, checkpoints, upgrade adapter
+transport/tailcat    Pinned native helper; self-hosted stock DERP supplies fallback
 tests                Real-process WebSocket black-box harness
 ```
 

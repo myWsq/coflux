@@ -5,5 +5,6 @@ export {
   assertReleaseVersion,
   supervisorReleaseStatement,
   cliReleaseStatement,
+  transportReleaseStatement,
   workerReleaseStatement,
 } from "../packages/cli/release-trust.mjs";

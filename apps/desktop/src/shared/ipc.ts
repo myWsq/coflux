@@ -2,6 +2,12 @@
 export const IPC = {
   /** preload 启动时同步取一次的引导数据（serverUrl / origin / version / platform） */
   bootstrap: "desktop:bootstrap",
+  tailcatOpen: "desktop:tailcat-open",
+  tailcatSend: "desktop:tailcat-send",
+  tailcatAck: "desktop:tailcat-ack",
+  tailcatClose: "desktop:tailcat-close",
+  tailcatControl: "desktop:tailcat-control",
+  tailcatEvent: "desktop:tailcat-event",
   connectLocal: "desktop:connect-local",
   logoutLocal: "desktop:logout-local",
   notify: "desktop:notify",
@@ -46,6 +52,7 @@ export const IPC = {
 } as const;
 
 export type Bootstrap = {
+  tailcat?: boolean;
   platform: string;
   version: string;
   serverUrl: string;

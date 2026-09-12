@@ -9,6 +9,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{MAX_DEVICE_FRAME_BYTES, MAX_FRAME_ID_BYTES};
 
+/// Signed helper metadata inherits version and target from its worker release.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransportArtifact {
+    pub url: String,
+    pub sha256: String,
+    pub size: u64,
+    pub release_signature: String,
+}
+
 /// 接收与发送共用的 UDS record payload 硬上限。
 pub const MAX_IPC_RECORD_BYTES: usize = MAX_DEVICE_FRAME_BYTES + 2 + MAX_FRAME_ID_BYTES;
 
@@ -107,6 +117,8 @@ pub enum WorkerToSupervisor {
         artifact_size: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         release_signature: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<TransportArtifact>,
     },
 }
 
@@ -459,6 +471,7 @@ mod tests {
             target: Some("aarch64-apple-darwin".into()),
             artifact_size: Some(42),
             release_signature: Some("22".repeat(64)),
+            transport: None,
         };
         let json = serde_json::to_string(&message).unwrap();
         assert!(json.contains(r#""artifactSize":42"#));
@@ -548,8 +561,7 @@ mod tests {
 
         // 旧 worker → 新 supervisor：没有这四个字段的 JSON 必须解码成功（supervisor 解码失败是静默
         // 丢弃整条，缺省不了就等于吞掉建会话请求），且四个字段为 None、序列化时不出现。
-        let legacy_json =
-            r#"{"type":"session.create","sessionId":"s2","taskId":"t2","cwd":"/x","cols":100,"rows":30}"#;
+        let legacy_json = r#"{"type":"session.create","sessionId":"s2","taskId":"t2","cwd":"/x","cols":100,"rows":30}"#;
         let back: WorkerToSupervisor = serde_json::from_str(legacy_json).unwrap();
         match &back {
             WorkerToSupervisor::SessionCreate {

@@ -22,7 +22,7 @@ struct ReducerTests {
     @Test func attachIndicatorOnlyTracksRequestsAndClearsWithoutGrantingControl() async throws {
         let client = makeClient()
         defer { client.logout() }
-        var auth = Coflux_V1_AuthOk(); auth.accountID = "account"
+        var auth = Coflux_V1_AuthOk(); auth.controlProtocolVersion = 2; auth.accountID = "account"
         client.apply(.authOk(auth))
         var state = snapshot(); state.tasks[0].sessionID = "s1"
         var idle = state.tasks[0]; idle.id = "idle"; idle.status = .idle; idle.clearSessionID()
@@ -123,7 +123,7 @@ struct ReducerTests {
 
     @Test func authOkWaitsForSnapshotInsteadOfRenderingEmptyAccount() {
         let client = makeClient()
-        client.apply(.authOk(Coflux_V1_AuthOk()))
+        client.apply(.authOk(currentAuthOK()))
         #expect(client.authState == .authed)
         #expect(client.syncState == .awaitingSnapshot)
         #expect(client.snapshotRevision == 0)
@@ -314,7 +314,7 @@ struct ReducerTests {
         let provider = LocalRouteProbe()
         let client = CofluxClient(configuration: ClientConfiguration(serverURL: URL(string: "ws://fake.test/client")!, buildID: "dev"),
                                   transport: FakeTransport(), tokenStore: InMemoryTokenStore(), localDeviceProvider: provider)
-        var auth = Coflux_V1_AuthOk(); auth.accountID = "account"
+        var auth = Coflux_V1_AuthOk(); auth.controlProtocolVersion = 2; auth.accountID = "account"
         client.apply(.authOk(auth))
         client.apply(.stateSnapshot(snapshot()))
         let release = client.retainDeviceMeasure(daemonID: "d1")
@@ -411,7 +411,7 @@ struct ReducerTests {
         defer { client.logout() }
         client.login(username: "dev", password: "secret")
         let connection = await transport.nextConnection()
-        connection.push(.authOk(Coflux_V1_AuthOk()))
+        connection.push(.authOk(currentAuthOK()))
         #expect(await waitUntil { client.authState == .authed })
         var initial = snapshot()
         initial.tasks[0].sessionID = "s1"

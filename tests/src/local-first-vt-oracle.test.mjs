@@ -22,7 +22,7 @@ before(async () => {
   chmodSync(PLAYER, 0o755);
   stack = await startStack({ port: PORT, daemonEnv: { COFLUX_SHELL: PLAYER } });
   device = await DeviceClient.pair(stack);
-  await device.openRelay();
+  await device.openNative();
 });
 
 after(async () => {

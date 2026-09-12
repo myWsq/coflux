@@ -1,4 +1,4 @@
-//! direct/relay 共用的 Device channel runtime。
+//! Device channel runtime shared by local and native transports.
 //!
 //! 本模块负责 channel principal、scope 门控、sessiond IPC multiplex 与每 channel 有界投递。
 //! git/fs/exec 与 prepared operation handler 在同一 runtime 上继续扩展，transport 不解释业务。
@@ -11,10 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use coflux_protocol::logln;
 use coflux_protocol::wire::{
     self, daemon_to_server, device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck,
-    DeviceP2pChannelGrant, DevicePtyGap, DevicePtyInput, DeviceRelayDial, DeviceScope,
-    DeviceSessionAttach, DeviceSessionCatalog, DeviceSessionCatalogRequest,
-    DeviceSessionSnapshotRequest, PreparedDeviceOperation, PreparedDeviceOperationInstalled,
-    SessionCheckpoint,
+    DevicePtyGap, DevicePtyInput, DeviceScope, DeviceSessionAttach, DeviceSessionCatalog,
+    DeviceSessionCatalogRequest, DeviceSessionSnapshotRequest, PreparedDeviceOperation,
+    PreparedDeviceOperationInstalled, SessionCheckpoint,
 };
 use coflux_protocol::{
     decode_device_envelope, encode_device_envelope, encode_frame, write_record, CommandStateInfo,
@@ -47,7 +46,7 @@ const INTERNAL_CHANNEL_ID: &str = "__coflux-worker";
 const AGENT_CHANNEL_PREFIX: &str = "__coflux-agent-";
 // 中心触发 prepared 执行（plan 091）用的合成 channel 前缀：`__coflux-server-<operation_id>`。
 // 不注册进 channels 表，往它回的应答按既有逻辑丢弃；只有 OperationAck/Error 经 report 回中心。
-// 与 `__coflux-worker` / `__coflux-agent-` 互不重叠，`validate_relay_dial` 对 `__coflux-` 前缀的保留照旧覆盖。
+// Separate from `__coflux-worker` and `__coflux-agent-`; remote grants reject reserved prefixes.
 const SERVER_CHANNEL_PREFIX: &str = "__coflux-server-";
 // 本 runtime 内已触发执行过的 operation_id 上限；满了整表清空——丢失只意味着重复 Execute 会再问
 // 一次 sessiond/worker 账本（它们各自去重），不会二次执行。
@@ -502,7 +501,7 @@ enum CallStartError {
 #[derive(Clone)]
 enum Principal {
     Local(LocalPrincipal),
-    Relay {
+    Remote {
         account_id: String,
         client_instance_id: String,
         transport_generation: u64,
@@ -518,7 +517,7 @@ impl Principal {
     fn account_id(&self) -> &str {
         match self {
             Self::Local(value) => &value.account_id,
-            Self::Relay { account_id, .. } => account_id,
+            Self::Remote { account_id, .. } => account_id,
             Self::Server => "",
         }
     }
@@ -526,7 +525,7 @@ impl Principal {
     fn client_instance_id(&self) -> &str {
         match self {
             Self::Local(value) => &value.client_instance_id,
-            Self::Relay {
+            Self::Remote {
                 client_instance_id, ..
             } => client_instance_id,
             Self::Server => "",
@@ -536,7 +535,7 @@ impl Principal {
     fn transport_generation(&self) -> u64 {
         match self {
             Self::Local(value) => value.transport_generation,
-            Self::Relay {
+            Self::Remote {
                 transport_generation,
                 ..
             } => *transport_generation,
@@ -556,10 +555,7 @@ impl Principal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransportKind {
     Local,
-    Relay,
-    // P2P DataChannel（plan 076）。授权与生命周期语义与 Relay 相同（中心逐 channel 授
-    // scopes、中心断开即全关），只是帧由 p2p 泵送往 DataChannel 而非 relay WS。
-    P2p,
+    Tailcat,
 }
 
 #[derive(Default)]
@@ -938,35 +934,29 @@ impl DeviceRuntime {
         Ok((channel_id, receiver))
     }
 
-    /// 注册一条 relay channel 并返回其出向帧接收端（plan 043：帧不再回中心控制 WS，
-    /// 由调用方——relay 拨号任务——泵到该 channel 专属的 relay WS）。
-    pub fn open_relay(self: &Arc<Self>, dial: &DeviceRelayDial) -> Result<ChannelReceiver, String> {
-        validate_relay_dial(dial)?;
-        self.open_remote(
-            TransportKind::Relay,
-            &dial.channel_id,
-            &dial.account_id,
-            &dial.client_instance_id,
-            dial.transport_generation,
-            &dial.scopes,
-        )
-    }
-
-    /// 注册一条 P2P channel（plan 076）。授权语义与 relay 相同：中心逐 channel 授 scopes、
-    /// daemon 信任控制面；帧由调用方——p2p channel 泵——送往该 channel 的 DataChannel。
-    pub fn open_p2p(
+    /// Admit only after the worker consumed a fresh central channel proof.
+    pub fn open_tailcat(
         self: &Arc<Self>,
-        grant: &DeviceP2pChannelGrant,
+        grant: &wire::DeviceTailcatGrant,
     ) -> Result<ChannelReceiver, String> {
-        validate_p2p_channel_grant(grant)?;
         self.open_remote(
-            TransportKind::P2p,
+            TransportKind::Tailcat,
             &grant.channel_id,
             &grant.account_id,
             &grant.client_instance_id,
             grant.transport_generation,
             &grant.scopes,
         )
+    }
+
+    pub fn close_tailcat(&self, channel_id: &str) {
+        self.close_remote(TransportKind::Tailcat, channel_id);
+    }
+    pub fn close_tailcats(&self) {
+        self.close_remote_all(TransportKind::Tailcat);
+    }
+    pub fn handle_tailcat_frame(self: &Arc<Self>, channel_id: &str, bytes: &[u8]) -> bool {
+        self.handle_remote_frame(TransportKind::Tailcat, channel_id, bytes)
     }
 
     fn open_remote(
@@ -995,7 +985,7 @@ impl DeviceRuntime {
             channel_id.to_string(),
             ChannelEntry {
                 transport,
-                principal: Principal::Relay {
+                principal: Principal::Remote {
                     account_id: account_id.to_string(),
                     client_instance_id: client_instance_id.to_string(),
                     transport_generation,
@@ -1014,14 +1004,6 @@ impl DeviceRuntime {
         }
     }
 
-    pub fn close_relay(&self, channel_id: &str) {
-        self.close_remote(TransportKind::Relay, channel_id);
-    }
-
-    pub fn close_p2p(&self, channel_id: &str) {
-        self.close_remote(TransportKind::P2p, channel_id);
-    }
-
     fn close_remote(&self, kind: TransportKind, channel_id: &str) {
         let removed = {
             let mut channels = self.channels.lock().unwrap();
@@ -1037,14 +1019,6 @@ impl DeviceRuntime {
         if let Some(entry) = removed {
             entry.sink.close();
         }
-    }
-
-    pub fn close_relays(&self) {
-        self.close_remote_all(TransportKind::Relay);
-    }
-
-    pub fn close_p2ps(&self) {
-        self.close_remote_all(TransportKind::P2p);
     }
 
     fn close_remote_all(&self, kind: TransportKind) {
@@ -2000,14 +1974,6 @@ impl DeviceRuntime {
         }
     }
 
-    pub fn handle_relay_frame(self: &Arc<Self>, channel_id: &str, bytes: &[u8]) -> bool {
-        self.handle_remote_frame(TransportKind::Relay, channel_id, bytes)
-    }
-
-    pub fn handle_p2p_frame(self: &Arc<Self>, channel_id: &str, bytes: &[u8]) -> bool {
-        self.handle_remote_frame(TransportKind::P2p, channel_id, bytes)
-    }
-
     fn handle_remote_frame(
         self: &Arc<Self>,
         kind: TransportKind,
@@ -2372,7 +2338,7 @@ impl DeviceRuntime {
                     Vec::new()
                 }
             }
-            Principal::Relay { scopes, .. } => scopes.clone(),
+            Principal::Remote { scopes, .. } => scopes.clone(),
             // 只放行 prepared 类载荷；execute_prepared_operation 已按安装模板校验过，这里的 scope
             // 只用于 send_payload/response 分派的对称检查（合成 channel 本就不在 channels 表里）。
             Principal::Server => vec![DeviceScope::Lifecycle as i32],
@@ -3795,39 +3761,6 @@ fn prepared_task_id(
     }
 }
 
-fn validate_relay_dial(dial: &DeviceRelayDial) -> Result<(), String> {
-    if dial.protocol_version != DEVICE_PROTOCOL_VERSION {
-        return Err("relay Device protocol version 不兼容".into());
-    }
-    if !valid_id(&dial.channel_id)
-        || dial.channel_id.starts_with("__coflux-")
-        || !valid_id(&dial.account_id)
-        || !valid_id(&dial.client_instance_id)
-        || dial.transport_generation == 0
-    {
-        return Err("relay principal/channel/generation 无效".into());
-    }
-    if !dial.relay_url.starts_with("ws://") && !dial.relay_url.starts_with("wss://") {
-        return Err("relay URL scheme 无效".into());
-    }
-    normalized_scopes(dial.scopes.clone()).map(|_| ())
-}
-
-fn validate_p2p_channel_grant(grant: &DeviceP2pChannelGrant) -> Result<(), String> {
-    if grant.protocol_version != DEVICE_PROTOCOL_VERSION {
-        return Err("p2p Device protocol version 不兼容".into());
-    }
-    if !valid_id(&grant.channel_id)
-        || grant.channel_id.starts_with("__coflux-")
-        || !valid_id(&grant.account_id)
-        || !valid_id(&grant.client_instance_id)
-        || grant.transport_generation == 0
-    {
-        return Err("p2p principal/channel/generation 无效".into());
-    }
-    normalized_scopes(grant.scopes.clone()).map(|_| ())
-}
-
 fn normalized_scopes(mut scopes: Vec<i32>) -> Result<Vec<i32>, String> {
     if scopes.is_empty()
         || scopes.len() > 4
@@ -3841,7 +3774,7 @@ fn normalized_scopes(mut scopes: Vec<i32>) -> Result<Vec<i32>, String> {
             )
         })
     {
-        return Err("relay scope 无效".into());
+        return Err("remote scope is invalid".into());
     }
     scopes.sort_unstable();
     scopes.dedup();
@@ -3979,8 +3912,8 @@ mod tests {
         exits: Arc<ExitOutbox>,
         local_id: String,
         local_rx: ChannelReceiver,
-        relay_id: String,
-        relay_rx: ChannelReceiver,
+        remote_id: String,
+        remote_rx: ChannelReceiver,
         from_supervisor: mpsc::Receiver<Vec<u8>>,
     }
 
@@ -4109,11 +4042,11 @@ mod tests {
                 ],
             })
             .unwrap();
-        let relay_id = "relay-1".to_string();
-        let relay_rx = runtime
-            .open_relay(&DeviceRelayDial {
-                channel_id: relay_id.clone(),
-                relay_url: "ws://127.0.0.1:1/v1/pipe?token=test.test".into(),
+        let remote_id = "relay-1".to_string();
+        let remote_rx = runtime
+            .open_tailcat(&wire::DeviceTailcatGrant {
+                channel_id: remote_id.clone(),
+
                 account_id: "account-1".into(),
                 client_instance_id: "client-1".into(),
                 transport_generation: 2,
@@ -4123,6 +4056,7 @@ mod tests {
                     DeviceScope::Rpc as i32,
                 ],
                 protocol_version: DEVICE_PROTOCOL_VERSION,
+                ..Default::default()
             })
             .unwrap();
         TestRuntime {
@@ -4135,8 +4069,8 @@ mod tests {
             exits,
             local_id,
             local_rx,
-            relay_id,
-            relay_rx,
+            remote_id,
+            remote_rx,
             from_supervisor,
         }
     }
@@ -4283,41 +4217,42 @@ mod tests {
             "Device channel 总数已达上限"
         );
 
-        let relay = DeviceRelayDial {
+        let relay = wire::DeviceTailcatGrant {
             channel_id: "relay-limit".into(),
-            relay_url: "ws://127.0.0.1:1/pipe".into(),
+
             account_id: "account-test".into(),
             client_instance_id: "relay-client".into(),
             transport_generation: 1,
             scopes: vec![DeviceScope::SessionRead as i32],
             protocol_version: DEVICE_PROTOCOL_VERSION,
+            ..Default::default()
         };
         assert_eq!(
-            runtime.open_relay(&relay).err().unwrap(),
+            runtime.open_tailcat(&relay).err().unwrap(),
             "Device channel 总数已达上限"
         );
-        let p2p = DeviceP2pChannelGrant {
-            connection_id: "connection-test".into(),
+        let second_remote = wire::DeviceTailcatGrant {
             channel_id: "p2p-limit".into(),
             account_id: "account-test".into(),
             client_instance_id: "p2p-client".into(),
             transport_generation: 1,
             scopes: vec![DeviceScope::SessionRead as i32],
             protocol_version: DEVICE_PROTOCOL_VERSION,
+            ..Default::default()
         };
         assert_eq!(
-            runtime.open_p2p(&p2p).err().unwrap(),
+            runtime.open_tailcat(&second_remote).err().unwrap(),
             "Device channel 总数已达上限"
         );
 
         runtime.close_channel(&local_a);
-        let _relay_rx = runtime.open_relay(&relay).unwrap();
+        let _remote_rx = runtime.open_tailcat(&relay).unwrap();
         assert_eq!(
-            runtime.open_p2p(&p2p).err().unwrap(),
+            runtime.open_tailcat(&second_remote).err().unwrap(),
             "Device channel 总数已达上限"
         );
-        runtime.close_relay(&relay.channel_id);
-        let _p2p_rx = runtime.open_p2p(&p2p).unwrap();
+        runtime.close_tailcat(&relay.channel_id);
+        let _second_remote_rx = runtime.open_tailcat(&second_remote).unwrap();
     }
 
     #[test]
@@ -4598,14 +4533,15 @@ mod tests {
         let runtime = DeviceRuntime::new(None, to_supervisor, to_server);
         let channel_id = "cleanup-relay".to_string();
         let mut channel_rx = runtime
-            .open_relay(&DeviceRelayDial {
+            .open_tailcat(&wire::DeviceTailcatGrant {
                 channel_id: channel_id.clone(),
-                relay_url: "ws://127.0.0.1:1/pipe".into(),
+
                 account_id: "cleanup-account".into(),
                 client_instance_id: "cleanup-client".into(),
                 transport_generation: 1,
                 scopes: vec![DeviceScope::SessionRead as i32],
                 protocol_version: DEVICE_PROTOCOL_VERSION,
+                ..Default::default()
             })
             .unwrap();
         {
@@ -4796,13 +4732,12 @@ mod tests {
             .contains("session-exited"));
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
-    /// plan 043：relay channel 出向帧就是 ChannelReceiver 里的原始 DeviceEnvelope bytes
-    /// （由拨号任务直接泵进该 channel 的 relay WS），不再有 DaemonToServer wrap。
-    async fn relay_envelope(receiver: &mut ChannelReceiver) -> DeviceEnvelope {
+    /// Native channels carry raw DeviceEnvelope bytes without a control-plane wrapper.
+    async fn remote_envelope(receiver: &mut ChannelReceiver) -> DeviceEnvelope {
         let bytes = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
             .await
             .unwrap()
@@ -4841,7 +4776,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_router_input_ack_returns_only_to_its_bound_local_or_relay_channel() {
+    async fn device_router_input_ack_returns_only_to_its_bound_local_or_remote_channel() {
         let mut fixture = test_runtime();
         let local_ack = DeviceEnvelope {
             protocol_version: DEVICE_PROTOCOL_VERSION,
@@ -4866,13 +4801,13 @@ mod tests {
             })) if session_id == "session-local"
         ));
         assert!(
-            fixture.relay_rx.try_recv().is_none(),
+            fixture.remote_rx.try_recv().is_none(),
             "local ACK must not leak to relay channels"
         );
 
         let relay_ack = DeviceEnvelope {
             protocol_version: DEVICE_PROTOCOL_VERSION,
-            channel_id: fixture.relay_id.clone(),
+            channel_id: fixture.remote_id.clone(),
             payload: Some(device_envelope::Payload::PtyInputAck(DevicePtyInputAck {
                 session_id: "session-relay".into(),
                 applied_through_seq: 9,
@@ -4880,8 +4815,8 @@ mod tests {
         };
         fixture
             .runtime
-            .deliver_from_sessiond(&fixture.relay_id, &encode_device_envelope(&relay_ack));
-        let relay = relay_envelope(&mut fixture.relay_rx).await;
+            .deliver_from_sessiond(&fixture.remote_id, &encode_device_envelope(&relay_ack));
+        let relay = remote_envelope(&mut fixture.remote_rx).await;
         assert!(matches!(
             relay.payload,
             Some(device_envelope::Payload::PtyInputAck(DevicePtyInputAck {
@@ -4896,12 +4831,12 @@ mod tests {
         );
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
     #[tokio::test]
-    async fn device_router_local_and_relay_share_request_dedup_and_response_correlation() {
+    async fn device_router_local_and_remote_share_request_dedup_and_response_correlation() {
         let mut fixture = test_runtime();
         let request = device_envelope::Payload::PortsRequest(DevicePortsRequest {
             request_id: "ports-shared".into(),
@@ -4911,8 +4846,8 @@ mod tests {
             &request_envelope(&fixture.local_id, request.clone()),
         );
         fixture.runtime.handle_client_frame(
-            &fixture.relay_id,
-            &request_envelope(&fixture.relay_id, request),
+            &fixture.remote_id,
+            &request_envelope(&fixture.remote_id, request),
         );
 
         let local = tokio::time::timeout(Duration::from_secs(2), fixture.local_rx.recv())
@@ -4920,7 +4855,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let local = decode_device_envelope(&local).unwrap();
-        let relay = relay_envelope(&mut fixture.relay_rx).await;
+        let relay = remote_envelope(&mut fixture.remote_rx).await;
         assert!(matches!(
             local.payload,
             Some(device_envelope::Payload::PortsResult(wire::DevicePortsResult { ref request_id, .. })) if request_id == "ports-shared"
@@ -4938,22 +4873,22 @@ mod tests {
             browse_home: false,
         });
         fixture.runtime.handle_client_frame(
-            &fixture.relay_id,
-            &request_envelope(&fixture.relay_id, collision),
+            &fixture.remote_id,
+            &request_envelope(&fixture.remote_id, collision),
         );
-        let collision = relay_envelope(&mut fixture.relay_rx).await;
+        let collision = remote_envelope(&mut fixture.remote_rx).await;
         assert!(matches!(
             collision.payload,
             Some(device_envelope::Payload::Error(DeviceError { ref code, .. })) if code == "request_collision"
         ));
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
     #[tokio::test]
-    async fn device_router_operation_id_is_exactly_once_across_local_and_relay() {
+    async fn device_router_operation_id_is_exactly_once_across_local_and_remote() {
         let mut fixture = test_runtime();
         let operation = |channel_id: &str, request_id: &str, script: &str| {
             request_envelope(
@@ -4974,15 +4909,15 @@ mod tests {
             &operation(&fixture.local_id, "exec-local", "printf x >> marker"),
         );
         fixture.runtime.handle_client_frame(
-            &fixture.relay_id,
-            &operation(&fixture.relay_id, "exec-relay", "printf x >> marker"),
+            &fixture.remote_id,
+            &operation(&fixture.remote_id, "exec-relay", "printf x >> marker"),
         );
         let local = tokio::time::timeout(Duration::from_secs(2), fixture.local_rx.recv())
             .await
             .unwrap()
             .unwrap();
         let local = decode_device_envelope(&local).unwrap();
-        let relay = relay_envelope(&mut fixture.relay_rx).await;
+        let relay = remote_envelope(&mut fixture.remote_rx).await;
         assert!(matches!(
             local.payload,
             Some(device_envelope::Payload::ExecResult(wire::ExecResult { ref request_id, ok: true, .. })) if request_id == "exec-local"
@@ -4998,19 +4933,19 @@ mod tests {
 
         // 完成后的不同 requestId 重投命中缓存；不同 payload 则 collision，均不得再次执行。
         fixture.runtime.handle_client_frame(
-            &fixture.relay_id,
-            &operation(&fixture.relay_id, "exec-retry", "printf x >> marker"),
+            &fixture.remote_id,
+            &operation(&fixture.remote_id, "exec-retry", "printf x >> marker"),
         );
-        let retry = relay_envelope(&mut fixture.relay_rx).await;
+        let retry = remote_envelope(&mut fixture.remote_rx).await;
         assert!(matches!(
             retry.payload,
             Some(device_envelope::Payload::ExecResult(wire::ExecResult { ref request_id, ok: true, .. })) if request_id == "exec-retry"
         ));
         fixture.runtime.handle_client_frame(
-            &fixture.relay_id,
-            &operation(&fixture.relay_id, "exec-collision", "printf y >> marker"),
+            &fixture.remote_id,
+            &operation(&fixture.remote_id, "exec-collision", "printf y >> marker"),
         );
-        let collision = relay_envelope(&mut fixture.relay_rx).await;
+        let collision = remote_envelope(&mut fixture.remote_rx).await;
         assert!(matches!(
             collision.payload,
             Some(device_envelope::Payload::Error(DeviceError { ref code, .. })) if code == "operation_collision"
@@ -5021,7 +4956,7 @@ mod tests {
         );
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -5029,7 +4964,7 @@ mod tests {
     async fn device_router_offline_local_downgrades_but_session_scope_stays_available() {
         let mut fixture = test_runtime();
         fixture.auth.set_server_online(false);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let ports = device_envelope::Payload::PortsRequest(DevicePortsRequest {
             request_id: "ports-offline".into(),
         });
@@ -5102,7 +5037,7 @@ mod tests {
         fixture.auth.revoke_grant("grant-1").unwrap();
         fixture.runtime.revoke_local_grant("grant-1");
         assert_eq!(fixture.local_rx.recv().await, None);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -5169,7 +5104,7 @@ mod tests {
                 .ok
         );
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -5278,7 +5213,7 @@ mod tests {
         assert!(fixture.exits.acknowledge(&current));
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -5337,7 +5272,7 @@ mod tests {
         drop(state);
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -5439,7 +5374,7 @@ mod tests {
         assert_eq!(reported.sessions[0].session_id, "session-current");
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -5592,7 +5527,7 @@ mod tests {
         drop(pending);
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -5695,7 +5630,7 @@ mod tests {
         drop(pending);
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -5767,7 +5702,7 @@ mod tests {
         );
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -5831,7 +5766,7 @@ mod tests {
         assert_eq!(continuation.session_offset, 1);
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -5902,7 +5837,7 @@ mod tests {
         drop(pending);
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -6029,7 +5964,7 @@ mod tests {
         assert!(fixture.catalogs.acknowledge(&delivery));
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -6164,7 +6099,7 @@ mod tests {
         assert!(fixture.checkpoints.state.lock().unwrap().pending.is_empty());
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -6220,7 +6155,7 @@ mod tests {
         assert_eq!(fixture.exits.0.state.lock().unwrap().pending.len(), 1);
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -6335,7 +6270,7 @@ mod tests {
         assert!(fixture.catalogs.acknowledge(&delivery));
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
@@ -6421,7 +6356,7 @@ mod tests {
         ));
 
         fixture.runtime.close_channel(&fixture.local_id);
-        fixture.runtime.close_relays();
+        fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);
     }
 }

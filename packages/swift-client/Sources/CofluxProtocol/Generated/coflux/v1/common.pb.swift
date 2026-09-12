@@ -513,6 +513,25 @@ public struct Coflux_V1_ProxyData: Sendable {
   public init() {}
 }
 
+/// Independently signed native companion for the exact enclosing worker release.
+public struct Coflux_V1_TransportArtifact: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var url: String = String()
+
+  public var sha256: String = String()
+
+  public var size: UInt64 = 0
+
+  public var releaseSignature: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 /// Immutable source snapshots survive deletion of the original target.
 public struct Coflux_V1_AccountNotification: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
@@ -1318,6 +1337,51 @@ extension Coflux_V1_ProxyData: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
   public static func ==(lhs: Coflux_V1_ProxyData, rhs: Coflux_V1_ProxyData) -> Bool {
     if lhs.connID != rhs.connID {return false}
     if lhs.data != rhs.data {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_TransportArtifact: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".TransportArtifact"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}url\0\u{1}sha256\0\u{1}size\0\u{3}release_signature\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.url) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.sha256) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.size) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.releaseSignature) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.url.isEmpty {
+      try visitor.visitSingularStringField(value: self.url, fieldNumber: 1)
+    }
+    if !self.sha256.isEmpty {
+      try visitor.visitSingularStringField(value: self.sha256, fieldNumber: 2)
+    }
+    if self.size != 0 {
+      try visitor.visitSingularUInt64Field(value: self.size, fieldNumber: 3)
+    }
+    if !self.releaseSignature.isEmpty {
+      try visitor.visitSingularStringField(value: self.releaseSignature, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_TransportArtifact, rhs: Coflux_V1_TransportArtifact) -> Bool {
+    if lhs.url != rhs.url {return false}
+    if lhs.sha256 != rhs.sha256 {return false}
+    if lhs.size != rhs.size {return false}
+    if lhs.releaseSignature != rhs.releaseSignature {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

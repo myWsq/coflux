@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { Buffer } from "node:buffer";
 import fs from "node:fs";
+import path from "node:path";
 
 export const WORKER_RELEASE_STATEMENT_DOMAIN = Buffer.from(
   "coflux-worker-release-v1\0",
@@ -12,6 +13,9 @@ export const SUPERVISOR_RELEASE_STATEMENT_DOMAIN = Buffer.from(
 );
 
 export const CLI_RELEASE_STATEMENT_DOMAIN = Buffer.from("coflux-cli-release-v1\0", "utf8");
+
+export const TRANSPORT_RELEASE_STATEMENT_DOMAIN = Buffer.from("coflux-transport-release-v1\0", "utf8");
+export function transportReleaseStatement(metadata) { return artifactReleaseStatement(TRANSPORT_RELEASE_STATEMENT_DOMAIN, metadata); }
 
 const STRICT_RELEASE_VERSION = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
@@ -142,7 +146,7 @@ function isRecord(value) {
  */
 export function parseReleaseManifestEntry(manifest, component, version, target) {
   assertReleaseVersion(version);
-  if (!["worker", "supervisor", "cli"].includes(component)) {
+  if (!["worker", "supervisor", "cli", "transport"].includes(component)) {
     throw new Error(`未知 release component: ${JSON.stringify(component)}`);
   }
   if (!isRecord(manifest) || manifest.schemaVersion !== 2 || manifest.version !== version) {
@@ -198,7 +202,7 @@ export function verifyReleaseArtifact({ component, version, entry, data, publicK
   const metadata = { version, target: entry.target, sha256, size: data.byteLength };
   const statement = component === "worker"
     ? workerReleaseStatement(metadata)
-    : component === "cli" ? cliReleaseStatement(metadata) : supervisorReleaseStatement(metadata);
+    : component === "cli" ? cliReleaseStatement(metadata) : component === "transport" ? transportReleaseStatement(metadata) : supervisorReleaseStatement(metadata);
   if (!crypto.verify(null, statement, publicKey, Buffer.from(entry.releaseSignature, "hex"))) {
     throw new Error(`${component} 产物 release Ed25519 签名无效`);
   }
@@ -211,11 +215,11 @@ export function verifyReleaseArtifact({ component, version, entry, data, publicK
 export function installStagedPair(staged) {
   if (
     !Array.isArray(staged) ||
-    ![2, 3].includes(staged.length) ||
+    ![2, 3, 4, 5].includes(staged.length) ||
     staged.some(({ source, destination }) =>
       typeof source !== "string" || !source || typeof destination !== "string" || !destination)
   ) {
-    throw new Error("daemon installation requires two or three valid staged artifacts");
+    throw new Error("daemon installation requires two to five valid staged artifacts");
   }
   const installed = [];
   const backups = [];
@@ -243,4 +247,49 @@ export function installStagedPair(staged) {
     }
     throw error;
   }
+}
+
+/** Publish a complete native runtime before changing any executable entry point.
+ * A worker reached through a bin symlink resolves current_exe into its immutable
+ * release directory, so interruption between entry-point updates cannot pair
+ * that worker with a helper from another release. */
+export function installNativeRelease(staged) {
+  if (!staged.some(({ destination }) => path.basename(destination) === "coflux-transport")) return installStagedPair(staged);
+  const binDir = path.dirname(staged[0].destination);
+  if (staged.some(({ destination }) => path.dirname(destination) !== binDir)) throw new Error("Native release destinations must share one binary directory");
+  const digest = crypto.createHash("sha256");
+  const entries = staged.map(({ source, destination }) => ({ source, destination, name: path.basename(destination) })).sort((a, b) => a.name.localeCompare(b.name));
+  if (new Set(entries.map(entry => entry.name)).size !== entries.length) throw new Error("Duplicate native release entry point");
+  for (const entry of entries) digest.update(entry.name).update("\0").update(fs.readFileSync(entry.source));
+  const id = digest.digest("hex"), releases = path.join(binDir, "releases"), directory = path.join(releases, id);
+  fs.mkdirSync(releases, { recursive: true, mode: 0o700 });
+  const sync = name => { const fd = fs.openSync(name, "r"); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } };
+  if (!fs.existsSync(directory)) {
+    const temporary = fs.mkdtempSync(path.join(releases, ".staging-"));
+    try {
+      for (const entry of entries) {
+        const output = path.join(temporary, entry.name);
+        fs.copyFileSync(entry.source, output);
+        fs.chmodSync(output, entry.name.endsWith(".txt") ? 0o644 : 0o755);
+        sync(output);
+      }
+      sync(temporary); fs.renameSync(temporary, directory); sync(releases);
+    } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+  }
+  const actual = crypto.createHash("sha256");
+  for (const entry of entries) {
+    const file = path.join(directory, entry.name), stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Invalid immutable native release member");
+    actual.update(entry.name).update("\0").update(fs.readFileSync(file));
+  }
+  if (actual.digest("hex") !== id) throw new Error("Immutable native release digest mismatch");
+  const links = fs.mkdtempSync(path.join(binDir, ".native-links-"));
+  try {
+    const entryPoints = entries.map(entry => {
+      const source = path.join(links, entry.name);
+      fs.symlinkSync(path.join(directory, entry.name), source);
+      return { source, destination: entry.destination };
+    });
+    installStagedPair(entryPoints); sync(binDir);
+  } finally { fs.rmSync(links, { recursive: true, force: true }); }
 }
