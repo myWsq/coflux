@@ -19,8 +19,10 @@ function cli(kind, home, args, input = "") {
     const timer = setTimeout(() => child.kill("SIGKILL"), 45000);
     child.stdout.on("data", (data) => { stdout += data; });
     child.stderr.on("data", (data) => { stderr += data; });
-    child.on("error", reject);
-    child.on("exit", (code) => { clearTimeout(timer); resolve({ code, stdout, stderr, value: code === 0 ? JSON.parse(stdout) : null }); });
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    // Rejected commands may exit before consuming stdin; verify their exit/output below.
+    child.stdin.on("error", (error) => { if (error.code !== "EPIPE") reject(error); });
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code, stdout, stderr, value: code === 0 ? JSON.parse(stdout) : null }); });
     child.stdin.end(input);
   });
 }
