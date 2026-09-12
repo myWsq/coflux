@@ -56,6 +56,7 @@ const TAMPERED = Buffer.from(ARTIFACT);
 TAMPERED[0] ^= 0xff; // 改一个字节
 
 let stack;
+let clientToken;
 let httpServer;
 let baseUrl;
 const repos = [];
@@ -80,6 +81,16 @@ before(async () => {
   await new Promise((r) => httpServer.listen(0, "127.0.0.1", r));
   baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
   stack = await startStack({ port: PORT, daemonEnv: { COFLUX_WORKER_PUBKEY: PUBKEY_HEX, COFLUX_WORKER_PROBATION_MS: "1500" } });
+  // Reuse the session for upgrade polling instead of exhausting password-login limits.
+  const client = stack.makeClient();
+  try {
+    await client.authSubscribe();
+    const auth = await client.waitFor((m) => m.case === "authOk", "fixture authentication");
+    assert.ok(auth.clientToken, "fixture authentication must issue a session token");
+    clientToken = auth.clientToken;
+  } finally {
+    client.close();
+  }
 });
 after(async () => {
   await stack?.stop();
@@ -96,7 +107,7 @@ function readWorkerPid() {
 async function isOnline() {
   const p = stack.makeClient();
   try {
-    const snap = await p.authSubscribe();
+    const snap = await p.authTokenSubscribe(clientToken);
     return !!snap.daemons.find((d) => d.daemonId === stack.daemonId && d.online);
   } catch {
     return false;
@@ -124,7 +135,7 @@ async function waitDaemonVersion(version, tries = 80) {
   for (let i = 0; i < tries; i++) {
     const c = stack.makeClient();
     try {
-      const snap = await c.authSubscribe();
+      const snap = await c.authTokenSubscribe(clientToken);
       const daemon = snap.daemons.find((item) => item.daemonId === stack.daemonId);
       if (daemon?.online && daemon.workerVersion === version) return true;
     } catch { /* supervisor/worker 正在重启 */ }
@@ -197,7 +208,7 @@ test("supervisor 重启：从 worker.active + 下载目录恢复已提交 worker
 
 test("并发远程升级：新请求优先，旧慢下载后到不得覆盖", async () => {
   const c = stack.makeClient();
-  await c.authSubscribe();
+  await c.authTokenSubscribe(clientToken);
   c.send({
     case: "clientUpgradeDaemon",
     daemonId: stack.daemonId,
@@ -232,7 +243,7 @@ test("anti-rollback 持久化：重启后降级与同版本重放均在下载前
   const pidBefore = readWorkerPid();
   const hitsBefore = requestHits.get("/good") ?? 0;
   const c = stack.makeClient();
-  await c.authSubscribe();
+  await c.authTokenSubscribe(clientToken);
   c.send({
     case: "clientUpgradeDaemon",
     daemonId: stack.daemonId,
@@ -257,7 +268,7 @@ test("发布元数据篡改被拒：legacy raw 签名正确也不能伪造 versi
   const pidBefore = readWorkerPid();
   const signed = signedRelease("v1.3.0");
   const c = stack.makeClient();
-  await c.authSubscribe();
+  await c.authTokenSubscribe(clientToken);
   c.send({
     case: "clientUpgradeDaemon",
     daemonId: stack.daemonId,
@@ -276,7 +287,7 @@ test("跨 target 发布被拒：合法签名的其他架构也不下载/执行",
   const pidBefore = readWorkerPid();
   const hitsBefore = requestHits.get("/good") ?? 0;
   const c = stack.makeClient();
-  await c.authSubscribe();
+  await c.authTokenSubscribe(clientToken);
   c.send({
     case: "clientUpgradeDaemon",
     daemonId: stack.daemonId,
@@ -322,7 +333,7 @@ test("签名不符被拒：产物合法但签名是别的数据 → 验签失败
   const pidBefore = readWorkerPid();
 
   const c = stack.makeClient();
-  await c.authSubscribe();
+  await c.authTokenSubscribe(clientToken);
   // url=合法产物、sha256 正确，但 signature 是对别的字节签的 → 仅签名这关就挡住
   c.send({
     case: "clientUpgradeDaemon",
@@ -343,7 +354,7 @@ test("超大下载被拒：仅凭 Content-Length 即在读取前失败，不重�
   const activeBefore = readActive();
   const pidBefore = readWorkerPid();
   const c = stack.makeClient();
-  await c.authSubscribe();
+  await c.authTokenSubscribe(clientToken);
   c.send({
     case: "clientUpgradeDaemon",
     daemonId: stack.daemonId,

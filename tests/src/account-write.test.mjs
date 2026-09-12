@@ -262,7 +262,7 @@ test("闭环：create_terminal --cmd（do-script）→ read_terminal(snapshot) �
 
   // 账号 API 的 list 里，跑着的终端带命令状态：空闲 + 上一条退出码。这份视图由 checkpoint 喂（2 秒周期），
   // 比 wait 的即时回执晚一拍，得轮询到字段出现为止。
-  const listed = await listedUntil(terminal.id, (t) => t.busy !== undefined, "list_terminals 带上命令状态");
+  const listed = await listedUntil(terminal.id, (t) => t.commandSeq === 1 && t.lastCommandExitCode !== null, "list_terminals receives the completed command checkpoint");
   assert.equal(listed.busy, false, JSON.stringify(listed));
   assert.equal(listed.lastCommandExitCode, 7, JSON.stringify(listed));
 
@@ -321,6 +321,8 @@ test("终端只有一种：create_terminal 不带 command 开出常驻 shell，r
   const waited = await okTool("wait_terminal", { terminalId: terminal.id, timeoutSeconds: 30 });
   assert.equal(waited.exited, true, "送 exit 之后才退出");
   assert.equal(waited.exitCode, 0, "退出码是 shell 的");
+  // The device wait result can precede the center's terminal-exit projection.
+  await observer.waitFor((m) => m.case === "taskUpdated" && m.task.id === terminal.id && m.task.status === TaskStatus.EXITED, "shell exit reaches the center", 30000);
   await okTool("remove_terminal", { terminalId: terminal.id });
 });
 

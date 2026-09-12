@@ -389,3 +389,58 @@ cancellations, or skips, in **390.743 seconds** with two-file concurrency.
 The new notification lifecycle case and all native fault phases passed. Its
 isolated PostgreSQL databases were removed. Log:
 `/tmp/coflux-tailcat-notifications-full.log`.
+
+## Signed-upgrade polling authentication (2026-09-12)
+
+GitHub run 34701708097 passed the corrected Linux helper fault fixture but failed
+two signed-upgrade cases: an online assertion followed by an `auth.ok` timeout.
+The fixture authenticated with a password on every polling connection. Successful
+password logins also consume the default per-IP budget of 30 per 60 seconds; the
+harness waits only for authOk, and the online probe converts any error to false.
+The CI log was not verbose enough to prove a limiter rejection directly.
+
+A local diagnostic run passed 9/9 but made 27 password-authentication calls in
+37 seconds. A controlled reproduction with only the isolated server's password
+budget reduced to 24 captured explicit limiter warnings and authError responses,
+then reproduced the false offline/authentication-timeout failures (6/9 passed).
+No production limit was changed.
+
+The fixture now obtains one session token and reuses it for its upgrade control
+and polling connections; real device pairing still exercises password login.
+Signature, size, rollback, worker identity, and PTY-continuity assertions are
+unchanged. The same 24-login reproduction now passes **9/9** in **39.597 seconds**,
+with five password-authentication calls and no limiter rejection. The shared
+harness and production authentication behavior are unchanged. Logs are retained
+at `/tmp/coflux-tailcat-signed-auth-trace.log`,
+`/tmp/coflux-tailcat-signed-auth-repro.log`, and
+`/tmp/coflux-tailcat-signed-token.log`.
+
+GitHub's second attempt of run 34701708097 passed signed upgrades unchanged but
+failed the account terminal list assertion: the fixture accepted the initial
+`busy=false, commandSeq=0, lastCommandExitCode=null` projection before the
+completed command checkpoint arrived. It now waits for command sequence 1 and a
+recorded exit code, then retains the exact busy/exit-code assertions.
+
+The first full local run after the token change passed 227/231 in 458.730 seconds.
+One account case attempted deletion after the device reported exit but before the
+center received its terminal-exit projection. That case now waits for the existing
+EXITED notification before deletion, as the other terminal cases already do.
+Three authorization failures came from port 8830 being occupied by another server:
+the diagnostic log records EADDRINUSE and a control-protocol mismatch. A separate
+account rerun also encountered an occupied fixture port and is excluded from
+acceptance. These failures are retained in `/tmp/coflux-tailcat-token-full.log` and
+`/tmp/coflux-tailcat-account-checkpoint.log`; targeted and full test invocations will no longer overlap, and fixture ports
+will be checked before the next acceptance pass.
+
+An additional isolated account attempt failed in shared setup with `native fault
+grant timed out`; its exact cause was not established. The diagnostic rerun then
+passed **10/10** in **77.222 seconds**. Logs:
+`/tmp/coflux-tailcat-account-checkpoint-retry.log` and
+`/tmp/coflux-tailcat-account-checkpoint-debug.log`.
+
+After the other workspace's suite ended, all declared fixture ports were checked
+and found free. The final complete two-file-concurrency run passed **231/231**,
+zero failures, cancellations, or skips, in **417.040 seconds**. Server/Desktop
+typechecks and the zero-warning Rust pretest build passed. All temporary test
+databases were removed. Final log: `/tmp/coflux-tailcat-token-full-final.log`.
+The release-acceptance gaps and original failed latency budget remain unchanged.
