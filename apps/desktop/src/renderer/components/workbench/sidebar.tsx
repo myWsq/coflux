@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useState } from "react";
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
@@ -10,9 +10,9 @@ import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { ActivityDots } from "@/components/workbench/pending-dots";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
+import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
+import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-width";
 import { workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
-import { SIDEBAR_WIDTH_KEY } from "@/config";
-import type { DesktopDaemonState } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 
 /** 心跳往返低于此值算「快」（绿），否则「慢」（黄）。局域网直连通常个位数到几十 ms，
@@ -31,33 +31,6 @@ function activityLabel(activity: WorkspaceActivity): string {
 function ActivityIcon({ activity, labeled }: { activity: WorkspaceActivity; labeled?: boolean }) {
   if (activity.status === "idle") return null;
   return <ActivityDots status={activity.status} label={labeled ? activityLabel(activity) : undefined} />;
-}
-
-const DEFAULT_SIDEBAR_WIDTH = 260;
-const MIN_SIDEBAR_WIDTH = 200;
-const MAX_SIDEBAR_WIDTH = 480;
-
-function clampSidebarWidth(width: number) {
-  if (!Number.isFinite(width)) return DEFAULT_SIDEBAR_WIDTH;
-  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, width));
-}
-
-function readSidebarWidth() {
-  try {
-    const stored = localStorage.getItem(SIDEBAR_WIDTH_KEY);
-    if (stored === null || stored.trim() === "") return DEFAULT_SIDEBAR_WIDTH;
-    return clampSidebarWidth(Number(stored));
-  } catch {
-    return DEFAULT_SIDEBAR_WIDTH;
-  }
-}
-
-function persistSidebarWidth(width: number) {
-  try {
-    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clampSidebarWidth(width)));
-  } catch {
-    // localStorage 不可用时仍保留本次会话中的宽度。
-  }
 }
 
 /** 乐观工作区条目（plan 078）：创建请求发出后、服务端广播到达前的占位行。
@@ -90,10 +63,10 @@ type SidebarProps = {
   onCreateMenuProjectIdChange: (projectId: string | null) => void;
   /** 乐观创建中的工作区（plan 078）：渲染在对应项目的工作区列表末尾 */
   pendingWorkspaces: PendingWorkspace[];
-  /** 本机 daemon 状态（plan 113）：账号菜单「本机 daemon」一行；null = 还没拿到 */
-  daemonState: DesktopDaemonState | null;
-  onOpenDaemonPanel: () => void;
-  onOpenExecutorSettings: () => void;
+  /** 账号脚部尾部的设置按钮：打开独立设置页 */
+  onOpenSettings: () => void;
+  /** 侧栏宽度：与设置页左栏共用同一份，见 use-sidebar-width.ts */
+  widthControl: SidebarWidthControl;
 };
 
 export function Sidebar(props: SidebarProps) {
@@ -110,87 +83,9 @@ export function Sidebar(props: SidebarProps) {
   const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
   // 默认全部展开，只记折叠集合（新项目出现时自然是展开态）
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
-  const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
-  const [isResizing, setIsResizing] = useState(false);
-  const sidebarWidthRef = useRef(sidebarWidth);
-  const resizeRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startWidth: number;
-    handle: HTMLDivElement;
-    previousCursor: string;
-    previousUserSelect: string;
-  } | null>(null);
   const createMenuProjectId = props.createMenuProjectId;
   const setCreateMenuProjectId = props.onCreateMenuProjectIdChange;
   const modPrefix = SHORTCUT_MODIFIER_PREFIX;
-
-  function updateSidebarWidth(width: number) {
-    const nextWidth = clampSidebarWidth(width);
-    sidebarWidthRef.current = nextWidth;
-    setSidebarWidth(nextWidth);
-  }
-
-  function restoreResizeEnvironment() {
-    const resize = resizeRef.current;
-    if (!resize) return;
-    resizeRef.current = null;
-    document.documentElement.style.cursor = resize.previousCursor;
-    document.documentElement.style.userSelect = resize.previousUserSelect;
-    if (resize.handle.hasPointerCapture(resize.pointerId)) {
-      resize.handle.releasePointerCapture(resize.pointerId);
-    }
-  }
-
-  function finishResize(pointerId: number) {
-    if (resizeRef.current?.pointerId !== pointerId) return;
-    restoreResizeEnvironment();
-    setIsResizing(false);
-    persistSidebarWidth(sidebarWidthRef.current);
-  }
-
-  function handleResizeStart(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!event.isPrimary || event.button !== 0 || resizeRef.current) return;
-    event.preventDefault();
-    const handle = event.currentTarget;
-    resizeRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startWidth: sidebarWidthRef.current,
-      handle,
-      previousCursor: document.documentElement.style.cursor,
-      previousUserSelect: document.documentElement.style.userSelect,
-    };
-    handle.setPointerCapture(event.pointerId);
-    document.documentElement.style.cursor = "col-resize";
-    document.documentElement.style.userSelect = "none";
-    setIsResizing(true);
-  }
-
-  function handleResizeMove(event: ReactPointerEvent<HTMLDivElement>) {
-    const resize = resizeRef.current;
-    if (!resize || resize.pointerId !== event.pointerId) return;
-    updateSidebarWidth(resize.startWidth + event.clientX - resize.startX);
-  }
-
-  function handleResizeEnd(event: ReactPointerEvent<HTMLDivElement>) {
-    const resize = resizeRef.current;
-    if (!resize || resize.pointerId !== event.pointerId) return;
-    updateSidebarWidth(resize.startWidth + event.clientX - resize.startX);
-    finishResize(event.pointerId);
-  }
-
-  function resetSidebarWidth() {
-    updateSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
-    persistSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
-  }
-
-  useEffect(
-    () => () => {
-      restoreResizeEnvironment();
-    },
-    [],
-  );
 
   function toggleProject(projectId: string) {
     setCollapsedIds((prev) => {
@@ -232,7 +127,7 @@ export function Sidebar(props: SidebarProps) {
     // （正好是账号脚部那一行）裁掉。横幅本身不动。
     <aside
       className="relative flex h-full min-h-0 shrink-0 flex-col border-r border-border bg-sidebar text-base"
-      style={{ width: sidebarWidth }}
+      style={{ width: props.widthControl.width }}
     >
       {/* 红绿灯（x=14,y=14）内嵌在这条空白带里，它同时是侧栏的窗口拖拽带（见 drag-region.ts）。 */}
       <div className="shrink-0" style={DESKTOP_DRAG_BAND_STYLE} />
@@ -661,29 +556,9 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       {/* 账号脚部（plan 110）：固定在滚动区之外，不随项目/设备列表滚动；不声明拖拽区。 */}
-      <AccountFooter
-        client={client}
-        daemonState={props.daemonState}
-        onOpenDaemonPanel={props.onOpenDaemonPanel}
-        onOpenExecutorSettings={props.onOpenExecutorSettings}
-      />
+      <AccountFooter client={client} onOpenSettings={props.onOpenSettings} />
 
-      <div
-        className="group/resize absolute inset-y-0 -right-[3px] z-20 w-1.5 cursor-col-resize touch-none"
-        onDoubleClick={resetSidebarWidth}
-        onLostPointerCapture={(event) => finishResize(event.pointerId)}
-        onPointerCancel={(event) => finishResize(event.pointerId)}
-        onPointerDown={handleResizeStart}
-        onPointerMove={handleResizeMove}
-        onPointerUp={handleResizeEnd}
-      >
-        <div
-          className={cn(
-            "pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors",
-            isResizing ? "bg-primary/70" : "bg-transparent group-hover/resize:bg-primary/50",
-          )}
-        />
-      </div>
+      <SidebarResizeHandle control={props.widthControl} />
     </aside>
   );
 }

@@ -12,6 +12,9 @@ type GlobalShortcutsOptions = {
   activeTerminalRef: RefObject<WorkspaceTerminalHandle | null>;
   onOpenCreateWorkspaceMenu: (projectId: string) => void;
   onToggleHelp: () => void;
+  /** 挂起时键盘与原生菜单命令都不再作用于终端：设置页这类整页覆盖层盖住工作台时传 true，
+   * 否则 ⌘T/⌘W/⌘1 会落到一个看不见也点不到的终端上。 */
+  isSuspended?: boolean;
 };
 
 /**
@@ -33,8 +36,10 @@ export function useGlobalShortcuts({
   activeTerminalRef,
   onOpenCreateWorkspaceMenu,
   onToggleHelp,
+  isSuspended = false,
 }: GlobalShortcutsOptions) {
   useEffect(() => {
+    if (isSuspended) return;
     function onKeyDown(event: KeyboardEvent) {
       // 单修饰 ⌘ 前缀：⌘/ 与下面的字母/数字键共用同一判定；再按一次 ⌘/ 由调用方 toggle 关闭。
       const hasPrefix = event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
@@ -88,12 +93,13 @@ export function useGlobalShortcuts({
 
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp]);
+  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, isSuspended]);
 
   // 原生菜单命令：与上面的键位一一对应。
   useEffect(
     () =>
       desktop.onCommand((command: DesktopCommand) => {
+        if (isSuspended) return;
         const terminal = activeTerminalRef.current;
         switch (command) {
           case "create-terminal":
@@ -116,6 +122,6 @@ export function useGlobalShortcuts({
             return;
         }
       }),
-    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp],
+    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, isSuspended],
   );
 }

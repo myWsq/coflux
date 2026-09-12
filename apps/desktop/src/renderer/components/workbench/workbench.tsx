@@ -16,8 +16,7 @@ import {
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
 import { DaemonOnboardingDialog } from "@/components/workbench/daemon-onboarding";
-import { DaemonPanelDialog } from "@/components/workbench/daemon-panel";
-import { ExecutorSettingsDialog } from "@/components/workbench/executor-settings";
+import { SettingsPage } from "@/components/settings/settings-page";
 import { countLocalRunningTerminals } from "@/components/workbench/daemon-view";
 import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "@/components/workbench/desktop-attention";
 import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
@@ -29,6 +28,7 @@ import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon
 import { useExecutorBridge } from "@/components/workbench/use-executor-bridge";
 import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
+import { useSidebarWidth } from "@/components/workbench/use-sidebar-width";
 import type { WorkspaceActiveTab, WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 import {
   parseStoredSelection,
@@ -195,8 +195,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const daemonState = useDesktopDaemonState(desktop);
   // executor（plan 116）：渲染层只把本机 daemon 的 device 通道两头接上，作业表在主进程。
   useExecutorBridge(client, daemonState?.daemonId);
-  const [daemonDialog, setDaemonDialog] = useState<"onboarding" | "panel" | null>(null);
-  const [executorSettingsOpen, setExecutorSettingsOpen] = useState(false);
+  const [daemonDialog, setDaemonDialog] = useState<"onboarding" | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // 侧栏宽度在这里持有一份，工作台侧栏与设置页左栏共用，避免设置页盖上来时宽度突变。
+  const sidebarWidth = useSidebarWidth();
   const attemptedAuthToken = useRef<string | null>(null);
   const [localAuthError, setLocalAuthError] = useState<string | null>(null);
   const [authRetry, setAuthRetry] = useState(0);
@@ -580,6 +582,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
     activeTerminalRef,
     onOpenCreateWorkspaceMenu: setCreateMenuProjectId,
     onToggleHelp: () => setHelpOpen((open) => !open),
+    // 设置页盖住工作台时终端既看不见也点不到，⌘T/⌘W/⌘1 之类再落到终端上就是盲操作；
+    // 原生菜单项走同一条挂起开关。
+    isSuspended: settingsOpen,
   });
 
   const surface = resolveWorkbenchSurface(authState);
@@ -644,12 +649,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
         createMenuProjectId={createMenuProjectId}
         onCreateMenuProjectIdChange={setCreateMenuProjectId}
         pendingWorkspaces={pendingWorkspaces}
-        daemonState={daemonState}
-        onOpenDaemonPanel={() => setDaemonDialog("panel")}
-        onOpenExecutorSettings={() => setExecutorSettingsOpen(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
+        widthControl={sidebarWidth}
       />
-
-      <ExecutorSettingsDialog open={executorSettingsOpen} onOpenChange={setExecutorSettingsOpen} bridge={desktop} />
 
       {terminalWorkspaces.length > 0 ? (
         <Suspense
@@ -807,28 +809,33 @@ export function Workbench({ client }: { client: CofluxClient }) {
       <ConfirmActionDialog action={confirmAction} onCancel={() => setConfirmAction(null)} />
       <ShortcutsHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
       <EnrollmentDialog open={enrollmentOpen} onOpenChange={setEnrollmentOpen} />
-      {/* 本机 daemon（plan 113）：面板与接入引导互斥；状态没到之前两者都不渲染 */}
+      {settingsOpen ? (
+        <SettingsPage
+          client={client}
+          daemonState={daemonState}
+          runningTerminals={daemonState ? countLocalRunningTerminals(tasks, daemonState.daemonId) : 0}
+          hasTopBanner={showReconnectBanner}
+          widthControl={sidebarWidth}
+          onClose={() => setSettingsOpen(false)}
+          onOpenOnboarding={() => {
+            setSettingsOpen(false);
+            setDaemonDialog("onboarding");
+          }}
+        />
+      ) : null}
+
+      {/* 本机 daemon（plan 113）：接入引导；状态没到之前不渲染 */}
       {daemonState ? (
-        <>
-          <DaemonPanelDialog
-            open={daemonDialog === "panel"}
-            onOpenChange={(open) => !open && setDaemonDialog(null)}
-            state={daemonState}
-            runningTerminals={countLocalRunningTerminals(tasks, daemonState.daemonId)}
-            bridge={desktop}
-            onOpenOnboarding={() => setDaemonDialog("onboarding")}
-          />
-          <DaemonOnboardingDialog
-            open={daemonDialog === "onboarding"}
-            onOpenChange={(open) => !open && setDaemonDialog(null)}
-            state={daemonState}
-            client={client}
-            bridge={desktop}
-            authError={localAuthError}
-            onRetryAuthorize={() => { attemptedAuthToken.current = null; setAuthRetry((value) => value + 1); }}
-            onDismiss={persistOnboardingDismissed}
-          />
-        </>
+        <DaemonOnboardingDialog
+          open={daemonDialog === "onboarding"}
+          onOpenChange={(open) => !open && setDaemonDialog(null)}
+          state={daemonState}
+          client={client}
+          bridge={desktop}
+          authError={localAuthError}
+          onRetryAuthorize={() => { attemptedAuthToken.current = null; setAuthRetry((value) => value + 1); }}
+          onDismiss={persistOnboardingDismissed}
+        />
       ) : null}
     </div>
   );
