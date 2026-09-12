@@ -32,16 +32,13 @@ import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts"
 import { useSidebarWidth } from "@/components/workbench/use-sidebar-width";
 import type { WorkspaceActiveTab, WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 import {
-  parseStoredSelection,
   resolveSelectionAfterTaskMove,
-  resolveWorkbenchSelection,
   resolveWorkbenchSurface,
-  serializeSelection,
   shouldShowReconnectBanner,
   taskCloseNeedsConfirmation,
-  type WorkbenchSelection,
 } from "@/components/workbench/workbench-state";
-import { DAEMON_ONBOARDING_DISMISSED_KEY, WORKSPACE_KEY, desktop } from "@/config";
+import { DAEMON_ONBOARDING_DISMISSED_KEY, desktop } from "@/config";
+import { useOpenWorkspaces } from "./use-open-workspaces";
 import type { DesktopBridge } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
@@ -73,16 +70,6 @@ function EmptyMain({ className, children }: { className?: string; children: Reac
       <div className={cn("flex min-h-0 flex-1 items-center justify-center", className)}>{children}</div>
     </main>
   );
-}
-
-function readStoredSelection(): WorkbenchSelection | null {
-  return parseStoredSelection(localStorage.getItem(WORKSPACE_KEY));
-}
-
-function persistSelection(selection: WorkbenchSelection | null) {
-  const serialized = serializeSelection(selection);
-  if (serialized === null) localStorage.removeItem(WORKSPACE_KEY);
-  else localStorage.setItem(WORKSPACE_KEY, serialized);
 }
 
 /** 接入引导点过「暂不」（plan 113）：之后不再自动弹，只从账号菜单再进。localStorage 不可用时按没点过。 */
@@ -173,7 +160,9 @@ function DesktopOutdated({ bridge }: { bridge: DesktopBridge }) {
 export function Workbench({ client }: { client: CofluxClient }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [selection, setSelection] = useState<WorkbenchSelection | null>(readStoredSelection);
+  const opened = useOpenWorkspaces(client);
+  const { selection } = opened.navigation;
+  const selectWorkspace = opened.selectWorkspace;
   // 访问过的工作区保持挂载（display 隐藏而非卸载）：卸载会 dispose xterm，
   // 丢 scrollback / 活跃 Tab / 控制权，切回来要重新 attach。同 TerminalPane 的 Tab 保活模式上移一层。
   const [visitedWorkspaceIds, setVisitedWorkspaceIds] = useState<ReadonlySet<string>>(new Set());
@@ -249,6 +238,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // 主区实际渲染的工作区：workspace 选中即其本身；device 选中解析 canonical 目录工作区（可能为空 → 设备空态）
   const activeWorkspace = selection?.kind === "device" ? canonicalDirWorkspaceOf(selection.id) : selectedWorkspace;
   const activeWorkspaceId = activeWorkspace?.id ?? null;
+  // Device details may acquire their canonical workspace only after terminal creation.
+  useEffect(() => {
+    if (selection?.kind === "device" && activeWorkspaceId) opened.rememberWorkspace(activeWorkspaceId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection?.kind, activeWorkspaceId]);
   // pending 期间继续持有目标设备的 route：创建往返要走它，松开再重连只会更慢。
   const selectedDaemonId = selection?.kind === "device" ? selection.id : (selectedWorkspace?.daemonId ?? pendingSelected?.daemonId);
 
@@ -297,8 +291,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       setActiveTabs(activeTabsRef.current);
       setFollowTask({ workspaceId: next.id, taskId });
       activeWorkspaceIdRef.current = next.id;
-      setSelection(next);
-      persistSelection(next);
+      selectWorkspace(next.id);
       syncVisibleTaskRef.current();
     });
   }, [client]);
@@ -333,25 +326,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (snapshotRevision > 0 || authState === "need-login" || authState === "auth-failed") dismissBootOverlay();
   }, [snapshotRevision, authState]);
 
-  // 快照后校准选中项：无效选择回退到首项目 main workspace（或任一工作区）。
-  // device 选中以设备仍在 daemons 为有效判据（离线设备仍可进详情看现场）。
-  // 乐观条目（plan 078）天然不在 workspaces 里：pending 期间视为有效，否则
-  // "点击后立即切换过去"会在同一帧被这里撤销，表现为点了没反应。
-  useEffect(() => {
-    if (snapshotRevision === 0) return;
-    const resolution = resolveWorkbenchSelection({
-      selection,
-      pendingWorkspaceIds: new Set(pendingWorkspaces.map((item) => item.id)),
-      projects,
-      workspaces,
-      daemons,
-    });
-    // 假 id 其实已落盘过一次（selectWorkspace 内部即 persist）：刷新后 pendingWorkspaces 为空，
-    // 本 effect 判定 invalid 回退自愈，无害。pending 期间跳过 persist，只是不再重复写假 id。
-    if (resolution.changed) setSelection(resolution.selection);
-    if (resolution.shouldPersist) persistSelection(resolution.selection);
-  }, [snapshotRevision, projects, workspaces, daemons, selection, pendingWorkspaces]);
-
   // 浏览器标签页标题跟随当前选中：项目工作区用项目名，设备详情用设备名。
   useEffect(() => {
     const project = projects.find((item) => item.id === selectedWorkspace?.projectId);
@@ -377,12 +351,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
     return () => releases.forEach((release) => release());
   }, [client, onlineDaemonIds]);
 
-  function selectWorkspace(workspaceId: string) {
-    const next: WorkbenchSelection = { kind: "workspace", id: workspaceId };
-    setSelection(next);
-    persistSelection(next);
-  }
-
   // 点系统通知 → 主进程把窗口带到前台并回传工作区 id → 选中它（工作区已删则安静忽略）。
   useEffect(() => {
     return desktop.onFocusWorkspace((workspaceId) => {
@@ -392,9 +360,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }, [client]);
 
   function selectDevice(daemonId: string) {
-    const next: WorkbenchSelection = { kind: "device", id: daemonId };
-    setSelection(next);
-    persistSelection(next);
+    opened.selectDevice(daemonId);
     setDeviceTerminalError(null);
   }
 
@@ -443,6 +409,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (timer !== undefined) window.clearTimeout(timer);
     pendingWorkspaceTimersRef.current.delete(pendingId);
     setPendingWorkspaces((prev) => prev.filter((item) => item.id !== pendingId));
+    opened.dropPending(pendingId);
   }
 
   function createWorkspace(project: Project, branch: string, createNew: boolean) {
@@ -637,7 +604,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
       <DesktopAttention client={client} bridge={desktop} selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null} />
       <Sidebar
         client={client}
-        selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
+        openedWorkspaceIds={opened.navigation.workspaceIds}
+        onCloseWorkspaces={(ids) => opened.closeWorkspaces(ids, activeWorkspaceId)}
+        selectedWorkspaceId={activeWorkspaceId ?? (selection?.kind === "workspace" ? selection.id : null)}
         onSelectWorkspace={selectWorkspace}
         selectedDeviceId={selection?.kind === "device" ? selection.id : null}
         onSelectDevice={selectDevice}

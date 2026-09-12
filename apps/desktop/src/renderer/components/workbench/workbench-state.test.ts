@@ -6,7 +6,6 @@ import {
   resolveActiveTaskId,
   resolveActiveTaskIdAfterPendingDrop,
   resolveSelectionAfterTaskMove,
-  resolveWorkbenchSelection,
   serializeSelection,
 } from "./workbench-state";
 
@@ -17,64 +16,6 @@ test("工作区与设备选择的持久化格式保持向后兼容", () => {
   assert.equal(serializeSelection({ kind: "workspace", id: "workspace-1" }), "workspace-1");
   assert.equal(serializeSelection({ kind: "device", id: "daemon-1" }), "device:daemon-1");
   assert.equal(serializeSelection(null), null);
-});
-
-test("有效设备选择即使离线也保留，乐观工作区暂不持久化", () => {
-  const device = { kind: "device", id: "daemon-1" } as const;
-  assert.deepEqual(
-    resolveWorkbenchSelection({
-      selection: device,
-      pendingWorkspaceIds: new Set(),
-      projects: [],
-      workspaces: [],
-      daemons: [{ daemonId: "daemon-1" }],
-    }),
-    { selection: device, changed: false, shouldPersist: true },
-  );
-
-  const pending = { kind: "workspace", id: "pending-ws-1" } as const;
-  assert.deepEqual(
-    resolveWorkbenchSelection({
-      selection: pending,
-      pendingWorkspaceIds: new Set([pending.id]),
-      projects: [],
-      workspaces: [],
-      daemons: [],
-    }),
-    { selection: pending, changed: false, shouldPersist: false },
-  );
-});
-
-test("失效选择优先回退到最早项目的 main workspace，再回退任一工作区", () => {
-  const projects = [
-    { id: "newer", createdAt: 20 },
-    { id: "older", createdAt: 10 },
-  ];
-  const workspaces = [
-    { id: "newer-main", projectId: "newer", isMain: true },
-    { id: "older-child", projectId: "older", isMain: false },
-    { id: "older-main", projectId: "older", isMain: true },
-  ];
-  assert.deepEqual(
-    resolveWorkbenchSelection({
-      selection: { kind: "workspace", id: "removed" },
-      pendingWorkspaceIds: new Set(),
-      projects,
-      workspaces,
-      daemons: [],
-    }),
-    { selection: { kind: "workspace", id: "older-main" }, changed: true, shouldPersist: true },
-  );
-  assert.deepEqual(
-    resolveWorkbenchSelection({
-      selection: { kind: "device", id: "removed" },
-      pendingWorkspaceIds: new Set(),
-      projects: [],
-      workspaces,
-      daemons: [],
-    }).selection,
-    { kind: "workspace", id: "newer-main" },
-  );
 });
 
 test("关闭 active Tab 回退第一项，关闭后台 Tab 保留当前选择", () => {

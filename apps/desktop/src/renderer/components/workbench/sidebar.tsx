@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, ListChecks, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { AccountFooter, type SettingsTooltipControl } from "@/components/workbench/account-footer";
@@ -44,6 +44,8 @@ export type PendingWorkspace = {
 
 type SidebarProps = {
   client: CofluxClient;
+  openedWorkspaceIds: readonly string[];
+  onCloseWorkspaces: (ids: readonly string[]) => void;
   selectedWorkspaceId: string | null;
   onSelectWorkspace: (workspaceId: string) => void;
   /** 当前选中的设备（设备详情视图，plan 048）；与 selectedWorkspaceId 互斥 */
@@ -84,6 +86,7 @@ export function Sidebar(props: SidebarProps) {
   // 「还没有项目」引导空态要等快照确认真空才渲染。
   const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
   // 默认全部展开，只记折叠集合（新项目出现时自然是展开态）
+  const [batchIds, setBatchIds] = useState<ReadonlySet<string> | null>(null);
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
   const createMenuProjectId = props.createMenuProjectId;
   const setCreateMenuProjectId = props.onCreateMenuProjectIdChange;
@@ -124,6 +127,17 @@ export function Sidebar(props: SidebarProps) {
       .filter((workspace) => workspace.projectId === projectId)
       .sort((left, right) => (left.isMain === right.isMain ? left.createdAt - right.createdAt : left.isMain ? -1 : 1));
 
+  function toggleBatchWorkspace(id: string) {
+    setBatchIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const selectedBatchIds = props.openedWorkspaceIds.filter((id) => batchIds?.has(id));
+
   return (
     // 高度跟随父容器而不是 h-screen：断线横幅出现时根容器加 pt-7，写死一屏高会把底部 28px
     // （正好是账号脚部那一行）裁掉。横幅本身不动。
@@ -134,6 +148,96 @@ export function Sidebar(props: SidebarProps) {
       {/* 红绿灯（x=14,y=14）内嵌在这条空白带里，它同时是侧栏的窗口拖拽带（见 drag-region.ts）。 */}
       <div className="shrink-0" style={DESKTOP_DRAG_BAND_STYLE} />
       <div className="flex min-h-0 flex-1 flex-col pt-1.5">
+        <section aria-label="工作台" className="mb-2 flex max-h-[45%] min-h-0 shrink-0 flex-col border-b border-border px-2 pb-2">
+          <div className="mb-1 flex h-7 shrink-0 items-center gap-1 px-2">
+            <span className="text-xs text-muted-foreground">工作台</span>
+            <span className="text-xs text-muted-foreground/60">{props.openedWorkspaceIds.length || ""}</span>
+            {batchIds !== null ? (
+              <div className="ml-auto flex items-center gap-2 text-xs">
+                <button
+                  className="text-secondary-foreground hover:text-foreground disabled:opacity-40"
+                  disabled={selectedBatchIds.length === 0}
+                  onClick={() => { props.onCloseWorkspaces(selectedBatchIds); setBatchIds(null); }}
+                >关闭{selectedBatchIds.length ? ` (${selectedBatchIds.length})` : "所选"}</button>
+                <button className="text-muted-foreground hover:text-foreground" onClick={() => setBatchIds(null)}>取消</button>
+              </div>
+            ) : props.openedWorkspaceIds.length > 0 ? (
+              <Tooltip content="批量关闭工作区">
+                <button
+                  aria-label="批量关闭工作区"
+                  className="ml-auto flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+                  onClick={() => setBatchIds(new Set())}
+                ><ListChecks className="size-3.5" /></button>
+              </Tooltip>
+            ) : null}
+          </div>
+          <div className="min-h-0 overflow-y-auto">
+            {props.openedWorkspaceIds.length === 0 ? (
+              <p className="px-2 py-2 text-xs leading-5 text-muted-foreground">
+                {snapshotRevision === 0 ? "正在加载工作区…" : "从项目中打开工作区，即可留在这里。"}
+              </p>
+            ) : props.openedWorkspaceIds.map((id) => {
+              const workspace = workspaces.find((item) => item.id === id);
+              const project = projects.find((item) => item.id === workspace?.projectId);
+              const daemon = daemons.find((item) => item.daemonId === workspace?.daemonId);
+              const label = workspace ? workspace.name || workspace.branch || workspace.path : "工作区信息待同步";
+              const context = workspace
+                ? `${project?.name ?? "设备终端"} · ${daemon?.name ?? "设备信息待同步"}${daemon && !daemon.online ? " · 离线" : ""}`
+                : "连接恢复后同步";
+              const activity = workspaceActivity(id, daemon?.online ?? false, tasks, sessionAgents);
+              return (
+                <ContextMenu
+                  key={id}
+                  label={`工作台「${label}」操作`}
+                  size="sm"
+                  items={[
+                    { label: "从工作台关闭", onClick: () => props.onCloseWorkspaces([id]) },
+                    { label: "关闭其他工作区", onClick: () => props.onCloseWorkspaces(props.openedWorkspaceIds.filter((other) => other !== id)) },
+                  ]}
+                >
+                  <div className={cn(
+                    "group/opened mb-0.5 flex min-w-0 items-center rounded-md",
+                    id === props.selectedWorkspaceId ? "bg-accent text-foreground" : "text-secondary-foreground hover:bg-accent/70",
+                  )}>
+                    {batchIds !== null ? (
+                      <input
+                        type="checkbox"
+                        aria-label={`选择工作区「${label}」`}
+                        checked={batchIds.has(id)}
+                        onChange={() => toggleBatchWorkspace(id)}
+                        className="ml-2 size-3.5 shrink-0 accent-primary"
+                      />
+                    ) : null}
+                    <Tooltip content={`${label} · ${context}${activityLabel(activity) ? ` · ${activityLabel(activity)}` : ""}`} placement="end" hasHoverIndication={false}>
+                      <button
+                        className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left disabled:cursor-default"
+                        disabled={!workspace && batchIds === null}
+                        onClick={() => batchIds !== null ? toggleBatchWorkspace(id) : props.onSelectWorkspace(id)}
+                      >
+                        <span className="flex size-3.5 shrink-0 items-center justify-center">
+                          {activity.status === "idle" ? <GitBranch className="size-3.5 text-muted-foreground" /> : <ActivityIcon activity={activity} labeled />}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm">{label}</span>
+                          <span className="block truncate text-xs text-muted-foreground">{context}</span>
+                        </span>
+                      </button>
+                    </Tooltip>
+                    {batchIds === null ? (
+                      <Tooltip content="从工作台关闭（终端继续运行）">
+                        <button
+                          aria-label={`从工作台关闭「${label}」`}
+                          className="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground focus:opacity-100 group-hover/opened:opacity-100"
+                          onClick={() => props.onCloseWorkspaces([id])}
+                        ><X className="size-3.5" /></button>
+                      </Tooltip>
+                    ) : null}
+                  </div>
+                </ContextMenu>
+              );
+            })}
+          </div>
+        </section>
         <section className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           <div className="mb-1.5 flex h-7 items-center px-2">
             <span className="text-xs text-muted-foreground">项目</span>

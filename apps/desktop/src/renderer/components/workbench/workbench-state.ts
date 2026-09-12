@@ -1,5 +1,5 @@
 import type { AuthState, ConnectionStatus } from "@coflux/client";
-import { TaskStatus, type DaemonInfo, type Project, type Workspace } from "@coflux/protocol";
+import { TaskStatus } from "@coflux/protocol";
 
 /** 主工作台当前应展示的顶层页面。把认证分支集中成纯决策，避免新增状态误落到登录失败页。 */
 export type WorkbenchSurface = "authenticating" | "outdated" | "login" | "workspace";
@@ -44,50 +44,6 @@ export function parseStoredSelection(raw: string | null): WorkbenchSelection | n
 export function serializeSelection(selection: WorkbenchSelection | null): string | null {
   if (!selection) return null;
   return selection.kind === "device" ? `${DEVICE_SELECTION_PREFIX}${selection.id}` : selection.id;
-}
-
-type SelectionProject = Pick<Project, "id" | "createdAt">;
-type SelectionWorkspace = Pick<Workspace, "id" | "projectId" | "isMain">;
-type SelectionDaemon = Pick<DaemonInfo, "daemonId">;
-
-export type SelectionResolution = {
-  selection: WorkbenchSelection | null;
-  /** false 表示继续沿用传入对象，组件无需 setState。 */
-  changed: boolean;
-  /** 乐观工作区是假 id，不能把它重复写成稳定选择。 */
-  shouldPersist: boolean;
-};
-
-/**
- * 快照到达后校准工作台选择：离线设备仍有效，乐观工作区暂时有效；失效项优先回退到
- * 最早项目的 main workspace，再回退到任一工作区。
- */
-export function resolveWorkbenchSelection(input: {
-  selection: WorkbenchSelection | null;
-  pendingWorkspaceIds: ReadonlySet<string>;
-  projects: readonly SelectionProject[];
-  workspaces: readonly SelectionWorkspace[];
-  daemons: readonly SelectionDaemon[];
-}): SelectionResolution {
-  const { selection, pendingWorkspaceIds, projects, workspaces, daemons } = input;
-  const pending = selection?.kind === "workspace" && pendingWorkspaceIds.has(selection.id);
-  const valid =
-    pending ||
-    (selection?.kind === "device"
-      ? daemons.some((daemon) => daemon.daemonId === selection.id)
-      : selection?.kind === "workspace" && workspaces.some((workspace) => workspace.id === selection.id));
-
-  if (selection && valid) {
-    return { selection, changed: false, shouldPersist: !pending };
-  }
-
-  const firstProject = [...projects].sort((left, right) => left.createdAt - right.createdAt)[0];
-  const fallback =
-    (firstProject && workspaces.find((workspace) => workspace.projectId === firstProject.id && workspace.isMain)) ??
-    workspaces[0];
-  const next: WorkbenchSelection | null = fallback ? { kind: "workspace", id: fallback.id } : null;
-  const changed = selection?.kind !== next?.kind || selection?.id !== next?.id;
-  return { selection: next, changed, shouldPersist: true };
 }
 
 /**
