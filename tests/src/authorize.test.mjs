@@ -452,12 +452,15 @@ test("HTTP 授权页：未登录 GET 不区分 token 是否有效；无效 token
   assert.equal(crossSite.status, 403);
   const secFetch = await formPost(confirmUrl, confirm.hidden, jar, { "sec-fetch-site": "cross-site" });
   assert.equal(secFetch.status, 403);
+  const nullOriginNoHint = await formPost(confirmUrl, confirm.hidden, jar, { origin: "null" });
+  assert.equal(nullOriginNoHint.status, 403, "没有 Sec-Fetch-Site 佐证的 Origin: null 不放行");
   const stillValid = await pageGet(pending.url, jar);
   assert.equal(stillValid.status, 200, "被拒的 POST 不消费 token");
   assert.ok(stillValid.html.includes("确认设备"));
 
-  // 正确的确认（同源 Origin 放行）：daemon 收到 enrolled；同一 token 二次使用报不可用
-  const done = await formPost(confirmUrl, stillValid.hidden, jar, { origin: BASE });
+  // 正确的确认：按真实浏览器的头组合发（Sec-Fetch-Site: same-origin + Origin: null，Chrome 对同源表单 POST 就是这么发的），
+  // daemon 收到 enrolled；同一 token 二次使用报不可用
+  const done = await formPost(confirmUrl, stillValid.hidden, jar, { "sec-fetch-site": "same-origin", origin: "null" });
   assert.equal(done.status, 200, done.html);
   assert.ok(done.html.includes("设备已授权"));
   const enrolled = await d.waitFor((m) => m.case === "daemonEnrolled", "enrolled");
