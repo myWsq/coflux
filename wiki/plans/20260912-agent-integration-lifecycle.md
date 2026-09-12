@@ -12,7 +12,7 @@
 - Category: feature
 - Execution: self
 - Planned at: `062df3f`, 2026-09-12
-- Current state: IN_PROGRESS; user removed legacy Codex plugin migration/coexistence from scope. New integration loading and update behavior remain in scope.
+- Current state: DONE. Implementation: `d33d3aa`; validation and operational boundaries are recorded below. Legacy Codex plugins remain user-owned.
 - Authorization: automatically commit this plan and implement after a clean-tree check; no push, PR, merge, release, or production changes. Use this isolated worktree.
 
 ## Requirement
@@ -82,14 +82,14 @@ Out of scope: production deployment, release publication, marketplace publicatio
 
 ## Done criteria
 
-- [ ] Both hosts load the right bundle inside Coflux without global configuration changes.
-- [ ] Native Codex review and unavailable/unknown status are accurately represented.
-- [ ] Mac/Linux packages include everything needed; old shells use updates on next agent launch.
-- [ ] Active agents preserve immutable old integration and compatible CLI behavior.
-- [ ] New integration does not inject duplicate context/events of its own; old Codex plugins remain user-owned.
-- [ ] Meaningful tests and all required checks pass; real host acceptance documented.
-- [ ] Full diff reviewed, scope checked, no temporary probe artifacts remain.
-- [ ] Index updated to DONE only when all outcomes hold.
+- [x] Both hosts load the right bundle inside Coflux without global configuration changes.
+- [x] Native Codex review and unavailable/unknown status are accurately represented.
+- [x] Mac/Linux packages include everything needed; old shells use updates on next agent launch.
+- [x] Active agents preserve immutable old integration and compatible CLI behavior.
+- [x] New integration does not inject duplicate context/events of its own; old Codex plugins remain user-owned.
+- [x] Meaningful tests and all required checks pass; real host acceptance documented.
+- [x] Full diff reviewed, scope checked, no temporary probe artifacts remain.
+- [x] Index updated to DONE only when all outcomes hold.
 
 ## STOP conditions
 
