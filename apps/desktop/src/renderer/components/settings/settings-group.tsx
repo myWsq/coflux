@@ -27,6 +27,10 @@ export function SettingsGroup({ title, children }: { title?: string; children: R
 /**
  * 一条设置行。`control` 放右边的开关 / 按钮 / 取值；纯展示的行不传即可。
  * 不接 onClick：整行可点会和行内的控件抢，Astryx 的 List 文档也明确不建议在可点行里再放可点元素。
+ *
+ * 横向内边距压过 Item 自带的 8–12px：那套间距是给下拉菜单、选择器里的密集条目用的，放到设置卡片里
+ * 文字几乎贴着卡片边。加到 16px 才和 Cursor / 系统设置的设置行看齐。分隔线仍然边到边——padding
+ * 在边框内沿，不影响 border 的宽度。
  */
 export function SettingsRow({
   label,
@@ -37,5 +41,5 @@ export function SettingsRow({
   description?: ReactNode;
   control?: ReactNode;
 }) {
-  return <ListItem label={label} description={description} endContent={control} />;
+  return <ListItem label={label} description={description} endContent={control} className="px-4 py-1" />;
 }

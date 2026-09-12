@@ -55,10 +55,12 @@ export function AccountFooter({
           // children 覆盖可见内容，label 仍是无障碍名
           label: "账号菜单",
           variant: "ghost",
-          // 背景三态全部压平（Tailwind 的 utilities 层排在 astryx-base 之后，见 index.css 的
-          // @layer 声明，所以这些工具类能盖掉 ghost 自带的 hover/active 底色）。
+          // 背景三态全部压平。注意要压的是 **background-image**：astryx 的 ghost 按钮用
+          // `linear-gradient(--color-overlay-hover, …)` 画 hover/active 的整块底色，不是
+          // background-color，所以 bg-transparent 压不掉它，得用 bg-none。
+          // （Tailwind 的 utilities 层排在 astryx-base 之后，见 index.css 的 @layer 声明。）
           className:
-            "group h-auto min-w-0 flex-1 justify-start rounded-md px-1.5 py-1 text-left hover:bg-transparent active:bg-transparent aria-expanded:bg-transparent",
+            "group h-auto min-w-0 flex-1 justify-start rounded-md px-1.5 py-1 text-left hover:bg-none active:bg-none aria-expanded:bg-none",
           children: (
             <span className="flex min-w-0 items-center gap-2">
               <Avatar name={identity.avatarName} size="xsmall" />

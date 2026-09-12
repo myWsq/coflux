@@ -94,8 +94,10 @@ export function SettingsPage(props: SettingsPageProps) {
             // 两条侧栏的右边框必须同色，否则一开设置页就看得出换了一条。
             className="relative flex h-full flex-col border-r border-border bg-sidebar text-base"
           >
-            <div style={DESKTOP_DRAG_BAND_STYLE} />
-            <VStack gap={3} hAlign="stretch" padding={2} isScrollable>
+            <div className="shrink-0" style={DESKTOP_DRAG_BAND_STYLE} />
+            {/* 导航区吃掉剩余高度，把账号脚部顶到底——和工作台侧栏同一个做法（那边是
+                flex-1 的滚动区 + shrink-0 的脚部）。 */}
+            <VStack gap={3} hAlign="stretch" padding={2} isScrollable className="min-h-0 flex-1">
               {/* 靠左对齐：撑满一栏宽的按钮把「返回」摆在正中，和它下面左对齐的分区列表对不上。 */}
               <Button
                 label="返回"
@@ -132,7 +134,8 @@ export function SettingsPage(props: SettingsPageProps) {
           <LayoutContent padding={0}>
             {/* 右侧同高的拖拽带：设置页没有 tab 栏，这条带子让整页顶部都能拖动窗口。 */}
             <div style={DESKTOP_DRAG_BAND_STYLE} />
-            <VStack gap={6} hAlign="stretch" padding={8} maxWidth={860}>
+            {/* 内容列居中并留出余量：设置项贴着左栏排会显得挤，宽窗口下更明显。 */}
+            <VStack gap={6} hAlign="stretch" padding={8} maxWidth={860} className="mx-auto">
               <VStack gap={1} hAlign="stretch">
                 <Heading level={3}>{section.label}</Heading>
                 <Text type="supporting">{section.description}</Text>
