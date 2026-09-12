@@ -26,7 +26,7 @@ const HELP: &str = "账号命令（JSON 输出）：
   coflux workspace rename <id> --name <名称> | workspace remove <id>
   coflux terminal new --workspace <id> [--cmd <命令>] [--title <标题>]
   coflux terminal list [--device <id>] [--workspace <id>]
-  coflux terminal read|wait|send|stop|remove <id> --remote
+  coflux terminal run|read|wait|send|stop|remove <id> --remote
   coflux ports --remote
   在 Coflux 应用已登录时自动使用应用账号；独立 CLI 可自行登录。
   命令退出或升级 CLI 不会结束已运行的终端。
@@ -40,19 +40,22 @@ coflux —— 账号与终端操作
 
   以下几条供**跑在 coflux 终端里的 agent** 调用，把工作变成用户看得见、能接管的东西：
 
-  coflux terminal new [--cmd \"<命令>\"] [--title \"<标题>\"]
-                          开一个真实终端，用户在 coflux 侧栏能看到并随时接管
-                          带 --cmd = 作业终端：命令在登录 shell 里跑完即退出并带退出码，输出另
-                          落一份日志供 read 回读（代价：stdout 是管道，不是 tty）
-                          不带 --cmd = 会话终端：工作区目录下的常驻登录 shell，stdin/stdout 都是
-                          真 tty（能跑 vim/htop、有颜色），先 read 等提示符再 send，送 exit 才结束
-  coflux terminal list   列出本工作区的终端（含 status / 退出码）
-  coflux terminal read <taskId> [--lines N]
-                          读某个终端的内容（纯文本，默认最后 200 行；终端已退出也能读）
-  coflux terminal wait <taskId> [--timeout <秒>]
-                          阻塞等到该终端退出，打印退出码（默认超时 30 分钟）
-  coflux terminal send <taskId> --text \"<文本>\" [--enter]
+  coflux terminal new [--title=\"<标题>\"] [--cmd=\"<命令>\"]
+                          开一个真实终端：工作区目录下的常驻登录 shell，stdin/stdout 都是真 tty，
+                          用户在 coflux 侧栏能看到并随时接管，直到输入 exit 或 close 才结束
+                          带 --cmd = 等 shell 提示符就绪后把命令打进去（终端继续活着），等于 new + run
+  coflux terminal run <taskId> --cmd=\"<命令>\"
+                          往已开的终端里打一条命令（提示符就绪后才打入；上一条还在跑时拒绝）
+  coflux terminal wait <taskId> [--timeout=<秒>] [--seq=<N>]
+                          阻塞等到当前（或第 N 条）命令结束，打印它的退出码：# finished exit=<code>；
+                          shell 自己退出则打印 # exited exit=<code>（默认超时 30 分钟）
+  coflux terminal read <taskId> [--lines=N]
+                          读终端滚动缓冲的尾部（纯文本，默认最后 200 行，可远超一屏）
+  coflux terminal send <taskId> --text=\"<文本>\" [--enter]
                           往终端里输入文本（--enter 追加回车）。用户正在接管时会被拒
+  coflux terminal list   列出本工作区的终端（含 status / 退出码，跑着的还带 busy|idle 与上一条命令的退出码）
+  coflux terminal close <taskId>
+                          结束该终端（等价账号 CLI 的 stop）
   coflux notify \"<一句话>\"  叫人：工作区在侧栏转为「等待交互」并显示这句话
   coflux progress \"<一句话>\"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
   coflux ports           列出本工作区的监听端口及可直接打开的预览 URL
@@ -110,7 +113,7 @@ mod tests {
 
     #[test]
     fn help_keeps_agent_phrases_used_by_skill_docs() {
-        for phrase in ["coflux terminal new", "coflux terminal read <taskId>", "coflux notify", "coflux progress", "coflux ports", "coflux workspace locate", "coflux hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS"] {
+        for phrase in ["coflux terminal new", "coflux terminal run <taskId>", "coflux terminal wait <taskId>", "coflux terminal read <taskId>", "coflux terminal close <taskId>", "coflux notify", "coflux progress", "coflux ports", "coflux workspace locate", "coflux hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS"] {
             assert!(HELP.contains(phrase), "HELP 缺 {phrase}");
         }
     }
