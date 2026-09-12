@@ -10,6 +10,7 @@ const operations = z.discriminatedUnion("op", [
   z.object({ op: z.literal("workspace.rename"), workspaceId: id, name: z.string().max(1024) }).strict(),
   z.object({ op: z.literal("workspace.remove"), workspaceId: id }).strict(),
   z.object({ op: z.literal("terminal.new"), workspaceId: id, title: z.string().max(1024).default(""), command: z.string().max(65536).default("") }).strict(),
+  z.object({ op: z.literal("terminal.run"), ...target, command: z.string().min(1).max(65536) }).strict(),
   z.object({ op: z.literal("terminal.read"), ...target, lines: z.number().int().min(1).max(2000).default(200) }).strict(),
   z.object({ op: z.literal("terminal.send"), ...target, text: z.string().max(65536), enter: z.boolean().default(false) }).strict(),
   z.object({ op: z.literal("terminal.wait"), ...target, timeout: z.number().min(0).max(600).default(30) }).strict(),

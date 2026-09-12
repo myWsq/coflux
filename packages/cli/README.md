@@ -34,13 +34,17 @@ coflux terminal read <terminal-id> --remote
 Account commands return JSON. Inside a Coflux terminal, local commands automatically use the current workspace:
 
 ```sh
-coflux terminal new --title 'Tests' --cmd 'pnpm test'
+coflux terminal new --title 'Tests' --cmd 'pnpm test'   # a persistent shell; the command is typed in once its prompt is ready
+coflux terminal wait <terminal-id>                      # blocks until that command finishes and prints its exit code
+coflux terminal run <terminal-id> --cmd 'pnpm lint'     # type another command into the same shell
+coflux terminal read <terminal-id>                      # the tail of the terminal's scrollback
 coflux terminal list
-coflux terminal read <terminal-id>
-coflux terminal wait <terminal-id>
+coflux terminal close <terminal-id>
 coflux progress 'Reviewing the changes.'
 coflux notify 'Ready for your review.'
 ```
+
+Every terminal is the workspace's default login shell on a real tty, alive until `exit` or `close`; `--cmd` and `run` only type a command in after the shell has signalled that its prompt is ready, and `wait` reports that command's exit code while the terminal stays open.
 
 The CLI bundled with the desktop app can reuse the app's login through a local channel. Independently installed CLIs can sign in themselves. See `coflux --help`, `cofluxd --help`, and the [agent skill](skills/coflux/SKILL.md).
 

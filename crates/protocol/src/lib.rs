@@ -41,8 +41,8 @@ pub use frame::{
     FRAME_OUTPUT, FRAME_PROXY_DATA, FRAME_REPLAY, MAX_FRAME_ID_BYTES,
 };
 pub use ipc::{
-    is_frame, write_record, RecordParseError, RecordParser, RecordWriteError, SessionInfo,
-    SupervisorToWorker, WorkerToSupervisor, MAX_IPC_RECORD_BYTES, SUPERVISOR_SOCK_ENV,
+    is_frame, write_record, CommandStateInfo, RecordParseError, RecordParser, RecordWriteError,
+    SessionInfo, SupervisorToWorker, WorkerToSupervisor, MAX_IPC_RECORD_BYTES, SUPERVISOR_SOCK_ENV,
     SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
 };
 pub use wire::{DaemonToServer, FsEntry, FsEntryKind, ServerToDaemon, SessionPorts, SessionRef};
