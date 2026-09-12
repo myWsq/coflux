@@ -18,6 +18,13 @@ import { cn } from "@/lib/utils";
 const ACCOUNT_MENU_WIDTH = 200;
 
 /**
+ * 缩小版按键标。Kbd 的每个 `<kbd>` 都带着组件内部写死的类，外部 className 只落在外层 span 上，
+ * 所以只能用后代选择器压过去（utilities 层排在 astryx-base 之后，压得动）。默认那套 20px 见方、
+ * 2px 底边的按键块是给正文里的快捷键说明用的，放进 tooltip 和菜单行就比旁边的字还抢眼。
+ */
+const COMPACT_KBD = "[&_kbd]:h-4 [&_kbd]:min-w-4 [&_kbd]:border-b [&_kbd]:px-1 [&_kbd]:text-2xs";
+
+/**
  * 侧栏底部的账号脚部（plan 110，Cursor 左下角那一行）：头像 + 登录身份，尾部一个设置按钮。
  *
  * 身份只显示一行用户名。所连服务器不再挂在名字下面当副标题——它是设置项，挪进了设置页的「通用」，
@@ -89,7 +96,7 @@ export function AccountFooter({
         <DropdownMenuItem
           icon={<Cog className="size-3.5" />}
           label={settingsLabel}
-          endContent={<Kbd keys="mod+," />}
+          endContent={<Kbd keys="mod+," className={COMPACT_KBD} />}
           onClick={onToggleSettings}
         />
         <Divider />
@@ -111,15 +118,16 @@ export function AccountFooter({
           content={
             <HStack gap={2} vAlign="center">
               <span>{settingsLabel}</span>
-              <Kbd keys="mod+," />
+              <Kbd keys="mod+," className={COMPACT_KBD} />
             </HStack>
           }
         >
           <button
             aria-label={settingsLabel}
             aria-pressed={isSettingsOpen}
+            // 尺寸对齐侧栏里其它图标按钮（24px 命中区 + 14px 图标），此前这颗大了一号。
             className={cn(
-              "flex size-7 shrink-0 items-center justify-center rounded-md transition-colors",
+              "flex size-6 shrink-0 items-center justify-center rounded-md transition-colors",
               isSettingsOpen
                 ? "bg-accent text-foreground"
                 : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -129,7 +137,7 @@ export function AccountFooter({
               onToggleSettings();
             }}
           >
-            <Cog className="size-4" />
+            <Cog className="size-3.5" />
           </button>
         </Tooltip>
       )}
