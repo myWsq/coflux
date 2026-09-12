@@ -1532,7 +1532,7 @@ impl LocalAuthErrorCode {
 }
 // ===== executor（plan 116）=====
 //
-// 「agent 经 `cofluxd executor` 甩子任务」的通路。桌面 app 是本机唯一的 executor host：daemon 把
+// 「agent 经 `coflux executor` 甩子任务」的通路。桌面 app 是本机唯一的 executor host：daemon 把
 // 工单**推**给它（与 pty_output 同一种既有能力：往已连通道推帧），它用普通上行消息回报状态与终态。
 // 刻意不造「device 向 client 发请求并等响应」的反向 RPC——本片没有任何一条消息需要配对应答。
 //

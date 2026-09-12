@@ -1,9 +1,8 @@
 //! agent 侧子命令（plan 112）：`terminal new|list|read|wait|send`、`notify`、`progress`、
-//! `ports`、`workspace [locate|forget]`、`hook <claude|codex>`，以及 `executor run`（plan 116，
-//! 没有 node 版对应物——它是 Rust 版独有的新命令）。
+//! `ports`、`workspace [locate|forget]`、`hook <claude|codex>`、`executor run`。
 //!
 //! 请求体、stdout 文案与退出码逐命令对齐 node 版 `packages/cli/coflux.mjs`（`cmdTerminal` /
-//! `cmdNotify` / `cmdProgress` / `cmdWorkspace` / `cmdPorts` / `cmdHook`）——SKILL.md 与黑盒用例引用
+//! `cmdNotify` / `cmdProgress` / `cmdWorkspace` / `cmdPorts` / `cmdHook` / `cmdExecutor`）——SKILL.md 与黑盒用例引用
 //! 的输出短语（如 `已开终端 <taskId>`）逐字保留。渲染逻辑抽成纯函数以便单测，I/O 只在 `run_*` 里。
 //!
 //! 与 `hook` 子命令的约定**相反**：这些命令必须写 stdout——输出就是给 agent 读的返回值。
@@ -19,13 +18,14 @@ use crate::gateway;
 use crate::text::{strip_ansi, tail_lines};
 
 const DEFAULT_READ_LINES: usize = 200;
-/// executor 轮询间隔。与 `terminal wait` 同款范式（单次 `/agent` 有 25 秒应答上限），
-/// 但间隔更短：executor 的终态是用户在等的返回值，多等三秒都是白等。
+/// Executor poll interval. Same shape as `terminal wait` (a single `/agent` reply is capped at
+/// 25 seconds), but tighter: the terminal state here is a return value someone is blocked on.
 const EXECUTOR_POLL: Duration = Duration::from_secs(2);
-/// executor 默认等待上限（秒）。子任务常跑很久，与 `terminal wait` 取同一个数量级。
+/// Default executor wait budget, in seconds. Sub-tasks run long; same order as `terminal wait`.
 const DEFAULT_EXECUTOR_TIMEOUT_S: f64 = 1800.0;
-/// 提交在**传输层**失败时的重投次数。重投用同一个 submissionId，daemon 侧按它去重——
-/// 「提交超时不得盲目重发」说的是不得换 id 重发，不是不许重试。
+/// How many times a submission may be re-sent after a *transport* failure. The retry reuses the
+/// same submissionId and the daemon deduplicates on it — "never blindly resubmit" forbids a second
+/// id, not a second attempt.
 const EXECUTOR_SUBMIT_RETRIES: usize = 2;
 /// wait 的循环在 CLI 侧：单次 `/agent` 有 25 秒的 loopback 应答上限。默认 30 分钟——编码任务常跑很久；
 /// 轮询走 terminal.status（daemon 本地账本直接答，不经中心），3 秒一次对本机 loopback 是零负担。
@@ -395,14 +395,16 @@ pub fn run_ports() {
 }
 
 /* -------------------------------- executor ------------------------------- */
-// `cofluxd executor run`（plan 116）：把一个边界清楚的子任务甩给内置 executor。
+// `coflux executor run`: hand one well-bounded sub-task to the built-in executor.
 //
-// 三段式：**submit** 拿 runId（daemon 立刻答，带 `submissionId` 去重）→ CLI 侧 **轮询** status
-// （单次 `/agent` 只有 25 秒应答上限，长任务不可能挂在一次请求上）→ 终态渲染。
-// 等待超时时先发一条 cancel 再报错：不留一个没人看的写任务在后台改文件。
+// Three phases: **submit** returns a runId (answered immediately, deduplicated by `submissionId`)
+// -> the CLI **polls** status (a single `/agent` reply is capped at 25 seconds, so a long run can
+// never hang off one request) -> the terminal state is rendered. On wait timeout a cancel goes out
+// before the error: leaving an unwatched write job editing files is worse than the timeout itself.
 
-/// 本进程的稳定提交 id：pid + 启动时刻纳秒。**只生成一次**，传输层失败重投时原样复用——
-/// daemon 按它去重，重投因此绝不会变成第二个 run。
+/// This process's stable submission id: pid plus the nanosecond it was minted. Generated **once**
+/// and reused verbatim when a transport failure forces a retry — the daemon deduplicates on it, so
+/// a retry can never become a second run.
 fn submission_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -411,7 +413,7 @@ fn submission_id() -> String {
     format!("sub-{}-{nanos}", std::process::id())
 }
 
-/// `--timeout`：正数（可带小数）才生效，其余取默认 1800 秒。
+/// `--timeout`: only a positive (possibly fractional) number counts; anything else means 1800s.
 pub fn executor_timeout_secs(raw: Option<&str>) -> f64 {
     raw.and_then(|text| text.trim().parse::<f64>().ok())
         .filter(|n| n.is_finite() && *n > 0.0)
@@ -432,7 +434,8 @@ fn changed_files(status: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 成功终态的 stdout：第一行是机器可读的状态行，其后是 executor 的最终回复与改动文件清单。
+/// stdout for a successful terminal state: a machine-readable status line first, then the
+/// executor's final reply and the list of files it changed.
 pub fn render_executor_success(status: &Value) -> String {
     let mut out = vec!["# succeeded".to_string()];
     let summary = field_str(status, "summary").trim().to_string();
@@ -452,7 +455,8 @@ pub fn render_executor_success(status: &Value) -> String {
     out.join("\n")
 }
 
-/// 非成功终态的 stderr 一句话：终态名 + 原因 + 已经改了什么（被中断/失败时最要紧的信息）。
+/// One stderr sentence for a non-success terminal state: state name, reason, and what was already
+/// changed — the last part matters most when the run was interrupted or failed midway.
 pub fn render_executor_failure(status: &Value) -> String {
     let terminal = field_str(status, "terminal");
     let terminal = if terminal.is_empty() { "unknown" } else { terminal };
@@ -479,7 +483,8 @@ pub fn render_executor_timeout(timeout_secs: f64, run_id: &str, phase: &str) -> 
     )
 }
 
-/// 提交：传输层失败按同一个 submissionId 重投；daemon 明确拒绝则原样报出去，不重投。
+/// Submit. A transport failure is retried with the same submissionId; an explicit daemon refusal
+/// is reported verbatim and never retried.
 fn executor_submit(prompt: &str, write: bool) -> String {
     let submission = submission_id();
     let request = || {
@@ -517,7 +522,7 @@ fn executor_submit(prompt: &str, write: bool) -> String {
 
 pub fn run_executor(args: &ParsedArgs) {
     if args.positional(1) != Some("run") {
-        crate::die("executor 的子命令只有 run：cofluxd executor run --prompt=\"<任务>\" [--write]");
+        crate::die("executor 的子命令只有 run：coflux executor run --prompt=\"<任务>\" [--write]");
     }
     let prompt = args.string("prompt").unwrap_or("").trim().to_string();
     if prompt.is_empty() {
@@ -532,10 +537,12 @@ pub fn run_executor(args: &ParsedArgs) {
         .and_then(|timeout| Instant::now().checked_add(timeout));
     let run_id = executor_submit(&prompt, write);
     loop {
-        // 第一次轮询不等：拒绝（写锁被占 / 未配置模型）要立刻现形，不让 agent 白等一轮。
+        // The first poll does not sleep: a rejection (write lock taken, model not configured) has to
+        // surface immediately instead of costing the caller a whole poll interval.
         let status = gateway::agent_post(with(body("executor.status"), "runId", run_id.as_str()));
         if field_str(&status, "phase") == "done" {
-            // `succeeded` 是**任务**的成败；信封顶层那个 `ok` 说的是请求本身被接受了。
+            // `succeeded` is about the *task*; the envelope's top-level `ok` only says the request
+            // itself was accepted.
             if field_bool(&status, "succeeded") {
                 println!("{}", render_executor_success(&status));
                 return;
@@ -543,7 +550,8 @@ pub fn run_executor(args: &ParsedArgs) {
             crate::die(&render_executor_failure(&status));
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            // 先取消再报错：留一个没人看的写任务在后台改文件，比超时本身糟得多。
+            // Cancel before reporting: an unwatched write job still editing files in the background
+            // is far worse than the timeout itself.
             let _ = gateway::agent_post_result(with(
                 body("executor.cancel"),
                 "runId",

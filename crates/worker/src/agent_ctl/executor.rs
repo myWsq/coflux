@@ -1,4 +1,4 @@
-//! executor run 账本（plan 116）：`cofluxd executor run` 与桌面 app 之间那张极小的作业表。
+//! executor run 账本（plan 116）：`coflux executor run` 与桌面 app 之间那张极小的作业表。
 //!
 //! **daemon 在这条链路上只做三件事**：认下本机唯一的 executor host、把工单推给它、把它回报的
 //! 状态与终态存着供 CLI 轮询。调度、写锁、转录、模型调用全在桌面主进程——worker 的内存态热升级

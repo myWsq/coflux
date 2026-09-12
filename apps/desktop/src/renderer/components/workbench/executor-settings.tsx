@@ -61,7 +61,7 @@ export function ExecutorSettingsDialog({ open, onOpenChange, bridge }: ExecutorS
           <LayoutContent>
             <VStack gap={3} hAlign="stretch">
               <Text type="supporting">
-                coflux 内置的 executor 用这里配的模型执行任务。你的 agent 在终端里用 <Text type="code">cofluxd executor run</Text>{" "}
+                coflux 内置的 executor 用这里配的模型执行任务。你的 agent 在终端里用 <Text type="code">coflux executor run</Text>{" "}
                 发起；executor 只能改发起它的那个工作区里的文件，不会提交，执行命令时也没有网络。
               </Text>
 

@@ -2291,7 +2291,7 @@ impl DeviceRuntime {
         }
     }
 
-    /// `cofluxd executor run` 的提交半程：登记 run 并把工单推给已登记的本机桌面 host。
+    /// `coflux executor run` 的提交半程：登记 run 并把工单推给已登记的本机桌面 host。
     /// 没有 host / host 没配好模型时**立刻**返回一句可读错误，而不是让 agent 轮询到超时。
     pub fn executor_submit(
         &self,
@@ -3645,7 +3645,7 @@ fn device_error(request_id: Option<String>, code: &str, message: &str) -> device
     })
 }
 
-/// executor run -> CLI 可读的 JSON。字段稳定：`cofluxd executor` 与 SKILL 都按它比对。
+/// executor run -> CLI 可读的 JSON。字段稳定：`coflux executor` 与 SKILL 都按它比对。
 fn executor_run_view(record: &ExecutorRun) -> serde_json::Value {
     serde_json::json!({
         "runId": record.run_id,

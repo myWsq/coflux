@@ -160,17 +160,20 @@ pub fn post_json(port: u16, path: &str, body: &str, timeout: Duration) -> Result
     parse_response(&raw)
 }
 
-/// `/agent` 请求的两类失败。分开是为了 executor 的提交：**只有** Transport 才允许用同一个
-/// submissionId 重投（daemon 侧按它去重），Refused 重投没有任何意义。
+/// The two kinds of `/agent` failure. They are separated for the executor's submit path: **only**
+/// a Transport failure may be re-sent with the same submissionId (the daemon deduplicates on it);
+/// re-sending a Refused request accomplishes nothing.
 pub enum AgentError {
-    /// 连不上 / 写不出去 / 读超时——请求是否已被执行**未知**
+    /// Could not connect, could not write, or the read timed out — whether the request already ran
+    /// is **unknown**.
     Transport(String),
-    /// daemon 明确拒绝（含配置错误）：原样是给 agent 看的一句话
+    /// The daemon refused explicitly (configuration errors included); the text is a sentence meant
+    /// for the calling agent and is passed through verbatim.
     Refused(String),
 }
 
 impl AgentError {
-    /// 落到 stderr 的最终文案（对齐 node 版 `agentPost`）。
+    /// The final sentence written to stderr (wording aligned with the node `agentPost`).
     pub fn message(&self) -> String {
         match self {
             Self::Transport(error) => {
@@ -181,8 +184,9 @@ impl AgentError {
     }
 }
 
-/// 发一条 `/agent` 请求并返回 daemon 的 JSON 应答。请求体自动补 pid / ppid / cwd 三个字段。
-/// 刻意不在这里做自动重试：terminal new 有副作用；要重投的调用方自己决定（见 executor submit）。
+/// Send one `/agent` request and return the daemon's JSON reply. The body automatically gains the
+/// pid / ppid / cwd fields. Deliberately no automatic retry here: `terminal new` has side effects;
+/// callers that want to retry decide for themselves (see the executor submit path).
 pub fn agent_post_result(mut body: Map<String, Value>) -> Result<Value, AgentError> {
     let port = local_gateway_port().map_err(AgentError::Refused)?;
     body.insert("pid".into(), Value::from(pid()));
@@ -209,7 +213,7 @@ pub fn agent_post_result(mut body: Map<String, Value>) -> Result<Value, AgentErr
     Ok(parsed.unwrap_or(Value::Null))
 }
 
-/// 发一条 `/agent` 请求；失败即 `die`（文案对齐 node 版 `agentPost`）。
+/// Send one `/agent` request; any failure calls `die` (wording aligned with the node `agentPost`).
 pub fn agent_post(body: Map<String, Value>) -> Value {
     match agent_post_result(body) {
         Ok(value) => value,

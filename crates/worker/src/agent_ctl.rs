@@ -119,7 +119,7 @@ pub enum AgentAction {
     /// `coflux workspace forget <path>`（plan 104）：Claude Code 已清理掉该 worktree，
     /// 其下所有终端搬回项目主工作区、工作区记录消失。
     WorkspaceForget { path: String },
-    /// `cofluxd executor run`（plan 116）的提交半程：登记一条 run 并把工单推给本机桌面 app。
+    /// `coflux executor run`（plan 116）的提交半程：登记一条 run 并把工单推给本机桌面 app。
     /// 长任务不可能挂在一次 `/agent` 上（服务端 25 秒上限），故与 `terminal wait` 同款：
     /// submit 拿 runId，CLI 侧轮询 status。`submission_id` 由 CLI 生成且重投不变——提交超时
     /// **不得盲目重发**，去重靠它。

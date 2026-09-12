@@ -157,9 +157,12 @@ function agentTimeoutMs() {
   return Math.min(Math.max(Math.floor(raw), MIN_AGENT_TIMEOUT_MS), AGENT_TIMEOUT_MS);
 }
 
-async function agentPost(body) {
+// The two kinds of `/agent` failure, separated for the executor's submit path: only a "transport"
+// failure may be re-sent with the same submissionId (the daemon deduplicates on it); re-sending a
+// "refused" request accomplishes nothing. Mirrors `AgentError` in crates/cli/src/gateway.rs.
+async function agentPostResult(body) {
   const portResult = localGatewayPort();
-  if (!portResult.ok) die(portResult.error);
+  if (!portResult.ok) return { ok: false, kind: "refused", message: portResult.error };
   let res;
   try {
     res = await fetch(`http://127.0.0.1:${portResult.port}/agent`, {
@@ -169,12 +172,19 @@ async function agentPost(body) {
       signal: AbortSignal.timeout(agentTimeoutMs()),
     });
   } catch (error) {
-    die(`连不上本机 daemon：${error?.message || error}（daemon 没在跑？查看 Coflux.app 或 cofluxd status）`);
+    const detail = error?.message || error;
+    return { ok: false, kind: "transport", message: `连不上本机 daemon：${detail}（daemon 没在跑？查看 Coflux.app 或 cofluxd status）` };
   }
   let parsed = null;
   try { parsed = await res.json(); } catch { /* 非 JSON 响应按下面的兜底报错处理 */ }
-  if (!res.ok || !parsed?.ok) die(parsed?.error || `daemon 返回 ${res.status}`);
-  return parsed;
+  if (!res.ok || !parsed?.ok) return { ok: false, kind: "refused", message: parsed?.error || `daemon 返回 ${res.status}` };
+  return { ok: true, value: parsed };
+}
+
+async function agentPost(body) {
+  const result = await agentPostResult(body);
+  if (!result.ok) die(result.message);
+  return result.value;
 }
 
 // 剥掉 ANSI/OSC 转义与 C0 控制字符，保留 \t 与 \n——snapshot 是给终端渲染的字节流，
@@ -327,6 +337,109 @@ async function cmdPorts() {
   for (const p of ports) console.log(`${p.port}  ${p.url}`);
 }
 
+/* -------------------------------- executor ------------------------------- */
+// `coflux executor run`: hand one well-bounded sub-task to the built-in executor. Request bodies,
+// stdout phrases and exit codes are aligned command-for-command with `run_executor` in
+// crates/cli/src/commands.rs.
+//
+// Three phases: **submit** returns a runId (answered immediately, deduplicated by `submissionId`)
+// -> the CLI **polls** status (a single `/agent` reply is capped at 25 seconds, so a long run can
+// never hang off one request) -> the terminal state is rendered. On wait timeout a cancel goes out
+// before the error: leaving an unwatched write job editing files is worse than the timeout itself.
+
+// Tighter than WAIT_POLL_MS: the executor's terminal state is a return value someone is blocked on.
+const EXECUTOR_POLL_MS = 2000;
+const DEFAULT_EXECUTOR_TIMEOUT_S = 1800;
+// How many times a submission may be re-sent after a *transport* failure. The retry reuses the same
+// submissionId and the daemon deduplicates on it — "never blindly resubmit" forbids a second id,
+// not a second attempt.
+const EXECUTOR_SUBMIT_RETRIES = 2;
+
+/** This process's stable submission id: pid plus the nanosecond it was minted. Generated once. */
+function submissionId() {
+  const nanos = BigInt(Date.now()) * 1000000n + (process.hrtime.bigint() % 1000000n);
+  return `sub-${process.pid}-${nanos}`;
+}
+
+function executorTimeoutSecs(raw) {
+  const requested = Number(raw);
+  return Number.isFinite(requested) && requested > 0 ? requested : DEFAULT_EXECUTOR_TIMEOUT_S;
+}
+
+function executorChangedFiles(status) {
+  return Array.isArray(status?.changedFiles) ? status.changedFiles.filter((f) => typeof f === "string") : [];
+}
+
+/** stdout for a success: a machine-readable status line, the final reply, then the changed files. */
+function renderExecutorSuccess(status) {
+  const out = ["# succeeded"];
+  const summary = String(status?.summary ?? "").trim();
+  out.push(summary || "（executor 没有留下最终回复）");
+  const files = executorChangedFiles(status);
+  if (!files.length) out.push("改动文件：无");
+  else { out.push(`改动文件（${files.length}）：`); out.push(...files); }
+  out.push("executor 不会 git commit：改动请自己 review 后提交。");
+  return out.join("\n");
+}
+
+/** One stderr sentence for a non-success terminal state: state, reason, and what already changed. */
+function renderExecutorFailure(status) {
+  const terminal = String(status?.terminal ?? "") || "unknown";
+  const reason = String(status?.error ?? "").trim() || String(status?.note ?? "").trim() || "executor 没有给出原因";
+  const files = executorChangedFiles(status);
+  const tail = files.length ? `；已改动 ${files.length} 个文件：${files.join(" ")}` : "";
+  return `executor 任务未成功（${terminal}）：${reason}${tail}`;
+}
+
+function renderExecutorTimeout(timeoutSec, runId, phase) {
+  return `等待超时（${timeoutSec}s）：executor 任务 ${runId} 仍是 ${phase}，已请求取消。可加大 --timeout 后重发`;
+}
+
+/** Submit. A transport failure retries with the same submissionId; a refusal is reported verbatim. */
+async function executorSubmit(prompt, write) {
+  const submission = submissionId();
+  for (let attempt = 0; ; attempt += 1) {
+    const result = await agentPostResult({ action: "executor.submit", submissionId: submission, prompt, write });
+    if (result.ok) {
+      const runId = String(result.value?.runId ?? "");
+      if (!runId) die("daemon 没有返回 runId（版本太旧？）");
+      return runId;
+    }
+    if (result.kind === "refused" || attempt >= EXECUTOR_SUBMIT_RETRIES) die(result.message);
+    await sleep(EXECUTOR_POLL_MS);
+  }
+}
+
+async function cmdExecutor(values) {
+  if (positionals[1] !== "run") die(`executor 的子命令只有 run：coflux executor run --prompt="<任务>" [--write]`);
+  const prompt = String(values.prompt ?? "").trim();
+  if (!prompt) {
+    die(`executor run 需要 --prompt="<任务>"（一句把边界说清的任务描述，例如 --prompt="把 crates/worker 的 clippy 警告清掉"）`);
+  }
+  const write = Boolean(values.write);
+  const timeoutSec = executorTimeoutSecs(values.timeout);
+  const deadline = Date.now() + timeoutSec * 1000;
+  const runId = await executorSubmit(prompt, write);
+  for (;;) {
+    // The first poll does not sleep: a rejection (write lock taken, model not configured) has to
+    // surface immediately instead of costing the caller a whole poll interval.
+    const status = await agentPost({ action: "executor.status", runId });
+    if (status.phase === "done") {
+      // `succeeded` is about the *task*; the envelope's top-level `ok` only says the request itself
+      // was accepted.
+      if (status.succeeded) return void console.log(renderExecutorSuccess(status));
+      die(renderExecutorFailure(status));
+    }
+    if (Date.now() >= deadline) {
+      // Cancel before reporting: an unwatched write job still editing files in the background is
+      // far worse than the timeout itself.
+      await agentPostResult({ action: "executor.cancel", runId });
+      die(renderExecutorTimeout(timeoutSec, runId, status.phase));
+    }
+    await sleep(EXECUTOR_POLL_MS);
+  }
+}
+
 const HELP = `coflux —— 账号与终端操作
   coflux hook <claude|codex>   [agent hook 信使] 读 stdin/argv 的事件 JSON，转发给本机 daemon
                           （在 claude/codex 的 hook 配置里指向本命令；失败静默，不干扰 agent）
@@ -349,6 +462,14 @@ const HELP = `coflux —— 账号与终端操作
   coflux notify "<一句话>"  叫人：工作区在侧栏转为「等待交互」并显示这句话
   coflux progress "<一句话>"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
   coflux ports           列出本工作区的监听端口及可直接打开的预览 URL
+  coflux executor run --prompt="<任务>" [--write] [--timeout <秒>]
+                          把一个边界清楚的子任务甩给内置的轻量 executor（由本机 Coflux.app
+                          执行），阻塞到跑完并打印它的最终回复与改动文件。一次性：没有会话、
+                          不续聊，要改就再发一次。入参只有任务描述与读写模式——模型由用户在
+                          Coflux.app 里全局配一次。默认只读；--write 才允许改文件（同一工作区
+                          同时只允许一个写任务）。它被内核级沙箱锁在本工作区目录内，**不联网**
+                          （先把依赖装好再甩），也**不会 git commit**（改动由你自己 review 提交）
+                          只有装了 Coflux.app 的这台机器能用
   coflux workspace       一行 JSON 报出「我在哪」：workspaceId（cwd 所在的有效工作区，本地命令
                           都落在它上面）、path、owningWorkspaceId（本终端此刻归属哪个工作区）、
                           moved。用 /cd 挪进另一个 coflux 工作区后用它确认目标，跨工作区操作时也传这个
@@ -395,6 +516,10 @@ const { values, positionals } = parseArgs({
     lines: { type: "string" },
     timeout: { type: "string" },
     text: { type: "string" },
+    // executor: the only free-form input is the prompt; the model is configured once in Coflux.app.
+    prompt: { type: "string" },
+    // executor: read-only by default; --write is the only mode switch.
+    write: { type: "boolean", default: false },
     enter: { type: "boolean", default: false },
     help: { type: "boolean", short: "h", default: false },
   },
@@ -406,7 +531,7 @@ if (handlesAccountCommand(positionals, values, HOME)) {
   try { await runAccountCommand(positionals, values, HOME); } catch (error) { die(error.message); }
   process.exit(0);
 }
-const handlers = { hook: cmdHook, terminal: cmdTerminal, notify: cmdNotify, progress: cmdProgress, ports: cmdPorts, workspace: cmdWorkspace };
+const handlers = { hook: cmdHook, terminal: cmdTerminal, notify: cmdNotify, progress: cmdProgress, ports: cmdPorts, executor: cmdExecutor, workspace: cmdWorkspace };
 const handler = handlers[cmd];
 if (!handler) die(`未知命令: ${cmd}\n本机宿主请使用 Coflux.app 或 cofluxd。\n\n${HELP}`);
 await handler(values);
