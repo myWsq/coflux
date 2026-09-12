@@ -24,7 +24,9 @@ export const ClientCommandHandler = withSchema(ClientCommandContract.schemas, as
       ]);
       const workspaceByTask = new Map(terminals.map((task) => [task.id, task.workspaceId]));
       const ports = hub.routeTable.listForAccount(accountId).map((route) => ({ ...route, workspaceId: workspaceByTask.get(route.taskId), url: buildPreviewUrl(route.shortId) }));
-      return reply({ ok: true, value: { accountId, devices, projects, workspaces, terminals, ports } });
+      // Live terminals carry their shell's command state (busy / last exit) from the latest checkpoint.
+      const decorated = terminals.map((task) => ({ ...task, ...(task.sessionId ? hub.terminalCommandState(task.sessionId) ?? {} : {}) }));
+      return reply({ ok: true, value: { accountId, devices, projects, workspaces, terminals: decorated, ports } });
     }
     case "logout":
       await hub.revokeClientSession(accountId, tokenHash);
@@ -33,6 +35,7 @@ export const ClientCommandHandler = withSchema(ClientCommandContract.schemas, as
     case "workspace.rename": return reply(await hub.renameWorkspaceForAccount(accountId, command.workspaceId, command.name));
     case "workspace.remove": return reply(await hub.removeWorkspaceForAccount(accountId, command.workspaceId));
     case "terminal.new": return reply(await hub.createTerminalForAccount(accountId, command));
+    case "terminal.run": return reply(await hub.runTerminalCommandForAccount(accountId, command.terminalId, command.command));
     case "terminal.read": {
       const result = await hub.readTerminalForAccount(accountId, command.terminalId);
       if (!result.ok) return reply(result);

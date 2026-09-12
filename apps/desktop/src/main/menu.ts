@@ -5,7 +5,6 @@ import type { DesktopCommand } from "../shared/desktop-bridge";
 export type MenuActions = {
   /** 菜单项 → 渲染层命令（与 use-global-shortcuts.ts 的键位语义一一对应） */
   sendCommand: (command: DesktopCommand) => void;
-  showServerInfo: () => void;
   checkForUpdates: () => void;
 };
 
@@ -34,7 +33,7 @@ export function buildAppMenu(actions: MenuActions): Menu {
         { role: "about" },
         { label: "检查更新…", click: () => actions.checkForUpdates() },
         { type: "separator" },
-        { label: "服务器地址…", click: () => actions.showServerInfo() },
+        pageShortcut("设置…", "CmdOrCtrl+,", "open-settings"),
         { type: "separator" },
         { role: "services" },
         { type: "separator" },

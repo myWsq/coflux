@@ -275,8 +275,9 @@ public struct Coflux_V1_AgentTerminalNew: Sendable {
 
   public var title: String = String()
 
-  /// worker 已写好的临时包装脚本绝对路径，server 原样填进 SessionCreate.shell。
-  /// server 不解释也不校验它——脚本由 daemon 自己生成、只回到同一个 daemon 执行。
+  /// Unused since the interactive-only terminal model: every terminal is the workspace's default
+  /// login shell, and a command to type in travels separately (terminal.run on the daemon's local
+  /// /agent surface). The worker always sends an empty string; the server ignores the field.
   public var shell: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -294,10 +295,10 @@ public struct Coflux_V1_AgentTerminalList: Sendable {
   public init() {}
 }
 
-/// 读某个终端当前内容。取的是中心缓存的 checkpoint 而非 daemon 本地 snapshot：本地 snapshot
-/// 在 session 退出后就没了，而「命令跑完了看输出」恰恰是 agent 最常用的场景（见 plans/074
-/// 执行期偏离记录）。中心 checkpoint 滞后 ≤2s（CHECKPOINT_INTERVAL），且经 server 天然完成
-/// 「该 task 与发起方同 workspace」的归属校验。
+/// Read a terminal's content from the center's cached checkpoint (the daemon's own snapshot is gone
+/// once the session has exited; a live terminal is read locally by the daemon instead — plan 094).
+/// The checkpoint lags by at most CHECKPOINT_INTERVAL (2s) and the server checks that the task
+/// belongs to the caller's workspace.
 public struct Coflux_V1_AgentTerminalRead: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -983,9 +984,10 @@ public struct Coflux_V1_DaemonToServer: Sendable {
   public init() {}
 }
 
-/// 读某终端的原始输出：优先命令日志尾部（agent/中心建的命令终端才有），否则 sessiond 当前
-/// 快照；两者都拿不到时 source=none，由中心退回 checkpoint。data 是原始字节（含 ANSI），
-/// 去转义/尾 N 行在中心做；worker 按 max_bytes 钳制。
+/// Read a terminal's raw output: the sessiond snapshot of a live session (scrollback plus the
+/// current screen); source=none when the session is gone, and the center falls back to its
+/// checkpoint. data is raw bytes (ANSI included); stripping and the last-N-lines cut happen in
+/// the center; the worker clamps to max_bytes.
 public struct Coflux_V1_ServerTerminalRead: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1044,11 +1046,29 @@ public struct Coflux_V1_ServerAgentRequest: Sendable {
     set {payload = .terminalInput(newValue)}
   }
 
+  public var terminalRun: Coflux_V1_ServerTerminalRun {
+    get {
+      if case .terminalRun(let v)? = payload {return v}
+      return Coflux_V1_ServerTerminalRun()
+    }
+    set {payload = .terminalRun(newValue)}
+  }
+
+  public var terminalWait: Coflux_V1_ServerTerminalWait {
+    get {
+      if case .terminalWait(let v)? = payload {return v}
+      return Coflux_V1_ServerTerminalWait()
+    }
+    set {payload = .terminalWait(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
     case terminalRead(Coflux_V1_ServerTerminalRead)
     case terminalInput(Coflux_V1_ServerTerminalInput)
+    case terminalRun(Coflux_V1_ServerTerminalRun)
+    case terminalWait(Coflux_V1_ServerTerminalWait)
 
   }
 
@@ -1062,7 +1082,8 @@ public struct Coflux_V1_ServerTerminalReadResult: Sendable {
 
   public var data: Data = Data()
 
-  /// log | snapshot | none
+  /// snapshot | none — snapshot is the sessiond rendering of a live session (scrollback plus the
+  /// current screen); none means the session is gone and the center falls back to its checkpoint.
   public var source: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1078,6 +1099,85 @@ public struct Coflux_V1_ServerTerminalInputResult: Sendable {
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
+}
+
+/// "do script": type `command` (plus Enter) into a live terminal once its shell has emitted the
+/// prompt-ready mark. Refused readably when a command is still running, when the shell never
+/// signalled readiness (integration not active), or when a human holder is present.
+public struct Coflux_V1_ServerTerminalRun: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var taskID: String = String()
+
+  public var command: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_ServerTerminalRunResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Sequence the typed command will carry in TerminalCommandState (wait targets it).
+  public var commandSeq: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Block until the targeted command (0 = the latest one started) has finished or the shell has
+/// exited, or until timeout_ms (bounded by the worker) elapses.
+public struct Coflux_V1_ServerTerminalWait: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var taskID: String = String()
+
+  public var commandSeq: UInt64 = 0
+
+  public var timeoutMs: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_ServerTerminalWaitResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// finished | running | exited — running means the timeout elapsed first.
+  public var state: String = String()
+
+  public var commandSeq: UInt64 = 0
+
+  /// The command's exit status (finished) or the shell's (exited).
+  public var exitCode: Int32 {
+    get {_exitCode ?? 0}
+    set {_exitCode = newValue}
+  }
+  /// Returns true if `exitCode` has been explicitly set.
+  public var hasExitCode: Bool {self._exitCode != nil}
+  /// Clears the value of `exitCode`. Subsequent reads from it will return its default value.
+  public mutating func clearExitCode() {self._exitCode = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _exitCode: Int32? = nil
 }
 
 public struct Coflux_V1_ServerAgentResult: Sendable {
@@ -1116,11 +1216,29 @@ public struct Coflux_V1_ServerAgentResult: Sendable {
     set {payload = .terminalInput(newValue)}
   }
 
+  public var terminalRun: Coflux_V1_ServerTerminalRunResult {
+    get {
+      if case .terminalRun(let v)? = payload {return v}
+      return Coflux_V1_ServerTerminalRunResult()
+    }
+    set {payload = .terminalRun(newValue)}
+  }
+
+  public var terminalWait: Coflux_V1_ServerTerminalWaitResult {
+    get {
+      if case .terminalWait(let v)? = payload {return v}
+      return Coflux_V1_ServerTerminalWaitResult()
+    }
+    set {payload = .terminalWait(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
     case terminalRead(Coflux_V1_ServerTerminalReadResult)
     case terminalInput(Coflux_V1_ServerTerminalInputResult)
+    case terminalRun(Coflux_V1_ServerTerminalRunResult)
+    case terminalWait(Coflux_V1_ServerTerminalWaitResult)
 
   }
 
@@ -1416,6 +1534,8 @@ public struct Coflux_V1_SessionCreate: Sendable {
 
   public var cwd: String = String()
 
+  /// Unused: the supervisor always starts the workspace's default login shell. Kept only so old
+  /// daemons keep decoding the message; the server never fills it.
   public var shell: String {
     get {_shell ?? String()}
     set {_shell = newValue}
@@ -3672,7 +3792,7 @@ extension Coflux_V1_ServerTerminalInput: SwiftProtobuf.Message, SwiftProtobuf._M
 
 extension Coflux_V1_ServerAgentRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerAgentRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{4}\u{9}terminal_read\0\u{3}terminal_input\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{4}\u{9}terminal_read\0\u{3}terminal_input\0\u{3}terminal_run\0\u{3}terminal_wait\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3707,6 +3827,32 @@ extension Coflux_V1_ServerAgentRequest: SwiftProtobuf.Message, SwiftProtobuf._Me
           self.payload = .terminalInput(v)
         }
       }()
+      case 12: try {
+        var v: Coflux_V1_ServerTerminalRun?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .terminalRun(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .terminalRun(v)
+        }
+      }()
+      case 13: try {
+        var v: Coflux_V1_ServerTerminalWait?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .terminalWait(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .terminalWait(v)
+        }
+      }()
       default: break
       }
     }
@@ -3728,6 +3874,14 @@ extension Coflux_V1_ServerAgentRequest: SwiftProtobuf.Message, SwiftProtobuf._Me
     case .terminalInput?: try {
       guard case .terminalInput(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
+    }()
+    case .terminalRun?: try {
+      guard case .terminalRun(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+    }()
+    case .terminalWait?: try {
+      guard case .terminalWait(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
     }()
     case nil: break
     }
@@ -3796,9 +3950,168 @@ extension Coflux_V1_ServerTerminalInputResult: SwiftProtobuf.Message, SwiftProto
   }
 }
 
+extension Coflux_V1_ServerTerminalRun: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ServerTerminalRun"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}command\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.command) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 2)
+    }
+    if !self.command.isEmpty {
+      try visitor.visitSingularStringField(value: self.command, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ServerTerminalRun, rhs: Coflux_V1_ServerTerminalRun) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.taskID != rhs.taskID {return false}
+    if lhs.command != rhs.command {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ServerTerminalRunResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ServerTerminalRunResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}command_seq\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.commandSeq) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.commandSeq != 0 {
+      try visitor.visitSingularUInt64Field(value: self.commandSeq, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ServerTerminalRunResult, rhs: Coflux_V1_ServerTerminalRunResult) -> Bool {
+    if lhs.commandSeq != rhs.commandSeq {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ServerTerminalWait: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ServerTerminalWait"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{3}command_seq\0\u{3}timeout_ms\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.commandSeq) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.timeoutMs) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 2)
+    }
+    if self.commandSeq != 0 {
+      try visitor.visitSingularUInt64Field(value: self.commandSeq, fieldNumber: 3)
+    }
+    if self.timeoutMs != 0 {
+      try visitor.visitSingularUInt32Field(value: self.timeoutMs, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ServerTerminalWait, rhs: Coflux_V1_ServerTerminalWait) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.taskID != rhs.taskID {return false}
+    if lhs.commandSeq != rhs.commandSeq {return false}
+    if lhs.timeoutMs != rhs.timeoutMs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ServerTerminalWaitResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ServerTerminalWaitResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}state\0\u{3}command_seq\0\u{3}exit_code\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.state) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.commandSeq) }()
+      case 3: try { try decoder.decodeSingularInt32Field(value: &self._exitCode) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.state.isEmpty {
+      try visitor.visitSingularStringField(value: self.state, fieldNumber: 1)
+    }
+    if self.commandSeq != 0 {
+      try visitor.visitSingularUInt64Field(value: self.commandSeq, fieldNumber: 2)
+    }
+    try { if let v = self._exitCode {
+      try visitor.visitSingularInt32Field(value: v, fieldNumber: 3)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ServerTerminalWaitResult, rhs: Coflux_V1_ServerTerminalWaitResult) -> Bool {
+    if lhs.state != rhs.state {return false}
+    if lhs.commandSeq != rhs.commandSeq {return false}
+    if lhs._exitCode != rhs._exitCode {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_ServerAgentResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerAgentResult"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{4}\u{7}terminal_read\0\u{3}terminal_input\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{4}\u{7}terminal_read\0\u{3}terminal_input\0\u{3}terminal_run\0\u{3}terminal_wait\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3835,6 +4148,32 @@ extension Coflux_V1_ServerAgentResult: SwiftProtobuf.Message, SwiftProtobuf._Mes
           self.payload = .terminalInput(v)
         }
       }()
+      case 12: try {
+        var v: Coflux_V1_ServerTerminalRunResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .terminalRun(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .terminalRun(v)
+        }
+      }()
+      case 13: try {
+        var v: Coflux_V1_ServerTerminalWaitResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .terminalWait(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .terminalWait(v)
+        }
+      }()
       default: break
       }
     }
@@ -3862,6 +4201,14 @@ extension Coflux_V1_ServerAgentResult: SwiftProtobuf.Message, SwiftProtobuf._Mes
     case .terminalInput?: try {
       guard case .terminalInput(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
+    }()
+    case .terminalRun?: try {
+      guard case .terminalRun(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+    }()
+    case .terminalWait?: try {
+      guard case .terminalWait(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
     }()
     case nil: break
     }

@@ -39,6 +39,28 @@ pub struct SessionInfo {
     pub session_id: String,
     pub task_id: String,
     pub pid: i32,
+    /// Shell-integration command state at resync time so a replacement worker (hot upgrade)
+    /// learns busy/sequence/last exit without waiting for the next mark. Absent from old
+    /// supervisors (`None` = unknown, the worker keeps whatever it had).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<CommandStateInfo>,
+}
+
+/// Command state of a live shell as tracked by sessiond from coflux's own OSC 133 marks
+/// (interactive-only terminal model). Mirrors `wire::TerminalCommandState`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandStateInfo {
+    /// At least one accepted mark arrived: the shell is instrumented and its prompt was drawn.
+    pub integrated: bool,
+    /// A command started (command-start mark) and has not finished yet.
+    pub busy: bool,
+    /// Monotonic count of commands started; 0 = none yet.
+    pub command_seq: u64,
+    /// Sequence of the last finished command (0 = none) and its exit status when known.
+    pub finished_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 /// worker → supervisor 控制消息（JSON）
@@ -128,6 +150,14 @@ pub enum SupervisorToWorker {
         /// legacy session.create，worker 必须先向 sessiond catalog 对账再决定是否清活状态。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pid: Option<i32>,
+    },
+    /// Command state changed (a coflux mark arrived): pushed so the worker's `wait` wakes at once
+    /// instead of polling snapshots. Old workers drop the unknown variant safely.
+    #[serde(rename = "session.command")]
+    SessionCommand {
+        session_id: String,
+        #[serde(flatten)]
+        state: CommandStateInfo,
     },
     #[serde(rename = "resync.list")]
     ResyncList {
@@ -565,6 +595,7 @@ mod tests {
                 session_id: "s1".into(),
                 task_id: "t1".into(),
                 pid: 4242,
+                command: None,
             }],
         };
         let s = serde_json::to_string(&m).unwrap();
@@ -586,7 +617,8 @@ mod tests {
                     vec![SessionInfo {
                         session_id: "s1".into(),
                         task_id: "t1".into(),
-                        pid: 4242
+                        pid: 4242,
+                        command: None,
                     }]
                 );
             }

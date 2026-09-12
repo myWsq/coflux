@@ -1,6 +1,15 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
-import type { DesktopBridge, DesktopCommand, DesktopDaemonState, DesktopNotification, DesktopUpdateState } from "../shared/desktop-bridge";
+import type {
+  DesktopBridge,
+  DesktopCommand,
+  DesktopDaemonState,
+  DesktopExecutorInbound,
+  DesktopExecutorOutbound,
+  DesktopExecutorSettings,
+  DesktopNotification,
+  DesktopUpdateState,
+} from "../shared/desktop-bridge";
 import type { NativeEvent, NativeTransportBridge } from "../shared/native-transport";
 import { IPC, type Bootstrap } from "../shared/ipc";
 
@@ -110,6 +119,27 @@ const bridge: DesktopBridge = {
   },
   daemonDismissError() {
     ipcRenderer.send(IPC.daemonDismissError);
+  },
+  getExecutorSettings() {
+    return ipcRenderer.invoke(IPC.executorGetSettings) as Promise<DesktopExecutorSettings>;
+  },
+  onExecutorSettings(listener) {
+    return subscribe<DesktopExecutorSettings>(IPC.executorSettings, listener);
+  },
+  setExecutorModel(provider: string, modelId: string) {
+    ipcRenderer.send(IPC.executorSetModel, { provider: String(provider), modelId: String(modelId) });
+  },
+  setExecutorApiKey(apiKey: string) {
+    ipcRenderer.send(IPC.executorSetApiKey, String(apiKey));
+  },
+  sendExecutorInbound(message: DesktopExecutorInbound) {
+    ipcRenderer.send(IPC.executorInbound, message);
+  },
+  setExecutorChannel(daemonId: string) {
+    ipcRenderer.send(IPC.executorChannel, String(daemonId));
+  },
+  onExecutorOutbound(listener) {
+    return subscribe<DesktopExecutorOutbound>(IPC.executorOutbound, listener);
   },
 };
 

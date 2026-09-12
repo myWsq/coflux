@@ -1,8 +1,21 @@
 import { ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
 
-import type { DesktopDaemonState, DesktopNotification, DesktopUpdateState } from "../shared/desktop-bridge";
+import type {
+  DesktopDaemonState,
+  DesktopExecutorInbound,
+  DesktopExecutorSettings,
+  DesktopNotification,
+  DesktopUpdateState,
+} from "../shared/desktop-bridge";
 import { IPC, type Bootstrap } from "../shared/ipc";
-import { sanitizeBadgeCount, sanitizeNotification, sanitizeSessionToken } from "./ipc-sanitize";
+import {
+  sanitizeBadgeCount,
+  sanitizeExecutorApiKey,
+  sanitizeExecutorInbound,
+  sanitizeExecutorModel,
+  sanitizeNotification,
+  sanitizeSessionToken,
+} from "./ipc-sanitize";
 import { isTrustedRendererUrl } from "./ipc-trust";
 
 export type TrustedSenders = { appOrigin: string; devRendererUrl?: string };
@@ -30,6 +43,13 @@ export type IpcActions = {
   daemonRemove: () => void;
   daemonOpenFdaGuide: () => void;
   daemonDismissError: () => void;
+  /** executor（plan 116）：渲染层只当信使，作业表与凭证都在主进程 */
+  getExecutorSettings: () => DesktopExecutorSettings;
+  setExecutorModel: (provider: string, modelId: string) => void;
+  setExecutorApiKey: (apiKey: string) => void;
+  executorInbound: (message: DesktopExecutorInbound) => void;
+  /** 空串 = 本机 daemon 的 device 通道断了 */
+  executorChannel: (daemonId: string) => void;
 };
 
 /** 每条 IPC 都先校验发送方 frame 来源；不可信一律忽略。 */
@@ -114,4 +134,32 @@ export function registerIpc(actions: IpcActions, trusted: TrustedSenders): void 
       if (isTrusted(event)) verb();
     });
   }
+
+  ipcMain.handle(IPC.executorGetSettings, (event) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    return actions.getExecutorSettings();
+  });
+
+  ipcMain.on(IPC.executorSetModel, (event, payload: unknown) => {
+    if (!isTrusted(event)) return;
+    const model = sanitizeExecutorModel(payload);
+    if (model) actions.setExecutorModel(model.provider, model.modelId);
+  });
+
+  ipcMain.on(IPC.executorSetApiKey, (event, payload: unknown) => {
+    if (!isTrusted(event)) return;
+    const key = sanitizeExecutorApiKey(payload);
+    if (key !== null) actions.setExecutorApiKey(key);
+  });
+
+  ipcMain.on(IPC.executorInbound, (event, payload: unknown) => {
+    if (!isTrusted(event)) return;
+    const message = sanitizeExecutorInbound(payload);
+    if (message) actions.executorInbound(message);
+  });
+
+  ipcMain.on(IPC.executorChannel, (event, payload: unknown) => {
+    if (!isTrusted(event)) return;
+    if (typeof payload === "string" && payload.length <= 128) actions.executorChannel(payload);
+  });
 }

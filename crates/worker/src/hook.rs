@@ -3,7 +3,7 @@
 //! - `/hook`（plan 073）：`coflux hook <agent>` 作为信使把 claude/codex 的 hook 事件送进来，
 //!   用于判定回合状态。状态对齐 Vibe Island：active / approval / question / done
 //!   （空 = 尚无 hook 信号）。
-//! - `/agent`（plan 074；plan 094 起 local-first）：`coflux terminal|notify|progress|ports` 的控制
+//! - `/agent`（plan 074；plan 094 起 local-first；executor 三条见下）：`coflux terminal|notify|progress|ports` 的控制
 //!   请求，见 [crate::agent_ctl]——send/read/wait/notify/progress 在 daemon 本地闭环，new/list/ports
 //!   由 daemon 代问中心。拒绝原因原样回给调用方：细节只是参数校验文案，吞成 `bad request` 只会让
 //!   agent 盲目重试（plan 094）。`/hook` 的应答形态不变。
@@ -34,10 +34,8 @@ use crate::agent_ctl::{AgentAction, AgentRequest, AgentResponse};
 const MAX_HEAD_BYTES: usize = 8 * 1024;
 /// `/hook` 体上限：hook 载荷只有几个字段，几 KB 足够，超限即拒。
 const MAX_BODY_BYTES: usize = 4 * 1024;
-/// `/agent` 体上限：要装得下 64 KB 的 send 文本或 16 KB 的命令行加 JSON 封包（plan 094，与 MCP 对齐）。
+/// `/agent` 体上限：要装得下 64 KB 的 send 文本或命令行加 JSON 封包（plan 094，与 MCP 对齐）。
 const MAX_AGENT_BODY_BYTES: usize = 128 * 1024;
-/// `terminal.new` 命令行上限：与中心 `MAX_TERMINAL_COMMAND_BYTES` 同值（空命令 = 会话终端，不受此限）。
-const MAX_COMMAND_BYTES: usize = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 /// 等待 main 消费任务完成 pid 反查的上限（含一次 spawn_blocking 进程树扫描）。
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -265,6 +263,12 @@ struct AgentBody {
     text: String,
     #[serde(default)]
     enter: bool,
+    /// `terminal.wait`: command sequence to wait for (0 = the latest one started) and the
+    /// blocking bound in milliseconds (0 = the daemon's default round).
+    #[serde(default)]
+    command_seq: u64,
+    #[serde(default)]
+    timeout_ms: u64,
     /// 调用方的当前工作目录（plan 102）：CLI 每条请求都带 `process.cwd()`，daemon 据此把
     /// 请求的**目标**解析到 cwd 所在的工作区。旧 CLI 不带，缺省空串 = 退回归属工作区。
     #[serde(default)]
@@ -274,11 +278,28 @@ struct AgentBody {
     /// 目录）刻意分开——插件脚本在会话当前目录里执行，两者未必相同。
     #[serde(default)]
     path: String,
+    /// executor（plan 116）：CLI 生成的稳定提交 id，重投不变——提交超时时靠它去重，
+    /// 不向用户增加入参。
+    #[serde(default)]
+    submission_id: String,
+    /// executor 的任务描述（唯一的自由入参）
+    #[serde(default)]
+    prompt: String,
+    /// executor 读写模式：true = 可写
+    #[serde(default)]
+    write: bool,
+    /// executor 的 run id（status / cancel）
+    #[serde(default)]
+    run_id: String,
 }
 
-/// 单次 send 的文本上限：与 MCP `send_terminal_input` 的 64 KB 同值（plan 094 对齐）；超长基本是
-/// 误把文件内容当输入灌，直接拒绝比截断安全。
+/// 单次 send 的文本上限（也是 `terminal.run` 命令行的上限）：与 MCP `send_terminal_input` 的 64 KB
+/// 同值（plan 094 对齐）；超长基本是误把文件内容当输入灌，直接拒绝比截断安全。
 const MAX_SEND_TEXT_BYTES: usize = 64 * 1024;
+
+/// executor 单条 prompt 的字节上限（plan 116）：与账本里的同值，在这里先挡一道，
+/// 让超长请求连队列都进不去。
+const MAX_EXECUTOR_PROMPT_BYTES: usize = crate::agent_ctl::executor::MAX_PROMPT_BYTES;
 
 async fn handle_agent(
     raw: &[u8],
@@ -288,19 +309,56 @@ async fn handle_agent(
         .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
     let action = match parsed.action.as_str() {
         "terminal.new" => {
-            // 命令为空 = 会话终端（plan 101）：不带命令即开一个常驻、全 tty 的登录 shell，
-            // 直到有人输入 exit 才结束；带命令的作业终端语义不变，上限只对非空命令生效。
-            if parsed.command.len() > MAX_COMMAND_BYTES {
-                return Err(RequestError::BadRequest(format!(
-                    "terminal.new 命令超过 {MAX_COMMAND_BYTES} 字节上限"
-                )));
+            // A terminal is always the default login shell (real tty, alive until exit/close).
+            // The old `command` field meant "run this as a job and exit"; an old CLI that still
+            // sends it must hear that the meaning is gone instead of silently getting a shell
+            // that never runs its command.
+            if !parsed.command.trim().is_empty() {
+                return Err(RequestError::BadRequest(
+                    "terminal.new no longer takes a command: open the terminal, then `coflux terminal run <taskId> --cmd=...` (update the coflux CLI)".into(),
+                ));
             }
             AgentAction::TerminalNew {
                 title: parsed.title,
-                command: parsed.command,
             }
         }
         "terminal.list" => AgentAction::TerminalList,
+        "terminal.run" => {
+            // "do script": typed into an existing terminal once its shell signals prompt readiness.
+            if parsed.task_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.run 缺 taskId".into()));
+            }
+            if parsed.command.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.run 缺 command".into()));
+            }
+            if parsed.command.len() > MAX_SEND_TEXT_BYTES {
+                return Err(RequestError::BadRequest(format!(
+                    "terminal.run command 超过 {MAX_SEND_TEXT_BYTES} 字节上限"
+                )));
+            }
+            AgentAction::TerminalRun {
+                task_id: parsed.task_id,
+                command: parsed.command,
+            }
+        }
+        "terminal.wait" => {
+            if parsed.task_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.wait 缺 taskId".into()));
+            }
+            AgentAction::TerminalWait {
+                task_id: parsed.task_id,
+                command_seq: parsed.command_seq,
+                timeout_ms: parsed.timeout_ms,
+            }
+        }
+        "terminal.close" => {
+            if parsed.task_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("terminal.close 缺 taskId".into()));
+            }
+            AgentAction::TerminalClose {
+                task_id: parsed.task_id,
+            }
+        }
         "terminal.status" => {
             if parsed.task_id.trim().is_empty() {
                 return Err(RequestError::BadRequest("terminal.status 缺 taskId".into()));
@@ -366,6 +424,40 @@ async fn handle_agent(
                 return Err(RequestError::BadRequest("workspace.forget 缺 path".into()));
             }
             AgentAction::WorkspaceForget { path: parsed.path }
+        }
+        "executor.submit" => {
+            if parsed.submission_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("executor.submit 缺 submissionId".into()));
+            }
+            if parsed.prompt.trim().is_empty() {
+                return Err(RequestError::BadRequest("executor.submit 缺 prompt".into()));
+            }
+            if parsed.prompt.len() > MAX_EXECUTOR_PROMPT_BYTES {
+                return Err(RequestError::BadRequest(format!(
+                    "executor.submit prompt 超过 {MAX_EXECUTOR_PROMPT_BYTES} 字节上限"
+                )));
+            }
+            AgentAction::ExecutorSubmit {
+                submission_id: parsed.submission_id,
+                prompt: parsed.prompt,
+                write: parsed.write,
+            }
+        }
+        "executor.status" => {
+            if parsed.run_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("executor.status 缺 runId".into()));
+            }
+            AgentAction::ExecutorStatus {
+                run_id: parsed.run_id,
+            }
+        }
+        "executor.cancel" => {
+            if parsed.run_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("executor.cancel 缺 runId".into()));
+            }
+            AgentAction::ExecutorCancel {
+                run_id: parsed.run_id,
+            }
         }
         other => return Err(RequestError::BadRequest(format!("未知 action {other}"))),
     };

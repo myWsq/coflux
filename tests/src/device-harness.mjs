@@ -387,7 +387,7 @@ export class DeviceClient {
 
   transportFor(caseName) {
     if (!this.transport?.lanes) return this.transport;
-    const sessionPayloads = new Set(["ping", "sessionCatalogRequest", "sessionAttach", "sessionDetach", "sessionSnapshotRequest", "exitAck", "ptyInput", "ptyResize", "sessionStop"]);
+    const sessionPayloads = new Set(["ping", "sessionCatalogRequest", "sessionAttach", "sessionDetach", "sessionSnapshotRequest", "exitAck", "ptyInput", "ptyResize", "sessionStop", "executorHostRegister", "executorReport"]);
     const scope = sessionPayloads.has(caseName) ? 2 : 4;
     return this.transport.lanes.find(lane => (lane.scope <= 2 ? 2 : 4) === scope)?.device.transport ?? this.transport;
   }

@@ -149,6 +149,8 @@ dependencies = [
  "regex",
  "serde_json",
  "sha2",
+ "signal-hook",
+ "tungstenite",
  "ureq",
  "url",
 ]

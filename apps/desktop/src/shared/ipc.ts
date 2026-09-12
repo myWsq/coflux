@@ -29,11 +29,25 @@ export const IPC = {
   daemonRemove: "desktop:daemon-remove",
   daemonOpenFdaGuide: "desktop:daemon-open-fda-guide",
   daemonDismissError: "desktop:daemon-dismiss-error",
+  /**
+   * executor（plan 116）。渲染层只做两件事：把 device 通道收到的工单转进来，把主进程要发的上行交出去。
+   * 作业表与写锁的真相在主进程，渲染层不持有任何 run 状态。
+   */
+  executorGetSettings: "desktop:executor-get-settings",
+  executorSetModel: "desktop:executor-set-model",
+  executorSetApiKey: "desktop:executor-set-api-key",
+  /** 渲染层 → 主进程：device 通道收到的 assign / cancel / registered / ack */
+  executorInbound: "desktop:executor-inbound",
+  /** 渲染层 → 主进程：本机 daemon 的 device 通道可用 / 断开 */
+  executorChannel: "desktop:executor-channel",
   /** 主进程 → 渲染层 */
   focusWorkspace: "desktop:focus-workspace",
   command: "desktop:command",
   updateState: "desktop:update-state",
   daemonState: "desktop:daemon-state",
+  executorSettings: "desktop:executor-settings",
+  /** 主进程 → 渲染层：请把这条帧经 device 通道发给本机 daemon */
+  executorOutbound: "desktop:executor-outbound",
 } as const;
 
 export type Bootstrap = {

@@ -7,9 +7,13 @@
 use std::collections::{HashMap, HashSet};
 
 const STRING_OPTIONS: &[&str] = &[
-    "username", "workspace", "device", "project", "branch", "server", "name", "title", "cmd", "lines", "timeout", "text",
+    "username", "workspace", "device", "project", "branch", "server", "name", "title", "cmd", "lines", "timeout", "text", "seq",
+    // executor: the only free-form input is the prompt; the model is configured once in Coflux.app.
+    "prompt",
 ];
-const BOOL_OPTIONS: &[&str] = &["password-stdin", "remote", "existing-branch", "json", "enter", "help"];
+const BOOL_OPTIONS: &[&str] = &["password-stdin", "remote", "existing-branch", "json", "enter", "help",
+    // executor: read-only by default; --write is the only mode switch.
+    "write"];
 const SHORT_OPTIONS: &[(char, &str)] = &[('h', "help")];
 
 #[derive(Debug, Default, PartialEq)]

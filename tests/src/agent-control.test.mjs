@@ -1,24 +1,25 @@
 /**
  * plan 074：agent 协同控制——跑在 coflux PTY 里的 agent 把工作外化成用户看得见、能接管的实体。
  *
- * 验收核心：
- * - `coflux terminal new` 在中心真建出 task（标题就是 agent 给的），命令真在那个 PTY 里跑，
- *   跑完转 EXITED 并带上退出码——这是 agent 判断成败的唯一依据；
- * - `terminal read` 拿得到**已退出**终端的输出且是去 ANSI 的纯文本（最常用的场景就是「跑完了
- *   看输出」，而中心 checkpoint 是 2 秒周期缓存、秒级命令根本进不去，故 worker 侧走命令日志）；
+ * 验收核心（终端只有一种：常驻的登录 shell，命令是 do-script）：
+ * - `coflux terminal new --cmd` 在中心真建出 task（标题就是 agent 给的），命令在 shell 发出提示符就绪标记
+ *   之后才打进真 tty 的 shell 里跑；`wait` 拿到的是**这条命令**的退出码，终端仍在跑；`close` 才结束它；
+ * - `terminal read` 是去 ANSI 的纯文本，取的是滚动缓冲的尾部（`--lines` 超过一屏也读得到）；
+ * - `run` 在命令还在跑时被拒（busy）；已结束的命令再 wait 立即拿到退出码；用户/agent 往跑着的命令里
+ *   打字不影响退出码；远端/嵌套 shell 的裸 OSC 133 标记不会提前结束 wait；
  * - `notify` 让 presence 转 question 并带上留言，经中心广播到所有 client；
  * - 安全边界：coflux 会话之外的 pid 一律拒（身份就是「你在谁的进程树里」）；
  * - 每工作区活跃终端硬上限，超限拒绝且错误可读；
  * - plan 094：`/agent` 的拒绝原因回给调用方（超长命令、缺参数都有具体文案，不再是 `bad request`），
- *   命令 16 KB / send 文本 64 KB 与 MCP 对齐；
- * - plan 101：不带 `--cmd` 开出的是**会话终端**——常驻、全 tty 的登录 shell，不自己退出，
- *   read 读的是快照（没有命令日志），送 `exit` 才 exited；空命令不再是参数错误。
+ *   run 命令行 / send 文本都是 64 KB 上限；旧 CLI 往 `terminal.new` 塞 command 会被明确拒绝而不是静默开出一个
+ *   不跑命令的 shell；
+ * - 不带 `--cmd` 只开 shell：不自己退出，read 读快照，送 `exit` 才 exited；空命令不是参数错误。
  * - plan 102：本地命令跟随**调用方 cwd** 所在的工作区（agent 可以 `/cd` 进同设备的另一个工作区），
  *   `coflux workspace` 报出有效/归属工作区；cwd 在所有工作区之外时落回归属工作区。
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -131,7 +132,7 @@ after(async () => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-test("terminal new：中心真建出任务、命令真在 PTY 里跑、跑完带退出码；read 拿得到已退出终端的纯文本输出", async () => {
+test("terminal new --cmd：中心真建出任务，命令在提示符就绪后打进常驻 shell；wait 给命令的退出码而终端仍在跑；read 去 ANSI；close 才结束", async () => {
   const home = mkDir();
   const device = await openNativeDevice(stack);
   const c = device.control;
@@ -140,129 +141,136 @@ test("terminal new：中心真建出任务、命令真在 PTY 里跑、跑完带
   await device.attach(task.sessionId);
 
   try {
-    // agent 在自己的会话里开一个新终端跑命令。命令刻意带 ANSI 颜色 + 非零退出码：
-    // 前者验证 read 的去转义，后者验证退出码透传（管道尾是 tee，靠 PIPESTATUS 取回）。
+    // 命令写成脚本文件，免得三层 shell 引号互相转义：带 ANSI 颜色（验 read 去转义）、验 stdin/stdout 都是 tty
+    // （do-script 就是打进真 tty 的 shell，不是管道）、非零退出码（验 wait 透传的是命令的退出码）。
+    const job = join(home, "job.sh");
+    writeFileSync(job, "printf '\\033[32mHELLO-FROM-AGENT\\033[0m\\n'\ntest -t 0 && test -t 1 && echo TTY-OK-AGENT\nexit 3\n");
     const newOut = join(home, "new.txt");
-    await device.input(
-      task.sessionId,
-      cliCmd(gatewayPort, `terminal new --title "跑单测" --cmd "printf '\\033[32mHELLO-FROM-AGENT\\033[0m\\n'; exit 3"`, newOut),
-    );
+    await device.input(task.sessionId, cliCmd(gatewayPort, `terminal new --title "跑单测" --cmd "sh ${job}"`, newOut));
 
     const created = await c.waitFor(
-      (m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "跑单测",
-      "agent 建的任务出现在侧栏",
+      (m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "跑单测" && m.task.status === TaskStatus.RUNNING,
+      "agent 建的任务出现在侧栏并跑起来",
       20000,
     );
     assert.notEqual(created.task.id, task.id, "必须是新任务，不是复用发起方那个");
-
-    const exited = await c.waitFor(
-      (m) => m.case === "taskUpdated" && m.task.id === created.task.id && m.task.status === TaskStatus.EXITED,
-      "命令跑完 → EXITED",
-      20000,
-    );
-    assert.equal(exited.task.exitCode, 3, "退出码必须透传——agent 全靠它判断成败");
-
-    const newText = await waitForFile(newOut, (s) => s.includes(created.task.id), "terminal new 输出");
+    const newText = await waitForFile(newOut, (s) => s.includes("已打入命令") || s.includes("✗"), "terminal new 输出", 30000);
     assert.match(newText, /已开终端/, "CLI 必须写 stdout（与 hook 子命令的约定相反）");
+    assert.match(newText, /已打入命令 #1/, `命令要在提示符就绪后打入: ${newText}`);
 
-    // 读已退出的终端：这是最常用的场景，中心 checkpoint 的 2 秒周期覆盖不到秒级命令
-    const readOut = join(home, "read.txt");
-    await device.input(task.sessionId, cliCmd(gatewayPort, `terminal read ${created.task.id}`, readOut));
-    const readText = await waitForFile(readOut, (s) => s.includes("HELLO-FROM-AGENT"), "terminal read 输出");
+    // wait 等的是那条命令：退出码 3 来自 shell 集成标记，终端本身仍是 running
+    const waitText = await runCli(device, task.sessionId, gatewayPort, home, `terminal wait ${created.task.id} --timeout 60`, (s) => s.includes("# finished") || s.includes("✗"), "terminal wait", 60000);
+    assert.match(waitText, /# finished exit=3/, `wait 要给命令的退出码: ${waitText}`);
+
+    // read：状态仍 running、去 ANSI 的纯文本、命令跑在真 tty 上
+    const readText = await readScreenUntil(device, task.sessionId, gatewayPort, home, created.task.id, (s) => s.includes("TTY-OK-AGENT"), "terminal read");
     assert.ok(!readText.includes(String.fromCharCode(27)), `read 输出必须去 ANSI 转义: ${JSON.stringify(readText)}`);
-    assert.match(readText, /exited/, "read 要带上状态");
-    assert.match(readText, /exit=3/, "read 要带上退出码");
+    assert.match(readText, /^# running/m, "命令跑完了终端也不退出");
+    assert.match(readText, /HELLO-FROM-AGENT/);
 
-    // list 看得到两个终端（发起方 + agent 建的），且 agent 建的带退出码
-    const listOut = join(home, "list.txt");
-    await device.input(task.sessionId, cliCmd(gatewayPort, "terminal list", listOut));
-    const listText = await waitForFile(listOut, (s) => s.includes(created.task.id), "terminal list 输出");
-    assert.match(listText, new RegExp(`${created.task.id}\\s+exited exit=3\\s+跑单测`), `list 形状不符: ${listText}`);
+    // list：跑着的终端带命令状态（空闲 + 上一条命令的退出码）
+    const listText = await runCli(device, task.sessionId, gatewayPort, home, "terminal list", (s) => s.includes(created.task.id), "terminal list 输出");
+    assert.match(listText, new RegExp(`${created.task.id}\\s+running idle last=3\\s+跑单测`), `list 形状不符: ${listText}`);
     assert.ok(listText.includes(task.id), "同工作区的其它终端也要列出来");
 
+    // close 才结束：等价于账号 CLI 的 stop
+    const closeText = await runCli(device, task.sessionId, gatewayPort, home, `terminal close ${created.task.id}`, (s) => s.includes("终端") || s.includes("✗"), "terminal close");
+    assert.match(closeText, /已关闭终端|已请求关闭终端/, closeText);
+    await c.waitFor(
+      (m) => m.case === "taskUpdated" && m.task.id === created.task.id && m.task.status === TaskStatus.EXITED,
+      "close 后终端退出",
+      30000,
+    );
+    const afterClose = await runCli(device, task.sessionId, gatewayPort, home, `terminal read ${created.task.id}`, (s) => s.includes("#"), "退出后的 read");
+    assert.match(afterClose, /^# exited/m, `退出后 read 报 exited: ${afterClose}`);
   } finally {
     await removeWorkspace(c, ws.id);
     device.close();
   }
 });
 
-test("会话终端（plan 101）：不带 --cmd 开出常驻的全 tty 登录 shell，read 读快照，送 exit 才退出", async () => {
+test("终端只有一种：不带 --cmd 只开常驻 shell；run 等提示符后打入、busy 时被拒；wait 命令级且不丢完成；打字不改退出码；裸标记不算数；read --lines 超过一屏", async () => {
   const home = mkDir();
   const device = await openNativeDevice(stack);
   const c = device.control;
   const { ws, task } = await startDirTerminal(c, home);
   const gatewayPort = device.gateway.port;
   await device.attach(task.sessionId);
+  const cli = (args, predicate, label, timeout) => runCli(device, task.sessionId, gatewayPort, home, args, predicate, label, timeout);
 
   try {
-    // 不带 --cmd：与用户在侧栏点「新建终端」等价，一个不会自己退出的登录 shell
     const newOut = join(home, "shell-new.txt");
     await device.input(task.sessionId, cliCmd(gatewayPort, `terminal new --title "调试 shell"`, newOut));
-
     const created = await c.waitFor(
-      (m) =>
-        m.case === "taskUpdated" &&
-        m.task.workspaceId === ws.id &&
-        m.task.title === "调试 shell" &&
-        m.task.status === TaskStatus.RUNNING,
-      "会话终端出现在侧栏并跑起来",
+      (m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "调试 shell" && m.task.status === TaskStatus.RUNNING,
+      "终端出现在侧栏并跑起来",
       20000,
     );
     const shellId = created.task.id;
-    const newText = await waitForFile(newOut, (s) => s.includes(shellId) && s.includes("会话终端"), "terminal new 完整输出");
-    assert.match(newText, /已开终端/, "输出与作业终端同形");
-    assert.match(newText, /会话终端/, `不带 --cmd 时要提示这是会话终端: ${newText}`);
+    const newText = await waitForFile(newOut, (s) => s.includes("结束：") || s.includes("✗"), "terminal new 完整输出");
+    assert.match(newText, /已开终端/);
+    assert.match(newText, new RegExp(`跑命令：coflux terminal run ${shellId} --cmd=`), `不带 --cmd 时要提示 run: ${newText}`);
 
-    // 先 read 等提示符：会话终端没有命令日志，read 拿到的是 sessiond 的当前画面
-    await readScreenUntil(
-      device,
-      task.sessionId,
-      gatewayPort,
-      home,
-      shellId,
-      (s) => s.includes("# running") && !s.includes("（暂无输出）"),
-      "等 shell 提示符出现",
-    );
+    // 还没跑过任何命令：wait 可读拒绝，不干等
+    const nothing = await cli(`terminal wait ${shellId} --timeout 5`, (s) => s.trim().length > 0, "没命令时 wait");
+    assert.match(nothing, /✗/, nothing);
+    assert.match(nothing, /nothing to wait for|no command has run/, nothing);
 
-    // 全 tty 是这种终端存在的理由：作业终端的 stdout 是管道，`test -t 1` 不成立、这行不会有输出。
-    // 标记里的引号让「命令回显」和「命令输出」区分得开（回显里是 TTY-"OK"-101）。
-    await device.input(
-      task.sessionId,
-      cliCmd(gatewayPort, `terminal send ${shellId} --text 'test -t 0 && test -t 1 && echo TTY-"OK"-101' --enter`, join(home, "shell-send.txt")),
-    );
-    const screen = await readScreenUntil(
-      device,
-      task.sessionId,
-      gatewayPort,
-      home,
-      shellId,
-      (s) => s.includes("TTY-OK-101"),
-      "会话终端里 stdin/stdout 都是 tty",
-    );
-    assert.match(screen, /# running/, "命令跑完了终端也不能退出——它是常驻的");
+    // run 不用先 read 等提示符：daemon 自己等提示符就绪标记再打入；输出超过一屏也读得到（滚动缓冲）
+    const runText = await cli(`terminal run ${shellId} --cmd "seq 1 300; echo SEQ-DONE"`, (s) => s.includes("已打入命令") || s.includes("✗"), "terminal run", 30000);
+    assert.match(runText, /已打入命令 #1/, runText);
+    const waitText = await cli(`terminal wait ${shellId} --timeout 60`, (s) => s.includes("# finished") || s.includes("✗"), "wait seq", 60000);
+    assert.match(waitText, /# finished exit=0/, waitText);
+    const readText = await cli(`terminal read ${shellId} --lines 250`, (s) => s.includes("SEQ-DONE"), "read --lines 250");
+    const lines = readText.split("\n").filter((line) => line.length > 0);
+    assert.ok(lines.length >= 240, `--lines 250 必须超过一屏（24 行）: 只有 ${lines.length} 行`);
+    assert.ok(readText.includes("\n100\n") && readText.includes("\n299\n300\nSEQ-DONE"), `尾部是滚动缓冲里的最新行: ${JSON.stringify(readText.slice(-60))}`);
 
-    const listText = await runCli(device, task.sessionId, gatewayPort, home, "terminal list", (s) => s.includes(shellId), "terminal list 输出");
-    assert.match(listText, new RegExp(`${shellId}\\s+running\\s+调试 shell`), `会话终端在 list 里应是 running: ${listText}`);
+    // busy：命令还在跑时再 run 被拒（可读），已结束再 wait 立即拿到退出码（不丢完成）
+    const slow = await cli(`terminal run ${shellId} --cmd "sleep 3; (exit 2)"`, (s) => s.includes("已打入命令") || s.includes("✗"), "run sleep");
+    assert.match(slow, /已打入命令 #2/, slow);
+    const busy = await cli(`terminal run ${shellId} --cmd "echo nope"`, (s) => s.trim().length > 0, "busy run");
+    assert.match(busy, /✗/, busy);
+    assert.match(busy, /busy/, `命令还在跑时 run 要可读拒绝: ${busy}`);
+    await cli(`terminal wait ${shellId} --timeout 60`, (s) => s.includes("# finished exit=2") || s.includes("✗"), "wait sleep", 60000);
+    await sleep(1500);
+    const t0 = Date.now();
+    const again = await cli(`terminal wait ${shellId} --timeout 30`, (s) => s.includes("#") || s.includes("✗"), "wait again");
+    assert.match(again, /# finished exit=2/, `已结束的命令再 wait 要立即给留档的退出码: ${again}`);
+    assert.ok(Date.now() - t0 < 10000, "已结束的命令不该等");
 
-    // 送 exit 才结束，退出码是 shell 的（上一条命令成功，故为 0）
-    await device.input(task.sessionId, cliCmd(gatewayPort, `terminal send ${shellId} --text "exit" --enter`, join(home, "shell-exit.txt")));
+    // 退出码在有人往命令里打字时也不丢：read 等输入，send 一行，wait 拿到 (exit 5)
+    const reading = await cli(`terminal run ${shellId} --cmd "read line; echo GOT:\\$line; (exit 5)"`, (s) => s.includes("已打入命令") || s.includes("✗"), "run read");
+    assert.match(reading, /已打入命令 #3/, reading);
+    await sleep(500);
+    const sendText = await cli(`terminal send ${shellId} --text "typed-in" --enter`, (s) => s.trim().length > 0, "send into running command");
+    assert.match(sendText, /已写入终端/, sendText);
+    const typed = await cli(`terminal wait ${shellId} --timeout 30`, (s) => s.includes("#") || s.includes("✗"), "wait read", 40000);
+    assert.match(typed, /# finished exit=5/, `打字进去的命令也要给它自己的退出码: ${typed}`);
+    const gotText = await readScreenUntil(device, task.sessionId, gatewayPort, home, shellId, (s) => /^GOT:typed-in$/m.test(s), "输入真的到了命令");
+    assert.match(gotText, /^GOT:typed-in$/m);
+
+    // 远端 / 嵌套 shell 的裸 OSC 133 标记不带本会话的秘密：wait 不会被它提前结束
+    const foreign = await cli(`terminal run ${shellId} --cmd "printf '\\\\033]133;D;0\\\\007'; printf '\\\\033]133;A\\\\007'; sleep 3; (exit 4)"`, (s) => s.includes("已打入命令") || s.includes("✗"), "run foreign marks");
+    assert.match(foreign, /已打入命令 #4/, foreign);
+    const early = await cli(`terminal wait ${shellId} --timeout 1`, (s) => s.includes("#") || s.includes("✗"), "wait with foreign marks");
+    assert.match(early, /等待超时/, `裸标记不能提前结束 wait: ${early}`);
+    assert.ok(!early.includes("# finished"), early);
+    const real = await cli(`terminal wait ${shellId} --timeout 30`, (s) => s.includes("#") || s.includes("✗"), "wait real end", 40000);
+    assert.match(real, /# finished exit=4/, real);
+
+    const listText = await cli("terminal list", (s) => s.includes(shellId), "terminal list 输出");
+    assert.match(listText, new RegExp(`${shellId}\\s+running idle last=4\\s+调试 shell`), `list 要带命令状态: ${listText}`);
+
+    // 送 exit 才结束，退出码是 shell 的；shell 退出后 wait 走通用退出路径
+    await cli(`terminal send ${shellId} --text "exit 0" --enter`, (s) => s.trim().length > 0, "send exit");
     await c.waitFor(
       (m) => m.case === "taskUpdated" && m.task.id === shellId && m.task.status === TaskStatus.EXITED,
-      "送 exit 后会话终端才退出",
+      "送 exit 后终端才退出",
       30000,
     );
-    const waitText = await runCli(
-      device,
-      task.sessionId,
-      gatewayPort,
-      home,
-      `terminal wait ${shellId} --timeout 60`,
-      (s) => s.includes("# exited"),
-      "wait 到会话终端退出",
-      60000,
-    );
-    assert.match(waitText, /# exited exit=0/, `wait 要报 shell 自己的退出码: ${waitText}`);
-
+    const exited = await cli(`terminal wait ${shellId} --timeout 60`, (s) => s.includes("# exited") || s.includes("✗"), "wait 到终端退出", 60000);
+    assert.match(exited, /# exited exit=0/, `shell 退出后 wait 报 shell 自己的退出码: ${exited}`);
   } finally {
     await removeWorkspace(c, ws.id);
     device.close();
@@ -357,15 +365,29 @@ test("安全边界：coflux 会话之外的 pid 一律拒；非 json 被拒；�
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ ...body, pid: process.pid, ppid: process.ppid }),
       });
-    const tooLong = await post({ action: "terminal.new", command: "x".repeat(17 * 1024) });
-    assert.equal(tooLong.status, 400);
-    assert.match((await tooLong.json()).error, /命令超过 16384 字节上限/, "超长命令要给具体原因，不是 bad request");
-    // plan 101：空命令是合法输入（会话终端），不再被参数校验拦下——它只会撞上 pid 门
+    // 旧 CLI 往 terminal.new 塞 command：明确拒绝（不能静默开出一个不跑命令的 shell）
+    const legacyCommand = await post({ action: "terminal.new", command: "echo hi" });
+    assert.equal(legacyCommand.status, 400);
+    assert.match((await legacyCommand.json()).error, /no longer takes a command/, "带 command 的 terminal.new 要指名道姓地拒绝");
+    // 空命令是合法输入（只开 shell），不被参数校验拦下——它只会撞上 pid 门
     const emptyCommand = await post({ action: "terminal.new", command: "" });
-    assert.equal(emptyCommand.status, 403, "空命令不再是 400：它是会话终端，只该被 pid 门拦下");
+    assert.equal(emptyCommand.status, 403, "空命令不是 400：只开 shell，只该被 pid 门拦下");
     assert.match((await emptyCommand.json()).error, /不在 coflux 终端里/);
     const blankCommand = await post({ action: "terminal.new", command: "   " });
     assert.equal(blankCommand.status, 403, "空白命令与缺省等价，同样不是参数错误");
+    // run 的命令行与 send 文本同一个 64 KB 上限；缺参数指名道姓
+    const tooLong = await post({ action: "terminal.run", taskId: "t", command: "x".repeat(64 * 1024 + 1) });
+    assert.equal(tooLong.status, 400);
+    assert.match((await tooLong.json()).error, /command 超过 65536 字节上限/, "超长命令要给具体原因，不是 bad request");
+    const noCommand = await post({ action: "terminal.run", taskId: "t" });
+    assert.equal(noCommand.status, 400);
+    assert.match((await noCommand.json()).error, /terminal\.run 缺 command/);
+    const noWaitTask = await post({ action: "terminal.wait" });
+    assert.equal(noWaitTask.status, 400);
+    assert.match((await noWaitTask.json()).error, /terminal\.wait 缺 taskId/);
+    const noCloseTask = await post({ action: "terminal.close" });
+    assert.equal(noCloseTask.status, 400);
+    assert.match((await noCloseTask.json()).error, /terminal\.close 缺 taskId/);
     const noTask = await post({ action: "terminal.status" });
     assert.equal(noTask.status, 400);
     assert.match((await noTask.json()).error, /terminal\.status 缺 taskId/, "缺参数要指名道姓");
@@ -378,7 +400,7 @@ test("安全边界：coflux 会话之外的 pid 一律拒；非 json 被拒；�
 
     // 上限：发起方那个终端已占 1 个，再开 1 个到顶，第 3 个必须被拒
     const firstOut = join(home, "first.txt");
-    await device.input(task.sessionId, cliCmd(gatewayPort, `terminal new --title "占位" --cmd "sleep 60"`, firstOut));
+    await device.input(task.sessionId, cliCmd(gatewayPort, `terminal new --title "占位"`, firstOut));
     await c.waitFor(
       (m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "占位" && m.task.status === TaskStatus.RUNNING,
       "占位终端跑起来",
@@ -386,7 +408,7 @@ test("安全边界：coflux 会话之外的 pid 一律拒；非 json 被拒；�
     );
 
     const overOut = join(home, "over.txt");
-    await device.input(task.sessionId, cliCmd(gatewayPort, `terminal new --title "超限" --cmd "sleep 60"`, overOut));
+    await device.input(task.sessionId, cliCmd(gatewayPort, `terminal new --title "超限"`, overOut));
     const overText = await waitForFile(overOut, (s) => s.includes("上限"), "超限错误");
     assert.match(overText, new RegExp(`活跃终端已达上限 ${MAX_TERMINALS}`), `超限错误要可读: ${overText}`);
 
@@ -471,21 +493,19 @@ test("跟随 cwd：在 B 的目录里开的终端属 B、跑在 B；list 只见 
       `cwd 不在任何工作区内要落回归属工作区: ${JSON.stringify(inNowhere)}`,
     );
 
-    // 2) 在 B 的目录里开终端：task 挂在 B 名下，命令真的在 B 的根目录里跑
-    const newText = await runIn(homeB, `terminal new --title "在 B 跑 pwd" --cmd "pwd"`, (s) => s.includes("已开终端") || s.includes("✗"), "在 B 开终端");
+    // 2) 在 B 的目录里开终端并打入 pwd：task 挂在 B 名下，命令真的在 B 的根目录里跑
+    const newText = await runIn(homeB, `terminal new --title "在 B 跑 pwd" --cmd "pwd"`, (s) => s.includes("已打入命令") || s.includes("✗"), "在 B 开终端", 30000);
     assert.match(newText, /已开终端/, `在 B 开终端失败: ${newText}`);
+    assert.match(newText, /已打入命令/, `pwd 要在提示符就绪后打入: ${newText}`);
     const inWsB = await c.waitFor(
       (m) => m.case === "taskUpdated" && m.task.title === "在 B 跑 pwd",
       "B 名下出现 agent 建的终端",
       20000,
     );
     assert.equal(inWsB.task.workspaceId, wsB.id, "终端必须挂在 cwd 所在的工作区 B 名下，而不是发起方 A");
-    await c.waitFor(
-      (m) => m.case === "taskUpdated" && m.task.id === inWsB.task.id && m.task.status === TaskStatus.EXITED,
-      "pwd 跑完",
-      20000,
-    );
-    const bReadText = await runIn(homeB, `terminal read ${inWsB.task.id}`, (s) => s.includes("exited"), "读 B 里那个终端");
+    const bWaitText = await runIn(homeB, `terminal wait ${inWsB.task.id} --timeout 30`, (s) => s.includes("#") || s.includes("✗"), "pwd 跑完", 40000);
+    assert.match(bWaitText, /# finished exit=0/, bWaitText);
+    const bReadText = await runIn(homeB, `terminal read ${inWsB.task.id}`, (s) => s.includes("# running"), "读 B 里那个终端");
     // macOS 的临时目录是 /var → /private/var 的符号链接：登记路径与 shell 里 pwd 打出来的物理路径
     // 可能是同一目录的两种写法，两种都算数（daemon 的匹配本来就两边规范化）。
     const bPhysical = realpathSync(homeB);
@@ -518,7 +538,7 @@ test("跟随 cwd：在 B 的目录里开的终端属 B、跑在 B；list 只见 
 
     // 5) cwd 在任何工作区之外 → 落回归属工作区 A（daemon 此时不申报 workspace_id，与旧 daemon 的
     //    请求逐字节等价，也就顺带证明了「不带字段仍落发起工作区」）
-    const backText = await runIn(outside, `terminal new --title "落回 A" --cmd "pwd"`, (s) => s.includes("已开终端") || s.includes("✗"), "工作区之外开终端");
+    const backText = await runIn(outside, `terminal new --title "落回 A"`, (s) => s.includes("已开终端") || s.includes("✗"), "工作区之外开终端");
     assert.match(backText, /已开终端/, `工作区之外开终端失败: ${backText}`);
     const backTask = await c.waitFor(
       (m) => m.case === "taskUpdated" && m.task.title === "落回 A",
@@ -554,34 +574,41 @@ test("plan 112：Rust 版 coflux 对同一组子命令给出与 node 版相同�
   const rust = (args, predicate, label, timeout) => runCli(device, task.sessionId, gatewayPort, home, args, predicate, label, timeout, RUST_LAUNCHER);
 
   try {
-    // terminal new（作业终端）：短语逐字对齐 node 版；退出码经中心透传。
-    // 输出文件是边写边读的：等最后一行 `看输出：` 出现（或 `✗`）再整段比对，只等首行会读到半截。
-    const newText = await rust(`terminal new --title "rust 作业" --cmd "echo HELLO-FROM-RUST; exit 3"`, (s) => s.includes("看输出：") || s.includes("✗"), "Rust terminal new");
+    // terminal new --cmd（do-script）：短语逐字对齐 node 版；命令在提示符就绪后打入。
+    // 输出文件是边写边读的：等 `已打入命令` 出现（或 `✗`）再整段比对，只等首行会读到半截。
+    const newText = await rust(`terminal new --title "rust 作业" --cmd "sh -c 'echo HELLO-FROM-RUST; exit 3'"`, (s) => s.includes("已打入命令") || s.includes("✗"), "Rust terminal new", 30000);
     const created = await c.waitFor((m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "rust 作业", "Rust 版建的任务出现在侧栏", 20000);
     assert.equal(
       newText.trim(),
-      `已开终端 ${created.task.id}（用户可在 coflux 侧栏看到并随时接管）\n看输出：coflux terminal read ${created.task.id}`,
+      `已开终端 ${created.task.id}（用户可在 coflux 侧栏看到并随时接管）\n已打入命令 #1（coflux terminal wait ${created.task.id} 等它结束，coflux terminal read ${created.task.id} 看输出）`,
       "terminal new 的两行输出与 node 版逐字一致",
     );
 
-    // terminal wait：轮询到退出并打印退出码
-    const waitText = await rust(`terminal wait ${created.task.id} --timeout 30`, (s) => s.includes("exited") || s.includes("✗"), "Rust terminal wait", 40000);
-    assert.equal(waitText.trim(), "# exited exit=3");
+    // terminal wait：阻塞到命令结束并打印它的退出码（终端仍在跑）
+    const waitText = await rust(`terminal wait ${created.task.id} --timeout 30`, (s) => s.includes("finished") || s.includes("✗"), "Rust terminal wait", 40000);
+    assert.equal(waitText.trim(), "# finished exit=3");
 
-    // terminal read：状态行 + 纯文本
+    // terminal read：状态行 + 纯文本（滚动缓冲）
+    await readScreenUntil(device, task.sessionId, gatewayPort, home, created.task.id, (s) => s.includes("HELLO-FROM-RUST"), "等 Rust 作业的输出上屏");
     const readText = await rust(`terminal read ${created.task.id}`, (s) => s.includes("HELLO-FROM-RUST"), "Rust terminal read");
-    assert.ok(readText.startsWith("# exited exit=3\n"), `read 首行: ${JSON.stringify(readText)}`);
+    assert.ok(readText.startsWith("# running\n"), `read 首行: ${JSON.stringify(readText)}`);
 
-    // terminal list：`<taskId>  <status> exit=<code>  <title>`
+    // terminal list：`<taskId>  <status> <busy|idle> last=<code>  <title>`
     const listText = await rust("terminal list", (s) => s.includes(created.task.id), "Rust terminal list");
-    assert.ok(listText.split("\n").includes(`${created.task.id}  exited exit=3  rust 作业`), `list 形状不符: ${listText}`);
+    assert.ok(listText.split("\n").includes(`${created.task.id}  running idle last=3  rust 作业`), `list 形状不符: ${listText}`);
 
-    // 会话终端 + send：不带 --cmd 的提示三行；send 的回执短语；送 exit 真的退出
-    // 会话终端的提示是四行：等最后一行 `送 exit 才结束` 出现（或 `✗`）再比对
-    const shellText = await rust(`terminal new --title "rust shell"`, (s) => s.includes("送 exit 才结束") || s.includes("✗"), "Rust 会话终端");
-    const shell = await c.waitFor((m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "rust shell" && m.task.status === TaskStatus.RUNNING, "会话终端跑起来", 20000);
-    assert.ok(shellText.includes("会话终端：常驻的登录 shell（全 tty），不会自己退出"), `会话终端提示: ${shellText}`);
-    assert.ok(shellText.includes(`再输命令：coflux terminal send ${shell.task.id} --text "<命令>" --enter（送 exit 才结束）`), `send 提示: ${shellText}`);
+    // terminal close：结束它（本工作区上限 2，得先腾出名额）
+    const closeText = await rust(`terminal close ${created.task.id}`, (s) => s.includes("终端") || s.includes("✗"), "Rust terminal close");
+    assert.match(closeText, /^已关闭终端 |^已请求关闭终端 /, closeText);
+    await c.waitFor((m) => m.case === "taskUpdated" && m.task.id === created.task.id && m.task.status === TaskStatus.EXITED, "close 后退出", 30000);
+
+    // 不带 --cmd 只开 shell：提示三行；send 的回执短语；送 exit 真的退出
+    // 提示的最后一行以 `结束：` 开头：等它出现（或 `✗`）再比对
+    const shellText = await rust(`terminal new --title "rust shell"`, (s) => s.includes("结束：") || s.includes("✗"), "Rust 终端");
+    const shell = await c.waitFor((m) => m.case === "taskUpdated" && m.task.workspaceId === ws.id && m.task.title === "rust shell" && m.task.status === TaskStatus.RUNNING, "终端跑起来", 20000);
+    assert.ok(shellText.includes("常驻的登录 shell（全 tty），不会自己退出"), `终端提示: ${shellText}`);
+    assert.ok(shellText.includes(`跑命令：coflux terminal run ${shell.task.id} --cmd="<命令>"`), `run 提示: ${shellText}`);
+    assert.ok(shellText.includes(`看输出：coflux terminal read ${shell.task.id}；结束：coflux terminal close ${shell.task.id}`), `close 提示: ${shellText}`);
     // 先等提示符（快照非空）再 send——与既有会话终端用例同一纪律；这里等待本身用 node 版，不是被测对象
     await readScreenUntil(device, task.sessionId, gatewayPort, home, shell.task.id, (s) => s.includes("# running") && !s.includes("（暂无输出）"), "等 Rust 会话终端的提示符");
     const sendText = await rust(`terminal send ${shell.task.id} --text "exit" --enter`, (s) => s.includes("已写入") || s.includes("✗"), "Rust terminal send");

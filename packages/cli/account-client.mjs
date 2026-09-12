@@ -83,7 +83,9 @@ export async function runAccountCommand(positionals, flags, home) {
     if (sub === "remove") operation = { op: "workspace.remove", workspaceId: target() };
   }
   if (command === "terminal") {
+    // `--cmd` is "do script": typed into the new terminal once its shell is at the prompt; the terminal stays open.
     if (sub === "new") operation = { op: "terminal.new", workspaceId: required("workspace"), title: flags.title || "", command: flags.cmd || "" };
+    if (sub === "run") operation = { op: "terminal.run", terminalId: target(), command: required("cmd") };
     if (sub === "read") operation = { op: "terminal.read", terminalId: target(), lines: Number(flags.lines ?? 200) };
     if (sub === "send") operation = { op: "terminal.send", terminalId: target(), text: required("text"), enter: !!flags.enter };
     if (sub === "wait") operation = { op: "terminal.wait", terminalId: target(), timeout: Number(flags.timeout ?? 30) };

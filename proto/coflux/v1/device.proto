@@ -347,6 +347,23 @@ message DeviceSessionSnapshotRequest {
   string session_id = 2;
 }
 
+// Command state of a live shell, derived by sessiond from the OSC 133 marks that coflux's own
+// rc chain emits together with the per-session secret. Marks without that secret (remote hosts
+// reached over ssh, nested shells, prompt frameworks) are ignored, so a nested shell or an ssh
+// session looks like one long-running command from the outside.
+message TerminalCommandState {
+  // At least one accepted mark has arrived: the shell is zsh/bash/fish started through coflux's
+  // rc chain and its prompt has been drawn at least once.
+  bool integrated = 1;
+  // A command has started and not finished yet.
+  bool busy = 2;
+  // Monotonic count of commands started in this shell; 0 = none yet.
+  uint64 command_seq = 3;
+  // Sequence of the last finished command (0 = none) and its exit status.
+  uint64 finished_seq = 4;
+  optional int32 exit_code = 5;
+}
+
 message DeviceSessionSnapshot {
   string request_id = 1;
   string session_id = 2;
@@ -357,6 +374,8 @@ message DeviceSessionSnapshot {
   // PTY 内程序经 OSC 0/2 设置的终端标题（plan 075）：sessiond 的 vt100 回调捕获、
   // 源头截断；空 = 从未设置或旧 supervisor 不支持，消费方一律回落自身默认。
   string title = 7;
+  // Shell-integration command state at snapshot time; absent from old supervisors.
+  TerminalCommandState command = 8;
 }
 
 message DevicePtyOutput {
@@ -433,13 +452,14 @@ message DeviceSessionCreate {
   string session_id = 3;
   string task_id = 4;
   string cwd = 5;
+  // Unused: the supervisor always starts the workspace's default login shell (a real tty that
+  // lives until exit). Kept for wire compatibility; the center never fills it.
   optional string shell = 6;
   uint32 cols = 7;
   uint32 rows = 8;
-  // 非空时该会话是「跑一条命令」的命令终端（plan 091）：worker 在 authorize 通过后、交给 sessiond
-  // 前本地写包装脚本（登录 shell 执行、tee 落日志、跑完退出带退出码）并把 shell 填成脚本路径。
-  // 脚本路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
-  // 会被判成 operation_collision。旧 worker 不认识本字段会起成普通 shell，由中心的能力门禁挡住。
+  // Unused since the interactive-only terminal model: a command the center wants typed in is sent
+  // separately (ServerTerminalRun) once the shell has signalled prompt readiness. Kept for wire
+  // compatibility; always empty.
   string command = 9;
   // 10 起是会话归属 id（plan 092）：与 daemon.proto SessionCreate 7 起同名同义，supervisor 据此组装
   // COFLUX_* 环境变量。它们会进入 sessiond 账本的 canonical 请求，同一 operation 重放时中心组帧的值
@@ -617,6 +637,97 @@ message SessionCheckpoint {
   double captured_at = 7;
   // OSC 0/2 终端标题（plan 075），随 snapshot 原样透传；语义同 DeviceSessionSnapshot.title。
   string title = 8;
+  // Command state (busy / sequence / last exit) carried along with the snapshot; absent from old daemons.
+  TerminalCommandState command = 9;
+}
+
+// ===== executor（plan 116）=====
+//
+// 「agent 经 `coflux executor` 甩子任务」的通路。桌面 app 是本机唯一的 executor host：daemon 把
+// 工单**推**给它（与 pty_output 同一种既有能力：往已连通道推帧），它用普通上行消息回报状态与终态。
+// 刻意不造「device 向 client 发请求并等响应」的反向 RPC——本片没有任何一条消息需要配对应答。
+//
+// 三条纪律写在这里，实现两侧都按它来：
+//   1. host 只能是 **loopback（同机）** 通道：executor 只服务桌面 app 所在的这台机器，远程 client
+//      即使拿到 SESSION_CONTROL 也不能抢注成 host。
+//   2. 能力按**名字**门禁（对齐 daemon-capabilities.ts 的范式），不比较版本号。
+//   3. 作业表与写锁的真相在桌面主进程；daemon 只留供 CLI 轮询的状态与终态，不做调度、不重派。
+
+enum ExecutorRunState {
+  EXECUTOR_RUN_STATE_UNSPECIFIED = 0;
+  // host 已接单，尚未开跑
+  EXECUTOR_RUN_STATE_ACCEPTED = 1;
+  EXECUTOR_RUN_STATE_RUNNING = 2;
+  // —— 以下为终态 ——
+  EXECUTOR_RUN_STATE_SUCCEEDED = 3;
+  // host 当场拒绝（写锁被占、未配置 provider/model、并发封顶、工作区不可用……），note 是给 agent 看的原因
+  EXECUTOR_RUN_STATE_REJECTED = 4;
+  EXECUTOR_RUN_STATE_MODEL_ERROR = 5;
+  EXECUTOR_RUN_STATE_TOOL_FAILED = 6;
+  EXECUTOR_RUN_STATE_CANCELLED = 7;
+  // 结果未知：host 掉线/换代后没能重报这条 run。**绝不自动重跑**——租约失效不证明旧 writer 已停止。
+  EXECUTOR_RUN_STATE_UNKNOWN = 8;
+}
+
+// client→daemon：把本 client 登记成本机 executor host（可重复发送 = 幂等更新）。
+// 同一 daemon 只认一个 host：host_id 稳定标识桌面实例，host_epoch 是同一 host 的连接换代号
+// （单调递增）。较低 epoch 的登记是 stale，直接拒。
+message DeviceExecutorHostRegister {
+  string host_id = 1;
+  uint64 host_epoch = 2;
+  // 按名门禁：daemon 只在清单里含本协议要求的能力名时才接受登记。
+  repeated string capabilities = 3;
+  // 用户已在桌面配好 provider/model/key。false 时 daemon 在**提交那一刻**就拒，
+  // 让 agent 立刻拿到「去桌面配置」而不是等一轮轮询。
+  bool ready = 4;
+  string not_ready_reason = 5;
+}
+
+// daemon→client：登记结果 + 重连对账清单。
+// reconcile_run_ids 是 daemon 手里仍未终结的 run；host 必须逐条重报（还在跑 = running，
+// 不认识 = 终态 unknown）。到 reconcile_deadline 仍未被重报的，daemon 自行判 unknown。
+message DeviceExecutorHostRegistered {
+  bool ok = 1;
+  optional string error = 2;
+  repeated string reconcile_run_ids = 3;
+  double reconcile_deadline = 4;
+}
+
+// daemon→client：一张工单。workspace_id 与 workspace_root 在**提交那一刻**就已解析固定
+// （plan 102 的 cwd 跟随只影响新提交，不改已在跑任务的边界）。
+message DeviceExecutorAssign {
+  string run_id = 1;
+  string prompt = 2;
+  // true = 可写；false = 只读
+  bool write = 3;
+  string workspace_id = 4;
+  // daemon 工作区表里登记的真实路径
+  string workspace_root = 5;
+  double submitted_at = 6;
+}
+
+// daemon→client：取消一条 run（幂等；已终结的 run 上的取消是空操作）。
+message DeviceExecutorCancel {
+  string run_id = 1;
+}
+
+// client→daemon：状态与终态回报。终态一直保留在 host 手里重发，直到收到 DeviceExecutorReportAck。
+message DeviceExecutorReport {
+  string run_id = 1;
+  ExecutorRunState state = 2;
+  // 进行中的一句话 / 拒绝原因；不含转录，转录留在桌面内部不经 daemon
+  string note = 3;
+  // 终态：executor 的最终回复
+  optional string summary = 4;
+  // 终态：改动过的文件（工作区相对路径）
+  repeated string changed_files = 5;
+  optional string error = 6;
+  double reported_at = 7;
+}
+
+// daemon→client：终态已落到 daemon 的 run 账本，host 可以丢掉本地副本了。
+message DeviceExecutorReportAck {
+  string run_id = 1;
 }
 
 message DeviceEnvelope {
@@ -663,5 +774,11 @@ message DeviceEnvelope {
     DevicePing ping = 55;
     DevicePong pong = 56;
     DeviceError error = 60;
+    DeviceExecutorHostRegister executor_host_register = 70;
+    DeviceExecutorHostRegistered executor_host_registered = 71;
+    DeviceExecutorAssign executor_assign = 72;
+    DeviceExecutorCancel executor_cancel = 73;
+    DeviceExecutorReport executor_report = 74;
+    DeviceExecutorReportAck executor_report_ack = 75;
   }
 }

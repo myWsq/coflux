@@ -105,9 +105,9 @@ const TASK_READ_TIMEOUT_MS = 15_000;
 /** deviceAuthorize 的等待上限：服务端要把 DaemonEnrolled 送达 daemon 并等它上线才回 deviceAuthorized。 */
 const DEVICE_AUTHORIZE_TIMEOUT_MS = 20_000;
 
-/** 已退出终端的最后输出来源（plan 097）：log = 命令终端的非 tty 纯文本日志尾部；snapshot / checkpoint = 规范化 ANSI
- * 屏幕（分别来自 daemon 当前画面与中心缓存）；none = 没有任何可回放内容。 */
-export type TaskReadSource = "log" | "snapshot" | "checkpoint" | "none";
+/** 已退出终端的最后输出来源（plan 097）：snapshot / checkpoint = 规范化 ANSI 屏幕（分别来自 daemon 当前画面与
+ * 中心缓存）；none = 没有任何可回放内容。 */
+export type TaskReadSource = "snapshot" | "checkpoint" | "none";
 export type TaskReadResult =
   | { ok: true; taskId: string; data: Uint8Array; source: TaskReadSource; capturedAt: number; status: TaskStatus; exitCode?: number }
   | { ok: false; error: string };
@@ -484,6 +484,11 @@ export function createCofluxClient(options: CofluxClientOptions) {
   }
 
   let connection!: ReturnType<typeof createConnection>;
+  /**
+   * executor（plan 116）：至多一个订阅者（桌面主进程经渲染层接上）。
+   * 其他 client 不订阅，daemon 也不会往它们推——收到也只是无害落空。
+   */
+  let executorListener: ((event: ExecutorClientEvent) => void) | undefined;
   const deviceRouter: DeviceRouter = createDeviceRouter({
     nativeRemote: options.deviceTransport.nativeRemote,
     enableLocalTransport: options.deviceTransport.enableLocalTransport,
@@ -512,6 +517,29 @@ export function createCofluxClient(options: CofluxClientOptions) {
     onPorts: () => {
       // 预览 URL 仍由中心的账号门禁路由签发；Device RPC 只负责确认本机原始监听事实。
     },
+    // executor（plan 116）：四条推送原样交给订阅者（桌面主进程），store 自己不持有任何 run 状态——
+    // 作业表的真相在主进程，这里多存一份只会漂移。
+    onExecutorAssign: (daemonId, assign) =>
+      executorListener?.({
+        kind: "assign",
+        runId: assign.runId,
+        prompt: assign.prompt,
+        write: assign.write,
+        workspaceId: assign.workspaceId,
+        workspaceRoot: assign.workspaceRoot,
+        submittedAt: Number(assign.submittedAt ?? 0),
+        daemonId,
+      }),
+    onExecutorCancel: (daemonId, runId) => executorListener?.({ kind: "cancel", runId, daemonId }),
+    onExecutorHostRegistered: (daemonId, registered) =>
+      executorListener?.({
+        kind: "registered",
+        ok: registered.ok,
+        error: registered.error,
+        reconcileRunIds: [...registered.reconcileRunIds],
+        daemonId,
+      }),
+    onExecutorReportAck: (daemonId, runId) => executorListener?.({ kind: "ack", runId, daemonId }),
     onError: reportLocalError,
     onInputState: (_daemonId, _taskId, sessionId, inputState) => {
       const wasBlocked = store.getState().inputStates[sessionId]?.blocked ?? false;
@@ -816,7 +844,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           break;
         }
         const source: TaskReadSource =
-          value.source === "log" || value.source === "snapshot" || value.source === "checkpoint" ? value.source : "none";
+          value.source === "snapshot" || value.source === "checkpoint" ? value.source : "none";
         pending.resolve({
           ok: true,
           taskId: value.taskId,
@@ -1055,6 +1083,15 @@ export function createCofluxClient(options: CofluxClientOptions) {
     startTask,
     closeTask,
     retainDevice,
+    /** executor（plan 116）：订阅 daemon 推来的四条；返回退订函数。至多一个订阅者。 */
+    subscribeExecutor(listener: (event: ExecutorClientEvent) => void): () => void {
+      executorListener = listener;
+      return () => {
+        if (executorListener === listener) executorListener = undefined;
+      };
+    },
+    sendExecutorHostRegister: deviceRouter.sendExecutorHostRegister,
+    sendExecutorReport: deviceRouter.sendExecutorReport,
     registerSessionConsumer,
     listDeviceDirectory,
     execInWorkspace,
@@ -1067,3 +1104,22 @@ export function createCofluxClient(options: CofluxClientOptions) {
 }
 
 export type CofluxClient = ReturnType<typeof createCofluxClient>;
+
+/**
+ * executor（plan 116）：daemon 经 device 通道推来的四条，归一成一个联合体交给订阅者。
+ * 带上 `daemonId` 是为了让订阅者能确认「这是本机那台推来的」——host 只服务本机。
+ */
+export type ExecutorClientEvent =
+  | {
+      kind: "assign";
+      runId: string;
+      prompt: string;
+      write: boolean;
+      workspaceId: string;
+      workspaceRoot: string;
+      submittedAt: number;
+      daemonId: string;
+    }
+  | { kind: "cancel"; runId: string; daemonId: string }
+  | { kind: "registered"; ok: boolean; error?: string; reconcileRunIds: string[]; daemonId: string }
+  | { kind: "ack"; runId: string; daemonId: string };

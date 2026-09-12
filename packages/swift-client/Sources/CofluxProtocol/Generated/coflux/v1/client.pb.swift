@@ -453,7 +453,7 @@ public struct Coflux_V1_TaskRemove: Sendable {
 }
 
 /// 读取一个任务（终端）的最后输出（plan 097）：web 激活已退出的 Tab 时回放用。server 复用
-/// agent read 的三层来源（daemon 命令日志 → daemon 当前快照 → 中心 checkpoint），结果只回给发起连接。
+/// agent read 的两层来源（daemon 当前快照 → 中心 checkpoint），结果只回给发起连接。
 /// max_bytes 为 0 取服务端默认；超过上限被钳制。
 public struct Coflux_V1_TaskRead: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
@@ -1225,8 +1225,8 @@ public struct Coflux_V1_OAuthAuthorizeResult: Sendable {
   fileprivate var _error: String? = nil
 }
 
-/// TaskRead 的回应：data 按 source 解释——log 是命令终端的非 tty 纯文本日志尾部（\n 换行）；
-/// snapshot / checkpoint 是规范化 ANSI 屏幕；none 表示没有任何可回放内容（data 为空）。
+/// TaskRead 的回应：data 按 source 解释——snapshot / checkpoint 是规范化 ANSI 屏幕（分别来自 daemon
+/// 当前画面与中心缓存）；none 表示没有任何可回放内容（data 为空）。
 /// status / exit_code 取自回应时刻的 Task 真相；error 非空时其余字段无意义（任务不存在或不属于本账号）。
 public struct Coflux_V1_TaskReadResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the

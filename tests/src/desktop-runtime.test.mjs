@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { once } from "node:events";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
-import { startStack, mkRepo } from "./harness.mjs";
+import { startStack, mkRepo, spawnDaemon, killTree } from "./harness.mjs";
 import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
 const PORT = 8874;
@@ -50,6 +51,22 @@ test("桌面托管：控制端重连保留同一 PTY，旧实例停止请求被�
     assert.equal(running.sessions.length, 1);
     assert.equal(running.instanceId, first.instanceId);
     const pid = running.sessions[0].pid;
+    const duplicate = spawnDaemon({
+      ...process.env,
+      COFLUX_HOME: stack.home,
+      COFLUX_SERVER: `ws://127.0.0.1:${PORT}/daemon`,
+      COFLUX_LOCAL_GATEWAY_PORT: "0",
+      COFLUX_RUNTIME_CONTROL: "1",
+      COFLUX_RUNTIME_ID: "test-duplicate-app",
+    });
+    try {
+      const [code, signal] = await once(duplicate, "exit", { signal: AbortSignal.timeout(3000) });
+      assert.equal(code, 1, "a second supervisor must fail while the runtime is serving");
+      assert.equal(signal, null);
+      const preserved = await request(stack.home, { op: "status" });
+      assert.equal(preserved.instanceId, first.instanceId, "the original control socket must remain reachable");
+      assert.equal(preserved.sessions[0].pid, pid);
+    } finally { killTree(duplicate); }
     device.close();
     device = await openNativeDevice(stack);
     await device.attach(live.task.sessionId);

@@ -13,7 +13,6 @@ mod gateway;
 mod git;
 mod hook;
 mod local_auth;
-mod log_sink;
 mod observed;
 mod ops;
 mod ports;
@@ -96,10 +95,6 @@ struct WorkerState {
     /// 等待授权中的链接过期时刻（server 侧 epoch ms）。到期且连接仍在、仍未登记时，
     /// 由 run_server_connection 的定时检查重发 daemon.enrollRequest 换新链接。
     pending_auth_expires_at: Option<f64>,
-    /// agent 自建终端的命令日志（plan 074）：taskId -> 日志绝对路径。读终端时优先用它而不是
-    /// 中心 checkpoint——checkpoint 是 2 秒周期的派生缓存，秒级命令的输出根本进不去，而日志
-    /// 还是全量而非一屏。worker 重启（热升级）后此表丢失，read 自动降级回 checkpoint。
-    agent_logs: HashMap<String, String>,
     /// agent 控制请求的在飞关联表（plan 074）：requestId -> 中心回执的接收端。
     /// 断开中心连接时整表清空——发送端 drop 会让等待方立刻拿到「连接中断」而不是干等超时。
     agent_pending: HashMap<String, tokio::sync::oneshot::Sender<wire::AgentControlResult>>,
@@ -114,6 +109,16 @@ struct WorkerState {
     last_diffs: HashMap<String, (i32, i32)>,
     /// 连接状态落盘快照（conn-state.json），供 cofluxd status 展示真实在线态（plan 033）。
     conn_state: ConnState,
+    /// Bumped whenever a session's command state or lifecycle changes in the ledger; agent
+    /// `wait`/`run` subscribe to it so they wake on the change instead of polling.
+    command_epoch: tokio::sync::watch::Sender<u64>,
+}
+
+impl WorkerState {
+    /// Wake every `wait`/`run` waiter: the ledger changed in a way they may care about.
+    pub(crate) fn bump_command_epoch(&self) {
+        self.command_epoch.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
 }
 
 /// 出站到 server 的消息：WS 上只有 binary message，一条 = 一个已编码好的 protobuf 信封字节串
@@ -484,11 +489,6 @@ async fn consume_hook_events(
 }
 
 fn main() {
-    // 日志汇子命令（plan 094）：命令终端的包装脚本以 `coflux-worker --log-sink <log>` 复用本二进制，
-    // 在建 tokio 运行时之前分流——它随命令活多久就活多久，不该为它起一整套调度线程。
-    if let Some(code) = log_sink::run_if_requested() {
-        std::process::exit(code);
-    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -589,13 +589,13 @@ async fn worker_main() {
         alive: HashMap::new(),
         credentials,
         pending_auth_expires_at: None,
-        agent_logs: HashMap::new(),
         agent_pending: HashMap::new(),
         ledger: session_ledger::SessionLedger::default(),
         workspaces: HashMap::new(),
         last_branches: HashMap::new(),
         last_diffs: HashMap::new(),
         conn_state,
+        command_epoch: tokio::sync::watch::channel(0).0,
     }));
     let observed = Arc::new(ObservedState::new());
 
@@ -1002,6 +1002,7 @@ async fn handle_sup_record(
                     .is_some_and(|current| current != &next);
                 state.alive.insert(session_id.clone(), next);
                 state.ledger.mark_started(&session_id, &task_id);
+                state.bump_command_epoch();
                 changed
             };
             if changed_incarnation {
@@ -1037,6 +1038,15 @@ async fn handle_sup_record(
             device.report_session_exit(&session_id, exit_code);
             device.request_reconciliation_catalog();
         }
+        SupervisorToWorker::SessionCommand {
+            session_id,
+            state: command,
+        } => {
+            // A coflux mark moved the shell's command state: record it and wake local waiters.
+            let mut s = state.lock().unwrap();
+            s.ledger.set_command_state(&session_id, command);
+            s.bump_command_epoch();
+        }
         SupervisorToWorker::SessionCreateFailed {
             session_id,
             task_id,
@@ -1045,7 +1055,9 @@ async fn handle_sup_record(
             logln!(
                 "[worker] session create failed without exit session={session_id} task={task_id}: {error}"
             );
-            state.lock().unwrap().ledger.forget(&session_id);
+            let mut s = state.lock().unwrap();
+            s.ledger.forget(&session_id);
+            s.bump_command_epoch();
             // 新 supervisor 用独立 variant 避免旧 worker 把 duplicate create failure 当退出；
             // 新 worker 同样只对账，不按裸 sessionId 改 alive 或上报 SessionExit。
             device.request_reconciliation_catalog();
@@ -1079,6 +1091,12 @@ async fn handle_sup_record(
                         .iter()
                         .map(|session| (session.session_id.as_str(), session.task_id.as_str())),
                 );
+                for session in &sessions {
+                    if let Some(command) = session.command {
+                        s.ledger.set_command_state(&session.session_id, command);
+                    }
+                }
+                s.bump_command_epoch();
                 s.sup_synced = true;
                 s.sup_resync_nonce = (!nonce.is_empty()).then_some(nonce);
                 s.snapshot_owner_id = snapshot_owner_id.clone();
@@ -1960,13 +1978,13 @@ mod tests {
             alive: HashMap::from([("session-old".into(), ("task-old".into(), 11))]),
             credentials: None,
             pending_auth_expires_at: None,
-            agent_logs: HashMap::new(),
             agent_pending: HashMap::new(),
             ledger: session_ledger::SessionLedger::default(),
             workspaces: HashMap::new(),
             last_branches: HashMap::new(),
             last_diffs: HashMap::new(),
             conn_state: ConnState::new("/tmp/coflux-resync-unit-test"),
+            command_epoch: tokio::sync::watch::channel(0).0,
         }))
     }
 

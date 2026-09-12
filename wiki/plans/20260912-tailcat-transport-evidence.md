@@ -289,3 +289,50 @@ full release-acceptance checklist is deliberately not marked DONE. Logs from the
 failed and successful iterations remain under `/tmp/coflux-tailcat-retirement-*`;
 temporary fixture credentials, subprocesses, databases, and build-only scratch
 resources are cleaned up after verification.
+
+## Main integration verification (2026-09-12)
+
+Integrated main `7386591ff4322bf9ad4b75019a8026232698bec0` into the Tailcat
+branch for PR #50. Resolved all nine conflicting files while retaining main's
+executor bridge, interactive terminal semantics, duplicate-supervisor protection,
+and both `workspace enter` and `locate`. Regenerated protobuf consumers from the
+combined schema and regenerated the dependency lockfile with main's executor
+packages and without the retired WebRTC dependency.
+
+The executor black-box fixture now uses native transport. Both host registration
+and reports travel on the SESSION_CONTROL lane and must receive the precise
+`executor_host_denied` response; the catalog remains usable afterward. This tests
+the worker's loopback identity requirement without weakening production policy or
+substituting an unrelated RPC-scope denial.
+
+Validation of the integrated source:
+
+- Server and Desktop typechecks passed; Desktop production build passed.
+- Rust build completed with zero warnings. All 278 Rust unit tests passed
+  (CLI 37, protocol 41, supervisor 80, worker 120).
+- Desktop: 176/176; shared client/coordinator: 76/76; Swift: 65/65.
+- iOS simulator app and test targets passed `build-for-testing`.
+- Release signing, CLI trust, and product-version tests: 20/20. Version consistency
+  passed at 1.1.1, and the Claude plugin synchronization check passed.
+- Protocol lint/regeneration and strict breaking checks against the integrated
+  main SHA passed; all four protocol-wrapper tests passed.
+
+The first complete black-box run passed 226 tests, with zero assertion failures
+and three cancelled tests: the Desktop version-admission suite's setup failed
+with `server did not become healthy`. It overlapped the iOS build; resource
+contention is a possibility, not an established cause. The affected file passed
+12/12 independently with debug logs and no source changes. A second complete run
+was started after the iOS build finished, preserving the default concurrency.
+
+The complete rerun passed **229/229**, zero failures, cancellations, or skips, in
+**219.341 seconds**. Recovery measured 22.187 seconds for initial-region outage,
+5.035 seconds for helper crash, and 13.137 seconds for runtime region outage;
+all fault phases retained PTY identity and input/output. Both workspace-follow
+modes, duplicate-supervisor protection, executor denial, and paired upgrades
+passed. Temporary test databases were confirmed removed.
+
+Logs are retained under `/tmp/coflux-tailcat-merge-*`, including the failed first
+run, the independent version-admission rerun, and the successful complete rerun.
+These results resolve the main-integration gap; they do not replace the outstanding
+internet/NAT, resource matrix, packaged GUI/keychain, signing/notarization, or
+published-artifact acceptance. The previously failed latency budget remains open.

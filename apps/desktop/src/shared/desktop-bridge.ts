@@ -66,7 +66,7 @@ export type DesktopUpdateState = {
 };
 
 /** 原生菜单项触发的命令；语义与 use-global-shortcuts.ts 的键位一一对应，⌘1-9 不进菜单。 */
-export type DesktopCommand = "create-terminal" | "close-terminal" | "create-workspace" | "previous-tab" | "next-tab" | "toggle-help";
+export type DesktopCommand = "create-terminal" | "close-terminal" | "create-workspace" | "previous-tab" | "next-tab" | "toggle-help" | "open-settings";
 
 export type DesktopNotification = {
   /** 点击通知后主进程回传给渲染层的工作区 id，用于选中该工作区 */
@@ -125,4 +125,47 @@ export type DesktopBridge = {
   /** 打开系统设置的完全磁盘访问面板并在 Finder 定位 supervisor 二进制 */
   daemonOpenFdaGuide(): void;
   daemonDismissError(): void;
+  /**
+   * executor（plan 116）。渲染层是**信使**不是决策者：作业表、写锁、runner 与凭证全在主进程，
+   * 它只负责把本机 daemon 的 device 通道两头接上，外加一个设置面。
+   * `getExecutorSettings` 永远不含 API key——只有 `hasApiKey` 这个布尔。
+   */
+  getExecutorSettings(): Promise<DesktopExecutorSettings>;
+  onExecutorSettings(listener: (settings: DesktopExecutorSettings) => void): () => void;
+  setExecutorModel(provider: string, modelId: string): void;
+  /** 空串 = 清除 */
+  setExecutorApiKey(apiKey: string): void;
+  /** device 通道收到 executor 帧时转进主进程 */
+  sendExecutorInbound(message: DesktopExecutorInbound): void;
+  /** 本机 daemon 的 device 通道通了 / 断了；daemonId 为空串表示断开 */
+  setExecutorChannel(daemonId: string): void;
+  /** 主进程要往 device 通道发的帧 */
+  onExecutorOutbound(listener: (message: DesktopExecutorOutbound) => void): () => void;
 };
+
+/** 渲染层可见的 executor 配置——刻意没有 apiKey 字段。 */
+export type DesktopExecutorSettings = {
+  provider: string;
+  modelId: string;
+  hasApiKey: boolean;
+  ready: boolean;
+  reason: string;
+};
+
+export type DesktopExecutorInbound =
+  | { kind: "assign"; runId: string; prompt: string; write: boolean; workspaceId: string; workspaceRoot: string; submittedAt: number }
+  | { kind: "cancel"; runId: string }
+  | { kind: "registered"; ok: boolean; error?: string; reconcileRunIds: string[] }
+  | { kind: "ack"; runId: string };
+
+export type DesktopExecutorOutbound =
+  | { kind: "register"; hostId: string; hostEpoch: number; capabilities: string[]; ready: boolean; notReadyReason: string }
+  | {
+      kind: "report";
+      runId: string;
+      state: string;
+      note: string;
+      summary?: string;
+      changedFiles?: string[];
+      error?: string;
+    };
