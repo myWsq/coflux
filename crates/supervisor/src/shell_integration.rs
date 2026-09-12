@@ -3,7 +3,8 @@
 //! zsh/bash load a wrapper after user startup files; fish uses vendor configuration.
 //! Wrappers resolve `<COFLUX_HOME>/bin/coflux` on each invocation so existing shells
 //! can launch updated integration. The native CLI pins immutable hooks and skill
-//! files for each agent. User aliases/functions keep precedence.
+//! files for each agent. User functions keep precedence; a self-referencing alias
+//! (`alias codex='codex --yolo'`) expands into the wrapper with its arguments.
 //!
 //! Installations without the native CLI retain the legacy Claude plugin-directory
 //! fallback. Unknown shells can call `coflux agent run` explicitly. Templates are
@@ -640,6 +641,44 @@ mod tests {
         );
         // 这条才分得清「让位」与「悄悄跑了真 claude」：别名生效就不该有任何进程执行到 PATH 上的 claude
         assert!(!home.join("argv.txt").exists(), "让位就不该执行到真 claude");
+
+        // 自引用别名（`alias claude='claude --flag'`，用户只是想固定几个参数）：别名照旧展开，
+        // 展开出来的 claude 落到我们的函数上，参数与集成都不丢；别名本身在 source 之后原样还在。
+        let script_path = home.join("self-alias.zsh");
+        fs::write(
+            &script_path,
+            format!(
+                "alias claude='claude --flag'\nsource {}\nclaude go\nalias claude\n",
+                sh_quote(&claude_sh.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        let output = Command::new(&zsh)
+            .args(["-d", "-f", script_path.to_str().unwrap()])
+            .env("PATH", &path)
+            .env("HOME", home_str)
+            .env("TERM", "dumb")
+            .env("COFLUX_CLAUDE_PLUGIN_DIR", &plugin)
+            .env_remove("COFLUX_HOME")
+            .stdin(Stdio::null())
+            .output()
+            .expect("起 zsh");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "claude='claude --flag'",
+            "source 之后用户的别名必须原样还在"
+        );
+        assert_eq!(
+            argv(&home),
+            vec![
+                "--plugin-dir".to_string(),
+                plugin.to_string_lossy().into_owned(),
+                "--flag".to_string(),
+                "go".to_string()
+            ],
+            "自引用别名要带着自己的参数进包装器，而不是绕过集成"
+        );
 
         fs::remove_dir_all(&home).ok();
     }

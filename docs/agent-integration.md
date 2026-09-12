@@ -10,8 +10,11 @@ Worker-only hot upgrades do not replace the CLI or its integration.
 ## Launch and update
 
 Supported automatic shell entry points are zsh, bash and fish. `claude` and `codex`
-resolve the installed native CLI on every invocation. User aliases/functions take
-precedence. Custom shells and dedicated launchers can use:
+resolve the installed native CLI on every invocation. User functions take
+precedence. A self-referencing zsh/bash alias such as `alias codex='codex --yolo'`
+keeps its arguments and still reaches the integration; an alias pointing elsewhere
+bypasses it. In fish an alias is a function and therefore takes precedence. Custom
+shells and dedicated launchers can use:
 
 ```sh
 coflux agent run claude -- --resume

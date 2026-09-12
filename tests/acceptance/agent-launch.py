@@ -27,7 +27,8 @@ with tempfile.TemporaryDirectory(prefix='coflux-launch-') as temp:
     # The same live shell reads the stable launcher again after an atomic executable update.
     shell = subprocess.Popen(['/bin/bash', '--noprofile', '--norc'], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     try:
-        shell.stdin.write(f'source "{ROOT}/crates/supervisor/src/shell/claude.sh"\nclaude "argument with spaces"\necho END\n')
+        # A self-referencing user alias keeps its arguments and still reaches the wrapper.
+        shell.stdin.write(f'shopt -s expand_aliases\nalias codex="codex --yolo"\nsource "{ROOT}/crates/supervisor/src/shell/claude.sh"\nclaude "argument with spaces"\necho END\n')
         shell.stdin.flush()
         lines = []
         while (line := shell.stdout.readline().strip()) != 'END':
@@ -50,6 +51,7 @@ with tempfile.TemporaryDirectory(prefix='coflux-launch-') as temp:
             lines.append(line)
         second = lines[0]
         assert second != first and Path(second).is_dir(), lines
+        assert lines[-2:] == ['--yolo', 'next invocation'], lines
         for host_shell, wrapper in [('zsh', 'claude.sh'), ('fish', 'coflux.fish')]:
             executable = shutil.which(host_shell)
             if executable:
