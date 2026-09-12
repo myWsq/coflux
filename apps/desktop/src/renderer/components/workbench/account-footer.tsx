@@ -5,11 +5,13 @@ import { Divider } from "@astryxdesign/core/Divider";
 import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
 import { Kbd } from "@astryxdesign/core/Kbd";
 import { HStack } from "@astryxdesign/core/Layout";
+import { Text } from "@astryxdesign/core/Text";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { ArrowUp, Cog, LogOut, RefreshCw } from "lucide-react";
 import type { CofluxClient } from "@coflux/client";
 
 import { accountIdentity, resolveAccountFooter } from "@/components/workbench/account-footer-view";
+import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { desktop } from "@/config";
 import { cn } from "@/lib/utils";
@@ -18,11 +20,16 @@ import { cn } from "@/lib/utils";
 const ACCOUNT_MENU_WIDTH = 200;
 
 /**
- * 缩小版按键标。Kbd 的每个 `<kbd>` 都带着组件内部写死的类，外部 className 只落在外层 span 上，
- * 所以只能用后代选择器压过去（utilities 层排在 astryx-base 之后，压得动）。默认那套 20px 见方、
- * 2px 底边的按键块是给正文里的快捷键说明用的，放进 tooltip 和菜单行就比旁边的字还抢眼。
+ * tooltip 里那对缩小版按键标。Kbd 的每个 `<kbd>` 都带着组件内部写死的类，外部 className 只落在
+ * 外层 span 上，所以只能用后代选择器压过去（utilities 层排在 astryx-base 之后，压得动）。默认那套
+ * 20px 见方、2px 底边的按键块是给正文里的快捷键说明用的，挨着 tooltip 的标签就比标签还抢眼。
+ *
+ * 菜单里不画按键块：菜单行的惯例（macOS 一路下来都是）是行尾一串淡色纯文字。
  */
 const COMPACT_KBD = "[&_kbd]:h-4 [&_kbd]:min-w-4 [&_kbd]:border-b [&_kbd]:px-1 [&_kbd]:text-2xs";
+
+/** 菜单行尾的快捷键文字，与侧栏其它快捷键提示同一口径（纯 ⌘ 前缀，见 shortcut-modifier.ts）。 */
+const SETTINGS_SHORTCUT_TEXT = `${SHORTCUT_MODIFIER_PREFIX},`;
 
 /**
  * 侧栏底部的账号脚部（plan 110，Cursor 左下角那一行）：头像 + 登录身份，尾部一个设置按钮。
@@ -96,7 +103,11 @@ export function AccountFooter({
         <DropdownMenuItem
           icon={<Cog className="size-3.5" />}
           label={settingsLabel}
-          endContent={<Kbd keys="mod+," className={COMPACT_KBD} />}
+          endContent={
+            <Text type="supporting" color="secondary">
+              {SETTINGS_SHORTCUT_TEXT}
+            </Text>
+          }
           onClick={onToggleSettings}
         />
         <Divider />
