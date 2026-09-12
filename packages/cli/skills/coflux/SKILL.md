@@ -1,6 +1,6 @@
 ---
 name: coflux
-description: Use coflux to open visible terminals, read, wait, type, report progress, notify the user and obtain preview URLs. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
+description: Use coflux to open visible terminals, read, wait, type, report progress, notify the user, obtain preview URLs, and hand a bounded mechanical sub-task to the built-in executor instead of spending your own context on it. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
 ---
 
 # Working inside coflux
@@ -14,11 +14,11 @@ and a way to operate the other workspaces and devices under the account when you
 
 | Track | Credentials | Reach | Use for |
 |---|---|---|---|
-| Local commands `coflux terminal/progress/notify/ports` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, read, wait, send, report progress, call the user, preview URLs: the default, fastest, no network dependency |
+| Local commands `coflux terminal/progress/notify/ports/executor` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, read, wait, send, report progress, call the user, preview URLs, hand a bounded sub-task to the built-in executor: the default, fastest, no network dependency |
 | Account CLI | app login or `coflux login` | all devices and workspaces in the account | child workspaces and remote terminals; JSON output |
 
-Of the local commands, `send`/`read`/`wait`/`notify`/`progress` complete entirely inside the
-local daemon and never touch the center; `new`/`list`/`ports` are relayed to the center by the
+Of the local commands, `send`/`read`/`wait`/`notify`/`progress`/`executor` complete entirely inside
+the local daemon and never touch the center; `new`/`list`/`ports` are relayed to the center by the
 daemon on your behalf (terminals must appear in the user's sidebar, preview URLs are minted by
 the center). You only ever talk to the local daemon.
 
@@ -296,6 +296,45 @@ coflux ports
 
 Lists every listening port in this workspace with its public preview URL. After starting a dev
 server, use it to get the URL and tell the user directly; they click it and nobody has to dig.
+
+### Hand a bounded sub-task to the executor
+
+```sh
+coflux executor run --prompt="Fix every clippy warning in crates/worker" --write
+coflux executor run --prompt="Find why the relay reconnect test flakes and report back"
+```
+
+The executor is a small agent built into coflux. Give it one self-contained job and it works in
+**the workspace your cwd is in** while you keep your own context for the main thread. The command
+blocks until the job ends, then prints the executor's final report and the files it changed.
+
+Reach for it when a job is mechanical, bounded and verbose — chasing a failing test suite, a
+repetitive refactor across many files, a search that would cost you many tool calls. Keep the work
+yourself when it needs the conversation's context, the user's judgment, or decisions the prompt
+cannot carry.
+
+**One-shot: there is no session and no follow-up.** Each run starts clean and ends when it ends;
+to change something, send a new run with a new prompt. So **write the prompt as a brief, not a
+hint**: the executor gets that one string and nothing else — no conversation history, no way to ask
+you what you meant. Say what done looks like and how to check it.
+
+Its boundaries, enforced by a kernel sandbox — count on them, and tell it what it needs up front:
+
+- **Only the originating workspace is writable.** Everything outside is unreadable and unwritable.
+  Without `--write` even that workspace is read-only, which is the right mode for investigations.
+- **Git metadata is read-only, so it never commits.** It leaves changes in the working tree;
+  reviewing and committing them is yours. `git status` and `git diff` work fine for it.
+- **Its tool processes have no network.** `npm install`, `cargo fetch` and friends fail. Install
+  what the job needs before handing it over.
+- **One writing executor per workspace at a time.** A second `--write` in the same workspace is
+  refused outright rather than queued; read-only runs may go in parallel up to a small cap.
+
+It runs inside the user's desktop app, so it only exists on the machine that app is on, and a run
+ends if the user quits the app, signs out, or stops the machine's terminals (you get a definite
+failure, never a hang). `--timeout <seconds>` caps how long you wait; the default is 30 minutes and
+a timeout cancels the run before failing. The model comes from the user's desktop settings; if they
+have not configured one, the command says so in one line — relay that to the user instead of
+retrying.
 
 ### Errors from local commands
 

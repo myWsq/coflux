@@ -8,33 +8,37 @@ const confirmed = (reason: StopReason): ExecutorStopTrigger => ({ kind: "runtime
 const declined = (reason: StopReason): ExecutorStopTrigger => ({ kind: "runtime-stop", reason, confirmed: false });
 
 test("用户确认的退出 / 退出登录 / 停止都取消在跑的任务，并说明是哪个动作", () => {
-  // 面板的「停止」与「移除」都走 stopConfirmed("stop")：两者都会结束 executor 工具进程所在的运行时。
+  // The panel's "stop" and "remove" both go through stopConfirmed("stop"): either one ends the
+  // runtime the executor's tool processes live on.
   for (const reason of ["quit", "logout", "stop"] as const) {
     const text = executorCancelReason(confirmed(reason));
     assert.equal(typeof text, "string", reason);
     assert.notEqual(text, "", reason);
     assert.ok(text?.includes("任务被中断"), `${reason}: ${text}`);
   }
-  // 三条的措辞互不相同：CLI 那头原样打给用户，说不清是哪个动作等于没说
+  // The three read differently: the CLI prints them verbatim, and one that does not name the action
+  // says nothing useful.
   const texts = new Set((["quit", "logout", "stop"] as const).map((r) => executorCancelReason(confirmed(r))));
   assert.equal(texts.size, 3);
 });
 
 test("app 真的在退出时取消，且与运行时停止是两条独立入口", () => {
-  // 退出安装更新自己置 quitting、不经 stopConfirmed，只有这条能盖住它
+  // Quit-and-install sets `quitting` itself and never goes through stopConfirmed; only this trigger
+  // covers it.
   const text = executorCancelReason({ kind: "app-exit" });
   assert.ok(text?.includes("任务被中断"), String(text));
 });
 
 test("取消退出对话框、重启、迁移、通道断开都不动在跑的任务", () => {
-  // 用户在确认框上点了取消：什么都没停，也就不能取消任何任务
+  // The user dismissed the confirmation dialog: nothing was stopped, so nothing may be cancelled.
   for (const reason of ["quit", "logout", "stop", "restart", "migrate"] as const) {
     assert.equal(executorCancelReason(declined(reason)), null, reason);
   }
-  // 重启后同一个运行时马上回来，app 自始至终没走；对用户只是一次闪断
+  // A restart brings the same runtime straight back and the app never left; to the user it is a blip.
   assert.equal(executorCancelReason(confirmed("restart")), null);
-  // 迁移停的是旧 LaunchAgent，不是本 app，那边不托管任何 executor 任务
+  // Migration stops the legacy LaunchAgent, not this app, and no executor task is hosted there.
   assert.equal(executorCancelReason(confirmed("migrate")), null);
-  // 通道断了不等于 app 死了：任务还在跑，重连后靠对账补状态；断线就当没跑会造成双写
+  // A dropped channel does not mean the app died: the tasks are still running and reconnecting
+  // reconciles them. Treating a drop as a stop would cause double writes.
   assert.equal(executorCancelReason({ kind: "device-channel-lost" }), null);
 });

@@ -1,21 +1,26 @@
 /**
- * executor 结构化工具的路径守卫（plan 116 M3）。
+ * The path guard for the executor's structured tools.
  *
- * 为什么需要它：bash 的每条命令都套了 `sandbox-exec`，有内核兜底；但 pi 的结构化文件工具
- * （read / edit / write / ls / grep / find）是在 runner 的 utilityProcess **里**直接调 fs 的，
- * 那个进程不在 Seatbelt 里（utilityProcess 由 Electron fork，命令行前面塞不进 sandbox-exec）。
- * 所以这一层必须由我们自己在 JS 里查。
+ * Why it exists: every bash command is wrapped in `sandbox-exec` with the kernel as a backstop, but
+ * pi's structured file tools (read / edit / write / ls / grep / find) call fs directly **inside** the
+ * runner's utilityProcess, and that process is not in Seatbelt (Electron forks a utilityProcess;
+ * there is no command line to prefix with sandbox-exec). So this layer has to be checked by us, in JS.
  *
- * 挂载点是 pi 的内联扩展 `pi.on("tool_call")`：`noExtensions` 关掉的是**磁盘扩展发现**
- * （工作区里放一个 `.pi/` 就能执行任意代码，必须关），内联扩展不受影响，是官方留的进程内钩子。
+ * It hangs off pi's inline extension hook, `pi.on("tool_call")`. What `noExtensions` disables is
+ * **on-disk extension discovery** (dropping a `.pi/` directory into a workspace would execute
+ * arbitrary code, so it must be off); inline extensions are unaffected and are the sanctioned
+ * in-process hook.
  *
- * 判定逻辑放在这里、与 pi 解耦，是为了能穷举测试——路径逃逸这种事靠读代码是看不出来的。
+ * The decision logic lives here, decoupled from pi, so it can be tested exhaustively — path escapes
+ * are not the kind of thing anyone spots by reading code.
  *
- * 注意这层与 Seatbelt 的关系是**互补不是冗余**：它挡住结构化工具，Seatbelt 挡住 bash 派生的一切。
- * 两层都要有，缺一层就有一整类越界没人管。
+ * This layer and Seatbelt are **complementary, not redundant**: this one covers the structured tools,
+ * Seatbelt covers everything bash spawns. Both are needed; drop either and a whole class of
+ * out-of-bounds access goes unwatched.
  */
 
-/** 只要带路径入参的工具都要过这一关；表驱动，新工具漏配时 `unknownToolPolicy` 兜底。 */
+/** Every tool taking a path argument passes through here. Table-driven; a new tool missing from the
+ * table simply contributes no path fields. */
 const PATH_FIELDS: Record<string, readonly string[]> = {
   read: ["path", "filePath", "file"],
   write: ["path", "filePath", "file"],
@@ -25,34 +30,36 @@ const PATH_FIELDS: Record<string, readonly string[]> = {
   find: ["path", "dir", "directory"],
 };
 
-/** 写类工具：只读模式下一律拒，连路径都不用看。 */
+/** Mutating tools: always refused in read-only mode, without even looking at the path. */
 const MUTATING_TOOLS = new Set(["write", "edit"]);
 
 export type GuardInput = {
   toolName: string;
-  /** 工具的入参对象；只读取，不改写 */
+  /** The tool's argument object; read only, never rewritten. */
   input: unknown;
-  /** realpath 解析后的工作区根 */
+  /** The workspace root, realpath-resolved. */
   workspaceRoot: string;
-  /** false = 只读模式 */
+  /** false = read-only mode. */
   writable: boolean;
 };
 
 export type GuardVerdict = { block: true; reason: string } | null;
 
 /**
- * 路径是否落在工作区内。
+ * Whether a path falls inside the workspace.
  *
- * 三件必须做对的事：
- *  1. 用**分段比较**而不是字符串前缀——`/repo-evil` 不能因为以 `/repo` 开头就算在 `/repo` 里。
- *  2. `..` 先归一化再比，否则 `/repo/../etc/passwd` 会蒙混过关。
- *  3. 根自身算在内。
+ * Three things this has to get right:
+ *  1. Compare **segment by segment**, not by string prefix — `/repo-evil` must not count as inside
+ *     `/repo` merely because it starts with it.
+ *  2. Normalize `..` before comparing, or `/repo/../etc/passwd` slips through.
+ *  3. The root itself counts as inside.
  *
- * 不解析符号链接：这里是纯函数，拿不到文件系统。调用方传进来的 root 已经是 realpath 解析过的，
- * 而目标路径的符号链接逃逸由 Seatbelt 那层兜底（它按内核解析后的真实路径判）。
+ * Symlinks are not resolved: this is a pure function with no filesystem access. The caller passes a
+ * root that is already realpath-resolved, and symlink escapes in the target path are caught by the
+ * Seatbelt layer, which judges the kernel-resolved real path.
  */
 export function isInsideWorkspace(workspaceRoot: string, candidate: string): boolean {
-  if (!candidate.startsWith("/")) return false; // 相对路径无从判断，一律不放行
+  if (!candidate.startsWith("/")) return false; // A relative path cannot be judged here, so never allow it.
   const root = normalizeSegments(workspaceRoot);
   const target = normalizeSegments(candidate);
   if (target.length < root.length) return false;
@@ -86,10 +93,11 @@ function collectPaths(toolName: string, input: unknown): string[] {
 }
 
 /**
- * 判一次工具调用。返回 null = 放行。
+ * Judge one tool call. Returning null means "allowed".
  *
- * 相对路径一律拒而不是拼到 root 上再判：pi 的工具各自解释相对路径的方式不保证一致，
- * 我们这边猜错一次就是一个洞。让模型给绝对路径，代价只是多一轮，收益是这层判定没有歧义。
+ * Relative paths are refused outright rather than joined onto the root first: pi's tools are not
+ * guaranteed to interpret relative paths the same way, and guessing wrong once is a hole. Making the
+ * model supply absolute paths costs one extra round trip and makes this check unambiguous.
  */
 export function guardToolCall({ toolName, input, workspaceRoot, writable }: GuardInput): GuardVerdict {
   if (!writable && MUTATING_TOOLS.has(toolName)) {

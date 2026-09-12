@@ -19,7 +19,7 @@ test("同前缀的兄弟目录不算在内——字符串前缀判定会在这�
 test("`..` 先归一化再判，逃逸不了", () => {
   assert.equal(isInsideWorkspace(ROOT, `${ROOT}/../etc/passwd`), false);
   assert.equal(isInsideWorkspace(ROOT, `${ROOT}/src/../../../tmp/x`), false);
-  // 绕一圈又回到工作区内的，应当放行
+  // A path that wanders out and back into the workspace should still be allowed.
   assert.equal(isInsideWorkspace(ROOT, `${ROOT}/src/../lib/x`), true);
 });
 

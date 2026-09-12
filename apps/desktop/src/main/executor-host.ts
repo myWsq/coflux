@@ -1,16 +1,20 @@
 /**
- * executor host（plan 116 M2）：主进程这一侧的门面。
+ * The executor host: the main process's facade.
  *
- * 把三件事收在一处，让 `index.ts` 只需要拿到一个对象：
- *   - **host 注册**：device 通道一通就向本机 daemon 报到（hostId + 单调递增的 epoch）。
- *     一个 daemon 只认一个 host，epoch 用来让「旧连接的迟到注册」被判 stale 而不是覆盖新的。
- *   - **配置变更的回流**：用户刚配好 provider/key，要立刻重新注册（把 ready 从 false 翻成 true），
- *     否则 daemon 会继续在提交那一刻拒掉任务，用户以为配了却没用。
- *   - **通道断开**：**不**清作业表。通道断了不等于 app 死了，任务还在跑；重连后靠对账把状态补回去。
- *     这条是刻意的：断线就重派 writer 会造成双写。
+ * It gathers three things in one place so `index.ts` only needs one object:
+ *   - **Host registration**: report to the local daemon as soon as the device channel is up (a
+ *     hostId plus a monotonically increasing epoch). A daemon recognizes exactly one host, and the
+ *     epoch lets a late registration from an old connection be judged stale instead of overwriting
+ *     the new one.
+ *   - **Configuration changes flowing back**: the moment the user sets a provider/key, re-register
+ *     so `ready` flips from false to true. Otherwise the daemon keeps refusing submissions at submit
+ *     time and the user's configuration appears to have no effect.
+ *   - **Channel loss**: do **not** clear the job table. A dropped channel does not mean the app
+ *     died; the tasks are still running and reconciliation restores the state on reconnect. This is
+ *     deliberate: re-dispatching a writer on every disconnect would cause double writes.
  *
- * `hostId` 用 app 的实例 id：同一个 app 进程重启后换新 id，daemon 因此知道换了实例、把旧 run 判 unknown，
- * 而不是误以为还是原来那个 host 在跑。
+ * `hostId` is the app instance's id: a restarted app process gets a new one, so the daemon knows the
+ * instance changed and judges old runs unknown rather than assuming the same host is still running.
  */
 
 import { randomUUID } from "node:crypto";
@@ -23,16 +27,16 @@ import { executorCancelReason, type ExecutorStopTrigger } from "./executor-lifec
 import { ExecutorManager, type RunnerHandle } from "./executor-manager";
 import type { ExecutorRunnerOutbound } from "./executor-runner-protocol";
 
-/** 能力按**名字**门禁，对齐 daemon-capabilities.ts 的范式；不比较版本号。 */
+/** Capabilities are gated **by name**, following daemon-capabilities.ts; no version comparison. */
 export const EXECUTOR_CAPABILITIES = ["executor_run"] as const;
 
 export type ExecutorHost = {
   getSettings(): DesktopExecutorSettings;
   setModel(provider: string, modelId: string): void;
   setApiKey(apiKey: string): void;
-  /** 渲染层转进来的 device 帧 */
+  /** A device frame relayed in by the renderer. */
   inbound(message: DesktopExecutorInbound): void;
-  /** 空串 = 通道断开 */
+  /** An empty string means the channel dropped. */
   setChannel(daemonId: string): void;
   /**
    * Something that looks like a local-runtime shutdown happened. The trigger decides whether runs
@@ -43,11 +47,11 @@ export type ExecutorHost = {
 
 export type ExecutorHostOptions = {
   config: ExecutorConfigStore;
-  /** out/main/executor-runner.js 的绝对路径 */
+  /** Absolute path to out/main/executor-runner.js. */
   runnerPath: string;
   sendToRenderer: (channel: string, payload: unknown) => void;
   log: (message: string) => void;
-  /** 仅测试注入 */
+  /** Injected in tests only. */
   spawnRunner?: () => RunnerHandle;
 };
 
@@ -96,7 +100,8 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
     options.sendToRenderer(IPC.executorSettings, options.config.view());
   }
 
-  /** 配置变了要做两件事：作业表的准入判据跟着变，并重新注册让 daemon 的提交门禁也跟着变。 */
+  /** A configuration change means two things: the job table's admission criteria follow, and
+   * re-registering makes the daemon's submit gate follow too. */
   function onConfigChanged(): void {
     manager.refreshReadiness();
     publishSettings();
@@ -133,7 +138,8 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
           break;
         case "registered":
           if (!message.ok) {
-            // 最常见的原因是这条通道不是 loopback（走了 relay）。daemon 是判据，这里只如实记下。
+            // The usual cause is that this channel is not loopback (it went over relay). The daemon
+            // is the authority; this side only records what it was told.
             options.log(`[executor] 本机 daemon 拒绝了 host 注册：${message.error ?? "未给出原因"}`);
             break;
           }
@@ -145,7 +151,8 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
       if (daemonId === channelDaemonId) return;
       channelDaemonId = daemonId;
       if (daemonId) register();
-      // 断开时**不**动作业表：任务还在跑，重连后靠对账补状态。断线就重派 writer 会造成双写。
+      // On a drop, leave the job table **alone**: the tasks are still running and reconciliation
+      // restores the state on reconnect. Re-dispatching a writer on a drop would cause double writes.
       else options.log("[executor] 本机 daemon 的 device 通道断开；在跑的任务继续，等重连对账");
     },
     stopRuns(trigger) {
@@ -157,7 +164,8 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
   };
 }
 
-/** 真实的 runner：Electron 的 utilityProcess。fork 的是文件路径，所以 runner 必须是独立构建产物。 */
+/** The real runner: an Electron utilityProcess. It forks a file path, so the runner has to be its
+ * own build artifact. */
 function forkRunner(runnerPath: string): RunnerHandle {
   const child = utilityProcess.fork(runnerPath, [], { serviceName: "coflux-executor", stdio: "ignore" });
   return {

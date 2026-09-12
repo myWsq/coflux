@@ -1,12 +1,16 @@
 /**
- * executor 管理器（plan 116 M2/M3 的胶水）：把作业表吐出的 effect 真正执行掉。
+ * The executor manager: the glue that actually carries out the effects the job table emits.
  *
- * 分工刻意划成三段，方便把最容易写错的部分留在纯函数里：
- *   - `executor-jobs`：并发、写锁、终态、对账。纯状态机，穷举测试。
- *   - `executor-sandbox` / `executor-workspace`：profile 文本与 git 事实。纯函数，穷举测试。
- *   - 本文件：起进程、杀进程组、落盘 profile、把回报交给上层发出去。副作用都在这里，注入依赖后可测。
+ * The split into three is deliberate, so the parts easiest to get wrong stay pure:
+ *   - `executor-jobs`: concurrency, the write lock, terminal states, reconciliation. A pure state
+ *     machine, tested exhaustively.
+ *   - `executor-sandbox` / `executor-workspace`: profile text and git facts. Pure functions, tested
+ *     exhaustively.
+ *   - This file: starting processes, killing process groups, writing the profile to disk, handing
+ *     reports up to be sent. All the side effects live here, testable through injected dependencies.
  *
- * 上层（IPC 接线）只需要给两样东西：一个把 device 帧发出去的回调，一个读配置与凭证的入口。
+ * The layer above (the IPC wiring) only has to supply two things: a callback that sends a device
+ * frame, and a way to read the configuration and credentials.
  */
 
 import { execFileSync } from "node:child_process";
@@ -19,10 +23,11 @@ import { buildSandboxProfile } from "./executor-sandbox";
 import { collectWorkspaceFacts, type GitRunner } from "./executor-workspace";
 import type { ExecutorRunnerOutbound, ExecutorRunnerStart } from "./executor-runner-protocol";
 
-/** 任务总时长上限：超过就 abort。executor 是「甩一段边界清楚的活」，不是长驻。 */
+/** Wall-clock cap for a task; past it the run is aborted. The executor is for handing over one
+ * well-bounded piece of work, not for running indefinitely. */
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 
-/** 一个在跑的 runner 子进程。 */
+/** One running runner child process. */
 export type RunnerHandle = {
   postMessage(message: unknown): void;
   kill(): void;
@@ -35,18 +40,18 @@ export type ExecutorConfigSnapshot = {
   reason: string;
   provider: string;
   modelId: string;
-  /** 只在起 runner 那一刻取用，不缓存、不落日志 */
+  /** Read only at the moment a runner is spawned; never cached, never logged. */
   apiKey: string;
   systemPrompt: string;
   shell: string;
 };
 
 export type ExecutorManagerDeps = {
-  /** 起一个 runner 子进程（真实实现用 utilityProcess.fork） */
+  /** Spawn a runner child process (the real implementation uses utilityProcess.fork). */
   spawnRunner: () => RunnerHandle;
-  /** 读当前配置与凭证 */
+  /** Read the current configuration and credentials. */
   config: () => ExecutorConfigSnapshot;
-  /** 把一帧发给 daemon（经渲染层的 device 通道） */
+  /** Send one frame to the daemon (through the renderer's device channel). */
   sendReport: (report: {
     runId: string;
     state: string;
@@ -70,7 +75,7 @@ const defaultRunGit: GitRunner = (args, cwd) => {
 type LiveRun = {
   handle: RunnerHandle;
   scratchDir: string;
-  /** 已经收到终态，等着放锁 */
+  /** A terminal state already arrived; waiting to release the lock. */
   settled: boolean;
 };
 
@@ -85,7 +90,8 @@ export class ExecutorManager {
     this.table = new ExecutorJobTable(undefined, { ready: config.ready, reason: config.reason });
   }
 
-  /** 配置变了（用户刚配好 provider/model）：作业表的准入判据要跟着变。 */
+  /** The configuration changed (the user just set a provider/model): the job table's admission
+   * criteria have to follow. */
   refreshReadiness(): void {
     const config = this.deps.config();
     this.table.setReadiness({ ready: config.ready, reason: config.reason });
@@ -149,7 +155,8 @@ export class ExecutorManager {
     let scratchDir = "";
     try {
       const config = this.deps.config();
-      // 两个都要 realpath：profile 里写的是内核解析后的路径，不一致规则就静默失效。
+      // Both need realpath: the profile carries kernel-resolved paths, and any mismatch makes the
+      // rule silently do nothing.
       const root = realpathSync(assignment.workspaceRoot);
       scratchDir = realpathSync(mkdtempSync(join(tmpdir(), "coflux-executor-")));
 
@@ -187,7 +194,8 @@ export class ExecutorManager {
       handle.postMessage(start);
       this.log(`run ${assignment.runId} 已起（${assignment.write ? "可写" : "只读"}，${root}）`);
     } catch (error) {
-      // 起不来也必须落终态：否则写锁不放，而且 CLI 会一直轮询。
+      // Failing to start must still record a terminal state: otherwise the write lock is never
+      // released and the CLI polls forever.
       const text = error instanceof Error ? error.message : String(error);
       this.log(`run ${assignment.runId} 启动失败：${text}`);
       if (scratchDir) this.cleanScratch(scratchDir);
@@ -199,7 +207,8 @@ export class ExecutorManager {
   private stop(runId: string): void {
     const run = this.live.get(runId);
     if (!run) return;
-    // 先让 runner 自己收尾（它会按进程组停掉 bash），拿不到回应再硬杀。
+    // Let the runner wind itself down first (it stops bash by process group); force-kill only if it
+    // does not answer.
     run.handle.postMessage({ type: "abort" });
     setTimeout(() => {
       if (this.live.has(runId)) {
@@ -225,12 +234,14 @@ export class ExecutorManager {
       if (run) run.settled = true;
       this.apply(this.table.finish(runId, outcome));
     }
-    // transcript / ready 本片不消费：转录留在桌面内部，第二片的悬浮小窗才用得上。
+    // transcript / ready are not consumed in this slice: the transcript stays inside the desktop app
+    // and is only needed by the second slice's floating window.
   }
 
   /**
-   * runner 进程没了。**只有在还没落终态时**才补一个——否则会把已经成功的 run 覆盖成失败。
-   * 补的是 `unknown` 而不是 `tool_failed`：进程异常消失时，它写到哪了我们并不知道。
+   * The runner process is gone. Fill in a terminal state **only if one was not recorded already** —
+   * otherwise a run that already succeeded would be overwritten as a failure. What gets filled in is
+   * `unknown`, not `tool_failed`: when a process vanishes unexpectedly, we do not know how far it got.
    */
   private onRunnerExit(runId: string, code: number): void {
     const run = this.live.get(runId);
@@ -246,13 +257,13 @@ export class ExecutorManager {
     );
   }
 
-  /** 只删 mkdtemp 给出的那个目录，且必须非空串。 */
+  /** Delete only the directory mkdtemp handed back, and only when the string is non-empty. */
   private cleanScratch(scratchDir: string): void {
     if (!scratchDir || !scratchDir.includes("coflux-executor-")) return;
     try {
       rmSync(scratchDir, { recursive: true, force: true });
     } catch {
-      // 清理失败不影响任务结果
+      // A failed cleanup does not affect the task's result.
     }
   }
 }

@@ -15,11 +15,13 @@ type ExecutorSettingsDialogProps = {
 };
 
 /**
- * 账号菜单「Executor 设置…」（plan 116 M4）。全局一份配置，不按工作区分。
+ * The account menu's "Executor settings…" dialog. One global configuration, not per workspace.
  *
- * API key 是**只写**的：主进程从不把它交给渲染层，这里只知道「配没配」。所以已配置时输入框留空、
- * 占位符写明「留空则不改动」，要清除得显式点按钮。这比塞一串假圆点诚实——用户看到假值会以为那是
- * 自己的 key，手滑覆盖就找不回来了。
+ * The API key is **write-only**: the main process never hands it to the renderer, which only knows
+ * whether one is set. So the field stays empty when a key exists, its placeholder says that leaving
+ * it empty changes nothing, and clearing takes an explicit button. That is more honest than a row of
+ * fake dots — a user seeing a fake value takes it for their key, and an accidental overwrite is
+ * unrecoverable.
  */
 export function ExecutorSettingsDialog({ open, onOpenChange, bridge }: ExecutorSettingsDialogProps) {
   const [settings, setSettings] = useState<DesktopExecutorSettings | null>(null);
@@ -46,7 +48,7 @@ export function ExecutorSettingsDialog({ open, onOpenChange, bridge }: ExecutorS
 
   function save() {
     bridge.setExecutorModel(provider, modelId);
-    if (apiKey.trim()) bridge.setExecutorApiKey(apiKey); // 留空 = 不改动已存的 key
+    if (apiKey.trim()) bridge.setExecutorApiKey(apiKey); // Empty means: leave the stored key alone.
     setApiKey("");
     onOpenChange(false);
   }

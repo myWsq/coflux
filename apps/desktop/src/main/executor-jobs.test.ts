@@ -176,10 +176,10 @@ test("本机运行时停止：未终结的 run 落 cancelled 并请求停止，�
   assert.equal(effects.filter((e) => e.kind === "stop").length, 1);
   const terminal = reports(effects).find((e) => e.kind === "report" && e.runId === "a");
   assert.equal(terminal?.kind === "report" && terminal.state, "cancelled");
-  // 终态必须带上「是哪个动作中断了它」，CLI 那头照原文打给用户
+  // The terminal state has to carry which action ended the run; the CLI prints it verbatim.
   assert.equal(terminal?.kind === "report" && terminal.outcome?.error, "退出 Coflux，任务被中断");
   assert.equal(t.activeRunIds().length, 0);
-  // 幂等：再来一次没有任何 effect
+  // Idempotent: a second call emits nothing.
   assert.deepEqual(t.cancelAll("退出 Coflux，任务被中断"), []);
 });
 

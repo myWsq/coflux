@@ -1,63 +1,76 @@
-//! executor run 账本（plan 116）：`coflux executor run` 与桌面 app 之间那张极小的作业表。
+//! The executor run ledger: the very small job table between `coflux executor run` and the desktop
+//! app.
 //!
-//! **daemon 在这条链路上只做三件事**：认下本机唯一的 executor host、把工单推给它、把它回报的
-//! 状态与终态存着供 CLI 轮询。调度、写锁、转录、模型调用全在桌面主进程——worker 的内存态热升级
-//! 即丢（见 `crates/worker/src/main.rs` 的命令日志索引注释），把作业表放这里等于把最需要活下来的
-//! 东西放在最容易消失的地方。
+//! **The daemon does exactly three things on this path**: recognize the machine's single executor
+//! host, push assignments to it, and store the states and terminal outcomes it reports for the CLI
+//! to poll. Scheduling, the write lock, transcripts and model calls all live in the desktop main
+//! process — worker memory is lost on hot upgrade (see the command-log index comment in
+//! `crates/worker/src/main.rs`), so putting the job table here would put what most needs to survive
+//! in the place most likely to vanish.
 //!
-//! **故障边界（写死，不得放宽）**：
-//! - channel 断了不等于 app 死了。**绝不重派 writer**——租约失效不证明旧 writer 已停止，重派就是双写。
-//! - host 换代（app 重启 / 通道重连）后走**对账**：daemon 报出手里仍未终结的 run，host 逐条重报；
-//!   到点没被重报的判 `Unknown`（结果未知），不是失败、更不是重跑。
-//! - 另一个桌面实例抢注成 host 时，上一个 host 名下未终结的 run 立刻判 `Unknown`：新实例无从
-//!   知道旧实例是否还在写。
+//! **Failure boundaries (fixed; do not relax them)**:
+//! - A dropped channel does not mean the app died. **Never re-dispatch a writer** — an expired lease
+//!   does not prove the old writer stopped, and re-dispatching is a double write.
+//! - After a host generation change (app restart / channel reconnect), go through **reconciliation**:
+//!   the daemon names the runs it still has unfinished and the host re-reports each one. Anything not
+//!   re-reported in time becomes `Unknown` (result unknown) — not a failure, and certainly not a rerun.
+//! - When another desktop instance claims the host slot, every unfinished run under the previous host
+//!   becomes `Unknown` immediately: the new instance has no way to know whether the old one is still
+//!   writing.
 //!
-//! 本模块是纯状态机（只吃 `now` 不读时钟、不做 I/O）：调用方拿到 [`Effect`] 后自己发帧。
+//! This module is a pure state machine (it takes `now` rather than reading a clock, and does no I/O):
+//! the caller receives [`Effect`]s and sends the frames itself.
 
 use std::collections::{BTreeMap, HashMap};
 
-/// host 必须在登记时报出的能力名。按名门禁，不比较版本号——对齐
-/// `apps/server/src/daemon-capabilities.ts` 的范式：旧客户端对未知载荷是静默丢弃的，
-/// 不设门禁只会让 agent 白等到超时。
+/// The capability name a host must declare when registering. Gated by name, with no version
+/// comparison, following `apps/server/src/daemon-capabilities.ts`: old clients drop unknown payloads
+/// silently, so having no gate would only leave the agent waiting for a timeout.
 pub const CAPABILITY_EXECUTOR_HOST: &str = "executor_host_v1";
 
-/// host 掉线 / 换代后给它重报的窗口。到点仍未重报即判 `Unknown`。
-/// 45s 与 lease TTL 同量级：足够 app 重连一次，又不至于让 CLI 干等太久。
+/// The window a host gets to re-report after a disconnect or a generation change. Anything still
+/// not re-reported when it closes becomes `Unknown`. 45s is the same order as the lease TTL: enough
+/// for the app to reconnect once, without leaving the CLI waiting too long.
 pub const RECONCILE_GRACE_MS: f64 = 45_000.0;
-/// 工单推出去之后等 host 接单的上限。host 在但不吭声（主进程卡死）时，run 不能永远停在 queued。
+/// How long to wait for a host to accept after an assignment is pushed. When the host is present but
+/// silent (a wedged main process), the run must not sit in queued forever.
 pub const ASSIGN_ACK_MS: f64 = 30_000.0;
-/// 账本里最多留多少条 run。超出时先淘汰最老的**已终结** run；全是在跑的就拒绝新提交。
+/// How many runs the ledger keeps. Past the cap, the oldest **finished** run is evicted first; when
+/// they are all still running, new submissions are refused.
 pub const MAX_RUNS: usize = 64;
-/// 单条 prompt 的字节上限：executor 的入参是一句任务描述，不是文件通道。
+/// Byte cap for one prompt: the executor's input is a task description, not a file channel.
 pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunPhase {
-    /// 已登记、工单已推给 host，还没收到接单回执
+    /// Registered and pushed to the host, with no acceptance receipt yet.
     Queued,
-    /// host 已接单
+    /// The host accepted it.
     Accepted,
-    /// host 报了 running
+    /// The host reported it running.
     Running,
-    /// 已终结，`terminal` 必有值
+    /// Finished; `terminal` is always set.
     Done,
 }
 
-/// 终态分类（plan 116）：**不得**把「进程退出 0」或「prompt() 返回」直接当成功。
+/// Terminal-state classification. A process exiting 0, or `prompt()` returning, **must not** be
+/// taken for success on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Terminal {
     Succeeded,
-    /// host 当场拒绝：写锁被占、未配置 provider/model、并发封顶……`note` 是给 agent 看的原因
+    /// The host refused on the spot: write lock taken, no provider/model configured, concurrency cap
+    /// reached, and so on. `note` carries the reason, written for the agent.
     Rejected,
     ModelError,
     ToolFailed,
     Cancelled,
-    /// 结果未知：host 掉线 / 换代后没能重报。**绝不自动重跑**
+    /// Result unknown: the host dropped or changed generation and never re-reported. **Never rerun
+    /// automatically.**
     Unknown,
 }
 
 impl Terminal {
-    /// CLI 与 SKILL 里露出的稳定字符串。
+    /// The stable strings the CLI and the SKILL expose.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Succeeded => "succeeded",
@@ -69,7 +82,7 @@ impl Terminal {
         }
     }
 
-    /// 只有 `Succeeded` 算成功；其余都要让 CLI 以非零退出码结束。
+    /// Only `Succeeded` counts as success; everything else must make the CLI exit non-zero.
     pub fn ok(self) -> bool {
         matches!(self, Self::Succeeded)
     }
@@ -90,7 +103,8 @@ impl RunPhase {
 pub struct RunRecord {
     pub run_id: String,
     pub submission_id: String,
-    /// 发起方会话（只作归属与排错线索，不参与鉴权——鉴权在 `/agent` 的 pid 反查那道门）
+    /// The initiating session (attribution and debugging only; it plays no part in authorization,
+    /// which happens at the pid lookup on `/agent`).
     pub session_id: String,
     pub workspace_id: String,
     pub workspace_root: String,
@@ -98,7 +112,7 @@ pub struct RunRecord {
     pub prompt: String,
     pub phase: RunPhase,
     pub terminal: Option<Terminal>,
-    /// 进行中的一句话 / 拒绝原因
+    /// One in-flight sentence, or the reason for a refusal.
     pub note: String,
     pub summary: String,
     pub changed_files: Vec<String>,
@@ -108,7 +122,8 @@ pub struct RunRecord {
     pub cancel_requested: bool,
     pub created_at: f64,
     pub updated_at: f64,
-    /// 到这个时刻还没等到 host 的消息就判 `Unknown`。None = 不计时（host 在、run 在跑）。
+    /// Without a message from the host by this instant, the run becomes `Unknown`. None means no
+    /// timer is running (the host is present and the run is going).
     pub deadline: Option<f64>,
 }
 
@@ -127,7 +142,7 @@ pub struct HostRecord {
     pub not_ready_reason: String,
 }
 
-/// 账本要调用方替它发出去的帧。账本自己不碰 I/O。
+/// The frames the ledger asks its caller to send. The ledger itself touches no I/O.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     Assign { channel_id: String, run_id: String },
@@ -135,11 +150,11 @@ pub enum Effect {
     ReportAck { channel_id: String, run_id: String },
 }
 
-// `reconcile_deadline` 是 epoch 毫秒、按仓库既有约定用 f64（见 local_auth.rs 的 `now_ms: f64`），
-// 而 f64 没有 Eq——故这里只 derive PartialEq，不 derive Eq。
+// `reconcile_deadline` is epoch milliseconds as f64, following the repository's existing convention
+// (see `now_ms: f64` in local_auth.rs), and f64 has no Eq — hence PartialEq only, without Eq.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegisterOutcome {
-    /// 需要 host 逐条重报的 run（重连对账）
+    /// The runs the host must re-report one by one (reconnect reconciliation).
     pub reconcile_run_ids: Vec<String>,
     pub reconcile_deadline: f64,
 }
@@ -161,10 +176,12 @@ impl ExecutorLedger {
         self.runs.get(run_id)
     }
 
-    /// 登记 / 更新本机 executor host。
+    /// Register or update the machine's executor host.
     ///
-    /// 同 host_id 的较低 epoch 是 stale（旧连接的迟到登记），直接拒；换了 host_id 则接管，
-    /// 并把上一个 host 名下未终结的 run 全部判 `Unknown`——新实例无从知道旧实例是否还在写。
+    /// A lower epoch for the same host_id is stale (a late registration from an old connection) and
+    /// is refused outright. A different host_id takes over, and every unfinished run under the
+    /// previous host becomes `Unknown` — the new instance has no way to know whether the old one is
+    /// still writing.
     pub fn register_host(
         &mut self,
         channel_id: &str,
@@ -217,8 +234,9 @@ impl ExecutorLedger {
         })
     }
 
-    /// host 的通道没了（调用方发现 channel 已不在 channels 表里）。**不重派**，只开始计时：
-    /// 到点仍没有新 host 重报，这些 run 落 `Unknown`。
+    /// The host's channel is gone (the caller noticed it left the channels table). **No
+    /// re-dispatch**, only a timer: if no new host re-reports before it expires, these runs become
+    /// `Unknown`.
     pub fn host_channel_lost(&mut self, now: f64) {
         let Some(host) = self.host.take() else { return };
         let deadline = now + RECONCILE_GRACE_MS;
@@ -247,7 +265,8 @@ impl ExecutorLedger {
         }
     }
 
-    /// 到点清算：把超过 deadline 仍没等到消息的 run 判 `Unknown`。每次读写账本前调用。
+    /// Settle expirations: any run past its deadline with no message becomes `Unknown`. Called before
+    /// every read of or write to the ledger.
     pub fn sweep(&mut self, now: f64) {
         for record in self.runs.values_mut() {
             if record.done() {
@@ -268,7 +287,8 @@ impl ExecutorLedger {
         }
     }
 
-    /// 提交一条 run。同 submission_id 重投返回同一条 run（CLI 的提交超时重发就靠它去重）。
+    /// Submit a run. The same submission_id arriving again returns the same run — this is what
+    /// deduplicates the CLI's retry after a submission timeout.
     #[allow(clippy::too_many_arguments)]
     pub fn submit(
         &mut self,
@@ -293,7 +313,8 @@ impl ExecutorLedger {
             ));
         }
         if let Some(run_id) = self.by_submission.get(submission_id) {
-            // 重投：只回已有 runId，绝不二次派发（executor 有副作用）
+            // A retry: return the existing runId and never dispatch twice (the executor has side
+            // effects).
             return Ok((run_id.clone(), None));
         }
         let Some(host) = self.host.clone() else {
@@ -348,8 +369,9 @@ impl ExecutorLedger {
         ))
     }
 
-    /// 取消：幂等。还没被接单的直接落 `Cancelled`（工单没人接，取消不会造成双写）；
-    /// 已接单的只置位并推一条取消帧，真正的终态仍由 host 报。
+    /// Cancel, idempotently. A run nobody accepted yet goes straight to `Cancelled` (with no taker,
+    /// cancelling cannot cause a double write); an accepted one only gets a flag and a cancel frame,
+    /// and the real terminal state still comes from the host.
     pub fn cancel(&mut self, run_id: &str, now: f64) -> Result<Option<Effect>, String> {
         self.sweep(now);
         let channel_id = self.host.as_ref().map(|host| host.channel_id.clone());
@@ -371,7 +393,8 @@ impl ExecutorLedger {
         }))
     }
 
-    /// 消化 host 的一条回报。返回要回给 host 的 ack（只有终态才 ack——host 靠它才敢丢掉本地副本）。
+    /// Consume one report from the host. Returns the ack to send back; only terminal states are
+    /// acked, because that ack is what lets the host drop its local copy.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_report(
         &mut self,
@@ -398,7 +421,7 @@ impl ExecutorLedger {
         match state {
             ReportState::Accepted | ReportState::Running => {
                 if record.done() {
-                    // 终态之后迟到的进行中回报：不复活，也不 ack。
+                    // An in-flight report arriving after a terminal state: do not revive it, do not ack.
                     return None;
                 }
                 record.phase = if state == ReportState::Accepted {
@@ -406,7 +429,8 @@ impl ExecutorLedger {
                 } else {
                     RunPhase::Running
                 };
-                // host 还活着且在报，取消计时器；掉线/换代时再重新装上。
+                // The host is alive and reporting, so clear the timer; it is re-armed on a disconnect
+                // or a generation change.
                 record.deadline = None;
                 None
             }
@@ -423,7 +447,8 @@ impl ExecutorLedger {
                     }
                     finish(record, terminal, note, now);
                 }
-                // 重复上报同一终态也要 ack：ack 丢了 host 会一直重发。
+                // Re-reporting the same terminal state still gets an ack: a lost ack makes the host
+                // resend forever.
                 channel_id.map(|channel_id| Effect::ReportAck {
                     channel_id,
                     run_id: run_id.to_string(),
@@ -432,7 +457,8 @@ impl ExecutorLedger {
         }
     }
 
-    /// 账本满了先淘汰最老的**已终结** run；一条都腾不出来就拒绝新提交，不挤掉在跑的任务。
+    /// When the ledger is full, evict the oldest **finished** run first; if none can be freed, refuse
+    /// the new submission rather than displacing a running task.
     fn evict_if_needed(&mut self) -> Result<(), String> {
         while self.runs.len() >= MAX_RUNS {
             let oldest = self
@@ -451,7 +477,7 @@ impl ExecutorLedger {
     }
 }
 
-/// host 回报的状态；wire 枚举到它的映射在 [`report_state_from_wire`]。
+/// The state a host reports; the wire enum maps to it in [`report_state_from_wire`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReportState {
     Accepted,
@@ -459,7 +485,7 @@ pub enum ReportState {
     Terminal(Terminal),
 }
 
-/// wire 的 `ExecutorRunState` → 账本状态。未知值按 None 处理而非 panic。
+/// The wire's `ExecutorRunState` -> a ledger state. Unknown values map to None rather than panicking.
 pub fn report_state_from_wire(value: i32) -> Option<ReportState> {
     use coflux_protocol::wire::ExecutorRunState as Wire;
     match Wire::try_from(value).ok()? {
@@ -618,7 +644,8 @@ mod tests {
         assert_eq!(record.terminal, Some(Terminal::Succeeded));
         assert_eq!(record.summary, "改完了");
         assert_eq!(record.changed_files, vec!["src/a.rs".to_string()]);
-        // ack 丢了 host 会重发同一条终态：必须再 ack 一次，且不改已落的结果
+        // A lost ack makes the host resend the same terminal state: ack it again, and do not change
+        // the outcome already recorded.
         let again = ledger.apply_report(
             "host-a",
             1,
@@ -650,13 +677,14 @@ mod tests {
             1.0,
         );
         ledger.host_channel_lost(10.0);
-        // 换代重连：拿到对账清单
+        // Reconnect after a generation change: get the reconcile list.
         let outcome = ledger
             .register_host("ch-2", "host-a", 2, &caps(), true, "", 20.0)
             .expect("重连登记成功");
         assert_eq!(outcome.reconcile_run_ids, vec![run_id.clone()]);
         assert_eq!(outcome.reconcile_deadline, 20.0 + RECONCILE_GRACE_MS);
-        // 没重报：到点判 unknown，且**不重派**（没有新的 Assign effect）
+        // Not re-reported: unknown once the deadline passes, and **no re-dispatch** (no new Assign
+        // effect).
         ledger.sweep(20.0 + RECONCILE_GRACE_MS);
         assert_eq!(
             ledger.run(&run_id).unwrap().terminal,
@@ -738,13 +766,13 @@ mod tests {
     fn cancel_is_idempotent_and_only_pushes_a_frame_once_accepted() {
         let mut ledger = ledger_with_host(0.0);
         let run_id = submit(&mut ledger, "sub-1", true, 0.0);
-        // 还没接单：本地直接落 cancelled，不推帧
+        // Not accepted yet: record cancelled locally, push no frame.
         assert_eq!(ledger.cancel(&run_id, 1.0).unwrap(), None);
         assert_eq!(
             ledger.run(&run_id).unwrap().terminal,
             Some(Terminal::Cancelled)
         );
-        // 已终结后再取消是空操作
+        // Cancelling after a terminal state is a no-op.
         assert_eq!(ledger.cancel(&run_id, 2.0).unwrap(), None);
 
         let second = submit(&mut ledger, "sub-2", true, 3.0);
@@ -767,7 +795,7 @@ mod tests {
             })
         );
         assert!(!ledger.run(&second).unwrap().done(), "终态仍由 host 报");
-        // 重复取消仍然只是再推一次帧，状态不变
+        // A repeated cancel only pushes the frame again; the state does not change.
         assert!(ledger.cancel(&second, 6.0).unwrap().is_some());
     }
 
@@ -803,7 +831,7 @@ mod tests {
                 index as f64,
             );
         }
-        // 全是已终结的：淘汰最老的那条，新提交照常通过
+        // All finished: evict the oldest and let the new submission through as usual.
         let fresh = submit(&mut ledger, "sub-fresh", false, 1_000.0);
         assert!(ledger.run(&fresh).is_some());
         assert!(ledger.runs.len() <= MAX_RUNS);

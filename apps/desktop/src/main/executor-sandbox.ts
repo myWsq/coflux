@@ -1,61 +1,75 @@
 /**
- * executor 工具进程的 Seatbelt profile 生成（plan 116 M3）。
+ * Seatbelt profile generation for the executor's tool processes.
  *
- * pi 官方明确不带沙箱（立场是「跑容器，或自己用扩展做确认流」），所以「只能改本工作区」这条得我们自己兑现。
- * 结构化文件工具可以在 JS 里查路径，但 `bash` 是个敞口——它能跑任何东西。这里给 bash 的每条命令套一层
- * `/usr/bin/sandbox-exec`，用内核来兜底。
+ * pi explicitly ships without a sandbox (its stated position is "run a container, or build your own
+ * confirmation flow as an extension"), so "it can only change this workspace" is ours to deliver.
+ * Structured file tools can check paths in JS, but `bash` is wide open — it can run anything. Every
+ * bash command is therefore wrapped in `/usr/bin/sandbox-exec` and the kernel is the backstop.
  *
- * **档位是「防失误」不是「防敌手」**：基线 `(allow default)` 之上做减法，能挡住越界写与整类本机代理执行，
- * 但 Mach/XPC 与 Apple Events 仍然开着。要堵那层得改成默认拒绝再逐项放行系统服务，是另一摊工程。
- * 威胁模型是「被搞糊涂的 agent 走错路」，不是有敌意的攻击者——用户本机跑的 Claude Code 本来就完全没有沙箱。
- * 任何把它说成完整隔离的文案都是错的。
+ * **The tier is "against mistakes", not "against adversaries"**: subtraction on top of an
+ * `(allow default)` baseline stops out-of-bounds writes and a whole class of local proxy execution,
+ * but Mach/XPC and Apple Events stay open. Closing those means switching to deny-by-default and
+ * allowing system services back one by one, which is its own project. The threat model is "a
+ * confused agent takes a wrong turn", not a hostile attacker — Claude Code on the user's own
+ * machine runs with no sandbox at all. Any copy calling this full isolation is wrong.
  *
- * ## 三条来自实测的硬约束（macOS 26 / Darwin 27 上逐条验过，别凭直觉改）
+ * ## Three hard constraints, each measured (verified on macOS 26 / Darwin 27; do not change on a hunch)
  *
- * 1. **路径必须是 realpath 解析后的真实路径**。`/var/...` 写进 profile 规则形同不存在（`/var` 是指向
- *    `/private/var` 的符号链接），而且**不报错**——表现是「允许规则像没写一样」，能让人白查半天。
- *    本模块因此拒绝收下任何看起来没解析过的路径。
- * 2. **不要用 `-D` 参数配 `(param "X")`**，实测不生效；一律把字面量拼进 profile。
- * 3. **`(deny network*)` 一条就同时挡住 loopback TCP 与 unix socket**（实测），所以不需要枚举 supervisor
- *    UDS、Docker socket、SSH agent 这些路径。反过来说也**不能**换成只封 loopback：那样 UDS 还开着。
+ * 1. **Paths must be realpath-resolved.** Writing `/var/...` into the profile makes the rule behave
+ *    as if it were absent (`/var` is a symlink to `/private/var`), and it **raises no error** — an
+ *    allow rule that silently does nothing, which can cost half a day. This module therefore refuses
+ *    any path that looks unresolved.
+ * 2. **Do not use `-D` parameters with `(param "X")`**; measured not to work. Always interpolate the
+ *    literal into the profile.
+ * 3. **A single `(deny network*)` blocks loopback TCP and unix sockets alike** (measured), so there
+ *    is no need to enumerate the supervisor UDS, the Docker socket, or the SSH agent. The converse
+ *    also holds: it **cannot** be narrowed to loopback only, which would leave UDS open.
  *
- * ## 为什么工具进程一律不联网
+ * ## Why tool processes never get the network
  *
- * daemon 的回环 `/agent` 端点认调用方靠的是请求体里自报的 pid（`crates/worker/src/hook.rs`），核对的是
- * 「这个 pid 属于某个会话进程树」而不是「这条连接真由它发出」。于是沙箱里的工具进程只要能打回环，就能用
- * `terminal.new` 让**完全不受沙箱约束的 daemon** 替它执行任意命令——沙箱等于白做。模型调用发生在 runner
- * 里而 runner 不进沙箱，所以断掉工具进程的网络不影响 executor 本身工作。
- * 代价是 executor 跑不了 `npm install` 这类要拉依赖的命令，这条限制写在 SKILL 里让发起方 agent 知道。
+ * The daemon's loopback `/agent` endpoint identifies its caller by a pid the request body reports
+ * about itself (`crates/worker/src/hook.rs`), and checks "this pid belongs to some session's process
+ * tree" rather than "this connection really came from it". So any tool process inside the sandbox
+ * that can reach loopback can use `terminal.new` to have the **entirely unsandboxed daemon** run
+ * arbitrary commands for it — the sandbox would be pointless. Model calls happen in the runner,
+ * which is not sandboxed, so cutting the tool processes' network does not affect the executor's own
+ * work. The cost is that it cannot run dependency-fetching commands like `npm install`; that limit
+ * is documented in the SKILL so the initiating agent knows about it.
  */
 
-/** shell 重定向要写 /dev/null，不放行的话 `cmd >/dev/null` 直接失败。 */
+/** Shell redirection writes to /dev/null; without an allowance `cmd >/dev/null` fails outright. */
 const WRITABLE_DEVICES = ["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/dtracehelper"] as const;
 
 export type SandboxInput = {
-  /** realpath 解析后的工作区根；只读模式下也用它做 cwd */
+  /** The workspace root, realpath-resolved; also the cwd in read-only mode. */
   workspaceRoot: string;
-  /** true = 可写模式（允许写工作区）；false = 只读（工作区也不可写） */
+  /** true = writable mode (the workspace may be written); false = read-only (not even the workspace). */
   writable: boolean;
   /**
-   * realpath 解析后、必须挖掉的其他已登记 worktree。
-   * 本仓库现实：`git worktree list` 里有嵌套在主工作区 `.claude/worktrees/` 下的 worktree，甚至两层嵌套。
-   * 不挖掉的话，在主工作区跑的 executor 会连带获得对别人未合并工作的写权限。
+   * Other registered worktrees that must be carved out, realpath-resolved.
+   * Reality in this repository: `git worktree list` shows worktrees nested under the main
+   * workspace's `.claude/worktrees/`, sometimes two levels deep. Without the carve-out, an executor
+   * running in the main workspace would also gain write access to someone else's unmerged work.
    */
   nestedWorktrees: readonly string[];
   /**
-   * realpath 解析后的 git 目录：本 worktree 的 gitdir 与共享的 common dir。
-   * v1 **一律只读**——executor 不 commit，改动交回发起方 agent 提交。这样同时躲开 worktree 级 config、
-   * `core.hooksPath`、rebase sequencer 的 `exec`、submodule config 这一整串持久化执行入口。
+   * The git directories, realpath-resolved: this worktree's gitdir and the shared common dir.
+   * v1 keeps them **read-only throughout** — the executor does not commit; the initiating agent
+   * commits the changes. That also sidesteps the whole chain of persisted execution entry points:
+   * worktree-level config, `core.hooksPath`, the rebase sequencer's `exec`, submodule config.
    */
   gitDirs: readonly string[];
-  /** 任务私有的 scratch 目录（realpath）。给它而不是放行整个 /tmp：那里有别的任务与共享 socket。 */
+  /** The task's private scratch directory (realpath). Given instead of allowing all of /tmp, which
+   * holds other tasks and shared sockets. */
   scratchDir: string;
 };
 
 /**
- * 路径准入。挡住三类会让 profile 静默失效或被注入的输入：非绝对路径、没解析过的路径、含引号或换行的路径。
- * profile 是 S-expression，一个未转义的引号就能改写规则语义，所以这里**拒绝**而不是转义——
- * 真实的工作区路径不会长这样，长这样就是出事了。
+ * Path admission. Blocks the three kinds of input that would silently void the profile or inject
+ * into it: non-absolute paths, unresolved paths, and paths containing quotes or newlines. The
+ * profile is an S-expression, where one unescaped quote can rewrite a rule's meaning, so this
+ * **refuses** rather than escapes — a real workspace path never looks like that, and one that does
+ * means something is already wrong.
  */
 function assertProfilePath(label: string, path: string): void {
   if (!path || !path.startsWith("/")) {
@@ -70,7 +84,8 @@ function assertProfilePath(label: string, path: string): void {
   if (path.split("/").includes("..") || path.split("/").includes(".")) {
     throw new Error(`executor 沙箱：${label} 必须是 realpath 解析后的路径，不能含 . 或 ..：${JSON.stringify(path)}`);
   }
-  // /var、/tmp、/etc 在 macOS 上都是指向 /private/... 的符号链接；没解析过的路径写进 profile 会静默失效。
+  // On macOS /var, /tmp and /etc are all symlinks into /private/...; an unresolved path written into
+  // the profile silently does nothing.
   if (/^\/(var|tmp|etc)(\/|$)/.test(path)) {
     throw new Error(
       `executor 沙箱：${label} 看起来未经 realpath 解析（${path}）——macOS 上 /var /tmp /etc 都是指向 /private 的符号链接，` +
@@ -84,8 +99,8 @@ function subpath(rule: string, path: string): string {
 }
 
 /**
- * 生成一条命令用的 profile。Seatbelt 里**后面的规则覆盖前面的**，所以顺序是：
- * 先全局拒写 → 再放行该放的 → 最后把要挖掉的重新拒掉。
+ * Build the profile for one command. In Seatbelt **later rules override earlier ones**, so the order
+ * is: deny all writes globally -> allow what should be allowed -> deny the carve-outs again.
  */
 export function buildSandboxProfile(input: SandboxInput): string {
   assertProfilePath("工作区根", input.workspaceRoot);
@@ -95,37 +110,40 @@ export function buildSandboxProfile(input: SandboxInput): string {
 
   const lines: string[] = [
     "(version 1)",
-    ";; executor 工具沙箱（coflux plan 116）。档位=防失误，不是防敌手：Mach/XPC 与 Apple Events 未收口。",
+    ";; coflux executor tool sandbox. Tier = against mistakes, not adversaries: Mach/XPC and Apple Events are not closed off.",
     "(allow default)",
     "",
-    ";; 网络：一条全拒。同时挡住 loopback TCP 与 unix socket（实测），于是沙箱里的工具进程无法回头",
-    ";; 打 daemon 的 /agent 借 terminal.new 让不受约束的 daemon 代执行。模型调用在沙箱外的 runner 里，不受影响。",
+    ";; Network: one blanket denial. It blocks loopback TCP and unix sockets alike (measured), so a tool",
+    ";; process cannot call back into the daemon's /agent and have the unconstrained daemon run commands",
+    ";; for it via terminal.new. Model calls happen in the runner, outside the sandbox, and are unaffected.",
     "(deny network*)",
     "",
-    ";; 文件写：默认全拒，再逐项放行。",
+    ";; File writes: deny everything by default, then allow back item by item.",
     "(deny file-write*)",
   ];
 
   if (input.writable) {
-    lines.push("", ";; 可写模式：只放行发起任务的那个工作区。", subpath("allow file-write*", input.workspaceRoot));
+    lines.push("", ";; Writable mode: allow only the workspace that started the task.", subpath("allow file-write*", input.workspaceRoot));
   } else {
-    lines.push("", ";; 只读模式：工作区本身也不可写，executor 只能看与跑。");
+    lines.push("", ";; Read-only mode: even the workspace is not writable; the executor may only look and run.");
   }
 
   lines.push(
     "",
-    ";; 任务私有 scratch（TMPDIR 指向它）。不放行整个 /tmp——那里有别的任务和共享 socket。",
+    ";; The task's private scratch (TMPDIR points at it). Not all of /tmp, which holds other tasks and shared sockets.",
     subpath("allow file-write*", input.scratchDir),
     "",
-    ";; shell 重定向需要的设备节点。",
+    ";; The device nodes shell redirection needs.",
     `(allow file-write* ${WRITABLE_DEVICES.map((device) => `(literal "${device}")`).join(" ")})`,
   );
 
   if (input.gitDirs.length > 0) {
     lines.push(
       "",
-      ";; git 元数据只读（v1 不 commit）。挖在放行之后才生效——主工作区的 .git 就落在工作区根里面。",
-      ";; 顺带堵掉 hooks、worktree 级 config、rebase sequencer 的 exec、submodule config 这串持久化执行入口。",
+      ";; Git metadata is read-only (v1 does not commit). The carve-out only works after the allow,",
+      ";; because the main workspace's .git sits inside the workspace root. It also closes the chain of",
+      ";; persisted execution entry points: hooks, worktree-level config, the rebase sequencer's exec,",
+      ";; and submodule config.",
       ...input.gitDirs.map((path) => subpath("deny file-write*", path)),
     );
   }
@@ -133,7 +151,8 @@ export function buildSandboxProfile(input: SandboxInput): string {
   if (input.nestedWorktrees.length > 0) {
     lines.push(
       "",
-      ";; 嵌套的其他已登记 worktree：别人的未合并工作，不能因为它恰好躺在本工作区目录下就变可写。",
+      ";; Other registered worktrees nested inside: someone else's unmerged work must not become",
+      ";; writable just because it happens to live under this workspace's directory.",
       ...input.nestedWorktrees.map((path) => subpath("deny file-write*", path)),
     );
   }
@@ -141,14 +160,15 @@ export function buildSandboxProfile(input: SandboxInput): string {
   return `${lines.join("\n")}\n`;
 }
 
-/** 套 sandbox-exec 的完整 argv。命令原样作为 `-c` 的实参传给 shell，不做字符串拼接。 */
+/** The full argv for wrapping in sandbox-exec. The command is passed verbatim as the shell's `-c`
+ * argument; nothing is concatenated into a string. */
 export function sandboxArgv(profilePath: string, shell: string, command: string): string[] {
   return ["/usr/bin/sandbox-exec", "-f", profilePath, shell, "-c", command];
 }
 
 /**
- * `git worktree list --porcelain` 的输出 → 除自己以外的 worktree 路径。
- * 只挑 `worktree ` 开头的行；其余（HEAD / branch / bare / detached）忽略。
+ * `git worktree list --porcelain` output -> every worktree path except our own.
+ * Only lines starting with `worktree ` are taken; the rest (HEAD / branch / bare / detached) are ignored.
  */
 export function otherWorktreePaths(porcelain: string, selfRoot: string): string[] {
   return porcelain

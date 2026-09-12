@@ -1,15 +1,18 @@
 /**
- * executor 的全局配置与凭证（plan 116 M4）。
+ * The executor's global configuration and credentials.
  *
- * 分成两半，因为两半的安全等级不同：
- *   - **非敏感项**（provider、模型 id）明文落 userData 下的 JSON，跟 `settings.json` 同级但独立成文件，
- *     免得把一个只认 `serverUrl` 的文件撑成杂物抽屉。
- *   - **API key** 走 `safeStorage` 加密落盘，复用 token-store 那套（先写临时文件再 rename，
- *     加密不可用就**不落盘**而不是回退明文）。
+ * Split in two because the two halves have different security levels:
+ *   - **Non-sensitive items** (provider, model id) go to plain JSON in userData, a sibling of
+ *     `settings.json` but its own file, so a file that only knows `serverUrl` does not swell into a
+ *     junk drawer.
+ *   - The **API key** is encrypted to disk through `safeStorage`, reusing token-store's approach
+ *     (write a temp file, then rename; if encryption is unavailable, write **nothing** rather than
+ *     falling back to plaintext).
  *
- * 凭证的流向只有一条：safeStorage → 主进程内存 → 起 runner 那一刻的 start 消息。
- * 它不进 `settings.json`、不进工具进程的 env、不进转录、不进日志，也从不下发给渲染层——
- * 渲染层只知道「配没配」，不知道配的是什么。
+ * The credential flows one way only: safeStorage -> main-process memory -> the start message at the
+ * moment a runner is spawned. It never enters `settings.json`, a tool process's environment, the
+ * transcript or the logs, and it is never sent to the renderer — the renderer only learns *whether*
+ * something is configured, never what.
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -18,12 +21,12 @@ import { dirname } from "node:path";
 import type { TokenCodec } from "./token-store";
 import { createTokenStore } from "./token-store";
 
-/** 渲染层能看到的配置形状——**没有 apiKey**，只有「配没配」。 */
+/** The configuration shape the renderer can see — **no apiKey**, only whether one is set. */
 export type ExecutorSettingsView = {
   provider: string;
   modelId: string;
   hasApiKey: boolean;
-  /** 三项齐全才算 ready；executor 提交在 daemon 那一刻就按它拒 */
+  /** Ready only when all three are present; the daemon refuses a submission on this at submit time. */
   ready: boolean;
   reason: string;
 };
@@ -34,8 +37,9 @@ export type ExecutorSettingsFile = {
 };
 
 /**
- * coflux 写死的 system prompt。**不由用户配、也不由发起方 agent 传**——executor 的人格与边界是产品的一部分，
- * 可配就意味着每个调用方都得重新想一遍，而且边界会被想漏。
+ * The system prompt, fixed by coflux. **Neither user-configurable nor passed by the calling agent** —
+ * the executor's persona and boundaries are part of the product; making them configurable would mean
+ * every caller has to think them through again, and the boundaries would get missed.
  */
 export const EXECUTOR_SYSTEM_PROMPT = [
   "You are the coflux executor: a focused sub-agent that another coding agent delegates a single, bounded task to.",
@@ -54,10 +58,11 @@ export const EXECUTOR_SYSTEM_PROMPT = [
 
 export type ExecutorConfigStore = {
   view(): ExecutorSettingsView;
-  /** 起 runner 时才调；返回的对象含明文 key，用完即弃，不要缓存、不要日志 */
+  /** Called only when spawning a runner; the returned object holds the key in the clear — use it and
+   * drop it, never cache it, never log it. */
   secrets(): { provider: string; modelId: string; apiKey: string };
   setModel(provider: string, modelId: string): void;
-  /** 空串 = 清除 */
+  /** An empty string clears it. */
   setApiKey(apiKey: string): boolean;
 };
 
@@ -82,7 +87,8 @@ export function readExecutorSettingsFile(path: string): ExecutorSettingsFile {
   }
 }
 
-/** 三项齐全才算 ready；理由是要原样透传给发起方 agent 的，写成它能照做的话。 */
+/** Ready only when all three are present. The reason is passed verbatim to the calling agent, so it
+ * is phrased as something that agent can act on. */
 export function deriveReadiness(provider: string, modelId: string, hasApiKey: boolean): { ready: boolean; reason: string } {
   if (!provider || !modelId) {
     return { ready: false, reason: "桌面 app 里还没配 executor 的 provider 与模型：打开账号菜单的「Executor 设置…」配好再发" };

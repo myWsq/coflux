@@ -1,43 +1,46 @@
 /**
- * 主进程 ↔ executor runner（utilityProcess 子进程）之间的消息契约（plan 116 M3）。
+ * The message contract between the main process and the executor runner (a utilityProcess child).
  *
- * 单独一个文件是为了两边共用同一份类型，且这份文件**不 import pi**——主进程侧不该因为
- * 引用消息类型就把整个 pi 拖进自己的模块图。
+ * It is its own file so both sides share one set of types, and so that this file **imports no pi**:
+ * the main process should not drag all of pi into its module graph just to name a message type.
  *
- * 凭证只在 `start` 消息里出现一次，不落盘、不进工具进程的 env、不进转录、不进日志。
+ * The credential appears exactly once, in the `start` message. It is never persisted, never placed
+ * in a tool process's environment, never transcribed, and never logged.
  */
 
 export type ExecutorRunnerStart = {
   type: "start";
   runId: string;
   prompt: string;
-  /** true = 可写模式 */
+  /** true = writable mode. */
   write: boolean;
-  /** realpath 解析后的工作区根 */
+  /** The workspace root, realpath-resolved. */
   workspaceRoot: string;
-  /** 本次任务私有的 scratch 目录（realpath）；TMPDIR 指向它 */
+  /** This task's private scratch directory (realpath); TMPDIR points at it. */
   scratchDir: string;
-  /** 生成好的 Seatbelt profile 落盘路径，bash 后端按它套 sandbox-exec */
+  /** Where the generated Seatbelt profile was written; the bash backend passes it to sandbox-exec. */
   sandboxProfilePath: string;
-  /** 登录 shell 路径 */
+  /** Path to the login shell. */
   shell: string;
-  /** coflux 写死的 system prompt */
+  /** The system prompt, fixed by coflux. */
   systemPrompt: string;
   model: { provider: string; id: string };
-  /** provider 凭证。**只在这条消息里出现**，runner 不得转发给任何子进程或写进任何输出。 */
+  /** The provider credential. It appears **only here**; the runner must never forward it to a child
+   * process or write it into any output. */
   apiKey: string;
-  /** 单次任务的总时长上限（毫秒） */
+  /** Wall-clock cap for one task, in milliseconds. */
   timeoutMs: number;
 };
 
 export type ExecutorRunnerInbound = ExecutorRunnerStart | { type: "abort" };
 
-/** runner → 主进程。`progress` 是给用户看的一句话；转录不经 daemon，留在桌面内部。 */
+/** Runner -> main process. `progress` is one sentence for the user; the transcript stays inside the
+ * desktop app and never passes through the daemon. */
 export type ExecutorRunnerOutbound =
   | { type: "ready" }
   | { type: "running" }
   | { type: "progress"; note: string }
-  /** 一条转录片段，供第二片的悬浮小窗消费；本片只落日志 */
+  /** One transcript fragment, for the second slice's floating window to consume; this slice only logs it. */
   | { type: "transcript"; seq: number; kind: "assistant" | "tool" | "error"; text: string }
   | {
       type: "done";
@@ -47,11 +50,12 @@ export type ExecutorRunnerOutbound =
       error?: string;
     };
 
-/** runner 的退出码语义；主进程据此在子进程异常消失时也能给出一个明确终态。 */
+/** The runner's exit-code meanings, so the main process can still name a definite terminal state
+ * when the child vanishes unexpectedly. */
 export const EXECUTOR_RUNNER_EXIT = {
   ok: 0,
-  /** 起不来（pi 加载失败、模型配置不可用…） */
+  /** Could not start (pi failed to load, the model configuration is unusable, ...). */
   startupFailed: 10,
-  /** 收到 abort 后自行收尾退出 */
+  /** Wound itself down after receiving an abort. */
   aborted: 11,
 } as const;

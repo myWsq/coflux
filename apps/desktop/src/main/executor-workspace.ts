@@ -1,8 +1,9 @@
 /**
- * 为一次 executor 任务算出沙箱要用的那几个路径事实（plan 116 M3）。
+ * The handful of path facts a run's sandbox needs, worked out for one executor task.
  *
- * 与 executor-sandbox 分开：那边只管把事实翻译成 profile 文本，这边管从 git 里把事实问出来。
- * 问的部分需要跑命令，所以 `runGit` 是注入的，纯逻辑（解析、去重、排除自己）可以单测。
+ * Split from executor-sandbox on purpose: that module only turns facts into profile text, this one
+ * asks git for the facts. Asking means running commands, so `runGit` is injected and the pure part
+ * (parsing, deduplication, excluding ourselves) stays unit-testable.
  */
 
 import { otherWorktreePaths } from "./executor-sandbox";
@@ -10,17 +11,18 @@ import { otherWorktreePaths } from "./executor-sandbox";
 export type GitRunner = (args: readonly string[], cwd: string) => { stdout: string; ok: boolean };
 
 export type WorkspaceFacts = {
-  /** realpath 解析后的工作区根 */
+  /** The workspace root, realpath-resolved. */
   root: string;
-  /** 本 worktree 的 gitdir 与共享 common dir，去重后；非 git 目录时为空 */
+  /** This worktree's gitdir and the shared common dir, deduplicated; empty outside a git repo. */
   gitDirs: string[];
-  /** 其他已登记 worktree（含嵌套在本工作区内的），realpath 由 git 给出 */
+  /** Every other registered worktree, nested ones included; git hands these back realpath-resolved. */
   otherWorktrees: string[];
 };
 
 /**
- * `--path-format=absolute` 让 git 直接给绝对路径，省一次拼接。
- * 三条都失败（不是 git 仓库）不算错：目录工作区也能跑 executor，只是没有 git 元数据要保护。
+ * `--path-format=absolute` makes git return absolute paths directly, saving a join.
+ * All three failing (not a git repository) is not an error: a directory workspace can run the
+ * executor too, it simply has no git metadata to protect.
  */
 export function collectWorkspaceFacts(root: string, runGit: GitRunner): WorkspaceFacts {
   const gitDir = readGitPath(runGit, root, "--git-dir");

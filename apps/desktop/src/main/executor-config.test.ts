@@ -12,7 +12,8 @@ import {
 } from "./executor-config";
 import type { TokenCodec } from "./token-store";
 
-/** 可用的假 codec：加个前缀冒充加密，足以验证「没有明文落盘」这件事 */
+/** A workable fake codec: a prefix standing in for encryption, enough to prove nothing lands on
+ * disk in the clear. */
 function fakeCodec(available = true): TokenCodec {
   return {
     isEncryptionAvailable: () => available,

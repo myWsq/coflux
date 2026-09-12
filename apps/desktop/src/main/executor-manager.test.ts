@@ -60,7 +60,7 @@ function harness(over: Partial<ExecutorConfigSnapshot> = {}) {
     },
     config: () => ({ ...CONFIG, ...over }),
     sendReport: (report) => reports.push(report),
-    // 不是 git 仓库也要能跑；这里直接给失败，走「无 git 元数据」分支
+    // It must work outside a git repository too; failing here takes the "no git metadata" branch.
     runGit: () => ({ stdout: "", ok: false }),
   });
   return { manager, reports, runners, root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
@@ -113,7 +113,7 @@ test("工作区路径不存在：不起 runner，落终态而不是把写锁挂�
     assert.equal(h.runners.length, 0);
     assert.equal(h.reports.at(-1)?.state, "tool_failed");
     assert.match(h.reports.at(-1)?.error ?? "", /启动失败/);
-    // 锁必须已放开：下一个写请求进得来
+    // The lock must be released: the next write request gets in.
     h.manager.onAssign(assignment(h.root, { runId: "run-2" }));
     assert.equal(h.runners.length, 1);
   } finally {

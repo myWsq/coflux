@@ -4,18 +4,20 @@ import type { CofluxClient } from "@coflux/client";
 import { desktop } from "@/config";
 
 /**
- * executor 的渲染层一侧（plan 116 M2）：**只当信使**。
+ * The executor's renderer side: **a messenger and nothing more**.
  *
- * 作业表、写锁、runner、凭证全在主进程；这里不持有任何 run 状态，也不做任何判断。
- * 三件事而已：
- *   1. 对本机 daemon 做一次**独立的常驻 retain**。工作台原本只对非选中设备做 `measureOnly`，
- *      那种 lane 刻意跳过 direct 走 relay，而 daemon 只认 loopback 通道上来的 executor 帧；
- *      而且 executor 服务不能依赖「用户此刻在看哪个工作区」。
- *   2. 把 daemon 推来的四条转进主进程。
- *   3. 把主进程要发的两条经 device 通道发出去。
+ * The job table, the write lock, the runner and the credentials all live in the main process. This
+ * holds no run state and makes no decisions. It does three things:
+ *   1. Takes an **independent, permanent retain** on the local daemon. The workbench otherwise only
+ *      does `measureOnly` for non-selected devices, and that lane deliberately skips direct in favour
+ *      of relay, while the daemon accepts executor frames only from a loopback channel. The executor
+ *      service also must not depend on which workspace the user happens to be looking at.
+ *   2. Relays the four frames the daemon pushes into the main process.
+ *   3. Sends the two frames the main process produces out over the device channel.
  *
- * 本机 daemon 的身份来自桌面侧的 `daemonState.daemonId`（plan 113 起 app 自己管这台机器的 daemon）。
- * 没有它就什么都不做——executor 只服务桌面 app 所在的这台机器。
+ * The local daemon's identity comes from the desktop side's `daemonState.daemonId` (the app has
+ * managed this machine's daemon since plan 113). Without it this does nothing — the executor only
+ * serves the machine the desktop app is on.
  */
 export function useExecutorBridge(client: CofluxClient, localDaemonId: string | undefined): void {
   useEffect(() => {
@@ -24,11 +26,12 @@ export function useExecutorBridge(client: CofluxClient, localDaemonId: string | 
       return;
     }
 
-    // 非 measureOnly：要的是真 direct lane，不是测量用的 relay。
+    // Not measureOnly: this needs a real direct lane, not the relay used for measurement.
     const release = client.retainDevice(localDaemonId);
 
     const unsubscribeInbound = client.subscribeExecutor((event) => {
-      // 只收本机那台的；别的设备不该推 executor 帧过来，真推了也不理。
+      // Only from this machine's daemon; no other device should push executor frames, and one that
+      // does is ignored.
       if (event.daemonId !== localDaemonId) return;
       if (event.kind === "assign") {
         desktop.sendExecutorInbound({
@@ -77,7 +80,8 @@ export function useExecutorBridge(client: CofluxClient, localDaemonId: string | 
       }
     });
 
-    // 通道就绪的通知放在订阅之后：主进程收到就会立刻发注册帧，早一步会打在没人接的地方。
+    // Announce channel readiness after subscribing: the main process sends its registration frame
+    // the moment it hears, and doing it a step earlier would send it where nobody is listening.
     desktop.setExecutorChannel(localDaemonId);
 
     return () => {
@@ -89,7 +93,8 @@ export function useExecutorBridge(client: CofluxClient, localDaemonId: string | 
   }, [client, localDaemonId]);
 }
 
-/** 主进程用字符串表达状态（跨 IPC 好读好断言），线上是 proto 枚举。 */
+/** The main process expresses state as strings (they read and assert better across IPC); on the
+ * wire it is a proto enum. */
 function executorStateToWire(state: string): number {
   switch (state) {
     case "accepted":
