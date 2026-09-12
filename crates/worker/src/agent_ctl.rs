@@ -436,14 +436,7 @@ async fn handle(
                 Err(response) => return response,
             };
             let root = scope.effective_path.clone().unwrap_or_default();
-            match device.executor_submit(
-                &submission_id,
-                &session_id,
-                &effective,
-                &root,
-                &prompt,
-                write,
-            ) {
+            match device.executor_submit(&submission_id, &effective, &root, &prompt, write) {
                 Ok(run_id) => AgentResponse::ok(serde_json::json!({ "runId": run_id })),
                 Err(message) => AgentResponse::err("409 Conflict", message),
             }

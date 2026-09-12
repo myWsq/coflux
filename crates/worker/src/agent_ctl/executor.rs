@@ -103,9 +103,6 @@ impl RunPhase {
 pub struct RunRecord {
     pub run_id: String,
     pub submission_id: String,
-    /// The initiating session (attribution and debugging only; it plays no part in authorization,
-    /// which happens at the pid lookup on `/agent`).
-    pub session_id: String,
     pub workspace_id: String,
     pub workspace_root: String,
     pub write: bool,
@@ -293,7 +290,6 @@ impl ExecutorLedger {
     pub fn submit(
         &mut self,
         submission_id: &str,
-        session_id: &str,
         workspace_id: &str,
         workspace_root: &str,
         prompt: &str,
@@ -339,7 +335,6 @@ impl ExecutorLedger {
         let record = RunRecord {
             run_id: run_id.clone(),
             submission_id: submission_id.to_string(),
-            session_id: session_id.to_string(),
             workspace_id: workspace_id.to_string(),
             workspace_root: workspace_root.to_string(),
             write,
@@ -529,7 +524,7 @@ mod tests {
 
     fn submit(ledger: &mut ExecutorLedger, submission: &str, write: bool, now: f64) -> String {
         ledger
-            .submit(submission, "s1", "ws-1", "/repo", "清掉 clippy 警告", write, now)
+            .submit(submission, "ws-1", "/repo", "清掉 clippy 警告", write, now)
             .expect("提交成功")
             .0
     }
@@ -548,7 +543,7 @@ mod tests {
     fn submitting_without_a_host_is_refused_readably_not_queued() {
         let mut ledger = ExecutorLedger::default();
         let refused = ledger
-            .submit("sub-1", "s1", "ws-1", "/repo", "干活", true, 0.0)
+            .submit("sub-1", "ws-1", "/repo", "干活", true, 0.0)
             .expect_err("没有 host 必须立刻拒");
         assert!(refused.contains("Coflux.app"), "{refused}");
     }
@@ -560,7 +555,7 @@ mod tests {
             .register_host("ch-1", "host-a", 1, &caps(), false, "去桌面配 provider", 0.0)
             .expect("登记成功");
         let refused = ledger
-            .submit("sub-1", "s1", "ws-1", "/repo", "干活", true, 0.0)
+            .submit("sub-1", "ws-1", "/repo", "干活", true, 0.0)
             .expect_err("未配置必须立刻拒");
         assert_eq!(refused, "去桌面配 provider");
     }
@@ -569,7 +564,7 @@ mod tests {
     fn same_submission_id_never_dispatches_twice() {
         let mut ledger = ledger_with_host(0.0);
         let (first, effect) = ledger
-            .submit("sub-1", "s1", "ws-1", "/repo", "干活", true, 0.0)
+            .submit("sub-1", "ws-1", "/repo", "干活", true, 0.0)
             .unwrap();
         assert_eq!(
             effect,
@@ -579,7 +574,7 @@ mod tests {
             })
         );
         let (second, effect) = ledger
-            .submit("sub-1", "s1", "ws-1", "/repo", "干活", true, 1.0)
+            .submit("sub-1", "ws-1", "/repo", "干活", true, 1.0)
             .unwrap();
         assert_eq!(second, first, "重投必须回同一条 run");
         assert_eq!(effect, None, "重投绝不二次派发");
@@ -805,11 +800,11 @@ mod tests {
         assert!(ledger.cancel("run-nope", 0.0).is_err());
         let long = "x".repeat(MAX_PROMPT_BYTES + 1);
         let refused = ledger
-            .submit("sub-1", "s1", "ws-1", "/repo", &long, true, 0.0)
+            .submit("sub-1", "ws-1", "/repo", &long, true, 0.0)
             .expect_err("超长 prompt 必须拒");
         assert!(refused.contains("上限"), "{refused}");
         let refused = ledger
-            .submit("sub-2", "s1", "ws-1", "/repo", "   ", true, 0.0)
+            .submit("sub-2", "ws-1", "/repo", "   ", true, 0.0)
             .expect_err("空 prompt 必须拒");
         assert!(refused.contains("prompt"), "{refused}");
     }

@@ -2296,7 +2296,6 @@ impl DeviceRuntime {
     pub fn executor_submit(
         &self,
         submission_id: &str,
-        session_id: &str,
         workspace_id: &str,
         workspace_root: &str,
         prompt: &str,
@@ -2305,7 +2304,6 @@ impl DeviceRuntime {
         let now = self.executor_gate();
         let (run_id, effect) = self.executor.lock().unwrap().submit(
             submission_id,
-            session_id,
             workspace_id,
             workspace_root,
             prompt,
