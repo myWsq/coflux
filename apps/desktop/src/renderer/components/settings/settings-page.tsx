@@ -22,6 +22,12 @@ import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-wid
 import { desktop } from "@/config";
 import type { DesktopDaemonState } from "@/desktop-bridge";
 
+/**
+ * 导航项与「返回」按钮的对齐口径：同高、同横向内边距、同字重。返回按钮是 Astryx Button（sm），
+ * 导航项是 ListItem，两者默认规格不一样，不拉齐就会看出上下两块是两套东西。
+ */
+const SETTINGS_NAV_ITEM_CLASS = "h-7 px-3 py-0 font-medium";
+
 /** 导航项图标：与分区一一对应，缺一个都会让那一行看起来是另一种东西。 */
 const SECTION_ICONS: Record<SettingsSectionId, LucideIcon> = {
   general: Settings2,
@@ -117,9 +123,13 @@ export function SettingsPage(props: SettingsPageProps) {
                       <ListItem
                         key={item.id}
                         label={item.label}
-                        startContent={<Icon className="size-4" />}
+                        startContent={<Icon className="size-4 shrink-0" />}
                         isSelected={item.id === section.id}
                         onClick={() => setSectionId(item.id)}
+                        // 逐项对齐上面那颗「返回」按钮：28px 高（--size-element-sm）、12px 横向
+                        // 内边距（--spacing-3）、medium 字重。Item 自己那套是 8px 内边距、常规字重，
+                        // 排在按钮下面一眼就能看出文字起点差了 4px。图标两边都是 16px，不用动。
+                        className={SETTINGS_NAV_ITEM_CLASS}
                       />
                     );
                   })}
