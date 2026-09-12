@@ -82,9 +82,16 @@ async function newAgentTerminal(c, device, task, ws, gatewayPort, home, title, c
   return created.task;
 }
 
+/** 同一个 task 会被读好几次，而 `Client.waitFor` 扫的是整条消息日志：只认本次 send 之后到达的那条回应，
+ * 否则第二次 read 会立刻撞上第一次的 taskReadResult（同 proxy.test.mjs 的 log.length 起点做法）。 */
 async function readTask(c, taskId) {
+  const since = c.log.length;
   c.send({ case: "taskRead", taskId, maxBytes: 0 });
-  return c.waitFor((m) => m.case === "taskReadResult" && m.taskId === taskId, `taskReadResult ${taskId}`, 20000);
+  return c.waitFor(
+    (m) => m.case === "taskReadResult" && m.taskId === taskId && c.log.indexOf(m) >= since,
+    `taskReadResult ${taskId}`,
+    20000,
+  );
 }
 
 before(async () => {
