@@ -100,8 +100,14 @@ jobs:
           echo "CI_DIFF_BASE=$base_sha" >> "$GITHUB_ENV"
 
           if git cat-file -e "${base_sha}:proto/buf.yaml" 2>/dev/null; then
-            echo "::notice::协议 breaking 基线：${base_ref} (${base_sha})"
-            node ../scripts/check-protocol-breaking.mjs "../.git#ref=${base_sha},subdir=proto"
+            # 发布后的 npm 质量门用默认分支的本文件去检查旧 release SHA，被检出的树
+            # 可能早于本脚本；那份提交进 main 时已被当时的门检过，这里降级而非误报。
+            if [ -f ../scripts/check-protocol-breaking.mjs ]; then
+              echo "::notice::协议 breaking 基线：${base_ref} (${base_sha})"
+              node ../scripts/check-protocol-breaking.mjs "../.git#ref=${base_sha},subdir=proto"
+            else
+              echo "::notice::检出的提交尚无 scripts/check-protocol-breaking.mjs，跳过 breaking 检查"
+            fi
           else
             echo "::notice::基线 ${base_ref} 尚无 proto/buf.yaml，跳过 breaking 检查"
           fi
@@ -128,7 +134,12 @@ jobs:
         run: |
           node scripts/product-version.mjs --check
           node scripts/release-notes.mjs --check
-          node --test scripts/product-version.test.mjs scripts/check-protocol-breaking.test.mjs
+          unit_tests=(scripts/product-version.test.mjs)
+          # 同上：旧 release SHA 的质量门里这份用例可能还不存在。
+          if [ -f scripts/check-protocol-breaking.test.mjs ]; then
+            unit_tests+=(scripts/check-protocol-breaking.test.mjs)
+          fi
+          node --test "${unit_tests[@]}"
 
       - run: pnpm install --frozen-lockfile
 
