@@ -18,7 +18,7 @@ import type { DesktopDaemonState } from "@/desktop-bridge";
  *
  * 整行本身就是下拉菜单的触发按钮（齿轮画在按钮内部，因此「点整行」与「点齿轮」天然是同一个菜单，
  * 也不会出现 button 套 button）。菜单三项：检查更新（文案随更新状态变）/ 服务器地址…（主进程原生
- * 对话框）/ 登出（直接回登录页，不二次确认——登出可逆）。
+ * 对话框）/ 登出（本机有活终端时先确认，停止并清理成功后回登录页）。
  *
  * 只有「新版本已下载」时尾部齿轮换成强调色「更新」按钮，此时它作为触发按钮的兄弟节点渲染，整行
  * 仍能打开菜单。脚部**不**触发更新检查（见 use-desktop-update.ts）。
@@ -86,7 +86,7 @@ export function AccountFooter({
         <DropdownMenuItem icon={<Server className="size-3.5" />} label="服务器地址…" onClick={() => desktop.showServerInfo()} />
         <DropdownMenuItem
           icon={<Monitor className="size-3.5" />}
-          label="本机 daemon"
+          label="这台 Mac"
           description={daemonLine ? (daemonLine.detail ? `${daemonLine.label} · ${daemonLine.detail}` : daemonLine.label) : "正在读取状态…"}
           endContent={daemonLine ? <StatusDot variant={daemonLine.tone} label={daemonLine.label} isPulsing={daemonLine.pulsing} /> : undefined}
           isDisabled={!daemonState}
@@ -99,7 +99,7 @@ export function AccountFooter({
           onClick={onOpenExecutorSettings}
         />
         <Divider />
-        <DropdownMenuItem icon={<LogOut className="size-3.5" />} label="登出" onClick={() => client.logout()} />
+        <DropdownMenuItem icon={<LogOut className="size-3.5" />} label="登出" onClick={() => { void desktop.logoutLocal().then((confirmed) => { if (confirmed) client.logout(false); }); }} />
       </DropdownMenu>
 
       {view.tail === "install" ? (

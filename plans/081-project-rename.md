@@ -1,8 +1,8 @@
-# Plan 081: 项目重命名——右键「重命名」对齐 device/workspace 范式
+# Plan 081: Rename projects through the context menu, matching devices and workspaces
 
-> 本 plan 是结果契约,不是逐步脚本。理解需求与已定决策后,对照活代码自行设计实现。
-> self-execution:实现者即验证者,里程碑验证随做随跑。命中 STOP 条件即停。
-> 完成后更新 `plans/README.md` 状态。
+> This plan is an outcome contract, not a step-by-step script. Understand the requirement and decisions, then design implementation against live code.
+> Self-execution: the implementer also verifies, running milestone checks along the way. Stop on any STOP condition.
+> Update `plans/README.md` when complete.
 >
 > Drift check: `git diff --stat f3a40d1..HEAD -- proto/coflux/v1/client.proto apps/server/src/hub.ts apps/server/src/store.ts apps/web/src/components/workbench/ tests/src/`
 
@@ -18,127 +18,91 @@
 
 ## Requirement
 
-用户原始诉求是「工作区设置页面改配置」,探索后收敛:Workspace 层唯一有语义的可改项
-name 已有右键重命名;真正缺口在 **Project 层——项目名导入后锁死,无任何修改入口**
-(`client.proto` 只有 `ProjectImport` / `ProjectRemove`)。
+The original request was to edit configuration on a workspace settings page. Exploration narrowed it down: name, the only meaningful editable workspace property, already has context-menu renaming. The actual gap is **Project: its name is locked after import, with no edit entry point**. client.proto only has ProjectImport/ProjectRemove.
 
-完成后:用户在 web 侧栏对项目行右键 →「重命名」→ 对话框改名 → 所有在线客户端
-(web/iOS)实时看到新名,刷新后仍是新名。不新建任何「设置页面」。
+Afterward, right-clicking a web sidebar project offers Rename, opens a naming dialog, and updates all online web/iOS clients immediately; refresh preserves the name. No new settings page.
 
-正确解 vs 相邻错误解:入口是**项目行右键菜单项 + 重命名对话框**,与 device
-(`sidebar.tsx:583`)、workspace(`sidebar.tsx:381`)完全同构;做成独立设置页/设置
-对话框、或顺手把 default_branch/repo_path 开放编辑,都是错误解。
+The correct entry is a **project-row context-menu item plus rename dialog**, matching device (`sidebar.tsx:583`) and workspace (`:381`). Separate settings pages/dialogs or opportunistic default_branch/repo_path editing are incorrect solutions.
 
 ## Decisions & tradeoffs
 
-- **不做设置页面,只加右键重命名**。Rejected: 独立工作区/项目设置页 — 当前唯一可改
-  项就是名称,单项配置撑不起一个页面,且引入全新 UI 范式(现有范式是右键菜单,
-  `sidebar.tsx:260-266` 项目行已有 ContextMenu)。
-- **default_branch 不开手改**。Rejected: 设置页里加默认分支编辑 — plan 072 已让
-  worker 探测本地 `origin/HEAD` 与 server 缓存不符即上报纠正
-  (`crates/worker/src/main.rs:1034-1050`),手改会在下一轮清单下发时被探测覆盖;
-  真相源在设备侧,中心 DB 只是缓存。Based on: `apps/server/src/hub.ts:1172`
-  (`workspaceDefaultBranch` 处理块注释「真相在设备侧,DB 是缓存」)。
-- **空名拒绝,不做回落**。对齐 device 语义(`hub.ts:1652-1654`「空名拒绝;设备没有
-  回落默认值」)。Rejected: 对齐 workspace 的空名回落分支名(`hub.ts:1643`)—
-  workspace 有天然回落值(branch),project 的导入期推导名(plan 020 从 git remote
-  推导)不是随手可取的现值,为回落再跑推导不值。服务端与对话框两侧都拦空名。
-- **复用 `projectCreated` 广播做 upsert,不新增下行消息**。Based on:
-  `packages/client/src/store.ts:470-474` 已对 `projectCreated` 做 upsert;plan 072
-  的 default_branch 纠正即走此路(`hub.ts:1183`)。因此 `packages/client` 零改动,
-  iOS/mobile 自动同步。
-- **proto 新消息 `ProjectSetName { project_id, name }`,oneof 取下一号 37**。
-  Based on: `client.proto` ClientToServer oneof 现最大号 36(`DeviceP2pChannelOpen`),
-  4/16/17/19-23/25/29-31 是 reserved 不可复用。参照 `WorkspaceSetName`
-  (`client.proto:82`)/`DeviceSetName`(`client.proto:88`)的注释风格,注明空名拒绝。
-- **归属校验按 accountId**。Based on: `hub.ts:1642`(workspace)与 `hub.ts:1651`
-  (device)均为 `x.accountId !== client.accountId` 即静默 return,项目侧同构;
-  store 侧参照 `store.ts:866` `updateWorkspaceName` 的单条 UPDATE RETURNING 形态。
+- **Only context-menu renaming, no settings page.** A single name field does not justify a new UI pattern. Project rows already have ContextMenu at sidebar.tsx:260-266.
+- **No manual default_branch editing.** Plan 072 makes worker correct server cache whenever local origin/HEAD differs (`crates/worker/src/main.rs:1034-1050`). Manual edits would be overwritten on the next inventory dispatch. Device owns truth; center DB caches it. Based on workspaceDefaultBranch comments at hub.ts:1172.
+- **Reject empty names; no fallback.** Match device semantics at hub.ts:1652-1654. Rejected: workspace's empty-name-to-branch fallback at :1643. Workspace has a natural branch fallback; project's import-time remote-derived name (020) is not a readily available current value, and rerunning inference is unjustified. Block empty names in server and dialog.
+- **Reuse projectCreated broadcast as upsert; no new downstream message.** Client store.ts:470-474 already upserts it; 072 uses the same path for default_branch corrections at hub.ts:1183. No packages/client changes; iOS/mobile sync automatically.
+- **Add proto `ProjectSetName { project_id, name }` at oneof field 37.** Current ClientToServer max is 36 (DeviceP2pChannelOpen). Reserved 4/16/17/19-23/25/29-31 cannot be reused. Follow WorkspaceSetName at client.proto:82 and DeviceSetName at :88, documenting empty-name rejection.
+- **Validate accountId ownership.** Workspace/device handlers at hub.ts:1642/:1651 silently return for x.accountId !== client.accountId; follow the same pattern. Store uses a single UPDATE RETURNING, matching updateWorkspaceName at store.ts:866.
 
 ## Direction
 
-### Milestone 1: 协议 + 服务端——ProjectSetName 全链路落库并广播
+### Milestone 1: Protocol/server persistence and broadcast
 
-`proto/coflux/v1/client.proto` 加 `ProjectSetName`,`buf generate`(在 `proto/` 下跑,
-`clean: true` 会重建 TS/Rust/Swift 三处 gen 产物,全部随提交入库);`apps/server` 的
-`hub.ts` 处理 + `store.ts` 加 `updateProjectName`,成功后广播 `projectCreated`。
-黑盒测试加项目重命名用例(参照 `tests/src/device-rename.test.mjs` 的双客户端
-「广播可见 + 落库可查」形态;造 project 的手法参考现有用到 `mkRepo()` + 导入流程的
-用例)。
+Add ProjectSetName to `proto/coflux/v1/client.proto`. Run buf generate from proto/; clean:true rebuilds TS/Rust/Swift outputs, all committed together. Add hub handler and store.updateProjectName, then broadcast projectCreated.
 
-Validation:
-`node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` → exit 0;
-`cargo build -p coflux-supervisor -p coflux-worker` → exit 0 零警告(Rust gen 重编);
-`pnpm -C tests test` → 全绿(含新用例)。
+Add black-box renaming coverage following `tests/src/device-rename.test.mjs`'s two-client broadcast/persistence assertions. Create the project with existing mkRepo/import patterns.
 
-### Milestone 2: web 入口——项目行右键「重命名」+ 对话框
+Validation: server tsc --noEmit exits 0; `cargo build -p coflux-supervisor -p coflux-worker` exits 0 with zero warnings after generated Rust recompilation; `pnpm -C tests test` all green including new tests.
 
-`sidebar.tsx` 项目行 ContextMenu(`sidebar.tsx:260-266`,现有「新建工作区」「移除
-项目」)加「重命名」;`dialogs.tsx` 照 `DeviceRenameDialog`(`dialogs.tsx:82`,空名
-禁提交语义)加 `ProjectRenameDialog`;`workbench.tsx` 接线发送(参照
-`workbench.tsx:290` 的 `workspaceSetName` 发送形态)。菜单项排序与 workspace 行
-一致:「重命名」在前,破坏性操作(移除项目)在 divider 之后。
+### Milestone 2: Web context menu and dialog
 
-Validation: `node_modules/.bin/tsc -b apps/web/tsconfig.json` → exit 0。
+Add Rename to project ContextMenu at sidebar.tsx:260-266, currently New workspace/Remove project. Add ProjectRenameDialog following DeviceRenameDialog at dialogs.tsx:82, including blocked empty submission. Wire workbench.tsx following workspaceSetName at :290. Match workspace menu ordering: Rename before the divider, destructive Remove project afterward.
+
+Validation: `node_modules/.bin/tsc -b apps/web/tsconfig.json` exits 0.
 
 ## Landmines
 
-- `buf.gen.yaml` 是 `clean: true`:`buf generate` 会**清空重建**
-  `packages/protocol/src/gen`、`crates/protocol/src/gen`、`proto/gen/swift` 三处。
-  若产物 diff 出现大面积非本次字段的变动,说明 buf 插件版本漂移,STOP 报告而非提交。
-- `hub.ts` 的 client 侧消息处理块里,归属不符是**静默 return**(无错误回包),新
-  处理沿用此惯例,测试断言用「等广播 + 查快照」而非等错误响应。
-- 黑盒测试串行跑(`--test-concurrency=1`)且每个文件自起 stack 固定端口:新用例
-  文件需选未被占用的 PORT(如 device-rename 用 8843,附近文件各不相同)。
-- AGENTS.md 纪律:提交前 `tsc --noEmit` + `cargo build`(零警告)+
-  `pnpm -C tests test` 全绿;commit message 中文、结尾带 Co-Authored-By。
+- buf.gen.yaml clean:true **clears and rebuilds** packages/protocol/src/gen, crates/protocol/src/gen, and proto/gen/swift. Widespread unrelated diff means plugin-version drift: STOP and report, do not commit it.
+- Ownership mismatch silently returns without error response. Tests should observe broadcasts/snapshots, not wait for errors.
+- Black-box tests run serially (`--test-concurrency=1`), and each file starts a stack at its own fixed PORT. Choose an unused one; device-rename uses 8843.
+- Historical AGENTS.md required green relevant tsc, zero-warning cargo build, and full tests before commit, plus Chinese commit messages and a Co-Authored-By trailer. The repository's current English language policy supersedes the historical commit-language rule.
 
 ## Scope
 
 In scope:
-- `proto/coflux/v1/client.proto` 及 `buf generate` 的三处 gen 产物
-- `apps/server/src/hub.ts`、`apps/server/src/store.ts`
+- `proto/coflux/v1/client.proto` and all three generated output locations
+- `apps/server/src/hub.ts`, `apps/server/src/store.ts`
 - `apps/web/src/components/workbench/{sidebar,dialogs,workbench}.tsx`
-- `tests/src/`(新增项目重命名用例)
-- `plans/README.md`(状态更新)
+- New project-rename tests in `tests/src/`
+- `plans/README.md` status
 
 Out of scope:
-- `packages/client` — `projectCreated` upsert 已在(`store.ts:470`),零改动
-- `apps/mobile` — 已冻结,upsert 广播自然同步,不动
-- `apps/ios` — 同上,收广播自动更新
-- default_branch / repo_path 的任何编辑入口 — 见 Decisions
-- 独立设置页面/设置对话框 — 见 Decisions
+- packages/client: projectCreated upsert already exists at store.ts:470
+- Frozen apps/mobile and apps/ios: broadcasts update them automatically
+- Editing default_branch/repo_path
+- Separate settings pages/dialogs
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| server 类型检查 | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
-| web 类型检查 | `node_modules/.bin/tsc -b apps/web/tsconfig.json` | exit 0 |
-| daemon 构建 | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0 零警告 |
-| 黑盒集成测试 | `pnpm -C tests test` | 全绿 |
-| web UI 走查 (acceptance) | 用户人工验证(既定惯例,Claude 不做 UI 验证) | 用户确认 |
+| Server types | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
+| Web types | `node_modules/.bin/tsc -b apps/web/tsconfig.json` | exit 0 |
+| Daemon build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0, zero warnings |
+| Black-box integration | `pnpm -C tests test` | All green |
+| Web UI acceptance | User verifies manually; established convention excludes Claude UI verification | User confirmation |
 
 ## Done criteria
 
-- [ ] 上表命令全过(UI 走查除外,交用户)。
-- [ ] web 项目行右键出现「重命名」,改名后双客户端广播可见、落库持久。
-- [ ] 空名(含全空白)在服务端与对话框两侧均被拒绝。
-- [ ] 新增黑盒用例断言广播与落库,且沿用既有 harness 形态。
-- [ ] 实现遵守 Decisions & tradeoffs 每一条。
-- [ ] 无 out-of-scope 文件变更(gen 产物除外,其属 in-scope)。
-- [ ] `plans/README.md` 状态已更新。
+- [ ] All commands pass, except UI walkthrough delegated to user.
+- [ ] Project context menu offers Rename; two clients see broadcast updates and persistence.
+- [ ] Server/dialog reject empty and whitespace-only names.
+- [ ] New black-box tests assert broadcasts/persistence using existing harness.
+- [ ] Every decision followed.
+- [ ] No out-of-scope changes; generated outputs are in scope.
+- [ ] plans/README.md updated.
 
 ## STOP conditions
 
-- Decisions 引用的事实不再成立(如 oneof 37 已被占用、projectCreated upsert 语义变更)。
-- 实现需要动 out-of-scope 文件(尤其 packages/client)。
-- 某验证命令经一次合理修复后仍连败两次。
-- `buf generate` 产物出现大面积无关 diff(插件版本漂移)。
+- A cited fact changes, such as occupied field 37 or changed projectCreated upsert semantics.
+- Out-of-scope changes required, especially packages/client.
+- Validation fails twice after one reasonable fix.
+- buf generate produces widespread unrelated plugin-drift changes.
 
 ## Maintenance notes
 
-- 项目名是纯展示别名,不参与任何路径/分支推导;导入期的 remote 推导名(plan 020)
-  只在导入时跑一次,重命名后不会被覆盖。
-- 若未来真出现第二、第三个项目级配置,再考虑把右键菜单收敛成设置对话框;单项时
-  右键直达是最低熵形态。
+- Project name is a display alias, never a path/branch input. Remote-derived naming from 020 runs once at import and will not overwrite later renames.
+- Reconsider a settings dialog only if more project settings emerge. For one item, direct context-menu access is simplest.
+
+### Original source references
+
+`sidebar.tsx:381`, `apps/server/src/hub.ts:1172`, `hub.ts:1643`, `packages/client/src/store.ts:470-474`, `client.proto:88`, `hub.ts:1651`, `workbench.tsx:290`.

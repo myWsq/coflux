@@ -18,7 +18,7 @@ import {
 import { DaemonOnboardingDialog } from "@/components/workbench/daemon-onboarding";
 import { DaemonPanelDialog } from "@/components/workbench/daemon-panel";
 import { ExecutorSettingsDialog } from "@/components/workbench/executor-settings";
-import { countLocalRunningTerminals, shouldOfferOnboarding } from "@/components/workbench/daemon-view";
+import { countLocalRunningTerminals } from "@/components/workbench/daemon-view";
 import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "@/components/workbench/desktop-attention";
 import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
@@ -85,14 +85,6 @@ function persistSelection(selection: WorkbenchSelection | null) {
 }
 
 /** 接入引导点过「暂不」（plan 113）：之后不再自动弹，只从账号菜单再进。localStorage 不可用时按没点过。 */
-function readOnboardingDismissed(): boolean {
-  try {
-    return localStorage.getItem(DAEMON_ONBOARDING_DISMISSED_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
 function persistOnboardingDismissed() {
   try {
     localStorage.setItem(DAEMON_ONBOARDING_DISMISSED_KEY, "1");
@@ -205,7 +197,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
   useExecutorBridge(client, daemonState?.daemonId);
   const [daemonDialog, setDaemonDialog] = useState<"onboarding" | "panel" | null>(null);
   const [executorSettingsOpen, setExecutorSettingsOpen] = useState(false);
-  const onboardingOfferedRef = useRef(false);
+  const attemptedAuthToken = useRef<string | null>(null);
+  const [localAuthError, setLocalAuthError] = useState<string | null>(null);
+  const [authRetry, setAuthRetry] = useState(0);
   // 乐观工作区条目（plan 078）：存组件层、渲染时与 store 数据合并，不进共享 store——
   // 快照对 workspaces 是整体替换，注入的假条目会被无声抹掉；共享包也不该背 web 专有语义。
   const [pendingWorkspaces, setPendingWorkspaces] = useState<PendingWorkspace[]>([]);
@@ -310,26 +304,22 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (followTask) setFollowTask(null);
   }, [followTask]);
 
-  // 登录成功后检测本机（plan 113）：中心连上的 authed + 未接入 + 本构建带 daemon + 没点过「暂不」→ 弹接入引导；
-  // 离线冷启动的 authed 来自缓存（status 不是 connected），不弹。每次登录最多弹一次，登出后复位。
+  // 自动接入不依赖对话框打开；仍通过已登录客户端兑现一次性设备授权。
+  const localAuthToken = daemonState?.status === "pending-auth" ? daemonState.authToken : undefined;
   useEffect(() => {
-    if (authState !== "authed") {
-      onboardingOfferedRef.current = false;
-      return;
-    }
-    if (
-      shouldOfferOnboarding({
-        authState,
-        connection: status,
-        state: daemonState,
-        dismissed: readOnboardingDismissed(),
-        alreadyOffered: onboardingOfferedRef.current,
-      })
-    ) {
-      onboardingOfferedRef.current = true;
+    if (authState !== "authed" || status !== "connected" || !localAuthToken || attemptedAuthToken.current === localAuthToken) return;
+    attemptedAuthToken.current = localAuthToken;
+    setLocalAuthError(null);
+    void client.authorizeDevice(localAuthToken).then((result) => {
+      if (!result.ok) {
+        setLocalAuthError(result.error);
+        setDaemonDialog("onboarding");
+      }
+    }).catch((error) => {
+      setLocalAuthError(String(error));
       setDaemonDialog("onboarding");
-    }
-  }, [authState, status, daemonState]);
+    });
+  }, [authState, status, localAuthToken, client, authRetry]);
 
   // 冷启动遮罩撤除（plan 078）：首快照到达即撤（snapshotRevision 单调递增，>0 一旦为真
   // 永远为真，断线不会误触发）；need-login/auth-failed 立即让位给登录表单。
@@ -834,6 +824,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
             state={daemonState}
             client={client}
             bridge={desktop}
+            authError={localAuthError}
+            onRetryAuthorize={() => { attemptedAuthToken.current = null; setAuthRetry((value) => value + 1); }}
             onDismiss={persistOnboardingDismissed}
           />
         </>

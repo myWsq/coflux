@@ -1,4 +1,4 @@
-# Plan 002: 存储层迁移 —— node:sqlite → Supabase Postgres（托管 PG 模式）
+# Plan 002: Storage layer migration - node:sqlite → Supabase Postgres (hosted PG mode)
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -20,186 +20,103 @@
 
 ## Requirement
 
-用户选 Supabase 的**主要动机是用它的数据库**（探索阶段曾误对齐为"只用 Auth"，
-plan 001 保留了 sqlite——本计划纠正这一点）。目标：coflux server 的持久化层从
-`node:sqlite` 整体迁移到 Postgres，生产连 Supabase 云项目的托管 Postgres，
-本地开发/测试连用户本机 selfhost Supabase 的 Postgres（docker compose，
-`localhost:5432`）。
+The user chose Supabase primarily for its database. Exploration incorrectly narrowed the choice to Auth, so plan 001 retained SQLite; this plan corrects that decision. Fully migrate the coflux server's persistence layer from `node:sqlite` to Postgres. Production connects to the Supabase cloud project's managed Postgres, while local development/tests use self-hosted Postgres through docker compose at `localhost:5432`.
 
-完成后成立的事实：
+The following must hold on completion:
 
-1. server 唯一的持久化引擎是 Postgres（`DATABASE_URL` 连接），`node:sqlite`
-   及 `COFLUX_DB` 配置从代码中移除。
-2. **架构不变**：server 仍是唯一数据访问方（"托管 PG"模式）。不用 Supabase 的
-   RLS / PostgREST / Realtime / Storage；web 与 daemon 的通路、协议、授权模型
-   零变化。plan 001 的换票认证逻辑原样保留。
-3. 集成测试连本地 Postgres（每套 stack 一个随机名临时 database，跑完删除），
-   26 个既有测试语义不变全绿。
-4. 本地 harness 与线上数据的隔离维持成立（本地连 selfhost PG，生产连云 pooler）。
+1. Postgres, configured by `DATABASE_URL`, is the server's only persistence engine. Remove `node:sqlite` and `COFLUX_DB` from the code.
+2. **Architecture remains unchanged**: the server remains the sole data-access layer in a hosted-PG model. Do not use Supabase RLS, PostgREST, Realtime, or Storage. Web/daemon paths, protocol, authorization, and plan 001's token-exchange authentication remain unchanged.
+3. Integration tests use local Postgres, with a randomly named temporary database per stack, deleted afterward. All 26 existing test files retain their semantics and pass.
+4. The local harness remains isolated from production data: local tests use self-hosted PG, while production uses the cloud pooler.
 
-正确 vs 相邻错误的判别：这是**换存储引擎，不是改架构**。如果实现开始让 web 直
-连 Supabase、用 RLS 做授权、或给表加 Supabase 专属机制（如依赖 auth.uid()），
-就是走偏了。同样，若保留 sqlite 做双引擎抽象也是走偏（见决策）。
+This changes the storage engine, not the architecture. Direct web access to Supabase, RLS authorization, Supabase-specific table behavior such as auth.uid(), or retaining SQLite behind a dual-engine abstraction would violate the scope.
 
 ## Decisions & tradeoffs
 
-- **单引擎 Postgres，删除 sqlite**。Rejected: `COFLUX_DB_DRIVER=sqlite|postgres`
-  双引擎抽象——每个查询两份实现+两套测试，复杂度翻倍；用户已明确数据库就是要
-  Supabase PG，自托管故事变为"需要一个 Postgres"（selfhost Supabase 或任意 PG），
-  可接受。
-- **PG 客户端：`postgres`（postgres.js，porsager/postgres）**。纯 JS 零依赖、
-  tagged-template 参数化天然防注入、内置连接池。Rejected: `pg`（node-postgres）
-  ——同样可行但依赖更多、API 更啰嗦；不要两个都装。
-- **coflux 表放独立 schema `coflux`，不放 `public`**。Supabase 的 `public`
-  schema 可能被 PostgREST Data API 暴露（取决于项目设置），独立 schema 从根上
-  隔离，也避免与 Supabase 自带对象混杂。连接后 `SET search_path` 或 SQL 里显式
-  schema 前缀，executor 选一种并全局一致。
-- **schema 管理沿用"启动时自建"**：server 启动时 `CREATE SCHEMA IF NOT EXISTS`
-  + `CREATE TABLE IF NOT EXISTS`（对应现 `store.ts:58-105` 的做法），轻量列迁移
-  沿用现 `migrate()` 思路（information_schema 查列补列）。Rejected: supabase
-  CLI migrations / 迁移工具——引入工具链与部署耦合，单应用自管 schema 的现状
-  风格熵更低。单实例部署无并发 DDL 问题。
-- **异步化的并发语义靠数据库约束兜底（关键）**：sqlite 同步 API 下每条消息处理
-  天然原子；Postgres async 后同一 client 的多条消息、多个 client 的消息可能交错。
-  不引入应用层锁/队列；改为：关键不变量用 DB 约束表达——memberships 主键
-  (userId, accountId) + lazy provision 走 `ON CONFLICT`/幂等事务；devices
-  tokenHash、client_tokens tokenHash 主键/唯一约束已有对应物，照搬。hub 中
-  "查后写"的路径（如 lazy 建号 `hub.ts:667-680`、级联删除的 4 个
-  `store.transaction`）改为 async 事务（postgres.js `sql.begin`），事务内保持
-  原子。Rejected: 每连接消息串行队列——对当前消息模式是过度设计，且不解决跨
-  连接竞态。
-- **`Store` API 全量 async 化**：所有方法返回 Promise，`hub.ts`（65 处调用）、
-  `index.ts`（10 处，含 bootstrap）全部 await 化。消息 handler 本已允许 async
-  （`handleClientAuth` 先例，`hub.ts:396-399` fire-and-forget + 未认证守卫）。
-  注意 handler 内先查后广播的顺序保持不变，不要把广播提前到写入完成前。
-- **连接配置：`DATABASE_URL` env**，进 `config.ts` 的 fail-closed 体系：生产
-  必须显式提供；dev（`COFLUX_DEV=1`）弱默认
-  `postgres://postgres:postgres@127.0.0.1:5432/postgres`。`COFLUX_DB` 配置与
-  dbPath 逻辑删除。连接池设小（max ~5）：生产走 Supabase session pooler，免费
-  版客户端连接额度有限，单实例 server 用不了多的。
-- **生产连接走 IPv4 session pooler（已验证）**：prod-jp 无 IPv6，直连
-  `db.<ref>.supabase.co:5432` 不通；`aws-0-ap-northeast-1.pooler.supabase.com`
-  的 5432（session）与 6543（transaction）均可达。用 **session pooler(5432)**
-  ——语义等同直连（支持 prepared statements）；transaction pooler 对
-  postgres.js 的默认 prepared 模式不兼容。Based on: 本轮 ssh prod-jp nc 实测。
-- **测试 harness：每套 stack 一个随机名临时 database**。harness 用管理连接
-  （`COFLUX_TEST_PG_URL`，默认同 dev 弱默认串）`CREATE DATABASE coflux_test_<rand>`，
-  server 进程的 `DATABASE_URL` 指向它，stop 时 DROP（需先断该库连接）。
-  Rejected: 临时 schema——server 的建表逻辑按 schema 名固定，改参数化 schema
-  名侵入更大；database 级隔离最干净。Rejected: docker 起临时 PG——用户本机
-  已有常驻 selfhost PG，测试前置写明即可。
-- **`meta` 表 / credFingerprint / pruneClientTokens 逻辑照搬**，仅换存取层。
-  local auth 模式（COFLUX_AUTH=local）行为语义不变——它与存储引擎正交。
-- **生产数据迁移 = 手工重放，不做迁移工具**：生产现有数据量趋近零（1 account
-  `default` + 1 membership + 少量 enrollment_keys/client_tokens、0 devices）。
-  切换时在新库手工 INSERT account/membership（运维步骤，见 Maintenance notes），
-  client_tokens 不迁（用户重新登录即可）。Rejected: sqlite→pg 数据泵——为零数据
-  写一次性工具是浪费。
+- **Use Postgres exclusively and remove SQLite**. Rejected: `COFLUX_DB_DRIVER=sqlite|postgres`. Two engines require two implementations and two test paths for every query. The user explicitly chose Supabase PG, and requiring self-hosters to supply Postgres—self-hosted Supabase or any PG—is acceptable.
+- **PG client: `postgres` (postgres.js, porsager/postgres)**. Pure JS with no dependencies, parameterized tagged templates to prevent injection, and a built-in connection pool. Rejected: `pg` (node-postgres), which is also viable but has more dependencies and a more verbose API. Do not install both.
+- **Store coflux tables in a dedicated `coflux` schema rather than `public`**. Supabase may expose `public` through PostgREST depending on project settings. A separate schema isolates application data and avoids mixing with Supabase objects. Use either `SET search_path` after connection or explicit schema prefixes consistently; the executor chooses.
+- **Continue application-managed schema creation at startup**: `CREATE SCHEMA IF NOT EXISTS` plus `CREATE TABLE IF NOT EXISTS`, following `store.ts:58-105`. Preserve lightweight `migrate()` behavior by inspecting information_schema and adding missing columns. Rejected: Supabase CLI migrations or another migration tool, which adds tooling/deployment coupling. A single application managing its own schema is simpler here; single-instance deployment avoids concurrent DDL.
+- **Use database constraints for asynchronous concurrency**. SQLite's synchronous API made message handling naturally atomic. With async Postgres, messages from the same or different clients may interleave. Do not add application locks/queues. Express invariants with DB constraints: memberships primary key (userId, accountId), idempotent lazy provisioning through `ON CONFLICT`/transactions, and the existing devices/client_tokens tokenHash primary-key/uniqueness constraints. Convert check-then-write paths such as lazy account creation (`hub.ts:667-680`) and the four cascade-deletion `store.transaction` calls into async transactions using postgres.js `sql.begin`. Rejected: per-connection serial message queues, which overcomplicate the current model and do not solve races across connections.
+- **Make the entire `Store` API asynchronous**. Every method returns a Promise; await all 65 calls in `hub.ts` and 10 in `index.ts`, including bootstrap. Message handlers already allow async (`handleClientAuth`, `hub.ts:396-399`, with fire-and-forget and an unauthenticated guard). Preserve validation/write-before-broadcast ordering; never broadcast before persistence completes.
+- **Connection configuration uses `DATABASE_URL`**, integrated into `config.ts` fail-closed checks. Production must supply it explicitly; dev (`COFLUX_DEV=1`) defaults to `postgres://postgres:postgres@127.0.0.1:5432/postgres`. Remove `COFLUX_DB` and dbPath. Keep the pool small, around max 5: production uses the Supabase session pooler, the free tier limits client connections, and a single server instance needs few connections.
+- **Use the IPv4 session pooler in production (verified)**. prod-jp has no IPv6, so `db.<ref>.supabase.co:5432` is unreachable. Both 5432 (session) and 6543 (transaction) on `aws-0-ap-northeast-1.pooler.supabase.com` are reachable. Choose **session pooler 5432** for direct-connection semantics and prepared-statement support; the transaction pooler is incompatible with postgres.js's default prepared mode. Based on SSH/nc measurements from prod-jp during this investigation.
+- **A randomly named temporary database per test stack**. The harness management connection uses `COFLUX_TEST_PG_URL`, defaulting to the dev connection string, and runs `CREATE DATABASE coflux_test_<rand>`. Point the server process's `DATABASE_URL` at it; disconnect database clients and DROP it during cleanup. Rejected: a temporary schema, since parameterizing the server's fixed schema name is more invasive; and starting temporary PG containers, since local self-hosted PG already exists.
+- **Preserve `meta`, credFingerprint, and pruneClientTokens logic**, changing only database access. Local auth (`COFLUX_AUTH=local`) is orthogonal to storage and retains its semantics.
+- **Replay production data manually; no migration tool**. Production has almost no data: one `default` account, one membership, a few enrollment_keys/client_tokens, and zero devices. Manually INSERT the account/membership into PG during cutover; do not migrate client_tokens, so users log in again. Rejected: a disposable sqlite→pg data-pump tool for this near-empty dataset. See Maintenance notes.
 
 ## Direction
 
-`store.ts` 是唯一持久化边界（hub/index 只经它触库），替换它的实现并 async 化
-调用面即可，协议/web/daemon/crates 零改动。
+`store.ts` is the sole persistence boundary; hub/index access the database only through it. Replace its implementation and await its callers, with no protocol/web/daemon/crates changes.
 
-### Milestone 1: Postgres 存储层 + 全调用面 async 化，本地 PG 验证全绿
+### Milestone 1: Postgres storage, async callers, and passing local tests
 
-之后成立：server 以 `DATABASE_URL` 连 Postgres 启动，功能与 `ef34fed` 等价
-（local 与 supabase 两种 auth 模式都工作）；`node:sqlite` import 与 `COFLUX_DB`
-不复存在；harness 按临时 database 模式跑，26 个既有测试文件**语义零改动**全绿
-（harness.mjs 本身的环境装配可改）。
+The server connects through `DATABASE_URL` and behaves like `ef34fed` in both local and Supabase auth modes. Remove the `node:sqlite` import and `COFLUX_DB`. The harness uses temporary databases, and all 26 existing test files pass with **no semantic changes**; harness.mjs environment setup may change.
 
-验证：`pnpm --filter @coflux/tests test` 全绿（前置：本机 selfhost PG 可连）；
-`pnpm -r build` exit 0；`grep -r "node:sqlite" apps/server/src` 无结果。
+Validation: `pnpm --filter @coflux/tests test` passes with local PG available; `pnpm -r build` exits 0; `grep -r "node:sqlite" apps/server/src` finds no matches.
 
 ## Landmines
 
-- **执行前置**：本机 selfhost Supabase PG 在 `127.0.0.1:5432`（已验证端口可达），
-  但**密码未知**。先用 dev 弱默认串试连；连不通 → STOP，请用户在环境里提供
-  `COFLUX_TEST_PG_URL`（含真实密码），不要猜密码、不要把密码写进任何文件。
-- `store.transaction(fn)` 的 4 个调用点（`hub.ts:469,516,677,779`）目前传同步
-  闭包；postgres.js 的 `sql.begin` 回调拿到的是**事务专属的 sql 实例**，事务内
-  所有语句必须用它而非全局实例，否则语句逃逸出事务（静默的原子性丢失）。Store
-  的事务 API 设计要把这一点封进去，不要让调用方拿得到全局连接。
-- sqlite 布尔/时间戳以 INTEGER 存（`isMain INTEGER`、`revoked INTEGER`、
-  `rowToWorkspace`/`rowToDevice` 手工转换，`store.ts:326-368`）；PG 下若改用
-  boolean/bigint，注意 postgres.js 对 bigint 默认返回 string——`createdAt` 等
-  毫秒时间戳字段用 `BIGINT` 时要配置解析或用 `DOUBLE PRECISION`/`NUMERIC` 谨慎
-  处理。协议侧类型是 number（`packages/protocol`），别让 string 漏出去。
-- `handleClientAuth` 已是 async fire-and-forget（`hub.ts:396-399`），其余
-  handler async 化后同一连接的消息处理可能交错；现有测试对消息顺序有隐式依赖
-  （如 `state.snapshot` 在 subscribe 后回、广播顺序），改动后靠全量测试兜底，
-  出现顺序类失败优先怀疑交错而非改测试。
-- `pnpm dev:server` 的 dev 模式（`COFLUX_DEV=1`）现在零依赖可跑；迁移后它需要
-  本机 PG 在跑。README 的"快速开始"段需要同步更新（前置多一条 selfhost PG）。
-- harness `startServer`/`startStack` 目前给子进程传 `COFLUX_DB` 临时文件路径
-  （`tests/src/harness.mjs:124` 及 `startServer`），改临时 database 后注意
-  `restartServer` 场景要复用同一个 database（重启后数据仍在的语义被
-  reconnect.test 依赖）。
-- DROP DATABASE 前要断开目标库的所有连接（`pg_terminate_backend` 或
-  postgres.js `.end()` 顺序），否则 DROP 报 "being accessed by other users"，
-  在 after 钩子里静默失败会泄漏测试库。
+- **Prerequisite**: local self-hosted Supabase PG is reachable at `127.0.0.1:5432`, but its **password is unknown**. Try the dev default first. If it fails, STOP and ask for `COFLUX_TEST_PG_URL` with the real password. Do not guess passwords or write the password to a file.
+- The four `store.transaction(fn)` callers (`hub.ts:469,516,677,779`) currently use synchronous closures. postgres.js passes a **transaction-specific sql instance** to `sql.begin`; every statement in the transaction must use it, or it silently escapes the transaction. Design the Store transaction API so callers cannot accidentally use the global connection.
+- SQLite stores booleans/timestamps as INTEGER (`isMain INTEGER`, `revoked INTEGER`, and manual `rowToWorkspace`/`rowToDevice` conversion in `store.ts:326-368`). If PG uses boolean/`BIGINT` instead, remember that postgres.js returns bigint as strings by default. Configure timestamp parsing for fields such as `createdAt`, or carefully choose `DOUBLE PRECISION`/`NUMERIC`. `packages/protocol` expects numbers; do not leak strings.
+- `handleClientAuth` is already async fire-and-forget (`hub.ts:396-399`). Making other handlers async allows same-connection messages to interleave. Existing tests implicitly depend on ordering, such as `state.snapshot` preceding later broadcasts after subscribe. Run the full suite; investigate interleaving before changing assertions when ordering failures appear.
+- `pnpm dev:server` in dev mode (`COFLUX_DEV=1`) currently runs without external dependencies. After migration, local PG must be running. Update the README quick-start prerequisites accordingly.
+- The harness currently sets `COFLUX_DB` when `startServer`/`startStack` spawn the server (`tests/src/harness.mjs:124` and `startServer`). After moving to temporary databases, `restartServer` must reuse the same database: reconnect.test depends on persistence across restart.
+- Disconnect all clients before DROP DATABASE, using `pg_terminate_backend` or appropriate postgres.js `.end()` ordering. Otherwise PG reports "being accessed by other users"; silently failing in an after hook leaks a test database.
 
 ## Scope
 
 In scope:
-- `apps/server/src/`（store / config / hub / index / auth 的触库处）
-- `apps/server/package.json`（+`postgres`，−无；`node:sqlite` 是内置模块无需删依赖）
-- `tests/src/`（harness 环境装配；测试文件语义不动）
-- `tests/package.json`（如需 `postgres` devDep 用于管理连接）
-- `README.md`（快速开始的前置说明）
+- `apps/server/src/` (database access in store/config/hub/index/auth)
+- `apps/server/package.json` (+`postgres`, −None; `node:sqlite` is a built-in module and does not need to be deleted)
+- `tests/src/` (harness environment assembly; test file semantics unchanged)
+- `tests/package.json` (if `postgres` devDep is required to manage the connection)
+- `README.md` (preliminary instructions for quick start)
 - `pnpm-lock.yaml`
 - `plans/`
 
 Out of scope:
-- `packages/protocol`、`apps/web`、`crates/`、`packages/cli` —— 存储引擎对它们不可见
-- Supabase RLS / PostgREST / Realtime —— 明确不用（见 Requirement 判别）
-- 生产切换与数据重放 —— 运维步骤（Maintenance notes），代码合并后单独执行
-- sqlite→pg 自动迁移工具 —— 生产数据趋近零，不做
+- `packages/protocol`, `apps/web`, `crates/`, `packages/cli` — the storage engine is invisible to them
+- Supabase RLS / PostgREST / Realtime - explicitly not used (see Requirement judgment)
+- Production switching and data replay - operation and maintenance steps (Maintenance notes), the code is merged and executed separately
+- sqlite→pg automatic migration tool - production data approaches zero, do not do it
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Test | `pnpm --filter @coflux/tests test` | exit 0（前置：本机 PG 可连） |
-| Typecheck/Build | `pnpm -r build` | exit 0 |
-| sqlite 清除确认 | `grep -rn "node:sqlite\|COFLUX_DB\b" apps/server/src tests/src` | 无结果 |
+| Test | `pnpm --filter @coflux/tests test` | exit 0 (prerequisite: local PG can be connected) |
+| Typecheck/Build | `pnpm -r build`  | exit 0 |
+| Confirm SQLite removal | `grep -rn "node:sqlite\|COFLUX_DB\b" apps/server/src tests/src` | No matches |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] 26 个既有测试文件语义零改动全绿（harness 装配层改动除外）。
-- [ ] `COFLUX_AUTH=local` 与 `COFLUX_AUTH=supabase` 两模式在 PG 下都工作（supabase.test.mjs 覆盖后者）。
-- [ ] 事务路径（设备删除级联、workspace 删除级联、lazy provision）在 PG 事务内原子。
-- [ ] coflux 表全部位于 `coflux` schema，`public` 无残留。
+- [ ] 26 existing test files have zero semantic changes and are all green (except for harness assembly layer changes).
+- [ ] Both `COFLUX_AUTH=local` and `COFLUX_AUTH=supabase` modes work under PG (supabase.test.mjs covers the latter).
+- [ ] Transaction paths (device delete cascade, workspace delete cascade, lazy provision) are atomic within PG transactions.
+- [ ] coflux tables are all in `coflux` schema, `public` has no residue.
 - [ ] Required tests exist and assert meaningful behavior.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
-- [ ] `plans/README.md` status is updated.
+- [ ] `plans/README.md`  status is updated.
 
 ## STOP conditions
 
-- 本机 PG 连不上且用户未提供 `COFLUX_TEST_PG_URL`。
+- The local PG cannot be connected and the user does not provide `COFLUX_TEST_PG_URL`.
 - A fact cited under Decisions & tradeoffs no longer holds.
 - The outcome requires out-of-scope files.
 - A validation command fails twice after one reasonable fix.
-- postgres.js 与 node 24/tsx 环境不兼容（如需原生构建）——停下报告。
+- postgres.js is not compatible with node 24/tsx environments (if native builds are required) - stop and report.
 
 ## Maintenance notes
 
-- **生产切换运维手册（代码合并后）**：
-  1. Supabase dashboard 拿云项目 database password（Settings → Database，必要时
-     reset）；连接串用 **session pooler**：
-     `postgres://postgres.yafiocdmkhjuphmmwtrn:<密码>@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres`
-     （prod-jp 无 IPv6，不能用直连串）。密码由用户亲手写入
-     `/etc/coflux/server.env` 的 `DATABASE_URL`，不经对话。
-  2. 部署新代码 → 启动自建 schema → 手工重放数据：INSERT `default` account、
-     用户 membership（UUID `096b387d-73e3-4cb2-830e-f07fd9baae22` → `default`,
-     role owner）。client_tokens 不迁，重新登录即可。
-  3. 旧 sqlite 文件 `/var/lib/coflux/coflux.db` 保留一段时间作回滚兜底后再删。
-  4. `COFLUX_DB` 从 server.env 删除。
-- 本地开发前置：selfhost Supabase（docker compose）在跑、`127.0.0.1:5432` 可连；
-  非默认密码时 export `DATABASE_URL`/`COFLUX_TEST_PG_URL`。
-- Supabase 免费版注意：数据库 500MB、pooler 客户端连接数有限；server 常驻查询
-  会保持项目活跃（不会被 pause）。
-- 将来 server 多实例（OPEN_QUESTIONS B7）：存储已外置，剩运行时状态（sessions/
-  daemons Map）外置——那是另一个计划。
+- **Production Switching Operation and Maintenance Manual (after code merger)**:
+  1. Get the cloud project database password from Supabase dashboard (Settings → Database, if necessary reset); use **session pooler** for connection string: `postgres://postgres.yafiocdmkhjuphmmwtrn:<password>@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres` (prod-jp does not have IPv6 and cannot use direct connection). The password is written manually by the user `DATABASE_URL` of `/etc/coflux/server.env` without pasting it into the conversation.
+  2. Deploy new code → start application-managed schema → manually replay data: INSERT `default` account, User membership (UUID `096b387d-73e3-4cb2-830e-f07fd9baae22` →`default`, role owner). client_tokens will not be migrated, just log in again.
+  3. The old sqlite file `/var/lib/coflux/coflux.db` is retained for a period of time for rollback and then deleted.
+  4. Remove `COFLUX_DB` from server.env.
+- Local development prerequisite: selfhost Supabase (docker compose) is running, `127.0.0.1:5432` can be connected; if the password is not the default, export `DATABASE_URL`/`COFLUX_TEST_PG_URL`.
+- Supabase free version note: database 500MB, pooler client connection number is limited; server resident query will keep the project active (not paused).
+- Multi-instance server in the future (OPEN_QUESTIONS B7): the storage has been externalized, leaving runtime status (sessions/ daemons Map) external - that's another plan.

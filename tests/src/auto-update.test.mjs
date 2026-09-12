@@ -28,7 +28,7 @@ const sha256hex = (buf) => crypto.createHash("sha256").update(buf).digest("hex")
 const ARTIFACT = readFileSync(WORKER_BIN); // 用真 worker 二进制当"新版本产物"
 
 // server 侧 auto-update.ts 的 rustTarget(platform, arch) 用 Rust 命名（macos/linux、aarch64/x86_64）；
-// 这里用 Node 命名算出同一台机器对应的 target 字符串（同 packages/cli/cofluxd.mjs 的 rustTarget()），
+// 这里用 Node 命名算出同一台机器对应的 target 字符串（同 packages/cli/coflux.mjs 的 rustTarget()），
 // 两套映射表对同一物理机产出同一个 target，manifest 用这个 key 才会被 maybeUpgrade 命中。
 function hostRuntime() {
   const p = platform(), a = arch();

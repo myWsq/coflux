@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import {
+  cliReleaseStatement,
   supervisorReleaseStatement,
   workerReleaseStatement,
 } from "../../scripts/release-statement.mjs";
@@ -31,6 +32,7 @@ test("release-sign 为 worker/supervisor 产生相互隔离且绑定元数据的
     const supervisorArtifact = Buffer.from("deterministic supervisor artifact\n", "utf8");
     writeFileSync(join(dir, workerName), workerArtifact);
     writeFileSync(join(dir, supervisorName), supervisorArtifact);
+    writeFileSync(join(dir, `coflux-cli-${target}`), workerArtifact);
     const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
     const pem = privateKey.export({ format: "pem", type: "pkcs8" });
 
@@ -45,6 +47,10 @@ test("release-sign 为 worker/supervisor 产生相互隔离且绑定元数据的
     });
 
     const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+    const cliEntry = parseReleaseManifestEntry(manifest, "cli", manifest.version, target);
+    verifyReleaseArtifact({component:"cli",version:manifest.version,entry:cliEntry,data:workerArtifact,publicKey});
+    assert.equal(crypto.verify(null, cliReleaseStatement({version:manifest.version,...cliEntry}), publicKey, Buffer.from(cliEntry.releaseSignature,"hex")), true);
+    assert.throws(() => verifyReleaseArtifact({component:"worker",version:manifest.version,entry:cliEntry,data:workerArtifact,publicKey}));
     const entry = manifest.worker[target];
     const supervisorEntry = manifest.supervisor[target];
     assert.equal(manifest.schemaVersion, 2);

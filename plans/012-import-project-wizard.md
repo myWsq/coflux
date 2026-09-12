@@ -1,4 +1,4 @@
-# Plan 012: 导入项目两步向导（设备 → 远程文件树选文件夹）
+# Plan 012: Two-step wizard for importing projects (device → choose a remote directory)
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -19,104 +19,75 @@
 
 ## Requirement
 
-现导入项目要手填远程绝对路径，易错且不可发现。改为两步向导：
+Project import currently requires manually entering a remote absolute path, which is hard to discover and error-prone. Replace it with a two-step wizard:
 
-1. **第一步选设备**：列出在线设备；一台在线设备时可默认选中。无在线设备时
-   显示空态引导「先登记设备」（复用现有 EnrollmentDialog 流）。
-2. **第二步浏览远程文件树选文件夹**：从设备用户 home 起步，面包屑 + 子目录
-   列表逐级下钻（每次进入目录发一次列目录请求），选中文件夹后确认导入。
+1. **Select a device:** list online devices and select one by default when available. With none online, show guidance to enroll a device first, reusing EnrollmentDialog.
+2. **Browse remote directories and choose a folder:** start at the device user’s home directory. Use breadcrumbs and a subdirectory list to navigate, requesting a listing each time the user enters a directory. Confirm the selected folder to import it.
 
-正确性判别：全程不需要手打路径；选错非 git 目录时依赖既有 `ProjectValidate`
-报错兜底（error toast 已有）；无在线设备/浏览中设备掉线均有明确提示不悬挂。
+Correctness criterion: importing requires no typed path. Selecting a non-Git directory produces the existing `ProjectValidate` error toast. No online devices, disconnection during browsing, and request failures produce clear feedback instead of hanging.
 
 ## Decisions & tradeoffs
 
-- **复用 FsList 中继链路，不新增消息对**。`ClientFsList` 加
-  `optional string daemon_id = 4`：daemon_id 模式下 server 校验设备属于本账号
-  （对照 `workspaceForClient` 的等价物），root 下发 `"~"`；workspace_id 模式
-  行为不变。Rejected: 新建 ClientBrowseDevice 消息——与 FsList 语义重复。
-  Based on: 中继机制 `pendingRelays`（hub.ts:806-813）、Rust `ops::list_dir`
-  的 root 锚定 + `safe_resolve` 越界校验（ops.rs:62-66）均已存在。
-- **daemon 侧 root=`"~"` 展开为用户 home**（worker main.rs FsList 分支，
-  展开后仍走 safe_resolve）。Rejected: server 下发绝对 home 路径——server
-  不知道各设备的 home。浏览范围因此锚定 home 及以下，不提供全盘浏览（安全
-  面收窄是特性不是缺陷）。
-- **proto 向后兼容演进**：只加 optional 字段，wire 不破坏；regen 命令
-  `cd proto && buf generate`（TS → packages/protocol/src/gen，Rust →
-  crates/protocol/src/gen）。
-- **UI 用 Astryx 组件写**（Dialog/Selector/Button/Text 等，遵循
-  apps/web/.claude/CLAUDE.md 约定）——组件库迁移方向已定（214560e 试点），
-  新 UI 不再用旧 radix 基座。目录浏览形态：**面包屑 + 当前目录子目录列表**，
-  Rejected: TreeList 展开树——懒加载树状态管理复杂，列表下钻交互更清晰。
-- **浏览时不做 git 仓库探测标记**。Rejected: FsEntry 加 is_git_repo——给通用
-  文件原语掺业务语义；导入时 ProjectValidate 已有校验兜底，选错有报错。
-- **请求-响应封装进 store 层**：fsListed 按 requestId 匹配回调（store 已有
-  的消息分发处加一个 pending map），不进 zustand 状态（一次性数据）。
+- **Reuse FsList relay messages.** Add `optional string daemon_id = 4` to `ClientFsList`. In daemon_id mode, verify account ownership as `workspaceForClient` does and send root `"~"`. Preserve workspace_id behavior. A new ClientBrowseDevice pair would duplicate FsList semantics. Evidence: `pendingRelays` (`hub.ts:806-813`) and Rust `ops::list_dir` already provide a root anchor and `safe_resolve` containment checks (`ops.rs:62-66`).
+- **Expand root `"~"` to the user’s home in the worker FsList branch**, then still use safe_resolve. The server cannot supply an absolute home path because it does not know each device’s home. Browsing is intentionally restricted to home and descendants rather than the entire filesystem.
+- **Backward-compatible proto evolution**: only add optional fields, the wire format remains compatible; regen command `cd proto && buf generate` (TS → packages/protocol/src/gen, Rust → crates/protocol/src/gen).
+- **Use Astryx components** such as Dialog/Selector/Button/Text, following apps/web/.claude/CLAUDE.md. The component migration was established by the 214560e pilot; new UI must not use old Radix primitives. Use **breadcrumbs plus the current directory’s subdirectory list**. Reject a lazy TreeList: tree state is more complex and list drill-down is clearer.
+- **Do not mark Git repositories while browsing.** Adding is_git_repo to FsEntry would mix business semantics into filesystem primitives. Existing ProjectValidate checks imports and reports incorrect selections.
+- **Encapsulate request/response handling in the store.** Match fsListed callbacks by requestId using a pending map at the existing dispatch point. Keep one-shot data outside zustand state.
 
 ## Direction
 
-### Milestone 1: 协议与后端
+### Milestone 1: Protocol and Backend
 
-proto 加字段 + buf generate 双端产物；hub.ts `clientFsList` 分支支持
-daemon_id 模式（账号归属校验 + daemon 在线校验 + root="~"）；worker main.rs
-FsList 分支展开 `~`。
-Validation: `pnpm --filter @coflux/protocol build` && `cargo build -q` exit 0。
+Add the proto field and regenerate both languages. Extend hub.ts clientFsList with daemon_id ownership/online checks and root="~"; expand `~` in worker main.rs FsList. Validation: `pnpm --filter @coflux/protocol build` && `cargo build -q` → exit 0.
 
-### Milestone 2: Web 向导 UI
+### Milestone 2: Web Wizard UI
 
-ImportProjectDialog 重做为两步向导（Astryx）；store 加 fsList 请求-响应封装；
-无在线设备空态 + 登记引导；掉线/超时错误显示。
-Validation: `pnpm --filter @coflux/web build` exit 0。
+Rebuild ImportProjectDialog as a two-step Astryx wizard. Add the store fsList request wrapper, no-device enrollment guidance, and disconnect/timeout errors. Validation: `pnpm --filter @coflux/web build` → exit 0.
 
-### Milestone 3: 验收
+### Milestone 3: Acceptance
 
-黑盒用例：clientFsList{daemonId} 返回 home 目录列表、无权 daemon 被拒。
-UI 冒烟：本地栈两步向导走通导入 `/tmp/coflux-dev-repo`。
-Validation: `cd tests && pnpm test` 全绿。
+Black-box tests verify that clientFsList{daemonId} lists home and rejects unauthorized devices. UI smoke: import `/tmp/coflux-dev-repo` through the local two-step wizard. Validation: `cd tests && pnpm test` passes.
 
 ## Landmines
 
-- `pendingRelays.register` 的超时回调签名与 kind 字符串（"fs.list"）要保持
-  一致（hub.ts:167 错误回包依赖 kind 分发）。
-- protobuf-es 生成的 optional 字段是 `string | undefined`，server 判别模式用
-  `value.daemonId !== undefined && value.daemonId !== ""`（proto3 optional
-  语义，空串与缺省需一致对待）。
-- Astryx `Selector` 组件 API 未核实（试点只用过 TextInput/Button/Card 等）——
-  实现前先 `pnpm exec astryx component Selector`。
+- The timeout callback signature of `pendingRelays.register` and the kind string ("fs.list") should be maintained Consistent (hub.ts:167 error response depends on kind distribution).
+- The optional field generated by protobuf-es is `string | undefined`, which is used by the server to determine the mode. `value.daemonId !== undefined && value.daemonId !== ""` (proto3 optional Semantics, empty strings and defaults must be treated consistently).
+- Astryx `Selector` component API has not been verified (the pilot only used TextInput/Button/Card, etc.)— `pnpm exec astryx component Selector` before implementation.
 
 ## Scope
 
 In scope:
-- `proto/coflux/v1/client.proto` + 双端生成产物（packages/protocol/src/gen、crates/protocol/src/gen）
-- `apps/server/src/hub.ts`（clientFsList 分支）
-- `crates/worker/src/main.rs`（FsList root 展开）
-- `apps/web/**`（向导 UI + store 封装）
-- `tests/**`（新增黑盒用例）
+- `proto/coflux/v1/client.proto`+ generated code for both languages (packages/protocol/src/gen, crates/protocol/src/gen)
+- `apps/server/src/hub.ts` (clientFsList branch)
+- `crates/worker/src/main.rs` (FsList root expansion)
+- `apps/web/**` (wizard UI + store package)
+- `tests/**` (new black-box test case)
 
 Out of scope:
-- FsRead / ExecRun 的设备模式 —— 本需求只要列目录
-- 文件树组件的通用化 —— 等后续功能需要再抽
-- 生产部署 —— 验收后另行执行
+- Device mode of FsRead / ExecRun - this requirement only requires listing the directory
+- Generalization of the file tree component - wait until subsequent functions are needed to extract it
+- Production deployment - to be executed separately after acceptance
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| proto 生成 | `cd proto && buf generate` | 双端产物更新 |
-| Rust 构建 | `cargo build -q` | exit 0 |
-| Web 构建 | `pnpm --filter @coflux/web build` | exit 0 |
-| 黑盒回归 (acceptance) | `cd tests && COFLUX_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:54322/postgres pnpm test` | 全绿（37+新增） |
+| proto generation | `cd proto && buf generate` | Generated code for both languages update |
+| Rust Build | `cargo build -q` | exit 0 |
+| Web Build | `pnpm --filter @coflux/web build` | exit 0 |
+| Black-box regression (acceptance) | `cd tests && COFLUX_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:54322/postgres pnpm test` | All green (37+ new) |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] 两步向导全程免手打路径完成导入；无在线设备时引导登记。
-- [ ] daemon_id 模式有账号归属校验（他人设备被拒），黑盒用例覆盖。
-- [ ] workspace_id 模式行为与改动前逐字节一致（不回归）。
+- [ ] The two-step wizard allows you to complete the import without manually entering the path; it guides the registration when there is no online device.
+- [ ] daemon_id mode has account ownership verification (other people’s devices are rejected), and is covered by black-box test cases.
+- [ ] workspace_id mode behavior is the same byte by byte as before the change (no regression).
 - [ ] `plans/README.md` status is updated.
 
 ## STOP conditions
 
 - A fact cited under Decisions & tradeoffs no longer holds.
-- Rust 侧 home 展开在目标平台（macOS/Linux）无统一实现路径。
-- Astryx 组件缺口导致向导必须回退旧组件库（记录后可用旧组件，但须报告）。
+- There is no unified implementation path for Rust-side home expansion on the target platform (macOS/Linux).
+- Astryx component gap causing the wizard to have to roll back the old component library (old components will be available after logging, but must be reported).

@@ -1,4 +1,4 @@
-# Plan 063: 生产切换 prod-jp 自托管 Postgres + Supabase 全面退役
+# Plan 063: Production cutover to prod-jp Postgres and retirement of Supabase
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -13,96 +13,89 @@
 
 - Priority: P1
 - Effort: M
-- Risk: HIGH（动生产）
+- Risk: HIGH (production changes)
 - Depends on: plans/059-server-password-auth.md, plans/060-web-mobile-login-consolidation.md, plans/061-ios-login-consolidation.md
 - Category: migration
-- Execution: self（主会话 + 用户配合验收）
-- Planned at: `c772ed4`, 2026-07-28（2026-07-28 复议改写：放弃 Prisma Cloud，数据库自托管在 prod-jp；原 062 prisma-next 数据层改写随之撤回，数据层代码保持 porsager/postgres 原样）
+- Execution: self (main session with user-assisted acceptance)
+- Planned at: `c772ed4`, 2026-07-28 (2026-07-28 reconsideration and rewriting: abandon Prisma Cloud, the database is self-hosted in prod-jp; the original 062 prisma-next data layer rewriting was subsequently withdrawn, and the data layer code remains porsager/postgres as it is)
 
 ## Requirement
 
-059-061 合并后，把生产从「Supabase Postgres + Supabase Auth」切到「prod-jp 本机 Postgres 17 + 自建 password auth」，随后退役 Supabase。约束（用户 2026-07-28）：单用户自用，**无用数据可弃，关键数据保住即可**；短暂维护窗口可接受；不引入 Prisma（用户 2026-07-28 复议明确）。
+After 059–061 merge, move from Supabase Postgres/Auth to prod-jp local Postgres 17 plus password auth, then retire Supabase. User decision 2026-07-28: single-user deployment, **retain essential data; disposable data may be dropped**, brief maintenance acceptable, no Prisma. Original 062 was withdrawn; retain porsager/postgres.
 
-完成后：api/app.coflux.dev 全功能运行，DATABASE_URL 指向 prod-jp 本机 PG（localhost）；用户以邮箱+密码登录；已登记设备无需重新 enroll；历史 checkpoints 可见；生产无任何 SUPABASE_* 配置；每日自动备份在位；Supabase 项目可删除。附带收益（记录动机）：消灭 Supabase egress 计费面（c772ed4 刚为 checkpoint egress 打过补丁）与 server→DB 的跨洋网络往返。
+api/app.coflux.dev remain fully functional. DATABASE_URL becomes localhost PG; email/password login; no daemon reenrollment; old checkpoints visible; no SUPABASE_* env; daily backup; Supabase project may be deleted. Motivation also removes Supabase egress billing (c772ed4 just reduced checkpoint egress) and cross-ocean server→DB RTT.
 
 ## Decisions & tradeoffs
 
-- **数据库落点：prod-jp 本机 apt 安装 postgresql 17**（Debian 13 candidate 17+278，与 Supabase 侧 PG 17.6 同大版本，2026-07-28 实测；prod-jp 现无任何 PG 服务，85G 盘 / 2.7G 可用内存足够单用户负载）。systemd 托管、仅监听 127.0.0.1、专用库/账号（如 `coflux`）。Rejected: docker 容器 PG —— 数据路径上多一层运行时依赖，apt+systemd 更无聊更稳；Rejected: Prisma Postgres —— 用户复议放弃，自托管消灭 egress 与延迟。
-- **数据层代码零改动**：保持 porsager/postgres + SCHEMA_DDL 原样（原 062 的 prisma-next 改写已撤回）。**schema 保留 `coflux`**——迁 public 的唯一动机是 prisma-next 的 beta 工具链顾虑，已消失；保留则 dump/restore 与代码全部零改动。Rejected: 借机迁 public —— 纯折腾。
-  Based on: `apps/server/src/store.ts:219`（CREATE SCHEMA coflux）、`apps/server/src/store.ts:418-424`（连接配置，`ssl:"prefer"` 对 localhost 明文直接可用，max=5 无需动）。
-- **关键数据清单**（迁移必保）：`accounts`、`memberships`、`devices`（token_hash 保住 ⇒ 全部 daemon 免重新 enroll）、`projects`、`workspaces`、`tasks`、`session_checkpoints`、`meta`。**可弃**（自然重建/重登）：`client_tokens`（各端重新登录）、`local_gateways`、`local_browser_grants`、`local_device_leases`、`prepared_device_operations`（租约/临时态）。实操上 `pg_dump -n coflux` 全 schema 拿下再弃也行，白名单 `-t` 也行——executor 择优，对账以关键表行数为准。Rejected: 双写/渐进迁移 —— 单用户短停机成本近零。
-  Based on: `apps/server/src/store.ts:219-401`（各表语义），用户拍板「关键数据在就行」。
-- **身份衔接：以旧 Supabase user UUID 建号**。生产 `memberships.user_id` 是 Supabase user UUID；用 059 建号脚本 `--id` 指定同一 UUID（email 用用户现邮箱），membership/账号数据零改动衔接。Rejected: 新 UUID + 数据改写 —— 多一步且易漏关联。
-  Based on: plans/059 建号脚本决策、`apps/server/src/hub.ts:1542`（getMembershipByUser 按 user_id 查）。
-- **搬迁工具链就地取材**：prod-jp 已有 pg_dump/psql 17.10，直接在 prod-jp 上对 Supabase 源库 dump（需 Supabase **direct** 连接串，不走 pooler；连接串在 prod-jp 现有 env 里是 pooler 形态，direct 串从 Supabase 控制台取——只引用位置不落明文）→ restore 进本机 PG。Rejected: 本机中转 —— 多一跳且本机无 pg 客户端工具。
-- **备份是硬要求，不许懒**：自托管单盘无云备份兜底。每日 cron `pg_dump -Fc` 到本机备份目录 + 保留最近 N 份（简单 find -mtime 轮转即可）；是否异地另存由用户后续决定，plan 内先落本机每日备份。这是防数据丢失的错误处理，属 ponytail 明文不可简化项。
-- **prod-jp env 目标态**：`COFLUX_AUTH=password`、`DATABASE_URL=postgres://coflux:<pw>@127.0.0.1:5432/coflux`（口令新生成，只存于 env，不入 git）；删除 `SUPABASE_URL`、`COFLUX_USERNAME`/`COFLUX_PASSWORD`。web 生产构建不再带 `VITE_SUPABASE_*`。部署机制（Caddy、服务单元、build-id 自举）一律不动。
-- **验收顺序**：先 smoke（`scripts/prod-smoke.mjs` + 手工：web 邮箱登录、设备在线、历史 checkpoint 打开、iOS 登录），全绿后才动 Supabase 退役；Supabase 项目保留只读至少数天作回滚垫，最终删除由用户在控制台操作。Rejected: 切换即删 —— 回滚垫零成本。
+- **apt Postgres 17 on prod-jp**, Debian 13 candidate 17+278, same major as Supabase 17.6. Measured 2026-07-28: no PG service, 85GB disk and 2.7GB free RAM sufficient. systemd, 127.0.0.1 only, dedicated coflux DB/user. Reject Docker runtime layer and user-rejected Prisma Postgres; local hosting removes egress/latency.
+- **No data-layer changes; keep coflux schema**. Only prisma-next beta concerns motivated public, now gone. Existing DDL/search path/dump restore stay unchanged; ssl:prefer and max:5 work locally (store.ts:219,418-424). Moving public adds pointless work.
+- **Essential tables**: accounts, memberships, devices including token_hash, projects, workspaces, tasks, session_checkpoints, meta. **Disposable**: client_tokens (relogin), local_gateways, local_browser_grants, local_device_leases, prepared_device_operations (temporary leases/state). Executor may dump whole schema with pg_dump -n coflux or whitelist -t, then compare essential row counts. No dual-write/gradual migration for negligible single-user downtime. Source DDL:219-401.
+- **Preserve user UUID** through 059 admin script --id using old memberships.user_id and current email. This reconnects account/membership without rewrites. New UUID risks missed associations; hub.ts:1542 looks up by user_id.
+- **Use prod-jp's pg_dump/psql 17.10** to dump source directly then restore locally. Require Supabase direct URL from console, not existing pooler env; reference credential location, never print it. Local machine lacks PG tools and would add a hop.
+- **Daily backups mandatory**: pg_dump -Fc to local backup directory with recent-N retention, simple find -mtime sufficient. Off-site choice can follow user decision; local daily protection cannot be deferred. Self-hosting has one disk and no managed cloud backup.
+- **Target env**: COFLUX_AUTH=password; DATABASE_URL=postgres://coflux:<pw>@127.0.0.1:5432/coflux with generated password only in env, never Git. Remove SUPABASE_URL/COFLUX_USERNAME/COFLUX_PASSWORD and Web VITE_SUPABASE_* build inputs. Keep Caddy/service/build-ID deployment mechanics.
+- **Smoke before retirement**: prod-smoke plus Web email login/device online/historical checkpoint/iOS login. Keep Supabase read-only for several days as rollback; user performs final console deletion. Immediate deletion discards free rollback.
 
 ## Direction
 
-### Milestone 1: prod-jp PG 就位 + 搬迁演练
+### Milestone 1: Install and rehearse
 
-apt 装 postgresql 17，localhost-only，建 `coflux` 库与专用账号；对 Supabase 生产库只读 dump 一次，restore 进本机 PG 做演练（schema 原名 `coflux`），关键表行数对账一致；每日备份 cron 就位并手动触发一次验证产物可 `pg_restore --list`。
-Validation: 行数对账一致；备份文件存在且可列出内容。
+Install localhost-only PG17/dedicated DB/user; read-only source dump, restore coflux schema, compare essential counts. Install daily backup cron, trigger once, inspect with pg_restore --list. Counts match and backup is readable.
 
-### Milestone 2: 切换窗口
+### Milestone 2: Cutover window
 
-停 prod server → 终态 dump → restore（清演练数据重灌或直接覆盖，executor 自定）→ 059 建号脚本建号（旧 UUID + 用户邮箱，密码由用户提供或临时生成后由用户改）→ 更新 env → 部署 059-061 合并后的代码与前端产物 → 起服。
-Validation: `node scripts/prod-smoke.mjs` 通过；web 邮箱登录 + 设备在线 + 历史 checkpoint 可见；iOS 登录（新版随 release.sh 发 TestFlight 后验）。
+Stop server→final dump→replace rehearsal data/restore→admin user with old UUID/email and user-provided or temporary password→update env→deploy merged 059–061/backend/frontend→start. prod-smoke passes; Web login/devices/checkpoints visible; iOS new release.sh/TestFlight build verified afterward.
 
-### Milestone 3: 退役与收尾
+### Milestone 3: Retire and close
 
-Supabase 项目暂停（删除由用户择日）；memory 更新（prod-server、local-test-postgres、deploy-strategy 的 Supabase 表述）；plans/README.md 收尾。
-Validation: 生产运行数天无异常（观察项，非阻塞）。
+Suspend Supabase; user chooses deletion date. Update recorded prod-server/local-test-postgres/deploy-strategy guidance and README. Observe several uneventful days; observation is nonblocking.
 
 ## Landmines
 
-- `client_tokens` 弃迁 ⇒ 所有客户端收 authError 清 token 回登录页——预期行为，不是故障。
-- `devices.token_hash` 若丢失，全部 daemon 需重新 enroll（含 memory fix-connect-branch 里那台待手动 update 的 LVR96VXW43）——devices 表行数对账必须严格一致。
-- pg_dump 对 Supabase 必须用 **direct** 连接串；pooler（supavisor）上跑 dump 会遇到 prepared statement/超时类问题。
-- prod-jp 内存仅 7.8G 且已用 5G（headroom/clickhouse 在跑）——PG 配置保持默认偏小即可（单用户负载极轻），不要照抄调优模板把 shared_buffers 拉大。
-- server 的 `ssl: "prefer"`（store.ts:420）对 localhost 明文可直连，无需改代码；但若 pg_hba 配置成必须 TLS 会连不上——装机时保持 Debian 默认 local/host 认证即可。
-- web 构建历史命令带 `VITE_SUPABASE_*`（plans/010/011 文档、memory prod-server）——060 后不再需要；沿用旧部署笔记会注入无效变量（无害但应清理笔记与 memory）。
+- Discarded client_tokens cause authError/token clear/login everywhere, expected.
+- Losing devices.token_hash forces reenrollment, including remembered manually updated LVR96VXW43. Device counts must match strictly.
+- Dump through direct Supabase connection; Supavisor pooler risks prepared-statement/timeouts.
+- prod-jp has 7.8GB total/~5GB used by headroom/ClickHouse. Keep modest PG defaults; do not inflate shared_buffers with generic tuning.
+- ssl:prefer supports plaintext localhost; requiring TLS in pg_hba would break that. Keep Debian local/host defaults.
+- Historical 010/011/prod-server commands inject obsolete VITE_SUPABASE_*; harmless after 060 but clean docs/guidance.
 
 ## Scope
 
-In scope:
-- prod-jp 环境（apt、PG 实例、cron、env、部署、服务重启）、Supabase 控制台（退役，用户操作）
-- `scripts/`（如需一次性迁移/备份脚本，落库留档）
-- memory 文件更新、`plans/README.md`
+In scope: prod-jp apt/PG/cron/env/deployment/restart, user Supabase-console retirement, scripts if useful to retain, guidance/README updates.
 
-Out of scope:
-- 任何 apps/ packages/ 源码改动 —— 059-061 已完成；发现代码问题一律停下报告
-- 本机 selfhost Supabase 容器组 —— 继续当本地开发/测试的裸 PG 用（54322 直连口），拆不拆由用户日后决定
+Out of scope: apps/packages source, completed by 059–061; report defects. Local selfhost Supabase remains usable as direct PG54322 until user separately chooses removal.
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| 迁移对账 | 关键表 `SELECT count(*)` 源/目标对比 | 一致 |
-| 备份验证 | `pg_restore --list <备份文件>` | 列出对象 |
-| 生产冒烟 (acceptance) | `node scripts/prod-smoke.mjs` | exit 0 |
-| 人工验收 (acceptance) | web/iOS 邮箱登录、设备在线、checkpoint 回看 | 全通 |
+| Reconciliation | Essential table SELECT count(*) source/target | Match |
+| Backup | `pg_restore --list <backup-file>` | Objects listed |
+| Production smoke | `node scripts/prod-smoke.mjs` | exit 0 |
+| Manual acceptance | Web/iOS email login, devices online, checkpoint review | All work |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] 生产在 prod-jp 本机 PG + password auth 上全功能运行；设备免重新 enroll。
-- [ ] 每日备份 cron 在位且经过一次手动验证。
-- [ ] 生产 env 无任何 SUPABASE_* 残留；Supabase 项目已暂停（删除由用户择日）。
-- [ ] memory（prod-server、local-test-postgres、deploy-strategy）已更新。
+- [ ] Production runs all functionality on prod-jp local Postgres with password authentication, without device reenrollment.
+- [ ] Daily backup cron is installed and verified through one manual run.
+- [ ] Production environment has no SUPABASE_* values; the Supabase project is suspended, with deletion left to the user on a later date.
+- [ ] Memory entries prod-server, local-test-postgres, and deploy-strategy are updated.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] `plans/README.md` status is updated.
 
 ## STOP conditions
 
-- 059-061 任一未验收完成。
-- 演练行数对账不一致且一次修正后仍不一致。
-- 切换窗口内任何不可解释的数据缺失——立即回滚 env 指回 Supabase（源表未动，回滚即恢复）。
+- Any 059–061 acceptance incomplete.
+- Rehearsal row mismatch persists after one correction.
+- Any unexplained cutover data loss: immediately restore DATABASE_URL to untouched Supabase source.
 
 ## Maintenance notes
 
-- 回滚垫：切换后 Supabase 项目保留只读数天；env 指回即回滚（059-061 的代码改动与数据库托管方无关，可不回滚代码）。
-- 自托管后 schema 演进回归本色：SCHEMA_DDL 幂等块 + 手工 ALTER 补列（store.ts:440 注释的既有惯例）。
-- prod-jp 单机同时承载 server 与 PG——磁盘/内存水位纳入日常观察；若未来多机，PG 迁移只是 dump/restore + 改 DATABASE_URL。
+- Rollback source remains a few days; restore env pointer, not code, because 059–061 do not depend on DB host.
+- Schema evolution retains idempotent SCHEMA_DDL plus manual ALTER supplements per store.ts:440.
+- Observe shared server/PG disk/memory. Future relocation is dump/restore plus DATABASE_URL.
+
+### Original source references
+
+`apps/server/src/store.ts:219`, `apps/server/src/store.ts:418-424`, `apps/server/src/store.ts:219-401`, `apps/server/src/hub.ts:1542`.

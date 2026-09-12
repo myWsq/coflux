@@ -4,7 +4,7 @@
  * 验收核心：
  * - 用户手开的 shell 有输出后退出：`taskRead` 拿到中心 checkpoint（source=checkpoint），内容含标记，
  *   status=EXITED、exitCode=0——daemon 侧会话已不在、也没有命令日志，全靠中心按 task 保留的最后一屏；
- * - 经 `cofluxd terminal new` 开的命令终端跑完退出：`taskRead` 拿到 daemon 命令日志尾部（source=log），
+ * - 经 `coflux terminal new` 开的命令终端跑完退出：`taskRead` 拿到 daemon 命令日志尾部（source=log），
  *   秒级命令的输出也在，退出码正确；
  * - 不存在的 task：结果自带 error，连接不断、后续请求照常。
  */
@@ -19,7 +19,7 @@ import { startStack } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
 
 const PORT = 8872;
-const COFLUXD = fileURLToPath(new URL("../../packages/cli/cofluxd.mjs", import.meta.url));
+const COFLUXD = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
 let stack;
 const dirs = [];
 

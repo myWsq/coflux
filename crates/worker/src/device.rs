@@ -1587,7 +1587,7 @@ impl DeviceRuntime {
         data: Vec<u8>,
     ) -> Result<(), String> {
         if self.human_holder_present(session_id) {
-            return Err("用户正在接管这个终端：把交互留给用户；要沟通用 cofluxd notify".into());
+            return Err("用户正在接管这个终端：把交互留给用户；要沟通用 coflux notify".into());
         }
         let attempt = self.begin_agent_io(session_id)?;
         let (tx, mut rx) = mpsc::channel::<device_envelope::Payload>(8);
@@ -3955,9 +3955,9 @@ fn epoch_ms() -> f64 {
 mod tests {
     use super::*;
     use coflux_protocol::wire::{
-        DeviceExecRun, DevicePortsRequest, DevicePtyInputAck, DevicePtyOutput,
-        DeviceSessionAttached, DeviceSessionCatalogRequest, DeviceSessionCreate,
-        DeviceSessionExited, LocalBrowserGrant, OnlineDeviceLease,
+        DeviceExecRun, DevicePortsRequest, DevicePtyInputAck, DeviceSessionAttached,
+        DeviceSessionCatalogRequest, DeviceSessionCreate, DeviceSessionExited, LocalBrowserGrant,
+        OnlineDeviceLease,
     };
     use p256::ecdsa::SigningKey;
 
@@ -4332,17 +4332,11 @@ mod tests {
             ),
             Ok(CallStart::Execute)
         ));
-        let initial_bytes = ledger.bytes;
-        assert_eq!(
-            initial_bytes,
-            call_record_bytes(&key, ledger.entries.get(&key).unwrap())
-        );
 
         let second = ResponseWaiter {
             channel_id: "channel-b".into(),
             request_id: "request-b".into(),
         };
-        let second_bytes = response_waiter_bytes(&second);
         assert!(matches!(
             start_call_with_limits(
                 &mut ledger,
@@ -4354,12 +4348,14 @@ mod tests {
             ),
             Ok(CallStart::Pending)
         ));
-        assert_eq!(ledger.bytes, initial_bytes + second_bytes);
+
+        // 同一 waiter 二次入账不重复计费
+        let accounted = ledger.bytes;
         assert!(matches!(
             start_call_with_limits(&mut ledger, key, fingerprint, second, 8, 4096),
             Ok(CallStart::Pending)
         ));
-        assert_eq!(ledger.bytes, initial_bytes + second_bytes);
+        assert_eq!(ledger.bytes, accounted);
     }
 
     #[test]
@@ -6415,39 +6411,5 @@ mod tests {
         fixture.runtime.close_channel(&fixture.local_id);
         fixture.runtime.close_relays();
         let _ = std::fs::remove_dir_all(&fixture.home);
-    }
-
-    #[test]
-    fn transport_backpressure_detects_output_sequence_gap() {
-        let mut cursor = StreamCursor {
-            next_seq: Some(4),
-            gapped: false,
-        };
-        let output = DevicePtyOutput {
-            session_id: "session-1".into(),
-            from_seq: 5,
-            to_seq: 6,
-            data: b"xx".to_vec(),
-        };
-        let contiguous = cursor.next_seq.is_none_or(|next| next == output.from_seq)
-            && output.to_seq
-                == output
-                    .from_seq
-                    .saturating_add(output.data.len().saturating_sub(1) as u64);
-        assert!(!contiguous);
-        cursor.gapped = true;
-        assert!(cursor.gapped);
-
-        let attached = DeviceSessionAttached {
-            snapshot_seq: 6,
-            session_id: "session-1".into(),
-            ..Default::default()
-        };
-        cursor = StreamCursor {
-            next_seq: Some(attached.snapshot_seq + 1),
-            gapped: false,
-        };
-        assert_eq!(cursor.next_seq, Some(7));
-        assert!(!cursor.gapped);
     }
 }

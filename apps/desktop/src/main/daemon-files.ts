@@ -1,5 +1,5 @@
 import type { DesktopDaemonFda } from "../shared/desktop-bridge";
-import { LAUNCHD_LABEL, type DaemonHomePaths } from "./daemon-paths";
+import { CLAUDE_PLUGIN_ENV, LAUNCHD_LABEL, type DaemonHomePaths } from "./daemon-paths";
 
 /**
  * ~/.coflux 与 LaunchAgent 的文本生成与解析（plan 113）。纯函数，无 Electron / fs 依赖；
@@ -7,8 +7,22 @@ import { LAUNCHD_LABEL, type DaemonHomePaths } from "./daemon-paths";
  * 解析函数只从文件内容里取所需字段，绝不把 pending-auth.json / credentials.json 的原文往外传。
  */
 
-/** LaunchAgent plist：等价于 cofluxd.mjs 的 plistXml()。 */
-export function launchAgentPlist(paths: DaemonHomePaths): string {
+/**
+ * plist 是 XML：app 可能装在带 `&` / `<` 的目录里，未转义会让 launchd 整份 plist 解析失败。
+ * 只转义 plan 115 新注入的值——COFLUX_HOME 那几行保持与 npm 版 plistXml 逐字同构（npm 线不动）。
+ */
+function escapeXmlText(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * LaunchAgent plist：等价于 cofluxd.mjs 的 plistXml()，外加 plan 115 的 COFLUX_CLAUDE_PLUGIN_DIR——
+ * 除这一个键外与 npm 版逐字同构（「已接入」判定只看 plist 与两个二进制存在，两边仍可互换）。
+ * claudePluginDir 缺省 / null / 空白（本构建不带插件）时一个字符都不多写。
+ */
+export function launchAgentPlist(paths: DaemonHomePaths, options: { claudePluginDir?: string | null } = {}): string {
+  const pluginDir = options.claudePluginDir?.trim();
+  const pluginEntry = pluginDir ? `<key>${CLAUDE_PLUGIN_ENV}</key><string>${escapeXmlText(pluginDir)}</string>` : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -17,7 +31,7 @@ export function launchAgentPlist(paths: DaemonHomePaths): string {
   <key>ProgramArguments</key>
   <array><string>${paths.supervisorBin}</string></array>
   <key>EnvironmentVariables</key>
-  <dict><key>COFLUX_HOME</key><string>${paths.home}</string></dict>
+  <dict><key>COFLUX_HOME</key><string>${paths.home}</string>${pluginEntry}</dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${paths.logFile}</string>
@@ -25,6 +39,22 @@ export function launchAgentPlist(paths: DaemonHomePaths): string {
 </dict>
 </plist>
 `;
+}
+
+/**
+ * app 启动时的 plist 同步判定（plan 115）：三个条件同时成立才重写——
+ * 1. **本构建带插件**（claudePluginDir 非空）。不带插件的构建（没跑过 stage 脚本、用 `electron .` 起的 dev 实例）
+ *    渲染出的是 npm 形态的 plist，若照写就会把打包版 app 写进去的 COFLUX_CLAUDE_PLUGIN_DIR 抹掉，
+ *    下次 daemon 重启插件就没了（同一台 Mac 上 dev 实例与安装版共用 ~/.coflux）。启动期一律不碰。
+ *    接入流程是用户的显式动作，不受这条约束，照旧按本构建渲染。
+ * 2. 本机**已接入**（plist 已在磁盘上）：未接入的机器不凭空创建 plist。
+ * 3. 内容确实不同。
+ * 重写只动文件，绝不 launchctl reload——那会结束本机所有终端，与 plan 113「从不自动重启」矛盾；
+ * 新值在下一次 supervisor 启动（面板点「重启」、开机、「重启并更新」）时生效。
+ */
+export function shouldRewritePlist(existing: string | null, next: string, claudePluginDir: string | null | undefined): boolean {
+  if (!claudePluginDir?.trim()) return false;
+  return existing !== null && existing !== next;
 }
 
 /**

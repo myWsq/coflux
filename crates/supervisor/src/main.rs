@@ -6,10 +6,12 @@
 //! 渐进式 Rust 化：本进程是 Rust，但能对接现有已测的 TS worker（UDS 协议语言中立），
 //! 故现有黑盒测试可直接验证。worker 走 COFLUX_WORKER_CMD/ARGS 指定（TS 阶段=node --import tsx worker.ts）。
 
+mod runtime_control;
 mod fda;
 mod manager;
 mod sessiond;
 mod sessions;
+mod shell_integration;
 mod upgrade;
 
 use std::collections::HashMap;
@@ -104,9 +106,21 @@ fn main() {
     sweep_dead_sockets();
     let home = std::env::var("COFLUX_HOME")
         .unwrap_or_else(|_| format!("{}/.coflux", std::env::var("HOME").unwrap_or_default()));
+    // 应用模式先拿独占锁，更新后的应用只能接回现存实例。
+    let desktop = if std::env::var("COFLUX_RUNTIME_CONTROL").as_deref() == Ok("1") {
+        Some(
+            runtime_control::RuntimeControl::bind(&home).unwrap_or_else(|error| {
+                eprintln!("无法启动 Coflux 本机运行组件：{error}");
+                std::process::exit(1);
+            }),
+        )
+    } else {
+        None
+    };
     let settings = Settings::load(&home);
     fda::write_status(&home); // macOS: 探测完全磁盘访问权限并落盘,供 cofluxd status/fda 展示引导；非 macOS 空操作
     write_version_file(&home); // plan 112：自身版本落盘，桌面版据此判断「app 内置的 supervisor 比在跑的新」
+    shell_integration::write_files(&home); // plan 115：会话 shell 集成的 rc 落盘（幂等覆盖，随二进制更新）
     let shell = std::env::var("COFLUX_SHELL")
         .ok()
         .filter(|s| !s.is_empty())
@@ -192,6 +206,9 @@ fn main() {
         SUPERVISOR_VERSION.to_string(),
     );
     manager.start();
+    if let Some(desktop) = desktop {
+        desktop.serve(manager.clone(), sessions.clone(), sock_path.clone());
+    }
 
     // 优雅关闭：SIGTERM/SIGINT → 杀 worker + 全部 PTY 后退出（systemd/launchd 会发 SIGTERM）
     {

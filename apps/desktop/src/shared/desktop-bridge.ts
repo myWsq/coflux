@@ -26,6 +26,8 @@ export type DesktopDaemonBusy = "install" | "start" | "restart" | "stop" | "remo
 export type DesktopDaemonFda = "granted" | "denied" | "unknown";
 
 export type DesktopDaemonState = {
+  runningTerminals?: number;
+  legacyInstallation?: boolean;
   status: DesktopDaemonStatus;
   /** 本构建是否自带三件；false（未打包 dev 实例没跑 stage 脚本）时「接入」「重启换新」都不可用，只能看状态 */
   bundled: boolean;
@@ -43,7 +45,7 @@ export type DesktopDaemonState = {
   fda: DesktopDaemonFda;
   /** 本机设备在目录里的身份（credentials.json 的 daemonId），渲染层据此数本机运行中终端 */
   daemonId?: string;
-  /** ~/.coflux/bin：给想在自己终端里直接用 cofluxd 的人看的路径提示（不改用户 shell 配置） */
+  /** ~/.coflux/bin：给想在自己终端里直接用 coflux 的人看的路径提示（不改用户 shell 配置） */
   binDir: string;
   busy?: DesktopDaemonBusy;
   /** 上一次动作失败的步骤与原因；渲染层显示后可 daemonDismissError 清掉 */
@@ -85,6 +87,8 @@ export type DesktopBridge = {
    * 渲染层自己弹不了——settings.json 路径与「打开设置文件」动作只有主进程有。
    */
   showServerInfo(): void;
+  connectLocal(): Promise<void>;
+  logoutLocal(): Promise<boolean>;
   notify(notification: DesktopNotification): void;
   /** 待处理工作区数；0 清除角标 */
   setBadge(count: number): void;

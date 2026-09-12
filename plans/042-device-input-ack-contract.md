@@ -1,8 +1,10 @@
-# Plan 042: Device PTY 输入累计 ACK 与连续 exactly-once 契约
+# Plan 042: Device PTY input cumulative ACK and contiguous exactly-once contract
 
-> 本计划是 outcome contract，不是逐函数脚本。理解需求与已记录决策后，针对实时代码自行
-> 设计实现。只有同时承担验证职责时才运行 milestone validation；委派执行者只实现，验证
-> 留给 orchestrator。遇到 STOP condition 必须停止。完成后更新 `plans/README.md`。
+> This plan is an outcome contract, not a function-by-function script. Understand
+> the requirements and recorded decisions, then design the implementation against
+> the live code. Run milestone validations only if you are also the verifier;
+> delegated executors implement, and the orchestrator validates. Stop on any
+> STOP condition. When complete, update `plans/README.md`.
 >
 > Drift check: `git diff --stat 0da4edf..HEAD -- proto packages/protocol crates/protocol crates/supervisor/src/sessiond.rs crates/supervisor/src/sessions.rs crates/worker/src/device.rs Cargo.toml Cargo.lock`
 
@@ -17,72 +19,44 @@
 
 ## Requirement
 
-在 web/client 开始跨 direct/relay 重投 PTY 输入前，补齐 daemon authority 的成功确认边界。
-当前 wire 声称 `input_seq` 承担 exactly-once，但 supervisor 在首次应用和重复请求两条成功路径
-都不返回结果；client 草稿只能无限保留输入，达到 256 条或 1 MiB 后还会静默丢弃最旧数据。
-完成后，sessiond 只连续提交输入并返回累计 ACK；ACK 丢失、worker 重启或 transport 迁移时，
-相同 logical client 可安全重投，既不重复写 PTY，也不会把尚未应用的序号越级确认。
+Define the daemon authority’s successful-input acknowledgment boundary before web/client reroutes PTY input between direct and relay.
 
-本计划只建立并产出 daemon 侧 ACK；浏览器消费 ACK、输入队列背压和 UI 行为属于 plan 040。
+The wire claims exactly-once behavior through `input_seq`, but neither first application nor duplicate success currently returns a result. The client draft can only retain input indefinitely, silently dropping the oldest entries above 256 entries or 1 MiB.
+
+After completion, sessiond commits only contiguous input and returns cumulative ACKs. After ACK loss, worker restart, or transport migration, the same logical client can retransmit safely without writing twice or acknowledging unapplied sequence numbers.
+
+This plan defines the ACK and implements daemon production of it. Browser ACK consumption, input-queue backpressure, and UI belong to plan 040.
 
 ## Decisions & tradeoffs
 
-- **新增 transport-neutral 累计 ACK**：Device 协议新增 `DevicePtyInputAck`，至少包含
-  `session_id` 与 `applied_through_seq`，由已认证 channel 隐式确定 logical client；不携带
-  `request_id`，也不为每次重投制造一份永久结果。拒绝“发送成功就从 client 队列删除”，因为
-  当前 supervisor 的 Apply/Duplicate 均无成功响应
-  （`crates/supervisor/src/sessions.rs:696-712`）。
-- **累计游标必须连续**：无游标时只允许序号 1；已有游标 N 时只有 N+1 可写入，N+2 及以上
-  返回 gap/error 且游标不动。拒绝当前“任何大于 N 都 Apply”的规则，否则跨 transport 乱序
-  会让 ACK 越过永久丢失的输入（`crates/supervisor/src/sessiond.rs:499-518`）。
-- **成功提交后才 ACK**：首次输入必须在 PTY `write_all` 成功且 authority 游标提交后返回新
-  `appliedThroughSeq`；写入或授权失败只返回关联原 `request_id` 的 error，绝不前移 ACK。
-  ACK 发送失败不回滚 PTY，而由同序号重投触发再次确认。
-- **所有已提交重投都返回累计 ACK**：`input_seq <= appliedThroughSeq` 一律不再写 PTY并返回
-  当前累计游标；等于当前游标且 payload 不同仍可报告 collision，早于当前游标的 payload
-  不做无界历史比对。拒绝把旧序号仅报 `stale_input`，因为 ACK 丢失后 client 必须有办法安全
-  清掉整段已提交前缀；严格连续提交已保证旧序号对应的 effect 曾发生。
-- **ACK 沿原 channel 原样返回**：worker 把它归类为 `SESSION_CONTROL` response，只投递给产生
-  输入的 logical channel；它不进入 output cursor/gap 合并，也不经中心解释。Device envelope
-  本来就是 local/relay 共用且由中心 opaque 转发
-  （`proto/coflux/v1/device.proto:1-4`, `crates/worker/src/device.rs:1068-1147`）。
-- **Protobuf 仍是唯一真相源**：消息和 oneof 字段先改 `proto/`，再完整生成 TS、Rust、Swift；
-  不手写任一语言镜像。一次生成会清理并重写三套输出
-  （`proto/buf.gen.yaml:1-13`）。
-- **不顺带扩展 resize 或 operation**：resize 始终只保留最后尺寸，prepared/stop 已有
-  `DeviceOperationAck`；本计划只修复会累积且不能丢的 PTY input。浏览器队列目前静默淘汰输入
-  的行为由 plan 040 消费 ACK 后移除（`packages/client/src/device-router.ts:958-974`）。
+- **Transport-neutral cumulative ACK**: add `DevicePtyInputAck` with at least `session_id` and `applied_through_seq`; the authenticated channel implicitly identifies the logical client. Carry no `request_id` and create no permanent result per retry. Reject removing input merely because send succeeded: supervisor Apply/Duplicate currently returns no success response (`crates/supervisor/src/sessions.rs:696-712`).
+- **Cumulative cursors are contiguous**: with no cursor, accept only sequence 1. At cursor N, only N+1 may be written; N+2 or greater returns a gap/error without advancing. Reject applying anything greater than N: transport reordering would ACK past permanently lost input (`crates/supervisor/src/sessiond.rs:499-518`).
+- **ACK only after a successful commit**: return `appliedThroughSeq` only after PTY `write_all` succeeds and authority commits the cursor. Write/authorization failure returns only the error correlated to the original `request_id`, never advancing ACK. Failed ACK delivery does not roll back PTY input; retransmitting the same sequence obtains another acknowledgment.
+- **Every already-committed retransmission returns cumulative ACK**: `input_seq <= appliedThroughSeq` never writes to the PTY and returns the current cursor. A payload mismatch at the current cursor may still be a collision; do not retain unbounded historical payloads to compare older sequences. Reject responding only with `stale_input`: after ACK loss the client needs a safe way to retire the entire committed prefix, whose effects are guaranteed by contiguous commits.
+- **Return ACK unchanged on its originating channel**: the worker classifies it as `SESSION_CONTROL` and delivers it only to the logical channel that produced the input. It does not participate in output-cursor/gap coalescing and is not interpreted centrally. Device envelopes already span local/relay with opaque central forwarding (`proto/coflux/v1/device.proto:1-4`, `crates/worker/src/device.rs:1068-1147`).
+- **Protobuf remains the sole source of truth**: edit message/oneof fields in `proto/`, then regenerate all TS/Rust/Swift bindings. No handwritten language mirrors. Generation cleans and rewrites all three output trees (`proto/buf.gen.yaml:1-13`).
+- **Do not expand resize or operation semantics**: resize keeps only the latest size, and prepared/stop already uses `DeviceOperationAck`. This plan fixes accumulated PTY input that must not be lost. Plan 040 removes silent client queue eviction when it consumes ACK (`packages/client/src/device-router.ts:958-974`).
 
 ## Direction
 
-### Milestone 1: wire 契约可跨语言生成
+### Milestone 1: wire contracts can be generated across languages
 
-ACK 的字段、累计语义、连续序号与 oneof 编号在 proto 注释中无歧义，三套生成物一致且旧字段号
-不复用。Validation: `cd proto && buf lint && buf generate && cd .. && cargo test -p coflux-protocol`
--> exit 0。
+Proto comments unambiguously define ACK fields, cumulative semantics, contiguous sequences, and oneof numbering. All three generated outputs agree, with no existing field-number reuse. Validation: `cd proto && buf lint && buf generate && cd .. && cargo test -p coflux-protocol` exits 0.
 
-### Milestone 2: sessiond 形成可证明的提交边界
+### Milestone 2: sessiond forms provable commit boundaries
 
-authority 对首次连续输入、ACK 丢失后的相同/较旧重投、序号 gap、payload collision、PTY 写失败、
-旧 holder 和旧 transport 都有测试；只有真实写入成功才能推进累计游标。Validation:
-`cargo test -p coflux-supervisor sessiond_` -> exit 0。
+Test authority handling of first contiguous input, current/older retries after ACK loss, sequence gaps, payload collisions, PTY write failure, stale holders, and stale transports. Only a successful actual write advances the cumulative cursor. Validation: `cargo test -p coflux-supervisor sessiond_` exits 0.
 
-### Milestone 3: direct/relay 共用 daemon 响应路径
+### Milestone 3: direct/relay shared daemon response path
 
-worker 明确授权并转发 ACK，channel 隔离、scope 过滤和队列失败行为有测试；server 无需新增
-Device payload 分派。Validation: `cargo test -p coflux-worker && cargo build -p coflux-supervisor -p coflux-worker`
--> exit 0，零 warning。
+The worker explicitly authorizes and forwards ACK. Test channel isolation, scope filtering, and queue failures without adding server Device-payload dispatch. Validation: `cargo test -p coflux-worker && cargo build -p coflux-supervisor -p coflux-worker` exits 0 with no warnings.
 
 ## Landmines
 
-- `DevicePtyInput` 的注释当前只写“较小 seq 拒绝”且没有成功确认
-  （`proto/coflux/v1/device.proto:307-315`）；新增累计 ACK 后必须同步修正旧注释，不能留下两套语义。
-- sessiond 的 input cursor 以 logical `client_instance_id` 为键，而 channel 会随 generation 迁移；
-  ACK 不能错误绑定物理 direct/relay 身份，否则 failover 后无法确认旧 effect
-  （`crates/supervisor/src/sessiond.rs:509-523`）。
-- worker 的 response scope 白名单目前没有 ACK case
-  （`crates/worker/src/device.rs:1446-1464`）；依赖默认分支“刚好能转发”不算完成。
-- generated code 不得手改；`buf generate` 的 `clean: true` 会触及与本消息无关但同目录的产物。
+- `DevicePtyInput` currently documents only rejection of lower sequences, with no success acknowledgment (`proto/coflux/v1/device.proto:307-315`). Update those comments when adding cumulative ACK; do not leave conflicting semantics.
+- sessiond keys its input cursor by logical `client_instance_id`; channels migrate with generation. Binding ACK to physical direct/relay identity would prevent acknowledgment of earlier effects after failover (`crates/supervisor/src/sessiond.rs:509-523`).
+- The worker response-scope allowlist has no ACK case (`crates/worker/src/device.rs:1446-1464`). Accidental forwarding through a default branch is not a complete implementation.
+- Never edit generated code manually. `buf generate` with `clean: true` also rewrites neighboring generated artifacts unrelated to this message.
 
 ## Scope
 
@@ -93,49 +67,47 @@ In scope:
 - `crates/supervisor/src/sessiond.rs`
 - `crates/supervisor/src/sessions.rs`
 - `crates/worker/src/device.rs`
-- 协议生成确有需要时的 `Cargo.toml`、crate manifests 与 `Cargo.lock`
+- Protocol generation `Cargo.toml`, crate manifests and `Cargo.lock` when necessary
 - `plans/README.md`
 
 Out of scope:
-- `packages/client/**`、`apps/web/**` — ACK 消费与背压由 plan 040 实现
-- `apps/server/**` — relay 必须继续 opaque，不解释 ACK
-- 黑盒浏览器/failover 验收 — 由 plan 041 统一完成
-- resize ACK、PTY output ACK 或 supervisor/OS 重启后的进程恢复
+- `packages/client/**`, `apps/web/**` —  ACK consumption and backpressure are implemented by plan 040
+- `apps/server/**` —  relay remains opaque and does not interpret ACK
+- Black-box browser/failover acceptance: consolidated in plan 041
+- Resize ACK, PTY-output ACK, and process recovery across supervisor/OS restarts
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Proto lint/generate | `cd proto && buf lint && buf generate` | exit 0，TS/Rust/Swift 均更新 |
+| Proto lint/generate | `cd proto && buf lint && buf generate` | exit 0, TS/Rust/Swift are all updated |
 | Protocol tests | `cargo test -p coflux-protocol` | exit 0 |
 | Supervisor semantics | `cargo test -p coflux-supervisor sessiond_` | exit 0 |
 | Worker routing | `cargo test -p coflux-worker` | exit 0 |
-| Daemon build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0，零 warning |
+| Daemon build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0, zero warnings |
 | TS generated consumers | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit && node_modules/.bin/tsc -p packages/client/tsconfig.json --noEmit` | exit 0 |
 | Diff hygiene | `git diff --check` | exit 0 |
 
 ## Done criteria
 
-- [ ] 所有列出的 commands 通过。
-- [ ] ACK wire 注释明确其 logical-client、累计、连续与失败语义，三语言生成物完整提交。
-- [ ] N 之前未提交时 N+1 不会写入，且不会出现越级 `appliedThroughSeq`。
-- [ ] Apply 与所有已提交重投都会 ACK；PTY 写失败、stale holder/transport 不会 ACK 或推进游标。
-- [ ] direct 与 relay 都只把 ACK 投递回正确 channel，且 response scope 为 `SESSION_CONTROL`。
-- [ ] 测试包含 ACK 丢失后从旧序号重投并得到当前累计游标的行为。
-- [ ] 实现遵循所有 Decisions & tradeoffs。
-- [ ] 未修改 out-of-scope 文件。
-- [ ] `plans/README.md` status 已更新。
+- [ ] All listed commands pass.
+- [ ] ACK wire comments specify logical-client, cumulative contiguous-prefix, and failure semantics; commit generated artifacts for all three languages.
+- [ ] If N is not committed, N+1 is not written; appliedThroughSeq never reports a noncontiguous prefix.
+- [ ] Successful application and retransmission of committed input both produce ACK. Failed PTY writes and stale holder/transport requests neither ACK nor advance the cursor.
+- [ ] Both direct and relay only deliver ACK back to the correct channel, and the response scope is `SESSION_CONTROL`.
+- [ ] Tests resend an old sequence after ACK loss and verify the current cumulative cursor is returned.
+- [ ] Implementation follows every Decisions & tradeoffs entry.
+- [ ] No out-of-scope files changed.
+- [ ] `plans/README.md` status updated.
 
 ## STOP conditions
 
-- plan 036 的 logical client/session 输入游标边界已被后续代码改成不同 authority。
-- ACK 需要 server 解码、持久化或改写 Device payload 才能工作。
-- PTY writer 无法区分成功提交与失败，却只能在写入前推进游标。
-- 需要改 `packages/client` 才能让协议/daemon 自身测试通过。
-- 任一 validation 在一次合理修复后连续失败两次。
+- The logical client/session input cursor boundary of plan 036 has been changed to a different authority by subsequent code.
+- ACK requires the server to decode, persist or rewrite the Device payload to work.
+- The PTY writer cannot distinguish between successful commits and failures, but can only advance the cursor before writing.
+- `packages/client` needs to be changed to allow the protocol/daemon itself to pass the test.
+- Any validation fails twice in a row after a reasonable fix.
 
 ## Maintenance notes
 
-`appliedThroughSeq` 只证明当前 sessiond authority 已把该连续前缀成功写给存活 PTY，不承诺终端
-程序已经处理、产生 echo，也不跨 supervisor/OS 重启持久化。以后若扩大 durability 边界，必须
-另立协议，而不能悄悄提升这个 ACK 的含义。
+`appliedThroughSeq` proves only that the current sessiond authority wrote a contiguous prefix to the surviving PTY. It does not promise that the terminal application processed it or produced an echo, and it does not persist across supervisor/OS restarts. Expanding durability requires a separate contract; never silently strengthen this ACK’s meaning.

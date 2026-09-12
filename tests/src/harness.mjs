@@ -302,9 +302,9 @@ function spawnApp(rel, env) {
 // 默认用 target/debug 下的产物（pretest 会 cargo build）；可用环境变量覆盖路径。
 const SUPERVISOR_BIN = process.env.COFLUX_SUPERVISOR_BIN || join(ROOT, "target/debug/coflux-supervisor");
 const WORKER_BIN = process.env.COFLUX_WORKER_BIN || join(ROOT, "target/debug/coflux-worker");
-/** Rust 版 agent 命令 `cofluxd`（plan 112，crates/cli；pretest 一并构建）：与 npm 版同名、供桌面版内置。
- * 黑盒在 coflux 终端里直接执行它，验证与 node 版 `packages/cli/cofluxd.mjs` 的 stdout 短语/退出码一致。 */
-export const CLI_BIN = process.env.COFLUX_CLI_BIN || join(ROOT, "target/debug/cofluxd");
+/** Rust 版 agent 命令 `coflux`（plan 112，crates/cli；pretest 一并构建）：与 npm 版同名、供桌面版内置。
+ * 黑盒在 coflux 终端里直接执行它，验证与 node 版 `packages/cli/coflux.mjs` 的 stdout 短语/退出码一致。 */
+export const CLI_BIN = process.env.COFLUX_CLI_BIN || join(ROOT, "target/debug/coflux");
 export function spawnDaemon(env) {
   const env2 = { ...env, COFLUX_WORKER_CMD: WORKER_BIN, COFLUX_WORKER_ARGS: "[]" };
   const child = spawn(SUPERVISOR_BIN, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
@@ -658,14 +658,14 @@ function unescapeHtml(text) {
 }
 
 /** 页面里的隐藏字段（csrf、request、to 一类），值已反转义。 */
-export function hiddenFieldsFrom(html) {
+function hiddenFieldsFrom(html) {
   const out = {};
   for (const m of html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) out[m[1]] = unescapeHtml(m[2]);
   return out;
 }
 
 /** 页面里第一张 POST 表单的 action（相对路径，值已反转义）。 */
-export function formActionFrom(html) {
+function formActionFrom(html) {
   const m = /<form method="post" action="([^"]+)"/.exec(html);
   return m ? unescapeHtml(m[1]) : null;
 }

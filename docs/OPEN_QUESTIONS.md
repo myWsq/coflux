@@ -1,62 +1,63 @@
-# OPEN QUESTIONS / 决策记录
+# Open questions and decision log
 
-记录两类东西：**(A) 我已自行拍板的设计选择**（按"最佳方案"先做了，待你确认/推翻），**(B) 真正需要你定夺的产品决策**（多与信任模型/形态有关，我没擅自决定）。
-
----
-
-## A. 已自行拍板（best-judgment，可回退）
-
-| # | 决策 | 理由 | 备选 |
-|---|------|------|------|
-| A1 | ~~内置 `node:sqlite` / Supabase Postgres~~ **已由 plans 059-063 收敛为自托管 Postgres**（2026-07） | 业务数据自持；保留事务、备份与未来扩展能力 | ——|
-| A2 | PTY/VT/history/holder/sequence 统一在 **supervisor/sessiond** | client、worker、中心断开都不影响会话；attach 直接取当前 snapshot | server live mirror（已删除） |
-| A3 | daemon resync + 完整 Device catalog/tombstone 对账 | 服务器重启可重挂已知 task，unknown live session 保留为 orphan，不伪造 exit | 仅 sessionId（无法可靠收敛生命周期） |
-| A4 | 任务状态机 `idle / running / exited`；对 `exited` 的 task 再 `task.start` = **重跑**（起新 session） | 简单够用 | 显式 restart 语义 / 保留多次运行历史 |
-| A5 | PTY 与普通 RPC 统一走端到端 **DeviceEnvelope** | direct/relay 共用语义，中心不解析 raw terminal | 中心 protobuf PTY（已删除并 reserved） |
-| A6 | 正式工作台与导入/任务交互在 Electron 桌面客户端（`apps/desktop`） | 桌面 app 是唯一前端与默认迭代对象；线上 web/mobile 已冻结 | `window.prompt` 原型、独立维护的 web 子项目（均已删除） |
-| A7 | daemon 每设备凭证、client 账号会话 token | daemonId 由服务器绑定，账号隔离 | 单一共享 token（已删除） |
-| A8 | sessiond 单 holder + 显式 takeover | detach、epoch、sequence 在唯一 authority 裁决 | server viewer/holder（已删除） |
+This document tracks two categories: **(A) design choices made using best judgment**, open to confirmation or reversal, and **(B) product decisions that require the owner's input**, usually concerning the trust model or product form.
 
 ---
 
-## B. 需要你定夺（未擅自决定）
+## A. Decisions made using best judgment (reversible)
 
-> 本节保留产品与部署决策。早期共享 token、登记密钥、SQLite/Supabase 等候选已经退役；当前安全边界
-> 以每设备凭证、server 签发的 client 会话 token、账号归属校验和单实例中心为准。
+| # | Decision | Rationale | Alternative |
+|---|----------|-----------|-------------|
+| A1 | ~~Built-in `node:sqlite` / Supabase Postgres~~ **Replaced by self-hosted Postgres in plans 059–063** (July 2026) | Own business data while retaining transactions, backups, and room to grow | — |
+| A2 | PTY/VT/history/holder/sequence belong to **supervisor/sessiond** | Client, worker, and center disconnections do not affect sessions; attach returns the current snapshot | Server live mirror (removed) |
+| A3 | Daemon resync with full device catalog/tombstone reconciliation | Server restarts can reattach known tasks; unknown live sessions remain orphans rather than receiving fabricated exits | sessionId alone (cannot reliably reconcile lifecycle) |
+| A4 | Task states are `idle / running / exited`; `task.start` on an `exited` task **reruns** it with a new session | Simple and sufficient | Explicit restart semantics / retaining multiple runs |
+| A5 | PTY and regular RPC share end-to-end **DeviceEnvelope** | Direct and relay paths share semantics; the center does not parse raw terminal data | Center-routed protobuf PTY (removed and reserved) |
+| A6 | The production workbench and import/task interactions live in the Electron desktop client (`apps/desktop`) | Desktop is the only frontend and default iteration target; online web/mobile clients are frozen | `window.prompt` prototype and separately maintained web project (both removed) |
+| A7 | Per-device daemon credentials and client account-session tokens | The server binds daemonId; accounts are isolated | One shared token (removed) |
+| A8 | A single holder in sessiond with explicit takeover | One authority decides detach, epoch, and sequence | Server viewer/holder model (removed) |
 
-### B1. 鉴权与多租户 ★最重要 —— ✅ 已定（Tailscale 模型）
-**决策（2026-06-21）**：单用户管自有多机，一机一 daemon、登录一个账号。即 Tailscale 式：
-- **Account** 为隔离单元（MVP 单账号，模型留多账号扩展位）。
-- **浏览器一次性授权**：未登记 daemon 的授权请求与当前 WS 连接绑定，用户登录后确认。
-- **每设备独立 deviceToken**：登记后签发，daemon 本地持久化，后续连接用它认证。
-  → 从根上修掉 #9 冒充问题：daemonId 由服务器按设备凭证绑定，不再客户端自报。
-- **用户口令 + 会话 token**：`local`/`password` 两种登录模式均由 server 签发有期限、可撤销的账号会话 token。
-- 账号内全互通（无需更细 ACL）；跨账号隔离。
-- 详见 [auth-design.md](auth-design.md)。
+---
 
-### B2. 工作区的信任边界 ★安全相关 —— ✅ 已定（仅本人自有机器）
-**决策（2026-06-21）**：仅操作本人自有机器，无需路径白名单/沙箱/容器。维持现状（daemon 仅校验"是目录"）。
+## B. Decisions requiring owner input
 
-### B3. daemon 离线时，运行中任务怎么处理？ —— ✅ 已定
-**决策（2026-06-21）**：接受现状。daemon 进程整死 → PTY 没了，恢复上限是"重新拉起 Agent"而非"恢复同一进程"；网络掉线进程仍活 → 重连 resync 恢复（已验证）。无需额外落盘 PTY 状态。
+> This section retains product and deployment decisions. Early shared-token, enrollment-key, and SQLite/Supabase candidates have been retired. Current security boundaries use per-device credentials, server-issued client-session tokens, account-ownership checks, and a single central instance.
 
-### B4. task 与 terminal 的基数 —— ✅ 已定
-一个 workspace 可有多个 task/终端 Tab；一个 task 的一次运行对应一个 live session，退出后重跑会创建
-新 session。桌面客户端已落地；线上 web/mobile 保持冻结形态。
+### B1. Authentication and multitenancy — highest priority — ✅ Decided: Tailscale model
 
-### B5. Agent 集成（V2）
-通路已通，下一步接 Agent 时：
-- 起任务时**自动拉起** `claude`/`codex` 并喂初始 prompt（人再接管），还是保持"只开 shell、人手动起"？
-- 要不要解析 Agent 的结构化输出（headless 模式）做富 UI？（这会引入"半 PTY 半结构化"的混合通道。）
+**Decision (2026-06-21)**: one user manages their own machines, with one daemon per machine logged into one account:
 
-### B6. 数据面是否需要二进制优化 —— ✅ 已完成并演进为本地优先（2026-07）
-terminal、holder、input ACK 与普通 RPC 使用 direct/relay 共用的 protobuf DeviceEnvelope。中心 relay 只转发
-opaque bytes；旧 `pty.output/input/replay` 与 server-routed RPC 已删除并保留字段编号。见
-[architecture.md](architecture.md)。
+- **Account** is the isolation unit: one account for MVP, with room for multiple accounts in the model.
+- **One-time browser authorization**: an unregistered daemon's authorization request is bound to its current WS connection and confirmed after user login.
+- **Independent deviceToken per device**: issued after enrollment, persisted locally, and used to authenticate subsequent connections. This fixes impersonation issue #9 at its source: the server binds daemonId to device credentials instead of trusting a client-supplied ID.
+- **User password and session token**: both `local` and `password` login modes issue expiring, revocable account-session tokens from the server.
+- All resources within an account are mutually accessible, without finer ACLs; accounts are isolated from one another.
+- See [auth-design.md](auth-design.md).
 
-### B7. 中心服务器部署形态 —— ✅ 已定（2026-07）
-- 单实例自托管（prod-jp），业务数据使用自托管 Postgres；身份层为 `local` 或自建 `password` 模式，Supabase 已退役。
-- TLS：`api.coflux.dev` 反代终结 `wss://`（2026-09-04 起前置一层 owo-jp-gw 入口反代，
-  中心自身仍只绑回环，见 [deployment.md](deployment.md)）。单实例是当前既定产品形态；没有明确需求前不引入 Redis、
-  leader election 或共享 presence。若未来改为多实例，pending authorization、在线 daemon 与 relay home
-  等内存 authority 必须先设计成可线性化的共享状态，不能只把现有 Map 搬进缓存。
+### B2. Workspace trust boundary — security-related — ✅ Decided: owner-controlled machines only
+
+**Decision (2026-06-21)**: operate only on the owner's own machines. No path allowlist, sandbox, or container is required. Retain the existing behavior: the daemon checks only that the path is a directory.
+
+### B3. What happens to running tasks when a daemon goes offline? — ✅ Decided
+
+**Decision (2026-06-21)**: accept current behavior. If the daemon process dies completely, its PTYs are lost; recovery can restart the agent but cannot restore the same process. If only the network disconnects and processes remain alive, reconnection/resync restores access (verified). No additional PTY state persistence is needed.
+
+### B4. Task-to-terminal cardinality — ✅ Decided
+
+A workspace may contain multiple tasks/terminal tabs. Each task run corresponds to one live session; rerunning after exit creates a new session. This is implemented in the desktop client; online web/mobile clients remain frozen.
+
+### B5. Agent integration (V2)
+
+The transport works. For the next agent-integration step:
+
+- Should starting a task automatically launch `claude`/`codex` with an initial prompt, allowing human takeover, or continue opening only a shell for manual launch?
+- Should headless structured agent output be parsed for richer UI? This would introduce a hybrid PTY/structured channel.
+
+### B6. Does the data plane need binary optimization? — ✅ Completed, then evolved to local-first (July 2026)
+
+Terminals, holder state, input ACKs, and regular RPC use protobuf DeviceEnvelope with shared direct/relay semantics. The central relay forwards only opaque bytes. Legacy `pty.output/input/replay` and server-routed RPC have been removed, with their field numbers reserved. See [architecture.md](architecture.md).
+
+### B7. Central-server deployment model — ✅ Decided (July 2026)
+
+- One self-hosted instance (prod-jp), with business data in self-hosted Postgres. Authentication uses `local` or self-managed `password` mode; Supabase has been retired.
+- TLS: the reverse proxy for `api.coflux.dev` terminates `wss://`. Since 2026-09-04, owo-jp-gw provides an additional ingress proxy; the center itself still binds only to loopback. See [deployment.md](deployment.md). A single instance is the agreed product model. Do not introduce Redis, leader election, or shared presence without a concrete requirement. Before moving to multiple instances, in-memory authorities such as pending authorizations, online daemons, and relay homes must become linearizable shared state; simply moving the existing Maps into a cache is insufficient.

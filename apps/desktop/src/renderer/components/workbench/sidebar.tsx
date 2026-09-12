@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, Cog, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, Info, LoaderCircle, MessageSquare, Monitor, Package, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 
 import { AccountFooter } from "@/components/workbench/account-footer";
@@ -348,7 +348,7 @@ export function Sidebar(props: SidebarProps) {
                         // workspaceActivity（packages/client），UI 只做呈现。
                         const activity = workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents);
                         const activityText = activityLabel(activity);
-                        // agent 经 `cofluxd progress` 播报的进度短评（plan 088）：与活动状态是两个
+                        // agent 经 `coflux progress` 播报的进度短评（plan 088）：与活动状态是两个
                         // 维度（状态 hooks 自动判定，短评 agent 主动播报），跨 hook 事件存活。
                         const progress = workspaceProgress(workspace.id, tasks, sessionAgents);
                         // 工作区详情 tooltip（需求勘误：原 plan 048-task-tab-tooltip 做到了任务 Tab 上，
@@ -366,7 +366,7 @@ export function Sidebar(props: SidebarProps) {
                                   <span className="truncate">{activityText}</span>
                                 </span>
                               ) : null}
-                              {/* agent 经 `cofluxd notify` 主动留的话（plan 074）：状态图标只能表达
+                              {/* agent 经 `coflux notify` 主动留的话（plan 074）：状态图标只能表达
                                   「它在等你」，具体等什么得由 agent 自己说。不 truncate——留言就是
                                   要读的内容，worker 侧已按 200 字符钳过。 */}
                               {activity.status === "question" && activity.message ? (
@@ -581,9 +581,6 @@ export function Sidebar(props: SidebarProps) {
               // 布局照 Cursor：一行标题说结论（走哪条路 + 多快），下面是图标条目列表铺上下文。
               const tooltipRows: { icon: LucideIcon; text: string }[] = [
                 { icon: Monitor, text: `${daemon.host} / ${daemon.platform}` },
-                ...(daemon.workerVersion ? [{ icon: Package, text: `worker ${daemon.workerVersion}` }] : []),
-                ...(daemon.supervisorVersion ? [{ icon: Cog, text: `supervisor ${daemon.supervisorVersion}` }] : []),
-                ...(transport?.detail ? [{ icon: Info, text: transport.detail }] : []),
               ];
               const tooltipContent = (
                 <div className="flex flex-col gap-1">

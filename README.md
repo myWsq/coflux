@@ -1,120 +1,167 @@
-# coflux
+<div align="center">
+  <img src="apps/ios/Coflux/Assets.xcassets/AppIcon.appiconset/AppIcon.png" alt="Coflux" width="96" height="96">
+  <h1>Coflux</h1>
+  <p><strong>Your terminals. Every machine. One workspace.</strong></p>
+  <p>A terminal workspace for you and your coding agents.<br>Run locally, reach your other devices, and take over whenever you need to.</p>
+  <p>
+    <a href="https://github.com/myWsq/coflux/releases/latest">Download for macOS</a> ·
+    <a href="#quick-start">Quick start</a> ·
+    <a href="docs/architecture.md">Architecture</a> ·
+    <a href="https://github.com/myWsq/coflux/issues">Report an issue</a>
+  </p>
+  <p>
+    <a href="https://github.com/myWsq/coflux/actions/workflows/ci.yml"><img src="https://github.com/myWsq/coflux/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://github.com/myWsq/coflux/releases/latest"><img src="https://img.shields.io/github/v/release/myWsq/coflux?color=222222&amp;label=release" alt="Latest release"></a>
+    <a href="https://www.npmjs.com/package/cofluxd"><img src="https://img.shields.io/npm/v/cofluxd?color=222222&amp;label=npm" alt="npm version"></a>
+  </p>
+</div>
 
-可跑在用户任意节点上的 **Daemon**，在本地起 PTY、驱动 Claude Code / Codex CLI 等 Agent。
-远端访问由中心完成 rendezvous，再经独立 opaque relay；同机优先 loopback，网络条件允许时可升到
-P2P，terminal 与普通 Device RPC 数据帧不经过中心控制 WS。一机一 daemon，设备模型类似 Tailscale。
+---
 
-> 架构详见 [docs/architecture.md](docs/architecture.md)；认证见 [docs/auth-design.md](docs/auth-design.md)；路线图/TODO 见 [docs/ROADMAP.md](docs/ROADMAP.md)；待讨论项见 [docs/OPEN_QUESTIONS.md](docs/OPEN_QUESTIONS.md)；生产部署拓扑见 [docs/deployment.md](docs/deployment.md)。
+Coflux brings local and remote terminals into a single desktop workspace. Sign in on your Macs, connect a Linux development machine, and work across them with the same account. Your code and terminal processes stay on the machine where they run.
 
-## Monorepo 结构
+Coding agents use the same capabilities through `coflux`: create a workspace, open a terminal, read its output, send input, and ask you to take over. Their work stays visible in the app.
 
-| 包 | 说明 |
-|----|------|
-| `packages/core` | TS 共享基础设施（日志等），供 server/client 复用 |
-| `packages/client` | 无 React 的 control client、store 与 DeviceRouter（桌面渲染层用） |
-| `packages/protocol` | Buf 生成的 TS 共享线协议（真相源在 `proto/`） |
-| `apps/server` | 中心服务器（TS）：认证/编排 + relay rendezvous + checkpoint + Postgres |
-| `apps/desktop` | macOS 桌面客户端（唯一前端）：Electron 主进程 + React 19 / xterm.js 渲染层（原生菜单/通知/角标/safeStorage 会话/签名公证/自动更新），`pnpm -C apps/desktop dev` |
-| `apps/ios` | 原生 iOS Client（SwiftUI + SwiftTerm）；使用共享 Swift Client Core |
-| `packages/swift-client` | Buf 生成的 Swift 协议、共享 Client Core 与 Apple 平台 transport |
-| `crates/protocol` | Buf 生成的 Rust 协议 + UDS frame/IPC |
-| `crates/relay` | 独立 opaque 数据面：短时单次 token 验证 + channel 配对，不连账号数据库 |
-| `crates/supervisor` | PTY/sessiond authority：VT/history/holder/sequence + worker 管理（极少升级） |
-| `crates/worker` | gateway、direct/relay、git/exec/fs、checkpoint 与中心连接（频繁升级） |
-| `packages/cli` | `cofluxd`：用户侧管理 CLI（npm，零依赖 node）——装/起/停/升级 daemon + doctor 连通性自检 |
+### Built around real terminals
 
-server/desktop 是 TypeScript（pnpm workspace）；**daemon 全 Rust**（Cargo workspace，零 node 运行时）。daemon
-拆成 supervisor + worker：升级只换 worker，PTY 在 supervisor 里存活。supervisor/sessiond 的角色类似
-tmux server——client 断开不影响进程，重新 attach 取当前 ANSI snapshot 与连续 output；但不承诺
-supervisor/OS 重启后恢复活进程。详见 [架构与 tmux 边界](docs/architecture.md#3-为什么像-tmux又不等于-tmux)。
+- **Install the app and get to work.** The macOS app includes its runtime and CLI. No separate Node.js, CLI, or background-service installation is needed.
+- **Reach your development machines.** Connect a Linux host or another Mac and operate its workspaces and terminals from the same account.
+- **Give agents tools you can see.** Claude Code, Codex, and other terminal tools run in real PTYs. Agents can share progress and hand control back to you.
+- **Keep sessions through client updates.** App updates reconnect to the running terminal runtime. Network-facing runtime updates preserve terminal processes too.
+- **Work directly when possible.** Local connections use loopback; remote connections can use peer-to-peer transport, with a relay fallback.
 
-## 用户侧：安装 daemon
+## Quick start
 
-**macOS 直接用 Coflux.app**（plan 113）：app 自带 daemon 三件，登录后按引导一键接入本机（落盘、起 launchd 服务、用登录态授权、
-完全磁盘访问引导），之后从账号菜单「本机 daemon」查看状态、重启或移除；不需要 Node。下面的 npm 路径给 Linux 与别的机器，
-两者写出的文件完全同构，可互换。
+### macOS desktop
 
-daemon 是预编译的 Rust 二进制，用 `cofluxd`（npm）装成系统服务（崩溃/开机自启）。默认连公共服务 `wss://api.coflux.dev/daemon`（自托管用 `--server` 改）。
+**Requires macOS 26 or later on Apple Silicon.**
 
-```bash
-npm i -g cofluxd
-cofluxd                 # 首次=up（起服务后打印浏览器授权链接），之后=看状态
-cofluxd up               # 幂等：零参数即可装/起；已装则按当前配置重装服务并重启
-cofluxd status / doctor / logs -f / update / down / uninstall
+1. [Download the latest release](https://github.com/myWsq/coflux/releases/latest), open the DMG, and move **Coflux** to Applications.
+2. Open the app and sign in. Your Mac is connected automatically.
+3. Import a local Git repository, create a workspace, and open a terminal. Run your usual shell tools or start `claude` or `codex`.
+
+Close the window to keep Coflux running in the background. Fully quitting the app or signing out ends this Mac's terminals after confirmation. If protected files are needed, grant access to **Coflux** in System Settings.
+
+### Linux and headless hosts
+
+**Requires Node.js 20 or later for the installer and command-line tools.** The terminal runtime itself is Rust and does not depend on Node.js.
+
+```sh
+npm install -g cofluxd
+cofluxd up
 ```
 
-登记走浏览器授权：`cofluxd up` 打印一次性授权链接（`https://api.coflux.dev/authorize/<token>`，server 直出的
-页面），在任意浏览器打开、登录账号后确认即可。`cofluxd doctor`
-分别检查中心 DNS/TCP/TLS/WS、gateway bind、持久 grant、loopback WS 与 daemon→中心状态；本地失败只
-表示 direct 降级，不等于 daemon 离线。**所有配置都在 `~/.coflux/settings.json`**
-（`serverUrl`/`deviceName`/`shell`），手改后重跑 `cofluxd up` 生效。发版/签名见
-[docs/RELEASING.md](docs/RELEASING.md)。
+Follow the authorization link to connect the host to your account. It then appears alongside your Macs in the desktop app.
 
-给跑在 coflux 终端里的 agent：每个 PTY 会话里都有 `COFLUX_DEVICE_ID` / `COFLUX_PROJECT_ID` /
-`COFLUX_WORKSPACE_ID` / `COFLUX_TASK_ID` / `COFLUX_SESSION_ID` / `COFLUX_MCP_URL` 六个环境变量，
-值与中心 MCP `list_*` 的 id 一致。分工只有一条规则：**本地能闭环的一律用零凭证的
-`cofluxd terminal/progress/notify/ports`**（send/read/wait/notify/progress 在 daemon 本地完成，不经中心）；
-只有跨出本工作区——开子工作区、跨工作区/跨设备操作——才用中心 MCP（`claude mcp add --transport http coflux "$COFLUX_MCP_URL"`）。
-supervisor 不走热升级，`cofluxd update && cofluxd restart` 后会话里才有这些变量。分工与纪律见
-`packages/cli/skills/coflux/SKILL.md`（随 `cofluxd` npm 包分发）。
+```sh
+cofluxd status       # Check this host
+cofluxd doctor       # Diagnose connectivity
+cofluxd logs -f      # Follow runtime logs
+```
 
-## 快速开始
+### One CLI for you and your agents
 
-前置：Node 22+ + pnpm（server/desktop）、Rust stable（daemon）、Docker（本地 Postgres）。
+The npm package installs **two distinct commands**. The desktop app also bundles `coflux` and makes it available inside its terminals.
 
-```bash
-pnpm install          # 安装 TS 依赖
-pnpm dev:pg           # 独立 Postgres（127.0.0.1:5432，与 CI / 开发默认连接串一致）
+| Entry point | Responsibility |
+| --- | --- |
+| **Coflux.app** | Desktop workspace and local device lifecycle |
+| **`cofluxd`** | Headless device lifecycle: install, start, stop, and update |
+| **`coflux`** | Account, device, workspace, and terminal operations |
 
-# 分终端跑（dev = server + desktop；daemon 单独，因为它是 Rust 二进制）：
+```sh
+# Inside a Coflux terminal: operate on the current workspace.
+coflux terminal new --title "Tests" --cmd "pnpm test"
+coflux terminal list
+coflux terminal read <terminal-id>
+coflux progress "Tests passed; reviewing the diff."
+
+# From a separately installed CLI: sign in, then reach another workspace.
+# Supply the password through stdin, not a command-line argument.
+coflux login --username <account> --password-stdin
+coflux device list
+coflux workspace list
+coflux terminal new --workspace <workspace-id> --cmd "git status"
+coflux terminal read <terminal-id> --remote
+```
+
+Account commands return JSON. Local commands use the terminal's existing context. The desktop CLI can reuse the app's login without exposing its credentials. See the [CLI guide](packages/cli/README.md), [agent skill](packages/cli/skills/coflux/SKILL.md), and [managed agent integration](docs/agent-integration.md).
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    Desktop["Coflux desktop"] --> Account["Account & device coordination"]
+    CLI["coflux CLI / agents"] --> Account
+    Account --> Mac["Your Mac"]
+    Account --> Linux["Your Linux host"]
+    Desktop -. "Local / peer-to-peer / relay" .-> Terminal["Live terminals on your devices"]
+    Mac --> Terminal
+    Linux --> Terminal
+```
+
+A long-lived **Supervisor** owns the PTYs, screen state, and terminal history. A separate **Worker** handles networking and device operations. Updating the Worker or reconnecting a client does not replace the process holding your shell.
+
+Updating or restarting the Supervisor itself is different: defer it until your tasks finish. Coflux does not claim to restore live processes after a Supervisor or OS restart.
+
+The server coordinates authentication, device discovery, and workspaces. Terminal traffic travels over direct or relayed device channels rather than the central control connection. See [architecture](docs/architecture.md) and [authentication](docs/auth-design.md) for the details; internal design documents are currently in Chinese.
+
+## Development
+
+You will need **Node.js 22+**, **pnpm 11**, **Rust stable**, and **Docker** for local PostgreSQL. Desktop development requires macOS.
+
+```sh
+git clone https://github.com/myWsq/coflux.git
+cd coflux
+pnpm install
+pnpm dev:pg
+
+# Run in separate terminals:
 pnpm dev:server
-pnpm dev:desktop      # Electron 桌面 app（渲染层 HMR 在 5274，主进程直连 ws://localhost:8787/client）
-pnpm dev:daemon       # 全 Rust daemon：cargo build 后起 supervisor（再 spawn worker）；走浏览器授权登记，凭证存 ~/.coflux
+pnpm dev:desktop
 ```
 
-1. 桌面 app 弹出后登录；dev 默认用用户名/密码 `admin` / `admin`（弱默认只在 `COFLUX_DEV=1` 生效）。
-2. 从在线设备导入该机器上已有的 git 仓库，再按需创建 worktree 工作区。
-3. 在工作区中新建终端，直接启动 `claude` / `codex`；同机优先显示 direct transport，失败自动 relay。
+The development app uses a separate data directory. The development server defaults to `admin` / `admin` only when `COFLUX_DEV=1`; never use development credentials in a public deployment. For a separate development host, run `pnpm dev:daemon`.
 
-任务支持停止/删除。重新 attach 从 daemon 的 VT/history 生成 snapshot，不从中心回放 raw PTY。已加载且
-已配对的页面在中心停止后仍可 list/attach/input/resize/stop；离线刷新/冷启动不在保证范围。
+```sh
+pnpm -C apps/desktop typecheck
+pnpm -C apps/desktop test
+pnpm -C apps/desktop build
+cargo test -p coflux-cli
+pnpm -C tests test
+```
 
-## 认证模型（Tailscale 式）
+Integration tests run real servers, runtimes, and WebSocket clients with temporary homes, databases, and ports. They do not install system services or use your normal Coflux credentials.
 
-- **浏览器授权**：新机器 daemon 发起授权请求，用户在已登录的浏览器里确认 → 服务器签发 **每设备 deviceToken**，daemon 本地持久化。
-- **设备凭证（deviceToken）**：后续连接用它认证；daemonId 由服务器签发绑定，无法冒充他机。
-- **用户登录**：`local` 模式校验环境变量中的用户名/密码；`password` 模式校验 Postgres 中的邮箱与
-  scrypt 密码哈希。两者成功后都由服务器签发有期限、可撤销的会话 token，浏览器自动保存并用于重连。
-- 服务器只持久化 device token 与会话 token 的 sha256 hash，不保存明文。详见
-  [docs/auth-design.md](docs/auth-design.md)。
+<details>
+<summary><strong>Repository map</strong></summary>
 
-## 环境变量
+| Path | Contents |
+| --- | --- |
+| `apps/desktop` | Electron, React, and xterm.js desktop app |
+| `apps/server` | Authentication, coordination, and PostgreSQL storage |
+| `apps/ios` | iOS client source; not part of the 1.0 desktop release |
+| `crates/supervisor` | PTYs, screen state, history, and Worker lifecycle |
+| `crates/worker` | Networking, Git, filesystem, and device operations |
+| `crates/cli` | Native `coflux` bundled with the desktop app |
+| `crates/relay` | Independent relay transport |
+| `packages/cli` | npm delivery of `coflux` and `cofluxd` |
+| `packages/client` | Shared TypeScript client and state |
+| `packages/swift-client` | Shared Swift client and transport |
+| `proto`, `packages/protocol`, `crates/protocol` | Protocol definitions and generated bindings |
+| `integrations/claude-plugin` | Claude Code hooks and agent skill |
+| `tests` | Process-level integration tests |
 
-| 变量 | 默认 | 用于 |
-|------|------|------|
-| `COFLUX_PORT` | `8787` | server 监听端口 |
-| `DATABASE_URL` | 生产必填；`COFLUX_DEV=1` 时弱默认 `postgres://postgres:postgres@127.0.0.1:5432/postgres` | server 的 Postgres 连接串（含密码，视为秘密） |
-| `COFLUX_AUTH` | `local` | 登录模式：`local`（单账号环境变量口令）或 `password`（Postgres 用户表） |
-| `COFLUX_USERNAME` | `admin` | `local` 模式用户名 |
-| `COFLUX_PASSWORD` | dev 为 `admin`；生产必填 | `local` 模式密码 |
-| `COFLUX_SESSION_TTL_MS` | `2592000000` | 登录后签发的会话 token 有效期（默认 30 天） |
-| `COFLUX_PROXY_HOST` | `p.localhost` | 端口转发预览域：`<shortId>-<该值>` 按反代路由；生产需配好泛解析 + 泛证书 |
-| `COFLUX_PUBLIC_URL` | `http://127.0.0.1:<COFLUX_PORT>` | 中心自身公网基址：OAuth issuer、PRM/AS 元数据、`/mcp` 资源标识与 server 直出的三张浏览器页面（`/authorize/<token>`、`/oauth/consent`、`/proxy-auth`）全由它拼（生产 `https://api.coflux.dev`），不从请求头推导 |
-| `COFLUX_OAUTH_ACCESS_TTL_MS` | `3600000` | MCP 宿主 OAuth access token 有效期（默认 1 小时） |
-| `COFLUX_OAUTH_REFRESH_TTL_MS` | 同 `COFLUX_SESSION_TTL_MS` | MCP 宿主 OAuth refresh token 有效期（用过即作废、轮换） |
-| `COFLUX_OAUTH_REFRESH_REUSE_GRACE_MS` | `60000` | 刚被轮换掉的 refresh token 在此宽限内再次出现按同机并发轮换复用（同 grant 再签一对）；超过宽限才当泄露整链撤销；`0` = 无宽限 |
-| `COFLUX_SERVER` | `ws://localhost:8787/daemon` | daemon 连接的服务器地址 |
-| `COFLUX_DEVICE_NAME` | `<hostname>` | daemon 登记时的设备名 |
-| `COFLUX_HOME` | `~/.coflux` | daemon 凭证存放目录 |
-| `COFLUX_SHELL` | `$SHELL` | PTY 使用的 shell |
-| `COFLUX_LOCAL_GATEWAY_PORT` | `8788` | loopback Device gateway；`0` 仅供 dev/test 随机端口 |
-| `COFLUX_SERVER_URL` | 打包版 `wss://api.coflux.dev/client`；dev `ws://localhost:8787/client` | 桌面 app 连接的服务器地址（也可 `--server=` 或 userData/settings.json） |
+</details>
 
-## 当前状态
+## Releases and contributing
 
-本地优先 V1 已实现，并有全量真实进程黑盒覆盖 direct/P2P/relay、中心停机、连续输入与
-session create/stop 去重、worker/server restart、VT snapshot oracle、checkpoint、账号隔离与热升级。
-`execRun` 等不可回滚副作用在 worker 崩溃后仍可能结果未知，不能笼统宣称 generic exactly-once。
-历史 benchmark 已达到性能门；每次发布仍需复跑 benchmark 与当前 Chrome 实机门。按
-2026-07-25 的既有决策，Safari/Firefox 暂不作为阻断门且可用性仍属未知；原生 iOS 真机生产
-验收待用户完成。待办见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+Desktop, CLI, and runtime releases share **one version number** and one `vX.Y.Z` tag. Download the desktop app from [GitHub Releases](https://github.com/myWsq/coflux/releases); update both npm commands with `npm install -g cofluxd@latest`.
+
+Bug reports and focused pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before making changes, and use [private vulnerability reporting](https://github.com/myWsq/coflux/security/advisories/new) for security issues.
+
+[Release notes](docs/releases/1.0.0.md) · [Release process](docs/RELEASING.md) · [Roadmap](docs/ROADMAP.md)
+
+## License
+
+[MIT](LICENSE) © 2026 Shuaiqi Wang. Bundled third-party components retain their own licenses.

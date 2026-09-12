@@ -1,3 +1,4 @@
+import { createUpdateInstaller } from "./update-install";
 import { setInterval, setTimeout } from "node:timers";
 import electronUpdater from "electron-updater";
 
@@ -25,7 +26,8 @@ export type UpdaterOptions = {
   /** 打包版才真的检查（electron-updater 对未打包应用直接跳过、不发事件） */
   enabled: boolean;
   /** quitAndInstall 会先关所有窗口：调用方在这里把「正在退出」置位，让窗口的 close 钩子放行 */
-  beforeInstall: () => void;
+  beforeInstall: () => Promise<boolean>;
+  onInstallError: () => void;
 };
 
 /**
@@ -44,6 +46,15 @@ export function createUpdater(options: UpdaterOptions): Updater {
     for (const listener of listeners) listener(state);
   }
 
+  const installer = createUpdateInstaller({
+    beforeInstall: options.beforeInstall,
+    install: () => autoUpdater.quitAndInstall(),
+    onError: (error) => {
+      options.onInstallError();
+      dispatch({ type: "error", message: String(error) });
+    },
+  });
+
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.allowDowngrade = false;
@@ -52,7 +63,10 @@ export function createUpdater(options: UpdaterOptions): Updater {
   autoUpdater.on("download-progress", (progress) => dispatch({ type: "progress", percent: progress.percent }));
   autoUpdater.on("update-downloaded", (info) => dispatch({ type: "downloaded", version: info.version }));
   autoUpdater.on("update-not-available", () => dispatch({ type: "not-available" }));
-  autoUpdater.on("error", (error) => dispatch({ type: "error", message: error?.message || String(error) }));
+  autoUpdater.on("error", (error) => {
+    installer.failed(error);
+    dispatch({ type: "error", message: error?.message || String(error) });
+  });
 
   function checkForUpdates(): void {
     if (!options.enabled) {
@@ -72,8 +86,7 @@ export function createUpdater(options: UpdaterOptions): Updater {
     checkForUpdates,
     installUpdate: () => {
       if (state.status !== "downloaded") return;
-      options.beforeInstall();
-      autoUpdater.quitAndInstall();
+      void installer.install();
     },
     getState: () => state,
     onChange: (listener) => {

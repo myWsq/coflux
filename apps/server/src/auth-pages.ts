@@ -1,14 +1,13 @@
 /**
- * server 直出的三张浏览器页面（plan 107）：设备授权（`/authorize/<token>`）、MCP 宿主 OAuth 同意页
- * （`/oauth/consent?request=`）、端口预览门禁（`/proxy-auth?to=`）。纯 HTML + 内联 CSS + 表单 POST，
+ * server 直出的浏览器页面：设备授权（`/authorize/<token>`）、端口预览门禁（`/proxy-auth?to=`）。纯 HTML + 内联 CSS + 表单 POST，
  * 不需要 JS；链接全部挂在 `config.publicUrl` 下（冻结的线上 web 不再被 server 引用）。
  *
- * 业务核心（凭证校验、待授权 token 的一次性与 TTL、OAuth 决定、预览 code 签发）全部经 AuthPagesHost
- * 调 Hub / OAuthService 的共用方法，与 WS 分支同源；本模块只多出「短命页面会话 + csrf」这一层浏览器语义：
+ * 业务核心（凭证校验、待授权 token 的一次性与 TTL、预览 code 签发）全部经 AuthPagesHost
+ * 调 Hub 的共用方法，与 WS 分支同源；本模块只多出「短命页面会话 + csrf」这一层浏览器语义：
  *
  * - 页面会话：登录成功后签发的内存态（随机 token、TTL 同 authorizeTtlMs、条目有上限、满额拒绝新建），
  *   记 accountId / userId（password 模式才有）。**不写 client_tokens、不签 ck_sess**——用户定的是每次流程都登录，
- *   只保留几分钟。cookie `cf_page` 按流程 Path 隔离（/authorize、/oauth/consent、/proxy-auth），
+ *   只保留几分钟。cookie `cf_page` 按流程 Path 隔离（/authorize、/proxy-auth），
  *   HttpOnly + SameSite=Lax + Max-Age=TTL，publicUrl 为 https 时加 Secure。
  * - csrf：登录前浏览器先拿到一个匿名 nonce cookie（无状态，不占内存），登录后 cookie 换成会话 token；
  *   隐藏字段 csrf = HMAC(进程随机密钥, cookie 值)。攻击者拿不到 HttpOnly cookie、算不出 HMAC，跨站表单必败；
@@ -30,7 +29,7 @@ const log = createLogger("server");
 
 /* ============================ 页面会话 + csrf ============================ */
 
-export type PageFlow = "authorize" | "consent" | "proxy";
+export type PageFlow = "authorize" | "proxy";
 
 export interface PageSession {
   token: string;
@@ -54,7 +53,6 @@ const MAX_TARGET_CHARS = 4_096;
 /** cookie Path 按流程隔离：三张页面各自登录、互不串用，同时开两条流也不会互相覆盖 cookie。 */
 export const FLOW_COOKIE_PATH: Record<PageFlow, string> = {
   authorize: "/authorize",
-  consent: "/oauth/consent",
   proxy: "/proxy-auth",
 };
 
@@ -290,26 +288,6 @@ export function renderAuthorizeConfirm(action: string, csrf: string, device: Pen
   );
 }
 
-export function renderConsentConfirm(
-  action: string,
-  csrf: string,
-  requestId: string,
-  info: { clientName: string; redirectHost: string; scope: string },
-): string {
-  const clientName = info.clientName || "未命名客户端";
-  return (
-    `<div class="msg"><h1>${escapeHtml(clientName)} 请求访问你的 coflux 账号</h1>` +
-    `<p>允许后，该应用可以查看你账号下的设备、项目、工作区与终端内容。</p>` +
-    `<div class="subject"><div class="name">${escapeHtml(clientName)}</div>` +
-    `<div class="meta">授权完成后跳回 ${escapeHtml(info.redirectHost || "应用")}</div>` +
-    (info.scope ? `<div class="meta">scope: ${escapeHtml(info.scope)}</div>` : "") +
-    `</div><form method="post" action="${escapeHtml(action)}">` +
-    `<input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="request" value="${escapeHtml(requestId)}">` +
-    `<button class="btn btn-primary" type="submit" name="decision" value="allow">允许访问</button>` +
-    `<button class="btn btn-secondary" type="submit" name="decision" value="deny">拒绝</button></form></div>`
-  );
-}
-
 /* ============================ Response 构造 ============================ */
 
 const PAGE_HEADERS: Record<string, string> = {
@@ -333,7 +311,7 @@ function redirectResponse(status: 302 | 303, location: string, setCookies: reado
   return new Response(null, { status, headers });
 }
 
-/* ============================ 三条流程 ============================ */
+/* ============================ 两条流程 ============================ */
 
 /** 页面需要的业务能力，由 Hub 结构性满足（依赖倒置，hub.ts → auth-pages.ts 单向 import）。 */
 export interface AuthPagesHost {
@@ -342,10 +320,6 @@ export interface AuthPagesHost {
   describePendingAuthorization(token: string): PendingDeviceInfo | undefined;
   authorizeDevice(token: string, accountId: AccountId): Promise<DeviceAuthorizeOutcome | undefined>;
   issueProxyAuth(accountId: AccountId, redirect: string): ProxyAuthOutcome;
-  readonly oauth: {
-    describePending(requestId: string): { clientName: string; redirectHost: string; scope: string } | undefined;
-    decide(requestId: string, approve: boolean, identity: { accountId: AccountId; userId: string | null }): { redirectUrl: string } | undefined;
-  };
 }
 
 /** handler 交进来的请求：标准 Fetch Request + index.ts 算好的来源地址（只用于登录限速）。 */
@@ -359,13 +333,10 @@ type GuardedPost =
   | { ok: true; form: URLSearchParams; session: PageSession | undefined };
 
 const AUTHORIZE_LOGIN = { title: "授权新设备", description: "先登录你的账号，再确认这台设备的信息", submitLabel: "登录并继续" };
-const CONSENT_LOGIN = { title: "授权应用访问", description: "先登录你的账号，再决定是否允许该应用访问", submitLabel: "登录并继续" };
 const PROXY_LOGIN = { title: "访问端口预览", description: "登录后将安全跳转到该工作区的预览页面", submitLabel: "登录并访问" };
 
 const TOO_MANY_AUTHORIZE = "尝试次数过多，请重新申请授权链接";
-const TOO_MANY_CONSENT = "尝试次数过多，请回到宿主重新发起授权";
 const INVALID_AUTHORIZE = "授权链接无效或已过期";
-const INVALID_CONSENT = "授权请求无效或已过期，请回到宿主重新发起授权";
 
 export class AuthPages {
   readonly sessions: PageSessionStore;
@@ -419,52 +390,6 @@ export class AuthPages {
 
   private authorizeLoginSpec(token: string): LoginFormSpec {
     return { ...AUTHORIZE_LOGIN, action: `${authorizePath(token)}/login` };
-  }
-
-  /* ------------------------------ OAuth 同意页 ------------------------------ */
-
-  async consentPage(req: PageRequest, requestId: string | undefined): Promise<Response> {
-    const id = boundedField(requestId, MAX_ID_CHARS);
-    if (!id) return htmlResponse(400, "授权请求不可用", renderMessage("授权请求不可用", "链接缺少授权请求 id，请回到宿主重新发起授权"));
-    const session = this.currentSession(req, "consent");
-    if (!session) return this.loginPage(req, "consent", this.consentLoginSpec(id));
-    if (session.failures >= config.authorizeMaxFailures) return htmlResponse(429, "授权请求不可用", renderMessage("授权请求不可用", TOO_MANY_CONSENT));
-    const info = this.host.oauth.describePending(id);
-    if (!info) {
-      session.failures += 1;
-      return htmlResponse(404, "授权请求不可用", renderMessage("授权请求不可用", INVALID_CONSENT));
-    }
-    return htmlResponse(200, "授权应用访问", renderConsentConfirm("/oauth/consent/decide", this.sessions.csrfFor(session.token), id, info));
-  }
-
-  async consentLogin(req: PageRequest): Promise<Response> {
-    const peek = await this.guardPost(req, "consent");
-    if (!peek.ok) return peek.response;
-    const id = boundedField(peek.form.get("request"), MAX_ID_CHARS);
-    return this.loginWithForm(req, peek.form, "consent", this.consentLoginSpec(id ?? ""), id ? consentPath(id) : "/oauth/consent");
-  }
-
-  async consentDecide(req: PageRequest): Promise<Response> {
-    const guarded = await this.guardPost(req, "consent");
-    if (!guarded.ok) return guarded.response;
-    const { session, form } = guarded;
-    const id = boundedField(form.get("request"), MAX_ID_CHARS);
-    if (!session) return redirectResponse(303, id ? consentPath(id) : "/oauth/consent");
-    if (!this.sessions.verifyCsrf(session.token, form.get("csrf"))) return this.csrfRejected("授权未完成");
-    const decision = form.get("decision");
-    if (!id || (decision !== "allow" && decision !== "deny")) return htmlResponse(400, "授权未完成", renderMessage("授权未完成", "请求缺少授权请求 id 或决定，请回到宿主重新发起授权"));
-    if (session.failures >= config.authorizeMaxFailures) return htmlResponse(429, "授权未完成", renderMessage("授权未完成", TOO_MANY_CONSENT));
-    const result = this.host.oauth.decide(id, decision === "allow", { accountId: session.accountId, userId: session.userId });
-    if (!result) {
-      session.failures += 1;
-      return htmlResponse(404, "授权未完成", renderMessage("授权未完成", INVALID_CONSENT));
-    }
-    // 允许与拒绝都直接 302 到 server 算出的宿主回调 URL；流程结束，会话作废。
-    return redirectResponse(302, result.redirectUrl, this.endSession(session));
-  }
-
-  private consentLoginSpec(requestId: string): LoginFormSpec {
-    return { ...CONSENT_LOGIN, action: "/oauth/consent/login", hidden: { request: requestId } };
   }
 
   /* ------------------------------ 端口预览门禁 ------------------------------ */
@@ -563,9 +488,6 @@ function authorizePath(token: string): string {
   return `/authorize/${encodeURIComponent(token)}`;
 }
 
-function consentPath(requestId: string): string {
-  return `/oauth/consent?request=${encodeURIComponent(requestId)}`;
-}
 
 function proxyAuthPath(target: string): string {
   return `/proxy-auth?to=${encodeURIComponent(target)}`;

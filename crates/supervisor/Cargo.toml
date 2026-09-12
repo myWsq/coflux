@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 coflux-protocol = { path = "../protocol" }
 portable-pty = "0.8"
+serde.workspace = true
 serde_json.workspace = true
 signal-hook = "0.3"
 libc = "0.2"

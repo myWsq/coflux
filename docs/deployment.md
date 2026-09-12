@@ -1,110 +1,83 @@
-# 生产部署
+# Production deployment
 
-记录生产环境**当前长什么样**。每次变更拓扑的 plan 落地后，回来更新这里——
-plan 记的是"这次改了什么"，这份记的是"现在是什么"。
+This document records **the current production layout**. Update it after every topology-changing plan: plans describe what changed; this document describes what exists now.
 
-发版流程见 [RELEASING.md](RELEASING.md)；架构原理见 [architecture.md](architecture.md)。
+See [RELEASING.md](RELEASING.md) for releases and [architecture.md](architecture.md) for architectural principles.
 
-## 拓扑
+## Topology
 
-三台机，中心只有一个实例（B7 已定的产品形态，见 [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md)）。
+Three machines, with one central instance—the agreed B7 product model in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md).
 
-```
-                     ┌──────────────── owo-jp-gw（日本，45.94.40.233）
-  浏览器 / iOS ──────>│  公网入口：Caddy 终结 TLS，反代回 prod-jp
-  daemon（各用户机器）│  jp relay：coflux-relay:8790（当前空转，中心未派发）
+```text
+                     ┌──────────────── owo-jp-gw (Japan, 45.94.40.233)
+  Browser / iOS ────>│  Public ingress: Caddy TLS termination, proxy to prod-jp
+  Daemons            │  JP relay: coflux-relay:8790 (idle; not currently assigned)
                      └────────┬───────────────────────────────
-                              │ 同机房公网，RTT 1.4ms
+                              │ Same-datacenter public network, RTT 1.4ms
                               v
-                     ┌──────────────── prod-jp（日本，82.40.34.55）
-                     │  中心 coflux-server → 127.0.0.1:8787（不对外）
+                     ┌──────────────── prod-jp (Japan, 82.40.34.55)
+                     │  coflux-server → 127.0.0.1:8787 (not public)
                      │  PostgreSQL 17 → 127.0.0.1:5432
-                     │  Caddy：静态 SPA + 按 Host 路由 + 预览域
+                     │  Caddy: static SPA, Host routing, preview domains
                      └────────────────────────────────────────
 
-                     ┌──────────────── prod-bj（北京，49.232.53.23）
-  daemon ───────────>│  bj relay：coflux-relay:8790（中心当前只派发这个）
+                     ┌──────────────── prod-bj (Beijing, 49.232.53.23)
+  Daemons ──────────>│  BJ relay: coflux-relay:8790 (the only assigned node)
                      └────────────────────────────────────────
 ```
 
-daemon 跑在各用户自己的机器上，不在任何一台服务器（prod-bj 上有一台自用 daemon
-`VM-0-3-ubuntu`，与它的 relay 角色无关）。
+Daemons run on users' machines, not as part of these server roles. prod-bj also hosts the owner's `VM-0-3-ubuntu` daemon, independently of its relay role.
 
-## 域名与线路
+## Domains and routing
 
-**最容易搞混的一点：coflux.dev 下橙云与灰云并存。** 只有泛域名还在 Cloudflare 代理后面。
+**The main source of confusion: coflux.dev mixes proxied and DNS-only Cloudflare records.** Only wildcard routing remains behind Cloudflare's proxy.
 
-| 域名 | A 记录 | CF 代理 | 终点 | 证书 |
+| Domain | A record | Cloudflare proxy | Destination | Certificate |
 | --- | --- | --- | --- | --- |
-| `coflux.dev` | 45.94.40.233 | 灰云 | owo 直接 301 → app | owo，HTTP-01 |
-| `api.coflux.dev` | 45.94.40.233 | 灰云 | owo → prod-jp:8787 | owo，HTTP-01 |
-| `app.coflux.dev` | 45.94.40.233 | 灰云 | owo → prod-jp（SPA + `/client` WS） | owo，HTTP-01 |
-| `m.coflux.dev` | 45.94.40.233 | 灰云 | owo → prod-jp（mobile，已冻结） | owo，HTTP-01 |
-| `*.coflux.dev` | 82.40.34.55 | **橙云** | 直达 prod-jp，端口转发预览域 | prod-jp，**DNS-01** |
-| `www.coflux.dev` | 82.40.34.55 | 橙云 | 无对应 site，落进预览域 block | — |
-| `relay.coflux.dev`<br>`relay-jp.coflux.dev` | 45.94.40.233 | 灰云 | owo 的 relay:8790 | owo，HTTP-01 |
-| `relay-bj.coflux.yourantiandi.com` | 49.232.53.23 | DNSPod 泛解析 | prod-bj 的 relay:8790 | prod-bj |
+| `coflux.dev` | 45.94.40.233 | DNS-only | owo directly returns 301 to app | owo, HTTP-01 |
+| `api.coflux.dev` | 45.94.40.233 | DNS-only | owo → prod-jp:8787 | owo, HTTP-01 |
+| `app.coflux.dev` | 45.94.40.233 | DNS-only | owo → prod-jp SPA + `/client` WS | owo, HTTP-01 |
+| `m.coflux.dev` | 45.94.40.233 | DNS-only | owo → prod-jp frozen mobile | owo, HTTP-01 |
+| `*.coflux.dev` | 82.40.34.55 | **Proxied** | Direct to prod-jp port previews | prod-jp, **DNS-01** |
+| `www.coflux.dev` | 82.40.34.55 | Proxied | No dedicated site; matches preview block | — |
+| `relay.coflux.dev`<br>`relay-jp.coflux.dev` | 45.94.40.233 | DNS-only | owo relay:8790 | owo, HTTP-01 |
+| `relay-bj.coflux.yourantiandi.com` | 49.232.53.23 | DNSPod wildcard | prod-bj relay:8790 | prod-bj |
 
-`api`/`app`/`m` 原本**没有独立记录**、靠泛记录覆盖；2026-09-04（plan 089）新建了独立
-灰云记录（独立优先于泛记录），泛记录保持橙云不动——这也是回滚的退路：删掉这三条，
-泛记录自动接管。
+`api`/`app`/`m` originally had **no dedicated records**, relying on the wildcard. Plan 089 created explicit DNS-only records on 2026-09-04; explicit records override wildcards. The wildcard stayed proxied, providing rollback: delete those three records and the wildcard takes over.
 
-大陆机器（prod-bj）只承载 relay，且用的是备案域名 `yourantiandi.com`；`coflux.dev`
-未备案，不落在大陆 IP 上。
+The mainland machine, prod-bj, hosts only the relay server role and uses the registered domain `yourantiandi.com`. `coflux.dev` has no mainland ICP registration and does not point to mainland IPs.
 
-## prod-jp —— 中心
+## prod-jp: center
 
-`ssh root@prod-jp`。Debian 13，4 核 7.8G。**这台机不是 coflux 独占**，Caddyfile 里还有
-`cchost.cc` / `cchost.ai` / `pa.wsq.cool` 等站点，改配置别误伤。
+Connect with `ssh root@prod-jp`. Debian 13, four cores, 7.8GB. **This host is shared with other projects**: Caddyfile also contains `cchost.cc`, `cchost.ai`, `pa.wsq.cool`, and others. Preserve them when editing.
 
-- 代码 `/opt/coflux`，形态是 **detached HEAD 钉在 tag**（本地 main 落后数百提交且无
-  upstream，`git pull` 不可用）。
-- 中心服务：systemd `coflux-server`，`node --import tsx apps/server/src/index.ts`，
-  只绑 `127.0.0.1:8787`。
-- 数据库：本机 apt PostgreSQL 17，只听 `127.0.0.1`，库/角色均名 `coflux`。
-  每日备份 `/etc/cron.daily/coflux-pg-backup` → `/var/backups/coflux/`（`-Fc`，留 14 份）。
-- 认证 `COFLUX_AUTH=password`（自建 users 表 + scrypt，Supabase 已退役）。
-  建号：`DATABASE_URL=... node --import tsx scripts/create-user.mjs --email .. --password ..`
-- Caddy 上 coflux 的四个站（裸域/api/app/m）用 **`tls internal`**（自签）——它们转灰云后
-  公网 ACME 必然失败；`*.coflux.dev` 仍走 DNS-01 cloudflare 插件，**别动**。
-- MCP / OAuth（plan 090）：`server.env` 里须有 `COFLUX_PUBLIC_URL=https://api.coflux.dev`
-  （issuer 与所有元数据 URL 由它拼，不看请求 Host）。宿主接入地址 `https://api.coflux.dev/mcp`；
-  端点 `/.well-known/oauth-protected-resource[/mcp]`、`/.well-known/oauth-authorization-server`、
-  `/oauth/{register,authorize,token}` 全部随 api 站反代到 8787，无需单独 handle。上线检查：
-  owo-jp-gw 与 prod-jp 的 api 站块没有别的 `.well-known` handle（HTTP-01 只占 `acme-challenge`）。
-  同意页 `api.coflux.dev/oauth/consent` 由 server 直出（plan 107），同样随 api 站反代，不依赖 web。
+- Source: `/opt/coflux`, **detached HEAD pinned to a tag**. Local main is hundreds of commits behind with no upstream; `git pull` is unsuitable.
+- Service: systemd `coflux-server`, running `node --import tsx apps/server/src/index.ts`, bound only to `127.0.0.1:8787`.
+- Database: apt-installed PostgreSQL 17, listening only on `127.0.0.1`, database and role both named `coflux`. Daily `/etc/cron.daily/coflux-pg-backup` writes custom-format (`-Fc`) backups to `/var/backups/coflux/`, retaining 14.
+- Authentication: `COFLUX_AUTH=password`, self-managed users/scrypt; Supabase is retired. Create users with `DATABASE_URL=... node --import tsx scripts/create-user.mjs --email .. --password ..`.
+- The four coflux sites—apex/api/app/m—use **`tls internal`**, since public ACME cannot validate this backend after DNS moves to ingress. `*.coflux.dev` still uses the Cloudflare DNS-01 plugin; **leave it unchanged**.
+- Version 1.0.0 account CLI uses central `/api/client/login` and `/api/client/command`. Desktop and standalone CLI both depend on them; deploy the center before updating 1.0.0 clients. MCP/dedicated OAuth routes are removed; old tables remain through historical migrations. `COFLUX_PUBLIC_URL=https://api.coflux.dev` still serves device authorization and preview pages. Whole-site API proxying needs no Caddy changes.
 
-## owo-jp-gw —— 公网入口 + jp relay
+## owo-jp-gw: public ingress and JP relay
 
-`ssh owo-jp-gw`。Debian 13，2 核。与 prod-jp 同机房（RTT 1.4ms）。**该机压着 9 个其他
-站点**（`zakki.owodns.com` / `cchost.cc` / `open.owo.nz` / `pir.bannin.app` 等），
-动它的 Caddy 就是动这些站。
+Connect with `ssh owo-jp-gw`. Debian 13, two cores, same datacenter as prod-jp with 1.4ms RTT. **Nine other sites share this host**, including `zakki.owodns.com`, `cchost.cc`, `open.owo.nz`, and `pir.bannin.app`. Caddy changes affect them too.
 
-- **三个 IP 绑同一网卡**：`45.94.40.29`（主）、**`45.94.40.233`（入口与 relay 域名现用，
-  认准这个）**、`45.94.40.123`（旧，但 `ifconfig.me` 仍显示它，极易误判）。
-- Caddy **2.6.2**，**不支持 `stream_close_delay`**，勿从 prod-jp 的配置照搬该指令。
-  代价是 reload 会掐断 coflux 的 WS 长连接，daemon 自动重连。
-- **严禁 `caddy add-package` 或升级二进制**——会替换二进制并让那 9 个站一起重启。
-  因此入口四站只能走 HTTP-01（灰云下挑战直达本机），拿不到泛证书，预览域才留在橙云。
-- relay 二进制 `/opt/coflux-relay/coflux-relay`，systemd `coflux-relay`，
-  env `/etc/coflux/relay.env`。**relay 站点严禁开 access_log**（token 在 query string）；
-  入口四站可以开（daemon 的 token 走 WS 消息，不在 URL 里），日志在
-  `/var/log/caddy/coflux-access.log`。
+- **Three IPs share one interface**: primary `45.94.40.29`; **`45.94.40.233`, the current ingress/relay address**; and old `45.94.40.123`, still returned by `ifconfig.me` and easily mistaken for the active address.
+- Caddy **2.6.2 does not support `stream_close_delay`**. Do not copy that directive from prod-jp. Reload therefore disconnects long-lived coflux WebSockets; daemons reconnect automatically.
+- **Do not run `caddy add-package` or upgrade the binary**: replacement restarts all nine other sites. The four ingress sites use HTTP-01 with DNS-only challenges reaching this host. Without wildcard certificates here, previews remain proxied through Cloudflare.
+- Relay binary: `/opt/coflux-relay/coflux-relay`; systemd service `coflux-relay`; environment `/etc/coflux/relay.env`. **Never enable access logs for relay sites**, whose query strings contain tokens. The four ingress sites may log because daemon tokens travel in WS messages, not URLs; logs are at `/var/log/caddy/coflux-access.log`.
 
-## prod-bj —— bj relay
+## prod-bj: Beijing relay
 
-`ssh root@prod-bj`。Ubuntu 24.04，SA3.LARGE8。形态与 jp relay 一致。中心的
-`COFLUX_RELAY_NODES` **当前只派发这一个节点**（jp 那个空转待拆）——原因是 jp 的 IP
-曾被 GFW 干扰而国内不可达，而 daemon 都在国内。
+Connect with `ssh root@prod-bj`. Ubuntu 24.04, SA3.LARGE8, same service layout as JP relay. Central `COFLUX_RELAY_NODES` **currently assigns only this node**; JP is idle pending removal. Its IP previously suffered GFW interference from mainland networks, where the daemons reside.
 
-派发规则：channel 用 daemon 上报的 `homeRelayId`，未上报时回退 `nodes[0]`，
-所以增删节点时**首项必须始终是可达节点**（`apps/server/src/relay-rendezvous.ts`）。
+Channels use daemon-reported `homeRelayId`, falling back to `nodes[0]`. Therefore **the first entry must always remain reachable** when changing the node list; see `apps/server/src/relay-rendezvous.ts`.
 
-也是国内视角的观测点——验证线路时从这台机打，本机家宽可能走代理而失真。
+This is also the mainland observation point. Test routing from here: local residential connections may be proxied and distort results.
 
-## 常规部署
+## Routine deployment
 
-部署只换 server（web/mobile 已冻结，见下一节，不再随代码重建）：
+Deploy server only. Web/mobile are frozen and are not rebuilt with source updates:
 
 ```sh
 ssh root@prod-jp 'cd /opt/coflux && git fetch --tags && git checkout <tag> \
@@ -112,102 +85,73 @@ ssh root@prod-jp 'cd /opt/coflux && git fetch --tags && git checkout <tag> \
   && systemctl restart coflux-server'
 ```
 
-## 浏览器页面由 server 直出（plan 107）
+## Server-rendered browser pages (plan 107)
 
-三条在系统浏览器里完成的流——新机器登记（`cofluxd up` 打印的 `/authorize/<token>`）、MCP 宿主 OAuth 同意页
-（`/oauth/consent`）、端口预览门禁（`/proxy-auth`）——由 server 直出 HTML，地址在 `COFLUX_PUBLIC_URL` 下
-（生产 `https://api.coflux.dev/...`），随 api 站整站反代到 8787，Caddy 无需改动。server 不再生成任何指向
-`app.coflux.dev` 的链接，也不再读任何「web 控制台地址」配置——`server.env` 里旧的那个 web 地址变量已是死变量，
-删掉即可。
+The system-browser flows—device enrollment through `/authorize/<token>` printed by `cofluxd up`, and preview access through `/proxy-auth`—are server-rendered HTML under `COFLUX_PUBLIC_URL`, `https://api.coflux.dev/...` in production. Whole-site API proxying sends them to 8787 without Caddy changes. Server generates no links to `app.coflux.dev` and reads no web-console URL configuration. The old web-address variable in `server.env` is unused and can be removed.
 
-## web 冻结（plan 106）
+## Frozen web clients (plan 106)
 
-`app.coflux.dev` 与 `m.coflux.dev` 继续服务**分割前最后一次构建**：不再更新、不做下载页、`/` 的行为不变。
-它们只剩历史工作台（日常工作台在桌面 app；三张浏览器页面已由 server 承担，见上一节，冻结 bundle 里的旧页面
-仍能手动打开但没有任何链接指向它们）。源码在 git 历史 `ce7026b`（分割基线，含最后一份 web / mobile 子项目源码）；
-生产当前跑的冻结构建对应的 SHA：`e32103b`（2026-09-11 部署，dist/build-id.txt 同值）。
+`app.coflux.dev` and `m.coflux.dev` continue serving **the last pre-split builds**, without updates or conversion to download pages; `/` behavior is unchanged. They are legacy workbenches only. Daily work uses desktop, and server handles the two browser flows above. Old pages in frozen bundles remain manually accessible but have no incoming links. The last web/mobile source is at split baseline `ce7026b`; the currently deployed frozen build corresponds to `e32103b`, deployed 2026-09-11 with matching dist/build-id.txt.
 
-**下一次从分割后的提交部署 prod 之前，必须先做这一步（一次性）。** `git checkout <tag>` 不会清掉被忽略的
-dist（检出目录 `apps/` 下的 `web/dist`、`mobile/dist`），所以冻结站在分割后的检出里会「碰巧」继续活着——但那是靠忽略文件没被清理，
-不是自动兼容：一次 `git clean`、换目录检出、或任何人按新仓库结构整理目录都会让它消失，`COFLUX_BUILD_ID_FILE`
-指的路径也随之失效。把冻结 dist 挪到仓库外的固定目录，Caddy root 与 server.env 指过去：
+**Before the next deployment from a post-split commit, perform this one-time step.** `git checkout <tag>` leaves ignored `apps/web/dist` and `apps/mobile/dist`, so frozen sites may accidentally survive a post-split checkout. That is persistence of ignored files, not automatic compatibility: `git clean`, a fresh checkout directory, or repository cleanup can remove them and invalidate `COFLUX_BUILD_ID_FILE`. Move frozen dist directories outside the repository and point Caddy roots/server.env there:
 
 ```sh
 ssh root@prod-jp 'mkdir -p /opt/coflux-web-frozen \
   && cd /opt/coflux/apps \
   && cp -a web/dist /opt/coflux-web-frozen/app \
   && cp -a mobile/dist /opt/coflux-web-frozen/m'
-# Caddyfile：app.coflux.dev / m.coflux.dev 两个站的 root 改为 /opt/coflux-web-frozen/app 与 /m（`/client` 反代不动）
-#   → caddy validate → systemctl reload caddy
-# /etc/coflux/server.env：
+# Caddyfile: set app.coflux.dev / m.coflux.dev roots to /opt/coflux-web-frozen/app and /m.
+# Keep /client proxying unchanged; run caddy validate, then systemctl reload caddy.
+# /etc/coflux/server.env:
 #   COFLUX_BUILD_ID_FILE=/opt/coflux-web-frozen/app/build-id.txt,/opt/coflux-web-frozen/m/build-id.txt
-#   → systemctl restart coflux-server（server 每次认证现读文件，只有改 env 才需重启）
+# Restart coflux-server after env changes. Build-ID files are reread on each authentication.
 ```
 
-做完后 `/opt/coflux/apps` 里残留的 `web` / `mobile` 目录可以删。冻结 bundle 仍按 build-id 精确准入（server 契约
-未变，plan 105 只放宽了 `client_kind=desktop`），所以 `COFLUX_BUILD_ID_FILE` 要跟着挪：server 读不到文件时静默忽略，
-允许集合为空 + `COFLUX_BUILD_ID` 未设 = 浏览器端的版本检查被整个跳过、任何 build-id 都放行——不是故障，但准入门就没了。
+Then remove leftover `web` / `mobile` directories under `/opt/coflux/apps`. Frozen bundles still require exact build-ID admission; plan 105 changed only `client_kind=desktop`. Move `COFLUX_BUILD_ID_FILE` with them. Unreadable files are silently ignored: an empty allow-set with unset `COFLUX_BUILD_ID` skips browser version checks entirely, accepting any build ID. It does not crash, but removes admission enforcement.
 
-**桌面版准入（plan 105）**：桌面按控制面协议版本准入，不看 build-id，部署 prod 不需要与 `desktop-v*` 对齐、
-不会踢在线桌面版；只有破坏性协议改动那次要先发桌面版再部署（见 [RELEASING.md](RELEASING.md)）。
+**Desktop admission (plan 105)** uses control-protocol version, not build ID. Production need not match client-release SHA and does not disconnect online desktop versions. Only breaking protocols require desktop release before deployment; see [RELEASING.md](RELEASING.md).
 
-改 Caddy：编辑 → `caddy validate` → `systemctl reload caddy`。
-在 prod-jp 上 validate 必须先 `set -a; . /etc/caddy/cloudflare.env; set +a`，
-否则拿不到 systemd 注入的 env，会报 `API token '' appears invalid` 假警报。
+For Caddy changes: edit, run `caddy validate`, then `systemctl reload caddy`. On prod-jp, first load systemd's environment with `set -a; . /etc/caddy/cloudflare.env; set +a`; otherwise validation falsely reports `API token '' appears invalid`.
 
-验证：
+Verification:
 
 ```sh
-curl -sS -o /dev/null -w "%{http_code}\n" https://app.coflux.dev/    # 200（api 根路径 404 属正常）
-# WS 必须强制 HTTP/1.1，h2 下升级不成立会误报 404
+curl -sS -o /dev/null -w "%{http_code}\n" https://app.coflux.dev/    # 200; API root 404 is normal
+# Force HTTP/1.1 for WS; h2 cannot perform this upgrade and misleadingly returns 404.
 curl -i --http1.1 -H "Connection: Upgrade" -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
   https://app.coflux.dev/client                                      # 101
 ssh root@prod-bj 'curl -sS -o /dev/null -w "ttfb=%{time_starttransfer}\n" https://app.coflux.dev/'
 ```
 
-端到端冒烟：`scripts/prod-smoke.mjs`（走真协议与独立 relay 路径）。
+End-to-end smoke: `scripts/prod-smoke.mjs`, using the real protocol and independent relay path.
 
-## 秘密
+## Secrets
 
-只记位置与类型，值一律不入库。
+Record only locations/types, never values.
 
-| 位置 | 内容 |
+| Location | Contents |
 | --- | --- |
-| prod-jp `/etc/coflux/server.env`（600） | `DATABASE_URL`（含库密码）、`COFLUX_RELAY_SIGNING_KEY`（rendezvous 签名种子）；非秘密但必须在：`COFLUX_PUBLIC_URL=https://api.coflux.dev`、`COFLUX_INBOUND_QUEUE_MAX_MESSAGES=1024` |
-| prod-jp `/etc/coflux/pg-coflux.pass`（600） | PG 角色口令 |
-| prod-jp `/etc/caddy/cloudflare.env`（600） | CF API token，**仅 coflux.dev zone 的 DNS 编辑权限**——读 zone settings（如 SSL 模式）会返回 `9109 Unauthorized` |
-| relay 节点 `/etc/coflux/relay.env` | `COFLUX_RELAY_PUBKEY`（验签公钥，非秘密） |
+| prod-jp `/etc/coflux/server.env` (600) | `DATABASE_URL` with database password; rendezvous signing seed `COFLUX_RELAY_SIGNING_KEY`. Required non-secret settings: `COFLUX_PUBLIC_URL=https://api.coflux.dev` and `COFLUX_INBOUND_QUEUE_MAX_MESSAGES=1024`. |
+| prod-jp `/etc/coflux/pg-coflux.pass` (600) | PostgreSQL role password |
+| prod-jp `/etc/caddy/cloudflare.env` (600) | Cloudflare API token with **DNS edit permission only for the coflux.dev zone**. Reading zone settings such as SSL mode returns `9109 Unauthorized`. |
+| Relay nodes `/etc/coflux/relay.env` | `COFLUX_RELAY_PUBKEY`, a non-secret verification public key |
 
-relay 密钥轮换顺序：换中心 seed → 同步新公钥到各 relay 的 `relay.env` → 重启两端
-（当前单公钥实现，窗口内 relay 短暂不可用）。
+Relay-key rotation: replace the central seed, distribute the new public key to every relay.env, then restart both ends. The current single-public-key implementation has a brief relay outage during transition.
 
-## 回滚
+## Rollback
 
-**入口链路**（受 DNS TTL≈300s 约束，不再是橙云改源站的秒级生效）：
-删掉 `api`/`app`/`m` 三条 A 记录（泛记录自动接管）→ 裸域改回 `82.40.34.55` + 橙云 →
-撤掉 prod-jp 四站的 `tls internal`。
+**Ingress routing**, subject to roughly 300-second DNS TTL rather than near-instant proxied origin changes: delete the `api`/`app`/`m` A records so the wildcard takes over, restore apex to `82.40.34.55` with proxying, then remove `tls internal` from prod-jp's four sites.
 
-**代码**：`git checkout` 回上一个 tag，重装依赖重启 server（冻结的 web 不参与回滚）。
+**Code**: check out the previous tag, reinstall dependencies, and restart server. Frozen web builds do not participate.
 
-## 坑
+## Pitfalls
 
-- **回源必须同时写 `header_up Host {host}` 和 `transport http { tls_server_name {host} }`。**
-  Caddy 反代到 `https://<IP>` 时 TLS SNI 默认取上游 IP，prod-jp 没有匹配 IP 的 site，
-  握手直接失败、上游报 **502**。`header_up Host` 只改 HTTP 头，改不了 SNI。
-- **`coflux.dev` 裸域必须有人持证书**，否则 CF 回源 SNI 握手报 **525**。prod-jp 上那个
-  只做 301 的 block，存在意义就是持证书，别因为"只是个跳转"而省掉。
-- **`app.coflux.dev` 的 `/client` 反代不能丢**：冻结的 web 前端连同源 `wss://{location.host}/client`，
-  漏了这段授权页/同意页会一直卡"连接中"。重写 Caddyfile 时最容易丢。
-- **ICMP 不是判据**：prod-jp 与 owo-jp-gw 都 ping 不通，但 TCP 正常。判连通性用 TCP。
-- **本机家宽测线路会失真**：Surge 等工具的 TUN 会接管流量，DNS 返回 `198.18.x.x` fake-IP、
-  `nc` 报 OPEN 都是假象。国内视角一律从 prod-bj 打。
-- **发版后 worker 不投递**先查 `COFLUX_AUTOUPDATE_REPO` 是否被注释掉了（有过前科）。
-- **daemon 认证后 2 秒一轮断连重连（`WS 入站队列超过硬上限`）**：v0.29.0 起 server 对每条 WS 连接有入站
-  待处理条数上限（`COFLUX_INBOUND_QUEUE_MAX_MESSAGES`，代码默认 64）。大 daemon（Home：13 工作区 / 21 任务）
-  认证后一口气回报 workspaceBranch/Diff/DefaultBranch、catalog、checkpoint 等 65+ 条，server 逐条 await DB 来不及
-  排空就被判超限断开，daemon 重连再来一遍，形成死循环（2026-09-05 首次把 v0.29.0+ 部署到生产时撞上）。
-  生产 `server.env` 已设 `COFLUX_INBOUND_QUEUE_MAX_MESSAGES=1024`（字节上限 16MB 不变）止血；根因（认证后突发
-  与逐条 await 的排空速度不匹配）待另立 plan 收口，别把这个 env 删掉。
-- 中心轮询 GitHub Release 做升级编排；若中心迁到大陆需注意该链路，
-  `COFLUX_AUTOUPDATE_API_BASE` 可指向镜像。
+- **Set both `header_up Host {host}` and `transport http { tls_server_name {host} }` when proxying to the origin.** With `https://<IP>`, Caddy otherwise uses the IP as TLS SNI. prod-jp has no matching IP site, so handshake fails and the proxy returns **502**. Host headers do not change SNI.
+- **The apex `coflux.dev` must have a certificate holder**, or Cloudflare origin SNI fails with **525**. prod-jp's redirect-only block exists to hold that certificate; do not remove it merely because it returns 301.
+- **Keep `/client` proxying on `app.coflux.dev`.** Frozen web connects to same-origin `wss://{location.host}/client`; omission leaves its authorization/consent pages stuck connecting. This is easy to lose in a Caddyfile rewrite.
+- **ICMP is not a connectivity test here**: prod-jp and owo-jp-gw do not answer ping but work over TCP. Test TCP.
+- **Residential local routing measurements can mislead**: Surge/TUN may intercept traffic, returning `198.18.x.x` fake IPs and misleading `nc` OPEN results. Use prod-bj for mainland observations.
+- **Worker updates not dispatched after release**: first check whether `COFLUX_AUTOUPDATE_REPO` was commented out; this has happened before.
+- **Daemon reconnects every two seconds after authentication**, with literal diagnostic `WS 入站队列超过硬上限`: since v0.29.0, server limits pending incoming messages per WS via `COFLUX_INBOUND_QUEUE_MAX_MESSAGES`, default 64. A large daemon such as Home (13 workspaces, 21 tasks) reports 65+ workspaceBranch/Diff/DefaultBranch, catalog, and checkpoint messages immediately after auth. Per-message awaited database operations cannot drain them quickly enough, so server disconnects and reconnect repeats the burst indefinitely. This occurred on first production deployment of v0.29.0+ on 2026-09-05. Production now sets `COFLUX_INBOUND_QUEUE_MAX_MESSAGES=1024`, retaining the 16MB byte limit. Root-cause work on burst/drain mismatch needs a separate plan; do not remove this setting.
+- Center polls GitHub Releases for upgrades. If moved to mainland China, assess that route; `COFLUX_AUTOUPDATE_API_BASE` can point to a mirror.

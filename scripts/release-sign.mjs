@@ -11,6 +11,7 @@ import { join } from "node:path";
 import {
   assertReleaseVersion,
   supervisorReleaseStatement,
+  cliReleaseStatement,
   workerReleaseStatement,
 } from "./release-statement.mjs";
 
@@ -82,6 +83,25 @@ for (const name of readdirSync(dir)) {
     releaseSignature,
   };
   targetsByComponent.supervisor.add(target);
+}
+
+// The CLI embeds the integration and is independently domain-separated from daemon artifacts.
+const cliNames = readdirSync(dir).filter((name) => name.startsWith("coflux-cli-") && !name.includes("."));
+if (cliNames.length) {
+  manifest.cli = {};
+  for (const name of cliNames) {
+    const target = name.slice("coflux-cli-".length);
+    const data = readFileSync(join(dir, name));
+    const sha256 = crypto.createHash("sha256").update(data).digest("hex");
+    const size = data.byteLength;
+    const releaseSignature = crypto.sign(null, cliReleaseStatement({ version, target, sha256, size }), key).toString("hex");
+    writeFileSync(join(dir, `${name}.release.sig`), releaseSignature);
+    sums.push(`${sha256}  ${name}`);
+    manifest.cli[target] = { target, sha256, size, releaseSignature, url: `https://github.com/${repo}/releases/download/${version}/${name}` };
+  }
+  if (Object.keys(manifest.cli).sort().join("\n") !== [...targetsByComponent.worker].sort().join("\n")) {
+    throw new Error("CLI targets must match worker targets");
+  }
 }
 
 const workerTargets = [...targetsByComponent.worker].sort();

@@ -1,13 +1,16 @@
 {
   "name": "cofluxd",
-  "version": "0.15.0",
-  "description": "coflux daemon 管理 CLI：装/起/停/升级 Rust daemon（supervisor + worker）",
+  "version": "1.1.0",
+  "description": "Coflux 无界面宿主（cofluxd）与统一操作工具（coflux）",
   "type": "module",
   "bin": {
-    "cofluxd": "cofluxd.mjs"
+    "cofluxd": "cofluxd.mjs",
+    "coflux": "coflux.mjs"
   },
   "files": [
     "cofluxd.mjs",
+    "coflux.mjs",
+    "account-client.mjs",
     "release-pubkey.hex",
     "release-trust.mjs",
     "README.md",

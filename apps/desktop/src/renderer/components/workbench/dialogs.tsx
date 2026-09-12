@@ -1,15 +1,60 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useId, useState, type FormEvent } from "react";
 import { TerminalSquare } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import { CodeBlock } from "@astryxdesign/core/CodeBlock";
 import { Dialog as AstryxDialog, DialogHeader as AstryxDialogHeader } from "@astryxdesign/core/Dialog";
+import { Heading } from "@astryxdesign/core/Heading";
 import { Icon } from "@astryxdesign/core/Icon";
 import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from "@astryxdesign/core/Layout";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 
 import { SHORTCUT_MODIFIERS } from "@/components/workbench/shortcut-modifier";
+
+/** 底栏按钮里的键位提示（Cursor 式）：按钮内、紧跟文字的弱化小字，不是键帽方块。
+ * 纯装饰——真正的键位行为由 Dialog 的 Esc 处理、表单的 submit 或动作按钮的焦点承担——读屏忽略。 */
+function KeyHint({ label }: { label: string }) {
+  return (
+    <span aria-hidden className="text-xs opacity-60">
+      {label}
+    </span>
+  );
+}
+
+type FooterAction = {
+  label: string;
+  onClick: () => void;
+  /** 默认 primary；确认框的删除类动作用 destructive。 */
+  variant?: "primary" | "destructive";
+  isDisabled?: boolean;
+  /** 打开即聚焦到这个按钮，原生 Enter/Space 即触发（Dialog 只认第一个 data-autofocus）。
+   * 表单弹窗不要开：焦点必须留在输入框，Enter 走 form submit。 */
+  hasAutofocus?: boolean;
+};
+
+/** 五个弹窗共用的底栏：分割线、右对齐、sm 尺寸；ghost「取消」带 Esc，动作按钮带 ↵。 */
+function DialogFooterActions(props: { onCancel?: () => void; action: FooterAction }) {
+  const { action } = props;
+  return (
+    <LayoutFooter hasDivider>
+      <HStack gap={2} hAlign="end">
+        {props.onCancel ? (
+          <AstryxButton label="取消" variant="ghost" size="sm" endContent={<KeyHint label="Esc" />} onClick={props.onCancel} />
+        ) : null}
+        <AstryxButton
+          label={action.label}
+          variant={action.variant ?? "primary"}
+          size="sm"
+          endContent={<KeyHint label="↵" />}
+          onClick={action.onClick}
+          isDisabled={action.isDisabled}
+          data-autofocus={action.hasAutofocus ? "true" : undefined}
+        />
+      </HStack>
+    </LayoutFooter>
+  );
+}
 
 type WorkspaceRenameDialogProps = {
   workspace: Workspace | null;
@@ -58,14 +103,7 @@ export function WorkspaceRenameDialog(props: WorkspaceRenameDialogProps) {
             </form>
           </LayoutContent>
         }
-        footer={
-          <LayoutFooter hasDivider={false}>
-            <HStack gap={2} hAlign="end">
-              <AstryxButton label="取消" variant="secondary" onClick={() => props.onOpenChange(false)} />
-              <AstryxButton label="保存" variant="primary" onClick={save} />
-            </HStack>
-          </LayoutFooter>
-        }
+        footer={<DialogFooterActions onCancel={() => props.onOpenChange(false)} action={{ label: "保存", onClick: save }} />}
       />
     </AstryxDialog>
   );
@@ -123,14 +161,7 @@ export function DeviceRenameDialog(props: DeviceRenameDialogProps) {
             </form>
           </LayoutContent>
         }
-        footer={
-          <LayoutFooter hasDivider={false}>
-            <HStack gap={2} hAlign="end">
-              <AstryxButton label="取消" variant="secondary" onClick={() => props.onOpenChange(false)} />
-              <AstryxButton label="保存" variant="primary" onClick={save} isDisabled={isSaveDisabled} />
-            </HStack>
-          </LayoutFooter>
-        }
+        footer={<DialogFooterActions onCancel={() => props.onOpenChange(false)} action={{ label: "保存", onClick: save, isDisabled: isSaveDisabled }} />}
       />
     </AstryxDialog>
   );
@@ -186,14 +217,7 @@ export function ProjectRenameDialog(props: ProjectRenameDialogProps) {
             </form>
           </LayoutContent>
         }
-        footer={
-          <LayoutFooter hasDivider={false}>
-            <HStack gap={2} hAlign="end">
-              <AstryxButton label="取消" variant="secondary" onClick={() => props.onOpenChange(false)} />
-              <AstryxButton label="保存" variant="primary" onClick={save} isDisabled={isSaveDisabled} />
-            </HStack>
-          </LayoutFooter>
-        }
+        footer={<DialogFooterActions onCancel={() => props.onOpenChange(false)} action={{ label: "保存", onClick: save, isDisabled: isSaveDisabled }} />}
       />
     </AstryxDialog>
   );
@@ -235,13 +259,7 @@ export function EnrollmentDialog(props: EnrollmentDialogProps) {
             </VStack>
           </LayoutContent>
         }
-        footer={
-          <LayoutFooter hasDivider={false}>
-            <HStack gap={2} hAlign="end">
-              <AstryxButton label="完成" variant="primary" onClick={() => props.onOpenChange(false)} />
-            </HStack>
-          </LayoutFooter>
-        }
+        footer={<DialogFooterActions action={{ label: "完成", onClick: () => props.onOpenChange(false), hasAutofocus: true }} />}
       />
     </AstryxDialog>
   );
@@ -305,30 +323,47 @@ export function ShortcutsHelpDialog(props: { open: boolean; onOpenChange: (open:
   );
 }
 
+/** 确认框（Cursor 式 alertdialog）：无标题栏无 ×，标题 + 弱化说明；Esc 取消、Enter 执行、点遮罩不关。
+ * 打开即聚焦到红色动作按钮——Enter 直接删除是有意为之，代价高的动作靠文案说清，不改回焦点给取消。 */
 export function ConfirmActionDialog(props: { action: ConfirmAction | null; onCancel: () => void }) {
+  const titleId = useId();
+  const descriptionId = useId();
   return (
-    <AstryxDialog isOpen={Boolean(props.action)} onOpenChange={(open) => !open && props.onCancel()} width={400}>
+    <AstryxDialog
+      isOpen={Boolean(props.action)}
+      onOpenChange={(open) => !open && props.onCancel()}
+      purpose="form"
+      role="alertdialog"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+      width={400}
+    >
       <Layout
-        header={<AstryxDialogHeader title={props.action?.title ?? ""} onOpenChange={(open) => !open && props.onCancel()} hasDivider={false} />}
         content={
           <LayoutContent>
-            <Text type="body">{props.action?.description}</Text>
+            <VStack gap={2} hAlign="stretch">
+              <Heading level={2} id={titleId}>
+                {props.action?.title ?? ""}
+              </Heading>
+              <Text type="body" color="secondary" id={descriptionId}>
+                {props.action?.description}
+              </Text>
+            </VStack>
           </LayoutContent>
         }
         footer={
-          <LayoutFooter hasDivider={false}>
-            <HStack gap={2} hAlign="end">
-              <AstryxButton label="取消" variant="secondary" onClick={() => props.onCancel()} />
-              <AstryxButton
-                label={props.action?.confirmLabel ?? "确认"}
-                variant="destructive"
-                onClick={() => {
-                  props.action?.onConfirm();
-                  props.onCancel();
-                }}
-              />
-            </HStack>
-          </LayoutFooter>
+          <DialogFooterActions
+            onCancel={props.onCancel}
+            action={{
+              label: props.action?.confirmLabel ?? "确认",
+              variant: "destructive",
+              hasAutofocus: true,
+              onClick: () => {
+                props.action?.onConfirm();
+                props.onCancel();
+              },
+            }}
+          />
         }
       />
     </AstryxDialog>

@@ -50,14 +50,14 @@ test("coflux 项目会话里 git worktree remove/move 被 deny，理由可操作
     assert.equal(decision.hookSpecificOutput.permissionDecision, "deny", command);
     const reason = decision.hookSpecificOutput.permissionDecisionReason;
     assert.match(reason, /proj-123/, "理由要带项目 id，agent 能直接填");
-    assert.match(reason, /remove_workspace/, "理由要指向替代做法");
+    assert.match(reason, /coflux workspace remove/, "理由要指向替代做法");
   }
   const remove = JSON.parse((await run(bash("git worktree remove ../feat"), IN_PROJECT)).stdout);
   const removeReason = remove.hookSpecificOutput.permissionDecisionReason;
-  assert.match(removeReason, /remove_workspace/);
+  assert.match(removeReason, /coflux workspace remove/);
   assert.match(removeReason, /orphan/i, "理由要说清为什么不能手工删：留下孤儿记录");
   const move = JSON.parse((await run(bash("git worktree move ../a ../b"), IN_PROJECT)).stdout);
-  assert.match(move.hookSpecificOutput.permissionDecisionReason, /remove_workspace/);
+  assert.match(move.hookSpecificOutput.permissionDecisionReason, /coflux workspace remove/);
 });
 
 test("plan 104：git worktree add 一律放行——coflux 会跟着 agent 进去，不再需要拦", async () => {
@@ -97,7 +97,7 @@ test("插件配置：hooks.json 含 matcher=Bash 的条目引用该脚本，版�
   assert.match(guard.hooks[0].command, /\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/guard-git-worktree\.mjs/);
   assert.match(guard.hooks[0].command, /command -v node/, "缺 node 要静默放行");
   const messenger = hooks.hooks.PreToolUse.find((entry) => entry.matcher === undefined);
-  assert.ok(messenger && /cofluxd hook claude/.test(messenger.hooks[0].command), "既有信使条目不能动");
+  assert.ok(messenger && /coflux hook claude/.test(messenger.hooks[0].command), "既有信使条目不能动");
   const manifest = JSON.parse(readFileSync(`${ROOT}integrations/claude-plugin/.claude-plugin/plugin.json`, "utf8"));
   const [major, minor] = manifest.version.split(".").map(Number);
   assert.ok(major > 0 || minor >= 4, `插件版本必须 ≥ 0.4.0: ${manifest.version}`);

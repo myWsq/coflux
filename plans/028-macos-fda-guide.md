@@ -1,4 +1,4 @@
-# Plan 028: macOS 完全磁盘访问权限（FDA）检测 + 引导流程
+# Plan 028: macOS Full Disk Access (FDA) detection and setup guidance
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -21,76 +21,76 @@
 
 ## Requirement
 
-daemon 在 macOS 上以 LaunchAgent 后台运行，PTY 子进程（shell/agent）访问桌面、文稿、下载等 TCC 保护目录时，系统会弹出目录授权窗；用户往往不在电脑前，弹窗没人点，操作挂起或失败。一次性授予 supervisor 二进制「完全磁盘访问权限」（FDA）后，整个进程树永久免弹。
+On macOS, the daemon runs as a background LaunchAgent. PTY child processes accessing TCC-protected Desktop, Documents, or Downloads can trigger folder-permission dialogs while the user is away, hanging or failing operations. Granting Full Disk Access (FDA) once to the supervisor binary prevents repeated prompts throughout its process tree.
 
-但 macOS **没有任何 API 能程序化弹出 FDA 授权窗**（Apple 刻意设计），产品能做的上限是：检测 + 跳转系统设置 + 引导用户手动添加。本计划把这条引导链做进 daemon 与 cofluxd CLI：
+macOS intentionally exposes no API to request FDA programmatically. The product can only detect access, open System Settings, and guide manual approval. Integrate this guidance into the daemon and cofluxd CLI.
 
-完成后为真：
+Required outcomes:
 
-1. macOS 上 supervisor 启动时探测自身是否具备 FDA，结果落地为 `COFLUX_HOME` 下的状态文件；
-2. `cofluxd status` 在 macOS 上多显示一行 FDA 授权状态（已授予/未授予/未知）；
-3. 新增 `cofluxd fda` 子命令：打印引导文案、打开系统设置 FDA 面板、在 Finder 中高亮 supervisor 二进制，等待用户完成后重启服务使授权生效；
-4. `onboard`/`up` 完成时若检测到未授权（macOS），追加一行提示指向 `cofluxd fda`；
-5. Linux 行为完全不变。
+1. When the supervisor on macOS starts, it detects whether it has FDA, and the result is the status file under `COFLUX_HOME`;
+2. `cofluxd status` displays one more line of FDA authorization status (granted/not granted/unknown) on macOS;
+3. Added `cofluxd fda` subcommand: print the instructions, open the system settings FDA panel, highlight the supervisor binary in Finder, wait for the user to complete and restart the service to make the authorization effective;
+4. If access has not been granted when `onboard`/`up` is completed (macOS), add a line of prompts pointing to `cofluxd fda`;
+5. Linux behavior is completely unchanged.
 
-正确/错误解的分界：检测必须发生在 **supervisor 进程内**——在 CLI（node）里试读保护路径测出来的是终端 App 的 TCC 权限，属于典型的错误解。
+The demarcation between correct/wrong solutions: The detection must occur within the **supervisor process** - What is measured by reading the protected path in the CLI (node) is the TCC permissions of the terminal App, which is a typical wrong solution.
 
 ## Decisions & tradeoffs
 
-- **探测主体**: supervisor 进程启动时探测（`#[cfg(target_os = "macos")]`）。Rejected: cofluxd CLI 直接试读保护路径 —— CLI 由终端启动，TCC 归属（responsible process）是 Terminal/iTerm，测的是终端的权限而非 daemon 的，结果必然失真。Based on: LaunchAgent 直接执行 `SUP_BIN`，`packages/cli/cofluxd.mjs:107-124`。
-- **探测方法**: 试读纯 FDA 保护路径 `$HOME/Library/Safari`（如 `read_dir`），成功=已授予，`PermissionDenied`=未授予，其他错误（如目录不存在）=未知。Rejected: 探测桌面/文稿/下载 —— 这些是 per-folder TCC 目录，探测本身会触发授权弹窗，恰是本需求要消灭的东西。注意 `$HOME` 是真实用户 home，不是 `COFLUX_HOME`（supervisor 里两者独立，`crates/supervisor/src/main.rs:46`）。
-- **状态通道**: supervisor 把探测结果写成 `COFLUX_HOME` 下的状态文件，CLI 读文件展示。Rejected: UDS 查询接口 —— 现有 CLI↔daemon 无查询通道，先例就是文件（`worker.pid`，写端 `crates/worker/src/main.rs:201`，读端 `packages/cli/cofluxd.mjs:280`），为一个布尔状态加 RPC 属过度设计。文件名与格式由执行者定，保持与现有先例同风格即可。
-- **`cofluxd fda` 的行为**: 引导文案 + `open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"` + `open -R <SUP_BIN>`（Finder 高亮，便于拖入设置列表；`~/.coflux` 是隐藏目录，用户手动导航困难）+ 提示用户完成添加后按回车 → 重启服务（复用现有 `restartService()`，`packages/cli/cofluxd.mjs:154-157`）。Rejected: 授权后不重启 —— FDA 对已运行进程不生效，必须重启 supervisor；Rejected: 任何「自动写 TCC.db / tccutil 授权」的尝试 —— 不存在合法途径。非 macOS 平台运行 `cofluxd fda` 直接提示仅 macOS 可用并退出。
-- **授权对象的文案**: 引导用户添加的是 supervisor 二进制（`~/.coflux/bin/coflux-supervisor`）。worker/PTY/agent 都是它的子进程，TCC 按 launchd 服务的 responsible process 归属，一次授权覆盖全树（同 sshd 模式）；文案不得让用户去添加 cofluxd、node 或终端 App。Based on: plist `ProgramArguments` 只有 `SUP_BIN`，`packages/cli/cofluxd.mjs:112-114`。
-- **未授权提示的触达点**: `status` 常驻显示 + `onboard`/`up` 结束时一行提示。探测结果文件由 supervisor 启动后才产生，CLI 读不到文件时显示「未知」并同样指向 `cofluxd fda`，不阻塞任何流程。Rejected: 上报 server / web 设备页警告 —— 多改协议/server/web 三处，当前无此需要，需要时另立计划。
+- **Detect inside the supervisor** at startup under `#[cfg(target_os = "macos")]`. Rejected: probing protected paths in the CLI, which measures Terminal/iTerm permissions as the responsible process rather than the daemon’s. LaunchAgent directly executes `SUP_BIN` (`packages/cli/cofluxd.mjs:107-124`).
+- **Probe an FDA-only protected path** such as `$HOME/Library/Safari` with `read_dir`: success means granted, `PermissionDenied` means not granted, and other errors such as missing directory mean unknown. Rejected: probing Desktop/Documents/Downloads, whose per-folder TCC dialogs would recreate the problem. `$HOME` is the real user home, distinct from `COFLUX_HOME` (`crates/supervisor/src/main.rs:46`).
+- **Status file**: supervisor writes the result under `COFLUX_HOME`; CLI reads and displays it. Rejected: a new UDS query API for a Boolean state. Existing CLI/daemon status already uses files, such as `worker.pid` (`crates/worker/src/main.rs:201`, `packages/cli/cofluxd.mjs:280`). The executor chooses filename/format consistent with existing conventions.
+- **`cofluxd fda`**: print guidance, run `open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"`, and `open -R <SUP_BIN>` to reveal the binary for dragging into settings (`~/.coflux` is hidden). Ask the user to press Enter after adding it, then reuse `restartService()` (`packages/cli/cofluxd.mjs:154-157`). Restart is required because FDA does not affect an already-running supervisor. Reject attempts to write TCC.db or authorize through tccutil; no supported mechanism exists. On other platforms, explain that FDA is macOS-only and exit.
+- **Identify the correct binary**: instruct users to add `~/.coflux/bin/coflux-supervisor`, not cofluxd, Node, or the terminal app. Worker/PTY/agent processes descend from the launchd service’s responsible process, so one approval covers the tree, as with sshd. The plist’s `ProgramArguments` contains only `SUP_BIN` (`packages/cli/cofluxd.mjs:112-114`).
+- **Prompt locations**: always show status in `status`, and add one line at the end of `onboard`/`up` when needed. The file appears only after supervisor startup; if unreadable, show Unknown and point to `cofluxd fda` without blocking. Rejected: server/web device warnings, which would require protocol/server/web changes without a current requirement.
 
 ## Direction
 
-两处改动，无共享边界，单计划串行完成即可。
+Two changes, no shared boundaries, can be completed serially in a single plan.
 
-### Milestone 1: supervisor 启动探测 FDA 并落地状态文件
+### Milestone 1: supervisor starts detecting FDA and writes status file
 
-macOS 上 supervisor 启动时（`crates/supervisor/src/main.rs` 的 `main` 早期、`Settings::load` 之后即可）探测 FDA 并写状态文件到 `COFLUX_HOME`；探测失败或非 macOS 不写/写「未知」均可，但不得影响启动流程（探测与写入全程不 panic、不阻塞）。Validation: `cargo build -p coflux-supervisor` -> exit 0；`cargo test -p coflux-protocol` -> exit 0（回归）。
+Early in macOS supervisor `main`, after `Settings::load` (`crates/supervisor/src/main.rs`), probe FDA and write its status under `COFLUX_HOME`. Probe failure and non-macOS paths may omit the file or write unknown, but detection/writing must neither panic nor block startup. Validation: `cargo build -p coflux-supervisor` and regression `cargo test -p coflux-protocol` exit 0.
 
-### Milestone 2: cofluxd CLI —— status 展示 + fda 子命令 + onboard/up 提示
+### Milestone 2: cofluxd CLI - status display + fda subcommand + onboard/up prompt
 
-`packages/cli/cofluxd.mjs`：`cmdStatus` 读状态文件加一行（仅 `IS_MAC`）；新增 `cmdFda` 并注册进 handlers 表（`packages/cli/cofluxd.mjs:338`）与 HELP 文案（`packages/cli/cofluxd.mjs:302` 起）；`onboard`/`up` 尾部按状态文件追加提示。CLI 是零依赖单文件 node 脚本，保持现有风格（`run()` 起子进程、中文文案、无新依赖）。Validation: `node --check packages/cli/cofluxd.mjs` -> exit 0。
+In `packages/cli/cofluxd.mjs`, `cmdStatus` reads the file and adds a line only under `IS_MAC`; add `cmdFda` to handlers (`packages/cli/cofluxd.mjs:338`) and HELP (from `packages/cli/cofluxd.mjs:302`). Add final `onboard`/`up` prompts based on status. Preserve the historical zero-dependency single-file Node style, `run()` subprocess helper, and Chinese UI copy. Validation: `node --check packages/cli/cofluxd.mjs` exits 0.
 
 ## Landmines
 
-- CLI 与 supervisor 对 home 的解析必须一致：CLI 用 `COFLUX_HOME || ~/.coflux`（`packages/cli/cofluxd.mjs:16`），supervisor 相同（`crates/supervisor/src/main.rs:46`）；状态文件两端路径拼法要对齐，否则 status 永远「未知」。
-- 探测路径必须用真实 `$HOME`（`std::env::var("HOME")`），不能用 `COFLUX_HOME`——dev 模式下 `COFLUX_HOME` 指向 `$PWD/.coflux-dev`（`package.json:10`），其下没有 `Library/Safari`。
-- `launchctl unload` + `load` 是现有重启方式（`packages/cli/cofluxd.mjs:155`）；`cofluxd fda` 复用 `restartService()`，不要另造 launchctl 调用。
-- 探测结果是启动时快照：用户授权后未重启前，状态文件仍显示未授予——这是预期行为（FDA 本就要求重启生效），文案里说清楚即可。
+- The parsing of home by CLI and supervisor must be consistent: CLI uses `COFLUX_HOME || ~/.coflux` (`packages/cli/cofluxd.mjs:16`), supervisor uses the same (`crates/supervisor/src/main.rs:46`); the path spellings at both ends of the status file must be aligned, otherwise the status will always be "unknown".
+- The detection path must use the real `$HOME` (`std::env::var("HOME")`), not `COFLUX_HOME` — in dev mode, `COFLUX_HOME` points to `$PWD/.coflux-dev` (`package.json:10`), and there is no `Library/Safari` under it.
+- `launchctl unload`+`load` is the existing restart method (`packages/cli/cofluxd.mjs:155`); `cofluxd fda` reuses `restartService()`, do not create another launchctl call.
+- The detection result is a snapshot at startup: after user authorization but before restarting, the status file still shows that it has not been granted - this is expected behavior (FDA requires a restart to take effect), just make it clear in the copy.
 
 ## Scope
 
 In scope:
 
 - `packages/cli/cofluxd.mjs`
-- `crates/supervisor/src/main.rs`（如需拆小函数可在同 crate 内新增模块）
-- `plans/README.md`（状态更新）
+- `crates/supervisor/src/main.rs` (If you need to split the small function, you can add a new module in the same crate)
+- `plans/README.md` (status update)
 
 Out of scope:
 
-- `crates/worker/`、`apps/server/`、`apps/web/`、`packages/protocol/`、`proto/` —— 不上报 server，不改协议
-- Linux/systemd 路径的任何行为变化
-- 文档（README 等）—— 子命令自带 HELP 即可
+- `crates/worker/`, `apps/server/`, `apps/web/`, `packages/protocol/`, `proto/` — Do not report to the server, do not change the protocol
+- Any behavioral changes to the Linux/systemd path
+- Documents (README, etc.) - Subcommands can come with HELP
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Rust 构建 | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0 |
-| Rust 单测（回归） | `cargo test -p coflux-protocol` | exit 0 |
-| CLI 语法检查 | `node --check packages/cli/cofluxd.mjs` | exit 0 |
-| 黑盒集成（acceptance） | `pnpm -C tests test` | exit 0 |
+| Rust Build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0 |
+| Rust unit test (regression) | `cargo test -p coflux-protocol` | exit 0 |
+| CLI syntax check | `node --check packages/cli/cofluxd.mjs` | exit 0 |
+| black-box integration (acceptance) | `pnpm -C tests test` | exit 0 |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] macOS 构建下 supervisor 启动会产生 FDA 状态文件；`cofluxd status` 在 macOS 显示 FDA 行；`cofluxd fda` 打开设置面板并高亮二进制，完成后重启服务；`onboard`/`up` 未授权时有一行提示。
-- [ ] 非 macOS 平台：supervisor 与 CLI 行为与现状完全一致（`cofluxd fda` 仅提示不支持）。
+- [ ] On macOS, supervisor startup writes FDA status; cofluxd status shows it; cofluxd fda opens settings and highlights the binary, then restarts the service after completion; onboard/up show a one-line notice when unauthorized.
+- [ ] Non-macOS platforms: supervisor and CLI behave exactly the same as the current situation (`cofluxd fda` only prompts that it is not supported).
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
 - [ ] `plans/README.md` status is updated.
@@ -104,6 +104,6 @@ Out of scope:
 
 ## Maintenance notes
 
-- Apple 若未来变更 `~/Library/Safari` 的 TCC 归类或路径，探测会退化为「未知」——属安全退化，只影响提示不影响功能；届时换一个纯 FDA 保护路径即可。
-- 系统设置深链 `x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles` 是 Apple 未文档化但多年稳定的 URL；失效时退化为只打开系统设置主界面，文案仍指路。
-- 二进制已 Developer ID 签名（v0.6.1 起），TCC 按签名身份记录授权，升级换二进制不丢授权；若未来改签名身份（换证书/Team），用户需重新授权。
+- If Apple changes the TCC classification or path of `~/Library/Safari` in the future, the detection will degrade to "Unknown" - a harmless fallback affecting only prompts, not functionality; then just change to a pure FDA protection path.
+- The system settings deep link `x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles` is a URL that Apple has not documented but has been stable for many years; when it fails, it degrades to only opening the system settings main interface, and the copy still provides guidance.
+- The binary is signed by Developer ID (from v0.6.1), TCC records authorization according to the signing identity, and upgrading the binary will not lose authorization; if the signing identity is changed in the future (certificate/Team change), the user needs to re-authorize.

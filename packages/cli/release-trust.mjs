@@ -11,6 +11,8 @@ export const SUPERVISOR_RELEASE_STATEMENT_DOMAIN = Buffer.from(
   "utf8",
 );
 
+export const CLI_RELEASE_STATEMENT_DOMAIN = Buffer.from("coflux-cli-release-v1\0", "utf8");
+
 const STRICT_RELEASE_VERSION = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
 const ED25519_SIGNATURE_HEX = /^[0-9a-f]{128}$/i;
@@ -111,6 +113,10 @@ export function supervisorReleaseStatement(metadata) {
   return artifactReleaseStatement(SUPERVISOR_RELEASE_STATEMENT_DOMAIN, metadata);
 }
 
+export function cliReleaseStatement(metadata) {
+  return artifactReleaseStatement(CLI_RELEASE_STATEMENT_DOMAIN, metadata);
+}
+
 export function createReleasePublicKey(publicKeyHex) {
   const normalized = typeof publicKeyHex === "string" ? publicKeyHex.trim() : "";
   if (!ED25519_PUBLIC_KEY_HEX.test(normalized)) {
@@ -136,7 +142,7 @@ function isRecord(value) {
  */
 export function parseReleaseManifestEntry(manifest, component, version, target) {
   assertReleaseVersion(version);
-  if (component !== "worker" && component !== "supervisor") {
+  if (!["worker", "supervisor", "cli"].includes(component)) {
     throw new Error(`未知 release component: ${JSON.stringify(component)}`);
   }
   if (!isRecord(manifest) || manifest.schemaVersion !== 2 || manifest.version !== version) {
@@ -192,7 +198,7 @@ export function verifyReleaseArtifact({ component, version, entry, data, publicK
   const metadata = { version, target: entry.target, sha256, size: data.byteLength };
   const statement = component === "worker"
     ? workerReleaseStatement(metadata)
-    : supervisorReleaseStatement(metadata);
+    : component === "cli" ? cliReleaseStatement(metadata) : supervisorReleaseStatement(metadata);
   if (!crypto.verify(null, statement, publicKey, Buffer.from(entry.releaseSignature, "hex"))) {
     throw new Error(`${component} 产物 release Ed25519 签名无效`);
   }
@@ -205,11 +211,11 @@ export function verifyReleaseArtifact({ component, version, entry, data, publicK
 export function installStagedPair(staged) {
   if (
     !Array.isArray(staged) ||
-    staged.length !== 2 ||
+    ![2, 3].includes(staged.length) ||
     staged.some(({ source, destination }) =>
       typeof source !== "string" || !source || typeof destination !== "string" || !destination)
   ) {
-    throw new Error("daemon 安装必须提供两个合法的暂存文件");
+    throw new Error("daemon installation requires two or three valid staged artifacts");
   }
   const installed = [];
   const backups = [];

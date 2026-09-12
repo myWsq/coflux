@@ -1,24 +1,28 @@
 /**
  * plan 092：每个 coflux PTY 会话注入 COFLUX_* 环境变量。
  *
- * 黑盒：中心只随建会话请求下发 id，supervisor 在 create_session 里组装六个变量。三条建会话路径各开一个
- * 终端、在里面把变量打出来，断言值与中心（MCP `list_*` / 广播里的 task）的 id 完全一致：
- *   ① MCP `create_terminal`（中心发起的 prepared session.create）：项目工作区六个变量齐全；
+ * 黑盒：中心只随建会话请求下发 id，supervisor 在 create_session 里组装五个变量。三条建会话路径各开一个
+ * 终端、在里面把变量打出来，断言值与中心（账号 API `list_*` / 广播里的 task）的 id 完全一致：
+ *   ① 账号 API `create_terminal`（中心发起的 prepared session.create）：项目工作区五个变量齐全；
  *      目录工作区 `COFLUX_PROJECT_ID` 存在但为空串；
  *   ② web 手开的终端（taskCreate + taskStart 的 prepared session.create，经 device-harness 自动执行）：
  *      attach 后输入 printf，经 read_terminal 读到；
- *   ③ 在 coflux 终端里跑 `cofluxd terminal new`（直发 IPC 路径），`terminal read` 里能看到。
+ *   ③ 在 coflux 终端里跑 `coflux terminal new`（直发 IPC 路径），`terminal read` 里能看到。
  * 旧 worker / 旧 supervisor 的兼容（缺字段不报错）由 crates/protocol/src/ipc.rs 的 Legacy 单测覆盖。
  *
  * plan 112（同一套会话环境，加在一起验）：supervisor 把 `<COFLUX_HOME>/bin` 前置进每个会话的 PATH 首段、
- * 启动时把自身版本写到 `<COFLUX_HOME>/supervisor-version`；Rust 版 `cofluxd`（target/debug/cofluxd）在同一个
+ * 启动时把自身版本写到 `<COFLUX_HOME>/supervisor-version`；Rust 版 `coflux`（target/debug/coflux）在同一个
  * coflux 终端里走路径③，输出短语与 node 版一致。
  *
- * 端口：8870（独占）。
+ * plan 115（同一套会话环境的第三件）：supervisor 给会话 shell 注入 shell 集成，把 `COFLUX_CLAUDE_PLUGIN_DIR`
+ * 翻译成 `claude --plugin-dir <dir>`。这条用例另起一套栈（见文件末尾），因为主栈的 `COFLUX_SHELL` 指向包装
+ * 脚本，按 basename 分派会（正确地）判成未知 shell、不注入。
+ *
+ * 端口：8870（独占）；plan 115 的第二套栈用 8874（同样独占）。
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,13 +30,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo, CLI_BIN } from "./harness.mjs";
 import { openRelayDevice } from "./device-harness.mjs";
-import { callTool, consentClient, obtainTokens } from "./oauth-harness.mjs";
+import { callOperation as callTool, loginAccount } from "./account-harness.mjs";
 
 const PORT = 8870;
 const BASE = `http://127.0.0.1:${PORT}`;
-const MCP_URL = `${BASE}/mcp`;
-const COFLUXD = fileURLToPath(new URL("../../packages/cli/cofluxd.mjs", import.meta.url));
-/** Rust 版 cofluxd（plan 112）：与 node 版同一组子命令、同样的 stdout 短语。 */
+const COFLUXD = fileURLToPath(new URL("../../packages/cli/coflux.mjs", import.meta.url));
+/** Rust 版 coflux（plan 112）：与 node 版同一组子命令、同样的 stdout 短语。 */
 const COFLUXD_RUST = CLI_BIN;
 /** 与 crates/supervisor/src/sessions.rs 的注入清单一致：变量名是 agent 面向的契约，只能加不能改。 */
 const ENV_NAMES = [
@@ -41,7 +44,6 @@ const ENV_NAMES = [
   "COFLUX_WORKSPACE_ID",
   "COFLUX_TASK_ID",
   "COFLUX_SESSION_ID",
-  "COFLUX_MCP_URL",
 ];
 const DUMP_ENV = "env | grep '^COFLUX_' | sort";
 
@@ -49,7 +51,6 @@ let stack;
 let repo;
 let device;
 let observer;
-let consentWs;
 let token;
 let projectId;
 let mainWorkspaceId;
@@ -115,7 +116,7 @@ function hasAllEnv(text) {
   return ENV_NAMES.every((name) => Object.hasOwn(env, name));
 }
 
-/** 断言六个变量齐全且与中心 id 一致。 */
+/** 断言五个变量齐全且与中心 id 一致。 */
 function assertEnv(env, expected) {
   for (const name of ENV_NAMES) assert.ok(Object.hasOwn(env, name), `${name} 必须存在（哪怕为空串）: ${JSON.stringify(env)}`);
   assert.equal(env.COFLUX_DEVICE_ID, expected.deviceId, "COFLUX_DEVICE_ID = 本机 daemon 的设备 id");
@@ -123,7 +124,7 @@ function assertEnv(env, expected) {
   assert.equal(env.COFLUX_WORKSPACE_ID, expected.workspaceId, "COFLUX_WORKSPACE_ID = 所属工作区 id");
   assert.equal(env.COFLUX_TASK_ID, expected.taskId, "COFLUX_TASK_ID = 本终端的任务 id");
   assert.equal(env.COFLUX_SESSION_ID, expected.sessionId, "COFLUX_SESSION_ID = 本 PTY 会话 id");
-  assert.equal(env.COFLUX_MCP_URL, MCP_URL, "COFLUX_MCP_URL = <COFLUX_PUBLIC_URL>/mcp");
+  assert.equal(env.COFLUX_MCP_URL, undefined, "新终端不再注入 账号 API 地址");
 }
 
 /** 从广播里拿某任务的 sessionId（建库时就写死，第一条 taskUpdated 就带）。 */
@@ -160,7 +161,7 @@ async function removeWorkspace(workspaceId) {
   await observer.waitFor((m) => m.case === "workspaceRemoved" && m.workspaceId === workspaceId, "cleanup ws removed", 20000);
 }
 
-/** 在会话里跑一条 cofluxd 命令，输出重定向到文件——比解析 PTY 分块输出可靠得多。 */
+/** 在会话里跑一条 coflux 命令，输出重定向到文件——比解析 PTY 分块输出可靠得多。 */
 function cliCmd(gatewayPort, args, outFile) {
   return `COFLUX_LOCAL_GATEWAY_PORT=${gatewayPort} node ${COFLUXD} ${args} > ${outFile} 2>&1\r`;
 }
@@ -188,8 +189,7 @@ function initialEnvFile(sessionId) {
 before(async () => {
   const shellWrapper = writeShellWrapper(mkDir("coflux-env-shell-"));
   stack = await startStack({ port: PORT, serverEnv: { COFLUX_PUBLIC_URL: BASE }, daemonEnv: { COFLUX_SHELL: shellWrapper } });
-  consentWs = await consentClient(stack);
-  token = (await obtainTokens(BASE, consentWs)).access_token;
+  token = await loginAccount(BASE);
 
   repo = mkRepo();
   device = await openRelayDevice(stack);
@@ -202,14 +202,13 @@ before(async () => {
 });
 
 after(async () => {
-  consentWs?.close();
   device?.close();
   await stack?.stop();
   repo?.cleanup();
   for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
 });
 
-test("路径①：MCP create_terminal 开的命令终端里六个 COFLUX_* 齐全，值与中心 id 一致", async () => {
+test("路径①：账号 API create_terminal 开的命令终端里五个 COFLUX_* 齐全，值与中心 id 一致", async () => {
   const { terminal } = await okTool("create_terminal", { workspaceId: mainWorkspaceId, title: "坐标", command: DUMP_ENV });
   assert.equal(terminal.workspaceId, mainWorkspaceId);
   const sessionId = await sessionIdOf(terminal.id);
@@ -221,7 +220,7 @@ test("路径①：MCP create_terminal 开的命令终端里六个 COFLUX_* 齐�
   const env = parseEnv(read.text);
   assertEnv(env, { deviceId: stack.daemonId, projectId, workspaceId: mainWorkspaceId, taskId: terminal.id, sessionId });
 
-  // 与 MCP 自己的 list_* 交叉核对：agent 把这些值直接传给 tools 就能命中
+  // 与 账号 API 自己的 list_* 交叉核对：agent 把这些值直接传给 tools 就能命中
   const { devices } = await okTool("list_devices", {});
   assert.ok(devices.some((d) => d.id === env.COFLUX_DEVICE_ID && d.online), `list_devices 里必须有在线的 ${env.COFLUX_DEVICE_ID}`);
   const { projects } = await okTool("list_projects", {});
@@ -278,14 +277,14 @@ test("路径②：web 手开的终端（taskCreate + taskStart）里也有 COFLU
   assert.ok(lines.includes(`S=${sessionId}`), `COFLUX_SESSION_ID 不符: ${read.text}`);
   assert.ok(lines.includes(`D=${stack.daemonId}`), `COFLUX_DEVICE_ID 不符: ${read.text}`);
   assert.ok(lines.includes(`P=${projectId}`), `COFLUX_PROJECT_ID 不符: ${read.text}`);
-  assert.ok(lines.includes(`M=${MCP_URL}`), `COFLUX_MCP_URL 不符: ${read.text}`);
+  assert.ok(lines.includes("M="), `COFLUX_MCP_URL 不符: ${read.text}`);
 
   await device.input(sessionId, "exit\r");
   await observer.waitFor((m) => m.case === "taskUpdated" && m.task.id === task.id && m.task.status === TaskStatus.EXITED, "手开终端退出", 20000);
   await okTool("remove_terminal", { terminalId: task.id });
 });
 
-test("路径③：在 coflux 终端里 `cofluxd terminal new`（直发 IPC 路径）开出的终端也有 COFLUX_*，terminal read 里能看到", async () => {
+test("路径③：在 coflux 终端里 `coflux terminal new`（直发 IPC 路径）开出的终端也有 COFLUX_*，terminal read 里能看到", async () => {
   const home = mkDir("coflux-env-cli-");
   const { ws, task: idle } = await dirWorkspace(home);
   const gatewayPort = device.gateway.port;
@@ -334,7 +333,7 @@ async function reportedSupervisorVersion() {
   return hit.case === "stateSnapshot" ? hit.daemons.find((d) => d.daemonId === stack.daemonId).supervisorVersion : hit.daemon.supervisorVersion;
 }
 
-test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变）；supervisor-version 落盘等于握手上报的版本；Rust 版 cofluxd 走路径③输出与 node 版一致", async () => {
+test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变）；supervisor-version 落盘等于握手上报的版本；Rust 版 coflux 走路径③输出与 node 版一致", async () => {
   // ① supervisor-version：启动即落盘，纯文本一行 = 握手上报的原文 + 换行（桌面版 plan 113 的读取契约）
   const version = await reportedSupervisorVersion();
   const versionFile = join(stack.home, "supervisor-version");
@@ -361,7 +360,7 @@ test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变
       "其余段 = supervisor 继承的 PATH，顺序不变、不重复",
     );
 
-    // ③ Rust 版 cofluxd 在同一个终端里走路径③：开终端、读输出——短语与 node 版逐字一致
+    // ③ Rust 版 coflux 在同一个终端里走路径③：开终端、读输出——短语与 node 版逐字一致
     const newOut = join(home, "new.txt");
     await device.input(origin.sessionId, cliCmdRust(gatewayPort, `terminal new --title "Rust 坐标" --cmd "${DUMP_ENV}"`, newOut));
     const created = await observer.waitFor(
@@ -379,7 +378,7 @@ test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变
     // 输出文件边写边读：等最后一行 `看输出：` 出现（或 `✗`）再比对，只等首行会读到半截
     const newText = await waitForFile(newOut, (s) => s.includes("看输出：") || s.includes("✗"), "Rust 版 terminal new 输出");
     assert.ok(
-      newText.includes(`已开终端 ${created.task.id}（用户可在 coflux 侧栏看到并随时接管）`) && newText.includes(`看输出：cofluxd terminal read ${created.task.id}`),
+      newText.includes(`已开终端 ${created.task.id}（用户可在 coflux 侧栏看到并随时接管）`) && newText.includes(`看输出：coflux terminal read ${created.task.id}`),
       `Rust 版 terminal new 的短语必须与 node 版逐字一致: ${JSON.stringify(newText)}`,
     );
 
@@ -391,5 +390,117 @@ test("plan 112：会话 PATH 首段是 <COFLUX_HOME>/bin（其余段顺序不变
     assertEnv(env, { deviceId: stack.daemonId, projectId: "", workspaceId: ws.id, taskId: created.task.id, sessionId: created.task.sessionId });
   } finally {
     await removeWorkspace(ws.id);
+  }
+});
+
+/* ===== plan 115：coflux 终端里手敲的 `claude` 自动带上 COFLUX_CLAUDE_PLUGIN_DIR 指向的插件 ===== */
+
+/** 第二套栈的端口（独占）。不能复用主栈：主栈的 COFLUX_SHELL 是包装脚本，按 basename 分派会判成未知 shell，
+ * 而这条用例要验的恰恰是真 shell（zsh/bash）那条注入链。 */
+const PLUGIN_PORT = 8874;
+
+/** 会话里被 `claude` 命中的假 claude：把自己的 argv 一行一个写进 `<dir>/claude-argv-<sessionId>.txt`
+ * （每个会话一份，互不覆盖）。放在 daemon PATH 的首段，会话 PATH 继承它。 */
+function writeFakeClaude(dir) {
+  const bin = join(dir, "bin");
+  mkdirSync(bin, { recursive: true });
+  const script = join(bin, "claude");
+  writeFileSync(script, `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/claude-argv-$COFLUX_SESSION_ID.txt"\n`);
+  chmodSync(script, 0o755);
+  return bin;
+}
+
+/** 临时家目录：把本机真实 rc 挡在外面（开发机的 ~/.zshrc 会把自己的 bin 目录重新前置，真 claude 会抢在假的
+ * 前面），同时给「用户原来的 rc 仍然照跑」一个可断言的落点。 */
+function writeFakeHome(dir) {
+  const home = join(dir, "home");
+  mkdirSync(home, { recursive: true });
+  const marker = join(home, "user-rc.log");
+  for (const rc of [".zshrc", ".bashrc"]) writeFileSync(join(home, rc), `printf '%s\\n' '${rc}' >> '${marker}'\n`);
+  return { home, marker };
+}
+
+/** zsh 优先（macOS 默认 shell），没有就退 bash——两条注入链都必须过。 */
+function realShell() {
+  const found = ["/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash"].find((path) => existsSync(path));
+  if (!found) throw new Error("本机既没有 zsh 也没有 bash，无法验证 shell 集成");
+  return found;
+}
+
+test("plan 115：真 shell 起的 coflux 会话里 `claude` 自动带 --plugin-dir，用户 rc 照跑；变量为空时与今天逐字一致", async () => {
+  const dir = mkDir("coflux-plugin-");
+  const pluginDir = join(dir, "claude-plugin");
+  const wsPath = join(dir, "ws");
+  for (const path of [pluginDir, wsPath]) mkdirSync(path, { recursive: true });
+  const bin = writeFakeClaude(dir);
+  const { home: fakeHome, marker } = writeFakeHome(dir);
+
+  // 注入方（真机上是 Coflux.app 的 LaunchAgent）只做一件事：把变量写进 daemon 的环境。
+  const plugged = await startStack({
+    port: PLUGIN_PORT,
+    daemonEnv: {
+      COFLUX_SHELL: realShell(),
+      COFLUX_CLAUDE_PLUGIN_DIR: pluginDir,
+      HOME: fakeHome,
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+    },
+  });
+  let plugDevice;
+  try {
+    plugDevice = await openRelayDevice(plugged);
+    const control = plugDevice.control;
+    control.send({ case: "terminalCreate", daemonId: plugged.daemonId, path: wsPath });
+    const created = await control.waitFor(
+      (m) => m.case === "workspaceCreated" && m.workspace.path === wsPath && m.workspace.daemonId === plugged.daemonId,
+      "plan 115 目录工作区",
+      20000,
+    );
+    const workspaceId = created.workspace.id;
+
+    // 会话终端（不带命令）才走默认 shell；命令终端的 shell 是包装脚本，本来就不该注入
+    const openSession = async (title) => {
+      control.send({ case: "taskCreate", workspaceId, title });
+      const idle = await control.waitFor(
+        (m) => m.case === "taskUpdated" && m.task.workspaceId === workspaceId && m.task.title === title,
+        `${title}：建任务`,
+        20000,
+      );
+      control.send({ case: "taskStart", taskId: idle.task.id, cols: 80, rows: 24 });
+      const run = await control.waitFor(
+        (m) => m.case === "taskUpdated" && m.task.id === idle.task.id && m.task.status === TaskStatus.RUNNING && !!m.task.sessionId,
+        `${title}：会话 RUNNING`,
+        20000,
+      );
+      await plugDevice.attach(run.task.sessionId);
+      return run.task;
+    };
+    const argvOf = async (sessionId, label) => {
+      const text = await waitForFile(join(dir, `claude-argv-${sessionId}.txt`), (s) => s.includes("chat"), label);
+      return text.split("\n").filter((line) => line !== "");
+    };
+
+    // ① 变量指向存在的目录：真 claude 收到 --plugin-dir <dir>，用户自己的参数原样跟在后面（含带空格的）
+    const on = await openSession("带插件");
+    await plugDevice.input(on.sessionId, "claude chat 'a b'\r");
+    assert.deepEqual(
+      await argvOf(on.sessionId, "带插件时的 claude argv"),
+      ["--plugin-dir", pluginDir, "chat", "a b"],
+      "shell 集成必须把变量翻译成 --plugin-dir，且不动用户自己的参数",
+    );
+    assert.ok(existsSync(marker), `用户原来的 rc 必须照常加载（没看到 ${marker}）`);
+
+    // ② 变量为空 = 逃生口，命令行与今天逐字相同。栈级 env 是固定的，所以在会话里把它清空——函数每次调用
+    //    才读这个变量，语义与「开一个变量为空的会话」等价。
+    const off = await openSession("变量为空");
+    await plugDevice.input(off.sessionId, "export COFLUX_CLAUDE_PLUGIN_DIR=\r");
+    await plugDevice.input(off.sessionId, "claude chat 'a b'\r");
+    assert.deepEqual(
+      await argvOf(off.sessionId, "变量为空时的 claude argv"),
+      ["chat", "a b"],
+      "变量为空时必须退化成今天的 claude：不加任何 flag",
+    );
+  } finally {
+    plugDevice?.close();
+    await plugged.stop();
   }
 });

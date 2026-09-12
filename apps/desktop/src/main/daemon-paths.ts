@@ -9,10 +9,23 @@ import { join } from "node:path";
 /** 内置三件在 Contents/Resources 下的子目录名（electron-builder.yml extraResources 的 to） */
 export const DAEMON_RESOURCE_DIR = "daemon";
 /** 内置与落盘的三个二进制文件名 */
-export const DAEMON_BINARIES = ["coflux-supervisor", "coflux-worker", "cofluxd"] as const;
+export const DAEMON_BINARIES = ["coflux-supervisor", "coflux-worker", "coflux"] as const;
 export type DaemonBinaryName = (typeof DAEMON_BINARIES)[number];
-/** 与三件同目录的版本戳 sidecar（CI 写 v0.0.0-desktop.<桌面版本>；本机 pack 缺失落 dev） */
+/** 与三件同目录的版本戳 sidecar（CI 写 vX.Y.Z；本机 pack 缺失落 dev） */
 export const DAEMON_VERSION_FILE = "VERSION";
+/**
+ * 内置 coflux 插件在 DAEMON_RESOURCE_DIR 下的子目录名（plan 115）：scripts/stage-daemon.mjs 把仓库里的
+ * integrations/claude-plugin 整目录逐字节拷过来，test/config.test.ts 守住脚本与这里同值。
+ * 插件是 node / sh 脚本，不是 Mach-O：不进 mac.binaries、不做 ad-hoc 重签、不落 ~/.coflux。
+ */
+export const CLAUDE_PLUGIN_RESOURCE_DIR = "claude-plugin";
+/** 插件清单在插件目录里的相对路径：目录「算数」以它存在为准 */
+export const CLAUDE_PLUGIN_MANIFEST = [".claude-plugin", "plugin.json"] as const;
+/**
+ * 经 LaunchAgent 注入给 supervisor 的插件目录变量名（plan 115）。契约只有这个名字，不约定任何路径：
+ * 值由 app 决定，daemon 不解析、不校验、不落盘；缺失 / 为空 / 目录不存在时 claude 的行为与今天完全一致。
+ */
+export const CLAUDE_PLUGIN_ENV = "COFLUX_CLAUDE_PLUGIN_DIR";
 /** launchd 服务 label（plist 的 Label，`launchctl print gui/<uid>/<label>`） */
 export const LAUNCHD_LABEL = "com.coflux.daemon";
 
@@ -53,7 +66,7 @@ export function daemonHomePaths(homeDir: string, env: Record<string, string | un
     binDir,
     supervisorBin: join(binDir, "coflux-supervisor"),
     workerBin: join(binDir, "coflux-worker"),
-    cliBin: join(binDir, "cofluxd"),
+    cliBin: join(binDir, "coflux"),
     settings: join(home, "settings.json"),
     logFile: join(home, "daemon.log"),
     credentials: join(home, "credentials.json"),

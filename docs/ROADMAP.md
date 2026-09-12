@@ -1,107 +1,84 @@
-# coflux 路线图 / TODO
+# coflux roadmap / TODO
 
-> 记录已完成的里程碑与待办工作。讨论细节见 [architecture.md](architecture.md) / [auth-design.md](auth-design.md) / [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md)。
+> Completed milestones and pending work. Discussion details are in [architecture.md](architecture.md), [auth-design.md](auth-design.md), and [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md).
 
-## 已完成
+## Completed
 
-- **V1 远程终端 + 项目制**：Account → Device → Project(git 仓库) → Workspace(主=仓库本身 / 其它=git worktree) → Task → Session(PTY)。
-- **Tailscale 式认证**：浏览器一次性授权 + 每设备凭证（daemonId 服务器签发不可冒充）+ 账号隔离。
-- **独占 + handoff**：一个终端同时一个控制端，attach 即接管。
-- **生产化加固**（两轮 + 一轮对抗式审查，共修 30 项确认问题）：WS 心跳、背压/流控、优雅关闭、崩溃兜底、重连指数退避、store 事务、级联删除原子化、结构化日志、统一配置。
-- **daemon 通用原语**：`exec`、`fs.list`/`fs.read`、`fs.write`（root 锚定 + realpath 防穿越；`fs.write` 另支持写入 daemon 系统临时目录），现统一经 direct/relay 共用的 DeviceEnvelope。
-- **二进制数据面**（2026-06）：曾把 PTY 收敛为中心 protobuf wire；2026-07-25 进一步迁到端到端 DeviceEnvelope，中心 raw PTY 字段已删除并 reserved。
-- **自动热升级全链路**（2026-06，方案 A，详见 [hot-upgrade-design.md](hot-upgrade-design.md)）：supervisor/worker 拆分 + 全 Rust 化（零 node 运行时，UDS IPC + 两级 resync，升级时会话存活）；版本注册表 + 观察期切换/自动回滚；远程下载 + component-separated ed25519 签名（绑定 version/target/sha256/size）+ 持久严格 SemVer anti-rollback（验签不过或降级/重放一律拒绝；不等同于中心控制面失陷后无 RCE）；用户侧 `cofluxd` CLI（npm）装 systemd/launchd 服务。
-- **发布链路**（2026-06→08）：严格 SemVer `v*` tag → release.yml 四平台交叉编译 + worker raw/release 双签名 + supervisor release 签名（`WORKER_SIGNING_KEY` protected environment secret）+ schema 2 manifest；supervisor 与 cofluxd 内置同一发布公钥，CLI 验证两类 daemon 产物并以双 floor 防远端降级；macOS 产物经 Developer ID 签名与 Apple 公证。
-- **多账号 + 自持认证/Postgres**（plans/001-002、059-063，2026-07）：早期 Supabase 换票与托管
-  Postgres 已退役；当前 `local` 模式使用环境变量口令，`password` 模式使用自建 users/memberships 与
-  scrypt 校验，两者均换取 coflux 自持会话 token；业务数据在自托管 Postgres 的 `coflux` schema。
-- **设备授权**（plan 003，2026-07）：daemon 无登记密钥时走浏览器授权流（一次性授权码 + `/authorize` 页）。
-- **端口转发预览**（plans/004-007，2026-07）：`*.p.coflux.dev` 泛域名，账号级门禁 cookie + 一次性授权 code，整条 TCP 经 daemon 隧道字节级透传（HTTP/SSE/WS 通吃）；shortId 确定性可收藏。2026-08-16 预览域挪平一级（`{shortId}-p.coflux.dev`）：coflux.dev 套 CF 橙云后二级泛域无边缘证书（Universal SSL 通配符不跨点），门禁 cookie Domain 随之挂到父域。2026-09-04 起 zone 内**只剩 `*.coflux.dev` 仍在橙云**（api/app/m/裸域已改灰云走 owo-jp-gw），预览域这条链路因此不受入口迁移影响。
-- **Web 工作区多终端 Tab**（plan 008，2026-07）。
-- **协议真相源 Protobuf 化**（plan 009，2026-07-15）：`proto/`（Buf 管理）单一真相源，`buf generate` 出 TS（protobuf-es）/ Rust（prost）/ Swift（swift-protobuf）三端；wire 迁全 protobuf binary 信封，旧 JSON 协议下线；CI 上 `buf lint` + `buf breaking` + 生成产物零 diff 校验。v0.3.0 发布并上线生产（api/app.coflux.dev）。
-- **server RavenJS 化 + 全仓库 TypeScript 7**（2026-07-15）：HTTP 应用层迁 `@raven.js/core`（组合根 + 插件 + 契约路由），WS/反代保持传输层。当时的“含 PTY 严格星形”决策已被 2026-07-25 本地优先架构取代；Postgres 只权威持有业务元数据，不持 terminal authority。
-- **Web 客户端技术栈与产品骨架重塑**（plans 010-012，2026-07-16→17）：完成 Cursor 式高密度工作台重写，最终收敛到 React 19 + React Compiler；接入 Astryx 设计系统；项目导入改为“在线设备 → 远程文件树”的两步向导。
-- **Web 终端交互完善**（plans 013-016、019，2026-07-19→20）：xterm 6.0 对齐；剪贴板图片压缩后经 `fs.write` 写入远端临时目录并把路径注入 Agent；全局快捷键与帮助面板；cell 度量漂移自动 refit；终端 URL 可点击；端口以 PlugZap + HoverCard 聚合展示并可跳转。
-- **worker 自动更新编排**（plan 017，2026-07-20）：daemon 上报 worker/supervisor 版本与架构，server 轮询 stable GitHub Release + manifest 后自动向在线 daemon 投递 worker 升级；失败按 daemon/版本退避封顶。supervisor 仍由 `cofluxd update` 人工升级。
-- **设备识别与管理**（plan 018，2026-07-20）：web 支持设备重命名，server 持久化并广播；在线即时同步、离线重连补偿到 daemon 本地 `settings.json`；设备 tooltip 展示 worker/supervisor 版本。
-- **黑盒集成测试**（`tests/`，跨重构有效）：全量真实进程测试覆盖 auth/账号隔离/项目-worktree-task-session、direct/P2P/relay、中心真实停机、input/session 生命周期去重与 worker mutation 运行期去重、VT oracle、checkpoint、两级 resync、跨 daemon 安全、handoff、热升级与验签对抗、端口转发、文件路径安全、畸形 wire 与优雅关闭。
-- **生产部署**：中心 prod-jp（Debian + systemd + 自托管 PG17），公网入口在 owo-jp-gw（2026-09-04 起，plan 089，去 CF 橙云改灰云直连），relay 节点 prod-bj；拓扑、域名线路、秘密位置与回滚见 [deployment.md](deployment.md)；`scripts/prod-smoke.mjs` 走真协议与独立 Device relay 路径，不落 local grant。
-- **本地优先 session authority**（plans 036-042、040-041，2026-07-25）：supervisor/sessiond 持 PTY、VT/history、holder、sequence 与 tombstone；web cached direct 走 `127.0.0.1:8788`，失败自动 opaque relay；中心停机后已加载/配对页面仍可 list/attach/input/resize/stop；input 与 session create/stop 可跨 worker replacement 去重（不跨 supervisor/OS restart），output gap 由 snapshot 自愈。旧 server xterm live mirror、raw replay、viewer/holder、全局 pause 与 server-routed exec/fs 已删除。mobile 仅做 relay-only 内部迁移，无新功能。
-- **独立 VT 与性能发布证据**（2026-07-25）：xterm 6 双 oracle + 脱敏 Claude/Codex/Vim fixtures；Apple M1 Pro debug、2000 行 history、20 warmup + 100 samples：echo p95 0.589ms，attach+xterm p95 64.820ms，direct timed path 中心 relay frame=0。保证/非保证 fidelity 见 [architecture.md](architecture.md#6-attach-与现场恢复)。
-- **server 侧终端镜像（历史，已取代）**（2026-07-19，69e132a/d8b3237）：曾用 `@xterm/headless` 实时消化 raw PTY 解决 attach 延迟；该方案让中心进入 terminal hot path，已由 sessiond snapshot + 有界派生 checkpoint 替代，server xterm 依赖和旧协议已删除。
+- **V1 remote terminals and project organization**: Account → Device → Project (Git repository) → Workspace (main repository or another Git worktree) → Task → Session (PTY).
+- **Tailscale-style authentication**: one-time browser authorization, per-device credentials with server-issued daemonId to prevent impersonation, and account isolation.
+- **Exclusive control and handoff**: one controller per terminal at a time; attaching takes control.
+- **Production hardening**: two review rounds plus an adversarial review resolved 30 confirmed issues, covering WS heartbeat, backpressure/flow control, graceful shutdown, crash handling, exponential reconnect backoff, store transactions, atomic cascading deletion, structured logs, and unified configuration.
+- **General daemon primitives**: `exec`, `fs.list` / `fs.read`, and `fs.write`, with root anchoring and realpath traversal protection. `fs.write` also supports the daemon's system temporary directory. All now use DeviceEnvelope shared by direct/relay paths.
+- **Binary data plane** (June 2026): PTY initially used center-routed protobuf; on 2026-07-25 it moved to end-to-end DeviceEnvelope. Central raw-PTY fields were removed and reserved.
+- **Complete automatic hot upgrades** (June 2026, Option A; [design](hot-upgrade-design.md)): supervisor/worker split, all-Rust daemon without Node, UDS IPC and two-level resync preserving sessions across upgrades; version registry, observation-period switching and automatic rollback; remote downloads with component-separated ed25519 signatures binding version/target/SHA-256/size; persistent strict-SemVer rollback prevention rejecting invalid signatures, downgrades, and replays. This does not imply prevention of RCE after central compromise. The npm `cofluxd` CLI installs systemd/launchd services.
+- **Release pipeline** (June–August 2026): strict SemVer `v*` tags trigger four-platform builds in release.yml, worker raw/release signatures, supervisor release signatures using protected environment secret `WORKER_SIGNING_KEY`, and schema 2 manifests. Supervisor and cofluxd embed the same public key. CLI verifies both daemon components and uses two floors to prevent remote downgrades. macOS artifacts receive Developer ID signatures and Apple notarization.
+- **Multiple accounts and self-managed authentication/Postgres** (plans 001–002, 059–063; July 2026): retired early Supabase token exchange and managed Postgres. `local` mode uses environment credentials; `password` mode uses owned users/memberships with scrypt. Both issue coflux-owned session tokens. Business data lives in the `coflux` schema of self-hosted Postgres.
+- **Device authorization** (plan 003, July 2026): daemons without enrollment keys use one-time authorization codes and the `/authorize` browser page.
+- **Port-forward previews** (plans 004–007, July 2026): wildcard `*.p.coflux.dev`, account-level gate cookies and one-time codes, and byte-transparent TCP through daemon tunnels for HTTP/SSE/WS. Deterministic shortIds support bookmarks. On 2026-08-16 the preview domain flattened to `{shortId}-p.coflux.dev`: Cloudflare Universal SSL wildcards do not span dots, leaving the former nested wildcard without an edge certificate after proxying coflux.dev. Gate cookies moved to the parent domain. Since 2026-09-04, **only `*.coflux.dev` remains proxied** in the zone; api/app/m/apex use DNS-only records through owo-jp-gw, so preview routing was unaffected by the ingress migration.
+- **Multiple terminal tabs per web workspace** (plan 008, July 2026).
+- **Protobuf as protocol source of truth** (plan 009, 2026-07-15): Buf-managed `proto/` generates TS (protobuf-es), Rust (prost), and Swift (swift-protobuf). Wire messages moved to all-protobuf binary envelopes, retiring JSON. CI runs `buf lint`, `buf breaking`, and generated-output zero-diff checks. v0.3.0 was released and deployed to api/app.coflux.dev.
+- **RavenJS server and repository-wide TypeScript 7** (2026-07-15): HTTP application code moved to `@raven.js/core` composition roots, plugins, and contract routes; WS/proxying remained transport concerns. The then-current strict-star topology including PTYs was superseded by local-first architecture on 2026-07-25. Postgres owns business metadata, not terminal authority.
+- **Web stack and product structure redesign** (plans 010–012, 2026-07-16–17): Cursor-style dense workbench rewrite, ultimately React 19 with React Compiler; Astryx design system; two-step project import from online device to remote file tree.
+- **Web terminal interactions** (plans 013–016, 019; 2026-07-19–20): xterm 6.0 alignment; compressed clipboard images written to remote temporary storage through `fs.write`, with paths injected into agents; global shortcuts/help; automatic refit on cell-metric drift; clickable terminal URLs; ports grouped through PlugZap + HoverCard with navigation.
+- **Worker automatic-update orchestration** (plan 017, 2026-07-20): daemon reports worker/supervisor versions and architecture; server polls stable GitHub Releases/manifests and dispatches worker updates to online daemons, with capped per-device/version failure backoff. Supervisors remain manually upgraded through `cofluxd update`.
+- **Device identification and management** (plan 018, 2026-07-20): web device renaming persisted/broadcast by the server, immediate online synchronization, and reconnect catch-up to local `settings.json`; device tooltips show both versions.
+- **Black-box integration tests** (`tests/`, resilient to refactoring): real-process coverage for authentication/account isolation, project-worktree-task-session lifecycle, direct/P2P/relay, actual center outages, input/session lifecycle deduplication and worker mutation deduplication during a worker lifetime, VT oracles, checkpoints, two-level resync, cross-daemon security, handoff, hot upgrades/signature adversarial tests, port forwarding, path safety, malformed wire messages, and graceful shutdown.
+- **Production deployment**: center prod-jp on Debian/systemd/self-hosted PG17; public ingress at owo-jp-gw since 2026-09-04 (plan 089), replacing Cloudflare proxying with DNS-only direct routing; relay on prod-bj. See [deployment.md](deployment.md) for topology, domains, secret locations, and rollback. `scripts/prod-smoke.mjs` uses the real protocol and independent device-relay path without persisting local grants.
+- **Local-first session authority** (plans 036–042, 040–041; 2026-07-25): supervisor/sessiond owns PTYs, VT/history, holder, sequence, and tombstones. Web cached direct uses `127.0.0.1:8788`, falling back to opaque relay. Loaded/paired pages retain list/attach/input/resize/stop during center outages. Input and session create/stop deduplicate across worker replacement, not supervisor/OS restart; snapshots heal output gaps. Removed server xterm live mirrors, raw replay, viewer/holder, global pause, and server-routed exec/fs. Mobile received only an internal relay-only migration, without new features.
+- **Independent VT and performance release evidence** (2026-07-25): dual xterm 6 oracles and sanitized Claude/Codex/Vim fixtures. Apple M1 Pro debug build, 2,000 history lines, 20 warmups and 100 samples: echo p95 0.589ms, attach+xterm p95 64.820ms, zero central relay frames in the timed direct path. Fidelity guarantees and exclusions are in [architecture.md](architecture.md#6-attach-and-state-recovery).
+- **Server terminal mirror (historical, superseded)** (2026-07-19, 69e132a/d8b3237): `@xterm/headless` previously consumed raw PTYs to reduce attach latency. This placed the center in the terminal hot path and was replaced by sessiond snapshots and bounded derived checkpoints; server xterm dependencies and the old protocol were removed.
 
-## 待办
+## Pending
 
-### 1. 桌面客户端产品化（主客户端 = `apps/desktop`，2026-09-11 起）
+### 1. Productizing desktop (primary client: `apps/desktop`, since 2026-09-11)
 
-> 日常客户端是 Electron 桌面 app（`apps/desktop`，唯一前端，见条目 4）；线上 web/mobile 已冻结，
-> 只承担新机器授权 / MCP OAuth 同意 / 端口预览门禁三张页面。
-> 产品定位已定：**Agent 指挥中心**——
-> 围绕"在各设备的工作区里跑 claude/codex 任务，人监督、随时接管"组织功能与交互，
-> 终端仍是核心界面，但组织逻辑是任务而非连接。功能/交互细化待产品设计讨论产出。
+> The everyday client is the Electron desktop app, the only frontend; see item 4. Online web/mobile clients are frozen, with device authorization, MCP OAuth consent, and port-preview access as satellite-page flows. Product positioning is settled: **an agent command center**, organized around running claude/codex tasks in workspaces across devices, with human supervision and takeover at any time. Terminals remain the main interface, but tasks—not connections—organize the product. Detailed features/interactions await product-design discussion.
 
-**已知问题/待细化（更新至 2026-07-25）：**
-- [x] 终端渲染问题：经常错位——xterm 6.0 升级后未再复现（2026-07-19 用户确认）
-- [x] 图片复制粘贴：浏览器剪贴板图片上传 daemon 临时目录并注入远端路径（plan 014）
-- [x] 终端样式调整：字号 13→12 与页面 UI 视觉平衡（0f1256b，2026-07-19 用户确认）
-- [x] 项目导入引导：在线设备 → 远程文件树两步向导（plan 012）
-- [ ] 设备接入引导优化（安装 `cofluxd` → 浏览器授权 → 上线）
-- [x] 端口转发基础交互：终端 Tab 聚合提示全部端口并可直接打开预览（plan 019）
-- [x] 终端恢复的性能问题：sessiond snapshot + cached direct 达到 attach+xterm p95 64.820ms（2026-07-25）
-- [x] 本地优先当前浏览器发布门：macOS Chrome 的 cached direct、首次 relay+pair、permission denied、fallback/promotion、worker restart、server outage 已实机签字；按 2026-07-25 决策 Safari/Firefox 暂不纳入阻断门，二者可用性仍属未知
-- [x] git diff 的展示：workspace 行数统计 `+X −Y`（plan 024）
-- [x] 快捷键支持：全局快捷键 + 帮助面板（plan 015）
-- [ ] 登录页和设备授权页的 UI 优化
-- [ ] 项目/设备的展示继续细化（设备重命名、在线状态、版本 tooltip 已完成）
+**Known issues and refinements, updated through 2026-07-25:**
 
-### 2. daemon 原语按需扩展
-- [x] `fs.write`（root 锚定写入 + daemon 临时目录模式，plan 014）
-- [ ] `fs.watch`（文件变更监听，需 daemon 原生 watcher）
+- [x] Frequent terminal misalignment: no longer reproduced after xterm 6.0 (user confirmed 2026-07-19).
+- [x] Image copy/paste: upload browser clipboard images to daemon temporary storage and inject remote paths (plan 014).
+- [x] Terminal styling: font size 13→12 for visual balance with page UI (0f1256b, user confirmed 2026-07-19).
+- [x] Project import: online-device → remote-file-tree wizard (plan 012).
+- [ ] Improve device onboarding: install `cofluxd`, authorize in browser, come online.
+- [x] Basic port-preview interaction: aggregate all ports in terminal tabs and open previews directly (plan 019).
+- [x] Terminal recovery performance: sessiond snapshot + cached direct achieved attach+xterm p95 64.820ms (2026-07-25).
+- [x] Current local-first browser release gate: physical macOS Chrome acceptance for cached direct, first relay+pair, permission denied, fallback/promotion, worker restart, and server outage. Per 2026-07-25 decision, Safari/Firefox are not blocking gates; their usability remains unknown.
+- [x] Git diff display: workspace line counts `+X −Y` (plan 024).
+- [x] Global shortcuts and help panel (plan 015).
+- [ ] Improve login/device-authorization UI.
+- [ ] Refine project/device presentation; renaming, online status, and version tooltips are complete.
 
-### 3. 产品/部署（详见 OPEN_QUESTIONS）
-- [x] 多终端 / 一个工作区多会话（B4）：web 已落地（plan 008）
-- [x] worker 自动更新编排：stable release 自动投递 + 失败退避（plan 017）
-- [ ] Agent 集成（B5）：起任务时可选自动拉起 `claude` / `codex` 带 prompt，人随时接管
-- [ ] 退出任务的保留/GC 策略（exited task 长期累积）
-- [ ] 中心服务器多实例 + 共享状态（当前既定形态是单实例；没有明确需求前不引入 Redis、leader election 或共享 presence）
-- [x] 独立 relay 服务·第一片（plan 043，2026-07-25）：`crates/relay` 单二进制 + 按需拨号
-  rendezvous，数据帧不再经中心控制 WS；relay 独立部署，与中心零连接、仅共享签名密钥对
-- [x] 独立 relay·第二片（plan 065，2026-07-29）：中心下发静态节点清单，daemon 经 `/healthz`
-  多次 RTT 采样并带滞后选择 home、周期重探；上报后 rendezvous 把 client/daemon 双端指向同一
-  home，未上报时回退清单首项。relay 节点间无互联，client/web/iOS 不拿清单也不参与探测
-- [x] P2P 直连·第一片（plan 076，2026-08-16）：WebRTC DataChannel 端到端直连并入 direct
-  槽位（loopback > P2P > relay，promotion 复用）；信令照 rendezvous 三角走中心控制 WS
-  （vanilla ICE），worker 引 webrtc-rs，分片流适配 30MiB 帧；黑盒以 werift 跨栈互通全链路
-  4 用例。STUN 部署（coturn on relay 节点）见 architecture.md，实机开通与打洞成功率生产
-  实测待用户；iOS/浏览器实机矩阵与 trickle ICE 为后续迭代
+### 2. Extend daemon primitives as needed
 
-### 4. macOS 客户端 = Electron 版（plan 103，2026-09-11）
+- [x] `fs.write`: root-anchored writes and daemon temporary-directory mode (plan 014).
+- [ ] `fs.watch`: filesystem change watching, requiring native daemon watchers.
 
-> 原生 Swift 路线三次立项均未到 parity（2026-07-15 / 2026-08-25 / 2026-09-05；第三次的 `apps/macos`
-> 于 2026-09-10 合入 main、plan 100 未完成），2026-09-11 用户决定改为 Electron 版，并在同日 plan 106 定案
-> **只迭代桌面版**：`apps/desktop` 是唯一前端，渲染层就在 `src/renderer`（React 19 + xterm，`@` 别名），桥接
-> `window.cofluxDesktop` 必选、没有浏览器分支；server/daemon 校验零放宽（主进程改写 WebSocket 握手 Origin 为
-> `https://desktop.coflux.dev`）。`apps/macos` 与 web / mobile 两个子项目都只在 git 历史里（分割基线 `ce7026b`）；
-> `packages/swift-client` 保留，现为 iOS 专属。
-- [x] Electron 壳 + 自定义 scheme 从 asar 提供渲染层：中心离线也能冷启动看本机终端（loopback direct）
-- [x] 原生菜单 + 纯 ⌘ 快捷键、系统通知 + Dock 角标（agent 等待批准/回答）、点通知聚焦工作区、外链一律系统浏览器
-- [x] 版本准入按控制面协议版本（plan 105，取代首发当天的 lockstep）：只有破坏性协议改动才让旧桌面版看到「需要更新」并触发 electron-updater；`desktop-v*` tag → 签名公证 → GitHub Release + `desktop-updates` 分支清单作更新源
-- [x] 放弃 web 端第一片（plan 106）：渲染层并入 `apps/desktop`、web/mobile 源码出仓、桥接必选；会话 token 进 safeStorage、
-      窗口大小/位置记忆、electron-log 主进程日志、帮助菜单无网页版入口
-- [x] 第二片（plan 107，2026-09-11）：三张卫星页面（`/authorize/<token>`、`/oauth/consent`、`/proxy-auth`）由 server 直出
-      HTML（短命内存页面会话 + csrf + PRG，登录按来源限速），链接全由 `COFLUX_PUBLIC_URL` 拼，`COFLUX_WEB_URL` 退役；
-      冻结的 web bundle 只剩历史工作台，server 不再链接到它
-- [ ] **第三片：桌面原生化升级**（各自立 plan，互不依赖，按需挑；前两片已把"唯一前端 = Electron"坐实，这些都是
-      只有桌面才做得到的事）
-  - [ ] `coflux://` 深链接：`cofluxd up` 打印的授权链接、通知点击、MCP 同意页的「回到 app」都能直接唤起桌面 app；
-        授权流可在 app 内完成（server 直出页面保留为无 app 时的兜底）。plan 103 已把 `coflux://` scheme 预留未占用
-  - [ ] 本机 daemon 改走主进程 UDS：同机时渲染层经主进程直连 supervisor 的 UDS（与 `cofluxd` 零凭证本地命令同一条信任边界），
-        不再为 loopback WS 维护浏览器身份 + grant；远端 daemon 仍走 relay / P2P。安全边界要单独论证，
-        不能顺手放宽 server/daemon 对 Origin 的校验
-  - [ ] 终端渲染器：评估 ghostty-web 或其它原生级渲染替代 xterm.js + WebGL（长期待办，见 docs/OPEN_QUESTIONS）；
-        前提是中文 IME 补丁（`terminal-pane.tsx` 的 `patchImeCommittedInput`）有等价物
-  - [ ] server 侧准入精简：web/mobile 已冻结，`COFLUX_BUILD_ID` / `COFLUX_BUILD_ID_FILE` 那套按 build-id 的浏览器准入只剩
-        冻结站在用；等冻结站退场时连同 `client_kind=web` 分支一起收掉，只留控制面协议版本准入
-  - [ ] `app.coflux.dev` 下载页：冻结工作台退场后把 `/` 换成桌面版下载 / 更新说明页（静态，Caddy 直出）
-- [ ] 首发验收待用户：CI 签名产物过 Gatekeeper、三路联调（direct 用 lsof 证明）、通知/角标在签名包上
-- [ ] 后续：universal（x64）构建开关、Windows/Linux 可移植性
+### 3. Product/deployment (see OPEN_QUESTIONS)
+
+- [x] Multiple terminals/sessions per workspace (B4): implemented on web (plan 008).
+- [x] Worker automatic updates: stable-release delivery with failure backoff (plan 017).
+- [ ] Agent integration (B5): optionally start `claude` / `codex` with a prompt when creating tasks, retaining human takeover.
+- [ ] Retention/GC policy for accumulating exited tasks.
+- [ ] Multiple central instances and shared state. Current product is single-instance; no Redis, leader election, or shared presence without a concrete need.
+- [x] Standalone relay, first slice (plan 043, 2026-07-25): single `crates/relay` binary and on-demand rendezvous dialing. Data no longer traverses central control WS; relay deploys independently with no central connection, sharing only the signing key pair.
+- [x] Standalone relay, second slice (plan 065, 2026-07-29): center distributes a static node list; daemon samples `/healthz` RTT repeatedly, selects a home with hysteresis, and periodically reprobes. After reporting, rendezvous points both client/daemon to the same home; absent reports fall back to the first list entry. Relay nodes do not interconnect; client/web/iOS neither receive the list nor probe.
+- [x] P2P direct, first slice (plan 076, 2026-08-16): end-to-end WebRTC DataChannel uses the direct slot, prioritized loopback > P2P > relay with shared promotion. Vanilla ICE signaling follows the central rendezvous triangle. Worker uses webrtc-rs and fragmented streams for 30MiB frames. Four end-to-end black-box cases verify cross-stack werift interoperability. See architecture.md for coturn STUN deployment on relay nodes. Physical activation and production hole-punch success measurements await the user; iOS/browser device matrices and trickle ICE are future work.
+
+### 4. macOS client: Electron (plan 103, 2026-09-11)
+
+> Three native Swift efforts failed to reach parity (2026-07-15, 2026-08-25, 2026-09-05). The third `apps/macos` effort merged into main on 2026-09-10 with plan 100 incomplete. On 2026-09-11, the user chose Electron; plan 106 the same day established **desktop-only iteration**. `apps/desktop` is the only frontend, with React 19/xterm in `src/renderer` under alias `@`, a mandatory `window.cofluxDesktop` bridge, and no browser fallback. Server/daemon validation remains strict; the main process rewrites WS Origin to `https://desktop.coflux.dev`. `apps/macos`, web, and mobile projects now exist only in history, split baseline `ce7026b`. `packages/swift-client` remains for iOS only.
+
+- [x] Electron shell and custom scheme serving the renderer from asar; cold-start access to local terminals through loopback direct even when the center is offline.
+- [x] Native menus, pure ⌘ shortcuts, system notifications/Dock badges for agents awaiting approval/answers, notification-driven workspace focus, and all external links in the system browser.
+- [x] Protocol-version admission (plan 105), replacing launch-day lockstep: only breaking protocols show Update Required and trigger electron-updater. `desktop-v*` tags produce signed/notarized GitHub Releases and update manifests on `desktop-updates`.
+- [x] Retiring web, first slice (plan 106): renderer merged into `apps/desktop`, web/mobile source removed, mandatory bridge, safeStorage tokens, persistent window size/position, electron-log main-process logs, and no web entry in Help.
+- [x] Second slice (plan 107, 2026-09-11): server-rendered `/authorize/<token>`, `/oauth/consent`, and `/proxy-auth` with short-lived in-memory page sessions, CSRF, PRG, and source-based login limits. Links derive from `COFLUX_PUBLIC_URL`; `COFLUX_WEB_URL` is retired. Frozen web bundles remain only legacy workbenches with no server links.
+- [ ] **Third slice: deeper native desktop integration.** Independent plans, chosen as needed; the first two slices established Electron as the sole frontend. These capabilities are desktop-specific:
+  - [ ] `coflux://` deep links: authorization links printed by `cofluxd up`, notifications, and Return to App from MCP consent should launch desktop. Authorization can complete in-app, retaining server pages as the no-app fallback. Plan 103 reserved but did not claim the scheme.
+  - [ ] Local daemon via main-process UDS: renderer reaches supervisor UDS through the main process, sharing the trust boundary of zero-credential local cofluxd commands, removing browser-identity/grant management for loopback WS. Remote daemons remain relay/P2P. Analyze security separately; do not relax Origin validation incidentally.
+  - [ ] Terminal renderer: evaluate ghostty-web or another native-grade replacement for xterm.js/WebGL. See docs/OPEN_QUESTIONS. An equivalent of the Chinese IME patch `patchImeCommittedInput` in `terminal-pane.tsx` is a prerequisite.
+  - [ ] Simplify server admission: build-ID admission through `COFLUX_BUILD_ID` / `COFLUX_BUILD_ID_FILE` now serves only frozen web/mobile. Remove it and `client_kind=web` when those sites retire, retaining control-protocol admission only.
+  - [ ] `app.coflux.dev` download page: after retiring the frozen workbench, replace `/` with static desktop downloads/release notes served by Caddy.
+- [ ] Initial release acceptance by the user: CI-signed artifact passes Gatekeeper, all three transport paths work together with direct proven using lsof, and notifications/badges work in signed packages.
+- [ ] Later: universal/x64 build switch and Windows/Linux portability.

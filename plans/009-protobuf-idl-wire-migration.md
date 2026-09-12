@@ -1,42 +1,41 @@
-# 009：协议真相源 Protobuf 化 + wire 迁移 protobuf binary
+# Plan 009: Protobuf as the protocol source of truth and binary wire format
 
-## 背景与决策
+## Background and decision-making
 
-协议镜像已达四份（TS 类型 + TS 校验表 + Rust serde + 未来 Swift 客户端），维护不可持续。
-决策（2026-07-15，与用户对齐）：
+Maintaining four protocol representations—TS types, the TS validation table, Rust serde, and the future Swift client—is unsustainable. Decision agreed with the user on 2026-07-15:
 
-- **真相源**：`proto/`（独立子项目，Buf 管理），`coflux/v1/{common,daemon,client}.proto`。
-- **三端生成**：TS（protobuf-es v2）→ `packages/protocol/src/gen`；Rust（prost）→ `crates/protocol/src/gen`；Swift（swift-protobuf）→ `proto/gen/swift`（macOS App 立项后再迁入 App 目录）。
-- **wire format 破坏性变更**（原子切换，不做新旧并存——全部 daemon/client 均自有可控）：
-  - 旧：JSON 文本帧（内部标签 `type` + camelCase）+ 自定义二进制帧（kind 1..4）。
-  - 新：**WS 上只有 binary message，每条 = 一个 protobuf 编码信封**（`/daemon`：`DaemonToServer`/`ServerToDaemon`；`/client`：`ClientToServer`/`ServerToClient`）。数据面（pty/proxy）作为信封 oneof 的普通载荷，payload 一律 `bytes`。
-  - protojson 仅用于日志调试，不上 wire。
-- **Rust daemon 保留**（CLI 语言问题与真相源解耦，无限期搁置迁 TS 的想法）。
+- **Source of truth**: `proto/` (independent sub-project, Buf management), `coflux/v1/{common,daemon,client}.proto`.
+- **Generate all three languages:** TS (protobuf-es v2) → `packages/protocol/src/gen`; Rust (prost) → `crates/protocol/src/gen`; Swift (swift-protobuf) → `proto/gen/swift`, to be moved into the app directory once the macOS project is approved.
+- **Make an atomic breaking wire-format change, with no old/new coexistence:** all daemons and clients are under our control.
+  - Old: JSON text frame (internal tag `type` + camelCase) + custom binary frame (kind 1..4).
+  - New: **Every WS message is binary and contains one protobuf envelope:** `/daemon` uses `DaemonToServer`/`ServerToDaemon`; `/client` uses `ClientToServer`/`ServerToClient`. PTY/proxy data is an ordinary envelope oneof payload, always represented as `bytes`.
+  - protojson is only used for log debugging, not wire.
+- **Retain the Rust daemon** (CLI language issues decoupled from source of truth, idea of migrating to TS is shelved indefinitely).
 
-## 语义映射要点（对照旧协议）
+## Key points of semantic mapping (compare with old protocol)
 
-- 消息集与语义 1:1 保留；`device.authorizeInfo` 双向同名拆分为 `DeviceAuthorizeInfoRequest`（C→S）/`DeviceAuthorizeInfoResult`（S→C）；`error` 消息 → `ServerError`。
-- `TaskStatus`/`FsEntry.type` 由字符串改为 proto enum（DB 存储仍为字符串，hub 做映射）。
-- 时间戳（`created_at` 等 ms epoch）与 `FsEntry.size` 用 `double`：保持旧 JSON 的 JS number 语义，避免 protobuf-es int64→bigint 的类型涟漪。
-- `timeout_ms` 收窄为 `uint32`；`cols/rows/port` 为 `uint32`（Rust 侧钳制到 u16）。
-- pty payload 由「已解码 string」改为 `bytes`：回放与实时输出天然字节一致，旧 `replayFrameToOutput` 的字节级 hack 随之删除；xterm.js `write(Uint8Array)`、SwiftTerm `feed(byteArray:)` 均直接支持。
-- 运行时校验：protobuf 解码即结构校验，旧 `isValid*` 手写校验表删除；解码失败/未知 oneof case 丢弃并记日志。
-- supervisor⟷worker 的 UDS IPC（`crates/protocol/src/ipc.rs`）为进程内部协议，**不动**。
+- Preserve the message set and semantics 1:1. Split bidirectional `device.authorizeInfo` into `DeviceAuthorizeInfoRequest` (C→S) and `DeviceAuthorizeInfoResult` (S→C); rename `error` to `ServerError`.
+- `TaskStatus`/`FsEntry.type` is changed from string to proto enum (DB storage is still string, hub does mapping).
+- Use `double` for timestamps (such as `created_at`, milliseconds since epoch) and `FsEntry.size` : Keep the JS number semantics of old JSON and avoid the type ripple of protobuf-es int64→bigint.
+- `timeout_ms` narrowed to `uint32`; `cols/rows/port` to `uint32` (Rust side clamped to u16).
+- Replace decoded-string PTY payloads with `bytes`, making replay and live output naturally byte-consistent. Remove the old byte-level `replayFrameToOutput` hack. xterm.js `write(Uint8Array)` and SwiftTerm `feed(byteArray:)` support this directly.
+- Protobuf decoding supplies structural validation; remove the handwritten `isValid*` tables. Discard and log decoding failures and unknown oneof cases.
+- The UDS IPC (`crates/protocol/src/ipc.rs`) of supervisor⟷worker is an internal protocol of the process and is **not moved**.
 
-## 阶段与闸口
+## Stages and gates
 
-1. **proto 建模 + 三端生成**：`buf lint` 过；`buf generate` 产物 into 各消费端。✅
-2. **TS 迁移**：`packages/protocol` 重构为「生成代码 + 信封 helpers」；`apps/server`、`apps/web` 全量切换。闸口：两个 `tsc --noEmit` 零错误。
-3. **Rust 迁移**：`crates/protocol` 的 `wire.rs` 退役、prost 生成类型接管；`frame.rs` **保留**——它同时服务 supervisor⟷worker 的 UDS 内部链路（PTY 数据 + 热升级传输），改它就要动 supervisor；worker 负责在「UDS 帧 ⟷ WS protobuf 信封」之间转换。闸口：`cargo build` 零警告、`cargo test` 过。
-4. **黑盒测试迁移**：`tests/src/harness.mjs` 内联 codec 改为消费 `packages/protocol` 的生成信封（生成代码源自真相源而非应用实现，黑盒性质保持）；全部用例适配。闸口：`pnpm -C tests test` 全绿。
-5. **发版**：版本 bump（breaking，0.x 主线跳次版本）+ tag 触发 release.yml（交叉编译 + ed25519 签名 worker + GitHub Release）。
-6. **prod-jp 部署实测**：server/web/daemon 全量更新；冒烟：daemon 上线、建任务、终端 IO、断线 replay、端口转发。
+1. **Proto modeling and generation:** `buf lint` passes; `buf generate` outputs are committed at each consumer. ✅
+2. **TS migration:** refactor `packages/protocol` into generated code plus envelope helpers; migrate `apps/server` and `apps/web` completely. Gate: both `tsc --noEmit` checks report zero errors.
+3. **Rust migration:** retire `crates/protocol` wire.rs in favor of prost-generated types. **Retain frame.rs:** it still serves supervisor-worker UDS traffic, including PTY data and hot-upgrade transfer. Changing it would require supervisor changes. The worker converts between UDS frames and WS protobuf envelopes. Gate: `cargo build` has zero warnings and `cargo test` passes.
+4. **Black-box migration:** replace the inline codec in `tests/src/harness.mjs` with generated envelopes from `packages/protocol`. These types derive from the protocol source of truth, not application implementation, preserving black-box testing. Adapt every case. Gate: `pnpm -C tests test` passes.
+5. **Release**: version bump (breaking, 0.x mainline jump version) + tag trigger release.yml (cross-compilation + ed25519 signature worker + GitHub Release).
+6. **prod-jp deployment test**: server/web/daemon is fully updated; smoke: daemon online, task creation, terminal IO, disconnection replay, port forwarding.
 
-## CI 治理
+## CI Governance
 
-- `buf lint` + `buf breaking --against '.git#branch=main,subdir=proto'` 进 ci.yml；生成产物进 git，CI 校验「重新生成零 diff」防手改生成文件。
+- Add `buf lint` and `buf breaking --against '.git#branch=main,subdir=proto'` to ci.yml. Commit generated artifacts and require zero diff after regeneration in CI to prevent manual edits.
 
-## 风险与回滚
+## Risk and rollback
 
-- 原子切换意味着部署窗口内新旧不互通：server 与 daemon 必须同批升级（prod-jp 上二者同机，窗口极短）。
-- 回滚 = 部署旧版本二进制/静态资源（协议无 DB schema 变更，数据层不受影响）。
+- Atomic switching means that the old and new versions are not interoperable within the deployment window: the server and the daemon must be upgraded in the same batch (on prod-jp, both are on the same machine, and the window is extremely short).
+- Rollback = deploy old version binary/static resources (no DB schema changes in the protocol, the data layer is not affected).

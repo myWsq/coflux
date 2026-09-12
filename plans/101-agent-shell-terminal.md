@@ -1,164 +1,150 @@
-# Plan 101：agent 终端新增「会话终端」——不带命令即开常驻、全 tty 的登录 shell，作业终端语义不变
+# Plan 101: Add persistent full-TTY login-shell terminals for agents while preserving command-job semantics
 
-> 本 plan 是**结果契约，不是操作脚本**。读懂需求与已定决策，然后对着活代码自己设计实现。
-> 执行模式是 subagent 委派：实现者只实现，里程碑验证与验收由编排者在实现者会话之外跑。
-> 命中任一 STOP 条件即停。完成后回写 `plans/README.md`。
+> This plan is an **outcome contract, not an execution script**. Understand requirements and decisions, then design against live code.
+> Execution is delegated: implementers implement; the orchestrator runs milestone validation and acceptance outside their sessions.
+> Stop on any STOP condition. Update `plans/README.md` when complete.
 >
-> 漂移检查：`git diff --stat 79b3694..HEAD -- packages/cli/cofluxd.mjs packages/cli/README.md packages/cli/skills/coflux/SKILL.md integrations/claude-plugin crates/worker/src/hook.rs crates/worker/src/agent_ctl.rs crates/worker/src/device.rs crates/worker/src/ops.rs crates/supervisor/src/sessions.rs apps/server/src/hub.ts apps/server/src/mcp/tools.ts apps/server/src/daemon-capabilities.ts proto/coflux/v1/daemon.proto proto/coflux/v1/device.proto tests/src/agent-control.test.mjs tests/src/mcp-write-tools.test.mjs scripts/sync-claude-plugin.mjs`
+> Drift check: `git diff --stat 79b3694..HEAD -- packages/cli/cofluxd.mjs packages/cli/README.md packages/cli/skills/coflux/SKILL.md integrations/claude-plugin crates/worker/src/hook.rs crates/worker/src/agent_ctl.rs crates/worker/src/device.rs crates/worker/src/ops.rs crates/supervisor/src/sessions.rs apps/server/src/hub.ts apps/server/src/mcp/tools.ts apps/server/src/daemon-capabilities.ts proto/coflux/v1/daemon.proto proto/coflux/v1/device.proto tests/src/agent-control.test.mjs tests/src/mcp-write-tools.test.mjs scripts/sync-claude-plugin.mjs`
 
 ## Status
 
 - Priority: P2
 - Effort: M
 - Risk: LOW
-- Depends on: none（消费 074 的 agent 本地 `terminal new`、091 的中心 MCP `create_terminal`、094 的本地账本/快照回读，三者都不动）
+- Depends on: none (uses 074 local terminal new, 091 central MCP create_terminal, and 094 local ledger/snapshot reading without changing those contracts)
 - Category: feature
 - Execution: subagent opus
 - Planned at: `79b3694`, 2026-09-10
 
 ## Requirement
 
-今天 agent 只能开一种终端：`cofluxd terminal new --cmd=…`（本地路径）或 MCP `create_terminal`（中心路径）都**必须带命令**，worker 把命令包成脚本 `登录 shell -lc <命令> | 日志汇; exit $PIPESTATUS`，跑完终端退出并带退出码。这种「作业终端」的代价是命令的 stdout 是管道而非 tty：颜色和进度条关闭，vim / htop / less 这类全屏程序不能用，而且一条命令跑完终端就没了，agent 想再跑一条只能重开。不带命令目前被三层依次拒绝（CLI die、daemon `terminal.new 缺 command`、MCP schema 必填 + server「命令不能为空」）。
+Agents currently have one terminal type: both local `cofluxd terminal new --cmd=…` and MCP create_terminal **require a command**. Worker wraps it as a login-shell `-lc <command> | log sink; exit $PIPESTATUS` script, then the terminal exits with the command status. These job terminals pipe stdout rather than presenting a TTY: colors/progress bars disappear, fullscreen programs such as vim/htop/less do not work, and each subsequent command requires another terminal. Missing commands are currently rejected by CLI die, daemon's missing-command error, and required MCP schema/server nonempty validation.
 
-用户拍板：**两种终端并存，用「命令是否为空」区分**。带命令的仍是作业终端，一字不改；不带命令的是新的「会话终端」——等价于用户自己在侧栏点「新建终端」：工作区目录下的默认登录 shell，stdin/stdout 都是真 tty，不自动退出，直到 agent 或用户在里面输入 `exit`。
+The user decided **both types coexist, selected by whether the command is empty**. Nonempty commands retain job-terminal behavior unchanged. Empty commands create a **session terminal**, equivalent to the user's New Terminal sidebar action: the workspace's default login shell, real TTY stdin/stdout, persistent until agent/user types exit.
 
-消费者是两类 agent：在 coflux 终端里经 `cofluxd terminal new` 的（Claude Code / Codex），以及任何宿主里经 MCP `create_terminal` 的。触发场景：需要一个常驻的交互终端跑多条命令、跑 TUI 或带颜色的程序、让用户随时能接管继续。
+Consumers are agents using local cofluxd terminal new in Coflux (Claude Code/Codex) and MCP create_terminal in any host. Use cases include multiple interactive commands, TUIs/colors, and user takeover.
 
-完成后为真（消费者可观察的行为）：
+Observable outcomes:
 
-- **开**：`cofluxd terminal new --title="…"` 不带 `--cmd`（或 `--cmd=` 为空白）即开会话终端，输出与作业终端同形（taskId + 提示）；MCP `create_terminal` 的 `command` 变为可选，缺省或空白同样开会话终端。侧栏立刻出现一个标题正确、状态 running 的终端，用户可接管。
-- **tty**：在会话终端里执行 `python3 -c 'import sys; print(sys.stdin.isatty(), sys.stdout.isatty())'` 打印 `True True`（作业终端是 `True False`）。
-- **read**：返回该终端的屏幕快照（去 ANSI 的纯文本，只有一屏），MCP `read_terminal` 的 source 为 `snapshot`（daemon 离线时退回 `checkpoint`）。没有命令日志，这是设计而非缺陷。
-- **send**：与作业终端相同；首次 send 前必须先 read 等到提示符，SKILL 里写明。
-- **wait / 退出码**：会话终端不会自己退出，`wait` 等到 shell 退出（agent 或用户输入 `exit`）才返回，退出码是 shell 的退出码；成败要靠 read 屏幕判断。
-- **作业终端不变**：带命令的路径行为、输出、日志、退出码、错误信息全部与今天一致。
-- **失败路径可读**：新 CLI 不带 `--cmd` 打到未升级的旧 daemon，得到旧 daemon 现成的「terminal.new 缺 command」拒绝；MCP 路径打到 091 之前的 daemon，由现有 `prepared_execute` 能力门禁给出「该设备的 daemon 需要升级」。两者都不需要新的探测或版本判断。
-- **文档**：SKILL（两份副本）、CLI 帮助与 README、MCP 工具描述都把「命令可选、空命令 = 会话终端、何时用哪种」讲清楚；插件版本提到 0.8.0。
+- **Create**: `cofluxd terminal new --title="…"` without --cmd, or with blank --cmd=, opens a session terminal and returns the same taskId/hint shape as jobs. MCP command becomes optional; missing/blank also creates a session. Sidebar immediately shows the correct title and running state, available for takeover.
+- **TTY**: `python3 -c 'import sys; print(sys.stdin.isatty(), sys.stdout.isatty())'` prints `True True`, versus job-terminal `True False`.
+- **Read**: one screen of ANSI-stripped snapshot text. MCP read_terminal source is snapshot, falling back to checkpoint if daemon is offline. No command log, by design.
+- **Send**: unchanged; first read and wait for a prompt before sending, documented in SKILL.
+- **Wait/status**: session terminals never exit automatically. Wait finishes only when the shell exits, with its exit status; assess individual command outcomes by reading the screen.
+- **Jobs unchanged**: behavior, output, logs, status, and errors of command-bearing terminals stay exactly the same.
+- **Readable failures**: a new CLI without --cmd talking to old daemon gets its existing missing-command rejection. Central MCP targeting a pre-091 daemon gets the existing prepared_execute upgrade-required rejection. No probing/version detection needed.
+- **Documentation**: synchronized SKILL copies, CLI help/README, and MCP descriptions explain optional commands, empty=session, and when to choose each. Plugin becomes 0.8.0.
 
-非目标（明确不做）：
-- 不改作业终端语义，不做「带命令且跑完不退」的混合形态，不加 `--shell` / `--keep-open` 之类新参数。
-- 不给会话终端加日志汇或任何形式的命令日志（会话终端的全部价值就是不经管道）。
-- 不做提示符就绪探测、不在 CLI 里自动等提示符。
-- web / mobile / iOS / macOS 侧栏不区分会话终端与用户手开终端；不动任何前端。
-- 不动 proto（连注释也不动）、不动 supervisor、不动 ops.rs 的脚本模板与日志汇。
-- 发版（worker tag 热升级、server 部署、npm cofluxd、插件市场）不在本 plan 内，README 状态里记「待发版」由用户决定。
+Explicit non-goals:
+- No job semantic changes, hybrid command-then-stay-open mode, --shell, or --keep-open.
+- No session log sink or command logs; avoiding pipes is the point.
+- No prompt-readiness detection or automatic CLI prompt waiting.
+- No web/mobile/iOS/macOS sidebar distinction from manually opened terminals; no frontend changes.
+- No proto changes, even comments; no supervisor or ops.rs script/log-sink changes.
+- No worker tags/hot upgrades, server deployment, npm, or marketplace publication. Mark pending release in the index for the user to decide.
 
 ## Decisions & tradeoffs
 
-- **区分两种终端的唯一判据是「命令 trim 后是否为空」，两条路径一致**：本地 `--cmd` 缺省与 `--cmd=` 空白等价，MCP `command` 缺省与空白等价，都开会话终端。Rejected：加显式标志（`--shell` / `mode`）——用户明确要的是「不带命令会怎样」这个自然语义，多一个标志就多一种「带标志又带命令」的组合要解释。Rejected：显式空串与缺省行为不同——两种「空」不同语义只会制造误用。Based on: `packages/cli/cofluxd.mjs:999-1000`（`values.cmd` 为空即 die）；`apps/server/src/mcp/tools.ts:403`（`command: z.string()` 必填）；`apps/server/src/hub.ts:3692`（`!command.trim()` 拒绝）；`crates/worker/src/hook.rs:281-284`（`command.trim().is_empty()` 拒绝）。
-
-- **零协议改动、零新能力名**。会话终端在协议上就是「shell 为空」：daemon→server 的 `AgentTerminalNew.shell` 传空串，server 原样透传进 `SessionCreate.shell`，supervisor 对空 shell 取默认登录 shell；中心路径的 `DeviceSessionCreate.command` 为空时 worker 已经走「不写脚本、普通 shell」分支。旧 daemon 的两条失败路径都已可读（见 Requirement）。Rejected：新增能力名（如 `shell_terminal`）做门禁——本地路径旧 daemon 自己就拒绝；中心路径 091 之前的 daemon 被 `prepared_execute` 挡住，091 及之后的 daemon 天然支持空命令，没有需要挡的组合。Rejected：改 proto 注释（`AgentTerminalNew.shell` 的注释仍写「包装脚本绝对路径」）——改注释要重新生成三份产物，不值；记入 Maintenance notes。Based on: `proto/coflux/v1/daemon.proto:103-108`；`apps/server/src/hub.ts:1294`（`shell: value.shell` 原样透传）；`crates/supervisor/src/sessions.rs:805-809`（空 shell 取 `self.shell`）；`crates/worker/src/device.rs:2088`（`if !create.command.is_empty()` 才写脚本）；`proto/coflux/v1/device.proto:480-482`（「旧 worker 不认识本字段会起成普通 shell，由中心的能力门禁挡住」）；`apps/server/src/daemon-capabilities.ts:11`（`prepared_execute`）；`crates/worker/src/main.rs:126-127`。
-
-- **会话终端不写包装脚本、不登记日志路径**：本地路径空命令时 agent_ctl 跳过 `write_command_script`，`shell` 传空串，不调用 `remember_log`；`read` 因此落到已在位的 sessiond 快照回退。Rejected：给会话终端也套脚本以便回读日志——脚本就是管道，stdout 一进管道就不是 tty，正是本需求要避免的。Based on: `crates/worker/src/agent_ctl.rs:214-236`（无条件写脚本并 `remember_log`）；`crates/worker/src/ops.rs:334-336`（「命令的 stdout 是管道而非 tty」）；`crates/worker/src/agent_ctl.rs:265-279` 与 `549-603`（日志优先、否则快照、都没有为空）。
-
-- **空命令放行，非空命令仍受 16 KB 上限，两处校验都如此**：hook.rs 与 hub.ts 的字节上限只对非空命令生效；错误文案里不再说「命令不能为空」。Based on: `crates/worker/src/hook.rs:39-40,281-289`；`apps/server/src/hub.ts:136,3692-3694`。
-
-- **默认标题**：title 与 command 都为空时，两条路径都落到 server 现成的「agent 终端」兜底；中心路径「默认取命令首行」在空命令下会得到空标题，必须补上同一兜底，侧栏不能出现空标题。Rejected：沿用 web 手开终端的「终端 N」编号——那是 web 客户端算的，server 侧没有这个计数。Based on: `apps/server/src/hub.ts:1272`（`value.title.trim() || "agent 终端"`）；`apps/server/src/hub.ts:3695`（`command.split("\n")[0].slice(0, 64)`）；`apps/web/src/components/workbench/workspace-terminal.tsx:411`。
-
-- **wait 语义不改，靠文档说清**：`wait` 仍是「等到 exited」，会话终端只在 shell 退出后才 exited；SKILL 明写「会话终端不会自己结束，`wait` 只在你 send 了 `exit` 之后才有意义，默认 30 分钟上限到期是超时不是失败」。Rejected：给会话终端的 `wait` 加特殊短路——语义分叉，且 agent 对「等一个不会结束的东西」本就该自己负责。Based on: `packages/cli/cofluxd.mjs:1030-1042`；`crates/worker/src/agent_ctl.rs` 账本状态判定（plan 094）。
-
-- **文档三处同步、SKILL 只改唯一源**：`packages/cli/skills/coflux/SKILL.md` 是唯一源，改完跑 `node scripts/sync-claude-plugin.mjs` 得到插件目录那份，CI 用 `--check` 比对；插件目录（含 SKILL）必须全英文，测试会递归扫汉字；MCP `create_terminal` 的 title/description/inputSchema 描述与 `read_terminal` 描述里「log = create_terminal 开的命令终端」的措辞要与新语义一致；CLI `--help` 与 `packages/cli/README.md` 同步；插件 `plugin.json` 提到 0.8.0（SKILL 内容变了，市场按版本发布）。Rejected：直接改插件目录那份 SKILL——`--check` 判红。Based on: `scripts/sync-claude-plugin.mjs:9-19`；`tests/src/claude-plugin-session-context.test.mjs`（插件目录零汉字用例，plan 099 改为递归扫目录）；`apps/server/src/mcp/tools.ts:265,395-405`；`packages/cli/cofluxd.mjs:1088-1095`；`integrations/claude-plugin/.claude-plugin/plugin.json`。
-
-- **测试落在两个既有黑盒文件里，各加一条会话终端闭环用例**（decided while planning）：`tests/src/agent-control.test.mjs` 加「不带 --cmd 开出终端 → list 为 running → send 一条能证明 tty 的命令 → read 快照含其输出 → send exit → wait 报 exited exit=0」；`tests/src/mcp-write-tools.test.mjs` 加「create_terminal 不带 command → read_terminal source=snapshot → send_terminal_input → wait_terminal 退出」。等提示符的手法由执行者定（例如 send 一条带唯一标记的命令后轮询 read 直到出现标记，不依赖提示符文本）。同时保留一条作业终端负向用例证明「空命令不再被拒、非空超长仍被拒」。Rejected：新建独立测试文件——两个文件已各自搭好 daemon/中心/PTY 的 fixture，复用最省。Based on: `tests/src/agent-control.test.mjs:86-130,229-260`；`tests/src/mcp-write-tools.test.mjs:186-270`。
+- **Trimmed command emptiness is the sole discriminator on both paths.** Missing/blank local --cmd and MCP command are equivalent. Rejected: explicit --shell/mode adds combinations with command that require explanation, contrary to the user's natural no-command request. Rejected: different meanings for absent and empty strings. Evidence: cofluxd.mjs:999-1000, mcp/tools.ts:403, hub.ts:3692, hook.rs:281-284.
+- **No protocol changes or new capability names.** Session terminals use empty AgentTerminalNew.shell, forwarded unchanged into SessionCreate.shell; supervisor selects its default shell. Central DeviceSessionCreate.command already skips scripts for empty values. Old-daemon failures are readable: local rejects itself; pre-091 central daemons are gated by prepared_execute, while 091+ already support empty commands. Rejected: a shell_terminal capability with no unsupported combination to guard. Rejected: changing the stale AgentTerminalNew.shell comment alone and regenerating three outputs; record it for later. Evidence: daemon.proto:103-108; hub.ts:1294; supervisor sessions.rs:805-809; worker device.rs:2088; device.proto:480-482 (old workers ignore command and start ordinary shells, protected by center capability gating); daemon-capabilities.ts:11; worker main.rs:126-127.
+- **Session terminals write no wrapper or log registration.** Local agent_ctl skips write_command_script, sends empty shell, and never calls remember_log. Read then uses the existing sessiond snapshot fallback. Rejected: wrapping sessions for logs would pipe stdout and destroy TTY behavior. Evidence: agent_ctl.rs:214-236 currently always writes/registers; ops.rs:334-336 documents piped stdout; agent_ctl.rs:265-279,549-603 prefers logs, then snapshots, then empty output.
+- **Allow empty commands but retain the 16 KB limit for nonempty commands in both validators.** hook.rs/hub.ts errors no longer say commands cannot be empty. Evidence: hook.rs:39-40,281-289; hub.ts:136,3692-3694.
+- **Default title**: empty title plus command uses server's existing `agent 终端` fallback on both paths. Central first-command-line default becomes empty and needs this explicit fallback. Rejected: web's Terminal N numbering is computed client-side and unavailable in server. Evidence: hub.ts:1272,3695; web workspace-terminal.tsx:411.
+- **Keep wait semantics; document them.** It still waits for exited. SKILL must explain sessions do not finish themselves; wait is useful after sending exit, and default 30-minute expiry is a timeout rather than command failure. Rejected: special-casing wait would split semantics; agents are responsible for choosing to wait on a persistent process. Evidence: cofluxd.mjs:1030-1042 and 094 ledger status in agent_ctl.rs.
+- **Synchronize all documentation; edit only authoritative SKILL.** Change packages/cli/skills/coflux/SKILL.md, then sync to the plugin; CI checks equality. Plugin content must be English, recursively checked. MCP create_terminal title/description/inputSchema and read_terminal's log description must distinguish command jobs; CLI help/README match. Bump plugin.json to 0.8.0 because SKILL changes are versioned marketplace content. Rejected: directly editing only the delivery SKILL. Evidence: sync script:9-19, session-context character test updated by 099, mcp/tools.ts:265,395-405, cofluxd.mjs:1088-1095, plugin.json.
+- **Add one session lifecycle case to each existing black-box file** (planning decision). agent-control: no --cmd → running list entry → send TTY-check command → snapshot contains output → send exit → wait reports exited exit=0. mcp-write-tools: no command → snapshot source → send input → wait for exit. Executor chooses prompt waiting, e.g. unique marker command and read polling rather than literal prompt matching. Retain negative coverage proving empty accepted and nonempty oversized rejected. Rejected: new test files, since both existing fixtures already provide daemon/center/PTY. Evidence: agent-control:86-130,229-260; mcp-write-tools:186-270.
 
 ## Direction
 
-四个里程碑，文件互不相交，但整体规模小、共享同一份语义，**作为一个工作包执行，不拆分**。
+Four disjoint milestones share one small semantic change. **Execute as one work package, without splitting.**
 
-### 里程碑 1：daemon 本地路径 + CLI 支持会话终端
+### Milestone 1: Local daemon and CLI support
 
-`cofluxd terminal new` 不带 `--cmd`（或空白）能开出会话终端：CLI 不再 die，daemon `/agent` 的 `terminal.new` 放行空命令并以空 shell 向中心建会话、不写脚本不记日志；非空命令路径与错误文案不变；`--help` 里 `--cmd` 标为可选并一句话说明两种终端。CLI 在开出会话终端后的提示文案由执行者定（至少提示「先 read 等提示符再 send」）。
-验证：`cargo build -p coflux-supervisor -p coflux-worker` -> exit 0 且零警告；`cargo test -p coflux-worker` -> exit 0；`node packages/cli/cofluxd.mjs --help` -> exit 0 且帮助里 terminal new 的 `--cmd` 为可选。
+Missing/blank --cmd opens a session: CLI no longer dies; daemon /agent terminal.new accepts empty and requests empty shell, without script/log registration. Nonempty-command behavior/errors remain. Help marks --cmd optional and explains both types. Executor chooses creation hints, including read-before-send prompt guidance.
+Validation: `cargo build -p coflux-supervisor -p coflux-worker` → warning-free exit 0; `cargo test -p coflux-worker` → exit 0; `node packages/cli/cofluxd.mjs --help` → exit 0 with optional --cmd.
 
-### 里程碑 2：中心 MCP 路径支持会话终端
+### Milestone 2: Central MCP support
 
-`create_terminal` 的 `command` 可选；`createTerminalForAccount` 空命令放行、非空仍限 16 KB、空标题落到「agent 终端」兜底；下发的 `DeviceSessionCreate.command` 为空串即可（worker 现有分支自然走普通 shell）；工具 title/description 与 `read_terminal` 描述改口径。
-验证：`node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` -> exit 0。
+Make command optional. createTerminalForAccount accepts empty, retains 16 KB limit, and defaults empty title to `agent 终端`. Send empty DeviceSessionCreate.command; worker's existing ordinary-shell branch handles it. Update tool and read descriptions.
+Validation: `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` → exit 0.
 
-### 里程碑 3：文档与插件
+### Milestone 3: Documentation and plugin
 
-SKILL 唯一源新增会话终端的说明（何时用作业终端、何时用会话终端；会话终端的 read 是快照、无日志；先 read 再 send；wait 只在 send exit 后有意义；全 tty 所以 TUI/颜色可用）并同步到插件目录；`packages/cli/README.md` 示例补一条不带 `--cmd` 的写法；插件 README 若描述了终端语义则同步；`plugin.json` 0.8.0。
-验证：`node scripts/sync-claude-plugin.mjs --check` -> exit 0；`node --import tsx --test tests/src/claude-plugin-session-context.test.mjs tests/src/claude-plugin-guard.test.mjs` -> 全绿（含插件目录零汉字）。
+Explain job/session choice, snapshot-only/no-log reads, read before send, wait after exit, and full-TTY TUI/color support in source SKILL, then synchronize. Add a no-command CLI README example. Update plugin README if it describes terminal semantics; bump plugin.json to 0.8.0.
+Validation: sync --check exits 0; session-context and guard tests pass, including English-only plugin scan.
 
-### 里程碑 4：黑盒用例
+### Milestone 4: Black-box cases
 
-按 Decisions 最后一条在两个既有黑盒文件里各加会话终端闭环用例与负向用例。
-验证（里程碑级，语法级）：`node --check tests/src/agent-control.test.mjs && node --check tests/src/mcp-write-tools.test.mjs` -> exit 0。真正跑通属验收（见 Commands）。
+Add lifecycle and negative cases to both existing files as specified.
+Milestone syntax validation: `node --check tests/src/agent-control.test.mjs && node --check tests/src/mcp-write-tools.test.mjs` → exit 0. Actual execution is acceptance below.
 
 ## Landmines
 
-- `crates/worker/src/device.rs:2088`：中心路径空命令已经走普通 shell 分支，且前面的 `remember_create` 不受影响——**不要**把它改成也写脚本，也不要在这里加门禁。
-- `apps/server/src/hub.ts:3695`：默认标题取命令首行，空命令下 `validBoundedText("")` 可能通过而留下空标题，必须显式兜底。
-- `packages/cli/cofluxd.mjs` 用 `parseArgs` 解析：`--cmd` 缺省、`--cmd=`、`--cmd ""` 三种写法的解析结果要实测，别只改 die 那一行；SKILL 里「必须写 `--cmd=<值>`」的约定保留。
-- `crates/worker/src/hook.rs:281-289` 的空命令拒绝是本地路径唯一的门，放行后 `AgentAction::TerminalNew` 的下游（agent_ctl）必须同时改，否则会写出一个 `-lc ''` 的脚本并立刻退出，表现为「开了就退」的静默失败。
-- `crates/worker/src/agent_ctl.rs:265-279`：`read` 的快照回退只认「中心给的 session 与本地 alive 表一致」，会话终端刚开出来的头几百毫秒快照可能为空（`（暂无输出）`），测试要轮询而不是一次 read。
-- 黑盒测试需要本机 PG 5432 与 Docker，且 `pnpm -C tests test` 的 pretest 会 cargo build；单跑文件前先 `CARGO_PROFILE_DEV_DEBUG=0 cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay`。全量黑盒里 `agent-activity` 的 presence 三条在装了 coflux 的本机必假红且会卡住整套，验收只跑本 plan 触及的两个文件。
-- `tests/src/claude-plugin-session-context.test.mjs` 递归扫插件目录禁止汉字：SKILL 新增段落、plugin.json description 都必须英文。
-- 旧 daemon 兼容不做任何探测：新 CLI 打旧 daemon 得到「terminal.new 缺 command」即为预期，SKILL 的「predates the daemon upgrade / 需要升级」一节顺带提一句「不带命令被拒 = daemon 需要升级」即可。
-- 生产生效节奏不同：worker 改动随 tag 热升级到达 daemon，server 随部署，CLI 随 npm，插件随市场。本 plan 完成 ≠ 生产可用，README 状态里写明。
+- device.rs:2088 already handles empty central commands as ordinary shells, without affecting preceding remember_create. Do not add scripts or gating there.
+- hub.ts:3695 derives title from command's first line; validBoundedText("") may pass, leaving blank sidebar titles without an explicit fallback.
+- CLI parseArgs needs real checks of omitted --cmd, --cmd=, and --cmd ""; do not merely remove one die. Preserve SKILL's --cmd=<value> convention.
+- Removing hook.rs's empty rejection must coincide with agent_ctl changes; otherwise it writes `-lc ''` and silently creates a terminal that immediately exits.
+- Snapshot fallback at agent_ctl.rs:265-279 requires central session identity to match local alive state. Initial snapshots can be empty for hundreds of milliseconds (`（暂无输出）`); poll in tests.
+- Black-box tests require local PG 5432 and Docker; pnpm pretest builds Rust. Before targeted files build with `CARGO_PROFILE_DEV_DEBUG=0 cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay`. Full-suite agent-activity presence cases false-fail/hang on this installed-Coflux machine, so acceptance runs only the two touched files.
+- Plugin character tests recurse: all new SKILL/plugin-description text must be English.
+- Do not probe old daemons. Existing missing-command rejection is expected; add a brief no-command-rejected-means-upgrade note to SKILL's upgrade guidance.
+- Production delivery differs by component: worker tags, server deployment, npm CLI, marketplace plugin. Plan completion does not mean live availability; state this in the index.
 
 ## Scope
 
 In scope:
-- `packages/cli/cofluxd.mjs`
-- `packages/cli/README.md`
-- `packages/cli/skills/coflux/SKILL.md`（唯一源）
-- `integrations/claude-plugin/skills/coflux/SKILL.md`（仅经 sync 脚本产出）
-- `integrations/claude-plugin/.claude-plugin/plugin.json`
-- `integrations/claude-plugin/README.md`（仅当其描述了终端语义）
-- `crates/worker/src/hook.rs`
-- `crates/worker/src/agent_ctl.rs`
-- `apps/server/src/hub.ts`
-- `apps/server/src/mcp/tools.ts`
-- `tests/src/agent-control.test.mjs`
-- `tests/src/mcp-write-tools.test.mjs`
-- `plans/101-agent-shell-terminal.md`、`plans/README.md`
+- packages/cli/cofluxd.mjs, README.md, source skills/coflux/SKILL.md
+- Synchronized plugin SKILL, plugin.json, and README only if it describes terminal semantics
+- crates/worker/src/hook.rs and agent_ctl.rs
+- apps/server/src/hub.ts and mcp/tools.ts
+- tests/src/agent-control.test.mjs and mcp-write-tools.test.mjs
+- This plan and plans/README.md
 
 Out of scope:
-- `proto/`、`packages/protocol/`、`packages/swift-client/`——零协议改动，注释也不动
-- `crates/supervisor/`——空 shell 取默认已在位
-- `crates/worker/src/ops.rs`、`crates/worker/src/log_sink.rs`、`crates/worker/src/device.rs`——脚本模板、日志汇、中心路径的空命令分支都不动
-- `apps/web/`、`apps/mobile/`、`apps/ios/`、`apps/macos/`——不区分会话终端
-- `integrations/claude-plugin/hooks/`、`integrations/claude-plugin/scripts/`——hooks 不变，Codex 无需重新信任
-- 发版与部署（tag、npm、市场、prod-jp）
+- proto, packages/protocol, packages/swift-client, including comments
+- supervisor, whose empty-shell default already exists
+- ops.rs, log_sink.rs, device.rs: existing wrappers/log sink/central empty-command branch
+- All frontend apps; no session-terminal distinction
+- Plugin hooks/scripts: unchanged, no Codex retrust
+- Tags, npm, marketplace, prod-jp release/deployment
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Rust 构建 | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0，零警告 |
-| Rust 单测 | `cargo test -p coflux-worker` | exit 0 |
-| server 类型检查 | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
-| CLI 帮助 | `node packages/cli/cofluxd.mjs --help` | exit 0，`--cmd` 标为可选 |
-| SKILL 两份一致 | `node scripts/sync-claude-plugin.mjs --check` | exit 0 |
-| 插件单测（含零汉字） | `node --import tsx --test tests/src/claude-plugin-session-context.test.mjs tests/src/claude-plugin-guard.test.mjs` | 全绿 |
-| 黑盒用例语法 | `node --check tests/src/agent-control.test.mjs && node --check tests/src/mcp-write-tools.test.mjs` | exit 0 |
-| 黑盒：本地路径 (acceptance) | `CARGO_PROFILE_DEV_DEBUG=0 cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay && cd tests && node --import tsx --test src/agent-control.test.mjs` | 全绿 |
-| 黑盒：中心路径 (acceptance) | `cd tests && node --import tsx --test src/mcp-write-tools.test.mjs` | 全绿 |
-| 真机走查 (acceptance) | 在本仓库的 coflux 终端里 `cofluxd terminal new --title="Shell"`，再 send `python3 -c 'import sys; print(sys.stdin.isatty(), sys.stdout.isatty())'` 并 read | 侧栏出现常驻终端；read 见 `True True`；send `exit` 后 wait 立即返回 exit=0 |
+| Rust build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0, zero warnings |
+| Rust tests | `cargo test -p coflux-worker` | exit 0 |
+| Server types | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
+| CLI help | `node packages/cli/cofluxd.mjs --help` | Optional --cmd, exit 0 |
+| SKILL consistency | `node scripts/sync-claude-plugin.mjs --check` | exit 0 |
+| Plugin tests and English scan | `node --import tsx --test tests/src/claude-plugin-session-context.test.mjs tests/src/claude-plugin-guard.test.mjs` | All pass |
+| Test syntax | `node --check tests/src/agent-control.test.mjs && node --check tests/src/mcp-write-tools.test.mjs` | exit 0 |
+| Local black-box acceptance | `CARGO_PROFILE_DEV_DEBUG=0 cargo build -p coflux-supervisor -p coflux-worker -p coflux-relay && cd tests && node --import tsx --test src/agent-control.test.mjs` | All pass |
+| Central black-box acceptance | `cd tests && node --import tsx --test src/mcp-write-tools.test.mjs` | All pass |
+| Real-machine acceptance | In this repository's Coflux terminal run `cofluxd terminal new --title="Shell"`, send `python3 -c 'import sys; print(sys.stdin.isatty(), sys.stdout.isatty())'`, then read | Persistent sidebar terminal; True True; send exit then wait returns exit=0 |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] 本地与 MCP 两条路径不带命令都开出常驻会话终端，tty 检查为 `True True`；带命令路径行为、日志、退出码、错误文案与 79b3694 一致。
-- [ ] 空命令 + 空标题的终端在侧栏显示「agent 终端」，不是空标题。
-- [ ] 非空命令超过 16 KB 仍被两条路径拒绝，文案不再含「不能为空」。
-- [ ] SKILL 唯一源与插件副本一致，插件目录零汉字，plugin.json 为 0.8.0，MCP 工具描述与 CLI 帮助已改口径。
-- [ ] Required tests exist and assert meaningful behavior（两个黑盒文件各有会话终端闭环用例与负向用例）。
+- [ ] Both paths create persistent sessions without commands, reporting True True; command jobs retain 79b3694 behavior/logs/status/errors.
+- [ ] Empty command/title displays `agent 终端`, never blank.
+- [ ] Both paths reject nonempty commands over 16 KB; error no longer claims empty is invalid.
+- [ ] Synchronized English-only SKILL, plugin 0.8.0, updated MCP descriptions/CLI help.
+- [ ] Meaningful session lifecycle and negative cases in both black-box files.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
-- [ ] `plans/README.md` status is updated.
+- [ ] plans/README.md updated.
 
 ## STOP conditions
 
-- A fact cited under Decisions & tradeoffs no longer holds（尤其 `device.rs` 的空命令分支、supervisor 的空 shell 取默认、hub.ts 的 shell 透传）。
-- The outcome requires out-of-scope files（例如发现必须改 proto 或 supervisor 才能开出会话终端）。
-- A validation command fails twice after one reasonable fix.
-- A named assumption is false（例如 `parseArgs` 无法区分 `--cmd` 缺省与非法用法而需要改参数体系）。
+- A cited fact changes, especially central empty-command handling, supervisor defaults, or hub shell passthrough.
+- Out-of-scope changes are required, such as proto/supervisor changes to create sessions.
+- Validation fails twice after one reasonable fix.
+- An assumption is false, such as parseArgs requiring redesign to distinguish omission from invalid syntax.
 
 ## Maintenance notes
 
-- `proto/coflux/v1/daemon.proto` 里 `AgentTerminalNew.shell` 的注释仍写「worker 已写好的临时包装脚本绝对路径」，实际语义已是「空串 = 默认登录 shell」；下次因别的原因动 proto 时顺手改注释并重新生成。
-- 会话终端没有日志：web 端 097 的退出回放对它只有 checkpoint 一屏；若将来需要会话终端也能回读全量输出，要另起 plan 走 PTY 侧录制（不能再用管道方案）。
-- 每工作区活跃终端上限 8 含会话终端；会话终端不会自己退出，agent 忘记 `exit` 会长期占位，若用户反馈撞上限，先看 074 记的「AI 开的终端的自动回收策略」。
-- 发版清单（用户决定）：worker 打 tag 热升级、server 部署 prod-jp、npm `cofluxd` 发版、插件 0.8.0 走 plugins-builder（把 main 的 SHA 交给 builder 会话）。
+- AgentTerminalNew.shell's proto comment still says temporary wrapper-script absolute path, but empty now means default login shell. Update it and regenerate when proto next changes for another reason.
+- Session terminals have no logs; plan 097 exit replay has only one checkpoint screen. Full-output history would need a separate PTY-side recording plan, never pipes.
+- The eight-active-terminals workspace limit includes sessions. Forgotten exit leaves slots occupied indefinitely; if users hit the limit, consult 074's AI-terminal automatic-reclamation backlog.
+- User-decided release checklist: worker tag/hot upgrade, server prod-jp deployment, npm cofluxd release, plugin 0.8.0 through plugins-builder with main SHA.

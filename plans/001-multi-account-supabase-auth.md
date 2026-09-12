@@ -1,4 +1,4 @@
-# Plan 001: 多账号 SaaS 化 —— Supabase Auth 身份层 + 换票登录
+# Plan 001: Multi-account SaaS — Supabase Auth identity layer and token-exchange login
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -20,165 +20,89 @@
 
 ## Requirement
 
-coflux 目前是单账号系统：身份 = env 里一对 `COFLUX_USERNAME`/`COFLUX_PASSWORD`，
-`accountId` 硬编码 `"default"`（`apps/server/src/config.ts:33-35`）。要把它改造成
-Tailscale 式多账号 SaaS：多个用户各自登录、各自拥有隔离的 Account（设备/项目/
-工作区/任务互不可见）。
+coflux currently supports one account: identity comes from the `COFLUX_USERNAME`/`COFLUX_PASSWORD` environment variables, and `accountId` is hardcoded to `"default"` (`apps/server/src/config.ts:33-35`). Convert it to a Tailscale-style multi-account SaaS: users log in independently and own isolated Accounts, with no visibility into each other's devices, projects, workspaces, or tasks.
 
-完成后成立的事实：
+The following must hold on completion:
 
-1. 生产 SaaS 模式（`COFLUX_AUTH=supabase`）下，用户用 Supabase 托管的
-   email+password 登录 web；不同用户登录后各自只能看到/触达自己账号下的设备与数据。
-2. 首次登录的合法 Supabase 用户自动获得一个个人 Account（lazy provision），
-   无需管理端在 coflux 侧做任何操作。
-3. local 模式（`COFLUX_AUTH=local`，默认）行为与现状完全一致：env 用户名密码、
-   单一 `default` 账号——`pnpm dev`、集成测试、自托管零感知。
-4. daemon 登记/认证机制（enrollmentKey → deviceToken）完全不变，Rust 侧零改动。
+1. In production SaaS mode (`COFLUX_AUTH=supabase`), users log in to the web client with Supabase-hosted email/password authentication. Each user can see and access only the devices and data in their own account.
+2. A valid Supabase user receives a personal Account on first login through lazy provisioning, without administrator action in coflux.
+3. Local mode (`COFLUX_AUTH=local`, the default) behaves exactly as before: environment-based credentials and a single `default` account. `pnpm dev`, integration tests, and self-hosted installations require no changes.
+4. Daemon enrollment/authentication (enrollmentKey → deviceToken) remains unchanged, with no Rust changes.
 
-正确 vs 相邻错误的判别：**Supabase 只做"你是谁"的一次性认证（IdP），coflux 的
-会话、数据、授权全部自持**。如果实现让 WS 连接持续依赖 Supabase JWT（比如每次
-重连都要新 JWT、或 server 定期调 Supabase API 校验会话），就是走偏了。
+**Supabase provides a one-time identity check; coflux owns its sessions, data, and authorization.** Making WS connections continually depend on Supabase JWTs—for example, obtaining a new JWT on every reconnect or periodically calling Supabase to validate sessions—would violate this boundary.
 
 ## Decisions & tradeoffs
 
-- **身份提供方**：Supabase Auth（email+password，dashboard 侧关闭 signup、手动建
-  用户）。Rejected: 自建 users 表 + scrypt——当前阶段更简单，但开放注册时需要自建
-  邮件验证/密码重置/防爆破整套；选 Supabase 是为未来开放注册付的一次性结构成本。
-  Rejected: 用 Supabase 的 Postgres/RLS 存业务数据——coflux 数据留在自己 sqlite
-  （`apps/server/src/store.ts`），Supabase 的接触面只有登录验签一处。
-- **换票模式（核心）**：web 用 Supabase 拿 access_token(JWT) → WS
-  `client.auth{ supabaseToken }` → server 用 JWKS **本地验签**（无网络往返，公钥
-  缓存）→ 取 `sub` 为 userId → 查/建 membership → 签发 coflux 自己的 30 天
-  session token（复用现有 `client_tokens` 机制，`store.ts:188-205`）→ 之后所有
-  WS 重连只用 coflux session token。Rejected: 每次连接都验 Supabase JWT——JWT
-  1 小时过期，WS 长连接/重连会被迫依赖 Supabase 可用性且要处理刷新。
-  Based on: `client.auth` 已有 clientToken 重连分支（`apps/server/src/hub.ts:396-421`），
-  `client_tokens` 已有 `expiresAt`（`store.ts:69-72`）。
-- **账号模型**：User : Account = 1:1 个人账号；新增 `memberships (userId,
-  accountId, role)` 表（PRIMARY KEY (userId, accountId)），role MVP 固定
-  `"owner"`。userId = Supabase user UUID（JWT `sub`）。**不建本地 users 表**——
-  身份资料在 Supabase，email 从 JWT claim 取。Rejected: users 表直挂 accountId
-  ——加团队时要迁移；memberships 表一行结构成本换未来零迁移。
-- **注册策略**：不做注册页/注册端点。Supabase dashboard 关 signup、手动 Add
-  user；coflux 侧对任何验签通过且无 membership 的 userId lazy 创建
-  Account（id = randomUUID，name = email claim）+ owner membership。能出示合法
-  JWT ⇒ 管理员亲手建的用户，故 lazy provision 安全。
-- **provider 抽象**：`COFLUX_AUTH` env，取值 `local`（默认）| `supabase`。
-  local = 现有 `verifyLogin` env 密码逻辑（`hub.ts:774`）原样保留。config 的
-  fail-closed 校验（`config.ts:52-59`）按 provider 分支：supabase 模式必需
-  `SUPABASE_URL`（及 web 侧 anon key），不再要求 `COFLUX_PASSWORD`/
-  `COFLUX_ENROLL_KEY`；local 模式要求维持现状。Rejected: 只留 Supabase——
-  集成测试（`tests/src/harness.mjs:117-135` 全走 username/password）和本地开发
-  会被迫依赖外部服务。
-- **bootstrap 按 provider 分支**：`default` 账号 seed、env enroll key seed、
-  credFingerprint 撤销逻辑（`apps/server/src/index.ts:24-46`）都是单账号/env
-  密码的伴生物，仅 local 模式执行。supabase 模式下 enroll key 全部走 UI 生成
-  （该能力已存在，`hub.ts:444-446`）。
-- **JWT 验签**：server 新增依赖 `jose`（纯 JS，无原生依赖），用
-  `createRemoteJWKSet(`${SUPABASE_URL}/auth/v1/.well-known/jwks.json`)`，校验
-  iss = `${SUPABASE_URL}/auth/v1`、aud = `authenticated`、exp。要求 Supabase
-  项目启用 asymmetric signing keys（新项目默认）；HS256 legacy secret 不支持，
-  验签失败回 `auth.error`。Rejected: node:crypto 手写验签——JWKS 轮换/缓存细节
-  不值得自研。
-- **web 侧 Supabase 配置来源** (decided while planning)：Vite build-time env
-  `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`。两者都设时登录表单走
-  Supabase（email+password 换 JWT），否则维持现状 username/password 表单。
-  Rejected: server 下发 auth 配置的运行时端点——web 本来就是 per-environment
-  静态构建，build-time env 是 Vite 惯例且少一个 HTTP 路由。
-- **web 登录不引 supabase-js SDK** (decided while planning)：email+password 换
-  token 就是一个 `fetch` POST 到
-  `${SUPABASE_URL}/auth/v1/token?grant_type=password`（header `apikey: <anon>`），
-  取响应 `access_token`。Rejected: 引 `@supabase/supabase-js`——只用一个端点就
-  引整个 SDK 不值；将来要 OAuth/magic link 再引。
-- **协议变更仅 TS 侧**：`client.auth` 增加可选 `supabaseToken` 字段
-  （`packages/protocol/src/index.ts:134`）；`auth.ok` 不变（照旧回带 coflux
-  session token）。client↔server 消息不经过 Rust 线协议真相源，crates/protocol
-  零改动。
-- **client_tokens 加 userId 列**：沿用 `store.ts:107-114` 的轻量 migrate 模式
-  （PRAGMA table_info 补列）。local 模式签发的 token userId 存 NULL。
-  per-user token 撤销不在本期范围。
-- **生产数据迁移**：prod-jp 现有 `default` 账号数据不动，切 supabase 模式后给
-  管理员的 Supabase userId 手动插一条 membership 指向 `default`。属运维步骤，
-  见 Maintenance notes，不在本计划代码范围内。
+- **Identity provider**: Supabase Auth with email/password. Disable signup in the dashboard and create users manually. Rejected: a local users table plus scrypt. Although simpler initially, opening registration would then require building email verification, password resets, and brute-force protection. Supabase incurs a one-time structural cost for future public signup. Rejected: storing business data in Supabase Postgres/RLS. coflux data stays in its own SQLite database (`apps/server/src/store.ts`); login verification is its only integration with Supabase.
+- **Token exchange is the core model**: the web client obtains a Supabase access_token (JWT), sends `client.auth{ supabaseToken }` over WS, and the server verifies the signature **locally using JWKS** with cached public keys and no verification round trip. It extracts `sub` as userId, looks up or creates membership, and issues a coflux session token valid for 30 days using the existing `client_tokens` mechanism (`store.ts:188-205`). Subsequent WS reconnects use only that coflux token. Rejected: checking a Supabase JWT on every connection. JWTs expire after one hour, making long-lived connections/reconnects depend on Supabase availability and refresh handling. Based on: the existing clientToken reconnect branch in `client.auth` (`apps/server/src/hub.ts:396-421`) and `expiresAt` in `client_tokens` (`store.ts:69-72`).
+- **Account model**: User : Account is initially 1:1 for personal accounts. Add `memberships (userId, accountId, role)` with PRIMARY KEY (userId, accountId); the MVP role is always `"owner"`. userId is the Supabase user UUID from JWT `sub`. **Do not create a local users table**: identity data remains in Supabase, and email comes from the JWT claim. Rejected: putting accountId directly on a users table, which would require migration when teams are added. The small membership-table cost avoids that later migration.
+- **Signup policy**: no signup page or endpoint. Disable signup in the Supabase dashboard and use Add user manually. For any verified userId without membership, coflux lazily creates an Account (id = randomUUID, name = email claim) and owner membership. A valid JWT then identifies an administrator-created user, making lazy provisioning safe.
+- **Provider abstraction**: `COFLUX_AUTH` accepts `local` (default) or `supabase`. Local mode preserves the existing environment-password `verifyLogin` logic (`hub.ts:774`). Branch the fail-closed configuration checks (`config.ts:52-59`) by provider: Supabase mode requires `SUPABASE_URL` and the web anon key, but no longer requires `COFLUX_PASSWORD`/`COFLUX_ENROLL_KEY`; local requirements remain unchanged. Rejected: supporting only Supabase, which would force integration tests (`tests/src/harness.mjs:117-135`, all using username/password) and local development to depend on an external service.
+- **Provider-specific bootstrap**: the `default` account seed, environment enroll-key seed, and credFingerprint revocation logic (`apps/server/src/index.ts:24-46`) belong to the single-account/environment-password model and run only in local mode. Supabase mode generates all enroll keys through the existing UI capability (`hub.ts:444-446`).
+- **JWT verification**: add `jose` to the server (pure JS, no native dependencies). Use ``createRemoteJWKSet(`${SUPABASE_URL}/auth/v1/.well-known/jwks.json`)`` and validate iss = `${SUPABASE_URL}/auth/v1`, aud = `authenticated`, and exp. Require asymmetric signing keys in the Supabase project, the default for new projects. Do not support the legacy HS256 secret; return `auth.error` on verification failure. Rejected: handwritten node:crypto verification, because implementing JWKS rotation and caching is not worthwhile.
+- **Web Supabase configuration** (decided while planning): Vite build-time `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`. When both are set, the login form exchanges email/password for a Supabase JWT; otherwise retain the current username/password form. Rejected: a server endpoint supplying runtime auth configuration. The web is already built per environment; build-time variables follow Vite conventions and avoid another HTTP route.
+- **No supabase-js SDK for web login** (decided while planning): exchange credentials with a `fetch` POST to `${SUPABASE_URL}/auth/v1/token?grant_type=password`, setting header `apikey: <anon>`, and read `access_token` from the response. Rejected: importing `@supabase/supabase-js` for one endpoint. Reconsider the SDK if OAuth or magic links are needed later.
+- **Protocol changes only on the TS side**: add optional `supabaseToken` to `client.auth` (`packages/protocol/src/index.ts:134`). Keep `auth.ok` unchanged, including its coflux session token. Client↔server messages do not pass through the Rust wire-protocol source, so crates/protocol remains unchanged.
+- **Add userId to client_tokens**: follow the lightweight migration pattern in `store.ts:107-114`, using PRAGMA table_info to add missing columns. Tokens issued in local mode store NULL as userId. Per-user token revocation is out of scope.
+- **Production data migration**: retain prod-jp's existing `default` account data. After switching to Supabase mode, manually insert a membership linking the administrator's Supabase userId to `default`. This is an operational step described in Maintenance notes, outside this plan's code changes.
 
 ## Direction
 
-现有隔离层（所有表带 accountId + hub 按 accountId 过滤广播/snapshot/路由）已经
-支撑多账号，本计划只增加"User → Account"的身份解析层，不动编排/数据面。
+The existing isolation layer already supports multiple accounts: every table has accountId, and the hub filters broadcasts, snapshots, and routes by accountId. Add only the User → Account identity-resolution layer, leaving orchestration and the data plane unchanged.
 
-### Milestone 1: server 支持 supabase provider（换票 + memberships + lazy provision）
+### Milestone 1: Server Supabase provider, token exchange, memberships, and lazy provisioning
 
-之后成立：`COFLUX_AUTH=supabase` 启动的 server 能接受
-`client.auth{ supabaseToken }`，验签→解析 userId→查/建 membership→签发 coflux
-session token；不同 userId 得到不同 accountId，数据互相不可见；local 模式行为
-与 `d8ba0df` 完全一致。
+A server started with `COFLUX_AUTH=supabase` accepts `client.auth{ supabaseToken }`, verifies it, resolves userId, looks up/creates membership, and issues a coflux session token. Different userIds receive different accountIds and cannot see each other's data. Local mode remains identical to `d8ba0df`.
 
-验证：`pnpm --filter @coflux/tests test` 全绿（证明 local 模式零回归）；新增的
-supabase 分支集成测试通过——测试里自建 ES256 key pair、起本地 HTTP 服务提供
-JWKS、签测试 JWT，把 `SUPABASE_URL` 指向该本地服务（这样不依赖真 Supabase）。
-至少覆盖：合法 JWT 首次登录建号、二次登录复用同一账号、过期/错签名 JWT 拒绝、
-两个不同 userId 账号隔离（互相看不到设备/任务）、换票得到的 session token 可重连。
+Validation: `pnpm --filter @coflux/tests test` passes, demonstrating no local-mode regression. New Supabase integration tests generate an ES256 key pair, serve JWKS over local HTTP, sign test JWTs, and point `SUPABASE_URL` at that service without using real Supabase. Cover first-login account creation, reuse on subsequent login, expired/incorrectly signed JWT rejection, device/task isolation between two userIds, and reconnecting with the exchanged session token.
 
-### Milestone 2: protocol + web 登录改造
+### Milestone 2: Protocol and web login
 
-之后成立：`packages/protocol` 的 `client.auth` 含 `supabaseToken` 可选字段；web
-在设了 `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` 时展示 email+password 表单、
-fetch Supabase 换 access_token、经 WS 完成换票并把 coflux session token 存
-localStorage（复用现有逻辑，`apps/web/src/App.tsx:96-157`）；未设时表单与现状
-完全一致。Supabase 登录失败（401/网络错误）在表单上有明确报错。
+`packages/protocol` exposes optional `supabaseToken` on `client.auth`. With `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` set, the web displays email/password login, fetches a Supabase access_token, exchanges it over WS, and saves the coflux token in localStorage using the existing logic (`apps/web/src/App.tsx:96-157`). Without those variables, the form remains unchanged. Supabase 401/network failures produce clear form errors.
 
-验证：`pnpm -r build` exit 0；`pnpm --filter @coflux/tests test` 全绿。手工验证
-路径（可选，若有可用 Supabase 项目）：设 env 起 dev server + web，真实登录走通。
+Validation: `pnpm -r build` exits 0 and `pnpm --filter @coflux/tests test` passes. Optional manual validation, if a Supabase project is available: configure the variables, start server/web development processes, and complete a real login.
 
 ## Landmines
 
-- `client.auth` 消息在 rate-limit 白名单里有特殊条目（`packages/protocol/src/index.ts:303`
-  附近的 `"client.auth": {}`），新增字段后确认该表/校验器（`isValidClientToServer`）
-  同步放行 `supabaseToken`，否则消息会在 transport 层被静默丢弃。
-- `index.ts:35-40` credFingerprint 逻辑会在 env 密码变化时**撤销全部** client
-  token。若在 supabase 模式下误执行，等于每次改任何 env 都把所有用户登出；
-  必须限定 local 模式。
-- `tests/src/security.test.mjs:66-67` 对 `client.auth` 发畸形字段（数字型
-  clientToken 等）断言拒绝——新增 `supabaseToken` 字段的类型校验要同样严格
-  （非 string 即拒绝），否则该测试思路下有漏洞。
-- `config.ts` 是模块加载时求值 + `process.exit(1)` fail-closed。新增的
-  provider 分支校验要保持这个模式，别把校验推迟到运行时。
-- web 的 token 恢复逻辑（`App.tsx:72-97`）在"有存量 token"时直接走 clientToken
-  重连分支——supabase 模式下这条路径必须保持可用（换票后的日常路径），别把它
-  改成每次都要重新向 Supabase 要 JWT。
+- `client.auth` has a special rate-limit allowlist entry near `"client.auth": {}` in `packages/protocol/src/index.ts:303`. Update that table/validator (`isValidClientToServer`) to allow `supabaseToken`, or transport will silently discard the message.
+- The credFingerprint logic in `index.ts:35-40` **revokes all** client tokens when the environment password changes. Running it in Supabase mode could log out everyone on environment changes; restrict it to local mode.
+- `tests/src/security.test.mjs:66-67` asserts rejection of malformed `client.auth` fields such as numeric clientToken. Apply the same strict string-only validation to `supabaseToken`.
+- `config.ts` validates during module loading and fails closed with `process.exit(1)`. Preserve this behavior for provider-specific checks rather than deferring validation until runtime.
+- Web token restoration (`App.tsx:72-97`) reconnects directly with an existing clientToken. Preserve this normal post-exchange path in Supabase mode; do not fetch another JWT on every reconnect.
 
 ## Scope
 
 In scope:
-- `apps/server/src/`（config / hub / store / index / 新增 auth 模块）
-- `apps/server/package.json`（新增 `jose`）
-- `packages/protocol/src/`（client.auth 消息 + 校验器）
-- `apps/web/src/`（登录表单 + Supabase fetch）
-- `tests/src/`（新增 supabase provider 集成测试；现有测试不应需要改动）
+
+- `apps/server/src/` (config, hub, store, index, and a new auth module)
+- `apps/server/package.json` (add `jose`)
+- `packages/protocol/src/` (client.auth message and validator)
+- `apps/web/src/` (login form and Supabase fetch)
+- `tests/src/` (new Supabase integration tests; existing tests should need no changes)
 - `plans/`
 
 Out of scope:
-- `crates/`、`packages/cli` —— daemon 登记/认证机制不变
-- 真实 Supabase 项目的创建与配置（关 signup、建用户）—— 运维步骤，见
-  Maintenance notes
-- 生产 prod-jp / staging 部署与 default 账号 membership 迁移 —— 运维步骤
-- 团队/多成员、角色权限、per-user token 撤销、开放注册 —— 未来迭代
-- OAuth / magic link / supabase-js SDK —— 未来迭代
+
+- `crates/`, `packages/cli`: daemon enrollment/authentication is unchanged
+- Creating/configuring a real Supabase project, disabling signup, and creating users: operational steps in Maintenance notes
+- prod-jp/staging deployment and default-account membership migration: operational steps
+- Teams, multiple members, role permissions, per-user token revocation, and public signup: future work
+- OAuth, magic links, and the supabase-js SDK: future work
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Test | `pnpm --filter @coflux/tests test` | exit 0（pretest 会 cargo build daemon） |
-| Typecheck/Build | `pnpm -r build` | exit 0 |
+| Test | `pnpm --filter @coflux/tests test` | exit 0; pretest builds the daemon with cargo |
+| Typecheck/build | `pnpm -r build` | exit 0 |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] supabase 模式：两个不同 Supabase userId 登录得到两个隔离账号（集成测试断言互不可见）。
-- [ ] supabase 模式：换票签发的 coflux session token 可用于 WS 重连，全程不再触碰 Supabase。
-- [ ] local 模式行为与 `d8ba0df` 一致，现有测试文件零改动即通过。
-- [ ] 过期 / 错误签名 / 非 string 的 supabaseToken 均被拒绝（auth.error 或断连）。
+- [ ] Supabase mode: two different Supabase userIds receive isolated accounts, asserted by integration tests.
+- [ ] Supabase mode: the exchanged coflux session token reconnects over WS without contacting Supabase again.
+- [ ] Local behavior matches `d8ba0df`; existing test files pass unchanged.
+- [ ] Expired, incorrectly signed, and non-string supabaseTokens are rejected with auth.error or disconnect.
 - [ ] Required tests exist and assert meaningful behavior.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
@@ -189,23 +113,16 @@ Out of scope:
 - A fact cited under Decisions & tradeoffs no longer holds.
 - The outcome requires out-of-scope files.
 - A validation command fails twice after one reasonable fix.
-- `jose` 无法在纯 node:sqlite/tsx 运行环境下工作（如需原生依赖）——停下报告。
-- 发现 client↔server 的 auth 消息实际经过 crates/protocol（与"仅 TS 侧"决策冲突）。
+- `jose` cannot run in the pure node:sqlite/tsx environment, for example because it requires native dependencies: stop and report.
+- Client↔server authentication actually passes through crates/protocol, contradicting the TS-only decision.
 
 ## Maintenance notes
 
-- **上线运维手册（代码合并后、切生产前）**：
-  1. Supabase 项目（可用 Supabase MCP 创建/管理）：Authentication → 关闭
-     signup；手动 Add user（管理员 + 受邀用户）；确认项目用 asymmetric
-     signing keys（JWKS 端点可访问）。
-  2. prod-jp env：`COFLUX_AUTH=supabase`、`SUPABASE_URL=<项目 URL>`；web 构建
-     加 `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY`。anon key 是公开值，非秘密。
-  3. 迁移既有数据：对管理员的 Supabase user UUID 执行
-     `INSERT INTO memberships (userId, accountId, role) VALUES ('<uuid>', 'default', 'owner')`
-     ——设备/项目/任务全保留。其他用户首次登录自动建新账号。
-  4. 迁移后 `COFLUX_USERNAME`/`COFLUX_PASSWORD` 可从 prod env 移除。
-- anon key 泄露无害（设计即公开），但 Supabase service_role key 永远不应出现在
-  coflux 任何配置里——本设计完全不需要它。
-- 将来加团队：memberships 已是多对多形状，加邀请流程 + role 检查即可，schema
-  无需迁移。
-- 将来换身份提供方：换票边界意味着只需替换"JWT 验签 → userId"这一个函数。
+- **Production operations after merging code and before cutover**:
+  1. Create/manage the Supabase project, optionally through Supabase MCP. Disable signup under Authentication; manually add the administrator and invited users. Confirm asymmetric signing keys and an accessible JWKS endpoint.
+  2. Set prod-jp environment variables `COFLUX_AUTH=supabase` and `SUPABASE_URL=<project URL>`. Add `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` to the web build. The anon key is public, not a secret.
+  3. Migrate existing data by running `INSERT INTO memberships (userId, accountId, role) VALUES ('<uuid>', 'default', 'owner')` with the administrator's Supabase user UUID. All devices/projects/tasks remain intact. Other users receive new accounts on first login.
+  4. Remove `COFLUX_USERNAME`/`COFLUX_PASSWORD` from production configuration after migration.
+- The anon key is public by design. The Supabase service_role key must never appear in any coflux configuration; this design does not need it.
+- Future teams need only invitations and role checks: memberships already supports many-to-many relationships without a schema migration.
+- Switching identity providers only requires replacing the JWT-verification → userId function at the token-exchange boundary.

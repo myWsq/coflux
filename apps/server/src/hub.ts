@@ -76,7 +76,6 @@ import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxy
 import { RelayTokenSigner, allowRendezvous, buildRelayPipeUrl, selectRelayNode, supportsP2pDial, supportsRelayDial, validRelayId } from "./relay-rendezvous.js";
 import { LocalControlPlane } from "./local-control.js";
 import { verifyPassword } from "./auth.js";
-import { OAuthService } from "./oauth.js";
 import { AuthPages } from "./auth-pages.js";
 import {
   createPreparedOperationService,
@@ -121,15 +120,13 @@ const MAX_AGENT_MESSAGE_BYTES = 1024;
 /** daemon 宣告的能力名（plan 091）：条数/单条字节上限，超限整条握手拒绝（同其它握手字段）。 */
 const MAX_CAPABILITY_ENTRIES = 32;
 const MAX_CAPABILITY_BYTES = 64;
-/** 完成原语（plan 091）的等待者总上限：MCP 一个请求一个等待者，256 已远超单账号并发。 */
+/** 完成原语（plan 091）的等待者总上限：账号接口一个请求一个等待者，256 已远超单账号并发。 */
 const MAX_COMPLETION_WAITERS = 256;
-/** 中心发起的 prepared 操作（建/删 worktree、建会话）的完成等待上限：Claude Code 远程 MCP 单请求
- * 60 秒，到期返回「已提交、稍后用 list_* 查」而不是挂着。 */
+/** 中心发起的 prepared 操作（建/删 worktree、建会话）的完成等待上限：到期返回「已提交、稍后用 list_* 查」而不是挂着。 */
 const OPERATION_WAIT_MS = 30_000;
-/** wait_terminal 的默认与上限（同上，≤ 50 秒）。 */
+/** 终端等待默认 30 秒，允许最长 600 秒。 */
 const TERMINAL_WAIT_DEFAULT_MS = 30_000;
-// plan 094：上限放宽到 600s。真正的天花板是宿主的单请求超时——手动 `claude mcp add` 的宿主默认 60s，
-// coflux 插件的 .mcp.json 把 timeout 放到 ≥ 600s；到期回 timedOut 让 agent 再调，长持请求越长越脆。
+// 到期返回 timedOut，Agent 可以继续等待；不把超时当成程序退出。
 const TERMINAL_WAIT_MAX_MS = 600_000;
 /** stop_terminal 发出 sessionClose 后等退出的上限；到期按「已在退出中」返回。 */
 const STOP_WAIT_MS = 15_000;
@@ -167,9 +164,9 @@ interface SessionAgentData {
   agent: string;
   /** hook 上报的回合状态：active / approval / question / done，空 = 无 hook 信号 */
   state: string;
-  /** `cofluxd notify` 的留言（plan 074）：与 state 同生命周期，纯展示 */
+  /** `coflux notify` 的留言（plan 074）：与 state 同生命周期，纯展示 */
   message: string;
-  /** `cofluxd progress` 的进度短评（plan 088）：跨 hook 事件存活，覆盖式，纯展示 */
+  /** `coflux progress` 的进度短评（plan 088）：跨 hook 事件存活，覆盖式，纯展示 */
   progress: string;
 }
 
@@ -187,7 +184,7 @@ export interface DaemonConn {
   accountId: AccountId;
   /** 握手上报的 CPU 架构（std::env::consts::ARCH），仅供自动升级编排做 target 映射，不下发给 web。 */
   arch: string;
-  /** 握手宣告的控制面能力名（plan 091）：MCP 写 tools 发送新增控制消息前按它做门禁。纯连接内存态。 */
+  /** 握手宣告的控制面能力名（plan 091）：账号接口 发送新增控制消息前按它做门禁。纯连接内存态。 */
   capabilities: ReadonlySet<string>;
   ws: WebSocket;
   /** daemon 探测选出的 home relay；纯连接 presence，重连后由新 worker 重新上报。 */
@@ -272,7 +269,7 @@ interface DaemonGenerationGate {
  * 会让已执行的 task 更新随事务回滚；外层只静默终止这份旧代际快照。 */
 class StaleDaemonConnectionError extends Error {}
 
-/** 操作层（plan 091，MCP 写 tools 消费）的统一结果：错误一律是可读文案，不抛。 */
+/** 操作层（plan 091，账号接口 消费）的统一结果：错误一律是可读文案，不抛。 */
 export type OperationOutcome<T> = { ok: true; value: T } | { ok: false; error: string };
 
 /** 用户名 + 密码凭证校验的结果（WS clientAuth 与页面登录共用，plan 107）：busy = scrypt 并发已满。 */
@@ -316,7 +313,7 @@ interface CompletionWaiter<T> {
 }
 
 /**
- * 完成原语（plan 091）：中心发起的 daemon 副作用没有 client 可通知，MCP tool 按 key（operationId /
+ * 完成原语（plan 091）：中心发起的 daemon 副作用没有 client 可通知，账号请求 按 key（operationId /
  * taskId）在这里等一个有界的结果。唤醒点在 Hub 既有的收敛路径末尾（report 收敛、sessionExit、
  * catalog exit、任务删除、daemon 断开/换代），不引入新的状态机。等待者有总数上限与超时。
  */
@@ -442,11 +439,7 @@ export class Hub {
   private readonly relayTokens: RelayTokenSigner;
   /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
-  /** MCP 宿主的 OAuth 授权服务器（plan 090）：待确认请求/授权码在它的内存里，与设备授权同款生命周期；
-   * HTTP 端点经 HubState 取它，确认页的两条 client 消息在下方 handleClientMessage 里落地。 */
-  readonly oauth: OAuthService;
-  /** server 直出的三张浏览器页面（plan 107）：设备授权 / OAuth 同意 / 端口预览门禁。页面会话与 csrf 在它的
-   * 内存里；业务核心（凭证校验、待授权 token、OAuth 决定、预览 code）全部经本 Hub 的共用方法，与 WS 分支同源。 */
+  /** 设备授权和端口预览页面；页面会话与 CSRF 独立，业务校验复用本 Hub。 */
   readonly authPages: AuthPages;
   private readonly enrollLimiter = new FixedWindowLimiter(config.enrollRateLimit, config.authRateWindowMs);
   private readonly daemonAuthLimiter = new FixedWindowLimiter(config.daemonAuthRateLimit, config.authRateWindowMs);
@@ -480,7 +473,6 @@ export class Hub {
   });
 
   constructor(private store: Store) {
-    this.oauth = new OAuthService(store);
     this.authPages = new AuthPages(this);
     this.localControl = new LocalControlPlane(
       store,
@@ -729,7 +721,7 @@ export class Hub {
     return this.daemons.has(daemonId);
   }
 
-  /** 账号下设备清单（在线连接优先，离线补自 devices 表）。clientSubscribe 与 MCP list_devices 共用。 */
+  /** 账号下设备清单（在线连接优先，离线补自 devices 表）。clientSubscribe 与 账号设备列表 共用。 */
   async daemonInfoList(accountId: AccountId): Promise<DaemonInfoData[]> {
     const list: DaemonInfoData[] = [];
     const seen = new Set<DaemonId>();
@@ -1245,7 +1237,7 @@ export class Hub {
     const declared = agentText(request.workspaceId);
     if (declared && declared !== workspace.id) {
       const proposed = await this.store.getWorkspace(declared);
-      // 必须同账号**同设备**：终端要在这台机器上跑（MCP create_terminal 只查账号，那里终端可以
+      // 必须同账号**同设备**：终端要在这台机器上跑（账号 terminal.new 只查账号，那里终端可以
       // 落在账号的任意设备上）。不存在与不属于本设备同一句错误，不泄漏别处工作区的存在性。
       if (!proposed || proposed.accountId !== daemon.accountId || proposed.daemonId !== daemon.info.daemonId) {
         return void fail(`工作区 ${declared} 不存在或不在本设备的本账号下`);
@@ -1351,7 +1343,7 @@ export class Hub {
                   workspaceId: currentWorkspace.id,
                   projectId: currentWorkspace.projectId,
                   daemonId: currentWorkspace.daemonId,
-                  mcpUrl: config.mcpUrl,
+                  mcpUrl: "", // 保留旧线格式字段，不再发布 MCP 地址。
                 },
               });
               if (!sent) {
@@ -2715,38 +2707,6 @@ export class Hub {
         await this.removeDevice(client, msg.payload.value.daemonId);
         break;
       }
-      case "oauthAuthorizeInfo": {
-        // OAuth 确认页查询（plan 090）：与 device.authorizeInfo 同一套失败计数——请求 id 是 ≥128bit
-        // 随机值，限速是纵深防御。
-        if ((client.authorizeFailures ?? 0) >= config.authorizeMaxFailures) {
-          this.sendClient(client, { case: "oauthAuthorizeInfo", value: { ok: false, error: "尝试次数过多，请回到宿主重新发起授权" } });
-          break;
-        }
-        const info = this.oauth.describePending(msg.payload.value.requestId);
-        if (!info) {
-          client.authorizeFailures = (client.authorizeFailures ?? 0) + 1;
-          this.sendClient(client, { case: "oauthAuthorizeInfo", value: { ok: false, error: "授权请求无效或已过期，请回到宿主重新发起授权" } });
-          break;
-        }
-        this.sendClient(client, { case: "oauthAuthorizeInfo", value: { ok: true, clientName: info.clientName, redirectHost: info.redirectHost, scope: info.scope } });
-        break;
-      }
-      case "oauthAuthorizeDecide": {
-        if ((client.authorizeFailures ?? 0) >= config.authorizeMaxFailures) {
-          this.sendClient(client, { case: "oauthAuthorizeResult", value: { ok: false, error: "尝试次数过多，请回到宿主重新发起授权" } });
-          break;
-        }
-        // userId 可得时（password 模式）随凭证落库；local 模式为 null。
-        const userId = client.tokenHash ? await this.store.userIdForClientToken(client.tokenHash) : null;
-        const result = this.oauth.decide(msg.payload.value.requestId, msg.payload.value.approve, { accountId: client.accountId!, userId });
-        if (!result) {
-          client.authorizeFailures = (client.authorizeFailures ?? 0) + 1;
-          this.sendClient(client, { case: "oauthAuthorizeResult", value: { ok: false, error: "授权请求无效或已过期，请回到宿主重新发起授权" } });
-          break;
-        }
-        this.sendClient(client, { case: "oauthAuthorizeResult", value: { ok: true, redirectUrl: result.redirectUrl } });
-        break;
-      }
       case "deviceAuthorizeInfo": {
         const p = this.checkedPendingAuth(client, msg.payload.value.token);
         if (!p) break; // helper 已回过 error
@@ -3099,7 +3059,7 @@ export class Hub {
     }
   }
 
-  /* ==================== 工作区 / 任务的共享写路径（web 与 MCP 同一逻辑，plan 091） ==================== */
+  /* ==================== 工作区 / 任务的共享写路径（桌面与 CLI 同一逻辑，plan 091） ==================== */
 
   /** 目录工作区：只删记录，绝不进入 worktree.remove（不能对 HOME 跑 git worktree 操作），
    * daemon 离线也可删。与 terminalCreate/taskCreate/removeDevice 共用 device 父行锁，
@@ -3176,7 +3136,7 @@ export class Hub {
 
   /** 删任务记录（含 checkpoint）：与 checkpoint/taskCreate/removeDevice 共用 device 父锁；锁后重读并在
    * 同一事务删 checkpoint + task，防迟到 checkpoint 在 taskRemove 后插回孤儿。web 由 UI 保证只删已退出的；
-   * MCP 传 rejectRunning=true 在同一事务内拒绝仍在运行的终端（plan 091）。 */
+   * 账号接口传 rejectRunning=true 在同一事务内拒绝仍在运行的终端（plan 091）。 */
   private async removeTaskRecord(initial: Task, rejectRunning: boolean): Promise<OperationOutcome<TaskId>> {
     type RemoveTaskTx =
       | { case: "error"; message: string }
@@ -3391,6 +3351,27 @@ export class Hub {
     return { case: "invalid" };
   }
 
+  /** 各客户端共用的登录入口；HTTP CLI 与桌面验证相同身份、签发相同类型的会话。 */
+  async loginClient(username: string, password: string, remoteAddress: string): Promise<OperationOutcome<{ accountId: AccountId; token: string }>> {
+    if (!this.allowLogin(remoteAddress)) return { ok: false, error: "登录尝试过于频繁，请稍后重试" };
+    const checked = await this.verifyLoginCredentials(username, password);
+    if (checked.case !== "ok") return { ok: false, error: checked.case === "busy" ? "登录服务繁忙" : "认证失败" };
+    const token = genToken("ck_sess");
+    const now = Date.now();
+    await this.store.upsertClientToken(hashToken(token), checked.accountId, now, now + config.sessionTtlMs, checked.userId);
+    return { ok: true, value: { accountId: checked.accountId, token } };
+  }
+
+  async revokeClientSession(accountId: AccountId, tokenHash: string): Promise<void> {
+    await this.store.revokeClientToken(tokenHash);
+    for (const client of this.clients) {
+      if (client.accountId === accountId && client.tokenHash === tokenHash) {
+        await this.localControl.logout(client);
+        client.ws.close(4001, "logout");
+      }
+    }
+  }
+
   /** 页面登录（plan 107）的来源限速：与 WS 登录共用同一个 loginLimiter（同一来源、同一窗口、同一阈值）。 */
   allowLogin(remoteAddress: string): boolean {
     return this.loginLimiter.allow(remoteAddress);
@@ -3472,7 +3453,7 @@ export class Hub {
         workspaceId: ws.id,
         projectId: ws.projectId,
         daemonId: task.daemonId,
-        mcpUrl: config.mcpUrl,
+        mcpUrl: "", // 保留旧线格式字段，不再发布 MCP 地址。
       },
     });
     await this.withTaskEffectGuard(task.id, async (effectGuard) => {
@@ -3842,7 +3823,7 @@ export class Hub {
     this.preparedOperations.removeClient(client);
   }
 
-  /* ==================== 中心发起的 daemon 副作用 + MCP 操作层（plan 091） ==================== */
+  /* ==================== 中心发起的 daemon 副作用 + 账号操作层（plan 091） ==================== */
 
   /** daemon 断开/换代/撤销：该设备上所有完成原语等待者与在飞读写请求以同一可读错误唤醒。 */
   private failDaemonWaiters(daemonId: DaemonId, message: string): void {
@@ -4002,7 +3983,7 @@ export class Hub {
   /** 在工作区里开一个真实终端：同一事务里建 IDLE task（沿用 terminalNew 的准入）并 prepare `session.create`
    * （中心发起），等收敛到 RUNNING。每工作区活跃终端上限含用户手开的。
    *
-   * 命令是否为空区分两种终端（plan 101，与本地 `cofluxd terminal new` 同判据）：非空 = 作业终端，worker
+   * 命令是否为空区分两种终端（plan 101，与本地 `coflux terminal new` 同判据）：非空 = 作业终端，worker
    * 收到后写包装脚本、跑完即退并带退出码；空 = 会话终端，worker 的空命令分支不写脚本，supervisor 起默认
    * 登录 shell（全 tty，常驻到有人输入 exit）。空白命令在这里收敛成空串——worker 那边判的是 `is_empty()`，
    * 留着空白会被当成命令套进脚本、开了就退。 */
@@ -4041,7 +4022,7 @@ export class Hub {
         workspaceId: initialWorkspace.id,
         projectId: initialWorkspace.projectId,
         daemonId: initialWorkspace.daemonId,
-        mcpUrl: config.mcpUrl,
+        mcpUrl: "", // 保留旧线格式字段，不再发布 MCP 地址。
       },
     });
     let task: Task | undefined;
@@ -4242,7 +4223,6 @@ export class Hub {
     this.pendingAgentRequests.clear();
     for (const p of this.pendingAuthorizations.values()) clearTimeout(p.timer);
     this.pendingAuthorizations.clear();
-    this.oauth.shutdown();
     this.daemonResyncAuthorities.clear();
     for (const d of daemons) try { d.ws.close(1001, "server shutting down"); } catch { /* ignore */ }
     for (const c of this.clients) try { c.ws.close(1001, "server shutting down"); } catch { /* ignore */ }

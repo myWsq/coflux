@@ -5,7 +5,7 @@ import { deriveDaemonState, type DaemonFacts } from "./daemon-state";
 
 const BASE: DaemonFacts = {
   bundle: { version: "v0.0.0-desktop.0.1.7" },
-  plistExists: true,
+  installationExists: true,
   supervisorExists: true,
   workerExists: true,
   registered: true,
@@ -19,7 +19,7 @@ const BASE: DaemonFacts = {
 
 test("已接入 = plist 与两个二进制都在，缺任一即未接入（不分 npm / app 来源）", () => {
   assert.equal(deriveDaemonState(BASE).status, "running");
-  assert.equal(deriveDaemonState({ ...BASE, plistExists: false }).status, "not-installed");
+  assert.equal(deriveDaemonState({ ...BASE, installationExists: false }).status, "not-installed");
   assert.equal(deriveDaemonState({ ...BASE, supervisorExists: false }).status, "not-installed");
   assert.equal(deriveDaemonState({ ...BASE, workerExists: false }).status, "not-installed");
   assert.equal(deriveDaemonState({ ...BASE, workerExists: false }).installed, false);

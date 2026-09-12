@@ -26,6 +26,8 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const bridge: DesktopBridge = {
+  connectLocal: () => ipcRenderer.invoke(IPC.connectLocal),
+  logoutLocal: () => ipcRenderer.invoke(IPC.logoutLocal),
   platform: boot.platform,
   version: boot.version,
   serverUrl: boot.serverUrl,

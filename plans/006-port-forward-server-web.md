@@ -1,4 +1,4 @@
-# Plan 006: server/web 侧 —— Host 路由反代 + 登录门禁 + 预览链接 UI
+# Plan 006: Server/web port forwarding: host routing, authentication, and preview links
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -21,122 +21,51 @@
 
 ## Requirement
 
-server(`apps/server`)与 web(`apps/web`)获得完整的反代与门禁能力,协议契约以
-plan 004 落地后的 `packages/protocol` 代码为真相源:
+Implement complete reverse-proxy and access-control support in the server (`apps/server`) and web client (`apps/web`), using the `packages/protocol` contract established by plan 004:
 
-1. **端口路由**:处理 daemon 上报的 `ports.update`(按连接 daemonId 归属校验),
-   为每个 (daemonId, port) 维护短路由标识 shortId 与预览 URL;向该账号 client
-   广播 `ports.updated`,`state.snapshot` 带全量端口;daemon 掉线、会话退出、端口
-   消失时撤销路由并广播空集。
-2. **反向代理**:Host 匹配 `<shortId>.<proxyHost>` 的 HTTP 请求与 WS upgrade,经
-   持有该路由的 daemon 隧道(`proxy.open`/kind=4 帧/`proxy.close`)透传到目标端口;
-   非代理 Host 的行为与现状完全一致(/health、/daemon、/client)。
-3. **登录门禁**:代理请求无有效 proxy cookie 时 302 到 web 的授权路由;web(已
-   登录会话)经 WS `proxy.issueAuth` 换取一次性回调 URL 并跳转;server 在回调端点
-   验 code、种 cookie、302 回原路径。cookie 会话必须与路由所属 device 的 accountId
-   匹配,跨账号访问一律 403/重新授权。redirect 目标严格限定本服务的代理子域名
-   (防开放重定向)。
-4. **web UI**:运行中 task 显示探测到的端口徽标/链接(点开即预览 URL);实现
-   `#/proxy-auth` 授权跳转路由(参照既有 `#/authorize/<token>` 设备授权页模式)。
+1. **Port routing:** process daemon `ports.update` reports after verifying ownership against the connection’s daemonId. Maintain a shortId and preview URL per (daemonId, port), broadcast `ports.updated` to the account’s clients, and include all ports in `state.snapshot`. Revoke routes and broadcast removal when a daemon disconnects, a session exits, or a port disappears.
+2. **Reverse proxy:** route HTTP requests and WS upgrades with Host `<shortId>.<proxyHost>` through the owning daemon’s tunnel (`proxy.open`, kind=4 frames, `proxy.close`) to the target port. Preserve existing /health, /daemon, and /client behavior on non-proxy hosts.
+3. **Access control:** redirect requests without a valid proxy cookie to web authorization with 302. The logged-in web client exchanges WS `proxy.issueAuth` for a one-time callback URL and navigates there. The callback validates the code, sets a cookie, and redirects to the original path. Require the cookie session’s accountId to match the route’s device owner; cross-account access always receives 403 or reauthorization. Restrict redirects to this service’s proxy subdomains to prevent open redirects.
+4. **Web UI:** show detected ports as preview links on running tasks. Add the `#/proxy-auth` redirect flow, following the existing `#/authorize/<token>` device-authorization page.
 
-浏览器可见的正确行为:在远程 task 的 PTY 里起 dev server → 数秒内 task 行出现
-端口链接 → 点击 → (首次经一次无感跳转)页面完整可用,含绝对路径静态资源与
-HMR WebSocket。
+Expected browser experience: start a development server in a remote task’s PTY; its port link appears within seconds; click it and, after a transparent first-use authorization redirect, the page works fully, including absolute-path assets and HMR WebSockets.
 
 ## Decisions & tradeoffs
 
-- **Host 头路由 + 泛子域名**:`proxyHost` 进 config(env `COFLUX_PROXY_HOST`,dev
-  默认 `p.localhost`);请求 Host 形如 `<shortId>.<proxyHost>` 即代理请求。本地/
-  测试用 Host 头模拟,不需要真 DNS。Rejected: 路径前缀 `/proxy/<id>/...` —— 绝对
-  路径资源全 404,重写是无底洞(dev-explore 已定)。
-  Based on: `apps/server/src/index.ts:53,69` 单一 http server 同时处理 request 与
-  upgrade,天然可按 Host 分流;生产 Caddy 在前(`apps/server/src/config.ts:44`),
-  泛证书由部署侧承担。
-- **shortId:server 内存签发的随机短标识(不含 daemonId/port 语义)**:每个
-  (daemonId, port) 首次出现时签发(如 10 字符 base36),server 运行期间稳定,重启
-  重签。URL 不泄露设备信息。Rejected: `<daemonId>-<port>` 直拼 —— 43 字符难看且
-  泄露内部 id;HMAC 确定性 id —— 过度设计,重启后 URL 变化的代价仅是重新点一次
-  链接。Based on: 路由是运行时态,与 Session 同生命周期哲学
-  (`docs/architecture.md` §5「Session 是运行时实体,不落盘」)。
-- **代理采用连接粒度透传(首请求后接管 socket)**:识别为代理请求后完成门禁
-  校验,然后重建请求原始字节(请求行 + rawHeaders + 已缓冲 body)写入隧道,并把
-  `req.socket` 与隧道双向对拼;此后该 TCP 连接上的 keep-alive 后续请求、WS upgrade
-  帧全部透传,server 不再解析。upgrade 事件同理(head + socket 对拼)。Rejected:
-  按请求粒度转发(重组 HTTP)—— SSE/长轮询/分块编码/websocket 各要专门处理,
-  透传一劳永逸且天然支持 HMR。注意:接管后同连接不再重验 cookie(连接已授权),
-  可接受。Based on: node http server 在 'request'/'upgrade' 事件均可拿到底层
-  socket;hub 中继「只校验归属、原样转发字节」的既有原则(`docs/architecture.md` §6)。
-- **门禁 cookie:随机 token,server 内存表 {accountId, exp},Domain=.<proxyHost>**:
-  一次授权覆盖该账号在本浏览器的所有预览子域名;HttpOnly + SameSite=Lax +
-  (https 时)Secure;TTL 复用 `config.sessionTtlMs` 量级(执行者定,≥1 天)。每个
-  代理请求校验 cookie 存在、未过期、且 `cookieSession.accountId ===
-  route.accountId`——通配 Domain 下跨账号路由靠这一步隔离,必须有测试意识。
-  server 重启 cookie 失效 → 自动重走无感跳转,用户已登录故无感。Rejected:
-  JWT/HMAC 无状态 cookie —— 单实例部署(docs/OPEN_QUESTIONS B7)内存表更简单
-  且可主动撤销;复用 client_tokens 表 —— 语义混杂,proxy 会话是运行时态。
-  Based on: `pendingAuthorizations` 同款内存 + TTL 模式(`apps/server/src/hub.ts:69-79,107`)。
-- **授权链路:302 → web `#/proxy-auth?to=…` → WS `proxy.issueAuth {redirect}` →
-  `proxy.auth {url}` → 302 回调 `/__coflux/auth?code=…&to=…` → 种 cookie → 302 原路径**:
-  code 一次性、TTL 60s、绑定 accountId。server 校验 redirect 的 host 匹配
-  `^[a-z0-9]+\.<proxyHost>$` 且 shortId 存在、属于该 client 的 account;`to` 仅取
-  path+query(不含 host),杜绝开放重定向。Rejected: web 直接种 cookie —— 跨域
-  种不了;URL 上带长期 token —— 泄露面大,一次性 code 是标准解法。
-  Based on: web 已有会话(`auth.ok` 的 clientToken,`apps/server/src/hub.ts:690-733`)
-  与 hash 路由授权页先例(plan 003 的 `/authorize/<token>` 页)。
-- **回调路径挂在代理子域名的 `/__coflux/auth`**:被代理应用自身的路径不可能撞
-  `__coflux` 前缀(约定保留);仅此一条路径在代理域上由 server 自答,其余全透传。
-  Rejected: 挂在主域 —— cookie 要种在 `.<proxyHost>` 上,必须由该域下的响应来 Set-Cookie。
-- **隧道 server 侧状态**:connId(server 签发)→ 浏览器 socket 的 map;daemon 的
-  `proxy.opened {ok:false}`/`proxy.closed` → 毁浏览器 socket(HTTP 未接管时可回
-  502);浏览器 socket close → `proxy.close`;daemon 掉线 → 该 daemon 全部隧道
-  socket 毁 + 路由撤销。归属校验:kind=4 上行帧仅当 connId 属于该 daemon 连接时
-  转发(同 pty 帧的 `s.daemonId !== conn.daemonId` 模式,`apps/server/src/hub.ts:183`)。
-- **web UI 最小呈现 (decided while planning)**:task 行内端口徽标(`:5173 ↗`),
-  href = 预览 URL,新标签打开;数据来自 snapshot.ports + ports.updated 增量维护。
-  不做端口管理面板/开关——探到即可用是已确认方向。
+- **Route by Host header using wildcard subdomains.** Add `proxyHost` to config (`COFLUX_PROXY_HOST`, default `p.localhost` in development). Requests for `<shortId>.<proxyHost>` are proxy requests. Local tests can supply Host headers without DNS. Rejected: `/proxy/<id>/...` prefixes, which break absolute-path assets and require unbounded rewriting, as established in dev-explore. Evidence: one HTTP server handles request and upgrade events (`apps/server/src/index.ts:53,69`), allowing Host dispatch; production already sits behind Caddy (`apps/server/src/config.ts:44`), and deployment owns wildcard certificates.
+- **Allocate random short IDs on the server and keep them in memory, without encoding daemonId or port.** Assign one when a (daemonId, port) first appears, for example 10 base36 characters. Keep it stable until server restart, after which a new ID is acceptable. URLs reveal no device information. Rejected: `<daemonId>-<port>`, an unattractive 43-character string exposing internal IDs, and deterministic HMAC IDs, which overengineer a change that only requires users to click a new link. Evidence: routes are runtime entities, like sessions (`docs/architecture.md` §5: sessions are not persisted).
+- **Forward raw bytes per TCP connection, taking over the socket after the first request.** Identify proxy requests, authorize them, reconstruct the initial request bytes (request line, rawHeaders, buffered body), write them to the tunnel, and bridge `req.socket` bidirectionally. Subsequent keep-alive requests and WS frames pass through without server parsing. Handle upgrade similarly with head plus socket bridging. Rejected: request-level HTTP reconstruction, which needs special handling for SSE, long polling, chunked encoding, and WebSocket; raw tunneling naturally supports HMR. The cookie is not rechecked after takeover of an already authorized connection; this is accepted. Evidence: Node exposes sockets in request/upgrade events, matching the hub’s ownership-check-and-forward-bytes principle (`docs/architecture.md` §6).
+- **Use a random cookie token backed by an in-memory {accountId, exp} table, with Domain=.<proxyHost>.** One authorization covers that account’s preview subdomains in the browser. Set HttpOnly, SameSite=Lax, and Secure for HTTPS. Choose a TTL on the scale of `config.sessionTtlMs`, at least one day. Validate presence, expiry, and `cookieSession.accountId === route.accountId`; this final check enforces cross-account isolation under the wildcard domain and must be tested. Server restart invalidates cookies, followed by a transparent authorization redirect for already logged-in users. Rejected: stateless JWT/HMAC cookies, since an in-memory table is simpler and revocable for the single-instance deployment (docs/OPEN_QUESTIONS B7); also reject reusing client_tokens, which mixes persistent and runtime semantics. Evidence: `pendingAuthorizations` already uses memory plus TTL (`apps/server/src/hub.ts:69-79,107`).
+- **Authorization chain: 302 → web `#/proxy-auth?to=…` → WS `proxy.issueAuth {redirect}` → `proxy.auth {url}` → callback `/__coflux/auth?code=…&to=…` → cookie → 302 to the original path.** Codes are single-use, expire after 60s, and bind to accountId. Require the redirect host to match `^[a-z0-9]+\.<proxyHost>$`, with an existing shortId owned by the client’s account. Restrict `to` to path and query, excluding host, to prevent open redirects. Rejected: setting cookies directly from the cross-domain web client, or exposing long-lived tokens in URLs. Evidence: the web already has a clientToken from `auth.ok` (`apps/server/src/hub.ts:690-733`) and the hash-based authorization-page precedent from plan 003 (`/authorize/<token>`).
+- **Serve `/__coflux/auth` on the proxy subdomain.** Reserve the `__coflux` prefix so proxied applications cannot collide with it. The server handles only this callback path on proxy domains; all others pass through. Rejected: a callback on the main domain, which cannot set the required `.<proxyHost>` cookie.
+- **Server tunnel state:** map server-issued connId to browser socket. On daemon `proxy.opened {ok:false}` or `proxy.closed`, destroy the browser socket, returning 502 if HTTP takeover has not occurred. Browser closure sends `proxy.close`; daemon disconnection destroys its tunnel sockets and revokes its routes. Forward inbound kind=4 frames only if connId belongs to the sending daemon, matching PTY ownership checks such as `s.daemonId !== conn.daemonId` (`apps/server/src/hub.ts:183`).
+- **Minimal web UI (decided during planning):** show an inline task port link such as `:5173 ↗`, opening the preview URL in a new tab. Initialize from snapshot.ports and apply ports.updated updates. Add no management panel or switches: detected ports are immediately usable.
 
 ## Direction
 
-server 侧改动集中在:config(proxyHost)、index.ts(Host 分流:代理 request/upgrade
-→ 新 proxy 模块;主域行为不变)、新 proxy 模块(门禁 + code/cookie 表 + socket↔隧道
-对拼)、hub(ports.update 处理/路由表/广播/snapshot/proxy.issueAuth/隧道帧转发/
-清理钩子)。建议隧道与门禁独立成 `proxy.ts`,hub 只做路由与归属,保持 hub 的
-「编排路由」定位。web 侧:App.tsx 加 proxy-auth 路由与端口徽标。
+Server changes cover config (proxyHost), index.ts (Host dispatch for request/upgrade while preserving main-domain behavior), a proxy module (authorization, code/cookie tables, socket-to-tunnel bridging), and the hub (reports, routes, broadcasts, snapshots, proxy.issueAuth, frame forwarding, cleanup hooks). Prefer `proxy.ts` for tunneling and access control, keeping the hub focused on routing and ownership. Add proxy-auth and port links to web App.tsx.
 
-### Milestone 1: 端口路由状态机(无反代)
+### Milestone 1: Port routing state machine (without reverse-proxy forwarding)
 
-ports.update → 路由表 + shortId + 广播 + snapshot;session 退出/daemon 掉线撤销。
-Validation: `pnpm exec tsc --noEmit -p apps/server` -> exit 0(行为归 007 黑盒)。
+Implement ports.update → route table/shortId → broadcast/snapshot, with revocation on session exit or daemon disconnection. Validation: `pnpm exec tsc --noEmit -p apps/server` → exit 0; plan 007 covers behavior.
 
-### Milestone 2: 反代数据通路(无门禁,或门禁可用假开关旁路)
+### Milestone 2: Reverse data path (no access control, or the access control can be bypassed by a fake switch)
 
-Host 分流 + 隧道对拼 + 生命周期清理;curl 带伪造 Host 可打通到本机测试端口。
-Validation: `pnpm exec tsc --noEmit -p apps/server` -> exit 0。
+Implement Host dispatch, tunnel bridging, and lifecycle cleanup. A curl request with a supplied Host reaches a local test port. Validation: `pnpm exec tsc --noEmit -p apps/server` → exit 0.
 
-### Milestone 3: 登录门禁闭环 + web UI
+### Milestone 3: Login access control closed loop + web UI
 
-302/issueAuth/回调/cookie/账号隔离;task 行端口链接;proxy-auth 路由。
-Validation: `pnpm exec tsc --noEmit -p apps/server && pnpm exec tsc --noEmit -p apps/web`
--> exit 0。
+302/issueAuth/callback/cookie/account isolation; task line port link; proxy-auth routing. Validation: `pnpm exec tsc --noEmit -p apps/server && pnpm exec tsc --noEmit -p apps/web` → exit 0.
 
 ## Landmines
 
-- 新 ClientToServer/DaemonToServer 消息若未同时进 `packages/protocol` 的 FIELDS
-  白名单(004 已加,勿改坏),transport 层静默丢弃,表现为超时。
-- `handleDaemonBinary`(`apps/server/src/hub.ts:178`)目前只认 pty 三帧;kind=4 上行
-  必须在此分流并做 connId→daemon 归属校验,否则恶意 daemon 可向他人浏览器注字节。
-- 浏览器 socket 有 `clientBufferHardLimit` 类似的内存风险:对拼时用
-  `socket.write` 返回值/`drain` 或 `pipe` 语义控制,别无限缓冲(参考
-  `hub.ts:184-192` 对慢 client 的处理哲学;简单做法:超水位直接毁连接)。
-- `req.socket` 接管后必须把该 socket 从 http server 的 keep-alive 管理里摘干净
-  (移除已有 listeners / `socket.removeAllListeners('data')` 前先确认 node 版本行为),
-  否则 http parser 会和透传字节打架——这是本 plan 实现难度最高的一处,先写
-  upgrade 路径(干净拿到 socket+head)再做 request 路径。
-- 代理域上的 `/health`、`/daemon`、`/client` 不存在——Host 分流必须先于现有
-  upgrade 路由判断(`apps/server/src/index.ts:69-78` 现按 pathname destroy 兜底)。
-- web 的 WS 服务地址来自 `VITE_COFLUX_SERVER`(README env 表);proxy-auth 页面
-  必须在同一 WS 会话上发 issueAuth,复用 App 现有连接管理,别新开裸连接。
-- dev 环境无 https,cookie 不能带 Secure;按 `x-forwarded-proto`/URL scheme 条件加。
+- If the new ClientToServer/DaemonToServer message does not enter the FIELDS of `packages/protocol` at the same time Whitelist (004 has been added, do not change it), the transport layer silently discards it, and it appears as a timeout.
+- `handleDaemonBinary` (`apps/server/src/hub.ts:178`) currently only recognizes pty three frames; kind=4 uplink the traffic must be diverted here and the connId→daemon ownership verification must be done, otherwise the malicious daemon can inject bytes into other people's browsers.
+- Browser sockets need bounded buffering, just like `clientBufferHardLimit`. Respect `socket.write` return values and `drain`, or use pipe semantics; never buffer indefinitely. Follow the slow-client philosophy at `hub.ts:184-192`; destroying connections above a limit is an acceptable simple approach.
+- After taking over `req.socket`, remove it from HTTP keep-alive/parser management. Confirm current Node behavior before removing listeners or calling `socket.removeAllListeners('data')`; otherwise the HTTP parser competes with raw forwarding. This is the hardest part: implement the clean socket/head upgrade path first, then request handling.
+- `/health`, `/daemon`, `/client` on the proxy domain do not exist - Host offload must precede existing upgrade routing judgment (`apps/server/src/index.ts:69-78` now press pathname destroy).
+- The WS service address of the web comes from `VITE_COFLUX_SERVER` (README env table); proxy-auth page IssueAuth must be issued on the same WS session, reuse the App's existing connection management, and do not open a new naked connection.
+- There is no https in the dev environment, and cookies cannot have Secure; add it according to the `x-forwarded-proto`/URL scheme condition.
 
 ## Scope
 
@@ -145,41 +74,37 @@ In scope:
 - `apps/web/src/**`
 
 Out of scope:
-- `packages/protocol` —— 契约已由 004 冻结;发现缺口 STOP 上报
-- `crates/**` —— 归 005
-- `tests/src/**`、docs —— 归 007
-- 生产 DNS 泛解析 / Caddy 泛证书配置 —— 部署侧,不在本仓库代码内
+- `packages/protocol` — The contract has been frozen by 004; if a gap is found, report STOP
+- `crates/**` —  owned by plan 005
+- `tests/src/**`, docs - owned by plan 007
+- Production DNS wildcard DNS/Caddy wildcard certificate configuration - deployment side, outside the repository code
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| TS 类型检查 | `pnpm exec tsc --noEmit -p apps/server && pnpm exec tsc --noEmit -p apps/web` | exit 0 |
-| Rust 构建(未破坏) | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0 |
-| 黑盒回归 (acceptance) | `COFLUX_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:54322/postgres pnpm -C tests test` | exit 0(既有用例不回归) |
+| TS type check | `pnpm exec tsc --noEmit -p apps/server && pnpm exec tsc --noEmit -p apps/web` | exit 0 |
+| Rust build (not broken) | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0 |
+| Black-box regression (acceptance) | `COFLUX_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:54322/postgres pnpm -C tests test` | exit 0 (existing tests have no regressions) |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] 非代理 Host 的所有既有行为不变(黑盒回归绿)。
-- [ ] 无 cookie 的代理请求 302 到 web;伪造/过期/跨账号 cookie 不放行。
-- [ ] redirect/`to` 校验拒绝任意外部 URL(无开放重定向)。
-- [ ] daemon 掉线后其全部路由与在途隧道被清理,client 收到端口撤销广播。
+- [ ] All existing behaviors of non-proxy Host remain unchanged (black-box regressions to green).
+- [ ] Proxy request without cookie 302 to web; forged/expired/cross-account cookies are not allowed.
+- [ ] redirect/`to` check rejects any external URL (no open redirects).
+- [ ] After the daemon goes offline, all its routes and tunnels in transit are cleared, and the client receives the port revocation broadcast.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
-- [ ] `plans/README.md` status is updated.
+- [ ] `plans/README.md`  status is updated.
 
 ## STOP conditions
 
-- 004 落地的协议缺字段/缺消息,无法表达路由或门禁语义。
-- `req.socket` 接管方案在当前 node 版本走不通(http parser 无法安全解除)——
-  这推翻连接粒度决策,需回报重新决策(降级为请求粒度 + 单独处理 upgrade)。
+- 004 The implemented protocol is missing fields/messages and cannot express routing or access control semantics.
+- The `req.socket` takeover plan does not work in the current node version (the http parser cannot be safely deactivated)— this overrides the connection granularity decision, requiring a re-decision (downgrade to request granularity + separate upgrade).
 - The outcome requires out-of-scope files.
 - A validation command fails twice after one reasonable fix.
 
 ## Maintenance notes
 
-生产上线前置(部署侧,不在代码内):`*.p.coflux.dev` 泛解析指向 prod-jp、Caddy
-增加该泛域名 site(DNS-01 泛证书)反代到 server 同端口、`COFLUX_PROXY_HOST=p.coflux.dev`。
-proxy cookie 与 code 表都是单实例内存态,未来多实例部署时需外置(与
-pendingAuthorizations 同批)。`__coflux` 路径前缀是对被代理应用的保留字约定。
+Production prerequisites belong to deployment: point `*.p.coflux.dev` wildcard DNS to prod-jp; add a Caddy wildcard site using DNS-01 certificates and the same server port; set `COFLUX_PROXY_HOST=p.coflux.dev`. Cookie and code tables live in single-instance memory and must be externalized alongside pendingAuthorizations if scaling out. The `__coflux` path prefix is reserved for the proxy.

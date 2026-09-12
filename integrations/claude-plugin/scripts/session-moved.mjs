@@ -5,11 +5,11 @@
 //
 // A plain `cd <path>` moves a live session (same conversation, no restart) to another directory, and
 // a coflux child workspace is just a registered git worktree, so a session whose terminal belongs to
-// workspace A can end up working inside workspace B. From then on the local `cofluxd` commands act on
+// workspace A can end up working inside workspace B. From then on the local `coflux` commands act on
 // B (the daemon resolves the caller's cwd) while the terminal still hangs under A in the sidebar.
-// Without this block the agent would keep passing A's id to the coflux MCP tools.
+// Without this block the agent would keep passing A's id to the coflux account CLI commands.
 //
-// Both ids come from `cofluxd workspace`, never from $COFLUX_WORKSPACE_ID: that variable is frozen
+// Both ids come from `coflux workspace`, never from $COFLUX_WORKSPACE_ID: that variable is frozen
 // when the PTY is spawned and only means "where this terminal was opened", so it goes stale as soon
 // as coflux follows the agent into a worktree (plan 104) — comparing against it would report a move
 // on every prompt forever after. The variable is used for one thing only: telling whether this
@@ -18,13 +18,13 @@
 // Contract (Claude Code hooks): stdin is one JSON document (cwd / prompt / session_id ...); a
 // UserPromptSubmit hook's stdout is added to the model context, so print the block as plain text
 // starting with "<" (never JSON) when the workspaces differ, and **not a single byte** in every other
-// case: no COFLUX_WORKSPACE_ID (not inside coflux), stdin not JSON, `cofluxd` missing or failing,
+// case: no COFLUX_WORKSPACE_ID (not inside coflux), stdin not JSON, `coflux` missing or failing,
 // same workspace. Always exit 0. Debug output goes to stderr only (COFLUX_HOOK_DEBUG=1).
 //
 // Stateless on purpose: while the session stays moved the block is printed on every prompt, so it
 // also comes back after a context compaction. The cost is that the block arrives with the *next*
-// prompt, not in the turn that moved: an agent that has to call an MCP tool right after moving runs
-// `cofluxd workspace` itself (see the coflux skill).
+// prompt, not in the turn that moved: an agent that has to call an account CLI command right after moving runs
+// `coflux workspace` itself (see the coflux skill).
 
 import { execFile } from "node:child_process";
 
@@ -58,16 +58,16 @@ async function readStdinJson() {
   }
 }
 
-/** `cofluxd workspace` prints one line of JSON; run it from the payload's cwd, never from ours. */
+/** `coflux workspace` prints one line of JSON; run it from the payload's cwd, never from ours. */
 function askCofluxd(cwd) {
   return new Promise((resolve) => {
     execFile(
-      "cofluxd",
+      "coflux",
       ["workspace"],
       { cwd, timeout: COFLUXD_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
       (error, stdout) => {
         if (error) {
-          debug("cofluxd workspace failed", error.message);
+          debug("coflux workspace failed", error.message);
           return resolve(null);
         }
         const line = String(stdout).trim().split("\n").filter(Boolean).pop();
@@ -75,7 +75,7 @@ function askCofluxd(cwd) {
         try {
           resolve(JSON.parse(line));
         } catch {
-          debug("cofluxd workspace did not print JSON", line.slice(0, 120));
+          debug("coflux workspace did not print JSON", line.slice(0, 120));
           resolve(null);
         }
       },
@@ -90,10 +90,10 @@ function block(effective, path, owning) {
     `effective workspace id: ${effective} (your cwd is inside it)`,
     `effective workspace path: ${path}`,
     `owning workspace id: ${owning} (where this terminal hangs in the user's sidebar)`,
-    `Local cofluxd commands (terminal new|list|read|wait|send) now act on ${effective}: a terminal you open lands there and runs in its directory, list shows its terminals, and terminals of ${owning} read back as not found.`,
-    `Pass ${effective} as workspaceId to coflux MCP tools.`,
+    `Local coflux commands (terminal new|list|read|wait|send) now act on ${effective}: a terminal you open lands there and runs in its directory, list shows its terminals, and terminals of ${owning} read back as not found.`,
+    `Pass ${effective} as workspaceId to coflux account CLI commands.`,
     "COFLUX_TASK_ID and COFLUX_SESSION_ID are unchanged: this terminal itself did not move.",
-    "Run `cofluxd workspace` at any time to check where you are.",
+    "Run `coflux workspace` at any time to check where you are.",
     "</coflux-session-moved>",
   ].join("\n");
 }

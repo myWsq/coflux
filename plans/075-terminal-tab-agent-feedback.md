@@ -1,4 +1,4 @@
-# Plan 075: 终端 Tab 栏的 agent 运行反馈——icon 与标题一眼可辨
+# Plan 075: Agent feedback in terminal tabs—recognizable icons and titles at a glance
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -21,190 +21,119 @@
 
 ## Requirement
 
-用户痛点：plan 073 把 agent 活动状态带进了侧栏，但**终端 tab 栏毫无反馈**——
-tab icon 永远是中性终端图标，tab 标题永远是「终端 N」。一个工作区开多个 tab 时，
-看不出哪个 tab 在跑 claude、跑的是什么事。
+Plan 073 brought agent activity into the sidebar, but **terminal tabs provide no feedback**: icons remain neutral terminals and titles remain "Terminal N." With multiple tabs in a workspace, users cannot tell which one runs Claude or what it is doing.
 
-**做完之后为真**：
+**After implementation**:
 
-1. **icon**：tab 对应 session 的进程树里检测到 agent（既有 `sessionAgents`
-   presence）时，tab icon 从 `SquareTerminal` 换成 agent 图标（claude/codex 可区分），
-   颜色跟随 hook 回合状态、与侧栏 ActivityDots 色语义一致（active 绿 /
-   approval·question 琥珀）；attaching 转圈与 detached 插头的既有优先级不变。
-2. **标题**：PTY 里的程序经 OSC 0/2 转义序列设置的终端标题（Claude Code 的自动
-   会话标题正是此机制）显示为 tab 标题，覆盖 `task.title`。**没打开该 tab（未
-   attach）也更新**（≤2s，走中心广播）、**页面刷新后依然成立**（订阅补发存量
-   checkpoint）；session 退出后回落 `task.title`。这是通用终端行为：vim/ssh/shell
-   设置的 OSC 标题同样生效，不做 agent 专属过滤。
+1. **Icon**: when existing `sessionAgents` presence detects an agent in a tab's session process tree, replace `SquareTerminal` with a distinguishable Claude/Codex icon. Its color follows hook turn state and sidebar ActivityDots semantics: active green, approval/question amber. Existing attaching spinner and detached plug priorities stay unchanged.
+2. **Title**: terminal titles set by PTY programs through OSC 0/2 (the mechanism behind Claude Code's automatic session titles) override `task.title` in tabs. **Unopened, unattached tabs also update** through center broadcasts within ≤2s; **refresh preserves titles** through subscription replay of stored checkpoints. When the session exits, fall back to `task.title`. This is general terminal behavior: OSC titles set by vim, ssh, or shells also apply, without agent-specific filtering.
 
-判断「相邻的错误解法」——以下三条路径已探明并排除，不要退回去：
+Three nearby but incorrect approaches have already been investigated and rejected:
 
-- **不是** web 端 xterm `onTitleChange`：非激活 tab 不 attach、收不到字节
-  （`workspace-terminal.tsx` 的 attach 门控）；且 attach 回放的是 vt100 规范化
-  snapshot，OSC 已被剥掉（`crates/supervisor/src/sessiond.rs` `render_normal_snapshot`），
-  刷新即丢——073 时用户已拒绝过同构的「刷新即丢」方案。
-- **不是**经 hook 信使上报：Claude Code hook 的 stdin JSON 没有标题字段（查过
-  官方文档 common fields），transcript JSONL 里也没有稳定的标题存储（本机实证：
-  活跃会话文件里无 summary 行，grep 到的 "summary" 是 SendMessage 工具参数）。
-- **不是** worker 侧扫输出字节：无人 attach 时字节不流经 worker，只有 dirty
-  通知（`crates/worker/src/main.rs:640` 注释），盲区与前端方案同构。
+- Web xterm `onTitleChange`: inactive tabs do not attach or receive bytes because of the attach gate in `workspace-terminal.tsx`. Attach replay uses vt100-normalized snapshots from `render_normal_snapshot` in `crates/supervisor/src/sessiond.rs`, with OSC removed, so titles disappear on refresh. The user already rejected equivalent refresh-loss behavior in 073.
+- Hook messenger reporting: Claude Code hook stdin JSON has no title field (official common-fields documentation checked), nor does transcript JSONL provide stable title storage. Local evidence: active session files have no summary row; matches for "summary" were SendMessage tool arguments.
+- Worker output-byte scanning: bytes do not flow through worker without an attached viewer; it only gets dirty notifications (`crates/worker/src/main.rs:640`). This has the same blind spot as the frontend approach.
 
 ## Decisions & tradeoffs
 
-- **捕获点 = sessiond 的 vt100 回调**。sessiond 本来就逐字节解析全部 PTY 输出
-  （scrollback/snapshot 都靠它，与 attach 无关），OSC 0/2 现在在 vt100 内被解析后
-  丢弃；用 `Parser::new_with_callbacks` + `Callbacks::set_window_title` 接住即可，
-  热路径零新增扫描。**这打破了 073/074 守住的「supervisor 不动」纪律，用户已在
-  departure check 知情拍板**（代价：supervisor 发版会断所有 daemon 的活 PTY）。
-  Rejected: 见 Requirement 的三条相邻错误解法。
-  Based on: `crates/supervisor/src/sessiond.rs:103-116`（`TerminalState::new` 用无
-  回调构造）；vt100 0.16.2 `src/perform.rs:198-208`（OSC 0 同时触发
-  icon_name+title 回调，OSC 2 只 title——所以只实现 `set_window_title` 即覆盖 0/2）。
+- **Capture titles through sessiond's vt100 callback.** Sessiond already parses all PTY output for scrollback/snapshots regardless of attach. vt100 currently parses then discards OSC 0/2; capture it with `Parser::new_with_callbacks` and `Callbacks::set_window_title`, without another hot-path scan. **This breaks the no-supervisor-change discipline maintained in 073/074; the user explicitly approved the departure after being informed that a supervisor release interrupts all live daemon PTYs.**
+  Rejected: the three approaches above.
+  Based on: `TerminalState::new` at `crates/supervisor/src/sessiond.rs:103-116` constructs a parser without callbacks. vt100 0.16.2 `src/perform.rs:198-208` calls both icon_name and title for OSC 0 and only title for OSC 2; implementing only `set_window_title` covers both.
 
-- **上报通道 = 既有 SessionSnapshot→SessionCheckpoint 链路加 `title` 字段，不新增
-  消息**。title 变化必然由输出引起 → 必有 dirty 通知 → ≤2s 内必有 checkpoint 上报；
-  server 广播 + 订阅补发存量已就绪，client store `sessionCheckpoints` 已按
-  sessionId 键控且随 sessionId 清除而清除——链路每一环都是现成的。
-  Rejected: 挂 `SessionAgentRef.title` —— 标题是 VT/session 事实，与 agent presence
-  生命周期无关（vim 设的标题也要显示；agent 退出瞬间 presence 消失但标题应随
-  checkpoint 存续）。
-  Rejected: 独立 title 通知消息 —— 多一条消息不多一分价值。
-  Based on: `proto/coflux/v1/device.proto:285`（DeviceSessionSnapshot）、`:522`
-  （SessionCheckpoint，client/daemon 两面共用同一消息）；`crates/worker/src/device.rs:1184`
-  （worker 组装 checkpoint）；`apps/server/src/hub.ts:560/592`（校验+广播）、
-  `hub.ts:1180` 附近（订阅补发）；`packages/client/src/store.ts:552-556/531-533`。
+- **Add `title` to the existing SessionSnapshot→SessionCheckpoint path, without new messages.** A title change comes from output, which creates a dirty notification and thus a checkpoint within ≤2s. Server broadcast and subscription replay already exist. Client `sessionCheckpoints` is keyed by sessionId and cleared when sessionId disappears. Every link already exists.
+  Rejected: `SessionAgentRef.title`, because a title is VT/session state independent of agent presence. Vim titles must display too; presence vanishes when an agent exits, while its title should persist with the checkpoint. A standalone title message adds no value.
+  Based on: `DeviceSessionSnapshot` at `proto/coflux/v1/device.proto:285`; shared client/daemon `SessionCheckpoint` at `:522`; worker checkpoint assembly at `crates/worker/src/device.rs:1184`; validation/broadcast at `apps/server/src/hub.ts:560/592`; subscription replay around `hub.ts:1180`; `packages/client/src/store.ts:552-556/531-533`.
 
-- **向后兼容 = proto 加字段、不 bump 版本**。旧 supervisor 不报 title → 空串 →
-  UI 回落现状；`buf breaking` 须过（072/073 同惯例）。
-  Based on: proto3 新增 string 字段默认空，序列化向后兼容。
+- **Backward compatibility: add proto fields without a version bump.** Old supervisors omit title, producing an empty string and current UI fallback. `buf breaking` must pass, following 072/073.
+  Based on: new proto3 string fields default to empty and preserve serialization compatibility.
 
-- **server 侧 title 随 checkpoint 落库**，schema 变更走 `migrate()` 的
-  `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 既有模式。长度钳制在 sessiond 侧
-  源头截断（UTF-8 安全，上限执行者定、量级 256 bytes），server 校验兜底
-  （不可信字节，超限整条拒收或截断均可，但拒收会连 ansi_snapshot 一起丢——
-  选截断更稳）。
-  Based on: `apps/server/src/store.ts:454-457`（migrate 模式）、`:404`
-  （session_checkpoints DDL）、`:1087`（upsert 以 snapshot_seq 前进为条件——title
-  随输出前进天然满足，无需独立比较）。
+- **Persist title with server checkpoints.** Follow `migrate()`'s existing `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` pattern. Truncate at sessiond's source on UTF-8 boundaries, with an executor-chosen limit around 256 bytes. Server validates untrusted input as a fallback. Rejecting the entire oversized record or truncating are both permitted, but truncation is safer because rejection also loses ansi_snapshot.
+  Based on: migration pattern at `apps/server/src/store.ts:454-457`, session_checkpoints DDL at `:404`, and upsert at `:1087`, which requires advancing snapshot_seq. Titles advance with output and need no separate comparison.
 
-- **web 显示语义**：tab 标题 = `checkpoint.title` 非空 ? 它 : `task.title || "终端"`；
-  悬浮 Tooltip 显全文（设计约定：不用原生 title 属性）。EXITED 时 task.sessionId
-  被清空、client 侧 checkpoint 条目随之删除 → 自动回落，无需专门代码。**不写回
-  `task.title` 落库**。
-  Rejected: OSC 标题写回 task.title（新增改名消息）—— 把易变 VT 状态写进持久
-  Task 实体，且「手动改名」是另一个需求，不在本次范围。
-  Based on: `apps/web/src/components/workbench/workspace-terminal.tsx:487`（现标题
-  渲染）、`packages/client/src/store.ts:531-533`（sessionId 移除时清 checkpoint 条目）。
+- **Web presentation**: tab title is nonempty `checkpoint.title`, otherwise `task.title || "终端"`. The Tooltip component shows full text; do not use native title attributes. EXITED clears task.sessionId and therefore removes the client checkpoint entry, automatically restoring fallback. **Do not persist into `task.title`.**
+  Rejected: writing OSC titles into task.title through a rename message mixes transient VT state with durable Task identity. Manual renaming is a separate requirement.
+  Based on: current title rendering at `apps/web/src/components/workbench/workspace-terminal.tsx:487`; checkpoint cleanup at `packages/client/src/store.ts:531-533`.
 
-- **icon 数据源 = 既有 `sessionAgents[task.sessionId]`，纯 web 改动**。claude 用
-  自绘星芒（sunburst）小 SVG 组件，codex 用可区分的另一图形（lucide 现有或自绘，
-  执行者定）；颜色语义对齐侧栏（active=success、approval/question=warning、
-  done/无 state=中性）。attaching/detached 图标优先级保持在 agent 图标之上。
-  Based on: `workspace-terminal.tsx:480-486`（现 icon 渲染分支）、
-  `packages/client/src/store.ts:125`（presence 数据已达 client）、
-  `sidebar.tsx:315-330`（侧栏消费方式与色语义参照）。
+- **Icons use existing `sessionAgents[task.sessionId]`; this is web-only.** Claude gets a small custom sunburst SVG; Codex gets a distinguishable shape, existing Lucide or custom at the executor's discretion. Match sidebar colors: active=success, approval/question=warning, done/no state=neutral. Attaching/detached icons retain priority over agents.
+  Based on: icon branches at `workspace-terminal.tsx:480-486`; available presence at `packages/client/src/store.ts:125`; sidebar consumption/colors at `sidebar.tsx:315-330`.
 
-- **apps/mobile 一行不动**（冻结纪律）；iOS 原生 app 不在本次范围（checkpoint
-  链路带 title 后它将来自然可用）。
+- **Do not change a line in frozen apps/mobile.** Native iOS is out of scope; it can use checkpoint titles later once the path exists.
 
 ## Direction
 
-### Milestone 1: 协议字段就位
+### Milestone 1: Protocol fields
 
-`DeviceSessionSnapshot` 与 `SessionCheckpoint` 各加 `string title` 字段，
-`buf generate` 重新生成（TS/Rust/Swift 三处产物都提交）。
-Validation: `cargo build -p coflux-supervisor -p coflux-worker`（零警告）+
-`node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` -> exit 0。
+Add `string title` to `DeviceSessionSnapshot` and `SessionCheckpoint`, run `buf generate`, and commit all three TS/Rust/Swift generated outputs.
+Validation: `cargo build -p coflux-supervisor -p coflux-worker` with zero warnings and `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit`, both exit 0.
 
-### Milestone 2: sessiond 捕获 OSC 标题
+### Milestone 2: Capture OSC titles in sessiond
 
-TerminalState 经 vt100 回调持有最新标题（源头截断），SessionSnapshot 响应带出。
-新增单测覆盖：OSC 0 与 OSC 2 都能设、超长截断在字符边界、无 OSC 时为空、
-分 chunk 喂入不碎（沿既有 chunk-boundary 测试风格）。
-Validation: `cargo test -p coflux-supervisor` -> exit 0。
+TerminalState stores the latest title through vt100 callbacks, truncates at source, and returns it in SessionSnapshot. Unit tests cover OSC 0 and 2, character-boundary truncation, empty titles without OSC, and fragmented input following existing chunk-boundary tests.
+Validation: `cargo test -p coflux-supervisor` exits 0.
 
-### Milestone 3: worker 转发 + server 校验落库广播
+### Milestone 3: Worker forwarding and server validation, persistence, broadcast
 
-worker 把 snapshot 里的 title 装进 checkpoint；server 校验（长度/类型）后随
-checkpoint 落库（ADD COLUMN IF NOT EXISTS）、广播、订阅补发均含 title。
-Validation: `cargo build -p coflux-worker` + server tsc -> exit 0。
+Worker copies snapshot title into checkpoint. Server validates type/length and includes title in persistence (`ADD COLUMN IF NOT EXISTS`), broadcasts, and subscription replay.
+Validation: `cargo build -p coflux-worker` and server tsc exit 0.
 
-### Milestone 4: web tab 栏呈现
+### Milestone 4: Web tabs
 
-icon 按 presence 换 agent 图标+状态色；标题按 checkpoint.title 覆盖显示 + Tooltip。
-Validation: `node_modules/.bin/tsc -b apps/web/tsconfig.json` -> exit 0。
-UI 视觉不做自动化走查（用户人工验收惯例）。
+Presence selects agent icons and colors. checkpoint.title overrides the displayed title with a Tooltip.
+Validation: `node_modules/.bin/tsc -b apps/web/tsconfig.json` exits 0. Visual acceptance is manual by the user, without automated UI walkthroughs.
 
-### Milestone 5: 黑盒验收
+### Milestone 5: Black-box acceptance
 
-新用例：黑盒终端里 printf OSC 0 标题序列 → 断言 client store 的
-checkpoint.title ≤ 数秒内到达且刷新重连后补发仍在；参考
-`tests/src/agent-activity.test.mjs` 的结构，照惯例做负向验证（临时抽掉
-server 侧 title 透传确认用例真的会红）。
-Validation: `pnpm -C tests test` -> 新用例过，全量无新增失败（既有
-cli-doctor 环境基线失败除外）。
+Print an OSC 0 title sequence in a black-box terminal and assert checkpoint.title reaches the client store within a few seconds and survives refresh/reconnection through replay. Follow `tests/src/agent-activity.test.mjs`; temporarily remove server title forwarding to verify the test really fails.
+Validation: `pnpm -C tests test`: new tests pass with no new full-suite failures, excluding existing cli-doctor environment baseline failures.
 
 ## Landmines
 
-- `hub.ts:592-600` `sendCheckpoint` 是**手工逐字段复制**——proto 加了字段这里
-  不加，client 永远收到空 title，且类型上不会报错。订阅补发路径（`hub.ts:1180`
-  附近）同样检查。
-- vt100 0.16.2 `Parser::new_with_callbacks` 把 callbacks **移进** parser；读回
-  title 需要确认 crate 是否暴露 callbacks 访问器，没有就用 `Arc<Mutex<...>>`/
-  `Rc<RefCell<...>>` 共享内层状态。另确认 sessiond resize 路径是否重建 Parser
-  （重建则 title 要迁移）。
-- `DeviceEnvelope.protocol_version`（supervisor↔worker UDS 双向）——核实版本
-  校验是严格相等还是 ≥：若严格相等且要 bump，旧 worker/新 supervisor 混跑期会
-  断联，须按现状语义处理，不要顺手 bump。
-- OSC 标题是**不可信用户数据**：server 侧校验，web 只做文本渲染（React 默认
-  转义即可），绝不 dangerouslySetInnerHTML。
-- checkpoint 是 2s 周期缓存（`CHECKPOINT_INTERVAL`），标题到 UI 有 ≤2s + 广播
-  延迟；黑盒断言与人工验收都别把这当 bug。
-- `buf breaking` 检查须过；三处生成产物（`packages/protocol/src/gen`、
-  `crates/protocol/src/gen`、`proto/gen/swift`）都要一并提交。
-- 黑盒全套大面积超时先查 Docker 半死（`docker ps`），别当代码回归；本机测试
-  PG 就是 5432。
+- `sendCheckpoint` at `hub.ts:592-600` **manually copies fields**. Adding proto fields without updating it silently sends empty titles; types will not catch this. Check subscription replay around `hub.ts:1180` too.
+- vt100 0.16.2 `Parser::new_with_callbacks` **moves** callbacks into parser. Check for an accessor; otherwise share inner title state with `Arc<Mutex<...>>`/`Rc<RefCell<...>>`. Check whether sessiond resize reconstructs Parser; if so, carry title over.
+- Check whether bidirectional supervisor↔worker UDS `DeviceEnvelope.protocol_version` validation requires equality or ≥. Equality plus a bump would disconnect mixed old-worker/new-supervisor deployments. Follow current semantics; do not casually bump it.
+- OSC titles are **untrusted user data**. Validate server-side and render only as text; React escaping suffices. Never use dangerouslySetInnerHTML.
+- Checkpoints run every 2s (`CHECKPOINT_INTERVAL`), so UI latency is ≤2s plus broadcast delay. Tests and manual acceptance must allow this.
+- `buf breaking` must pass. Commit generated artifacts in `packages/protocol/src/gen`, `crates/protocol/src/gen`, and `proto/gen/swift` together.
+- Widespread black-box timeouts may mean an unhealthy Docker runtime; check `docker ps` before diagnosing regression. Local test PG is on 5432.
 
 ## Scope
 
 In scope:
 
-- `proto/coflux/v1/device.proto` 及三处生成产物
-- `crates/supervisor/src/sessiond.rs`（如实现需要，`sessions.rs` 的 snapshot 装配处）
+- `proto/coflux/v1/device.proto` and three generated output locations
+- `crates/supervisor/src/sessiond.rs`, plus snapshot assembly in `sessions.rs` if required
 - `crates/worker/src/device.rs`
-- `apps/server/src/hub.ts`、`apps/server/src/store.ts`
-- `packages/client/src/store.ts`（如需类型透传；协议类型自动到位则不动）
-- `apps/web/src/components/workbench/workspace-terminal.tsx`（及新增的小图标组件文件）
-- `tests/src/`（新用例）
+- `apps/server/src/hub.ts` and `apps/server/src/store.ts`
+- `packages/client/src/store.ts` only if type forwarding is needed; leave unchanged if protocol types suffice
+- `apps/web/src/components/workbench/workspace-terminal.tsx` and small new icon component files
+- New tests in `tests/src/`
 - `plans/README.md`
 
 Out of scope:
 
-- `apps/mobile` —— 冻结纪律，一行不动
-- `apps/ios` —— 不在本次；链路就位后它自然可跟进
-- `apps/web` sidebar —— 073 已完成，本次不动
-- Task 改名/`task.title` 写库 —— 另一个需求
-- 发版（git tag / push）—— 不在授权内；生产生效需下一个 tag 且 **supervisor
-  更新要求 daemon 重启（活 PTY 断一次）**，由用户择机执行
+- `apps/mobile`: frozen, no changes
+- `apps/ios`: future follow-up once the path exists
+- `apps/web` sidebar: completed in 073
+- Task renaming / persistence of `task.title`: separate requirement
+- Release (`git tag` / push): not authorized here. Production needs the next tag, and **supervisor updates require daemon restart, interrupting live PTYs once**. The user chooses when.
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Rust 构建 | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0，零警告 |
-| supervisor 单测 | `cargo test -p coflux-supervisor` | exit 0 |
-| 协议单测 | `cargo test -p coflux-protocol` | exit 0 |
-| server 类型 | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
-| web 类型 | `node_modules/.bin/tsc -b apps/web/tsconfig.json` | exit 0 |
-| 黑盒 (acceptance) | `pnpm -C tests test` | 新用例过，无新增失败 |
+| Rust build | `cargo build -p coflux-supervisor -p coflux-worker` | exit 0, zero warnings |
+| Supervisor unit tests | `cargo test -p coflux-supervisor` | exit 0 |
+| Protocol unit tests | `cargo test -p coflux-protocol` | exit 0 |
+| Server types | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
+| Web types | `node_modules/.bin/tsc -b apps/web/tsconfig.json` | exit 0 |
+| Black-box acceptance | `pnpm -C tests test` | New tests pass; no new failures |
 
 ## Done criteria
 
 - [ ] All listed commands pass.
-- [ ] 黑盒里 OSC 0/2 设置的标题在未 attach、且模拟重连（订阅补发）后仍能从
-      client store 读到。
-- [ ] tab icon 在 presence 存在时切换为 agent 图标且状态色正确（人工验收）。
-- [ ] 新黑盒用例做过负向验证（抽掉透传后确实变红）。
+- [ ] Black-box OSC 0/2 titles can be read from client store without attach and after simulated reconnection/subscription replay.
+- [ ] Tabs show agent icons and correct state colors when presence exists (manual acceptance).
+- [ ] New black-box tests were negatively verified by removing forwarding.
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
 - [ ] `plans/README.md` status is updated.
@@ -212,16 +141,13 @@ Out of scope:
 ## STOP conditions
 
 - A fact cited under Decisions & tradeoffs no longer holds.
-- vt100 0.16.2 的回调机制无法在不升级 crate 大版本的前提下拿到 title。
-- `DeviceEnvelope.protocol_version` 被证实为严格相等校验且必须 bump 才能加字段。
+- vt100 0.16.2 callbacks cannot expose title without a major crate upgrade.
+- `DeviceEnvelope.protocol_version` requires strict equality and adding fields requires a bump.
 - The outcome requires out-of-scope files.
 - A validation command fails twice after one reasonable fix.
 
 ## Maintenance notes
 
-- 这是 073/074 之后 supervisor 的**首次功能性改动**：发版时活 PTY 会断，
-  RELEASING 流程与 changelog 里要明示；此后 supervisor 仍回归「极少升级」纪律。
-- 标题语义是「通用终端标题」而非「claude 标题」：用户 shell 若配置了 precmd
-  OSC（如 oh-my-zsh），tab 标题会跟随 cwd/命令变化——这是有意行为，与真终端
-  （iTerm/Ghostty）一致，不要当 bug 修掉。
-- iOS 若要跟进，从 `SessionCheckpoint.title` 直接取即可，daemon/server 无需再动。
+- This is the **first functional supervisor change** after 073/074. Release instructions and changelog must clearly state that live PTYs will be interrupted. Afterward, retain the rare-supervisor-upgrade discipline.
+- These are general terminal titles, not Claude-only titles. Shell precmd OSC hooks, such as oh-my-zsh, will change titles with cwd/commands. This intentionally matches real terminals such as iTerm/Ghostty; do not "fix" it.
+- iOS can later read `SessionCheckpoint.title` directly without additional daemon/server changes.

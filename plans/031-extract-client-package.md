@@ -1,4 +1,4 @@
-# Plan 031: 抽取 packages/client —— 协议 client + store 双端共享
+# Plan 031: Extract packages/client to share the protocol client and store across web and mobile
 
 > This plan is an outcome contract, not a step-by-step script. Understand the
 > requirement and the recorded decisions, then design the implementation
@@ -21,110 +21,67 @@
 
 ## Requirement
 
-移动随身端（plan 032）与桌面 web 需要共享同一份协议 client：连接管理
-（`apps/web/src/client/connection.ts`，117 行）与控制面 store
-（`apps/web/src/client/store.ts`，438 行，zustand **vanilla**，不绑 React）。
-本计划把这两个文件抽成 workspace 包 `packages/client`（`@coflux/client`），
-桌面 web 改为从包导入。
+Mobile (plan 032) and desktop web need one shared protocol client: connection management (`apps/web/src/client/connection.ts`, 117 lines) and control-plane store (`apps/web/src/client/store.ts`, 438 lines, zustand **vanilla**, independent of React). Extract both into workspace package `packages/client` (`@coflux/client`) and update desktop web imports.
 
-红线：**桌面 web 行为零变化**。这是纯结构性搬移 + 环境耦合注入化，不新增任何
-功能、不改任何协议语义。正确解与相邻错误解的分界：错误解是包内仍残留
-`import.meta.env` / app 特定常量（换个位置的耦合）；正确解是包只依赖注入的
-options 与 `@coflux/protocol`，任何浏览器 app 传入自己的 config 即可复用。
+**Desktop web behavior must not change.** This is file relocation plus injection of environment dependencies, with no new functionality or protocol changes. Leaving `import.meta.env` or app-specific constants in the package merely relocates coupling. The package should depend only on injected options and `@coflux/protocol`, so another browser app can supply its own configuration.
 
 ## Decisions & tradeoffs
 
-- **包边界**：`connection.ts` + `store.ts` 整体迁入 `packages/client/src`，
-  `createCofluxClient` 与全部导出类型（`CofluxClient`、`CofluxState`、
-  `FsListResult`、`ExecResult`、`FsWriteResult`、`ConnectionStatus`、
-  `PortPreview`、`ClientError`、`AuthState` 等）从包根导出。Rejected: 只抽
-  connection 留 store —— store 才是移动端要复用的大头（快照/增量归约、
-  pending-map 请求响应关联、PTY consumer 注册表）。Based on:
-  `apps/web/src/client/store.ts:62-436`（工厂函数自包含，UI 无关）。
-- **环境耦合注入化**：store 对 app 的全部依赖只有
-  `apps/web/src/client/store.ts:12-13` 两行——`@/config` 的
-  `SERVER_URL`/`TOKEN_KEY`/`USE_SUPABASE`/`AuthCredential` 与 `@/lib/auth` 的
-  `loginWithSupabase`（23 行，fetch 直连 Supabase token 端点，无 SDK 依赖）。
-  改为 `createCofluxClient(options)` 注入：`serverUrl`、`tokenStorageKey`、
-  以及一个可选的外部登录提供者（其存在与否即现 `USE_SUPABASE` 语义，同时决定
-  authError 时的两种文案，见 `store.ts:159`）。`AuthCredential` 类型随包走；
-  `loginWithSupabase` 本身留在 apps/web（它读 `VITE_SUPABASE_*`，是 app 层
-  配置的一部分），web 侧作为登录提供者传入。包内不出现 `import.meta.env`。
-  Rejected: 包内直读 env —— vite 前缀约定是 app 层关注点，包应环境无关。
-- **包形态照抄 `@coflux/protocol`**：private、`type: module`、`main`/`types`/
-  `exports` 直指 `./src/index.ts`，无构建步骤；依赖 `@coflux/protocol`
-  (workspace:\*) 与 `zustand`。Based on: `packages/protocol/package.json`
-  （source-direct 形态）、`pnpm-workspace.yaml`（`packages/*` 已覆盖）。
-- **localStorage 留在包内**：token 持久化（`store.ts:63,150,157`）是浏览器
-  client 的固有职责，两端（都是浏览器 app）共享；storage key 经 options 注入。
-  Rejected: 把持久化也抽象成接口 —— 没有非浏览器消费者，YAGNI。
-- **web 侧只改 import 路径与装配点**：`@/client/store` / `@/client/connection`
-  的所有引用改为 `@coflux/client`；创建处（`App.tsx` 一带）传入由
-  `@/config`/`@/lib/auth` 组装的 options。`apps/web/src/config.ts` 与
-  `lib/auth.ts` 保留原位。web `package.json` 增加 `@coflux/client`
-  workspace 依赖；zustand 依赖两处并存无妨（版本同源 workspace lockfile）。
+- **Package boundary**: move `connection.ts` and `store.ts` into `packages/client/src`; export `createCofluxClient` and all public types from the package root: `CofluxClient`, `CofluxState`, `FsListResult`, `ExecResult`, `FsWriteResult`, `ConnectionStatus`, `PortPreview`, `ClientError`, `AuthState`, and others. Rejected: extracting connection alone. Mobile chiefly needs the store’s snapshot/incremental reduction, pending request correlation, and PTY consumers. The factory is self-contained and UI-independent (`apps/web/src/client/store.ts:62-436`).
+- **Inject environment dependencies**: app coupling is concentrated at `apps/web/src/client/store.ts:12-13`: `SERVER_URL`/`TOKEN_KEY`/`USE_SUPABASE`/`AuthCredential` from `@/config` and `loginWithSupabase` from `@/lib/auth` (23 lines of direct token-endpoint fetch, no SDK). `createCofluxClient(options)` receives `serverUrl`, `tokenStorageKey`, and an optional external login provider; provider presence replaces `USE_SUPABASE` and selects the two authError messages (`store.ts:159`). Move `AuthCredential` into the package. Keep `loginWithSupabase` in apps/web because it reads `VITE_SUPABASE_*`; inject it as the login provider. No `import.meta.env` in the package. Rejected: package-owned env reads, since Vite prefixes belong to the app.
+- **Follow `@coflux/protocol` packaging**: private, `type: module`, with `main`/`types`/`exports` pointing directly to `./src/index.ts`, no build step. Depend on `@coflux/protocol` (workspace:*) and `zustand`. See `packages/protocol/package.json` and `pnpm-workspace.yaml` (`packages/*`).
+- **Keep localStorage in the package**: token persistence (`store.ts:63,150,157`) is shared browser-client behavior; inject only the storage key. Rejected: a persistence interface when there are no non-browser consumers.
+- **Change only imports and client assembly in web**: replace all `@/client/store`/`@/client/connection` imports with `@coflux/client`. Build options at the creation point near App.tsx from `@/config`/`@/lib/auth`; retain `apps/web/src/config.ts` and `lib/auth.ts`. Add the workspace dependency to web `package.json`. Both packages may depend on zustand, resolved to one version by the workspace lockfile.
 
 ## Direction
 
-一次性的结构搬移：建包 → 迁文件 → 注入化 → 改 web 引用。搬移中不顺手重构、
-不改注释措辞、不动 store 内部逻辑（diff 应当呈现为「文件移动 + 注入点小改 +
-import 改写」，而非逻辑重写）。
+Create package → move files → inject dependencies → rewrite web imports. Do not refactor opportunistically or rewrite comments/store internals. The diff should show file movement, small injection changes, and import updates, not a logical rewrite.
 
-### Milestone 1: packages/client 成包
+### Milestone 1: packages/client into packages
 
-包存在、导出完整、内部零 app 耦合（无 `import.meta.env`、无 `@/` 别名引用）。
-Validation: `pnpm --filter @coflux/web build` → exit 0（此时 web 已切换引用，
-见 M2；若执行者选择两步走，以最终态为准）。
+The package exists with complete exports and no `import.meta.env` or `@/` coupling. Validation: `pnpm --filter @coflux/web build` exits 0 after web imports switch in M2; a two-step implementation is acceptable if the final state passes.
 
-### Milestone 2: web 切换到包引用
+### Milestone 2: web switches to package references
 
-`apps/web/src/client/` 目录删除，所有引用改从 `@coflux/client` 导入，web 构建
-通过。Validation: `pnpm --filter @coflux/web build` → exit 0；
-`grep -rn "client/store\|client/connection" apps/web/src` → 无残留引用。
+Remove `apps/web/src/client/`; import everything through `@coflux/client`. Validation: `pnpm --filter @coflux/web build` exits 0, and `grep -rn "client/store\|client/connection" apps/web/src` finds no residual references.
 
 ## Landmines
 
-- `apps/web` 的 `@/` 路径别名由其 vite/tsconfig 配置提供，仅在 app 内有效——
-  包内代码不能使用，迁移时两处 `@/` import（`store.ts:12-14`）必须消解。
-- `connection.ts` 需自查对 `@/config` 是否有隐藏依赖（recon 只确认了
-  `createConnection({url})` 参数化；若有残留 env 读取一并注入化）。
-- `tests/` 黑盒测试直连 `@coflux/protocol`，不引用 web client，不受影响；
-  不要为它加 `@coflux/client` 依赖。
-- `packages/core` 是 server/daemon 侧共享基建（读 `process.env`，
-  `packages/core/src/index.ts:12-14`），不要把 client 放进去——浏览器端引它会
-  炸 `process` 未定义。
+- `apps/web` owns the `@/` alias through Vite/tsconfig. It is invalid inside the package; resolve both imports at `store.ts:12-14` during migration.
+- Inspect `connection.ts` for hidden `@/config` dependencies. Exploration confirmed `createConnection({url})`, but any remaining env reads must also be injected.
+- Black-box `tests/` uses `@coflux/protocol`, not the web client. Leave it unaffected; do not add `@coflux/client` there.
+- `packages/core` is server/daemon infrastructure reading `process.env` (`packages/core/src/index.ts:12-14`). Do not put the client there: browsers would fail on undefined `process`.
 
 ## Scope
 
 In scope:
 
-- `packages/client/**`（新建）
-- `apps/web/src/client/**`（删除/迁出）
-- `apps/web/src/**`（仅 import 路径与 client 创建处的装配代码）
-- `apps/web/package.json`（新增 workspace 依赖）
-- `pnpm-lock.yaml`（随 install 更新）
+- `packages/client/**` (new)
+- `apps/web/src/client/**` (delete/move out)
+- `apps/web/src/**` (only import path and assembly code where client is created)
+- `apps/web/package.json` (new workspace dependency)
+- `pnpm-lock.yaml` (updated with install)
 
 Out of scope:
 
-- `apps/server`、`crates/`、`packages/protocol`、`packages/core` —— 协议与
-  服务端不动
-- 桌面 web 任何可见行为变化 —— 红线
-- `apps/mobile` —— plan 032 的事
+- `apps/server`, `crates/`, `packages/protocol`, `packages/core` — protocol and server behavior remain unchanged
+- Any visible behavior change on desktop web - red line
+- `apps/mobile` — owned by plan 032
 
 ## Commands
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
 | Typecheck + build | `pnpm --filter @coflux/web build` | exit 0 |
-| 残留引用检查 | `grep -rn "@/client" apps/web/src` | 无输出 |
-| 桌面回归冒烟 (acceptance) | Playwright MCP，1440×900：登录 → 选工作区 → 终端出现 → 变更视图 | 与基线行为一致 |
+| Residual reference check | `grep -rn "@/client" apps/web/src` | No output |
+| Desktop regression smoke test (acceptance) | Playwright MCP, 1440×900: Login → Select workspace → Terminal appears → Change view | Consistent with baseline behavior |
 
 ## Done criteria
 
-- [ ] `pnpm --filter @coflux/web build` 通过。
-- [ ] `packages/client` 内无 `import.meta.env`、无 `@/` 别名、无 supabase 具体逻辑。
-- [ ] `apps/web/src/client/` 已不存在，web 全部经 `@coflux/client` 导入。
-- [ ] 桌面 web 行为零变化（acceptance 冒烟通过）。
+- [ ] `pnpm --filter @coflux/web build` passed.
+- [ ] There is no `import.meta.env`, no `@/` alias, and no supabase specific logic in `packages/client`.
+- [ ] `apps/web/src/client/` no longer exists, and all web pages are imported via `@coflux/client`.
+- [ ] Zero change in desktop web behavior (acceptance smoke test passes).
 - [ ] Implementation follows every entry in Decisions & tradeoffs.
 - [ ] No out-of-scope files changed.
 - [ ] `plans/README.md` status is updated.
@@ -134,11 +91,9 @@ Out of scope:
 - A fact cited under Decisions & tradeoffs no longer holds.
 - The outcome requires out-of-scope files.
 - A validation command fails twice after one reasonable fix.
-- store/connection 中发现无法经 options 注入消解的 app 耦合（意味着边界判断错误，需回到规划）。
+- App coupling was found in store/connection that cannot be resolved through options injection (meaning that the boundary judgment is wrong and needs to go back to planning).
 
 ## Maintenance notes
 
-- `@coflux/client` 是双端（apps/web、apps/mobile）共享的协议消费层真相源；
-  改协议语义（快照归约、控制权状态、pending-map）只改这一处。
-- 包 API 是 `createCofluxClient(options)` 一个工厂；新增注入项时保持「app 层
-  组装、包层无环境」的边界。
+- `@coflux/client` is the shared protocol-consumption source of truth for apps/web and apps/mobile. Change snapshot reduction, control state, and pending-map semantics there only.
+- Keep `createCofluxClient(options)` as the factory boundary: apps assemble configuration; the package stays environment-independent when new options are added.
