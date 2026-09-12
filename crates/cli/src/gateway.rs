@@ -160,23 +160,40 @@ pub fn post_json(port: u16, path: &str, body: &str, timeout: Duration) -> Result
     parse_response(&raw)
 }
 
-/// 发一条 `/agent` 请求并返回 daemon 的 JSON 应答；失败即 `die`（文案对齐 node 版 `agentPost`）。
-/// 请求体自动补 pid / ppid / cwd 三个字段。刻意不做自动重试：terminal new 有副作用。
-pub fn agent_post(mut body: Map<String, Value>) -> Value {
-    let port = match local_gateway_port() {
-        Ok(port) => port,
-        Err(error) => crate::die(&error),
-    };
+/// The two kinds of `/agent` failure. They are separated for the executor's submit path: **only**
+/// a Transport failure may be re-sent with the same submissionId (the daemon deduplicates on it);
+/// re-sending a Refused request accomplishes nothing.
+pub enum AgentError {
+    /// Could not connect, could not write, or the read timed out — whether the request already ran
+    /// is **unknown**.
+    Transport(String),
+    /// The daemon refused explicitly (configuration errors included); the text is a sentence meant
+    /// for the calling agent and is passed through verbatim.
+    Refused(String),
+}
+
+impl AgentError {
+    /// The final sentence written to stderr (wording aligned with the node `agentPost`).
+    pub fn message(&self) -> String {
+        match self {
+            Self::Transport(error) => {
+                format!("连不上本机 daemon：{error}（daemon 没在跑？先看 cofluxd status）")
+            }
+            Self::Refused(error) => error.clone(),
+        }
+    }
+}
+
+/// Send one `/agent` request and return the daemon's JSON reply. The body automatically gains the
+/// pid / ppid / cwd fields. Deliberately no automatic retry here: `terminal new` has side effects;
+/// callers that want to retry decide for themselves (see the executor submit path).
+pub fn agent_post_result(mut body: Map<String, Value>) -> Result<Value, AgentError> {
+    let port = local_gateway_port().map_err(AgentError::Refused)?;
     body.insert("pid".into(), Value::from(pid()));
     body.insert("ppid".into(), Value::from(ppid()));
     body.insert("cwd".into(), Value::from(caller_cwd()));
     let payload = Value::Object(body).to_string();
-    let response = match post_json(port, "/agent", &payload, agent_timeout()) {
-        Ok(response) => response,
-        Err(error) => crate::die(&format!(
-            "连不上本机 daemon：{error}（daemon 没在跑？先看 cofluxd status）"
-        )),
-    };
+    let response = post_json(port, "/agent", &payload, agent_timeout()).map_err(AgentError::Transport)?;
     let parsed: Option<Value> = serde_json::from_slice(&response.body).ok();
     let is_ok = parsed
         .as_ref()
@@ -191,9 +208,17 @@ pub fn agent_post(mut body: Map<String, Value>) -> Value {
             .filter(|text| !text.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| format!("daemon 返回 {}", response.status));
-        crate::die(&error);
+        return Err(AgentError::Refused(error));
     }
-    parsed.unwrap_or(Value::Null)
+    Ok(parsed.unwrap_or(Value::Null))
+}
+
+/// Send one `/agent` request; any failure calls `die` (wording aligned with the node `agentPost`).
+pub fn agent_post(body: Map<String, Value>) -> Value {
+    match agent_post_result(body) {
+        Ok(value) => value,
+        Err(error) => crate::die(&error.message()),
+    }
 }
 
 #[cfg(test)]

@@ -17,6 +17,8 @@ import { log } from "./log";
 import { buildAppMenu } from "./menu";
 import { setDockBadge, showWorkspaceNotification } from "./notifications";
 import { DESKTOP_ORIGIN, rewriteHandshakeHeaders } from "./origin";
+import { createExecutorConfigStore } from "./executor-config";
+import { createExecutorHost, type ExecutorHost } from "./executor-host";
 import { readSettingsFile, resolveServerUrl } from "./settings";
 import { createTokenStore } from "./token-store";
 import { createUpdater } from "./updater";
@@ -49,6 +51,8 @@ let mainWindow: BrowserWindow | null = null;
 let quitting = false;
 let daemonManager: DaemonManager | null = null;
 let localConnect: Promise<void> | null = null;
+// Executor: the quit path has to reach the host, so it lives at module scope.
+let executorHost: ExecutorHost | null = null;
 
 function showMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -67,6 +71,9 @@ function sendToRenderer(channel: string, payload: unknown): void {
 const settingsPath = () => join(app.getPath("userData"), "settings.json");
 const tokenPath = () => join(app.getPath("userData"), "session-token.bin");
 const windowStatePath = () => join(app.getPath("userData"), "window-state.json");
+// executor（plan 116）：非敏感项与 API key 分两个文件，后者同样 safeStorage 加密。
+const executorSettingsPath = () => join(app.getPath("userData"), "executor.json");
+const executorKeyPath = () => join(app.getPath("userData"), "executor-key.bin");
 
 function currentServerUrl(): string {
   return resolveServerUrl({
@@ -114,8 +121,15 @@ if (!app.requestSingleInstanceLock()) {
 
   let exitInFlight = false;
   app.on("before-quit", (event) => {
+    // Executor teardown belongs to the *second*, committed pass only. The first pass still has to
+    // ask the user, and they may cancel it; killing running jobs there would be unrecoverable.
+    // This pass is also the common exit for the updater (`beforeInstall` sets `quitting` itself),
+    // so it is the only place that covers quit-and-install. Running jobs must reach a definite
+    // terminal state here: "the app closed, so the job stopped" is accepted, silence is not —
+    // the CLI on the other end would poll forever.
     if (quitting || !daemonManager) {
       daemonManager?.dispose();
+      executorHost?.stopRuns({ kind: "app-exit" });
       return;
     }
     event.preventDefault();
@@ -158,6 +172,21 @@ if (!app.requestSingleInstanceLock()) {
       onError: (stage, error) => log.warn(`会话 token ${stage} 失败，按未登录处理`, error),
     });
     if (!safeStorage.isEncryptionAvailable()) log.warn("safeStorage 加密不可用：会话 token 不落盘，每次启动需重新登录");
+
+    // executor（plan 116）：配置 + 作业表 + runner 全在主进程；渲染层只当 device 通道的信使。
+    const executorConfig = createExecutorConfigStore({
+      settingsPath: executorSettingsPath(),
+      keyPath: executorKeyPath(),
+      codec: safeStorage,
+      onError: (stage, error) => log.warn(`executor 配置 ${stage} 失败`, error),
+    });
+    const executor = createExecutorHost({
+      config: executorConfig,
+      runnerPath: join(__dirname, "executor-runner.js"),
+      sendToRenderer,
+      log: (message) => log.info(message),
+    });
+    executorHost = executor;
 
     // 自动更新：generic provider 读仓库 desktop-updates 分支的 latest-mac.yml；状态变化广播给渲染层，
     // 版本准入被拒的状态页据此显示「需要更新」。quitAndInstall 前把 quitting 置位，close 钩子才放行关窗。
@@ -211,6 +240,10 @@ if (!app.requestSingleInstanceLock()) {
         });
         return result.response === 1;
       },
+      // Executor runs end exactly when the user confirms a local-runtime stop — quit, logout, and
+      // the panel's stop / remove. A dismissed dialog, a restart, and a dropped device channel all
+      // leave them running; `executorCancelReason` owns that whole decision.
+      onStopOutcome: (reason, confirmed) => executorHost?.stopRuns({ kind: "runtime-stop", reason, confirmed }),
       commands: {
         exec: execCommand,
         openExternal: (url) => void shell.openExternal(url),
@@ -237,6 +270,10 @@ if (!app.requestSingleInstanceLock()) {
       })();
       return localConnect;
     }
+    // Logout clears account state only. `executor.json` and `executor-key.bin` are global app
+    // configuration — the provider and model the user picked once, not something an account owns —
+    // so they deliberately survive: signing back in must not mean configuring the executor again.
+    // Running executor jobs do end here, through the confirmed `logout` stop (see `onStopOutcome`).
     async function logoutLocal(): Promise<boolean> {
       if (exitInFlight || quitting) return false;
       exitInFlight = true;
@@ -296,6 +333,11 @@ if (!app.requestSingleInstanceLock()) {
         daemonRemove: () => void daemon.remove(),
         daemonOpenFdaGuide: daemon.openFdaGuide,
         daemonDismissError: daemon.dismissError,
+        getExecutorSettings: executor.getSettings,
+        setExecutorModel: executor.setModel,
+        setExecutorApiKey: executor.setApiKey,
+        executorInbound: executor.inbound,
+        executorChannel: executor.setChannel,
       },
       trusted,
     );
@@ -306,7 +348,6 @@ if (!app.requestSingleInstanceLock()) {
           showMainWindow();
           sendToRenderer(IPC.command, command);
         },
-        showServerInfo: () => void showServerInfo(serverUrl),
         checkForUpdates: () => {
           showMainWindow();
           updater.checkForUpdates();

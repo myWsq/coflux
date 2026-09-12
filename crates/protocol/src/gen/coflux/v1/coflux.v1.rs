@@ -1243,6 +1243,91 @@ pub struct SessionCheckpoint {
     #[prost(message, optional, tag="9")]
     pub command: ::core::option::Option<TerminalCommandState>,
 }
+/// client→daemon：把本 client 登记成本机 executor host（可重复发送 = 幂等更新）。
+/// 同一 daemon 只认一个 host：host_id 稳定标识桌面实例，host_epoch 是同一 host 的连接换代号
+/// （单调递增）。较低 epoch 的登记是 stale，直接拒。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceExecutorHostRegister {
+    #[prost(string, tag="1")]
+    pub host_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub host_epoch: u64,
+    /// 按名门禁：daemon 只在清单里含本协议要求的能力名时才接受登记。
+    #[prost(string, repeated, tag="3")]
+    pub capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// 用户已在桌面配好 provider/model/key。false 时 daemon 在**提交那一刻**就拒，
+    /// 让 agent 立刻拿到「去桌面配置」而不是等一轮轮询。
+    #[prost(bool, tag="4")]
+    pub ready: bool,
+    #[prost(string, tag="5")]
+    pub not_ready_reason: ::prost::alloc::string::String,
+}
+/// daemon→client：登记结果 + 重连对账清单。
+/// reconcile_run_ids 是 daemon 手里仍未终结的 run；host 必须逐条重报（还在跑 = running，
+/// 不认识 = 终态 unknown）。到 reconcile_deadline 仍未被重报的，daemon 自行判 unknown。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceExecutorHostRegistered {
+    #[prost(bool, tag="1")]
+    pub ok: bool,
+    #[prost(string, optional, tag="2")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag="3")]
+    pub reconcile_run_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(double, tag="4")]
+    pub reconcile_deadline: f64,
+}
+/// daemon→client：一张工单。workspace_id 与 workspace_root 在**提交那一刻**就已解析固定
+/// （plan 102 的 cwd 跟随只影响新提交，不改已在跑任务的边界）。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceExecutorAssign {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub prompt: ::prost::alloc::string::String,
+    /// true = 可写；false = 只读
+    #[prost(bool, tag="3")]
+    pub write: bool,
+    #[prost(string, tag="4")]
+    pub workspace_id: ::prost::alloc::string::String,
+    /// daemon 工作区表里登记的真实路径
+    #[prost(string, tag="5")]
+    pub workspace_root: ::prost::alloc::string::String,
+    #[prost(double, tag="6")]
+    pub submitted_at: f64,
+}
+/// daemon→client：取消一条 run（幂等；已终结的 run 上的取消是空操作）。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceExecutorCancel {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+}
+/// client→daemon：状态与终态回报。终态一直保留在 host 手里重发，直到收到 DeviceExecutorReportAck。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceExecutorReport {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(enumeration="ExecutorRunState", tag="2")]
+    pub state: i32,
+    /// 进行中的一句话 / 拒绝原因；不含转录，转录留在桌面内部不经 daemon
+    #[prost(string, tag="3")]
+    pub note: ::prost::alloc::string::String,
+    /// 终态：executor 的最终回复
+    #[prost(string, optional, tag="4")]
+    pub summary: ::core::option::Option<::prost::alloc::string::String>,
+    /// 终态：改动过的文件（工作区相对路径）
+    #[prost(string, repeated, tag="5")]
+    pub changed_files: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="6")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(double, tag="7")]
+    pub reported_at: f64,
+}
+/// daemon→client：终态已落到 daemon 的 run 账本，host 可以丢掉本地副本了。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceExecutorReportAck {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceEnvelope {
     #[prost(uint32, tag="1")]
@@ -1251,7 +1336,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -1334,6 +1419,18 @@ pub mod device_envelope {
         Pong(super::DevicePong),
         #[prost(message, tag="60")]
         Error(super::DeviceError),
+        #[prost(message, tag="70")]
+        ExecutorHostRegister(super::DeviceExecutorHostRegister),
+        #[prost(message, tag="71")]
+        ExecutorHostRegistered(super::DeviceExecutorHostRegistered),
+        #[prost(message, tag="72")]
+        ExecutorAssign(super::DeviceExecutorAssign),
+        #[prost(message, tag="73")]
+        ExecutorCancel(super::DeviceExecutorCancel),
+        #[prost(message, tag="74")]
+        ExecutorReport(super::DeviceExecutorReport),
+        #[prost(message, tag="75")]
+        ExecutorReportAck(super::DeviceExecutorReportAck),
     }
 }
 // Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
@@ -1458,6 +1555,69 @@ impl LocalAuthErrorCode {
             "LOCAL_AUTH_ERROR_CODE_NONCE_INVALID" => Some(Self::NonceInvalid),
             "LOCAL_AUTH_ERROR_CODE_LEASE_INVALID" => Some(Self::LeaseInvalid),
             "LOCAL_AUTH_ERROR_CODE_RATE_LIMITED" => Some(Self::RateLimited),
+            _ => None,
+        }
+    }
+}
+// ===== executor（plan 116）=====
+//
+// 「agent 经 `coflux executor` 甩子任务」的通路。桌面 app 是本机唯一的 executor host：daemon 把
+// 工单**推**给它（与 pty_output 同一种既有能力：往已连通道推帧），它用普通上行消息回报状态与终态。
+// 刻意不造「device 向 client 发请求并等响应」的反向 RPC——本片没有任何一条消息需要配对应答。
+//
+// 三条纪律写在这里，实现两侧都按它来：
+//    1. host 只能是 **loopback（同机）** 通道：executor 只服务桌面 app 所在的这台机器，远程 client
+//       即使拿到 SESSION_CONTROL 也不能抢注成 host。
+//    2. 能力按**名字**门禁（对齐 daemon-capabilities.ts 的范式），不比较版本号。
+//    3. 作业表与写锁的真相在桌面主进程；daemon 只留供 CLI 轮询的状态与终态，不做调度、不重派。
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ExecutorRunState {
+    Unspecified = 0,
+    /// host 已接单，尚未开跑
+    Accepted = 1,
+    Running = 2,
+    /// —— 以下为终态 ——
+    Succeeded = 3,
+    /// host 当场拒绝（写锁被占、未配置 provider/model、并发封顶、工作区不可用……），note 是给 agent 看的原因
+    Rejected = 4,
+    ModelError = 5,
+    ToolFailed = 6,
+    Cancelled = 7,
+    /// 结果未知：host 掉线/换代后没能重报这条 run。**绝不自动重跑**——租约失效不证明旧 writer 已停止。
+    Unknown = 8,
+}
+impl ExecutorRunState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EXECUTOR_RUN_STATE_UNSPECIFIED",
+            Self::Accepted => "EXECUTOR_RUN_STATE_ACCEPTED",
+            Self::Running => "EXECUTOR_RUN_STATE_RUNNING",
+            Self::Succeeded => "EXECUTOR_RUN_STATE_SUCCEEDED",
+            Self::Rejected => "EXECUTOR_RUN_STATE_REJECTED",
+            Self::ModelError => "EXECUTOR_RUN_STATE_MODEL_ERROR",
+            Self::ToolFailed => "EXECUTOR_RUN_STATE_TOOL_FAILED",
+            Self::Cancelled => "EXECUTOR_RUN_STATE_CANCELLED",
+            Self::Unknown => "EXECUTOR_RUN_STATE_UNKNOWN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EXECUTOR_RUN_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "EXECUTOR_RUN_STATE_ACCEPTED" => Some(Self::Accepted),
+            "EXECUTOR_RUN_STATE_RUNNING" => Some(Self::Running),
+            "EXECUTOR_RUN_STATE_SUCCEEDED" => Some(Self::Succeeded),
+            "EXECUTOR_RUN_STATE_REJECTED" => Some(Self::Rejected),
+            "EXECUTOR_RUN_STATE_MODEL_ERROR" => Some(Self::ModelError),
+            "EXECUTOR_RUN_STATE_TOOL_FAILED" => Some(Self::ToolFailed),
+            "EXECUTOR_RUN_STATE_CANCELLED" => Some(Self::Cancelled),
+            "EXECUTOR_RUN_STATE_UNKNOWN" => Some(Self::Unknown),
             _ => None,
         }
     }

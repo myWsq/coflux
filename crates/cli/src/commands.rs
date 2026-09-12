@@ -1,8 +1,8 @@
 //! agent 侧子命令（plan 112）：`terminal new|run|list|read|wait|send|close`、`notify`、`progress`、
-//! `ports`、`workspace [locate|forget]`、`hook <claude|codex>`。
+//! `ports`、`workspace [locate|forget]`、`hook <claude|codex>`、`executor run`。
 //!
 //! 请求体、stdout 文案与退出码逐命令对齐 node 版 `packages/cli/coflux.mjs`（`cmdTerminal` /
-//! `cmdNotify` / `cmdProgress` / `cmdWorkspace` / `cmdPorts` / `cmdHook`）——SKILL.md 与黑盒用例引用
+//! `cmdNotify` / `cmdProgress` / `cmdWorkspace` / `cmdPorts` / `cmdHook` / `cmdExecutor`）——SKILL.md 与黑盒用例引用
 //! 的输出短语（如 `已开终端 <taskId>`）逐字保留。渲染逻辑抽成纯函数以便单测，I/O 只在 `run_*` 里。
 //!
 //! 与 `hook` 子命令的约定**相反**：这些命令必须写 stdout——输出就是给 agent 读的返回值。
@@ -18,6 +18,15 @@ use crate::gateway;
 use crate::text::{strip_ansi, tail_lines};
 
 const DEFAULT_READ_LINES: usize = 200;
+/// Executor poll interval. Same shape as `terminal wait` (a single `/agent` reply is capped at
+/// 25 seconds), but tighter: the terminal state here is a return value someone is blocked on.
+const EXECUTOR_POLL: Duration = Duration::from_secs(2);
+/// Default executor wait budget, in seconds. Sub-tasks run long; same order as `terminal wait`.
+const DEFAULT_EXECUTOR_TIMEOUT_S: f64 = 1800.0;
+/// How many times a submission may be re-sent after a *transport* failure. The retry reuses the
+/// same submissionId and the daemon deduplicates on it — "never blindly resubmit" forbids a second
+/// id, not a second attempt.
+const EXECUTOR_SUBMIT_RETRIES: usize = 2;
 /// `wait` loops here because one `/agent` round-trip is capped at 25 s on the loopback endpoint;
 /// each round the daemon blocks up to `WAIT_ROUND_MS` on its command-state watch and answers the
 /// moment the command finishes, so the loop never hammers it. Default 30 minutes overall.
@@ -474,6 +483,179 @@ pub fn run_ports() {
     println!("{}", render_ports(&result));
 }
 
+/* -------------------------------- executor ------------------------------- */
+// `coflux executor run`: hand one well-bounded sub-task to the built-in executor.
+//
+// Three phases: **submit** returns a runId (answered immediately, deduplicated by `submissionId`)
+// -> the CLI **polls** status (a single `/agent` reply is capped at 25 seconds, so a long run can
+// never hang off one request) -> the terminal state is rendered. On wait timeout a cancel goes out
+// before the error: leaving an unwatched write job editing files is worse than the timeout itself.
+
+/// This process's stable submission id: pid plus the nanosecond it was minted. Generated **once**
+/// and reused verbatim when a transport failure forces a retry — the daemon deduplicates on it, so
+/// a retry can never become a second run.
+fn submission_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    format!("sub-{}-{nanos}", std::process::id())
+}
+
+/// `--timeout`: only a positive (possibly fractional) number counts; anything else means 1800s.
+pub fn executor_timeout_secs(raw: Option<&str>) -> f64 {
+    raw.and_then(|text| text.trim().parse::<f64>().ok())
+        .filter(|n| n.is_finite() && *n > 0.0)
+        .unwrap_or(DEFAULT_EXECUTOR_TIMEOUT_S)
+}
+
+fn changed_files(status: &Value) -> Vec<String> {
+    status
+        .get("changedFiles")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// stdout for a successful terminal state: a machine-readable status line first, then the
+/// executor's final reply and the list of files it changed.
+pub fn render_executor_success(status: &Value) -> String {
+    let mut out = vec!["# succeeded".to_string()];
+    let summary = field_str(status, "summary").trim().to_string();
+    out.push(if summary.is_empty() {
+        "（executor 没有留下最终回复）".to_string()
+    } else {
+        summary
+    });
+    let files = changed_files(status);
+    if files.is_empty() {
+        out.push("改动文件：无".to_string());
+    } else {
+        out.push(format!("改动文件（{}）：", files.len()));
+        out.extend(files);
+    }
+    out.push("executor 不会 git commit：改动请自己 review 后提交。".to_string());
+    out.join("\n")
+}
+
+/// One stderr sentence for a non-success terminal state: state name, reason, and what was already
+/// changed — the last part matters most when the run was interrupted or failed midway.
+pub fn render_executor_failure(status: &Value) -> String {
+    let terminal = field_str(status, "terminal");
+    let terminal = if terminal.is_empty() { "unknown" } else { terminal };
+    let mut reason = field_str(status, "error").trim().to_string();
+    if reason.is_empty() {
+        reason = field_str(status, "note").trim().to_string();
+    }
+    if reason.is_empty() {
+        reason = "executor 没有给出原因".to_string();
+    }
+    let files = changed_files(status);
+    let tail = if files.is_empty() {
+        String::new()
+    } else {
+        format!("；已改动 {} 个文件：{}", files.len(), files.join(" "))
+    };
+    format!("executor 任务未成功（{terminal}）：{reason}{tail}")
+}
+
+pub fn render_executor_timeout(timeout_secs: f64, run_id: &str, phase: &str) -> String {
+    format!(
+        "等待超时（{}s）：executor 任务 {run_id} 仍是 {phase}，已请求取消。可加大 --timeout 后重发",
+        js_number(&Value::from(timeout_secs))
+    )
+}
+
+/// Submit. A transport failure is retried with the same submissionId; an explicit daemon refusal
+/// is reported verbatim and never retried.
+fn executor_submit(prompt: &str, write: bool) -> String {
+    let submission = submission_id();
+    let request = || {
+        with(
+            with(
+                with(body("executor.submit"), "submissionId", submission.as_str()),
+                "prompt",
+                prompt,
+            ),
+            "write",
+            write,
+        )
+    };
+    let mut attempt = 0;
+    loop {
+        match gateway::agent_post_result(request()) {
+            Ok(result) => {
+                let run_id = field_str(&result, "runId").to_string();
+                if run_id.is_empty() {
+                    crate::die("daemon 没有返回 runId（版本太旧？）");
+                }
+                return run_id;
+            }
+            Err(error @ gateway::AgentError::Refused(_)) => crate::die(&error.message()),
+            Err(error) => {
+                if attempt >= EXECUTOR_SUBMIT_RETRIES {
+                    crate::die(&error.message());
+                }
+                attempt += 1;
+                std::thread::sleep(EXECUTOR_POLL);
+            }
+        }
+    }
+}
+
+pub fn run_executor(args: &ParsedArgs) {
+    if args.positional(1) != Some("run") {
+        crate::die("executor 的子命令只有 run：coflux executor run --prompt=\"<任务>\" [--write]");
+    }
+    let prompt = args.string("prompt").unwrap_or("").trim().to_string();
+    if prompt.is_empty() {
+        crate::die(
+            "executor run 需要 --prompt=\"<任务>\"（一句把边界说清的任务描述，例如 --prompt=\"把 crates/worker 的 clippy 警告清掉\"）",
+        );
+    }
+    let write = args.flag("write");
+    let timeout_secs = executor_timeout_secs(args.string("timeout"));
+    let deadline = Duration::try_from_secs_f64(timeout_secs)
+        .ok()
+        .and_then(|timeout| Instant::now().checked_add(timeout));
+    let run_id = executor_submit(&prompt, write);
+    loop {
+        // The first poll does not sleep: a rejection (write lock taken, model not configured) has to
+        // surface immediately instead of costing the caller a whole poll interval.
+        let status = gateway::agent_post(with(body("executor.status"), "runId", run_id.as_str()));
+        if field_str(&status, "phase") == "done" {
+            // `succeeded` is about the *task*; the envelope's top-level `ok` only says the request
+            // itself was accepted.
+            if field_bool(&status, "succeeded") {
+                println!("{}", render_executor_success(&status));
+                return;
+            }
+            crate::die(&render_executor_failure(&status));
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            // Cancel before reporting: an unwatched write job still editing files in the background
+            // is far worse than the timeout itself.
+            let _ = gateway::agent_post_result(with(
+                body("executor.cancel"),
+                "runId",
+                run_id.as_str(),
+            ));
+            crate::die(&render_executor_timeout(
+                timeout_secs,
+                &run_id,
+                field_str(&status, "phase"),
+            ));
+        }
+        std::thread::sleep(EXECUTOR_POLL);
+    }
+}
+
 /* ---------------------------------- hook --------------------------------- */
 // `coflux hook <claude|codex>`：信使。读 stdin/argv 的 hook 事件 JSON，只取事件名与进程坐标转发到
 // `/hook`——payload 里的 prompt / 回答原文 / 通知正文一律不出机（隐私边界）。
@@ -736,6 +918,69 @@ mod tests {
             { "port": 8080, "url": "" },
         ] });
         assert_eq!(render_ports(&result), "5173  https://x.coflux.dev\n8080  ");
+    }
+
+    #[test]
+    fn executor_timeout_defaults_like_terminal_wait() {
+        assert_eq!(executor_timeout_secs(None), 1800.0);
+        assert_eq!(executor_timeout_secs(Some("0")), 1800.0);
+        assert_eq!(executor_timeout_secs(Some("abc")), 1800.0);
+        assert_eq!(executor_timeout_secs(Some("90")), 90.0);
+    }
+
+    #[test]
+    fn executor_submission_ids_are_unique_per_call() {
+        let first = submission_id();
+        assert!(first.starts_with("sub-"));
+        assert_ne!(first, submission_id());
+    }
+
+    #[test]
+    fn executor_success_prints_the_reply_the_files_and_the_no_commit_boundary() {
+        let status = json!({
+            "phase": "done", "terminal": "succeeded", "succeeded": true,
+            "summary": "清掉了 7 条 clippy 警告", "changedFiles": ["crates/worker/src/a.rs", "crates/worker/src/b.rs"],
+        });
+        let text = render_executor_success(&status);
+        assert!(text.starts_with("# succeeded\n清掉了 7 条 clippy 警告\n"), "{text}");
+        assert!(text.contains("改动文件（2）：\ncrates/worker/src/a.rs\ncrates/worker/src/b.rs"), "{text}");
+        assert!(text.contains("不会 git commit"), "{text}");
+        // 没改动 / 没回复也要说清楚，不能打印空白
+        let empty = render_executor_success(&json!({ "phase": "done", "succeeded": true }));
+        assert!(empty.contains("（executor 没有留下最终回复）"), "{empty}");
+        assert!(empty.contains("改动文件：无"), "{empty}");
+    }
+
+    #[test]
+    fn executor_failure_names_the_terminal_state_and_the_reason() {
+        let rejected = render_executor_failure(&json!({
+            "terminal": "rejected", "note": "该工作区已有一个写模式 executor 在跑",
+        }));
+        assert_eq!(
+            rejected,
+            "executor 任务未成功（rejected）：该工作区已有一个写模式 executor 在跑"
+        );
+        // error 优先于 note，并带上已经改了哪些文件
+        let failed = render_executor_failure(&json!({
+            "terminal": "tool_failed", "note": "工具失败", "error": "写文件被沙箱拒绝",
+            "changedFiles": ["a.rs"],
+        }));
+        assert_eq!(
+            failed,
+            "executor 任务未成功（tool_failed）：写文件被沙箱拒绝；已改动 1 个文件：a.rs"
+        );
+        // 字段全缺也要有一句可读的话
+        let bare = render_executor_failure(&json!({}));
+        assert!(bare.contains("unknown"), "{bare}");
+        assert!(bare.contains("没有给出原因"), "{bare}");
+    }
+
+    #[test]
+    fn executor_timeout_message_says_it_cancelled() {
+        let text = render_executor_timeout(90.0, "run-1", "running");
+        assert!(text.contains("等待超时（90s）"), "{text}");
+        assert!(text.contains("已请求取消"), "{text}");
+        assert!(text.contains("--timeout"), "{text}");
     }
 
     #[test]

@@ -10,13 +10,14 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
-    "test": "node --import tsx --test src/main/*.test.ts src/renderer/*.test.ts src/renderer/components/workbench/*.test.ts test/*.test.ts",
+    "test": "node --import tsx --test src/main/*.test.ts src/renderer/*.test.ts src/renderer/components/settings/*.test.ts src/renderer/components/workbench/*.test.ts test/*.test.ts",
     "stage-daemon": "node scripts/stage-daemon.mjs",
     "pack": "node scripts/stage-daemon.mjs && electron-vite build && electron-builder --mac --dir --publish never",
     "dist": "node scripts/stage-daemon.mjs && electron-vite build && electron-builder --mac --arm64 --publish never",
     "icon": "node scripts/export-icon.mjs"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.9"
   },

@@ -11,6 +11,9 @@ import {
   type ClientToServerPayload,
   type DeviceEnvelope,
   type DeviceEnvelopePayload,
+  type DeviceExecutorAssign,
+  type DeviceExecutorHostRegistered,
+  type DeviceExecutorReport,
   type DevicePortsResult,
   type DeviceSessionCatalog,
   type FsListed,
@@ -172,6 +175,15 @@ export interface DeviceRouterOptions {
   onPorts: (daemonId: string, ports: DevicePortsResult) => void;
   onError: (message: string) => void;
   onInputState?: (daemonId: string, taskId: string, sessionId: string, state: DeviceInputState) => void;
+  /**
+   * executor（plan 116）：daemon 把工单**推**过来，桌面主进程执行、再用普通上行消息回报。
+   * 刻意不是反向 RPC——这四条里没有一条需要配对应答，沿用 pty_output 那种既有的推送语义即可。
+   * 只有桌面 app 会接这些回调；其他 client 不注册，收到也只是无害地落空。
+   */
+  onExecutorAssign?: (daemonId: string, assign: DeviceExecutorAssign) => void;
+  onExecutorCancel?: (daemonId: string, runId: string) => void;
+  onExecutorHostRegistered?: (daemonId: string, registered: DeviceExecutorHostRegistered) => void;
+  onExecutorReportAck?: (daemonId: string, runId: string) => void;
   /** 仅供确定性状态机测试与非 browser host；desktop 生产调用不传。 */
   adapter?: DeviceRouterAdapter;
   clock?: DeviceRouterClock;
@@ -1720,6 +1732,19 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       case "portsResult":
         options.onPorts(route.daemonId, payload.value);
         break;
+      // executor（plan 116）：四条都是单向推送，不进 pendingRequests。
+      case "executorAssign":
+        options.onExecutorAssign?.(route.daemonId, payload.value);
+        break;
+      case "executorCancel":
+        options.onExecutorCancel?.(route.daemonId, payload.value.runId);
+        break;
+      case "executorHostRegistered":
+        options.onExecutorHostRegistered?.(route.daemonId, payload.value);
+        break;
+      case "executorReportAck":
+        options.onExecutorReportAck?.(route.daemonId, payload.value.runId);
+        break;
       case "pong": {
         // 心跳不走 pendingRequests（那条路带 demand 语义，会把按需拨号的连接钉住不放），
         // 故在这里自行配对：只认最后发出的那一发，迟到的旧 pong 直接丢。
@@ -2392,6 +2417,29 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     });
   }
 
+  /**
+   * executor（plan 116）的两条上行。走当前 session lane 的活跃通道。
+   *
+   * daemon 那边**只认 loopback（direct）通道**上来的 executor 帧（`Principal::Local`），远端 client
+   * 即使持有 SESSION_CONTROL 也会被拒。这里不自行判断本机与否：判据在 daemon，客户端猜一遍只会两边漂移。
+   * 走 relay 时注册会被拒，daemon 回 `executorHostRegistered { ok: false }`，调用方据此不接单——
+   * 失败是可读的、自纠正的，好过客户端自作聪明。
+   */
+  function sendExecutorHostRegister(
+    daemonId: string,
+    register: { hostId: string; hostEpoch: bigint; capabilities: string[]; ready: boolean; notReadyReason: string },
+  ): boolean {
+    const channel = routeFor(daemonId).sessionLane.active;
+    if (!channel) return false;
+    return sendOn(channel, normalizePayload({ case: "executorHostRegister", value: register }));
+  }
+
+  function sendExecutorReport(daemonId: string, report: DeviceExecutorReport): boolean {
+    const channel = routeFor(daemonId).sessionLane.active;
+    if (!channel) return false;
+    return sendOn(channel, normalizePayload({ case: "executorReport", value: report }));
+  }
+
   function sendInput(daemonId: string, sessionId: string, data: Uint8Array): boolean {
     const route = routeFor(daemonId);
     const session = route.sessions.get(sessionId);
@@ -2880,6 +2928,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     attachSession,
     seedCheckpoint,
     sendInput,
+    sendExecutorHostRegister,
+    sendExecutorReport,
     resize,
     stopSession,
     suspendSession,

@@ -59,6 +59,14 @@ coflux —— 账号与终端操作
   coflux notify \"<一句话>\"  叫人：工作区在侧栏转为「等待交互」并显示这句话
   coflux progress \"<一句话>\"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
   coflux ports           列出本工作区的监听端口及可直接打开的预览 URL
+  coflux executor run --prompt=\"<任务>\" [--write] [--timeout <秒>]
+                          把一个边界清楚的子任务甩给内置的轻量 executor（由本机 Coflux.app
+                          执行），阻塞到跑完并打印它的最终回复与改动文件。一次性：没有会话、
+                          不续聊，要改就再发一次。入参只有任务描述与读写模式——模型由用户在
+                          Coflux.app 里全局配一次。默认只读；--write 才允许改文件（同一工作区
+                          同时只允许一个写任务）。它被内核级沙箱锁在本工作区目录内，**不联网**
+                          （先把依赖装好再甩），也**不会 git commit**（改动由你自己 review 提交）
+                          只有装了 Coflux.app 的这台机器能用
   coflux workspace       一行 JSON 报出「我在哪」：workspaceId（cwd 所在的有效工作区，本地命令
                           都落在它上面）、path、owningWorkspaceId（本终端此刻归属哪个工作区）、
                           moved。用 /cd 挪进另一个 coflux 工作区后用它确认目标，跨工作区操作时也传这个
@@ -103,6 +111,7 @@ fn main() {
         "notify" => commands::run_notify(&parsed),
         "progress" => commands::run_progress(&parsed),
         "ports" => commands::run_ports(),
+        "executor" => commands::run_executor(&parsed),
         "workspace" => commands::run_workspace(&parsed),
         other => {
             die(&format!("未知命令: {other}\n本机宿主请使用 Coflux.app 或 cofluxd。\n\n{HELP}"));
@@ -116,7 +125,7 @@ mod tests {
 
     #[test]
     fn help_keeps_agent_phrases_used_by_skill_docs() {
-        for phrase in ["coflux terminal new", "coflux terminal run <taskId>", "coflux terminal wait <taskId>", "coflux terminal read <taskId>", "coflux terminal close <taskId>", "coflux notify", "coflux progress", "coflux ports", "coflux workspace locate", "coflux hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS"] {
+        for phrase in ["coflux terminal new", "coflux terminal run <taskId>", "coflux terminal wait <taskId>", "coflux terminal read <taskId>", "coflux terminal close <taskId>", "coflux notify", "coflux progress", "coflux ports", "coflux workspace locate", "coflux executor run", "coflux hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS"] {
             assert!(HELP.contains(phrase), "HELP 缺 {phrase}");
         }
     }

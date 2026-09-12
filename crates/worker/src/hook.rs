@@ -3,7 +3,7 @@
 //! - `/hook`（plan 073）：`coflux hook <agent>` 作为信使把 claude/codex 的 hook 事件送进来，
 //!   用于判定回合状态。状态对齐 Vibe Island：active / approval / question / done
 //!   （空 = 尚无 hook 信号）。
-//! - `/agent`（plan 074；plan 094 起 local-first）：`coflux terminal|notify|progress|ports` 的控制
+//! - `/agent`（plan 074；plan 094 起 local-first；executor 三条见下）：`coflux terminal|notify|progress|ports` 的控制
 //!   请求，见 [crate::agent_ctl]——send/read/wait/notify/progress 在 daemon 本地闭环，new/list/ports
 //!   由 daemon 代问中心。拒绝原因原样回给调用方：细节只是参数校验文案，吞成 `bad request` 只会让
 //!   agent 盲目重试（plan 094）。`/hook` 的应答形态不变。
@@ -278,11 +278,28 @@ struct AgentBody {
     /// 目录）刻意分开——插件脚本在会话当前目录里执行，两者未必相同。
     #[serde(default)]
     path: String,
+    /// executor（plan 116）：CLI 生成的稳定提交 id，重投不变——提交超时时靠它去重，
+    /// 不向用户增加入参。
+    #[serde(default)]
+    submission_id: String,
+    /// executor 的任务描述（唯一的自由入参）
+    #[serde(default)]
+    prompt: String,
+    /// executor 读写模式：true = 可写
+    #[serde(default)]
+    write: bool,
+    /// executor 的 run id（status / cancel）
+    #[serde(default)]
+    run_id: String,
 }
 
 /// 单次 send 的文本上限（也是 `terminal.run` 命令行的上限）：与 MCP `send_terminal_input` 的 64 KB
 /// 同值（plan 094 对齐）；超长基本是误把文件内容当输入灌，直接拒绝比截断安全。
 const MAX_SEND_TEXT_BYTES: usize = 64 * 1024;
+
+/// executor 单条 prompt 的字节上限（plan 116）：与账本里的同值，在这里先挡一道，
+/// 让超长请求连队列都进不去。
+const MAX_EXECUTOR_PROMPT_BYTES: usize = crate::agent_ctl::executor::MAX_PROMPT_BYTES;
 
 async fn handle_agent(
     raw: &[u8],
@@ -407,6 +424,40 @@ async fn handle_agent(
                 return Err(RequestError::BadRequest("workspace.forget 缺 path".into()));
             }
             AgentAction::WorkspaceForget { path: parsed.path }
+        }
+        "executor.submit" => {
+            if parsed.submission_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("executor.submit 缺 submissionId".into()));
+            }
+            if parsed.prompt.trim().is_empty() {
+                return Err(RequestError::BadRequest("executor.submit 缺 prompt".into()));
+            }
+            if parsed.prompt.len() > MAX_EXECUTOR_PROMPT_BYTES {
+                return Err(RequestError::BadRequest(format!(
+                    "executor.submit prompt 超过 {MAX_EXECUTOR_PROMPT_BYTES} 字节上限"
+                )));
+            }
+            AgentAction::ExecutorSubmit {
+                submission_id: parsed.submission_id,
+                prompt: parsed.prompt,
+                write: parsed.write,
+            }
+        }
+        "executor.status" => {
+            if parsed.run_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("executor.status 缺 runId".into()));
+            }
+            AgentAction::ExecutorStatus {
+                run_id: parsed.run_id,
+            }
+        }
+        "executor.cancel" => {
+            if parsed.run_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("executor.cancel 缺 runId".into()));
+            }
+            AgentAction::ExecutorCancel {
+                run_id: parsed.run_id,
+            }
         }
         other => return Err(RequestError::BadRequest(format!("未知 action {other}"))),
     };

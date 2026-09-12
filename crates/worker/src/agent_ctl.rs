@@ -37,6 +37,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use prost::Message as _;
 
+pub mod executor;
+
 use crate::session_ledger::{SessionPhase, SessionRecord};
 use crate::{
     agents, device::DeviceRuntime, observed::ObservedState, workspace_match, worktree_locate,
@@ -134,6 +136,19 @@ pub enum AgentAction {
     /// `coflux workspace forget <path>`（plan 104）：Claude Code 已清理掉该 worktree，
     /// 其下所有终端搬回项目主工作区、工作区记录消失。
     WorkspaceForget { path: String },
+    /// `coflux executor run`（plan 116）的提交半程：登记一条 run 并把工单推给本机桌面 app。
+    /// 长任务不可能挂在一次 `/agent` 上（服务端 25 秒上限），故与 `terminal wait` 同款：
+    /// submit 拿 runId，CLI 侧轮询 status。`submission_id` 由 CLI 生成且重投不变——提交超时
+    /// **不得盲目重发**，去重靠它。
+    ExecutorSubmit {
+        submission_id: String,
+        prompt: String,
+        write: bool,
+    },
+    /// 轮询原语：本地账本直接答，不经中心，也不经桌面 app。
+    ExecutorStatus { run_id: String },
+    /// 取消一条 run（幂等）。
+    ExecutorCancel { run_id: String },
 }
 
 pub struct AgentResponse {
@@ -478,6 +493,31 @@ async fn handle(
         AgentAction::WorkspaceForget { path } => {
             forget_workspace(state, to_server_tx, &session_id, &scope, &path).await
         }
+        AgentAction::ExecutorSubmit {
+            submission_id,
+            prompt,
+            write,
+        } => {
+            // 工作区边界在**提交这一刻**就固定（plan 116 Landmine 4）：之后父 agent 再 `cd` 或
+            // 进 worktree 挪窝，都不改变已在跑任务的边界。
+            let effective = match scope.require_effective() {
+                Ok(effective) => effective.to_string(),
+                Err(response) => return response,
+            };
+            let root = scope.effective_path.clone().unwrap_or_default();
+            match device.executor_submit(&submission_id, &effective, &root, &prompt, write) {
+                Ok(run_id) => AgentResponse::ok(serde_json::json!({ "runId": run_id })),
+                Err(message) => AgentResponse::err("409 Conflict", message),
+            }
+        }
+        AgentAction::ExecutorStatus { run_id } => match device.executor_status(&run_id) {
+            Ok(view) => AgentResponse::ok(view),
+            Err(message) => AgentResponse::err("404 Not Found", message),
+        },
+        AgentAction::ExecutorCancel { run_id } => match device.executor_cancel(&run_id) {
+            Ok(()) => AgentResponse::ok(serde_json::json!({ "runId": run_id })),
+            Err(message) => AgentResponse::err("404 Not Found", message),
+        },
     }
 }
 

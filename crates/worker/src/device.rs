@@ -25,6 +25,9 @@ use prost::Message as _;
 use rand_core::{OsRng, RngCore};
 use tokio::sync::{mpsc, oneshot, Notify};
 
+use crate::agent_ctl::executor::{
+    self, Effect as ExecutorEffect, ExecutorLedger, RunRecord as ExecutorRun,
+};
 use crate::local_auth::{AuthenticatedLocal, LocalAuth, LocalPrincipal};
 use crate::{Config, WorkerState, WsOut};
 
@@ -789,6 +792,10 @@ pub struct DeviceRuntime {
     /// generation/seq；只有结果未知时才换 identity，避免 sessiond cursor 随每次 send 增长。
     agent_io_states: Mutex<HashMap<String, AgentIoState>>,
     prepared: Mutex<HashMap<String, PreparedRecord>>,
+    /// executor run 账本（plan 116）：本机唯一的桌面 host + 供 CLI 轮询的 run 状态与终态。
+    /// 放在 runtime 上是因为两个消费方都只握得到它：`/agent` 的 executor.* 动作，
+    /// 与本机 loopback 通道上来的 host 登记 / 回报帧。
+    executor: Mutex<ExecutorLedger>,
     /// 中心已触发执行过的 operation_id（plan 091）：Execute 重发只重放上次 report 或忽略在飞，绝不二次分派。
     executed_operations: Mutex<HashSet<String>>,
     /// 中心按需读快照的在飞等待者：内部 request_id → (session_id, 回执)。
@@ -883,6 +890,7 @@ impl DeviceRuntime {
             pending_agent_ios: Mutex::new(HashMap::new()),
             agent_io_states: Mutex::new(HashMap::new()),
             prepared: Mutex::new(HashMap::new()),
+            executor: Mutex::new(ExecutorLedger::default()),
             executed_operations: Mutex::new(HashSet::new()),
             pending_snapshot_reads: Mutex::new(HashMap::new()),
             requests: Mutex::new(CallLedger::default()),
@@ -1898,6 +1906,16 @@ impl DeviceRuntime {
             );
             return;
         }
+        // executor（plan 116）：既不是 request/response 也不去 sessiond，就地消化。
+        // 放在 scope 门之后、request_id 校验之前——这些帧刻意不带 request_id。
+        if matches!(
+            payload,
+            device_envelope::Payload::ExecutorHostRegister(_)
+                | device_envelope::Payload::ExecutorReport(_)
+        ) {
+            self.handle_executor_frame(channel_id, &principal, payload.clone());
+            return;
+        }
         if let device_envelope::Payload::SessionAttach(attach) = payload {
             if attach.client_instance_id != principal.client_instance_id()
                 || attach.transport_generation != principal.transport_generation()
@@ -2112,6 +2130,202 @@ impl DeviceRuntime {
         } else {
             self.dispatch_worker_request(channel_id, Principal::Server, envelope);
         }
+    }
+
+    /* ------------------------------ executor（plan 116） ------------------------------ */
+
+    /// 每次读写 executor 账本前先过一道「清算门」：host 的通道没了就登记掉线（**不重派**），
+    /// 再把超期未回报的 run 判成「结果未知」。返回统一的 now，避免同一次操作里取到两个时刻。
+    ///
+    /// 刻意分成两把短锁依次取：executor 与 channels 绝不嵌套持有，避免与 send_payload 形成环。
+    fn executor_gate(&self) -> f64 {
+        let now = epoch_ms();
+        let host_channel = self
+            .executor
+            .lock()
+            .unwrap()
+            .host()
+            .map(|host| host.channel_id.clone());
+        let lost = match host_channel {
+            Some(channel_id) => !self.channels.lock().unwrap().contains_key(&channel_id),
+            None => false,
+        };
+        let mut ledger = self.executor.lock().unwrap();
+        if lost {
+            ledger.host_channel_lost(now);
+        }
+        ledger.sweep(now);
+        now
+    }
+
+    /// 本机 loopback 通道上来的 executor host 登记 / 回报。
+    ///
+    /// **只认 direct（loopback）通道**：executor 只服务桌面 app 所在的这台机器，远端 client
+    /// 即使持有 SESSION_CONTROL 也不能抢注成 host，否则它就能截走本机工单。
+    fn handle_executor_frame(
+        &self,
+        channel_id: &str,
+        principal: &Principal,
+        payload: device_envelope::Payload,
+    ) {
+        if !matches!(principal, Principal::Local(_)) {
+            self.send_error(
+                channel_id,
+                None,
+                "executor_host_denied",
+                "executor host 只能由本机 loopback 通道登记",
+            );
+            return;
+        }
+        let now = self.executor_gate();
+        match payload {
+            device_envelope::Payload::ExecutorHostRegister(register) => {
+                let outcome = self.executor.lock().unwrap().register_host(
+                    channel_id,
+                    &register.host_id,
+                    register.host_epoch,
+                    &register.capabilities,
+                    register.ready,
+                    &register.not_ready_reason,
+                    now,
+                );
+                let registered = match outcome {
+                    Ok(outcome) => wire::DeviceExecutorHostRegistered {
+                        ok: true,
+                        error: None,
+                        reconcile_run_ids: outcome.reconcile_run_ids,
+                        reconcile_deadline: outcome.reconcile_deadline,
+                    },
+                    Err(error) => wire::DeviceExecutorHostRegistered {
+                        ok: false,
+                        error: Some(error),
+                        reconcile_run_ids: Vec::new(),
+                        reconcile_deadline: 0.0,
+                    },
+                };
+                self.send_payload(
+                    channel_id,
+                    device_envelope::Payload::ExecutorHostRegistered(registered),
+                );
+            }
+            device_envelope::Payload::ExecutorReport(report) => {
+                // 回报的身份不看它自报什么：只认「这条 channel 就是当前已登记的 host」。
+                let host = {
+                    let ledger = self.executor.lock().unwrap();
+                    ledger
+                        .host()
+                        .filter(|host| host.channel_id == channel_id)
+                        .map(|host| (host.host_id.clone(), host.epoch))
+                };
+                let Some((host_id, host_epoch)) = host else {
+                    return;
+                };
+                let Some(state) = executor::report_state_from_wire(report.state) else {
+                    return;
+                };
+                let effect = self.executor.lock().unwrap().apply_report(
+                    &host_id,
+                    host_epoch,
+                    &report.run_id,
+                    state,
+                    &report.note,
+                    report.summary.as_deref().unwrap_or_default(),
+                    report.changed_files,
+                    report.error.as_deref().unwrap_or_default(),
+                    now,
+                );
+                if let Some(effect) = effect {
+                    self.dispatch_executor_effect(effect);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 把账本给出的一条 effect 变成真的帧。账本自己不碰 I/O，锁在这里已经放掉。
+    fn dispatch_executor_effect(&self, effect: ExecutorEffect) {
+        match effect {
+            ExecutorEffect::Assign {
+                channel_id,
+                run_id,
+            } => {
+                let assign = {
+                    let ledger = self.executor.lock().unwrap();
+                    ledger.run(&run_id).map(|record| wire::DeviceExecutorAssign {
+                        run_id: record.run_id.clone(),
+                        prompt: record.prompt.clone(),
+                        write: record.write,
+                        workspace_id: record.workspace_id.clone(),
+                        workspace_root: record.workspace_root.clone(),
+                        submitted_at: record.created_at,
+                    })
+                };
+                if let Some(assign) = assign {
+                    self.send_payload(&channel_id, device_envelope::Payload::ExecutorAssign(assign));
+                }
+            }
+            ExecutorEffect::Cancel {
+                channel_id,
+                run_id,
+            } => self.send_payload(
+                &channel_id,
+                device_envelope::Payload::ExecutorCancel(wire::DeviceExecutorCancel { run_id }),
+            ),
+            ExecutorEffect::ReportAck {
+                channel_id,
+                run_id,
+            } => self.send_payload(
+                &channel_id,
+                device_envelope::Payload::ExecutorReportAck(wire::DeviceExecutorReportAck {
+                    run_id,
+                }),
+            ),
+        }
+    }
+
+    /// `coflux executor run` 的提交半程：登记 run 并把工单推给已登记的本机桌面 host。
+    /// 没有 host / host 没配好模型时**立刻**返回一句可读错误，而不是让 agent 轮询到超时。
+    pub fn executor_submit(
+        &self,
+        submission_id: &str,
+        workspace_id: &str,
+        workspace_root: &str,
+        prompt: &str,
+        write: bool,
+    ) -> Result<String, String> {
+        let now = self.executor_gate();
+        let (run_id, effect) = self.executor.lock().unwrap().submit(
+            submission_id,
+            workspace_id,
+            workspace_root,
+            prompt,
+            write,
+            now,
+        )?;
+        if let Some(effect) = effect {
+            self.dispatch_executor_effect(effect);
+        }
+        Ok(run_id)
+    }
+
+    /// 轮询原语：本地账本直接答。
+    pub fn executor_status(&self, run_id: &str) -> Result<serde_json::Value, String> {
+        self.executor_gate();
+        let ledger = self.executor.lock().unwrap();
+        ledger
+            .run(run_id)
+            .map(executor_run_view)
+            .ok_or_else(|| "没有这条 executor 任务（runId 不对或已被淘汰）".to_string())
+    }
+
+    /// 取消一条 run（幂等）。
+    pub fn executor_cancel(&self, run_id: &str) -> Result<(), String> {
+        let now = self.executor_gate();
+        let effect = self.executor.lock().unwrap().cancel(run_id, now)?;
+        if let Some(effect) = effect {
+            self.dispatch_executor_effect(effect);
+        }
+        Ok(())
     }
 
     fn authorize_prepared(&self, envelope: &DeviceEnvelope) -> Result<(), String> {
@@ -3439,6 +3653,26 @@ fn device_error(request_id: Option<String>, code: &str, message: &str) -> device
     })
 }
 
+/// executor run -> CLI 可读的 JSON。字段稳定：`coflux executor` 与 SKILL 都按它比对。
+fn executor_run_view(record: &ExecutorRun) -> serde_json::Value {
+    serde_json::json!({
+        "runId": record.run_id,
+        "phase": record.phase.as_str(),
+        "terminal": record.terminal.map(|terminal| terminal.as_str()),
+        // 刻意不叫 `ok`：`/agent` 的应答信封顶层已经有一个 `ok`（请求本身是否被接受），
+        // 同名会让 CLI 把「任务失败」误判成「请求被拒」。
+        "succeeded": record.terminal.map(|terminal| terminal.ok()),
+        "note": record.note,
+        "summary": record.summary,
+        "changedFiles": record.changed_files,
+        "error": record.error,
+        "write": record.write,
+        "workspaceId": record.workspace_id,
+        "createdAt": record.created_at,
+        "updatedAt": record.updated_at,
+    })
+}
+
 fn routed_to_sessiond(payload: &device_envelope::Payload) -> bool {
     matches!(
         payload,
@@ -3635,6 +3869,12 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         | device_envelope::Payload::ProjectValidate(_)
         | device_envelope::Payload::WorktreeAdd(_)
         | device_envelope::Payload::WorktreeRemove(_) => Some(DeviceScope::Lifecycle),
+        // executor host（plan 116）取 SESSION_CONTROL 而不是 RPC：RPC 只能由中心在线 lease 授予，
+        // 而 executor 是一条**完全本地**的通路（本地能闭环的绝不经中心），把它挂在需要中心
+        // 在线的 scope 上等于给本地功能强加一条中心依赖。真正的边界在下面那道 loopback 门：
+        // 只有本机 direct 通道能登记成 host，远端 client 即使拿到 SESSION_CONTROL 也抢不走。
+        device_envelope::Payload::ExecutorHostRegister(_)
+        | device_envelope::Payload::ExecutorReport(_) => Some(DeviceScope::SessionControl),
         _ => None,
     }
 }
@@ -3656,6 +3896,10 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         | device_envelope::Payload::PortsResult(_) => Some(DeviceScope::Rpc),
         device_envelope::Payload::ProjectValidated(_)
         | device_envelope::Payload::WorktreeAdded(_) => Some(DeviceScope::Lifecycle),
+        device_envelope::Payload::ExecutorHostRegistered(_)
+        | device_envelope::Payload::ExecutorAssign(_)
+        | device_envelope::Payload::ExecutorCancel(_)
+        | device_envelope::Payload::ExecutorReportAck(_) => Some(DeviceScope::SessionControl),
         _ => None,
     }
 }
