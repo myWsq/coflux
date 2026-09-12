@@ -10,6 +10,28 @@ if [[ -f "$__coflux_user_zdotdir/.zshrc" ]]; then
 fi
 unset __coflux_user_zdotdir
 source @COFLUX_SHELL_INTEGRATION_DIR@/claude.sh
+# Shell-integration marks (OSC 133 with this session's secret): prompt-start before every prompt,
+# command-start from preexec, command-end with the exit status from the next precmd. Added to the
+# hook arrays after the user's rc, never replacing the user's own precmd/preexec.
+if [[ -n "$__coflux_mark_secret" ]]; then
+  typeset -g __coflux_mark_active=
+  __coflux_precmd() {
+    local __coflux_status=$?
+    if [[ -n "$__coflux_mark_active" ]]; then
+      __coflux_mark_active=
+      printf '\033]133;D;%s;coflux=%s\007' "$__coflux_status" "$__coflux_mark_secret"
+    fi
+    printf '\033]133;A;coflux=%s\007' "$__coflux_mark_secret"
+    return "$__coflux_status"
+  }
+  __coflux_preexec() {
+    __coflux_mark_active=1
+    printf '\033]133;C;coflux=%s\007' "$__coflux_mark_secret"
+  }
+  typeset -ga precmd_functions preexec_functions
+  precmd_functions+=(__coflux_precmd)
+  preexec_functions+=(__coflux_preexec)
+fi
 # ZDOTDIR 还给用户：会话里 `echo $ZDOTDIR` 与今天一致（原来没设过就 unset），登录 shell 接着要读的
 # .zlogin 也因此直接落到用户那份，不再经过本目录。
 if [[ -n "$COFLUX_USER_ZDOTDIR" ]]; then

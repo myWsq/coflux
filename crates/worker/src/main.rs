@@ -109,6 +109,16 @@ struct WorkerState {
     last_diffs: HashMap<String, (i32, i32)>,
     /// 连接状态落盘快照（conn-state.json），供 cofluxd status 展示真实在线态（plan 033）。
     conn_state: ConnState,
+    /// Bumped whenever a session's command state or lifecycle changes in the ledger; agent
+    /// `wait`/`run` subscribe to it so they wake on the change instead of polling.
+    command_epoch: tokio::sync::watch::Sender<u64>,
+}
+
+impl WorkerState {
+    /// Wake every `wait`/`run` waiter: the ledger changed in a way they may care about.
+    pub(crate) fn bump_command_epoch(&self) {
+        self.command_epoch.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
 }
 
 /// 出站到 server 的消息：WS 上只有 binary message，一条 = 一个已编码好的 protobuf 信封字节串
@@ -556,6 +566,7 @@ async fn worker_main() {
         last_branches: HashMap::new(),
         last_diffs: HashMap::new(),
         conn_state,
+        command_epoch: tokio::sync::watch::channel(0).0,
     }));
     let observed = Arc::new(ObservedState::new());
 
@@ -970,6 +981,7 @@ async fn handle_sup_record(
                     .is_some_and(|current| current != &next);
                 state.alive.insert(session_id.clone(), next);
                 state.ledger.mark_started(&session_id, &task_id);
+                state.bump_command_epoch();
                 changed
             };
             if changed_incarnation {
@@ -1005,6 +1017,15 @@ async fn handle_sup_record(
             device.report_session_exit(&session_id, exit_code);
             device.request_reconciliation_catalog();
         }
+        SupervisorToWorker::SessionCommand {
+            session_id,
+            state: command,
+        } => {
+            // A coflux mark moved the shell's command state: record it and wake local waiters.
+            let mut s = state.lock().unwrap();
+            s.ledger.set_command_state(&session_id, command);
+            s.bump_command_epoch();
+        }
         SupervisorToWorker::SessionCreateFailed {
             session_id,
             task_id,
@@ -1013,7 +1034,9 @@ async fn handle_sup_record(
             logln!(
                 "[worker] session create failed without exit session={session_id} task={task_id}: {error}"
             );
-            state.lock().unwrap().ledger.forget(&session_id);
+            let mut s = state.lock().unwrap();
+            s.ledger.forget(&session_id);
+            s.bump_command_epoch();
             // 新 supervisor 用独立 variant 避免旧 worker 把 duplicate create failure 当退出；
             // 新 worker 同样只对账，不按裸 sessionId 改 alive 或上报 SessionExit。
             device.request_reconciliation_catalog();
@@ -1047,6 +1070,12 @@ async fn handle_sup_record(
                         .iter()
                         .map(|session| (session.session_id.as_str(), session.task_id.as_str())),
                 );
+                for session in &sessions {
+                    if let Some(command) = session.command {
+                        s.ledger.set_command_state(&session.session_id, command);
+                    }
+                }
+                s.bump_command_epoch();
                 s.sup_synced = true;
                 s.sup_resync_nonce = (!nonce.is_empty()).then_some(nonce);
                 s.snapshot_owner_id = snapshot_owner_id.clone();
@@ -1927,6 +1956,7 @@ mod tests {
             last_branches: HashMap::new(),
             last_diffs: HashMap::new(),
             conn_state: ConnState::new("/tmp/coflux-resync-unit-test"),
+            command_epoch: tokio::sync::watch::channel(0).0,
         }))
     }
 

@@ -484,6 +484,135 @@ mod tests {
         });
     }
 
+    /// Feed command lines to an interactive shell over a pipe (no tty: prompts go to stderr, hook
+    /// output to stdout) and return stdout. Interactive mode is what makes precmd/preexec/PROMPT_COMMAND
+    /// run — exactly the hooks the marks hang on.
+    fn run_interactive(command: &mut Command, lines: &str) -> String {
+        use std::io::Write as _;
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("起交互 shell");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(lines.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().expect("等 shell 退出");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    const MARK_SECRET: &str = "s3cret";
+    /// Three commands whose exit statuses the marks must carry, plus a probe that the secret is
+    /// gone from the environment of the shell itself and of the child it spawns.
+    const MARK_SCRIPT: &str = "printf 'SECRET=%s\\n' \"${COFLUX_TERMINAL_SECRET-unset}\"\nfalse\nsh -c 'printenv COFLUX_TERMINAL_SECRET || echo CHILD_NO_SECRET; exit 7'\ntrue\n";
+
+    fn assert_marks(shell: &str, stdout: &str) {
+        let prompt = format!("\x1b]133;A;coflux={MARK_SECRET}\x07");
+        let start = format!("\x1b]133;C;coflux={MARK_SECRET}\x07");
+        let first_prompt = stdout.find(&prompt).unwrap_or_else(|| panic!("{shell}: 没有 prompt 标记: {stdout:?}"));
+        let first_start = stdout.find(&start).unwrap_or_else(|| panic!("{shell}: 没有 command-start 标记: {stdout:?}"));
+        assert!(first_prompt < first_start, "{shell}: prompt 标记必须先于第一条命令: {stdout:?}");
+        assert_eq!(stdout.matches(&start).count(), 4, "{shell}: 四条命令各一个 command-start: {stdout:?}");
+        for code in [0, 1, 7] {
+            let end = format!("\x1b]133;D;{code};coflux={MARK_SECRET}\x07");
+            assert!(stdout.contains(&end), "{shell}: 缺退出码 {code} 的 command-end 标记: {stdout:?}");
+        }
+        assert!(stdout.contains("SECRET=unset"), "{shell}: 秘密必须从 shell 自己的环境里拿掉: {stdout:?}");
+        assert!(stdout.contains("CHILD_NO_SECRET"), "{shell}: 子进程绝不能拿到秘密: {stdout:?}");
+    }
+
+    #[test]
+    fn zsh_marks_carry_the_secret_and_keep_it_out_of_the_environment() {
+        let Some(zsh) = find_shell("zsh") else {
+            eprintln!("跳过：本机没有 zsh");
+            return;
+        };
+        let home = test_home("marks-zsh");
+        let home_str = home.to_str().unwrap();
+        write_files(home_str);
+        // The user's own precmd (a plain function, not the hook array) must keep running.
+        let user_zdotdir = home.join("user");
+        fs::create_dir_all(&user_zdotdir).unwrap();
+        fs::write(user_zdotdir.join(".zshrc"), "precmd() { echo USER_PRECMD; }\n").unwrap();
+        let stdout = run_interactive(
+            Command::new(&zsh)
+                .args(["-d", "-i"])
+                .env("HOME", home_str)
+                .env("TERM", "dumb")
+                .env("ZDOTDIR", dir(home_str).join("zsh"))
+                .env("COFLUX_USER_ZDOTDIR", &user_zdotdir)
+                .env("COFLUX_TERMINAL_SECRET", MARK_SECRET),
+            MARK_SCRIPT,
+        );
+        assert_marks("zsh", &stdout);
+        assert!(stdout.contains("USER_PRECMD"), "用户自己的 precmd 必须照跑: {stdout:?}");
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn bash_marks_carry_the_secret_and_chain_user_prompt_command_and_debug_trap() {
+        let Some(bash) = find_shell("bash") else {
+            eprintln!("跳过：本机没有 bash");
+            return;
+        };
+        let home = test_home("marks-bash");
+        let home_str = home.to_str().unwrap();
+        write_files(home_str);
+        // A user PROMPT_COMMAND with a trailing separator and a user DEBUG trap: both must survive.
+        fs::write(
+            home.join(".bashrc"),
+            "PROMPT_COMMAND='echo USER_PROMPT; '\ntrap 'echo USER_DEBUG' DEBUG\n",
+        )
+        .unwrap();
+        let init = dir(home_str).join("bash/init.bash");
+        let stdout = run_interactive(
+            Command::new(&bash)
+                .args(["--noprofile", "--init-file", init.to_str().unwrap(), "-i"])
+                .env("HOME", home_str)
+                .env("TERM", "dumb")
+                .env("COFLUX_TERMINAL_SECRET", MARK_SECRET),
+            MARK_SCRIPT,
+        );
+        assert_marks("bash", &stdout);
+        assert!(stdout.contains("USER_PROMPT"), "用户的 PROMPT_COMMAND 必须照跑: {stdout:?}");
+        assert!(stdout.contains("USER_DEBUG"), "用户的 DEBUG trap 必须照跑: {stdout:?}");
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn rendered_rc_hides_the_secret_before_user_files_run() {
+        let home = test_home("marks-render");
+        let home_str = home.to_str().unwrap();
+        write_files(home_str);
+        let root = dir(home_str);
+        // zsh: the copy + unset lives in .zshenv, the very first file, ahead of the user's .zshenv.
+        let zshenv = fs::read_to_string(root.join("zsh/.zshenv")).unwrap();
+        let hide = zshenv.find("unset COFLUX_TERMINAL_SECRET").expect(".zshenv 必须拿掉秘密");
+        let user = zshenv.find("$__coflux_user_zdotdir/.zshenv").unwrap();
+        assert!(hide < user, "秘密必须在用户 .zshenv 之前拿掉");
+        // bash: same, ahead of /etc/bash.bashrc and ~/.bashrc.
+        let init = fs::read_to_string(root.join("bash/init.bash")).unwrap();
+        let hide = init.find("unset COFLUX_TERMINAL_SECRET").expect("init.bash 必须拿掉秘密");
+        let user = init.find(". /etc/bash.bashrc").unwrap();
+        assert!(hide < user, "秘密必须在用户 rc 之前拿掉");
+        // fish: vendor conf runs before config.fish; the erase must be there.
+        let fish = fs::read_to_string(root.join("fish-data/fish/vendor_conf.d/coflux.fish")).unwrap();
+        assert!(fish.contains("set -e COFLUX_TERMINAL_SECRET"));
+        assert!(fish.contains("--on-event fish_postexec"));
+        // No template ever echoes the secret as text: it only appears inside an OSC 133 payload.
+        let zshrc = fs::read_to_string(root.join("zsh/.zshrc")).unwrap();
+        for text in [&zshenv, &init, &fish, &zshrc] {
+            for line in text.lines().filter(|line| line.contains("__coflux_mark_secret") && line.contains("printf")) {
+                assert!(line.contains("133;"), "秘密只能出现在 OSC 133 载荷里: {line}");
+            }
+        }
+        fs::remove_dir_all(&home).ok();
+    }
+
     #[test]
     fn zsh_chain_runs_user_rc_in_order_including_a_user_set_zdotdir() {
         let Some(zsh) = find_shell("zsh") else {

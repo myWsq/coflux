@@ -17,8 +17,8 @@ use coflux_protocol::wire::{
     SessionCheckpoint,
 };
 use coflux_protocol::{
-    decode_device_envelope, encode_device_envelope, encode_frame, write_record, DataFrame,
-    DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES, MAX_FRAME_ID_BYTES,
+    decode_device_envelope, encode_device_envelope, encode_frame, write_record, CommandStateInfo,
+    DataFrame, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES, MAX_FRAME_ID_BYTES,
     MAX_SESSION_CHECKPOINT_BYTES,
 };
 use prost::Message as _;
@@ -1211,12 +1211,11 @@ impl DeviceRuntime {
         // 会话账本（plan 094）：精确 control exit 与 catalog tombstone 都经这里，退出码本地留档供
         // agent 的 wait/read 查询。两条调用路径此刻都不持有 state 锁（见 main.rs 的 SessionExit 分支
         // 与上面 catalog 提交里的作用域块）。
-        services
-            .state
-            .lock()
-            .unwrap()
-            .ledger
-            .mark_exited(session_id, exit_code);
+        {
+            let mut state = services.state.lock().unwrap();
+            state.ledger.mark_exited(session_id, exit_code);
+            state.bump_command_epoch();
+        }
         let bytes = coflux_protocol::wire::DaemonToServer {
             payload: Some(daemon_to_server::Payload::SessionExit(wire::SessionExit {
                 session_id: session_id.to_string(),
@@ -2837,6 +2836,23 @@ impl DeviceRuntime {
                     });
                 if !current_matches {
                     return;
+                }
+                // Snapshots carry the command state too: the fallback for a lost session.command
+                // push (and the way a hot-upgraded worker catches up between marks).
+                if let Some(command) = snapshot.command {
+                    let mut state = services.state.lock().unwrap();
+                    if state.ledger.set_command_state(
+                        &snapshot.session_id,
+                        CommandStateInfo {
+                            integrated: command.integrated,
+                            busy: command.busy,
+                            command_seq: command.command_seq,
+                            finished_seq: command.finished_seq,
+                            exit_code: command.exit_code,
+                        },
+                    ) {
+                        state.bump_command_epoch();
+                    }
                 }
                 let checkpoint = SessionCheckpoint {
                     session_id: snapshot.session_id.clone(),

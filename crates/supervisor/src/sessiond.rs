@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use coflux_protocol::ipc::CommandStateInfo;
 use vt100::{Cell, Color, Screen};
 
 const HISTORY_WRAP_FACTOR: usize = 4;
@@ -204,18 +205,115 @@ impl DecModeScanner {
 /// OSC 标题的长度钳制（plan 075）：标题是 PTY 内程序给的不可信输入，源头截断。
 const MAX_TITLE_BYTES: usize = 256;
 
-/// OSC 0/2 终端标题捕获（plan 075）。vt100 只在回调瞬间给出 bytes，这里暂存一拍，
-/// `TerminalState::feed` 处理完后收割到自身字段——parser 在 resize 时会被整个重建
-/// （规范 snapshot 重放不含 OSC），标题的存续必须独立于 parser 生命周期。
-/// `Option` 区分「本轮没有标题事件」与「程序显式设空标题」。
-#[derive(Default)]
-struct TitleCapture {
-    pending: Option<Vec<u8>>,
+/// A shell-integration mark accepted from the PTY output (OSC 133 carrying this session's secret).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// `133;A`: the shell is about to draw its prompt — the only moment do-script may type.
+    PromptStart,
+    /// `133;C`: a command line was accepted and is starting.
+    CommandStart,
+    /// `133;D;<exit>`: the command finished; `None` when the shell gave no status.
+    CommandEnd(Option<i32>),
 }
 
-impl vt100::Callbacks for TitleCapture {
+/// Parameter that every accepted mark must present, followed by the session secret.
+const MARK_SECRET_PARAM: &[u8] = b"coflux=";
+
+/// OSC capture (plan 075 titles + shell-integration marks). vt100 only hands out the bytes inside
+/// the callback, so both are parked here and harvested right after `TerminalState::feed` — the
+/// parser is rebuilt on resize (the canonical snapshot replay carries no OSC), so neither may
+/// live in the parser. `pending_title` is an `Option` to tell "no title event" from "explicitly
+/// cleared". Marks are keyed on the per-session secret: OSC 133 from remote hosts, nested shells
+/// or prompt frameworks never presents it and is dropped here, before any state changes.
+#[derive(Default)]
+struct OscCapture {
+    pending_title: Option<Vec<u8>>,
+    secret: String,
+    marks: Vec<Mark>,
+}
+
+impl OscCapture {
+    fn with_secret(secret: String) -> Self {
+        Self {
+            secret,
+            ..Self::default()
+        }
+    }
+}
+
+impl vt100::Callbacks for OscCapture {
     fn set_window_title(&mut self, _: &mut Screen, title: &[u8]) {
-        self.pending = Some(title.to_vec());
+        self.pending_title = Some(title.to_vec());
+    }
+
+    fn unhandled_osc(&mut self, _: &mut Screen, params: &[&[u8]]) {
+        if self.secret.is_empty() || params.first().copied() != Some(&b"133"[..]) {
+            return;
+        }
+        let presented = params.iter().skip(2).any(|param| {
+            param
+                .strip_prefix(MARK_SECRET_PARAM)
+                .is_some_and(|secret| secret == self.secret.as_bytes())
+        });
+        if !presented {
+            return;
+        }
+        let mark = match params.get(1).copied() {
+            Some(b"A") => Mark::PromptStart,
+            Some(b"C") => Mark::CommandStart,
+            Some(b"D") => Mark::CommandEnd(
+                params
+                    .get(2)
+                    .and_then(|raw| std::str::from_utf8(raw).ok())
+                    .and_then(|text| text.parse::<i32>().ok()),
+            ),
+            _ => return,
+        };
+        self.marks.push(mark);
+    }
+}
+
+/// Per-session command state machine fed by accepted marks. `changed` is set whenever a mark
+/// moved the state so sessions.rs can push the new state to the worker right after the feed.
+#[derive(Default)]
+struct CommandTracker {
+    state: CommandStateInfo,
+    changed: bool,
+}
+
+impl CommandTracker {
+    fn apply(&mut self, mark: Mark) {
+        let before = self.state;
+        let state = &mut self.state;
+        state.integrated = true;
+        match mark {
+            Mark::PromptStart => {
+                // A prompt without a command-end: the shell was replaced (`exec`) or a hook was
+                // skipped. Close the command with an unknown status rather than staying busy forever.
+                if state.busy {
+                    state.busy = false;
+                    state.finished_seq = state.command_seq;
+                    state.exit_code = None;
+                }
+            }
+            Mark::CommandStart => {
+                state.command_seq = state.command_seq.saturating_add(1);
+                state.busy = true;
+            }
+            Mark::CommandEnd(code) => {
+                // An end without a start (the start mark was lost) still counts as one command so
+                // the sequence a caller was promised keeps lining up.
+                if !state.busy {
+                    state.command_seq = state.command_seq.saturating_add(1);
+                }
+                state.busy = false;
+                state.finished_seq = state.command_seq;
+                state.exit_code = code;
+            }
+        }
+        if *state != before {
+            self.changed = true;
+        }
     }
 }
 
@@ -236,9 +334,12 @@ fn clamp_title(raw: &[u8]) -> String {
 }
 
 pub struct TerminalState {
-    parser: vt100::Parser<TitleCapture>,
+    parser: vt100::Parser<OscCapture>,
     /// PTY 内程序经 OSC 0/2 设置的终端标题；空 = 从未设置。跨 resize 存续。
     title: String,
+    /// Secret the shell must present in every mark; empty = no marks are ever accepted.
+    mark_secret: String,
+    command: CommandTracker,
     rows: u16,
     cols: u16,
     history_line_limit: usize,
@@ -259,9 +360,11 @@ impl TerminalState {
                 rows,
                 cols,
                 history_row_capacity,
-                TitleCapture::default(),
+                OscCapture::default(),
             ),
             title: String::new(),
+            mark_secret: String::new(),
+            command: CommandTracker::default(),
             rows,
             cols,
             history_line_limit,
@@ -272,6 +375,14 @@ impl TerminalState {
             mode_scanner: DecModeScanner::default(),
             normal_before_alt: None,
         }
+    }
+
+    /// Install the per-session secret that shell-integration marks must present. Without it every
+    /// OSC 133 sequence is ignored (unit tests and unknown shells).
+    pub fn with_mark_secret(mut self, secret: String) -> Self {
+        self.parser.callbacks_mut().secret = secret.clone();
+        self.mark_secret = secret;
+        self
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Option<Delta> {
@@ -305,8 +416,12 @@ impl TerminalState {
         if start < bytes.len() {
             self.parser.process(&bytes[start..]);
         }
-        if let Some(pending) = self.parser.callbacks_mut().pending.take() {
+        let callbacks = self.parser.callbacks_mut();
+        if let Some(pending) = callbacks.pending_title.take() {
             self.title = clamp_title(&pending);
+        }
+        for mark in std::mem::take(&mut callbacks.marks) {
+            self.command.apply(mark);
         }
 
         let from_seq = self.output_seq.saturating_add(1);
@@ -394,7 +509,7 @@ impl TerminalState {
             rows,
             cols,
             self.history_row_capacity,
-            TitleCapture::default(),
+            OscCapture::with_secret(self.mark_secret.clone()),
         );
         parser.process(&snapshot);
         self.parser = parser;
@@ -409,6 +524,20 @@ impl TerminalState {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// Current shell-integration command state (busy / sequence / last exit).
+    pub fn command_state(&self) -> CommandStateInfo {
+        self.command.state
+    }
+
+    /// The command state if a mark changed it since the last call; `None` otherwise.
+    pub fn take_command_change(&mut self) -> Option<CommandStateInfo> {
+        if !self.command.changed {
+            return None;
+        }
+        self.command.changed = false;
+        Some(self.command.state)
     }
 
     pub fn rows(&self) -> u16 {
@@ -594,6 +723,20 @@ impl SessionState {
             input_failure: None,
             resize_cursors: HashMap::new(),
         }
+    }
+
+    /// See [`TerminalState::with_mark_secret`].
+    pub fn with_mark_secret(mut self, secret: String) -> Self {
+        self.terminal = self.terminal.with_mark_secret(secret);
+        self
+    }
+
+    pub fn command_state(&self) -> CommandStateInfo {
+        self.terminal.command_state()
+    }
+
+    pub fn take_command_change(&mut self) -> Option<CommandStateInfo> {
+        self.terminal.take_command_change()
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<PendingDelta> {
@@ -1685,6 +1828,89 @@ mod tests {
         assert!(state.title().chars().all(|c| c == '标'));
         state.feed(b"\x1b]2;tab\there\x07");
         assert_eq!(state.title(), "tabhere");
+    }
+
+    #[test]
+    fn sessiond_marks_drive_command_state_only_with_the_session_secret() {
+        let mut state = TerminalState::new(4, 40, 8).with_mark_secret("s3cret".into());
+        assert_eq!(state.command_state(), CommandStateInfo::default());
+        assert!(state.take_command_change().is_none());
+
+        // A prompt framework's bare OSC 133 (no secret): ignored, nothing is "integrated".
+        state.feed(b"\x1b]133;A\x07\x1b]133;D;0\x07plain$ ");
+        assert!(!state.command_state().integrated);
+        assert!(state.take_command_change().is_none());
+
+        // coflux's own prompt-start: integrated and idle, still no command.
+        state.feed(b"\x1b]133;A;coflux=s3cret\x07$ ");
+        let idle = state.take_command_change().expect("prompt mark changes the state");
+        assert!(idle.integrated && !idle.busy);
+        assert_eq!((idle.command_seq, idle.finished_seq, idle.exit_code), (0, 0, None));
+        // A second prompt (empty Enter) changes nothing and pushes nothing.
+        state.feed(b"\x1b]133;A;coflux=s3cret\x07$ ");
+        assert!(state.take_command_change().is_none());
+
+        // command-start: busy with sequence 1.
+        state.feed(b"ssh host\r\n\x1b]133;C;coflux=s3cret\x07");
+        let busy = state.take_command_change().unwrap();
+        assert!(busy.busy);
+        assert_eq!(busy.command_seq, 1);
+
+        // Marks from the remote host / a nested shell never end the command: bare ones and ones
+        // with a foreign secret alike (the secret never crossed the ssh boundary).
+        state.feed(b"\x1b]133;A\x07remote$ \x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A;aid=42\x07");
+        state.feed(b"\x1b]133;D;0;coflux=other\x07\x1b]133;A;coflux=\x07");
+        assert!(state.command_state().busy);
+        assert!(state.take_command_change().is_none());
+
+        // command-end with the exit status, delivered one byte at a time (chunked PTY reads).
+        for byte in b"\x1b]133;D;3;coflux=s3cret\x07\x1b]133;A;coflux=s3cret\x07$ " {
+            state.feed(std::slice::from_ref(byte));
+        }
+        let done = state.take_command_change().unwrap();
+        assert!(!done.busy);
+        assert_eq!((done.command_seq, done.finished_seq, done.exit_code), (1, 1, Some(3)));
+
+        // Without a secret installed nothing is ever accepted — not even an empty `coflux=`.
+        let mut plain = TerminalState::new(4, 40, 8);
+        plain.feed(b"\x1b]133;A;coflux=\x07\x1b]133;C;coflux=\x07");
+        assert_eq!(plain.command_state(), CommandStateInfo::default());
+    }
+
+    #[test]
+    fn sessiond_command_state_survives_resize_and_tolerates_lost_marks() {
+        let mut state = TerminalState::new(4, 40, 8).with_mark_secret("s3cret".into());
+        state.feed(b"\x1b]133;A;coflux=s3cret\x07$ \x1b]133;C;coflux=s3cret\x07");
+        assert!(state.command_state().busy);
+        // resize rebuilds the parser: the tracker, the secret and busy-ness all survive.
+        state.resize(6, 60);
+        assert!(state.command_state().busy);
+        state.feed(b"\x1b]133;D;0;coflux=s3cret\x07");
+        assert_eq!(state.command_state().exit_code, Some(0));
+        assert_eq!(state.command_state().finished_seq, 1);
+
+        // A prompt while still busy (exec'd shell, skipped hook): the command closes with an
+        // unknown status instead of pinning the terminal busy forever.
+        state.feed(b"\x1b]133;C;coflux=s3cret\x07");
+        assert_eq!(state.command_state().command_seq, 2);
+        state.feed(b"\x1b]133;A;coflux=s3cret\x07$ ");
+        let closed = state.command_state();
+        assert!(!closed.busy);
+        assert_eq!((closed.finished_seq, closed.exit_code), (2, None));
+
+        // An end without a start still counts as one command so promised sequences line up.
+        state.feed(b"\x1b]133;D;7;coflux=s3cret\x07");
+        let counted = state.command_state();
+        assert_eq!((counted.command_seq, counted.finished_seq, counted.exit_code), (3, 3, Some(7)));
+
+        // A `D` without a status: finished, exit unknown.
+        state.feed(b"\x1b]133;C;coflux=s3cret\x07\x1b]133;D;coflux=s3cret\x07");
+        let unknown = state.command_state();
+        assert_eq!((unknown.command_seq, unknown.finished_seq, unknown.exit_code), (4, 4, None));
+        // The marks themselves never reach the rendered screen or the title.
+        assert_eq!(state.title(), "");
+        let snapshot = String::from_utf8_lossy(&state.snapshot()).into_owned();
+        assert!(!snapshot.contains("s3cret"), "secret leaked into the snapshot: {snapshot}");
     }
 
     #[test]
