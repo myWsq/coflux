@@ -852,8 +852,8 @@ impl Sessions {
         // plan 115：shell 集成——按 shell 的 basename 分派，给 shell 塞一段我们自己的 rc，由它在用户 rc
         // 全部跑完之后定义 claude 函数，把 COFLUX_CLAUDE_PLUGIN_DIR 翻译成 `claude --plugin-dir <dir>`。
         // ZDOTDIR / XDG_DATA_DIRS 是覆盖语义，与上面两段同理必须写在拷贝 std::env 之后（用户原来的
-        // ZDOTDIR 由 plan() 从 supervisor 自身环境里读出来，交给 rc 转发）。认不出的 shell（含命令终端
-        // 那种指向包装脚本的 shell）不注入，行为与今天逐字相同。
+        // ZDOTDIR 由 plan() 从 supervisor 自身环境里读出来，交给 rc 转发）。认不出的 shell（如 /bin/sh
+        // 或黑盒用例里的包装脚本）不注入，行为与今天逐字相同。
         if let Some(injection) =
             shell_integration::plan(&shell, &self.home, |key| std::env::var(key).ok())
         {
@@ -1585,6 +1585,7 @@ impl Sessions {
                 cols: u32::from(locked.state.cols()),
                 rows: u32::from(locked.state.rows()),
                 title: locked.state.title().to_string(),
+                command: None,
             }),
         );
     }

@@ -17,10 +17,10 @@
 //! 与 [`AgentAction::WorkspaceForget`] 在本地解析 worktree 身份（见 [`crate::worktree_locate`]）、
 //! 交中心核验落库，再按中心的响应更新账本。账本仍然只从中心学，只是多了这一个学的时机。
 //!
-//! **本地能闭环的不碰中心（plan 094）**：send / read / wait(status) / notify / progress 全在 daemon
-//! 本地完成——归属校验（目标与调用方的有效工作区相同）与退出码来自 [`crate::session_ledger`]，内容来自
-//! 本地命令日志或 sessiond 快照，presence 标注改 observed 后立即上报（断连期间由重连后的全量补发
-//! 兜底）。它们不要求 daemon 此刻连着中心。只有 new / list / ports 转成 `AgentControlRequest` 交给
+//! **本地能闭环的不碰中心（plan 094）**：send / run / read / wait / close / notify / progress 全在 daemon
+//! 本地完成——归属校验（目标与调用方的有效工作区相同）、命令状态与退出码来自 [`crate::session_ledger`]，
+//! 内容来自 sessiond 快照（滚动缓冲 + 当前屏），presence 标注改 observed 后立即上报（断连期间由重连后的
+//! 全量补发兜底）。它们不要求 daemon 此刻连着中心。只有 new / list / ports 转成 `AgentControlRequest` 交给
 //! 中心：Task 要落库广播、预览 URL 由中心生成，这三条本来就不是本地能闭环的；中心离线时它们明确
 //! 报错——「让用户看得见」正是它们的全部意义。
 
@@ -39,7 +39,7 @@ use prost::Message as _;
 
 use crate::session_ledger::{SessionPhase, SessionRecord};
 use crate::{
-    agents, device::DeviceRuntime, observed::ObservedState, ops, workspace_match, worktree_locate,
+    agents, device::DeviceRuntime, observed::ObservedState, workspace_match, worktree_locate,
     WorkerState, WsOut,
 };
 
@@ -47,12 +47,6 @@ use crate::{
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
 /// notify 留言长度上限（字符）。它只是侧栏 tooltip 里的一句话，不是日志通道。
 const MAX_NOTIFY_CHARS: usize = 200;
-/// 单次 read 从命令日志尾部取的字节上限；CLI 侧还会再按行数收窄。
-const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
-/// agent_logs 表的条目上限。超出即整表清空——丢失只意味着 read 退回中心 checkpoint，
-/// 没有正确性后果，所以不值得为它做 LRU。
-/// ponytail: 粗暴清表，真出现「一个工作区几百个终端」的用法再换 LRU。
-const MAX_TRACKED_LOGS: usize = 256;
 /// 中心回执关联表只保存正在等待的 agent 控制请求；达到上限立即拒绝，不能让本地 HTTP
 /// 并发在 20 秒超时窗口内无界堆积。
 const AGENT_PENDING_LIMIT: usize = 128;
@@ -61,14 +55,6 @@ const AGENT_PENDING_LIMIT: usize = 128;
 const MAX_SERVER_READ_BYTES: u64 = 256 * 1024;
 /// ServerTerminalInput 单次写入字节上限：MCP 一次 send 是一行命令或一小段文本，不是文件通道。
 const MAX_SERVER_INPUT_BYTES: usize = 64 * 1024;
-
-pub(crate) fn remember_log(state: &Arc<Mutex<WorkerState>>, task_id: String, log_path: String) {
-    let mut s = state.lock().unwrap();
-    if s.agent_logs.len() >= MAX_TRACKED_LOGS {
-        s.agent_logs.clear();
-    }
-    s.agent_logs.insert(task_id, log_path);
-}
 
 /// gateway 解析出的一条 agent 控制请求；`respond` 回填 HTTP 应答。
 pub struct AgentRequest {
@@ -82,11 +68,11 @@ pub struct AgentRequest {
 }
 
 pub enum AgentAction {
-    /// `terminal new`：`command` 非空 = 作业终端（跑完即退，带退出码），
-    /// 空 = 会话终端（常驻的登录 shell，全 tty，输入 exit 才结束）——plan 101。
+    /// `terminal new`: the workspace's default login shell on a real tty, alive until `exit`
+    /// or `close`. There is only this one kind of terminal; a command to type in after the
+    /// prompt is a separate `terminal.run` request.
     TerminalNew {
         title: String,
-        command: String,
     },
     TerminalList,
     TerminalRead {
@@ -243,39 +229,18 @@ async fn handle(
             crate::report_agents_if_changed(state, observed, to_server_tx).await;
             AgentResponse::ok(serde_json::json!({}))
         }
-        AgentAction::TerminalNew { title, command } => {
-            // 两种终端由「命令是否为空」区分（plan 101）：
-            // - 非空 = 作业终端：本地写包装脚本，shell 指向脚本，输出经日志汇落一份供 read 回读；
-            // - 空 = 会话终端：不写脚本、不记日志路径，shell 传空串让 supervisor 取默认登录 shell。
-            //   stdin/stdout 都是真 tty（这正是它存在的理由，套脚本就等于套管道），终端常驻到
-            //   agent 或用户输入 exit 为止；read 因此落到下面的 sessiond 快照回退。
-            let script = if command.trim().is_empty() {
-                None
-            } else {
-                match ops::write_command_script(&command) {
-                    Ok(paths) => Some(paths),
-                    Err(error) => {
-                        return AgentResponse::err(
-                            "500 Internal Server Error",
-                            format!("写命令脚本失败：{error}"),
-                        )
-                    }
-                }
-            };
-            let shell = script
-                .as_ref()
-                .map(|(shell, _)| shell.clone())
-                .unwrap_or_default();
+        AgentAction::TerminalNew { title } => {
+            // The center records the Task and hands the create to this daemon; the supervisor
+            // starts the default login shell in the target workspace (stdin and stdout on a real
+            // tty). Nothing is typed here: `terminal.run` does that once the prompt mark arrives.
             let payload = agent_control_request::Payload::TerminalNew(wire::AgentTerminalNew {
                 title,
-                shell,
+                // Unused wire field (see daemon.proto): always empty.
+                shell: String::new(),
             });
             match ask_server(state, to_server_tx, session_id, scope.declared(), payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalNew(result)) => {
-                    if let Some((_, log_path)) = script {
-                        remember_log(state, result.task_id.clone(), log_path);
-                    }
                     AgentResponse::ok(
                         serde_json::json!({ "taskId": result.task_id, "sessionId": result.session_id }),
                     )
@@ -308,25 +273,23 @@ async fn handle(
             }
         }
         AgentAction::TerminalRead { task_id } => {
-            // 本地闭环（plan 094）：归属与状态来自会话账本，内容优先本地命令日志尾部；会话仍活着
-            // 则退回 sessiond 当前快照；都没有则为空。不问中心——agent 就跑在这台 daemon 上，中心
-            // checkpoint 只是这里的派生缓存。ANSI 原样带回，去转义在 CLI 侧做。
+            // Local-first (plan 094): ownership and status come from the session ledger, the
+            // content is the sessiond snapshot of a live session — the rendered scrollback plus
+            // the current screen, up to the supervisor's history limit — and empty once the
+            // shell has exited. The center is not asked; its checkpoint is a derived cache of
+            // this very snapshot. ANSI is returned as is; the CLI strips it.
             let (target_session, record) = match resolve_local_target(state, &scope, &task_id) {
                 Ok(found) => found,
                 Err(response) => return response,
             };
-            let local_log = { state.lock().unwrap().agent_logs.get(&task_id).cloned() };
-            let from_log = local_log
-                .as_deref()
-                .and_then(|path| ops::read_command_log_tail(path, MAX_LOG_TAIL_BYTES));
-            let text = match from_log {
-                Some(text) => text,
-                None if record.phase == SessionPhase::Running => device
+            let text = if record.phase == SessionPhase::Running {
+                device
                     .read_session_snapshot(&target_session)
                     .await
                     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                    .unwrap_or_default(),
-                None => String::new(),
+                    .unwrap_or_default()
+            } else {
+                String::new()
             };
             AgentResponse::ok(serde_json::json!({
                 "ansi": text,
@@ -820,10 +783,12 @@ mod tests {
     }
 }
 
-/// 中心发起的终端读/写（plan 091，与 AgentControlRequest 方向相反）。两种动作都是无落库副作用的
-/// 直发请求：读走「命令日志尾部优先、否则 sessiond 当前快照、都没有则 source=none 交中心退回
-/// checkpoint」；写经 [`DeviceRuntime::agent_send_input`] 正门——人类 holder 在场时被拒，错误文案
-/// 原样回中心（同 `coflux terminal send` 的人类优先纪律）。每条请求必回一条 result。
+/// Center-initiated terminal reads and writes (plan 091, the opposite direction of
+/// AgentControlRequest). Both are direct requests without durable side effects: a read answers
+/// with the sessiond snapshot of a live session (otherwise `source=none`, and the center falls
+/// back to its checkpoint); a write goes through the [`DeviceRuntime::agent_send_input`] front
+/// door — refused while a human holder is present, the message forwarded verbatim (the same
+/// humans-first rule as `coflux terminal send`). Every request gets exactly one result.
 pub async fn handle_server_request(
     request: wire::ServerAgentRequest,
     state: &Arc<Mutex<WorkerState>>,
@@ -850,15 +815,8 @@ pub async fn handle_server_request(
                     },
                 )),
             };
-            let log_path = { state.lock().unwrap().agent_logs.get(&read.task_id).cloned() };
-            if let Some(text) = log_path
-                .as_deref()
-                .and_then(|path| ops::read_command_log_tail(path, max_bytes))
-            {
-                return reply(text.into_bytes(), "log");
-            }
-            // 没有命令日志（用户手开的终端、或 worker 热升级后表已丢）：会话仍活着就取 sessiond
-            // 当前快照。只认中心给的 session 与本地 alive 表一致的情况，不按裸 task 猜。
+            // A live session answers with the sessiond snapshot (scrollback + screen); only the
+            // session the center names is trusted, and only while the local alive table agrees.
             let session_alive = !read.session_id.is_empty()
                 && state
                     .lock()
@@ -898,6 +856,10 @@ pub async fn handle_server_request(
                 },
                 Err(message) => fail(message),
             }
+        }
+        Some(server_agent_request::Payload::TerminalRun(_))
+        | Some(server_agent_request::Payload::TerminalWait(_)) => {
+            fail("terminal run/wait are wired in the do-script milestone".into())
         }
         None => fail("未知的中心请求动作（daemon 不认识该 payload）".into()),
     }

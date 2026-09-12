@@ -108,17 +108,18 @@ message SessionAgents {
 // 是已认证的可信面，无需 operation_id 模板。
 message AgentTerminalNew {
   string title = 1;
-  // worker 已写好的临时包装脚本绝对路径，server 原样填进 SessionCreate.shell。
-  // server 不解释也不校验它——脚本由 daemon 自己生成、只回到同一个 daemon 执行。
+  // Unused since the interactive-only terminal model: every terminal is the workspace's default
+  // login shell, and a command to type in travels separately (terminal.run on the daemon's local
+  // /agent surface). The worker always sends an empty string; the server ignores the field.
   string shell = 2;
 }
 
 message AgentTerminalList {}
 
-// 读某个终端当前内容。取的是中心缓存的 checkpoint 而非 daemon 本地 snapshot：本地 snapshot
-// 在 session 退出后就没了，而「命令跑完了看输出」恰恰是 agent 最常用的场景（见 plans/074
-// 执行期偏离记录）。中心 checkpoint 滞后 ≤2s（CHECKPOINT_INTERVAL），且经 server 天然完成
-// 「该 task 与发起方同 workspace」的归属校验。
+// Read a terminal's content from the center's cached checkpoint (the daemon's own snapshot is gone
+// once the session has exited; a live terminal is read locally by the daemon instead — plan 094).
+// The checkpoint lags by at most CHECKPOINT_INTERVAL (2s) and the server checks that the task
+// belongs to the caller's workspace.
 message AgentTerminalRead {
   string task_id = 1;
 }
@@ -308,13 +309,14 @@ message DaemonToServer {
 
 // ===== 中心发起的终端读/写（plan 091）=====
 //
-// 与 AgentControlRequest 方向相反：这是中心（MCP 写 tools）问 daemon。一个 request + 一个
+// 与 AgentControlRequest 方向相反：这是中心（账号 API 的终端操作）问 daemon。一个 request + 一个
 // result，各带 oneof payload，新增动作只加分支不占顶层字段号。两者都是无落库副作用的直发
-// 消息（读日志/快照、经 sessiond 正门写一段输入），有落库副作用的动作走 prepared + Execute。
+// 消息（读快照、经 sessiond 正门写一段输入 / 打入一条命令、等命令结束），有落库副作用的动作走 prepared + Execute。
 
-// 读某终端的原始输出：优先命令日志尾部（agent/中心建的命令终端才有），否则 sessiond 当前
-// 快照；两者都拿不到时 source=none，由中心退回 checkpoint。data 是原始字节（含 ANSI），
-// 去转义/尾 N 行在中心做；worker 按 max_bytes 钳制。
+// Read a terminal's raw output: the sessiond snapshot of a live session (scrollback plus the
+// current screen); source=none when the session is gone, and the center falls back to its
+// checkpoint. data is raw bytes (ANSI included); stripping and the last-N-lines cut happen in
+// the center; the worker clamps to max_bytes.
 message ServerTerminalRead {
   string task_id = 1;
   // 中心已知的当前 session（task 仍在跑时非空）；worker 只据它取快照，不按裸 task 猜。
@@ -334,16 +336,50 @@ message ServerAgentRequest {
   oneof payload {
     ServerTerminalRead terminal_read = 10;
     ServerTerminalInput terminal_input = 11;
+    ServerTerminalRun terminal_run = 12;
+    ServerTerminalWait terminal_wait = 13;
   }
 }
 
 message ServerTerminalReadResult {
   bytes data = 1;
-  // log | snapshot | none
+  // snapshot | none — snapshot is the sessiond rendering of a live session (scrollback plus the
+  // current screen); none means the session is gone and the center falls back to its checkpoint.
   string source = 2;
 }
 
 message ServerTerminalInputResult {}
+
+// "do script": type `command` (plus Enter) into a live terminal once its shell has emitted the
+// prompt-ready mark. Refused readably when a command is still running, when the shell never
+// signalled readiness (integration not active), or when a human holder is present.
+message ServerTerminalRun {
+  string session_id = 1;
+  string task_id = 2;
+  string command = 3;
+}
+
+message ServerTerminalRunResult {
+  // Sequence the typed command will carry in TerminalCommandState (wait targets it).
+  uint64 command_seq = 1;
+}
+
+// Block until the targeted command (0 = the latest one started) has finished or the shell has
+// exited, or until timeout_ms (bounded by the worker) elapses.
+message ServerTerminalWait {
+  string session_id = 1;
+  string task_id = 2;
+  uint64 command_seq = 3;
+  uint32 timeout_ms = 4;
+}
+
+message ServerTerminalWaitResult {
+  // finished | running | exited — running means the timeout elapsed first.
+  string state = 1;
+  uint64 command_seq = 2;
+  // The command's exit status (finished) or the shell's (exited).
+  optional int32 exit_code = 3;
+}
 
 message ServerAgentResult {
   string request_id = 1;
@@ -352,6 +388,8 @@ message ServerAgentResult {
   oneof payload {
     ServerTerminalReadResult terminal_read = 10;
     ServerTerminalInputResult terminal_input = 11;
+    ServerTerminalRunResult terminal_run = 12;
+    ServerTerminalWaitResult terminal_wait = 13;
   }
 }
 
@@ -450,6 +488,8 @@ message SessionCreate {
   string session_id = 1;
   string task_id = 2;
   string cwd = 3;
+  // Unused: the supervisor always starts the workspace's default login shell. Kept only so old
+  // daemons keep decoding the message; the server never fills it.
   optional string shell = 4;
   uint32 cols = 5;
   uint32 rows = 6;

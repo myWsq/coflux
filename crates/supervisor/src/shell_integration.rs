@@ -231,8 +231,7 @@ mod tests {
         assert_eq!(shell_kind("/usr/bin/fish"), Some(Kind::Fish));
         // /bin/sh 不认（macOS 上它是 POSIX 模式的 bash，根本不读 --init-file 那条链）
         assert_eq!(shell_kind("/bin/sh"), None);
-        // 命令终端的包装脚本（crates/worker/src/ops.rs 写的那种）与黑盒里的 COFLUX_SHELL 包装脚本
-        assert_eq!(shell_kind("/tmp/coflux-agent-cmd/cmd-123-456.sh"), None);
+        // 黑盒里的 COFLUX_SHELL 包装脚本：basename 不是三种 shell 之一
         assert_eq!(shell_kind("/tmp/coflux-env-shell-x/coflux-test-shell"), None);
         assert_eq!(shell_kind(""), None);
     }

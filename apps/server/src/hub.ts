@@ -133,8 +133,7 @@ const STOP_WAIT_MS = 15_000;
 /** server→daemon 读/写请求的回执超时。写入超时不重发（结果未知，先 read 再决定）。 */
 const AGENT_REQUEST_TIMEOUT_MS = 10_000;
 const MAX_PENDING_AGENT_REQUESTS = 256;
-/** create_terminal 命令与 send_terminal_input 单次输入的字节上限（worker 侧另有同级钳制）。 */
-const MAX_TERMINAL_COMMAND_BYTES = 16 * 1024;
+/** send_terminal_input 单次输入（也是 create_terminal 要打入的命令）的字节上限（worker 侧另有同级钳制）。 */
 const MAX_TERMINAL_INPUT_BYTES = 64 * 1024;
 const MAX_TERMINAL_TITLE_BYTES = 256;
 const MAX_BRANCH_BYTES = 255;
@@ -303,8 +302,8 @@ export type TaskExitWaitResult =
   | { case: "failed"; message: string }
   | { case: "timeout" };
 
-/** read_terminal 的内容来源：log/snapshot 经 daemon，checkpoint 是中心缓存，none 三者皆无。 */
-export type TerminalReadSource = "log" | "snapshot" | "checkpoint" | "none";
+/** read_terminal 的内容来源：snapshot 经 daemon（活会话的滚动缓冲 + 当前屏），checkpoint 是中心缓存，none 两者皆无。 */
+export type TerminalReadSource = "snapshot" | "checkpoint" | "none";
 
 interface CompletionWaiter<T> {
   daemonId: DaemonId;
@@ -1329,15 +1328,14 @@ export class Hub {
               // 失败时用完整 incarnation CAS 补偿删除，并广播 removed 覆盖并发订阅快照窗口。
               const sent = this.sendDaemon(daemon, {
                 case: "sessionCreate",
-                // shell 指向 worker 自己写的命令包装脚本（supervisor 的 CommandBuilder 不接受 args）。
-                // 路径由 daemon 生成、只回到同一个 daemon 执行，server 不解释也不校验它。agent 不带
-                // 命令时（会话终端，plan 101）它是空串，supervisor 据此起默认登录 shell。
+                // Every terminal is the workspace's default login shell (interactive-only model): the
+                // wire `shell` field stays empty and the supervisor picks its default. A command the agent
+                // wants typed in goes through the daemon's local terminal.run once the prompt is ready.
                 // 会话归属 id + mcpUrl（plan 092）：supervisor 据此注入 COFLUX_* 环境变量；只下发 id，不下发 env map。
                 value: {
                   sessionId,
                   taskId: task.id,
                   cwd: currentWorkspace.path,
-                  shell: value.shell,
                   cols: AGENT_TERMINAL_COLS,
                   rows: AGENT_TERMINAL_ROWS,
                   workspaceId: currentWorkspace.id,
@@ -3983,10 +3981,10 @@ export class Hub {
   /** 在工作区里开一个真实终端：同一事务里建 IDLE task（沿用 terminalNew 的准入）并 prepare `session.create`
    * （中心发起），等收敛到 RUNNING。每工作区活跃终端上限含用户手开的。
    *
-   * 命令是否为空区分两种终端（plan 101，与本地 `coflux terminal new` 同判据）：非空 = 作业终端，worker
-   * 收到后写包装脚本、跑完即退并带退出码；空 = 会话终端，worker 的空命令分支不写脚本，supervisor 起默认
-   * 登录 shell（全 tty，常驻到有人输入 exit）。空白命令在这里收敛成空串——worker 那边判的是 `is_empty()`，
-   * 留着空白会被当成命令套进脚本、开了就退。 */
+   * There is one kind of terminal: the workspace's default login shell on a real tty, alive until exit. A
+   * non-empty `command` is "do script" (Terminal.app semantics): once the task is RUNNING it is typed into
+   * that shell through the daemon (ServerTerminalRun), which waits for the shell's prompt-ready mark first.
+   * The terminal stays open afterwards; the command's completion is what `terminal.wait` observes. */
   async createTerminalForAccount(
     accountId: AccountId,
     input: { workspaceId: WorkspaceId; title: string; command: string },
@@ -3994,11 +3992,11 @@ export class Hub {
     const initialWorkspace = await this.store.getWorkspace(input.workspaceId);
     if (!initialWorkspace || initialWorkspace.accountId !== accountId) return { ok: false, error: `工作区 ${input.workspaceId} 不存在或不属于当前账号` };
     const command = input.command.trim() ? input.command : "";
-    if (Buffer.byteLength(command, "utf8") > MAX_TERMINAL_COMMAND_BYTES) {
-      return { ok: false, error: `命令不超过 ${MAX_TERMINAL_COMMAND_BYTES} 字节` };
+    if (Buffer.byteLength(command, "utf8") > MAX_TERMINAL_INPUT_BYTES) {
+      return { ok: false, error: `命令不超过 ${MAX_TERMINAL_INPUT_BYTES} 字节` };
     }
-    // 会话终端没有命令可取首行，标题落到与 terminalNew 同一个兜底：侧栏不能出现空标题。
-    const title = input.title.trim() || command.split("\n")[0]!.slice(0, 64).trim() || "agent 终端";
+    // 标题落到与 terminalNew 同一个兜底：侧栏不能出现空标题。
+    const title = input.title.trim() || "agent 终端";
     if (!validBoundedText(title, MAX_TERMINAL_TITLE_BYTES)) return { ok: false, error: "终端标题过长或含控制字符" };
     const daemon = this.requireOnlineDaemon(initialWorkspace.daemonId, accountId, DAEMON_CAPABILITY_PREPARED_EXECUTE);
     if (!daemon.ok) return daemon;
@@ -4018,7 +4016,6 @@ export class Hub {
         cwd: initialWorkspace.path,
         cols: AGENT_TERMINAL_COLS,
         rows: AGENT_TERMINAL_ROWS,
-        command,
         workspaceId: initialWorkspace.id,
         projectId: initialWorkspace.projectId,
         daemonId: initialWorkspace.daemonId,
@@ -4091,7 +4088,7 @@ export class Hub {
     return { ok: true, value: running };
   }
 
-  /** 读终端：daemon 在线且支持 terminal_io → 经 daemon（命令日志尾部优先，否则本地快照）；否则中心 checkpoint。 */
+  /** 读终端：daemon 在线且支持 terminal_io → 经 daemon（活会话的 sessiond 快照：滚动缓冲 + 当前屏）；否则中心 checkpoint。 */
   async readTerminalForAccount(
     accountId: AccountId,
     terminalId: TaskId,
@@ -4107,7 +4104,7 @@ export class Hub {
         value: { taskId: task.id, sessionId: task.sessionId ?? "", maxBytes: bytes },
       });
       if (result?.ok && result.payload.case === "terminalRead" && result.payload.value.source !== "none") {
-        const source: TerminalReadSource = result.payload.value.source === "log" ? "log" : "snapshot";
+        const source: TerminalReadSource = "snapshot";
         const fresh = await this.store.getTask(task.id) ?? task;
         return { ok: true, value: { task: fresh, data: result.payload.value.data, source, capturedAt: Date.now(), title: fresh.title } };
       }

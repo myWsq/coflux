@@ -13,7 +13,6 @@ mod gateway;
 mod git;
 mod hook;
 mod local_auth;
-mod log_sink;
 mod observed;
 mod ops;
 mod p2p;
@@ -96,10 +95,6 @@ struct WorkerState {
     /// 等待授权中的链接过期时刻（server 侧 epoch ms）。到期且连接仍在、仍未登记时，
     /// 由 run_server_connection 的定时检查重发 daemon.enrollRequest 换新链接。
     pending_auth_expires_at: Option<f64>,
-    /// agent 自建终端的命令日志（plan 074）：taskId -> 日志绝对路径。读终端时优先用它而不是
-    /// 中心 checkpoint——checkpoint 是 2 秒周期的派生缓存，秒级命令的输出根本进不去，而日志
-    /// 还是全量而非一屏。worker 重启（热升级）后此表丢失，read 自动降级回 checkpoint。
-    agent_logs: HashMap<String, String>,
     /// agent 控制请求的在飞关联表（plan 074）：requestId -> 中心回执的接收端。
     /// 断开中心连接时整表清空——发送端 drop 会让等待方立刻拿到「连接中断」而不是干等超时。
     agent_pending: HashMap<String, tokio::sync::oneshot::Sender<wire::AgentControlResult>>,
@@ -480,11 +475,6 @@ async fn consume_hook_events(
 }
 
 fn main() {
-    // 日志汇子命令（plan 094）：命令终端的包装脚本以 `coflux-worker --log-sink <log>` 复用本二进制，
-    // 在建 tokio 运行时之前分流——它随命令活多久就活多久，不该为它起一整套调度线程。
-    if let Some(code) = log_sink::run_if_requested() {
-        std::process::exit(code);
-    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -560,7 +550,6 @@ async fn worker_main() {
         alive: HashMap::new(),
         credentials,
         pending_auth_expires_at: None,
-        agent_logs: HashMap::new(),
         agent_pending: HashMap::new(),
         ledger: session_ledger::SessionLedger::default(),
         workspaces: HashMap::new(),
@@ -1932,7 +1921,6 @@ mod tests {
             alive: HashMap::from([("session-old".into(), ("task-old".into(), 11))]),
             credentials: None,
             pending_auth_expires_at: None,
-            agent_logs: HashMap::new(),
             agent_pending: HashMap::new(),
             ledger: session_ledger::SessionLedger::default(),
             workspaces: HashMap::new(),
