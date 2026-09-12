@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod codex;
 mod workspace;
 
 pub use workspace::enter as enter_workspace;
@@ -365,6 +366,11 @@ fn launch(host: &str, args: &[String]) -> Result<(), String> {
                         ""
                     }
                 );
+                if host == "codex" && codex::interactive(args) {
+                    let status = codex::launch(&command, &root, args)?;
+                    record("ended", host);
+                    std::process::exit(status);
+                }
             }
             Err(error) => eprintln!("Coflux: integration unavailable ({error}); starting {host}."),
         }
@@ -374,6 +380,7 @@ fn launch(host: &str, args: &[String]) -> Result<(), String> {
 }
 pub fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
+        Some("codex-bridge") => codex::serve(&args[1..]),
         Some("prepare") => {
             let root = prepare()?;
             println!("{}", json!({"directory":root,"schemaVersion":1}));

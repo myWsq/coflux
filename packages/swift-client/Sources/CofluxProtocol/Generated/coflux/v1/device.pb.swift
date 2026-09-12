@@ -1099,6 +1099,44 @@ public struct Coflux_V1_DeviceSessionSnapshotRequest: Sendable {
   public init() {}
 }
 
+/// Command state of a live shell, derived by sessiond from the OSC 133 marks that coflux's own
+/// rc chain emits together with the per-session secret. Marks without that secret (remote hosts
+/// reached over ssh, nested shells, prompt frameworks) are ignored, so a nested shell or an ssh
+/// session looks like one long-running command from the outside.
+public struct Coflux_V1_TerminalCommandState: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// At least one accepted mark has arrived: the shell is zsh/bash/fish started through coflux's
+  /// rc chain and its prompt has been drawn at least once.
+  public var integrated: Bool = false
+
+  /// A command has started and not finished yet.
+  public var busy: Bool = false
+
+  /// Monotonic count of commands started in this shell; 0 = none yet.
+  public var commandSeq: UInt64 = 0
+
+  /// Sequence of the last finished command (0 = none) and its exit status.
+  public var finishedSeq: UInt64 = 0
+
+  public var exitCode: Int32 {
+    get {_exitCode ?? 0}
+    set {_exitCode = newValue}
+  }
+  /// Returns true if `exitCode` has been explicitly set.
+  public var hasExitCode: Bool {self._exitCode != nil}
+  /// Clears the value of `exitCode`. Subsequent reads from it will return its default value.
+  public mutating func clearExitCode() {self._exitCode = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _exitCode: Int32? = nil
+}
+
 public struct Coflux_V1_DeviceSessionSnapshot: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1120,9 +1158,21 @@ public struct Coflux_V1_DeviceSessionSnapshot: Sendable {
   /// 源头截断；空 = 从未设置或旧 supervisor 不支持，消费方一律回落自身默认。
   public var title: String = String()
 
+  /// Shell-integration command state at snapshot time; absent from old supervisors.
+  public var command: Coflux_V1_TerminalCommandState {
+    get {_command ?? Coflux_V1_TerminalCommandState()}
+    set {_command = newValue}
+  }
+  /// Returns true if `command` has been explicitly set.
+  public var hasCommand: Bool {self._command != nil}
+  /// Clears the value of `command`. Subsequent reads from it will return its default value.
+  public mutating func clearCommand() {self._command = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
+
+  fileprivate var _command: Coflux_V1_TerminalCommandState? = nil
 }
 
 public struct Coflux_V1_DevicePtyOutput: Sendable {
@@ -1307,6 +1357,8 @@ public struct Coflux_V1_DeviceSessionCreate: Sendable {
 
   public var cwd: String = String()
 
+  /// Unused: the supervisor always starts the workspace's default login shell (a real tty that
+  /// lives until exit). Kept for wire compatibility; the center never fills it.
   public var shell: String {
     get {_shell ?? String()}
     set {_shell = newValue}
@@ -1320,10 +1372,9 @@ public struct Coflux_V1_DeviceSessionCreate: Sendable {
 
   public var rows: UInt32 = 0
 
-  /// 非空时该会话是「跑一条命令」的命令终端（plan 091）：worker 在 authorize 通过后、交给 sessiond
-  /// 前本地写包装脚本（登录 shell 执行、tee 落日志、跑完退出带退出码）并把 shell 填成脚本路径。
-  /// 脚本路径由 operation_id 确定性派生——sessiond 账本的 canonical 请求含 shell，重放时路径若变
-  /// 会被判成 operation_collision。旧 worker 不认识本字段会起成普通 shell，由中心的能力门禁挡住。
+  /// Unused since the interactive-only terminal model: a command the center wants typed in is sent
+  /// separately (ServerTerminalRun) once the shell has signalled prompt readiness. Kept for wire
+  /// compatibility; always empty.
   public var command: String = String()
 
   /// 10 起是会话归属 id（plan 092）：与 daemon.proto SessionCreate 7 起同名同义，supervisor 据此组装
@@ -1875,9 +1926,21 @@ public struct Coflux_V1_SessionCheckpoint: Sendable {
   /// OSC 0/2 终端标题（plan 075），随 snapshot 原样透传；语义同 DeviceSessionSnapshot.title。
   public var title: String = String()
 
+  /// Command state (busy / sequence / last exit) carried along with the snapshot; absent from old daemons.
+  public var command: Coflux_V1_TerminalCommandState {
+    get {_command ?? Coflux_V1_TerminalCommandState()}
+    set {_command = newValue}
+  }
+  /// Returns true if `command` has been explicitly set.
+  public var hasCommand: Bool {self._command != nil}
+  /// Clears the value of `command`. Subsequent reads from it will return its default value.
+  public mutating func clearCommand() {self._command = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
+
+  fileprivate var _command: Coflux_V1_TerminalCommandState? = nil
 }
 
 public struct Coflux_V1_DeviceEnvelope: Sendable {
@@ -4006,9 +4069,63 @@ extension Coflux_V1_DeviceSessionSnapshotRequest: SwiftProtobuf.Message, SwiftPr
   }
 }
 
+extension Coflux_V1_TerminalCommandState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".TerminalCommandState"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}integrated\0\u{1}busy\0\u{3}command_seq\0\u{3}finished_seq\0\u{3}exit_code\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBoolField(value: &self.integrated) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.busy) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.commandSeq) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.finishedSeq) }()
+      case 5: try { try decoder.decodeSingularInt32Field(value: &self._exitCode) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.integrated != false {
+      try visitor.visitSingularBoolField(value: self.integrated, fieldNumber: 1)
+    }
+    if self.busy != false {
+      try visitor.visitSingularBoolField(value: self.busy, fieldNumber: 2)
+    }
+    if self.commandSeq != 0 {
+      try visitor.visitSingularUInt64Field(value: self.commandSeq, fieldNumber: 3)
+    }
+    if self.finishedSeq != 0 {
+      try visitor.visitSingularUInt64Field(value: self.finishedSeq, fieldNumber: 4)
+    }
+    try { if let v = self._exitCode {
+      try visitor.visitSingularInt32Field(value: v, fieldNumber: 5)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_TerminalCommandState, rhs: Coflux_V1_TerminalCommandState) -> Bool {
+    if lhs.integrated != rhs.integrated {return false}
+    if lhs.busy != rhs.busy {return false}
+    if lhs.commandSeq != rhs.commandSeq {return false}
+    if lhs.finishedSeq != rhs.finishedSeq {return false}
+    if lhs._exitCode != rhs._exitCode {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_DeviceSessionSnapshot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceSessionSnapshot"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}snapshot_seq\0\u{3}ansi_snapshot\0\u{1}cols\0\u{1}rows\0\u{1}title\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}snapshot_seq\0\u{3}ansi_snapshot\0\u{1}cols\0\u{1}rows\0\u{1}title\0\u{1}command\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4023,12 +4140,17 @@ extension Coflux_V1_DeviceSessionSnapshot: SwiftProtobuf.Message, SwiftProtobuf.
       case 5: try { try decoder.decodeSingularUInt32Field(value: &self.cols) }()
       case 6: try { try decoder.decodeSingularUInt32Field(value: &self.rows) }()
       case 7: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 8: try { try decoder.decodeSingularMessageField(value: &self._command) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if !self.requestID.isEmpty {
       try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
     }
@@ -4050,6 +4172,9 @@ extension Coflux_V1_DeviceSessionSnapshot: SwiftProtobuf.Message, SwiftProtobuf.
     if !self.title.isEmpty {
       try visitor.visitSingularStringField(value: self.title, fieldNumber: 7)
     }
+    try { if let v = self._command {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -4061,6 +4186,7 @@ extension Coflux_V1_DeviceSessionSnapshot: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.cols != rhs.cols {return false}
     if lhs.rows != rhs.rows {return false}
     if lhs.title != rhs.title {return false}
+    if lhs._command != rhs._command {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5384,7 +5510,7 @@ extension Coflux_V1_DeviceOperationReport: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Coflux_V1_SessionCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SessionCheckpoint"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{3}snapshot_seq\0\u{3}ansi_snapshot\0\u{1}cols\0\u{1}rows\0\u{3}captured_at\0\u{1}title\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{3}snapshot_seq\0\u{3}ansi_snapshot\0\u{1}cols\0\u{1}rows\0\u{3}captured_at\0\u{1}title\0\u{1}command\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5400,12 +5526,17 @@ extension Coflux_V1_SessionCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._Mes
       case 6: try { try decoder.decodeSingularUInt32Field(value: &self.rows) }()
       case 7: try { try decoder.decodeSingularDoubleField(value: &self.capturedAt) }()
       case 8: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 9: try { try decoder.decodeSingularMessageField(value: &self._command) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if !self.sessionID.isEmpty {
       try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
     }
@@ -5430,6 +5561,9 @@ extension Coflux_V1_SessionCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if !self.title.isEmpty {
       try visitor.visitSingularStringField(value: self.title, fieldNumber: 8)
     }
+    try { if let v = self._command {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5442,6 +5576,7 @@ extension Coflux_V1_SessionCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.rows != rhs.rows {return false}
     if lhs.capturedAt != rhs.capturedAt {return false}
     if lhs.title != rhs.title {return false}
+    if lhs._command != rhs._command {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

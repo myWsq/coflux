@@ -1,4 +1,4 @@
-//! agent 侧子命令（plan 112）：`terminal new|list|read|wait|send`、`notify`、`progress`、
+//! agent 侧子命令（plan 112）：`terminal new|run|list|read|wait|send|close`、`notify`、`progress`、
 //! `ports`、`workspace [locate|forget]`、`hook <claude|codex>`。
 //!
 //! 请求体、stdout 文案与退出码逐命令对齐 node 版 `packages/cli/coflux.mjs`（`cmdTerminal` /
@@ -18,10 +18,11 @@ use crate::gateway;
 use crate::text::{strip_ansi, tail_lines};
 
 const DEFAULT_READ_LINES: usize = 200;
-/// wait 的循环在 CLI 侧：单次 `/agent` 有 25 秒的 loopback 应答上限。默认 30 分钟——编码任务常跑很久；
-/// 轮询走 terminal.status（daemon 本地账本直接答，不经中心），3 秒一次对本机 loopback 是零负担。
+/// `wait` loops here because one `/agent` round-trip is capped at 25 s on the loopback endpoint;
+/// each round the daemon blocks up to `WAIT_ROUND_MS` on its command-state watch and answers the
+/// moment the command finishes, so the loop never hammers it. Default 30 minutes overall.
 const DEFAULT_WAIT_TIMEOUT_S: f64 = 1800.0;
-const WAIT_POLL: Duration = Duration::from_secs(3);
+const WAIT_ROUND_MS: u64 = 20_000;
 
 fn body(action: &str) -> Map<String, Value> {
     let mut map = Map::new();
@@ -108,7 +109,7 @@ fn passthrough(value: &Value, key: &str) -> Option<Value> {
 
 /* ------------------------------- terminal ------------------------------- */
 
-/// `--cmd` 缺省与 `--cmd= 空白` 等价（plan 101）：都开会话终端，空白收敛成空串。
+/// `--cmd` 缺省与 `--cmd= 空白` 等价：都只开终端，空白收敛成空串（不打入任何东西）。
 pub fn normalize_command(cmd: Option<&str>) -> String {
     match cmd {
         Some(raw) if !raw.trim().is_empty() => raw.to_string(),
@@ -116,19 +117,38 @@ pub fn normalize_command(cmd: Option<&str>) -> String {
     }
 }
 
-pub fn render_terminal_new(result: &Value, command: &str) -> String {
+/// First line of `terminal new`: the terminal exists whatever happens to the command afterwards.
+pub fn render_terminal_opened(result: &Value) -> String {
     let task_id = field_str(result, "taskId");
-    let mut lines = vec![format!("已开终端 {task_id}（用户可在 coflux 侧栏看到并随时接管）")];
-    if !command.is_empty() {
-        lines.push(format!("看输出：coflux terminal read {task_id}"));
-    } else {
-        lines.push("会话终端：常驻的登录 shell（全 tty），不会自己退出".to_string());
-        lines.push(format!("先等提示符：coflux terminal read {task_id}"));
-        lines.push(format!(
-            "再输命令：coflux terminal send {task_id} --text \"<命令>\" --enter（送 exit 才结束）"
-        ));
+    format!("已开终端 {task_id}（用户可在 coflux 侧栏看到并随时接管）")
+}
+
+/// Hint lines after opening a terminal without `--cmd`.
+pub fn render_terminal_new_hints(task_id: &str) -> String {
+    [
+        "常驻的登录 shell（全 tty），不会自己退出".to_string(),
+        format!("跑命令：coflux terminal run {task_id} --cmd=\"<命令>\"（等提示符就绪后打入，wait 可等它结束）"),
+        format!("看输出：coflux terminal read {task_id}；结束：coflux terminal close {task_id}"),
+    ]
+    .join("\n")
+}
+
+/// `terminal run` / `terminal new --cmd` succeeded: the command was typed after the prompt mark.
+pub fn render_terminal_run(result: &Value, task_id: &str) -> String {
+    let seq = result.get("commandSeq").map(js_number).unwrap_or_default();
+    format!("已打入命令 #{seq}（coflux terminal wait {task_id} 等它结束，coflux terminal read {task_id} 看输出）")
+}
+
+/// ` busy` / ` idle` plus ` last=<code>` for a live, instrumented terminal; nothing otherwise.
+fn command_suffix(value: &Value) -> String {
+    if !field_bool(value, "integrated") {
+        return String::new();
     }
-    lines.join("\n")
+    let mut suffix = if field_bool(value, "busy") { " busy".to_string() } else { " idle".to_string() };
+    if let Some(code) = value.get("lastCommandExitCode").filter(|code| !code.is_null()) {
+        suffix.push_str(&format!(" last={}", js_number(code)));
+    }
+    suffix
 }
 
 pub fn render_terminal_list(result: &Value) -> String {
@@ -144,10 +164,11 @@ pub fn render_terminal_list(result: &Value) -> String {
         .iter()
         .map(|t| {
             format!(
-                "{}  {}{}  {}",
+                "{}  {}{}{}  {}",
                 field_str(t, "taskId"),
                 field_str(t, "status"),
                 exit_suffix(t),
+                command_suffix(t),
                 field_str(t, "title")
             )
         })
@@ -181,28 +202,77 @@ pub fn wait_timeout_secs(raw: Option<&str>) -> f64 {
         .unwrap_or(DEFAULT_WAIT_TIMEOUT_S)
 }
 
-pub fn render_wait_exited(status: &Value) -> String {
-    format!("# exited{}", exit_suffix(status))
+/// `--seq`: a positive integer targets that command; anything else = the latest one (0).
+pub fn wait_command_seq(raw: Option<&str>) -> u64 {
+    raw.and_then(|text| text.trim().parse::<u64>().ok()).unwrap_or(0)
 }
 
-pub fn render_wait_timeout(timeout_secs: f64, task_id: &str, status: &str) -> String {
+/// `# finished exit=<code>` for a command, `# exited exit=<code>` when the shell itself ended.
+pub fn render_wait_done(result: &Value) -> String {
+    let state = if field_str(result, "state") == "exited" { "exited" } else { "finished" };
+    format!("# {state}{}", exit_suffix(result))
+}
+
+pub fn render_wait_timeout(timeout_secs: f64, task_id: &str, command_seq: &str) -> String {
     format!(
-        "等待超时（{}s）：终端 {task_id} 仍是 {status}。可加大 --timeout，或 coflux terminal read {task_id} 看现场",
+        "等待超时（{}s）：终端 {task_id} 的命令 #{command_seq} 仍在运行。可加大 --timeout，或 coflux terminal read {task_id} 看现场",
         js_number(&Value::from(timeout_secs))
     )
+}
+
+pub fn render_terminal_close(result: &Value, task_id: &str) -> String {
+    if field_bool(result, "exited") {
+        format!("已关闭终端 {task_id}（exited{}）", exit_suffix(result))
+    } else {
+        format!("已请求关闭终端 {task_id}，shell 仍在退出中（coflux terminal list 可查）")
+    }
 }
 
 pub fn run_terminal(args: &ParsedArgs) {
     match args.positional(1) {
         Some("new") => {
+            // Open first, then "do script": the terminal exists (and is reported) even when the
+            // command cannot be typed — an old daemon refuses `terminal.run` as an unknown action
+            // and never runs the command any other way.
             let command = normalize_command(args.string("cmd"));
+            let request = with(body("terminal.new"), "title", args.string("title").unwrap_or(""));
+            let opened = gateway::agent_post(request);
+            println!("{}", render_terminal_opened(&opened));
+            let task_id = field_str(&opened, "taskId").to_string();
+            if command.is_empty() {
+                println!("{}", render_terminal_new_hints(&task_id));
+            } else {
+                let request = with(
+                    with(body("terminal.run"), "taskId", task_id.as_str()),
+                    "command",
+                    command.as_str(),
+                );
+                let ran = gateway::agent_post(request);
+                println!("{}", render_terminal_run(&ran, &task_id));
+            }
+        }
+        Some("run") => {
+            let Some(task_id) = args.positional(2) else {
+                crate::die("terminal run 需要 <taskId>（用 coflux terminal list 查）");
+            };
+            let command = normalize_command(args.string("cmd"));
+            if command.is_empty() {
+                crate::die("terminal run 需要 --cmd=\"<命令>\"");
+            }
             let request = with(
-                with(body("terminal.new"), "title", args.string("title").unwrap_or("")),
+                with(body("terminal.run"), "taskId", task_id),
                 "command",
                 command.as_str(),
             );
             let result = gateway::agent_post(request);
-            println!("{}", render_terminal_new(&result, &command));
+            println!("{}", render_terminal_run(&result, task_id));
+        }
+        Some("close") => {
+            let Some(task_id) = args.positional(2) else {
+                crate::die("terminal close 需要 <taskId>（用 coflux terminal list 查）");
+            };
+            let result = gateway::agent_post(with(body("terminal.close"), "taskId", task_id));
+            println!("{}", render_terminal_close(&result, task_id));
         }
         Some("list") => {
             let result = gateway::agent_post(body("terminal.list"));
@@ -238,28 +308,38 @@ pub fn run_terminal(args: &ParsedArgs) {
                 crate::die("terminal wait 需要 <taskId>（用 coflux terminal list 查）");
             };
             let timeout_secs = wait_timeout_secs(args.string("timeout"));
+            let command_seq = wait_command_seq(args.string("seq"));
             // 极大的 --timeout（Duration/Instant 装不下）等价于「不设 deadline」，与 node 版一样不报错。
             let deadline = Duration::try_from_secs_f64(timeout_secs)
                 .ok()
                 .and_then(|timeout| Instant::now().checked_add(timeout));
             loop {
-                // 按 taskId 直接问本地账本；目标不存在/不在本工作区时 daemon 回可读错误，agent_post 直接 die。
-                let status = gateway::agent_post(with(body("terminal.status"), "taskId", task_id));
-                if field_str(&status, "status") == "exited" {
-                    println!("{}", render_wait_exited(&status));
+                // Each round blocks inside the daemon (its command-state watch wakes it the moment
+                // the command ends); a `running` answer only means the round elapsed.
+                let round_ms = deadline
+                    .map(|deadline| deadline.saturating_duration_since(Instant::now()).as_millis() as u64)
+                    .unwrap_or(WAIT_ROUND_MS)
+                    .clamp(1, WAIT_ROUND_MS);
+                let request = with(
+                    with(with(body("terminal.wait"), "taskId", task_id), "commandSeq", command_seq),
+                    "timeoutMs",
+                    round_ms,
+                );
+                let result = gateway::agent_post(request);
+                if field_str(&result, "state") != "running" {
+                    println!("{}", render_wait_done(&result));
                     return;
                 }
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     crate::die(&render_wait_timeout(
                         timeout_secs,
                         task_id,
-                        field_str(&status, "status"),
+                        &result.get("commandSeq").map(js_number).unwrap_or_default(),
                     ));
                 }
-                std::thread::sleep(WAIT_POLL);
             }
         }
-        _ => crate::die("terminal 需要子命令：new | list | read | wait | send"),
+        _ => crate::die("terminal 需要子命令：new | run | list | read | wait | send | close"),
     }
 }
 
@@ -537,27 +617,35 @@ mod tests {
     }
 
     #[test]
-    fn terminal_new_output_matches_node_for_job_and_session_terminals() {
-        let result = json!({ "ok": true, "taskId": "t-1" });
+    fn terminal_new_and_run_output_matches_node() {
+        let opened = json!({ "ok": true, "taskId": "t-1" });
+        assert_eq!(render_terminal_opened(&opened), "已开终端 t-1（用户可在 coflux 侧栏看到并随时接管）");
+        let hints = render_terminal_new_hints("t-1");
+        assert!(hints.starts_with("常驻的登录 shell（全 tty），不会自己退出\n"));
+        assert!(hints.contains("coflux terminal run t-1 --cmd=\"<命令>\""));
+        assert!(hints.ends_with("看输出：coflux terminal read t-1；结束：coflux terminal close t-1"));
         assert_eq!(
-            render_terminal_new(&result, "pnpm test"),
-            "已开终端 t-1（用户可在 coflux 侧栏看到并随时接管）\n看输出：coflux terminal read t-1"
+            render_terminal_run(&json!({ "ok": true, "taskId": "t-1", "commandSeq": 3 }), "t-1"),
+            "已打入命令 #3（coflux terminal wait t-1 等它结束，coflux terminal read t-1 看输出）"
         );
-        let session = render_terminal_new(&result, "");
-        assert!(session.starts_with("已开终端 t-1（用户可在 coflux 侧栏看到并随时接管）\n会话终端：常驻的登录 shell（全 tty），不会自己退出\n"));
-        assert!(session.contains("先等提示符：coflux terminal read t-1\n"));
-        assert!(session.ends_with("再输命令：coflux terminal send t-1 --text \"<命令>\" --enter（送 exit 才结束）"));
+        assert_eq!(normalize_command(Some("   ")), "");
+        assert_eq!(normalize_command(Some("pnpm test")), "pnpm test");
     }
 
     #[test]
-    fn terminal_list_rows_and_empty() {
+    fn terminal_list_rows_show_busy_and_last_exit_for_live_shells() {
         assert_eq!(render_terminal_list(&json!({ "terminals": [] })), "本工作区暂无终端");
         let result = json!({ "terminals": [
-            { "taskId": "a", "status": "running", "title": "构建" },
+            { "taskId": "a", "status": "running", "title": "构建", "integrated": true, "busy": true, "commandSeq": 2, "lastCommandExitCode": 0 },
             { "taskId": "b", "status": "exited", "exitCode": 0, "title": "测试" },
             { "taskId": "c", "status": "exited", "exitCode": null, "title": "" },
+            { "taskId": "d", "status": "running", "title": "空闲", "integrated": true, "busy": false, "commandSeq": 0, "lastCommandExitCode": null },
+            { "taskId": "e", "status": "running", "title": "未集成", "integrated": false, "busy": false },
         ] });
-        assert_eq!(render_terminal_list(&result), "a  running  构建\nb  exited exit=0  测试\nc  exited  ");
+        assert_eq!(
+            render_terminal_list(&result),
+            "a  running busy last=0  构建\nb  exited exit=0  测试\nc  exited  \nd  running idle  空闲\ne  running  未集成"
+        );
     }
 
     #[test]
@@ -584,18 +672,27 @@ mod tests {
     }
 
     #[test]
-    fn wait_and_send_phrases() {
-        assert_eq!(render_wait_exited(&json!({ "status": "exited", "exitCode": 130 })), "# exited exit=130");
-        assert_eq!(render_wait_exited(&json!({ "status": "exited" })), "# exited");
+    fn wait_send_and_close_phrases() {
+        assert_eq!(render_wait_done(&json!({ "state": "finished", "commandSeq": 1, "exitCode": 3 })), "# finished exit=3");
+        assert_eq!(render_wait_done(&json!({ "state": "finished", "commandSeq": 1, "exitCode": null })), "# finished");
+        assert_eq!(render_wait_done(&json!({ "state": "exited", "exitCode": 130 })), "# exited exit=130");
         assert_eq!(
-            render_wait_timeout(90.0, "t-1", "running"),
-            "等待超时（90s）：终端 t-1 仍是 running。可加大 --timeout，或 coflux terminal read t-1 看现场"
+            render_wait_timeout(90.0, "t-1", "2"),
+            "等待超时（90s）：终端 t-1 的命令 #2 仍在运行。可加大 --timeout，或 coflux terminal read t-1 看现场"
         );
         assert_eq!(
-            render_wait_timeout(2.5, "t-1", "running"),
-            "等待超时（2.5s）：终端 t-1 仍是 running。可加大 --timeout，或 coflux terminal read t-1 看现场"
+            render_wait_timeout(2.5, "t-1", "1"),
+            "等待超时（2.5s）：终端 t-1 的命令 #1 仍在运行。可加大 --timeout，或 coflux terminal read t-1 看现场"
         );
+        assert_eq!(wait_command_seq(None), 0);
+        assert_eq!(wait_command_seq(Some("x")), 0);
+        assert_eq!(wait_command_seq(Some("4")), 4);
         assert_eq!(render_terminal_send("t-1"), "已写入终端 t-1（用 coflux terminal read t-1 核对效果）");
+        assert_eq!(render_terminal_close(&json!({ "exited": true, "exitCode": 0 }), "t-1"), "已关闭终端 t-1（exited exit=0）");
+        assert_eq!(
+            render_terminal_close(&json!({ "exited": false, "exitCode": null }), "t-1"),
+            "已请求关闭终端 t-1，shell 仍在退出中（coflux terminal list 可查）"
+        );
     }
 
     #[test]

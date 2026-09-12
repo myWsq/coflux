@@ -16,6 +16,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use coflux_protocol::CommandStateInfo;
+
 /// 会话生命周期；`wait`/`read` 据此报 status 与退出码。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SessionPhase {
@@ -31,7 +33,21 @@ pub(crate) struct SessionRecord {
     /// 空串 = 归属未知
     pub workspace_id: String,
     pub phase: SessionPhase,
+    /// Shell-integration command state as last pushed by the supervisor (session.command control
+    /// message, resync list or snapshot). Default = no mark ever seen.
+    pub command: CommandStateInfo,
+    /// Sequence promised to the most recent `terminal.run`: the command was typed but its
+    /// command-start mark may not have arrived yet, so `wait` without an explicit target must
+    /// aim at this rather than at `command.command_seq`.
+    pub promised_seq: u64,
     exited_at: Option<Instant>,
+}
+
+impl SessionRecord {
+    /// Highest command sequence known or promised: what `wait` targets by default.
+    pub fn latest_command_seq(&self) -> u64 {
+        self.command.command_seq.max(self.promised_seq)
+    }
 }
 
 /// 已退出条目的保留上限：agent 通常在退出后几秒到几分钟内 wait/read，24 小时或 512 条之外的
@@ -66,6 +82,8 @@ impl SessionLedger {
                         task_id: task_id.to_string(),
                         workspace_id: workspace_id.to_string(),
                         phase: SessionPhase::Pending,
+                        command: CommandStateInfo::default(),
+                        promised_seq: 0,
                         exited_at: None,
                     },
                 );
@@ -87,6 +105,8 @@ impl SessionLedger {
                 task_id: task_id.to_string(),
                 workspace_id: String::new(),
                 phase: SessionPhase::Pending,
+                command: CommandStateInfo::default(),
+                promised_seq: 0,
                 exited_at: None,
             });
         if !task_id.is_empty() {
@@ -104,6 +124,43 @@ impl SessionLedger {
     pub fn learn_alive<'a>(&mut self, sessions: impl IntoIterator<Item = (&'a str, &'a str)>) {
         for (session_id, task_id) in sessions {
             self.mark_started(session_id, task_id);
+        }
+    }
+
+    /// Supervisor pushed (or a snapshot carried) the shell's command state. Unknown sessions are
+    /// not invented; returns whether a known record changed.
+    pub fn set_command_state(&mut self, session_id: &str, state: CommandStateInfo) -> bool {
+        let Some(entry) = self.by_session.get_mut(session_id) else {
+            return false;
+        };
+        if entry.command == state {
+            return false;
+        }
+        entry.command = state;
+        true
+    }
+
+    /// `terminal.run` is about to type a command: reserve the sequence it will carry once its
+    /// command-start mark arrives, so a `wait` issued in between targets it and not the previous
+    /// command. Reserved *before* the keystrokes go out, so the mark can only ever land on an
+    /// already-promised sequence whatever order the input ack and the mark are handled in.
+    pub fn promise_run(&mut self, session_id: &str) -> u64 {
+        let Some(entry) = self.by_session.get_mut(session_id) else {
+            return 0;
+        };
+        let next = entry.latest_command_seq().saturating_add(1);
+        entry.promised_seq = next;
+        next
+    }
+
+    /// The keystrokes for `seq` never reached the PTY: give the reservation back. A promise made
+    /// after this one (impossible while the busy check holds, but cheap to respect) stays.
+    pub fn withdraw_run(&mut self, session_id: &str, seq: u64) {
+        let Some(entry) = self.by_session.get_mut(session_id) else {
+            return;
+        };
+        if entry.promised_seq == seq {
+            entry.promised_seq = seq.saturating_sub(1);
         }
     }
 

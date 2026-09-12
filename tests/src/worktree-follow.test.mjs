@@ -245,7 +245,7 @@ for (const mode of ['locate', 'enter']) test(`${mode}: register and move workspa
     assert.equal(stillInA.owningWorkspaceId, wsA.id, `归属必须还在 A: ${JSON.stringify(stillInA)}`);
 
     // ---- ⑤ 旧格式请求行为不变：不带任何新字段的 terminal new 照常在当前归属工作区开终端 ----
-    const newText = await runCli(sessionId, `terminal new --title "老路径" --cmd "pwd"`, (s) => s.includes("已开终端") || s.includes("✗"), "老路径开终端");
+    const newText = await runCli(sessionId, `terminal new --title "老路径"`, (s) => s.includes("已开终端") || s.includes("✗"), "老路径开终端");
     assert.match(newText, /已开终端/, `旧格式请求必须一字不变地继续工作: ${newText}`);
     const legacy = await c.waitFor((m) => m.case === "taskUpdated" && m.task.title === "老路径", "老路径的终端出现", 20000);
     assert.equal(legacy.task.workspaceId, wsA.id, "没申报目标工作区时仍落在发起方的归属工作区");

@@ -67,6 +67,9 @@ impl RuntimeControl {
 
     pub fn serve(self, manager: Arc<Manager>, sessions: Arc<Sessions>, worker_socket: String) {
         std::thread::spawn(move || {
+            // Rust 2021 captures fields separately; keep the lock alive for the entire
+            // serving loop instead of dropping it when serve returns.
+            let _lock = self._lock;
             for stream in self.listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
