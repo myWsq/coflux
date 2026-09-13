@@ -15,3 +15,8 @@ allowBuilds:
   # 留空——pnpm 11 把「未表态的 build 脚本」当 install 失败，会让 typecheck / CI 直接红。
   '@google/genai': false
   protobufjs: false
+  # astryx 0.6.0 起两个包都带 postinstall（0.1.6 没有）。那脚本只在没跑过 `astryx init` 时打印一行
+  # 提示，不生成任何产物、也从不让 install 失败。显式拒绝而不是留空——pnpm 11 把「未表态的 build
+  # 脚本」当 install 失败，连 `pnpm exec` 的依赖自检都会退出 1，typecheck / test 全线红。
+  '@astryxdesign/cli': false
+  '@astryxdesign/core': false

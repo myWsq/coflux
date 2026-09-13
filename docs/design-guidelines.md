@@ -29,7 +29,7 @@ Mechanism: an open `DropdownMenu` drops `button.tooltip`, so `Button` unmounts t
 
 Two consequences worth knowing at the call site: `onOpenChange` fires **only** when `isMenuOpen` is also passed (otherwise the menu is uncontrolled and the callback is dead code), and the sibling `Tooltip` must come after the menu in document order, because its effect binds to `anchorRef.current` and the trigger's ref is only attached by then.
 
-Delete this rule once astryx's `DropdownMenu` no longer contains `tooltip: isOpen ? undefined : button.tooltip` and `Button` no longer conditionally renders its tooltip node; the workaround exists only for the pinned 0.1.6.
+Delete this rule once astryx's `DropdownMenu` no longer contains `tooltip: isOpen ? undefined : button.tooltip` and `Button` no longer conditionally renders its tooltip node. Both conditions were re-checked at **0.6.0** and still hold (`src/DropdownMenu/DropdownMenu.tsx:488` and `:926`; `src/Button/Button.tsx:795`), so the workaround stays. Re-run that same two-part check against upstream source on the next astryx upgrade before touching any call site.
 
 ## Interactive elements over a window drag region
 
