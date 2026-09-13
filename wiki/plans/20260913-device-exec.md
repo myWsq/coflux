@@ -19,6 +19,7 @@
 - Execution: subagent opus (user decision at the departure check); verification and code review by the orchestrator
 - Stop after: implementation — the user answered "继续" to an offer to execute the plan, superseding the earlier plan-only endpoint
 - Workspace: isolated — `.claude/worktrees/20260913-device-exec`, branch `dev/20260913-device-exec`, cut from main `ee711cc5` with a clean tree
+- Current state: DONE on `dev/20260913-device-exec` (implementation `e4d5495c`..`84b34bba`, one REVISE round). Verified by the orchestrator: `cargo build` exit 0 with zero warnings; `cargo test -p coflux-protocol -p coflux-worker -p coflux-cli` exit 0 (cli 38 / protocol 42 / worker 122); server `tsc --noEmit` exit 0; `pnpm -C tests test` exit 0 with the six new exec cases green; CLI end-to-end against a local stack covering shell semantics, stream separation, remote-exit-code passthrough, all four 255 failure paths, an empty `terminal list --device` after seven execs, and the two center log lines carrying `commandBytes` rather than the command. Three `crates/supervisor` `shell_integration` tests fail on this machine — `crates/supervisor` has zero diff in this range and the failures' left-hand value is the installed coflux integration directory injecting its own `--plugin-dir` into the real shell, so they are environment false-reds unrelated to this work. Not done: merge to main, release (daemon + server + both CLIs + plugin 0.16.0 SHA to the builder), real-machine acceptance (production runs an older server and the Debian device's supervisor v1.1.1 will not announce `device_exec` until `cofluxd update && cofluxd restart`).
 - Planned at: `ee711cc5`, 2026-09-13
 
 ## Requirement
@@ -182,10 +183,17 @@ $ coflux device exec c4723d40 --cmd="uname -a"
   constants in `crates/worker/src/main.rs:133-139`.
 
 - **Auditing follows ssh: a trace in the center's log, nothing in the UI, and no
-  per-device switch**. The center logs acceptance and completion (account,
-  device, cwd, command, exit code, duration) through the existing
-  `createLogger` (`apps/server/src/index.ts:13,24`); the sidebar and the desktop
-  app show nothing. Rejected: a per-device "allow remote exec" toggle — exec
+  per-device switch**. The center logs acceptance and completion through the
+  existing `createLogger` (`apps/server/src/index.ts:13,24`) with the account,
+  the device, the cwd, the **command's byte length**, the exit code and the
+  duration; the sidebar and the desktop app show nothing. **The command text
+  itself is never logged** (corrected during verification — this entry first
+  said "command", and the implementation faithfully logged it verbatim):
+  an agent's command line routinely carries credentials (`curl -H
+  "Authorization: Bearer …"`, `PGPASSWORD=… psql`), the center's log is
+  long-lived and may be shipped to an aggregator, and sshd — the model for this
+  whole feature — logs the login and never the command. Neither stdout nor
+  stderr content is logged either. Rejected: a per-device "allow remote exec" toggle — exec
   grants no capability that is not already reachable (the same token can do
   `terminal new --workspace` + `send` today and cause identical damage); it only
   reduces visibility, which is what the log restores, so a switch would add
@@ -325,10 +333,25 @@ In scope:
 - `apps/server/src/daemon-capabilities.ts`, `apps/server/src/hub.ts`,
   `apps/server/src/interface/client-command/`
 - `crates/cli/src/account.rs`, `crates/cli/src/main.rs` (HELP),
-  `packages/cli/account-client.mjs`
-- `integrations/claude-plugin/skills/` — the coflux SKILL gains `device exec`
-  and the exec/Terminal division of labour (English only)
+  `crates/cli/src/args.rs` (the new options must be in the option table, or the
+  whole command fails as "unknown option"), `packages/cli/account-client.mjs`,
+  `packages/cli/coflux.mjs` (the npm entry point's option table and HELP)
+- `packages/cli/skills/coflux/SKILL.md` — the SKILL's **sole source** per
+  AGENTS.md:21 — synchronized into `integrations/claude-plugin/skills/` with
+  `node scripts/sync-claude-plugin.mjs` (CI verifies both copies match), plus
+  `integrations/claude-plugin/.claude-plugin/plugin.json` version bump, which
+  the same AGENTS.md line requires after any plugin-directory change
+- `packages/swift-client/Sources/CofluxProtocol/Generated/` — `buf generate`
+  emits all three language outputs and CI:115-122 fails on a non-empty diff
+- `tests/src/contract.test.mjs` — the retained suite exists for exactly this
+  wire contract (AGENTS.md:76)
 - `wiki/plans/20260913-device-exec.md`, `wiki/plans/README.md`
+
+The five entries after `account.rs` were added during verification: the original
+scope section named only `account.rs`, `main.rs`, `account-client.mjs` and
+`integrations/claude-plugin/skills/`, which is not a buildable set — each
+addition above is mechanically forced by the option tables, AGENTS.md:21,
+CI:115-122 or AGENTS.md:76, not a widening of the requirement.
 
 Out of scope:
 
@@ -345,7 +368,7 @@ Out of scope:
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Rust unit tests | `cargo test -p coflux-protocol` | exit 0 |
+| Rust unit tests | `cargo test -p coflux-protocol -p coflux-worker -p coflux-cli` | exit 0 |
 | Rust zero-warning build | `cargo build` | exit 0, no warnings |
 | Server typecheck | `node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit` | exit 0 |
 | Black-box wire contract | `pnpm -C tests test` | exit 0 |
@@ -392,3 +415,16 @@ Out of scope:
   requirement, not the completion of this one.
 - If push/pull is taken up later, `fs_read` / `fs_write` map onto this plan's
   milestone split almost one-for-one.
+- The worker tells a timeout apart from other failures by comparing
+  `started.elapsed()` against the requested timeout, deliberately not by
+  matching `ops::run_command`'s message text. That is an implicit coupling to
+  the fact that a timed-out `run_command` always consumes the full timeout: if
+  its timeout behaviour ever changes, this classification degrades silently into
+  reporting a timeout as a generic failure (or the reverse). Revisit it together
+  with any change to `crates/worker/src/ops.rs`'s timeout handling.
+- There is no per-device cap on concurrent execs. The only backstop is the
+  center's global `MAX_PENDING_AGENT_REQUESTS` (`apps/server/src/hub.ts`), so a
+  runaway caller can load one device with parallel commands the way it cannot
+  with terminals (those are capped at 8 per workspace). Acceptable as shipped —
+  exec holds no PTY and no task — but it is the first thing to add if a caller
+  ever does that in practice.
