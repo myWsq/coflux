@@ -1190,23 +1190,20 @@ mod tests {
     }
 
     /// `device exec` 的 cwd 规则：空 = HOME，`~` 前缀展开，其余只收绝对路径，且必须真是目录。
-    #[tokio::test]
-    async fn exec_cwd_defaults_to_home_and_refuses_anything_but_an_absolute_or_tilde_path() {
+    #[test]
+    fn exec_cwd_defaults_to_home_and_refuses_anything_but_an_absolute_or_tilde_path() {
         let home = std::env::var("HOME").expect("测试环境必须有 HOME");
-        assert_eq!(resolve_exec_cwd("").await.as_deref(), Ok(home.as_str()));
-        assert_eq!(resolve_exec_cwd("  ").await.as_deref(), Ok(home.as_str()));
-        assert_eq!(resolve_exec_cwd("~").await.as_deref(), Ok(home.as_str()));
-        assert_eq!(resolve_exec_cwd("/").await.as_deref(), Ok("/"));
+        assert_eq!(resolve_exec_cwd("").as_deref(), Ok(home.as_str()));
+        assert_eq!(resolve_exec_cwd("  ").as_deref(), Ok(home.as_str()));
+        assert_eq!(resolve_exec_cwd("~").as_deref(), Ok(home.as_str()));
+        assert_eq!(resolve_exec_cwd("/").as_deref(), Ok("/"));
 
-        let relative = resolve_exec_cwd("logs").await.expect_err("相对路径必须被拒");
+        let relative = resolve_exec_cwd("logs").expect_err("相对路径必须被拒");
         assert!(relative.contains("绝对路径"), "{relative}");
-        let missing = resolve_exec_cwd("/nonexistent-coflux-exec-cwd")
-            .await
-            .expect_err("不存在的路径必须被拒");
+        let missing =
+            resolve_exec_cwd("/nonexistent-coflux-exec-cwd").expect_err("不存在的路径必须被拒");
         assert!(missing.contains("不存在"), "{missing}");
-        let not_a_dir = resolve_exec_cwd("/etc/hosts")
-            .await
-            .expect_err("文件不能当 cwd");
+        let not_a_dir = resolve_exec_cwd("/etc/hosts").expect_err("文件不能当 cwd");
         assert!(not_a_dir.contains("不是目录"), "{not_a_dir}");
     }
 
@@ -1400,7 +1397,7 @@ pub async fn handle_server_request(
                     "命令超过 {MAX_SERVER_EXEC_COMMAND_BYTES} 字节上限"
                 ));
             }
-            let cwd = match resolve_exec_cwd(&exec.cwd).await {
+            let cwd = match resolve_exec_cwd(&exec.cwd) {
                 Ok(cwd) => cwd,
                 Err(message) => return fail(message),
             };
@@ -1455,7 +1452,7 @@ pub async fn handle_server_request(
 /// `device exec` 的 cwd：空 = daemon 用户的 HOME，否则只接受绝对路径或 `~` 前缀（展开后必须
 /// 存在且是目录）。刻意不查 WorkspaceList——exec 是设备级原语，不带工作区语义；路径不对时给一句
 /// 可读的话，而不是让 spawn 以 ENOENT 失败。
-async fn resolve_exec_cwd(raw: &str) -> Result<String, String> {
+fn resolve_exec_cwd(raw: &str) -> Result<String, String> {
     let requested = raw.trim();
     let absolute_or_tilde =
         requested.starts_with('/') || requested == "~" || requested.starts_with("~/");
@@ -1469,8 +1466,7 @@ async fn resolve_exec_cwd(raw: &str) -> Result<String, String> {
     let expanded = crate::ops::expand_home(target)
         .filter(|path| !path.is_empty())
         .ok_or("该设备的 daemon 读不到 HOME，请显式传 --cwd=<绝对路径>")?;
-    // 先落成绑定再 match：把 metadata 的 future（借着 expanded）在语句结束时丢掉，后面才能移动它。
-    let probed = tokio::fs::metadata(&expanded).await;
+    let probed = std::fs::metadata(&expanded);
     match probed {
         Ok(meta) if meta.is_dir() => Ok(expanded),
         Ok(_) => Err(format!("--cwd 不是目录：{expanded}")),

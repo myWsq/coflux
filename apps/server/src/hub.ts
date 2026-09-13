@@ -4187,6 +4187,13 @@ export class Hub {
    * that is the whole audit surface by decision, since the same token could already do
    * `terminal new` + `send` with identical reach.
    *
+   * Those lines carry **`commandBytes`, never the command text**, and never any output. Agent
+   * commands routinely carry credentials on the command line (`curl -H "Authorization: Bearer …"`,
+   * `PGPASSWORD=… psql`), and this log is long-lived and may be shipped to an aggregator — the same
+   * reason sshd records the login and not the command. The audit question is which account ran a
+   * command of this size on which device, in which directory, for how long and with what exit code;
+   * the command text itself lives in the agent's own conversation.
+   *
    * The daemon request carries an **explicit** timeout: the default AGENT_REQUEST_TIMEOUT_MS would
    * declare a 60-second command a device timeout after 10 seconds. The grace on top lets the
    * device's own timeout fire first, so a timeout comes back as its readable sentence. */
@@ -4196,26 +4203,27 @@ export class Hub {
   ): Promise<OperationOutcome<{ deviceId: DaemonId; exitCode: number; stdout: string; stderr: string; cwd: string; durationMs: number }>> {
     const command = input.command;
     if (!command.trim()) return { ok: false, error: "命令为空" };
-    if (Buffer.byteLength(command, "utf8") > MAX_DEVICE_EXEC_COMMAND_BYTES) return { ok: false, error: `命令不超过 ${MAX_DEVICE_EXEC_COMMAND_BYTES} 字节` };
+    const commandBytes = Buffer.byteLength(command, "utf8");
+    if (commandBytes > MAX_DEVICE_EXEC_COMMAND_BYTES) return { ok: false, error: `命令不超过 ${MAX_DEVICE_EXEC_COMMAND_BYTES} 字节` };
     const daemon = this.requireOnlineDaemon(input.deviceId, accountId, DAEMON_CAPABILITY_DEVICE_EXEC);
     if (!daemon.ok) return daemon;
     const timeoutMs = Math.max(1000, Math.min(DEVICE_EXEC_MAX_MS, Math.floor(input.timeoutMs) || DEVICE_EXEC_DEFAULT_MS));
     const startedAt = Date.now();
-    log.info("device exec 受理", { accountId, daemonId: input.deviceId, cwd: input.cwd, timeoutMs, command });
+    log.info("device exec 受理", { accountId, daemonId: input.deviceId, cwd: input.cwd, timeoutMs, commandBytes });
     const result = await this.requestDaemonAgent(daemon.value, { case: "exec", value: { command, cwd: input.cwd, timeoutMs } }, timeoutMs + DEVICE_EXEC_GRACE_MS);
     const durationMs = Date.now() - startedAt;
     if (!result) {
-      log.warn("device exec 无回执", { accountId, daemonId: input.deviceId, durationMs, command });
+      log.warn("device exec 无回执", { accountId, daemonId: input.deviceId, durationMs, commandBytes });
       return { ok: false, error: "等待设备回执超时或设备已断开，命令是否跑完未知；改用 coflux terminal new 可以看到过程" };
     }
     if (!result.ok || result.payload.case !== "exec") {
       const error = result.ok ? "设备回执类型不匹配" : result.error ?? "设备拒绝执行该命令";
-      log.warn("device exec 失败", { accountId, daemonId: input.deviceId, durationMs, command, error });
+      log.warn("device exec 失败", { accountId, daemonId: input.deviceId, durationMs, commandBytes, error });
       return { ok: false, error };
     }
     const outcome = result.payload.value;
     log.info("device exec 完成", {
-      accountId, daemonId: input.deviceId, cwd: outcome.cwd, command, exitCode: outcome.exitCode, durationMs,
+      accountId, daemonId: input.deviceId, cwd: outcome.cwd, commandBytes, exitCode: outcome.exitCode, durationMs,
       stdoutBytes: Buffer.byteLength(outcome.stdout, "utf8"), stderrBytes: Buffer.byteLength(outcome.stderr, "utf8"),
     });
     return { ok: true, value: { deviceId: input.deviceId, exitCode: outcome.exitCode, stdout: outcome.stdout, stderr: outcome.stderr, cwd: outcome.cwd, durationMs } };
