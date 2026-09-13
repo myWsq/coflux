@@ -6,7 +6,9 @@ The app requires macOS 26+ on Apple Silicon. It bundles the terminal runtime and
 
 ## Development
 
-Start the local PostgreSQL instance and server from the repository root, then launch the app:
+To put the app in front of a human for acceptance, skip the local stack and point the dev client at production with `pnpm dev:desktop:prod`; the account's existing workspaces and terminals are the point. See [desktop acceptance](../../docs/desktop-acceptance.md).
+
+For protocol work, start the local PostgreSQL instance and server from the repository root, then launch the app:
 
 ```sh
 pnpm dev:pg

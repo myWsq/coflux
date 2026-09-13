@@ -8,6 +8,7 @@
     "dev:pg": "docker compose up -d",
     "dev:server": "pnpm --filter @coflux/server dev",
     "dev:desktop": "pnpm --filter @coflux/desktop dev",
+    "dev:desktop:prod": "COFLUX_SERVER_URL=wss://api.coflux.dev/client pnpm --filter @coflux/desktop dev",
     "dev:daemon": "cargo build -p coflux-supervisor -p coflux-worker && node scripts/build-test-transports.mjs && COFLUX_HOME=\"$PWD/.coflux-dev\" COFLUX_WORKER_CMD=\"$PWD/target/debug/coflux-worker\" ./target/debug/coflux-supervisor",
     "dev": "pnpm -r --parallel --filter @coflux/server --filter @coflux/desktop dev",
     "build": "pnpm -r build && cargo build --release && node scripts/build-transport.mjs",

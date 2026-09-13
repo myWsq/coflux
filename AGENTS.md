@@ -39,6 +39,7 @@ cargo test -p coflux-protocol      # Rust unit tests: frame codec and serde wire
 pnpm build:daemon                 # Build release daemon binaries and paired native helper
 node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit   # Server type checking
 pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test && pnpm -C apps/desktop build   # Desktop types, tests, and build
+pnpm dev:desktop:prod                               # Desktop against production: the default for human acceptance, see docs/desktop-acceptance.md
 pnpm -C apps/desktop dev / pack                     # Develop against local port 8787 / package an unsigned .app for smoke testing
 pnpm dev:pg                                         # Dedicated local Postgres: compose, 127.0.0.1:5432
 pnpm dev:server / dev:desktop / dev:daemon          # Start each component; pnpm dev runs server and desktop concurrently
@@ -50,6 +51,7 @@ git tag v1.2.3 && git push origin v1.2.3            # Release: cross-compile, si
 
 - **Local Postgres**: `pnpm dev:pg` starts a dedicated instance (`compose.yaml`, `127.0.0.1:5432`). Both `pnpm dev:server` and black-box tests default to `postgres://postgres:postgres@127.0.0.1:5432/postgres`; setting `DATABASE_URL` / `COFLUX_TEST_PG_URL` is unnecessary. Do not use leftover local Supabase containers (54322 / pooled port 5432).
 - **Desktop dev opens but never connects: port 8787 is not running.** The `pnpm dev:desktop` main process gives the renderer `ws://localhost:8787/client` directly, without the Vite proxy; renderer HMR uses 5274. The page loads without the dev server, but WS cannot connect. Check that `curl localhost:8787/health` returns 200. Dev userData uses `Coflux-dev`, separate from the installed app's tokens and window position.
+- **Do not start the local stack merely to look at the desktop app.** For human acceptance of a UI change, run `pnpm dev:desktop:prod`: the real account already has the workspaces and live terminals the reviewer needs, and no server, daemon or enrollment is involved. The local stack is for protocol work and for states production cannot produce. See [docs/desktop-acceptance.md](docs/desktop-acceptance.md), which also covers what a dev build cannot reach (remote devices) and what must never be killed (the installed app's runtime).
 
 CI/releases: `.github/workflows/ci.yml` gates pushes and PRs; `release.yml` publishes desktop and daemon components together for `v*` tags, then publishes npm packages at the same version; `desktop-release.yml` is called only by the unified workflow and handles signed, notarized desktop builds. Worker artifacts use ed25519 signatures verified by the supervisor. Key configuration is documented in [docs/RELEASING.md](docs/RELEASING.md).
 
