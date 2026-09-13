@@ -46,5 +46,6 @@ export const ClientCommandHandler = withSchema(ClientCommandContract.schemas, as
     case "terminal.wait": return reply(await hub.waitTerminalForAccount(accountId, command.terminalId, command.timeout * 1000));
     case "terminal.stop": return reply(await hub.stopTerminalForAccount(accountId, command.terminalId));
     case "terminal.remove": return reply(await hub.removeTerminalForAccount(accountId, command.terminalId));
+    case "device.exec": return reply(await hub.execOnDeviceForAccount(accountId, { deviceId: command.deviceId, command: command.command, cwd: command.cwd, timeoutMs: command.timeout * 1000 }));
   }
 });

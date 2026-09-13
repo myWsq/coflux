@@ -16,6 +16,10 @@ const operations = z.discriminatedUnion("op", [
   z.object({ op: z.literal("terminal.wait"), ...target, timeout: z.number().min(0).max(600).default(30) }).strict(),
   z.object({ op: z.literal("terminal.stop"), ...target }).strict(),
   z.object({ op: z.literal("terminal.remove"), ...target }).strict(),
+  // `device.exec`: one-shot execution on a device, ssh semantics. `cwd` is the only addressing —
+  // there is deliberately no workspaceId here (that would pull workspace semantics back into a
+  // device-level primitive); empty cwd = the daemon user's HOME. Timeout is in seconds.
+  z.object({ op: z.literal("device.exec"), deviceId: id, command: z.string().min(1).max(65536), cwd: z.string().max(4096).default(""), timeout: z.number().int().min(1).max(600).default(60) }).strict(),
 ]);
 export const ClientCommandContract = defineContract({
   method: "POST", path: "/api/client/command",

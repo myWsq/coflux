@@ -82,6 +82,7 @@ import {
 } from "./prepared-operation.service.js";
 import { PreparedOperationConvergenceService, type OperationEffect } from "./prepared-operation-convergence.service.js";
 import {
+  DAEMON_CAPABILITY_DEVICE_EXEC,
   DAEMON_CAPABILITY_PREPARED_EXECUTE,
   DAEMON_CAPABILITY_TERMINAL_IO,
   daemonUpgradeRequired,
@@ -134,6 +135,13 @@ const TERMINAL_RUN_TIMEOUT_MS = 15_000;
 /** terminal_wait 单轮在 daemon 侧的阻塞上限（daemon 另有 8 秒钳制）；中心按总超时循环发起多轮。 */
 const TERMINAL_WAIT_ROUND_MS = 8_000;
 const MAX_PENDING_AGENT_REQUESTS = 256;
+/** `device.exec` 的超时：默认 60 秒、最长 600 秒。更久、或需要用户看得见的长任务属于终端，不属于 exec。 */
+const DEVICE_EXEC_DEFAULT_MS = 60_000;
+const DEVICE_EXEC_MAX_MS = 600_000;
+/** 在请求超时之上留的余量：让设备自己的超时先到，回执因此是一句可读的话而不是「无回执」。 */
+const DEVICE_EXEC_GRACE_MS = 5_000;
+/** `device.exec` 的命令行字节上限（worker 侧同级钳制）：exec 是一条命令行，不是脚本通道。 */
+const MAX_DEVICE_EXEC_COMMAND_BYTES = 64 * 1024;
 /** send_terminal_input 单次输入（也是 create_terminal 要打入的命令）的字节上限（worker 侧另有同级钳制）。 */
 const MAX_TERMINAL_INPUT_BYTES = 64 * 1024;
 const MAX_TERMINAL_TITLE_BYTES = 256;
@@ -389,7 +397,9 @@ type ServerAgentRequestPayload =
   | { case: "terminalRead"; value: { taskId: TaskId; sessionId: SessionId; maxBytes: number } }
   | { case: "terminalInput"; value: { sessionId: SessionId; data: Uint8Array } }
   | { case: "terminalRun"; value: { taskId: TaskId; sessionId: SessionId; command: string } }
-  | { case: "terminalWait"; value: { taskId: TaskId; sessionId: SessionId; commandSeq: bigint; timeoutMs: number } };
+  | { case: "terminalWait"; value: { taskId: TaskId; sessionId: SessionId; commandSeq: bigint; timeoutMs: number } }
+  // `device exec`: the one branch that is not about a terminal — no session, no task, just a cwd.
+  | { case: "exec"; value: { command: string; cwd: string; timeoutMs: number } };
 
 /** Shell-integration command state of a live terminal as last carried by its checkpoint (≤2 s lag):
  * what the account CLI's `terminal list` shows next to `running`. */
@@ -4166,6 +4176,49 @@ export class Hub {
     if (!task || task.accountId !== accountId) return { ok: false, error: `终端 ${terminalId} 不存在或不属于当前账号` };
     if (task.status === TaskStatus.RUNNING || task.sessionId) return { ok: false, error: "终端仍在运行，先 stop_terminal 再删除" };
     return await this.removeTaskRecord(task, true);
+  }
+
+  /** `device.exec`: one-shot command execution on a device, ssh semantics (`ssh host "cmd"`).
+   *
+   * Deliberately **not** a Terminal: no PTY on the device, no Task record here, nothing in the
+   * user's sidebar, no draw on the workspace terminal cap, no dependency on the OSC 133 prompt mark
+   * and no workspace required — `cwd` is the only addressing, and the device hands the command
+   * string to `sh -c`. The only trace is the pair of log lines below (acceptance + completion);
+   * that is the whole audit surface by decision, since the same token could already do
+   * `terminal new` + `send` with identical reach.
+   *
+   * The daemon request carries an **explicit** timeout: the default AGENT_REQUEST_TIMEOUT_MS would
+   * declare a 60-second command a device timeout after 10 seconds. The grace on top lets the
+   * device's own timeout fire first, so a timeout comes back as its readable sentence. */
+  async execOnDeviceForAccount(
+    accountId: AccountId,
+    input: { deviceId: DaemonId; command: string; cwd: string; timeoutMs: number },
+  ): Promise<OperationOutcome<{ deviceId: DaemonId; exitCode: number; stdout: string; stderr: string; cwd: string; durationMs: number }>> {
+    const command = input.command;
+    if (!command.trim()) return { ok: false, error: "命令为空" };
+    if (Buffer.byteLength(command, "utf8") > MAX_DEVICE_EXEC_COMMAND_BYTES) return { ok: false, error: `命令不超过 ${MAX_DEVICE_EXEC_COMMAND_BYTES} 字节` };
+    const daemon = this.requireOnlineDaemon(input.deviceId, accountId, DAEMON_CAPABILITY_DEVICE_EXEC);
+    if (!daemon.ok) return daemon;
+    const timeoutMs = Math.max(1000, Math.min(DEVICE_EXEC_MAX_MS, Math.floor(input.timeoutMs) || DEVICE_EXEC_DEFAULT_MS));
+    const startedAt = Date.now();
+    log.info("device exec 受理", { accountId, daemonId: input.deviceId, cwd: input.cwd, timeoutMs, command });
+    const result = await this.requestDaemonAgent(daemon.value, { case: "exec", value: { command, cwd: input.cwd, timeoutMs } }, timeoutMs + DEVICE_EXEC_GRACE_MS);
+    const durationMs = Date.now() - startedAt;
+    if (!result) {
+      log.warn("device exec 无回执", { accountId, daemonId: input.deviceId, durationMs, command });
+      return { ok: false, error: "等待设备回执超时或设备已断开，命令是否跑完未知；改用 coflux terminal new 可以看到过程" };
+    }
+    if (!result.ok || result.payload.case !== "exec") {
+      const error = result.ok ? "设备回执类型不匹配" : result.error ?? "设备拒绝执行该命令";
+      log.warn("device exec 失败", { accountId, daemonId: input.deviceId, durationMs, command, error });
+      return { ok: false, error };
+    }
+    const outcome = result.payload.value;
+    log.info("device exec 完成", {
+      accountId, daemonId: input.deviceId, cwd: outcome.cwd, command, exitCode: outcome.exitCode, durationMs,
+      stdoutBytes: Buffer.byteLength(outcome.stdout, "utf8"), stderrBytes: Buffer.byteLength(outcome.stderr, "utf8"),
+    });
+    return { ok: true, value: { deviceId: input.deviceId, exitCode: outcome.exitCode, stdout: outcome.stdout, stderr: outcome.stderr, cwd: outcome.cwd, durationMs } };
   }
 
   /** 运行时计数（供 /health 暴露） */
