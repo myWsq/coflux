@@ -94,7 +94,9 @@ export async function runAccountCommand(positionals, flags, home) {
       if (!id) throw new Error("缺少设备 ID（coflux device list 可以看到）");
       const cmd = required("cmd");
       const timeout = Number(flags.timeout ?? 60);
+      // 上限在这里就说清楚，别让中心的入参校验回一句「请求失败」。
       if (!Number.isInteger(timeout)) throw new Error("--timeout 必须是整数秒");
+      if (timeout < 1 || timeout > 600) throw new Error("--timeout 取 1-600 秒；更久、或需要用户看见的长任务请改用 coflux terminal new");
       value = await call({ op: "device.exec", deviceId: id, command: cmd, cwd: flags.cwd ?? "", timeout });
     } catch (error) {
       await fail(error.message);

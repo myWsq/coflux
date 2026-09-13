@@ -1457,21 +1457,18 @@ pub async fn handle_server_request(
 /// 可读的话，而不是让 spawn 以 ENOENT 失败。
 async fn resolve_exec_cwd(raw: &str) -> Result<String, String> {
     let requested = raw.trim();
-    let home_missing = || "该设备的 daemon 读不到 HOME，请显式传 --cwd=<绝对路径>".to_string();
-    if requested.is_empty() {
-        return std::env::var("HOME")
-            .ok()
-            .filter(|home| !home.is_empty())
-            .ok_or_else(home_missing);
-    }
-    if !(requested.starts_with('/') || requested == "~" || requested.starts_with("~/")) {
+    let absolute_or_tilde =
+        requested.starts_with('/') || requested == "~" || requested.starts_with("~/");
+    if !requested.is_empty() && !absolute_or_tilde {
         return Err(format!(
             "--cwd 只接受绝对路径或 ~ 开头的路径（收到 {requested}）"
         ));
     }
-    let expanded = crate::ops::expand_home(requested)
+    // 缺省与显式 `~` 走同一条展开+校验路径，HOME 本身也因此被校验到。
+    let target = if requested.is_empty() { "~" } else { requested };
+    let expanded = crate::ops::expand_home(target)
         .filter(|path| !path.is_empty())
-        .ok_or_else(home_missing)?;
+        .ok_or("该设备的 daemon 读不到 HOME，请显式传 --cwd=<绝对路径>")?;
     // 先落成绑定再 match：把 metadata 的 future（借着 expanded）在语句结束时丢掉，后面才能移动它。
     let probed = tokio::fs::metadata(&expanded).await;
     match probed {

@@ -141,6 +141,10 @@ fn device_exec(
         .unwrap_or(EXEC_DEFAULT_TIMEOUT_SECS)
         .parse::<u32>()
         .map_err(|_| "--timeout 必须是整数秒")?;
+    // 上限在这里就说清楚，别让中心的入参校验回一句「请求失败」。
+    if !(1..=600).contains(&timeout) {
+        return Err("--timeout 取 1-600 秒；更久、或需要用户看见的长任务请改用 coflux terminal new".into());
+    }
     let value = call(json!({
         "op": "device.exec",
         "deviceId": device_id,
