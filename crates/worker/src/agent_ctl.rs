@@ -1472,7 +1472,9 @@ async fn resolve_exec_cwd(raw: &str) -> Result<String, String> {
     let expanded = crate::ops::expand_home(requested)
         .filter(|path| !path.is_empty())
         .ok_or_else(home_missing)?;
-    match tokio::fs::metadata(&expanded).await {
+    // 先落成绑定再 match：把 metadata 的 future（借着 expanded）在语句结束时丢掉，后面才能移动它。
+    let probed = tokio::fs::metadata(&expanded).await;
+    match probed {
         Ok(meta) if meta.is_dir() => Ok(expanded),
         Ok(_) => Err(format!("--cwd 不是目录：{expanded}")),
         Err(_) => Err(format!("--cwd 在该设备上不存在：{expanded}")),
