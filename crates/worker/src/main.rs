@@ -132,11 +132,15 @@ pub(crate) type WsOut = Vec<u8>;
 /// 能力名是协议契约的一部分：新增控制消息时同步加名字，并与 apps/server 的常量保持一致。
 const CAPABILITY_PREPARED_EXECUTE: &str = "prepared_execute";
 const CAPABILITY_TERMINAL_IO: &str = "terminal_io";
+/// Knows ServerExecRun: one-shot `sh -c` execution on this device (`coflux device exec`), which is
+/// deliberately not a Terminal. Paired with DAEMON_CAPABILITY_DEVICE_EXEC in apps/server.
+const CAPABILITY_DEVICE_EXEC: &str = "device_exec";
 
 fn daemon_capabilities() -> Vec<String> {
     let mut capabilities = vec![
         CAPABILITY_PREPARED_EXECUTE.to_string(),
         CAPABILITY_TERMINAL_IO.to_string(),
+        CAPABILITY_DEVICE_EXEC.to_string(),
     ];
     if std::env::var("COFLUX_TRANSPORT_PAIR").as_deref() == Ok("1") {
         capabilities.push("transport_pair_v1".into());

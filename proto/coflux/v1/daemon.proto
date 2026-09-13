@@ -19,7 +19,8 @@ message DaemonAuth {
   // worker 宣告的控制面能力名（plan 091）。中心按能力名而非版本号做门禁：dev/测试的 worker
   // 上报 `builtin`，自动升级也刻意不做 semver 比较。旧 worker 不发此字段 → 自然被挡。
   // 现有能力名：`prepared_execute`（认识 PreparedDeviceOperationExecute）、
-  // `terminal_io`（认识 ServerAgentRequest 的读/写）。新增控制消息时同步加能力名。
+  // `terminal_io`（认识 ServerAgentRequest 的读/写）、`device_exec`（认识 ServerExecRun，
+  // 一次性跨设备执行）。新增控制消息时同步加能力名。
   repeated string capabilities = 5;
 }
 
@@ -348,6 +349,8 @@ message ServerAgentRequest {
     ServerTerminalInput terminal_input = 11;
     ServerTerminalRun terminal_run = 12;
     ServerTerminalWait terminal_wait = 13;
+    // One-shot command execution, not a Terminal (see ServerExecRun below).
+    ServerExecRun exec = 14;
   }
 }
 
@@ -391,6 +394,39 @@ message ServerTerminalWaitResult {
   optional int32 exit_code = 3;
 }
 
+// ===== One-shot cross-device execution (`coflux device exec`) =====
+//
+// Deliberately **not** a Terminal: no PTY on the device, no Task record in the center, nothing in
+// the user's sidebar, no draw on the per-workspace live-terminal cap, and no dependency on the
+// shell's OSC 133 prompt-ready mark. Semantics follow `ssh host "cmd"`: one buffered request, one
+// buffered result. Long jobs whose progress the user should watch belong to a Terminal instead.
+//
+// Note this deliberately carries a bare `cwd` rather than DeviceExecRun's `workspace_id`: exec is a
+// device-level primitive that exists to be free of workspace semantics, so the worker never
+// consults its WorkspaceList here. That is not a weakening — the command string is handed to the
+// remote `sh -c`, so an authenticated account token can `cd` anywhere regardless.
+message ServerExecRun {
+  // Handed verbatim to the remote `sh -c`: pipes, `&&`, redirection, globs and `$VAR` all work,
+  // and quoting is the caller's responsibility.
+  string command = 1;
+  // Absolute path, or a `~` prefix the worker expands; empty = the daemon user's HOME. The worker
+  // answers readably when it does not exist or is not a directory, instead of failing with ENOENT.
+  string cwd = 2;
+  // Bounded by the worker's own ceiling. A timeout kills the remote process and is a definite
+  // failure, never a silent truncation.
+  uint32 timeout_ms = 3;
+}
+
+message ServerExecRunResult {
+  int32 exit_code = 1;
+  // The two streams stay separate, each truncated by the worker with an explicit inline marker
+  // when it exceeds the per-stream byte limit — truncation is never silent.
+  string stdout = 2;
+  string stderr = 3;
+  // The cwd the command actually ran in (HOME resolved, `~` expanded); the center logs it.
+  string cwd = 4;
+}
+
 message ServerAgentResult {
   string request_id = 1;
   bool ok = 2;
@@ -400,6 +436,7 @@ message ServerAgentResult {
     ServerTerminalInputResult terminal_input = 11;
     ServerTerminalRunResult terminal_run = 12;
     ServerTerminalWaitResult terminal_wait = 13;
+    ServerExecRunResult exec = 14;
   }
 }
 

@@ -10,11 +10,12 @@
 use prost::Message;
 
 use crate::wire::{
-    daemon_to_server, device_envelope, server_to_daemon, DaemonAuthError, DaemonEnrollRequest,
-    DaemonToServer, DeviceEnvelope, DeviceExecRun, DevicePtyInputAck, DevicePtyOutput, DeviceScope,
-    DeviceSessionAttached, DeviceSessionCreate, DeviceTailcatGrant, FsEntry, FsEntryKind,
-    LocalClientHello, PreparedDeviceOperation, ProjectValidated, ServerToDaemon, SessionCreate,
-    SessionPorts,
+    daemon_to_server, device_envelope, server_agent_request, server_agent_result, server_to_daemon,
+    DaemonAuthError, DaemonEnrollRequest, DaemonToServer, DeviceEnvelope, DeviceExecRun,
+    DevicePtyInputAck, DevicePtyOutput, DeviceScope, DeviceSessionAttached, DeviceSessionCreate,
+    DeviceTailcatGrant, FsEntry, FsEntryKind, LocalClientHello, PreparedDeviceOperation,
+    ProjectValidated, ServerAgentRequest, ServerAgentResult, ServerExecRun, ServerExecRunResult,
+    ServerToDaemon, SessionCreate, SessionPorts,
 };
 use crate::{decode_device_envelope, encode_device_envelope, DEVICE_PROTOCOL_VERSION};
 
@@ -585,4 +586,64 @@ fn auth_error_and_enroll_request_round_trip() {
         back2.payload,
         Some(daemon_to_server::Payload::DaemonEnrollRequest(_))
     ));
+}
+
+/// One-shot cross-device exec (`coflux device exec`) rides the ServerAgentRequest / ServerAgentResult
+/// oneofs, never the ServerToDaemon / DaemonToServer top level (whose `exec_run` / `exec_result`
+/// names are reserved there). This pins both the envelope dispatch and the fact that the two output
+/// streams come back separately alongside the exit code — the whole wire contract of the feature.
+#[test]
+fn server_initiated_exec_round_trips_inside_the_agent_request_oneofs() {
+    let request = ServerToDaemon {
+        payload: Some(server_to_daemon::Payload::ServerAgentRequest(
+            ServerAgentRequest {
+                request_id: "x1".into(),
+                payload: Some(server_agent_request::Payload::Exec(ServerExecRun {
+                    command: "cd /opt && ls | wc -l".into(),
+                    cwd: "~/logs".into(),
+                    timeout_ms: 300_000,
+                })),
+            },
+        )),
+    };
+    let back = ServerToDaemon::decode(request.encode_to_vec().as_slice()).unwrap();
+    let Some(server_to_daemon::Payload::ServerAgentRequest(agent)) = back.payload else {
+        panic!("exec 必须经 ServerAgentRequest 分派");
+    };
+    assert_eq!(agent.request_id, "x1");
+    let Some(server_agent_request::Payload::Exec(exec)) = agent.payload else {
+        panic!("payload 必须回到 exec 分支");
+    };
+    assert_eq!(exec.command, "cd /opt && ls | wc -l");
+    assert_eq!(exec.cwd, "~/logs");
+    assert_eq!(exec.timeout_ms, 300_000);
+
+    let result = DaemonToServer {
+        payload: Some(daemon_to_server::Payload::ServerAgentResult(
+            ServerAgentResult {
+                request_id: "x1".into(),
+                ok: true,
+                error: None,
+                payload: Some(server_agent_result::Payload::Exec(ServerExecRunResult {
+                    exit_code: 1,
+                    stdout: "12\n".into(),
+                    stderr: "cat: /nonexistent: No such file or directory\n".into(),
+                    cwd: "/home/coflux/logs".into(),
+                })),
+            },
+        )),
+    };
+    let back = DaemonToServer::decode(result.encode_to_vec().as_slice()).unwrap();
+    let Some(daemon_to_server::Payload::ServerAgentResult(agent)) = back.payload else {
+        panic!("exec 结果必须经 ServerAgentResult 分派");
+    };
+    assert!(agent.ok);
+    assert!(agent.error.is_none());
+    let Some(server_agent_result::Payload::Exec(outcome)) = agent.payload else {
+        panic!("结果 payload 必须回到 exec 分支");
+    };
+    assert_eq!(outcome.exit_code, 1);
+    assert_eq!(outcome.stdout, "12\n");
+    assert!(outcome.stderr.contains("No such file"));
+    assert_eq!(outcome.cwd, "/home/coflux/logs");
 }
