@@ -34,7 +34,7 @@ coflux runs a **daemon** on any node. The daemon hosts local PTYs, drives agents
 
 ```sh
 pnpm install                       # TS dependencies
-pnpm -C tests test                 # Black-box integration tests; pretest builds daemon binaries
+pnpm -C tests test                 # Black-box core (~1 min): wire contract, signing/trust chain, hot-upgrade rollback
 cargo test -p coflux-protocol      # Rust unit tests: frame codec and serde wire format
 pnpm build:daemon                 # Build release daemon binaries and paired native helper
 node_modules/.bin/tsc -p apps/server/tsconfig.json --noEmit   # Server type checking
@@ -60,16 +60,30 @@ Prerequisites: Node 22+ (server and test tooling), pnpm, and Rust stable (`rustu
 ## Change discipline
 
 - **Protocol changes**: update both `crates/protocol` (Rust source of truth used by the daemon) and `packages/protocol` (TS, used by server/web). Keep wire formats identical: internally tagged `type`, camelCase, and binary data-plane frames. Black-box tests detect behavioral drift.
-- **Before committing, all checks must pass**: relevant `tsc --noEmit`, `cargo build` with zero warnings, and the complete `pnpm -C tests test` suite.
+- **Before committing**: the relevant `tsc --noEmit` and a zero-warning `cargo build`. Run `pnpm -C tests test` (about a minute) when you touched the wire protocol, release signing, or the hot-upgrade path — the three things it still covers. Everything else is accepted by hand.
 - End commit messages with a `Co-Authored-By: Claude ...` trailer.
 
-## Test harness (important)
+## Test harness
 
-This is the repository's core quality mechanism and is **deliberately black-box**. The same suite validated the rewrite from a TS daemon to an entirely Rust daemon without modification. Prefer it for accepting new functionality.
+**This is a single-maintainer project and acceptance is manual.** On 2026-09-13 the black-box suite was cut from 59 files to the three areas where a silent break would not show up while using the product; CI was cut to match. Everything else — UI, terminals, workspaces, agent integration, transport — is accepted by using it.
+
+What is still automated, and why:
+
+| kept | why it cannot be caught by hand |
+| --- | --- |
+| `contract.test.mjs` | the exec/fs wire contract between the Rust daemon and the TS server: drift is silent until something misbehaves much later |
+| `signed-upgrade.test.mjs`, `release-sign.test.mjs`, `cli-release-trust.test.mjs` | ed25519 artifact verification and the npm trust chain: the negative cases (tampered artifact, wrong signature, cross-target, anti-rollback) cannot be exercised by using the product |
+| `worker-upgrade.test.mjs` | hot-upgrade probation and rollback, including the pseudo-healthy cases that must never commit: a broken rollback bricks a remote daemon |
+
+Plus the cheap compile-level gates that stay in CI: protocol lint/breaking/generated-artifact consistency, `tsc --noEmit`, desktop typecheck/build, Rust unit tests and a zero-warning build.
+
+**Do not grow this back by habit.** A new test belongs here only if a break would stay invisible while using the product. If you would notice it the first time you open the app, do not write a test for it. The deleted files remain in Git history (before `chore: trim the test suite and CI to a single-maintainer workflow`) if a specific one is ever wanted back.
+
+The retained files are **deliberately black-box**: they drive real processes over the WebSocket wire protocol and never import application internals, which is why the same suite survived the TS-to-Rust daemon rewrite unchanged.
 
 ### Structure and philosophy
 
-- Location: `tests/src/` (`harness.mjs` and `*.test.mjs`). `node --test` runs **files** concurrently (four by default; `COFLUX_TEST_CONCURRENCY=1` enables serial troubleshooting; CI uses two). Tests within each file run sequentially. The full suite takes roughly 11 minutes serially or 3 minutes concurrently. During development, run relevant files with `node --import tsx --test tests/src/<x>.test.mjs`; run the full suite before committing. Parallel execution requires exclusive ports per file. Choose an unused port for a new file using `grep -h "PORT = " tests/src/*.test.mjs | sort -t= -k2 -n`.
+- Location: `tests/src/` (`harness.mjs`, `device-harness.mjs`, `derp-harness.mjs`, `tailcat-harness.mjs`, and five `*.test.mjs` files). `node --test` runs **files** concurrently (four by default; `COFLUX_TEST_CONCURRENCY=1` enables serial troubleshooting; CI uses two). Tests within each file run sequentially; the whole suite is about a minute. Run one file with `node --import tsx --test tests/src/<x>.test.mjs`. Each file owns an exclusive port — check the existing ones with `grep -h "PORT = " tests/src/*.test.mjs | sort`. Ports are hardcoded, so **two suites cannot run on one machine at the same time**: a second run steals the ports and fails as a timeout that looks like a code bug.
 - **Black-box**: tests drive **real processes through the WebSocket wire protocol**, never application internals, so they survive refactoring and language rewrites. The PTY frame codec in `harness.mjs` is **intentionally inline pure JS**, importing no application code, to remain independent of the system under test.
 - `startStack()` launches an independent **TS server (tsx) and Rust supervisor daemon**, which spawns the Rust worker. It waits for the daemon to come online before returning control handles. `Client` is a test WS client with `waitFor`; `mkRepo()` creates temporary Git repositories.
 - Default daemon binaries: `target/debug/coflux-{supervisor,worker}` (built by `pretest`). Override them with `COFLUX_SUPERVISOR_BIN` / `COFLUX_WORKER_BIN`.

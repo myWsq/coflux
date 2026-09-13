@@ -79,7 +79,7 @@ WS `device.authorizeInfo{ token }` / `device.authorize{ token }`, still used by 
 
 ### Invalidation conditions
 
-Black-box assertions are in `tests/src/authorize.test.mjs`.
+Black-box coverage of this flow was removed on 2026-09-13; acceptance is manual.
 
 - **Single use**: successful `device.authorize` immediately removes the token from the pending map. Reuse returns `device.authorizeInfo{ ok:false }`.
 - **TTL**: default 10 minutes, controlled by `COFLUX_AUTHORIZE_TTL_MS`, with active `setTimeout` cleanup. Expired tokens are treated as nonexistent, revealing no distinction between expired and never-existing tokens. The server silently removes them without notification or disconnection. **The worker renews links**: it tracks `expiresAt` and, if still unenrolled at expiry, resends `daemon.enrollRequest` on the same connection. A new `daemon.authorizePending` overwrites pending-auth.json, and cofluxd polling prints the new link. While the daemon remains alive, users receive fresh links; old links become invalid immediately at expiry.
@@ -100,7 +100,7 @@ States and copy (all three pages share account/password fields and an invalid-cr
 - Consent: missing `request` asks the user to restart authorization from the host because the request ID is absent. Invalid/expired requests show Authorization Request Unavailable. Confirmation identifies the requesting application, callback host, and scope, with Allow Access and Deny. Both decisions return 302 to the server-calculated host callback URL.
 - Preview gate: missing/malformed `to` shows Invalid Preview Link; only shape is checked before login. Successful login issues a one-time code and returns 302 to the preview-domain callback, which sets its cookie there, matching WS `proxyIssueAuth`. Missing previews or ownership mismatches show Cannot Open Preview with a reason.
 
-All interpolated values are escaped: device names/hosts/platforms, application names/callback hosts/scopes, and echoed tokens/request IDs. Responses use `Cache-Control: no-store`, `X-Frame-Options: DENY`, and CSP `default-src 'none'`. Page sessions and CSRF keys exist only in memory under the single-instance assumption, like `pendingAuthorizations` / `ProxyGate`. HTTP-flow black-box cases live in `tests/src/authorize.test.mjs`, `mcp-oauth.test.mjs`, and `proxy.test.mjs`.
+All interpolated values are escaped: device names/hosts/platforms, application names/callback hosts/scopes, and echoed tokens/request IDs. Responses use `Cache-Control: no-store`, `X-Frame-Options: DENY`, and CSP `default-src 'none'`. Page sessions and CSRF keys exist only in memory under the single-instance assumption, like `pendingAuthorizations` / `ProxyGate`. The HTTP-flow black-box cases were removed on 2026-09-13; acceptance is manual.
 
 ## OAuth clients (MCP, plan 090)
 
@@ -135,7 +135,7 @@ on expiry: POST /oauth/token (refresh_token) → new access + refresh; old refre
 
 ### Validation and invalidation
 
-Black-box assertions are in `tests/src/mcp-oauth.test.mjs` and `mcp-isolation.test.mjs`.
+Black-box coverage of this flow was removed on 2026-09-13; acceptance is manual.
 
 - **redirect_uri**: loopback `http://localhost`, `127.0.0.1`, and `[::1]` permit arbitrary ports/paths under RFC 8252; Claude Code chooses a random callback port each time. Non-loopback redirects must exactly match registered values. Invalid client_id/redirect_uri returns 400 without redirecting to an unvalidated address. Other invalid parameters return an `error` to the host according to the specification.
 - **PKCE S256 is mandatory**: verifier mismatch returns `invalid_grant`.

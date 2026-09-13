@@ -283,7 +283,7 @@ Reproducible benchmark on 2026-07-25: Apple M1 Pro, `a3592ff` debug daemon, defa
 | Device attach + fresh xterm 6 parsing to usable screen | 64.820 ms | < 100 ms |
 | Relay-frame increase on timed direct path | 0 | = 0 |
 
-Since plan 043 removed relay frames from central control WS, the last metric observes bidirectional relay-transport frame counts through `relayFrameSnapshot` in `tests/src/local-first-benchmark.mjs`. Its meaning is unchanged: zero relay involvement in the timed direct hot path.
+Since plan 043 removed relay frames from central control WS, the last metric observes bidirectional relay-transport frame counts through `relayFrameSnapshot` in the local-first benchmark (removed 2026-09-13; see Git history). Its meaning is unchanged: zero relay involvement in the timed direct hot path.
 
 A second run on `a89476b`, also 2026-07-25, measured echo p95 0.771ms, attach p95 59.838ms, and zero central-frame increase; all SLOs still passed within normal sampling variation.
 

@@ -195,46 +195,8 @@ jobs:
       - name: npm latest 发布门自检（SemVer/幂等/防回退）
         run: node scripts/npm-publish-guard.mjs --self-check
 
-      - name: 黑盒集成测试（pretest 构建 daemon，跑全量）
-        # 4 vCPU runner 上每路 stack = tsx server + supervisor + worker + native helper + DERP，4 路会挤压固定超时的用例；2 路稳。
+      # 保留的黑盒只剩三块手动验收发现不了的：协议 wire 契约、发布签名/升级信任链、热升级回滚。
+      - name: 黑盒核心（wire 契约 / 签名信任链 / 热升级回滚）
         env:
           COFLUX_TEST_CONCURRENCY: "2"
         run: pnpm -C tests test
-
-      # Package.swift 在 Linux 仅暴露跨平台 Protocol/Core；ApplePlatform 由下方
-      # macOS + iOS SDK 的 xcodebuild 门覆盖，避免用假 stub 获得虚假的 Linux 绿灯。
-      - uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2
-        with:
-          # swift-protobuf 1.38.1 的 package tools version 已要求 Swift 6.2。
-          swift-version: "6.2"
-
-      - name: Swift 协议与 client core 测试
-        run: swift test --package-path packages/swift-client --parallel
-
-  ios-build:
-    name: iOS build-for-testing
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.checkout_ref || github.sha }}
-          fetch-depth: 0
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-
-      - name: macOS cofluxd doctor fixture
-        run: node --test tests/src/cli-doctor.test.mjs
-
-      - name: iOS app + tests 编译门（ApplePlatform 真 SDK）
-        run: |
-          xcodebuild \
-            -project apps/ios/Coflux.xcodeproj \
-            -scheme Coflux \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$RUNNER_TEMP/CofluxDerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            build-for-testing
