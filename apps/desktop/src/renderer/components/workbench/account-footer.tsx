@@ -113,7 +113,7 @@ export function AccountFooter({
             "group h-auto min-w-0 flex-1 justify-start rounded-md px-1.5 py-1 text-left hover:bg-none active:bg-none aria-expanded:bg-none",
           children: (
             <span className="flex min-w-0 items-center gap-2">
-              <Avatar name={identity.avatarName} size="xsmall" />
+              <Avatar name={identity.avatarName} size="sm" />
               <span className={identityClassName(identity.isPlaceholder)} title={identity.label}>
                 {identity.label}
               </span>

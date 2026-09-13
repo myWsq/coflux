@@ -23,9 +23,9 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@astryxdesign/cli": "^0.1.6",
-    "@astryxdesign/core": "^0.1.6",
-    "@astryxdesign/theme-neutral": "^0.1.6",
+    "@astryxdesign/cli": "^0.6.0",
+    "@astryxdesign/core": "^0.6.0",
+    "@astryxdesign/theme-neutral": "^0.6.0",
     "@coflux/client": "workspace:*",
     "@coflux/protocol": "workspace:*",
     "@shikijs/langs": "^4.3.1",
@@ -35,6 +35,7 @@
     "@types/node": "^22.10.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^5.2.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
@@ -53,7 +54,6 @@
     "tailwindcss": "^4.3.2",
     "vite": "^6.4.3",
     "yaml": "^2.9.0",
-    "zustand": "^5.0.14",
-    "@types/ws": "^8.5.13"
+    "zustand": "^5.0.14"
   }
 }
