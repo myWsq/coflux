@@ -127,15 +127,19 @@ The recorded deployment used custom home-relay selection. That source has been r
 
 This is also the mainland observation point. Test routing from here: local residential connections may be proxied and distort results.
 
-## Server deployment after native migration prerequisites
+## Server deployment
 
-After the native cutover prerequisites above are satisfied, update the server tag. Web/mobile assets remain frozen but their version-1 remote protocol cannot authenticate to this source:
+The center runs a detached checkout of a release tag. Take a database backup before a deployment carrying a schema migration, since the daily cron backup can be hours old:
 
 ```sh
-ssh root@prod-jp 'cd /opt/coflux && git fetch --tags && git checkout <tag> \
-  && pnpm install --frozen-lockfile \
-  && systemctl restart coflux-server'
+ssh root@prod-jp 'sudo -u postgres pg_dump -Fc -d coflux > /var/backups/coflux/coflux-predeploy-<tag>-$(date +%Y%m%d-%H%M%S).dump'
+ssh root@prod-jp 'cd /opt/coflux && git fetch --tags origin; git checkout <tag>'
+ssh root@prod-jp 'cd /opt/coflux && pnpm install --frozen-lockfile && systemctl restart coflux-server'
 ```
+
+Run the steps separately rather than chaining them with `&&`. Checking out and installing leaves the running service untouched until the restart, so a failure there costs nothing; and `git fetch --tags` exits non-zero whenever an old tag on this host would be clobbered, which silently skips a chained checkout. Confirm afterwards with `git log --oneline -1`, `systemctl is-active coflux-server`, `curl -sS http://127.0.0.1:8787/health`, and the boot lines in `journalctl -u coflux-server`. Migrations run at boot inside one transaction under an advisory lock; `SELECT version, name FROM coflux.schema_migrations ORDER BY version DESC` shows what applied.
+
+**Deploying a tag that contains the native transport additionally requires the prerequisites above**, because that source sets the control protocol floor to 2 and rejects every older client and worker. Tags predating it deploy normally. Web/mobile assets remain frozen, and their version-1 remote protocol cannot authenticate to the native-transport source.
 
 ## Server-rendered browser pages (plan 107)
 

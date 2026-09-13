@@ -202,4 +202,9 @@ The supervisor cannot hot-upgrade because it owns PTYs. Use `cofluxd update` to 
 
 A newly started supervisor takes the greater of its bundled worker's strict SemVer and existing `worker.release-floor` as the initial remote rollback-prevention floor. Both embedded public keys must match; CI rejects drift. **Do not rotate the trust root directly**: old cofluxd/supervisors cannot accept releases signed only with a new key. First design and publish an old-key-authenticated dual-trust/handover release, then switch signing keys. Editing the two hex files alone is insufficient.
 
-> **After release, remember:** hot upgrades cover only workers. If a release includes supervisor fixes (check `git diff <previous-tag>..HEAD -- crates/supervisor`), run `cofluxd update` on each daemon machine; otherwise those fixes never reach production supervisors.
+> **After release, remember:** hot upgrades cover only workers, so a release touching the Supervisor (check `git diff <previous-tag>..HEAD -- crates/supervisor`) reaches devices only after each one restarts its runtime. The path differs per platform, and `coflux device list` shows which devices still run an older `supervisorVersion`:
+>
+> - **macOS through Coflux.app**: nothing to run by hand. The app updates itself, notices that its bundled Supervisor outranks the running one, and reports `update-ready`; the user confirms the runtime restart when their terminals can end. `cofluxd` is not involved — see [Bundled daemon](#bundled-daemon-desktop-releases-include-rust-components-and-the-go-helper).
+> - **Linux and other headless hosts**: `cofluxd update`, then `cofluxd restart` once tasks finish.
+>
+> Devices installed before the app bundled its runtime may still run an old npm-installed service; migrating those is an app prompt, not a release step.
