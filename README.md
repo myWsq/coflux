@@ -20,13 +20,14 @@
 
 Coflux brings local and remote terminals into a single desktop workspace. Sign in on your Macs, connect a Linux development machine, and work across them with the same account. Your code and terminal processes stay on the machine where they run.
 
-Coding agents use the same capabilities through `coflux`: create a workspace, open a terminal, read its output, send input, and ask you to take over. Their work stays visible in the app.
+Coding agents use the same capabilities through `coflux`: create a workspace, open a terminal, read its output, send input, and ask you to take over. They can also hand a bounded sub-task to the built-in executor, which works inside the originating workspace under a kernel sandbox. Their work stays visible in the app.
 
 ### Built around real terminals
 
 - **Install the app and get to work.** The macOS app includes its runtime and CLI. No separate Node.js, CLI, or background-service installation is needed.
 - **Reach your development machines.** Connect a Linux host or another Mac and operate its workspaces and terminals from the same account.
 - **Give agents tools you can see.** Claude Code, Codex, and other terminal tools run in real PTYs. Agents can share progress and hand control back to you.
+- **Get called when it matters.** An agent's explicit notification lands in an account-wide inbox, reaches you on whichever device you are using, and takes you to the terminal it came from.
 - **Keep sessions through client updates.** App updates reconnect to the running terminal runtime. Network-facing runtime updates preserve terminal processes too.
 - **Work directly when possible.** Local connections use loopback; remote connections use the embedded Tailcat/Tailscale stack, with self-hosted DERP fallback.
 
@@ -76,6 +77,8 @@ coflux terminal wait <terminal-id>                      # blocks until that comm
 coflux terminal read <terminal-id>                      # the tail of the terminal's scrollback
 coflux terminal close <terminal-id>
 coflux progress "Tests passed; reviewing the diff."
+coflux executor run --prompt "Fix every clippy warning in crates/worker" --write
+coflux notify "The migration needs your decision."
 
 # From a separately installed CLI: sign in, then reach another workspace.
 # Supply the password through stdin, not a command-line argument.
@@ -161,7 +164,7 @@ Desktop, CLI, and runtime releases share **one version number** and one `vX.Y.Z`
 
 Bug reports and focused pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before making changes, and use [private vulnerability reporting](https://github.com/myWsq/coflux/security/advisories/new) for security issues.
 
-[Release notes](docs/releases/1.0.0.md) · [Release process](docs/RELEASING.md) · [Roadmap](docs/ROADMAP.md)
+[Release notes](docs/releases/README.md) · [Release process](docs/RELEASING.md) · [Roadmap](docs/ROADMAP.md)
 
 ## License
 

@@ -73,7 +73,9 @@ Pre-release checklist:
 1. Work locally on `main` with `HEAD == origin/main`. Release metadata performs the same hard check after a fresh fetch. This prevents accidentally tagging an old/divergent commit; it does not replace the `v*` rulesets.
 2. **Main CI must be green.** `ci.yml` is the quality gate; black-box tests rely on its Postgres service.
 3. Run `pnpm release:version X.Y.Z` to synchronize root, desktop, and CLI versions, then commit and merge into main. `pnpm release:check vX.Y.Z` verifies consistency. Root `package.json.version` is the sole product-version source. npm publication remains automatic after the complete release succeeds. There is no separate manual publication entry point: retry the same npm workflow after failure rather than independently bumping the CLI.
-4. Ensure no `release` / `npm-publish` workflow is running or pending. Push one tag at a time, waiting for both GitHub Release and downstream npm workflows to finish before releasing the next version.
+4. Commit `docs/releases/X.Y.Z.md` together with the version bump, and add it to the [release notes index](releases/README.md). CI reads the notes file named after the current product version, so a missing file fails main.
+5. Ensure no `release` / `npm-publish` workflow is running or pending. Push one tag at a time, waiting for both GitHub Release and downstream npm workflows to finish before releasing the next version.
+6. **Keep main still until npm publication finishes.** The npm gate runs `ci.yml` **from the default branch** against the **release commit**, so a change merged into main between the tag and the gate is applied to an older tree. A `ci.yml` step calling a script that the release commit does not contain fails the gate and skips publication. Merge substantial pull requests after the release completes.
 
 ```sh
 git fetch --prune origin
@@ -103,6 +105,15 @@ A `v*` tag triggers `.github/workflows/release.yml`:
 > **P2 / TODO: npm old-run idempotency versus fail-closed behavior.** `npm-publish-guard.mjs` strictly validates registry `dist-tags.latest` and its corresponding version entries before checking whether the requested version already exists. If latest is missing/corrupt, an old run fails even when its exact version exists, rather than skipping idempotently. This is intentional fail-closed behavior: the guard lacks reliable context proving it is only an old-release replay. Moving the exact-existing check ahead of latest validation could silently accept a new CLI release when registry state is invalid. Diagnose/repair npm latest manually first; relax this only after adding verifiable rerun context and corresponding negative tests.
 
 `ci.yml` gates pushes/PRs to main: type checks and desktop build, Rust tests/build with `-D warnings`, the full real-process black-box suite, and Swift/iOS build checks.
+
+### Recovering a failed npm publication
+
+Re-run `npm-publish` after a transient failure. Understand its two properties first, because they decide whether a re-run can work at all:
+
+- The gate reuses `ci.yml` **from the default branch** with `checkout_ref` pinned to the release commit. The workflow definition and the code under test therefore come from different trees, and a step that depends on code newer than the release commit breaks the gate for every older tag. Steps like this must degrade when the checked-out tree lacks what they call, as the protocol breaking check does.
+- **GitHub re-runs a workflow with the workflow files captured for the original run.** Repairing `ci.yml` on main does not change a re-run of an existing `npm-publish` run. The repair only reaches a **new** run, and the sole trigger for one is a successful `release` run.
+
+So a gate failure caused by workflow/code mismatch cannot be recovered by re-running, and re-running the `release` workflow is not a remedy either: it rebuilds and re-signs artifacts already published under that tag, and the desktop update feed rejects content changes for a version it already carries. Record the gap and let the next release restore npm, as [1.2.0](releases/1.2.0-publication.md) did; a version-pinned `npm install -g cofluxd@X.Y.Z` line in that release's notes must be corrected, since the registry has no such version. Adding a standalone publication entry point is a deliberate change to the release authorization model, not a routine fix.
 
 ## Electron desktop releases
 
