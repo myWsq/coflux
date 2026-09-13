@@ -10,3 +10,4 @@
 | [Interactive-only terminals with do-script semantics](20260912-interactive-terminal-model.md) | DONE, merged into main (2026-09-12); real-machine acceptance with a packaged daemon is pending the user | subagent fable | None; a later plan covers notify targeting a terminal and desktop tab landing |
 | [Executor engine and transport](20260912-executor-engine.md) | DONE, merged into main (2026-09-12); not released; user acceptance on a real machine pending | subagent opus | None |
 | [Reconcile the executor engine branch with main 1.0.0](20260912-executor-reconcile.md) | DONE, merged into main (2026-09-12): `coflux executor run` on both CLIs; cancellation bound to confirmed runtime stops; SKILL re-grafted at plugin 0.15.0 | subagent opus | Executor engine plan |
+| [Lift the desktop design system from astryx 0.1.6 to 0.6.0](20260913-astryx-0-6-0.md) | IN_PROGRESS | self | None |
