@@ -16,7 +16,7 @@
 - Risk: MED — touches the daemon wire protocol and widens what an account token can reach without a visible terminal
 - Depends on: none
 - Category: feature
-- Execution: deferred — the user asked for a plan only, so no executor was selected
+- Execution: subagent opus (user decision at the departure check); verification and code review by the orchestrator
 - Stop after: implementation — the user answered "继续" to an offer to execute the plan, superseding the earlier plan-only endpoint
 - Workspace: isolated — `.claude/worktrees/20260913-device-exec`, branch `dev/20260913-device-exec`, cut from main `ee711cc5` with a clean tree
 - Planned at: `ee711cc5`, 2026-09-13
