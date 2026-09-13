@@ -22,6 +22,14 @@ const HELP: &str = "账号命令（JSON 输出）：
   coflux login --username <账号> --password-stdin [--server https://…]
   coflux whoami | logout
   coflux device list | project list | workspace list
+  coflux device exec <deviceId> --cmd=\"<命令>\" [--cwd=<目录>] [--timeout=<秒>]
+                          在另一台设备上跑一条命令并拿回结果，语义同 ssh host \"cmd\"：命令交给远端
+                          sh -c（管道、&& 、重定向、通配、$VAR 都有效），stdout 与 stderr 分开回带，
+                          最后一行是 # exit=<code>，进程退出码透传远端（本命令自己失败时为 255）。
+                          **这不是终端**：没有 PTY、不进用户侧栏、不占工作区的终端并发额度、不需要
+                          任何工作区。--cwd 默认 daemon 用户的 HOME，只接受绝对路径或 ~ 开头的路径；
+                          --timeout 默认 60 秒、最长 600 秒；没有 stdin。要输密码、驱动 TUI，或想让
+                          用户看见过程并能接管的长任务，用 coflux terminal new，不要用它
   coflux workspace new --project <id> --branch <分支> [--existing-branch]
   coflux workspace rename <id> --name <名称> | workspace remove <id>
   coflux terminal new --workspace <id> [--cmd <命令>] [--title <标题>]
@@ -125,7 +133,7 @@ mod tests {
 
     #[test]
     fn help_keeps_agent_phrases_used_by_skill_docs() {
-        for phrase in ["coflux terminal new", "coflux terminal run <taskId>", "coflux terminal wait <taskId>", "coflux terminal read <taskId>", "coflux terminal close <taskId>", "coflux notify", "coflux progress", "coflux ports", "coflux workspace locate", "coflux executor run", "coflux hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS"] {
+        for phrase in ["coflux terminal new", "coflux terminal run <taskId>", "coflux terminal wait <taskId>", "coflux terminal read <taskId>", "coflux terminal close <taskId>", "coflux notify", "coflux progress", "coflux ports", "coflux workspace locate", "coflux executor run", "coflux hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS", "coflux device exec <deviceId>"] {
             assert!(HELP.contains(phrase), "HELP 缺 {phrase}");
         }
     }

@@ -529,6 +529,14 @@ agent 命令的环境变量：COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等�
   coflux login --username <账号> --password-stdin [--server https://…]
   coflux whoami | logout
   coflux device list | project list | workspace list
+  coflux device exec <deviceId> --cmd="<命令>" [--cwd=<目录>] [--timeout=<秒>]
+                          在另一台设备上跑一条命令并拿回结果，语义同 ssh host "cmd"：命令交给远端
+                          sh -c（管道、&&、重定向、通配、$VAR 都有效），stdout 与 stderr 分开回带，
+                          最后一行是 # exit=<code>，进程退出码透传远端（本命令自己失败时为 255）。
+                          **这不是终端**：没有 PTY、不进用户侧栏、不占工作区的终端并发额度、不需要
+                          任何工作区。--cwd 默认 daemon 用户的 HOME，只接受绝对路径或 ~ 开头的路径；
+                          --timeout 默认 60 秒、最长 600 秒；没有 stdin。要输密码、驱动 TUI，或想让
+                          用户看见过程并能接管的长任务，用 coflux terminal new，不要用它
   coflux workspace new --project <id> --branch <分支> [--existing-branch]
   coflux workspace rename <id> --name <名称> | workspace remove <id>
   coflux terminal new --workspace <id> [--cmd <命令>]
@@ -556,6 +564,8 @@ const { values, positionals } = parseArgs({
     lines: { type: "string" },
     timeout: { type: "string" },
     seq: { type: "string" },
+    // `device exec`: the working directory on the remote device (absolute, or a `~` prefix).
+    cwd: { type: "string" },
     text: { type: "string" },
     // executor: the only free-form input is the prompt; the model is configured once in Coflux.app.
     prompt: { type: "string" },

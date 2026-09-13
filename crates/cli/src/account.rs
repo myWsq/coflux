@@ -120,6 +120,53 @@ fn id(args: &ParsedArgs) -> Result<&str, String> {
     args.positional(2).ok_or_else(|| "缺少目标 ID".into())
 }
 
+/// `device exec` 自身失败（够不到设备、参数错、超时）用的退出码，ssh 的约定：远端退出码占满
+/// 0-254，255 留给「命令根本没跑成」。别的账号命令仍走 [`crate::die`] 的 1。
+const EXEC_CLI_FAILURE: i32 = 255;
+/// exec 的默认超时（秒）；上限由中心与设备各自钳制在 600。
+const EXEC_DEFAULT_TIMEOUT_SECS: &str = "60";
+
+/// 跑一次 `coflux device exec`，返回要透传的远端退出码。
+fn device_exec(
+    args: &ParsedArgs,
+    call: &dyn Fn(Value) -> Result<Value, String>,
+) -> Result<i32, String> {
+    let device_id = args
+        .positional(2)
+        .filter(|value| !value.is_empty())
+        .ok_or("缺少设备 ID（coflux device list 可以看到）")?;
+    let command = required(args, "cmd")?;
+    let timeout = args
+        .string("timeout")
+        .unwrap_or(EXEC_DEFAULT_TIMEOUT_SECS)
+        .parse::<u32>()
+        .map_err(|_| "--timeout 必须是整数秒")?;
+    // 上限在这里就说清楚，别让中心的入参校验回一句「请求失败」。
+    if !(1..=600).contains(&timeout) {
+        return Err("--timeout 取 1-600 秒；更久、或需要用户看见的长任务请改用 coflux terminal new".into());
+    }
+    let value = call(json!({
+        "op": "device.exec",
+        "deviceId": device_id,
+        "command": command,
+        "cwd": args.string("cwd").unwrap_or(""),
+        "timeout": timeout,
+    }))?;
+    let exit_code = value["exitCode"]
+        .as_i64()
+        .ok_or("设备回执缺少退出码（中心版本过旧？）")?;
+    // 顺序固定：stdout、stderr、`# exit=`；每段写完就 flush，终端里的先后次序才与远端一致。
+    let mut out = io::stdout().lock();
+    let _ = out.write_all(value["stdout"].as_str().unwrap_or("").as_bytes());
+    let _ = out.flush();
+    let mut err = io::stderr().lock();
+    let _ = err.write_all(value["stderr"].as_str().unwrap_or("").as_bytes());
+    let _ = err.flush();
+    let _ = writeln!(out, "# exit={exit_code}");
+    let _ = out.flush();
+    Ok(exit_code as i32)
+}
+
 pub fn handles(args: &ParsedArgs) -> bool {
     match args.positional(0).unwrap_or("") {
         "login" | "logout" | "whoami" | "device" | "project" => true,
@@ -177,11 +224,13 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.to_string()),
     };
-    let timeout = if command == "terminal" && args.positional(1) == Some("wait") {
-        610
-    } else {
-        40
-    };
+    // `terminal wait` 与 `device exec` 都可能在中心侧阻塞到 600 秒；HTTP 超时必须给它们让路，
+    // 否则 `--timeout=300` 会先在 CLI 这一侧被切断。其余账号操作 40 秒足够。
+    let long_running = matches!(
+        (command, args.positional(1)),
+        ("terminal", Some("wait")) | ("device", Some("exec"))
+    );
+    let timeout = if long_running { 610 } else { 40 };
     let call = |operation: Value| -> Result<Value, String> {
         if let Some(session) = &session {
             let server = origin(session["server"].as_str().ok_or("CLI 服务器记录无效")?)?;
@@ -217,6 +266,19 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
         println!("{}", json!({"loggedOut":true}));
         return Ok(());
     }
+    // `device exec`：一次性跨设备执行，ssh 语义——不是终端，所以输出也不是 JSON：stdout 进
+    // stdout、stderr 进 stderr（两条流始终分开），最后一行 `# exit=<code>`，进程退出码**透传
+    // 远端**。本 CLI 自身的失败（设备离线、能力缺失、cwd 不对、超时、参数错）一律 255，这样
+    // 调用方的 shell 判断能把「远端命令返回 1」与「根本没跑成」分开——其余命令仍用 die 的 1。
+    if command == "device" && args.positional(1) == Some("exec") {
+        match device_exec(args, &call) {
+            Ok(code) => std::process::exit(code),
+            Err(message) => {
+                eprintln!("✗ {message}");
+                std::process::exit(EXEC_CLI_FAILURE);
+            }
+        }
+    }
     let sub = args.positional(1).unwrap_or("list");
     let operation = match (command, sub) {
         ("workspace", "new") => {
@@ -228,6 +290,9 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
         ("workspace", "remove") => json!({"op":"workspace.remove","workspaceId":id(args)?}),
         ("terminal", "new") => {
             json!({"op":"terminal.new","workspaceId":required(args,"workspace")?,"title":args.string("title").unwrap_or(""),"command":args.string("cmd").unwrap_or("")})
+        }
+        ("terminal", "run") => {
+            json!({"op":"terminal.run","terminalId":id(args)?,"command":required(args,"cmd")?})
         }
         ("terminal", "read") => {
             json!({"op":"terminal.read","terminalId":id(args)?,"lines":args.string("lines").unwrap_or("200").parse::<u32>().map_err(|_| "--lines 必须是整数")?})

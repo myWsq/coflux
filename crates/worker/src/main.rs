@@ -132,11 +132,15 @@ pub(crate) type WsOut = Vec<u8>;
 /// 能力名是协议契约的一部分：新增控制消息时同步加名字，并与 apps/server 的常量保持一致。
 const CAPABILITY_PREPARED_EXECUTE: &str = "prepared_execute";
 const CAPABILITY_TERMINAL_IO: &str = "terminal_io";
+/// Knows ServerExecRun: one-shot `sh -c` execution on this device (`coflux device exec`), which is
+/// deliberately not a Terminal. Paired with DAEMON_CAPABILITY_DEVICE_EXEC in apps/server.
+const CAPABILITY_DEVICE_EXEC: &str = "device_exec";
 
 fn daemon_capabilities() -> Vec<String> {
     let mut capabilities = vec![
         CAPABILITY_PREPARED_EXECUTE.to_string(),
         CAPABILITY_TERMINAL_IO.to_string(),
+        CAPABILITY_DEVICE_EXEC.to_string(),
     ];
     if std::env::var("COFLUX_TRANSPORT_PAIR").as_deref() == Ok("1") {
         capabilities.push("transport_pair_v1".into());
@@ -1742,8 +1746,9 @@ async fn on_server_message(
                     server_to_daemon::Payload::PreparedDeviceOperationExecute(execute) => {
                         device.execute_prepared_operation(&execute.operation_id);
                     }
-                    // 中心发起的终端读/写（plan 091）：读日志/快照或经 agent_send_input 正门写入，
-                    // 可能等 sessiond 回执（最长 5s），另开 task 以免阻塞消息循环；每条必回一条 result。
+                    // 中心发起的终端读/写（plan 091）与一次性 exec（`coflux device exec`）：读日志/
+                    // 快照、经 agent_send_input 正门写入，或在某目录下跑一条 `sh -c`。都可能长时间
+                    // 等待（exec 最长 600s），另开 task 以免阻塞消息循环；每条必回一条 result。
                     server_to_daemon::Payload::ServerAgentRequest(request) => {
                         let device = device.clone();
                         let state = state.clone();

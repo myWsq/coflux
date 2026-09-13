@@ -10,6 +10,8 @@
 export const DAEMON_CAPABILITY_PREPARED_EXECUTE = "prepared_execute";
 /** 认识 ServerAgentRequest：中心可经 daemon 读命令日志/快照、往终端写输入。 */
 export const DAEMON_CAPABILITY_TERMINAL_IO = "terminal_io";
+/** 认识 ServerExecRun：中心可在该设备上一次性执行一条 `sh -c` 命令（`coflux device exec`，不是终端）。 */
+export const DAEMON_CAPABILITY_DEVICE_EXEC = "device_exec";
 
 /** 写 tool 在缺失能力时返回的可读错误；SKILL/文档里以「需要升级」一词指代它。 */
 export function daemonUpgradeRequired(deviceName: string): string {

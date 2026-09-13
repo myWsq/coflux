@@ -10,10 +10,36 @@ import { openNativeDevice } from "./device-harness.mjs";
 
 const PORT = 8826;
 let stack;
+let accountToken;
 const repos = [];
 
-before(async () => { stack = await startStack({ port: PORT }); });
+before(async () => {
+  stack = await startStack({ port: PORT });
+  // 一次登录复用给本文件的账号操作（密码登录有来源限速，别一条用例一次）。
+  const login = await fetch(`http://127.0.0.1:${PORT}/api/client/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ protocolVersion: 1, username: "admin", password: "admin" }),
+  });
+  const body = await login.json();
+  assert.equal(body.ok, true, `账号登录失败：${body.error ?? login.status}`);
+  accountToken = body.value.token;
+});
 after(async () => { await stack?.stop(); repos.forEach((r) => r.cleanup()); });
+
+/** 一条账号操作（`/api/client/command`），原样回带 `{ ok, value | error }`。 */
+async function accountCommand(command) {
+  const response = await fetch(`http://127.0.0.1:${PORT}/api/client/command`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${accountToken}` },
+    body: JSON.stringify({ protocolVersion: 1, command }),
+  });
+  return await response.json();
+}
+/** `coflux device exec` 的中心入口。 */
+function deviceExec(fields) {
+  return accountCommand({ op: "device.exec", deviceId: stack.daemonId, ...fields });
+}
 
 // 在一个 workspace 里发请求并等回带（按 requestId 关联）的辅助
 async function importWorkspace(device) {
@@ -214,4 +240,68 @@ test("fs：root 内指向 root 外的符号链接被拒（realpath 锚定）", a
   assert.equal(read.ok, false, "指向 root 外的符号链接被拒");
   rmSync(outside, { recursive: true, force: true });
   device.close();
+});
+
+// ===== device exec：中心发起的一次性跨设备执行（不是终端）=====
+// 与上面那组 exec 用例相反方向：上面是 browser→daemon 的本地 DeviceEnvelope 通道，这里是
+// 账号 API→中心→daemon 的 ServerAgentRequest 通道。两条通道的协议契约都只能靠本文件盯住。
+
+test("device exec：命令交给远端 sh -c，stdout/exitCode 结构化回带", async () => {
+  const r = await deviceExec({ command: "cd /tmp && pwd && printf 'SUM %s\\n' $((6*7))" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.value.exitCode, 0);
+  // `cd … && …` 只有经 shell 才跑得通；直接 execve 会以「cd 不是可执行文件」失败。
+  assert.match(r.value.stdout, /\/tmp/);
+  assert.match(r.value.stdout, /SUM 42/);
+  assert.equal(r.value.stderr, "");
+});
+
+test("device exec：cwd 缺省为 daemon 用户的 HOME，~ 前缀被展开", async () => {
+  const home = await deviceExec({ command: "pwd" });
+  assert.equal(home.ok, true, home.error);
+  assert.equal(home.value.exitCode, 0);
+  assert.ok(home.value.cwd.startsWith("/"), `回带绝对 cwd：${home.value.cwd}`);
+  assert.equal(home.value.stdout.trim(), home.value.cwd);
+
+  const tilde = await deviceExec({ command: "pwd", cwd: "~" });
+  assert.equal(tilde.ok, true, tilde.error);
+  assert.equal(tilde.value.cwd, home.value.cwd, "~ 与缺省指向同一个 HOME");
+});
+
+test("device exec：两条流分开，非零退出码如实回带", async () => {
+  const r = await deviceExec({ command: "echo out; echo err 1>&2; exit 3" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.value.exitCode, 3);
+  assert.equal(r.value.stdout.trim(), "out");
+  assert.equal(r.value.stderr.trim(), "err", "stderr 不被混进 stdout");
+});
+
+test("device exec：cwd 不存在 / 不是目录 / 不是绝对路径，各回一句可读的话", async () => {
+  const missing = await deviceExec({ command: "pwd", cwd: "/definitely-not-here-coflux-exec" });
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /不存在/);
+
+  const notDir = await deviceExec({ command: "pwd", cwd: "/etc/hosts" });
+  assert.equal(notDir.ok, false);
+  assert.match(notDir.error, /不是目录/);
+
+  const relative = await deviceExec({ command: "pwd", cwd: "logs" });
+  assert.equal(relative.ok, false);
+  assert.match(relative.error, /绝对路径/);
+});
+
+test("device exec：超时是确定的失败（远端进程被杀），不是静默截断", async () => {
+  const r = await deviceExec({ command: "sleep 30", timeout: 1 });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /超时/);
+});
+
+test("device exec：不是终端——跑完之后账号快照里没有多出任何 task", async () => {
+  const before = await accountCommand({ op: "snapshot" });
+  assert.equal(before.ok, true, before.error);
+  const r = await deviceExec({ command: "true" });
+  assert.equal(r.ok, true, r.error);
+  const after = await accountCommand({ op: "snapshot" });
+  assert.equal(after.ok, true, after.error);
+  assert.equal(after.value.terminals.length, before.value.terminals.length, "exec 不产生 task 记录");
 });

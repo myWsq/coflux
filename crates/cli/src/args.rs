@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 const STRING_OPTIONS: &[&str] = &[
     "username", "workspace", "device", "project", "branch", "server", "name", "title", "cmd", "lines", "timeout", "text", "seq",
+    // `device exec`: the working directory on the remote device (absolute, or a `~` prefix).
+    "cwd",
     // executor: the only free-form input is the prompt; the model is configured once in Coflux.app.
     "prompt",
 ];
@@ -154,6 +156,26 @@ mod tests {
             "选项 '--cmd <value>' 缺参数"
         );
         assert_eq!(parse(argv(&["--enter=1"])).unwrap_err(), "选项 '--enter' 不接受参数");
+    }
+
+    /// `device exec` 的三个选项都必须在选项表里：漏一个不是「该参数被忽略」，而是整条命令
+    /// 以「未知选项」失败。
+    #[test]
+    fn device_exec_options_are_in_the_table() {
+        let parsed = parse(argv(&[
+            "device",
+            "exec",
+            "d1",
+            "--cmd=cd /opt && ls | wc -l",
+            "--cwd=~/logs",
+            "--timeout",
+            "300",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.positionals, vec!["device", "exec", "d1"]);
+        assert_eq!(parsed.string("cmd"), Some("cd /opt && ls | wc -l"));
+        assert_eq!(parsed.string("cwd"), Some("~/logs"));
+        assert_eq!(parsed.string("timeout"), Some("300"));
     }
 
     #[test]

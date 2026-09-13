@@ -2214,7 +2214,8 @@ pub struct DaemonAuth {
     /// worker 宣告的控制面能力名（plan 091）。中心按能力名而非版本号做门禁：dev/测试的 worker
     /// 上报 `builtin`，自动升级也刻意不做 semver 比较。旧 worker 不发此字段 → 自然被挡。
     /// 现有能力名：`prepared_execute`（认识 PreparedDeviceOperationExecute）、
-    /// `terminal_io`（认识 ServerAgentRequest 的读/写）。新增控制消息时同步加能力名。
+    /// `terminal_io`（认识 ServerAgentRequest 的读/写）、`device_exec`（认识 ServerExecRun，
+    /// 一次性跨设备执行）。新增控制消息时同步加能力名。
     #[prost(string, repeated, tag="5")]
     pub capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
@@ -2676,7 +2677,7 @@ pub struct ServerTerminalInput {
 pub struct ServerAgentRequest {
     #[prost(string, tag="1")]
     pub request_id: ::prost::alloc::string::String,
-    #[prost(oneof="server_agent_request::Payload", tags="10, 11, 12, 13")]
+    #[prost(oneof="server_agent_request::Payload", tags="10, 11, 12, 13, 14")]
     pub payload: ::core::option::Option<server_agent_request::Payload>,
 }
 /// Nested message and enum types in `ServerAgentRequest`.
@@ -2691,6 +2692,9 @@ pub mod server_agent_request {
         TerminalRun(super::ServerTerminalRun),
         #[prost(message, tag="13")]
         TerminalWait(super::ServerTerminalWait),
+        /// One-shot command execution, not a Terminal (see ServerExecRun below).
+        #[prost(message, tag="14")]
+        Exec(super::ServerExecRun),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2747,6 +2751,46 @@ pub struct ServerTerminalWaitResult {
     #[prost(int32, optional, tag="3")]
     pub exit_code: ::core::option::Option<i32>,
 }
+/// ===== One-shot cross-device execution (`coflux device exec`) =====
+///
+/// Deliberately **not** a Terminal: no PTY on the device, no Task record in the center, nothing in
+/// the user's sidebar, no draw on the per-workspace live-terminal cap, and no dependency on the
+/// shell's OSC 133 prompt-ready mark. Semantics follow `ssh host "cmd"`: one buffered request, one
+/// buffered result. Long jobs whose progress the user should watch belong to a Terminal instead.
+///
+/// Note this deliberately carries a bare `cwd` rather than DeviceExecRun's `workspace_id`: exec is a
+/// device-level primitive that exists to be free of workspace semantics, so the worker never
+/// consults its WorkspaceList here. That is not a weakening — the command string is handed to the
+/// remote `sh -c`, so an authenticated account token can `cd` anywhere regardless.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerExecRun {
+    /// Handed verbatim to the remote `sh -c`: pipes, `&&`, redirection, globs and `$VAR` all work,
+    /// and quoting is the caller's responsibility.
+    #[prost(string, tag="1")]
+    pub command: ::prost::alloc::string::String,
+    /// Absolute path, or a `~` prefix the worker expands; empty = the daemon user's HOME. The worker
+    /// answers readably when it does not exist or is not a directory, instead of failing with ENOENT.
+    #[prost(string, tag="2")]
+    pub cwd: ::prost::alloc::string::String,
+    /// Bounded by the worker's own ceiling. A timeout kills the remote process and is a definite
+    /// failure, never a silent truncation.
+    #[prost(uint32, tag="3")]
+    pub timeout_ms: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerExecRunResult {
+    #[prost(int32, tag="1")]
+    pub exit_code: i32,
+    /// The two streams stay separate, each truncated by the worker with an explicit inline marker
+    /// when it exceeds the per-stream byte limit — truncation is never silent.
+    #[prost(string, tag="2")]
+    pub stdout: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub stderr: ::prost::alloc::string::String,
+    /// The cwd the command actually ran in (HOME resolved, `~` expanded); the center logs it.
+    #[prost(string, tag="4")]
+    pub cwd: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ServerAgentResult {
     #[prost(string, tag="1")]
@@ -2755,7 +2799,7 @@ pub struct ServerAgentResult {
     pub ok: bool,
     #[prost(string, optional, tag="3")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(oneof="server_agent_result::Payload", tags="10, 11, 12, 13")]
+    #[prost(oneof="server_agent_result::Payload", tags="10, 11, 12, 13, 14")]
     pub payload: ::core::option::Option<server_agent_result::Payload>,
 }
 /// Nested message and enum types in `ServerAgentResult`.
@@ -2770,6 +2814,8 @@ pub mod server_agent_result {
         TerminalRun(super::ServerTerminalRunResult),
         #[prost(message, tag="13")]
         TerminalWait(super::ServerTerminalWaitResult),
+        #[prost(message, tag="14")]
+        Exec(super::ServerExecRunResult),
     }
 }
 /// worker 观测到某 worktree 的 HEAD 分支变化（真相源：设备上的 worktree，DB 只是镜像）
