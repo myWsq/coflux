@@ -652,17 +652,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
       )}
     >
       <DesktopAttention client={client} bridge={desktop} selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null} />
-      {/* A single action dock stays outside all workspace tab scrollers, including empty views. */}
-      <div
-        role="group"
-        aria-label="终端栏操作"
-        className="absolute right-0 z-30 flex h-9 w-20 items-center justify-center gap-2 border-b border-border bg-background"
-        style={{ top: showReconnectBanner ? 28 : 0, ...NO_DRAG_REGION_STYLE }}
-      >
-        <div aria-hidden className="pointer-events-none absolute inset-y-0 right-full w-6 bg-gradient-to-r from-transparent to-background" />
-        <PortMenu key={activeWorkspaceId ?? "none"} client={client} workspaceId={activeWorkspaceId} />
-        <NotificationInbox client={client} open={notificationOpen} onOpen={() => { setSettingsOpen(false); setNotificationOpen(true); }} onClose={() => setNotificationOpen(false)} onNavigate={navigateNotificationTask} />
-      </div>
       <Sidebar
         client={client}
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
@@ -871,6 +860,23 @@ export function Workbench({ client }: { client: CofluxClient }) {
           onDismiss={persistOnboardingDismissed}
         />
       ) : null}
+
+      {/* 终端栏右上角的操作坞：一份实例服务所有工作区，包括没有顶栏的空态，所以留在标签滚动区外面。
+          它浮在终端顶栏的 `pr-20` 留白上，而那条顶栏整条是窗口拖拽区（plan 108）。Electron 按
+          **文档顺序**合成拖拽区——`drag` 取并集、`no-drag` 取差集——所以本节点必须排在主区之后：
+          放在主区之前时，这里挖出的洞会被随后顶栏的 `drag` 并集重新填平，坞里的按钮收不到
+          click / mouseenter，表现为点不动、Tooltip 也不出（见 drag-region.ts）。位置是 absolute，
+          挪到末尾只改合成与绘制顺序，不影响布局。 */}
+      <div
+        role="group"
+        aria-label="终端栏操作"
+        className="absolute right-0 z-30 flex h-9 w-20 items-center justify-center gap-2 border-b border-border bg-background"
+        style={{ top: showReconnectBanner ? 28 : 0, ...NO_DRAG_REGION_STYLE }}
+      >
+        <div aria-hidden className="pointer-events-none absolute inset-y-0 right-full w-6 bg-gradient-to-r from-transparent to-background" />
+        <PortMenu key={activeWorkspaceId ?? "none"} client={client} workspaceId={activeWorkspaceId} />
+        <NotificationInbox client={client} open={notificationOpen} onOpen={() => { setSettingsOpen(false); setNotificationOpen(true); }} onClose={() => setNotificationOpen(false)} onNavigate={navigateNotificationTask} />
+      </div>
     </div>
   );
 }
