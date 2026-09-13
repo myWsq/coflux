@@ -29,6 +29,11 @@ function broker(home, body, timeout) {
     socket.on("end", () => { try { resolve(unwrap(JSON.parse(text))); } catch (error) { reject(error); } });
   });
 }
+/** 写到底再继续：`device exec` 之后要用远端退出码退出，而 process.exit 会截断写向管道的输出。 */
+function writeAll(stream, text) {
+  if (!text) return Promise.resolve();
+  return new Promise((resolve) => stream.write(text, resolve));
+}
 export function handlesAccountCommand(positionals, flags, home) {
   const [command, sub] = positionals;
   if (["login", "logout", "whoami", "device", "project"].includes(command)) return true;
@@ -59,7 +64,8 @@ export async function runAccountCommand(positionals, flags, home) {
   const session = fs.existsSync(sessionPath) ? JSON.parse(fs.readFileSync(sessionPath, "utf8")) : null;
   const call = (operation) => {
     const body = { protocolVersion: 1, command: operation };
-    const timeout = operation.op === "terminal.wait" ? 610000 : 40000;
+    // `terminal.wait` 与 `device.exec` 都可能在中心侧阻塞到 600 秒；其余账号操作 40 秒足够。
+    const timeout = operation.op === "terminal.wait" || operation.op === "device.exec" ? 610000 : 40000;
     if (!session) {
       if (flags.server) throw new Error("请先登录指定服务器");
       return broker(home, body, timeout);
@@ -75,6 +81,30 @@ export async function runAccountCommand(positionals, flags, home) {
     fs.rmSync(sessionPath);
     print({ loggedOut: true });
     return;
+  }
+  // `device exec`: one-shot cross-device execution, ssh semantics — not a Terminal, so the output is
+  // not JSON either. stdout goes to stdout, stderr to stderr (always separate), the last line is
+  // `# exit=<code>`, and the process exit code is the **remote** one. This CLI's own failures
+  // (device offline, capability missing, bad cwd, timeout, bad arguments) all exit 255, so a caller's
+  // shell test can tell "the remote command returned 1" from "it never ran".
+  if (command === "device" && sub === "exec") {
+    const fail = async (message) => { await writeAll(process.stderr, `✗ ${message}\n`); process.exit(255); };
+    let value;
+    try {
+      if (!id) throw new Error("缺少设备 ID（coflux device list 可以看到）");
+      const cmd = required("cmd");
+      const timeout = Number(flags.timeout ?? 60);
+      if (!Number.isInteger(timeout)) throw new Error("--timeout 必须是整数秒");
+      value = await call({ op: "device.exec", deviceId: id, command: cmd, cwd: flags.cwd ?? "", timeout });
+    } catch (error) {
+      await fail(error.message);
+    }
+    const exitCode = Number(value?.exitCode);
+    if (!Number.isInteger(exitCode)) await fail("设备回执缺少退出码（中心版本过旧？）");
+    await writeAll(process.stdout, String(value.stdout ?? ""));
+    await writeAll(process.stderr, String(value.stderr ?? ""));
+    await writeAll(process.stdout, `# exit=${exitCode}\n`);
+    process.exit(exitCode);
   }
   let operation;
   if (command === "workspace") {

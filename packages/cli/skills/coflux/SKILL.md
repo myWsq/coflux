@@ -1,6 +1,6 @@
 ---
 name: coflux
-description: Use coflux to enter workspaces, open terminals the user can see and take over, run commands in them, wait for those commands, read their scrollback, type into them, report progress, notify the user, obtain preview URLs, and hand a bounded mechanical sub-task to the built-in executor instead of spending your own context on it. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
+description: Use coflux to enter workspaces, open terminals the user can see and take over, run commands in them, wait for those commands, read their scrollback, type into them, run one-shot commands on another device in the account and get their output, report progress, notify the user, obtain preview URLs, and hand a bounded mechanical sub-task to the built-in executor instead of spending your own context on it. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
 ---
 
 # Working inside coflux
@@ -410,6 +410,7 @@ never as a command argument. Account commands return JSON. A workspace ID identi
 
 ```sh
 coflux device list
+coflux device exec <deviceId> --cmd="<command>" [--cwd=<dir>] [--timeout=<seconds>]
 coflux project list --device <deviceId>
 coflux workspace list --device <deviceId>
 coflux workspace new --project <projectId> --branch <branch>
@@ -435,6 +436,41 @@ is immediate), and `stop` is `close`.
 Read before sending; stop immediately when the user takes over. If a write times out, inspect the
 result before retrying. Exiting the CLI does not stop its terminals. Delete workspaces through
 `coflux workspace remove` so the filesystem and workspace records stay consistent.
+
+### Run one command on another machine
+
+```sh
+coflux device exec <deviceId> --cmd="cd /opt/app && git rev-parse HEAD"
+coflux device exec <deviceId> --cmd="systemctl is-active caddy" --cwd=/etc --timeout=10
+```
+
+This is `ssh host "cmd"` for the devices in this account, and it is **not a Terminal**: no PTY on
+the device, nothing in the user's sidebar, no draw on any workspace's terminal cap, and no workspace
+required — a device whose directories were never registered as coflux workspaces is still reachable.
+The command string is handed to the remote `sh -c`, so pipes, `&&`, redirection, globs and `$VAR` all
+work, and quoting is yours to get right.
+
+Its output is not JSON: stdout goes to stdout, stderr goes to stderr (always separate, and each one
+carries an explicit marker if it had to be truncated), and the last line is `# exit=<code>`. **The
+CLI's exit code is the remote command's**, so an ordinary shell test around it works. The CLI's own
+failures — device offline, that device's daemon too old (`cofluxd update && cofluxd restart` there),
+`--cwd` missing or not a directory, the timeout elapsing — are one readable sentence and exit **255**,
+so a remote exit 1 is never confused with "it never ran".
+
+`--cwd` is the only addressing: an absolute path or a `~` prefix, defaulting to the daemon user's
+HOME. To run inside a workspace, pass the `path` from `coflux workspace list --device <deviceId>`.
+There is no `--workspace`, and there is **no stdin**.
+
+**`device exec` or a terminal?** A division of labour, not a limitation:
+
+- **`device exec`** when the command is short and what you want is its result: a version check, a
+  config grep, a service status, a one-line remote fix. `--timeout` defaults to 60 seconds and is
+  capped at 600; a timeout kills the remote process and is a definite failure, never a partial
+  answer. Output is buffered, so nothing appears until the command ends.
+- **`coflux terminal new --workspace <workspaceId>`** when the job is long, when the user should be
+  able to watch it and take it over, or when a human has to type something into it (a `sudo`
+  password, a confirmation, a TUI). That is what a Terminal is for, and exec deliberately cannot do
+  it.
 
 ## Boundaries
 
