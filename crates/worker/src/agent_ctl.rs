@@ -70,6 +70,18 @@ const MAX_SERVER_READ_BYTES: u64 = 256 * 1024;
 /// ServerTerminalInput 单次写入字节上限：MCP 一次 send 是一行命令或一小段文本，不是文件通道。
 const MAX_SERVER_INPUT_BYTES: usize = 64 * 1024;
 
+/// `coflux device exec`: the worker's own ceiling on the center's requested timeout. It matches the
+/// product boundary between exec and a Terminal — a job that needs longer belongs to a Terminal,
+/// where the user can watch it and take it over.
+const SERVER_EXEC_MAX_MS: u64 = 600_000;
+/// Default when the center sends no timeout; same value as [`crate::ops`]'s own default.
+const SERVER_EXEC_DEFAULT_MS: u64 = 60_000;
+/// Per-stream byte cap on what one exec returns. stdout and stderr are capped independently and the
+/// account CLI's whole response is limited to 8 MiB, so two 1 MiB streams leave ample headroom.
+const MAX_SERVER_EXEC_OUTPUT_BYTES: usize = 1024 * 1024;
+/// The command string cap: exec is a command line, not a script channel.
+const MAX_SERVER_EXEC_COMMAND_BYTES: usize = 64 * 1024;
+
 /// gateway 解析出的一条 agent 控制请求；`respond` 回填 HTTP 应答。
 pub struct AgentRequest {
     pub pid: i32,
@@ -1176,6 +1188,45 @@ mod tests {
         ));
         assert_eq!(pending.len(), AGENT_PENDING_LIMIT);
     }
+
+    /// `device exec` 的 cwd 规则：空 = HOME，`~` 前缀展开，其余只收绝对路径，且必须真是目录。
+    #[tokio::test]
+    async fn exec_cwd_defaults_to_home_and_refuses_anything_but_an_absolute_or_tilde_path() {
+        let home = std::env::var("HOME").expect("测试环境必须有 HOME");
+        assert_eq!(resolve_exec_cwd("").await.as_deref(), Ok(home.as_str()));
+        assert_eq!(resolve_exec_cwd("  ").await.as_deref(), Ok(home.as_str()));
+        assert_eq!(resolve_exec_cwd("~").await.as_deref(), Ok(home.as_str()));
+        assert_eq!(resolve_exec_cwd("/").await.as_deref(), Ok("/"));
+
+        let relative = resolve_exec_cwd("logs").await.expect_err("相对路径必须被拒");
+        assert!(relative.contains("绝对路径"), "{relative}");
+        let missing = resolve_exec_cwd("/nonexistent-coflux-exec-cwd")
+            .await
+            .expect_err("不存在的路径必须被拒");
+        assert!(missing.contains("不存在"), "{missing}");
+        let not_a_dir = resolve_exec_cwd("/etc/hosts")
+            .await
+            .expect_err("文件不能当 cwd");
+        assert!(not_a_dir.contains("不是目录"), "{not_a_dir}");
+    }
+
+    /// 截断必须显式：上限内原样返回，超限保留开头并留下一条说明了原始字节数的标记。
+    #[test]
+    fn exec_output_truncation_is_never_silent() {
+        let short = "hello\n".to_string();
+        assert_eq!(truncate_exec_stream(short.clone(), "stdout"), short);
+
+        let long = "x".repeat(MAX_SERVER_EXEC_OUTPUT_BYTES + 4096);
+        let cut = truncate_exec_stream(long.clone(), "stderr");
+        assert!(cut.starts_with(&long[..1024]), "保留开头");
+        assert!(cut.contains("stderr 已截断"), "{cut}");
+        assert!(cut.contains(&long.len().to_string()), "标注原始字节数");
+
+        // 多字节字符不能被切成半个码点（否则 protobuf 的 string 字段编不出去）。
+        let wide = "语".repeat(MAX_SERVER_EXEC_OUTPUT_BYTES);
+        let cut = truncate_exec_stream(wide, "stdout");
+        assert!(cut.contains("stdout 已截断"));
+    }
 }
 
 /// Center-initiated terminal reads and writes (plan 091, the opposite direction of
@@ -1184,6 +1235,9 @@ mod tests {
 /// back to its checkpoint); a write goes through the [`DeviceRuntime::agent_send_input`] front
 /// door — refused while a human holder is present, the message forwarded verbatim (the same
 /// humans-first rule as `coflux terminal send`). Every request gets exactly one result.
+///
+/// The one branch here that is not about terminals is `exec` (`coflux device exec`): a one-shot
+/// `sh -c` in a plain directory with no PTY, no session and no workspace, buffered in and out.
 pub async fn handle_server_request(
     request: wire::ServerAgentRequest,
     state: &Arc<Mutex<WorkerState>>,
@@ -1334,6 +1388,110 @@ pub async fn handle_server_request(
                 Err((_, message)) => fail(message),
             }
         }
+        // `coflux device exec`: one-shot execution, deliberately not a Terminal. No PTY, no session,
+        // no task, no workspace — the command string goes to `sh -c` in the resolved cwd and both
+        // output streams come back buffered with the exit code.
+        Some(server_agent_request::Payload::Exec(exec)) => {
+            if exec.command.trim().is_empty() {
+                return fail("命令为空".into());
+            }
+            if exec.command.len() > MAX_SERVER_EXEC_COMMAND_BYTES {
+                return fail(format!(
+                    "命令超过 {MAX_SERVER_EXEC_COMMAND_BYTES} 字节上限"
+                ));
+            }
+            let cwd = match resolve_exec_cwd(&exec.cwd).await {
+                Ok(cwd) => cwd,
+                Err(message) => return fail(message),
+            };
+            let timeout_ms = if exec.timeout_ms == 0 {
+                SERVER_EXEC_DEFAULT_MS
+            } else {
+                u64::from(exec.timeout_ms).min(SERVER_EXEC_MAX_MS)
+            };
+            // The shell is what makes `cd /opt && ls | wc -l` work; args[] straight to execve would
+            // not. Empty env = inherit the daemon user's environment; stdin stays null inside
+            // run_command, so a command that waits for input fails instead of hanging.
+            let started = Instant::now();
+            let outcome = crate::ops::run_command(
+                &cwd,
+                "sh",
+                &["-c".to_string(), exec.command.clone()],
+                &HashMap::new(),
+                Some(timeout_ms),
+            )
+            .await;
+            if !outcome.ok {
+                if started.elapsed() >= Duration::from_millis(timeout_ms) {
+                    return fail(format!(
+                        "命令超过 {} 秒的超时上限，远端进程已被杀掉；需要更久、或需要用户看见与接管的长任务请改用 coflux terminal new",
+                        timeout_ms / 1000
+                    ));
+                }
+                return fail(
+                    outcome
+                        .error
+                        .unwrap_or_else(|| "命令在该设备上未能正常结束".into()),
+                );
+            }
+            wire::ServerAgentResult {
+                request_id: request_id.clone(),
+                ok: true,
+                error: None,
+                payload: Some(server_agent_result::Payload::Exec(
+                    wire::ServerExecRunResult {
+                        exit_code: outcome.exit_code,
+                        stdout: truncate_exec_stream(outcome.stdout, "stdout"),
+                        stderr: truncate_exec_stream(outcome.stderr, "stderr"),
+                        cwd,
+                    },
+                )),
+            }
+        }
         None => fail("未知的中心请求动作（daemon 不认识该 payload）".into()),
     }
+}
+
+/// `device exec` 的 cwd：空 = daemon 用户的 HOME，否则只接受绝对路径或 `~` 前缀（展开后必须
+/// 存在且是目录）。刻意不查 WorkspaceList——exec 是设备级原语，不带工作区语义；路径不对时给一句
+/// 可读的话，而不是让 spawn 以 ENOENT 失败。
+async fn resolve_exec_cwd(raw: &str) -> Result<String, String> {
+    let requested = raw.trim();
+    let home_missing = || "该设备的 daemon 读不到 HOME，请显式传 --cwd=<绝对路径>".to_string();
+    if requested.is_empty() {
+        return std::env::var("HOME")
+            .ok()
+            .filter(|home| !home.is_empty())
+            .ok_or_else(home_missing);
+    }
+    if !(requested.starts_with('/') || requested == "~" || requested.starts_with("~/")) {
+        return Err(format!(
+            "--cwd 只接受绝对路径或 ~ 开头的路径（收到 {requested}）"
+        ));
+    }
+    let expanded = crate::ops::expand_home(requested)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(home_missing)?;
+    match tokio::fs::metadata(&expanded).await {
+        Ok(meta) if meta.is_dir() => Ok(expanded),
+        Ok(_) => Err(format!("--cwd 不是目录：{expanded}")),
+        Err(_) => Err(format!("--cwd 在该设备上不存在：{expanded}")),
+    }
+}
+
+/// 单条流超过上限时保留开头并**显式**标注截断——一次性 exec 不能静默丢输出。
+fn truncate_exec_stream(mut stream: String, name: &str) -> String {
+    if stream.len() <= MAX_SERVER_EXEC_OUTPUT_BYTES {
+        return stream;
+    }
+    let total = stream.len();
+    let mut keep = MAX_SERVER_EXEC_OUTPUT_BYTES;
+    while keep > 0 && !stream.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    stream.truncate(keep);
+    stream.push_str(&format!(
+        "\n# [coflux] {name} 已截断：只保留前 {keep} 字节（该流共 {total} 字节）\n"
+    ));
+    stream
 }

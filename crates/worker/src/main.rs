@@ -1746,8 +1746,9 @@ async fn on_server_message(
                     server_to_daemon::Payload::PreparedDeviceOperationExecute(execute) => {
                         device.execute_prepared_operation(&execute.operation_id);
                     }
-                    // 中心发起的终端读/写（plan 091）：读日志/快照或经 agent_send_input 正门写入，
-                    // 可能等 sessiond 回执（最长 5s），另开 task 以免阻塞消息循环；每条必回一条 result。
+                    // 中心发起的终端读/写（plan 091）与一次性 exec（`coflux device exec`）：读日志/
+                    // 快照、经 agent_send_input 正门写入，或在某目录下跑一条 `sh -c`。都可能长时间
+                    // 等待（exec 最长 600s），另开 task 以免阻塞消息循环；每条必回一条 result。
                     server_to_daemon::Payload::ServerAgentRequest(request) => {
                         let device = device.clone();
                         let state = state.clone();
