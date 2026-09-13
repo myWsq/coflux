@@ -9,6 +9,12 @@ import type { CSSProperties } from "react";
  * 代价是拖拽区吞掉区域内的全部指针事件（Electron #37789）：`drag` 区域里的 DOM 收不到
  * click / dblclick / mouseenter，所以拖拽区内每个可交互元素都必须显式声明 `no-drag`。
  *
+ * **光声明 `no-drag` 还不够，它必须在文档顺序上晚于那个 `drag` 元素。** Electron 按文档顺序
+ * 合成这些矩形——`drag` 取并集、`no-drag` 取差集——所以先挖的洞会被后面声明的 `drag` 并集填平，
+ * z-index 不参与。踩过一次：右上角动作坞浮在终端顶栏给它留的 `pr-20` 上，坞自己声明了 `no-drag`，
+ * 但它排在主区之前，顶栏的 `drag` 随后把洞填回去，坞里的按钮点不动、Tooltip 也不出
+ * （修复见 workbench.tsx 里动作坞那段注释）。
+ *
  * React 的 `CSSProperties` 没有 `WebkitAppRegion` 键，故这里统一 `as CSSProperties` 断言。
  */
 export const DESKTOP_TITLEBAR_HEIGHT = 38;

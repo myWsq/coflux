@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
 import { Text } from "@astryxdesign/core/Text";
@@ -20,6 +20,7 @@ export function NotificationInbox({ client, open, onClose, onOpen, onNavigate }:
   const workspaces = useStore(client.store, (state) => state.workspaces);
   const [hints, setHints] = useState<AccountNotification[]>([]);
   const [targetError, setTargetError] = useState("");
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
   function view(item: AccountNotification) {
     client.markNotificationRead(item.id);
     setHints((items) => items.filter((hint) => hint.id !== item.id));
@@ -61,12 +62,12 @@ export function NotificationInbox({ client, open, onClose, onOpen, onNavigate }:
       hasChevron={false}
       placement="below"
       button={{
+        ref: anchorRef,
         label: `通知中心，${inbox.unreadCount} 条未读`,
         icon: <span className="relative flex"><Bell className="size-3.5" />{inbox.unreadCount > 0 && <span aria-hidden className="absolute -right-0.5 -top-0.5 size-1 rounded-full bg-primary" />}</span>,
         isIconOnly: true,
         variant: "ghost",
         size: "sm",
-        tooltip: inbox.unreadCount > 0 ? `通知中心 · ${inbox.unreadCount} 条未读` : "通知中心",
         style: { color: "var(--muted-foreground)", height: 24, width: 24, minWidth: 24, paddingInline: 0 },
       }}
     >
@@ -98,5 +99,11 @@ export function NotificationInbox({ client, open, onClose, onOpen, onNavigate }:
         </div>
       </div>}
     </DropdownMenu>
+    {/* 不能用 DropdownMenu 的 button.tooltip：菜单打开时它把 tooltip 丢掉（DropdownMenu.js:307），
+        Button 于是在 tooltip 正显示时卸载它的 popover 节点，而移除 popover 不触发 toggle，
+        useLayer 的 open 标志滞留为真，之后 show() 一直被守卫吞掉——表现为点过菜单后 tooltip 不再出现。
+        sibling Tooltip 的节点不会被卸载，受控 isOpen 走正常的 hide 复位。渲染在菜单之后，
+        这样首挂时 Button 的 ref 已经附上。见 docs/design-guidelines.md。 */}
+    <Tooltip anchorRef={anchorRef} isOpen={open ? false : undefined} content={inbox.unreadCount > 0 ? `通知中心 · ${inbox.unreadCount} 条未读` : "通知中心"} />
   </>;
 }

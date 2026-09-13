@@ -3,6 +3,7 @@ import { Check, Plus } from "lucide-react";
 import { Divider } from "@astryxdesign/core/Divider";
 import { DropdownMenu, DropdownMenuItem, type DropdownMenuButtonProps } from "@astryxdesign/core/DropdownMenu";
 import { Text } from "@astryxdesign/core/Text";
+import { Tooltip } from "@astryxdesign/core/Tooltip";
 
 /** 不可选分支的原因（行内短提示 + tooltip 全文） */
 export type BranchTaken = { hint: string; reason: string };
@@ -31,21 +32,29 @@ type Entry = { kind: "branch"; name: string; taken?: BranchTaken } | { kind: "cr
 export function BranchMenu(props: BranchMenuProps) {
   const [internalOpen, setInternalOpen] = useState(false);
   const open = props.isOpen ?? internalOpen;
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
+  // 摘掉 button.tooltip 自己渲染成 sibling Tooltip：交给 Button 内部管时，菜单开合会卡住 hover
+  // （见 docs/design-guidelines.md）。tooltipContent 在组件生命周期内恒定，不会在显示中卸载 Tooltip。
+  const { tooltip: tooltipContent, ...buttonProps } = props.button;
   const setOpen = (next: boolean) => {
     props.onOpenChange?.(next);
     if (props.isOpen === undefined) setInternalOpen(next);
   };
   return (
-    <DropdownMenu
-      isMenuOpen={open}
-      onOpenChange={setOpen}
-      menuWidth={320}
-      hasChevron={false}
-      placement="below"
-      button={props.button}
-    >
-      {open ? <BranchMenuPanel {...props} close={() => setOpen(false)} /> : null}
-    </DropdownMenu>
+    <>
+      <DropdownMenu
+        isMenuOpen={open}
+        onOpenChange={setOpen}
+        menuWidth={320}
+        hasChevron={false}
+        placement="below"
+        button={{ ...buttonProps, ref: anchorRef }}
+      >
+        {open ? <BranchMenuPanel {...props} close={() => setOpen(false)} /> : null}
+      </DropdownMenu>
+      {/* 挂在菜单之后：首挂时 Button 的 ref 才已附上。 */}
+      {tooltipContent ? <Tooltip anchorRef={anchorRef} isOpen={open ? false : undefined} content={tooltipContent} /> : null}
+    </>
   );
 }
 
