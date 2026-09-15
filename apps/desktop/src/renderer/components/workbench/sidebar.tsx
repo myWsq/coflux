@@ -8,6 +8,7 @@ import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 import { AccountFooter, type SettingsTooltipControl } from "@/components/workbench/account-footer";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
+import { copyEntityHandle } from "@/components/workbench/entity-handle";
 import { ActivityDots } from "@/components/workbench/pending-dots";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
@@ -172,6 +173,9 @@ export function Sidebar(props: SidebarProps) {
                     items={[
                       { label: "新建工作区", onClick: () => setCreateMenuProjectId(project.id) },
                       { label: "重命名", onClick: () => props.onRenameProject(project) },
+                      // Handle copy (plan 20260914-entity-handles): the right-click menu is the
+                      // only place it surfaces — handles are never persistent UI text.
+                      { label: "复制标识", onClick: () => copyEntityHandle("project", project.id) },
                       { type: "divider" },
                       { label: "移除项目", onClick: () => props.onRemoveProject(project) },
                     ]}
@@ -303,6 +307,7 @@ export function Sidebar(props: SidebarProps) {
                           size="sm"
                           items={[
                             { label: "重命名", onClick: () => props.onRenameWorkspace(workspace) },
+                            { label: "复制标识", onClick: () => copyEntityHandle("workspace", workspace.id) },
                             ...(!workspace.isMain
                               ? [{ type: "divider" } as const, { label: "删除工作区", onClick: () => props.onRemoveWorkspace(workspace) }]
                               : []),
@@ -504,6 +509,7 @@ export function Sidebar(props: SidebarProps) {
                   size="sm"
                   items={[
                     { label: "重命名", onClick: () => props.onRenameDevice(daemon) },
+                    { label: "复制标识", onClick: () => copyEntityHandle("device", daemon.daemonId) },
                     { type: "divider" },
                     { label: "移除设备", onClick: () => props.onRemoveDevice(daemon) },
                   ]}

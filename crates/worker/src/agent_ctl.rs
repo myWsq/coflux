@@ -36,7 +36,8 @@ use prost::Message as _;
 
 pub mod executor;
 
-use crate::session_ledger::{SessionPhase, SessionRecord};
+use crate::handle::{self, HandleKind};
+use crate::session_ledger::{PrefixMatch, SessionPhase, SessionRecord};
 use crate::{
     agents, device::DeviceRuntime, observed::ObservedState, workspace_match, worktree_locate,
     WorkerState, WsOut,
@@ -308,9 +309,9 @@ async fn handle(
             match ask_server(state, to_server_tx, session_id, scope.declared(), payload).await {
                 Err(response) => response,
                 Ok(agent_control_result::Payload::TerminalNew(result)) => {
-                    AgentResponse::ok(
-                        serde_json::json!({ "taskId": result.task_id, "sessionId": result.session_id }),
-                    )
+                    let mut payload = terminal_identity(&result.task_id);
+                    payload.insert("sessionId".into(), serde_json::json!(result.session_id));
+                    AgentResponse::ok(serde_json::Value::Object(payload))
                 }
                 Ok(_) => AgentResponse::err("502 Bad Gateway", "中心回执类型不匹配"),
             }
@@ -329,6 +330,7 @@ async fn handle(
                         .map(|terminal| {
                             let mut entry = serde_json::json!({
                                 "taskId": terminal.task_id,
+                                "ref": handle::of(HandleKind::Terminal, &terminal.task_id),
                                 "title": terminal.title,
                                 "status": status_name(terminal.status),
                                 "exitCode": terminal.exit_code,
@@ -371,37 +373,35 @@ async fn handle(
             } else {
                 String::new()
             };
-            AgentResponse::ok(serde_json::json!({
-                "ansi": text,
-                "capturedAt": epoch_ms(),
-                "status": phase_name(&record.phase),
-                "exitCode": exit_code_of(&record.phase),
-            }))
+            let mut payload = terminal_identity(&record.task_id);
+            payload.insert("ansi".into(), serde_json::json!(text));
+            payload.insert("capturedAt".into(), serde_json::json!(epoch_ms()));
+            payload.insert("status".into(), serde_json::json!(phase_name(&record.phase)));
+            payload.insert("exitCode".into(), serde_json::json!(exit_code_of(&record.phase)));
+            AgentResponse::ok(serde_json::Value::Object(payload))
         }
         AgentAction::TerminalStatus { task_id } => {
             match resolve_local_target(state, &scope, &task_id) {
                 Ok((_, record)) => {
-                    let mut status = serde_json::json!({
-                        "taskId": task_id,
-                        "status": phase_name(&record.phase),
-                        "exitCode": exit_code_of(&record.phase),
-                    });
-                    if let Some(object) = status.as_object_mut() {
-                        object.extend(command_fields(&record));
-                    }
-                    AgentResponse::ok(status)
+                    let mut status = terminal_identity(&record.task_id);
+                    status.insert("status".into(), serde_json::json!(phase_name(&record.phase)));
+                    status.insert("exitCode".into(), serde_json::json!(exit_code_of(&record.phase)));
+                    status.extend(command_fields(&record));
+                    AgentResponse::ok(serde_json::Value::Object(status))
                 }
                 Err(response) => response,
             }
         }
         AgentAction::TerminalRun { task_id, command } => {
-            let (target_session, _) = match resolve_local_target(state, &scope, &task_id) {
+            let (target_session, record) = match resolve_local_target(state, &scope, &task_id) {
                 Ok(found) => found,
                 Err(response) => return response,
             };
             match run_in_session(state, device, &target_session, &command).await {
                 Ok(command_seq) => {
-                    AgentResponse::ok(serde_json::json!({ "taskId": task_id, "commandSeq": command_seq }))
+                    let mut payload = terminal_identity(&record.task_id);
+                    payload.insert("commandSeq".into(), serde_json::json!(command_seq));
+                    AgentResponse::ok(serde_json::Value::Object(payload))
                 }
                 Err((status, message)) => AgentResponse::err(status, message),
             }
@@ -411,7 +411,7 @@ async fn handle(
             command_seq,
             timeout_ms,
         } => {
-            let (target_session, _) = match resolve_local_target(state, &scope, &task_id) {
+            let (target_session, record) = match resolve_local_target(state, &scope, &task_id) {
                 Ok(found) => found,
                 Err(response) => return response,
             };
@@ -421,7 +421,7 @@ async fn handle(
                 Duration::from_millis(timeout_ms).min(WAIT_ROUND_MAX)
             };
             match wait_in_session(state, &target_session, command_seq, timeout).await {
-                Ok(outcome) => AgentResponse::ok(outcome.to_json(&task_id)),
+                Ok(outcome) => AgentResponse::ok(outcome.to_json(&record.task_id)),
                 Err((status, message)) => AgentResponse::err(status, message),
             }
         }
@@ -430,10 +430,11 @@ async fn handle(
                 Ok(found) => found,
                 Err(response) => return response,
             };
+            let mut payload = terminal_identity(&record.task_id);
             if let SessionPhase::Exited { exit_code } = record.phase {
-                return AgentResponse::ok(
-                    serde_json::json!({ "taskId": task_id, "exited": true, "exitCode": exit_code }),
-                );
+                payload.insert("exited".into(), serde_json::Value::Bool(true));
+                payload.insert("exitCode".into(), serde_json::json!(exit_code));
+                return AgentResponse::ok(serde_json::Value::Object(payload));
             }
             if !device.close_session(&target_session) {
                 return AgentResponse::err(
@@ -444,11 +445,9 @@ async fn handle(
             // The exit arrives through the ordinary SessionExit path; give it a bounded moment so
             // the caller usually learns the shell's status in the same call.
             let exited = wait_for_exit(state, &target_session, CLOSE_WAIT).await;
-            AgentResponse::ok(serde_json::json!({
-                "taskId": task_id,
-                "exited": exited.is_some(),
-                "exitCode": exited,
-            }))
+            payload.insert("exited".into(), serde_json::Value::Bool(exited.is_some()));
+            payload.insert("exitCode".into(), serde_json::json!(exited));
+            AgentResponse::ok(serde_json::Value::Object(payload))
         }
         AgentAction::TerminalSend {
             task_id,
@@ -478,7 +477,9 @@ async fn handle(
                 data.push(b'\r');
             }
             match device.agent_send_input(&target_session, data).await {
-                Ok(()) => AgentResponse::ok(serde_json::json!({})),
+                Ok(()) => AgentResponse::ok(serde_json::Value::Object(terminal_identity(
+                    &record.task_id,
+                ))),
                 Err(message) => AgentResponse::err("409 Conflict", message),
             }
         }
@@ -500,10 +501,14 @@ async fn handle(
         }
         AgentAction::WorkspaceCurrent => match scope.require_effective() {
             Err(response) => response,
+            // `ref` / `owningRef` 是纯附加的：读它的两处（插件的 session-moved.mjs 与
+            // crates/cli/src/integration.rs）都只取 workspaceId，多两个键动不了它们。
             Ok(effective) => AgentResponse::ok(serde_json::json!({
                 "workspaceId": effective,
+                "ref": handle::of(HandleKind::Workspace, effective),
                 "path": scope.effective_path.clone().unwrap_or_default(),
                 "owningWorkspaceId": scope.owning,
+                "owningRef": handle::of(HandleKind::Workspace, &scope.owning),
                 "moved": scope.moved(),
                 "cwd": cwd,
             })),
@@ -742,14 +747,19 @@ fn resolve_scope(
     }
 }
 
-/// 本地命令的目标解析（plan 094 + 102）：调用方与目标都必须有已知归属，且目标的归属等于调用方的
-/// **有效工作区**（cwd 落在哪个工作区，就对哪个工作区的终端说话）。归属永远不猜——早于 daemon
-/// 升级的会话归属未知，一律可读拒绝；能按申报的 cwd 改向的只是**目标**。
-/// 「不在本工作区」与「不存在」同一句错误——不向别的工作区泄漏存在性。
+/// 本地命令的目标解析（plan 094 + 102；标识见 plan 20260914-entity-handles）：调用方与目标都必须
+/// 有已知归属，且目标的归属等于调用方的**有效工作区**（cwd 落在哪个工作区，就对哪个工作区的终端
+/// 说话）。归属永远不猜——早于 daemon 升级的会话归属未知，一律可读拒绝；能按申报的 cwd 改向的
+/// 只是**目标**。「不在本工作区」与「不存在」同一句错误——不向别的工作区泄漏存在性。
+///
+/// `target` 既收完整 task id，也收终端标识 `coflux:terminal:<前 8 位>`。标识是**边界概念**：
+/// 在这里换成真 id，往下一层再也见不到它。三种拒绝各说各的话——类型不符（拿工作区标识来关终端）、
+/// 本工作区内前缀有歧义、以及与「不存在」共用的那一句。匹配范围只有本工作区，歧义也只在本工作区内
+/// 判定（见 [`crate::session_ledger::SessionLedger::task_by_prefix`]）。
 fn resolve_local_target(
     state: &Arc<Mutex<WorkerState>>,
     scope: &WorkspaceScope,
-    task_id: &str,
+    target: &str,
 ) -> Result<(String, SessionRecord), AgentResponse> {
     let effective = scope.require_effective()?;
     let s = state.lock().unwrap();
@@ -759,8 +769,28 @@ fn resolve_local_target(
             "终端不在本工作区或不存在（用 coflux terminal list 查）",
         )
     };
-    let Some((target_session, target)) = s.ledger.task(task_id) else {
-        return Err(not_found());
+    let (target_session, target) = match handle::parse(target) {
+        Some(parsed) => {
+            if parsed.kind != HandleKind::Terminal {
+                return Err(AgentResponse::err(
+                    "400 Bad Request",
+                    wrong_kind_message(parsed.kind, target),
+                ));
+            }
+            match s.ledger.task_by_prefix(&parsed.prefix, effective) {
+                PrefixMatch::Unique(session_id, record) => (session_id, record),
+                PrefixMatch::Ambiguous => {
+                    return Err(AgentResponse::err("409 Conflict", ambiguous_message(target)))
+                }
+                PrefixMatch::None => return Err(not_found()),
+            }
+        }
+        None => {
+            let Some(found) = s.ledger.task(target) else {
+                return Err(not_found());
+            };
+            found
+        }
     };
     if target.workspace_id.is_empty() {
         return Err(AgentResponse::err(
@@ -772,6 +802,33 @@ fn resolve_local_target(
         return Err(not_found());
     }
     Ok((target_session.to_string(), target.clone()))
+}
+
+/// 拿别的实体的标识来指终端：同时说清「给的是什么」与「要的是什么」，绝不去另一张表里试着
+/// 把它对上某个相邻实体——`terminal close` 收到一个工作区标识必须响亮地失败。
+fn wrong_kind_message(given: HandleKind, target: &str) -> String {
+    format!(
+        "这是{}标识 {target}，本命令要的是终端标识 coflux:terminal:<前 8 位> 或终端 ID（用 coflux terminal list 查）",
+        given.label()
+    )
+}
+
+/// 前缀在**本工作区内**撞了：短标识的可读性代价就是这一句，让用户改用完整 id。
+fn ambiguous_message(target: &str) -> String {
+    format!("标识 {target} 在本工作区匹配到多个终端，请改用完整终端 ID（用 coflux terminal list 查）")
+}
+
+/// 一条本地终端结果的身份字段：`taskId` 永远是解析出来的**完整 UUID**，`ref` 是它的标识。
+/// 都不是调用方递进来的原文——不然一个标识进来就会原样出现在 `taskId` 里，`ref` 还会由标识再
+/// 生成一次标识，而「结果带 ref」这类粗检查照样过。
+fn terminal_identity(task_id: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut fields = serde_json::Map::new();
+    fields.insert("taskId".into(), serde_json::Value::from(task_id));
+    fields.insert(
+        "ref".into(),
+        serde_json::Value::from(handle::of(HandleKind::Terminal, task_id)),
+    );
+    fields
 }
 
 /// The command-state fields every status view carries for a live terminal: `integrated`, `busy`,
@@ -881,18 +938,25 @@ enum WaitOutcome {
 }
 
 impl WaitOutcome {
+    /// `task_id` is the **resolved** terminal id, never the caller's input: a handle that got this
+    /// far is already a UUID here, and `ref` is derived from that UUID rather than from the handle.
     fn to_json(&self, task_id: &str) -> serde_json::Value {
-        match self {
+        let mut payload = terminal_identity(task_id);
+        let fields = match self {
             WaitOutcome::Finished { command_seq, exit_code } => serde_json::json!({
-                "taskId": task_id, "state": "finished", "commandSeq": command_seq, "exitCode": exit_code,
+                "state": "finished", "commandSeq": command_seq, "exitCode": exit_code,
             }),
             WaitOutcome::Exited { exit_code } => serde_json::json!({
-                "taskId": task_id, "state": "exited", "exitCode": exit_code,
+                "state": "exited", "exitCode": exit_code,
             }),
             WaitOutcome::Running { command_seq } => serde_json::json!({
-                "taskId": task_id, "state": "running", "commandSeq": command_seq,
+                "state": "running", "commandSeq": command_seq,
             }),
+        };
+        if let serde_json::Value::Object(fields) = fields {
+            payload.extend(fields);
         }
+        serde_json::Value::Object(payload)
     }
 }
 
@@ -1128,6 +1192,58 @@ mod tests {
             effective: effective.into(),
             effective_path: Some("/x/repo".into()),
         }
+    }
+
+    #[test]
+    fn local_results_carry_the_resolved_uuid_and_its_handle() {
+        let identity = terminal_identity("9e21c4d0-1111-2222-3333-444455556666");
+        assert_eq!(
+            identity.get("taskId").and_then(serde_json::Value::as_str),
+            Some("9e21c4d0-1111-2222-3333-444455556666"),
+            "taskId 必须是解析后的完整 UUID，不是调用方递进来的标识"
+        );
+        assert_eq!(
+            identity.get("ref").and_then(serde_json::Value::as_str),
+            Some("coflux:terminal:9e21c4d0")
+        );
+        // ref 由 UUID 生成；拿标识再生成一次标识只会得到一个残废的 ref
+        let wrong = terminal_identity("coflux:terminal:9e21c4d0");
+        assert_ne!(
+            wrong.get("ref").and_then(serde_json::Value::as_str),
+            Some("coflux:terminal:9e21c4d0"),
+            "标识进 taskId 会被这条断言抓住"
+        );
+    }
+
+    #[test]
+    fn wait_results_report_the_resolved_uuid_too() {
+        let json = WaitOutcome::Finished {
+            command_seq: 2,
+            exit_code: Some(0),
+        }
+        .to_json("9e21c4d0-1111-2222-3333-444455556666");
+        assert_eq!(json["taskId"], "9e21c4d0-1111-2222-3333-444455556666");
+        assert_eq!(json["ref"], "coflux:terminal:9e21c4d0");
+        assert_eq!(json["state"], "finished");
+        assert_eq!(json["commandSeq"], 2);
+        let running = WaitOutcome::Running { command_seq: 5 }
+            .to_json("3f2a1b7c-aaaa-bbbb-cccc-ddddeeeeffff");
+        assert_eq!(running["ref"], "coflux:terminal:3f2a1b7c");
+        assert_eq!(running["state"], "running");
+    }
+
+    #[test]
+    fn a_handle_of_the_wrong_kind_and_an_ambiguous_one_say_different_things() {
+        let wrong = wrong_kind_message(HandleKind::Workspace, "coflux:workspace:3f2a1b7c");
+        assert!(wrong.contains("工作区标识"), "{wrong}");
+        assert!(wrong.contains("终端标识"), "{wrong}");
+        assert!(wrong.contains("coflux:workspace:3f2a1b7c"), "{wrong}");
+        let device = wrong_kind_message(HandleKind::Device, "coflux:device:b6767697");
+        assert!(device.contains("设备标识"), "{device}");
+        let ambiguous = ambiguous_message("coflux:terminal:9e21c4d0");
+        assert!(ambiguous.contains("多个终端"), "{ambiguous}");
+        assert!(ambiguous.contains("完整终端 ID"), "{ambiguous}");
+        assert_ne!(wrong, ambiguous, "三种拒绝各说各的话");
     }
 
     #[test]

@@ -3,6 +3,50 @@ import fs from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
 
+/* --------------------------------- 实体标识 -------------------------------- */
+// `coflux:<kind>:<hex>`：设备 / 项目 / 工作区 / 终端 ID 的可粘贴短形式，hex 是 ID 的前几位
+// （生成时固定取前 8 位）。解析大小写不敏感并归一成小写；凡是收 ID 的地方都收标识。
+//
+// 规则是纯拼接，故各端各自本地生成，不上协议：Rust 侧同一份规则在 crates/cli/src/handle.rs 与
+// crates/worker/src/handle.rs——两版 CLI 的输出是逐字对齐的契约，改一边必须改另一边。
+const HANDLE_KINDS = ["device", "project", "workspace", "terminal"];
+
+/** `id` 的标识。空进空出：缺坐标时不能造出 `coflux:x:` 这样的半截标识。 */
+export function entityHandle(kind, id) {
+  const raw = typeof id === "string" ? id : "";
+  return raw ? `coflux:${kind}:${raw.slice(0, 8).toLowerCase()}` : "";
+}
+
+/** 解析标识；不是标识（裸 UUID 也一样）返回 null，调用方按它看起来的那个 ID 处理。 */
+export function parseHandle(raw) {
+  if (typeof raw !== "string") return null;
+  const parts = raw.toLowerCase().split(":");
+  if (parts.length !== 3 || parts[0] !== "coflux") return null;
+  const [, kind, hex] = parts;
+  if (!HANDLE_KINDS.includes(kind) || !/^[0-9a-f]{4,32}$/.test(hex)) return null;
+  return { kind, prefix: hex };
+}
+
+/**
+ * `--device` / `--workspace` 筛选值命中某个 ID 吗？标识按类型 + 前缀比，其余按原样相等比。
+ * 这是**比较**不是解析：不查表，只用同一套语法——也正因为如此，标识绝不能漏到字符串相等那条
+ * 路上去，否则它谁也匹配不上，打印一个空列表还不报错。
+ */
+export function matchesTarget(target, id, kind) {
+  const handle = parseHandle(target);
+  if (!handle) return id === target;
+  return handle.kind === kind && typeof id === "string" && id.toLowerCase().startsWith(handle.prefix);
+}
+
+/** 筛选参数拿到了别的类型的标识：说清楚，不要打印空列表。不是标识的一律放行（那就是个 ID）。 */
+const HANDLE_LABELS = { device: "设备", project: "项目", workspace: "工作区", terminal: "终端" };
+export function checkFilterHandle(flag, expected, target) {
+  const handle = parseHandle(target);
+  if (handle && handle.kind !== expected) {
+    throw new Error(`--${flag} 需要${HANDLE_LABELS[expected]}标识或${HANDLE_LABELS[expected]} ID，给的是${HANDLE_LABELS[handle.kind]}标识 ${target}`);
+  }
+}
+
 function origin(raw) {
   const url = new URL(raw.replace(/^wss:/, "https:").replace(/^ws:/, "http:"));
   if (url.username || url.password) throw new Error("服务器地址不能包含凭据");
@@ -129,7 +173,10 @@ export async function runAccountCommand(positionals, flags, home) {
   if (command === "whoami") value = { accountId: value.accountId };
   else if (sub === "list" || command === "ports") {
     const field = { device: "devices", project: "projects", workspace: "workspaces", terminal: "terminals", ports: "ports" }[command];
-    value = value[field].filter((item) => (!flags.device || item.daemonId === flags.device) && (!flags.workspace || item.workspaceId === flags.workspace || (command === "workspace" && item.id === flags.workspace)));
+    // 客户端字符串比较，不经中心解析：标识不在这里认，就会一个都匹配不上（空列表、还不报错）。
+    if (flags.device) checkFilterHandle("device", "device", flags.device);
+    if (flags.workspace) checkFilterHandle("workspace", "workspace", flags.workspace);
+    value = value[field].filter((item) => (!flags.device || matchesTarget(flags.device, item.daemonId, "device")) && (!flags.workspace || matchesTarget(flags.workspace, item.workspaceId, "workspace") || (command === "workspace" && matchesTarget(flags.workspace, item.id, "workspace"))));
   }
   print(value);
 }

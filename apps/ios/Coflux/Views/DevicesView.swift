@@ -37,6 +37,8 @@ struct DevicesView: View {
                 } label: {
                     deviceRow(daemon)
                 }
+                // 长按复制设备标识（plan 20260914）：整行可点是短按，长按不抢它。
+                .copyHandleContextMenu(.device, id: daemon.daemonID)
                 .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 12, trailing: 20))
                 .listRowBackground(Theme.background)
                 .listRowSeparatorTint(Theme.border)

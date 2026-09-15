@@ -55,6 +55,13 @@ impl SessionRecord {
 const MAX_EXITED_RECORDS: usize = 512;
 const EXITED_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// 标识前缀在一个工作区内的匹配结果。「零」与「不在本工作区」对调用方是同一件事，故不区分。
+pub(crate) enum PrefixMatch<'a> {
+    None,
+    Unique(&'a str, &'a SessionRecord),
+    Ambiguous,
+}
+
 #[derive(Default)]
 pub(crate) struct SessionLedger {
     by_session: HashMap<String, SessionRecord>,
@@ -226,6 +233,41 @@ impl SessionLedger {
         Some((session_id.as_str(), record))
     }
 
+    /// 按终端标识的 id 前缀找 task——**候选集只有 `workspace_id` 这一个工作区的终端**。
+    ///
+    /// 范围不是整个账本，这一点是本方法存在的全部理由：本地命令刻意把「不在本工作区」与
+    /// 「不存在」收敛成同一句错（见 `agent_ctl::resolve_local_target`），若跨工作区做前缀匹配，
+    /// 两个不同工作区里前缀相同的终端会撞出一条「有歧义」——那等于告诉调用方别处还有一个。
+    /// 歧义也因此只在本工作区内判定。
+    ///
+    /// 与 [`SessionLedger::task`] 分开：那是精确 `HashMap` 命中，它上面挂着一组精确匹配的用例，
+    /// 不为标识改它的语义。
+    pub fn task_by_prefix<'a>(&'a self, prefix: &str, workspace_id: &str) -> PrefixMatch<'a> {
+        if prefix.is_empty() || workspace_id.is_empty() {
+            return PrefixMatch::None;
+        }
+        let mut found: Option<(&str, &SessionRecord)> = None;
+        for (task_id, session_id) in &self.by_task {
+            if !task_id.to_ascii_lowercase().starts_with(prefix) {
+                continue;
+            }
+            let Some(record) = self.by_session.get(session_id) else {
+                continue;
+            };
+            if record.workspace_id != workspace_id {
+                continue;
+            }
+            if found.is_some() {
+                return PrefixMatch::Ambiguous;
+            }
+            found = Some((session_id.as_str(), record));
+        }
+        match found {
+            Some((session_id, record)) => PrefixMatch::Unique(session_id, record),
+            None => PrefixMatch::None,
+        }
+    }
+
     fn prune(&mut self) {
         let now = Instant::now();
         let stale: Vec<String> = self
@@ -352,6 +394,56 @@ mod tests {
         assert_eq!(ledger.move_all_workspaces("ws-b", "ws-a"), 0);
         assert_eq!(ledger.move_all_workspaces("", "ws-a"), 0);
         assert_eq!(ledger.move_all_workspaces("ws-a", "ws-a"), 0);
+    }
+
+    /// 用例里只关心「唯一 / 有歧义 / 没有」，把匹配结果压成一个好断言的形状。
+    fn matched<'a>(result: PrefixMatch<'a>) -> Option<&'a str> {
+        match result {
+            PrefixMatch::Unique(session_id, _) => Some(session_id),
+            PrefixMatch::None => None,
+            PrefixMatch::Ambiguous => Some("<ambiguous>"),
+        }
+    }
+
+    #[test]
+    fn handle_prefix_finds_exactly_one_terminal_of_the_calling_workspace() {
+        let mut ledger = SessionLedger::default();
+        ledger.remember_create("s1", "9e21c4d0-1111-2222-3333-444455556666", "ws-a");
+        ledger.remember_create("s2", "3f2a1b7c-aaaa-bbbb-cccc-ddddeeeeffff", "ws-a");
+        assert_eq!(matched(ledger.task_by_prefix("9e21c4d0", "ws-a")), Some("s1"));
+        // 大小写不敏感：标识已归一成小写，task id 也按小写比
+        assert_eq!(matched(ledger.task_by_prefix("3f2a", "ws-a")), Some("s2"));
+        // 前缀谁也不命中 = 不存在
+        assert_eq!(matched(ledger.task_by_prefix("deadbeef", "ws-a")), None);
+        // 空参数不许退化成「全匹配」
+        assert_eq!(matched(ledger.task_by_prefix("", "ws-a")), None);
+        assert_eq!(matched(ledger.task_by_prefix("9e21c4d0", "")), None);
+    }
+
+    #[test]
+    fn handle_prefix_never_reaches_another_workspace_even_to_report_ambiguity() {
+        let mut ledger = SessionLedger::default();
+        ledger.remember_create("s-here", "9e21c4d0-1111-2222-3333-444455556666", "ws-a");
+        ledger.remember_create("s-there", "9e21c4d0-9999-8888-7777-666655554444", "ws-b");
+        // 同前缀在别的工作区里也有一个：本工作区仍然唯一，绝不报歧义（那等于泄漏它的存在）
+        assert_eq!(matched(ledger.task_by_prefix("9e21c4d0", "ws-a")), Some("s-here"));
+        assert_eq!(matched(ledger.task_by_prefix("9e21c4d0", "ws-b")), Some("s-there"));
+        // 归属未知的会话（热升级后对账学来的）不在任何工作区的候选集里
+        ledger.mark_started("s-legacy", "9e21c4d0-0000-0000-0000-000000000000");
+        assert_eq!(matched(ledger.task_by_prefix("9e21c4d0", "ws-a")), Some("s-here"));
+    }
+
+    #[test]
+    fn handle_prefix_reports_ambiguity_inside_one_workspace() {
+        let mut ledger = SessionLedger::default();
+        ledger.remember_create("s1", "9e21c4d0-1111-2222-3333-444455556666", "ws-a");
+        ledger.remember_create("s2", "9e21c4d0-9999-8888-7777-666655554444", "ws-a");
+        assert_eq!(matched(ledger.task_by_prefix("9e21c4d0", "ws-a")), Some("<ambiguous>"));
+        // 撞车时的出路是完整 ID——它不是标识，走的是 `task` 那条精确命中
+        assert_eq!(
+            ledger.task("9e21c4d0-1111-2222-3333-444455556666").unwrap().0,
+            "s1"
+        );
     }
 
     #[test]

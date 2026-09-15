@@ -305,3 +305,127 @@ test("device exec：不是终端——跑完之后账号快照里没有多出任
   assert.equal(after.ok, true, after.error);
   assert.equal(after.value.terminals.length, before.value.terminals.length, "exec 不产生 task 记录");
 });
+
+// ===== entity handles: `coflux:<kind>:<hex>` =====
+// The account API accepts a handle wherever it accepts an id, and returns `ref` on every entity it
+// returns. Both halves are wire contract only: nothing in the product shows a handle as UI text, so a
+// silent break here surfaces as an agent's paste no longer working, long after the change.
+
+/** The same generation rule the server uses: kind token + the UUID's first 8 hex characters. */
+const handleOf = (kind, id) => `coflux:${kind}:${id.slice(0, 8)}`;
+const HANDLE_SHAPE = /^coflux:(device|project|workspace|terminal):[0-9a-f]{8}$/;
+
+test("entity handle：快照里每个实体都带 ref，id 字段原名原值不动", async () => {
+  const device = await openNativeDevice(stack);
+  const ws = await importWorkspace(device);
+  const snapshot = await accountCommand({ op: "snapshot" });
+  assert.equal(snapshot.ok, true, snapshot.error);
+  const { devices, projects, workspaces, terminals } = snapshot.value;
+
+  const dev = devices.find((d) => d.daemonId === stack.daemonId);
+  assert.ok(dev, "快照里有本设备");
+  assert.equal(dev.ref, handleOf("device", stack.daemonId));
+  assert.equal(dev.daemonId, stack.daemonId, "device 的 id 字段保持 UUID");
+
+  const workspace = workspaces.find((w) => w.id === ws.id);
+  assert.ok(workspace, "快照里有刚导入的工作区");
+  assert.equal(workspace.ref, handleOf("workspace", ws.id));
+  assert.equal(workspace.id, ws.id, "workspace 的 id 字段保持 UUID");
+
+  const project = projects.find((p) => p.id === workspace.projectId);
+  assert.ok(project, "快照里有该工作区所属项目");
+  assert.equal(project.ref, handleOf("project", project.id));
+
+  for (const entity of [...devices, ...projects, ...workspaces, ...terminals]) {
+    assert.match(entity.ref ?? "", HANDLE_SHAPE, "每个实体的 ref 都是 coflux:<kind>:<8 位小写 hex>");
+  }
+  device.close();
+});
+
+test("entity handle：device handle 与 UUID 驱动同一条命令，回带的是解析后的 UUID", async () => {
+  const byId = await deviceExec({ command: "pwd" });
+  assert.equal(byId.ok, true, byId.error);
+
+  const byHandle = await accountCommand({ op: "device.exec", deviceId: handleOf("device", stack.daemonId), command: "pwd" });
+  assert.equal(byHandle.ok, true, byHandle.error);
+  assert.equal(byHandle.value.exitCode, byId.value.exitCode);
+  assert.equal(byHandle.value.stdout, byId.value.stdout, "handle 与 UUID 打到同一台设备");
+  assert.equal(byHandle.value.cwd, byId.value.cwd);
+  assert.equal(byHandle.value.deviceId, stack.daemonId, "回带 UUID，不是调用方写的 handle");
+  assert.equal(byHandle.value.ref, handleOf("device", stack.daemonId));
+
+  // 输入大小写不敏感，归一化成小写后再解析。
+  const upper = await accountCommand({ op: "device.exec", deviceId: handleOf("device", stack.daemonId).toUpperCase(), command: "pwd" });
+  assert.equal(upper.ok, true, upper.error);
+  assert.equal(upper.value.deviceId, stack.daemonId);
+});
+
+test("entity handle：workspace handle 与 UUID 在 rename 上等价，单实体回带也带 ref", async () => {
+  const device = await openNativeDevice(stack);
+  const ws = await importWorkspace(device);
+
+  const byId = await accountCommand({ op: "workspace.rename", workspaceId: ws.id, name: "renamed-by-uuid" });
+  assert.equal(byId.ok, true, byId.error);
+  assert.equal(byId.value.id, ws.id);
+  assert.equal(byId.value.name, "renamed-by-uuid");
+  assert.equal(byId.value.ref, handleOf("workspace", ws.id));
+
+  const byHandle = await accountCommand({ op: "workspace.rename", workspaceId: handleOf("workspace", ws.id), name: "renamed-by-handle" });
+  assert.equal(byHandle.ok, true, byHandle.error);
+  assert.equal(byHandle.value.id, ws.id, "handle 解析到同一个工作区");
+  assert.equal(byHandle.value.name, "renamed-by-handle", "handle 与 UUID 驱动同一次改名");
+  assert.equal(byHandle.value.ref, handleOf("workspace", ws.id));
+  device.close();
+});
+
+test("entity handle：终端全程用 handle 寻址，嵌套实体同样带 ref", async () => {
+  const device = await openNativeDevice(stack);
+  const ws = await importWorkspace(device);
+
+  // terminal.new 的 workspaceId 收 handle；回带的 Task 是嵌套单实体，也要带 ref。
+  const created = await accountCommand({ op: "terminal.new", workspaceId: handleOf("workspace", ws.id), title: "handle-test" });
+  assert.equal(created.ok, true, created.error);
+  const terminalId = created.value.id;
+  assert.equal(created.value.ref, handleOf("terminal", terminalId));
+  assert.equal(created.value.workspaceId, ws.id, "workspace handle 解析到同一个工作区");
+
+  const read = await accountCommand({ op: "terminal.read", terminalId: handleOf("terminal", terminalId), lines: 5 });
+  assert.equal(read.ok, true, read.error);
+  assert.equal(read.value.task.id, terminalId, "terminal handle 解析到同一个终端");
+  assert.equal(read.value.task.ref, handleOf("terminal", terminalId));
+
+  const stopped = await accountCommand({ op: "terminal.stop", terminalId: handleOf("terminal", terminalId) });
+  assert.equal(stopped.ok, true, stopped.error);
+  assert.equal(stopped.value.task.id, terminalId);
+  assert.equal(stopped.value.task.ref, handleOf("terminal", terminalId), "terminal.stop 的 {task} 也带 ref");
+  device.close();
+});
+
+test("entity handle：种类不符的 handle 当场被拒，错误同时点出两个种类", async () => {
+  const workspaceHandle = handleOf("workspace", "0123456789abcdef");
+
+  const onDevice = await accountCommand({ op: "device.exec", deviceId: workspaceHandle, command: "true" });
+  assert.equal(onDevice.ok, false, "工作区标识不能当设备用");
+  assert.match(onDevice.error, /工作区标识/, "错误点出标识自己的种类");
+  assert.match(onDevice.error, /设备/, "错误点出这里要的种类");
+
+  const onTerminal = await accountCommand({ op: "terminal.stop", terminalId: workspaceHandle });
+  assert.equal(onTerminal.ok, false, "工作区标识不能当终端用");
+  assert.match(onTerminal.error, /工作区标识/);
+  assert.match(onTerminal.error, /终端/);
+});
+
+test("entity handle：账号下没有对应实体的 handle 报未知，不落到相邻实体上", async () => {
+  const unknownDevice = await accountCommand({ op: "device.exec", deviceId: "coflux:device:deadbeef", command: "true" });
+  assert.equal(unknownDevice.ok, false);
+  assert.match(unknownDevice.error, /没有对应的设备/);
+
+  const unknownTerminal = await accountCommand({ op: "terminal.read", terminalId: "coflux:terminal:deadbeef", lines: 5 });
+  assert.equal(unknownTerminal.ok, false);
+  assert.match(unknownTerminal.error, /没有对应的终端/);
+
+  // 不是 handle 的字符串原样透传，走原来的归属校验，措辞不变。
+  const plain = await accountCommand({ op: "terminal.read", terminalId: randomUUID(), lines: 5 });
+  assert.equal(plain.ok, false);
+  assert.match(plain.error, /不存在或不属于当前账号/);
+});

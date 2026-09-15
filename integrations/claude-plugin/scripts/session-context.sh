@@ -22,6 +22,9 @@
 # and a shell watchdog kills it regardless, which also covers a `coflux` too old to know that
 # variable. There is no timeout(1) on macOS /bin/sh, hence the background-job-plus-watchdog dance.
 #
+# Each coordinate is also printed as an entity handle (`coflux:<kind>:<first 8 hex>`), added after
+# the id lines and never replacing them — see `handle_line` below for the shared format.
+#
 # Contract: outside coflux (COFLUX_WORKSPACE_ID empty or unset) print nothing and exit 0. Never
 # write anything else to stdout, and keep the block starting with "<" so no host mistakes it for
 # JSON. Everything about the daemon is best effort: no coflux, daemon down, daemon too old for the
@@ -51,6 +54,17 @@ coflux_locate() {
   rm -f "$out"
 }
 
+# One `coflux:<kind>:<first 8 hex>` line for a coordinate, labelled by kind. An empty coordinate
+# (a directory workspace has no project) contributes no line rather than a truncated handle. This is
+# the second <coflux-session> emitter: the device-level agent integration (`handle_lines` in
+# crates/cli/src/integration.rs) prints these very lines, and the two must not drift — an agent has
+# to see the same coordinates whichever way its terminal was started. The ids above are never
+# replaced; the handles are added after them.
+handle_line() {
+  [ -n "$3" ] || return 0
+  printf '%s handle: coflux:%s:%s\n' "$1" "$2" "$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
+}
+
 # The hook runs in the session's current directory, which is exactly the directory to locate.
 WORKSPACE_ID="${COFLUX_WORKSPACE_ID}"
 if command -v coflux >/dev/null 2>&1; then
@@ -67,7 +81,17 @@ printf '%s\n' \
   "COFLUX_PROJECT_ID=${COFLUX_PROJECT_ID:-}" \
   "COFLUX_WORKSPACE_ID=${WORKSPACE_ID}" \
   "COFLUX_TASK_ID=${COFLUX_TASK_ID:-}" \
-  "COFLUX_SESSION_ID=${COFLUX_SESSION_ID:-}" \
+  "COFLUX_SESSION_ID=${COFLUX_SESSION_ID:-}"
+
+if [ -n "${COFLUX_DEVICE_ID:-}${COFLUX_PROJECT_ID:-}${WORKSPACE_ID}${COFLUX_TASK_ID:-}" ]; then
+  handle_line Device device "${COFLUX_DEVICE_ID:-}"
+  handle_line Project project "${COFLUX_PROJECT_ID:-}"
+  handle_line Workspace workspace "${WORKSPACE_ID}"
+  handle_line Terminal terminal "${COFLUX_TASK_ID:-}"
+  printf '%s\n' 'Handles are interchangeable with the ids above in every coflux command.'
+fi
+
+printf '%s\n' \
   '(COFLUX_TASK_ID is this terminal. An empty COFLUX_PROJECT_ID means a directory workspace without a git repository.)' \
   'Rule: in the current workspace use local `coflux terminal new|list|read|wait|send`, `coflux progress`, `coflux notify` and `coflux ports`. Across workspaces or devices use account CLI: `coflux workspace list/new`, `coflux terminal new --workspace <id>` and `coflux terminal read/send/wait <id> --remote`.' \
   'The workspace id above is where this terminal belongs right now. Enter a git worktree and coflux follows you: the terminal moves under that worktree in the sidebar, registering it as a child workspace if needed. Plain `cd` does not move it, but the local commands still act on the workspace your cwd is in: `coflux workspace` prints both.' \

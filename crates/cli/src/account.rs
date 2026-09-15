@@ -1,5 +1,6 @@
 //! 账号客户端：短命令连接公共操作层；结束命令不会停止任何本机或远端终端。
 use crate::args::ParsedArgs;
+use crate::handle;
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
@@ -333,17 +334,33 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
             "ports" => "ports",
             _ => unreachable!(),
         };
+        // 这两个筛选是**客户端字符串比较**，不经中心解析：标识不在这里认，就会一个都匹配不上、
+        // 打印一个空列表还不报错。类型给错（拿工作区标识填 --device）同样先说清楚再说。
+        if let Some(target) = args.string("device") {
+            handle::check_filter("device", handle::HandleKind::Device, target)?;
+        }
+        if let Some(target) = args.string("workspace") {
+            handle::check_filter("workspace", handle::HandleKind::Workspace, target)?;
+        }
         let items = value[field].as_array().ok_or("账号快照无效")?;
         value = Value::Array(
             items
                 .iter()
                 .filter(|item| {
-                    args.string("device")
-                        .map_or(true, |target| item["daemonId"] == target)
-                        && args.string("workspace").map_or(true, |target| {
-                            item["workspaceId"] == target
-                                || (command == "workspace" && item["id"] == target)
-                        })
+                    args.string("device").map_or(true, |target| {
+                        handle::matches(target, item["daemonId"].as_str(), handle::HandleKind::Device)
+                    }) && args.string("workspace").map_or(true, |target| {
+                        handle::matches(
+                            target,
+                            item["workspaceId"].as_str(),
+                            handle::HandleKind::Workspace,
+                        ) || (command == "workspace"
+                            && handle::matches(
+                                target,
+                                item["id"].as_str(),
+                                handle::HandleKind::Workspace,
+                            ))
+                    })
                 })
                 .cloned()
                 .collect(),

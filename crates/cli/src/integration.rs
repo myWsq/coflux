@@ -1,4 +1,5 @@
 //! Per-invocation integration. The launcher may update; hooks and skill files may not.
+use crate::handle;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -202,6 +203,34 @@ fn record(state: &str, host: &str) {
     previous["updatedAt"] = json!(now().to_string());
     let _ = atomic_json(&path, &previous);
 }
+/// The handle block of `<coflux-session>`: one `coflux:<kind>:<short>` line per coordinate,
+/// labelled by kind, printed **after** the id lines and never replacing them.
+///
+/// The plugin's shell hook (`integrations/claude-plugin/scripts/session-context.sh`) is the other
+/// emitter of this block and prints these lines identically, line for line — an agent must see the
+/// same coordinates whichever way its terminal was started. A coordinate that is empty (a directory
+/// workspace has no project) contributes no line rather than a truncated handle; when every
+/// coordinate is empty the whole block, closing sentence included, disappears.
+fn handle_lines(device: &str, project: &str, workspace: &str, terminal: &str) -> String {
+    let mut lines = Vec::new();
+    for (label, kind, id) in [
+        ("Device", handle::HandleKind::Device, device),
+        ("Project", handle::HandleKind::Project, project),
+        ("Workspace", handle::HandleKind::Workspace, workspace),
+        ("Terminal", handle::HandleKind::Terminal, terminal),
+    ] {
+        let text = handle::of(kind, id);
+        if !text.is_empty() {
+            lines.push(format!("{label} handle: {text}"));
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines.push("Handles are interchangeable with the ids above in every coflux command.".into());
+    format!("\n{}", lines.join("\n"))
+}
+
 fn emit_context(root: &Path, workspace: &Value, host: &str, event: &str) {
     let workspace_id = workspace["workspaceId"].as_str().unwrap_or_default();
     if let Some(path) = status_file() {
@@ -222,7 +251,13 @@ fn emit_context(root: &Path, workspace: &Value, host: &str, event: &str) {
     } else {
         String::new()
     };
-    let context = format!("<coflux-session>\nYou are in a Coflux terminal. The user can watch and take over.\nDevice: {}\nProject: {}\nWorkspace: {}\nTerminal: {}\nSession: {}\nUse `coflux` for local terminal/progress/notify/ports operations and account operations across devices. Query `coflux workspace` after changing directories; these coordinates are a snapshot.{}\nIntegration: {}\nRead {} for the complete Coflux skill.\n</coflux-session>",env("COFLUX_DEVICE_ID"),env("COFLUX_PROJECT_ID"),workspace_id,env("COFLUX_TASK_ID"),env("COFLUX_SESSION_ID"),selection,root.file_name().unwrap_or_default().to_string_lossy(),root.join("skills/coflux/SKILL.md").display());
+    let handles = handle_lines(
+        &env("COFLUX_DEVICE_ID"),
+        &env("COFLUX_PROJECT_ID"),
+        workspace_id,
+        &env("COFLUX_TASK_ID"),
+    );
+    let context = format!("<coflux-session>\nYou are in a Coflux terminal. The user can watch and take over.\nDevice: {}\nProject: {}\nWorkspace: {}\nTerminal: {}\nSession: {}{}\nUse `coflux` for local terminal/progress/notify/ports operations and account operations across devices. Query `coflux workspace` after changing directories; these coordinates are a snapshot.{}\nIntegration: {}\nRead {} for the complete Coflux skill.\n</coflux-session>",env("COFLUX_DEVICE_ID"),env("COFLUX_PROJECT_ID"),workspace_id,env("COFLUX_TASK_ID"),env("COFLUX_SESSION_ID"),handles,selection,root.file_name().unwrap_or_default().to_string_lossy(),root.join("skills/coflux/SKILL.md").display());
     if event == "SessionStart" {
         println!("{context}");
     } else if host == "claude" || host == "codex" {
@@ -428,5 +463,42 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("coflux agent run <claude|codex> -- [agent arguments]\ncoflux agent prepare\ncoflux agent status\nSet COFLUX_AGENT_INTEGRATION=off to bypass automatic integration.");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact lines the plugin's shell hook must print too
+    /// (`integrations/claude-plugin/scripts/session-context.sh`). Both emitters, one format.
+    #[test]
+    fn session_block_handles_are_labelled_by_kind_and_added_after_the_ids() {
+        let lines = handle_lines(
+            "b6767697-60b2-4700-a304-1404bf03c675",
+            "c66dc1d4-5955-4ba5-b41e-9e37f364eb95",
+            "3f2a1b7c-aaaa-bbbb-cccc-ddddeeeeffff",
+            "9e21c4d0-1111-2222-3333-444455556666",
+        );
+        assert_eq!(
+            lines,
+            "\nDevice handle: coflux:device:b6767697\nProject handle: coflux:project:c66dc1d4\nWorkspace handle: coflux:workspace:3f2a1b7c\nTerminal handle: coflux:terminal:9e21c4d0\nHandles are interchangeable with the ids above in every coflux command."
+        );
+    }
+
+    #[test]
+    fn a_missing_coordinate_contributes_no_line_instead_of_half_a_handle() {
+        // A directory workspace has no project: that line goes away, the others stay.
+        let lines = handle_lines(
+            "b6767697-60b2-4700-a304-1404bf03c675",
+            "",
+            "3f2a1b7c-aaaa-bbbb-cccc-ddddeeeeffff",
+            "",
+        );
+        assert!(!lines.contains("coflux:project:"), "{lines}");
+        assert!(!lines.contains("Terminal handle"), "{lines}");
+        assert!(lines.contains("Device handle: coflux:device:b6767697"), "{lines}");
+        assert!(lines.contains("Workspace handle: coflux:workspace:3f2a1b7c"), "{lines}");
+        assert_eq!(handle_lines("", "", "", ""), "", "一个坐标都没有就整块不印");
     }
 }

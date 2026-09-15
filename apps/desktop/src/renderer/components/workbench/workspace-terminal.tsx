@@ -5,10 +5,12 @@ import { Bot, FileDiff, GitBranch, History, LoaderCircle, Plus, SquareTerminal, 
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
+import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { ChangesView } from "@/components/workbench/changes-view";
 import { DRAG_REGION_STYLE, NO_DRAG_REGION_STYLE } from "@/components/workbench/drag-region";
+import { copyEntityHandle } from "@/components/workbench/entity-handle";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
@@ -428,50 +430,63 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
             // OSC 标题非空即覆盖显示；EXITED 后 sessionId 清空 → 自动回落 task.title。
             const tabTitle = (task.sessionId && checkpointTitles[task.sessionId]) || task.title;
             return (
-              <div
-                key={task.id}
-                className={cn(
-                  "group flex h-7 max-w-52 shrink-0 items-center rounded-md text-sm transition-colors",
-                  isActive ? "bg-accent text-foreground" : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
-                )}
-                // Keep tab selection and close controls outside the native drag region.
-                style={NO_DRAG_REGION_STYLE}
-              >
-                  <button
-                    className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left"
-                    onClick={() => requestActivation(task.id, state === "detached")}
-                  >
-                    {state === "attaching" ? (
-                      <LoaderCircle className="size-3 shrink-0 animate-spin text-muted-foreground" />
-                    ) : state === "detached" ? (
-                      <Unplug className="size-3 shrink-0 text-warning" />
-                    ) : agentEntry ? (
-                      <AgentGlyph
-                        agent={agentEntry.agent}
-                        state={agentEntry.state}
-                        seen={seenDone}
-                        className={isActive ? "opacity-90" : "opacity-70"}
-                      />
-                    ) : (
-                      <SquareTerminal className={cn("size-3 shrink-0", isActive ? "opacity-90" : "opacity-50")} />
+              // The flex-item box stays on an outer wrapper rather than on the tab itself:
+              // ContextMenu inserts its own trigger element between the two, and that element
+              // cannot be styled from here (its `className`/`style` props address the menu
+              // surface, and `triggerXstyle` needs StyleX, which this app does not compile).
+              // Without shrink-0 out here the tabs would squeeze instead of the strip scrolling.
+              // The whole tab also stays outside the native drag region, as before.
+              <div key={task.id} className="shrink-0" style={NO_DRAG_REGION_STYLE}>
+                <ContextMenu
+                  label={`终端「${tabTitle || "终端"}」操作`}
+                  size="sm"
+                  // Handle copy (plan 20260914-entity-handles): a terminal's handle is the task
+                  // id's first 8 hex characters; it appears here and nowhere else on screen.
+                  items={[{ label: "复制标识", onClick: () => copyEntityHandle("terminal", task.id) }]}
+                >
+                  <div
+                    className={cn(
+                      "group flex h-7 max-w-52 items-center rounded-md text-sm transition-colors",
+                      isActive ? "bg-accent text-foreground" : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
                     )}
-                    {tabTitle === task.title || !tabTitle ? (
-                      <span className="truncate">{tabTitle || "终端"}</span>
-                    ) : (
-                      // OSC 标题往往比 tab 宽，悬浮给全文（设计约定：Tooltip 组件，不用原生 title）
-                      <Tooltip content={tabTitle} placement="below">
-                        <span className="truncate">{tabTitle}</span>
-                      </Tooltip>
-                    )}
-                  </button>
-                <Tooltip content={`关闭终端 ${modPrefix}W`} placement="below">
-                  <button
-                    className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
-                    onClick={() => onCloseTask(task)}
                   >
-                    <X className="size-3" />
-                  </button>
-                </Tooltip>
+                    <button
+                      className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left"
+                      onClick={() => requestActivation(task.id, state === "detached")}
+                    >
+                      {state === "attaching" ? (
+                        <LoaderCircle className="size-3 shrink-0 animate-spin text-muted-foreground" />
+                      ) : state === "detached" ? (
+                        <Unplug className="size-3 shrink-0 text-warning" />
+                      ) : agentEntry ? (
+                        <AgentGlyph
+                          agent={agentEntry.agent}
+                          state={agentEntry.state}
+                          seen={seenDone}
+                          className={isActive ? "opacity-90" : "opacity-70"}
+                        />
+                      ) : (
+                        <SquareTerminal className={cn("size-3 shrink-0", isActive ? "opacity-90" : "opacity-50")} />
+                      )}
+                      {tabTitle === task.title || !tabTitle ? (
+                        <span className="truncate">{tabTitle || "终端"}</span>
+                      ) : (
+                        // OSC 标题往往比 tab 宽，悬浮给全文（设计约定：Tooltip 组件，不用原生 title）
+                        <Tooltip content={tabTitle} placement="below">
+                          <span className="truncate">{tabTitle}</span>
+                        </Tooltip>
+                      )}
+                    </button>
+                    <Tooltip content={`关闭终端 ${modPrefix}W`} placement="below">
+                      <button
+                        className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                        onClick={() => onCloseTask(task)}
+                      >
+                        <X className="size-3" />
+                      </button>
+                    </Tooltip>
+                  </div>
+                </ContextMenu>
               </div>
             );
           })}

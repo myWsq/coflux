@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 
 use crate::args::ParsedArgs;
 use crate::gateway;
+use crate::handle;
 use crate::text::{strip_ansi, tail_lines};
 
 const DEFAULT_READ_LINES: usize = 200;
@@ -160,6 +161,16 @@ fn command_suffix(value: &Value) -> String {
     suffix
 }
 
+/// 一行终端的第一列：标识。daemon 已经在载荷里给了 `ref`；它没给（CLI 比 daemon 新）就按同一条
+/// 规则从 `taskId` 现算一个——生成规则是纯拼接，两边算出来的东西一样。
+fn row_handle(terminal: &Value) -> String {
+    let given = field_str(terminal, "ref");
+    if !given.is_empty() {
+        return given.to_string();
+    }
+    handle::of(handle::HandleKind::Terminal, field_str(terminal, "taskId"))
+}
+
 pub fn render_terminal_list(result: &Value) -> String {
     let terminals = result
         .get("terminals")
@@ -174,7 +185,7 @@ pub fn render_terminal_list(result: &Value) -> String {
         .map(|t| {
             format!(
                 "{}  {}{}{}  {}",
-                field_str(t, "taskId"),
+                row_handle(t),
                 field_str(t, "status"),
                 exit_suffix(t),
                 command_suffix(t),
@@ -396,11 +407,15 @@ pub fn run_progress(args: &ParsedArgs) {
 /* -------------------------------- workspace ------------------------------ */
 // 「我在哪」与「跟着我搬」（plan 102 / 103）。三条都打一行 JSON，字段稳定——插件脚本按它比对。
 
+/// `ref` / `owningRef` 原样透传 daemon 的字段：daemon 旧到不给就跟着省略（`json_line` 的既有
+/// 规则），读这行的插件脚本（session-moved.mjs）只取 workspaceId，多两个键动不了它。
 pub fn render_workspace_current(result: &Value) -> String {
     json_line(&[
         ("workspaceId", passthrough(result, "workspaceId")),
+        ("ref", passthrough(result, "ref")),
         ("path", passthrough(result, "path")),
         ("owningWorkspaceId", passthrough(result, "owningWorkspaceId")),
+        ("owningRef", passthrough(result, "owningRef")),
         ("moved", Some(Value::from(field_bool(result, "moved")))),
     ])
 }
@@ -821,21 +836,44 @@ mod tests {
         );
         assert_eq!(normalize_command(Some("   ")), "");
         assert_eq!(normalize_command(Some("pnpm test")), "pnpm test");
+        // `terminal list` 的行首在两版里都是标识（node 侧见 coflux.mjs 的 cmdTerminal `list` 分支
+        // 与 account-client.mjs 的 entityHandle）：第一列是标识，后面的列一字未动。
+        let row = json!({ "terminals": [{ "taskId": "9e21c4d0-1111-2222-3333-444455556666", "ref": "coflux:terminal:9e21c4d0", "status": "running", "title": "构建" }] });
+        assert_eq!(render_terminal_list(&row), "coflux:terminal:9e21c4d0  running  构建");
     }
 
     #[test]
     fn terminal_list_rows_show_busy_and_last_exit_for_live_shells() {
         assert_eq!(render_terminal_list(&json!({ "terminals": [] })), "本工作区暂无终端");
         let result = json!({ "terminals": [
-            { "taskId": "a", "status": "running", "title": "构建", "integrated": true, "busy": true, "commandSeq": 2, "lastCommandExitCode": 0 },
-            { "taskId": "b", "status": "exited", "exitCode": 0, "title": "测试" },
-            { "taskId": "c", "status": "exited", "exitCode": null, "title": "" },
-            { "taskId": "d", "status": "running", "title": "空闲", "integrated": true, "busy": false, "commandSeq": 0, "lastCommandExitCode": null },
-            { "taskId": "e", "status": "running", "title": "未集成", "integrated": false, "busy": false },
+            { "taskId": "aaaaaaaa-1111-2222-3333-444455556666", "ref": "coflux:terminal:aaaaaaaa", "status": "running", "title": "构建", "integrated": true, "busy": true, "commandSeq": 2, "lastCommandExitCode": 0 },
+            { "taskId": "bbbbbbbb-1111-2222-3333-444455556666", "ref": "coflux:terminal:bbbbbbbb", "status": "exited", "exitCode": 0, "title": "测试" },
+            { "taskId": "cccccccc-1111-2222-3333-444455556666", "ref": "coflux:terminal:cccccccc", "status": "exited", "exitCode": null, "title": "" },
+            { "taskId": "dddddddd-1111-2222-3333-444455556666", "ref": "coflux:terminal:dddddddd", "status": "running", "title": "空闲", "integrated": true, "busy": false, "commandSeq": 0, "lastCommandExitCode": null },
+            { "taskId": "eeeeeeee-1111-2222-3333-444455556666", "ref": "coflux:terminal:eeeeeeee", "status": "running", "title": "未集成", "integrated": false, "busy": false },
         ] });
         assert_eq!(
             render_terminal_list(&result),
-            "a  running busy last=0  构建\nb  exited exit=0  测试\nc  exited  \nd  running idle  空闲\ne  running  未集成"
+            "coflux:terminal:aaaaaaaa  running busy last=0  构建\ncoflux:terminal:bbbbbbbb  exited exit=0  测试\ncoflux:terminal:cccccccc  exited  \ncoflux:terminal:dddddddd  running idle  空闲\ncoflux:terminal:eeeeeeee  running  未集成"
+        );
+    }
+
+    #[test]
+    fn terminal_list_leads_with_the_handle_even_against_a_daemon_that_sends_none() {
+        // 行首是标识而不是裸 UUID：这是 agent 读得最多的一行，标识既更短又自带类型，
+        // 且因为等价规则可以直接抄进下一条命令。
+        let old_daemon = json!({ "terminals": [
+            { "taskId": "9E21C4D0-1111-2222-3333-444455556666", "status": "running", "title": "构建" },
+        ] });
+        assert_eq!(
+            render_terminal_list(&old_daemon),
+            "coflux:terminal:9e21c4d0  running  构建",
+            "daemon 没给 ref 就按同一条规则现算，不会退回打裸 id"
+        );
+        // 载荷里的 ref 优先（同一条规则，值必然一致）
+        assert_eq!(
+            row_handle(&json!({ "taskId": "9e21c4d0-1111-2222-3333-444455556666", "ref": "coflux:terminal:9e21c4d0" })),
+            "coflux:terminal:9e21c4d0"
         );
     }
 
@@ -895,10 +933,15 @@ mod tests {
 
     #[test]
     fn workspace_json_lines_keep_node_field_order_and_omit_missing() {
-        let current = json!({ "ok": true, "workspaceId": "w1", "path": "/a", "owningWorkspaceId": "w0", "moved": true });
+        let current = json!({ "ok": true, "workspaceId": "w1", "ref": "coflux:workspace:3f2a1b7c", "path": "/a", "owningWorkspaceId": "w0", "owningRef": "coflux:workspace:aaaabbbb", "moved": true });
         assert_eq!(
             render_workspace_current(&current),
-            r#"{"workspaceId":"w1","path":"/a","owningWorkspaceId":"w0","moved":true}"#
+            r#"{"workspaceId":"w1","ref":"coflux:workspace:3f2a1b7c","path":"/a","owningWorkspaceId":"w0","owningRef":"coflux:workspace:aaaabbbb","moved":true}"#
+        );
+        // 旧 daemon 不给标识：两个键一起省略，原有字段一字未动
+        assert_eq!(
+            render_workspace_current(&json!({ "ok": true, "workspaceId": "w1", "path": "/a", "owningWorkspaceId": "w0", "moved": false })),
+            r#"{"workspaceId":"w1","path":"/a","owningWorkspaceId":"w0","moved":false}"#
         );
         // 旧 daemon 少字段：键省略、布尔仍落 false
         assert_eq!(render_workspace_current(&json!({ "ok": true })), r#"{"moved":false}"#);

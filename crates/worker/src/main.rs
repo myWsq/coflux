@@ -11,6 +11,7 @@ mod creds;
 mod device;
 mod gateway;
 mod git;
+mod handle;
 mod hook;
 mod local_auth;
 mod observed;

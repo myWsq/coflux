@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // coflux：账号与本地、跨设备业务操作；不负责宿主生命周期。
-import { handlesAccountCommand, runAccountCommand } from "./account-client.mjs";
+import { entityHandle, handlesAccountCommand, runAccountCommand } from "./account-client.mjs";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
@@ -206,6 +206,15 @@ function tailLines(text, n) {
   return lines.slice(-n).join("\n");
 }
 
+/**
+ * 一行终端的第一列：标识。daemon 已经在载荷里给了 `ref`；它没给（CLI 比 daemon 新）就按同一条
+ * 规则从 `taskId` 现算一个——生成规则是纯拼接，两边算出来的东西一样。
+ * 与 Rust 版 `row_handle`（crates/cli/src/commands.rs）逐字对齐。
+ */
+function rowHandle(t) {
+  return (typeof t.ref === "string" && t.ref) || entityHandle("terminal", t.taskId);
+}
+
 /** ` busy` / ` idle` plus ` last=<code>` for a live, instrumented terminal; nothing otherwise. */
 function commandSuffix(t) {
   if (!t.integrated) return "";
@@ -256,7 +265,7 @@ async function cmdTerminal(values) {
     if (!terminals.length) return void console.log("本工作区暂无终端");
     for (const t of terminals) {
       const exit = t.exitCode === undefined || t.exitCode === null ? "" : ` exit=${t.exitCode}`;
-      console.log(`${t.taskId}  ${t.status}${exit}${commandSuffix(t)}  ${t.title}`);
+      console.log(`${rowHandle(t)}  ${t.status}${exit}${commandSuffix(t)}  ${t.title}`);
     }
   } else if (sub === "read") {
     const taskId = positionals[2];
@@ -330,10 +339,14 @@ async function cmdWorkspace() {
   const sub = positionals[1];
   if (!sub) {
     const result = await agentPost({ action: "workspace.current" });
+    // ref / owningRef 原样透传：daemon 旧到不给就是 undefined，JSON.stringify 直接省掉这两个键
+    // （与 Rust 版 render_workspace_current 同序同省略规则）。
     return void console.log(JSON.stringify({
       workspaceId: result.workspaceId,
+      ref: result.ref,
       path: result.path,
       owningWorkspaceId: result.owningWorkspaceId,
+      owningRef: result.owningRef,
       moved: Boolean(result.moved),
     }));
   }
@@ -521,6 +534,11 @@ const HELP = `coflux —— 账号与终端操作
   coflux workspace forget <path>
                           该 worktree 已被删掉：其下所有终端搬回项目主工作区、工作区记录消失
                           （不执行 git worktree remove）
+
+实体标识：设备 / 项目 / 工作区 / 终端的 ID 都可以写成 coflux:<kind>:<ID 前 8 位>，例如
+coflux:workspace:3f2a1b7c。凡是收 ID 的地方都收标识（大小写不敏感），返回实体的地方都带一个
+ref 字段给出它的标识。前缀在范围内撞车时会让你改用完整 ID；标识类型与命令要的不一致会直接报错，
+不会去动旁边那个实体。
 
 agent 命令的环境变量：COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等待上限（默认 30000，只能调小），
 供有硬超时的 hook 脚本用——到点干净失败，好过被宿主杀在半路。

@@ -967,6 +967,56 @@ export class Store {
     return rows.map((r) => r.id);
   }
 
+  /* -------------------------- entity handles ------------------------ */
+  /**
+   * Candidate ids for a `coflux:<kind>:<hex>` handle: the requesting account's entities of one kind
+   * whose id starts with `prefix`, at most `limit` of them.
+   *
+   * Deliberately a bounded query per kind, not a scan in memory: the caller only needs to tell "no
+   * match" from "exactly one" from "more than one", the four tables are `TEXT PRIMARY KEY` with an
+   * `account_id` index, and an account with hundreds of terminals must not be loaded to resolve one
+   * paste. `prefix` is validated hex upstream, so it carries no LIKE wildcard; the kind selects a
+   * literal statement, so no identifier is interpolated either.
+   *
+   * The account filter is the security boundary: a handle must never answer whether some other
+   * account owns a matching entity, so resolution only ever runs after the account is known.
+   */
+  async listIdsByPrefix(
+    kind: "device" | "project" | "workspace" | "terminal",
+    accountId: AccountId,
+    prefix: string,
+    limit: number,
+  ): Promise<string[]> {
+    const pattern = `${prefix}%`;
+    switch (kind) {
+      case "device": {
+        // Same visible set as listDevices: a revoked device is gone as far as the account is concerned.
+        const rows = await this.sql<{ id: string }[]>`
+          SELECT id FROM devices WHERE account_id = ${accountId} AND revoked = false AND id LIKE ${pattern} ORDER BY id LIMIT ${limit}
+        `;
+        return rows.map((r) => r.id);
+      }
+      case "project": {
+        const rows = await this.sql<{ id: string }[]>`
+          SELECT id FROM projects WHERE account_id = ${accountId} AND id LIKE ${pattern} ORDER BY id LIMIT ${limit}
+        `;
+        return rows.map((r) => r.id);
+      }
+      case "workspace": {
+        const rows = await this.sql<{ id: string }[]>`
+          SELECT id FROM workspaces WHERE account_id = ${accountId} AND id LIKE ${pattern} ORDER BY id LIMIT ${limit}
+        `;
+        return rows.map((r) => r.id);
+      }
+      case "terminal": {
+        const rows = await this.sql<{ id: string }[]>`
+          SELECT id FROM tasks WHERE account_id = ${accountId} AND id LIKE ${pattern} ORDER BY id LIMIT ${limit}
+        `;
+        return rows.map((r) => r.id);
+      }
+    }
+  }
+
   /* ---------------------- prepared operations ---------------------- */
   async createPreparedOperation(operation: NewPreparedOperation): Promise<PreparedOperationRecord | undefined> {
     const now = Date.now();

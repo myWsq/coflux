@@ -386,6 +386,9 @@ struct WorkspaceDetailView: View {
             .padding(.horizontal, 12)
             .frame(height: 30)
         }
+        // 长按复制终端标识（plan 20260914）：终端在 iOS 上没有列表行，只有这枚 chip，
+        // 复制入口就挂在它身上；短按切 tab 不受影响。
+        .copyHandleContextMenu(.terminal, id: task.id)
     }
 
     private func statusColor(_ task: Coflux_V1_Task) -> Color {
