@@ -1,8 +1,8 @@
-version: 2.1.0
+version: 2.1.1
 files:
-  - url: https://github.com/myWsq/coflux/releases/download/v2.1.0/coflux-2.1.0-arm64.zip
-    sha512: 3lPwhaN7dUooY9UE29lJ6sknBBlzjiKRFAfCk5ASOD0+gMqSX/MfFhaZhNe+KoZ8F1u762DWZMntrReDuOqP/w==
-    size: 172639299
-path: https://github.com/myWsq/coflux/releases/download/v2.1.0/coflux-2.1.0-arm64.zip
-sha512: 3lPwhaN7dUooY9UE29lJ6sknBBlzjiKRFAfCk5ASOD0+gMqSX/MfFhaZhNe+KoZ8F1u762DWZMntrReDuOqP/w==
-releaseDate: '2026-09-18T05:17:33.256Z'
+  - url: https://github.com/myWsq/coflux/releases/download/v2.1.1/coflux-2.1.1-arm64.zip
+    sha512: jJVl6NRqUmNX/uTMB/K2lLuUQJnLb85m6lgo9H6BoU67RsXK6JSDfW5iOcHIfl5m6PuOAIjstRP3OB5JRzXhhg==
+    size: 195404601
+path: https://github.com/myWsq/coflux/releases/download/v2.1.1/coflux-2.1.1-arm64.zip
+sha512: jJVl6NRqUmNX/uTMB/K2lLuUQJnLb85m6lgo9H6BoU67RsXK6JSDfW5iOcHIfl5m6PuOAIjstRP3OB5JRzXhhg==
+releaseDate: '2026-09-18T08:02:15.053Z'
