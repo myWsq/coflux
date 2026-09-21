@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
 
+import { EXECUTOR_HOST_CAPABILITY } from "@coflux/protocol";
+
 import { CLAUDE_PLUGIN_ENV, CLAUDE_PLUGIN_RESOURCE_DIR, DAEMON_BINARIES, DAEMON_RESOURCE_DIR, DAEMON_VERSION_FILE } from "../src/main/daemon-paths";
 
 // 发布配置（electron-builder.yml）与发布 workflow 能被解析且守住 plan 103 的硬约束。
@@ -230,4 +232,19 @@ test("统一发布：桌面仅受调用、release-signing 环境、缺 secret �
 test("ci.yml 带 desktop 质量门", () => {
   const ci = readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
   assert.match(ci, /pnpm -C apps\/desktop typecheck && pnpm -C apps\/desktop test && pnpm -C apps\/desktop build/);
+});
+
+// The executor host capability is one string agreed between two languages, and a mismatch is
+// invisible from inside the app: the settings page still reads "ready" and the only symptom is the
+// agent being told Coflux.app is not running. Read the daemon's constant from its own source so a
+// rename on either side fails here instead of silently disabling every executor run.
+test("executor host 能力名与 daemon 侧常量逐字一致", () => {
+  const daemon = readFileSync(resolve(repoRoot, "crates/worker/src/agent_ctl/executor.rs"), "utf8");
+  const declared = daemon.match(/pub const CAPABILITY_EXECUTOR_HOST: &str = "([^"]+)";/);
+  assert.ok(declared, "daemon 侧常量没找到（改名了？）");
+  assert.equal(EXECUTOR_HOST_CAPABILITY, declared[1]);
+  // executor-host.ts imports electron, so it cannot be loaded here: pin by source that the host
+  // still registers with the shared constant rather than a literal of its own.
+  const host = readFileSync(resolve(desktopRoot, "src/main/executor-host.ts"), "utf8");
+  assert.match(host, /EXECUTOR_CAPABILITIES = \[EXECUTOR_HOST_CAPABILITY\] as const;/);
 });

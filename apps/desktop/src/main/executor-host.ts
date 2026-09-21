@@ -28,6 +28,8 @@
 import { randomUUID } from "node:crypto";
 import { utilityProcess } from "electron";
 
+import { EXECUTOR_HOST_CAPABILITY } from "@coflux/protocol";
+
 import type {
   DesktopExecutorCatalog,
   DesktopExecutorInbound,
@@ -48,8 +50,10 @@ import type { ExecutorRuntime } from "./executor-runtime";
 import type { ExecutorCachedSettings } from "./executor-settings-cache";
 import type { ExecutorSettingsWriter } from "./executor-settings-writer";
 
-/** Capabilities are gated **by name**, following daemon-capabilities.ts; no version comparison. */
-export const EXECUTOR_CAPABILITIES = ["executor_run"] as const;
+/** Capabilities are gated **by name**, following daemon-capabilities.ts; no version comparison. The
+ * name comes from the protocol package because the daemon refuses any registration that does not
+ * carry this exact string. */
+export const EXECUTOR_CAPABILITIES = [EXECUTOR_HOST_CAPABILITY] as const;
 
 /**
  * How long to wait for the daemon to hand the saved configuration back. The centre pushes it the

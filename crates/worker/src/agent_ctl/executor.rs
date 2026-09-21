@@ -26,6 +26,10 @@ use std::collections::{BTreeMap, HashMap};
 /// The capability name a host must declare when registering. Gated by name, with no version
 /// comparison, following `apps/server/src/daemon-capabilities.ts`: old clients drop unknown payloads
 /// silently, so having no gate would only leave the agent waiting for a timeout.
+///
+/// The desktop host reads the same string from `EXECUTOR_HOST_CAPABILITY` in
+/// `packages/protocol/src/index.ts`. Changing one side alone silently refuses every registration,
+/// which surfaces only as "Coflux.app is not running" on the agent's side.
 pub const CAPABILITY_EXECUTOR_HOST: &str = "executor_host_v1";
 
 /// The window a host gets to re-report after a disconnect or a generation change. Anything still
