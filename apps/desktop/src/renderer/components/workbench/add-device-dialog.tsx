@@ -58,6 +58,7 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
   const { open, client } = props;
   const status = useStore(client.store, (state) => state.status);
   const daemons = useStore(client.store, (state) => state.daemons);
+  const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
 
   const [tab, setTab] = useState<AddDeviceTab>("desktop");
   const [tracker, setTracker] = useState<BaselineTracker<DaemonInfo>>(() => ({ baseline: null, daemonsAtConnect: null }));
@@ -77,7 +78,7 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
     setWasOpen(open);
     if (open) {
       setTab("desktop");
-      setTracker(startBaselineTracker(status, daemons));
+      setTracker(startBaselineTracker(status, daemons, snapshotRevision > 0));
       setSuccess(null);
       setLink("");
       setLinkError(null);

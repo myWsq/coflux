@@ -95,7 +95,9 @@ export type DeviceBaseline = ReadonlySet<string> | null;
  * snapshot replaces the whole `daemons` list (possibly an offline-catalogue list or `[]` until then).
  * Snapping at the status flip would make every existing device look new once the snapshot lands.
  *
- * - Opened while connected: snap immediately (the authOk → snapshot gap is negligible).
+ * - Opened while connected with some list already present: snap immediately (the authOk →
+ *   snapshot gap after a reconnect is negligible, and the list kept across it is the account's).
+ * - Opened while connected before any list arrived: wait for the first different array, as below.
  * - Opened while not connected: when the status flips to connected, remember the `daemons` array
  *   reference seen at that moment, and snap on the first *different* array — a snapshot always
  *   assigns a fresh array, so the reference changes exactly when live data arrives.
@@ -111,9 +113,15 @@ function idsOf(daemons: readonly { daemonId: string }[]): ReadonlySet<string> {
   return new Set(daemons.map((daemon) => daemon.daemonId));
 }
 
-/** Tracker for a fresh opening of the dialog. */
-export function startBaselineTracker<T extends { daemonId: string }>(status: ConnectionStatus, daemons: readonly T[]): BaselineTracker<T> {
-  return status === "connected" ? { baseline: idsOf(daemons), daemonsAtConnect: null } : { baseline: null, daemonsAtConnect: null };
+/**
+ * Tracker for a fresh opening of the dialog. `hasData` is `snapshotRevision > 0`: not proof of live
+ * data (offline-catalogue hydration bumps it too), but 0 reliably means no list of any kind has
+ * arrived yet — e.g. a cold start whose boot overlay lifted before the first snapshot. Connected
+ * without data waits for the next list instead of snapping `[]`.
+ */
+export function startBaselineTracker<T extends { daemonId: string }>(status: ConnectionStatus, daemons: readonly T[], hasData: boolean): BaselineTracker<T> {
+  if (status !== "connected") return { baseline: null, daemonsAtConnect: null };
+  return hasData ? { baseline: idsOf(daemons), daemonsAtConnect: null } : { baseline: null, daemonsAtConnect: daemons };
 }
 
 /**

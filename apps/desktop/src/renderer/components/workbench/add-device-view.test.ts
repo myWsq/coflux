@@ -88,14 +88,14 @@ const B = { daemonId: "b", name: "beta" };
 const C = { daemonId: "c", name: "gamma" };
 
 test("baseline not yet taken → nothing is new", () => {
-  const tracker = startBaselineTracker("disconnected", []);
+  const tracker = startBaselineTracker("disconnected", [], false);
   assert.equal(tracker.baseline, null);
   assert.deepEqual(newDevices(tracker.baseline, [A, B]), []);
   assert.deepEqual(newDevices(null, [A]), []);
 });
 
 test("opened while connected: the current list is the baseline and only unseen ids are new", () => {
-  const tracker = startBaselineTracker("connected", [A, B]);
+  const tracker = startBaselineTracker("connected", [A, B], true);
   assert.deepEqual(newDevices(tracker.baseline, [A, B]), []);
   assert.deepEqual(newDevices(tracker.baseline, [A, { ...B, online: false }, C]), [C]);
   // Once taken, the baseline is never replaced.
@@ -104,7 +104,7 @@ test("opened while connected: the current list is the baseline and only unseen i
 
 test("opened before the first live snapshot: the status flip alone does not take the baseline", () => {
   const stale: { daemonId: string; name: string }[] = [];
-  let tracker = startBaselineTracker("connecting", stale);
+  let tracker = startBaselineTracker("connecting", stale, false);
   tracker = advanceBaselineTracker(tracker, "connected", stale);
   assert.equal(tracker.baseline, null);
   // Same list reference again (e.g. an unrelated store update) → still waiting.
@@ -118,9 +118,23 @@ test("opened before the first live snapshot: the status flip alone does not take
   assert.deepEqual(newDevices(tracker.baseline, [A, B, C]), [C]);
 });
 
+test("opened while connected but before any list arrived: the empty list is not the baseline", () => {
+  const empty: { daemonId: string; name: string }[] = [];
+  let tracker = startBaselineTracker("connected", empty, false);
+  assert.equal(tracker.baseline, null);
+  assert.deepEqual(newDevices(tracker.baseline, [A, B]), []);
+  tracker = advanceBaselineTracker(tracker, "connected", empty);
+  assert.equal(tracker.baseline, null);
+  // The first snapshot becomes the baseline: the devices it brings are not "new".
+  const snapshot = [A, B];
+  tracker = advanceBaselineTracker(tracker, "connected", snapshot);
+  assert.deepEqual(newDevices(tracker.baseline, snapshot), []);
+  assert.deepEqual(newDevices(tracker.baseline, [A, B, C]), [C]);
+});
+
 test("dropping out of connected before the snapshot restarts the wait", () => {
   const cached = [A];
-  let tracker = startBaselineTracker("disconnected", cached);
+  let tracker = startBaselineTracker("disconnected", cached, true);
   tracker = advanceBaselineTracker(tracker, "connected", cached);
   tracker = advanceBaselineTracker(tracker, "disconnected", cached);
   assert.equal(tracker.daemonsAtConnect, null);
