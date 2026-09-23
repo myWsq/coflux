@@ -765,7 +765,8 @@ function parseNode(value: unknown, state: ParseState, depth: number): LayoutNode
     return { kind: "group", id, tabs, activeTabId };
   }
   if (value.kind === "split") {
-    if (value.direction !== "row" && value.direction !== "column") return null;
+    const direction = value.direction;
+    if (direction !== "row" && direction !== "column") return null;
     const rawChildren = Array.isArray(value.children) ? value.children : [];
     const rawSizes = Array.isArray(value.sizes) ? value.sizes : [];
     const sizesUsable =
@@ -779,7 +780,7 @@ function parseNode(value: unknown, state: ParseState, depth: number): LayoutNode
       sizes.push(sizesUsable ? (rawSizes[index] as number) : 1);
     });
     if (children.length === 0) return null;
-    return normalizeSplit({ kind: "split", direction: value.direction, children, sizes: normalizeSizes(sizes) });
+    return normalizeSplit({ kind: "split", direction, children, sizes: normalizeSizes(sizes) });
   }
   return null;
 }
@@ -811,9 +812,11 @@ export function readStoredLayouts(store: TerminalLayoutStore): Record<string, Te
   } catch {
     return {};
   }
-  if (!isRecord(parsed) || parsed.version !== STORAGE_VERSION || !isRecord(parsed.layouts)) return {};
+  if (!isRecord(parsed) || parsed.version !== STORAGE_VERSION) return {};
+  const stored = parsed.layouts;
+  if (!isRecord(stored)) return {};
   const layouts: Record<string, TerminalLayout> = {};
-  for (const [workspaceId, value] of Object.entries(parsed.layouts)) {
+  for (const [workspaceId, value] of Object.entries(stored)) {
     if (workspaceId) layouts[workspaceId] = parseLayout(value);
   }
   return layouts;
