@@ -112,8 +112,14 @@ export type WorkspaceTerminalHandle = {
  * and reports intents; it keeps no second copy of tab selection.
  */
 export type WorkspaceLayoutActions = {
-  /** Apply a layout change that makes no tab newly chosen by the user (focus a group, resize a split). */
-  update: (workspaceId: string, change: (layout: TerminalLayout) => TerminalLayout) => void;
+  /**
+   * Apply a layout change that makes no tab newly chosen by the user (focus a group, resize a
+   * split). `transient` changes (every pointermove of a sash drag) are not written to storage until
+   * `persist` is called.
+   */
+  update: (workspaceId: string, change: (layout: TerminalLayout) => TerminalLayout, options?: { transient?: boolean }) => void;
+  /** Write the layouts to storage now (the end of a sash drag). */
+  persist: () => void;
   /** Current layout (not the render's copy): a sash drag reads its starting sizes from it. */
   get: (workspaceId: string) => TerminalLayout;
   /** A user action on a tab (click, banner's 重新接管): activates it, claims it back if detached, focuses it. */
@@ -126,11 +132,11 @@ export type WorkspaceLayoutActions = {
 
 type WorkspaceTerminalProps = {
   workspaceId: string;
-  /** 是否为当前显示的工作区：隐藏时保持挂载（「变更」视图的折叠态与已拉取数据都不丢）。 */
+  /** Whether this is the workspace on screen. Hidden ones stay mounted (the changes view keeps its collapsed state and fetched data). */
   active: boolean;
   client: CofluxClient;
   onCloseTask: (task: Task) => void;
-  /** 终端面板与接管状态机已提升到 Workbench（plan 104）：容器只借它读控制态、重开已退出终端。 */
+  /** Panes and the attach machine live in Workbench (plan 104); the container only reads control states and reopens exited terminals through it. */
   attach: TerminalAttach;
   /** This workspace's layout, already reconciled against the task list by Workbench. */
   layout: TerminalLayout;
@@ -197,16 +203,35 @@ function GroupSash({
   sash,
   onStart,
   onResize,
+  onEnd,
   onEqualize,
 }: {
   sash: LayoutSash;
   /** The split's extent in px and its sizes at the start of the drag, or null when there is nothing to drag. */
   onStart: (container: HTMLElement) => { splitPx: number; startSizes: readonly number[] } | null;
   onResize: (deltaPx: number, splitPx: number, startSizes: readonly number[]) => void;
+  /** The drag ended (released, cancelled or unmounted): the owner persists the final sizes. */
+  onEnd: () => void;
   onEqualize: () => void;
 }) {
   const [isResizing, setIsResizing] = useState(false);
   const dragRef = useRef<SashDrag | null>(null);
+  // Unmounted mid-drag (a remote close collapsed a group, the tree reshaped): put the document's
+  // cursor and text selection back, and tell the owner the drag is over. Pointer capture dies with
+  // the element.
+  const onEndRef = useRef(onEnd);
+  onEndRef.current = onEnd;
+  useEffect(
+    () => () => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      dragRef.current = null;
+      document.documentElement.style.cursor = drag.previousCursor;
+      document.documentElement.style.userSelect = drag.previousUserSelect;
+      onEndRef.current();
+    },
+    [],
+  );
   const row = sash.direction === "row";
   const rect: LayoutRect = sash.splitRect;
   const style = row
@@ -221,6 +246,7 @@ function GroupSash({
     document.documentElement.style.userSelect = drag.previousUserSelect;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     setIsResizing(false);
+    onEnd();
   }
 
   return (
@@ -301,8 +327,8 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
     }),
   );
 
-  // 目录工作区（无 repo 终端，plan 045/048）：作为设备详情的载体，保留终端 Tabs/新建，
-  // 但 git 语义（分支按钮/「变更」覆盖层/diff）全部不渲染。
+  // Directory workspace (no repo, plan 045/048): the carrier of a device detail view. It keeps terminal
+  // tabs and ＋, but nothing with git semantics (branch button, changes overlay, diff) is rendered.
   const isDirWorkspace = Boolean(workspace && isDirWorkspaceOf(workspace));
 
   /** 切换分支中：目标分支名（按钮 pending 态；成功由 daemon 上报驱动 branch 变更后自动清除） */
@@ -312,6 +338,10 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
   // Tab drag (plan 20260923-terminal-split-groups): the dragged task, and where it would land.
   const [dragTaskId, setDragTaskId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  // Set by dragend. The drag state is entered one task after dragstart; if the drag never really
+  // started (dragend first), entering it then would leave the strips without their drag region and
+  // the drop zones covering every pane for good.
+  const dragEndedRef = useRef(true);
 
   // 分支切换：checkout 在本 worktree 内经 Device exec 完成，成功后同步元数据（workspaceSetBranch）。
   const takenBranches = new Map<string, BranchTaken>(
@@ -408,7 +438,8 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
     );
 
     if (pending && taskId === pending.id) {
-      // 乐观 pending tab（plan 078）：点击只回焦点，不进激活/attach 状态机；无关闭入口，不可拖。
+      // Optimistic pending tab (plan 078): a click only focuses it, never entering the activation/attach
+      // machine; it has no close button and cannot be dragged.
       return (
         <div key={taskId} data-tab-slot className="relative shrink-0" style={NO_DRAG_REGION_STYLE}>
           <div className={cn("flex h-7 max-w-52 items-center rounded-md text-sm transition-colors", isActive ? activeClass : idleClass)}>
@@ -434,7 +465,7 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
     if (sessionId && agentState && agentState !== "done" && agentState !== "waiting") {
       seenDoneRef.current.delete(sessionId);
     }
-    // 本工作区正显示、变更覆盖层关着、且它是所在分组的活动 Tab（即它在屏幕上），才算已读。
+    // Seen only when it is on screen: this workspace is shown, the changes overlay is closed, and it is its group's active tab.
     if (active && !changesOpen && isActive && sessionId && (agentState === "done" || agentState === "waiting")) {
       seenDoneRef.current.add(sessionId);
     }
@@ -462,9 +493,15 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
           event.dataTransfer.setData(TAB_DRAG_TYPE, task.id);
           event.dataTransfer.effectAllowed = "move";
           // Changing the DOM inside dragstart can cancel the drag in Chromium; let it start first.
-          window.setTimeout(() => setDragTaskId(task.id), 0);
+          dragEndedRef.current = false;
+          window.setTimeout(() => {
+            if (!dragEndedRef.current) setDragTaskId(task.id);
+          }, 0);
         }}
-        onDragEnd={endDrag}
+        onDragEnd={() => {
+          dragEndedRef.current = true;
+          endDrag();
+        }}
       >
         <ContextMenu
           label={`终端「${tabTitle || "终端"}」操作`}
@@ -475,12 +512,12 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
             { label: "复制标识", onClick: () => copyEntityHandle("terminal", task.id) },
             { type: "divider" },
             {
-              label: "向右拆分",
+              label: "移到右侧新分组",
               isDisabled: !canSplit,
               onClick: () => actions.moveTab(workspaceId, task.id, (current) => moveTabToNewGroup(current, task.id, group.id, "right")),
             },
             {
-              label: "向下拆分",
+              label: "移到下方新分组",
               isDisabled: !canSplit,
               onClick: () => actions.moveTab(workspaceId, task.id, (current) => moveTabToNewGroup(current, task.id, group.id, "down")),
             },
@@ -509,7 +546,8 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
                 </Tooltip>
               )}
             </button>
-            <Tooltip content={`关闭终端 ${modPrefix}W`} placement="below">
+            {/* ⌘W closes the focused group's active tab only, so only that tab advertises it. */}
+            <Tooltip content={bright ? `关闭终端 ${modPrefix}W` : "关闭终端"} placement="below">
               <button
                 className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                 onClick={() => onCloseTask(task)}
@@ -545,10 +583,13 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
           if (group.id !== layout.focusedGroupId) actions.update(workspaceId, (current) => focusGroup(current, group.id));
         }}
       >
-        {/* 分组标签栏：左上分组带分支按钮（没有拆分时，这就是原来那条顶栏，只是「变更」挪进了右上角操作坞）。
-            贴着窗口上沿的标签栏是窗口拖拽区（plan 108）：空白处按住能拖窗口、双击走 macOS 标题栏双击偏好；
-            下方分组的标签栏不是。拖拽区吞掉指针事件——往里加任何可点/可悬浮的元素都必须带
-            NO_DRAG_REGION_STYLE（见 drag-region.ts）。右上分组给操作坞留出它实测的宽度。 */}
+        {/* Group tab strip. The top-left group carries the branch button (with no split this is the old top
+            bar, minus 「变更」, which moved into the action dock). Strips touching the window's top edge are
+            window drag regions (plan 108): drag the window from empty space, double-click follows the macOS
+            title-bar preference; lower groups' strips are not. A drag region swallows pointer events, so
+            anything clickable or hoverable added here needs NO_DRAG_REGION_STYLE (see drag-region.ts). The
+            top-right group reserves the action dock's measured width. */}
+        {/* `h-9` is GROUP_TAB_STRIP_HEIGHT (terminal-layout.ts): panes are placed that far below the group's top. */}
         <header
           className="flex h-9 min-w-0 shrink-0 items-center gap-2 border-b border-border bg-background pl-3"
           style={{ ...(stripIsDragRegion ? DRAG_REGION_STYLE : NO_DRAG_REGION_STYLE), paddingRight: reserveDock ? dockWidth : 8 }}
@@ -597,7 +638,7 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
             }}
           >
             {group.tabs.map((taskId, index) => renderTab(group, taskId, index, groupFocused))}
-            {/* 新建按钮跟随最后一个 Tab（浏览器式），不钉在最右；在哪个分组点就开在哪个分组。 */}
+            {/* ＋ follows the last tab (browser style) rather than sitting at the far right; it opens the terminal in this group. */}
             <Tooltip content={`新建终端 ${modPrefix}T`} placement="below">
               <button
                 className="ml-0.5 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-wait disabled:opacity-50"
@@ -611,8 +652,9 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
           </div>
         </header>
 
-        {/* 分组主体：面板层按同一个矩形盖在它上面（面板层 DOM 在后、整层 pointer-events-none），
-            这里的空态 / 创建中 / 横幅照常收得到点击；横幅 z-10 压在面板之上。 */}
+        {/* Group body. The pane layer covers it with the same rectangle (later in the DOM, pointer-events-none
+            as a whole), so the empty state, the creating placeholder and the banners here still get clicks;
+            banners are z-10, above the pane. */}
         <div className="relative min-h-0 min-w-0 flex-1 bg-terminal">
           {showsPending && pending ? (
             // pending tab 的主区（plan 078）：不挂 TerminalPane（假 id 不产生请求），只显示创建中。
@@ -674,13 +716,14 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
     );
   }
 
-  // 容器只出分组外壳（标签栏、主体占位、分隔条、拖放区）与「变更」覆盖层，终端面板由 Workbench 层统一挂
-  // （plan 104）。外层是一层 absolute inset-0（见 workbench.tsx），这里的矩形都相对终端主区。
+  // The container renders only group chrome (strips, body placeholders, sashes, drop zones) and the
+  // changes overlay; panes are mounted by Workbench (plan 104). The wrapper is absolute inset-0 (see
+  // workbench.tsx), so every rectangle here is relative to the terminal main area.
   return (
     <>
       {geometry.groups.map((entry) => renderGroup(entry.group, entry.rect))}
 
-      {/* 分隔条：排在分组外壳之后（文档顺序晚于标签栏的拖拽区，见 drag-region.ts），z-20 压在面板层之上。 */}
+      {/* Sashes: after the group chrome (later in document order than the strips' drag regions, see drag-region.ts), z-20 above the pane layer. */}
       {changesOpen || singleGroup
         ? null
         : geometry.sashes.map((sash) => (
@@ -695,14 +738,20 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
               }}
               onResize={(deltaPx, splitPx, startSizes) => {
                 const minPx = sash.direction === "row" ? MIN_GROUP_WIDTH : MIN_GROUP_HEIGHT;
-                actions.update(workspaceId, (current) => resizeSplit(current, sash.path, sash.index, startSizes, deltaPx / splitPx, minPx / splitPx));
+                actions.update(
+                  workspaceId,
+                  (current) => resizeSplit(current, sash.path, sash.index, startSizes, deltaPx / splitPx, minPx / splitPx),
+                  { transient: true },
+                );
               }}
+              onEnd={actions.persist}
               onEqualize={() => actions.update(workspaceId, (current) => equalizeSplit(current, sash.path))}
             />
           ))}
 
-      {/* 拖放区（标签拖动期间才有）：盖在面板层之上，拖着标签经过终端时事件落在这里而不是面板上——
-          面板的拖放上传只认文件，标签的拖动载荷也刻意不是文件。 */}
+      {/* Drop zones, only while a tab is dragged: above the pane layer, so a tab dragged over a terminal lands
+          here and never on the pane — whose drop upload only accepts files, and the tab payload is
+          deliberately not a file. */}
       {dragTaskId && !changesOpen
         ? geometry.groups.map(({ group, rect }) => {
             const target = dropTarget?.kind === "zone" && dropTarget.groupId === group.id ? dropTarget.zone : null;
@@ -737,9 +786,11 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
           })
         : null}
 
-      {/* 「变更」覆盖层：从右上角操作坞打开，盖住整个终端主区（下面所有分组原样留着，agent 照跑）；
-          再点一次或 Esc 回到原来的分组布局。与终端面板同保活模式（隐藏不卸载），折叠态/已拉取数据才不随切换丢失。
-          顶部留一条与标签栏等高的窗口拖拽带，覆盖层开着时窗口照样能拖。目录工作区无 git 语义，整层不渲染。 */}
+      {/* The changes overlay: opened from the action dock, it covers the whole main area (every group stays
+          as it is underneath, agents keep running); pressing again or Esc returns to the groups. Kept alive
+          like the panes (hidden, not unmounted), so its collapsed state and fetched data survive. Its top
+          band is a window drag region as tall as a strip, so the window stays draggable while it is open.
+          Directory workspaces have no git semantics and do not render it. */}
       {isDirWorkspace ? null : (
         <div className={cn("absolute inset-0 z-20 flex flex-col bg-terminal", changesOpen ? "" : "hidden")}>
           <header

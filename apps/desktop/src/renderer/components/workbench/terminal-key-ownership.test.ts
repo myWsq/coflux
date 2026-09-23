@@ -74,7 +74,7 @@ test("其余带 ⌥ 的组合照旧归终端：⌥ 是 Meta，⌘⌥0、⌘⌥ �
   assert.equal(decideTerminalKeyOwner(key("KeyV", { meta: true, alt: true })), "terminal");
   assert.equal(decideTerminalKeyOwner(key("Digit1", { alt: true })), "terminal");
   assert.equal(decideTerminalKeyOwner(key("ArrowLeft", { alt: true })), "terminal");
-  // 多一个修饰键就不是那组快捷键
+  // One more modifier and it is no longer a group shortcut
   assert.equal(decideTerminalKeyOwner(key("Digit1", { meta: true, alt: true, shift: true })), "terminal");
   assert.equal(decideTerminalKeyOwner(key("ArrowLeft", { meta: true, alt: true, ctrl: true })), "terminal");
 });

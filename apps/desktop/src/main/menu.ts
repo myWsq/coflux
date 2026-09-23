@@ -9,7 +9,7 @@ export type MenuActions = {
 };
 
 /**
- * 原生菜单（plan 103）。⌘T/⌘W/⌘N/⌘[ ]/⌘\ /⌘/ 这些由页面处理的键：菜单项展示键位但 **不注册**
+ * 原生菜单（plan 103）。⌘T/⌘W/⌘N/⌘[ ]/⌘/ 这些由页面处理的键：菜单项展示键位但 **不注册**
  * accelerator（registerAccelerator: false）——键落到页面，由 use-global-shortcuts 按纯 ⌘
  * 前缀处理；点菜单项才走 sendCommand。关窗改成 ⇧⌘W，把 ⌘W 让给「关闭终端」。
  * ⌘R「重新载入」是唯一的例外：它是 webContents 层的动作，页面没有什么可代劳的，直接用原生 role。
@@ -79,8 +79,10 @@ export function buildAppMenu(actions: MenuActions): Menu {
         pageShortcut("下一个终端", "CmdOrCtrl+]", "next-tab"),
         { type: "separator" },
         // Editor groups (plan 20260923-terminal-split-groups): displayed, not registered, like the rest.
-        pageShortcut("向右拆分", "CmdOrCtrl+\\", "split-right"),
-        pageShortcut("向下拆分", "Shift+CmdOrCtrl+\\", "split-down"),
+        // Unlike the tab context menu's 移到右侧/下方新分组 (which move that tab), these open a new terminal.
+        // ⌘\ is also handled by the page, like the other page shortcuts above.
+        pageShortcut("向右拆分（新建终端）", "CmdOrCtrl+\\", "split-right"),
+        pageShortcut("向下拆分（新建终端）", "Shift+CmdOrCtrl+\\", "split-down"),
         pageShortcut("聚焦左侧分组", "Alt+CmdOrCtrl+Left", "focus-group-left"),
         pageShortcut("聚焦右侧分组", "Alt+CmdOrCtrl+Right", "focus-group-right"),
         pageShortcut("聚焦上方分组", "Alt+CmdOrCtrl+Up", "focus-group-up"),

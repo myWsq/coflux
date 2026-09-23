@@ -17,8 +17,9 @@ export function shouldShowReconnectBanner(status: ConnectionStatus): boolean {
 }
 
 /**
- * 保活的后台工作区不得拉取 diff；只有当前工作区的「变更」覆盖层开着时才算激活
- * （plan 20260923-terminal-split-groups：「变更」从常驻 Tab 挪进操作坞，开合按工作区记）。
+ * A kept-alive background workspace must not fetch diffs; the changes view is active only while
+ * the selected workspace's changes overlay is open (plan 20260923-terminal-split-groups moved
+ * 「变更」 from a resident tab into the action dock; its open state is kept per workspace).
  */
 export function shouldActivateChangesView(workspaceActive: boolean, changesOpen: boolean): boolean {
   return workspaceActive && changesOpen;

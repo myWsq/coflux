@@ -92,6 +92,9 @@ const TerminalPanes = lazy(() =>
 // 避免永久滞留。与遮罩的 8s 无关——工作区创建含 daemon 侧 git worktree add，慢链路可能更长。
 const PENDING_CREATE_TIMEOUT_MS = 15_000;
 
+/** Terminal layouts are written this long after the last change (plan 20260923-terminal-split-groups). */
+const LAYOUT_PERSIST_DELAY_MS = 400;
+
 /**
  * 无顶栏的空态主区（plan 108）：顶部留一条与侧栏空白带等高的窗口拖拽带，没有终端顶栏时
  * 也能从主区顶部拖动 / 双击窗口；空态内容在余下区域里继续垂直居中，按钮不落进拖拽带
@@ -271,8 +274,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [pendingWorkspaces, setPendingWorkspaces] = useState<PendingWorkspace[]>([]);
   const pendingWorkspaceTimersRef = useRef(new Map<string, number>());
   const pendingWorkspaceSeqRef = useRef(0);
-  // 只指向选中工作区的命令句柄：由本组件在渲染期按选中工作区现造（见 terminalHandleFor），
-  // 保活但隐藏的工作区永远拿不到，全局快捷键天然只作用于选中的那一个。
+  // Command handle of the selected workspace only, rebuilt during render (see terminalHandleFor):
+  // kept-alive hidden workspaces never get one, so global shortcuts only ever reach the selected one.
   const activeTerminalRef = useRef<WorkspaceTerminalHandle | null>(null);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const activeWorkspaceIdRef = useRef<string | null>(null);
@@ -287,6 +290,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const layoutsRef = useRef<Record<string, TerminalLayout>>(initialLayouts);
   const [, setLayoutVersion] = useState(0);
   const lastWrittenLayoutsRef = useRef<string | null>(null);
+  // Debounced persisting (see flushLayoutPersist): the layouts object last looked at, the pending
+  // write, whether a sash drag is in progress, and the snapshot gate as of the last render.
+  const checkedLayoutsRef = useRef<Record<string, TerminalLayout> | null>(null);
+  const layoutPersistTimerRef = useRef<number | undefined>(undefined);
+  const transientLayoutRef = useRef(false);
+  const snapshotReadyRef = useRef(false);
   // The changes overlay, open per workspace; it survives switching away and back, as the old
   // per-container view did. Ref mirror for the same synchronous-read reason.
   const [changesOpen, setChangesOpenState] = useState<Record<string, boolean>>({});
@@ -369,7 +378,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     return { visible, focused: focused && visible.has(focused) ? focused : null };
   }
 
-  /** 可见面板集合同步写进状态机的门禁镜像：渲染期写一次，每次布局 / 覆盖层提交再写一次。 */
+  /** Writes the visible set into the attach gate's mirror: once during render, again on every layout or overlay commit. */
   function syncVisible() {
     attach.setVisibleTaskIds(currentScreen().visible);
   }
@@ -383,8 +392,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
     setLayoutVersion((version) => version + 1);
   }
 
-  function updateLayout(workspaceId: string, change: (layout: TerminalLayout) => TerminalLayout) {
+  function updateLayout(workspaceId: string, change: (layout: TerminalLayout) => TerminalLayout, options: { transient?: boolean } = {}) {
+    transientLayoutRef.current = Boolean(options.transient);
     commitLayout(workspaceId, change(layoutOf(workspaceId)));
+  }
+
+  /** End of a sash drag: the transient sizes become the stored ones, written now. */
+  function persistLayoutsNow() {
+    transientLayoutRef.current = false;
+    checkedLayoutsRef.current = layoutsRef.current;
+    flushLayoutPersistRef.current();
   }
 
   function setWorkspaceChangesOpen(workspaceId: string, open: boolean) {
@@ -393,8 +410,14 @@ export function Workbench({ client }: { client: CofluxClient }) {
     setChangesOpenState(changesOpenRef.current);
     syncVisible();
     // Opening takes the caret out of the terminal, so no key — Esc above all — reaches a shell
-    // hidden under the overlay. Closing hands focus back through the focused pane's `focused` prop.
+    // hidden under the overlay. Closing is a user action (dock button, Esc, an activating command)
+    // and hands the caret back to the focused pane explicitly: the dock button that was just clicked
+    // holds focus, and the pane's own focus-on-`focused` yields to any element holding focus.
     if (open && document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    if (!open) {
+      const focused = currentScreen().focused;
+      if (focused) attach.focusTask(focused);
+    }
   }
   const setWorkspaceChangesOpenRef = useRef(setWorkspaceChangesOpen);
   setWorkspaceChangesOpenRef.current = setWorkspaceChangesOpen;
@@ -434,7 +457,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const title = `终端 ${known.length + 1}`;
     const pendingId = `${PENDING_TAB_PREFIX}${++pendingCreateSeqRef.current}`;
     commitLayout(workspaceId, beginPendingTab(layout, { id: pendingId, title, knownTaskIds: known }, side));
-    // 本地兜底：taskCreate 既没广播成功也没广播错误时撤掉 pending tab，避免永久滞留。
+    // Local fallback: when taskCreate is answered by neither a success nor an error broadcast, drop the pending tab.
     const timer = window.setTimeout(() => {
       if (pendingCreateTimersRef.current.get(workspaceId)?.pendingId === pendingId) pendingCreateTimersRef.current.delete(workspaceId);
       updateLayout(workspaceId, (current) => dropPendingTab(current, pendingId));
@@ -461,10 +484,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (group && group.id !== layout.focusedGroupId) commitLayout(workspaceId, focusGroup(layout, group.id));
   }
 
-  // 终端被搬到别的工作区（plan 104）：用户正看着的终端（选中工作区焦点分组的活动 Tab）搬走时选中态跟过去，
-  // 它在新工作区里落进焦点分组并成为活动 Tab。这件事必须赶在 React 渲染之前定下来：store 订阅在
-  // setState 中同步触发、与本轮渲染合批，两个工作区的布局就在这一步搬好，渲染读到的已是最终结果——
-  // 新工作区不会先回退去 attach 别的 Tab，被搬走的终端也不会闪一下。
+  // A terminal moved to another workspace (plan 104): when it is the one the user is watching (the
+  // focused group's active tab of the selected workspace), the selection follows it, and it lands in
+  // the new workspace's focused group as its active tab. This has to be settled before React renders:
+  // the store subscription fires synchronously inside setState and batches with this render, so both
+  // workspaces' layouts are moved right here and the render already reads the final result — the new
+  // workspace never first falls back to attaching another tab, and the moved terminal never flickers.
   useEffect(() => {
     return client.store.subscribe((state, previous) => {
       if (state.tasks === previous.tasks || state.snapshotRevision === 0) return;
@@ -827,9 +852,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const screen = currentScreen();
   attach.setVisibleTaskIds(screen.visible);
   const selectedLayout = activeWorkspaceId ? layoutOf(activeWorkspaceId) : EMPTY_LAYOUT;
-  const selectedFocusedTab = focusedTabId(selectedLayout);
-  // The ⌘P palette's current place: the focused group's active tab (never a background group's).
-  const focusedTaskId = selectedFocusedTab && !selectedFocusedTab.startsWith(PENDING_TAB_PREFIX) ? selectedFocusedTab : null;
   // Each visible pane sits on its group's body, in percentages the browser lays out in the same frame.
   const paneFrames = new Map<string, CSSProperties>();
   for (const { group, rect } of layoutGeometry(selectedLayout).groups) {
@@ -838,7 +860,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const selectedChangesOpen = Boolean(activeWorkspaceId && changesOpen[activeWorkspaceId]);
 
   // A create that reconcile answered: the task took the pending tab's place; start it as the old
-  // container did — unless the user picked another tab in that group while waiting (转正不抢焦点).
+  // container did — unless the user picked another tab in that group while waiting (settling never steals the choice).
   // Declared before the visible-set effect below so the user-action path is queued first.
   useEffect(() => {
     if (settledCreatesRef.current.length === 0) return;
@@ -860,6 +882,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // Panes that came on screen without the user choosing that tab — workspace switch, overlay
   // closed, a background group's fallback, a restored layout — are refitted and attached without
   // forcing. A user activation is already queued by then and makes this a no-op for its tab.
+  // Switching workspace is a user action: the focused pane takes the caret even though the sidebar
+  // entry that was clicked holds focus (the pane's own focus-on-`focused` yields to it).
+  useEffect(() => {
+    if (screen.focused) attach.focusTask(screen.focused);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeWorkspaceId]);
+
   const shownTaskIdsRef = useRef<ReadonlySet<string>>(new Set());
   useEffect(() => {
     const previous = shownTaskIdsRef.current;
@@ -867,15 +896,42 @@ export function Workbench({ client }: { client: CofluxClient }) {
     for (const taskId of screen.visible) if (!previous.has(taskId)) attach.ensureVisible(taskId);
   });
 
-  // Persist only after the first snapshot, and only when the serialised layouts changed.
-  useEffect(() => {
-    const serialized = planLayoutPersist({ snapshotReady, layouts: layoutsRef.current, lastWritten: lastWrittenLayoutsRef.current });
+  // Persisting: only after the first snapshot, only when the layouts object changed since the last
+  // look (every change replaces it, so an identity check is enough to skip unrelated renders), and
+  // debounced so a burst of changes is one write. Sash drags commit transient layouts on every
+  // pointermove and do not schedule a write at all; the drag's end flushes.
+  snapshotReadyRef.current = snapshotReady;
+  function flushLayoutPersist() {
+    if (layoutPersistTimerRef.current !== undefined) window.clearTimeout(layoutPersistTimerRef.current);
+    layoutPersistTimerRef.current = undefined;
+    const serialized = planLayoutPersist({
+      snapshotReady: snapshotReadyRef.current,
+      layouts: layoutsRef.current,
+      lastWritten: lastWrittenLayoutsRef.current,
+    });
     if (serialized === null) return;
     lastWrittenLayoutsRef.current = serialized;
     writeStoredLayouts(TERMINAL_LAYOUT_STORE, serialized);
+  }
+  const flushLayoutPersistRef = useRef(flushLayoutPersist);
+  flushLayoutPersistRef.current = flushLayoutPersist;
+  useEffect(() => {
+    if (!snapshotReady || transientLayoutRef.current || checkedLayoutsRef.current === layoutsRef.current) return;
+    checkedLayoutsRef.current = layoutsRef.current;
+    if (layoutPersistTimerRef.current !== undefined) window.clearTimeout(layoutPersistTimerRef.current);
+    layoutPersistTimerRef.current = window.setTimeout(() => flushLayoutPersistRef.current(), LAYOUT_PERSIST_DELAY_MS);
   });
+  // A write still waiting when the window goes away (quit, reload) happens right then.
+  useEffect(() => {
+    const flush = () => flushLayoutPersistRef.current();
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, []);
 
-  // error 消息到达时撤掉在途的乐观创建（taskCreate 失败兜底）；launching 态归状态机自己清。
+  // An error broadcast drops the in-flight optimistic creates (taskCreate failed); the attach machine clears its own launching state.
   useEffect(() => {
     if (!lastError) return;
     for (const [workspaceId, entry] of pendingCreateTimersRef.current) {
@@ -978,6 +1034,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   const workspaceActions: WorkspaceLayoutActions = {
     update: updateLayout,
+    persist: persistLayoutsNow,
     get: layoutOf,
     activateTab: activateTaskByUser,
     moveTab: moveTabByUser,
@@ -1087,10 +1144,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
             </EmptyMain>
           }
         >
-          {/* 终端主区（plan 104 / 20260923-terminal-split-groups）：一块相对定位的区域。工作区容器铺满它，
-              按布局树画各分组的外壳（标签栏、主体占位、分隔条）；终端面板层是它们之后的兄弟节点，按 task id
-              常驻，每个可见面板按所在分组主体的矩形摆放。标签在分组间移动、终端换工作区，面板都只换矩形，
-              既不跟着容器重建，也不依赖新工作区的容器是否挂载。未选中工作区时整块隐藏，面板保持挂载。 */}
+          {/* Terminal main area (plan 104 / 20260923-terminal-split-groups): one positioned box. The workspace
+              container fills it and draws each group's chrome from the layout tree (tab strips, body
+              placeholders, sashes); the pane layer is their later sibling, keyed by task id, and places
+              each visible pane on its group's body rectangle. Moving a tab between groups or a terminal
+              between workspaces only changes a rectangle: panes are neither rebuilt with a container nor
+              dependent on the new workspace's container being mounted. Hidden, with panes kept mounted,
+              while no workspace is selected. */}
           <main className={cn("relative isolate min-w-0 flex-1 bg-terminal", !activeWorkspaceId && "hidden")}>
             {terminalWorkspaces.map((workspace) => {
               const isActive = workspace.id === activeWorkspaceId;
@@ -1247,7 +1307,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
         recentStore={RECENT_PLACES_STORE}
         current={{
           workspaceId: activeWorkspaceId,
-          taskId: focusedTaskId,
+          // The focused group's active tab while on screen (null under the changes overlay), never a background group's.
+          taskId: screen.focused,
           daemonId: selection?.kind === "device" ? selection.id : null,
         }}
         onOpenWorkspace={selectWorkspace}
@@ -1286,14 +1347,17 @@ export function Workbench({ client }: { client: CofluxClient }) {
         />
       ) : null}
 
-      {/* 终端栏右上角的操作坞：一份实例服务所有工作区，包括没有顶栏的空态，所以留在标签滚动区外面。
-          它浮在右上分组标签栏给它留的空白上（宽度实测，见 attachDock），而那条标签栏是窗口拖拽区（plan 108）。
-          Electron 按**文档顺序**合成拖拽区——`drag` 取并集、`no-drag` 取差集——所以本节点必须排在主区之后：
-          放在主区之前时，这里挖出的洞会被随后标签栏的 `drag` 并集重新填平，坞里的按钮收不到
-          click / mouseenter，表现为点不动、Tooltip 也不出（见 drag-region.ts）。位置是 absolute，
-          挪到末尾只改合成与绘制顺序，不影响布局。
-          「变更」（plan 20260923-terminal-split-groups）从常驻 Tab 挪到这里：按下即用变更视图盖住整个主区，
-          再按一次或 Esc 回到原来的分组布局；目录工作区没有 git 语义，不出这个按钮。 */}
+      {/* The action dock at the top right: one instance serves every workspace, empty states included,
+          so it stays outside the tab strips. It floats over the space the top-right group's strip
+          reserves for it (its measured width, see attachDock), and that strip is a window drag region
+          (plan 108). Electron composes drag regions in **document order** — `drag` is a union, `no-drag`
+          a difference — so this node must come after the main area: placed before it, the hole it punches
+          is filled back in by the strip's later `drag`, and the dock's buttons get no click or mouseenter
+          (dead buttons, no tooltips; see drag-region.ts). It is absolutely positioned, so being last only
+          changes composition and paint order, not layout.
+          「变更」 (plan 20260923-terminal-split-groups) lives here instead of a resident tab: pressing it
+          covers the whole main area with the changes view, pressing again or Esc returns to the groups.
+          Directory workspaces have no git semantics and get no such button. */}
       <div
         ref={attachDock}
         role="group"

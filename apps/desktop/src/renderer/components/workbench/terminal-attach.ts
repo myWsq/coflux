@@ -78,8 +78,9 @@ export function useTerminalAttach(client: CofluxClient, { tasks }: { tasks: read
   // controlStates 的同步镜像：imperative 函数需要在 setState 后立即读到"当下"值
   // （对应 Solid 信号的同步读语义），而 React state 变量本身要等下一次渲染才更新，故用 ref 双轨。
   const controlStatesRef = useRef<Record<string, TerminalControlState>>({});
-  // 可见面板集合的同步镜像：可见性由 Workbench 判定（选中工作区 + 每个分组的活动 Tab + 变更覆盖层关着），
-  // 这里的回调由子组件 effect 在任意渲染代触发，直接闭包捕获会读到过期值（landmine），一律经它读。
+  // Synchronous mirror of the visible set. Workbench decides visibility (selected workspace, every
+  // group's active tab, changes overlay closed); the callbacks here fire from child effects in any
+  // render generation, so a closure capture would read a stale value — always read through this.
   const visibleTaskIdsRef = useRef<ReadonlySet<string>>(new Set());
 
   function setVisibleTaskIds(taskIds: ReadonlySet<string>) {
@@ -108,7 +109,8 @@ export function useTerminalAttach(client: CofluxClient, { tasks }: { tasks: read
     attachTimersRef.current.delete(taskId);
   }
 
-  // 拿到控制权后必须 fit + ptyResize：把本端尺寸推给 PTY，否则远端 PTY 保持上一个 holder 的尺寸导致排版错乱。
+  // Once owned, fit and ptyResize: push this side's size to the PTY, or it keeps the previous
+  // holder's size and the remote layout breaks.
   // Never focus here: with several panes on screen an attach completing in a background group would
   // steal the caret from the group the user is typing in.
   function markOwned(taskId: string, sessionId: string) {

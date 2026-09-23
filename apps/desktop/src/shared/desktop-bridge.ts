@@ -70,7 +70,7 @@ export type DesktopUpdateState = {
   message?: string;
 };
 
-/** 原生菜单项触发的命令；语义与 use-global-shortcuts.ts 的键位一一对应，⌘1-9 / ⌘⌥1-9 不进菜单。 */
+/** Commands sent by native menu items; each matches a key in use-global-shortcuts.ts. ⌘1-9 and ⌘⌥1-9 have no menu entries. */
 export type DesktopCommand =
   | "create-terminal"
   | "close-terminal"

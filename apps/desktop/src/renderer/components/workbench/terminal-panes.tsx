@@ -12,10 +12,12 @@ import { isUsableAgentSessionId, transcriptAgentOf } from "@/components/workbenc
  * 终端被搬到别的工作区对面板而言只是 workspaceId prop 变了一下——同一个 xterm 实例、选区、
  * 滚动位置全部保住，不卸载也不重挂。
  *
- * 层铺满整个终端主区，DOM 上排在工作区容器之后，故整层 pointer-events-none：不挡住分组的标签栏、
- * 空态与横幅；可见的面板自己把 pointer-events 开回来（见 terminal-pane.tsx）。分组（plan
- * 20260923-terminal-split-groups）之后可见面板可以有好几个，每个按所在分组主体的矩形摆放；
- * 标签在分组间移动只换矩形，面板既不卸载也不换 key、不换父节点。
+ * The layer covers the whole terminal main area and comes after the workspace containers in the
+ * DOM, so it is pointer-events-none as a whole: it does not block the groups' tab strips, empty
+ * states or banners, and each visible pane turns pointer events back on for itself (see
+ * terminal-pane.tsx). With editor groups (plan 20260923-terminal-split-groups) several panes can be
+ * visible, each placed on its group's body rectangle; moving a tab between groups only changes
+ * that rectangle — a pane is never unmounted, re-keyed or re-parented.
  */
 export function TerminalPanes({
   tasks,

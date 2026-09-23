@@ -478,7 +478,7 @@ export function splitWithNewTab(layout: TerminalLayout, targetGroupId: string, s
 
 /**
  * Moves a tab into a new group on one side of `targetGroupId` (drop on a group edge, or the tab
- * context menu's 「向右拆分」/「向下拆分」). Its old group collapses if emptied. Splitting a group
+ * context menu's 「移到右侧新分组」/「移到下方新分组」). Its old group collapses if emptied. Splitting a group
  * with its only tab is a no-op — there would be nothing left behind.
  */
 export function moveTabToNewGroup(layout: TerminalLayout, taskId: string, targetGroupId: string, side: LayoutSide): TerminalLayout {
@@ -861,7 +861,10 @@ export function writeStoredLayouts(store: TerminalLayoutStore, serialized: strin
 // Rendering helpers (still pure: strings only)
 // ---------------------------------------------------------------------------------------------
 
-/** Height of a group's tab strip, in px (Tailwind `h-9`). */
+/**
+ * Height of a group's tab strip, in px. Coupled to the strip's Tailwind `h-9` (36px) in
+ * workspace-terminal.tsx: change both together, or panes overlap or gap their strips.
+ */
 export const GROUP_TAB_STRIP_HEIGHT = 36;
 
 function percent(value: number): string {

@@ -26,10 +26,12 @@ type GlobalShortcutsOptions = {
 };
 
 /**
- * 全局快捷键（plan 015）：纯 ⌘ 前缀 + ⌘/ 帮助面板；编辑器分组（plan 20260923-terminal-split-groups）
- * 另加两组修饰键：⌘⇧（只有 ⌘⇧\ 向下拆分）与 ⌘⌥（分组内第 N 个 Tab、按方向移动焦点）。
- * 按**精确的修饰键组合**分派：纯 ⌘ 那组不因为新键位而放宽——⇧⌘W 是原生「关闭窗口」（main/menu.ts），
- * 多认一个 ⇧ 就会把它吞掉。
+ * 全局快捷键（plan 015）：纯 ⌘ 前缀 + ⌘/ 帮助面板。
+ *
+ * Editor groups (plan 20260923-terminal-split-groups) add two more modifier sets: ⌘⇧ (only ⌘⇧\,
+ * split down) and ⌘⌥ (the Nth tab of the focused group, focus the adjacent group). Keys are
+ * dispatched by the exact modifier set, and the bare-⌘ set is not widened for the new keys: ⇧⌘W is
+ * the native close-window accelerator (main/menu.ts), and accepting an extra ⇧ would swallow it.
  *
  * 挂在 window capture 阶段而非某个 xterm 的 attachCustomKeyEventHandler：capture 先于
  * xterm 隐藏 textarea 的 target 阶段触发，preventDefault + stopPropagation 能在组合键
@@ -53,7 +55,7 @@ export function useGlobalShortcuts({
 }: GlobalShortcutsOptions) {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      // 修饰键组合按精确集合分派：纯 ⌘、⌘⇧、⌘⌥ 三组各认各的键，Ctrl 一律不碰。
+      // Exact modifier sets: bare ⌘, ⌘⇧ and ⌘⌥ each take their own keys; anything with Ctrl is left alone.
       if (!event.metaKey || event.ctrlKey) return;
       const bare = !event.shiftKey && !event.altKey;
       const withShift = event.shiftKey && !event.altKey;

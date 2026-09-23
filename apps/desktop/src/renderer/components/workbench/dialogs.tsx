@@ -265,7 +265,7 @@ function KeyCap({ label }: { label: string }) {
   );
 }
 
-/** 快捷键帮助面板：Cmd+/ 打开，再按一次或 Esc 关闭；键位表硬编码（十来条快捷键不值得配置化）。 */
+/** Shortcut help: ⌘/ opens it, pressing again or Esc closes it. The table is hard-coded — a dozen keys do not justify configuration. */
 export function ShortcutsHelpDialog(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const rows = shortcutRows();
   return (

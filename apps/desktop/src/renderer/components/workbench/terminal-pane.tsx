@@ -593,9 +593,10 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     // OSC 52：远端程序（claude / tmux / vim…）把一段文本塞进本机剪贴板。xterm 6.0.0 自己没有
     // 52 号 handler，载荷怎么解、什么时候写、查询怎么答都由这里决定（见 osc52-clipboard.ts）。
-    // 门控是 focused && owned：好几个面板同时在出字（分组之后甚至同时在屏幕上），剪贴板却是全局唯一的，
-    // 后台 tab、非焦点分组或被别端接管的面板没资格改用户正在别处用的剪贴板。写入走主进程 Electron clipboard
-    // ——OSC 52 背后没有用户手势，navigator.clipboard 在窗口失焦时必被拒。
+    // Gated on focused && owned: several panes print at once (with groups, several are on screen at
+    // once) but the clipboard is global, so a background tab, a non-focused group or a pane another
+    // client took over has no right to overwrite it.
+    // 写入走主进程 Electron clipboard——OSC 52 背后没有用户手势，navigator.clipboard 在窗口失焦时必被拒。
     // 无论写入、丢弃还是查询都返回 true：查询绝不回一个字节，也不让序列落到别的 handler 手里。
     terminal.parser.registerOscHandler(52, (data) => {
       const parsed = parseOsc52Payload(data);
@@ -780,13 +781,30 @@ export function TerminalPane(props: TerminalPaneProps) {
     return () => cancelAnimationFrame(frame);
   }, [props.visible]);
 
+  // Taking the keyboard is deferred a frame, and in that frame the click that focused this group may
+  // have opened something that took focus itself: a context menu, the branch menu, this pane's
+  // paper, an input. Stealing it back would close or strand that surface, and an Esc meant for it
+  // would reach the shell as \x1b. So focus only when nothing else holds it — the body, or a
+  // terminal (another pane that just lost focus, this one, a hidden one).
   useEffect(() => {
     if (!props.focused) return;
     const frame = requestAnimationFrame(() => {
       controllerRef.current?.fit();
+      const current = document.activeElement;
+      if (current instanceof HTMLElement && current !== document.body && !current.closest("[data-terminal-host]")) return;
       controllerRef.current?.focus();
     });
     return () => cancelAnimationFrame(frame);
+  }, [props.focused]);
+
+  // Losing focus while still on screen (the focused group's active tab became the optimistic tab,
+  // or another group took focus by keyboard): let go of the caret, or keystrokes would keep going
+  // into a group that no longer looks focused — input is gated on `visible`, not `focused`.
+  useEffect(() => {
+    if (props.focused) return;
+    const host = hostRef.current;
+    const current = document.activeElement;
+    if (host && current instanceof HTMLElement && host.contains(current)) current.blur();
   }, [props.focused]);
 
   // 查找与右键菜单的动作：都在组件体里定义（由 React 事件触发，闭包捕获的就是当下的 props，
@@ -834,9 +852,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     void navigator.clipboard.writeText(text).catch(() => showToast({ body: "复制失败", type: "error" }));
   }
 
-  // ⌘F / ⌘↑ / ⌘↓：挂在 window capture 阶段，只有焦点面板响应（分组之后可见面板可以有好几个，
-  // 按可见门控会让一次按键在每个可见面板里各触发一次）。use-global-shortcuts 的纯 ⌘ 前缀里
-  // 没有这几个键位，不会互相抢；这里要 preventDefault，否则组合键会被编码下发给远端 shell。
+  // ⌘F / ⌘↑ / ⌘↓ on the window's capture phase, answered by the focused pane only: with groups
+  // several panes are visible, and a visibility gate would fire one key press in each of them.
+  // use-global-shortcuts 的纯 ⌘ 前缀里没有这几个键位，不会互相抢；这里要 preventDefault，否则组合键会被编码下发给远端 shell。
   // 纸面展开时整个终端被盖住：⌘F 查找与命令导航此刻都作用在一个看不见的终端上，
   // 而查找框还会和纸面的按钮抢同一个角，所以整条一并让开。
   useEffect(() => {
@@ -910,9 +928,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   // 触发区塌了菜单就会弹错地方。
   // 搜索框/链接提示/拖拽遮罩都是 absolute，不是 grid item，定位仍相对这个容器，行为不变。
   return (
-    // 位置（plan 20260923-terminal-split-groups）：可见时按所在分组主体的矩形摆放（百分比，浏览器同一帧布局，
-    // 不靠 JS 量尺寸——量出来的中间尺寸会被当成真尺寸推给 PTY）；没给矩形就铺满面板层。
-    // 面板按 task id 常驻，换分组只换这里的矩形，xterm 实例、选区、滚动位置都不动。
+    // Position (plan 20260923-terminal-split-groups): while visible the pane sits on its group's body
+    // rectangle, in percentages the browser lays out in the same frame — never measured in JS, since
+    // an intermediate measured size would be pushed to the PTY as real. Without a rectangle it fills
+    // the layer. Panes stay keyed by task id; moving to another group only changes this rectangle, so
+    // the xterm instance, selection and scroll position are untouched.
     <div
       className={
         props.visible
@@ -934,7 +954,7 @@ export function TerminalPane(props: TerminalPaneProps) {
             文字周围的内边距不在这里，而在 index.css 的 .xterm 上：FitAddon 量的是本元素的 computed height
             （border-box，因为 Tailwind preflight 给了 box-sizing: border-box），只减 terminal.element 自己的
             padding——padding 留在这一层会被当成可用空间多算出一行，末行被面板下沿切掉。 */}
-        <div ref={hostRef} className={`absolute inset-0${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
+        <div ref={hostRef} data-terminal-host className={`absolute inset-0${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
       </ContextMenu>
       {searchOpen ? (
         <div className="absolute right-4 top-2 z-20 flex items-center gap-1 rounded-md border border-border bg-background/95 px-1.5 py-1 shadow-lg backdrop-blur">
