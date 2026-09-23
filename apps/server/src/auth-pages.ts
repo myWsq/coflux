@@ -258,8 +258,8 @@ body{background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSy
 .page{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px 16px}
 .stack{width:100%;max-width:360px;display:flex;flex-direction:column;gap:20px}
 .head{text-align:center;display:flex;flex-direction:column;gap:6px}
-.brand{font-size:22px;font-weight:700;letter-spacing:.01em}
-.mark{color:var(--accent);margin-right:6px}
+.brand{display:flex;align-items:center;justify-content:center;gap:10px;font-size:22px;font-weight:700;letter-spacing:.01em}
+.mark{flex:none}
 .tagline{margin:0;color:var(--muted);font-size:14px;word-break:break-word}
 .foot{margin:8px 0 0;text-align:center;color:var(--muted);font-size:12px}
 .banner{padding:10px 12px;border-radius:8px;background:var(--danger-bg);border:1px solid var(--danger-border);color:var(--danger-fg);font-size:13px}
@@ -286,6 +286,12 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--f
 .code{padding:14px 16px;border-radius:8px;border:1px solid var(--border);background:var(--code-bg);font:600 20px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.08em;text-align:center;user-select:all;word-break:break-all}
 `.trim();
 
+/** The app icon (apps/desktop/src/renderer/public/favicon.svg), inlined: the pages load no resources. */
+const BRAND_MARK =
+  `<svg class="mark" viewBox="0 0 512 512" width="28" height="28" aria-hidden="true"><rect width="512" height="512" rx="96" fill="#111214"/>` +
+  `<path d="M152,180 L232,256 L152,332" fill="none" stroke="#e6e6e3" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"/>` +
+  `<rect x="272" y="234" width="110" height="44" rx="10" fill="#e6e6e3"/></svg>`;
+
 function footerText(): string {
   let host = "";
   try {
@@ -303,7 +309,7 @@ export function renderPage(title: string, body: string, tagline = "登录以连�
     `<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex">` +
     `<title>${escapeHtml(title)} · Coflux</title><style>${CSS}</style></head>` +
     `<body><main class="page"><div class="stack">` +
-    `<header class="head"><div class="brand"><span class="mark" aria-hidden="true">◆</span>Coflux</div>` +
+    `<header class="head"><div class="brand">${BRAND_MARK}Coflux</div>` +
     `<p class="tagline">${escapeHtml(tagline)}</p></header>` +
     body +
     `<p class="foot">${escapeHtml(footerText())}</p></div></main></body></html>`
