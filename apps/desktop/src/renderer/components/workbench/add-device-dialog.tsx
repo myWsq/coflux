@@ -96,7 +96,9 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
   }, [open, status, daemons]);
 
   // Freeze the first new device during render, so the frame that brings it also shows the success view.
-  const found = open && !success ? newDevices(tracker.baseline, daemons)[0] : undefined;
+  // Skipped on the reset render itself: `tracker` / `success` there still hold the previous opening's
+  // values, whose baseline would flag devices that joined while the dialog was closed.
+  const found = open && open === wasOpen && !success ? newDevices(tracker.baseline, daemons)[0] : undefined;
   if (found) setSuccess({ daemonId: found.daemonId, name: found.name });
 
   // Only a validated token can be sent: every miss counts against this connection's failure budget,
