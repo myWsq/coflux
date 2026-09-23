@@ -261,6 +261,6 @@ mod tests {
 
     #[test]
     fn s256_matches_rfc7636_example() {
-        assert_eq!(s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"), "E9Melhoa2OwvFWFlC6EcCwsZtpHTu4X9-UThXrtcM1s");
+        assert_eq!(s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
     }
 }
