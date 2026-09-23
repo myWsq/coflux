@@ -38,6 +38,10 @@ const SETTINGS = join(HOME, "settings.json"); // 用户配置（serverUrl/device
 const LOG_FILE = join(HOME, "daemon.log");
 const CRED = join(HOME, "credentials.json");
 const PENDING_AUTH = join(HOME, "pending-auth.json"); // worker 落盘的待授权链接（daemon.authorizePending）
+// One-time join key (plan 20260924-device-join-keys): `up --key` writes it, the worker presents it once
+// and deletes it on the server's answer, recording what happened in the outcome file (0600 each).
+const JOIN_KEY = join(HOME, "join-key.json");
+const JOIN_OUTCOME = join(HOME, "join-outcome.json");
 const CONN_STATE = join(HOME, "conn-state.json"); // worker 落盘的连接态快照（plan 033，见 crates/worker/src/conn_state.rs）
 const LOCAL_GATEWAY_STORE = join(HOME, "local-gateway.json"); // gateway key/origin/grant；doctor 只读结构与数量，绝不打印秘密
 const FDA_STATUS = join(HOME, "fda-status"); // supervisor 启动时探测落盘（仅 macOS，见 crates/supervisor/src/fda.rs）
@@ -67,6 +71,17 @@ function readSettings() {
 
 function readPendingAuth() {
   try { return JSON.parse(fs.readFileSync(PENDING_AUTH, "utf8")); } catch { return null; }
+}
+
+function readJoinOutcome() {
+  try { return JSON.parse(fs.readFileSync(JOIN_OUTCOME, "utf8")); } catch { return null; }
+}
+
+function readCredentialsSummary() {
+  try {
+    const c = JSON.parse(fs.readFileSync(CRED, "utf8"));
+    return { serverUrl: typeof c.serverUrl === "string" ? c.serverUrl : "", daemonId: typeof c.daemonId === "string" ? c.daemonId : "" };
+  } catch { return { serverUrl: "", daemonId: "" }; }
 }
 
 function readConnState() {
@@ -449,6 +464,55 @@ async function applyAndStart({ serverUrl, deviceName, shell, version, binDir, no
   }
 }
 
+/**
+ * `cofluxd up --key` (plan 20260924-device-join-keys): join the account with a one-time key minted in
+ * Coflux's 添加设备 dialog. Never prints a link and never enters the 11-minute link wait.
+ *
+ * Order matters: stop the service before the key file exists, so a worker still running from the link
+ * era can never pick it up in a renewal and then be killed mid-answer; starting the stopped unit again
+ * (`enable --now` on Linux, unload/load on macOS) is the restart that makes the new worker read it.
+ * The CLI still never speaks the protocol: it learns the result only from `credentials.json` and the
+ * outcome file the worker writes.
+ */
+async function joinWithKey({ serverUrl, deviceName, shell, version, binDir, key }) {
+  await ensureBinaries({ version, binDir, skipIfPresent: true });
+  applyConfig({ serverUrl, deviceName, shell });
+  if (serverUrl !== DEFAULT_SERVER) console.log(`⚠ 使用非默认服务器: ${serverUrl}`);
+  stopService();
+  // The worker clears pending-auth.json only at connection end, not on SIGTERM: a stale one would
+  // read as "daemon too old for keys" below.
+  for (const file of [JOIN_OUTCOME, PENDING_AUTH]) { try { fs.rmSync(file, { force: true }); } catch { /* */ } }
+  fs.writeFileSync(JOIN_KEY, JSON.stringify({ key }) + "\n", { mode: 0o600 });
+  fs.chmodSync(JOIN_KEY, 0o600);
+  installService(true);
+  console.log(`✓ daemon 已启动 → ${serverUrl}`);
+  console.log("\n  正在用接入密钥接入账号 …\n");
+  const maxWaitMs = 2 * 60 * 1000;
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    const outcome = readJoinOutcome();
+    if (fs.existsSync(CRED) || outcome?.status === "joined") {
+      console.log("✓ 已接入\n");
+      cmdStatus();
+      return;
+    }
+    if (outcome?.status === "rejected") {
+      die(`接入失败：${outcome.reason || "密钥无效、已过期或已被使用"}\n  在 Coflux 的添加设备里换一个密钥，再重新运行这条命令。`);
+    }
+    if (outcome?.status === "unsupported") {
+      die("服务器还不支持接入密钥（需要更新服务器）。");
+    }
+    if (fs.existsSync(JOIN_KEY) && fs.existsSync(PENDING_AUTH)) {
+      // The daemon enrolled without reading the key: its binary predates join keys (up keeps existing
+      // binaries). Drop the key so a later worker never presents it behind the user's back.
+      try { fs.rmSync(JOIN_KEY, { force: true }); } catch { /* */ }
+      die("已安装的 daemon 版本过旧，不认识接入密钥：先运行 `cofluxd update`，再在 Coflux 的添加设备里换一个密钥重新运行这条命令。");
+    }
+    await sleep(500);
+  }
+  die("等待接入超时：daemon 仍在后台尝试连接服务器。用 `cofluxd status` 查看状态，`cofluxd logs` 查看原因。");
+}
+
 // 轮询 ~/.coflux/pending-auth.json（授权链接）与 credentials.json（登记成功）给出全程反馈。
 // CLI 保持零协议：只读文件，不连 WS；daemon 断线重连会自动重发 enrollRequest、换发新链接。
 async function waitForAuthorization() {
@@ -479,6 +543,24 @@ async function waitForAuthorization() {
 
 async function cmdUp(v) {
   const s = readSettings();
+  if (v.key !== undefined) {
+    const key = v.key.trim();
+    if (!/^cf_join_[A-Za-z0-9_-]+$/.test(key)) die("--key 不是接入密钥：请完整复制 Coflux 添加设备里的命令（密钥以 cf_join_ 开头）");
+    if (v["no-start"]) die("--key 不能与 --no-start 同用：密钥只在启动时使用一次");
+    if (fs.existsSync(CRED)) {
+      // Already registered: a key would never be presented, so change nothing at all.
+      const c = readCredentialsSummary();
+      console.log(`✓ 此设备已接入 ${c.serverUrl || s.serverUrl || "(未知服务器)"}${c.daemonId ? `（设备 ${c.daemonId}）` : ""}，忽略 --key，未做任何改动。`);
+      return;
+    }
+    await joinWithKey({
+      serverUrl: v.server || s.serverUrl || DEFAULT_SERVER,
+      deviceName: v.name || s.deviceName || hostname(),
+      shell: v.shell || s.shell,
+      version: v.version, binDir: v["bin-dir"], key,
+    });
+    return;
+  }
   await applyAndStart({
     serverUrl: v.server || s.serverUrl || DEFAULT_SERVER,
     deviceName: v.name || s.deviceName || hostname(),
@@ -844,6 +926,7 @@ const HELP = `cofluxd —— coflux daemon 管理
 
   cofluxd                 首次=up（打印浏览器授权链接），已配置=status
   cofluxd up [flags]      幂等：首次装+起，已装则按当前 settings.json 重装服务并重启
+  cofluxd up --key <密钥>  用 Coflux 添加设备里生成的一次性密钥直接接入账号（不打印授权链接；已接入则不做改动）
   cofluxd status          服务器/登记（含"等待授权"）/服务/连接状态
   cofluxd doctor          中心网络 + gateway bind/grant/loopback + daemon 状态分层自检
   cofluxd update          下载新二进制（不重启；supervisor 有变化时提示用 restart 应用）
@@ -853,14 +936,14 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd down            停止
   cofluxd uninstall [--purge]   卸载（--purge 连二进制/配置/凭证一并删）
 
-up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>
+up flags: --server <ws://.../daemon>  --name <名>  --shell <路径>  --key <cf_join_…>(一次性接入密钥，1 小时内有效)
 通用: --version <vX|latest>(不传时 up 沿用已有二进制，update 默认 latest)  --bin-dir <dir>(用本地 cargo 产物)  --no-start
 配置都在 ~/.coflux/settings.json（serverUrl/deviceName/shell），daemon 直接读；改后重跑 cofluxd up 生效。`;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
-    server: { type: "string" }, name: { type: "string" }, shell: { type: "string" },
+    server: { type: "string" }, name: { type: "string" }, shell: { type: "string" }, key: { type: "string" },
     version: { type: "string" }, "bin-dir": { type: "string" },
     "no-start": { type: "boolean", default: false }, purge: { type: "boolean", default: false },
     follow: { type: "boolean", short: "f", default: false }, help: { type: "boolean", short: "h", default: false },

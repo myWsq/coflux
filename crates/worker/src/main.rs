@@ -48,7 +48,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use conn_state::ConnState;
-use creds::{CredStore, Credentials, PendingAuth};
+use creds::{CredStore, Credentials, JoinOutcome, PendingAuth};
 use observed::ObservedState;
 
 #[derive(Clone)]
@@ -98,6 +98,10 @@ struct WorkerState {
     /// 等待授权中的链接过期时刻（server 侧 epoch ms）。到期且连接仍在、仍未登记时，
     /// 由 run_server_connection 的定时检查重发 daemon.enrollRequest 换新链接。
     pending_auth_expires_at: Option<f64>,
+    /// Whether the enroll request on the current server connection carried a join key (plan
+    /// 20260924-device-join-keys). Decides whether the server's answer is recorded as a join outcome;
+    /// reset at every connection start.
+    join_key_presented: bool,
     /// agent 控制请求的在飞关联表（plan 074）：requestId -> 中心回执的接收端。
     /// 断开中心连接时整表清空——发送端 drop 会让等待方立刻拿到「连接中断」而不是干等超时。
     agent_pending: HashMap<String, tokio::sync::oneshot::Sender<wire::AgentControlResult>>,
@@ -621,6 +625,7 @@ async fn worker_main() {
         alive: HashMap::new(),
         credentials,
         pending_auth_expires_at: None,
+        join_key_presented: false,
         agent_pending: HashMap::new(),
         ledger: session_ledger::SessionLedger::default(),
         workspaces: HashMap::new(),
@@ -1269,6 +1274,53 @@ async fn server_loop(
     }
 }
 
+/// The enroll request of an unregistered worker. A join key left by `cofluxd up --key` is attached
+/// when present (plan 20260924-device-join-keys); whether one was sent is remembered for this
+/// connection so the server's answer can be recorded. Every answer deletes the key file, and a renewal
+/// only follows an answer, so in practice only the first request of a connection can carry a key.
+fn enroll_request(
+    cfg: &Config,
+    creds_store: &CredStore,
+    state: &Mutex<WorkerState>,
+) -> wire::DaemonEnrollRequest {
+    let join_key = creds_store.load_join_key().unwrap_or_default();
+    state.lock().unwrap().join_key_presented = !join_key.is_empty();
+    if !join_key.is_empty() {
+        logln!("[worker] enrolling with a join key");
+    }
+    wire::DaemonEnrollRequest {
+        name: cfg.device_name.clone(),
+        host: cfg.host.clone(),
+        platform: cfg.platform.clone(),
+        worker_version: cfg.worker_version.clone(),
+        supervisor_version: cfg.supervisor_version.clone(),
+        arch: cfg.arch.clone(),
+        capabilities: daemon_capabilities(),
+        control_protocol_version: coflux_protocol::CONTROL_PROTOCOL_VERSION,
+        join_key,
+    }
+}
+
+/// Settle a presented join key once the server has answered: delete the key file and record the
+/// outcome for `cofluxd up --key`. A no-op when this connection's enroll carried no key.
+fn settle_join_key(
+    state: &Mutex<WorkerState>,
+    creds_store: &CredStore,
+    status: &str,
+    reason: Option<&str>,
+) {
+    let presented = std::mem::replace(&mut state.lock().unwrap().join_key_presented, false);
+    if !presented {
+        return;
+    }
+    creds_store.clear_join_key();
+    creds_store.save_join_outcome(&JoinOutcome {
+        status,
+        reason,
+        at: now_ms_f64(),
+    });
+}
+
 async fn run_server_connection(
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     cfg: &Arc<Config>,
@@ -1294,6 +1346,7 @@ async fn run_server_connection(
         let mut s = state.lock().unwrap();
         s.authed = false;
         s.pending_auth_expires_at = None; // 授权链接与连接同生命周期，新连接从零开始
+        s.join_key_presented = false;
     }
     if let Some(auth) = local_auth {
         auth.set_server_online(false);
@@ -1314,16 +1367,11 @@ async fn run_server_connection(
             capabilities: daemon_capabilities(),
             control_protocol_version: coflux_protocol::CONTROL_PROTOCOL_VERSION,
         }),
-        None => daemon_to_server::Payload::DaemonEnrollRequest(wire::DaemonEnrollRequest {
-            name: cfg.device_name.clone(),
-            host: cfg.host.clone(),
-            platform: cfg.platform.clone(),
-            worker_version: cfg.worker_version.clone(),
-            supervisor_version: cfg.supervisor_version.clone(),
-            arch: cfg.arch.clone(),
-            capabilities: daemon_capabilities(),
-            control_protocol_version: coflux_protocol::CONTROL_PROTOCOL_VERSION,
-        }),
+        None => daemon_to_server::Payload::DaemonEnrollRequest(enroll_request(
+            cfg,
+            creds_store,
+            state,
+        )),
     };
     let init_bytes = (wire::DaemonToServer {
         payload: Some(init),
@@ -1391,16 +1439,11 @@ async fn run_server_connection(
                 };
                 if expired {
                     logln!("[worker] authorization link expired; requesting a new one");
-                    let req = daemon_to_server::Payload::DaemonEnrollRequest(wire::DaemonEnrollRequest {
-                        name: cfg.device_name.clone(),
-                        host: cfg.host.clone(),
-                        platform: cfg.platform.clone(),
-                        worker_version: cfg.worker_version.clone(),
-                        supervisor_version: cfg.supervisor_version.clone(),
-                        arch: cfg.arch.clone(),
-                        capabilities: daemon_capabilities(),
-                        control_protocol_version: coflux_protocol::CONTROL_PROTOCOL_VERSION,
-                    });
+                    let req = daemon_to_server::Payload::DaemonEnrollRequest(enroll_request(
+                        cfg,
+                        creds_store,
+                        state,
+                    ));
                     let bytes = (wire::DaemonToServer { payload: Some(req) }).encode_to_vec();
                     if !send_server_ws(&mut sink, Message::binary(bytes), write_timeout).await { break; }
                 }
@@ -1551,6 +1594,9 @@ async fn on_server_message(
             };
             creds_store.save(&c);
             creds_store.clear_pending_auth(); // 授权兑现后不再是 pending 了
+            settle_join_key(state, creds_store, "joined", None);
+            // Registered now, so any key file left behind can never be presented; drop it too.
+            creds_store.clear_join_key();
             let daemon_changed = {
                 let mut s = state.lock().unwrap();
                 let changed = s
@@ -1606,15 +1652,30 @@ async fn on_server_message(
         }) => {
             // 等待用户在浏览器确认授权；连接保持打开，server 确认后会在同一连接上直接推 DaemonEnrolled
             // （见上），不会走 exit(1)——这是与 DaemonAuthError{needEnroll:false} 致命路径的关键区别。
+            // A link in answer to an enroll that carried a join key means the server predates join
+            // keys and ignored it. Settle the key (file gone, outcome `unsupported`) before writing
+            // pending-auth.json: cofluxd reads "key file and pending link both present" as a daemon
+            // binary too old to know keys, which must never match this worker.
+            settle_join_key(state, creds_store, "unsupported", None);
             logln!("[worker] waiting for authorization: {url}");
             creds_store.save_pending_auth(&PendingAuth { url, expires_at });
             state.lock().unwrap().pending_auth_expires_at = Some(expires_at); // 供续期检查用；到期未确认则重发 enrollRequest
+        }
+        server_to_daemon::Payload::DaemonJoinKeyRejected(wire::DaemonJoinKeyRejected { reason }) => {
+            // The server closes the socket right after. Do not exit: the ordinary reconnect backoff
+            // then enrolls without a key (the file is gone), i.e. falls back to the link flow.
+            logln!("[worker] join key rejected: {reason}");
+            settle_join_key(state, creds_store, "rejected", Some(reason.as_str()));
+            creds_store.clear_join_key();
         }
         server_to_daemon::Payload::DaemonAuthError(wire::DaemonAuthError {
             message,
             need_enroll,
         }) => {
             logln!("[worker] auth error: {message}");
+            // An enroll that carried a key can still be refused before redemption (control protocol
+            // too old) or lose its device mid-registration; either way the key is answered.
+            settle_join_key(state, creds_store, "rejected", Some(message.as_str()));
             if need_enroll {
                 creds_store.clear();
                 let mut state = state.lock().unwrap();
@@ -2053,6 +2114,7 @@ mod tests {
             alive: HashMap::from([("session-old".into(), ("task-old".into(), 11))]),
             credentials: None,
             pending_auth_expires_at: None,
+            join_key_presented: false,
             agent_pending: HashMap::new(),
             ledger: session_ledger::SessionLedger::default(),
             workspaces: HashMap::new(),

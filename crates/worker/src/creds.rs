@@ -25,6 +25,29 @@ pub struct PendingAuth {
     pub expires_at: f64,
 }
 
+/// One-time device join key (plan 20260924-device-join-keys): `cofluxd up --key` writes
+/// `{home}/join-key.json` (0600) before starting the service. The worker presents it only while it has
+/// no credentials and deletes it as soon as the server answers — enrolled, rejected, or (old server)
+/// handed back a link — so a key is never presented twice.
+#[derive(Deserialize)]
+struct JoinKeyFile {
+    key: String,
+}
+
+/// What became of the join key this worker presented, for `cofluxd up --key` to report
+/// (`{home}/join-outcome.json`, 0600). `status` is `joined`, `rejected` or `unsupported` (an old
+/// server ignored the key and answered with an authorization link).
+#[derive(Serialize)]
+pub struct JoinOutcome<'a> {
+    pub status: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'a str>,
+    pub at: f64,
+}
+
+/// Longest key accepted from the file; the server's own bound is 128 bytes.
+const MAX_JOIN_KEY_LEN: usize = 256;
+
 pub struct CredStore {
     path: String,
     home: String,
@@ -59,6 +82,48 @@ impl CredStore {
 
     pub fn clear_pending_auth(&self) {
         let _ = fs::remove_file(self.pending_auth_path());
+    }
+
+    fn join_key_path(&self) -> String {
+        format!("{}/join-key.json", self.home)
+    }
+
+    fn join_outcome_path(&self) -> String {
+        format!("{}/join-outcome.json", self.home)
+    }
+
+    /// The pending join key, if `cofluxd up --key` left one. Empty, oversized or unparsable files
+    /// count as no key (the enroll then goes through the link flow).
+    pub fn load_join_key(&self) -> Option<String> {
+        let data = fs::read_to_string(self.join_key_path()).ok()?;
+        let file: JoinKeyFile = serde_json::from_str(&data).ok()?;
+        let key = file.key.trim().to_string();
+        if key.is_empty() || key.len() > MAX_JOIN_KEY_LEN {
+            None
+        } else {
+            Some(key)
+        }
+    }
+
+    pub fn clear_join_key(&self) {
+        let _ = fs::remove_file(self.join_key_path());
+    }
+
+    pub fn save_join_outcome(&self, outcome: &JoinOutcome) {
+        let _ = fs::create_dir_all(&self.home);
+        let json = match serde_json::to_string_pretty(outcome) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(self.join_outcome_path())
+        {
+            let _ = f.write_all(json.as_bytes());
+        }
     }
 
     pub fn load(&self) -> Option<Credentials> {

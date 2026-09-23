@@ -526,7 +526,7 @@ export class Store {
           SELECT key_hash FROM device_join_keys
           WHERE account_id = ${k.accountId} AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ${k.createdAt}
           ORDER BY created_at DESC, key_hash
-          OFFSET ${Math.max(1, k.maxLive)}
+          OFFSET ${Math.max(1, k.maxLive)}::int
         )
       `;
     });

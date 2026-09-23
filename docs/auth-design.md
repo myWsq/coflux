@@ -43,9 +43,23 @@ Authentication failure returns `daemon.authError`. If the device has been delete
 - `client.removeDevice{ daemonId }` persistently revokes the device, disconnects it, and removes its workspace/task business data.
 - Local credential persistence naturally implements one daemon per machine. Reinstalling on the same machine enrolls a new device; the old device can be removed in the UI.
 
-## Device authorization flow (Tailscale style, plan 003; sole enrollment path since plan 034)
+## Device join keys (plan 20260924-device-join-keys)
 
-With no arguments, `cofluxd up` connects the daemon anonymously and requests one-time authorization, confirmed in a browser by a signed-in user. It calls `store.createDevice(...)` and writes `devices`. The resulting daemonId/deviceToken and subsequent authentication are identical regardless of how enrollment was initiated.
+The desktop 添加设备 dialog (Headless tab) mints a one-time join key over the control WebSocket (`client.deviceJoinKeyCreate{ requestId, replaces }` → `deviceJoinKeyCreated{ requestId, key, expiresAt | error }`) and embeds it in the command it shows: `cofluxd up --server <daemon url> --key cf_join_…`. Running that command is the whole job — nothing is pasted back.
+
+- **Storage**: table `device_join_keys` (migration 8) keeps only the SHA-256 hash, the minting account (FK, cascade on delete), `created_at`, `expires_at`, `used_at` and `revoked_at`. Server restarts and deploys inside the hour do not invalidate keys.
+- **Rules**: single use, one hour (`COFLUX_JOIN_KEY_TTL_MS`). `replaces` revokes the previous key immediately, only when it belongs to the same account. At most `COFLUX_MAX_JOIN_KEYS` (default 10) are live per account; minting beyond that revokes the oldest. Mints are rate limited per account (`COFLUX_JOIN_KEY_MINT_RATE_LIMIT` per auth rate window). Closing the dialog does not revoke its key.
+- **Delivery to the daemon**: `cofluxd up --key` stops the service, writes `~/.coflux/join-key.json` (0600) and starts it again. The key never enters `settings.json` or the service unit. The worker reads it only while it has no credentials and deletes it on the server's first answer.
+- **Redemption**: `daemon.enrollRequest{ …, joinKey }` is redeemed by one conditional UPDATE (live key → mark used, return account) inside the same transaction as the device-cap check and `createDevice`, then registered exactly like a link authorization (`daemon.enrolled`). A cap rejection rolls the transaction back, so the key is not spent. A key enroll never creates a pending link.
+- **Rejection**: an invalid, expired, used or replaced key gets `daemon.joinKeyRejected{ reason }` and the socket closes; there is no fallback to a link. The worker records `rejected` in `~/.coflux/join-outcome.json` and keeps running; its next connection enrolls without a key (link flow).
+- **Outcome file**: `joined`, `rejected` (+ reason) or `unsupported` (an old server ignored the key and answered with a link). `cofluxd up --key` polls only `credentials.json` and this file, with a two-minute bound after the service starts; a key file still present next to a `pending-auth.json` means the installed daemon binary predates join keys (`cofluxd update`).
+- **Guessing**: keys are 192-bit random tokens, length-bounded before hashing; the per-IP `COFLUX_ENROLL_RATE_LIMIT` on enrollment bounds attempts.
+
+This is not the long-lived `enrollKey` that plan 034 removed: that key was seeded from a server environment variable and reusable; a join key is minted per use by a signed-in client and bound to its account.
+
+## Device authorization flow (Tailscale style, plan 003)
+
+Browser authorization remains the path for `cofluxd up` without `--key`. With no arguments, `cofluxd up` connects the daemon anonymously and requests one-time authorization, confirmed in a browser by a signed-in user. It calls `store.createDevice(...)` and writes `devices`. The resulting daemonId/deviceToken and subsequent authentication are identical regardless of how enrollment was initiated.
 
 ### State is in memory; the connection is authoritative
 

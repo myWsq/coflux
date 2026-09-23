@@ -45,10 +45,10 @@ Requires Node.js 20 or later.
 
 ```sh
 npm install -g cofluxd
-cofluxd up
+cofluxd up --key <join key>
 ```
 
-Follow the authorization link to connect the host to your account. Use `cofluxd status`, `cofluxd doctor`, or `cofluxd logs -f` to inspect it.
+Get the command, join key included, from **Add device → Headless** in the Coflux desktop app. The key is single use and valid for one hour; the host joins your account as soon as the command runs. Without `--key`, `cofluxd up` prints an authorization link instead: open it in a browser signed in to your account. Use `cofluxd status`, `cofluxd doctor`, or `cofluxd logs -f` to inspect it.
 
 ## Operate your workspaces
 

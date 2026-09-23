@@ -4144,6 +4144,7 @@ mod tests {
             alive: HashMap::new(),
             credentials: None,
             pending_auth_expires_at: None,
+            join_key_presented: false,
             workspaces,
             last_branches: HashMap::new(),
             last_diffs: HashMap::new(),

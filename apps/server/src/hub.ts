@@ -3922,7 +3922,7 @@ export class Hub {
    * it is this account's own live key. The plaintext goes back only to the requesting connection. */
   private async createJoinKey(client: ClientConn, requestId: string, replaces: string): Promise<void> {
     const reply = (value: { key?: string; expiresAt?: number; error?: string }) =>
-      this.sendClient(client, { case: "deviceJoinKeyCreated", value: { requestId, ...value } });
+      this.sendClient(client, { case: "deviceJoinKeyCreated", value: { requestId, key: value.key ?? "", expiresAt: value.expiresAt ?? 0, error: value.error ?? "" } });
     if (!validBoundedText(requestId, MAX_JOIN_KEY_REQUEST_ID_BYTES) || (replaces !== "" && !validBoundedText(replaces, MAX_JOIN_KEY_BYTES))) {
       reply({ error: "生成密钥的请求无效" });
       return;
