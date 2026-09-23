@@ -70,13 +70,21 @@ export type DesktopUpdateState = {
   message?: string;
 };
 
-/** 原生菜单项触发的命令；语义与 use-global-shortcuts.ts 的键位一一对应，⌘1-9 不进菜单。 */
+/** 原生菜单项触发的命令；语义与 use-global-shortcuts.ts 的键位一一对应，⌘1-9 / ⌘⌥1-9 不进菜单。 */
 export type DesktopCommand =
   | "create-terminal"
   | "close-terminal"
   | "create-workspace"
   | "previous-tab"
   | "next-tab"
+  /** ⌘\ / ⌘⇧\: split the focused group and open a new terminal in the new group. */
+  | "split-right"
+  | "split-down"
+  /** ⌘⌥←/→/↑/↓: move focus to the adjacent group. */
+  | "focus-group-left"
+  | "focus-group-right"
+  | "focus-group-up"
+  | "focus-group-down"
   | "toggle-help"
   | "open-settings"
   | "toggle-palette";

@@ -61,3 +61,26 @@ test("字段缺省视为未按下：只有 metaKey 明确为真才轮到应用",
   assert.equal(decideTerminalKeyOwner({ code: "KeyC", metaKey: true }), "app");
   assert.equal(decideTerminalKeyOwner({ code: "KeyA", metaKey: true }), "select-all");
 });
+
+test("⌘⌥ 数字与方向键是分组快捷键，归应用：keyup 也不能落进终端", () => {
+  for (const code of ["Digit1", "Digit5", "Digit9", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"]) {
+    assert.equal(decideTerminalKeyOwner(key(code, { meta: true, alt: true })), "app", code);
+    assert.equal(decideTerminalKeyOwner(key(code, { meta: true, alt: true }, "keyup")), "app", `${code} keyup`);
+  }
+});
+
+test("其余带 ⌥ 的组合照旧归终端：⌥ 是 Meta，⌘⌥0、⌘⌥ 字母、⌥ 数字 / 方向键都不是分组快捷键", () => {
+  assert.equal(decideTerminalKeyOwner(key("Digit0", { meta: true, alt: true })), "terminal");
+  assert.equal(decideTerminalKeyOwner(key("KeyV", { meta: true, alt: true })), "terminal");
+  assert.equal(decideTerminalKeyOwner(key("Digit1", { alt: true })), "terminal");
+  assert.equal(decideTerminalKeyOwner(key("ArrowLeft", { alt: true })), "terminal");
+  // 多一个修饰键就不是那组快捷键
+  assert.equal(decideTerminalKeyOwner(key("Digit1", { meta: true, alt: true, shift: true })), "terminal");
+  assert.equal(decideTerminalKeyOwner(key("ArrowLeft", { meta: true, alt: true, ctrl: true })), "terminal");
+});
+
+test("⌘\\ 与 ⇧⌘\\（拆分）本来就在 ⌘ 那一档，归应用", () => {
+  assert.equal(decideTerminalKeyOwner(key("Backslash", { meta: true })), "app");
+  assert.equal(decideTerminalKeyOwner(key("Backslash", { meta: true, shift: true })), "app");
+  assert.equal(decideTerminalKeyOwner(key("IntlBackslash", { meta: true })), "app");
+});

@@ -9,7 +9,7 @@ export type MenuActions = {
 };
 
 /**
- * 原生菜单（plan 103）。⌘T/⌘W/⌘N/⌘[ ]/⌘/ 这些由页面处理的键：菜单项展示键位但 **不注册**
+ * 原生菜单（plan 103）。⌘T/⌘W/⌘N/⌘[ ]/⌘\ /⌘/ 这些由页面处理的键：菜单项展示键位但 **不注册**
  * accelerator（registerAccelerator: false）——键落到页面，由 use-global-shortcuts 按纯 ⌘
  * 前缀处理；点菜单项才走 sendCommand。关窗改成 ⇧⌘W，把 ⌘W 让给「关闭终端」。
  * ⌘R「重新载入」是唯一的例外：它是 webContents 层的动作，页面没有什么可代劳的，直接用原生 role。
@@ -77,6 +77,14 @@ export function buildAppMenu(actions: MenuActions): Menu {
         { type: "separator" },
         pageShortcut("上一个终端", "CmdOrCtrl+[", "previous-tab"),
         pageShortcut("下一个终端", "CmdOrCtrl+]", "next-tab"),
+        { type: "separator" },
+        // Editor groups (plan 20260923-terminal-split-groups): displayed, not registered, like the rest.
+        pageShortcut("向右拆分", "CmdOrCtrl+\\", "split-right"),
+        pageShortcut("向下拆分", "Shift+CmdOrCtrl+\\", "split-down"),
+        pageShortcut("聚焦左侧分组", "Alt+CmdOrCtrl+Left", "focus-group-left"),
+        pageShortcut("聚焦右侧分组", "Alt+CmdOrCtrl+Right", "focus-group-right"),
+        pageShortcut("聚焦上方分组", "Alt+CmdOrCtrl+Up", "focus-group-up"),
+        pageShortcut("聚焦下方分组", "Alt+CmdOrCtrl+Down", "focus-group-down"),
         { type: "separator" },
         // 打包版也有 ⌘R：界面卡住时不必退出应用（退出会连带断掉中心连接与本机 device 通道）。
         // role 自带 accelerator 与可用态；主进程注册的 accelerator 优先于页面，终端抢不走它。

@@ -37,6 +37,14 @@
  * ⇧ 则**不**排除：⇧⌘ 在 macOS 上同样是应用层（原生菜单里就有 ⇧⌘W）。也不做平台分支——桌面版
  * 只出 macOS 包，别的平台上 metaKey 是 Super/Win 键，一样没有终端语义。
  *
+ * ## ⌘⌥ 的例外：分组快捷键
+ *
+ * 编辑器分组（plan 20260923-terminal-split-groups）占用了 ⌘⌥1–9（分组内第 N 个 Tab）与 ⌘⌥←→↑↓
+ * （按方向移动焦点）。全局快捷键在 window capture 阶段抢下 keydown，但 keyup 仍会走到 xterm：若按上面
+ * 「带 ⌥ 归终端」的规则，协商了 kitty REPORT_EVENT_TYPES 的 TUI 就会收到一个没见过按下的松开——
+ * 正是本模块要防的那种故障。所以恰好这几组 ⌘⌥ 组合（不带 Ctrl、不带 ⇧）归应用；其余带 ⌥ 的组合
+ * 照旧归终端（⌥ 是 Meta）。
+ *
  * 纯函数、只吃事件字段：渲染层单测在纯 Node 下跑，没有 DOM，模块里不能碰 KeyboardEvent 运行时值。
  */
 
@@ -56,9 +64,27 @@ export type TerminalKeyEvent = {
  */
 export type TerminalKeyOwner = "terminal" | "app" | "select-all";
 
+const GROUP_CHORD_CODES = new Set([
+  "Digit1",
+  "Digit2",
+  "Digit3",
+  "Digit4",
+  "Digit5",
+  "Digit6",
+  "Digit7",
+  "Digit8",
+  "Digit9",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+]);
+
 /** 这个按键归谁。 */
 export function decideTerminalKeyOwner(event: TerminalKeyEvent): TerminalKeyOwner {
   if (event.metaKey !== true) return "terminal";
+  // ⌘⌥1–9 and ⌘⌥ arrows are the app's group shortcuts; checked before the ⌥ → terminal rule.
+  if (event.altKey === true && event.ctrlKey !== true && event.shiftKey !== true && GROUP_CHORD_CODES.has(event.code ?? "")) return "app";
   if (event.ctrlKey === true || event.altKey === true) return "terminal";
   if (event.shiftKey !== true && event.code === "KeyA") return "select-all";
   return "app";

@@ -26,7 +26,10 @@ type GlobalShortcutsOptions = {
 };
 
 /**
- * 全局快捷键（plan 015）：纯 ⌘ 前缀 + ⌘/ 帮助面板。
+ * 全局快捷键（plan 015）：纯 ⌘ 前缀 + ⌘/ 帮助面板；编辑器分组（plan 20260923-terminal-split-groups）
+ * 另加两组修饰键：⌘⇧（只有 ⌘⇧\ 向下拆分）与 ⌘⌥（分组内第 N 个 Tab、按方向移动焦点）。
+ * 按**精确的修饰键组合**分派：纯 ⌘ 那组不因为新键位而放宽——⇧⌘W 是原生「关闭窗口」（main/menu.ts），
+ * 多认一个 ⇧ 就会把它吞掉。
  *
  * 挂在 window capture 阶段而非某个 xterm 的 attachCustomKeyEventHandler：capture 先于
  * xterm 隐藏 textarea 的 target 阶段触发，preventDefault + stopPropagation 能在组合键
@@ -50,30 +53,76 @@ export function useGlobalShortcuts({
 }: GlobalShortcutsOptions) {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      // 单修饰 ⌘ 前缀：⌘/ 与下面的字母/数字键共用同一判定；再按一次 ⌘/ 由调用方 toggle 关闭。
-      const hasPrefix = event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
-      if (!hasPrefix) return;
+      // 修饰键组合按精确集合分派：纯 ⌘、⌘⇧、⌘⌥ 三组各认各的键，Ctrl 一律不碰。
+      if (!event.metaKey || event.ctrlKey) return;
+      const bare = !event.shiftKey && !event.altKey;
+      const withShift = event.shiftKey && !event.altKey;
+      const withAlt = event.altKey && !event.shiftKey;
+      if (!bare && !withShift && !withAlt) return;
+      // ⌘\ may be reported as IntlBackslash on ISO keyboards.
+      const isBackslash = event.code === "Backslash" || event.code === "IntlBackslash";
 
-      // ⌘,（macOS 的「偏好设置」惯例）不受挂起影响：它开关的就是那个覆盖层本身，人在设置页里
-      // 按它应当关掉设置页——挂起是为了别让终端快捷键落到看不见的终端上，与这条无关。
-      if (event.code === "Comma") {
-        event.preventDefault();
-        event.stopPropagation();
-        onToggleSettings();
-        return;
-      }
+      if (bare) {
+        // ⌘,（macOS 的「偏好设置」惯例）不受挂起影响：它开关的就是那个覆盖层本身，人在设置页里
+        // 按它应当关掉设置页——挂起是为了别让终端快捷键落到看不见的终端上，与这条无关。
+        if (event.code === "Comma") {
+          event.preventDefault();
+          event.stopPropagation();
+          onToggleSettings();
+          return;
+        }
 
-      // ⌘P sits on the same side of the gate as ⌘,: the palette suspends the whole workbench set
-      // while it is open (⌘[ / ⌘] have to reach its filter tabs), so a ⌘P placed after the gate
-      // could never be pressed a second time to close what it opened.
-      if (event.code === "KeyP") {
-        event.preventDefault();
-        event.stopPropagation();
-        onTogglePalette();
-        return;
+        // ⌘P sits on the same side of the gate as ⌘,: the palette suspends the whole workbench set
+        // while it is open (⌘[ / ⌘] have to reach its filter tabs), so a ⌘P placed after the gate
+        // could never be pressed a second time to close what it opened.
+        if (event.code === "KeyP") {
+          event.preventDefault();
+          event.stopPropagation();
+          onTogglePalette();
+          return;
+        }
       }
 
       if (isSuspended) return;
+      const terminal = activeTerminalRef.current;
+
+      if (withShift) {
+        // ⌘⇧\ splits downward. Nothing else with ⇧ belongs here: ⇧⌘W is the native close-window accelerator.
+        if (!isBackslash) return;
+        event.preventDefault();
+        event.stopPropagation();
+        terminal?.splitTerminal("down");
+        return;
+      }
+
+      if (withAlt) {
+        // ⌘⌥1–9: the focused group's Nth tab. ⌘⌥ arrows: focus the adjacent group.
+        // terminal-key-ownership.ts classifies exactly these chords as the app's, so their keyup
+        // never reaches a TUI either.
+        if (event.code.startsWith("Digit")) {
+          const digit = Number(event.code.slice("Digit".length));
+          if (digit < 1 || digit > 9) return;
+          event.preventDefault();
+          event.stopPropagation();
+          terminal?.selectTabByIndex(digit - 1);
+          return;
+        }
+        const side =
+          event.code === "ArrowLeft"
+            ? "left"
+            : event.code === "ArrowRight"
+              ? "right"
+              : event.code === "ArrowUp"
+                ? "up"
+                : event.code === "ArrowDown"
+                  ? "down"
+                  : null;
+        if (!side) return;
+        event.preventDefault();
+        event.stopPropagation();
+        terminal?.focusGroupInDirection(side);
+        return;
+      }
 
       if (event.code === "Slash") {
         event.preventDefault();
@@ -82,7 +131,13 @@ export function useGlobalShortcuts({
         return;
       }
 
-      const terminal = activeTerminalRef.current;
+      if (isBackslash) {
+        event.preventDefault();
+        event.stopPropagation();
+        terminal?.splitTerminal("right");
+        return;
+      }
+
       switch (event.code) {
         case "KeyT":
           event.preventDefault();
@@ -111,12 +166,14 @@ export function useGlobalShortcuts({
           return;
       }
 
+      // ⌘1–9 focuses the Nth group in layout order (plan 20260923-terminal-split-groups); it used
+      // to select the Nth tab, which is ⌘⌥1–9 now.
       if (event.code.startsWith("Digit")) {
         const digit = Number(event.code.slice("Digit".length));
         if (digit >= 1 && digit <= 9) {
           event.preventDefault();
           event.stopPropagation();
-          terminal?.selectTabByIndex(digit - 1);
+          terminal?.focusGroupByIndex(digit - 1);
         }
       }
     }
@@ -155,6 +212,24 @@ export function useGlobalShortcuts({
             return;
           case "next-tab":
             terminal?.selectRelativeTab(1);
+            return;
+          case "split-right":
+            terminal?.splitTerminal("right");
+            return;
+          case "split-down":
+            terminal?.splitTerminal("down");
+            return;
+          case "focus-group-left":
+            terminal?.focusGroupInDirection("left");
+            return;
+          case "focus-group-right":
+            terminal?.focusGroupInDirection("right");
+            return;
+          case "focus-group-up":
+            terminal?.focusGroupInDirection("up");
+            return;
+          case "focus-group-down":
+            terminal?.focusGroupInDirection("down");
             return;
           case "toggle-help":
             onToggleHelp();

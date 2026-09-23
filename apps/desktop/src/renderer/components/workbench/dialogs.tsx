@@ -238,9 +238,13 @@ function shortcutRows(): { keys: string[]; description: string }[] {
     { keys: [...mod, "P"], description: "快速跳转到工作区 / 终端 / 设备" },
     { keys: [...mod, "T"], description: "新建终端" },
     { keys: [...mod, "W"], description: "关闭当前终端" },
-    { keys: [...mod, "1-9"], description: "切换到第 N 个终端" },
-    { keys: [...mod, "["], description: "上一个终端" },
-    { keys: [...mod, "]"], description: "下一个终端" },
+    { keys: [...mod, "\\"], description: "向右拆分并新建终端" },
+    { keys: ["⇧", ...mod, "\\"], description: "向下拆分并新建终端" },
+    { keys: [...mod, "1-9"], description: "切换到第 N 个分组" },
+    { keys: ["⌥", ...mod, "1-9"], description: "切换到当前分组的第 N 个终端" },
+    { keys: ["⌥", ...mod, "←→↑↓"], description: "切换到相邻的分组" },
+    { keys: [...mod, "["], description: "当前分组的上一个终端" },
+    { keys: [...mod, "]"], description: "当前分组的下一个终端" },
     { keys: [...mod, "N"], description: "新建工作区" },
     // ⌘R 不在 use-global-shortcuts 里：它由原生菜单的 role: "reload" 注册（见 main/menu.ts）。
     { keys: [...mod, "R"], description: "重新载入界面" },
@@ -261,7 +265,7 @@ function KeyCap({ label }: { label: string }) {
   );
 }
 
-/** 快捷键帮助面板：Cmd+/ 打开，再按一次或 Esc 关闭；键位表硬编码（6 条快捷键不值得配置化）。 */
+/** 快捷键帮助面板：Cmd+/ 打开，再按一次或 Esc 关闭；键位表硬编码（十来条快捷键不值得配置化）。 */
 export function ShortcutsHelpDialog(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const rows = shortcutRows();
   return (
