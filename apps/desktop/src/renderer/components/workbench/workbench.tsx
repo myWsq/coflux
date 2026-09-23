@@ -12,12 +12,12 @@ import { Tooltip } from "@astryxdesign/core/Tooltip";
 import {
   ConfirmActionDialog,
   DeviceRenameDialog,
-  EnrollmentDialog,
   ProjectRenameDialog,
   ShortcutsHelpDialog,
   WorkspaceRenameDialog,
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
+import { AddDeviceDialog } from "@/components/workbench/add-device-dialog";
 import { DaemonOnboardingDialog } from "@/components/workbench/daemon-onboarding";
 import { NavigationPalette } from "@/components/workbench/command-palette";
 import { deviceVisitKey, terminalVisitKey, workspaceVisitKey } from "@/components/workbench/command-palette-data";
@@ -1319,7 +1319,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onOpenDevice={selectDevice}
       />
       <ShortcutsHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
-      <EnrollmentDialog open={enrollmentOpen} onOpenChange={setEnrollmentOpen} />
+      <AddDeviceDialog
+        open={enrollmentOpen}
+        onOpenChange={setEnrollmentOpen}
+        client={client}
+        daemonState={daemonState}
+        onOnboardThisMac={() => {
+          setEnrollmentOpen(false);
+          setDaemonDialog("onboarding");
+        }}
+      />
       {settingsOpen ? (
         <SettingsPage
           client={client}
