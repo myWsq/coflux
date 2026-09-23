@@ -1,11 +1,8 @@
 import { useEffect, useId, useState, type FormEvent } from "react";
-import { TerminalSquare } from "lucide-react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 import { Button as AstryxButton } from "@astryxdesign/core/Button";
-import { CodeBlock } from "@astryxdesign/core/CodeBlock";
 import { Dialog as AstryxDialog, DialogHeader as AstryxDialogHeader } from "@astryxdesign/core/Dialog";
 import { Heading } from "@astryxdesign/core/Heading";
-import { Icon } from "@astryxdesign/core/Icon";
 import { HStack, Layout, LayoutContent, VStack } from "@astryxdesign/core/Layout";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
@@ -176,48 +173,6 @@ export function ProjectRenameDialog(props: ProjectRenameDialogProps) {
           </LayoutContent>
         }
         footer={<DialogFooterActions onCancel={() => props.onOpenChange(false)} action={{ label: "保存", onClick: save, isDisabled: isSaveDisabled }} />}
-      />
-    </AstryxDialog>
-  );
-}
-
-type EnrollmentDialogProps = {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-};
-
-/** 添加设备：给「别的机器」看的静态安装引导（无凭证生成——登记走浏览器授权，daemon 自己打印链接）。
- * 这台 Mac 自己走账号菜单里的「本机 daemon」接入（plan 113），不放回这里。 */
-export function EnrollmentDialog(props: EnrollmentDialogProps) {
-  return (
-    <AstryxDialog isOpen={props.open} onOpenChange={props.onOpenChange} purpose="form" width={480}>
-      <Layout
-        header={
-          <AstryxDialogHeader
-            title="添加设备"
-            subtitle="在要接入的另一台机器上安装并启动 daemon，然后在浏览器里完成一次授权。这台 Mac 用账号菜单里的「本机 daemon」接入。"
-            onOpenChange={props.onOpenChange}
-            hasDivider={false}
-          />
-        }
-        content={
-          <LayoutContent>
-            <VStack gap={3} hAlign="stretch">
-              <Text type="body" size="sm">
-                在新机器的终端中运行：
-              </Text>
-              {/* CodeBlock 自带复制按钮；文本可选中，剪贴板权限被拒时可手动复制 */}
-              <CodeBlock code={"npm i -g cofluxd && cofluxd up"} language="plaintext" size="sm" isWrapped />
-              <VStack gap={2} hAlign="center">
-                <Icon icon={TerminalSquare} size="md" />
-                <Text type="supporting" justify="center">
-                  daemon 启动后会打印一个授权链接，在任意设备的浏览器里打开它并确认，设备即上线。
-                </Text>
-              </VStack>
-            </VStack>
-          </LayoutContent>
-        }
-        footer={<DialogFooterActions action={{ label: "完成", onClick: () => props.onOpenChange(false), hasAutofocus: true }} />}
       />
     </AstryxDialog>
   );
