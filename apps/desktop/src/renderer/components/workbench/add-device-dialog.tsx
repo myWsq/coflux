@@ -95,10 +95,9 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
     setTracker((previous) => advanceBaselineTracker(previous, status, daemons));
   }, [open, status, daemons]);
 
+  // Freeze the first new device during render, so the frame that brings it also shows the success view.
   const found = open && !success ? newDevices(tracker.baseline, daemons)[0] : undefined;
-  useEffect(() => {
-    if (found) setSuccess({ daemonId: found.daemonId, name: found.name });
-  }, [found]);
+  if (found) setSuccess({ daemonId: found.daemonId, name: found.name });
 
   // Only a validated token can be sent: every miss counts against this connection's failure budget,
   // which this Mac's own automatic local authorization shares.
