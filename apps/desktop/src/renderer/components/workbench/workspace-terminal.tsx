@@ -161,20 +161,40 @@ function zoneAt(event: ReactDragEvent<HTMLElement>): LayoutSide | "center" {
   return nearest.distance < EDGE_ZONE ? nearest.side : "center";
 }
 
-function zoneHighlightClass(zone: LayoutSide | "center"): string {
+/**
+ * The drop highlight's box within a group body, as four insets. All four are always set, so moving
+ * between zones is a plain CSS transition of top/right/bottom/left — the highlight glides from one
+ * half to another instead of jumping.
+ */
+function zoneHighlightInsets(zone: LayoutSide | "center"): { top: string; right: string; bottom: string; left: string } {
   switch (zone) {
     case "left":
-      return "inset-y-0 left-0 w-1/2";
+      return { top: "0%", right: "50%", bottom: "0%", left: "0%" };
     case "right":
-      return "inset-y-0 right-0 w-1/2";
+      return { top: "0%", right: "0%", bottom: "0%", left: "50%" };
     case "up":
-      return "inset-x-0 top-0 h-1/2";
+      return { top: "0%", right: "0%", bottom: "50%", left: "0%" };
     case "down":
-      return "inset-x-0 bottom-0 h-1/2";
+      return { top: "50%", right: "0%", bottom: "0%", left: "0%" };
     default:
-      return "inset-0";
+      return { top: "0%", right: "0%", bottom: "0%", left: "0%" };
   }
 }
+
+/**
+ * A fully transparent 1×1 image handed to setDragImage. Chromium's own drag image is a snapshot of
+ * the tab, and on macOS the pixels outside its rounded corners come out black; the tab is drawn by
+ * us instead (see the drag ghost below), following the pointer.
+ */
+const EMPTY_DRAG_IMAGE: HTMLImageElement | null = (() => {
+  if (typeof Image === "undefined") return null;
+  const image = new Image();
+  image.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+  return image;
+})();
+
+/** What the drag ghost shows and where the pointer held the tab. */
+type DragGhost = { title: string; width: number; offsetX: number; offsetY: number; x: number; y: number };
 
 function hasTabPayload(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types).includes(TAB_DRAG_TYPE);
@@ -342,6 +362,39 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
   // started (dragend first), entering it then would leave the strips without their drag region and
   // the drop zones covering every pane for good.
   const dragEndedRef = useRef(true);
+  // The drawn drag image: captured at dragstart, moved by a window dragover listener straight on the
+  // DOM node (one transform per frame, no React render per pointer move).
+  const dragGhostRef = useRef<DragGhost | null>(null);
+  const ghostNodeRef = useRef<HTMLDivElement | null>(null);
+  // The last zone each group highlighted, so a highlight fading out stays where it was instead of
+  // snapping back to the centre while it fades.
+  const lastZoneRef = useRef(new Map<string, LayoutSide | "center">());
+
+  useEffect(() => {
+    if (!dragTaskId) return;
+    let frame = 0;
+    function place() {
+      frame = 0;
+      const ghost = dragGhostRef.current;
+      const node = ghostNodeRef.current;
+      if (!ghost || !node) return;
+      node.style.transform = `translate3d(${ghost.x - ghost.offsetX}px, ${ghost.y - ghost.offsetY}px, 0)`;
+    }
+    function onDragOver(event: DragEvent) {
+      const ghost = dragGhostRef.current;
+      // Chromium reports 0,0 on some drag events at the window edge; keep the last real position.
+      if (!ghost || (event.clientX === 0 && event.clientY === 0)) return;
+      ghost.x = event.clientX;
+      ghost.y = event.clientY;
+      if (!frame) frame = requestAnimationFrame(place);
+    }
+    place();
+    window.addEventListener("dragover", onDragOver, { capture: true });
+    return () => {
+      window.removeEventListener("dragover", onDragOver, { capture: true });
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [dragTaskId]);
 
   // 分支切换：checkout 在本 worktree 内经 Device exec 完成，成功后同步元数据（workspaceSetBranch）。
   const takenBranches = new Map<string, BranchTaken>(
@@ -391,6 +444,8 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
   function endDrag() {
     setDragTaskId(null);
     setDropTarget(null);
+    dragGhostRef.current = null;
+    lastZoneRef.current.clear();
   }
 
   function dropOnStrip(group: LayoutGroup, index: number) {
@@ -492,6 +547,16 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
         onDragStart={(event) => {
           event.dataTransfer.setData(TAB_DRAG_TYPE, task.id);
           event.dataTransfer.effectAllowed = "move";
+          if (EMPTY_DRAG_IMAGE) event.dataTransfer.setDragImage(EMPTY_DRAG_IMAGE, 0, 0);
+          const tabRect = event.currentTarget.getBoundingClientRect();
+          dragGhostRef.current = {
+            title: tabTitle || "终端",
+            width: tabRect.width,
+            offsetX: event.clientX - tabRect.left,
+            offsetY: event.clientY - tabRect.top,
+            x: event.clientX,
+            y: event.clientY,
+          };
           // Changing the DOM inside dragstart can cancel the drag in Chromium; let it start first.
           dragEndedRef.current = false;
           window.setTimeout(() => {
@@ -755,6 +820,8 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
       {dragTaskId && !changesOpen
         ? geometry.groups.map(({ group, rect }) => {
             const target = dropTarget?.kind === "zone" && dropTarget.groupId === group.id ? dropTarget.zone : null;
+            if (target) lastZoneRef.current.set(group.id, target);
+            const shownZone = target ?? lastZoneRef.current.get(group.id) ?? "center";
             return (
               <div
                 key={`drop:${group.id}`}
@@ -778,13 +845,41 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
                   dropOnZone(group, zoneAt(event));
                 }}
               >
-                {target ? (
-                  <div aria-hidden className={cn("pointer-events-none absolute rounded-md border border-primary/40 bg-primary/15", zoneHighlightClass(target))} />
-                ) : null}
+                {/* Always mounted while dragging: entering fades in, moving between zones glides the insets,
+                    leaving fades out in place. The 4px inset keeps it clear of the group's edges. */}
+                <div
+                  aria-hidden
+                  className={cn(
+                    "pointer-events-none absolute rounded-md border border-primary/40 bg-primary/15 transition-[top,right,bottom,left,opacity] duration-150 ease-out",
+                    target ? "opacity-100" : "opacity-0",
+                  )}
+                  style={Object.fromEntries(
+                    Object.entries(zoneHighlightInsets(shownZone)).map(([edge, value]) => [edge, `calc(${value} + 4px)`]),
+                  )}
+                />
               </div>
             );
           })
         : null}
+
+      {/* The drag image, drawn here (see EMPTY_DRAG_IMAGE): an opaque tab that follows the pointer.
+          Positioned by the dragover listener, fixed to the viewport, never a pointer target. */}
+      {dragTaskId && dragGhostRef.current ? (
+        <div
+          ref={ghostNodeRef}
+          aria-hidden
+          className="pointer-events-none fixed left-0 top-0 z-50 will-change-transform"
+          style={{ transform: `translate3d(${dragGhostRef.current.x - dragGhostRef.current.offsetX}px, ${dragGhostRef.current.y - dragGhostRef.current.offsetY}px, 0)` }}
+        >
+          <div
+            className="flex h-7 max-w-52 items-center gap-1.5 rounded-md border border-border bg-popover px-2.5 text-sm text-foreground shadow-lg transition-[opacity,transform] duration-150 ease-out starting:scale-95 starting:opacity-0"
+            style={{ minWidth: Math.min(dragGhostRef.current.width, 208) }}
+          >
+            <SquareTerminal className="size-3 shrink-0 opacity-90" />
+            <span className="truncate">{dragGhostRef.current.title}</span>
+          </div>
+        </div>
+      ) : null}
 
       {/* The changes overlay: opened from the action dock, it covers the whole main area (every group stays
           as it is underneath, agents keep running); pressing again or Esc returns to the groups. Kept alive
