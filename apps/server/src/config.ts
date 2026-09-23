@@ -53,6 +53,25 @@ function publicUrl(): string {
 
 const PUBLIC_URL = publicUrl();
 
+/**
+ * Provider sign-in (GitHub / Google through Better Auth). A provider is enabled only in password mode
+ * and only when its client id is set; the client secret is then required in production through the
+ * same fail-closed `secret()` path, and in development a missing secret simply leaves it disabled.
+ */
+export type OAuthProviderId = "github" | "google";
+
+function oauthProvider(id: OAuthProviderId, envPrefix: string): { id: OAuthProviderId; clientId: string; clientSecret: string } | undefined {
+  if (isLocal) return undefined;
+  const clientId = (process.env[`${envPrefix}_CLIENT_ID`] ?? "").trim();
+  if (!clientId) return undefined;
+  const clientSecret = secret(`${envPrefix}_CLIENT_SECRET`, "", true);
+  return clientSecret ? { id, clientId, clientSecret } : undefined;
+}
+
+const OAUTH_PROVIDERS = [oauthProvider("github", "COFLUX_GITHUB"), oauthProvider("google", "COFLUX_GOOGLE")].filter(
+  (provider): provider is { id: OAuthProviderId; clientId: string; clientSecret: string } => provider !== undefined,
+);
+
 export const config = {
   authProvider,
   port: int("COFLUX_PORT", DEFAULT_PORT),
@@ -70,6 +89,14 @@ export const config = {
   daemonUrl: process.env.COFLUX_DAEMON_URL ?? `ws://127.0.0.1:${int("COFLUX_PORT", DEFAULT_PORT)}/daemon`,
   /** 设备授权与端口预览的固定公网基址，不从请求头推导。 */
   publicUrl: PUBLIC_URL,
+
+  /** Enabled sign-in providers (password mode with credentials configured); empty = password form only. */
+  oauthProviders: OAUTH_PROVIDERS,
+  /** Better Auth's signing/encryption secret. Required in production only when a provider is enabled. */
+  authSecret: secret("COFLUX_AUTH_SECRET", "coflux-dev-auth-secret-not-for-production-use", OAUTH_PROVIDERS.length > 0),
+  /** COFLUX_SIGNUP_ALLOWLIST: comma-separated exact addresses and `@domain` entries allowed to create a new
+   * user through a provider. Empty = nobody new; existing users always sign in. Parsed in signup-policy.ts. */
+  signupAllowlist: process.env.COFLUX_SIGNUP_ALLOWLIST ?? "",
 
   /** 端口转发预览域：Host 形如 `<shortId>-<proxyHost>` 的请求按反代处理（见 plan 006；2026-08-16
    *  从 `.` 分隔挪为 `-` 分隔——预览域落一级子域，CF 橙云 Universal SSL 的 `*.coflux.dev` 才覆盖）。

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
 import type {
   DesktopBridge,
+  DesktopBrowserLoginResult,
   DesktopCommand,
   DesktopDaemonState,
   DesktopExecutorCatalog,
@@ -11,6 +12,8 @@ import type {
   DesktopExecutorSaveResult,
   DesktopExecutorSettings,
   DesktopExecutorTestResult,
+  DesktopLoginOptions,
+  DesktopLoginProvider,
   DesktopNotification,
   DesktopUpdateState,
 } from "../shared/desktop-bridge";
@@ -107,6 +110,18 @@ const bridge: DesktopBridge = {
   },
   clearSessionToken() {
     ipcRenderer.send(IPC.clearSessionToken);
+  },
+  getLoginOptions() {
+    return ipcRenderer.invoke(IPC.loginOptions) as Promise<DesktopLoginOptions>;
+  },
+  startBrowserLogin(provider: DesktopLoginProvider) {
+    return ipcRenderer.invoke(IPC.loginStart, String(provider)) as Promise<DesktopBrowserLoginResult>;
+  },
+  reopenBrowserLogin() {
+    ipcRenderer.send(IPC.loginReopen);
+  },
+  cancelBrowserLogin() {
+    ipcRenderer.send(IPC.loginCancel);
   },
   getDaemonState() {
     return ipcRenderer.invoke(IPC.daemonGetState) as Promise<DesktopDaemonState>;

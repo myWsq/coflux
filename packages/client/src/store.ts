@@ -1000,6 +1000,20 @@ export function createCofluxClient(options: CofluxClientOptions) {
     connect({ username, password });
   }
 
+  /**
+   * Sign in with a session token that was just issued outside the WebSocket (the desktop's browser
+   * login, plan 20260923): the same explicit-login semantics as `login`, carrying `{ token }` over
+   * the existing token path. The token is persisted immediately so a restart before `authOk` keeps it.
+   */
+  function loginWithToken(issued: string) {
+    if (!issued) return;
+    store.setState({ loginError: "" });
+    clearOfflineCatalog();
+    token = issued;
+    options.tokenStorage.write(issued);
+    connect({ token: issued });
+  }
+
   function logout(revoke = true) {
     shouldRetry = false;
     clearNotificationTimers();
@@ -1204,6 +1218,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     onNotification,
     store,
     login,
+    loginWithToken,
     logout,
     send,
     sendInput,

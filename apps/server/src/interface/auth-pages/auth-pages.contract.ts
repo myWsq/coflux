@@ -41,3 +41,75 @@ export const PostProxyAuthLoginContract = defineContract({
   path: "/proxy-auth/login",
   schemas: {},
 });
+
+/* Provider sign-in (plan 20260923): a provider button POSTs under its flow's path, and the OAuth round
+ * trip returns to a GET under the same path, so the flow's `cf_page` cookie Path covers both. */
+
+export const PostAuthorizeProviderContract = defineContract({
+  method: "POST",
+  path: "/authorize/:token/oauth/:provider",
+  schemas: {},
+});
+
+export const GetAuthorizeProviderReturnContract = defineContract({
+  method: "GET",
+  path: "/authorize/:token/oauth",
+  schemas: {},
+});
+
+export const PostProxyAuthProviderContract = defineContract({
+  method: "POST",
+  path: "/proxy-auth/oauth/:provider",
+  schemas: {},
+});
+
+export const GetProxyAuthProviderReturnContract = defineContract({
+  method: "GET",
+  path: "/proxy-auth/oauth",
+  schemas: {},
+});
+
+/** Native (desktop / CLI) login page for a request registered through `/api/client/login/request`. */
+export const GetNativeLoginPageContract = defineContract({
+  method: "GET",
+  path: "/login/:id",
+  schemas: {},
+});
+
+export const PostNativeLoginContract = defineContract({
+  method: "POST",
+  path: "/login/:id/login",
+  schemas: {},
+});
+
+export const PostNativeProviderContract = defineContract({
+  method: "POST",
+  path: "/login/:id/oauth/:provider",
+  schemas: {},
+});
+
+export const GetNativeProviderReturnContract = defineContract({
+  method: "GET",
+  path: "/login/:id/oauth",
+  schemas: {},
+});
+
+/** 「允许登录」on the confirmation card. */
+export const PostNativeConfirmContract = defineContract({
+  method: "POST",
+  path: "/login/:id/confirm",
+  schemas: {},
+});
+
+export const PostNativeDenyContract = defineContract({
+  method: "POST",
+  path: "/login/:id/deny",
+  schemas: {},
+});
+
+/** Better Auth's fallback error URL (failures it cannot attribute to a flow). */
+export const GetLoginErrorPageContract = defineContract({
+  method: "GET",
+  path: "/login-error",
+  schemas: {},
+});

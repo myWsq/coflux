@@ -98,6 +98,22 @@ export type DesktopNotification = {
   body: string;
 };
 
+/** Sign-in providers the desktop may offer (plan 20260923); the server says which are enabled. */
+export type DesktopLoginProvider = "github" | "google";
+
+export type DesktopLoginOptions = {
+  /** Only these get buttons; empty = the password form alone, never a dead button. */
+  providers: DesktopLoginProvider[];
+};
+
+/**
+ * Outcome of a browser sign-in. The token itself never crosses the bridge in this result: the main
+ * process stores it (same path as `setSessionToken`) and the renderer reads it back to connect.
+ */
+export type DesktopBrowserLoginResult =
+  | { ok: true; login: string }
+  | { ok: false; reason: "not_allowed" | "not_verified" | "cancelled" | "timeout" | "network" | "failed"; message: string };
+
 export type DesktopBridge = {
   readonly nativeTransport?: NativeTransportBridge;
   readonly platform: string;
@@ -137,6 +153,17 @@ export type DesktopBridge = {
   getSessionToken(): Promise<string>;
   setSessionToken(token: string): void;
   clearSessionToken(): void;
+  /**
+   * Browser sign-in (plan 20260923): the system browser, a 127.0.0.1 loopback listener, PKCE and the
+   * code exchange all live in the main process; the renderer only asks and learns the outcome.
+   */
+  getLoginOptions(): Promise<DesktopLoginOptions>;
+  /** Opens the system browser; resolves when the login finished, failed, timed out or was cancelled. */
+  startBrowserLogin(provider: DesktopLoginProvider): Promise<DesktopBrowserLoginResult>;
+  /** 「重新打开浏览器」: the same pending request's page again. */
+  reopenBrowserLogin(): void;
+  /** 「取消」: the pending `startBrowserLogin` resolves with `cancelled`. */
+  cancelBrowserLogin(): void;
   /**
    * 本机 daemon（plan 113）：一个状态对象 + 几个无参窄动词，主进程只做 ~/.coflux 落盘、launchctl、
    * codesign 与 FDA 引导两跳，桥接面不因此长出 fs / shell / 任意命令能力。

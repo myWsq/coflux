@@ -7,6 +7,7 @@
 
 mod account;
 mod args;
+mod browser_login;
 mod commands;
 mod gateway;
 mod handle;
@@ -20,6 +21,8 @@ pub fn die(message: &str) -> ! {
 }
 
 const HELP: &str = "账号命令（JSON 输出）：
+  coflux login [--server https://…]   在浏览器中登录（打印地址并尝试打开浏览器；SSH 下改为粘贴登录码，
+                          也可用 COFLUX_LOGIN_PASTE=1 强制），打印「已登录为 <邮箱>」
   coflux login --username <账号> --password-stdin [--server https://…]
   coflux whoami | logout
   coflux device list | project list | workspace list

@@ -118,11 +118,13 @@ export interface Account {
   createdAt: number;
 }
 
-/** password 模式（plan 059）的登录账号：email 归一化小写存储/查询。 */
+/** password 模式（plan 059）的登录账号：email 归一化小写存储/查询。
+ * `passwordHash` is null for a user created through a provider sign-in (plan 20260923): such a user
+ * has no password, and password login must never match it. */
 export interface User {
   id: string;
   email: string;
-  passwordHash: string;
+  passwordHash: string | null;
   createdAt: number;
 }
 
@@ -416,13 +418,35 @@ export class Store {
     return rows[0];
   }
   /** 建号脚本用：邮箱已存在则更新口令哈希（保留原 id/createdAt），否则新建。 */
-  async upsertUser(u: User): Promise<User> {
+  async upsertUser(u: User & { passwordHash: string }): Promise<User> {
     const rows = await this.sql<User[]>`
       INSERT INTO users ${this.sql(u, "id", "email", "passwordHash", "createdAt")}
       ON CONFLICT (email) DO UPDATE SET password_hash = excluded.password_hash
       RETURNING *
     `;
     return rows[0];
+  }
+  /**
+   * Provider sign-in of an allowlisted new email (plan 20260923): create the coflux user without a
+   * password, or — when a concurrent sign-in or an earlier interrupted attempt already created one —
+   * reuse it. The `email UNIQUE` conflict is "reuse", never an error; the re-read returns the canonical row.
+   */
+  async ensurePasswordlessUser(u: { id: string; email: string; createdAt: number }): Promise<User> {
+    await this.sql`
+      INSERT INTO users (id, email, password_hash, created_at)
+      VALUES (${u.id}, ${u.email}, NULL, ${u.createdAt})
+      ON CONFLICT (email) DO NOTHING
+    `;
+    const user = await this.getUserByEmail(u.email);
+    if (!user) throw new Error("provider sign-in could not create or find the user row");
+    return user;
+  }
+  /** Better Auth leftovers (plan 20260923): abandoned OAuth states and any session that escaped its
+   * handoff. Sessions are short-lived and deleted at handoff; this only bounds what is left behind. */
+  async pruneAuthRows(now: number): Promise<void> {
+    const cutoff = new Date(now);
+    await this.sql`DELETE FROM auth_verification WHERE "expiresAt" < ${cutoff}`;
+    await this.sql`DELETE FROM auth_session WHERE "expiresAt" < ${cutoff}`;
   }
 
   /* ------------------------ memberships ---------------------------- */

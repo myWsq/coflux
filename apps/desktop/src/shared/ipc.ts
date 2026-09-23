@@ -23,6 +23,11 @@ export const IPC = {
   getSessionToken: "desktop:get-session-token",
   setSessionToken: "desktop:set-session-token",
   clearSessionToken: "desktop:clear-session-token",
+  /** Browser sign-in (plan 20260923): provider list, start / reopen / cancel */
+  loginOptions: "desktop:login-options",
+  loginStart: "desktop:login-start",
+  loginReopen: "desktop:login-reopen",
+  loginCancel: "desktop:login-cancel",
   /** 本机 daemon（plan 113）：状态拉取 + 无参窄动词 */
   daemonGetState: "desktop:daemon-get-state",
   daemonEnroll: "desktop:daemon-enroll",

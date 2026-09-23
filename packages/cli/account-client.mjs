@@ -1,7 +1,12 @@
 // 账号客户端与桌面共用中心操作层；本文件不依赖 MCP 或 Node 常驻进程。
+import { spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
+import { hostname } from "node:os";
 import { join } from "node:path";
+import readline from "node:readline";
 
 /* --------------------------------- 实体标识 -------------------------------- */
 // `coflux:<kind>:<hex>`：设备 / 项目 / 工作区 / 终端 ID 的可粘贴短形式，hex 是 ID 的前几位
@@ -73,6 +78,118 @@ function broker(home, body, timeout) {
     socket.on("end", () => { try { resolve(unwrap(JSON.parse(text))); } catch (error) { reject(error); } });
   });
 }
+/* ------------------------------ browser login ------------------------------ */
+// `coflux login` with no credential flags (plan 20260923-oauth-login-redesign): RFC 8252 loopback
+// redirect with PKCE (S256), or a paste code when the browser cannot reach back (SSH, or forced with
+// COFLUX_LOGIN_PASTE=1). Same requests, same copy as the Rust CLI (crates/cli/src/browser_login.rs).
+
+const LOGIN_FAILURES = { not_allowed: "该邮箱未开通 Coflux", not_verified: "该账号的邮箱未经验证，无法登录", cancelled: "已取消登录" };
+
+function prefersPaste() {
+  return ["COFLUX_LOGIN_PASTE", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"].some((name) => !!process.env[name]);
+}
+
+function openBrowser(url) {
+  try {
+    const child = spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], { stdio: "ignore", detached: true });
+    child.on("error", () => undefined);
+    child.unref();
+  } catch {
+    /* printing the URL is enough */
+  }
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
+}
+
+function callbackPage(title, body) {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(title)} · Coflux</title><style>:root{color-scheme:light dark}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font:15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}main{text-align:center;padding:24px}h1{font-size:18px}</style></head><body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(body)}</p></main></body></html>`;
+}
+
+function listenLoopback() {
+  return new Promise((resolve) => {
+    const server = http.createServer();
+    server.once("error", () => resolve(null));
+    server.listen(0, "127.0.0.1", () => resolve(server));
+  });
+}
+
+function askLine(prompt) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr, terminal: !!process.stdin.isTTY });
+    rl.question(prompt, (answer) => { rl.close(); resolve(answer.trim()); });
+  });
+}
+
+async function browserLogin(server) {
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier, "ascii").digest("base64url");
+  const state = randomBytes(24).toString("base64url");
+  const listener = prefersPaste() ? null : await listenLoopback();
+  const port = listener ? listener.address().port : undefined;
+  let registered;
+  try {
+    registered = await request(server, "/api/client/login/request", null, {
+      protocolVersion: 1, clientKind: "cli", host: (hostname() || "unknown-host").slice(0, 253),
+      redirect: listener ? "loopback" : "paste", ...(listener ? { port } : {}),
+      codeChallenge: challenge, codeChallengeMethod: "S256", state,
+    }, 30000);
+  } catch (error) {
+    listener?.close();
+    throw error;
+  }
+  const page = new URL(registered.url);
+  // Only ever open a page on the server we are logging into.
+  if (page.origin !== server) { listener?.close(); throw new Error("服务器返回的登录地址不在该服务器上"); }
+  const exchange = (code) => request(server, "/api/client/login/exchange", null, { protocolVersion: 1, code, codeVerifier: verifier }, 30000);
+  process.stderr.write(`在浏览器中打开以下地址完成登录（Ctrl-C 取消）：\n  ${page.href}\n`);
+  if (!listener) {
+    process.stderr.write("登录后页面会显示一次性登录码。\n");
+    const code = await askLine("粘贴登录码：");
+    if (!code) throw new Error("没有输入登录码");
+    return exchange(code);
+  }
+  openBrowser(page.href);
+  const waitMs = typeof registered.expiresAt === "number" && registered.expiresAt > Date.now() ? registered.expiresAt - Date.now() : 600000;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(new Error("登录超时，请重新运行 coflux login")), waitMs);
+    let done = false;
+    function finish(error, value) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      listener.close();
+      setTimeout(() => listener.closeAllConnections?.(), 1000).unref();
+      if (error) reject(error); else resolve(value);
+    }
+    listener.on("request", (req, res) => {
+      const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
+      const answer = (status, title, body) => { res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); res.end(callbackPage(title, body)); };
+      if (req.method !== "GET" || url.pathname !== "/callback" || url.searchParams.get("state") !== state) { answer(404, "页面不存在", "这个地址只用于 Coflux 登录回调。"); return; }
+      const failed = url.searchParams.get("error");
+      if (failed) {
+        const message = LOGIN_FAILURES[failed] ?? "登录未完成，请重试";
+        answer(200, "登录未完成", `${message}。可以关闭此页面，回到终端。`);
+        finish(new Error(message));
+        return;
+      }
+      exchange(url.searchParams.get("code") ?? "").then(
+        (value) => { answer(200, "已登录", "已登录，可以回到终端。"); finish(null, value); },
+        (error) => { answer(200, "登录未完成", "登录未完成，请回到终端查看原因。"); finish(error); },
+      );
+    });
+  });
+}
+
+function saveSession(home, sessionPath, record) {
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  fs.chmodSync(home, 0o700);
+  const temp = `${sessionPath}.${process.pid}.tmp`;
+  try { fs.writeFileSync(temp, JSON.stringify(record), { mode: 0o600, flag: "wx" }); fs.renameSync(temp, sessionPath); }
+  finally { fs.rmSync(temp, { force: true }); }
+}
+
 /** 写到底再继续：`device exec` 之后要用远端退出码退出，而 process.exit 会截断写向管道的输出。 */
 function writeAll(stream, text) {
   if (!text) return Promise.resolve();
@@ -108,16 +225,20 @@ export async function runAccountCommand(positionals, flags, home) {
   const print = (value) => console.log(JSON.stringify(value));
   if (command === "login") {
     const server = origin(flags.server || "https://api.coflux.dev");
+    // No credential flags: sign in through the browser (loopback + PKCE, or a paste code over SSH).
+    if (!flags.username && !flags["password-stdin"]) {
+      const value = await browserLogin(server);
+      if (!value?.token) throw new Error("服务器没有返回会话");
+      saveSession(home, sessionPath, { server, token: value.token, accountId: value.accountId });
+      console.log(`已登录为 ${value.login || "当前账号"}`);
+      return;
+    }
     const username = required("username");
     if (!flags["password-stdin"]) throw new Error("用 --password-stdin 从标准输入读取密码；密码不进入命令参数或配置文件");
     let password = "";
     for await (const chunk of process.stdin) { password += chunk; if (Buffer.byteLength(password) > 4096) throw new Error("密码过长"); if (password.includes("\n")) break; }
     const value = await request(server, "/api/client/login", null, { protocolVersion: 1, username, password: password.split("\n", 1)[0].replace(/\r$/, "") }, 30000);
-    fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-    fs.chmodSync(home, 0o700);
-    const temp = `${sessionPath}.${process.pid}.tmp`;
-    try { fs.writeFileSync(temp, JSON.stringify({ server, token: value.token, accountId: value.accountId }), { mode: 0o600, flag: "wx" }); fs.renameSync(temp, sessionPath); }
-    finally { fs.rmSync(temp, { force: true }); }
+    saveSession(home, sessionPath, { server, token: value.token, accountId: value.accountId });
     print({ accountId: value.accountId, server });
     return;
   }

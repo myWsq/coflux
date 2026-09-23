@@ -224,6 +224,15 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
     let command = args.positional(0).unwrap_or("");
     if command == "login" {
         let server = origin(args.string("server").unwrap_or("https://api.coflux.dev"))?;
+        // No credential flags: sign in through the browser (loopback + PKCE, or a paste code over SSH).
+        if args.string("username").is_none() && !args.flag("password-stdin") {
+            let post = |path: &str, body: Value| http(&server, path, None, body, 30);
+            let granted = crate::browser_login::run(&server, &post)?;
+            save(&json!({"server":server,"token":granted.token,"accountId":granted.account_id}))?;
+            let who = if granted.login.is_empty() { "当前账号".to_string() } else { granted.login };
+            println!("已登录为 {who}");
+            return Ok(());
+        }
         let username = required(args, "username")?;
         if !args.flag("password-stdin") {
             return Err(

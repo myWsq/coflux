@@ -13,12 +13,15 @@
     "@coflux/protocol": "workspace:*",
     "@hono/node-server": "^2.0.8",
     "@raven.js/core": "^3.0.0",
+    "better-auth": "1.7.5",
     "hono": "^4.12.30",
+    "pg": "8.23.0",
     "postgres": "^3.4.9",
     "ws": "^8.18.0",
     "zod": "4.5.4"
   },
   "devDependencies": {
+    "@types/pg": "8.23.1",
     "@types/ws": "^8.5.13"
   }
 }
