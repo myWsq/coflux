@@ -717,12 +717,38 @@ async function verifyServerIdentity(port, username, password, signal) {
   }
 }
 
-/** 起一套独立栈，返回控制句柄。等到 daemon 在线后才返回。 */
+/** Create a password-mode user by running `scripts/create-user.mjs` as a child process against the
+ * stack's own test database: process-level, so the suite stays black-box (no apps/* import here). */
+async function createPasswordUser(databaseUrl, { email, password }, signal) {
+  throwIfStackAborted(signal, "create user");
+  const child = spawn(TSX, [join(ROOT, "scripts/create-user.mjs"), "--email", email, "--password", password], {
+    cwd: ROOT,
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    stdio: DEBUG ? "inherit" : "ignore",
+  });
+  const exited = new Promise((resolveExit, rejectExit) => {
+    child.once("error", rejectExit);
+    child.once("exit", (code, signalName) => resolveExit(code ?? signalName));
+  });
+  const code = await waitForStackOperation(exited, {
+    signal,
+    timeoutMs: 30000,
+    label: `create user ${email}`,
+    cancel: () => { try { child.kill("SIGKILL"); } catch { /* */ } },
+  });
+  if (code !== 0) throw new Error(`create-user for ${email} exited with ${code}`);
+}
+
+/** 起一套独立栈，返回控制句柄。等到 daemon 在线后才返回。
+ * opts.users（plan 20260924-device-join-keys）：`[{ email, password }]` 时 server 以 COFLUX_AUTH=password
+ * 启动，并在身份校验前逐个建号——local 模式只有一个账号，跨账号用例需要第二个。每个用户首次登录时
+ * lazy 建自己的个人账号；栈默认以第一个用户登录（startStack 自带的 daemon 也登记到它名下）。 */
 export async function startStack(opts = {}) {
   const port = opts.port;
   if (!port) throw new Error("startStack requires a port");
-  const username = opts.username ?? "admin";
-  const password = opts.password ?? "admin";
+  const users = opts.users?.length ? opts.users : null;
+  const username = opts.username ?? users?.[0].email ?? "admin";
+  const password = opts.password ?? users?.[0].password ?? "admin";
   const signal = opts.signal;
   const strictCleanup = opts.strictCleanup === true;
   const ref = { server: null, daemon: null, derp: null };
@@ -795,6 +821,9 @@ export async function startStack(opts = {}) {
       COFLUX_USERNAME: username,
       COFLUX_PASSWORD: password,
       COFLUX_DERP_REGIONS: JSON.stringify([derp.region]),
+      // Password mode enables sign-in providers found in the environment, which would then require
+      // COFLUX_AUTH_SECRET; a developer shell exporting provider client ids must not break the stack.
+      ...(users ? { COFLUX_AUTH: "password", COFLUX_GITHUB_CLIENT_ID: "", COFLUX_GOOGLE_CLIENT_ID: "" } : {}),
       ...(opts.serverEnv ?? {}),
     };
     const daemonEnv = {
@@ -810,6 +839,8 @@ export async function startStack(opts = {}) {
     ref.daemonEnv = daemonEnv;
     ref.server = spawnApp("apps/server/src/index.ts", serverEnv);
     await waitHealth(port, 12000, signal);
+    // The server has run its migrations by now, so the users table exists.
+    for (const user of users ?? []) await createPasswordUser(testDb.url, user, signal);
     await verifyServerIdentity(port, username, password, signal);
     throwIfStackAborted(signal);
     ref.daemon = spawnDaemon(daemonEnv);
@@ -834,6 +865,8 @@ export async function startStack(opts = {}) {
     derp,
     nativeHelpers,
     daemonId: null,
+    /** The env the stack's own daemon runs with; tests spawning another daemon override COFLUX_HOME. */
+    daemonEnv: ref.daemonEnv,
     makeClient: (options) => new Client(port, options),
     /** 真正停止中心进程，但保留 daemon、临时数据库与 loopback gateway。 */
     async stopServer() {
