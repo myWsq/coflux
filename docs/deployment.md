@@ -183,6 +183,30 @@ curl -i --http1.1 -H "Connection: Upgrade" -H "Upgrade: websocket" \
 ssh root@prod-bj 'curl -sS -o /dev/null -w "ttfb=%{time_starttransfer}\n" https://app.coflux.dev/'
 ```
 
+## Sign in with GitHub or Google (plan 20260923)
+
+Provider sign-in is embedded in the center (Better Auth, pinned in `apps/server/package.json`) and exists only with `COFLUX_AUTH=password`. Each provider is enabled independently when its client id is set; with none enabled, every login surface shows the password form alone. Better Auth does the OAuth round trip only: coflux still issues its own session tokens and short page sessions, and the Better Auth session is deleted at handoff.
+
+| Variable | Kind | Meaning |
+| --- | --- | --- |
+| `COFLUX_GITHUB_CLIENT_ID` / `COFLUX_GITHUB_CLIENT_SECRET` | id: setting; secret: **secret** | GitHub OAuth app. Setting the id enables GitHub; the secret is then required (fail-closed start in production). |
+| `COFLUX_GOOGLE_CLIENT_ID` / `COFLUX_GOOGLE_CLIENT_SECRET` | id: setting; secret: **secret** | Google OAuth client (web application). Same rule as GitHub. |
+| `COFLUX_AUTH_SECRET` | **secret** | Better Auth signing/encryption secret, at least 32 random characters. Required in production as soon as any provider is enabled. |
+| `COFLUX_SIGNUP_ALLOWLIST` | setting | Comma-separated exact addresses and `@domain` entries allowed to **create** a user through a provider, e.g. `owner@example.com,@example.org`. Empty or unset: nobody new. Existing users (same verified email) always sign in and never need to be listed. Changing it means editing `server.env` and restarting. |
+
+Register these callback URLs with the providers, under `COFLUX_PUBLIC_URL`:
+
+- GitHub OAuth app, "Authorization callback URL": `${COFLUX_PUBLIC_URL}/api/auth/callback/github` (production: `https://api.coflux.dev/api/auth/callback/github`).
+- Google OAuth client, "Authorized redirect URIs": `${COFLUX_PUBLIC_URL}/api/auth/callback/google`.
+
+**Google only admits the consent screen's listed test users until the OAuth consent screen is published** ("In production"). A sign-in failing for everyone else before that is a console setting, not a code defect.
+
+A provider sign-in is accepted only with a provider-verified email: it lands on the existing user with that email (same account and data), creates a passwordless user and personal account when the email is allowlisted, and is otherwise refused with 「该邮箱未开通 Coflux」.
+
+**Schema migration 7 (`auth_identity`) is one-way.** It adds the `auth_user`, `auth_session`, `auth_account` and `auth_verification` tables and drops `NOT NULL` on `users.password_hash` (provider-created users have no password). An older server cannot run against a migrated database; take the backup described under *Server deployment* before deploying it, and say so in the release notes. Better Auth's runtime migration is never used; a Better Auth upgrade that changes its table shape needs a new coflux migration.
+
+Native clients sign in through `/login/<request>` (desktop app and `coflux login` without flags): loopback redirect with PKCE, or a paste code over SSH. Whole-site API proxying already covers `/api/auth/*` and `/login/*`; no Caddy change is needed.
+
 End-to-end smoke: `scripts/prod-smoke.mjs`, using real DeviceEnvelope traffic through the native helper. It makes production changes and is run only during an authorized smoke test.
 
 ## Secrets
@@ -191,7 +215,7 @@ Record only locations/types, never values.
 
 | Location | Contents |
 | --- | --- |
-| prod-jp `/etc/coflux/server.env` (600) | `DATABASE_URL` with database password; rendezvous signing seed `COFLUX_RELAY_SIGNING_KEY`. Required non-secret settings: `COFLUX_PUBLIC_URL=https://api.coflux.dev` and `COFLUX_INBOUND_QUEUE_MAX_MESSAGES=1024`. |
+| prod-jp `/etc/coflux/server.env` (600) | `DATABASE_URL` with database password; rendezvous signing seed `COFLUX_RELAY_SIGNING_KEY`; when provider sign-in is enabled, `COFLUX_AUTH_SECRET` and the provider client secrets (`COFLUX_GITHUB_CLIENT_SECRET`, `COFLUX_GOOGLE_CLIENT_SECRET`). Required non-secret settings: `COFLUX_PUBLIC_URL=https://api.coflux.dev` and `COFLUX_INBOUND_QUEUE_MAX_MESSAGES=1024`. |
 | prod-jp `/etc/coflux/pg-coflux.pass` (600) | PostgreSQL role password |
 | prod-jp `/etc/caddy/cloudflare.env` (600) | Cloudflare API token with **DNS edit permission only for the coflux.dev zone**. Reading zone settings such as SSL mode returns `9109 Unauthorized`. |
 | Relay nodes `/etc/coflux/relay.env` | `COFLUX_RELAY_PUBKEY`, a non-secret verification public key |
