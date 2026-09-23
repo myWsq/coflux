@@ -6,81 +6,48 @@ import {
   advanceBaselineTracker,
   desktopDownloadUrl,
   headlessAgentPrompt,
+  joinKeyMinutesLeft,
   manualInstallCommand,
   newDevices,
-  parseAuthorizeInput,
   showThisMacRow,
   startBaselineTracker,
 } from "./add-device-view";
 
-const TOKEN = "cf_authz_Ab3-x_Yz09";
-
-function accepted(input: string): string {
-  const result = parseAuthorizeInput(input);
-  assert.equal(result.ok, true, `expected ${JSON.stringify(input)} to be accepted`);
-  return result.ok ? result.token : "";
-}
-
-function rejected(input: string): string {
-  const result = parseAuthorizeInput(input);
-  assert.equal(result.ok, false, `expected ${JSON.stringify(input)} to be rejected`);
-  const error = result.ok ? "" : result.error;
-  assert.ok(error.length > 0);
-  return error;
-}
-
-test("paste: the full authorization link yields its token", () => {
-  assert.equal(accepted(`https://api.coflux.dev/authorize/${TOKEN}`), TOKEN);
-});
-
-test("paste: a trailing slash, query or fragment on the link is ignored", () => {
-  assert.equal(accepted(`https://api.coflux.dev/authorize/${TOKEN}/`), TOKEN);
-  assert.equal(accepted(`https://api.coflux.dev/authorize/${TOKEN}?from=cli`), TOKEN);
-  assert.equal(accepted(`https://api.coflux.dev/authorize/${TOKEN}#x`), TOKEN);
-  assert.equal(accepted(`https://self.example/prefix/authorize/${TOKEN}`), TOKEN);
-});
-
-test("paste: a bare token is accepted", () => {
-  assert.equal(accepted(TOKEN), TOKEN);
-});
-
-test("paste: surrounding whitespace is trimmed on links and bare tokens", () => {
-  assert.equal(accepted(`  https://api.coflux.dev/authorize/${TOKEN}\n`), TOKEN);
-  assert.equal(accepted(`\t${TOKEN}  `), TOKEN);
-});
-
-test("paste: a URL without /authorize/ is rejected", () => {
-  rejected("https://api.coflux.dev/other/cf_authz_abc");
-  rejected("https://api.coflux.dev/authorize/");
-  rejected("https://github.com/myWsq/coflux");
-});
-
-test("paste: a link whose token lacks the cf_authz_ shape is rejected", () => {
-  rejected("https://api.coflux.dev/authorize/abc.DEF-123");
-  rejected("https://api.coflux.dev/authorize/cf_authz_a%2Fb");
-  rejected("https://api.coflux.dev/authorize/cf_authz_");
-});
-
-test("paste: free text and empty input are rejected", () => {
-  rejected("");
-  rejected("   ");
-  rejected("please authorize my device");
-  rejected("cf_authz_has space");
-  rejected("tok");
-});
+const KEY = "cf_join_Ab3-x_Yz09";
 
 test("download URL is pinned to the running app's version", () => {
   assert.equal(desktopDownloadUrl("2.4.0"), "https://github.com/myWsq/coflux/releases/download/v2.4.0/coflux-2.4.0-arm64.dmg");
 });
 
-test("manual command and prompt always pass --server with the daemon URL", () => {
+test("manual command carries --server with the daemon URL and the join key", () => {
   const url = "wss://self.example/prefix/daemon";
-  assert.equal(manualInstallCommand(url), `npm i -g cofluxd && cofluxd up --server ${url}`);
-  const prompt = headlessAgentPrompt(url);
-  assert.ok(prompt.includes(`cofluxd up --server ${url}`));
-  for (const phrase of ["Node.js 20", "npm config get prefix", "cofluxd status", "/authorize/", "loginctl enable-linger", "sudo", "non-zero exit", "添加设备"]) {
+  assert.equal(manualInstallCommand(url, KEY), `npm i -g cofluxd && cofluxd up --server ${url} --key ${KEY}`);
+});
+
+test("agent prompt: runs the one keyed command and confirms with cofluxd status", () => {
+  const url = "wss://self.example/prefix/daemon";
+  const prompt = headlessAgentPrompt(url, KEY);
+  assert.ok(prompt.includes(`cofluxd up --server ${url} --key ${KEY}`));
+  for (const phrase of ["Node.js 20", "npm i -g cofluxd", "cofluxd status"]) {
     assert.ok(prompt.includes(phrase), `prompt should mention ${phrase}`);
   }
+});
+
+test("agent prompt: short, and never sends anyone back to a link", () => {
+  const prompt = headlessAgentPrompt("wss://api.coflux.dev/daemon", KEY);
+  assert.ok(prompt.split("\n").length <= 7, "prompt should stay a handful of lines");
+  for (const phrase of ["/authorize/", "link", "链接", "paste", "添加设备"]) {
+    assert.ok(!prompt.toLowerCase().includes(phrase.toLowerCase()), `prompt should not mention ${phrase}`);
+  }
+});
+
+test("join key countdown: whole minutes rounded up, zero once expired", () => {
+  const now = 1_000_000;
+  assert.equal(joinKeyMinutesLeft(now + 60 * 60_000, now), 60);
+  assert.equal(joinKeyMinutesLeft(now + 59 * 60_000 + 1, now), 60);
+  assert.equal(joinKeyMinutesLeft(now + 30_000, now), 1);
+  assert.equal(joinKeyMinutesLeft(now, now), 0);
+  assert.equal(joinKeyMinutesLeft(now - 1, now), 0);
 });
 
 const A = { daemonId: "a", name: "alpha" };

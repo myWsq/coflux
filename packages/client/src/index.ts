@@ -14,6 +14,7 @@ export {
   type ExecResult,
   type FsWriteResult,
   type DeviceAuthorizeResult,
+  type DeviceJoinKeyResult,
   type TaskReadResult,
   type TaskReadSource,
   type DeviceTransportOptions,

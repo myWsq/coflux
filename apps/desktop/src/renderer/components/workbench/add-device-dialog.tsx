@@ -1,29 +1,30 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CircleCheck, Download } from "lucide-react";
 import { useStore } from "zustand";
-import type { CofluxClient } from "@coflux/client";
+import type { CofluxClient, DeviceJoinKeyResult } from "@coflux/client";
 import type { DaemonInfo } from "@coflux/protocol";
 import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import { CodeBlock } from "@astryxdesign/core/CodeBlock";
 import { Collapsible } from "@astryxdesign/core/Collapsible";
 import { Dialog as AstryxDialog, DialogHeader as AstryxDialogHeader } from "@astryxdesign/core/Dialog";
 import { Heading } from "@astryxdesign/core/Heading";
-import { HStack, Layout, LayoutContent, StackItem, VStack } from "@astryxdesign/core/Layout";
+import { HStack, Layout, LayoutContent, VStack } from "@astryxdesign/core/Layout";
+import { Link } from "@astryxdesign/core/Link";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
+import { Skeleton } from "@astryxdesign/core/Skeleton";
+import { Spinner } from "@astryxdesign/core/Spinner";
 import { Text } from "@astryxdesign/core/Text";
-import { TextInput } from "@astryxdesign/core/TextInput";
 
 import { DialogFooterActions } from "@/components/dialog-footer";
 import {
   advanceBaselineTracker,
   desktopDownloadUrl,
   headlessAgentPrompt,
+  joinKeyMinutesLeft,
   manualInstallCommand,
   newDevices,
-  parseAuthorizeInput,
   showThisMacRow,
   startBaselineTracker,
-  type AuthorizeToken,
   type BaselineTracker,
 } from "@/components/workbench/add-device-view";
 import { desktop, SERVER_URL } from "@/config";
@@ -44,15 +45,25 @@ type AddDeviceDialogProps = {
 };
 
 const DAEMON_URL = daemonServerUrl(SERVER_URL);
-const AGENT_PROMPT = headlessAgentPrompt(DAEMON_URL);
-const MANUAL_COMMAND = manualInstallCommand(DAEMON_URL);
+
+/**
+ * The Headless tab's one-time join key for this opening of the dialog. `previous` is the key a mint
+ * replaces: kept on failure so 重试 still revokes it (a failed mint revoked nothing).
+ */
+type JoinKeyState =
+  | { status: "idle" }
+  | { status: "minting" }
+  | { status: "ready"; key: string; expiresAt: number }
+  | { status: "error"; error: string; previous: string };
 
 /**
  * 添加设备 (plan 20260923-add-device-dialog): Desktop (install Coflux.app on another Apple-silicon
- * Mac) and Headless (cofluxd, set up by an agent or by hand, authorized by pasting its link here with
- * this app's own session). Whichever route is used, any device id that was not in the account when
- * the dialog started watching flips the dialog to success in place. Closing has no side effects; an
- * authorization still in flight may complete, but its result is dropped and reopening starts clean.
+ * Mac) and Headless (cofluxd, set up by an agent or by hand). The Headless tab mints a one-time join
+ * key the first time it is shown in an opening (plan 20260924-device-join-keys) and embeds it in both
+ * the agent prompt and the command, so running the command is the whole job. Whichever route is used,
+ * any device id that was not in the account when the dialog started watching flips the dialog to
+ * success in place. Closing does not revoke the key (an agent may still be installing); a mint still
+ * in flight may complete, but its result is dropped and reopening mints a fresh key.
  */
 export function AddDeviceDialog(props: AddDeviceDialogProps) {
   const { open, client } = props;
@@ -63,13 +74,13 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
   const [tab, setTab] = useState<AddDeviceTab>("desktop");
   const [tracker, setTracker] = useState<BaselineTracker<DaemonInfo>>(() => ({ baseline: null, daemonsAtConnect: null }));
   const [success, setSuccess] = useState<{ daemonId: string; name: string } | null>(null);
-  const [link, setLink] = useState("");
-  const [linkError, setLinkError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
-  const [authorized, setAuthorized] = useState(false);
+  const [joinKey, setJoinKey] = useState<JoinKeyState>({ status: "idle" });
+  const [now, setNow] = useState(() => Date.now());
   const [wasOpen, setWasOpen] = useState(false);
   // Bumped on every open / close: a result that belongs to an earlier opening is dropped.
   const generationRef = useRef(0);
+  // Bumped on every mint: only the latest mint's answer is shown (换一个 pressed twice).
+  const mintRef = useRef(0);
 
   // Every opening starts clean on the Desktop tab with a fresh baseline. Reset during render (not in
   // an effect) so the first committed frame never shows the previous opening's success view or
@@ -80,16 +91,44 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
       setTab("desktop");
       setTracker(startBaselineTracker(status, daemons, snapshotRevision > 0));
       setSuccess(null);
-      setLink("");
-      setLinkError(null);
-      setPending(false);
-      setAuthorized(false);
+      setJoinKey({ status: "idle" });
     }
   }
 
   useEffect(() => {
     generationRef.current += 1;
   }, [open]);
+
+  async function mintJoinKey(replaces: string) {
+    const generation = generationRef.current;
+    const mint = ++mintRef.current;
+    setJoinKey({ status: "minting" });
+    let result: DeviceJoinKeyResult;
+    try {
+      result = await client.createDeviceJoinKey(replaces);
+    } catch (reason) {
+      result = { ok: false, error: String(reason) };
+    }
+    if (generation !== generationRef.current || mint !== mintRef.current) return;
+    setNow(Date.now());
+    setJoinKey(result.ok ? { status: "ready", key: result.key, expiresAt: result.expiresAt } : { status: "error", error: result.error, previous: replaces });
+  }
+
+  // First show of the Headless tab in this opening mints its key; tab switches keep it. Declared after
+  // the generation bump so the mint belongs to the current opening.
+  useEffect(() => {
+    if (open && tab === "headless" && joinKey.status === "idle") void mintJoinKey("");
+    // mintJoinKey is recreated every render; the state it reads is captured at call time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, tab, joinKey.status]);
+
+  // Countdown: re-render once a second while a key is showing.
+  const counting = open && joinKey.status === "ready";
+  useEffect(() => {
+    if (!counting) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [counting]);
 
   useEffect(() => {
     if (!open) return;
@@ -102,39 +141,19 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
   const found = open && open === wasOpen && !success ? newDevices(tracker.baseline, daemons)[0] : undefined;
   if (found) setSuccess({ daemonId: found.daemonId, name: found.name });
 
-  // Only a validated token can be sent: every miss counts against this connection's failure budget,
-  // which this Mac's own automatic local authorization shares.
-  async function sendAuthorization(token: AuthorizeToken) {
-    const generation = generationRef.current;
-    setPending(true);
-    setLinkError(null);
-    let error: string | null = null;
-    try {
-      const result = await client.authorizeDevice(token);
-      if (!result.ok) error = result.error;
-    } catch (reason) {
-      error = String(reason);
-    }
-    if (generation !== generationRef.current) return;
-    setPending(false);
-    if (error === null) setAuthorized(true);
-    else setLinkError(error);
-  }
-
-  function submit(event?: FormEvent<HTMLFormElement>) {
-    event?.preventDefault();
-    if (pending) return;
-    const parsed = parseAuthorizeInput(link);
-    if (!parsed.ok) {
-      setLinkError(parsed.error);
-      return;
-    }
-    void sendAuthorization(parsed.token);
-  }
-
   function close() {
     props.onOpenChange(false);
   }
+
+  // 换一个 revokes the key it replaces immediately (server side); after a failed mint, 重试 replaces the
+  // key the failed attempt meant to replace.
+  function replaceJoinKey() {
+    if (joinKey.status === "ready") void mintJoinKey(joinKey.key);
+    else if (joinKey.status === "error") void mintJoinKey(joinKey.previous);
+  }
+
+  const readyKey = joinKey.status === "ready" ? joinKey : null;
+  const minutesLeft = readyKey ? joinKeyMinutesLeft(readyKey.expiresAt, now) : 0;
 
   // Name follows a rename while the success view is showing; the captured name covers a vanished entry.
   const successName = success ? daemons.find((daemon) => daemon.daemonId === success.daemonId)?.name || success.name : "";
@@ -204,42 +223,52 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
                       让 agent 帮你装
                     </Text>
                     <Text type="supporting">
-                      适用于 Linux、Intel Mac 和服务器。把下面这段话发给目标机器上的 agent（Claude Code、Codex 等），它会安装 cofluxd 并把授权链接交给你。
+                      适用于 Linux、Intel Mac 和服务器。把下面这段话发给目标机器上的 agent（Claude Code、Codex 等），它会安装 cofluxd 并接入当前账号。
                     </Text>
-                    {/* CodeBlock has a copy button by default; the text stays selectable if clipboard access is denied. */}
-                    <CodeBlock code={AGENT_PROMPT} language="plaintext" size="sm" isWrapped maxHeight={220} />
+                    {readyKey ? (
+                      // CodeBlock has a copy button by default; the text stays selectable if clipboard access is denied.
+                      <CodeBlock code={headlessAgentPrompt(DAEMON_URL, readyKey.key)} language="plaintext" size="sm" isWrapped maxHeight={220} />
+                    ) : joinKey.status === "error" ? (
+                      <VStack gap={1} hAlign="stretch">
+                        <HStack gap={2} vAlign="center">
+                          <p className="text-sm leading-5 text-destructive">生成密钥失败</p>
+                          <AstryxButton label="重试" variant="secondary" size="sm" onClick={replaceJoinKey} />
+                        </HStack>
+                        <Text type="supporting">{joinKey.error}</Text>
+                      </VStack>
+                    ) : (
+                      <Skeleton height={120} radius={2} />
+                    )}
                   </VStack>
 
                   <Collapsible trigger="自己动手" defaultIsOpen={false}>
                     <VStack gap={2} hAlign="stretch" padding={2}>
                       <Text type="supporting">在目标机器的终端运行（需要 Node.js 20+）：</Text>
-                      <CodeBlock code={MANUAL_COMMAND} language="plaintext" size="sm" isWrapped />
-                      <Text type="supporting">命令会打印一个授权链接，粘贴到下方即可；在已登录的浏览器里打开它也行。</Text>
+                      {readyKey ? (
+                        <CodeBlock code={manualInstallCommand(DAEMON_URL, readyKey.key)} language="plaintext" size="sm" isWrapped />
+                      ) : joinKey.status === "error" ? (
+                        <Text type="supporting">生成密钥后显示命令。</Text>
+                      ) : (
+                        <Skeleton height={40} radius={2} />
+                      )}
                     </VStack>
                   </Collapsible>
 
-                  <form onSubmit={submit}>
-                    <VStack gap={2} hAlign="stretch">
-                      <HStack gap={2} vAlign="end">
-                        <StackItem size="fill">
-                          <TextInput
-                            label="授权链接"
-                            value={link}
-                            onChange={(value) => {
-                              setLink(value);
-                              setLinkError(null);
-                            }}
-                            placeholder="粘贴 https://…/authorize/… 链接或 cf_authz_… token"
-                            width="100%"
-                            autoComplete="off"
-                          />
-                        </StackItem>
-                        <AstryxButton label="授权" type="submit" variant="primary" isDisabled={pending || !link.trim()} isLoading={pending} />
-                      </HStack>
-                      {linkError ? <p className="text-sm leading-5 text-destructive">{linkError}</p> : null}
-                      {authorized && !linkError ? <Text type="supporting">已授权，等待设备上线…</Text> : null}
-                    </VStack>
-                  </form>
+                  {readyKey ? (
+                    <HStack gap={2} vAlign="center">
+                      {minutesLeft > 0 ? (
+                        <>
+                          <Spinner size="sm" shade="subtle" />
+                          <Text type="supporting">{`等待设备接入… 密钥 ${minutesLeft} 分钟内有效，只能用一次 ·`}</Text>
+                        </>
+                      ) : (
+                        <Text type="supporting">密钥已过期 ·</Text>
+                      )}
+                      <Link type="supporting" onClick={replaceJoinKey}>
+                        换一个
+                      </Link>
+                    </HStack>
+                  ) : null}
                 </VStack>
               )}
             </VStack>

@@ -110,6 +110,11 @@ export type DeviceAuthorizeResult = { ok: true } | { ok: false; error: string };
 const TASK_READ_TIMEOUT_MS = 15_000;
 /** deviceAuthorize 的等待上限：服务端要把 DaemonEnrolled 送达 daemon 并等它上线才回 deviceAuthorized。 */
 const DEVICE_AUTHORIZE_TIMEOUT_MS = 20_000;
+/** A minted one-time device join key (plan 20260924-device-join-keys); `expiresAt` is ms epoch from the
+ * server. Failures come from the server (`deviceJoinKeyCreated{ error }`) or are local (not signed in,
+ * connection lost, timeout — also what an older server that ignores the request produces). */
+export type DeviceJoinKeyResult = { ok: true; key: string; expiresAt: number } | { ok: false; error: string };
+const DEVICE_JOIN_KEY_TIMEOUT_MS = 15_000;
 
 /** 已退出终端的最后输出来源（plan 097）：snapshot / checkpoint = 规范化 ANSI 屏幕（分别来自 daemon 当前画面与
  * 中心缓存）；none = 没有任何可回放内容。 */
@@ -335,6 +340,21 @@ export function createCofluxClient(options: CofluxClientOptions) {
   const pendingTaskRemovals = new Set<string>();
   // plan 112：在飞的 deviceAuthorize（回应不带 request id，一次只允许一个在飞）。
   let pendingDeviceAuthorize: { resolve: (result: DeviceAuthorizeResult) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+
+  // Join key mints in flight, keyed by request id (the notificationList pattern): several may overlap,
+  // e.g. 换一个 pressed while the first mint is still answering.
+  let joinKeyRequest = 0;
+  const pendingJoinKeys = new Map<string, { resolve: (result: DeviceJoinKeyResult) => void; timer: ReturnType<typeof setTimeout> }>();
+  function settleJoinKey(requestId: string, result: DeviceJoinKeyResult): void {
+    const pending = pendingJoinKeys.get(requestId);
+    if (!pending) return;
+    pendingJoinKeys.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(result);
+  }
+  function failJoinKeys(error: string): void {
+    for (const requestId of [...pendingJoinKeys.keys()]) settleJoinKey(requestId, { ok: false, error });
+  }
 
   /** 收口在飞的设备授权：成功 / 服务端拒绝 / 本地失败（断连、登出、超时）都走这里，只结算一次。 */
   function settleDeviceAuthorize(result: DeviceAuthorizeResult): void {
@@ -605,6 +625,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           error: hadNotificationReads ? "标记已读未获确认，重连后请检查" : state.notificationInbox.error } }));
         // 回应不会再来了：在飞的设备授权立即失败而不是挂到超时（plan 112）
         settleDeviceAuthorize({ ok: false, error: "与服务器的连接已断开，请重试" });
+        failJoinKeys("与服务器的连接已断开，请重试");
         // TCP/WS transport 断开不等于账号授权已撤销，也不等于 worker 那条独立控制 WS 已断。
         // Router 会立即禁用新 rendezvous/高权限能力，但给既有 remote session lane 一个有界宽限。
         deviceRouter.setControlDisconnected();
@@ -964,6 +985,13 @@ export function createCofluxClient(options: CofluxClientOptions) {
         if (!payload.value.ok) settleDeviceAuthorize({ ok: false, error: payload.value.error || "授权链接无效或已过期" });
         break;
       }
+      case "deviceJoinKeyCreated": {
+        const value = payload.value;
+        settleJoinKey(value.requestId, value.error || !value.key
+          ? { ok: false, error: value.error || "服务器没有返回密钥" }
+          : { ok: true, key: value.key, expiresAt: value.expiresAt });
+        break;
+      }
       default:
         break;
     }
@@ -980,6 +1008,18 @@ export function createCofluxClient(options: CofluxClientOptions) {
       const timer = setTimeout(() => settleDeviceAuthorize({ ok: false, error: "设备授权超时，请重试" }), DEVICE_AUTHORIZE_TIMEOUT_MS);
       pendingDeviceAuthorize = { resolve, timer };
       send({ case: "deviceAuthorize", value: { token } });
+    });
+  }
+
+  /** Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
+   * `replaces` names the key it supersedes; the server revokes that one immediately. */
+  function createDeviceJoinKey(replaces = ""): Promise<DeviceJoinKeyResult> {
+    if (!controlAuthenticated) return Promise.resolve({ ok: false, error: "尚未登录或与服务器的连接未就绪" });
+    const requestId = `${notificationRequestPrefix}-join-${++joinKeyRequest}`;
+    return new Promise<DeviceJoinKeyResult>((resolve) => {
+      const timer = setTimeout(() => settleJoinKey(requestId, { ok: false, error: "生成密钥超时，请重试" }), DEVICE_JOIN_KEY_TIMEOUT_MS);
+      pendingJoinKeys.set(requestId, { resolve, timer });
+      send({ case: "deviceJoinKeyCreate", value: { requestId, replaces } });
     });
   }
 
@@ -1022,6 +1062,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     store.setState({ notificationInbox: emptyNotificationInbox() });
     controlAuthenticated = false;
     settleDeviceAuthorize({ ok: false, error: "已登出" });
+    failJoinKeys("已登出");
     pendingTaskRemovals.clear();
     clearOfflineTimer();
     clearOfflineCatalog();
@@ -1206,6 +1247,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     notificationListeners.clear();
     controlAuthenticated = false;
     settleDeviceAuthorize({ ok: false, error: "客户端已断开" });
+    failJoinKeys("客户端已断开");
     clearOfflineTimer();
     deviceRouter.destroy();
     connection.stop();
@@ -1241,6 +1283,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     readTask,
     sendFsWrite,
     authorizeDevice,
+    createDeviceJoinKey,
     reportLocalError,
     disconnect,
   };

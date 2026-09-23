@@ -2,85 +2,43 @@ import type { ConnectionStatus } from "@coflux/client";
 
 import type { DesktopDaemonState } from "@/desktop-bridge";
 
-import { authorizeTokenFromUrl } from "../../../shared/daemon-urls";
-
 /**
- * 添加设备 dialog (plan 20260923-add-device-dialog): the React-free parts — paste-input validation,
- * the agent prompt, the manual command, the pinned download URL, the new-device diff and the
- * this-Mac row condition. Kept pure so they run under node --test like daemon-view.ts.
+ * 添加设备 dialog (plan 20260923-add-device-dialog, join keys since plan 20260924-device-join-keys):
+ * the React-free parts — the agent prompt, the manual command, the key countdown, the pinned download
+ * URL, the new-device diff and the this-Mac row condition. Kept pure so they run under node --test
+ * like daemon-view.ts.
  */
-
-/** Server token shape: `genToken("cf_authz")` → `cf_authz_<base64url>` (apps/server/src/secrets.ts). */
-const AUTHORIZE_TOKEN_SHAPE = /^cf_authz_[A-Za-z0-9_-]+$/;
-
-declare const authorizeTokenBrand: unique symbol;
-
-/**
- * A device authorization token that passed `parseAuthorizeInput`. Only the validator mints this
- * type, and the dialog's send path accepts nothing else, so unvalidated text never reaches
- * `client.authorizeDevice`: every rejected token counts against the connection's failure budget,
- * which this Mac's own automatic local authorization shares.
- */
-export type AuthorizeToken = string & { readonly [authorizeTokenBrand]: true };
-
-export type AuthorizeInputResult = { ok: true; token: AuthorizeToken } | { ok: false; error: string };
-
-function parsesAsUrl(value: string): boolean {
-  try {
-    new URL(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Pasted text → token. A URL goes through `authorizeTokenFromUrl` (anchored on `/authorize/<token>`,
- * trailing slash / query / fragment stripped, URL-decoded); anything else is taken as a bare token.
- * Either way the result must have the server's `cf_authz_` shape. Nothing is sent on failure.
- */
-export function parseAuthorizeInput(raw: string): AuthorizeInputResult {
-  const input = raw.trim();
-  if (!input) return { ok: false, error: "请粘贴授权链接" };
-  const isUrl = parsesAsUrl(input);
-  const token = isUrl ? authorizeTokenFromUrl(input) : input;
-  if (token === null) return { ok: false, error: "这不是授权链接：链接应形如 https://…/authorize/cf_authz_…" };
-  if (!AUTHORIZE_TOKEN_SHAPE.test(token)) {
-    return { ok: false, error: isUrl ? "授权链接格式不对，请完整复制 cofluxd 打印的链接" : "无法识别：请粘贴完整的授权链接，或以 cf_authz_ 开头的 token" };
-  }
-  return { ok: true, token: token as AuthorizeToken };
-}
 
 /** The arm64 dmg of exactly this app's version (release tag is always `v<product version>`). */
 export function desktopDownloadUrl(version: string): string {
   return `https://github.com/myWsq/coflux/releases/download/v${version}/coflux-${version}-arm64.dmg`;
 }
 
-/** Manual headless install, for people who would rather type it themselves. */
-export function manualInstallCommand(daemonUrl: string): string {
-  return `npm i -g cofluxd && cofluxd up --server ${daemonUrl}`;
+/** Manual headless install, for people who would rather type it themselves. The one-time join key is
+ * part of the command: running it joins the account, nothing is pasted back. */
+export function manualInstallCommand(daemonUrl: string, joinKey: string): string {
+  return `npm i -g cofluxd && cofluxd up --server ${daemonUrl} --key ${joinKey}`;
 }
 
 /**
- * The prompt handed to an agent on the target machine. `daemonUrl` is `daemonServerUrl(SERVER_URL)`,
- * always passed explicitly so a non-default server can never be silently skipped.
+ * The prompt handed to an agent on the target machine — deliberately short. `daemonUrl` is
+ * `daemonServerUrl(SERVER_URL)`, always passed explicitly so a non-default server can never be
+ * silently skipped. It never mentions authorization links, not even as a fallback: with a key the
+ * command either joins or fails with a reason.
  */
-export function headlessAgentPrompt(daemonUrl: string): string {
-  return `Please install the Coflux daemon (cofluxd) on this machine and connect it to my Coflux account.
+export function headlessAgentPrompt(daemonUrl: string, joinKey: string): string {
+  return `Please connect this machine to my Coflux account:
+1. Make sure Node.js 20 or newer is installed (\`node --version\`); if it is missing or older, install it.
+2. Run \`npm i -g cofluxd\`.
+3. Run \`cofluxd up --server ${daemonUrl} --key ${joinKey}\` (it can take up to about two minutes).
+4. Run \`cofluxd status\` and confirm it shows this machine as registered (凭证: 已登记).
+If a command fails, stop and tell me its error.`;
+}
 
-Ground rules:
-- Never use sudo on your own. If any step seems to need root, stop and ask me first.
-- Wherever a step says "stop and ask", wait for my answer before continuing.
-
-Steps:
-1. Check Node.js: run \`node --version\`. It must be Node.js 20 or newer. If Node.js is missing or older than 20, stop and ask me how I want to install it.
-2. Check that the npm global prefix is writable by the current user: run \`npm config get prefix\` and test that directory, e.g. \`test -w "$(npm config get prefix)" && echo writable\`. If it is not writable, stop and ask me how to proceed (do not use sudo).
-3. Install: \`npm i -g cofluxd\`
-4. Start the daemon: \`cofluxd up --server ${daemonUrl}\`
-   On first run this downloads the daemon binaries, installs and starts a background service, prints an authorization link, and then blocks in the foreground for up to 11 minutes waiting for authorization. Do not sit waiting on it. Run it in the background, e.g. \`nohup cofluxd up --server ${daemonUrl} > /tmp/cofluxd-up.log 2>&1 &\`, or with a generous timeout that leaves room for the download, e.g. \`timeout 300 cofluxd up --server ${daemonUrl}\` on Linux. When it is cut short, a timeout or non-zero exit is expected and is not a failure: the service keeps running and keeps the link fresh.
-5. Get the link: run \`cofluxd status\` every few seconds until its output contains a URL with \`/authorize/\` (or shows 凭证: 已登记, meaning it is already authorized). If \`up\` exited with a real error before the service was installed, show me /tmp/cofluxd-up.log (or the error) instead. Give me the link and ask me to paste it into the 添加设备 (Add device) dialog in the Coflux desktop app (Headless tab). Opening it in a browser signed in to the same account also works.
-6. After I say I have authorized it, run \`cofluxd status\` again and confirm the device shows as registered (凭证: 已登记) and the service is running. If it still shows an /authorize/ link, the previous one may have expired: give me the new link.
-7. Linux only: the daemon runs as a \`systemctl --user\` service, which stops when I log out unless lingering is enabled. Ask me before running \`loginctl enable-linger "$USER"\`; do not run it without my confirmation.`;
+/** Whole minutes left on a join key, rounded up (a key with 30 s left still reads "1 分钟"); 0 once expired. */
+export function joinKeyMinutesLeft(expiresAt: number, now: number): number {
+  const left = expiresAt - now;
+  return left > 0 ? Math.ceil(left / 60_000) : 0;
 }
 
 /**
