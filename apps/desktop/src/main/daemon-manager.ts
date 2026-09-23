@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { setInterval } from "node:timers";
 
 import type { DesktopDaemonBusy, DesktopDaemonFda, DesktopDaemonState } from "../shared/desktop-bridge";
+import { daemonServerUrl } from "../shared/daemon-urls";
 import type { DaemonBundle } from "./daemon-bundle";
-import { buildDaemonSettings, daemonServerUrl, daemonSettingsJson, parseCredentialsDaemonId, parseFdaStatus, parsePendingAuth, parseSupervisorVersion } from "./daemon-files";
+import { buildDaemonSettings, daemonSettingsJson, parseCredentialsDaemonId, parseFdaStatus, parsePendingAuth, parseSupervisorVersion } from "./daemon-files";
 import { LAUNCHD_LABEL, type DaemonHomePaths } from "./daemon-paths";
 import { deriveDaemonState, type DaemonFacts } from "./daemon-state";
 import { bundleRuntimeId, runtimeStatus, stageRuntime, startRuntime, stopRuntime, type RuntimeStatus } from "./desktop-runtime";

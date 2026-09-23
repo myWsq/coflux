@@ -1,4 +1,5 @@
 import type { DesktopDaemonFda } from "../shared/desktop-bridge";
+import { authorizeTokenFromUrl } from "../shared/daemon-urls";
 import { CLAUDE_PLUGIN_ENV, LAUNCHD_LABEL, type DaemonHomePaths } from "./daemon-paths";
 
 /**
@@ -57,18 +58,6 @@ export function shouldRewritePlist(existing: string | null, next: string, claude
   return existing !== null && existing !== next;
 }
 
-/**
- * daemon 的服务器地址跟随 app：/client 端点换成 /daemon（wss://api.coflux.dev/client → wss://api.coflux.dev/daemon）。
- * 路径不是 /client 结尾时直接落 /daemon。
- */
-export function daemonServerUrl(clientServerUrl: string): string {
-  const url = new URL(clientServerUrl);
-  url.pathname = url.pathname.endsWith("/client") ? `${url.pathname.slice(0, -"/client".length)}/daemon` : "/daemon";
-  url.search = "";
-  url.hash = "";
-  return url.toString();
-}
-
 export type DaemonSettings = { serverUrl: string; deviceName: string; shell?: string };
 
 /**
@@ -88,18 +77,6 @@ export function daemonSettingsJson(settings: DaemonSettings): string {
 }
 
 export type PendingAuth = { token: string; expiresAt?: number };
-
-/** 从 `<publicUrl>/authorize/<token>` 取 token（server 用 encodeURIComponent 编过）。 */
-export function authorizeTokenFromUrl(url: string): string | null {
-  try {
-    const match = /\/authorize\/([^/?#]+)\/?$/.exec(new URL(url).pathname);
-    if (!match) return null;
-    const token = decodeURIComponent(match[1]);
-    return token ? token : null;
-  } catch {
-    return null;
-  }
-}
 
 /** pending-auth.json（worker 落盘：{ url, expiresAt }）→ token；形状不对或 url 不是授权链接返回 null。 */
 export function parsePendingAuth(text: string | null): PendingAuth | null {

@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { authorizeTokenFromUrl, daemonServerUrl } from "../shared/daemon-urls";
 import {
-  authorizeTokenFromUrl,
   buildDaemonSettings,
-  daemonServerUrl,
   daemonSettingsJson,
   launchAgentPlist,
   parseCredentialsDaemonId,
