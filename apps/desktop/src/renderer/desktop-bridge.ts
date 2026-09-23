@@ -7,6 +7,7 @@ import type { DesktopBridge } from "../shared/desktop-bridge";
 
 export type {
   DesktopBridge,
+  DesktopBrowserLoginResult,
   DesktopCommand,
   DesktopDaemonBusy,
   DesktopDaemonFda,
@@ -22,6 +23,8 @@ export type {
   DesktopExecutorSaveResult,
   DesktopExecutorSettings,
   DesktopExecutorTestResult,
+  DesktopLoginOptions,
+  DesktopLoginProvider,
   DesktopNotification,
   DesktopUpdateState,
   DesktopUpdateStatus,

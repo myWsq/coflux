@@ -5,7 +5,7 @@ import { useStore } from "zustand";
 import { AlertCircle, FolderGit2, LoaderCircle, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
 import { type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
 
-import { AuthMessage, AuthShell, CredentialsForm } from "@/components/auth/auth-shell";
+import { AuthMessage, AuthShell, LoginScreen, authFooterText } from "@/components/auth/auth-shell";
 import { dismissBootOverlay } from "@/boot-overlay";
 import { Button } from "@astryxdesign/core/Button";
 import {
@@ -165,7 +165,7 @@ function DesktopOutdated({ bridge }: { bridge: DesktopBridge }) {
   }, [bridge]);
   const prompt = resolveOutdatedPrompt(update);
   return (
-    <AuthShell>
+    <AuthShell tagline="Coflux 需要更新" footer={authFooterText(bridge.serverUrl, bridge.version)}>
       <AuthMessage
         icon={prompt.busy ? <LoaderCircle className="size-5 animate-spin text-primary" /> : <RefreshCw className="size-5 text-primary" />}
         title={prompt.title}
@@ -509,6 +509,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
     await client.login(username, password);
   }
 
+  /** Browser sign-in finished (plan 20260923): the main process stored the new token; connect with it. */
+  async function loginWithBrowserToken() {
+    const token = await desktop.getSessionToken().catch(() => "");
+    if (token) client.loginWithToken(token);
+  }
+
   function openEnrollment() {
     setImportOpen(false);
     setEnrollmentOpen(true);
@@ -716,19 +722,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   if (surface === "login") {
     return (
-      <AuthShell>
-        <CredentialsForm
-          title="登录到 coflux"
-          description="使用你的账号访问远程工作区"
-          username={username}
-          password={password}
-          busy={false}
-          error={authState === "auth-failed" ? loginError || "登录失败" : undefined}
-          onUsernameChange={setUsername}
-          onPasswordChange={setPassword}
-          onSubmit={login}
-        />
-      </AuthShell>
+      <LoginScreen
+        bridge={desktop}
+        username={username}
+        password={password}
+        passwordError={authState === "auth-failed" ? loginError || "登录失败" : undefined}
+        onUsernameChange={setUsername}
+        onPasswordChange={setPassword}
+        onSubmit={login}
+        onBrowserLogin={() => void loginWithBrowserToken()}
+      />
     );
   }
 

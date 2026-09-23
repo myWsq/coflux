@@ -22,6 +22,7 @@ import { DESKTOP_ORIGIN, rewriteHandshakeHeaders } from "./origin";
 import { createExecutorConfigStore, createExecutorRuntime } from "@coflux/executor";
 import { createExecutorHost, type ExecutorHost } from "./executor-host";
 import { createExecutorSettingsWriter } from "./executor-settings-writer";
+import { createBrowserLogin } from "./browser-login";
 import { createRendererResetListener } from "./renderer-reset";
 import { readSettingsFile, resolveServerUrl } from "./settings";
 import { createTokenStore } from "./token-store";
@@ -340,6 +341,25 @@ if (!app.requestSingleInstanceLock()) {
     if(nativeTransport) registerTailcatIpc(nativeTransport, trusted);
     app.once("will-quit", () => nativeTransport?.setControl(false, true));
 
+    // Browser sign-in (plan 20260923): loopback + PKCE + code exchange all stay in this process. The
+    // token lands through the same store-and-reset path as the renderer's setSessionToken.
+    const storeSessionToken = (token: string) => {
+      if (token !== tokenStore.read()) nativeTransport?.setControl(false, true);
+      tokenStore.write(token);
+    };
+    const browserLogin = createBrowserLogin({
+      serverUrl,
+      hostname: hostname(),
+      openExternal: (url) => void shell.openExternal(url),
+      storeToken: storeSessionToken,
+      focusApp: () => {
+        showMainWindow();
+        app.focus({ steal: true });
+      },
+      log: (message, detail) => log.warn(message, detail),
+    });
+    app.once("will-quit", () => browserLogin.dispose());
+
     registerIpc(
       {
         connectLocal,
@@ -364,10 +384,11 @@ if (!app.requestSingleInstanceLock()) {
         installUpdate: updater.installUpdate,
         getUpdateState: updater.getState,
         getSessionToken: tokenStore.read,
-        setSessionToken: (token) => {
-          if(token !== tokenStore.read())nativeTransport?.setControl(false,true);
-          tokenStore.write(token);
-        },
+        setSessionToken: storeSessionToken,
+        getLoginOptions: browserLogin.getOptions,
+        startBrowserLogin: browserLogin.start,
+        reopenBrowserLogin: browserLogin.reopen,
+        cancelBrowserLogin: browserLogin.cancel,
         clearSessionToken: () => { nativeTransport?.setControl(false, true); tokenStore.clear(); },
         // 渲染层主动拉取（账号菜单挂载时）顺带触发一次含 launchctl 的全量刷新：用户驱动、低频
         getDaemonState: () => {

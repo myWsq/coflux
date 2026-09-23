@@ -1,6 +1,7 @@
 import { ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
 
 import type {
+  DesktopBrowserLoginResult,
   DesktopDaemonState,
   DesktopExecutorCatalog,
   DesktopExecutorInbound,
@@ -8,6 +9,8 @@ import type {
   DesktopExecutorSaveResult,
   DesktopExecutorSettings,
   DesktopExecutorTestResult,
+  DesktopLoginOptions,
+  DesktopLoginProvider,
   DesktopNotification,
   DesktopUpdateState,
 } from "../shared/desktop-bridge";
@@ -22,6 +25,7 @@ import {
   sanitizeSessionToken,
 } from "./ipc-sanitize";
 import { isTrustedRendererUrl } from "./ipc-trust";
+import { isLoginProvider } from "./browser-login";
 
 export type TrustedSenders = { appOrigin: string; devRendererUrl?: string };
 
@@ -42,6 +46,11 @@ export type IpcActions = {
   getSessionToken: () => string;
   setSessionToken: (token: string) => void;
   clearSessionToken: () => void;
+  /** Browser sign-in (plan 20260923): the renderer asks, the main process does the whole flow. */
+  getLoginOptions: () => Promise<DesktopLoginOptions>;
+  startBrowserLogin: (provider: DesktopLoginProvider) => Promise<DesktopBrowserLoginResult>;
+  reopenBrowserLogin: () => void;
+  cancelBrowserLogin: () => void;
   /** 本机 daemon（plan 113）：一个状态对象 + 无参窄动词，载荷为空，来源校验即全部校验 */
   getDaemonState: () => DesktopDaemonState;
   daemonEnroll: () => void;
@@ -129,6 +138,25 @@ export function registerIpc(actions: IpcActions, trusted: TrustedSenders): void 
 
   ipcMain.on(IPC.clearSessionToken, (event) => {
     if (isTrusted(event)) actions.clearSessionToken();
+  });
+
+  ipcMain.handle(IPC.loginOptions, (event) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    return actions.getLoginOptions();
+  });
+
+  ipcMain.handle(IPC.loginStart, (event, payload: unknown) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    if (!isLoginProvider(payload)) return Promise.resolve({ ok: false, reason: "failed", message: "不支持该登录方式" } satisfies DesktopBrowserLoginResult);
+    return actions.startBrowserLogin(payload);
+  });
+
+  ipcMain.on(IPC.loginReopen, (event) => {
+    if (isTrusted(event)) actions.reopenBrowserLogin();
+  });
+
+  ipcMain.on(IPC.loginCancel, (event) => {
+    if (isTrusted(event)) actions.cancelBrowserLogin();
   });
 
   ipcMain.handle(IPC.daemonGetState, (event) => {

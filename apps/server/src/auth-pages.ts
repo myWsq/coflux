@@ -581,7 +581,14 @@ export class AuthPages {
     const request = this.host.nativeLogins.describe(id);
     if (!request) return htmlResponse(404, "登录请求不可用", renderMessage("登录请求不可用", INVALID_NATIVE));
     const session = this.nativeSession(req, id);
-    if (!session) return this.loginPage(req, "login", this.nativeLoginSpec(id));
+    if (!session) {
+      // The app's own provider button opens `/login/<id>?provider=<p>`: go straight to the provider
+      // instead of asking for a second click. Nothing is granted by this — the confirmation card with
+      // its csrf still stands between any sign-in and the code — so no csrf is needed to start it.
+      const provider = new URL(req.request.url).searchParams.get("provider");
+      if (provider && this.host.identity.providers.includes(provider as never)) return this.nativeProviderAutoStart(req, id, provider);
+      return this.loginPage(req, "login", this.nativeLoginSpec(id));
+    }
     return htmlResponse(200, "确认登录", renderNativeConfirm(nativePath(id), this.sessions.csrfFor(session.token), request, session.login), [], "确认这次登录");
   }
 
@@ -591,6 +598,20 @@ export class AuthPages {
 
   nativeProviderStart(req: PageRequest, id: string, provider: string): Promise<Response> {
     return this.providerStart(req, "login", this.nativeLoginSpec(id), provider, `${nativePath(id)}/oauth`);
+  }
+
+  private async nativeProviderAutoStart(req: PageRequest, id: string, provider: string): Promise<Response> {
+    const spec = this.nativeLoginSpec(id);
+    if (!this.host.allowLogin(req.remoteAddress)) return this.loginPage(req, "login", spec, "登录尝试过于频繁，请稍后重试", 429);
+    const returnUrl = `${config.publicUrl}${nativePath(id)}/oauth`;
+    let started: { url: string; setCookies: string[] } | undefined;
+    try {
+      started = await this.host.identity.startSignIn(provider as never, returnUrl, returnUrl, req.request.headers);
+    } catch (error) {
+      log.warn("provider sign-in could not start", { flow: "login", provider, error: String(error) });
+    }
+    if (!started) return this.loginPage(req, "login", spec, "暂时无法连接登录服务，请稍后重试", 502);
+    return redirectResponse(302, started.url, started.setCookies);
   }
 
   /** A failed provider return ends a loopback request right away, so the waiting app shows why
