@@ -72,8 +72,10 @@ import { config } from "./config.js";
 import { ProxyRouteTable, ProxyGate, TunnelRegistry, buildPreviewUrl, parseProxyRedirect, buildAuthCallbackUrl } from "./proxy.js";
 import { TailcatRendezvous, privateTailcatRegions } from "./tailcat-rendezvous.js";
 import { LocalControlPlane } from "./local-control.js";
-import { verifyPassword } from "./auth.js";
+import { verifyStoredPassword } from "./auth.js";
 import { AuthPages } from "./auth-pages.js";
+import { createIdentity, type Identity, type ProviderIdentity } from "./identity.js";
+import { NativeLoginStore, type NativeLoginGrant, type NativeLoginRegistration } from "./native-login.js";
 import {
   createPreparedOperationService,
   MAX_PREPARED_FRAME_BYTES,
@@ -494,6 +496,12 @@ export class Hub {
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
   /** 设备授权和端口预览页面；页面会话与 CSRF 独立，业务校验复用本 Hub。 */
   readonly authPages: AuthPages;
+  /** Provider sign-in (Better Auth, plan 20260923); a no-op identity when no provider is enabled. */
+  readonly identity: Identity;
+  /** Native (desktop / CLI) browser login requests: loopback or paste code, PKCE-bound. */
+  readonly nativeLogins = new NativeLoginStore(config.authorizeTtlMs, config.maxPendingAuthorizations);
+  private readonly nativeLoginLimiter = new FixedWindowLimiter(config.loginRateLimit, config.authRateWindowMs);
+  private authPruneTimer: ReturnType<typeof setInterval> | undefined;
   private readonly enrollLimiter = new FixedWindowLimiter(config.enrollRateLimit, config.authRateWindowMs);
   private readonly daemonAuthLimiter = new FixedWindowLimiter(config.daemonAuthRateLimit, config.authRateWindowMs);
   private readonly loginLimiter = new FixedWindowLimiter(config.loginRateLimit, config.authRateWindowMs);
@@ -533,6 +541,22 @@ export class Hub {
   private readonly executorSecrets = createExecutorSecrets(parseExecutorSecretKeys(config.executorSecretKeys));
 
   constructor(private store: Store) {
+    this.identity = createIdentity({
+      store,
+      databaseUrl: config.databaseUrl,
+      publicUrl: config.publicUrl,
+      secret: config.authSecret,
+      providers: config.oauthProviders,
+      allowlist: config.signupAllowlist,
+      errorUrl: `${config.publicUrl}/login-error`,
+    });
+    if (this.identity.providers.length > 0) {
+      // Abandoned OAuth attempts leave auth_verification rows; escaped handoffs would leave sessions.
+      this.authPruneTimer = setInterval(() => {
+        void this.store.pruneAuthRows(Date.now()).catch((error) => log.warn("Better Auth row cleanup failed", { error: String(error) }));
+      }, 10 * 60_000);
+      this.authPruneTimer.unref?.();
+    }
     this.authPages = new AuthPages(this);
     this.localControl = new LocalControlPlane(
       store,
@@ -3496,7 +3520,7 @@ export class Hub {
       try {
         const email = username.trim().toLowerCase();
         const user = email ? await this.store.getUserByEmail(email) : undefined;
-        if (user && (await verifyPassword(password, user.passwordHash))) {
+        if (user && (await verifyStoredPassword(password, user.passwordHash))) {
           const accountId = await this.resolveAccountForUser({ userId: user.id, email: user.email });
           return { case: "ok", accountId, userId: user.id };
         }
@@ -3529,6 +3553,44 @@ export class Hub {
         client.ws.close(4001, "logout");
       }
     }
+  }
+
+  /* ------------------------ provider + native login (plan 20260923) ------------------------ */
+
+  /** Providers every login surface may show; empty in local mode or without credentials. */
+  enabledProviders(): readonly string[] {
+    return this.identity.providers;
+  }
+
+  /** A provider identity read at handoff → its personal account (created lazily, same path as password). */
+  async accountForProviderIdentity(identity: ProviderIdentity): Promise<AccountId> {
+    return this.resolveAccountForUser({ userId: identity.userId, email: identity.email });
+  }
+
+  /** Registration and code exchange share their own per-source window (same threshold as logins). */
+  allowNativeLogin(remoteAddress: string): boolean {
+    return this.nativeLoginLimiter.allow(remoteAddress);
+  }
+
+  registerNativeLogin(input: NativeLoginRegistration): OperationOutcome<{ requestId: string; url: string; expiresAt: number }> {
+    const registered = this.nativeLogins.register(input);
+    if (!registered.ok) return { ok: false, error: registered.error === "full" ? "登录请求过多，请稍后重试" : "登录请求无效" };
+    return { ok: true, value: { requestId: registered.id, url: `${config.publicUrl}/login/${registered.id}`, expiresAt: registered.expiresAt } };
+  }
+
+  /** code + verifier → a fresh ck_sess, exactly once (the store burns the code on any attempt). */
+  async exchangeNativeLogin(code: string, verifier: string): Promise<OperationOutcome<{ accountId: AccountId; token: string; login: string }>> {
+    const grant = this.nativeLogins.exchange(code, verifier);
+    if (!grant) return { ok: false, error: "登录码无效或已过期，请重新登录" };
+    const token = await this.issueClientToken(grant);
+    return { ok: true, value: { accountId: grant.accountId, token, login: grant.login } };
+  }
+
+  private async issueClientToken(grant: Pick<NativeLoginGrant, "accountId" | "userId">): Promise<string> {
+    const token = genToken("ck_sess");
+    const now = Date.now();
+    await this.store.upsertClientToken(hashToken(token), grant.accountId, now, now + config.sessionTtlMs, grant.userId);
+    return token;
   }
 
   /** 页面登录（plan 107）的来源限速：与 WS 登录共用同一个 loginLimiter（同一来源、同一窗口、同一阈值）。 */
@@ -4519,6 +4581,8 @@ export class Hub {
     this.pendingAgentRequests.clear();
     for (const p of this.pendingAuthorizations.values()) clearTimeout(p.timer);
     this.pendingAuthorizations.clear();
+    if (this.authPruneTimer) clearInterval(this.authPruneTimer);
+    void this.identity.close();
     this.daemonResyncAuthorities.clear();
     for (const d of daemons) try { d.ws.close(1001, "server shutting down"); } catch { /* ignore */ }
     for (const c of this.clients) try { c.ws.close(1001, "server shutting down"); } catch { /* ignore */ }

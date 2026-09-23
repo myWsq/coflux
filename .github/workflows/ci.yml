@@ -175,6 +175,8 @@ jobs:
           go build -mod=readonly -o ../../target/debug/coflux-test-derper tailscale.com/cmd/derper
       - name: Native grant coordinator tests
         run: node --import tsx --test apps/server/src/tailcat-rendezvous.test.ts apps/server/src/derp-admission.test.ts
+      - name: Sign-in identity and native login tests (allowlist, verified email, PKCE, handoff on Postgres)
+        run: node --import tsx --test apps/server/src/signup-policy.test.ts apps/server/src/native-login.test.ts apps/server/src/identity.test.ts
 
       - name: Rust 单元测试（protocol/supervisor/worker/cli）
         env:

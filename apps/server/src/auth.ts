@@ -32,3 +32,13 @@ export async function verifyPassword(password: string, stored: string): Promise<
     return false;
   }
 }
+
+/**
+ * Password check against a stored user's hash. A user created through a provider sign-in has no
+ * password (`null`): that is "no password", never a match, whatever was typed — and it must not reach
+ * `verifyPassword`, which would throw on a null hash and turn a wrong password into a 500.
+ */
+export async function verifyStoredPassword(password: string, stored: string | null | undefined): Promise<boolean> {
+  if (typeof stored !== "string" || stored.length === 0) return false;
+  return verifyPassword(password, stored);
+}
