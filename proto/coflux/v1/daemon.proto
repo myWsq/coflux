@@ -36,6 +36,11 @@ message DaemonEnrollRequest {
   string arch = 6;
   // 同 DaemonAuth.capabilities：首次登记的连接不会再走 DaemonAuth，能力必须随登记一起上报。
   repeated string capabilities = 7;
+  // One-time join key minted by a signed-in client (plan 20260924-device-join-keys). Non-empty:
+  // the server consumes it and enrolls the device into the minting account at once (DaemonEnrolled),
+  // or answers DaemonJoinKeyRejected and closes; it never falls back to an authorization link.
+  // Empty: the browser-link flow (DaemonAuthorizePending). Old servers ignore the field.
+  string join_key = 9;
 }
 
 // 独立于认证消息的 gateway capability announce；保持旧认证构造面完全兼容，worker 可在
@@ -464,6 +469,14 @@ message WorkspaceDefaultBranch {
 
 // ===== Server → Daemon 载荷 =====
 
+// Answer to a DaemonEnrollRequest whose join_key was invalid, expired, already used or replaced
+// (or whose account is at its device cap). The server closes the socket right after. The worker
+// deletes its key file, records the outcome and keeps running: its next connection enrolls without
+// a key. Only workers that sent join_key ever receive this.
+message DaemonJoinKeyRejected {
+  string reason = 1;
+}
+
 message DaemonEnrolled {
   uint32 control_protocol_version = 3;
   string daemon_id = 1;
@@ -663,6 +676,7 @@ message ServerToDaemon {
     DeviceTailcatGrant device_tailcat_grant = 41;
     DeviceTailcatRevoke device_tailcat_revoke = 42;
     ExecutorSettingsUpdate executor_settings = 43;
+    DaemonJoinKeyRejected daemon_join_key_rejected = 44;
   }
 }
 

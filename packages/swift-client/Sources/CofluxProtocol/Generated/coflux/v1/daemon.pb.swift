@@ -80,6 +80,12 @@ public struct Coflux_V1_DaemonEnrollRequest: Sendable {
   /// 同 DaemonAuth.capabilities：首次登记的连接不会再走 DaemonAuth，能力必须随登记一起上报。
   public var capabilities: [String] = []
 
+  /// One-time join key minted by a signed-in client (plan 20260924-device-join-keys). Non-empty:
+  /// the server consumes it and enrolls the device into the minting account at once (DaemonEnrolled),
+  /// or answers DaemonJoinKeyRejected and closes; it never falls back to an authorization link.
+  /// Empty: the browser-link flow (DaemonAuthorizePending). Old servers ignore the field.
+  public var joinKey: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1417,6 +1423,22 @@ public struct Coflux_V1_WorkspaceDefaultBranch: Sendable {
   public init() {}
 }
 
+/// Answer to a DaemonEnrollRequest whose join_key was invalid, expired, already used or replaced
+/// (or whose account is at its device cap). The server closes the socket right after. The worker
+/// deletes its key file, records the outcome and keeps running: its next connection enrolls without
+/// a key. Only workers that sent join_key ever receive this.
+public struct Coflux_V1_DaemonJoinKeyRejected: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var reason: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_DaemonEnrolled: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2067,6 +2089,14 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     set {payload = .executorSettings(newValue)}
   }
 
+  public var daemonJoinKeyRejected: Coflux_V1_DaemonJoinKeyRejected {
+    get {
+      if case .daemonJoinKeyRejected(let v)? = payload {return v}
+      return Coflux_V1_DaemonJoinKeyRejected()
+    }
+    set {payload = .daemonJoinKeyRejected(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -2099,6 +2129,7 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     case deviceTailcatGrant(Coflux_V1_DeviceTailcatGrant)
     case deviceTailcatRevoke(Coflux_V1_DeviceTailcatRevoke)
     case executorSettings(Coflux_V1_ExecutorSettingsUpdate)
+    case daemonJoinKeyRejected(Coflux_V1_DaemonJoinKeyRejected)
 
   }
 
@@ -2198,7 +2229,7 @@ extension Coflux_V1_DaemonAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Coflux_V1_DaemonEnrollRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonEnrollRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}host\0\u{1}platform\0\u{3}worker_version\0\u{3}supervisor_version\0\u{1}arch\0\u{1}capabilities\0\u{3}control_protocol_version\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}host\0\u{1}platform\0\u{3}worker_version\0\u{3}supervisor_version\0\u{1}arch\0\u{1}capabilities\0\u{3}control_protocol_version\0\u{3}join_key\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2214,6 +2245,7 @@ extension Coflux_V1_DaemonEnrollRequest: SwiftProtobuf.Message, SwiftProtobuf._M
       case 6: try { try decoder.decodeSingularStringField(value: &self.arch) }()
       case 7: try { try decoder.decodeRepeatedStringField(value: &self.capabilities) }()
       case 8: try { try decoder.decodeSingularUInt32Field(value: &self.controlProtocolVersion) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.joinKey) }()
       default: break
       }
     }
@@ -2244,6 +2276,9 @@ extension Coflux_V1_DaemonEnrollRequest: SwiftProtobuf.Message, SwiftProtobuf._M
     if self.controlProtocolVersion != 0 {
       try visitor.visitSingularUInt32Field(value: self.controlProtocolVersion, fieldNumber: 8)
     }
+    if !self.joinKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.joinKey, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2256,6 +2291,7 @@ extension Coflux_V1_DaemonEnrollRequest: SwiftProtobuf.Message, SwiftProtobuf._M
     if lhs.supervisorVersion != rhs.supervisorVersion {return false}
     if lhs.arch != rhs.arch {return false}
     if lhs.capabilities != rhs.capabilities {return false}
+    if lhs.joinKey != rhs.joinKey {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -4768,6 +4804,36 @@ extension Coflux_V1_WorkspaceDefaultBranch: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
+extension Coflux_V1_DaemonJoinKeyRejected: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DaemonJoinKeyRejected"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}reason\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DaemonJoinKeyRejected, rhs: Coflux_V1_DaemonJoinKeyRejected) -> Bool {
+    if lhs.reason != rhs.reason {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_DaemonEnrolled: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonEnrolled"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_id\0\u{3}device_token\0\u{3}control_protocol_version\0")
@@ -5563,7 +5629,7 @@ extension Coflux_V1_ExecutorSettingsUpdate: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToDaemon"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{4}\u{3}proxy_open\0\u{3}proxy_close\0\u{4}\u{5}proxy_data\0\u{3}workspace_list\0\u{4}\u{2}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{4}\u{4}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0\u{4}\u{3}agent_control_result\0\u{4}\u{3}prepared_device_operation_execute\0\u{3}server_agent_request\0\u{3}device_tailcat_configure\0\u{3}device_tailcat_grant\0\u{3}device_tailcat_revoke\0\u{3}executor_settings\0\u{b}device_relay_dial\0\u{b}relay_node_list\0\u{b}device_p2p_dial\0\u{b}device_p2p_channel_grant\0\u{b}session_replay\0\u{b}pty_resize\0\u{b}exec_run\0\u{b}fs_list\0\u{b}fs_read\0\u{b}pty_input\0\u{b}fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}\"\u{1}\u{c}$\u{1}\u{c}%\u{1}\u{c}\u{b}\u{1}\u{c}\u{c}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{15}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{4}\u{3}proxy_open\0\u{3}proxy_close\0\u{4}\u{5}proxy_data\0\u{3}workspace_list\0\u{4}\u{2}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{4}\u{4}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0\u{4}\u{3}agent_control_result\0\u{4}\u{3}prepared_device_operation_execute\0\u{3}server_agent_request\0\u{3}device_tailcat_configure\0\u{3}device_tailcat_grant\0\u{3}device_tailcat_revoke\0\u{3}executor_settings\0\u{3}daemon_join_key_rejected\0\u{b}device_relay_dial\0\u{b}relay_node_list\0\u{b}device_p2p_dial\0\u{b}device_p2p_channel_grant\0\u{b}session_replay\0\u{b}pty_resize\0\u{b}exec_run\0\u{b}fs_list\0\u{b}fs_read\0\u{b}pty_input\0\u{b}fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}\"\u{1}\u{c}$\u{1}\u{c}%\u{1}\u{c}\u{b}\u{1}\u{c}\u{c}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{15}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5948,6 +6014,19 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .executorSettings(v)
         }
       }()
+      case 44: try {
+        var v: Coflux_V1_DaemonJoinKeyRejected?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .daemonJoinKeyRejected(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .daemonJoinKeyRejected(v)
+        }
+      }()
       default: break
       }
     }
@@ -6074,6 +6153,10 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .executorSettings?: try {
       guard case .executorSettings(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 43)
+    }()
+    case .daemonJoinKeyRejected?: try {
+      guard case .daemonJoinKeyRejected(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 44)
     }()
     case nil: break
     }

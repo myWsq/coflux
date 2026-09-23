@@ -38,6 +38,7 @@ import {
   type AccountId,
   type DaemonId,
   type DaemonToServer,
+  type DaemonEnrollRequest,
   type ClientToServer,
   type ServerToDaemonPayload,
   type ServerToClientPayload,
@@ -113,6 +114,11 @@ const MAX_ENROLL_ARCH_BYTES = 32;
 const MAX_LOGIN_NAME_BYTES = 320;
 const MAX_LOGIN_PASSWORD_BYTES = 1024;
 const MAX_CLIENT_TOKEN_BYTES = 512;
+/** Join keys are `cf_join_` + 32 base64url chars; the bound only stops oversized input before hashing. */
+const MAX_JOIN_KEY_BYTES = 128;
+const MAX_JOIN_KEY_REQUEST_ID_BYTES = 128;
+/** One message for every redeem miss (unknown, expired, used, replaced): nothing to learn by probing. */
+const JOIN_KEY_REJECTED = "接入密钥无效、已过期或已被使用";
 const MAX_RATE_LIMIT_KEYS = 10_000;
 const MAX_SNAPSHOT_BACKLOG_MESSAGES = 4_096;
 /** agent 自建终端的初始视口（plan 074）：没有真实 client 视口可依，取一个比 80×24 宽的默认值——
@@ -335,6 +341,25 @@ export interface PendingDeviceInfo {
 /** 设备授权兑现结果：失败文案与 WS deviceAuthorizeInfo{ ok:false } 完全一致。 */
 export type DeviceAuthorizeOutcome = { ok: true } | { ok: false; error: string };
 
+/** The device facts an enroll request carries; shared by link authorization and join keys. */
+interface EnrollDeviceInfo {
+  name: string;
+  host: string;
+  platform: string;
+  workerVersion: string;
+  supervisorVersion: string;
+  arch: string;
+  capabilities: readonly string[];
+}
+
+/** `rejected`: the account claim found nothing (a join key that is not live). `cap`: the account is at
+ * its device cap and nothing was written. `gone`: the device row exists but the connection could not
+ * be registered (socket closed, device revoked meanwhile). */
+type EnrollOutcome = { ok: true; daemonId: DaemonId; accountId: AccountId } | { ok: false; reason: "rejected" | "cap" | "gone" };
+
+/** Thrown inside the enroll transaction to roll it back — a consumed join key included. */
+class DeviceCapReached extends Error {}
+
 /** 端口预览门禁签发结果：成功即浏览器要跳转的回调 URL。 */
 export type ProxyAuthOutcome = { ok: true; url: string } | { ok: false; error: string };
 
@@ -503,6 +528,8 @@ export class Hub {
   private readonly nativeLoginLimiter = new FixedWindowLimiter(config.loginRateLimit, config.authRateWindowMs);
   private authPruneTimer: ReturnType<typeof setInterval> | undefined;
   private readonly enrollLimiter = new FixedWindowLimiter(config.enrollRateLimit, config.authRateWindowMs);
+  /** Join key mints per account (plan 20260924-device-join-keys). */
+  private readonly joinKeyMintLimiter = new FixedWindowLimiter(config.joinKeyMintRateLimit, config.authRateWindowMs);
   private readonly daemonAuthLimiter = new FixedWindowLimiter(config.daemonAuthRateLimit, config.authRateWindowMs);
   private readonly loginLimiter = new FixedWindowLimiter(config.loginRateLimit, config.authRateWindowMs);
   private readonly tokenAuthLimiter = new FixedWindowLimiter(config.tokenAuthRateLimit, config.authRateWindowMs);
@@ -2095,6 +2122,11 @@ export class Hub {
           conn.ws.close(1008, "invalid enroll request");
           return;
         }
+        // A join key enrolls at once or is rejected explicitly; it never falls through to a link.
+        if (value.joinKey !== "") {
+          await this.enrollByJoinKey(conn, value);
+          break;
+        }
         // 同连接理论上只会有一个 pending（daemon 收到 authorizePending 前不会再发一次）；
         // 兜底：若已有旧 pending（例如客户端异常重发），先摘掉旧的再建新的，避免 token 泄漏。
         if (conn.pendingAuthToken) {
@@ -2860,6 +2892,10 @@ export class Hub {
       }
       case "clientRemoveDevice": {
         await this.removeDevice(client, msg.payload.value.daemonId);
+        break;
+      }
+      case "deviceJoinKeyCreate": {
+        await this.createJoinKey(client, msg.payload.value.requestId, msg.payload.value.replaces);
         break;
       }
       case "deviceAuthorizeInfo": {
@@ -3769,7 +3805,8 @@ export class Hub {
     clearTimeout(p.timer);
     if (p.conn.pendingAuthToken === p.token) p.conn.pendingAuthToken = undefined;
 
-    if ((await this.store.countDevices(accountId)) >= config.maxDevicesPerAccount) {
+    const outcome = await this.enrollNewDevice(p.conn, p, async () => accountId);
+    if (!outcome.ok && outcome.reason === "cap") {
       // 设备数超限是致命错误，daemon 侧直接退出（needEnroll:false）。
       this.sendRaw(p.conn.ws, { case: "daemonAuthError", value: { message: "账号设备数已达上限", needEnroll: false } });
       try {
@@ -3779,22 +3816,142 @@ export class Hub {
       }
       return { ok: false, error: "账号设备数已达上限" };
     }
+    if (!outcome.ok) return { ok: false, error: "设备在授权完成前已失效，请重新发起" };
+    log.info("daemon authorized", { daemonId: outcome.daemonId, name: p.name, host: p.host, accountId });
+    return { ok: true };
+  }
 
+  /**
+   * Create a device for an enrolling daemon and register its connection: the one device-creation path,
+   * shared by link authorization and join keys. `claimAccount` runs in the same transaction as the
+   * device-cap check and the insert; for a join key it is the atomic redeem, so a key is never burnt
+   * when the cap rejects the enroll (DeviceCapReached rolls the transaction back).
+   *
+   * If registerDaemonConn then fails (the socket went away), the device row stays behind and a join key
+   * stays spent — the same outcome the link flow has always had; the user removes the stale device.
+   */
+  private async enrollNewDevice(
+    conn: DaemonCtx,
+    info: EnrollDeviceInfo,
+    claimAccount: (tx: Store) => Promise<AccountId | undefined>,
+  ): Promise<EnrollOutcome> {
     const daemonId = randomUUID();
     const deviceToken = genToken("ck_dev");
     const ts = Date.now();
-    await this.store.createDevice({ id: daemonId, accountId, name: p.name, host: p.host, platform: p.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: false });
+    let accountId: AccountId | undefined;
+    try {
+      accountId = await this.store.transaction(async (tx) => {
+        const claimed = await claimAccount(tx);
+        if (!claimed) return undefined;
+        if ((await tx.countDevices(claimed)) >= config.maxDevicesPerAccount) throw new DeviceCapReached();
+        await tx.createDevice({ id: daemonId, accountId: claimed, name: info.name, host: info.host, platform: info.platform, tokenHash: hashToken(deviceToken), createdAt: ts, lastSeenAt: ts, revoked: false });
+        return claimed;
+      });
+    } catch (error) {
+      if (error instanceof DeviceCapReached) return { ok: false, reason: "cap" };
+      throw error;
+    }
+    if (!accountId) return { ok: false, reason: "rejected" };
     const registered = await this.registerDaemonConn(
-      p.conn,
-      { daemonId, name: p.name, host: p.host, platform: p.platform, online: true, workerVersion: p.workerVersion, supervisorVersion: p.supervisorVersion },
+      conn,
+      { daemonId, name: info.name, host: info.host, platform: info.platform, online: true, workerVersion: info.workerVersion, supervisorVersion: info.supervisorVersion },
       accountId,
-      p.arch,
+      info.arch,
       { case: "daemonEnrolled", value: { daemonId, deviceToken, controlProtocolVersion: CONTROL_PROTOCOL_VERSION } },
-      p.capabilities,
+      info.capabilities,
     );
-    if (!registered) return { ok: false, error: "设备在授权完成前已失效，请重新发起" };
-    log.info("daemon authorized", { daemonId, name: p.name, host: p.host, accountId });
-    return { ok: true };
+    return registered ? { ok: true, daemonId, accountId } : { ok: false, reason: "gone" };
+  }
+
+  /**
+   * `daemonEnrollRequest` carrying a join key (plan 20260924-device-join-keys): redeem it and enroll into
+   * the minting account at once, or answer `daemonJoinKeyRejected` and close. Never mints a pending link:
+   * a bad key must make `cofluxd up --key` fail with a reason, not silently fall back to the link flow.
+   * Guessing is bounded by the per-IP enrollLimiter the caller already applied.
+   */
+  private async enrollByJoinKey(conn: DaemonCtx, value: DaemonEnrollRequest): Promise<void> {
+    // Keys never enter pendingAuthorizations; drop a link an earlier keyless request left on this socket.
+    if (conn.pendingAuthToken) {
+      const old = this.pendingAuthorizations.get(conn.pendingAuthToken);
+      if (old) clearTimeout(old.timer);
+      this.pendingAuthorizations.delete(conn.pendingAuthToken);
+      conn.pendingAuthToken = undefined;
+    }
+    const reject = (reason: string) => {
+      this.sendRaw(conn.ws, { case: "daemonJoinKeyRejected", value: { reason } });
+      try {
+        conn.ws.close(1008, "join key rejected");
+      } catch {
+        /* ignore */
+      }
+    };
+    if (!validBoundedText(value.joinKey, MAX_JOIN_KEY_BYTES)) {
+      log.warn("daemon join key has an invalid shape", { remoteAddress: conn.remoteAddress });
+      reject(JOIN_KEY_REJECTED);
+      return;
+    }
+    const keyHash = hashToken(value.joinKey);
+    const info: EnrollDeviceInfo = {
+      name: value.name.trim(),
+      host: value.host.trim(),
+      platform: value.platform.trim(),
+      workerVersion: value.workerVersion,
+      supervisorVersion: value.supervisorVersion,
+      arch: value.arch,
+      capabilities: [...(value.capabilities ?? [])],
+    };
+    const outcome = await this.enrollNewDevice(conn, info, (tx) => tx.consumeJoinKey(keyHash, Date.now()));
+    if (outcome.ok) {
+      log.info("daemon joined with a join key", { daemonId: outcome.daemonId, name: info.name, host: info.host, accountId: outcome.accountId });
+      return;
+    }
+    if (outcome.reason === "rejected") {
+      log.warn("daemon join key rejected", { remoteAddress: conn.remoteAddress });
+      reject(JOIN_KEY_REJECTED);
+      return;
+    }
+    // The key is not consumed when the cap rejects (rolled back); it stays usable once a device is removed.
+    if (outcome.reason === "cap") {
+      reject("账号设备数已达上限");
+      return;
+    }
+    log.warn("daemon joined with a key but went away before registration", { remoteAddress: conn.remoteAddress });
+  }
+
+  /** `deviceJoinKeyCreate`: mint a one-time join key for the signed-in account, revoking `replaces` when
+   * it is this account's own live key. The plaintext goes back only to the requesting connection. */
+  private async createJoinKey(client: ClientConn, requestId: string, replaces: string): Promise<void> {
+    const reply = (value: { key?: string; expiresAt?: number; error?: string }) =>
+      this.sendClient(client, { case: "deviceJoinKeyCreated", value: { requestId, ...value } });
+    if (!validBoundedText(requestId, MAX_JOIN_KEY_REQUEST_ID_BYTES) || (replaces !== "" && !validBoundedText(replaces, MAX_JOIN_KEY_BYTES))) {
+      reply({ error: "生成密钥的请求无效" });
+      return;
+    }
+    const accountId = client.accountId!;
+    if (!this.joinKeyMintLimiter.allow(accountId)) {
+      reply({ error: "生成密钥过于频繁，请稍后再试" });
+      return;
+    }
+    const key = genToken("cf_join");
+    const createdAt = Date.now();
+    const expiresAt = createdAt + config.joinKeyTtlMs;
+    try {
+      await this.store.createJoinKey({
+        keyHash: hashToken(key),
+        accountId,
+        createdAt,
+        expiresAt,
+        replacesHash: replaces ? hashToken(replaces) : undefined,
+        maxLive: config.maxLiveJoinKeys,
+      });
+    } catch (error) {
+      log.warn("join key mint failed", { accountId, error: String(error) });
+      reply({ error: "生成密钥失败" });
+      return;
+    }
+    // Opportunistic cleanup keeps the table bounded without a timer.
+    void this.store.pruneJoinKeys(createdAt).catch((error) => log.warn("join key cleanup failed", { error: String(error) }));
+    reply({ key, expiresAt });
   }
 
   private async removeDevice(client: ClientConn, daemonId: DaemonId): Promise<void> {

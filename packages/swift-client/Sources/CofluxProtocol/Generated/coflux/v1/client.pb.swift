@@ -754,6 +754,14 @@ public struct Coflux_V1_ClientToServer: Sendable {
     set {payload = .deviceTailcatFailed(newValue)}
   }
 
+  public var deviceJoinKeyCreate: Coflux_V1_DeviceJoinKeyCreate {
+    get {
+      if case .deviceJoinKeyCreate(let v)? = payload {return v}
+      return Coflux_V1_DeviceJoinKeyCreate()
+    }
+    set {payload = .deviceJoinKeyCreate(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -788,6 +796,7 @@ public struct Coflux_V1_ClientToServer: Sendable {
     case deviceTailcatClose(Coflux_V1_DeviceTailcatClose)
     case deviceTailcatControl(Coflux_V1_DeviceTailcatControl)
     case deviceTailcatFailed(Coflux_V1_DeviceTailcatFailed)
+    case deviceJoinKeyCreate(Coflux_V1_DeviceJoinKeyCreate)
 
   }
 
@@ -1536,6 +1545,14 @@ public struct Coflux_V1_ServerToClient: Sendable {
     set {payload = .deviceTailcatClosed(newValue)}
   }
 
+  public var deviceJoinKeyCreated: Coflux_V1_DeviceJoinKeyCreated {
+    get {
+      if case .deviceJoinKeyCreated(let v)? = payload {return v}
+      return Coflux_V1_DeviceJoinKeyCreated()
+    }
+    set {payload = .deviceJoinKeyCreated(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -1569,8 +1586,49 @@ public struct Coflux_V1_ServerToClient: Sendable {
     case notificationChanged(Coflux_V1_NotificationChanged)
     case deviceTailcatResult(Coflux_V1_DeviceTailcatResult)
     case deviceTailcatClosed(Coflux_V1_DeviceTailcatClosed)
+    case deviceJoinKeyCreated(Coflux_V1_DeviceJoinKeyCreated)
 
   }
+
+  public init() {}
+}
+
+/// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
+/// A headless machine presents it in DaemonEnrollRequest.join_key and joins the account without a
+/// browser link. Single use, one hour. `replaces` names the key this one supersedes; the server
+/// revokes it immediately when it belongs to the same account. Unrelated to the enrollment key that
+/// plan 034 removed (its names and numbers stay reserved).
+public struct Coflux_V1_DeviceJoinKeyCreate: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var replaces: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Answer to DeviceJoinKeyCreate, only to the requesting connection. A non-empty error means no key
+/// was minted; otherwise `key` is the plaintext (the server keeps only its hash) and `expires_at` is
+/// the expiry in ms epoch.
+public struct Coflux_V1_DeviceJoinKeyCreated: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var key: String = String()
+
+  public var expiresAt: Double = 0
+
+  public var error: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 }
@@ -2488,7 +2546,7 @@ extension Coflux_V1_OAuthAuthorizeDecide: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{4}\u{4}local_unpair_request\0\u{4}\u{2}terminal_create\0\u{4}\u{3}project_set_name\0\u{3}oauth_authorize_info\0\u{3}oauth_authorize_decide\0\u{3}task_read\0\u{3}notification_list\0\u{3}notification_read\0\u{3}device_tailcat_connect\0\u{3}device_tailcat_close\0\u{3}device_tailcat_control\0\u{3}device_tailcat_failed\0\u{b}device_relay_connect\0\u{b}device_p2p_offer\0\u{b}device_p2p_channel_open\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}\u{c}\u{1d}\u{1}\u{c}\u{1e}\u{1}\u{c}\u{1f}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{4}\u{4}local_unpair_request\0\u{4}\u{2}terminal_create\0\u{4}\u{3}project_set_name\0\u{3}oauth_authorize_info\0\u{3}oauth_authorize_decide\0\u{3}task_read\0\u{3}notification_list\0\u{3}notification_read\0\u{3}device_tailcat_connect\0\u{3}device_tailcat_close\0\u{3}device_tailcat_control\0\u{3}device_tailcat_failed\0\u{3}device_join_key_create\0\u{b}device_relay_connect\0\u{b}device_p2p_offer\0\u{b}device_p2p_channel_open\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}\u{c}\u{1d}\u{1}\u{c}\u{1e}\u{1}\u{c}\u{1f}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2899,6 +2957,19 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .deviceTailcatFailed(v)
         }
       }()
+      case 47: try {
+        var v: Coflux_V1_DeviceJoinKeyCreate?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceJoinKeyCreate(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceJoinKeyCreate(v)
+        }
+      }()
       default: break
       }
     }
@@ -3033,6 +3104,10 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .deviceTailcatFailed?: try {
       guard case .deviceTailcatFailed(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 46)
+    }()
+    case .deviceJoinKeyCreate?: try {
+      guard case .deviceJoinKeyCreate(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 47)
     }()
     case nil: break
     }
@@ -3836,7 +3911,7 @@ extension Coflux_V1_TaskReadResult: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToClient"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{4}\u{4}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{4}\u{2}session_agents_updated\0\u{4}\u{3}oauth_authorize_info\0\u{3}oauth_authorize_result\0\u{3}task_read_result\0\u{3}notification_page\0\u{3}notification_changed\0\u{3}device_tailcat_result\0\u{3}device_tailcat_closed\0\u{b}device_relay_grant\0\u{b}device_p2p_answer\0\u{b}device_p2p_channel_result\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{b}device_relay_status\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}\u{c}\u{1d}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{4}\u{4}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{4}\u{2}session_agents_updated\0\u{4}\u{3}oauth_authorize_info\0\u{3}oauth_authorize_result\0\u{3}task_read_result\0\u{3}notification_page\0\u{3}notification_changed\0\u{3}device_tailcat_result\0\u{3}device_tailcat_closed\0\u{3}device_join_key_created\0\u{b}device_relay_grant\0\u{b}device_p2p_answer\0\u{b}device_p2p_channel_result\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{b}device_relay_status\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}\u{c}\u{1d}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4234,6 +4309,19 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .deviceTailcatClosed(v)
         }
       }()
+      case 44: try {
+        var v: Coflux_V1_DeviceJoinKeyCreated?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .deviceJoinKeyCreated(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .deviceJoinKeyCreated(v)
+        }
+      }()
       default: break
       }
     }
@@ -4365,6 +4453,10 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .deviceTailcatClosed(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 43)
     }()
+    case .deviceJoinKeyCreated?: try {
+      guard case .deviceJoinKeyCreated(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 44)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -4372,6 +4464,86 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
   public static func ==(lhs: Coflux_V1_ServerToClient, rhs: Coflux_V1_ServerToClient) -> Bool {
     if lhs.payload != rhs.payload {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceJoinKeyCreate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceJoinKeyCreate"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}replaces\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.replaces) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.replaces.isEmpty {
+      try visitor.visitSingularStringField(value: self.replaces, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceJoinKeyCreate, rhs: Coflux_V1_DeviceJoinKeyCreate) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.replaces != rhs.replaces {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceJoinKeyCreated: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceJoinKeyCreated"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}key\0\u{3}expires_at\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.key) }()
+      case 3: try { try decoder.decodeSingularDoubleField(value: &self.expiresAt) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.key.isEmpty {
+      try visitor.visitSingularStringField(value: self.key, fieldNumber: 2)
+    }
+    if self.expiresAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.expiresAt, fieldNumber: 3)
+    }
+    if !self.error.isEmpty {
+      try visitor.visitSingularStringField(value: self.error, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceJoinKeyCreated, rhs: Coflux_V1_DeviceJoinKeyCreated) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.key != rhs.key {return false}
+    if lhs.expiresAt != rhs.expiresAt {return false}
+    if lhs.error != rhs.error {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

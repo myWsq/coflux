@@ -115,6 +115,12 @@ export const config = {
   /** 设备授权（Tailscale 式）：一次性授权码 TTL（plan 003 定为 10min）、client 侧 device.authorize 的限速阈值 */
   authorizeTtlMs: int("COFLUX_AUTHORIZE_TTL_MS", 10 * 60 * 1000),
   authorizeMaxFailures: int("COFLUX_AUTHORIZE_MAX_FAILURES", 10),
+  /** One-time device join keys (plan 20260924-device-join-keys): lifetime (one hour), how many may be
+   * live per account at once (minting beyond it revokes the oldest), and mints per account per auth
+   * rate window (bounds insert/revoke churn, not only the live count). */
+  joinKeyTtlMs: Math.max(1_000, int("COFLUX_JOIN_KEY_TTL_MS", 60 * 60 * 1000)),
+  maxLiveJoinKeys: Math.max(1, int("COFLUX_MAX_JOIN_KEYS", 10)),
+  joinKeyMintRateLimit: Math.max(1, int("COFLUX_JOIN_KEY_MINT_RATE_LIMIT", 20)),
   /** 匿名登记与口令登录的资源边界：窗口按来源 IP 计数，pending/并发再给全局硬上限。 */
   authRateWindowMs: Math.max(1, int("COFLUX_AUTH_RATE_WINDOW_MS", 60_000)),
   enrollRateLimit: Math.max(1, int("COFLUX_ENROLL_RATE_LIMIT", 12)),

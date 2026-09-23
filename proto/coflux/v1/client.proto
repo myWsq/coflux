@@ -196,6 +196,7 @@ message ClientToServer {
     DeviceTailcatClose device_tailcat_close = 44;
     DeviceTailcatControl device_tailcat_control = 45;
     DeviceTailcatFailed device_tailcat_failed = 46;
+    DeviceJoinKeyCreate device_join_key_create = 47;
   }
 }
 
@@ -372,7 +373,27 @@ message ServerToClient {
     NotificationChanged notification_changed = 41;
     DeviceTailcatResult device_tailcat_result = 42;
     DeviceTailcatClosed device_tailcat_closed = 43;
+    DeviceJoinKeyCreated device_join_key_created = 44;
   }
+}
+
+// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
+// A headless machine presents it in DaemonEnrollRequest.join_key and joins the account without a
+// browser link. Single use, one hour. `replaces` names the key this one supersedes; the server
+// revokes it immediately when it belongs to the same account. Unrelated to the enrollment key that
+// plan 034 removed (its names and numbers stay reserved).
+message DeviceJoinKeyCreate {
+  string request_id = 1;
+  string replaces = 2;
+}
+// Answer to DeviceJoinKeyCreate, only to the requesting connection. A non-empty error means no key
+// was minted; otherwise `key` is the plaintext (the server keeps only its hash) and `expires_at` is
+// the expiry in ms epoch.
+message DeviceJoinKeyCreated {
+  string request_id = 1;
+  string key = 2;
+  double expires_at = 3;
+  string error = 4;
 }
 
 // Bounded newest-first history. Zero before_sequence requests the first page.

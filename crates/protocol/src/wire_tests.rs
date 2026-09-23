@@ -578,14 +578,17 @@ fn auth_error_and_enroll_request_round_trip() {
                 arch: "x86_64".into(),
                 capabilities: Vec::new(),
                 control_protocol_version: crate::CONTROL_PROTOCOL_VERSION,
+                join_key: "cf_join_abc".into(),
             },
         )),
     };
     let back2 = DaemonToServer::decode(req.encode_to_vec().as_slice()).unwrap();
-    assert!(matches!(
-        back2.payload,
-        Some(daemon_to_server::Payload::DaemonEnrollRequest(_))
-    ));
+    match back2.payload {
+        Some(daemon_to_server::Payload::DaemonEnrollRequest(request)) => {
+            assert_eq!(request.join_key, "cf_join_abc")
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    }
 }
 
 /// One-shot cross-device exec (`coflux device exec`) rides the ServerAgentRequest / ServerAgentResult

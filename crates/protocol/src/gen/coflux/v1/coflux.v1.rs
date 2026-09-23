@@ -1826,7 +1826,7 @@ pub struct OAuthAuthorizeDecide {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -1895,6 +1895,8 @@ pub mod client_to_server {
         DeviceTailcatControl(super::DeviceTailcatControl),
         #[prost(message, tag="46")]
         DeviceTailcatFailed(super::DeviceTailcatFailed),
+        #[prost(message, tag="47")]
+        DeviceJoinKeyCreate(super::DeviceJoinKeyCreate),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -2079,7 +2081,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -2146,7 +2148,35 @@ pub mod server_to_client {
         DeviceTailcatResult(super::DeviceTailcatResult),
         #[prost(message, tag="43")]
         DeviceTailcatClosed(super::DeviceTailcatClosed),
+        #[prost(message, tag="44")]
+        DeviceJoinKeyCreated(super::DeviceJoinKeyCreated),
     }
+}
+/// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
+/// A headless machine presents it in DaemonEnrollRequest.join_key and joins the account without a
+/// browser link. Single use, one hour. `replaces` names the key this one supersedes; the server
+/// revokes it immediately when it belongs to the same account. Unrelated to the enrollment key that
+/// plan 034 removed (its names and numbers stay reserved).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceJoinKeyCreate {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub replaces: ::prost::alloc::string::String,
+}
+/// Answer to DeviceJoinKeyCreate, only to the requesting connection. A non-empty error means no key
+/// was minted; otherwise `key` is the plaintext (the server keeps only its hash) and `expires_at` is
+/// the expiry in ms epoch.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceJoinKeyCreated {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(double, tag="3")]
+    pub expires_at: f64,
+    #[prost(string, tag="4")]
+    pub error: ::prost::alloc::string::String,
 }
 /// Bounded newest-first history. Zero before_sequence requests the first page.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2247,6 +2277,12 @@ pub struct DaemonEnrollRequest {
     /// 同 DaemonAuth.capabilities：首次登记的连接不会再走 DaemonAuth，能力必须随登记一起上报。
     #[prost(string, repeated, tag="7")]
     pub capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// One-time join key minted by a signed-in client (plan 20260924-device-join-keys). Non-empty:
+    /// the server consumes it and enrolls the device into the minting account at once (DaemonEnrolled),
+    /// or answers DaemonJoinKeyRejected and closes; it never falls back to an authorization link.
+    /// Empty: the browser-link flow (DaemonAuthorizePending). Old servers ignore the field.
+    #[prost(string, tag="9")]
+    pub join_key: ::prost::alloc::string::String,
 }
 /// 独立于认证消息的 gateway capability announce；保持旧认证构造面完全兼容，worker 可在
 /// authed 后及 gateway identity 变化时重复上报，server 以 daemon 连接身份绑定该 descriptor。
@@ -2856,6 +2892,15 @@ pub struct WorkspaceDefaultBranch {
 }
 // ===== Server → Daemon 载荷 =====
 
+/// Answer to a DaemonEnrollRequest whose join_key was invalid, expired, already used or replaced
+/// (or whose account is at its device cap). The server closes the socket right after. The worker
+/// deletes its key file, records the outcome and keeps running: its next connection enrolls without
+/// a key. Only workers that sent join_key ever receive this.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DaemonJoinKeyRejected {
+    #[prost(string, tag="1")]
+    pub reason: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DaemonEnrolled {
     #[prost(uint32, tag="3")]
@@ -3080,7 +3125,7 @@ pub struct ExecutorSettingsUpdate {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 19, 20, 35, 38, 39, 40, 41, 42, 43")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 19, 20, 35, 38, 39, 40, 41, 42, 43, 44")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -3145,6 +3190,8 @@ pub mod server_to_daemon {
         DeviceTailcatRevoke(super::DeviceTailcatRevoke),
         #[prost(message, tag="43")]
         ExecutorSettings(super::ExecutorSettingsUpdate),
+        #[prost(message, tag="44")]
+        DaemonJoinKeyRejected(super::DaemonJoinKeyRejected),
     }
 }
 /// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD

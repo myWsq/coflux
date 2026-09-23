@@ -503,6 +503,55 @@ export class Store {
     await this.sql`DELETE FROM client_tokens WHERE revoked = true OR (expires_at IS NOT NULL AND expires_at <= ${now})`;
   }
 
+  /* ------------------------ device join keys ------------------------ */
+  /** Mint a one-time device join key (plan 20260924-device-join-keys), in one transaction serialized
+   * per account: revoke `replacesHash` when it is this account's own live key, insert the new hash,
+   * then revoke the oldest live keys beyond `maxLive`. Only hashes are stored. */
+  async createJoinKey(k: { keyHash: string; accountId: AccountId; createdAt: number; expiresAt: number; replacesHash?: string; maxLive: number }): Promise<void> {
+    await this.transaction(async (tx) => {
+      await tx.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`join-keys:${k.accountId}`}, 0))`;
+      if (k.replacesHash) {
+        await tx.sql`
+          UPDATE device_join_keys SET revoked_at = ${k.createdAt}
+          WHERE key_hash = ${k.replacesHash} AND account_id = ${k.accountId} AND used_at IS NULL AND revoked_at IS NULL
+        `;
+      }
+      await tx.sql`
+        INSERT INTO device_join_keys (key_hash, account_id, created_at, expires_at)
+        VALUES (${k.keyHash}, ${k.accountId}, ${k.createdAt}, ${k.expiresAt})
+      `;
+      await tx.sql`
+        UPDATE device_join_keys SET revoked_at = ${k.createdAt}
+        WHERE key_hash IN (
+          SELECT key_hash FROM device_join_keys
+          WHERE account_id = ${k.accountId} AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ${k.createdAt}
+          ORDER BY created_at DESC, key_hash
+          OFFSET ${Math.max(1, k.maxLive)}
+        )
+      `;
+    });
+  }
+  /** Redeem a join key: one conditional UPDATE that matches only a live key (unused, unrevoked, not
+   * expired) and returns its account. Zero rows = rejected. Two daemons racing with the same key
+   * cannot both win. Call inside transaction() when device creation must commit with it. */
+  async consumeJoinKey(keyHash: string, now: number): Promise<AccountId | undefined> {
+    const rows = await this.sql<{ accountId: string }[]>`
+      UPDATE device_join_keys SET used_at = ${now}
+      WHERE key_hash = ${keyHash} AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ${now}
+      RETURNING account_id
+    `;
+    return rows[0]?.accountId;
+  }
+  /** Drop keys that can no longer be redeemed (expired, used or revoked) once they are a day old,
+   * so the table stays bounded. */
+  async pruneJoinKeys(now: number): Promise<void> {
+    const cutoff = now - 24 * 60 * 60 * 1000;
+    await this.sql`
+      DELETE FROM device_join_keys
+      WHERE expires_at < ${cutoff} OR (created_at < ${cutoff} AND (used_at IS NOT NULL OR revoked_at IS NOT NULL))
+    `;
+  }
+
   /* ---------------------------- devices ---------------------------- */
   async createDevice(d: Device): Promise<Device> {
     await this.sql`

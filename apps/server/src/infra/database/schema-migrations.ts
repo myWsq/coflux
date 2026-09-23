@@ -1298,6 +1298,26 @@ const AUTH_IDENTITY_SCHEMA_SQL = `
   ALTER TABLE coflux.users ALTER COLUMN password_hash DROP NOT NULL;
 `;
 
+/** Version 8 (plan 20260924-device-join-keys): one-time device join keys. A signed-in client mints
+ * one; a headless daemon presents it in DaemonEnrollRequest.join_key and joins the minting account
+ * without a browser link. Only the sha256 hash is stored. A key is live while `used_at` and
+ * `revoked_at` are both NULL and `expires_at` is in the future; redeeming it is one conditional UPDATE.
+ * A fresh table name on purpose: the `enrollment_keys` table plan 034 stopped using still exists,
+ * un-dropped, in production. **One-way**: older servers do not know the table and would ignore it,
+ * but the release notes require the server to ship before the cofluxd that sends keys. */
+const DEVICE_JOIN_KEYS_SCHEMA_SQL = `
+CREATE TABLE coflux.device_join_keys (
+  key_hash TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES coflux.accounts(id) ON DELETE CASCADE,
+  created_at DOUBLE PRECISION NOT NULL,
+  expires_at DOUBLE PRECISION NOT NULL,
+  used_at DOUBLE PRECISION,
+  revoked_at DOUBLE PRECISION
+);
+CREATE INDEX idx_device_join_keys_account ON coflux.device_join_keys(account_id, created_at);
+CREATE INDEX idx_device_join_keys_expires ON coflux.device_join_keys(expires_at);
+`;
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -1352,6 +1372,12 @@ const MIGRATIONS: readonly Migration[] = [
     name: "auth_identity",
     definition: AUTH_IDENTITY_SCHEMA_SQL,
     async apply(sql) { await sql.unsafe(AUTH_IDENTITY_SCHEMA_SQL); },
+  },
+  {
+    version: 8,
+    name: "device_join_keys",
+    definition: DEVICE_JOIN_KEYS_SCHEMA_SQL,
+    async apply(sql) { await sql.unsafe(DEVICE_JOIN_KEYS_SCHEMA_SQL); },
   },
 ];
 
