@@ -60,6 +60,12 @@ type TerminalPaperProps = {
   buttonHidden: boolean;
   /** 收起之后把焦点还给终端。 */
   onRestoreFocus: () => void;
+  /**
+   * Whether this paper's terminal is the focused one (plan 20260923-terminal-split-groups). Several
+   * panes can be on screen, each with its paper open; only the focused one answers Esc, or one Esc
+   * would close them all. Defaults to true.
+   */
+  escapeEnabled?: boolean;
 };
 
 export function TerminalPaper(props: TerminalPaperProps) {
@@ -163,8 +169,9 @@ export function TerminalPaper(props: TerminalPaperProps) {
    * Claude Code 的 Esc 会打断它正在进行的回合——比纸面关不掉严重得多。焦点本来就在纸面上，
    * 这里是第二道保险。
    */
+  const escapeEnabled = props.escapeEnabled ?? true;
   useEffect(() => {
-    if (!mounted) return;
+    if (!mounted || !escapeEnabled) return;
     function onKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -173,7 +180,7 @@ export function TerminalPaper(props: TerminalPaperProps) {
     }
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [mounted, requestClose]);
+  }, [mounted, escapeEnabled, requestClose]);
 
   // 纸面自己收下焦点，终端那侧连 keydown 都收不到。
   useEffect(() => {

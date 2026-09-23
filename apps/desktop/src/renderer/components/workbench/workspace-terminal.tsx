@@ -191,6 +191,8 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     updateView("terminal"); // 任何终端 Tab 的激活（点击/键盘/新建）都切回终端视图，与「变更」互斥
     updateActiveTaskId(taskId);
     attach.requestActivation(taskId, forceClaim);
+    // Attach no longer moves keyboard focus; with a single group the active pane is the focused one.
+    attach.focusTask(taskId);
   }
 
   // 分支切换：checkout 在本 worktree 内经 Device exec 完成，成功后同步元数据（workspaceSetBranch）。

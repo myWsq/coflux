@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { useStore } from "zustand";
 import type { Task } from "@coflux/protocol";
 import type { CofluxClient } from "@coflux/client";
@@ -11,19 +12,28 @@ import { isUsableAgentSessionId, transcriptAgentOf } from "@/components/workbenc
  * 终端被搬到别的工作区对面板而言只是 workspaceId prop 变了一下——同一个 xterm 实例、选区、
  * 滚动位置全部保住，不卸载也不重挂。
  *
- * 层与工作区容器的主体占同一个网格单元（见 workbench.tsx 的两行网格），DOM 上排在容器之后，
- * 故整层 pointer-events-none：不可见时不挡住容器里的空态 /「变更」视图 / 横幅，
- * 可见的那个面板自己把 pointer-events 开回来（见 terminal-pane.tsx）。
+ * 层铺满整个终端主区，DOM 上排在工作区容器之后，故整层 pointer-events-none：不挡住分组的标签栏、
+ * 空态与横幅；可见的面板自己把 pointer-events 开回来（见 terminal-pane.tsx）。分组（plan
+ * 20260923-terminal-split-groups）之后可见面板可以有好几个，每个按所在分组主体的矩形摆放；
+ * 标签在分组间移动只换矩形，面板既不卸载也不换 key、不换父节点。
  */
 export function TerminalPanes({
   tasks,
-  visibleTaskId,
+  visibleTaskIds,
+  focusedTaskId,
+  frames,
+  onPaneFocus,
   client,
   attach,
 }: {
   /** 已挂过面板且仍在快照里的 task；顺序稳定，避免 React 搬动已挂载的面板节点。 */
   tasks: readonly Task[];
-  visibleTaskId: string | null;
+  visibleTaskIds: ReadonlySet<string>;
+  /** The focused group's active tab in the selected workspace, when on screen. */
+  focusedTaskId: string | null;
+  /** Rectangle of each visible pane (its group's body). */
+  frames: ReadonlyMap<string, CSSProperties>;
+  onPaneFocus: (taskId: string) => void;
   client: CofluxClient;
   attach: TerminalAttach;
 }) {
@@ -32,7 +42,7 @@ export function TerminalPanes({
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
 
   return (
-    <div className="pointer-events-none relative col-start-1 row-start-2 min-h-0 min-w-0">
+    <div className="pointer-events-none absolute inset-0">
       {tasks.map((task) => {
         const entry = task.sessionId ? sessionAgents[task.sessionId] : undefined;
         // 旧 worker、以及旧离线缓存里恢复出来的条目都没有这个字段——别信 TS 上那个 string。
@@ -44,7 +54,10 @@ export function TerminalPanes({
             taskId={task.id}
             sessionId={task.sessionId ?? null}
             workspaceId={task.workspaceId}
-            active={task.id === visibleTaskId}
+            visible={visibleTaskIds.has(task.id)}
+            focused={task.id === focusedTaskId}
+            frame={frames.get(task.id)}
+            onPointerFocus={onPaneFocus}
             controlState={attach.stateOf(task)}
             registerSessionConsumer={client.registerSessionConsumer}
             sendInput={client.sendInput}

@@ -274,13 +274,14 @@ export function Workbench({ client }: { client: CofluxClient }) {
   activeWorkspaceIdRef.current = activeWorkspaceId;
 
   // 接管状态机（plan 104）：与面板一起提升到本层，按 task id 记账、不认工作区。
-  const attach = useTerminalAttach(client, { tasks, activeWorkspaceId });
+  const attach = useTerminalAttach(client, { tasks });
 
   /** 可见面板 = 选中工作区的终端视图活动 Tab；同步写进状态机的门禁镜像。 */
   function syncVisibleTask() {
     const workspaceId = activeWorkspaceIdRef.current;
     const entry = workspaceId ? activeTabsRef.current[workspaceId] : undefined;
-    attach.setVisibleTaskId(entry?.viewIsTerminal ? entry.taskId : null);
+    const taskId = entry?.viewIsTerminal ? entry.taskId : null;
+    attach.setVisibleTaskIds(new Set(taskId ? [taskId] : []));
   }
   // 渲染期同步一次：切换工作区时门禁必须立刻跟上（同 WorkspaceTerminal 里 ref 镜像 prop 的写法）。
   syncVisibleTask();
@@ -305,6 +306,15 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   const activeTab = activeWorkspaceId ? activeTabs[activeWorkspaceId] : undefined;
   const visibleTaskId = activeTab?.viewIsTerminal ? activeTab.taskId : null;
+
+  // A pane that just came on screen without a user action (workspace switch) is refitted and
+  // attached without forcing; user activations are already queued and make this a no-op.
+  const shownTaskIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (shownTaskIdRef.current === visibleTaskId) return;
+    shownTaskIdRef.current = visibleTaskId;
+    if (visibleTaskId) attach.ensureVisible(visibleTaskId);
+  });
 
   // 终端被搬到别的工作区（plan 104）：用户正看着的终端搬走时选中态跟过去，它在新工作区里
   // 仍是活动 Tab。这件事必须赶在 React 渲染之前定下来——工作区容器的 tasks effect 先于本组件的
@@ -802,7 +812,17 @@ export function Workbench({ client }: { client: CofluxClient }) {
                 </div>
               );
             })}
-            <TerminalPanes tasks={paneTasks} visibleTaskId={visibleTaskId} client={client} attach={attach} />
+            <div className="pointer-events-none relative col-start-1 row-start-2 min-h-0 min-w-0">
+              <TerminalPanes
+                tasks={paneTasks}
+                visibleTaskIds={new Set(visibleTaskId ? [visibleTaskId] : [])}
+                focusedTaskId={visibleTaskId}
+                frames={new Map()}
+                onPaneFocus={() => {}}
+                client={client}
+                attach={attach}
+              />
+            </div>
           </main>
         </Suspense>
       ) : null}

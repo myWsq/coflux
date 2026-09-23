@@ -20,23 +20,33 @@ export type TerminalAttach = {
   /** RUNNING 且尚未（且可能永不）发起 attach 的任务（后台面板 / 隐藏工作区 / 旁观页面）
    * 回落为 "idle"：Tab 图标呈中性终端图标，不是永转的 attaching spinner。 */
   stateOf: (task: Task) => TerminalControlState;
-  /** 激活的状态机部分；Tab 选中态仍归工作区容器自己维护。 */
+  /**
+   * A user action on a specific tab (click, shortcut, drop, palette/notification jump, the banner's
+   * 重新接管): may force-claim a detached task. Tab selection itself lives in the layout
+   * (plan 20260923-terminal-split-groups); this is only the state-machine part.
+   */
   requestActivation: (taskId: string, forceClaim?: boolean) => void;
+  /**
+   * A pane became visible without the user choosing that tab (overlay closed, workspace switch,
+   * a background group's fallback, a restored layout): fit, then attach without forcing. A detached
+   * task stays detached — taking it back needs a user action. Never moves keyboard focus.
+   */
+  ensureVisible: (taskId: string) => void;
+  /** Keyboard focus to a pane (next frame). Only the focused group's active pane is ever passed here. */
+  focusTask: (taskId: string) => void;
   /** 横幅「重新打开」（plan 097）：在同一个 Tab 里起新 shell。 */
   reopenTask: (taskId: string) => void;
-  /** 当前可见的面板 = 选中工作区的终端视图活动 Tab。attach 门禁读的就是它，
-   * 故 Workbench 在渲染期与上报回调里同步写入（对应 Solid 信号的同步读语义）。 */
-  setVisibleTaskId: (taskId: string | null) => void;
+  /** Panes on screen = the active tab of every group of the selected workspace while the changes
+   * overlay is closed. The attach gate reads it, so Workbench writes it synchronously during render
+   * and in every layout commit (the same synchronous-read contract as before, now a set). */
+  setVisibleTaskIds: (taskIds: ReadonlySet<string>) => void;
   handleTerminalReady: (taskId: string, controller: TerminalController) => void;
   handleTerminalDispose: (taskId: string, controller: TerminalController) => void;
   handleSessionReady: (taskId: string, sessionId: string, controller: TerminalController) => void;
   handleOutput: (taskId: string, sessionId: string) => void;
 };
 
-export function useTerminalAttach(
-  client: CofluxClient,
-  { tasks, activeWorkspaceId }: { tasks: readonly Task[]; activeWorkspaceId: string | null },
-): TerminalAttach {
+export function useTerminalAttach(client: CofluxClient, { tasks }: { tasks: readonly Task[] }): TerminalAttach {
   const detachedTaskIds = useStore(client.store, (state) => state.detachedTaskIds);
   const lastError = useStore(client.store, (state) => state.lastError);
 
@@ -52,6 +62,8 @@ export function useTerminalAttach(
   const attachSequenceRef = useRef(0);
   const launchingTaskIdsRef = useRef(new Set<string>()); // 自己发起启动（非 attach）的任务
   const activationRequestsRef = useRef(new Set<string>());
+  // Panes that became visible on their own and still wait for a controller (the pane layer is lazy).
+  const visibleRequestsRef = useRef(new Set<string>());
   const forcedClaimsRef = useRef(new Set<string>());
   // 已退出终端回放（plan 097）的账本：
   // lastSessionRef：task 最近一次已知的 sessionId（退出时中心会清空 task.sessionId，这里留底）；
@@ -66,12 +78,16 @@ export function useTerminalAttach(
   // controlStates 的同步镜像：imperative 函数需要在 setState 后立即读到"当下"值
   // （对应 Solid 信号的同步读语义），而 React state 变量本身要等下一次渲染才更新，故用 ref 双轨。
   const controlStatesRef = useRef<Record<string, TerminalControlState>>({});
-  // 可见面板的同步镜像：可见性由 Workbench 判定（选中工作区 + 终端视图 + 活动 Tab），
+  // 可见面板集合的同步镜像：可见性由 Workbench 判定（选中工作区 + 每个分组的活动 Tab + 变更覆盖层关着），
   // 这里的回调由子组件 effect 在任意渲染代触发，直接闭包捕获会读到过期值（landmine），一律经它读。
-  const visibleTaskIdRef = useRef<string | null>(null);
+  const visibleTaskIdsRef = useRef<ReadonlySet<string>>(new Set());
 
-  function setVisibleTaskId(taskId: string | null) {
-    visibleTaskIdRef.current = taskId;
+  function setVisibleTaskIds(taskIds: ReadonlySet<string>) {
+    visibleTaskIdsRef.current = taskIds;
+  }
+
+  function isVisible(taskId: string): boolean {
+    return visibleTaskIdsRef.current.has(taskId);
   }
 
   // untrack(tasks) 的对应物：直接读 store 当下状态，不经由本次渲染闭包捕获的 tasks（可能已过期）。
@@ -92,19 +108,19 @@ export function useTerminalAttach(
     attachTimersRef.current.delete(taskId);
   }
 
-  // 拿到控制权后必须 fit + focus + ptyResize：把本端尺寸推给 PTY，
-  // 否则远端 PTY 保持上一个 holder 的尺寸导致排版错乱。
+  // 拿到控制权后必须 fit + ptyResize：把本端尺寸推给 PTY，否则远端 PTY 保持上一个 holder 的尺寸导致排版错乱。
+  // Never focus here: with several panes on screen an attach completing in a background group would
+  // steal the caret from the group the user is typing in.
   function markOwned(taskId: string, sessionId: string) {
     const task = currentTask(taskId);
     if (!task || task.status !== TaskStatus.RUNNING || task.sessionId !== sessionId) return;
     if (controlStatesRef.current[taskId] === "detached") return;
     clearAttachTimer(taskId);
     updateControlState(taskId, "owned");
-    if (visibleTaskIdRef.current === taskId) {
+    if (isVisible(taskId)) {
       const controller = controllersRef.current.get(taskId);
       if (!controller) return;
       controller.fit();
-      controller.focus();
       const { cols, rows } = controller.dimensions();
       client.resizeSession(sessionId, cols, rows);
     }
@@ -132,25 +148,34 @@ export function useTerminalAttach(
     attachTimersRef.current.set(task.id, timer);
   }
 
-  function performActivation(taskId: string) {
+  /**
+   * `user`: a user action on this tab — a detached task is force-claimed back.
+   * `visible`: the pane merely became visible — never forces, and leaves a detached task alone
+   * (two clients showing the same grid would otherwise steal every pane back on every switch).
+   * Neither moves keyboard focus.
+   */
+  function performActivation(taskId: string, mode: "user" | "visible") {
     const task = currentTask(taskId);
     const controller = controllersRef.current.get(taskId);
     if (!task || !controller) return;
 
     controller.fit();
-    controller.focus();
     if (task.status === TaskStatus.RUNNING && task.sessionId) {
       if (sessionReadyRef.current.get(taskId) !== task.sessionId) return;
-      activationRequestsRef.current.delete(taskId);
-      const force = forcedClaimsRef.current.delete(taskId) || controlStatesRef.current[taskId] === "detached";
-      // 不可见的面板一律不申请控制权：隐藏工作区里"活动 Tab 从列表消失后自动选中另一个 Tab"
-      // 也会走到这里——终端被搬去别的工作区（plan 104）正是这条路，绝不能顺手抢兄弟 Tab 的
-      // 控制权；旁观端打开页面同理，否则每个隐藏工作区的第一个任务都会被抢一遍。
-      // 点击 Tab / 快捷键触发的激活只可能发生在可见面板上，不受影响。
-      if (visibleTaskIdRef.current === taskId) beginAttach(task, controller, force);
+      if (mode === "user") {
+        activationRequestsRef.current.delete(taskId);
+        const force = forcedClaimsRef.current.delete(taskId) || controlStatesRef.current[taskId] === "detached";
+        // 不可见的面板一律不申请控制权：隐藏工作区里"活动 Tab 从列表消失后自动选中另一个 Tab"
+        // 也会走到这里——终端被搬去别的工作区（plan 104）正是这条路，绝不能顺手抢兄弟 Tab 的
+        // 控制权；旁观端打开页面同理，否则每个隐藏工作区的第一个任务都会被抢一遍。
+        if (isVisible(taskId)) beginAttach(task, controller, force);
+        return;
+      }
+      if (isVisible(taskId) && controlStatesRef.current[taskId] !== "detached") beginAttach(task, controller, false);
       return;
     }
 
+    if (mode === "visible" && activationRequestsRef.current.has(taskId)) return;
     activationRequestsRef.current.delete(taskId);
     forcedClaimsRef.current.delete(taskId);
     if (launchingTaskIdsRef.current.has(taskId)) return;
@@ -215,13 +240,36 @@ export function useTerminalAttach(
 
   function requestActivation(taskId: string, forceClaim = false) {
     activationRequestsRef.current.add(taskId);
+    visibleRequestsRef.current.delete(taskId);
     if (forceClaim) forcedClaimsRef.current.add(taskId);
-    requestAnimationFrame(() => performActivation(taskId));
+    requestAnimationFrame(() => performActivation(taskId, "user"));
+  }
+
+  function ensureVisible(taskId: string) {
+    // A user activation for this tab is already queued and will do everything this would, with the
+    // right force flag; attaching here as well would send a second, non-forced attach after it.
+    if (activationRequestsRef.current.has(taskId)) return;
+    if (!controllersRef.current.has(taskId)) {
+      visibleRequestsRef.current.add(taskId);
+      return;
+    }
+    requestAnimationFrame(() => {
+      if (!isVisible(taskId) || activationRequestsRef.current.has(taskId)) return;
+      performActivation(taskId, "visible");
+    });
+  }
+
+  function focusTask(taskId: string) {
+    requestAnimationFrame(() => controllersRef.current.get(taskId)?.focus());
   }
 
   function handleTerminalReady(taskId: string, controller: TerminalController) {
     controllersRef.current.set(taskId, controller);
-    if (activationRequestsRef.current.has(taskId)) performActivation(taskId);
+    if (activationRequestsRef.current.has(taskId)) {
+      performActivation(taskId, "user");
+      return;
+    }
+    if (visibleRequestsRef.current.delete(taskId) && isVisible(taskId)) performActivation(taskId, "visible");
   }
 
   function handleTerminalDispose(taskId: string, controller: TerminalController) {
@@ -239,12 +287,12 @@ export function useTerminalAttach(
 
     if (launchingTaskIdsRef.current.delete(taskId)) {
       beginAttach(task, controller, false);
-    } else if (visibleTaskIdRef.current === taskId) {
+    } else if (isVisible(taskId)) {
       // 只有用户正看着这个面板（工作区可见且它是活动 Tab）时才主动申请控制权；
       // 后台面板 / 隐藏工作区 / 旁观页面里的面板不发 taskStart，不抢占对端 holder。
       beginAttach(task, controller, false);
     }
-    if (activationRequestsRef.current.has(taskId)) performActivation(taskId);
+    if (activationRequestsRef.current.has(taskId)) performActivation(taskId, "user");
   }
 
   function handleOutput(taskId: string, sessionId: string) {
@@ -266,6 +314,7 @@ export function useTerminalAttach(
         sessionReadyRef.current.delete(taskId);
         launchingTaskIdsRef.current.delete(taskId);
         activationRequestsRef.current.delete(taskId);
+        visibleRequestsRef.current.delete(taskId);
         forcedClaimsRef.current.delete(taskId);
         clearAttachTimer(taskId);
       }
@@ -295,7 +344,7 @@ export function useTerminalAttach(
         if (!controller) continue;
         const lastSession = lastSessionRef.current.get(task.id);
         const sawLive = Boolean(lastSession && liveOutputRef.current.get(task.id) === lastSession);
-        if (sawLive || visibleTaskIdRef.current === task.id) showExitedHistory(task, controller);
+        if (sawLive || isVisible(task.id)) showExitedHistory(task, controller);
       }
     }
     // 只跟踪 tasks（对应 Solid `on(tasks, ...)` 的显式单一依赖），
@@ -325,32 +374,9 @@ export function useTerminalAttach(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastError]);
 
-  // 工作区从隐藏切回显示：重新 fit（隐藏期间尺寸为 0，ResizeObserver 的 fit 被 no-op 掉）并聚焦；
-  // 可见面板若隐藏期间从未 attach，在此补一次 beginAttach。transport 重连由 DeviceRouter
-  // 自己迁移，不再借中心 snapshotRevision 重抢 holder。detached 显式排除：必须用户点击。
-  useEffect(() => {
-    if (!activeWorkspaceId) return;
-    const frame = requestAnimationFrame(() => {
-      const taskId = visibleTaskIdRef.current;
-      if (!taskId) return;
-      const controller = controllersRef.current.get(taskId);
-      controller?.fit();
-      controller?.focus();
-      const task = currentTask(taskId);
-      if (
-        task &&
-        controller &&
-        task.status === TaskStatus.RUNNING &&
-        task.sessionId &&
-        sessionReadyRef.current.get(taskId) === task.sessionId &&
-        controlStatesRef.current[taskId] !== "detached"
-      ) {
-        beginAttach(task, controller, false);
-      }
-    });
-    return () => cancelAnimationFrame(frame);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeWorkspaceId]);
+  // The old "workspace became visible → refit and attach" effect is gone: Workbench now diffs the
+  // visible set on every commit and calls ensureVisible for each pane that just appeared, which
+  // covers workspace switches, the changes overlay closing and background-group fallbacks alike.
 
   useEffect(() => {
     const timers = attachTimersRef.current;
@@ -364,8 +390,10 @@ export function useTerminalAttach(
     controlStates,
     stateOf,
     requestActivation,
+    ensureVisible,
+    focusTask,
     reopenTask,
-    setVisibleTaskId,
+    setVisibleTaskIds,
     handleTerminalReady,
     handleTerminalDispose,
     handleSessionReady,

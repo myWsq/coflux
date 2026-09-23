@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -45,7 +45,20 @@ type TerminalPaneProps = {
   taskId: string;
   sessionId: string | null;
   workspaceId: string;
-  active: boolean;
+  /**
+   * On screen (the active tab of a group of the selected workspace, changes overlay closed). Drives
+   * rendering, pointer events, fit, resize reporting, input, image paste and file drop.
+   */
+  visible: boolean;
+  /**
+   * The focused group's active pane — at most one. Drives keyboard focus, the OSC 52 clipboard write
+   * (the clipboard is global) and the window-level ⌘F / ⌘↑ / ⌘↓ handler.
+   */
+  focused: boolean;
+  /** Where the pane sits while visible (the group body's rectangle, percentages). Absent = fill the layer. */
+  frame?: CSSProperties;
+  /** A pointer went down anywhere in the pane: its group becomes the focused one. */
+  onPointerFocus?: (taskId: string) => void;
   controlState: TerminalControlState;
   registerSessionConsumer: (sessionId: string, consumer: (data: Uint8Array, replace: boolean) => void) => () => void;
   sendInput: (sessionId: string, data: string) => void;
@@ -185,7 +198,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
   // 这里反过来是"始终读最新"而非"读一次"，用同样的 ref 手段解决）。
   const liveRef = useRef({
-    active: props.active,
+    visible: props.visible,
+    focused: props.focused,
     controlState: props.controlState,
     sessionId: props.sessionId,
     workspaceId: props.workspaceId,
@@ -196,7 +210,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   });
   useEffect(() => {
     liveRef.current = {
-      active: props.active,
+      visible: props.visible,
+      focused: props.focused,
       controlState: props.controlState,
       sessionId: props.sessionId,
       workspaceId: props.workspaceId,
@@ -513,7 +528,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       }
     };
     const fit = () => {
-      if (!liveRef.current.active || !host.isConnected) return;
+      if (!liveRef.current.visible || !host.isConnected) return;
       // 工作区保活模式下被 display:none 隐藏时尺寸为 0：FitAddon 会把终端钳到 2×1
       // 并经 onResize 把 2×1 传给远程 PTY（远端 TUI 按 2 列重排，切回闪残影、污染镜像）。
       // 0 尺寸一律不 fit，切回显示后 WorkspaceTerminal 的 rAF fit 会用真实尺寸补上。
@@ -536,7 +551,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       pendingFit = window.setTimeout(() => {
         pendingFit = undefined;
         // 防抖落地时面板可能已经被隐藏（尺寸归零）：那条「不可见不 fit」的性质要一直成立。
-        if (!liveRef.current.active || !host.isConnected) return;
+        if (!liveRef.current.visible || !host.isConnected) return;
         const size = host.getBoundingClientRect();
         if (size.width === 0 || size.height === 0) return;
         applyFit();
@@ -568,25 +583,25 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     // 输入/resize 的门控见 terminal-control-state.ts（输入含 attaching，尺寸只在 owned）。
     terminal.onData((data) => {
-      const { active, controlState, sessionId, sendInput } = liveRef.current;
-      if (active && canSendTerminalInput(controlState) && sessionId) sendInput(sessionId, data);
+      const { visible, controlState, sessionId, sendInput } = liveRef.current;
+      if (visible && canSendTerminalInput(controlState) && sessionId) sendInput(sessionId, data);
     });
     terminal.onResize(({ cols, rows }) => {
-      const { active, controlState, sessionId, sendResize } = liveRef.current;
-      if (active && canSendTerminalResize(controlState) && sessionId) sendResize(sessionId, cols, rows);
+      const { visible, controlState, sessionId, sendResize } = liveRef.current;
+      if (visible && canSendTerminalResize(controlState) && sessionId) sendResize(sessionId, cols, rows);
     });
 
     // OSC 52：远端程序（claude / tmux / vim…）把一段文本塞进本机剪贴板。xterm 6.0.0 自己没有
     // 52 号 handler，载荷怎么解、什么时候写、查询怎么答都由这里决定（见 osc52-clipboard.ts）。
-    // 门控与 onData 同一条（active && owned）：好几个面板同时在出字，剪贴板却是全局唯一的，
-    // 后台 tab 或被别端接管的面板没资格改用户正在别处用的剪贴板。写入走主进程 Electron clipboard
+    // 门控是 focused && owned：好几个面板同时在出字（分组之后甚至同时在屏幕上），剪贴板却是全局唯一的，
+    // 后台 tab、非焦点分组或被别端接管的面板没资格改用户正在别处用的剪贴板。写入走主进程 Electron clipboard
     // ——OSC 52 背后没有用户手势，navigator.clipboard 在窗口失焦时必被拒。
     // 无论写入、丢弃还是查询都返回 true：查询绝不回一个字节，也不让序列落到别的 handler 手里。
     terminal.parser.registerOscHandler(52, (data) => {
       const parsed = parseOsc52Payload(data);
       if (parsed.kind === "write") {
-        const { active, controlState } = liveRef.current;
-        if (active && controlState === "owned") desktop.writeClipboard(parsed.text);
+        const { focused, controlState } = liveRef.current;
+        if (focused && controlState === "owned") desktop.writeClipboard(parsed.text);
       }
       return true;
     });
@@ -602,8 +617,8 @@ export function TerminalPane(props: TerminalPaneProps) {
       event.preventDefault();
       event.stopPropagation();
 
-      const { active, controlState, sessionId, workspaceId, sendFsWrite } = liveRef.current;
-      if (!(active && controlState === "owned" && sessionId)) {
+      const { visible, controlState, sessionId, workspaceId, sendFsWrite } = liveRef.current;
+      if (!(visible && controlState === "owned" && sessionId)) {
         controllerRef.current?.writeSystem("未持有控制权，无法粘贴图片", "warning");
         return;
       }
@@ -656,8 +671,8 @@ export function TerminalPane(props: TerminalPaneProps) {
       const files = Array.from(event.dataTransfer?.items ?? []).map(fileFromDragItem).filter((file): file is File => file !== null);
       if (files.length === 0) return; // 文件夹不递归展开，也不打扰用户。
 
-      const { active, controlState, sessionId, workspaceId, sendFsWrite, showToast } = liveRef.current;
-      if (!(active && controlState === "owned" && sessionId)) {
+      const { visible, controlState, sessionId, workspaceId, sendFsWrite, showToast } = liveRef.current;
+      if (!(visible && controlState === "owned" && sessionId)) {
         showToast({ body: "未持有控制权，无法上传文件", type: "error" });
         return;
       }
@@ -699,7 +714,7 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     const observer = new ResizeObserver(() => fit());
     observer.observe(host);
-    if (props.active) requestAnimationFrame(() => fit());
+    if (props.visible) requestAnimationFrame(() => fit());
 
     // devicePixelRatio 变化（浏览器缩放、拖跨不同缩放比的显示器）后 xterm 按新 dpr
     // 重新取整 cell 尺寸，host CSS 尺寸不变、ResizeObserver 不会触发，需主动补 fit。
@@ -757,14 +772,22 @@ export function TerminalPane(props: TerminalPaneProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.sessionId]);
 
+  // Becoming visible refits (a hidden pane's fit is a no-op, so the size is stale); becoming the
+  // focused pane also takes the keyboard. Only one pane is ever focused, so only one takes it.
   useEffect(() => {
-    if (!props.active) return;
+    if (!props.visible) return;
+    const frame = requestAnimationFrame(() => controllerRef.current?.fit());
+    return () => cancelAnimationFrame(frame);
+  }, [props.visible]);
+
+  useEffect(() => {
+    if (!props.focused) return;
     const frame = requestAnimationFrame(() => {
       controllerRef.current?.fit();
       controllerRef.current?.focus();
     });
     return () => cancelAnimationFrame(frame);
-  }, [props.active]);
+  }, [props.focused]);
 
   // 查找与右键菜单的动作：都在组件体里定义（由 React 事件触发，闭包捕获的就是当下的 props，
   // 不像挂载期注册的那批必须经 liveRef）。
@@ -811,12 +834,13 @@ export function TerminalPane(props: TerminalPaneProps) {
     void navigator.clipboard.writeText(text).catch(() => showToast({ body: "复制失败", type: "error" }));
   }
 
-  // ⌘F / ⌘↑ / ⌘↓：挂在 window capture 阶段，只有可见面板响应。use-global-shortcuts 的纯 ⌘ 前缀里
+  // ⌘F / ⌘↑ / ⌘↓：挂在 window capture 阶段，只有焦点面板响应（分组之后可见面板可以有好几个，
+  // 按可见门控会让一次按键在每个可见面板里各触发一次）。use-global-shortcuts 的纯 ⌘ 前缀里
   // 没有这几个键位，不会互相抢；这里要 preventDefault，否则组合键会被编码下发给远端 shell。
   // 纸面展开时整个终端被盖住：⌘F 查找与命令导航此刻都作用在一个看不见的终端上，
   // 而查找框还会和纸面的按钮抢同一个角，所以整条一并让开。
   useEffect(() => {
-    if (!props.active || paperOpen) return;
+    if (!props.focused || paperOpen) return;
     function onKeyDown(event: KeyboardEvent) {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
       if (event.code === "KeyF") {
@@ -834,12 +858,12 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [props.active, paperOpen]);
+  }, [props.focused, paperOpen]);
 
   // 切到别的 tab 就收起纸面：面板只是 display:hidden，留着它下次回来会是一份过期快照。
   useEffect(() => {
-    if (!props.active) setPaperOpen(false);
-  }, [props.active]);
+    if (!props.visible) setPaperOpen(false);
+  }, [props.visible]);
 
   // 打开查找框时聚焦并全选输入内容（再按一次 ⌘F 是「换个词重搜」而不是追加）。
   useEffect(() => {
@@ -886,9 +910,18 @@ export function TerminalPane(props: TerminalPaneProps) {
   // 触发区塌了菜单就会弹错地方。
   // 搜索框/链接提示/拖拽遮罩都是 absolute，不是 grid item，定位仍相对这个容器，行为不变。
   return (
+    // 位置（plan 20260923-terminal-split-groups）：可见时按所在分组主体的矩形摆放（百分比，浏览器同一帧布局，
+    // 不靠 JS 量尺寸——量出来的中间尺寸会被当成真尺寸推给 PTY）；没给矩形就铺满面板层。
+    // 面板按 task id 常驻，换分组只换这里的矩形，xterm 实例、选区、滚动位置都不动。
     <div
-      className={props.active ? "pointer-events-auto absolute inset-0 grid grid-cols-1 grid-rows-1" : "absolute inset-0 hidden"}
-      aria-hidden={!props.active}
+      className={
+        props.visible
+          ? `pointer-events-auto absolute grid grid-cols-1 grid-rows-1${props.frame ? "" : " inset-0"}`
+          : "absolute inset-0 hidden"
+      }
+      style={props.visible ? props.frame : undefined}
+      aria-hidden={!props.visible}
+      onPointerDownCapture={() => props.onPointerFocus?.(props.taskId)}
     >
       {/* macOS 上 Electron 不提供默认右键菜单，不接管的话右键完全没反应。
           不传 ref：布局已不靠它。（顺带记下已核实的行为：ContextMenu 把 ref 经 useMergedRefs 合到
@@ -964,6 +997,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           open={paperOpen}
           onOpenChange={setPaperOpen}
           buttonHidden={searchOpen}
+          escapeEnabled={props.focused}
           onRestoreFocus={() => terminalRef.current?.focus()}
         />
       ) : null}
