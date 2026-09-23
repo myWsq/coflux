@@ -19,5 +19,11 @@ export const DAEMON_ONBOARDING_DISMISSED_KEY = `coflux_daemon_onboarding_dismiss
  * another server, and an unscoped key would make the palette offer places that do not exist.
  */
 export const COMMAND_PALETTE_RECENT_KEY = `coflux_recent_places:${SERVER_URL}`;
+/**
+ * Terminal editor-group layouts per workspace (plan 20260923-terminal-split-groups): groups, tab
+ * order, active tab per group, split ratios, focused group. Local to this machine and scoped by
+ * server address like the palette's recent places — workspace and task ids mean nothing elsewhere.
+ */
+export const TERMINAL_LAYOUTS_KEY = `coflux_terminal_layouts:${SERVER_URL}`;
 
 export type { AuthCredential } from "@coflux/client";

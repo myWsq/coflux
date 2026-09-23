@@ -3,8 +3,6 @@ import { test } from "node:test";
 
 import {
   parseStoredSelection,
-  resolveActiveTaskId,
-  resolveActiveTaskIdAfterPendingDrop,
   resolveSelectionAfterTaskMove,
   resolveWorkbenchSelection,
   serializeSelection,
@@ -77,28 +75,6 @@ test("失效选择优先回退到最早项目的 main workspace，再回退任�
   );
 });
 
-test("关闭 active Tab 回退第一项，关闭后台 Tab 保留当前选择", () => {
-  assert.equal(resolveActiveTaskId("task-2", ["task-1", "task-3"], null), "task-1");
-  assert.equal(resolveActiveTaskId("task-2", ["task-1", "task-2"], null), "task-2");
-  assert.equal(resolveActiveTaskId("pending-1", ["task-1"], "pending-1"), "pending-1");
-  assert.equal(resolveActiveTaskId("removed", [], null), null);
-});
-
-test("pending Tab 失败只在仍 active 时回退，不抢用户后来选择的 Tab", () => {
-  assert.equal(resolveActiveTaskIdAfterPendingDrop("pending-1", "pending-1", ["task-1", "task-2"]), "task-1");
-  assert.equal(resolveActiveTaskIdAfterPendingDrop("task-2", "pending-1", ["task-1", "task-2"]), "task-2");
-  assert.equal(resolveActiveTaskIdAfterPendingDrop("pending-1", "pending-1", []), null);
-});
-
-test("被搬进来的终端继续当活动 Tab，还没进快照时不影响原有回退", () => {
-  // 搬进来的 task 优先于当前选择，也优先于首项回退
-  assert.equal(resolveActiveTaskId("task-1", ["task-1", "moved"], null, "moved"), "moved");
-  assert.equal(resolveActiveTaskId(null, ["task-1", "moved"], null, "moved"), "moved");
-  // 跟随目标还没出现在本工作区的快照里：按原规则走
-  assert.equal(resolveActiveTaskId("task-1", ["task-1"], null, "moved"), "task-1");
-  assert.equal(resolveActiveTaskId(null, ["task-1"], null, "moved"), "task-1");
-});
-
 test("活动 Tab 被搬去别的工作区时选中态跟过去", () => {
   assert.deepEqual(
     resolveSelectionAfterTaskMove({
@@ -146,5 +122,4 @@ test("活动 Tab 是被删而非被搬时不跟随，仍走原来的活动 Tab �
     }),
     null,
   );
-  assert.equal(resolveActiveTaskId("task-1", ["task-2"], null, null), "task-2");
 });
