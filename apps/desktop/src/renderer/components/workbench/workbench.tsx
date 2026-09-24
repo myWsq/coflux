@@ -33,6 +33,11 @@ import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
 import { useTerminalAttach } from "@/components/workbench/terminal-attach";
 import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon";
 import { useExecutorBridge } from "@/components/workbench/use-executor-bridge";
+import { BrowserViews, type BrowserViewEntry } from "@/components/workbench/browser-view";
+import { createBrowserRuntime } from "@/components/workbench/browser-runtime";
+import { createBrowserTabId, readBrowserTabRecords, restoreBrowserTabs, type BrowserTabStore } from "@/components/workbench/browser-tabs";
+import type { BrowserLibraryStore } from "@/components/workbench/browser-library";
+import { localPortUrl, normalizeIncomingUrl } from "@/components/workbench/browser-address";
 import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import { useSidebarWidth } from "@/components/workbench/use-sidebar-width";
@@ -53,9 +58,13 @@ import {
   focusedTabId,
   groupBodyStyle,
   groupOfTab,
+  isBrowserTabId,
+  isTaskTabId,
   layoutGeometry,
+  openTabBeside,
   planLayoutPersist,
   readStoredLayouts,
+  removeTab,
   revealTab,
   writeStoredLayouts,
   type LayoutSide,
@@ -72,7 +81,15 @@ import {
   taskCloseNeedsConfirmation,
   type WorkbenchSelection,
 } from "@/components/workbench/workbench-state";
-import { COMMAND_PALETTE_RECENT_KEY, DAEMON_ONBOARDING_DISMISSED_KEY, TERMINAL_LAYOUTS_KEY, WORKSPACE_KEY, desktop } from "@/config";
+import {
+  BROWSER_LIBRARY_KEY,
+  BROWSER_TABS_KEY,
+  COMMAND_PALETTE_RECENT_KEY,
+  DAEMON_ONBOARDING_DISMISSED_KEY,
+  TERMINAL_LAYOUTS_KEY,
+  WORKSPACE_KEY,
+  desktop,
+} from "@/config";
 import type { DesktopBridge } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
@@ -132,6 +149,13 @@ const RECENT_PLACES_STORE: RecentPlacesStore = { storage: localStorage, key: COM
  * every read and write inside it is guarded.
  */
 const TERMINAL_LAYOUT_STORE: TerminalLayoutStore = { storage: localStorage, key: TERMINAL_LAYOUTS_KEY };
+
+/**
+ * Built-in browser tabs (plan 20260924-desktop-browser-tab): each tab's record (workspace, URL,
+ * title), next to the layouts and scoped the same way; and the global bookmarks / history library.
+ */
+const BROWSER_TAB_STORE: BrowserTabStore = { storage: localStorage, key: BROWSER_TABS_KEY };
+const BROWSER_LIBRARY_STORE: BrowserLibraryStore = { storage: localStorage, key: BROWSER_LIBRARY_KEY };
 
 /** Nothing on screen: no workspace selected, or its changes overlay covers the groups. */
 const NO_SCREEN: { visible: ReadonlySet<string>; focused: string | null } = { visible: new Set(), focused: null };
@@ -286,8 +310,14 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // all read "now" values before React re-renders (the reason the old activeTabs had a ref mirror
   // too). `layoutVersion` only asks for a render. Stored layouts are read once and left
   // unreconciled — before the first snapshot there is nothing to reconcile them against.
-  const [initialLayouts] = useState(() => readStoredLayouts(TERMINAL_LAYOUT_STORE));
-  const layoutsRef = useRef<Record<string, TerminalLayout>>(initialLayouts);
+  // Browser tabs come back with the layouts: a browser id without a stored record is dropped, and so
+  // is a record no layout references (plan 20260924-desktop-browser-tab).
+  const [initialState] = useState(() => restoreBrowserTabs(readStoredLayouts(TERMINAL_LAYOUT_STORE), readBrowserTabRecords(BROWSER_TAB_STORE)));
+  const layoutsRef = useRef<Record<string, TerminalLayout>>(initialState.layouts);
+  // Built-in browser tabs' runtime: what each tab shows, the library, prepared partitions, guests.
+  const [browser] = useState(() =>
+    createBrowserRuntime({ desktop, tabStore: BROWSER_TAB_STORE, libraryStore: BROWSER_LIBRARY_STORE, initialRecords: initialState.records }),
+  );
   const [, setLayoutVersion] = useState(0);
   const lastWrittenLayoutsRef = useRef<string | null>(null);
   // Debounced persisting (see flushLayoutPersist): the layouts object last looked at, the pending
@@ -373,9 +403,28 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const workspaceId = activeWorkspaceIdRef.current;
     if (!workspaceId || changesOpenRef.current[workspaceId]) return NO_SCREEN;
     const layout = layoutOf(workspaceId);
-    const visible = new Set(activeTabIds(layout).filter((id) => !id.startsWith(PENDING_TAB_PREFIX)));
+    // Terminals only: the pending tab and browser tabs never reach the attach machine.
+    const visible = new Set(activeTabIds(layout).filter(isTaskTabId));
     const focused = focusedTabId(layout);
     return { visible, focused: focused && visible.has(focused) ? focused : null };
+  }
+
+  /** The focused group's active tab of the selected workspace when it is a browser tab on screen. */
+  function focusedBrowserTabId(): string | null {
+    const workspaceId = activeWorkspaceIdRef.current;
+    if (!workspaceId || changesOpenRef.current[workspaceId]) return null;
+    const focused = focusedTabId(layoutOf(workspaceId));
+    return focused && isBrowserTabId(focused) ? focused : null;
+  }
+
+  /**
+   * Keyboard focus into a tab: a terminal through the attach machine, a browser tab through its view
+   * (the page, or its address bar when there is no page). `attach.focusTask` is a no-op for ids that
+   * are not tasks, which is why the browser case needs its own path.
+   */
+  function focusTab(tabId: string) {
+    if (isBrowserTabId(tabId)) browser.focus(tabId);
+    else if (isTaskTabId(tabId)) attach.focusTask(tabId);
   }
 
   /** Writes the visible set into the attach gate's mirror: once during render, again on every layout or overlay commit. */
@@ -415,8 +464,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
     // holds focus, and the pane's own focus-on-`focused` yields to any element holding focus.
     if (open && document.activeElement instanceof HTMLElement) document.activeElement.blur();
     if (!open) {
-      const focused = currentScreen().focused;
-      if (focused) attach.focusTask(focused);
+      const focused = currentScreen().focused ?? focusedBrowserTabId();
+      if (focused) focusTab(focused);
     }
   }
   const setWorkspaceChangesOpenRef = useRef(setWorkspaceChangesOpen);
@@ -432,6 +481,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
     setWorkspaceChangesOpen(workspaceId, false);
     commitLayout(workspaceId, revealTab(layoutOf(workspaceId), taskId));
     if (taskId.startsWith(PENDING_TAB_PREFIX)) return;
+    if (isBrowserTabId(taskId)) {
+      browser.focus(taskId);
+      return;
+    }
     const task = client.store.getState().tasks.find((item) => item.id === taskId);
     if (!task) return;
     attach.requestActivation(taskId, attach.stateOf(task) === "detached");
@@ -472,8 +525,61 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const next = change(layoutOf(workspaceId));
     commitLayout(workspaceId, next);
     const taskId = focusedTabId(next);
-    if (taskId && !taskId.startsWith(PENDING_TAB_PREFIX)) attach.focusTask(taskId);
+    if (taskId && !taskId.startsWith(PENDING_TAB_PREFIX)) focusTab(taskId);
   }
+
+  /**
+   * A new built-in browser tab (plan 20260924-desktop-browser-tab): in the workspace's focused group
+   * and active there — or, for a page's popup, right after its opener in the opener's group. Its
+   * record is written before the layout that references it. `url` empty = a blank tab, whose address
+   * bar takes the caret.
+   */
+  function openBrowserTab(workspaceId: string, url: string, besideTabId: string | null = null) {
+    setWorkspaceChangesOpen(workspaceId, false);
+    const tabId = createBrowserTabId(crypto.randomUUID());
+    browser.createTab(tabId, workspaceId, url);
+    const layout = layoutOf(workspaceId);
+    commitLayout(workspaceId, besideTabId ? openTabBeside(layout, besideTabId, tabId) : revealTab(layout, tabId));
+    if (workspaceId === activeWorkspaceIdRef.current) browser.focus(tabId);
+  }
+
+  /** Closing a browser tab just removes it — no confirmation, nothing to stop. The caret goes to the tab that takes its place. */
+  function closeBrowserTab(workspaceId: string, tabId: string) {
+    commitLayout(workspaceId, removeTab(layoutOf(workspaceId), tabId));
+    browser.removeTab(tabId);
+    if (workspaceId !== activeWorkspaceIdRef.current) return;
+    const next = focusedTabId(layoutOf(workspaceId));
+    if (next) focusTab(next);
+  }
+
+  // Main-process browser events that change the layout: a click into a page focuses its group; a
+  // page's popup opens beside it. Read through refs so the subscription is made once.
+  const browserGuestFocusRef = useRef((tabId: string) => {
+    void tabId;
+  });
+  browserGuestFocusRef.current = (tabId: string) => {
+    const workspaceId = activeWorkspaceIdRef.current;
+    if (!workspaceId || changesOpenRef.current[workspaceId]) return;
+    if (browser.tabs.getState().tabs[tabId]?.workspaceId !== workspaceId) return;
+    focusPaneGroup(tabId);
+  };
+  const browserPopupRef = useRef((tabId: string, url: string) => {
+    void tabId;
+    void url;
+  });
+  browserPopupRef.current = (tabId: string, url: string) => {
+    const target = normalizeIncomingUrl(url);
+    const workspaceId = browser.tabs.getState().tabs[tabId]?.workspaceId;
+    if (!target || !workspaceId || !groupOfTab(layoutOf(workspaceId), tabId)) return;
+    openBrowserTab(workspaceId, target, tabId);
+  };
+  useEffect(() => {
+    browser.setWorkbenchHandlers({
+      onGuestFocus: (tabId) => browserGuestFocusRef.current(tabId),
+      onPopup: (tabId, url) => browserPopupRef.current(tabId, url),
+    });
+    return browser.start();
+  }, [browser]);
 
   /** A pointer went down inside a pane: its group becomes the focused one (the pane layer sits above the chrome). */
   function focusPaneGroup(taskId: string) {
@@ -496,7 +602,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       const workspaceId = activeWorkspaceIdRef.current;
       if (!workspaceId) return;
       const watched = focusedTabId(layoutsRef.current[workspaceId] ?? EMPTY_LAYOUT);
-      if (!watched || watched.startsWith(PENDING_TAB_PREFIX)) return;
+      if (!watched || !isTaskTabId(watched)) return;
       const next = resolveSelectionAfterTaskMove({ activeWorkspaceId: workspaceId, activeTaskId: watched, tasks: state.tasks });
       if (!next) return;
       reconcileWorkspaceLayoutRef.current(workspaceId, state.tasks, true);
@@ -864,6 +970,30 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (group.activeTabId && screen.visible.has(group.activeTabId)) paneFrames.set(group.activeTabId, groupBodyStyle(rect));
   }
   const selectedChangesOpen = Boolean(activeWorkspaceId && changesOpen[activeWorkspaceId]);
+  // Browser views (plan 20260924-desktop-browser-tab): one per browser tab of every mounted
+  // workspace, each on its group's body rectangle whether or not it is on screen — a hidden view
+  // keeps its size and its page. The list is sorted by tab id so the relative order of mounted views
+  // never changes: React then never moves a view's DOM node, and a moved <webview> would reload.
+  const browserEntries: BrowserViewEntry[] = [];
+  for (const workspace of terminalWorkspaces) {
+    const layout = workspaceLayouts.get(workspace.id) ?? layoutOf(workspace.id);
+    const onScreen = workspace.id === activeWorkspaceId && !changesOpen[workspace.id];
+    for (const { group, rect } of layoutGeometry(layout).groups) {
+      for (const tabId of group.tabs) {
+        if (!isBrowserTabId(tabId)) continue;
+        const visible = onScreen && group.activeTabId === tabId;
+        browserEntries.push({
+          tabId,
+          workspaceId: workspace.id,
+          daemonId: workspace.daemonId,
+          visible,
+          focused: visible && group.id === layout.focusedGroupId,
+          frame: groupBodyStyle(rect),
+        });
+      }
+    }
+  }
+  browserEntries.sort((left, right) => (left.tabId < right.tabId ? -1 : left.tabId > right.tabId ? 1 : 0));
 
   // A create that reconcile answered: the task took the pending tab's place; start it as the old
   // container did — unless the user picked another tab in that group while waiting (settling never steals the choice).
@@ -891,7 +1021,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // Switching workspace is a user action: the focused pane takes the caret even though the sidebar
   // entry that was clicked holds focus (the pane's own focus-on-`focused` yields to it).
   useEffect(() => {
-    if (screen.focused) attach.focusTask(screen.focused);
+    const focused = screen.focused ?? focusedBrowserTabId();
+    if (focused) focusTab(focused);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWorkspaceId]);
 
@@ -1018,6 +1149,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
         // Suspended while the overlay is open: a blind ⌘W would close a terminal nobody can see.
         if (changesOpenRef.current[workspaceId]) return;
         const taskId = focusedTabId(layoutOf(workspaceId));
+        if (taskId && isBrowserTabId(taskId)) {
+          closeBrowserTab(workspaceId, taskId);
+          return;
+        }
         const task = taskId ? client.store.getState().tasks.find((item) => item.id === taskId) : undefined;
         if (task) requestCloseTask(task);
       },
@@ -1034,6 +1169,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       focusGroupByIndex: (index) => focusGroupBy(workspaceId, (layout) => focusGroupByIndex(layout, index)),
       focusGroupInDirection: (side) => focusGroupBy(workspaceId, (layout) => focusGroupInDirection(layout, side)),
       splitTerminal: (side) => createTerminalIn(workspaceId, side),
+      openBrowserTab: () => openBrowserTab(workspaceId, ""),
     };
   }
   activeTerminalRef.current = activeWorkspaceId ? terminalHandleFor(activeWorkspaceId) : null;
@@ -1048,6 +1184,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
       updateLayout(workspaceId, (layout) => focusGroup(layout, groupId));
       createTerminalIn(workspaceId, null);
     },
+    closeBrowserTab,
+    reloadBrowserTab: (tabId) => browser.reload(tabId),
   };
 
   // The dock is measured rather than sized by a constant: with the changes button and its +X −Y
@@ -1140,21 +1278,32 @@ export function Workbench({ client }: { client: CofluxClient }) {
       />
 
       {terminalWorkspaces.length > 0 ? (
-        <Suspense
-          fallback={
-            <EmptyMain className="text-muted-foreground">
-              <LoaderCircle className="size-5 animate-spin" />
-            </EmptyMain>
-          }
+        // Terminal main area (plan 104 / 20260923-terminal-split-groups): one positioned box. The workspace
+        // container fills it and draws each group's chrome from the layout tree (tab strips, body
+        // placeholders, sashes); the pane layer is their later sibling, keyed by task id, and places
+        // each visible pane on its group's body rectangle. Moving a tab between groups or a terminal
+        // between workspaces only changes a rectangle: panes are neither rebuilt with a container nor
+        // dependent on the new workspace's container being mounted.
+        // While no workspace is selected it is hidden with its panes and browser views kept mounted —
+        // taken out of the flow and made invisible, never `display: none`: a <webview> under a
+        // display:none ancestor loses its guest's rendering and risks a detached guest (plan
+        // 20260924-desktop-browser-tab). For the same reason the browser layer sits outside the
+        // Suspense boundary, which would hide what it holds with display:none while suspended.
+        <main
+          className={cn(
+            "isolate min-w-0 bg-terminal",
+            activeWorkspaceId ? "relative flex-1" : "pointer-events-none invisible absolute bottom-0 right-0",
+          )}
+          style={activeWorkspaceId ? undefined : { top: showReconnectBanner ? 28 : 0, left: sidebarWidth.width }}
+          aria-hidden={!activeWorkspaceId}
         >
-          {/* Terminal main area (plan 104 / 20260923-terminal-split-groups): one positioned box. The workspace
-              container fills it and draws each group's chrome from the layout tree (tab strips, body
-              placeholders, sashes); the pane layer is their later sibling, keyed by task id, and places
-              each visible pane on its group's body rectangle. Moving a tab between groups or a terminal
-              between workspaces only changes a rectangle: panes are neither rebuilt with a container nor
-              dependent on the new workspace's container being mounted. Hidden, with panes kept mounted,
-              while no workspace is selected. */}
-          <main className={cn("relative isolate min-w-0 flex-1 bg-terminal", !activeWorkspaceId && "hidden")}>
+          <Suspense
+            fallback={
+              <div className="absolute inset-0 flex items-center justify-center text-muted-foreground">
+                <LoaderCircle className="size-5 animate-spin" />
+              </div>
+            }
+          >
             {terminalWorkspaces.map((workspace) => {
               const isActive = workspace.id === activeWorkspaceId;
               return (
@@ -1169,6 +1318,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
                     changesOpen={Boolean(changesOpen[workspace.id])}
                     dockWidth={dockWidth}
                     actions={workspaceActions}
+                    browser={browser}
                   />
                 </div>
               );
@@ -1179,11 +1329,25 @@ export function Workbench({ client }: { client: CofluxClient }) {
               focusedTaskId={screen.focused}
               frames={paneFrames}
               onPaneFocus={focusPaneGroup}
+              onOpenBrowserTab={(workspaceId, url) => {
+                const target = normalizeIncomingUrl(url);
+                if (target) openBrowserTab(workspaceId, target);
+              }}
               client={client}
               attach={attach}
             />
-          </main>
-        </Suspense>
+          </Suspense>
+          <BrowserViews
+            runtime={browser}
+            client={client}
+            entries={browserEntries}
+            onPointerFocus={focusPaneGroup}
+            onOpenTab={(workspaceId, url, besideTabId) => {
+              const target = normalizeIncomingUrl(url);
+              if (target) openBrowserTab(workspaceId, target, besideTabId);
+            }}
+          />
+        </main>
       ) : null}
       {selectedDevice && !activeWorkspace ? (
         // 设备详情空态（plan 048）：这台设备还没有目录工作区，首次新建走 fsList(~) + terminalCreate；
@@ -1317,6 +1481,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onOpenWorkspace={selectWorkspace}
         onOpenTerminal={openPaletteTerminal}
         onOpenDevice={selectDevice}
+        onNewBrowserTab={activeWorkspaceId ? () => openBrowserTab(activeWorkspaceId, "") : undefined}
       />
       <ShortcutsHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
       <AddDeviceDialog
@@ -1400,7 +1565,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
             </button>
           </Tooltip>
         ) : null}
-        <PortMenu key={activeWorkspaceId ?? "none"} client={client} workspaceId={activeWorkspaceId} />
+        <PortMenu
+          key={activeWorkspaceId ?? "none"}
+          client={client}
+          workspaceId={activeWorkspaceId}
+          onOpenInBrowser={activeWorkspaceId ? (port) => openBrowserTab(activeWorkspaceId, localPortUrl(port)) : undefined}
+        />
         <NotificationInbox client={client} open={notificationOpen} onOpen={() => { setSettingsOpen(false); setNotificationOpen(true); }} onClose={() => setNotificationOpen(false)} onNavigate={navigateNotificationTask} />
       </div>
     </div>

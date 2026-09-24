@@ -233,9 +233,19 @@ export function useGlobalShortcuts({
           case "focus-group-down":
             terminal?.focusGroupInDirection("down");
             return;
+          case "new-browser-tab":
+            terminal?.openBrowserTab();
+            return;
           case "toggle-help":
             onToggleHelp();
             return;
+        }
+        // ⌘1–9 / ⌘⌥1–9 typed inside a browser page, forwarded by the main process (plan 20260924-desktop-browser-tab).
+        const digit = /^(focus-group|select-tab)-([1-9])$/.exec(command);
+        if (digit) {
+          const index = Number(digit[2]) - 1;
+          if (digit[1] === "focus-group") terminal?.focusGroupByIndex(index);
+          else terminal?.selectTabByIndex(index);
         }
       }),
     [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onToggleSettings, onTogglePalette, isSuspended],

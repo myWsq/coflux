@@ -13,8 +13,14 @@ import type { ActivityDotsStatus } from "@/components/workbench/pending-dots";
  * without rendering anything.
  */
 
-/** The four kinds of entry. Projects have no filter tab of their own: they rank among workspaces. */
-export type PaletteEntryKind = "workspace" | "project" | "terminal" | "device";
+/**
+ * The kinds of entry. Projects have no filter tab of their own: they rank among workspaces. Actions
+ * (plan 20260924-desktop-browser-tab: 新建浏览器标签页) have none either and only surface on a
+ * typed query in 全部 — the empty-query list stays the ⌘P ⏎ bounce between places.
+ */
+export type PaletteEntryKind = "workspace" | "project" | "terminal" | "device" | "action";
+
+export type PaletteAction = "new-browser-tab";
 
 /** The filter tab row. `all` is the tab the palette opens on. */
 export type PaletteFilter = "all" | "workspace" | "terminal" | "device";
@@ -26,7 +32,8 @@ export type PaletteActivity = ActivityDotsStatus | null;
 export type PaletteTarget =
   | { kind: "workspace"; workspaceId: string }
   | { kind: "terminal"; workspaceId: string; taskId: string }
-  | { kind: "device"; daemonId: string };
+  | { kind: "device"; daemonId: string }
+  | { kind: "action"; action: PaletteAction };
 
 export type PaletteEntry = {
   /** Stable identity: the palette item id, and the key this place is remembered under. */
@@ -70,10 +77,11 @@ const GROUP_OF_KIND: Record<PaletteEntryKind, string> = {
   project: "工作区",
   terminal: "终端",
   device: "设备",
+  action: "操作",
 };
 
 /** Fixed group order, so the headings never reshuffle themselves as scores change. */
-const GROUP_ORDER: readonly string[] = [RECENT_GROUP, "工作区", "终端", "设备"];
+const GROUP_ORDER: readonly string[] = [RECENT_GROUP, "工作区", "终端", "设备", "操作"];
 
 const DEFAULT_LIMIT = 50;
 
@@ -111,6 +119,8 @@ export type PaletteSnapshotInput = {
     /** Set only while a device detail view is the selection. */
     daemonId: string | null;
   };
+  /** Whether 新建浏览器标签页 is on offer: there is a workspace on screen to open it in. */
+  canOpenBrowserTab?: boolean;
 };
 
 /** Map the shared workspace aggregate onto the dot states; idle becomes no dots at all. */
@@ -223,6 +233,20 @@ export function buildPaletteSnapshot(input: PaletteSnapshotInput): PaletteSnapsh
     });
   }
 
+  if (input.canOpenBrowserTab) {
+    entries.push({
+      key: "action:new-browser-tab",
+      kind: "action",
+      label: "新建浏览器标签页",
+      detail: "",
+      context: "操作",
+      keywords: "browser web page tab new 浏览器 网页 标签页 新建",
+      activity: null,
+      isOffline: false,
+      target: { kind: "action", action: "new-browser-tab" },
+    });
+  }
+
   const currentKeys = new Set<string>();
   const currentWorkspace = input.current.workspaceId ? workspaceById.get(input.current.workspaceId) : undefined;
   if (input.current.workspaceId) currentKeys.add(workspaceVisitKey(input.current.workspaceId));
@@ -285,7 +309,8 @@ export function searchPaletteEntries(input: PaletteSearchInput): PaletteItem[] {
   if (terms.length === 0) {
     // The current location is only excluded here: on a typed query, hiding what the user just
     // searched for by name would read as a bug.
-    const reachable = candidates.filter((entry) => !input.snapshot.currentKeys.has(entry.key));
+    // Actions are not places: they never appear on the empty-query list.
+    const reachable = candidates.filter((entry) => !input.snapshot.currentKeys.has(entry.key) && entry.kind !== "action");
     const byKey = new Map<string, PaletteEntry>(reachable.map((entry) => [entry.key, entry]));
     const recent: PaletteEntry[] = [];
     for (const key of input.recent) {

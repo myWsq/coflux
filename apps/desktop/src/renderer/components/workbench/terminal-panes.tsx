@@ -25,6 +25,7 @@ export function TerminalPanes({
   focusedTaskId,
   frames,
   onPaneFocus,
+  onOpenBrowserTab,
   client,
   attach,
 }: {
@@ -36,6 +37,8 @@ export function TerminalPanes({
   /** Rectangle of each visible pane (its group's body). */
   frames: ReadonlyMap<string, CSSProperties>;
   onPaneFocus: (taskId: string) => void;
+  /** A terminal link's 在内置浏览器中打开 (plan 20260924-desktop-browser-tab). */
+  onOpenBrowserTab: (workspaceId: string, url: string) => void;
   client: CofluxClient;
   attach: TerminalAttach;
 }) {
@@ -72,6 +75,7 @@ export function TerminalPanes({
             transcriptAgent={transcriptAgent}
             agentSessionId={agentSessionId}
             execInWorkspace={client.execInWorkspace}
+            onOpenBrowserTab={onOpenBrowserTab}
           />
         );
       })}

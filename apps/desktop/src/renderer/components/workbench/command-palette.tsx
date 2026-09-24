@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Folder, GitBranch, Monitor, SquareTerminal, type LucideIcon } from "lucide-react";
+import { Folder, GitBranch, Globe, Monitor, SquareTerminal, type LucideIcon } from "lucide-react";
 import {
   CommandPalette,
   CommandPaletteFooter,
@@ -48,6 +48,8 @@ export type NavigationPaletteProps = {
   onOpenWorkspace: (workspaceId: string) => void;
   onOpenTerminal: (workspaceId: string, taskId: string) => void;
   onOpenDevice: (daemonId: string) => void;
+  /** 新建浏览器标签页 (plan 20260924-desktop-browser-tab); offered only while a workspace is on screen. */
+  onNewBrowserTab?: () => void;
 };
 
 /** The tab row. An Actions tab belongs here later; nothing of it is built now. */
@@ -63,6 +65,7 @@ const KIND_ICON: Record<PaletteEntryKind, LucideIcon> = {
   project: Folder,
   terminal: SquareTerminal,
   device: Monitor,
+  action: Globe,
 };
 
 const ACTIVITY_LABEL: Record<Exclude<PaletteActivity, null>, string> = {
@@ -221,6 +224,7 @@ export function NavigationPalette(props: NavigationPaletteProps) {
         sessionAgents: state.sessionAgents,
         sessionCheckpoints: state.sessionCheckpoints,
         current: props.current,
+        canOpenBrowserTab: Boolean(props.onNewBrowserTab && props.current.workspaceId),
       });
       recentRef.current = readRecentPlaces(props.recentStore);
     } else {
@@ -255,7 +259,8 @@ export function NavigationPalette(props: NavigationPaletteProps) {
     const target = entry.target;
     if (target.kind === "workspace") props.onOpenWorkspace(target.workspaceId);
     else if (target.kind === "terminal") props.onOpenTerminal(target.workspaceId, target.taskId);
-    else props.onOpenDevice(target.daemonId);
+    else if (target.kind === "device") props.onOpenDevice(target.daemonId);
+    else if (target.action === "new-browser-tab") props.onNewBrowserTab?.();
   }
 
   return (

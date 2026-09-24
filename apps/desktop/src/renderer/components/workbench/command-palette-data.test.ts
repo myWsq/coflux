@@ -241,3 +241,21 @@ test("离线设备的工作区仍然列出，只是标记为离线并轻微靠�
   assert.equal(entry.activity, null);
   assert.ok(searchPaletteEntries({ snapshot, query: "cmd-p", filter: "all", recent: [] }).some((item) => item.id === entry.key));
 });
+
+test("新建浏览器标签页 is an action: offered only with a workspace on screen, only on a typed query in 全部", () => {
+  const withAction = buildPaletteSnapshot({ ...fixture({ workspaceId: "w1", taskId: null, daemonId: null }), canOpenBrowserTab: true });
+  const without = buildPaletteSnapshot(fixture());
+  assert.equal(without.entries.some((entry) => entry.kind === "action"), false);
+
+  const typed = searchPaletteEntries({ snapshot: withAction, query: "浏览器", filter: "all", recent: [] });
+  assert.equal(typed[0]?.auxiliaryData.entry.target.kind, "action");
+  assert.equal(typed[0]?.auxiliaryData.group, "操作");
+  assert.equal(searchPaletteEntries({ snapshot: withAction, query: "browser", filter: "all", recent: [] })[0]?.label, "新建浏览器标签页");
+  // Never on the empty-query list (not even if its key were remembered), never on a narrowed tab.
+  const empty = searchPaletteEntries({ snapshot: withAction, query: "", filter: "all", recent: ["action:new-browser-tab"] });
+  assert.equal(
+    empty.some((item) => item.auxiliaryData.entry.kind === "action"),
+    false,
+  );
+  assert.equal(searchPaletteEntries({ snapshot: withAction, query: "浏览器", filter: "terminal", recent: [] }).length, 0);
+});

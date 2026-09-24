@@ -22,7 +22,8 @@ import type { TranscriptAgent, TranscriptExec } from "@/components/workbench/ter
 import { decideTerminalFit, TERMINAL_FIT_LIMITS, type TerminalFitProposal } from "@/components/workbench/terminal-fit";
 import { applyImeCommittedInputPatch, type XtermCoreInternals } from "@/components/workbench/terminal-ime-patch";
 import { decideTerminalKeyOwner } from "@/components/workbench/terminal-key-ownership";
-import { shouldOpenTerminalLink } from "@/components/workbench/terminal-link-activation";
+import { shouldCopyTerminalFileReference, shouldOpenTerminalWebLink } from "@/components/workbench/terminal-link-activation";
+import { rewriteUnspecifiedHost } from "@/components/workbench/browser-address";
 import { parseOsc52Payload } from "@/components/workbench/osc52-clipboard";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { desktop } from "@/config";
@@ -70,6 +71,8 @@ type TerminalPaneProps = {
   onOutput: (taskId: string, sessionId: string) => void;
   /** 会话纸面（plan 20260919）：这个终端里跑着的 agent，null = 没有 agent，不出按钮。 */
   transcriptAgent: TranscriptAgent | null;
+  /** Right click on a web link → 在内置浏览器中打开 (plan 20260924-desktop-browser-tab): a browser tab in this pane's workspace. */
+  onOpenBrowserTab?: (workspaceId: string, url: string) => void;
   /** agent 自己的会话标识，已校验过形状；null = 旧 worker / 还没上报，同样不出按钮。 */
   agentSessionId: string | null;
   /** 直接是 `client.execInWorkspace`：按工作区归属路由，本地远程同一条路，无分支。 */
@@ -193,6 +196,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [menuCommands, setMenuCommands] = useState(0);
   // 链接悬停提示（需要修饰键才激活，不提示的话没人猜得到）；位置用 fixed，省掉容器坐标换算。
   const [linkHint, setLinkHint] = useState<{ label: string; x: number; y: number } | null>(null);
+  // The web link under the pointer, from the web-link addon's hover/leave (link computation is
+  // asynchronous, so a right click the instant the pointer arrives may miss it — accepted). The
+  // context menu snapshots it when it opens: its three link items belong to that link.
+  const hoveredLinkRef = useRef<string | null>(null);
+  const [menuLink, setMenuLink] = useState<string | null>(null);
 
   // onData/onResize/粘贴/拖拽处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
@@ -311,21 +319,29 @@ export function TerminalPane(props: TerminalPaneProps) {
     searchAddonRef.current = searchAddon;
     searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => setSearchResults({ index: resultIndex, count: resultCount }));
 
-    // 输出中的 URL：⌘（或 Ctrl）+点击在系统浏览器打开，普通点击只聚焦终端（plan 109）。
+    // 输出中的 URL（plan 20260924-desktop-browser-tab，取代 plan 109 对网页链接的 ⌘ 门控）：普通左键单击
+    // 在系统浏览器打开；右键在终端菜单顶部多出三项（系统浏览器 / 内置浏览器 / 复制链接）；拖选经过链接
+    // 不算点击——xterm 在同一链接上 mousedown+mouseup 就激活、不看选区，所以激活前先看有没有选区。
     // 必须传自定义激活函数——插件默认的那个先调无 URL 的 window.open()、再赋 location.href，
     // 主进程对 window.open 一律 deny 且只放行 http(s) 的 URL，收到 about:blank 直接丢弃，表现为点了没反应。
     // 这里带 URL 调 window.open，主进程的 setWindowOpenHandler 拿到真实 URL 交 shell.openExternal；
-    // 返回值在桌面版恒为 null（deny），不据此分支。
+    // 返回值在桌面版恒为 null（deny），不据此分支。0.0.0.0 先改写成 localhost（浏览器拒绝前者）。
     terminal.loadAddon(
       new WebLinksAddon(
         (event, uri) => {
           setLinkHint(null);
-          if (!shouldOpenTerminalLink(event)) return;
-          window.open(uri, "_blank", "noopener");
+          if (!shouldOpenTerminalWebLink(event, terminal.hasSelection())) return;
+          window.open(rewriteUnspecifiedHost(uri), "_blank", "noopener");
         },
         {
-          hover: (event) => setLinkHint({ label: `${SHORTCUT_MODIFIER_PREFIX} 点击打开`, x: event.clientX, y: event.clientY }),
-          leave: () => setLinkHint(null),
+          hover: (event, text) => {
+            hoveredLinkRef.current = text;
+            setLinkHint({ label: "点击打开 · 右键更多", x: event.clientX, y: event.clientY });
+          },
+          leave: (_event, text) => {
+            if (hoveredLinkRef.current === text) hoveredLinkRef.current = null;
+            setLinkHint(null);
+          },
         },
       ),
     );
@@ -357,7 +373,7 @@ export function TerminalPane(props: TerminalPaneProps) {
             decorations: { pointerCursor: true, underline: true },
             activate: (event: MouseEvent, linkText: string) => {
               setLinkHint(null);
-              if (!shouldOpenTerminalLink(event)) return;
+              if (!shouldCopyTerminalFileReference(event)) return;
               void navigator.clipboard.writeText(linkText).then(
                 () => liveRef.current.showToast({ body: `已复制 ${linkText}`, type: "info" }),
                 () => liveRef.current.showToast({ body: "复制路径失败", type: "error" }),
@@ -891,7 +907,29 @@ export function TerminalPane(props: TerminalPaneProps) {
     input?.select();
   }, [searchOpen]);
 
+  // A right click on a web link (plan 20260924-desktop-browser-tab) puts three items for that link
+  // on top of the unchanged menu; a right click elsewhere shows the menu as it always was.
+  const linkTarget = menuLink ? rewriteUnspecifiedHost(menuLink) : null;
+  const linkItems: ContextMenuOption[] = linkTarget
+    ? [
+        { label: "在系统浏览器中打开", onClick: () => window.open(linkTarget, "_blank", "noopener") },
+        {
+          label: "在内置浏览器中打开",
+          isDisabled: !props.onOpenBrowserTab,
+          onClick: () => props.onOpenBrowserTab?.(props.workspaceId, linkTarget),
+        },
+        {
+          label: "复制链接",
+          onClick: () => {
+            desktop.writeClipboard(menuLink ?? linkTarget);
+            showToast({ body: "已复制链接", type: "info" });
+          },
+        },
+        { type: "divider" },
+      ]
+    : [];
   const contextMenuItems: ContextMenuOption[] = [
+    ...linkItems,
     { label: "复制", isDisabled: !menuSelection, onClick: copySelection },
     { label: "粘贴", onClick: pasteFromClipboard },
     { type: "divider" },
@@ -910,6 +948,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (open) {
       setMenuSelection(Boolean(terminalRef.current?.hasSelection()));
       setMenuCommands(commandsRef.current?.count() ?? 0);
+      setMenuLink(hoveredLinkRef.current);
       return;
     }
     // 菜单自己也要收焦点，等它归位后再把焦点还给终端。

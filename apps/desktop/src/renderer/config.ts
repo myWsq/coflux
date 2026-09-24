@@ -25,5 +25,15 @@ export const COMMAND_PALETTE_RECENT_KEY = `coflux_recent_places:${SERVER_URL}`;
  * server address like the palette's recent places — workspace and task ids mean nothing elsewhere.
  */
 export const TERMINAL_LAYOUTS_KEY = `coflux_terminal_layouts:${SERVER_URL}`;
+/**
+ * Built-in browser tabs' records (plan 20260924-desktop-browser-tab): per tab, its workspace, URL
+ * and last title. Scoped by server address exactly like the layouts that reference them.
+ */
+export const BROWSER_TABS_KEY = `coflux_browser_tabs:${SERVER_URL}`;
+/**
+ * The built-in browser's bookmarks, bookmarks-bar toggle and history: global on this Mac — every
+ * workspace and every server share them — and never synced.
+ */
+export const BROWSER_LIBRARY_KEY = "coflux_browser_library";
 
 export type { AuthCredential } from "@coflux/client";

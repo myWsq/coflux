@@ -35,6 +35,10 @@ Delete this rule once astryx's `DropdownMenu` no longer contains `tooltip: isOpe
 
 Anything clickable that sits inside or overlaps a `-webkit-app-region: drag` area must declare `no-drag` **and come later in document order than that drag element**. Order decides the outcome: Electron composes the regions in document order, taking a union for `drag` and a difference for `no-drag`, so a hole punched earlier is filled back in by a `drag` rectangle declared later. A control that loses this race receives no click and no `mouseenter` at all — it reads as dead, not as misstyled. See the header comment in `apps/desktop/src/renderer/components/workbench/drag-region.ts`.
 
+## Browser tabs: never `display: none` a `<webview>` or any ancestor of one
+
+Built-in browser tabs (`browser-view.tsx`) keep hidden pages alive with `visibility: hidden` at their last rectangle, and `<main>` is taken out of the flow and made invisible rather than `hidden` when no workspace is selected. Do not add `hidden`, `display: none` or a Suspense boundary above the browser layer, and never move or re-key a view: a `<webview>` under `display: none` risks a blank or detached guest, and one moved to another parent reloads its page (the user loses HMR state and logins in progress).
+
 ## Workspace activity: SVG dot matrices
 
 Use `ActivityDots` for the four workspace activity states, matching assistant-ui DotMatrix's N×N SVG circles. Running: random flashes in a 4×4 matrix. Awaiting approval: slowly blinking 5×5 exclamation mark. Awaiting an answer: cycling 5×5 ellipsis. Turn complete: static 5×5 check mark. The neutral state remains GitBranch. Do not use `LoaderCircle`, sweeping highlights, Unicode braille, or lucide status icons in this slot.

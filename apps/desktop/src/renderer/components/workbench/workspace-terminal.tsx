@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { Bot, FileDiff, GitBranch, History, LoaderCircle, Plus, SquareTerminal, Unplug, X } from "lucide-react";
@@ -15,6 +15,10 @@ import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifi
 import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
 import { ClawdGlyph } from "@/components/workbench/clawd-glyph";
+import { hostLabel } from "@/components/workbench/browser-address";
+import type { BrowserRuntime } from "@/components/workbench/browser-runtime";
+import { BrowserTabGlyph } from "@/components/workbench/browser-view";
+import { desktop } from "@/config";
 import type { TerminalAttach } from "@/components/workbench/terminal-attach";
 import type { TerminalControlState } from "@/components/workbench/terminal-pane";
 import {
@@ -23,6 +27,7 @@ import {
   focusGroup,
   groupBodyStyle,
   groupFrameStyle,
+  isBrowserTabId,
   layoutGeometry,
   moveTabToGroup,
   moveTabToNewGroup,
@@ -104,6 +109,8 @@ export type WorkspaceTerminalHandle = {
   focusGroupInDirection: (side: LayoutSide) => void;
   /** ⌘\ / ⌘⇧\: splits the focused group and opens a new terminal in the new group. */
   splitTerminal: (side: "right" | "down") => void;
+  /** 文件 / ⌘P → 新建浏览器标签页 (plan 20260924-desktop-browser-tab): a blank browser tab in the focused group. */
+  openBrowserTab: () => void;
 };
 
 /**
@@ -128,6 +135,9 @@ export type WorkspaceLayoutActions = {
   moveTab: (workspaceId: string, taskId: string, change: (layout: TerminalLayout) => TerminalLayout) => void;
   /** ＋ in a group: focuses that group, then opens a terminal there. */
   createTerminal: (workspaceId: string, groupId: string) => void;
+  /** A browser tab's close button / context menu: removes the tab, no confirmation (plan 20260924-desktop-browser-tab). */
+  closeBrowserTab: (workspaceId: string, tabId: string) => void;
+  reloadBrowserTab: (tabId: string) => void;
 };
 
 type WorkspaceTerminalProps = {
@@ -145,6 +155,8 @@ type WorkspaceTerminalProps = {
   /** Measured width of the action dock floating over the top-right strip. */
   dockWidth: number;
   actions: WorkspaceLayoutActions;
+  /** Built-in browser tabs' titles, favicons and loading state for their strip chips. */
+  browser: BrowserRuntime;
 };
 
 function zoneAt(event: ReactDragEvent<HTMLElement>): LayoutSide | "center" {
@@ -194,7 +206,16 @@ const EMPTY_DRAG_IMAGE: HTMLImageElement | null = (() => {
 })();
 
 /** What the drag ghost shows and where the pointer held the tab. */
-type DragGhost = { title: string; width: number; offsetX: number; offsetY: number; x: number; y: number };
+type DragGhost = {
+  title: string;
+  /** A browser tab's ghost shows its favicon (or a globe) instead of the terminal glyph. */
+  browser: { favicon: string | null } | null;
+  width: number;
+  offsetX: number;
+  offsetY: number;
+  x: number;
+  y: number;
+};
 
 function hasTabPayload(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types).includes(TAB_DRAG_TYPE);
@@ -315,7 +336,7 @@ function GroupSash({
   );
 }
 
-export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, attach, layout, changesOpen, dockWidth, actions }: WorkspaceTerminalProps) {
+export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, attach, layout, changesOpen, dockWidth, actions, browser }: WorkspaceTerminalProps) {
   const workspace = useStore(client.store, (state) => state.workspaces.find((item) => item.id === workspaceId));
   const projectWorkspaces = useStore(
     client.store,
@@ -330,6 +351,7 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
     ),
   );
   const modPrefix = SHORTCUT_MODIFIER_PREFIX;
+  const browserTabs = useStore(browser.tabs, (state) => state.tabs);
   // agent presence（plan 073/075）：引用只在实际变化时更新（worker 变化才发），直接订阅。
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
   // OSC 终端标题（plan 075）：checkpoint 每 ~2s 换引用（有输出即上报），必须用选择器把
@@ -477,6 +499,111 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
     return group.tabs.length;
   }
 
+  /** Native HTML5 drag of any tab (terminal or browser); its payload is not a file type. */
+  function tabDragProps(tabId: string, title: string, browserGhost: DragGhost["browser"]) {
+    return {
+      draggable: true,
+      onDragStart: (event: ReactDragEvent<HTMLDivElement>) => {
+        event.dataTransfer.setData(TAB_DRAG_TYPE, tabId);
+        event.dataTransfer.effectAllowed = "move";
+        if (EMPTY_DRAG_IMAGE) event.dataTransfer.setDragImage(EMPTY_DRAG_IMAGE, 0, 0);
+        const tabRect = event.currentTarget.getBoundingClientRect();
+        dragGhostRef.current = {
+          title,
+          browser: browserGhost,
+          width: tabRect.width,
+          offsetX: event.clientX - tabRect.left,
+          offsetY: event.clientY - tabRect.top,
+          x: event.clientX,
+          y: event.clientY,
+        };
+        // Changing the DOM inside dragstart can cancel the drag in Chromium; let it start first.
+        dragEndedRef.current = false;
+        window.setTimeout(() => {
+          if (!dragEndedRef.current) setDragTaskId(tabId);
+        }, 0);
+      },
+      onDragEnd: () => {
+        dragEndedRef.current = true;
+        endDrag();
+      },
+    };
+  }
+
+  /**
+   * A built-in browser tab's chip (plan 20260924-desktop-browser-tab): favicon (a spinner while
+   * loading), the page title (else its host), a close button — the same chrome, drag and split
+   * behaviour as a terminal tab. Closing needs no confirmation.
+   */
+  function renderBrowserTab(
+    group: LayoutGroup,
+    tabId: string,
+    isActive: boolean,
+    bright: boolean,
+    activeClass: string,
+    idleClass: string,
+    indicators: ReactNode,
+  ) {
+    const view = browserTabs[tabId];
+    const url = view?.url ?? "";
+    const label = view?.title || (url ? hostLabel(url) : "新标签页");
+    const canSplit = group.tabs.length > 1;
+    return (
+      <div
+        key={tabId}
+        data-tab-slot
+        className={cn("relative shrink-0", dragTaskId === tabId && "opacity-50")}
+        style={NO_DRAG_REGION_STYLE}
+        {...tabDragProps(tabId, label, { favicon: view?.favicon ?? null })}
+      >
+        <ContextMenu
+          label={`标签页「${label}」操作`}
+          size="sm"
+          items={[
+            { label: "复制网址", isDisabled: !url, onClick: () => desktop.writeClipboard(url) },
+            { label: "重新加载", isDisabled: !url, onClick: () => actions.reloadBrowserTab(tabId) },
+            { type: "divider" },
+            {
+              label: "移到右侧新分组",
+              isDisabled: !canSplit,
+              onClick: () => actions.moveTab(workspaceId, tabId, (current) => moveTabToNewGroup(current, tabId, group.id, "right")),
+            },
+            {
+              label: "移到下方新分组",
+              isDisabled: !canSplit,
+              onClick: () => actions.moveTab(workspaceId, tabId, (current) => moveTabToNewGroup(current, tabId, group.id, "down")),
+            },
+            { type: "divider" },
+            { label: "关闭标签页", onClick: () => actions.closeBrowserTab(workspaceId, tabId) },
+          ]}
+        >
+          <div className={cn("group flex h-7 max-w-52 items-center rounded-md text-sm transition-colors", isActive ? activeClass : idleClass)}>
+            <button className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left" onClick={() => actions.activateTab(workspaceId, tabId)}>
+              <BrowserTabGlyph favicon={view?.favicon ?? null} loading={view?.loading ?? false} className={bright ? "opacity-90" : "opacity-70"} />
+              {url && view?.title ? (
+                <Tooltip content={`${view.title} · ${url}`} placement="below">
+                  <span className="truncate">{label}</span>
+                </Tooltip>
+              ) : (
+                <span className="truncate">{label}</span>
+              )}
+            </button>
+            {/* ⌘W closes the focused group's active tab only, so only that tab advertises it. */}
+            <Tooltip content={bright ? `关闭标签页 ${modPrefix}W` : "关闭标签页"} placement="below">
+              <button
+                className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                onClick={() => actions.closeBrowserTab(workspaceId, tabId)}
+              >
+                <X className="size-3" />
+              </button>
+            </Tooltip>
+          </div>
+        </ContextMenu>
+        {indicators}
+      </div>
+    );
+  }
+
   function renderTab(group: LayoutGroup, taskId: string, index: number, groupFocused: boolean) {
     const isActive = group.activeTabId === taskId;
     // The focused group's active tab carries the full highlight; other groups' active tabs a weaker one.
@@ -511,6 +638,8 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
       );
     }
 
+    if (isBrowserTabId(taskId)) return renderBrowserTab(group, taskId, isActive, isActive && groupFocused, activeClass, idleClass, indicators);
+
     const task = taskById.get(taskId);
     if (!task) return null;
     const state = stateOf(task);
@@ -543,30 +672,7 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
         data-tab-slot
         className={cn("relative shrink-0", dragTaskId === task.id && "opacity-50")}
         style={NO_DRAG_REGION_STYLE}
-        draggable
-        onDragStart={(event) => {
-          event.dataTransfer.setData(TAB_DRAG_TYPE, task.id);
-          event.dataTransfer.effectAllowed = "move";
-          if (EMPTY_DRAG_IMAGE) event.dataTransfer.setDragImage(EMPTY_DRAG_IMAGE, 0, 0);
-          const tabRect = event.currentTarget.getBoundingClientRect();
-          dragGhostRef.current = {
-            title: tabTitle || "终端",
-            width: tabRect.width,
-            offsetX: event.clientX - tabRect.left,
-            offsetY: event.clientY - tabRect.top,
-            x: event.clientX,
-            y: event.clientY,
-          };
-          // Changing the DOM inside dragstart can cancel the drag in Chromium; let it start first.
-          dragEndedRef.current = false;
-          window.setTimeout(() => {
-            if (!dragEndedRef.current) setDragTaskId(task.id);
-          }, 0);
-        }}
-        onDragEnd={() => {
-          dragEndedRef.current = true;
-          endDrag();
-        }}
+        {...tabDragProps(task.id, tabTitle || "终端", null)}
       >
         <ContextMenu
           label={`终端「${tabTitle || "终端"}」操作`}
@@ -875,7 +981,11 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
             className="flex h-7 max-w-52 items-center gap-1.5 rounded-md border border-border bg-popover px-2.5 text-sm text-foreground shadow-lg transition-[opacity,transform] duration-150 ease-out starting:scale-95 starting:opacity-0"
             style={{ minWidth: Math.min(dragGhostRef.current.width, 208) }}
           >
-            <SquareTerminal className="size-3 shrink-0 opacity-90" />
+            {dragGhostRef.current.browser ? (
+              <BrowserTabGlyph favicon={dragGhostRef.current.browser.favicon} loading={false} className="opacity-90" />
+            ) : (
+              <SquareTerminal className="size-3 shrink-0 opacity-90" />
+            )}
             <span className="truncate">{dragGhostRef.current.title}</span>
           </div>
         </div>
