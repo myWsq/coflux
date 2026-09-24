@@ -129,3 +129,33 @@ test("central native close disposes its lane and a stale channel cannot close it
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
+
+test("owned lanes never reach the renderer: frames, path and close go to their owner only", async () => {
+  const f = fixture();
+  f.helper.request = async (op: string) => op === "prepare" ? { publicKey: `nodekey:${"a".repeat(64)}` } : op === "probe" ? { ok: true, path: { mode: "direct", latencyMs: 3 } } : {};
+  const frames: string[] = []; let closed = 0;
+  try {
+    // A renderer lane on the same transport still reports its path: the probe above is live.
+    await f.transport.open(request("renderer"));
+    await flush();
+    assert(f.events.some(event => event.kind === "path" && event.handle === "renderer"));
+    const owned = await f.transport.openOwned(request("owned", 3), { frame: bytes => frames.push(Buffer.from(bytes).toString()), closed: () => { closed++; } });
+    await flush();
+    // The first frame arrived inside the handshake callback, before openOwned resolved.
+    assert.deepEqual(frames, ["first-data"]);
+    assert(!f.events.some(event => event.handle === owned.handle), "no frame/path/closed event for an owned lane");
+    // Consumed inside the callback: the renderer lane budget holds only the renderer lane's frame.
+    assert.equal(f.internal.incomingRecords, 1);
+    // The renderer cannot address it.
+    assert.equal(f.transport.send(owned.handle, Buffer.from("x")), false);
+    f.transport.closeRendererLane(owned.handle);
+    assert.equal(closed, 0);
+    assert.equal(f.transport.sendOwned(owned.handle, Buffer.from("x")), true);
+    assert.equal(f.transport.sendOwned("renderer", Buffer.from("x")), false);
+    // A central disconnect (the renderer's control(false,false)) closes it like any non-session lane.
+    f.transport.setControl(false, false);
+    assert.equal(closed, 1);
+    assert(!f.events.some(event => event.handle === owned.handle));
+    assert.equal(f.transport.sendOwned(owned.handle, Buffer.from("x")), false);
+  } finally { f.transport.close(); }
+});

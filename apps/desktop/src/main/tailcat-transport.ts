@@ -4,7 +4,14 @@ import { create, ClientToServerSchema, encodeClientToServer, decodeServerToClien
 import { TailcatHelper } from "./tailcat-helper";
 
 import type { NativeOpen, NativeEvent } from "../shared/native-transport";
-type Lane = { id: string; stream: number; daemon: string; connection: string; scope: number; incoming: number; records: number[]; live: boolean; closed: boolean; probe?: ReturnType<typeof setInterval> };
+/**
+ * A lane main consumes itself (the browser's loopback tunnel, plan 20260924-remote-localhost-tunnel).
+ * Its frames, its close and its path never go through `emit`: the renderer never sees its handle,
+ * and its frames are consumed inside `frame` — outside the renderer lane budget below, which only a
+ * renderer acknowledgement would ever free.
+ */
+export type OwnedLaneHandlers = { frame(bytes: Uint8Array): void; closed(): void };
+type Lane = { id: string; stream: number; daemon: string; connection: string; scope: number; incoming: number; records: number[]; live: boolean; closed: boolean; probe?: ReturnType<typeof setInterval>; owner?: OwnedLaneHandlers };
 type GrantWaiter = { resolve(value: DeviceTailcatResult): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 const MAX_BYTES = 32 * 1024 * 1024;
 
@@ -91,13 +98,23 @@ export class NativeTailcatTransport {
     return attempt;
   }
 
+  /** Whether the renderer reported the account connection online. Only the renderer sets it. */
+  isOnline(): boolean { return this.online; }
+
   async open(request: NativeOpen): Promise<{ handle: string; channelId: string; scopes: number[] }> {
+    return this.openLane(request);
+  }
+  /** A lane main owns: see `OwnedLaneHandlers`. Same admission, grant and proof as a renderer lane. */
+  async openOwned(request: NativeOpen, owner: OwnedLaneHandlers): Promise<{ handle: string; channelId: string; scopes: number[] }> {
+    return this.openLane(request, owner);
+  }
+  private async openLane(request: NativeOpen, owner?: OwnedLaneHandlers): Promise<{ handle: string; channelId: string; scopes: number[] }> {
     if (!this.online || !request.daemonId || !request.clientInstanceId || !/^\d{1,20}$/.test(request.generation) || BigInt(request.generation) <= 0n || ![1, 2, 3, 4].includes(request.scope)) throw new Error("远程连接参数无效");
     if (this.opening.size>=256 || this.opening.has(request.requestId) || this.lanes.has(request.requestId)) throw new Error("远程连接请求过多");
     this.opening.add(request.requestId);
-    try { return await this.openScoped(request); } finally { this.opening.delete(request.requestId); this.cancelled.delete(request.requestId); }
+    try { return await this.openScoped(request, owner); } finally { this.opening.delete(request.requestId); this.cancelled.delete(request.requestId); }
   }
-  private async openScoped(request: NativeOpen): Promise<{ handle: string; channelId: string; scopes: number[] }> {
+  private async openScoped(request: NativeOpen, owner?: OwnedLaneHandlers): Promise<{ handle: string; channelId: string; scopes: number[] }> {
     try { await this.ensure(); } catch(error){this.opening.delete(request.requestId);this.cancelled.delete(request.requestId);throw error;}
     if(this.cancelled.delete(request.requestId)){this.opening.delete(request.requestId);throw new Error("连接已取消");}
     const helper = this.helper!; const epoch = this.epoch;
@@ -110,7 +127,7 @@ export class NativeTailcatTransport {
       created.ready = helper.request("prepare", { connection }).then((result) => { if (typeof result.publicKey !== "string") throw new Error("远程设备身份无效"); created.key = result.publicKey; });
       this.devices.set(request.daemonId, created); device = created;
     }
-    const id = request.requestId, stream = this.nextStream++, lane: Lane = { id, stream, daemon: request.daemonId, connection: device.connection, scope: request.scope, incoming: 0, records: [], live: false, closed: false };
+    const id = request.requestId, stream = this.nextStream++, lane: Lane = { id, stream, daemon: request.daemonId, connection: device.connection, scope: request.scope, incoming: 0, records: [], live: false, closed: false, owner };
     device.users++; this.lanes.set(id, lane);
     try {
       await device.ready; if (lane.closed || epoch !== this.epoch) throw new Error("连接已取消");
@@ -128,6 +145,7 @@ export class NativeTailcatTransport {
       helper.watch(stream, {
         frame: (frame) => {
           if (!authenticated) { if (receive) { if (expectingAcceptance && Buffer.from(frame).toString() === "ok") authenticated = true; receive(frame); } else this.closeLane(id); return; }
+          if (lane.owner) { if (!lane.closed) lane.owner.frame(frame); return; }
           if (frame.length > MAX_BYTES - lane.incoming || frame.length > 128 * 1024 * 1024 - this.incomingBytes || lane.records.length >= 256 || this.incomingRecords >= 1024) { this.closeLane(id); return; }
           lane.incoming += frame.length; lane.records.push(frame.length); this.incomingBytes += frame.length; this.incomingRecords++; this.emit({ kind: "frame", handle: id, frame });
         },
@@ -146,13 +164,19 @@ export class NativeTailcatTransport {
       const accepted = await acceptedPromise; grant.proofKey.fill(0);
       if (Buffer.from(accepted).toString() !== "ok" || lane.closed || epoch !== this.epoch) throw new Error("远程身份验证失败");
       authenticated = true; lane.live = true;
+      if (lane.owner) return { handle: id, channelId: id, scopes: grant.scopes };
       const probe = () => void helper.request("probe", { connection: lane.connection }).then((result) => { if (result.path && !lane.closed) this.emit({ kind: "path", handle: id, mode: result.path.mode, rttMs: result.path.latencyMs }); }).catch(() => undefined);
       probe(); lane.probe = setInterval(probe, 15_000); lane.probe.unref();
       return { handle: id, channelId: id, scopes: grant.scopes };
     } catch (error) { this.closeLane(id); throw error; } finally { this.opening.delete(id); this.cancelled.delete(id); }
   }
 
-  send(handle: string, frame: Uint8Array): boolean { const lane = this.lanes.get(handle); return !!lane && lane.live && !lane.closed && (!!(this.online && this.controlAuthed) || [DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL].includes(lane.scope)) && !!this.helper?.send(lane.stream, frame); }
+  /** Renderer lanes only: an owned lane is never reachable from the renderer. */
+  send(handle: string, frame: Uint8Array): boolean { const lane = this.lanes.get(handle); return !!lane && !lane.owner && this.sendLane(lane, frame); }
+  sendOwned(handle: string, frame: Uint8Array): boolean { const lane = this.lanes.get(handle); return !!lane && !!lane.owner && this.sendLane(lane, frame); }
+  private sendLane(lane: Lane, frame: Uint8Array): boolean { return lane.live && !lane.closed && (!!(this.online && this.controlAuthed) || [DeviceScope.SESSION_READ, DeviceScope.SESSION_CONTROL].includes(lane.scope)) && !!this.helper?.send(lane.stream, frame); }
+  /** The renderer's close: it can only ever close its own lanes. */
+  closeRendererLane(id: string): void { if (this.lanes.get(id)?.owner) return; this.closeLane(id); }
   acknowledge(handle: string, bytes: number): void { const lane = this.lanes.get(handle); if (lane && lane.records[0] === bytes) { lane.records.shift(); lane.incoming -= bytes; this.incomingBytes -= bytes; this.incomingRecords--; } }
 
   closeLane(id: string): void {
@@ -160,7 +184,7 @@ export class NativeTailcatTransport {
     const pending = this.grants.get(id); if (pending) { clearTimeout(pending.timer); pending.reject(new Error("连接已取消")); this.grants.delete(id); }
     this.helper?.closeStream(lane.stream); try { this.sendControl({ case: "deviceTailcatClose", value: { channelId: id } }); } catch { /* The central grace timer revokes unreachable channels. */ }
     const device = this.devices.get(lane.daemon); if (device?.connection === lane.connection && --device.users === 0) { this.devices.delete(lane.daemon); const owner=this.helper, epoch=this.epoch; void owner?.request("drop", { connection: lane.connection }).catch(() => {if(this.helper===owner && this.epoch===epoch)this.close();}); }
-    this.emit({ kind: "closed", handle: id });
+    if (lane.owner) lane.owner.closed(); else this.emit({ kind: "closed", handle: id });
   }
   private pauseLanes(): void {
     for (const id of this.opening) this.cancelled.add(id);

@@ -237,6 +237,11 @@ const bridge: DesktopBridge = {
   browserTrustCertificate(guestId: number, host: string) {
     return ipcRenderer.invoke(IPC.browserTrustCertificate, { guestId: Number(guestId), host: String(host) }).then((ok) => ok === true);
   },
+  browserTunnelFailure(guestId: number, url: string) {
+    return ipcRenderer
+      .invoke(IPC.browserTunnelFailure, { guestId: Number(guestId), url: String(url) })
+      .then((reason) => (reason === "offline" || reason === "refused" || reason === "unsupported" ? reason : null));
+  },
   onBrowserEvent(listener) {
     return subscribe<DesktopBrowserEvent>(IPC.browserEvent, listener);
   },

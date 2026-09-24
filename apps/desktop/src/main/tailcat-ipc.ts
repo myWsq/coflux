@@ -16,6 +16,6 @@ export function registerTailcatIpc(transport: NativeTailcatTransport, trusted: T
   });
   ipcMain.handle(IPC.tailcatSend, (event, handle: unknown, frame: unknown) => allowed(event) && id(handle) && frame instanceof Uint8Array && frame.byteLength <= 30 * 1024 * 1024 && transport.send(handle, frame));
   ipcMain.on(IPC.tailcatAck, (event, handle: unknown, bytes: unknown) => { if (allowed(event) && id(handle) && typeof bytes === "number") transport.acknowledge(handle, bytes); });
-  ipcMain.on(IPC.tailcatClose, (event, handle: unknown) => { if (allowed(event) && id(handle)) transport.closeLane(handle); });
+  ipcMain.on(IPC.tailcatClose, (event, handle: unknown) => { if (allowed(event) && id(handle)) transport.closeRendererLane(handle); });
   ipcMain.on(IPC.tailcatControl, (event, online: unknown, hard: unknown) => { if (allowed(event) && typeof online === "boolean" && typeof hard === "boolean") transport.setControl(online, hard); });
 }

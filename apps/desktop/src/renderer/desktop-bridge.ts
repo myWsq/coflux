@@ -15,6 +15,7 @@ export type {
   DesktopBrowserMode,
   DesktopBrowserPrepared,
   DesktopBrowserRect,
+  DesktopBrowserTunnelFailure,
   DesktopCommand,
   DesktopDaemonBusy,
   DesktopDaemonFda,

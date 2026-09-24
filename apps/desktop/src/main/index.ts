@@ -1,7 +1,7 @@
 import { NativeTailcatTransport } from "./tailcat-transport";
 import { registerTailcatIpc } from "./tailcat-ipc";
 import { startClientBroker } from "./client-broker";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createDesktopAccount } from "./desktop-account";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -29,6 +29,8 @@ import { createTokenStore } from "./token-store";
 import { createUpdater } from "./updater";
 import { createMainWindow, openExternalIfHttp } from "./window";
 import { createBrowserHost } from "./browser-host";
+import { LoopbackTunnels } from "./loopback-tunnel";
+import { DeviceScope } from "@coflux/protocol";
 
 // scheme 特权只能在 ready 之前注册一次：standard（有 host、相对路径可解析）+ secure（安全上下文，
 // IndexedDB/crypto.subtle 可用）+ fetch/流式/代码缓存。不 bypassCSP——CSP 由响应头自己带。
@@ -412,6 +414,33 @@ if (!app.requestSingleInstanceLock()) {
       trusted,
     );
 
+    // The browser tab's device tunnel (plan 20260924-remote-localhost-tunnel): one RPC lane per remote
+    // device, owned by main on the same native transport, under an identity of this app run's own.
+    // The renderer keeps sole say over the transport's online state; ⌘R's transport reset and every
+    // central disconnect close these lanes like any other, and they reopen on demand with backoff.
+    const tunnelClientInstanceId = `desktop-browser-${randomUUID()}`;
+    let tunnelGeneration = 0;
+    const loopbackTunnels = nativeTransport
+      ? new LoopbackTunnels(
+          {
+            online: () => nativeTransport.isOnline(),
+            open: async (daemonId, handlers) => {
+              const opened = await nativeTransport.openOwned(
+                { requestId: `browser-${randomUUID()}`, daemonId, clientInstanceId: tunnelClientInstanceId, generation: String(++tunnelGeneration), scope: DeviceScope.RPC },
+                handlers,
+              );
+              return {
+                channelId: opened.channelId,
+                send: (frame) => nativeTransport.sendOwned(opened.handle, frame),
+                close: () => nativeTransport.closeLane(opened.handle),
+              };
+            },
+          },
+          (message, detail) => log.warn(message, detail),
+        )
+      : null;
+    app.once("will-quit", () => loopbackTunnels?.dispose());
+
     // Built-in browser tabs (plan 20260924-desktop-browser-tab): partitions, the webview gate, guest
     // plumbing, certificates, downloads, screenshots. Whether a workspace's `localhost` is this Mac is
     // decided here from the local daemon id — never from renderer state that is null on the first frame.
@@ -424,6 +453,8 @@ if (!app.requestSingleInstanceLock()) {
       sendCommand: (command) => sendToRenderer(IPC.command, command),
       openExternal: openExternalIfHttp,
       log: (message, detail) => log.warn(message, detail),
+      connectLoopback: loopbackTunnels ? (daemonId, port) => loopbackTunnels.connect(daemonId, port) : undefined,
+      resolveSystemProxy: (url) => session.defaultSession.resolveProxy(url),
     });
     browserHost.registerIpc(trusted);
     app.once("will-quit", () => browserHost.dispose());

@@ -64,6 +64,8 @@ export const IPC = {
   browserClearData: "desktop:browser-clear-data",
   browserCertificate: "desktop:browser-certificate",
   browserTrustCertificate: "desktop:browser-trust-certificate",
+  /** Why a remote workspace's loopback load failed (plan 20260924-remote-localhost-tunnel). */
+  browserTunnelFailure: "desktop:browser-tunnel-failure",
   /** 主进程 → 渲染层：browser events (focus, keys, popups, favicons, history, downloads, mode). */
   browserEvent: "desktop:browser-event",
   /** 主进程 → 渲染层 */

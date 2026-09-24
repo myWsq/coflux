@@ -384,6 +384,13 @@ export function sanitizeClearData(payload: unknown): { workspaceId: string; targ
     : null;
 }
 
+/** A remote workspace page's failed load: which URL it was, to look up why the tunnel failed. */
+export function sanitizeTunnelFailureQuery(payload: unknown): { guestId: number; url: string } | null {
+  const guestId = guestIdOf(payload);
+  if (guestId === null || !isRecord(payload) || typeof payload.url !== "string" || payload.url.length > 8192) return null;
+  return isAllowedPageNavigation(payload.url) ? { guestId, url: payload.url } : null;
+}
+
 export function sanitizeCertificateQuery(payload: unknown): { guestId: number; host: string } | null {
   const guestId = guestIdOf(payload);
   if (guestId === null || !isRecord(payload)) return null;

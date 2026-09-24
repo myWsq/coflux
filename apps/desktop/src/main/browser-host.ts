@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { Duplex } from "node:stream";
 import {
   app,
   clipboard,
@@ -8,6 +9,8 @@ import {
   Menu,
   session,
   webContents as allWebContents,
+  type AuthInfo,
+  type AuthenticationResponseDetails,
   type Certificate,
   type DownloadItem,
   type IpcMainEvent,
@@ -28,6 +31,7 @@ import type {
   DesktopBrowserEvent,
   DesktopBrowserMode,
   DesktopBrowserPrepared,
+  DesktopBrowserTunnelFailure,
   DesktopCommand,
 } from "../shared/desktop-bridge";
 import { IPC } from "../shared/ipc";
@@ -49,6 +53,7 @@ import {
   sanitizeGuestPayload,
   sanitizeNavigate,
   sanitizePrepare,
+  sanitizeTunnelFailureQuery,
   serializeTrustedCertificates,
   stepZoomFactor,
   uniqueDownloadName,
@@ -57,6 +62,7 @@ import {
   type GuestKeyAction,
   type TrustedCertificates,
 } from "./browser-policy";
+import { startPartitionProxy, type PartitionProxy } from "./browser-proxy";
 import { isTrustedRendererUrl } from "./ipc-trust";
 
 /**
@@ -64,7 +70,7 @@ import { isTrustedRendererUrl } from "./ipc-trust";
  *
  * The renderer embeds pages with `<webview>` and owns every piece of chrome around them. This module
  * owns what must not be the renderer's: the per-workspace session partitions (permissions, the
- * remote-workspace loopback block, certificates, downloads), the gate every `<webview>` passes before
+ * remote-workspace network path, certificates, downloads), the gate every `<webview>` passes before
  * it may attach, the hardening and event plumbing of every guest (popups, keys, focus, favicons,
  * navigation state, zoom), docked DevTools, screenshots and clearing data. The rules themselves are
  * pure and live in browser-policy.ts.
@@ -72,8 +78,13 @@ import { isTrustedRendererUrl } from "./ipc-trust";
  * Order, always: the renderer asks to **prepare** a workspace's partition; only then does it insert
  * a `<webview>` with that partition and `src="about:blank"`, which the gate admits; only once the
  * guest is attached does it ask main to **navigate**. Preparing is where the session is configured
- * (slice 2 installs its proxy there, which is async — the reason it is not done in the synchronous
- * `will-attach-webview`).
+ * (a remote workspace's proxy is installed there, which is async — the reason it is not done in the
+ * synchronous `will-attach-webview`).
+ *
+ * A remote workspace's `localhost` is its device (plan 20260924-remote-localhost-tunnel): its
+ * partition sends every request to a private local proxy (browser-proxy.ts), which carries loopback
+ * targets through the device tunnel and everything else along this Mac's system proxy. The proxy is
+ * installed with `<-loopback>`, without which Chromium would bypass it for loopback implicitly.
  */
 
 /** Permissions a dev page may use without a prompt; everything else is refused. */
@@ -83,6 +94,8 @@ const MAX_FAVICON_BYTES = 256 * 1024;
 const FAVICON_TIMEOUT_MS = 5000;
 /** How long preparing waits for the local daemon id before calling the workspace remote. */
 const DEFAULT_LOCAL_DAEMON_WAIT_MS = 3000;
+/** A tunnel failure older than this no longer explains a failed load. */
+const TUNNEL_FAILURE_TTL_MS = 60_000;
 const CERTIFICATES_FILE = "browser-certificates.json";
 
 type TrustedSenders = { appOrigin: string; devRendererUrl?: string };
@@ -100,6 +113,14 @@ export type BrowserHostOptions = {
   openExternal: (url: string) => void;
   log: (message: string, detail?: unknown) => void;
   localDaemonWaitMs?: number;
+  /**
+   * A connection to a loopback port of the device `daemonId` (the device tunnel); rejects with a
+   * `TunnelError`. Absent when this build has no native transport: remote partitions then keep
+   * slice 1's loopback block.
+   */
+  connectLoopback?: (daemonId: string, port: number) => Promise<Duplex>;
+  /** This Mac's system proxy for a URL, in PAC form; non-loopback traffic of a remote partition follows it. */
+  resolveSystemProxy?: (url: string) => Promise<string>;
 };
 
 export type BrowserHost = {
@@ -124,6 +145,17 @@ type ConfiguredPartition = {
   daemonId: string;
   /** The mode last reported to the renderer; null before the first prepare. */
   announced: DesktopBrowserMode | null;
+  /** The remote partition's own proxy listener; null for a local partition. */
+  proxy: PartitionProxy | null;
+  /**
+   * What the session's proxy configuration is: `null` never set (Chromium's default, the system
+   * settings), `"system"` set back to them, or the port of the partition's proxy.
+   */
+  applied: "system" | number | null;
+  /** Network changes of this partition, one at a time and in order. */
+  network: Promise<void>;
+  /** Per port: why the last loopback open through the tunnel failed. */
+  tunnelFailures: Map<number, { reason: DesktopBrowserTunnelFailure; at: number }>;
 };
 
 type Guest = {
@@ -143,6 +175,24 @@ function hostOf(url: string): string | null {
 
 function isWebUrl(url: string): boolean {
   return url !== "about:blank" && isAllowedPageNavigation(url);
+}
+
+/** The port a URL connects to, defaults included; null for anything else. */
+function portOfUrl(url: string): number | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.port) return Number(parsed.port);
+    if (parsed.protocol === "http:" || parsed.protocol === "ws:") return 80;
+    if (parsed.protocol === "https:" || parsed.protocol === "wss:") return 443;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the partition's requests go through its proxy (so loopback reaches the device). */
+function proxied(entry: ConfiguredPartition): boolean {
+  return typeof entry.applied === "number";
 }
 
 export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
@@ -187,17 +237,70 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
   }
 
   // A workspace prepared while the local daemon id was unknown was reported as remote; once main
-  // learns the id, any partition whose meaning changed is reported again. The loopback block reads
-  // the mode on every request, so it follows immediately.
+  // learns the id, any partition whose meaning changed flips its network path and is reported again
+  // once the flip is in place.
   const stopWatchingDaemon = options.onLocalDaemonChange(() => {
     for (const entry of configured.values()) {
       if (entry.announced === null) continue;
       const mode = modeOf(entry);
-      if (mode === entry.announced) continue;
-      entry.announced = mode;
-      send({ kind: "mode", workspaceId: entry.workspaceId, mode });
+      void queueNetwork(entry).then(() => {
+        if (mode !== modeOf(entry) || mode === entry.announced) return;
+        entry.announced = mode;
+        send({ kind: "mode", workspaceId: entry.workspaceId, mode });
+      });
     }
   });
+
+  /**
+   * Brings the partition's network path in line with its mode: a remote partition gets its own
+   * authenticated proxy (`fixed_servers` + `<-loopback>`), a local one the system settings. Every
+   * change drops pooled connections, so nothing keeps reaching the old place. Resolves only once
+   * `setProxy` and `closeAllConnections` both resolved.
+   */
+  async function applyNetwork(entry: ConfiguredPartition): Promise<void> {
+    const remote = modeOf(entry) === "remote";
+    const connectLoopback = options.connectLoopback;
+    if (remote && connectLoopback) {
+      if (!entry.proxy) {
+        try {
+          entry.proxy = await startPartitionProxy({
+            // The daemon is read per connection: a workspace prepared again may have moved.
+            connectLoopback: (port) => connectLoopback(entry.daemonId, port),
+            resolveProxy: (url) => (options.resolveSystemProxy ? options.resolveSystemProxy(url) : Promise.resolve("DIRECT")),
+            onLoopbackResult: (port, failure) => {
+              if (failure === null) entry.tunnelFailures.delete(port);
+              else entry.tunnelFailures.set(port, { reason: failure, at: Date.now() });
+            },
+            log: options.log,
+          });
+        } catch (error) {
+          // Slice 1's loopback block stays in force for this partition.
+          options.log("浏览器代理启动失败，远程工作区的 localhost 暂不可用", String(error));
+          return;
+        }
+      }
+      if (entry.applied === entry.proxy.port) return;
+      await entry.session.setProxy({ mode: "fixed_servers", proxyRules: `127.0.0.1:${entry.proxy.port}`, proxyBypassRules: "<-loopback>" });
+      await entry.session.closeAllConnections();
+      entry.applied = entry.proxy.port;
+      return;
+    }
+    const proxy = entry.proxy;
+    entry.proxy = null;
+    if (proxied(entry)) {
+      await entry.session.setProxy({ mode: "system" });
+      await entry.session.closeAllConnections();
+      entry.applied = "system";
+    }
+    proxy?.close();
+    entry.tunnelFailures.clear();
+  }
+
+  function queueNetwork(entry: ConfiguredPartition): Promise<void> {
+    const next = entry.network.then(() => applyNetwork(entry)).catch((error: unknown) => options.log("浏览器分区网络配置失败", String(error)));
+    entry.network = next;
+    return next;
+  }
 
   function waitForLocalDaemonId(): Promise<void> {
     if (options.localDaemonId()) return Promise.resolve();
@@ -282,12 +385,17 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
    */
   function configureSession(ses: Session, partition: string): void {
     denyPermissions(ses);
-    // Slice 1: a remote workspace's `localhost` is another device, which this slice cannot reach —
-    // refuse every loopback request of such a partition (navigations, subresources, fetch/XHR,
-    // WebSockets, redirects) rather than silently showing this Mac's. The mode is read per request.
+    // Fallback only: a remote partition whose proxy is not (yet) in place — it could not be started,
+    // this build has no tunnel, or a mode flip is still being applied — must not silently show this
+    // Mac's `localhost`, so its loopback requests (navigations, subresources, fetch/XHR, WebSockets,
+    // redirects) are refused. The mode is read per request.
     ses.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
       const entry = configured.get(partition);
-      const block = entry !== undefined && modeOf(entry) === "remote" && isLoopbackUrl(details.url);
+      const block = entry !== undefined && modeOf(entry) === "remote" && !proxied(entry) && isLoopbackUrl(details.url);
+      if (block && entry) {
+        const port = portOfUrl(details.url);
+        if (port !== null) entry.tunnelFailures.set(port, { reason: "offline", at: Date.now() });
+      }
       callback(block ? { cancel: true } : {});
     });
     ses.setCertificateVerifyProc(verifyProcFor(partition));
@@ -310,12 +418,14 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     if (!entry) {
       const ses = session.fromPartition(partition);
       configureSession(ses, partition);
-      entry = { session: ses, workspaceId, daemonId, announced: null };
+      entry = { session: ses, workspaceId, daemonId, announced: null, proxy: null, applied: null, network: Promise.resolve(), tunnelFailures: new Map() };
       configured.set(partition, entry);
     } else {
       entry.daemonId = daemonId;
     }
     await waitForLocalDaemonId();
+    // Before the renderer may insert a webview: its first navigation must already take this path.
+    await queueNetwork(entry);
     const mode = modeOf(entry);
     entry.announced = mode;
     prepared.add(partition);
@@ -361,7 +471,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     if (iconUrl.startsWith("data:image/")) return iconUrl.length <= MAX_FAVICON_BYTES * 1.4 ? iconUrl : null;
     if (!isWebUrl(iconUrl)) return null;
     const entry = configured.get(guest.partition);
-    if (entry && modeOf(entry) === "remote" && isLoopbackUrl(iconUrl)) return null;
+    if (entry && modeOf(entry) === "remote" && !proxied(entry) && isLoopbackUrl(iconUrl)) return null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FAVICON_TIMEOUT_MS);
     try {
@@ -690,6 +800,36 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
   }
   app.on("certificate-error", onCertificateError);
 
+  // Credentials for a remote partition's proxy, recognised by the listener's own host and port —
+  // never by `webContents`, which may be null here. Everything else keeps the default (cancelled).
+  function onLogin(
+    event: { preventDefault: () => void },
+    _contents: WebContents | null,
+    _details: AuthenticationResponseDetails,
+    authInfo: AuthInfo,
+    callback: (username?: string, password?: string) => void,
+  ): void {
+    if (!authInfo.isProxy) return;
+    for (const entry of configured.values()) {
+      const proxy = entry.proxy;
+      if (!proxy || authInfo.port !== proxy.port || authInfo.host !== proxy.host) continue;
+      event.preventDefault();
+      callback(proxy.credentials.username, proxy.credentials.password);
+      return;
+    }
+  }
+  app.on("login", onLogin);
+
+  /** Why the last loopback open of this page's partition to that URL's port failed, if it did lately. */
+  function tunnelFailure(guest: Guest, url: string): DesktopBrowserTunnelFailure | null {
+    const entry = configured.get(guest.partition);
+    const port = portOfUrl(url);
+    if (!entry || port === null || modeOf(entry) !== "remote" || !isLoopbackUrl(url)) return null;
+    const failure = entry.tunnelFailures.get(port);
+    if (!failure || Date.now() - failure.at > TUNNEL_FAILURE_TTL_MS) return null;
+    return failure.reason;
+  }
+
   function registerIpc(trustedSenders: TrustedSenders): void {
     const allowed = (event: IpcMainEvent | IpcMainInvokeEvent) => isTrustedRendererUrl(event.senderFrame?.url, trustedSenders);
     /** A page guest embedded by the very renderer that asks about it. */
@@ -805,6 +945,14 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       return failures.get(guest.partition)?.get(input.host) ?? null;
     });
 
+    ipcMain.handle(IPC.browserTunnelFailure, (event, payload: unknown) => {
+      if (!allowed(event)) throw new Error("untrusted sender");
+      const input = sanitizeTunnelFailureQuery(payload);
+      const guest = input ? pageGuest(event, input.guestId) : null;
+      if (!input || !guest) return null;
+      return tunnelFailure(guest, input.url);
+    });
+
     ipcMain.handle(IPC.browserTrustCertificate, (event, payload: unknown) => {
       if (!allowed(event)) throw new Error("untrusted sender");
       const input = sanitizeCertificateQuery(payload);
@@ -830,6 +978,11 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
   function dispose(): void {
     stopWatchingDaemon();
     app.removeListener("certificate-error", onCertificateError);
+    app.removeListener("login", onLogin);
+    for (const entry of configured.values()) {
+      entry.proxy?.close();
+      entry.proxy = null;
+    }
     reset();
   }
 

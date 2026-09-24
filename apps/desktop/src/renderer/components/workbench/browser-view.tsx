@@ -56,7 +56,13 @@ import type { BrowserRuntime } from "@/components/workbench/browser-runtime";
 import { listForwardedPorts } from "@/components/workbench/port-menu";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { desktop } from "@/config";
-import type { DesktopBrowserCertificate, DesktopBrowserEvent, DesktopBrowserMode, DesktopBrowserPrepared } from "@/desktop-bridge";
+import type {
+  DesktopBrowserCertificate,
+  DesktopBrowserEvent,
+  DesktopBrowserMode,
+  DesktopBrowserPrepared,
+  DesktopBrowserTunnelFailure,
+} from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 
 /**
@@ -106,7 +112,8 @@ type WebviewElement = HTMLElement & { getWebContentsId: () => number };
 type Failure =
   | { kind: "refused"; url: string }
   | { kind: "network"; url: string; code: number; description: string }
-  | { kind: "remote-loopback"; url: string }
+  /** A remote workspace's loopback load failed in the device tunnel (plan 20260924-remote-localhost-tunnel). */
+  | { kind: "tunnel"; url: string; reason: DesktopBrowserTunnelFailure }
   | { kind: "certificate"; url: string; host: string; certificate: DesktopBrowserCertificate | null }
   | { kind: "crashed"; url: string };
 
@@ -117,6 +124,12 @@ const NET_ERR_CONNECTION_REFUSED = -102;
 
 function isCertificateError(code: number): boolean {
   return code <= -200 && code > -300;
+}
+
+/** The page for a failed load main has nothing more specific about. */
+function loadFailure(url: string, code: number, description: string): Failure {
+  if (code === NET_ERR_CONNECTION_REFUSED) return { kind: "refused", url };
+  return { kind: "network", url, code, description };
 }
 
 function createWebview(partition: string, options: { allowPopups: boolean }): WebviewElement {
@@ -255,12 +268,6 @@ function BrowserView({
     setHighlight(-1);
     const nextUrl = target === "about:blank" ? "" : target;
     runtime.updateTab(tabId, nextUrl === liveRef.current.url ? { url: nextUrl } : { url: nextUrl, title: "", favicon: null });
-    // Slice 1: a remote workspace's localhost is another device this build cannot reach. Main refuses
-    // such requests anyway; saying so here avoids a round trip and a blank page.
-    if (currentMode() === "remote" && isLoopbackUrl(target)) {
-      setFailure({ kind: "remote-loopback", url: target });
-      return;
-    }
     const guest = guestIdRef.current;
     if (guest === null) {
       pendingUrlRef.current = target;
@@ -402,15 +409,22 @@ function BrowserView({
         }
         return;
       }
-      if (detail.errorCode === NET_ERR_BLOCKED_BY_CLIENT && currentMode() === "remote" && isLoopbackUrl(failedUrl)) {
-        setFailure({ kind: "remote-loopback", url: failedUrl });
+      const fallback = loadFailure(failedUrl, detail.errorCode, detail.errorDescription);
+      const guest = guestIdRef.current;
+      if (currentMode() === "remote" && isLoopbackUrl(failedUrl) && guest !== null) {
+        // The device tunnel failed in main, which remembers why. Asked here rather than pushed from
+        // there: a push and this event travel different paths, and the generic page would win races.
+        const settle = (reason: DesktopBrowserTunnelFailure | null) => {
+          if (runtime.tabs.getState().tabs[tabId]?.url !== failedUrl) return;
+          if (reason) setFailure({ kind: "tunnel", url: failedUrl, reason });
+          // Refused before reaching the tunnel (main's fallback block): the device is not reachable.
+          else if (detail.errorCode === NET_ERR_BLOCKED_BY_CLIENT) setFailure({ kind: "tunnel", url: failedUrl, reason: "offline" });
+          else setFailure(fallback);
+        };
+        void desktop.browserTunnelFailure(guest, failedUrl).then(settle, () => settle(null));
         return;
       }
-      if (detail.errorCode === NET_ERR_CONNECTION_REFUSED) {
-        setFailure({ kind: "refused", url: failedUrl });
-        return;
-      }
-      setFailure({ kind: "network", url: failedUrl, code: detail.errorCode, description: detail.errorDescription });
+      setFailure(fallback);
     });
     on("render-process-gone", () => {
       runtime.updateTab(tabId, { loading: false });
@@ -448,8 +462,8 @@ function BrowserView({
               return;
             case "mode":
               setMode(event.mode);
-              // The daemon registered after all: a loopback page refused as "remote" can load now.
-              if (event.mode === "local" && liveRef.current.failure?.kind === "remote-loopback") actionsRef.current.retry();
+              // `localhost` changed meaning: a loopback page that failed for the old one may load now.
+              if (liveRef.current.failure?.kind === "tunnel") actionsRef.current.retry();
               return;
             default:
               return;
@@ -901,7 +915,7 @@ function BrowserView({
               </div>
               <h2 className="text-base font-medium text-foreground">新标签页</h2>
               <p className="mt-1.5 text-sm leading-5 text-muted-foreground">
-                在地址栏输入网址、端口号或搜索内容。{isRemote ? "这个工作区在另一台设备上，它的 localhost 暂时还打不开。" : ""}
+                在地址栏输入网址、端口号或搜索内容。{isRemote ? "这个工作区在另一台设备上，localhost 指的是那台设备。" : ""}
               </p>
               <div className="mt-5 w-full text-left">
                 <div className="mb-1.5 px-1 text-2xs font-medium uppercase tracking-wide text-muted-foreground">转发中的端口</div>
@@ -1021,10 +1035,20 @@ function FailurePage({
     body = port !== null ? `这个工作区所在设备的 ${port} 端口上没有程序在监听。启动开发服务器后重试。` : "对方拒绝了连接。";
   } else if (failure.kind === "network") {
     body = `${failure.description || "网络错误"}（${failure.code}）`;
-  } else if (failure.kind === "remote-loopback") {
-    icon = <Unplug className="size-5" />;
-    heading = "远程工作区暂不支持 localhost";
-    body = "这个工作区在另一台设备上，它的 localhost 指的是那台设备，内置浏览器暂时还连不过去；公网地址不受影响。需要时可以用端口转发在系统浏览器里打开。";
+  } else if (failure.kind === "tunnel") {
+    const port = loopbackPortOf(failure.url);
+    if (failure.reason === "refused") {
+      heading = `设备上的 localhost:${port ?? ""} 没有服务在监听`;
+      body = "在这个工作区的终端里启动开发服务器后重试。";
+    } else if (failure.reason === "unsupported") {
+      icon = <Unplug className="size-5" />;
+      heading = "该设备的 coflux 版本过旧";
+      body = "更新后才能在内置浏览器中访问它的 localhost。";
+    } else {
+      icon = <Unplug className="size-5" />;
+      heading = "设备离线或无法连接";
+      body = "这个工作区所在的设备现在连不上。确认它在线后重试。";
+    }
   } else if (failure.kind === "certificate") {
     icon = <ShieldAlert className="size-5" />;
     heading = "此站点的证书不受信任";

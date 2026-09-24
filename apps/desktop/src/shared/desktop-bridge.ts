@@ -112,10 +112,16 @@ export type DesktopNotification = {
 /**
  * Built-in browser tabs (plan 20260924-desktop-browser-tab). Whether a workspace's `localhost` is
  * this Mac (`local`) or another device (`remote`) is decided by the main process from the local
- * daemon id, never by the renderer. In this slice a remote workspace's partition refuses every
- * loopback request.
+ * daemon id, never by the renderer. A remote workspace's loopback requests reach its device through
+ * the device tunnel (plan 20260924-remote-localhost-tunnel).
  */
 export type DesktopBrowserMode = "local" | "remote";
+
+/**
+ * Why a remote workspace's loopback load failed: the device is offline or unreachable, nothing
+ * listens on that port on the device, or the device's coflux predates the tunnel.
+ */
+export type DesktopBrowserTunnelFailure = "offline" | "refused" | "unsupported";
 
 export type DesktopBrowserPrepared = { partition: string; mode: DesktopBrowserMode };
 
@@ -296,6 +302,11 @@ export type DesktopBridge = {
   browserCertificate(guestId: number, host: string): Promise<DesktopBrowserCertificate | null>;
   /** 信任证书: remembers that certificate for `host` in this page's partition, across restarts. */
   browserTrustCertificate(guestId: number, host: string): Promise<boolean>;
+  /**
+   * Asked from `did-fail-load` of a loopback URL in a remote workspace: why the device tunnel failed
+   * for that URL's port, or null when no recent tunnel failure explains it.
+   */
+  browserTunnelFailure(guestId: number, url: string): Promise<DesktopBrowserTunnelFailure | null>;
   onBrowserEvent(listener: (event: DesktopBrowserEvent) => void): () => void;
 };
 
