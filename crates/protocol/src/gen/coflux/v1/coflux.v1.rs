@@ -1334,6 +1334,58 @@ pub struct DeviceExecutorReportAck {
     #[prost(string, tag="1")]
     pub run_id: ::prost::alloc::string::String,
 }
+/// client→worker (RPC): open a TCP connection to the device's loopback port.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceLoopbackOpen {
+    #[prost(uint32, tag="1")]
+    pub connection_id: u32,
+    /// 1..=65535.
+    #[prost(uint32, tag="2")]
+    pub port: u32,
+}
+/// worker→client (RPC): the connection is established; data may flow both ways.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceLoopbackOpened {
+    #[prost(uint32, tag="1")]
+    pub connection_id: u32,
+}
+/// worker→client (RPC): the connection could not be opened. Terminal for the id.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceLoopbackFailed {
+    #[prost(uint32, tag="1")]
+    pub connection_id: u32,
+    #[prost(enumeration="DeviceLoopbackFailure", tag="2")]
+    pub reason: i32,
+    /// Diagnostic text for logs; never shown as the failure page.
+    #[prost(string, tag="3")]
+    pub message: ::prost::alloc::string::String,
+}
+/// Both directions (client→worker requires RPC): bytes of an open connection.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceLoopbackData {
+    #[prost(uint32, tag="1")]
+    pub connection_id: u32,
+    /// Non-empty, at most 64 KiB.
+    #[prost(bytes="vec", tag="2")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
+/// Both directions (client→worker requires RPC): the receiver consumed `frames`
+/// data frames of the connection and returns that much credit to the sender.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceLoopbackAck {
+    #[prost(uint32, tag="1")]
+    pub connection_id: u32,
+    #[prost(uint32, tag="2")]
+    pub frames: u32,
+}
+/// Both directions (client→worker requires RPC): the sender closed the
+/// connection. Data frames sent before it are still delivered in order; the
+/// receiver flushes them to its socket, then closes it. Terminal for the id.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceLoopbackClose {
+    #[prost(uint32, tag="1")]
+    pub connection_id: u32,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceEnvelope {
     #[prost(uint32, tag="1")]
@@ -1342,7 +1394,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -1437,6 +1489,18 @@ pub mod device_envelope {
         ExecutorReport(super::DeviceExecutorReport),
         #[prost(message, tag="75")]
         ExecutorReportAck(super::DeviceExecutorReportAck),
+        #[prost(message, tag="80")]
+        LoopbackOpen(super::DeviceLoopbackOpen),
+        #[prost(message, tag="81")]
+        LoopbackOpened(super::DeviceLoopbackOpened),
+        #[prost(message, tag="82")]
+        LoopbackFailed(super::DeviceLoopbackFailed),
+        #[prost(message, tag="83")]
+        LoopbackData(super::DeviceLoopbackData),
+        #[prost(message, tag="84")]
+        LoopbackAck(super::DeviceLoopbackAck),
+        #[prost(message, tag="85")]
+        LoopbackClose(super::DeviceLoopbackClose),
     }
 }
 // Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
@@ -1624,6 +1688,77 @@ impl ExecutorRunState {
             "EXECUTOR_RUN_STATE_TOOL_FAILED" => Some(Self::ToolFailed),
             "EXECUTOR_RUN_STATE_CANCELLED" => Some(Self::Cancelled),
             "EXECUTOR_RUN_STATE_UNKNOWN" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+// ===== Loopback tunnel (plan 20260924-remote-localhost-tunnel) =====
+//
+// Lets a client reach TCP ports on the device's own loopback interface over an
+// authenticated Device channel: the desktop app's built-in browser tab uses it so
+// that `localhost` in a remote workspace means that workspace's device.
+//
+// Authority: every client-initiated payload below requires DEVICE_SCOPE_RPC, and
+// every worker-initiated one is only delivered under it. RPC already allows `exec`
+// of arbitrary commands on the device, so reaching the device's loopback grants
+// nothing new. The client names a port, never an address: the worker dials only
+// 127.0.0.1:<port>, falling back to \[::1\]:<port> when IPv4 fails.
+//
+// Connections are multiplexed on one channel by a client-chosen connection_id
+// (non-zero, never reused during the channel's life). Frames of one connection
+// are ordered because the channel is.
+//
+// Flow control is credit-based, per direction, counted in DATA FRAMES:
+//    - A DeviceLoopbackData frame carries at most 64 KiB of data.
+//    - Per connection, a sender keeps at most 8 unacknowledged data frames in flight.
+//    - Per channel, the worker keeps at most 48 unacknowledged data frames in flight
+//      across all its connections; the client keeps at most 16.
+//    - The receiver acknowledges data frames with DeviceLoopbackAck once it has
+//      handed them to its socket. The client acknowledges EVERY data frame it
+//      receives, including frames for connections it has already closed: the
+//      worker returns channel-wide credit only on acknowledgement.
+// Neither side ever drops or reorders data: a receiver that cannot queue a frame
+// closes that connection (DeviceLoopbackClose), never skips bytes.
+//
+// A worker that predates these payloads decodes them as an empty oneof and
+// answers DeviceError{code:"empty_payload", request_id: unset}; clients treat
+// exactly that as "the device's worker does not support the tunnel".
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum DeviceLoopbackFailure {
+    Unspecified = 0,
+    /// Both 127.0.0.1 and \[::1\] refused the connection: nothing listens on the port.
+    Refused = 1,
+    /// Any other dial error, including a timeout.
+    Unreachable = 2,
+    /// The per-channel or per-worker connection cap is reached.
+    Limit = 3,
+    /// Invalid port or connection_id, or a connection_id already in use.
+    Invalid = 4,
+}
+impl DeviceLoopbackFailure {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "DEVICE_LOOPBACK_FAILURE_UNSPECIFIED",
+            Self::Refused => "DEVICE_LOOPBACK_FAILURE_REFUSED",
+            Self::Unreachable => "DEVICE_LOOPBACK_FAILURE_UNREACHABLE",
+            Self::Limit => "DEVICE_LOOPBACK_FAILURE_LIMIT",
+            Self::Invalid => "DEVICE_LOOPBACK_FAILURE_INVALID",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "DEVICE_LOOPBACK_FAILURE_UNSPECIFIED" => Some(Self::Unspecified),
+            "DEVICE_LOOPBACK_FAILURE_REFUSED" => Some(Self::Refused),
+            "DEVICE_LOOPBACK_FAILURE_UNREACHABLE" => Some(Self::Unreachable),
+            "DEVICE_LOOPBACK_FAILURE_LIMIT" => Some(Self::Limit),
+            "DEVICE_LOOPBACK_FAILURE_INVALID" => Some(Self::Invalid),
             _ => None,
         }
     }

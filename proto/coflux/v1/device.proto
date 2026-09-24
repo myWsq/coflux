@@ -730,6 +730,91 @@ message DeviceExecutorReportAck {
   string run_id = 1;
 }
 
+// ===== Loopback tunnel (plan 20260924-remote-localhost-tunnel) =====
+//
+// Lets a client reach TCP ports on the device's own loopback interface over an
+// authenticated Device channel: the desktop app's built-in browser tab uses it so
+// that `localhost` in a remote workspace means that workspace's device.
+//
+// Authority: every client-initiated payload below requires DEVICE_SCOPE_RPC, and
+// every worker-initiated one is only delivered under it. RPC already allows `exec`
+// of arbitrary commands on the device, so reaching the device's loopback grants
+// nothing new. The client names a port, never an address: the worker dials only
+// 127.0.0.1:<port>, falling back to [::1]:<port> when IPv4 fails.
+//
+// Connections are multiplexed on one channel by a client-chosen connection_id
+// (non-zero, never reused during the channel's life). Frames of one connection
+// are ordered because the channel is.
+//
+// Flow control is credit-based, per direction, counted in DATA FRAMES:
+//   - A DeviceLoopbackData frame carries at most 64 KiB of data.
+//   - Per connection, a sender keeps at most 8 unacknowledged data frames in flight.
+//   - Per channel, the worker keeps at most 48 unacknowledged data frames in flight
+//     across all its connections; the client keeps at most 16.
+//   - The receiver acknowledges data frames with DeviceLoopbackAck once it has
+//     handed them to its socket. The client acknowledges EVERY data frame it
+//     receives, including frames for connections it has already closed: the
+//     worker returns channel-wide credit only on acknowledgement.
+// Neither side ever drops or reorders data: a receiver that cannot queue a frame
+// closes that connection (DeviceLoopbackClose), never skips bytes.
+//
+// A worker that predates these payloads decodes them as an empty oneof and
+// answers DeviceError{code:"empty_payload", request_id: unset}; clients treat
+// exactly that as "the device's worker does not support the tunnel".
+
+enum DeviceLoopbackFailure {
+  DEVICE_LOOPBACK_FAILURE_UNSPECIFIED = 0;
+  // Both 127.0.0.1 and [::1] refused the connection: nothing listens on the port.
+  DEVICE_LOOPBACK_FAILURE_REFUSED = 1;
+  // Any other dial error, including a timeout.
+  DEVICE_LOOPBACK_FAILURE_UNREACHABLE = 2;
+  // The per-channel or per-worker connection cap is reached.
+  DEVICE_LOOPBACK_FAILURE_LIMIT = 3;
+  // Invalid port or connection_id, or a connection_id already in use.
+  DEVICE_LOOPBACK_FAILURE_INVALID = 4;
+}
+
+// client→worker (RPC): open a TCP connection to the device's loopback port.
+message DeviceLoopbackOpen {
+  uint32 connection_id = 1;
+  // 1..=65535.
+  uint32 port = 2;
+}
+
+// worker→client (RPC): the connection is established; data may flow both ways.
+message DeviceLoopbackOpened {
+  uint32 connection_id = 1;
+}
+
+// worker→client (RPC): the connection could not be opened. Terminal for the id.
+message DeviceLoopbackFailed {
+  uint32 connection_id = 1;
+  DeviceLoopbackFailure reason = 2;
+  // Diagnostic text for logs; never shown as the failure page.
+  string message = 3;
+}
+
+// Both directions (client→worker requires RPC): bytes of an open connection.
+message DeviceLoopbackData {
+  uint32 connection_id = 1;
+  // Non-empty, at most 64 KiB.
+  bytes data = 2;
+}
+
+// Both directions (client→worker requires RPC): the receiver consumed `frames`
+// data frames of the connection and returns that much credit to the sender.
+message DeviceLoopbackAck {
+  uint32 connection_id = 1;
+  uint32 frames = 2;
+}
+
+// Both directions (client→worker requires RPC): the sender closed the
+// connection. Data frames sent before it are still delivered in order; the
+// receiver flushes them to its socket, then closes it. Terminal for the id.
+message DeviceLoopbackClose {
+  uint32 connection_id = 1;
+}
+
 message DeviceEnvelope {
   uint32 protocol_version = 1;
   // 已认证后的 inner channel_id 必须与 loopback/relay/UDS 外层 channel 相同；LocalGatewayHello
@@ -780,5 +865,11 @@ message DeviceEnvelope {
     DeviceExecutorCancel executor_cancel = 73;
     DeviceExecutorReport executor_report = 74;
     DeviceExecutorReportAck executor_report_ack = 75;
+    DeviceLoopbackOpen loopback_open = 80;
+    DeviceLoopbackOpened loopback_opened = 81;
+    DeviceLoopbackFailed loopback_failed = 82;
+    DeviceLoopbackData loopback_data = 83;
+    DeviceLoopbackAck loopback_ack = 84;
+    DeviceLoopbackClose loopback_close = 85;
   }
 }
