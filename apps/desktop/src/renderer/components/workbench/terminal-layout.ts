@@ -83,6 +83,25 @@ export type LayoutGeometry = {
 /** Prefix of the optimistic tab's fake id; such ids never reach the attach machine or storage. */
 export const PENDING_TAB_PREFIX = "pending-tab-";
 
+/**
+ * Prefix of a built-in browser tab's id (plan 20260924-desktop-browser-tab). Browser tabs are
+ * layout entries like terminals — they move, split, close and take focus the same way — but they
+ * are not tasks: reconcile never drops them for being absent from the task list, and every
+ * terminal-only path (attach, stop-on-close, cross-workspace moves) skips them by this prefix.
+ * Unlike the pending tab they are persisted; their URL and title live in a separate per-workspace
+ * record (browser-tabs.ts).
+ */
+export const BROWSER_TAB_PREFIX = "browser-tab-";
+
+export function isBrowserTabId(id: string): boolean {
+  return id.startsWith(BROWSER_TAB_PREFIX);
+}
+
+/** A layout id that is a terminal task — neither the optimistic pending tab nor a browser tab. */
+export function isTaskTabId(id: string): boolean {
+  return !id.startsWith(PENDING_TAB_PREFIX) && !isBrowserTabId(id);
+}
+
 const EPSILON = 1e-6;
 
 // ---------------------------------------------------------------------------------------------
@@ -128,6 +147,11 @@ export function activeTabIds(layout: TerminalLayout): string[] {
 
 export function layoutTabIds(layout: TerminalLayout): string[] {
   return listGroups(layout.root).flatMap((group) => group.tabs);
+}
+
+/** The layout's browser tabs, in layout (tree) order. */
+export function browserTabIdsOf(layout: TerminalLayout): string[] {
+  return layoutTabIds(layout).filter(isBrowserTabId);
 }
 
 function nextGroupId(root: LayoutNode): string {
@@ -399,6 +423,24 @@ export function revealTab(layout: TerminalLayout, taskId: string): TerminalLayou
   return updateGroup(layout, target.id, (group) => ({ ...group, tabs: [...group.tabs, taskId], activeTabId: taskId }));
 }
 
+/**
+ * Puts a tab that is not in the layout yet right after `anchorId`, in the anchor's group, and makes
+ * it that group's active tab with the group focused — a page's `window.open` / `target=_blank`
+ * opening a browser tab beside its opener. Without the anchor in the layout it behaves like
+ * `revealTab`.
+ */
+export function openTabBeside(layout: TerminalLayout, anchorId: string, taskId: string): TerminalLayout {
+  if (groupOfTab(layout, taskId)) return activateTab(layout, taskId);
+  const anchor = groupOfTab(layout, anchorId);
+  if (!anchor) return revealTab(layout, taskId);
+  const next = updateGroup(layout, anchor.id, (group) => {
+    const tabs = [...group.tabs];
+    tabs.splice(tabs.indexOf(anchorId) + 1, 0, taskId);
+    return { ...group, tabs, activeTabId: taskId };
+  });
+  return focusGroup(next, anchor.id);
+}
+
 /** Removes a tab wherever it is; its group collapses when emptied. Clears the pending entry if it was that. */
 export function removeTab(layout: TerminalLayout, taskId: string): TerminalLayout {
   const group = groupOfTab(layout, taskId);
@@ -649,6 +691,7 @@ export type ReconcileOptions = {
 /**
  * Brings a workspace's layout in line with its live task list (ordered by creation):
  * - the pending tab is exempt from removal; the task answering it replaces it in place;
+ * - browser tabs are not tasks and are exempt from removal too (they go when the user closes them);
  * - tasks that vanished (closed, or moved to another workspace) are removed, emptied groups collapse;
  * - tasks the layout does not hold yet (created here or elsewhere, or moved in) land in the focused
  *   group, becoming its active tab only when it had none;
@@ -663,7 +706,7 @@ export function reconcileLayout(layout: TerminalLayout, taskIds: readonly string
   const live = new Set(taskIds);
   const pendingId = next.pending?.id ?? null;
   for (const id of layoutTabIds(next)) {
-    if (id !== pendingId && !live.has(id)) next = removeTab(next, id);
+    if (id !== pendingId && !isBrowserTabId(id) && !live.has(id)) next = removeTab(next, id);
   }
 
   const present = new Set(layoutTabIds(next));
@@ -681,6 +724,19 @@ export function reconcileLayout(layout: TerminalLayout, taskIds: readonly string
 
   const follow = options.follow;
   if (follow && live.has(follow)) next = activateTab(next, follow);
+  return next;
+}
+
+/**
+ * Drops every browser tab whose id `keep` rejects — on restore, a browser id in a stored layout
+ * without a stored record (URL, title) is dropped; emptied groups collapse as on any close.
+ * Returns the same object when nothing was dropped.
+ */
+export function pruneBrowserTabs(layout: TerminalLayout, keep: (tabId: string) => boolean): TerminalLayout {
+  let next = layout;
+  for (const id of browserTabIdsOf(layout)) {
+    if (!keep(id)) next = removeTab(next, id);
+  }
   return next;
 }
 
@@ -785,7 +841,11 @@ function parseNode(value: unknown, state: ParseState, depth: number): LayoutNode
   return null;
 }
 
-/** One stored layout. Anything unusable collapses to a single group; unknown tab ids are left for reconcile to drop. */
+/**
+ * One stored layout. Anything unusable collapses to a single group; unknown tab ids are left for
+ * reconcile to drop. Browser tab ids are kept as they are — reconcile keeps them, and the caller
+ * drops the ones without a stored record (`pruneBrowserTabs`).
+ */
 export function parseLayout(value: unknown): TerminalLayout {
   if (!isRecord(value)) return createLayout();
   const state: ParseState = { seenTabs: new Set(), idMap: new Map(), counter: 0 };

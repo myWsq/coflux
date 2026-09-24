@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  BROWSER_TAB_PREFIX,
   EMPTY_LAYOUT,
   activateTab,
   activeTabIds,
@@ -17,21 +18,27 @@ import {
   focusedGroupRelativeTab,
   focusedGroupTabAt,
   focusedTabId,
+  browserTabIdsOf,
   groupBodyStyle,
   groupOfTab,
   layoutGeometry,
   listGroups,
   moveTabToGroup,
   moveTabToNewGroup,
+  openTabBeside,
   orderedGroups,
   parseLayout,
   planLayoutPersist,
+  pruneBrowserTabs,
   readStoredLayouts,
   reconcileLayout,
   removeTab,
+  revealTab,
   resizeSplit,
   serializeLayouts,
   splitWithNewTab,
+  isBrowserTabId,
+  isTaskTabId,
   writeStoredLayouts,
   type TerminalLayout,
 } from "./terminal-layout";
@@ -433,4 +440,89 @@ test("stored ids that are no longer tasks are dropped by the first reconcile aft
   writeStoredLayouts({ storage, key: "k" }, serializeLayouts({ ws: grid2x2() }));
   const restored = readStoredLayouts({ storage, key: "k" }).ws!;
   assert.deepEqual(tabsInOrder(effectiveLayout(restored, ["b", "d", "e"], { snapshotReady: true })), [["b"], ["d", "e"]]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Browser tabs (plan 20260924-desktop-browser-tab)
+// ---------------------------------------------------------------------------------------------
+
+const WEB = `${BROWSER_TAB_PREFIX}w1`;
+const WEB2 = `${BROWSER_TAB_PREFIX}w2`;
+
+test("browser tab ids are their own namespace, neither tasks nor the pending tab", () => {
+  assert.equal(isBrowserTabId(WEB), true);
+  assert.equal(isTaskTabId(WEB), false);
+  assert.equal(isTaskTabId("pending-tab-1"), false);
+  assert.equal(isTaskTabId("a"), true);
+  assert.equal(isBrowserTabId("a"), false);
+});
+
+test("reconcile keeps browser tabs although they are not tasks", () => {
+  const layout = revealTab(createLayout(["a", "b"]), WEB);
+  const next = reconcileLayout(layout, ["a"]);
+  assert.deepEqual(tabsInOrder(next), [["a", WEB]]);
+  assert.equal(focusedTabId(next), WEB);
+  // Nothing to change: same object back, browser tab included.
+  assert.equal(reconcileLayout(next, ["a"]), next);
+  // A group holding only a browser tab survives every task closing.
+  const split = moveTabToNewGroup(next, WEB, groupIdOf(next, "a"), "right");
+  const reconciled = reconcileLayout(split, []);
+  assert.deepEqual(tabsInOrder(reconciled), [[WEB]]);
+});
+
+test("a new task lands next to browser tabs in the focused group without stealing the browser tab's focus", () => {
+  const layout = revealTab(createLayout(["a"]), WEB);
+  const next = reconcileLayout(layout, ["a", "n"]);
+  assert.deepEqual(tabsInOrder(next), [["a", WEB, "n"]]);
+  assert.equal(focusedTabId(next), WEB);
+});
+
+test("browser tabs move, split and close like any tab", () => {
+  let layout = revealTab(createLayout(["a", "b"]), WEB);
+  const g1 = groupIdOf(layout, "a");
+  layout = moveTabToNewGroup(layout, WEB, g1, "right");
+  assert.deepEqual(tabsInOrder(layout), [["a", "b"], [WEB]]);
+  assert.equal(focusedTabId(layout), WEB);
+  layout = moveTabToGroup(layout, "b", groupIdOf(layout, WEB), 0);
+  assert.deepEqual(tabsInOrder(layout), [["a"], ["b", WEB]]);
+  layout = moveTabToGroup(layout, WEB, g1, 0);
+  assert.deepEqual(tabsInOrder(layout), [[WEB, "a"], ["b"]]);
+  layout = splitWithNewTab(layout, g1, "down", WEB2);
+  assert.deepEqual(tabsInOrder(layout), [[WEB, "a"], ["b"], [WEB2]]);
+  layout = removeTab(layout, WEB2);
+  assert.deepEqual(tabsInOrder(layout), [[WEB, "a"], ["b"]]);
+  layout = removeTab(layout, WEB);
+  assert.deepEqual(tabsInOrder(layout), [["a"], ["b"]]);
+  assert.deepEqual(browserTabIdsOf(layout), []);
+});
+
+test("a popup opens right after its opener in the opener's group, active and focused", () => {
+  let layout = createLayout([WEB, "a"]);
+  layout = moveTabToNewGroup(layout, "a", groupIdOf(layout, WEB), "right");
+  assert.equal(focusedTabId(layout), "a");
+  const next = openTabBeside(layout, WEB, WEB2);
+  assert.deepEqual(tabsInOrder(next), [[WEB, WEB2], ["a"]]);
+  assert.equal(focusedTabId(next), WEB2);
+  // An opener that is gone: the new tab joins the focused group instead.
+  const orphan = openTabBeside(layout, `${BROWSER_TAB_PREFIX}gone`, WEB2);
+  assert.deepEqual(tabsInOrder(orphan), [[WEB], ["a", WEB2]]);
+});
+
+test("browser tabs survive storage and parsing; restore prunes the ones without a record", () => {
+  let layout = revealTab(createLayout(["a"]), WEB);
+  layout = moveTabToNewGroup(layout, WEB, groupIdOf(layout, "a"), "right");
+  layout = revealTab(layout, WEB2);
+  const storage = memoryStorage();
+  const store = { storage, key: "layouts" };
+  assert.ok(writeStoredLayouts(store, serializeLayouts({ ws: layout })));
+  const restored = readStoredLayouts(store).ws!;
+  assert.deepEqual(tabsInOrder(restored), [["a"], [WEB, WEB2]]);
+  assert.equal(focusedTabId(restored), WEB2);
+  assert.deepEqual(tabsInOrder(parseLayout(JSON.parse(serializeLayouts({ ws: layout })).layouts.ws)), [["a"], [WEB, WEB2]]);
+
+  const pruned = pruneBrowserTabs(restored, (id) => id === WEB);
+  assert.deepEqual(tabsInOrder(pruned), [["a"], [WEB]]);
+  const allGone = pruneBrowserTabs(restored, () => false);
+  assert.deepEqual(tabsInOrder(allGone), [["a"]]);
+  assert.equal(pruneBrowserTabs(restored, () => true), restored);
 });
