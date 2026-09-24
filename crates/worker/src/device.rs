@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use coflux_protocol::logln;
@@ -28,6 +28,7 @@ use crate::agent_ctl::executor::{
     self, Effect as ExecutorEffect, ExecutorLedger, HostAuthority, RegisterOutcome,
     RunRecord as ExecutorRun,
 };
+use crate::device_loopback::{self, LoopbackTable};
 use crate::executor_host::{Inbound as ExecutorHostInbound, LOCAL_CHANNEL_ID as EXECUTOR_LOCAL_CHANNEL};
 use crate::local_auth::{AuthenticatedLocal, LocalAuth, LocalPrincipal};
 use crate::{Config, WorkerState, WsOut};
@@ -571,6 +572,9 @@ struct ChannelEntry {
     principal: Principal,
     sink: ChannelSink,
     streams: HashMap<String, StreamCursor>,
+    /// Loopback tunnel connections of this channel, created on the first open. Dropping the
+    /// entry (every channel-removal path does) tears all of them down.
+    loopback: Option<LoopbackTable>,
 }
 
 #[derive(Clone)]
@@ -812,6 +816,8 @@ pub struct DeviceRuntime {
     byte_limit: usize,
     channel_limit: usize,
     aggregate_queue: AggregateQueueBudget,
+    /// Loopback tunnel connections across every channel, against the per-worker cap.
+    loopback_connections: Arc<AtomicUsize>,
 }
 
 impl DeviceRuntime {
@@ -906,6 +912,7 @@ impl DeviceRuntime {
             byte_limit,
             channel_limit,
             aggregate_queue,
+            loopback_connections: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -937,6 +944,7 @@ impl DeviceRuntime {
                 principal: Principal::Local(authenticated.principal),
                 sink,
                 streams: HashMap::new(),
+                loopback: None,
             },
         );
         Ok((channel_id, receiver))
@@ -1001,6 +1009,7 @@ impl DeviceRuntime {
                 },
                 sink,
                 streams: HashMap::new(),
+                loopback: None,
             },
         );
         Ok(receiver)
@@ -1888,6 +1897,14 @@ impl DeviceRuntime {
             );
             return;
         }
+        // Loopback tunnel frames carry no request_id: consume them right after the scope gate, or
+        // the request/response path would answer them with `invalid_request_id`.
+        if device_loopback::is_loopback_payload(payload) {
+            if let Some(payload) = envelope.payload {
+                self.handle_loopback_frame(channel_id, payload);
+            }
+            return;
+        }
         // executor（plan 116）：既不是 request/response 也不去 sessiond，就地消化。
         // 放在 scope 门之后、request_id 校验之前——这些帧刻意不带 request_id。
         if matches!(
@@ -1980,6 +1997,64 @@ impl DeviceRuntime {
         } else {
             self.dispatch_worker_request(channel_id.to_string(), principal, envelope);
         }
+    }
+
+    /// Route one client tunnel frame to the channel's table, creating it on the first open.
+    fn handle_loopback_frame(self: &Arc<Self>, channel_id: &str, payload: device_envelope::Payload) {
+        let handle = {
+            let mut channels = self.channels.lock().unwrap();
+            let Some(entry) = channels.get_mut(channel_id) else {
+                return;
+            };
+            if entry.loopback.is_none() {
+                if !matches!(payload, device_envelope::Payload::LoopbackOpen(_)) {
+                    // Nothing was ever opened here: stray data/ack/close address nothing.
+                    return;
+                }
+                entry.loopback = Some(LoopbackTable::new(
+                    Arc::new(LoopbackOutlet {
+                        runtime: Arc::downgrade(self),
+                        channel_id: channel_id.to_string(),
+                    }),
+                    self.loopback_connections.clone(),
+                ));
+            }
+            entry.loopback.as_ref().map(LoopbackTable::handle)
+        };
+        // The channels lock is released: dispatch may queue frames, which takes it again.
+        if let Some(handle) = handle {
+            handle.dispatch(payload);
+        }
+    }
+
+    /// Queue a worker-initiated tunnel frame on the channel, under the same response scope gate
+    /// as every other device-initiated payload. Never closes the channel itself: the tunnel
+    /// decides what a refused frame means.
+    fn send_loopback(&self, channel_id: &str, payload: device_envelope::Payload) -> bool {
+        let principal = self
+            .channels
+            .lock()
+            .unwrap()
+            .get(channel_id)
+            .map(|entry| entry.principal.clone());
+        let Some(principal) = principal else {
+            return false;
+        };
+        let scopes = self.effective_scopes(&principal);
+        if response_required_scope(&payload).is_none_or(|scope| !scopes.contains(&(scope as i32)))
+        {
+            return false;
+        }
+        let bytes = encode_device_envelope(&DeviceEnvelope {
+            protocol_version: DEVICE_PROTOCOL_VERSION,
+            channel_id: channel_id.to_string(),
+            payload: Some(payload),
+        });
+        self.channels
+            .lock()
+            .unwrap()
+            .get(channel_id)
+            .is_some_and(|entry| entry.sink.try_send(bytes))
     }
 
     fn handle_remote_frame(
@@ -3525,6 +3600,27 @@ impl DeviceRuntime {
     }
 }
 
+/// Where a channel's loopback table queues its frames. Holds the runtime weakly: the table lives
+/// inside the runtime's channel entry.
+struct LoopbackOutlet {
+    runtime: Weak<DeviceRuntime>,
+    channel_id: String,
+}
+
+impl device_loopback::Outlet for LoopbackOutlet {
+    fn send(&self, payload: device_envelope::Payload) -> bool {
+        self.runtime
+            .upgrade()
+            .is_some_and(|runtime| runtime.send_loopback(&self.channel_id, payload))
+    }
+
+    fn close_channel(&self) {
+        if let Some(runtime) = self.runtime.upgrade() {
+            runtime.close_channel(&self.channel_id);
+        }
+    }
+}
+
 fn start_call(
     ledger: &Mutex<CallLedger>,
     key: String,
@@ -3939,6 +4035,12 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         | device_envelope::Payload::FsRead(_)
         | device_envelope::Payload::FsWrite(_)
         | device_envelope::Payload::PortsRequest(_) => Some(DeviceScope::Rpc),
+        // Loopback tunnel: RPC already allows `exec` on the device, so reaching its loopback
+        // ports grants nothing new. Opened/Failed are worker-initiated and stay unmapped here.
+        device_envelope::Payload::LoopbackOpen(_)
+        | device_envelope::Payload::LoopbackData(_)
+        | device_envelope::Payload::LoopbackAck(_)
+        | device_envelope::Payload::LoopbackClose(_) => Some(DeviceScope::Rpc),
         // 心跳取最低权限：它是纯 echo，不读任何状态，要 RPC scope 只会把它挡在
         // 没有 lease 的通道外——而恰恰是那种通道最需要被探活。
         device_envelope::Payload::Ping(_) => Some(DeviceScope::SessionRead),
@@ -3971,6 +4073,11 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         | device_envelope::Payload::FsReadResult(_)
         | device_envelope::Payload::FsWriteResult(_)
         | device_envelope::Payload::PortsResult(_) => Some(DeviceScope::Rpc),
+        device_envelope::Payload::LoopbackOpened(_)
+        | device_envelope::Payload::LoopbackFailed(_)
+        | device_envelope::Payload::LoopbackData(_)
+        | device_envelope::Payload::LoopbackAck(_)
+        | device_envelope::Payload::LoopbackClose(_) => Some(DeviceScope::Rpc),
         device_envelope::Payload::ProjectValidated(_)
         | device_envelope::Payload::WorktreeAdded(_) => Some(DeviceScope::Lifecycle),
         device_envelope::Payload::ExecutorHostRegistered(_)
@@ -4918,6 +5025,184 @@ mod tests {
             response_required_scope(&device_envelope::Payload::PtyInputAck(Default::default())),
             Some(DeviceScope::SessionControl)
         );
+    }
+
+    #[test]
+    fn loopback_tunnel_payloads_are_rpc_scoped_in_both_directions() {
+        use device_envelope::Payload;
+        for client in [
+            Payload::LoopbackOpen(Default::default()),
+            Payload::LoopbackData(Default::default()),
+            Payload::LoopbackAck(Default::default()),
+            Payload::LoopbackClose(Default::default()),
+        ] {
+            assert_eq!(required_scope(&client), Some(DeviceScope::Rpc));
+            assert!(device_loopback::is_loopback_payload(&client));
+        }
+        // Worker-initiated only: a client sending them is refused as unsupported.
+        for worker_only in [
+            Payload::LoopbackOpened(Default::default()),
+            Payload::LoopbackFailed(Default::default()),
+        ] {
+            assert_eq!(required_scope(&worker_only), None);
+        }
+        for worker in [
+            Payload::LoopbackOpened(Default::default()),
+            Payload::LoopbackFailed(Default::default()),
+            Payload::LoopbackData(Default::default()),
+            Payload::LoopbackAck(Default::default()),
+            Payload::LoopbackClose(Default::default()),
+        ] {
+            assert_eq!(response_required_scope(&worker), Some(DeviceScope::Rpc));
+        }
+    }
+
+    #[tokio::test]
+    async fn loopback_frames_pass_the_scope_gate_and_never_reach_the_request_path() {
+        use device_envelope::Payload;
+        let mut fixture = test_runtime();
+        let refused_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        fixture.runtime.handle_tailcat_frame(
+            &fixture.remote_id,
+            &request_envelope(
+                &fixture.remote_id,
+                Payload::LoopbackOpen(wire::DeviceLoopbackOpen {
+                    connection_id: 1,
+                    port: refused_port as u32,
+                }),
+            ),
+        );
+        let answer = tokio::time::timeout(Duration::from_secs(12), fixture.remote_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            decode_device_envelope(&answer).unwrap().payload,
+            Some(Payload::LoopbackFailed(wire::DeviceLoopbackFailed { connection_id: 1, reason, .. }))
+                if reason == wire::DeviceLoopbackFailure::Refused as i32
+        ));
+
+        // Stray tunnel frames of a channel with no table address nothing and answer nothing —
+        // in particular not the request path's `invalid_request_id`.
+        let other = "relay-loopback-stray".to_string();
+        let mut other_rx = fixture
+            .runtime
+            .open_tailcat(&wire::DeviceTailcatGrant {
+                channel_id: other.clone(),
+                account_id: "account-1".into(),
+                client_instance_id: "client-1".into(),
+                transport_generation: 3,
+                scopes: vec![DeviceScope::Rpc as i32],
+                protocol_version: DEVICE_PROTOCOL_VERSION,
+                ..Default::default()
+            })
+            .unwrap();
+        fixture.runtime.handle_tailcat_frame(
+            &other,
+            &request_envelope(
+                &other,
+                Payload::LoopbackAck(wire::DeviceLoopbackAck {
+                    connection_id: 9,
+                    frames: 1,
+                }),
+            ),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), other_rx.recv())
+                .await
+                .is_err(),
+            "a stray tunnel frame must not be answered"
+        );
+
+        // Worker-initiated payloads cannot come from a client.
+        fixture.runtime.handle_tailcat_frame(
+            &fixture.remote_id,
+            &request_envelope(
+                &fixture.remote_id,
+                Payload::LoopbackOpened(wire::DeviceLoopbackOpened { connection_id: 2 }),
+            ),
+        );
+        assert!(matches!(
+            remote_envelope(&mut fixture.remote_rx).await.payload,
+            Some(Payload::Error(DeviceError { ref code, request_id: None, .. }))
+                if code == "unsupported_payload"
+        ));
+
+        // Without RPC the open is refused by the scope gate.
+        let read_only = "relay-loopback-read-only".to_string();
+        let mut read_only_rx = fixture
+            .runtime
+            .open_tailcat(&wire::DeviceTailcatGrant {
+                channel_id: read_only.clone(),
+                account_id: "account-1".into(),
+                client_instance_id: "client-1".into(),
+                transport_generation: 4,
+                scopes: vec![DeviceScope::SessionRead as i32],
+                protocol_version: DEVICE_PROTOCOL_VERSION,
+                ..Default::default()
+            })
+            .unwrap();
+        fixture.runtime.handle_tailcat_frame(
+            &read_only,
+            &request_envelope(
+                &read_only,
+                Payload::LoopbackOpen(wire::DeviceLoopbackOpen {
+                    connection_id: 1,
+                    port: refused_port as u32,
+                }),
+            ),
+        );
+        assert!(matches!(
+            remote_envelope(&mut read_only_rx).await.payload,
+            Some(Payload::Error(DeviceError { ref code, .. })) if code == "scope_denied"
+        ));
+        fixture.runtime.close_tailcats();
+        let _ = std::fs::remove_dir_all(&fixture.home);
+    }
+
+    #[tokio::test]
+    async fn closing_the_channel_closes_all_of_its_tunnel_connections() {
+        use device_envelope::Payload;
+        use tokio::io::AsyncReadExt;
+        let mut fixture = test_runtime();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port() as u32;
+        for connection_id in [1, 2] {
+            fixture.runtime.handle_tailcat_frame(
+                &fixture.remote_id,
+                &request_envelope(
+                    &fixture.remote_id,
+                    Payload::LoopbackOpen(wire::DeviceLoopbackOpen {
+                        connection_id,
+                        port,
+                    }),
+                ),
+            );
+        }
+        let (mut first, _) = listener.accept().await.unwrap();
+        let (mut second, _) = listener.accept().await.unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                remote_envelope(&mut fixture.remote_rx).await.payload,
+                Some(Payload::LoopbackOpened(_))
+            ));
+        }
+        assert_eq!(fixture.runtime.loopback_connections.load(Ordering::Acquire), 2);
+        // What the Tailcat channel loop does when `helper.send` fails or the lane ends.
+        fixture.runtime.close_tailcat(&fixture.remote_id);
+        assert_eq!(fixture.runtime.loopback_connections.load(Ordering::Acquire), 0);
+        let mut rest = Vec::new();
+        for socket in [&mut first, &mut second] {
+            tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut rest))
+                .await
+                .expect("the device-side socket closes with the channel")
+                .unwrap();
+        }
+        fixture.runtime.close_channel(&fixture.local_id);
+        let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
     #[tokio::test]

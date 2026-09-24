@@ -104,6 +104,19 @@ that proof key, atomically consuming the grant before admitting DeviceEnvelope.
 An address alone conveys no Coflux business authority. Remote streams never
 pass through the loopback gateway or acquire local offline grants.
 
+`DEVICE_SCOPE_RPC` also covers the Device protocol's loopback tunnel
+(`DeviceLoopbackOpen` and its companions): a channel holding it may open TCP
+connections to ports on the device's own loopback interface, which the desktop
+app's built-in browser uses so that `localhost` in a remote workspace reaches
+that workspace's device. This is not an escalation: `RPC` already allows `exec`
+of arbitrary commands on the device, which can reach the same ports. The tunnel
+is a Device protocol capability enforced by the worker's DeviceEnvelope gate,
+not a helper feature — the helper remains a byte pipe with no generic proxy. The
+client names only a port; the worker dials only `127.0.0.1` and `[::1]`, never a
+hostname or another address, so the tunnel cannot pivot into the device's
+network. Reaching a non-loopback address as seen from the device would be a new
+scope decision.
+
 Worker control loss clears unconsumed grants and closes pre-auth streams and active remote
 channels by retiring the serving helper. Client control loss retains only existing session lanes for the
 existing 15-second grace window; no new or elevated operations are permitted.

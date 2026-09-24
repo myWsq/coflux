@@ -9,6 +9,7 @@ mod agents;
 mod conn_state;
 mod creds;
 mod device;
+mod device_loopback;
 mod executor_host;
 mod executor_settings;
 mod gateway;
