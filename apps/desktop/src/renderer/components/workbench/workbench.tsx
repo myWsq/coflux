@@ -1184,6 +1184,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
       updateLayout(workspaceId, (layout) => focusGroup(layout, groupId));
       createTerminalIn(workspaceId, null);
     },
+    createBrowserTab: (workspaceId, groupId) => {
+      updateLayout(workspaceId, (layout) => focusGroup(layout, groupId));
+      openBrowserTab(workspaceId, "");
+    },
     closeBrowserTab,
     reloadBrowserTab: (tabId) => browser.reload(tabId),
   };

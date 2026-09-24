@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { Bot, FileDiff, GitBranch, History, LoaderCircle, Plus, SquareTerminal, Unplug, X } from "lucide-react";
+import { Bot, FileDiff, GitBranch, Globe, History, LoaderCircle, Plus, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
+import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { ChangesView } from "@/components/workbench/changes-view";
@@ -133,8 +134,10 @@ export type WorkspaceLayoutActions = {
   activateTab: (workspaceId: string, taskId: string) => void;
   /** A user moved a tab (drop, context-menu split): the moved tab is then activated as a user action. */
   moveTab: (workspaceId: string, taskId: string, change: (layout: TerminalLayout) => TerminalLayout) => void;
-  /** ＋ in a group: focuses that group, then opens a terminal there. */
+  /** ＋ in a group (or the empty state): focuses that group, then opens a terminal there. */
   createTerminal: (workspaceId: string, groupId: string) => void;
+  /** ＋ menu's 浏览器: focuses that group, then opens a blank browser tab there. */
+  createBrowserTab: (workspaceId: string, groupId: string) => void;
   /** A browser tab's close button / context menu: removes the tab, no confirmation (plan 20260924-desktop-browser-tab). */
   closeBrowserTab: (workspaceId: string, tabId: string) => void;
   reloadBrowserTab: (tabId: string) => void;
@@ -158,6 +161,62 @@ type WorkspaceTerminalProps = {
   /** Built-in browser tabs' titles, favicons and loading state for their strip chips. */
   browser: BrowserRuntime;
 };
+
+/**
+ * The tab strip's ＋: a menu of what to open in this group — a terminal or a blank browser tab
+ * (Cursor's new-tab menu without its search box). While a terminal is being created the terminal
+ * item waits (one create at a time) and the trigger spins in the group that holds it; a browser tab
+ * can still be opened. Tooltip per docs/design-guidelines.md: a sibling after the menu, suppressed
+ * while it is open.
+ */
+function NewTabMenu({
+  busy,
+  spinning,
+  terminalShortcut,
+  onTerminal,
+  onBrowser,
+}: {
+  busy: boolean;
+  spinning: boolean;
+  terminalShortcut: string;
+  onTerminal: () => void;
+  onBrowser: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
+  return (
+    <>
+      <DropdownMenu
+        isMenuOpen={open}
+        onOpenChange={setOpen}
+        menuWidth={200}
+        hasChevron={false}
+        placement="below"
+        alignment="start"
+        button={{
+          ref: anchorRef,
+          label: "新建标签页",
+          icon: spinning ? <LoaderCircle className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />,
+          isIconOnly: true,
+          variant: "ghost",
+          size: "sm",
+          // Astryx puts the style on the <button> itself, so the no-drag hole lands on the trigger.
+          style: { color: "var(--muted-foreground)", height: 24, width: 24, minWidth: 24, paddingInline: 0, marginLeft: 2, flexShrink: 0, ...NO_DRAG_REGION_STYLE },
+        }}
+      >
+        <DropdownMenuItem
+          icon={<SquareTerminal className="size-3.5" />}
+          label="终端"
+          isDisabled={busy}
+          endContent={<span className="text-xs text-muted-foreground">{terminalShortcut}</span>}
+          onClick={onTerminal}
+        />
+        <DropdownMenuItem icon={<Globe className="size-3.5" />} label="浏览器" onClick={onBrowser} />
+      </DropdownMenu>
+      <Tooltip anchorRef={anchorRef} isOpen={open ? false : undefined} content="新建标签页" />
+    </>
+  );
+}
 
 function zoneAt(event: ReactDragEvent<HTMLElement>): LayoutSide | "center" {
   const rect = event.currentTarget.getBoundingClientRect();
@@ -809,17 +868,15 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
             }}
           >
             {group.tabs.map((taskId, index) => renderTab(group, taskId, index, groupFocused))}
-            {/* ＋ follows the last tab (browser style) rather than sitting at the far right; it opens the terminal in this group. */}
-            <Tooltip content={`新建终端 ${modPrefix}T`} placement="below">
-              <button
-                className="ml-0.5 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-wait disabled:opacity-50"
-                style={NO_DRAG_REGION_STYLE}
-                onClick={() => actions.createTerminal(workspaceId, group.id)}
-                disabled={Boolean(pending)}
-              >
-                {holdsPending ? <LoaderCircle className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
-              </button>
-            </Tooltip>
+            {/* ＋ follows the last tab (browser style) rather than sitting at the far right; like Cursor's, it
+                asks what to open in this group. */}
+            <NewTabMenu
+              busy={Boolean(pending)}
+              spinning={holdsPending}
+              terminalShortcut={`${modPrefix}T`}
+              onTerminal={() => actions.createTerminal(workspaceId, group.id)}
+              onBrowser={() => actions.createBrowserTab(workspaceId, group.id)}
+            />
           </div>
         </header>
 
