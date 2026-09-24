@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import {
   app,
   clipboard,
+  ClipboardItem,
   ipcMain,
   Menu,
   session,
@@ -321,6 +322,21 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     return { partition, mode };
   }
 
+  /**
+   * A screenshot onto the system clipboard as PNG. Electron 44's clipboard is the async W3C-style
+   * API: resolves true only once the write committed, so the renderer's success toast follows it.
+   */
+  async function writeImageToClipboard(image: NativeImage): Promise<boolean> {
+    try {
+      const png = new Blob([new Uint8Array(image.toPNG())], { type: "image/png" });
+      await clipboard.write([new ClipboardItem({ "image/png": png })]);
+      return true;
+    } catch (error) {
+      options.log("截图写入剪贴板失败", String(error));
+      return false;
+    }
+  }
+
   function sendHistory(guest: Guest): void {
     const contents = guest.contents;
     if (contents.isDestroyed()) return;
@@ -399,7 +415,12 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       items.push(
         { label: "在新标签页中打开链接", click: () => send({ kind: "popup", guestId: contents.id, url: link }) },
         { label: "在系统浏览器中打开链接", click: () => options.openExternal(link) },
-        { label: "复制链接地址", click: () => clipboard.writeText(link) },
+        {
+          label: "复制链接地址",
+          click: () => {
+            clipboard.writeText(link).catch((error: unknown) => options.log("复制链接地址失败", String(error)));
+          },
+        },
         { type: "separator" },
       );
     }
@@ -708,8 +729,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       if (!guest) return false;
       const image = await guest.contents.capturePage();
       if (image.isEmpty()) return false;
-      clipboard.writeImage(image);
-      return true;
+      return writeImageToClipboard(image);
     });
 
     ipcMain.handle(IPC.browserFreeze, async (event, payload: unknown) => {
@@ -733,8 +753,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       if (!image) return false;
       const crop = cropRectInPixels(input.rect, image.getSize());
       if (!crop) return false;
-      clipboard.writeImage(image.crop(crop));
-      return true;
+      return writeImageToClipboard(image.crop(crop));
     });
 
     ipcMain.on(IPC.browserReleaseFreeze, (event, payload: unknown) => {
