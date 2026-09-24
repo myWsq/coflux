@@ -330,8 +330,9 @@ impl Inner {
         )
         .abort_handle();
         let mut state = self.state.lock().unwrap();
+        let closed = state.closed;
         match state.connections.get_mut(&connection_id) {
-            Some(connection) if connection.serial == serial && !state.closed => {
+            Some(connection) if connection.serial == serial && !closed => {
                 connection.task = Some(task);
             }
             // Already finished (or the table shut down) before the handle could be stored.

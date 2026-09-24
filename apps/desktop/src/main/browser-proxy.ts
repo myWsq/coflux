@@ -193,6 +193,14 @@ class ProxyConnection {
     }
   }
 
+  /**
+   * For checks after an `await`: `close()` may have run meanwhile, which TypeScript's narrowing of
+   * `phase` from before the `await` cannot know.
+   */
+  private isClosed(): boolean {
+    return this.phase === "closed";
+  }
+
   private takeAll(): Buffer {
     const bytes = this.buffer;
     this.buffer = Buffer.alloc(0);
@@ -279,7 +287,7 @@ class ProxyConnection {
       this.failConnect();
       return;
     }
-    if (this.phase === "closed") {
+    if (this.isClosed()) {
       stream.destroy();
       return;
     }
@@ -322,7 +330,7 @@ class ProxyConnection {
         key = `direct:${target.host}:${target.port}`;
       }
     }
-    if (this.phase === "closed") return;
+    if (this.isClosed()) return;
     if (!this.upstream || this.upstream.key !== key || !this.upstream.alive) {
       const previous = this.upstream;
       this.upstream = null;
@@ -338,7 +346,7 @@ class ProxyConnection {
         this.close();
         return;
       }
-      if (this.phase === "closed") {
+      if (this.isClosed()) {
         stream.destroy();
         return;
       }
