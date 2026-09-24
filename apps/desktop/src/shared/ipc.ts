@@ -51,6 +51,21 @@ export const IPC = {
   executorInbound: "desktop:executor-inbound",
   /** 渲染层 → 主进程：本机 daemon 的 device 通道可用 / 断开，附本次连接的 generation */
   executorChannel: "desktop:executor-channel",
+  /** Built-in browser tabs (plan 20260924-desktop-browser-tab): renderer → main. */
+  browserPrepare: "desktop:browser-prepare",
+  browserNavigate: "desktop:browser-navigate",
+  browserCommand: "desktop:browser-command",
+  browserCaptureVisible: "desktop:browser-capture-visible",
+  browserFreeze: "desktop:browser-freeze",
+  browserCaptureRegion: "desktop:browser-capture-region",
+  browserReleaseFreeze: "desktop:browser-release-freeze",
+  browserOpenDevTools: "desktop:browser-open-devtools",
+  browserCloseDevTools: "desktop:browser-close-devtools",
+  browserClearData: "desktop:browser-clear-data",
+  browserCertificate: "desktop:browser-certificate",
+  browserTrustCertificate: "desktop:browser-trust-certificate",
+  /** 主进程 → 渲染层：browser events (focus, keys, popups, favicons, history, downloads, mode). */
+  browserEvent: "desktop:browser-event",
   /** 主进程 → 渲染层 */
   focusNotification: "desktop:focus-notification",
   focusWorkspace: "desktop:focus-workspace",

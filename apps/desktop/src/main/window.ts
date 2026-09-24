@@ -26,6 +26,13 @@ export type MainWindowOptions = {
   onNavigated?: (navigation: RendererNavigation) => void;
   /** bounds 写盘失败只记日志 */
   onStateError?: (error: unknown) => void;
+  /**
+   * Built-in browser tabs (plan 20260924-desktop-browser-tab): the gate every `<webview>` passes
+   * before it attaches (it hardens the guest's preferences and may refuse it), and the hook that
+   * adopts an attached guest. Absent, every webview is refused, as before the browser tab existed.
+   */
+  webviewGate?: (event: Electron.Event, webPreferences: Electron.WebPreferences, params: Record<string, string>) => void;
+  onWebviewAttached?: (guest: Electron.WebContents) => void;
 };
 
 /** 只有 http(s) 外链交给系统浏览器；其它 scheme（javascript:、file:、自定义）一律丢弃。 */
@@ -40,7 +47,8 @@ export function openExternalIfHttp(url: string): void {
 
 /**
  * 主窗口（plan 103）：隐藏标题栏 + 红绿灯内嵌到侧栏顶部（IDE 式，渲染层给侧栏留出拖拽区）。
- * 安全基线：sandbox / contextIsolation 默认开，nodeIntegration 关，webview 关；新窗口一律拒绝、
+ * 安全基线：sandbox / contextIsolation 默认开，nodeIntegration 关；webview 只经 browser-host.ts 的闸门挂载
+ * （plan 20260924-desktop-browser-tab：无 preload、沙箱、只认预先准备好的分区）；新窗口一律拒绝、
  * 外链交系统浏览器；离开 app 自身来源的导航拦下（授权页 / OAuth 同意页 / 端口预览都在系统浏览器）。
  * 大小/位置（plan 106）：上次关窗/退出时保存的 bounds 若仍落在某个显示器上就恢复，否则默认尺寸居中。
  */
@@ -67,7 +75,8 @@ export function createMainWindow(options: MainWindowOptions): BrowserWindow {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
-      webviewTag: false,
+      // The built-in browser tab embeds pages with <webview>; every one of them passes webviewGate.
+      webviewTag: true,
       spellcheck: false,
     },
   });
@@ -94,7 +103,14 @@ export function createMainWindow(options: MainWindowOptions): BrowserWindow {
     openExternalIfHttp(url);
   });
 
-  window.webContents.on("will-attach-webview", (event) => event.preventDefault());
+  // The blanket deny became a gate (plan 20260924-desktop-browser-tab); without one, nothing attaches.
+  const gate = options.webviewGate;
+  window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+    if (gate) gate(event, webPreferences, params);
+    else event.preventDefault();
+  });
+  const onWebviewAttached = options.onWebviewAttached;
+  if (onWebviewAttached) window.webContents.on("did-attach-webview", (_event, guest) => onWebviewAttached(guest));
 
   // 挂在 did-navigate 上：它只在主 frame 的跨文档导航**提交之后**触发（页内导航走
   // did-navigate-in-page），被上面 will-navigate 拦下的外链导航根本不会走到这里。两个标记

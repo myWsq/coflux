@@ -40,6 +40,12 @@ export type RendererResetTargets = {
   /** Drop the executor device channel, leaving the job table alone. */
   resetExecutorChannel: () => void;
   setBadge: (count: number) => void;
+  /**
+   * Built-in browser tabs (plan 20260924-desktop-browser-tab): the rebuilt page destroyed every
+   * `<webview>`, so the per-guest bookkeeping (guests, docked DevTools links, frozen screenshots) and
+   * the partitions prepared for the old page go with it. Idempotent like the rest.
+   */
+  resetBrowserHost?: () => void;
 };
 
 /** A committed navigation of the window's own `webContents`. */
@@ -75,5 +81,6 @@ export function createRendererResetListener(
     targets.closeTransport();
     targets.resetExecutorChannel();
     targets.setBadge(0);
+    targets.resetBrowserHost?.();
   };
 }

@@ -27,7 +27,8 @@ import { createRendererResetListener } from "./renderer-reset";
 import { readSettingsFile, resolveServerUrl } from "./settings";
 import { createTokenStore } from "./token-store";
 import { createUpdater } from "./updater";
-import { createMainWindow } from "./window";
+import { createMainWindow, openExternalIfHttp } from "./window";
+import { createBrowserHost } from "./browser-host";
 
 // scheme 特权只能在 ready 之前注册一次：standard（有 host、相对路径可解析）+ secure（安全上下文，
 // IndexedDB/crypto.subtle 可用）+ fetch/流式/代码缓存。不 bypassCSP——CSP 由响应头自己带。
@@ -411,6 +412,22 @@ if (!app.requestSingleInstanceLock()) {
       trusted,
     );
 
+    // Built-in browser tabs (plan 20260924-desktop-browser-tab): partitions, the webview gate, guest
+    // plumbing, certificates, downloads, screenshots. Whether a workspace's `localhost` is this Mac is
+    // decided here from the local daemon id — never from renderer state that is null on the first frame.
+    const browserHost = createBrowserHost({
+      userDataPath: app.getPath("userData"),
+      downloadsPath: () => app.getPath("downloads"),
+      localDaemonId: () => daemon.getState().daemonId ?? null,
+      onLocalDaemonChange: (listener) => daemon.onChange(() => listener()),
+      sendToRenderer,
+      sendCommand: (command) => sendToRenderer(IPC.command, command),
+      openExternal: openExternalIfHttp,
+      log: (message, detail) => log.warn(message, detail),
+    });
+    browserHost.registerIpc(trusted);
+    app.once("will-quit", () => browserHost.dispose());
+
     Menu.setApplicationMenu(
       buildAppMenu({
         sendCommand: (command) => {
@@ -420,6 +437,10 @@ if (!app.requestSingleInstanceLock()) {
         checkForUpdates: () => {
           showMainWindow();
           updater.checkForUpdates();
+        },
+        reload: () => {
+          if (browserHost.reloadFocusedGuest()) return;
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
         },
       }),
     );
@@ -431,6 +452,7 @@ if (!app.requestSingleInstanceLock()) {
         closeTransport: () => nativeTransport?.close(),
         resetExecutorChannel: () => executor.setChannel("", 0),
         setBadge: setDockBadge,
+        resetBrowserHost: browserHost.reset,
       },
       trusted,
     );
@@ -444,6 +466,8 @@ if (!app.requestSingleInstanceLock()) {
       instanceLabel,
       onNavigated: resetForRebuiltRenderer,
       onStateError: (error) => log.warn("窗口位置写盘失败", error),
+      webviewGate: browserHost.gateWebview,
+      onWebviewAttached: browserHost.adoptGuest,
     });
   });
 }

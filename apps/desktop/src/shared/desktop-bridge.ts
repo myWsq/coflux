@@ -71,6 +71,8 @@ export type DesktopUpdateState = {
 };
 
 /** Commands sent by native menu items; each matches a key in use-global-shortcuts.ts. ⌘1-9 and ⌘⌥1-9 have no menu entries. */
+export type DesktopDigit = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
+
 export type DesktopCommand =
   | "create-terminal"
   | "close-terminal"
@@ -85,6 +87,15 @@ export type DesktopCommand =
   | "focus-group-right"
   | "focus-group-up"
   | "focus-group-down"
+  /**
+   * ⌘1–9 / ⌘⌥1–9 (plan 20260924-desktop-browser-tab). The menu has no items for these — the renderer
+   * handles the keys itself — but a focused browser page swallows keys before the renderer sees
+   * them, so the main process forwards them through this channel.
+   */
+  | `focus-group-${DesktopDigit}`
+  | `select-tab-${DesktopDigit}`
+  /** 文件 → 新建浏览器标签页 (plan 20260924-desktop-browser-tab); no keyboard shortcut. */
+  | "new-browser-tab"
   | "toggle-help"
   | "open-settings"
   | "toggle-palette";
@@ -97,6 +108,58 @@ export type DesktopNotification = {
   title: string;
   body: string;
 };
+
+/**
+ * Built-in browser tabs (plan 20260924-desktop-browser-tab). Whether a workspace's `localhost` is
+ * this Mac (`local`) or another device (`remote`) is decided by the main process from the local
+ * daemon id, never by the renderer. In this slice a remote workspace's partition refuses every
+ * loopback request.
+ */
+export type DesktopBrowserMode = "local" | "remote";
+
+export type DesktopBrowserPrepared = { partition: string; mode: DesktopBrowserMode };
+
+/** Toolbar and menu actions on one page guest. */
+export type DesktopBrowserCommand = "back" | "forward" | "reload" | "hard-reload" | "stop" | "zoom-in" | "zoom-out" | "zoom-reset";
+
+/** ⋯ → 清除 Cookies / 清除缓存 / 清除已信任的证书: always the current workspace's partition only. */
+export type DesktopBrowserClearTarget = "cookies" | "cache" | "certificates";
+
+/** A region of the page, as fractions (0..1) of the frozen frame's width and height. */
+export type DesktopBrowserRect = { x: number; y: number; width: number; height: number };
+
+/** The certificate a top-level load failed on, for the trust prompt. */
+export type DesktopBrowserCertificate = {
+  host: string;
+  /** Chromium's verification result, e.g. `net::ERR_CERT_AUTHORITY_INVALID`. */
+  error: string;
+  fingerprint: string;
+  subject: string;
+  issuer: string;
+  /** Seconds since the epoch. */
+  validExpiry: number;
+};
+
+/**
+ * Main → renderer. Page guests are named by their webContents id (`<webview>.getWebContentsId()`),
+ * which the renderer maps back to its tab.
+ */
+export type DesktopBrowserEvent =
+  /** The page took keyboard focus (a click into it): its group becomes the focused one. */
+  | { kind: "focus"; guestId: number }
+  /** A browser key pressed inside the page: ⌘L, ⌥⌘I. */
+  | { kind: "key"; guestId: number; action: "focus-address" | "toggle-devtools" }
+  /** `window.open` / `target=_blank`: open the URL as a new browser tab beside the opener. */
+  | { kind: "popup"; guestId: number; url: string }
+  /** The page's favicon, fetched through its own session and handed over as a `data:` URL. */
+  | { kind: "favicon"; guestId: number; pageUrl: string; dataUrl: string | null }
+  /** Navigation state after a navigation or a zoom change. */
+  | { kind: "history"; guestId: number; canGoBack: boolean; canGoForward: boolean; zoomFactor: number }
+  | { kind: "devtools-closed"; guestId: number }
+  /** A download from any browser page landed in the Downloads folder (or did not). */
+  | { kind: "download"; filename: string; state: "completed" | "cancelled" | "interrupted" }
+  /** A workspace's `localhost` changed meaning (the local daemon registered after the tab was prepared). */
+  | { kind: "mode"; workspaceId: string; mode: DesktopBrowserMode };
 
 /** Sign-in providers the desktop may offer (plan 20260923); the server says which are enabled. */
 export type DesktopLoginProvider = "github" | "google";
@@ -208,6 +271,32 @@ export type DesktopBridge = {
   setExecutorChannel(daemonId: string, generation: number): void;
   /** 主进程要往 device 通道发的帧 */
   onExecutorOutbound(listener: (message: DesktopExecutorOutbound) => void): () => void;
+  /**
+   * Built-in browser tabs (plan 20260924-desktop-browser-tab). The renderer owns the `<webview>`
+   * elements and the chrome around them; sessions, guest hardening, certificates, downloads,
+   * screenshots, favicons and DevTools docking are the main process's. Order is always prepare →
+   * insert the webview (with the returned partition, `src="about:blank"`) → navigate.
+   */
+  browserPrepare(workspaceId: string, daemonId: string): Promise<DesktopBrowserPrepared>;
+  /** Loads an http(s) URL (or about:blank) in a page guest; anything else is refused by main. */
+  browserNavigate(guestId: number, url: string): void;
+  browserCommand(guestId: number, command: DesktopBrowserCommand): void;
+  /** 截取可见区域: the whole visible page to the clipboard. */
+  browserCaptureVisible(guestId: number): Promise<boolean>;
+  /** 框选截图, step one: freezes the page's current frame and returns it as a `data:` URL. */
+  browserFreeze(guestId: number): Promise<string | null>;
+  /** Step two: the chosen region of the frozen frame to the clipboard. The frozen frame is released. */
+  browserCaptureRegion(guestId: number, rect: DesktopBrowserRect): Promise<boolean>;
+  browserReleaseFreeze(guestId: number): void;
+  /** Docks the page's DevTools into a host `<webview>` (partition `BROWSER_DEVTOOLS_PARTITION`, still on about:blank). */
+  browserOpenDevTools(guestId: number, hostGuestId: number): Promise<boolean>;
+  browserCloseDevTools(guestId: number): void;
+  browserClearData(workspaceId: string, target: DesktopBrowserClearTarget): Promise<boolean>;
+  /** The certificate a load of `host` in this page's partition last failed on; null when none is known. */
+  browserCertificate(guestId: number, host: string): Promise<DesktopBrowserCertificate | null>;
+  /** 信任证书: remembers that certificate for `host` in this page's partition, across restarts. */
+  browserTrustCertificate(guestId: number, host: string): Promise<boolean>;
+  onBrowserEvent(listener: (event: DesktopBrowserEvent) => void): () => void;
 };
 
 /** 一个自定义端点的定义。**不含凭据**——它单独走 `apiKey` 字段，且只往主进程去。 */

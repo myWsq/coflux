@@ -7,7 +7,14 @@ import type { DesktopBridge } from "../shared/desktop-bridge";
 
 export type {
   DesktopBridge,
+  DesktopBrowserCertificate,
+  DesktopBrowserClearTarget,
+  DesktopBrowserCommand,
+  DesktopBrowserEvent,
   DesktopBrowserLoginResult,
+  DesktopBrowserMode,
+  DesktopBrowserPrepared,
+  DesktopBrowserRect,
   DesktopCommand,
   DesktopDaemonBusy,
   DesktopDaemonFda,

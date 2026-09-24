@@ -191,3 +191,23 @@ test("(d) regression guard: after a reset the same daemonId registers again", ()
     { daemonId: "daemon-1", epoch: 2 },
   ]);
 });
+
+test("(e) a reload resets the browser host's per-guest state; an in-page or foreign navigation does not", () => {
+  let resets = 0;
+  const listener = createRendererResetListener(
+    {
+      closeTransport: () => undefined,
+      resetExecutorChannel: () => undefined,
+      setBadge: () => undefined,
+      resetBrowserHost: () => {
+        resets += 1;
+      },
+    },
+    TRUSTED,
+  );
+  listener(RELOAD);
+  assert.equal(resets, 1);
+  listener({ ...RELOAD, isSameDocument: true });
+  listener({ url: "https://example.com/", isMainFrame: true, isSameDocument: false });
+  assert.equal(resets, 1);
+});

@@ -2,7 +2,13 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
 import type {
   DesktopBridge,
+  DesktopBrowserCertificate,
+  DesktopBrowserClearTarget,
+  DesktopBrowserCommand,
+  DesktopBrowserEvent,
   DesktopBrowserLoginResult,
+  DesktopBrowserPrepared,
+  DesktopBrowserRect,
   DesktopCommand,
   DesktopDaemonState,
   DesktopExecutorCatalog,
@@ -187,6 +193,52 @@ const bridge: DesktopBridge = {
   },
   onExecutorOutbound(listener) {
     return subscribe<DesktopExecutorOutbound>(IPC.executorOutbound, listener);
+  },
+  // Built-in browser tabs (plan 20260924-desktop-browser-tab). Arguments are rebuilt as plain
+  // values here; the main process validates them again.
+  browserPrepare(workspaceId: string, daemonId: string) {
+    return ipcRenderer.invoke(IPC.browserPrepare, { workspaceId: String(workspaceId), daemonId: String(daemonId) }) as Promise<DesktopBrowserPrepared>;
+  },
+  browserNavigate(guestId: number, url: string) {
+    ipcRenderer.send(IPC.browserNavigate, { guestId: Number(guestId), url: String(url) });
+  },
+  browserCommand(guestId: number, command: DesktopBrowserCommand) {
+    ipcRenderer.send(IPC.browserCommand, { guestId: Number(guestId), command: String(command) });
+  },
+  browserCaptureVisible(guestId: number) {
+    return ipcRenderer.invoke(IPC.browserCaptureVisible, { guestId: Number(guestId) }).then((ok) => ok === true);
+  },
+  browserFreeze(guestId: number) {
+    return ipcRenderer.invoke(IPC.browserFreeze, { guestId: Number(guestId) }).then((value) => (typeof value === "string" ? value : null));
+  },
+  browserCaptureRegion(guestId: number, rect: DesktopBrowserRect) {
+    return ipcRenderer
+      .invoke(IPC.browserCaptureRegion, {
+        guestId: Number(guestId),
+        rect: { x: Number(rect.x), y: Number(rect.y), width: Number(rect.width), height: Number(rect.height) },
+      })
+      .then((ok) => ok === true);
+  },
+  browserReleaseFreeze(guestId: number) {
+    ipcRenderer.send(IPC.browserReleaseFreeze, { guestId: Number(guestId) });
+  },
+  browserOpenDevTools(guestId: number, hostGuestId: number) {
+    return ipcRenderer.invoke(IPC.browserOpenDevTools, { guestId: Number(guestId), hostGuestId: Number(hostGuestId) }).then((ok) => ok === true);
+  },
+  browserCloseDevTools(guestId: number) {
+    ipcRenderer.send(IPC.browserCloseDevTools, { guestId: Number(guestId) });
+  },
+  browserClearData(workspaceId: string, target: DesktopBrowserClearTarget) {
+    return ipcRenderer.invoke(IPC.browserClearData, { workspaceId: String(workspaceId), target: String(target) }).then((ok) => ok === true);
+  },
+  browserCertificate(guestId: number, host: string) {
+    return ipcRenderer.invoke(IPC.browserCertificate, { guestId: Number(guestId), host: String(host) }) as Promise<DesktopBrowserCertificate | null>;
+  },
+  browserTrustCertificate(guestId: number, host: string) {
+    return ipcRenderer.invoke(IPC.browserTrustCertificate, { guestId: Number(guestId), host: String(host) }).then((ok) => ok === true);
+  },
+  onBrowserEvent(listener) {
+    return subscribe<DesktopBrowserEvent>(IPC.browserEvent, listener);
   },
 };
 

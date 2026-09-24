@@ -6,6 +6,12 @@ export type MenuActions = {
   /** 菜单项 → 渲染层命令（与 use-global-shortcuts.ts 的键位语义一一对应） */
   sendCommand: (command: DesktopCommand) => void;
   checkForUpdates: () => void;
+  /**
+   * ⌘R 「重新载入」 (plan 20260924-desktop-browser-tab): the focused surface decides — a focused
+   * browser page reloads itself (a docked DevTools host reloads its page, never the app), anything
+   * else reloads the window. The accelerator stays registered by the main process.
+   */
+  reload: () => void;
 };
 
 /**
@@ -52,6 +58,8 @@ export function buildAppMenu(actions: MenuActions): Menu {
         pageShortcut("新建工作区", "CmdOrCtrl+N", "create-workspace"),
         pageShortcut("新建终端", "CmdOrCtrl+T", "create-terminal"),
         pageShortcut("关闭终端", "CmdOrCtrl+W", "close-terminal"),
+        // Built-in browser tab (plan 20260924-desktop-browser-tab): no keyboard shortcut on purpose.
+        { label: "新建浏览器标签页", click: () => actions.sendCommand("new-browser-tab") },
         { type: "separator" },
         { role: "close", label: "关闭窗口", accelerator: "Shift+CmdOrCtrl+W" },
       ],
@@ -90,7 +98,10 @@ export function buildAppMenu(actions: MenuActions): Menu {
         { type: "separator" },
         // 打包版也有 ⌘R：界面卡住时不必退出应用（退出会连带断掉中心连接与本机 device 通道）。
         // role 自带 accelerator 与可用态；主进程注册的 accelerator 优先于页面，终端抢不走它。
-        { role: "reload", label: "重新载入" },
+        // Not the stock `reload` role any more (plan 20260924-desktop-browser-tab): that reloads the
+        // whole app even when a browser page has focus. On macOS a focused page sees ⌘R first and
+        // only leaves it to this item when it does not handle the key itself.
+        { label: "重新载入", accelerator: "CmdOrCtrl+R", click: () => actions.reload() },
         ...devItems,
         { type: "separator" },
         { role: "resetZoom" },
