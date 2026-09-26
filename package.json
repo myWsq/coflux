@@ -1,6 +1,6 @@
 {
   "name": "coflux",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.6.0",

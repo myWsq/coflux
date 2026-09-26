@@ -1,6 +1,6 @@
 {
   "name": "cofluxd",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "Coflux 无界面宿主（cofluxd）与统一操作工具（coflux）",
   "type": "module",
   "bin": {
