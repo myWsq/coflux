@@ -31,6 +31,7 @@ use crate::agent_ctl::executor::{
 use crate::device_loopback::{self, LoopbackTable};
 use crate::executor_host::{Inbound as ExecutorHostInbound, LOCAL_CHANNEL_ID as EXECUTOR_LOCAL_CHANNEL};
 use crate::local_auth::{AuthenticatedLocal, LocalAuth, LocalPrincipal};
+use crate::secret::{SecretBytes, SecretVault};
 use crate::{Config, WorkerState, WsOut};
 
 const CHANNEL_QUEUE_RECORDS: usize = 256;
@@ -818,6 +819,10 @@ pub struct DeviceRuntime {
     aggregate_queue: AggregateQueueBudget,
     /// Loopback tunnel connections across every channel, against the per-worker cap.
     loopback_connections: Arc<AtomicUsize>,
+    /// Secret custody (plan 20260926-agent-secret-input). Lives on the runtime because all of its
+    /// consumers already hold it: the secret socket, the Device-channel answers, the
+    /// session-exit cleanup and the snapshot redaction below.
+    secrets: Arc<SecretVault>,
 }
 
 impl DeviceRuntime {
@@ -877,6 +882,7 @@ impl DeviceRuntime {
         aggregate_byte_limit: usize,
         channel_limit: usize,
     ) -> Arc<Self> {
+        let secrets = Arc::new(SecretVault::new(to_server.clone()));
         let aggregate_queue = AggregateQueueBudget::new(
             aggregate_byte_limit,
             channel_limit.saturating_mul(CHANNEL_GAP_FRAME_BYTES),
@@ -913,6 +919,7 @@ impl DeviceRuntime {
             channel_limit,
             aggregate_queue,
             loopback_connections: Arc::new(AtomicUsize::new(0)),
+            secrets,
         })
     }
 
@@ -1174,10 +1181,17 @@ impl DeviceRuntime {
     /// session 退出是长期派生状态的最终边界。`WorkerState.alive` 的 incarnation 裁决由
     /// control exit 或完整 catalog 负责；这里只幂等清派生状态，避免迟到的旧
     /// DeviceSessionExited 按裸 sessionId 删除新 incarnation。
+    ///
+    /// Every path that removes a session from `WorkerState.alive` ends here: the supervisor exit
+    /// commit, the supervisor resync that replaces the table wholesale, the sessiond catalog
+    /// commit, and a session id reused by a new incarnation. That makes it the one hook where a
+    /// session's secret values are zeroed and its pending secret requests end
+    /// (plan 20260926-agent-secret-input).
     pub fn session_exited(&self, session_id: &str) {
         if session_id.is_empty() {
             return;
         }
+        self.secrets.session_ended(session_id);
         for entry in self.channels.lock().unwrap().values_mut() {
             entry.streams.remove(session_id);
         }
@@ -1197,6 +1211,11 @@ impl DeviceRuntime {
             .lock()
             .unwrap()
             .retain(|_, pending| pending.session_id != session_id);
+    }
+
+    /// The worker's secret custody (plan 20260926-agent-secret-input).
+    pub fn secrets(&self) -> &Arc<SecretVault> {
+        &self.secrets
     }
 
     /// 精确 control exit 和 catalog tombstone 共用的可靠上报入口。
@@ -1905,6 +1924,15 @@ impl DeviceRuntime {
             }
             return;
         }
+        // Secret answers (plan 20260926-agent-secret-input): settled here, right after the scope
+        // gate (SESSION_CONTROL on the channel, no attach or holder_epoch needed). The envelope is
+        // taken apart so the value moves into zeroing custody without an extra copy.
+        if matches!(payload, device_envelope::Payload::SecretAnswer(_)) {
+            if let Some(device_envelope::Payload::SecretAnswer(answer)) = envelope.payload {
+                self.handle_secret_answer(channel_id, answer);
+            }
+            return;
+        }
         // executor（plan 116）：既不是 request/response 也不去 sessiond，就地消化。
         // 放在 scope 门之后、request_id 校验之前——这些帧刻意不带 request_id。
         if matches!(
@@ -1997,6 +2025,34 @@ impl DeviceRuntime {
         } else {
             self.dispatch_worker_request(channel_id.to_string(), principal, envelope);
         }
+    }
+
+    /// One desktop answer to a pending secret request: the first answer wins, every answer gets
+    /// exactly one acknowledgement on the same channel. Never logs or formats the value.
+    fn handle_secret_answer(&self, channel_id: &str, mut answer: wire::DeviceSecretAnswer) {
+        let value = SecretBytes::new(std::mem::take(&mut answer.value).into_bytes());
+        let status = if !valid_id(&answer.request_id) {
+            drop(value);
+            coflux_protocol::logln!("[secret] answer with an invalid request id refused");
+            wire::SecretAnswerStatus::Invalid
+        } else {
+            let kind = wire::SecretAnswerKind::try_from(answer.kind)
+                .unwrap_or(wire::SecretAnswerKind::Unspecified);
+            let status = self.secrets.answer(&answer.request_id, kind, value);
+            logln!(
+                "[secret] answer request={} status={}",
+                answer.request_id,
+                status.as_str_name()
+            );
+            status
+        };
+        self.send_payload(
+            channel_id,
+            device_envelope::Payload::SecretAnswerAck(wire::DeviceSecretAnswerAck {
+                request_id: answer.request_id,
+                status: status as i32,
+            }),
+        );
     }
 
     /// Route one client tunnel frame to the channel's table, creating it on the first open.
@@ -3210,14 +3266,21 @@ impl DeviceRuntime {
                 self.handle_catalog_page(catalog);
             }
             device_envelope::Payload::SessionSnapshot(snapshot) => {
+                // Redaction choke point (plan 20260926-agent-secret-input). Every sessiond snapshot
+                // that leaves toward an agent or the center arrives on the internal channel and
+                // passes here: the local `terminal read` and the center-initiated read (both via
+                // `read_session_snapshot` below) and the SessionCheckpoint published to the center.
+                // Snapshots and live output served to a desktop's own Device channel never come
+                // through here and stay unredacted. Redacting before any tail truncation.
                 let read = self
                     .pending_snapshot_reads
                     .lock()
                     .unwrap()
                     .remove(&snapshot.request_id);
                 if let Some(read) = read {
-                    // 中心按需读（plan 091）：原样交给等待者，不进 checkpoint outbox。
-                    let _ = read.sender.send(Ok(snapshot.ansi_snapshot.clone()));
+                    // 中心按需读（plan 091）：交给等待者，不进 checkpoint outbox。
+                    let redacted = self.secrets.redact(&snapshot.ansi_snapshot).into_owned();
+                    let _ = read.sender.send(Ok(redacted));
                     return;
                 }
                 let Some(expected) = self
@@ -3265,11 +3328,15 @@ impl DeviceRuntime {
                         state.bump_command_epoch();
                     }
                 }
+                let ansi_snapshot = self.secrets.redact(&snapshot.ansi_snapshot).into_owned();
+                if ansi_snapshot.len() > MAX_SESSION_CHECKPOINT_BYTES {
+                    return;
+                }
                 let checkpoint = SessionCheckpoint {
                     session_id: snapshot.session_id.clone(),
                     task_id: expected.task_id,
                     snapshot_seq: snapshot.snapshot_seq,
-                    ansi_snapshot: snapshot.ansi_snapshot.clone(),
+                    ansi_snapshot,
                     cols: snapshot.cols,
                     rows: snapshot.rows,
                     captured_at: epoch_ms(),
@@ -4054,6 +4121,9 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         // 只有本机 direct 通道能登记成 host，远端 client 即使拿到 SESSION_CONTROL 也抢不走。
         device_envelope::Payload::ExecutorHostRegister(_)
         | device_envelope::Payload::ExecutorReport(_) => Some(DeviceScope::SessionControl),
+        // Secret answers (plan 20260926-agent-secret-input): granted per channel, not per session.
+        // No attach or holder_epoch is required, so any desktop of the account can answer.
+        device_envelope::Payload::SecretAnswer(_) => Some(DeviceScope::SessionControl),
         _ => None,
     }
 }
@@ -4084,6 +4154,7 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         | device_envelope::Payload::ExecutorAssign(_)
         | device_envelope::Payload::ExecutorCancel(_)
         | device_envelope::Payload::ExecutorReportAck(_) => Some(DeviceScope::SessionControl),
+        device_envelope::Payload::SecretAnswerAck(_) => Some(DeviceScope::SessionControl),
         _ => None,
     }
 }
@@ -4115,6 +4186,8 @@ fn request_id(payload: &device_envelope::Payload) -> Option<String> {
         device_envelope::Payload::FsWrite(value) => Some(value.request_id.clone()),
         device_envelope::Payload::PortsRequest(value) => Some(value.request_id.clone()),
         device_envelope::Payload::Ping(value) => Some(value.request_id.clone()),
+        // Only so a scope refusal reaches the waiting answer; answers never enter the call ledger.
+        device_envelope::Payload::SecretAnswer(value) => Some(value.request_id.clone()),
         _ => None,
     }
 }
@@ -4982,6 +5055,92 @@ mod tests {
             .lock()
             .unwrap()
             .contains("session-exited"));
+
+        fixture.runtime.close_channel(&fixture.local_id);
+        fixture.runtime.close_tailcats();
+        let _ = std::fs::remove_dir_all(&fixture.home);
+    }
+
+    /// Secret answers need only SESSION_CONTROL on the channel (no attach), the first one wins
+    /// across channels, and the held value is redacted from the center checkpoint and from reads
+    /// but dropped with its session (plan 20260926-agent-secret-input).
+    #[tokio::test]
+    async fn secret_answers_first_wins_across_channels_and_values_are_redacted_then_dropped() {
+        let mut fixture = test_runtime();
+        let pid = std::process::id() as i32;
+        fixture
+            .state
+            .lock()
+            .unwrap()
+            .alive
+            .insert("session-s".into(), ("task-s".into(), pid));
+        let ticket = fixture
+            .runtime
+            .secrets()
+            .begin_ask("session-s", "task-s", "TOKEN", "deploy", Duration::from_secs(60))
+            .unwrap();
+        let answer = |value: &str, kind: wire::SecretAnswerKind| {
+            device_envelope::Payload::SecretAnswer(wire::DeviceSecretAnswer {
+                request_id: ticket.request_id.clone(),
+                kind: kind as i32,
+                value: value.into(),
+            })
+        };
+        fixture.runtime.handle_tailcat_frame(
+            &fixture.remote_id,
+            &request_envelope(
+                &fixture.remote_id,
+                answer("value-4b1d", wire::SecretAnswerKind::Provide),
+            ),
+        );
+        let ack = remote_envelope(&mut fixture.remote_rx).await;
+        let Some(device_envelope::Payload::SecretAnswerAck(ack)) = ack.payload else {
+            panic!("expected a secret answer ack");
+        };
+        assert_eq!(ack.status, wire::SecretAnswerStatus::Accepted as i32);
+
+        fixture.runtime.handle_client_frame(
+            &fixture.local_id,
+            &request_envelope(&fixture.local_id, answer("", wire::SecretAnswerKind::Decline)),
+        );
+        let ack = remote_envelope(&mut fixture.local_rx).await;
+        let Some(device_envelope::Payload::SecretAnswerAck(ack)) = ack.payload else {
+            panic!("expected a secret answer ack");
+        };
+        assert_eq!(ack.status, wire::SecretAnswerStatus::AlreadyAnswered as i32);
+
+        // The checkpoint published to the center goes through the redaction choke point.
+        fixture.runtime.pending_snapshots.lock().unwrap().insert(
+            "checkpoint-1".into(),
+            pending_snapshot("session-s", "task-s", pid),
+        );
+        fixture
+            .runtime
+            .handle_internal_response(&device_envelope::Payload::SessionSnapshot(
+                wire::DeviceSessionSnapshot {
+                    request_id: "checkpoint-1".into(),
+                    session_id: "session-s".into(),
+                    snapshot_seq: 1,
+                    ansi_snapshot: b"$ echo value-4b1d\r\nvalue-4b1d\r\n".to_vec(),
+                    cols: 80,
+                    rows: 24,
+                    ..Default::default()
+                },
+            ));
+        let delivery = fixture.checkpoints.claim(1).await;
+        assert!(!delivery.bytes.windows(10).any(|window| window == b"value-4b1d"));
+        let decoded = wire::DaemonToServer::decode(delivery.bytes.as_slice()).unwrap();
+        let Some(daemon_to_server::Payload::SessionCheckpoint(checkpoint)) = decoded.payload else {
+            panic!("expected a checkpoint");
+        };
+        assert_eq!(checkpoint.ansi_snapshot, b"$ echo ***\r\n***\r\n".to_vec());
+
+        fixture.runtime.session_exited("session-s");
+        assert!(!fixture.runtime.secrets().holds("session-s", "TOKEN"));
+        assert_eq!(
+            fixture.runtime.secrets().redact(b"value-4b1d").as_ref(),
+            b"value-4b1d"
+        );
 
         fixture.runtime.close_channel(&fixture.local_id);
         fixture.runtime.close_tailcats();

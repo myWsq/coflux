@@ -20,6 +20,7 @@ mod local_auth;
 mod observed;
 mod ops;
 mod ports;
+mod secret;
 mod session_ledger;
 mod tailcat;
 mod tailcat_auth;
@@ -695,6 +696,15 @@ async fn worker_main() {
     ));
     let local_endpoints = Arc::new(hook::LocalEndpoints { hook_tx, agent_tx });
 
+    // The kernel-attested secret socket (plan 20260926-agent-secret-input): every `coflux secret`
+    // action travels over it, never over the loopback `/agent` endpoint above.
+    tokio::spawn(secret::socket::run(
+        home.clone(),
+        state.clone(),
+        device.clone(),
+        to_server_tx.clone(),
+    ));
+
     // gateway 监听独立于中心 server_loop；热升级时旧 worker 短暂占端口会在后台重试。
     if let Some(auth) = local_auth.clone() {
         let daemon_state = state.clone();
@@ -829,6 +839,7 @@ async fn worker_main() {
         let state = state.clone();
         let observed = observed.clone();
         let to_server_tx = to_server_tx.clone();
+        let device = device.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -837,6 +848,11 @@ async fn worker_main() {
                 report_ports_if_changed(&state, &observed, &to_server_tx).await;
                 // agent 探测（plan 073）与端口探测同周期：都走一遍进程树，成本同量级
                 report_agents_if_changed(&state, &observed, &to_server_tx).await;
+                // Safety net behind DeviceRuntime::session_exited: secret values never outlive
+                // their session, even if a removal path were ever missed.
+                let live: std::collections::HashSet<String> =
+                    state.lock().unwrap().alive.keys().cloned().collect();
+                device.secrets().retain_sessions(&live);
             }
         });
     }
@@ -1492,6 +1508,8 @@ async fn run_server_connection(
                     // acknowledge=false，不得拿旧 alive 触发 force。
                     force_report_ports(state, observed, to_server_tx).await;
                     force_report_agents(state, observed, to_server_tx).await;
+                    // Pending secret requests are memory-only in the center, like presence.
+                    device.secrets().publish();
                 }
             }
             delivery = checkpoints.claim(connection_epoch), if connection_authed => {

@@ -747,6 +747,24 @@ fn resolve_scope(
     }
 }
 
+/// The caller's effective workspace root (plan 102 rules), for `coflux secret inject`
+/// (plan 20260926-agent-secret-input): the workspace the caller's reported cwd falls in, else the
+/// terminal's owning workspace. The caller itself is already kernel-attested to be inside
+/// `session_id`, so trusting its cwd for the target is the same trust every local command uses.
+pub(crate) fn effective_workspace_root(
+    state: &Arc<Mutex<WorkerState>>,
+    session_id: &str,
+    cwd: &str,
+) -> Result<String, String> {
+    let scope = resolve_scope(state, session_id, cwd);
+    if scope.effective.is_empty() {
+        return Err("this terminal predates the daemon upgrade and has no workspace ownership: reopen the terminal and try again".into());
+    }
+    scope.effective_path.ok_or_else(|| {
+        "this terminal's workspace is not synced to the daemon yet; retry in a moment".into()
+    })
+}
+
 /// 本地命令的目标解析（plan 094 + 102；标识见 plan 20260914-entity-handles）：调用方与目标都必须
 /// 有已知归属，且目标的归属等于调用方的**有效工作区**（cwd 落在哪个工作区，就对哪个工作区的终端
 /// 说话）。归属永远不猜——早于 daemon 升级的会话归属未知，一律可读拒绝；能按申报的 cwd 改向的
@@ -1076,7 +1094,7 @@ fn epoch_ms() -> f64 {
 ///
 /// `workspace_id` 是**申报**的目标工作区（plan 102）：只有 agent 挪进同设备另一个工作区时才非空，
 /// 中心核验同账号同设备后以它为目标；空 = 中心用发起 task 的工作区（旧 worker 恒空）。
-async fn ask_server(
+pub(crate) async fn ask_server(
     state: &Arc<Mutex<WorkerState>>,
     to_server_tx: &mpsc::Sender<WsOut>,
     session_id: String,
