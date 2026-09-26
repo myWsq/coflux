@@ -1,6 +1,6 @@
 ---
 name: coflux
-description: Use coflux to enter workspaces, open terminals the user can see and take over, run commands in them, wait for those commands, read their scrollback, type into them, run one-shot commands on another device in the account and get their output, report progress, notify the user, obtain preview URLs, and hand a bounded mechanical sub-task to the built-in executor instead of spending your own context on it. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
+description: Use coflux to enter workspaces, open terminals the user can see and take over, run commands in them, wait for those commands, read their scrollback, type into them, run one-shot commands on another device in the account and get their output, report progress, notify the user, obtain preview URLs, get a secret (API key, password) from the user without the value entering your context, and hand a bounded mechanical sub-task to the built-in executor instead of spending your own context on it. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
 ---
 
 # Working inside coflux
@@ -14,7 +14,7 @@ and a way to operate the other workspaces and devices under the account when you
 
 | Track | Credentials | Reach | Use for |
 |---|---|---|---|
-| Local commands `coflux terminal/progress/notify/ports/executor` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, hand a bounded sub-task to the built-in executor: the default; some actions require a server connection |
+| Local commands `coflux terminal/progress/notify/ports/executor/secret` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, get a secret from the user, hand a bounded sub-task to the built-in executor: the default; some actions require a server connection |
 | Account CLI | app login or `coflux login` | all devices and workspaces in the account | child workspaces and remote terminals; JSON output |
 
 Of the local commands, `run`/`wait`/`read`/`send`/`close`/`progress`/`executor` complete
@@ -467,6 +467,49 @@ says so in one line — relay that to the user instead of retrying.
 **Images and other files are not an input.** The prompt is a task description with a size cap, not a
 file channel: point at paths inside the workspace instead of trying to hand anything over.
 
+### Get a secret from the user
+
+```sh
+coflux secret ask OPENAI_API_KEY --reason "Run the integration tests against the real API"
+coflux secret exec OPENAI_API_KEY -- pnpm test:integration
+coflux secret inject DATABASE_URL --file .env.local
+```
+
+When a task needs a value only the user has — an API key, a token, a database password — and it
+goes to a **non-interactive** destination (a command that reads it from the environment, or a
+dotenv/config file), ask for it with `coflux secret`. **Never ask the user to paste a secret into
+the chat**: that puts it in the transcript, the model provider's logs and on screen. With
+`coflux secret` you never see the value; you get a name and an outcome, and every use of the value
+goes back through coflux.
+
+- `ask NAME --reason "<why>"` shows a request card over this terminal on every Coflux desktop of
+  the account (plus one inbox notification). It blocks until the user answers, then prints exactly
+  one word: `provided`, `declined` or `cancelled` (closed card, timeout — default 10 minutes,
+  `--timeout <seconds>` — or the terminal ended). Exit status is 0 only for `provided`. Write the
+  reason for the user: say what the value is for and where it will go. NAME is an
+  environment-variable name. Asking again for a NAME replaces its value. On `declined`, do not ask
+  again unprompted; on `cancelled`, tell the user what you were waiting for before retrying. A
+  timeout with no card on the user's screen usually means their desktop app is too old — say so.
+- `exec NAME [NAME…] -- <cmd> [args…]` runs the command with each value in a same-name environment
+  variable, passes its exit status through, and shows every occurrence of a value in its output
+  as `***`. A NAME that was not provided in this terminal fails with a sentence telling you to
+  `ask` first.
+- `inject NAME --file <path> [--key KEY]` makes the daemon insert or update `KEY=value` (KEY
+  defaults to NAME) in a dotenv file inside the workspace your cwd is in. A new file is owner-only;
+  a path outside the workspace, including through a symlink, is refused. It prints only that the
+  file was written. Checking that the file is gitignored is yours.
+
+Values belong to **this terminal**: only processes in it can use them, and they are dropped when it
+ends (and when the user's device restarts its coflux runtime) — a new terminal must `ask` again.
+They live only in the local daemon's memory, never on disk or on the center. `coflux terminal read`
+and the center's copy of any terminal show a held value as `***`.
+
+Not for interactive prompts: an `ssh` or `sudo` password prompt stays with the user — open a
+terminal they can take over, `coflux notify` them, and `coflux terminal wait`. The built-in
+executor cannot use `coflux secret` (it is not a terminal process). And it prevents accidents, not
+a determined agent: once a value is in an environment variable or a file you can read, printing it
+on purpose would leak it — never do that.
+
 ### Errors from local commands
 
 Errors are one readable sentence; do what they say: "not inside a coflux terminal" = you are not
@@ -596,6 +639,8 @@ There is no `--workspace`, and there is **no stdin**.
 - A workspace has a cap on concurrently live terminals (default 8, including the user's own).
   On hitting the cap, `list` first: usually some finished terminals were never collected. If the
   user really filled it up, `notify` them instead of forcing it.
+- `coflux secret ask` needs the daemon connected to the center (the request reaches the user's
+  desktops through it) and fails at once otherwise; `exec` and `inject` stay local.
 - `new`/`list`/`ports`/`notify` and account commands need the daemon connected to the center; "letting the
   user see" is their whole point. `run`/`wait`/`read`/`send`/`close`/`progress` do not
   depend on the center. When disconnected they fail loudly rather than degrade silently.

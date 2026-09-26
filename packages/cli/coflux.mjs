@@ -8,8 +8,10 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 const HOME = process.env.COFLUX_HOME || join(homedir(), ".coflux");
-// Native integration owns explicit workspace selection and conversation state.
-if (process.argv[2] === "agent" || (process.argv[2] === "workspace" && process.argv[3] === "enter")) {
+// Native integration owns explicit workspace selection and conversation state. `secret` is native
+// only too: it speaks the worker's kernel-attested socket and masks child output, and one
+// implementation of that is enough (plan 20260926-agent-secret-input).
+if (process.argv[2] === "agent" || process.argv[2] === "secret" || (process.argv[2] === "workspace" && process.argv[3] === "enter")) {
   const native = process.env.COFLUX_AGENT_BUNDLE
     ? join(process.env.COFLUX_AGENT_BUNDLE, "coflux")
     : join(HOME, "bin", "coflux");

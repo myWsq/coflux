@@ -12,6 +12,7 @@ mod commands;
 mod gateway;
 mod handle;
 mod integration;
+mod secret;
 mod text;
 
 /// `✗ <msg>` 到 stderr 并以 1 退出（node 版 `die`）。
@@ -79,6 +80,15 @@ coflux —— 账号与终端操作
   coflux notify \"<一句话>\"  发送站内通知；服务器保存后确认送达
   coflux progress \"<一句话>\"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
   coflux ports           列出本工作区的监听端口及可直接打开的预览 URL
+  coflux secret ask NAME --reason \"<why>\" [--timeout <seconds>]
+  coflux secret exec NAME [NAME…] -- <cmd> [args…]
+  coflux secret inject NAME --file <path> [--key KEY]
+                          Get a secret (API key, password) from the user on their Coflux desktop
+                          without the value entering your context: ask prints only
+                          provided | declined | cancelled; exec runs a command with the value in
+                          a same-name environment variable and shows it as *** in the output;
+                          inject writes KEY=value into a dotenv file in this workspace.
+                          Details: coflux secret help
   coflux executor run --prompt=\"<任务>\" [--write] [--timeout <秒>]
                           把一个边界清楚的子任务甩给内置的轻量 executor（由本机 Coflux.app
                           执行），阻塞到跑完并打印它的最终回复与改动文件。一次性：没有会话、
@@ -116,6 +126,11 @@ fn main() {
         if let Err(error) = integration::run(&raw[1..]) { die(&error); }
         return;
     }
+    // `secret exec` needs the raw argv: everything after `--` is the child's command line.
+    if raw.first().is_some_and(|arg| arg == "secret") {
+        secret::run(&raw[1..]);
+        return;
+    }
     let parsed = match args::parse(std::env::args().skip(1)) {
         Ok(parsed) => parsed,
         Err(error) => die(&format!("参数错误：{error}\n\n{HELP}")),
@@ -150,7 +165,7 @@ mod tests {
 
     #[test]
     fn help_keeps_agent_phrases_used_by_skill_docs() {
-        for phrase in ["coflux terminal new", "coflux terminal run <taskId>", "coflux terminal wait <taskId>", "coflux terminal read <taskId>", "coflux terminal close <taskId>", "coflux notify", "coflux progress", "coflux ports", "coflux workspace locate", "coflux executor run", "coflux hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS", "coflux device exec <deviceId>", "coflux project import <path>", "coflux:<kind>:<ID 前 8 位>", "coflux:workspace:3f2a1b7c"] {
+        for phrase in ["coflux terminal new", "coflux terminal run <taskId>", "coflux terminal wait <taskId>", "coflux terminal read <taskId>", "coflux terminal close <taskId>", "coflux notify", "coflux progress", "coflux ports", "coflux workspace locate", "coflux executor run", "coflux secret ask NAME", "coflux secret exec NAME", "coflux secret inject NAME", "coflux hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS", "coflux device exec <deviceId>", "coflux project import <path>", "coflux:<kind>:<ID 前 8 位>", "coflux:workspace:3f2a1b7c"] {
             assert!(HELP.contains(phrase), "HELP 缺 {phrase}");
         }
     }
