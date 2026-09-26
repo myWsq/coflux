@@ -447,6 +447,7 @@ impl SecretVault {
     }
 
     /// Whether `session_id` holds a value for `name`.
+    #[cfg(test)]
     pub fn holds(&self, session_id: &str, name: &str) -> bool {
         self.state
             .lock()
@@ -756,7 +757,7 @@ mod tests {
 
     #[test]
     fn longer_values_win_on_overlap() {
-        let values: Vec<&[u8]> = vec![b"abcdef", b"abc"];
+        let values: Vec<&[u8]> = vec![&b"abcdef"[..], &b"abc"[..]];
         assert_eq!(redact_with(b"abcdefabc", &values).as_ref(), b"******");
     }
 
