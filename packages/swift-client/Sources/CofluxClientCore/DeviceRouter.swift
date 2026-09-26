@@ -588,6 +588,29 @@ final class DeviceRouter {
         return execution
     }
 
+    // MARK: - Agent secret requests (plan 20260926-ios-secret-input)
+
+    /// Answer a pending secret request straight to the requesting worker over the session lane: the
+    /// worker requires only SESSION_CONTROL, and a pending session-lane request is itself lane demand,
+    /// so the lane opens even when the terminal is not attached. The wire request id is the secret
+    /// request id, which the worker echoes in `secret_answer_ack`. For PROVIDE the payload carries
+    /// the secret: it must never be logged and lives only as long as this call.
+    func answerSecret(daemonID: String, requestID: String, kind: Coflux_V1_SecretAnswerKind,
+                      value: String) async throws -> Coflux_V1_SecretAnswerStatus {
+        let route = routeFor(daemonID)
+        // Keyed by the secret request id: a second concurrent answer would orphan the first waiter.
+        guard route.pendingRequests[requestID] == nil else {
+            throw DeviceRouteError("这个密钥请求正在应答中", code: "secret_answer_in_flight")
+        }
+        var answer = Coflux_V1_DeviceSecretAnswer()
+        answer.requestID = requestID
+        answer.kind = kind
+        answer.value = kind == .provide ? value : ""
+        let result = try await request(route, lane: .session, requestID: requestID, payload: .secretAnswer(answer))
+        guard case .secretAnswerAck(let ack) = result else { throw DeviceRouteError("密钥应答响应类型错误") }
+        return ack.status
+    }
+
     // MARK: - fs 上传（plan 071）
 
     /// temp=true 落 daemon 侧系统临时目录，回带绝对路径供 client 直接注入 PTY，不自行拼装
@@ -1659,6 +1682,7 @@ final class DeviceRouter {
         case .fsListed(let value): return value.requestID
         case .fsReadResult(let value): return value.requestID
         case .execResult(let value): return value.requestID
+        case .secretAnswerAck(let value): return value.requestID
         case .pong(let value): return value.requestID
         case .error(let value): return value.hasRequestID ? value.requestID : nil
         default: return nil

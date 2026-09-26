@@ -91,6 +91,55 @@ public final class CofluxClient {
         return nil
     }
 
+    /// Pending agent secret requests (plan 20260926-ios-secret-input): requestID → request, replaced
+    /// per device by `secretRequestsUpdated`. Metadata only; live-only, never persisted. Cleared on
+    /// stateSnapshot (the center re-sends per device right after it), daemonRemoved, local session
+    /// exit and logout — mirroring packages/client/src/store.ts. A disconnected daemon arrives as an
+    /// empty set from the center, not as a client-side clear.
+    public private(set) var secretRequests: [String: SecretRequestInfo] = [:]
+
+    /// The pending secret requests of one terminal, oldest first.
+    public func pendingSecretRequests(taskID: String) -> [SecretRequestInfo] {
+        secretRequests.values.filter { $0.taskID == taskID }.sorted(by: SecretRequestInfo.ordered)
+    }
+
+    /// The oldest pending secret request among a workspace's terminals, for the workspace row marker.
+    public func pendingSecretRequest(workspaceID: String) -> SecretRequestInfo? {
+        let taskIDs = Set(tasks.filter { $0.workspaceID == workspaceID }.map(\.id))
+        return secretRequests.values.filter { taskIDs.contains($0.taskID) }.min(by: SecretRequestInfo.ordered)
+    }
+
+    /// Answer a pending secret request. The value goes straight to the requesting device's worker
+    /// over the end-to-end Device channel (session lane) and never enters this client's state; the
+    /// result is the worker's acknowledgement, or `.failed` when it could not be delivered. A request
+    /// that already left the pending set short-circuits to `.alreadyAnswered` without sending.
+    public func answerSecretRequest(requestID: String, answer: SecretAnswer) async -> SecretAnswerResult {
+        guard let request = secretRequests[requestID] else { return .alreadyAnswered }
+        let kind: Coflux_V1_SecretAnswerKind
+        let value: String
+        switch answer {
+        case .provide(let secret):
+            kind = .provide
+            value = secret
+        case .decline:
+            kind = .decline
+            value = ""
+        case .cancel:
+            kind = .cancel
+            value = ""
+        }
+        do {
+            let status = try await deviceRouter.answerSecret(
+                daemonID: request.daemonID, requestID: requestID, kind: kind, value: value
+            )
+            return SecretAnswerResult(status: status)
+        } catch let error as DeviceRouteError {
+            return .failed(error.message)
+        } catch {
+            return .failed(Self.describeLocalError(error))
+        }
+    }
+
     /// 设备面板（plan 077）：per-daemon 传输可观测状态。relayHost = 正在经过的 relay 节点
     /// host；rttMs = 最近一次 DevicePing 往返。仅设备页在场（retainDeviceMeasure）时点亮。
     public struct DeviceTransportInfo: Equatable, Sendable {
@@ -279,6 +328,7 @@ public final class CofluxClient {
         tasks = []
         ports = [:]
         sessionAgents = [:]
+        secretRequests = [:]
         detachedTaskIDs = []
         sessionCheckpoints = [:]
         blockedSessionIDs = []
@@ -527,6 +577,8 @@ public final class CofluxClient {
             tasks = value.tasks.map(applyLocalExit)
             ports = Dictionary(value.ports.map { ($0.taskID, $0.ports) }, uniquingKeysWith: { _, latest in latest })
             sessionAgents = [:]
+            // Same for pending secret requests: re-sent per device right after the snapshot.
+            secretRequests = [:]
             let taskIDs = Set(value.tasks.map(\.id))
             detachedTaskIDs = detachedTaskIDs.intersection(taskIDs)
             snapshotRevision += 1
@@ -547,6 +599,7 @@ public final class CofluxClient {
             workspaces.removeAll { $0.daemonID == value.daemonID }
             tasks.removeAll { $0.daemonID == value.daemonID }
             sessionAgents = sessionAgents.filter { $0.value.daemonID != value.daemonID }
+            secretRequests = secretRequests.filter { $0.value.daemonID != value.daemonID }
             deviceTransports[value.daemonID] = nil
 
         case .projectCreated(let value):
@@ -605,6 +658,13 @@ public final class CofluxClient {
             sessionAgents = sessionAgents.filter { $0.value.daemonID != value.daemonID }
             for session in value.sessions where !session.sessionID.isEmpty {
                 sessionAgents[session.sessionID] = SessionAgentInfo(daemonID: value.daemonID, session: session)
+            }
+
+        case .secretRequestsUpdated(let value):
+            // Full replacement per device (empty = none pending on it).
+            secretRequests = secretRequests.filter { $0.value.daemonID != value.daemonID }
+            for request in value.requests where !request.requestID.isEmpty {
+                secretRequests[request.requestID] = SecretRequestInfo(daemonID: value.daemonID, request: request)
             }
 
         case .error(let value):
@@ -668,6 +728,8 @@ public final class CofluxClient {
         // session 已退出：presence 必须和 task 的 sessionID 同步消失，否则后续 taskRemoved
         // 已无法再从 task 反查旧 session，UI 会永久留下僵尸 agent（store.ts:263-265）。
         sessionAgents[sessionID] = nil
+        // The worker ends a terminal's pending secret requests with it; close the cards right away.
+        secretRequests = secretRequests.filter { $0.value.sessionID != sessionID }
         tasks = tasks.map { task in
             guard task.id == taskID, task.hasSessionID, task.sessionID == sessionID else { return task }
             var adjusted = task
@@ -691,6 +753,7 @@ public final class CofluxClient {
             liveSessionIDs.remove(sessionID)
             localExits[sessionID] = nil
             sessionAgents[sessionID] = nil
+            secretRequests = secretRequests.filter { $0.value.sessionID != sessionID }
             sessionConsumers[sessionID] = nil
             sessionConsumerTokens[sessionID] = nil
             deviceRouter.forgetSession(daemonID: task.daemonID, sessionID: sessionID)
