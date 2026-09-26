@@ -163,7 +163,7 @@ struct WorkspaceListView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "key.fill")
                         .font(Theme.Fonts.meta)
-                    Text("等待输入密钥：\(secret.name)")
+                    Text("等待输入：\(secret.name)")
                         .font(Theme.Fonts.label.weight(.medium))
                         .lineLimit(1)
                 }

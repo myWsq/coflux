@@ -22,24 +22,36 @@ type AnswerSecret = (requestId: string, answer: SecretAnswer) => Promise<SecretA
 export function SecretRequestCards({
   requests,
   source,
+  deviceName,
   onAnswer,
 }: {
   requests: readonly SecretRequestState[];
   /** 设备 · 工作区 · 终端 */
   source: string;
+  deviceName: string;
   onAnswer: AnswerSecret;
 }) {
   if (requests.length === 0) return null;
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-4 z-30 flex flex-col items-end gap-2 px-4">
       {requests.map((request) => (
-        <SecretRequestCard key={request.requestId} request={request} source={source} onAnswer={onAnswer} />
+        <SecretRequestCard key={request.requestId} request={request} source={source} deviceName={deviceName} onAnswer={onAnswer} />
       ))}
     </div>
   );
 }
 
-function SecretRequestCard({ request, source, onAnswer }: { request: SecretRequestState; source: string; onAnswer: AnswerSecret }) {
+function SecretRequestCard({
+  request,
+  source,
+  deviceName,
+  onAnswer,
+}: {
+  request: SecretRequestState;
+  source: string;
+  deviceName: string;
+  onAnswer: AnswerSecret;
+}) {
   const [value, setValue] = useState("");
   const [phase, setPhase] = useState<SecretCardPhase>({ kind: "pending" });
   if (phase.kind === "closed") return null;
@@ -59,20 +71,20 @@ function SecretRequestCard({ request, source, onAnswer }: { request: SecretReque
   return (
     <div
       role="dialog"
-      aria-label={`Agent 请求密钥 ${request.name}`}
+      aria-label={`Agent 请求输入 ${request.name}`}
       className="pointer-events-auto w-96 max-w-full rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-lg"
     >
       <div className="flex items-start gap-2">
         <KeyRound className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium">
-            Agent 请求密钥 <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{request.name}</code>
+            Agent 请求输入 <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{request.name}</code>
           </div>
           <div className="mt-0.5 truncate text-xs text-muted-foreground">{source}</div>
         </div>
         <Button
-          label="关闭（视为取消）"
-          tooltip="关闭：告诉 agent 这次取消了"
+          label="取消请求"
+          tooltip="取消请求"
           icon={<X className="size-3.5" />}
           isIconOnly
           variant="ghost"
@@ -81,10 +93,12 @@ function SecretRequestCard({ request, source, onAnswer }: { request: SecretReque
           onClick={() => void submit({ kind: "cancel" })}
         />
       </div>
-      <div className="mt-2 rounded-md border border-border bg-muted/40 px-2 py-1.5">
-        <div className="text-[11px] text-muted-foreground">Agent 写的理由（不是 coflux 的说明）</div>
-        <div className="mt-0.5 whitespace-pre-wrap break-words text-sm">{request.reason}</div>
-      </div>
+      {request.reason ? (
+        <div className="mt-2 rounded-md border border-border bg-muted/40 px-2 py-1.5">
+          <div className="text-[11px] text-muted-foreground">Agent 说</div>
+          <div className="mt-0.5 whitespace-pre-wrap break-words text-sm">{request.reason}</div>
+        </div>
+      ) : null}
       <div className="mt-2">
         <TextInput
           label={`${request.name} 的值`}
@@ -104,10 +118,8 @@ function SecretRequestCard({ request, source, onAnswer }: { request: SecretReque
           <Text type="supporting">{phase.error}，可以重试。</Text>
         </div>
       ) : null}
-      <div className="mt-2 flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
-          只交给该设备的 coflux，agent 看不到这个值 · {deadline} 过期
-        </span>
+      <div className="mt-1.5 text-[11px] text-muted-foreground">只交给 {deviceName || "该设备"}，Agent 看不到 · {deadline} 过期</div>
+      <div className="mt-2 flex items-center justify-end gap-2">
         <Button
           label="拒绝"
           variant="secondary"

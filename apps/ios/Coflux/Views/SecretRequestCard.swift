@@ -17,12 +17,13 @@ struct SecretRequestCards: View {
     let requests: [SecretRequestInfo]
     /// 设备 · 工作区 · 终端
     let source: String
+    let deviceName: String
 
     var body: some View {
         if !requests.isEmpty {
             VStack(spacing: 8) {
                 ForEach(requests) { request in
-                    SecretRequestCard(client: client, request: request, source: source)
+                    SecretRequestCard(client: client, request: request, source: source, deviceName: deviceName)
                 }
             }
             .padding(.horizontal, 12)
@@ -35,6 +36,7 @@ private struct SecretRequestCard: View {
     let client: CofluxClient
     let request: SecretRequestInfo
     let source: String
+    let deviceName: String
     @State private var value = ""
     @State private var phase: SecretCardPhase = .pending
 
@@ -71,7 +73,9 @@ private struct SecretRequestCard: View {
     private var card: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            reason
+            if !request.reason.isEmpty {
+                reason
+            }
             field
             if let failure {
                 Text("\(failure)，可以重试。")
@@ -84,7 +88,7 @@ private struct SecretRequestCard: View {
         .padding(14)
         .glassEffect(.regular, in: .rect(cornerRadius: 18))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Agent 请求密钥 \(request.name)")
+        .accessibilityLabel("Agent 请求输入 \(request.name)")
     }
 
     private var header: some View {
@@ -95,7 +99,7 @@ private struct SecretRequestCard: View {
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text("Agent 请求密钥")
+                    Text("Agent 请求输入")
                         .font(Theme.Fonts.label.weight(.semibold))
                         .foregroundStyle(Theme.foreground)
                     Text(request.name)
@@ -125,7 +129,7 @@ private struct SecretRequestCard: View {
             }
             .buttonStyle(.plain)
             .disabled(isSubmitting)
-            .accessibilityLabel("关闭（视为取消）")
+            .accessibilityLabel("取消请求")
         }
     }
 
@@ -136,7 +140,7 @@ private struct SecretRequestCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
         return VStack(alignment: .leading, spacing: 3) {
-            Text("Agent 写的理由（不是 coflux 的说明）")
+            Text("Agent 说")
                 .font(Theme.Fonts.meta)
                 .foregroundStyle(Theme.mutedForeground)
             // A long reason scrolls inside a capped box instead of pushing the buttons off screen.
@@ -171,29 +175,31 @@ private struct SecretRequestCard: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
-            Text("只交给该设备的 coflux，agent 看不到这个值 · \(deadline) 过期")
+        VStack(alignment: .leading, spacing: 8) {
+            Text("只交给 \(deviceName.isEmpty ? "该设备" : deviceName)，Agent 看不到 · \(deadline) 过期")
                 .font(Theme.Fonts.meta)
                 .foregroundStyle(Theme.mutedForeground)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button {
-                submit(.decline)
-            } label: {
-                buttonLabel("拒绝", busy: isSubmitting(.decline), tint: Theme.foreground)
-                    .background(Theme.secondarySurface, in: RoundedRectangle(cornerRadius: 8))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                Button {
+                    submit(.decline)
+                } label: {
+                    buttonLabel("拒绝", busy: isSubmitting(.decline), tint: Theme.foreground)
+                        .background(Theme.secondarySurface, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(isSubmitting)
+                Button {
+                    submit(.provide(value))
+                } label: {
+                    buttonLabel("提供", busy: isSubmitting(.provide), tint: Theme.primaryForeground)
+                        .background(Theme.primary, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(isSubmitting || value.isEmpty)
+                .opacity(isSubmitting || value.isEmpty ? 0.4 : 1)
             }
-            .buttonStyle(.plain)
-            .disabled(isSubmitting)
-            Button {
-                submit(.provide(value))
-            } label: {
-                buttonLabel("提供", busy: isSubmitting(.provide), tint: Theme.primaryForeground)
-                    .background(Theme.primary, in: RoundedRectangle(cornerRadius: 8))
-            }
-            .buttonStyle(.plain)
-            .disabled(isSubmitting || value.isEmpty)
-            .opacity(isSubmitting || value.isEmpty ? 0.4 : 1)
         }
     }
 

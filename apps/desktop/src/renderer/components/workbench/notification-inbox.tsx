@@ -95,7 +95,7 @@ export function NotificationInbox({ client, open, onClose, onOpen, onNavigate }:
               label={<span className="line-clamp-2 whitespace-pre-wrap break-words">{item.message}</span>}
               description={<span className="block whitespace-normal break-words">
                 {[project?.name, item.workspaceName, item.terminalTitle, item.deviceName].filter(Boolean).join(" / ")}
-                {secretEnded && <span className="block">密钥请求已结束</span>}
+                {secretEnded && <span className="block">输入请求已结束</span>}
                 {!available && <span className="block">来源已删除，无法跳转</span>}
               </span>}
               onClick={() => view(item)}

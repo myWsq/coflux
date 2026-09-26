@@ -158,7 +158,8 @@ struct WorkspaceDetailView: View {
                         SecretRequestCards(
                             client: client,
                             requests: client.pendingSecretRequests(taskID: task.id),
-                            source: secretRequestSource(task)
+                            source: secretRequestSource(task),
+                            deviceName: secretRequestDevice(task)
                         )
                     }
                 }
@@ -399,7 +400,7 @@ struct WorkspaceDetailView: View {
                     Image(systemName: "key.fill")
                         .font(Theme.Fonts.meta)
                         .foregroundStyle(Theme.warning)
-                        .accessibilityLabel("等待输入密钥")
+                        .accessibilityLabel("等待输入")
                 }
             }
             .foregroundStyle(active ? Theme.foreground : Theme.mutedForeground)
@@ -416,9 +417,13 @@ struct WorkspaceDetailView: View {
     }
 
     /// 设备 · 工作区 · 终端 — where a secret request comes from, as on the desktop card.
-    private func secretRequestSource(_ task: Coflux_V1_Task) -> String {
+    private func secretRequestDevice(_ task: Coflux_V1_Task) -> String {
         let daemon = client.daemons.first { $0.daemonID == task.daemonID }
-        let device = daemon.map { $0.name.isEmpty ? $0.host : $0.name } ?? ""
+        return daemon.map { $0.name.isEmpty ? $0.host : $0.name } ?? ""
+    }
+
+    private func secretRequestSource(_ task: Coflux_V1_Task) -> String {
+        let device = secretRequestDevice(task)
         let workspaceLabel = workspace.branch.isEmpty ? workspace.name : workspace.branch
         return [device, workspaceLabel, taskTitle(task)].filter { !$0.isEmpty }.joined(separator: " · ")
     }

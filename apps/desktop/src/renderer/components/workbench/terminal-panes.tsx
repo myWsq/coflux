@@ -61,13 +61,12 @@ export function TerminalPanes({
         const agentSessionId = entry && isUsableAgentSessionId(entry.agentSessionId) ? entry.agentSessionId : null;
         const requests = secretRequestsForTask(secretRequests, task.id);
         const workspace = requests.length > 0 ? workspaces.find((item) => item.id === task.workspaceId) : undefined;
-        const source = [
-          daemons.find((item) => item.daemonId === task.daemonId)?.name ?? "",
-          workspace?.name || workspace?.branch || "",
-          task.title,
-        ].filter(Boolean).join(" · ");
+        const deviceName = requests.length > 0 ? daemons.find((item) => item.daemonId === task.daemonId)?.name ?? "" : "";
+        const source = [deviceName, workspace?.name || workspace?.branch || "", task.title].filter(Boolean).join(" · ");
         const secretCards =
-          requests.length > 0 ? <SecretRequestCards requests={requests} source={source} onAnswer={client.answerSecretRequest} /> : null;
+          requests.length > 0 ? (
+            <SecretRequestCards requests={requests} source={source} deviceName={deviceName} onAnswer={client.answerSecretRequest} />
+          ) : null;
         return (
           <TerminalPane
             key={task.id}
