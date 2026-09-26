@@ -25,6 +25,10 @@
 //! An `ask` keeps its connection open until the outcome; the client closing it (Ctrl-C, killed
 //! agent) withdraws the request so every card closes. A worker that goes away (hot upgrade,
 //! runtime restart) closes the connection, which the CLI reports as `cancelled`.
+//!
+//! Every connection has its request line consumed before any reply, refusals included, and ends
+//! with a write-side shutdown: an unread receive buffer at close resets a Unix socket on macOS and
+//! the client would lose the reply.
 
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -126,8 +130,7 @@ pub async fn run(
         };
         let Ok(permit) = slots.clone().try_acquire_owned() else {
             tokio::spawn(async move {
-                let mut stream = stream;
-                reply(&mut stream, &refusal("busy", "too many concurrent secret requests; retry")).await;
+                refuse(stream, &refusal("busy", "too many concurrent secret requests; retry")).await;
             });
             continue;
         };
@@ -191,28 +194,61 @@ fn refusal(code: &str, error: impl AsRef<str>) -> Value {
     json!({ "ok": false, "code": code, "error": error.as_ref() })
 }
 
-async fn reply(stream: &mut UnixStream, value: &Value) {
-    let mut line = value.to_string().into_bytes();
-    line.push(b'\n');
-    let _ = tokio::time::timeout(REPLY_WRITE_TIMEOUT, stream.write_all(&line)).await;
+type Reader = BufReader<tokio::net::unix::OwnedReadHalf>;
+type Writer = tokio::net::unix::OwnedWriteHalf;
+
+/// Read the one request line, bounded in size and time. `None` when no complete line arrived.
+async fn read_request_line(reader: &mut Reader) -> Option<Vec<u8>> {
+    let mut line = Vec::new();
+    let read = tokio::time::timeout(
+        REQUEST_READ_TIMEOUT,
+        (&mut *reader).take(MAX_REQUEST_BYTES).read_until(b'\n', &mut line),
+    )
+    .await;
+    match read {
+        Ok(Ok(n)) if n > 0 && line.ends_with(b"\n") => Some(line),
+        _ => None,
+    }
 }
 
-async fn handle_connection(mut stream: UnixStream, context: &Context) {
-    // Identity first, from the kernel; the body is not even read for a stranger.
-    let credentials = match stream.peer_cred() {
-        Ok(credentials) => credentials,
-        Err(error) => {
-            reply(&mut stream, &refusal("not_in_session", format!("cannot identify the caller: {error}"))).await;
-            return;
+/// End the exchange gracefully: shut our write side down, then drain whatever the client still
+/// sends until it closes (bounded). Closing a Unix socket whose receive buffer still holds unread
+/// bytes resets the connection on macOS, and the peer then loses a reply already written.
+async fn close_gracefully(reader: &mut Reader, writer: &mut Writer) {
+    let _ = tokio::time::timeout(REPLY_WRITE_TIMEOUT, writer.shutdown()).await;
+    let mut sink = [0u8; 4096];
+    let mut drained = 0u64;
+    let _ = tokio::time::timeout(REQUEST_READ_TIMEOUT, async {
+        while drained < MAX_REQUEST_BYTES {
+            match reader.read(&mut sink).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => drained += n as u64,
+            }
         }
-    };
+    })
+    .await;
+}
+
+/// Refuse a connection whose request is not even looked at: the request line is still consumed
+/// first, so the refusal reaches the client instead of being lost to a connection reset.
+async fn refuse(stream: UnixStream, value: &Value) {
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    let _ = read_request_line(&mut reader).await;
+    write_reply(&mut write_half, value).await;
+    close_gracefully(&mut reader, &mut write_half).await;
+}
+
+/// The caller's session, from the kernel-reported pid: `Ok((session_id, task_id))` or the refusal.
+async fn identify(stream: &UnixStream, context: &Context) -> Result<(String, String), Value> {
+    let credentials = stream
+        .peer_cred()
+        .map_err(|error| refusal("not_in_session", format!("cannot identify the caller: {error}")))?;
     if credentials.uid() != context.owner_uid {
-        reply(&mut stream, &refusal("not_in_session", "the caller runs as another user")).await;
-        return;
+        return Err(refusal("not_in_session", "the caller runs as another user"));
     }
     let Some(pid) = credentials.pid() else {
-        reply(&mut stream, &refusal("not_in_session", "the kernel did not report the caller's pid")).await;
-        return;
+        return Err(refusal("not_in_session", "the kernel did not report the caller's pid"));
     };
     let alive = context.state.lock().unwrap().alive.clone();
     let session = {
@@ -224,49 +260,54 @@ async fn handle_connection(mut stream: UnixStream, context: &Context) {
     };
     let Some(session_id) = session else {
         logln!("[secret] refused a caller outside every coflux terminal (pid {pid})");
-        reply(
-            &mut stream,
-            &refusal(
-                "not_in_session",
-                "not inside a coflux terminal: coflux secret only works for processes started in a terminal coflux opened",
-            ),
-        )
-        .await;
-        return;
+        return Err(refusal(
+            "not_in_session",
+            "not inside a coflux terminal: coflux secret only works for processes started in a terminal coflux opened",
+        ));
     };
     let task_id = alive
         .get(&session_id)
         .map(|(task_id, _)| task_id.clone())
         .unwrap_or_default();
+    Ok((session_id, task_id))
+}
 
+async fn handle_connection(stream: UnixStream, context: &Context) {
+    // Identity first, from the kernel; it alone decides whether the request is looked at. The
+    // request line is consumed either way (see `close_gracefully`), never parsed for a stranger.
+    let identity = identify(&stream, context).await;
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
-    let mut line = Vec::new();
-    let read = tokio::time::timeout(
-        REQUEST_READ_TIMEOUT,
-        (&mut reader).take(MAX_REQUEST_BYTES).read_until(b'\n', &mut line),
-    )
-    .await;
-    let request: Value = match read {
-        Ok(Ok(n)) if n > 0 && line.ends_with(b"\n") => match serde_json::from_slice(&line) {
-            Ok(value) => value,
-            Err(_) => {
-                write_reply(&mut write_half, &refusal("bad_request", "the request is not valid JSON")).await;
-                return;
-            }
-        },
-        _ => {
+    let line = read_request_line(&mut reader).await;
+    let (session_id, task_id) = match identity {
+        Ok(identity) => identity,
+        Err(refusal) => {
+            write_reply(&mut write_half, &refusal).await;
+            close_gracefully(&mut reader, &mut write_half).await;
+            return;
+        }
+    };
+    let request: Value = match line.map(|line| serde_json::from_slice::<Value>(&line)) {
+        Some(Ok(value)) => value,
+        Some(Err(_)) => {
+            write_reply(&mut write_half, &refusal("bad_request", "the request is not valid JSON")).await;
+            close_gracefully(&mut reader, &mut write_half).await;
+            return;
+        }
+        None => {
             write_reply(&mut write_half, &refusal("bad_request", "no complete request line")).await;
+            close_gracefully(&mut reader, &mut write_half).await;
             return;
         }
     };
     let op = request.get("op").and_then(Value::as_str).unwrap_or_default();
     match op {
         "ask" => {
-            let answer = ask(context, &session_id, &task_id, &request, &mut reader).await;
-            if let Some(answer) = answer {
-                write_reply(&mut write_half, &answer).await;
-            }
+            let Some(answer) = ask(context, &session_id, &task_id, &request, &mut reader).await else {
+                // The client is gone: nothing to reply to.
+                return;
+            };
+            write_reply(&mut write_half, &answer).await;
         }
         "release" => release(context, &session_id, &request, &mut write_half).await,
         "inject" => {
@@ -275,9 +316,10 @@ async fn handle_connection(mut stream: UnixStream, context: &Context) {
         }
         _ => write_reply(&mut write_half, &refusal("bad_request", format!("unknown op {op:?}"))).await,
     }
+    close_gracefully(&mut reader, &mut write_half).await;
 }
 
-async fn write_reply(writer: &mut tokio::net::unix::OwnedWriteHalf, value: &Value) {
+async fn write_reply(writer: &mut Writer, value: &Value) {
     let mut line = value.to_string().into_bytes();
     line.push(b'\n');
     let _ = tokio::time::timeout(REPLY_WRITE_TIMEOUT, writer.write_all(&line)).await;

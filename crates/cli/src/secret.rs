@@ -169,6 +169,20 @@ fn send_request(stream: &mut UnixStream, request: &Value) {
     let mut line = request.to_string().into_bytes();
     line.push(b'\n');
     if let Err(error) = stream.write_all(&line) {
+        // The worker may have refused (and closed) before our write landed; its reply, when it
+        // got one out, says why far better than a broken pipe does.
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+        ) {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            if let Ok(Some(line)) = read_reply(stream) {
+                let reply: Value = serde_json::from_slice(&line).unwrap_or(Value::Null);
+                if reply.get("ok").and_then(Value::as_bool) == Some(false) {
+                    die(&refusal_message(&reply));
+                }
+            }
+        }
         die(&format!("cannot send the request to the coflux daemon: {error}"));
     }
 }
@@ -409,11 +423,9 @@ impl Masker {
         let mut index = 0;
         while index < self.pending.len() {
             let rest = &self.pending[index..];
-            if let Some(value) = self.values.iter().find(|value| rest.starts_with(value)) {
-                out.extend_from_slice(REDACTED);
-                index += value.len();
-                continue;
-            }
+            // Checked before any full match: when a shorter value matches here but a longer one
+            // could still complete from this position, redacting the shorter now would leak the
+            // longer one's tail once the next chunk arrives.
             if self
                 .values
                 .iter()
@@ -421,6 +433,11 @@ impl Masker {
             {
                 // The tail may be the start of a value: decide once more bytes arrive.
                 break;
+            }
+            if let Some(value) = self.values.iter().find(|value| rest.starts_with(value)) {
+                out.extend_from_slice(REDACTED);
+                index += value.len();
+                continue;
             }
             out.push(self.pending[index]);
             index += 1;
@@ -549,6 +566,12 @@ mod tests {
         assert_eq!(masker.push(b"prompt> "), b"prompt> ".to_vec());
         assert_eq!(masker.push(b"se"), Vec::<u8>::new());
         assert_eq!(masker.push(b"cret!"), b"***!".to_vec());
+    }
+
+    #[test]
+    fn a_shorter_value_waits_while_a_longer_one_could_still_complete() {
+        assert_eq!(masked(&["abcd", "ab"], &["xab", "cdy"]), "x***y");
+        assert_eq!(masked(&["abcd", "ab"], &["xab", "zz"]), "x***zz");
     }
 
     #[test]
