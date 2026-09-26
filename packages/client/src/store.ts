@@ -3,6 +3,8 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import {
   TaskStatus,
   CONTROL_PROTOCOL_VERSION,
+  SecretAnswerKind,
+  SecretAnswerStatus,
   type AccountNotification,
   type ClientToServerPayload,
   type DaemonInfo,
@@ -33,6 +35,44 @@ export type SessionAgentState = {
    * 别信这里的 string 类型**（离线缓存里恢复出来的旧条目根本没有这个字段）。 */
   agentSessionId: string;
 };
+
+/** A pending secret request (plan 20260926-agent-secret-input): an agent in the terminal
+ * `sessionId` / `taskId` asked the user for `name`. Metadata only — the value never passes through
+ * the client store. `reason` is the agent's own text and must be presented as such. Replaced per
+ * device by `secretRequestsUpdated`; a request that leaves the set is settled or gone. */
+export type SecretRequestState = {
+  requestId: string;
+  daemonId: string;
+  sessionId: string;
+  taskId: string;
+  name: string;
+  reason: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
+/** The worker's acknowledgement of a secret answer, or a local failure to deliver it (`failed`:
+ * the device was unreachable or the request timed out — the card keeps its input for a retry). */
+export type SecretAnswerResult =
+  | { status: "accepted" | "already_answered" | "expired" | "unknown_request" | "invalid" }
+  | { status: "failed"; error: string };
+
+export type SecretAnswer = { kind: "provide"; value: string } | { kind: "decline" } | { kind: "cancel" };
+
+function secretAnswerResult(status: SecretAnswerStatus): SecretAnswerResult {
+  switch (status) {
+    case SecretAnswerStatus.ACCEPTED:
+      return { status: "accepted" };
+    case SecretAnswerStatus.ALREADY_ANSWERED:
+      return { status: "already_answered" };
+    case SecretAnswerStatus.EXPIRED:
+      return { status: "expired" };
+    case SecretAnswerStatus.UNKNOWN_REQUEST:
+      return { status: "unknown_request" };
+    default:
+      return { status: "invalid" };
+  }
+}
 
 export type WorkspaceActivity =
   | { status: "idle" }
@@ -269,6 +309,9 @@ export type CofluxState = {
   sessionCheckpoints: Record<string, SessionCheckpoint>;
   /** agent presence + hook 回合状态（plan 073）：sessionId → agent/state。来自 sessionAgentsUpdated 按设备全量替换。 */
   sessionAgents: Record<string, SessionAgentState>;
+  /** Pending secret requests (plan 20260926-agent-secret-input): requestId → request, replaced per
+   * device by secretRequestsUpdated. Live-only: never written to the offline catalog. */
+  secretRequests: Record<string, SecretRequestState>;
   lastError: ClientError | null;
   snapshotRevision: number;
 };
@@ -381,6 +424,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     localSessions: [],
     sessionCheckpoints: {},
     sessionAgents: {},
+    secretRequests: {},
     notificationInbox: emptyNotificationInbox(),
     lastError: null,
     snapshotRevision: 0,
@@ -534,7 +578,12 @@ export function createCofluxClient(options: CofluxClientOptions) {
       // session 已退出：agent presence 一并清理，防僵尸琥珀（plan 073）
       const sessionAgents = { ...state.sessionAgents };
       delete sessionAgents[sessionId];
+      // The worker ends a terminal's pending secret requests with it; close the cards right away.
+      const secretRequests = Object.fromEntries(
+        Object.entries(state.secretRequests).filter(([, request]) => request.sessionId !== sessionId),
+      );
       return {
+        secretRequests,
         localSessions: upsert(state.localSessions, local, (item) => item.daemonId === daemonId && item.sessionId === sessionId),
         tasks: state.tasks.map((task) => task.id === taskId && task.sessionId === sessionId
           ? { ...task, status: TaskStatus.EXITED, sessionId: undefined, exitCode }
@@ -806,6 +855,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
             detachedTaskIds: new Set([...state.detachedTaskIds].filter((taskId) => taskIds.has(taskId))),
             // agent presence 清零重建：server 会紧随快照按设备补发当前全量（plan 073）。
             sessionAgents: {},
+            // Same for pending secret requests: re-sent per device right after the snapshot.
+            secretRequests: {},
             snapshotRevision: state.snapshotRevision + 1,
           };
         });
@@ -825,6 +876,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           workspaces: state.workspaces.filter((workspace) => workspace.daemonId !== value.daemonId),
           tasks: state.tasks.filter((task) => task.daemonId !== value.daemonId),
           sessionAgents: Object.fromEntries(Object.entries(state.sessionAgents).filter(([, entry]) => entry.daemonId !== value.daemonId)),
+          secretRequests: Object.fromEntries(Object.entries(state.secretRequests).filter(([, entry]) => entry.daemonId !== value.daemonId)),
         }));
         break;
       }
@@ -944,6 +996,29 @@ export function createCofluxClient(options: CofluxClientOptions) {
             };
           }
           return { sessionAgents };
+        });
+        break;
+      }
+      case "secretRequestsUpdated": {
+        const value = payload.value;
+        store.setState((state) => {
+          // Full replacement per device (empty = none pending on it).
+          const secretRequests: Record<string, SecretRequestState> = Object.fromEntries(
+            Object.entries(state.secretRequests).filter(([, entry]) => entry.daemonId !== value.daemonId),
+          );
+          for (const request of value.requests) {
+            secretRequests[request.requestId] = {
+              requestId: request.requestId,
+              daemonId: value.daemonId,
+              sessionId: request.sessionId,
+              taskId: request.taskId,
+              name: request.name,
+              reason: request.reason,
+              createdAt: request.createdAt,
+              expiresAt: request.expiresAt,
+            };
+          }
+          return { secretRequests };
         });
         break;
       }
@@ -1085,6 +1160,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       localSessions: [],
       sessionCheckpoints: {},
       sessionAgents: {},
+      secretRequests: {},
     });
   }
 
@@ -1203,6 +1279,22 @@ export function createCofluxClient(options: CofluxClientOptions) {
     }
   }
 
+  /** Answer a pending secret request (plan 20260926-agent-secret-input). The value goes straight to
+   * the requesting device's worker over the end-to-end Device channel and never enters the store;
+   * the result is the worker's acknowledgement. */
+  async function answerSecretRequest(requestId: string, answer: SecretAnswer): Promise<SecretAnswerResult> {
+    const request = store.getState().secretRequests[requestId];
+    if (!request) return { status: "already_answered" };
+    const kind =
+      answer.kind === "provide" ? SecretAnswerKind.PROVIDE : answer.kind === "decline" ? SecretAnswerKind.DECLINE : SecretAnswerKind.CANCEL;
+    try {
+      const status = await deviceRouter.answerSecret(request.daemonId, requestId, kind, answer.kind === "provide" ? answer.value : "");
+      return secretAnswerResult(status);
+    } catch (error) {
+      return { status: "failed", error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   /** 本地失败（exec/checkout 等非服务端错误）汇入同一个全局错误提示通道 */
   function reportLocalError(message: string) {
     errorSequence += 1;
@@ -1275,6 +1367,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         if (executorListener === listener) executorListener = undefined;
       };
     },
+    answerSecretRequest,
     sendExecutorHostRegister: deviceRouter.sendExecutorHostRegister,
     sendExecutorReport: deviceRouter.sendExecutorReport,
     registerSessionConsumer,

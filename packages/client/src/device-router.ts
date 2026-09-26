@@ -8,6 +8,8 @@ import {
   DeviceScope,
   LocalAuthErrorCode,
   MAX_DEVICE_FRAME_BYTES,
+  SecretAnswerKind,
+  SecretAnswerStatus,
   type ClientToServerPayload,
   type DeviceEnvelope,
   type DeviceEnvelopePayload,
@@ -2233,6 +2235,32 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     throw unexpectedResponse("fsWriteResult", response);
   }
 
+  /** Answer a pending secret request (plan 20260926-agent-secret-input) directly to the worker over
+   * the end-to-end Device channel; the center never sees the value. Needs only SESSION_CONTROL on
+   * the channel — no attach, no holder — so a desktop that never opened the terminal can answer.
+   * The route is retained for the duration of the send because a device the user has not selected
+   * has no lane otherwise. Resolves with the worker's acknowledgement. */
+  async function answerSecret(
+    daemonId: string,
+    requestId: string,
+    kind: SecretAnswerKind,
+    value: string,
+  ): Promise<SecretAnswerStatus> {
+    const route = routeFor(daemonId);
+    route.transientDemand += 1;
+    try {
+      const response = await request(daemonId, DeviceScope.SESSION_CONTROL, {
+        case: "secretAnswer",
+        value: { requestId, kind, value: kind === SecretAnswerKind.PROVIDE ? value : "" },
+      });
+      if (response.case === "secretAnswerAck") return response.value.status;
+      throw unexpectedResponse("secretAnswerAck", response);
+    } finally {
+      route.transientDemand = Math.max(0, route.transientDemand - 1);
+      releaseIdle(route);
+    }
+  }
+
   async function requestPorts(daemonId: string): Promise<DevicePortsResult> {
     const response = await request(daemonId, DeviceScope.RPC, {
       case: "portsRequest",
@@ -2522,6 +2550,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     fsRead,
     fsWrite,
     requestPorts,
+    answerSecret,
     executePrepared,
     reset,
     destroy,
@@ -2547,6 +2576,7 @@ function requestIdOf(payload: RuntimeDevicePayload): string | undefined {
     case "fsRead":
     case "fsWrite":
     case "portsRequest":
+    case "secretAnswer":
       return payload.value.requestId;
     default:
       return undefined;
@@ -2566,6 +2596,7 @@ function responseRequestId(payload: RuntimeDevicePayload): string | undefined {
     case "fsReadResult":
     case "fsWriteResult":
     case "portsResult":
+    case "secretAnswerAck":
       return payload.value.requestId;
     case "error":
       return payload.value.requestId;

@@ -55,6 +55,7 @@ import {
   type DeviceSessionCatalog,
   type DeviceSessionInfo,
   type SessionAgentRef,
+  type SecretRequestRef,
   type SessionCheckpoint,
   type AgentControlRequest,
   type AgentControlResultPayload,
@@ -106,6 +107,10 @@ const MAX_CATALOG_ENTRIES = 4096;
 const MAX_CATALOG_PATH_BYTES = 16 * 1024;
 const MAX_RETAINED_CATALOG_BYTES = 4 * 1024 * 1024;
 const MAX_AGENT_ENTRIES = 1024;
+/** Pending secret requests per daemon (plan 20260926-agent-secret-input); the worker caps itself at 64. */
+const MAX_SECRET_REQUEST_ENTRIES = 64;
+const MAX_SECRET_REASON_BYTES = 2000;
+const SECRET_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const MAX_ENROLL_NAME_BYTES = 256;
 const MAX_ENROLL_HOST_BYTES = 256;
 const MAX_ENROLL_PLATFORM_BYTES = 64;
@@ -200,6 +205,18 @@ interface SessionAgentData {
   /** agent 自己的会话标识（plan 20260919）：客户端据此定位 transcript 文件。空 = 旧 worker 或
    * 未上报。中心只做保守形状校验后原样转发，不解释、不落库。 */
   agentSessionId: string;
+}
+
+/** A pending secret request (plan 20260926-agent-secret-input): metadata only, never the value.
+ * Plain object like SessionAgentData; only ever built as a nested field of a broadcast. */
+interface SecretRequestData {
+  requestId: string;
+  sessionId: SessionId;
+  taskId: TaskId;
+  name: string;
+  reason: string;
+  createdAt: number;
+  expiresAt: number;
 }
 
 interface DaemonResyncAuthority {
@@ -516,6 +533,11 @@ export class Hub {
   /** agent presence（plan 073）：daemon 上报的"会话进程树内检测到的 agent CLI"。派生运行时
    * 事实——纯内存、不落库，daemon 断开即清空并广播；订阅时按设备补发当前全量。 */
   private sessionAgents = new Map<DaemonId, { accountId: AccountId; sessions: SessionAgentData[] }>();
+  /** Pending secret requests (plan 20260926-agent-secret-input): the daemon's latest SecretRequests
+   * snapshot, validated like presence. Memory only, never persisted: a center restart must not
+   * resurrect requests nobody can answer. Cleared and broadcast empty when the daemon disconnects;
+   * re-sent per device on subscribe. */
+  private secretRequests = new Map<DaemonId, { accountId: AccountId; requests: SecretRequestData[] }>();
   private readonly localControl: LocalControlPlane<ClientConn, DaemonConn>;
   /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
@@ -1860,6 +1882,59 @@ export class Hub {
     this.broadcast(daemon.accountId, { case: "sessionAgentsUpdated", value: { daemonId, sessions: valid } });
   }
 
+  /** Pending secret requests (plan 20260926-agent-secret-input): each entry must name a session of
+   * this daemon that belongs to the stated task (catalog live or runtime route, the presence rule);
+   * malformed or foreign entries are dropped. An unchanged snapshot is absorbed (the worker re-sends
+   * unconditionally after authentication). */
+  private acceptSecretRequests(daemon: DaemonConn, requests: readonly SecretRequestRef[]): void {
+    const daemonId = daemon.info.daemonId;
+    const live = this.catalog.get(daemonId);
+    const valid: SecretRequestData[] = [];
+    const seen = new Set<string>();
+    for (const entry of requests.slice(0, MAX_SECRET_REQUEST_ENTRIES)) {
+      if (!validControlId(entry.requestId) || seen.has(entry.requestId)) continue;
+      if (!validControlId(entry.sessionId) || !validControlId(entry.taskId)) continue;
+      if (!SECRET_NAME_PATTERN.test(entry.name)) continue;
+      if (!entry.reason || Buffer.byteLength(entry.reason) > MAX_SECRET_REASON_BYTES) continue;
+      if (!Number.isFinite(entry.createdAt) || !Number.isFinite(entry.expiresAt)) continue;
+      const catalogInfo = live?.get(entry.sessionId);
+      const runtime = this.sessions.get(entry.sessionId);
+      const matchesKnownSession = catalogInfo
+        ? catalogInfo.taskId === entry.taskId
+        : runtime?.daemonId === daemonId && runtime.taskId === entry.taskId;
+      if (!matchesKnownSession) continue;
+      seen.add(entry.requestId);
+      valid.push({
+        requestId: entry.requestId,
+        sessionId: entry.sessionId,
+        taskId: entry.taskId,
+        name: entry.name,
+        reason: entry.reason,
+        createdAt: entry.createdAt,
+        expiresAt: entry.expiresAt,
+      });
+    }
+    const previous = this.secretRequests.get(daemonId);
+    const unchanged =
+      previous !== undefined &&
+      previous.requests.length === valid.length &&
+      previous.requests.every(
+        (p, i) =>
+          p.requestId === valid[i]!.requestId &&
+          p.sessionId === valid[i]!.sessionId &&
+          p.taskId === valid[i]!.taskId &&
+          p.name === valid[i]!.name &&
+          p.reason === valid[i]!.reason &&
+          p.createdAt === valid[i]!.createdAt &&
+          p.expiresAt === valid[i]!.expiresAt,
+      );
+    if (unchanged) return;
+    if (valid.length === 0 && previous === undefined) return;
+    if (valid.length === 0) this.secretRequests.delete(daemonId);
+    else this.secretRequests.set(daemonId, { accountId: daemon.accountId, requests: valid });
+    this.broadcast(daemon.accountId, { case: "secretRequestsUpdated", value: { daemonId, requests: valid } });
+  }
+
   /* ----------------------- durable prepared op ----------------------- */
 
   private async handleDeviceOperationReport(daemon: DaemonConn, report: DeviceOperationReport): Promise<void> {
@@ -2289,6 +2364,11 @@ export class Hub {
       case "sessionAgents": {
         const daemon = this.currentDaemon(conn);
         if (daemon) this.acceptSessionAgents(daemon, msg.payload.value.sessions);
+        break;
+      }
+      case "secretRequests": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) this.acceptSecretRequests(daemon, msg.payload.value.requests);
         break;
       }
       case "agentControlRequest": {
@@ -2733,6 +2813,11 @@ export class Hub {
       if (this.sessionAgents.delete(daemonId)) {
         this.broadcast(accountId, { case: "sessionAgentsUpdated", value: { daemonId, sessions: [] } });
       }
+      // Pending secret requests die with the connection: the worker that could accept an answer
+      // is gone (a new one starts with none), so every card closes.
+      if (this.secretRequests.delete(daemonId)) {
+        this.broadcast(accountId, { case: "secretRequestsUpdated", value: { daemonId, requests: [] } });
+      }
       // close 清理也持 generation gate：后继连接只能在 lease/route/offline 广播全部收口后上线，
       // 避免旧 close continuation 在新连接 online 之后撤销新 lease 或补发 offline。
       await this.localControl.daemonDisconnected(daemonId);
@@ -2818,6 +2903,10 @@ export class Hub {
         // 这里按设备补发当前全量——顺序在快照之后、与 checkpoint 同批，天然落在乱序防护序列内。
         for (const [daemonId, entry] of this.sessionAgents) {
           if (entry.accountId === accountId) this.sendClientNow(client, { case: "sessionAgentsUpdated", value: { daemonId, sessions: entry.sessions } });
+        }
+        // Pending secret requests follow the same rule: the client clears them with the snapshot.
+        for (const [daemonId, entry] of this.secretRequests) {
+          if (entry.accountId === accountId) this.sendClientNow(client, { case: "secretRequestsUpdated", value: { daemonId, requests: entry.requests } });
         }
         try {
           // ready prepared 列表也必须跨 complete 稳定：查询和投递都收进 service 的同一代际，

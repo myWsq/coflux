@@ -23,6 +23,9 @@ export {
   type TokenStorage,
   type LocalSessionState,
   type SessionAgentState,
+  type SecretRequestState,
+  type SecretAnswer,
+  type SecretAnswerResult,
   type WorkspaceActivity,
 } from "./store";
 export {
