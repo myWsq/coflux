@@ -815,6 +815,53 @@ message DeviceLoopbackClose {
   uint32 connection_id = 1;
 }
 
+// ===== Secret answers (plan 20260926-agent-secret-input) =====
+//
+// A desktop answers a pending secret request (announced to it through the center as
+// SecretRequestRef) directly to the worker over this end-to-end channel, so the center never sees
+// the value. Requires DEVICE_SCOPE_SESSION_CONTROL on the channel and nothing else: no attach, no
+// holder_epoch, so a desktop that never opened the requesting terminal can answer. The worker
+// arbitrates by request_id: the first answer wins and later ones are acknowledged as
+// ALREADY_ANSWERED. Every answer gets exactly one DeviceSecretAnswerAck on the same channel.
+
+enum SecretAnswerKind {
+  SECRET_ANSWER_KIND_UNSPECIFIED = 0;
+  // `value` carries the secret; the agent learns `provided`.
+  SECRET_ANSWER_KIND_PROVIDE = 1;
+  // The user refused; the agent learns `declined`.
+  SECRET_ANSWER_KIND_DECLINE = 2;
+  // The user closed the card; the agent learns `cancelled`.
+  SECRET_ANSWER_KIND_CANCEL = 3;
+}
+
+enum SecretAnswerStatus {
+  SECRET_ANSWER_STATUS_UNSPECIFIED = 0;
+  // This answer settled the request.
+  SECRET_ANSWER_STATUS_ACCEPTED = 1;
+  // Another answer (possibly from another desktop) settled it first.
+  SECRET_ANSWER_STATUS_ALREADY_ANSWERED = 2;
+  // The request timed out, its terminal ended, or the agent stopped waiting.
+  SECRET_ANSWER_STATUS_EXPIRED = 3;
+  // This worker runtime never issued the request (for example after a hot upgrade).
+  SECRET_ANSWER_STATUS_UNKNOWN_REQUEST = 4;
+  // Malformed answer: unspecified kind, or an empty or oversized value for PROVIDE.
+  SECRET_ANSWER_STATUS_INVALID = 5;
+}
+
+// client→worker (SESSION_CONTROL). `value` is only meaningful for PROVIDE and must be empty
+// otherwise. Implementations must never log or debug-print this message.
+message DeviceSecretAnswer {
+  string request_id = 1;
+  SecretAnswerKind kind = 2;
+  string value = 3;
+}
+
+// worker→client (SESSION_CONTROL): the outcome of one DeviceSecretAnswer.
+message DeviceSecretAnswerAck {
+  string request_id = 1;
+  SecretAnswerStatus status = 2;
+}
+
 message DeviceEnvelope {
   uint32 protocol_version = 1;
   // 已认证后的 inner channel_id 必须与 loopback/relay/UDS 外层 channel 相同；LocalGatewayHello
@@ -871,5 +918,7 @@ message DeviceEnvelope {
     DeviceLoopbackData loopback_data = 83;
     DeviceLoopbackAck loopback_ack = 84;
     DeviceLoopbackClose loopback_close = 85;
+    DeviceSecretAnswer secret_answer = 90;
+    DeviceSecretAnswerAck secret_answer_ack = 91;
   }
 }

@@ -265,6 +265,35 @@ pub struct AccountNotification {
     #[prost(double, tag="11")]
     pub read_at: f64,
 }
+/// A pending secret request (plan 20260926-agent-secret-input): an agent in a coflux terminal ran
+/// `coflux secret ask NAME` and the worker is waiting for a desktop to provide or decline the value.
+/// Metadata only: the value itself never travels in this message, never reaches the center, and is
+/// delivered from the desktop to the worker over the end-to-end Device channel (DeviceSecretAnswer).
+/// Derived runtime fact: the center mirrors it in memory, never persists it, and clears it when the
+/// daemon disconnects.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SecretRequestRef {
+    /// Worker-generated, unique within the worker runtime; the key DeviceSecretAnswer names.
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// The live session (terminal) whose agent asked; only that session can use the value.
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub task_id: ::prost::alloc::string::String,
+    /// Environment-variable style name the agent asked for ([A-Za-z_][A-Za-z0-9_]*).
+    #[prost(string, tag="4")]
+    pub name: ::prost::alloc::string::String,
+    /// Free text written by the agent; clients must present it as the agent's words.
+    #[prost(string, tag="5")]
+    pub reason: ::prost::alloc::string::String,
+    /// ms epoch
+    #[prost(double, tag="6")]
+    pub created_at: f64,
+    /// ms epoch; after it the worker answers the agent `cancelled` and drops the request.
+    #[prost(double, tag="7")]
+    pub expires_at: f64,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum TaskStatus {
@@ -1386,6 +1415,25 @@ pub struct DeviceLoopbackClose {
     #[prost(uint32, tag="1")]
     pub connection_id: u32,
 }
+/// client→worker (SESSION_CONTROL). `value` is only meaningful for PROVIDE and must be empty
+/// otherwise. Implementations must never log or debug-print this message.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSecretAnswer {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(enumeration="SecretAnswerKind", tag="2")]
+    pub kind: i32,
+    #[prost(string, tag="3")]
+    pub value: ::prost::alloc::string::String,
+}
+/// worker→client (SESSION_CONTROL): the outcome of one DeviceSecretAnswer.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceSecretAnswerAck {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(enumeration="SecretAnswerStatus", tag="2")]
+    pub status: i32,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceEnvelope {
     #[prost(uint32, tag="1")]
@@ -1394,7 +1442,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -1501,6 +1549,10 @@ pub mod device_envelope {
         LoopbackAck(super::DeviceLoopbackAck),
         #[prost(message, tag="85")]
         LoopbackClose(super::DeviceLoopbackClose),
+        #[prost(message, tag="90")]
+        SecretAnswer(super::DeviceSecretAnswer),
+        #[prost(message, tag="91")]
+        SecretAnswerAck(super::DeviceSecretAnswerAck),
     }
 }
 // Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
@@ -1759,6 +1811,93 @@ impl DeviceLoopbackFailure {
             "DEVICE_LOOPBACK_FAILURE_UNREACHABLE" => Some(Self::Unreachable),
             "DEVICE_LOOPBACK_FAILURE_LIMIT" => Some(Self::Limit),
             "DEVICE_LOOPBACK_FAILURE_INVALID" => Some(Self::Invalid),
+            _ => None,
+        }
+    }
+}
+// ===== Secret answers (plan 20260926-agent-secret-input) =====
+//
+// A desktop answers a pending secret request (announced to it through the center as
+// SecretRequestRef) directly to the worker over this end-to-end channel, so the center never sees
+// the value. Requires DEVICE_SCOPE_SESSION_CONTROL on the channel and nothing else: no attach, no
+// holder_epoch, so a desktop that never opened the requesting terminal can answer. The worker
+// arbitrates by request_id: the first answer wins and later ones are acknowledged as
+// ALREADY_ANSWERED. Every answer gets exactly one DeviceSecretAnswerAck on the same channel.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SecretAnswerKind {
+    Unspecified = 0,
+    /// `value` carries the secret; the agent learns `provided`.
+    Provide = 1,
+    /// The user refused; the agent learns `declined`.
+    Decline = 2,
+    /// The user closed the card; the agent learns `cancelled`.
+    Cancel = 3,
+}
+impl SecretAnswerKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SECRET_ANSWER_KIND_UNSPECIFIED",
+            Self::Provide => "SECRET_ANSWER_KIND_PROVIDE",
+            Self::Decline => "SECRET_ANSWER_KIND_DECLINE",
+            Self::Cancel => "SECRET_ANSWER_KIND_CANCEL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SECRET_ANSWER_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "SECRET_ANSWER_KIND_PROVIDE" => Some(Self::Provide),
+            "SECRET_ANSWER_KIND_DECLINE" => Some(Self::Decline),
+            "SECRET_ANSWER_KIND_CANCEL" => Some(Self::Cancel),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SecretAnswerStatus {
+    Unspecified = 0,
+    /// This answer settled the request.
+    Accepted = 1,
+    /// Another answer (possibly from another desktop) settled it first.
+    AlreadyAnswered = 2,
+    /// The request timed out, its terminal ended, or the agent stopped waiting.
+    Expired = 3,
+    /// This worker runtime never issued the request (for example after a hot upgrade).
+    UnknownRequest = 4,
+    /// Malformed answer: unspecified kind, or an empty or oversized value for PROVIDE.
+    Invalid = 5,
+}
+impl SecretAnswerStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SECRET_ANSWER_STATUS_UNSPECIFIED",
+            Self::Accepted => "SECRET_ANSWER_STATUS_ACCEPTED",
+            Self::AlreadyAnswered => "SECRET_ANSWER_STATUS_ALREADY_ANSWERED",
+            Self::Expired => "SECRET_ANSWER_STATUS_EXPIRED",
+            Self::UnknownRequest => "SECRET_ANSWER_STATUS_UNKNOWN_REQUEST",
+            Self::Invalid => "SECRET_ANSWER_STATUS_INVALID",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SECRET_ANSWER_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "SECRET_ANSWER_STATUS_ACCEPTED" => Some(Self::Accepted),
+            "SECRET_ANSWER_STATUS_ALREADY_ANSWERED" => Some(Self::AlreadyAnswered),
+            "SECRET_ANSWER_STATUS_EXPIRED" => Some(Self::Expired),
+            "SECRET_ANSWER_STATUS_UNKNOWN_REQUEST" => Some(Self::UnknownRequest),
+            "SECRET_ANSWER_STATUS_INVALID" => Some(Self::Invalid),
             _ => None,
         }
     }
@@ -2103,6 +2242,17 @@ pub struct SessionAgentsUpdated {
     #[prost(message, repeated, tag="2")]
     pub sessions: ::prost::alloc::vec::Vec<SessionAgentRef>,
 }
+/// A device's pending secret requests (plan 20260926-agent-secret-input): the full current set,
+/// broadcast after each daemon SecretRequests report or when the daemon disconnects (empty), and
+/// re-sent per device on subscribe. Drives the request card on every desktop; a request that
+/// leaves the set closes its card. In-memory derived fact, never persisted.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SecretRequestsUpdated {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub requests: ::prost::alloc::vec::Vec<SecretRequestRef>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StateSnapshot {
     #[prost(message, repeated, tag="1")]
@@ -2216,7 +2366,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -2285,6 +2435,8 @@ pub mod server_to_client {
         DeviceTailcatClosed(super::DeviceTailcatClosed),
         #[prost(message, tag="44")]
         DeviceJoinKeyCreated(super::DeviceJoinKeyCreated),
+        #[prost(message, tag="45")]
+        SecretRequestsUpdated(super::SecretRequestsUpdated),
     }
 }
 /// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
@@ -2496,6 +2648,16 @@ pub struct PortsUpdate {
 pub struct SessionAgents {
     #[prost(message, repeated, tag="1")]
     pub sessions: ::prost::alloc::vec::Vec<SessionAgentRef>,
+}
+/// Full idempotent snapshot of this daemon's pending secret requests (plan
+/// 20260926-agent-secret-input), same shape as SessionAgents: sent on every change and
+/// unconditionally after authentication; empty = none pending. The server validates each entry's
+/// session/task against its catalog, keeps the result in memory only and fans it out to the
+/// account's clients. Never carries a secret value.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SecretRequests {
+    #[prost(message, repeated, tag="1")]
+    pub requests: ::prost::alloc::vec::Vec<SecretRequestRef>,
 }
 /// ===== agent 协同控制（plan 074）=====
 ///
@@ -2759,7 +2921,7 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 30, 31, 32, 34, 35, 36, 37, 38")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 30, 31, 32, 34, 35, 36, 37, 38, 39")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -2821,6 +2983,8 @@ pub mod daemon_to_server {
         DeviceTailcatInstalled(super::DeviceTailcatInstalled),
         #[prost(message, tag="38")]
         DeviceTailcatOpened(super::DeviceTailcatOpened),
+        #[prost(message, tag="39")]
+        SecretRequests(super::SecretRequests),
     }
 }
 // ===== 中心发起的终端读/写（plan 091）=====

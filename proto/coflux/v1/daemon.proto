@@ -99,6 +99,15 @@ message SessionAgents {
   repeated SessionAgentRef sessions = 1;
 }
 
+// Full idempotent snapshot of this daemon's pending secret requests (plan
+// 20260926-agent-secret-input), same shape as SessionAgents: sent on every change and
+// unconditionally after authentication; empty = none pending. The server validates each entry's
+// session/task against its catalog, keeps the result in memory only and fans it out to the
+// account's clients. Never carries a secret value.
+message SecretRequests {
+  repeated SecretRequestRef requests = 1;
+}
+
 // ===== agent 协同控制（plan 074）=====
 //
 // 跑在 PTY 里的 agent 经 loopback 发起的中心操作。worker 已用调用方 pid 反查进程树确认它
@@ -321,6 +330,7 @@ message DaemonToServer {
     DeviceTailcatEndpoint device_tailcat_endpoint = 36;
     DeviceTailcatInstalled device_tailcat_installed = 37;
     DeviceTailcatOpened device_tailcat_opened = 38;
+    SecretRequests secret_requests = 39;
   }
 }
 

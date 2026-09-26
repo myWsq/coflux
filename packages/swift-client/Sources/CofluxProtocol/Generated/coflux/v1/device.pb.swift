@@ -312,6 +312,114 @@ public enum Coflux_V1_DeviceLoopbackFailure: SwiftProtobuf.Enum, Swift.CaseItera
 
 }
 
+public enum Coflux_V1_SecretAnswerKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+
+  /// `value` carries the secret; the agent learns `provided`.
+  case provide // = 1
+
+  /// The user refused; the agent learns `declined`.
+  case decline // = 2
+
+  /// The user closed the card; the agent learns `cancelled`.
+  case cancel // = 3
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .provide
+    case 2: self = .decline
+    case 3: self = .cancel
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .provide: return 1
+    case .decline: return 2
+    case .cancel: return 3
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_SecretAnswerKind] = [
+    .unspecified,
+    .provide,
+    .decline,
+    .cancel,
+  ]
+
+}
+
+public enum Coflux_V1_SecretAnswerStatus: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+
+  /// This answer settled the request.
+  case accepted // = 1
+
+  /// Another answer (possibly from another desktop) settled it first.
+  case alreadyAnswered // = 2
+
+  /// The request timed out, its terminal ended, or the agent stopped waiting.
+  case expired // = 3
+
+  /// This worker runtime never issued the request (for example after a hot upgrade).
+  case unknownRequest // = 4
+
+  /// Malformed answer: unspecified kind, or an empty or oversized value for PROVIDE.
+  case invalid // = 5
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .accepted
+    case 2: self = .alreadyAnswered
+    case 3: self = .expired
+    case 4: self = .unknownRequest
+    case 5: self = .invalid
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .accepted: return 1
+    case .alreadyAnswered: return 2
+    case .expired: return 3
+    case .unknownRequest: return 4
+    case .invalid: return 5
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_SecretAnswerStatus] = [
+    .unspecified,
+    .accepted,
+    .alreadyAnswered,
+    .expired,
+    .unknownRequest,
+    .invalid,
+  ]
+
+}
+
 /// Native Tailcat candidate transport. These messages are distinct from legacy
 /// relay URLs and WebRTC signaling; DeviceEnvelope remains unchanged.
 public struct Coflux_V1_DeviceTailcatIdentity: Sendable {
@@ -2271,6 +2379,39 @@ public struct Coflux_V1_DeviceLoopbackClose: Sendable {
   public init() {}
 }
 
+/// client→worker (SESSION_CONTROL). `value` is only meaningful for PROVIDE and must be empty
+/// otherwise. Implementations must never log or debug-print this message.
+public struct Coflux_V1_DeviceSecretAnswer: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var kind: Coflux_V1_SecretAnswerKind = .unspecified
+
+  public var value: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (SESSION_CONTROL): the outcome of one DeviceSecretAnswer.
+public struct Coflux_V1_DeviceSecretAnswerAck: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var status: Coflux_V1_SecretAnswerStatus = .unspecified
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_DeviceEnvelope: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2684,6 +2825,22 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     set {payload = .loopbackClose(newValue)}
   }
 
+  public var secretAnswer: Coflux_V1_DeviceSecretAnswer {
+    get {
+      if case .secretAnswer(let v)? = payload {return v}
+      return Coflux_V1_DeviceSecretAnswer()
+    }
+    set {payload = .secretAnswer(newValue)}
+  }
+
+  public var secretAnswerAck: Coflux_V1_DeviceSecretAnswerAck {
+    get {
+      if case .secretAnswerAck(let v)? = payload {return v}
+      return Coflux_V1_DeviceSecretAnswerAck()
+    }
+    set {payload = .secretAnswerAck(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -2737,6 +2894,8 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     case loopbackData(Coflux_V1_DeviceLoopbackData)
     case loopbackAck(Coflux_V1_DeviceLoopbackAck)
     case loopbackClose(Coflux_V1_DeviceLoopbackClose)
+    case secretAnswer(Coflux_V1_DeviceSecretAnswer)
+    case secretAnswerAck(Coflux_V1_DeviceSecretAnswerAck)
 
   }
 
@@ -2765,6 +2924,14 @@ extension Coflux_V1_ExecutorRunState: SwiftProtobuf._ProtoNameProviding {
 
 extension Coflux_V1_DeviceLoopbackFailure: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0DEVICE_LOOPBACK_FAILURE_UNSPECIFIED\0\u{1}DEVICE_LOOPBACK_FAILURE_REFUSED\0\u{1}DEVICE_LOOPBACK_FAILURE_UNREACHABLE\0\u{1}DEVICE_LOOPBACK_FAILURE_LIMIT\0\u{1}DEVICE_LOOPBACK_FAILURE_INVALID\0")
+}
+
+extension Coflux_V1_SecretAnswerKind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SECRET_ANSWER_KIND_UNSPECIFIED\0\u{1}SECRET_ANSWER_KIND_PROVIDE\0\u{1}SECRET_ANSWER_KIND_DECLINE\0\u{1}SECRET_ANSWER_KIND_CANCEL\0")
+}
+
+extension Coflux_V1_SecretAnswerStatus: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SECRET_ANSWER_STATUS_UNSPECIFIED\0\u{1}SECRET_ANSWER_STATUS_ACCEPTED\0\u{1}SECRET_ANSWER_STATUS_ALREADY_ANSWERED\0\u{1}SECRET_ANSWER_STATUS_EXPIRED\0\u{1}SECRET_ANSWER_STATUS_UNKNOWN_REQUEST\0\u{1}SECRET_ANSWER_STATUS_INVALID\0")
 }
 
 extension Coflux_V1_DeviceTailcatIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -6527,9 +6694,84 @@ extension Coflux_V1_DeviceLoopbackClose: SwiftProtobuf.Message, SwiftProtobuf._M
   }
 }
 
+extension Coflux_V1_DeviceSecretAnswer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceSecretAnswer"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}kind\0\u{1}value\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.value) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 2)
+    }
+    if !self.value.isEmpty {
+      try visitor.visitSingularStringField(value: self.value, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceSecretAnswer, rhs: Coflux_V1_DeviceSecretAnswer) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.kind != rhs.kind {return false}
+    if lhs.value != rhs.value {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceSecretAnswerAck: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceSecretAnswerAck"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}status\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.status) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.status != .unspecified {
+      try visitor.visitSingularEnumField(value: self.status, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceSecretAnswerAck, rhs: Coflux_V1_DeviceSecretAnswerAck) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceEnvelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7189,6 +7431,32 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .loopbackClose(v)
         }
       }()
+      case 90: try {
+        var v: Coflux_V1_DeviceSecretAnswer?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .secretAnswer(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .secretAnswer(v)
+        }
+      }()
+      case 91: try {
+        var v: Coflux_V1_DeviceSecretAnswerAck?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .secretAnswerAck(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .secretAnswerAck(v)
+        }
+      }()
       default: break
       }
     }
@@ -7405,6 +7673,14 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .loopbackClose?: try {
       guard case .loopbackClose(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 85)
+    }()
+    case .secretAnswer?: try {
+      guard case .secretAnswer(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 90)
+    }()
+    case .secretAnswerAck?: try {
+      guard case .secretAnswerAck(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 91)
     }()
     case nil: break
     }

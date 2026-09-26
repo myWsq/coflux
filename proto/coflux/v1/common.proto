@@ -197,3 +197,25 @@ message AccountNotification {
   double created_at = 10;
   double read_at = 11;
 }
+
+// A pending secret request (plan 20260926-agent-secret-input): an agent in a coflux terminal ran
+// `coflux secret ask NAME` and the worker is waiting for a desktop to provide or decline the value.
+// Metadata only: the value itself never travels in this message, never reaches the center, and is
+// delivered from the desktop to the worker over the end-to-end Device channel (DeviceSecretAnswer).
+// Derived runtime fact: the center mirrors it in memory, never persists it, and clears it when the
+// daemon disconnects.
+message SecretRequestRef {
+  // Worker-generated, unique within the worker runtime; the key DeviceSecretAnswer names.
+  string request_id = 1;
+  // The live session (terminal) whose agent asked; only that session can use the value.
+  string session_id = 2;
+  string task_id = 3;
+  // Environment-variable style name the agent asked for ([A-Za-z_][A-Za-z0-9_]*).
+  string name = 4;
+  // Free text written by the agent; clients must present it as the agent's words.
+  string reason = 5;
+  // ms epoch
+  double created_at = 6;
+  // ms epoch; after it the worker answers the agent `cancelled` and drops the request.
+  double expires_at = 7;
+}

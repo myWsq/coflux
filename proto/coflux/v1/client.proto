@@ -252,6 +252,15 @@ message SessionAgentsUpdated {
   repeated SessionAgentRef sessions = 2;
 }
 
+// A device's pending secret requests (plan 20260926-agent-secret-input): the full current set,
+// broadcast after each daemon SecretRequests report or when the daemon disconnects (empty), and
+// re-sent per device on subscribe. Drives the request card on every desktop; a request that
+// leaves the set closes its card. In-memory derived fact, never persisted.
+message SecretRequestsUpdated {
+  string daemon_id = 1;
+  repeated SecretRequestRef requests = 2;
+}
+
 message StateSnapshot {
   repeated DaemonInfo daemons = 1;
   repeated Project projects = 2;
@@ -374,6 +383,7 @@ message ServerToClient {
     DeviceTailcatResult device_tailcat_result = 42;
     DeviceTailcatClosed device_tailcat_closed = 43;
     DeviceJoinKeyCreated device_join_key_created = 44;
+    SecretRequestsUpdated secret_requests_updated = 45;
   }
 }
 

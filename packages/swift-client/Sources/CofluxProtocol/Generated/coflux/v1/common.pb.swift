@@ -572,6 +572,42 @@ public struct Coflux_V1_AccountNotification: Sendable {
   public init() {}
 }
 
+/// A pending secret request (plan 20260926-agent-secret-input): an agent in a coflux terminal ran
+/// `coflux secret ask NAME` and the worker is waiting for a desktop to provide or decline the value.
+/// Metadata only: the value itself never travels in this message, never reaches the center, and is
+/// delivered from the desktop to the worker over the end-to-end Device channel (DeviceSecretAnswer).
+/// Derived runtime fact: the center mirrors it in memory, never persists it, and clears it when the
+/// daemon disconnects.
+public struct Coflux_V1_SecretRequestRef: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Worker-generated, unique within the worker runtime; the key DeviceSecretAnswer names.
+  public var requestID: String = String()
+
+  /// The live session (terminal) whose agent asked; only that session can use the value.
+  public var sessionID: String = String()
+
+  public var taskID: String = String()
+
+  /// Environment-variable style name the agent asked for ([A-Za-z_][A-Za-z0-9_]*).
+  public var name: String = String()
+
+  /// Free text written by the agent; clients must present it as the agent's words.
+  public var reason: String = String()
+
+  /// ms epoch
+  public var createdAt: Double = 0
+
+  /// ms epoch; after it the worker answers the agent `cancelled` and drops the request.
+  public var expiresAt: Double = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
 fileprivate let _protobuf_package = "coflux.v1"
@@ -1474,6 +1510,66 @@ extension Coflux_V1_AccountNotification: SwiftProtobuf.Message, SwiftProtobuf._M
     if lhs.terminalTitle != rhs.terminalTitle {return false}
     if lhs.createdAt != rhs.createdAt {return false}
     if lhs.readAt != rhs.readAt {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_SecretRequestRef: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SecretRequestRef"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}task_id\0\u{1}name\0\u{1}reason\0\u{3}created_at\0\u{3}expires_at\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      case 6: try { try decoder.decodeSingularDoubleField(value: &self.createdAt) }()
+      case 7: try { try decoder.decodeSingularDoubleField(value: &self.expiresAt) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 2)
+    }
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 3)
+    }
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 4)
+    }
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 5)
+    }
+    if self.createdAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.createdAt, fieldNumber: 6)
+    }
+    if self.expiresAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.expiresAt, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_SecretRequestRef, rhs: Coflux_V1_SecretRequestRef) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.taskID != rhs.taskID {return false}
+    if lhs.name != rhs.name {return false}
+    if lhs.reason != rhs.reason {return false}
+    if lhs.createdAt != rhs.createdAt {return false}
+    if lhs.expiresAt != rhs.expiresAt {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
