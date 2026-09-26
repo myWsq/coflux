@@ -8,6 +8,7 @@ import { Tooltip } from "@astryxdesign/core/Tooltip";
 import type { CofluxClient } from "@coflux/client";
 import type { AccountNotification } from "@coflux/protocol";
 import { desktop } from "@/config";
+import { secretRequestEntryEnded } from "@/components/workbench/secret-request";
 
 export function NotificationInbox({ client, open, onClose, onOpen, onNavigate }: {
   client: CofluxClient; open: boolean; onClose: () => void; onOpen: () => void;
@@ -18,6 +19,9 @@ export function NotificationInbox({ client, open, onClose, onOpen, onNavigate }:
   const tasks = useStore(client.store, (state) => state.tasks);
   const projects = useStore(client.store, (state) => state.projects);
   const workspaces = useStore(client.store, (state) => state.workspaces);
+  // Agent secret requests (plan 20260926-agent-secret-input): their inbox entries read as ended once
+  // the request leaves the live set.
+  const secretRequests = useStore(client.store, (state) => state.secretRequests);
   const [hints, setHints] = useState<AccountNotification[]>([]);
   const [targetError, setTargetError] = useState("");
   const anchorRef = useRef<HTMLButtonElement | null>(null);
@@ -85,11 +89,13 @@ export function NotificationInbox({ client, open, onClose, onOpen, onNavigate }:
             const workspace = workspaces.find((entry) => entry.id === item.workspaceId);
             const project = projects.find((entry) => entry.id === workspace?.projectId);
             const available = task && workspace;
+            const secretEnded = secretRequestEntryEnded(item, secretRequests) === true;
             return <DropdownMenuItem
               key={item.id}
               label={<span className="line-clamp-2 whitespace-pre-wrap break-words">{item.message}</span>}
               description={<span className="block whitespace-normal break-words">
                 {[project?.name, item.workspaceName, item.terminalTitle, item.deviceName].filter(Boolean).join(" / ")}
+                {secretEnded && <span className="block">密钥请求已结束</span>}
                 {!available && <span className="block">来源已删除，无法跳转</span>}
               </span>}
               onClick={() => view(item)}

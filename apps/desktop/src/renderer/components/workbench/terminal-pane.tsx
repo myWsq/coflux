@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -77,6 +77,9 @@ type TerminalPaneProps = {
   agentSessionId: string | null;
   /** 直接是 `client.execInWorkspace`：按工作区归属路由，本地远程同一条路，无分支。 */
   execInWorkspace: TranscriptExec;
+  /** Agent secret request cards for this terminal (plan 20260926-agent-secret-input), drawn over the
+   * pane; null when none is pending. */
+  secretCards?: ReactNode;
 };
 
 // 终端贴图（plan 014）的压缩目标独立于文件上传上限，保持 3.5MB 以节省截图传输带宽。
@@ -1060,6 +1063,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           onRestoreFocus={() => terminalRef.current?.focus()}
         />
       ) : null}
+      {props.secretCards}
     </div>
   );
 }

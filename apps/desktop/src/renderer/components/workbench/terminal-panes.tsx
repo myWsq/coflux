@@ -6,6 +6,8 @@ import type { CofluxClient } from "@coflux/client";
 import { TerminalPane } from "@/components/workbench/terminal-pane";
 import type { TerminalAttach } from "@/components/workbench/terminal-attach";
 import { isUsableAgentSessionId, transcriptAgentOf } from "@/components/workbench/terminal-transcript";
+import { SecretRequestCards } from "@/components/workbench/secret-request-card";
+import { secretRequestsForTask } from "@/components/workbench/secret-request";
 
 /**
  * 终端面板层（plan 104）：面板挂在 Workbench 层、按 task id 建立稳定身份，与工作区容器平级。
@@ -45,6 +47,10 @@ export function TerminalPanes({
   // 会话纸面（plan 20260919）的两个入参从 presence 来：终端里跑着哪个 agent、它自己的会话标识。
   // 两者缺一按钮就不出现——每个普通 shell 角上挂一个永远点不动的灰按钮只是噪声。
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
+  // Agent secret requests (plan 20260926-agent-secret-input): a card over the requesting pane.
+  const secretRequests = useStore(client.store, (state) => state.secretRequests);
+  const daemons = useStore(client.store, (state) => state.daemons);
+  const workspaces = useStore(client.store, (state) => state.workspaces);
 
   return (
     <div className="pointer-events-none absolute inset-0">
@@ -53,6 +59,15 @@ export function TerminalPanes({
         // 旧 worker、以及旧离线缓存里恢复出来的条目都没有这个字段——别信 TS 上那个 string。
         const transcriptAgent = entry ? transcriptAgentOf(entry.agent) : null;
         const agentSessionId = entry && isUsableAgentSessionId(entry.agentSessionId) ? entry.agentSessionId : null;
+        const requests = secretRequestsForTask(secretRequests, task.id);
+        const workspace = requests.length > 0 ? workspaces.find((item) => item.id === task.workspaceId) : undefined;
+        const source = [
+          daemons.find((item) => item.daemonId === task.daemonId)?.name ?? "",
+          workspace?.name || workspace?.branch || "",
+          task.title,
+        ].filter(Boolean).join(" · ");
+        const secretCards =
+          requests.length > 0 ? <SecretRequestCards requests={requests} source={source} onAnswer={client.answerSecretRequest} /> : null;
         return (
           <TerminalPane
             key={task.id}
@@ -76,6 +91,7 @@ export function TerminalPanes({
             agentSessionId={agentSessionId}
             execInWorkspace={client.execInWorkspace}
             onOpenBrowserTab={onOpenBrowserTab}
+            secretCards={secretCards}
           />
         );
       })}
