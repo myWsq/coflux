@@ -205,6 +205,25 @@ function NewTabMenu({
   useEffect(() => {
     if (open) anchorRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [open]);
+  // A keyboard close (Esc) hands focus to the trigger before the caret goes back to the tab, and the
+  // tooltip opens on keyboard focus whatever its isOpen says — it would flash. It reads isEnabled
+  // from the last committed render, so it is switched off while the menu is open and stays off until
+  // the trigger loses focus or the pointer comes back to it.
+  const [tooltipQuiet, setTooltipQuiet] = useState(false);
+  useEffect(() => {
+    if (open) setTooltipQuiet(true);
+  }, [open]);
+  useEffect(() => {
+    const trigger = anchorRef.current;
+    if (!tooltipQuiet || !trigger) return;
+    const release = () => setTooltipQuiet(false);
+    trigger.addEventListener("focusout", release);
+    trigger.addEventListener("pointerenter", release);
+    return () => {
+      trigger.removeEventListener("focusout", release);
+      trigger.removeEventListener("pointerenter", release);
+    };
+  }, [tooltipQuiet]);
   function changeOpen(next: boolean) {
     onOpenChange(next);
     if (next) return;
@@ -244,7 +263,7 @@ function NewTabMenu({
         />
         <DropdownMenuItem icon={<Globe className="size-3.5" />} label="浏览器" onClick={onBrowser} />
       </DropdownMenu>
-      <Tooltip anchorRef={anchorRef} isOpen={open ? false : undefined} content="新建标签页" />
+      <Tooltip anchorRef={anchorRef} isEnabled={!open && !tooltipQuiet} isOpen={open ? false : undefined} content="新建标签页" />
     </>
   );
 }
