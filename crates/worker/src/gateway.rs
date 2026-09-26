@@ -147,6 +147,47 @@ async fn probe_is_post(stream: &TcpStream) -> bool {
         .unwrap_or(false)
 }
 
+/// Linux: loopback TCP is reachable by every account on the machine, so a `POST /agent|/hook`
+/// caller must run as the worker's user. The caller's end of the connection is looked up in
+/// `/proc/net/tcp{,6}` ([crate::ports::tcp_caller_uid]) and its uid compared with our effective
+/// uid. Returns the refusal reason; only the local endpoints consult it (the WebSocket `/device`
+/// path has its own Origin check and P-256 authentication). Fails closed.
+#[cfg(target_os = "linux")]
+async fn peer_user_refusal(stream: &TcpStream) -> Option<String> {
+    let (Ok(peer), Ok(local)) = (stream.peer_addr(), stream.local_addr()) else {
+        return Some("cannot identify the caller's connection".into());
+    };
+    let owner = tokio::task::spawn_blocking(move || {
+        (crate::ports::tcp_caller_uid(peer, local), effective_uid())
+    })
+    .await;
+    match owner {
+        Ok((Some(caller), Some(ours))) if caller == ours => None,
+        Ok((Some(caller), Some(_))) => {
+            logln!("[worker] local endpoint refused a TCP caller running as uid {caller}");
+            Some("the caller runs as another user".into())
+        }
+        Ok((None, _)) => Some("the caller's connection is not in /proc/net/tcp".into()),
+        _ => Some("cannot determine the worker's own user".into()),
+    }
+}
+
+/// Other platforms have no `/proc/net/tcp`: the Host/Origin check is what stops the web path,
+/// and cross-user macOS machines are outside the threat model.
+#[cfg(not(target_os = "linux"))]
+async fn peer_user_refusal(_stream: &TcpStream) -> Option<String> {
+    None
+}
+
+/// `geteuid()` without libc (a macOS-only dependency of this crate): the second value of the
+/// `Uid:` line in `/proc/self/status` (real, effective, saved, filesystem).
+#[cfg(target_os = "linux")]
+fn effective_uid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    line.split_whitespace().nth(2)?.parse().ok()
+}
+
 async fn handle_connection(
     stream: TcpStream,
     auth: Arc<LocalAuth>,
@@ -154,8 +195,14 @@ async fn handle_connection(
     daemon_id: DaemonIdProvider,
     endpoints: Arc<LocalEndpoints>,
 ) -> Result<(), String> {
+    // Right after accept, before a byte of the request is read: while the caller waits for its
+    // reply, its end of the connection is an ESTABLISHED row whose owner we can still look up.
+    let refusal = peer_user_refusal(&stream).await;
     if probe_is_post(&stream).await {
-        return hook::serve(stream, endpoints).await;
+        // The `Host` a legitimate CLI names is this stream's own port (ephemeral in tests; both
+        // listeners always share one port).
+        let port = stream.local_addr().map(|addr| addr.port()).unwrap_or(0);
+        return hook::serve(stream, endpoints, hook::Caller::Loopback { port, refusal }).await;
     }
     let captured_origin = Arc::new(Mutex::new(None::<String>));
     let callback_origin = captured_origin.clone();

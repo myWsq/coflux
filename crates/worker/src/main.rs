@@ -5,6 +5,7 @@
 //! 全 Rust 化后整个 daemon 无 node 运行时依赖。
 
 mod agent_ctl;
+mod agent_socket;
 mod agents;
 mod conn_state;
 mod creds;
@@ -696,14 +697,29 @@ async fn worker_main() {
     ));
     let local_endpoints = Arc::new(hook::LocalEndpoints { hook_tx, agent_tx });
 
-    // The kernel-attested secret socket (plan 20260926-agent-secret-input): every `coflux secret`
-    // action travels over it, never over the loopback `/agent` endpoint above.
-    tokio::spawn(secret::socket::run(
-        home.clone(),
-        state.clone(),
-        device.clone(),
-        to_server_tx.clone(),
-    ));
+    // The kernel-attested local sockets in `$COFLUX_HOME/ipc`, prepared once and shared:
+    // - secret.sock (plan 20260926-agent-secret-input): every `coflux secret` action travels over
+    //   it, never over the loopback `/agent` endpoint;
+    // - agent.sock (plan 20260926-agent-endpoint-hardening): the same `/agent` and `/hook` as the
+    //   gateway port, with the caller's pid from the kernel. Current CLIs use it first; the TCP
+    //   path stays for agents running an older pinned CLI.
+    match secret::socket::prepare_directory(&home) {
+        Ok((directory, owner_uid)) => {
+            tokio::spawn(secret::socket::run(
+                directory.clone(),
+                owner_uid,
+                state.clone(),
+                device.clone(),
+                to_server_tx.clone(),
+            ));
+            tokio::spawn(agent_socket::run(
+                directory,
+                owner_uid,
+                local_endpoints.clone(),
+            ));
+        }
+        Err(error) => logln!("[worker] local sockets disabled: {error}"),
+    }
 
     // gateway 监听独立于中心 server_loop；热升级时旧 worker 短暂占端口会在后台重试。
     if let Some(auth) = local_auth.clone() {

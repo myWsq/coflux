@@ -14,18 +14,27 @@
 //! 上报 pid 仍然存活。
 //!
 //! **安全边界（plan 074 起已不再是「纯展示」，勿沿用旧结论）**：本端点无认证，但**能起进程**
-//! （`/agent` 的 terminal.new）。真正的门是 **pid 反查**：调用方报的 pid 必须落在某个存活
+//! （`/agent` 的 terminal.new）。真正的门是 **pid 反查**：调用方的 pid 必须落在某个存活
 //! session 的进程树内，否则一律拒——只有 coflux 自己起的 PTY 里的进程能用，且能力被钉死在
 //! 它自己所属的 session 上。这道门由 [crate::agents::session_of_pid] 统一裁定，
-//! 两条路径共用。此外仍要求 content-type: application/json——浏览器跨源发不出这种
-//! "非简单请求"（预检必失败），挡掉网页脚本对 localhost 的盲打。
+//! 两条路径共用。
+//!
+//! Two transports reach these handlers (plan 20260926-agent-endpoint-hardening), see [`Caller`]:
+//!
+//! - the kernel-attested Unix socket `$COFLUX_HOME/ipc/agent.sock` ([crate::agent_socket]), where
+//!   the pid is the kernel's and the body's `pid`/`ppid` are ignored — what current CLIs use;
+//! - the loopback TCP gateway port, kept for agents still running an older pinned CLI. There the
+//!   pid is self-reported, so the transport itself is hardened: the `Host` header must be exactly
+//!   `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` for the accepted stream's own port,
+//!   and any `Origin` header is refused (a browser always sends one on POST, and under DNS
+//!   rebinding puts the attacker's name in `Host`; the content-type preflight is void there). On
+//!   Linux the caller's socket must also belong to the worker's uid (`crate::gateway`).
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use coflux_protocol::logln;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::agent_ctl::{AgentAction, AgentRequest, AgentResponse};
@@ -37,11 +46,24 @@ const MAX_BODY_BYTES: usize = 4 * 1024;
 /// `/agent` 体上限：要装得下 64 KB 的 send 文本或命令行加 JSON 封包（plan 094，与 MCP 对齐）。
 const MAX_AGENT_BODY_BYTES: usize = 128 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
+/// How much a client may still send after the reply before the connection is simply closed.
+const MAX_DRAIN_BYTES: usize = MAX_HEAD_BYTES + MAX_AGENT_BODY_BYTES;
 /// 等待 main 消费任务完成 pid 反查的上限（含一次 spawn_blocking 进程树扫描）。
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
 /// agent 控制请求的等待上限：pid 反查之外还要等中心回执，故显著长于 hook
 /// （须大于 agent_ctl::SERVER_TIMEOUT，否则这里先超时、那边的错误信息就丢了）。
 const AGENT_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Who is on the other end of a connection, decided by the transport before the request is read.
+pub enum Caller {
+    /// The loopback TCP gateway. `port` is the accepted stream's own local port (what a legitimate
+    /// `Host` header names); `refusal` is set when the transport already refused the peer (the
+    /// Linux uid check). The body's `pid`/`ppid` are the identity.
+    Loopback { port: u16, refusal: Option<String> },
+    /// The kernel-attested Unix socket: the peer's pid from `peer_cred()`, or why it was refused.
+    /// The body's `pid`/`ppid` are ignored.
+    Kernel(Result<i32, String>),
+}
 
 /// gateway 分派到本模块的两个消费端。
 pub struct LocalEndpoints {
@@ -112,6 +134,9 @@ struct HookBody {
     event: String,
     #[serde(default)]
     notification: String,
+    /// Self-reported identity, used on TCP only. Optional since the agent socket, where the kernel
+    /// supplies the pid; on TCP a missing pid (0) simply fails the session lookup.
+    #[serde(default)]
     pid: i32,
     #[serde(default)]
     ppid: i32,
@@ -155,10 +180,18 @@ pub fn sanitize_agent_session_id(value: &serde_json::Value) -> Option<String> {
     Some(text.to_string())
 }
 
-/// 处理一条已被 gateway 判定为 `POST ` 开头的连接：解析请求 → 转交消费任务 → 等结果 → 应答。
-/// 所有失败路径都尽力回一个 HTTP 错误响应后关闭连接。
-pub async fn serve(mut stream: TcpStream, endpoints: Arc<LocalEndpoints>) -> Result<(), String> {
-    let (status, body) = match handle(&mut stream, &endpoints).await {
+/// 处理一条本地端点连接（TCP 上已被 gateway 判定为 `POST ` 开头；Unix socket 上是整条连接）：
+/// 解析请求 → 校验调用方 → 转交消费任务 → 等结果 → 应答。所有失败路径都尽力回一个 HTTP 错误响应后
+/// 关闭连接。
+pub async fn serve<S>(
+    mut stream: S,
+    endpoints: Arc<LocalEndpoints>,
+    caller: Caller,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (status, body) = match handle(&mut stream, &endpoints, &caller).await {
         Ok(response) => (response.status, response.body),
         Err(RequestError::BadRequest(detail)) => {
             logln!("[worker] local endpoint bad request: {detail}");
@@ -177,8 +210,64 @@ pub async fn serve(mut stream: TcpStream, endpoints: Arc<LocalEndpoints>) -> Res
         body.len(),
     );
     let _ = tokio::time::timeout(IO_TIMEOUT, stream.write_all(response.as_bytes())).await;
-    let _ = stream.shutdown().await;
+    close_gracefully(&mut stream).await;
     Ok(())
+}
+
+/// End the exchange gracefully: shut our write side down, then drain whatever the client still
+/// sends until it closes (bounded in bytes and time). A refusal may be written before the body was
+/// read; closing with unread bytes in the receive buffer resets the connection (Unix sockets on
+/// macOS, TCP everywhere), and the client would lose the reply already written.
+async fn close_gracefully<S>(stream: &mut S)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let _ = tokio::time::timeout(IO_TIMEOUT, stream.shutdown()).await;
+    let mut sink = [0u8; 4096];
+    let mut drained = 0usize;
+    let _ = tokio::time::timeout(IO_TIMEOUT, async {
+        while drained < MAX_DRAIN_BYTES {
+            match stream.read(&mut sink).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => drained += n,
+            }
+        }
+    })
+    .await;
+}
+
+/// A refusal of the caller itself (not of its arguments): readable, and never the generic
+/// `bad request`, so whoever hits it learns why.
+fn forbidden(reason: impl AsRef<str>) -> AgentResponse {
+    AgentResponse::err("403 Forbidden", format!("refused: {}", reason.as_ref()))
+}
+
+/// The TCP transport's own gate: `Host` must be exactly one of the loopback names with the
+/// accepted stream's port, and no `Origin` may be present, whatever its value (`null` included).
+/// Returns the refusal reason, or `None` when the request may proceed.
+fn loopback_refusal(head: &Head, port: u16) -> Option<String> {
+    if head.origin {
+        return Some(
+            "a request carrying an Origin header (a browser) cannot use the local agent endpoint"
+                .into(),
+        );
+    }
+    if head.host_count != 1 {
+        return Some("the local agent endpoint needs exactly one Host header".into());
+    }
+    let host = head.host.as_deref().unwrap_or_default();
+    let allowed = [
+        format!("127.0.0.1:{port}"),
+        format!("localhost:{port}"),
+        format!("[::1]:{port}"),
+    ];
+    if allowed.iter().any(|candidate| candidate == host) {
+        None
+    } else {
+        Some(format!(
+            "Host {host:?} is not this loopback endpoint (expected 127.0.0.1:{port})"
+        ))
+    }
 }
 
 enum RequestError {
@@ -186,13 +275,38 @@ enum RequestError {
     Unavailable,
 }
 
-async fn handle(
-    stream: &mut TcpStream,
+async fn handle<S>(
+    stream: &mut S,
     endpoints: &Arc<LocalEndpoints>,
-) -> Result<AgentResponse, RequestError> {
+    caller: &Caller,
+) -> Result<AgentResponse, RequestError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let (head, mut body) = read_head(stream).await.map_err(RequestError::BadRequest)?;
-    let (path, content_length, content_type) =
-        parse_head(&head).map_err(RequestError::BadRequest)?;
+    let head = parse_head(&head).map_err(RequestError::BadRequest)?;
+    // The caller is judged before anything in the request is acted on. `Some(pid)` = the kernel's
+    // pid, which overrides whatever the body says; `None` = TCP, where the body's pid stands.
+    let kernel_pid = match caller {
+        Caller::Loopback { port, refusal } => {
+            if let Some(reason) = refusal {
+                return Ok(forbidden(reason));
+            }
+            if let Some(reason) = loopback_refusal(&head, *port) {
+                logln!("[worker] local endpoint refused a TCP request: {reason}");
+                return Ok(forbidden(reason));
+            }
+            None
+        }
+        Caller::Kernel(Ok(pid)) => Some(*pid),
+        Caller::Kernel(Err(reason)) => return Ok(forbidden(reason)),
+    };
+    let Head {
+        path,
+        content_length,
+        content_type,
+        ..
+    } = head;
     let is_agent = path == "/agent";
     if !is_agent && path != "/hook" {
         return Err(RequestError::BadRequest(format!("path {path}")));
@@ -232,7 +346,7 @@ async fn handle(
     if is_agent {
         // 拒绝原因回给调用方（plan 094）：都是参数校验文案，不是秘密；吞成 `bad request` 只会让 agent
         // 盲目重试。`/hook` 仍走下面的统一渲染。
-        return match handle_agent(raw, &endpoints.agent_tx).await {
+        return match handle_agent(raw, &endpoints.agent_tx, kernel_pid).await {
             Err(RequestError::BadRequest(detail)) => {
                 Ok(AgentResponse::err("400 Bad Request", detail))
             }
@@ -243,6 +357,7 @@ async fn handle(
     let parsed: HookBody = serde_json::from_slice(raw)
         .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
     let agent_session_id = sanitize_agent_session_id(&parsed.agent_session_id);
+    let (pid, ppid) = kernel_pid.map_or((parsed.pid, parsed.ppid), |pid| (pid, pid));
     // Two independent reasons to forward: the event carries turn state, or it carries the agent's
     // session id. `SessionStart` is exactly the second case — the transcript exists from that
     // moment on, so waiting for the first state-bearing event would keep the paper button hidden
@@ -258,8 +373,8 @@ async fn handle(
         event: parsed.event,
         notification: parsed.notification,
         background_tasks: parsed.background_tasks,
-        pid: parsed.pid,
-        ppid: parsed.ppid,
+        pid,
+        ppid,
         agent_session_id,
         respond,
     };
@@ -294,6 +409,8 @@ fn hook_response(outcome: HookOutcome) -> AgentResponse {
 #[serde(rename_all = "camelCase")]
 struct AgentBody {
     action: String,
+    /// Self-reported identity, used on TCP only (see `HookBody::pid`).
+    #[serde(default)]
     pid: i32,
     #[serde(default)]
     ppid: i32,
@@ -349,9 +466,12 @@ const MAX_SEND_TEXT_BYTES: usize = 64 * 1024;
 /// 让超长请求连队列都进不去。
 const MAX_EXECUTOR_PROMPT_BYTES: usize = crate::agent_ctl::executor::MAX_PROMPT_BYTES;
 
+/// `kernel_pid`: the peer pid the agent socket read from the kernel; it replaces the body's
+/// `pid` and `ppid` (`None` on TCP, where the body's values are the identity).
 async fn handle_agent(
     raw: &[u8],
     agent_tx: &mpsc::Sender<AgentRequest>,
+    kernel_pid: Option<i32>,
 ) -> Result<AgentResponse, RequestError> {
     let parsed: AgentBody = serde_json::from_slice(raw)
         .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
@@ -510,10 +630,11 @@ async fn handle_agent(
         }
         other => return Err(RequestError::BadRequest(format!("未知 action {other}"))),
     };
+    let (pid, ppid) = kernel_pid.map_or((parsed.pid, parsed.ppid), |pid| (pid, pid));
     let (respond, outcome_rx) = oneshot::channel();
     let request = AgentRequest {
-        pid: parsed.pid,
-        ppid: parsed.ppid,
+        pid,
+        ppid,
         cwd: parsed.cwd,
         action,
         respond,
@@ -529,7 +650,10 @@ async fn handle_agent(
 }
 
 /// 读到 `\r\n\r\n` 为止，返回（头部文本, 已多读进来的 body 前缀）。
-async fn read_head(stream: &mut TcpStream) -> Result<(String, Vec<u8>), String> {
+async fn read_head<S>(stream: &mut S) -> Result<(String, Vec<u8>), String>
+where
+    S: AsyncRead + Unpin,
+{
     let mut buffer = Vec::with_capacity(1024);
     loop {
         if buffer.len() > MAX_HEAD_BYTES {
@@ -552,8 +676,21 @@ async fn read_head(stream: &mut TcpStream) -> Result<(String, Vec<u8>), String> 
     }
 }
 
-/// 极小 HTTP 头解析：只取 path / content-length / content-type，其余头忽略。
-fn parse_head(head: &str) -> Result<(String, usize, String), String> {
+/// The parts of a request head the endpoints look at.
+struct Head {
+    path: String,
+    content_length: usize,
+    content_type: String,
+    /// The last `Host` value seen, and how many `Host` headers there were (more than one is
+    /// ambiguous and refused on TCP).
+    host: Option<String>,
+    host_count: usize,
+    /// Whether any `Origin` header was present, whatever its value.
+    origin: bool,
+}
+
+/// 极小 HTTP 头解析：取 path / content-length / content-type / Host / Origin，其余头忽略。
+fn parse_head(head: &str) -> Result<Head, String> {
     let mut lines = head.lines();
     let request_line = lines.next().ok_or("空请求")?;
     let mut parts = request_line.split_whitespace();
@@ -562,24 +699,35 @@ fn parse_head(head: &str) -> Result<(String, usize, String), String> {
     if method != "POST" {
         return Err(format!("method {method}"));
     }
-    let mut content_length = 0usize;
-    let mut content_type = String::new();
+    let mut parsed = Head {
+        path: path.to_string(),
+        content_length: 0,
+        content_type: String::new(),
+        host: None,
+        host_count: 0,
+        origin: false,
+    };
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         match name.trim().to_ascii_lowercase().as_str() {
             "content-length" => {
-                content_length = value
+                parsed.content_length = value
                     .trim()
                     .parse()
                     .map_err(|_| "content-length 畸形".to_string())?
             }
-            "content-type" => content_type = value.trim().to_string(),
+            "content-type" => parsed.content_type = value.trim().to_string(),
+            "host" => {
+                parsed.host = Some(value.trim().to_string());
+                parsed.host_count += 1;
+            }
+            "origin" => parsed.origin = true,
             _ => {}
         }
     }
-    Ok((path.to_string(), content_length, content_type))
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -639,10 +787,53 @@ mod tests {
     #[test]
     fn parse_head_extracts_fields() {
         let head = "POST /hook HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 42";
-        let (path, length, content_type) = parse_head(head).unwrap();
-        assert_eq!(path, "/hook");
-        assert_eq!(length, 42);
-        assert_eq!(content_type, "application/json");
+        let parsed = parse_head(head).unwrap();
+        assert_eq!(parsed.path, "/hook");
+        assert_eq!(parsed.content_length, 42);
+        assert_eq!(parsed.content_type, "application/json");
+        assert_eq!(parsed.host.as_deref(), Some("x"));
+        assert_eq!(parsed.host_count, 1);
+        assert!(!parsed.origin);
         assert!(parse_head("GET /hook HTTP/1.1").is_err());
+    }
+
+    fn head_with(headers: &str) -> Head {
+        parse_head(&format!(
+            "POST /agent HTTP/1.1\r\n{headers}content-type: application/json"
+        ))
+        .unwrap()
+    }
+
+    /// The TCP gate: only the exact loopback names with the accepted port, never an Origin.
+    #[test]
+    fn loopback_gate_accepts_only_cli_shaped_requests() {
+        for host in ["127.0.0.1:8788", "localhost:8788", "[::1]:8788"] {
+            let head = head_with(&format!("Host: {host}\r\n"));
+            assert_eq!(loopback_refusal(&head, 8788), None, "{host} must pass");
+        }
+        for headers in [
+            "",
+            "Host: evil.example:8788\r\n",
+            "Host: 127.0.0.1:8789\r\n",
+            "Host: 127.0.0.1\r\n",
+            "Host: localhost\r\n",
+            "Host: 127.0.0.1:8788\r\nHost: 127.0.0.1:8788\r\n",
+            "Host: 127.0.0.1:8788\r\nOrigin: http://x\r\n",
+            "Host: 127.0.0.1:8788\r\nOrigin: null\r\n",
+            "Host: 127.0.0.1:8788\r\norigin: \r\n",
+        ] {
+            let head = head_with(headers);
+            assert!(loopback_refusal(&head, 8788).is_some(), "must refuse {headers:?}");
+        }
+    }
+
+    /// On the agent socket a body may omit pid/ppid entirely.
+    #[test]
+    fn bodies_parse_without_pid() {
+        let hook: HookBody =
+            serde_json::from_slice(br#"{"agent":"claude","event":"Stop"}"#).unwrap();
+        assert_eq!((hook.pid, hook.ppid), (0, 0));
+        let agent: AgentBody = serde_json::from_slice(br#"{"action":"terminal.list"}"#).unwrap();
+        assert_eq!((agent.pid, agent.ppid), (0, 0));
     }
 }

@@ -22,6 +22,99 @@ pub(crate) fn process_tree(root_pid: i32) -> Vec<i32> {
     imp::process_tree(root_pid)
 }
 
+/// The uid owning the caller's end of a loopback TCP connection to the gateway (plan
+/// 20260926-agent-endpoint-hardening). `peer` is the address the gateway sees for the caller,
+/// `gateway` the accepted stream's local address. `None` when no matching ESTABLISHED row is
+/// found; the table is re-read a couple of times first, because `seq_file` can skip rows while
+/// the kernel's table changes under the reader.
+#[cfg(target_os = "linux")]
+pub fn tcp_caller_uid(peer: std::net::SocketAddr, gateway: std::net::SocketAddr) -> Option<u32> {
+    for _ in 0..3 {
+        let tables = imp::read_tcp_tables();
+        if let Some(uid) = caller_uid_in_tables(tables.iter().map(String::as_str), peer, gateway) {
+            return Some(uid);
+        }
+    }
+    None
+}
+
+/// Rows of a `/proc/net/tcp{,6}` table, header skipped, split into fields:
+/// `sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode …`.
+#[cfg(any(target_os = "linux", test))]
+fn tcp_table_rows(content: &str) -> impl Iterator<Item = Vec<&str>> {
+    content
+        .lines()
+        .skip(1)
+        .map(|line| line.split_whitespace().collect::<Vec<&str>>())
+        .filter(|fields| fields.len() >= 10)
+}
+
+/// `ADDR:PORT` as the kernel prints it. The address is 1 (v4) or 4 (v6) 32-bit words, each
+/// printed with `%08X` from its in-memory value, i.e. in the machine's native byte order; the
+/// port is printed in host order.
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_socket_addr(field: &str) -> Option<std::net::SocketAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    let (address, port) = field.split_once(':')?;
+    let port = u16::from_str_radix(port, 16).ok()?;
+    let word = |index: usize| -> Option<[u8; 4]> {
+        let hex = address.get(index * 8..index * 8 + 8)?;
+        Some(u32::from_str_radix(hex, 16).ok()?.to_ne_bytes())
+    };
+    let ip = match address.len() {
+        8 => IpAddr::V4(Ipv4Addr::from(word(0)?)),
+        32 => {
+            let mut bytes = [0u8; 16];
+            for index in 0..4 {
+                bytes[index * 4..index * 4 + 4].copy_from_slice(&word(index)?);
+            }
+            IpAddr::V6(Ipv6Addr::from(bytes))
+        }
+        _ => return None,
+    };
+    Some(SocketAddr::new(ip, port))
+}
+
+/// Same endpoint across address families: an AF_INET6 client talking to the v4 listener shows up
+/// in `tcp6` with IPv4-mapped addresses, while the gateway sees plain IPv4.
+#[cfg(any(target_os = "linux", test))]
+fn same_endpoint(a: std::net::SocketAddr, b: std::net::SocketAddr) -> bool {
+    use std::net::IpAddr;
+    let canonical = |ip: IpAddr| match ip {
+        IpAddr::V4(v4) => v4.to_ipv6_mapped(),
+        IpAddr::V6(v6) => v6,
+    };
+    a.port() == b.port() && canonical(a.ip()) == canonical(b.ip())
+}
+
+/// The caller's row is the one seen from the caller's side: `local_address` = the peer address
+/// the gateway sees, `rem_address` = the gateway address, and state ESTABLISHED (`01`). Any other
+/// state is refused: a TIME_WAIT or orphaned row prints uid 0, which a root worker would accept.
+#[cfg(any(target_os = "linux", test))]
+fn caller_uid_in_tables<'a>(
+    tables: impl IntoIterator<Item = &'a str>,
+    peer: std::net::SocketAddr,
+    gateway: std::net::SocketAddr,
+) -> Option<u32> {
+    for content in tables {
+        for fields in tcp_table_rows(content) {
+            if fields[3] != "01" {
+                continue;
+            }
+            let (Some(local), Some(remote)) = (
+                parse_proc_socket_addr(fields[1]),
+                parse_proc_socket_addr(fields[2]),
+            ) else {
+                continue;
+            };
+            if same_endpoint(local, peer) && same_endpoint(remote, gateway) {
+                return fields[7].parse().ok();
+            }
+        }
+    }
+    None
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use std::collections::HashSet;
@@ -204,10 +297,19 @@ mod imp {
         }
         let mut ports = HashSet::new();
         // v4 与 v6(如 vite/node 默认绑的 `::`)都要算,只报端口号不分地址族
-        for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
-            collect_listen_ports(path, &owned_inodes, &mut ports);
+        for content in read_tcp_tables() {
+            collect_listen_ports(&content, &owned_inodes, &mut ports);
         }
         ports
+    }
+
+    /// The contents of `/proc/net/tcp` and `/proc/net/tcp6`, whichever are readable. Shared by
+    /// the port probe and the gateway's caller-uid lookup ([super::tcp_caller_uid]).
+    pub fn read_tcp_tables() -> Vec<String> {
+        ["/proc/net/tcp", "/proc/net/tcp6"]
+            .iter()
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .collect()
     }
 
     fn parse_socket_inode(target: &Path) -> Option<u64> {
@@ -219,16 +321,8 @@ mod imp {
             .ok()
     }
 
-    fn collect_listen_ports(path: &str, owned_inodes: &HashSet<u64>, ports: &mut HashSet<u16>) {
-        let Ok(content) = fs::read_to_string(path) else {
-            return;
-        };
-        for line in content.lines().skip(1) {
-            // sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode ...
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 10 {
-                continue;
-            }
+    fn collect_listen_ports(content: &str, owned_inodes: &HashSet<u64>, ports: &mut HashSet<u16>) {
+        for fields in super::tcp_table_rows(content) {
             if fields[3] != "0A" {
                 continue; // TCP_LISTEN
             }
@@ -315,5 +409,90 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
+    }
+}
+
+/// The gateway's caller-uid lookup against fixture `/proc/net/tcp{,6}` content. The fixtures are
+/// what a little-endian kernel prints (x86_64, aarch64: every target this ships on).
+#[cfg(all(test, target_endian = "little"))]
+mod tcp_table_tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    const HEADER: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
+
+    fn row(local: &str, remote: &str, state: &str, uid: u32) -> String {
+        format!("   1: {local} {remote} {state} 00000000:00000000 00:00000000 00000000  {uid}        0 4242 1 0000000000000000 20 4 30 10 -1")
+    }
+
+    fn table(rows: &[String]) -> String {
+        std::iter::once(HEADER.to_string())
+            .chain(rows.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn addr(text: &str) -> SocketAddr {
+        text.parse().unwrap()
+    }
+
+    // 127.0.0.1 / ::1 / ::ffff:127.0.0.1 as printed on little-endian; gateway port 8788 = 0x2254.
+    const V4_LOOPBACK: &str = "0100007F";
+    const V6_LOOPBACK: &str = "00000000000000000000000001000000";
+    const V4_MAPPED_LOOPBACK: &str = "0000000000000000FFFF00000100007F";
+
+    fn fixtures() -> (String, String) {
+        let tcp = table(&[
+            // The listener and the worker's own accepted end: never the caller's row.
+            row(&format!("{V4_LOOPBACK}:2254"), "00000000:0000", "0A", 1000),
+            row(&format!("{V4_LOOPBACK}:2254"), &format!("{V4_LOOPBACK}:D431"), "01", 1000),
+            // The caller's end of a v4 connection (port 54321).
+            row(&format!("{V4_LOOPBACK}:D431"), &format!("{V4_LOOPBACK}:2254"), "01", 1001),
+            // A TIME_WAIT leftover (port 42000) prints uid 0.
+            row(&format!("{V4_LOOPBACK}:A410"), &format!("{V4_LOOPBACK}:2254"), "06", 0),
+        ]);
+        let tcp6 = table(&[
+            // The caller's end of a ::1 connection (port 40000).
+            row(&format!("{V6_LOOPBACK}:9C40"), &format!("{V6_LOOPBACK}:2254"), "01", 1002),
+            // An AF_INET6 client on the v4 listener (port 41000): IPv4-mapped in tcp6.
+            row(&format!("{V4_MAPPED_LOOPBACK}:A028"), &format!("{V4_MAPPED_LOOPBACK}:2254"), "01", 1003),
+        ]);
+        (tcp, tcp6)
+    }
+
+    fn lookup(peer: &str, gateway: &str) -> Option<u32> {
+        let (tcp, tcp6) = fixtures();
+        caller_uid_in_tables([tcp.as_str(), tcp6.as_str()], addr(peer), addr(gateway))
+    }
+
+    #[test]
+    fn finds_the_callers_row_for_v4_v6_and_mapped_clients() {
+        assert_eq!(lookup("127.0.0.1:54321", "127.0.0.1:8788"), Some(1001));
+        assert_eq!(lookup("[::1]:40000", "[::1]:8788"), Some(1002));
+        assert_eq!(lookup("127.0.0.1:41000", "127.0.0.1:8788"), Some(1003));
+    }
+
+    #[test]
+    fn refuses_time_wait_and_missing_rows() {
+        // TIME_WAIT with uid 0 must not be taken for the caller.
+        assert_eq!(lookup("127.0.0.1:42000", "127.0.0.1:8788"), None);
+        // No row at all.
+        assert_eq!(lookup("127.0.0.1:43000", "127.0.0.1:8788"), None);
+        // The right peer port against the wrong gateway port is not a match either.
+        assert_eq!(lookup("127.0.0.1:54321", "127.0.0.1:8789"), None);
+        // Nor is the v4 row taken for a ::1 peer on the same port.
+        assert_eq!(lookup("[::1]:54321", "[::1]:8788"), None);
+    }
+
+    #[test]
+    fn parses_kernel_addresses() {
+        assert_eq!(parse_proc_socket_addr("0100007F:2254"), Some(addr("127.0.0.1:8788")));
+        assert_eq!(parse_proc_socket_addr(&format!("{V6_LOOPBACK}:2254")), Some(addr("[::1]:8788")));
+        assert_eq!(
+            parse_proc_socket_addr(&format!("{V4_MAPPED_LOOPBACK}:2254")),
+            Some(addr("[::ffff:127.0.0.1]:8788"))
+        );
+        assert_eq!(parse_proc_socket_addr("garbage"), None);
+        assert_eq!(parse_proc_socket_addr("0100007:2254"), None);
     }
 }

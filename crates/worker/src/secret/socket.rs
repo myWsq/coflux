@@ -72,46 +72,18 @@ struct Context {
     owner_uid: u32,
 }
 
-/// Serve the secret socket for the lifetime of this worker.
+/// Serve the secret socket for the lifetime of this worker. `directory` is the prepared `ipc/`
+/// directory ([`prepare_directory`]), shared with the agent socket (`crate::agent_socket`).
 pub async fn run(
-    home: String,
+    directory: PathBuf,
+    owner_uid: u32,
     state: Arc<Mutex<WorkerState>>,
     device: Arc<DeviceRuntime>,
     to_server: mpsc::Sender<WsOut>,
 ) {
-    let (directory, owner_uid) = match prepare_directory(&home) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            logln!("[secret] socket disabled: {error}");
-            return;
-        }
-    };
-    let path = directory.join(SOCKET_FILE);
-    if path.as_os_str().len() > MAX_SOCKET_PATH_BYTES {
-        logln!(
-            "[secret] socket disabled: {} is longer than {MAX_SOCKET_PATH_BYTES} bytes",
-            path.display()
-        );
+    let Some(listener) = listen(&directory.join(SOCKET_FILE), "secret").await else {
         return;
-    }
-    let mut warned_busy = false;
-    let listener = loop {
-        match bind(&path).await {
-            Ok(listener) => break listener,
-            Err(BindError::Busy) => {
-                if !warned_busy {
-                    logln!("[secret] another live worker holds {}; retrying", path.display());
-                    warned_busy = true;
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-            Err(BindError::Failed(error)) => {
-                logln!("[secret] cannot bind {}: {error}; retrying", path.display());
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        }
     };
-    logln!("[secret] listening on {}", path.display());
     let context = Arc::new(Context {
         state,
         device,
@@ -142,9 +114,43 @@ pub async fn run(
     }
 }
 
+/// Bind one socket inside the prepared `ipc/` directory, retrying until it is ours: a live worker
+/// still answering on it is waited out, a stale leftover replaced. `None` when the path cannot
+/// ever be bound (longer than `sun_path` allows); the caller then serves nothing. `label` only
+/// tags the log lines.
+pub async fn listen(path: &Path, label: &str) -> Option<UnixListener> {
+    if path.as_os_str().len() > MAX_SOCKET_PATH_BYTES {
+        logln!(
+            "[{label}] socket disabled: {} is longer than {MAX_SOCKET_PATH_BYTES} bytes",
+            path.display()
+        );
+        return None;
+    }
+    let mut warned_busy = false;
+    let listener = loop {
+        match bind(path).await {
+            Ok(listener) => break listener,
+            Err(BindError::Busy) => {
+                if !warned_busy {
+                    logln!("[{label}] another live worker holds {}; retrying", path.display());
+                    warned_busy = true;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(BindError::Failed(error)) => {
+                logln!("[{label}] cannot bind {}: {error}; retrying", path.display());
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    };
+    logln!("[{label}] listening on {}", path.display());
+    Some(listener)
+}
+
 /// `$COFLUX_HOME/ipc`, created 0700 and forced back to 0700 if it already exists. Refuses a
 /// symlink or a non-directory in its place. Returns the directory and its owner uid (ours).
-fn prepare_directory(home: &str) -> Result<(PathBuf, u32), String> {
+/// Prepared once per worker; every local socket (secret, agent) lives in it.
+pub fn prepare_directory(home: &str) -> Result<(PathBuf, u32), String> {
     let directory = Path::new(home).join(SOCKET_DIR);
     match std::fs::symlink_metadata(&directory) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
