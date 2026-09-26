@@ -96,7 +96,9 @@ type DropTarget =
  * workspace only; kept-alive hidden workspaces never receive commands.
  */
 export type WorkspaceTerminalHandle = {
-  /** ⌘T: a new terminal in the focused group. */
+  /** ⌘T: toggles the focused group's ＋ menu, opened as from the keyboard (first item focused, arrows, Enter). */
+  toggleNewTabMenu: () => void;
+  /** 文件 → 新建终端: a new terminal in the focused group. */
   createTerminal: () => void;
   /** ⌘W: closes the focused group's active tab. Suspended while the changes overlay is open. */
   closeActiveTab: () => void;
@@ -138,6 +140,13 @@ export type WorkspaceLayoutActions = {
   createTerminal: (workspaceId: string, groupId: string) => void;
   /** ＋ menu's 浏览器: focuses that group, then opens a blank browser tab there. */
   createBrowserTab: (workspaceId: string, groupId: string) => void;
+  /**
+   * Opens (groupId) or closes (null) a group's ＋ menu. Workbench holds which one is open so ⌘T can
+   * open the focused group's; at most one is open at a time.
+   */
+  setNewTabMenu: (workspaceId: string, groupId: string | null) => void;
+  /** The ＋ menu closed and left the caret on its trigger (or nowhere): hand it back to the focused tab. */
+  focusActiveTab: (workspaceId: string) => void;
   /** A browser tab's close button / context menu: removes the tab, no confirmation (plan 20260924-desktop-browser-tab). */
   closeBrowserTab: (workspaceId: string, tabId: string) => void;
   reloadBrowserTab: (tabId: string) => void;
@@ -160,35 +169,58 @@ type WorkspaceTerminalProps = {
   actions: WorkspaceLayoutActions;
   /** Built-in browser tabs' titles, favicons and loading state for their strip chips. */
   browser: BrowserRuntime;
+  /** The group whose ＋ menu is open, if it is in this workspace. */
+  newTabMenuGroupId: string | null;
 };
 
 /**
  * The tab strip's ＋: a menu of what to open in this group — a terminal or a blank browser tab
- * (Cursor's new-tab menu without its search box). While a terminal is being created the terminal
- * item waits (one create at a time) and the trigger spins in the group that holds it; a browser tab
- * can still be opened. Tooltip per docs/design-guidelines.md: a sibling after the menu, suppressed
- * while it is open.
+ * (Cursor's new-tab menu without its search box). ⌘T opens the focused group's menu the same way;
+ * Astryx treats that programmatic open as a keyboard one, so the first enabled item takes focus and
+ * arrows / Enter / Esc work, and the items themselves carry no shortcut. While a terminal is being
+ * created the terminal item waits (one create at a time) and the trigger spins in the group that
+ * holds it; a browser tab can still be opened. Tooltip per docs/design-guidelines.md: a sibling
+ * after the menu, suppressed while it is open.
  */
 function NewTabMenu({
+  open,
+  onOpenChange,
   busy,
   spinning,
-  terminalShortcut,
   onTerminal,
   onBrowser,
+  onRestoreFocus,
 }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   busy: boolean;
   spinning: boolean;
-  terminalShortcut: string;
   onTerminal: () => void;
   onBrowser: () => void;
+  onRestoreFocus: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLButtonElement | null>(null);
+  // ⌘T with a long strip: the ＋ follows the last tab and may be scrolled out of view; the menu is
+  // anchored to it, so bring it in first.
+  useEffect(() => {
+    if (open) anchorRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [open]);
+  function changeOpen(next: boolean) {
+    onOpenChange(next);
+    if (next) return;
+    // A keyboard close (Esc, Enter on an item) puts the caret on the trigger, a pointer close on
+    // nothing; either way the terminal would stop taking keys. Astryx moves focus after this
+    // callback, so look once it settled, and leave alone a caret that went somewhere on purpose.
+    requestAnimationFrame(() => {
+      const focused = document.activeElement;
+      if (!focused || focused === document.body || focused === anchorRef.current) onRestoreFocus();
+    });
+  }
   return (
     <>
       <DropdownMenu
         isMenuOpen={open}
-        onOpenChange={setOpen}
+        onOpenChange={changeOpen}
         menuWidth={200}
         hasChevron={false}
         placement="below"
@@ -208,7 +240,6 @@ function NewTabMenu({
           icon={<SquareTerminal className="size-3.5" />}
           label="终端"
           isDisabled={busy}
-          endContent={<span className="text-xs text-muted-foreground">{terminalShortcut}</span>}
           onClick={onTerminal}
         />
         <DropdownMenuItem icon={<Globe className="size-3.5" />} label="浏览器" onClick={onBrowser} />
@@ -395,7 +426,19 @@ function GroupSash({
   );
 }
 
-export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, attach, layout, changesOpen, dockWidth, actions, browser }: WorkspaceTerminalProps) {
+export function WorkspaceTerminal({
+  workspaceId,
+  active,
+  client,
+  onCloseTask,
+  attach,
+  layout,
+  changesOpen,
+  dockWidth,
+  actions,
+  browser,
+  newTabMenuGroupId,
+}: WorkspaceTerminalProps) {
   const workspace = useStore(client.store, (state) => state.workspaces.find((item) => item.id === workspaceId));
   const projectWorkspaces = useStore(
     client.store,
@@ -871,11 +914,13 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
             {/* ＋ follows the last tab (browser style) rather than sitting at the far right; like Cursor's, it
                 asks what to open in this group. */}
             <NewTabMenu
+              open={newTabMenuGroupId === group.id}
+              onOpenChange={(open) => actions.setNewTabMenu(workspaceId, open ? group.id : null)}
               busy={Boolean(pending)}
               spinning={holdsPending}
-              terminalShortcut={`${modPrefix}T`}
               onTerminal={() => actions.createTerminal(workspaceId, group.id)}
               onBrowser={() => actions.createBrowserTab(workspaceId, group.id)}
+              onRestoreFocus={() => actions.focusActiveTab(workspaceId)}
             />
           </div>
         </header>
@@ -901,7 +946,7 @@ export function WorkspaceTerminal({ workspaceId, active, client, onCloseTask, at
                   <SquareTerminal className="size-5" />
                 </div>
                 <h2 className="text-base font-medium text-foreground">{isDirWorkspace ? "这台设备还没有终端" : "这个工作区还没有终端"}</h2>
-                <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。也可以按 {modPrefix}T 快速新建。</p>
+                <p className="mt-1.5 text-sm leading-5 text-muted-foreground">创建后会立即启动 shell，并作为一个新 Tab 打开。也可以按 {modPrefix}T 新建标签页。</p>
                 <Button
                   className="mt-5"
                   label="新建终端"

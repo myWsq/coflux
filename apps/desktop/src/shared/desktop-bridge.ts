@@ -74,6 +74,9 @@ export type DesktopUpdateState = {
 export type DesktopDigit = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
 
 export type DesktopCommand =
+  /** ⌘T: toggle the focused group's new-tab menu (terminal or browser). */
+  | "new-tab"
+  /** 文件 → 新建终端; no keyboard shortcut. */
   | "create-terminal"
   | "close-terminal"
   | "create-workspace"

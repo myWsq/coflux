@@ -51,6 +51,7 @@ import {
   effectiveLayout,
   findCreatedTask,
   focusGroup,
+  focusedGroup,
   focusGroupByIndex,
   focusGroupInDirection,
   focusedGroupRelativeTab,
@@ -302,6 +303,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // kept-alive hidden workspaces never get one, so global shortcuts only ever reach the selected one.
   const activeTerminalRef = useRef<WorkspaceTerminalHandle | null>(null);
   const [notificationOpen, setNotificationOpen] = useState(false);
+  // The ＋ menu that is open (a group's tab strip), whether a click or ⌘T opened it.
+  const [newTabMenu, setNewTabMenu] = useState<{ workspaceId: string; groupId: string } | null>(null);
   const activeWorkspaceIdRef = useRef<string | null>(null);
   // 已挂过面板的 task：面板寿命与工作区容器解耦，终端被搬到没访问过的工作区也不重建。
   const paneTaskIdsRef = useRef(new Set<string>());
@@ -1144,6 +1147,15 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // the selected workspace only, during render, so a hidden workspace can never receive one.
   function terminalHandleFor(workspaceId: string): WorkspaceTerminalHandle {
     return {
+      toggleNewTabMenu: () => {
+        if (newTabMenu?.workspaceId === workspaceId) {
+          setNewTabMenu(null);
+          return;
+        }
+        // The changes overlay covers the tab strip the menu hangs from.
+        setWorkspaceChangesOpen(workspaceId, false);
+        setNewTabMenu({ workspaceId, groupId: focusedGroup(layoutOf(workspaceId)).id });
+      },
       createTerminal: () => createTerminalIn(workspaceId, null),
       closeActiveTab: () => {
         // Suspended while the overlay is open: a blind ⌘W would close a terminal nobody can see.
@@ -1190,6 +1202,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
     },
     closeBrowserTab,
     reloadBrowserTab: (tabId) => browser.reload(tabId),
+    setNewTabMenu: (workspaceId, groupId) => setNewTabMenu(groupId ? { workspaceId, groupId } : null),
+    focusActiveTab: (workspaceId) => {
+      if (workspaceId !== activeWorkspaceIdRef.current) return;
+      const focused = currentScreen().focused ?? focusedBrowserTabId();
+      if (focused) focusTab(focused);
+    },
   };
 
   // The dock is measured rather than sized by a constant: with the changes button and its +X −Y
@@ -1323,6 +1341,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
                     dockWidth={dockWidth}
                     actions={workspaceActions}
                     browser={browser}
+                    newTabMenuGroupId={isActive && newTabMenu?.workspaceId === workspace.id ? newTabMenu.groupId : null}
                   />
                 </div>
               );

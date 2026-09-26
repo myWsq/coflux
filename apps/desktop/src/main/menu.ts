@@ -56,10 +56,11 @@ export function buildAppMenu(actions: MenuActions): Menu {
       label: "文件",
       submenu: [
         pageShortcut("新建工作区", "CmdOrCtrl+N", "create-workspace"),
-        pageShortcut("新建终端", "CmdOrCtrl+T", "create-terminal"),
-        pageShortcut("关闭终端", "CmdOrCtrl+W", "close-terminal"),
-        // Built-in browser tab (plan 20260924-desktop-browser-tab): no keyboard shortcut on purpose.
+        // ⌘T opens the tab strip's ＋ menu (terminal or browser); the two kinds themselves have no shortcut.
+        pageShortcut("新建标签页…", "CmdOrCtrl+T", "new-tab"),
+        { label: "新建终端", click: () => actions.sendCommand("create-terminal") },
         { label: "新建浏览器标签页", click: () => actions.sendCommand("new-browser-tab") },
+        pageShortcut("关闭终端", "CmdOrCtrl+W", "close-terminal"),
         { type: "separator" },
         { role: "close", label: "关闭窗口", accelerator: "Shift+CmdOrCtrl+W" },
       ],

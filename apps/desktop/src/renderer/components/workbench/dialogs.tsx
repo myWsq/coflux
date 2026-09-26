@@ -191,7 +191,7 @@ function shortcutRows(): { keys: string[]; description: string }[] {
   const mod = SHORTCUT_MODIFIERS;
   const rows = [
     { keys: [...mod, "P"], description: "快速跳转到工作区 / 终端 / 设备" },
-    { keys: [...mod, "T"], description: "新建终端" },
+    { keys: [...mod, "T"], description: "新建标签页（选择终端或浏览器）" },
     { keys: [...mod, "W"], description: "关闭当前终端" },
     { keys: [...mod, "\\"], description: "向右拆分并新建终端" },
     { keys: ["⇧", ...mod, "\\"], description: "向下拆分并新建终端" },

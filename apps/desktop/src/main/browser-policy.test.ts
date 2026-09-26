@@ -99,7 +99,7 @@ test("app page shortcuts leave a focused page as commands", () => {
     const action = classifyGuestKey(input);
     return action?.kind === "command" ? action.command : null;
   };
-  assert.equal(command(key("KeyT")), "create-terminal");
+  assert.equal(command(key("KeyT")), "new-tab");
   assert.equal(command(key("KeyW")), "close-terminal");
   assert.equal(command(key("KeyN")), "create-workspace");
   assert.equal(command(key("KeyP")), "toggle-palette");

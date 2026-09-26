@@ -144,7 +144,7 @@ export function useGlobalShortcuts({
         case "KeyT":
           event.preventDefault();
           event.stopPropagation();
-          terminal?.createTerminal();
+          terminal?.toggleNewTabMenu();
           return;
         case "KeyW":
           event.preventDefault();
@@ -200,6 +200,9 @@ export function useGlobalShortcuts({
         if (isSuspended) return;
         const terminal = activeTerminalRef.current;
         switch (command) {
+          case "new-tab":
+            terminal?.toggleNewTabMenu();
+            return;
           case "create-terminal":
             terminal?.createTerminal();
             return;

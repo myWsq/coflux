@@ -133,7 +133,7 @@ export function classifyGuestKey(input: GuestKeyInput): GuestKeyAction | null {
       case "KeyP":
         return { kind: "command", command: "toggle-palette" };
       case "KeyT":
-        return { kind: "command", command: "create-terminal" };
+        return { kind: "command", command: "new-tab" };
       case "KeyW":
         return { kind: "command", command: "close-terminal" };
       case "KeyN":
