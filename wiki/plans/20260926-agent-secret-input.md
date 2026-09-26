@@ -190,7 +190,7 @@ Out of scope:
 
 ## STOP conditions
 
-- A fact cited under Decisions & tradeoffs no longer holds (for example, `/agent` already authenticates callers, or the device channel lacks a per-session control scope).
+- A fact cited under Decisions & tradeoffs no longer holds (for example, `/agent` already authenticates callers, or no device channel grant carries `SESSION_CONTROL`).
 - `UnixStream::peer_cred()` does not return a pid on macOS or Linux (verified as returning one in tokio 1.52.3 at planning time).
 - The desktop cannot reach the device channel from the card without opening a new transport path.
 - The outcome requires out-of-scope files (supervisor, iOS, database migrations).
