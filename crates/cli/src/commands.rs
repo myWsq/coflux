@@ -798,18 +798,11 @@ pub fn run_hook(args: &ParsedArgs) {
         hook_debug(debug, "payload 缺事件名，忽略");
         return;
     };
-    let port = match gateway::local_gateway_port() {
-        Ok(port) => port,
-        Err(error) => {
-            hook_debug(debug, &error);
-            return;
-        }
-    };
-    let encoded = Value::Object(request).to_string();
-    hook_debug(debug, &format!("POST /hook {encoded}"));
-    match gateway::post_json(port, "/hook", &encoded, HOOK_POST_TIMEOUT) {
+    hook_debug(debug, &format!("POST /hook {}", Value::Object(request.clone())));
+    // The agent socket first; the gateway port is resolved only when the socket is absent.
+    match gateway::local_post("/hook", request, HOOK_POST_TIMEOUT) {
         Ok(response) => hook_debug(debug, &format!("响应 {}", response.status)),
-        Err(error) => hook_debug(debug, &error),
+        Err(error) => hook_debug(debug, &error.message()),
     }
 }
 

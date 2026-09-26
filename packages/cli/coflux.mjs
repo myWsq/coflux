@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 const HOME = process.env.COFLUX_HOME || join(homedir(), ".coflux");
@@ -34,6 +35,93 @@ function localGatewayPort() {
     return { ok: false, error: `COFLUX_LOCAL_GATEWAY_PORT=${raw} 无法定位固定监听端口` };
   }
   return { ok: true, port };
+}
+
+/* ---------------------- local transport (plan 20260926-agent-endpoint-hardening) ---------------------- */
+// `/agent` and `/hook` reach the worker over its kernel-attested Unix socket first; the worker reads
+// this process's pid from the kernel, so the body carries no pid/ppid there. The loopback TCP port
+// is used only when the socket is **absent** (no file, or nobody listening: an older worker), and
+// only then is COFLUX_LOCAL_GATEWAY_PORT read. A reply from the socket, refusals included, is final
+// and never retried over TCP; a connect refused for any other reason (a sandbox's EPERM/EACCES)
+// fails hard and names the socket. Mirrors `local_post` in crates/cli/src/gateway.rs.
+// The path mirrors `SOCKET_FILE` in crates/worker/src/agent_socket.rs.
+const AGENT_SOCKET = join(HOME, "ipc", "agent.sock");
+/** The worker never binds a longer socket path (sun_path limits), so a longer one is absent. */
+const MAX_SOCKET_PATH_BYTES = 100;
+
+/**
+ * One HTTP/1.1 POST over the agent socket.
+ * → { ok: true, status, text } | { ok: false, kind: "absent" | "denied" | "transport", message }
+ */
+function socketPost(path, payload, timeoutMs) {
+  if (Buffer.byteLength(AGENT_SOCKET) > MAX_SOCKET_PATH_BYTES) return Promise.resolve({ ok: false, kind: "absent" });
+  return new Promise((resolve) => {
+    let settled = false;
+    let timedOut = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const req = httpRequest(
+      {
+        socketPath: AGENT_SOCKET,
+        path,
+        method: "POST",
+        agent: false,
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload), connection: "close" },
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => finish({ ok: true, status: res.statusCode, text: Buffer.concat(chunks).toString("utf8") }));
+        res.on("error", (error) => finish({ ok: false, kind: "transport", message: error?.message || String(error) }));
+      },
+    );
+    const timer = setTimeout(() => {
+      timedOut = true;
+      req.destroy(new Error("请求超时"));
+    }, timeoutMs);
+    req.on("error", (error) => {
+      if (!timedOut && error?.syscall === "connect") {
+        if (error.code === "ENOENT" || error.code === "ECONNREFUSED") return finish({ ok: false, kind: "absent" });
+        return finish({
+          ok: false,
+          kind: "denied",
+          message: `cannot connect to the coflux daemon's agent socket at ${AGENT_SOCKET} (${error.code || error.message}); this process is not allowed to reach it (a sandbox without local network access?)`,
+        });
+      }
+      finish({ ok: false, kind: "transport", message: error?.message || String(error) });
+    });
+    req.end(payload);
+  });
+}
+
+/**
+ * POST one JSON body to the local daemon: the agent socket first, the TCP gateway only when the
+ * socket is absent. `body.pid`/`body.ppid` are transport business: dropped on the socket, set to
+ * this process's on TCP.
+ * → { ok: true, status, text } | { ok: false, kind: "refused" | "transport", message }
+ */
+async function localPost(path, body, timeoutMs) {
+  const { pid: _pid, ppid: _ppid, ...rest } = body;
+  const viaSocket = await socketPost(path, JSON.stringify(rest), timeoutMs);
+  if (viaSocket.ok || viaSocket.kind === "transport") return viaSocket;
+  if (viaSocket.kind === "denied") return { ok: false, kind: "refused", message: viaSocket.message };
+  const portResult = localGatewayPort();
+  if (!portResult.ok) return { ok: false, kind: "refused", message: portResult.error };
+  try {
+    const res = await fetch(`http://127.0.0.1:${portResult.port}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...rest, pid: process.pid, ppid: process.ppid }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return { ok: true, status: res.status, text: await res.text() };
+  } catch (error) {
+    return { ok: false, kind: "transport", message: error?.message || String(error) };
+  }
 }
 /* ------------------------------ hook：agent 事件信使 ------------------------------ */
 // agent hook 的上报信使：用户在 claude/codex 的 hook 配置里指向本命令，事件发生时它把
@@ -87,11 +175,6 @@ async function cmdHook() {
       hookDebug("payload 缺事件名，忽略");
       return;
     }
-    const portResult = localGatewayPort();
-    if (!portResult.ok) {
-      hookDebug(portResult.error);
-      return;
-    }
     const notification = payload.notification_type ?? payload.notificationType;
     const body = {
       agent,
@@ -108,13 +191,9 @@ async function cmdHook() {
       backgroundTasks: Array.isArray(payload.background_tasks) ? payload.background_tasks.length : undefined,
     };
     hookDebug("POST /hook", JSON.stringify(body));
-    const res = await fetch(`http://127.0.0.1:${portResult.port}/hook`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(HOOK_POST_TIMEOUT_MS),
-    });
-    hookDebug(`响应 ${res.status}`);
+    // The agent socket first; the gateway port is resolved only when the socket is absent.
+    const res = await localPost("/hook", body, HOOK_POST_TIMEOUT_MS);
+    hookDebug(res.ok ? `响应 ${res.status}` : res.message);
   } catch (error) {
     hookDebug(error?.message || String(error));
   } finally {
@@ -165,23 +244,15 @@ function agentTimeoutMs() {
 // failure may be re-sent with the same submissionId (the daemon deduplicates on it); re-sending a
 // "refused" request accomplishes nothing. Mirrors `AgentError` in crates/cli/src/gateway.rs.
 async function agentPostResult(body) {
-  const portResult = localGatewayPort();
-  if (!portResult.ok) return { ok: false, kind: "refused", message: portResult.error };
-  let res;
-  try {
-    res = await fetch(`http://127.0.0.1:${portResult.port}/agent`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...body, pid: process.pid, ppid: process.ppid, cwd: callerCwd() }),
-      signal: AbortSignal.timeout(agentTimeoutMs()),
-    });
-  } catch (error) {
-    const detail = error?.message || error;
-    return { ok: false, kind: "transport", message: `连不上本机 daemon：${detail}（daemon 没在跑？查看 Coflux.app 或 cofluxd status）` };
+  const res = await localPost("/agent", { ...body, cwd: callerCwd() }, agentTimeoutMs());
+  if (!res.ok) {
+    if (res.kind === "refused") return res;
+    return { ok: false, kind: "transport", message: `连不上本机 daemon：${res.message}（daemon 没在跑？查看 Coflux.app 或 cofluxd status）` };
   }
   let parsed = null;
-  try { parsed = await res.json(); } catch { /* 非 JSON 响应按下面的兜底报错处理 */ }
-  if (!res.ok || !parsed?.ok) return { ok: false, kind: "refused", message: parsed?.error || `daemon 返回 ${res.status}` };
+  try { parsed = JSON.parse(res.text); } catch { /* 非 JSON 响应按下面的兜底报错处理 */ }
+  const success = res.status >= 200 && res.status < 300;
+  if (!success || !parsed?.ok) return { ok: false, kind: "refused", message: parsed?.error || `daemon 返回 ${res.status}` };
   return { ok: true, value: parsed };
 }
 

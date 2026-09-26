@@ -146,16 +146,16 @@ fn local(action: &str, path: Option<&str>) -> Result<Value, String> {
     local_at(action, path, &crate::gateway::caller_cwd())
 }
 fn local_at(action: &str, path: Option<&str>, cwd: &str) -> Result<Value, String> {
-    let mut body = json!({"action":action,"pid":crate::gateway::pid(),"ppid":crate::gateway::ppid(),"cwd":cwd});
+    // Identity is the transport's business (`gateway::local_post`): the kernel's on the agent
+    // socket, pid/ppid added only on the TCP fallback.
+    let mut body = serde_json::Map::new();
+    body.insert("action".into(), Value::from(action));
+    body.insert("cwd".into(), Value::from(cwd));
     if let Some(path) = path {
-        body["path"] = Value::from(path);
+        body.insert("path".into(), Value::from(path));
     }
-    let response = crate::gateway::post_json(
-        crate::gateway::local_gateway_port()?,
-        "/agent",
-        &body.to_string(),
-        Duration::from_millis(1800),
-    )?;
+    let response = crate::gateway::local_post("/agent", body, Duration::from_millis(1800))
+        .map_err(|error| error.message())?;
     let value: Value = serde_json::from_slice(&response.body).map_err(|e| e.to_string())?;
     if !response.ok() || value["ok"] != true {
         return Err(string(&value, "error"));
@@ -354,14 +354,7 @@ fn hook(host: &str) {
         crate::gateway::pid(),
         crate::gateway::ppid(),
     ) {
-        if let Ok(port) = crate::gateway::local_gateway_port() {
-            let _ = crate::gateway::post_json(
-                port,
-                "/hook",
-                &Value::Object(body).to_string(),
-                Duration::from_millis(1500),
-            );
-        }
+        let _ = crate::gateway::local_post("/hook", body, Duration::from_millis(1500));
     }
 }
 fn launch(host: &str, args: &[String]) -> Result<(), String> {

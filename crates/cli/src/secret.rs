@@ -25,8 +25,8 @@ use serde_json::{json, Value};
 
 use crate::die;
 
-/// Mirrors `SOCKET_DIR` / `SOCKET_FILE` in `crates/worker/src/secret/socket.rs`.
-const SOCKET_DIR: &str = "ipc";
+/// Mirrors `SOCKET_FILE` in `crates/worker/src/secret/socket.rs` (the directory is
+/// `gateway::IPC_DIR`).
 const SOCKET_FILE: &str = "secret.sock";
 const DEFAULT_ASK_TIMEOUT_SECS: u64 = 10 * 60;
 const MAX_ASK_TIMEOUT_SECS: u64 = 60 * 60;
@@ -148,11 +148,7 @@ fn require_name(name: Option<&String>, usage: &str) -> String {
 }
 
 fn socket_path() -> PathBuf {
-    let home = std::env::var_os("COFLUX_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".coflux"));
-    home.join(SOCKET_DIR).join(SOCKET_FILE)
+    crate::gateway::ipc_socket_path(SOCKET_FILE)
 }
 
 fn connect() -> UnixStream {
