@@ -50,6 +50,18 @@
   font-style: italic;
 }
 
+/* Astryx renders its layers (DropdownMenu, Tooltip, any useLayer user) inline as native
+ * [popover] elements, DOM descendants of wherever the trigger sits, and `-webkit-app-region`
+ * is inherited. A menu opened from the tab strip <header> (which is `drag`) therefore counted
+ * as window drag area even though it paints in the top layer below the strip: its items were
+ * unclickable and pressing on it dragged the window. This rule keeps every layer out of the
+ * drag area with no per-call-site discipline; do not remove it. Unlayered on purpose, so it
+ * outranks every cascade layer declared above. See the header comment in
+ * components/workbench/drag-region.ts. */
+[popover] {
+  -webkit-app-region: no-drag;
+}
+
 /* Cursor 式近黑 IDE：低对比分层、暖调灰阶、无彩强调。
  * 三层地面（由深至浅）：terminal(终端纸面) < background(应用底) < sidebar/card(面板)。 */
 :root {

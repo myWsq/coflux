@@ -15,6 +15,15 @@ import type { CSSProperties } from "react";
  * 但它排在主区之前，顶栏的 `drag` 随后把洞填回去，坞里的按钮点不动、Tooltip 也不出
  * （修复见 workbench.tsx 里动作坞那段注释）。
  *
+ * **`app-region` 会被 DOM 后代继承，哪怕后代画在 `drag` 元素的盒子之外。** Astryx 的浮层
+ * （DropdownMenu / Tooltip / 任何 useLayer 用户）默认就地渲染成原生 `[popover]` 元素，是触发器
+ * 所在处的 DOM 后代：顶部标签条 `<header>` 带 `drag`，从条里打开的菜单就跟着继承 `drag`，
+ * 菜单项点不动、按住还会拖走窗口（2.6.0 的 ＋ 菜单踩过）。触发器按钮自己的 `no-drag` 管不到它，
+ * 浮层是按钮的兄弟而不是后代。现由 renderer/index.css 里一条未分层的全局规则
+ * `[popover] { -webkit-app-region: no-drag; }` 统一兜住，所有浮层无论触发器在哪都不属于拖拽区
+ * ——那条规则不能删。它只覆盖 `[popover]`：在 `drag` 元素内部手搓的非 popover 浮层（自己绝对
+ * 定位的面板之类）照样会继承 `drag`，仍须自带 `NO_DRAG_REGION_STYLE`。
+ *
  * React 的 `CSSProperties` 没有 `WebkitAppRegion` 键，故这里统一 `as CSSProperties` 断言。
  */
 export const DESKTOP_TITLEBAR_HEIGHT = 38;
