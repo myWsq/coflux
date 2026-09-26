@@ -118,6 +118,8 @@ struct WorkspaceListView: View {
         }
         // agent 经 `cofluxd progress` 播报的进度短评（plan 088）：副行灰字，随下一条覆盖
         let progress = client.workspaceProgress(workspaceID: workspace.id)
+        // An agent waiting for a secret (plan 20260926-ios-secret-input) takes precedence over progress.
+        let secret = client.pendingSecretRequest(workspaceID: workspace.id)
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 14) {
                 // 与 web 侧栏同源：lucide GitBranch（asset 模板渲染），main 分支同 web 用 warning 色
@@ -157,7 +159,17 @@ struct WorkspaceListView: View {
                     .foregroundStyle(Theme.success)
                 }
             }
-            if let progress {
+            if let secret {
+                HStack(spacing: 4) {
+                    Image(systemName: "key.fill")
+                        .font(Theme.Fonts.meta)
+                    Text("等待输入密钥：\(secret.name)")
+                        .font(Theme.Fonts.label.weight(.medium))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(Theme.warning)
+                .padding(.leading, 38) // 对齐主标题起点（图标列 24 + 间距 14）
+            } else if let progress {
                 Text(progress)
                     .font(Theme.Fonts.label)
                     .foregroundStyle(Theme.mutedForeground)

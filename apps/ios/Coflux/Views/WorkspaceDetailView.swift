@@ -149,6 +149,19 @@ struct WorkspaceDetailView: View {
                 .clipped()
                 // 终端页与系统键盘绝缘：键盘只属于模态成文层
                 .ignoresSafeArea(.keyboard)
+                // Agent secret request cards (plan 20260926-ios-secret-input): anchored at the top of
+                // the terminal page below the status strip, floating over the terminal. An overlay on
+                // the pager keeps them out of the panel lift/clip and never resizes the terminal; the
+                // keyboard their field raises covers only the bottom of the page.
+                .overlay(alignment: .top) {
+                    if let task = activeTask {
+                        SecretRequestCards(
+                            client: client,
+                            requests: client.pendingSecretRequests(taskID: task.id),
+                            source: secretRequestSource(task)
+                        )
+                    }
+                }
             }
         }
         .overlay(alignment: .bottom) {
@@ -378,9 +391,16 @@ struct WorkspaceDetailView: View {
                 Circle()
                     .fill(statusColor(task))
                     .frame(width: 6, height: 6)
-                Text(task.title.isEmpty ? "任务 \(task.id.prefix(6))" : task.title)
+                Text(taskTitle(task))
                     .font(Theme.Fonts.label.weight(active ? .semibold : .regular))
                     .lineLimit(1)
+                // This terminal's agent is waiting for a secret (plan 20260926-ios-secret-input).
+                if client.secretRequests.values.contains(where: { $0.taskID == task.id }) {
+                    Image(systemName: "key.fill")
+                        .font(Theme.Fonts.meta)
+                        .foregroundStyle(Theme.warning)
+                        .accessibilityLabel("等待输入密钥")
+                }
             }
             .foregroundStyle(active ? Theme.foreground : Theme.mutedForeground)
             .padding(.horizontal, 12)
@@ -389,6 +409,18 @@ struct WorkspaceDetailView: View {
         // 长按复制终端标识（plan 20260914）：终端在 iOS 上没有列表行，只有这枚 chip，
         // 复制入口就挂在它身上；短按切 tab 不受影响。
         .copyHandleContextMenu(.terminal, id: task.id)
+    }
+
+    private func taskTitle(_ task: Coflux_V1_Task) -> String {
+        task.title.isEmpty ? "任务 \(task.id.prefix(6))" : task.title
+    }
+
+    /// 设备 · 工作区 · 终端 — where a secret request comes from, as on the desktop card.
+    private func secretRequestSource(_ task: Coflux_V1_Task) -> String {
+        let daemon = client.daemons.first { $0.daemonID == task.daemonID }
+        let device = daemon.map { $0.name.isEmpty ? $0.host : $0.name } ?? ""
+        let workspaceLabel = workspace.branch.isEmpty ? workspace.name : workspace.branch
+        return [device, workspaceLabel, taskTitle(task)].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     private func statusColor(_ task: Coflux_V1_Task) -> Color {
