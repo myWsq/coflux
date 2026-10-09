@@ -15,6 +15,13 @@ BUILD_NUMBER=$(git rev-list --count HEAD)
 echo "==> build native transport framework"
 node ../../scripts/build-ios-transport.mjs
 
+# SwiftTerm 带 Metal 着色器；Xcode 27 起 Metal Toolchain 是单独下载的组件，缺了归档只在
+# 编译期报 "missing Metal Toolchain"（2026-10-09 实测）。首次缺失时自动补装（约 840MB）。
+if ! xcrun metal -v >/dev/null 2>&1; then
+  echo "==> download Metal Toolchain"
+  xcodebuild -downloadComponent MetalToolchain
+fi
+
 WORK_DIR=$(mktemp -d)
 ARCHIVE_PATH="$WORK_DIR/Coflux.xcarchive"
 LOG="$WORK_DIR/xcodebuild.log"
