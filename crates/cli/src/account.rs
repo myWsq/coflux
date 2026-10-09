@@ -14,6 +14,9 @@ fn err(what: &str, next: &str) -> String {
     format!("{what}\n{next}")
 }
 const USAGE_NEXT: &str = "Run coflux --help for usage.";
+/// The public server. Sessions saved before it moved to its ICP-registered name name the old origin.
+const DEFAULT_SERVER: &str = "https://api.coflux.yourantiandi.com";
+const LEGACY_DEFAULT_SERVER: &str = "https://api.coflux.dev";
 const LOGIN_NEXT: &str = "Sign in to the Coflux app, or run coflux login.";
 const QUERY_NEXT: &str = "Check whether it took effect before you try again.";
 
@@ -240,7 +243,7 @@ pub fn handles(args: &ParsedArgs) -> bool {
 pub fn run(args: &ParsedArgs) -> Result<(), String> {
     let command = args.positional(0).unwrap_or("");
     if command == "login" {
-        let server = origin(args.string("server").unwrap_or("https://api.coflux.dev"))?;
+        let server = origin(args.string("server").unwrap_or(DEFAULT_SERVER))?;
         // No credential flags: sign in through the browser (loopback + PKCE, or a paste code over SSH).
         if args.string("username").is_none() && !args.flag("password-stdin") {
             let post = |path: &str, body: Value| http(&server, path, None, body, 30);
@@ -293,9 +296,14 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
     let timeout = if long_running { 610 } else { 40 };
     let call = |operation: Value| -> Result<Value, String> {
         if let Some(session) = &session {
-            let server = origin(session["server"].as_str().ok_or_else(|| {
+            let saved = origin(session["server"].as_str().ok_or_else(|| {
                 err("This CLI's sign-in record is damaged.", "Run coflux login again.")
             })?)?;
+            let server = if saved == LEGACY_DEFAULT_SERVER {
+                DEFAULT_SERVER.to_string()
+            } else {
+                saved
+            };
             if let Some(requested) = args.string("server") {
                 if origin(requested)? != server {
                     return Err(err("You are signed in to a different server.", "Run coflux login --server <url> first."));

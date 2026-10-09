@@ -1,6 +1,6 @@
 {
   "name": "coflux",
-  "version": "2.16.2",
+  "version": "2.17.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.6.0",
@@ -8,7 +8,7 @@
     "dev:pg": "docker compose up -d",
     "dev:server": "pnpm --filter @coflux/server dev",
     "dev:desktop": "pnpm --filter @coflux/desktop dev",
-    "dev:desktop:prod": "COFLUX_SERVER_URL=wss://api.coflux.dev/client pnpm --filter @coflux/desktop dev",
+    "dev:desktop:prod": "COFLUX_SERVER_URL=wss://api.coflux.yourantiandi.com/client pnpm --filter @coflux/desktop dev",
     "dev:daemon": "cargo build -p coflux-launcher -p coflux-runtime -p coflux-ptyd && node scripts/build-test-transports.mjs && COFLUX_HOME=\"$PWD/.coflux-dev\" COFLUX_RUNTIME_CMD=\"$PWD/target/debug/coflux-runtime\" ./target/debug/coflux-launcher",
     "dev": "pnpm -r --parallel --filter @coflux/server --filter @coflux/desktop dev",
     "build": "pnpm -r build && cargo build --release && node scripts/build-transport.mjs",

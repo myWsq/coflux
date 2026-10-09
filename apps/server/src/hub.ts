@@ -319,6 +319,8 @@ export interface DaemonCtx {
   accountId: AccountId | null;
   /** 含义同 ClientConn.remoteAddress。 */
   remoteAddress: string;
+  /** The public base for the host this daemon connected to (`publicUrlFor`); its authorize link is built on it. */
+  publicUrl: string;
   /** 已发起 daemon.enrollRequest 且尚未被确认/过期/断线清理时，指向 pendingAuthorizations 里的 token */
   pendingAuthToken?: string;
 }
@@ -2419,7 +2421,7 @@ export class Hub {
         });
         conn.pendingAuthToken = token;
         // 授权页自 plan 107 起由 server 直出（interface/auth-pages），链接挂在中心公网基址下。
-        this.sendRaw(conn.ws, { case: "daemonAuthorizePending", value: { url: `${config.publicUrl}/authorize/${token}`, expiresAt: createdAt + config.authorizeTtlMs } });
+        this.sendRaw(conn.ws, { case: "daemonAuthorizePending", value: { url: `${conn.publicUrl}/authorize/${token}`, expiresAt: createdAt + config.authorizeTtlMs } });
         log.info("daemon authorize requested", { name: value.name.trim(), host: value.host.trim() });
         break;
       }
@@ -3973,10 +3975,11 @@ export class Hub {
     return this.nativeLoginLimiter.allow(remoteAddress);
   }
 
-  registerNativeLogin(input: NativeLoginRegistration): OperationOutcome<{ requestId: string; url: string; expiresAt: number }> {
+  /** `publicUrl` is the base the client reached us on: it only accepts a sign-in page on that origin. */
+  registerNativeLogin(input: NativeLoginRegistration, publicUrl: string): OperationOutcome<{ requestId: string; url: string; expiresAt: number }> {
     const registered = this.nativeLogins.register(input);
     if (!registered.ok) return { ok: false, error: registered.error === "full" ? "登录请求过多，请稍后重试" : "登录请求无效" };
-    return { ok: true, value: { requestId: registered.id, url: `${config.publicUrl}/login/${registered.id}`, expiresAt: registered.expiresAt } };
+    return { ok: true, value: { requestId: registered.id, url: `${publicUrl}/login/${registered.id}`, expiresAt: registered.expiresAt } };
   }
 
   /** code + verifier → a fresh ck_sess, exactly once (the store burns the code on any attempt). */

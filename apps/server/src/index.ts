@@ -12,7 +12,7 @@ import { getRequestListener } from "@hono/node-server";
 import { currentAppStorage } from "@raven.js/core";
 import { createLogger } from "@coflux/core";
 import { decodeDaemonToServer, decodeClientToServer } from "@coflux/protocol";
-import { config } from "./config.js";
+import { config, publicUrlFor } from "./config.js";
 import { app } from "./app.js";
 import { StoreState } from "./plugins/store.plugin.js";
 import { HubState } from "./plugins/hub.plugin.js";
@@ -68,7 +68,7 @@ httpServer.on("upgrade", (req, socket, head) => {
 });
 
 const daemonEp = attachEndpoint(daemonWss, {
-  makeCtx: (ws: WebSocket, request): DaemonCtx => ({ ws, daemonId: null, accountId: null, remoteAddress: requestAddress(request) }),
+  makeCtx: (ws: WebSocket, request): DaemonCtx => ({ ws, daemonId: null, accountId: null, remoteAddress: requestAddress(request), publicUrl: publicUrlFor(request.headers.host) }),
   isAuthed: (c) => c.daemonId !== null,
   // 等浏览器授权的 daemon（已发 enrollRequest、持有 pending token）是合法未认证态，
   // 不能被 auth deadline 踢——否则每 15s 断连重连、授权链接无限换新（生产实测踩过）。

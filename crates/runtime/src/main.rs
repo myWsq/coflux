@@ -670,6 +670,17 @@ fn main() {
         .block_on(runtime_main(home, sessions));
 }
 
+/// The public centre moved to its ICP-registered name on 2026-10-09. Devices enrolled before then saved
+/// the old address, which still works through a slow forwarder; dial the current one instead. Nothing
+/// else about the device changes: its credentials are not bound to the address.
+fn current_server_url(url: String) -> String {
+    if url == "wss://api.coflux.dev/daemon" {
+        "wss://api.coflux.yourantiandi.com/daemon".to_string()
+    } else {
+        url
+    }
+}
+
 async fn runtime_main(home: String, sessions: Arc<Sessions>) {
     // rustls 0.23 要求在任何 TLS 握手前选定 process-level CryptoProvider，
     // 否则连 wss:// 时 panic（"Could not automatically determine the process-level CryptoProvider"）。
@@ -678,7 +689,11 @@ async fn runtime_main(home: String, sessions: Arc<Sessions>) {
         .expect("安装 rustls ring CryptoProvider 失败");
     let s = Settings::load(&home); // 用户配置，env 同名变量可覆盖
     let cfg = Arc::new(Config {
-        server_url: pick("COFLUX_SERVER", s.server_url, "ws://localhost:8787/daemon"),
+        server_url: current_server_url(pick(
+            "COFLUX_SERVER",
+            s.server_url,
+            "ws://localhost:8787/daemon",
+        )),
         device_name: pick(
             "COFLUX_DEVICE_NAME",
             s.device_name,

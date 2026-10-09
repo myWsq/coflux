@@ -2,7 +2,7 @@
  * 生产冒烟：走真实 wire 协议 + native Device 驱动一轮最小端到端流程。
  *
  * 用法：
- *   COFLUX_SMOKE_TOKEN=<clientToken> [COFLUX_SMOKE_URL=wss://api.coflux.dev/client] \
+ *   COFLUX_SMOKE_TOKEN=<clientToken> [COFLUX_SMOKE_URL=wss://api.coflux.yourantiandi.com/client] \
  *   [COFLUX_SMOKE_DAEMON=<daemon 名>] [COFLUX_SMOKE_REPO=/opt/coflux] \
  *   node --import tsx scripts/prod-smoke.mjs
  *
@@ -22,7 +22,7 @@ import { TaskStatus } from "../packages/protocol/src/index.ts";
 import { Client } from "../tests/src/harness.mjs";
 import { DeviceClient, utf8 } from "../tests/src/device-harness.mjs";
 
-const URL_ = process.env.COFLUX_SMOKE_URL ?? "wss://api.coflux.dev/client";
+const URL_ = process.env.COFLUX_SMOKE_URL ?? "wss://api.coflux.yourantiandi.com/client";
 const TOKEN = process.env.COFLUX_SMOKE_TOKEN;
 const USER = process.env.COFLUX_SMOKE_USER; // 本地账号模式备选（token 优先）
 const PASS = process.env.COFLUX_SMOKE_PASS;

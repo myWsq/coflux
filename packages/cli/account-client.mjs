@@ -17,6 +17,9 @@ function cliError(message, next) {
 }
 const USAGE_NEXT = "Run coflux --help for usage.";
 const LOGIN_NEXT = "Sign in to the Coflux app, or run coflux login.";
+// The public server. Sessions saved before it moved to its ICP-registered name name the old origin.
+const DEFAULT_ACCOUNT_SERVER = "https://api.coflux.yourantiandi.com";
+const LEGACY_ACCOUNT_SERVER = "https://api.coflux.dev";
 
 /* --------------------------------- 实体标识 -------------------------------- */
 // `coflux:<kind>:<hex>`：设备 / 项目 / 工作区 / 终端 ID 的可粘贴短形式，hex 是 ID 的前几位
@@ -244,7 +247,7 @@ export async function runAccountCommand(positionals, flags, home) {
   };
   const print = (value) => console.log(JSON.stringify(value));
   if (command === "login") {
-    const server = origin(flags.server || "https://api.coflux.dev");
+    const server = origin(flags.server || DEFAULT_ACCOUNT_SERVER);
     // No credential flags: sign in through the browser (loopback + PKCE, or a paste code over SSH).
     if (!flags.username && !flags["password-stdin"]) {
       const value = await browserLogin(server);
@@ -271,7 +274,7 @@ export async function runAccountCommand(positionals, flags, home) {
       if (flags.server) throw cliError("You are not signed in to that server.", "Run coflux login --server <url> first.");
       return broker(home, body, timeout);
     }
-    const server = origin(session.server);
+    const server = origin(session.server === LEGACY_ACCOUNT_SERVER ? DEFAULT_ACCOUNT_SERVER : session.server);
     if (flags.server && origin(flags.server) !== server) throw cliError("You are signed in to a different server.", "Run coflux login --server <url> first.");
     if (!session.token) throw cliError("You are not signed in.", "Run coflux login.");
     return request(server, "/api/client/command", session.token, body, timeout);
