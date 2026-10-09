@@ -35,7 +35,6 @@ test("annotator sync: ids and pins are validated, unknown anchors dropped", () =
       anchor: { kind: "pin", id: "ann-1", scroll: true },
       outlined: ["ann-1", "no good"],
       capture: true,
-      palette: { accent: "rgb(10, 20, 30)", onAccent: "#fff", success: "oklch(0.7 0.1 150)", onSuccess: "white" },
     },
   });
   assert.ok(parsed);
@@ -49,15 +48,10 @@ test("annotator sync: ids and pins are validated, unknown anchors dropped", () =
   assert.deepEqual(parsed.state.anchor, { kind: "pin", id: "ann-1", scroll: true });
   assert.deepEqual(parsed.state.outlined, ["ann-1"]);
   assert.equal(parsed.state.capture, true);
-  assert.equal(parsed.state.palette?.success, "oklch(0.7 0.1 150)");
-  assert.equal(
-    sanitizeAnnotatorSync({ guestId: 1, state: { palette: { accent: "red;} body{display:none", onAccent: "#fff", success: "#0f0", onSuccess: "#fff" } } })?.state.palette,
-    null,
-  );
   assert.equal(sanitizeAnnotatorSync({ guestId: -1, state: {} }), null);
   assert.equal(sanitizeAnnotatorSync({ guestId: 1, state: { anchor: { kind: "pick", token: "a b" } } })?.state.anchor, null);
-  // Outlines, capture and the palette alone never attach a debugger.
-  const quiet = { mode: false, capture: true, pins: [], anchor: null, outlined: ["ann-1"], palette: parsed.state.palette };
+  // Outlines and capture alone never attach a debugger.
+  const quiet = { mode: false, capture: true, pins: [], anchor: null, outlined: ["ann-1"] };
   assert.equal(annotatorStateNeedsPage(quiet), false);
   assert.equal(annotatorStateNeedsPage({ ...quiet, mode: true }), true);
 });
@@ -126,8 +120,7 @@ test("pins sit outside an element's top-right corner, on a region's top-left cor
   assert.deepEqual(annotatorPinPosition({ x: 300, y: 100, width: 200, height: 50 }, viewport, 20, 18, true), { x: 290, y: 91 });
 });
 
-test("the page script embeds the pin placement and has no palette of its own", () => {
+test("the page script embeds the pin placement and has no type below 11 px", () => {
   assert.ok(ANNOTATOR_PAGE_SCRIPT.includes("var pinPosition = (function"));
-  assert.doesNotMatch(ANNOTATOR_PAGE_SCRIPT, /#[0-9a-fA-F]{3,8}\b/);
   assert.doesNotMatch(ANNOTATOR_PAGE_SCRIPT, /font:[^;"]*\b(?:[0-9]|10)px/);
 });

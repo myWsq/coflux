@@ -38,7 +38,7 @@ import { AnnotationImageKind, type Annotation, type AnnotationImage } from "@cof
 import { annotationMeta, cardPlacement, groupByPage, isResolved, pageKey, type AgentTerminal, type CardBox } from "@/components/workbench/browser-annotations";
 import type { AnnotationsModel, WorkspaceAnnotations } from "@/components/workbench/browser-annotations-model";
 import { displayUrl } from "@/components/workbench/browser-address";
-import type { DesktopAnnotatorPalette, DesktopAnnotatorPick } from "@/desktop-bridge";
+import type { DesktopAnnotatorPick } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 
 /**
@@ -124,46 +124,6 @@ export async function prepareReferenceImage(blob: Blob): Promise<DraftImage | nu
     data = new Uint8Array(await best.arrayBuffer());
   }
   return { key: crypto.randomUUID(), dataUrl: bytesToDataUrl(data, mimeType), mimeType, data, kind: "reference" };
-}
-
-/* ---------------------------------------------------------------- theme colours for the page */
-
-/** The theme's accent and success colours, resolved to computed values inside the app's theme scope. */
-export function resolveAnnotatorPalette(scope: HTMLElement): DesktopAnnotatorPalette | null {
-  const probe = document.createElement("span");
-  probe.style.display = "none";
-  scope.appendChild(probe);
-  const read = (token: string) => {
-    probe.style.color = `var(${token})`;
-    return getComputedStyle(probe).color;
-  };
-  const palette = {
-    accent: read("--color-accent"),
-    onAccent: read("--color-on-accent"),
-    success: read("--color-success"),
-    onSuccess: read("--color-on-success"),
-  };
-  probe.remove();
-  return palette.accent && palette.onAccent && palette.success && palette.onSuccess ? palette : null;
-}
-
-/** The page's colours, following the app theme (re-resolved when the system appearance changes). */
-export function useAnnotatorPalette(scopeRef: RefObject<HTMLElement | null>): DesktopAnnotatorPalette | null {
-  const [palette, setPalette] = useState<DesktopAnnotatorPalette | null>(null);
-  useEffect(() => {
-    const scope = scopeRef.current;
-    if (!scope) return;
-    const update = () =>
-      setPalette((current) => {
-        const next = resolveAnnotatorPalette(scope);
-        return current && next && JSON.stringify(current) === JSON.stringify(next) ? current : next;
-      });
-    update();
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, [scopeRef]);
-  return palette;
 }
 
 /* ---------------------------------------------------------------- shared pieces */

@@ -3,7 +3,6 @@ import type {
   DesktopAnnotatorBox,
   DesktopAnnotatorElement,
   DesktopAnnotatorLocator,
-  DesktopAnnotatorPalette,
   DesktopAnnotatorPin,
   DesktopAnnotatorRegion,
   DesktopAnnotatorSource,
@@ -110,21 +109,6 @@ export function sanitizeRegion(value: unknown): DesktopAnnotatorRegion | null {
   return { x, y, width, height };
 }
 
-/** A CSS colour the renderer resolved from its theme (`rgb(…)`, `#…`, `oklch(…)`…); nothing else. */
-function colour(value: unknown): string | null {
-  return typeof value === "string" && /^[#a-zA-Z0-9(),.%\s/-]{1,80}$/.test(value) ? value : null;
-}
-
-function sanitizePalette(value: unknown): DesktopAnnotatorPalette | null {
-  if (!isRecord(value)) return null;
-  const accent = colour(value.accent);
-  const onAccent = colour(value.onAccent);
-  const success = colour(value.success);
-  const onSuccess = colour(value.onSuccess);
-  if (!accent || !onAccent || !success || !onSuccess) return null;
-  return { accent, onAccent, success, onSuccess };
-}
-
 /** `browserAnnotatorSync` from the renderer. */
 export function sanitizeAnnotatorSync(payload: unknown): { guestId: number; state: DesktopAnnotatorState } | null {
   if (!isRecord(payload) || !isRecord(payload.state)) return null;
@@ -159,15 +143,14 @@ export function sanitizeAnnotatorSync(payload: unknown): { guestId: number; stat
       pins,
       anchor: sanitizeAnchor(raw.anchor),
       outlined,
-      palette: sanitizePalette(raw.palette),
     },
   };
 }
 
 /**
- * Whether a state needs the page instrumented at all. The capture flag, the outlines and the
- * palette never do on their own: a card is always anchored, and a tab with no annotate mode, pins
- * or anchor must not get a debugger.
+ * Whether a state needs the page instrumented at all. The capture flag and the outlines never do
+ * on their own: a card is always anchored, and a tab with no annotate mode, pins or anchor must
+ * not get a debugger.
  */
 export function annotatorStateNeedsPage(state: DesktopAnnotatorState): boolean {
   return state.mode || state.pins.length > 0 || state.anchor !== null;

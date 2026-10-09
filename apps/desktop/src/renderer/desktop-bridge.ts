@@ -9,7 +9,6 @@ export type {
   DesktopAnnotatorBox,
   DesktopAnnotatorElement,
   DesktopAnnotatorLocator,
-  DesktopAnnotatorPalette,
   DesktopAnnotatorPick,
   DesktopAnnotatorPickTarget,
   DesktopAnnotatorPin,

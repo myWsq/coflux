@@ -97,7 +97,7 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
 
-const EMPTY_STATE: DesktopAnnotatorState = { mode: false, capture: false, pins: [], anchor: null, outlined: [], palette: null };
+const EMPTY_STATE: DesktopAnnotatorState = { mode: false, capture: false, pins: [], anchor: null, outlined: [] };
 
 export function createBrowserAnnotator(options: {
   send: (event: DesktopBrowserEvent) => void;

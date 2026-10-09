@@ -74,7 +74,6 @@ import {
   draftIsDirty,
   prepareReferenceImage,
   useAnnotationUndo,
-  useAnnotatorPalette,
   type AnnotationDraft,
   type PanelNotice,
 } from "@/components/workbench/browser-annotations-ui";
@@ -298,7 +297,6 @@ function BrowserView({
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const cardRef = useRef<HTMLDivElement | null>(null);
-  const palette = useAnnotatorPalette(rootRef);
   const webviewHostRef = useRef<HTMLDivElement | null>(null);
   const pageRef = useRef<HTMLDivElement | null>(null);
   const devtoolsHostRef = useRef<HTMLDivElement | null>(null);
@@ -359,7 +357,6 @@ function BrowserView({
     pins: pagePins,
     anchor: annotatorAnchor,
     outlined,
-    palette,
   };
   const annotatorKey = JSON.stringify(annotatorState);
   const pageMissing = missing.url && pageKey(missing.url) === pageKey(url) ? missing.ids : new Set<string>();

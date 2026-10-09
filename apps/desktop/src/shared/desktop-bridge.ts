@@ -255,9 +255,6 @@ export type DesktopAnnotatorPin = {
 /** What the page reports the rectangle of: the elements just picked, or an annotation. */
 export type DesktopAnnotatorAnchor = { kind: "pick"; token: string } | { kind: "pin"; id: string; scroll: boolean } | null;
 
-/** The app theme's colours the page draws with; the page script has no palette of its own. */
-export type DesktopAnnotatorPalette = { accent: string; onAccent: string; success: string; onSuccess: string };
-
 /** The renderer's whole wish for one page guest; main re-applies it after every navigation. */
 export type DesktopAnnotatorState = {
   /** Annotate mode: hover, ↑↓ levels, click, shift-click, shift-drag. */
@@ -268,7 +265,6 @@ export type DesktopAnnotatorState = {
   anchor: DesktopAnnotatorAnchor;
   /** Annotations whose elements or region are outlined (the selected one, an open card's, the hovered panel row's). */
   outlined: string[];
-  palette: DesktopAnnotatorPalette | null;
 };
 
 export type DesktopAnnotatorElement = DesktopAnnotatorLocator & {
