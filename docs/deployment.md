@@ -82,9 +82,21 @@ Three machines, with one central instance—the agreed B7 product model in [OPEN
 
 Daemons run on users' machines, not as part of these server roles. prod-bj also hosts the owner's `VM-0-3-ubuntu` daemon, independently of its relay role.
 
-## Current topology: the centre on coflux-sh (since 2026-10-09 20:47)
+## Current topology: the centre on coflux-bj (since 2026-10-09 23:10)
 
-The centre, its database and the DERP/STUN node run on one Tencent Cloud host in Shanghai. prod-jp only forwards the `coflux.dev` names to it; prod-bj no longer carries coflux traffic.
+The centre, its database and the DERP/STUN node run on one Tencent Cloud host in Beijing, **coflux-bj** (`root@82.157.104.55`, zone `ap-beijing-3`, same account and the same layout as coflux-sh below). It replaced coflux-sh after about two hours because Shanghai was too far from the owner's devices. Differences from the coflux-sh description that follows:
+
+- DERP region is **903 `coflux-bj`**, node `derp.coflux.yourantiandi.com` with `IPv4` 82.157.104.55, STUN 3479. Clients dial the region's IPv4, so DERP never depended on the DNS change.
+- Caddy trusts both forwarders: `trusted_proxies static 82.40.34.37/32 49.234.42.193/32`.
+- prod-jp's `(coflux_to_sh)` snippet now dials `https://82.157.104.55` (backup `Caddyfile.bak-pre-to-bj-*`).
+- **coflux-sh is a forwarder only**: its Caddyfile forwards every name it still receives to coflux-bj (backup `Caddyfile.bak-pre-to-bj-*`), and its `coflux-server`, `coflux-derp` and `coflux-stun` are stopped and disabled. Its database is frozen at the cutover dump `/var/backups/coflux/coflux-cutover-bj-20261009-230850.dump`. Retire it once DNSPod points `api`/`derp.coflux.yourantiandi.com` at 82.157.104.55 and no request reaches it.
+- Rollback to coflux-sh mirrors the rollback below: dump coflux-bj, restore on coflux-sh, restore the `.bak-pre-to-bj-*` Caddyfiles on coflux-sh and prod-jp, re-enable coflux-sh's services with its `tailcat.env` (region 902).
+
+When piping a dump between hosts, never let anything else write to the same stdout: on this cutover a `curl` health line ahead of `pg_dump` corrupted the stream, `pg_restore` failed after the target database had been dropped, and a pipeline to `grep` hid the failure, so the server briefly started on an empty database before any traffic reached it. Write the dump to a file first and check `pg_restore -l` before dropping anything.
+
+### coflux-sh (Shanghai), 2026-10-09 20:47–23:10
+
+The centre, its database and the DERP/STUN node ran on one Tencent Cloud host in Shanghai. prod-jp only forwards the `coflux.dev` names to it; prod-bj no longer carries coflux traffic.
 
 ```text
   mainland devices ──(direct)──> api.coflux.yourantiandi.com ┐
@@ -172,12 +184,12 @@ This is also the mainland observation point. Test routing from here: local resid
 
 The center runs a detached checkout of a release tag. Take a database backup before a deployment carrying a schema migration, since the daily cron backup can be hours old:
 
-The centre host is coflux-sh (`root@49.234.42.193`) since 2026-10-09; the commands are unchanged otherwise. Fetching from GitHub and npm works from there but is slower than from Japan.
+The centre host is coflux-bj (`root@82.157.104.55`) since 2026-10-09 23:10; the commands are unchanged otherwise. Fetching from GitHub and npm works from there but is slower than from Japan.
 
 ```sh
-ssh root@49.234.42.193 'sudo -u postgres pg_dump -Fc -d coflux > /var/backups/coflux/coflux-predeploy-<tag>-$(date +%Y%m%d-%H%M%S).dump'
-ssh root@49.234.42.193 'cd /opt/coflux && git fetch --tags origin; git checkout <tag>'
-ssh root@49.234.42.193 'cd /opt/coflux && pnpm install --frozen-lockfile && systemctl restart coflux-server'
+ssh root@82.157.104.55 'sudo -u postgres pg_dump -Fc -d coflux > /var/backups/coflux/coflux-predeploy-<tag>-$(date +%Y%m%d-%H%M%S).dump'
+ssh root@82.157.104.55 'cd /opt/coflux && git fetch --tags origin; git checkout <tag>'
+ssh root@82.157.104.55 'cd /opt/coflux && pnpm install --frozen-lockfile && systemctl restart coflux-server'
 ```
 
 Run the steps separately rather than chaining them with `&&`. Checking out and installing leaves the running service untouched until the restart, so a failure there costs nothing; and `git fetch --tags` exits non-zero whenever an old tag on this host would be clobbered, which silently skips a chained checkout. Confirm afterwards with `git log --oneline -1`, `systemctl is-active coflux-server`, `curl -sS http://127.0.0.1:8787/health`, and the boot lines in `journalctl -u coflux-server`. Migrations run at boot inside one transaction under an advisory lock; `SELECT version, name FROM coflux.schema_migrations ORDER BY version DESC` shows what applied.
