@@ -1,6 +1,6 @@
 {
   "name": "cofluxd",
-  "version": "2.16.1",
+  "version": "2.16.2",
   "description": "Run a headless Coflux device (cofluxd) and work with Coflux terminals, workspaces and your account (coflux)",
   "type": "module",
   "bin": {
