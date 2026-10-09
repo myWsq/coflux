@@ -1,3 +1,4 @@
+import { ANNOTATOR_COLOURS } from "../shared/annotator-colours";
 import { annotatorPinPosition } from "./browser-annotator-policy";
 
 /**
@@ -12,12 +13,13 @@ import { annotatorPinPosition } from "./browser-annotator-policy";
  * It does only what must happen inside the page — the gestures (hover, ↑/↓ level traversal, click,
  * shift-click selections finalised on shift release or blur, shift-drag regions on the live page),
  * hit-testing, locating elements again, rectangles, and the pins and outlines (drawn in a closed
- * shadow root, in the colours the renderer sends: it has no palette of its own) — and acts in the
+ * shadow root, in the fixed `ANNOTATOR_COLOURS`, legible on any page) — and acts in the
  * top-level frame only. While a card is open (`capture`) it swallows pointer input and reports
  * clicks as outside clicks. The cards, attachments and panel are renderer UI.
  *
  * Written by hand for coflux (no third-party code). Kept free of template-literal syntax so it can
- * live in this raw string; the pin placement is `annotatorPinPosition`'s own source, embedded.
+ * live in this raw string; the pin placement is `annotatorPinPosition`'s own source and the
+ * colours are `ANNOTATOR_COLOURS` as JSON, both embedded.
  */
 
 export const ANNOTATOR_WORLD = "coflux-annotator";
@@ -40,8 +42,11 @@ export const ANNOTATOR_PAGE_SCRIPT =
   var pinPosition = (` +
   annotatorPinPosition.toString() +
   String.raw`);
+  var COLOURS = ` +
+  JSON.stringify(ANNOTATOR_COLOURS) +
+  String.raw`;
 
-  var state = { mode: false, capture: false, pins: [], anchor: null, outlined: [], palette: null };
+  var state = { mode: false, capture: false, pins: [], anchor: null, outlined: [] };
   var host = null, root = null, hoverBox = null, hoverLabel = null, anchorBox = null, dragBox = null, outlineLayer = null, pinLayer = null, cursorStyle = null;
   // token -> { elements: [...], region: null | { x, y, width, height } }; only the latest pick is kept.
   var picked = new Map();
@@ -271,13 +276,13 @@ export const ANNOTATOR_PAGE_SCRIPT =
       host.setAttribute("style", "all: initial !important; position: fixed !important; inset: 0 !important; pointer-events: none !important; z-index: 2147483647 !important; display: block !important;");
       root = host.attachShadow({ mode: "closed" });
       var style = document.createElement("style");
-      // Colours come from the renderer's theme (custom properties set by applyPalette); the system
-      // colours are only a fallback for the moment before the first state arrives.
+      // Fixed colours, not the app theme: they must stay visible on any page. Every box carries a
+      // 1 px ring (--cr) outside its coloured border; the anchor's halo lies beyond that ring.
       style.textContent = [
-        ":host{--ca:Highlight;--con:HighlightText;--cs:Highlight;--cson:HighlightText}",
-        ".hover,.anchor,.outline,.drag{position:fixed;display:none;box-sizing:border-box;border-radius:3px;pointer-events:none}",
+        ":host{--ca:" + COLOURS.accent + ";--con:" + COLOURS.onAccent + ";--cs:" + COLOURS.success + ";--cson:" + COLOURS.onSuccess + ";--cr:" + COLOURS.ring + "}",
+        ".hover,.anchor,.outline,.drag{position:fixed;display:none;box-sizing:border-box;border-radius:3px;pointer-events:none;box-shadow:0 0 0 1px var(--cr)}",
         ".hover{border:1.5px solid var(--ca);background:color-mix(in srgb,var(--ca) 10%,transparent)}",
-        ".anchor{border:2px solid var(--ca);box-shadow:0 0 0 3px color-mix(in srgb,var(--ca) 22%,transparent)}",
+        ".anchor{border:2px solid var(--ca);box-shadow:0 0 0 1px var(--cr),0 0 0 4px color-mix(in srgb,var(--ca) 22%,transparent)}",
         ".outline{border:1.5px dashed var(--ca)}",
         ".outline.sel{border-style:solid;background:color-mix(in srgb,var(--ca) 14%,transparent)}",
         ".drag{border:1.5px dashed var(--ca);background:color-mix(in srgb,var(--ca) 10%,transparent)}",
@@ -297,16 +302,6 @@ export const ANNOTATOR_PAGE_SCRIPT =
     }
     parent.appendChild(host);
     return true;
-  }
-
-  function applyPalette() {
-    if (!host) return;
-    var palette = state.palette;
-    var names = [["--ca", "accent"], ["--con", "onAccent"], ["--cs", "success"], ["--cson", "onSuccess"]];
-    for (var i = 0; i < names.length; i++) {
-      if (palette && palette[names[i][1]]) host.style.setProperty(names[i][0], palette[names[i][1]]);
-      else host.style.removeProperty(names[i][0]);
-    }
   }
 
   function place(node, rect) {
@@ -723,7 +718,6 @@ export const ANNOTATOR_PAGE_SCRIPT =
     frame = 0;
     if (!needed()) { if (host && host.isConnected) host.remove(); return; }
     if (!ensureUi()) return;
-    applyPalette();
     renderPins();
     renderOutlines();
     renderAnchor();
@@ -770,8 +764,7 @@ export const ANNOTATOR_PAGE_SCRIPT =
         capture: !!next.capture,
         pins: Array.isArray(next.pins) ? next.pins : [],
         anchor: next.anchor || null,
-        outlined: Array.isArray(next.outlined) ? next.outlined : [],
-        palette: next.palette || null
+        outlined: Array.isArray(next.outlined) ? next.outlined : []
       };
       // Only the latest pick is kept, and it is not dropped by a state sent before the renderer
       // heard of it (main still reads its elements' source identity).
