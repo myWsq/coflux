@@ -60,4 +60,4 @@ if ! node ./testflight-distribute.mjs --build "$BUILD_NUMBER"; then
 fi
 # dSYM 不随包上传（见 ExportOptions.plist 的 uploadSymbols 说明）：归档目录保留在这里，
 # 需要符号化崩溃日志时从它手动上传。
-echo "    dSYM: $ARCHIVE_PATH/dSYMs（归档保留在 $WORK_DIR）"
+echo "    dSYM: ${ARCHIVE_PATH}/dSYMs（归档保留在 ${WORK_DIR}）"
