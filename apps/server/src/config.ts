@@ -180,6 +180,11 @@ export const config = {
   /** 自动更新编排（plan 015）：轮询 GitHub `/releases/latest` + manifest.json，对在线 daemon
    * 推送 worker 升级。未设 COFLUX_AUTOUPDATE_REPO（形如 owner/repo）则功能整体关闭。 */
   autoUpdateApiBase: process.env.COFLUX_AUTOUPDATE_API_BASE ?? "https://api.github.com",
+  /** COFLUX_AUTOUPDATE_MIRROR_BASE (e.g. https://dl.coflux.dev): read the release mirror's
+   * `releases/latest.json` and `releases/<tag>/manifest.json` instead of the GitHub API. The mirror
+   * holds the latest stable release only, the same release `/releases/latest` names; a centre in
+   * mainland China reaches it reliably and api.github.com not. */
+  autoUpdateMirrorBase: (process.env.COFLUX_AUTOUPDATE_MIRROR_BASE ?? "").replace(/\/+$/, ""),
   autoUpdateRepo: process.env.COFLUX_AUTOUPDATE_REPO ?? "",
   autoUpdatePollMs: int("COFLUX_AUTOUPDATE_POLL_MS", 10 * 60 * 1000),
   autoUpdateMaxAttempts: int("COFLUX_AUTOUPDATE_MAX_ATTEMPTS", 3),
