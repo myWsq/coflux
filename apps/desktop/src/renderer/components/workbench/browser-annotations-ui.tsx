@@ -41,6 +41,8 @@ import { displayUrl } from "@/components/workbench/browser-address";
 import type { DesktopAnnotatorPick } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 
+import { ANNOTATOR_COLOURS } from "../../../shared/annotator-colours";
+
 /**
  * Browser annotations UI (plans 20260929-browser-annotations, 20260929-annotation-polish): the
  * toolbar's two-part button, the hint pill, the comment card for a new pick or an edit, the detail
@@ -168,15 +170,36 @@ export function useAnnotationUndo(
   };
 }
 
-/** A number badge in the pin's colour (the theme accent; success with ✓ once resolved). */
-export function NumberBadge({ number, resolved, className }: { number: number; resolved: boolean; className?: string }) {
+/**
+ * A number badge in its pin's colour (accent; success with ✓ once resolved). Browser annotations
+ * (`page`) take the page pins' fixed `ANNOTATOR_COLOURS` so a row always matches its pin; diff-line
+ * comments (`theme`) keep the theme accent of the diff view's own badges.
+ */
+export function NumberBadge({
+  number,
+  resolved,
+  colours = "theme",
+  className,
+}: {
+  number: number;
+  resolved: boolean;
+  colours?: "page" | "theme";
+  className?: string;
+}) {
+  const page: CSSProperties | undefined =
+    colours === "page"
+      ? resolved
+        ? { backgroundColor: ANNOTATOR_COLOURS.success, color: ANNOTATOR_COLOURS.onSuccess }
+        : { backgroundColor: ANNOTATOR_COLOURS.accent, color: ANNOTATOR_COLOURS.onAccent }
+      : undefined;
   return (
     <span
       className={cn(
         "flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full px-1 text-xs font-semibold leading-none tabular-nums",
-        resolved ? "bg-(--color-success) text-(--color-on-success)" : "bg-(--color-accent) text-(--color-on-accent)",
+        !page && (resolved ? "bg-(--color-success) text-(--color-on-success)" : "bg-(--color-accent) text-(--color-on-accent)"),
         className,
       )}
+      style={page}
     >
       {resolved ? <Check className="size-2.5" strokeWidth={3} /> : number}
     </span>
@@ -405,7 +428,7 @@ export function AnnotationCard({
         onClose();
       }}
     >
-      <CardHeader badge={draft.number !== null ? <NumberBadge number={draft.number} resolved={false} /> : null} title={draft.title} onClose={onClose} />
+      <CardHeader badge={draft.number !== null ? <NumberBadge number={draft.number} resolved={false} colours="page" /> : null} title={draft.title} onClose={onClose} />
       <GrowingInput
         inputRef={inputRef}
         value={draft.comment}
@@ -550,7 +573,7 @@ export function AnnotationDetailCard({
         onClose();
       }}
     >
-      <CardHeader badge={<NumberBadge number={annotation.number} resolved={resolved} />} title={title} onClose={onClose} />
+      <CardHeader badge={<NumberBadge number={annotation.number} resolved={resolved} colours="page" />} title={title} onClose={onClose} />
       <p className={cn("whitespace-pre-wrap break-words text-base", resolved ? "text-muted-foreground" : "text-foreground")}>{annotation.comment}</p>
       {missing ? (
         <p className="flex items-center gap-1 text-sm text-warning">
@@ -915,7 +938,7 @@ function PendingRow({
         if (event.key === "Enter") onSelect();
       }}
     >
-      <NumberBadge number={annotation.number} resolved={false} className="mt-0.5" />
+      <NumberBadge number={annotation.number} resolved={false} colours="page" className="mt-0.5" />
       <div className="min-w-0 flex-1">
         <p className="line-clamp-3 whitespace-pre-wrap break-words text-base text-foreground">{annotation.comment}</p>
         <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
@@ -988,7 +1011,7 @@ function ResolvedRow({
       onPointerLeave={() => onHover(null)}
     >
       <div className="flex cursor-pointer items-start gap-2" onClick={onSelect}>
-        <NumberBadge number={annotation.number} resolved className="mt-0.5" />
+        <NumberBadge number={annotation.number} resolved colours="page" className="mt-0.5" />
         <div className="min-w-0 flex-1">
           {/* The agent's note leads: it is what the user reviews. */}
           <p className="line-clamp-3 whitespace-pre-wrap break-words text-base text-foreground">{annotation.resolutionNote || "（没有留下说明）"}</p>
