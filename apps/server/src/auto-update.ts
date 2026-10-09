@@ -162,18 +162,32 @@ export class AutoUpdater {
     if (d) this.maybeUpgrade(d);
   }
 
+  /** The latest stable tag and its manifest, from the release mirror when configured, else GitHub. */
+  private async latestManifest(): Promise<{ tag: string; manifest: unknown } | undefined> {
+    const mirror = config.autoUpdateMirrorBase;
+    if (mirror) {
+      const pointer = await fetchJson(`${mirror}/releases/latest.json`);
+      const tag = typeof pointer?.version === "string" ? pointer.version : null;
+      if (!tag) return undefined;
+      return { tag, manifest: await fetchJson(`${mirror}/releases/${encodeURIComponent(tag)}/manifest.json`) };
+    }
+    const github = await fetchJson(`${config.autoUpdateApiBase}/repos/${config.autoUpdateRepo}/releases/latest`);
+    const tag = typeof github?.tag_name === "string" ? github.tag_name : null;
+    if (!tag) return undefined;
+    const assets: { name: string; browser_download_url: string }[] = Array.isArray(github.assets) ? github.assets : [];
+    const manifestAsset = assets.find((a) => a.name === "manifest.json");
+    if (!manifestAsset) {
+      log.warn("release 缺少 manifest.json 资产", { tag });
+      return undefined;
+    }
+    return { tag, manifest: await fetchJson(manifestAsset.browser_download_url) };
+  }
+
   private async pollOnce(): Promise<void> {
     try {
-      const github = await fetchJson(`${config.autoUpdateApiBase}/repos/${config.autoUpdateRepo}/releases/latest`);
-      const tag = typeof github?.tag_name === "string" ? github.tag_name : null;
-      if (!tag) return;
-      const assets: { name: string; browser_download_url: string }[] = Array.isArray(github.assets) ? github.assets : [];
-      const manifestAsset = assets.find((a) => a.name === "manifest.json");
-      if (!manifestAsset) {
-        log.warn("release 缺少 manifest.json 资产", { tag });
-        return;
-      }
-      const manifest = await fetchJson(manifestAsset.browser_download_url);
+      const latest = await this.latestManifest();
+      if (!latest) return;
+      const { tag, manifest } = latest;
       const release = parseManifestRelease(manifest, tag);
       if (!release) {
         log.warn("manifest.json release statement 字段缺失或与 release tag 不一致", { tag });
@@ -182,7 +196,7 @@ export class AutoUpdater {
       this.latest = { version: tag, component: release.component, workers: release.entries };
       log.info("latest release polled", { version: tag, component: release.component, targets: Object.keys(release.entries) });
     } catch (err) {
-      log.warn("轮询 GitHub release 失败", { err: err instanceof Error ? err.message : String(err) });
+      log.warn("轮询最新 release 失败", { source: config.autoUpdateMirrorBase || "github", err: err instanceof Error ? err.message : String(err) });
       return;
     }
     this.sweep();
@@ -253,7 +267,7 @@ export class AutoUpdater {
 }
 
 async function fetchJson(url: string): Promise<any> {
-  const res = await fetch(url, { headers: { "user-agent": "coflux-server", accept: "application/vnd.github+json" } });
+  const res = await fetch(url, { headers: { "user-agent": "coflux-server", accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(30_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   return res.json();
 }

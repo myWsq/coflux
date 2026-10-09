@@ -164,7 +164,7 @@ gh variable set R2_BUCKET --env release-signing --body coflux-releases
 
 **How clients choose.**
 
-- **Runtime/transport pushes**: the server still discovers releases by polling GitHub (prod-jp is outside China) and pushes the manifest's R2 URLs to launcher daemons.
+- **Runtime/transport pushes**: with `COFLUX_AUTOUPDATE_MIRROR_BASE=https://dl.coflux.dev` (production since 2026-10-09, when the centre moved to mainland China and `api.github.com` became unreliable from it), the server discovers releases from `releases/latest.json` and `releases/<tag>/manifest.json`; without it, it polls GitHub's `/releases/latest`. Either way it pushes the manifest's R2 URLs to launcher daemons. The pointer is written only after the GitHub Release exists, so the mirror never names a release GitHub does not have.
 - **`cofluxd up` / `cofluxd update`** without `--version` read `https://dl.coflux.dev/releases/latest.json` and install that tag from the mirror; nothing calls `api.github.com`, and `latest` means latest stable. With `--version X`, cofluxd installs from the mirror only when the pointer names X, and otherwise (an older version, a prerelease, or an unreadable pointer) from GitHub Releases. There is no mirror-then-GitHub fallback on error: an R2 outage stays visible. `COFLUX_RELEASE_DOWNLOAD_BASE` overrides the mirror base and `COFLUX_RELEASE_ARCHIVE_BASE` the GitHub one.
 - **Desktop auto-update**: new builds read `desktop/latest-mac.yml`; older installs read the `desktop-updates` branch. Both feeds point at the R2 zip.
 
