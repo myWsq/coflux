@@ -84,21 +84,21 @@ Daemons run on users' machines, not as part of these server roles. prod-bj also 
 
 ## Domains and routing
 
-**The main source of confusion: coflux.dev mixes proxied and DNS-only Cloudflare records.** Only wildcard routing remains behind Cloudflare's proxy.
+**Since 2026-10-09 the centre's public names are proxied by Cloudflare straight to prod-jp; owo-jp-gw is no longer in the path.** On 2026-10-08 prod-jp lost all networking for about a day (no reboot, no data loss), and when it came back owo-jp-gw's addresses (`45.94.40.29`, `45.94.40.233`) were unreachable from mainland networks on every port while still reachable from abroad. Mainland daemons and clients could not reach the centre, so ingress moved to Cloudflare's proxy. Mainland TTFB through Cloudflare is about 1.7s, versus 0.27s through owo; that is the price of not depending on one blockable address. Do not point these names at prod-jp DNS-only either: that exposes the origin address to the same blocking.
 
 | Domain | A record | Cloudflare proxy | Destination | Certificate |
 | --- | --- | --- | --- | --- |
-| `coflux.dev` | 45.94.40.233 | DNS-only | owo directly returns 301 to app | owo, HTTP-01 |
-| `api.coflux.dev` | 45.94.40.233 | DNS-only | owo → prod-jp:8787 | owo, HTTP-01 |
-| `app.coflux.dev` | 45.94.40.233 | DNS-only | owo → prod-jp SPA + `/client` WS | owo, HTTP-01 |
-| `m.coflux.dev` | 45.94.40.233 | DNS-only | owo → prod-jp frozen mobile | owo, HTTP-01 |
+| `coflux.dev` | 82.40.34.37 | **Proxied** | prod-jp returns 301 to app | prod-jp, **DNS-01** |
+| `api.coflux.dev` | 82.40.34.37 | **Proxied** | prod-jp:8787 | prod-jp, **DNS-01** (served by the `*.coflux.dev` certificate) |
+| `app.coflux.dev` | 82.40.34.37 | **Proxied** | prod-jp SPA + `/client` WS | prod-jp, **DNS-01** (served by the `*.coflux.dev` certificate) |
+| `m.coflux.dev` | 82.40.34.37 | **Proxied** | prod-jp frozen mobile | prod-jp, **DNS-01** |
 | `*.coflux.dev` | 82.40.34.37 | **Proxied** | Direct to prod-jp port previews | prod-jp, **DNS-01** |
 | `www.coflux.dev` | 82.40.34.37 | Proxied | No dedicated site; matches preview block | — |
 | `relay.coflux.dev`<br>`relay-jp.coflux.dev` | 45.94.40.233 | DNS-only | owo relay:8790 | owo, HTTP-01 |
 | `relay-bj.coflux.yourantiandi.com` | 49.232.53.23 | DNSPod wildcard | prod-bj relay:8790 | prod-bj |
 | `dl.coflux.dev` | R2 custom domain (managed by Cloudflare) | **Proxied** | R2 bucket `coflux-releases`: the release download mirror, latest stable only | Cloudflare edge (min TLS 1.2) |
 
-`api`/`app`/`m` originally had **no dedicated records**, relying on the wildcard. Plan 089 created explicit DNS-only records on 2026-09-04; explicit records override wildcards. The wildcard stayed proxied, providing rollback: delete those three records and the wildcard takes over.
+`api`/`app`/`m` originally had **no dedicated records**, relying on the wildcard. Plan 089 created explicit DNS-only records pointing at owo-jp-gw on 2026-09-04; on 2026-10-09 the same records were repointed to prod-jp with the proxy on. Switching back to owo is the reverse: set the four records to `45.94.40.233` DNS-only and check owo's Caddy still proxies to prod-jp. Before doing so, confirm owo is reachable from prod-bj (`nc -z 45.94.40.233 443`).
 
 `dl.coflux.dev` is the R2 bucket's custom domain, not a DNS record we manage; like any explicit record it overrides the proxied wildcard for that one name. A zone Cache Rule (`http.host eq "dl.coflux.dev"`) makes every response cache-eligible and takes edge and browser TTLs from the origin `Cache-Control` that the release workflow sets; without it, extension-less binaries, `.json` and `.yml` would not be cached. The bucket's `r2.dev` URL is disabled. It is part of the product contract: stable manifests, desktop builds and cofluxd read it. See [RELEASING.md](RELEASING.md#r2-download-mirror-dlcofluxdev).
 
@@ -116,11 +116,13 @@ Connect with `ssh root@prod-jp`. Debian 13, four cores, 7.8GB. **This host is sh
 - Service: systemd `coflux-server`, running `node --import tsx apps/server/src/index.ts`, bound only to `127.0.0.1:8787`.
 - Database: apt-installed PostgreSQL 17, listening only on `127.0.0.1`, database and role both named `coflux`. Daily `/etc/cron.daily/coflux-pg-backup` writes custom-format (`-Fc`) backups to `/var/backups/coflux/`, retaining 14.
 - Authentication: `COFLUX_AUTH=password`, self-managed users/scrypt; Supabase is retired. Create users with `DATABASE_URL=... node --import tsx scripts/create-user.mjs --email .. --password ..`.
-- The four coflux sites—apex/api/app/m—use **`tls internal`**, since public ACME cannot validate this backend after DNS moves to ingress. `*.coflux.dev` still uses the Cloudflare DNS-01 plugin; **leave it unchanged**.
+- The four coflux sites—apex/api/app/m—use the Cloudflare **DNS-01** plugin, like `*.coflux.dev` (since 2026-10-09; between 2026-09-04 and then they used `tls internal` behind owo). DNS-01 issuance does not depend on where the records point, so the origin keeps publicly valid certificates whichever ingress is in front. Backup before the change: `/etc/caddy/Caddyfile.bak-cf-ingress-20261009_112923`.
 - **DERP admission** (2026-09-18): `COFLUX_DERP_ADMISSION_TOKEN` in `server.env`, and `api.coflux.dev` carries a `handle /derp-verify*` route to the loopback admission listener on 8793. The relay authenticates with Basic credentials built from that token; the secret is never in a path or a log. This replaced an SSH tunnel from prod-bj — see the outage note under prod-bj. **When this host's address changes, nothing here needs editing**, which is the whole point of the change.
 - Version 1.0.0 account CLI uses central `/api/client/login` and `/api/client/command`. Desktop and standalone CLI both depend on them; deploy the center before updating 1.0.0 clients. MCP/dedicated OAuth routes are removed; old tables remain through historical migrations. `COFLUX_PUBLIC_URL=https://api.coflux.dev` still serves device authorization and preview pages. Whole-site API proxying needs no Caddy changes.
 
-## owo-jp-gw: public ingress and JP relay
+## owo-jp-gw: former public ingress and JP relay
+
+**Out of the coflux path since 2026-10-09** (see *Domains and routing*); its Caddy sites are left in place for a switch back. It is unreachable from mainland networks, so `ssh prod-jp` jumps through prod-bj instead of owo.
 
 Connect with `ssh owo-jp-gw`. Debian 13, two cores, same datacenter as prod-jp with 1.4ms RTT. **Nine other sites share this host**, including `zakki.owodns.com`, `cchost.cc`, `open.owo.nz`, and `pir.bannin.app`. Caddy changes affect them too.
 
@@ -231,7 +233,7 @@ The relay key locations above belong to the pre-migration inventory. Native DERP
 
 ## Rollback
 
-**Ingress routing**, subject to roughly 300-second DNS TTL rather than near-instant proxied origin changes: delete the `api`/`app`/`m` A records so the wildcard takes over, restore apex to `82.40.34.37` with proxying, then remove `tls internal` from prod-jp's four sites.
+**Ingress routing** (current: Cloudflare proxy → prod-jp, since 2026-10-09): the four origin sites carry DNS-01 certificates, so ingress changes are DNS-only. Edit the four A records with the zone token in prod-jp's `/etc/caddy/cloudflare.env` (run the API calls on prod-jp so the token never leaves it). Proxied origin changes apply almost at once; leaving proxied for DNS-only takes the roughly 300-second TTL, and Surge on the owner's Mac may need `POST /v1/dns/flush`.
 
 **Code**: check out the previous tag, reinstall dependencies, and restart server. Frozen web builds do not participate.
 
