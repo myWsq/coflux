@@ -82,9 +82,36 @@ Three machines, with one central instance—the agreed B7 product model in [OPEN
 
 Daemons run on users' machines, not as part of these server roles. prod-bj also hosts the owner's `VM-0-3-ubuntu` daemon, independently of its relay role.
 
+## Current topology: the centre on coflux-sh (since 2026-10-09 20:47)
+
+The centre, its database and the DERP/STUN node run on one Tencent Cloud host in Shanghai. prod-jp only forwards the `coflux.dev` names to it; prod-bj no longer carries coflux traffic.
+
+```text
+  mainland devices ──(direct)──> api.coflux.yourantiandi.com ┐
+                                                             ├─> coflux-sh (Shanghai, 49.234.42.193)
+  coflux.dev clients ─> Cloudflare ─> prod-jp Caddy ─────────┘    Caddy :443 → coflux-server 127.0.0.1:8787
+                        (forwarder: SNI api.coflux.yourantiandi.com,  PostgreSQL 17 127.0.0.1:5432
+                         Host kept, XFF = CF-Connecting-IP)           derper 127.0.0.1:8444 (derp.coflux.yourantiandi.com)
+                                                                      stund UDP 3479
+```
+
+**Why `coflux.dev` cannot point at this host.** Tencent Cloud blocks names without a mainland ICP filing on 80/443: once it notices one, HTTP gets a 302 to `dnspod.qcloud.com/static/webblock.html?d=<name>` and HTTPS is reset after the ClientHello. It is reactive (the first requests on 2026-10-09 went through, then the block appeared) and it applies to Cloudflare's origin pulls too, which surface as **525**. Traffic from inside Tencent Cloud (prod-bj) is not filtered, so **prod-bj is not a valid observation point for this block**; test from a residential or foreign machine. The filter sees only SNI/Host in the clear, so a forwarder that dials with SNI on the registered name and sends the original `Host` passes, and the coflux.dev site blocks on coflux-sh route it as before. `yourantiandi.com` is filed under the same Tencent account (`app-id` 1301555531), which is what makes its names servable here.
+
+- **Host**: `ssh root@49.234.42.193` (local alias `coflux-sh`). Debian 13, 2 cores, 1.9GB plus a 2GB `/swapfile`, zone `ap-shanghai-4`. Security group: TCP 22/80/443, **UDP 3479**.
+- **DNS** (DNSPod): `api.coflux.yourantiandi.com` and `derp.coflux.yourantiandi.com` are explicit A records to 49.234.42.193; `*.yourantiandi.com` still points at prod-bj. Certificates for both are Let's Encrypt via Caddy (HTTP-01/TLS-ALPN). The coflux.dev certificates were copied from prod-jp and renew by DNS-01 with the same zone token.
+- **Centre**: same layout as prod-jp had — `/opt/coflux` detached at a tag, systemd `coflux-server` with `/etc/coflux/server.env` and `tailcat.env`, frozen web in `/opt/coflux-web-frozen`, daily `/etc/cron.daily/coflux-pg-backup`. `COFLUX_PUBLIC_URL` and `COFLUX_DAEMON_URL` use `api.coflux.yourantiandi.com`, so authorization, login and preview-gate pages are served on the fast name. `COFLUX_EXECUTOR_KEYS` is the original value; a new one would orphan every stored executor credential.
+- **Client addresses**: Caddy here trusts only prod-jp (`trusted_proxies static 82.40.34.37/32`), and prod-jp sets `X-Forwarded-For` from `CF-Connecting-IP`, so login rate limits still see the real client. Without both, every forwarded user would share prod-jp's budget.
+- **DERP**: region 902 `private-sh`, node `derp.coflux.yourantiandi.com`, STUNPort 3479. `coflux-derp.service` reads the Caddy-managed certificate through links in `/var/lib/coflux-derp/certs`; `coflux-derp-cert.path` restarts it on renewal. Admission is loopback (`http://derp:<token>@127.0.0.1:8793/derp-verify` in `/etc/coflux-derp/admission.env`, 0600), so it no longer depends on any public route. Caddy's unit runs without `--environ`, which would print the Cloudflare token into the journal.
+- **Latency**: mainland → `api.coflux.yourantiandi.com` TTFB about 0.1s; through Cloudflare and prod-jp about 1.9s. Shanghai ↔ prod-jp RTT is 40–60ms but loses SYNs at evening peak (up to ~18% of new connections take a 1s retransmit), so the forwarder is a compatibility path, not the target.
+- **Retired**: prod-jp's `coflux-server` is stopped and disabled, its database left as of the cutover dump `/var/backups/coflux/coflux-cutover-sh-20261009-204739.dump`. prod-bj's `coflux-derp`/`coflux-stun` are no longer advertised.
+
+**Rollback**: dump coflux-sh's database and restore it on prod-jp first (anything written since the cutover exists only here), then `cp /etc/caddy/Caddyfile.bak-pre-sh-forwarder-20261009_204726 /etc/caddy/Caddyfile` on prod-jp, reload Caddy, re-enable and start prod-jp's `coflux-server` with its old `tailcat.env` (region 901 on prod-bj), and stop coflux-sh's server.
+
+The sections below describe the hosts as they were before this move, with prod-jp now acting only as the forwarder.
+
 ## Domains and routing
 
-**Since 2026-10-09 the centre's public names are proxied by Cloudflare straight to prod-jp; owo-jp-gw is no longer in the path.** On 2026-10-08 prod-jp lost all networking for about a day (no reboot, no data loss), and when it came back owo-jp-gw's addresses (`45.94.40.29`, `45.94.40.233`) were unreachable from mainland networks on every port while still reachable from abroad. Mainland daemons and clients could not reach the centre, so ingress moved to Cloudflare's proxy. Mainland TTFB through Cloudflare is about 1.7s, versus 0.27s through owo; that is the price of not depending on one blockable address. Do not point these names at prod-jp DNS-only either: that exposes the origin address to the same blocking.
+**Since 2026-10-09 20:47 the coflux.dev names still resolve to prod-jp through Cloudflare, but prod-jp forwards them to coflux-sh (see above).** **Earlier on 2026-10-09 the centre's public names are proxied by Cloudflare straight to prod-jp; owo-jp-gw is no longer in the path.** On 2026-10-08 prod-jp lost all networking for about a day (no reboot, no data loss), and when it came back owo-jp-gw's addresses (`45.94.40.29`, `45.94.40.233`) were unreachable from mainland networks on every port while still reachable from abroad. Mainland daemons and clients could not reach the centre, so ingress moved to Cloudflare's proxy. Mainland TTFB through Cloudflare is about 1.7s, versus 0.27s through owo; that is the price of not depending on one blockable address. Do not point these names at prod-jp DNS-only either: that exposes the origin address to the same blocking.
 
 | Domain | A record | Cloudflare proxy | Destination | Certificate |
 | --- | --- | --- | --- | --- |
@@ -143,10 +170,12 @@ This is also the mainland observation point. Test routing from here: local resid
 
 The center runs a detached checkout of a release tag. Take a database backup before a deployment carrying a schema migration, since the daily cron backup can be hours old:
 
+The centre host is coflux-sh (`root@49.234.42.193`) since 2026-10-09; the commands are unchanged otherwise. Fetching from GitHub and npm works from there but is slower than from Japan.
+
 ```sh
-ssh root@prod-jp 'sudo -u postgres pg_dump -Fc -d coflux > /var/backups/coflux/coflux-predeploy-<tag>-$(date +%Y%m%d-%H%M%S).dump'
-ssh root@prod-jp 'cd /opt/coflux && git fetch --tags origin; git checkout <tag>'
-ssh root@prod-jp 'cd /opt/coflux && pnpm install --frozen-lockfile && systemctl restart coflux-server'
+ssh root@49.234.42.193 'sudo -u postgres pg_dump -Fc -d coflux > /var/backups/coflux/coflux-predeploy-<tag>-$(date +%Y%m%d-%H%M%S).dump'
+ssh root@49.234.42.193 'cd /opt/coflux && git fetch --tags origin; git checkout <tag>'
+ssh root@49.234.42.193 'cd /opt/coflux && pnpm install --frozen-lockfile && systemctl restart coflux-server'
 ```
 
 Run the steps separately rather than chaining them with `&&`. Checking out and installing leaves the running service untouched until the restart, so a failure there costs nothing; and `git fetch --tags` exits non-zero whenever an old tag on this host would be clobbered, which silently skips a chained checkout. Confirm afterwards with `git log --oneline -1`, `systemctl is-active coflux-server`, `curl -sS http://127.0.0.1:8787/health`, and the boot lines in `journalctl -u coflux-server`. Migrations run at boot inside one transaction under an advisory lock; `SELECT version, name FROM coflux.schema_migrations ORDER BY version DESC` shows what applied.
@@ -224,6 +253,8 @@ Record only locations/types, never values.
 
 | Location | Contents |
 | --- | --- |
+| coflux-sh `/etc/coflux-derp/admission.env` (600) | DERP verify URL carrying `COFLUX_DERP_ADMISSION_TOKEN` as Basic credentials |
+| coflux-sh: the prod-jp rows below, at the same paths | Copied unchanged at the 2026-10-09 cutover (`server.env` with the two URLs above changed). prod-jp keeps its copies; its `cloudflare.env` is still what the forwarder's DNS-01 renewals use. |
 | prod-jp `/etc/coflux/server.env` (600) | `DATABASE_URL` with database password; rendezvous signing seed `COFLUX_RELAY_SIGNING_KEY`; when provider sign-in is enabled, `COFLUX_AUTH_SECRET` and the provider client secrets (`COFLUX_GITHUB_CLIENT_SECRET`, `COFLUX_GOOGLE_CLIENT_SECRET`). Required non-secret settings: `COFLUX_PUBLIC_URL=https://api.coflux.dev` and `COFLUX_INBOUND_QUEUE_MAX_MESSAGES=1024`. |
 | prod-jp `/etc/coflux/pg-coflux.pass` (600) | PostgreSQL role password |
 | prod-jp `/etc/caddy/cloudflare.env` (600) | Cloudflare API token with **DNS edit permission only for the coflux.dev zone**. Reading zone settings such as SSL mode returns `9109 Unauthorized`. |
