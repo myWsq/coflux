@@ -32,7 +32,9 @@ import { executorRuntime, plistXml, ptydPlistXml, ptydSystemdUnit, systemdUnit, 
 import { bold, duration, error as printError, fail, info, step, success, table, warn } from "./output.mjs";
 
 // The public server; self-hosted servers pass --server.
-const DEFAULT_SERVER = "wss://api.coflux.dev/daemon";
+const DEFAULT_SERVER = "wss://api.coflux.yourantiandi.com/daemon";
+// The public server's address before it moved to its ICP-registered name; a saved copy means the default.
+const LEGACY_DEFAULT_SERVER = "wss://api.coflux.dev/daemon";
 
 const REPO = "myWsq/coflux";
 // Release downloads route by version, never by failure (plan 20260930-r2-download-mirror): the mirror
@@ -892,10 +894,14 @@ function validateKey(raw) {
 function resolveSettings(v) {
   const s = readSettings();
   return {
-    serverUrl: v.server || s.serverUrl || DEFAULT_SERVER,
+    serverUrl: currentServer(v.server || s.serverUrl || DEFAULT_SERVER),
     deviceName: v.name || s.deviceName || hostname(),
     shell: v.shell || s.shell,
   };
+}
+
+function currentServer(serverUrl) {
+  return serverUrl === LEGACY_DEFAULT_SERVER ? DEFAULT_SERVER : serverUrl;
 }
 
 function noticeServer(serverUrl) {

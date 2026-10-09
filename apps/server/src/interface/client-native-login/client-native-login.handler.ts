@@ -1,5 +1,5 @@
 import { RavenContext, withSchema } from "@raven.js/core";
-import { config } from "../../config.js";
+import { config, publicUrlFor } from "../../config.js";
 import { HubState } from "../../plugins/hub.plugin.js";
 import { REMOTE_ADDRESS_HEADER } from "../../transport.js";
 import { ClientAuthConfigContract, ClientLoginExchangeContract, ClientLoginRequestContract } from "./client-native-login.contract.js";
@@ -24,7 +24,7 @@ export const ClientLoginRequestHandler = withSchema(ClientLoginRequestContract.s
     redirect: body.redirect === "loopback" ? { kind: "loopback", port: body.port! } : { kind: "paste" },
     codeChallenge: body.codeChallenge,
     state: body.state,
-  });
+  }, publicUrlFor(new URL(RavenContext.getOrFailed().request.url).host));
   return reply(result, result.ok ? 200 : 400);
 });
 

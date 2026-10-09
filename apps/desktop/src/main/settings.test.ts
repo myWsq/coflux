@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DEFAULT_SERVER_URL, isValidServerUrl, resolveServerUrl } from "./settings";
+import { DEFAULT_SERVER_URL, LEGACY_DEFAULT_SERVER_URL, isValidServerUrl, resolveServerUrl } from "./settings";
 
 test("优先级：--server > COFLUX_SERVER_URL > settings.json > 默认", () => {
   const env = { COFLUX_SERVER_URL: "wss://env.example/client" };
   assert.equal(resolveServerUrl({ argv: ["--server=wss://cli.example/client"], env, fileServerUrl: "wss://file.example/client", packaged: true }), "wss://cli.example/client");
   assert.equal(resolveServerUrl({ argv: [], env, fileServerUrl: "wss://file.example/client", packaged: true }), "wss://env.example/client");
   assert.equal(resolveServerUrl({ argv: [], env: {}, fileServerUrl: "wss://file.example/client", packaged: true }), "wss://file.example/client");
+});
+
+test("旧默认地址（api.coflux.dev）映射到新默认地址，其余地址原样保留", () => {
+  assert.equal(resolveServerUrl({ argv: [], env: {}, fileServerUrl: LEGACY_DEFAULT_SERVER_URL, packaged: true }), DEFAULT_SERVER_URL);
+  assert.equal(resolveServerUrl({ argv: [], env: {}, fileServerUrl: "wss://api.coflux.dev/other", packaged: true }), "wss://api.coflux.dev/other");
 });
 
 test("非法值跳过、落到下一级：http 不是 WS 端点，空串与乱码都不算", () => {

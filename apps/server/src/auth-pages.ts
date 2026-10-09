@@ -29,7 +29,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createLogger } from "@coflux/core";
 import type { AccountId } from "@coflux/protocol";
-import { config } from "./config.js";
+import { config, publicUrlFor } from "./config.js";
 import { genToken } from "./secrets.js";
 import { parseCookies, parseProxyRedirect } from "./proxy.js";
 import type { CredentialCheck, DeviceAuthorizeOutcome, PendingDeviceInfo, ProxyAuthOutcome } from "./hub.js";
@@ -478,7 +478,6 @@ const PROVIDER_UNFINISHED = "登录未完成，请重试";
 export class AuthPages {
   readonly sessions: PageSessionStore;
   private readonly secure: boolean;
-  private readonly publicOrigin: string;
 
   constructor(
     private readonly host: AuthPagesHost,
@@ -486,7 +485,6 @@ export class AuthPages {
   ) {
     this.sessions = sessions;
     this.secure = config.publicUrl.startsWith("https:");
-    this.publicOrigin = new URL(config.publicUrl).origin;
   }
 
   /* ------------------------------ 设备授权 ------------------------------ */
@@ -774,7 +772,8 @@ export class AuthPages {
 
   /** POST 公共前置：来源纵深校验 → 有界读表单 → 取当前会话（可能没有）。csrf 由调用方按会话/匿名 nonce 核对。 */
   private async guardPost(req: PageRequest, flow: PageFlow): Promise<GuardedPost> {
-    if (crossSiteRequest(req.request.headers, this.publicOrigin)) {
+    // The page was served on the public base for this request's host, so that base is its own origin.
+    if (crossSiteRequest(req.request.headers, new URL(publicUrlFor(new URL(req.request.url).host)).origin)) {
       return { ok: false, response: htmlResponse(403, "请求被拒绝", renderMessage("请求被拒绝", "请求来源不合法，请回到原页面重试。")) };
     }
     const form = await readForm(req.request);

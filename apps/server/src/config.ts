@@ -35,23 +35,40 @@ function secret(name: string, devDefault: string, required = true): string {
 }
 
 /** 中心公网基址：只接受无凭证、无 query/fragment 的 http(s) 基址，去掉尾部斜杠后原样作 issuer。 */
-function publicUrl(): string {
-  const raw = process.env.COFLUX_PUBLIC_URL ?? `http://127.0.0.1:${int("COFLUX_PORT", DEFAULT_PORT)}`;
+function parsePublicUrl(raw: string, name: string): string {
   let parsed: URL;
   try {
     parsed = new URL(raw);
   } catch {
-    console.error(`[config] COFLUX_PUBLIC_URL 不是合法 URL：${raw}`);
+    console.error(`[config] ${name} 不是合法 URL：${raw}`);
     process.exit(1);
   }
   if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    console.error("[config] COFLUX_PUBLIC_URL 必须是无凭证、query、fragment 的 http/https 基址");
+    console.error(`[config] ${name} 必须是无凭证、query、fragment 的 http/https 基址`);
     process.exit(1);
   }
   return raw.replace(/\/+$/, "");
 }
 
-const PUBLIC_URL = publicUrl();
+const PUBLIC_URL = parsePublicUrl(process.env.COFLUX_PUBLIC_URL ?? `http://127.0.0.1:${int("COFLUX_PORT", DEFAULT_PORT)}`, "COFLUX_PUBLIC_URL");
+
+/**
+ * COFLUX_PUBLIC_URL_ALIASES: further base URLs, comma-separated, under which the same centre is reached.
+ * Native clients refuse a sign-in page on any origin other than the one they connected to, so pages and
+ * links handed to a client are built on the base whose host it used (see `publicUrlFor`).
+ */
+const PUBLIC_URL_ALIASES = (process.env.COFLUX_PUBLIC_URL_ALIASES ?? "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean)
+  .map((value) => parsePublicUrl(value, "COFLUX_PUBLIC_URL_ALIASES"));
+
+/** The public base whose host matches a request's Host header; COFLUX_PUBLIC_URL when none does. */
+export function publicUrlFor(host: string | null | undefined): string {
+  const wanted = host?.trim().toLowerCase();
+  if (wanted) for (const base of [PUBLIC_URL, ...PUBLIC_URL_ALIASES]) if (new URL(base).host === wanted) return base;
+  return PUBLIC_URL;
+}
 
 /**
  * Provider sign-in (GitHub / Google through Better Auth). A provider is enabled only in password mode
@@ -87,7 +104,7 @@ export const config = {
   accountId: "default",
   /** daemon 连接地址，展示在 web「添加设备」命令里；反代/公网部署时用 COFLUX_DAEMON_URL 覆盖 */
   daemonUrl: process.env.COFLUX_DAEMON_URL ?? `ws://127.0.0.1:${int("COFLUX_PORT", DEFAULT_PORT)}/daemon`,
-  /** 设备授权与端口预览的固定公网基址，不从请求头推导。 */
+  /** 设备授权与端口预览的主公网基址；页面与链接按请求 Host 在它和 COFLUX_PUBLIC_URL_ALIASES 之间选（publicUrlFor）。 */
   publicUrl: PUBLIC_URL,
 
   /** Enabled sign-in providers (password mode with credentials configured); empty = password form only. */
