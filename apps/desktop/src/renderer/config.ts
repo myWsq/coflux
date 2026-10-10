@@ -42,6 +42,12 @@ export const BROWSER_TABS_KEY = `coflux_browser_tabs:${SERVER_URL}`;
  */
 export const SCREEN_TABS_KEY = `coflux_screen_tabs:${SERVER_URL}`;
 /**
+ * The remote screen's resolution choice per device (plan 20261011-screen-resolution-presets): a
+ * fixed preset in points, or nothing for 「跟随窗口」. Scoped by server address like the screen tab
+ * records — device ids mean nothing on another server.
+ */
+export const SCREEN_RESOLUTIONS_KEY = `coflux_screen_resolutions:${SERVER_URL}`;
+/**
  * File tabs' records (plan 20261001-terminal-file-tab): per tab, its workspace, the file's canonical
  * workspace-relative path and the line it was opened at. Scoped like the layouts that reference
  * them; never synced to the account.

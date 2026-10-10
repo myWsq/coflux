@@ -167,6 +167,7 @@ public final class ScreenHelper: HelperServerDelegate {
             startCaptureIfPossible(session)
         case .screenVideoCredit(let credit)?:
             guard let session, session.id == credit.sessionID, session.videoLane == lane else { return }
+            session.stats.creditGranted += Int(clamping: credit.bytes)
             session.credit.grant(Int(clamping: credit.bytes))
         case .screenKeyframeRequest(let request)?:
             guard let session, session.id == request.sessionID else { return }
@@ -418,7 +419,16 @@ public final class ScreenHelper: HelperServerDelegate {
         let tick = DispatchSource.makeTimerSource(queue: .main)
         tick.schedule(deadline: .now() + 1, repeating: 1)
         tick.setEventHandler { [weak self, weak session] in
-            guard let self, let session, self.session === session, let encoder = session.encoder else { return }
+            guard let self, let session, self.session === session else { return }
+            // One line every 30 s while streaming: enough to tell, after the fact, which stage a
+            // frozen picture stalled in (capture, credit, encoder, lane) without flooding the log.
+            session.ticks += 1
+            if session.ticks % 30 == 0, !session.paused {
+                let stats = session.stats
+                session.stats = PipelineStats()
+                self.log("stats 30s: captured \(stats.captured), no-credit \(stats.noCredit), encode \(stats.encodeCalls), encoded \(stats.encoded), sent \(stats.sent) (\(stats.sentBytes) B), credit back \(stats.creditGranted) B; available \(session.credit.available) B, outstanding \(session.credit.outstanding) B; capture \(session.capture.running ? "on" : "off"), paused \(session.paused), video lane \(session.videoLane != nil), display ready \(session.displayReady)")
+            }
+            guard let encoder = session.encoder else { return }
             let dropped = session.credit.droppedFrames - session.droppedAtLastTick
             session.droppedAtLastTick = session.credit.droppedFrames
             if session.bitrate.tick(droppedFrames: dropped, outstanding: session.credit.outstanding, window: session.window) {
@@ -451,17 +461,21 @@ public final class ScreenHelper: HelperServerDelegate {
                     completion(HelperError.display("virtual display did not come online (displays asleep?)"))
                     return
                 }
-                do {
-                    try DisplayConfiguration.selectMode(geometry, on: displayID)
-                    try DisplayConfiguration.mirrorAll(onto: displayID)
-                } catch {
+                let fail: (Error) -> Void = { error in
                     session.displayReady = false
                     completion(error)
-                    return
                 }
-                session.displayReady = true
-                session.lastError = nil
-                completion(nil)
+                DisplayConfiguration.settle({ try DisplayConfiguration.selectMode(geometry, on: displayID) }) { [weak self] error in
+                    guard let self, self.session === session else { return }
+                    if let error { return fail(error) }
+                    DisplayConfiguration.settle({ try DisplayConfiguration.mirrorAll(onto: displayID) }) { [weak self] error in
+                        guard let self, self.session === session else { return }
+                        if let error { return fail(error) }
+                        session.displayReady = true
+                        session.lastError = nil
+                        completion(nil)
+                    }
+                }
             }
         }
     }
@@ -524,15 +538,19 @@ public final class ScreenHelper: HelperServerDelegate {
     }
 
     private func captured(_ sample: CMSampleBuffer, _ session: Session) {
+        session.stats.captured += 1
         guard let encoder = session.encoder, session.videoLane != nil, !session.paused else { return }
         guard session.credit.shouldEncode else {
+            session.stats.noCredit += 1
             session.credit.requireKeyframe()
             return
         }
+        session.stats.encodeCalls += 1
         encoder.encode(sample, forceKeyframe: session.credit.needsKeyframe)
     }
 
     private func encoded(_ output: VideoEncoder.Output, _ session: Session) {
+        session.stats.encoded += 1
         guard let lane = session.videoLane else { return }
         if session.credit.needsKeyframe && !output.keyframe {
             // A non-keyframe after a drop cannot be decoded: drop it too and keep asking.
@@ -540,6 +558,8 @@ public final class ScreenHelper: HelperServerDelegate {
             return
         }
         guard session.credit.trySend(bytes: output.data.count) else { return }
+        session.stats.sent += 1
+        session.stats.sentBytes += output.data.count
         session.frameSeq += 1
         let chunks = AnnexB.chunks(output.data, chunkBytes: Self.videoChunkBytes)
         for (index, chunk) in chunks.enumerated() {
@@ -728,6 +748,10 @@ final class Session {
     var bitrate = BitrateController(initialCredit: 2 * 1024 * 1024)
     var droppedAtLastTick = 0
     var bitrateTimer: DispatchSourceTimer?
+    /// Pipeline counters since the last stats line (see `wireSession`): what was captured, skipped
+    /// for lack of credit, handed to the encoder, encoded and sent.
+    var stats = PipelineStats()
+    var ticks = 0
     var captureStarting = false
     let capture = CaptureEngine()
     var encoder: VideoEncoder?
@@ -740,4 +764,14 @@ final class Session {
         self.controlLane = controlLane
         self.geometry = geometry
     }
+}
+
+struct PipelineStats {
+    var captured = 0
+    var noCredit = 0
+    var encodeCalls = 0
+    var encoded = 0
+    var sent = 0
+    var sentBytes = 0
+    var creditGranted = 0
 }

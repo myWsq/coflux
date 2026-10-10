@@ -35,14 +35,22 @@ coflux-runtime: crates/runtime/src/screen.rs                             per ses
   is required, so a hand-written literal cannot omit it); handles `directoryWorkspaceEnsure`.
 - **Desktop main** (`apps/desktop/src/main/screen-host.ts`): opens and owns the control and video
   lanes (`openOwned`, RPC scope) under an identity of the app run's own, bridges bytes to the page over
-  a `MessageChannelMain` port (structured clone, no per-frame ack loop), polls the local clipboard
+  a `MessageChannelMain` port (structured clone, no per-frame ack loop; the renderer → main direction
+  never puts an `ArrayBuffer` in the transfer list, because Electron 44.3.0 delivers a transferred
+  buffer to `MessagePortMain` as null, and sends each frame in a buffer of exactly its size;
+  main → renderer clones intact; dropped requests, failed lane opens and lane closes are logged to
+  `main.log`), polls the local clipboard
   while a visible session asks, writes it on the remote's changes, and calls
   `webContents.setIgnoreMenuShortcuts` while a picture has focus (probed on Electron 44.3.0: covers
   `role: quit`).
 - **Renderer**: `screen-tabs.ts` (records: workspace, device, stable remote session id),
   `screen-runtime.ts`, `screen-session.ts` (protocol, credit, WebCodecs `avc1.64001f` Annex B),
-  `screen-view.tsx` (status bar 直连/中继 + latency, 沉浸, 断开; states; input; cursor). The tab kind is
+  `screen-view.tsx` (status bar 直连/中继 + latency, resolution, 沉浸, 断开; states; input; cursor). The tab kind is
   registered in `terminal-layout.ts` (`SCREEN_TAB_PREFIX`, exempt from reconcile, not a task).
+- **Resolution**: the status bar's dropdown (`screen-resolution.ts`) offers 「跟随窗口」 (default: the
+  remote display follows the tab 1:1 in points) or a fixed size in points (1280×800 … 1920×1080) at
+  the local screen's scale, sent through `ScreenSessionResize` at once; on a fixed size resizing the tab
+  or immersive mode only scales the picture. Remembered per (server, device) on this Mac.
 
 ## Budgets
 

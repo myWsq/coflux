@@ -3,10 +3,23 @@ import { useStore } from "zustand";
 import { Cloud, Expand, LoaderCircle, Lock, Monitor, ShieldAlert, Shrink, Unplug, X, Zap } from "lucide-react";
 
 import { Button } from "@astryxdesign/core/Button";
+import { DropdownMenu, DropdownMenuRadioGroup, DropdownMenuRadioItem } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import type { CofluxClient } from "@coflux/client";
-import { desktop } from "@/config";
+import { desktop, SCREEN_RESOLUTIONS_KEY } from "@/config";
 import { cn } from "@/lib/utils";
+import { NO_DRAG_REGION_STYLE } from "@/components/workbench/drag-region";
+import {
+  parseScreenResolution,
+  readScreenResolution,
+  SCREEN_RESOLUTION_FOLLOW,
+  SCREEN_RESOLUTION_PRESETS,
+  screenResolutionLabel,
+  screenResolutionValue,
+  writeScreenResolution,
+  type ScreenResolution,
+  type ScreenResolutionStore,
+} from "@/components/workbench/screen-resolution";
 import { modifierBits, type ScreenSession, type ScreenSessionState } from "@/components/workbench/screen-session";
 import type { ScreenRuntime } from "@/components/workbench/screen-runtime";
 
@@ -16,8 +29,10 @@ import type { ScreenRuntime } from "@/components/workbench/screen-runtime";
  * The layer mirrors the browser views: it covers the main area, holds one view per screen tab of
  * every mounted workspace on its group's body rectangle, keeps hidden ones mounted (their session
  * stays paused on the remote, the virtual display in place) and never re-keys a view. The picture
- * is a canvas the session draws decoded frames into; the remote display follows the view's size
- * 1:1 in points, so the canvas only scales transiently while a resize is in flight.
+ * is a canvas the session draws decoded frames into. By default the remote display follows the
+ * view's size 1:1 in points, so the canvas only scales transiently while a resize is in flight; on a
+ * fixed resolution picked in the status bar (remembered per device) the picture is contained in the
+ * view and resizing it only scales the picture.
  *
  * Keyboard: while the picture has focus every key goes to the remote — ⌘W, ⌘T, ⌘Q, ⌘1–9, ⌘C/V
  * included. The page-level shortcut listener yields (use-global-shortcuts.ts) and main switches
@@ -53,6 +68,8 @@ type ScreenViewsProps = {
 };
 
 const STATUS_BAR_HEIGHT = 28;
+/** The resolution choice per device, on this machine (screen-resolution.ts). */
+const SCREEN_RESOLUTION_STORE: ScreenResolutionStore = { storage: localStorage, key: SCREEN_RESOLUTIONS_KEY };
 /** The reserved combination: ⌃⌥⌘F toggles immersive mode and never reaches the remote. */
 export function isImmersiveToggle(event: { code: string; ctrlKey: boolean; altKey: boolean; metaKey: boolean; shiftKey: boolean }): boolean {
   return event.code === "KeyF" && event.ctrlKey && event.altKey && event.metaKey && !event.shiftKey;
@@ -97,13 +114,19 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
   const swallowKeyUp = useRef(new Set<string>());
   const [hoverTop, setHoverTop] = useState(false);
   const [pictureFocused, setPictureFocused] = useState(false);
+  const [resolutionMenuOpen, setResolutionMenuOpen] = useState(false);
 
-  // The session lives as long as the view; closing the tab ends it (runtime.removeTab).
+  // The session lives as long as the view; closing the tab ends it (runtime.removeTab). It starts at
+  // the device's remembered resolution.
   useEffect(() => {
-    const created = runtime.sessionFor(tabId, { deviceOnline: () => deviceOnlineRef.current, transportMode: () => transportModeRef.current });
+    const created = runtime.sessionFor(tabId, {
+      deviceOnline: () => deviceOnlineRef.current,
+      transportMode: () => transportModeRef.current,
+      resolution: readScreenResolution(SCREEN_RESOLUTION_STORE, daemonId),
+    });
     setSession(created);
     return () => runtime.release(tabId);
-  }, [runtime, tabId]);
+  }, [runtime, tabId, daemonId]);
 
   useEffect(() => runtime.register(tabId, { focus: () => pictureRef.current?.focus({ preventScroll: true }) }), [runtime, tabId]);
 
@@ -126,7 +149,8 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
     if (deviceOnline) retryIfWaiting();
   }, [deviceOnline]);
 
-  // The remote display follows the picture area's size, 1:1 in points.
+  // The remote display follows the picture area's size, 1:1 in points, unless a fixed resolution is
+  // chosen (the session then keeps the remote's size and only follows the local scale).
   useEffect(() => {
     const node = pictureRef.current;
     if (!node || !session) return;
@@ -254,11 +278,18 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
   const rttText = transport?.rttMs === undefined ? "" : ` · ${Math.round(transport.rttMs)}ms`;
   const phase = state?.phase ?? "connecting";
   const readOnly = phase === "streaming" && state?.permissions !== null && state?.permissions !== undefined && !state.permissions.accessibility;
-  const showStatusBar = !immersive || hoverTop;
+  // An open resolution menu keeps the bar in, or its trigger would slide away under the menu.
+  const showStatusBar = !immersive || hoverTop || resolutionMenuOpen;
   const pictureStyle: CSSProperties = immersive ? { top: 0 } : { top: STATUS_BAR_HEIGHT };
   const cursor = state?.cursor;
   const display = state?.display ?? null;
   const cursorStyle = pictureCursorStyle(cursor, display, pictureSize);
+
+  function pickResolution(resolution: ScreenResolution) {
+    if (!session) return;
+    session.setResolution(resolution);
+    writeScreenResolution(SCREEN_RESOLUTION_STORE, daemonId, resolution);
+  }
 
   return (
     <div
@@ -274,7 +305,7 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
       }}
       onPointerLeave={() => immersive && setHoverTop(false)}
     >
-      {/* Status bar: connection route and latency, the device, 沉浸 and 断开. In immersive mode it slides in from the top edge. */}
+      {/* Status bar: connection route and latency, the device, the resolution, 沉浸 and 断开. In immersive mode it slides in from the top edge. */}
       <div
         className={cn(
           "absolute inset-x-0 top-0 z-10 flex items-center gap-2 border-b border-border bg-background px-3 text-xs text-muted-foreground transition-transform",
@@ -289,7 +320,7 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
           {routeLabel}
           {rttText}
         </span>
-        <span className="truncate">{phaseLabel(phase, state)}</span>
+        <span className="truncate">{phaseLabel(phase)}</span>
         {readOnly ? (
           <Tooltip content="那台 Mac 未授予 Coflux「辅助功能」权限，只能查看，不能操作" placement="below">
             <span className="flex items-center gap-1 whitespace-nowrap text-warning">
@@ -299,6 +330,16 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
           </Tooltip>
         ) : null}
         <span className="flex-1" />
+        <ResolutionMenu
+          resolution={state?.resolution ?? null}
+          display={display}
+          isDisabled={!session}
+          open={resolutionMenuOpen}
+          onOpenChange={setResolutionMenuOpen}
+          onPick={pickResolution}
+          isPictureFocused={() => document.activeElement === pictureRef.current}
+          onRestoreFocus={() => pictureRef.current?.focus({ preventScroll: true })}
+        />
         <Tooltip content={immersive ? "退出沉浸模式 ⌃⌥⌘F" : "沉浸模式 ⌃⌥⌘F"} placement="below">
           <button
             type="button"
@@ -363,6 +404,85 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
   );
 }
 
+/**
+ * The status bar's resolution dropdown: 「跟随窗口」 and the fixed presets, the current one checked.
+ * Its tooltip names what the remote display actually is.
+ */
+function ResolutionMenu({
+  resolution,
+  display,
+  isDisabled,
+  open,
+  onOpenChange,
+  onPick,
+  isPictureFocused,
+  onRestoreFocus,
+}: {
+  resolution: ScreenResolution;
+  display: ScreenSessionState["display"];
+  isDisabled: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onPick: (resolution: ScreenResolution) => void;
+  isPictureFocused: () => boolean;
+  onRestoreFocus: () => void;
+}) {
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
+  // Opening the menu from a focused picture takes the focus away (the picture's blur releases what
+  // the remote holds); closing it hands the focus back, unless it went somewhere on purpose.
+  const returnFocusRef = useRef(false);
+  function changeOpen(next: boolean) {
+    onOpenChange(next);
+    if (next) return;
+    const restore = returnFocusRef.current;
+    returnFocusRef.current = false;
+    if (!restore) return;
+    // Astryx moves focus after this callback; look once it settled.
+    requestAnimationFrame(() => {
+      const focused = document.activeElement;
+      if (!focused || focused === document.body || focused === anchorRef.current) onRestoreFocus();
+    });
+  }
+  return (
+    <>
+      <DropdownMenu
+        isMenuOpen={open}
+        onOpenChange={changeOpen}
+        menuWidth={140}
+        placement="below"
+        alignment="end"
+        button={{
+          ref: anchorRef,
+          label: screenResolutionLabel(resolution),
+          variant: "ghost",
+          size: "sm",
+          isDisabled,
+          // Read before the pointer moves the focus off the picture.
+          onPointerDown: () => {
+            if (!open) returnFocusRef.current = isPictureFocused();
+          },
+          // Sized like the bar's other buttons; no-drag because in immersive mode the bar sits on the window's top edge.
+          style: { color: "var(--muted-foreground)", height: 24, paddingInline: 6, gap: 4, fontSize: "inherit", ...NO_DRAG_REGION_STYLE },
+        }}
+      >
+        <DropdownMenuRadioGroup label="远端分辨率" value={screenResolutionValue(resolution)} onChange={(value) => onPick(parseScreenResolution(value))}>
+          <DropdownMenuRadioItem value={SCREEN_RESOLUTION_FOLLOW} label="跟随窗口" />
+          {SCREEN_RESOLUTION_PRESETS.map((preset) => (
+            <DropdownMenuRadioItem key={screenResolutionValue(preset)} value={screenResolutionValue(preset)} label={screenResolutionLabel(preset)} />
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenu>
+      <Tooltip
+        anchorRef={anchorRef}
+        isEnabled={!open}
+        isOpen={open ? false : undefined}
+        placement="below"
+        content={display ? `远端分辨率 ${display.widthPoints}×${display.heightPoints}@${display.scale}x` : "远端分辨率"}
+      />
+    </>
+  );
+}
+
 /** Where the contained canvas is drawn inside the picture area (CSS px, relative to it). */
 function drawnRect(areaWidth: number, areaHeight: number, widthPoints: number, heightPoints: number): { left: number; top: number; width: number; height: number } {
   if (widthPoints <= 0 || heightPoints <= 0) return { left: 0, top: 0, width: areaWidth, height: areaHeight };
@@ -389,14 +509,15 @@ function remoteCursorStyle(cursor: ScreenSessionState["cursor"], display: { widt
   };
 }
 
-function phaseLabel(phase: ScreenSessionState["phase"], state: ScreenSessionState | null): string {
+function phaseLabel(phase: ScreenSessionState["phase"]): string {
   switch (phase) {
     case "connecting":
       return "正在连接…";
     case "starting":
       return "正在准备远端显示器…";
     case "streaming":
-      return state?.display ? `${state.display.widthPoints}×${state.display.heightPoints}@${state.display.scale}x` : "";
+      // The resolution is the status bar's dropdown (and its tooltip).
+      return "";
     case "paused":
       return "已暂停";
     case "no-permission":

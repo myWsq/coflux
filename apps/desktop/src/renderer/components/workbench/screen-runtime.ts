@@ -1,6 +1,7 @@
 import { createStore, type StoreApi } from "zustand/vanilla";
 
 import type { DesktopBridge } from "@/desktop-bridge";
+import type { ScreenResolution } from "@/components/workbench/screen-resolution";
 import { ScreenSession } from "@/components/workbench/screen-session";
 import { serializeScreenTabRecords, writeScreenTabRecords, type ScreenTabRecord, type ScreenTabStore } from "@/components/workbench/screen-tabs";
 
@@ -15,8 +16,8 @@ export type ScreenRuntime = {
   tabs: StoreApi<{ tabs: Readonly<Record<string, ScreenTabRecord>> }>;
   createTab: (id: string, record: ScreenTabRecord) => void;
   removeTab: (id: string) => void;
-  /** The tab's live session, created on first use for a mounted view. */
-  sessionFor: (tabId: string, context: { deviceOnline: () => boolean; transportMode: () => string }) => ScreenSession | null;
+  /** The tab's live session, created on first use for a mounted view, starting at `context.resolution`. */
+  sessionFor: (tabId: string, context: { deviceOnline: () => boolean; transportMode: () => string; resolution: ScreenResolution }) => ScreenSession | null;
   /** The tab's session if its view is mounted. */
   sessionOf: (tabId: string) => ScreenSession | null;
   /** The view unmounted (workspace unmounted, reload): let go locally without ending the remote session. */
@@ -76,6 +77,7 @@ export function createScreenRuntime(options: {
         deviceOnline: context.deviceOnline,
         transportMode: context.transportMode,
         takeOverOnOpen: fresh.delete(tabId),
+        resolution: context.resolution,
       });
       sessions.set(tabId, session);
       return session;

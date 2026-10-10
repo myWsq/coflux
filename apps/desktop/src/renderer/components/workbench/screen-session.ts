@@ -27,6 +27,7 @@ import {
 
 import type { DesktopBridge, DesktopScreenLane, DesktopScreenLaneKind, DesktopScreenPortMessage, DesktopScreenPortRequest } from "@/desktop-bridge";
 import { SCREEN_PORT_MESSAGE } from "@/desktop-bridge";
+import type { ScreenResolution } from "@/components/workbench/screen-resolution";
 
 /** What the tab shows; see `ScreenView` for the copy of each. */
 export type ScreenPhase =
@@ -68,6 +69,8 @@ export type ScreenSessionState = {
   cursor: ScreenCursorState;
   /** Frames drawn since the session opened; the view uses it to know a picture exists. */
   framesDrawn: number;
+  /** The resolution choice: a fixed size in points, or `null` to follow the tab's size. */
+  resolution: ScreenResolution;
 };
 
 export type ScreenSessionOptions = {
@@ -84,6 +87,8 @@ export type ScreenSessionOptions = {
    * closed, a resume — never take over; a tab that was taken over only reconnects through 「重新接管」.
    */
   takeOverOnOpen: boolean;
+  /** The resolution choice the session starts with (the device's remembered one). */
+  resolution: ScreenResolution;
 };
 
 const MODIFIER_SHIFT = 1;
@@ -112,7 +117,10 @@ export function modifierBits(event: { shiftKey: boolean; ctrlKey: boolean; altKe
   return bits;
 }
 
-/** The size the remote display should have for a tab of `width`×`height` CSS px at `devicePixelRatio`. */
+/**
+ * The size the remote display should have for a tab of `width`×`height` CSS px at `devicePixelRatio`
+ * (a fixed resolution choice passes its points as `width`×`height`).
+ */
 export function displayRequest(width: number, height: number, devicePixelRatio: number): { widthPoints: number; heightPoints: number; scale: number } {
   return { widthPoints: Math.max(1, Math.round(width)), heightPoints: Math.max(1, Math.round(height)), scale: devicePixelRatio >= 1.5 ? 2 : 1 };
 }
@@ -123,6 +131,7 @@ export function initialCreditFor(mode: string): number {
 }
 
 type Lanes = { control: DesktopScreenLane; video: DesktopScreenLane };
+type DisplaySize = { widthPoints: number; heightPoints: number; scale: number };
 
 export class ScreenSession {
   readonly sessionId: string;
@@ -137,8 +146,14 @@ export class ScreenSession {
   private visible = false;
   private closed = false;
   private disposed = false;
-  private wantedSize: { widthPoints: number; heightPoints: number; scale: number } | null = null;
-  private appliedSize: { widthPoints: number; heightPoints: number; scale: number } | null = null;
+  /** The tab's last reported size in CSS px and its devicePixelRatio. */
+  private tabArea: { width: number; height: number; devicePixelRatio: number } | null = null;
+  /** What the remote display should be: the tab's size, or the fixed choice at the local scale. */
+  private wantedSize: DisplaySize | null = null;
+  /** What the remote was last asked for (the open's size, then each resize). */
+  private appliedSize: DisplaySize | null = null;
+  /** The size the open in flight carries; the applied size once it succeeds. */
+  private openSize: DisplaySize | null = null;
   private resizeSeq = 0n;
   private resizeTimer: number | undefined;
   private reopenTimer: number | undefined;
@@ -169,7 +184,8 @@ export class ScreenSession {
     this.desktop = options.desktop;
     this.options = options;
     this.forceNext = options.takeOverOnOpen;
-    this.state = { phase: "connecting", error: null, permissions: null, locked: false, display: null, cursor: INITIAL_CURSOR, framesDrawn: 0 };
+    this.state = { phase: "connecting", error: null, permissions: null, locked: false, display: null, cursor: INITIAL_CURSOR, framesDrawn: 0, resolution: options.resolution };
+    this.wantedSize = this.sizeWanted();
   }
 
   subscribe(listener: () => void): () => void {
@@ -210,13 +226,32 @@ export class ScreenSession {
     }
   }
 
-  /** The tab's size in CSS px changed; the remote display follows (debounced). */
+  /**
+   * The tab's size in CSS px changed; the remote display follows (debounced). On a fixed resolution
+   * only a change of the local scale reaches the remote; the picture just scales.
+   */
   setSize(width: number, height: number, devicePixelRatio: number) {
     if (this.disposed || this.closed) return;
-    const next = displayRequest(width, height, devicePixelRatio);
-    this.wantedSize = next;
+    this.tabArea = { width, height, devicePixelRatio };
+    this.wantedSize = this.sizeWanted();
     window.clearTimeout(this.resizeTimer);
     this.resizeTimer = window.setTimeout(() => this.applySize(), RESIZE_DEBOUNCE_MS);
+  }
+
+  /** The user picked a resolution: the remote follows at once, without reconnecting. */
+  setResolution(resolution: ScreenResolution) {
+    if (this.disposed || this.closed) return;
+    this.update({ resolution });
+    this.wantedSize = this.sizeWanted();
+    window.clearTimeout(this.resizeTimer);
+    this.applySize();
+  }
+
+  private sizeWanted(): DisplaySize | null {
+    const resolution = this.state.resolution;
+    const devicePixelRatio = this.tabArea?.devicePixelRatio ?? window.devicePixelRatio;
+    if (resolution) return displayRequest(resolution.widthPoints, resolution.heightPoints, devicePixelRatio);
+    return this.tabArea ? displayRequest(this.tabArea.width, this.tabArea.height, devicePixelRatio) : null;
   }
 
   private applySize() {
@@ -272,7 +307,10 @@ export class ScreenSession {
     }
   }
 
-  /** Immersive mode entered or left: lets the remote display follow the new size at once. */
+  /**
+   * Immersive mode entered or left: lets the remote display follow the new size at once (a no-op on
+   * a fixed resolution, whose wanted size the tab's size does not change).
+   */
   flushSize() {
     window.clearTimeout(this.resizeTimer);
     this.applySize();
@@ -351,9 +389,12 @@ export class ScreenSession {
     port.start();
   }
 
-  private post(request: DesktopScreenPortRequest, transfer: Transferable[] = []) {
+  // No transfer list, ever: on Electron 44.3.0 an `ArrayBuffer` transferred to `MessagePortMain`
+  // arrives in main as null, so every frame was silently dropped. Bytes go by structured clone, each
+  // in a buffer of exactly its own size (`exactBuffer`), never a view's larger backing store.
+  private post(request: DesktopScreenPortRequest) {
     if (!this.port) return;
-    this.port.postMessage(request, transfer);
+    this.port.postMessage(request);
   }
 
   private requestReopen(delay: number) {
@@ -437,7 +478,7 @@ export class ScreenSession {
     const lanes = this.lanes;
     if (!lanes || !this.laneUp[lane] || !this.port) return false;
     const bytes = encodeDeviceEnvelope(create(DeviceEnvelopeSchema, { protocolVersion: DEVICE_PROTOCOL_VERSION, channelId: lanes[lane].channelId, payload }));
-    this.post({ type: "send", lane, data: bytes.buffer }, [bytes.buffer]);
+    this.post({ type: "send", lane, data: exactBuffer(bytes) });
     return true;
   }
 
@@ -453,6 +494,7 @@ export class ScreenSession {
     const lanes = this.lanes;
     if (!lanes) return;
     const size = this.wantedSize ?? { widthPoints: 1280, heightPoints: 800, scale: 2 };
+    this.openSize = size;
     const requestId = `open-${++this.openRequest}`;
     const force = this.forceNext;
     this.forceNext = false;
@@ -535,7 +577,7 @@ export class ScreenSession {
         }
         this.opened = true;
         this.holderEpoch = opened.holderEpoch;
-        this.appliedSize = this.wantedSize;
+        this.appliedSize = this.openSize;
         this.update({ ...this.statusPatch(opened.status), phase: this.phaseFrom(opened.status), error: null, framesDrawn: 0 });
         this.attachVideo();
         if (!this.visible) this.sendControl({ case: "screenSessionPause", value: { sessionId: this.sessionId, holderEpoch: this.holderEpoch } });
@@ -580,11 +622,7 @@ export class ScreenSession {
         const content = payload.value.content?.content;
         if (!content) return;
         if (content.case === "text") this.post({ type: "clipboard-set", text: content.value });
-        else if (content.case === "png") {
-          const png = content.value;
-          const copy = png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) as ArrayBuffer;
-          this.post({ type: "clipboard-set", png: copy }, [copy]);
-        }
+        else if (content.case === "png") this.post({ type: "clipboard-set", png: exactBuffer(content.value) });
         return;
       }
       case "screenSessionDetached":
@@ -792,6 +830,15 @@ export class ScreenSession {
 
 function isModifierCode(code: string): boolean {
   return code === "MetaLeft" || code === "MetaRight" || code === "ControlLeft" || code === "ControlRight" || code === "AltLeft" || code === "AltRight" || code === "ShiftLeft" || code === "ShiftRight" || code === "CapsLock" || code === "Fn";
+}
+
+/**
+ * The view's bytes in an `ArrayBuffer` of exactly their size, for the port to main: an encoder's
+ * output may be a view on a larger buffer, and cloning `.buffer` would send its whole backing store.
+ */
+function exactBuffer(bytes: Uint8Array): ArrayBuffer {
+  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength && bytes.buffer instanceof ArrayBuffer) return bytes.buffer;
+  return bytes.slice().buffer as ArrayBuffer;
 }
 
 function concat(chunks: Uint8Array[], bytes: number): Uint8Array {
