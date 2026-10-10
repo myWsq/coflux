@@ -1414,11 +1414,12 @@ export class Store {
    * client receives on subscribe (plan 20261010-terminal-checkpoint-energy). Same retention window
    * as the reads above. */
   async listSessionTitles(accountId: AccountId): Promise<SessionTitleRecord[]> {
-    return this.sql<SessionTitleRecord[]>`
+    const rows = await this.sql<SessionTitleRecord[]>`
       SELECT session_id, task_id, title FROM session_checkpoints
       WHERE account_id = ${accountId} AND updated_at >= ${Date.now() - SESSION_CHECKPOINT_RETENTION_MS}
       ORDER BY captured_at DESC
     `;
+    return rows.map((row) => ({ sessionId: row.sessionId, taskId: row.taskId, title: row.title }));
   }
 
   /** A title reported as metadata (plan 20261010-terminal-checkpoint-energy) lands on the session's
