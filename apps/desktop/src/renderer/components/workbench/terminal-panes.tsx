@@ -91,6 +91,7 @@ export function TerminalPanes({
             onPointerFocus={onPaneFocus}
             controlState={attach.stateOf(task)}
             registerSessionConsumer={client.registerSessionConsumer}
+            watchSessionContent={client.watchSessionContent}
             sendInput={client.sendInput}
             sendResize={client.resizeSession}
             sendFsWrite={client.sendFsWrite}

@@ -100,7 +100,12 @@ export function ActivityDots({ status, label }: { status: ActivityDotsStatus; la
         const on = !config.glyph || config.glyph.has(i);
         const hi = on ? (config.base ?? 1) : (config.dim ?? 0.15);
         const blink = on ? config.blink?.(i, row, col) : undefined;
-        const lo = blink?.lo ?? hi;
+        // A dot with no visible blink is drawn static: an infinite animation between two equal
+        // opacities still costs a compositor frame on every tick (plan 20261010-terminal-checkpoint-energy).
+        if (!blink) {
+          return <circle key={i} cx={col + 0.5} cy={row + 0.5} r={0.32} fill="currentColor" opacity={hi} />;
+        }
+        const lo = blink.lo;
         return (
           <circle
             key={i}
@@ -113,8 +118,8 @@ export function ActivityDots({ status, label }: { status: ActivityDotsStatus; la
               {
                 "--coflux-dot-hi": hi,
                 "--coflux-dot-lo": lo,
-                animationDuration: `${blink?.duration ?? 1}s`,
-                animationDelay: `${blink?.delay ?? 0}s`,
+                animationDuration: `${blink.duration}s`,
+                animationDelay: `${blink.delay}s`,
               } as CSSProperties
             }
           />

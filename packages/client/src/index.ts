@@ -38,6 +38,8 @@ export {
   type OfflineCatalogStorage,
   type TokenStorage,
   type LocalSessionState,
+  type SessionMetadataState,
+  type SessionContentConsumer,
   type SessionAgentState,
   type SecretRequestState,
   type SecretAnswer,

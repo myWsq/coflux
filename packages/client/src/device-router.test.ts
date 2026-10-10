@@ -877,26 +877,6 @@ test("send=false 触发 session lane 恢复，未确认 input 在新 transport �
   h.router.destroy();
 });
 
-test("checkpoint 不 seed live cursor，重复 gap 合并为单个 full attach", async () => {
-  const h = harness();
-  h.router.seedCheckpoint("daemon-1", "task-1", "session-1", 99n);
-  h.router.attachSession("daemon-1", "task-1", "session-1", 80, 24);
-  await flush();
-  const direct = latestOpen(h.adapter, "direct");
-  h.adapter.resolve(direct);
-  await flush();
-  const firstAttach = attachRequest(direct);
-  assert.equal(firstAttach.resumeFromSeq, undefined);
-  attach(h.router, h.adapter, direct, 5n);
-  const before = payloads(direct).filter((payload) => payload?.case === "sessionAttach").length;
-  h.adapter.emit(direct, { case: "ptyGap", value: { sessionId: "session-1", expectedSeq: 6n, availableSeq: 9n } });
-  h.adapter.emit(direct, { case: "ptyGap", value: { sessionId: "session-1", expectedSeq: 6n, availableSeq: 9n } });
-  const attaches = payloads(direct).filter((payload) => payload?.case === "sessionAttach");
-  assert.equal(attaches.length, before + 1);
-  assert.equal(attaches.at(-1)?.case === "sessionAttach" ? attaches.at(-1)!.value.resumeFromSeq : 1n, undefined);
-  h.router.destroy();
-});
-
 test("已完成 attach 的重复 response 不会覆盖 live snapshot", async () => {
   const h = harness();
   h.router.attachSession("daemon-1", "task-1", "session-1", 80, 24);

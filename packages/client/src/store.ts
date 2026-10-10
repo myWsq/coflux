@@ -19,7 +19,6 @@ import {
   type DeviceSessionCatalog,
   type FsEntry,
   type Project,
-  type SessionCheckpoint,
   type Task,
   type Workspace,
 } from "@coflux/protocol";
@@ -276,6 +275,20 @@ export type TaskReadResult =
   | { ok: true; taskId: string; data: Uint8Array; source: TaskReadSource; capturedAt: number; status: TaskStatus; exitCode?: number }
   | { ok: false; error: string };
 type SessionConsumer = (data: Uint8Array, replace: boolean) => void;
+/** Receives a whole rendered screen that replaces what the pane shows (plan
+ * 20261010-terminal-checkpoint-energy): the content of a terminal the pane is not live-attached to. */
+export type SessionContentConsumer = (data: Uint8Array) => void;
+
+/** A terminal's metadata (plan 20261010-terminal-checkpoint-energy): its OSC title. The entry's
+ * identity changes only when a field changes, so selectors on it do not re-render on every report. */
+export type SessionMetadataState = { sessionId: string; taskId: string; title: string };
+
+/** Refresh period of a visible pane that shows a live terminal without being attached to it
+ * (held by another device): the cadence the old checkpoint push had. */
+const SESSION_CONTENT_REFRESH_MS = 2_000;
+/** First fetch of a pane that just became visible: long enough for an ordinary attach to make the
+ * session live first, so the common case fetches nothing. */
+const SESSION_CONTENT_FIRST_FETCH_MS = 300;
 
 export type LocalSessionState = {
   daemonId: string;
@@ -285,7 +298,6 @@ export type LocalSessionState = {
   cwd: string;
   cols: number;
   rows: number;
-  outputSeq: bigint;
   startedAt: number;
   status: "running" | "exited";
   exitCode?: number;
@@ -438,7 +450,9 @@ export type CofluxState = {
   deviceTransports: Record<string, DeviceTransportState>;
   inputStates: Record<string, DeviceInputState>;
   localSessions: LocalSessionState[];
-  sessionCheckpoints: Record<string, SessionCheckpoint>;
+  /** Terminal metadata (plan 20261010-terminal-checkpoint-energy): sessionId → title. Content never
+   * lives here — panes fetch it, or take it from a non-reactive cache, only while visible. */
+  sessionMetadata: Record<string, SessionMetadataState>;
   /** agent presence + hook 回合状态（plan 073）：sessionId → agent/state。来自 sessionAgentsUpdated 按设备全量替换。 */
   sessionAgents: Record<string, SessionAgentState>;
   /** Pending secret requests (plan 20260926-agent-secret-input): requestId → request, replaced per
@@ -466,12 +480,28 @@ export type CofluxState = {
   snapshotRevision: number;
 };
 
-function upsert<T>(list: T[], item: T, match: (value: T) => boolean): T[] {
+/** Replace or append `item`. An existing entry with the same own fields keeps the list's identity, so a
+ * periodic refresh that changes nothing does not re-render its subscribers. */
+function upsert<T extends object>(list: T[], item: T, match: (value: T) => boolean): T[] {
   const index = list.findIndex(match);
   if (index === -1) return [...list, item];
+  if (shallowEqual(list[index]!, item)) return list;
   const next = list.slice();
   next[index] = item;
   return next;
+}
+
+function shallowEqual<T extends object>(left: T, right: T): boolean {
+  const leftKeys = Object.keys(left) as (keyof T)[];
+  if (leftKeys.length !== Object.keys(right).length) return false;
+  return leftKeys.every((key) => Object.is(left[key], right[key]));
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left === right) return true;
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) if (left[index] !== right[index]) return false;
+  return true;
 }
 
 /** 目录工作区（无 repo 终端，plan 045）：projectId 为空即目录工作区。
@@ -675,7 +705,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     deviceTransports: {},
     inputStates: {},
     localSessions: [],
-    sessionCheckpoints: {},
+    sessionMetadata: {},
     sessionAgents: {},
     secretRequests: {},
     executorRuns: {},
@@ -790,6 +820,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
     if (consumers) for (const consumer of consumers) consumer(data, replace);
   }
 
+  // The device router refreshes every catalog every 3 s: an unchanged catalog must leave the state
+  // (and so every subscriber, the sidebar first) untouched. Output sequences are deliberately not
+  // stored — they change with every byte a terminal prints and nothing renders them.
   function updateLocalCatalog(daemonId: string, catalog: DeviceSessionCatalog): void {
     store.setState((state) => {
       let localSessions = state.localSessions;
@@ -802,7 +835,6 @@ export function createCofluxClient(options: CofluxClientOptions) {
           cwd: session.cwd,
           cols: session.cols,
           rows: session.rows,
-          outputSeq: session.outputSeq,
           startedAt: session.startedAt,
           status: "running",
         };
@@ -818,7 +850,6 @@ export function createCofluxClient(options: CofluxClientOptions) {
           cwd: existing?.cwd ?? "",
           cols: existing?.cols ?? 80,
           rows: existing?.rows ?? 24,
-          outputSeq: exit.finalOutputSeq,
           startedAt: existing?.startedAt ?? 0,
           status: "exited",
           exitCode: exit.exitCode,
@@ -826,13 +857,21 @@ export function createCofluxClient(options: CofluxClientOptions) {
         };
         localSessions = upsert(localSessions, next, (item) => item.daemonId === daemonId && item.sessionId === exit.sessionId);
       }
-      return { localSessions };
+      return localSessions === state.localSessions ? state : { localSessions };
     });
     for (const exit of catalog.exits) markSessionExited(daemonId, exit.taskId, exit.sessionId, exit.exitCode);
   }
 
+  /** `record` without the entries matching `drop`; the same object when none match. */
+  function withoutEntries<T>(record: Record<string, T>, drop: (key: string, value: T) => boolean): Record<string, T> {
+    if (!Object.entries(record).some(([key, value]) => drop(key, value))) return record;
+    return Object.fromEntries(Object.entries(record).filter(([key, value]) => !drop(key, value)));
+  }
+
+  // Also replayed for every exit tombstone of every catalog refresh: a repeat must change nothing.
   function markSessionExited(daemonId: string, taskId: string, sessionId: string, exitCode: number): void {
     liveSessionIds.delete(sessionId);
+    sessionContents.delete(sessionId);
     // A hidden (closing) terminal gets the same local fact, so a rollback never restores a dead session.
     const parked = parkedTasks.get(taskId);
     if (parked && parked.item.sessionId === sessionId) {
@@ -848,37 +887,130 @@ export function createCofluxClient(options: CofluxClientOptions) {
         cwd: existing?.cwd ?? "",
         cols: existing?.cols ?? 80,
         rows: existing?.rows ?? 24,
-        outputSeq: existing?.outputSeq ?? 0n,
         startedAt: existing?.startedAt ?? 0,
         status: "exited",
         exitCode,
         exitedAt: existing?.exitedAt ?? Date.now(),
       };
-      const inputStates = { ...state.inputStates };
-      delete inputStates[sessionId];
+      const inputStates = withoutEntries(state.inputStates, (key) => key === sessionId);
       // session 已退出：agent presence 一并清理，防僵尸琥珀（plan 073）
-      const sessionAgents = { ...state.sessionAgents };
-      delete sessionAgents[sessionId];
+      const sessionAgents = withoutEntries(state.sessionAgents, (key) => key === sessionId);
       // The worker ends a terminal's pending secret requests with it; close the cards right away.
-      const secretRequests = Object.fromEntries(
-        Object.entries(state.secretRequests).filter(([, request]) => request.sessionId !== sessionId),
-      );
+      const secretRequests = withoutEntries(state.secretRequests, (_, request) => request.sessionId === sessionId);
       // A run's card lives on its caller's terminal; the center drops the run with the session.
-      const executorRuns = Object.fromEntries(
-        Object.entries(state.executorRuns).filter(([, run]) => run.sessionId !== sessionId),
-      );
-      return {
-        secretRequests,
-        executorRuns,
-        localSessions: upsert(state.localSessions, local, (item) => item.daemonId === daemonId && item.sessionId === sessionId),
-        tasks: state.tasks.map((task) => task.id === taskId && task.sessionId === sessionId
+      const executorRuns = withoutEntries(state.executorRuns, (_, run) => run.sessionId === sessionId);
+      const localSessions = upsert(state.localSessions, local, (item) => item.daemonId === daemonId && item.sessionId === sessionId);
+      const tasks = state.tasks.some((task) => task.id === taskId && task.sessionId === sessionId)
+        ? state.tasks.map((task) => task.id === taskId && task.sessionId === sessionId
           ? { ...task, status: TaskStatus.EXITED, sessionId: undefined, exitCode }
-          : task),
-        detachedTaskIds: withoutSetValue(state.detachedTaskIds, taskId),
-        inputStates,
-        sessionAgents,
-      };
+          : task)
+        : state.tasks;
+      const detachedTaskIds = withoutSetValue(state.detachedTaskIds, taskId);
+      if (
+        secretRequests === state.secretRequests &&
+        executorRuns === state.executorRuns &&
+        localSessions === state.localSessions &&
+        tasks === state.tasks &&
+        detachedTaskIds === state.detachedTaskIds &&
+        inputStates === state.inputStates &&
+        sessionAgents === state.sessionAgents
+      ) return state;
+      return { secretRequests, executorRuns, localSessions, tasks, detachedTaskIds, inputStates, sessionAgents };
     });
+  }
+
+  /* ---------------- terminal metadata and content (plan 20261010-terminal-checkpoint-energy) ---------------- */
+
+  /** The center of this connection serves SessionMetadata (AuthOk.session_metadata): content is
+   * fetched through TaskRead. False against an older center, which keeps pushing checkpoints. */
+  let sessionMetadataSupported = false;
+  /** Content pushed by an older center, by session: kept out of the reactive store and handed to a
+   * pane only while it is visible, so a hidden pane never parses it. */
+  const sessionContents = new Map<string, Uint8Array>();
+  type ContentWatch = {
+    taskId: string;
+    sessionId: string;
+    consumer: SessionContentConsumer;
+    timer: ReturnType<typeof setTimeout> | undefined;
+    stopped: boolean;
+    inFlight: boolean;
+    fetched: boolean;
+    lastDelivered: Uint8Array | undefined;
+  };
+  const contentWatches = new Map<string, Set<ContentWatch>>();
+
+  function applySessionMetadata(sessionId: string, taskId: string, title: string): void {
+    const current = store.getState().sessionMetadata[sessionId];
+    if (current && current.taskId === taskId && current.title === title) return;
+    store.setState((state) => ({ sessionMetadata: { ...state.sessionMetadata, [sessionId]: { sessionId, taskId, title } } }));
+  }
+
+  function deliverContent(watch: ContentWatch, data: Uint8Array): void {
+    if (watch.stopped || liveSessionIds.has(watch.sessionId)) return;
+    if (watch.lastDelivered && bytesEqual(watch.lastDelivered, data)) return;
+    watch.lastDelivered = data;
+    watch.consumer(data);
+  }
+
+  /** One refresh of a visible, non-live pane: the cached push of an older center, or a TaskRead —
+   * the daemon's current screen while its device is online (about as often as the old push), the
+   * center's stored content once while it is offline. */
+  function refreshContent(watch: ContentWatch): void {
+    if (watch.stopped) return;
+    watch.timer = setTimeout(() => refreshContent(watch), SESSION_CONTENT_REFRESH_MS);
+    if (liveSessionIds.has(watch.sessionId)) return;
+    if (!sessionMetadataSupported) {
+      const cached = sessionContents.get(watch.sessionId);
+      if (cached) deliverContent(watch, cached);
+      return;
+    }
+    const task = taskById(watch.taskId);
+    if (!task || task.sessionId !== watch.sessionId || task.status !== TaskStatus.RUNNING) return;
+    if (!controlAuthenticated || watch.inFlight) return;
+    const online = store.getState().daemons.some((daemon) => daemon.daemonId === task.daemonId && daemon.online);
+    if (watch.fetched && !online) return;
+    watch.inFlight = true;
+    void readTask(watch.taskId).then((result) => {
+      watch.inFlight = false;
+      if (!result.ok || result.source === "none") return;
+      watch.fetched = true;
+      if (taskById(watch.taskId)?.sessionId !== watch.sessionId) return;
+      deliverContent(watch, result.data);
+    });
+  }
+
+  /**
+   * A visible pane asks for its terminal's content while it is not live-attached (another device
+   * holds the session, the device is offline, the attach is still on its way). Nothing is delivered
+   * while the session is live: the attach snapshot and live output own the screen. Hidden panes do
+   * not watch, so they never fetch or parse anything. Returns the unwatch function.
+   */
+  function watchSessionContent(taskId: string, sessionId: string, consumer: SessionContentConsumer): () => void {
+    const watch: ContentWatch = {
+      taskId,
+      sessionId,
+      consumer,
+      timer: undefined,
+      stopped: false,
+      inFlight: false,
+      fetched: false,
+      lastDelivered: undefined,
+    };
+    let watches = contentWatches.get(sessionId);
+    if (!watches) {
+      watches = new Set();
+      contentWatches.set(sessionId, watches);
+    }
+    watches.add(watch);
+    watch.timer = setTimeout(() => refreshContent(watch), SESSION_CONTENT_FIRST_FETCH_MS);
+    return () => {
+      watch.stopped = true;
+      clearTimeout(watch.timer);
+      const current = contentWatches.get(sessionId);
+      if (!current) return;
+      current.delete(watch);
+      if (current.size === 0) contentWatches.delete(sessionId);
+    };
   }
 
   let connection!: ReturnType<typeof createConnection>;
@@ -907,7 +1039,10 @@ export function createCofluxClient(options: CofluxClientOptions) {
     onSessionAttached: (_daemonId, taskId) => {
       store.setState((state) => ({ detachedTaskIds: withoutSetValue(state.detachedTaskIds, taskId) }));
     },
-    onSessionDetached: (_daemonId, taskId) => {
+    onSessionDetached: (_daemonId, taskId, sessionId) => {
+      // Another holder took the session: no live output arrives any more, so a visible pane goes
+      // back to fetching its content (plan 20261010-terminal-checkpoint-energy).
+      liveSessionIds.delete(sessionId);
       store.setState((state) => ({ detachedTaskIds: new Set(state.detachedTaskIds).add(taskId) }));
     },
     onSessionExited: markSessionExited,
@@ -1008,8 +1143,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     consumers.add(consumer);
     // A remounted pane (e.g. after a rollback) owns the session's life cycle again.
     if (routedTask && deferredSessionReleases.get(routedTask.id)?.sessionId === sessionId) deferredSessionReleases.delete(routedTask.id);
-    const checkpoint = store.getState().sessionCheckpoints[sessionId];
-    if (checkpoint && !liveSessionIds.has(sessionId)) consumer(checkpoint.ansiSnapshot, true);
+    // Live data only: a pane that is visible and not live asks for content with watchSessionContent
+    // (plan 20261010-terminal-checkpoint-energy), so a hidden pane never parses a whole screen.
     return () => {
       const current = sessionConsumers.get(sessionId);
       if (!current) return;
@@ -1208,6 +1343,10 @@ export function createCofluxClient(options: CofluxClientOptions) {
           store.setState({ agentSettings: EMPTY_AGENT_SETTINGS });
         }
         store.setState({ agentSettingsSupported: value.agentSettings, agentSettingsReceived: false });
+        // Terminal content: fetched through TaskRead when the center serves metadata, else taken
+        // from the checkpoints it pushes (plan 20261010-terminal-checkpoint-energy).
+        sessionMetadataSupported = value.sessionMetadata;
+        if (sessionMetadataSupported) sessionContents.clear();
         deviceRouter.setControlOnline(true);
         store.setState({ authState: "authed", loginError: "", loginName: value.loginName ?? "" });
         shouldRetry = true;
@@ -1433,14 +1572,15 @@ export function createCofluxClient(options: CofluxClientOptions) {
             ports,
             detachedTaskIds: withoutSetValue(state.detachedTaskIds, value.taskId),
             inputStates,
-            sessionCheckpoints: removedSessionId
-              ? Object.fromEntries(Object.entries(state.sessionCheckpoints).filter(([sessionId]) => sessionId !== removedSessionId))
-              : state.sessionCheckpoints,
+            sessionMetadata: removedSessionId
+              ? withoutEntries(state.sessionMetadata, (sessionId) => sessionId === removedSessionId)
+              : state.sessionMetadata,
             sessionAgents: removedSessionId
               ? Object.fromEntries(Object.entries(state.sessionAgents).filter(([sessionId]) => sessionId !== removedSessionId))
               : state.sessionAgents,
           };
         });
+        if (removedSessionId) sessionContents.delete(removedSessionId);
         if (removed && removedSessionId) {
           liveSessionIds.delete(removedSessionId);
           deviceRouter.forgetSession(removed.daemonId, removedSessionId);
@@ -1455,13 +1595,19 @@ export function createCofluxClient(options: CofluxClientOptions) {
         break;
       }
       case "sessionCheckpoint": {
+        // Only an older center pushes these (plan 20261010-terminal-checkpoint-energy): its title is
+        // metadata, its content waits in the non-reactive cache and reaches only the panes that
+        // watch it — visible and not live.
         const checkpoint = payload.value;
-        store.setState((state) => ({
-          sessionCheckpoints: { ...state.sessionCheckpoints, [checkpoint.sessionId]: checkpoint },
-        }));
-        const task = taskById(checkpoint.taskId);
-        if (task) deviceRouter.seedCheckpoint(task.daemonId, checkpoint.taskId, checkpoint.sessionId, checkpoint.snapshotSeq);
-        if (!liveSessionIds.has(checkpoint.sessionId)) deliverSession(checkpoint.sessionId, checkpoint.ansiSnapshot, true);
+        applySessionMetadata(checkpoint.sessionId, checkpoint.taskId, checkpoint.title);
+        sessionContents.set(checkpoint.sessionId, checkpoint.ansiSnapshot);
+        const watches = contentWatches.get(checkpoint.sessionId);
+        if (watches) for (const watch of watches) deliverContent(watch, checkpoint.ansiSnapshot);
+        break;
+      }
+      case "sessionMetadata": {
+        const metadata = payload.value;
+        applySessionMetadata(metadata.sessionId, metadata.taskId, metadata.title);
         break;
       }
       case "sessionAgentsUpdated": {
@@ -1744,6 +1890,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     token = "";
     options.tokenStorage.clear();
     connection.stop();
+    sessionMetadataSupported = false;
+    sessionContents.clear();
     store.setState({
       authState: "need-login",
       loginName: "",
@@ -1756,7 +1904,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       deviceTransports: {},
       inputStates: {},
       localSessions: [],
-      sessionCheckpoints: {},
+      sessionMetadata: {},
       sessionAgents: {},
       secretRequests: {},
       executorRuns: {},
@@ -2212,6 +2360,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       return deviceRouter.stopExecutorRun(run.daemonId, run.runId);
     },
     registerSessionConsumer,
+    watchSessionContent,
     listDeviceDirectory,
     execInWorkspace,
     listWorkspaceChanges,

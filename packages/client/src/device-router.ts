@@ -258,7 +258,6 @@ interface RoutedSession {
   holderEpoch?: bigint;
   /** 仅在当前 terminal consumer 实际应用过 live snapshot/delta 后存在。 */
   outputSeq?: bigint;
-  checkpointSeq?: bigint;
   hasLiveSnapshot: boolean;
   inputSeq: bigint;
   ackedInputSeq: bigint;
@@ -2401,32 +2400,6 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       .catch(() => scheduleRecovery(route, route.sessionLane));
   }
 
-  function seedCheckpoint(daemonId: string, taskId: string, sessionId: string, snapshotSeq: bigint): void {
-    const route = routeFor(daemonId);
-    const existing = route.sessions.get(sessionId);
-    if (existing) {
-      if (existing.checkpointSeq === undefined || snapshotSeq > existing.checkpointSeq) existing.checkpointSeq = snapshotSeq;
-      return;
-    }
-    route.sessions.set(sessionId, {
-      daemonId,
-      taskId,
-      sessionId,
-      desired: false,
-      detached: false,
-      cols: 80,
-      rows: 24,
-      checkpointSeq: snapshotSeq,
-      hasLiveSnapshot: false,
-      inputSeq: 0n,
-      ackedInputSeq: 0n,
-      resizeSeq: 0n,
-      retainedInputs: [],
-      retainedInputBytes: 0,
-      holderWaiters: new Set(),
-    });
-  }
-
   /** Executor host registration and reports use the active session lane.
    * The worker additionally requires loopback identity; native remote channels
    * receive executor_host_denied even when they have SESSION_CONTROL scope.
@@ -3023,7 +2996,6 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     probeDevice,
     retainDevice,
     attachSession,
-    seedCheckpoint,
     sendInput,
     sendExecutorHostRegister,
     sendExecutorReport,

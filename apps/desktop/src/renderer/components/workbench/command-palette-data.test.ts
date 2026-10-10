@@ -74,7 +74,7 @@ function fixture(current: PaletteSnapshotInput["current"] = { workspaceId: null,
       task("t-idle", "w1", "空闲终端", { status: TaskStatus.IDLE, sessionId: undefined }),
     ],
     sessionAgents: { "s-t1": agent("t1", "active") },
-    sessionCheckpoints: {},
+    sessionMetadata: {},
     current,
   };
 }
@@ -116,7 +116,7 @@ test("快照覆盖四种条目，目录工作区只出终端、非 RUNNING 终�
 
 test("终端标题用 Tab 自己的规则：有 OSC checkpoint 标题就覆盖 task.title", () => {
   const input = fixture();
-  input.sessionCheckpoints = { "s-t1": { title: "claude · 正在改 palette" } };
+  input.sessionMetadata = { "s-t1": { title: "claude · 正在改 palette" } };
   const snapshot = buildPaletteSnapshot(input);
   const terminal = snapshot.entries.find((entry) => entry.key === terminalVisitKey("t1"))!;
   assert.equal(terminal.label, "claude · 正在改 palette");

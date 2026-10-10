@@ -109,8 +109,8 @@ export type PaletteSnapshotInput = {
   daemons: readonly DaemonInfo[];
   tasks: readonly Task[];
   sessionAgents: Record<string, SessionAgentState>;
-  /** OSC titles: a tab shows the checkpoint title when it has one, so matching must too. */
-  sessionCheckpoints: Record<string, { title?: string } | undefined>;
+  /** OSC titles: a tab shows the metadata (OSC) title when it has one, so matching must too. */
+  sessionMetadata: Record<string, { title?: string } | undefined>;
   /** What is on screen at the moment the palette opens. */
   current: {
     workspaceId: string | null;
@@ -204,8 +204,8 @@ export function buildPaletteSnapshot(input: PaletteSnapshotInput): PaletteSnapsh
     const daemon = daemonById.get(task.daemonId);
     const online = daemon?.online ?? false;
     const agent = task.sessionId ? input.sessionAgents[task.sessionId] : undefined;
-    // The tab's own title rule: the OSC checkpoint title when there is one, else the task title.
-    const checkpointTitle = task.sessionId ? input.sessionCheckpoints[task.sessionId]?.title : undefined;
+    // The tab's own title rule: the OSC metadata title when there is one, else the task title.
+    const checkpointTitle = task.sessionId ? input.sessionMetadata[task.sessionId]?.title : undefined;
     const isDir = isDirWorkspace(workspace);
     const project = isDir ? undefined : projectById.get(workspace.projectId);
     entries.push({
