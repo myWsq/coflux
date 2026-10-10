@@ -64,6 +64,10 @@ type TerminalPaneProps = {
   onPointerFocus?: (taskId: string) => void;
   controlState: TerminalControlState;
   registerSessionConsumer: (sessionId: string, consumer: (data: Uint8Array, replace: boolean) => void) => () => void;
+  /** Content of a terminal this pane shows without being live-attached (plan
+   * 20261010-terminal-checkpoint-energy). Watched only while the pane is visible: a hidden pane never
+   * fetches or parses a whole screen. */
+  watchSessionContent: (taskId: string, sessionId: string, consumer: (data: Uint8Array) => void) => () => void;
   sendInput: (sessionId: string, data: string) => void;
   sendResize: (sessionId: string, cols: number, rows: number) => void;
   sendFsWrite: (workspaceId: string, path: string, data: Uint8Array, temp: boolean) => Promise<FsWriteResult>;
@@ -942,6 +946,26 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (!sessionId) return;
     return attachSession(sessionId);
   }, [sessionId]);
+
+  // The screen of a session this pane is not live on — held by another device, its device offline,
+  // the attach still on its way (plan 20261010-terminal-checkpoint-energy). Watched only while
+  // visible; the client delivers nothing while the session is live. Not reported as output: it is
+  // not live output, and the attach state machine must not treat it as such.
+  const watchContent = useEffectEvent((sessionId: string): (() => void) | undefined => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    return props.watchSessionContent(props.taskId, sessionId, (data) => {
+      // A rendered screen carries no OSC 133: the old command boundaries go with the old screen.
+      terminal.reset();
+      commandsRef.current?.clear();
+      terminal.write(data);
+    });
+  });
+  const visible = props.visible;
+  useEffect(() => {
+    if (!visible || !sessionId) return;
+    return watchContent(sessionId);
+  }, [visible, sessionId]);
 
   // Becoming visible refits (a hidden pane's fit is a no-op, so the size is stale); becoming the
   // focused pane also takes the keyboard. Only one pane is ever focused, so only one takes it.

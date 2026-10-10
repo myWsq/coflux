@@ -707,6 +707,24 @@ message SessionCheckpoint {
   TerminalCommandState command = 9;
 }
 
+// A terminal's metadata without its content (plan 20261010-terminal-checkpoint-energy). Checkpoints
+// are split in two signals: this one is small and sent as soon as the title or the command state
+// changes (and in full for every live session right after the daemon reconnects), while the content
+// keeps travelling as SessionCheckpoint at a low cadence.
+//
+// daemon→server: title and command state of a live session; the center checks the session belongs
+// to the sending daemon under the stated task, exactly like a SessionCheckpoint.
+// server→client: only to clients that declared ClientAuth.session_metadata; carries the title only
+// (command is left unset) and replaces the content push those clients no longer receive.
+message SessionMetadata {
+  string session_id = 1;
+  string task_id = 2;
+  // OSC 0/2 terminal title, same semantics as SessionCheckpoint.title (empty = never set).
+  string title = 3;
+  // Shell-integration command state; absent toward clients.
+  TerminalCommandState command = 4;
+}
+
 // ===== executor（plan 116）=====
 //
 // 「agent 经 `coflux executor` 甩子任务」的通路。桌面 app 是本机唯一的 executor host：daemon 把

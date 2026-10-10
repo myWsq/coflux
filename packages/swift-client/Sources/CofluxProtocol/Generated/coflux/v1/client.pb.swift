@@ -105,6 +105,11 @@ public struct Coflux_V1_ClientAuth: Sendable {
   /// Clears the value of `controlProtocolVersion`. Subsequent reads from it will return its default value.
   public mutating func clearControlProtocolVersion() {self._controlProtocolVersion = nil}
 
+  /// The client consumes SessionMetadata and fetches terminal content through TaskRead (plan
+  /// 20261010-terminal-checkpoint-energy). Only honoured when the center announces
+  /// AuthOk.session_metadata; a client that leaves it false keeps receiving every SessionCheckpoint.
+  public var sessionMetadata: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -900,6 +905,12 @@ public struct Coflux_V1_AuthOk: Sendable {
   /// it sends AgentSettingsUpdated after the subscribe snapshot and accepts AgentSettingSet. False
   /// (an older center) tells the client "not supported" apart from "nothing configured yet".
   public var agentSettings: Bool = false
+
+  /// This center serves terminal metadata without content (plan 20261010-terminal-checkpoint-energy):
+  /// a client that declared ClientAuth.session_metadata receives SessionMetadata instead of
+  /// SessionCheckpoint (on subscribe and on change) and reads content through TaskRead. False (an
+  /// older center) means the client must stay on the SessionCheckpoint push.
+  public var sessionMetadata: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1713,6 +1724,14 @@ public struct Coflux_V1_ServerToClient: Sendable {
     set {payload = .agentSettingsUpdated(newValue)}
   }
 
+  public var sessionMetadata: Coflux_V1_SessionMetadata {
+    get {
+      if case .sessionMetadata(let v)? = payload {return v}
+      return Coflux_V1_SessionMetadata()
+    }
+    set {payload = .sessionMetadata(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -1752,6 +1771,7 @@ public struct Coflux_V1_ServerToClient: Sendable {
     case executorRunsUpdated(Coflux_V1_ExecutorRunsUpdated)
     case directoryWorkspaceEnsured(Coflux_V1_DirectoryWorkspaceEnsured)
     case agentSettingsUpdated(Coflux_V1_AgentSettingsUpdated)
+    case sessionMetadata(Coflux_V1_SessionMetadata)
 
   }
 
@@ -1981,7 +2001,7 @@ fileprivate let _protobuf_package = "coflux.v1"
 
 extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientAuth"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}username\0\u{1}password\0\u{3}client_token\0\u{3}supabase_token\0\u{3}client_version\0\u{3}client_kind\0\u{3}control_protocol_version\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}username\0\u{1}password\0\u{3}client_token\0\u{3}supabase_token\0\u{3}client_version\0\u{3}client_kind\0\u{3}control_protocol_version\0\u{3}session_metadata\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1996,6 +2016,7 @@ extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
       case 5: try { try decoder.decodeSingularStringField(value: &self._clientVersion) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self._clientKind) }()
       case 7: try { try decoder.decodeSingularUInt32Field(value: &self._controlProtocolVersion) }()
+      case 8: try { try decoder.decodeSingularBoolField(value: &self.sessionMetadata) }()
       default: break
       }
     }
@@ -2027,6 +2048,9 @@ extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     try { if let v = self._controlProtocolVersion {
       try visitor.visitSingularUInt32Field(value: v, fieldNumber: 7)
     } }()
+    if self.sessionMetadata != false {
+      try visitor.visitSingularBoolField(value: self.sessionMetadata, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2038,6 +2062,7 @@ extension Coflux_V1_ClientAuth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     if lhs._clientVersion != rhs._clientVersion {return false}
     if lhs._clientKind != rhs._clientKind {return false}
     if lhs._controlProtocolVersion != rhs._controlProtocolVersion {return false}
+    if lhs.sessionMetadata != rhs.sessionMetadata {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3467,7 +3492,7 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AuthOk"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}client_token\0\u{4}\u{2}login_name\0\u{3}notification_inbox\0\u{3}control_protocol_version\0\u{3}agent_settings\0\u{b}ice_servers\0\u{c}\u{3}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}client_token\0\u{4}\u{2}login_name\0\u{3}notification_inbox\0\u{3}control_protocol_version\0\u{3}agent_settings\0\u{3}session_metadata\0\u{b}ice_servers\0\u{c}\u{3}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3481,6 +3506,7 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
       case 5: try { try decoder.decodeSingularBoolField(value: &self.notificationInbox) }()
       case 6: try { try decoder.decodeSingularUInt32Field(value: &self.controlProtocolVersion) }()
       case 7: try { try decoder.decodeSingularBoolField(value: &self.agentSettings) }()
+      case 8: try { try decoder.decodeSingularBoolField(value: &self.sessionMetadata) }()
       default: break
       }
     }
@@ -3509,6 +3535,9 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     if self.agentSettings != false {
       try visitor.visitSingularBoolField(value: self.agentSettings, fieldNumber: 7)
     }
+    if self.sessionMetadata != false {
+      try visitor.visitSingularBoolField(value: self.sessionMetadata, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3519,6 +3548,7 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     if lhs._loginName != rhs._loginName {return false}
     if lhs.notificationInbox != rhs.notificationInbox {return false}
     if lhs.agentSettings != rhs.agentSettings {return false}
+    if lhs.sessionMetadata != rhs.sessionMetadata {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -4365,7 +4395,7 @@ extension Coflux_V1_TaskReadResult: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToClient"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{4}\u{4}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{4}\u{2}session_agents_updated\0\u{4}\u{3}oauth_authorize_info\0\u{3}oauth_authorize_result\0\u{3}task_read_result\0\u{3}notification_page\0\u{3}notification_changed\0\u{3}device_tailcat_result\0\u{3}device_tailcat_closed\0\u{3}device_join_key_created\0\u{3}secret_requests_updated\0\u{3}annotations_summary_updated\0\u{3}executor_runs_updated\0\u{3}directory_workspace_ensured\0\u{3}agent_settings_updated\0\u{b}device_relay_grant\0\u{b}device_p2p_answer\0\u{b}device_p2p_channel_result\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{b}device_relay_status\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}\u{c}\u{1d}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{4}\u{4}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{4}\u{2}session_agents_updated\0\u{4}\u{3}oauth_authorize_info\0\u{3}oauth_authorize_result\0\u{3}task_read_result\0\u{3}notification_page\0\u{3}notification_changed\0\u{3}device_tailcat_result\0\u{3}device_tailcat_closed\0\u{3}device_join_key_created\0\u{3}secret_requests_updated\0\u{3}annotations_summary_updated\0\u{3}executor_runs_updated\0\u{3}directory_workspace_ensured\0\u{3}agent_settings_updated\0\u{3}session_metadata\0\u{b}device_relay_grant\0\u{b}device_p2p_answer\0\u{b}device_p2p_channel_result\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{b}device_relay_status\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}\u{c}\u{1d}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4841,6 +4871,19 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .agentSettingsUpdated(v)
         }
       }()
+      case 50: try {
+        var v: Coflux_V1_SessionMetadata?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .sessionMetadata(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .sessionMetadata(v)
+        }
+      }()
       default: break
       }
     }
@@ -4995,6 +5038,10 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .agentSettingsUpdated?: try {
       guard case .agentSettingsUpdated(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 49)
+    }()
+    case .sessionMetadata?: try {
+      guard case .sessionMetadata(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 50)
     }()
     case nil: break
     }

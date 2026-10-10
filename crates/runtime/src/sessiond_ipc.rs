@@ -39,7 +39,20 @@ pub struct SessionInfo {
     /// exit without waiting for the next mark.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<CommandStateInfo>,
+    /// OSC title at resync time, so the core can report metadata for adopted sessions without
+    /// rendering a snapshot (plan 20261010-terminal-checkpoint-energy).
+    #[serde(default)]
+    pub title: String,
 }
+
+/// The runtime core's own logical Device channel toward sessiond (checkpoint snapshots, catalogs).
+pub const INTERNAL_CHANNEL_ID: &str = "__coflux-worker";
+
+/// Request id of the unsolicited `SessionSnapshot` sessiond sends on the runtime's internal Device
+/// channel right before a session's `session.exit` (plan 20261010-terminal-checkpoint-energy): the
+/// final content of the terminal, rendered while sessiond still holds its screen. The runtime
+/// publishes it as the session's last checkpoint when content is still owed.
+pub const FINAL_SNAPSHOT_REQUEST_ID: &str = "__coflux-final-snapshot";
 
 /// runtime core → sessiond control records (JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +120,10 @@ pub enum SessiondEvent {
         #[serde(flatten)]
         state: CommandStateInfo,
     },
+    /// The OSC 0/2 title changed (plan 20261010-terminal-checkpoint-energy): pushed so the title
+    /// reaches the center as metadata without the runtime rendering a snapshot.
+    #[serde(rename = "session.title")]
+    SessionTitle { session_id: String, title: String },
     #[serde(rename = "resync.list")]
     ResyncList {
         /// Unused since the launcher checks health itself; kept empty.
@@ -311,7 +328,7 @@ mod tests {
             nonce: String::new(),
             snapshot_owner_id: "owner-1".into(),
             snapshot_epoch: 9,
-            sessions: vec![SessionInfo { session_id: "s1".into(), task_id: "t1".into(), pid: 4242, command: None }],
+            sessions: vec![SessionInfo { session_id: "s1".into(), task_id: "t1".into(), pid: 4242, command: None, title: "t".into() }],
         };
         let back: SessiondEvent = serde_json::from_str(&serde_json::to_string(&list).unwrap()).unwrap();
         match back {

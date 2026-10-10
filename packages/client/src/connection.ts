@@ -63,7 +63,9 @@ type ConnectionOptions = {
 
 /** 认证包：build-id 照旧上报；clientKind 与控制面协议版本一并带上（plan 105），server 按 kind 选准入规则。 */
 export function buildAuthPayload(credential: AuthCredential, buildId: string, clientKind?: ClientKind): ClientToServerPayload {
-  const version = { clientVersion: buildId, clientKind, controlProtocolVersion: CONTROL_PROTOCOL_VERSION };
+  // sessionMetadata (plan 20261010-terminal-checkpoint-energy): this client reads terminal titles from
+  // SessionMetadata and fetches content through TaskRead once the center announces support.
+  const version = { clientVersion: buildId, clientKind, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, sessionMetadata: true };
   return "token" in credential
     ? { case: "clientAuth", value: { clientToken: credential.token, ...version } }
     : { case: "clientAuth", value: { username: credential.username, password: credential.password, ...version } };

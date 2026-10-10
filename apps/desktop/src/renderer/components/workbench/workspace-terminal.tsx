@@ -574,15 +574,15 @@ export function WorkspaceTerminal({
   // activity indicator while it is not on screen. The map only changes with a center snapshot.
   const executorRuns = useStore(client.store, (state) => state.executorRuns);
   const executorTaskIds = executorTaskIdsOf(executorRuns);
-  // OSC 终端标题（plan 075）：checkpoint 每 ~2s 换引用（有输出即上报），必须用选择器把
-  // 本工作区的 title 摘出来浅比较，否则整棵 WorkspaceTerminal 会跟着 2s 心跳空转重渲染。
+  // OSC 终端标题（plan 075）：来自 sessionMetadata（plan 20261010-terminal-checkpoint-energy），
+  // 仍用选择器把本工作区的 title 摘出来浅比较，别的终端换标题时不重渲染整棵 WorkspaceTerminal。
   const checkpointTitles = useStore(
     client.store,
     useShallow((state) => {
       const titles: Record<string, string> = {};
       for (const task of state.tasks) {
         if (task.workspaceId !== workspaceId || !task.sessionId) continue;
-        const title = state.sessionCheckpoints[task.sessionId]?.title;
+        const title = state.sessionMetadata[task.sessionId]?.title;
         if (title) titles[task.sessionId] = title;
       }
       return titles;

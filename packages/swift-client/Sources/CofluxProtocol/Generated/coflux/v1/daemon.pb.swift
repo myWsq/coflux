@@ -1076,6 +1076,15 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     set {payload = .executorRuns(newValue)}
   }
 
+  /// Title and command state of a live session, sent on change (plan 20261010-terminal-checkpoint-energy).
+  public var sessionMetadata: Coflux_V1_SessionMetadata {
+    get {
+      if case .sessionMetadata(let v)? = payload {return v}
+      return Coflux_V1_SessionMetadata()
+    }
+    set {payload = .sessionMetadata(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -1110,6 +1119,8 @@ public struct Coflux_V1_DaemonToServer: Sendable {
     case secretRequests(Coflux_V1_SecretRequests)
     case annotationsSummary(Coflux_V1_AnnotationsSummary)
     case executorRuns(Coflux_V1_ExecutorRuns)
+    /// Title and command state of a live session, sent on change (plan 20261010-terminal-checkpoint-energy).
+    case sessionMetadata(Coflux_V1_SessionMetadata)
 
   }
 
@@ -3744,7 +3755,7 @@ extension Coflux_V1_ProxyClosed: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DaemonToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{4}\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{4}\u{2}workspace_default_branch\0\u{3}session_agents\0\u{3}agent_control_request\0\u{4}\u{2}server_agent_result\0\u{3}device_tailcat_identity\0\u{3}device_tailcat_endpoint\0\u{3}device_tailcat_installed\0\u{3}device_tailcat_opened\0\u{3}secret_requests\0\u{3}annotations_summary\0\u{3}executor_runs\0\u{b}relay_home\0\u{b}device_p2p_answer_report\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{1d}\u{1}\u{c}!\u{1}\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{4}\u{2}daemon_auth\0\u{3}daemon_enroll_request\0\u{3}daemon_resync\0\u{3}project_validated\0\u{3}worktree_added\0\u{3}session_started\0\u{3}session_exit\0\u{3}ports_update\0\u{3}proxy_opened\0\u{3}proxy_closed\0\u{4}\u{6}proxy_data\0\u{3}workspace_branch\0\u{4}\u{2}workspace_diff\0\u{3}local_grant_ack\0\u{4}\u{3}session_checkpoint\0\u{3}device_operation_report\0\u{3}local_gateway_announce\0\u{3}session_catalog\0\u{3}prepared_device_operation_installed\0\u{4}\u{2}workspace_default_branch\0\u{3}session_agents\0\u{3}agent_control_request\0\u{4}\u{2}server_agent_result\0\u{3}device_tailcat_identity\0\u{3}device_tailcat_endpoint\0\u{3}device_tailcat_installed\0\u{3}device_tailcat_opened\0\u{3}secret_requests\0\u{3}annotations_summary\0\u{3}executor_runs\0\u{3}session_metadata\0\u{b}relay_home\0\u{b}device_p2p_answer_report\0\u{b}daemon_enroll\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}pty_replay\0\u{b}fs_write_result\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}\u{1d}\u{1}\u{c}!\u{1}\u{c}\u{1}\u{1}\u{c}\u{c}\u{1}\u{c}\u{d}\u{1}\u{c}\u{e}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{13}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4142,6 +4153,19 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .executorRuns(v)
         }
       }()
+      case 42: try {
+        var v: Coflux_V1_SessionMetadata?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .sessionMetadata(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .sessionMetadata(v)
+        }
+      }()
       default: break
       }
     }
@@ -4272,6 +4296,10 @@ extension Coflux_V1_DaemonToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .executorRuns?: try {
       guard case .executorRuns(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 41)
+    }()
+    case .sessionMetadata?: try {
+      guard case .sessionMetadata(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 42)
     }()
     case nil: break
     }

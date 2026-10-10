@@ -26,6 +26,10 @@ message ClientAuth {
   // 控制面协议版本（plan 105，常量 CONTROL_PROTOCOL_VERSION）：desktop 低于 server 支持的最低版本才被拒；
   // 平时部署 server 不再踢旧桌面版，它们由 electron-updater 在后台升级。
   optional uint32 control_protocol_version = 7;
+  // The client consumes SessionMetadata and fetches terminal content through TaskRead (plan
+  // 20261010-terminal-checkpoint-energy). Only honoured when the center announces
+  // AuthOk.session_metadata; a client that leaves it false keeps receiving every SessionCheckpoint.
+  bool session_metadata = 8;
 }
 
 // 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地）
@@ -241,6 +245,11 @@ message AuthOk {
   // it sends AgentSettingsUpdated after the subscribe snapshot and accepts AgentSettingSet. False
   // (an older center) tells the client "not supported" apart from "nothing configured yet".
   bool agent_settings = 7;
+  // This center serves terminal metadata without content (plan 20261010-terminal-checkpoint-energy):
+  // a client that declared ClientAuth.session_metadata receives SessionMetadata instead of
+  // SessionCheckpoint (on subscribe and on change) and reads content through TaskRead. False (an
+  // older center) means the client must stay on the SessionCheckpoint push.
+  bool session_metadata = 8;
 }
 
 message AuthError {
@@ -434,6 +443,7 @@ message ServerToClient {
     ExecutorRunsUpdated executor_runs_updated = 47;
     DirectoryWorkspaceEnsured directory_workspace_ensured = 48;
     AgentSettingsUpdated agent_settings_updated = 49;
+    SessionMetadata session_metadata = 50;
   }
 }
 

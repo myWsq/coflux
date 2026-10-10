@@ -2787,6 +2787,44 @@ public struct Coflux_V1_SessionCheckpoint: Sendable {
   fileprivate var _command: Coflux_V1_TerminalCommandState? = nil
 }
 
+/// A terminal's metadata without its content (plan 20261010-terminal-checkpoint-energy). Checkpoints
+/// are split in two signals: this one is small and sent as soon as the title or the command state
+/// changes (and in full for every live session right after the daemon reconnects), while the content
+/// keeps travelling as SessionCheckpoint at a low cadence.
+///
+/// daemon→server: title and command state of a live session; the center checks the session belongs
+/// to the sending daemon under the stated task, exactly like a SessionCheckpoint.
+/// server→client: only to clients that declared ClientAuth.session_metadata; carries the title only
+/// (command is left unset) and replaces the content push those clients no longer receive.
+public struct Coflux_V1_SessionMetadata: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var taskID: String = String()
+
+  /// OSC 0/2 terminal title, same semantics as SessionCheckpoint.title (empty = never set).
+  public var title: String = String()
+
+  /// Shell-integration command state; absent toward clients.
+  public var command: Coflux_V1_TerminalCommandState {
+    get {_command ?? Coflux_V1_TerminalCommandState()}
+    set {_command = newValue}
+  }
+  /// Returns true if `command` has been explicitly set.
+  public var hasCommand: Bool {self._command != nil}
+  /// Clears the value of `command`. Subsequent reads from it will return its default value.
+  public mutating func clearCommand() {self._command = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _command: Coflux_V1_TerminalCommandState? = nil
+}
+
 /// client→daemon：把本 client 登记成本机 executor host（可重复发送 = 幂等更新）。
 /// 同一 daemon 只认一个 host：host_id 稳定标识桌面实例，host_epoch 是同一 host 的连接换代号
 /// （单调递增）。较低 epoch 的登记是 stale，直接拒。
@@ -9276,6 +9314,55 @@ extension Coflux_V1_SessionCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.cols != rhs.cols {return false}
     if lhs.rows != rhs.rows {return false}
     if lhs.capturedAt != rhs.capturedAt {return false}
+    if lhs.title != rhs.title {return false}
+    if lhs._command != rhs._command {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_SessionMetadata: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SessionMetadata"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}title\0\u{1}command\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._command) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 2)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 3)
+    }
+    try { if let v = self._command {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_SessionMetadata, rhs: Coflux_V1_SessionMetadata) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.taskID != rhs.taskID {return false}
     if lhs.title != rhs.title {return false}
     if lhs._command != rhs._command {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}

@@ -231,7 +231,7 @@ export function NavigationPalette(props: NavigationPaletteProps) {
         daemons: state.daemons,
         tasks: state.tasks,
         sessionAgents: state.sessionAgents,
-        sessionCheckpoints: state.sessionCheckpoints,
+        sessionMetadata: state.sessionMetadata,
         current: props.current,
         canOpenBrowserTab: Boolean(props.onNewBrowserTab && props.current.workspaceId),
         canOpenScreenTab: Boolean(props.onNewScreenTab && props.current.workspaceId),
