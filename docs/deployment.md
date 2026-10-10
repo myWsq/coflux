@@ -86,6 +86,7 @@ Daemons run on users' machines, not as part of these server roles. prod-bj also 
 
 The centre, its database and the DERP/STUN node run on one Tencent Cloud host in Beijing, **coflux-bj** (`root@82.157.104.55`, zone `ap-beijing-3`, same account and the same layout as coflux-sh below). It replaced coflux-sh after about two hours because Shanghai was too far from the owner's devices. Differences from the coflux-sh description that follows:
 
+- **Deployed**: `63704e9c` (= v2.18.0, deployed 2026-10-10 20:52 before the tag was pushed). No migration; backup `/var/backups/coflux/coflux-predeploy-63704e9c-20261010-204628.dump`. From this version the centre broadcasts session metadata instead of checkpoint content to clients that declare `ClientAuth.session_metadata`, and keeps the content push for older desktops and iOS.
 - DERP region is **903 `coflux-bj`**, node `derp.coflux.yourantiandi.com` with `IPv4` 82.157.104.55, STUN 3479. Clients dial the region's IPv4, so DERP never depended on the DNS change.
 - Caddy trusts both forwarders: `trusted_proxies static 82.40.34.37/32 49.234.42.193/32`.
 - prod-jp's `(coflux_to_sh)` snippet now dials `https://82.157.104.55` (backup `Caddyfile.bak-pre-to-bj-*`).
