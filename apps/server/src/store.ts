@@ -242,6 +242,9 @@ export interface SessionCheckpointRecord extends Omit<SessionCheckpointRow, "sna
   snapshotSeq: bigint;
 }
 
+/** A stored checkpoint's identity and title without its content (plan 20261010-terminal-checkpoint-energy). */
+export type SessionTitleRecord = Pick<SessionCheckpointRecord, "sessionId" | "taskId" | "title">;
+
 function rowToCheckpoint(row: SessionCheckpointRow): SessionCheckpointRecord {
   return { ...row, snapshotSeq: BigInt(row.snapshotSeq) };
 }
@@ -1405,6 +1408,28 @@ export class Store {
       SELECT * FROM session_checkpoints WHERE account_id = ${accountId} ORDER BY captured_at DESC
     `;
     return rows.map(rowToCheckpoint);
+  }
+
+  /** Titles of the account's stored checkpoints, without loading their content: what a metadata
+   * client receives on subscribe (plan 20261010-terminal-checkpoint-energy). Same retention window
+   * as the reads above. */
+  async listSessionTitles(accountId: AccountId): Promise<SessionTitleRecord[]> {
+    return this.sql<SessionTitleRecord[]>`
+      SELECT session_id, task_id, title FROM session_checkpoints
+      WHERE account_id = ${accountId} AND updated_at >= ${Date.now() - SESSION_CHECKPOINT_RETENTION_MS}
+      ORDER BY captured_at DESC
+    `;
+  }
+
+  /** A title reported as metadata (plan 20261010-terminal-checkpoint-energy) lands on the session's
+   * stored row, if there is one yet: the content upsert only applies when snapshot_seq grows, so it
+   * cannot carry a title-only change. Without a row the title waits in the hub's memory and is
+   * written with the first content. */
+  async updateSessionCheckpointTitle(daemonId: DaemonId, sessionId: SessionId, taskId: TaskId, title: string): Promise<void> {
+    await this.sql`
+      UPDATE session_checkpoints SET title = ${title}
+      WHERE session_id = ${sessionId} AND task_id = ${taskId} AND daemon_id = ${daemonId} AND title <> ${title}
+    `;
   }
 
   /** checkpoint 是可丢派生缓存：按账号同时限制保留期、条目数和 BYTEA 总量。 */

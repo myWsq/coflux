@@ -59,6 +59,8 @@ import {
   type ExecutorRunRef,
   type WorkspaceAnnotationSummary,
   type SessionCheckpoint,
+  type SessionMetadata,
+  type TerminalCommandState,
   type AgentControlRequest,
   type AgentControlResultPayload,
   type AgentWorkspaceLocate,
@@ -71,6 +73,7 @@ import {
   type AgentSettingRecord,
   type PreparedOperationRecord,
   type SessionCheckpointRecord,
+  type SessionTitleRecord,
 } from "./store.js";
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
@@ -200,6 +203,11 @@ const MAX_WORKSPACE_NAME_BYTES = 256;
 const MAX_PROJECT_NAME_BYTES = 256;
 /** read_terminal 经 daemon 读取的字节上限（与 checkpoint 同级）。 */
 const MAX_TERMINAL_READ_BYTES = 256 * 1024;
+/** How long, and for how many sessions, a just-ended session's final content checkpoint is still
+ * accepted after its exit (plan 20261010-terminal-checkpoint-energy). The daemon sends it right
+ * before the exit, so it trails by at most a reconnect. */
+const ENDED_SESSION_TTL_MS = 2 * 60_000;
+const MAX_ENDED_SESSIONS = 1024;
 
 /** daemon 展示信息：不用生成的 DaemonInfo 消息类型（无需 $typeName）——它只作为其它信封消息的
  * 嵌套字段被构造（nested init 接受纯对象），从不单独序列化，用生成类型纯属多余的仪式。 */
@@ -312,6 +320,9 @@ export interface ClientConn {
   tokenHash?: string;
   /** device.authorize(Info) 猜测失败次数（同连接累计）；达上限后拒绝再试（限速见 plan 003） */
   authorizeFailures?: number;
+  /** The client declared ClientAuth.session_metadata (plan 20261010-terminal-checkpoint-energy): it
+   * receives SessionMetadata instead of SessionCheckpoint and reads content through TaskRead. */
+  sessionMetadata?: boolean;
 }
 export interface DaemonCtx {
   ws: WebSocket;
@@ -579,6 +590,15 @@ export class Hub {
   private sessions = new Map<SessionId, RuntimeSession>();
   /** Command state of live sessions from their checkpoints (interactive-only terminal model); dropped with the session. */
   private readonly commandStates = new Map<SessionId, TerminalCommandView>();
+  /** Latest title of live sessions (plan 20261010-terminal-checkpoint-energy). `fromMetadata` marks a
+   * title (and command state) reported by SessionMetadata: from then on it wins over the copy a
+   * content checkpoint carries, which can be older when the two arrive out of order. `sentTitle`
+   * is the title last broadcast to metadata clients. Dropped with the session. */
+  private readonly sessionTitles = new Map<SessionId, { taskId: TaskId; accountId: AccountId; title: string; fromMetadata: boolean; sentTitle?: string }>();
+  /** Sessions that just ended (plan 20261010-terminal-checkpoint-energy): the daemon may deliver a
+   * session's final content checkpoint after its exit, and that one checkpoint is still stored.
+   * Bounded by count and age; an entry is consumed by the checkpoint it admits. */
+  private readonly endedSessions = new Map<SessionId, { taskId: TaskId; daemonId: DaemonId; accountId: AccountId; endedAt: number }>();
   private clients = new Set<ClientConn>();
   private readonly preparedOperations: PreparedOperationService<ClientConn, DaemonConn>;
   /** 完成原语（plan 091）：中心发起的 prepared 操作按 operationId、任务退出按 taskId 等结果。 */
@@ -1837,6 +1857,60 @@ export class Hub {
     });
   }
 
+  /** title 由 sessiond 源头钳制（256B）；这里兜底截断而非整条拒收——伪造 daemon 塞超长
+   * 标题不该连累 ansi_snapshot 一起丢。256 个 UTF-16 单元对展示已绰绰有余。
+   * 注意不能在 surrogate pair 中间截：proto 解码保证 well-formed，半个代理对只会由
+   * 这次截断制造，而它不是合法 UTF-8，会让 PG 的 TEXT 写入整条报错。 */
+  private clampSessionTitle(title: string): string {
+    if (title.length <= 256) return title;
+    const end = /[\uD800-\uDBFF]/.test(title[255]!) ? 255 : 256;
+    return title.slice(0, end);
+  }
+
+  /** The session belongs to this daemon under the stated task (catalog live or runtime route): the
+   * ownership check shared by SessionCheckpoint and SessionMetadata. */
+  private matchesKnownSession(daemon: DaemonConn, sessionId: SessionId, taskId: TaskId): boolean {
+    const live = this.catalog.get(daemon.info.daemonId)?.get(sessionId);
+    const runtime = this.sessions.get(sessionId);
+    return live
+      ? live.taskId === taskId
+      : runtime?.daemonId === daemon.info.daemonId && runtime.taskId === taskId;
+  }
+
+  // Command state rides along the checkpoint or the metadata (interactive-only terminal model) and
+  // only lives in memory: the Task record stays as it is, the view is dropped with the session.
+  private setCommandState(sessionId: SessionId, command: TerminalCommandState): void {
+    this.commandStates.set(sessionId, {
+      integrated: command.integrated,
+      busy: command.busy,
+      commandSeq: Number(command.commandSeq),
+      lastCommandExitCode: command.finishedSeq > 0n && command.exitCode !== undefined ? command.exitCode : null,
+    });
+  }
+
+  /** Remember a session that just ended so its final content checkpoint, which the daemon may
+   * deliver after the exit, is still stored once (plan 20261010-terminal-checkpoint-energy). */
+  private rememberEndedSession(session: RuntimeSession): void {
+    const now = Date.now();
+    for (const [sessionId, entry] of this.endedSessions) {
+      if (now - entry.endedAt <= ENDED_SESSION_TTL_MS && this.endedSessions.size < MAX_ENDED_SESSIONS) break;
+      this.endedSessions.delete(sessionId);
+    }
+    this.endedSessions.delete(session.sessionId);
+    this.endedSessions.set(session.sessionId, {
+      taskId: session.taskId,
+      daemonId: session.daemonId,
+      accountId: session.accountId,
+      endedAt: now,
+    });
+  }
+
+  /**
+   * Content checkpoint: stored for offline view and the read fallback, pushed to legacy clients
+   * only (plan 20261010-terminal-checkpoint-energy). Also the legacy combined signal of an older
+   * daemon, whose title and command state count as metadata until the session reports
+   * SessionMetadata itself. A session that just ended may still deliver its final content.
+   */
   private async acceptSessionCheckpoint(daemon: DaemonConn, checkpoint: SessionCheckpoint): Promise<void> {
     if (
       !validControlId(checkpoint.sessionId) ||
@@ -1850,52 +1924,130 @@ export class Hub {
       checkpoint.capturedAt <= 0 ||
       checkpoint.capturedAt > Date.now() + 5 * 60_000
     ) return;
-    // title 由 sessiond 源头钳制（256B）；这里兜底截断而非整条拒收——伪造 daemon 塞超长
-    // 标题不该连累 ansi_snapshot 一起丢。256 个 UTF-16 单元对展示已绰绰有余。
-    // 注意不能在 surrogate pair 中间截：proto 解码保证 well-formed，半个代理对只会由
-    // 这次截断制造，而它不是合法 UTF-8，会让 PG 的 TEXT 写入整条报错。
-    if (checkpoint.title.length > 256) {
-      const end = /[\uD800-\uDBFF]/.test(checkpoint.title[255]!) ? 255 : 256;
-      checkpoint.title = checkpoint.title.slice(0, end);
+    checkpoint.title = this.clampSessionTitle(checkpoint.title);
+    const daemonId = daemon.info.daemonId;
+    let ended = false;
+    if (!this.matchesKnownSession(daemon, checkpoint.sessionId, checkpoint.taskId)) {
+      // The final content of a session whose exit reached the center first: accepted once.
+      const entry = this.endedSessions.get(checkpoint.sessionId);
+      if (
+        !entry ||
+        entry.daemonId !== daemonId ||
+        entry.accountId !== daemon.accountId ||
+        entry.taskId !== checkpoint.taskId ||
+        Date.now() - entry.endedAt > ENDED_SESSION_TTL_MS
+      ) return;
+      ended = true;
+    } else {
+      const known = this.sessionTitles.get(checkpoint.sessionId);
+      if (known?.fromMetadata && known.taskId === checkpoint.taskId) {
+        // The daemon reports metadata on change: its title is the newer one, and the copy inside
+        // this content (rendered earlier, or delivered out of order) must not roll it back.
+        checkpoint.title = known.title;
+      } else {
+        if (checkpoint.command) this.setCommandState(checkpoint.sessionId, checkpoint.command);
+        this.sessionTitles.set(checkpoint.sessionId, {
+          taskId: checkpoint.taskId,
+          accountId: daemon.accountId,
+          title: checkpoint.title,
+          fromMetadata: false,
+          sentTitle: known && known.taskId === checkpoint.taskId ? known.sentTitle : undefined,
+        });
+      }
     }
-    const live = this.catalog.get(daemon.info.daemonId)?.get(checkpoint.sessionId);
-    const runtime = this.sessions.get(checkpoint.sessionId);
-    const matchesKnownSession = live
-      ? live.taskId === checkpoint.taskId
-      : runtime?.daemonId === daemon.info.daemonId && runtime.taskId === checkpoint.taskId;
-    if (!matchesKnownSession) return;
-    // Command state rides along the checkpoint (interactive-only terminal model) and only lives in
-    // memory: the Task record stays as it is, the view is dropped with the session.
-    if (checkpoint.command) {
-      const command = checkpoint.command;
-      this.commandStates.set(checkpoint.sessionId, {
-        integrated: command.integrated,
-        busy: command.busy,
-        commandSeq: Number(command.commandSeq),
-        lastCommandExitCode: command.finishedSeq > 0n && command.exitCode !== undefined ? command.exitCode : null,
-      });
-    }
-    await this.withDeviceEffectGuard(daemon.info.daemonId, async (effectGuard) => {
+    await this.withDeviceEffectGuard(daemonId, async (effectGuard) => {
       const stored = await this.store.transaction(async (tx) => {
         // checkpoint 也是 device 子记录：父锁后重读 task，与 removeDevice 的
         // 「删 checkpoint → 删 task」串行，防迟到 upsert 在删除后插回孤儿。
-        const device = await tx.claimActiveDevice(daemon.info.daemonId, daemon.accountId);
+        const device = await tx.claimActiveDevice(daemonId, daemon.accountId);
         if (!device) return undefined;
         const task = await tx.getTask(checkpoint.taskId);
+        if (!task || task.accountId !== daemon.accountId || task.daemonId !== daemonId) return undefined;
+        const current = ended
+          // The exit cleared task.sessionId; a restarted task (new session) no longer takes it.
+          ? task.status === TaskStatus.EXITED && !task.sessionId
+          : task.sessionId === checkpoint.sessionId && task.status === TaskStatus.RUNNING;
+        if (!current) return undefined;
+        return tx.upsertSessionCheckpoint(daemon.accountId, daemonId, checkpoint);
+      });
+      if (!stored || effectGuard.cancelled || this.daemons.get(daemonId) !== daemon) return;
+      if (ended) this.endedSessions.delete(checkpoint.sessionId);
+      for (const client of this.clients) {
+        if (client.subscribed && client.accountId === daemon.accountId && !client.sessionMetadata) this.sendCheckpoint(client, stored);
+      }
+      if (!ended) this.broadcastSessionTitle(checkpoint.sessionId);
+    });
+  }
+
+  /**
+   * SessionMetadata from the daemon (plan 20261010-terminal-checkpoint-energy): title and command
+   * state on change, and in full after every resync. Same id validation, title truncation and
+   * ownership check as a checkpoint; a title change is persisted on the stored checkpoint row (the
+   * read fallback and the legacy subscribe replay read it there) under the same device guard and
+   * task re-check, then broadcast to metadata clients.
+   */
+  private async acceptSessionMetadata(daemon: DaemonConn, metadata: SessionMetadata): Promise<void> {
+    if (!validControlId(metadata.sessionId) || !validControlId(metadata.taskId)) return;
+    const title = this.clampSessionTitle(metadata.title);
+    const daemonId = daemon.info.daemonId;
+    if (!this.matchesKnownSession(daemon, metadata.sessionId, metadata.taskId)) return;
+    if (metadata.command) this.setCommandState(metadata.sessionId, metadata.command);
+    const known = this.sessionTitles.get(metadata.sessionId);
+    const previous = known && known.taskId === metadata.taskId ? known : undefined;
+    this.sessionTitles.set(metadata.sessionId, {
+      taskId: metadata.taskId,
+      accountId: daemon.accountId,
+      title,
+      fromMetadata: true,
+      sentTitle: previous?.sentTitle,
+    });
+    if (previous && previous.title === title) return;
+    await this.withDeviceEffectGuard(daemonId, async (effectGuard) => {
+      const current = await this.store.transaction(async (tx) => {
+        const device = await tx.claimActiveDevice(daemonId, daemon.accountId);
+        if (!device) return false;
+        const task = await tx.getTask(metadata.taskId);
         if (
           !task ||
           task.accountId !== daemon.accountId ||
-          task.daemonId !== daemon.info.daemonId ||
-          task.sessionId !== checkpoint.sessionId ||
+          task.daemonId !== daemonId ||
+          task.sessionId !== metadata.sessionId ||
           task.status !== TaskStatus.RUNNING
-        ) return undefined;
-        return tx.upsertSessionCheckpoint(daemon.accountId, daemon.info.daemonId, checkpoint);
+        ) return false;
+        await tx.updateSessionCheckpointTitle(daemonId, metadata.sessionId, metadata.taskId, title);
+        return true;
       });
-      if (!stored || effectGuard.cancelled || this.daemons.get(daemon.info.daemonId) !== daemon) return;
-      for (const client of this.clients) {
-        if (client.subscribed && client.accountId === daemon.accountId) this.sendCheckpoint(client, stored);
-      }
+      if (!current || effectGuard.cancelled || this.daemons.get(daemonId) !== daemon) return;
+      this.broadcastSessionTitle(metadata.sessionId);
     });
+  }
+
+  /** Push a session's title to the account's metadata clients when it differs from the last push. */
+  private broadcastSessionTitle(sessionId: SessionId): void {
+    const entry = this.sessionTitles.get(sessionId);
+    if (!entry || entry.sentTitle === entry.title) return;
+    entry.sentTitle = entry.title;
+    const payload: ServerToClientPayload = {
+      case: "sessionMetadata",
+      value: { sessionId, taskId: entry.taskId, title: entry.title },
+    };
+    for (const client of this.clients) {
+      if (client.subscribed && client.accountId === entry.accountId && client.sessionMetadata) this.sendClient(client, payload);
+    }
+  }
+
+  /** Subscribe snapshot for a metadata client: every known terminal title — the stored rows (also
+   * terminals of offline devices) overlaid by the live sessions' current titles. */
+  private sendInitialSessionTitles(client: ClientConn, accountId: AccountId, stored: readonly SessionTitleRecord[]): void {
+    const titles = new Map<SessionId, { taskId: TaskId; title: string }>();
+    for (const row of stored) titles.set(row.sessionId, { taskId: row.taskId, title: row.title });
+    for (const [sessionId, entry] of this.sessionTitles) {
+      if (entry.accountId === accountId) titles.set(sessionId, { taskId: entry.taskId, title: entry.title });
+    }
+    for (const [sessionId, entry] of titles) {
+      if (!entry.title) continue;
+      this.sendClientNow(client, { case: "sessionMetadata", value: { sessionId, taskId: entry.taskId, title: entry.title } });
+    }
   }
 
   private sendCheckpoint(client: ClientConn, checkpoint: SessionCheckpointRecord, initialSnapshot = false): void {
@@ -2542,6 +2694,19 @@ export class Hub {
         }
         break;
       }
+      case "sessionMetadata": {
+        const value = msg.payload.value;
+        const daemon = this.currentDaemon(conn);
+        if (daemon) {
+          // A title change is a durable write on the stored row: serialized with connection
+          // replacement like the checkpoint above.
+          await this.withDaemonGenerationGate(daemon.info.daemonId, async () => {
+            if (!this.isCurrentDaemon(daemon)) return;
+            await this.acceptSessionMetadata(daemon, value);
+          });
+        }
+        break;
+      }
       case "sessionAgents": {
         const daemon = this.currentDaemon(conn);
         if (daemon) this.acceptSessionAgents(daemon, msg.payload.value.sessions);
@@ -2972,6 +3137,8 @@ export class Hub {
     const s = this.sessions.get(sessionId);
     this.sessions.delete(sessionId);
     this.commandStates.delete(sessionId);
+    this.sessionTitles.delete(sessionId);
+    if (s) this.rememberEndedSession(s);
     const released = this.routeTable.releaseSession(sessionId);
     if (!released) return;
     for (const shortId of released.shortIds) this.tunnels.closeAllForShortId(shortId);
@@ -3080,7 +3247,9 @@ export class Hub {
         let projects: Project[];
         let workspaces: Workspace[];
         let tasks: Task[];
-        let checkpoints: SessionCheckpointRecord[];
+        // Metadata clients get titles only (plan 20261010-terminal-checkpoint-energy): no content
+        // blobs are loaded for them.
+        let checkpoints: SessionCheckpointRecord[] | SessionTitleRecord[];
         let inbox: Awaited<ReturnType<Store["notificationPage"]>>;
         let agentSettings: AgentSettingRecord[];
         try {
@@ -3091,7 +3260,7 @@ export class Hub {
             this.store.listProjects(accountId),
             this.store.listWorkspaces(accountId),
             this.store.listTasks(accountId),
-            this.store.listSessionCheckpoints(accountId),
+            client.sessionMetadata ? this.store.listSessionTitles(accountId) : this.store.listSessionCheckpoints(accountId),
             this.store.notificationPage(accountId),
             this.store.listAgentSettings(accountId),
           ]);
@@ -3106,7 +3275,8 @@ export class Hub {
         this.sendClientNow(client, { case: "stateSnapshot", value: { daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) } });
         this.sendClientNow(client, { case: "notificationPage", value: { ...inbox, requestId: "initial" } });
         this.sendClientNow(client, { case: "agentSettingsUpdated", value: { agents: agentSettings, requestId: "", error: "" } });
-        for (const checkpoint of checkpoints) this.sendCheckpoint(client, checkpoint, true);
+        if (client.sessionMetadata) this.sendInitialSessionTitles(client, accountId, checkpoints);
+        else for (const checkpoint of checkpoints as SessionCheckpointRecord[]) this.sendCheckpoint(client, checkpoint, true);
         // agent presence 补发（plan 073）：client 的 stateSnapshot handler 会清空本地 presence，
         // 这里按设备补发当前全量——顺序在快照之后、与 checkpoint 同批，天然落在乱序防护序列内。
         for (const [daemonId, entry] of this.sessionAgents) {
@@ -3888,8 +4058,9 @@ export class Hub {
 
     client.accountId = accountId;
     client.tokenHash = tokenHash;
+    client.sessionMetadata = msg.sessionMetadata === true;
     const loginName = await this.resolveLoginName(loginUserId, tokenHash);
-    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true, agentSettings: true } });
+    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true, agentSettings: true, sessionMetadata: true } });
   }
 
   /** authOk 回带的「登录身份显示串」（plan 110）：local 模式恒为 env 用户名；password 模式按
