@@ -45,8 +45,12 @@ coflux-runtime: crates/runtime/src/screen.rs                             per ses
   `role: quit`).
 - **Renderer**: `screen-tabs.ts` (records: workspace, device, stable remote session id),
   `screen-runtime.ts`, `screen-session.ts` (protocol, credit, WebCodecs `avc1.64001f` Annex B),
-  `screen-view.tsx` (status bar 直连/中继 + latency, 沉浸, 断开; states; input; cursor). The tab kind is
+  `screen-view.tsx` (status bar 直连/中继 + latency, resolution, 沉浸, 断开; states; input; cursor). The tab kind is
   registered in `terminal-layout.ts` (`SCREEN_TAB_PREFIX`, exempt from reconcile, not a task).
+- **Resolution**: the status bar's dropdown (`screen-resolution.ts`) offers 「跟随窗口」 (default: the
+  remote display follows the tab 1:1 in points) or a fixed size in points (1280×800 … 1920×1080) at
+  the local screen's scale, sent through `ScreenSessionResize` at once; on a fixed size resizing the tab
+  or immersive mode only scales the picture. Remembered per (server, device) on this Mac.
 
 ## Budgets
 
