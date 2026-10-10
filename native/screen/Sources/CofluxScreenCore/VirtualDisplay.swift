@@ -6,8 +6,9 @@ import Foundation
 /// 27) can be swapped for the macOS 27 SkyLight `SLVirtualDisplay` family later without touching
 /// the session. Measured facts the implementation respects (see the plan's Decisions):
 ///  1. re-applying settings on the same object changes resolution and keeps the displayID;
-///  2. the first apply lands on a 1× mode of doubled point size: the HiDPI mode is selected
-///     explicitly afterwards from the modes the system then offers;
+///  2. with hiDPI the mode is given in points and the system offers the HiDPI mode at twice it in
+///     pixels, but may not land on it by itself: it is selected explicitly afterwards from the
+///     modes the system then offers;
 ///  3. while every display sleeps WindowServer defers all configuration: the displays are woken
 ///     and the display waited for before creating, capturing or destroying — and the same serial
 ///     number is reused on every attempt (a lingering display is deferred, not leaked);
@@ -46,8 +47,12 @@ public final class CGVirtualDisplayProvider: VirtualDisplayProvider {
         guard let display else { throw HelperError.display("CGVirtualDisplay unavailable") }
         let settings = CGVirtualDisplaySettings()
         settings.hiDPI = geometry.scale == 2 ? 1 : 0
+        // With hiDPI set, the mode's size is read as points: the system then offers the native
+        // HiDPI mode at twice it in pixels. Given pixels, it would build a mode twice as large and
+        // offer the wanted one only as unusable for the desktop, which a selection refuses with
+        // kCGErrorFailure (measured on macOS 27).
         settings.modes = [
-            CGVirtualDisplayMode(width: UInt(geometry.widthPixels), height: UInt(geometry.heightPixels), refreshRate: 60),
+            CGVirtualDisplayMode(width: UInt(geometry.widthPoints), height: UInt(geometry.heightPoints), refreshRate: 60),
         ]
         guard display.apply(settings) else {
             throw HelperError.display("applySettings refused \(geometry.widthPixels)x\(geometry.heightPixels)")
@@ -93,6 +98,27 @@ public enum DisplayConfiguration {
         poll()
     }
 
+    /// Run `attempt` until it stops throwing, every `interval` up to `timeout`; the completion carries
+    /// the last failure. A virtual display that just came online (or was just re-applied) is still
+    /// being reconfigured: WindowServer refuses a mode change or a mirror with kCGErrorFailure until
+    /// it settles, and accepts the same request a moment later (measured on macOS 27).
+    public static func settle(timeout: TimeInterval = 3, interval: TimeInterval = 0.2, _ attempt: @escaping () throws -> Void, completion: @escaping (Error?) -> Void) {
+        let deadline = Date().addingTimeInterval(timeout)
+        func poll() {
+            do {
+                try attempt()
+                completion(nil)
+            } catch {
+                if Date() >= deadline {
+                    completion(error)
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + interval) { poll() }
+                }
+            }
+        }
+        poll()
+    }
+
     public static func onlineDisplays() -> [CGDirectDisplayID] {
         var count: UInt32 = 0
         var ids = [CGDirectDisplayID](repeating: 0, count: 32)
@@ -125,8 +151,9 @@ public enum DisplayConfiguration {
             throw HelperError.display("cannot begin display configuration")
         }
         CGConfigureDisplayWithDisplayMode(config, displayID, modes[index], nil)
-        guard CGCompleteDisplayConfiguration(config, .forAppOnly) == .success else {
-            throw HelperError.display("mode selection refused")
+        let status = CGCompleteDisplayConfiguration(config, .forAppOnly)
+        guard status == .success else {
+            throw HelperError.display("mode selection refused (CGError \(status.rawValue))")
         }
     }
 
@@ -141,8 +168,9 @@ public enum DisplayConfiguration {
         for display in onlineDisplays() where display != virtualDisplay {
             CGConfigureDisplayMirrorOfDisplay(config, display, virtualDisplay)
         }
-        guard CGCompleteDisplayConfiguration(config, .forAppOnly) == .success else {
-            throw HelperError.display("mirroring refused")
+        let status = CGCompleteDisplayConfiguration(config, .forAppOnly)
+        guard status == .success else {
+            throw HelperError.display("mirroring refused (CGError \(status.rawValue))")
         }
     }
 
