@@ -1,6 +1,7 @@
 //! git 操作：校验仓库、worktree 增删。与 TS git.ts 行为一致。
 
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 async fn run_git(args: &[&str]) -> (bool, String, String) {
@@ -81,6 +82,53 @@ pub(crate) async fn repo_facts(path: &str) -> Option<crate::worktree_locate::Rep
 pub struct DiffStat {
     pub additions: i32,
     pub deletions: i32,
+}
+
+/// Fastest cadence of a workspace's diff statistics: the branch-watch tick.
+pub const DIFF_STAT_BASE_INTERVAL: Duration = Duration::from_secs(3);
+/// Slowest cadence while the statistics keep coming back unchanged.
+pub const DIFF_STAT_MAX_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Per-workspace pacing of [`diff_stat`] (plan 20261010-terminal-checkpoint-energy). Each run
+/// spawns several git processes and reads every untracked file; while consecutive results are
+/// identical the interval doubles up to [`DIFF_STAT_MAX_INTERVAL`], and the first different result
+/// (or a branch change, see [`DiffStatBackoff::reset`]) brings it back to the base interval.
+#[derive(Clone, Debug)]
+pub struct DiffStatBackoff {
+    interval: Duration,
+    next_due: Instant,
+}
+
+impl DiffStatBackoff {
+    /// A workspace seen for the first time is due at once.
+    pub fn new(now: Instant) -> Self {
+        Self {
+            interval: DIFF_STAT_BASE_INTERVAL,
+            next_due: now,
+        }
+    }
+
+    pub fn due(&self, now: Instant) -> bool {
+        now >= self.next_due
+    }
+
+    /// Something outside the statistics changed (the branch, a reconnect): due now, fast again.
+    pub fn reset(&mut self, now: Instant) {
+        self.interval = DIFF_STAT_BASE_INTERVAL;
+        self.next_due = now;
+    }
+
+    /// A run finished: back off when its result equals the previous one, else return to the base
+    /// interval. Returns the delay until the next run.
+    pub fn record(&mut self, now: Instant, changed: bool) -> Duration {
+        self.interval = if changed {
+            DIFF_STAT_BASE_INTERVAL
+        } else {
+            self.interval.saturating_mul(2).min(DIFF_STAT_MAX_INTERVAL)
+        };
+        self.next_due = now + self.interval;
+        self.interval
+    }
 }
 
 /// 计算某 worktree 相对 default_branch 的累积 git diff：merge-base(default_branch, HEAD) 到
@@ -416,6 +464,34 @@ mod tests {
         count_untracked_lines, ordered_remote_names, parse_shortstat, project_name_from_remote,
         suggested_name_from_remotes,
     };
+
+    #[test]
+    fn diff_stat_backs_off_while_unchanged_and_snaps_back_on_change() {
+        use super::{DiffStatBackoff, DIFF_STAT_BASE_INTERVAL, DIFF_STAT_MAX_INTERVAL};
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let mut backoff = DiffStatBackoff::new(start);
+        assert!(backoff.due(start), "a new workspace runs at once");
+        // The first result is a change (nothing to compare with): base cadence.
+        assert_eq!(backoff.record(start, true), DIFF_STAT_BASE_INTERVAL);
+        assert_eq!(backoff.record(start, false), Duration::from_secs(6));
+        assert_eq!(backoff.record(start, false), Duration::from_secs(12));
+        let mut interval = Duration::ZERO;
+        for _ in 0..10 {
+            interval = backoff.record(start, false);
+        }
+        assert_eq!(interval, DIFF_STAT_MAX_INTERVAL, "capped at the ceiling");
+        assert!(!backoff.due(start + Duration::from_secs(59)));
+        assert!(backoff.due(start + DIFF_STAT_MAX_INTERVAL));
+        // A changed result returns to the base cadence at once.
+        assert_eq!(backoff.record(start, true), DIFF_STAT_BASE_INTERVAL);
+        // A branch change makes it due immediately.
+        backoff.record(start, false);
+        backoff.reset(start);
+        assert!(backoff.due(start));
+        assert_eq!(backoff.record(start, false), Duration::from_secs(6));
+    }
 
     #[test]
     fn parses_shortstat_variants() {

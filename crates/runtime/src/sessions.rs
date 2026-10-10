@@ -34,7 +34,9 @@ use coflux_ptyd::{InputChannel, PtydClient, PtydError, SubscriptionEvent};
 use rand_core::{OsRng, RngCore};
 
 use crate::sessiond::{Checkpoint, ControlError, InputAdmission, SequencedDecision, SessionState, TerminalState};
-use crate::sessiond_ipc::{encode_frame, DataFrame, SessionInfo, SessiondEvent};
+use crate::sessiond_ipc::{
+    encode_frame, DataFrame, SessionInfo, SessiondEvent, FINAL_SNAPSHOT_REQUEST_ID, INTERNAL_CHANNEL_ID,
+};
 use crate::shell_integration;
 
 /// 把 `segment` 放到 PATH 首段（plan 112）：原 PATH 为空/缺失时就只有这一段；其余段顺序不变；
@@ -206,7 +208,7 @@ const CATALOG_LEASE_LIMIT: usize = 1024;
 pub const TERMINAL_SECRET_ENV: &str = "COFLUX_TERMINAL_SECRET";
 
 /// `wire::TerminalCommandState` view of the sessiond command state.
-fn wire_command_state(state: CommandStateInfo) -> TerminalCommandState {
+pub(crate) fn wire_command_state(state: CommandStateInfo) -> TerminalCommandState {
     TerminalCommandState {
         integrated: state.integrated,
         busy: state.busy,
@@ -1430,6 +1432,15 @@ impl Sessions {
                         state,
                     });
                 }
+                // Same for the OSC title (plan 20261010-terminal-checkpoint-energy): the runtime
+                // reports it as metadata without rendering a snapshot. Best effort too — a dropped
+                // event is repaired by the next content snapshot, which carries the title.
+                if let Some(title) = locked.state.take_title_change() {
+                    let _ = this.send_ctrl(&SessiondEvent::SessionTitle {
+                        session_id: session_id.clone(),
+                        title,
+                    });
+                }
 
                 // 只通知 worker 该 session 的派生 checkpoint 已脏；PTY 原始字节不离开
                 // supervisor/sessiond。保留旧 output frame 编号便于跨版本 worker 忽略 payload。
@@ -1481,6 +1492,19 @@ impl Sessions {
             let task_id = locked.task_id.clone();
             let pid = locked.pid;
             let channels = locked.state.subscriber_channels();
+            // The terminal's final content (plan 20261010-terminal-checkpoint-energy): rendered now,
+            // while sessiond still holds the screen — once the session leaves the map a snapshot
+            // request can only answer session_not_found. The runtime decides whether it is owed.
+            let final_snapshot = DeviceSessionSnapshot {
+                request_id: FINAL_SNAPSHOT_REQUEST_ID.to_string(),
+                session_id: session_id.clone(),
+                snapshot_seq: final_output_seq,
+                ansi_snapshot: locked.state.snapshot(),
+                cols: u32::from(locked.state.cols()),
+                rows: u32::from(locked.state.rows()),
+                title: locked.state.title().to_string(),
+                command: Some(wire_command_state(locked.state.command_state())),
+            };
             let event_number = this.next_event_id.fetch_add(1, Ordering::Relaxed) + 1;
             let tombstone = DeviceSessionExitTombstone {
                 event_id: format!("exit-{}-{event_number}", std::process::id()),
@@ -1521,6 +1545,13 @@ impl Sessions {
                         }),
                     );
                 }
+                // Ahead of session.exit on the same ordered queue, so the runtime still knows the
+                // session (and its secrets, for redaction) when the final content arrives. Best
+                // effort: under backpressure the last periodic content stays the stored one.
+                this.send_device(
+                    INTERNAL_CHANNEL_ID,
+                    device_envelope::Payload::SessionSnapshot(final_snapshot),
+                );
                 this.send_ctrl_or_disconnect(
                     &SessiondEvent::SessionExit {
                         session_id: session_id.clone(),
@@ -1826,6 +1857,7 @@ impl Sessions {
                     task_id: locked.task_id.clone(),
                     pid: locked.pid,
                     command: Some(locked.state.command_state()),
+                    title: locked.state.title().to_string(),
                 }
             })
             .collect();

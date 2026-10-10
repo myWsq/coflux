@@ -21,7 +21,9 @@ use coflux_protocol::{
     MAX_SESSION_CHECKPOINT_BYTES, SCREEN_CHANNEL_RECORD_BUDGET,
 };
 
-use crate::sessiond_ipc::{encode_frame, DataFrame, SessiondCommand};
+use crate::sessiond_ipc::{
+    encode_frame, DataFrame, SessiondCommand, FINAL_SNAPSHOT_REQUEST_ID, INTERNAL_CHANNEL_ID,
+};
 use prost::Message as _;
 use rand_core::{OsRng, RngCore};
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -36,6 +38,7 @@ use crate::executor_host::{Inbound as ExecutorHostInbound, LOCAL_CHANNEL_ID as E
 use crate::local_auth::{AuthenticatedLocal, LocalAuth, LocalPrincipal};
 use crate::screen;
 use crate::secret::{SecretBytes, SecretVault};
+use crate::sessions::wire_command_state;
 use crate::{Config, WorkerState, WsOut};
 
 const CHANNEL_QUEUE_RECORDS: usize = 256;
@@ -48,7 +51,6 @@ const DEVICE_CHANNEL_LIMIT_ERROR: &str = "Device channel 总数已达上限";
 // gap 是 worker/sessiond 生成的控制元数据，合法 ID 下远小于 4 KiB。每 channel 独立留一槽，
 // 并使用与普通数据分离的全局预算，保证 data 预算耗尽后仍能报告缺口。
 const CHANNEL_GAP_FRAME_BYTES: usize = 4 * 1024;
-const INTERNAL_CHANNEL_ID: &str = "__coflux-worker";
 // agent 写 PTY（plan 088）用的合成 channel 前缀；仍走 sessiond 的
 // attach/holder/input_seq 正门，不新增任何输入语义。
 const AGENT_CHANNEL_PREFIX: &str = "__coflux-agent-";
@@ -65,7 +67,16 @@ const AGENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const PENDING_AGENT_IO_LIMIT: usize = 64;
 const AGENT_IO_SESSION_LIMIT: usize = 256;
 const AGENT_IDENTITY_LIMIT_PER_SESSION: usize = 16;
-const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
+// Checkpoint cadence (plan 20261010-terminal-checkpoint-energy). Content — the redacted ANSI
+// snapshot the center stores for offline view and the read fallback — is rendered once output has
+// been quiet for the window, or at the ceiling while output never settles: a continuously printing
+// session costs one snapshot per 30 s instead of one per 2 s, and stored content is never more than
+// about half a minute stale. Metadata (title, command state) does not wait for content: it is
+// published on change, at most once per interval per session. The tick only scans small maps.
+const CHECKPOINT_TICK: Duration = Duration::from_millis(500);
+const CONTENT_QUIET_WINDOW: Duration = Duration::from_secs(3);
+const CONTENT_CEILING: Duration = Duration::from_secs(30);
+const METADATA_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const CALL_LEDGER_LIMIT: usize = 1024;
 const CALL_LEDGER_BYTES: usize = 64 * 1024 * 1024;
 // pending call 预留一个小型确定错误的缓存空间。这样真实结果装不下时仍能把该次执行
@@ -418,6 +429,99 @@ struct PendingSnapshot {
     session_id: String,
     task_id: String,
     pid: i32,
+}
+
+/// Content owed to the center for one session (plan 20261010-terminal-checkpoint-energy): output
+/// arrived since its last content checkpoint. `first` is when the oldest unsent output arrived
+/// (it drives the staleness ceiling), `last` the newest (it drives the quiet window).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirtyContent {
+    first: Instant,
+    last: Instant,
+}
+
+impl DirtyContent {
+    /// Content is due once output settled for the quiet window, or when it never settles, once the
+    /// oldest unsent output is as old as the ceiling.
+    fn due(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last) >= CONTENT_QUIET_WINDOW
+            || now.saturating_duration_since(self.first) >= CONTENT_CEILING
+    }
+}
+
+/// Sessions owing content, with the timing the cadence needs. Session ids are unique keys.
+#[derive(Default)]
+struct DirtySessions {
+    entries: HashMap<String, DirtyContent>,
+}
+
+impl DirtySessions {
+    /// New output: the quiet window restarts, the ceiling keeps counting from the oldest output.
+    fn touch(&mut self, session_id: String, now: Instant) {
+        self.entries
+            .entry(session_id)
+            .and_modify(|entry| entry.last = now)
+            .or_insert(DirtyContent { first: now, last: now });
+    }
+
+    /// Owe content without new output (reconnect, resync, a snapshot that did not go out): a session
+    /// already dirty keeps its timing.
+    fn extend(&mut self, session_ids: impl IntoIterator<Item = String>) {
+        let now = Instant::now();
+        for session_id in session_ids {
+            self.entries
+                .entry(session_id)
+                .or_insert(DirtyContent { first: now, last: now });
+        }
+    }
+
+    /// Put back an entry taken by [`Self::take_due`] whose snapshot did not go out, merged with any
+    /// output that arrived meanwhile: the ceiling keeps counting from the oldest output, so a
+    /// session that keeps printing is never starved.
+    fn restore(&mut self, session_id: String, taken: DirtyContent) {
+        self.entries
+            .entry(session_id)
+            .and_modify(|entry| {
+                entry.first = entry.first.min(taken.first);
+                entry.last = entry.last.max(taken.last);
+            })
+            .or_insert(taken);
+    }
+
+    #[cfg(test)]
+    fn contains(&self, session_id: &str) -> bool {
+        self.entries.contains_key(session_id)
+    }
+
+    fn remove(&mut self, session_id: &str) -> bool {
+        self.entries.remove(session_id).is_some()
+    }
+
+    fn take_due(&mut self, now: Instant) -> Vec<(String, DirtyContent)> {
+        let due: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.due(now))
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        due.into_iter()
+            .filter_map(|session_id| {
+                let entry = self.entries.remove(&session_id)?;
+                Some((session_id, entry))
+            })
+            .collect()
+    }
+}
+
+/// Title and command-state reporting toward the center (plan 20261010-terminal-checkpoint-energy).
+/// `titles` mirrors sessiond's OSC title of every live session (title events, resync, snapshots);
+/// `pending` holds sessions whose metadata changed since it was last published, throttled per
+/// session by [`METADATA_MIN_INTERVAL`] so a title animated by its program cannot flood the center.
+#[derive(Default)]
+struct MetadataState {
+    titles: HashMap<String, String>,
+    pending: HashSet<String>,
+    last_published: HashMap<String, Instant>,
 }
 
 #[derive(Clone)]
@@ -794,7 +898,13 @@ pub struct DeviceRuntime {
     to_server: mpsc::Sender<WsOut>,
     services: Option<ProductionServices>,
     channels: Mutex<HashMap<String, ChannelEntry>>,
-    dirty_sessions: Mutex<HashSet<String>>,
+    /// Sessions owing content to the center, with their cadence timing.
+    dirty_sessions: Mutex<DirtySessions>,
+    /// Title / command-state reporting (plan 20261010-terminal-checkpoint-energy).
+    metadata: Mutex<MetadataState>,
+    /// SessionMetadata toward the center: coalesced per session, replayed across WS generations
+    /// like checkpoints, drained by the server loop through [`Self::claim_metadata`].
+    metadata_outbox: CoalescingOutbox,
     pending_snapshots: Mutex<HashMap<String, PendingSnapshot>>,
     pending_catalogs: Mutex<CatalogState>,
     /// server 认证换代与完整 catalog 提交共用的线性化门。锁顺序固定为
@@ -925,7 +1035,9 @@ impl DeviceRuntime {
             to_server,
             services,
             channels: Mutex::new(HashMap::new()),
-            dirty_sessions: Mutex::new(HashSet::new()),
+            dirty_sessions: Mutex::new(DirtySessions::default()),
+            metadata: Mutex::new(MetadataState::default()),
+            metadata_outbox: CoalescingOutbox::default(),
             pending_snapshots: Mutex::new(HashMap::new()),
             pending_catalogs: Mutex::new(CatalogState::default()),
             catalog_commit_gate: Mutex::new(()),
@@ -1205,7 +1317,19 @@ impl DeviceRuntime {
         self.rotate_catalog_rounds();
     }
 
+    /// The session produced output: its content is owed, and the quiet window restarts.
     pub fn mark_session_dirty(&self, session_id: &str) {
+        let now = Instant::now();
+        self.with_live_dirty(session_id, |dirty| dirty.touch(session_id.to_string(), now));
+    }
+
+    /// The session's content is owed without new output (a new incarnation, a sessiond resync):
+    /// an already dirty session keeps its timing.
+    pub fn owe_session_content(&self, session_id: &str) {
+        self.with_live_dirty(session_id, |dirty| dirty.extend([session_id.to_string()]));
+    }
+
+    fn with_live_dirty(&self, session_id: &str, update: impl FnOnce(&mut DirtySessions)) {
         if session_id.is_empty() {
             return;
         }
@@ -1216,16 +1340,16 @@ impl DeviceRuntime {
             }
             // 与 session_exited 共享 state→dirty 锁序：迟到 Output 要么先登记并被退出
             // 清掉，要么在退出移除 alive 后被拒，不能在 cleanup 后复活 dirty。
-            self.dirty_sessions
-                .lock()
-                .unwrap()
-                .insert(session_id.to_string());
+            update(&mut self.dirty_sessions.lock().unwrap());
             return;
         }
-        self.dirty_sessions
-            .lock()
-            .unwrap()
-            .insert(session_id.to_string());
+        update(&mut self.dirty_sessions.lock().unwrap());
+    }
+
+    /// A snapshot taken for content did not go out: owe it again with its original timing.
+    fn restore_dirty(&self, session_id: String, taken: DirtyContent) {
+        let session = session_id.clone();
+        self.with_live_dirty(&session, |dirty| dirty.restore(session_id, taken));
     }
 
     /// session 退出是长期派生状态的最终边界。`WorkerState.alive` 的 incarnation 裁决由
@@ -1252,6 +1376,13 @@ impl DeviceRuntime {
             .retain(|_, pending| pending.session_id != session_id);
         self.agent_io_states.lock().unwrap().remove(session_id);
         self.dirty_sessions.lock().unwrap().remove(session_id);
+        {
+            let mut metadata = self.metadata.lock().unwrap();
+            metadata.titles.remove(session_id);
+            metadata.pending.remove(session_id);
+            metadata.last_published.remove(session_id);
+        }
+        self.metadata_outbox.remove(session_id);
         self.pending_snapshots
             .lock()
             .unwrap()
@@ -1307,19 +1438,24 @@ impl DeviceRuntime {
         }
     }
 
+    /// Checkpoints toward the center, split in two signals (plan 20261010-terminal-checkpoint-energy):
+    /// metadata that changed is published (throttled per session), and content is requested from
+    /// sessiond only for sessions whose output settled or reached the staleness ceiling.
     pub async fn run_checkpoint_loop(self: Arc<Self>) {
-        let mut interval = tokio::time::interval(CHECKPOINT_INTERVAL);
+        let mut interval = tokio::time::interval(CHECKPOINT_TICK);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             let Some(services) = &self.services else {
                 continue;
             };
+            let now = Instant::now();
+            self.flush_metadata(now);
             if !self.supervisor_online.load(Ordering::Acquire) {
                 continue;
             }
-            let dirty = std::mem::take(&mut *self.dirty_sessions.lock().unwrap());
-            for session_id in dirty {
+            let due = self.dirty_sessions.lock().unwrap().take_due(now);
+            for (session_id, taken) in due {
                 let state = services.state.lock().unwrap();
                 let Some((task_id, pid)) = state.alive.get(&session_id).cloned() else {
                     continue;
@@ -1332,7 +1468,7 @@ impl DeviceRuntime {
                     .any(|pending| pending.session_id == session_id)
                 {
                     drop(state);
-                    self.mark_session_dirty(&session_id);
+                    self.restore_dirty(session_id, taken);
                     continue;
                 }
                 let request_id = self.next_internal_id("checkpoint");
@@ -1353,10 +1489,155 @@ impl DeviceRuntime {
                 ));
                 if !sent {
                     self.pending_snapshots.lock().unwrap().remove(&request_id);
-                    self.mark_session_dirty(&session_id);
+                    self.restore_dirty(session_id, taken);
                 }
             }
         }
+    }
+
+    /* ---------------- metadata (plan 20261010-terminal-checkpoint-energy) ---------------- */
+
+    /// sessiond reported a new OSC title for a live session.
+    pub fn session_title_changed(&self, session_id: &str, title: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        let mut metadata = self.metadata.lock().unwrap();
+        if metadata.titles.get(session_id).map(String::as_str) == Some(title) {
+            return;
+        }
+        metadata.titles.insert(session_id.to_string(), title.to_string());
+        metadata.pending.insert(session_id.to_string());
+    }
+
+    /// A title learned on the side (resync list, a rendered snapshot). A session seen for the first
+    /// time is not a change: its metadata goes out in full after the next resync anyway.
+    pub fn learn_session_title(&self, session_id: &str, title: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        let mut metadata = self.metadata.lock().unwrap();
+        let known = metadata.titles.get(session_id).cloned();
+        match known {
+            Some(known) if known == title => {}
+            Some(_) => {
+                metadata.titles.insert(session_id.to_string(), title.to_string());
+                metadata.pending.insert(session_id.to_string());
+            }
+            None => {
+                metadata.titles.insert(session_id.to_string(), title.to_string());
+            }
+        }
+    }
+
+    /// The session's command state changed in the ledger: report it to the center.
+    pub fn session_command_changed(&self, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        self.metadata
+            .lock()
+            .unwrap()
+            .pending
+            .insert(session_id.to_string());
+    }
+
+    /// Every live session's metadata, now and unthrottled: called once the center has the current
+    /// resync (after a (re)connect, or after sessiond resynced), so command state and titles reach
+    /// it without waiting for any change.
+    pub fn publish_all_metadata(&self) {
+        let Some(services) = &self.services else {
+            return;
+        };
+        let sessions: Vec<String> = services
+            .state
+            .lock()
+            .unwrap()
+            .alive
+            .keys()
+            .cloned()
+            .collect();
+        let now = Instant::now();
+        for session_id in sessions {
+            if self.publish_metadata(&session_id) {
+                let mut metadata = self.metadata.lock().unwrap();
+                metadata.pending.remove(&session_id);
+                metadata.last_published.insert(session_id, now);
+            }
+        }
+    }
+
+    /// Publish pending metadata whose session has not published within the throttle interval; the
+    /// rest stays pending for a later tick.
+    fn flush_metadata(&self, now: Instant) {
+        let due: Vec<String> = {
+            let mut metadata = self.metadata.lock().unwrap();
+            let due: Vec<String> = metadata
+                .pending
+                .iter()
+                .filter(|session_id| {
+                    metadata.last_published.get(*session_id).is_none_or(|last| {
+                        now.saturating_duration_since(*last) >= METADATA_MIN_INTERVAL
+                    })
+                })
+                .cloned()
+                .collect();
+            for session_id in &due {
+                metadata.pending.remove(session_id);
+                metadata.last_published.insert(session_id.clone(), now);
+            }
+            due
+        };
+        for session_id in due {
+            self.publish_metadata(&session_id);
+        }
+    }
+
+    /// Encode and queue one live session's metadata. Returns false for a session that is not alive.
+    fn publish_metadata(&self, session_id: &str) -> bool {
+        let Some(services) = &self.services else {
+            return false;
+        };
+        let (task_id, command) = {
+            let state = services.state.lock().unwrap();
+            let Some((task_id, _)) = state.alive.get(session_id) else {
+                return false;
+            };
+            let command = state
+                .ledger
+                .session(session_id)
+                .map(|record| wire_command_state(record.command));
+            (task_id.clone(), command)
+        };
+        let title = self
+            .metadata
+            .lock()
+            .unwrap()
+            .titles
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default();
+        let payload = daemon_to_server::Payload::SessionMetadata(wire::SessionMetadata {
+            session_id: session_id.to_string(),
+            task_id,
+            title,
+            command,
+        });
+        self.metadata_outbox.publish(
+            session_id.to_string(),
+            wire::DaemonToServer {
+                payload: Some(payload),
+            }
+            .encode_to_vec(),
+        )
+    }
+
+    pub async fn claim_metadata(&self, connection_epoch: u64) -> OutboxDelivery {
+        self.metadata_outbox.claim(connection_epoch).await
+    }
+
+    pub fn acknowledge_metadata(&self, delivery: &OutboxDelivery) -> bool {
+        self.metadata_outbox.acknowledge(delivery)
     }
 
     /// catalog 请求走 bounded supervisor queue，首发、续页和响应本身都可能在背压时丢失。
@@ -3930,6 +4211,10 @@ impl DeviceRuntime {
                     let _ = read.sender.send(Ok(redacted));
                     return;
                 }
+                if snapshot.request_id == FINAL_SNAPSHOT_REQUEST_ID {
+                    self.publish_final_content(snapshot);
+                    return;
+                }
                 let Some(expected) = self
                     .pending_snapshots
                     .lock()
@@ -3938,66 +4223,10 @@ impl DeviceRuntime {
                 else {
                     return;
                 };
-                if snapshot.session_id != expected.session_id
-                    || snapshot.ansi_snapshot.len() > MAX_SESSION_CHECKPOINT_BYTES
-                {
+                if snapshot.session_id != expected.session_id {
                     return;
                 }
-                let Some(services) = &self.services else {
-                    return;
-                };
-                let current_matches = services
-                    .state
-                    .lock()
-                    .unwrap()
-                    .alive
-                    .get(&snapshot.session_id)
-                    .is_some_and(|(task_id, pid)| {
-                        task_id == &expected.task_id && *pid == expected.pid
-                    });
-                if !current_matches {
-                    return;
-                }
-                // Snapshots carry the command state too: the fallback for a lost session.command
-                // push (and the way a hot-upgraded worker catches up between marks).
-                if let Some(command) = snapshot.command {
-                    let mut state = services.state.lock().unwrap();
-                    if state.ledger.set_command_state(
-                        &snapshot.session_id,
-                        CommandStateInfo {
-                            integrated: command.integrated,
-                            busy: command.busy,
-                            command_seq: command.command_seq,
-                            finished_seq: command.finished_seq,
-                            exit_code: command.exit_code,
-                        },
-                    ) {
-                        state.bump_command_epoch();
-                    }
-                }
-                let ansi_snapshot = self.secrets.redact(&snapshot.ansi_snapshot).into_owned();
-                if ansi_snapshot.len() > MAX_SESSION_CHECKPOINT_BYTES {
-                    return;
-                }
-                let checkpoint = SessionCheckpoint {
-                    session_id: snapshot.session_id.clone(),
-                    task_id: expected.task_id,
-                    snapshot_seq: snapshot.snapshot_seq,
-                    ansi_snapshot,
-                    cols: snapshot.cols,
-                    rows: snapshot.rows,
-                    captured_at: epoch_ms(),
-                    title: snapshot.title.clone(),
-                    command: snapshot.command,
-                };
-                let payload = daemon_to_server::Payload::SessionCheckpoint(checkpoint);
-                services.checkpoints.publish(
-                    snapshot.session_id.clone(),
-                    coflux_protocol::wire::DaemonToServer {
-                        payload: Some(payload),
-                    }
-                    .encode_to_vec(),
-                );
+                self.publish_content(snapshot, &expected);
             }
             device_envelope::Payload::Error(error) => {
                 if let Some(request_id) = &error.request_id {
@@ -4029,6 +4258,121 @@ impl DeviceRuntime {
             }
             _ => {}
         }
+    }
+
+    /// Publish a content checkpoint from a sessiond snapshot taken for `expected` (the session's
+    /// incarnation when the snapshot was asked for). Also the catch-up for lost pushes: the
+    /// snapshot's command state and title repair a dropped session.command / session.title.
+    fn publish_content(&self, snapshot: &wire::DeviceSessionSnapshot, expected: &PendingSnapshot) {
+        if snapshot.ansi_snapshot.len() > MAX_SESSION_CHECKPOINT_BYTES {
+            return;
+        }
+        let Some(services) = &self.services else {
+            return;
+        };
+        let current_matches = services
+            .state
+            .lock()
+            .unwrap()
+            .alive
+            .get(&snapshot.session_id)
+            .is_some_and(|(task_id, pid)| task_id == &expected.task_id && *pid == expected.pid);
+        if !current_matches {
+            return;
+        }
+        // Snapshots carry the command state too: the fallback for a lost session.command
+        // push (and the way a hot-upgraded worker catches up between marks).
+        if let Some(command) = snapshot.command {
+            let changed = {
+                let mut state = services.state.lock().unwrap();
+                let changed = state.ledger.set_command_state(
+                    &snapshot.session_id,
+                    CommandStateInfo {
+                        integrated: command.integrated,
+                        busy: command.busy,
+                        command_seq: command.command_seq,
+                        finished_seq: command.finished_seq,
+                        exit_code: command.exit_code,
+                    },
+                );
+                if changed {
+                    state.bump_command_epoch();
+                }
+                changed
+            };
+            if changed {
+                self.session_command_changed(&snapshot.session_id);
+            }
+        }
+        self.learn_session_title(&snapshot.session_id, &snapshot.title);
+        let ansi_snapshot = self.secrets.redact(&snapshot.ansi_snapshot).into_owned();
+        if ansi_snapshot.len() > MAX_SESSION_CHECKPOINT_BYTES {
+            return;
+        }
+        // Content keeps travelling as SessionCheckpoint with title and command state, so a center
+        // that predates SessionMetadata still learns both (at content cadence).
+        let checkpoint = SessionCheckpoint {
+            session_id: snapshot.session_id.clone(),
+            task_id: expected.task_id.clone(),
+            snapshot_seq: snapshot.snapshot_seq,
+            ansi_snapshot,
+            cols: snapshot.cols,
+            rows: snapshot.rows,
+            captured_at: epoch_ms(),
+            title: snapshot.title.clone(),
+            command: snapshot.command,
+        };
+        let payload = daemon_to_server::Payload::SessionCheckpoint(checkpoint);
+        services.checkpoints.publish(
+            snapshot.session_id.clone(),
+            coflux_protocol::wire::DaemonToServer {
+                payload: Some(payload),
+            }
+            .encode_to_vec(),
+        );
+    }
+
+    /// sessiond's final snapshot of an exiting session, sent right before its session.exit
+    /// (plan 20261010-terminal-checkpoint-energy). It becomes the session's last content checkpoint
+    /// when content is still owed — output since the last content, or a content snapshot that will
+    /// now never be answered — so an exited terminal's stored screen includes what it printed last.
+    /// The center accepts this checkpoint even when the exit reaches it first.
+    fn publish_final_content(&self, snapshot: &wire::DeviceSessionSnapshot) {
+        let Some(services) = &self.services else {
+            return;
+        };
+        let Some((task_id, pid)) = services
+            .state
+            .lock()
+            .unwrap()
+            .alive
+            .get(&snapshot.session_id)
+            .cloned()
+        else {
+            return;
+        };
+        let owed_output = self
+            .dirty_sessions
+            .lock()
+            .unwrap()
+            .remove(&snapshot.session_id);
+        let owed_snapshot = {
+            let mut pending = self.pending_snapshots.lock().unwrap();
+            let before = pending.len();
+            pending.retain(|_, pending| pending.session_id != snapshot.session_id);
+            pending.len() != before
+        };
+        if !owed_output && !owed_snapshot {
+            return;
+        }
+        self.publish_content(
+            snapshot,
+            &PendingSnapshot {
+                session_id: snapshot.session_id.clone(),
+                task_id,
+                pid,
+            },
+        );
     }
 
     fn handle_catalog_page(&self, catalog: &DeviceSessionCatalog) {
@@ -4198,7 +4542,7 @@ impl DeviceRuntime {
             .collect::<HashMap<_, _>>();
         // 完整 catalog 是 incarnation 的权威提交点；同 sessionId 只要 taskId 或 pid
         // 变化，就必须先清旧 cursor/holder/agent/snapshot，再把新 incarnation 标 dirty。
-        let changed_or_removed = {
+        let (changed_or_removed, new_incarnations) = {
             let mut state = services.state.lock().unwrap();
             let changed = state
                 .alive
@@ -4206,8 +4550,16 @@ impl DeviceRuntime {
                 .filter(|(session_id, identity)| new_alive.get(*session_id) != Some(*identity))
                 .map(|(session_id, _)| session_id.clone())
                 .collect::<Vec<_>>();
+            // Only a new incarnation owes content: a catalog runs after every exit, and owing
+            // every live session's content each time would undo the content cadence
+            // (plan 20261010-terminal-checkpoint-energy).
+            let fresh = new_alive
+                .iter()
+                .filter(|(session_id, identity)| state.alive.get(*session_id) != Some(*identity))
+                .map(|(session_id, _)| session_id.clone())
+                .collect::<HashSet<_>>();
             state.alive = new_alive;
-            changed
+            (changed, fresh)
         };
         let mut stale_derived = changed_or_removed.into_iter().collect::<HashSet<_>>();
         for entry in self.channels.lock().unwrap().values() {
@@ -4256,7 +4608,9 @@ impl DeviceRuntime {
         }
         for session_id in &live {
             self.cancel_session_exit(session_id);
-            self.mark_session_dirty(session_id);
+            if new_incarnations.contains(session_id) {
+                self.owe_session_content(session_id);
+            }
         }
         // tombstone 只在同一份完整快照中没有同 ID live session 时转成可靠 exit；否则它
         // 可能属于已被复用 ID 的旧 incarnation，裸 SessionExit 会误杀新 task。
@@ -5820,6 +6174,112 @@ mod tests {
                 final_output_seq: 9,
             })) if session_id == "session-exited"
         ));
+    }
+
+    /// Content cadence (plan 20261010-terminal-checkpoint-energy): a burst is snapshotted once it
+    /// settles, a session that never settles once per ceiling, and a snapshot that could not go out
+    /// keeps its place against the ceiling.
+    #[test]
+    fn content_cadence_waits_for_quiet_and_caps_staleness_at_the_ceiling() {
+        let start = Instant::now();
+        let mut dirty = DirtySessions::default();
+        dirty.touch("burst".into(), start);
+        dirty.touch("burst".into(), start + Duration::from_secs(1));
+        assert!(dirty.take_due(start + Duration::from_secs(3)).is_empty(), "still printing a moment ago");
+        let due = dirty.take_due(start + Duration::from_secs(1) + CONTENT_QUIET_WINDOW);
+        assert_eq!(due.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["burst"]);
+        assert!(dirty.take_due(start + Duration::from_secs(60)).is_empty(), "taken once");
+
+        // Output every half second never settles: nothing until the ceiling, then exactly one.
+        let steps = (CONTENT_CEILING.as_millis() / 500) as u32;
+        let mut snapshots = 0;
+        // The second ceiling counts from the first output after the first content (step + 1).
+        for step in 0..=steps * 2 + 1 {
+            let now = start + Duration::from_millis(500) * step;
+            dirty.touch("busy".into(), now);
+            snapshots += dirty.take_due(now).len();
+            if step < steps {
+                assert_eq!(snapshots, 0, "no content before the ceiling (step {step})");
+            }
+        }
+        assert_eq!(snapshots, 2, "one content per ceiling while output never settles");
+
+        // A snapshot that did not go out is owed again with its original start, merged with any
+        // output that arrived meanwhile.
+        let later = start + Duration::from_secs(600);
+        dirty.touch("starved".into(), later);
+        let taken = dirty.take_due(later + CONTENT_CEILING);
+        assert_eq!(taken.len(), 1);
+        dirty.touch("starved".into(), later + CONTENT_CEILING + Duration::from_millis(100));
+        let (id, entry) = taken.into_iter().next().unwrap();
+        dirty.restore(id, entry);
+        assert_eq!(
+            dirty.take_due(later + CONTENT_CEILING + Duration::from_millis(500)).len(),
+            1,
+            "still past the ceiling: due on the next tick"
+        );
+    }
+
+    /// sessiond's final snapshot before an exit becomes the last content only when content is
+    /// owed, and a title change reported on the side is published as metadata without any snapshot
+    /// (plan 20261010-terminal-checkpoint-energy).
+    #[tokio::test]
+    async fn final_snapshot_is_published_only_when_content_is_owed_and_titles_travel_as_metadata() {
+        let fixture = test_runtime();
+        let final_snapshot = |session_id: &str, text: &[u8]| {
+            device_envelope::Payload::SessionSnapshot(wire::DeviceSessionSnapshot {
+                request_id: FINAL_SNAPSHOT_REQUEST_ID.into(),
+                session_id: session_id.into(),
+                snapshot_seq: 7,
+                ansi_snapshot: text.to_vec(),
+                cols: 80,
+                rows: 24,
+                title: "final title".into(),
+                ..Default::default()
+            })
+        };
+        {
+            let mut state = fixture.state.lock().unwrap();
+            state.alive.insert("session-quiet".into(), ("task-quiet".into(), 1));
+            state.alive.insert("session-printed".into(), ("task-printed".into(), 2));
+        }
+
+        // Nothing printed since the last content: the final snapshot adds nothing.
+        fixture
+            .runtime
+            .handle_internal_response(&final_snapshot("session-quiet", b"old screen"));
+        assert!(fixture.checkpoints.state.lock().unwrap().pending.is_empty());
+
+        // Output right before the exit: the final snapshot is published at once, not after the
+        // quiet window, and the session no longer owes content.
+        fixture.runtime.mark_session_dirty("session-printed");
+        fixture
+            .runtime
+            .handle_internal_response(&final_snapshot("session-printed", b"last words"));
+        let delivery = fixture.checkpoints.claim(1).await;
+        let decoded = wire::DaemonToServer::decode(delivery.bytes.as_slice()).unwrap();
+        let Some(daemon_to_server::Payload::SessionCheckpoint(checkpoint)) = decoded.payload else {
+            panic!("expected a checkpoint");
+        };
+        assert_eq!(checkpoint.task_id, "task-printed");
+        assert_eq!(checkpoint.ansi_snapshot, b"last words".to_vec());
+        assert!(!fixture.runtime.dirty_sessions.lock().unwrap().contains("session-printed"));
+
+        // A title event is metadata: queued for the center without any snapshot request.
+        fixture.runtime.session_title_changed("session-quiet", "building");
+        fixture.runtime.flush_metadata(Instant::now());
+        let delivery = fixture.runtime.claim_metadata(1).await;
+        let decoded = wire::DaemonToServer::decode(delivery.bytes.as_slice()).unwrap();
+        let Some(daemon_to_server::Payload::SessionMetadata(metadata)) = decoded.payload else {
+            panic!("expected metadata");
+        };
+        assert_eq!(metadata.task_id, "task-quiet");
+        assert_eq!(metadata.title, "building");
+        assert!(fixture.runtime.pending_snapshots.lock().unwrap().is_empty());
+
+        fixture.runtime.close_channel(&fixture.local_id);
+        fixture.runtime.close_tailcats();
+        let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
     #[test]

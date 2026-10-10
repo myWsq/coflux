@@ -962,12 +962,17 @@ async fn runtime_main(home: String, sessions: Arc<Sessions>) {
 
     // 分支监视 + diff 统计（plan 024）：worktree HEAD 是分支的真相源（纯文件读，无子进程）；
     // diff 统计基准是 merge-base(default_branch, HEAD)（git 子进程 + untracked 文件读，见
-    // git::diff_stat）。同一 3s 周期内一并处理，变化才上报，满足 ≤5s 轮询间隔的约束。
+    // git::diff_stat）。变化才上报。
+    // The branch check keeps the 3 s tick. The diff statistics back off per workspace while their
+    // result stays the same (up to a minute) and return to 3 s as soon as it or the branch changes
+    // (plan 20261010-terminal-checkpoint-energy). This supersedes the earlier "≤5s polling"
+    // constraint, which had no recorded source: an idle workspace now costs one git round a minute.
     {
         let state = state.clone();
         let to_server_tx = to_server_tx.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(3));
+            let mut backoffs: HashMap<String, git::DiffStatBackoff> = HashMap::new();
+            let mut tick = tokio::time::interval(git::DIFF_STAT_BASE_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
@@ -986,7 +991,14 @@ async fn runtime_main(home: String, sessions: Arc<Sessions>) {
                         })
                         .collect()
                 };
+                backoffs.retain(|workspace_id, _| {
+                    targets.iter().any(|(target, _, _)| target == workspace_id)
+                });
                 for (workspace_id, path, default_branch) in targets {
+                    let now = Instant::now();
+                    let backoff = backoffs
+                        .entry(workspace_id.clone())
+                        .or_insert_with(|| git::DiffStatBackoff::new(now));
                     if let Some(branch) = git::current_branch(&path) {
                         let changed = {
                             let mut s = state.lock().unwrap();
@@ -998,6 +1010,7 @@ async fn runtime_main(home: String, sessions: Arc<Sessions>) {
                             }
                         };
                         if changed {
+                            backoff.reset(now);
                             send_d2s(
                                 &to_server_tx,
                                 daemon_to_server::Payload::WorkspaceBranch(wire::WorkspaceBranch {
@@ -1009,6 +1022,13 @@ async fn runtime_main(home: String, sessions: Arc<Sessions>) {
                         }
                     }
 
+                    // A reconnect forgets the last reported statistics; report them again promptly.
+                    if !state.lock().unwrap().last_diffs.contains_key(&workspace_id) {
+                        backoff.reset(now);
+                    }
+                    if !backoff.due(now) {
+                        continue;
+                    }
                     let stat = git::diff_stat(&path, &default_branch).await;
                     let changed = {
                         let mut s = state.lock().unwrap();
@@ -1022,6 +1042,7 @@ async fn runtime_main(home: String, sessions: Arc<Sessions>) {
                             true
                         }
                     };
+                    backoff.record(Instant::now(), changed);
                     if changed {
                         send_d2s(
                             &to_server_tx,
@@ -1271,7 +1292,7 @@ async fn handle_sessiond_record(
                 device.session_exited(&session_id);
             }
             device.cancel_session_exit(&session_id);
-            device.mark_session_dirty(&session_id);
+            device.owe_session_content(&session_id);
             try_send_d2s(
                 to_server_tx,
                 daemon_to_server::Payload::SessionStarted(wire::SessionStarted {
@@ -1305,9 +1326,19 @@ async fn handle_sessiond_record(
             state: command,
         } => {
             // A coflux mark moved the shell's command state: record it and wake local waiters.
-            let mut s = state.lock().unwrap();
-            s.ledger.set_command_state(&session_id, command);
-            s.bump_command_epoch();
+            let changed = {
+                let mut s = state.lock().unwrap();
+                let changed = s.ledger.set_command_state(&session_id, command);
+                s.bump_command_epoch();
+                changed
+            };
+            // ...and report it to the center as metadata (plan 20261010-terminal-checkpoint-energy).
+            if changed {
+                device.session_command_changed(&session_id);
+            }
+        }
+        SessiondEvent::SessionTitle { session_id, title } => {
+            device.session_title_changed(&session_id, &title);
         }
         SessiondEvent::SessionCreateFailed {
             session_id,
@@ -1369,7 +1400,8 @@ async fn handle_sessiond_record(
             }
             for session in &sessions {
                 device.cancel_session_exit(&session.session_id);
-                device.mark_session_dirty(&session.session_id);
+                device.learn_session_title(&session.session_id, &session.title);
+                device.owe_session_content(&session.session_id);
             }
             logln!("[worker] supervisor resync count={}", sessions.len());
             resyncs.publish_current(state);
@@ -1689,6 +1721,10 @@ async fn run_server_connection(
                     // acknowledge=false，不得拿旧 alive 触发 force。
                     force_report_ports(state, observed, to_server_tx).await;
                     force_report_agents(state, observed, to_server_tx).await;
+                    // Title and command state of every live session (plan
+                    // 20261010-terminal-checkpoint-energy): `terminal list` through the center is
+                    // current right after a reconnect, without waiting for any change.
+                    device.publish_all_metadata();
                     // Pending secret requests are memory-only in the center, like presence.
                     device.secrets().publish();
                     // So are the live executor runs (plan 20260929-executor-pip).
@@ -1704,6 +1740,12 @@ async fn run_server_connection(
                     break;
                 }
                 checkpoints.acknowledge(&delivery);
+            }
+            delivery = device.claim_metadata(connection_epoch), if connection_authed => {
+                if !send_server_ws(&mut sink, Message::binary(delivery.bytes.clone()), write_timeout).await {
+                    break;
+                }
+                device.acknowledge_metadata(&delivery);
             }
             delivery = catalogs.claim(connection_epoch), if connection_authed => {
                 if !send_server_ws(&mut sink, Message::binary(delivery.bytes.clone()), write_timeout).await {

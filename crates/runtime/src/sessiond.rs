@@ -401,6 +401,10 @@ pub struct TerminalState {
     parser: vt100::Parser<OscCapture>,
     /// PTY 内程序经 OSC 0/2 设置的终端标题；空 = 从未设置。跨 resize 存续。
     title: String,
+    /// The title changed since the last [`TerminalState::take_title_change`]; lets sessiond push a
+    /// title event instead of the runtime rendering snapshots to learn it
+    /// (plan 20261010-terminal-checkpoint-energy).
+    title_changed: bool,
     /// Secret the shell must present in every mark; empty = no marks are ever accepted.
     mark_secret: String,
     command: CommandTracker,
@@ -427,6 +431,7 @@ impl TerminalState {
                 OscCapture::default(),
             ),
             title: String::new(),
+            title_changed: false,
             mark_secret: String::new(),
             command: CommandTracker::default(),
             rows,
@@ -482,7 +487,11 @@ impl TerminalState {
         }
         let callbacks = self.parser.callbacks_mut();
         if let Some(pending) = callbacks.pending_title.take() {
-            self.title = clamp_title(&pending);
+            let title = clamp_title(&pending);
+            if title != self.title {
+                self.title = title;
+                self.title_changed = true;
+            }
         }
         for mark in std::mem::take(&mut callbacks.marks) {
             self.command.apply(mark);
@@ -525,6 +534,7 @@ impl TerminalState {
         Self {
             parser,
             title: checkpoint.title.clone(),
+            title_changed: false,
             mark_secret,
             command: CommandTracker {
                 state: checkpoint.command,
@@ -679,6 +689,16 @@ impl TerminalState {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// The title if an OSC 0/2 changed it since the last call; `None` otherwise. Setting the same
+    /// title again is not a change.
+    pub fn take_title_change(&mut self) -> Option<String> {
+        if !self.title_changed {
+            return None;
+        }
+        self.title_changed = false;
+        Some(self.title.clone())
     }
 
     /// Current shell-integration command state (busy / sequence / last exit).
@@ -1081,6 +1101,10 @@ impl SessionState {
 
     pub fn take_command_change(&mut self) -> Option<CommandStateInfo> {
         self.terminal.take_command_change()
+    }
+
+    pub fn take_title_change(&mut self) -> Option<String> {
+        self.terminal.take_title_change()
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<PendingDelta> {
@@ -2180,6 +2204,19 @@ mod tests {
                 b"\x1b[?47l",
             ]);
         }
+    }
+
+    #[test]
+    fn sessiond_title_change_fires_once_per_real_change() {
+        let mut state = TerminalState::new(4, 12, 8);
+        assert_eq!(state.take_title_change(), None);
+        state.feed(b"\x1b]0;one\x07");
+        assert_eq!(state.take_title_change().as_deref(), Some("one"));
+        assert_eq!(state.take_title_change(), None, "taken once");
+        state.feed(b"plain output\x1b]2;one\x07");
+        assert_eq!(state.take_title_change(), None, "the same title again is not a change");
+        state.feed(b"\x1b]2;two\x07\x1b]2;\x07");
+        assert_eq!(state.take_title_change().as_deref(), Some(""), "the last title of a chunk wins");
     }
 
     #[test]
