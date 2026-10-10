@@ -1490,6 +1490,28 @@ pub struct SessionCheckpoint {
     #[prost(message, optional, tag="9")]
     pub command: ::core::option::Option<TerminalCommandState>,
 }
+/// A terminal's metadata without its content (plan 20261010-terminal-checkpoint-energy). Checkpoints
+/// are split in two signals: this one is small and sent as soon as the title or the command state
+/// changes (and in full for every live session right after the daemon reconnects), while the content
+/// keeps travelling as SessionCheckpoint at a low cadence.
+///
+/// daemon→server: title and command state of a live session; the center checks the session belongs
+/// to the sending daemon under the stated task, exactly like a SessionCheckpoint.
+/// server→client: only to clients that declared ClientAuth.session_metadata; carries the title only
+/// (command is left unset) and replaces the content push those clients no longer receive.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SessionMetadata {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub task_id: ::prost::alloc::string::String,
+    /// OSC 0/2 terminal title, same semantics as SessionCheckpoint.title (empty = never set).
+    #[prost(string, tag="3")]
+    pub title: ::prost::alloc::string::String,
+    /// Shell-integration command state; absent toward clients.
+    #[prost(message, optional, tag="4")]
+    pub command: ::core::option::Option<TerminalCommandState>,
+}
 /// client→daemon：把本 client 登记成本机 executor host（可重复发送 = 幂等更新）。
 /// 同一 daemon 只认一个 host：host_id 稳定标识桌面实例，host_epoch 是同一 host 的连接换代号
 /// （单调递增）。较低 epoch 的登记是 stale，直接拒。
@@ -3674,6 +3696,11 @@ pub struct ClientAuth {
     /// 平时部署 server 不再踢旧桌面版，它们由 electron-updater 在后台升级。
     #[prost(uint32, optional, tag="7")]
     pub control_protocol_version: ::core::option::Option<u32>,
+    /// The client consumes SessionMetadata and fetches terminal content through TaskRead (plan
+    /// 20261010-terminal-checkpoint-energy). Only honoured when the center announces
+    /// AuthOk.session_metadata; a client that leaves it false keeps receiving every SessionCheckpoint.
+    #[prost(bool, tag="8")]
+    pub session_metadata: bool,
 }
 /// 登出：撤销本连接使用的会话 token（服务器侧失效，非仅清本地）
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3973,6 +4000,12 @@ pub struct AuthOk {
     /// (an older center) tells the client "not supported" apart from "nothing configured yet".
     #[prost(bool, tag="7")]
     pub agent_settings: bool,
+    /// This center serves terminal metadata without content (plan 20261010-terminal-checkpoint-energy):
+    /// a client that declared ClientAuth.session_metadata receives SessionMetadata instead of
+    /// SessionCheckpoint (on subscribe and on change) and reads content through TaskRead. False (an
+    /// older center) means the client must stay on the SessionCheckpoint push.
+    #[prost(bool, tag="8")]
+    pub session_metadata: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthError {
@@ -4171,7 +4204,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -4250,6 +4283,8 @@ pub mod server_to_client {
         DirectoryWorkspaceEnsured(super::DirectoryWorkspaceEnsured),
         #[prost(message, tag="49")]
         AgentSettingsUpdated(super::AgentSettingsUpdated),
+        #[prost(message, tag="50")]
+        SessionMetadata(super::SessionMetadata),
     }
 }
 /// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
@@ -4794,7 +4829,7 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 30, 31, 32, 34, 35, 36, 37, 38, 39, 40, 41")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 30, 31, 32, 34, 35, 36, 37, 38, 39, 40, 41, 42")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -4862,6 +4897,9 @@ pub mod daemon_to_server {
         AnnotationsSummary(super::AnnotationsSummary),
         #[prost(message, tag="41")]
         ExecutorRuns(super::ExecutorRuns),
+        /// Title and command state of a live session, sent on change (plan 20261010-terminal-checkpoint-energy).
+        #[prost(message, tag="42")]
+        SessionMetadata(super::SessionMetadata),
     }
 }
 // ===== 中心发起的终端读/写（plan 091）=====

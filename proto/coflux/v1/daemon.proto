@@ -352,6 +352,8 @@ message DaemonToServer {
     SecretRequests secret_requests = 39;
     AnnotationsSummary annotations_summary = 40;
     ExecutorRuns executor_runs = 41;
+    // Title and command state of a live session, sent on change (plan 20261010-terminal-checkpoint-energy).
+    SessionMetadata session_metadata = 42;
   }
 }
 
