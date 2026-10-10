@@ -351,9 +351,12 @@ export class ScreenSession {
     port.start();
   }
 
-  private post(request: DesktopScreenPortRequest, transfer: Transferable[] = []) {
+  // No transfer list, ever: on Electron 44.3.0 an `ArrayBuffer` transferred to `MessagePortMain`
+  // arrives in main as null, so every frame was silently dropped. Bytes go by structured clone, each
+  // in a buffer of exactly its own size (`exactBuffer`), never a view's larger backing store.
+  private post(request: DesktopScreenPortRequest) {
     if (!this.port) return;
-    this.port.postMessage(request, transfer);
+    this.port.postMessage(request);
   }
 
   private requestReopen(delay: number) {
@@ -437,7 +440,7 @@ export class ScreenSession {
     const lanes = this.lanes;
     if (!lanes || !this.laneUp[lane] || !this.port) return false;
     const bytes = encodeDeviceEnvelope(create(DeviceEnvelopeSchema, { protocolVersion: DEVICE_PROTOCOL_VERSION, channelId: lanes[lane].channelId, payload }));
-    this.post({ type: "send", lane, data: bytes.buffer }, [bytes.buffer]);
+    this.post({ type: "send", lane, data: exactBuffer(bytes) });
     return true;
   }
 
@@ -580,11 +583,7 @@ export class ScreenSession {
         const content = payload.value.content?.content;
         if (!content) return;
         if (content.case === "text") this.post({ type: "clipboard-set", text: content.value });
-        else if (content.case === "png") {
-          const png = content.value;
-          const copy = png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) as ArrayBuffer;
-          this.post({ type: "clipboard-set", png: copy }, [copy]);
-        }
+        else if (content.case === "png") this.post({ type: "clipboard-set", png: exactBuffer(content.value) });
         return;
       }
       case "screenSessionDetached":
@@ -792,6 +791,15 @@ export class ScreenSession {
 
 function isModifierCode(code: string): boolean {
   return code === "MetaLeft" || code === "MetaRight" || code === "ControlLeft" || code === "ControlRight" || code === "AltLeft" || code === "AltRight" || code === "ShiftLeft" || code === "ShiftRight" || code === "CapsLock" || code === "Fn";
+}
+
+/**
+ * The view's bytes in an `ArrayBuffer` of exactly their size, for the port to main: an encoder's
+ * output may be a view on a larger buffer, and cloning `.buffer` would send its whole backing store.
+ */
+function exactBuffer(bytes: Uint8Array): ArrayBuffer {
+  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength && bytes.buffer instanceof ArrayBuffer) return bytes.buffer;
+  return bytes.slice().buffer as ArrayBuffer;
 }
 
 function concat(chunks: Uint8Array[], bytes: number): Uint8Array {

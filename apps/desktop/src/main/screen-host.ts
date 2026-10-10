@@ -5,9 +5,18 @@
  * input, cursor, clipboard, state) and video (frames one way, credit and keyframe requests the
  * other) — so input never queues behind video. Main opens and owns both, under an identity of this
  * app run's own like the browser tab's loopback tunnel, and bridges their bytes to the renderer
- * over a `MessageChannelMain` port: frames cross as transferred buffers, never structured clones
- * through `webContents.send` and its per-frame ack loop. The renderer encodes and decodes the
- * DeviceEnvelopes itself; main never looks inside a frame.
+ * over a `MessageChannelMain` port, never through `webContents.send` and its per-frame ack loop. The
+ * renderer encodes and decodes the DeviceEnvelopes itself; main never looks inside a frame.
+ *
+ * Bytes cross that port by structured clone in both directions, and the renderer → main direction
+ * must never put an `ArrayBuffer` in the transfer list: on Electron 44.3.0 a renderer `MessagePort`
+ * → `MessagePortMain` message with a transferred buffer arrives with its data null (probed
+ * 2026-10-10), which once kept every lane frame and clipboard image on this Mac without a trace.
+ * The renderer sends an exactly-sized buffer per frame. Main → renderer clones intact as it is.
+ *
+ * Every request main cannot use, every lane open that fails and every lane the transport closes
+ * leaves a line in main.log (drops once per session and reason, with the counts at session close);
+ * never frame or clipboard contents.
  *
  * Also here, because only main can do it: reading the local clipboard (polled while a session asks,
  * Electron has no change event; the hash of the last value seen or written prevents echo loops),
@@ -59,6 +68,8 @@ type Session = {
   opening: boolean;
   watchClipboard: boolean;
   closed: boolean;
+  /** Requests dropped this session, by reason: the first of each is logged, the totals at close. */
+  drops: Map<string, number>;
 };
 
 export function createScreenHost(options: ScreenHostOptions) {
@@ -81,6 +92,18 @@ export function createScreenHost(options: ScreenHostOptions) {
     }
   }
 
+  function logContext(session: Session, extra?: Record<string, unknown>) {
+    return { sessionId: session.sessionId, daemonId: session.daemonId, ...extra };
+  }
+
+  // Video runs at tens of frames a second, so a broken request shape repeats per frame: the first
+  // drop of each reason is logged as it happens, the rest only counted for `close`.
+  function drop(session: Session, reason: string, extra?: Record<string, unknown>) {
+    const count = (session.drops.get(reason) ?? 0) + 1;
+    session.drops.set(reason, count);
+    if (count === 1) options.log(`screen request dropped: ${reason}`, logContext(session, extra));
+  }
+
   function closeLanes(session: Session) {
     const transport = options.transport;
     for (const kind of ["control", "video"] as const) {
@@ -95,6 +118,7 @@ export function createScreenHost(options: ScreenHostOptions) {
     const transport = options.transport;
     if (!transport || session.opening || session.closed) return;
     if (!transport.online()) {
+      options.log("screen lanes not opened: transport offline", logContext(session));
       post(session, { type: "lanes-failed", message: "offline" });
       return;
     }
@@ -114,6 +138,7 @@ export function createScreenHost(options: ScreenHostOptions) {
         closed: () => {
           if (session.closed || session.lanes[kind] !== request.requestId) return;
           session.lanes[kind] = undefined;
+          options.log("screen lane closed by the transport", logContext(session, { lane: kind }));
           post(session, { type: "closed", lane: kind });
         },
       });
@@ -127,7 +152,9 @@ export function createScreenHost(options: ScreenHostOptions) {
       post(session, { type: "lanes", control, video });
     } catch (error) {
       closeLanes(session);
-      post(session, { type: "lanes-failed", message: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      options.log("screen lanes failed to open", logContext(session, { error: message }));
+      post(session, { type: "lanes-failed", message });
     } finally {
       session.opening = false;
       if (session.closed) closeLanes(session);
@@ -190,31 +217,61 @@ export function createScreenHost(options: ScreenHostOptions) {
     }
   }
 
-  async function applyRemoteClipboard(request: { text?: string; png?: ArrayBuffer }) {
+  async function applyRemoteClipboard(session: Session, request: { text?: string; png?: ArrayBuffer }) {
     if (typeof request.text === "string") {
-      if (Buffer.byteLength(request.text, "utf8") > MAX_CLIPBOARD_BYTES) return;
+      if (Buffer.byteLength(request.text, "utf8") > MAX_CLIPBOARD_BYTES) {
+        drop(session, "clipboard text over the size cap");
+        return;
+      }
       clipboardHash = createHash("sha256").update("t:").update(request.text).digest("hex");
       await clipboard.writeText(request.text);
       return;
     }
-    if (request.png instanceof ArrayBuffer && request.png.byteLength > 0 && request.png.byteLength <= MAX_CLIPBOARD_BYTES) {
-      clipboardHash = createHash("sha256").update("p:").update(Buffer.from(request.png)).digest("hex");
-      await clipboard.write([new ClipboardItem({ "image/png": new Blob([new Uint8Array(request.png)], { type: "image/png" }) })]);
+    if (!(request.png instanceof ArrayBuffer)) {
+      drop(session, "clipboard-set without text or a png ArrayBuffer", { png: describe(request.png) });
+      return;
     }
+    if (request.png.byteLength === 0 || request.png.byteLength > MAX_CLIPBOARD_BYTES) {
+      drop(session, "clipboard png empty or over the size cap", { bytes: request.png.byteLength });
+      return;
+    }
+    clipboardHash = createHash("sha256").update("p:").update(Buffer.from(request.png)).digest("hex");
+    await clipboard.write([new ClipboardItem({ "image/png": new Blob([new Uint8Array(request.png)], { type: "image/png" }) })]);
   }
 
   function handleRequest(session: Session, raw: unknown) {
-    if (!raw || typeof raw !== "object") return;
+    if (!raw || typeof raw !== "object") {
+      drop(session, "request is not an object", { request: describe(raw) });
+      return;
+    }
     const request = raw as DesktopScreenPortRequest;
     switch (request.type) {
       case "send": {
         const transport = options.transport;
-        const id = request.lane === "control" || request.lane === "video" ? session.lanes[request.lane] : undefined;
-        if (!transport || !id || !(request.data instanceof ArrayBuffer) || request.data.byteLength === 0 || request.data.byteLength > MAX_FRAME) return;
+        if (request.lane !== "control" && request.lane !== "video") {
+          drop(session, "send to an unknown lane");
+          return;
+        }
+        const id = session.lanes[request.lane];
+        if (!transport || !id) {
+          // A frame racing a lane close is expected now and then; logged once, so a lane the
+          // renderer believes open while main does not still shows.
+          drop(session, "send while the lane is not open", { lane: request.lane });
+          return;
+        }
+        if (!(request.data instanceof ArrayBuffer)) {
+          drop(session, "send without an ArrayBuffer", { lane: request.lane, data: describe(request.data) });
+          return;
+        }
+        if (request.data.byteLength === 0 || request.data.byteLength > MAX_FRAME) {
+          drop(session, "send of an empty or oversized frame", { lane: request.lane, bytes: request.data.byteLength });
+          return;
+        }
         if (!transport.send(id, new Uint8Array(request.data))) {
           // Backlog over budget or lane gone: the lane is finished, the renderer reopens.
           session.lanes[request.lane] = undefined;
           transport.close(id);
+          options.log("screen lane closed: the transport refused a frame", logContext(session, { lane: request.lane }));
           post(session, { type: "closed", lane: request.lane });
         }
         return;
@@ -223,12 +280,13 @@ export function createScreenHost(options: ScreenHostOptions) {
         void openLanes(session);
         return;
       case "clipboard-set":
-        applyRemoteClipboard(request).catch((error) => options.log("clipboard write failed", error));
+        applyRemoteClipboard(session, request).catch((error) => options.log("clipboard write failed", error));
         return;
       case "clipboard-watch":
         setClipboardWatch(session, request.on === true);
         return;
       default:
+        drop(session, "unknown request type", { type: describe((request as { type?: unknown }).type) });
         return;
     }
   }
@@ -238,6 +296,7 @@ export function createScreenHost(options: ScreenHostOptions) {
     if (!session) return;
     sessions.delete(sessionId);
     session.closed = true;
+    if (session.drops.size > 0) options.log("screen session closed with dropped requests", logContext(session, { drops: Object.fromEntries(session.drops) }));
     closeLanes(session);
     setClipboardWatch(session, false);
     try { session.port.close(); } catch { /* already gone */ }
@@ -249,7 +308,7 @@ export function createScreenHost(options: ScreenHostOptions) {
     close(sessionId);
     if (sessions.size >= MAX_SESSIONS) return false;
     const channel = new MessageChannelMain();
-    const session: Session = { sessionId, daemonId, port: channel.port1, lanes: {}, opening: false, watchClipboard: false, closed: false };
+    const session: Session = { sessionId, daemonId, port: channel.port1, lanes: {}, opening: false, watchClipboard: false, closed: false, drops: new Map() };
     sessions.set(sessionId, session);
     channel.port1.on("message", (event) => handleRequest(session, event.data));
     channel.port1.on("close", () => { if (sessions.get(sessionId) === session) close(sessionId); });
@@ -298,3 +357,13 @@ export function createScreenHost(options: ScreenHostOptions) {
 }
 
 export type ScreenHost = ReturnType<typeof createScreenHost>;
+
+/** What a dropped value was, for the log: its type and size, never its contents. */
+function describe(value: unknown): string {
+  if (value === null) return "null";
+  if (value instanceof ArrayBuffer) return `ArrayBuffer(${value.byteLength})`;
+  if (ArrayBuffer.isView(value)) return `${value.constructor.name}(${value.byteLength})`;
+  if (typeof value === "string") return value.length <= 32 && /^[\w-]*$/.test(value) ? `string "${value}"` : `string(${value.length})`;
+  if (typeof value === "object") return (value as { constructor?: { name?: string } }).constructor?.name ?? "object";
+  return typeof value;
+}

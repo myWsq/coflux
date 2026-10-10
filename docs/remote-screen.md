@@ -35,7 +35,11 @@ coflux-runtime: crates/runtime/src/screen.rs                             per ses
   is required, so a hand-written literal cannot omit it); handles `directoryWorkspaceEnsure`.
 - **Desktop main** (`apps/desktop/src/main/screen-host.ts`): opens and owns the control and video
   lanes (`openOwned`, RPC scope) under an identity of the app run's own, bridges bytes to the page over
-  a `MessageChannelMain` port (structured clone, no per-frame ack loop), polls the local clipboard
+  a `MessageChannelMain` port (structured clone, no per-frame ack loop; the renderer → main direction
+  never puts an `ArrayBuffer` in the transfer list, because Electron 44.3.0 delivers a transferred
+  buffer to `MessagePortMain` as null, and sends each frame in a buffer of exactly its size;
+  main → renderer clones intact; dropped requests, failed lane opens and lane closes are logged to
+  `main.log`), polls the local clipboard
   while a visible session asks, writes it on the remote's changes, and calls
   `webContents.setIgnoreMenuShortcuts` while a picture has focus (probed on Electron 44.3.0: covers
   `role: quit`).
