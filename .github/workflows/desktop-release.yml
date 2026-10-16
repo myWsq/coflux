@@ -122,7 +122,7 @@ jobs:
 
       # 内置 daemon 三件（plan 113）：artifact 不保留执行位，stage 脚本复制到 build/daemon/ 时统一补 0755；
       # 缺任一件脚本直接失败，不会静默出一个不带 daemon 的包。
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: desktop-daemon-bundle
           path: ${{ runner.temp }}/daemon-bundle
