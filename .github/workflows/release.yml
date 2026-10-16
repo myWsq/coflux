@@ -241,7 +241,7 @@ jobs:
           # tar.gz contains launcher, runtime, ptyd, transport and the native CLI for manual installation
           tar -C "$bin" -czf "dist/coflux-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" coflux-launcher coflux-runtime coflux coflux-transport coflux-ptyd TRANSPORT-NOTICES.txt TRANSPORT-MODULES.txt
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.target }}
           path: dist/
@@ -281,7 +281,7 @@ jobs:
 
       # 签名 job 只有 contents:read；后续 contents:write job 只拿不可变的同-run artifact，
       # 不接触 WORKER_SIGNING_KEY，避免发布 token 与离线发布根落在同一权限域。
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signed-release-assets
           path: |
