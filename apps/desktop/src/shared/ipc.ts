@@ -77,6 +77,8 @@ export const IPC = {
    */
   screenOpen: "desktop:screen-open",
   screenClose: "desktop:screen-close",
+  /** Locked remote Mac: probe its Screen Sharing through the device tunnel, then open macOS Screen Sharing on a loopback forward. */
+  screenSharingOpen: "desktop:screen-sharing-open",
   /** The picture took or lost keyboard focus: main switches its menu accelerators off / on. */
   screenFocus: "desktop:screen-focus",
   /** Immersive mode: the window goes full screen and back. */

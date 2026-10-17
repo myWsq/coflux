@@ -421,7 +421,7 @@ class ProxyConnection {
 }
 
 /** Joins two byte streams both ways; a graceful end is passed on, an abrupt close tears both down. */
-function splice(client: Socket, stream: Duplex, early: Buffer): void {
+export function splice(client: Socket, stream: Duplex, early: Buffer): void {
   if (early.length > 0) stream.write(early);
   client.pipe(stream);
   stream.pipe(client);

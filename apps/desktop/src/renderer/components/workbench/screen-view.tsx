@@ -425,7 +425,7 @@ function ScreenView({ entry, runtime, client, immersiveDaemonId, onToggleImmersi
             style={remoteCursorStyle(cursor, display, pictureSize)}
           />
         ) : null}
-        <StateOverlay phase={phase} state={state} deviceOnline={deviceOnline} deviceName={daemon?.name ?? "设备"} session={session} />
+        <StateOverlay phase={phase} state={state} deviceOnline={deviceOnline} deviceName={daemon?.name ?? "设备"} daemonId={daemonId} session={session} />
         {phase === "streaming" && !pictureFocused && entry.visible ? (
           <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-md bg-background/80 px-2 py-1 text-2xs text-muted-foreground backdrop-blur">
             点击画面后，键盘和鼠标都发往远端
@@ -572,7 +572,46 @@ function phaseLabel(phase: ScreenSessionState["phase"]): string {
   }
 }
 
-function StateOverlay({ phase, state, deviceOnline, deviceName, session }: { phase: ScreenSessionState["phase"]; state: ScreenSessionState | null; deviceOnline: boolean; deviceName: string; session: ScreenSession | null }) {
+const SCREEN_SHARING_ERRORS: Record<"offline" | "refused" | "unsupported", string> = {
+  refused: "那台 Mac 没有开启「屏幕共享」。请在它的「系统设置 → 通用 → 共享」里打开「屏幕共享」后重试。",
+  unsupported: "那台设备上的 coflux 版本太旧，不支持这个功能。请先更新那台设备上的 coflux。",
+  offline: "暂时无法连接到那台设备。请确认它在线后重试。",
+};
+
+/** The locked state: the lock screen is not capturable, so unlocking is handed to macOS Screen Sharing (main probes and forwards). */
+function LockedOverlayBody({ daemonId, deviceOnline }: { daemonId: string; deviceOnline: boolean }) {
+  const [pending, setPending] = useState(false);
+  const [opened, setOpened] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const open = () => {
+    setPending(true);
+    setError(null);
+    desktop
+      .screenSharingOpen(daemonId)
+      .then((result) => {
+        if (result.ok) {
+          setOpened(true);
+          return;
+        }
+        setOpened(false);
+        setError(SCREEN_SHARING_ERRORS[result.reason]);
+      })
+      .catch(() => setError(SCREEN_SHARING_ERRORS.offline))
+      .finally(() => setPending(false));
+  };
+  return (
+    <>
+      <Lock className="size-5 text-muted-foreground" />
+      <h2 className="mt-4 text-base font-medium text-foreground">远端已锁定</h2>
+      <p className="mt-1.5 text-sm leading-5 text-muted-foreground">可以通过 macOS 屏幕共享解锁那台 Mac，解锁后这里的画面会自动恢复。</p>
+      <Button className="mt-5" label={pending ? "正在打开屏幕共享…" : "用 macOS 屏幕共享解锁"} variant="primary" size="sm" isDisabled={!deviceOnline || pending} onClick={open} />
+      {error ? <p className="mt-3 text-xs leading-5 text-destructive">{error}</p> : null}
+      {opened && !error ? <p className="mt-3 text-xs leading-5 text-muted-foreground">解锁后可以关闭屏幕共享窗口。</p> : null}
+    </>
+  );
+}
+
+function StateOverlay({ phase, state, deviceOnline, deviceName, daemonId, session }: { phase: ScreenSessionState["phase"]; state: ScreenSessionState | null; deviceOnline: boolean; deviceName: string; daemonId: string; session: ScreenSession | null }) {
   if (phase === "streaming" || phase === "paused" || phase === "closed") return null;
   const shell = (children: ReactNode) => (
     <div className="absolute inset-0 flex items-center justify-center bg-terminal">
@@ -608,13 +647,7 @@ function StateOverlay({ phase, state, deviceOnline, deviceName, session }: { pha
         </>,
       );
     case "locked":
-      return shell(
-        <>
-          <Lock className="size-5 text-muted-foreground" />
-          <h2 className="mt-4 text-base font-medium text-foreground">需要在那台 Mac 上解锁</h2>
-          <p className="mt-1.5 text-sm leading-5 text-muted-foreground">远端登录会话已锁定，这里不支持远程解锁。解锁后画面会自动恢复。</p>
-        </>,
-      );
+      return shell(<LockedOverlayBody daemonId={daemonId} deviceOnline={deviceOnline} />);
     case "detached":
       return (
         <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between gap-2 border-b border-warning/20 bg-warning/10 px-4 py-2 text-xs text-warning backdrop-blur">
