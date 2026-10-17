@@ -70,6 +70,14 @@ coflux-runtime: crates/runtime/src/screen.rs                             per ses
   while a visible session asks, writes it on the remote's changes, and calls
   `webContents.setIgnoreMenuShortcuts` while a picture has focus (probed on Electron 44.3.0: covers
   `role: quit`).
+- **Unlock handoff** (`screen-sharing-forward.ts`, owned by the screen host): a locked remote Mac cannot
+  be captured or typed into, so the locked overlay's button asks main to open macOS Screen Sharing on it.
+  Main probes the remote's loopback port 5900 through the device's loopback tunnel (the failure reasons
+  `offline` / `refused` / `unsupported` become the overlay's copy), then opens `vnc://127.0.0.1:<port>` on a
+  forwarding listener bound to loopback only, on an OS-chosen port (never 5900, which is this Mac's own
+  Screen Sharing), each accepted socket spliced into its own tunnel stream. The page sends only the
+  device id; the port and the URL are fixed in main. The helper's 2 s lock polling resumes the picture
+  once the user unlocks. Coflux never sees a password.
 - **Renderer**: `screen-records.ts` (records per device: the stable remote session id),
   `screen-runtime.ts` (records and live sessions, keyed by device), `screen-session.ts` (protocol,
   credit, WebCodecs `avc1.64001f` Annex B), `screen-view.tsx` (status bar 直连/中继 + latency,
@@ -114,6 +122,12 @@ physical `KeyboardEvent.code` and are mapped to macOS virtual key codes on the r
   exits now. A helper the worker cannot serve through (protocol, refused hello) gets
   `tear_down`: it ends its session immediately (display removed, arrangement restored) and exits.
   Two helpers never hold virtual displays at the same time.
+- Unlock handoff: Screen Sharing must be turned on in the remote Mac's System Settings → General →
+  Sharing (Coflux does not enable it). The forward closes after a minute with no open connection, and
+  with the device's screen session (disconnect, unmount, window reload), ⌘R and app quit, which cuts a
+  live Apple Screen Sharing window ("connection lost"); every central disconnect and ⌘R's transport
+  reset also abandon the tunnel lane and drop it. Not covered: a sleeping Mac, FileVault pre-boot or the
+  login window after a reboot.
 - Cursor shapes come from `NSCursor.currentSystem`; when unreadable the helper falls back to
   cursor-in-video.
 - Not measured: a Mac with no physical display at all; decode throughput at 2880×1800@60.
