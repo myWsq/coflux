@@ -171,6 +171,7 @@ export type DesktopScreenPortRequest =
   | { type: "clipboard-watch"; on: boolean };
 /** The window message the preload posts to the page with the session's port in `ports[0]`. */
 export const SCREEN_PORT_MESSAGE = "coflux-screen-port";
+export type DesktopScreenSharingResult = { ok: true } | { ok: false; reason: "offline" | "refused" | "unsupported" };
 export type DesktopScreenEvent = { kind: "fullscreen"; on: boolean };
 
 /**
@@ -493,6 +494,12 @@ export type DesktopBridge = {
    */
   screenOpen(sessionId: string, daemonId: string): Promise<boolean>;
   screenClose(sessionId: string): void;
+  /**
+   * Unlock handoff for a locked remote Mac: main probes the device's Screen Sharing (loopback port
+   * 5900) through the tunnel and, when reachable, opens macOS Screen Sharing on a short-lived loopback
+   * forward. The page sends only the device id; the port and URL are fixed in main.
+   */
+  screenSharingOpen(daemonId: string): Promise<DesktopScreenSharingResult>;
   /** The picture has keyboard focus: every menu accelerator (⌘Q, ⇧⌘W, ⌘R, ⌃⌘F, Edit) yields to it. */
   screenFocus(focused: boolean): void;
   /** Immersive mode: the window goes full screen (true) or back (false). */

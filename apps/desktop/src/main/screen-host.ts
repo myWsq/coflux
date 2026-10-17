@@ -29,12 +29,14 @@
  * session itself lives on the remote helper across all of it.
  */
 import { randomUUID, createHash } from "node:crypto";
-import { clipboard, ClipboardItem, ipcMain, MessageChannelMain, type IpcMainEvent, type IpcMainInvokeEvent, type MessagePortMain } from "electron";
+import type { Duplex } from "node:stream";
+import { clipboard, ClipboardItem, ipcMain, MessageChannelMain, shell, type IpcMainEvent, type IpcMainInvokeEvent, type MessagePortMain } from "electron";
 
 import { DeviceScope } from "@coflux/protocol";
-import type { DesktopScreenLane, DesktopScreenLaneKind, DesktopScreenPortMessage, DesktopScreenPortRequest } from "../shared/desktop-bridge";
+import type { DesktopScreenLane, DesktopScreenLaneKind, DesktopScreenPortMessage, DesktopScreenPortRequest, DesktopScreenSharingResult } from "../shared/desktop-bridge";
 import { IPC } from "../shared/ipc";
 import { isTrustedRendererUrl } from "./ipc-trust";
+import { createScreenSharingForward } from "./screen-sharing-forward";
 import type { TrustedSenders } from "./ipc";
 import type { OwnedLaneHandlers } from "./tailcat-transport";
 
@@ -50,6 +52,8 @@ export type ScreenHostOptions = {
   /** The window whose page holds the tabs: where ports go and whose menu shortcuts are toggled. */
   window: () => { postPort(sessionId: string, port: MessagePortMain): void; setIgnoreMenuShortcuts(ignore: boolean): void; setFullScreen(on: boolean): void; isFullScreen(): boolean } | null;
   log: (message: string, detail?: unknown) => void;
+  /** A connection to a port on a remote device's loopback (the unlock handoff to macOS Screen Sharing); absent without a native transport. */
+  connectLoopback?: (daemonId: string, port: number) => Promise<Duplex>;
 };
 
 /** Largest frame accepted from or sent to the renderer: one device frame. */
@@ -80,6 +84,11 @@ export function createScreenHost(options: ScreenHostOptions) {
   let clipboardHash = "";
   let clipboardPolling = false;
   let focused = false;
+  const screenSharing = createScreenSharingForward({
+    connect: (daemonId, port) => (options.connectLoopback ? options.connectLoopback(daemonId, port) : Promise.reject(new Error("no native transport"))),
+    openUrl: (url) => shell.openExternal(url),
+    log: options.log,
+  });
 
   // `MessagePortMain.postMessage` structured-clones the message (its transfer list is for ports
   // only): one memcpy of the frame in main, then the IPC hop — no per-frame ack loop and no JSON.
@@ -299,6 +308,7 @@ export function createScreenHost(options: ScreenHostOptions) {
     if (session.drops.size > 0) options.log("screen session closed with dropped requests", logContext(session, { drops: Object.fromEntries(session.drops) }));
     closeLanes(session);
     setClipboardWatch(session, false);
+    if (![...sessions.values()].some((item) => item.daemonId === session.daemonId)) screenSharing.closeDevice(session.daemonId);
     try { session.port.close(); } catch { /* already gone */ }
   }
 
@@ -332,6 +342,7 @@ export function createScreenHost(options: ScreenHostOptions) {
   /** The renderer was rebuilt (⌘R, crash): every session of the old page is gone with it. Idempotent. */
   function reset() {
     for (const sessionId of [...sessions.keys()]) close(sessionId);
+    screenSharing.dispose();
     if (focused) setFocus(false);
   }
 
@@ -348,6 +359,12 @@ export function createScreenHost(options: ScreenHostOptions) {
       if (!allowed(event) || !raw || typeof raw !== "object") return;
       const value = raw as { sessionId?: unknown };
       if (id(value.sessionId)) close(value.sessionId);
+    });
+    ipcMain.handle(IPC.screenSharingOpen, async (event, raw: unknown): Promise<DesktopScreenSharingResult> => {
+      if (!allowed(event) || !raw || typeof raw !== "object") return { ok: false, reason: "offline" };
+      const value = raw as { daemonId?: unknown };
+      if (!id(value.daemonId) || !options.connectLoopback) return { ok: false, reason: "offline" };
+      return screenSharing.open(value.daemonId);
     });
     ipcMain.on(IPC.screenFocus, (event, value: unknown) => { if (allowed(event) && typeof value === "boolean") setFocus(value); });
     ipcMain.on(IPC.screenImmersive, (event, value: unknown) => { if (allowed(event) && typeof value === "boolean") setImmersive(value); });

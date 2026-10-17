@@ -505,6 +505,7 @@ if (!app.requestSingleInstanceLock()) {
         };
       },
       log: (message, detail) => log.warn(message, detail),
+      connectLoopback: loopbackTunnels ? (daemonId, port) => loopbackTunnels.connect(daemonId, port) : undefined,
     });
     screenHost.registerIpc(trusted);
     app.once("will-quit", () => screenHost.dispose());

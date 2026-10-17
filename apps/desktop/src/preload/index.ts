@@ -25,6 +25,7 @@ import type {
   DesktopLoginProvider,
   DesktopNotification,
   DesktopScreenEvent,
+  DesktopScreenSharingResult,
   DesktopUpdateState,
   DesktopWorkspaceFileResult,
 } from "../shared/desktop-bridge";
@@ -266,6 +267,13 @@ const bridge: DesktopBridge = {
   // Remote screen tabs (plan 20260929-remote-desktop).
   screenOpen(sessionId: string, daemonId: string) {
     return ipcRenderer.invoke(IPC.screenOpen, { sessionId: String(sessionId), daemonId: String(daemonId) }).then((ok) => ok === true);
+  },
+  screenSharingOpen(daemonId: string) {
+    return ipcRenderer.invoke(IPC.screenSharingOpen, { daemonId: String(daemonId) }).then((result): DesktopScreenSharingResult => {
+      if (result && typeof result === "object" && (result as { ok?: unknown }).ok === true) return { ok: true };
+      const reason = (result as { reason?: unknown } | null)?.reason;
+      return { ok: false, reason: reason === "refused" || reason === "unsupported" ? reason : "offline" };
+    });
   },
   screenClose(sessionId: string) {
     ipcRenderer.send(IPC.screenClose, { sessionId: String(sessionId) });
