@@ -2,6 +2,7 @@
 //
 // Started by the worker as a detached process with `--socket <path>`; serves the worker over that
 // Unix socket, owns the session and exits by itself when it has no session and no worker.
+import AppKit
 import CofluxScreenCore
 import Darwin
 import Foundation
@@ -61,14 +62,18 @@ interrupt.setEventHandler {
 }
 interrupt.resume()
 
-// The main run loop, not `dispatchMain()`: CoreGraphics updates this process's view of the displays
-// (the online list, their modes) only while handling WindowServer's reconfiguration notifications
-// on the main run loop. Parked in `dispatchMain()` the helper saw its first virtual display and
-// none after it, for as long as it lived. The run loop drains the main queue too, so everything
-// else (the socket, timers, signal sources, ScreenCaptureKit's main-actor tasks) runs as before.
-// `run()` returns if the loop ever has nothing attached; the port keeps it attached and the loop
-// re-enters it regardless.
-RunLoop.main.add(NSMachPort(), forMode: .default)
-while true {
-    RunLoop.main.run()
-}
+// AppKit's event loop, not a bare run loop or `dispatchMain()`: CoreGraphics updates this process's
+// view of the displays (the online list, their modes) only while handling WindowServer's
+// reconfiguration notifications, and those reach the process through the event port that only
+// NSApplication's loop drains. Under `dispatchMain()` and under `RunLoop.main.run()` alike, a
+// display the helper created stayed without modes or never came online in its own view, and the
+// notifications surfaced only inside a later synchronous call such as the failure teardown
+// (measured on macOS 27.2: under NSApplication the callback fires within 10 ms of `apply` and the
+// modes are there). The loop drains the main queue too, so the socket, timers, signal sources and
+// ScreenCaptureKit's main-actor tasks run as before. Prohibited: no Dock icon, menu bar or
+// activation. The activity keeps App Nap, which a background-only app is eligible for, from
+// coalescing the session's timers; idle system sleep stays allowed.
+let app = NSApplication.shared
+app.setActivationPolicy(.prohibited)
+let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Coflux remote screen helper")
+app.run()
