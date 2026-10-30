@@ -12,7 +12,7 @@ struct WorkspaceListView: View {
     var body: some View {
         NavigationStack {
             List {
-                ForEach(client.projects, id: \.id) { project in
+                ForEach(client.visibleProjects, id: \.id) { project in
                     Section {
                         let members = client.workspaces.filter { $0.projectID == project.id }
                         ForEach(members, id: \.id) { workspace in
@@ -41,7 +41,7 @@ struct WorkspaceListView: View {
                 }
             }
             .overlay {
-                if client.projects.isEmpty {
+                if client.visibleProjects.isEmpty {
                     ContentUnavailableView(
                         "暂无项目",
                         systemImage: "tray",
