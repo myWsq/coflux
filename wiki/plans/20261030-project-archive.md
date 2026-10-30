@@ -354,3 +354,12 @@ The worktree starts without `node_modules` and with an empty `target/`: run `pnp
 - iOS hiding ships with the next TestFlight build; not covered by CI.
 - The plugin bump (0.25.1) ships with the next `v*` release; release notes in English.
 - Desktop UI acceptance is by hand (`pnpm dev:desktop:prod` against production needs the server deployed first; otherwise the local stack).
+
+## Outcome
+
+- Status: APPROVE — 2026-10-30
+- Mode: subagent(opus), one work package (milestones sequential); plan audited by subagent(fable) before dispatch
+- Commits: `24e283d5..0b3e3072` (`f33d11df` protocol, `e20add0d` migration + store, `afcf6235` centre, `b13624f4` client, `f1a48699` desktop, `2719c98d` iOS, `0b3e3072` skill + plugin 0.25.1)
+- Verification: `buf lint` clean, `buf generate` reproduces the committed trees, breaking check against `32d8ede1` passes; server `tsc --noEmit` 0; client tests 102/102; desktop typecheck, 559/559 tests, build and oxlint clean; `cargo build` zero warnings; `cargo test -p coflux-protocol -p coflux-cli` pass; plugin sync leaves no diff; black-box `pnpm -C tests test` 95/95. A throwaway live script against a real stack confirmed: `AuthOk.projectArchive`; archiving a project with a running terminal broadcasts `projectCreated` with `archivedAt` and `taskRemoved`; desktop `taskCreate`/`workspaceCreate` and CLI `terminal.new`/`workspace.new` refused with 「项目已归档」; `project list` carries `archivedAt`; re-archive keeps the timestamp; re-import returns the same project with `alreadyImported: true` and unarchives it without a duplicate; unarchive restores the workspace and creation works again.
+- Deviations: the workbench's file-tab pruning keeps using all workspaces, so an archived workspace's open file tabs survive and return on unarchive (accepted: archiving hides, it does not remove). `isProjectDeleting` was replaced by `projectAdmission` (active / archived / deleting) for the early, message-only checks; `claimActiveProject` still returns archived rows and every creation site refuses on the locked row's `archivedAt` (within Your call).
+- Follow-ups: agent `terminalNew` and worktree-locate refusals were verified by review only, not driven live; desktop UI (sidebar menu, confirm dialog, settings section) awaits the user's hand walkthrough; Esc while the delete confirm is open over Settings closes Settings rather than the dialog (pre-existing, shared with the Executor endpoint dialog); iOS hiding ships with the next TestFlight build.
