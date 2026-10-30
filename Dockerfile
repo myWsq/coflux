@@ -7,8 +7,22 @@ COPY --from=transport-go /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 ENV CGO_ENABLED=0 GOTOOLCHAIN=go1.27.1
 
-RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates postgresql openssl \
+RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates postgresql openssl xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# Zig 0.17.x: the runtime's VT engine (libghostty-vt) is compiled from Ghostty's source during the
+# cargo build. The base image is multi-arch (arm64 under OrbStack, x86_64 in CI), so pick the
+# tarball by the image's architecture and verify ziglang.org's published SHA-256.
+RUN set -e; arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) sum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 ;; \
+      aarch64) sum=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8 ;; \
+      *) echo "no Zig 0.17.0 tarball for $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/0.17.0/zig-${arch}-linux-0.17.0.tar.xz"; \
+    echo "${sum}  /tmp/zig.tar.xz" | sha256sum -c -; \
+    mkdir -p /opt/zig; tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1; rm /tmp/zig.tar.xz; \
+    ln -s /opt/zig/zig /usr/local/bin/zig; zig version
 
 # Rust toolchain（minimal）
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable

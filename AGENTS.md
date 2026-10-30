@@ -59,7 +59,7 @@ CI/releases: `.github/workflows/ci.yml` gates pushes and PRs; `release.yml` publ
 
 For production infrastructure (three machines, domain routing, deployment and rollback commands, and known pitfalls), see [docs/deployment.md](docs/deployment.md). **Read it before touching production.** Domains under coflux.dev mix proxied and DNS-only Cloudflare records, and Caddy on two machines also serves other projects.
 
-Prerequisites: Node 22+ (server and test tooling), pnpm, and Rust stable (`rustup`). Building the bundled transport helper also requires Go 1.27.1.
+Prerequisites: Node 22+ (server and test tooling), pnpm, Rust stable (`rustup`), and Zig 0.17.x (the runtime's VT engine, libghostty-vt, is compiled from Ghostty's source during the cargo build, which also needs `git` and network on first build). Building the bundled transport helper also requires Go 1.27.1.
 
 ## Change discipline
 
