@@ -476,6 +476,10 @@ export type CofluxState = {
   /** The account's configuration has arrived on this connection. Until then `agentSettings` may be
    * stale, so it must not be edited: an edit based on it would be broadcast as the truth. */
   agentSettingsReceived: boolean;
+  /** The center of the current connection archives projects (`AuthOk.project_archive`, plan
+   * 20261030-project-archive). False before the first authOk and against an older center, which
+   * only knows project removal. */
+  projectArchiveSupported: boolean;
   lastError: ClientError | null;
   snapshotRevision: number;
 };
@@ -508,6 +512,20 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
  * 判定在客户端收敛于此一处，勿在 UI 层散落裸比较。 */
 export function isDirWorkspace(workspace: Workspace): boolean {
   return !workspace.projectId;
+}
+
+/** An archived project (plan 20261030-project-archive) stays in `state.projects` but is hidden from
+ * every list, the palette and the selection. This and `isWorkspaceArchived` are the single
+ * definition of "visible"; no UI compares `archivedAt` itself. */
+export function isProjectArchived(project: Project): boolean {
+  return project.archivedAt !== undefined;
+}
+
+/** A workspace of an archived project. A directory workspace has no project and is never archived. */
+export function isWorkspaceArchived(workspace: Workspace, projects: readonly Project[]): boolean {
+  if (isDirWorkspace(workspace)) return false;
+  const project = projects.find((entry) => entry.id === workspace.projectId);
+  return project !== undefined && isProjectArchived(project);
 }
 
 /* Optimistic removal (plan 20261002-optimistic-removal): a pending removal leaves the visible
@@ -713,6 +731,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     agentSettings: EMPTY_AGENT_SETTINGS,
     agentSettingsSupported: false,
     agentSettingsReceived: false,
+    projectArchiveSupported: false,
     notificationInbox: emptyNotificationInbox(),
     lastError: null,
     snapshotRevision: 0,
@@ -1301,6 +1320,35 @@ export function createCofluxClient(options: CofluxClientOptions) {
     return true;
   }
 
+  /**
+   * Archives or unarchives a project (plan 20261030-project-archive). The local copy is patched at
+   * once and the offline catalog saved; the centre's `projectCreated` (and any later snapshot)
+   * overwrites it, so there is no rollback timer. Not a removal: it never goes through parking. Not
+   * connected, or an older centre: reports an error, changes nothing and returns false.
+   */
+  function setProjectArchived(projectId: string, archived: boolean): boolean {
+    if (!controlAuthenticated) {
+      reportLocalError(archived ? "与服务器的连接未就绪，暂时无法归档项目" : "与服务器的连接未就绪，暂时无法取消归档");
+      return false;
+    }
+    if (!store.getState().projectArchiveSupported) {
+      reportLocalError("服务器版本过旧，不支持归档项目");
+      return false;
+    }
+    store.setState((state) => ({
+      projects: state.projects.map((project) => {
+        if (project.id !== projectId || isProjectArchived(project) === archived) return project;
+        if (archived) return { ...project, archivedAt: Date.now() };
+        const next = { ...project };
+        delete next.archivedAt;
+        return next;
+      }),
+    }));
+    persistOfflineCatalog();
+    send({ case: "projectSetArchived", value: { projectId, archived } });
+    return true;
+  }
+
   /** Ids of workspaces hidden by a pending removal: they may still come back (plan 078's create adoption must know them). */
   function hiddenWorkspaceIds(): string[] {
     return [...parkedWorkspaces.keys()];
@@ -1343,6 +1391,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           store.setState({ agentSettings: EMPTY_AGENT_SETTINGS });
         }
         store.setState({ agentSettingsSupported: value.agentSettings, agentSettingsReceived: false });
+        store.setState({ projectArchiveSupported: value.projectArchive });
         // Terminal content: fetched through TaskRead when the center serves metadata, else taken
         // from the checkpoints it pushes (plan 20261010-terminal-checkpoint-energy).
         sessionMetadataSupported = value.sessionMetadata;
@@ -1373,6 +1422,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         agentSettingsAccount = "";
         failAgentSettingWrites("登录已失效，修改没有保存");
         store.setState({ agentSettings: EMPTY_AGENT_SETTINGS, agentSettingsSupported: false, agentSettingsReceived: false });
+        store.setState({ projectArchiveSupported: false });
         // Show the server's own reason. This branch is reached by an expired session token, a
         // rate-limited address and an obsolete bundle just as much as by wrong credentials, and
         // a hard-coded "wrong username or password" misnamed every one of them — the desktop's
@@ -1912,6 +1962,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       agentSettings: EMPTY_AGENT_SETTINGS,
       agentSettingsSupported: false,
       agentSettingsReceived: false,
+      projectArchiveSupported: false,
     });
   }
 
@@ -2324,6 +2375,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     closeTask,
     removeWorkspace,
     removeProject,
+    setProjectArchived,
     hiddenWorkspaceIds,
     retainDevice,
     /** executor（plan 116）：订阅 daemon 推来的四条；返回退订函数。至多一个订阅者。 */
