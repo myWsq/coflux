@@ -106,11 +106,16 @@ const converge = async (
         // wizard and the account CLI) land here, and the device parent row is already locked by
         // claimActiveDevice, so a plain read inside this transaction serialises concurrent imports.
         // A candidate that is being deleted is not a hit — handing it back would return a project
-        // that is in the middle of disappearing, so the import creates a new one instead.
+        // that is in the middle of disappearing, so the import creates a new one instead. An archived
+        // candidate is a hit: importing it again unarchives it (plan 20261030-project-archive), and
+        // the row returned by that update is what gets broadcast, so clients show it again.
         const candidate = (await tx.listProjectsByDaemon(operation.daemonId)).find(
           (entry) => entry.repoPath === value.repoPath && entry.accountId === operation.accountId,
         );
-        const reused = candidate ? await tx.claimActiveProject(candidate.id) : undefined;
+        const claimed = candidate ? await tx.claimActiveProject(candidate.id) : undefined;
+        const reused = claimed && claimed.archivedAt !== undefined
+          ? await tx.setProjectArchived(claimed.id, false, Date.now())
+          : claimed;
         const ts = Date.now();
         let project = reused;
         if (!project) {
@@ -159,6 +164,9 @@ const converge = async (
           project.accountId !== operation.accountId ||
           project.daemonId !== operation.daemonId
         ) throw new OperationConvergenceError("worktree.add target project 已失效或正在删除");
+        if (project.archivedAt !== undefined) {
+          throw new OperationConvergenceError("项目已归档，不能再创建工作区");
+        }
         const workspace = create(WorkspaceSchema, {
           id: workspaceId,
           accountId: operation.accountId,

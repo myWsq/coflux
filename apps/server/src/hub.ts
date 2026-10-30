@@ -1535,6 +1535,9 @@ export class Hub {
                     project.accountId !== currentWorkspace.accountId ||
                     project.daemonId !== currentWorkspace.daemonId
                   ) return { ok: false, error: "项目正在删除，不能再创建终端" } as const;
+                  if (project.archivedAt !== undefined) {
+                    return { ok: false, error: "项目已归档，不能再创建终端" } as const;
+                  }
                 }
 
                 const tasks = await tx.listTasksByWorkspace(currentWorkspace.id);
@@ -1720,6 +1723,9 @@ export class Hub {
         project.accountId !== daemon.accountId ||
         project.daemonId !== daemon.info.daemonId
       ) return { ok: false, error: "项目正在删除，不能再跟随 worktree" } as const;
+      if (project.archivedAt !== undefined) {
+        return { ok: false, error: "项目已归档，不能再跟随 worktree" } as const;
+      }
 
       // 先按 daemon 报的既有 id 认，认不出再按规范化 path 在本项目内查重；两条都空才登记。
       let target: Workspace | undefined;
@@ -3488,8 +3494,14 @@ export class Hub {
           this.sendClient(client, { case: "error", value: { message: "项目不存在或不属于本账号" } });
           return;
         }
-        if (await this.store.isProjectDeleting(project.id)) {
+        // Early refusal for the message only; the worktree.add convergence re-checks under the lock.
+        const admission = await this.store.projectAdmission(project.id);
+        if (admission === "deleting") {
           this.sendClient(client, { case: "error", value: { message: "项目正在删除，不能再创建工作区" } });
+          return;
+        }
+        if (admission === "archived") {
+          this.sendClient(client, { case: "error", value: { message: "项目已归档，不能再创建工作区" } });
           return;
         }
         const d = this.daemons.get(project.daemonId);
@@ -3631,6 +3643,31 @@ export class Hub {
         });
         break;
       }
+      case "projectSetArchived": {
+        // Plan 20261030-project-archive. The flag is committed first, so every creation path (which
+        // reads archivedAt off the row it locks) refuses new terminals before the teardown below
+        // enumerates them. The guard is re-checked before every broadcast: finalizeDeletingProject
+        // cancels it, and a projectCreated sent after projectRemoved would resurrect the project.
+        const value = msg.payload.value;
+        await this.withProjectEffectGuard(value.projectId, async (projectEffectGuard) => {
+          const project = await this.store.getProject(value.projectId);
+          if (!project || project.accountId !== client.accountId || projectEffectGuard.cancelled) return;
+          const updated = await this.store.setProjectArchived(project.id, value.archived, Date.now());
+          if (!updated || projectEffectGuard.cancelled) return;
+          // Reuses the projectCreated upsert (as projectSetName does): other clients hide it at once.
+          this.broadcast(updated.accountId, { case: "projectCreated", value: { project: updated } });
+          if (!value.archived) return;
+          // Archive closes and deletes the project's terminals; workspaces stay. Never refused for an
+          // offline device: the records go now, and the runtime retirement is best effort.
+          for (const workspace of await this.store.listWorkspacesByProject(updated.id)) {
+            for (const task of await this.store.listTasksByWorkspace(workspace.id)) {
+              if (projectEffectGuard.cancelled) return;
+              await this.removeTaskRecord(task, false);
+            }
+          }
+        });
+        break;
+      }
       case "directoryWorkspaceEnsure": {
         // The device's canonical directory workspace without a task (plan 20260929-remote-desktop):
         // a screen tab needs a workspace to live in but no shell. Same device lock, same idempotent
@@ -3728,6 +3765,7 @@ export class Hub {
                 if (!project || project.accountId !== ws.accountId || project.daemonId !== ws.daemonId) {
                   return { error: "项目正在删除，不能再创建任务" } as const;
                 }
+                if (project.archivedAt !== undefined) return { error: "项目已归档，不能再创建任务" } as const;
               }
               const ts = Date.now();
               const task: Task = create(TaskSchema, { id: taskId, accountId: ws.accountId, daemonId: ws.daemonId, projectId: ws.projectId, workspaceId: ws.id, title: value.title || "未命名任务", status: TaskStatus.IDLE, createdAt: ts, updatedAt: ts });
@@ -4060,7 +4098,7 @@ export class Hub {
     client.tokenHash = tokenHash;
     client.sessionMetadata = msg.sessionMetadata === true;
     const loginName = await this.resolveLoginName(loginUserId, tokenHash);
-    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true, agentSettings: true, sessionMetadata: true } });
+    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true, agentSettings: true, sessionMetadata: true, projectArchive: true } });
   }
 
   /** authOk 回带的「登录身份显示串」（plan 110）：local 模式恒为 env 用户名；password 模式按
@@ -4227,9 +4265,9 @@ export class Hub {
     if (!d) return void fail(`daemon 不在线：${task.daemonId}`);
     const ws = await this.store.getWorkspace(task.workspaceId);
     if (!ws) return void fail("工作区已不存在");
-    if (await this.store.isProjectDeleting(task.projectId)) {
-      return void fail("项目正在删除，不能启动新 session");
-    }
+    const admission = await this.store.projectAdmission(task.projectId);
+    if (admission === "deleting") return void fail("项目正在删除，不能启动新 session");
+    if (admission === "archived") return void fail("项目已归档，不能启动新 session");
 
     const sessionId = randomUUID();
     const c = clampDim(cols, 80);
@@ -4292,6 +4330,7 @@ export class Hub {
             project.accountId !== currentWorkspace.accountId ||
             project.daemonId !== currentWorkspace.daemonId
           ) return "项目正在删除，不能启动新 session";
+          if (project.archivedAt !== undefined) return "项目已归档，不能启动新 session";
         }
         return undefined;
       });
@@ -4874,7 +4913,10 @@ export class Hub {
     if (!validBoundedText(branch, MAX_BRANCH_BYTES) || /\s/.test(branch)) return { ok: false, error: "分支名无效（不能为空、不能含空白或控制字符）" };
     const name = (input.name ?? "").trim() || branch;
     if (!validBoundedText(name, MAX_WORKSPACE_NAME_BYTES)) return { ok: false, error: "工作区名称过长或含控制字符" };
-    if (await this.store.isProjectDeleting(project.id)) return { ok: false, error: "项目正在删除，不能再创建工作区" };
+    // Early refusal for the message only; the worktree.add convergence re-checks under the lock.
+    const admission = await this.store.projectAdmission(project.id);
+    if (admission === "deleting") return { ok: false, error: "项目正在删除，不能再创建工作区" };
+    if (admission === "archived") return { ok: false, error: "项目已归档，不能再创建工作区" };
     const daemon = this.requireOnlineDaemon(project.daemonId, accountId, DAEMON_CAPABILITY_PREPARED_EXECUTE);
     if (!daemon.ok) return daemon;
 
@@ -5025,6 +5067,7 @@ export class Hub {
           if (!isDirWorkspace(ws)) {
             const project = await tx.claimActiveProject(ws.projectId);
             if (!project || project.accountId !== ws.accountId || project.daemonId !== ws.daemonId) return "项目正在删除，不能再创建终端";
+            if (project.archivedAt !== undefined) return "项目已归档，不能再创建终端";
           }
           // 统计所有活跃终端而不只是 agent 建的：防的是「侧栏被刷满」，来源无所谓（同 terminalNew）。
           const active = (await tx.listTasksByWorkspace(ws.id)).filter((t) => t.status === TaskStatus.RUNNING).length;
