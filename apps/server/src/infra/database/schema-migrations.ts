@@ -1333,6 +1333,11 @@ CREATE TABLE coflux.account_agent_settings (
 );
 `;
 
+// Plan 20261030-project-archive: NULL = active, otherwise the centre's ms epoch at archiving.
+const PROJECT_ARCHIVE_SCHEMA_SQL = `
+ALTER TABLE coflux.projects ADD COLUMN archived_at DOUBLE PRECISION;
+`;
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -1399,6 +1404,12 @@ const MIGRATIONS: readonly Migration[] = [
     name: "account_agent_settings",
     definition: ACCOUNT_AGENT_SETTINGS_SCHEMA_SQL,
     async apply(sql) { await sql.unsafe(ACCOUNT_AGENT_SETTINGS_SCHEMA_SQL); },
+  },
+  {
+    version: 10,
+    name: "project_archive",
+    definition: PROJECT_ARCHIVE_SCHEMA_SQL,
+    async apply(sql) { await sql.unsafe(PROJECT_ARCHIVE_SCHEMA_SQL); },
   },
 ];
 

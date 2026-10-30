@@ -852,12 +852,34 @@ export class Store {
   async markProjectDeleting(id: ProjectId): Promise<void> {
     await this.sql`UPDATE projects SET deleting = true WHERE id = ${id}`;
   }
-  async isProjectDeleting(id: ProjectId): Promise<boolean> {
-    const rows = await this.sql<{ deleting: boolean }[]>`SELECT deleting FROM projects WHERE id = ${id}`;
-    return rows[0]?.deleting ?? false;
+  /** Non-locking admission read for early, user-facing refusals only (plan 20261030-project-archive):
+   * "deleting" wins over "archived"; undefined = no such project. The authoritative check is the
+   * `archivedAt` of the row `claimActiveProject` locked. */
+  async projectAdmission(id: ProjectId): Promise<"active" | "archived" | "deleting" | undefined> {
+    const rows = await this.sql<{ deleting: boolean; archivedAt: number | null }[]>`
+      SELECT deleting, archived_at FROM projects WHERE id = ${id}
+    `;
+    const row = rows[0];
+    if (!row) return undefined;
+    if (row.deleting) return "deleting";
+    return row.archivedAt === null ? "active" : "archived";
+  }
+  /** Archive (keeping an existing timestamp) or unarchive a project that is not being deleted, in one
+   * locking statement (plan 20261030-project-archive). undefined = missing or being deleted. */
+  async setProjectArchived(id: ProjectId, archived: boolean, now: number): Promise<Project | undefined> {
+    const rows = archived
+      ? await this.sql<Project[]>`
+          UPDATE projects SET archived_at = COALESCE(archived_at, ${now})
+          WHERE id = ${id} AND deleting = false RETURNING *
+        `
+      : await this.sql<Project[]>`
+          UPDATE projects SET archived_at = NULL WHERE id = ${id} AND deleting = false RETURNING *
+        `;
+    return rows[0] && create(ProjectSchema, rows[0]);
   }
   /** 必须在 transaction() 内调用；与 project 删除共用行锁，避免迟到的 worktree report
-   * 在 finalizer 已读取子项后重新插入 workspace。 */
+   * 在 finalizer 已读取子项后重新插入 workspace。An archived project is still returned: every
+   * creation path refuses it by the locked row's `archivedAt` (plan 20261030-project-archive). */
   async claimActiveProject(id: ProjectId): Promise<Project | undefined> {
     const rows = await this.sql<Project[]>`SELECT * FROM projects WHERE id = ${id} AND deleting = false FOR UPDATE`;
     return rows[0] && create(ProjectSchema, rows[0]);
