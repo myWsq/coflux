@@ -3,10 +3,12 @@ import { Button } from "@astryxdesign/core/Button";
 import { Layout, LayoutContent, LayoutPanel, VStack } from "@astryxdesign/core/Layout";
 import { List, ListItem } from "@astryxdesign/core/List";
 import { Heading, Text } from "@astryxdesign/core/Text";
-import { ArrowLeft, Bot, Settings2, Sparkles } from "lucide-react";
+import { Archive, ArrowLeft, Bot, Settings2, Sparkles } from "lucide-react";
 import type { CofluxClient } from "@coflux/client";
+import type { Project } from "@coflux/protocol";
 
 import { AgentsSection } from "@/components/settings/agents-section";
+import { ArchivedProjectsSection } from "@/components/settings/archived-projects-section";
 import { ExecutorSection } from "@/components/settings/executor-section";
 import { GeneralSection } from "@/components/settings/general-section";
 import { MachineSection } from "@/components/settings/machine-section";
@@ -41,6 +43,7 @@ const SETTINGS_NAV_ITEM_CLASS = "h-7 px-3 py-0 font-medium";
 const SECTION_ICONS: Record<SettingsSectionId, DeviceMarkComponent> = {
   general: Settings2,
   agents: Sparkles,
+  "archived-projects": Archive,
   machine: AppleMark,
   executor: Bot,
 };
@@ -60,6 +63,8 @@ type SettingsPageProps = {
   widthControl: SidebarWidthControl;
   /** 齿轮 tooltip 的压制开关，与工作台那个脚部共用 */
   settingsTooltip: SettingsTooltipControl;
+  /** 「已归档项目」's 删除: the workbench's removal confirm dialog (plan 20261030-project-archive). */
+  onRemoveProject: (project: Project) => void;
 };
 
 /**
@@ -170,6 +175,9 @@ export function SettingsPage(props: SettingsPageProps) {
 
               {section.id === "general" ? <GeneralSection client={props.client} /> : null}
               {section.id === "agents" ? <AgentsSection client={props.client} /> : null}
+              {section.id === "archived-projects" ? (
+                <ArchivedProjectsSection client={props.client} onRemoveProject={props.onRemoveProject} />
+              ) : null}
               {section.id === "machine" ? (
                 props.daemonState ? (
                   <MachineSection

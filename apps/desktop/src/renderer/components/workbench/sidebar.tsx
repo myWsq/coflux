@@ -19,7 +19,7 @@ import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifi
 import { SidebarToggleButton } from "@/components/workbench/sidebar-collapse";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
 import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-width";
-import { workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
+import { isProjectArchived, workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
 import { cn } from "@/lib/utils";
 
 /** 心跳往返低于此值算「快」（绿），否则「慢」（黄）。局域网直连通常个位数到几十 ms，
@@ -111,7 +111,10 @@ type SidebarProps = {
   onSelectDevice: (daemonId: string) => void;
   onImportProject: () => void;
   onCreateWorkspace: (project: Project, branch: string, createNew: boolean) => void;
+  /** The project menu's 移除项目, offered only against a centre that cannot archive. */
   onRemoveProject: (project: Project) => void;
+  /** The project menu's 归档项目 (plan 20261030-project-archive), against a centre that archives. */
+  onArchiveProject: (project: Project) => void;
   onRenameProject: (project: Project) => void;
   onRemoveWorkspace: (workspace: Workspace) => void;
   onRenameWorkspace: (workspace: Workspace) => void;
@@ -146,8 +149,11 @@ type SidebarProps = {
 
 export function Sidebar(props: SidebarProps) {
   const client = props.client;
-  const projects = useStore(client.store, (state) => state.projects);
+  // Archived projects (plan 20261030-project-archive) are not listed; their workspaces are only
+  // ever listed under their project, so filtering projects hides them too.
+  const projects = useStore(client.store, (state) => state.projects).filter((project) => !isProjectArchived(project));
   const workspaces = useStore(client.store, (state) => state.workspaces);
+  const projectArchiveSupported = useStore(client.store, (state) => state.projectArchiveSupported);
   const daemons = useStore(client.store, (state) => state.daemons);
   const tasks = useStore(client.store, (state) => state.tasks);
   const localSessions = useStore(client.store, (state) => state.localSessions);
@@ -258,7 +264,9 @@ export function Sidebar(props: SidebarProps) {
                       // only place it surfaces — handles are never persistent UI text.
                       { label: "复制标识", onClick: () => copyEntityHandle("project", project.id) },
                       { type: "divider" },
-                      { label: "移除项目", onClick: () => props.onRemoveProject(project) },
+                      projectArchiveSupported
+                        ? { label: "归档项目", onClick: () => props.onArchiveProject(project) }
+                        : { label: "移除项目", onClick: () => props.onRemoveProject(project) },
                     ]}
                   >
                     <div className="group/row flex h-8 items-center rounded-md text-secondary-foreground transition-colors hover:bg-accent/70 hover:text-foreground">
