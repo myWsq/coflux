@@ -239,9 +239,22 @@ public struct Coflux_V1_Project: Sendable {
   /// 避免 protobuf-es 的 int64→bigint 在 TS 端产生大面积类型涟漪
   public var createdAt: Double = 0
 
+  /// Archived at (ms epoch, centre clock; plan 20261030-project-archive). Absent = active. An
+  /// archived project keeps its workspaces but refuses new workspaces and terminals; clients hide it.
+  public var archivedAt: Double {
+    get {_archivedAt ?? 0}
+    set {_archivedAt = newValue}
+  }
+  /// Returns true if `archivedAt` has been explicitly set.
+  public var hasArchivedAt: Bool {self._archivedAt != nil}
+  /// Clears the value of `archivedAt`. Subsequent reads from it will return its default value.
+  public mutating func clearArchivedAt() {self._archivedAt = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
+
+  fileprivate var _archivedAt: Double? = nil
 }
 
 public struct Coflux_V1_Workspace: Sendable {
@@ -869,7 +882,7 @@ extension Coflux_V1_DaemonInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Coflux_V1_Project: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Project"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}account_id\0\u{3}daemon_id\0\u{1}name\0\u{3}repo_path\0\u{3}default_branch\0\u{3}created_at\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}account_id\0\u{3}daemon_id\0\u{1}name\0\u{3}repo_path\0\u{3}default_branch\0\u{3}created_at\0\u{3}archived_at\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -884,12 +897,17 @@ extension Coflux_V1_Project: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
       case 5: try { try decoder.decodeSingularStringField(value: &self.repoPath) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.defaultBranch) }()
       case 7: try { try decoder.decodeSingularDoubleField(value: &self.createdAt) }()
+      case 8: try { try decoder.decodeSingularDoubleField(value: &self._archivedAt) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if !self.id.isEmpty {
       try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
     }
@@ -911,6 +929,9 @@ extension Coflux_V1_Project: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
     if self.createdAt.bitPattern != 0 {
       try visitor.visitSingularDoubleField(value: self.createdAt, fieldNumber: 7)
     }
+    try { if let v = self._archivedAt {
+      try visitor.visitSingularDoubleField(value: v, fieldNumber: 8)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -922,6 +943,7 @@ extension Coflux_V1_Project: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
     if lhs.repoPath != rhs.repoPath {return false}
     if lhs.defaultBranch != rhs.defaultBranch {return false}
     if lhs.createdAt != rhs.createdAt {return false}
+    if lhs._archivedAt != rhs._archivedAt {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

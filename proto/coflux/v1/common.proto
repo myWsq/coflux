@@ -34,6 +34,9 @@ message Project {
   // ms epoch。时间戳统一 double：与旧 JSON 的 JS number 语义一致，
   // 避免 protobuf-es 的 int64→bigint 在 TS 端产生大面积类型涟漪
   double created_at = 7;
+  // Archived at (ms epoch, centre clock; plan 20261030-project-archive). Absent = active. An
+  // archived project keeps its workspaces but refuses new workspaces and terminals; clients hide it.
+  optional double archived_at = 8;
 }
 
 message Workspace {
