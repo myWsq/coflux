@@ -273,3 +273,32 @@ All cargo commands run with `RUSTFLAGS="-D warnings"` so the Zig library is buil
 - Rollback: the launcher rolls back a crash-looping or pseudo-healthy runtime by itself; a manual rollback to the previous release restores from libghostty-written checkpoints because the format is unchanged and alt-mode checkpoints still carry the primary screen (D2). There are no migrations, flags or new environment variables.
 - Manual acceptance after merge (`pnpm dev:desktop:prod` against a runtime built from this branch, or after release): in a terminal running a styled TUI (strikethrough/underline colours, links) and one using Kitty keyboard (e.g. an agent CLI), close and reopen the desktop window or switch devices, and confirm the reattached screen matches; resize the window with long wrapped lines in history and confirm reflow; run `coflux terminal read` on a live terminal and confirm readable output.
 - Release notes: mention that reattached terminals now keep full styling, links and keyboard modes, and that terminal history uses less memory.
+
+## Outcome
+
+- Status: APPROVE — 2026-10-31
+- Mode: subagent(opus), one work package (milestones strictly serial). M1 dispatched alone as the gate, then M2–M3; two REVISE rounds. The plan audit ran on fable before execution.
+- Commits: `cf51a5cc..224c3bad` — implementation `0cb950c2`, `7750b5cb` (M1), `57ff1037` (T4–T8), `8a68cc03` (T9), `3071cca7`, `b50b4739` (round 1), `224c3bad` (round 2); plan updates `88579c58`, `14b952fd`.
+- Evidence (orchestrator runs):
+  - `COFLUX_HOME= RUSTFLAGS="-D warnings" cargo test` on protocol, launcher, runtime, cli and ptyd: all pass (runtime 339/339), zero warnings; zero-warning `cargo build` of the four binaries.
+  - Black-box core `pnpm -C tests test` with the terminal's `COFLUX_*` cleared: 95/95, including runtime-swap takeover of live ptyd sessions and every pseudo-healthy rollback case.
+  - Release targets: `aarch64-apple-darwin` and `x86_64-apple-darwin` build in release with libghostty linked statically (`otool -L` shows only system libraries); `aarch64-unknown-linux-musl` builds natively in an arm64 Linux container to a statically linked ELF with zero warnings, and sessiond's 72 tests pass there.
+  - Gate width harness re-run: 2 regressions (flags), 26 agreements with xterm.js.
+  - `buf generate` leaves no diff; protocol and generated files differ from `32d8ede1` only in the title comment; `git diff --check` clean; the `vt100` grep outside plans finds nothing.
+- Deviations:
+  - Regional indicators are 2 cells (Ghostty's table), against xterm.js's 1; accepted by the user at the gate (D1, D8).
+  - Cursor shape is appended as DECSCUSR (the formatter omits it); a block cursor emits nothing, so a client whose own default is not block keeps its default after a program's explicit `CSI 2 q`.
+  - The primary screen during alt is formatted on a snapshot clone instead of the `?47` toggle the brief first named (the toggle moves the cursor/pen and closes OSC 8).
+  - The scanner models libghostty's sequence boundaries but not its 24-parameter/4-intermediate/colon dispatch rules, which decide only whether a CSI acts, never where it ends.
+  - Image storage stays at the library's per-screen limit (the binding exposes the setter only behind `kitty-graphics`); a zero APC budget keeps image data from ever reaching it.
+  - Alt-mode checkpoints now also shrink to fit `max_bytes`.
+  - With unwrap on, the formatter emits empty cells at the start of a continuation row as ECH/CUF, which a pending wrap breaks on replay; snapshots are post-processed to perform the real wrap there (round 1).
+  - cross 0.2.5's `volumes` mounts directories but sets the variables under the path's name; both are also listed in `passthrough` (round 2).
+  - Scope widened to one comment in `terminal-pane.tsx` naming the snapshot width source.
+  - Verification's "Format" row was wrong: `cargo fmt --check` fails on 54 files this branch never touched (the repository is not rustfmt-clean and CI does not check it); the branch's own files pass.
+- Follow-ups:
+  - `x86_64-unknown-linux-musl` and the `cross` container path are not verified end to end: on this Mac, cross's x86_64-only images run under Rosetta, where Zig's build runner dies (`rosetta error: bss_size overflow`). The container setup was verified up to Zig (prefetched source mounted and used, no clone, cache writable). Run both musl `cross build`s on an x86_64 Linux host before tagging.
+  - The Docker test image (`docker build -t coflux-test .`) was not built: this machine's network makes its from-scratch downloads impractical.
+  - Taking a snapshot while a TUI is on the alternate screen encodes and decodes the whole terminal once (a few milliseconds and a transient copy of up to the scrollback cap); snapshots go out at most every 3–30 s.
+  - The test asserting that Kitty images are not stored compares against a default terminal it assumes stores them; that assumption was not separately checked.
+  - Manual acceptance per Merge and deploy is pending the user.
