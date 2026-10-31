@@ -2422,6 +2422,29 @@ mod tests {
         assert!(plain_text(&restored(&state)).contains("1234567890"));
     }
 
+    /// A soft-wrapped row that fills the width exactly, then a continuation row that begins with
+    /// empty cells: the replay must wrap there instead of stepping over or erasing the row's last
+    /// cell, with or without a background on the empty cells and with or without text after them.
+    #[test]
+    fn a_full_width_soft_wrap_survives_whatever_the_continuation_row_starts_with() {
+        for bytes in [
+            &b"1234567890x\x1b[2;1H\x1b[44m\x1b[3X\x1b[0m\x1b[2;6Hy"[..],
+            b"1234567890x\x1b[2;1H\x1b[1X\x1b[2;4Hy",
+            b"1234567890x\x1b[2;1H\x1b[1;31m\x1b[44m\x1b[2X\x1b[2;3Hz",
+            b"\x1b]8;;https://example.com/\x1b\\1234567890x\x1b[2;1H\x1b[45m\x1b[X\x1b[2;4Hw",
+        ] {
+            let mut state = TerminalState::new(4, 10, 8);
+            let mut reference = Reference::new(4, 10, 8);
+            state.feed(bytes);
+            reference.feed(bytes);
+            let replayed = restored(&state);
+            assert_equivalent(&replayed, reference.term());
+            let rows = rows_dump(&replayed);
+            assert!(rows[0].wrapped && rows[1].continuation, "{bytes:?}");
+            assert_eq!(rows[0].text(), "1234567890", "{bytes:?}");
+        }
+    }
+
     #[test]
     fn resize_reflows_a_long_wrapped_line_on_the_primary_screen() {
         let line = "abcdefghijklmnopqrstuvwxy";

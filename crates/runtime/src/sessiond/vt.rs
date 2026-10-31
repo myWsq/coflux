@@ -23,6 +23,7 @@ use libghostty_vt::render::CursorVisualStyle;
 use libghostty_vt::screen::Screen;
 use libghostty_vt::selection::Selection;
 use libghostty_vt::snapshot::Decoder;
+use libghostty_vt::style::{PaletteIndex, RgbColor, Style, StyleColor, Underline};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate};
 use libghostty_vt::{RenderState, Terminal};
 
@@ -432,7 +433,12 @@ fn run_formatter(term: &Term, options: FormatterOptions<'_, '_>) -> Vec<u8> {
 
 /// The whole active screen (used for the alternate screen, which has no scrollback).
 fn format_screen(term: &Term, modes: bool) -> Vec<u8> {
-    run_formatter(term, snapshot_options(modes))
+    let start = term
+        .scrollback_rows()
+        .ok()
+        .and_then(|rows| u32::try_from(rows).ok())
+        .unwrap_or(0);
+    repair_full_width_wraps(term, start, run_formatter(term, snapshot_options(modes)))
 }
 
 /// The newest `line_limit` logical lines of history plus the screen. A selection from the first
@@ -458,12 +464,144 @@ fn format_newest(term: &Term, line_limit: usize, modes: bool) -> Vec<u8> {
             .map(|to| Selection::new(from, to, false))
         });
     match selection {
-        Ok(selection) => run_formatter(term, snapshot_options(modes).with_selection(&selection)),
+        Ok(selection) => repair_full_width_wraps(
+            term,
+            start,
+            run_formatter(term, snapshot_options(modes).with_selection(&selection)),
+        ),
         Err(err) => {
             logln!("[sessiond] snapshot selection unavailable: {err:?}");
             Vec::new()
         }
     }
+}
+
+/// Whether some soft-wrapped row from `start` on is followed by a row that begins with an empty
+/// cell: the only place where [`repair_full_width_wraps`] can have something to do.
+fn has_blank_led_continuation(term: &Term, start: u32) -> bool {
+    let Some(total) = term
+        .total_rows()
+        .ok()
+        .and_then(|rows| u32::try_from(rows).ok())
+    else {
+        return false;
+    };
+    (start..total.saturating_sub(1)).any(|y| {
+        let wrapped = term
+            .grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
+            .and_then(|grid| grid.row())
+            .and_then(|row| row.is_wrapped())
+            .unwrap_or(false);
+        wrapped
+            && !term
+                .grid_ref(Point::Screen(PointCoordinate { x: 0, y: y + 1 }))
+                .and_then(|grid| grid.cell())
+                .and_then(|cell| cell.has_text())
+                .unwrap_or(true)
+    })
+}
+
+/// The formatter joins soft-wrapped rows (unwrap on) and relies on printing to wrap them again.
+/// When a wrapped row is full, the replay's cursor sits on its last column with a wrap pending;
+/// if the continuation row then begins with empty cells, the formatter steps over them (CUF) or
+/// erases them with their background (ECH), neither of which wraps, so the replay overwrites the
+/// row's last cell and loses both wrap flags. Replaying the output into a scratch terminal finds
+/// every such step; in front of it a space performs the real wrap, BS returns to the first cell
+/// of the continuation row, ECH (with the default pen) empties that cell again, and the pen is
+/// restored. The replay then matches the terminal cell for cell, flags and styles included.
+fn repair_full_width_wraps(term: &Term, start: u32, output: Vec<u8>) -> Vec<u8> {
+    if !has_blank_led_continuation(term, start) {
+        return output;
+    }
+    let (Ok(cols), Ok(rows)) = (term.cols(), term.rows()) else {
+        return output;
+    };
+    let Ok(mut scratch) = Term::new(cols, rows) else {
+        return output;
+    };
+    let _ = scratch.set_scrollback_max_bytes(None);
+    let mut repaired = Vec::with_capacity(output.len() + 64);
+    let mut written = 0;
+    let mut from = 0;
+    while let Some(step) = find_cursor_step(&output, from) {
+        scratch.vt_write(&output[written..step]);
+        repaired.extend_from_slice(&output[written..step]);
+        written = step;
+        if scratch.is_cursor_pending_wrap().unwrap_or(false) {
+            let mut fix = b"\x1b[0m \x08\x1b[X".to_vec();
+            if let Ok(pen) = scratch.cursor_style() {
+                fix.extend_from_slice(&sgr(&pen));
+            }
+            scratch.vt_write(&fix);
+            repaired.extend_from_slice(&fix);
+        }
+        from = step + 2;
+    }
+    repaired.extend_from_slice(&output[written..]);
+    repaired
+}
+
+/// Offset of the next `ESC [ <digits> X` (ECH) or `ESC [ <digits> C` (CUF) at or after `from`.
+/// The formatter's output carries no other strings an ESC could hide in: OSC 8 URIs end at ESC.
+fn find_cursor_step(output: &[u8], from: usize) -> Option<usize> {
+    let mut at = from;
+    while at + 2 < output.len() {
+        if output[at] == 0x1b && output[at + 1] == b'[' {
+            let digits = output[at + 2..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            let end = at + 2 + digits;
+            if digits > 0 && matches!(output.get(end), Some(b'X' | b'C')) {
+                return Some(at);
+            }
+        }
+        at += 1;
+    }
+    None
+}
+
+/// SGR that sets exactly `style` from a reset pen.
+fn sgr(style: &Style) -> Vec<u8> {
+    let mut params: Vec<String> = Vec::new();
+    for (on, param) in [
+        (style.bold, "1"),
+        (style.faint, "2"),
+        (style.italic, "3"),
+        (style.blink, "5"),
+        (style.inverse, "7"),
+        (style.invisible, "8"),
+        (style.strikethrough, "9"),
+        (style.overline, "53"),
+    ] {
+        if on {
+            params.push(param.into());
+        }
+    }
+    match style.underline {
+        Underline::None => {}
+        Underline::Double => params.push("4:2".into()),
+        Underline::Curly => params.push("4:3".into()),
+        Underline::Dotted => params.push("4:4".into()),
+        Underline::Dashed => params.push("4:5".into()),
+        _ => params.push("4".into()),
+    }
+    for (base, color) in [
+        (38, style.fg_color),
+        (48, style.bg_color),
+        (58, style.underline_color),
+    ] {
+        match color {
+            StyleColor::None => {}
+            StyleColor::Palette(PaletteIndex(index)) => params.push(format!("{base};5;{index}")),
+            StyleColor::Rgb(RgbColor { r, g, b }) => params.push(format!("{base};2;{r};{g};{b}")),
+        }
+    }
+    let mut out = b"\x1b[0m".to_vec();
+    for param in params {
+        out.extend_from_slice(format!("\x1b[{param}m").as_bytes());
+    }
+    out
 }
 
 /// Screen-space row where the newest `line_limit` logical lines of history begin; the first
