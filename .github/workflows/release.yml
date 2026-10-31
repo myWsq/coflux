@@ -156,9 +156,10 @@ jobs:
 
       # cross builds inside a container: hand it Ghostty's source at the commit the
       # libghostty-vt-sys build script pins, with every Zig package the lib-vt build needs already
-      # in the source's zig-pkg/, plus a writable Zig global cache, both mounted at the same path
-      # through Cross.toml's [build.env] volumes. The container then neither clones nor fetches,
-      # and Zig does not depend on a writable HOME.
+      # in the source's zig-pkg/, plus a writable Zig global cache. Cross.toml's [build.env]
+      # `volumes` mounts both at the same path and `passthrough` sets GHOSTTY_SOURCE_DIR and
+      # ZIG_GLOBAL_CACHE_DIR (cross 0.2.5's `volumes` alone does not set them). The container then
+      # neither clones nor fetches, and Zig does not depend on a writable HOME.
       - name: Prefetch Ghostty source and Zig packages for cross
         if: matrix.cross
         env:

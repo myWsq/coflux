@@ -4,14 +4,16 @@
 # 矩阵产物的版本永远落 "dev"（见 plans/015 review）。
 #
 # libghostty-vt (sessiond's VT engine) is compiled from Ghostty's source by Zig 0.17.x inside the
-# container. The release workflow prefetches on the runner and mounts both at the same path:
+# container. The release workflow prefetches on the runner and hands two directories over:
 # GHOSTTY_SOURCE_DIR (Ghostty's source, read by the libghostty-vt-sys build script, with the Zig
 # packages lib-vt needs already in its zig-pkg/) and ZIG_GLOBAL_CACHE_DIR (a writable Zig global
-# cache, which keeps Zig off the container's unwritable HOME). Without them the build script
-# clones Ghostty itself, which is why git is installed too; the container keeps outbound network
-# for that and for anything Zig still has to fetch.
+# cache, which keeps Zig off the container's unwritable HOME). `volumes` mounts each directory at
+# the same path; `passthrough` sets the variables. Both are needed: cross 0.2.5's `volumes` alone
+# sets the variable under the path's name, so the build would see neither. Without them the
+# build script clones Ghostty itself, which is why git is installed too; the container keeps
+# outbound network for that and for anything Zig still has to fetch.
 [build.env]
-passthrough = ["COFLUX_RELEASE_VERSION"]
+passthrough = ["COFLUX_RELEASE_VERSION", "GHOSTTY_SOURCE_DIR", "ZIG_GLOBAL_CACHE_DIR"]
 volumes = ["GHOSTTY_SOURCE_DIR", "ZIG_GLOBAL_CACHE_DIR"]
 
 [build]
