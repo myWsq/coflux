@@ -1,2 +1,0 @@
-# vendored 库默认折叠，便于审查宿主实现。
-vendor/vt100/** linguist-vendored=true

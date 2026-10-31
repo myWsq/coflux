@@ -34,7 +34,7 @@ pub(super) const HISTORY_WRAP_FACTOR: usize = 4;
 /// (measured at 60-300 columns, plan 20261030-sessiond-libghostty-vt gate check 5); 12 leaves
 /// headroom for style and hyperlink tables. The resident cap of one session is therefore
 /// `history_line_limit × HISTORY_WRAP_FACTOR × cols × 12` bytes (28.8 MB for 5,000 lines at 120
-/// columns), against the 32-byte cells vt100 kept for the same number of rows. libghostty prunes
+/// columns), about a third of the 32-byte cells the previous engine kept for as many rows. libghostty prunes
 /// whole pages (~400 KB), so the cap is approximate by up to a page.
 const HISTORY_BYTES_PER_CELL: usize = 12;
 
