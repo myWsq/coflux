@@ -69,6 +69,7 @@ An adjacent wrong solution: upgrading vt100 to 0.18 (released 2026-10-18/19). It
   - The terminal must be constructed inside its thread, `Drop` must join, and a never-waiting feed needs a bound → D3/T4.
 - Milestone 1 (executor, opus; commits `0cb950c2`, `7750b5cb`): pin and Zig in every build environment done; musl builds keep `cross` with Ghostty source and Zig packages prefetched on the runner by a real lib-vt build (`--fetch=needed` misses five lazy dependencies) and mounted into the container. Gate checks: 3 (2027 lock), 5 (memory: ~5.7–6.5 MB vs ~21.2 MB at 5,000 lines, 120 columns; ~10 bytes/cell vs 32) and 6 (newest-N lines via a row walk and a selection) pass; 1 misses only cursor shape; 4 fails with the `?47` toggle and passes on a snapshot clone; 2 fails on flags (orchestrator re-ran the width harness: 2 regressions, 26 agreements).
 - Gate question — "Flags are 2 cells per regional indicator in Ghostty vs 1 in xterm.js and vt100, no override; accept, patch Ghostty's width table, or stop?" Answer: **Accept the flag width difference**. Revised D1, D2, D8 and T7 `(revised at gate)`.
+- Verification of M2–M3 (commits `57ff1037`, `8a68cc03`): 336/338 runtime tests pass with zero warnings. The two resize tests expose a formatter hazard: with unwrap on, empty cells at the start of a continuation row are emitted as `ECH`/`CUF` right after a row that exactly fills the width, and on replay the pending-wrap cursor erases or overwrites that row's last cell. Sent back as REVISE. `git grep vt100` still hit a desktop comment describing the old engine's width table; scope widened to that one comment `(added at verification)`.
 
 ### Maintenance notes
 
@@ -208,6 +209,7 @@ In scope:
 - `proto/coflux/v1/device.proto` (one comment) and its `buf generate` outputs: `crates/protocol/src/gen/**`, `packages/protocol/src/gen/**`, `packages/swift-client/Sources/CofluxProtocol/Generated/**` (comment-only diff)
 - `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `.github/workflows/desktop-release.yml`, `Cross.toml`, `Dockerfile`
 - `AGENTS.md` (prerequisites line), `docs/RELEASING.md` (build matrix)
+- `apps/desktop/src/renderer/components/workbench/terminal-pane.tsx` — only the comment above `terminal.loadAddon(new Unicode11Addon())` that names the daemon's width source `(added at verification)`
 
 Out of scope:
 - `crates/runtime/src/sessions.rs`, `device.rs`, `agent_ctl.rs` — `TerminalState`/`SessionState` keep their API; if they must change, stop and report
