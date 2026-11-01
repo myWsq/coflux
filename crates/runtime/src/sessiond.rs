@@ -1,24 +1,19 @@
 //! sessiond 的纯状态核心：VT grid/history、规范化 ANSI snapshot、输出序号与 channel stream。
 //!
-//! 本模块不持有 PTY/网络对象，单测可以把生成的 ANSI snapshot 喂给第二个 `vt100::Parser`
-//! 做状态等价验证。PTY 生命周期与 Device channel 路由留在 `sessions.rs`。
+//! The VT engine is libghostty-vt, owned by one thread per session (see [`vt`]); unit tests
+//! replay the ANSI snapshot into a second libghostty terminal to check state equivalence. PTY
+//! lifetimes and Device channel routing stay in `sessions.rs`.
 
 use std::collections::{HashMap, VecDeque};
 
 use coflux_protocol::ipc::CommandStateInfo;
-use vt100::{Cell, Color, Screen};
 
-/// 逻辑行上限 → VT physical row 容量的余量：一条逻辑行最多按 4 个 physical row 折行计费，
-/// 否则窄窗口下 history 会先被 physical 容量截断，拿不满 `history_line_limit` 条逻辑行。
-///
-/// 它同时是单 session 常驻内存的乘数：`line_limit × 4` 行，每行 `cols` 个 32 字节 cell
-/// （`vendor/vt100/src/cell.rs` 断言了 `size_of::<Cell>() == 32`），行是滚出屏幕时才分配的。
-/// 调 `DEFAULT_HISTORY_LINE_LIMIT`（`main.rs`）前先按这条算术估一遍。
-const HISTORY_WRAP_FACTOR: usize = 4;
+mod vt;
+
 const RETRANSMIT_LIMIT: usize = 512 * 1024;
-// vt100 0.16 使用的 vte 0.15 最多保留 32 个 CSI 参数/子参数；scanner 必须遵循同一
-// 上限，否则超限尾部的 1049 会被误判成 alt 边界，既与 parser 状态分歧又会多做整屏渲染。
-const VTE_CSI_PARAM_LIMIT: u8 = 32;
+/// Parameter slots xterm.js keeps for a CSI (and the pre-libghostty runtime kept): digits past
+/// them never make a DA1 query non-zero, so DA1 recognition stays what clients answer.
+const XTERM_CSI_PARAM_SLOTS: u8 = 32;
 /// logical identity 的 transport generation 与 input/resize cursor 必须保留到 session 结束，
 /// 否则淘汰旧项会破坏同一 supervisor runtime 内的去重。达到上限后只拒绝新 identity；已登记
 /// identity 仍可迁移 transport、提交在途 input 并推进 cursor。
@@ -29,34 +24,51 @@ const LOGICAL_CLIENT_LIMIT: usize = 256;
 /// answers terminal queries, so sessiond answers them itself (see [`SessionState::feed`]).
 pub(crate) const AGENT_IDENTITY_PREFIX: &str = "__coflux-agent-";
 
-/// sessiond's reply to a DA1 query, the same one xterm.js gives: a VT100 with Advanced Video Option.
+/// sessiond's reply to a DA1 query, the same one xterm.js gives: a DEC VT-100 with Advanced Video Option.
 const DA1_REPLY: &[u8] = b"\x1b[?1;2c";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AltEvent {
-    Enter,
-    Exit,
+/// What a byte of PTY output completed, as far as sessiond itself cares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScanEvent {
+    /// The final byte of a DA1 query (`CSI c` / `CSI 0 c`).
+    Da1Query,
+    /// The final byte of a DECSET naming mode 2027 (grapheme clustering), which sessiond keeps off.
+    GraphemeClusterSet,
+    /// An OSC 0/2 title, raw and unclamped.
+    Title(Vec<u8>),
+    /// An OSC 133 mark that presented the session secret.
+    Mark(Mark),
 }
 
-/// 跟随 vte 状态机的轻量扫描器。原本只为 DECSET/DECRST 的 alt 边界而存在（只跟 ESC/CSI）；
-/// plan 20260918-ptyd-terminal-custody 把它扩展到字符串态（OSC / DCS / APC / PM / SOS）与
-/// UTF-8 续字节，因为它还要回答第二个问题：**此刻切一刀安全吗**——checkpoint 只能落在两条序列
-/// 之间。切在 OSC 133 mark 中间，重放会把尾巴（`coflux=<secret>`）当普通文本打进屏幕和历史，
-/// 暴露的正是 mark 校验用的 session secret；切在多字节字符中间，新建的 parser 会吐一个坏字。
-/// PTY 安静与否只决定 supervisor 什么时候来问，从来不是边界条件本身：shell 完全可以把一条 OSC
-/// 分两次 `write(2)`，中间隔得比合帧窗口还长。
+/// Lightweight scanner that follows libghostty-vt's parser states on the feeding thread, so
+/// sessiond never has to ask the terminal thread anything while feeding. It answers:
 ///
-/// It answers a third question too: did this byte complete a DA1 query (`CSI c` / `CSI 0 c`)?
-/// sessiond answers the query itself when no client receives the raw bytes (see
-/// [`SessionState::feed`]), so the answer must follow vte's states exactly — a `[c` inside an
-/// OSC/DCS payload or after an intermediate is not a query.
+/// - **Is it safe to cut here?** A checkpoint may only fall between two sequences
+///   ([`OutputScanner::between_sequences`]). Cut inside an OSC 133 mark and the replay types its
+///   tail (`coflux=<secret>`) into screen and history, exposing the very secret marks are checked
+///   against; cut inside a multi-byte character and the new terminal prints a broken one. A quiet
+///   PTY only decides when the supervisor asks; it is never the boundary itself: a shell may well
+///   write one OSC in two `write(2)`s further apart than the batching window.
+/// - **Did this byte complete a DA1 query, a DECSET of mode 2027, a title or a mark?** See
+///   [`ScanEvent`]. Titles and marks are captured here, from a bounded payload buffer, rather
+///   than through libghostty callbacks, which run on the terminal thread.
+///
+/// The states mirror libghostty's parse table: CAN/SUB abort any sequence and ESC starts a new
+/// one; outside ground, the 8-bit C1 bytes 0x80-0x9F start or end sequences as the table says,
+/// except inside OSC and DCS payloads, where every byte from 0x20 up is payload; in ground every
+/// byte is UTF-8 (C1 never introduces a sequence there). Parameter and intermediate counts and
+/// colon separators decide only whether libghostty dispatches a CSI, never where it ends, so the
+/// scanner does not need them: DA1 keeps the xterm.js semantics clients answer with, and a DECSET
+/// of 2027 is reported even when libghostty would drop it, since forcing an off mode off again is
+/// a no-op.
 #[derive(Debug, Default)]
-struct DecModeScanner {
+struct OutputScanner {
     state: ScanState,
     /// Ground 态里尚未收齐的 UTF-8 续字节数。
     utf8_pending: u8,
-    /// The byte last fed completed a DA1 query.
-    da1_query: bool,
+    osc: OscCapture,
+    /// Secret the shell must present in every mark; empty = no marks are ever accepted.
+    secret: String,
 }
 
 #[derive(Debug, Default)]
@@ -65,29 +77,18 @@ enum ScanState {
     Ground,
     Escape,
     EscapeIntermediate,
-    Csi {
-        phase: CsiPhase,
-        private: bool,
-        /// A private-marker byte (`0x3c..=0x3f`) opened the sequence; `private` only records `?`.
-        marked: bool,
-        /// A retained parameter has a non-zero value (digits vte drops past its limit don't count).
-        nonzero_param: bool,
-        retained_params: u8,
-        in_subparams: bool,
-        alt_param_seen: bool,
-        current: u16,
-        has_digit: bool,
-    },
-    /// `ESC ]` … BEL / ST。vte 里 ESC 会先离开 OSC 进入 Escape，再由 `\` 收尾。
-    OscString,
-    /// `ESC P` … ST（entry/param/intermediate/passthrough/ignore 在"是否处于序列内"上无区别，合并）。
-    DcsString,
-    /// `ESC X` / `ESC ^` / `ESC _` … ST。
-    SosPmApcString,
+    Csi(CsiScan),
+    /// `ESC ]` … BEL / ST. ESC leaves it (and dispatches it); CAN/SUB abort it.
+    Osc,
+    DcsEntry,
+    DcsParam,
+    DcsIntermediate,
+    /// DCS passthrough or ignore: only ESC, CAN and SUB leave it.
+    DcsBody,
+    /// `ESC X` / `ESC ^` / `ESC _` … ST.
+    SosPmApc,
 }
 
-/// 只保留 DECSET/DECRST 判定所需的 VTE CSI 阶段。阶段边界必须与 vte 0.15 一致：
-/// intermediate 后再遇参数字节会进入 ignore，CAN/SUB 则从任意阶段取消整条序列。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CsiPhase {
     Entry,
@@ -96,19 +97,117 @@ enum CsiPhase {
     Ignore,
 }
 
-impl DecModeScanner {
-    #[cfg(test)]
-    fn retained_parameter_count(&self) -> usize {
-        match &self.state {
-            ScanState::Csi {
-                retained_params,
-                has_digit,
-                ..
-            } => {
-                usize::from(*retained_params)
-                    + usize::from(*retained_params < VTE_CSI_PARAM_LIMIT && *has_digit)
+#[derive(Debug, Clone, Copy)]
+struct CsiScan {
+    phase: CsiPhase,
+    /// Only parameter bytes (digits, `;`, `:`) so far: no private marker, no intermediate. With
+    /// all-zero parameters and final `c` that is a DA1 query, the same as xterm.js decides.
+    da1_shape: bool,
+    da1_nonzero: bool,
+    da1_slots: u8,
+    /// `?` opened the sequence (a DEC private mode set/reset).
+    question: bool,
+    value: u16,
+    has_digit: bool,
+    names_2027: bool,
+}
+
+impl CsiScan {
+    fn new() -> Self {
+        Self {
+            phase: CsiPhase::Entry,
+            da1_shape: true,
+            da1_nonzero: false,
+            da1_slots: 0,
+            question: false,
+            value: 0,
+            has_digit: false,
+            names_2027: false,
+        }
+    }
+
+    fn end_parameter(&mut self) {
+        if self.has_digit && self.value == 2027 {
+            self.names_2027 = true;
+        }
+        self.value = 0;
+        self.has_digit = false;
+    }
+
+    /// One byte inside a CSI; `Some` once the final byte ends it.
+    fn feed(&mut self, byte: u8) -> Option<Option<ScanEvent>> {
+        match byte {
+            b'0'..=b'9' => {
+                if self.da1_shape && self.da1_slots < XTERM_CSI_PARAM_SLOTS && byte != b'0' {
+                    self.da1_nonzero = true;
+                }
+                if self.question {
+                    self.value = self
+                        .value
+                        .saturating_mul(10)
+                        .saturating_add(u16::from(byte - b'0'));
+                    self.has_digit = true;
+                }
+                self.phase = match self.phase {
+                    CsiPhase::Entry | CsiPhase::Parameter => CsiPhase::Parameter,
+                    CsiPhase::Intermediate | CsiPhase::Ignore => CsiPhase::Ignore,
+                };
             }
-            _ => 0,
+            b';' | b':' => {
+                if self.da1_shape && self.da1_slots < XTERM_CSI_PARAM_SLOTS {
+                    self.da1_slots += 1;
+                }
+                if self.question {
+                    self.end_parameter();
+                }
+                self.phase = match (self.phase, byte) {
+                    // libghostty ignores a CSI that starts with a colon.
+                    (CsiPhase::Entry, b':') => CsiPhase::Ignore,
+                    (CsiPhase::Entry | CsiPhase::Parameter, _) => CsiPhase::Parameter,
+                    _ => CsiPhase::Ignore,
+                };
+            }
+            0x3c..=0x3f => {
+                self.da1_shape = false;
+                self.phase = match self.phase {
+                    CsiPhase::Entry => {
+                        self.question = byte == b'?';
+                        CsiPhase::Parameter
+                    }
+                    _ => CsiPhase::Ignore,
+                };
+            }
+            0x20..=0x2f => {
+                self.da1_shape = false;
+                if self.phase != CsiPhase::Ignore {
+                    self.phase = CsiPhase::Intermediate;
+                }
+            }
+            0x40..=0x7e => {
+                if self.question {
+                    self.end_parameter();
+                }
+                let event = if byte == b'c' && self.da1_shape && !self.da1_nonzero {
+                    Some(ScanEvent::Da1Query)
+                } else if byte == b'h' && self.question && self.names_2027 {
+                    Some(ScanEvent::GraphemeClusterSet)
+                } else {
+                    None
+                };
+                return Some(event);
+            }
+            // C0 controls execute, DEL and 0xA0-0xFF are ignored: the sequence goes on.
+            _ => {}
+        }
+        None
+    }
+}
+
+impl OutputScanner {
+    fn with_secret(secret: String) -> Self {
+        Self {
+            secret,
+            ..Self::default()
         }
     }
 
@@ -117,199 +216,204 @@ impl DecModeScanner {
         matches!(self.state, ScanState::Ground) && self.utf8_pending == 0
     }
 
-    /// Whether the byte last passed to [`DecModeScanner::feed`] was the final byte of a DA1 query:
-    /// the CSI that vt100 hands to `unhandled_csi` with no intermediate, final `c` and all-zero
-    /// parameters.
-    fn completed_da1_query(&self) -> bool {
-        self.da1_query
+    /// Whether libghostty honours an 8-bit C1 byte in the current state: everywhere outside
+    /// ground except inside OSC and DCS payloads, where high bytes are payload data.
+    fn honours_c1(&self) -> bool {
+        !matches!(
+            self.state,
+            ScanState::Ground | ScanState::Osc | ScanState::DcsBody
+        )
     }
 
-    fn feed(&mut self, byte: u8) -> Option<AltEvent> {
-        self.da1_query = false;
-        match &mut self.state {
-            ScanState::Ground => {
-                if byte == 0x1b {
-                    self.state = ScanState::Escape;
-                    self.utf8_pending = 0;
-                    return None;
-                }
-                // 只为"切一刀是否安全"跟踪 UTF-8 续字节；vte 自己的 utf8 解码不受影响。
-                self.utf8_pending = match byte {
-                    0x80..=0xbf => self.utf8_pending.saturating_sub(1),
-                    0xc2..=0xdf => 1,
-                    0xe0..=0xef => 2,
-                    0xf0..=0xf4 => 3,
-                    _ => 0,
-                };
-                None
-            }
-            ScanState::Escape => {
-                self.state = match byte {
-                    b'[' => ScanState::Csi {
-                        phase: CsiPhase::Entry,
-                        private: false,
-                        marked: false,
-                        nonzero_param: false,
-                        retained_params: 0,
-                        in_subparams: false,
-                        alt_param_seen: false,
-                        current: 0,
-                        has_digit: false,
-                    },
-                    b']' => ScanState::OscString,
-                    b'P' => ScanState::DcsString,
-                    b'X' | b'^' | b'_' => ScanState::SosPmApcString,
-                    0x18 | 0x1a => ScanState::Ground,
-                    0x1b | 0x00..=0x17 | 0x19 | 0x1c..=0x1f => ScanState::Escape,
-                    0x20..=0x2f => ScanState::EscapeIntermediate,
-                    0x30..=0x7e => ScanState::Ground,
-                    _ => ScanState::Escape,
-                };
-                None
-            }
-            ScanState::OscString => {
-                self.state = match byte {
-                    // BEL 直接收尾；ESC 进 Escape 等 `\`（ST）；CAN/SUB 取消。
-                    0x07 | 0x18 | 0x1a => ScanState::Ground,
-                    0x1b => ScanState::Escape,
-                    _ => ScanState::OscString,
-                };
-                None
-            }
-            ScanState::DcsString => {
-                self.state = match byte {
-                    0x18 | 0x1a => ScanState::Ground,
-                    0x1b => ScanState::Escape,
-                    _ => ScanState::DcsString,
-                };
-                None
-            }
-            ScanState::SosPmApcString => {
-                self.state = match byte {
-                    0x18 | 0x1a => ScanState::Ground,
-                    0x1b => ScanState::Escape,
-                    _ => ScanState::SosPmApcString,
-                };
-                None
-            }
-            ScanState::EscapeIntermediate => {
-                self.state = match byte {
-                    0x18 | 0x1a => ScanState::Ground,
-                    0x1b => ScanState::Escape,
-                    0x30..=0x7e => ScanState::Ground,
-                    _ => ScanState::EscapeIntermediate,
-                };
-                None
-            }
-            ScanState::Csi {
-                phase,
-                private,
-                marked,
-                nonzero_param,
-                retained_params,
-                in_subparams,
-                alt_param_seen,
-                current,
-                has_digit,
-            } => {
-                if matches!(byte, 0x18 | 0x1a) {
-                    self.state = ScanState::Ground;
-                    return None;
-                }
-                if byte == 0x1b {
-                    self.state = ScanState::Escape;
-                    return None;
-                }
+    fn enter(&mut self, next: ScanState) {
+        if matches!(next, ScanState::Osc) {
+            self.osc.reset();
+        }
+        self.state = next;
+    }
 
-                match byte {
-                    0x20..=0x2f => {
-                        if !matches!(*phase, CsiPhase::Ignore) {
-                            *phase = CsiPhase::Intermediate;
-                        }
-                    }
-                    b'0'..=b'9' => match phase {
-                        CsiPhase::Entry | CsiPhase::Parameter => {
-                            *phase = CsiPhase::Parameter;
-                            if *retained_params < VTE_CSI_PARAM_LIMIT {
-                                *current = current
-                                    .saturating_mul(10)
-                                    .saturating_add(u16::from(byte - b'0'));
-                                *has_digit = true;
-                                if byte != b'0' {
-                                    *nonzero_param = true;
-                                }
-                            }
-                        }
-                        CsiPhase::Intermediate => *phase = CsiPhase::Ignore,
-                        CsiPhase::Ignore => {}
-                    },
-                    0x3a | 0x3b => match phase {
-                        CsiPhase::Entry | CsiPhase::Parameter => {
-                            *phase = CsiPhase::Parameter;
-                            if *retained_params < VTE_CSI_PARAM_LIMIT {
-                                if byte == b';'
-                                    && !*in_subparams
-                                    && *has_digit
-                                    && matches!(*current, 47 | 1049)
-                                {
-                                    *alt_param_seen = true;
-                                }
-                                *retained_params += 1;
-                            }
-                            *in_subparams = byte == b':';
-                            *current = 0;
-                            *has_digit = false;
-                        }
-                        CsiPhase::Intermediate => *phase = CsiPhase::Ignore,
-                        CsiPhase::Ignore => {}
-                    },
-                    0x3c..=0x3f => match phase {
-                        CsiPhase::Entry => {
-                            // vt100 只把第一个 intermediate 为 '?' 的 CSI 交给 DEC mode。
-                            *private = byte == b'?';
-                            *marked = true;
-                            *phase = CsiPhase::Parameter;
-                        }
-                        CsiPhase::Parameter | CsiPhase::Intermediate => {
-                            *phase = CsiPhase::Ignore;
-                        }
-                        CsiPhase::Ignore => {}
-                    },
-                    0x40..=0x7e => {
-                        let is_alt = !matches!(*phase, CsiPhase::Ignore)
-                            && *private
-                            && (*alt_param_seen
-                                || (*retained_params < VTE_CSI_PARAM_LIMIT
-                                    && !*in_subparams
-                                    && *has_digit
-                                    && matches!(*current, 47 | 1049)));
-                        let event = if is_alt && byte == b'h' {
-                            Some(AltEvent::Enter)
-                        } else if is_alt && byte == b'l' {
-                            Some(AltEvent::Exit)
-                        } else {
-                            None
-                        };
-                        // An intermediate (or a marker, which vte collects as one) makes vt100
-                        // dispatch the CSI as something other than DA1; ignore never dispatches.
-                        let da1 = byte == b'c'
-                            && matches!(*phase, CsiPhase::Entry | CsiPhase::Parameter)
-                            && !*marked
-                            && !*nonzero_param;
-                        self.state = ScanState::Ground;
-                        self.da1_query = da1;
-                        return event;
-                    }
-                    _ => {}
-                }
-                None
+    fn feed(&mut self, byte: u8) -> Option<ScanEvent> {
+        if matches!(self.state, ScanState::Ground) {
+            if byte == 0x1b {
+                self.state = ScanState::Escape;
+                self.utf8_pending = 0;
+                return None;
             }
+            // 只为"切一刀是否安全"跟踪 UTF-8 续字节。
+            self.utf8_pending = match byte {
+                0x80..=0xbf => self.utf8_pending.saturating_sub(1),
+                0xc2..=0xdf => 1,
+                0xe0..=0xef => 2,
+                0xf0..=0xf4 => 3,
+                _ => 0,
+            };
+            return None;
+        }
+
+        // Transitions libghostty takes from any state.
+        let anywhere = match byte {
+            0x18 | 0x1a => Some(ScanState::Ground),
+            0x1b => Some(ScanState::Escape),
+            0x80..=0x9f if self.honours_c1() => Some(match byte {
+                0x90 => ScanState::DcsEntry,
+                0x98 | 0x9e | 0x9f => ScanState::SosPmApc,
+                0x9b => ScanState::Csi(CsiScan::new()),
+                0x9d => ScanState::Osc,
+                _ => ScanState::Ground,
+            }),
+            _ => None,
+        };
+        if let Some(next) = anywhere {
+            // ESC ends an OSC the way ST does (the `\` that follows is an ESC dispatch of its
+            // own); CAN and SUB abort it.
+            let event = (matches!(self.state, ScanState::Osc) && byte == 0x1b)
+                .then(|| self.dispatch_osc())
+                .flatten();
+            self.enter(next);
+            return event;
+        }
+
+        let next = match &mut self.state {
+            ScanState::Ground => unreachable!("ground is handled above"),
+            ScanState::Escape => match byte {
+                0x20..=0x2f => Some(ScanState::EscapeIntermediate),
+                b'P' => Some(ScanState::DcsEntry),
+                b'X' | b'^' | b'_' => Some(ScanState::SosPmApc),
+                b'[' => Some(ScanState::Csi(CsiScan::new())),
+                b']' => Some(ScanState::Osc),
+                0x30..=0x7e => Some(ScanState::Ground),
+                _ => None,
+            },
+            ScanState::EscapeIntermediate => match byte {
+                0x30..=0x7e => Some(ScanState::Ground),
+                _ => None,
+            },
+            ScanState::Csi(scan) => match scan.feed(byte) {
+                Some(event) => {
+                    self.state = ScanState::Ground;
+                    return event;
+                }
+                None => None,
+            },
+            ScanState::Osc => match byte {
+                0x07 => {
+                    let event = self.dispatch_osc();
+                    self.state = ScanState::Ground;
+                    return event;
+                }
+                0x20..=0xff => {
+                    self.osc.put(byte);
+                    None
+                }
+                _ => None,
+            },
+            ScanState::DcsEntry => match byte {
+                0x20..=0x2f => Some(ScanState::DcsIntermediate),
+                b':' | 0x40..=0x7e => Some(ScanState::DcsBody),
+                0x30..=0x39 | b';' | 0x3c..=0x3f => Some(ScanState::DcsParam),
+                _ => None,
+            },
+            ScanState::DcsParam => match byte {
+                0x20..=0x2f => Some(ScanState::DcsIntermediate),
+                b':' | 0x3c..=0x3f | 0x40..=0x7e => Some(ScanState::DcsBody),
+                _ => None,
+            },
+            ScanState::DcsIntermediate => match byte {
+                0x30..=0x7e => Some(ScanState::DcsBody),
+                _ => None,
+            },
+            ScanState::DcsBody | ScanState::SosPmApc => None,
+        };
+        if let Some(next) = next {
+            self.enter(next);
+        }
+        None
+    }
+
+    fn dispatch_osc(&mut self) -> Option<ScanEvent> {
+        let capture = std::mem::take(&mut self.osc);
+        if capture.kind != OscKind::Wanted {
+            return None;
+        }
+        let params: Vec<&[u8]> = capture
+            .payload
+            .splitn(OSC_PARAM_LIMIT, |byte| *byte == b';')
+            .collect();
+        match params.as_slice() {
+            [b"0", title] | [b"2", title] => Some(ScanEvent::Title(title.to_vec())),
+            // A cut payload could pass a secret prefix for the whole secret: never a mark.
+            [b"133", ..] if !capture.truncated => {
+                parse_mark(&params, &self.secret).map(ScanEvent::Mark)
+            }
+            _ => None,
         }
     }
 }
 
 /// OSC 标题的长度钳制（plan 075）：标题是 PTY 内程序给的不可信输入，源头截断。
 const MAX_TITLE_BYTES: usize = 256;
+
+/// OSC payload bytes captured for titles and marks. A longer OSC 0/2 keeps its first bytes (its
+/// title is clamped to [`MAX_TITLE_BYTES`] anyway); a longer OSC 133 is never a mark.
+const OSC_CAPTURE_BYTES: usize = 4096;
+
+/// OSC parameters split on `;`, as the pre-libghostty runtime did: the last one keeps any further separators.
+const OSC_PARAM_LIMIT: usize = 16;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum OscKind {
+    /// The command number is not complete yet.
+    #[default]
+    Undecided,
+    /// OSC 0, 2 or 133: captured.
+    Wanted,
+    /// Anything else: not captured.
+    Ignored,
+}
+
+/// The payload of the OSC being scanned, kept only for the commands sessiond reads.
+#[derive(Debug, Default)]
+struct OscCapture {
+    payload: Vec<u8>,
+    kind: OscKind,
+    truncated: bool,
+}
+
+impl OscCapture {
+    fn reset(&mut self) {
+        self.payload.clear();
+        self.kind = OscKind::Undecided;
+        self.truncated = false;
+    }
+
+    fn put(&mut self, byte: u8) {
+        match self.kind {
+            OscKind::Ignored => return,
+            OscKind::Undecided if byte == b';' => {
+                self.kind = if matches!(self.payload.as_slice(), b"0" | b"2" | b"133") {
+                    OscKind::Wanted
+                } else {
+                    OscKind::Ignored
+                };
+                if self.kind == OscKind::Ignored {
+                    self.payload = Vec::new();
+                    return;
+                }
+            }
+            OscKind::Undecided if self.payload.len() >= 3 => {
+                self.kind = OscKind::Ignored;
+                self.payload = Vec::new();
+                return;
+            }
+            _ => {}
+        }
+        if self.payload.len() < OSC_CAPTURE_BYTES {
+            self.payload.push(byte);
+        } else {
+            self.truncated = true;
+        }
+    }
+}
 
 /// A shell-integration mark accepted from the PTY output (OSC 133 carrying this session's secret).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,57 +429,31 @@ enum Mark {
 /// Parameter that every accepted mark must present, followed by the session secret.
 const MARK_SECRET_PARAM: &[u8] = b"coflux=";
 
-/// OSC capture (plan 075 titles + shell-integration marks). vt100 only hands out the bytes inside
-/// the callback, so both are parked here and harvested right after `TerminalState::feed` — the
-/// parser is rebuilt on resize (the canonical snapshot replay carries no OSC), so neither may
-/// live in the parser. `pending_title` is an `Option` to tell "no title event" from "explicitly
-/// cleared". Marks are keyed on the per-session secret: OSC 133 from remote hosts, nested shells
-/// or prompt frameworks never presents it and is dropped here, before any state changes.
-#[derive(Default)]
-struct OscCapture {
-    pending_title: Option<Vec<u8>>,
-    secret: String,
-    marks: Vec<Mark>,
-}
-
-impl OscCapture {
-    fn with_secret(secret: String) -> Self {
-        Self {
-            secret,
-            ..Self::default()
-        }
+/// Marks are keyed on the per-session secret: OSC 133 from remote hosts, nested shells or prompt
+/// frameworks never presents it and is dropped here, before any state changes. Without a secret
+/// nothing is accepted.
+fn parse_mark(params: &[&[u8]], secret: &str) -> Option<Mark> {
+    if secret.is_empty() || params.first().copied() != Some(&b"133"[..]) {
+        return None;
     }
-}
-
-impl vt100::Callbacks for OscCapture {
-    fn set_window_title(&mut self, _: &mut Screen, title: &[u8]) {
-        self.pending_title = Some(title.to_vec());
+    let presented = params.iter().skip(2).any(|param| {
+        param
+            .strip_prefix(MARK_SECRET_PARAM)
+            .is_some_and(|presented| presented == secret.as_bytes())
+    });
+    if !presented {
+        return None;
     }
-
-    fn unhandled_osc(&mut self, _: &mut Screen, params: &[&[u8]]) {
-        if self.secret.is_empty() || params.first().copied() != Some(&b"133"[..]) {
-            return;
-        }
-        let presented = params.iter().skip(2).any(|param| {
-            param
-                .strip_prefix(MARK_SECRET_PARAM)
-                .is_some_and(|secret| secret == self.secret.as_bytes())
-        });
-        if !presented {
-            return;
-        }
-        let mark = match params.get(1).copied() {
-            Some(b"A") => Mark::PromptStart,
-            Some(b"C") => Mark::CommandStart,
-            Some(b"D") => Mark::CommandEnd(
-                params
-                    .get(2)
-                    .and_then(|raw| std::str::from_utf8(raw).ok())
-                    .and_then(|text| text.parse::<i32>().ok()),
-            ),
-            _ => return,
-        };
-        self.marks.push(mark);
+    match params.get(1).copied() {
+        Some(b"A") => Some(Mark::PromptStart),
+        Some(b"C") => Some(Mark::CommandStart),
+        Some(b"D") => Some(Mark::CommandEnd(
+            params
+                .get(2)
+                .and_then(|raw| std::str::from_utf8(raw).ok())
+                .and_then(|text| text.parse::<i32>().ok()),
+        )),
+        _ => None,
     }
 }
 
@@ -439,27 +517,36 @@ fn clamp_title(raw: &[u8]) -> String {
     text[..end].to_string()
 }
 
+/// Offsets of the final bytes of the DECSETs of mode 2027 in `bytes`, scanned from ground. Used
+/// for canonical snapshots replayed into a fresh terminal, which never carry titles or marks.
+fn grapheme_resets(bytes: &[u8]) -> Vec<usize> {
+    let mut scanner = OutputScanner::default();
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| scanner.feed(**byte) == Some(ScanEvent::GraphemeClusterSet))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 pub struct TerminalState {
-    parser: vt100::Parser<OscCapture>,
+    /// The libghostty terminal, on its own thread. Every read waits behind the feeds queued
+    /// before it, so it always matches `output_seq`.
+    vt: vt::VtHandle,
+    scanner: OutputScanner,
     /// PTY 内程序经 OSC 0/2 设置的终端标题；空 = 从未设置。跨 resize 存续。
     title: String,
     /// The title changed since the last [`TerminalState::take_title_change`]; lets sessiond push a
     /// title event instead of the runtime rendering snapshots to learn it
     /// (plan 20261010-terminal-checkpoint-energy).
     title_changed: bool,
-    /// Secret the shell must present in every mark; empty = no marks are ever accepted.
-    mark_secret: String,
     command: CommandTracker,
     rows: u16,
     cols: u16,
     history_line_limit: usize,
-    history_row_capacity: usize,
     output_seq: u64,
     retransmit: VecDeque<Delta>,
     retransmit_bytes: usize,
-    mode_scanner: DecModeScanner,
-    /// 进入 alt screen 前的完整主屏 snapshot；退出 alt 后由 vt100 内部主 grid 接回。
-    normal_before_alt: Option<Vec<u8>>,
     /// Output seqs of the final bytes of the DA1 queries completed by the last `feed`.
     da1_queries: Vec<u64>,
     /// Output seq of the final byte of the last terminal query sessiond answered itself; 0 = none.
@@ -470,27 +557,18 @@ pub struct TerminalState {
 
 impl TerminalState {
     pub fn new(rows: u16, cols: u16, history_line_limit: usize) -> Self {
-        let history_row_capacity = history_line_limit.saturating_mul(HISTORY_WRAP_FACTOR);
         Self {
-            parser: vt100::Parser::new_with_callbacks(
-                rows,
-                cols,
-                history_row_capacity,
-                OscCapture::default(),
-            ),
+            vt: vt::VtHandle::spawn(rows, cols, history_line_limit),
+            scanner: OutputScanner::default(),
             title: String::new(),
             title_changed: false,
-            mark_secret: String::new(),
             command: CommandTracker::default(),
             rows,
             cols,
             history_line_limit,
-            history_row_capacity,
             output_seq: 0,
             retransmit: VecDeque::new(),
             retransmit_bytes: 0,
-            mode_scanner: DecModeScanner::default(),
-            normal_before_alt: None,
             da1_queries: Vec::new(),
             answered_query_seq: 0,
         }
@@ -499,11 +577,12 @@ impl TerminalState {
     /// Install the per-session secret that shell-integration marks must present. Without it every
     /// OSC 133 sequence is ignored (unit tests and unknown shells).
     pub fn with_mark_secret(mut self, secret: String) -> Self {
-        self.parser.callbacks_mut().secret = secret.clone();
-        self.mark_secret = secret;
+        self.scanner.secret = secret;
         self
     }
 
+    /// Hand the bytes to the terminal thread without waiting for them to be applied; title,
+    /// marks, DA1 queries and the checkpoint boundary come from the scanner on this thread.
     pub fn feed(&mut self, bytes: &[u8]) -> Option<Delta> {
         self.da1_queries.clear();
         if bytes.is_empty() {
@@ -511,49 +590,28 @@ impl TerminalState {
         }
         let from_seq = self.output_seq.saturating_add(1);
 
-        // 只在 alt mode 边界拆 chunk；其余仍批量交给 vte，避免逐 byte clone/dispatch。
-        let mut start = 0;
+        let mut grapheme_resets = Vec::new();
+        let mut pending_title = None;
         for (index, byte) in bytes.iter().copied().enumerate() {
-            let event = self.mode_scanner.feed(byte);
-            // A DA1 query only records its offset; it never splits the chunk for the parser.
-            if self.mode_scanner.completed_da1_query() {
-                self.da1_queries
-                    .push(from_seq.saturating_add(index as u64));
+            match self.scanner.feed(byte) {
+                None => {}
+                Some(ScanEvent::Da1Query) => {
+                    self.da1_queries.push(from_seq.saturating_add(index as u64));
+                }
+                Some(ScanEvent::GraphemeClusterSet) => grapheme_resets.push(index),
+                // The last title of a chunk wins, as it always has.
+                Some(ScanEvent::Title(raw)) => pending_title = Some(raw),
+                Some(ScanEvent::Mark(mark)) => self.command.apply(mark),
             }
-            let Some(event) = event else {
-                continue;
-            };
-            if start < index {
-                self.parser.process(&bytes[start..index]);
-            }
-            let was_alt = self.parser.screen().alternate_screen();
-            if event == AltEvent::Enter && !was_alt {
-                self.normal_before_alt = Some(render_normal_snapshot(
-                    self.parser.screen(),
-                    self.history_line_limit,
-                    self.history_row_capacity,
-                ));
-            }
-            self.parser.process(&bytes[index..=index]);
-            if event == AltEvent::Exit && was_alt && !self.parser.screen().alternate_screen() {
-                self.normal_before_alt = None;
-            }
-            start = index + 1;
         }
-        if start < bytes.len() {
-            self.parser.process(&bytes[start..]);
-        }
-        let callbacks = self.parser.callbacks_mut();
-        if let Some(pending) = callbacks.pending_title.take() {
+        if let Some(pending) = pending_title {
             let title = clamp_title(&pending);
             if title != self.title {
                 self.title = title;
                 self.title_changed = true;
             }
         }
-        for mark in std::mem::take(&mut callbacks.marks) {
-            self.command.apply(mark);
-        }
+        self.vt.feed(bytes.to_vec(), grapheme_resets);
 
         self.output_seq = self.output_seq.saturating_add(bytes.len() as u64);
         let delta = Delta {
@@ -565,9 +623,9 @@ impl TerminalState {
         Some(delta)
     }
 
-    /// checkpoint 只能落在两条序列之间（见 [`DecModeScanner::between_sequences`]）。
+    /// checkpoint 只能落在两条序列之间（见 [`OutputScanner::between_sequences`]）。
     pub fn checkpoint_eligible(&self) -> bool {
-        self.mode_scanner.between_sequences()
+        self.scanner.between_sequences()
     }
 
     /// Output seqs of the final bytes of the DA1 queries the last `feed` completed, in order.
@@ -586,29 +644,25 @@ impl TerminalState {
         self.answered_query_seq = self.answered_query_seq.max(seq);
     }
 
-    /// 从 checkpoint 重建：把规范 snapshot 喂给新 parser，再装回 snapshot 编码不了的那些状态。
-    /// 之后调用方按偏移把 ring 里 `[output_seq, now)` 的字节逐段 `feed` 进来。
+    /// 从 checkpoint 重建：把规范 snapshot 喂给新 terminal，再装回 snapshot 编码不了的那些状态。
+    /// 之后调用方按偏移把 ring 里 `[output_seq, now)` 的字节逐段 `feed` 进来。`normal_before_alt`
+    /// is never fed: the snapshot already starts with the primary screen.
     pub fn restore(
         checkpoint: &Checkpoint,
         history_line_limit: usize,
         mark_secret: String,
     ) -> Self {
-        let history_row_capacity = history_line_limit.saturating_mul(HISTORY_WRAP_FACTOR);
-        let mut parser = vt100::Parser::new_with_callbacks(
-            checkpoint.rows,
-            checkpoint.cols,
-            history_row_capacity,
-            OscCapture::with_secret(mark_secret.clone()),
+        let vt = vt::VtHandle::spawn(checkpoint.rows, checkpoint.cols, history_line_limit);
+        vt.feed(
+            checkpoint.snapshot.clone(),
+            grapheme_resets(&checkpoint.snapshot),
         );
-        parser.process(&checkpoint.snapshot);
-        let callbacks = parser.callbacks_mut();
-        callbacks.pending_title = None;
-        callbacks.marks.clear();
+        vt.barrier();
         Self {
-            parser,
+            vt,
+            scanner: OutputScanner::with_secret(mark_secret),
             title: checkpoint.title.clone(),
             title_changed: false,
-            mark_secret,
             command: CommandTracker {
                 state: checkpoint.command,
                 changed: false,
@@ -616,12 +670,9 @@ impl TerminalState {
             rows: checkpoint.rows,
             cols: checkpoint.cols,
             history_line_limit,
-            history_row_capacity,
             output_seq: checkpoint.output_seq,
             retransmit: VecDeque::new(),
             retransmit_bytes: 0,
-            mode_scanner: DecModeScanner::default(),
-            normal_before_alt: checkpoint.normal_before_alt.clone(),
             da1_queries: Vec::new(),
             answered_query_seq: checkpoint.answered_query_seq,
         }
@@ -635,20 +686,11 @@ impl TerminalState {
     }
 
     /// 当前状态打成 checkpoint。snapshot 太大时按逻辑行数减半直到装进 `max_bytes`（只影响
-    /// 这份 checkpoint 的回滚深度，不影响在跑的 history）；实在装不下返回 None。
+    /// 这份 checkpoint 的回滚深度，不影响在跑的 history）；连一屏都装不下才返回 None。
     pub fn checkpoint(&self, max_bytes: usize) -> Option<Checkpoint> {
         let mut line_limit = self.history_line_limit;
         loop {
-            let snapshot = if self.parser.screen().alternate_screen() {
-                self.snapshot()
-            } else {
-                render_normal_snapshot(self.parser.screen(), line_limit, self.history_row_capacity)
-            };
-            let normal_before_alt = self
-                .normal_before_alt
-                .as_ref()
-                .filter(|_| self.parser.screen().alternate_screen())
-                .cloned();
+            let rendered = self.vt.render(line_limit);
             let checkpoint = Checkpoint {
                 output_seq: self.output_seq,
                 rows: self.rows,
@@ -656,8 +698,8 @@ impl TerminalState {
                 title: self.title.clone(),
                 command: self.command.state,
                 answered_query_seq: self.answered_query_seq,
-                normal_before_alt,
-                snapshot,
+                normal_before_alt: rendered.primary,
+                snapshot: rendered.snapshot,
             };
             if checkpoint.encoded_len() <= max_bytes {
                 return Some(checkpoint);
@@ -691,70 +733,20 @@ impl TerminalState {
         }
     }
 
+    /// The canonical ANSI snapshot at `output_seq`: a full reset, at most `history_line_limit`
+    /// logical lines of history and the screen. While the alternate screen is active: the primary
+    /// screen's snapshot, `?1049h`, then the alternate screen with its modes.
     pub fn snapshot(&self) -> Vec<u8> {
-        if self.parser.screen().alternate_screen() {
-            let mut snapshot = self
-                .normal_before_alt
-                .clone()
-                .unwrap_or_else(|| b"\x1bc".to_vec());
-            snapshot.extend_from_slice(b"\x1b[?1049h\x1b[H\x1b[2J");
-            render_active_grid(&mut snapshot, self.parser.screen(), &[]);
-            snapshot
-        } else {
-            render_normal_snapshot(
-                self.parser.screen(),
-                self.history_line_limit,
-                self.history_row_capacity,
-            )
-        }
+        self.vt.render(self.history_line_limit).snapshot
     }
 
+    /// libghostty's native resize: the primary screen reflows its logical lines (the alternate
+    /// screen does not), and the scrollback budget follows the new width.
     pub fn resize(&mut self, rows: u16, cols: u16) {
         if self.rows == rows && self.cols == cols {
             return;
         }
-        // vt100::Grid::set_size 在列数变化时会直接清掉 wrap 标记并截/补每个 physical row，
-        // 与浏览器 xterm 的 logical-line reflow 不一致；尤其 alt screen 激活时，隐藏 normal
-        // screen 会停在旧布局，退出 alt 后丢行。先把规范 snapshot 当成逻辑行流，再在新尺寸的
-        // parser 中重放，既保留 hard line 边界，也让 normal/history 与 xterm 按新列宽重排。
-        let was_alt = self.parser.screen().alternate_screen();
-        let normal = if was_alt {
-            self.normal_before_alt
-                .clone()
-                .unwrap_or_else(|| b"\x1bc".to_vec())
-        } else {
-            render_normal_snapshot(
-                self.parser.screen(),
-                self.history_line_limit,
-                self.history_row_capacity,
-            )
-        };
-        let reflowed_normal = reflow_normal_snapshot(
-            &normal,
-            self.rows,
-            self.cols,
-            rows,
-            cols,
-            self.history_line_limit,
-            self.history_row_capacity,
-        );
-        let snapshot = if was_alt {
-            let mut snapshot = reflowed_normal.clone();
-            snapshot.extend_from_slice(b"\x1b[?1049h\x1b[H\x1b[2J");
-            render_active_grid(&mut snapshot, self.parser.screen(), &[]);
-            snapshot
-        } else {
-            reflowed_normal.clone()
-        };
-        let mut parser = vt100::Parser::new_with_callbacks(
-            rows,
-            cols,
-            self.history_row_capacity,
-            OscCapture::with_secret(self.mark_secret.clone()),
-        );
-        parser.process(&snapshot);
-        self.parser = parser;
-        self.normal_before_alt = was_alt.then_some(reflowed_normal);
+        self.vt.resize(rows, cols);
         self.rows = rows;
         self.cols = cols;
     }
@@ -884,15 +876,16 @@ impl Checkpoint {
             command: self.command,
             answered_query_seq: self.answered_query_seq,
             alt: self.normal_before_alt.is_some(),
-            normal_len: self.normal_before_alt.as_ref().map_or(0, |normal| normal.len() as u32),
+            normal_len: self
+                .normal_before_alt
+                .as_ref()
+                .map_or(0, |normal| normal.len() as u32),
         }
     }
 
     pub fn encoded_len(&self) -> usize {
         let header = serde_json::to_vec(&self.header()).unwrap_or_default();
-        4 + header.len()
-            + self.normal_before_alt.as_ref().map_or(0, Vec::len)
-            + self.snapshot.len()
+        4 + header.len() + self.normal_before_alt.as_ref().map_or(0, Vec::len) + self.snapshot.len()
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -1143,7 +1136,10 @@ impl SessionState {
                 message: "input reservation 不存在".into(),
             });
         };
-        if reservations.front().is_none_or(|pending| pending.seq != input_seq) {
+        if reservations
+            .front()
+            .is_none_or(|pending| pending.seq != input_seq)
+        {
             return Err(ControlError {
                 code: "input_reservation_missing",
                 message: "input reservation 顺序错误".into(),
@@ -1180,7 +1176,13 @@ impl SessionState {
         resume_from_seq: Option<u64>,
         ring: &mut dyn FnMut(u64, u64) -> Option<Vec<u8>>,
     ) -> Result<AttachOutcome, AttachError> {
-        self.attach_inner(channel_id, client_instance_id, transport_generation, resume_from_seq, Some(ring))
+        self.attach_inner(
+            channel_id,
+            client_instance_id,
+            transport_generation,
+            resume_from_seq,
+            Some(ring),
+        )
     }
 
     pub fn command_state(&self) -> CommandStateInfo {
@@ -1265,7 +1267,13 @@ impl SessionState {
         transport_generation: u64,
         resume_from_seq: Option<u64>,
     ) -> Result<AttachOutcome, AttachError> {
-        self.attach_inner(channel_id, client_instance_id, transport_generation, resume_from_seq, None)
+        self.attach_inner(
+            channel_id,
+            client_instance_id,
+            transport_generation,
+            resume_from_seq,
+            None,
+        )
     }
 
     fn attach_inner(
@@ -1320,13 +1328,23 @@ impl SessionState {
         // 本地缓冲够不到、但 ring 仍覆盖：从 ptyd 取 `[seq+1, output_seq]` 一整段当作一条 delta。
         let from_ring = match (&local, resume_from_seq, ring.as_mut()) {
             (None, Some(seq), Some(ring))
-                if seq < self.terminal.output_seq() && seq.saturating_add(1) >= self.terminal.ring_floor_seq() =>
+                if seq < self.terminal.output_seq()
+                    && seq.saturating_add(1) >= self.terminal.ring_floor_seq() =>
             {
                 let from = seq.saturating_add(1);
                 let to = self.terminal.output_seq();
                 ring(from, to)
                     .filter(|data| data.len() as u64 == to - from + 1)
-                    .map(|data| (seq, vec![Delta { from_seq: from, to_seq: to, data }]))
+                    .map(|data| {
+                        (
+                            seq,
+                            vec![Delta {
+                                from_seq: from,
+                                to_seq: to,
+                                data,
+                            }],
+                        )
+                    })
             }
             _ => None,
         };
@@ -1798,362 +1816,252 @@ impl SessionState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CellStyle {
-    fg: Color,
-    bg: Color,
-    bold: bool,
-    dim: bool,
-    italic: bool,
-    underline: bool,
-    inverse: bool,
-}
-
-impl Default for CellStyle {
-    fn default() -> Self {
-        Self {
-            fg: Color::Default,
-            bg: Color::Default,
-            bold: false,
-            dim: false,
-            italic: false,
-            underline: false,
-            inverse: false,
-        }
-    }
-}
-
-impl From<&Cell> for CellStyle {
-    fn from(cell: &Cell) -> Self {
-        Self {
-            fg: cell.fgcolor(),
-            bg: cell.bgcolor(),
-            bold: cell.bold(),
-            dim: cell.dim(),
-            italic: cell.italic(),
-            underline: cell.underline(),
-            inverse: cell.inverse(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct CellSnapshot {
-    contents: String,
-    wide: bool,
-    continuation: bool,
-    style: CellStyle,
-}
-
-#[derive(Debug, Clone)]
-struct RowSnapshot {
-    cells: Vec<CellSnapshot>,
-    wrapped: bool,
-}
-
-fn capture_row(screen: &Screen, row: u16, cols: u16) -> RowSnapshot {
-    let mut cells = Vec::with_capacity(usize::from(cols));
-    for col in 0..cols {
-        let cell = screen.cell(row, col);
-        cells.push(match cell {
-            Some(cell) => CellSnapshot {
-                contents: cell.contents().to_string(),
-                wide: cell.is_wide(),
-                continuation: cell.is_wide_continuation(),
-                style: CellStyle::from(cell),
-            },
-            None => CellSnapshot {
-                contents: String::new(),
-                wide: false,
-                continuation: false,
-                style: CellStyle::default(),
-            },
-        });
-    }
-    RowSnapshot {
-        cells,
-        wrapped: screen.row_wrapped(row),
-    }
-}
-
-fn capture_viewport(screen: &Screen) -> Vec<RowSnapshot> {
-    let (rows, cols) = screen.size();
-    (0..rows)
-        .map(|row| capture_row(screen, row, cols))
-        .collect()
-}
-
-fn capture_complete_history(
-    screen: &Screen,
-    line_limit: usize,
-    row_capacity: usize,
-) -> Vec<RowSnapshot> {
-    if screen.alternate_screen() || line_limit == 0 {
-        return Vec::new();
-    }
-    let (_, cols) = screen.size();
-    let mut view = screen.clone();
-    view.set_scrollback(usize::MAX);
-    let history_rows = view.scrollback();
-    let mut rows = Vec::with_capacity(history_rows);
-    for index in 0..history_rows {
-        view.set_scrollback(history_rows - index);
-        rows.push(capture_row(&view, 0, cols));
-    }
-
-    // vt100 的底层容量按 physical row 截断。容量打满时无法知道首 row 是否接续已丢前缀，
-    // 因而保守丢到第一个 hard-line 结束点；对外 snapshot 永不从半条 logical line 开始。
-    if history_rows == row_capacity {
-        let safe_start = rows
-            .iter()
-            .position(|row| !row.wrapped)
-            .map_or(rows.len(), |index| index + 1);
-        rows.drain(..safe_start);
-    }
-    // history 尾部若仍 wrap 到 viewport，也不作为残缺 logical line 单独写入历史。
-    let safe_end = rows
-        .iter()
-        .rposition(|row| !row.wrapped)
-        .map_or(0, |index| index + 1);
-    rows.truncate(safe_end);
-
-    let logical_lines = rows.iter().filter(|row| !row.wrapped).count();
-    if logical_lines > line_limit {
-        let drop_lines = logical_lines - line_limit;
-        let mut seen = 0;
-        let mut start = 0;
-        for (index, row) in rows.iter().enumerate() {
-            if !row.wrapped {
-                seen += 1;
-                if seen == drop_lines {
-                    start = index + 1;
-                    break;
-                }
-            }
-        }
-        rows.drain(..start);
-    }
-    rows
-}
-
-fn render_normal_snapshot(screen: &Screen, line_limit: usize, row_capacity: usize) -> Vec<u8> {
-    let history = capture_complete_history(screen, line_limit, row_capacity);
-    let mut snapshot = b"\x1bc".to_vec();
-    render_active_grid(&mut snapshot, screen, &history);
-    snapshot
-}
-
-fn reflow_normal_snapshot(
-    snapshot: &[u8],
-    old_rows: u16,
-    old_cols: u16,
-    rows: u16,
-    cols: u16,
-    line_limit: usize,
-    row_capacity: usize,
-) -> Vec<u8> {
-    let mut old = vt100::Parser::new(old_rows, old_cols, row_capacity);
-    old.process(snapshot);
-    let (cursor_row, cursor_col) = old.screen().cursor_position();
-    // xterm 增高 viewport 时会先从 scrollback 拉回 physical rows，cursor 随 viewport 一起
-    // 下移；单纯在新尺寸重放 ANSI 会把 cursor 固定在旧 viewport row，退出 alt 后少出空行。
-    let history_rows = {
-        let mut view = old.screen().clone();
-        view.set_scrollback(usize::MAX);
-        view.scrollback()
-    };
-    let pulled = rows
-        .saturating_sub(old_rows)
-        .min(u16::try_from(history_rows).unwrap_or(u16::MAX));
-    let target_row = cursor_row
-        .saturating_add(pulled)
-        .min(rows.saturating_sub(1));
-    let target_col = cursor_col.min(cols.saturating_sub(1));
-
-    let mut parser = vt100::Parser::new(rows, cols, row_capacity);
-    parser.process(snapshot);
-    parser.process(
-        format!(
-            "\x1b[{};{}H",
-            target_row.saturating_add(1),
-            target_col.saturating_add(1)
-        )
-        .as_bytes(),
-    );
-    render_normal_snapshot(parser.screen(), line_limit, row_capacity)
-}
-
-fn render_active_grid(out: &mut Vec<u8>, screen: &Screen, history: &[RowSnapshot]) {
-    let mut rows = Vec::with_capacity(history.len() + usize::from(screen.size().0));
-    rows.extend_from_slice(history);
-    rows.extend(capture_viewport(screen));
-    for (index, row) in rows.iter().enumerate() {
-        render_row(out, row);
-        if !row.wrapped && index + 1 < rows.len() {
-            out.extend_from_slice(b"\r\n");
-        }
-    }
-    out.extend_from_slice(&screen.cursor_state_formatted());
-    out.extend_from_slice(&screen.attributes_formatted());
-    out.extend_from_slice(&screen.input_mode_formatted());
-}
-
-fn render_row(out: &mut Vec<u8>, row: &RowSnapshot) {
-    let default = CellStyle::default();
-    let end = if row.wrapped {
-        row.cells.len()
-    } else {
-        row.cells
-            .iter()
-            .rposition(|cell| !cell.contents.is_empty() || cell.style != default)
-            .map_or(0, |index| index + 1)
-    };
-    let mut style = CellStyle::default();
-    emit_style(out, &style);
-    let mut index = 0;
-    while index < end {
-        let cell = &row.cells[index];
-        if cell.continuation {
-            index += 1;
-            continue;
-        }
-        if cell.style != style {
-            emit_style(out, &cell.style);
-            style = cell.style.clone();
-        }
-        if cell.contents.is_empty() {
-            out.push(b' ');
-        } else {
-            out.extend_from_slice(cell.contents.as_bytes());
-        }
-        index += if cell.wide { 2 } else { 1 };
-    }
-    if style != default {
-        emit_style(out, &default);
-    }
-    if end < row.cells.len() {
-        // auto-wrap 在 viewport 底部滚动时，新 row 会继承当时的背景色。显式用默认属性擦掉
-        // 未序列化的尾部 padding，既不把空白变成文字，也不改变 logical-line wrap。
-        out.extend_from_slice(b"\x1b[K");
-    }
-}
-
-fn emit_style(out: &mut Vec<u8>, style: &CellStyle) {
-    let mut params = vec!["0".to_string()];
-    if style.bold {
-        params.push("1".into());
-    }
-    if style.dim {
-        params.push("2".into());
-    }
-    if style.italic {
-        params.push("3".into());
-    }
-    if style.underline {
-        params.push("4".into());
-    }
-    if style.inverse {
-        params.push("7".into());
-    }
-    push_color(&mut params, style.fg, false);
-    push_color(&mut params, style.bg, true);
-    out.extend_from_slice(format!("\x1b[{}m", params.join(";")).as_bytes());
-}
-
-fn push_color(params: &mut Vec<String>, color: Color, background: bool) {
-    match color {
-        Color::Default => {}
-        Color::Idx(index) if index < 8 => {
-            params.push((if background { 40 + index } else { 30 + index }).to_string())
-        }
-        Color::Idx(index) if index < 16 => params.push(
-            (if background {
-                100 + index - 8
-            } else {
-                90 + index - 8
-            })
-            .to_string(),
-        ),
-        Color::Idx(index) => params.push(format!("{};5;{index}", if background { 48 } else { 38 })),
-        Color::Rgb(red, green, blue) => params.push(format!(
-            "{};2;{red};{green};{blue}",
-            if background { 48 } else { 38 }
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
+    use libghostty_vt::key;
+    use libghostty_vt::screen::{CellWide, Screen};
+    use libghostty_vt::style::{RgbColor, Style, StyleColor, Underline};
+    use libghostty_vt::terminal::{Mode, ModeKind, Point, PointCoordinate};
+    use libghostty_vt::{RenderState, Terminal};
 
-    fn assert_screen_equivalent(actual: &Screen, expected: &Screen) {
-        assert_eq!(actual.size(), expected.size());
-        assert_eq!(actual.alternate_screen(), expected.alternate_screen());
-        assert_eq!(actual.cursor_position(), expected.cursor_position());
-        assert_eq!(actual.application_keypad(), expected.application_keypad());
-        assert_eq!(actual.application_cursor(), expected.application_cursor());
-        assert_eq!(actual.bracketed_paste(), expected.bracketed_paste());
-        assert_eq!(actual.hide_cursor(), expected.hide_cursor());
-        let (rows, cols) = actual.size();
-        for row in 0..rows {
-            assert_eq!(
-                actual.row_wrapped(row),
-                expected.row_wrapped(row),
-                "row {row} wrap mismatch"
-            );
-            for col in 0..cols {
-                assert_eq!(
-                    actual.cell(row, col),
-                    expected.cell(row, col),
-                    "cell ({row}, {col}) mismatch"
-                );
+    type Term = vt::Term;
+
+    /// A fresh libghostty terminal of the given size with `bytes` written into it: what a client
+    /// replaying a snapshot ends up with. Its scrollback is unlimited so nothing replayed is lost.
+    fn replay(rows: u16, cols: u16, bytes: &[u8]) -> Term {
+        let mut term: Term = Terminal::new(cols, rows).unwrap();
+        term.set_scrollback_max_bytes(None).unwrap();
+        term.vt_write(bytes);
+        term
+    }
+
+    fn restored(state: &TerminalState) -> Term {
+        replay(state.rows, state.cols, &state.snapshot())
+    }
+
+    /// The oracle: the same output written into a terminal configured exactly like sessiond's,
+    /// on the test thread, so its state can be read directly.
+    struct Reference {
+        engine: vt::Engine,
+        scanner: OutputScanner,
+    }
+
+    impl Reference {
+        fn new(rows: u16, cols: u16, history_line_limit: usize) -> Self {
+            Self {
+                engine: vt::Engine::new(rows, cols, history_line_limit).unwrap(),
+                scanner: OutputScanner::default(),
             }
         }
-    }
 
-    #[test]
-    fn single_row_terminal_wrap_does_not_panic() {
-        let mut state = TerminalState::new(1, 4, 16);
-        state.feed(b"abcde");
-        assert_eq!(state.parser.screen().contents(), "e");
-        let mut history = state.parser.screen().clone();
-        history.set_scrollback(1);
-        assert_eq!(history.contents(), "abcd");
-        assert!(history.row_wrapped(0), "滚出单行屏幕的历史仍需保留自动换行标记");
-        let mut without_history = TerminalState::new(1, 4, 0);
-        without_history.feed(b"abcde");
-        assert_eq!(without_history.parser.screen().contents(), "e");
-    }
-
-    fn restored(state: &TerminalState) -> vt100::Parser {
-        let mut parser = vt100::Parser::new(state.rows, state.cols, state.history_row_capacity);
-        parser.process(&state.snapshot());
-        parser
-    }
-
-    /// 把 vt100 的真实 alternate-screen 跳变当 oracle。每个 chunk 至多包含一次预期跳变，
-    /// 这样既比较 scanner 事件，也验证未完成 CSI 跨 `feed` 边界后的状态延续。
-    fn assert_dec_scanner_matches_vt100(chunks: &[&[u8]]) {
-        let mut scanner = DecModeScanner::default();
-        let mut oracle = vt100::Parser::new(4, 12, 0);
-        for (index, chunk) in chunks.iter().enumerate() {
-            let events: Vec<_> = chunk
-                .iter()
-                .filter_map(|byte| scanner.feed(*byte))
-                .collect();
-            let was_alt = oracle.screen().alternate_screen();
-            oracle.process(chunk);
-            let is_alt = oracle.screen().alternate_screen();
-            let expected = match (was_alt, is_alt) {
-                (false, true) => vec![AltEvent::Enter],
-                (true, false) => vec![AltEvent::Exit],
-                _ => Vec::new(),
-            };
-            assert_eq!(
-                events, expected,
-                "chunk {index} 与 vt100/VTE 的 alt mode 跳变不一致: {chunk:?}"
-            );
+        fn feed(&mut self, bytes: &[u8]) {
+            let mut resets = Vec::new();
+            for (index, byte) in bytes.iter().enumerate() {
+                if self.scanner.feed(*byte) == Some(ScanEvent::GraphemeClusterSet) {
+                    resets.push(index);
+                }
+            }
+            self.engine.write(bytes, &resets);
         }
+
+        fn resize(&mut self, rows: u16, cols: u16) {
+            self.engine.resize(rows, cols);
+        }
+
+        fn term(&self) -> &Term {
+            self.engine.terminal()
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct CellDump {
+        text: String,
+        wide: CellWide,
+        style: Style,
+        link: Vec<u8>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct RowDump {
+        wrapped: bool,
+        continuation: bool,
+        cells: Vec<CellDump>,
+    }
+
+    impl RowDump {
+        fn text(&self) -> String {
+            self.cells
+                .iter()
+                .map(|cell| {
+                    if cell.text.is_empty() && cell.wide != CellWide::SpacerTail {
+                        " ".to_string()
+                    } else {
+                        cell.text.clone()
+                    }
+                })
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        }
+    }
+
+    fn cell_dump(term: &Term, x: u16, y: u32) -> CellDump {
+        let grid = term
+            .grid_ref(Point::Screen(PointCoordinate { x, y }))
+            .unwrap();
+        let mut graphemes = ['\0'; 32];
+        let len = grid.graphemes(&mut graphemes).unwrap();
+        let mut link = vec![0u8; 2048];
+        let link_len = grid.hyperlink_uri(&mut link).unwrap();
+        link.truncate(link_len);
+        CellDump {
+            text: graphemes[..len].iter().collect(),
+            wide: grid.cell().unwrap().wide().unwrap(),
+            style: grid.style().unwrap(),
+            link,
+        }
+    }
+
+    /// Every row, scrollback first.
+    fn rows_dump(term: &Term) -> Vec<RowDump> {
+        let cols = term.cols().unwrap();
+        let total = term.total_rows().unwrap() as u32;
+        (0..total)
+            .map(|y| {
+                let row = term
+                    .grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
+                    .unwrap()
+                    .row()
+                    .unwrap();
+                RowDump {
+                    wrapped: row.is_wrapped().unwrap(),
+                    continuation: row.is_wrap_continuation().unwrap(),
+                    cells: (0..cols).map(|x| cell_dump(term, x, y)).collect(),
+                }
+            })
+            .collect()
+    }
+
+    const MODES: &[Mode] = &[
+        Mode::INSERT,
+        Mode::LINEFEED,
+        Mode::DECCKM,
+        Mode::ORIGIN,
+        Mode::WRAPAROUND,
+        Mode::CURSOR_BLINKING,
+        Mode::CURSOR_VISIBLE,
+        Mode::ALT_SCREEN_LEGACY,
+        Mode::KEYPAD_KEYS,
+        Mode::LEFT_RIGHT_MARGIN,
+        Mode::X10_MOUSE,
+        Mode::NORMAL_MOUSE,
+        Mode::BUTTON_MOUSE,
+        Mode::ANY_MOUSE,
+        Mode::FOCUS_EVENT,
+        Mode::SGR_MOUSE,
+        Mode::ALT_SCREEN,
+        Mode::ALT_SCREEN_SAVE,
+        Mode::BRACKETED_PASTE,
+        Mode::SYNC_OUTPUT,
+        Mode::GRAPHEME_CLUSTER,
+        Mode::IN_BAND_RESIZE,
+    ];
+
+    /// Cursor, pen, keyboard flags, modes and cursor shape: everything a snapshot must carry
+    /// besides the cells.
+    #[derive(Debug, PartialEq)]
+    struct StateDump {
+        cursor: (u16, u16),
+        pending_wrap: bool,
+        cursor_visible: bool,
+        pen: Style,
+        kitty_flags: u8,
+        modes: Vec<(u16, bool, bool)>,
+        screen: Screen,
+        cursor_shape: String,
+        cursor_blinking: bool,
+    }
+
+    fn state_dump(term: &Term) -> StateDump {
+        let mut render = RenderState::new().unwrap();
+        let snapshot = render.update(term).unwrap();
+        StateDump {
+            cursor: (term.cursor_x().unwrap(), term.cursor_y().unwrap()),
+            pending_wrap: term.is_cursor_pending_wrap().unwrap(),
+            cursor_visible: term.is_cursor_visible().unwrap(),
+            pen: term.cursor_style().unwrap(),
+            kitty_flags: term.kitty_keyboard_flags().unwrap().bits(),
+            modes: MODES
+                .iter()
+                .map(|mode| {
+                    (
+                        mode.value(),
+                        mode.kind() == ModeKind::Ansi,
+                        term.mode(*mode).unwrap(),
+                    )
+                })
+                .collect(),
+            screen: term.active_screen().unwrap(),
+            cursor_shape: format!("{:?}", snapshot.cursor_visual_style().unwrap()),
+            cursor_blinking: snapshot.cursor_blinking().unwrap(),
+        }
+    }
+
+    /// `actual` (a replayed snapshot) shows what `expected` shows: the same screen, the same
+    /// newest history rows (a snapshot carries at most `history_line_limit` logical lines, the
+    /// reference may keep more), the same cursor, pen, modes and keyboard state.
+    fn assert_equivalent(actual: &Term, expected: &Term) {
+        let actual_rows = rows_dump(actual);
+        let expected_rows = rows_dump(expected);
+        let actual_history = actual.scrollback_rows().unwrap();
+        let expected_history = expected.scrollback_rows().unwrap();
+        assert!(
+            expected_history >= actual_history,
+            "the replay holds more history ({actual_history}) than the terminal ({expected_history})"
+        );
+        assert_eq!(
+            actual_rows[..],
+            expected_rows[expected_history - actual_history..],
+            "rows differ"
+        );
+        assert_eq!(state_dump(actual), state_dump(expected), "state differs");
+    }
+
+    /// The text of the whole terminal, history included, soft-wrapped lines joined.
+    fn plain_text(term: &Term) -> String {
+        let options = FormatterOptions::new()
+            .with_format(Format::Plain)
+            .with_unwrap(true);
+        let mut formatter = Formatter::new(term, options).unwrap();
+        String::from_utf8(formatter.format_alloc(None).unwrap().to_vec()).unwrap()
+    }
+
+    /// What the key encoder sends for a few keys under the terminal's keyboard state (cursor
+    /// keys, keypad, modifyOtherKeys, Kitty flags).
+    fn key_probe(term: &Term) -> Vec<Vec<u8>> {
+        let mut encoder = key::Encoder::new().unwrap();
+        encoder.set_options_from_terminal(term);
+        [
+            (key::Key::Enter, key::Mods::CTRL, None),
+            (key::Key::ArrowUp, key::Mods::empty(), None),
+            (key::Key::I, key::Mods::CTRL, Some("i")),
+            (key::Key::A, key::Mods::CTRL | key::Mods::SHIFT, Some("a")),
+        ]
+        .into_iter()
+        .map(|(code, mods, text)| {
+            let mut event = key::Event::new().unwrap();
+            event
+                .set_action(key::Action::Press)
+                .set_key(code)
+                .set_mods(mods);
+            event.set_utf8(text);
+            let mut out = Vec::new();
+            encoder.encode_to_vec(&event, &mut out).unwrap();
+            out
+        })
+        .collect()
     }
 
     #[test]
@@ -2166,11 +2074,14 @@ mod tests {
         )
         .as_bytes();
         let mut state = TerminalState::new(5, 24, 16);
+        let mut reference = Reference::new(5, 24, 16);
         state.feed(bytes);
+        reference.feed(bytes);
         state.resize(6, 30);
+        reference.resize(6, 30);
         state.feed(b"\r\nafter resize");
-        let parser = restored(&state);
-        assert_screen_equivalent(state.parser.screen(), parser.screen());
+        reference.feed(b"\r\nafter resize");
+        assert_equivalent(&restored(&state), reference.term());
     }
 
     #[test]
@@ -2182,158 +2093,77 @@ mod tests {
         for byte in bytes {
             split.feed(std::slice::from_ref(byte));
         }
-        assert_screen_equivalent(whole.parser.screen(), split.parser.screen());
         assert_eq!(whole.snapshot(), split.snapshot());
     }
 
+    /// Writes `stream` one byte at a time into the scanner and into a libghostty terminal: after
+    /// every byte, "between sequences" must be libghostty's own ground state.
+    fn assert_boundaries_match_libghostty(stream: &[u8]) {
+        let mut scanner = OutputScanner::default();
+        let mut term: Term = Terminal::new(20, 4).unwrap();
+        for (index, byte) in stream.iter().enumerate() {
+            scanner.feed(*byte);
+            term.vt_write(std::slice::from_ref(byte));
+            assert_eq!(
+                scanner.between_sequences(),
+                term.is_vt_ground().unwrap(),
+                "after byte {index} ({byte:#04x}) of {stream:?}"
+            );
+        }
+    }
+
     #[test]
-    fn dec_mode_scanner参数上限与_vte一致且保持常量内存() {
-        let mut scanner = DecModeScanner::default();
-        for byte in b"\x1b[?" {
-            assert_eq!(scanner.feed(*byte), None);
-        }
-        for _ in 0..100_000 {
-            assert_eq!(scanner.feed(b';'), None);
-        }
-        assert_eq!(
-            scanner.retained_parameter_count(),
-            usize::from(VTE_CSI_PARAM_LIMIT),
-            "未终止 CSI 只保留与 VTE 相同的固定参数槽位"
-        );
-        let mut tail_event = None;
-        for byte in b"1049h" {
-            let event = scanner.feed(*byte);
-            if *byte == b'h' {
-                tail_event = event;
-            } else {
-                assert_eq!(event, None);
+    fn scanner_sequence_boundaries_follow_libghostty() {
+        let mut streams: Vec<Vec<u8>> = vec![
+            b"plain \x1b[1;31mred\x1b[0m \x1b[?1049h\x1b[?47l".to_vec(),
+            b"\x1b]0;title\x07\x1b]2;st\x1b\\\x1b]133;A;coflux=x\x07".to_vec(),
+            b"\x1bPq#0;2;0;0;0#0~~\x1b\\\x1b_Gf=100;\x1b\\\x1b^pm\x1b\\\x1bXsos\x1b\\".to_vec(),
+            "真e\u{301} 😀 ok".as_bytes().to_vec(),
+            // ESC inside a UTF-8 character starts a sequence.
+            vec![0xe7, 0x1b, b'[', b'm', b'x'],
+            // CSI shapes libghostty ignores but still ends at the final byte.
+            b"\x1b[:c\x1b[1:2m\x1b[1:2H\x1b[0;?c\x1b[ 0c\x1b[1\x7f2m\x1b[1\x072m".to_vec(),
+            // 0xA0-0xFF inside escape and CSI states are ignored, not printed.
+            b"\x1b\xa0A\x1b[1\xff2m\x1b(\xe0B".to_vec(),
+            // C1 bytes inside sequences start or end them, but are payload in OSC and DCS bodies.
+            b"\x1b[1\x9b2c\x1b[\x9d0;t\x07\x1b\x80x\x1b[\x9cq".to_vec(),
+            b"\x1b]0;a\x9cb\x9bc\x07\x1bP1;2|pay\x9cload\x1b\\\x1bP\x9b5m".to_vec(),
+            b"\x1b_apc\x9cafter\x1b_apc\xa0\xff\x1b\\\x1bX\x90q\x1b\\".to_vec(),
+            // DCS entry, parameter and intermediate states.
+            b"\x1bP:x\x1b\\\x1bP1;2 !q\x1b\\\x1bP1?q\x1b\\\x1bP !0q\x1b\\".to_vec(),
+        ];
+        for control in [0x18u8, 0x1a] {
+            for prefix in [
+                &b"\x1b"[..],
+                b"\x1b[?1049",
+                b"\x1b]0;t",
+                b"\x1bPq",
+                b"\x1b_G",
+                b"\x1b (",
+            ] {
+                let mut stream = prefix.to_vec();
+                stream.push(control);
+                stream.extend_from_slice(b"h after\x1b[0m");
+                streams.push(stream);
             }
         }
-        assert_eq!(tail_event, None, "VTE 已忽略的超限尾参数不能触发 alt 边界");
-
-        let mut tail_sequence = b"\x1b[?".to_vec();
-        tail_sequence.extend(std::iter::repeat_n(b';', 100_000));
-        tail_sequence.extend_from_slice(b"1049h");
-        let mut parser = vt100::Parser::new(4, 12, 0);
-        parser.process(&tail_sequence);
-        assert!(
-            !parser.screen().alternate_screen(),
-            "底层 VTE 同样不会接受超限尾部的 1049"
-        );
-
-        let mut front_sequence = b"\x1b[?1049;".to_vec();
-        front_sequence.extend(std::iter::repeat_n(b';', 100_000));
-        front_sequence.extend_from_slice(b"0h");
-        let mut front_event = None;
-        for byte in &front_sequence {
-            front_event = scanner.feed(*byte).or(front_event);
+        for control in [0x00u8, 0x07, 0x17, 0x19, 0x1c, 0x1f, 0x7f, 0x80] {
+            streams.push([&b"\x1b"[..], &[control], b"[?1049h", b"\x1b[?47l"].concat());
         }
-        parser.process(&front_sequence);
-        assert_eq!(front_event, Some(AltEvent::Enter));
-        assert!(
-            parser.screen().alternate_screen(),
-            "前 32 个槽位内的 1049 必须与 VTE 一样生效"
-        );
-
-        for byte in b"\x1b[?47l" {
-            let event = scanner.feed(*byte);
-            if *byte == b'l' {
-                assert_eq!(event, Some(AltEvent::Exit));
-            } else {
-                assert_eq!(event, None);
-            }
+        for intermediate in 0x20u8..=0x2f {
+            streams.push([&b"\x1b"[..], &[intermediate], b"[?1049h"].concat());
+            streams.push([&b"\x1b[?1049"[..], &[intermediate], b"1h", b"\x1b[?47l"].concat());
+            streams.push([&b"\x1b["[..], &[intermediate], b"?1049h"].concat());
         }
-        parser.process(b"\x1b[?47l");
-        assert!(!parser.screen().alternate_screen());
-    }
-
-    #[test]
-    fn dec_mode_scanner_can_sub与_vte一致且跨分块取消_csi() {
-        for control in [0x18, 0x1a] {
-            let control = [control];
-            assert_dec_scanner_matches_vt100(&[
-                b"\x1b[?1049",
-                &control,
-                b"h",
-                b"\x1b[?47",
-                b"h",
-                b"\x1b[?1049",
-                &control,
-                b"l",
-                b"\x1b[?47l",
-            ]);
-            assert_dec_scanner_matches_vt100(&[
-                b"\x1b",
-                &control,
-                b"[?1049h",
-                b"\x1b[?47h",
-                b"\x1b[?47l",
-            ]);
+        for marker in 0x3cu8..=0x3f {
+            streams.push([&b"\x1b[?"[..], &[marker], b"1049h"].concat());
         }
-    }
-
-    #[test]
-    fn dec_mode_scanner_escape内控制字符与_vte状态一致() {
-        for control in [0x00, 0x07, 0x17, 0x19, 0x1c, 0x1f, 0x7f, 0x80] {
-            let control = [control];
-            assert_dec_scanner_matches_vt100(&[b"\x1b", &control, b"[?1049h", b"\x1b[?47l"]);
-        }
-    }
-
-    #[test]
-    fn dec_mode_scanner_escape_intermediate与_vte状态一致() {
-        for intermediate in 0x20..=0x2f {
-            let intermediate = [intermediate];
-            assert_dec_scanner_matches_vt100(&[
-                b"\x1b",
-                &intermediate,
-                b"[?1049h",
-                b"\x1b[?47h",
-                b"\x1b[?47l",
-            ]);
-        }
-    }
-
-    #[test]
-    fn dec_mode_scanner_intermediate阶段与_vte一致且跨分块保留() {
-        for intermediate in 0x20..=0x2f {
-            let intermediate = [intermediate];
-
-            // '?' 是 vt100 识别 DECSET/DECRST 的第一个 intermediate；后续合法
-            // intermediate 不会改变它，因此 1049 仍应生效。
-            assert_dec_scanner_matches_vt100(&[b"\x1b[?1049", &intermediate, b"h", b"\x1b[?47l"]);
-
-            // 先进入 CSI intermediate 后再出现 private marker，VTE 会转入 ignore。
-            assert_dec_scanner_matches_vt100(&[
-                b"\x1b[",
-                &intermediate,
-                b"?1049h",
-                b"\x1b[?47h",
-                b"\x1b[?47l",
-            ]);
-
-            // intermediate 后继续写参数同样进入 ignore；尾部 h 不能误报 Enter。
-            assert_dec_scanner_matches_vt100(&[
-                b"\x1b[?1049",
-                &intermediate,
-                b"1h",
-                b"\x1b[?47h",
-                b"\x1b[?47l",
-            ]);
-        }
-    }
-
-    #[test]
-    fn dec_mode_scanner重复_private_marker与_vte的_csi_ignore一致() {
-        for marker in 0x3c..=0x3f {
-            let marker = [marker];
-            assert_dec_scanner_matches_vt100(&[
-                b"\x1b[?",
-                &marker,
-                b"1049h",
-                b"\x1b[?47h",
-                b"\x1b[?47l",
-            ]);
+        let mut long = b"\x1b[?".to_vec();
+        long.extend(std::iter::repeat_n(b';', 10_000));
+        long.extend_from_slice(b"1049h done");
+        streams.push(long);
+        for stream in &streams {
+            assert_boundaries_match_libghostty(stream);
         }
     }
 
@@ -2345,9 +2175,17 @@ mod tests {
         assert_eq!(state.take_title_change().as_deref(), Some("one"));
         assert_eq!(state.take_title_change(), None, "taken once");
         state.feed(b"plain output\x1b]2;one\x07");
-        assert_eq!(state.take_title_change(), None, "the same title again is not a change");
+        assert_eq!(
+            state.take_title_change(),
+            None,
+            "the same title again is not a change"
+        );
         state.feed(b"\x1b]2;two\x07\x1b]2;\x07");
-        assert_eq!(state.take_title_change().as_deref(), Some(""), "the last title of a chunk wins");
+        assert_eq!(
+            state.take_title_change().as_deref(),
+            Some(""),
+            "the last title of a chunk wins"
+        );
     }
 
     #[test]
@@ -2362,6 +2200,9 @@ mod tests {
         assert_eq!(state.title(), "from osc 2");
         state.feed(b"\x1b]0;\x07"); // 显式设空 = 清空
         assert_eq!(state.title(), "");
+        // Not titles: another OSC, a title with a separator, an aborted OSC.
+        state.feed(b"\x1b]1;icon\x07\x1b]2;a;b\x07\x1b]2;cancelled\x18");
+        assert_eq!(state.title(), "");
     }
 
     #[test]
@@ -2372,7 +2213,6 @@ mod tests {
             state.feed(std::slice::from_ref(byte));
         }
         assert_eq!(state.title(), "标题跨 chunk 不碎");
-        // resize 重建 parser（snapshot 重放不含 OSC），标题必须存续。
         state.resize(6, 20);
         assert_eq!(state.title(), "标题跨 chunk 不碎");
     }
@@ -2386,6 +2226,31 @@ mod tests {
         assert!(state.title().chars().all(|c| c == '标'));
         state.feed(b"\x1b]2;tab\there\x07");
         assert_eq!(state.title(), "tabhere");
+        // Past the capture buffer the title still comes from its first bytes.
+        let huge = format!("\x1b]2;{}\x07", "t".repeat(OSC_CAPTURE_BYTES * 2));
+        state.feed(huge.as_bytes());
+        assert_eq!(state.title(), "t".repeat(MAX_TITLE_BYTES));
+    }
+
+    #[test]
+    fn title_and_marks_are_the_same_whatever_byte_the_stream_is_split_at() {
+        let stream = concat!(
+            "\x1b]2;split title\x07$ ",
+            "\x1b]133;A;coflux=s3cret\x07$ \x1b]133;C;coflux=s3cret\x1b\\",
+            "out\x1b]133;D;5;coflux=s3cret\x07\x1b]0;最后\x1b\\"
+        )
+        .as_bytes();
+        let mut whole = TerminalState::new(4, 40, 8).with_mark_secret("s3cret".into());
+        whole.feed(stream);
+        assert_eq!(whole.title(), "最后");
+        assert_eq!(whole.command_state().exit_code, Some(5));
+        for cut in 0..=stream.len() {
+            let mut split = TerminalState::new(4, 40, 8).with_mark_secret("s3cret".into());
+            split.feed(&stream[..cut]);
+            split.feed(&stream[cut..]);
+            assert_eq!(split.title(), whole.title(), "cut {cut}");
+            assert_eq!(split.command_state(), whole.command_state(), "cut {cut}");
+        }
     }
 
     #[test]
@@ -2401,9 +2266,14 @@ mod tests {
 
         // coflux's own prompt-start: integrated and idle, still no command.
         state.feed(b"\x1b]133;A;coflux=s3cret\x07$ ");
-        let idle = state.take_command_change().expect("prompt mark changes the state");
+        let idle = state
+            .take_command_change()
+            .expect("prompt mark changes the state");
         assert!(idle.integrated && !idle.busy);
-        assert_eq!((idle.command_seq, idle.finished_seq, idle.exit_code), (0, 0, None));
+        assert_eq!(
+            (idle.command_seq, idle.finished_seq, idle.exit_code),
+            (0, 0, None)
+        );
         // A second prompt (empty Enter) changes nothing and pushes nothing.
         state.feed(b"\x1b]133;A;coflux=s3cret\x07$ ");
         assert!(state.take_command_change().is_none());
@@ -2427,7 +2297,10 @@ mod tests {
         }
         let done = state.take_command_change().unwrap();
         assert!(!done.busy);
-        assert_eq!((done.command_seq, done.finished_seq, done.exit_code), (1, 1, Some(3)));
+        assert_eq!(
+            (done.command_seq, done.finished_seq, done.exit_code),
+            (1, 1, Some(3))
+        );
 
         // Without a secret installed nothing is ever accepted — not even an empty `coflux=`.
         let mut plain = TerminalState::new(4, 40, 8);
@@ -2440,7 +2313,7 @@ mod tests {
         let mut state = TerminalState::new(4, 40, 8).with_mark_secret("s3cret".into());
         state.feed(b"\x1b]133;A;coflux=s3cret\x07$ \x1b]133;C;coflux=s3cret\x07");
         assert!(state.command_state().busy);
-        // resize rebuilds the parser: the tracker, the secret and busy-ness all survive.
+        // resize: the tracker, the secret and busy-ness all survive.
         state.resize(6, 60);
         assert!(state.command_state().busy);
         state.feed(b"\x1b]133;D;0;coflux=s3cret\x07");
@@ -2459,121 +2332,333 @@ mod tests {
         // An end without a start still counts as one command so promised sequences line up.
         state.feed(b"\x1b]133;D;7;coflux=s3cret\x07");
         let counted = state.command_state();
-        assert_eq!((counted.command_seq, counted.finished_seq, counted.exit_code), (3, 3, Some(7)));
+        assert_eq!(
+            (counted.command_seq, counted.finished_seq, counted.exit_code),
+            (3, 3, Some(7))
+        );
 
         // A `D` without a status: finished, exit unknown.
         state.feed(b"\x1b]133;C;coflux=s3cret\x07\x1b]133;D;coflux=s3cret\x07");
         let unknown = state.command_state();
-        assert_eq!((unknown.command_seq, unknown.finished_seq, unknown.exit_code), (4, 4, None));
+        assert_eq!(
+            (unknown.command_seq, unknown.finished_seq, unknown.exit_code),
+            (4, 4, None)
+        );
         // The marks themselves never reach the rendered screen or the title.
         assert_eq!(state.title(), "");
         let snapshot = String::from_utf8_lossy(&state.snapshot()).into_owned();
-        assert!(!snapshot.contains("s3cret"), "secret leaked into the snapshot: {snapshot}");
+        assert!(
+            !snapshot.contains("s3cret"),
+            "secret leaked into the snapshot: {snapshot}"
+        );
     }
 
     #[test]
     fn sessiond_vt_alt_screen_snapshot_restores_hidden_normal_screen() {
         let mut state = TerminalState::new(4, 18, 8);
-        state.feed(b"normal survives\r\nsecond");
-        state.feed(b"\x1b[?1049h\x1b[2J\x1b[Halt tui\x1b[?2004h");
-        assert!(state.parser.screen().alternate_screen());
+        let mut reference = Reference::new(4, 18, 8);
+        for bytes in [
+            &b"normal survives\r\nsecond"[..],
+            b"\x1b[?1049h\x1b[2J\x1b[Halt tui\x1b[?2004h",
+        ] {
+            state.feed(bytes);
+            reference.feed(bytes);
+        }
+        assert_eq!(reference.term().active_screen().unwrap(), Screen::Alternate);
 
-        let mut parser = restored(&state);
-        assert_screen_equivalent(state.parser.screen(), parser.screen());
+        let snapshot = state.snapshot();
+        let primary_end = snapshot
+            .windows(b"\x1b[?1049h\x1b[H\x1b[2J".len())
+            .position(|window| window == b"\x1b[?1049h\x1b[H\x1b[2J")
+            .expect("the alternate half follows the primary snapshot");
+        assert!(snapshot.starts_with(b"\x1bc"));
+        assert!(
+            !String::from_utf8_lossy(&snapshot[..primary_end]).contains("1049"),
+            "the primary half must not enter the alternate screen"
+        );
 
-        state.feed(b"\x1b[?1049l");
-        parser.process(b"\x1b[?1049l");
-        assert_screen_equivalent(state.parser.screen(), parser.screen());
-        assert!(state.parser.screen().contents().contains("normal survives"));
+        let mut replayed = replay(4, 18, &snapshot);
+        assert_equivalent(&replayed, reference.term());
+        replayed.vt_write(b"\x1b[?1049l");
+        reference.feed(b"\x1b[?1049l");
+        assert_equivalent(&replayed, reference.term());
+        assert!(plain_text(&replayed).contains("normal survives"));
     }
 
     #[test]
-    fn sessiond_vt_snapshot_clears_unserialized_trailing_padding() {
+    fn alternate_screen_snapshot_leaves_the_live_cursor_pen_and_open_link_alone() {
+        let mut state = TerminalState::new(4, 20, 8);
+        let mut reference = Reference::new(4, 20, 8);
+        let setup = b"\x1b[1;32mprimary\r\n\x1b[?1049h\x1b[2J\x1b[2;3H\x1b[3;35m\x1b]8;;https://alt.example/\x1b\\AB";
+        state.feed(setup);
+        reference.feed(setup);
+        let first = state.snapshot();
+        assert_eq!(state.snapshot(), first, "taking a snapshot changes nothing");
+
+        // Output after the snapshots continues with the alternate screen's cursor, pen and link.
+        let tail = b"CD\x1b]8;;\x1b\\EF";
+        state.feed(tail);
+        reference.feed(tail);
+        let replayed = restored(&state);
+        assert_equivalent(&replayed, reference.term());
+        let history = replayed.scrollback_rows().unwrap() as u32;
+        let cell = cell_dump(&replayed, 4, history + 1);
+        assert_eq!(cell.text, "C");
+        assert!(cell.style.italic);
+        assert_eq!(cell.link, b"https://alt.example/");
+        assert!(cell_dump(&replayed, 6, history + 1).link.is_empty());
+    }
+
+    #[test]
+    fn sessiond_vt_resize_snapshot_matches_the_reflowed_terminal() {
         let mut state = TerminalState::new(2, 8, 8);
-        state.feed(b"first\r\n\x1b[48;5;24m1234567890\x1b[0m");
+        let mut reference = Reference::new(2, 8, 8);
+        let bytes = b"first\r\n\x1b[48;5;24m1234567890\x1b[0m";
+        state.feed(bytes);
+        reference.feed(bytes);
         state.resize(3, 10);
-        let screen = state.parser.screen();
-        assert!(screen.contents().contains("1234567890"));
-        for row in 0..screen.size().0 {
-            for col in 0..screen.size().1 {
-                let cell = screen.cell(row, col).unwrap();
-                if cell.contents().is_empty() {
-                    assert_eq!(
-                        cell.bgcolor(),
-                        Color::Default,
-                        "cell ({row}, {col}) 保留了 reflow padding 背景色"
-                    );
-                }
-            }
+        reference.resize(3, 10);
+        assert_equivalent(&restored(&state), reference.term());
+        assert!(plain_text(&restored(&state)).contains("1234567890"));
+    }
+
+    /// A soft-wrapped row that fills the width exactly, then a continuation row that begins with
+    /// empty cells: the replay must wrap there instead of stepping over or erasing the row's last
+    /// cell, with or without a background on the empty cells and with or without text after them.
+    #[test]
+    fn a_full_width_soft_wrap_survives_whatever_the_continuation_row_starts_with() {
+        for bytes in [
+            &b"1234567890x\x1b[2;1H\x1b[44m\x1b[3X\x1b[0m\x1b[2;6Hy"[..],
+            b"1234567890x\x1b[2;1H\x1b[1X\x1b[2;4Hy",
+            b"1234567890x\x1b[2;1H\x1b[1;31m\x1b[44m\x1b[2X\x1b[2;3Hz",
+            b"\x1b]8;;https://example.com/\x1b\\1234567890x\x1b[2;1H\x1b[45m\x1b[X\x1b[2;4Hw",
+        ] {
+            let mut state = TerminalState::new(4, 10, 8);
+            let mut reference = Reference::new(4, 10, 8);
+            state.feed(bytes);
+            reference.feed(bytes);
+            let replayed = restored(&state);
+            assert_equivalent(&replayed, reference.term());
+            let rows = rows_dump(&replayed);
+            assert!(rows[0].wrapped && rows[1].continuation, "{bytes:?}");
+            assert_eq!(rows[0].text(), "1234567890", "{bytes:?}");
         }
-        let snapshot = state.snapshot();
-        assert!(snapshot
-            .windows(b"\x1b[K".len())
-            .any(|window| window == b"\x1b[K"));
-        let mut parser = vt100::Parser::new(state.rows, state.cols, state.history_row_capacity);
-        parser.process(&snapshot);
-        assert_screen_equivalent(screen, parser.screen());
+    }
+
+    #[test]
+    fn resize_reflows_a_long_wrapped_line_on_the_primary_screen() {
+        let line = "abcdefghijklmnopqrstuvwxy";
+        let mut state = TerminalState::new(4, 10, 8);
+        state.feed(format!("{line}\r\nnext").as_bytes());
+        let narrow = rows_dump(&restored(&state));
+        assert!(
+            narrow.iter().any(|row| row.wrapped),
+            "25 columns wrap at 10"
+        );
+
+        state.resize(4, 30);
+        let replayed = restored(&state);
+        let rows = rows_dump(&replayed);
+        let joined = rows
+            .iter()
+            .position(|row| row.text() == line)
+            .expect("the line is one row again at 30 columns");
+        assert!(!rows[joined].wrapped);
+        assert_eq!(rows[joined + 1].text(), "next");
+        assert!(rows.iter().all(|row| !row.wrapped && !row.continuation));
     }
 
     #[test]
     fn sessiond_vt_resize_while_alt_reflows_hidden_normal_screen() {
         let mut state = TerminalState::new(2, 8, 8);
-        state.feed(b"first\r\n\x1b[48;5;24m1234567890\x1b[0m");
-        state.feed(b"\x1b[?1049h\x1b[2J\x1b[Halt tui");
-        state.resize(3, 10);
-
-        let mut parser = restored(&state);
-        assert!(parser.screen().alternate_screen());
-        assert_screen_equivalent(state.parser.screen(), parser.screen());
-
-        state.feed(b"\x1b[?1049l");
-        parser.process(b"\x1b[?1049l");
-        assert_screen_equivalent(state.parser.screen(), parser.screen());
-        assert!(state.parser.screen().contents().contains("1234567890"));
-        for row in 0..state.parser.screen().size().0 {
-            for col in 0..state.parser.screen().size().1 {
-                let cell = state.parser.screen().cell(row, col).unwrap();
-                if cell.contents().is_empty() {
-                    assert_eq!(
-                        cell.bgcolor(),
-                        Color::Default,
-                        "hidden normal cell ({row}, {col}) 保留了背景色"
-                    );
-                }
-            }
+        let mut reference = Reference::new(2, 8, 8);
+        for bytes in [
+            &b"first\r\n\x1b[48;5;24m1234567890\x1b[0m"[..],
+            b"\x1b[?1049h\x1b[2J\x1b[Halt tui",
+        ] {
+            state.feed(bytes);
+            reference.feed(bytes);
         }
+        state.resize(3, 10);
+        reference.resize(3, 10);
+
+        let mut replayed = restored(&state);
+        assert_eq!(replayed.active_screen().unwrap(), Screen::Alternate);
+        assert_equivalent(&replayed, reference.term());
+
+        replayed.vt_write(b"\x1b[?1049l");
+        reference.feed(b"\x1b[?1049l");
+        assert_equivalent(&replayed, reference.term());
+        assert!(plain_text(&replayed).contains("1234567890"));
     }
 
     #[test]
     fn sessiond_vt_history_snapshot_keeps_complete_logical_lines() {
-        let mut state = TerminalState::new(3, 10, 2);
         let mut bytes = vec![b'x'; 100];
         bytes.extend_from_slice(b"\r\none\r\ntwo\r\nthree\r\ncurrent");
-        state.feed(&bytes);
-        let selected =
-            capture_complete_history(state.parser.screen(), 2, state.history_row_capacity);
-        let hard_lines = selected.iter().filter(|row| !row.wrapped).count();
-        assert!(
-            hard_lines <= 2,
-            "history exceeded logical-line limit: {hard_lines}"
-        );
-        assert!(
-            selected.last().is_none_or(|row| !row.wrapped),
-            "history ended with a partial logical line"
-        );
-        assert!(
-            selected
+        for (limit, x_cells) in [(1, 0), (2, 100), (5, 100)] {
+            let mut state = TerminalState::new(3, 10, limit);
+            state.feed(&bytes);
+            let snapshot = state.snapshot();
+            assert!(
+                snapshot.starts_with(b"\x1bc"),
+                "a snapshot starts with a full reset"
+            );
+            let replayed = replay(3, 10, &snapshot);
+            let rows = rows_dump(&replayed);
+            let history = replayed.scrollback_rows().unwrap();
+            let logical = rows[..history]
                 .iter()
-                .flat_map(|row| &row.cells)
-                .all(|cell| !cell.contents.contains('x')),
-            "history began inside truncated long line"
-        );
+                .filter(|row| !row.continuation)
+                .count();
+            assert!(
+                logical <= limit,
+                "limit {limit}: {logical} logical lines of history"
+            );
+            assert!(
+                !rows[0].continuation,
+                "limit {limit}: history began inside a logical line"
+            );
+            assert!(
+                history == 0 || !rows[history - 1].wrapped,
+                "limit {limit}: history ended inside a logical line"
+            );
+            let text = plain_text(&replayed);
+            assert_eq!(
+                text.matches('x').count(),
+                x_cells,
+                "limit {limit}: {text:?}"
+            );
+            assert!(text.contains("current"));
+        }
 
-        let snapshot = state.snapshot();
-        let mut parser = vt100::Parser::new(3, 10, 16);
-        parser.process(&snapshot);
-        assert!(parser.screen().contents().contains("current"));
+        let mut none = TerminalState::new(3, 10, 0);
+        none.feed(&bytes);
+        let replayed = replay(3, 10, &none.snapshot());
+        assert_eq!(
+            replayed.scrollback_rows().unwrap(),
+            0,
+            "a zero limit keeps no history"
+        );
+        assert!(plain_text(&replayed).contains("current"));
     }
+
+    #[test]
+    fn snapshot_carries_full_sgr_links_scroll_region_and_keyboard_modes() {
+        let bytes = concat!(
+            "\x1b[9mstrike\x1b[0m \x1b[4:3;58:2::255:0:128mcurly\x1b[0m ",
+            "\x1b]8;id=x;https://example.com/a\x1b\\link\x1b]8;;\x1b\\ ",
+            "\x1b[5;38;5;208;48;2;1;2;3mblink\x1b[0m\r\n",
+            "\x1b[3;8r\x1b[>4;2m\x1b[>1u\x1b[?1h\x1b=\x1b[3g\x1b[1;5H\x1bH\x1b[5;2H"
+        )
+        .as_bytes();
+        let mut state = TerminalState::new(10, 40, 16);
+        let mut reference = Reference::new(10, 40, 16);
+        state.feed(bytes);
+        reference.feed(bytes);
+        let mut replayed = restored(&state);
+        assert_equivalent(&replayed, reference.term());
+
+        let history = replayed.scrollback_rows().unwrap() as u32;
+        assert!(cell_dump(&replayed, 0, history).style.strikethrough);
+        let curly = cell_dump(&replayed, 7, history);
+        assert_eq!(curly.style.underline, Underline::Curly);
+        assert_eq!(
+            curly.style.underline_color,
+            StyleColor::Rgb(RgbColor {
+                r: 255,
+                g: 0,
+                b: 128
+            })
+        );
+        assert_eq!(
+            cell_dump(&replayed, 13, history).link,
+            b"https://example.com/a"
+        );
+        let blink = cell_dump(&replayed, 18, history).style;
+        assert!(blink.blink);
+        assert_eq!(
+            blink.bg_color,
+            StyleColor::Rgb(RgbColor { r: 1, g: 2, b: 3 })
+        );
+        assert_eq!(replayed.kitty_keyboard_flags().unwrap().bits(), 1);
+        assert_eq!(key_probe(&replayed), key_probe(reference.term()));
+
+        // The scroll region and the tab stops behave the same after the replay.
+        let probe = b"\x1b[8;1Hbottom\nscrolled\x1b[10;1H\tT";
+        replayed.vt_write(probe);
+        reference.feed(probe);
+        assert_equivalent(&replayed, reference.term());
+
+        // modifyOtherKeys on its own (Kitty flags take precedence when both are set).
+        let mut other_keys = TerminalState::new(3, 20, 4);
+        let mut other_reference = Reference::new(3, 20, 4);
+        other_keys.feed(b"\x1b[>4;2m");
+        other_reference.feed(b"\x1b[>4;2m");
+        let other_replayed = restored(&other_keys);
+        assert_eq!(
+            key_probe(&other_replayed),
+            key_probe(other_reference.term())
+        );
+        assert_ne!(key_probe(&other_replayed), key_probe(&replay(3, 20, b"")));
+
+        // Never the palette, default colours or the working directory.
+        let snapshot = String::from_utf8_lossy(&state.snapshot()).into_owned();
+        for osc in ["\x1b]4;", "\x1b]10;", "\x1b]11;", "\x1b]7;"] {
+            assert!(!snapshot.contains(osc), "{osc:?} in {snapshot:?}");
+        }
+    }
+
+    #[test]
+    fn mode_2027_never_takes_effect_so_widths_stay_per_code_point() {
+        let family = "👨\u{200d}👩\u{200d}👧";
+        for prefix in ["\x1b[?2027h", "\x1b[?1;2027h"] {
+            let mut state = TerminalState::new(3, 20, 4);
+            state.feed(format!("{prefix}{family}|").as_bytes());
+            let replayed = restored(&state);
+            assert_eq!(
+                replayed.cursor_x().unwrap(),
+                7,
+                "{prefix:?}: three wide code points and the bar"
+            );
+            assert!(!replayed.mode(Mode::GRAPHEME_CLUSTER).unwrap());
+            assert!(!String::from_utf8_lossy(&state.snapshot()).contains("2027"));
+        }
+        // A terminal that honoured the mode would make the family one 2-cell cluster.
+        let honoured = replay(3, 20, format!("\x1b[?2027h{family}|").as_bytes());
+        assert_eq!(honoured.cursor_x().unwrap(), 3);
+    }
+
+    #[test]
+    fn cursor_shape_survives_snapshot_and_replay() {
+        for (sequence, shape, blinking) in [
+            ("\x1b[6 q", "Bar", false),
+            ("\x1b[5 q", "Bar", true),
+            ("\x1b[4 q", "Underline", false),
+            ("\x1b[3 q", "Underline", true),
+            ("\x1b[2 q", "Block", false),
+        ] {
+            let mut state = TerminalState::new(3, 20, 4);
+            let mut reference = Reference::new(3, 20, 4);
+            let bytes = format!("abc{sequence}");
+            state.feed(bytes.as_bytes());
+            reference.feed(bytes.as_bytes());
+            let replayed = restored(&state);
+            assert_equivalent(&replayed, reference.term());
+            let dump = state_dump(&replayed);
+            assert_eq!(
+                (dump.cursor_shape.as_str(), dump.cursor_blinking),
+                (shape, blinking),
+                "{sequence:?}"
+            );
+        }
+    }
+
+    /// Checkpoints written by the pre-libghostty runtime (generated with the code at `32d8ede1`).
+    /// normal: 5x24, history 16, title "legacy era", busy command 1, output_seq 293.
+    /// alt: 4x20, history 8, output_seq 59, alternate screen active.
+    const LEGACY_NORMAL_CHECKPOINT: &[u8] = b"\x00\x00\x00\xbb{\"v\":1,\"output_seq\":293,\"rows\":5,\"cols\":24,\"title\":\"legacy era\",\"command\":{\"integrated\":true,\"busy\":true,\"commandSeq\":1,\"finishedSeq\":0},\"alt\":false,\"normal_len\":0,\"answered_query_seq\":0}\x1bc\x1b[0m\x1b[0;31mline 0\x1b[0m\x1b[K\x0d\x0a\x1b[0m\x1b[0;32mline 1\x1b[0m\x1b[K\x0d\x0a\x1b[0m\x1b[0;33mline 2\x1b[0m\x1b[K\x0d\x0a\x1b[0m\x1b[0;34mline 3\x1b[0m\x1b[K\x0d\x0a\x1b[0m\x1b[0;35mline 4\x1b[0m\x1b[K\x0d\x0a\x1b[0m\x1b[0;36mline 5\x1b[0m\x1b[K\x0d\x0a\x1b[0m\x1b[0;37mline 6\x1b[0m\x1b[K\x0d\x0a\x1b[0m\x1b[0;90mline 7\x1b[0m\x1b[K\x0d\x0a\x1b[0m$ \x1b[0;1;4m\xe7\x9c\x9fe\xcc\x81\x1b[0m wrapped beyond the\x1b[0m width\x1b[K\x0d\x0a\x1b[0mprompt$ \x1b[K\x1b[?25h\x1b[5;9H\x1b[m\x1b>\x1b[?1h\x1b[?2004h";
+    const LEGACY_ALT_CHECKPOINT: &[u8] = b"\x00\x00\x00\xb2{\"v\":1,\"output_seq\":59,\"rows\":4,\"cols\":20,\"title\":\"\",\"command\":{\"integrated\":false,\"busy\":false,\"commandSeq\":0,\"finishedSeq\":0},\"alt\":true,\"normal_len\":86,\"answered_query_seq\":0}\x1bc\x1b[0mmain line\x1b[K\x0d\x0a\x1b[0msecond line\x1b[K\x0d\x0a\x1b[0m\x1b[K\x0d\x0a\x1b[0m\x1b[K\x1b[?25h\x1b[3;1H\x1b[m\x1b>\x1b[?1l\x1b[?2004l\x1bc\x1b[0mmain line\x1b[K\x0d\x0a\x1b[0msecond line\x1b[K\x0d\x0a\x1b[0m\x1b[K\x0d\x0a\x1b[0m\x1b[K\x1b[?25h\x1b[3;1H\x1b[m\x1b>\x1b[?1l\x1b[?2004l\x1b[?1049h\x1b[H\x1b[2J\x1b[0malt screen\x1b[K\x0d\x0a\x1b[0m  here\x1b[K\x0d\x0a\x1b[0m\x1b[K\x0d\x0a\x1b[0m\x1b[K\x1b[?25h\x1b[2;7H\x1b[m\x1b>\x1b[?1l\x1b[?2004l";
 
     #[test]
     fn sessiond_attach_snapshot_then_live_delta_is_contiguous() {
@@ -2613,7 +2698,11 @@ mod tests {
         assert_eq!(sliced.ansi_snapshot, None);
         assert_eq!(sliced.replay.len(), 1);
         assert_eq!(
-            (sliced.replay[0].from_seq, sliced.replay[0].to_seq, sliced.replay[0].data.as_slice()),
+            (
+                sliced.replay[0].from_seq,
+                sliced.replay[0].to_seq,
+                sliced.replay[0].data.as_slice()
+            ),
             (5, 5, &b"e"[..])
         );
         assert_eq!(
@@ -2635,8 +2724,22 @@ mod tests {
         state.feed(b"ghi");
         let sliced = state.deltas_after(2).expect("偏移 2 之后仍在重发缓冲里");
         assert_eq!(sliced.len(), 2);
-        assert_eq!((sliced[0].from_seq, sliced[0].to_seq, sliced[0].data.as_slice()), (3, 6, &b"cdef"[..]));
-        assert_eq!((sliced[1].from_seq, sliced[1].to_seq, sliced[1].data.as_slice()), (7, 9, &b"ghi"[..]));
+        assert_eq!(
+            (
+                sliced[0].from_seq,
+                sliced[0].to_seq,
+                sliced[0].data.as_slice()
+            ),
+            (3, 6, &b"cdef"[..])
+        );
+        assert_eq!(
+            (
+                sliced[1].from_seq,
+                sliced[1].to_seq,
+                sliced[1].data.as_slice()
+            ),
+            (7, 9, &b"ghi"[..])
+        );
         assert_eq!(state.deltas_after(9), Some(Vec::new()));
         assert_eq!(state.deltas_after(10), None);
 
@@ -2656,10 +2759,19 @@ mod tests {
         assert_eq!(outcome.snapshot_seq, 2);
         assert_eq!(outcome.ansi_snapshot, None);
         assert_eq!(outcome.replay.len(), 1);
-        assert_eq!((outcome.replay[0].from_seq, outcome.replay[0].to_seq, outcome.replay[0].data.as_slice()), (3, 6, &b"cdef"[..]));
+        assert_eq!(
+            (
+                outcome.replay[0].from_seq,
+                outcome.replay[0].to_seq,
+                outcome.replay[0].data.as_slice()
+            ),
+            (3, 6, &b"cdef"[..])
+        );
         // ring 给的长度对不上就不冒充连续流。
         let short = session
-            .attach_with_ring("channel-2", "client-1", 2, Some(2), &mut |_, _| Some(b"cd".to_vec()))
+            .attach_with_ring("channel-2", "client-1", 2, Some(2), &mut |_, _| {
+                Some(b"cd".to_vec())
+            })
             .unwrap();
         assert!(short.ansi_snapshot.is_some());
         assert!(short.replay.is_empty());
@@ -2676,7 +2788,7 @@ mod tests {
             let osc_start = stream.iter().position(|byte| *byte == 0x1b).unwrap();
             let osc_end = osc_start + b"\x1b]133;A;coflux=deadbeef".len() + terminator.len();
             for cut in 0..=stream.len() {
-                let mut scanner = DecModeScanner::default();
+                let mut scanner = OutputScanner::default();
                 for byte in &stream[..cut] {
                     scanner.feed(*byte);
                 }
@@ -2709,7 +2821,7 @@ mod tests {
             "\u{301}".as_bytes(),
         ];
         for sequence in cases {
-            let mut scanner = DecModeScanner::default();
+            let mut scanner = OutputScanner::default();
             for (index, byte) in sequence.iter().enumerate() {
                 scanner.feed(*byte);
                 let last = index + 1 == sequence.len();
@@ -2734,50 +2846,144 @@ mod tests {
         )
         .as_bytes();
         let mut state = TerminalState::new(5, 24, 16).with_mark_secret("s3cret".into());
+        let mut reference = Reference::new(5, 24, 16);
         state.feed(bytes);
+        reference.feed(bytes);
         assert!(state.checkpoint_eligible());
         let checkpoint = state.checkpoint(usize::MAX).unwrap();
         assert_eq!(checkpoint.output_seq, bytes.len() as u64);
+        assert!(checkpoint.normal_before_alt.is_none());
         let encoded = checkpoint.encode();
         assert_eq!(encoded.len(), checkpoint.encoded_len());
         let decoded = Checkpoint::decode(&encoded).unwrap();
         assert_eq!(decoded, checkpoint);
 
-        let mut restored = TerminalState::restore(&decoded, 16, "s3cret".into());
-        assert_screen_equivalent(restored.parser.screen(), state.parser.screen());
-        assert_eq!(restored.title(), "my title");
-        assert_eq!(restored.command_state(), state.command_state());
-        assert_eq!(restored.output_seq(), state.output_seq());
-        assert!(restored.take_command_change().is_none());
+        let mut restored_state = TerminalState::restore(&decoded, 16, "s3cret".into());
+        assert_equivalent(&restored(&restored_state), reference.term());
+        assert_eq!(restored_state.title(), "my title");
+        assert_eq!(restored_state.command_state(), state.command_state());
+        assert_eq!(restored_state.output_seq(), state.output_seq());
+        assert!(restored_state.take_command_change().is_none());
         // 之后的字节在两边产生相同的屏幕与相同的序号。
         let tail = b"\r\nafter restore\x1b]133;C;coflux=s3cret\x07";
         let left = state.feed(tail).unwrap();
-        let right = restored.feed(tail).unwrap();
+        let right = restored_state.feed(tail).unwrap();
+        reference.feed(tail);
         assert_eq!((left.from_seq, left.to_seq), (right.from_seq, right.to_seq));
-        assert_screen_equivalent(restored.parser.screen(), state.parser.screen());
-        assert!(restored.command_state().busy);
+        assert_equivalent(&restored(&restored_state), reference.term());
+        assert_equivalent(&restored(&state), reference.term());
+        assert!(restored_state.command_state().busy);
 
-        // alt screen 激活时 normal_before_alt 随 checkpoint 走，退出 alt 后主屏照旧接回。
+        // A checkpoint taken in alt carries the primary snapshot in normal_before_alt and restores
+        // both screens from its snapshot alone.
         let mut alt = TerminalState::new(4, 12, 8);
-        alt.feed(b"main line\r\n\x1b[?1049h\x1b[Halt!");
+        let mut alt_reference = Reference::new(4, 12, 8);
+        let alt_bytes = b"main line\r\n\x1b[?1049h\x1b[Halt!";
+        alt.feed(alt_bytes);
+        alt_reference.feed(alt_bytes);
         let alt_checkpoint = alt.checkpoint(usize::MAX).unwrap();
-        assert!(alt_checkpoint.normal_before_alt.is_some());
-        let mut alt_restored = TerminalState::restore(&Checkpoint::decode(&alt_checkpoint.encode()).unwrap(), 8, String::new());
-        assert!(alt_restored.parser.screen().alternate_screen());
+        let normal = alt_checkpoint
+            .normal_before_alt
+            .clone()
+            .expect("alt checkpoints carry the primary");
+        assert!(normal.starts_with(b"\x1bc"));
+        assert!(alt_checkpoint.snapshot.starts_with(&normal));
+        assert!(String::from_utf8_lossy(&normal).contains("main line"));
+        assert!(!String::from_utf8_lossy(&normal).contains("1049"));
+        let mut alt_restored = TerminalState::restore(
+            &Checkpoint::decode(&alt_checkpoint.encode()).unwrap(),
+            8,
+            String::new(),
+        );
+        assert_eq!(
+            restored(&alt_restored).active_screen().unwrap(),
+            Screen::Alternate
+        );
+        assert_equivalent(&restored(&alt_restored), alt_reference.term());
         alt.feed(b"\x1b[?1049l");
         alt_restored.feed(b"\x1b[?1049l");
-        assert_screen_equivalent(alt_restored.parser.screen(), alt.parser.screen());
-        assert!(alt_restored.parser.screen().contents().contains("main line"));
+        alt_reference.feed(b"\x1b[?1049l");
+        assert_equivalent(&restored(&alt_restored), alt_reference.term());
+        assert_equivalent(&restored(&alt), alt_reference.term());
+        assert!(plain_text(&restored(&alt_restored)).contains("main line"));
+
+        // A checkpoint too big for its budget drops the oldest logical lines first, and is None
+        // only when the screen alone does not fit.
+        let mut long = TerminalState::new(3, 20, 64);
+        for index in 0..40 {
+            long.feed(format!("history line {index:02}\r\n").as_bytes());
+        }
+        let full = long.checkpoint(usize::MAX).unwrap();
+        let smaller = long.checkpoint(full.encoded_len() - 1).unwrap();
+        assert!(smaller.encoded_len() < full.encoded_len());
+        let kept = plain_text(&replay(3, 20, &smaller.snapshot));
+        assert!(kept.contains("history line 39") && !kept.contains("history line 00"));
+        assert!(long.checkpoint(16).is_none());
 
         // 不认识的格式版本退化为 None，调用方只回放 ring。
         assert!(Checkpoint::decode(b"\x00\x00\x00\x02{}").is_none());
         let tampered = encoded.clone();
         let header_len = u32::from_be_bytes(tampered[..4].try_into().unwrap()) as usize;
-        let header = String::from_utf8_lossy(&tampered[4..4 + header_len]).replace("\"v\":1", "\"v\":99");
+        let header =
+            String::from_utf8_lossy(&tampered[4..4 + header_len]).replace("\"v\":1", "\"v\":99");
         let mut future = (header.len() as u32).to_be_bytes().to_vec();
         future.extend_from_slice(header.as_bytes());
         future.extend_from_slice(&tampered[4 + header_len..]);
         assert!(Checkpoint::decode(&future).is_none());
+    }
+
+    #[test]
+    fn a_checkpoint_written_by_the_previous_runtime_restores() {
+        let checkpoint =
+            Checkpoint::decode(LEGACY_NORMAL_CHECKPOINT).expect("the legacy blob decodes");
+        assert_eq!(
+            (
+                checkpoint.rows,
+                checkpoint.cols,
+                checkpoint.output_seq,
+                checkpoint.title.as_str()
+            ),
+            (5, 24, 293, "legacy era")
+        );
+        let mut normal = TerminalState::restore(&checkpoint, 16, "s3cret".into());
+        assert!(normal.command_state().busy);
+        assert_eq!(normal.output_seq(), 293);
+        let text = plain_text(&restored(&normal));
+        for expected in [
+            "line 2",
+            "line 7",
+            "真e\u{301}",
+            "wrapped beyond the width",
+            "prompt$",
+        ] {
+            assert!(
+                text.contains(expected),
+                "{expected:?} missing from {text:?}"
+            );
+        }
+        normal.feed(b"\x1b]133;D;0;coflux=s3cret\x07");
+        assert_eq!(normal.command_state().exit_code, Some(0));
+        // What this runtime writes still decodes with the unchanged decoder.
+        let written = normal.checkpoint(usize::MAX).unwrap();
+        assert_eq!(Checkpoint::decode(&written.encode()), Some(written));
+
+        let alt = Checkpoint::decode(LEGACY_ALT_CHECKPOINT).expect("the legacy alt blob decodes");
+        assert!(alt.normal_before_alt.is_some());
+        let mut alt_state = TerminalState::restore(&alt, 8, String::new());
+        let replayed = restored(&alt_state);
+        assert_eq!(replayed.active_screen().unwrap(), Screen::Alternate);
+        let alt_text = plain_text(&replayed);
+        assert!(
+            alt_text.contains("alt screen") && alt_text.contains("here"),
+            "{alt_text:?}"
+        );
+        alt_state.feed(b"\x1b[?1049l");
+        let primary = plain_text(&restored(&alt_state));
+        assert!(
+            primary.contains("main line") && primary.contains("second line"),
+            "{primary:?}"
+        );
+        assert!(!primary.contains("alt screen"));
     }
 
     #[test]
@@ -3153,9 +3359,8 @@ mod tests {
             b"agent is working".len() as u64 + marker.len() as u64
         );
 
-        let mut restored = vt100::Parser::new(4, 24, 32);
-        restored.process(&state.snapshot());
-        assert!(restored.screen().contents().contains("COMPLETED"));
+        let replayed = replay(4, 24, &state.snapshot());
+        assert!(plain_text(&replayed).contains("COMPLETED"));
     }
 
     #[test]
@@ -3205,58 +3410,93 @@ mod tests {
     /// 旧 ptyd 没有 `cursors`：重建出的 authority 拿不到"什么真正写进了 PTY"的记录。回来的 client 从它
     /// 上次的 seq 继续（比如 5）必须被接纳，而不是判 `input_seq_gap`——那会把一个能力缺失变成死 ack。
     #[test]
-    fn cursorless_rebuild_accepts_a_returning_client_at_its_own_sequence_and_ptyd_rejections_are_not_fatal() {
+    fn cursorless_rebuild_accepts_a_returning_client_at_its_own_sequence_and_ptyd_rejections_are_not_fatal(
+    ) {
         let mut state = SessionState::restore(TerminalState::new(3, 12, 4));
         state.set_cursorless_rebuild();
-        let epoch = state.attach("channel-a", "client-a", 2, None).unwrap().holder_epoch;
+        let epoch = state
+            .attach("channel-a", "client-a", 2, None)
+            .unwrap()
+            .holder_epoch;
         // 上一个 supervisor 已经 ack 过 1..4，client 继续投 5。
         let admitted = state
             .admit_input("channel-a", "request-5", epoch, 5, b"five".to_vec())
             .expect("拿不到游标时以 client 自报的 seq 为起点");
-        assert_eq!(admitted, InputAdmission::Enqueue { client_instance_id: "client-a".into() });
+        assert_eq!(
+            admitted,
+            InputAdmission::Enqueue {
+                client_instance_id: "client-a".into()
+            }
+        );
         assert_eq!(state.input_applied_through("channel-a", epoch).unwrap(), 4);
         // 起点一旦确立，之后照常连续：6 可以，8 是 gap。
         state.complete_input("client-a", 5).unwrap();
         assert!(matches!(
-            state.admit_input("channel-a", "request-6", epoch, 6, b"six".to_vec()).unwrap(),
+            state
+                .admit_input("channel-a", "request-6", epoch, 6, b"six".to_vec())
+                .unwrap(),
             InputAdmission::Enqueue { .. }
         ));
         assert_eq!(
-            state.admit_input("channel-a", "request-8", epoch, 8, b"eight".to_vec()).unwrap_err().code,
+            state
+                .admit_input("channel-a", "request-8", epoch, 8, b"eight".to_vec())
+                .unwrap_err()
+                .code,
             "input_seq_gap"
         );
         // ptyd 按它的游标拒绝了 6：弹掉 reservation、把目标交回，session 没有封死，7 之后照常。
         let target = state.reject_pending_input("client-a", 6).unwrap();
-        assert_eq!((target.channel_id.as_str(), target.request_id.as_str()), ("channel-a", "request-6"));
+        assert_eq!(
+            (target.channel_id.as_str(), target.request_id.as_str()),
+            ("channel-a", "request-6")
+        );
         assert!(matches!(
-            state.admit_input("channel-a", "request-6-again", epoch, 6, b"six".to_vec()).unwrap(),
+            state
+                .admit_input("channel-a", "request-6-again", epoch, 6, b"six".to_vec())
+                .unwrap(),
             InputAdmission::Enqueue { .. }
         ));
-        assert!(state.reject_pending_input("client-a", 9).is_err(), "只能弹队首那一条");
+        assert!(
+            state.reject_pending_input("client-a", 9).is_err(),
+            "只能弹队首那一条"
+        );
 
         // 有游标的正常重建不受影响：跳号仍是 gap。
         let mut strict = SessionState::restore(TerminalState::new(3, 12, 4));
         strict.restore_input_cursor("client-a", 4, b"four".to_vec());
-        let epoch = strict.attach("channel-a", "client-a", 2, None).unwrap().holder_epoch;
+        let epoch = strict
+            .attach("channel-a", "client-a", 2, None)
+            .unwrap()
+            .holder_epoch;
         assert!(matches!(
-            strict.admit_input("channel-a", "r", epoch, 5, b"five".to_vec()).unwrap(),
+            strict
+                .admit_input("channel-a", "r", epoch, 5, b"five".to_vec())
+                .unwrap(),
             InputAdmission::Enqueue { .. }
         ));
         let mut fresh = SessionState::restore(TerminalState::new(3, 12, 4));
-        let epoch = fresh.attach("channel-a", "client-a", 2, None).unwrap().holder_epoch;
-        assert_eq!(fresh.admit_input("channel-a", "r", epoch, 5, b"five".to_vec()).unwrap_err().code, "input_seq_gap");
+        let epoch = fresh
+            .attach("channel-a", "client-a", 2, None)
+            .unwrap()
+            .holder_epoch;
+        assert_eq!(
+            fresh
+                .admit_input("channel-a", "r", epoch, 5, b"five".to_vec())
+                .unwrap_err()
+                .code,
+            "input_seq_gap"
+        );
     }
 
     /// Stream offsets (0-based) of the bytes the scanner reports as completing a DA1 query, with
     /// the stream fed one byte at a time across `chunks`.
     fn scanner_da1_positions(chunks: &[&[u8]]) -> Vec<usize> {
-        let mut scanner = DecModeScanner::default();
+        let mut scanner = OutputScanner::default();
         let mut positions = Vec::new();
         let mut offset = 0;
         for chunk in chunks {
             for byte in *chunk {
-                scanner.feed(*byte);
-                if scanner.completed_da1_query() {
+                if scanner.feed(*byte) == Some(ScanEvent::Da1Query) {
                     positions.push(offset);
                 }
                 offset += 1;
@@ -3265,44 +3505,9 @@ mod tests {
         positions
     }
 
-    /// Oracle: the CSI sequences vt100 hands to `unhandled_csi` with no intermediate, final `c` and
-    /// all-zero parameters — exactly what the scanner must call a DA1 query.
-    #[derive(Default)]
-    struct Da1Oracle {
-        queries: usize,
-    }
-
-    impl vt100::Callbacks for Da1Oracle {
-        fn unhandled_csi(
-            &mut self,
-            _: &mut Screen,
-            i1: Option<u8>,
-            i2: Option<u8>,
-            params: &[&[u16]],
-            c: char,
-        ) {
-            if i1.is_none()
-                && i2.is_none()
-                && c == 'c'
-                && params.iter().all(|param| param.iter().all(|value| *value == 0))
-            {
-                self.queries += 1;
-            }
-        }
-    }
-
-    fn assert_da1_scanner_matches_vt100(chunks: &[&[u8]]) {
-        let mut oracle = vt100::Parser::new_with_callbacks(4, 12, 0, Da1Oracle::default());
-        for chunk in chunks {
-            oracle.process(chunk);
-        }
-        assert_eq!(
-            scanner_da1_positions(chunks).len(),
-            oracle.callbacks().queries,
-            "DA1 count differs from vt100/VTE for {chunks:?}"
-        );
-    }
-
+    /// DA1 queries as xterm.js (and the pre-libghostty runtime) recognise them: no intermediate
+    /// and no private marker, final `c`, every parameter zero. A query sessiond answers must be
+    /// one a client would have answered, so these are xterm.js's semantics, not libghostty's.
     const DA1_CASES: &[(&[u8], usize)] = &[
         (b"\x1b[c", 1),
         (b"\x1b[0c", 1),
@@ -3313,14 +3518,24 @@ mod tests {
         (b"\x1b[>0c", 0),
         (b"\x1b[=c", 0),
         (b"\x1b[1c", 0),
+        (b"\x1b[5c", 0),
         (b"\x1b[ c", 0),
         (b"\x1bc", 0),
         (b"\x1b]0;[c\x07", 0),
         (b"\x1bP[c\x1b\\", 0),
+        (b"\x1b[;c", 1),
+        (b"\x1b[00c", 1),
+        (b"\x1b[0:0c", 1),
+        (b"\x1b[0:1c", 0),
+        (b"\x1b[10c", 0),
+        (b"\x1b[0\x18c", 0),
+        (b"\x1b[0\x07c", 1),
+        (b"\x1b[0;?c", 0),
+        (b"\x1b[ 0c", 0),
     ];
 
     #[test]
-    fn dec_mode_scanner_recognises_completed_da1_queries_only() {
+    fn output_scanner_recognises_completed_da1_queries_only() {
         for &(input, expected) in DA1_CASES {
             assert_eq!(
                 scanner_da1_positions(&[input]).len(),
@@ -3334,49 +3549,80 @@ mod tests {
         // Split across chunk boundaries the state carries over.
         assert_eq!(scanner_da1_positions(&[b"\x1b[", b"c"]), vec![2]);
         assert_eq!(scanner_da1_positions(&[b"\x1b", b"[0", b"c"]), vec![3]);
-        // Recognising DA1 changes neither the alt events nor the sequence-boundary answer.
-        let mut scanner = DecModeScanner::default();
-        for byte in b"\x1b[?1049h\x1b[c" {
+        // Recognising DA1 does not change the sequence-boundary answer.
+        let mut scanner = OutputScanner::default();
+        for byte in b"\x1b[?1049h\x1b[" {
             scanner.feed(*byte);
         }
-        assert!(scanner.completed_da1_query());
+        assert_eq!(scanner.feed(b'c'), Some(ScanEvent::Da1Query));
         assert!(scanner.between_sequences());
-        scanner.feed(b'x');
-        assert!(!scanner.completed_da1_query(), "the flag describes the last byte only");
+        assert_eq!(
+            scanner.feed(b'x'),
+            None,
+            "the event describes its own byte only"
+        );
     }
 
     #[test]
-    fn dec_mode_scanner_da1_matches_vt100_including_chunk_splits() {
+    fn output_scanner_da1_survives_every_chunk_split() {
         for &(input, expected) in DA1_CASES {
-            let mut oracle = vt100::Parser::new_with_callbacks(4, 12, 0, Da1Oracle::default());
-            oracle.process(input);
-            assert_eq!(oracle.callbacks().queries, expected, "oracle sanity for {input:?}");
-            assert_da1_scanner_matches_vt100(&[input]);
             for cut in 0..=input.len() {
-                assert_da1_scanner_matches_vt100(&[&input[..cut], &input[cut..]]);
+                assert_eq!(
+                    scanner_da1_positions(&[&input[..cut], &input[cut..]]).len(),
+                    expected,
+                    "{input:?} split at {cut}"
+                );
             }
             let bytes: Vec<&[u8]> = input.chunks(1).collect();
-            assert_da1_scanner_matches_vt100(&bytes);
+            assert_eq!(
+                scanner_da1_positions(&bytes).len(),
+                expected,
+                "{input:?} byte by byte"
+            );
         }
-        let stream: Vec<u8> = DA1_CASES.iter().flat_map(|(input, _)| input.iter().copied()).collect();
+        let stream: Vec<u8> = DA1_CASES
+            .iter()
+            .flat_map(|(input, _)| input.iter().copied())
+            .collect();
         let total: usize = DA1_CASES.iter().map(|(_, expected)| expected).sum();
-        assert_eq!(scanner_da1_positions(&[&stream]).len(), total);
+        let whole = scanner_da1_positions(&[&stream]);
+        assert_eq!(whole.len(), total);
         for cut in 0..=stream.len() {
-            assert_da1_scanner_matches_vt100(&[&stream[..cut], &stream[cut..]]);
+            assert_eq!(
+                scanner_da1_positions(&[&stream[..cut], &stream[cut..]]),
+                whole,
+                "cut {cut}"
+            );
         }
-        // Edge shapes the scanner must agree on even though the tasks do not list them.
-        for extra in [
-            &b"\x1b[;c"[..],
-            b"\x1b[00c",
-            b"\x1b[0:0c",
-            b"\x1b[0:1c",
-            b"\x1b[10c",
-            b"\x1b[0\x18c",
-            b"\x1b[0\x07c",
-            b"\x1b[0;?c",
-            b"\x1b[ 0c",
+    }
+
+    #[test]
+    fn output_scanner_reports_every_decset_of_mode_2027() {
+        let positions = |input: &[u8]| -> Vec<usize> {
+            let mut scanner = OutputScanner::default();
+            input
+                .iter()
+                .enumerate()
+                .filter(|(_, byte)| scanner.feed(**byte) == Some(ScanEvent::GraphemeClusterSet))
+                .map(|(index, _)| index)
+                .collect()
+        };
+        assert_eq!(positions(b"\x1b[?2027h"), vec![7]);
+        assert_eq!(positions(b"a\x1b[?1;2027;25hb\x1b[?2027h"), vec![13, 22]);
+        assert_eq!(
+            positions(b"\x1b[?02027h"),
+            vec![8],
+            "the value, not the spelling"
+        );
+        for not_a_set in [
+            &b"\x1b[?2027l"[..],
+            b"\x1b[2027h",
+            b"\x1b[?20270h",
+            b"\x1b[?2026h",
+            b"\x1b]0;?2027h\x07",
+            b"\x1b[?2027\x18h",
         ] {
-            assert_da1_scanner_matches_vt100(&[extra]);
+            assert!(positions(not_a_set).is_empty(), "{not_a_set:?}");
         }
     }
 
@@ -3396,21 +3642,72 @@ mod tests {
         state.feed(b"c");
         assert_eq!(state.take_da1_queries(), vec![18]);
 
-        // The query never splits the chunk for the parser: the screen is what vt100 shows.
+        // The query is consumed by the terminal: the screen shows only the text around it.
         let mut plain = TerminalState::new(4, 12, 8);
         plain.feed(b"ab\x1b[cd");
-        assert_eq!(plain.parser.screen().contents(), "abd");
+        assert_eq!(plain_text(&restored(&plain)).trim_end(), "abd");
 
         // resize and restore replay canonical snapshots and record nothing.
         plain.feed(b"\x1b[c");
         assert_eq!(plain.take_da1_queries().len(), 1);
         plain.resize(5, 20);
         assert!(plain.take_da1_queries().is_empty());
-        let mut restored = TerminalState::restore(&plain.checkpoint(usize::MAX).unwrap(), 8, String::new());
-        assert!(restored.take_da1_queries().is_empty());
+        let mut restored_state =
+            TerminalState::restore(&plain.checkpoint(usize::MAX).unwrap(), 8, String::new());
+        assert!(restored_state.take_da1_queries().is_empty());
         plain.feed(b"\x1b[c");
         plain.feed(b"z");
-        assert!(plain.take_da1_queries().is_empty(), "a later feed replaces an undrained record");
+        assert!(
+            plain.take_da1_queries().is_empty(),
+            "a later feed replaces an undrained record"
+        );
+    }
+
+    #[test]
+    fn libghostty_replies_never_reach_the_pty_and_images_are_not_stored() {
+        // Queries libghostty would answer itself: DA2/DA3, DECRQM, DSR, XTVERSION, size reports,
+        // colour scheme, OSC colour queries, ENQ.
+        let queries =
+            b"\x1b[>c\x1b[=c\x1b[?2004$p\x1b[5n\x1b[6n\x1b[>q\x1b[18t\x1b[?996n\x1b]11;?\x07\x05";
+        let mut state = SessionState::new(3, 20, 4);
+        state.feed(queries);
+        assert!(
+            state.take_query_replies().is_empty(),
+            "sessiond answers DA1 only"
+        );
+        state.feed(b"\x1b[c");
+        assert_eq!(state.take_query_replies(), vec![DA1_REPLY.to_vec()]);
+
+        // A Kitty graphics transmission carrying data is dropped whole by the zero APC budget, so
+        // no image is ever stored; a terminal with libghostty's default budget stores and places it.
+        let image = format!(
+            "\x1b_Ga=T,f=24,s=32,v=32,i=7;{}\x1b\\after",
+            "A".repeat(4096)
+        );
+        let placements = |term: &Term| -> usize {
+            let mut render = RenderState::new().unwrap();
+            let snapshot = render.update(term).unwrap();
+            let mut images = libghostty_vt::render::ImageIterator::new().unwrap();
+            let mut iteration = images.update(&snapshot).unwrap();
+            let mut count = 0;
+            while iteration.next().is_some() {
+                count += 1;
+            }
+            count
+        };
+        let mut budgeted: Term = Terminal::new(20, 3).unwrap();
+        budgeted.set_apc_max_bytes(Some(0)).unwrap();
+        budgeted.resize(20, 3, 8, 16).unwrap();
+        budgeted.vt_write(image.as_bytes());
+        let mut unbudgeted: Term = Terminal::new(20, 3).unwrap();
+        unbudgeted.resize(20, 3, 8, 16).unwrap();
+        unbudgeted.vt_write(image.as_bytes());
+        assert_eq!(placements(&unbudgeted), 1, "the probe sees a stored image");
+        assert_eq!(placements(&budgeted), 0);
+        let mut reference = Reference::new(3, 20, 4);
+        reference.feed(image.as_bytes());
+        assert_eq!(placements(reference.term()), 0);
+        assert!(plain_text(reference.term()).contains("after"));
     }
 
     #[test]
@@ -3420,7 +3717,11 @@ mod tests {
         assert!(pending.is_empty());
         assert_eq!(state.take_query_replies(), vec![b"\x1b[?1;2c".to_vec()]);
         assert!(state.take_query_replies().is_empty(), "drained");
-        assert_eq!(state.answered_query_seq(), 3, "the `c` is the chunk's last byte");
+        assert_eq!(
+            state.answered_query_seq(),
+            3,
+            "the `c` is the chunk's last byte"
+        );
 
         let mut two = SessionState::new(3, 12, 4);
         two.feed(b"\x1b[c\x1b[0c");
@@ -3430,7 +3731,11 @@ mod tests {
         let mut tail = SessionState::new(3, 12, 4);
         tail.feed(b"x\x1b[cyyyy");
         assert_eq!(tail.take_query_replies().len(), 1);
-        assert_eq!(tail.answered_query_seq(), 4, "marker at the `c`, not the chunk's to_seq (8)");
+        assert_eq!(
+            tail.answered_query_seq(),
+            4,
+            "marker at the `c`, not the chunk's to_seq (8)"
+        );
 
         // A feed without a query replaces a reply buffer nobody took and leaves the marker alone.
         let mut stale = SessionState::new(3, 12, 4);
@@ -3461,10 +3766,19 @@ mod tests {
         // An agent holder stays subscribed but never answers.
         let mut agent = SessionState::new(3, 12, 4);
         agent
-            .attach("__coflux-agent-client-1-g1", "__coflux-agent-client-1", 1, None)
+            .attach(
+                "__coflux-agent-client-1-g1",
+                "__coflux-agent-client-1",
+                1,
+                None,
+            )
             .unwrap();
         let pending = agent.feed(b"\x1b[c");
-        assert_eq!(pending.len(), 1, "the agent channel still receives the delta");
+        assert_eq!(
+            pending.len(),
+            1,
+            "the agent channel still receives the delta"
+        );
         assert_eq!(agent.take_query_replies().len(), 1);
         assert_eq!(agent.answered_query_seq(), 3);
     }
@@ -3532,8 +3846,13 @@ mod tests {
 
         // A header written before the field existed still decodes, with marker 0.
         let header_len = u32::from_be_bytes(encoded[..4].try_into().unwrap()) as usize;
-        let mut header: serde_json::Value = serde_json::from_slice(&encoded[4..4 + header_len]).unwrap();
-        assert!(header.as_object_mut().unwrap().remove("answered_query_seq").is_some());
+        let mut header: serde_json::Value =
+            serde_json::from_slice(&encoded[4..4 + header_len]).unwrap();
+        assert!(header
+            .as_object_mut()
+            .unwrap()
+            .remove("answered_query_seq")
+            .is_some());
         let header = serde_json::to_vec(&header).unwrap();
         let mut legacy = (header.len() as u32).to_be_bytes().to_vec();
         legacy.extend_from_slice(&header);

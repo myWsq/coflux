@@ -1862,7 +1862,7 @@ public struct Coflux_V1_DeviceSessionSnapshot: Sendable {
 
   public var rows: UInt32 = 0
 
-  /// PTY 内程序经 OSC 0/2 设置的终端标题（plan 075）：sessiond 的 vt100 回调捕获、
+  /// PTY 内程序经 OSC 0/2 设置的终端标题（plan 075）：sessiond 的输出扫描器捕获、
   /// 源头截断；空 = 从未设置或旧 supervisor 不支持，消费方一律回落自身默认。
   public var title: String = String()
 

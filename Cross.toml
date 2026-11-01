@@ -2,5 +2,24 @@
 # release.yml 靠 COFLUX_RELEASE_VERSION 给 supervisor 编译期注入版本号（见
 # crates/launcher/src/main.rs::LAUNCHER_VERSION），必须显式放行，否则 linux
 # 矩阵产物的版本永远落 "dev"（见 plans/015 review）。
+#
+# libghostty-vt (sessiond's VT engine) is compiled from Ghostty's source by Zig 0.17.x inside the
+# container. The release workflow prefetches on the runner and hands two directories over:
+# GHOSTTY_SOURCE_DIR (Ghostty's source, read by the libghostty-vt-sys build script, with the Zig
+# packages lib-vt needs already in its zig-pkg/) and ZIG_GLOBAL_CACHE_DIR (a writable Zig global
+# cache, which keeps Zig off the container's unwritable HOME). `volumes` mounts each directory at
+# the same path; `passthrough` sets the variables. Both are needed: cross 0.2.5's `volumes` alone
+# sets the variable under the path's name, so the build would see neither. Without them the
+# build script clones Ghostty itself, which is why git is installed too; the container keeps
+# outbound network for that and for anything Zig still has to fetch.
 [build.env]
-passthrough = ["COFLUX_RELEASE_VERSION"]
+passthrough = ["COFLUX_RELEASE_VERSION", "GHOSTTY_SOURCE_DIR", "ZIG_GLOBAL_CACHE_DIR"]
+volumes = ["GHOSTTY_SOURCE_DIR", "ZIG_GLOBAL_CACHE_DIR"]
+
+[build]
+# Zig for the container's own architecture (cross's images are x86_64; uname keeps an arm64 host
+# image working too), verified against ziglang.org's published SHA-256 for 0.17.0.
+pre-build = [
+    "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git xz-utils && rm -rf /var/lib/apt/lists/*",
+    "set -e; arch=$(uname -m); case \"$arch\" in x86_64) sum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 ;; aarch64) sum=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8 ;; *) echo \"no Zig for $arch\" >&2; exit 1 ;; esac; curl -fsSL -o /tmp/zig.tar.xz \"https://ziglang.org/download/0.17.0/zig-$arch-linux-0.17.0.tar.xz\"; echo \"$sum  /tmp/zig.tar.xz\" | sha256sum -c -; mkdir -p /opt/zig; tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1; rm /tmp/zig.tar.xz; ln -sf /opt/zig/zig /usr/local/bin/zig; zig version",
+]

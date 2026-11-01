@@ -146,6 +146,51 @@ jobs:
         with:
           tool: cross
 
+      # libghostty-vt (sessiond's VT engine) is compiled from Ghostty's source by Zig 0.17.x. The
+      # macOS targets build with this Zig directly; the musl targets use it here only to prefetch,
+      # and build inside cross's container with the Zig its pre-build installs (Cross.toml).
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          cache-key: ${{ matrix.target }}
+
+      # cross builds inside a container: hand it Ghostty's source at the commit the
+      # libghostty-vt-sys build script pins, with every Zig package the lib-vt build needs already
+      # in the source's zig-pkg/, plus a writable Zig global cache. Cross.toml's [build.env]
+      # `volumes` mounts both at the same path and `passthrough` sets GHOSTTY_SOURCE_DIR and
+      # ZIG_GLOBAL_CACHE_DIR (cross 0.2.5's `volumes` alone does not set them). The container then
+      # neither clones nor fetches, and Zig does not depend on a writable HOME.
+      - name: Prefetch Ghostty source and Zig packages for cross
+        if: matrix.cross
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo fetch
+          sys_manifest=$(cargo metadata --format-version 1 \
+            | jq -r '.packages[] | select(.name == "libghostty-vt-sys") | .manifest_path')
+          commit=$(sed -n 's/^const GHOSTTY_COMMIT: &str = "\([0-9a-f]\{40\}\)";$/\1/p' \
+            "$(dirname "$sys_manifest")/build.rs")
+          if [ -z "$commit" ]; then
+            echo "::error::GHOSTTY_COMMIT not found in $(dirname "$sys_manifest")/build.rs"
+            exit 1
+          fi
+          src="$RUNNER_TEMP/ghostty-src"
+          zig_cache="$RUNNER_TEMP/ghostty-zig-cache"
+          git init -q "$src"
+          git -C "$src" fetch -q --depth 1 https://github.com/ghostty-org/ghostty.git "$commit"
+          git -C "$src" checkout -q --detach FETCH_HEAD
+          # A real build with the options the build script passes. `zig build --fetch=needed` is
+          # not enough: lib-vt requests five lazy dependencies only while building, and Zig 0.17
+          # stores fetched packages in "$src/zig-pkg", which travels into the container with $src.
+          (cd "$src" && ZIG_GLOBAL_CACHE_DIR="$zig_cache" zig build \
+            -Demit-lib-vt=true -Doptimize=ReleaseFast -Dcpu=baseline -Demit-xcframework=false \
+            -Dapp-runtime=none -Dtarget="${TARGET/-unknown-/-}" \
+            --prefix "$RUNNER_TEMP/ghostty-prefetch/install" \
+            --cache-dir "$RUNNER_TEMP/ghostty-prefetch/cache")
+          echo "GHOSTTY_SOURCE_DIR=$src" >> "$GITHUB_ENV"
+          echo "ZIG_GLOBAL_CACHE_DIR=$zig_cache" >> "$GITHUB_ENV"
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.1'

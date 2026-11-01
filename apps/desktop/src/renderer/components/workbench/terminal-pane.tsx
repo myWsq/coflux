@@ -359,8 +359,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     // Unicode 11 宽度表：emoji 与全角标点按两格算，否则光标漂移、行尾留垃圾（Claude Code 首当其冲）。
-    // 残留分歧（本 plan 不关）：supervisor 快照用的 vt100 走 unicode-width 0.2.2 = Unicode 17，
-    // 这里是 11，Unicode 12-17 新增的字符两边宽度仍不一致，gap 恢复时表现为折行位置对不上。
+    // Remaining mismatch: daemon snapshots take widths from libghostty-vt (current Unicode, regional indicators 2 cells each),
+    // this is Unicode 11: flags and post-11 characters can sit at other columns after a reattach until the program redraws.
     terminal.loadAddon(new Unicode11Addon());
     terminal.unicode.activeVersion = "11";
     // ⌘F 查找（命中高亮 + 计数）。OSC 52 不用 @xterm/addon-clipboard：addon 会答复查询，
