@@ -79,6 +79,15 @@ account has that id — fix what you typed rather than go looking at the machine
 with no `coflux:device:` prefix lands here), and a submitted-but-unfinished import tells you to check
 `coflux project list`.
 
+A project the user archived in the desktop app keeps its workspaces but is hidden from their
+sidebar, and its terminals were closed and deleted when it was archived. In `coflux project list` its
+entry carries `archivedAt` (milliseconds since the epoch); an active project has no such field.
+`workspace new` and `terminal new` in an archived project fail with a message containing
+"项目已归档" — do not retry or work around it: tell the user, who can unarchive it in the desktop app
+under Settings → 已归档项目 (archived projects). Importing the repository of an archived project
+unarchives it and returns that same project with `alreadyImported: true`, so it reappears in the
+user's sidebar.
+
 ## Run one command on another machine
 
 ```sh

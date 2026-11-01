@@ -90,6 +90,13 @@ message ProjectSetName {
   string name = 2;
 }
 
+// Archive or unarchive a project (plan 20261030-project-archive). Archiving closes and deletes the
+// project's terminals and refuses new workspaces and terminals; unarchiving only clears the flag.
+message ProjectSetArchived {
+  string project_id = 1;
+  bool archived = 2;
+}
+
 // 在 project 下用 git worktree 新建工作区
 message WorkspaceCreate {
   string project_id = 1;
@@ -224,6 +231,7 @@ message ClientToServer {
     DeviceJoinKeyCreate device_join_key_create = 47;
     DirectoryWorkspaceEnsure directory_workspace_ensure = 48;
     AgentSettingSet agent_setting_set = 49;
+    ProjectSetArchived project_set_archived = 50;
   }
 }
 
@@ -250,6 +258,10 @@ message AuthOk {
   // SessionCheckpoint (on subscribe and on change) and reads content through TaskRead. False (an
   // older center) means the client must stay on the SessionCheckpoint push.
   bool session_metadata = 8;
+  // This center archives projects (plan 20261030-project-archive): it accepts ProjectSetArchived
+  // and sets Project.archived_at. False (an older center) means the client must keep offering
+  // project removal instead of archiving.
+  bool project_archive = 9;
 }
 
 message AuthError {

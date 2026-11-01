@@ -1,5 +1,5 @@
 import { TaskStatus, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
-import { isDirWorkspace, workspaceActivity, type SessionAgentState, type WorkspaceActivity } from "@coflux/client";
+import { isDirWorkspace, isProjectArchived, isWorkspaceArchived, workspaceActivity, type SessionAgentState, type WorkspaceActivity } from "@coflux/client";
 
 import type { ActivityDotsStatus } from "@/components/workbench/pending-dots";
 
@@ -159,12 +159,16 @@ function agentActivityOf(state: string | undefined, daemonOnline: boolean): Pale
  */
 export function buildPaletteSnapshot(input: PaletteSnapshotInput): PaletteSnapshot {
   const daemonById = new Map<string, DaemonInfo>(input.daemons.map((daemon) => [daemon.daemonId, daemon]));
-  const projectById = new Map<string, Project>(input.projects.map((project) => [project.id, project]));
-  const workspaceById = new Map<string, Workspace>(input.workspaces.map((workspace) => [workspace.id, workspace]));
+  // Archived projects (plan 20261030-project-archive), their workspaces and so their terminals are
+  // not destinations: everything below reads the visible lists only.
+  const projects = input.projects.filter((project) => !isProjectArchived(project));
+  const workspaces = input.workspaces.filter((workspace) => !isWorkspaceArchived(workspace, input.projects));
+  const projectById = new Map<string, Project>(projects.map((project) => [project.id, project]));
+  const workspaceById = new Map<string, Workspace>(workspaces.map((workspace) => [workspace.id, workspace]));
   const entries: PaletteEntry[] = [];
 
-  for (const project of input.projects) {
-    const main = input.workspaces.find((workspace) => workspace.projectId === project.id && workspace.isMain);
+  for (const project of projects) {
+    const main = workspaces.find((workspace) => workspace.projectId === project.id && workspace.isMain);
     if (!main) continue;
     const daemon = daemonById.get(project.daemonId);
     const online = daemon?.online ?? false;
@@ -181,7 +185,7 @@ export function buildPaletteSnapshot(input: PaletteSnapshotInput): PaletteSnapsh
     });
   }
 
-  for (const workspace of input.workspaces) {
+  for (const workspace of workspaces) {
     if (isDirWorkspace(workspace)) continue;
     const project = projectById.get(workspace.projectId);
     const daemon = daemonById.get(workspace.daemonId);

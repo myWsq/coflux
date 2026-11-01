@@ -4,6 +4,8 @@ export {
   MAX_ANNOTATION_UPLOAD_BYTES,
   createCofluxClient,
   isDirWorkspace,
+  isProjectArchived,
+  isWorkspaceArchived,
   workspaceActivity,
   workspaceProgress,
   type CofluxClient,

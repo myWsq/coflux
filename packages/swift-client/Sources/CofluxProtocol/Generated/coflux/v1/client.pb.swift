@@ -338,6 +338,22 @@ public struct Coflux_V1_ProjectSetName: Sendable {
   public init() {}
 }
 
+/// Archive or unarchive a project (plan 20261030-project-archive). Archiving closes and deletes the
+/// project's terminals and refuses new workspaces and terminals; unarchiving only clears the flag.
+public struct Coflux_V1_ProjectSetArchived: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var projectID: String = String()
+
+  public var archived: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 /// 在 project 下用 git worktree 新建工作区
 public struct Coflux_V1_WorkspaceCreate: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
@@ -825,6 +841,14 @@ public struct Coflux_V1_ClientToServer: Sendable {
     set {payload = .agentSettingSet(newValue)}
   }
 
+  public var projectSetArchived: Coflux_V1_ProjectSetArchived {
+    get {
+      if case .projectSetArchived(let v)? = payload {return v}
+      return Coflux_V1_ProjectSetArchived()
+    }
+    set {payload = .projectSetArchived(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -862,6 +886,7 @@ public struct Coflux_V1_ClientToServer: Sendable {
     case deviceJoinKeyCreate(Coflux_V1_DeviceJoinKeyCreate)
     case directoryWorkspaceEnsure(Coflux_V1_DirectoryWorkspaceEnsure)
     case agentSettingSet(Coflux_V1_AgentSettingSet)
+    case projectSetArchived(Coflux_V1_ProjectSetArchived)
 
   }
 
@@ -911,6 +936,11 @@ public struct Coflux_V1_AuthOk: Sendable {
   /// SessionCheckpoint (on subscribe and on change) and reads content through TaskRead. False (an
   /// older center) means the client must stay on the SessionCheckpoint push.
   public var sessionMetadata: Bool = false
+
+  /// This center archives projects (plan 20261030-project-archive): it accepts ProjectSetArchived
+  /// and sets Project.archived_at. False (an older center) means the client must keep offering
+  /// project removal instead of archiving.
+  public var projectArchive: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2409,6 +2439,41 @@ extension Coflux_V1_ProjectSetName: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
+extension Coflux_V1_ProjectSetArchived: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ProjectSetArchived"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}project_id\0\u{1}archived\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.projectID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.archived) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.projectID.isEmpty {
+      try visitor.visitSingularStringField(value: self.projectID, fieldNumber: 1)
+    }
+    if self.archived != false {
+      try visitor.visitSingularBoolField(value: self.archived, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ProjectSetArchived, rhs: Coflux_V1_ProjectSetArchived) -> Bool {
+    if lhs.projectID != rhs.projectID {return false}
+    if lhs.archived != rhs.archived {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_WorkspaceCreate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WorkspaceCreate"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}project_id\0\u{1}name\0\u{1}branch\0\u{3}create_new\0")
@@ -2881,7 +2946,7 @@ extension Coflux_V1_OAuthAuthorizeDecide: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{4}\u{4}local_unpair_request\0\u{4}\u{2}terminal_create\0\u{4}\u{3}project_set_name\0\u{3}oauth_authorize_info\0\u{3}oauth_authorize_decide\0\u{3}task_read\0\u{3}notification_list\0\u{3}notification_read\0\u{3}device_tailcat_connect\0\u{3}device_tailcat_close\0\u{3}device_tailcat_control\0\u{3}device_tailcat_failed\0\u{3}device_join_key_create\0\u{3}directory_workspace_ensure\0\u{3}agent_setting_set\0\u{b}device_relay_connect\0\u{b}device_p2p_offer\0\u{b}device_p2p_channel_open\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}\u{c}\u{1d}\u{1}\u{c}\u{1e}\u{1}\u{c}\u{1f}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{4}\u{4}local_unpair_request\0\u{4}\u{2}terminal_create\0\u{4}\u{3}project_set_name\0\u{3}oauth_authorize_info\0\u{3}oauth_authorize_decide\0\u{3}task_read\0\u{3}notification_list\0\u{3}notification_read\0\u{3}device_tailcat_connect\0\u{3}device_tailcat_close\0\u{3}device_tailcat_control\0\u{3}device_tailcat_failed\0\u{3}device_join_key_create\0\u{3}directory_workspace_ensure\0\u{3}agent_setting_set\0\u{3}project_set_archived\0\u{b}device_relay_connect\0\u{b}device_p2p_offer\0\u{b}device_p2p_channel_open\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}\u{c}\u{1d}\u{1}\u{c}\u{1e}\u{1}\u{c}\u{1f}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3331,6 +3396,19 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .agentSettingSet(v)
         }
       }()
+      case 50: try {
+        var v: Coflux_V1_ProjectSetArchived?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .projectSetArchived(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .projectSetArchived(v)
+        }
+      }()
       default: break
       }
     }
@@ -3478,6 +3556,10 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .agentSettingSet(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 49)
     }()
+    case .projectSetArchived?: try {
+      guard case .projectSetArchived(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 50)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -3492,7 +3574,7 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AuthOk"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}client_token\0\u{4}\u{2}login_name\0\u{3}notification_inbox\0\u{3}control_protocol_version\0\u{3}agent_settings\0\u{3}session_metadata\0\u{b}ice_servers\0\u{c}\u{3}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}client_token\0\u{4}\u{2}login_name\0\u{3}notification_inbox\0\u{3}control_protocol_version\0\u{3}agent_settings\0\u{3}session_metadata\0\u{3}project_archive\0\u{b}ice_servers\0\u{c}\u{3}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3507,6 +3589,7 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
       case 6: try { try decoder.decodeSingularUInt32Field(value: &self.controlProtocolVersion) }()
       case 7: try { try decoder.decodeSingularBoolField(value: &self.agentSettings) }()
       case 8: try { try decoder.decodeSingularBoolField(value: &self.sessionMetadata) }()
+      case 9: try { try decoder.decodeSingularBoolField(value: &self.projectArchive) }()
       default: break
       }
     }
@@ -3538,6 +3621,9 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     if self.sessionMetadata != false {
       try visitor.visitSingularBoolField(value: self.sessionMetadata, fieldNumber: 8)
     }
+    if self.projectArchive != false {
+      try visitor.visitSingularBoolField(value: self.projectArchive, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3549,6 +3635,7 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     if lhs.notificationInbox != rhs.notificationInbox {return false}
     if lhs.agentSettings != rhs.agentSettings {return false}
     if lhs.sessionMetadata != rhs.sessionMetadata {return false}
+    if lhs.projectArchive != rhs.projectArchive {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

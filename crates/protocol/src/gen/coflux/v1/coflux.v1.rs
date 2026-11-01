@@ -43,6 +43,10 @@ pub struct Project {
     /// 避免 protobuf-es 的 int64→bigint 在 TS 端产生大面积类型涟漪
     #[prost(double, tag="7")]
     pub created_at: f64,
+    /// Archived at (ms epoch, centre clock; plan 20261030-project-archive). Absent = active. An
+    /// archived project keeps its workspaces but refuses new workspaces and terminals; clients hide it.
+    #[prost(double, optional, tag="8")]
+    pub archived_at: ::core::option::Option<f64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Workspace {
@@ -3781,6 +3785,15 @@ pub struct ProjectSetName {
     #[prost(string, tag="2")]
     pub name: ::prost::alloc::string::String,
 }
+/// Archive or unarchive a project (plan 20261030-project-archive). Archiving closes and deletes the
+/// project's terminals and refuses new workspaces and terminals; unarchiving only clears the flag.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProjectSetArchived {
+    #[prost(string, tag="1")]
+    pub project_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub archived: bool,
+}
 /// 在 project 下用 git worktree 新建工作区
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WorkspaceCreate {
@@ -3900,7 +3913,7 @@ pub struct OAuthAuthorizeDecide {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -3975,6 +3988,8 @@ pub mod client_to_server {
         DirectoryWorkspaceEnsure(super::DirectoryWorkspaceEnsure),
         #[prost(message, tag="49")]
         AgentSettingSet(super::AgentSettingSet),
+        #[prost(message, tag="50")]
+        ProjectSetArchived(super::ProjectSetArchived),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -4006,6 +4021,11 @@ pub struct AuthOk {
     /// older center) means the client must stay on the SessionCheckpoint push.
     #[prost(bool, tag="8")]
     pub session_metadata: bool,
+    /// This center archives projects (plan 20261030-project-archive): it accepts ProjectSetArchived
+    /// and sets Project.archived_at. False (an older center) means the client must keep offering
+    /// project removal instead of archiving.
+    #[prost(bool, tag="9")]
+    pub project_archive: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthError {

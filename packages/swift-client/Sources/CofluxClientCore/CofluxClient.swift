@@ -24,6 +24,9 @@ public final class CofluxClient {
     public private(set) var loginError = ""
     public private(set) var daemons: [Coflux_V1_DaemonInfo] = []
     public private(set) var projects: [Coflux_V1_Project] = []
+    /// Projects that are not archived (plan 20261030-project-archive): what every project list shows.
+    /// An archived project's workspaces are listed only under it, so they disappear with it.
+    public var visibleProjects: [Coflux_V1_Project] { projects.filter { !$0.hasArchivedAt } }
     public private(set) var workspaces: [Coflux_V1_Workspace] = []
     public private(set) var tasks: [Coflux_V1_Task] = []
     public private(set) var lastError: ClientError?

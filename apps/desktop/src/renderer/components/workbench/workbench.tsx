@@ -1,9 +1,9 @@
 import { PortMenu } from "./port-menu";
 import { NotificationInbox } from "./notification-inbox";
-import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { AlertCircle, FolderGit2, FolderTree, LoaderCircle, Monitor, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
-import { SCREEN_CAPABILITY, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
+import { SCREEN_CAPABILITY, TaskStatus, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
 
 import { AuthMessage, AuthShell, LoginScreen, authFooterText } from "@/components/auth/auth-shell";
 import { dismissBootOverlay } from "@/boot-overlay";
@@ -116,7 +116,7 @@ import {
 } from "@/config";
 import type { DesktopBridge } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
-import { isDirWorkspace, type CofluxClient, type CofluxState } from "@coflux/client";
+import { isDirWorkspace, isProjectArchived, isWorkspaceArchived, type CofluxClient, type CofluxState } from "@coflux/client";
 
 // 终端栈（xterm + WorkspaceTerminal/TerminalPanes）懒加载，不进首屏主 chunk：
 // 登录页与"未选中工作区"的空状态都不需要它。module 级别声明，保证只 lazy() 一次，
@@ -487,8 +487,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const authState = useStore(client.store, (state) => state.authState);
   const loginError = useStore(client.store, (state) => state.loginError);
   const status = useStore(client.store, (state) => state.status);
-  const projects = useStore(client.store, (state) => state.projects);
-  const workspaces = useStore(client.store, (state) => state.workspaces);
+  const allProjects = useStore(client.store, (state) => state.projects);
+  const allWorkspaces = useStore(client.store, (state) => state.workspaces);
+  // Archived projects (plan 20261030-project-archive) and their workspaces are invisible: everything
+  // below — the selection, the mounted workspaces, the empty state — reads these, so the render an
+  // archive lands in already falls back instead of mounting the archived workspace.
+  const projects = useMemo(() => allProjects.filter((project) => !isProjectArchived(project)), [allProjects]);
+  const workspaces = useMemo(
+    () => allWorkspaces.filter((workspace) => !isWorkspaceArchived(workspace, allProjects)),
+    [allWorkspaces, allProjects],
+  );
   // 终端面板挂在本层（plan 104），故这里要全量 tasks：引用只在 task 实体真的变化时才换。
   const tasks = useStore(client.store, (state) => state.tasks);
   const daemons = useStore(client.store, (state) => state.daemons);
@@ -858,7 +866,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // (before the first one the workspace list is empty only because nothing has arrived).
   useEffect(() => {
     if (!snapshotReady) return;
-    const live = new Set(workspaces.map((workspace) => workspace.id));
+    // All workspaces, archived ones included: archiving hides a workspace, it does not remove it.
+    const live = new Set(allWorkspaces.map((workspace) => workspace.id));
     for (const [tabId, record] of Object.entries(files.tabs.getState().tabs)) {
       if (live.has(record.workspaceId)) continue;
       const layout = layoutsRef.current[record.workspaceId];
@@ -866,7 +875,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       files.removeTab(tabId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaces, snapshotReady]);
+  }, [allWorkspaces, snapshotReady]);
 
   // A screen whose device is gone (removed from the account) is closed for good once a snapshot says
   // so; the selection falls back through resolveWorkbenchSelection.
@@ -1279,6 +1288,23 @@ export function Workbench({ client }: { client: CofluxClient }) {
       // Optimistic (plan 20261002-optimistic-removal): the project and its workspaces vanish now;
       // the selection falls back through resolveWorkbenchSelection.
       onConfirm: () => client.removeProject(project.id),
+    });
+  }
+
+  /** 归档项目 (plan 20261030-project-archive): confirmed only when it would close running terminals. */
+  function requestArchiveProject(project: Project) {
+    const state = client.store.getState();
+    const workspaceIds = new Set(state.workspaces.filter((workspace) => workspace.projectId === project.id).map((workspace) => workspace.id));
+    const running = state.tasks.filter((task) => workspaceIds.has(task.workspaceId) && task.status === TaskStatus.RUNNING).length;
+    if (running === 0) {
+      client.setProjectArchived(project.id, true);
+      return;
+    }
+    setConfirmAction({
+      title: `归档项目「${project.name}」？`,
+      description: `项目里正在运行的 ${running} 个终端会被关闭。归档后可以在 设置 → 已归档项目 里取消归档。`,
+      confirmLabel: "归档项目",
+      onConfirm: () => client.setProjectArchived(project.id, true),
     });
   }
 
@@ -1761,6 +1787,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onImportProject={() => setImportOpen(true)}
         onCreateWorkspace={createWorkspace}
         onRemoveProject={requestRemoveProject}
+        onArchiveProject={requestArchiveProject}
         onRenameProject={setRenameProject}
         onRemoveWorkspace={requestRemoveWorkspace}
         onRenameWorkspace={setRenameWorkspace}
@@ -2082,6 +2109,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
           hasTopBanner={showReconnectBanner}
           widthControl={sidebarWidth}
           settingsTooltip={settingsTooltip}
+          onRemoveProject={requestRemoveProject}
           onClose={() => setSettingsOpen(false)}
           onOpenOnboarding={() => {
             setSettingsOpen(false);
