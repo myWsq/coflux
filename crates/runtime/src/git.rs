@@ -447,6 +447,17 @@ pub async fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(),
     .await;
     if !ok {
         let _ = run_git(&["-C", repo_path, "worktree", "prune"]).await;
+        // The worktree was already deleted outside coflux: nothing is left to remove.
+        // Only a definite NotFound on an absolute path counts as gone.
+        if !worktree_path.is_empty()
+            && std::path::Path::new(worktree_path).is_absolute()
+            && matches!(
+                std::fs::symlink_metadata(worktree_path),
+                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound
+            )
+        {
+            return Ok(());
+        }
         let error = error.trim();
         let error = if error.is_empty() {
             "git worktree remove failed"
