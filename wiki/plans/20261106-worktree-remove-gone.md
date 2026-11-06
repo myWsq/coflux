@@ -194,3 +194,12 @@ Out of scope:
   carries it in its bundled runtime. No centre deployment, migration or protocol change.
 - After the update, the stale workspace records (12 on the owner's device on 2026-11-06) can be deleted from
   the desktop app normally — that is the user-visible acceptance.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-06
+- Mode: subagent(sonnet)
+- Commits: `18bbe10c..1451578a`
+- Deviations: the executor formatted with `rustfmt --edition 2021` on the one changed file instead of `cargo fmt -p coflux-runtime`, because the crate is not fmt-clean at baseline (`agent_ctl/executor.rs` and others) and the crate-wide formatter would have touched out-of-scope files. The changed file is rustfmt-clean.
+- Verification: zero-warning `cargo build --workspace`; `COFLUX_HOME= cargo test -p coflux-runtime` 339/339; a temporary, uncommitted test in a scratch repo confirmed all five cases — worktree removed via git → Ok, directory deleted but still registered → Ok, plain directory with a file → Err with the file intact, live worktree → Ok and removed, relative missing path → Err.
+- Follow-ups: `cargo fmt -p coflux-runtime --check` fails on main independently of this change. The stale workspace records (12 on the owner's device) become deletable once the runtime carrying this fix is released.
