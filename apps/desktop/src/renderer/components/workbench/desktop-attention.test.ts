@@ -118,8 +118,15 @@ test("error ranks below approval and question and above active", () => {
   assert.equal(withQuestion["ws-a"].kind, "question");
   assert.equal(withQuestion["ws-a"].message, "继续？");
 
-  // An approval's message never reaches the notification, as before.
-  const approval = attentionSnapshot({ ...base, sessionAgents: { "s-a": agent("t-a", "approval", "Allow?") } });
-  assert.equal(approval["ws-a"].message, undefined);
-  assert.deepEqual(attentionNotificationText(approval["ws-a"]), { title: "claude 等待批准", body: "coflux · main" });
+});
+
+test("an approval carries the agent's message in the body when it left one", () => {
+  const withMessage = attentionSnapshot({ ...base, sessionAgents: { "s-a": agent("t-a", "approval", "Apply?") } });
+  assert.equal(withMessage["ws-a"].message, "Apply?");
+  assert.deepEqual(attentionNotificationText(withMessage["ws-a"]), { title: "claude 等待批准", body: "coflux · main\nApply?" });
+
+  // A hook-driven approval has no message: the body is just the place, as before.
+  const bare = attentionSnapshot({ ...base, sessionAgents: { "s-a": agent("t-a", "approval") } });
+  assert.equal(bare["ws-a"].message, undefined);
+  assert.deepEqual(attentionNotificationText(bare["ws-a"]), { title: "claude 等待批准", body: "coflux · main" });
 });

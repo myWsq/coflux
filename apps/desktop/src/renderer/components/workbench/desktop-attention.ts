@@ -11,7 +11,7 @@ export type AttentionKind = "approval" | "question" | "error";
 export type AttentionEntry = {
   kind: AttentionKind;
   agent: string;
-  /** What the agent said: its `coflux notify` message for question, its OSC 7501 msg for error. */
+  /** What the agent said about what it needs (a `coflux notify` message or an OSC 7501 msg); empty when it said nothing. */
   message?: string;
   projectName?: string;
   branch: string;
@@ -37,7 +37,7 @@ export function attentionSnapshot(input: {
     snapshot[workspace.id] = {
       kind: activity.status,
       agent: activity.agent,
-      message: activity.status === "approval" ? undefined : activity.message,
+      message: activity.message,
       projectName: input.projects.find((project) => project.id === workspace.projectId)?.name,
       branch: workspace.branch,
       taskId: activity.taskId,
@@ -65,12 +65,15 @@ export function diffAttention(previous: AttentionSnapshot, next: AttentionSnapsh
   return { entered, badgeCount: Object.keys(next).length };
 }
 
-/** 通知文案：标题说明「谁在等什么」，正文定位到项目/分支；提问态附 agent 留言。 */
+/** Notification text: the title says who is waiting on what, the body names the project and
+ * branch, followed by the agent's message when it left one. */
 export function attentionNotificationText(entry: AttentionEntry): { title: string; body: string } {
   const where = entry.projectName ? `${entry.projectName} · ${entry.branch}` : entry.branch;
-  if (entry.kind === "approval") {
-    return { title: `${entry.agent} 等待批准`, body: where };
-  }
-  const title = entry.kind === "error" ? `${entry.agent} 出错停止` : `${entry.agent} 等待回答`;
+  const title =
+    entry.kind === "approval"
+      ? `${entry.agent} 等待批准`
+      : entry.kind === "error"
+        ? `${entry.agent} 出错停止`
+        : `${entry.agent} 等待回答`;
   return { title, body: entry.message ? `${where}\n${entry.message}` : where };
 }
