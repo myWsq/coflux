@@ -31,6 +31,22 @@ struct AppShell: View {
             .environment(\.shellLayout, layout)
         }
         .background(Theme.background)
+        // A terminal created from home opens (and starts) as soon as it appears.
+        .onChange(of: client.tasks.map(\.id)) { _, _ in
+            openPendingTerminal()
+        }
+    }
+
+    private func openPendingTerminal() {
+        guard let pending = navigation.pendingTerminal,
+              let task = client.tasks
+                  .filter({ $0.workspaceID == pending.workspaceID && !pending.knownTaskIDs.contains($0.id) })
+                  .min(by: { $0.createdAt < $1.createdAt })
+        else { return }
+        navigation.pendingTerminal = nil
+        // A created task is IDLE: start it, as the terminal page does for the terminals it creates.
+        client.startTask(taskID: task.id, cols: 80, rows: 24)
+        navigation.show(workspaceID: pending.workspaceID, taskID: task.id)
     }
 
     // MARK: - Tab layout (compact and tall)
@@ -91,7 +107,7 @@ struct AppShell: View {
     }
 
     private var waitingCount: Int {
-        0
+        client.waitingCount
     }
 }
 
@@ -112,33 +128,5 @@ struct WorkspacePage: View {
             )
             .background(Theme.background)
         }
-    }
-}
-
-/// Placeholder sidebar for the split layout until the compact home lands (M2).
-struct HomeSidebar: View {
-    let client: CofluxClient
-    @Environment(SceneNavigation.self) private var navigation
-
-    var body: some View {
-        List {
-            Section {
-                Button {
-                    navigation.tab = .devices
-                } label: {
-                    Label("设备", systemImage: "macbook.and.iphone")
-                }
-            }
-            ForEach(client.visibleProjects, id: \.id) { project in
-                Section(project.name) {
-                    ForEach(client.workspaces.filter { $0.projectID == project.id }, id: \.id) { workspace in
-                        Button(workspace.branch.isEmpty ? workspace.name : workspace.branch) {
-                            navigation.show(workspaceID: workspace.id, taskID: nil)
-                        }
-                    }
-                }
-            }
-        }
-        .navigationTitle("coflux")
     }
 }
