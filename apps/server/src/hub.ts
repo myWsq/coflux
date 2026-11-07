@@ -236,7 +236,7 @@ interface SessionAgentData {
   sessionId: SessionId;
   taskId: TaskId;
   agent: string;
-  /** Turn state from hooks or OSC 7501: active / approval / question / error / done; empty = no signal. */
+  /** Turn state from the agent's OSC 7501 reports: active / approval / question / error / done; empty = no signal. */
   state: string;
   /** `coflux notify` 的留言（plan 074）：与 state 同生命周期，纯展示 */
   message: string;

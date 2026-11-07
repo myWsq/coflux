@@ -161,7 +161,7 @@ export type WorkspaceActivity =
   | { status: "error"; agent: string; message?: string; taskId?: string }
   | { status: "done"; agent: string };
 
-/** Workspace activity, relayed as hooks and OSC 7501 report it: no thresholds, no clock
+/** Workspace activity, relayed as the agents report it through OSC 7501: no thresholds, no clock
  * inference. Across sessions approval > question > error > active > done. An offline device or
  * no signal is neutral. An old worker's "waiting" counts as done, so "just finished" is never
  * shown as needing you. */
@@ -195,9 +195,10 @@ export function workspaceActivity(
   return { status: "idle" };
 }
 
-/** 工作区进度短评（plan 088）：RUNNING 任务的 presence 里第一条非空 progress。
- * 与活动状态是两个维度——状态永远由 hooks 自动判定，短评永远由 agent 主动播报，
- * 互不覆盖；agent 进程退出时随 presence 条目一起消失。 */
+/** Workspace progress note (plan 088): the first non-empty progress in the presence of a RUNNING
+ * task. It is a dimension apart from activity: state always comes from the agent's OSC 7501
+ * reports, the note always from the agent's own broadcast, and neither overrides the other; it
+ * disappears with the presence entry when the agent process exits. */
 export function workspaceProgress(
   workspaceId: string,
   tasks: readonly Task[],
