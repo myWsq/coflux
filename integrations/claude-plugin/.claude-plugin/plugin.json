@@ -1,7 +1,7 @@
 {
   "name": "coflux",
-  "version": "0.25.1",
-  "description": "Connect Claude Code to Coflux: hooks report turn states and session coordinates, the coflux skill documents local and account CLI commands for terminals across workspaces and devices, and the coflux-secret skill gets secrets from the user without the value entering the conversation.",
+  "version": "0.26.0",
+  "description": "Connect Claude Code to Coflux: hooks pass session coordinates, the agent's session id and worktree moves to the local daemon, the coflux skill documents local and account CLI commands for terminals across workspaces and devices, and the coflux-secret skill gets secrets from the user without the value entering the conversation.",
   "author": {
     "name": "Shuaiqi Wang",
     "email": "wsq961@outlook.com",
