@@ -456,3 +456,31 @@ path are unchanged.
   error stops now notify. English only.
 - Acceptance is manual and needs a runtime built from this branch (the change lives in the
   runtime and hot-upgrades with it); the desktop half is visible in a dev preview.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-07
+- Mode: subagent(opus), one work package (M3/M4 too small to outweigh a split); one revision round
+- Commits: `7206efc7..11843e43`
+- Deviations:
+  - T4: a rebuilt session's record is not pushed at the end of the rebuild — recovery runs
+    before the core attaches, so that push would have nowhere to go. Instead `send_resync`
+    sends every session's current value, absence included, right after `resync.list` under the
+    session's lock; this also repairs any live push lost to a full queue.
+  - T6: the immediate report runs in a dedicated task woken by a `tokio::sync::Notify` instead
+    of inline in the sessiond bridge loop, which also carries Device frames and must not wait
+    on a process scan; a burst of reports costs one scan.
+  - Parser (D2, Your call): hand-written in `sessiond.rs`; `msg` decoded with the existing
+    `base64` dependency (padding optional) and clamped like a title (256 bytes).
+  - A `claude` tab in `error` shows the red error cross instead of Clawd (no Clawd pose reads
+    apart from done and waiting; its file was out of scope).
+  - Approval notifications now carry the agent's message when there is one (hook approvals
+    have none, so their text is unchanged).
+  - `agentActivityOf` in `command-palette-data.ts` is exported for its test.
+- Verification: zero-warning `cargo build`; `COFLUX_HOME= cargo test -p coflux-runtime`
+  347/347; server `tsc --noEmit`; desktop typecheck, oxlint, 563/563 tests and build.
+  `tsc -p packages/client` reports errors only in the untouched `connection.test.ts`
+  (pre-existing). `cargo fmt --check` differs only in files this plan did not touch.
+- Follow-ups: the manual walkthrough (the four observations under Requirement) on a runtime
+  built from this branch, pending the user; proto comments on `SessionAgentRef.state` still
+  list four states (see Maintenance notes); `error` now also counts toward the Dock badge.
