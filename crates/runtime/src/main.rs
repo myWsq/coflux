@@ -505,9 +505,9 @@ async fn force_report_ports(
     }
 }
 
-/// 周期(2s)扫描每个存活会话进程树内的 agent CLI（plan 073）+ 合并 hook 回合状态；变化才发
+/// 周期(2s)扫描每个存活会话进程树内的 agent CLI（plan 073）+ 合并 OSC 7501 记录；变化才发
 /// 全量。扫描同端口探测一样是同步阻塞 IO（/proc 读或 libproc/sysctl 系统调用），
-/// spawn_blocking 挪出执行器。hook 事件被接受后也会立即触发一次（不等下个周期）。
+/// spawn_blocking 挪出执行器。hook 事件与 OSC 7501 推送后也会立即触发一次（不等下个周期）。
 pub(crate) async fn report_agents_if_changed(
     state: &Arc<Mutex<WorkerState>>,
     observed: &ObservedState,
@@ -547,8 +547,8 @@ async fn force_report_agents(
 }
 
 /// hook 事件消费：pid（信使进程，仍存活——响应发出前它不退出）反查落在哪个存活会话的
-/// 进程树内，命中则记录回合状态并立即触发一次 presence 上报。找不到 = coflux 之外启动的
-/// agent，静默 404（信使侧本来就静默）。
+/// 进程树内，命中则记录 agent 自己的会话标识并立即触发一次 presence 上报。找不到 = coflux 之外
+/// 启动的 agent，静默 404（信使侧本来就静默）。Hooks carry no turn state: that comes from OSC 7501.
 async fn consume_hook_events(
     mut hook_rx: tokio::sync::mpsc::Receiver<hook::HookRequest>,
     state: Arc<Mutex<WorkerState>>,
@@ -556,19 +556,6 @@ async fn consume_hook_events(
     to_server_tx: Sender<WsOut>,
 ) {
     while let Some(request) = hook_rx.recv().await {
-        let hook_state = hook::event_state(
-            &request.event,
-            &request.notification,
-            request.background_tasks,
-        );
-        // An event is worth a pid lookup when it carries turn state **or** the agent's own
-        // session id. The second case is what makes `SessionStart` count: the transcript exists
-        // from then on, and gating the id behind a state-bearing event would hide the paper
-        // button for a whole first turn.
-        if hook_state.is_none() && request.agent_session_id.is_none() {
-            let _ = request.respond.send(hook::HookOutcome::Ignored);
-            continue;
-        }
         let alive = { state.lock().unwrap().alive.clone() };
         let (pid, ppid) = (request.pid, request.ppid);
         let session_id =
@@ -581,27 +568,13 @@ async fn consume_hook_events(
             continue;
         };
         logln!(
-            "[worker] hook event agent={} event={} notification={} bg={} state={} session={session_id}",
+            "[worker] hook event agent={} event={} session={session_id}",
             request.agent,
             request.event,
-            request.notification,
-            request.background_tasks,
-            hook_state.unwrap_or("-")
         );
-        if let Some(agent_session_id) = request.agent_session_id {
-            observed.apply_agent_session_id(session_id.clone(), agent_session_id);
-        }
-        if let Some(hook_state) = hook_state {
-            observed.apply_hook_state(session_id, hook_state);
-        }
+        observed.apply_agent_session_id(session_id, request.agent_session_id);
         report_agents_if_changed(&state, &observed, &to_server_tx).await;
-        // An id-only event changed nothing about the turn; say so, even though the messenger
-        // treats both answers the same way.
-        let _ = request.respond.send(if hook_state.is_some() {
-            hook::HookOutcome::Accepted
-        } else {
-            hook::HookOutcome::Ignored
-        });
+        let _ = request.respond.send(hook::HookOutcome::Accepted);
     }
 }
 

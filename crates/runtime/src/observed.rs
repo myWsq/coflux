@@ -30,15 +30,13 @@ struct ObservedInner {
     last_reported_agents: Vec<wire::SessionAgentRef>,
     ports_delivery_dirty: bool,
     agents_delivery_dirty: bool,
-    hook_states: HashMap<String, &'static str>,
-    hook_messages: HashMap<String, String>,
     hook_progress: HashMap<String, String>,
     /// The agent's own session id per coflux session (plan 20260919). It lives like
-    /// `hook_progress`, not like `hook_messages`: it identifies the session, so it must survive
-    /// every turn-state change and only disappear when the presence entry itself does.
+    /// `hook_progress`: it identifies the session, so it must survive every turn-state change
+    /// and only disappear when the presence entry itself does.
     hook_agent_sessions: HashMap<String, String>,
-    /// The root OSC 7501 record per session, as sessiond pushed it. While present it decides the
-    /// entry's state, message and agent name; hooks only fill in what it does not carry.
+    /// The root OSC 7501 record per session, as sessiond pushed it: the only source of an
+    /// entry's state and message, and the preferred source of its agent name.
     program_status: HashMap<String, ProgramStatus>,
 }
 
@@ -106,24 +104,8 @@ impl ObservedState {
         }
     }
 
-    /// Update hook state and discard legacy presence annotations; durable inbox messages are independent.
-    pub(crate) fn apply_hook_state(&self, session_id: String, state: &'static str) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.hook_states.insert(session_id.clone(), state);
-        inner.hook_messages.remove(&session_id);
-    }
-
-    /// Legacy annotation fixture for compatibility tests; explicit notify no longer uses presence.
-    #[cfg(test)]
-    pub(crate) fn apply_notify(&self, session_id: String, message: String) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.hook_states.insert(session_id.clone(), "question");
-        inner.hook_messages.insert(session_id, message);
-    }
-
-    /// Record the agent's own session id. Independent of turn state: an event that carries only
-    /// an id (`SessionStart`) records it without touching state, and a state-bearing event that
-    /// carries none leaves the previously recorded id alone.
+    /// Record the agent's own session id (sent by its hooks). Independent of turn state, which
+    /// comes from OSC 7501.
     pub(crate) fn apply_agent_session_id(&self, session_id: String, agent_session_id: String) {
         self.inner
             .lock()
@@ -322,9 +304,9 @@ pub(crate) fn scan_ports(alive: &SessionProcesses) -> Vec<wire::SessionPorts> {
 /// presence 扫描是 annotation 的存活门：本轮没扫到的 session 立即剪枝。
 ///
 /// The entries are the process-detected ones plus every alive session holding an OSC 7501
-/// record. A record, while present, decides state, message and agent name (it is the program's
-/// own account; hooks fall back only without one); progress and the agent session id still come
-/// from hooks. Records of sessions no longer alive are dropped.
+/// record. State and message come only from the record (none = `""`, no message); the record
+/// also names the agent. Progress and the agent session id come from their own channels.
+/// Records of sessions no longer alive are dropped.
 fn merge_annotations(
     inner: &mut ObservedInner,
     mut sessions: Vec<wire::SessionAgentRef>,
@@ -361,12 +343,6 @@ fn merge_annotations(
             .map(|entry| entry.session_id.as_str())
             .collect();
         inner
-            .hook_states
-            .retain(|session_id, _| present.contains(session_id.as_str()));
-        inner
-            .hook_messages
-            .retain(|session_id, _| present.contains(session_id.as_str()));
-        inner
             .hook_progress
             .retain(|session_id, _| present.contains(session_id.as_str()));
         inner
@@ -382,13 +358,6 @@ fn merge_annotations(
                 _ => String::new(),
             };
             entry.agent = program_agent(&record.app, &entry.agent);
-        } else {
-            if let Some(state) = inner.hook_states.get(&entry.session_id) {
-                entry.state = (*state).to_string();
-            }
-            if let Some(message) = inner.hook_messages.get(&entry.session_id) {
-                entry.message = message.clone();
-            }
         }
         if let Some(progress) = inner.hook_progress.get(&entry.session_id) {
             entry.progress = progress.clone();
@@ -484,47 +453,38 @@ mod tests {
         assert!(observed.commit_agents(agents("s2"), false).is_none());
     }
 
+    /// Without an OSC 7501 record a process-detected entry has no state and no message; progress
+    /// is its own channel, replaced by the latest value and pruned with the entry.
     #[test]
-    fn hook_清留言保留进度且_presence_消失会剪枝() {
+    fn detected_entry_without_a_record_has_no_state_and_keeps_progress() {
         let observed = ObservedState::new();
-        observed.apply_notify("s1".into(), "需要你决定".into());
         observed.apply_progress("s1".into(), "正在定位".into());
 
         let first = observed
             .commit_agents(agents("s1"), false)
-            .expect("annotation 变化应上报");
-        assert_eq!(first.sessions[0].state, "question");
-        assert_eq!(first.sessions[0].message, "需要你决定");
+            .expect("a new entry is reported");
+        assert!(first.sessions[0].state.is_empty());
+        assert!(first.sessions[0].message.is_empty());
         assert_eq!(first.sessions[0].progress, "正在定位");
 
-        observed.apply_hook_state("s1".into(), "active");
+        observed.apply_progress("s1".into(), "正在回归".into());
         let second = observed
             .commit_agents(agents("s1"), false)
-            .expect("hook 变化应上报");
-        assert_eq!(second.sessions[0].state, "active");
-        assert!(second.sessions[0].message.is_empty());
-        assert_eq!(second.sessions[0].progress, "正在定位");
-
-        observed.apply_progress("s1".into(), "正在回归".into());
-        let third = observed
-            .commit_agents(agents("s1"), false)
-            .expect("新 progress 应覆盖旧值");
-        assert_eq!(third.sessions[0].state, "active");
-        assert!(third.sessions[0].message.is_empty());
-        assert_eq!(third.sessions[0].progress, "正在回归");
+            .expect("new progress replaces the old");
+        assert!(second.sessions[0].state.is_empty());
+        assert_eq!(second.sessions[0].progress, "正在回归");
 
         assert!(observed.commit_agents(Vec::new(), false).is_some());
         let returned = observed
             .commit_agents(agents("s1"), false)
-            .expect("agent 再出现应上报");
+            .expect("a returning agent is reported");
         assert!(returned.sessions[0].state.is_empty());
-        assert!(returned.sessions[0].message.is_empty());
         assert!(returned.sessions[0].progress.is_empty());
     }
 
-    /// The agent session id lives like `progress`, not like `message`: a turn-state change must
-    /// not evaporate it (a Claude session keeps the same transcript across every Stop /
-    /// UserPromptSubmit), while the presence entry disappearing takes it with it.
+    /// The agent session id lives like `progress`, not like the turn state: a state change must
+    /// not evaporate it (a Claude session keeps the same transcript across every turn), while the
+    /// presence entry disappearing takes it with it.
     #[test]
     fn agent_session_id_跨_hook_事件存活且随条目剪枝() {
         let observed = ObservedState::new();
@@ -535,10 +495,13 @@ mod tests {
             .expect("新增 agent session id 应上报");
         assert_eq!(first.sessions[0].agent_session_id, "6fd5b5f9-959b");
 
-        observed.apply_hook_state("s1".into(), "active");
+        observed.apply_program_status(
+            "s1".into(),
+            Some(record(ProgramState::Working, None, "", "")),
+        );
         let second = observed
             .commit_agents(agents("s1"), false)
-            .expect("hook 变化应上报");
+            .expect("a state change is reported");
         assert_eq!(second.sessions[0].state, "active");
         assert_eq!(second.sessions[0].agent_session_id, "6fd5b5f9-959b");
 
@@ -875,28 +838,31 @@ mod tests {
     }
 
     #[test]
-    fn program_status_record_overrides_hooks_until_removed() {
+    fn program_status_record_alone_decides_state() {
         let observed = ObservedState::new();
-        observed.apply_hook_state("s1".into(), "approval");
         observed.apply_agent_session_id("s1".into(), "6fd5b5f9".into());
         observed.apply_progress("s1".into(), "step 2".into());
         observed.apply_program_status(
             "s1".into(),
             Some(record(ProgramState::Working, None, "pi", "")),
         );
-        // A later hook does not win by arriving later.
-        observed.apply_hook_state("s1".into(), "approval");
 
         let entry = committed(&observed, agents("s1"));
         assert_eq!(entry.state, "active");
         assert_eq!(entry.agent, "pi");
-        assert_eq!(entry.agent_session_id, "6fd5b5f9", "still from hooks");
-        assert_eq!(entry.progress, "step 2", "still from hooks");
+        assert_eq!(
+            entry.agent_session_id, "6fd5b5f9",
+            "survives alongside a record"
+        );
+        assert_eq!(entry.progress, "step 2", "survives alongside a record");
 
+        // The record removed: the detected entry stays, with no state.
         observed.apply_program_status("s1".into(), None);
         let entry = committed(&observed, agents("s1"));
-        assert_eq!(entry.state, "approval", "the hook state shows again");
+        assert_eq!(entry.state, "");
+        assert!(entry.message.is_empty());
         assert_eq!(entry.agent, "claude");
+        assert_eq!(entry.agent_session_id, "6fd5b5f9");
     }
 
     #[test]
