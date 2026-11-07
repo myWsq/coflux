@@ -34,7 +34,7 @@ if ! xcodebuild archive \
   -allowProvisioningUpdates \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" >"$LOG" 2>&1; then
   tail -30 "$LOG" >&2
-  echo "归档失败（完整日志: $LOG）" >&2
+  echo "归档失败（完整日志: ${LOG}）" >&2
   exit 1
 fi
 
@@ -44,7 +44,7 @@ if ! xcodebuild -exportArchive \
   -exportOptionsPlist ExportOptions.plist \
   -allowProvisioningUpdates >"$LOG" 2>&1; then
   tail -30 "$LOG" >&2
-  echo "上传失败（完整日志: $LOG）" >&2
+  echo "上传失败（完整日志: ${LOG}）" >&2
   exit 1
 fi
 
