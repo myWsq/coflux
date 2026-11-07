@@ -1340,6 +1340,8 @@ async fn handle_sessiond_record(
         SessiondEvent::SessionTitle { session_id, title } => {
             device.session_title_changed(&session_id, &title);
         }
+        // Merged into agent presence by the runtime core (next commit).
+        SessiondEvent::SessionProgramStatus { .. } => {}
         SessiondEvent::SessionCreateFailed {
             session_id,
             task_id,

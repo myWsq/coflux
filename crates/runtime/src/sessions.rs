@@ -1539,6 +1539,14 @@ impl Sessions {
                         title,
                     });
                 }
+                // And for the OSC 7501 root record: the core merges it into agent presence and
+                // reports at once. Best effort too — every resync re-sends the current records.
+                if let Some(status) = locked.state.take_program_status_change() {
+                    let _ = this.send_ctrl(&SessiondEvent::SessionProgramStatus {
+                        session_id: session_id.clone(),
+                        status,
+                    });
+                }
 
                 // 只通知 worker 该 session 的派生 checkpoint 已脏；PTY 原始字节不离开
                 // supervisor/sessiond。保留旧 output frame 编号便于跨版本 worker 忽略 payload。
@@ -1866,6 +1874,10 @@ impl Sessions {
         let _ = state.take_command_change();
         // Re-fed history was answered when it was live; never write a reply for it.
         let _ = state.take_query_replies();
+        // The OSC 7501 record recovered from the replay is pushed once, after the `resync.list`
+        // the core asks for when it attaches (see `send_resync`): recovery runs before the core
+        // is attached, so a push from here would have nowhere to go.
+        let _ = state.take_program_status_change();
 
         // 4) 输入游标：ptyd 那边才是"什么真正写进了 PTY"的记录。
         //    拿不到游标（旧 ptyd 没有 `cursors`、或读失败）就以 client 自报的 seq 为起点接纳，重复 / 跳号
@@ -1962,11 +1974,11 @@ impl Sessions {
             .map(|(id, session)| (id.clone(), session.clone()))
             .collect();
         let sessions = handles
-            .into_iter()
+            .iter()
             .map(|(session_id, session)| {
                 let locked = session.lock().unwrap();
                 SessionInfo {
-                    session_id,
+                    session_id: session_id.clone(),
                     task_id: locked.task_id.clone(),
                     pid: locked.pid,
                     command: Some(locked.state.command_state()),
@@ -1974,12 +1986,28 @@ impl Sessions {
                 }
             })
             .collect();
-        self.send_ctrl(&SessiondEvent::ResyncList {
+        if !self.send_ctrl(&SessiondEvent::ResyncList {
             nonce,
             snapshot_owner_id: self.snapshot_owner_id.clone(),
             snapshot_epoch: self.snapshot_epoch.load(Ordering::Acquire),
             sessions,
-        })
+        }) {
+            return false;
+        }
+        // The OSC 7501 records follow the list, so the core already counts their sessions alive.
+        // Each is read and sent under its session's lock, the same lock a live feed pushes under,
+        // so a newer live push can never be overtaken by an older record from here. Best effort,
+        // like the live pushes.
+        for (session_id, session) in handles {
+            let locked = session.lock().unwrap();
+            if let Some(status) = locked.state.program_status() {
+                let _ = self.send_ctrl(&SessiondEvent::SessionProgramStatus {
+                    session_id,
+                    status: Some(status.clone()),
+                });
+            }
+        }
+        true
     }
 
     pub fn handle_device(self: &Arc<Self>, outer_channel_id: &str, bytes: &[u8]) {
