@@ -8,16 +8,16 @@ import SwiftUI
 /// 列表保持高行距 plain 风格、灰色常规体分组标题、行尾 chevron。
 struct WorkspaceListView: View {
     let client: CofluxClient
+    @Environment(SceneNavigation.self) private var navigation
 
     var body: some View {
-        NavigationStack {
             List {
                 ForEach(client.visibleProjects, id: \.id) { project in
                     Section {
                         let members = client.workspaces.filter { $0.projectID == project.id }
                         ForEach(members, id: \.id) { workspace in
-                            NavigationLink {
-                                WorkspaceDetailView(client: client, workspace: workspace)
+                            Button {
+                                navigation.show(workspaceID: workspace.id, taskID: nil)
                             } label: {
                                 workspaceRow(workspace)
                             }
@@ -51,15 +51,6 @@ struct WorkspaceListView: View {
             }
             .navigationTitle("项目") // 与 web 侧栏对齐（sidebar.tsx:201）：列表主体是项目，工作区是项下成员
             .toolbar {
-                // 设备面板入口（plan 077）：设备是账号级资源，与项目列表平级但不抢主位。
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        DevicesView(client: client)
-                    } label: {
-                        Image(systemName: "macbook.and.iphone")
-                    }
-                    .accessibilityLabel("设备")
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button("登出", role: .destructive) { client.logout() }
@@ -69,7 +60,6 @@ struct WorkspaceListView: View {
                     .accessibilityLabel("账号")
                 }
             }
-        }
     }
 
     private var offlineBanner: some View {

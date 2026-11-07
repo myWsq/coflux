@@ -10,7 +10,14 @@ struct WorkspaceDetailView: View {
     let client: CofluxClient
     let workspace: Coflux_V1_Workspace
     @Environment(\.dismiss) private var dismiss
-    @State private var activeTaskID: String?
+    /// The window's navigation: the active terminal lives there (per workspace), so a layout
+    /// switch that rebuilds this page lands on the same terminal, and cards / sidebar / list can
+    /// request one.
+    @Environment(SceneNavigation.self) private var navigation
+    /// Which window owns each terminal (plan D12): only owned terminals get a terminal view.
+    @Environment(TerminalOwnership.self) private var ownership
+    /// This mounted page's claims; released when SwiftUI tears the page down.
+    @State private var claims = TerminalClaimHolder()
     @State private var termCols: UInt32 = 80
     @State private var termRows: UInt32 = 24
     @State private var confirmingRemove = false
@@ -75,6 +82,18 @@ struct WorkspaceDetailView: View {
     @State private var pageProgress: CGFloat = 0
     @State private var chipFrames: [String: CGRect] = [:]
 
+    private var activeTaskID: String? {
+        get { navigation.activeTaskID(in: workspace.id) }
+        nonmutating set { navigation.setActiveTask(newValue, in: workspace.id) }
+    }
+
+    private var activeTaskBinding: Binding<String?> {
+        Binding(
+            get: { navigation.activeTaskID(in: workspace.id) },
+            set: { navigation.setActiveTask($0, in: workspace.id) }
+        )
+    }
+
     /// tab 序 = 创建序（mobile 同序：createdAt 升序）
     private var members: [Coflux_V1_Task] {
         client.tasks
@@ -124,7 +143,7 @@ struct WorkspaceDetailView: View {
                     .scrollTargetLayout()
                 }
                 .scrollTargetBehavior(.paging)
-                .scrollPosition(id: $activeTaskID)
+                .scrollPosition(id: activeTaskBinding)
                 .scrollIndicators(.hidden)
                 .onScrollGeometryChange(for: CGFloat.self) { geo in
                     geo.containerSize.width > 0 ? geo.contentOffset.x / geo.containerSize.width : 0
@@ -307,7 +326,19 @@ struct WorkspaceDetailView: View {
             Text("运行中的会话将被停止，任务从列表移除")
         }
         .onAppear {
-            if activeTaskID == nil { activeTaskID = members.first?.id }
+            if activeTaskID == nil || !members.contains(where: { $0.id == activeTaskID }) {
+                activeTaskID = members.first?.id
+            }
+            claims.attach(ownership)
+            claimTerminals(activating: activeTaskID)
+        }
+        // Activating a terminal (swipe, chip, card, sidebar, list) takes it from another window.
+        .onChange(of: activeTaskID) { _, id in
+            claimTerminals(activating: id)
+        }
+        // Terminals nobody owns (new ones, or ones another window let go) are taken quietly.
+        .onChange(of: unownedTaskIDs) { _, _ in
+            claimTerminals(activating: nil)
         }
         .onChange(of: members.map(\.id)) { _, ids in
             // 自建任务识别：差集而非"下一个新任务"（workspace-detail.tsx:188，防它端并发建任务误认）
@@ -436,10 +467,49 @@ struct WorkspaceDetailView: View {
         }
     }
 
+    // MARK: - Window ownership (plan D12)
+
+    private var unownedTaskIDs: [String] {
+        members.map(\.id).filter { ownership.owner(of: $0) == nil }
+    }
+
+    private func ownsTerminal(_ taskID: String) -> Bool {
+        ownership.isOwned(taskID, by: navigation.sceneID)
+    }
+
+    /// Claims every terminal of this page that nobody owns, and `activating` even when another
+    /// window owns it.
+    private func claimTerminals(activating: String?) {
+        for task in members {
+            ownership.claim(task.id, scene: navigation.sceneID, holder: claims.id, force: task.id == activating)
+        }
+    }
+
+    /// Stand-in for a terminal bound in another window; "在这里打开" moves it here.
+    private func elsewherePlaceholder(_ task: Coflux_V1_Task) -> some View {
+        ContentUnavailableView {
+            Label("已在另一个窗口打开", systemImage: "macwindow.on.rectangle")
+        } description: {
+            Text(taskTitle(task))
+        } actions: {
+            Button("在这里打开") {
+                ownership.claim(task.id, scene: navigation.sceneID, holder: claims.id, force: true)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.primary)
+            .foregroundStyle(Theme.primaryForeground)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.terminal)
+    }
+
     // MARK: - 任务页（statusStrip + 终端，逐任务保活）
 
+    @ViewBuilder
     private func taskPage(_ task: Coflux_V1_Task) -> some View {
-        VStack(spacing: 0) {
+        if !ownsTerminal(task.id) {
+            elsewherePlaceholder(task)
+        } else {
             TerminalHostView(
                 client: client,
                 taskID: task.id,

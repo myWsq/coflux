@@ -27,6 +27,8 @@ enum CofluxAppComposition {
 struct CofluxApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var client: CofluxClient
+    /// Which window owns each terminal: one registry for all scenes, like the client itself.
+    @State private var terminalOwnership = TerminalOwnership()
 
     init() {
         _client = State(initialValue: CofluxClient(
@@ -44,12 +46,15 @@ struct CofluxApp: App {
     }
 
     var body: some Scene {
+        // One WindowGroup, any number of windows (Split View, two Coflux windows side by side):
+        // each window gets its own RootView and navigation; client and ownership are shared.
         WindowGroup {
-            // 视觉对标 Cursor iOS；主题跟随系统自动切换（深色=真黑，浅色=系统白）
             RootView(client: client)
+                .environment(terminalOwnership)
         }
         .onChange(of: scenePhase) { _, phase in
-            // 进后台主动断连、回前台无条件重建（plan 044 后台生命周期决策）
+            // 进后台主动断连、回前台无条件重建（plan 044 后台生命周期决策）。
+            // The App-level phase aggregates every scene: background only when all windows are.
             switch phase {
             case .background:
                 client.suspend()

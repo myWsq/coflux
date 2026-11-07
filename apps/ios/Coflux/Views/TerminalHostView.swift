@@ -4,32 +4,45 @@ import SwiftTerm
 
 /// 激活终端的能力注册表：输入板据此决定方向键序列（DECCKM，plan 053）；
 /// 滚到底浮键经此触达激活任务的 TerminalView（plan 056）。
+///
+/// Process-wide and keyed by task id, so with several windows two terminal views of one task can
+/// overlap for a moment: SwiftUI does not order one window's `dismantleUIView` against another
+/// window's `updateUIView`. Every entry therefore carries its registrant's token, the same way
+/// `CofluxClient` guards its session consumers: a view that lost the terminal cannot unregister
+/// (or overwrite) the entry of the view that now owns it (plan D12).
 @MainActor
 final class TerminalModeRegistry {
     static let shared = TerminalModeRegistry()
-    private var applicationCursorGetters: [String: () -> Bool] = [:]
-    private var scrollToBottomActions: [String: () -> Void] = [:]
+
+    private struct Entry {
+        let token: UUID
+        let applicationCursor: () -> Bool
+        let scrollToBottom: () -> Void
+    }
+
+    private var entries: [String: Entry] = [:]
 
     func register(
         taskID: String,
+        token: UUID,
         applicationCursor: @escaping () -> Bool,
         scrollToBottom: @escaping () -> Void
     ) {
-        applicationCursorGetters[taskID] = applicationCursor
-        scrollToBottomActions[taskID] = scrollToBottom
+        entries[taskID] = Entry(token: token, applicationCursor: applicationCursor, scrollToBottom: scrollToBottom)
     }
 
-    func unregister(taskID: String) {
-        applicationCursorGetters[taskID] = nil
-        scrollToBottomActions[taskID] = nil
+    /// Removes the entry only while it is still the caller's.
+    func unregister(taskID: String, token: UUID) {
+        guard entries[taskID]?.token == token else { return }
+        entries[taskID] = nil
     }
 
     func applicationCursor(taskID: String) -> Bool {
-        applicationCursorGetters[taskID]?() ?? false
+        entries[taskID]?.applicationCursor() ?? false
     }
 
     func scrollToBottom(taskID: String) {
-        scrollToBottomActions[taskID]?()
+        entries[taskID]?.scrollToBottom()
     }
 }
 
@@ -39,6 +52,11 @@ final class TerminalModeRegistry {
 /// - RUNNING 任务在绑定时以终端实际 dims 发起 attach（client.startTask 内部路由）
 struct TerminalHostView: UIViewRepresentable {
     let client: CofluxClient
+    /// The window this view lives in, checked against the ownership registry: a view whose window
+    /// no longer owns the terminal (it is about to be replaced by a placeholder) neither binds,
+    /// registers, nor resizes the PTY. Absent outside a scene shell, where the view always owns.
+    @Environment(TerminalOwnership.self) private var ownership: TerminalOwnership?
+    @Environment(SceneNavigation.self) private var navigation: SceneNavigation?
     let taskID: String
     let sessionID: String?
     var onSizeChanged: ((UInt32, UInt32) -> Void)?
@@ -83,17 +101,29 @@ struct TerminalHostView: UIViewRepresentable {
         view.installColors(Self.webAnsiPalette)
         view.getTerminal().setCursorStyle(.blinkBar)
         context.coordinator.terminalView = view
+        context.coordinator.isOwner = ownerCheck()
         return view
     }
 
     func updateUIView(_ uiView: TerminalView, context: Context) {
-        context.coordinator.taskID = taskID
-        context.coordinator.bind(sessionID: sessionID)
+        let coordinator = context.coordinator
+        coordinator.taskID = taskID
+        coordinator.isOwner = ownerCheck()
+        coordinator.bind(sessionID: sessionID)
+        guard coordinator.isOwner() else { return }
         TerminalModeRegistry.shared.register(
             taskID: taskID,
+            token: coordinator.registryToken,
             applicationCursor: { [weak uiView] in uiView?.getTerminal().applicationCursor ?? false },
             scrollToBottom: { [weak uiView] in uiView?.scroll(toPosition: 1.0) }
         )
+    }
+
+    /// Whether this view's window owns the terminal right now.
+    private func ownerCheck() -> @MainActor () -> Bool {
+        guard let ownership, let scene = navigation?.sceneID else { return { true } }
+        let taskID = taskID
+        return { [weak ownership] in ownership?.isOwned(taskID, by: scene) ?? true }
     }
 
     static func dismantleUIView(_ uiView: TerminalView, coordinator: Coordinator) {
@@ -120,6 +150,9 @@ struct TerminalHostView: UIViewRepresentable {
         private var lastAtBottom: Bool?
         private var lastBottomSlack: CGFloat = -1
         weak var terminalView: TerminalView?
+        /// This view's token in `TerminalModeRegistry`.
+        let registryToken = UUID()
+        var isOwner: @MainActor () -> Bool = { true }
         private var boundSessionID: String?
         private var releaseConsumer: (@MainActor () -> Void)?
 
@@ -139,6 +172,9 @@ struct TerminalHostView: UIViewRepresentable {
 
         func bind(sessionID: String?) {
             guard sessionID != boundSessionID else { return }
+            // A view whose window lost the terminal must not take the session's single consumer
+            // slot back from the owning window (it is about to be dismantled anyway).
+            guard isOwner() else { return }
             releaseConsumer?()
             releaseConsumer = nil
             boundSessionID = sessionID
@@ -157,7 +193,7 @@ struct TerminalHostView: UIViewRepresentable {
         }
 
         func release() {
-            TerminalModeRegistry.shared.unregister(taskID: taskID)
+            TerminalModeRegistry.shared.unregister(taskID: taskID, token: registryToken)
             releaseConsumer?()
             releaseConsumer = nil
             boundSessionID = nil
@@ -179,7 +215,7 @@ struct TerminalHostView: UIViewRepresentable {
             let rows = UInt32(newRows)
             onSizeChanged?(cols, rows)
             reportBottomSlack()
-            guard let sessionID = boundSessionID else { return }
+            guard let sessionID = boundSessionID, isOwner() else { return }
             // 尾沿去抖：布局连续变化（输入区展开/收起、系统键盘滑入）只把最终
             // 尺寸发给 daemon，避免 SIGWINCH 风暴让远端 TUI 重画闪动（plan 053）
             resizeDebounce?.cancel()
