@@ -1,0 +1,1161 @@
+<meta charset="utf-8">
+<title>Coflux for iPhone Duo</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: a dark review sheet, one section per iPhone Duo form; every device is drawn in pt at one shared scale so sizes compare honestly. */
+:root {
+  color-scheme: dark;
+  /* app — apps/ios Theme.swift (desktop tokens) */
+  --phone: #0f0f0f; --term: #0a0a0a; --card: #191918; --raise: #242422;
+  --glass: rgba(42, 42, 40, .82); --line: rgba(255,255,255,.075);
+  --fg: #e6e6e3; --muted: #8b8b83; --faint: #5c5c56;
+  --primary: #ecece8; --on-primary: #0f0f0f;
+  --warn: #d9ad2c; --ok: #4fae6e; --bad: #e05c6a; --info: #6f9be0;
+  /* sheet */
+  --canvas: #151514; --panel: #1c1c1a; --ink: #e9e9e4; --note: #a3a39b;
+  --ui: -apple-system, "SF Pro Text", system-ui, "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --z: .6;
+}
+* { box-sizing: border-box; }
+body { background: var(--canvas); color: var(--ink); font-family: var(--ui); }
+.page { max-width: 1360px; margin: 0 auto; padding-block: 48px 96px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 72px; }
+
+header.top { display: grid; gap: 20px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; color: var(--warn); text-transform: uppercase; }
+h1 { font-size: clamp(34px, 5vw, 54px); line-height: 1.02; letter-spacing: -.025em; margin: 0; font-weight: 760; text-wrap: balance; }
+.lede { color: var(--note); font-size: 15px; line-height: 1.65; margin: 0; max-width: 72ch; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chips span { font-size: 12.5px; padding: 6px 11px; border-radius: 99px; background: var(--panel); border: 1px solid var(--line); }
+.chips b { color: var(--note); font-weight: 500; margin-right: 6px; }
+
+.forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+.form { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 18px; display: grid; grid-template-columns: 64px 1fr; gap: 6px 16px; align-items: start; }
+.form svg.pic { grid-row: span 3; width: 64px; height: 64px; fill: none; stroke: var(--ink); stroke-width: 2.2; stroke-linejoin: round; }
+.form h3 { margin: 0; font-size: 15.5px; }
+.form .dim { font-family: var(--mono); font-size: 12px; color: var(--warn); font-variant-numeric: tabular-nums; }
+.form p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--note); }
+
+section.block { display: grid; gap: 28px; }
+.block-h { display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 22px; }
+.block-h .row1 { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.block-h h2 { margin: 0; font-size: 26px; letter-spacing: -.015em; }
+.block-h .dim { font-family: var(--mono); font-size: 12.5px; color: var(--warn); }
+.block-h p { margin: 0; color: var(--note); font-size: 14px; line-height: 1.6; max-width: 80ch; }
+.sub-h { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.sub-h h3 { margin: 0; font-size: 18px; }
+.sub-h p { margin: 0; color: var(--note); font-size: 13.5px; }
+.stage { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 44px 24px; align-items: start; }
+.stage.wide { grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)); }
+.stage.tall { grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); }
+figure.shot { margin: 0; display: grid; justify-items: center; gap: 18px; min-width: 0; }
+figcaption { width: 100%; max-width: 540px; display: grid; gap: 6px; }
+figcaption .tag { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; color: var(--warn); }
+figcaption .rec { color: var(--ok); font-weight: 650; }
+figcaption h3 { margin: 0; font-size: 15.5px; }
+figcaption ul { margin: 0; padding-left: 16px; color: var(--note); font-size: 13px; line-height: 1.55; display: grid; gap: 3px; }
+
+/* ---------- devices (1 CSS px = 1 pt, then scaled by --z) ---------- */
+.dev { zoom: var(--z); position: relative; overflow: hidden; background: var(--phone); color: var(--fg); font-family: var(--ui); font-size: 15px; flex: none;
+  box-shadow: 0 0 0 9px #060606, 0 0 0 10.5px #33332f, 0 40px 70px -24px rgba(0,0,0,.75); }
+.dev.o { width: 466px; height: 678px; border-radius: 20px 56px 56px 20px; box-shadow: -6px 0 0 3px #060606, 0 0 0 9px #060606, 0 0 0 10.5px #33332f, 0 40px 70px -24px rgba(0,0,0,.75); }
+.dev.w { width: 890px; height: 626px; border-radius: 44px; }
+.dev.t { width: 626px; height: 890px; border-radius: 44px; }
+svg.i { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+svg.i.sm { width: 16px; height: 16px; } svg.i.xs { width: 13px; height: 13px; }
+.hi { position: absolute; bottom: 8px; left: 50%; width: 134px; margin-left: -67px; height: 5px; border-radius: 3px; background: rgba(255,255,255,.5); z-index: 60; }
+
+/* system rail (status + toolbar + tab bar) on the trailing edge */
+.rail { position: absolute; top: 0; bottom: 0; right: 0; width: 72px; padding: 14px 0 22px; display: flex; flex-direction: column; align-items: center; gap: 10px; z-index: 40; }
+.cam { width: 30px; height: 30px; border-radius: 50%; background: #000; box-shadow: 0 0 0 1.5px #1f1f1d; margin: 4px 0 2px; }
+.stat { display: grid; justify-items: center; gap: 4px; margin-bottom: 4px; }
+.stat b { font-size: 14px; font-weight: 650; }
+.ring { width: 34px; height: 34px; border-radius: 50%; border: 2.2px solid var(--fg); border-bottom-style: dotted; display: grid; place-items: center; }
+.ring svg { width: 15px; height: 15px; }
+.rg { display: flex; flex-direction: column; gap: 2px; background: var(--glass); backdrop-filter: blur(18px); border: 1px solid var(--line); border-radius: 26px; padding: 3px; }
+.rb { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); position: relative; font-weight: 650; }
+.rb.on { background: rgba(255,255,255,.12); }
+.rb .bd { position: absolute; top: 4px; right: 3px; min-width: 16px; height: 16px; border-radius: 8px; background: var(--warn); color: #1a1400; font-size: 10px; font-weight: 800; display: grid; place-items: center; padding: 0 4px; }
+.rail .sp { flex: 1; }
+/* horizontal bar (sidebar, open tall) */
+.hbar { position: absolute; top: 0; left: 0; right: 0; height: 74px; padding: 16px 16px 0; display: flex; align-items: flex-start; gap: 10px; z-index: 40; }
+.hbar .tt { display: grid; gap: 1px; padding-top: 4px; min-width: 0; }
+.hbar .tt b { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hbar .tt span { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.hbar .sp { flex: 1; }
+.cb { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; background: var(--glass); backdrop-filter: blur(18px); border: 1px solid var(--line); color: var(--fg); flex: none; position: relative; font-weight: 650; }
+.cgrp { display: flex; gap: 2px; background: var(--glass); backdrop-filter: blur(18px); border: 1px solid var(--line); border-radius: 26px; padding: 3px; }
+.cgrp .rb { width: 42px; height: 42px; }
+.cstat { display: flex; align-items: center; gap: 8px; padding-top: 10px; margin-left: 4px; }
+.cstat b { font-size: 14px; }
+.cstat .ring { width: 26px; height: 26px; border-width: 2px; }
+.cstat .ring svg { width: 12px; height: 12px; }
+
+/* content */
+.oc { position: absolute; left: 0; top: 0; bottom: 0; right: 72px; padding: 22px 6px 0 18px; display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+.ltitle { display: grid; gap: 2px; padding: 0 2px 2px; }
+.ltitle b { font-size: 30px; font-weight: 760; letter-spacing: -.02em; }
+.ltitle span { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.ititle { position: absolute; top: 18px; left: 18px; right: 84px; z-index: 30; display: flex; align-items: center; gap: 10px; }
+.ititle .tt { display: grid; gap: 1px; min-width: 0; }
+.ititle b { font-size: 16px; } .ititle span { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.sec-h { display: flex; align-items: center; gap: 8px; padding: 6px 2px 0; font-size: 19px; font-weight: 700; }
+.sec-h .n { font-size: 12.5px; font-weight: 650; padding: 2px 8px; border-radius: 99px; background: rgba(217,173,44,.16); color: var(--warn); }
+.sec-h .more { margin-left: auto; font-size: 14px; font-weight: 500; color: var(--muted); }
+.av { width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; font-weight: 700; font-size: 17px; flex: none; position: relative; }
+.av.cl { background: #3a2a22; color: #e8916c; }
+.av.cx { background: #e6e6e3; color: #111; font-family: var(--mono); font-size: 13px; }
+.av.sh { background: var(--raise); color: var(--muted); }
+.av.sm { width: 26px; height: 26px; border-radius: 8px; font-size: 13px; }
+.av.sm.cx { font-size: 10px; }
+.av .st { position: absolute; right: -3px; top: -3px; width: 11px; height: 11px; border-radius: 50%; border: 2.5px solid var(--card); }
+.st.w { background: var(--warn); } .st.o { background: var(--ok); } .st.d { background: var(--info); }
+.att { background: var(--card); border: 1px solid var(--line); border-radius: 26px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.att-top { display: flex; align-items: center; gap: 10px; }
+.who { display: grid; gap: 1px; min-width: 0; }
+.who b { font-size: 15px; } .who span { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pill { margin-left: auto; font-size: 12px; font-weight: 650; padding: 4px 9px; border-radius: 99px; white-space: nowrap; }
+.pill.w { color: var(--warn); background: rgba(217,173,44,.14); }
+.att p { margin: 0; font-size: 15px; line-height: 1.45; }
+.act { display: flex; gap: 8px; align-items: center; }
+.chip { font-size: 14px; font-weight: 600; padding: 8px 14px; border-radius: 99px; background: var(--raise); }
+.chip.pri { background: var(--primary); color: var(--on-primary); }
+.time { margin-left: auto; font-size: 12px; color: var(--faint); }
+.pdots { display: flex; gap: 5px; justify-content: center; }
+.pdots i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+.pdots i.on { background: var(--fg); width: 16px; border-radius: 3px; }
+.group { background: var(--card); border: 1px solid var(--line); border-radius: 24px; padding: 2px 0; }
+.g-head { display: flex; align-items: center; gap: 8px; padding: 12px 16px 8px; color: var(--muted); font-size: 14px; }
+.g-head b { color: var(--fg); font-size: 15px; font-weight: 650; }
+.dev-n { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.o { background: var(--ok); } .dot.x { background: var(--faint); }
+.row { display: flex; align-items: center; gap: 12px; padding: 11px 16px; border-top: 1px solid var(--line); }
+.row.first { border-top: 0; }
+.row .ico { width: 30px; display: grid; place-items: center; color: var(--muted); flex: none; }
+.r-main { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.r-t { font-size: 15px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.r-s { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.r-s.w { color: var(--warn); } .r-s.o { color: var(--ok); }
+.diff { font-family: var(--mono); font-size: 12px; display: flex; gap: 5px; flex: none; }
+.diff .a { color: var(--ok); } .diff .r { color: var(--bad); }
+.lbl { font-size: 12px; color: var(--faint); margin-left: 6px; font-weight: 400; }
+
+/* home B: tiles + feed */
+.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tile { height: 150px; border-radius: 26px; background: var(--card); border: 1px solid var(--line); position: relative; display: grid; place-items: center; }
+.mini { width: 108px; height: 100px; border-radius: 12px; background: var(--term); border: 1px solid rgba(255,255,255,.06); padding: 8px; font-family: var(--mono); font-size: 6.2px; line-height: 1.55; color: #bdbdb7; overflow: hidden; transform: rotate(-3deg); box-shadow: 0 10px 24px rgba(0,0,0,.45); margin-bottom: 14px; }
+.tile:nth-child(2n) .mini { transform: rotate(2.5deg); }
+.tile .name { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); background: #2a2a28; border: 1px solid var(--line); border-radius: 99px; padding: 5px 12px; font-size: 13px; font-weight: 600; white-space: nowrap; box-shadow: 0 6px 14px rgba(0,0,0,.4); }
+.tile .badge { position: absolute; top: 10px; right: 10px; min-width: 22px; height: 22px; border-radius: 11px; background: var(--warn); color: #1a1400; font-size: 12px; font-weight: 750; display: grid; place-items: center; padding: 0 6px; }
+.fi { display: flex; gap: 12px; padding: 8px 2px; align-items: flex-start; }
+.fi .av { width: 42px; height: 42px; border-radius: 50%; font-size: 19px; }
+.fi .av .st { border-color: var(--phone); }
+.fi .t { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.fi .t b { font-size: 15px; } .fi .t b span { color: var(--muted); font-weight: 400; font-size: 13px; }
+.fi .t .s { font-size: 14px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fi .t .s.w { color: var(--warn); font-weight: 600; }
+.fi .tm { font-size: 12px; color: var(--faint); padding-top: 3px; }
+/* home C: filter + flat list */
+.seg { display: flex; gap: 8px; }
+.seg span { font-size: 14px; font-weight: 600; padding: 8px 13px; border-radius: 99px; background: var(--card); border: 1px solid var(--line); color: var(--muted); }
+.seg span.on { background: var(--primary); color: var(--on-primary); border-color: transparent; }
+.seg span em { font-style: normal; opacity: .6; margin-left: 4px; }
+.lh2 { font-size: 13px; color: var(--muted); padding: 2px 4px 0; font-weight: 600; }
+.newbar { position: absolute; left: 14px; right: 86px; bottom: 22px; height: 54px; border-radius: 27px; background: var(--glass); backdrop-filter: blur(20px); border: 1px solid var(--line); display: flex; align-items: center; gap: 10px; padding: 0 7px 0 16px; color: var(--muted); font-size: 15px; z-index: 30; }
+.newbar .go { margin-left: auto; width: 40px; height: 40px; border-radius: 50%; background: var(--primary); color: var(--on-primary); display: grid; place-items: center; }
+
+/* terminal */
+.term { position: absolute; background: var(--term); font-family: var(--mono); font-size: 12px; line-height: 1.5; color: #e4e4e4; white-space: pre; overflow: hidden; }
+.term .d { color: #6b6b66; } .term .g { color: #4fae6e; } .term .r { color: #e05c6a; } .term .m { color: #c678dd; } .term .c { color: #e8916c; } .term .b { color: #6f9be0; } .term .hl { background: rgba(79,174,110,.14); } .term .hr { background: rgba(224,92,106,.14); } .term .sel { color: #8fb3ea; }
+.term .box { display: inline-block; border: 1px solid #3a3a37; border-radius: 6px; padding: 6px 10px; }
+.cur { background: #e4e4e4; }
+.dock { position: absolute; z-index: 35; display: flex; flex-direction: column; gap: 10px; padding-top: 22px; background: linear-gradient(rgba(10,10,10,0), var(--term) 22px); }
+.keys { display: flex; gap: 7px; }
+.k { flex: 1; height: 40px; border-radius: 13px; background: var(--glass); border: 1px solid var(--line); display: grid; place-items: center; font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--fg); }
+.k.red { color: var(--bad); }
+.k.big { height: 46px; font-size: 17px; }
+.k.hot { background: rgba(217,173,44,.16); border-color: rgba(217,173,44,.35); color: var(--warn); }
+.k.ent { background: var(--primary); color: var(--on-primary); border-color: transparent; }
+.composer { background: var(--card); border: 1px solid rgba(255,255,255,.1); border-radius: 26px; padding: 14px 10px 10px 16px; display: grid; gap: 10px; box-shadow: 0 18px 40px rgba(0,0,0,.5); }
+.composer.row1 { grid-template-columns: 1fr auto; align-items: center; padding: 8px 8px 8px 18px; border-radius: 28px; }
+.c-text { font-size: 16px; color: var(--muted); line-height: 1.4; }
+.c-text.on { color: var(--fg); }
+.caret { display: inline-block; width: 2px; height: 19px; background: var(--fg); vertical-align: -4px; margin-left: 1px; }
+.c-bar { display: flex; align-items: center; gap: 6px; }
+.c-bar .sp { flex: 1; }
+.c-hint { font-size: 12px; color: var(--faint); }
+.cbtn { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); background: var(--raise); }
+.send { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; background: var(--primary); color: var(--on-primary); }
+.send.off { background: var(--raise); color: var(--faint); }
+.notice { display: flex; align-items: center; gap: 10px; background: #221d10; border: 1px solid rgba(217,173,44,.3); border-radius: 18px; padding: 10px 12px; }
+.notice div { display: grid; gap: 2px; min-width: 0; }
+.notice b { font-size: 14px; color: var(--warn); }
+.notice span { font-size: 13px; color: #cfc7ae; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pad { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.pad .k { height: 46px; }
+.pad .h2 { grid-row: span 2; height: auto; }
+
+/* overlays */
+.kb { position: absolute; left: 0; right: 0; bottom: 0; height: 292px; background: #2b2b2d; padding: 6px 4px 0; display: flex; flex-direction: column; gap: 10px; z-index: 50; }
+.kb .kr { display: flex; gap: 5px; justify-content: center; }
+.kb .kk { width: 40px; height: 44px; border-radius: 7px; background: #5a5a5e; color: #fff; display: grid; place-items: center; font-size: 20px; }
+.kb .kk.f { background: #3f3f42; font-size: 15px; }
+.kb .sugg { height: 32px; display: flex; justify-content: space-around; align-items: center; color: #ddd; font-size: 15px; }
+.kb .sugg i { width: 1px; height: 20px; background: #4a4a4c; }
+.scrim { position: absolute; inset: 0; background: rgba(5,5,5,.66); z-index: 36; }
+.dict { position: absolute; z-index: 37; display: flex; flex-direction: column; align-items: stretch; gap: 18px; }
+.bubble { background: var(--card); border: 1px solid rgba(255,255,255,.12); border-radius: 26px; padding: 18px; font-size: 18px; line-height: 1.45; display: grid; gap: 8px; }
+.bubble small { font-size: 12.5px; color: var(--muted); }
+.wave { display: flex; gap: 4px; align-items: center; justify-content: center; height: 40px; }
+.wave i { width: 4px; border-radius: 2px; background: var(--fg); opacity: .8; }
+.rbtns { display: flex; justify-content: space-between; padding: 0 16px; }
+.rbig { display: grid; justify-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.rbig span { width: 62px; height: 62px; border-radius: 50%; display: grid; place-items: center; background: var(--raise); color: var(--fg); border: 1px solid var(--line); }
+.rbig.go span { background: var(--primary); color: var(--on-primary); }
+.base { height: 120px; border-radius: 50% 50% 0 0 / 100% 100% 0 0; background: #1d1d1c; border-top: 1px solid rgba(255,255,255,.1); display: grid; place-items: center; color: var(--muted); font-size: 13.5px; margin: 0 -24px; }
+.sheet { position: absolute; z-index: 45; border-radius: 34px; background: #1c1c1b; border: 1px solid rgba(255,255,255,.1); padding: 10px 16px 22px; display: grid; gap: 14px; box-shadow: 0 -20px 50px rgba(0,0,0,.6); }
+.grab { width: 38px; height: 5px; border-radius: 3px; background: #4a4a47; justify-self: center; }
+.sh-h { display: flex; align-items: center; justify-content: space-between; }
+.sh-h b { font-size: 17px; }
+.dcard { background: var(--card); border: 1px solid var(--line); border-radius: 24px; padding: 14px; display: flex; gap: 12px; align-items: center; }
+.os { width: 50px; height: 50px; border-radius: 16px; background: var(--raise); display: grid; place-items: center; flex: none; }
+.statl { display: flex; gap: 10px; font-size: 12.5px; color: var(--muted); align-items: center; font-variant-numeric: tabular-nums; }
+.statl .mono { color: var(--fg); font-family: var(--mono); }
+.dcard.off { opacity: .55; }
+.btn-wide { height: 50px; border-radius: 25px; display: grid; place-items: center; font-weight: 650; font-size: 16px; background: var(--raise); }
+.btn-wide.pri { background: var(--primary); color: var(--on-primary); }
+.sec-field { height: 52px; border-radius: 18px; background: var(--term); border: 1px solid rgba(255,255,255,.18); display: flex; align-items: center; padding: 0 8px 0 16px; font-family: var(--mono); letter-spacing: 3px; font-size: 18px; }
+.sec-field .cbtn { margin-left: auto; }
+.quote { background: var(--raise); border-radius: 16px; padding: 12px 14px; font-size: 14.5px; line-height: 1.5; }
+.quote small { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.fine { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+/* split / folds */
+.side { position: absolute; left: 0; top: 0; bottom: 0; background: #121211; border-right: 1px solid var(--line); overflow: hidden; }
+.side .list { position: absolute; top: 80px; left: 12px; right: 12px; bottom: 74px; display: flex; flex-direction: column; gap: 4px; overflow: hidden; }
+.srow { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 14px; }
+.srow.on { background: var(--raise); }
+.srow .r-t { font-size: 14.5px; } .srow .r-s { font-size: 12px; }
+.lh { font-size: 12.5px; color: var(--muted); padding: 10px 10px 2px; font-weight: 600; }
+.lh span { font-weight: 400; }
+.search { position: absolute; left: 12px; right: 12px; bottom: 18px; height: 46px; border-radius: 23px; background: var(--glass); border: 1px solid var(--line); display: flex; align-items: center; gap: 10px; padding: 0 16px; color: var(--muted); font-size: 15px; }
+.fold { position: absolute; z-index: 55; pointer-events: none; }
+.fold.v { top: 0; bottom: 0; width: 2px; background: linear-gradient(transparent, rgba(255,255,255,.07) 15%, rgba(255,255,255,.07) 85%, transparent); }
+.fold.h { left: 0; right: 0; height: 2px; background: linear-gradient(90deg, transparent, rgba(255,255,255,.07) 15%, rgba(255,255,255,.07) 85%, transparent); }
+.fold.on { background: repeating-linear-gradient(45deg, rgba(217,173,44,.10) 0 6px, transparent 6px 12px); border: 1px dashed rgba(217,173,44,.45); }
+.fold-l { position: absolute; z-index: 56; font-family: var(--mono); font-size: 11px; color: var(--warn); background: var(--term); padding: 2px 6px; border-radius: 4px; }
+
+/* split view (multitasking) */
+.win { position: absolute; overflow: hidden; background: var(--phone); border-radius: 28px; }
+.win .oc { right: 72px; }
+.rail.l { right: auto; left: 0; }
+.win.lft .oc { left: 72px; right: 0; padding: 22px 18px 0 6px; }
+.divider { position: absolute; z-index: 58; display: grid; place-items: center; }
+.divider i { display: block; background: #4a4a47; border-radius: 3px; }
+.other { position: absolute; overflow: hidden; background: #e9e9e6; border-radius: 28px; color: #2b2b2b; }
+.other .addr { position: absolute; left: 50%; transform: translateX(-50%); height: 40px; border-radius: 20px; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.12); display: flex; align-items: center; gap: 8px; padding: 0 16px; font-size: 14px; color: #555; white-space: nowrap; }
+.other .doc { position: absolute; display: grid; gap: 10px; }
+.other .doc b { font-size: 22px; color: #1d1d1f; }
+.other .doc i { display: block; height: 9px; border-radius: 5px; background: #cfcfca; }
+.other .doc .code { height: 70px; border-radius: 10px; background: #dcdcd7; }
+.other .rail2 { position: absolute; top: 0; bottom: 0; width: 72px; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 18px 0; }
+.other .rail2 span { width: 46px; height: 46px; border-radius: 50%; background: rgba(255,255,255,.85); box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+
+/* spec + questions */
+.spec { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 13.5px; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--note); font-weight: 500; font-size: 12.5px; }
+td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+td small { color: var(--note); }
+.qs { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.q { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 18px; display: grid; gap: 8px; align-content: start; }
+.q .id { font-family: var(--mono); font-size: 12px; color: var(--warn); }
+.q h3 { margin: 0; font-size: 15.5px; line-height: 1.35; }
+.q p { margin: 0; color: var(--note); font-size: 13.5px; line-height: 1.6; }
+.q p b { color: var(--ink); font-weight: 600; }
+
+@media (max-width: 640px) { :root { --z: .52; } .stage.wide, .stage.tall { grid-template-columns: 1fr; } .dev.w { zoom: .38; } }
+@media (prefers-reduced-motion: no-preference) {
+  .wave i { animation: w 1.1s ease-in-out infinite alternate; }
+  @keyframes w { from { transform: scaleY(.45); } to { transform: scaleY(1); } }
+}
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+  <symbol id="branch" viewBox="0 0 24 24"><line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+  <symbol id="folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="mic" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></symbol>
+  <symbol id="up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></symbol>
+  <symbol id="clip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+  <symbol id="img" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></symbol>
+  <symbol id="laptop" viewBox="0 0 24 24"><path d="M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9m16 0H4m16 0 1.28 2.55a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L4 16"/></symbol>
+  <symbol id="server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></symbol>
+  <symbol id="globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></symbol>
+  <symbol id="key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></symbol>
+  <symbol id="grid" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1.5"/><rect width="7" height="7" x="14" y="3" rx="1.5"/><rect width="7" height="7" x="3" y="14" rx="1.5"/><rect width="7" height="7" x="14" y="14" rx="1.5"/></symbol>
+  <symbol id="x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="del" viewBox="0 0 24 24"><path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/></symbol>
+  <symbol id="enter" viewBox="0 0 24 24"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></symbol>
+  <symbol id="paste" viewBox="0 0 24 24"><rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></symbol>
+  <symbol id="pencil" viewBox="0 0 24 24"><path d="M21.17 6.81a1 1 0 0 0-3.99-3.99L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z"/></symbol>
+  <symbol id="tabs" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/></symbol>
+  <symbol id="home" viewBox="0 0 24 24"><path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="sidebar" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></symbol>
+  <symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="wifi" viewBox="0 0 24 24"><path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.86a10 10 0 0 1 14 0"/><path d="M8.5 16.43a5 5 0 0 1 7 0"/></symbol>
+  <symbol id="term" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></symbol>
+</svg>
+
+<div class="page">
+  <header class="top">
+    <span class="eyebrow">iOS 重构 · 设计稿 v3</span>
+    <h1>Coflux for iPhone Duo</h1>
+    <p class="lede">这一版只为 iPhone Duo 设计，其它 iPhone 只保证布局不坏。每台设备都按真实 pt 尺寸画，缩放比例统一，所以三种形态之间的大小对比是真实的。右侧竖排的状态栏、工具栏和 tab 栏由系统绘制，位置照 Apple 的 Duo 文档示意图。画面里的项目、分支和 agent 对话是示例数据，字段都是客户端现在已经有的（工作区、设备、agent 回合状态、secret 请求）。</p>
+    <div class="chips">
+      <span><b>设备</b>只做 iPhone Duo</span>
+      <span><b>基调</b>暗色，配色沿用桌面 token</span>
+      <span><b>参考</b>AirBuild、Cursor iOS 的卡片和底部输入</span>
+      <span><b>终端</b>输入框优先</span>
+      <span><b>准则</b>已写入 AGENTS.md</span>
+    </div>
+    <div class="forms">
+      <div class="form">
+        <svg class="pic" viewBox="0 0 64 64"><path d="M14 6h28a12 12 0 0 1 12 12v28a12 12 0 0 1-12 12H14a4 4 0 0 1-4-4V10a4 4 0 0 1 4-4Z"/><path d="M10 10v44" stroke-width="4"/><circle cx="44" cy="15" r="2.5" fill="currentColor"/></svg>
+        <h3>外屏 · 合上</h3><span class="dim">466 × 678 pt · 宽 compact</span>
+        <p>主形态，先定它。系统界面竖排在右侧一列，内容占左边全部高度。</p>
+      </div>
+      <div class="form">
+        <svg class="pic" viewBox="0 0 64 64"><rect x="4" y="14" width="56" height="38" rx="7"/><path d="M32 14v38" stroke-dasharray="3 3"/></svg>
+        <h3>内屏 · 横放展开</h3><span class="dim">≈ 890 × 626 pt · regular × regular</span>
+        <p>打开时的自然方向，折痕竖在中间。分栏；书本式半折时左栏对齐折痕。</p>
+      </div>
+      <div class="form">
+        <svg class="pic" viewBox="0 0 64 64"><rect x="13" y="4" width="38" height="56" rx="7"/><path d="M13 32h38" stroke-dasharray="3 3"/></svg>
+        <h3>内屏 · 竖放展开</h3><span class="dim">≈ 626 × 890 pt · regular × regular</span>
+        <p>工具栏横在顶部，折痕横在中间。半折立在桌上就是笔记本姿态。</p>
+      </div>
+      <div class="form">
+        <svg class="pic" viewBox="0 0 64 64"><rect x="4" y="14" width="27" height="38" rx="5"/><rect x="33" y="14" width="27" height="38" rx="5" fill="currentColor" fill-opacity=".15"/></svg>
+        <h3>内屏 · 分屏</h3><span class="dim">半屏 ≈ 440 × 626 pt</span>
+        <p>和别的 app 并排。半屏和外屏差不多大，直接用外屏布局；系统栏贴窗口外侧。</p>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===================== OUTER ===================== -->
+  <section class="block">
+    <div class="block-h">
+      <div class="row1"><h2>外屏 · 合上</h2><span class="dim">466 × 678 pt</span></div>
+      <p>主形态，单手拿着用。系统在右侧画一列：摄像头、时间、工具栏，最下面是 tab 栏或底部工具栏。App 只管左边的内容区，大约 390 pt 宽，高度到底。</p>
+    </div>
+
+    <div class="sub-h"><h3>首页：三个方案，选一个</h3><p>三个都画在外屏上；系统栏、卡片和配色相同，只差结构。</p></div>
+    <div class="stage">
+
+      <!-- HOME A -->
+      <figure class="shot">
+        <div class="dev o">
+          <div class="oc">
+            <div class="ltitle"><b>coflux</b><span><i class="dot o"></i>3 台设备在线</span></div>
+            <div class="sec-h">需要你 <span class="n">3</span></div>
+            <div class="att">
+              <div class="att-top"><span class="av cl">✻</span><div class="who"><b>claude</b><span>coflux · dev/ios-redesign</span></div><span class="pill w">在问你</span></div>
+              <p>首页按哪个方案做？我倾向“需要你 + 项目”，回合状态现在就有。</p>
+              <div class="act"><span class="chip pri">看终端</span><span class="time">刚刚</span></div>
+            </div>
+            <div class="pdots"><i class="on"></i><i></i><i></i></div>
+            <div class="sec-h">项目 <span class="more">全部</span></div>
+            <div class="group">
+              <div class="g-head"><svg class="i sm"><use href="#folder"/></svg><b>coflux</b><span class="dev-n"><i class="dot o"></i>wsq-mbp</span></div>
+              <div class="row"><span class="ico"><span class="av sm cx">&gt;_<i class="st o"></i></span></span><div class="r-main"><div class="r-t">dev/sessiond-libghostty-vt</div><div class="r-s o">进行中 · cargo test</div></div><span class="diff"><span class="a">+1.2k</span><span class="r">−340</span></span></div>
+              <div class="row"><span class="ico" style="color:var(--warn)"><svg class="i"><use href="#branch"/></svg></span><div class="r-main"><div class="r-t">main<span class="lbl">主工作区</span></div><div class="r-s">2 个终端 · 空闲</div></div></div>
+            </div>
+          </div>
+          <div class="rail">
+            <span class="cam"></span>
+            <div class="stat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+            <div class="rg"><span class="rb">W</span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#plus"/></svg></span></div>
+            <span class="sp"></span>
+            <div class="rg"><span class="rb on"><svg class="i"><use href="#home"/></svg><span class="bd">3</span></span><span class="rb"><svg class="i"><use href="#laptop"/></svg></span></div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">方案 A · <span class="rec">推荐</span></span>
+          <h3>“需要你”在上，项目在下</h3>
+          <ul>
+            <li>“需要你”一次一张卡片，横滑翻页；只放等你的事：提问、要权限、secret 请求</li>
+            <li>没人等你时这一段收起，项目区上移</li>
+            <li>项目区保留和桌面侧栏一样的层级，行上显示 agent 状态</li>
+            <li>右下是系统 tab 栏：首页、设备，角标是等你的数量</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- HOME B -->
+      <figure class="shot">
+        <div class="dev o">
+          <div class="oc">
+            <div class="ltitle"><b>coflux</b><span><i class="dot o"></i>3 台设备在线</span></div>
+            <div class="tiles">
+              <div class="tile"><span class="badge">1</span><div class="mini"><span style="color:#e8916c">⏺</span> Update(Theme.swift)<br><span style="color:#4fae6e">+ surface 0x1B1B1A</span><br><span style="color:#e05c6a">- surface 0x151514</span><br>Make this edit?<br><span style="color:#8fb3ea">❯ 1. Yes</span><br>  2. Yes, allow all<br>  3. No</div><span class="name">coflux</span></div>
+              <div class="tile"><span class="badge">1</span><div class="mini">$ pnpm -C tests test<br><span style="color:#6b6b66">▶ contract.test.mjs</span><br><span style="color:#4fae6e">✔ exec round-trip</span><br><span style="color:#4fae6e">✔ fsWrite temp</span><br><span style="color:#6b6b66">▶ signed-upgrade</span></div><span class="name">raven</span></div>
+              <div class="tile"><div class="mini">❯ git status<br>On branch main<br>nothing to commit,<br>working tree clean<br>❯ <span style="background:#e4e4e4">&nbsp;</span></div><span class="name">dotfiles</span></div>
+              <div class="tile"><div class="mini"><span style="color:#e8916c">✻</span> Thinking…<br><span style="color:#6b6b66">(esc to interrupt)</span><br><br>⏺ Read(derp.go)<br>  ⎿ 214 lines</div><span class="name">tailcat-lab</span></div>
+            </div>
+            <div class="fi"><span class="av cl">✻<i class="st w"></i></span><div class="t"><b>claude <span>@coflux · ios-redesign</span></b><div class="s w">要你确认</div></div><span class="tm">刚刚</span></div>
+            <div class="fi"><span class="av cx">&gt;_<i class="st w"></i></span><div class="t"><b>codex <span>@raven · main</span></b><div class="s w">要权限</div></div><span class="tm">2 分钟</span></div>
+            <div class="fi"><span class="av cl">✻<i class="st d"></i></span><div class="t"><b>claude <span>@coflux · release</span></b><div class="s">说完了：v2.21.1 发版说明写好了</div></div><span class="tm">10:24</span></div>
+          </div>
+          <div class="rail">
+            <span class="cam"></span>
+            <div class="stat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+            <div class="rg"><span class="rb">W</span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#plus"/></svg></span></div>
+            <span class="sp"></span>
+            <div class="rg"><span class="rb on"><svg class="i"><use href="#home"/></svg><span class="bd">3</span></span><span class="rb"><svg class="i"><use href="#laptop"/></svg></span></div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">方案 B</span>
+          <h3>AirBuild 式：项目磁贴 + agent 动态</h3>
+          <ul>
+            <li>最像 AirBuild，一眼看到每个项目终端里在发生什么</li>
+            <li>外屏只放得下 4 块磁贴，项目再多就要翻页，工作区这一层被藏起来</li>
+            <li>磁贴里的终端缩略图需要画面快照，iOS 现在拿不到（Q8）</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- HOME C -->
+      <figure class="shot">
+        <div class="dev o">
+          <div class="oc">
+            <div class="ltitle"><b>终端</b><span>9 个终端 · 4 台设备</span></div>
+            <div class="seg"><span class="on">全部<em>9</em></span><span>需要你<em>3</em></span><span>进行中<em>2</em></span></div>
+            <div class="lh2">需要你</div>
+            <div class="group">
+              <div class="row first"><span class="av cl">✻<i class="st w"></i></span><div class="r-main"><div class="r-t">dev/ios-redesign</div><div class="r-s">coflux · wsq-mbp</div></div><span class="pill w">在问你</span></div>
+              <div class="row"><span class="av cx">&gt;_<i class="st w"></i></span><div class="r-main"><div class="r-t">main</div><div class="r-s">raven · wsq-debian</div></div><span class="pill w">要权限</span></div>
+              <div class="row"><span class="av sh"><svg class="i sm"><use href="#key"/></svg><i class="st w"></i></span><div class="r-main"><div class="r-t">OPENAI_API_KEY</div><div class="r-s">tailcat-lab · Devbox SG</div></div><span class="pill w">等输入</span></div>
+            </div>
+            <div class="lh2">进行中</div>
+            <div class="group">
+              <div class="row first"><span class="av cx">&gt;_<i class="st o"></i></span><div class="r-main"><div class="r-t">dev/sessiond-libghostty-vt</div><div class="r-s">coflux · cargo test</div></div><span class="time">4 分钟</span></div>
+            </div>
+          </div>
+          <div class="newbar"><svg class="i"><use href="#term"/></svg>在 coflux · main 开新终端…<span class="go"><svg class="i"><use href="#plus"/></svg></span></div>
+          <div class="rail">
+            <span class="cam"></span>
+            <div class="stat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+            <div class="rg"><span class="rb">W</span></div>
+            <span class="sp"></span>
+            <div class="rg"><span class="rb on"><svg class="i"><use href="#term"/></svg><span class="bd">3</span></span><span class="rb"><svg class="i"><use href="#laptop"/></svg></span></div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">方案 C</span>
+          <h3>扁平终端流，按状态分组</h3>
+          <ul>
+            <li>不分项目，所有终端按“需要你 / 进行中 / 空闲”排，类似 Cursor 的 All Agents</li>
+            <li>底部常驻“开新终端”输入，手机上也能直接起一个 agent</li>
+            <li>和桌面端结构差得最远；终端多了以后项目归属不好找</li>
+          </ul>
+        </figcaption>
+      </figure>
+    </div>
+
+    <div class="sub-h"><h3>终端和其它页面</h3><p>按方案 A 画；首页选别的方案，这些页面不受影响。</p></div>
+    <div class="stage">
+
+      <!-- O2 terminal running -->
+      <figure class="shot">
+        <div class="dev o">
+          <div class="term" style="left:0;top:0;bottom:0;right:72px;padding:74px 12px 0 16px"><span class="c">⏺</span> Update(<span class="b">Views/Theme.swift</span>)
+  <span class="d">⎿  Updated with 6 additions</span>
+    <span class="hr"><span class="r">42 -  surface = 0x151514</span></span>
+    <span class="hl"><span class="g">42 +  surface = 0x1B1B1A</span></span>
+    <span class="hl"><span class="g">43 +  raise   = 0x242422</span></span>
+
+<span class="c">⏺</span> 首页拆成「需要你」和「项目」两段。
+  先接 sessionAgents 的回合状态，
+  再画卡片。
+
+<span class="c">⏺</span> Write(<span class="b">Views/AttentionCard.swift</span>)
+  <span class="d">⎿  Wrote 96 lines</span>
+
+<span class="c">✻ Pondering…</span> <span class="d">(esc to interrupt · 42s)</span>
+</div>
+          <div class="ititle"><span class="av sm cl">✻</span><div class="tt"><b>ios-redesign</b><span>coflux · wsq-mbp</span></div></div>
+          <div class="dock" style="left:12px;right:80px;bottom:22px">
+            <div class="keys"><span class="k">esc</span><span class="k red">^C</span><span class="k">tab</span><span class="k">↑</span><span class="k">↓</span><span class="k">/</span></div>
+            <div class="composer row1"><div class="c-text">回复 claude…</div><div class="c-bar"><span class="cbtn"><svg class="i sm"><use href="#mic"/></svg></span><span class="send off"><svg class="i sm"><use href="#up"/></svg></span></div></div>
+          </div>
+          <div class="rail">
+            <span class="cam"></span>
+            <div class="stat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#back"/></svg></span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#tabs"/></svg><span class="bd">1</span></span><span class="rb"><svg class="i"><use href="#more"/></svg></span></div>
+            <span class="sp"></span>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#clip"/></svg></span><span class="rb"><svg class="i"><use href="#grid"/></svg></span></div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">O2 · 终端 · agent 进行中</span>
+          <h3>终端占满内容区，输入在底部</h3>
+          <ul>
+            <li>标题行放 agent、分支、项目和设备，由系统导航标题绘制</li>
+            <li>右上：返回、终端列表（角标：同工作区还有终端在等你）、更多</li>
+            <li>右下：附件、完整按键；底部工具栏竖排后在这里</li>
+            <li>输入卡片缩成一行：文字、麦克风、发送</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- O3 approval -->
+      <figure class="shot">
+        <div class="dev o">
+          <div class="term" style="left:0;top:0;bottom:0;right:72px;padding:74px 12px 0 16px"><span class="c">⏺</span> Update(<span class="b">Views/Theme.swift</span>)
+
+<span class="box"> <b>Edit file</b>  <span class="d">Views/Theme.swift</span>
+
+  <span class="hr"><span class="r">12 -  accent = 0x262624</span></span>
+  <span class="hl"><span class="g">12 +  accent = 0x2C2C29</span></span>
+
+ Do you want to make this edit?
+ <span class="sel">❯ 1. Yes</span>
+   2. Yes, allow all edits during
+      this session (shift+tab)
+   3. No, and tell Claude what to
+      do differently (esc)          </span>
+</div>
+          <div class="ititle"><span class="av sm cl">✻</span><div class="tt"><b>ios-redesign</b><span>coflux · wsq-mbp</span></div></div>
+          <div class="dock" style="left:12px;right:80px;bottom:22px">
+            <div class="notice"><span class="av sm cl">✻</span><div><b>claude 要你确认</b><span>修改 Theme.swift · 按数字选，或直接回复</span></div></div>
+            <div class="keys"><span class="k big hot">1</span><span class="k big hot">2</span><span class="k big hot">3</span><span class="k big">↑</span><span class="k big">↓</span><span class="k big ent"><svg class="i"><use href="#enter"/></svg></span></div>
+            <div class="composer row1"><div class="c-text">告诉 claude 换个做法…</div><div class="c-bar"><span class="cbtn"><svg class="i sm"><use href="#mic"/></svg></span><span class="send off"><svg class="i sm"><use href="#up"/></svg></span></div></div>
+          </div>
+          <div class="rail">
+            <span class="cam"></span>
+            <div class="stat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#back"/></svg></span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#tabs"/></svg></span><span class="rb"><svg class="i"><use href="#more"/></svg></span></div>
+            <span class="sp"></span>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#clip"/></svg></span><span class="rb"><svg class="i"><use href="#grid"/></svg></span></div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">O3 · 终端 · 要权限 / 提问</span>
+          <h3>按键行换成选项键</h3>
+          <ul>
+            <li>agent 回合状态是 approval 或 question 时，按键行变成 1 / 2 / 3 / 方向 / 回车，按键加大</li>
+            <li>提示条显示 agent 的留言；没有留言时显示通用文案</li>
+            <li>按键只发送按键本身，不解析菜单文字</li>
+            <li>esc 移进完整按键面板，免得和“3”挨着误触</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- O4 typing -->
+      <figure class="shot">
+        <div class="dev o">
+          <div class="term" style="left:0;top:0;bottom:0;right:72px;padding:74px 12px 0 16px"><span class="c">⏺</span> 卡片已经能显示 question 和
+  approval。要不要顺便把 Theme.swift
+  的 token 一起换掉？
+
+<span class="d">──────────────────────────────────</span>
+<span class="d">&gt;</span> <span class="cur"> </span>
+</div>
+          <div class="ititle"><span class="av sm cl">✻</span><div class="tt"><b>ios-redesign</b><span>coflux · wsq-mbp</span></div></div>
+          <div class="dock" style="left:12px;right:80px;bottom:302px;background:none">
+            <div class="composer"><div class="c-text on">先别动 Theme.swift，等设计稿定了再换 token<span class="caret"></span></div><div class="c-bar"><span class="cbtn"><svg class="i sm"><use href="#img"/></svg></span><span class="sp"></span><span class="c-hint">发送并回车</span><span class="send"><svg class="i sm"><use href="#up"/></svg></span></div></div>
+          </div>
+          <div class="rail" style="bottom:292px">
+            <span class="cam"></span>
+            <div class="stat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#back"/></svg></span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#tabs"/></svg></span><span class="rb"><svg class="i"><use href="#more"/></svg></span></div>
+          </div>
+          <div class="kb" data-kb></div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">O4 · 打字</span>
+          <h3>输入卡片展开，贴在键盘上</h3>
+          <ul>
+            <li>点输入卡片弹出系统键盘，卡片展开成多行</li>
+            <li>终端不跟着动（沿用“冻结基座”，打字时不触发 resize）</li>
+            <li>发送 = 文字 + 回车；长按发送键只填字不回车（Q5）</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- O5 dictation -->
+      <figure class="shot">
+        <div class="dev o">
+          <div class="term" style="left:0;top:0;bottom:0;right:72px;padding:74px 12px 0 16px"><span class="c">⏺</span> 要不要顺便把 Theme.swift 的 token
+  一起换掉？
+
+<span class="d">──────────────────────────────────</span>
+<span class="d">&gt;</span> <span class="cur"> </span>
+</div>
+          <div class="scrim" style="right:72px"></div>
+          <div class="dict" style="left:16px;right:88px;bottom:0">
+            <div class="bubble"><small>识别结果 · 点文字可以改</small>token 先别换，把首页做完，我在 Duo 上看一下再说</div>
+            <div class="wave" aria-hidden="true"></div>
+            <div class="rbtns">
+              <div class="rbig"><span><svg class="i"><use href="#x"/></svg></span>取消</div>
+              <div class="rbig"><span><svg class="i"><use href="#pencil"/></svg></span>编辑</div>
+              <div class="rbig go"><span><svg class="i"><use href="#up"/></svg></span>发送</div>
+            </div>
+            <div class="base">松手了，确认后再发</div>
+          </div>
+          <div class="rail">
+            <span class="cam"></span>
+            <div class="stat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">O5 · 对讲</span>
+          <h3>长按输入卡片说话，松手确认</h3>
+          <ul>
+            <li>保留 plan 068 的语义：松手进入确认，不直接发出；按住时滑到“取消”或“发送”上松手，直接执行</li>
+            <li>只换外观，按钮位置改成跟着内容区宽度计算，不再写死尺寸</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- O6 keypad -->
+      <figure class="shot">
+        <div class="dev o">
+          <div class="term" style="left:0;top:0;bottom:0;right:72px;padding:74px 12px 0 16px"><span class="d">~/W/coflux</span> <span class="m">main</span> <span class="d">❯</span> vim apps/ios/release.sh
+<span class="d">~</span>
+<span class="d">~</span>
+</div>
+          <div class="ititle"><svg class="i"><use href="#term"/></svg><div class="tt"><b>main · zsh</b><span>coflux · wsq-mbp</span></div></div>
+          <div class="scrim" style="right:72px;background:rgba(5,5,5,.35)"></div>
+          <div class="sheet" style="left:8px;right:80px;bottom:8px">
+            <span class="grab"></span>
+            <div class="sh-h"><b>按键</b><span class="cbtn"><svg class="i sm"><use href="#x"/></svg></span></div>
+            <div class="pad">
+              <span class="k">esc</span><span class="k">1</span><span class="k">2</span><span class="k">3</span><span class="k">4</span><span class="k"><svg class="i sm"><use href="#del"/></svg></span>
+              <span class="k">tab</span><span class="k">q</span><span class="k">^D</span><span class="k red">^C</span><span class="k">^U</span><span class="k">^L</span>
+              <span class="k">/</span><span class="k">:</span><span class="k">~</span><span class="k">↑</span><span class="k">|</span><span class="k h2 ent"><svg class="i"><use href="#enter"/></svg></span>
+              <span class="k">^R</span><span class="k">^Z</span><span class="k">←</span><span class="k">↓</span><span class="k">→</span>
+            </div>
+            <div class="two"><div class="btn-wide" style="height:44px;font-size:14px">粘贴</div><div class="btn-wide" style="height:44px;font-size:14px">相册 / 文件</div></div>
+          </div>
+          <div class="rail">
+            <span class="cam"></span>
+            <div class="stat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#back"/></svg></span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#tabs"/></svg></span><span class="rb"><svg class="i"><use href="#more"/></svg></span></div>
+            <span class="sp"></span>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#clip"/></svg></span><span class="rb on"><svg class="i"><use href="#grid"/></svg></span></div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">O6 · 完整按键</span>
+          <h3>原控制板收进一张面板</h3>
+          <ul>
+            <li>vim、htop 这类场景，从右下“按键”打开；可以一直开着当键盘用</li>
+            <li>方向键和删除键按住连发；方向键按 DECCKM 模式发码（沿用现有行为）</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- O7 devices -->
+      <figure class="shot">
+        <div class="dev o">
+          <div class="oc">
+            <div class="ltitle"><b>设备</b><span>3 台在线 · 1 台离线</span></div>
+            <div class="dcard"><span class="os"><svg class="i"><use href="#laptop"/></svg></span><div class="r-main"><div class="r-t">wsq-mbp<span class="lbl">4 个终端</span></div><div class="statl"><span><i class="dot o"></i> 在线</span><span class="mono">8 ms</span><span>macOS</span></div></div></div>
+            <div class="dcard"><span class="os"><svg class="i"><use href="#server"/></svg></span><div class="r-main"><div class="r-t">wsq-debian<span class="lbl">2 个终端</span></div><div class="statl"><span><i class="dot o"></i> 在线</span><span class="mono">31 ms</span><span>Linux</span></div></div></div>
+            <div class="dcard"><span class="os"><svg class="i"><use href="#globe"/></svg></span><div class="r-main"><div class="r-t">Devbox SG<span class="lbl">1 个终端</span></div><div class="statl"><span><i class="dot o"></i> 在线</span><span class="mono">96 ms</span><span>Linux</span></div></div></div>
+            <div class="dcard off"><span class="os"><svg class="i"><use href="#laptop"/></svg></span><div class="r-main"><div class="r-t">work-mbp</div><div class="statl"><span><i class="dot x"></i> 3 天前在线</span></div></div></div>
+          </div>
+          <div class="rail">
+            <span class="cam"></span>
+            <div class="stat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+            <div class="rg"><span class="rb">W</span></div>
+            <span class="sp"></span>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#home"/></svg><span class="bd">3</span></span><span class="rb on"><svg class="i"><use href="#laptop"/></svg></span></div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">O7 · 设备</span>
+          <h3>tab 栏第二项</h3>
+          <ul>
+            <li>系统图标、在线状态、延迟、终端数</li>
+            <li>点进去是这台设备上的终端列表，和工作区终端用同一套终端页</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- O8 secret -->
+      <figure class="shot">
+        <div class="dev o">
+          <div class="term" style="left:0;top:0;bottom:0;right:72px;padding:74px 12px 0 16px"><span class="c">⏺</span> 冒烟需要 OpenAI 的 key，用
+  coflux secret 向你要。
+
+<span class="c">⏺</span> Bash(coflux secret OPENAI_API_KEY)
+  <span class="d">⎿  waiting for the user…</span>
+</div>
+          <div class="ititle"><span class="av sm cl">✻</span><div class="tt"><b>executor-smoke</b><span>tailcat-lab · Devbox SG</span></div></div>
+          <div class="scrim" style="right:72px;background:rgba(5,5,5,.5)"></div>
+          <div class="sheet" style="left:8px;right:80px;bottom:8px">
+            <span class="grab"></span>
+            <div class="att-top"><span class="av sh"><svg class="i sm"><use href="#key"/></svg></span><div class="who"><b style="font-size:17px">OPENAI_API_KEY</b><span>claude 请求输入</span></div></div>
+            <div class="quote"><small>agent 说</small>冒烟需要这个 key，只写进 .env，不会出现在对话里。</div>
+            <div class="sec-field">••••••••••••••<span class="cbtn"><svg class="i sm"><use href="#paste"/></svg></span></div>
+            <div class="fine">只交给 Devbox SG，agent 看不到值 · 4:52 后过期</div>
+            <div class="two"><div class="btn-wide">拒绝</div><div class="btn-wide pri">提供</div></div>
+          </div>
+          <div class="rail">
+            <span class="cam"></span>
+            <div class="stat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">O8 · secret 请求</span>
+          <h3>面板，语义不变</h3>
+          <ul>
+            <li>从首页“需要你”或终端里打开</li>
+            <li>文案和安全语义沿用现有 SecretRequestCard，只换外观</li>
+          </ul>
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ===================== INNER WIDE ===================== -->
+  <section class="block">
+    <div class="block-h">
+      <div class="row1"><h2>内屏 · 横放展开</h2><span class="dim">≈ 890 × 626 pt</span></div>
+      <p>打开时的自然方向，折痕竖在中间。按 Apple 的规则：左栏工具栏横排，右侧详情的状态栏和工具栏竖排在右边。内屏前置摄像头不用时隐藏，不需要避让。</p>
+    </div>
+    <div class="stage wide">
+
+      <!-- W1 split -->
+      <figure class="shot">
+        <div class="dev w">
+          <div class="side" style="width:300px">
+            <div class="hbar" style="right:auto;width:300px"><span class="cb"><svg class="i"><use href="#sidebar"/></svg></span><div class="tt"><b>coflux</b><span>3 台设备在线</span></div><span class="sp"></span><span class="cb">W</span></div>
+            <div class="list">
+              <div class="lh">需要你 · 3</div>
+              <div class="srow on"><span class="av sm cl">✻<i class="st w"></i></span><div class="r-main"><div class="r-t">ios-redesign</div><div class="r-s w">在问你 · coflux</div></div></div>
+              <div class="srow"><span class="av sm cx">&gt;_<i class="st w"></i></span><div class="r-main"><div class="r-t">main</div><div class="r-s w">要权限 · raven</div></div></div>
+              <div class="srow"><span class="av sm sh"><svg class="i xs"><use href="#key"/></svg><i class="st w"></i></span><div class="r-main"><div class="r-t">OPENAI_API_KEY</div><div class="r-s w">等输入 · tailcat-lab</div></div></div>
+              <div class="lh">coflux <span>· wsq-mbp</span></div>
+              <div class="srow"><span class="av sm cx">&gt;_<i class="st o"></i></span><div class="r-main"><div class="r-t">sessiond-libghostty-vt</div><div class="r-s o">进行中</div></div></div>
+              <div class="srow"><span class="ico" style="width:26px;color:var(--warn)"><svg class="i sm"><use href="#branch"/></svg></span><div class="r-main"><div class="r-t">main</div><div class="r-s">2 个终端 · 空闲</div></div></div>
+              <div class="lh">raven <span>· wsq-debian</span></div>
+              <div class="srow"><span class="av sm cx">&gt;_<i class="st w"></i></span><div class="r-main"><div class="r-t">main</div><div class="r-s w">要权限</div></div></div>
+            </div>
+            <div class="search"><svg class="i sm"><use href="#search"/></svg>搜索终端</div>
+          </div>
+          <div class="term" style="left:301px;top:0;bottom:0;right:72px;padding:76px 14px 0 18px"><span class="d">~/W/coflux</span> <span class="m">dev/ios-redesign</span>
+
+<span class="c">⏺</span> Read(<span class="b">apps/ios/Coflux/Views/WorkspaceListView.swift</span>)
+  <span class="d">⎿  Read 182 lines</span>
+
+<span class="c">⏺</span> Update(<span class="b">apps/ios/Coflux/Views/Theme.swift</span>)
+  <span class="d">⎿  Updated with 6 additions and 2 removals</span>
+     <span class="hr"><span class="r">42 -  static let surface = Color(rgb: 0x151514)</span></span>
+     <span class="hl"><span class="g">42 +  static let surface = Color(rgb: 0x1B1B1A)</span></span>
+
+<span class="c">⏺</span> 卡片已经能显示 question 和 approval。要不要
+  顺便把 Theme.swift 的 token 一起换掉？
+</div>
+          <div class="ititle" style="left:319px"><span class="av sm cl">✻</span><div class="tt"><b>ios-redesign</b><span>coflux · wsq-mbp</span></div></div>
+          <div class="dock" style="left:313px;right:84px;bottom:22px">
+            <div class="notice"><span class="av sm cl">✻</span><div><b>claude 在问你</b><span>要不要顺便换 Theme.swift 的 token？</span></div></div>
+            <div class="keys"><span class="k">esc</span><span class="k red">^C</span><span class="k">tab</span><span class="k">↑</span><span class="k">↓</span><span class="k">/</span></div>
+            <div class="composer row1"><div class="c-text">回复 claude…</div><div class="c-bar"><span class="cbtn"><svg class="i sm"><use href="#mic"/></svg></span><span class="send off"><svg class="i sm"><use href="#up"/></svg></span></div></div>
+          </div>
+          <div class="rail">
+            <div class="stat" style="margin-top:6px"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#tabs"/></svg></span><span class="rb"><svg class="i"><use href="#more"/></svg></span></div>
+            <span class="sp"></span>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#clip"/></svg></span><span class="rb"><svg class="i"><use href="#grid"/></svg></span></div>
+          </div>
+          <span class="fold v" style="left:444px"></span>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">W1 · 完全展开 · 分栏</span>
+          <h3>左栏列表，右侧终端</h3>
+          <ul>
+            <li>左栏是首页的紧凑版：“需要你”加项目；点一行，右侧直接切到那个终端，不用返回</li>
+            <li>左栏底部是搜索终端；左上按钮收起左栏，终端占满整屏</li>
+            <li>完全展开时折痕不是保留区，内容可以跨过去（细线只标示位置）</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- W2 book -->
+      <figure class="shot">
+        <div class="dev w">
+          <div class="side" style="width:433px">
+            <div class="hbar" style="right:auto;width:433px"><span class="cb"><svg class="i"><use href="#sidebar"/></svg></span><div class="tt"><b>coflux</b><span>3 台设备在线</span></div><span class="sp"></span><span class="cb">W</span></div>
+            <div class="list">
+              <div class="lh">需要你 · 3</div>
+              <div class="srow on"><span class="av sm cl">✻<i class="st w"></i></span><div class="r-main"><div class="r-t">ios-redesign</div><div class="r-s w">在问你：要不要顺便换 Theme.swift 的 token？</div></div><span class="time">刚刚</span></div>
+              <div class="srow"><span class="av sm cx">&gt;_<i class="st w"></i></span><div class="r-main"><div class="r-t">raven · main</div><div class="r-s w">要权限：pnpm -C tests test</div></div><span class="time">2 分钟</span></div>
+              <div class="srow"><span class="av sm sh"><svg class="i xs"><use href="#key"/></svg><i class="st w"></i></span><div class="r-main"><div class="r-t">OPENAI_API_KEY</div><div class="r-s w">等输入 · tailcat-lab · Devbox SG</div></div></div>
+              <div class="lh">coflux <span>· wsq-mbp</span></div>
+              <div class="srow"><span class="av sm cx">&gt;_<i class="st o"></i></span><div class="r-main"><div class="r-t">sessiond-libghostty-vt</div><div class="r-s o">进行中 · cargo test -p coflux-runtime</div></div><span class="diff"><span class="a">+1.2k</span></span></div>
+              <div class="srow"><span class="ico" style="width:26px;color:var(--warn)"><svg class="i sm"><use href="#branch"/></svg></span><div class="r-main"><div class="r-t">main</div><div class="r-s">2 个终端 · 空闲</div></div></div>
+            </div>
+            <div class="search"><svg class="i sm"><use href="#search"/></svg>搜索终端</div>
+          </div>
+          <div class="term" style="left:457px;top:0;bottom:0;right:72px;padding:76px 12px 0 14px"><span class="c">⏺</span> 卡片已经能显示 question
+  和 approval。要不要顺便把
+  Theme.swift 的 token 一起
+  换掉？
+
+<span class="d">─────────────────────────────</span>
+<span class="d">&gt;</span> <span class="cur"> </span>
+</div>
+          <div class="ititle" style="left:471px"><span class="av sm cl">✻</span><div class="tt"><b>ios-redesign</b><span>coflux</span></div></div>
+          <div class="dock" style="left:467px;right:84px;bottom:22px">
+            <div class="keys"><span class="k big hot">1</span><span class="k big hot">2</span><span class="k big">↑</span><span class="k big">↓</span><span class="k big ent"><svg class="i"><use href="#enter"/></svg></span></div>
+            <div class="composer row1"><div class="c-text">回复 claude…</div><div class="c-bar"><span class="cbtn"><svg class="i sm"><use href="#mic"/></svg></span><span class="send off"><svg class="i sm"><use href="#up"/></svg></span></div></div>
+          </div>
+          <div class="rail">
+            <div class="stat" style="margin-top:6px"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#tabs"/></svg></span><span class="rb"><svg class="i"><use href="#more"/></svg></span></div>
+            <span class="sp"></span>
+            <div class="rg"><span class="rb"><svg class="i"><use href="#clip"/></svg></span><span class="rb"><svg class="i"><use href="#grid"/></svg></span></div>
+          </div>
+          <span class="fold v on" style="left:433px;width:24px"></span>
+          <span class="fold-l" style="left:383px;top:300px;transform:rotate(-90deg)">折痕 · 保留区</span>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">W2 · 书本式半折</span>
+          <h3>左栏贴住左半屏，终端在右半屏</h3>
+          <ul>
+            <li>半折时折痕变成保留区，左栏宽度对齐到折痕</li>
+            <li>左栏变宽后显示更多信息：agent 留言、时间、改动行数</li>
+            <li>右侧终端约 46 列，按键行只留最常用的几颗</li>
+          </ul>
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ===================== INNER TALL ===================== -->
+  <section class="block">
+    <div class="block-h">
+      <div class="row1"><h2>内屏 · 竖放展开</h2><span class="dim">≈ 626 × 890 pt</span></div>
+      <p>工具栏横在顶部，和 iPad 一样。宽度够显示 80 列以上，适合看长 diff 和日志。折痕横在中间；半折立起来就是笔记本姿态。</p>
+    </div>
+    <div class="stage tall">
+
+      <!-- T1 tall -->
+      <figure class="shot">
+        <div class="dev t">
+          <div class="hbar"><span class="cb"><svg class="i"><use href="#back"/></svg></span><span class="av sm cl" style="margin-top:10px">✻</span><div class="tt"><b>ios-redesign</b><span>coflux · wsq-mbp</span></div><span class="sp"></span><div class="cgrp"><span class="rb"><svg class="i"><use href="#tabs"/></svg><span class="bd">1</span></span><span class="rb"><svg class="i"><use href="#clip"/></svg></span><span class="rb"><svg class="i"><use href="#grid"/></svg></span><span class="rb"><svg class="i"><use href="#more"/></svg></span></div><div class="cstat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div></div>
+          <div class="term" style="left:0;right:0;top:0;bottom:0;padding:86px 16px 0 18px"><span class="d">~/W/coflux</span> <span class="m">dev/ios-redesign</span> <span class="d">❯</span> claude
+
+<span class="c">⏺</span> Read(<span class="b">apps/ios/Coflux/Views/WorkspaceListView.swift</span>)
+  <span class="d">⎿  Read 182 lines</span>
+
+<span class="c">⏺</span> Update(<span class="b">apps/ios/Coflux/Views/Theme.swift</span>)
+  <span class="d">⎿  Updated Theme.swift with 6 additions and 2 removals</span>
+     38    enum Theme {
+     39      static let terminal = Color(rgb: 0x0A0A0A)
+     40      static let background = Color(rgb: 0x0F0F0F)
+     <span class="hr"><span class="r">41 -    static let surface = Color(rgb: 0x151514)            </span></span>
+     <span class="hl"><span class="g">41 +    static let surface = Color(rgb: 0x1B1B1A)            </span></span>
+     <span class="hl"><span class="g">42 +    static let raise = Color(rgb: 0x242422)              </span></span>
+     43      static let secondarySurface = Color(rgb: 0x1F1F1E)
+
+<span class="c">⏺</span> Write(<span class="b">apps/ios/Coflux/Views/AttentionCard.swift</span>)
+  <span class="d">⎿  Wrote 96 lines to AttentionCard.swift</span>
+
+<span class="c">⏺</span> 首页拆成「需要你」和「项目」两段，先接 sessionAgents 的回合
+  状态，再画卡片。
+
+<span class="c">✻ Pondering…</span> <span class="d">(esc to interrupt · 42s · ↓ 1.2k tokens)</span>
+</div>
+          <div class="dock" style="left:16px;right:16px;bottom:24px">
+            <div class="keys"><span class="k">esc</span><span class="k red">^C</span><span class="k">tab</span><span class="k">↑</span><span class="k">↓</span><span class="k">←</span><span class="k">→</span><span class="k">/</span></div>
+            <div class="composer row1"><div class="c-text">回复 claude…</div><div class="c-bar"><span class="cbtn"><svg class="i sm"><use href="#mic"/></svg></span><span class="send off"><svg class="i sm"><use href="#up"/></svg></span></div></div>
+          </div>
+          <span class="fold h" style="top:444px"></span>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">T1 · 竖放完全展开</span>
+          <h3>终端全屏，工具栏横在顶部</h3>
+          <ul>
+            <li>和外屏是同一个终端页，只是工具栏回到顶部，终端更宽更高（约 83 列 × 34 行）</li>
+            <li>按键行加宽，左右方向键也放进来</li>
+            <li>不显示左栏；切换终端走工具栏里的终端列表</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- T2 laptop -->
+      <figure class="shot">
+        <div class="dev t">
+          <div class="hbar"><span class="cb"><svg class="i"><use href="#back"/></svg></span><span class="av sm cl" style="margin-top:10px">✻</span><div class="tt"><b>ios-redesign</b><span>coflux · wsq-mbp</span></div><span class="sp"></span><div class="cgrp"><span class="rb"><svg class="i"><use href="#tabs"/></svg></span><span class="rb"><svg class="i"><use href="#more"/></svg></span></div><div class="cstat"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div></div>
+          <div class="term" style="left:0;right:0;top:0;height:433px;padding:86px 16px 0 18px"><span class="c">⏺</span> Update(<span class="b">apps/ios/Coflux/Views/Theme.swift</span>)
+  <span class="d">⎿  Updated Theme.swift with 6 additions and 2 removals</span>
+     <span class="hr"><span class="r">41 -    static let surface = Color(rgb: 0x151514)</span></span>
+     <span class="hl"><span class="g">41 +    static let surface = Color(rgb: 0x1B1B1A)</span></span>
+
+<span class="c">⏺</span> 卡片已经能显示 question 和 approval。要不要顺便把
+  Theme.swift 的 token 一起换掉？
+
+<span class="d">──────────────────────────────────────────────────────────</span>
+<span class="d">&gt;</span> <span class="cur"> </span>
+</div>
+          <span class="fold on h" style="top:433px;height:24px"></span>
+          <span class="fold-l" style="right:18px;top:437px">折痕 · 保留区</span>
+          <div style="position:absolute;left:0;right:0;top:457px;bottom:0;padding:16px 18px 28px;display:flex;flex-direction:column;gap:12px;background:var(--phone)">
+            <div class="composer row1"><div class="c-text">回复 claude…</div><div class="c-bar"><span class="cbtn"><svg class="i sm"><use href="#clip"/></svg></span><span class="cbtn"><svg class="i sm"><use href="#mic"/></svg></span><span class="send off"><svg class="i sm"><use href="#up"/></svg></span></div></div>
+            <div class="pad">
+              <span class="k">esc</span><span class="k">1</span><span class="k">2</span><span class="k">3</span><span class="k">4</span><span class="k"><svg class="i sm"><use href="#del"/></svg></span>
+              <span class="k">tab</span><span class="k">q</span><span class="k">^D</span><span class="k red">^C</span><span class="k">^U</span><span class="k">^L</span>
+              <span class="k">/</span><span class="k">:</span><span class="k">~</span><span class="k">↑</span><span class="k">|</span><span class="k h2 ent"><svg class="i"><use href="#enter"/></svg></span>
+              <span class="k">^R</span><span class="k">^Z</span><span class="k">←</span><span class="k">↓</span><span class="k">→</span>
+            </div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">T2 · 笔记本姿态</span>
+          <h3>上半屏终端，下半屏输入和完整按键</h3>
+          <ul>
+            <li>竖放半折立在桌上：终端在折痕上方，输入卡片和完整按键常驻在下方</li>
+            <li>用系统的排列容器（ArrangementView）切换，它会自动避开折痕；完全展开时回到 T1</li>
+            <li>下半屏常驻完整按键，所以工具栏只留终端列表和更多</li>
+          </ul>
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ===================== SPLIT VIEW ===================== -->
+  <section class="block">
+    <div class="block-h">
+      <div class="row1"><h2>内屏 · 分屏</h2><span class="dim">半屏 ≈ 440 × 626 pt</span></div>
+      <p>内屏可以开 Split View，两个 app 或两个 coflux 窗口并排。半屏的大小和比例与外屏几乎一样（外屏 466 × 678），所以<b style="color:var(--ink)">半屏直接用外屏布局</b>，不另外设计。布局按窗口大小判断，不按“现在在哪块屏”判断。每个窗口的系统栏贴在它靠外的那条边：coflux 在左半边时，竖排的系统栏在左边缘。竖放时两个窗口上下叠放，coflux 拿到的是一个又宽又矮的窗口。</p>
+    </div>
+    <div class="stage wide">
+
+      <!-- S1 coflux right -->
+      <figure class="shot">
+        <div class="dev w">
+          <div class="other" style="left:0;top:0;bottom:0;width:440px">
+            <div class="addr" style="top:18px">developer.apple.com</div>
+            <div class="doc" style="left:28px;right:28px;top:84px"><b>Preparing your app for iPhone Duo</b><i style="width:92%"></i><i style="width:84%"></i><i style="width:96%"></i><i style="width:70%"></i><span class="code"></span><i style="width:88%"></i><i style="width:76%"></i><i style="width:90%"></i></div>
+          </div>
+          <div class="divider" style="left:440px;width:10px;top:0;bottom:0"><i style="width:4px;height:40px"></i></div>
+          <div class="win" style="left:450px;top:0;bottom:0;right:0">
+            <div class="oc">
+              <div class="ltitle"><b>coflux</b><span><i class="dot o"></i>3 台设备在线</span></div>
+              <div class="sec-h">需要你 <span class="n">3</span></div>
+              <div class="att">
+                <div class="att-top"><span class="av cl">✻</span><div class="who"><b>claude</b><span>coflux · dev/ios-redesign</span></div><span class="pill w">在问你</span></div>
+                <p>首页按哪个方案做？我倾向“需要你 + 项目”。</p>
+                <div class="act"><span class="chip pri">看终端</span></div>
+              </div>
+              <div class="pdots"><i class="on"></i><i></i><i></i></div>
+              <div class="sec-h">项目 <span class="more">全部</span></div>
+              <div class="group">
+                <div class="g-head"><svg class="i sm"><use href="#folder"/></svg><b>coflux</b><span class="dev-n"><i class="dot o"></i>wsq-mbp</span></div>
+                <div class="row"><span class="ico"><span class="av sm cx">&gt;_<i class="st o"></i></span></span><div class="r-main"><div class="r-t">dev/sessiond-libghostty-vt</div><div class="r-s o">进行中 · cargo test</div></div></div>
+              </div>
+            </div>
+            <div class="rail">
+              <div class="stat" style="margin-top:6px"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+              <div class="rg"><span class="rb">W</span></div>
+              <div class="rg"><span class="rb"><svg class="i"><use href="#plus"/></svg></span></div>
+              <span class="sp"></span>
+              <div class="rg"><span class="rb on"><svg class="i"><use href="#home"/></svg><span class="bd">3</span></span><span class="rb"><svg class="i"><use href="#laptop"/></svg></span></div>
+            </div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">S1 · 横放分屏 · coflux 在右</span>
+          <h3>和外屏首页同一个布局</h3>
+          <ul>
+            <li>典型用法：左边看文档或网页，右边盯着 agent</li>
+            <li>系统栏在右边缘，和合上时的位置一样</li>
+            <li>内容区约 368 pt 宽，比外屏窄 26 pt；行内文字截断，卡片不变</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- S2 coflux left, terminal -->
+      <figure class="shot">
+        <div class="dev w">
+          <div class="win lft" style="left:0;top:0;bottom:0;width:440px">
+            <div class="term" style="left:72px;top:0;bottom:0;right:0;padding:74px 16px 0 12px"><span class="c">⏺</span> Update(<span class="b">Views/Theme.swift</span>)
+  <span class="d">⎿  Updated with 6 additions</span>
+    <span class="hr"><span class="r">42 -  surface = 0x151514</span></span>
+    <span class="hl"><span class="g">42 +  surface = 0x1B1B1A</span></span>
+
+<span class="c">⏺</span> 首页拆成「需要你」和「项目」
+  两段，先接回合状态。
+
+<span class="c">✻ Pondering…</span> <span class="d">(esc · 42s)</span>
+</div>
+            <div class="ititle" style="left:88px;right:16px"><span class="av sm cl">✻</span><div class="tt"><b>ios-redesign</b><span>coflux · wsq-mbp</span></div></div>
+            <div class="dock" style="left:82px;right:12px;bottom:22px">
+              <div class="keys"><span class="k">esc</span><span class="k red">^C</span><span class="k">tab</span><span class="k">↑</span><span class="k">↓</span><span class="k">/</span></div>
+              <div class="composer row1"><div class="c-text">回复 claude…</div><div class="c-bar"><span class="cbtn"><svg class="i sm"><use href="#mic"/></svg></span><span class="send off"><svg class="i sm"><use href="#up"/></svg></span></div></div>
+            </div>
+            <div class="rail l">
+              <div class="stat" style="margin-top:6px"><b>9:41</b><span class="ring"><svg class="i"><use href="#wifi"/></svg></span></div>
+              <div class="rg"><span class="rb"><svg class="i"><use href="#back"/></svg></span></div>
+              <div class="rg"><span class="rb"><svg class="i"><use href="#tabs"/></svg><span class="bd">1</span></span><span class="rb"><svg class="i"><use href="#more"/></svg></span></div>
+              <span class="sp"></span>
+              <div class="rg"><span class="rb"><svg class="i"><use href="#clip"/></svg></span><span class="rb"><svg class="i"><use href="#grid"/></svg></span></div>
+            </div>
+          </div>
+          <div class="divider" style="left:440px;width:10px;top:0;bottom:0"><i style="width:4px;height:40px"></i></div>
+          <div class="other" style="left:450px;top:0;bottom:0;right:0">
+            <div class="doc" style="left:28px;right:96px;top:84px"><b>localhost:5173</b><i style="width:80%"></i><i style="width:94%"></i><span class="code" style="height:150px"></span><i style="width:66%"></i><i style="width:88%"></i></div>
+            <div class="rail2" style="right:0"><span></span><span></span><span></span></div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">S2 · 横放分屏 · coflux 在左</span>
+          <h3>系统栏换到左边缘，内容镜像</h3>
+          <ul>
+            <li>系统把 coflux 的竖排工具栏放到左边缘，终端和输入整体右移，这是系统自动做的</li>
+            <li>典型用法：左边终端里的 agent 改代码，右边看预览</li>
+            <li>只要用系统 toolbar 和容器，左右两种位置不需要分开写</li>
+          </ul>
+        </figcaption>
+      </figure>
+
+      <!-- S3 tall split, coflux bottom -->
+      <figure class="shot">
+        <div class="dev t">
+          <div class="other" style="left:0;right:0;top:0;height:440px">
+            <div class="addr" style="top:18px">github.com · Pull request #121</div>
+            <div class="doc" style="left:32px;right:32px;top:84px"><b>feat(ios): redesign for iPhone Duo</b><i style="width:60%"></i><span class="code" style="height:110px"></span><i style="width:92%"></i><i style="width:84%"></i><i style="width:70%"></i></div>
+          </div>
+          <div class="divider" style="top:440px;height:10px;left:0;right:0"><i style="width:40px;height:4px"></i></div>
+          <div class="win" style="left:0;right:0;top:450px;bottom:0">
+            <div class="hbar" style="height:66px;padding-top:12px"><span class="cb"><svg class="i"><use href="#back"/></svg></span><span class="av sm cl" style="margin-top:10px">✻</span><div class="tt"><b>ios-redesign</b><span>coflux · wsq-mbp</span></div><span class="sp"></span><div class="cgrp"><span class="rb"><svg class="i"><use href="#tabs"/></svg></span><span class="rb"><svg class="i"><use href="#grid"/></svg></span><span class="rb"><svg class="i"><use href="#more"/></svg></span></div></div>
+            <div class="term" style="left:0;right:0;top:0;bottom:0;padding:72px 16px 0 18px"><span class="c">⏺</span> 卡片已经能显示 question 和 approval。要不要顺便把
+  Theme.swift 的 token 一起换掉？
+
+<span class="d">──────────────────────────────────────────────────────────</span>
+<span class="d">&gt;</span> <span class="cur"> </span>
+</div>
+            <div class="dock" style="left:16px;right:16px;bottom:18px">
+              <div class="keys"><span class="k">esc</span><span class="k red">^C</span><span class="k">tab</span><span class="k">↑</span><span class="k">↓</span><span class="k">←</span><span class="k">→</span><span class="k">/</span></div>
+              <div class="composer row1"><div class="c-text">回复 claude…</div><div class="c-bar"><span class="cbtn"><svg class="i sm"><use href="#mic"/></svg></span><span class="send off"><svg class="i sm"><use href="#up"/></svg></span></div></div>
+            </div>
+          </div>
+          <span class="hi"></span>
+        </div>
+        <figcaption>
+          <span class="tag">S3 · 竖放分屏 · coflux 在下</span>
+          <h3>又宽又矮：工具栏在顶部，终端约 12 行</h3>
+          <ul>
+            <li>竖放时两个窗口上下叠放，coflux 拿到约 626 × 440 的窗口</li>
+            <li>宽度够放 8 颗按键；高度紧，终端只剩十几行，适合边看 PR 边回 agent</li>
+            <li>窗口矮于一定高度时，按键行收进“按键”按钮，给终端多留几行（阈值实现时定）</li>
+          </ul>
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ===================== SPEC ===================== -->
+  <section class="block">
+    <div class="block-h">
+      <div class="row1"><h2>布局规格</h2></div>
+      <p>终端列数按 SF Mono 12 pt 估算（每字约 7.2 pt，行高 18 pt），只用来对比各形态，实际以运行结果为准。</p>
+    </div>
+    <div class="spec">
+      <table>
+        <thead><tr><th>形态</th><th>系统栏</th><th>内容区</th><th>终端（估算）</th><th>终端页底部</th></tr></thead>
+        <tbody>
+          <tr><td>外屏 · 合上</td><td>右侧竖排，约 72 pt</td><td class="num">≈ 390 × 678</td><td class="num">≈ 50 列 × 26 行</td><td><small>按键行 + 一行输入卡片；完整按键用面板</small></td></tr>
+          <tr><td>内屏横放 · 分栏</td><td>左栏横排；右侧竖排</td><td class="num">300 + ≈ 518</td><td class="num">≈ 67 列 × 23 行</td><td><small>同外屏</small></td></tr>
+          <tr><td>内屏横放 · 书本半折</td><td>同上，左栏对齐折痕</td><td class="num">433 | ≈ 361</td><td class="num">≈ 46 列 × 23 行</td><td><small>按键行精简为 5 颗</small></td></tr>
+          <tr><td>内屏竖放 · 展开</td><td>顶部横排</td><td class="num">626 × ≈ 816</td><td class="num">≈ 83 列 × 34 行</td><td><small>按键行 8 颗</small></td></tr>
+          <tr><td>内屏横放 · 分屏半屏</td><td>窗口外侧边竖排（左或右）</td><td class="num">≈ 368 × 626</td><td class="num">≈ 47 列 × 24 行</td><td><small>与外屏相同</small></td></tr>
+          <tr><td>内屏竖放 · 分屏半屏</td><td>窗口顶部横排</td><td class="num">626 × ≈ 440</td><td class="num">≈ 83 列 × 12 行</td><td><small>按键行 8 颗；窗口更矮时收进按钮</small></td></tr>
+          <tr><td>内屏竖放 · 笔记本</td><td>顶部横排</td><td class="num">626 × 433 | 433</td><td class="num">≈ 83 列 × 19 行</td><td><small>下半屏：输入卡片 + 完整按键</small></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="spec">
+      <table>
+        <thead><tr><th>元素</th><th>规格</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>字阶</td><td class="num">30 / 19 / 15 / 13 / 12</td><td><small>大标题 / 分区标题 / 正文 / 说明 / 元数据，全部跟随动态字体</small></td></tr>
+          <tr><td>卡片</td><td class="num">圆角 24–26 · 描边 白 7.5%</td><td><small>只给可点的对象用卡片；列表行之间用细线</small></td></tr>
+          <tr><td>按键</td><td class="num">高 40（选项态 46）· 圆角 13</td><td><small>选项态的数字键用琥珀色底</small></td></tr>
+          <tr><td>输入卡片</td><td class="num">单行 56 高 · 圆角 28</td><td><small>打字时展开成多行，圆角 26</small></td></tr>
+          <tr><td>状态色</td><td><small>琥珀 = 等你　绿 = 进行中　蓝 = 说完了　红 = 中断 / 删除</small></td><td><small>和桌面端同一套 token</small></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===================== QUESTIONS ===================== -->
+  <section class="block">
+    <div class="block-h"><div class="row1"><h2>需要你定的</h2></div><p>回复编号加选择就行。</p></div>
+    <div class="qs">
+      <div class="q"><span class="id">Q1</span><h3>首页用 A、B 还是 C？</h3><p>我推荐 <b>A</b>：它直接回答“有没有人在等我”，所需数据现在都有。B 最像 AirBuild，但外屏只放得下 4 块磁贴，还依赖终端缩略图。</p></div>
+      <div class="q"><span class="id">Q2</span><h3>用系统 tab 栏放“首页 / 设备”？</h3><p>合上时 tab 栏在右下角竖排，角标显示等你的数量。账号放右上工具栏。</p></div>
+      <div class="q"><span class="id">Q3</span><h3>内屏横放用分栏（W1 / W2）？</h3><p>我推荐分栏：在左栏点一下就能切换终端。另一种是内屏只显示一个大终端。</p></div>
+      <div class="q"><span class="id">Q4</span><h3>竖放半折自动切笔记本布局（T2）？</h3><p>我推荐自动切换。如果你很少半折着用，可以放到第二期。</p></div>
+      <div class="q"><span class="id">Q5</span><h3>发送 = 文字 + 回车？</h3><p>现在是 plan 054/055 定的“发送只填字，回车另按”。我建议改成<b>发送即回车</b>，长按发送键才只填字。多行粘贴仍拍平成一行。</p></div>
+      <div class="q"><span class="id">Q6</span><h3>按键行跟着 agent 状态切换？</h3><p>要权限或提问时换成数字选项键，其它时候是 esc / ^C / tab / 方向。普通 shell 一直是后一组。</p></div>
+      <div class="q"><span class="id">Q7</span><h3>首页卡片里直接回复？</h3><p>不用进终端就能回，但回复时看不到终端上下文。也可以只保留“看终端”。</p></div>
+      <div class="q"><span class="id">Q8</span><h3>要不要终端缩略图？</h3><p>只有方案 B 需要。中心有终端镜像，但 iOS 从没读过；要加一个读取最近画面的接口。</p></div>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  var rows = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+  document.querySelectorAll('[data-kb]').forEach(function (kb) {
+    var h = '<div class="sugg"><span>“token”</span><i></i><span>token</span><i></i><span>tokens</span></div>';
+    rows.forEach(function (r, idx) {
+      h += '<div class="kr">';
+      if (idx === 2) h += '<span class="kk f" style="width:50px">⇧</span>';
+      r.split('').forEach(function (c) { h += '<span class="kk">' + c + '</span>'; });
+      if (idx === 2) h += '<span class="kk f" style="width:50px">⌫</span>';
+      h += '</div>';
+    });
+    h += '<div class="kr"><span class="kk f" style="width:96px">123</span><span class="kk" style="width:230px;font-size:15px">空格</span><span class="kk f" style="width:96px">换行</span></div>';
+    kb.innerHTML = h;
+  });
+  var hs = [10, 22, 34, 18, 40, 28, 14, 36, 24, 12, 30, 20, 8];
+  document.querySelectorAll('.wave').forEach(function (w) {
+    w.innerHTML = hs.map(function (v, i) { return '<i style="height:' + v + 'px;animation-delay:' + (i * 0.07) + 's"></i>'; }).join('');
+  });
+})();
+</script>
