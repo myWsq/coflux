@@ -54,7 +54,7 @@ struct DeviceSessionsView: View {
     var body: some View {
         Group {
             if let workspace {
-                // 任务台原样复用（tab 条 / 整页翻页 / 控制板 / 对讲全部照旧）。
+                // 终端页原样复用（翻页 / dock / 按键面板 / 对讲 / 窗口归属全部照旧）。
                 // .id 绑工作区：目录工作区被删后又新建时，结构位置不变会让
                 // 旧 deck 的 activeTaskID 等实例状态被复用到另一个工作区上。
                 // 标题由 deck 自己按「目录工作区用设备名」解析，本页不再设，
@@ -125,6 +125,7 @@ struct DeviceSessionsView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.primary)
+                .foregroundStyle(Theme.primaryForeground)
                 .disabled(!daemon.online || creating)
                 if let createError {
                     Text(createError)
