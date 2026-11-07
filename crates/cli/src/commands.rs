@@ -756,8 +756,10 @@ pub fn run_executor(args: &ParsedArgs) {
 
 /* ---------------------------------- hook --------------------------------- */
 // `coflux hook <claude|codex>`: the messenger. It reads the hook event JSON from stdin/argv and
-// forwards only the event name and process coordinates to `/hook`; the prompt, answer text and
-// notification body in the payload never leave the machine (privacy boundary).
+// forwards only the agent's own session id, the event name and process coordinates to `/hook`;
+// the prompt, answer text and notification body in the payload never leave the machine (privacy
+// boundary). Hooks carry no turn state: that comes from the agent's OSC 7501 reports. A payload
+// without a session id sends nothing.
 //
 // Discipline: never disturb the agent itself. Every failure exits 0 silently (claude reads a
 // non-zero exit of a Stop hook as "block the stop"). stdout stays empty (claude parses a hook's
@@ -811,7 +813,7 @@ pub(crate) fn read_stdin_json() -> Option<Value> {
     serde_json::from_str(trimmed).ok()
 }
 
-/// hook 载荷 → `/hook` 请求体。返回 None 表示载荷不可用（缺事件名等），调用方静默放弃。
+/// hook 载荷 → `/hook` 请求体。返回 None 表示没有可发的（缺事件名或缺会话标识），调用方静默放弃。
 /// 字段顺序与省略规则同 node 版：`JSON.stringify` 会丢掉 undefined 的键。
 pub fn build_hook_body(agent: &str, payload: &Value, pid: i64, ppid: i64) -> Option<Map<String, Value>> {
     let object = payload.as_object()?;
@@ -821,33 +823,18 @@ pub fn build_hook_body(agent: &str, payload: &Value, pid: i64, ppid: i64) -> Opt
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .or_else(|| object.get("type").and_then(Value::as_str).filter(|text| !text.is_empty()))?;
+    // The agent's own session id (claude: session_id / codex notify: thread-id) is the only thing
+    // the worker records from a hook; without one there is nothing to send.
+    let session = object
+        .get("session_id")
+        .filter(|value| !value.is_null())
+        .or_else(|| object.get("thread-id").filter(|value| !value.is_null()))?;
     let mut map = Map::new();
     map.insert("agent".into(), Value::from(agent));
     map.insert("event".into(), Value::from(event));
     map.insert("pid".into(), Value::from(pid));
     map.insert("ppid".into(), Value::from(ppid));
-    // agent 自身的会话标识（claude: session_id / codex notify: thread-id），供 worker 去重与调试
-    let session = object
-        .get("session_id")
-        .filter(|value| !value.is_null())
-        .or_else(|| object.get("thread-id").filter(|value| !value.is_null()));
-    if let Some(session) = session {
-        map.insert("agentSessionId".into(), session.clone());
-    }
-    // Claude Notification 的类型枚举（permission_prompt / agent_needs_input …），不含正文
-    let notification = object
-        .get("notification_type")
-        .filter(|value| !value.is_null())
-        .or_else(|| object.get("notificationType").filter(|value| !value.is_null()))
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty());
-    if let Some(notification) = notification {
-        map.insert("notification".into(), Value::from(notification));
-    }
-    // Stop/SubagentStop 独有：在飞的后台工作条数。只传条数——条目里的 description 是自由文本，不出机。
-    if let Some(tasks) = object.get("background_tasks").and_then(Value::as_array) {
-        map.insert("backgroundTasks".into(), Value::from(tasks.len()));
-    }
+    map.insert("agentSessionId".into(), session.clone());
     Some(map)
 }
 
@@ -880,7 +867,7 @@ pub fn run_hook(args: &ParsedArgs) {
         }
     }
     let Some(request) = build_hook_body(agent, &payload, gateway::pid(), gateway::ppid()) else {
-        hook_debug(debug, "payload has no event name; ignored");
+        hook_debug(debug, "payload has no event name or no session id; nothing to send");
         return;
     };
     hook_debug(debug, &format!("POST /hook {}", Value::Object(request.clone())));
@@ -998,15 +985,16 @@ mod tests {
     #[test]
     fn hook_body_mirrors_node_field_rules() {
         let payload = json!({
-            "hook_event_name": "Notification",
+            "hook_event_name": "SessionStart",
             "session_id": "s1",
             "notification_type": "permission_prompt",
+            "background_tasks": [{ "description": "x" }],
             "prompt": "绝不出机的正文",
         });
         let body = build_hook_body("claude", &payload, 10, 9).unwrap();
         assert_eq!(
             Value::Object(body),
-            json!({ "agent": "claude", "event": "Notification", "pid": 10, "ppid": 9, "agentSessionId": "s1", "notification": "permission_prompt" })
+            json!({ "agent": "claude", "event": "SessionStart", "pid": 10, "ppid": 9, "agentSessionId": "s1" })
         );
 
         // codex notify：type + thread-id
@@ -1014,17 +1002,32 @@ mod tests {
         let body = build_hook_body("codex", &payload, 1, 0).unwrap();
         assert_eq!(body.get("event"), Some(&Value::from("agent-turn-complete")));
         assert_eq!(body.get("agentSessionId"), Some(&Value::from("th1")));
-        assert!(!body.contains_key("notification"));
-        assert!(!body.contains_key("backgroundTasks"));
 
-        // Stop 带 background_tasks：只传条数
-        let payload = json!({ "hook_event_name": "Stop", "background_tasks": [{ "description": "x" }, { "description": "y" }] });
-        let body = build_hook_body("claude", &payload, 1, 0).unwrap();
-        assert_eq!(body.get("backgroundTasks"), Some(&Value::from(2)));
+        // No session id → nothing to send.
+        assert!(build_hook_body("claude", &json!({ "hook_event_name": "Stop" }), 1, 0).is_none());
+        assert!(build_hook_body(
+            "claude",
+            &json!({ "hook_event_name": "Stop", "session_id": null }),
+            1,
+            0
+        )
+        .is_none());
 
         // 空事件名 / 非对象 → 放弃
-        assert!(build_hook_body("claude", &json!({ "hook_event_name": "" }), 1, 0).is_none());
-        assert!(build_hook_body("claude", &json!({ "hook_event_name": "", "type": "t" }), 1, 0).is_some());
+        assert!(build_hook_body(
+            "claude",
+            &json!({ "hook_event_name": "", "session_id": "s" }),
+            1,
+            0
+        )
+        .is_none());
+        assert!(build_hook_body(
+            "claude",
+            &json!({ "hook_event_name": "", "type": "t", "session_id": "s" }),
+            1,
+            0
+        )
+        .is_some());
         assert!(build_hook_body("claude", &json!([1, 2]), 1, 0).is_none());
         assert!(build_hook_body("claude", &json!({ "session_id": "s" }), 1, 0).is_none());
     }
