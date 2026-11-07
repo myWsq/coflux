@@ -31,6 +31,21 @@ coflux runs a **daemon** on any node. The daemon hosts local PTYs, drives agents
 
 `cofluxd` is the headless device-host entry point, responsible only for installation, connectivity, and daemon lifecycle. `coflux` provides account and local/remote business operations. The npm `cofluxd` package ships both entry points. Desktop bundles the Rust `coflux` binary and adds it to terminal PATH. Neither entry point forwards legacy commands.
 
+## iOS app (`apps/ios`): designed for iPhone Duo only
+
+`apps/ios` is a native Swift app for the maintainer's own use, and the maintainer's only iPhone is an iPhone Duo. Design, build, and accept every iOS change for iPhone Duo. Other iPhones get basic compatibility only: layouts must not break there, but nothing is designed, polished, or checked for them, and no code path exists only for them.
+
+- **Three forms, each a first-class layout.** Design and accept all three; none is a scaled copy of another.
+  - *Outer display, closed* (466×678 pt, compact width): the system draws the status bar, toolbar, and tab bar as a vertical rail on the trailing edge, with the camera at the top trailing corner. App content owns the full height to the left of the rail.
+  - *Inner display, open wide* (about 890×626 pt, regular × regular, the natural open orientation): the fold runs vertically through the middle. Use a split layout; the sidebar keeps horizontal bars and the detail column gets the vertical rail. In the half-open book pose the sidebar takes the leading half.
+  - *Inner display, open tall* (about 626×890 pt): bars are horizontal at the top and the fold runs horizontally. Half-open, this is the laptop pose: terminal above the fold, input below it.
+- **System containers and toolbars only.** Use `NavigationStack`, `NavigationSplitView`, `TabView`, and `.toolbar` items that carry both an icon and a title. Only system bars move to the vertical rail; hand-drawn headers, floating buttons, or title capsules do not, so do not build them. Group items with semantic placements, and use `visibilityPriority` and the overflow menu when space runs out.
+- **Lay out from the container, not the device.** Derive layout from the container's size and size classes, never from `UIScreen` bounds, the interface idiom, the orientation, or fixed iPhone dimensions.
+- **Respect reserved regions.** Read the fold and camera regions with `reservedRegions` and keep content and controls out of them; use `ArrangementView` for pose-dependent layouts.
+- **The terminal changes size.** Moving between displays or poses changes the terminal's rows and columns, so resize the PTY with the existing debounce. The fixed-size "slide the terminal up" model holds only within one display.
+- **Dark only**, with colours from the desktop tokens (`apps/ios/Coflux/Views/Theme.swift`).
+- **Tooling**: target iOS 27.1, the iPhone Duo minimum (the project still declares 26.0 until the redesign raises it), and build with Xcode 27 or newer (older Xcode versions do not extend content under the status bar and camera). Check layouts in the iPhone Duo simulator, which needs the iOS 27.1 simulator runtime, and accept them on the device. Reference: [Preparing your app for iPhone Duo](https://developer.apple.com/documentation/technologyoverviews/preparing-your-app-for-iphone-duo).
+
 ## Common commands
 
 ```sh
