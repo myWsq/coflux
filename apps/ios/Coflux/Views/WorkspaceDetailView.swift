@@ -1,86 +1,62 @@
 import CofluxClientCore
 import CofluxProtocol
 import SwiftUI
+import UIKit
 
-/// 工作区任务台（plan 049）：终端不设二级页——顶部横向 tab 条 + 整页 paged
-/// 滑动切换任务，结构对齐 mobile workspace-detail（进入即挂载全部任务页，
-/// 各自 attach 保活；返回列表整体卸载）。新建终端沿 mobile 语义：taskCreate
-/// 无请求-响应关联，记录发送前已知 id 集合，快照增量新出现的任务即自建、自动激活。
+/// The terminal page (plan 049 → Duo redesign, plan D3/D13/D16): the active terminal fills the
+/// content area down to the resting dock; every terminal of the workspace stays mounted in a
+/// horizontal pager (swipe to switch, each attached and kept alive; leaving the page unmounts
+/// them). All chrome is the system's: the navigation title names the terminal, and the toolbar
+/// carries 终端 (the terminal list), 附件, 按键 (the full keypad) and 更多 — on the outer display the
+/// system draws them on the vertical rail. Status banners sit in a strip at the top of the content.
+///
+/// 新建终端沿 mobile 语义：taskCreate 无请求-响应关联，记录发送前已知 id 集合，快照增量新出现的
+/// 任务即自建、自动激活并启动。
 struct WorkspaceDetailView: View {
     let client: CofluxClient
     let workspace: Coflux_V1_Workspace
-    @Environment(\.dismiss) private var dismiss
     /// The window's navigation: the active terminal lives there (per workspace), so a layout
     /// switch that rebuilds this page lands on the same terminal, and cards / sidebar / list can
     /// request one.
     @Environment(SceneNavigation.self) private var navigation
     /// Which window owns each terminal (plan D12): only owned terminals get a terminal view.
     @Environment(TerminalOwnership.self) private var ownership
+    @Environment(\.shellLayout) private var layout
     /// This mounted page's claims; released when SwiftUI tears the page down.
     @State private var claims = TerminalClaimHolder()
     @State private var termCols: UInt32 = 80
     @State private var termRows: UInt32 = 24
     @State private var confirmingRemove = false
     @State private var knownTaskIDsBeforeCreate: Set<String>?
-    /// 控制板展开态按工作区持久化（plan 058 复议 2026-07-26 默认折叠定案）：
-    /// init 播种（onAppear 翻转会有可见跳变 + 一次多余 resize），变更时写回；
-    /// UserDefaults.bool 缺省 false 恰为默认展开，纯新工作区免三态判断
-    @State private var inputCollapsed: Bool
-    /// 无 resize 平移模型（plan 053）：终端容器尺寸恒定，被输入面板整体
-    /// "顶上去"（offset 平移 + 裁剪），行列数不变 → 零 SIGWINCH 零重排。
-    /// 位移量 = 面板实测高度（尺寸不受 transition 影响，量值稳定）；
-    /// 平滑感来自 offset 自身的动画插值（纯 transform，不触发布局）。
-    @State private var panelHeight: CGFloat = 0
-    /// 手动键盘追踪：页面对键盘免疫（最外层 ignoresSafeArea(.keyboard)），
-    /// 键盘弹起时手动把面板平移到"成文框骑在键盘顶上"的位置，
-    /// 控制板下半部分被键盘盖住（2026-07-26 用户定案，取代蒙层方案）
-    /// 成文层与系统键盘同层（fullScreenCover 透明底，无暗色蒙层）：
-    /// 底下的终端/控制板完全冻结不动（2026-07-26 用户最终定案——
-    /// 键盘骑乘/面板位移方案均已尝试并废弃，冻结基座手感最好）
+    /// 成文层与系统键盘同层（fullScreenCover 透明底）：底下的终端与 dock 完全冻结不动
+    /// （2026-07-26 用户最终定案，冻结基座手感最好；打字时不触发 resize）
     @State private var composing = false
     @State private var draft = ""
     /// 长按对讲会话（plan 064）：非 nil = 已在采音；松手分发完清空。
-    /// 豆包优先、Apple 本地降级只在 session.start() 内部判定一次。
     @State private var dictationSession: DictationSession?
-    /// 蒙层可见性（plan 069）：与 session 生命周期解耦——预热期 session 已在
-    /// 采音而蒙层还不显示。两者绑死（此前的 `if let dictationSession`）会让
-    /// 按下占位条就闪一次蒙层，破坏 plan 066 定下的点击/长按系统消歧。
+    /// 蒙层可见性（plan 069）：与 session 生命周期解耦——预热期 session 已在采音而蒙层还不显示。
     @State private var dictationOverlayVisible = false
-    /// 手指当前命中的底部按钮（plan 068）：蒙层拿它做高亮/提示，松手也按它
-    /// 分发——用户看到高亮的那颗就是执行的那个。
+    /// 手指当前命中的按钮（plan 068）：蒙层拿它做高亮/提示，松手也按它分发。
     @State private var dictationZone: DictationZone = .none
-    /// 蒙层在全局坐标系里的框：按钮位置由它推出，命中判定与按钮绘制同源
-    /// （手势位置也取 .global，两边同一坐标空间）。
+    /// 蒙层在全局坐标系里的框：按钮位置由它推出，命中判定与按钮绘制同源。
     @State private var dictationBounds: CGRect = .zero
-    /// 蒙层相位（plan 068）：listening（手指在屏上）→ finalizing（等终稿）
-    /// → settled（确认态 / 留驻示错）。
+    /// 蒙层相位（plan 068）：listening → finalizing → settled。
     @State private var dictationStage: DictationStage = .listening
     /// 逐任务离底态（plan 056）：true = 在底部。未上报（无输出/未滚动）视为在底
     @State private var atBottomByTask: [String: Bool] = [:]
-    /// 逐任务底部空白（pt，TerminalHostView 上报）：未上报视为满屏（整量抬升）
-    @State private var bottomSlackByTask: [String: CGFloat] = [:]
+    /// The dock's resting height (key row + composer, never the notice bar): the terminal ends
+    /// above it, so neither the notice bar nor the keyboard resizes the terminal (D13).
+    @State private var restingDockHeight: CGFloat = 0
+    /// The page's content size: decides the short-window fold and where the toolbar items go.
+    @State private var pageSize: CGSize = .zero
+    @State private var showingKeypad = false
+    @State private var showingPhotoPicker = false
+    @State private var showingFilePicker = false
+    @State private var secretSheet: SecretSheetTarget?
 
-    /// 浮键列避开控制板的抬升量（恒 = 面板高）
-    private var panelLift: CGFloat { inputCollapsed ? 0 : panelHeight }
-    /// 终端抬升量 clamp 到内容真正需要让出的量：新终端内容在顶、下半屏
-    /// 全空时不抬（整量抬会把唯一有内容的顶部裁掉，露出的却是空白）
-    private var terminalLift: CGFloat {
-        let slack = activeTaskID.flatMap { bottomSlackByTask[$0] } ?? 0
-        return max(0, panelLift - slack)
-    }
-
-    init(client: CofluxClient, workspace: Coflux_V1_Workspace) {
-        self.client = client
-        self.workspace = workspace
-        _inputCollapsed = State(initialValue: UserDefaults.standard.bool(forKey: Self.padCollapsedKey(workspace.id)))
-    }
-
-    private static func padCollapsedKey(_ workspaceID: String) -> String {
-        "terminalPadCollapsed.\(workspaceID)"
-    }
-    /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
-    @State private var pageProgress: CGFloat = 0
-    @State private var chipFrames: [String: CGRect] = [:]
+    /// Below this content height the key row folds into 按键 and only the composer stays
+    /// (tall Split View, outer display in landscape): the terminal keeps its rows.
+    static let shortPageHeight: CGFloat = 470
 
     private var activeTaskID: String? {
         get { navigation.activeTaskID(in: workspace.id) }
@@ -94,7 +70,7 @@ struct WorkspaceDetailView: View {
         )
     }
 
-    /// tab 序 = 创建序（mobile 同序：createdAt 升序）
+    /// 页序 = 创建序（createdAt 升序）
     private var members: [Coflux_V1_Task] {
         client.tasks
             .filter { $0.workspaceID == workspace.id }
@@ -105,366 +81,379 @@ struct WorkspaceDetailView: View {
         members.first { $0.id == activeTaskID }
     }
 
-    /// 主标题=分支，与 web 对齐；目录工作区（无 repo 终端）没有分支、name 是裸 `~`，
-    /// 改用设备名（name 为空退到 host，与设备面板同规则）。「目录工作区由设备命名」
-    /// 是工作区种类的属性而不是调用方偏好，故在此解析，不开 title 参数——
-    /// 开了参数，下一个调用方就能把任务台标题写成任何东西。
-    private var navigationTitleText: String {
-        guard isDirWorkspace(workspace) else {
-            return workspace.branch.isEmpty ? workspace.name : workspace.branch
-        }
-        guard let daemon = client.daemons.first(where: { $0.daemonID == workspace.daemonID }) else {
-            return workspace.name
-        }
-        let label = daemon.name.isEmpty ? daemon.host : daemon.name
-        return label.isEmpty ? workspace.name : label
+    private var shortWindow: Bool {
+        pageSize.height > 0 && pageSize.height < Self.shortPageHeight
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            if members.isEmpty {
-                emptyState
-            } else {
-                tabBar
-                // 横幅挪出终端页（终端会被面板顶上去裁顶，横幅必须常驻可见）
-                if let task = activeTask {
-                    statusStrip(task)
-                }
-                // 分页容器用 ScrollView 而非 TabView(.page)：后者不暴露连续
-                // 滚动进度，药丸只能落定后追赶（"不跟手"，plan 050 返工点）
-                ScrollView(.horizontal) {
-                    HStack(spacing: 0) {
-                        ForEach(members, id: \.id) { task in
-                            taskPage(task)
-                                .containerRelativeFrame(.horizontal)
-                                .id(task.id)
-                        }
-                    }
-                    .scrollTargetLayout()
-                }
-                .scrollTargetBehavior(.paging)
-                .scrollPosition(id: activeTaskBinding)
-                .scrollIndicators(.hidden)
-                .onScrollGeometryChange(for: CGFloat.self) { geo in
-                    geo.containerSize.width > 0 ? geo.contentOffset.x / geo.containerSize.width : 0
-                } action: { _, value in
-                    pageProgress = value
-                }
-                // 第一页继续往回滑 = 返回工作区列表：松手瞬间（离开拖拽相位）
-                // 左缘回弹超过 12% 页宽即 pop，一次手势只判定一次
-                .onScrollPhaseChange { oldPhase, _, context in
-                    guard oldPhase == .interacting || oldPhase == .tracking else { return }
-                    let width = context.geometry.containerSize.width
-                    guard width > 0 else { return }
-                    if context.geometry.contentOffset.x / width < -0.12 {
-                        dismiss()
-                    }
-                }
-                // 平移而非缩放：终端整体被顶上去，顶部裁掉（scrollback 仍可
-                // 在终端内滚动回看；完整画面 = 收起面板）。
-                // 动画挂在 offset 上：与面板同曲线同时长，一起滑动
-                .offset(y: -terminalLift)
-                .animation(.smooth(duration: 0.25), value: terminalLift)
-                .clipped()
-                // 终端页与系统键盘绝缘：键盘只属于模态成文层
-                .ignoresSafeArea(.keyboard)
-                // Agent secret request cards (plan 20260926-ios-secret-input): anchored at the top of
-                // the terminal page below the status strip, floating over the terminal. An overlay on
-                // the pager keeps them out of the panel lift/clip and never resizes the terminal; the
-                // keyboard their field raises covers only the bottom of the page.
-                .overlay(alignment: .top) {
-                    if let task = activeTask {
-                        SecretRequestCards(
-                            client: client,
-                            requests: client.pendingSecretRequests(taskID: task.id),
-                            source: secretRequestSource(task),
-                            deviceName: secretRequestDevice(task)
-                        )
-                    }
-                }
-            }
-        }
-        .overlay(alignment: .bottom) {
-            ZStack {
-                if !inputCollapsed, !members.isEmpty {
-                    TerminalInputArea(
-                        client: client,
-                        task: activeTask,
-                        draft: draft,
-                        onCompose: { setComposing(true) },
-                        onDictatePrewarm: { prewarmDictation() },
-                        onDictateBegin: { beginDictation() },
-                        onDictateMove: { dictationZone = DictationZone.hit($0, in: dictationBounds) },
-                        onDictateEnd: { endDictation() },
-                        onDictateAbort: { abortDictation() }
-                    )
-                    .onGeometryChange(for: CGFloat.self) { proxy in
-                        proxy.size.height
-                    } action: { height in
-                        panelHeight = height
-                    }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .animation(.smooth(duration: 0.25), value: inputCollapsed)
-        }
-        // 基座对系统键盘免疫（冻结）；成文层走独立呈现上下文与键盘同层
-        .ignoresSafeArea(.keyboard)
-        .fullScreenCover(isPresented: $composing) {
-            TerminalComposeOverlay(
-                draft: $draft,
-                onSend: { sendDraft() },
-                onDismiss: { setComposing(false) }
-            )
-            // 毛玻璃底在内容层自绘并淡入淡出；呈现层禁默认滑入动画（见 setComposing）
-            .presentationBackground(.clear)
-        }
-        .overlay(alignment: .bottomTrailing) {
-            // 右下浮键列（plan 053 气泡 → 056 常驻两态 → 057 收编新建 → 058 定序）：
-            // 瞬态键置列顶——滚到底浮现时列向上生长，常驻键（新建/键盘）零位移；
-            // 键盘键守最下拇指位（折叠态=展开输入区、展开态=收起输入区，
-            // 收起入口只此一处，输入区内不再有）。
-            // 布局切换刻意不做动画：终端高度一步到位只触发一次 resize，
-            // 动画期间逐帧 resize 会引发远端 TUI 重画闪动；过渡只给浮键自己
-            ZStack {
-                if !members.isEmpty {
-                    VStack(spacing: 12) {
-                        if let taskID = activeTask?.id, atBottomByTask[taskID] == false {
-                            Button {
-                                TerminalModeRegistry.shared.scrollToBottom(taskID: taskID)
-                            } label: {
-                                Image(systemName: "arrow.down.to.line")
-                                    .font(Theme.Fonts.body.weight(.medium))
-                                    .foregroundStyle(Theme.foreground)
-                                    .frame(width: 52, height: 52)
-                            }
-                            .glassEffect(.regular.interactive(), in: .circle)
-                            .accessibilityLabel("滚动到底部")
-                            .transition(.scale.combined(with: .opacity))
-                        }
-                        Button {
-                            createTerminal()
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(Theme.Fonts.body.weight(.medium))
-                                .foregroundStyle(Theme.foreground)
-                                .frame(width: 52, height: 52)
-                        }
-                        .glassEffect(.regular.interactive(), in: .circle)
-                        .accessibilityLabel("新建终端")
-                        Button {
-                            inputCollapsed.toggle()
-                        } label: {
-                            Image(systemName: inputCollapsed ? "keyboard" : "keyboard.chevron.compact.down")
-                                .font(Theme.Fonts.body.weight(.medium))
-                                .foregroundStyle(Theme.foreground)
-                                .frame(width: 52, height: 52)
-                        }
-                        .glassEffect(.regular.interactive(), in: .circle)
-                        .accessibilityLabel(inputCollapsed ? "展开输入区" : "收起输入区")
-                    }
-                }
-            }
-            // 动画只作用于浮键容器内部（ZStack 常驻承接 transition），
-            // 不外溢到布局——外溢会重新引入逐帧 resize 闪动
-            .animation(.smooth(duration: 0.2), value: inputCollapsed)
-            .animation(.smooth(duration: 0.2), value: atBottomByTask)
-            .padding(.trailing, 20)
-            .padding(.bottom, 24)
-            // 展开时抬到控制板上方（纯 transform）：恒用整量面板高——
-            // 终端侧 clamp 后可能不抬，浮键仍须让开面板
-            .offset(y: -panelLift)
-            .animation(.smooth(duration: 0.25), value: panelLift)
-        }
-        .overlay {
-            // 对讲浮层：不用 fullScreenCover（对讲不涉及系统键盘，不需要成文层
-            // 那套呈现层+冻结基座机制），纯 .overlay 铺满即可，叠在其它层之上
-            if dictationOverlayVisible, let dictationSession {
-                DictationOverlay(
-                    session: dictationSession,
-                    zone: dictationZone,
-                    stage: dictationStage,
-                    onDiscard: { closeDictationOverlay() },
-                    onSend: { sendDictation() },
-                    onEdit: { editDictation() }
-                )
-            }
-        }
-        // 按钮几何真相源：蒙层就铺在这个框里，两颗胶囊按 DictationZone 的常量
-        // 从框的底边推出，命中判定（全局坐标）与蒙层绘制（对齐自身底边）同源
-        .onGeometryChange(for: CGRect.self) { proxy in
-            proxy.frame(in: .global)
-        } action: { frame in
-            dictationBounds = frame
-        }
-        .animation(.easeOut(duration: 0.15), value: dictationOverlayVisible)
-        .background(Theme.background)
-        .onChange(of: inputCollapsed) { _, collapsed in
-            UserDefaults.standard.set(collapsed, forKey: Self.padCollapsedKey(workspace.id))
-        }
-        .navigationTitle(navigationTitleText)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if activeTask != nil {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button("停止并删除任务", role: .destructive) { confirmingRemove = true }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                    }
-                    .accessibilityLabel("任务操作")
-                }
-            }
-        }
-        .confirmationDialog("删除任务？", isPresented: $confirmingRemove, titleVisibility: .visible) {
-            Button("停止并删除", role: .destructive) {
-                if let task = activeTask {
-                    Task { await client.closeTask(task) }
-                }
-            }
-        } message: {
-            Text("运行中的会话将被停止，任务从列表移除")
-        }
-        .onAppear {
-            if activeTaskID == nil || !members.contains(where: { $0.id == activeTaskID }) {
-                activeTaskID = members.first?.id
-            }
-            claims.attach(ownership)
-            claimTerminals(activating: activeTaskID)
-        }
-        // Activating a terminal (swipe, chip, card, sidebar, list) takes it from another window.
-        .onChange(of: activeTaskID) { _, id in
-            claimTerminals(activating: id)
-        }
-        // Terminals nobody owns (new ones, or ones another window let go) are taken quietly.
-        .onChange(of: unownedTaskIDs) { _, _ in
-            claimTerminals(activating: nil)
-        }
-        .onChange(of: members.map(\.id)) { _, ids in
-            // 自建任务识别：差集而非"下一个新任务"（workspace-detail.tsx:188，防它端并发建任务误认）
-            if let known = knownTaskIDsBeforeCreate,
-               let mine = ids.first(where: { !known.contains($0) }) {
-                activeTaskID = mine
-                knownTaskIDsBeforeCreate = nil
-                // 自建任务直接启动（web performActivation 同语义）：新任务无 session，
-                // TerminalHostView.bind 只对 RUNNING 任务发 attach，不补这发
-                // 会停在「任务尚未启动」横幅等手动点启动
-                client.startTask(taskID: mine, cols: termCols, rows: termRows)
-            }
-            // 激活任务被删除（本端或它端）：收敛到仍存在的页
-            if let active = activeTaskID, !ids.contains(active) {
-                activeTaskID = ids.last
-            }
-            if activeTaskID == nil { activeTaskID = ids.first }
-        }
+    /// 附件 / 按键 go to the bottom bar (the lower end of the rail on the outer display and in the
+    /// split detail) unless the window lays its bars out horizontally and short: then everything
+    /// stays in the top bar, as in the tall layout.
+    private var bottomBarItems: Bool {
+        layout != .tall && pageSize.height >= pageSize.width
     }
 
-    // MARK: - tab 条（内容组件非导航 chrome；激活指示 = 单一常驻玻璃药丸，
-    // 位置按翻页连续进度在相邻 chip 框架间插值 → 跟手滑动，plan 050）
+    // MARK: - Titles
 
-    private var tabBar: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(members, id: \.id) { task in
-                        tabChip(task)
-                            .onGeometryChange(for: CGRect.self) { proxy in
-                                proxy.frame(in: .named("chipBar"))
-                            } action: { frame in
-                                chipFrames[task.id] = frame
-                            }
-                            .id(task.id)
-                    }
-                }
-                .padding(.horizontal, 16)
-                // 垂直留白必须在 ScrollView 内容里而非外面：药丸边缘高光
-                // 贴着滚动容器裁剪边界会被切掉（真机踩过）
-                .padding(.vertical, 6)
-                .coordinateSpace(.named("chipBar"))
-                .background {
-                    if let frame = pillFrame() {
-                        Color.clear
-                            .glassEffect(.regular, in: .capsule)
-                            .frame(width: frame.width, height: frame.height)
-                            .position(x: frame.midX, y: frame.midY)
-                    }
-                }
-            }
-            .onChange(of: activeTaskID) { _, id in
-                guard let id else { return }
-                withAnimation { proxy.scrollTo(id, anchor: .center) }
-            }
-        }
+    /// A directory workspace (no repository) is the device's terminal: the device names the page.
+    /// 「目录工作区由设备命名」是工作区种类的属性而不是调用方偏好，故在此解析。
+    private var deviceLabel: String {
+        client.deviceName(workspace.daemonID)
     }
 
-    /// 药丸目标框架：翻页进度的整数部分定相邻 chip 对，小数部分线性插值。
-    private func pillFrame() -> CGRect? {
-        let ids = members.map(\.id)
-        guard !ids.isEmpty else { return nil }
-        let progress = min(max(pageProgress, 0), CGFloat(ids.count - 1))
-        let index = Int(progress.rounded(.down))
-        let fraction = progress - CGFloat(index)
-        guard let from = chipFrames[ids[index]] else { return nil }
-        guard fraction > 0, index + 1 < ids.count, let to = chipFrames[ids[index + 1]] else { return from }
-        return CGRect(
-            x: from.minX + (to.minX - from.minX) * fraction,
-            y: from.minY + (to.minY - from.minY) * fraction,
-            width: from.width + (to.width - from.width) * fraction,
-            height: from.height + (to.height - from.height) * fraction
-        )
+    private func terminalName(_ task: Coflux_V1_Task) -> String {
+        if let agent = client.agent(forTask: task), !agent.agent.isEmpty { return agent.agent }
+        return taskTitle(task)
     }
 
-    private func tabChip(_ task: Coflux_V1_Task) -> some View {
-        let active = task.id == activeTaskID
-        return Button {
-            withAnimation(.smooth(duration: 0.3)) { activeTaskID = task.id }
-        } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(statusColor(task))
-                    .frame(width: 6, height: 6)
-                Text(taskTitle(task))
-                    .font(Theme.Fonts.label.weight(active ? .semibold : .regular))
-                    .lineLimit(1)
-                // This terminal's agent is waiting for a secret (plan 20260926-ios-secret-input).
-                if client.secretRequests.values.contains(where: { $0.taskID == task.id }) {
-                    Image(systemName: "key.fill")
-                        .font(Theme.Fonts.meta)
-                        .foregroundStyle(Theme.warning)
-                        .accessibilityLabel("等待输入")
-                }
-            }
-            .foregroundStyle(active ? Theme.foreground : Theme.mutedForeground)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
+    private var titleText: String {
+        if isDirWorkspace(workspace) {
+            let label = deviceLabel
+            return label.isEmpty ? workspace.name : label
         }
-        // 长按复制终端标识（plan 20260914）：终端在 iOS 上没有列表行，只有这枚 chip，
-        // 复制入口就挂在它身上；短按切 tab 不受影响。
-        .copyHandleContextMenu(.terminal, id: task.id)
+        return activeTask.map(terminalName) ?? workspace.displayTitle
+    }
+
+    private var subtitleText: String {
+        if isDirWorkspace(workspace) {
+            return activeTask.map(terminalName) ?? ""
+        }
+        let project = client.projects.first { $0.id == workspace.projectID }?.name ?? workspace.displayTitle
+        return [project, deviceLabel].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     private func taskTitle(_ task: Coflux_V1_Task) -> String {
         task.title.isEmpty ? "任务 \(task.id.prefix(6))" : task.title
     }
 
-    /// 设备 · 工作区 · 终端 — where a secret request comes from, as on the desktop card.
-    private func secretRequestDevice(_ task: Coflux_V1_Task) -> String {
-        let daemon = client.daemons.first { $0.daemonID == task.daemonID }
-        return daemon.map { $0.name.isEmpty ? $0.host : $0.name } ?? ""
+    // MARK: - Body
+
+    var body: some View {
+        pageContent
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.terminal)
+            // 基座对系统键盘免疫（冻结）；成文层走独立呈现上下文与键盘同层
+            .ignoresSafeArea(.keyboard)
+            .overlay {
+                // 对讲浮层：不涉及系统键盘，纯 .overlay 铺满即可，叠在其它层之上
+                if dictationOverlayVisible, let dictationSession {
+                    DictationOverlay(
+                        session: dictationSession,
+                        zone: dictationZone,
+                        stage: dictationStage,
+                        onDiscard: { closeDictationOverlay() },
+                        onSend: { sendDictation() },
+                        onEdit: { editDictation() }
+                    )
+                }
+            }
+            // 按钮几何真相源：蒙层就铺在这个框里，按钮由 DictationZone.Geometry 从框的尺寸推出，
+            // 命中判定（全局坐标）与蒙层绘制（对齐自身）同源
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .global)
+            } action: { frame in
+                dictationBounds = frame
+                pageSize = frame.size
+            }
+            .animation(.easeOut(duration: 0.15), value: dictationOverlayVisible)
+            .navigationTitle(titleText)
+            .navigationSubtitle(subtitleText)
+            .navigationBarTitleDisplayMode(.inline)
+            // The bottom of the rail belongs to this page's toolbar, not the tab bar.
+            .toolbar(.hidden, for: .tabBar)
+            .toolbar { toolbarContent }
+            .fullScreenCover(isPresented: $composing) {
+                TerminalComposeOverlay(
+                    draft: $draft,
+                    ready: terminalReady,
+                    placeholder: composerPlaceholder,
+                    onSend: { sendDraft(withEnter: $0) },
+                    onPhoto: { data, type in keySender.uploadImage(data: data, typeIdentifier: type, prefix: "photo") },
+                    onDismiss: { setComposing(false) }
+                )
+                // 毛玻璃底在内容层自绘并淡入淡出；呈现层禁默认滑入动画（见 setComposing）
+                .presentationBackground(.clear)
+            }
+            .sheet(isPresented: $showingKeypad) {
+                TerminalKeypad(client: client, task: activeTask, onClose: { showingKeypad = false })
+                    .padding(.horizontal, 16)
+                    .padding(.top, 14)
+                    .padding(.bottom, 8)
+                    // A detent that leaves the terminal's upper part visible and usable: the panel
+                    // stays open while keys are pressed.
+                    .presentationDetents([.height(372), .large])
+                    .presentationBackgroundInteraction(.enabled(upThrough: .height(372)))
+                    .presentationBackground(Theme.card)
+                    .presentationCornerRadius(34)
+                    .presentationDragIndicator(.visible)
+            }
+            .sheet(isPresented: $showingPhotoPicker) {
+                PhotoPicker(isPresented: $showingPhotoPicker) { data, typeIdentifier in
+                    keySender.uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "photo")
+                }
+            }
+            .sheet(isPresented: $showingFilePicker) {
+                FilePicker(isPresented: $showingFilePicker) { url in
+                    keySender.uploadFile(url: url)
+                }
+            }
+            .sheet(item: $secretSheet) { target in
+                SecretRequestSheet(client: client, taskID: target.taskID)
+            }
+            .confirmationDialog("删除任务？", isPresented: $confirmingRemove, titleVisibility: .visible) {
+                Button("停止并删除", role: .destructive) {
+                    if let task = activeTask {
+                        Task { await client.closeTask(task) }
+                    }
+                }
+            } message: {
+                Text("运行中的会话将被停止，任务从列表移除")
+            }
+            .onAppear {
+                if activeTaskID == nil || !members.contains(where: { $0.id == activeTaskID }) {
+                    activeTaskID = members.first?.id
+                }
+                claims.attach(ownership)
+                claimTerminals(activating: activeTaskID)
+            }
+            // Activating a terminal (swipe, list, card, sidebar) takes it from another window.
+            .onChange(of: activeTaskID) { _, id in
+                claimTerminals(activating: id)
+            }
+            // Terminals nobody owns (new ones, or ones another window let go) are taken quietly.
+            .onChange(of: unownedTaskIDs) { _, _ in
+                claimTerminals(activating: nil)
+            }
+            .onChange(of: members.map(\.id)) { _, ids in
+                // 自建任务识别：差集而非"下一个新任务"（workspace-detail.tsx:188，防它端并发建任务误认）
+                if let known = knownTaskIDsBeforeCreate,
+                   let mine = ids.first(where: { !known.contains($0) }) {
+                    activeTaskID = mine
+                    knownTaskIDsBeforeCreate = nil
+                    // 自建任务直接启动：新任务无 session，TerminalHostView.bind 只对 RUNNING 任务发
+                    // attach，不补这发会停在「任务尚未启动」横幅等手动点启动
+                    client.startTask(taskID: mine, cols: termCols, rows: termRows)
+                }
+                // 激活任务被删除（本端或它端）：收敛到仍存在的页
+                if let active = activeTaskID, !ids.contains(active) {
+                    activeTaskID = ids.last
+                }
+                if activeTaskID == nil { activeTaskID = ids.first }
+            }
     }
 
-    private func secretRequestSource(_ task: Coflux_V1_Task) -> String {
-        let device = secretRequestDevice(task)
-        let workspaceLabel = workspace.branch.isEmpty ? workspace.name : workspace.branch
-        return [device, workspaceLabel, taskTitle(task)].filter { !$0.isEmpty }.joined(separator: " · ")
-    }
-
-    private func statusColor(_ task: Coflux_V1_Task) -> Color {
-        switch task.status {
-        case .running: return client.detachedTaskIDs.contains(task.id) ? Theme.warning : Theme.success
-        case .exited: return task.exitCode == 0 ? Theme.subtleForeground : Theme.destructive
-        default: return Theme.subtleForeground
+    @ViewBuilder
+    private var pageContent: some View {
+        if members.isEmpty {
+            emptyState
+        } else {
+            ZStack(alignment: .bottom) {
+                terminalColumn(reserveDock: true)
+                dock(inlineKeypad: false)
+            }
         }
+    }
+
+    /// Status strip + the pager. With `reserveDock` the terminal ends above the resting dock.
+    private func terminalColumn(reserveDock: Bool) -> some View {
+        VStack(spacing: 0) {
+            if let task = activeTask {
+                statusStrip(task)
+            }
+            pager
+                .overlay(alignment: .bottomTrailing) {
+                    scrollToBottomButton
+                }
+        }
+        .padding(.bottom, reserveDock ? restingDockHeight : 0)
+    }
+
+    /// 分页容器用 ScrollView：全部任务页同时挂载（各自 attach 保活），左右滑动切换。第一页再往回
+    /// 滑不再返回列表（D16）：返回只走系统返回。
+    private var pager: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 0) {
+                ForEach(members, id: \.id) { task in
+                    taskPage(task)
+                        .containerRelativeFrame(.horizontal)
+                        .id(task.id)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollPosition(id: activeTaskBinding)
+        .scrollIndicators(.hidden)
+        .clipped()
+        // 终端页与系统键盘绝缘：键盘只属于模态成文层
+        .ignoresSafeArea(.keyboard)
+    }
+
+    private func dock(inlineKeypad: Bool) -> some View {
+        TerminalInputArea(
+            client: client,
+            task: activeTask,
+            draft: draft,
+            foldKeyRow: shortWindow && !inlineKeypad,
+            inlineKeypad: inlineKeypad,
+            onCompose: { setComposing(true) },
+            onSend: { withEnter in sendFromDock(withEnter: withEnter) },
+            onOpenSecret: { openSecretSheet() },
+            onDictatePrewarm: { prewarmDictation() },
+            onDictateBegin: { beginDictation() },
+            onDictateMove: { dictationZone = DictationZone.hit($0, in: dictationBounds) },
+            onDictateEnd: { endDictation() },
+            onDictateAbort: { abortDictation() }
+        )
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.height
+        } action: { height in
+            if !inlineKeypad { restingDockHeight = height }
+        }
+    }
+
+    /// Transient: shown while the active terminal is scrolled away from its bottom.
+    @ViewBuilder
+    private var scrollToBottomButton: some View {
+        ZStack {
+            if let taskID = activeTask?.id, atBottomByTask[taskID] == false {
+                Button {
+                    TerminalModeRegistry.shared.scrollToBottom(taskID: taskID)
+                } label: {
+                    Image(systemName: "arrow.down.to.line")
+                        .font(Theme.Fonts.label.weight(.semibold))
+                        .foregroundStyle(Theme.foreground)
+                        .frame(width: 40, height: 40)
+                        .background(Theme.card, in: Circle())
+                        .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("滚动到底部")
+                .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .padding(12)
+        .animation(.smooth(duration: 0.2), value: atBottomByTask)
+    }
+
+    // MARK: - Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if members.isEmpty {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    createTerminal()
+                } label: {
+                    Label("新建终端", systemImage: "plus")
+                }
+            }
+        } else if bottomBarItems {
+            ToolbarItem(placement: .topBarTrailing) { terminalsMenu }
+                .visibilityPriority(.high)
+            ToolbarItem(placement: .topBarTrailing) { moreMenu }
+                .visibilityPriority(.high)
+            ToolbarItem(placement: .bottomBar) { attachMenu }
+                .visibilityPriority(.low)
+            ToolbarItem(placement: .bottomBar) { keypadButton }
+        } else {
+            ToolbarItem(placement: .topBarTrailing) { terminalsMenu }
+                .visibilityPriority(.high)
+            ToolbarItem(placement: .topBarTrailing) { attachMenu }
+                .visibilityPriority(.low)
+            ToolbarItem(placement: .topBarTrailing) { keypadButton }
+            ToolbarItem(placement: .topBarTrailing) { moreMenu }
+                .visibilityPriority(.high)
+        }
+    }
+
+    /// This workspace's terminals with their state, plus 新建终端. The badge counts the other
+    /// terminals that wait for the user.
+    private var terminalsMenu: some View {
+        Menu {
+            Picker("终端", selection: activeTaskBinding.animation(.smooth(duration: 0.3))) {
+                ForEach(members, id: \.id) { task in
+                    Label(terminalMenuTitle(task), systemImage: statusSymbol(task))
+                        .tag(Optional(task.id))
+                }
+            }
+            .pickerStyle(.inline)
+            Button("新建终端", systemImage: "plus") {
+                createTerminal()
+            }
+        } label: {
+            Label("终端", systemImage: "rectangle.stack")
+        }
+        .badge(otherWaitingCount)
+    }
+
+    private var attachMenu: some View {
+        Menu {
+            Button("相册", systemImage: "photo") { showingPhotoPicker = true }
+            Button("文件", systemImage: "folder") { showingFilePicker = true }
+        } label: {
+            Label("附件", systemImage: "paperclip")
+        }
+        .disabled(keySender.sessionID == nil || keySender.uploading)
+        .accessibilityLabel("上传文件到终端")
+    }
+
+    private var keypadButton: some View {
+        Button {
+            showingKeypad.toggle()
+        } label: {
+            Label("按键", systemImage: "keyboard")
+        }
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            if let task = activeTask {
+                if !client.pendingSecretRequests(taskID: task.id).isEmpty {
+                    Button("提供 Agent 请求的输入", systemImage: "key") { openSecretSheet() }
+                }
+                // 复制终端标识（plan 20260914）：曾挂在终端 tab chip 的长按上
+                if let handle = EntityHandle.make(.terminal, id: task.id) {
+                    Button("复制终端标识", systemImage: "doc.on.doc") {
+                        UIPasteboard.general.string = handle
+                    }
+                }
+                Button("停止并删除任务", systemImage: "trash", role: .destructive) {
+                    confirmingRemove = true
+                }
+            }
+        } label: {
+            Label("更多", systemImage: "ellipsis")
+        }
+    }
+
+    private func terminalMenuTitle(_ task: Coflux_V1_Task) -> String {
+        guard let agent = client.agent(forTask: task), !agent.agent.isEmpty else { return taskTitle(task) }
+        return "\(taskTitle(task)) · \(agent.agent)"
+    }
+
+    private func waits(_ task: Coflux_V1_Task) -> Bool {
+        if !client.pendingSecretRequests(taskID: task.id).isEmpty { return true }
+        let state = client.agent(forTask: task)?.state
+        return state == "approval" || state == "question"
+    }
+
+    private var otherWaitingCount: Int {
+        members.filter { $0.id != activeTaskID && waits($0) }.count
+    }
+
+    /// Shape as well as colour: the menu renders its icons in one tint.
+    private func statusSymbol(_ task: Coflux_V1_Task) -> String {
+        if waits(task) { return "exclamationmark.bubble.fill" }
+        switch task.status {
+        case .running: return client.detachedTaskIDs.contains(task.id) ? "eye" : "circle.fill"
+        case .exited: return task.exitCode == 0 ? "checkmark.circle" : "xmark.circle"
+        default: return "circle"
+        }
+    }
+
+    private func openSecretSheet() {
+        guard let task = activeTask else { return }
+        secretSheet = SecretSheetTarget(taskID: task.id)
     }
 
     // MARK: - Window ownership (plan D12)
@@ -503,7 +492,7 @@ struct WorkspaceDetailView: View {
         .background(Theme.terminal)
     }
 
-    // MARK: - 任务页（statusStrip + 终端，逐任务保活）
+    // MARK: - 任务页（逐任务保活）
 
     @ViewBuilder
     private func taskPage(_ task: Coflux_V1_Task) -> some View {
@@ -518,8 +507,7 @@ struct WorkspaceDetailView: View {
                     termCols = cols
                     termRows = rows
                 },
-                onAtBottomChanged: { atBottomByTask[task.id] = $0 },
-                onBottomSlackChanged: { bottomSlackByTask[task.id] = $0 }
+                onAtBottomChanged: { atBottomByTask[task.id] = $0 }
             )
         }
     }
@@ -540,7 +528,9 @@ struct WorkspaceDetailView: View {
             Button("新建终端") { createTerminal() }
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.primary)
+                .foregroundStyle(Theme.primaryForeground)
         }
+        .background(Theme.background)
     }
 
     private func createTerminal() {
@@ -548,71 +538,82 @@ struct WorkspaceDetailView: View {
         client.createTask(workspaceID: workspace.id, title: "终端 \(members.count + 1)")
     }
 
-    /// fullScreenCover 默认自下滑入/滑出；成文层要的是背景淡入淡出（内容层
-    /// 自己做 fade），故呈现切换一律禁系统动画
+    // MARK: - Sending
+
+    private var keySender: TerminalKeySender {
+        TerminalKeySender(client: client, task: activeTask)
+    }
+
+    private var composerPlaceholder: String {
+        guard let task = activeTask, let agent = client.agent(forTask: task), !agent.agent.isEmpty else {
+            return "输入命令…"
+        }
+        return "回复 \(agent.agent)…"
+    }
+
+    /// fullScreenCover 默认自下滑入/滑出；成文层要的是背景淡入淡出（内容层自己做 fade），
+    /// 故呈现切换一律禁系统动画
     private func setComposing(_ on: Bool) {
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) { composing = on }
     }
 
-    /// sendText 的静默前置条件：任务在跑且有 session。不满足时 sendText 什么
-    /// 都不做，调用方要自己兜底（对讲落地会退到草稿，不让话凭空丢）。
+    /// 发送的前置条件：任务在跑且有 session。不满足时什么都不发，调用方自己兜底（成文层留驻
+    /// 提示「终端未运行」，对讲落地退到草稿，不让话凭空丢）。
     private var terminalReady: Bool {
         guard let task = activeTask else { return false }
         return task.status == .running && task.hasSessionID
     }
 
-    /// 发送文本到激活任务：单行字面文本原样落终端，不追加回车、不包
-    /// bracketed paste（plan 054/055 复议 053——包裹依赖接收端 2004 模式，
-    /// 未开时草稿内 \n 会被当回车执行，即真机「时灵时不灵」根因；提交时机
-    /// 由用户按控制板大回车决定——对讲确认发送也只落文本，回车仍在用户手里，
-    /// plan 067/068）。换行符只可能经粘贴/语音混入，信任边界上以空格拍平。
-    /// 成文草稿与对讲成稿共用此路径（plan 066 landmine：蒙层落文本不得
-    /// 绕过它自行写终端）。
-    private func sendText(_ text: String) {
-        guard terminalReady, let task = activeTask, !text.isEmpty else { return }
-        let payload = text.components(separatedBy: .newlines).joined(separator: " ")
+    /// Writes `text` (+ Enter) to the active terminal as one input (plan D10): the composer, the
+    /// dock's send button and dictation's confirmed send all come through here. Returns whether
+    /// anything was sent.
+    @discardableResult
+    private func sendText(_ text: String, withEnter: Bool) -> Bool {
+        guard terminalReady, let task = activeTask,
+              let payload = ComposerPayload.bytes(text, withEnter: withEnter) else { return false }
         client.sendInput(sessionID: task.sessionID, payload)
+        return true
     }
 
-    private func sendDraft() {
-        sendText(draft)
+    private func sendDraft(withEnter: Bool) -> Bool {
+        guard sendText(draft, withEnter: withEnter) else { return false }
         draft = ""
-        // 呈现层的拆除由 overlay 的 fadeOutAndDismiss 统一走淡出时序，此处不拆
+        return true
     }
 
-    // MARK: - 长按对讲（plan 064 → 066 确认态 → 067 松手直发 → plan 068
-    // 复议恢复确认关卡 → plan 069 乐观启动）：占位条长按开始，蒙层底部两颗
-    // 按钮（左取消 / 右发送）。快慢两档——按住期间滑进哪颗，松手就直接执行
-    // 哪个；原地松手则进确认态，草稿定格等用户点发送/点文字编辑。转写文字
-    // 落终端必经显式确认：coflux 是纯转文字，识别错误没有兜底（2026-08-01
-    // 用户复议推翻 067 松手直发）。
-    // 采音早于蒙层（plan 069）：按下即起 session（prewarm），长按判定通过才
-    // 显示蒙层（begin），未达长按松手则静默拆掉（abort）——按下瞬间说的话由
-    // session 的 pendingPCM 接住，蒙层显现时草稿里已有第一个词。
+    /// The dock's send button: sends the draft when the terminal is ready; otherwise opens the
+    /// compose layer, which keeps the draft and says why nothing went out.
+    private func sendFromDock(withEnter: Bool) {
+        guard !draft.isEmpty else { return }
+        if !sendDraft(withEnter: withEnter) {
+            setComposing(true)
+        }
+    }
 
-    /// 按下即采音（plan 069）：touch down 去抖后起 session，蒙层不显示。
-    /// 长按判定通过时 beginDictation 直接接管这个 session——不得丢弃重建，
-    /// 那样预热采到的音全废，等于没做（landmine）。按下抖动可能重入，
-    /// 靠 session 非空幂等去重。
-    /// 未授权时整段跳过（判据见 DictationSession.permissionsGranted）：否则
-    /// 首次点一下占位条想打字就弹麦克风权限框。
+    // MARK: - 长按对讲（plan 064 → 066 确认态 → 067 松手直发 → plan 068 复议恢复确认关卡 →
+    // plan 069 乐观启动）：composer 长按开始，蒙层上两颗按钮（左取消 / 右发送）。按住期间滑进哪颗，
+    // 松手就直接执行哪个；原地松手则进确认态，草稿定格等用户点发送/点文字编辑。转写文字落终端
+    // 必经显式确认：coflux 是纯转文字，识别错误没有兜底。
+
+    /// 按下即采音（plan 069）：touch down 去抖后起 session，蒙层不显示。长按判定通过时
+    /// beginDictation 直接接管这个 session——不得丢弃重建。未授权时整段跳过：否则首次点一下
+    /// composer 想打字就弹麦克风权限框。
     private func prewarmDictation() {
         guard dictationSession == nil, DictationSession.permissionsGranted else { return }
         startDictation()
     }
 
-    /// 长按判定通过：显示蒙层。session 通常已在预热中（复用）；未授权/预热被
-    /// 跳过时此刻才起，走完整 start()（含权限请求），与 069 之前完全一致。
+    /// 长按判定通过：显示蒙层。session 通常已在预热中（复用）；未授权/预热被跳过时此刻才起，
+    /// 走完整 start()（含权限请求）。
     private func beginDictation() {
         if dictationSession == nil { startDictation() }
         dictationOverlayVisible = true
     }
 
-    /// 未达长按就松手（plan 069）：静默拆预热 session，不弹任何提示——麦克风
-    /// 必须在这条路径上释放，否则悬挂 tap 让下次长按静音或崩溃（AudioCapture
-    /// landmine）。蒙层已显示 = 走的是正常松手分发（endDictation），不插手。
+    /// 未达长按就松手（plan 069）：静默拆预热 session——麦克风必须在这条路径上释放，否则悬挂
+    /// tap 让下次长按静音或崩溃（AudioCapture landmine）。蒙层已显示 = 正常松手分发，不插手。
     private func abortDictation() {
         guard !dictationOverlayVisible, let session = dictationSession else { return }
         dictationSession = nil
@@ -636,14 +637,10 @@ struct WorkspaceDetailView: View {
 
     /// 松手分发：按松手瞬间命中的按钮决定去向。
     /// - 取消：立即弃稿拆层，不等终稿；
-    /// - 其余：finalizing 短暂留驻等 session.finish() 落定拿终稿——finish()
-    ///   在松手瞬间就跑（松手即释放麦克风，不能拖到用户点发送，landmine），
-    ///   且落定前不得拆 session/蒙层（权限引导会闪没，plan 066 landmine），
-    ///   也不得用松手瞬间的 volatile 文本抢跑。终稿到手后：
-    ///   滑入发送 → 直接落终端输入行并拆层（手指滑过去就是明确意图）；
-    ///   原地松手 → 停在确认态等显式点击；空转写 → 直接拆层，什么都不落；
-    ///   权限被拒 / 无字可看的失败保留 064 的留驻示错态（点任意处关闭），
-    ///   失败带字则并入确认态（蒙层在气泡下加错误标注，文字仍可发送/编辑）。
+    /// - 其余：finalizing 短暂留驻等 session.finish() 落定拿终稿（finish() 在松手瞬间就跑，松手
+    ///   即释放麦克风；落定前不得拆 session/蒙层，也不得用 volatile 文本抢跑）。终稿到手后：
+    ///   滑入发送 → 直接落终端（文字 + 回车）并拆层；原地松手 → 停在确认态；空转写 → 直接拆层；
+    ///   权限被拒 / 无字可看的失败留驻示错，失败带字则并入确认态。
     private func endDictation() {
         guard let session = dictationSession else { return }
         let zone = dictationZone
@@ -675,8 +672,7 @@ struct WorkspaceDetailView: View {
         }
     }
 
-    /// 确认态点「发送」：终稿已落定（确认态只在 finish() 返回后才出现），
-    /// 直接取当前文本落地。
+    /// 确认态点「发送」：终稿已落定，直接取当前文本落地。
     private func sendDictation() {
         guard let session = dictationSession else { return }
         let text = session.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -684,8 +680,7 @@ struct WorkspaceDetailView: View {
         deliver(text)
     }
 
-    /// 确认态点草稿文字：落 draft 开成文层继续编辑（plan 066 的通道，
-    /// 067 删掉，068 恢复）。
+    /// 确认态点草稿文字：落 draft 开成文层继续编辑。
     private func editDictation() {
         guard let session = dictationSession else { return }
         let text = session.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -694,13 +689,11 @@ struct WorkspaceDetailView: View {
         setComposing(true)
     }
 
-    /// 对讲成稿落地：能直发就走 sendText（单行不回车）；落不下去（任务已退出/
-    /// 无 session，sendText 会静默 no-op）退到草稿，用户的话不能凭空消失。
+    /// 对讲成稿落地：走与成文层同一条「文字 + 回车」路径；落不下去（任务已退出/无 session）
+    /// 退到草稿，用户的话不能凭空消失。
     private func deliver(_ text: String) {
         guard !text.isEmpty else { return }
-        if terminalReady {
-            sendText(text)
-        } else {
+        if !sendText(text, withEnter: true) {
             draft = text
         }
     }

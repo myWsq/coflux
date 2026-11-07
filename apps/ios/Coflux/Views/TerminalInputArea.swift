@@ -5,159 +5,523 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// 终端输入区（plan 053）——移动端两层输入模型：
-/// - 成文层：单行原生输入框 + 系统输入法（中文可用），整行编辑一次发送；
-///   发送 = 仅落字面文本不回车（plan 054/055 复议 053），回车由控制板大回车键补。
-/// - 控制层：精简键盘（数字/Esc//、Tab/⇧Tab/⌫、^C/方向/回车），单键直发。
-///   无字母（字母走成文层），故不设粘滞 Ctrl——组合键以专用键给出（^C）。
-/// 终端本体是纯显示（DisplayOnlyTerminalView），软键盘输入全部从这里走
-/// client.sendInput，路由到激活任务的 session；无 RUNNING session 时禁用。
+/// The bytes a composed text sends (plan D10): line breaks — which only paste or dictation can
+/// bring in — are flattened to spaces at the trust boundary, and Enter is appended unless the user
+/// long-pressed send. Never wrapped in bracketed paste: that depends on the receiver's mode 2004,
+/// and the text must land the same way in every program. nil = nothing to send.
+enum ComposerPayload {
+    static func bytes(_ text: String, withEnter: Bool) -> String? {
+        guard !text.isEmpty else { return nil }
+        let flat = text.components(separatedBy: .newlines).joined(separator: " ")
+        return withEnter ? flat + "\r" : flat
+    }
+}
+
+/// Sends keys and uploads to the active terminal's session. Shared by the dock's key row and the
+/// full keypad, so every key sends exactly what the old control pad sent.
+@MainActor
+struct TerminalKeySender {
+    let client: CofluxClient
+    let task: Coflux_V1_Task?
+
+    /// The running session keys go to; nil disables the keys.
+    var sessionID: String? {
+        guard let task, task.status == .running, task.hasSessionID else { return nil }
+        return task.sessionID
+    }
+
+    /// 上传忙态（plan 071）：相册/文件/粘贴三个入口共享——同一 session 同刻只有一次上传在途
+    /// （CofluxClient.uploadFile 自身也有此门控，这里只管 UI 呈现）。
+    var uploading: Bool {
+        sessionID.map { client.uploadingSessionIDs.contains($0) } ?? false
+    }
+
+    func press(_ bytes: String) {
+        guard let sessionID else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        client.sendInput(sessionID: sessionID, bytes)
+    }
+
+    /// 方向键按下时查激活终端的 DECCKM：应用模式发 SS3（ESC O），否则 CSI（ESC [）。
+    /// The registry is owner-guarded, so after a terminal moves between windows this reads the
+    /// mode of the view that owns it now.
+    func arrowBytes(_ letter: String) -> String {
+        let application = task.map { TerminalModeRegistry.shared.applicationCursor(taskID: $0.id) } ?? false
+        return (application ? "\u{1b}O" : "\u{1b}[") + letter
+    }
+
+    /// 粘贴：剪贴板有图先走上传（plan 071），否则回落系统剪贴板文本直发终端；剪贴板天然可能
+    /// 多行，包 bracketed paste 防换行在开 2004 的接收端被当提交。
+    func paste() {
+        if let (data, typeIdentifier) = clipboardImageData() {
+            uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "paste")
+            return
+        }
+        guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
+        press("\u{1b}[200~" + text + "\u{1b}[201~")
+    }
+
+    /// 剪贴板原始图片字节（plan 071 landmine）：UIPasteboard.image 返回的是系统重新解码的
+    /// UIImage，会丢原始字节；data(forPasteboardType:) 才是未经改动的原始数据，只在超预算时
+    /// 才允许重编码。
+    private func clipboardImageData() -> (Data, String)? {
+        let pasteboard = UIPasteboard.general
+        for uti in [UTType.png.identifier, UTType.jpeg.identifier, UTType.heic.identifier] {
+            if let data = pasteboard.data(forPasteboardType: uti), !data.isEmpty {
+                return (data, uti)
+            }
+        }
+        return nil
+    }
+
+    /// 图片上传编排（plan 071）：ImagePipeline.process 是 nonisolated async——await 时真正跑在
+    /// 后台线程，大图解码/重编码不占用 MainActor。命名单段 `<前缀>-<epoch毫秒>-<短随机><ext>`
+    /// （temp 模式 path 只认单段文件名，device.proto:453 注释）。
+    func uploadImage(data: Data, typeIdentifier: String?, prefix: String) {
+        guard let sessionID else { return }
+        let client = self.client
+        Task {
+            guard let (payload, ext) = await ImagePipeline.process(data: data, typeIdentifier: typeIdentifier) else {
+                client.reportLocalError("图片处理失败")
+                return
+            }
+            await client.uploadFile(
+                sessionID: sessionID, data: payload, suggestedName: Self.uploadName(prefix: prefix, ext: ext)
+            )
+        }
+    }
+
+    /// 文件上传编排（plan 071）：asCopy 拿到的沙盒拷贝直接读字节，原文件名只取安全扩展名。
+    /// 超上限由 CofluxClient.uploadFile→DeviceRouter.fsWrite 前置拦截并报错，这里不重复判断。
+    /// ponytail: Data(contentsOf:) 在 MainActor 上同步读（asCopy 沙盒拷贝，上限 30MB）；
+    /// 若真机测出卡顿再挪后台线程。
+    func uploadFile(url: URL) {
+        guard let sessionID else { return }
+        let client = self.client
+        Task {
+            guard let data = try? Data(contentsOf: url) else {
+                client.reportLocalError("读取文件失败")
+                return
+            }
+            let name = Self.uploadName(prefix: "file", ext: Self.safeExtension(url.lastPathComponent))
+            await client.uploadFile(sessionID: sessionID, data: data, suggestedName: name)
+        }
+    }
+
+    /// 单段上传文件名（plan 071 命名规则）：<前缀>-<epoch毫秒>-<短随机><ext>（ext 含前导点，可为空）。
+    private static func uploadName(prefix: String, ext: String) -> String {
+        let suffix = String((0 ..< 6).compactMap { _ in "abcdefghijklmnopqrstuvwxyz0123456789".randomElement() })
+        return "\(prefix)-\(Int(Date().timeIntervalSince1970 * 1000))-\(suffix)\(ext)"
+    }
+
+    /// web safeDropExtension 同原则：只保留 ASCII 字母数字扩展名（1-16 字符），否则丢扩展名。
+    private static func safeExtension(_ filename: String) -> String {
+        guard let dotIndex = filename.lastIndex(of: "."), dotIndex != filename.startIndex else { return "" }
+        let ext = filename[filename.index(after: dotIndex)...]
+        guard (1 ... 16).contains(ext.count), ext.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else {
+            return ""
+        }
+        return ".\(ext)"
+    }
+}
+
+// MARK: - Key caps
+
+/// How a key cap is drawn.
+enum KeyStyle {
+    case normal
+    /// ^C: destructive text
+    case destructive
+    /// Option digits while an agent waits: amber fill
+    case hot
+    /// ⏎: inverted primary
+    case enter
+}
+
+/// A key cap: mockup 40 pt high (46 enlarged), radius 13, glass-like input fill.
+struct KeyCap: View {
+    var label: String?
+    var systemImage: String?
+    var style: KeyStyle = .normal
+    var height: CGFloat = Theme.Metrics.keyHeight
+    var large = false
+
+    var body: some View {
+        Group {
+            if let systemImage {
+                Image(systemName: systemImage)
+            } else {
+                Text(label ?? "")
+            }
+        }
+        .font(large ? Theme.Fonts.keyLarge : Theme.Fonts.key)
+        .foregroundStyle(foreground)
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
+        .background(background, in: RoundedRectangle(cornerRadius: Theme.Metrics.keyRadius))
+        .overlay {
+            RoundedRectangle(cornerRadius: Theme.Metrics.keyRadius)
+                .strokeBorder(stroke, lineWidth: 1)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: Theme.Metrics.keyRadius))
+    }
+
+    private var foreground: Color {
+        switch style {
+        case .normal: Theme.foreground
+        case .destructive: Theme.destructive
+        case .hot: Theme.warning
+        case .enter: Theme.primaryForeground
+        }
+    }
+
+    private var background: Color {
+        switch style {
+        case .normal, .destructive: Theme.input
+        case .hot: Theme.warning.opacity(0.16)
+        case .enter: Theme.primary
+        }
+    }
+
+    private var stroke: Color {
+        switch style {
+        case .normal, .destructive: Theme.border
+        case .hot: Theme.warning.opacity(0.35)
+        case .enter: .clear
+        }
+    }
+}
+
+/// Dims a pressed key a little: keys react without any custom timing.
+struct KeyPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.6 : 1)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+}
+
+/// A key that sends its bytes once per tap.
+struct TerminalKey: View {
+    let sender: TerminalKeySender
+    var label: String?
+    var systemImage: String?
+    var style: KeyStyle = .normal
+    var height: CGFloat = Theme.Metrics.keyHeight
+    var large = false
+    let bytes: () -> String
+
+    var body: some View {
+        Button {
+            sender.press(bytes())
+        } label: {
+            KeyCap(label: label, systemImage: systemImage, style: style, height: height, large: large)
+        }
+        .buttonStyle(KeyPressStyle())
+    }
+}
+
+/// 可连发键（方向/退格）：按下即发一次（实体键盘语义），按住 0.35s 后以 80ms 间隔连发，松手停。
+struct RepeatKey: View {
+    let sender: TerminalKeySender
+    var label: String?
+    var systemImage: String?
+    var height: CGFloat = Theme.Metrics.keyHeight
+    var large = false
+    let bytes: () -> String
+    @State private var timer: Timer?
+
+    var body: some View {
+        KeyCap(label: label, systemImage: systemImage, height: height, large: large)
+            .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 40) {
+                guard let sessionID = sender.sessionID else { return }
+                // 连发期间序列求值一次即可（按住途中 DECCKM 不会切换）；只捕获 Sendable 值跨进 Timer 闭包
+                let payload = bytes()
+                let client = sender.client
+                timer?.invalidate()
+                timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in
+                    Task { @MainActor in client.sendInput(sessionID: sessionID, payload) }
+                }
+            } onPressingChanged: { pressing in
+                if pressing {
+                    sender.press(bytes())
+                } else {
+                    stop()
+                }
+            }
+            .onDisappear { stop() }
+    }
+
+    private func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+}
+
+// MARK: - The dock
+
+/// The terminal page's dock (plan D11/D13, mockup O2/O3): an optional notice bar, a key row that
+/// follows the agent, and a one-line composer, pinned to the bottom of the content area.
+///
+/// - Key row: when the active terminal's agent is in `approval` or `question` it becomes the
+///   enlarged option keys `1 2 3 ↑ ↓ ⏎` (only the keys' bytes are sent — the menu text is never
+///   parsed); otherwise `esc ^C tab ↑ ↓ /`, plus `← →` when the dock is wide enough to keep keys
+///   at the mockup's size. The row has one fixed height, and the notice bar floats above the dock
+///   outside its measured size, so neither changes the terminal's size.
+/// - Composer: tap opens the compose layer, a long press starts dictation; the send button sends
+///   the draft with Enter (a long press sends it without).
+/// - Short window: `foldKeyRow` moves the key row into the 按键 toolbar item (only the composer
+///   stays). Laptop pose: `inlineKeypad` shows the composer above the full keypad instead.
+///
+/// 终端本体是纯显示（DisplayOnlyTerminalView），软键盘输入全部从这里走 client.sendInput。
 struct TerminalInputArea: View {
     let client: CofluxClient
     let task: Coflux_V1_Task?
     /// 草稿宿主持有：占位条只做预览，点击进与系统键盘同层的成文层
     let draft: String
+    var foldKeyRow = false
+    var inlineKeypad = false
     let onCompose: () -> Void
-    /// 长按对讲（plan 064；操作台几何 plan 067 → 068；乐观启动 plan 069）：
-    /// 手指落下即请求预热采音（prewarm，去抖后），长按判定通过才进对讲态
-    /// （begin，宿主此刻才显示蒙层），未达长按松手则请求拆掉预热（abort）。
-    /// 对讲期间手指位置（全局坐标）实时外传，由宿主对蒙层底部两颗按钮做命中
-    /// 判定，松手时按最后命中的按钮分发（滑入取消 / 滑入发送 / 原地松手进
-    /// 确认态）——本层不判去向，只管把位置递出去。
+    /// Send the draft (tap: with Enter; long press: without).
+    let onSend: (_ withEnter: Bool) -> Void
+    /// Open the secret request sheet of the active terminal.
+    let onOpenSecret: () -> Void
+    /// 长按对讲（plan 064；操作台几何 plan 067 → 068；乐观启动 plan 069）：手指落下即请求预热采音
+    /// （prewarm，去抖后），长按判定通过才进对讲态（begin，宿主此刻才显示蒙层），未达长按松手则
+    /// 请求拆掉预热（abort）。对讲期间手指位置（全局坐标）实时外传，由宿主对蒙层按钮做命中判定。
     let onDictatePrewarm: () -> Void
     let onDictateBegin: () -> Void
     let onDictateMove: (CGPoint) -> Void
     let onDictateEnd: () -> Void
     let onDictateAbort: () -> Void
-    @State private var repeatTimer: Timer?
+
     @State private var dictateActive = false
     @State private var prewarmTask: Task<Void, Never>?
-    /// 相册/文件 App 选择器呈现态（plan 071）：sheet(isPresented:) 驱动，
-    /// picker 内部选完/取消都会把它拨回 false。
-    @State private var showingPhotoPicker = false
-    @State private var showingFilePicker = false
-    /// 上传来源二选一菜单（2026-08-15 复议 071 的入口位）
-    @State private var showingAttachMenu = false
     /// 对讲预兆的显现度（0-1，plan 069）：按下即向 1 渐变，见 pressChanged
     @State private var dictateHint: Double = 0
-    /// 按压视觉态：GestureState 在手势结束/被系统取消时自动复位，
-    /// 不会像手动 @State 那样在手势中断路径上卡住
+    /// 按压视觉态：GestureState 在手势结束/被系统取消时自动复位
     @GestureState private var pressing = false
+    @State private var width: CGFloat = 0
+    @State private var sendLongPressed = false
 
-    /// 预热去抖（plan 069）：手指落下到真正起采音之间的等待。AudioCapture 用
-    /// `.record` category，激活即打断其它音频播放并点亮状态栏橙点——点一下
-    /// 占位条打字不该付这个代价，正常点击（~60-120ms 抬手）必须被它完全滤掉；
-    /// 同时它远短于长按阈值 0.28s，不影响"按下即说"。
-    /// 注意这不是 plan 066 否掉的自造计时：长按判定与点按/长按的消歧仍全归
-    /// 系统手势，这个定时器只决定预热何时开始，不参与任何手势判定。
+    /// 预热去抖（plan 069）：手指落下到真正起采音之间的等待。正常点击（~60-120ms 抬手）必须被它
+    /// 完全滤掉；它远短于长按阈值 0.28s，不影响"按下即说"。长按判定与点按/长按的消歧仍全归系统
+    /// 手势，这个定时器只决定预热何时开始。
     private static let prewarmDelay = Duration.milliseconds(120)
+    /// `← →` join the row from this dock width on: 8 keys stay at least the mockup's ~55 pt.
+    static let arrowsWidth: CGFloat = 520
 
-    private var sessionID: String? {
-        guard let task, task.status == .running, task.hasSessionID else { return nil }
-        return task.sessionID
+    private var sender: TerminalKeySender {
+        TerminalKeySender(client: client, task: task)
     }
 
-    /// 上传忙态（plan 071）：相册/文件/粘贴三个入口键共享——同一 session 同刻只有
-    /// 一次上传在途（CofluxClient.uploadFile 自身也有此门控，这里只管 UI 呈现）。
-    private var uploading: Bool {
-        sessionID.map { client.uploadingSessionIDs.contains($0) } ?? false
+    private var agent: Coflux_V1_SessionAgentRef? {
+        task.flatMap { client.agent(forTask: $0) }
+    }
+
+    private var waitingState: String? {
+        guard let state = agent?.state, state == "approval" || state == "question" else { return nil }
+        return state
+    }
+
+    private var pendingSecret: SecretRequestInfo? {
+        task.flatMap { client.pendingSecretRequests(taskID: $0.id).first }
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 6) {
-                composerRow
-                attachKey
+        VStack(spacing: 10) {
+            if inlineKeypad {
+                notice
+                composer
+                TerminalKeypad(client: client, task: task)
+            } else {
+                if !foldKeyRow {
+                    keyRow
+                }
+                composer
             }
-            padRows
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
-        .padding(.bottom, 6)
-        .background(Theme.surface)
+        .padding(.bottom, 8)
+        .background {
+            if inlineKeypad {
+                Theme.background
+            } else {
+                // The terminal ends above the dock; a short fade keeps the seam soft.
+                LinearGradient(colors: [Theme.terminal.opacity(0), Theme.terminal], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.2))
+            }
+        }
+        // Outside the measured size: showing or hiding it never resizes the terminal (D13).
         .overlay(alignment: .top) {
-            Rectangle().fill(Theme.border).frame(height: 0.5)
-        }
-        .disabled(sessionID == nil)
-        .opacity(sessionID == nil ? 0.45 : 1)
-        // 两个 picker 的 sheet 挂在根上而非 attachKey 上：菜单收起与 sheet 呈现
-        // 同锚点会撞呈现时序（dialog 未落定即 present，sheet 静默不出）
-        .sheet(isPresented: $showingPhotoPicker) {
-            PhotoPicker(isPresented: $showingPhotoPicker) { data, typeIdentifier in
-                uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "photo")
+            if !inlineKeypad {
+                notice
+                    .padding(.horizontal, 12)
+                    .alignmentGuide(.top) { $0[.bottom] }
             }
         }
-        .sheet(isPresented: $showingFilePicker) {
-            FilePicker(isPresented: $showingFilePicker) { url in
-                uploadFile(url: url)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+        .animation(.smooth(duration: 0.2), value: waitingState)
+    }
+
+    // MARK: Notice bar
+
+    @ViewBuilder
+    private var notice: some View {
+        if let secret = pendingSecret {
+            Button(action: onOpenSecret) {
+                noticeBar(
+                    mark: .secret,
+                    title: "\(agent?.agent ?? "Agent") 请求输入 \(secret.name)",
+                    detail: "点这里提供，值只交给设备"
+                )
             }
+            .buttonStyle(.plain)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+        } else if let state = waitingState, let agent {
+            let name = agent.agent.isEmpty ? "agent" : agent.agent
+            noticeBar(
+                mark: .agent(agent.agent),
+                title: state == "approval" ? "\(name) 要你确认" : "\(name) 在问你",
+                detail: agent.message.isEmpty ? nil : agent.message
+            )
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
         }
     }
 
-    /// 上传入口（plan 071 → 2026-08-15 复议入口位）：原先在控制板独立一行，
-    /// 真机上那行没出来（根因未定），且成文条右侧本就是 iOS 附件惯例位——
-    /// 挪来这里顺带省掉控制板一行高度。相册/文件走系统 confirmationDialog 二选一。
-    private var attachKey: some View {
-        Button {
-            showingAttachMenu = true
-        } label: {
-            keyCap(label: nil, systemImage: "paperclip", tint: Theme.foreground, height: 38)
-        }
-        .frame(width: 44)
-        .disabled(uploading)
-        .opacity(uploading ? 0.5 : 1)
-        .accessibilityLabel("上传文件到终端")
-        .confirmationDialog("上传到终端", isPresented: $showingAttachMenu, titleVisibility: .visible) {
-            Button("相册") { showingPhotoPicker = true }
-            Button("文件") { showingFilePicker = true }
-            Button("取消", role: .cancel) {}
-        }
-    }
-
-    // MARK: - 成文入口（占位条：预览草稿，点击进成文层——基座冻结，
-    // 输入框与系统键盘在独立呈现层同层升降）。收起入口在右下浮键（plan 056）
-
-    private var composerRow: some View {
-        HStack {
-            Text(draft.isEmpty ? "长按说话・点击输入到终端" : draft)
-                .font(Theme.Fonts.label)
-                .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.foreground)
-                .lineLimit(1)
-            Spacer()
-            // 常驻占位、只调透明度：条件插入会让预兆显隐时行内布局跳一下
-            Image(systemName: "mic.fill")
-                .foregroundStyle(Theme.primary)
-                .opacity(dictateHint)
+    private func noticeBar(mark: AgentAvatar.Mark, title: String, detail: String?) -> some View {
+        HStack(spacing: 10) {
+            AgentAvatar(mark: mark, size: 26)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(Theme.Fonts.label.weight(.semibold))
+                    .foregroundStyle(Theme.warning)
+                    .lineLimit(1)
+                if let detail {
+                    Text(detail)
+                        .font(Theme.Fonts.label)
+                        .foregroundStyle(Theme.foreground.opacity(0.8))
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
-        .frame(height: 38)
-        .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
+        .padding(.vertical, 10)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 18))
+        .background(Theme.warning.opacity(0.1), in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Theme.warning.opacity(0.3), lineWidth: 1))
+        .padding(.bottom, 2)
+    }
+
+    // MARK: Key row
+
+    private var keyRow: some View {
+        HStack(spacing: 7) {
+            if waitingState != nil {
+                let large = Theme.Metrics.keyHeightLarge
+                ForEach(["1", "2", "3"], id: \.self) { digit in
+                    TerminalKey(sender: sender, label: digit, style: .hot, height: large, large: true) { digit }
+                }
+                RepeatKey(sender: sender, label: "↑", height: large, large: true) { sender.arrowBytes("A") }
+                RepeatKey(sender: sender, label: "↓", height: large, large: true) { sender.arrowBytes("B") }
+                TerminalKey(sender: sender, systemImage: "return", style: .enter, height: large, large: true) { "\r" }
+            } else {
+                TerminalKey(sender: sender, label: "esc") { "\u{1b}" }
+                TerminalKey(sender: sender, label: "^C", style: .destructive) { "\u{03}" }
+                TerminalKey(sender: sender, label: "tab") { "\t" }
+                RepeatKey(sender: sender, label: "↑") { sender.arrowBytes("A") }
+                RepeatKey(sender: sender, label: "↓") { sender.arrowBytes("B") }
+                if width >= Self.arrowsWidth {
+                    RepeatKey(sender: sender, label: "←") { sender.arrowBytes("D") }
+                    RepeatKey(sender: sender, label: "→") { sender.arrowBytes("C") }
+                }
+                TerminalKey(sender: sender, label: "/") { "/" }
+            }
+        }
+        // One height for both rows: switching never changes the dock's size.
+        .frame(height: Theme.Metrics.keyHeightLarge)
+        .disabled(sender.sessionID == nil)
+        .opacity(sender.sessionID == nil ? 0.45 : 1)
+    }
+
+    // MARK: Composer
+
+    private var placeholder: String {
+        guard let name = agent?.agent, !name.isEmpty else { return "输入命令…" }
+        return "回复 \(name)…"
+    }
+
+    private var composer: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Text(draft.isEmpty ? placeholder : draft)
+                    .font(Theme.Fonts.body)
+                    .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.foreground)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "mic.fill")
+                    .font(Theme.Fonts.label.weight(.semibold))
+                    .foregroundStyle(dictateHint > 0.5 ? Theme.primary : Theme.mutedForeground)
+                    .frame(width: Theme.Metrics.roundButton, height: Theme.Metrics.roundButton)
+                    .background(Theme.accentSurface, in: Circle())
+                    .accessibilityLabel("长按说话")
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { onCompose() }
+            .gesture(composerGesture)
+            .onChange(of: pressing) { _, down in pressChanged(down) }
+            // 手指还按着时输入区被拆掉：GestureState 复位的 onChange 到不了这里，热着的预热
+            // session 会连着麦克风悬在后台，手动补一次抬手
+            .onDisappear { pressChanged(false) }
+            sendButton
+        }
+        .padding(.leading, 18)
+        .padding(.trailing, 8)
+        .frame(height: Theme.Metrics.composerHeight)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.Metrics.composerRadius))
         .overlay {
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: Theme.Metrics.composerRadius)
+                .strokeBorder(Theme.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: Theme.Metrics.composerRadius)
                 .strokeBorder(Theme.primary, lineWidth: 1)
                 .opacity(dictateHint)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 10))
-        .scaleEffect(pressing ? 0.97 : 1)
+        .scaleEffect(pressing ? 0.98 : 1)
         .animation(.easeOut(duration: 0.08), value: pressing)
-        .onTapGesture { onCompose() }
-        .gesture(composerGesture)
-        .onChange(of: pressing) { _, down in pressChanged(down) }
-        // 手指还按着时输入区被拆掉（收起控制板/离开工作区）：GestureState 复位
-        // 的 onChange 到不了这里，热着的预热 session 会连着麦克风悬在后台，
-        // 手动补一次抬手（蒙层已显示的正常对讲由宿主的 guard 挡住）
-        .onDisappear { pressChanged(false) }
     }
 
-    /// 手指落下/离开（plan 069）：`pressing` 由 sequenced 手势的 .updating 驱动，
-    /// 是当前能拿到的最早按下信号（早于 0.28s 长按判定），一路管两件事——
-    /// - **视觉预兆**：mic 图标与 primary 边框渐显，让长按判定窗口不再是"按了
-    ///   没反应"的空白。刻意用慢 easeIn：正常点击（~60-120ms 抬手）时预兆几乎
-    ///   不可见，按住不放才完全显现。显式 withAnimation 给自己的曲线，不蹭
-    ///   上面按压缩放那条 0.08s。
-    /// - **预热采音**：去抖后请求宿主起 session（见 prewarmDelay）；抬手时
-    ///   若长按未判定通过则请求拆掉。abort 在宿主侧按"蒙层是否已显示"自判，
-    ///   故与 onEnded 的先后顺序无关，正常对讲的松手分发不会被它插一脚。
+    private var sendButton: some View {
+        let empty = draft.isEmpty
+        return Button {
+            // A long press already sent the text without Enter.
+            if sendLongPressed {
+                sendLongPressed = false
+                return
+            }
+            onSend(true)
+        } label: {
+            Image(systemName: "arrow.up")
+                .font(Theme.Fonts.label.weight(.bold))
+                .foregroundStyle(empty ? Theme.subtleForeground : Theme.primaryForeground)
+                .frame(width: Theme.Metrics.roundButton, height: Theme.Metrics.roundButton)
+                .background(empty ? Theme.accentSurface : Theme.primary, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.5).onEnded { _ in
+                guard !draft.isEmpty else { return }
+                sendLongPressed = true
+                onSend(false)
+            }
+        )
+        .disabled(empty)
+        .accessibilityLabel("发送并回车")
+    }
+
+    /// 手指落下/离开（plan 069）：`pressing` 由 sequenced 手势的 .updating 驱动，是最早的按下
+    /// 信号（早于 0.28s 长按判定）——视觉预兆渐显，去抖后请求预热采音；抬手时若长按未判定通过
+    /// 则请求拆掉（宿主按"蒙层是否已显示"自判，与 onEnded 的先后无关）。
     private func pressChanged(_ down: Bool) {
         withAnimation(down ? .easeIn(duration: 0.3) : .easeOut(duration: 0.12)) {
             dictateHint = down ? 1 : 0
@@ -176,21 +540,10 @@ struct TerminalInputArea: View {
         }
     }
 
-    /// 长按对讲手势（plan 066 复议 2026-07-30）：不自造长按判定——此前
-    /// DragGesture+定时器方案里，首个 onChanged 本身滞后于手指落下（要过
-    /// 系统手势消歧），自计时叠在这个不确定起点上，实际判定时长远超设定值
-    /// 且不稳定（真机投诉根因）。改用 iOS 原生语义：LongPressGesture 系统
-    /// 默认参数 sequenced DragGesture（Apple 官方"长按后拖动"组合），判定
-    /// 时长/移动容差/与点按的消歧全交系统；判定通过瞬间给触觉（context
-    /// menu 惯例），随后 drag 把手指位置持续外传。短按由 .onTapGesture 独立
-    /// 消歧，抬手即触发、不等长按超时。
-    /// minimumDuration 0.28s（2026-08-01 用户实测定案；系统默认 0.5s 明显
-    /// 拖沓，再调需用户拍板）。与 066 结论的分界要看清：被否掉的是**自造
-    /// 计时**（DragGesture + Timer——首个 onChanged 本身滞后于手指落下，自
-    /// 计时叠在这个不确定起点上，实际判定时长失控），不是给系统手势传参；
-    /// 判定与和 .onTapGesture 的消歧此处仍全归系统，不是"又在自造阈值"。
-    /// 坐标空间取 .global（plan 067）：蒙层底部按钮的命中判定要和按钮几何
-    /// 在同一坐标系里比，local（占位条自身坐标）没法和全屏蒙层对齐。
+    /// 长按对讲手势（plan 066 复议）：不自造长按判定——LongPressGesture（0.28s，2026-08-01 用户
+    /// 实测定案）sequenced DragGesture 是 Apple 官方"长按后拖动"组合，判定时长/移动容差/与点按的
+    /// 消歧全交系统；判定通过瞬间给触觉，随后 drag 把手指位置（.global，与蒙层命中判定同一坐标
+    /// 空间）持续外传。短按由 .onTapGesture 独立消歧。
     private var composerGesture: some Gesture {
         LongPressGesture(minimumDuration: 0.28)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
@@ -212,228 +565,139 @@ struct TerminalInputArea: View {
                 onDictateEnd()
             }
     }
+}
 
-    // MARK: - 控制层
+// MARK: - The full keypad
 
-    /// 频率分区布局（2026-07-26 用户定案，第一性推导）：
-    /// - 回车 = 最高频 → 竖跨两行大键钉右下角（右拇指落点），primary 高亮；
-    /// - 方向簇紧贴回车左侧（菜单流 ↓↓⏎ 零位移），按住连发；
-    /// - esc = 打断 agent，高频 → 宽键钉左下角（左拇指落点）；
-    /// - 数字 = 快选，中频 → 降为顶部矮行；
-    /// - ^C 破坏性大 → 缩小、与回车对角隔离。
-    private var padRows: some View {
-        VStack(spacing: 6) {
-            // 顶排：esc + 数字快选 1-5 + 右上角小⌫（六个等宽键与下块六列大致对齐）
-            HStack(spacing: 6) {
-                key("esc", bytes: "\u{1b}")
-                ForEach(["1", "2", "3", "4", "5"], id: \.self) { digit in
-                    key(digit, bytes: digit)
+/// The old control pad as a panel (mockup O6): a sheet that can stay open while keys are pressed,
+/// or inline below the composer in the laptop pose. Every key sends what the old pad sent; paste
+/// and uploads keep plan 071's behaviour (raw image bytes, HEIC → JPEG, 30 MB cap, 60 s timeout).
+///
+///     esc  1   2   3   4   ⌫
+///     tab  q   ^D  ^C  ^U  ^L
+///     /    :   ~   ↑   |   ⏎
+///     ^R   ^Z  ←   ↓   →   ⏎
+struct TerminalKeypad: View {
+    let client: CofluxClient
+    let task: Coflux_V1_Task?
+    /// Present in the sheet: a header with a close button.
+    var onClose: (() -> Void)?
+
+    @State private var showingAttachMenu = false
+    @State private var showingPhotoPicker = false
+    @State private var showingFilePicker = false
+
+    private var sender: TerminalKeySender {
+        TerminalKeySender(client: client, task: task)
+    }
+
+    private let spacing: CGFloat = 8
+    private let height = Theme.Metrics.keyHeightLarge
+
+    var body: some View {
+        VStack(spacing: 12) {
+            if let onClose {
+                HStack {
+                    Text("按键")
+                        .font(Theme.Fonts.rowTitle)
+                    Spacer()
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(Theme.Fonts.label.weight(.semibold))
+                            .foregroundStyle(Theme.mutedForeground)
+                            .frame(width: Theme.Metrics.roundButton, height: Theme.Metrics.roundButton)
+                            .background(Theme.accentSurface, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("关闭按键")
                 }
-                repeatKey(systemImage: "delete.left", bytes: "\u{7f}")
-                    .frame(width: 52)
             }
-            // 下块：左区 3 列扩充键（^C 守左下角）+ 收窄方向簇（tab、/ 夹 ↑）+ 竖跨大⏎
-            HStack(spacing: 6) {
-                VStack(spacing: 6) {
-                    HStack(spacing: 6) {
-                        key("tab", bytes: "\t")
-                        key("q", bytes: "q")
-                        key("^D", bytes: "\u{04}")
-                    }
-                    HStack(spacing: 6) {
-                        key("^C", tint: Theme.destructive, bytes: "\u{03}")
-                        key("^U", bytes: "\u{15}")
-                        key("^L", bytes: "\u{0c}")
-                    }
+            VStack(spacing: spacing) {
+                HStack(spacing: spacing) {
+                    key("esc", "\u{1b}")
+                    ForEach(["1", "2", "3", "4"], id: \.self) { key($0, $0) }
+                    RepeatKey(sender: sender, systemImage: "delete.left", height: height) { "\u{7f}" }
                 }
-                .frame(maxWidth: .infinity)
-                VStack(spacing: 6) {
-                    HStack(spacing: 6) {
-                        pasteKey
-                        repeatKey(systemImage: "arrowtriangle.up.fill", bytes: arrowBytes("A"))
-                        key("/", bytes: "/")
-                    }
-                    HStack(spacing: 6) {
-                        repeatKey(systemImage: "arrowtriangle.left.fill", bytes: arrowBytes("D"))
-                        repeatKey(systemImage: "arrowtriangle.down.fill", bytes: arrowBytes("B"))
-                        repeatKey(systemImage: "arrowtriangle.right.fill", bytes: arrowBytes("C"))
-                    }
+                HStack(spacing: spacing) {
+                    key("tab", "\t")
+                    key("q", "q")
+                    key("^D", "\u{04}")
+                    key("^C", "\u{03}", style: .destructive)
+                    key("^U", "\u{15}")
+                    key("^L", "\u{0c}")
                 }
-                .frame(width: 150)
-                enterKey
+                // Six equal columns; the last is the tall ⏎ spanning both rows.
+                HStack(spacing: spacing) {
+                    column { key("/", "/") } bottom: { key("^R", "\u{12}") }
+                    column { key(":", ":") } bottom: { key("^Z", "\u{1a}") }
+                    column { key("~", "~") } bottom: {
+                        RepeatKey(sender: sender, label: "←", height: height) { sender.arrowBytes("D") }
+                    }
+                    column {
+                        RepeatKey(sender: sender, label: "↑", height: height) { sender.arrowBytes("A") }
+                    } bottom: {
+                        RepeatKey(sender: sender, label: "↓", height: height) { sender.arrowBytes("B") }
+                    }
+                    column { key("|", "|") } bottom: {
+                        RepeatKey(sender: sender, label: "→", height: height) { sender.arrowBytes("C") }
+                    }
+                    TerminalKey(sender: sender, systemImage: "return", style: .enter, height: height * 2 + spacing) { "\r" }
+                        .accessibilityLabel("回车")
+                }
+            }
+            .disabled(sender.sessionID == nil)
+            .opacity(sender.sessionID == nil ? 0.45 : 1)
+            HStack(spacing: 10) {
+                wideButton("粘贴", systemImage: "doc.on.clipboard") { sender.paste() }
+                    .accessibilityLabel("粘贴到终端")
+                wideButton("相册 / 文件", systemImage: "paperclip") { showingAttachMenu = true }
+                    .accessibilityLabel("上传文件到终端")
+                    .confirmationDialog("上传到终端", isPresented: $showingAttachMenu, titleVisibility: .visible) {
+                        Button("相册") { showingPhotoPicker = true }
+                        Button("文件") { showingFilePicker = true }
+                        Button("取消", role: .cancel) {}
+                    }
+            }
+            .disabled(sender.sessionID == nil || sender.uploading)
+            .opacity(sender.sessionID == nil || sender.uploading ? 0.5 : 1)
+        }
+        // 两个 picker 的 sheet 挂在根上：菜单收起与 sheet 呈现同锚点会撞呈现时序
+        .sheet(isPresented: $showingPhotoPicker) {
+            PhotoPicker(isPresented: $showingPhotoPicker) { data, typeIdentifier in
+                sender.uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "photo")
+            }
+        }
+        .sheet(isPresented: $showingFilePicker) {
+            FilePicker(isPresented: $showingFilePicker) { url in
+                sender.uploadFile(url: url)
             }
         }
     }
 
-    /// 粘贴：剪贴板有图先走上传（plan 071），否则回落系统剪贴板文本直发终端
-    /// （移动端独有高频缺口，替代低频 ⇧tab）；剪贴板天然可能多行，包 bracketed
-    /// paste 防换行在开 2004 的接收端被当提交。
-    private var pasteKey: some View {
-        Button {
-            if let (data, typeIdentifier) = clipboardImageData() {
-                uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "paste")
-                return
-            }
-            guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
-            press("\u{1b}[200~" + text + "\u{1b}[201~")
-        } label: {
-            keyCap(label: nil, systemImage: "doc.on.clipboard", tint: Theme.foreground, height: 38)
-        }
-        .disabled(uploading)
-        .opacity(uploading ? 0.5 : 1)
-        .accessibilityLabel("粘贴到终端")
+    private func key(_ label: String, _ bytes: String, style: KeyStyle = .normal) -> some View {
+        TerminalKey(sender: sender, label: label, style: style, height: height) { bytes }
     }
 
-    /// 剪贴板原始图片字节（plan 071 landmine）：UIPasteboard.image 返回的是系统重新
-    /// 解码的 UIImage，会丢原始字节（PNG 截图经它会被静默转成别的编码）；
-    /// data(forPasteboardType:) 才是未经改动的原始数据，只在超预算时才允许重编码。
-    private func clipboardImageData() -> (Data, String)? {
-        let pasteboard = UIPasteboard.general
-        for uti in [UTType.png.identifier, UTType.jpeg.identifier, UTType.heic.identifier] {
-            if let data = pasteboard.data(forPasteboardType: uti), !data.isEmpty {
-                return (data, uti)
-            }
+    private func column(
+        @ViewBuilder top: () -> some View,
+        @ViewBuilder bottom: () -> some View
+    ) -> some View {
+        VStack(spacing: spacing) {
+            top()
+            bottom()
         }
-        return nil
     }
 
-    /// 回车：最高频主键，竖跨两行大键、primary 高亮、钉右下角；
-    /// 顶上是同宽的小退格（右缘列 = 小⌫ + 大⏎）
-    private var enterKey: some View {
-        Button {
-            press("\r")
-        } label: {
-            Image(systemName: "return")
+    private func wideButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
                 .font(Theme.Fonts.label.weight(.semibold))
-                .foregroundStyle(Theme.primaryForeground)
-                .frame(width: 52, height: 82)
-                .background(Theme.primary, in: RoundedRectangle(cornerRadius: 8))
+                .foregroundStyle(Theme.foreground)
+                .frame(maxWidth: .infinity)
+                .frame(height: 44)
+                .background(Theme.accentSurface, in: Capsule())
         }
-        .accessibilityLabel("回车")
-    }
-
-    /// 方向键按下时查激活终端的 DECCKM：应用模式发 SS3（ESC O），否则 CSI（ESC [）
-    private func arrowBytes(_ letter: String) -> String {
-        let application = task.map { TerminalModeRegistry.shared.applicationCursor(taskID: $0.id) } ?? false
-        return (application ? "\u{1b}O" : "\u{1b}[") + letter
-    }
-
-    private func press(_ bytes: String) {
-        guard let sessionID else { return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        client.sendInput(sessionID: sessionID, bytes)
-    }
-
-    /// 图片上传编排（plan 071）：ImagePipeline.process 是 nonisolated async——await 时
-    /// 真正跑在后台线程，大图解码/重编码不占用这里的 MainActor（DictationSession.
-    /// requestSpeechPermission 同构手法）。命名单段 `<前缀>-<epoch毫秒>-<短随机><ext>`
-    /// （temp 模式 path 只认单段文件名，device.proto:453 注释）。
-    private func uploadImage(data: Data, typeIdentifier: String?, prefix: String) {
-        guard let sessionID else { return }
-        let client = self.client
-        Task {
-            guard let (payload, ext) = await ImagePipeline.process(data: data, typeIdentifier: typeIdentifier) else {
-                client.reportLocalError("图片处理失败")
-                return
-            }
-            await client.uploadFile(
-                sessionID: sessionID, data: payload, suggestedName: Self.uploadName(prefix: prefix, ext: ext)
-            )
-        }
-    }
-
-    /// 文件上传编排（plan 071）：asCopy 拿到的沙盒拷贝直接读字节，原文件名只取安全
-    /// 扩展名（web safeDropExtension 同原则）。超上限由 CofluxClient.uploadFile→
-    /// DeviceRouter.fsWrite 前置拦截并报错，这里不重复判断。
-    /// ponytail: Data(contentsOf:) 在 MainActor 上同步读（asCopy 沙盒拷贝，量级
-    /// 上限 30MB，本地闪存读取通常 <100ms）；若真机测出卡顿再挪后台线程。
-    private func uploadFile(url: URL) {
-        guard let sessionID else { return }
-        let client = self.client
-        Task {
-            guard let data = try? Data(contentsOf: url) else {
-                client.reportLocalError("读取文件失败")
-                return
-            }
-            let name = Self.uploadName(prefix: "file", ext: Self.safeExtension(url.lastPathComponent))
-            await client.uploadFile(sessionID: sessionID, data: data, suggestedName: name)
-        }
-    }
-
-    /// 单段上传文件名（plan 071 命名规则，对照 web terminal-pane.tsx 的 paste-/drop-
-    /// 命名）：<前缀>-<epoch毫秒>-<短随机><ext>（ext 含前导点，可为空）。
-    private static func uploadName(prefix: String, ext: String) -> String {
-        let suffix = String((0 ..< 6).compactMap { _ in "abcdefghijklmnopqrstuvwxyz0123456789".randomElement() })
-        return "\(prefix)-\(Int(Date().timeIntervalSince1970 * 1000))-\(suffix)\(ext)"
-    }
-
-    /// web safeDropExtension 同原则（terminal-pane.tsx:105-108）：只保留 ASCII 字母数字
-    /// 扩展名（1-16 字符），避免奇怪字符拖累 temp 路径；不满足条件直接丢扩展名。
-    private static func safeExtension(_ filename: String) -> String {
-        guard let dotIndex = filename.lastIndex(of: "."), dotIndex != filename.startIndex else { return "" }
-        let ext = filename[filename.index(after: dotIndex)...]
-        guard (1 ... 16).contains(ext.count), ext.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else {
-            return ""
-        }
-        return ".\(ext)"
-    }
-
-    private func key(
-        _ label: String?,
-        systemImage: String? = nil,
-        tint: Color = Theme.foreground,
-        height: CGFloat = 38,
-        bytes: @autoclosure @escaping () -> String
-    ) -> some View {
-        Button {
-            press(bytes())
-        } label: {
-            keyCap(label: label, systemImage: systemImage, tint: tint, height: height)
-        }
-    }
-
-    /// 可连发键（方向/退格）：按下即发一次（实体键盘语义），按住 0.35s 后
-    /// 以 80ms 间隔连发，松手停。
-    private func repeatKey(
-        systemImage: String,
-        height: CGFloat = 38,
-        bytes: @autoclosure @escaping () -> String
-    ) -> some View {
-        keyCap(label: nil, systemImage: systemImage, tint: Theme.foreground, height: height)
-            .contentShape(RoundedRectangle(cornerRadius: 8))
-            .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 40) {
-                guard let sessionID else { return }
-                // 连发期间序列求值一次即可（按住途中 DECCKM 不会切换）；
-                // 只捕获 Sendable 值跨进 Timer 闭包
-                let payload = bytes()
-                let client = self.client
-                repeatTimer?.invalidate()
-                repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in
-                    Task { @MainActor in client.sendInput(sessionID: sessionID, payload) }
-                }
-            } onPressingChanged: { pressing in
-                if pressing {
-                    press(bytes())
-                } else {
-                    repeatTimer?.invalidate()
-                    repeatTimer = nil
-                }
-            }
-    }
-
-    private func keyCap(label: String?, systemImage: String?, tint: Color, height: CGFloat) -> some View {
-        Group {
-            if let systemImage {
-                Image(systemName: systemImage)
-            } else {
-                Text(label ?? "")
-            }
-        }
-        .font(Theme.Fonts.label.weight(.medium))
-        .foregroundStyle(tint)
-        .frame(maxWidth: .infinity)
-        .frame(height: height)
-        .background(Theme.secondarySurface, in: RoundedRectangle(cornerRadius: 8))
+        .buttonStyle(KeyPressStyle())
     }
 }
 
@@ -579,13 +843,9 @@ private enum ImagePipeline {
     }
 }
 
-/// 成文层（plan 053 最终形态）：与系统键盘同层的输入条（fullScreenCover
-/// 透明底、无暗色蒙层——底下的终端与控制板完全冻结可见）。
-/// 点输入条外任意处取消（草稿保留）；单行输入，发送/键盘回车 = 仅落文本
-/// 不回车（plan 054/055）。
-/// 可调强度毛玻璃：暂停的 UIViewPropertyAnimator 用 fractionComplete 控制
-/// 模糊深度（0-1 连续），这是"淡毛玻璃"的唯一正确姿势——直接给材质设
-/// opacity 会禁用模糊、退化成不透明灰遮罩（真机踩过）。强度渐变自带淡入淡出。
+/// 可调强度毛玻璃（成文层与对讲蒙层的底）：暂停的 UIViewPropertyAnimator 用 fractionComplete
+/// 控制模糊深度（0-1 连续），这是"淡毛玻璃"的唯一正确姿势——直接给材质设 opacity 会禁用
+/// 模糊、退化成不透明灰遮罩（真机踩过）。强度渐变自带淡入淡出。
 struct VariableBlurView: UIViewRepresentable {
     /// 0 = 无模糊，1 = 完整 ultraThinMaterialDark
     var intensity: CGFloat
@@ -634,62 +894,131 @@ struct VariableBlurView: UIViewRepresentable {
     }
 }
 
+/// 成文层（plan 053 → Duo redesign, mockup O4）：the composer card expanded over the frozen
+/// terminal, riding on the system keyboard (fullScreenCover with a clear background: the terminal
+/// and the dock underneath neither move nor resize while the keyboard is up, D13).
+/// Send = text + Enter in one write; a long press on send writes the text without Enter
+/// (plan D10). When the terminal is not ready nothing is sent: the draft and the layer stay, with
+/// the hint "终端未运行". 点卡片外任意处取消（草稿保留）。
 struct TerminalComposeOverlay: View {
     @Binding var draft: String
-    let onSend: () -> Void
+    /// The active terminal is running and has a session.
+    let ready: Bool
+    let placeholder: String
+    /// Sends the draft; returns whether it was sent.
+    let onSend: (_ withEnter: Bool) -> Bool
+    /// 相册 shortcut: the picked image is uploaded to the terminal.
+    let onPhoto: (Data, String?) -> Void
     let onDismiss: () -> Void
     @FocusState private var focused: Bool
-    /// 自绘淡入淡出（呈现层动画已禁）：毛玻璃强度与输入条透明度同步渐变
+    /// 自绘淡入淡出（呈现层动画已禁）：毛玻璃强度与卡片透明度同步渐变
     @State private var appeared = false
+    @State private var notReadyHint = false
+    @State private var showingPhotoPicker = false
+    @State private var sendLongPressed = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // 控制中心式清透重糊的最优公开逼近：部分强度下着色层按比例变淡、
-            // 模糊保留大半（全强度时内置 tint 拉满会发闷；调研见 plan 053）
+            // 控制中心式清透重糊的最优公开逼近（调研见 plan 053）
             VariableBlurView(intensity: appeared ? 0.65 : 0)
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture { fadeOutAndDismiss() }
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("输入后发送到终端", text: $draft)
+            VStack(alignment: .leading, spacing: 10) {
+                TextField(placeholder, text: $draft, axis: .vertical)
+                    .lineLimit(1 ... 6)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .submitLabel(.send)
-                    .onSubmit {
-                        onSend()
-                        fadeOutAndDismiss()
-                    }
                     .focused($focused)
                     .font(Theme.Fonts.body)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 8)
-                Image(systemName: "arrow.up")
-                    .font(Theme.Fonts.label.weight(.bold))
-                    .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.primaryForeground)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(draft.isEmpty ? Theme.secondarySurface : Theme.primary))
-                    .onTapGesture {
-                        onSend()
-                        fadeOutAndDismiss()
+                    .padding(.top, 4)
+                    .onChange(of: draft) { _, _ in notReadyHint = false }
+                HStack(spacing: 6) {
+                    Button {
+                        showingPhotoPicker = true
+                    } label: {
+                        Image(systemName: "photo")
+                            .font(Theme.Fonts.label.weight(.semibold))
+                            .foregroundStyle(Theme.mutedForeground)
+                            .frame(width: Theme.Metrics.roundButton, height: Theme.Metrics.roundButton)
+                            .background(Theme.accentSurface, in: Circle())
                     }
-                    .accessibilityLabel("发送")
+                    .buttonStyle(.plain)
+                    .disabled(!ready)
+                    .accessibilityLabel("从相册上传到终端")
+                    Spacer(minLength: 8)
+                    Text(notReadyHint ? "终端未运行" : "发送并回车")
+                        .font(Theme.Fonts.meta)
+                        .foregroundStyle(notReadyHint ? Theme.warning : Theme.subtleForeground)
+                    sendButton
+                }
             }
-            .padding(10)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Theme.border, lineWidth: 0.5))
-            .padding(.horizontal, 8)
-            .padding(.bottom, 6)
+            .padding(.leading, 16)
+            .padding(.trailing, 10)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.Metrics.expandedComposerRadius))
+            .overlay {
+                RoundedRectangle(cornerRadius: Theme.Metrics.expandedComposerRadius)
+                    .strokeBorder(Theme.border, lineWidth: 1)
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
             .opacity(appeared ? 1 : 0)
         }
         .onAppear {
             withAnimation(.easeOut(duration: 0.18)) { appeared = true }
             focused = true
         }
+        .sheet(isPresented: $showingPhotoPicker) {
+            PhotoPicker(isPresented: $showingPhotoPicker) { data, typeIdentifier in
+                onPhoto(data, typeIdentifier)
+            }
+        }
     }
 
-    /// 收场时序：模糊/卡片 ~120ms 淡完 → 系统键盘 ~250ms 落完 → 320ms 时
-    /// 才拆呈现层（此刻屏上已无残留，拆除不可见）。提前拆会把淡出中的模糊
-    /// 和下落中的键盘硬切掉——"结尾一卡"的根因（真机踩过）。
+    private var sendButton: some View {
+        let empty = draft.isEmpty
+        return Button {
+            // A long press already handled this touch.
+            if sendLongPressed {
+                sendLongPressed = false
+                return
+            }
+            send(withEnter: true)
+        } label: {
+            Image(systemName: "arrow.up")
+                .font(Theme.Fonts.label.weight(.bold))
+                .foregroundStyle(empty ? Theme.subtleForeground : Theme.primaryForeground)
+                .frame(width: Theme.Metrics.roundButton, height: Theme.Metrics.roundButton)
+                .background(empty ? Theme.accentSurface : Theme.primary, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.5).onEnded { _ in
+                guard !draft.isEmpty else { return }
+                sendLongPressed = true
+                send(withEnter: false)
+            }
+        )
+        .accessibilityLabel("发送并回车")
+        .accessibilityAction(named: "只填字不回车") { send(withEnter: false) }
+    }
+
+    private func send(withEnter: Bool) {
+        guard !draft.isEmpty else { return }
+        guard ready else {
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            notReadyHint = true
+            return
+        }
+        if onSend(withEnter) {
+            fadeOutAndDismiss()
+        }
+    }
+
+    /// 收场时序：模糊/卡片 ~120ms 淡完 → 系统键盘 ~250ms 落完 → 320ms 时才拆呈现层。
+    /// 提前拆会把淡出中的模糊和下落中的键盘硬切掉——"结尾一卡"的根因（真机踩过）。
     private func fadeOutAndDismiss() {
         focused = false
         withAnimation(.easeIn(duration: 0.12)) { appeared = false }
