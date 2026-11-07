@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { TaskStatus, type Task, type Workspace } from "@coflux/protocol";
 import type { SessionAgentState } from "@coflux/client";
 
-import { attentionSnapshot, diffAttention, type AttentionSnapshot } from "./desktop-attention";
+import { attentionNotificationText, attentionSnapshot, diffAttention, type AttentionSnapshot } from "./desktop-attention";
 
 function workspace(id: string, branch = id): Workspace {
   return { id, projectId: "p1", daemonId: "d1", branch, name: "", isMain: false, createdAt: 1, additions: 0, deletions: 0 } as unknown as Workspace;
@@ -82,4 +82,44 @@ test("两个终端同时等待：快照的 taskId 与标题里的 agent 属于�
   const questions = attentionSnapshot({ ...base, tasks, sessionAgents: { ...sessionAgents, "s-2": { ...agent("t-2", "question"), agent: "claude" } } });
   assert.equal(questions["ws-a"].agent, "codex");
   assert.equal(questions["ws-a"].taskId, "t-1");
+});
+
+test("a program stopped on an error notifies once, titled with its agent, its message in the body", () => {
+  const sessionAgents = { "s-a": { ...agent("t-a", "error", "build failed"), agent: "demo" } };
+  const snapshot = attentionSnapshot({ ...base, sessionAgents });
+  assert.equal(snapshot["ws-a"].kind, "error");
+  assert.equal(snapshot["ws-a"].taskId, "t-a");
+
+  const diff = diffAttention({}, snapshot);
+  assert.equal(diff.entered.length, 1);
+  assert.deepEqual(attentionNotificationText(diff.entered[0].entry), {
+    title: "demo 出错停止",
+    body: "coflux · main\nbuild failed",
+  });
+  assert.deepEqual(diffAttention(snapshot, snapshot).entered, [], "staying stopped is not new");
+
+  // Question → error is a change of kind, so new attention.
+  const question = attentionSnapshot({ ...base, sessionAgents: { "s-a": agent("t-a", "question") } });
+  assert.deepEqual(diffAttention(question, snapshot).entered.map((item) => item.entry.kind), ["error"]);
+
+  // Without a message the body is just the place.
+  const bare = attentionSnapshot({ ...base, sessionAgents: { "s-a": { ...agent("t-a", "error"), agent: "demo" } } });
+  assert.deepEqual(attentionNotificationText(bare["ws-a"]), { title: "demo 出错停止", body: "coflux · main" });
+});
+
+test("error ranks below approval and question and above active", () => {
+  const tasks = [task("t-1", "ws-a", "s-1"), task("t-2", "ws-a", "s-2")];
+  const withActive = attentionSnapshot({ ...base, tasks, sessionAgents: { "s-1": agent("t-1", "active"), "s-2": agent("t-2", "error", "boom") } });
+  assert.equal(withActive["ws-a"].kind, "error");
+  assert.equal(withActive["ws-a"].taskId, "t-2");
+  assert.equal(withActive["ws-a"].message, "boom");
+
+  const withQuestion = attentionSnapshot({ ...base, tasks, sessionAgents: { "s-1": agent("t-1", "error", "boom"), "s-2": agent("t-2", "question", "继续？") } });
+  assert.equal(withQuestion["ws-a"].kind, "question");
+  assert.equal(withQuestion["ws-a"].message, "继续？");
+
+  // An approval's message never reaches the notification, as before.
+  const approval = attentionSnapshot({ ...base, sessionAgents: { "s-a": agent("t-a", "approval", "Allow?") } });
+  assert.equal(approval["ws-a"].message, undefined);
+  assert.deepEqual(attentionNotificationText(approval["ws-a"]), { title: "claude 等待批准", body: "coflux · main" });
 });

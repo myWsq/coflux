@@ -4,13 +4,14 @@ import type { DaemonInfo, Project, Task, Workspace } from "@coflux/protocol";
 /**
  * 桌面通知 / Dock 角标的数据源（plan 103）：从侧栏现成的活动聚合（workspaceActivity）里抽出
  * 「等待人」的两态——approval / question。纯函数，渲染进程按 store 变化驱动，主进程只执行。
+ * A program stopped on an error (`error`, from OSC 7501) also needs the user, so it counts too.
  */
-export type AttentionKind = "approval" | "question";
+export type AttentionKind = "approval" | "question" | "error";
 
 export type AttentionEntry = {
   kind: AttentionKind;
   agent: string;
-  /** question 态 agent 留的话（coflux notify），没有则空 */
+  /** What the agent said: its `coflux notify` message for question, its OSC 7501 msg for error. */
   message?: string;
   projectName?: string;
   branch: string;
@@ -32,11 +33,11 @@ export function attentionSnapshot(input: {
   for (const workspace of input.workspaces) {
     const daemon = input.daemons.find((item) => item.daemonId === workspace.daemonId);
     const activity = workspaceActivity(workspace.id, daemon?.online ?? false, input.tasks, input.sessionAgents);
-    if (activity.status !== "approval" && activity.status !== "question") continue;
+    if (activity.status !== "approval" && activity.status !== "question" && activity.status !== "error") continue;
     snapshot[workspace.id] = {
       kind: activity.status,
       agent: activity.agent,
-      message: activity.status === "question" ? activity.message : undefined,
+      message: activity.status === "approval" ? undefined : activity.message,
       projectName: input.projects.find((project) => project.id === workspace.projectId)?.name,
       branch: workspace.branch,
       taskId: activity.taskId,
@@ -70,5 +71,6 @@ export function attentionNotificationText(entry: AttentionEntry): { title: strin
   if (entry.kind === "approval") {
     return { title: `${entry.agent} 等待批准`, body: where };
   }
-  return { title: `${entry.agent} 等待回答`, body: entry.message ? `${where}\n${entry.message}` : where };
+  const title = entry.kind === "error" ? `${entry.agent} 出错停止` : `${entry.agent} 等待回答`;
+  return { title, body: entry.message ? `${where}\n${entry.message}` : where };
 }
