@@ -230,6 +230,10 @@ Product conclusions (confirmed by the user):
   and the single-call payload; `WorkspaceDetailView(client:workspace:)` keeps
   its signature so M2/M3/M5 stay disjoint; Verification gains the simulator
   device creation, the Go toolchain download and the Swift test baseline.
+- (refreshed at dispatch) Simulator verification dropped: the Tailcat
+  framework has no simulator slice. Compile checks use the device destination
+  (`build` and `build-for-testing`); unit tests and screenshots move to the
+  device. Swift client baseline: 103 tests.
 
 ### Maintenance notes
 
@@ -481,8 +485,8 @@ Out of scope:
 
 ### Milestone validations
 
-- Every milestone: `xcodebuild build -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO` → `** BUILD SUCCEEDED **`, no new warnings in touched files.
-- Milestone 2 and 3: the "Unit tests (acceptance)" row below, once the Duo simulator device exists → exit 0, including the new tests for waiting items (T6) and the send payload (T11).
+- Every milestone: the "Device compile" row below → `** BUILD SUCCEEDED **`, no new warnings in touched files; and the "Test compile" row → `** TEST BUILD SUCCEEDED **`.
+- Simulator builds are not possible (refreshed at dispatch): `scripts/build-ios-transport.mjs` produces only an `iphoneos` arm64 slice of `CofluxTailcat.xcframework`, so every `iOS Simulator` destination fails to link. Unit tests therefore run on a connected device, as acceptance.
 
 ### Commands
 
@@ -491,12 +495,10 @@ Out of scope:
 | Tailcat framework (prerequisite) | `node scripts/build-ios-transport.mjs` | exit 0 (first run downloads go1.27.1) |
 | Swift client baseline (before dispatch) | `swift test --package-path packages/swift-client` at `afe5a152` | exit 0; record the test count |
 | Swift client unchanged | `swift test --package-path packages/swift-client` | exit 0, same count as the baseline |
-| App compile | `xcodebuild build -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO` | `** BUILD SUCCEEDED **` |
-| Device compile | `xcodebuild build -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'generic/platform=iOS' -allowProvisioningUpdates` | `** BUILD SUCCEEDED **` |
-| Duo simulator runtime (acceptance prerequisite) | `xcodebuild -downloadPlatform iOS` then `xcrun simctl list runtimes` | an iOS 27.1+ runtime listed |
-| Duo simulator device (acceptance prerequisite) | `xcrun simctl create "iPhone Duo" com.apple.CoreSimulator.SimDeviceType.iPhone-Duo <runtime-id from the previous row>` | a device UDID; neither installed runtime (26.5, 27.0) supports the Duo type |
-| Unit tests (acceptance) | `xcodebuild test -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'platform=iOS Simulator,name=iPhone Duo' -only-testing:CofluxTests` | exit 0 through the shared scheme (it sets `COFLUX_IOS_TEST_HOST=1`); `DictationProbeTests` skip on the simulator |
-| Simulator screenshots (acceptance) | boot an iPhone Duo simulator, install, `xcrun simctl io booted screenshot` closed / open wide / open tall | structure matches mockup frames O1–O8, W1, T1 |
+| Device compile | `xcodebuild build -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'generic/platform=iOS' -allowProvisioningUpdates` | `** BUILD SUCCEEDED **` (needs the Metal Toolchain: `xcodebuild -downloadComponent MetalToolchain`; baseline green at `c2326189`) |
+| Test compile | `xcodebuild build-for-testing -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'generic/platform=iOS' -allowProvisioningUpdates` | `** TEST BUILD SUCCEEDED **` |
+| Unit tests on the device (acceptance) | `xcodebuild test -project apps/ios/Coflux.xcodeproj -scheme Coflux -destination 'platform=iOS,name=<the user's iPhone Duo>' -only-testing:CofluxTests -allowProvisioningUpdates` | exit 0 through the shared scheme (it sets `COFLUX_IOS_TEST_HOST=1`); needs the phone paired and reachable |
+| Device walkthrough (acceptance) | install on the iPhone Duo and walk every form | structure matches the mockup frames |
 
 ### Done criteria
 
