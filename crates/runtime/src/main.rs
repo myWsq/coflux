@@ -922,8 +922,34 @@ async fn runtime_main(home: String, sessions: Arc<Sessions>) {
         let to_server_tx = to_server_tx.clone();
         let resyncs = resyncs.clone();
         let device = device.clone();
+        // OSC 7501 records are reported at once, like hook events, but from their own task: the
+        // bridge loop also carries Device frames and must never wait on a process scan. A
+        // `Notify` holds one permit, so a burst of reports costs one scan.
+        let agents_kick = Arc::new(tokio::sync::Notify::new());
+        {
+            let state = state.clone();
+            let observed = observed.clone();
+            let to_server_tx = to_server_tx.clone();
+            let agents_kick = agents_kick.clone();
+            tokio::spawn(async move {
+                loop {
+                    agents_kick.notified().await;
+                    report_agents_if_changed(&state, &observed, &to_server_tx).await;
+                }
+            });
+        }
+        let observed = observed.clone();
         tokio::spawn(async move {
-            sessiond_bridge(sessions, state, to_server_tx, resyncs, device).await
+            sessiond_bridge(
+                sessions,
+                state,
+                to_server_tx,
+                resyncs,
+                device,
+                observed,
+                agents_kick,
+            )
+            .await
         });
     }
 
@@ -1192,6 +1218,8 @@ async fn sessiond_bridge(
     to_server_tx: Sender<WsOut>,
     resyncs: Arc<ResyncOutbox>,
     device: Arc<device::DeviceRuntime>,
+    observed: Arc<ObservedState>,
+    agents_kick: Arc<tokio::sync::Notify>,
 ) {
     let mut generation = 0u64;
     loop {
@@ -1211,7 +1239,16 @@ async fn sessiond_bridge(
                 break;
             }
             for payload in payloads {
-                handle_sessiond_record(payload, &state, &to_server_tx, &resyncs, &device).await;
+                handle_sessiond_record(
+                    payload,
+                    &state,
+                    &to_server_tx,
+                    &resyncs,
+                    &device,
+                    &observed,
+                    &agents_kick,
+                )
+                .await;
             }
         }
         {
@@ -1250,6 +1287,8 @@ async fn handle_sessiond_record(
     to_server_tx: &Sender<WsOut>,
     resyncs: &Arc<ResyncOutbox>,
     device: &Arc<device::DeviceRuntime>,
+    observed: &Arc<ObservedState>,
+    agents_kick: &Arc<tokio::sync::Notify>,
 ) {
     if is_frame(&rec) {
         // output 只是一条本地 dirty 通知；真实 terminal bytes 仅经 Device channel 交付，
@@ -1320,6 +1359,9 @@ async fn handle_sessiond_record(
             device.session_exited(&session_id);
             device.report_session_exit(&session_id, exit_code);
             device.request_reconciliation_catalog();
+            // An ended session leaves no OSC 7501 record behind.
+            observed.apply_program_status(session_id, None);
+            agents_kick.notify_one();
         }
         SessiondEvent::SessionCommand {
             session_id,
@@ -1339,6 +1381,12 @@ async fn handle_sessiond_record(
         }
         SessiondEvent::SessionTitle { session_id, title } => {
             device.session_title_changed(&session_id, &title);
+        }
+        SessiondEvent::SessionProgramStatus { session_id, status } => {
+            // A program reported its status (OSC 7501): merge it and report without waiting for
+            // the periodic scan.
+            observed.apply_program_status(session_id, status);
+            agents_kick.notify_one();
         }
         // Merged into agent presence by the runtime core (next commit).
         SessiondEvent::SessionProgramStatus { .. } => {}
