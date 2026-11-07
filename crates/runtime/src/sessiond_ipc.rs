@@ -128,8 +128,8 @@ pub enum SessiondEvent {
     SessionTitle { session_id: String, title: String },
     /// The session's root OSC 7501 record changed; `None` = it is gone. Pushed so agent presence
     /// is reported at once rather than at the next process scan. Also pushed after every
-    /// `resync.list` for each session holding a record, which is how a rebuilt session's record
-    /// reaches the core.
+    /// `resync.list` for every session in it, `None` included, which is how a rebuilt session's
+    /// record reaches the core and how a lost push is repaired.
     #[serde(rename = "session.programStatus")]
     SessionProgramStatus {
         session_id: String,

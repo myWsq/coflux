@@ -1995,17 +1995,16 @@ impl Sessions {
             return false;
         }
         // The OSC 7501 records follow the list, so the core already counts their sessions alive.
-        // Each is read and sent under its session's lock, the same lock a live feed pushes under,
-        // so a newer live push can never be overtaken by an older record from here. Best effort,
-        // like the live pushes.
+        // Every session's current value is sent, absence included, so a lost live push (a clear
+        // as much as a report) is repaired by the next resync. Each is read and sent under its
+        // session's lock, the same lock a live feed pushes under, so a newer live push can never
+        // be overtaken by an older value from here. Best effort, like the live pushes.
         for (session_id, session) in handles {
             let locked = session.lock().unwrap();
-            if let Some(status) = locked.state.program_status() {
-                let _ = self.send_ctrl(&SessiondEvent::SessionProgramStatus {
-                    session_id,
-                    status: Some(status.clone()),
-                });
-            }
+            let _ = self.send_ctrl(&SessiondEvent::SessionProgramStatus {
+                session_id,
+                status: locked.state.program_status().cloned(),
+            });
         }
         true
     }

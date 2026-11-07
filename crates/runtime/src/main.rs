@@ -1388,8 +1388,6 @@ async fn handle_sessiond_record(
             observed.apply_program_status(session_id, status);
             agents_kick.notify_one();
         }
-        // Merged into agent presence by the runtime core (next commit).
-        SessiondEvent::SessionProgramStatus { .. } => {}
         SessiondEvent::SessionCreateFailed {
             session_id,
             task_id,
