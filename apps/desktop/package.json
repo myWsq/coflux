@@ -1,6 +1,6 @@
 {
   "name": "@coflux/desktop",
-  "version": "2.21.1",
+  "version": "2.22.0",
   "productName": "Coflux",
   "private": true,
   "description": "coflux 桌面客户端：Electron 主进程 + React/xterm 工作台渲染层",

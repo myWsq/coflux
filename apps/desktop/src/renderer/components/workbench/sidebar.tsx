@@ -32,6 +32,7 @@ function activityLabel(activity: WorkspaceActivity): string {
   if (activity.status === "active") return `${name}正在执行`;
   if (activity.status === "approval") return `${name}等待批准`;
   if (activity.status === "question") return `${name}等待回答`;
+  if (activity.status === "error") return `${name}出错停止`;
   return `${name}本轮完成`;
 }
 
@@ -365,10 +366,12 @@ export function Sidebar(props: SidebarProps) {
                                   <span className="truncate">executor 正在执行子任务</span>
                                 </span>
                               ) : null}
-                              {/* agent 经 `coflux notify` 主动留的话（plan 074）：状态图标只能表达
-                                  「它在等你」，具体等什么得由 agent 自己说。不 truncate——留言就是
-                                  要读的内容，worker 侧已按 200 字符钳过。 */}
-                              {activity.status === "question" && activity.message ? (
+                              {/* What the agent said about what it needs (a `coflux notify` message,
+                                  plan 074, or an OSC 7501 msg): the icon only says it is waiting or
+                                  stopped. Not truncated: the message is the content; the worker
+                                  already clamped it. */}
+                              {(activity.status === "approval" || activity.status === "question" || activity.status === "error") &&
+                              activity.message ? (
                                 <span className="flex items-start gap-1.5 text-sm text-foreground">
                                   <MessageSquare className="mt-0.5 size-3 shrink-0 opacity-70" />
                                   <span className="whitespace-pre-wrap break-words">{activity.message}</span>

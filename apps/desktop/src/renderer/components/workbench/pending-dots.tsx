@@ -8,7 +8,7 @@ import type { CSSProperties } from "react";
 
 import { cn } from "@/lib/utils";
 
-export type ActivityDotsStatus = "active" | "approval" | "question" | "done";
+export type ActivityDotsStatus = "active" | "approval" | "question" | "error" | "done";
 
 type Blink = { duration: number; delay: number; lo: number };
 
@@ -51,6 +51,19 @@ const ELLIPSIS = glyph(5, [
   [2, 2],
   [2, 4],
 ]);
+/** Stopped on an error: a static cross, so it reads apart from the check by shape and from the
+ * waiting states by not blinking. */
+const CROSS = glyph(5, [
+  [0, 0],
+  [1, 1],
+  [2, 2],
+  [3, 3],
+  [4, 4],
+  [0, 4],
+  [1, 3],
+  [3, 1],
+  [4, 0],
+]);
 
 const STATES: Record<ActivityDotsStatus, StateConfig> = {
   active: {
@@ -75,6 +88,12 @@ const STATES: Record<ActivityDotsStatus, StateConfig> = {
     glyph: ELLIPSIS,
     dim: 0.12,
     blink: (_i, _row, col) => ({ duration: 1.2, delay: -col * 0.09, lo: 0.2 }),
+  },
+  error: {
+    grid: 5,
+    color: "text-destructive",
+    glyph: CROSS,
+    dim: 0.12,
   },
   done: {
     grid: 5,
