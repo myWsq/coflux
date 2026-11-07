@@ -53,6 +53,9 @@ struct WorkspaceDetailView: View {
     @State private var showingPhotoPicker = false
     @State private var showingFilePicker = false
     @State private var secretSheet: SecretSheetTarget?
+    /// Tall layout, half folded with a horizontal fold: the keypad is inline below the fold and
+    /// the 按键 toolbar item goes away (plan D9).
+    @State private var laptopPose = false
 
     /// Below this content height the key row folds into 按键 and only the composer stays
     /// (tall Split View, outer display in landscape): the terminal keeps its rows.
@@ -82,7 +85,7 @@ struct WorkspaceDetailView: View {
     }
 
     private var shortWindow: Bool {
-        pageSize.height > 0 && pageSize.height < Self.shortPageHeight
+        layout != .tall && pageSize.height > 0 && pageSize.height < Self.shortPageHeight
     }
 
     /// 附件 / 按键 go to the bottom bar (the lower end of the rail on the outer display and in the
@@ -245,12 +248,45 @@ struct WorkspaceDetailView: View {
     private var pageContent: some View {
         if members.isEmpty {
             emptyState
+        } else if layout == .tall {
+            tallArrangement
         } else {
             ZStack(alignment: .bottom) {
                 terminalColumn(reserveDock: true)
                 dock(inlineKeypad: false)
             }
         }
+    }
+
+    /// The tall layout (mockup T1/T2, plan D9): the whole page is one overlay arrangement — the
+    /// pager of terminals as the secondary view, the input area as the primary one. Fully open
+    /// there is no dividing region: the input overlays the terminal exactly as in the other
+    /// layouts, and the terminal ends above the resting dock. Half folded with a horizontal fold
+    /// (laptop pose) the system places the terminal before the fold and the input after it; the
+    /// input then carries the full keypad inline. The pose is read from the reserved regions only
+    /// — never from sensors or the window size — and both changes land in the same layout pass,
+    /// so the transition resizes the terminal once.
+    private var tallArrangement: some View {
+        GeometryReader { proxy in
+            let laptop = Self.isLaptopPose(proxy)
+            ArrangementView {
+                dock(inlineKeypad: laptop)
+                    .frame(maxHeight: .infinity, alignment: laptop ? .top : .bottom)
+                    .overlayArrangementEdge(VerticalEdge.bottom)
+            } secondary: {
+                terminalColumn(reserveDock: !laptop)
+            }
+            // Overlay, not split: fully open the keypad must not stay on screen.
+            .arrangementViewStyle(OverlayArrangementViewStyle().axes(.vertical))
+            .onChange(of: laptop, initial: true) { _, isLaptop in
+                laptopPose = isLaptop
+            }
+        }
+    }
+
+    /// An active dividing region running horizontally across the page: the laptop pose.
+    private static func isLaptopPose(_ proxy: GeometryProxy) -> Bool {
+        proxy.reservedRegions(kind: .division).contains { $0.isActive && $0.frame.width > $0.frame.height }
     }
 
     /// Status strip + the pager. With `reserveDock` the terminal ends above the resting dock.
@@ -358,9 +394,13 @@ struct WorkspaceDetailView: View {
         } else {
             ToolbarItem(placement: .topBarTrailing) { terminalsMenu }
                 .visibilityPriority(.high)
-            ToolbarItem(placement: .topBarTrailing) { attachMenu }
-                .visibilityPriority(.low)
-            ToolbarItem(placement: .topBarTrailing) { keypadButton }
+            // The laptop pose keeps the full keypad (with 粘贴 and 相册 / 文件) below the fold, so the
+            // bar keeps only the terminal list and 更多 (mockup T2).
+            if !(layout == .tall && laptopPose) {
+                ToolbarItem(placement: .topBarTrailing) { attachMenu }
+                    .visibilityPriority(.low)
+                ToolbarItem(placement: .topBarTrailing) { keypadButton }
+            }
             ToolbarItem(placement: .topBarTrailing) { moreMenu }
                 .visibilityPriority(.high)
         }

@@ -23,7 +23,7 @@ struct AppShell: View {
             // compact ⇄ tall keep one TabView (same branch); only split swaps the container.
             Group {
                 if layout == .split {
-                    splitLayout
+                    splitLayout(fold: Self.bookFold(in: proxy))
                 } else {
                     tabLayout
                 }
@@ -73,12 +73,35 @@ struct AppShell: View {
 
     // MARK: - Split layout (large window wider than tall)
 
-    private var splitLayout: some View {
+    /// Default sidebar width with the display fully open (mockup W1); the fold is not reserved
+    /// then and content may cross it.
+    private static let sidebarWidth: CGFloat = 300
+
+    /// The fold of the half-open book pose: an active dividing region that runs vertically.
+    /// Fully open, the fold is not a reserved region and this is nil (D8).
+    static func bookFold(in proxy: GeometryProxy) -> CGRect? {
+        proxy.reservedRegions(kind: .division)
+            .first { $0.isActive && $0.frame.height > $0.frame.width }?
+            .frame
+    }
+
+    /// In the book pose the sidebar takes the leading half exactly up to the fold and the detail
+    /// starts after it, so nothing interactive sits in the fold (mockup W2). The sidebar toggle
+    /// (system) collapses the sidebar so the terminal takes the whole display.
+    private func splitLayout(fold: CGRect?) -> some View {
         @Bindable var navigation = navigation
+        let sidebarWidth = fold.map { max(0, $0.minX) } ?? Self.sidebarWidth
+        let sidebarVisible = navigation.columnVisibility != .detailOnly
         return NavigationSplitView(columnVisibility: $navigation.columnVisibility) {
             HomeSidebar(client: client)
+                .navigationSplitViewColumnWidth(
+                    min: fold == nil ? 260 : sidebarWidth,
+                    ideal: sidebarWidth,
+                    max: fold == nil ? 360 : sidebarWidth
+                )
         } detail: {
             detailColumn
+                .padding(.leading, sidebarVisible ? (fold?.width ?? 0) : 0)
         }
     }
 
