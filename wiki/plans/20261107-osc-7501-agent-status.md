@@ -60,8 +60,14 @@ code. Product conclusions, confirmed by the user:
    state is the fallback, and hooks keep supplying the agent's own session id (used for the
    transcript paper view).
 
-Non-goals: child records (reports with an `id`), progress percentages, any iOS change (iOS
-does not consume agent state), and retiring the hooks.
+Non-goals: child records (reports with an `id`), progress percentages, and any iOS change
+(iOS does not consume agent state).
+
+Amended after the first implementation (D13): turn state comes **only** from OSC 7501. The
+hooks stop reporting state; they keep supplying the agent's own session id and their
+non-status jobs (session context, workspace following, the worktree guard). Agents that do
+not emit 7501 — Claude Code below 2.1.295, Codex builds without it — still appear through
+process detection but show no state. The user accepted that explicitly.
 
 Observable when done: Claude Code ≥ 2.1.295 in a coflux terminal with the plugin's hooks
 disabled still shows correct states; pi shows 「pi 正在执行」;
@@ -141,6 +147,16 @@ with "boom" under it and raises a notification; pressing Ctrl-C back to the prom
   ⌘P palette and desktop attention, in red (`text-destructive`, the existing red token), and
   ranks between question and active everywhere states are ranked. `message` is carried and
   shown for approval and error as well as question. Based on: product conclusions 2 and 3.
+- **D13 Hooks carry no state** `(amended after implementation)`: supersedes D7's fallback.
+  The runtime no longer maps hook events to turn states; `/hook` only records the agent's
+  session id (and still refuses callers outside every session tree). The messengers send a
+  body only when the payload carries a session id and no longer send notification type or
+  background-task counts. Hook registrations whose only job was state are removed from the
+  plugin and from the device-managed integration; registrations with another job stay, and
+  the plugin gains the messenger on `SessionStart` so the session id arrives at once.
+  Process detection stays, for presence, the agent name and the transcript button. Rejected:
+  keeping hooks as a fallback — the user chose one source of truth and accepted that
+  non-7501 agent versions show no state. Based on: Discussion log entry 8.
 
 ### Discussion log
 
@@ -162,6 +178,15 @@ with "boom" under it and raises a notification; pressing Ctrl-C back to the prom
 7. `(decided while planning)` D2 parser choice delegated; D3 root-only; D5 probe answer
    does not move `answered_query_seq` and is independent of the holder; D8 clamp of 32 bytes;
    D10 no checkpoint field.
+8. After the first implementation was approved, the user asked to remove every state-related
+   part of the hooks in this same change and rely on OSC 7501 alone, explicitly not caring
+   about agent versions that do not emit it. Settled D13. Which registrations stay was
+   decided while planning: plugin keeps `SessionStart` (context, plus the messenger for the
+   session id), `UserPromptSubmit` (session-moved script), `PreToolUse` (worktree guard),
+   `PostToolUse` EnterWorktree/ExitWorktree and `WorktreeRemove` (worktree following);
+   the managed Claude integration keeps `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+   `PostToolUse`, `SessionEnd`, `WorktreeRemove`; managed Codex keeps `SessionStart`,
+   `UserPromptSubmit`, `SessionEnd`.
 
 ### Maintenance notes
 
@@ -356,6 +381,75 @@ Depends on: none
   `error` yields one notification titled `demo 出错停止`; existing approval/question
   behaviour and texts are unchanged.
 
+### Milestone 5: hooks stop carrying state (amendment, D13)
+
+Depends on: Milestones 1–4 (already implemented). Turn state now comes only from OSC 7501.
+
+#### T10 · The runtime keeps no hook state
+
+- Where: `crates/runtime/src/hook.rs` — `pub fn event_state`, `HookRequest`, the `/hook`
+  branch of `handle` ("Two independent reasons to forward"), its tests;
+  `crates/runtime/src/main.rs` — the hook consumer that calls
+  `observed.apply_hook_state(session_id, hook_state)`;
+  `crates/runtime/src/observed.rs` — `hook_states`, `hook_messages`, `apply_hook_state`,
+  `apply_notify`, the hook branch in `merge_annotations`, tests.
+- Change: delete the event→state mapping and everything that stores or merges hook state
+  and hook messages. `/hook` forwards a request only when it carries a valid agent session
+  id; the consumer records that id and reports. The request no longer carries notification
+  type or background-task count.
+- After: a session's `state`/`message` come only from its OSC 7501 record; a
+  process-detected session without one has `state: ""`. A `/hook` body without a session id
+  is answered as today's "ignored" outcome and never reaches the consumer. A caller outside
+  every session tree that sends a session id is still refused. `agent_session_id` keeps its
+  existing lifetime. Remove or rewrite tests that asserted hook-driven states.
+- Don't: keep a hook fallback "for old agents" (D13).
+
+#### T11 · The messengers send only the session id
+
+- Where: `crates/cli/src/commands.rs` — `pub fn build_hook_body`, `pub fn run_hook`, tests
+  (`hook_body_mirrors_node_field_rules` and the `background_tasks` case);
+  `packages/cli/coflux.mjs` — the hook messenger section
+  (`/* ------------------------------ hook：agent 事件信使`), including its header comment.
+- Change: build a body only when the payload carries a session id (`session_id`, or the Codex
+  field the current code already reads); drop `notification` and `backgroundTasks`. When
+  there is no body, post nothing. `run_hook` still prints the worktree-guard decision first.
+- After: `{hook_event_name:"Stop"}` without a session id → no POST; `{hook_event_name:
+  "SessionStart", session_id:"s1"}` → body with agent, event, pid, ppid, agentSessionId only.
+  Node and Rust messengers agree.
+
+#### T12 · Only non-status hooks are registered
+
+- Where: `crates/cli/src/integration.rs` — `const EVENTS`, `fn claude_hooks`,
+  `fn codex_args`, and any test pinning them; `integrations/claude-plugin/hooks/hooks.json`;
+  `integrations/claude-plugin/.claude-plugin/plugin.json`;
+  `integrations/claude-plugin/README.md` (the hooks section).
+- Change: managed Claude registers exactly `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+  `PostToolUse`, `SessionEnd`, `WorktreeRemove`; managed Codex exactly `SessionStart`,
+  `UserPromptSubmit`, `SessionEnd`. In the plugin: delete the `Stop`, `StopFailure`,
+  `PermissionRequest`, `Notification`, `PostToolUseFailure` keys; delete the
+  `coflux hook claude` entries under `UserPromptSubmit` and the unmatched one under
+  `PostToolUse` (keep `session-moved.mjs` and the EnterWorktree/ExitWorktree matcher entry);
+  keep `PreToolUse`'s messenger (worktree guard); add the same messenger command as a second
+  hook under `SessionStart`, after `session-context.sh`. Rewrite the hooks.json
+  `description`, the README hooks section and `plugin.json`'s description so none of them
+  says hooks report turn states; bump `plugin.json` to `0.26.0`.
+- After: nothing in either integration registers an event whose only job was turn state;
+  every remaining job (context, session moved, worktree follow/forget/guard, session id) is
+  still wired.
+- Don't: touch `integrations/claude-plugin/skills/` (mirrored from `packages/cli/skills`).
+
+#### T13 · Wording and the black-box body follow
+
+- Where: `apps/server/src/hub.ts` — the `state` field comment ("Turn state from hooks or OSC
+  7501"); `packages/client/src/store.ts` — the `workspaceActivity` and `workspaceProgress`
+  doc comments; `tests/src/agent-endpoint.test.mjs` — `const bodies`, whose `/hook` body is
+  `{ agent: "claude", event: "Stop", pid: livePid, ppid: livePid }`.
+- Change: say state comes from OSC 7501; give the test's `/hook` body a valid
+  `agentSessionId` (a UUID) and event `SessionStart`, so the request still reaches the
+  in-tree gate the test exercises.
+- After: the test's assertions are unchanged and meaningful — an in-tree caller gets 200,
+  a forged or foreign caller is refused.
+
 ### Your call
 
 - D2: which parser, and the internal representation of the record and events.
@@ -388,12 +482,17 @@ In scope:
 - `apps/server/src/hub.ts`
 - `packages/client/src/store.ts`
 - `apps/desktop/src/renderer/components/workbench/{sidebar.tsx,pending-dots.tsx,workspace-terminal.tsx,command-palette-data.ts,command-palette.tsx,desktop-attention.ts,desktop-attention.test.ts,command-palette-data.test.ts}`
+- Milestone 5 adds: `crates/runtime/src/hook.rs`, `crates/cli/src/commands.rs`,
+  `crates/cli/src/integration.rs`, `packages/cli/coflux.mjs`,
+  `integrations/claude-plugin/hooks/hooks.json`,
+  `integrations/claude-plugin/.claude-plugin/plugin.json`,
+  `integrations/claude-plugin/README.md`, `tests/src/agent-endpoint.test.mjs`
 
 Out of scope:
 - `proto/` and every generated tree — comment-only changes would force regeneration (D11).
 - `crates/ptyd`, `crates/launcher` — no PTY-ownership or upgrade change.
-- `crates/runtime/src/hook.rs`, the CLI hook messenger and `integrations/claude-plugin` —
-  hooks are unchanged (non-goal).
+- The plugin's scripts (`integrations/claude-plugin/scripts/`) and skills — their jobs are
+  not status.
 - `apps/ios` — no change.
 - Agent progress percentage and child records (non-goals).
 
