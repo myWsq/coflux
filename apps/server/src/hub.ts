@@ -236,7 +236,7 @@ interface SessionAgentData {
   sessionId: SessionId;
   taskId: TaskId;
   agent: string;
-  /** hook 上报的回合状态：active / approval / question / done，空 = 无 hook 信号 */
+  /** Turn state from hooks or OSC 7501: active / approval / question / error / done; empty = no signal. */
   state: string;
   /** `coflux notify` 的留言（plan 074）：与 state 同生命周期，纯展示 */
   message: string;
@@ -288,8 +288,10 @@ interface DaemonResyncAuthority {
   retiredOwnerIds: Set<string>;
 }
 
-/** state 白名单：名单外的按畸形消息整条丢弃。waiting 是 v0.21 旧值，仍收以免混版本丢条目。 */
-const AGENT_STATES = new Set(["", "active", "approval", "question", "done", "waiting"]);
+/** Allowed agent states; an entry with any other value is dropped as malformed. `error` comes from
+ * OSC 7501 (the program stopped on an error). `waiting` is the v0.21 value, still accepted so a
+ * mixed-version fleet does not lose entries. */
+const AGENT_STATES = new Set(["", "active", "approval", "question", "error", "done", "waiting"]);
 
 export interface DaemonConn {
   info: DaemonInfoData;
