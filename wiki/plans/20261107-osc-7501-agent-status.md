@@ -559,8 +559,13 @@ path are unchanged.
 ## Outcome
 
 - Status: APPROVE — 2026-11-07
-- Mode: subagent(opus), one work package (M3/M4 too small to outweigh a split); one revision round
-- Commits: `7206efc7..11843e43`
+- Mode: subagent(opus), one work package (M3/M4 too small to outweigh a split); one revision round;
+  Milestone 5 (D13) added afterwards at the user's request and dispatched to the same executor
+- Commits: `7206efc7..11843e43` (Milestones 1–4), `fd1703ca..457e9a63` (Milestone 5)
+- Milestone 5: hooks carry no turn state; `/hook` only records the agent session id; plugin
+  0.26.0 and the managed integration register only hooks with another job. Verified: zero-warning
+  build, runtime 346/346, `coflux-cli` 57/57, `node --check`, plugin mirror check, server tsc,
+  desktop 563/563 + build, black-box `agent-endpoint.test.mjs` 5/5.
 - Deviations:
   - T4: a rebuilt session's record is not pushed at the end of the rebuild — recovery runs
     before the core attaches, so that push would have nowhere to go. Instead `send_resync`
