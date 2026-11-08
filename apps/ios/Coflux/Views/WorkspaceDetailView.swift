@@ -78,6 +78,8 @@ struct WorkspaceDetailView: View {
     /// Tall layout, half folded with a horizontal fold: the keypad is inline below the fold and
     /// the 按键 toolbar item goes away (plan D9).
     @State private var laptopPose = false
+    /// The avatar tray's natural width (sizes it in the top bar).
+    @State private var trayContentWidth: CGFloat = 0
 
     /// Below this content height the key row folds into 按键 and only the composer stays
     /// (tall Split View, outer display in landscape): the terminal keeps its rows.
@@ -128,6 +130,21 @@ struct WorkspaceDetailView: View {
     /// page is as tall and narrow as the outer display's. A short wide window keeps the menu.
     private var showsStrip: Bool {
         barsOnRail || layout == .tall
+    }
+
+    /// Tall layout: the tray sits in the top bar, in the room between the back button and the
+    /// trailing items that the title left (mockup option B,
+    /// `wiki/plans/20261108-ios-tall-terminal-header-mockup.html`; the user's pick, 2026-11-08).
+    /// Elsewhere it is a row above the terminal.
+    private var stripInTopBar: Bool {
+        layout == .tall
+    }
+
+    /// The tray's width in the top bar: its content, up to the room the bar leaves. On the Duo
+    /// open tall (669 pt) the back button, the four trailing items and the status bar's corner
+    /// take about 440 pt of the row.
+    private var topBarTrayWidth: CGFloat {
+        min(trayContentWidth, max(120, laidOutSize.width - 445))
     }
 
     // MARK: - Titles
@@ -319,16 +336,18 @@ struct WorkspaceDetailView: View {
         if members.isEmpty {
             emptyState
         } else if layout == .tall {
-            VStack(spacing: 0) {
-                terminalStrip
-                tallArrangement
-            }
+            tallArrangement
         } else {
             VStack(spacing: 0) {
                 // The bars sit on the rail and the page shows no title: the strip names the
                 // terminals and switches between them.
                 if barsOnRail {
                     terminalStrip
+                        .frame(height: Self.tabHeight)
+                        .padding(.top, 6)
+                        .padding(.bottom, 4)
+                        .mask { Rectangle().padding(.vertical, -60) }
+                        .background(Theme.terminal)
                 }
                 ZStack(alignment: .bottom) {
                     terminalColumn(reserveDock: true)
@@ -393,7 +412,8 @@ struct WorkspaceDetailView: View {
                 }
                 // Swiping the pager changes the active terminal without a transaction: animate anyway.
                 .animation(.smooth(duration: 0.25), value: activeTaskID)
-                .padding(.horizontal, 10)
+                .padding(.horizontal, stripInTopBar ? 2 : 10)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { trayContentWidth = $0 }
             }
             .scrollIndicators(.hidden)
             // Clawd's confetti and flag reach above the tile, and the badge past its corner: let
@@ -404,19 +424,18 @@ struct WorkspaceDetailView: View {
                 withAnimation(.smooth(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
             }
         }
-        .frame(height: Self.tabHeight)
-        .padding(.top, 6)
-        .padding(.bottom, 4)
-        .mask { Rectangle().padding(.vertical, -60) }
-        .background(Theme.terminal)
     }
 
+    /// The tray's tiles: 30 pt in a row above the terminal; in the top bar as tall as the
+    /// system's buttons beside them (48 pt on the Duo, measured from a screenshot; user's call).
+    private var tileHeight: CGFloat { stripInTopBar ? 48 : Self.tabHeight }
+    private var tileRadius: CGFloat { stripInTopBar ? 16 : 10 }
+    private var tileGlyph: CGFloat { stripInTopBar ? 24 : 18 }
     private static let tabHeight: CGFloat = 30
-    private static let tabRadius: CGFloat = 10
 
     private func terminalTab(_ task: Coflux_V1_Task) -> some View {
         let active = task.id == activeTaskID
-        let shape = RoundedRectangle(cornerRadius: Self.tabRadius)
+        let shape = RoundedRectangle(cornerRadius: tileRadius)
         return Button {
             withAnimation(.smooth(duration: 0.25)) { activeTaskID = task.id }
         } label: {
@@ -424,15 +443,15 @@ struct WorkspaceDetailView: View {
                 tabGlyph(task)
                 if active {
                     Text(tabName(task))
-                        .font(Theme.Fonts.label.weight(.semibold))
+                        .font((stripInTopBar ? Theme.Fonts.body : Theme.Fonts.label).weight(.semibold))
                         .foregroundStyle(Theme.foreground)
                         .lineLimit(1)
                         .transition(.opacity)
                 }
             }
-            .padding(.leading, active ? 8 : 0)
-            .padding(.trailing, active ? 12 : 0)
-            .frame(minWidth: Self.tabHeight, minHeight: Self.tabHeight, maxHeight: Self.tabHeight)
+            .padding(.leading, active ? (stripInTopBar ? 12 : 8) : 0)
+            .padding(.trailing, active ? (stripInTopBar ? 16 : 12) : 0)
+            .frame(minWidth: tileHeight, minHeight: tileHeight, maxHeight: tileHeight)
             .background(active ? Theme.accentSurface : Theme.card, in: shape)
             .overlay(shape.strokeBorder(active ? Theme.foreground.opacity(0.1) : Theme.border, lineWidth: 1))
             .overlay(alignment: .topTrailing) {
@@ -458,17 +477,20 @@ struct WorkspaceDetailView: View {
         if task.status == .running, let agent = client.agent(forTask: task), agent.agent.lowercased() == "claude" {
             if agent.state == "error" {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: tileGlyph * 0.72, weight: .semibold))
                     .foregroundStyle(Theme.destructive)
-                    .frame(width: 18, height: 18)
+                    .frame(width: tileGlyph, height: tileGlyph)
             } else {
-                ClawdGlyph(pose: ClawdPose(state: agent.state, seen: navigation.seenFinishedTaskIDs.contains(task.id)))
+                ClawdGlyph(
+                    pose: ClawdPose(state: agent.state, seen: navigation.seenFinishedTaskIDs.contains(task.id)),
+                    size: tileGlyph
+                )
             }
         } else {
             Circle()
                 .fill(tabTone(task))
-                .frame(width: 7, height: 7)
-                .frame(width: 12, height: 18)
+                .frame(width: stripInTopBar ? 9 : 7, height: stripInTopBar ? 9 : 7)
+                .frame(width: tileGlyph * 0.67, height: tileGlyph)
         }
     }
 
@@ -615,6 +637,14 @@ struct WorkspaceDetailView: View {
             ToolbarItem(placement: .bottomBar) { pasteButton }
         } else {
             if showsStrip {
+                if stripInTopBar {
+                    // Solid tiles, not one more glass capsule (the user turned glass down).
+                    ToolbarItem(placement: .topBarLeading) {
+                        terminalStrip
+                            .frame(width: topBarTrayWidth, height: tileHeight)
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                }
                 ToolbarItem(placement: .topBarTrailing) { newTerminalButton }
                     .visibilityPriority(.high)
             } else {
