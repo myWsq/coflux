@@ -699,7 +699,7 @@ struct WorkspaceDetailView: View {
             // The rail's title row, in the top bar: the title on the left, the avatars on the
             // right, in the room left by the back button, two trailing items and the status
             // bar's corner. A fixed width: offered its ideal size, the bar squeezed the title to
-            // a sliver.
+            // a sliver; too wide, it folded 新建终端 and 更多 into the system's overflow button.
             ToolbarItem(placement: .topBarLeading) {
                 HStack(spacing: 12) {
                     pageTitle
@@ -708,7 +708,7 @@ struct WorkspaceDetailView: View {
                         terminalAvatars
                     }
                 }
-                .frame(width: max(180, laidOutSize.width - 330), alignment: .leading)
+                .frame(width: max(180, laidOutSize.width - 380), alignment: .leading)
             }
             .sharedBackgroundVisibility(.hidden)
         }
