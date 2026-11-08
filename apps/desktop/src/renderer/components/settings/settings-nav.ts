@@ -5,7 +5,7 @@
  * 「默认分区一定存在」「未知 id 退回默认」这类约束由 node --test 守住，不散在 JSX 里。
  */
 
-export type SettingsSectionId = "general" | "agents" | "archived-projects" | "machine" | "executor";
+export type SettingsSectionId = "general" | "agents" | "speech" | "archived-projects" | "machine" | "executor";
 
 export type SettingsSection = {
   id: SettingsSectionId;
@@ -18,7 +18,8 @@ export type SettingsSection = {
 };
 
 /**
- * 顺序即左栏的显示顺序：先账号所在的「通用」，再自成一组的「Agents」（plan 20261001-desktop-agents），
+ * 顺序即左栏的显示顺序：先账号所在的「通用」，再「Agents」（plan 20261001-desktop-agents）与「语音识别」
+ * (plan 20261108-ios-seed-asr) in one group of account-level settings,
  * then 「已归档项目」 in a group of its own (plan 20261030-project-archive)，最后本机与 executor 这两项运行时设置。
  */
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
@@ -32,6 +33,12 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: "agents",
     label: "Agents",
     description: "在新建标签页菜单里直接启动的编码 agent，以及各自的启动命令。配置存在账号上，账号下的所有设备共用。",
+    group: 1,
+  },
+  {
+    id: "speech",
+    label: "语音识别",
+    description: "iPhone 长按说话所用的豆包语音识别 2.0（火山方舟 Agent Plan）API Key。Key 存在账号上，账号下的所有设备共用。",
     group: 1,
   },
   {

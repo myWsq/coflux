@@ -3,7 +3,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { Layout, LayoutContent, LayoutPanel, VStack } from "@astryxdesign/core/Layout";
 import { List, ListItem } from "@astryxdesign/core/List";
 import { Heading, Text } from "@astryxdesign/core/Text";
-import { Archive, ArrowLeft, Bot, Settings2, Sparkles } from "lucide-react";
+import { Archive, ArrowLeft, Bot, Mic, Settings2, Sparkles } from "lucide-react";
 import type { CofluxClient } from "@coflux/client";
 import type { Project } from "@coflux/protocol";
 
@@ -12,6 +12,7 @@ import { ArchivedProjectsSection } from "@/components/settings/archived-projects
 import { ExecutorSection } from "@/components/settings/executor-section";
 import { GeneralSection } from "@/components/settings/general-section";
 import { MachineSection } from "@/components/settings/machine-section";
+import { SpeechSection } from "@/components/settings/speech-section";
 import {
   DEFAULT_SETTINGS_SECTION,
   resolveSettingsSection,
@@ -43,6 +44,7 @@ const SETTINGS_NAV_ITEM_CLASS = "h-7 px-3 py-0 font-medium";
 const SECTION_ICONS: Record<SettingsSectionId, DeviceMarkComponent> = {
   general: Settings2,
   agents: Sparkles,
+  speech: Mic,
   "archived-projects": Archive,
   machine: AppleMark,
   executor: Bot,
@@ -175,6 +177,7 @@ export function SettingsPage(props: SettingsPageProps) {
 
               {section.id === "general" ? <GeneralSection client={props.client} /> : null}
               {section.id === "agents" ? <AgentsSection client={props.client} /> : null}
+              {section.id === "speech" ? <SpeechSection client={props.client} /> : null}
               {section.id === "archived-projects" ? (
                 <ArchivedProjectsSection client={props.client} onRemoveProject={props.onRemoveProject} />
               ) : null}

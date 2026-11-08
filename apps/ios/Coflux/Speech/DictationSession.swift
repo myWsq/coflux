@@ -1,51 +1,73 @@
 import AVFoundation
+import CofluxClientCore
 import Foundation
-import Speech
 import UIKit
 
 private struct DictationTimeoutError: Error {}
 
-/// 一次长按对讲的会话状态机（plan 064）。引擎选型只在会话开始时判一次：
-/// 豆包 IME 免 key 通道优先，~2.5s 准入超时内未连上则降级 Apple 本地识别，
-/// 会话期间不再切换引擎。
+/// 一次长按对讲的会话状态机（plan 064 → plan 20261108-ios-seed-asr）：只有一个引擎——豆包
+/// Seed-ASR 2.0，用账号上存的 API Key，不重试、不降级（D1）。准入（取 Key + 等语境 + 建连）
+/// 整体限时约 3s；取 Key、读语境与开麦克风并行。
 @MainActor
 final class DictationSession: ObservableObject {
-    enum Engine {
-        case doubao
-        case apple
+    /// Why dictation cannot start at all; the microphone is never opened.
+    enum Unavailability: Equatable {
+        /// The account has no key.
+        case notConfigured
+        /// The centre does not store the key (older server).
+        case outdatedServer
     }
 
     enum Phase: Equatable {
         case connecting
-        case modelDownloading(progress: Double?)
-        case active(Engine)
+        /// Recognising; `withContext` = the agent conversation went into the recognition context.
+        case active(withContext: Bool)
+        case unavailable(Unavailability)
         case permissionDenied
         case failed(String)
     }
+
+    static let invalidKeyMessage = "Key 无效，请在「语音识别」里重新填写"
+    static let unreachableMessage = "无法连接识别服务"
 
     @Published private(set) var phase: Phase = .connecting
     @Published private(set) var displayText = ""
     @Published private(set) var isVolatile = false
 
+    private let client: CofluxClient
+    private let contextSource: DictationContextSource
     private let capture = AudioCapture()
     private var provider: (any SpeechTranscribing)?
     private var listenTask: Task<Void, Never>?
     private var startTask: Task<Void, Never>?
-    /// 快速按下-松开可能在豆包 2.5s 准入判定还没跑完时就要求收尾；每个 await
-    /// 挂起点之后都要重新检查这个标志，避免残留连接或重复初始化（真实场景，
-    /// 不是臆造的边界情况）。
+    private var keyTask: Task<Result<String, any Error>, Never>?
+    private var contextTask: Task<DictationContext, Never>?
+    /// 快速按下-松开可能在准入还没跑完时就要求收尾；每个 await 挂起点之后都要重新检查这个
+    /// 标志，避免残留连接或重复初始化（真实场景，不是臆造的边界情况）。
     private var teardownRequested = false
-    /// 准入期（握手/降级判定，最多几百 ms 到 2.5s）采到的音频先攒这里，
-    /// provider 就绪后在 feedProvider 里补喂——否则开口前几百 ms 全丢字。
-    /// 上限防异常场景无限膨胀（16kHz mono Int16 下 300KB ≈ 9.4s，远超准入窗口）。
+    /// 准入期（取 Key / 等语境 / 握手，最多约 3s）采到的音频先攒这里，provider 就绪后在
+    /// feedProvider 里补喂——否则开口前几百 ms 全丢字。上限防异常场景无限膨胀
+    /// （16kHz mono Int16 下 300KB ≈ 9.4s，远超准入窗口）。
     private var pendingPCM: [Data] = []
     private var pendingPCMBytes = 0
     private static let pendingPCMCapBytes = 300 * 1024
 
-    private static let admissionTimeout: UInt64 = 2_500_000_000
+    /// The whole admission — key fetch, context wait and connect — is bounded: `finish()` awaits
+    /// `startTask` first, so an unbounded admission would leave the overlay finalizing for the key
+    /// fetch's full timeout.
+    private static let admissionTimeout: Duration = .seconds(3)
+    /// The conversation context is waited for at most this long from touch-down; after it the
+    /// workspace sentence alone goes in.
+    private static let contextDeadline: Duration = .milliseconds(1200)
+    private let createdAt = ContinuousClock.now
 
-    /// 麦克风与语音识别是否都已授权。两个系统查询都能同步读到，故此判据
-    /// 一处两用：
+    /// `sessionID`: the terminal's session, whose agent conversation becomes the context.
+    init(client: CofluxClient, workspaceID: String, sessionID: String?) {
+        self.client = client
+        contextSource = DictationContextSource(client: client, workspaceID: workspaceID, sessionID: sessionID)
+    }
+
+    /// 麦克风是否已授权（同步可读），一处两用：
     /// - start() 的权限快路径（plan 066）：已授权时没有权限框弹出/收起这回事，
     ///   慢路径那套等待可整段跳过；
     /// - 预热准入（plan 069）：不满足就完全不预热——否则首次点一下占位条想
@@ -54,31 +76,47 @@ final class DictationSession: ObservableObject {
     ///   "预热也支持首次授权"把它打开。
     static var permissionsGranted: Bool {
         AVAudioApplication.shared.recordPermission == .granted
-            && SFSpeechRecognizer.authorizationStatus() == .authorized
+    }
+
+    /// The account has a key on a centre that stores it: dictation can start. Prewarm is skipped
+    /// otherwise.
+    static func isAvailable(on client: CofluxClient) -> Bool {
+        client.speechKeySupported && client.speechKeyStatus?.configured == true
     }
 
     /// 长按触发：包一层 Task 存进 startTask，finish() 靠它等 phase 落定
-    /// （权限被拒/引擎失败都在 start() 内部同步设置，await 它就不会读到
+    /// （不可用/权限被拒/连接失败都在 start() 内部设置，await 它就不会读到
     /// 过期的 .connecting）。
     func begin() {
         startTask = Task { await self.start() }
     }
 
     private func start() async {
-        let speechGranted: Bool
-        if Self.permissionsGranted {
-            // 权限快路径（plan 066，2026-07-30 用户定案）：下面那套"等回
-            // active + 400ms 缓冲"只为消化权限框收起的瞬态而存在（见慢路径
-            // 分支注释）——已授权时可以整段跳过，直接进 capture.start()，
-            // 消除长按后立即开口时头几百 ms 音频在采音开始前被丢的窗口。
-            speechGranted = true
-        } else {
+        guard client.speechKeySupported else {
+            phase = .unavailable(.outdatedServer)
+            return
+        }
+        guard client.speechKeyStatus?.configured == true else {
+            phase = .unavailable(.notConfigured)
+            return
+        }
+        // Key and context run alongside the microphone, from touch-down (prewarm) on. Both are
+        // cancelled by cancel(); their late results are ignored behind teardownRequested.
+        let client = client
+        let keyTask = Task { () -> Result<String, any Error> in
+            do { return .success(try await client.speechKey()) } catch { return .failure(error) }
+        }
+        let source = contextSource
+        let contextTask = Task { await source.load(client: client) }
+        self.keyTask = keyTask
+        self.contextTask = contextTask
+
+        if !Self.permissionsGranted {
             let firstAsk = AVAudioApplication.shared.recordPermission != .granted
             guard await AVAudioApplication.requestRecordPermission() else {
                 phase = .permissionDenied
                 return
             }
-            let granted = await Self.requestSpeechPermission()
             guard !teardownRequested else { return }
 
             // 真机长按崩溃根因（2026-07-29，栈：_ReportRPCTimeout →
@@ -94,8 +132,9 @@ final class DictationSession: ObservableObject {
             if firstAsk {
                 try? await Task.sleep(for: .milliseconds(400))
             }
-            speechGranted = granted
         }
+        // 权限快路径（plan 066）：已授权时直接进 capture.start()，消除长按后立即开口时
+        // 头几百 ms 音频在采音开始前被丢的窗口。
         guard !teardownRequested else { return }
 
         do {
@@ -112,58 +151,81 @@ final class DictationSession: ObservableObject {
             return
         }
 
-        let doubao = DoubaoIMEProvider()
-        do {
-            try await Self.withTimeout(Self.admissionTimeout) { try await doubao.start() }
-            guard !teardownRequested else {
-                await doubao.cancel()
-                capture.stop()
-                return
-            }
-            provider = doubao
-            phase = .active(.doubao)
-            pump(doubao)
-            return
-        } catch {
-            await doubao.cancel()
-        }
+        let deadline = ContinuousClock.now + Self.admissionTimeout
 
+        guard let keyResult = await Self.value(of: keyTask, before: deadline) else {
+            return fail(Self.unreachableMessage)
+        }
         guard !teardownRequested else {
             capture.stop()
             return
         }
-        guard speechGranted else {
-            phase = .permissionDenied
-            capture.stop()
-            return
+        let apiKey: String
+        switch keyResult {
+        case .success(let key):
+            apiKey = key
+        case .failure(let error):
+            return fail((error as? SpeechKeyError)?.message ?? Self.unreachableMessage)
         }
-        guard #available(iOS 26.0, *) else {
-            phase = .failed("语音识别暂不可用")
+        guard !apiKey.isEmpty else {
+            phase = .unavailable(.notConfigured)
             capture.stop()
             return
         }
 
-        let apple = AppleSpeechProvider()
-        do {
-            try await apple.start()
-            guard !teardownRequested else {
-                await apple.cancel()
-                capture.stop()
-                return
-            }
-            provider = apple
-            phase = .active(.apple)
-            pump(apple)
-        } catch {
-            phase = .failed("语音识别暂不可用")
+        let context = await Self.value(of: contextTask, before: min(createdAt + Self.contextDeadline, deadline))
+            ?? contextSource.fallback
+        guard !teardownRequested else {
             capture.stop()
+            return
+        }
+
+        let seed = SeedASRProvider(apiKey: apiKey, contextItems: context.items)
+        let connect = Task { () -> Result<Void, SeedASRStartError> in
+            do {
+                try await seed.start()
+                return .success(())
+            } catch let error as SeedASRStartError {
+                return .failure(error)
+            } catch {
+                return .failure(.unreachable)
+            }
+        }
+        guard let outcome = await Self.value(of: connect, before: deadline) else {
+            await seed.cancel()
+            return fail(Self.unreachableMessage)
+        }
+        guard !teardownRequested else {
+            await seed.cancel()
+            capture.stop()
+            return
+        }
+        switch outcome {
+        case .failure(.invalidKey):
+            await seed.cancel()
+            return fail(Self.invalidKeyMessage)
+        case .failure(.unreachable):
+            await seed.cancel()
+            return fail(Self.unreachableMessage)
+        case .success:
+            provider = seed
+            phase = .active(withContext: context.includesConversation)
+            pump(seed)
         }
     }
 
-    /// 上滑取消：不等终稿，尽快断开
+    /// An admission failure: show it and release the microphone. No fallback (D1).
+    private func fail(_ message: String) {
+        phase = .failed(message)
+        capture.stop()
+    }
+
+    /// 上滑取消 / 未达长按就松手：不等终稿，尽快断开；在飞的取 Key 与读语境一并取消。
     func cancel() {
         guard !teardownRequested else { return }
         teardownRequested = true
+        keyTask?.cancel()
+        contextTask?.cancel()
         listenTask?.cancel()
         capture.stop()
         if let provider {
@@ -171,14 +233,16 @@ final class DictationSession: ObservableObject {
         }
     }
 
-    /// 松手结束：等 start() 把 phase 落定（权限拒绝/引擎失败也在此刻才能读到
+    /// 松手结束：等 start() 把 phase 落定（不可用/权限拒绝/连接失败也在此刻才能读到
     /// 准确值），再请求引擎给出终稿，最多等 2s，返回已转写文字（不含首尾空白）。
-    /// 收尾强制调 provider.cancel() 关 ws/结束 listenTask：SessionFinished
-    /// 丢包或超时都不该让连接悬挂到服务端自己断（cancel 内部已改幂等）。
+    /// 收尾强制调 provider.cancel() 关 ws/结束 listenTask：终包丢失或超时都不该让连接
+    /// 悬挂到服务端自己断（cancel 内部幂等）。
     func finish() async -> String {
         guard !teardownRequested else { return displayText.trimmingCharacters(in: .whitespacesAndNewlines) }
         teardownRequested = true
         await startTask?.value
+        keyTask?.cancel()
+        contextTask?.cancel()
         capture.stop()
         await provider?.finish()
         if let task = listenTask {
@@ -228,8 +292,6 @@ final class DictationSession: ObservableObject {
         case .finalized(let text):
             displayText = text
             isVolatile = false
-        case .modelDownloading(let progress):
-            phase = .modelDownloading(progress: progress)
         case .failed(let message):
             phase = .failed(message)
         case .closed:
@@ -237,13 +299,18 @@ final class DictationSession: ObservableObject {
         }
     }
 
-    /// nonisolated 是必须的：类是 @MainActor，若闭包继承主线程隔离，tccd 在
-    /// 后台队列回调时 SE-0423 动态隔离检查会直接 SIGTRAP（2026-07-29 全部
-    /// 真机崩溃的根因，iOS 27 起回调不再落主线程）。
-    private nonisolated static func requestSpeechPermission() async -> Bool {
-        await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { status in
-                continuation.resume(returning: status == .authorized)
+    /// The task's value, or nil once `deadline` passes, whichever comes first. The task is not
+    /// cancelled here; a late value is simply dropped.
+    private static func value<T: Sendable>(of task: Task<T, Never>, before deadline: ContinuousClock.Instant) async -> T? {
+        let race = FirstResult<T>()
+        return await withCheckedContinuation { continuation in
+            race.continuation = continuation
+            race.timer = Task { @MainActor in
+                do { try await Task.sleep(until: deadline, clock: .continuous) } catch { return }
+                race.resolve(nil)
+            }
+            Task { @MainActor in
+                race.resolve(await task.value)
             }
         }
     }
@@ -263,5 +330,19 @@ final class DictationSession: ObservableObject {
             group.cancelAll()
             return result
         }
+    }
+}
+
+/// One-shot resolution of `DictationSession.value(of:before:)`: whichever side comes first wins.
+@MainActor
+private final class FirstResult<T: Sendable> {
+    var continuation: CheckedContinuation<T?, Never>?
+    var timer: Task<Void, Never>?
+
+    func resolve(_ value: T?) {
+        guard let continuation else { return }
+        self.continuation = nil
+        timer?.cancel()
+        continuation.resume(returning: value)
     }
 }

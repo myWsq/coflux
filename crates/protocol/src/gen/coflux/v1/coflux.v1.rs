@@ -3913,7 +3913,7 @@ pub struct OAuthAuthorizeDecide {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -3990,6 +3990,10 @@ pub mod client_to_server {
         AgentSettingSet(super::AgentSettingSet),
         #[prost(message, tag="50")]
         ProjectSetArchived(super::ProjectSetArchived),
+        #[prost(message, tag="51")]
+        SpeechKeySet(super::SpeechKeySet),
+        #[prost(message, tag="52")]
+        SpeechKeyGet(super::SpeechKeyGet),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -4026,6 +4030,11 @@ pub struct AuthOk {
     /// project removal instead of archiving.
     #[prost(bool, tag="9")]
     pub project_archive: bool,
+    /// This center stores the account's dictation API key (plan 20261108-ios-seed-asr): it sends
+    /// SpeechKeyStatus after the subscribe snapshot and accepts SpeechKeySet / SpeechKeyGet. False (an
+    /// older center) tells the client "not supported" apart from "no key configured yet".
+    #[prost(bool, tag="10")]
+    pub speech_key: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthError {
@@ -4224,7 +4233,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -4305,6 +4314,10 @@ pub mod server_to_client {
         AgentSettingsUpdated(super::AgentSettingsUpdated),
         #[prost(message, tag="50")]
         SessionMetadata(super::SessionMetadata),
+        #[prost(message, tag="51")]
+        SpeechKeyStatus(super::SpeechKeyStatus),
+        #[prost(message, tag="52")]
+        SpeechKeyValue(super::SpeechKeyValue),
     }
 }
 /// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
@@ -4331,6 +4344,51 @@ pub struct DeviceJoinKeyCreated {
     #[prost(double, tag="3")]
     pub expires_at: f64,
     #[prost(string, tag="4")]
+    pub error: ::prost::alloc::string::String,
+}
+/// Account-level dictation API key (plan 20261108-ios-seed-asr): the Doubao speech-recognition key the
+/// iOS app uses for long-press dictation. The center stores it encrypted and never broadcasts it.
+/// Replace the signed-in account's key; an empty `api_key` clears it. Answered with SpeechKeyStatus
+/// carrying the same request_id.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechKeySet {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub api_key: ::prost::alloc::string::String,
+}
+/// Fetch the signed-in account's key in plaintext. Answered with SpeechKeyValue, only to this
+/// connection.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechKeyGet {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+}
+/// Whether the account has a key, never the key itself. Sent to the client right after the subscribe
+/// snapshot (empty request_id) and, after every accepted SpeechKeySet, to every subscribed client of
+/// the account (request_id of that write; also sent directly to an unsubscribed writer). A non-empty
+/// `error` answers a rejected write, goes only to the writer, and its `configured` / `updated_at` must
+/// be ignored. `updated_at` is the last write in ms epoch, center clock (0 when not configured).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SpeechKeyStatus {
+    #[prost(bool, tag="1")]
+    pub configured: bool,
+    #[prost(double, tag="2")]
+    pub updated_at: f64,
+    #[prost(string, tag="3")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub error: ::prost::alloc::string::String,
+}
+/// Answer to SpeechKeyGet, only to the requesting connection. Empty `api_key` with empty `error` means
+/// no key is configured; a non-empty `error` means the stored key could not be read.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechKeyValue {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub api_key: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
     pub error: ::prost::alloc::string::String,
 }
 /// Bounded newest-first history. Zero before_sequence requests the first page.

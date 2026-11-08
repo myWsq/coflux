@@ -30,7 +30,5 @@
 	<!-- 终端长按对讲（plan 064）：占位条长按发起语音输入，转写结果落草稿供确认后发送 -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>用于长按占位条时录音，将语音转写为终端输入草稿</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>用于在语音转写服务不可用时，使用本机语音识别生成终端输入草稿</string>
 </dict>
 </plist>

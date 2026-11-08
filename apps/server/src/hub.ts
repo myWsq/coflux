@@ -150,6 +150,11 @@ const MAX_AGENT_SETTING_COMMAND_CHARS = 1000;
 const MAX_AGENT_SETTINGS_PER_ACCOUNT = 32;
 /** Control characters (newlines included) are stripped from a command: it is typed into a shell as one line. */
 const AGENT_COMMAND_CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
+/* Account dictation key (plan 20261108-ios-seed-asr). The key is opaque to the center: only a length
+ * bound and a charset sanity check (no whitespace, no control characters) apply. */
+const MAX_SPEECH_KEY_REQUEST_ID_BYTES = 128;
+const MAX_SPEECH_KEY_CHARS = 256;
+const SPEECH_KEY_INVALID_CHARS = /[\s\u0000-\u001f\u007f]/u;
 /** One message for every redeem miss (unknown, expired, used, replaced): nothing to learn by probing. */
 const JOIN_KEY_REJECTED = "接入密钥无效、已过期或已被使用";
 const MAX_RATE_LIMIT_KEYS = 10_000;
@@ -647,6 +652,9 @@ export class Hub {
   /** Agent-setting writes chained per account (plan 20261002-account-agent-settings), so the full
    * configurations they broadcast leave in commit order and the last broadcast is the latest state. */
   private readonly agentSettingWrites = new Map<AccountId, Promise<void>>();
+  /** Speech-key writes chained per account (plan 20261108-ios-seed-asr), for the same reason: the
+   * statuses they broadcast leave in commit order. */
+  private readonly speechKeyWrites = new Map<AccountId, Promise<void>>();
   private readonly daemonAuthLimiter = new FixedWindowLimiter(config.daemonAuthRateLimit, config.authRateWindowMs);
   private readonly loginLimiter = new FixedWindowLimiter(config.loginRateLimit, config.authRateWindowMs);
   private readonly tokenAuthLimiter = new FixedWindowLimiter(config.tokenAuthRateLimit, config.authRateWindowMs);
@@ -3260,10 +3268,11 @@ export class Hub {
         let checkpoints: SessionCheckpointRecord[] | SessionTitleRecord[];
         let inbox: Awaited<ReturnType<Store["notificationPage"]>>;
         let agentSettings: AgentSettingRecord[];
+        let speechKey: Awaited<ReturnType<Store["getSpeechKey"]>>;
         try {
           // The agent settings are read in the same window as the rest: a write that commits before
           // this read is in it, one that commits after lands in the backlog replayed below.
-          [daemons, projects, workspaces, tasks, checkpoints, inbox, agentSettings] = await Promise.all([
+          [daemons, projects, workspaces, tasks, checkpoints, inbox, agentSettings, speechKey] = await Promise.all([
             this.daemonInfoList(accountId),
             this.store.listProjects(accountId),
             this.store.listWorkspaces(accountId),
@@ -3271,6 +3280,8 @@ export class Hub {
             client.sessionMetadata ? this.store.listSessionTitles(accountId) : this.store.listSessionCheckpoints(accountId),
             this.store.notificationPage(accountId),
             this.store.listAgentSettings(accountId),
+            // Status only: the ciphertext is never decrypted for the snapshot.
+            this.store.getSpeechKey(accountId),
           ]);
         } catch (error) {
           client.snapshotBacklog = undefined;
@@ -3283,6 +3294,7 @@ export class Hub {
         this.sendClientNow(client, { case: "stateSnapshot", value: { daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) } });
         this.sendClientNow(client, { case: "notificationPage", value: { ...inbox, requestId: "initial" } });
         this.sendClientNow(client, { case: "agentSettingsUpdated", value: { agents: agentSettings, requestId: "", error: "" } });
+        this.sendClientNow(client, { case: "speechKeyStatus", value: { configured: speechKey !== undefined, updatedAt: speechKey?.updatedAt ?? 0, requestId: "", error: "" } });
         if (client.sessionMetadata) this.sendInitialSessionTitles(client, accountId, checkpoints);
         else for (const checkpoint of checkpoints as SessionCheckpointRecord[]) this.sendCheckpoint(client, checkpoint, true);
         // agent presence 补发（plan 073）：client 的 stateSnapshot handler 会清空本地 presence，
@@ -3383,6 +3395,14 @@ export class Hub {
       }
       case "agentSettingSet": {
         await this.setAgentSetting(client, msg.payload.value);
+        break;
+      }
+      case "speechKeySet": {
+        await this.setSpeechKey(client, msg.payload.value);
+        break;
+      }
+      case "speechKeyGet": {
+        await this.getSpeechKey(client, msg.payload.value.requestId);
         break;
       }
       case "deviceAuthorizeInfo": {
@@ -4100,7 +4120,7 @@ export class Hub {
     client.tokenHash = tokenHash;
     client.sessionMetadata = msg.sessionMetadata === true;
     const loginName = await this.resolveLoginName(loginUserId, tokenHash);
-    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true, agentSettings: true, sessionMetadata: true, projectArchive: true } });
+    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true, agentSettings: true, sessionMetadata: true, projectArchive: true, speechKey: true } });
   }
 
   /** authOk 回带的「登录身份显示串」（plan 110）：local 模式恒为 env 用户名；password 模式按
@@ -4538,6 +4558,84 @@ export class Hub {
     } finally {
       if (this.agentSettingWrites.get(accountId) === tail) this.agentSettingWrites.delete(accountId);
     }
+  }
+
+  /** `speechKeySet` (plan 20261108-ios-seed-asr): replace or clear the account's dictation API key,
+   * then send the new status (never the key) to every subscribed client of the account — the writer
+   * included, and directly to an unsubscribed writer — tagged with the write's request id. A rejected
+   * write is answered with an error to the writer only. Clearing works even when no encryption key
+   * is configured, so a stored key can always be removed. */
+  private async setSpeechKey(client: ClientConn, value: { requestId: string; apiKey: string }): Promise<void> {
+    const { requestId } = value;
+    const reject = (error: string) =>
+      this.sendClient(client, { case: "speechKeyStatus", value: { requestId, configured: false, updatedAt: 0, error } });
+    if (!validBoundedText(requestId, MAX_SPEECH_KEY_REQUEST_ID_BYTES)) return void reject("语音识别 Key 请求无效");
+    const apiKey = value.apiKey.trim();
+    if (apiKey.length > MAX_SPEECH_KEY_CHARS) return void reject(`API Key 不能超过 ${MAX_SPEECH_KEY_CHARS} 个字符`);
+    if (SPEECH_KEY_INVALID_CHARS.test(apiKey)) return void reject("API Key 不能包含空白或控制字符");
+    let ciphertext: string | undefined;
+    if (apiKey !== "") {
+      // Checked before encrypt() so the executor's own error text never reaches the client.
+      if (!this.executorSecrets.available()) return void reject("中心还没有配置凭据加密密钥，拒绝以明文保存 API Key");
+      try {
+        ciphertext = this.executorSecrets.encrypt(apiKey);
+      } catch {
+        return void reject("中心还没有配置凭据加密密钥，拒绝以明文保存 API Key");
+      }
+    }
+    const accountId = client.accountId!;
+    const previous = this.speechKeyWrites.get(accountId) ?? Promise.resolve();
+    const run = previous.then(async () => {
+      const updatedAt = Date.now();
+      try {
+        if (ciphertext === undefined) await this.store.clearSpeechKey(accountId);
+        else await this.store.setSpeechKey(accountId, ciphertext, updatedAt);
+      } catch (error) {
+        log.warn("speech key write failed", { accountId, error: String(error) });
+        reject("保存语音识别 Key 失败，请重试");
+        return;
+      }
+      const configured = ciphertext !== undefined;
+      const payload: ServerToClientPayload = {
+        case: "speechKeyStatus",
+        value: { requestId, configured, updatedAt: configured ? updatedAt : 0, error: "" },
+      };
+      this.broadcast(accountId, payload);
+      if (!client.subscribed) this.sendClient(client, payload);
+    });
+    const tail = run.catch(() => undefined);
+    this.speechKeyWrites.set(accountId, tail);
+    try {
+      await run;
+    } finally {
+      if (this.speechKeyWrites.get(accountId) === tail) this.speechKeyWrites.delete(accountId);
+    }
+  }
+
+  /** `speechKeyGet` (plan 20261108-ios-seed-asr): the account's dictation key in plaintext, only to the
+   * requesting connection. No row = empty key and empty error; an unreadable row is an error, never
+   * "not configured". */
+  private async getSpeechKey(client: ClientConn, requestId: string): Promise<void> {
+    const reply = (value: { apiKey?: string; error?: string }) =>
+      this.sendClient(client, { case: "speechKeyValue", value: { requestId, apiKey: value.apiKey ?? "", error: value.error ?? "" } });
+    if (!validBoundedText(requestId, MAX_SPEECH_KEY_REQUEST_ID_BYTES)) return void reply({ error: "语音识别 Key 请求无效" });
+    const accountId = client.accountId!;
+    let row: Awaited<ReturnType<Store["getSpeechKey"]>>;
+    try {
+      row = await this.store.getSpeechKey(accountId);
+    } catch (error) {
+      log.warn("speech key read failed", { accountId, error: String(error) });
+      return void reply({ error: "读取语音识别 Key 失败，请重试" });
+    }
+    if (!row) return void reply({});
+    let apiKey: string;
+    try {
+      apiKey = this.executorSecrets.decrypt(row.ciphertext);
+    } catch {
+      log.warn("speech key undecryptable", { accountId });
+      return void reply({ error: "服务端密钥已变更，原先保存的 API Key 无法读取：请重新填写" });
+    }
+    reply({ apiKey });
   }
 
   /** `deviceJoinKeyCreate`: mint a one-time join key for the signed-in account, revoking `replaces` when

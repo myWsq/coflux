@@ -726,7 +726,7 @@ private enum ImagePipeline {
     private static let qualities: [CGFloat] = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
 
     /// nonisolated + async：经 await 从 MainActor 调用时真正跑在后台线程，不占用
-    /// 调用方（DictationSession.requestSpeechPermission 同构手法）。
+    /// 调用方的 MainActor。
     nonisolated static func process(data: Data, typeIdentifier: String?) async -> (Data, String)? {
         if let ext = losslessExt(for: typeIdentifier), data.count <= budgetBytes {
             return (data, ext)

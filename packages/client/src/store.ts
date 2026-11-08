@@ -273,6 +273,14 @@ export type AccountAgentSettings = Readonly<Record<string, AccountAgentSetting>>
  * not support it, the configuration of this connection has not arrived, disconnected, timed out). */
 export type AgentSettingWriteResult = { ok: true } | { ok: false; error: string };
 const AGENT_SETTING_WRITE_TIMEOUT_MS = 15_000;
+/** The account's dictation API key as this client sees it (plan 20261108-ios-seed-asr): whether one is
+ * stored and when it was last written (ms epoch, center clock). Never the key itself. */
+export type SpeechKeyStatus = { configured: boolean; updatedAt: number };
+/** Answer to `setSpeechKey`: the center accepted the write (its broadcast has already replaced
+ * `speechKeyStatus`), or it failed — refused by the center, or locally (not connected, the center does
+ * not support it, disconnected, timed out). */
+export type SpeechKeyWriteResult = { ok: true } | { ok: false; error: string };
+const SPEECH_KEY_WRITE_TIMEOUT_MS = 15_000;
 const EMPTY_AGENT_SETTINGS: AccountAgentSettings = Object.freeze({});
 
 /** 已退出终端的最后输出来源（plan 097）：snapshot / checkpoint = 规范化 ANSI 屏幕（分别来自 daemon 当前画面与
@@ -487,6 +495,13 @@ export type CofluxState = {
    * 20261030-project-archive). False before the first authOk and against an older center, which
    * only knows project removal. */
   projectArchiveSupported: boolean;
+  /** The center of the current connection stores the account's dictation key (`AuthOk.speech_key`,
+   * plan 20261108-ios-seed-asr). False before the first authOk and against an older center. */
+  speechKeySupported: boolean;
+  /** Whether the account has a dictation key, replaced by every `speechKeyStatus`. Null until the
+   * first status arrives. Kept across disconnects like `agentSettings`, but never saved with the
+   * offline catalog; reset when the account changes. The desktop never holds the key itself. */
+  speechKeyStatus: SpeechKeyStatus | null;
   lastError: ClientError | null;
   snapshotRevision: number;
 };
@@ -696,6 +711,23 @@ export function createCofluxClient(options: CofluxClientOptions) {
   // The account `agentSettings` belongs to: a different account must never see, or launch, them.
   let agentSettingsAccount = "";
 
+  // Speech-key writes in flight (plan 20261108-ios-seed-asr), with the same lifecycle as the
+  // agent-setting writes above.
+  let speechKeyRequest = 0;
+  const pendingSpeechKeyWrites = new Map<string, { resolve: (result: SpeechKeyWriteResult) => void; timer: ReturnType<typeof setTimeout> }>();
+  function settleSpeechKeyWrite(requestId: string, result: SpeechKeyWriteResult): void {
+    const pending = pendingSpeechKeyWrites.get(requestId);
+    if (!pending) return;
+    pendingSpeechKeyWrites.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(result);
+  }
+  function failSpeechKeyWrites(error: string): void {
+    for (const requestId of [...pendingSpeechKeyWrites.keys()]) settleSpeechKeyWrite(requestId, { ok: false, error });
+  }
+  // The account `speechKeyStatus` belongs to.
+  let speechKeyAccount = "";
+
   // Directory-workspace ensures in flight (plan 20260929-remote-desktop), keyed by request id like the join keys.
   let directoryWorkspaceRequest = 0;
   const pendingDirectoryWorkspaces = new Map<string, { resolve: (result: DirectoryWorkspaceResult) => void; timer: ReturnType<typeof setTimeout> }>();
@@ -739,6 +771,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     agentSettingsSupported: false,
     agentSettingsReceived: false,
     projectArchiveSupported: false,
+    speechKeySupported: false,
+    speechKeyStatus: null,
     notificationInbox: emptyNotificationInbox(),
     lastError: null,
     snapshotRevision: 0,
@@ -1125,6 +1159,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         // The configuration stays (the offline menu uses it); it just is no longer this connection's.
         store.setState({ agentSettingsReceived: false });
         failAgentSettingWrites("与服务器的连接已断开，修改没有保存");
+        failSpeechKeyWrites("与服务器的连接已断开，修改没有保存");
         // TCP/WS transport 断开不等于账号授权已撤销，也不等于 worker 那条独立控制 WS 已断。
         // Router 会立即禁用新 rendezvous/高权限能力，但给既有 remote session lane 一个有界宽限。
         deviceRouter.setControlDisconnected();
@@ -1399,6 +1434,13 @@ export function createCofluxClient(options: CofluxClientOptions) {
         }
         store.setState({ agentSettingsSupported: value.agentSettings, agentSettingsReceived: false });
         store.setState({ projectArchiveSupported: value.projectArchive });
+        // Speech key: the status arrives after the subscribe snapshot; the previous one stays until
+        // then unless it belongs to another account or this center does not store the key.
+        if (speechKeyAccount !== value.accountId || !value.speechKey) {
+          speechKeyAccount = value.accountId;
+          store.setState({ speechKeyStatus: null });
+        }
+        store.setState({ speechKeySupported: value.speechKey });
         // Terminal content: fetched through TaskRead when the center serves metadata, else taken
         // from the checkpoints it pushes (plan 20261010-terminal-checkpoint-energy).
         sessionMetadataSupported = value.sessionMetadata;
@@ -1429,6 +1471,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
         agentSettingsAccount = "";
         failAgentSettingWrites("登录已失效，修改没有保存");
         store.setState({ agentSettings: EMPTY_AGENT_SETTINGS, agentSettingsSupported: false, agentSettingsReceived: false });
+        speechKeyAccount = "";
+        failSpeechKeyWrites("登录已失效，修改没有保存");
+        store.setState({ speechKeySupported: false, speechKeyStatus: null });
         store.setState({ projectArchiveSupported: false });
         // Show the server's own reason. This branch is reached by an expired session token, a
         // rate-limited address and an obsolete bundle just as much as by wrong credentials, and
@@ -1450,7 +1495,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
         // 不是可重试的断线；进入专用状态页（非认证失败，不设 loginError——auth-failed 展示面语义是
         // "账号/密码错了"，混用会误导用户），由 app 触发自动更新检查。
         shouldRetry = false;
-        store.setState({ authState: "outdated" });
+        speechKeyAccount = "";
+        failSpeechKeyWrites("客户端版本过旧，修改没有保存");
+        store.setState({ authState: "outdated", speechKeySupported: false, speechKeyStatus: null });
         break;
       }
       case "notificationPage": {
@@ -1823,6 +1870,17 @@ export function createCofluxClient(options: CofluxClientOptions) {
         if (value.requestId) settleAgentSettingWrite(value.requestId, { ok: true });
         break;
       }
+      case "speechKeyStatus": {
+        const value = payload.value;
+        // A rejected write: answered to the writer only; its configured/updatedAt mean nothing.
+        if (value.error) {
+          settleSpeechKeyWrite(value.requestId, { ok: false, error: value.error });
+          break;
+        }
+        store.setState({ speechKeyStatus: { configured: value.configured, updatedAt: value.updatedAt } });
+        if (value.requestId) settleSpeechKeyWrite(value.requestId, { ok: true });
+        break;
+      }
       case "directoryWorkspaceEnsured": {
         const value = payload.value;
         settleDirectoryWorkspace(value.requestId, value.ok && value.workspaceId
@@ -1878,6 +1936,24 @@ export function createCofluxClient(options: CofluxClientOptions) {
       const timer = setTimeout(() => settleAgentSettingWrite(requestId, { ok: false, error: "保存超时，修改没有保存" }), AGENT_SETTING_WRITE_TIMEOUT_MS);
       pendingAgentSettingWrites.set(requestId, { resolve, timer });
       send({ case: "agentSettingSet", value: { requestId, agentId, enabled: setting.enabled, command: setting.command } });
+    });
+  }
+
+  /**
+   * Replace (or, with an empty string, clear) the account's dictation API key (plan
+   * 20261108-ios-seed-asr). Only while connected to a center that stores it; otherwise it fails at
+   * once. On success every subscribed client of the account has received the new status. The key is
+   * sent once and never kept here; failures never touch lastError.
+   */
+  function setSpeechKey(apiKey: string): Promise<SpeechKeyWriteResult> {
+    const state = store.getState();
+    if (!controlAuthenticated) return Promise.resolve({ ok: false, error: "与服务器的连接未就绪，修改没有保存" });
+    if (!state.speechKeySupported) return Promise.resolve({ ok: false, error: "服务器版本过旧，不支持保存语音识别 Key" });
+    const requestId = `${notificationRequestPrefix}-speech-${++speechKeyRequest}`;
+    return new Promise<SpeechKeyWriteResult>((resolve) => {
+      const timer = setTimeout(() => settleSpeechKeyWrite(requestId, { ok: false, error: "保存超时，修改没有保存" }), SPEECH_KEY_WRITE_TIMEOUT_MS);
+      pendingSpeechKeyWrites.set(requestId, { resolve, timer });
+      send({ case: "speechKeySet", value: { requestId, apiKey: apiKey.trim() } });
     });
   }
 
@@ -1938,6 +2014,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     failJoinKeys("已登出");
     failAgentSettingWrites("已登出");
     agentSettingsAccount = "";
+    failSpeechKeyWrites("已登出");
+    speechKeyAccount = "";
     pendingTaskRemovals.clear();
     clearRemovals();
     clearOfflineTimer();
@@ -1970,6 +2048,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
       agentSettingsSupported: false,
       agentSettingsReceived: false,
       projectArchiveSupported: false,
+      speechKeySupported: false,
+      speechKeyStatus: null,
     });
   }
 
@@ -2360,6 +2440,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     settleDeviceAuthorize({ ok: false, error: "客户端已断开" });
     failJoinKeys("客户端已断开");
     failAgentSettingWrites("客户端已断开");
+    failSpeechKeyWrites("客户端已断开");
     clearRemovals();
     clearOfflineTimer();
     deviceRouter.destroy();
@@ -2433,6 +2514,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     authorizeDevice,
     createDeviceJoinKey,
     setAgentSetting,
+    setSpeechKey,
     ensureDirectoryWorkspace,
     holdsTaskTerminal,
     typeIntoHeldTerminal,

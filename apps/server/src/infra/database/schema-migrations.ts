@@ -1338,6 +1338,15 @@ const PROJECT_ARCHIVE_SCHEMA_SQL = `
 ALTER TABLE coflux.projects ADD COLUMN archived_at DOUBLE PRECISION;
 `;
 
+// Plan 20261108-ios-seed-asr: the account's dictation API key, encrypted with the executor secret keys.
+const ACCOUNT_SPEECH_KEYS_SCHEMA_SQL = `
+CREATE TABLE coflux.account_speech_keys (
+  account_id TEXT PRIMARY KEY REFERENCES coflux.accounts(id) ON DELETE CASCADE,
+  api_key_ciphertext TEXT NOT NULL,
+  updated_at DOUBLE PRECISION NOT NULL
+);
+`;
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -1410,6 +1419,12 @@ const MIGRATIONS: readonly Migration[] = [
     name: "project_archive",
     definition: PROJECT_ARCHIVE_SCHEMA_SQL,
     async apply(sql) { await sql.unsafe(PROJECT_ARCHIVE_SCHEMA_SQL); },
+  },
+  {
+    version: 11,
+    name: "account_speech_keys",
+    definition: ACCOUNT_SPEECH_KEYS_SCHEMA_SQL,
+    async apply(sql) { await sql.unsafe(ACCOUNT_SPEECH_KEYS_SCHEMA_SQL); },
   },
 ];
 

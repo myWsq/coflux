@@ -6,8 +6,8 @@ enum SpeechCaptureError: Error {
 }
 
 /// 共享采音器（plan 064 决策）：一份 AVAudioEngine tap，统一重采样到 16kHz mono
-/// Int16 PCM 喂给转写 provider（豆包要 16k mono 做 Opus；Apple 引擎侧自己转成
-/// bestAvailableAudioFormat）。用 @unchecked Sendable：AVAudioEngine 的 tap 回调
+/// Int16 PCM 喂给转写 provider（Seed-ASR 直接收 16k mono 原始 PCM）。
+/// 用 @unchecked Sendable：AVAudioEngine 的 tap 回调
 /// 跑在 CoreAudio 实时线程，不受 Swift 并发隔离管辖；本类只由持有者
 /// （DictationSession，MainActor）在 start/stop 上做外部串行化，tap 内部只读
 /// immutable 的 converter/format，不与外部发生并发写冲突。

@@ -78,6 +78,8 @@ struct WorkspaceDetailView: View {
     @State private var showingPhotoPicker = false
     @State private var showingFilePicker = false
     @State private var secretSheet: SecretSheetTarget?
+    /// 「语音识别」 settings, opened from the dictation overlay's 「去设置」.
+    @State private var showingSpeechSettings = false
     /// Tall layout, half folded with a horizontal fold: the keypad is inline below the fold and
     /// the 按键 toolbar item goes away (plan D9).
     @State private var laptopPose = false
@@ -204,6 +206,11 @@ struct WorkspaceDetailView: View {
         // The bottom of the rail belongs to this page's toolbar, not the tab bar.
         .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbarContent }
+        // On the outermost container, not under the frozen page size: a presentation attached
+        // inside `base` would be laid out against the pinned frame.
+        .sheet(isPresented: $showingSpeechSettings) {
+            SpeechSettingsSheet(client: client)
+        }
     }
 
     /// The page itself, immune to the system keyboard, with its sheets and lifecycle hooks.
@@ -226,7 +233,11 @@ struct WorkspaceDetailView: View {
                         stage: dictationStage,
                         onDiscard: { closeDictationOverlay() },
                         onSend: { sendDictation() },
-                        onEdit: { editDictation() }
+                        onEdit: { editDictation() },
+                        onOpenSettings: {
+                            closeDictationOverlay()
+                            showingSpeechSettings = true
+                        }
                     )
                 }
             }
@@ -1058,9 +1069,10 @@ struct WorkspaceDetailView: View {
 
     /// 按下即采音（plan 069）：touch down 去抖后起 session，蒙层不显示。长按判定通过时
     /// beginDictation 直接接管这个 session——不得丢弃重建。未授权时整段跳过：否则首次点一下
-    /// composer 想打字就弹麦克风权限框。
+    /// composer 想打字就弹麦克风权限框；账号没配语音识别 Key 时也跳过（没有可连的引擎）。
     private func prewarmDictation() {
-        guard dictationSession == nil, DictationSession.permissionsGranted else { return }
+        guard dictationSession == nil, DictationSession.permissionsGranted,
+              DictationSession.isAvailable(on: client) else { return }
         startDictation()
     }
 
@@ -1080,7 +1092,12 @@ struct WorkspaceDetailView: View {
     }
 
     private func startDictation() {
-        let session = DictationSession()
+        // The active terminal's agent conversation becomes the recognition context.
+        let session = DictationSession(
+            client: client,
+            workspaceID: workspace.id,
+            sessionID: activeTask.flatMap { $0.hasSessionID ? $0.sessionID : nil }
+        )
         dictationSession = session
         dictationZone = .none
         dictationStage = .listening
@@ -1116,7 +1133,7 @@ struct WorkspaceDetailView: View {
             dictationStage = .settled
             if text.isEmpty {
                 switch session.phase {
-                case .permissionDenied, .failed:
+                case .permissionDenied, .unavailable, .failed:
                     return  // 留驻示错/引导，点任意处关闭
                 default:
                     closeDictationOverlay()  // 空转写：无字可落
