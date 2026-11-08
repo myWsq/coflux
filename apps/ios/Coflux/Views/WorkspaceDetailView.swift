@@ -8,7 +8,7 @@ import UIKit
 /// horizontal pager (swipe to switch, each attached and kept alive; leaving the page unmounts
 /// them). A cluster of round avatars in the terminal's top-right corner switches between them
 /// (tap one, or swipe the pager; tap the active one for the list with names and states). The
-/// title names the workspace (none with the bars on the rail); the toolbar carries 新建终端 and
+/// title names the workspace; the toolbar carries 新建终端 and
 /// 更多, plus 附件 and 粘贴 on the rail's lower end — inside 更多 elsewhere. Status banners float
 /// over the terminal's bottom rows.
 ///
@@ -191,9 +191,6 @@ struct WorkspaceDetailView: View {
         .navigationTitle(titleText)
         .navigationSubtitle(subtitleText)
         .navigationBarTitleDisplayMode(.inline)
-        // With the bars on the rail the title would be the only thing left in a bar across the
-        // top: drop it and give the height to the terminal.
-        .toolbar(removing: barsOnRail ? .title : nil)
         // The bottom of the rail belongs to this page's toolbar, not the tab bar.
         .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbarContent }
@@ -315,11 +312,6 @@ struct WorkspaceDetailView: View {
             tallArrangement
         } else {
             VStack(spacing: 0) {
-                // The bars sit on the rail and the terminal runs to the screen's top edge: a
-                // little room so its first row clears the display's corner.
-                if barsOnRail {
-                    Theme.terminal.frame(height: 8)
-                }
                 ZStack(alignment: .bottom) {
                     terminalColumn(reserveDock: true)
                     dock(inlineKeypad: false)
@@ -327,10 +319,10 @@ struct WorkspaceDetailView: View {
                 // The keypad pushes the terminal up: clip it at the top of the page.
                 .clipped()
             }
-            // With the bars on the rail nothing is drawn across the top or the bottom (status,
-            // camera and home indicator sit on the rail), yet the safe area keeps ~30 pt at each:
-            // the terminal and the keys take them.
-            .ignoresSafeArea(.container, edges: barsOnRail ? .vertical : [])
+            // With the bars on the rail nothing is drawn across the bottom (the home indicator
+            // sits on the rail), yet the safe area keeps ~30 pt there: the keys take it. The top
+            // keeps the title.
+            .ignoresSafeArea(.container, edges: barsOnRail ? .bottom : [])
         }
     }
 
@@ -1076,10 +1068,10 @@ struct WorkspaceDetailView: View {
     private func statusStrip(_ task: Coflux_V1_Task) -> some View {
         if client.detachedTaskIDs.contains(task.id) {
             banner(
-                text: "已在其他设备上接管，这里只能查看",
+                text: "此终端正在其他设备上使用",
                 icon: "eye",
                 tint: Theme.warning,
-                actionLabel: "接管"
+                actionLabel: "在此使用"
             ) {
                 client.startTask(taskID: task.id, cols: termCols, rows: termRows, force: true)
             }
