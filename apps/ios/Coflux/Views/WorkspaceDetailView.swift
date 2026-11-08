@@ -379,62 +379,64 @@ struct WorkspaceDetailView: View {
         proxy.reservedRegions(kind: .division).contains { $0.isActive && $0.frame.width > $0.frame.height }
     }
 
-    /// The terminals of this workspace as a cluster of round avatars floating over the
-    /// terminal's top-right corner (mockup F4, `wiki/plans/20261108-ios-terminal-facepile-mockup.html`;
-    /// the user's design, 2026-11-08). They overlap like a facepile, each earlier one over the
-    /// next; the active one stays in the pile, raised above its neighbours, with a white ring. The dot at
-    /// each one's bottom right is its state, in the home rows' tones. No pad behind them: each avatar
-    /// carries its own shadow. A tap on another avatar switches to it (the pager follows; a
-    /// swipe of the pager switches too); a tap on the active one opens the list with every
-    /// terminal's name and state, and 新建终端.
+    /// The terminals of this workspace as a pile of round avatars (mockup F4,
+    /// `wiki/plans/20261108-ios-terminal-facepile-mockup.html`; the user's design, 2026-11-08):
+    /// in the title row on the rail, floating over the terminal's top-right corner elsewhere.
+    /// Each earlier avatar lies over the next; the active one is raised above its neighbours
+    /// with a white ring. A dot at the top right shows an agent's state in the home rows' tones
+    /// (none without one). No pad behind them: each avatar carries its own shadow. A tap opens
+    /// the list with every terminal's name and state, and 新建终端; a swipe of the pager also
+    /// switches.
     private var terminalAvatars: some View {
         let tasks = members
-        let activeIndex = tasks.firstIndex { $0.id == activeTaskID }
-        return HStack(spacing: -Self.avatarOverlap) {
-            ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
-                let active = index == activeIndex
-                Button {
-                    if active {
-                        withAnimation(.smooth(duration: 0.2)) { showingTerminalList.toggle() }
-                    } else {
-                        showingTerminalList = false
-                        withAnimation(.smooth(duration: 0.25)) { activeTaskID = task.id }
-                    }
-                } label: {
+        // One button: a tap anywhere on the pile opens the list, where the terminal is chosen
+        // (user's call, 2026-11-08: no switching from the pile itself).
+        return Button {
+            withAnimation(.smooth(duration: 0.2)) { showingTerminalList.toggle() }
+        } label: {
+            HStack(spacing: -Self.avatarOverlap) {
+                ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
+                    let active = task.id == activeTaskID
                     terminalAvatar(task, active: active)
+                        .zIndex(active ? Double(tasks.count + 1) : Double(tasks.count - index))
                 }
-                .buttonStyle(.plain)
-                .zIndex(active ? Double(tasks.count + 1) : Double(tasks.count - index))
-                .accessibilityLabel(tabName(task))
-                .accessibilityValue(TerminalActivity(task, client: client).text)
-                .accessibilityHint(active ? "显示全部终端" : "切换到这个终端")
-                .accessibilityAddTraits(active ? .isSelected : [])
             }
+            .contentShape(Capsule())
         }
+        .buttonStyle(.plain)
         .animation(.smooth(duration: 0.25), value: activeTaskID)
+        .accessibilityLabel("终端")
+        .accessibilityValue(activeTask.map { "\(tabName($0))，共 \(tasks.count) 个" } ?? "")
+        .accessibilityHint("显示全部终端")
     }
 
     private static let avatarOverlap: CGFloat = 10
 
     /// A round avatar: the agent's mark, a white ring on the active terminal (faint on the
-    /// others), and a dot at the bottom right in the state's tone (user's call, 2026-11-08).
+    /// others), and — when an agent reports a state — a dot at the top right in its tone
+    /// (user's call, 2026-11-08).
     private func terminalAvatar(_ task: Coflux_V1_Task, active: Bool, size: CGFloat? = nil) -> some View {
         let size = size ?? avatarSize
         let activity = TerminalActivity(task, client: client)
-        let ring = active ? Theme.foreground : Theme.foreground.opacity(0.16)
+        // The ring is an outer border, 1 pt off the face (user's call, 2026-11-08): thin, so
+        // the face and its glyph keep the whole diameter.
+        let ringWidth: CGFloat = active ? 1.5 : 1
+        let ring = active ? Theme.foreground : Theme.foreground.opacity(0.18)
         return Circle()
             .fill(Theme.card)
             .frame(width: size, height: size)
-            .overlay { avatarGlyph(task, size: size * 0.58) }
-            .overlay(Circle().strokeBorder(ring, lineWidth: 2))
-            // Overlapping avatars stay apart: a ring of the terminal's colour around each.
-            .background(Circle().fill(Theme.terminal).padding(-2))
-            .overlay(alignment: .bottomTrailing) {
-                Circle()
-                    .fill(activity.tone.color)
-                    .frame(width: size * 0.3, height: size * 0.3)
-                    .overlay(Circle().strokeBorder(Theme.terminal, lineWidth: 2))
-                    .offset(x: 2, y: 2)
+            .overlay { avatarGlyph(task, size: size * 0.68) }
+            .overlay(Circle().stroke(ring, lineWidth: ringWidth).padding(-(1 + ringWidth / 2)))
+            // Overlapping avatars stay apart: a band of the terminal's colour around each ring.
+            .background(Circle().fill(Theme.terminal).padding(-(1 + ringWidth + 1.5)))
+            .overlay(alignment: .topTrailing) {
+                if activity.fromAgent {
+                    Circle()
+                        .fill(activity.tone.color)
+                        .frame(width: size * 0.3, height: size * 0.3)
+                        .overlay(Circle().strokeBorder(Theme.terminal, lineWidth: 2))
+                        .offset(x: 3, y: -3)
+                }
             }
             .compositingGroup()
             .shadow(color: .black.opacity(0.6), radius: 4, y: 3)
