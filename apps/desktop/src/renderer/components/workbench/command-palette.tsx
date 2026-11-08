@@ -75,6 +75,7 @@ const ACTIVITY_LABEL: Record<Exclude<PaletteActivity, null>, string> = {
   active: "正在执行",
   approval: "等待批准",
   question: "等待回答",
+  error: "出错停止",
   done: "本轮完成",
 };
 
@@ -198,6 +199,8 @@ function PaletteRow({ entry }: { entry: PaletteEntry }) {
         {entry.isOffline && entry.kind !== "device" ? <span>离线</span> : null}
         {entry.activity === "approval" || entry.activity === "question" ? (
           <span className="text-warning">{ACTIVITY_LABEL[entry.activity]}</span>
+        ) : entry.activity === "error" ? (
+          <span className="text-destructive">{ACTIVITY_LABEL[entry.activity]}</span>
         ) : null}
       </span>
     </div>

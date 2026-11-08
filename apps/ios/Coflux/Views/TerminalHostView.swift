@@ -100,7 +100,7 @@ struct TerminalHostView: UIViewRepresentable {
         view.nativeForegroundColor = Theme.terminalForegroundUIColor
         view.caretColor = Theme.terminalForegroundUIColor
         view.installColors(Self.webAnsiPalette)
-        view.getTerminal().setCursorStyle(.blinkBar)
+        view.setCursorStyle(.blinkBar)
         context.coordinator.terminalView = view
         context.coordinator.isOwner = ownerCheck()
         return view
@@ -115,7 +115,7 @@ struct TerminalHostView: UIViewRepresentable {
         TerminalModeRegistry.shared.register(
             taskID: taskID,
             token: coordinator.registryToken,
-            applicationCursor: { [weak uiView] in uiView?.getTerminal().applicationCursor ?? false },
+            applicationCursor: { [weak uiView] in uiView?.terminalInputStateSnapshot()?.applicationCursor ?? false },
             scrollToBottom: { [weak uiView] in
                 guard let uiView else { return }
                 // A flick may still be decelerating: stop it first, or the momentum carries on
@@ -183,14 +183,14 @@ struct TerminalHostView: UIViewRepresentable {
             guard let sessionID, let terminalView else { return }
             releaseConsumer = client.registerSessionConsumer(sessionID: sessionID) { [weak self] data, replace in
                 guard let self, let terminalView = self.terminalView else { return }
-                if replace { terminalView.getTerminal().resetToInitialState() }
+                if replace { terminalView.resetToInitialState() }
                 terminalView.feed(byteArray: ArraySlice([UInt8](data)))
                 // feed 后补刷离底态：新输出/replace 会改变 scrollback 与 yDisp，
                 // 而 scrolled 回调只保证用户拖动路径（plan 056 landmine）
                 self.reportScrollState()
             }
-            let terminal = terminalView.getTerminal()
-            client.startTask(taskID: taskID, cols: UInt32(terminal.cols), rows: UInt32(terminal.rows))
+            let dims = terminalView.terminalDimensions
+            client.startTask(taskID: taskID, cols: UInt32(dims.cols), rows: UInt32(dims.rows))
         }
 
         func release() {
@@ -242,8 +242,8 @@ struct TerminalHostView: UIViewRepresentable {
         func scrolled(source: TerminalView, position: Double) {
             reportScrollState()
         }
-        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-            if let url = URL(string: link), url.scheme == "https" || url.scheme == "http" {
+        func requestOpenLink(source: TerminalView, request: TerminalLinkRequest) {
+            if let url = URL(string: request.link), url.scheme == "https" || url.scheme == "http" {
                 UIApplication.shared.open(url)
             }
         }

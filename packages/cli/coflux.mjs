@@ -130,14 +130,15 @@ async function localPost(path, body, timeoutMs) {
 }
 /* ------------------------------ hook：agent 事件信使 ------------------------------ */
 // agent hook 的上报信使：用户在 claude/codex 的 hook 配置里指向本命令，事件发生时它把
-// 事件名转发给本机 worker 的固定 gateway（POST /hook），供活动状态判定。
+// agent 自身的会话标识转发给本机 worker（POST /hook），供桌面端定位 transcript。Hooks carry no
+// turn state: that comes from the agent's OSC 7501 reports.
 //
 // 输入两种形态都收：claude 与 codex hooks 引擎走 stdin JSON；codex 旧式 notify 把 payload
-// 作为最后一个 argv 传入。只转发事件名 + notification 类型 + agent 会话 id + 本进程
-// pid/ppid——payload 里的 prompt / 回答原文 / 通知正文一律不出机（隐私边界）。
+// 作为最后一个 argv 传入。只转发 agent 会话 id + 事件名 + 本进程 pid/ppid——payload 里的
+// prompt / 回答原文 / 通知正文一律不出机（隐私边界）。A payload without a session id sends nothing.
 //
-// 契约（worker 侧将来实现 /hook 时依赖）：请求保持到收到响应才退出——worker 在处理期间
-// 用上报的 pid 反查进程树归属哪个 session，本进程活着扫描才有效。
+// 契约：请求保持到收到响应才退出——worker 在处理期间用上报的 pid 反查进程树归属哪个
+// session，本进程活着扫描才有效。
 //
 // 纪律：本命令绝不能干扰 agent 本体——任何失败（daemon 不在/端口不通/payload 畸形）都
 // 静默退出 0（claude 把 Stop hook 的非零退出码解释为"阻止收尾"）；绝不写 stdout（claude
@@ -180,21 +181,14 @@ async function cmdHook() {
       hookDebug("payload has no event name; ignored");
       return;
     }
-    const notification = payload.notification_type ?? payload.notificationType;
-    const body = {
-      agent,
-      event,
-      pid: process.pid,
-      ppid: process.ppid,
-      // agent 自身的会话标识（claude: session_id / codex notify: thread-id），供 worker 去重与调试
-      agentSessionId: payload.session_id ?? payload["thread-id"] ?? undefined,
-      // Claude Notification 的类型枚举（permission_prompt / agent_needs_input …），不含正文
-      notification: typeof notification === "string" && notification ? notification : undefined,
-      // Stop/SubagentStop 独有：本会话在飞的后台工作（shell/subagent/monitor/workflow）。claude
-      // 官方设它就是为了让 hook 区分「真做完了」与「挂起等后台把自己叫醒」。只传条数——条目里的
-      // description 是自由文本（含路径与代码片段），按本命令的隐私边界不出机。
-      backgroundTasks: Array.isArray(payload.background_tasks) ? payload.background_tasks.length : undefined,
-    };
+    // The agent's own session id (claude: session_id / codex notify: thread-id) is the only thing
+    // the worker records from a hook; without one there is nothing to send.
+    const agentSessionId = payload.session_id ?? payload["thread-id"];
+    if (agentSessionId === undefined || agentSessionId === null) {
+      hookDebug("payload has no session id; nothing to send");
+      return;
+    }
+    const body = { agent, event, pid: process.pid, ppid: process.ppid, agentSessionId };
     hookDebug("POST /hook", JSON.stringify(body));
     // The agent socket first; the gateway port is resolved only when the socket is absent.
     const res = await localPost("/hook", body, HOOK_POST_TIMEOUT_MS);

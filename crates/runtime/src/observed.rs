@@ -10,9 +10,19 @@ use std::sync::Mutex;
 use coflux_protocol::wire;
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::sessiond::{BlockedKind, ProgramState, ProgramStatus};
 use crate::{agents, ports};
 
 pub(crate) type SessionProcesses = HashMap<String, (String, i32)>;
+
+/// Task id per alive session: the part of the alive snapshot the presence merge needs.
+type AliveTasks = HashMap<String, String>;
+
+/// Longest agent name a program may report about itself, in bytes.
+const MAX_PROGRAM_APP_BYTES: usize = 32;
+
+/// Agent name for a reporting program that gave none and was not recognised by process.
+const UNNAMED_PROGRAM_AGENT: &str = "agent";
 
 #[derive(Default)]
 struct ObservedInner {
@@ -20,13 +30,14 @@ struct ObservedInner {
     last_reported_agents: Vec<wire::SessionAgentRef>,
     ports_delivery_dirty: bool,
     agents_delivery_dirty: bool,
-    hook_states: HashMap<String, &'static str>,
-    hook_messages: HashMap<String, String>,
     hook_progress: HashMap<String, String>,
     /// The agent's own session id per coflux session (plan 20260919). It lives like
-    /// `hook_progress`, not like `hook_messages`: it identifies the session, so it must survive
-    /// every turn-state change and only disappear when the presence entry itself does.
+    /// `hook_progress`: it identifies the session, so it must survive every turn-state change
+    /// and only disappear when the presence entry itself does.
     hook_agent_sessions: HashMap<String, String>,
+    /// The root OSC 7501 record per session, as sessiond pushed it: the only source of an
+    /// entry's state and message, and the preferred source of its agent name.
+    program_status: HashMap<String, ProgramStatus>,
 }
 
 /// 一份待发送观测值，同时持有对应类型的 scan lane。调用方必须在 enqueue 完成并按结果
@@ -93,30 +104,27 @@ impl ObservedState {
         }
     }
 
-    /// Update hook state and discard legacy presence annotations; durable inbox messages are independent.
-    pub(crate) fn apply_hook_state(&self, session_id: String, state: &'static str) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.hook_states.insert(session_id.clone(), state);
-        inner.hook_messages.remove(&session_id);
-    }
-
-    /// Legacy annotation fixture for compatibility tests; explicit notify no longer uses presence.
-    #[cfg(test)]
-    pub(crate) fn apply_notify(&self, session_id: String, message: String) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.hook_states.insert(session_id.clone(), "question");
-        inner.hook_messages.insert(session_id, message);
-    }
-
-    /// Record the agent's own session id. Independent of turn state: an event that carries only
-    /// an id (`SessionStart`) records it without touching state, and a state-bearing event that
-    /// carries none leaves the previously recorded id alone.
+    /// Record the agent's own session id (sent by its hooks). Independent of turn state, which
+    /// comes from OSC 7501.
     pub(crate) fn apply_agent_session_id(&self, session_id: String, agent_session_id: String) {
         self.inner
             .lock()
             .unwrap()
             .hook_agent_sessions
             .insert(session_id, agent_session_id);
+    }
+
+    /// Record (or, with `None`, forget) a session's root OSC 7501 record.
+    pub(crate) fn apply_program_status(&self, session_id: String, status: Option<ProgramStatus>) {
+        let mut inner = self.inner.lock().unwrap();
+        match status {
+            Some(status) => {
+                inner.program_status.insert(session_id, status);
+            }
+            None => {
+                inner.program_status.remove(&session_id);
+            }
+        }
     }
 
     /// progress 是独立信道：不改变 state/message，只保留最新一条。
@@ -209,10 +217,14 @@ impl ObservedState {
     {
         let lane = self.agents_scan_lane.lock().await;
         let alive = snapshot();
+        let tasks: AliveTasks = alive
+            .iter()
+            .map(|(session_id, (task_id, _pid))| (session_id.clone(), task_id.clone()))
+            .collect();
         let sessions = tokio::task::spawn_blocking(move || scan(&alive))
             .await
             .ok()?;
-        let value = self.commit_agents(sessions, force)?;
+        let value = self.commit_agents_alive(sessions, &tasks, force)?;
         Some(ObservedReport {
             value,
             inner: &self.inner,
@@ -236,13 +248,29 @@ impl ObservedState {
         Some(wire::PortsUpdate { sessions })
     }
 
+    /// Test shorthand: every scanned session is alive, and nothing else is.
+    #[cfg(test)]
     fn commit_agents(
         &self,
         sessions: Vec<wire::SessionAgentRef>,
         force: bool,
     ) -> Option<wire::SessionAgents> {
+        let tasks = sessions
+            .iter()
+            .map(|entry| (entry.session_id.clone(), entry.task_id.clone()))
+            .collect();
+        self.commit_agents_alive(sessions, &tasks, force)
+    }
+
+    /// `sessions` is the process-detected list; `alive` the snapshot it was scanned from.
+    fn commit_agents_alive(
+        &self,
+        sessions: Vec<wire::SessionAgentRef>,
+        alive: &AliveTasks,
+        force: bool,
+    ) -> Option<wire::SessionAgents> {
         let mut inner = self.inner.lock().unwrap();
-        let sessions = merge_annotations(&mut inner, sessions);
+        let sessions = merge_annotations(&mut inner, sessions, alive);
         if !force && !inner.agents_delivery_dirty && inner.last_reported_agents == sessions {
             return None;
         }
@@ -274,21 +302,46 @@ pub(crate) fn scan_ports(alive: &SessionProcesses) -> Vec<wire::SessionPorts> {
 }
 
 /// presence 扫描是 annotation 的存活门：本轮没扫到的 session 立即剪枝。
+///
+/// The entries are the process-detected ones plus every alive session holding an OSC 7501
+/// record. State and message come only from the record (none = `""`, no message); the record
+/// also names the agent. Progress and the agent session id come from their own channels.
+/// Records of sessions no longer alive are dropped.
 fn merge_annotations(
     inner: &mut ObservedInner,
     mut sessions: Vec<wire::SessionAgentRef>,
+    alive: &AliveTasks,
 ) -> Vec<wire::SessionAgentRef> {
+    inner
+        .program_status
+        .retain(|session_id, _| alive.contains_key(session_id));
+    {
+        let detected: HashSet<&str> = sessions
+            .iter()
+            .map(|entry| entry.session_id.as_str())
+            .collect();
+        let reported: Vec<wire::SessionAgentRef> = inner
+            .program_status
+            .keys()
+            .filter(|session_id| !detected.contains(session_id.as_str()))
+            .map(|session_id| wire::SessionAgentRef {
+                session_id: session_id.clone(),
+                task_id: alive.get(session_id).cloned().unwrap_or_default(),
+                agent: String::new(),
+                state: String::new(),
+                message: String::new(),
+                progress: String::new(),
+                agent_session_id: String::new(),
+            })
+            .collect();
+        sessions.extend(reported);
+    }
+    sessions.sort_by(|a, b| a.session_id.cmp(&b.session_id));
     {
         let present: HashSet<&str> = sessions
             .iter()
             .map(|entry| entry.session_id.as_str())
             .collect();
-        inner
-            .hook_states
-            .retain(|session_id, _| present.contains(session_id.as_str()));
-        inner
-            .hook_messages
-            .retain(|session_id, _| present.contains(session_id.as_str()));
         inner
             .hook_progress
             .retain(|session_id, _| present.contains(session_id.as_str()));
@@ -298,11 +351,13 @@ fn merge_annotations(
     }
 
     for entry in &mut sessions {
-        if let Some(state) = inner.hook_states.get(&entry.session_id) {
-            entry.state = (*state).to_string();
-        }
-        if let Some(message) = inner.hook_messages.get(&entry.session_id) {
-            entry.message = message.clone();
+        if let Some(record) = inner.program_status.get(&entry.session_id) {
+            entry.state = program_presence_state(record).to_string();
+            entry.message = match record.state {
+                ProgramState::Blocked | ProgramState::Error => record.message.clone(),
+                _ => String::new(),
+            };
+            entry.agent = program_agent(&record.app, &entry.agent);
         }
         if let Some(progress) = inner.hook_progress.get(&entry.session_id) {
             entry.progress = progress.clone();
@@ -312,6 +367,43 @@ fn merge_annotations(
         }
     }
     sessions
+}
+
+/// The presence state a program status record stands for; `""` = present but idle.
+fn program_presence_state(record: &ProgramStatus) -> &'static str {
+    match (record.state, record.kind) {
+        (ProgramState::Working, _) => "active",
+        (ProgramState::Blocked, Some(BlockedKind::Question)) => "question",
+        (ProgramState::Blocked, _) => "approval",
+        (ProgramState::Done, _) => "done",
+        (ProgramState::Error, _) => "error",
+        (ProgramState::Idle, _) => "",
+    }
+}
+
+/// The agent name for a record: the program's own `app`, sanitised (control characters dropped,
+/// clamped on a character boundary, `claude-code` read as `claude`); without one, the name
+/// process detection found, else a generic one.
+fn program_agent(app: &str, detected: &str) -> String {
+    let mut name: String = app.chars().filter(|c| !c.is_control()).collect();
+    if name.len() > MAX_PROGRAM_APP_BYTES {
+        let mut end = MAX_PROGRAM_APP_BYTES;
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.truncate(end);
+    }
+    let name = name.trim();
+    if name == "claude-code" {
+        return "claude".into();
+    }
+    if !name.is_empty() {
+        return name.to_string();
+    }
+    if !detected.is_empty() {
+        return detected.to_string();
+    }
+    UNNAMED_PROGRAM_AGENT.into()
 }
 
 #[cfg(test)]
@@ -361,47 +453,38 @@ mod tests {
         assert!(observed.commit_agents(agents("s2"), false).is_none());
     }
 
+    /// Without an OSC 7501 record a process-detected entry has no state and no message; progress
+    /// is its own channel, replaced by the latest value and pruned with the entry.
     #[test]
-    fn hook_清留言保留进度且_presence_消失会剪枝() {
+    fn detected_entry_without_a_record_has_no_state_and_keeps_progress() {
         let observed = ObservedState::new();
-        observed.apply_notify("s1".into(), "需要你决定".into());
         observed.apply_progress("s1".into(), "正在定位".into());
 
         let first = observed
             .commit_agents(agents("s1"), false)
-            .expect("annotation 变化应上报");
-        assert_eq!(first.sessions[0].state, "question");
-        assert_eq!(first.sessions[0].message, "需要你决定");
+            .expect("a new entry is reported");
+        assert!(first.sessions[0].state.is_empty());
+        assert!(first.sessions[0].message.is_empty());
         assert_eq!(first.sessions[0].progress, "正在定位");
 
-        observed.apply_hook_state("s1".into(), "active");
+        observed.apply_progress("s1".into(), "正在回归".into());
         let second = observed
             .commit_agents(agents("s1"), false)
-            .expect("hook 变化应上报");
-        assert_eq!(second.sessions[0].state, "active");
-        assert!(second.sessions[0].message.is_empty());
-        assert_eq!(second.sessions[0].progress, "正在定位");
-
-        observed.apply_progress("s1".into(), "正在回归".into());
-        let third = observed
-            .commit_agents(agents("s1"), false)
-            .expect("新 progress 应覆盖旧值");
-        assert_eq!(third.sessions[0].state, "active");
-        assert!(third.sessions[0].message.is_empty());
-        assert_eq!(third.sessions[0].progress, "正在回归");
+            .expect("new progress replaces the old");
+        assert!(second.sessions[0].state.is_empty());
+        assert_eq!(second.sessions[0].progress, "正在回归");
 
         assert!(observed.commit_agents(Vec::new(), false).is_some());
         let returned = observed
             .commit_agents(agents("s1"), false)
-            .expect("agent 再出现应上报");
+            .expect("a returning agent is reported");
         assert!(returned.sessions[0].state.is_empty());
-        assert!(returned.sessions[0].message.is_empty());
         assert!(returned.sessions[0].progress.is_empty());
     }
 
-    /// The agent session id lives like `progress`, not like `message`: a turn-state change must
-    /// not evaporate it (a Claude session keeps the same transcript across every Stop /
-    /// UserPromptSubmit), while the presence entry disappearing takes it with it.
+    /// The agent session id lives like `progress`, not like the turn state: a state change must
+    /// not evaporate it (a Claude session keeps the same transcript across every turn), while the
+    /// presence entry disappearing takes it with it.
     #[test]
     fn agent_session_id_跨_hook_事件存活且随条目剪枝() {
         let observed = ObservedState::new();
@@ -412,10 +495,13 @@ mod tests {
             .expect("新增 agent session id 应上报");
         assert_eq!(first.sessions[0].agent_session_id, "6fd5b5f9-959b");
 
-        observed.apply_hook_state("s1".into(), "active");
+        observed.apply_program_status(
+            "s1".into(),
+            Some(record(ProgramState::Working, None, "", "")),
+        );
         let second = observed
             .commit_agents(agents("s1"), false)
-            .expect("hook 变化应上报");
+            .expect("a state change is reported");
         assert_eq!(second.sessions[0].state, "active");
         assert_eq!(second.sessions[0].agent_session_id, "6fd5b5f9-959b");
 
@@ -592,5 +678,236 @@ mod tests {
             .expect("force enqueue 失败后普通扫描必须补发");
         assert_eq!(retry.value().sessions[0].session_id, "s1");
         retry.acknowledge();
+    }
+
+    fn record(
+        state: ProgramState,
+        kind: Option<BlockedKind>,
+        app: &str,
+        message: &str,
+    ) -> ProgramStatus {
+        ProgramStatus {
+            state,
+            kind,
+            app: app.into(),
+            message: message.into(),
+        }
+    }
+
+    fn alive(session_ids: &[&str]) -> AliveTasks {
+        session_ids
+            .iter()
+            .map(|session_id| (session_id.to_string(), format!("task-{session_id}")))
+            .collect()
+    }
+
+    /// The single entry committed for `s1` with `detected` as the process-detected list and
+    /// only `s1` alive.
+    fn committed(
+        observed: &ObservedState,
+        detected: Vec<wire::SessionAgentRef>,
+    ) -> wire::SessionAgentRef {
+        let report = observed
+            .commit_agents_alive(detected, &alive(&["s1"]), true)
+            .expect("force always reports");
+        assert_eq!(report.sessions.len(), 1, "{:?}", report.sessions);
+        report.sessions.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn program_status_record_maps_to_presence() {
+        let cases = [
+            (
+                record(ProgramState::Working, None, "pi", ""),
+                "pi",
+                "active",
+                "",
+            ),
+            (
+                record(
+                    ProgramState::Blocked,
+                    Some(BlockedKind::Auth),
+                    "pi",
+                    "Log in",
+                ),
+                "pi",
+                "approval",
+                "Log in",
+            ),
+            (
+                record(
+                    ProgramState::Blocked,
+                    Some(BlockedKind::Permission),
+                    "pi",
+                    "",
+                ),
+                "pi",
+                "approval",
+                "",
+            ),
+            (
+                record(ProgramState::Blocked, None, "pi", ""),
+                "pi",
+                "approval",
+                "",
+            ),
+            (
+                record(
+                    ProgramState::Blocked,
+                    Some(BlockedKind::Question),
+                    "pi",
+                    "Apply?",
+                ),
+                "pi",
+                "question",
+                "Apply?",
+            ),
+            (
+                record(ProgramState::Error, None, "pi", "boom"),
+                "pi",
+                "error",
+                "boom",
+            ),
+            (
+                record(ProgramState::Done, None, "pi", "ignored"),
+                "pi",
+                "done",
+                "",
+            ),
+            (record(ProgramState::Idle, None, "pi", ""), "pi", "", ""),
+            (
+                record(ProgramState::Working, None, "claude-code", ""),
+                "claude",
+                "active",
+                "",
+            ),
+            (
+                record(ProgramState::Working, None, "", ""),
+                "agent",
+                "active",
+                "",
+            ),
+            (
+                record(ProgramState::Working, None, "a\u{7}b", ""),
+                "ab",
+                "active",
+                "",
+            ),
+        ];
+        for (status, agent, state, message) in cases {
+            let observed = ObservedState::new();
+            observed.apply_program_status("s1".into(), Some(status.clone()));
+            let entry = committed(&observed, Vec::new());
+            assert_eq!(entry.session_id, "s1");
+            assert_eq!(entry.task_id, "task-s1", "task id from the alive snapshot");
+            assert_eq!(
+                (
+                    entry.agent.as_str(),
+                    entry.state.as_str(),
+                    entry.message.as_str()
+                ),
+                (agent, state, message),
+                "{status:?}"
+            );
+        }
+
+        // Empty app on a process-detected session keeps the detected name.
+        let observed = ObservedState::new();
+        observed.apply_program_status(
+            "s1".into(),
+            Some(record(ProgramState::Working, None, "", "")),
+        );
+        let mut codex = agents("s1");
+        codex[0].agent = "codex".into();
+        assert_eq!(committed(&observed, codex).agent, "codex");
+
+        // A long app is clamped to 32 bytes on a character boundary.
+        let observed = ObservedState::new();
+        observed.apply_program_status(
+            "s1".into(),
+            Some(record(ProgramState::Working, None, &"x".repeat(40), "")),
+        );
+        assert_eq!(committed(&observed, Vec::new()).agent, "x".repeat(32));
+        let observed = ObservedState::new();
+        let wide = format!("{}é", "x".repeat(31));
+        observed.apply_program_status(
+            "s1".into(),
+            Some(record(ProgramState::Working, None, &wide, "")),
+        );
+        assert_eq!(committed(&observed, Vec::new()).agent, "x".repeat(31));
+    }
+
+    #[test]
+    fn program_status_record_alone_decides_state() {
+        let observed = ObservedState::new();
+        observed.apply_agent_session_id("s1".into(), "6fd5b5f9".into());
+        observed.apply_progress("s1".into(), "step 2".into());
+        observed.apply_program_status(
+            "s1".into(),
+            Some(record(ProgramState::Working, None, "pi", "")),
+        );
+
+        let entry = committed(&observed, agents("s1"));
+        assert_eq!(entry.state, "active");
+        assert_eq!(entry.agent, "pi");
+        assert_eq!(
+            entry.agent_session_id, "6fd5b5f9",
+            "survives alongside a record"
+        );
+        assert_eq!(entry.progress, "step 2", "survives alongside a record");
+
+        // The record removed: the detected entry stays, with no state.
+        observed.apply_program_status("s1".into(), None);
+        let entry = committed(&observed, agents("s1"));
+        assert_eq!(entry.state, "");
+        assert!(entry.message.is_empty());
+        assert_eq!(entry.agent, "claude");
+        assert_eq!(entry.agent_session_id, "6fd5b5f9");
+    }
+
+    #[test]
+    fn program_status_records_follow_the_alive_set() {
+        let observed = ObservedState::new();
+        observed.apply_program_status(
+            "s1".into(),
+            Some(record(ProgramState::Working, None, "pi", "")),
+        );
+        observed.apply_program_status(
+            "s2".into(),
+            Some(record(ProgramState::Done, None, "pi", "")),
+        );
+        let report = observed
+            .commit_agents_alive(Vec::new(), &alive(&["s1", "s2"]), true)
+            .unwrap();
+        let ids: Vec<&str> = report
+            .sessions
+            .iter()
+            .map(|entry| entry.session_id.as_str())
+            .collect();
+        assert_eq!(ids, ["s1", "s2"], "sorted by session id");
+
+        // s2 left the alive set: its record goes with it and does not come back.
+        let report = observed
+            .commit_agents_alive(Vec::new(), &alive(&["s1"]), true)
+            .unwrap();
+        assert_eq!(report.sessions.len(), 1);
+        let report = observed
+            .commit_agents_alive(Vec::new(), &alive(&["s1", "s2"]), true)
+            .unwrap();
+        assert_eq!(report.sessions.len(), 1);
+        assert_eq!(report.sessions[0].session_id, "s1");
+
+        // A process-detected entry and a record on another session are merged and sorted.
+        let mut detected = agents("s0");
+        detected[0].task_id = "task-s0".into();
+        let report = observed
+            .commit_agents_alive(detected, &alive(&["s0", "s1"]), true)
+            .unwrap();
+        let ids: Vec<&str> = report
+            .sessions
+            .iter()
+            .map(|entry| entry.session_id.as_str())
+            .collect();
+        assert_eq!(ids, ["s0", "s1"]);
     }
 }

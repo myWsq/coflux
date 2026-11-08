@@ -1,5 +1,5 @@
 {
-  "description": "Forward Claude Code hook events to the local coflux daemon through the coflux messenger (silent no-op when coflux is not installed); at session start, inside a coflux terminal, print the <coflux-session> block with the session's coflux coordinates; on every prompt, print a <coflux-session-moved> block when the working directory sits in a different coflux workspace than the terminal does; follow the agent into git worktrees (EnterWorktree, ExitWorktree, resume and Claude Code's own cleanup move the terminal's owning workspace, registering an unknown worktree first); on PreToolUse, the same `coflux hook claude` messenger denies `git worktree remove|move` only when its target is a worktree coflux has registered as a workspace on this device, pointing the agent to `coflux workspace remove <workspaceId>`, and otherwise stays silent.",
+  "description": "Connect Claude Code sessions to the local coflux daemon (every hook is a silent no-op when coflux or node is not installed); hooks carry no turn state, which comes from the agent's own OSC 7501 reports. At session start, inside a coflux terminal, print the <coflux-session> block with the session's coflux coordinates, and send the agent's session id through the `coflux hook claude` messenger so the desktop can open its transcript; on every prompt, print a <coflux-session-moved> block when the working directory sits in a different coflux workspace than the terminal does; follow the agent into git worktrees (EnterWorktree, ExitWorktree, resume and Claude Code's own cleanup move the terminal's owning workspace, registering an unknown worktree first); on PreToolUse, the same messenger denies `git worktree remove|move` only when its target is a worktree coflux has registered as a workspace on this device, pointing the agent to `coflux workspace remove <workspaceId>`, and otherwise stays silent.",
   "hooks": {
     "SessionStart": [
       {
@@ -10,9 +10,7 @@
             "timeout": 8
           }
         ]
-      }
-    ],
-    "UserPromptSubmit": [
+      },
       {
         "hooks": [
           {
@@ -20,7 +18,9 @@
             "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
           }
         ]
-      },
+      }
+    ],
+    "UserPromptSubmit": [
       {
         "hooks": [
           {
@@ -43,14 +43,6 @@
     ],
     "PostToolUse": [
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
-          }
-        ]
-      },
-      {
         "matcher": "EnterWorktree|ExitWorktree",
         "hooks": [
           {
@@ -68,56 +60,6 @@
             "type": "command",
             "command": "sh -c 'command -v node >/dev/null 2>&1 && exec node \"$0\" || :' \"${CLAUDE_PLUGIN_ROOT}/scripts/worktree-follow.mjs\"",
             "timeout": 15
-          }
-        ]
-      }
-    ],
-    "PostToolUseFailure": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
-          }
-        ]
-      }
-    ],
-    "StopFailure": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
-          }
-        ]
-      }
-    ],
-    "Notification": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'command -v coflux >/dev/null 2>&1 && exec coflux hook claude || :'"
           }
         ]
       }
