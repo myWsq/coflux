@@ -93,12 +93,11 @@ struct WorkspaceDetailView: View {
         nonmutating set { navigation.setActiveTask(newValue, in: workspace.id) }
     }
 
-    private var activeTaskBinding: Binding<String?> {
-        Binding(
-            get: { navigation.activeTaskID(in: workspace.id) },
-            set: { navigation.setActiveTask($0, in: workspace.id) }
-        )
-    }
+    /// Where the pager stands. Kept in step with `activeTaskID` both ways by hand (see `pager`):
+    /// a bound `scrollPosition(id:)` dropped the first request when the page appeared on a
+    /// terminal other than the first, and a width change left the pager on another page, so
+    /// the title named one terminal while the pager showed another.
+    @State private var pagerPosition = ScrollPosition(idType: String.self)
 
     /// 页序 = 创建序（createdAt 升序）
     private var members: [Coflux_V1_Task] {
@@ -619,6 +618,13 @@ struct WorkspaceDetailView: View {
 
     /// 分页容器用 ScrollView：全部任务页同时挂载（各自 attach 保活），左右滑动切换。第一页再往回
     /// 滑不再返回列表（D16）：返回只走系统返回。
+    private func alignPager() {
+        guard let id = activeTaskID else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { pagerPosition.scrollTo(id: id) }
+    }
+
     private var pager: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 0) {
@@ -631,7 +637,27 @@ struct WorkspaceDetailView: View {
             .scrollTargetLayout()
         }
         .scrollTargetBehavior(.paging)
-        .scrollPosition(id: activeTaskBinding)
+        .scrollPosition($pagerPosition)
+        // A swipe settles on a page: that terminal becomes the active one.
+        .onChange(of: pagerPosition.viewID(type: String.self)) { _, id in
+            guard let id, id != activeTaskID else { return }
+            activeTaskID = id
+        }
+        // The active terminal changed elsewhere (list, card, sidebar, a new terminal): go there.
+        .onChange(of: activeTaskID) { _, id in
+            guard let id, pagerPosition.viewID(type: String.self) != id else { return }
+            withAnimation(.smooth(duration: 0.3)) { pagerPosition.scrollTo(id: id) }
+        }
+        // On appearing, and whenever the page width changes, the pager lands on the active
+        // terminal again: a new width moves every page.
+        .onChange(of: laidOutSize.width, initial: true) { _, _ in
+            alignPager()
+        }
+        .task(id: members.map(\.id)) {
+            // After the first layout pass: a request made before the pages exist is dropped.
+            await Task.yield()
+            alignPager()
+        }
         .scrollIndicators(.hidden)
         .clipped()
         // 终端页与系统键盘绝缘：键盘只属于模态成文层
