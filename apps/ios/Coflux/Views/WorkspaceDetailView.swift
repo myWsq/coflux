@@ -192,6 +192,11 @@ struct WorkspaceDetailView: View {
         .navigationTitle(titleText)
         .navigationSubtitle(subtitleText)
         .navigationBarTitleDisplayMode(.inline)
+        // The page draws its title itself, always on the leading side (mockup
+        // `wiki/plans/20261108-ios-terminal-facepile-mockup.html`, user's call 2026-11-08): the
+        // system's inline title centres a short name and moves a long one to the side, and on
+        // the rail it takes ~80 pt for one line. The navigation title stays for the back menu.
+        .toolbar(removing: .title)
         // The bottom of the rail belongs to this page's toolbar, not the tab bar.
         .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbarContent }
@@ -313,17 +318,32 @@ struct WorkspaceDetailView: View {
             tallArrangement
         } else {
             VStack(spacing: 0) {
+                // With the bars on the rail the title row is the page's own: the name on the
+                // left, the avatars on the right.
+                if barsOnRail {
+                    HStack(spacing: 12) {
+                        pageTitle
+                        Spacer(minLength: 0)
+                        terminalAvatars
+                    }
+                    .padding(.leading, 14)
+                    .padding(.trailing, 10)
+                    .frame(height: 44)
+                    .padding(.top, 6)
+                    .background(Theme.terminal)
+                    .zIndex(1)
+                }
                 ZStack(alignment: .bottom) {
                     terminalColumn(reserveDock: true)
                     dock(inlineKeypad: false)
                 }
-                // The keypad pushes the terminal up: clip it at the top of the page.
+                // The keypad pushes the terminal up past the title row: clip it there.
                 .clipped()
             }
-            // With the bars on the rail nothing is drawn across the bottom (the home indicator
-            // sits on the rail), yet the safe area keeps ~30 pt there: the keys take it. The top
-            // keeps the title.
-            .ignoresSafeArea(.container, edges: barsOnRail ? .bottom : [])
+            // With the bars on the rail nothing is drawn across the top or the bottom (status,
+            // camera and home indicator sit on the rail), yet the safe area keeps ~30 pt at each:
+            // the title row and the keys take them.
+            .ignoresSafeArea(.container, edges: barsOnRail ? .vertical : [])
         }
     }
 
@@ -580,13 +600,17 @@ struct WorkspaceDetailView: View {
                             }
                     }
                     VStack(alignment: .trailing, spacing: 8) {
-                        terminalAvatars
+                        // On the rail the avatars sit in the title row; the list still drops
+                        // down over the terminal's corner.
+                        if !barsOnRail {
+                            terminalAvatars
+                        }
                         if showingTerminalList {
                             terminalList
                                 .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
                         }
                     }
-                    .padding(.top, 10)
+                    .padding(.top, barsOnRail ? 6 : 10)
                     .padding(.trailing, 10)
                 }
             }
@@ -668,12 +692,38 @@ struct WorkspaceDetailView: View {
 
     // MARK: - Toolbar
 
+    /// The page's title: the active terminal, and project · branch · device below it, on the
+    /// leading side. The rail's title row holds it; otherwise the top bar's leading slot.
+    private var pageTitle: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(titleText)
+                .font(Theme.Fonts.rowTitle)
+                .foregroundStyle(Theme.foreground)
+            if !subtitleText.isEmpty {
+                Text(subtitleText)
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.mutedForeground)
+            }
+        }
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        if !barsOnRail {
+            // Room left by the back button, two trailing items and the status bar's corner.
+            ToolbarItem(placement: .topBarLeading) {
+                pageTitle
+                    .frame(maxWidth: max(140, laidOutSize.width - 330), alignment: .leading)
+            }
+            .sharedBackgroundVisibility(.hidden)
+        }
         if members.isEmpty {
             ToolbarItem(placement: .topBarTrailing) { newTerminalButton }
         } else if bottomBarItems {
-            // The switcher lists and switches the terminals here, so the rail only adds one.
+            // The avatars list and switch the terminals, so the rail only adds one.
             ToolbarItem(placement: .topBarTrailing) { newTerminalButton }
                 .visibilityPriority(.high)
             ToolbarItem(placement: .topBarTrailing) { moreMenu }

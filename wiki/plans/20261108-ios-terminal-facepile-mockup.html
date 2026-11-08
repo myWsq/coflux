@@ -38,8 +38,13 @@ section.q > p { margin: 0; max-width: 80ch; color: #c8c8c2; font-size: 14.5px; l
 svg.i { width: 20px; height: 20px; stroke: #e6e6e3; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 .outer { width: 466px; height: 678px; border-radius: 20px 56px 56px 20px; background: var(--phone); }
 .outer .col { position: absolute; left: 0; top: 0; bottom: 0; width: 394px; background: var(--term); display: flex; flex-direction: column; overflow: hidden; }
-.otitle { flex: none; height: 58px; padding: 8px 16px 0; display: grid; align-content: center; text-align: left; line-height: 1.25; min-width: 0; }
-.otitle b { font-size: 20px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .otitle small { color: var(--fg2); font-size: 12.5px; }
+/* Outer display: no system title bar (it took ~80 pt); a 44 pt row of its own instead —
+   the terminal's name and project · branch · device on the left, the avatars on the right. */
+.otitle { flex: none; height: 44px; margin-top: 6px; padding: 0 10px 0 14px; display: flex; align-items: center; gap: 12px; position: relative; z-index: 6; }
+.otitle .tt { flex: 1; min-width: 0; display: grid; line-height: 1.25; }
+.otitle b { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.otitle small { color: var(--fg2); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pad.inrow { position: relative; top: 0; right: 0; flex: none; }
 .rail { position: absolute; right: 0; top: 0; bottom: 0; width: 72px; }
 .rail .time { position: absolute; top: 76px; width: 72px; text-align: center; font-weight: 700; font-size: 17px; }
 .rail .ring { position: absolute; top: 104px; left: 17px; width: 38px; height: 38px; border-radius: 50%; border: 3px solid #e6e6e3; border-right-color: #555; }
@@ -56,8 +61,8 @@ svg.i { width: 20px; height: 20px; stroke: #e6e6e3; fill: none; stroke-width: 2;
 .status { flex: none; width: 104px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; font-weight: 600; }
 .status .ring { width: 38px; height: 38px; border-radius: 50%; border: 3px solid #e6e6e3; border-right-color: #555; }
 .nav .ttl { flex: 1; min-width: 0; text-align: left; line-height: 1.25; }
-.nav .ttl b { display: block; font-size: 20px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.nav .ttl small { color: var(--fg2); font-size: 12.5px; }
+.nav .ttl b { display: block; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav .ttl small { color: var(--fg2); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
 .termwrap { position: relative; flex: 1; min-height: 0; }
 .term { position: absolute; inset: 0; padding: 0 12px 0 14px; font-family: var(--mono); font-size: 12.5px; line-height: 15.7px; white-space: pre; color: #e4e4e4; overflow: hidden; }
 .inner .term { padding-top: 8px; }
@@ -136,7 +141,7 @@ svg.i { width: 20px; height: 20px; stroke: #e6e6e3; fill: none; stroke-width: 2;
 
 <div class="page">
   <header>
-    <span class="spec">方向已定：圆形头像叠放在终端右上角 · 左右滑终端也能切 · 提示条放底部</span>
+    <span class="spec">外屏：自己的 44 pt 标题行（左名字、右头像），不用系统标题 · 内屏竖开：系统顶栏 + 头像浮在终端右上角 · 提示条放底部</span>
     <h1>终端头像组</h1>
     <p>① 头像组（定稿 F4）；② 点开以后的列表：自绘卡片还是系统菜单；③ 整页上提示条和「更多」菜单的位置。</p>
     <div class="pick" data-count>终端数 <button data-n="1">1 个</button><button data-n="3">3 个</button><button data-n="5" class="on">5 个</button><button data-n="8">8 个</button></div>
@@ -211,15 +216,16 @@ const dock = `<div class="dock"><span class="k">esc</span><span class="k">tab</s
 // cfg: { form, style, list, open, banner, more }
 function device(cfg) {
   const extras = cfg.banner ? `<div class="bottomstack"><span class="fab">${svg("down")}</span><div class="banner">👁<span>此终端正在其他设备上使用</span><b>在此使用</b></div></div>` : "";
-  const body = `<div class="termwrap"><div class="term">${TERM}</div><div class="pad ${cfg.style}" data-pad></div>${extras}</div>`;
+  const pad = `<div class="pad ${cfg.style} ${cfg.form === "outer" ? "inrow" : ""}" data-pad></div>`;
+  const body = `<div class="termwrap"><div class="term">${TERM}</div>${cfg.form === "outer" ? "" : pad}${extras}</div>`;
   const attrs = `data-cfg='${JSON.stringify(cfg)}' data-active="0"`;
-  if (cfg.form === "outer") return `<div class="dev outer" ${attrs}><div class="col"><div class="otitle"><b>dev/20261107-ios-duo-redesign</b><small>coflux · MacBook Pro</small></div>${body}${dock}</div>
+  if (cfg.form === "outer") return `<div class="dev outer" ${attrs}><div class="col"><div class="otitle"><div class="tt"><b data-tt></b><small>coflux · dev/20261107-ios-duo-redesign · MacBook Pro</small></div>${pad}</div>${body}${dock}</div>
     <div class="rail"><div class="time">20:39</div><div class="ring"></div><div class="btn">${svg("back")}</div>
       <div class="grp a">${svg("plus")}${svg("more")}</div><div class="grp b">${svg("clip")}${svg("paste")}</div></div></div>`;
   const moreMenu = cfg.more ? `<div class="more"><div class="mi">粘贴${svg("paste")}</div><div class="mi">从相册上传${svg("photo")}</div><div class="mi">上传文件${svg("folder")}</div><div class="msep"></div>
     <div class="mi">复制终端 ID${svg("copy")}</div><div class="mi red">停止并删除终端${svg("trash")}</div></div>` : "";
   return `<div class="dev inner" ${attrs}>${cfg.more ? '<div class="dim"></div>' : ""}
-    <div class="nav"><span class="circ glass">${svg("back")}</span><span class="ttl"><b>dev/20261107-ios-duo-redesign</b><small>coflux · MacBook Pro</small></span>
+    <div class="nav"><span class="circ glass">${svg("back")}</span><span class="ttl"><b data-tt></b><small>coflux · dev/20261107-ios-duo-redesign · MacBook Pro</small></span>
       <span class="caps glass"><span>${svg("plus")}</span><span>${svg("more")}</span>${moreMenu}</span>
       <span class="status"><span>20:39</span><span class="ring"></span></span></div>${body}${dock}</div>`;
 }
@@ -240,7 +246,7 @@ const SECTIONS = [
     text: "左边是外屏上这个终端正在别的设备上使用时：提示条在终端底部，“滚到底部”按钮在它上面，右上角留给头像。右边是内屏竖开：顶栏只有新建终端和「更多」，「更多」里第一节是粘贴和两个上传，第二节是终端操作，不再出现“更多里套更多”。",
     cells: [
       { key: "P1", title: "外屏 · 提示条在底部", body: "提示条横跨终端宽度，盖住终端最后一两行；不会挤小终端。", cfg: { form: "outer", style: "F4", banner: true } },
-      { key: "P2", title: "内屏竖开 · 「更多」展开", body: "顶栏中间是工作区（分支 + 项目 · 设备），头像组在终端右上角。", cfg: { form: "inner", style: "F4", more: true } },
+      { key: "P2", title: "内屏竖开 · 「更多」展开", body: "顶栏是系统的：标题是当前终端，第二行项目 · 分支 · 设备；头像组浮在终端右上角。", cfg: { form: "inner", style: "F4", more: true } },
     ] },
 ];
 
@@ -258,6 +264,7 @@ function render(dev) {
   const pad = dev.querySelector("[data-pad]");
   pad.innerHTML = cluster(cfg.style, active) + (cfg.list ? list(cfg.list, active) : "");
   pad.classList.toggle("open", dev.dataset.open === "1");
+  dev.querySelector("[data-tt]").textContent = T[active].title;
   animateClawds(pad);
 }
 
