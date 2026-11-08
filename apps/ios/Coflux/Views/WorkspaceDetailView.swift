@@ -8,7 +8,7 @@ import UIKit
 /// horizontal pager (swipe to switch, each attached and kept alive; leaving the page unmounts
 /// them). A cluster of round avatars in the terminal's top-right corner switches between them
 /// (tap one, or swipe the pager; tap the active one for the list with names and states). The
-/// title names the workspace; the toolbar carries 新建终端 and
+/// title names the active terminal (project · branch · device below); the toolbar carries 新建终端 and
 /// 更多, plus 附件 and 粘贴 on the rail's lower end — inside 更多 elsewhere. Status banners float
 /// over the terminal's bottom rows.
 ///
@@ -152,14 +152,15 @@ struct WorkspaceDetailView: View {
             let label = deviceLabel
             return label.isEmpty ? workspace.name : label
         }
-        return workspace.displayTitle
+        return activeTask.map(terminalName) ?? workspace.displayTitle
     }
 
-    /// project · device; nothing for a directory workspace (the title is the device already).
+    /// project · branch · device; the terminal for a directory workspace (the title is the
+    /// device).
     private var subtitleText: String {
-        if isDirWorkspace(workspace) { return "" }
-        let project = client.projects.first { $0.id == workspace.projectID }?.name ?? workspace.displayTitle
-        return [project, deviceLabel].filter { !$0.isEmpty }.joined(separator: " · ")
+        if isDirWorkspace(workspace) { return activeTask.map(terminalName) ?? "" }
+        let project = client.projects.first { $0.id == workspace.projectID }?.name ?? ""
+        return [project, workspace.displayTitle, deviceLabel].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     private func taskTitle(_ task: Coflux_V1_Task) -> String {
@@ -190,8 +191,7 @@ struct WorkspaceDetailView: View {
         .ignoresSafeArea(.keyboard)
         .navigationTitle(titleText)
         .navigationSubtitle(subtitleText)
-        // The workspace on the leading side, as large as the bar allows (the home's title style)
-        .toolbarTitleDisplayMode(.inlineLarge)
+        .navigationBarTitleDisplayMode(.inline)
         // The bottom of the rail belongs to this page's toolbar, not the tab bar.
         .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbarContent }
