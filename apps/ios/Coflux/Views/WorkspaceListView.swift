@@ -103,14 +103,29 @@ struct WorkspaceListView: View {
 
     private func waitingCard(_ item: WaitingItem) -> some View {
         let text = WaitingItemText(item, client: client)
-        return VStack(alignment: .leading, spacing: 12) {
+        let subtitle = [text.context, relativeTimeLabel(item.time)]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+        // The whole card is the tap target: it opens the terminal, or the input sheet for a
+        // secret request.
+        return Button {
+            open(item)
+        } label: {
+            waitingCardBody(text, subtitle: subtitle)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(text.isSecret ? "提供输入" : "打开终端")
+    }
+
+    private func waitingCardBody(_ text: WaitingItemText, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 AgentAvatar(mark: text.mark)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(text.title)
                         .font(Theme.Fonts.rowTitle)
                         .lineLimit(1)
-                    Text(text.context)
+                    Text(subtitle)
                         .font(Theme.Fonts.label)
                         .foregroundStyle(Theme.mutedForeground)
                         .lineLimit(1)
@@ -127,26 +142,11 @@ struct WorkspaceListView: View {
                 .font(Theme.Fonts.cardBody)
                 .lineLimit(3)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            HStack {
-                Button {
-                    open(item)
-                } label: {
-                    Text(text.isSecret ? "提供" : "查看")
-                        .font(Theme.Fonts.label.weight(.semibold))
-                        .foregroundStyle(Theme.primaryForeground)
-                        .padding(.horizontal, 14)
-                        .frame(height: 34)
-                        .background(Theme.primary, in: Capsule())
-                }
-                .buttonStyle(.plain)
-                Spacer()
-                Text(relativeTimeLabel(item.time))
-                    .font(Theme.Fonts.meta)
-                    .foregroundStyle(Theme.subtleForeground)
-            }
         }
         .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .cardBackground(radius: 26)
+        .contentShape(.rect(cornerRadius: 26))
     }
 
     private func pageDots(_ items: [WaitingItem]) -> some View {
