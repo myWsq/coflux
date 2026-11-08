@@ -381,10 +381,9 @@ struct WorkspaceDetailView: View {
 
     /// The terminals of this workspace as a pile of round avatars (mockup F4,
     /// `wiki/plans/20261108-ios-terminal-facepile-mockup.html`; the user's design, 2026-11-08):
-    /// in the title row on the rail, floating over the terminal's top-right corner elsewhere.
+    /// beside the title — in the rail's title row, or in the top bar.
     /// Each earlier avatar lies over the next; the active one is raised above its neighbours
-    /// with a white ring. A dot at the top right shows an agent's state in the home rows' tones
-    /// (none without one). No pad behind them: each avatar carries its own shadow. A tap opens
+    /// with a white ring. No pad behind them: each avatar carries its own shadow. A tap opens
     /// the list with every terminal's name and state, and 新建终端; a swipe of the pager also
     /// switches.
     private var terminalAvatars: some View {
@@ -412,15 +411,15 @@ struct WorkspaceDetailView: View {
 
     private static let avatarOverlap: CGFloat = 10
 
-    /// A round avatar: the agent's mark, a white ring on the active terminal (faint on the
-    /// others), and — when an agent reports a state — a dot at the top right in its tone
-    /// (user's call, 2026-11-08).
+    /// A round avatar: the agent's mark and a white ring on the active terminal (faint on the
+    /// others; none when the workspace has one terminal). No state dot (user's call,
+    /// 2026-11-08): the list shows the states.
     private func terminalAvatar(_ task: Coflux_V1_Task, active: Bool, size: CGFloat? = nil) -> some View {
         let size = size ?? avatarSize
-        let activity = TerminalActivity(task, client: client)
         // The ring is an outer border, 1 pt off the face (user's call, 2026-11-08): thin, so
         // the face and its glyph keep the whole diameter.
-        let ringWidth: CGFloat = active ? 1.5 : 1
+        // A lone terminal needs no marking: no ring at all.
+        let ringWidth: CGFloat = members.count < 2 ? 0 : active ? 1.5 : 1
         let ring = active ? Theme.foreground : Theme.foreground.opacity(0.18)
         return Circle()
             .fill(Theme.card)
@@ -429,15 +428,6 @@ struct WorkspaceDetailView: View {
             .overlay(Circle().stroke(ring, lineWidth: ringWidth).padding(-(1 + ringWidth / 2)))
             // Overlapping avatars stay apart: a band of the terminal's colour around each ring.
             .background(Circle().fill(Theme.terminal).padding(-(1 + ringWidth + 1.5)))
-            .overlay(alignment: .topTrailing) {
-                if activity.fromAgent {
-                    Circle()
-                        .fill(activity.tone.color)
-                        .frame(width: size * 0.3, height: size * 0.3)
-                        .overlay(Circle().strokeBorder(Theme.terminal, lineWidth: 2))
-                        .offset(x: 3, y: -3)
-                }
-            }
             .compositingGroup()
             .shadow(color: .black.opacity(0.6), radius: 4, y: 3)
             .contentShape(Circle())
@@ -596,11 +586,8 @@ struct WorkspaceDetailView: View {
                             }
                     }
                     VStack(alignment: .trailing, spacing: 8) {
-                        // On the rail the avatars sit in the title row; the list still drops
-                        // down over the terminal's corner.
-                        if !barsOnRail {
-                            terminalAvatars
-                        }
+                        // The avatars sit with the title (the rail's row, or the top bar); the
+                        // list drops down over the terminal's corner.
                         if showingTerminalList {
                             terminalList
                                 .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
@@ -709,10 +696,19 @@ struct WorkspaceDetailView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         if !barsOnRail {
-            // Room left by the back button, two trailing items and the status bar's corner.
+            // The rail's title row, in the top bar: the title on the left, the avatars on the
+            // right, in the room left by the back button, two trailing items and the status
+            // bar's corner. A fixed width: offered its ideal size, the bar squeezed the title to
+            // a sliver.
             ToolbarItem(placement: .topBarLeading) {
-                pageTitle
-                    .frame(maxWidth: max(140, laidOutSize.width - 330), alignment: .leading)
+                HStack(spacing: 12) {
+                    pageTitle
+                    Spacer(minLength: 0)
+                    if !members.isEmpty {
+                        terminalAvatars
+                    }
+                }
+                .frame(width: max(180, laidOutSize.width - 330), alignment: .leading)
             }
             .sharedBackgroundVisibility(.hidden)
         }

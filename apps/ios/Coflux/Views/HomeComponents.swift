@@ -200,9 +200,6 @@ struct WorkspaceActivity {
 struct TerminalActivity {
     let tone: WorkspaceActivity.Tone
     let text: String
-    /// The state comes from the agent (its turn state or a secret it asked for), not from the
-    /// terminal alone: only then does the avatar wear a state dot.
-    let fromAgent: Bool
 
     @MainActor
     init(_ task: Coflux_V1_Task, client: CofluxClient) {
@@ -213,7 +210,6 @@ struct TerminalActivity {
         if let secret = client.pendingSecretRequests(taskID: task.id).first {
             tone = .waiting
             text = "等待输入 \(secret.name)"
-            fromAgent = true
             return
         }
         switch task.status {
@@ -222,18 +218,15 @@ struct TerminalActivity {
         case .exited:
             tone = task.exitCode == 0 ? .idle : .failed
             text = task.exitCode == 0 ? "已退出" : "已退出 · 代码 \(task.exitCode)"
-            fromAgent = false
             return
         default:
             tone = .idle
             text = "未启动"
-            fromAgent = false
             return
         }
         let ref = client.agent(forTask: task)
         let message = ref.map(\.message).flatMap { $0.isEmpty ? nil : $0 }
         let progress = ref.map(\.progress).flatMap { $0.isEmpty ? nil : $0 }
-        fromAgent = ["approval", "question", "active", "done", "waiting", "error"].contains(ref?.state ?? "")
         switch ref?.state {
         case "approval":
             tone = .waiting
