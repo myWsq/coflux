@@ -184,3 +184,12 @@ Out of scope:
 
 - Desktop-only. It ships with the next desktop release, with no server deployment and no runtime release. Remote devices work through the existing `execInWorkspace` route, so no daemon on any device needs updating.
 - Human acceptance is manual: the user walks through the six outcomes in a `pnpm dev:desktop:prod` preview. A recap appears only after a Claude session has been idle about 3 minutes, so the walkthrough needs that wait.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-08
+- Mode: subagent(opus), one work package (milestones are sequential)
+- Commits: `7ea5b073..efc032be`
+- Deviations: none. Under Your call the executor put the parser in `terminal-recap.ts` and the card in `terminal-recap-card.tsx` (`ClaudeTabCard`). It also exported `HEADER_PREFIX`, `EXIT_NOT_FOUND` and `EXIT_READ_FAILED` from `terminal-transcript.ts`, and it clears the held recap, rather than hiding it, when the state turns `active`.
+- Verification: desktop typecheck, lint, tests (559/559) and build are green. The locator and parser were exercised against the 40 newest real local transcripts: 15 had a current recap and none returned a superseded one. Synthetic cases (recap followed by a `user` record yields none; a leading fragment and trailing bookkeeping records are ignored; suffix stripped; missing timestamp yields no age) pass.
+- Follow-ups: the user's walkthrough in `pnpm dev:desktop:prod` (the six outcomes in Requirement) is still to do. Hovering the executor dots inside a Claude tab may show their own tooltip alongside the card.
