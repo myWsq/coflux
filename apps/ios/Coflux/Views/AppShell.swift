@@ -31,6 +31,9 @@ struct AppShell: View {
             .environment(\.shellLayout, layout)
         }
         .background(Theme.background)
+        .overlay(alignment: .top) {
+            ErrorToast(client: client)
+        }
         // A terminal created from home opens (and starts) as soon as it appears.
         .onChange(of: client.tasks.map(\.id)) { _, _ in
             openPendingTerminal()

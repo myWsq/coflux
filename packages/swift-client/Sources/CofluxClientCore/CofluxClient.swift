@@ -27,8 +27,30 @@ public final class CofluxClient {
     /// Projects that are not archived (plan 20261030-project-archive): what every project list shows.
     /// An archived project's workspaces are listed only under it, so they disappear with it.
     public var visibleProjects: [Coflux_V1_Project] { projects.filter { !$0.hasArchivedAt } }
-    public private(set) var workspaces: [Coflux_V1_Workspace] = []
-    public private(set) var tasks: [Coflux_V1_Task] = []
+    /// The workspaces to show: the centre's catalog minus those pending removal.
+    public var workspaces: [Coflux_V1_Workspace] {
+        workspaceRemovals.isEmpty ? catalogWorkspaces : catalogWorkspaces.filter { workspaceRemovals[$0.id] == nil }
+    }
+    /// The terminals to show: those of a workspace pending removal leave with it.
+    public var tasks: [Coflux_V1_Task] {
+        workspaceRemovals.isEmpty ? catalogTasks : catalogTasks.filter { workspaceRemovals[$0.workspaceID] == nil }
+    }
+    /// The centre's catalog as last reported; every server message updates these.
+    private var catalogWorkspaces: [Coflux_V1_Workspace] = []
+    private var catalogTasks: [Coflux_V1_Task] = []
+    /// Optimistic workspace removal (store.ts `removeWorkspace`, plan 20261002-optimistic-removal):
+    /// a pending one leaves `workspaces` / `tasks` at once and comes back if the centre reports an
+    /// error, never answers, or a snapshot shows the request was lost. Keyed by workspace id.
+    private var workspaceRemovals: [String: WorkspaceRemoval] = [:]
+    private var workspaceRemovalSequence = 0
+    private struct WorkspaceRemoval {
+        let token: Int
+        /// The connection the request went out on; it was sent after that connection's subscribe.
+        let generation: Int
+        let timer: Task<Void, Never>
+    }
+    /// The centre sends no acknowledgement; `git worktree remove --force` on a large tree is slow.
+    private static let workspaceRemovalTimeout: Duration = .seconds(300)
     public private(set) var lastError: ClientError?
     /// 每次 stateSnapshot 自增（store.ts:392）；第二片终端 re-attach 依赖它判定重连边界。
     public private(set) var snapshotRevision = 0
@@ -327,8 +349,9 @@ public final class CofluxClient {
         syncState = .notSubscribed
         daemons = []
         projects = []
-        workspaces = []
-        tasks = []
+        catalogWorkspaces = []
+        catalogTasks = []
+        clearWorkspaceRemovals()
         ports = [:]
         sessionAgents = [:]
         secretRequests = [:]
@@ -564,20 +587,29 @@ public final class CofluxClient {
             }
             localSessions.removeAll { !incomingDaemonIDs.contains($0.daemonID) }
             let incomingTasks = Dictionary(value.tasks.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
-            let staleTasks = tasks.filter { previous in
+            let staleTasks = catalogTasks.filter { previous in
                 guard let incoming = incomingTasks[previous.id] else { return true }
                 let previousSession = previous.hasSessionID ? previous.sessionID : nil
                 let incomingSession = incoming.hasSessionID ? incoming.sessionID : nil
                 return previousSession != incomingSession
             }
             clearDerivedState(for: staleTasks)
+            // A removal stays pending only if it went out after this snapshot's subscribe (same
+            // connection) and the workspace is still listed: the centre handles it after building
+            // the snapshot. Otherwise it is settled (gone) or was lost with a dropped connection
+            // (still listed: it comes back).
+            let incomingWorkspaceIDs = Set(value.workspaces.map(\.id))
+            for (id, removal) in workspaceRemovals
+            where removal.generation != generation || !incomingWorkspaceIDs.contains(id) {
+                clearWorkspaceRemoval(id)
+            }
             daemons = value.daemons
             projects = value.projects
-            workspaces = value.workspaces
+            catalogWorkspaces = value.workspaces
             serverRunningSessions = Dictionary(value.tasks.compactMap { task in
                 task.status == .running && task.hasSessionID ? (task.id, task.sessionID) : nil
             }, uniquingKeysWith: { _, latest in latest })
-            tasks = value.tasks.map(applyLocalExit)
+            catalogTasks = value.tasks.map(applyLocalExit)
             ports = Dictionary(value.ports.map { ($0.taskID, $0.ports) }, uniquingKeysWith: { _, latest in latest })
             sessionAgents = [:]
             // Same for pending secret requests: re-sent per device right after the snapshot.
@@ -595,12 +627,13 @@ public final class CofluxClient {
         case .daemonRemoved(let value):
             deviceRouter.removeDaemon(value.daemonID)
             localSessions.removeAll { $0.daemonID == value.daemonID }
-            let removedTasks = tasks.filter { $0.daemonID == value.daemonID }
+            let removedTasks = catalogTasks.filter { $0.daemonID == value.daemonID }
             clearDerivedState(for: removedTasks)
             daemons.removeAll { $0.daemonID == value.daemonID }
             projects.removeAll { $0.daemonID == value.daemonID }
-            workspaces.removeAll { $0.daemonID == value.daemonID }
-            tasks.removeAll { $0.daemonID == value.daemonID }
+            catalogWorkspaces.removeAll { $0.daemonID == value.daemonID }
+            catalogTasks.removeAll { $0.daemonID == value.daemonID }
+            settleWorkspaceRemovals()
             sessionAgents = sessionAgents.filter { $0.value.daemonID != value.daemonID }
             secretRequests = secretRequests.filter { $0.value.daemonID != value.daemonID }
             deviceTransports[value.daemonID] = nil
@@ -610,42 +643,44 @@ public final class CofluxClient {
             upsert(&projects, value.project) { $0.id == value.project.id }
 
         case .projectRemoved(let value):
-            let removedTasks = tasks.filter { $0.projectID == value.projectID }
+            let removedTasks = catalogTasks.filter { $0.projectID == value.projectID }
             clearDerivedState(for: removedTasks)
             projects.removeAll { $0.id == value.projectID }
-            workspaces.removeAll { $0.projectID == value.projectID }
-            tasks.removeAll { $0.projectID == value.projectID }
+            catalogWorkspaces.removeAll { $0.projectID == value.projectID }
+            catalogTasks.removeAll { $0.projectID == value.projectID }
+            settleWorkspaceRemovals()
 
         case .workspaceCreated(let value):
             guard value.hasWorkspace else { break }
-            upsert(&workspaces, value.workspace) { $0.id == value.workspace.id }
+            upsert(&catalogWorkspaces, value.workspace) { $0.id == value.workspace.id }
 
         case .workspaceRemoved(let value):
-            let removedTasks = tasks.filter { $0.workspaceID == value.workspaceID }
+            let removedTasks = catalogTasks.filter { $0.workspaceID == value.workspaceID }
             clearDerivedState(for: removedTasks)
-            workspaces.removeAll { $0.id == value.workspaceID }
-            tasks.removeAll { $0.workspaceID == value.workspaceID }
+            catalogWorkspaces.removeAll { $0.id == value.workspaceID }
+            catalogTasks.removeAll { $0.workspaceID == value.workspaceID }
+            settleWorkspaceRemovals()
 
         case .taskUpdated(let value):
             guard value.hasTask else { break }
             serverRunningSessions[value.task.id] = value.task.status == .running && value.task.hasSessionID ? value.task.sessionID : nil
             let task = applyLocalExit(value.task)
-            if let previous = tasks.first(where: { $0.id == task.id }) {
+            if let previous = catalogTasks.first(where: { $0.id == task.id }) {
                 let previousSession = previous.hasSessionID ? previous.sessionID : nil
                 let nextSession = task.hasSessionID ? task.sessionID : nil
                 if previousSession != nextSession || task.status != .running {
                     clearDerivedState(for: [previous])
                 }
             }
-            upsert(&tasks, task) { $0.id == task.id }
+            upsert(&catalogTasks, task) { $0.id == task.id }
             if task.status != .running { detachedTaskIDs.remove(task.id) }
 
         case .taskRemoved(let value):
             finishAttachIndicator(value.taskID)
             serverRunningSessions[value.taskID] = nil
-            let removed = tasks.first { $0.id == value.taskID }
+            let removed = catalogTasks.first { $0.id == value.taskID }
             if let removed { clearDerivedState(for: [removed]) }
-            tasks.removeAll { $0.id == value.taskID }
+            catalogTasks.removeAll { $0.id == value.taskID }
 
         case .sessionCheckpoint(let checkpoint):
             // server 侧终端镜像：live 输出在场时不覆盖现场，只在无 live 时投给终端做只读回放
@@ -672,6 +707,10 @@ public final class CofluxClient {
 
         case .error(let value):
             clearAttachIndicators()
+            // The centre's failure reply carries no request id: any error brings every pending
+            // workspace removal back (a false positive only flashes the row back until its removed
+            // broadcast), as store.ts does.
+            clearWorkspaceRemovals()
             errorSequence += 1
             lastError = ClientError(id: errorSequence, message: value.message)
 
@@ -719,7 +758,7 @@ public final class CofluxClient {
     public func orphanSessions(daemonID: String) -> [LocalSessionInfo] {
         localSessions.filter { item in
             item.daemonID == daemonID && item.exit == nil &&
-                !tasks.contains { $0.id == item.session.taskID && $0.hasSessionID && $0.sessionID == item.session.sessionID }
+                !catalogTasks.contains { $0.id == item.session.taskID && $0.hasSessionID && $0.sessionID == item.session.sessionID }
         }
     }
 
@@ -733,7 +772,7 @@ public final class CofluxClient {
         sessionAgents[sessionID] = nil
         // The worker ends a terminal's pending secret requests with it; close the cards right away.
         secretRequests = secretRequests.filter { $0.value.sessionID != sessionID }
-        tasks = tasks.map { task in
+        catalogTasks = catalogTasks.map { task in
             guard task.id == taskID, task.hasSessionID, task.sessionID == sessionID else { return task }
             var adjusted = task
             adjusted.status = .exited
@@ -776,6 +815,52 @@ public final class CofluxClient {
         create.workspaceID = workspaceID
         create.title = title
         send(.taskCreate(create))
+    }
+
+    /// Removes a workspace optimistically (store.ts `removeWorkspace`): it and its terminals leave
+    /// `workspaces` / `tasks` now and come back if the centre reports an error or never answers.
+    /// Not optimistic while the control connection is not authenticated — the request would be
+    /// dropped — so it reports an error and returns false; true when the removal was sent.
+    @discardableResult
+    public func removeWorkspace(workspaceID: String) -> Bool {
+        guard controlAuthenticated else {
+            reportLocalError("与服务器的连接未就绪，暂时无法删除工作区")
+            return false
+        }
+        guard workspaceRemovals[workspaceID] == nil,
+              catalogWorkspaces.contains(where: { $0.id == workspaceID }) else { return false }
+        var request = Coflux_V1_WorkspaceRemove()
+        request.workspaceID = workspaceID
+        send(.workspaceRemove(request))
+        workspaceRemovalSequence += 1
+        let token = workspaceRemovalSequence
+        // The centre's silent returns leave nothing to report: the timeout restores without an error.
+        let timer = Task { [weak self] in
+            try? await Task.sleep(for: Self.workspaceRemovalTimeout)
+            guard !Task.isCancelled, let self, self.workspaceRemovals[workspaceID]?.token == token else { return }
+            self.clearWorkspaceRemoval(workspaceID)
+        }
+        workspaceRemovals[workspaceID] = WorkspaceRemoval(token: token, generation: generation, timer: timer)
+        return true
+    }
+
+    /// Ends one pending removal: the workspace shows again unless the catalog no longer has it.
+    private func clearWorkspaceRemoval(_ workspaceID: String) {
+        workspaceRemovals.removeValue(forKey: workspaceID)?.timer.cancel()
+    }
+
+    private func clearWorkspaceRemovals() {
+        for removal in workspaceRemovals.values { removal.timer.cancel() }
+        workspaceRemovals.removeAll()
+    }
+
+    /// Settles the removals whose workspace the centre has dropped (directly, or with its project
+    /// or device).
+    private func settleWorkspaceRemovals() {
+        let present = Set(catalogWorkspaces.map(\.id))
+        for id in workspaceRemovals.keys where !present.contains(id) {
+            clearWorkspaceRemoval(id)
+        }
     }
 
     /// 设备先报告退出、中心尚未落库时，等待中心确认后再重启；调用方取消后不再发送。

@@ -12,7 +12,8 @@ extension View {
 }
 
 /// Deleting asks first, with the desktop's wording: the worktree directory goes, the branch stays.
-/// The row leaves when the centre broadcasts `workspaceRemoved`.
+/// The row leaves at once (optimistic, `CofluxClient.removeWorkspace`) and comes back with an
+/// error toast if the centre refuses.
 private struct WorkspaceContextMenu: ViewModifier {
     let client: CofluxClient
     let workspace: Coflux_V1_Workspace
@@ -46,9 +47,7 @@ private struct WorkspaceContextMenu: ViewModifier {
     }
 
     private func remove() {
-        var request = Coflux_V1_WorkspaceRemove()
-        request.workspaceID = workspace.id
-        guard client.sendWorkbenchCommand(.workspaceRemove(request)) else { return }
+        guard client.removeWorkspace(workspaceID: workspace.id) else { return }
         // A window showing it (the split detail) goes back to no selection rather than to
         // "工作区不可用".
         if navigation.workspaceID == workspace.id {
