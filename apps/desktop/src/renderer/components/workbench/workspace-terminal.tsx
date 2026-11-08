@@ -15,6 +15,7 @@ import { copyEntityHandle } from "@/components/workbench/entity-handle";
 import { executorTaskIds as executorTaskIdsOf } from "@/components/workbench/executor-run";
 import { ActivityDots } from "@/components/workbench/pending-dots";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
+import { ClaudeTabCard } from "@/components/workbench/terminal-recap-card";
 import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
 import { ClawdGlyph } from "@/components/workbench/clawd-glyph";
@@ -957,6 +958,44 @@ export function WorkspaceTerminal({
     // Moving a group's only tab into a new group beside that group would leave nothing behind.
     const canSplit = group.tabs.length > 1;
     const bright = isActive && groupFocused;
+    // A tab running Claude gets the recap card on hover, which also shows the full title, so its
+    // title needs no tooltip of its own.
+    const claudeEntry = agentEntry?.agent === "claude" ? agentEntry : undefined;
+    const mainButton = (
+      <button
+        className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left"
+        onClick={() => actions.activateTab(workspaceId, task.id)}
+      >
+        {state === "attaching" ? (
+          <LoaderCircle className="size-3 shrink-0 animate-spin text-muted-foreground" />
+        ) : state === "detached" ? (
+          <Unplug className="size-3 shrink-0 text-warning" />
+        ) : agentEntry ? (
+          <AgentGlyph agent={agentEntry.agent} state={agentEntry.state} seen={tabSeenDone} className={bright ? "opacity-90" : "opacity-70"} />
+        ) : launchedAgent ? (
+          <AgentLogo agent={launchedAgent} className={cn("size-3", bright ? "opacity-90" : "opacity-70")} />
+        ) : (
+          <SquareTerminal className={cn("size-3 shrink-0", bright ? "opacity-90" : "opacity-50")} />
+        )}
+        {claudeEntry || tabTitle === task.title || !tabTitle ? (
+          <span className="truncate">{tabTitle || "终端"}</span>
+        ) : (
+          // OSC 标题往往比 tab 宽，悬浮给全文（设计约定：Tooltip 组件，不用原生 title）
+          <Tooltip content={tabTitle} placement="below">
+            <span className="truncate">{tabTitle}</span>
+          </Tooltip>
+        )}
+        {/* An executor run delegated from this terminal (plan 20260929-executor-pip), shown
+            only while the terminal is not on screen — on screen the card itself is visible. */}
+        {executorTaskIds.has(task.id) && !(active && !changesOpen && isActive) ? (
+          <Tooltip content="executor 正在执行子任务" placement="below">
+            <span className="flex shrink-0 items-center">
+              <ActivityDots status="active" label="executor 正在执行子任务" />
+            </span>
+          </Tooltip>
+        ) : null}
+      </button>
+    );
     return (
       // The flex-item box stays on an outer wrapper rather than on the tab itself:
       // ContextMenu inserts its own trigger element between the two, and that element
@@ -993,39 +1032,19 @@ export function WorkspaceTerminal({
           ]}
         >
           <div className={cn("group flex h-7 max-w-52 items-center rounded-md text-sm transition-colors", isActive ? activeClass : idleClass)}>
-            <button
-              className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left"
-              onClick={() => actions.activateTab(workspaceId, task.id)}
-            >
-              {state === "attaching" ? (
-                <LoaderCircle className="size-3 shrink-0 animate-spin text-muted-foreground" />
-              ) : state === "detached" ? (
-                <Unplug className="size-3 shrink-0 text-warning" />
-              ) : agentEntry ? (
-                <AgentGlyph agent={agentEntry.agent} state={agentEntry.state} seen={tabSeenDone} className={bright ? "opacity-90" : "opacity-70"} />
-              ) : launchedAgent ? (
-                <AgentLogo agent={launchedAgent} className={cn("size-3", bright ? "opacity-90" : "opacity-70")} />
-              ) : (
-                <SquareTerminal className={cn("size-3 shrink-0", bright ? "opacity-90" : "opacity-50")} />
-              )}
-              {tabTitle === task.title || !tabTitle ? (
-                <span className="truncate">{tabTitle || "终端"}</span>
-              ) : (
-                // OSC 标题往往比 tab 宽，悬浮给全文（设计约定：Tooltip 组件，不用原生 title）
-                <Tooltip content={tabTitle} placement="below">
-                  <span className="truncate">{tabTitle}</span>
-                </Tooltip>
-              )}
-              {/* An executor run delegated from this terminal (plan 20260929-executor-pip), shown
-                  only while the terminal is not on screen — on screen the card itself is visible. */}
-              {executorTaskIds.has(task.id) && !(active && !changesOpen && isActive) ? (
-                <Tooltip content="executor 正在执行子任务" placement="below">
-                  <span className="flex shrink-0 items-center">
-                    <ActivityDots status="active" label="executor 正在执行子任务" />
-                  </span>
-                </Tooltip>
-              ) : null}
-            </button>
+            {claudeEntry ? (
+              <ClaudeTabCard
+                exec={client.execInWorkspace}
+                workspaceId={workspaceId}
+                agentSessionId={claudeEntry.agentSessionId}
+                agentState={claudeEntry.state}
+                title={tabTitle || "终端"}
+              >
+                {mainButton}
+              </ClaudeTabCard>
+            ) : (
+              mainButton
+            )}
             {/* ⌘W closes the focused group's active tab only, so only that tab advertises it. */}
             <Tooltip content={bright ? `关闭终端 ${modPrefix}W` : "关闭终端"} placement="below">
               <button
