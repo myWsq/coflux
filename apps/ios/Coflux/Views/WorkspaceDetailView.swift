@@ -77,8 +77,6 @@ struct WorkspaceDetailView: View {
     /// Tall layout, half folded with a horizontal fold: the keypad is inline below the fold and
     /// the 按键 toolbar item goes away (plan D9).
     @State private var laptopPose = false
-    /// The strip's active pill slides between tabs.
-    @Namespace private var tabNamespace
 
     /// Below this content height the key row folds into 按键 and only the composer stays
     /// (tall Split View, outer display in landscape): the terminal keeps its rows.
@@ -367,70 +365,78 @@ struct WorkspaceDetailView: View {
         proxy.reservedRegions(kind: .division).contains { $0.isActive && $0.frame.width > $0.frame.height }
     }
 
-    /// The terminals of this workspace as a segmented control on a Liquid Glass capsule (the
-    /// references were pillowtalk's and Notion's floating glass switchers): each tab is the
-    /// agent's glyph — Clawd in its state's pose for claude — and the name; the active one sits on
-    /// a raised pill that slides between tabs. A tap switches (the pager follows); a swipe of the
-    /// pager moves the pill.
+    /// The terminals of this workspace as a tray of avatars (design option E, mockup
+    /// `wiki/plans/20261108-ios-terminal-switcher-mockup.html`; the user's pick, 2026-11-08): each
+    /// terminal is a small square with its agent's glyph — Clawd in its state's pose for claude —
+    /// and the active one opens into a wider tile with the name. A terminal that is not active and
+    /// waits for the user wears an amber badge. A tap selects (the pager follows); a swipe of the
+    /// pager moves the selection.
     private var terminalStrip: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal) {
-                HStack(spacing: 2) {
+                HStack(spacing: 6) {
                     ForEach(members, id: \.id) { task in
                         terminalTab(task)
                             .id(task.id)
                     }
                 }
-                // Swiping the pager changes the active terminal without a transaction: slide anyway.
+                // Swiping the pager changes the active terminal without a transaction: animate anyway.
                 .animation(.smooth(duration: 0.25), value: activeTaskID)
-                .padding(Self.tabTrackInset)
-                .glassEffect(.regular, in: .capsule)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 10)
             }
             .scrollIndicators(.hidden)
-            // Clawd's confetti and flag reach above the tab: let them, and clip only sideways.
+            // Clawd's confetti and flag reach above the tile, and the badge past its corner: let
+            // them, and clip only sideways.
             .scrollClipDisabled()
             .onChange(of: activeTaskID, initial: true) { _, id in
                 guard let id else { return }
                 withAnimation(.smooth(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
             }
         }
-        .frame(height: Self.tabHeight + Self.tabTrackInset * 2)
-        // 36 pt in all, as the underline strip it replaced: the terminal keeps its rows.
-        .padding(.top, 3)
-        .padding(.bottom, 1)
+        .frame(height: Self.tabHeight)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
         .mask { Rectangle().padding(.vertical, -60) }
         .background(Theme.terminal)
     }
 
-    private static let tabHeight: CGFloat = 26
-    private static let tabTrackInset: CGFloat = 3
+    private static let tabHeight: CGFloat = 30
+    private static let tabRadius: CGFloat = 10
 
     private func terminalTab(_ task: Coflux_V1_Task) -> some View {
         let active = task.id == activeTaskID
+        let shape = RoundedRectangle(cornerRadius: Self.tabRadius)
         return Button {
-            withAnimation(.smooth(duration: 0.3)) { activeTaskID = task.id }
+            withAnimation(.smooth(duration: 0.25)) { activeTaskID = task.id }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 7) {
                 tabGlyph(task)
-                Text(tabName(task))
-                    .font(Theme.Fonts.label.weight(active ? .semibold : .regular))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(active ? Theme.foreground : Theme.mutedForeground)
-            .padding(.leading, 9)
-            .padding(.trailing, 12)
-            .frame(height: Self.tabHeight)
-            .background {
                 if active {
-                    Capsule()
-                        .fill(Theme.foreground.opacity(0.14))
-                        .matchedGeometryEffect(id: "activeTerminalTab", in: tabNamespace)
+                    Text(tabName(task))
+                        .font(Theme.Fonts.label.weight(.semibold))
+                        .foregroundStyle(Theme.foreground)
+                        .lineLimit(1)
+                        .transition(.opacity)
                 }
             }
-            .contentShape(.capsule)
+            .padding(.leading, active ? 8 : 0)
+            .padding(.trailing, active ? 12 : 0)
+            .frame(minWidth: Self.tabHeight, minHeight: Self.tabHeight, maxHeight: Self.tabHeight)
+            .background(active ? Theme.accentSurface : Theme.card, in: shape)
+            .overlay(shape.strokeBorder(active ? Theme.foreground.opacity(0.1) : Theme.border, lineWidth: 1))
+            .overlay(alignment: .topTrailing) {
+                if !active, waits(task) {
+                    Circle()
+                        .fill(Theme.warning)
+                        .frame(width: 9, height: 9)
+                        .overlay(Circle().strokeBorder(Theme.terminal, lineWidth: 2))
+                        .offset(x: 3, y: -3)
+                }
+            }
+            .contentShape(shape)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(tabName(task))
         .accessibilityAddTraits(active ? .isSelected : [])
     }
 
