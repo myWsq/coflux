@@ -81,7 +81,7 @@ struct TerminalHostView: UIViewRepresentable {
         view.nativeForegroundColor = Theme.terminalForegroundUIColor
         view.caretColor = Theme.terminalForegroundUIColor
         view.installColors(Self.webAnsiPalette)
-        view.getTerminal().setCursorStyle(.blinkBar)
+        view.setCursorStyle(.blinkBar)
         context.coordinator.terminalView = view
         return view
     }
@@ -91,7 +91,7 @@ struct TerminalHostView: UIViewRepresentable {
         context.coordinator.bind(sessionID: sessionID)
         TerminalModeRegistry.shared.register(
             taskID: taskID,
-            applicationCursor: { [weak uiView] in uiView?.getTerminal().applicationCursor ?? false },
+            applicationCursor: { [weak uiView] in uiView?.terminalInputStateSnapshot()?.applicationCursor ?? false },
             scrollToBottom: { [weak uiView] in uiView?.scroll(toPosition: 1.0) }
         )
     }
@@ -145,15 +145,15 @@ struct TerminalHostView: UIViewRepresentable {
             guard let sessionID, let terminalView else { return }
             releaseConsumer = client.registerSessionConsumer(sessionID: sessionID) { [weak self] data, replace in
                 guard let self, let terminalView = self.terminalView else { return }
-                if replace { terminalView.getTerminal().resetToInitialState() }
+                if replace { terminalView.resetToInitialState() }
                 terminalView.feed(byteArray: ArraySlice([UInt8](data)))
                 // feed 后补刷离底态：新输出/replace 会改变 scrollback 与 yDisp，
                 // 而 scrolled 回调只保证用户拖动路径（plan 056 landmine）
                 self.reportScrollState()
                 self.reportBottomSlack()
             }
-            let terminal = terminalView.getTerminal()
-            client.startTask(taskID: taskID, cols: UInt32(terminal.cols), rows: UInt32(terminal.rows))
+            let dims = terminalView.terminalDimensions
+            client.startTask(taskID: taskID, cols: UInt32(dims.cols), rows: UInt32(dims.rows))
         }
 
         func release() {
@@ -205,11 +205,16 @@ struct TerminalHostView: UIViewRepresentable {
         /// ponytail: 光标行近似内容底行——normal buffer 光标上移后打印会低估空白，可接受
         private func reportBottomSlack() {
             guard let view = terminalView else { return }
-            let terminal = view.getTerminal()
             var slack: CGFloat = 0
-            if !view.canScroll, !terminal.isCurrentBufferAlternate, terminal.rows > 0 {
-                let rowsBelow = terminal.rows - terminal.getCursorLocation().y - 1
-                slack = view.frame.height * CGFloat(rowsBelow) / CGFloat(terminal.rows)
+            // Cheap checks first; the full state snapshot (cursor row) is taken only
+            // when slack can be non-zero.
+            if !view.canScroll,
+               let input = view.terminalInputStateSnapshot(),
+               !input.isAlternateBuffer,
+               input.dimensions.rows > 0 {
+                let rows = input.dimensions.rows
+                let rowsBelow = rows - view.terminalStateSnapshot().cursor.row - 1
+                slack = view.frame.height * CGFloat(rowsBelow) / CGFloat(rows)
             }
             guard abs(slack - lastBottomSlack) > 0.5 else { return }
             lastBottomSlack = slack
@@ -221,8 +226,8 @@ struct TerminalHostView: UIViewRepresentable {
         func scrolled(source: TerminalView, position: Double) {
             reportScrollState()
         }
-        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-            if let url = URL(string: link), url.scheme == "https" || url.scheme == "http" {
+        func requestOpenLink(source: TerminalView, request: TerminalLinkRequest) {
+            if let url = URL(string: request.link), url.scheme == "https" || url.scheme == "http" {
                 UIApplication.shared.open(url)
             }
         }

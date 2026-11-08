@@ -27,11 +27,13 @@ ARCHIVE_PATH="$WORK_DIR/Coflux.xcarchive"
 LOG="$WORK_DIR/xcodebuild.log"
 
 echo "==> archive (build $BUILD_NUMBER)"
+# SwiftTerm 1.99 起带构建插件 SwiftTermBuildInfoPlugin（生成版本/terminfo 信息），命令行构建须跳过插件信任确认，否则归档在 Validate plug-in 一步失败
 if ! xcodebuild archive \
   -project Coflux.xcodeproj -scheme Coflux \
   -destination 'generic/platform=iOS' \
   -archivePath "$ARCHIVE_PATH" \
   -allowProvisioningUpdates \
+  -skipPackagePluginValidation \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" >"$LOG" 2>&1; then
   tail -30 "$LOG" >&2
   echo "归档失败（完整日志: $LOG）" >&2
