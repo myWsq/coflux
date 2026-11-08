@@ -214,7 +214,6 @@ struct TerminalHostView: UIViewRepresentable {
             guard newCols > 0, newRows > 0 else { return }
             let cols = UInt32(newCols)
             let rows = UInt32(newRows)
-            print("COFLUX-DEBUG sizeChanged \(cols)x\(rows) frame=\(source.frame.size) inset=\(source.adjustedContentInset)")
             onSizeChanged?(cols, rows)
             guard let sessionID = boundSessionID, isOwner() else { return }
             // 尾沿去抖：布局连续变化（窗口缩放、折叠姿态切换、状态横幅出现）只把最终

@@ -194,7 +194,7 @@ struct HomeSidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .copyHandleContextMenu(.workspace, id: workspace.id)
+        .workspaceContextMenu(client: client, workspace: workspace)
         .listRowBackground(rowBackground(selected))
         .listRowSeparator(.hidden)
     }

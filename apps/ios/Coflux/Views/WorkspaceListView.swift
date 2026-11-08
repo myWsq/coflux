@@ -256,8 +256,8 @@ struct WorkspaceListView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        // 长按复制工作区标识（plan 20260914）
-        .copyHandleContextMenu(.workspace, id: workspace.id)
+        // Long press: copy the handle (plan 20260914), delete a non-main workspace
+        .workspaceContextMenu(client: client, workspace: workspace)
     }
 }
 

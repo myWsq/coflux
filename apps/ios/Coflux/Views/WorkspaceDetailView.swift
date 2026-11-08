@@ -786,7 +786,6 @@ struct WorkspaceDetailView: View {
             .clipped()
             .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
                 if !composing { liveTerminalSize = size }
-                print("COFLUX-DEBUG page=\(pageSize) dock=\(restingDockHeight) rail=\(barsOnRail) composing=\(composing) offered=\(size)")
             }
         }
     }
