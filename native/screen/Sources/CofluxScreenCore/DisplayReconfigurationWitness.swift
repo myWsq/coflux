@@ -4,12 +4,12 @@ import Foundation
 /// Logs the display reconfigurations WindowServer notifies this process of, one line per burst.
 ///
 /// CoreGraphics keeps a process's view of the displays (the online list, each display's modes)
-/// current only by handling those notifications on the main run loop. A helper that parks the main
-/// thread without running it answers none of them (WindowServer logs a 0.25 s timeout per
-/// notification naming the pid) and keeps the view it had when its connection was set up: the
-/// first virtual display works and every later one never shows up. This witness is the evidence,
-/// in the helper's own log, that notifications arrive: a display created, resized, mirrored or
-/// destroyed without a matching line means they do not.
+/// current only by handling those notifications, which reach the process through AppKit's event
+/// loop. A helper that does not run NSApplication handles them late or never (WindowServer may log
+/// a 0.25 s timeout naming the pid) and keeps a stale view: a display it creates has no modes or
+/// never shows up. This witness is the evidence, in the helper's own log, that notifications
+/// arrive: a display created, resized, mirrored or destroyed without a matching line within a
+/// second means they do not; a line that names a display both added and removed came too late.
 public final class DisplayReconfigurationWitness {
     private let log: (String) -> Void
     /// Flags per display since the last line, in the order the displays first reported.
