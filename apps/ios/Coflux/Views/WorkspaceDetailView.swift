@@ -128,7 +128,7 @@ struct WorkspaceDetailView: View {
 
     /// The avatars' diameter: the outer display and the other compact windows, the tall layout.
     private var avatarSize: CGFloat {
-        layout == .tall ? 36 : 32
+        layout == .tall ? 34 : 30
     }
 
     // MARK: - Titles
@@ -359,17 +359,22 @@ struct WorkspaceDetailView: View {
         proxy.reservedRegions(kind: .division).contains { $0.isActive && $0.frame.width > $0.frame.height }
     }
 
-    /// The terminals of this workspace as a cluster of round avatars in the terminal's top-right
-    /// corner (mockup option A, `wiki/plans/20261108-ios-terminal-avatars-mockup.html`; the
-    /// user's pick, 2026-11-08), overlapping like a facepile. Each shows its agent — Clawd in its
-    /// state's pose for claude — with a state dot in the home rows' tones; the active one has a
-    /// white ring, one that waits an amber ring. A tap on another avatar switches to it (the
-    /// pager follows; a swipe of the pager switches too); a tap on the active one opens the list
-    /// with every terminal's name and state, and 新建终端.
+    /// The terminals of this workspace as a cluster of round avatars floating over the
+    /// terminal's top-right corner (mockup F4, `wiki/plans/20261108-ios-terminal-facepile-mockup.html`;
+    /// the user's design, 2026-11-08). They overlap like a facepile, each earlier one over the
+    /// next; the active one stands apart with a gap on both sides and a white dot at its bottom
+    /// right. The ring is the state, in the home rows' tones. No pad behind them: each avatar
+    /// carries its own shadow. A tap on another avatar switches to it (the pager follows; a
+    /// swipe of the pager switches too); a tap on the active one opens the list with every
+    /// terminal's name and state, and 新建终端.
     private var terminalAvatars: some View {
-        HStack(spacing: -avatarSize * 0.28) {
-            ForEach(members, id: \.id) { task in
-                let active = task.id == activeTaskID
+        let tasks = members
+        let activeIndex = tasks.firstIndex { $0.id == activeTaskID }
+        return HStack(spacing: -Self.avatarOverlap) {
+            ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
+                let active = index == activeIndex
+                // The active one and the one after it step out of the pile.
+                let apart = activeIndex.map { (index == $0 && index > 0) || index == $0 + 1 } ?? false
                 Button {
                     if active {
                         withAnimation(.smooth(duration: 0.2)) { showingTerminalList.toggle() }
@@ -381,38 +386,44 @@ struct WorkspaceDetailView: View {
                     terminalAvatar(task, active: active)
                 }
                 .buttonStyle(.plain)
-                .zIndex(active ? 1 : 0)
+                .padding(.leading, apart ? Self.avatarOverlap + Self.avatarGap : 0)
+                .zIndex(active ? Double(tasks.count + 1) : Double(tasks.count - index))
                 .accessibilityLabel(tabName(task))
                 .accessibilityValue(TerminalActivity(task, client: client).text)
                 .accessibilityHint(active ? "显示全部终端" : "切换到这个终端")
                 .accessibilityAddTraits(active ? .isSelected : [])
             }
         }
-        .padding(4)
-        .background(Theme.terminal.opacity(0.86), in: Capsule())
-        .overlay(Capsule().strokeBorder(Theme.foreground.opacity(0.08), lineWidth: 1))
-        .shadow(color: .black.opacity(0.45), radius: 9, y: 4)
         .animation(.smooth(duration: 0.25), value: activeTaskID)
     }
 
+    private static let avatarOverlap: CGFloat = 10
+    private static let avatarGap: CGFloat = 5
+
+    /// A round avatar: the agent's mark, a ring in the state's tone (faint while idle), and on
+    /// the active terminal a white dot.
     private func terminalAvatar(_ task: Coflux_V1_Task, active: Bool, size: CGFloat? = nil) -> some View {
         let size = size ?? avatarSize
         let activity = TerminalActivity(task, client: client)
-        let ring = active ? Theme.foreground : activity.tone == .waiting ? Theme.warning : Theme.foreground.opacity(0.18)
+        let ring = activity.tone == .idle ? Theme.foreground.opacity(0.16) : activity.tone.color
         return Circle()
             .fill(Theme.card)
             .frame(width: size, height: size)
             .overlay { avatarGlyph(task, size: size * 0.58) }
-            .overlay(Circle().strokeBorder(ring, lineWidth: active ? 2 : 1.5))
+            .overlay(Circle().strokeBorder(ring, lineWidth: 2))
             // Overlapping avatars stay apart: a ring of the terminal's colour around each.
             .background(Circle().fill(Theme.terminal).padding(-2))
             .overlay(alignment: .bottomTrailing) {
-                Circle()
-                    .fill(activity.tone.color)
-                    .frame(width: size * 0.3, height: size * 0.3)
-                    .overlay(Circle().strokeBorder(Theme.terminal, lineWidth: 2))
-                    .offset(x: 2, y: 2)
+                if active {
+                    Circle()
+                        .fill(Theme.foreground)
+                        .frame(width: size * 0.3, height: size * 0.3)
+                        .overlay(Circle().strokeBorder(Theme.terminal, lineWidth: 2))
+                        .offset(x: 2, y: 2)
+                }
             }
+            .compositingGroup()
+            .shadow(color: .black.opacity(0.6), radius: 4, y: 3)
             .contentShape(Circle())
     }
 
@@ -575,8 +586,8 @@ struct WorkspaceDetailView: View {
                                 .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
                         }
                     }
-                    .padding(.top, 8)
-                    .padding(.trailing, 8)
+                    .padding(.top, 10)
+                    .padding(.trailing, 10)
                 }
             }
             .padding(.bottom, reserveDock ? restingDockHeight : 0)
