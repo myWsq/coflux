@@ -1,10 +1,10 @@
 import Foundation
 
-/// Whether the account stores a dictation API key (plan 20261108-ios-seed-asr), as the centre last
-/// reported it. Never carries the key itself.
+/// Whether the account has a dictation API key (plan 20261108-ios-seed-asr), as the centre last
+/// reported it. Never the key itself.
 public struct SpeechKeyStatus: Equatable, Sendable {
     public var configured: Bool
-    /// The last write in ms epoch, centre clock (0 when not configured).
+    /// The last write, ms epoch on the centre's clock; 0 when not configured.
     public var updatedAt: Double
 
     public init(configured: Bool, updatedAt: Double) {
@@ -13,14 +13,15 @@ public struct SpeechKeyStatus: Equatable, Sendable {
     }
 }
 
-/// Answer to `CofluxClient.setSpeechKey`: the centre accepted the write (its status broadcast has
-/// already replaced `speechKeyStatus`), or it failed with a message fit for the user.
+/// Answer to `CofluxClient.setSpeechKey`: accepted (the status broadcast has already replaced
+/// `speechKeyStatus`), or failed with a message for the user.
 public enum SpeechKeyWriteResult: Equatable, Sendable {
     case ok
     case failed(String)
 }
 
-/// A failed `CofluxClient.speechKey()`; `message` is fit for the user and never contains the key.
+/// A failed speech-key request: not connected, unsupported by the centre, timed out, disconnected,
+/// or refused by the centre. `message` is shown to the user as is; it never contains the key.
 public struct SpeechKeyError: LocalizedError, Equatable, Sendable {
     public let message: String
     public var errorDescription: String? { message }
