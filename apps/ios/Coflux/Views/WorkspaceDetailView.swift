@@ -51,6 +51,8 @@ struct WorkspaceDetailView: View {
     @State private var restingDockHeight: CGFloat = 0
     /// The page's content size: decides the short-window fold and where the toolbar items go.
     @State private var pageSize: CGSize = .zero
+    /// The page's widest side safe-area inset: the system's rail, when it draws one.
+    @State private var railInset: CGFloat = 0
     /// The page's size pinned while the compose layer is up (see `base`).
     @State private var frozenPageSize: CGSize?
 
@@ -120,10 +122,13 @@ struct WorkspaceDetailView: View {
         barsOnRail
     }
 
-    /// The system draws this page's bars as a vertical rail (the outer display, a Split View half,
-    /// the split detail column): every window that is not the tall layout and not wider than tall.
+    /// The system draws this page's bars as a vertical rail (the outer display — in landscape
+    /// too —, a Split View half, the split detail column). Read from where the system put them:
+    /// a rail takes a wide safe-area inset at the leading or trailing edge. The window's aspect
+    /// does not tell: the outer display in landscape (678×466) keeps its rail (seen on the Duo,
+    /// 2026-11-08).
     private var barsOnRail: Bool {
-        layout != .tall && laidOutSize.height >= laidOutSize.width
+        layout != .tall && railInset > 40
     }
 
     /// The avatars' diameter: the outer display and the other compact windows, the tall layout.
@@ -233,6 +238,11 @@ struct WorkspaceDetailView: View {
             } action: { frame in
                 dictationBounds = frame
                 pageSize = frame.size
+            }
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                max(proxy.safeAreaInsets.leading, proxy.safeAreaInsets.trailing)
+            } action: { inset in
+                railInset = inset
             }
             .animation(.easeOut(duration: 0.15), value: dictationOverlayVisible)
             .sheet(isPresented: $showingKeypad) {
