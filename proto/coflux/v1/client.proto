@@ -232,6 +232,8 @@ message ClientToServer {
     DirectoryWorkspaceEnsure directory_workspace_ensure = 48;
     AgentSettingSet agent_setting_set = 49;
     ProjectSetArchived project_set_archived = 50;
+    SpeechKeySet speech_key_set = 51;
+    SpeechKeyGet speech_key_get = 52;
   }
 }
 
@@ -262,6 +264,10 @@ message AuthOk {
   // and sets Project.archived_at. False (an older center) means the client must keep offering
   // project removal instead of archiving.
   bool project_archive = 9;
+  // This center stores the account's dictation API key (plan 20261108-ios-seed-asr): it sends
+  // SpeechKeyStatus after the subscribe snapshot and accepts SpeechKeySet / SpeechKeyGet. False (an
+  // older center) tells the client "not supported" apart from "no key configured yet".
+  bool speech_key = 10;
 }
 
 message AuthError {
@@ -456,6 +462,8 @@ message ServerToClient {
     DirectoryWorkspaceEnsured directory_workspace_ensured = 48;
     AgentSettingsUpdated agent_settings_updated = 49;
     SessionMetadata session_metadata = 50;
+    SpeechKeyStatus speech_key_status = 51;
+    SpeechKeyValue speech_key_value = 52;
   }
 }
 
@@ -476,6 +484,38 @@ message DeviceJoinKeyCreated {
   string key = 2;
   double expires_at = 3;
   string error = 4;
+}
+
+// Account-level dictation API key (plan 20261108-ios-seed-asr): the Doubao speech-recognition key the
+// iOS app uses for long-press dictation. The center stores it encrypted and never broadcasts it.
+// Replace the signed-in account's key; an empty `api_key` clears it. Answered with SpeechKeyStatus
+// carrying the same request_id.
+message SpeechKeySet {
+  string request_id = 1;
+  string api_key = 2;
+}
+// Fetch the signed-in account's key in plaintext. Answered with SpeechKeyValue, only to this
+// connection.
+message SpeechKeyGet {
+  string request_id = 1;
+}
+// Whether the account has a key, never the key itself. Sent to the client right after the subscribe
+// snapshot (empty request_id) and, after every accepted SpeechKeySet, to every subscribed client of
+// the account (request_id of that write; also sent directly to an unsubscribed writer). A non-empty
+// `error` answers a rejected write, goes only to the writer, and its `configured` / `updated_at` must
+// be ignored. `updated_at` is the last write in ms epoch, center clock (0 when not configured).
+message SpeechKeyStatus {
+  bool configured = 1;
+  double updated_at = 2;
+  string request_id = 3;
+  string error = 4;
+}
+// Answer to SpeechKeyGet, only to the requesting connection. Empty `api_key` with empty `error` means
+// no key is configured; a non-empty `error` means the stored key could not be read.
+message SpeechKeyValue {
+  string request_id = 1;
+  string api_key = 2;
+  string error = 3;
 }
 
 // Bounded newest-first history. Zero before_sequence requests the first page.
