@@ -382,8 +382,8 @@ struct WorkspaceDetailView: View {
     /// The terminals of this workspace as a cluster of round avatars floating over the
     /// terminal's top-right corner (mockup F4, `wiki/plans/20261108-ios-terminal-facepile-mockup.html`;
     /// the user's design, 2026-11-08). They overlap like a facepile, each earlier one over the
-    /// next; the active one stands apart with a gap on both sides and a white dot at its bottom
-    /// right. The ring is the state, in the home rows' tones. No pad behind them: each avatar
+    /// next; the active one stays in the pile, raised above its neighbours, with a white ring. The dot at
+    /// each one's bottom right is its state, in the home rows' tones. No pad behind them: each avatar
     /// carries its own shadow. A tap on another avatar switches to it (the pager follows; a
     /// swipe of the pager switches too); a tap on the active one opens the list with every
     /// terminal's name and state, and 新建终端.
@@ -393,8 +393,6 @@ struct WorkspaceDetailView: View {
         return HStack(spacing: -Self.avatarOverlap) {
             ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
                 let active = index == activeIndex
-                // The active one and the one after it step out of the pile.
-                let apart = activeIndex.map { (index == $0 && index > 0) || index == $0 + 1 } ?? false
                 Button {
                     if active {
                         withAnimation(.smooth(duration: 0.2)) { showingTerminalList.toggle() }
@@ -406,7 +404,6 @@ struct WorkspaceDetailView: View {
                     terminalAvatar(task, active: active)
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, apart ? Self.avatarOverlap + Self.avatarGap : 0)
                 .zIndex(active ? Double(tasks.count + 1) : Double(tasks.count - index))
                 .accessibilityLabel(tabName(task))
                 .accessibilityValue(TerminalActivity(task, client: client).text)
@@ -418,14 +415,13 @@ struct WorkspaceDetailView: View {
     }
 
     private static let avatarOverlap: CGFloat = 10
-    private static let avatarGap: CGFloat = 5
 
-    /// A round avatar: the agent's mark, a ring in the state's tone (faint while idle), and on
-    /// the active terminal a white dot.
+    /// A round avatar: the agent's mark, a white ring on the active terminal (faint on the
+    /// others), and a dot at the bottom right in the state's tone (user's call, 2026-11-08).
     private func terminalAvatar(_ task: Coflux_V1_Task, active: Bool, size: CGFloat? = nil) -> some View {
         let size = size ?? avatarSize
         let activity = TerminalActivity(task, client: client)
-        let ring = activity.tone == .idle ? Theme.foreground.opacity(0.16) : activity.tone.color
+        let ring = active ? Theme.foreground : Theme.foreground.opacity(0.16)
         return Circle()
             .fill(Theme.card)
             .frame(width: size, height: size)
@@ -434,13 +430,11 @@ struct WorkspaceDetailView: View {
             // Overlapping avatars stay apart: a ring of the terminal's colour around each.
             .background(Circle().fill(Theme.terminal).padding(-2))
             .overlay(alignment: .bottomTrailing) {
-                if active {
-                    Circle()
-                        .fill(Theme.foreground)
-                        .frame(width: size * 0.3, height: size * 0.3)
-                        .overlay(Circle().strokeBorder(Theme.terminal, lineWidth: 2))
-                        .offset(x: 2, y: 2)
-                }
+                Circle()
+                    .fill(activity.tone.color)
+                    .frame(width: size * 0.3, height: size * 0.3)
+                    .overlay(Circle().strokeBorder(Theme.terminal, lineWidth: 2))
+                    .offset(x: 2, y: 2)
             }
             .compositingGroup()
             .shadow(color: .black.opacity(0.6), radius: 4, y: 3)

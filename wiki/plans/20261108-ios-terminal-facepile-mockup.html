@@ -82,20 +82,19 @@ svg.i { width: 20px; height: 20px; stroke: #e6e6e3; fill: none; stroke-width: 2;
 .t-work { color: var(--ok); } .t-wait { color: var(--warn); } .t-done { color: var(--info); } .t-idle { color: var(--fg2); }
 
 /* avatars */
-/* The ring is the state (home tones); the dot at the bottom right marks the active terminal
-   only. Earlier avatars lie on top of later ones; the active one rises above them all. */
+/* A white ring marks the active terminal; the dot at the bottom right is the state (home
+   tones). Earlier avatars lie on top of later ones; the active one rises above them all. */
 .av { --sz: 32px; width: var(--sz); height: var(--sz); border-radius: 50%; background: var(--card); border: 2px solid rgba(230,230,227,.16); display: grid; place-items: center; position: relative; flex: none; cursor: pointer; box-shadow: 0 0 0 2px var(--term), 0 3px 8px rgba(0,0,0,.6); }
-.av.r-work { border-color: var(--ok); } .av.r-wait { border-color: var(--warn); } .av.r-done { border-color: var(--info); }
-.av .cur { position: absolute; right: -2px; bottom: -2px; width: 30%; height: 30%; border-radius: 50%; background: var(--fg); border: 2px solid var(--term); display: none; }
-.av.on .cur { display: block; }
-.av.on { z-index: 200 !important; }
+.av .cur { position: absolute; right: -2px; bottom: -2px; width: 30%; height: 30%; border-radius: 50%; border: 2px solid var(--term); }
+.av.r-work .cur { background: var(--ok); } .av.r-wait .cur { background: var(--warn); } .av.r-done .cur { background: var(--info); } .av.r-idle .cur { background: var(--fg2); }
+.av.on { border-color: var(--fg); z-index: 200 !important; }
 .av .clawd { width: 58%; height: 58%; }
 /* No pad behind the cluster: each avatar floats on its own shadow. */
 .pad { position: absolute; top: 10px; right: 10px; z-index: 5; display: flex; align-items: center; }
 /* F4: one size, the active one opens a gap on both sides and leaves the pile */
 .F4 .av { --sz: 30px; transition: margin .25s ease; }
 .F4 .av + .av { margin-left: -10px; }
-.F4 .av.on:not(:first-child), .F4 .av.on + .av { margin-left: 5px; }
+
 @media (prefers-reduced-motion: reduce) { .F4 .av { transition: none; } }
 
 /* the list under the avatars */
@@ -232,14 +231,14 @@ function device(cfg) {
 
 const SECTIONS = [
   { n: "①", title: "头像组本身", cols: 2,
-    text: "浮在终端右上角，没有整体底色，每个头像自带一点阴影。圈的颜色是状态（黄在等你、绿在干活、蓝本轮完成、灰空闲），右下角白点只标当前那个。点头像能切换，切到 1 个和 8 个看极端情况。",
+    text: "浮在终端右上角，没有整体底色，每个头像自带一点阴影。白圈标当前那个，右下角的点是状态（黄在等你、绿在干活、蓝本轮完成、灰空闲）。点头像能切换，切到 1 个和 8 个看极端情况。",
     cells: [
-      { key: "F4", title: "定稿：一样大，当前的单独站着", body: "都是 30 pt、叠 10 pt，前面的压着后面的。当前那个不和任何头像叠：两边各留 5 pt 空隙，单独站着，右下角一个白点；是第一个时只有右边留空。圈的颜色是状态：黄在等你、绿在干活、蓝本轮完成、灰空闲。", cfg: { form: "outer", style: "F4" } },
+      { key: "F4", title: "定稿：一样大、保持叠放", body: "都是 30 pt、叠 10 pt，前面的压着后面的；当前那个浮到最上层，白圈。右下角的点是状态：黄在等你、绿在干活、蓝本轮完成、灰空闲。", cfg: { form: "outer", style: "F4" } },
     ] },
   { n: "②", title: "点当前头像以后的列表", cols: 2,
     text: "列出全部终端：名字 + 一行状态 + 新建终端。",
     cells: [
-      { key: "L1", title: "自绘卡片（现在代码里的）", rec: true, body: "状态文字用首页的颜色（黄 / 绿 / 蓝 / 灰），左边的头像和右上角的一样（圈是状态），当前那行打勾。", cfg: { form: "outer", style: "F4", list: "L1", open: true } },
+      { key: "L1", title: "自绘卡片（现在代码里的）", rec: true, body: "状态文字用首页的颜色（黄 / 绿 / 蓝 / 灰），左边的头像和右上角的一样（点是状态），当前那行打勾。", cfg: { form: "outer", style: "F4", list: "L1", open: true } },
       { key: "L2", title: "系统菜单", body: "iOS 原生菜单，最“像系统”。状态只能是灰色小字，Clawd 只能是静态图，顶上可以写一行工作区。", cfg: { form: "outer", style: "F4", list: "L2", open: true } },
     ] },
   { n: "③", title: "整页：提示条和「更多」", cols: 2,
