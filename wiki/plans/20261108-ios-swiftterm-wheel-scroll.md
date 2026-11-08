@@ -85,6 +85,7 @@ Everything else the terminal host does must keep working:
 - Base branch: options were "stack on PR #126 (recommended)" and "base on main". Answer: 「基于 main」. This settles D7.
 - Departure check: execution subagent(sonnet) (recommended); autopilot "全自动直达执行" (recommended over plan audit and review pause).
 - `(decided while planning)` D2 exact pin, D4 reset ordering, D5 cheap-first slack, D6 link callback.
+- `(revised at verification)` Two gaps came up at verification, and both went back to the executor as REVISE round 1. First, SwiftTerm 1.99.3 brings new transitive packages (`h`, `swift-png`), so the resolver rewrote `Package.resolved` beyond the swiftterm pin; the resolver's output was committed unedited. Second, 1.99.3 runs a build-tool plugin (`SwiftTermBuildInfoPlugin`, which runs `git` and generates build-info and terminfo tables). Command-line builds fail at `Validate plug-in` unless they pass `-skipPackagePluginValidation`, so `apps/ios/release.sh`'s archive call now passes it. This was added to scope.
 
 ### Maintenance notes
 
@@ -174,6 +175,7 @@ In scope:
 - `apps/ios/Coflux/Views/TerminalHostView.swift`
 - `apps/ios/Coflux.xcodeproj/project.pbxproj` (the SwiftTerm package reference only)
 - `apps/ios/Coflux.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved` (the swiftterm pin only)
+- `apps/ios/release.sh` (the archive invocation only; added at verification)
 
 Out of scope:
 - `apps/ios/Coflux/Views/TerminalInputArea.swift`, `WorkspaceDetailView.swift` and every other view. They talk to the terminal only through `TerminalModeRegistry` and the host's callbacks, whose shapes do not change.
@@ -224,3 +226,23 @@ built for iphoneos only), so the build gate is a device build.
 - No server, daemon or protocol change. It ships to the device through a direct install or TestFlight (`apps/ios/release.sh`).
 - PR #126 (Duo redesign) edits `TerminalHostView.swift` too, so whichever merges second resolves the conflict. Re-apply the five call-site migrations and the link callback on #126's version; #126 has no `reportBottomSlack`.
 - Device builds need the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`) if Xcode reports it missing.
+- SwiftTerm 1.99 runs a build-tool plugin. Command-line builds need `-skipPackagePluginValidation`, which `release.sh` now passes, and the Xcode GUI asks once to "Trust & Enable" `SwiftTermBuildInfoPlugin`.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-08
+- Mode: subagent(sonnet), one package, one REVISE round
+- Commits: `5c90f9a6..d0333308`
+- Verification run here:
+  - `xcodebuild -resolvePackageDependencies` resolved SwiftTerm @ 1.99.3.
+  - A device build for `generic/platform=iOS` and a device build for the Duo id both reported BUILD SUCCEEDED with `-skipPackagePluginValidation`.
+  - `TerminalHostView.swift` produces no new warnings; the two remaining warnings are pre-existing ones in `Speech/`.
+  - A grep for `getTerminal` / `isCurrentBufferAlternate` / `getCursorLocation` / `allowMouseReporting` / `mouseModeChanged` / gesture recognizers finds nothing.
+  - `bash -n apps/ios/release.sh` passes.
+  - The scope is 4 files.
+- Deviations:
+  - `Package.resolved` gains the new transitive pins `h` 1.0.1 and `swift-png` 4.5.2 plus a new `originHash`. The plan expected the other pins to stay byte-identical, but SwiftTerm 1.99.3 adds dependencies.
+  - `apps/ios/release.sh` was added to scope so the TestFlight archive passes `-skipPackagePluginValidation`.
+- Follow-ups:
+  - The user still has to walk through the change on the iPhone Duo. The Duo currently runs the PR #126 redesign build, so this main-based build was compiled for the device but not installed.
+  - PR #126 conflicts in `TerminalHostView.swift`; re-apply the five call-site migrations and the link callback there.
