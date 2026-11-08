@@ -108,6 +108,7 @@ struct WorkspaceActivity {
         case active
         case done
         case idle
+        case failed
 
         var color: Color {
             switch self {
@@ -115,6 +116,7 @@ struct WorkspaceActivity {
             case .active: Theme.success
             case .done: Theme.info
             case .idle: Theme.mutedForeground
+            case .failed: Theme.destructive
             }
         }
     }
@@ -189,6 +191,61 @@ struct WorkspaceActivity {
                 tone = best == nil ? .idle : .active
                 subtitle = joined("\(running.count) 个终端运行中", progress)
             }
+        }
+    }
+}
+
+/// One terminal's state line, in the words and tones of the home rows (等待批准 / 正在执行 /
+/// 本轮完成 …): the terminal page's switcher and its menu show it under the terminal's name.
+struct TerminalActivity {
+    let tone: WorkspaceActivity.Tone
+    let text: String
+
+    @MainActor
+    init(_ task: Coflux_V1_Task, client: CofluxClient) {
+        func joined(_ head: String, _ tail: String?) -> String {
+            guard let tail, !tail.isEmpty else { return head }
+            return "\(head) · \(tail)"
+        }
+        if let secret = client.pendingSecretRequests(taskID: task.id).first {
+            tone = .waiting
+            text = "等待输入 \(secret.name)"
+            return
+        }
+        switch task.status {
+        case .running:
+            break
+        case .exited:
+            tone = task.exitCode == 0 ? .idle : .failed
+            text = task.exitCode == 0 ? "已退出" : "已退出 · 代码 \(task.exitCode)"
+            return
+        default:
+            tone = .idle
+            text = "未启动"
+            return
+        }
+        let ref = client.agent(forTask: task)
+        let message = ref.map(\.message).flatMap { $0.isEmpty ? nil : $0 }
+        let progress = ref.map(\.progress).flatMap { $0.isEmpty ? nil : $0 }
+        switch ref?.state {
+        case "approval":
+            tone = .waiting
+            text = joined("等待批准", message)
+        case "question":
+            tone = .waiting
+            text = joined("等待回答", message)
+        case "active":
+            tone = .active
+            text = joined("正在执行", progress)
+        case "done", "waiting":
+            tone = .done
+            text = joined("本轮完成", progress)
+        case "error":
+            tone = .failed
+            text = joined("出错了", message)
+        default:
+            tone = .idle
+            text = ref.map { $0.agent.isEmpty ? "运行中" : "\($0.agent) · 空闲" } ?? "运行中"
         }
     }
 }

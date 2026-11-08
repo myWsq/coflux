@@ -78,8 +78,6 @@ struct WorkspaceDetailView: View {
     /// Tall layout, half folded with a horizontal fold: the keypad is inline below the fold and
     /// the 按键 toolbar item goes away (plan D9).
     @State private var laptopPose = false
-    /// The avatar tray's natural width (sizes it in the top bar).
-    @State private var trayContentWidth: CGFloat = 0
 
     /// Below this content height the key row folds into 按键 and only the composer stays
     /// (tall Split View, outer display in landscape): the terminal keeps its rows.
@@ -125,26 +123,24 @@ struct WorkspaceDetailView: View {
         layout != .tall && laidOutSize.height >= laidOutSize.width
     }
 
-    /// The avatar tray names and switches the terminals, in place of the title and the 终端 menu:
-    /// with the bars on the rail, and in the tall layout (the inner display open tall), whose
-    /// page is as tall and narrow as the outer display's. A short wide window keeps the menu.
-    private var showsStrip: Bool {
+    /// The switcher names the active terminal and switches between them, in place of the title
+    /// and the 终端 menu: with the bars on the rail, and in the tall layout (the inner display
+    /// open tall). A short wide window keeps the title and the menu.
+    private var showsSwitcher: Bool {
         barsOnRail || layout == .tall
     }
 
-    /// Tall layout: the tray sits in the top bar, in the room between the back button and the
-    /// trailing items that the title left (mockup option B,
-    /// `wiki/plans/20261108-ios-tall-terminal-header-mockup.html`; the user's pick, 2026-11-08).
-    /// Elsewhere it is a row above the terminal.
-    private var stripInTopBar: Bool {
+    /// Tall layout: the switcher sits in the top bar, in the room between the back button and
+    /// the trailing items that the title left. Elsewhere it is a row above the terminal.
+    private var switcherInTopBar: Bool {
         layout == .tall
     }
 
-    /// The tray's width in the top bar: its content, up to the room the bar leaves. On the Duo
-    /// open tall (669 pt) the back button, the four trailing items and the status bar's corner
-    /// take about 440 pt of the row.
-    private var topBarTrayWidth: CGFloat {
-        min(trayContentWidth, max(120, laidOutSize.width - 445))
+    /// The switcher's text width in the top bar. On the Duo open tall (669 pt) the back button,
+    /// three trailing items, the status bar's corner and the switcher's glyph and chevron take
+    /// about 450 pt of the row.
+    private var topBarSwitcherTextWidth: CGFloat {
+        max(110, laidOutSize.width - 450)
     }
 
     // MARK: - Titles
@@ -220,7 +216,7 @@ struct WorkspaceDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         // The tray names the terminals: drop the title. With the bars on the rail it would be
         // the only thing left in a bar across the top, so the terminal gets that height too.
-        .toolbar(removing: showsStrip ? .title : nil)
+        .toolbar(removing: showsSwitcher ? .title : nil)
         // The bottom of the rail belongs to this page's toolbar, not the tab bar.
         .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbarContent }
@@ -342,14 +338,15 @@ struct WorkspaceDetailView: View {
             tallArrangement
         } else {
             VStack(spacing: 0) {
-                // The bars sit on the rail and the page shows no title: the strip names the
-                // terminals and switches between them.
+                // The bars sit on the rail and the page shows no title: the switcher names the
+                // terminal and switches between them.
                 if barsOnRail {
-                    terminalStrip
-                        .frame(height: Self.tabHeight)
-                        .padding(.top, 6)
-                        .padding(.bottom, 4)
-                        .mask { Rectangle().padding(.vertical, -60) }
+                    terminalSwitcher
+                        .padding(.horizontal, 12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 42)
+                        .padding(.top, 4)
+                        .padding(.bottom, 2)
                         .background(Theme.terminal)
                 }
                 ZStack(alignment: .bottom) {
@@ -398,82 +395,96 @@ struct WorkspaceDetailView: View {
         proxy.reservedRegions(kind: .division).contains { $0.isActive && $0.frame.width > $0.frame.height }
     }
 
-    /// The terminals of this workspace as a tray of avatars (design option E, mockup
-    /// `wiki/plans/20261108-ios-terminal-switcher-mockup.html`; the user's pick, 2026-11-08): each
-    /// terminal is a small square with its agent's glyph — Clawd in its state's pose for claude —
-    /// and the active one opens into a wider tile with the name. A terminal that is not active and
-    /// waits for the user wears an amber badge. A tap selects (the pager follows); a swipe of the
-    /// pager moves the selection.
-    private var terminalStrip: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal) {
-                HStack(spacing: 6) {
-                    ForEach(members, id: \.id) { task in
-                        terminalTab(task)
-                            .id(task.id)
-                    }
-                }
-                // Swiping the pager changes the active terminal without a transaction: animate anyway.
-                .animation(.smooth(duration: 0.25), value: activeTaskID)
-                .padding(.horizontal, stripInTopBar ? 2 : 10)
-                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { trayContentWidth = $0 }
-            }
-            .scrollIndicators(.hidden)
-            // Clawd's confetti and flag reach above the tile, and the badge past its corner: let
-            // them, and clip only sideways.
-            .scrollClipDisabled()
-            .onChange(of: activeTaskID, initial: true) { _, id in
-                guard let id else { return }
-                withAnimation(.smooth(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
-            }
-        }
-    }
-
-    /// The tray's tiles: 30 pt in a row above the terminal; in the top bar as tall as the
-    /// system's buttons beside them (48 pt on the Duo, measured from a screenshot; user's call).
-    private var tileHeight: CGFloat { stripInTopBar ? 48 : Self.tabHeight }
-    private var tileRadius: CGFloat { stripInTopBar ? 16 : 10 }
-    private var tileGlyph: CGFloat { stripInTopBar ? 24 : 18 }
-    private static let tabHeight: CGFloat = 30
-
-    private func terminalTab(_ task: Coflux_V1_Task) -> some View {
-        let active = task.id == activeTaskID
-        let shape = RoundedRectangle(cornerRadius: tileRadius)
-        return Button {
-            withAnimation(.smooth(duration: 0.25)) { activeTaskID = task.id }
+    /// The terminal switcher (mockup option B, `wiki/plans/20261108-ios-terminal-names-mockup.html`;
+    /// the user's pick, 2026-11-08): the active terminal in two lines — its name (the title its
+    /// program set, as on the desktop tab) and its state in the home rows' words and tones — and a
+    /// chevron; an amber dot on the chevron when another terminal waits. A tap opens the system
+    /// menu of all terminals (checkmark on the active one) and 新建终端; a swipe of the pager
+    /// still switches. Showing one name only is what makes long names and many terminals fit.
+    private var terminalSwitcher: some View {
+        Menu {
+            terminalMenuContent
         } label: {
-            HStack(spacing: 7) {
-                tabGlyph(task)
-                if active {
-                    Text(tabName(task))
-                        .font((stripInTopBar ? Theme.Fonts.body : Theme.Fonts.label).weight(.semibold))
-                        .foregroundStyle(Theme.foreground)
-                        .lineLimit(1)
-                        // A task summary can run long: truncate it, the tray scrolls the rest.
-                        .frame(maxWidth: stripInTopBar ? 150 : 200, alignment: .leading)
-                        .transition(.opacity)
-                }
-            }
-            .padding(.leading, active ? (stripInTopBar ? 12 : 8) : 0)
-            .padding(.trailing, active ? (stripInTopBar ? 16 : 12) : 0)
-            .frame(minWidth: tileHeight, minHeight: tileHeight, maxHeight: tileHeight)
-            .background(active ? Theme.accentSurface : Theme.card, in: shape)
-            .overlay(shape.strokeBorder(active ? Theme.foreground.opacity(0.1) : Theme.border, lineWidth: 1))
-            .overlay(alignment: .topTrailing) {
-                if !active, waits(task) {
-                    Circle()
-                        .fill(Theme.warning)
-                        .frame(width: 9, height: 9)
-                        .overlay(Circle().strokeBorder(Theme.terminal, lineWidth: 2))
-                        .offset(x: 3, y: -3)
-                }
-            }
-            .contentShape(shape)
+            switcherLabel
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(tabName(task))
-        .accessibilityAddTraits(active ? .isSelected : [])
+        .menuIndicator(.hidden)
+        .tint(Theme.foreground)
     }
+
+    @ViewBuilder
+    private var switcherLabel: some View {
+        if let task = activeTask {
+            let activity = TerminalActivity(task, client: client)
+            HStack(spacing: 8) {
+                tabGlyph(task)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(tabName(task))
+                        .font(Theme.Fonts.rowTitle)
+                        .foregroundStyle(Theme.foreground)
+                    Text(activity.text)
+                        .font(Theme.Fonts.label)
+                        .foregroundStyle(activity.tone.color)
+                }
+                .lineLimit(1)
+                // The row above the terminal offers its width; the top bar offers none, so cap it.
+                .frame(maxWidth: switcherInTopBar ? topBarSwitcherTextWidth : nil, alignment: .leading)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Theme.mutedForeground)
+                    .frame(width: 20, height: 20)
+                    .background(Theme.foreground.opacity(0.12), in: Circle())
+                    .overlay(alignment: .topTrailing) {
+                        if otherWaitingCount > 0 {
+                            Circle()
+                                .fill(Theme.warning)
+                                .frame(width: 8, height: 8)
+                                .overlay(Circle().strokeBorder(Theme.terminal, lineWidth: 1.5))
+                                .offset(x: 3, y: -3)
+                        }
+                    }
+            }
+            .contentShape(.rect)
+            .accessibilityElement(children: .combine)
+            .accessibilityHint("切换终端")
+        }
+    }
+
+    /// The menu of this workspace's terminals: name and state line, checkmark on the active one,
+    /// then 新建终端. Shared by the switcher and the 终端 toolbar menu of short wide windows.
+    @ViewBuilder
+    private var terminalMenuContent: some View {
+        Picker(selection: activeTaskBinding.animation(.smooth(duration: 0.3))) {
+            ForEach(members, id: \.id) { task in
+                Label {
+                    Text(tabName(task))
+                    Text(TerminalActivity(task, client: client).text)
+                } icon: {
+                    menuIcon(task)
+                }
+                .tag(Optional(task.id))
+            }
+        } label: {
+            // Where these terminals live: the page shows no workspace title on these layouts.
+            Text(workspaceContext)
+        }
+        .pickerStyle(.inline)
+        Section {
+            Button("新建终端", systemImage: "plus") {
+                createTerminal()
+            }
+        }
+    }
+
+    /// The agent's mark in the menu: a system menu shows still pictures, so Clawd stands still.
+    private func menuIcon(_ task: Coflux_V1_Task) -> Image {
+        switch client.agent(forTask: task)?.agent.lowercased() {
+        case "claude": Image("clawd-gym-00").renderingMode(.original)
+        case "codex": Image(systemName: "chevron.left.forwardslash.chevron.right")
+        default: Image(systemName: "terminal")
+        }
+    }
+
+    private static let switcherGlyph: CGFloat = 22
 
     /// Claude: Clawd in its state's pose (the desktop's tab glyph), the error cross when it
     /// stopped on an error. Any other terminal: the state dot.
@@ -482,20 +493,20 @@ struct WorkspaceDetailView: View {
         if task.status == .running, let agent = client.agent(forTask: task), agent.agent.lowercased() == "claude" {
             if agent.state == "error" {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: tileGlyph * 0.72, weight: .semibold))
+                    .font(.system(size: Self.switcherGlyph * 0.72, weight: .semibold))
                     .foregroundStyle(Theme.destructive)
-                    .frame(width: tileGlyph, height: tileGlyph)
+                    .frame(width: Self.switcherGlyph, height: Self.switcherGlyph)
             } else {
                 ClawdGlyph(
                     pose: ClawdPose(state: agent.state, seen: navigation.seenFinishedTaskIDs.contains(task.id)),
-                    size: tileGlyph
+                    size: Self.switcherGlyph
                 )
             }
         } else {
             Circle()
-                .fill(tabTone(task))
-                .frame(width: stripInTopBar ? 9 : 7, height: stripInTopBar ? 9 : 7)
-                .frame(width: tileGlyph * 0.67, height: tileGlyph)
+                .fill(TerminalActivity(task, client: client).tone.color)
+                .frame(width: 8, height: 8)
+                .frame(width: 14, height: Self.switcherGlyph)
         }
     }
 
@@ -522,17 +533,6 @@ struct WorkspaceDetailView: View {
         let name = terminalName(task)
         let clash = members.contains { $0.id != task.id && terminalName($0) == name }
         return clash ? taskTitle(task) : name
-    }
-
-    /// The same tones as the home rows: waits amber, works green, finished its turn blue.
-    private func tabTone(_ task: Coflux_V1_Task) -> Color {
-        if waits(task) { return Theme.warning }
-        guard task.status == .running else { return Theme.subtleForeground }
-        switch client.agent(forTask: task)?.state {
-        case "active": return Theme.success
-        case "done": return Theme.info
-        default: return Theme.mutedForeground
-        }
     }
 
     /// Status strip + the pager. With `reserveDock` the terminal ends above the resting dock and
@@ -632,7 +632,7 @@ struct WorkspaceDetailView: View {
         if members.isEmpty {
             ToolbarItem(placement: .topBarTrailing) { newTerminalButton }
         } else if bottomBarItems {
-            // The terminal strip lists and switches the terminals here, so the rail only adds one.
+            // The switcher lists and switches the terminals here, so the rail only adds one.
             ToolbarItem(placement: .topBarTrailing) { newTerminalButton }
                 .visibilityPriority(.high)
             ToolbarItem(placement: .topBarTrailing) { moreMenu }
@@ -641,14 +641,11 @@ struct WorkspaceDetailView: View {
                 .visibilityPriority(.low)
             ToolbarItem(placement: .bottomBar) { pasteButton }
         } else {
-            if showsStrip {
-                if stripInTopBar {
-                    // Solid tiles, not one more glass capsule (the user turned glass down).
-                    ToolbarItem(placement: .topBarLeading) {
-                        terminalStrip
-                            .frame(width: topBarTrayWidth, height: tileHeight)
-                    }
-                    .sharedBackgroundVisibility(.hidden)
+            if showsSwitcher {
+                if switcherInTopBar {
+                    // Reads as the bar's title, not one more glass capsule.
+                    ToolbarItem(placement: .topBarLeading) { terminalSwitcher }
+                        .sharedBackgroundVisibility(.hidden)
                 }
                 ToolbarItem(placement: .topBarTrailing) { newTerminalButton }
                     .visibilityPriority(.high)
@@ -656,8 +653,11 @@ struct WorkspaceDetailView: View {
                 ToolbarItem(placement: .topBarTrailing) { terminalsMenu }
                     .visibilityPriority(.high)
             }
-            ToolbarItem(placement: .topBarTrailing) { attachMenu }
-                .visibilityPriority(.low)
+            // With the switcher in the top bar, 附件 moves into 更多 to leave the name room.
+            if !switcherInTopBar {
+                ToolbarItem(placement: .topBarTrailing) { attachMenu }
+                    .visibilityPriority(.low)
+            }
             ToolbarItem(placement: .topBarTrailing) { pasteButton }
             ToolbarItem(placement: .topBarTrailing) { moreMenu }
                 .visibilityPriority(.high)
@@ -668,19 +668,7 @@ struct WorkspaceDetailView: View {
     /// terminals that wait for the user.
     private var terminalsMenu: some View {
         Menu {
-            Picker(selection: activeTaskBinding.animation(.smooth(duration: 0.3))) {
-                ForEach(members, id: \.id) { task in
-                    Label(terminalMenuTitle(task), systemImage: statusSymbol(task))
-                        .tag(Optional(task.id))
-                }
-            } label: {
-                // Where these terminals live: the page shows no title on the rail layouts.
-                Text(workspaceContext)
-            }
-            .pickerStyle(.inline)
-            Button("新建终端", systemImage: "plus") {
-                createTerminal()
-            }
+            terminalMenuContent
         } label: {
             Label("终端", systemImage: "rectangle.stack")
         }
@@ -786,6 +774,9 @@ struct WorkspaceDetailView: View {
 
     private var moreMenu: some View {
         Menu {
+            if switcherInTopBar {
+                attachMenu
+            }
             if let task = activeTask {
                 if !client.pendingSecretRequests(taskID: task.id).isEmpty {
                     Button("提供 Agent 请求的输入", systemImage: "key") { openSecretSheet() }
@@ -805,11 +796,6 @@ struct WorkspaceDetailView: View {
         }
     }
 
-    private func terminalMenuTitle(_ task: Coflux_V1_Task) -> String {
-        guard let agent = client.agent(forTask: task), !agent.agent.isEmpty else { return taskTitle(task) }
-        return "\(taskTitle(task)) · \(agent.agent)"
-    }
-
     private func waits(_ task: Coflux_V1_Task) -> Bool {
         if !client.pendingSecretRequests(taskID: task.id).isEmpty { return true }
         let state = client.agent(forTask: task)?.state
@@ -818,16 +804,6 @@ struct WorkspaceDetailView: View {
 
     private var otherWaitingCount: Int {
         members.filter { $0.id != activeTaskID && waits($0) }.count
-    }
-
-    /// Shape as well as colour: the menu renders its icons in one tint.
-    private func statusSymbol(_ task: Coflux_V1_Task) -> String {
-        if waits(task) { return "exclamationmark.bubble.fill" }
-        switch task.status {
-        case .running: return client.detachedTaskIDs.contains(task.id) ? "eye" : "circle.fill"
-        case .exited: return task.exitCode == 0 ? "checkmark.circle" : "xmark.circle"
-        default: return "circle"
-        }
     }
 
     private func openSecretSheet() {
