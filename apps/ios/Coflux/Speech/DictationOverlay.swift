@@ -173,10 +173,10 @@ struct DictationOverlay: View {
     @ViewBuilder
     private var bubble: some View {
         let content = VStack(alignment: .leading, spacing: 8) {
-            Text(confirming ? "识别结果 · 点文字可以改" : "正在听")
+            Text(confirming ? "识别结果 · 点按文字可编辑" : "正在聆听")
                 .font(Theme.Fonts.meta)
                 .foregroundStyle(Theme.mutedForeground)
-            Text(session.displayText.isEmpty ? "聆听中…" : session.displayText)
+            Text(session.displayText.isEmpty ? "请说话…" : session.displayText)
                 .font(Theme.Fonts.transcript)
                 .foregroundStyle(session.isVolatile ? Theme.mutedForeground : Theme.foreground)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -223,8 +223,8 @@ struct DictationOverlay: View {
     }
 
     private var standHint: String {
-        if confirming { return "松手了，确认后再发" }
-        if stage == .finalizing { return "整理中…" }
+        if confirming { return "确认后发送" }
+        if stage == .finalizing { return "正在识别…" }
         switch zone {
         case .cancel: return "松开取消"
         case .send: return "松开发送"

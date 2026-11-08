@@ -34,7 +34,7 @@ extension View {
                 Button {
                     UIPasteboard.general.string = handle
                 } label: {
-                    Label("复制标识", systemImage: "doc.on.doc")
+                    Label("复制 ID", systemImage: "doc.on.doc")
                 }
             }
         }

@@ -373,7 +373,7 @@ struct TerminalInputArea: View {
                 noticeBar(
                     mark: .secret,
                     title: "\(agent?.agent ?? "Agent") 请求输入 \(secret.name)",
-                    detail: "点这里提供，值只交给设备"
+                    detail: "点按提供，内容只发送到该设备"
                 )
             }
             .buttonStyle(.plain)
@@ -382,7 +382,7 @@ struct TerminalInputArea: View {
             let name = agent.agent.isEmpty ? "agent" : agent.agent
             noticeBar(
                 mark: .agent(agent.agent),
-                title: state == "approval" ? "\(name) 要你确认" : "\(name) 在问你",
+                title: state == "approval" ? "\(name) 等待批准" : "\(name) 等待回答",
                 detail: agent.message.isEmpty ? nil : agent.message
             )
             .transition(.opacity.combined(with: .move(edge: .bottom)))
@@ -1002,7 +1002,7 @@ struct TerminalComposeOverlay: View {
             }
         )
         .accessibilityLabel("发送并回车")
-        .accessibilityAction(named: "只填字不回车") { send(withEnter: false) }
+        .accessibilityAction(named: "仅填入，不回车") { send(withEnter: false) }
     }
 
     private func send(withEnter: Bool) {

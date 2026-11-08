@@ -125,7 +125,7 @@ struct WorkspaceDetailView: View {
     }
 
     private func taskTitle(_ task: Coflux_V1_Task) -> String {
-        task.title.isEmpty ? "任务 \(task.id.prefix(6))" : task.title
+        task.title.isEmpty ? "终端 \(task.id.prefix(6))" : task.title
     }
 
     // MARK: - Body
@@ -202,14 +202,14 @@ struct WorkspaceDetailView: View {
             .sheet(item: $secretSheet) { target in
                 SecretRequestSheet(client: client, taskID: target.taskID)
             }
-            .confirmationDialog("删除任务？", isPresented: $confirmingRemove, titleVisibility: .visible) {
+            .confirmationDialog("删除终端？", isPresented: $confirmingRemove, titleVisibility: .visible) {
                 Button("停止并删除", role: .destructive) {
                     if let task = activeTask {
                         Task { await client.closeTask(task) }
                     }
                 }
             } message: {
-                Text("运行中的会话将被停止，任务从列表移除")
+                Text("正在运行的会话会被停止，终端将从列表中移除")
             }
             .onAppear {
                 if activeTaskID == nil || !members.contains(where: { $0.id == activeTaskID }) {
@@ -453,11 +453,11 @@ struct WorkspaceDetailView: View {
                 }
                 // 复制终端标识（plan 20260914）：曾挂在终端 tab chip 的长按上
                 if let handle = EntityHandle.make(.terminal, id: task.id) {
-                    Button("复制终端标识", systemImage: "doc.on.doc") {
+                    Button("复制终端 ID", systemImage: "doc.on.doc") {
                         UIPasteboard.general.string = handle
                     }
                 }
-                Button("停止并删除任务", systemImage: "trash", role: .destructive) {
+                Button("停止并删除终端", systemImage: "trash", role: .destructive) {
                     confirmingRemove = true
                 }
             }
@@ -521,7 +521,7 @@ struct WorkspaceDetailView: View {
         } description: {
             Text(taskTitle(task))
         } actions: {
-            Button("在这里打开") {
+            Button("在此窗口打开") {
                 ownership.claim(task.id, scene: navigation.sceneID, holder: claims.id, force: true)
             }
             .buttonStyle(.borderedProminent)
@@ -555,7 +555,7 @@ struct WorkspaceDetailView: View {
     private var emptyState: some View {
         ContentUnavailableView {
             Label {
-                Text("暂无任务")
+                Text("暂无终端")
             } icon: {
                 Image("square-terminal")
                     .resizable()
@@ -744,16 +744,16 @@ struct WorkspaceDetailView: View {
     private func statusStrip(_ task: Coflux_V1_Task) -> some View {
         if client.detachedTaskIDs.contains(task.id) {
             banner(
-                text: "已被其它客户端接管，当前为旁观视图",
+                text: "已在其他设备上接管，这里只能查看",
                 icon: "eye",
                 tint: Theme.warning,
-                actionLabel: "强制接管"
+                actionLabel: "接管"
             ) {
                 client.startTask(taskID: task.id, cols: termCols, rows: termRows, force: true)
             }
         } else if task.status != .running {
             banner(
-                text: task.status == .exited ? "会话已退出" : "任务尚未启动",
+                text: task.status == .exited ? "会话已退出" : "终端尚未启动",
                 icon: "play.circle",
                 tint: Theme.mutedForeground,
                 actionLabel: "启动"
@@ -761,7 +761,7 @@ struct WorkspaceDetailView: View {
                 client.startTask(taskID: task.id, cols: termCols, rows: termRows)
             }
         } else if task.hasSessionID, client.blockedSessionIDs.contains(task.sessionID) {
-            banner(text: "终端输入等待确认，缓冲区已满", icon: "hourglass", tint: Theme.warning, actionLabel: nil, action: nil)
+            banner(text: "输入过多，正在等待终端处理", icon: "hourglass", tint: Theme.warning, actionLabel: nil, action: nil)
         }
     }
 

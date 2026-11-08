@@ -88,13 +88,13 @@ struct WaitingItemText {
         case .agent(let name, let state, let message):
             mark = .agent(name)
             title = name.isEmpty ? "agent" : name
-            pill = state == .question ? "在问你" : "要权限"
-            self.message = message.isEmpty ? (state == .question ? "有问题等你回答" : "等你确认一个操作") : message
+            pill = state == .question ? "等待回答" : "等待批准"
+            self.message = message.isEmpty ? (state == .question ? "有问题需要你回答" : "有操作需要你批准") : message
             isSecret = false
         case .secret(let request):
             mark = .secret
             title = request.name
-            pill = "等输入"
+            pill = "等待输入"
             message = request.reason.isEmpty ? "Agent 请求输入 \(request.name)" : request.reason
             isSecret = true
         }
@@ -150,7 +150,7 @@ struct WorkspaceActivity {
         if let secret = client.pendingSecretRequest(workspaceID: workspace.id) {
             agent = best?.ref.agent
             tone = .waiting
-            subtitle = "等输入：\(secret.name)"
+            subtitle = "等待输入 \(secret.name)"
             taskID = secret.taskID
         } else if let best, best.rank >= 1 {
             agent = best.ref.agent
@@ -159,16 +159,16 @@ struct WorkspaceActivity {
             switch best.rank {
             case 4:
                 tone = .waiting
-                subtitle = joined("要权限", message)
+                subtitle = joined("等待批准", message)
             case 3:
                 tone = .waiting
-                subtitle = joined("在问你", message)
+                subtitle = joined("等待回答", message)
             case 2:
                 tone = .active
-                subtitle = joined("进行中", progress)
+                subtitle = joined("正在执行", progress)
             default:
                 tone = .done
-                subtitle = joined("说完了", progress)
+                subtitle = joined("本轮完成", progress)
             }
         } else {
             agent = best?.ref.agent
@@ -269,7 +269,7 @@ struct ConnectionBanner: View {
     var body: some View {
         if client.status != .connected {
             Label(
-                client.status == .connecting ? "连接中…" : "连接已断开，恢复后自动重连",
+                client.status == .connecting ? "连接中…" : "连接已断开，网络恢复后会自动重连",
                 systemImage: client.status == .connecting ? "arrow.triangle.2.circlepath" : "wifi.slash"
             )
             .font(Theme.Fonts.label.weight(.medium))
@@ -294,7 +294,7 @@ struct AccountMenu: View {
 
     var body: some View {
         Menu {
-            Button("登出", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+            Button("退出登录", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
                 client.logout()
             }
         } label: {

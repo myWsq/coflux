@@ -88,7 +88,7 @@ private struct SecretRequestCard: View {
             }
             field
             if let failure {
-                Text("\(failure)，可以重试。")
+                Text("\(failure)，请重试。")
                     .font(Theme.Fonts.label)
                     .foregroundStyle(Theme.destructive)
                     .fixedSize(horizontal: false, vertical: true)
@@ -141,7 +141,7 @@ private struct SecretRequestCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
         return VStack(alignment: .leading, spacing: 4) {
-            Text("Agent 说")
+            Text("Agent 说明")
                 .font(Theme.Fonts.meta)
                 .foregroundStyle(Theme.mutedForeground)
             // A long reason scrolls inside a capped box instead of pushing the buttons off screen.
@@ -224,10 +224,10 @@ private struct SecretRequestCard: View {
                 .font(Theme.Fonts.body)
                 .foregroundStyle(Theme.mutedForeground)
             VStack(alignment: .leading, spacing: 1) {
-                Text("已粘贴多行值 · \(SecretPaste.lineCount(value)) 行")
+                Text("已粘贴 \(SecretPaste.lineCount(value)) 行内容")
                     .font(Theme.Fonts.label.weight(.semibold))
                     .foregroundStyle(Theme.foreground)
-                Text("内容已遮蔽，换行原样保留")
+                Text("内容已隐藏，换行会原样保留")
                     .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.mutedForeground)
             }
@@ -256,7 +256,7 @@ private struct SecretRequestCard: View {
                 .strokeBorder(Theme.mutedForeground.opacity(0.45), lineWidth: 1)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(request.name) 的值，多行，已遮蔽")
+        .accessibilityLabel("\(request.name) 的值，多行，已隐藏")
     }
 
     private func accept(_ text: String) {
@@ -270,7 +270,7 @@ private struct SecretRequestCard: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("只交给 \(deviceName.isEmpty ? "该设备" : deviceName)，Agent 看不到 · \(deadline) 过期")
+            Text("仅发送到\(deviceName.isEmpty ? "该设备" : "「\(deviceName)」")，Agent 无法查看 · \(deadline) 过期")
                 .font(Theme.Fonts.label)
                 .foregroundStyle(Theme.mutedForeground)
                 .fixedSize(horizontal: false, vertical: true)

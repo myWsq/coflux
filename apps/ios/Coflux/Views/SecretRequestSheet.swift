@@ -50,7 +50,7 @@ struct SecretRequestSheet: View {
     static func source(taskID: String, client: CofluxClient) -> String {
         let task = client.tasks.first { $0.id == taskID }
         let workspace = task.flatMap { task in client.workspaces.first { $0.id == task.workspaceID } }
-        let terminal = task.map { $0.title.isEmpty ? "任务 \($0.id.prefix(6))" : $0.title } ?? ""
+        let terminal = task.map { $0.title.isEmpty ? "终端 \($0.id.prefix(6))" : $0.title } ?? ""
         return [deviceName(taskID: taskID, client: client), workspace?.displayTitle ?? "", terminal]
             .filter { !$0.isEmpty }
             .joined(separator: " · ")

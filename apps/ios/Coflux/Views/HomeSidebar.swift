@@ -25,7 +25,7 @@ struct HomeSidebar: View {
                         waitingRow(item)
                     }
                 } header: {
-                    sectionHeader("需要你", detail: "\(items.count)")
+                    sectionHeader("待处理", detail: "\(items.count)")
                 }
             }
             ForEach(client.visibleProjects, id: \.id) { project in

@@ -39,7 +39,7 @@ struct WorkspaceListView: View {
                 ContentUnavailableView(
                     "暂无项目",
                     systemImage: "tray",
-                    description: Text("在桌面端导入 git 仓库后此处会出现")
+                    description: Text("在桌面端导入 Git 仓库后会显示在这里")
                 )
             }
         }
@@ -71,7 +71,7 @@ struct WorkspaceListView: View {
     private func waitingSection(_ items: [WaitingItem]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Text("需要你")
+                Text("待处理")
                     .font(Theme.Fonts.sectionTitle)
                 Text("\(items.count)")
                     .font(Theme.Fonts.meta.weight(.semibold).monospacedDigit())
@@ -131,7 +131,7 @@ struct WorkspaceListView: View {
                 Button {
                     open(item)
                 } label: {
-                    Text(text.isSecret ? "提供" : "看终端")
+                    Text(text.isSecret ? "提供" : "查看")
                         .font(Theme.Fonts.label.weight(.semibold))
                         .foregroundStyle(Theme.primaryForeground)
                         .padding(.horizontal, 14)

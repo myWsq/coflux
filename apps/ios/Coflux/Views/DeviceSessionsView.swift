@@ -101,7 +101,7 @@ struct DeviceSessionsView: View {
         if let daemon {
             ContentUnavailableView {
                 Label {
-                    Text("在「\(deviceName)」上开一个终端")
+                    Text("在「\(deviceName)」上新建终端")
                 } icon: {
                     Image("square-terminal")
                         .resizable()
@@ -109,7 +109,7 @@ struct DeviceSessionsView: View {
                         .frame(width: 42, height: 42)
                 }
             } description: {
-                Text(daemon.online ? "终端会打开在这台设备的 HOME 目录" : "设备当前离线，上线后才能新建终端")
+                Text(daemon.online ? "终端将在该设备的主目录中打开" : "设备离线，上线后才能新建终端")
             } actions: {
                 Button {
                     createTerminal()
@@ -165,7 +165,7 @@ struct DeviceSessionsView: View {
                 // FsListed 的失败是带内的：ok=false 或 path 缺失时继续发，
                 // 只会换来 server 的「终端目录路径为空」。
                 guard listed.ok, listed.hasPath, !listed.path.isEmpty else {
-                    let reason = listed.hasError && !listed.error.isEmpty ? listed.error : "无法解析设备 HOME 目录"
+                    let reason = listed.hasError && !listed.error.isEmpty ? listed.error : "无法获取设备的主目录"
                     failCreate(reason)
                     return
                 }

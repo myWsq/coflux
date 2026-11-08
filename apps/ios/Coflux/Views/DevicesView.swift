@@ -63,7 +63,7 @@ struct DevicesView: View {
                 ContentUnavailableView(
                     "暂无设备",
                     systemImage: "macbook.and.iphone",
-                    description: Text("在机器上安装 cofluxd 并完成授权后此处会出现")
+                    description: Text("在电脑上安装 cofluxd 并完成授权后会显示在这里")
                 )
             }
         }

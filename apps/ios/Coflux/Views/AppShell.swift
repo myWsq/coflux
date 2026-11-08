@@ -121,7 +121,7 @@ struct AppShell: View {
                     ContentUnavailableView(
                         "选择一个终端",
                         systemImage: "terminal",
-                        description: Text("从左栏选择工作区或等你处理的终端")
+                        description: Text("从左侧选择工作区或待处理的终端")
                     )
                     .background(Theme.background)
                 }

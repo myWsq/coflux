@@ -25,7 +25,7 @@ struct RootView: View {
                 ContentUnavailableView(
                     "客户端版本不兼容",
                     systemImage: "exclamationmark.triangle",
-                    description: Text("请更新 app 后重试")
+                    description: Text("请更新 App 后重试")
                 )
             }
         }
