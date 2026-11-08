@@ -260,56 +260,59 @@ struct RepeatKey: View {
 
 // MARK: - The dock
 
-/// The terminal page's dock (plan D11/D13, mockup O2/O3): an optional notice bar, a key row that
-/// follows the agent, and a one-line composer, pinned to the bottom of the content area.
+/// The terminal page's dock: an optional notice bar over a key row that follows the agent, pinned
+/// to the bottom of the content area. Typing lives on the 输入 toolbar item; talking on the
+/// row's microphone key (hold).
 ///
 /// - Key row: when the active terminal's agent is in `approval` or `question` it becomes the
-///   enlarged option keys `1 2 3 ↑ ↓ ⏎` (only the keys' bytes are sent — the menu text is never
-///   parsed); otherwise `esc ^C tab ↑ ↓ /`, plus `← →` when the dock is wide enough to keep keys
-///   at the mockup's size. The row has one fixed height, and the notice bar floats above the dock
-///   outside its measured size, so neither changes the terminal's size.
-/// - Composer: tap opens the compose layer, a long press starts dictation; the send button sends
-///   the draft with Enter (a long press sends it without).
-/// - Short window: `foldKeyRow` moves the key row into the 按键 toolbar item (only the composer
-///   stays). Laptop pose: `inlineKeypad` shows the composer above the full keypad instead.
+///   enlarged option keys `1 2 3 🎤 ↑ ↓ ⏎` (only the keys' bytes are sent — the menu text is never
+///   parsed); otherwise `esc ^C tab 🎤 ↑ ↓ /`, plus `← →` when the dock is wide enough.
+/// - Extra keys: a swipe up anywhere over the dock brings the keys the quick rows leave out
+///   (`TerminalExtraKeys`) up above the quick rows, following the finger; the host owns how much
+///   shows (`keypadReveal`), snaps it open or shut on release, and pushes the terminal up by the
+///   same amount. A swipe down puts them away.
+/// - The row has one fixed height, and the notice bar floats above the dock outside its measured
+///   size, so the notice never changes the terminal's size.
+/// - Laptop pose: `inlineKeypad` shows the quick rows and the extra keys below the fold.
 ///
-/// 终端本体是纯显示（DisplayOnlyTerminalView），软键盘输入全部从这里走 client.sendInput。
+/// 终端本体是纯显示（DisplayOnlyTerminalView），软键盘输入全部从这里与成文层走 client.sendInput。
 struct TerminalInputArea: View {
     let client: CofluxClient
     let task: Coflux_V1_Task?
-    /// 草稿宿主持有：占位条只做预览，点击进与系统键盘同层的成文层
-    let draft: String
-    var foldKeyRow = false
     var inlineKeypad = false
-    let onCompose: () -> Void
-    /// Send the draft (tap: with Enter; long press: without).
-    let onSend: (_ withEnter: Bool) -> Void
+    /// Space below the keys: `railBottomGap` where the page runs to the screen's bottom edge.
+    var bottomGap: CGFloat = 8
+    /// How much of the extra keys show above the key rows, 0 … their natural height.
+    var keypadReveal: CGFloat = 0
+    /// The extra keys' natural height.
+    let onKeypadHeight: (CGFloat) -> Void
+    /// The resting dock's height (the key rows): the terminal ends above it.
+    let onRestingHeight: (CGFloat) -> Void
+    /// A vertical drag over the keys: the translation so far.
+    let onKeypadDrag: (CGFloat) -> Void
+    /// The drag ended: its predicted final translation (a flick carries on).
+    let onKeypadDragEnd: (CGFloat) -> Void
+    /// VoiceOver's expand / collapse action.
+    let onKeypadToggle: () -> Void
     /// Open the secret request sheet of the active terminal.
     let onOpenSecret: () -> Void
-    /// 长按对讲（plan 064；操作台几何 plan 067 → 068；乐观启动 plan 069）：手指落下即请求预热采音
-    /// （prewarm，去抖后），长按判定通过才进对讲态（begin，宿主此刻才显示蒙层），未达长按松手则
-    /// 请求拆掉预热（abort）。对讲期间手指位置（全局坐标）实时外传，由宿主对蒙层按钮做命中判定。
+    /// The input key's tap: the compose layer with the system keyboard.
+    let onCompose: () -> Void
+    /// The input key's hold to talk (see `HoldToTalk`).
     let onDictatePrewarm: () -> Void
     let onDictateBegin: () -> Void
     let onDictateMove: (CGPoint) -> Void
     let onDictateEnd: () -> Void
     let onDictateAbort: () -> Void
 
-    @State private var dictateActive = false
-    @State private var prewarmTask: Task<Void, Never>?
-    /// 对讲预兆的显现度（0-1，plan 069）：按下即向 1 渐变，见 pressChanged
-    @State private var dictateHint: Double = 0
-    /// 按压视觉态：GestureState 在手势结束/被系统取消时自动复位
-    @GestureState private var pressing = false
-    @State private var width: CGFloat = 0
-    @State private var sendLongPressed = false
+    /// The extra keys' natural height (measured at a fixed size, so it never feeds back).
+    @State private var extrasHeight: CGFloat = 0
+    /// A keypad drag is under way. Resets by itself however the drag ends — including when the
+    /// system cancels it, where `onEnded` never runs; the reset then settles the keypad.
+    @GestureState private var draggingKeypad = false
+    /// The last drag's predicted end, for settling a cancelled drag.
+    @State private var lastPredictedTranslation: CGFloat = 0
 
-    /// 预热去抖（plan 069）：手指落下到真正起采音之间的等待。正常点击（~60-120ms 抬手）必须被它
-    /// 完全滤掉；它远短于长按阈值 0.28s，不影响"按下即说"。长按判定与点按/长按的消歧仍全归系统
-    /// 手势，这个定时器只决定预热何时开始。
-    private static let prewarmDelay = Duration.milliseconds(120)
-    /// `← →` join the row from this dock width on: 8 keys stay at least the mockup's ~55 pt.
-    static let arrowsWidth: CGFloat = 520
 
     private var sender: TerminalKeySender {
         TerminalKeySender(client: client, task: task)
@@ -329,39 +332,96 @@ struct TerminalInputArea: View {
     }
 
     var body: some View {
-        VStack(spacing: 10) {
+        Group {
             if inlineKeypad {
-                notice
-                composer
-                TerminalKeypad(client: client, task: task)
-            } else {
-                if !foldKeyRow {
-                    keyRow
+                VStack(spacing: 7) {
+                    notice
+                        .padding(.bottom, 3)
+                    keyRows
+                    TerminalExtraKeys(client: client, task: task)
                 }
-                composer
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 8)
-        .background {
-            if inlineKeypad {
-                Theme.background
+                .padding(.horizontal, Self.sideInset)
+                .padding(.vertical, 8)
+                .background(Theme.background)
             } else {
-                // The terminal ends above the dock; a short fade keeps the seam soft.
-                LinearGradient(colors: [Theme.terminal.opacity(0), Theme.terminal], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.2))
+                dock
             }
         }
-        // Outside the measured size: showing or hiding it never resizes the terminal (D13).
-        .overlay(alignment: .top) {
-            if !inlineKeypad {
-                notice
-                    .padding(.horizontal, 12)
-                    .alignmentGuide(.top) { $0[.bottom] }
-            }
-        }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .animation(.smooth(duration: 0.2), value: waitingState)
+    }
+
+    private var dock: some View {
+        // 0 … 1: how far the extra keys are out.
+        let progress = extrasHeight > 0 ? min(max(keypadReveal / extrasHeight, 0), 1) : 0
+        return VStack(spacing: 0) {
+            // Above the quick rows, which never move: always mounted at their natural height and
+            // shown through a window that grows upwards from the quick rows, so the row nearest
+            // them comes out first, as if rising from behind them; the keys fade and settle from
+            // slightly smaller while they come.
+            TerminalExtraKeys(client: client, task: task)
+                .padding(.horizontal, Self.sideInset)
+                .padding(.top, 8)
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                    extrasHeight = height
+                    onKeypadHeight(height)
+                }
+                .opacity(progress)
+                .scaleEffect(0.92 + 0.08 * progress, anchor: .bottom)
+                .frame(height: keypadReveal, alignment: .bottom)
+                .clipped()
+                // Hit-testable while a drag runs: dropping hit testing mid-drag (as the keys
+                // shrink) would cancel the drag and leave the keypad half out.
+                .allowsHitTesting(progress > 0.9 || draggingKeypad)
+                .accessibilityHidden(keypadReveal == 0)
+            keyRows
+                .padding(.horizontal, Self.sideInset)
+                .padding(.top, 8)
+                .padding(.bottom, bottomGap)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { onRestingHeight($0) }
+        }
+        .background(Theme.terminal)
+        // One vertical drag over the whole dock — keys and gaps: up brings the extra keys
+        // out, down puts them away. Simultaneous, so it never takes a key's tap away; per-key
+        // high-priority drags lost to the keys' own gestures on the device. The host ignores it
+        // while talking, where the finger slides up from the input key onto 发送 / 取消.
+        .simultaneousGesture(keypadDrag(minimumDistance: 10))
+        // A drag the system cancelled never reaches onEnded: settle it here. After a normal end
+        // this second call finds no drag running and does nothing.
+        .onChange(of: draggingKeypad) { _, dragging in
+            if !dragging { onKeypadDragEnd(lastPredictedTranslation) }
+        }
+        // No handle (user's call, 2026-11-08): the swipe over the keys is the whole gesture.
+        // VoiceOver gets it as an action.
+        .accessibilityAction(named: keypadReveal > 0 ? "收起按键" : "展开按键") { onKeypadToggle() }
+        // Outside the measured size, floating just above the dock's top edge — so it rises with
+        // the extra keys — over the terminal's last line: the notice never resizes the terminal
+        // (D13).
+        .overlay(alignment: .top) {
+            notice
+                .padding(.horizontal, Self.sideInset)
+                .alignmentGuide(.top) { $0[.bottom] }
+        }
+    }
+
+    /// The keys' side margins: nearly flush, lined up with the terminal's text above.
+    static let sideInset: CGFloat = 4
+
+    /// The keys' bottom gap where the page runs to the screen's bottom edge (bars on the rail):
+    /// their bottom edge lines up with the rail's lowest button, measured on the Duo's outer
+    /// display. Elsewhere the safe area already keeps them off the edge.
+    static let railBottomGap: CGFloat = 25
+
+    /// Global coordinates: the dock moves under the finger while it drags, and a local
+    /// translation would feed back into itself.
+    private func keypadDrag(minimumDistance: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: minimumDistance, coordinateSpace: .global)
+            .updating($draggingKeypad) { _, state, _ in state = true }
+            .onChanged { value in
+                lastPredictedTranslation = value.predictedEndTranslation.height
+                onKeypadDrag(value.translation.height)
+            }
+            .onEnded { onKeypadDragEnd($0.predictedEndTranslation.height) }
     }
 
     // MARK: Notice bar
@@ -406,7 +466,7 @@ struct TerminalInputArea: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, Self.sideInset)
         .padding(.vertical, 10)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 18))
         .background(Theme.warning.opacity(0.1), in: RoundedRectangle(cornerRadius: 18))
@@ -416,288 +476,155 @@ struct TerminalInputArea: View {
 
     // MARK: Key row
 
-    private var keyRow: some View {
-        HStack(spacing: 7) {
-            if waitingState != nil {
-                let large = Theme.Metrics.keyHeightLarge
-                ForEach(["1", "2", "3"], id: \.self) { digit in
-                    TerminalKey(sender: sender, label: digit, style: .hot, height: large, large: true) { digit }
-                }
-                RepeatKey(sender: sender, label: "↑", height: large, large: true) { sender.arrowBytes("A") }
-                RepeatKey(sender: sender, label: "↓", height: large, large: true) { sender.arrowBytes("B") }
-                TerminalKey(sender: sender, systemImage: "return", style: .enter, height: large, large: true) { "\r" }
-            } else {
-                TerminalKey(sender: sender, label: "esc") { "\u{1b}" }
-                TerminalKey(sender: sender, label: "^C", style: .destructive) { "\u{03}" }
-                TerminalKey(sender: sender, label: "tab") { "\t" }
-                RepeatKey(sender: sender, label: "↑") { sender.arrowBytes("A") }
-                RepeatKey(sender: sender, label: "↓") { sender.arrowBytes("B") }
-                if width >= Self.arrowsWidth {
-                    RepeatKey(sender: sender, label: "←") { sender.arrowBytes("D") }
-                    RepeatKey(sender: sender, label: "→") { sender.arrowBytes("C") }
-                }
-                TerminalKey(sender: sender, label: "/") { "/" }
-            }
+    /// Two rows on seven equal columns, the microphone two columns wide beside ↑ and a tall ⏎
+    /// spanning both rows (user's layout, 2026-11-08):
+    ///
+    ///     esc  tab  [  🎤  ]  ↑  ⌫  ⏎
+    ///     ^C   ^D   /    ←    ↓  →  ⏎
+    ///
+    /// While the agent waits (`approval` / `question`) esc, tab and ^C turn into the amber option
+    /// keys 1 2 3 — only the keys' bytes are sent, the menu text is never parsed. Every key but the
+    /// microphone also drags the extra keys out; the microphone is left out, so sliding up from it
+    /// while talking (onto 发送 / 取消) never moves them.
+    private var keyRows: some View {
+        let height = Theme.Metrics.keyHeight
+        let spacing: CGFloat = 7
+        // The column width comes from the space offered, never from a measurement of the keys:
+        // sizing the keys from the dock's own measured width fed back into that width and spun
+        // SwiftUI in an endless layout loop until the watchdog killed the app (seen on the Duo).
+        return GeometryReader { proxy in
+            let column = max(0, (proxy.size.width - spacing * 6) / 7)
+            keyColumns(column: column, height: height, spacing: spacing)
         }
-        // One height for both rows: switching never changes the dock's size.
-        .frame(height: Theme.Metrics.keyHeightLarge)
+        .frame(height: height * 2 + spacing)
+    }
+
+    /// Seven columns of `column` each: ⏎ takes one, the microphone two.
+    private func keyColumns(column: CGFloat, height: CGFloat, spacing: CGFloat) -> some View {
+        let waiting = waitingState != nil
+        return HStack(spacing: spacing) {
+            VStack(spacing: spacing) {
+                HStack(spacing: spacing) {
+                    terminalKeys {
+                        if waiting {
+                            TerminalKey(sender: sender, label: "1", style: .hot, height: height) { "1" }
+                            TerminalKey(sender: sender, label: "2", style: .hot, height: height) { "2" }
+                        } else {
+                            TerminalKey(sender: sender, label: "esc") { "\u{1b}" }
+                            TerminalKey(sender: sender, label: "tab") { "\t" }
+                        }
+                    }
+                    micKey(height: height)
+                        .frame(width: column * 2 + spacing)
+                    terminalKeys {
+                        RepeatKey(sender: sender, label: "↑") { sender.arrowBytes("A") }
+                        RepeatKey(sender: sender, systemImage: "delete.left") { "\u{7f}" }
+                            .accessibilityLabel("删除")
+                    }
+                }
+                HStack(spacing: spacing) {
+                    terminalKeys {
+                        if waiting {
+                            TerminalKey(sender: sender, label: "3", style: .hot, height: height) { "3" }
+                        } else {
+                            TerminalKey(sender: sender, label: "^C", style: .destructive) { "\u{03}" }
+                        }
+                        TerminalKey(sender: sender, label: "^D") { "\u{04}" }
+                        TerminalKey(sender: sender, label: "/") { "/" }
+                        RepeatKey(sender: sender, label: "←") { sender.arrowBytes("D") }
+                        RepeatKey(sender: sender, label: "↓") { sender.arrowBytes("B") }
+                        RepeatKey(sender: sender, label: "→") { sender.arrowBytes("C") }
+                    }
+                }
+            }
+            terminalKeys {
+                TerminalKey(sender: sender, systemImage: "return", style: .enter, height: height * 2 + spacing) { "\r" }
+                    .accessibilityLabel("回车")
+            }
+            .frame(width: column)
+        }
+    }
+
+    /// A `Group`, not a stack: its modifiers land on each key, so every key keeps an equal share
+    /// of the row's width with the microphone key.
+    private func terminalKeys(@ViewBuilder _ keys: () -> some View) -> some View {
+        Group {
+            keys()
+        }
         .disabled(sender.sessionID == nil)
         .opacity(sender.sessionID == nil ? 0.45 : 1)
     }
 
-    // MARK: Composer
-
-    private var placeholder: String {
-        guard let name = agent?.agent, !name.isEmpty else { return "输入命令…" }
-        return "回复 \(name)…"
-    }
-
-    private var composer: some View {
-        HStack(spacing: 6) {
-            HStack(spacing: 6) {
-                Text(draft.isEmpty ? placeholder : draft)
-                    .font(Theme.Fonts.body)
-                    .foregroundStyle(draft.isEmpty ? Theme.mutedForeground : Theme.foreground)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: "mic.fill")
-                    .font(Theme.Fonts.label.weight(.semibold))
-                    .foregroundStyle(dictateHint > 0.5 ? Theme.primary : Theme.mutedForeground)
-                    .frame(width: Theme.Metrics.roundButton, height: Theme.Metrics.roundButton)
-                    .background(Theme.accentSurface, in: Circle())
-                    .accessibilityLabel("长按说话")
-            }
-            .contentShape(Rectangle())
-            .onTapGesture { onCompose() }
-            .gesture(composerGesture)
-            .onChange(of: pressing) { _, down in pressChanged(down) }
-            // 手指还按着时输入区被拆掉：GestureState 复位的 onChange 到不了这里，热着的预热
-            // session 会连着麦克风悬在后台，手动补一次抬手
-            .onDisappear { pressChanged(false) }
-            sendButton
-        }
-        .padding(.leading, 18)
-        .padding(.trailing, 8)
-        .frame(height: Theme.Metrics.composerHeight)
-        .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.Metrics.composerRadius))
-        .overlay {
-            RoundedRectangle(cornerRadius: Theme.Metrics.composerRadius)
-                .strokeBorder(Theme.border, lineWidth: 1)
-            RoundedRectangle(cornerRadius: Theme.Metrics.composerRadius)
-                .strokeBorder(Theme.primary, lineWidth: 1)
-                .opacity(dictateHint)
-        }
-        .scaleEffect(pressing ? 0.98 : 1)
-        .animation(.easeOut(duration: 0.08), value: pressing)
-    }
-
-    private var sendButton: some View {
-        let empty = draft.isEmpty
-        return Button {
-            // A long press already sent the text without Enter.
-            if sendLongPressed {
-                sendLongPressed = false
-                return
-            }
-            onSend(true)
-        } label: {
-            Image(systemName: "arrow.up")
-                .font(Theme.Fonts.label.weight(.bold))
-                .foregroundStyle(empty ? Theme.subtleForeground : Theme.primaryForeground)
-                .frame(width: Theme.Metrics.roundButton, height: Theme.Metrics.roundButton)
-                .background(empty ? Theme.accentSurface : Theme.primary, in: Circle())
-        }
-        .buttonStyle(.plain)
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.5).onEnded { _ in
-                guard !draft.isEmpty else { return }
-                sendLongPressed = true
-                onSend(false)
-            }
-        )
-        .disabled(empty)
-        .accessibilityLabel("发送并回车")
-    }
-
-    /// 手指落下/离开（plan 069）：`pressing` 由 sequenced 手势的 .updating 驱动，是最早的按下
-    /// 信号（早于 0.28s 长按判定）——视觉预兆渐显，去抖后请求预热采音；抬手时若长按未判定通过
-    /// 则请求拆掉（宿主按"蒙层是否已显示"自判，与 onEnded 的先后无关）。
-    private func pressChanged(_ down: Bool) {
-        withAnimation(down ? .easeIn(duration: 0.3) : .easeOut(duration: 0.12)) {
-            dictateHint = down ? 1 : 0
-        }
-        prewarmTask?.cancel()
-        prewarmTask = nil
-        guard down else {
-            onDictateAbort()
-            return
-        }
-        prewarmTask = Task {
-            // sleep 被取消时 try? 会立刻返回，必须再查一次 isCancelled
-            try? await Task.sleep(for: Self.prewarmDelay)
-            guard !Task.isCancelled else { return }
-            onDictatePrewarm()
-        }
-    }
-
-    /// 长按对讲手势（plan 066 复议）：不自造长按判定——LongPressGesture（0.28s，2026-08-01 用户
-    /// 实测定案）sequenced DragGesture 是 Apple 官方"长按后拖动"组合，判定时长/移动容差/与点按的
-    /// 消歧全交系统；判定通过瞬间给触觉，随后 drag 把手指位置（.global，与蒙层命中判定同一坐标
-    /// 空间）持续外传。短按由 .onTapGesture 独立消歧。
-    private var composerGesture: some Gesture {
-        LongPressGesture(minimumDuration: 0.28)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
-            .updating($pressing) { _, state, _ in
-                state = true
-            }
-            .onChanged { value in
-                guard case .second(true, let drag) = value else { return }
-                if !dictateActive {
-                    dictateActive = true
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    onDictateBegin()
+    /// Hold to talk (the dictation overlay covers the page; slide onto 发送 / 取消 or lift for
+    /// the confirm state). A tap only answers with a light haptic: talking needs the hold.
+    /// Tap: type (the compose layer with the system keyboard). Hold: talk.
+    private func micKey(height: CGFloat) -> some View {
+        KeyCap(height: height)
+            .overlay {
+                HStack(spacing: 10) {
+                    Image(systemName: "keyboard")
+                    Rectangle()
+                        .fill(Theme.border)
+                        .frame(width: 1, height: 16)
+                    Image(systemName: "mic.fill")
                 }
-                if let drag { onDictateMove(drag.location) }
+                .font(Theme.Fonts.key)
+                .foregroundStyle(Theme.foreground)
             }
-            .onEnded { _ in
-                guard dictateActive else { return }
-                dictateActive = false
-                onDictateEnd()
-            }
+            .onTapGesture { onCompose() }
+            .modifier(HoldToTalk(
+                onPrewarm: onDictatePrewarm,
+                onBegin: onDictateBegin,
+                onMove: onDictateMove,
+                onEnd: onDictateEnd,
+                onAbort: onDictateAbort
+            ))
+            .accessibilityElement()
+            .accessibilityLabel("输入")
+            .accessibilityHint("轻点打字，按住说话")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { onCompose() }
     }
 }
 
-// MARK: - The full keypad
+// MARK: - The extra keys
 
-/// The old control pad as a panel (mockup O6): a sheet that can stay open while keys are pressed,
-/// or inline below the composer in the laptop pose. Every key sends what the old pad sent; paste
-/// and uploads keep plan 071's behaviour (raw image bytes, HEIC → JPEG, 30 MB cap, 60 s timeout).
+/// The keys the two quick rows leave out (user's call, 2026-11-08: pulling the dock up shows only
+/// what is not already on screen), on the same seven columns:
 ///
-///     esc  1   2   3   4   ⌫
-///     tab  q   ^D  ^C  ^U  ^L
-///     /    :   ~   ↑   |   ⏎
-///     ^R   ^Z  ←   ↓   →   ⏎
-struct TerminalKeypad: View {
+///     1   2   3   4   q   :   ~
+///     ⇧⇥  ^R  ^U  ^L  ^Z  |   ^W
+///
+/// Pulled out below the quick rows, inline in the laptop pose, or as a sheet in a short window.
+/// 粘贴, 相册 and 文件 live on the toolbar (粘贴 and 附件).
+struct TerminalExtraKeys: View {
     let client: CofluxClient
     let task: Coflux_V1_Task?
-    /// Present in the sheet: a header with a close button.
-    var onClose: (() -> Void)?
-
-    @State private var showingAttachMenu = false
-    @State private var showingPhotoPicker = false
-    @State private var showingFilePicker = false
 
     private var sender: TerminalKeySender {
         TerminalKeySender(client: client, task: task)
     }
 
-    private let spacing: CGFloat = 8
-    private let height = Theme.Metrics.keyHeightLarge
-
     var body: some View {
-        VStack(spacing: 12) {
-            if let onClose {
-                HStack {
-                    Text("按键")
-                        .font(Theme.Fonts.rowTitle)
-                    Spacer()
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(Theme.Fonts.label.weight(.semibold))
-                            .foregroundStyle(Theme.mutedForeground)
-                            .frame(width: Theme.Metrics.roundButton, height: Theme.Metrics.roundButton)
-                            .background(Theme.accentSurface, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("关闭按键")
+        VStack(spacing: 7) {
+            HStack(spacing: 7) {
+                ForEach(["1", "2", "3", "4", "q", ":", "~"], id: \.self) { key in
+                    TerminalKey(sender: sender, label: key) { key }
                 }
             }
-            VStack(spacing: spacing) {
-                HStack(spacing: spacing) {
-                    key("esc", "\u{1b}")
-                    ForEach(["1", "2", "3", "4"], id: \.self) { key($0, $0) }
-                    RepeatKey(sender: sender, systemImage: "delete.left", height: height) { "\u{7f}" }
-                }
-                HStack(spacing: spacing) {
-                    key("tab", "\t")
-                    key("q", "q")
-                    key("^D", "\u{04}")
-                    key("^C", "\u{03}", style: .destructive)
-                    key("^U", "\u{15}")
-                    key("^L", "\u{0c}")
-                }
-                // Six equal columns; the last is the tall ⏎ spanning both rows.
-                HStack(spacing: spacing) {
-                    column { key("/", "/") } bottom: { key("^R", "\u{12}") }
-                    column { key(":", ":") } bottom: { key("^Z", "\u{1a}") }
-                    column { key("~", "~") } bottom: {
-                        RepeatKey(sender: sender, label: "←", height: height) { sender.arrowBytes("D") }
-                    }
-                    column {
-                        RepeatKey(sender: sender, label: "↑", height: height) { sender.arrowBytes("A") }
-                    } bottom: {
-                        RepeatKey(sender: sender, label: "↓", height: height) { sender.arrowBytes("B") }
-                    }
-                    column { key("|", "|") } bottom: {
-                        RepeatKey(sender: sender, label: "→", height: height) { sender.arrowBytes("C") }
-                    }
-                    TerminalKey(sender: sender, systemImage: "return", style: .enter, height: height * 2 + spacing) { "\r" }
-                        .accessibilityLabel("回车")
-                }
-            }
-            .disabled(sender.sessionID == nil)
-            .opacity(sender.sessionID == nil ? 0.45 : 1)
-            HStack(spacing: 10) {
-                wideButton("粘贴", systemImage: "doc.on.clipboard") { sender.paste() }
-                    .accessibilityLabel("粘贴到终端")
-                wideButton("相册 / 文件", systemImage: "paperclip") { showingAttachMenu = true }
-                    .accessibilityLabel("上传文件到终端")
-                    .confirmationDialog("上传到终端", isPresented: $showingAttachMenu, titleVisibility: .visible) {
-                        Button("相册") { showingPhotoPicker = true }
-                        Button("文件") { showingFilePicker = true }
-                        Button("取消", role: .cancel) {}
-                    }
-            }
-            .disabled(sender.sessionID == nil || sender.uploading)
-            .opacity(sender.sessionID == nil || sender.uploading ? 0.5 : 1)
-        }
-        // 两个 picker 的 sheet 挂在根上：菜单收起与 sheet 呈现同锚点会撞呈现时序
-        .sheet(isPresented: $showingPhotoPicker) {
-            PhotoPicker(isPresented: $showingPhotoPicker) { data, typeIdentifier in
-                sender.uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "photo")
+            HStack(spacing: 7) {
+                TerminalKey(sender: sender, label: "⇧⇥") { "\u{1b}[Z" }
+                    .accessibilityLabel("Shift Tab")
+                TerminalKey(sender: sender, label: "^R") { "\u{12}" }
+                TerminalKey(sender: sender, label: "^U") { "\u{15}" }
+                TerminalKey(sender: sender, label: "^L") { "\u{0c}" }
+                TerminalKey(sender: sender, label: "^Z") { "\u{1a}" }
+                TerminalKey(sender: sender, label: "|") { "|" }
+                TerminalKey(sender: sender, label: "^W") { "\u{17}" }
             }
         }
-        .sheet(isPresented: $showingFilePicker) {
-            FilePicker(isPresented: $showingFilePicker) { url in
-                sender.uploadFile(url: url)
-            }
-        }
-    }
-
-    private func key(_ label: String, _ bytes: String, style: KeyStyle = .normal) -> some View {
-        TerminalKey(sender: sender, label: label, style: style, height: height) { bytes }
-    }
-
-    private func column(
-        @ViewBuilder top: () -> some View,
-        @ViewBuilder bottom: () -> some View
-    ) -> some View {
-        VStack(spacing: spacing) {
-            top()
-            bottom()
-        }
-    }
-
-    private func wideButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .font(Theme.Fonts.label.weight(.semibold))
-                .foregroundStyle(Theme.foreground)
-                .frame(maxWidth: .infinity)
-                .frame(height: 44)
-                .background(Theme.accentSurface, in: Capsule())
-        }
-        .buttonStyle(KeyPressStyle())
+        .disabled(sender.sessionID == nil)
+        .opacity(sender.sessionID == nil ? 0.45 : 1)
     }
 }
 
@@ -895,18 +822,18 @@ struct VariableBlurView: UIViewRepresentable {
 }
 
 /// 成文层（plan 053 → Duo redesign, mockup O4）：the composer card expanded over the frozen
-/// terminal, riding on the system keyboard (fullScreenCover with a clear background: the terminal
+/// terminal, riding on the system keyboard (an overlay over the keyboard-immune page: the terminal
 /// and the dock underneath neither move nor resize while the keyboard is up, D13).
-/// Send = text + Enter in one write; a long press on send writes the text without Enter
-/// (plan D10). When the terminal is not ready nothing is sent: the draft and the layer stay, with
-/// the hint "终端未运行". 点卡片外任意处取消（草稿保留）。
+/// Send writes the text only — the user presses Enter themselves (2026-11-08, reverting plan D10's
+/// text + Enter). When the terminal is not ready nothing is sent: the draft and the layer stay,
+/// with the hint "终端未运行". 点卡片外任意处取消（草稿保留）。
 struct TerminalComposeOverlay: View {
     @Binding var draft: String
     /// The active terminal is running and has a session.
     let ready: Bool
     let placeholder: String
-    /// Sends the draft; returns whether it was sent.
-    let onSend: (_ withEnter: Bool) -> Bool
+    /// Sends the draft (text only, no Enter); returns whether it was sent.
+    let onSend: () -> Bool
     /// 相册 shortcut: the picked image is uploaded to the terminal.
     let onPhoto: (Data, String?) -> Void
     let onDismiss: () -> Void
@@ -915,7 +842,19 @@ struct TerminalComposeOverlay: View {
     @State private var appeared = false
     @State private var notReadyHint = false
     @State private var showingPhotoPicker = false
-    @State private var sendLongPressed = false
+    /// How far the system keyboard reaches up into this layer.
+    @State private var keyboardOverlap: CGFloat = 0
+    /// The layer's bottom edge in screen coordinates.
+    @State private var layerBottom: CGFloat = 0
+
+    /// Follows the keyboard with its own animation curve and duration.
+    private func keyboardChanged(_ note: Notification, hiding: Bool = false) {
+        let info = note.userInfo ?? [:]
+        let end = (info[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect) ?? .zero
+        let duration = (info[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+        let overlap = hiding ? 0 : max(0, layerBottom - end.minY)
+        withAnimation(.easeOut(duration: duration)) { keyboardOverlap = overlap }
+    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -947,9 +886,11 @@ struct TerminalComposeOverlay: View {
                     .disabled(!ready)
                     .accessibilityLabel("从相册上传到终端")
                     Spacer(minLength: 8)
-                    Text(notReadyHint ? "终端未运行" : "发送并回车")
-                        .font(Theme.Fonts.meta)
-                        .foregroundStyle(notReadyHint ? Theme.warning : Theme.subtleForeground)
+                    if notReadyHint {
+                        Text("终端未运行")
+                            .font(Theme.Fonts.meta)
+                            .foregroundStyle(Theme.warning)
+                    }
                     sendButton
                 }
             }
@@ -963,8 +904,18 @@ struct TerminalComposeOverlay: View {
                     .strokeBorder(Theme.border, lineWidth: 1)
             }
             .padding(.horizontal, 12)
-            .padding(.bottom, 8)
+            .padding(.bottom, 8 + keyboardOverlap)
             .opacity(appeared ? 1 : 0)
+        }
+        // The page underneath ignores the keyboard, and so does this layer: it lifts its card by
+        // the keyboard's measured overlap itself, so nothing else is ever laid out again.
+        .ignoresSafeArea(.keyboard)
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { layerBottom = $0 }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+            keyboardChanged(note)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { note in
+            keyboardChanged(note, hiding: true)
         }
         .onAppear {
             withAnimation(.easeOut(duration: 0.18)) { appeared = true }
@@ -980,12 +931,7 @@ struct TerminalComposeOverlay: View {
     private var sendButton: some View {
         let empty = draft.isEmpty
         return Button {
-            // A long press already handled this touch.
-            if sendLongPressed {
-                sendLongPressed = false
-                return
-            }
-            send(withEnter: true)
+            send()
         } label: {
             Image(systemName: "arrow.up")
                 .font(Theme.Fonts.label.weight(.bold))
@@ -994,25 +940,17 @@ struct TerminalComposeOverlay: View {
                 .background(empty ? Theme.accentSurface : Theme.primary, in: Circle())
         }
         .buttonStyle(.plain)
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.5).onEnded { _ in
-                guard !draft.isEmpty else { return }
-                sendLongPressed = true
-                send(withEnter: false)
-            }
-        )
-        .accessibilityLabel("发送并回车")
-        .accessibilityAction(named: "仅填入，不回车") { send(withEnter: false) }
+        .accessibilityLabel("发送")
     }
 
-    private func send(withEnter: Bool) {
+    private func send() {
         guard !draft.isEmpty else { return }
         guard ready else {
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
             notReadyHint = true
             return
         }
-        if onSend(withEnter) {
+        if onSend() {
             fadeOutAndDismiss()
         }
     }

@@ -86,6 +86,10 @@ struct TerminalHostView: UIViewRepresentable {
         // 点状态栏回顶是 UIScrollView 系统默认，终端场景纯误触源（plan 056）；
         // 反向的滚到底走右下浮键
         view.scrollsToTop = false
+        // No rubber band: a flick that reaches the bottom switches SwiftTerm back to following
+        // the output, and it then pins the offset to the bottom while the bounce animation pulls
+        // the other way — the view knocks against the bottom several times (seen on the Duo).
+        view.bounces = false
         view.terminalDelegate = context.coordinator
         // 字体/光标/配色对齐 web 终端（bar 光标；iOS 的 monospacedSystemFont
         // 即 SF Mono，与 web 首选字体同族）。字号 13 而非 web 的 12：
@@ -112,7 +116,13 @@ struct TerminalHostView: UIViewRepresentable {
             taskID: taskID,
             token: coordinator.registryToken,
             applicationCursor: { [weak uiView] in uiView?.getTerminal().applicationCursor ?? false },
-            scrollToBottom: { [weak uiView] in uiView?.scroll(toPosition: 1.0) }
+            scrollToBottom: { [weak uiView] in
+                guard let uiView else { return }
+                // A flick may still be decelerating: stop it first, or the momentum carries on
+                // after the jump and the view bounces against the bottom a few times.
+                uiView.setContentOffset(uiView.contentOffset, animated: false)
+                uiView.scroll(toPosition: 1.0)
+            }
         )
     }
 
@@ -204,6 +214,7 @@ struct TerminalHostView: UIViewRepresentable {
             guard newCols > 0, newRows > 0 else { return }
             let cols = UInt32(newCols)
             let rows = UInt32(newRows)
+            print("COFLUX-DEBUG sizeChanged \(cols)x\(rows) frame=\(source.frame.size) inset=\(source.adjustedContentInset)")
             onSizeChanged?(cols, rows)
             guard let sessionID = boundSessionID, isOwner() else { return }
             // 尾沿去抖：布局连续变化（窗口缩放、折叠姿态切换、状态横幅出现）只把最终
