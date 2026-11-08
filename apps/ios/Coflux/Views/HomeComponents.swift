@@ -304,14 +304,21 @@ func onlineDevicesSubtitle(_ client: CofluxClient) -> String {
 /// The account menu of home and the sidebar.
 struct AccountMenu: View {
     let client: CofluxClient
+    @State private var showingSpeechSettings = false
 
     var body: some View {
         Menu {
+            Button("语音识别…", systemImage: "waveform") {
+                showingSpeechSettings = true
+            }
             Button("退出登录", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
                 client.logout()
             }
         } label: {
             Label("账号", systemImage: "person.crop.circle")
+        }
+        .sheet(isPresented: $showingSpeechSettings) {
+            SpeechSettingsSheet(client: client)
         }
     }
 }

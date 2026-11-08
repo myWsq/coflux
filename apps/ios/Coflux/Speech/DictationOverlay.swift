@@ -84,7 +84,7 @@ enum DictationStage: Equatable {
 ///   DragGesture 走）；
 /// - 确认态：原地松手且有字，气泡定格且可点（进成文层编辑），取消 / 编辑 / 发送三颗实体按钮，
 ///   底座保留作锚——转写文字落终端前必经这一关（coflux 是纯转文字，识别错误没有兜底）；
-/// - 错误/权限留驻：权限被拒 / 无字可看的失败，点任意处关闭（064 语义）。
+/// - 错误/权限留驻：权限被拒 / 未配置 Key / 无字可看的失败，点任意处关闭（064 语义）。
 struct DictationOverlay: View {
     @ObservedObject var session: DictationSession
     /// 手指当前命中的按钮：驱动圆的高亮与提示语（松手分发用同一个值）
@@ -96,6 +96,8 @@ struct DictationOverlay: View {
     let onSend: () -> Void
     /// 确认态点草稿文字或「编辑」：调用方把文字落 draft 并打开成文层。
     let onEdit: () -> Void
+    /// 未配置 Key 时的「去设置」：调用方关掉浮层并打开语音识别设置。
+    let onOpenSettings: () -> Void
 
     private var text: String {
         session.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -318,14 +320,13 @@ struct DictationOverlay: View {
     @ViewBuilder
     private var engineBadge: some View {
         switch session.phase {
-        case .active(.doubao):
-            badge("云端识别", tint: Theme.success)
-        case .active(.apple):
-            badge("本机识别", tint: Theme.primary)
+        case .active(let withContext):
+            badge(withContext ? "豆包 · 带语境" : "豆包", tint: Theme.success)
         case .connecting:
             badge("连接中…", tint: Theme.mutedForeground)
-        case .modelDownloading:
-            badge("准备本机语音模型…", tint: Theme.mutedForeground)
+        case .unavailable:
+            // At rest the footer explains it; while the finger is down, say it up front.
+            if resting { EmptyView() } else { badge("语音输入不可用", tint: Theme.warning) }
         case .permissionDenied, .failed:
             EmptyView()
         }
@@ -340,21 +341,28 @@ struct DictationOverlay: View {
             .background(Capsule().fill(tint.opacity(0.15)))
     }
 
-    /// 留驻态（没有底座与按钮）：权限引导、模型下载、无字失败。
+    /// 留驻态（没有底座与按钮）：权限引导、Key 未配置、无字失败。
     @ViewBuilder
     private var restingFooter: some View {
         switch session.phase {
-        case .modelDownloading(let progress):
+        case .unavailable(.notConfigured):
             VStack(spacing: 8) {
-                ProgressView(value: progress)
-                    .frame(width: 160)
-                Text("首次使用本机语音需下载模型")
-                    .font(Theme.Fonts.meta)
-                    .foregroundStyle(Theme.mutedForeground)
+                Text("语音输入不可用：未配置豆包 API Key")
+                    .font(Theme.Fonts.label)
+                    .foregroundStyle(Theme.foreground)
+                    .multilineTextAlignment(.center)
+                Button("去设置", action: onOpenSettings)
+                    .font(Theme.Fonts.label.weight(.semibold))
+                    .foregroundStyle(Theme.primary)
             }
+        case .unavailable(.outdatedServer):
+            Text("语音输入不可用：服务器版本过旧，不支持语音识别 Key")
+                .font(Theme.Fonts.label)
+                .foregroundStyle(Theme.foreground)
+                .multilineTextAlignment(.center)
         case .permissionDenied:
             VStack(spacing: 8) {
-                Text("需要麦克风与语音识别权限")
+                Text("需要麦克风权限")
                     .font(Theme.Fonts.label)
                     .foregroundStyle(Theme.foreground)
                 Button("前往设置") {
@@ -377,7 +385,7 @@ struct DictationOverlay: View {
 }
 
 /// A decorative waveform: it moves while listening and rests once the finger is off. The speech
-/// engines expose no level, so it signals "listening", not loudness.
+/// engine exposes no level, so it signals "listening", not loudness.
 private struct Waveform: View {
     let active: Bool
     private let bars = 15
