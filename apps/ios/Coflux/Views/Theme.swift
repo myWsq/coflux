@@ -14,6 +14,9 @@ enum Theme {
     static let accentSurface = Color(rgb: 0x262624)   // --accent
     static let input = Color(rgb: 0x2A2A28)           // --input 输入类填充
     static let border = Color(rgb: 0x242422)          // --border 分隔线
+    /// Raised card surface of the Duo redesign (home cards, project groups, composer, sheets):
+    /// one step above `surface`, the desktop's popover/muted layer.
+    static let card = Color(rgb: 0x1B1B1A)            // --popover / --muted
 
     // 文字
     static let foreground = Color(rgb: 0xE6E6E3)      // --foreground 主文字
@@ -29,6 +32,9 @@ enum Theme {
     static let success = Color(rgb: 0x4FAE6E)         // --success
     static let warning = Color(rgb: 0xC9A227)         // --warning（web 侧 main 分支同色）
     static let destructive = Color(rgb: 0xE05C6A)     // --destructive
+    /// Agent turn finished ("说完了"): the blue of the desktop terminal theme (ANSI blue in
+    /// terminal-pane.tsx, the same value as `webAnsiPalette[4]` in TerminalHostView).
+    static let info = Color(rgb: 0x6B9BD1)
 
     // 终端（SwiftTerm 用 UIColor；真相源 = web terminal-pane.tsx 的 xterm theme）
     static let terminalUIColor = UIColor(red: 0x0A / 255, green: 0x0A / 255, blue: 0x0A / 255, alpha: 1)
@@ -50,6 +56,34 @@ enum Theme {
         static let meta = Font.caption
         /// 页面副标题（登录页 slogan）
         static let subtitle = Font.subheadline
+        /// Section title on home and devices (需要你 / 项目), mockup 19 pt
+        static let sectionTitle = Font.title3.weight(.bold)
+        /// Card and row title, mockup 15 pt
+        static let rowTitle = Font.subheadline.weight(.semibold)
+        /// Card body text (an agent's message), mockup 15 pt
+        static let cardBody = Font.subheadline
+        /// Terminal key caps, mockup 14 pt mono
+        static let key = Font.system(.subheadline, design: .monospaced).weight(.semibold)
+        /// Enlarged option keys (agent waiting), mockup 17 pt mono
+        static let keyLarge = Font.system(.body, design: .monospaced).weight(.semibold)
+        /// Dictation transcript, mockup 18 pt
+        static let transcript = Font.title3
+    }
+
+    /// Shapes and sizes of the Duo redesign (mockup "布局规格").
+    enum Metrics {
+        /// Cards: home cards, project groups, device cards
+        static let cardRadius: CGFloat = 24
+        /// Key caps: 40 pt high, 46 pt for the enlarged option keys and the keypad
+        static let keyRadius: CGFloat = 13
+        static let keyHeight: CGFloat = 40
+        static let keyHeightLarge: CGFloat = 46
+        /// The one-line composer card; it expands to a multi-line card while typing
+        static let composerHeight: CGFloat = 56
+        static let composerRadius: CGFloat = 28
+        static let expandedComposerRadius: CGFloat = 26
+        /// Round buttons inside cards (microphone, send, close)
+        static let roundButton: CGFloat = 38
     }
 }
 

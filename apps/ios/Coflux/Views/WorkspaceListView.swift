@@ -2,181 +2,329 @@ import CofluxClientCore
 import CofluxProtocol
 import SwiftUI
 
-/// 项目分组的工作区列表 + 设备在线/任务状态。断线不清空内容：
-/// 保留最后快照渲染，顶部横幅提示（store.ts:517-519 同语义）。
-/// 导航 chrome 走系统 NavigationStack（大标题 + toolbar），Liquid Glass 由系统提供；
-/// 列表保持高行距 plain 风格、灰色常规体分组标题、行尾 chevron。
+/// 首页（compact and tall layouts, plan D4/D6/D7): what waits for the user first, then the
+/// projects. "需要你" is a horizontally paged row of cards — one per waiting item — and is hidden
+/// when nothing waits; "项目" keeps the desktop sidebar's hierarchy (project → workspaces) with the
+/// agent state on each row. 断线不清空内容：保留最后快照渲染，顶部横幅提示。
+/// The page lives in the 首页 tab's NavigationStack; its chrome is the system large title and
+/// toolbar. Opening a card or a row goes through `SceneNavigation.show`.
 struct WorkspaceListView: View {
     let client: CofluxClient
+    @Environment(SceneNavigation.self) private var navigation
+    @State private var waitingPage: String?
+    @State private var showingNewTerminal = false
+    @State private var secretSheet: SecretSheetTarget?
+
+    var body: some View {
+        let items = client.waitingItems
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if !items.isEmpty {
+                    waitingSection(items)
+                }
+                if !client.visibleProjects.isEmpty {
+                    projectsSection
+                }
+            }
+            .padding(.top, 4)
+            .padding(.bottom, 24)
+        }
+        .scrollIndicators(.hidden)
+        .background(Theme.background)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            ConnectionBanner(client: client)
+        }
+        .overlay {
+            if client.visibleProjects.isEmpty, items.isEmpty {
+                ContentUnavailableView(
+                    "暂无项目",
+                    systemImage: "tray",
+                    description: Text("在桌面端导入 Git 仓库后会显示在这里")
+                )
+            }
+        }
+        .navigationTitle("coflux")
+        .navigationSubtitle(onlineDevicesSubtitle(client))
+        .navigationBarTitleDisplayMode(.large)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                AccountMenu(client: client)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showingNewTerminal = true
+                } label: {
+                    Label("新建终端", systemImage: "plus")
+                }
+            }
+        }
+        .sheet(isPresented: $showingNewTerminal) {
+            NewTerminalPicker(client: client)
+        }
+        .sheet(item: $secretSheet) { target in
+            SecretRequestSheet(client: client, taskID: target.taskID)
+        }
+    }
+
+    // MARK: - 需要你
+
+    private func waitingSection(_ items: [WaitingItem]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("待处理")
+                    .font(Theme.Fonts.sectionTitle)
+                Text("\(items.count)")
+                    .font(Theme.Fonts.meta.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(Theme.warning)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Theme.warning.opacity(0.16), in: Capsule())
+            }
+            .padding(.horizontal, 20)
+            ScrollView(.horizontal) {
+                LazyHStack(alignment: .top, spacing: 12) {
+                    ForEach(items) { item in
+                        waitingCard(item)
+                            .containerRelativeFrame(.horizontal)
+                            .id(item.id)
+                    }
+                }
+                .scrollTargetLayout()
+            }
+            .contentMargins(.horizontal, 16, for: .scrollContent)
+            .scrollTargetBehavior(.viewAligned)
+            .scrollPosition(id: $waitingPage)
+            .scrollIndicators(.hidden)
+            if items.count > 1 {
+                pageDots(items)
+            }
+        }
+        // A horizontal scroll view reaches into the safe area along its axis: on the outer
+        // display the next card showed through the system rail. Clip to the content column.
+        .clipped()
+    }
+
+    private func waitingCard(_ item: WaitingItem) -> some View {
+        let text = WaitingItemText(item, client: client)
+        let subtitle = [text.context, relativeTimeLabel(item.time)]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+        // The whole card is the tap target: it opens the terminal, or the input sheet for a
+        // secret request.
+        return Button {
+            open(item)
+        } label: {
+            waitingCardBody(text, subtitle: subtitle)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(text.isSecret ? "提供输入" : "打开终端")
+    }
+
+    private func waitingCardBody(_ text: WaitingItemText, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                AgentAvatar(mark: text.mark, clawd: .raise)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(text.title)
+                        .font(Theme.Fonts.rowTitle)
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(Theme.Fonts.label)
+                        .foregroundStyle(Theme.mutedForeground)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Text(text.pill)
+                    .font(Theme.Fonts.meta.weight(.semibold))
+                    .foregroundStyle(Theme.warning)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Theme.warning.opacity(0.14), in: Capsule())
+            }
+            Text(text.message)
+                .font(Theme.Fonts.cardBody)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardBackground(radius: 26)
+        .contentShape(.rect(cornerRadius: 26))
+    }
+
+    private func pageDots(_ items: [WaitingItem]) -> some View {
+        let current = waitingPage ?? items.first?.id
+        return HStack(spacing: 5) {
+            ForEach(items) { item in
+                Capsule()
+                    .fill(item.id == current ? Theme.foreground : Theme.subtleForeground)
+                    .frame(width: item.id == current ? 16 : 6, height: 6)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .animation(.smooth(duration: 0.2), value: current)
+        .accessibilityHidden(true)
+    }
+
+    private func open(_ item: WaitingItem) {
+        if case .secret = item.kind {
+            secretSheet = SecretSheetTarget(taskID: item.taskID)
+        } else {
+            navigation.show(workspaceID: item.workspaceID, taskID: item.taskID)
+        }
+    }
+
+    // MARK: - 项目
+
+    private var projectsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("项目")
+                .font(Theme.Fonts.sectionTitle)
+                .padding(.horizontal, 20)
+                .padding(.top, 6)
+            ForEach(client.visibleProjects, id: \.id) { project in
+                projectCard(project)
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private func projectCard(_ project: Coflux_V1_Project) -> some View {
+        let members = client.workspaces.filter { $0.projectID == project.id }
+        let online = client.daemons.first { $0.daemonID == project.daemonID }?.online ?? false
+        return VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image("folder")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 15, height: 15)
+                    .foregroundStyle(Theme.mutedForeground)
+                Text(project.name)
+                    .font(Theme.Fonts.rowTitle)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Circle()
+                    .fill(online ? Theme.success : Theme.subtleForeground)
+                    .frame(width: 7, height: 7)
+                Text(client.deviceName(project.daemonID))
+                    .font(Theme.Fonts.label)
+                    .foregroundStyle(Theme.mutedForeground)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+            ForEach(members, id: \.id) { workspace in
+                Rectangle()
+                    .fill(Theme.border)
+                    .frame(height: 1)
+                workspaceRow(workspace)
+            }
+        }
+        .padding(.vertical, 2)
+        .cardBackground()
+    }
+
+    private func workspaceRow(_ workspace: Coflux_V1_Workspace) -> some View {
+        let activity = WorkspaceActivity(workspace, client: client)
+        return Button {
+            navigation.show(workspaceID: workspace.id, taskID: activity.taskID)
+        } label: {
+            HStack(spacing: 12) {
+                WorkspaceRowIcon(workspace: workspace, activity: activity)
+                    .frame(width: 30)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(workspace.displayTitle)
+                            .font(Theme.Fonts.rowTitle)
+                            .foregroundStyle(Theme.foreground)
+                            .lineLimit(1)
+                        if let label = workspace.customLabel {
+                            Text(label)
+                                .font(Theme.Fonts.meta)
+                                .foregroundStyle(Theme.subtleForeground)
+                                .lineLimit(1)
+                        }
+                    }
+                    Text(activity.subtitle)
+                        .font(Theme.Fonts.label)
+                        .foregroundStyle(activity.tone.color)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                DiffStat(additions: workspace.additions, deletions: workspace.deletions)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        // Long press: copy the handle (plan 20260914), delete a non-main workspace
+        .workspaceContextMenu(client: client, workspace: workspace)
+    }
+}
+
+/// Which terminal's secret requests the sheet shows.
+struct SecretSheetTarget: Identifiable, Hashable {
+    let taskID: String
+    var id: String { taskID }
+}
+
+/// 新建终端 from home: a picker of workspaces grouped by project. Choosing one creates a terminal
+/// there ("终端 N", as the terminal page names them); the window's shell opens and starts it as
+/// soon as it appears in the snapshot (`SceneNavigation.pendingTerminal`).
+struct NewTerminalPicker: View {
+    let client: CofluxClient
+    @Environment(SceneNavigation.self) private var navigation
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
                 ForEach(client.visibleProjects, id: \.id) { project in
-                    Section {
-                        let members = client.workspaces.filter { $0.projectID == project.id }
-                        ForEach(members, id: \.id) { workspace in
-                            NavigationLink {
-                                WorkspaceDetailView(client: client, workspace: workspace)
-                            } label: {
-                                workspaceRow(workspace)
+                    let members = client.workspaces.filter { $0.projectID == project.id }
+                    if !members.isEmpty {
+                        Section(project.name) {
+                            ForEach(members, id: \.id) { workspace in
+                                Button {
+                                    create(in: workspace)
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Text(workspace.displayTitle)
+                                            .font(Theme.Fonts.body)
+                                            .foregroundStyle(Theme.foreground)
+                                            .lineLimit(1)
+                                        if let label = workspace.customLabel {
+                                            Text(label)
+                                                .font(Theme.Fonts.label)
+                                                .foregroundStyle(Theme.mutedForeground)
+                                                .lineLimit(1)
+                                        }
+                                    }
+                                }
+                                .listRowBackground(Theme.card)
                             }
-                            // 长按复制工作区标识（plan 20260914）
-                            .copyHandleContextMenu(.workspace, id: workspace.id)
-                            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-                            .listRowBackground(Theme.background)
-                            .listRowSeparatorTint(Theme.border)
                         }
-                    } header: {
-                        projectHeader(project)
                     }
                 }
             }
-            .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .background(Theme.background)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if client.status != .connected {
-                    offlineBanner
-                }
-            }
-            .overlay {
-                if client.visibleProjects.isEmpty {
-                    ContentUnavailableView(
-                        "暂无项目",
-                        systemImage: "tray",
-                        description: Text("在桌面端导入 git 仓库后此处会出现")
-                    )
-                }
-            }
-            .navigationTitle("项目") // 与 web 侧栏对齐（sidebar.tsx:201）：列表主体是项目，工作区是项下成员
+            .navigationTitle("新建终端")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                // 设备面板入口（plan 077）：设备是账号级资源，与项目列表平级但不抢主位。
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        DevicesView(client: client)
-                    } label: {
-                        Image(systemName: "macbook.and.iphone")
-                    }
-                    .accessibilityLabel("设备")
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button("登出", role: .destructive) { client.logout() }
-                    } label: {
-                        Image(systemName: "person.fill")
-                    }
-                    .accessibilityLabel("账号")
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消", systemImage: "xmark") { dismiss() }
                 }
             }
         }
+        .presentationDetents([.medium, .large])
     }
 
-    private var offlineBanner: some View {
-        Label(
-            client.status == .connecting ? "连接中…" : "连接已断开，恢复后自动重连",
-            systemImage: client.status == .connecting ? "arrow.triangle.2.circlepath" : "wifi.slash"
-        )
-        .font(Theme.Fonts.label.weight(.medium))
-        .foregroundStyle(Theme.warning)
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .background(Theme.warning.opacity(0.12))
-    }
-
-    private func projectHeader(_ project: Coflux_V1_Project) -> some View {
-        let online = client.daemons.first { $0.daemonID == project.daemonID }?.online ?? false
-        return HStack(spacing: 8) {
-            Image("folder")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 15, height: 15)
-                .foregroundStyle(Theme.mutedForeground)
-            Text(project.name)
-                .font(Theme.Fonts.body)
-                .foregroundStyle(Theme.mutedForeground)
-                .textCase(nil)
-            Circle()
-                .fill(online ? Theme.success : Theme.subtleForeground)
-                .frame(width: 7, height: 7)
-        }
-        .padding(.vertical, 4)
-        .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 4, trailing: 20))
-    }
-
-    private func workspaceRow(_ workspace: Coflux_V1_Workspace) -> some View {
-        let running = client.tasks.filter { $0.workspaceID == workspace.id && $0.status == .running }.count
-        // 与 web 侧栏对齐（sidebar.tsx:325-331）：主标题=分支；自定义名只在行尾灰字
-        // （name≠branch 时才有；主工作区未起名默认「主工作区」）。目录工作区无分支回退 name
-        let title = workspace.branch.isEmpty ? workspace.name : workspace.branch
-        let customName: String? = if !workspace.name.isEmpty, workspace.name != workspace.branch {
-            workspace.name
-        } else if workspace.isMain {
-            "主工作区"
-        } else {
-            nil
-        }
-        // agent 经 `cofluxd progress` 播报的进度短评（plan 088）：副行灰字，随下一条覆盖
-        let progress = client.workspaceProgress(workspaceID: workspace.id)
-        // An agent waiting for a secret (plan 20260926-ios-secret-input) takes precedence over progress.
-        let secret = client.pendingSecretRequest(workspaceID: workspace.id)
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 14) {
-                // 与 web 侧栏同源：lucide GitBranch（asset 模板渲染），main 分支同 web 用 warning 色
-                Image("git-branch")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 18, height: 18)
-                    .foregroundStyle(workspace.isMain ? Theme.warning : Theme.mutedForeground)
-                    .frame(width: 24)
-                Text(title)
-                    .font(Theme.Fonts.body)
-                    .lineLimit(1)
-                Spacer()
-                if let customName {
-                    Text(customName)
-                        .font(Theme.Fonts.label)
-                        .foregroundStyle(Theme.mutedForeground)
-                        .lineLimit(1)
-                }
-                if workspace.additions != 0 || workspace.deletions != 0 {
-                    HStack(spacing: 4) {
-                        Text("+\(workspace.additions)")
-                            .foregroundStyle(Theme.success)
-                        Text("−\(workspace.deletions)")
-                            .foregroundStyle(Theme.destructive)
-                    }
-                    .font(Theme.Fonts.meta.monospacedDigit().weight(.medium))
-                }
-                if running > 0 {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(Theme.success)
-                            .frame(width: 6, height: 6)
-                        Text("\(running)")
-                            .font(Theme.Fonts.meta.monospacedDigit().weight(.semibold))
-                    }
-                    .foregroundStyle(Theme.success)
-                }
-            }
-            if let secret {
-                HStack(spacing: 4) {
-                    Image(systemName: "key.fill")
-                        .font(Theme.Fonts.meta)
-                    Text("等待输入：\(secret.name)")
-                        .font(Theme.Fonts.label.weight(.medium))
-                        .lineLimit(1)
-                }
-                .foregroundStyle(Theme.warning)
-                .padding(.leading, 38) // 对齐主标题起点（图标列 24 + 间距 14）
-            } else if let progress {
-                Text(progress)
-                    .font(Theme.Fonts.label)
-                    .foregroundStyle(Theme.mutedForeground)
-                    .lineLimit(1)
-                    .padding(.leading, 38) // 对齐主标题起点（图标列 24 + 间距 14）
-            }
-        }
-        .padding(.vertical, 12)
+    private func create(in workspace: Coflux_V1_Workspace) {
+        let known = Set(client.tasks.filter { $0.workspaceID == workspace.id }.map(\.id))
+        navigation.pendingTerminal = SceneNavigation.PendingTerminal(workspaceID: workspace.id, knownTaskIDs: known)
+        client.createTask(workspaceID: workspace.id, title: "终端 \(known.count + 1)")
+        dismiss()
     }
 }

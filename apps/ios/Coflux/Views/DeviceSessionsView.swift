@@ -54,7 +54,7 @@ struct DeviceSessionsView: View {
     var body: some View {
         Group {
             if let workspace {
-                // 任务台原样复用（tab 条 / 整页翻页 / 控制板 / 对讲全部照旧）。
+                // 终端页原样复用（翻页 / dock / 按键面板 / 对讲 / 窗口归属全部照旧）。
                 // .id 绑工作区：目录工作区被删后又新建时，结构位置不变会让
                 // 旧 deck 的 activeTaskID 等实例状态被复用到另一个工作区上。
                 // 标题由 deck 自己按「目录工作区用设备名」解析，本页不再设，
@@ -101,7 +101,7 @@ struct DeviceSessionsView: View {
         if let daemon {
             ContentUnavailableView {
                 Label {
-                    Text("在「\(deviceName)」上开一个终端")
+                    Text("在「\(deviceName)」上新建终端")
                 } icon: {
                     Image("square-terminal")
                         .resizable()
@@ -109,7 +109,7 @@ struct DeviceSessionsView: View {
                         .frame(width: 42, height: 42)
                 }
             } description: {
-                Text(daemon.online ? "终端会打开在这台设备的 HOME 目录" : "设备当前离线，上线后才能新建终端")
+                Text(daemon.online ? "终端将在该设备的主目录中打开" : "设备离线，上线后才能新建终端")
             } actions: {
                 Button {
                     createTerminal()
@@ -125,6 +125,7 @@ struct DeviceSessionsView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.primary)
+                .foregroundStyle(Theme.primaryForeground)
                 .disabled(!daemon.online || creating)
                 if let createError {
                     Text(createError)
@@ -164,7 +165,7 @@ struct DeviceSessionsView: View {
                 // FsListed 的失败是带内的：ok=false 或 path 缺失时继续发，
                 // 只会换来 server 的「终端目录路径为空」。
                 guard listed.ok, listed.hasPath, !listed.path.isEmpty else {
-                    let reason = listed.hasError && !listed.error.isEmpty ? listed.error : "无法解析设备 HOME 目录"
+                    let reason = listed.hasError && !listed.error.isEmpty ? listed.error : "无法获取设备的主目录"
                     failCreate(reason)
                     return
                 }

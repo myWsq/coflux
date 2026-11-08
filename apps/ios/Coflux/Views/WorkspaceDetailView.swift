@@ -1,81 +1,105 @@
 import CofluxClientCore
 import CofluxProtocol
 import SwiftUI
+import UIKit
 
-/// 工作区任务台（plan 049）：终端不设二级页——顶部横向 tab 条 + 整页 paged
-/// 滑动切换任务，结构对齐 mobile workspace-detail（进入即挂载全部任务页，
-/// 各自 attach 保活；返回列表整体卸载）。新建终端沿 mobile 语义：taskCreate
-/// 无请求-响应关联，记录发送前已知 id 集合，快照增量新出现的任务即自建、自动激活。
+/// The terminal page (plan 049 → Duo redesign, plan D3/D13/D16): the active terminal fills the
+/// content area down to the resting dock; every terminal of the workspace stays mounted in a
+/// horizontal pager (swipe to switch, each attached and kept alive; leaving the page unmounts
+/// them). A cluster of round avatars in the terminal's top-right corner switches between them
+/// (tap one, or swipe the pager; tap the active one for the list with names and states). The
+/// title names the active terminal (project · branch · device below); the toolbar carries 新建终端 and
+/// 更多, plus 附件 and 粘贴 on the rail's lower end — inside 更多 elsewhere. Status banners float
+/// over the terminal's bottom rows.
+///
+/// 新建终端沿 mobile 语义：taskCreate 无请求-响应关联，记录发送前已知 id 集合，快照增量新出现的
+/// 任务即自建、自动激活并启动。
 struct WorkspaceDetailView: View {
     let client: CofluxClient
     let workspace: Coflux_V1_Workspace
-    @Environment(\.dismiss) private var dismiss
-    @State private var activeTaskID: String?
+    /// The window's navigation: the active terminal lives there (per workspace), so a layout
+    /// switch that rebuilds this page lands on the same terminal, and cards / sidebar / list can
+    /// request one.
+    @Environment(SceneNavigation.self) private var navigation
+    /// Which window owns each terminal (plan D12): only owned terminals get a terminal view.
+    @Environment(TerminalOwnership.self) private var ownership
+    @Environment(\.shellLayout) private var layout
+    /// This mounted page's claims; released when SwiftUI tears the page down.
+    @State private var claims = TerminalClaimHolder()
     @State private var termCols: UInt32 = 80
     @State private var termRows: UInt32 = 24
     @State private var confirmingRemove = false
     @State private var knownTaskIDsBeforeCreate: Set<String>?
-    /// 控制板展开态按工作区持久化（plan 058 复议 2026-07-26 默认折叠定案）：
-    /// init 播种（onAppear 翻转会有可见跳变 + 一次多余 resize），变更时写回；
-    /// UserDefaults.bool 缺省 false 恰为默认展开，纯新工作区免三态判断
-    @State private var inputCollapsed: Bool
-    /// 无 resize 平移模型（plan 053）：终端容器尺寸恒定，被输入面板整体
-    /// "顶上去"（offset 平移 + 裁剪），行列数不变 → 零 SIGWINCH 零重排。
-    /// 位移量 = 面板实测高度（尺寸不受 transition 影响，量值稳定）；
-    /// 平滑感来自 offset 自身的动画插值（纯 transform，不触发布局）。
-    @State private var panelHeight: CGFloat = 0
-    /// 手动键盘追踪：页面对键盘免疫（最外层 ignoresSafeArea(.keyboard)），
-    /// 键盘弹起时手动把面板平移到"成文框骑在键盘顶上"的位置，
-    /// 控制板下半部分被键盘盖住（2026-07-26 用户定案，取代蒙层方案）
-    /// 成文层与系统键盘同层（fullScreenCover 透明底，无暗色蒙层）：
-    /// 底下的终端/控制板完全冻结不动（2026-07-26 用户最终定案——
-    /// 键盘骑乘/面板位移方案均已尝试并废弃，冻结基座手感最好）
+    /// 成文层叠在页面之上、随系统键盘升起：底下的终端与 dock 完全冻结不动
+    /// （2026-07-26 用户最终定案，冻结基座手感最好；打字时不触发 resize）
     @State private var composing = false
     @State private var draft = ""
     /// 长按对讲会话（plan 064）：非 nil = 已在采音；松手分发完清空。
-    /// 豆包优先、Apple 本地降级只在 session.start() 内部判定一次。
     @State private var dictationSession: DictationSession?
-    /// 蒙层可见性（plan 069）：与 session 生命周期解耦——预热期 session 已在
-    /// 采音而蒙层还不显示。两者绑死（此前的 `if let dictationSession`）会让
-    /// 按下占位条就闪一次蒙层，破坏 plan 066 定下的点击/长按系统消歧。
+    /// 蒙层可见性（plan 069）：与 session 生命周期解耦——预热期 session 已在采音而蒙层还不显示。
     @State private var dictationOverlayVisible = false
-    /// 手指当前命中的底部按钮（plan 068）：蒙层拿它做高亮/提示，松手也按它
-    /// 分发——用户看到高亮的那颗就是执行的那个。
+    /// 手指当前命中的按钮（plan 068）：蒙层拿它做高亮/提示，松手也按它分发。
     @State private var dictationZone: DictationZone = .none
-    /// 蒙层在全局坐标系里的框：按钮位置由它推出，命中判定与按钮绘制同源
-    /// （手势位置也取 .global，两边同一坐标空间）。
+    /// 蒙层在全局坐标系里的框：按钮位置由它推出，命中判定与按钮绘制同源。
     @State private var dictationBounds: CGRect = .zero
-    /// 蒙层相位（plan 068）：listening（手指在屏上）→ finalizing（等终稿）
-    /// → settled（确认态 / 留驻示错）。
+    /// 蒙层相位（plan 068）：listening → finalizing → settled。
     @State private var dictationStage: DictationStage = .listening
     /// 逐任务离底态（plan 056）：true = 在底部。未上报（无输出/未滚动）视为在底
     @State private var atBottomByTask: [String: Bool] = [:]
-    /// 逐任务底部空白（pt，TerminalHostView 上报）：未上报视为满屏（整量抬升）
-    @State private var bottomSlackByTask: [String: CGFloat] = [:]
+    /// The dock's resting height (handle + key row, never the notice bar or the keypad): the
+    /// terminal ends above it, so neither the notice bar nor the keyboard resizes the terminal (D13).
+    @State private var restingDockHeight: CGFloat = 0
+    /// The page's content size: decides the short-window fold and where the toolbar items go.
+    @State private var pageSize: CGSize = .zero
+    /// The page's widest side safe-area inset: the system's rail, when it draws one.
+    @State private var railInset: CGFloat = 0
+    /// The page's size pinned while the compose layer is up (see `base`).
+    @State private var frozenPageSize: CGSize?
 
-    /// 浮键列避开控制板的抬升量（恒 = 面板高）
-    private var panelLift: CGFloat { inputCollapsed ? 0 : panelHeight }
-    /// 终端抬升量 clamp 到内容真正需要让出的量：新终端内容在顶、下半屏
-    /// 全空时不抬（整量抬会把唯一有内容的顶部裁掉，露出的却是空白）
-    private var terminalLift: CGFloat {
-        let slack = activeTaskID.flatMap { bottomSlackByTask[$0] } ?? 0
-        return max(0, panelLift - slack)
+    /// The size the page lays out at: pinned while composing, otherwise the live one.
+    private var laidOutSize: CGSize { frozenPageSize ?? pageSize }
+    /// The keypad as a sheet (short windows only).
+    @State private var showingKeypad = false
+    /// The full keypad pulled out below the key row: how much of it shows (follows the finger,
+    /// then animates open or shut). The terminal never resizes for it — it is pushed up by the
+    /// same amount, so its bottom rows (where agents and prompts live) stay just above the keypad
+    /// and the PTY is never reflowed (user's call, 2026-11-08: no resize after the drag). The
+    /// price: the top rows of a top-anchored screen (a fresh shell, vim) sit out of view while the
+    /// keypad is open.
+    @State private var keypadHeight: CGFloat = 0
+    @State private var keypadReveal: CGFloat = 0
+    /// keypadReveal when the current drag began; nil while no drag runs.
+    @State private var keypadDragStart: CGFloat?
+    /// The drag's translation when it was recognised: movement is measured from there.
+    @State private var keypadDragAnchor: CGFloat = 0
+    /// The terminal's size as laid out, and the size it is pinned to while composing.
+    @State private var liveTerminalSize: CGSize = .zero
+    @State private var frozenTerminalSize: CGSize?
+    @State private var showingPhotoPicker = false
+    @State private var showingFilePicker = false
+    @State private var secretSheet: SecretSheetTarget?
+    /// Tall layout, half folded with a horizontal fold: the keypad is inline below the fold and
+    /// the 按键 toolbar item goes away (plan D9).
+    @State private var laptopPose = false
+    /// The list of every terminal, opened from the active avatar.
+    @State private var showingTerminalList = false
+
+    /// Below this content height the key row folds into 按键 and only the composer stays
+    /// (tall Split View, outer display in landscape): the terminal keeps its rows.
+    static let shortPageHeight: CGFloat = 470
+
+    private var activeTaskID: String? {
+        get { navigation.activeTaskID(in: workspace.id) }
+        nonmutating set { navigation.setActiveTask(newValue, in: workspace.id) }
     }
 
-    init(client: CofluxClient, workspace: Coflux_V1_Workspace) {
-        self.client = client
-        self.workspace = workspace
-        _inputCollapsed = State(initialValue: UserDefaults.standard.bool(forKey: Self.padCollapsedKey(workspace.id)))
-    }
+    /// Where the pager stands. Kept in step with `activeTaskID` both ways by hand (see `pager`):
+    /// a bound `scrollPosition(id:)` dropped the first request when the page appeared on a
+    /// terminal other than the first, and a width change left the pager on another page, so
+    /// the title named one terminal while the pager showed another.
+    @State private var pagerPosition = ScrollPosition(idType: String.self)
 
-    private static func padCollapsedKey(_ workspaceID: String) -> String {
-        "terminalPadCollapsed.\(workspaceID)"
-    }
-    /// 翻页连续进度（小数页索引）与 chip 框架缓存：药丸跟手滑动的两个输入
-    @State private var pageProgress: CGFloat = 0
-    @State private var chipFrames: [String: CGRect] = [:]
-
-    /// tab 序 = 创建序（mobile 同序：createdAt 升序）
+    /// 页序 = 创建序（createdAt 升序）
     private var members: [Coflux_V1_Task] {
         client.tasks
             .filter { $0.workspaceID == workspace.id }
@@ -86,360 +110,844 @@ struct WorkspaceDetailView: View {
         members.first { $0.id == activeTaskID }
     }
 
-    /// 主标题=分支，与 web 对齐；目录工作区（无 repo 终端）没有分支、name 是裸 `~`，
-    /// 改用设备名（name 为空退到 host，与设备面板同规则）。「目录工作区由设备命名」
-    /// 是工作区种类的属性而不是调用方偏好，故在此解析，不开 title 参数——
-    /// 开了参数，下一个调用方就能把任务台标题写成任何东西。
-    private var navigationTitleText: String {
-        guard isDirWorkspace(workspace) else {
-            return workspace.branch.isEmpty ? workspace.name : workspace.branch
-        }
-        guard let daemon = client.daemons.first(where: { $0.daemonID == workspace.daemonID }) else {
-            return workspace.name
-        }
-        let label = daemon.name.isEmpty ? daemon.host : daemon.name
-        return label.isEmpty ? workspace.name : label
+    private var shortWindow: Bool {
+        layout != .tall && laidOutSize.height > 0 && laidOutSize.height < Self.shortPageHeight
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            if members.isEmpty {
-                emptyState
-            } else {
-                tabBar
-                // 横幅挪出终端页（终端会被面板顶上去裁顶，横幅必须常驻可见）
-                if let task = activeTask {
-                    statusStrip(task)
-                }
-                // 分页容器用 ScrollView 而非 TabView(.page)：后者不暴露连续
-                // 滚动进度，药丸只能落定后追赶（"不跟手"，plan 050 返工点）
-                ScrollView(.horizontal) {
-                    HStack(spacing: 0) {
-                        ForEach(members, id: \.id) { task in
-                            taskPage(task)
-                                .containerRelativeFrame(.horizontal)
-                                .id(task.id)
-                        }
-                    }
-                    .scrollTargetLayout()
-                }
-                .scrollTargetBehavior(.paging)
-                .scrollPosition(id: $activeTaskID)
-                .scrollIndicators(.hidden)
-                .onScrollGeometryChange(for: CGFloat.self) { geo in
-                    geo.containerSize.width > 0 ? geo.contentOffset.x / geo.containerSize.width : 0
-                } action: { _, value in
-                    pageProgress = value
-                }
-                // 第一页继续往回滑 = 返回工作区列表：松手瞬间（离开拖拽相位）
-                // 左缘回弹超过 12% 页宽即 pop，一次手势只判定一次
-                .onScrollPhaseChange { oldPhase, _, context in
-                    guard oldPhase == .interacting || oldPhase == .tracking else { return }
-                    let width = context.geometry.containerSize.width
-                    guard width > 0 else { return }
-                    if context.geometry.contentOffset.x / width < -0.12 {
-                        dismiss()
-                    }
-                }
-                // 平移而非缩放：终端整体被顶上去，顶部裁掉（scrollback 仍可
-                // 在终端内滚动回看；完整画面 = 收起面板）。
-                // 动画挂在 offset 上：与面板同曲线同时长，一起滑动
-                .offset(y: -terminalLift)
-                .animation(.smooth(duration: 0.25), value: terminalLift)
-                .clipped()
-                // 终端页与系统键盘绝缘：键盘只属于模态成文层
-                .ignoresSafeArea(.keyboard)
-                // Agent secret request cards (plan 20260926-ios-secret-input): anchored at the top of
-                // the terminal page below the status strip, floating over the terminal. An overlay on
-                // the pager keeps them out of the panel lift/clip and never resizes the terminal; the
-                // keyboard their field raises covers only the bottom of the page.
-                .overlay(alignment: .top) {
-                    if let task = activeTask {
-                        SecretRequestCards(
-                            client: client,
-                            requests: client.pendingSecretRequests(taskID: task.id),
-                            source: secretRequestSource(task),
-                            deviceName: secretRequestDevice(task)
-                        )
-                    }
-                }
-            }
-        }
-        .overlay(alignment: .bottom) {
-            ZStack {
-                if !inputCollapsed, !members.isEmpty {
-                    TerminalInputArea(
-                        client: client,
-                        task: activeTask,
-                        draft: draft,
-                        onCompose: { setComposing(true) },
-                        onDictatePrewarm: { prewarmDictation() },
-                        onDictateBegin: { beginDictation() },
-                        onDictateMove: { dictationZone = DictationZone.hit($0, in: dictationBounds) },
-                        onDictateEnd: { endDictation() },
-                        onDictateAbort: { abortDictation() }
-                    )
-                    .onGeometryChange(for: CGFloat.self) { proxy in
-                        proxy.size.height
-                    } action: { height in
-                        panelHeight = height
-                    }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .animation(.smooth(duration: 0.25), value: inputCollapsed)
-        }
-        // 基座对系统键盘免疫（冻结）；成文层走独立呈现上下文与键盘同层
-        .ignoresSafeArea(.keyboard)
-        .fullScreenCover(isPresented: $composing) {
-            TerminalComposeOverlay(
-                draft: $draft,
-                onSend: { sendDraft() },
-                onDismiss: { setComposing(false) }
-            )
-            // 毛玻璃底在内容层自绘并淡入淡出；呈现层禁默认滑入动画（见 setComposing）
-            .presentationBackground(.clear)
-        }
-        .overlay(alignment: .bottomTrailing) {
-            // 右下浮键列（plan 053 气泡 → 056 常驻两态 → 057 收编新建 → 058 定序）：
-            // 瞬态键置列顶——滚到底浮现时列向上生长，常驻键（新建/键盘）零位移；
-            // 键盘键守最下拇指位（折叠态=展开输入区、展开态=收起输入区，
-            // 收起入口只此一处，输入区内不再有）。
-            // 布局切换刻意不做动画：终端高度一步到位只触发一次 resize，
-            // 动画期间逐帧 resize 会引发远端 TUI 重画闪动；过渡只给浮键自己
-            ZStack {
-                if !members.isEmpty {
-                    VStack(spacing: 12) {
-                        if let taskID = activeTask?.id, atBottomByTask[taskID] == false {
-                            Button {
-                                TerminalModeRegistry.shared.scrollToBottom(taskID: taskID)
-                            } label: {
-                                Image(systemName: "arrow.down.to.line")
-                                    .font(Theme.Fonts.body.weight(.medium))
-                                    .foregroundStyle(Theme.foreground)
-                                    .frame(width: 52, height: 52)
-                            }
-                            .glassEffect(.regular.interactive(), in: .circle)
-                            .accessibilityLabel("滚动到底部")
-                            .transition(.scale.combined(with: .opacity))
-                        }
-                        Button {
-                            createTerminal()
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(Theme.Fonts.body.weight(.medium))
-                                .foregroundStyle(Theme.foreground)
-                                .frame(width: 52, height: 52)
-                        }
-                        .glassEffect(.regular.interactive(), in: .circle)
-                        .accessibilityLabel("新建终端")
-                        Button {
-                            inputCollapsed.toggle()
-                        } label: {
-                            Image(systemName: inputCollapsed ? "keyboard" : "keyboard.chevron.compact.down")
-                                .font(Theme.Fonts.body.weight(.medium))
-                                .foregroundStyle(Theme.foreground)
-                                .frame(width: 52, height: 52)
-                        }
-                        .glassEffect(.regular.interactive(), in: .circle)
-                        .accessibilityLabel(inputCollapsed ? "展开输入区" : "收起输入区")
-                    }
-                }
-            }
-            // 动画只作用于浮键容器内部（ZStack 常驻承接 transition），
-            // 不外溢到布局——外溢会重新引入逐帧 resize 闪动
-            .animation(.smooth(duration: 0.2), value: inputCollapsed)
-            .animation(.smooth(duration: 0.2), value: atBottomByTask)
-            .padding(.trailing, 20)
-            .padding(.bottom, 24)
-            // 展开时抬到控制板上方（纯 transform）：恒用整量面板高——
-            // 终端侧 clamp 后可能不抬，浮键仍须让开面板
-            .offset(y: -panelLift)
-            .animation(.smooth(duration: 0.25), value: panelLift)
-        }
-        .overlay {
-            // 对讲浮层：不用 fullScreenCover（对讲不涉及系统键盘，不需要成文层
-            // 那套呈现层+冻结基座机制），纯 .overlay 铺满即可，叠在其它层之上
-            if dictationOverlayVisible, let dictationSession {
-                DictationOverlay(
-                    session: dictationSession,
-                    zone: dictationZone,
-                    stage: dictationStage,
-                    onDiscard: { closeDictationOverlay() },
-                    onSend: { sendDictation() },
-                    onEdit: { editDictation() }
-                )
-            }
-        }
-        // 按钮几何真相源：蒙层就铺在这个框里，两颗胶囊按 DictationZone 的常量
-        // 从框的底边推出，命中判定（全局坐标）与蒙层绘制（对齐自身底边）同源
-        .onGeometryChange(for: CGRect.self) { proxy in
-            proxy.frame(in: .global)
-        } action: { frame in
-            dictationBounds = frame
-        }
-        .animation(.easeOut(duration: 0.15), value: dictationOverlayVisible)
-        .background(Theme.background)
-        .onChange(of: inputCollapsed) { _, collapsed in
-            UserDefaults.standard.set(collapsed, forKey: Self.padCollapsedKey(workspace.id))
-        }
-        .navigationTitle(navigationTitleText)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if activeTask != nil {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button("停止并删除任务", role: .destructive) { confirmingRemove = true }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                    }
-                    .accessibilityLabel("任务操作")
-                }
-            }
-        }
-        .confirmationDialog("删除任务？", isPresented: $confirmingRemove, titleVisibility: .visible) {
-            Button("停止并删除", role: .destructive) {
-                if let task = activeTask {
-                    Task { await client.closeTask(task) }
-                }
-            }
-        } message: {
-            Text("运行中的会话将被停止，任务从列表移除")
-        }
-        .onAppear {
-            if activeTaskID == nil { activeTaskID = members.first?.id }
-        }
-        .onChange(of: members.map(\.id)) { _, ids in
-            // 自建任务识别：差集而非"下一个新任务"（workspace-detail.tsx:188，防它端并发建任务误认）
-            if let known = knownTaskIDsBeforeCreate,
-               let mine = ids.first(where: { !known.contains($0) }) {
-                activeTaskID = mine
-                knownTaskIDsBeforeCreate = nil
-                // 自建任务直接启动（web performActivation 同语义）：新任务无 session，
-                // TerminalHostView.bind 只对 RUNNING 任务发 attach，不补这发
-                // 会停在「任务尚未启动」横幅等手动点启动
-                client.startTask(taskID: mine, cols: termCols, rows: termRows)
-            }
-            // 激活任务被删除（本端或它端）：收敛到仍存在的页
-            if let active = activeTaskID, !ids.contains(active) {
-                activeTaskID = ids.last
-            }
-            if activeTaskID == nil { activeTaskID = ids.first }
-        }
+    /// 附件 / 按键 go to the bottom bar (the lower end of the rail on the outer display and in the
+    /// split detail) unless the window lays its bars out horizontally and short: then everything
+    /// stays in the top bar, as in the tall layout.
+    private var bottomBarItems: Bool {
+        barsOnRail
     }
 
-    // MARK: - tab 条（内容组件非导航 chrome；激活指示 = 单一常驻玻璃药丸，
-    // 位置按翻页连续进度在相邻 chip 框架间插值 → 跟手滑动，plan 050）
-
-    private var tabBar: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(members, id: \.id) { task in
-                        tabChip(task)
-                            .onGeometryChange(for: CGRect.self) { proxy in
-                                proxy.frame(in: .named("chipBar"))
-                            } action: { frame in
-                                chipFrames[task.id] = frame
-                            }
-                            .id(task.id)
-                    }
-                }
-                .padding(.horizontal, 16)
-                // 垂直留白必须在 ScrollView 内容里而非外面：药丸边缘高光
-                // 贴着滚动容器裁剪边界会被切掉（真机踩过）
-                .padding(.vertical, 6)
-                .coordinateSpace(.named("chipBar"))
-                .background {
-                    if let frame = pillFrame() {
-                        Color.clear
-                            .glassEffect(.regular, in: .capsule)
-                            .frame(width: frame.width, height: frame.height)
-                            .position(x: frame.midX, y: frame.midY)
-                    }
-                }
-            }
-            .onChange(of: activeTaskID) { _, id in
-                guard let id else { return }
-                withAnimation { proxy.scrollTo(id, anchor: .center) }
-            }
-        }
+    /// The system draws this page's bars as a vertical rail (the outer display — in landscape
+    /// too —, a Split View half, the split detail column). Read from where the system put them:
+    /// a rail takes a wide safe-area inset at the leading or trailing edge. The window's aspect
+    /// does not tell: the outer display in landscape (678×466) keeps its rail (seen on the Duo,
+    /// 2026-11-08).
+    private var barsOnRail: Bool {
+        layout != .tall && railInset > 40
     }
 
-    /// 药丸目标框架：翻页进度的整数部分定相邻 chip 对，小数部分线性插值。
-    private func pillFrame() -> CGRect? {
-        let ids = members.map(\.id)
-        guard !ids.isEmpty else { return nil }
-        let progress = min(max(pageProgress, 0), CGFloat(ids.count - 1))
-        let index = Int(progress.rounded(.down))
-        let fraction = progress - CGFloat(index)
-        guard let from = chipFrames[ids[index]] else { return nil }
-        guard fraction > 0, index + 1 < ids.count, let to = chipFrames[ids[index + 1]] else { return from }
-        return CGRect(
-            x: from.minX + (to.minX - from.minX) * fraction,
-            y: from.minY + (to.minY - from.minY) * fraction,
-            width: from.width + (to.width - from.width) * fraction,
-            height: from.height + (to.height - from.height) * fraction
-        )
+    /// The avatars' diameter: the outer display and the other compact windows, the tall layout.
+    private var avatarSize: CGFloat {
+        layout == .tall ? 34 : 30
     }
 
-    private func tabChip(_ task: Coflux_V1_Task) -> some View {
-        let active = task.id == activeTaskID
-        return Button {
-            withAnimation(.smooth(duration: 0.3)) { activeTaskID = task.id }
-        } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(statusColor(task))
-                    .frame(width: 6, height: 6)
-                Text(taskTitle(task))
-                    .font(Theme.Fonts.label.weight(active ? .semibold : .regular))
-                    .lineLimit(1)
-                // This terminal's agent is waiting for a secret (plan 20260926-ios-secret-input).
-                if client.secretRequests.values.contains(where: { $0.taskID == task.id }) {
-                    Image(systemName: "key.fill")
-                        .font(Theme.Fonts.meta)
-                        .foregroundStyle(Theme.warning)
-                        .accessibilityLabel("等待输入")
-                }
-            }
-            .foregroundStyle(active ? Theme.foreground : Theme.mutedForeground)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
+    // MARK: - Titles
+
+    /// A directory workspace (no repository) is the device's terminal: the device names the page.
+    /// 「目录工作区由设备命名」是工作区种类的属性而不是调用方偏好，故在此解析。
+    private var deviceLabel: String {
+        client.deviceName(workspace.daemonID)
+    }
+
+    /// What the terminal is doing (its title, as on the desktop tab), else its agent, else its
+    /// own name.
+    private func terminalName(_ task: Coflux_V1_Task) -> String {
+        if let title = client.terminalTitle(forTask: task) { return title }
+        if let agent = client.agent(forTask: task), !agent.agent.isEmpty { return agent.agent }
+        return taskTitle(task)
+    }
+
+    private var titleText: String {
+        if isDirWorkspace(workspace) {
+            let label = deviceLabel
+            return label.isEmpty ? workspace.name : label
         }
-        // 长按复制终端标识（plan 20260914）：终端在 iOS 上没有列表行，只有这枚 chip，
-        // 复制入口就挂在它身上；短按切 tab 不受影响。
-        .copyHandleContextMenu(.terminal, id: task.id)
+        return activeTask.map(terminalName) ?? workspace.displayTitle
+    }
+
+    /// project · branch · device; the terminal for a directory workspace (the title is the
+    /// device).
+    private var subtitleText: String {
+        if isDirWorkspace(workspace) { return activeTask.map(terminalName) ?? "" }
+        let project = client.projects.first { $0.id == workspace.projectID }?.name ?? ""
+        return [project, workspace.displayTitle, deviceLabel].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     private func taskTitle(_ task: Coflux_V1_Task) -> String {
-        task.title.isEmpty ? "任务 \(task.id.prefix(6))" : task.title
+        task.title.isEmpty ? "终端 \(task.id.prefix(6))" : task.title
     }
 
-    /// 设备 · 工作区 · 终端 — where a secret request comes from, as on the desktop card.
-    private func secretRequestDevice(_ task: Coflux_V1_Task) -> String {
-        let daemon = client.daemons.first { $0.daemonID == task.daemonID }
-        return daemon.map { $0.name.isEmpty ? $0.host : $0.name } ?? ""
+    // MARK: - Body
+
+    var body: some View {
+        // The compose layer sits in the same view tree, over the page: presenting it as a
+        // fullScreenCover took the toolbar off the rail and re-laid the page out in another
+        // container (the terminal jumped 522 → 761 pt and back, seen in the Duo's log). The page
+        // ignores the keyboard (frozen base, 2026-07-26); the layer above it rides on it.
+        ZStack {
+            base
+            if composing {
+                TerminalComposeOverlay(
+                    draft: $draft,
+                    ready: terminalReady,
+                    placeholder: composerPlaceholder,
+                    onSend: { sendDraft() },
+                    onPhoto: { data, type in keySender.uploadImage(data: data, typeIdentifier: type, prefix: "photo") },
+                    onDismiss: { setComposing(false) }
+                )
+            }
+        }
+        // Nothing on this page follows the keyboard; the compose layer lifts its card itself.
+        .ignoresSafeArea(.keyboard)
+        .navigationTitle(titleText)
+        .navigationSubtitle(subtitleText)
+        .navigationBarTitleDisplayMode(.inline)
+        // The page draws its title itself, always on the leading side (mockup
+        // `wiki/plans/20261108-ios-terminal-facepile-mockup.html`, user's call 2026-11-08): the
+        // system's inline title centres a short name and moves a long one to the side, and on
+        // the rail it takes ~80 pt for one line. The navigation title stays for the back menu.
+        .toolbar(removing: .title)
+        // The bottom of the rail belongs to this page's toolbar, not the tab bar.
+        .toolbar(.hidden, for: .tabBar)
+        .toolbar { toolbarContent }
     }
 
-    private func secretRequestSource(_ task: Coflux_V1_Task) -> String {
-        let device = secretRequestDevice(task)
-        let workspaceLabel = workspace.branch.isEmpty ? workspace.name : workspace.branch
-        return [device, workspaceLabel, taskTitle(task)].filter { !$0.isEmpty }.joined(separator: " · ")
+    /// The page itself, immune to the system keyboard, with its sheets and lifecycle hooks.
+    private var base: some View {
+        pageContent
+            // Pinned, top-aligned, while the compose layer is up: with the keyboard showing the
+            // page's frame grows past the screen (620 → 797 pt on the outer display, seen in the
+            // Duo's log) and everything bottom-aligned slid away under the keyboard.
+            .frame(width: frozenPageSize?.width, height: frozenPageSize?.height)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background(Theme.terminal)
+            // 基座对系统键盘免疫（冻结）：键盘只属于叠在上面的成文层
+            .ignoresSafeArea(.keyboard)
+            .overlay {
+                // 对讲浮层：不涉及系统键盘，纯 .overlay 铺满即可，叠在其它层之上
+                if dictationOverlayVisible, let dictationSession {
+                    DictationOverlay(
+                        session: dictationSession,
+                        zone: dictationZone,
+                        stage: dictationStage,
+                        onDiscard: { closeDictationOverlay() },
+                        onSend: { sendDictation() },
+                        onEdit: { editDictation() }
+                    )
+                }
+            }
+            // 按钮几何真相源：蒙层就铺在这个框里，按钮由 DictationZone.Geometry 从框的尺寸推出，
+            // 命中判定（全局坐标）与蒙层绘制（对齐自身）同源
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .global)
+            } action: { frame in
+                dictationBounds = frame
+                pageSize = frame.size
+            }
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                max(proxy.safeAreaInsets.leading, proxy.safeAreaInsets.trailing)
+            } action: { inset in
+                railInset = inset
+            }
+            .animation(.easeOut(duration: 0.15), value: dictationOverlayVisible)
+            .sheet(isPresented: $showingKeypad) {
+                TerminalExtraKeys(client: client, task: activeTask)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 24)
+                    .padding(.bottom, 8)
+                    // A short window's extra keys: a low panel that leaves the terminal and the
+                    // quick rows usable and stays open while keys are pressed.
+                    .presentationDetents([.height(150)])
+                    .presentationBackgroundInteraction(.enabled(upThrough: .height(150)))
+                    .presentationBackground(Theme.card)
+                    .presentationCornerRadius(34)
+                    .presentationDragIndicator(.visible)
+            }
+            .sheet(isPresented: $showingPhotoPicker) {
+                PhotoPicker(isPresented: $showingPhotoPicker) { data, typeIdentifier in
+                    keySender.uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "photo")
+                }
+            }
+            .sheet(isPresented: $showingFilePicker) {
+                FilePicker(isPresented: $showingFilePicker) { url in
+                    keySender.uploadFile(url: url)
+                }
+            }
+            .sheet(item: $secretSheet) { target in
+                SecretRequestSheet(client: client, taskID: target.taskID)
+            }
+            .confirmationDialog("删除终端？", isPresented: $confirmingRemove, titleVisibility: .visible) {
+                Button("停止并删除", role: .destructive) {
+                    if let task = activeTask {
+                        Task { await client.closeTask(task) }
+                    }
+                }
+            } message: {
+                Text("正在运行的会话会被停止，终端将从列表中移除")
+            }
+            .onAppear {
+                if activeTaskID == nil || !members.contains(where: { $0.id == activeTaskID }) {
+                    activeTaskID = members.first?.id
+                }
+                claims.attach(ownership)
+                claimTerminals(activating: activeTaskID)
+            }
+            // An open keypad whose height changed (a wider window adds ← →): follow it.
+            .onChange(of: keypadHeight) { old, height in
+                guard keypadDragStart == nil, old > 0, keypadReveal == old else { return }
+                keypadReveal = height
+            }
+            // Activating a terminal (swipe, list, card, sidebar) takes it from another window.
+            .onChange(of: activeTaskID) { _, id in
+                claimTerminals(activating: id)
+            }
+            .onChange(of: activeTaskID, initial: true) { _, _ in updateSeenFinished() }
+            .onChange(of: finishedTaskIDs) { _, _ in updateSeenFinished() }
+            // Terminals nobody owns (new ones, or ones another window let go) are taken quietly.
+            .onChange(of: unownedTaskIDs) { _, _ in
+                claimTerminals(activating: nil)
+            }
+            .onChange(of: members.map(\.id)) { _, ids in
+                // 自建任务识别：差集而非"下一个新任务"（workspace-detail.tsx:188，防它端并发建任务误认）
+                if let known = knownTaskIDsBeforeCreate,
+                   let mine = ids.first(where: { !known.contains($0) }) {
+                    activeTaskID = mine
+                    knownTaskIDsBeforeCreate = nil
+                    // 自建任务直接启动：新任务无 session，TerminalHostView.bind 只对 RUNNING 任务发
+                    // attach，不补这发会停在「任务尚未启动」横幅等手动点启动
+                    client.startTask(taskID: mine, cols: termCols, rows: termRows)
+                }
+                // 激活任务被删除（本端或它端）：收敛到仍存在的页
+                if let active = activeTaskID, !ids.contains(active) {
+                    activeTaskID = ids.last
+                }
+                if activeTaskID == nil { activeTaskID = ids.first }
+            }
     }
 
-    private func statusColor(_ task: Coflux_V1_Task) -> Color {
-        switch task.status {
-        case .running: return client.detachedTaskIDs.contains(task.id) ? Theme.warning : Theme.success
-        case .exited: return task.exitCode == 0 ? Theme.subtleForeground : Theme.destructive
-        default: return Theme.subtleForeground
+    @ViewBuilder
+    private var pageContent: some View {
+        if members.isEmpty {
+            emptyState
+        } else if layout == .tall {
+            tallArrangement
+        } else {
+            VStack(spacing: 0) {
+                // With the bars on the rail the title row is the page's own: the name on the
+                // left, the avatars on the right.
+                if barsOnRail {
+                    HStack(spacing: 12) {
+                        pageTitle
+                        Spacer(minLength: 0)
+                        terminalAvatars
+                    }
+                    .padding(.leading, 14)
+                    .padding(.trailing, 10)
+                    .frame(height: 44)
+                    .padding(.top, 6)
+                    .background(Theme.terminal)
+                    .zIndex(1)
+                }
+                ZStack(alignment: .bottom) {
+                    terminalColumn(reserveDock: true)
+                    dock(inlineKeypad: false)
+                }
+                // The keypad pushes the terminal up past the title row: clip it there.
+                .clipped()
+            }
+            // With the bars on the rail nothing is drawn across the top or the bottom (status,
+            // camera and home indicator sit on the rail), yet the safe area keeps ~30 pt at each:
+            // the title row and the keys take them.
+            .ignoresSafeArea(.container, edges: barsOnRail ? .vertical : [])
         }
     }
 
-    // MARK: - 任务页（statusStrip + 终端，逐任务保活）
+    /// The tall layout (mockup T1/T2, plan D9): the whole page is one overlay arrangement — the
+    /// pager of terminals as the secondary view, the input area as the primary one. Fully open
+    /// there is no dividing region: the input overlays the terminal exactly as in the other
+    /// layouts, and the terminal ends above the resting dock. Half folded with a horizontal fold
+    /// (laptop pose) the system places the terminal before the fold and the input after it; the
+    /// input then carries the full keypad inline. The pose is read from the reserved regions only
+    /// — never from sensors or the window size — and both changes land in the same layout pass,
+    /// so the transition resizes the terminal once.
+    private var tallArrangement: some View {
+        GeometryReader { proxy in
+            let laptop = Self.isLaptopPose(proxy)
+            ArrangementView {
+                dock(inlineKeypad: laptop)
+                    .frame(maxHeight: .infinity, alignment: laptop ? .top : .bottom)
+                    .overlayArrangementEdge(VerticalEdge.bottom)
+            } secondary: {
+                terminalColumn(reserveDock: !laptop)
+                    .clipped()
+            }
+            // Overlay, not split: fully open the keypad must not stay on screen.
+            .arrangementViewStyle(OverlayArrangementViewStyle().axes(.vertical))
+            .onChange(of: laptop, initial: true) { _, isLaptop in
+                laptopPose = isLaptop
+            }
+        }
+    }
 
+    /// An active dividing region running horizontally across the page: the laptop pose.
+    private static func isLaptopPose(_ proxy: GeometryProxy) -> Bool {
+        proxy.reservedRegions(kind: .division).contains { $0.isActive && $0.frame.width > $0.frame.height }
+    }
+
+    /// The terminals of this workspace as a pile of round avatars (mockup F4,
+    /// `wiki/plans/20261108-ios-terminal-facepile-mockup.html`; the user's design, 2026-11-08):
+    /// beside the title — in the rail's title row, or in the top bar.
+    /// Each earlier avatar lies over the next; the active one is raised above its neighbours
+    /// with a white ring. No pad behind them: each avatar carries its own shadow. A tap opens
+    /// the list with every terminal's name and state, and 新建终端; a swipe of the pager also
+    /// switches.
+    private var terminalAvatars: some View {
+        let tasks = members
+        // One button: a tap anywhere on the pile opens the list, where the terminal is chosen
+        // (user's call, 2026-11-08: no switching from the pile itself).
+        return Button {
+            withAnimation(.smooth(duration: 0.2)) { showingTerminalList.toggle() }
+        } label: {
+            HStack(spacing: -Self.avatarOverlap) {
+                ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
+                    let active = task.id == activeTaskID
+                    terminalAvatar(task, active: active)
+                        .zIndex(active ? Double(tasks.count + 1) : Double(tasks.count - index))
+                }
+            }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .animation(.smooth(duration: 0.25), value: activeTaskID)
+        .accessibilityLabel("终端")
+        .accessibilityValue(activeTask.map { "\(tabName($0))，共 \(tasks.count) 个" } ?? "")
+        .accessibilityHint("显示全部终端")
+    }
+
+    private static let avatarOverlap: CGFloat = 10
+
+    /// The pile's width, rings included.
+    private var avatarsWidth: CGFloat {
+        guard !members.isEmpty else { return 0 }
+        return avatarSize + CGFloat(members.count - 1) * (avatarSize - Self.avatarOverlap) + 6
+    }
+
+    /// A round avatar: the agent's mark and a white ring on the active terminal (faint on the
+    /// others; none when the workspace has one terminal). No state dot (user's call,
+    /// 2026-11-08): the list shows the states.
+    private func terminalAvatar(_ task: Coflux_V1_Task, active: Bool, size: CGFloat? = nil) -> some View {
+        let size = size ?? avatarSize
+        // The ring is an outer border, 1 pt off the face (user's call, 2026-11-08): thin, so
+        // the face and its glyph keep the whole diameter.
+        // A lone terminal needs no marking: no ring at all.
+        let ringWidth: CGFloat = members.count < 2 ? 0 : active ? 1.5 : 1
+        let ring = active ? Theme.foreground : Theme.foreground.opacity(0.18)
+        return Circle()
+            .fill(Theme.card)
+            .frame(width: size, height: size)
+            .overlay { avatarGlyph(task, size: size * 0.68) }
+            .overlay(Circle().stroke(ring, lineWidth: ringWidth).padding(-(1 + ringWidth / 2)))
+            // Overlapping avatars stay apart: a band of the terminal's colour around each ring.
+            .background(Circle().fill(Theme.terminal).padding(-(1 + ringWidth + 1.5)))
+            .compositingGroup()
+            .shadow(color: .black.opacity(0.6), radius: 4, y: 3)
+            .contentShape(Circle())
+    }
+
+    /// The agent's mark: Clawd for claude (its state's pose, the error cross when it stopped on
+    /// an error), >_ for codex, an initial for another agent, the terminal symbol for a shell.
+    @ViewBuilder
+    private func avatarGlyph(_ task: Coflux_V1_Task, size: CGFloat) -> some View {
+        let agent = task.status == .running ? client.agent(forTask: task) : nil
+        switch agent?.agent.lowercased() {
+        case "claude":
+            if agent?.state == "error" {
+                Image(systemName: "xmark")
+                    .font(.system(size: size * 0.7, weight: .bold))
+                    .foregroundStyle(Theme.destructive)
+            } else {
+                ClawdGlyph(
+                    pose: ClawdPose(state: agent?.state ?? "", seen: navigation.seenFinishedTaskIDs.contains(task.id)),
+                    size: min(size, ClawdSheet.renderedGlyphSize)
+                )
+            }
+        case "codex":
+            Text(">_")
+                .font(.system(size: size * 0.62, weight: .bold, design: .monospaced))
+                .foregroundStyle(Theme.foreground)
+        case .some(let name) where !name.isEmpty:
+            Text(String(name.prefix(1)).uppercased())
+                .font(.system(size: size * 0.72, weight: .bold))
+                .foregroundStyle(Theme.foreground)
+        default:
+            Image(systemName: "terminal")
+                .font(.system(size: size * 0.6, weight: .semibold))
+                .foregroundStyle(Theme.mutedForeground)
+        }
+    }
+
+    /// Every terminal with its name and state line (the home rows' tones), the active one
+    /// checked, then 新建终端. Scrolls when the terminals outgrow the page.
+    private var terminalList: some View {
+        let rows = VStack(spacing: 2) {
+            ForEach(members, id: \.id) { task in
+                terminalListRow(task)
+            }
+            Rectangle()
+                .fill(Theme.border)
+                .frame(height: 1)
+                .padding(.vertical, 4)
+            Button {
+                showingTerminalList = false
+                createTerminal()
+            } label: {
+                Label("新建终端", systemImage: "plus")
+                    .font(Theme.Fonts.rowTitle)
+                    .foregroundStyle(Theme.mutedForeground)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(6)
+        return ViewThatFits(in: .vertical) {
+            rows
+            ScrollView { rows }
+                .scrollIndicators(.hidden)
+        }
+        .frame(width: min(320, max(240, laidOutSize.width - 32)))
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Theme.foreground.opacity(0.09), lineWidth: 1))
+        .shadow(color: .black.opacity(0.55), radius: 18, y: 10)
+    }
+
+    private func terminalListRow(_ task: Coflux_V1_Task) -> some View {
+        let active = task.id == activeTaskID
+        let activity = TerminalActivity(task, client: client)
+        return Button {
+            showingTerminalList = false
+            withAnimation(.smooth(duration: 0.25)) { activeTaskID = task.id }
+        } label: {
+            HStack(spacing: 10) {
+                terminalAvatar(task, active: false, size: 32)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(tabName(task))
+                        .font(Theme.Fonts.rowTitle)
+                        .foregroundStyle(Theme.foreground)
+                    Text(activity.text)
+                        .font(Theme.Fonts.label)
+                        .foregroundStyle(activity.tone.color)
+                }
+                .lineLimit(1)
+                Spacer(minLength: 4)
+                if active {
+                    Image(systemName: "checkmark")
+                        .font(Theme.Fonts.label.weight(.bold))
+                        .foregroundStyle(Theme.foreground)
+                }
+            }
+            .padding(8)
+            .background(active ? Theme.accentSurface : .clear, in: RoundedRectangle(cornerRadius: 12))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Finished turns the user has looked at
+
+    /// Terminals whose agent finished its turn: they throw confetti until the user looks at them.
+    private var finishedTaskIDs: [String] {
+        members.filter { task in
+            let state = client.agent(forTask: task)?.state
+            return state == "done" || state == "waiting"
+        }.map(\.id)
+    }
+
+    /// A finished terminal counts as seen once it is the active one (the shell forgets it when
+    /// its agent starts another turn).
+    private func updateSeenFinished() {
+        guard let active = activeTaskID, finishedTaskIDs.contains(active),
+              !navigation.seenFinishedTaskIDs.contains(active) else { return }
+        navigation.seenFinishedTaskIDs.insert(active)
+    }
+
+    /// The agent's name, or the terminal's title when another terminal here shows the same name.
+    private func tabName(_ task: Coflux_V1_Task) -> String {
+        let name = terminalName(task)
+        let clash = members.contains { $0.id != task.id && terminalName($0) == name }
+        return clash ? taskTitle(task) : name
+    }
+
+    /// Status strip + the pager. With `reserveDock` the terminal ends above the resting dock and
+    /// rides up with the keypad.
+    private func terminalColumn(reserveDock: Bool) -> some View {
+        pager
+            // Floating over the terminal's bottom rows, never below them: a banner that comes and
+            // goes (another device takes over, the session exits) must not resize the terminal.
+            // It sits at the bottom, under the scroll-to-bottom button, to leave the top-right
+            // corner to the avatars.
+            .overlay(alignment: .bottom) {
+                VStack(alignment: .trailing, spacing: 0) {
+                    scrollToBottomButton
+                    if let task = activeTask {
+                        statusStrip(task)
+                    }
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                ZStack(alignment: .topTrailing) {
+                    // A tap anywhere else closes the list.
+                    if showingTerminalList {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                withAnimation(.smooth(duration: 0.2)) { showingTerminalList = false }
+                            }
+                    }
+                    VStack(alignment: .trailing, spacing: 8) {
+                        // The avatars sit with the title (the rail's row, or the top bar); the
+                        // list drops down over the terminal's corner.
+                        if showingTerminalList {
+                            terminalList
+                                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
+                        }
+                    }
+                    .padding(.top, barsOnRail ? 6 : 10)
+                    .padding(.trailing, 10)
+                }
+            }
+            .padding(.bottom, reserveDock ? restingDockHeight : 0)
+        .offset(y: reserveDock ? -keypadReveal : 0)
+    }
+
+    /// 分页容器用 ScrollView：全部任务页同时挂载（各自 attach 保活），左右滑动切换。第一页再往回
+    /// 滑不再返回列表（D16）：返回只走系统返回。
+    private func alignPager() {
+        guard let id = activeTaskID else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { pagerPosition.scrollTo(id: id) }
+    }
+
+    private var pager: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 0) {
+                ForEach(members, id: \.id) { task in
+                    taskPage(task)
+                        .containerRelativeFrame(.horizontal)
+                        .id(task.id)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollPosition($pagerPosition)
+        // A swipe settles on a page: that terminal becomes the active one.
+        .onChange(of: pagerPosition.viewID(type: String.self)) { _, id in
+            guard let id, id != activeTaskID else { return }
+            activeTaskID = id
+        }
+        // The active terminal changed elsewhere (list, card, sidebar, a new terminal): go there.
+        .onChange(of: activeTaskID) { _, id in
+            guard let id, pagerPosition.viewID(type: String.self) != id else { return }
+            withAnimation(.smooth(duration: 0.3)) { pagerPosition.scrollTo(id: id) }
+        }
+        // On appearing, and whenever the page width changes, the pager lands on the active
+        // terminal again: a new width moves every page.
+        .onChange(of: laidOutSize.width, initial: true) { _, _ in
+            alignPager()
+        }
+        .task(id: members.map(\.id)) {
+            // After the first layout pass: a request made before the pages exist is dropped.
+            await Task.yield()
+            alignPager()
+        }
+        .scrollIndicators(.hidden)
+        .clipped()
+        // 终端页与系统键盘绝缘：键盘只属于模态成文层
+        .ignoresSafeArea(.keyboard)
+    }
+
+    private func dock(inlineKeypad: Bool) -> some View {
+        TerminalInputArea(
+            client: client,
+            task: activeTask,
+            inlineKeypad: inlineKeypad,
+            bottomGap: barsOnRail ? TerminalInputArea.railBottomGap : 8,
+            keypadReveal: inlineKeypad ? 0 : keypadReveal,
+            onKeypadHeight: { keypadHeight = $0 },
+            onRestingHeight: { height in
+                if !inlineKeypad { restingDockHeight = height }
+            },
+            onKeypadDrag: { keypadDragChanged($0) },
+            onKeypadDragEnd: { keypadDragEnded($0) },
+            onKeypadToggle: { toggleKeypad() },
+            onOpenSecret: { openSecretSheet() },
+            onCompose: {
+                guard !dictationOverlayVisible else { return }
+                setComposing(true)
+            },
+            onDictatePrewarm: { prewarmDictation() },
+            onDictateBegin: { beginDictation() },
+            onDictateMove: { dictationZone = DictationZone.hit($0, in: dictationBounds) },
+            onDictateEnd: { endDictation() },
+            onDictateAbort: { abortDictation() }
+        )
+    }
+
+    /// Transient: shown while the active terminal is scrolled away from its bottom.
+    @ViewBuilder
+    private var scrollToBottomButton: some View {
+        ZStack {
+            if let taskID = activeTask?.id, atBottomByTask[taskID] == false {
+                Button {
+                    TerminalModeRegistry.shared.scrollToBottom(taskID: taskID)
+                } label: {
+                    Image(systemName: "arrow.down.to.line")
+                        .font(Theme.Fonts.label.weight(.semibold))
+                        .foregroundStyle(Theme.foreground)
+                        .frame(width: 40, height: 40)
+                        .background(Theme.card, in: Circle())
+                        .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("滚动到底部")
+                .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .padding(12)
+        .animation(.smooth(duration: 0.2), value: atBottomByTask)
+    }
+
+    // MARK: - Toolbar
+
+    /// The page's title: the active terminal, and project · branch · device below it, on the
+    /// leading side. The rail's title row holds it; otherwise the top bar's leading slot.
+    private var pageTitle: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(titleText)
+                .font(Theme.Fonts.rowTitle)
+                .foregroundStyle(Theme.foreground)
+            if !subtitleText.isEmpty {
+                Text(subtitleText)
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.mutedForeground)
+            }
+        }
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if !barsOnRail {
+            // The rail's title row, in the top bar: the title on the left; the avatars right
+            // before 新建终端 and 更多, solid (no shared glass). The title gets a fixed width — the
+            // room left by the back button, the trailing items and the status bar's corner:
+            // offered its ideal size, the bar squeezed it to a sliver; too wide, the bar folded
+            // the trailing items into its overflow button.
+            ToolbarItem(placement: .topBarLeading) {
+                pageTitle
+                    .frame(width: max(120, laidOutSize.width - 392 - avatarsWidth), alignment: .leading)
+            }
+            .sharedBackgroundVisibility(.hidden)
+            if !members.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) { terminalAvatars }
+                    .sharedBackgroundVisibility(.hidden)
+            }
+        }
+        if members.isEmpty {
+            ToolbarItem(placement: .topBarTrailing) { newTerminalButton }
+        } else if bottomBarItems {
+            // The avatars list and switch the terminals, so the rail only adds one.
+            ToolbarItem(placement: .topBarTrailing) { newTerminalButton }
+                .visibilityPriority(.high)
+            ToolbarItem(placement: .topBarTrailing) { moreMenu }
+                .visibilityPriority(.high)
+            ToolbarItem(placement: .bottomBar) { attachMenu }
+                .visibilityPriority(.low)
+            ToolbarItem(placement: .bottomBar) { pasteButton }
+        } else {
+            // One 更多 holds 粘贴 and 附件 too: a top bar that runs out of room folds items into
+            // the system's own overflow menu, which put 更多 inside another 更多.
+            ToolbarItem(placement: .topBarTrailing) { newTerminalButton }
+                .visibilityPriority(.high)
+            ToolbarItem(placement: .topBarTrailing) { moreMenu }
+                .visibilityPriority(.high)
+        }
+    }
+
+    private var attachMenu: some View {
+        Menu {
+            Button("相册", systemImage: "photo") { showingPhotoPicker = true }
+            Button("文件", systemImage: "folder") { showingFilePicker = true }
+        } label: {
+            Label("附件", systemImage: "paperclip")
+        }
+        .disabled(keySender.sessionID == nil || keySender.uploading)
+        .accessibilityLabel("上传文件到终端")
+    }
+
+    /// 粘贴: plan 071's behaviour — an image on the clipboard is uploaded, text is pasted.
+    private var pasteButton: some View {
+        Button {
+            keySender.paste()
+        } label: {
+            Label("粘贴", systemImage: "doc.on.clipboard")
+        }
+        .disabled(keySender.sessionID == nil || keySender.uploading)
+    }
+
+    private var newTerminalButton: some View {
+        Button {
+            createTerminal()
+        } label: {
+            Label("新建终端", systemImage: "plus")
+        }
+    }
+
+    // MARK: - Pulling the keypad out
+
+    /// The finger moved: the keys follow it 1:1 from where the drag was recognised (no jump by
+    /// the gesture's minimum distance), and past either end they give with a rubber band.
+    private func keypadDragChanged(_ translation: CGFloat) {
+        // While talking the finger slides over the dock onto 发送 / 取消: not a keypad drag.
+        if dictationOverlayVisible {
+            if keypadDragStart != nil { setKeypad(open: keypadReveal > keypadHeight / 2) }
+            return
+        }
+        guard !shortWindow, keypadHeight > 0 else { return }
+        if keypadDragStart == nil {
+            keypadDragStart = keypadReveal
+            keypadDragAnchor = translation
+        }
+        let raw = (keypadDragStart ?? 0) - (translation - keypadDragAnchor)
+        keypadReveal = Self.rubberBand(raw, limit: keypadHeight)
+    }
+
+    /// Inside 0…limit unchanged; beyond it the excess is damped like UIScrollView's bounce. Below
+    /// 0 the keys cannot shrink further, so the overshoot is simply held at 0.
+    private static func rubberBand(_ value: CGFloat, limit: CGFloat) -> CGFloat {
+        if value <= 0 { return 0 }
+        guard value > limit else { return value }
+        let excess = value - limit
+        let dimension: CGFloat = 120
+        return limit + (1 - 1 / (excess * 0.55 / dimension + 1)) * dimension
+    }
+
+    /// Released: a clear flick or pull settles in its direction, however short (a small swipe down
+    /// must collapse — needing half the keypad's height made it feel ignored); a hesitant release
+    /// settles by where the keypad is. A short window has no room below the terminal, so an
+    /// upward flick opens the keypad as a sheet there.
+    private func keypadDragEnded(_ predictedTranslation: CGFloat) {
+        if shortWindow {
+            if predictedTranslation < -24, !dictationOverlayVisible { showingKeypad = true }
+            return
+        }
+        guard keypadDragStart != nil else { return }
+        keypadDragStart = nil
+        let open: Bool
+        if predictedTranslation < -24 {
+            open = true
+        } else if predictedTranslation > 24 {
+            open = false
+        } else {
+            open = keypadReveal > keypadHeight / 2
+        }
+        setKeypad(open: open)
+    }
+
+    /// The handle's tap.
+    private func toggleKeypad() {
+        if shortWindow {
+            showingKeypad = true
+        } else {
+            setKeypad(open: keypadReveal < keypadHeight / 2)
+        }
+    }
+
+    /// Animates the keypad open or shut with a little spring; the terminal rides along.
+    private func setKeypad(open: Bool) {
+        keypadDragStart = nil
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.78)) {
+            keypadReveal = open ? keypadHeight : 0
+        }
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            if !bottomBarItems {
+                Section {
+                    Button("粘贴", systemImage: "doc.on.clipboard") { keySender.paste() }
+                    Button("从相册上传", systemImage: "photo") { showingPhotoPicker = true }
+                    Button("上传文件", systemImage: "folder") { showingFilePicker = true }
+                }
+                .disabled(keySender.sessionID == nil || keySender.uploading)
+            }
+            if let task = activeTask {
+                if !client.pendingSecretRequests(taskID: task.id).isEmpty {
+                    Button("提供 Agent 请求的输入", systemImage: "key") { openSecretSheet() }
+                }
+                // 复制终端标识（plan 20260914）：曾挂在终端 tab chip 的长按上
+                if let handle = EntityHandle.make(.terminal, id: task.id) {
+                    Button("复制终端 ID", systemImage: "doc.on.doc") {
+                        UIPasteboard.general.string = handle
+                    }
+                }
+                Button("停止并删除终端", systemImage: "trash", role: .destructive) {
+                    confirmingRemove = true
+                }
+            }
+        } label: {
+            Label("更多", systemImage: "ellipsis")
+        }
+    }
+
+    private func openSecretSheet() {
+        guard let task = activeTask else { return }
+        secretSheet = SecretSheetTarget(taskID: task.id)
+    }
+
+    // MARK: - Window ownership (plan D12)
+
+    private var unownedTaskIDs: [String] {
+        members.map(\.id).filter { ownership.owner(of: $0) == nil }
+    }
+
+    private func ownsTerminal(_ taskID: String) -> Bool {
+        ownership.isOwned(taskID, by: navigation.sceneID)
+    }
+
+    /// Claims every terminal of this page that nobody owns, and `activating` even when another
+    /// window owns it.
+    private func claimTerminals(activating: String?) {
+        for task in members {
+            ownership.claim(task.id, scene: navigation.sceneID, holder: claims.id, force: task.id == activating)
+        }
+    }
+
+    /// Stand-in for a terminal bound in another window; "在这里打开" moves it here.
+    private func elsewherePlaceholder(_ task: Coflux_V1_Task) -> some View {
+        ContentUnavailableView {
+            Label("已在另一个窗口打开", systemImage: "macwindow.on.rectangle")
+        } description: {
+            Text(taskTitle(task))
+        } actions: {
+            Button("在此窗口打开") {
+                ownership.claim(task.id, scene: navigation.sceneID, holder: claims.id, force: true)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.primary)
+            .foregroundStyle(Theme.primaryForeground)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.terminal)
+    }
+
+    // MARK: - 任务页（逐任务保活）
+
+    @ViewBuilder
     private func taskPage(_ task: Coflux_V1_Task) -> some View {
-        VStack(spacing: 0) {
+        if !ownsTerminal(task.id) {
+            elsewherePlaceholder(task)
+        } else {
             TerminalHostView(
                 client: client,
                 taskID: task.id,
@@ -448,16 +956,23 @@ struct WorkspaceDetailView: View {
                     termCols = cols
                     termRows = rows
                 },
-                onAtBottomChanged: { atBottomByTask[task.id] = $0 },
-                onBottomSlackChanged: { bottomSlackByTask[task.id] = $0 }
+                onAtBottomChanged: { atBottomByTask[task.id] = $0 }
             )
+            // Pinned while the compose layer is up: whatever the page does under the keyboard,
+            // the terminal keeps its size, so it never reflows for typing.
+            .frame(width: frozenTerminalSize?.width, height: frozenTerminalSize?.height)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .clipped()
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                if !composing { liveTerminalSize = size }
+            }
         }
     }
 
     private var emptyState: some View {
         ContentUnavailableView {
             Label {
-                Text("暂无任务")
+                Text("暂无终端")
             } icon: {
                 Image("square-terminal")
                     .resizable()
@@ -470,7 +985,9 @@ struct WorkspaceDetailView: View {
             Button("新建终端") { createTerminal() }
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.primary)
+                .foregroundStyle(Theme.primaryForeground)
         }
+        .background(Theme.background)
     }
 
     private func createTerminal() {
@@ -478,71 +995,84 @@ struct WorkspaceDetailView: View {
         client.createTask(workspaceID: workspace.id, title: "终端 \(members.count + 1)")
     }
 
-    /// fullScreenCover 默认自下滑入/滑出；成文层要的是背景淡入淡出（内容层
-    /// 自己做 fade），故呈现切换一律禁系统动画
+    // MARK: - Sending
+
+    private var keySender: TerminalKeySender {
+        TerminalKeySender(client: client, task: activeTask)
+    }
+
+    private var composerPlaceholder: String {
+        guard let task = activeTask, let agent = client.agent(forTask: task), !agent.agent.isEmpty else {
+            return "输入命令…"
+        }
+        return "回复 \(agent.agent)…"
+    }
+
+    /// 成文层自己做淡入淡出，挂载/拆除不带系统过渡
     private func setComposing(_ on: Bool) {
+        if on, liveTerminalSize.width > 0 { frozenTerminalSize = liveTerminalSize }
+        if on, pageSize.width > 0 { frozenPageSize = pageSize }
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) { composing = on }
+        if !on {
+            // Let go once the keyboard is down and the page is back to its size.
+            Task {
+                try? await Task.sleep(for: .milliseconds(450))
+                if !composing {
+                    frozenTerminalSize = nil
+                    frozenPageSize = nil
+                }
+            }
+        }
     }
 
-    /// sendText 的静默前置条件：任务在跑且有 session。不满足时 sendText 什么
-    /// 都不做，调用方要自己兜底（对讲落地会退到草稿，不让话凭空丢）。
+    /// 发送的前置条件：任务在跑且有 session。不满足时什么都不发，调用方自己兜底（成文层留驻
+    /// 提示「终端未运行」，对讲落地退到草稿，不让话凭空丢）。
     private var terminalReady: Bool {
         guard let task = activeTask else { return false }
         return task.status == .running && task.hasSessionID
     }
 
-    /// 发送文本到激活任务：单行字面文本原样落终端，不追加回车、不包
-    /// bracketed paste（plan 054/055 复议 053——包裹依赖接收端 2004 模式，
-    /// 未开时草稿内 \n 会被当回车执行，即真机「时灵时不灵」根因；提交时机
-    /// 由用户按控制板大回车决定——对讲确认发送也只落文本，回车仍在用户手里，
-    /// plan 067/068）。换行符只可能经粘贴/语音混入，信任边界上以空格拍平。
-    /// 成文草稿与对讲成稿共用此路径（plan 066 landmine：蒙层落文本不得
-    /// 绕过它自行写终端）。
-    private func sendText(_ text: String) {
-        guard terminalReady, let task = activeTask, !text.isEmpty else { return }
-        let payload = text.components(separatedBy: .newlines).joined(separator: " ")
+    /// Writes `text` to the active terminal as one input, without Enter — the user presses Enter
+    /// themselves (2026-11-08). The compose layer and dictation's send both come through here.
+    /// Returns whether anything was sent.
+    @discardableResult
+    private func sendText(_ text: String) -> Bool {
+        guard terminalReady, let task = activeTask,
+              let payload = ComposerPayload.bytes(text, withEnter: false) else { return false }
         client.sendInput(sessionID: task.sessionID, payload)
+        return true
     }
 
-    private func sendDraft() {
-        sendText(draft)
+    private func sendDraft() -> Bool {
+        guard sendText(draft) else { return false }
         draft = ""
-        // 呈现层的拆除由 overlay 的 fadeOutAndDismiss 统一走淡出时序，此处不拆
+        return true
     }
 
-    // MARK: - 长按对讲（plan 064 → 066 确认态 → 067 松手直发 → plan 068
-    // 复议恢复确认关卡 → plan 069 乐观启动）：占位条长按开始，蒙层底部两颗
-    // 按钮（左取消 / 右发送）。快慢两档——按住期间滑进哪颗，松手就直接执行
-    // 哪个；原地松手则进确认态，草稿定格等用户点发送/点文字编辑。转写文字
-    // 落终端必经显式确认：coflux 是纯转文字，识别错误没有兜底（2026-08-01
-    // 用户复议推翻 067 松手直发）。
-    // 采音早于蒙层（plan 069）：按下即起 session（prewarm），长按判定通过才
-    // 显示蒙层（begin），未达长按松手则静默拆掉（abort）——按下瞬间说的话由
-    // session 的 pendingPCM 接住，蒙层显现时草稿里已有第一个词。
+    // MARK: - 长按对讲（plan 064 → 066 确认态 → 067 松手直发 → plan 068 复议恢复确认关卡 →
+    // plan 069 乐观启动）：composer 长按开始，蒙层上两颗按钮（左取消 / 右发送）。按住期间滑进哪颗，
+    // 松手就直接执行哪个；原地松手则进确认态，草稿定格等用户点发送/点文字编辑。转写文字落终端
+    // 必经显式确认：coflux 是纯转文字，识别错误没有兜底。
 
-    /// 按下即采音（plan 069）：touch down 去抖后起 session，蒙层不显示。
-    /// 长按判定通过时 beginDictation 直接接管这个 session——不得丢弃重建，
-    /// 那样预热采到的音全废，等于没做（landmine）。按下抖动可能重入，
-    /// 靠 session 非空幂等去重。
-    /// 未授权时整段跳过（判据见 DictationSession.permissionsGranted）：否则
-    /// 首次点一下占位条想打字就弹麦克风权限框。
+    /// 按下即采音（plan 069）：touch down 去抖后起 session，蒙层不显示。长按判定通过时
+    /// beginDictation 直接接管这个 session——不得丢弃重建。未授权时整段跳过：否则首次点一下
+    /// composer 想打字就弹麦克风权限框。
     private func prewarmDictation() {
         guard dictationSession == nil, DictationSession.permissionsGranted else { return }
         startDictation()
     }
 
-    /// 长按判定通过：显示蒙层。session 通常已在预热中（复用）；未授权/预热被
-    /// 跳过时此刻才起，走完整 start()（含权限请求），与 069 之前完全一致。
+    /// 长按判定通过：显示蒙层。session 通常已在预热中（复用）；未授权/预热被跳过时此刻才起，
+    /// 走完整 start()（含权限请求）。
     private func beginDictation() {
         if dictationSession == nil { startDictation() }
         dictationOverlayVisible = true
     }
 
-    /// 未达长按就松手（plan 069）：静默拆预热 session，不弹任何提示——麦克风
-    /// 必须在这条路径上释放，否则悬挂 tap 让下次长按静音或崩溃（AudioCapture
-    /// landmine）。蒙层已显示 = 走的是正常松手分发（endDictation），不插手。
+    /// 未达长按就松手（plan 069）：静默拆预热 session——麦克风必须在这条路径上释放，否则悬挂
+    /// tap 让下次长按静音或崩溃（AudioCapture landmine）。蒙层已显示 = 正常松手分发，不插手。
     private func abortDictation() {
         guard !dictationOverlayVisible, let session = dictationSession else { return }
         dictationSession = nil
@@ -566,14 +1096,10 @@ struct WorkspaceDetailView: View {
 
     /// 松手分发：按松手瞬间命中的按钮决定去向。
     /// - 取消：立即弃稿拆层，不等终稿；
-    /// - 其余：finalizing 短暂留驻等 session.finish() 落定拿终稿——finish()
-    ///   在松手瞬间就跑（松手即释放麦克风，不能拖到用户点发送，landmine），
-    ///   且落定前不得拆 session/蒙层（权限引导会闪没，plan 066 landmine），
-    ///   也不得用松手瞬间的 volatile 文本抢跑。终稿到手后：
-    ///   滑入发送 → 直接落终端输入行并拆层（手指滑过去就是明确意图）；
-    ///   原地松手 → 停在确认态等显式点击；空转写 → 直接拆层，什么都不落；
-    ///   权限被拒 / 无字可看的失败保留 064 的留驻示错态（点任意处关闭），
-    ///   失败带字则并入确认态（蒙层在气泡下加错误标注，文字仍可发送/编辑）。
+    /// - 其余：finalizing 短暂留驻等 session.finish() 落定拿终稿（finish() 在松手瞬间就跑，松手
+    ///   即释放麦克风；落定前不得拆 session/蒙层，也不得用 volatile 文本抢跑）。终稿到手后：
+    ///   滑入发送 → 直接落终端（文字 + 回车）并拆层；原地松手 → 停在确认态；空转写 → 直接拆层；
+    ///   权限被拒 / 无字可看的失败留驻示错，失败带字则并入确认态。
     private func endDictation() {
         guard let session = dictationSession else { return }
         let zone = dictationZone
@@ -605,8 +1131,7 @@ struct WorkspaceDetailView: View {
         }
     }
 
-    /// 确认态点「发送」：终稿已落定（确认态只在 finish() 返回后才出现），
-    /// 直接取当前文本落地。
+    /// 确认态点「发送」：终稿已落定，直接取当前文本落地。
     private func sendDictation() {
         guard let session = dictationSession else { return }
         let text = session.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -614,8 +1139,7 @@ struct WorkspaceDetailView: View {
         deliver(text)
     }
 
-    /// 确认态点草稿文字：落 draft 开成文层继续编辑（plan 066 的通道，
-    /// 067 删掉，068 恢复）。
+    /// 确认态点草稿文字：落 draft 开成文层继续编辑。
     private func editDictation() {
         guard let session = dictationSession else { return }
         let text = session.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -624,13 +1148,11 @@ struct WorkspaceDetailView: View {
         setComposing(true)
     }
 
-    /// 对讲成稿落地：能直发就走 sendText（单行不回车）；落不下去（任务已退出/
-    /// 无 session，sendText 会静默 no-op）退到草稿，用户的话不能凭空消失。
+    /// 对讲成稿落地：走与成文层同一条「只发文字」路径；落不下去（任务已退出/无 session）
+    /// 退到草稿，用户的话不能凭空消失。
     private func deliver(_ text: String) {
         guard !text.isEmpty else { return }
-        if terminalReady {
-            sendText(text)
-        } else {
+        if !sendText(text) {
             draft = text
         }
     }
@@ -641,16 +1163,16 @@ struct WorkspaceDetailView: View {
     private func statusStrip(_ task: Coflux_V1_Task) -> some View {
         if client.detachedTaskIDs.contains(task.id) {
             banner(
-                text: "已被其它客户端接管，当前为旁观视图",
+                text: "此终端正在其他设备上使用",
                 icon: "eye",
                 tint: Theme.warning,
-                actionLabel: "强制接管"
+                actionLabel: "在此使用"
             ) {
                 client.startTask(taskID: task.id, cols: termCols, rows: termRows, force: true)
             }
         } else if task.status != .running {
             banner(
-                text: task.status == .exited ? "会话已退出" : "任务尚未启动",
+                text: task.status == .exited ? "会话已退出" : "终端尚未启动",
                 icon: "play.circle",
                 tint: Theme.mutedForeground,
                 actionLabel: "启动"
@@ -658,7 +1180,7 @@ struct WorkspaceDetailView: View {
                 client.startTask(taskID: task.id, cols: termCols, rows: termRows)
             }
         } else if task.hasSessionID, client.blockedSessionIDs.contains(task.sessionID) {
-            banner(text: "终端输入等待确认，缓冲区已满", icon: "hourglass", tint: Theme.warning, actionLabel: nil, action: nil)
+            banner(text: "输入过多，正在等待终端处理", icon: "hourglass", tint: Theme.warning, actionLabel: nil, action: nil)
         }
     }
 
@@ -682,8 +1204,14 @@ struct WorkspaceDetailView: View {
             }
         }
         .foregroundStyle(tint)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
-        .background(tint.opacity(0.10))
+        .padding(.leading, 14)
+        .padding(.trailing, 8)
+        .padding(.vertical, 7)
+        // Floats over terminal text: an opaque card, tinted.
+        .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(tint.opacity(0.25), lineWidth: 1))
+        .padding(.horizontal, 8)
+        .padding(.bottom, 8)
     }
 }

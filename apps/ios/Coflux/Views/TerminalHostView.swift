@@ -4,32 +4,45 @@ import SwiftTerm
 
 /// 激活终端的能力注册表：输入板据此决定方向键序列（DECCKM，plan 053）；
 /// 滚到底浮键经此触达激活任务的 TerminalView（plan 056）。
+///
+/// Process-wide and keyed by task id, so with several windows two terminal views of one task can
+/// overlap for a moment: SwiftUI does not order one window's `dismantleUIView` against another
+/// window's `updateUIView`. Every entry therefore carries its registrant's token, the same way
+/// `CofluxClient` guards its session consumers: a view that lost the terminal cannot unregister
+/// (or overwrite) the entry of the view that now owns it (plan D12).
 @MainActor
 final class TerminalModeRegistry {
     static let shared = TerminalModeRegistry()
-    private var applicationCursorGetters: [String: () -> Bool] = [:]
-    private var scrollToBottomActions: [String: () -> Void] = [:]
+
+    private struct Entry {
+        let token: UUID
+        let applicationCursor: () -> Bool
+        let scrollToBottom: () -> Void
+    }
+
+    private var entries: [String: Entry] = [:]
 
     func register(
         taskID: String,
+        token: UUID,
         applicationCursor: @escaping () -> Bool,
         scrollToBottom: @escaping () -> Void
     ) {
-        applicationCursorGetters[taskID] = applicationCursor
-        scrollToBottomActions[taskID] = scrollToBottom
+        entries[taskID] = Entry(token: token, applicationCursor: applicationCursor, scrollToBottom: scrollToBottom)
     }
 
-    func unregister(taskID: String) {
-        applicationCursorGetters[taskID] = nil
-        scrollToBottomActions[taskID] = nil
+    /// Removes the entry only while it is still the caller's.
+    func unregister(taskID: String, token: UUID) {
+        guard entries[taskID]?.token == token else { return }
+        entries[taskID] = nil
     }
 
     func applicationCursor(taskID: String) -> Bool {
-        applicationCursorGetters[taskID]?() ?? false
+        entries[taskID]?.applicationCursor() ?? false
     }
 
     func scrollToBottom(taskID: String) {
-        scrollToBottomActions[taskID]?()
+        entries[taskID]?.scrollToBottom()
     }
 }
 
@@ -39,14 +52,16 @@ final class TerminalModeRegistry {
 /// - RUNNING 任务在绑定时以终端实际 dims 发起 attach（client.startTask 内部路由）
 struct TerminalHostView: UIViewRepresentable {
     let client: CofluxClient
+    /// The window this view lives in, checked against the ownership registry: a view whose window
+    /// no longer owns the terminal (it is about to be replaced by a placeholder) neither binds,
+    /// registers, nor resizes the PTY. Absent outside a scene shell, where the view always owns.
+    @Environment(TerminalOwnership.self) private var ownership: TerminalOwnership?
+    @Environment(SceneNavigation.self) private var navigation: SceneNavigation?
     let taskID: String
     let sessionID: String?
     var onSizeChanged: ((UInt32, UInt32) -> Void)?
     /// 离底态变化上报（plan 056）：true = 已在底部。详情页据此显隐滚到底浮键
     var onAtBottomChanged: ((Bool) -> Void)?
-    /// 底部空白上报（pt）：内容底边以下的空白高度。详情页据此把面板抬升量
-    /// clamp 到真正需要让出的量——新终端内容在顶、下半屏全空时不裁顶
-    var onBottomSlackChanged: ((CGFloat) -> Void)?
 
     /// ANSI 16 色对齐 web xterm theme（terminal-pane.tsx:197-211）。web 未指定的
     /// bright 位沿用 normal 同色（brightBlack/brightWhite 例外），保持双端观感一致。
@@ -71,6 +86,10 @@ struct TerminalHostView: UIViewRepresentable {
         // 点状态栏回顶是 UIScrollView 系统默认，终端场景纯误触源（plan 056）；
         // 反向的滚到底走右下浮键
         view.scrollsToTop = false
+        // No rubber band: a flick that reaches the bottom switches SwiftTerm back to following
+        // the output, and it then pins the offset to the bottom while the bounce animation pulls
+        // the other way — the view knocks against the bottom several times (seen on the Duo).
+        view.bounces = false
         view.terminalDelegate = context.coordinator
         // 字体/光标/配色对齐 web 终端（bar 光标；iOS 的 monospacedSystemFont
         // 即 SF Mono，与 web 首选字体同族）。字号 13 而非 web 的 12：
@@ -83,17 +102,35 @@ struct TerminalHostView: UIViewRepresentable {
         view.installColors(Self.webAnsiPalette)
         view.setCursorStyle(.blinkBar)
         context.coordinator.terminalView = view
+        context.coordinator.isOwner = ownerCheck()
         return view
     }
 
     func updateUIView(_ uiView: TerminalView, context: Context) {
-        context.coordinator.taskID = taskID
-        context.coordinator.bind(sessionID: sessionID)
+        let coordinator = context.coordinator
+        coordinator.taskID = taskID
+        coordinator.isOwner = ownerCheck()
+        coordinator.bind(sessionID: sessionID)
+        guard coordinator.isOwner() else { return }
         TerminalModeRegistry.shared.register(
             taskID: taskID,
+            token: coordinator.registryToken,
             applicationCursor: { [weak uiView] in uiView?.terminalInputStateSnapshot()?.applicationCursor ?? false },
-            scrollToBottom: { [weak uiView] in uiView?.scroll(toPosition: 1.0) }
+            scrollToBottom: { [weak uiView] in
+                guard let uiView else { return }
+                // A flick may still be decelerating: stop it first, or the momentum carries on
+                // after the jump and the view bounces against the bottom a few times.
+                uiView.setContentOffset(uiView.contentOffset, animated: false)
+                uiView.scroll(toPosition: 1.0)
+            }
         )
+    }
+
+    /// Whether this view's window owns the terminal right now.
+    private func ownerCheck() -> @MainActor () -> Bool {
+        guard let ownership, let scene = navigation?.sceneID else { return { true } }
+        let taskID = taskID
+        return { [weak ownership] in ownership?.isOwned(taskID, by: scene) ?? true }
     }
 
     static func dismantleUIView(_ uiView: TerminalView, coordinator: Coordinator) {
@@ -105,8 +142,7 @@ struct TerminalHostView: UIViewRepresentable {
             client: client,
             taskID: taskID,
             onSizeChanged: onSizeChanged,
-            onAtBottomChanged: onAtBottomChanged,
-            onBottomSlackChanged: onBottomSlackChanged
+            onAtBottomChanged: onAtBottomChanged
         )
     }
 
@@ -116,10 +152,11 @@ struct TerminalHostView: UIViewRepresentable {
         var taskID: String
         private let onSizeChanged: ((UInt32, UInt32) -> Void)?
         private let onAtBottomChanged: ((Bool) -> Void)?
-        private let onBottomSlackChanged: ((CGFloat) -> Void)?
         private var lastAtBottom: Bool?
-        private var lastBottomSlack: CGFloat = -1
         weak var terminalView: TerminalView?
+        /// This view's token in `TerminalModeRegistry`.
+        let registryToken = UUID()
+        var isOwner: @MainActor () -> Bool = { true }
         private var boundSessionID: String?
         private var releaseConsumer: (@MainActor () -> Void)?
 
@@ -127,18 +164,19 @@ struct TerminalHostView: UIViewRepresentable {
             client: CofluxClient,
             taskID: String,
             onSizeChanged: ((UInt32, UInt32) -> Void)?,
-            onAtBottomChanged: ((Bool) -> Void)?,
-            onBottomSlackChanged: ((CGFloat) -> Void)?
+            onAtBottomChanged: ((Bool) -> Void)?
         ) {
             self.client = client
             self.taskID = taskID
             self.onSizeChanged = onSizeChanged
             self.onAtBottomChanged = onAtBottomChanged
-            self.onBottomSlackChanged = onBottomSlackChanged
         }
 
         func bind(sessionID: String?) {
             guard sessionID != boundSessionID else { return }
+            // A view whose window lost the terminal must not take the session's single consumer
+            // slot back from the owning window (it is about to be dismantled anyway).
+            guard isOwner() else { return }
             releaseConsumer?()
             releaseConsumer = nil
             boundSessionID = sessionID
@@ -150,14 +188,13 @@ struct TerminalHostView: UIViewRepresentable {
                 // feed 后补刷离底态：新输出/replace 会改变 scrollback 与 yDisp，
                 // 而 scrolled 回调只保证用户拖动路径（plan 056 landmine）
                 self.reportScrollState()
-                self.reportBottomSlack()
             }
             let dims = terminalView.terminalDimensions
             client.startTask(taskID: taskID, cols: UInt32(dims.cols), rows: UInt32(dims.rows))
         }
 
         func release() {
-            TerminalModeRegistry.shared.unregister(taskID: taskID)
+            TerminalModeRegistry.shared.unregister(taskID: taskID, token: registryToken)
             releaseConsumer?()
             releaseConsumer = nil
             boundSessionID = nil
@@ -178,9 +215,8 @@ struct TerminalHostView: UIViewRepresentable {
             let cols = UInt32(newCols)
             let rows = UInt32(newRows)
             onSizeChanged?(cols, rows)
-            reportBottomSlack()
-            guard let sessionID = boundSessionID else { return }
-            // 尾沿去抖：布局连续变化（输入区展开/收起、系统键盘滑入）只把最终
+            guard let sessionID = boundSessionID, isOwner() else { return }
+            // 尾沿去抖：布局连续变化（窗口缩放、折叠姿态切换、状态横幅出现）只把最终
             // 尺寸发给 daemon，避免 SIGWINCH 风暴让远端 TUI 重画闪动（plan 053）
             resizeDebounce?.cancel()
             resizeDebounce = Task { [client] in
@@ -198,27 +234,6 @@ struct TerminalHostView: UIViewRepresentable {
             guard atBottom != lastAtBottom else { return }
             lastAtBottom = atBottom
             onAtBottomChanged?(atBottom)
-        }
-
-        /// 底部空白：normal buffer 且无 scrollback 时 = 光标行以下的空白高度；
-        /// 有 scrollback 或 alternate buffer（全屏 TUI）内容满屏，slack 恒 0。
-        /// ponytail: 光标行近似内容底行——normal buffer 光标上移后打印会低估空白，可接受
-        private func reportBottomSlack() {
-            guard let view = terminalView else { return }
-            var slack: CGFloat = 0
-            // Cheap checks first; the full state snapshot (cursor row) is taken only
-            // when slack can be non-zero.
-            if !view.canScroll,
-               let input = view.terminalInputStateSnapshot(),
-               !input.isAlternateBuffer,
-               input.dimensions.rows > 0 {
-                let rows = input.dimensions.rows
-                let rowsBelow = rows - view.terminalStateSnapshot().cursor.row - 1
-                slack = view.frame.height * CGFloat(rowsBelow) / CGFloat(rows)
-            }
-            guard abs(slack - lastBottomSlack) > 0.5 else { return }
-            lastBottomSlack = slack
-            onBottomSlackChanged?(slack)
         }
 
         func setTerminalTitle(source: TerminalView, title: String) {}

@@ -2,10 +2,10 @@ import CofluxClientCore
 import SwiftUI
 import UIKit
 
-/// Agent secret request cards (plan 20260926-ios-secret-input), anchored at the top of the
-/// requesting terminal page below the status strip: the page is immune to the keyboard, so a card at
-/// the bottom would have its buttons covered once the field raises it. Same content and states as
-/// the desktop card (apps/desktop/.../secret-request-card.tsx). Every client of the account shows
+/// Agent secret request cards (plan 20260926-ios-secret-input), shown in `SecretRequestSheet`, the
+/// bottom sheet opened from a home card or the terminal page (Duo redesign, mockup O8; the sheet
+/// rises with the keyboard, so the buttons stay reachable). Same content and states as the desktop
+/// card (apps/desktop/.../secret-request-card.tsx). Every client of the account shows
 /// the request; the first answer wins, and a request that leaves the live set (answered elsewhere,
 /// expired, the agent stopped waiting) simply stops being rendered.
 ///
@@ -28,13 +28,14 @@ struct SecretRequestCards: View {
 
     var body: some View {
         if !requests.isEmpty {
-            VStack(spacing: 8) {
+            VStack(spacing: 22) {
                 ForEach(requests) { request in
                     SecretRequestCard(client: client, request: request, source: source, deviceName: deviceName)
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 16)
             .padding(.top, 8)
+            .padding(.bottom, 22)
         }
     }
 }
@@ -80,48 +81,38 @@ private struct SecretRequestCard: View {
     }
 
     private var card: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             header
             if !request.reason.isEmpty {
                 reason
             }
             field
             if let failure {
-                Text("\(failure)，可以重试。")
+                Text("\(failure)，请重试。")
                     .font(Theme.Fonts.label)
                     .foregroundStyle(Theme.destructive)
                     .fixedSize(horizontal: false, vertical: true)
             }
             footer
         }
-        .padding(14)
-        .glassEffect(.regular, in: .rect(cornerRadius: 18))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Agent 请求输入 \(request.name)")
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "key.fill")
-                .font(Theme.Fonts.label)
-                .foregroundStyle(Theme.warning)
-                .padding(.top, 2)
+        HStack(alignment: .center, spacing: 10) {
+            AgentAvatar(mark: .secret, size: 34)
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text("Agent 请求输入")
-                        .font(Theme.Fonts.label.weight(.semibold))
-                        .foregroundStyle(Theme.foreground)
-                    Text(request.name)
-                        .font(Theme.Fonts.label.monospaced())
-                        .foregroundStyle(Theme.foreground)
-                        .lineLimit(1)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Theme.secondarySurface, in: RoundedRectangle(cornerRadius: 4))
-                }
+                Text(request.name)
+                    .font(Theme.Fonts.body.weight(.semibold).monospaced())
+                    .foregroundStyle(Theme.foreground)
+                    .lineLimit(1)
+                Text("Agent 请求输入")
+                    .font(Theme.Fonts.label)
+                    .foregroundStyle(Theme.mutedForeground)
                 Text(source)
                     .font(Theme.Fonts.meta)
-                    .foregroundStyle(Theme.mutedForeground)
+                    .foregroundStyle(Theme.subtleForeground)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -133,7 +124,8 @@ private struct SecretRequestCard: View {
                 Image(systemName: "xmark")
                     .font(Theme.Fonts.label.weight(.semibold))
                     .foregroundStyle(Theme.mutedForeground)
-                    .frame(width: 30, height: 30)
+                    .frame(width: Theme.Metrics.roundButton, height: Theme.Metrics.roundButton)
+                    .background(Theme.accentSurface, in: Circle())
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -148,8 +140,8 @@ private struct SecretRequestCard: View {
             .foregroundStyle(Theme.foreground)
             .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
-        return VStack(alignment: .leading, spacing: 3) {
-            Text("Agent 说")
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("Agent 说明")
                 .font(Theme.Fonts.meta)
                 .foregroundStyle(Theme.mutedForeground)
             // A long reason scrolls inside a capped box instead of pushing the buttons off screen.
@@ -159,10 +151,10 @@ private struct SecretRequestCard: View {
             }
             .frame(maxHeight: 120)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.secondarySurface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+        .background(Theme.accentSurface, in: RoundedRectangle(cornerRadius: 16))
     }
 
     @ViewBuilder
@@ -173,6 +165,14 @@ private struct SecretRequestCard: View {
             HStack(spacing: 8) {
                 singleLineField
                 pasteButton
+            }
+            .padding(.leading, 16)
+            .padding(.trailing, 7)
+            .frame(height: 52)
+            .background(Theme.terminal, in: RoundedRectangle(cornerRadius: 18))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18)
+                    .strokeBorder(Theme.mutedForeground.opacity(0.45), lineWidth: 1)
             }
         }
     }
@@ -193,10 +193,8 @@ private struct SecretRequestCard: View {
             }
             .privacySensitive()
             .disabled(isSubmitting)
-            .font(Theme.Fonts.body)
-            .padding(.horizontal, 12)
-            .frame(height: 42)
-            .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
+            .font(Theme.Fonts.body.monospaced())
+            .frame(maxHeight: .infinity)
             .accessibilityLabel("\(request.name) 的值")
     }
 
@@ -207,10 +205,10 @@ private struct SecretRequestCard: View {
             accept(text)
         } label: {
             Image(systemName: "doc.on.clipboard")
-                .font(Theme.Fonts.body)
+                .font(Theme.Fonts.label.weight(.semibold))
                 .foregroundStyle(Theme.foreground)
-                .frame(width: 42, height: 42)
-                .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
+                .frame(width: Theme.Metrics.roundButton, height: Theme.Metrics.roundButton)
+                .background(Theme.accentSurface, in: Circle())
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -226,10 +224,10 @@ private struct SecretRequestCard: View {
                 .font(Theme.Fonts.body)
                 .foregroundStyle(Theme.mutedForeground)
             VStack(alignment: .leading, spacing: 1) {
-                Text("已粘贴多行值 · \(SecretPaste.lineCount(value)) 行")
+                Text("已粘贴 \(SecretPaste.lineCount(value)) 行内容")
                     .font(Theme.Fonts.label.weight(.semibold))
                     .foregroundStyle(Theme.foreground)
-                Text("内容已遮蔽，换行原样保留")
+                Text("内容已隐藏，换行会原样保留")
                     .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.mutedForeground)
             }
@@ -249,11 +247,16 @@ private struct SecretRequestCard: View {
             .accessibilityLabel("清除粘贴的值")
         }
         .privacySensitive()
-        .padding(.horizontal, 12)
-        .frame(minHeight: 42)
-        .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .frame(minHeight: 52)
+        .background(Theme.terminal, in: RoundedRectangle(cornerRadius: 18))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18)
+                .strokeBorder(Theme.mutedForeground.opacity(0.45), lineWidth: 1)
+        }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(request.name) 的值，多行，已遮蔽")
+        .accessibilityLabel("\(request.name) 的值，多行，已隐藏")
     }
 
     private func accept(_ text: String) {
@@ -266,18 +269,17 @@ private struct SecretRequestCard: View {
     }
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("只交给 \(deviceName.isEmpty ? "该设备" : deviceName)，Agent 看不到 · \(deadline) 过期")
-                .font(Theme.Fonts.meta)
+        VStack(alignment: .leading, spacing: 14) {
+            Text("仅发送到\(deviceName.isEmpty ? "该设备" : "「\(deviceName)」")，Agent 无法查看 · \(deadline) 过期")
+                .font(Theme.Fonts.label)
                 .foregroundStyle(Theme.mutedForeground)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
+            HStack(spacing: 10) {
                 Button {
                     submit(.decline)
                 } label: {
                     buttonLabel("拒绝", busy: isSubmitting(.decline), tint: Theme.foreground)
-                        .background(Theme.secondarySurface, in: RoundedRectangle(cornerRadius: 8))
+                        .background(Theme.accentSurface, in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .disabled(isSubmitting)
@@ -285,7 +287,7 @@ private struct SecretRequestCard: View {
                     submit(.provide(value))
                 } label: {
                     buttonLabel("提供", busy: isSubmitting(.provide), tint: Theme.primaryForeground)
-                        .background(Theme.primary, in: RoundedRectangle(cornerRadius: 8))
+                        .background(Theme.primary, in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .disabled(isSubmitting || value.isEmpty)
@@ -297,7 +299,7 @@ private struct SecretRequestCard: View {
     private func buttonLabel(_ title: String, busy: Bool, tint: Color) -> some View {
         ZStack {
             Text(title)
-                .font(Theme.Fonts.label.weight(.semibold))
+                .font(Theme.Fonts.body.weight(.semibold))
                 .opacity(busy ? 0 : 1)
             if busy {
                 ProgressView()
@@ -306,8 +308,9 @@ private struct SecretRequestCard: View {
             }
         }
         .foregroundStyle(tint)
-        .padding(.horizontal, 16)
-        .frame(height: 34)
+        .frame(maxWidth: .infinity)
+        .frame(height: 50)
+        .contentShape(Capsule())
     }
 
     private func submit(_ answer: SecretAnswer) {
