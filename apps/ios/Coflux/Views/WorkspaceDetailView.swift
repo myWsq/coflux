@@ -6,9 +6,10 @@ import UIKit
 /// The terminal page (plan 049 → Duo redesign, plan D3/D13/D16): the active terminal fills the
 /// content area down to the resting dock; every terminal of the workspace stays mounted in a
 /// horizontal pager (swipe to switch, each attached and kept alive; leaving the page unmounts
-/// them). All chrome is the system's: the navigation title names the terminal, and the toolbar
-/// carries 终端 (the terminal list), 附件, 按键 (the full keypad) and 更多 — on the outer display the
-/// system draws them on the vertical rail. Status banners sit in a strip at the top of the content.
+/// them). Above the terminal a tray of avatars names and switches the terminals (outer display,
+/// Split View halves, split detail, open tall); a short wide window has the title and a 终端 menu
+/// instead. The toolbar carries 新建终端, 附件, 按键 (the full keypad) and 更多 — on the outer
+/// display the system draws them on the vertical rail. Status banners float over the terminal.
 ///
 /// 新建终端沿 mobile 语义：taskCreate 无请求-响应关联，记录发送前已知 id 集合，快照增量新出现的
 /// 任务即自建、自动激活并启动。
@@ -122,6 +123,13 @@ struct WorkspaceDetailView: View {
         layout != .tall && laidOutSize.height >= laidOutSize.width
     }
 
+    /// The avatar tray names and switches the terminals, in place of the title and the 终端 menu:
+    /// with the bars on the rail, and in the tall layout (the inner display open tall), whose
+    /// page is as tall and narrow as the outer display's. A short wide window keeps the menu.
+    private var showsStrip: Bool {
+        barsOnRail || layout == .tall
+    }
+
     // MARK: - Titles
 
     /// A directory workspace (no repository) is the device's terminal: the device names the page.
@@ -190,9 +198,9 @@ struct WorkspaceDetailView: View {
         .navigationTitle(titleText)
         .navigationSubtitle(subtitleText)
         .navigationBarTitleDisplayMode(.inline)
-        // With the bars on the rail the title would be the only thing left in a bar across the
-        // top: drop it and give the height to the terminal; 终端 names the page instead.
-        .toolbar(removing: barsOnRail ? .title : nil)
+        // The tray names the terminals: drop the title. With the bars on the rail it would be
+        // the only thing left in a bar across the top, so the terminal gets that height too.
+        .toolbar(removing: showsStrip ? .title : nil)
         // The bottom of the rail belongs to this page's toolbar, not the tab bar.
         .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbarContent }
@@ -311,7 +319,10 @@ struct WorkspaceDetailView: View {
         if members.isEmpty {
             emptyState
         } else if layout == .tall {
-            tallArrangement
+            VStack(spacing: 0) {
+                terminalStrip
+                tallArrangement
+            }
         } else {
             VStack(spacing: 0) {
                 // The bars sit on the rail and the page shows no title: the strip names the
@@ -603,8 +614,13 @@ struct WorkspaceDetailView: View {
                 .visibilityPriority(.low)
             ToolbarItem(placement: .bottomBar) { pasteButton }
         } else {
-            ToolbarItem(placement: .topBarTrailing) { terminalsMenu }
-                .visibilityPriority(.high)
+            if showsStrip {
+                ToolbarItem(placement: .topBarTrailing) { newTerminalButton }
+                    .visibilityPriority(.high)
+            } else {
+                ToolbarItem(placement: .topBarTrailing) { terminalsMenu }
+                    .visibilityPriority(.high)
+            }
             ToolbarItem(placement: .topBarTrailing) { attachMenu }
                 .visibilityPriority(.low)
             ToolbarItem(placement: .topBarTrailing) { pasteButton }
