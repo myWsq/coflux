@@ -99,6 +99,9 @@ struct WorkspaceListView: View {
                 pageDots(items)
             }
         }
+        // A horizontal scroll view reaches into the safe area along its axis: on the outer
+        // display the next card showed through the system rail. Clip to the content column.
+        .clipped()
     }
 
     private func waitingCard(_ item: WaitingItem) -> some View {
