@@ -411,6 +411,12 @@ struct WorkspaceDetailView: View {
 
     private static let avatarOverlap: CGFloat = 10
 
+    /// The pile's width, rings included.
+    private var avatarsWidth: CGFloat {
+        guard !members.isEmpty else { return 0 }
+        return avatarSize + CGFloat(members.count - 1) * (avatarSize - Self.avatarOverlap) + 6
+    }
+
     /// A round avatar: the agent's mark and a white ring on the active terminal (faint on the
     /// others; none when the workspace has one terminal). No state dot (user's call,
     /// 2026-11-08): the list shows the states.
@@ -696,21 +702,20 @@ struct WorkspaceDetailView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         if !barsOnRail {
-            // The rail's title row, in the top bar: the title on the left, the avatars on the
-            // right, in the room left by the back button, two trailing items and the status
-            // bar's corner. A fixed width: offered its ideal size, the bar squeezed the title to
-            // a sliver; too wide, it folded 新建终端 and 更多 into the system's overflow button.
+            // The rail's title row, in the top bar: the title on the left; the avatars right
+            // before 新建终端 and 更多, solid (no shared glass). The title gets a fixed width — the
+            // room left by the back button, the trailing items and the status bar's corner:
+            // offered its ideal size, the bar squeezed it to a sliver; too wide, the bar folded
+            // the trailing items into its overflow button.
             ToolbarItem(placement: .topBarLeading) {
-                HStack(spacing: 12) {
-                    pageTitle
-                    Spacer(minLength: 0)
-                    if !members.isEmpty {
-                        terminalAvatars
-                    }
-                }
-                .frame(width: max(180, laidOutSize.width - 380), alignment: .leading)
+                pageTitle
+                    .frame(width: max(120, laidOutSize.width - 392 - avatarsWidth), alignment: .leading)
             }
             .sharedBackgroundVisibility(.hidden)
+            if !members.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) { terminalAvatars }
+                    .sharedBackgroundVisibility(.hidden)
+            }
         }
         if members.isEmpty {
             ToolbarItem(placement: .topBarTrailing) { newTerminalButton }
