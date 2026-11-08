@@ -155,7 +155,10 @@ struct WorkspaceDetailView: View {
         client.deviceName(workspace.daemonID)
     }
 
+    /// What the terminal is doing (its title, as on the desktop tab), else its agent, else its
+    /// own name.
     private func terminalName(_ task: Coflux_V1_Task) -> String {
+        if let title = client.terminalTitle(forTask: task) { return title }
         if let agent = client.agent(forTask: task), !agent.agent.isEmpty { return agent.agent }
         return taskTitle(task)
     }
@@ -446,6 +449,8 @@ struct WorkspaceDetailView: View {
                         .font((stripInTopBar ? Theme.Fonts.body : Theme.Fonts.label).weight(.semibold))
                         .foregroundStyle(Theme.foreground)
                         .lineLimit(1)
+                        // A task summary can run long: truncate it, the tray scrolls the rest.
+                        .frame(maxWidth: stripInTopBar ? 150 : 200, alignment: .leading)
                         .transition(.opacity)
                 }
             }

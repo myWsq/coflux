@@ -106,6 +106,21 @@ extension CofluxClient {
         return sessionAgents[task.sessionID]?.session
     }
 
+    /// What the terminal is doing, as the desktop tab says it: the title the program running in
+    /// it set (OSC 0/2 — Claude Code writes a summary of its task there). It reaches this client
+    /// with the session's checkpoints. The leading status mark (Claude's ✳ or spinner) is dropped:
+    /// Clawd shows the state. Nil when no title is known.
+    func terminalTitle(forTask task: Coflux_V1_Task) -> String? {
+        guard task.hasSessionID,
+              let checkpoint = sessionCheckpoints[task.sessionID],
+              checkpoint.taskID == task.id
+        else { return nil }
+        let title = checkpoint.title
+            .drop { !$0.isLetter && !$0.isNumber }
+            .trimmingCharacters(in: .whitespaces)
+        return title.isEmpty ? nil : title
+    }
+
     /// A device's display name: its name, else its host.
     func deviceName(_ daemonID: String) -> String {
         guard let daemon = daemons.first(where: { $0.daemonID == daemonID }) else { return "" }
