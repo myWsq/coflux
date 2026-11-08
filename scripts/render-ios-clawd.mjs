@@ -22,8 +22,8 @@ const assetDir = path.join(root, "apps/ios/Coflux/Assets.xcassets/Clawd");
 const swiftFile = path.join(root, "apps/ios/Coflux/Views/ClawdFrames.generated.swift");
 const chrome = process.env.CHROME_BIN ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
-/** The glyph's box on iOS, in points: the view box is fitted into it (meet), as on the desktop. */
-const GLYPH_PT = 18;
+/** The glyph box the frames are rendered for, in points (the view box is fitted into it, meet, as on the desktop): above the sizes iOS shows, so they only scale down. */
+const GLYPH_PT = 24;
 const SCALE = 3;
 
 const svgs = Object.fromEntries(

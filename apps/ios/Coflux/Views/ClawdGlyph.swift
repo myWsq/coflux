@@ -44,7 +44,8 @@ enum ClawdSheet: String {
 /// the desktop. With Reduce Motion each pose holds one frame.
 struct ClawdGlyph: View {
     let pose: ClawdPose
-    var size: CGFloat = ClawdSheet.renderedGlyphSize
+    /// At most `ClawdSheet.renderedGlyphSize`, so the frames only ever scale down.
+    var size: CGFloat = 18
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var frame = 0
 

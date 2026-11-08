@@ -79,9 +79,6 @@ struct WorkspaceDetailView: View {
     @State private var laptopPose = false
     /// The strip's active pill slides between tabs.
     @Namespace private var tabNamespace
-    /// Finished terminals the user has looked at: Clawd stands still on them instead of throwing
-    /// confetti (the desktop's `seen`).
-    @State private var seenDoneTaskIDs: Set<String> = []
 
     /// Below this content height the key row folds into 按键 and only the composer stays
     /// (tall Split View, outer display in landscape): the terminal keeps its rows.
@@ -448,7 +445,7 @@ struct WorkspaceDetailView: View {
                     .foregroundStyle(Theme.destructive)
                     .frame(width: 18, height: 18)
             } else {
-                ClawdGlyph(pose: ClawdPose(state: agent.state, seen: seenDoneTaskIDs.contains(task.id)))
+                ClawdGlyph(pose: ClawdPose(state: agent.state, seen: navigation.seenFinishedTaskIDs.contains(task.id)))
             }
         } else {
             Circle()
@@ -468,13 +465,12 @@ struct WorkspaceDetailView: View {
         }.map(\.id)
     }
 
-    /// A finished terminal counts as seen once it is the active one; it forgets that when its
-    /// agent starts another turn.
+    /// A finished terminal counts as seen once it is the active one (the shell forgets it when
+    /// its agent starts another turn).
     private func updateSeenFinished() {
-        let finished = Set(finishedTaskIDs)
-        var seen = seenDoneTaskIDs.intersection(finished)
-        if let active = activeTaskID, finished.contains(active) { seen.insert(active) }
-        if seen != seenDoneTaskIDs { seenDoneTaskIDs = seen }
+        guard let active = activeTaskID, finishedTaskIDs.contains(active),
+              !navigation.seenFinishedTaskIDs.contains(active) else { return }
+        navigation.seenFinishedTaskIDs.insert(active)
     }
 
     /// The agent's name, or the terminal's title when another terminal here shows the same name.

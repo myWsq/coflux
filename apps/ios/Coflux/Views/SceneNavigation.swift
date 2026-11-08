@@ -66,6 +66,11 @@ final class SceneNavigation {
     var columnVisibility: NavigationSplitViewVisibility = .all
     /// A terminal created from home that opens once it appears in the snapshot.
     var pendingTerminal: PendingTerminal?
+    /// Terminals whose agent finished its turn and that the user has looked at since (the
+    /// desktop's `seen`): Clawd stands still on them instead of throwing confetti, on the tabs
+    /// and on home. The terminal page adds the active one; the shell forgets a terminal once
+    /// its agent is no longer finished.
+    var seenFinishedTaskIDs: Set<String> = []
 
     struct PendingTerminal: Equatable {
         let workspaceID: String
@@ -107,5 +112,6 @@ final class SceneNavigation {
         devicePath = []
         columnVisibility = .all
         pendingTerminal = nil
+        seenFinishedTaskIDs = []
     }
 }

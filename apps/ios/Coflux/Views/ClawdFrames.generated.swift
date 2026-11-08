@@ -13,5 +13,5 @@ extension ClawdSheet {
     }
 
     /// The glyph box the frames were rendered for, in points.
-    static let renderedGlyphSize: CGFloat = 18
+    static let renderedGlyphSize: CGFloat = 24
 }

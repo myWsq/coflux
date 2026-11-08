@@ -120,7 +120,7 @@ struct WorkspaceListView: View {
     private func waitingCardBody(_ text: WaitingItemText, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                AgentAvatar(mark: text.mark)
+                AgentAvatar(mark: text.mark, clawd: .raise)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(text.title)
                         .font(Theme.Fonts.rowTitle)

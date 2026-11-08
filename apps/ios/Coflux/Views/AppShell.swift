@@ -34,10 +34,24 @@ struct AppShell: View {
         .overlay(alignment: .top) {
             ErrorToast(client: client)
         }
+        // A finished terminal the user looked at is forgotten once its agent is no longer
+        // finished, so its next finished turn throws confetti again.
+        .onChange(of: finishedTaskIDs) { _, finished in
+            let seen = navigation.seenFinishedTaskIDs.intersection(finished)
+            if seen != navigation.seenFinishedTaskIDs { navigation.seenFinishedTaskIDs = seen }
+        }
         // A terminal created from home opens (and starts) as soon as it appears.
         .onChange(of: client.tasks.map(\.id)) { _, _ in
             openPendingTerminal()
         }
+    }
+
+    /// Terminals whose agent has finished its turn.
+    private var finishedTaskIDs: Set<String> {
+        Set(client.sessionAgents.values.compactMap { info in
+            let state = info.session.state
+            return state == "done" || state == "waiting" ? info.session.taskID : nil
+        })
     }
 
     private func openPendingTerminal() {

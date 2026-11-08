@@ -451,7 +451,7 @@ struct TerminalInputArea: View {
 
     private func noticeBar(mark: AgentAvatar.Mark, title: String, detail: String?) -> some View {
         HStack(spacing: 10) {
-            AgentAvatar(mark: mark, size: 26)
+            AgentAvatar(mark: mark, size: 26, clawd: .raise)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(Theme.Fonts.label.weight(.semibold))

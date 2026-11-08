@@ -15,6 +15,8 @@ struct AgentAvatar: View {
     let mark: Mark
     var size: CGFloat = 34
     var dot: Color?
+    /// Claude's mark is Clawd, in this pose (the desktop's tab glyph).
+    var clawd: ClawdPose = .idle
 
     var body: some View {
         RoundedRectangle(cornerRadius: size * 0.32)
@@ -47,9 +49,7 @@ struct AgentAvatar: View {
                     .font(.system(size: size * 0.42, weight: .semibold))
                     .foregroundStyle(Theme.mutedForeground)
             case "claude":
-                Text("✻")
-                    .font(.system(size: size * 0.5, weight: .bold))
-                    .foregroundStyle(Theme.warning)
+                ClawdGlyph(pose: clawd, size: min(size * 0.7, ClawdSheet.renderedGlyphSize))
             case "codex":
                 Text(">_")
                     .font(.system(size: size * 0.38, weight: .bold, design: .monospaced))
@@ -121,6 +121,9 @@ struct WorkspaceActivity {
 
     /// The agent shown on the row (nil: no agent, the row shows the branch icon).
     let agent: String?
+    /// That agent's turn state (`SessionAgentRef.state`); a pending secret request counts as
+    /// waiting for approval.
+    let agentState: String?
     let tone: Tone
     let subtitle: String
     /// The terminal the row opens: the one that waits, else the agent's, else nil (keep the last).
@@ -149,11 +152,13 @@ struct WorkspaceActivity {
         }
         if let secret = client.pendingSecretRequest(workspaceID: workspace.id) {
             agent = best?.ref.agent
+            agentState = "approval"
             tone = .waiting
             subtitle = "等待输入 \(secret.name)"
             taskID = secret.taskID
         } else if let best, best.rank >= 1 {
             agent = best.ref.agent
+            agentState = best.ref.state
             taskID = best.task.id
             let message = best.ref.message.isEmpty ? nil : best.ref.message
             switch best.rank {
@@ -172,6 +177,7 @@ struct WorkspaceActivity {
             }
         } else {
             agent = best?.ref.agent
+            agentState = best?.ref.state
             taskID = best?.task.id
             if tasks.isEmpty {
                 tone = .idle
@@ -221,10 +227,17 @@ struct WorkspaceRowIcon: View {
     let workspace: Coflux_V1_Workspace
     let activity: WorkspaceActivity
     var size: CGFloat = 26
+    @Environment(SceneNavigation.self) private var navigation
+
+    /// Clawd's pose for the row's agent: confetti for a finished turn nobody has looked at yet.
+    private var clawd: ClawdPose {
+        let seen = activity.taskID.map { navigation.seenFinishedTaskIDs.contains($0) } ?? false
+        return ClawdPose(state: activity.agentState ?? "", seen: seen)
+    }
 
     var body: some View {
         if let agent = activity.agent {
-            AgentAvatar(mark: .agent(agent), size: size, dot: activity.tone.color)
+            AgentAvatar(mark: .agent(agent), size: size, dot: activity.tone.color, clawd: clawd)
         } else {
             // 与桌面侧栏同源：lucide GitBranch（asset 模板渲染），main 分支用 warning 色
             Image("git-branch")

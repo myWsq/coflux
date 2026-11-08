@@ -135,7 +135,7 @@ struct HomeSidebar: View {
             }
         } label: {
             HStack(spacing: 10) {
-                AgentAvatar(mark: text.mark, size: 26, dot: Theme.warning)
+                AgentAvatar(mark: text.mark, size: 26, dot: Theme.warning, clawd: .raise)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(text.isSecret ? text.title : (workspaceTitle(item.workspaceID) ?? text.title))
                         .font(Theme.Fonts.rowTitle)
