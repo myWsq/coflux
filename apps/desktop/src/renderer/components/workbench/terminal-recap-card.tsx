@@ -10,6 +10,7 @@ function statusOf(state: string): { dots: ActivityDotsStatus; label: string } | 
   if (state === "active") return { dots: "active", label: "正在执行" };
   if (state === "approval") return { dots: "approval", label: "等待批准" };
   if (state === "question") return { dots: "question", label: "等待回答" };
+  if (state === "error") return { dots: "error", label: "出错停止" };
   if (state === "done" || state === "waiting") return { dots: "done", label: "本轮完成" };
   return null;
 }
