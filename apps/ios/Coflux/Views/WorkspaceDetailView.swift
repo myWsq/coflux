@@ -77,6 +77,11 @@ struct WorkspaceDetailView: View {
     /// Tall layout, half folded with a horizontal fold: the keypad is inline below the fold and
     /// the 按键 toolbar item goes away (plan D9).
     @State private var laptopPose = false
+    /// The strip's active pill slides between tabs.
+    @Namespace private var tabNamespace
+    /// Finished terminals the user has looked at: Clawd stands still on them instead of throwing
+    /// confetti (the desktop's `seen`).
+    @State private var seenDoneTaskIDs: Set<String> = []
 
     /// Below this content height the key row folds into 按键 and only the composer stays
     /// (tall Split View, outer display in landscape): the terminal keeps its rows.
@@ -282,6 +287,8 @@ struct WorkspaceDetailView: View {
             .onChange(of: activeTaskID) { _, id in
                 claimTerminals(activating: id)
             }
+            .onChange(of: activeTaskID, initial: true) { _, _ in updateSeenFinished() }
+            .onChange(of: finishedTaskIDs) { _, _ in updateSeenFinished() }
             // Terminals nobody owns (new ones, or ones another window let go) are taken quietly.
             .onChange(of: unownedTaskIDs) { _, _ in
                 claimTerminals(activating: nil)
@@ -363,62 +370,111 @@ struct WorkspaceDetailView: View {
         proxy.reservedRegions(kind: .division).contains { $0.isActive && $0.frame.width > $0.frame.height }
     }
 
-    /// The terminals of this workspace as a row of tabs: a state dot and the name, the active one
-    /// raised. A tap switches (the pager follows); a swipe of the pager moves the highlight.
+    /// The terminals of this workspace as a segmented control on a Liquid Glass capsule (the
+    /// references were pillowtalk's and Notion's floating glass switchers): each tab is the
+    /// agent's glyph — Clawd in its state's pose for claude — and the name; the active one sits on
+    /// a raised pill that slides between tabs. A tap switches (the pager follows); a swipe of the
+    /// pager moves the pill.
     private var terminalStrip: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal) {
-                HStack(spacing: 18) {
+                HStack(spacing: 2) {
                     ForEach(members, id: \.id) { task in
                         terminalTab(task)
                             .id(task.id)
                     }
                 }
-                .padding(.horizontal, 16)
+                // Swiping the pager changes the active terminal without a transaction: slide anyway.
+                .animation(.smooth(duration: 0.25), value: activeTaskID)
+                .padding(Self.tabTrackInset)
+                .glassEffect(.regular, in: .capsule)
+                .padding(.horizontal, 8)
             }
             .scrollIndicators(.hidden)
+            // Clawd's confetti and flag reach above the tab: let them, and clip only sideways.
+            .scrollClipDisabled()
             .onChange(of: activeTaskID, initial: true) { _, id in
                 guard let id else { return }
                 withAnimation(.smooth(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
             }
         }
-        .frame(height: 32)
-        .padding(.top, 4)
-        .background(alignment: .bottom) {
-            Rectangle()
-                .fill(Theme.border)
-                .frame(height: 1)
-        }
+        .frame(height: Self.tabHeight + Self.tabTrackInset * 2)
+        // 36 pt in all, as the underline strip it replaced: the terminal keeps its rows.
+        .padding(.top, 3)
+        .padding(.bottom, 1)
+        .mask { Rectangle().padding(.vertical, -60) }
         .background(Theme.terminal)
     }
 
-    /// Underline tabs: the active terminal's name is bright and underlined.
+    private static let tabHeight: CGFloat = 26
+    private static let tabTrackInset: CGFloat = 3
+
     private func terminalTab(_ task: Coflux_V1_Task) -> some View {
         let active = task.id == activeTaskID
         return Button {
             withAnimation(.smooth(duration: 0.3)) { activeTaskID = task.id }
         } label: {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(tabTone(task))
-                    .frame(width: 6, height: 6)
+                tabGlyph(task)
                 Text(tabName(task))
                     .font(Theme.Fonts.label.weight(active ? .semibold : .regular))
                     .lineLimit(1)
             }
             .foregroundStyle(active ? Theme.foreground : Theme.mutedForeground)
-            .frame(maxHeight: .infinity)
-            .overlay(alignment: .bottom) {
-                Capsule()
-                    .fill(Theme.foreground)
-                    .frame(height: 2)
-                    .opacity(active ? 1 : 0)
+            .padding(.leading, 9)
+            .padding(.trailing, 12)
+            .frame(height: Self.tabHeight)
+            .background {
+                if active {
+                    Capsule()
+                        .fill(Theme.foreground.opacity(0.14))
+                        .matchedGeometryEffect(id: "activeTerminalTab", in: tabNamespace)
+                }
             }
-            .contentShape(.rect)
+            .contentShape(.capsule)
         }
         .buttonStyle(.plain)
-        .animation(.smooth(duration: 0.2), value: active)
         .accessibilityAddTraits(active ? .isSelected : [])
+    }
+
+    /// Claude: Clawd in its state's pose (the desktop's tab glyph), the error cross when it
+    /// stopped on an error. Any other terminal: the state dot.
+    @ViewBuilder
+    private func tabGlyph(_ task: Coflux_V1_Task) -> some View {
+        if task.status == .running, let agent = client.agent(forTask: task), agent.agent.lowercased() == "claude" {
+            if agent.state == "error" {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.destructive)
+                    .frame(width: 18, height: 18)
+            } else {
+                ClawdGlyph(pose: ClawdPose(state: agent.state, seen: seenDoneTaskIDs.contains(task.id)))
+            }
+        } else {
+            Circle()
+                .fill(tabTone(task))
+                .frame(width: 7, height: 7)
+                .frame(width: 12, height: 18)
+        }
+    }
+
+    // MARK: - Finished turns the user has looked at
+
+    /// Terminals whose agent finished its turn: they throw confetti until the user looks at them.
+    private var finishedTaskIDs: [String] {
+        members.filter { task in
+            let state = client.agent(forTask: task)?.state
+            return state == "done" || state == "waiting"
+        }.map(\.id)
+    }
+
+    /// A finished terminal counts as seen once it is the active one; it forgets that when its
+    /// agent starts another turn.
+    private func updateSeenFinished() {
+        let finished = Set(finishedTaskIDs)
+        var seen = seenDoneTaskIDs.intersection(finished)
+        if let active = activeTaskID, finished.contains(active) { seen.insert(active) }
+        if seen != seenDoneTaskIDs { seenDoneTaskIDs = seen }
     }
 
     /// The agent's name, or the terminal's title when another terminal here shows the same name.
