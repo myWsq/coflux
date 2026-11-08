@@ -597,6 +597,31 @@ export class Store {
     });
   }
 
+  /* ---------------------- account speech key ---------------------- */
+  /** The account's dictation API key (plan 20261108-ios-seed-asr) as stored: ciphertext only — the
+   * store never encrypts or decrypts. */
+  async getSpeechKey(accountId: AccountId): Promise<{ ciphertext: string; updatedAt: number } | undefined> {
+    const rows = await this.sql<{ ciphertext: string; updatedAt: number }[]>`
+      SELECT api_key_ciphertext AS ciphertext, updated_at FROM account_speech_keys
+      WHERE account_id = ${accountId}
+    `;
+    return rows[0];
+  }
+  /** Replace the account's key ciphertext (last write wins). */
+  async setSpeechKey(accountId: AccountId, ciphertext: string, updatedAt: number): Promise<void> {
+    await this.sql`
+      INSERT INTO account_speech_keys (account_id, api_key_ciphertext, updated_at)
+      VALUES (${accountId}, ${ciphertext}, ${updatedAt})
+      ON CONFLICT (account_id) DO UPDATE SET
+        api_key_ciphertext = excluded.api_key_ciphertext,
+        updated_at = excluded.updated_at
+    `;
+  }
+  /** Remove the account's key; a no-op when none is stored. */
+  async clearSpeechKey(accountId: AccountId): Promise<void> {
+    await this.sql`DELETE FROM account_speech_keys WHERE account_id = ${accountId}`;
+  }
+
   /* ---------------------------- devices ---------------------------- */
   async createDevice(d: Device): Promise<Device> {
     await this.sql`
