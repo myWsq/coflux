@@ -190,7 +190,8 @@ struct WorkspaceDetailView: View {
         .ignoresSafeArea(.keyboard)
         .navigationTitle(titleText)
         .navigationSubtitle(subtitleText)
-        .navigationBarTitleDisplayMode(.inline)
+        // The workspace on the leading side, as large as the bar allows (the home's title style)
+        .toolbarTitleDisplayMode(.inlineLarge)
         // The bottom of the rail belongs to this page's toolbar, not the tab bar.
         .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbarContent }
