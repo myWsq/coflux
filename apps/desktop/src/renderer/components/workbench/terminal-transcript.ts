@@ -32,11 +32,11 @@ const MAX_AGENT_SESSION_ID_LENGTH = 128;
 export const TRANSCRIPT_TAIL_BYTES = 512 * 1024;
 
 /** The one line our locator scripts print before the tail, so the head loss is not guesswork. */
-const HEADER_PREFIX = "coflux-transcript";
+export const HEADER_PREFIX = "coflux-transcript";
 
 /** Exit codes shared by both locator scripts. 0 = found, everything else is a distinct state. */
-const EXIT_NOT_FOUND = 3;
-const EXIT_READ_FAILED = 4;
+export const EXIT_NOT_FOUND = 3;
+export const EXIT_READ_FAILED = 4;
 
 /**
  * Claude's transcript is `<config>/projects/<slug>/<session-id>.jsonl`. The glob stays
