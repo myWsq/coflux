@@ -43,15 +43,21 @@ const SKILL_REFERENCES: &[(&str, &str)] = &[
         include_str!("../../../packages/cli/skills/coflux/references/workspaces.md"),
     ),
 ];
-const EVENTS: &[&str] = &[
+/// Claude events the managed integration hooks, each for a job other than turn state (which comes
+/// from OSC 7501): session context and the agent session id (`SessionStart`, `UserPromptSubmit`),
+/// the worktree guard (`PreToolUse`), worktree follow (`PostToolUse`), the session's end
+/// (`SessionEnd`) and worktree forget (`WorktreeRemove`).
+const CLAUDE_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
-    "PermissionRequest",
-    "Stop",
     "SessionEnd",
+    "WorktreeRemove",
 ];
+/// Codex events the managed integration hooks: session context, the agent session id and the
+/// session's end.
+const CODEX_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "SessionEnd"];
 
 fn home() -> PathBuf {
     std::env::var_os("COFLUX_HOME")
@@ -151,18 +157,13 @@ fn hook_command(root: &Path, host: &str) -> String {
 }
 fn claude_hooks(root: &Path) -> Value {
     let mut hooks = serde_json::Map::new();
-    for event in EVENTS.iter().copied().chain([
-        "PostToolUseFailure",
-        "Notification",
-        "StopFailure",
-        "WorktreeRemove",
-    ]) {
+    for event in CLAUDE_EVENTS.iter().copied() {
         hooks.insert(event.to_string(), json!([{"hooks":[{"type":"command","command":hook_command(root,"claude"),"timeout":8}]}]));
     }
     json!({"hooks":hooks})
 }
 fn codex_args(root: &Path) -> Vec<String> {
-    EVENTS
+    CODEX_EVENTS
         .iter()
         .flat_map(|event| {
             [

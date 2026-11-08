@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use coflux_protocol::{CommandStateInfo, MAX_FRAME_ID_BYTES};
 
+use crate::sessiond::ProgramStatus;
+
 pub const FRAME_OUTPUT: u8 = 1;
 pub const FRAME_INPUT: u8 = 2;
 pub const FRAME_REPLAY: u8 = 3;
@@ -124,6 +126,16 @@ pub enum SessiondEvent {
     /// reaches the center as metadata without the runtime rendering a snapshot.
     #[serde(rename = "session.title")]
     SessionTitle { session_id: String, title: String },
+    /// The session's root OSC 7501 record changed; `None` = it is gone. Pushed so agent presence
+    /// is reported at once rather than at the next process scan. Also pushed after every
+    /// `resync.list` for every session in it, `None` included, which is how a rebuilt session's
+    /// record reaches the core and how a lost push is repaired.
+    #[serde(rename = "session.programStatus")]
+    SessionProgramStatus {
+        session_id: String,
+        #[serde(default)]
+        status: Option<ProgramStatus>,
+    },
     #[serde(rename = "resync.list")]
     ResyncList {
         /// Unused since the launcher checks health itself; kept empty.
