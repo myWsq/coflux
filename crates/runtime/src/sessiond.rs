@@ -7,6 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use coflux_protocol::ipc::CommandStateInfo;
+use serde::{Deserialize, Serialize};
 
 mod vt;
 
@@ -38,6 +39,148 @@ enum ScanEvent {
     Title(Vec<u8>),
     /// An OSC 133 mark that presented the session secret.
     Mark(Mark),
+    /// A well-formed OSC 7501 program status report.
+    ProgramStatus(ProgramReport),
+    /// The OSC 7501 support probe (`OSC 7501 ; ? ST`), answered with the same terminator.
+    ProgramStatusProbe(OscTerminator),
+    /// RIS (`ESC c`): a full reset of the terminal.
+    Reset,
+}
+
+/// How an OSC sequence ended. A reply ends the same way, since some programs only recognise
+/// replies that match their request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OscTerminator {
+    Bel,
+    /// `ESC \` (any ESC ends an OSC; the `\` is its own dispatch).
+    St,
+}
+
+/// What the program is doing, per the OSC 7501 Program Status Protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProgramState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+}
+
+/// What a blocked program needs from the user; only meaningful with [`ProgramState::Blocked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockedKind {
+    Permission,
+    Question,
+    Auth,
+}
+
+/// The root OSC 7501 record of a session: the facts of the last report, unmapped. How they
+/// become agent presence is decided by the runtime core (`observed.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramStatus {
+    pub state: ProgramState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<BlockedKind>,
+    /// The program's self-reported name, raw (sanitised by the core).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app: String,
+    /// The decoded `msg`, stripped of control characters and clamped like a title.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub message: String,
+}
+
+/// One parsed OSC 7501 report: `status` is `None` for `state=clear`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProgramReport {
+    /// The record path; empty = the root record.
+    id: Vec<u8>,
+    status: Option<ProgramStatus>,
+}
+
+/// sessiond's answer to the OSC 7501 probe, without its terminator: every state and blocked kind
+/// it understands.
+const PROGRAM_STATUS_PROBE_REPLY: &[u8] =
+    b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth";
+
+fn program_status_probe_reply(terminator: OscTerminator) -> Vec<u8> {
+    let mut reply = PROGRAM_STATUS_PROBE_REPLY.to_vec();
+    reply.extend_from_slice(match terminator {
+        OscTerminator::Bel => b"\x07",
+        OscTerminator::St => b"\x1b\\",
+    });
+    reply
+}
+
+/// Parse an OSC 7501 report body (`key=value:key=value`). Unknown keys are ignored, a repeated
+/// key's last value wins, pairs without `=` are skipped; a missing or unknown `state` drops the
+/// whole report. `truncated` = the capture was cut, so its last pair may be incomplete and is
+/// dropped.
+fn parse_program_report(body: &[u8], truncated: bool) -> Option<ProgramReport> {
+    let body = if truncated {
+        &body[..body.iter().rposition(|byte| *byte == b':')?]
+    } else {
+        body
+    };
+    let mut state = None;
+    let mut id: &[u8] = b"";
+    let mut kind: &[u8] = b"";
+    let mut app: &[u8] = b"";
+    let mut msg: &[u8] = b"";
+    for pair in body.split(|byte| *byte == b':') {
+        let Some(split) = pair.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        let (key, value) = (&pair[..split], &pair[split + 1..]);
+        match key {
+            b"state" => state = Some(value),
+            b"id" => id = value,
+            b"kind" => kind = value,
+            b"app" => app = value,
+            b"msg" => msg = value,
+            _ => {}
+        }
+    }
+    let state = match state? {
+        b"idle" => Some(ProgramState::Idle),
+        b"working" => Some(ProgramState::Working),
+        b"done" => Some(ProgramState::Done),
+        b"blocked" => Some(ProgramState::Blocked),
+        b"error" => Some(ProgramState::Error),
+        b"clear" => None,
+        _ => return None,
+    };
+    let status = state.map(|state| ProgramStatus {
+        state,
+        kind: match (state, kind) {
+            (ProgramState::Blocked, b"permission") => Some(BlockedKind::Permission),
+            (ProgramState::Blocked, b"question") => Some(BlockedKind::Question),
+            (ProgramState::Blocked, b"auth") => Some(BlockedKind::Auth),
+            _ => None,
+        },
+        app: String::from_utf8_lossy(app).into_owned(),
+        message: decode_program_message(msg),
+    });
+    Some(ProgramReport {
+        id: id.to_vec(),
+        status,
+    })
+}
+
+/// `msg` is base64 UTF-8; padding is optional. Undecodable = no message.
+fn decode_program_message(raw: &[u8]) -> String {
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    use base64::Engine as _;
+    const ENGINE: GeneralPurpose = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    );
+    match ENGINE.decode(raw) {
+        Ok(decoded) => clamp_title(&decoded),
+        Err(_) => String::new(),
+    }
 }
 
 /// Lightweight scanner that follows libghostty-vt's parser states on the feeding thread, so
@@ -49,9 +192,10 @@ enum ScanEvent {
 ///   against; cut inside a multi-byte character and the new terminal prints a broken one. A quiet
 ///   PTY only decides when the supervisor asks; it is never the boundary itself: a shell may well
 ///   write one OSC in two `write(2)`s further apart than the batching window.
-/// - **Did this byte complete a DA1 query, a DECSET of mode 2027, a title or a mark?** See
-///   [`ScanEvent`]. Titles and marks are captured here, from a bounded payload buffer, rather
-///   than through libghostty callbacks, which run on the terminal thread.
+/// - **Did this byte complete a DA1 query, a DECSET of mode 2027, a title, a mark, an OSC 7501
+///   program status report or probe, or a full reset?** See [`ScanEvent`]. Titles, marks and
+///   program status are captured here, from a bounded payload buffer, rather than through
+///   libghostty callbacks, which run on the terminal thread.
 ///
 /// The states mirror libghostty's parse table: CAN/SUB abort any sequence and ESC starts a new
 /// one; outside ground, the 8-bit C1 bytes 0x80-0x9F start or end sequences as the table says,
@@ -267,7 +411,7 @@ impl OutputScanner {
             // ESC ends an OSC the way ST does (the `\` that follows is an ESC dispatch of its
             // own); CAN and SUB abort it.
             let event = (matches!(self.state, ScanState::Osc) && byte == 0x1b)
-                .then(|| self.dispatch_osc())
+                .then(|| self.dispatch_osc(OscTerminator::St))
                 .flatten();
             self.enter(next);
             return event;
@@ -276,6 +420,10 @@ impl OutputScanner {
         let next = match &mut self.state {
             ScanState::Ground => unreachable!("ground is handled above"),
             ScanState::Escape => match byte {
+                b'c' => {
+                    self.state = ScanState::Ground;
+                    return Some(ScanEvent::Reset);
+                }
                 0x20..=0x2f => Some(ScanState::EscapeIntermediate),
                 b'P' => Some(ScanState::DcsEntry),
                 b'X' | b'^' | b'_' => Some(ScanState::SosPmApc),
@@ -297,7 +445,7 @@ impl OutputScanner {
             },
             ScanState::Osc => match byte {
                 0x07 => {
-                    let event = self.dispatch_osc();
+                    let event = self.dispatch_osc(OscTerminator::Bel);
                     self.state = ScanState::Ground;
                     return event;
                 }
@@ -330,10 +478,16 @@ impl OutputScanner {
         None
     }
 
-    fn dispatch_osc(&mut self) -> Option<ScanEvent> {
+    fn dispatch_osc(&mut self, terminator: OscTerminator) -> Option<ScanEvent> {
         let capture = std::mem::take(&mut self.osc);
         if capture.kind != OscKind::Wanted {
             return None;
+        }
+        if let Some(body) = capture.payload.strip_prefix(b"7501;") {
+            if body == b"?" && !capture.truncated {
+                return Some(ScanEvent::ProgramStatusProbe(terminator));
+            }
+            return parse_program_report(body, capture.truncated).map(ScanEvent::ProgramStatus);
         }
         let params: Vec<&[u8]> = capture
             .payload
@@ -353,8 +507,9 @@ impl OutputScanner {
 /// OSC 标题的长度钳制（plan 075）：标题是 PTY 内程序给的不可信输入，源头截断。
 const MAX_TITLE_BYTES: usize = 256;
 
-/// OSC payload bytes captured for titles and marks. A longer OSC 0/2 keeps its first bytes (its
-/// title is clamped to [`MAX_TITLE_BYTES`] anyway); a longer OSC 133 is never a mark.
+/// OSC payload bytes captured for titles, marks and program status. A longer OSC 0/2 keeps its
+/// first bytes (its title is clamped to [`MAX_TITLE_BYTES`] anyway); a longer OSC 133 is never a
+/// mark; a longer OSC 7501 loses its cut last pair.
 const OSC_CAPTURE_BYTES: usize = 4096;
 
 /// OSC parameters split on `;`, as the pre-libghostty runtime did: the last one keeps any further separators.
@@ -365,7 +520,7 @@ enum OscKind {
     /// The command number is not complete yet.
     #[default]
     Undecided,
-    /// OSC 0, 2 or 133: captured.
+    /// OSC 0, 2, 133 or 7501: captured.
     Wanted,
     /// Anything else: not captured.
     Ignored,
@@ -390,7 +545,7 @@ impl OscCapture {
         match self.kind {
             OscKind::Ignored => return,
             OscKind::Undecided if byte == b';' => {
-                self.kind = if matches!(self.payload.as_slice(), b"0" | b"2" | b"133") {
+                self.kind = if matches!(self.payload.as_slice(), b"0" | b"2" | b"133" | b"7501") {
                     OscKind::Wanted
                 } else {
                     OscKind::Ignored
@@ -400,7 +555,7 @@ impl OscCapture {
                     return;
                 }
             }
-            OscKind::Undecided if self.payload.len() >= 3 => {
+            OscKind::Undecided if self.payload.len() >= 4 => {
                 self.kind = OscKind::Ignored;
                 self.payload = Vec::new();
                 return;
@@ -529,6 +684,15 @@ fn grapheme_resets(bytes: &[u8]) -> Vec<usize> {
         .collect()
 }
 
+/// A terminal query completed by PTY output that sessiond may have to answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalQuery {
+    /// A DA1 query; the output seq of its final byte.
+    Da1(u64),
+    /// The OSC 7501 probe, with the terminator its reply must use.
+    ProgramStatus(OscTerminator),
+}
+
 pub struct TerminalState {
     /// The libghostty terminal, on its own thread. Every read waits behind the feeds queued
     /// before it, so it always matches `output_seq`.
@@ -547,8 +711,13 @@ pub struct TerminalState {
     output_seq: u64,
     retransmit: VecDeque<Delta>,
     retransmit_bytes: usize,
-    /// Output seqs of the final bytes of the DA1 queries completed by the last `feed`.
-    da1_queries: Vec<u64>,
+    /// The terminal queries the last `feed` completed, in output order.
+    queries: Vec<TerminalQuery>,
+    /// The session's root OSC 7501 record; `None` = no program reported, or the record was
+    /// cleared. Never checkpointed: a rebuild recovers it only from the replayed ring.
+    program_status: Option<ProgramStatus>,
+    /// The record changed since the last [`TerminalState::take_program_status_change`].
+    program_status_changed: bool,
     /// Output seq of the final byte of the last terminal query sessiond answered itself; 0 = none.
     /// A client resuming below it would receive that query raw and answer it a second time, so
     /// such a resume gets a snapshot instead. Carried in checkpoints across sessiond rebuilds.
@@ -569,7 +738,9 @@ impl TerminalState {
             output_seq: 0,
             retransmit: VecDeque::new(),
             retransmit_bytes: 0,
-            da1_queries: Vec::new(),
+            queries: Vec::new(),
+            program_status: None,
+            program_status_changed: false,
             answered_query_seq: 0,
         }
     }
@@ -582,9 +753,10 @@ impl TerminalState {
     }
 
     /// Hand the bytes to the terminal thread without waiting for them to be applied; title,
-    /// marks, DA1 queries and the checkpoint boundary come from the scanner on this thread.
+    /// marks, terminal queries, program status and the checkpoint boundary come from the scanner
+    /// on this thread.
     pub fn feed(&mut self, bytes: &[u8]) -> Option<Delta> {
-        self.da1_queries.clear();
+        self.queries.clear();
         if bytes.is_empty() {
             return None;
         }
@@ -596,12 +768,30 @@ impl TerminalState {
             match self.scanner.feed(byte) {
                 None => {}
                 Some(ScanEvent::Da1Query) => {
-                    self.da1_queries.push(from_seq.saturating_add(index as u64));
+                    self.queries
+                        .push(TerminalQuery::Da1(from_seq.saturating_add(index as u64)));
+                }
+                Some(ScanEvent::ProgramStatusProbe(terminator)) => {
+                    self.queries.push(TerminalQuery::ProgramStatus(terminator));
                 }
                 Some(ScanEvent::GraphemeClusterSet) => grapheme_resets.push(index),
                 // The last title of a chunk wins, as it always has.
                 Some(ScanEvent::Title(raw)) => pending_title = Some(raw),
-                Some(ScanEvent::Mark(mark)) => self.command.apply(mark),
+                Some(ScanEvent::Mark(mark)) => {
+                    self.command.apply(mark);
+                    // A new prompt from this session's own shell: whatever program reported its
+                    // status has handed control back.
+                    if mark == Mark::PromptStart {
+                        self.set_program_status(None);
+                    }
+                }
+                // Only the root record is kept; child records are ignored.
+                Some(ScanEvent::ProgramStatus(report)) => {
+                    if report.id.is_empty() {
+                        self.set_program_status(report.status);
+                    }
+                }
+                Some(ScanEvent::Reset) => self.set_program_status(None),
             }
         }
         if let Some(pending) = pending_title {
@@ -628,10 +818,44 @@ impl TerminalState {
         self.scanner.between_sequences()
     }
 
+    /// The terminal queries the last `feed` completed, in output order. Only `feed` records
+    /// them: `resize` and `restore` replay canonical snapshots, never queries.
+    pub fn take_queries(&mut self) -> Vec<TerminalQuery> {
+        std::mem::take(&mut self.queries)
+    }
+
     /// Output seqs of the final bytes of the DA1 queries the last `feed` completed, in order.
-    /// Only `feed` records them: `resize` and `restore` replay canonical snapshots, never queries.
+    #[cfg(test)]
     pub fn take_da1_queries(&mut self) -> Vec<u64> {
-        std::mem::take(&mut self.da1_queries)
+        self.take_queries()
+            .into_iter()
+            .filter_map(|query| match query {
+                TerminalQuery::Da1(seq) => Some(seq),
+                TerminalQuery::ProgramStatus(_) => None,
+            })
+            .collect()
+    }
+
+    /// A report replaces the record whole; an identical one is not a change.
+    fn set_program_status(&mut self, status: Option<ProgramStatus>) {
+        if self.program_status != status {
+            self.program_status = status;
+            self.program_status_changed = true;
+        }
+    }
+
+    /// The session's root OSC 7501 record, if any.
+    pub fn program_status(&self) -> Option<&ProgramStatus> {
+        self.program_status.as_ref()
+    }
+
+    /// The record (`Some(None)` = gone) if it changed since the last call; `None` otherwise.
+    pub fn take_program_status_change(&mut self) -> Option<Option<ProgramStatus>> {
+        if !self.program_status_changed {
+            return None;
+        }
+        self.program_status_changed = false;
+        Some(self.program_status.clone())
     }
 
     /// See `answered_query_seq`.
@@ -673,7 +897,9 @@ impl TerminalState {
             output_seq: checkpoint.output_seq,
             retransmit: VecDeque::new(),
             retransmit_bytes: 0,
-            da1_queries: Vec::new(),
+            queries: Vec::new(),
+            program_status: None,
+            program_status_changed: false,
             answered_query_seq: checkpoint.answered_query_seq,
         }
     }
@@ -1197,12 +1423,24 @@ impl SessionState {
         self.terminal.take_title_change()
     }
 
+    /// See [`TerminalState::program_status`].
+    pub fn program_status(&self) -> Option<&ProgramStatus> {
+        self.terminal.program_status()
+    }
+
+    /// See [`TerminalState::take_program_status_change`].
+    pub fn take_program_status_change(&mut self) -> Option<Option<ProgramStatus>> {
+        self.terminal.take_program_status_change()
+    }
+
     /// Feed PTY output and return the deltas owed to subscribers. When the output completes a DA1
     /// query that no human client receives raw — no holder, an agent holder, or a holder whose
     /// subscription is gapped or behind — sessiond becomes the answerer: one reply per query is
     /// left for [`SessionState::take_query_replies`] and the answered-query marker moves to the
     /// last such query. A human holder receiving these bytes answers through xterm.js instead.
-    /// `feed` itself never writes anything.
+    /// The OSC 7501 probe has no other answerer, so sessiond answers every one, whoever holds the
+    /// session, without moving the marker (no client would answer it on a resume). Replies keep
+    /// the order of their queries in the output. `feed` itself never writes anything.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<PendingDelta> {
         self.query_replies.clear();
         let Some(delta) = self.terminal.feed(bytes) else {
@@ -1223,8 +1461,8 @@ impl SessionState {
                 delta: delta.clone(),
             });
         }
-        let queries = self.terminal.take_da1_queries();
-        if let Some(&last_query) = queries.last() {
+        let queries = self.terminal.take_queries();
+        if !queries.is_empty() {
             // Agent channels stay subscribed after their write, so a subscription alone is not an
             // answerer: only the human holder's own raw stream is.
             let human_receives_raw = self.holder.as_ref().is_some_and(|holder| {
@@ -1233,9 +1471,22 @@ impl SessionState {
                         .iter()
                         .any(|delivery| delivery.channel_id == holder.channel_id)
             });
-            if !human_receives_raw {
-                self.query_replies = vec![DA1_REPLY.to_vec(); queries.len()];
-                self.terminal.raise_answered_query_seq(last_query);
+            let mut last_da1 = None;
+            for query in queries {
+                match query {
+                    TerminalQuery::ProgramStatus(terminator) => {
+                        self.query_replies
+                            .push(program_status_probe_reply(terminator));
+                    }
+                    TerminalQuery::Da1(seq) if !human_receives_raw => {
+                        self.query_replies.push(DA1_REPLY.to_vec());
+                        last_da1 = Some(seq);
+                    }
+                    TerminalQuery::Da1(_) => {}
+                }
+            }
+            if let Some(seq) = last_da1 {
+                self.terminal.raise_answered_query_seq(seq);
             }
         }
         pending
@@ -3860,5 +4111,284 @@ mod tests {
         let legacy = Checkpoint::decode(&legacy).expect("an older header must still decode");
         assert_eq!(legacy.answered_query_seq, 0);
         assert_eq!(legacy.output_seq, 3);
+    }
+
+    /// Every event the scanner reports for a stream fed one byte at a time across `chunks`.
+    fn scanner_events(chunks: &[&[u8]]) -> Vec<ScanEvent> {
+        let mut scanner = OutputScanner::default();
+        chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter())
+            .filter_map(|byte| scanner.feed(*byte))
+            .collect()
+    }
+
+    const BLOCKED_REPORT: &[u8] = b"\x1b]7501;state=blocked:kind=question:app=pi:msg=QXBwbHk/\x07";
+
+    fn blocked_question() -> ProgramStatus {
+        ProgramStatus {
+            state: ProgramState::Blocked,
+            kind: Some(BlockedKind::Question),
+            app: "pi".into(),
+            message: "Apply?".into(),
+        }
+    }
+
+    fn report(state: ProgramState) -> ProgramStatus {
+        ProgramStatus {
+            state,
+            kind: None,
+            app: String::new(),
+            message: String::new(),
+        }
+    }
+
+    const PROBE_REPLY_BEL: &[u8] =
+        b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x07";
+    const PROBE_REPLY_ST: &[u8] =
+        b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\";
+
+    #[test]
+    fn output_scanner_turns_osc_7501_into_reports_and_probes() {
+        let expected = vec![ScanEvent::ProgramStatus(ProgramReport {
+            id: Vec::new(),
+            status: Some(blocked_question()),
+        })];
+        assert_eq!(scanner_events(&[BLOCKED_REPORT]), expected);
+        let bytes: Vec<&[u8]> = BLOCKED_REPORT.chunks(1).collect();
+        assert_eq!(scanner_events(&bytes), expected, "byte by byte");
+        for cut in 0..=BLOCKED_REPORT.len() {
+            assert_eq!(
+                scanner_events(&[&BLOCKED_REPORT[..cut], &BLOCKED_REPORT[cut..]]),
+                expected,
+                "split at {cut}"
+            );
+        }
+
+        assert_eq!(
+            scanner_events(&[b"\x1b]7501;?\x1b\\"]),
+            vec![ScanEvent::ProgramStatusProbe(OscTerminator::St)]
+        );
+        assert_eq!(
+            scanner_events(&[b"\x1b]7501;?\x07"]),
+            vec![ScanEvent::ProgramStatusProbe(OscTerminator::Bel)]
+        );
+        for dropped in [
+            &b"\x1b]7501;app=x\x07"[..],
+            b"\x1b]7501;state=bogus\x07",
+            b"\x1b]7501;state=\x07",
+            b"\x1b]7501\x07",
+            b"\x1b]75010;state=idle\x07",
+            b"\x1b]750;state=idle\x07",
+            b"\x1b]7501;?x\x07",
+            b"\x1b]7501;state=idle\x18",
+        ] {
+            assert!(scanner_events(&[dropped]).is_empty(), "{dropped:?}");
+        }
+        assert_eq!(scanner_events(&[b"\x1bc"]), vec![ScanEvent::Reset]);
+        assert!(scanner_events(&[b"\x1b(c"]).is_empty(), "not RIS");
+    }
+
+    #[test]
+    fn program_report_parsing_follows_the_protocol() {
+        let parse = |body: &[u8]| parse_program_report(body, false);
+        // Unknown keys ignored, last value wins, malformed pairs skipped.
+        let parsed = parse(b"bogus:state=idle:x=1:state=working:app=a:app=cargo").unwrap();
+        assert_eq!(parsed.id, b"");
+        assert_eq!(
+            parsed.status,
+            Some(ProgramStatus {
+                app: "cargo".into(),
+                ..report(ProgramState::Working)
+            })
+        );
+        // Kind only for blocked; unknown kind = absent.
+        assert_eq!(
+            parse(b"state=working:kind=auth")
+                .unwrap()
+                .status
+                .unwrap()
+                .kind,
+            None
+        );
+        assert_eq!(
+            parse(b"state=blocked:kind=telepathy")
+                .unwrap()
+                .status
+                .unwrap()
+                .kind,
+            None
+        );
+        assert_eq!(
+            parse(b"state=blocked:kind=auth")
+                .unwrap()
+                .status
+                .unwrap()
+                .kind,
+            Some(BlockedKind::Auth)
+        );
+        // Clear, ids, unpadded and undecodable messages.
+        assert_eq!(
+            parse(b"state=clear:id=x").unwrap(),
+            ProgramReport {
+                id: b"x".to_vec(),
+                status: None
+            }
+        );
+        assert_eq!(
+            parse(b"state=error:msg=QXBwbHk")
+                .unwrap()
+                .status
+                .unwrap()
+                .message,
+            "Apply"
+        );
+        assert_eq!(
+            parse(b"state=error:msg=!!!")
+                .unwrap()
+                .status
+                .unwrap()
+                .message,
+            ""
+        );
+        // A message is stripped of control characters and clamped like a title.
+        assert_eq!(
+            parse(b"state=error:msg=YQpi")
+                .unwrap()
+                .status
+                .unwrap()
+                .message,
+            "ab"
+        );
+        // A cut capture loses its last pair, never more.
+        assert_eq!(
+            parse_program_report(b"state=done:app=cargo:msg=QXBw", true)
+                .unwrap()
+                .status,
+            Some(ProgramStatus {
+                app: "cargo".into(),
+                ..report(ProgramState::Done)
+            })
+        );
+        assert_eq!(parse_program_report(b"state=done", true), None);
+    }
+
+    #[test]
+    fn root_program_status_is_kept_and_changes_are_taken_once() {
+        let mut state = TerminalState::new(4, 40, 8).with_mark_secret("s3cret".into());
+        assert_eq!(state.take_program_status_change(), None);
+        state.feed(BLOCKED_REPORT);
+        assert_eq!(
+            state.take_program_status_change(),
+            Some(Some(blocked_question()))
+        );
+        assert_eq!(state.take_program_status_change(), None, "taken once");
+        state.feed(BLOCKED_REPORT);
+        assert_eq!(
+            state.take_program_status_change(),
+            None,
+            "an identical report is not a change"
+        );
+
+        // A child record never touches the root, not even its clear.
+        state.feed(b"\x1b]7501;state=working:id=child\x07\x1b]7501;state=clear:id=x\x07");
+        assert_eq!(state.take_program_status_change(), None);
+        assert_eq!(state.program_status(), Some(&blocked_question()));
+
+        // A report replaces the record whole.
+        state.feed(b"\x1b]7501;state=working\x07");
+        assert_eq!(
+            state.take_program_status_change(),
+            Some(Some(report(ProgramState::Working)))
+        );
+
+        state.feed(b"\x1b]7501;state=clear\x07");
+        assert_eq!(state.take_program_status_change(), Some(None));
+        assert_eq!(state.program_status(), None);
+
+        // A report split over two feeds counts once complete.
+        state.feed(&BLOCKED_REPORT[..10]);
+        assert_eq!(state.take_program_status_change(), None);
+        state.feed(&BLOCKED_REPORT[10..]);
+        assert_eq!(
+            state.take_program_status_change(),
+            Some(Some(blocked_question()))
+        );
+    }
+
+    #[test]
+    fn program_status_clears_on_a_secret_prompt_and_on_ris_only() {
+        let mut state = TerminalState::new(4, 40, 8).with_mark_secret("s3cret".into());
+        state.feed(BLOCKED_REPORT);
+        let _ = state.take_program_status_change();
+
+        state.feed(b"\x1b]133;A\x07\x1b]133;A;coflux=wrong\x07");
+        assert_eq!(
+            state.take_program_status_change(),
+            None,
+            "no secret, no clear"
+        );
+        assert_eq!(state.program_status(), Some(&blocked_question()));
+
+        state.feed(b"\x1b]133;A;coflux=s3cret\x07$ ");
+        assert_eq!(state.take_program_status_change(), Some(None));
+
+        state.feed(BLOCKED_REPORT);
+        let _ = state.take_program_status_change();
+        state.feed(b"\x1bc");
+        assert_eq!(state.take_program_status_change(), Some(None));
+
+        // Events apply in byte order within one feed.
+        state.feed(b"\x1bc\x1b]7501;state=error\x07");
+        assert_eq!(
+            state.take_program_status_change(),
+            Some(Some(report(ProgramState::Error)))
+        );
+        state.feed(b"\x1b]7501;state=done\x07\x1b]133;A;coflux=s3cret\x07");
+        assert_eq!(state.take_program_status_change(), Some(None));
+
+        // Never checkpointed: a restore starts without a record.
+        state.feed(b"\x1b]7501;state=working\x07");
+        let restored =
+            TerminalState::restore(&state.checkpoint(usize::MAX).unwrap(), 8, String::new());
+        assert_eq!(restored.program_status(), None);
+    }
+
+    #[test]
+    fn session_answers_every_program_status_probe_in_output_order() {
+        let mut alone = SessionState::new(3, 12, 4);
+        alone.feed(b"\x1b]7501;?\x07");
+        assert_eq!(alone.take_query_replies(), vec![PROBE_REPLY_BEL.to_vec()]);
+        assert_eq!(
+            alone.answered_query_seq(),
+            0,
+            "a probe never moves the marker"
+        );
+        alone.feed(b"\x1b]7501;?\x1b\\");
+        assert_eq!(alone.take_query_replies(), vec![PROBE_REPLY_ST.to_vec()]);
+
+        // A human holder receiving the raw output answers DA1, never the probe.
+        let mut held = SessionState::new(3, 12, 4);
+        held.attach("channel-1", "client-1", 1, None).unwrap();
+        let pending = held.feed(b"\x1b]7501;?\x07\x1b[c");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(held.take_query_replies(), vec![PROBE_REPLY_BEL.to_vec()]);
+        assert_eq!(held.answered_query_seq(), 0);
+
+        // Without a holder both are answered, in the order they were written.
+        let mut both = SessionState::new(3, 12, 4);
+        both.feed(b"\x1b]7501;?\x07\x1b[c");
+        assert_eq!(
+            both.take_query_replies(),
+            vec![PROBE_REPLY_BEL.to_vec(), DA1_REPLY.to_vec()]
+        );
+        assert_eq!(both.answered_query_seq(), 12, "the DA1 `c` still moves it");
+        let mut reversed = SessionState::new(3, 12, 4);
+        reversed.feed(b"\x1b[c\x1b]7501;?\x07");
+        assert_eq!(
+            reversed.take_query_replies(),
+            vec![DA1_REPLY.to_vec(), PROBE_REPLY_BEL.to_vec()]
+        );
+        assert_eq!(reversed.answered_query_seq(), 3);
     }
 }

@@ -1,7 +1,7 @@
 # coflux plugin for Claude Code
 
 Connects Claude Code to the [coflux](https://github.com/myWsq/coflux) agent command center: one daemon per
-machine runs the PTYs that host agent sessions, and the web/mobile app shows every workspace's live turn state
+machine runs the PTYs that host agent sessions, and the desktop app shows every workspace's live state
 so a human can supervise many parallel agents and take over at any time.
 
 This directory is the plugin's **delivery directory**: self-contained and loadable as is.
@@ -26,12 +26,13 @@ This directory is the plugin's **delivery directory**: self-contained and loadab
 
 ## Components
 
-- **hooks/** — three kinds of hooks in one file:
-  - `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `Stop`, `StopFailure`
-    and `Notification` are forwarded to the `coflux hook claude` messenger, which relays them to the local daemon;
-    the daemon maps events to turn states (active / approval / question / done) shown in the coflux sidebar. When
-    `coflux` is not installed or the daemon is down, the messenger exits silently and never disturbs the agent.
-    On `PreToolUse` the messenger (the Rust `coflux` CLI; the Node one from the npm package only forwards events)
+- **hooks/** — three kinds of hooks in one file. None of them reports turn state: the coflux sidebar shows the
+  state an agent reports itself through OSC 7501 program status, so an agent version without it shows no state.
+  - `SessionStart` (after the session block below) and `PreToolUse` run the `coflux hook claude` messenger. It
+    relays only the agent's session id to the local daemon, so the desktop can open the session's transcript; a
+    payload without one sends nothing. When `coflux` is not installed or the daemon is down, the messenger exits
+    silently and never disturbs the agent.
+    On `PreToolUse` the messenger (the Rust `coflux` CLI; the Node one from the npm package only relays the id)
     also guards worktree removal: inside a coflux terminal it denies `git worktree remove|move` only when the
     target is a worktree coflux has registered as a workspace on this device, and points the agent to
     `coflux workspace remove <workspaceId>`, which closes that workspace's terminals and then removes the worktree
@@ -47,6 +48,8 @@ This directory is the plugin's **delivery directory**: self-contained and loadab
     runs out of its own budget — printing the block always wins over locating, because a hook killed by the host
     timeout would leave the session with no coordinates at all. It fires on every session source, so the block
     comes back after context compaction. Outside coflux it prints nothing.
+  - `UserPromptSubmit` runs `scripts/session-moved.mjs`, which prints a `<coflux-session-moved>` block when the
+    working directory sits in a different coflux workspace than the terminal does.
   - `PostToolUse` with `matcher: "EnterWorktree|ExitWorktree"` and `WorktreeRemove` run
     `scripts/worktree-follow.mjs`: coflux follows the agent into a git worktree. The script hands the payload's
     `cwd` (or, on removal, `worktree_path`) to the local `coflux workspace locate|forget` command, which moves the
@@ -78,8 +81,8 @@ This directory is the plugin's **delivery directory**: self-contained and loadab
 
 ## Privacy boundary
 
-The messenger hooks forward only the event name, notification type, agent session id, in-flight background task
-count and messenger pid; prompts, replies and notification bodies never leave the machine. The session block and
+The messenger hooks forward only the event name, the agent session id and the messenger pid; prompts, replies and
+notification bodies never leave the machine. The session block and
 the worktree hooks call only the local daemon on loopback, with no credentials (the daemon identifies the caller
 by its process tree); what they send is a directory path, and the daemon forwards the resolved worktree path and
 branch to the center so the workspace can appear in the user's own sidebar. Account CLI access is scoped to the current
@@ -88,8 +91,7 @@ account, using the desktop login or the CLI session stored by Coflux.
 ## Migrating from manual hook configuration
 
 If you previously wired `coflux hook claude` by hand in `~/.claude/settings.json`, remove those `hooks` entries
-after installing this plugin; otherwise every event fires twice (the merged state stays correct, it is just
-wasted work).
+after installing this plugin; otherwise those events fire twice (harmless, just wasted work).
 
 ## Maintenance
 

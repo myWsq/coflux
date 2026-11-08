@@ -155,7 +155,8 @@ test("setup: a terminal, its shell pid, the gateway port and the agent socket", 
 
 const bodies = () => ({
   "/agent": { action: "terminal.list", pid: livePid, ppid: livePid, cwd: "" },
-  "/hook": { agent: "claude", event: "Stop", pid: livePid, ppid: livePid },
+  // A hook reaches the in-tree gate only when it carries an agent session id.
+  "/hook": { agent: "claude", event: "SessionStart", pid: livePid, ppid: livePid, agentSessionId: "6fd5b5f9-959b-4845-91b8-e2f6cefc1a51" },
 });
 
 test("TCP: a CLI-shaped request with an in-tree pid still works", async () => {

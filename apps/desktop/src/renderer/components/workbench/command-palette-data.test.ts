@@ -4,6 +4,7 @@ import { TaskStatus, type DaemonInfo, type Project, type Task, type Workspace } 
 import type { SessionAgentState } from "@coflux/client";
 
 import {
+  agentActivityOf,
   buildPaletteSnapshot,
   deviceVisitKey,
   projectVisitKey,
@@ -190,6 +191,31 @@ test("同一档命中里，正在干活 / 在等人的条目排在闲着的前�
   assert.deepEqual(items.map((item) => item.id), [
     workspaceVisitKey("w2"),
     workspaceVisitKey("w3"),
+    workspaceVisitKey("w1"),
+    projectVisitKey("p1"),
+  ]);
+});
+
+test("a terminal stopped on an error shows error, ranked between question and active", () => {
+  assert.equal(agentActivityOf("error", true), "error");
+  assert.equal(agentActivityOf("error", false), null, "an offline device is neutral");
+
+  const input = fixture();
+  input.workspaces = [
+    workspace("w1", "p1", "task-a", { isMain: true }),
+    workspace("w2", "p1", "task-b"),
+    workspace("w3", "p1", "task-c"),
+    workspace("w4", "p1", "task-d"),
+  ];
+  input.tasks = [task("t1", "w2", "终端"), task("t2", "w3", "终端"), task("t3", "w4", "终端")];
+  input.sessionAgents = { "s-t1": agent("t1", "active"), "s-t2": agent("t2", "error"), "s-t3": agent("t3", "question") };
+  const snapshot = buildPaletteSnapshot(input);
+  assert.equal(snapshot.entries.find((entry) => entry.key === terminalVisitKey("t2"))?.activity, "error");
+  const items = searchPaletteEntries({ snapshot, query: "task", filter: "workspace", recent: [] });
+  assert.deepEqual(items.map((item) => item.id), [
+    workspaceVisitKey("w4"),
+    workspaceVisitKey("w3"),
+    workspaceVisitKey("w2"),
     workspaceVisitKey("w1"),
     projectVisitKey("p1"),
   ]);

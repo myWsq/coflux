@@ -1,8 +1,8 @@
 //! loopback 本地 HTTP 端点：agent 与 daemon 之间的唯一反向通道。两条路径——
 //!
-//! - `/hook`（plan 073）：`coflux hook <agent>` 作为信使把 claude/codex 的 hook 事件送进来，
-//!   用于判定回合状态。状态对齐 Vibe Island：active / approval / question / done
-//!   （空 = 尚无 hook 信号）。
+//! - `/hook`（plan 073）：`coflux hook <agent>` 作为信使把 claude/codex 的 hook 事件送进来。
+//!   Since the OSC 7501 amendment it carries only the agent's own session id (for the
+//!   transcript); turn state comes from the program's OSC 7501 reports, never from hooks.
 //! - `/agent`（plan 074；plan 094 起 local-first；executor 三条见下）：`coflux terminal|notify|progress|ports` 的控制
 //!   请求，见 [crate::agent_ctl]——send/read/wait/notify/progress 在 daemon 本地闭环，new/list/ports
 //!   由 daemon 代问中心。拒绝原因原样回给调用方：细节只是参数校验文案，吞成 `bad request` 只会让
@@ -71,60 +71,25 @@ pub struct LocalEndpoints {
     pub agent_tx: mpsc::Sender<AgentRequest>,
 }
 
-/// 信使上报的事件（已解析）；respond 回填处理结果驱动 HTTP 响应。
+/// 信使上报的事件（已解析）；respond 回填处理结果驱动 HTTP 响应。Only events carrying a valid
+/// agent session id get this far.
 pub struct HookRequest {
     pub agent: String,
     pub event: String,
-    pub notification: String,
-    pub background_tasks: u32,
     pub pid: i32,
     pub ppid: i32,
-    /// The agent's own session identifier, already validated (plan 20260919). `None` means the
-    /// messenger sent nothing usable — never a reason to drop the event itself.
-    pub agent_session_id: Option<String>,
+    /// The agent's own session identifier, already validated (plan 20260919).
+    pub agent_session_id: String,
     pub respond: oneshot::Sender<HookOutcome>,
 }
 
 pub enum HookOutcome {
-    /// 事件已接受并合并进 presence 状态
+    /// The agent session id was recorded on the caller's session.
     Accepted,
-    /// 事件名不在映射表内（如 SessionStart）：合法但无状态语义，不改变任何东西
+    /// The event carried no usable agent session id: valid, but nothing to record.
     Ignored,
     /// 上报 pid 不在任何存活 session 的进程树内（coflux 之外启动的 agent）
     SessionNotFound,
-}
-
-/// hook 事件名（+ Notification 的类型 + 在飞后台工作数）→ 回合状态。claude 与 codex hooks
-/// 引擎共用 claude 命名；codex 旧式 notify 用 kebab-case。名单外或 Notification 类型未知一律
-/// 忽略（而非拒绝），用户多配了 hook 事件不会造成干扰。
-pub fn event_state(event: &str, notification: &str, background_tasks: u32) -> Option<&'static str> {
-    match event {
-        // 干活的起点是 prompt 进入处理循环，不是第一次调工具：模型思考 + 纯文本输出的那一段
-        // （xhigh 下几十秒起）若不算 active，状态会一直停在上一轮的 done；不调工具的问答轮次
-        // 更是整轮都不亮。plan 073 当初怕「人没打字也被标成正在执行」（插件 Stop 续跑 / 排队
-        // 消息也会打 UserPromptSubmit）——但那两种情形里 agent 恰恰确实在干活，标 active 是对的。
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some("active"),
-        "PermissionRequest" | "approval-requested" => Some("approval"),
-        // 回合结束**但仍有在飞的后台工作**（shell / subagent / monitor / workflow）：agent 不是
-        // 「做完了等你看」，而是「挂起等后台把自己叫醒」——那些活儿一完成它必然继续干。此时落
-        // done 会让用户白跑一趟去看一个还没结束的回合，且假完成窗口 = 后台任务的剩余时长
-        // （一次 build/test 就是几分钟）。claude 的 Stop/SubagentStop payload 带 background_tasks
-        // 正是为区分这两者而设。旧版 claude 与 codex 无此字段（信使给 0），行为与从前一致。
-        "Stop" | "StopFailure" | "agent-turn-complete" => Some(if background_tasks > 0 {
-            "active"
-        } else {
-            "done"
-        }),
-        "Notification" => match notification {
-            "permission_prompt" => Some("approval"),
-            "agent_needs_input" | "elicitation_dialog" | "elicitation_url_dialog" => {
-                Some("question")
-            }
-            "agent_completed" | "idle_prompt" => Some("done"),
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 #[derive(serde::Deserialize)]
@@ -132,23 +97,18 @@ pub fn event_state(event: &str, notification: &str, background_tasks: u32) -> Op
 struct HookBody {
     agent: String,
     event: String,
-    #[serde(default)]
-    notification: String,
     /// Self-reported identity, used on TCP only. Optional since the agent socket, where the kernel
     /// supplies the pid; on TCP a missing pid (0) simply fails the session lookup.
     #[serde(default)]
     pid: i32,
     #[serde(default)]
     ppid: i32,
-    /// 信使从 Stop/SubagentStop payload 数出的在飞后台工作条数（旧信使不发 = 0）
-    #[serde(default)]
-    background_tasks: u32,
     /// The agent's own session id, forwarded verbatim by the messenger (claude `session_id`,
     /// codex `thread-id`). Deliberately typed as a free-form JSON value: the CLI copies whatever
     /// the agent put there (`commands.rs`, `session.clone()`), and a non-string must **not** make
-    /// the whole body fail to deserialize — that would 400 the request and lose the presence
-    /// event, which is far worse than a missing transcript id. Validated by
-    /// [`sanitize_agent_session_id`] instead.
+    /// the whole body fail to deserialize into a 400; it is simply "no id". Validated by
+    /// [`sanitize_agent_session_id`] instead. Fields older messengers still send
+    /// (`notification`, `backgroundTasks`) are ignored.
     #[serde(default)]
     agent_session_id: serde_json::Value,
 }
@@ -159,8 +119,7 @@ const MAX_AGENT_SESSION_ID_BYTES: usize = 128;
 
 /// Second line of defence for the agent session id (the first one is positional: every call site
 /// passes the id as its own argv entry, never interpolated into command text). Anything that is
-/// not a plain, bounded identifier yields `None` = "no id", and the event carrying it is still
-/// processed normally.
+/// not a plain, bounded identifier yields `None` = "no id", and the request is answered as ignored.
 pub fn sanitize_agent_session_id(value: &serde_json::Value) -> Option<String> {
     let text = value.as_str()?;
     if text.is_empty() || text.len() > MAX_AGENT_SESSION_ID_BYTES {
@@ -356,23 +315,16 @@ where
 
     let parsed: HookBody = serde_json::from_slice(raw)
         .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
-    let agent_session_id = sanitize_agent_session_id(&parsed.agent_session_id);
     let (pid, ppid) = kernel_pid.map_or((parsed.pid, parsed.ppid), |pid| (pid, pid));
-    // Two independent reasons to forward: the event carries turn state, or it carries the agent's
-    // session id. `SessionStart` is exactly the second case — the transcript exists from that
-    // moment on, so waiting for the first state-bearing event would keep the paper button hidden
-    // through a whole first turn.
-    if event_state(&parsed.event, &parsed.notification, parsed.background_tasks).is_none()
-        && agent_session_id.is_none()
-    {
+    // The only thing a hook still carries is the agent's own session id (turn state comes from
+    // OSC 7501). Without one there is nothing to record, so the consumer never sees the request.
+    let Some(agent_session_id) = sanitize_agent_session_id(&parsed.agent_session_id) else {
         return Ok(hook_response(HookOutcome::Ignored));
-    }
+    };
     let (respond, outcome_rx) = oneshot::channel();
     let request = HookRequest {
         agent: parsed.agent,
         event: parsed.event,
-        notification: parsed.notification,
-        background_tasks: parsed.background_tasks,
         pid,
         ppid,
         agent_session_id,
@@ -764,26 +716,11 @@ fn parse_head(head: &str) -> Result<Head, String> {
 mod tests {
     use super::*;
 
-    /// 回合结束但后台还有活 = 挂起等唤醒，不是完成；无后台工作时仍是 done。
+    /// A malformed id must degrade to "no id", and it must not be able to make the body itself
+    /// unparsable: the messenger forwards the agent's raw JSON value, so a number or an object has
+    /// to survive deserialization and simply lose the id.
     #[test]
-    fn stop_with_background_work_is_not_done() {
-        assert_eq!(event_state("Stop", "", 1), Some("active"));
-        assert_eq!(event_state("StopFailure", "", 3), Some("active"));
-        assert_eq!(event_state("Stop", "", 0), Some("done"));
-        // 后台工作数只对回合结束类事件有意义，不改变其它事件的判定
-        assert_eq!(event_state("PermissionRequest", "", 2), Some("approval"));
-        assert_eq!(
-            event_state("Notification", "agent_needs_input", 2),
-            Some("question")
-        );
-        assert_eq!(event_state("SessionStart", "", 2), None);
-    }
-
-    /// A malformed id must degrade to "no id", and — crucially — it must not be able to make the
-    /// body itself unparsable: the messenger forwards the agent's raw JSON value, so a number or
-    /// an object has to survive deserialization and simply lose the id.
-    #[test]
-    fn agent_session_id_is_validated_without_dropping_the_event() {
+    fn agent_session_id_is_validated_without_failing_the_body() {
         let ok = serde_json::json!("6fd5b5f9-959b-4845-91b8-e2f6cefc1a51");
         assert_eq!(
             sanitize_agent_session_id(&ok).as_deref(),
@@ -803,9 +740,9 @@ mod tests {
             assert_eq!(sanitize_agent_session_id(&bad), None, "should reject {bad}");
         }
 
-        // The whole body still deserializes when the field is a non-string, and the surviving
-        // fields still drive presence.
-        let raw = br#"{"agent":"claude","event":"Stop","pid":1,"agentSessionId":{"unexpected":true}}"#;
+        // The whole body still deserializes when the field is a non-string, and fields older
+        // messengers still send are ignored.
+        let raw = br#"{"agent":"claude","event":"Stop","pid":1,"notification":"x","backgroundTasks":2,"agentSessionId":{"unexpected":true}}"#;
         let parsed: HookBody = serde_json::from_slice(raw).expect("body must still parse");
         assert_eq!(parsed.event, "Stop");
         assert_eq!(sanitize_agent_session_id(&parsed.agent_session_id), None);

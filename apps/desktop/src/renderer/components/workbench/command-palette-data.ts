@@ -140,10 +140,11 @@ function activityOf(activity: WorkspaceActivity): PaletteActivity {
  * string on the wire, so anything unknown is neutral, and an old worker's "waiting" reads as
  * "turn complete" — the same collapse `workspaceActivity` performs.
  */
-function agentActivityOf(state: string | undefined, daemonOnline: boolean): PaletteActivity {
+export function agentActivityOf(state: string | undefined, daemonOnline: boolean): PaletteActivity {
   if (!daemonOnline) return null;
   if (state === "approval") return "approval";
   if (state === "question") return "question";
+  if (state === "error") return "error";
   if (state === "active") return "active";
   if (state === "done" || state === "waiting") return "done";
   return null;
@@ -292,7 +293,17 @@ function matchesFilter(entry: PaletteEntry, filter: PaletteFilter): boolean {
 /** Something that wants the user outranks something that is merely busy, which outranks idle. */
 function activityScore(entry: PaletteEntry): number {
   const byStatus =
-    entry.activity === "approval" ? 9 : entry.activity === "question" ? 8 : entry.activity === "active" ? 6 : entry.activity === "done" ? 3 : 0;
+    entry.activity === "approval"
+      ? 9
+      : entry.activity === "question"
+        ? 8
+        : entry.activity === "error"
+          ? 7
+          : entry.activity === "active"
+            ? 6
+            : entry.activity === "done"
+              ? 3
+              : 0;
   return byStatus - (entry.isOffline ? 4 : 0);
 }
 

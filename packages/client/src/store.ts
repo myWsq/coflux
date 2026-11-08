@@ -154,14 +154,17 @@ function annotationFailure(error: unknown): AnnotationFailure {
 export type WorkspaceActivity =
   | { status: "idle" }
   | { status: "active"; agent?: string }
-  /** `taskId`: the waiting terminal whose agent is named here — the first approval (else question) in `tasks` order. */
-  | { status: "approval"; agent: string; taskId?: string }
+  /** `taskId`: the terminal whose agent is named here — the first entry of the winning state in `tasks` order. */
+  | { status: "approval"; agent: string; message?: string; taskId?: string }
   | { status: "question"; agent: string; message?: string; taskId?: string }
+  /** The program stopped on an error (OSC 7501 `state=error`). */
+  | { status: "error"; agent: string; message?: string; taskId?: string }
   | { status: "done"; agent: string };
 
-/** 工作区活动聚合（对齐 Vibe Island）：纯粹转述 hook 上报，无阈值、无时钟推断。
- * 多 session 冲突时 approval > question > active > done。设备离线 / 无 hook 信号一律中性。
- * 旧 worker 的 "waiting" 按 done 收（避免把「刚说完」误标成要你动手）。 */
+/** Workspace activity, relayed as the agents report it through OSC 7501: no thresholds, no clock
+ * inference. Across sessions approval > question > error > active > done. An offline device or
+ * no signal is neutral. An old worker's "waiting" counts as done, so "just finished" is never
+ * shown as needing you. */
 export function workspaceActivity(
   workspaceId: string,
   daemonOnline: boolean,
@@ -169,29 +172,33 @@ export function workspaceActivity(
   sessionAgents: Record<string, SessionAgentState>,
 ): WorkspaceActivity {
   if (!daemonOnline) return { status: "idle" };
-  let approval: { agent: string; taskId: string } | null = null;
+  let approval: { entry: SessionAgentState; taskId: string } | null = null;
   let question: { entry: SessionAgentState; taskId: string } | null = null;
+  let error: { entry: SessionAgentState; taskId: string } | null = null;
   let active: string | undefined;
   let done: string | null = null;
   for (const task of tasks) {
     if (task.workspaceId !== workspaceId || task.status !== TaskStatus.RUNNING || !task.sessionId) continue;
     const entry = sessionAgents[task.sessionId];
     if (entry === undefined) continue;
-    if (entry.state === "approval") approval = approval ?? { agent: entry.agent, taskId: task.id };
+    if (entry.state === "approval") approval = approval ?? { entry, taskId: task.id };
     else if (entry.state === "question") question = question ?? { entry, taskId: task.id };
+    else if (entry.state === "error") error = error ?? { entry, taskId: task.id };
     else if (entry.state === "active") active = active ?? entry.agent;
     else if (entry.state === "done" || entry.state === "waiting") done = done ?? entry.agent;
   }
-  if (approval !== null) return { status: "approval", agent: approval.agent, taskId: approval.taskId };
+  if (approval !== null) return { status: "approval", agent: approval.entry.agent, message: approval.entry.message || undefined, taskId: approval.taskId };
   if (question !== null) return { status: "question", agent: question.entry.agent, message: question.entry.message || undefined, taskId: question.taskId };
+  if (error !== null) return { status: "error", agent: error.entry.agent, message: error.entry.message || undefined, taskId: error.taskId };
   if (active !== undefined) return { status: "active", agent: active };
   if (done !== null) return { status: "done", agent: done };
   return { status: "idle" };
 }
 
-/** 工作区进度短评（plan 088）：RUNNING 任务的 presence 里第一条非空 progress。
- * 与活动状态是两个维度——状态永远由 hooks 自动判定，短评永远由 agent 主动播报，
- * 互不覆盖；agent 进程退出时随 presence 条目一起消失。 */
+/** Workspace progress note (plan 088): the first non-empty progress in the presence of a RUNNING
+ * task. It is a dimension apart from activity: state always comes from the agent's OSC 7501
+ * reports, the note always from the agent's own broadcast, and neither overrides the other; it
+ * disappears with the presence entry when the agent process exits. */
 export function workspaceProgress(
   workspaceId: string,
   tasks: readonly Task[],
