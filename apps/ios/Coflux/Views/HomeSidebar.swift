@@ -2,25 +2,26 @@ import CofluxClientCore
 import CofluxProtocol
 import SwiftUI
 
-/// Home compacted into the split layout's sidebar (plan D8, mockup W1/W2): "需要你" rows, then the
-/// projects with their workspace rows, and the 设备 entry. Tapping a row switches the detail column
-/// to that terminal with no back navigation; the selected row is highlighted. The search field at
-/// the bottom filters workspaces and terminals by name. Workspace rows end their state line with
-/// the diff. When the sidebar is wide (book pose, where it takes the leading half) the rows carry
+/// Home compacted into the split layout's sidebar (plan D8, mockup W1/W2), laid out like the
+/// desktop's: "待处理" rows, the projects with their workspace rows, then every device, and the
+/// account with a settings button pinned at the bottom (no search, no separate account button —
+/// user's call, 2026-11-09). Tapping a row switches the detail column to that terminal — a
+/// device's row to the device's own terminal page — with no back navigation; the selected row is
+/// highlighted. Workspace rows end their state line with the diff. When the sidebar is wide (book pose, where it takes the leading half) the rows carry
 /// more: the time and the custom label. In the tall layout the same sidebar floats over the
 /// terminal (`AppShell`).
 struct HomeSidebar: View {
     let client: CofluxClient
     @Environment(SceneNavigation.self) private var navigation
     @Environment(\.shellLayout) private var layout
-    @State private var query = ""
     @State private var wide = false
     @State private var secretSheet: SecretSheetTarget?
+    @State private var showingSettings = false
 
     private static let wideWidth: CGFloat = 380
 
     var body: some View {
-        let items = filteredItems
+        let items = client.waitingItems
         List {
             if !items.isEmpty {
                 Section {
@@ -32,7 +33,7 @@ struct HomeSidebar: View {
                 }
             }
             ForEach(client.visibleProjects, id: \.id) { project in
-                let members = filteredWorkspaces(in: project)
+                let members = client.workspaces.filter { $0.projectID == project.id }
                 if !members.isEmpty {
                     Section {
                         ForEach(members, id: \.id) { workspace in
@@ -43,8 +44,14 @@ struct HomeSidebar: View {
                     }
                 }
             }
-            Section {
-                devicesRow
+            if !client.daemons.isEmpty {
+                Section {
+                    ForEach(sortedDaemons, id: \.daemonID) { daemon in
+                        deviceRow(daemon)
+                    }
+                } header: {
+                    sectionHeader("设备", detail: "\(client.daemons.filter(\.online).count) 台在线")
+                }
             }
         }
         .listStyle(.plain)
@@ -53,53 +60,24 @@ struct HomeSidebar: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             ConnectionBanner(client: client)
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            accountFooter
+        }
+        // The device rows show each device's latency: measured only while the sidebar is up.
+        .measuresDevices(client: client)
         .onGeometryChange(for: Bool.self) { proxy in
             proxy.size.width >= Self.wideWidth
         } action: { isWide in
             wide = isWide
         }
-        .searchable(text: $query, prompt: "搜索终端")
         .navigationTitle("coflux")
         .navigationSubtitle(onlineDevicesSubtitle(client))
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                AccountMenu(client: client)
-            }
-            DefaultToolbarItem(kind: .search, placement: .bottomBar)
+        .sheet(isPresented: $showingSettings) {
+            SpeechSettingsSheet(client: client)
         }
         .sheet(item: $secretSheet) { target in
             SecretRequestSheet(client: client, taskID: target.taskID)
-        }
-    }
-
-    // MARK: - Filtering
-
-    private var trimmedQuery: String {
-        query.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func matches(_ text: String) -> Bool {
-        text.localizedCaseInsensitiveContains(trimmedQuery)
-    }
-
-    private func workspaceMatches(_ workspace: Coflux_V1_Workspace) -> Bool {
-        guard !trimmedQuery.isEmpty else { return true }
-        if matches(workspace.name) || matches(workspace.branch) { return true }
-        return client.tasks.contains { $0.workspaceID == workspace.id && matches($0.title) }
-    }
-
-    private func filteredWorkspaces(in project: Coflux_V1_Project) -> [Coflux_V1_Workspace] {
-        client.workspaces.filter { $0.projectID == project.id && workspaceMatches($0) }
-    }
-
-    private var filteredItems: [WaitingItem] {
-        let items = client.waitingItems
-        guard !trimmedQuery.isEmpty else { return items }
-        return items.filter { item in
-            let text = WaitingItemText(item, client: client)
-            if matches(text.title) || matches(text.context) { return true }
-            return client.tasks.contains { $0.id == item.taskID && matches($0.title) }
         }
     }
 
@@ -208,19 +186,134 @@ struct HomeSidebar: View {
         .listRowSeparator(.hidden)
     }
 
-    private var devicesRow: some View {
-        Button {
-            navigation.showDevices()
+    /// Online devices first, then by name.
+    private var sortedDaemons: [Coflux_V1_DaemonInfo] {
+        client.daemons.sorted { lhs, rhs in
+            if lhs.online != rhs.online { return lhs.online }
+            return lhs.name.localizedCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    /// A device as on the desktop's sidebar: the OS mark with a dot whose colour is the latency
+    /// (hollow when offline), the name, and online · RTT · its terminals below. Offline devices
+    /// are dimmed. Opens the device's own terminal page.
+    private func deviceRow(_ daemon: Coflux_V1_DaemonInfo) -> some View {
+        let rtt = daemon.online ? client.deviceTransports[daemon.daemonID]?.rttMs : nil
+        let running = client.deviceRunningTerminalCount(daemon.daemonID)
+        return Button {
+            navigation.showDevice(daemonID: daemon.daemonID)
         } label: {
-            Label("设备", systemImage: "macbook.and.iphone")
-                .font(Theme.Fonts.rowTitle)
-                .foregroundStyle(Theme.foreground)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 26 * 0.32)
+                    .fill(Theme.accentSurface)
+                    .frame(width: 26, height: 26)
+                    .overlay {
+                        Image(systemName: devicePlatformSymbol(daemon.platform))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Theme.foreground)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        Group {
+                            if daemon.online {
+                                Circle().fill(deviceRTTTone(rtt))
+                            } else {
+                                Circle().fill(Theme.card)
+                                    .overlay(Circle().strokeBorder(Theme.mutedForeground, lineWidth: 1.2))
+                            }
+                        }
+                        .frame(width: 26 * 0.34, height: 26 * 0.34)
+                        .overlay(Circle().strokeBorder(Theme.card, lineWidth: 2).padding(-2))
+                        .offset(x: 26 * 0.1, y: -26 * 0.1)
+                    }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(daemon.name.isEmpty ? daemon.host : daemon.name)
+                        .font(Theme.Fonts.rowTitle)
+                        .foregroundStyle(Theme.foreground)
+                        .lineLimit(1)
+                    deviceLine(online: daemon.online, rtt: rtt, running: running)
+                        .font(Theme.Fonts.meta)
+                        .foregroundStyle(Theme.mutedForeground)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .listRowBackground(rowBackground(navigation.tab == .devices))
+        .opacity(daemon.online ? 1 : 0.55)
+        .copyHandleContextMenu(.device, id: daemon.daemonID)
+        .listRowBackground(rowBackground(navigation.selectedDeviceID == daemon.daemonID))
         .listRowSeparator(.hidden)
+    }
+
+    private func deviceLine(online: Bool, rtt: Double?, running: Int) -> Text {
+        guard online else { return Text("离线") }
+        var line = Text("在线")
+        if let rtt {
+            line = line + Text(" · ") + Text("\(Int(rtt.rounded())) ms").foregroundStyle(deviceRTTTone(rtt))
+        }
+        if running > 0 {
+            line = line + Text(" · \(running) 个终端")
+        }
+        return line
+    }
+
+    /// Pinned under the list (desktop plan 110): who is signed in — a tap offers 退出登录 — and the
+    /// settings button.
+    private var accountFooter: some View {
+        let name = client.loginName
+        return HStack(spacing: 10) {
+            Menu {
+                Button("退出登录", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+                    client.logout()
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(Theme.accentSurface)
+                        .frame(width: 30, height: 30)
+                        .overlay {
+                            if let initial = name.first {
+                                Text(String(initial).uppercased())
+                                    .font(Theme.Fonts.label.weight(.bold))
+                                    .foregroundStyle(Theme.foreground)
+                            } else {
+                                Image(systemName: "person.fill")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Theme.mutedForeground)
+                            }
+                        }
+                    Text(name.isEmpty ? "已登录" : name)
+                        .font(Theme.Fonts.rowTitle)
+                        .foregroundStyle(name.isEmpty ? Theme.mutedForeground : Theme.foreground)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("账号 \(name)")
+            Button {
+                showingSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(Theme.foreground)
+                    .frame(width: 40, height: 40)
+                    .background(Theme.accentSurface, in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("设置")
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 12)
+        .padding(.vertical, 10)
+        .background(Theme.surface)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Theme.border).frame(height: 1)
+        }
     }
 
     private func rowBackground(_ selected: Bool) -> some View {

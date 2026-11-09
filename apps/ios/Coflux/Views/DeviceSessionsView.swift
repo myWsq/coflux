@@ -65,6 +65,7 @@ struct DeviceSessionsView: View {
                 emptyState
                     .navigationTitle(deviceName)
                     .navigationBarTitleDisplayMode(.inline)
+                    .sidebarToggleItem(client: client)
             }
         }
         // 目录工作区到达 = 创建成功的完成信号（terminalCreate 无请求-响应关联，

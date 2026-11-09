@@ -9,12 +9,6 @@ import SwiftUI
 struct DevicesView: View {
     let client: CofluxClient
 
-    /// 每台在线设备一个测量持有的释放闭包；页面离开或设备下线时释放。
-    @State private var measureReleases: [String: @MainActor () -> Void] = [:]
-
-    /// 与桌面同档（sidebar.tsx RTT_GOOD_MS）：< 200ms 绿、≥ 200ms 黄。
-    private static let rttGoodMS = 200.0
-
     private func sorted(_ daemons: [Coflux_V1_DaemonInfo]) -> [Coflux_V1_DaemonInfo] {
         daemons.sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
     }
@@ -25,10 +19,6 @@ struct DevicesView: View {
 
     private var offline: [Coflux_V1_DaemonInfo] {
         sorted(client.daemons.filter { !$0.online })
-    }
-
-    private var onlineIDs: Set<String> {
-        Set(client.daemons.filter(\.online).map(\.daemonID))
     }
 
     private var subtitle: String {
@@ -74,9 +64,7 @@ struct DevicesView: View {
         .navigationDestination(for: DeviceRoute.self) { route in
             DeviceSessionsView(client: client, daemonID: route.daemonID)
         }
-        .onAppear { syncMeasures() }
-        .onChange(of: onlineIDs) { syncMeasures() }
-        .onDisappear { releaseAllMeasures() }
+        .measuresDevices(client: client)
     }
 
     // MARK: - Card
@@ -92,9 +80,9 @@ struct DevicesView: View {
 
     private func deviceCard(_ daemon: Coflux_V1_DaemonInfo) -> some View {
         let rtt = daemon.online ? client.deviceTransports[daemon.daemonID]?.rttMs : nil
-        let running = runningSessionCount(daemon.daemonID)
+        let running = client.deviceRunningTerminalCount(daemon.daemonID)
         return HStack(spacing: 12) {
-            Image(systemName: platformSymbol(daemon.platform))
+            Image(systemName: devicePlatformSymbol(daemon.platform))
                 .font(.system(size: 20))
                 .foregroundStyle(daemon.online ? Theme.foreground : Theme.mutedForeground)
                 .frame(width: 50, height: 50)
@@ -116,7 +104,7 @@ struct DevicesView: View {
                     // 色只表延迟、形只表状态（桌面 2026-07-26 原则）：在线实心点、离线空心环。
                     HStack(spacing: 5) {
                         if daemon.online {
-                            Circle().fill(rttTone(rtt)).frame(width: 7, height: 7)
+                            Circle().fill(deviceRTTTone(rtt)).frame(width: 7, height: 7)
                             Text("在线")
                         } else {
                             Circle().stroke(Theme.mutedForeground, lineWidth: 1.2).frame(width: 7, height: 7)
@@ -126,7 +114,7 @@ struct DevicesView: View {
                     if let rtt {
                         Text("\(Int(rtt.rounded())) ms")
                             .font(Theme.Fonts.label.monospaced().monospacedDigit())
-                            .foregroundStyle(rttTone(rtt))
+                            .foregroundStyle(deviceRTTTone(rtt))
                     }
                     Text(platformLabel(daemon.platform))
                         .lineLimit(1)
@@ -145,20 +133,6 @@ struct DevicesView: View {
         .opacity(daemon.online ? 1 : 0.55)
     }
 
-    /// 只数这台设备 canonical 目录工作区里的 RUNNING 任务：点进去看到的就是这些，数字必须和
-    /// 页面一致。按 daemonID 统计会把项目工作区的终端也算进来。
-    private func runningSessionCount(_ daemonID: String) -> Int {
-        guard let workspace = canonicalDirWorkspace(daemonID: daemonID, in: client.workspaces) else { return 0 }
-        return client.tasks.filter { $0.workspaceID == workspace.id && $0.status == .running }.count
-    }
-
-    private func platformSymbol(_ platform: String) -> String {
-        let lower = platform.lowercased()
-        if lower.contains("darwin") || lower.contains("mac") { return "laptopcomputer" }
-        if lower.contains("linux") { return "server.rack" }
-        return "desktopcomputer"
-    }
-
     private func platformLabel(_ platform: String) -> String {
         let lower = platform.lowercased()
         if lower.contains("darwin") || lower.contains("mac") { return "macOS" }
@@ -166,27 +140,67 @@ struct DevicesView: View {
         if lower.contains("windows") { return "Windows" }
         return platform
     }
+}
 
-    private func rttTone(_ rtt: Double?) -> Color {
-        guard let rtt else { return Theme.mutedForeground }
-        return rtt < Self.rttGoodMS ? Theme.success : Theme.warning
+// MARK: - Shared with the sidebar's 设备 section
+
+extension CofluxClient {
+    /// 只数这台设备 canonical 目录工作区里的 RUNNING 任务：点进去看到的就是这些，数字必须和
+    /// 页面一致。按 daemonID 统计会把项目工作区的终端也算进来。
+    func deviceRunningTerminalCount(_ daemonID: String) -> Int {
+        guard let workspace = canonicalDirWorkspace(daemonID: daemonID, in: workspaces) else { return 0 }
+        return tasks.filter { $0.workspaceID == workspace.id && $0.status == .running }.count
+    }
+}
+
+func devicePlatformSymbol(_ platform: String) -> String {
+    let lower = platform.lowercased()
+    if lower.contains("darwin") || lower.contains("mac") { return "laptopcomputer" }
+    if lower.contains("linux") { return "server.rack" }
+    return "desktopcomputer"
+}
+
+/// 与桌面同档（sidebar.tsx RTT_GOOD_MS）：< 200ms 绿、≥ 200ms 黄；未测到为灰。
+func deviceRTTTone(_ rtt: Double?) -> Color {
+    guard let rtt else { return Theme.mutedForeground }
+    return rtt < 200 ? Theme.success : Theme.warning
+}
+
+extension View {
+    /// Measures RTT and route to every online device while this view is on screen (plan 077):
+    /// started on appear, released on disappear or when a device goes offline — never resident.
+    func measuresDevices(client: CofluxClient) -> some View {
+        modifier(DeviceMeasures(client: client))
+    }
+}
+
+private struct DeviceMeasures: ViewModifier {
+    let client: CofluxClient
+    /// 每台在线设备一个测量持有的释放闭包；页面离开或设备下线时释放。
+    @State private var releases: [String: @MainActor () -> Void] = [:]
+
+    private var onlineIDs: Set<String> {
+        Set(client.daemons.filter(\.online).map(\.daemonID))
     }
 
-    // MARK: - 测量生命周期
+    func body(content: Content) -> some View {
+        content
+            .onAppear { sync() }
+            .onChange(of: onlineIDs) { sync() }
+            .onDisappear {
+                for release in releases.values { release() }
+                releases.removeAll()
+            }
+    }
 
-    private func syncMeasures() {
+    private func sync() {
         let online = onlineIDs
-        for (daemonID, release) in measureReleases where !online.contains(daemonID) {
+        for (daemonID, release) in releases where !online.contains(daemonID) {
             release()
-            measureReleases[daemonID] = nil
+            releases[daemonID] = nil
         }
-        for daemonID in online where measureReleases[daemonID] == nil {
-            measureReleases[daemonID] = client.retainDeviceMeasure(daemonID: daemonID)
+        for daemonID in online where releases[daemonID] == nil {
+            releases[daemonID] = client.retainDeviceMeasure(daemonID: daemonID)
         }
-    }
-
-    private func releaseAllMeasures() {
-        for release in measureReleases.values { release() }
-        measureReleases.removeAll()
     }
 }

@@ -20,6 +20,9 @@ public final class CofluxClient {
     public private(set) var authState: AuthState = .needLogin
     /// 仅使用中心认证结果命名本地配对空间；不以用户输入的账号名推断身份。
     public private(set) var accountID: String?
+    /// Who is signed in, for display only (`AuthOk.login_name`, plan 110): the email in password
+    /// mode, the configured user name in local mode; empty when the centre does not say.
+    public private(set) var loginName = ""
     public private(set) var syncState: SyncState = .notSubscribed
     public private(set) var loginError = ""
     public private(set) var daemons: [Coflux_V1_DaemonInfo] = []
@@ -340,6 +343,7 @@ public final class CofluxClient {
         failControlRequests("已登出")
         resetSpeechKeyState()
         accountID = nil
+        loginName = ""
         shouldRetry = false
         token = nil
         lastError = nil
@@ -559,6 +563,7 @@ public final class CofluxClient {
             if accountID != value.accountID || !value.speechKey { resetSpeechKeyState() }
             speechKeySupported = value.speechKey
             accountID = value.accountID.isEmpty ? nil : value.accountID
+            loginName = value.hasLoginName ? value.loginName : ""
             deviceRouter.setAccountID(accountID)
             authState = .authed
             syncState = .awaitingSnapshot
@@ -585,6 +590,7 @@ public final class CofluxClient {
             resetPendingTaskRemovals()
             resetSpeechKeyState()
             accountID = nil
+            loginName = ""
             deviceRouter.setAccountID(nil)
             // token 已被服务端视为无效：清 token + 停重连（继续退避=凭证风暴，store.ts:341-351）
             token = nil

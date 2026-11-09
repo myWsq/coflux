@@ -111,10 +111,17 @@ final class SceneNavigation {
         overlayVisibility = .detailOnly
     }
 
-    /// The 设备 entry of the sidebar.
-    func showDevices() {
+    /// A device row of the sidebar: that device's terminal page. Kept as the 设备 stack's path,
+    /// so the compact layout lands on the same page.
+    func showDevice(daemonID: String) {
         tab = .devices
+        devicePath = [DeviceRoute(daemonID: daemonID)]
         overlayVisibility = .detailOnly
+    }
+
+    /// The device whose page the 设备 side shows, if any.
+    var selectedDeviceID: String? {
+        tab == .devices ? devicePath.last?.daemonID : nil
     }
 
     /// The tall layout's sidebar button: bring the floating sidebar out or put it away.

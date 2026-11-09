@@ -165,9 +165,18 @@ struct AppShell: View {
     private var detailColumn: some View {
         @Bindable var navigation = navigation
         if navigation.tab == .devices {
-            NavigationStack(path: $navigation.devicePath) {
-                DevicesView(client: client)
-                    .sidebarToggleItem(client: client)
+            if let daemonID = navigation.devicePath.last?.daemonID {
+                // A device row of the sidebar: the device's own terminal page, like a workspace.
+                NavigationStack {
+                    DeviceSessionsView(client: client, daemonID: daemonID)
+                        .id(daemonID)
+                }
+            } else {
+                // Carried over from the compact layout's 设备 tab, with no device chosen yet.
+                NavigationStack(path: $navigation.devicePath) {
+                    DevicesView(client: client)
+                        .sidebarToggleItem(client: client)
+                }
             }
         } else {
             NavigationStack {
