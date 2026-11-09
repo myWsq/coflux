@@ -346,9 +346,7 @@ struct WorkspaceDetailView: View {
                 }
                 .padding(.top, barsOnRail ? Self.railTitleHeight : 0)
                 // With the bars on the rail the title row is the page's own: the name on the
-                // left, the avatars on the right. It floats over the terminal on a soft edge
-                // (user's call, 2026-11-10): the keypad pushes the terminal up under it, where it
-                // blurs and fades as a list does under the sidebar's bar, instead of being cut.
+                // left, the avatars on the right, over the terminal the keypad pushes up.
                 if barsOnRail {
                     HStack(spacing: 12) {
                         pageTitle
@@ -359,10 +357,7 @@ struct WorkspaceDetailView: View {
                     .padding(.trailing, 10)
                     .frame(height: 44)
                     .padding(.top, 6)
-                    .background(alignment: .top) {
-                        TopEdgeBlur()
-                            .frame(height: Self.railTitleHeight + TopEdgeBlur.fade)
-                    }
+                    .background(Theme.terminal)
                 }
             }
             .clipped()
@@ -389,17 +384,11 @@ struct WorkspaceDetailView: View {
                     .frame(maxHeight: .infinity, alignment: laptop ? .top : .bottom)
                     .overlayArrangementEdge(VerticalEdge.bottom)
             } secondary: {
-                // Not clipped: the keypad pushes the terminal up under the top bar, where the
-                // soft edge below blurs it as the bars on the rail do.
                 terminalColumn(reserveDock: !laptop)
+                    .clipped()
             }
             // Overlay, not split: fully open the keypad must not stay on screen.
             .arrangementViewStyle(OverlayArrangementViewStyle().axes(.vertical))
-            .overlay(alignment: .top) {
-                TopEdgeBlur()
-                    .frame(height: proxy.safeAreaInsets.top + TopEdgeBlur.fade)
-                    .offset(y: -proxy.safeAreaInsets.top)
-            }
             .onChange(of: laptop, initial: true) { _, isLaptop in
                 laptopPose = isLaptop
             }
