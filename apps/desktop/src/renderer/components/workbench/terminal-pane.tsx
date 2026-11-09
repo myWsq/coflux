@@ -427,6 +427,25 @@ export function TerminalPane(props: TerminalPaneProps) {
       });
     };
 
+    // What a web link does on click, hover and leave — shared by the URLs found in the text and by
+    // OSC 8 hyperlinks, so both open, paint and feed the context menu the same way.
+    const webLink = (url: string, range: IBufferRange) => {
+      const target: HoveredLink = { kind: "url", url };
+      return {
+        activate: (event: MouseEvent, uri: string) => {
+          setLinkHint(null);
+          if (!shouldOpenTerminalWebLink(event, terminal.hasSelection())) return;
+          window.open(rewriteUnspecifiedHost(uri), "_blank", "noopener");
+        },
+        hover: (event: MouseEvent) => {
+          hoveredLinkRef.current = target;
+          paintHover(range);
+          setLinkHint({ label: "点击打开 · 右键更多", x: event.clientX, y: event.clientY });
+        },
+        leave: () => leaveLink(target),
+      };
+    };
+
     // 输出中的 URL（plan 20260924-desktop-browser-tab，取代 plan 109 对网页链接的 ⌘ 门控）：普通左键单击
     // 在系统浏览器打开；右键在终端菜单顶部多出三项（系统浏览器 / 内置浏览器 / 复制链接）；拖选经过链接
     // 不算点击——xterm 在同一链接上 mousedown+mouseup 就激活、不看选区，所以激活前先看有没有选区。
@@ -445,27 +464,37 @@ export function TerminalPane(props: TerminalPaneProps) {
         }
         callback(
           links.map(({ range, text }): ILink => {
-            const target: HoveredLink = { kind: "url", url: text };
+            const link = webLink(text, range);
             return {
               range,
               text,
               decorations: { pointerCursor: true, underline: false },
-              activate: (event, uri) => {
-                setLinkHint(null);
-                if (!shouldOpenTerminalWebLink(event, terminal.hasSelection())) return;
-                window.open(rewriteUnspecifiedHost(uri), "_blank", "noopener");
-              },
-              hover: (event) => {
-                hoveredLinkRef.current = target;
-                paintHover(range);
-                setLinkHint({ label: "点击打开 · 右键更多", x: event.clientX, y: event.clientY });
-              },
-              leave: () => leaveLink(target),
+              activate: link.activate,
+              hover: link.hover,
+              leave: link.leave,
             };
           }),
         );
       },
     });
+    // OSC 8 hyperlinks come from xterm's built-in provider, which hands them to `linkHandler`;
+    // without one it shows confirm() and then a URL-less window.open that the main process drops.
+    // They behave exactly like the URLs above. xterm only passes http(s) links here (no
+    // allowNonHttpProtocols). One handler serves every OSC 8 link and its leave() gets no link of
+    // its own, so the link built on hover is kept for leave — leaveLink clears the context menu's
+    // link only when it is the same object hover stored.
+    let hoveredOscLink: ReturnType<typeof webLink> | null = null;
+    terminal.options.linkHandler = {
+      activate: (event, text, range) => webLink(text, range).activate(event, text),
+      hover: (event, text, range) => {
+        hoveredOscLink = webLink(text, range);
+        hoveredOscLink.hover(event);
+      },
+      leave: () => {
+        hoveredOscLink?.leave();
+        hoveredOscLink = null;
+      },
+    };
 
     // File links (plan 20261001-terminal-file-tab; recognition from plan 20260916): a recognised
     // `path[:line[:col]]` is a link only once the device confirms it is a regular file inside the

@@ -3,18 +3,69 @@
  *
  * The terminal used `@xterm/addon-web-links`, but its links carry no `decorations`, and xterm then
  * always underlines on hover; the hover style is now a colour, so the provider is written here.
- * The addon's `LinkComputer` is not exported from its built package, so its matching — the strict
- * URL regex, the `new URL` sanity check, and walking wrapped lines both ways — is re-implemented
- * below after `@xterm/addon-web-links` 0.13 (`src/WebLinkProvider.ts`, MIT, © The xterm.js authors).
+ * Where a URL ends follows VS Code's `LinkComputer` (`src/vs/editor/common/languages/linkComputer.ts`,
+ * MIT, © Microsoft Corporation): the addon's regex stops only at ASCII characters, so a URL ran on
+ * into the Chinese punctuation after it (`https://cchost.ai/docs，然后登录` was one link). The
+ * `new URL` sanity check and walking wrapped lines both ways are re-implemented below after
+ * `@xterm/addon-web-links` 0.13 (`src/WebLinkProvider.ts`, MIT, © The xterm.js authors).
  */
 
 import type { IBuffer, IBufferRange } from "@xterm/xterm";
 
+/** Where a URL starts. Same schemes as the addon's default pattern. */
+const URL_SCHEME = /(?:https?|HTTPS?):\/\//g;
+
 /**
- * Everything starting with http:// or https:// up to the first whitespace, quote or unsafe
- * character; final punctuation and brackets are not part of the URL. Same as the addon's default.
+ * Characters that end a URL wherever they appear: the unsafe ASCII ones, and the CJK punctuation
+ * and brackets that follow a URL in Chinese or Japanese text without a space. CJK letters are not
+ * here — a path like `/wiki/中文` is a real URL, so letters stay part of it.
  */
-const STRICT_URL = /(https?|HTTPS?):[/]{2}[^\s"'!*(){}|\\^<>`]*[^\s"':,.!?{}|\\^~[\]`()<>]/g;
+const URL_TERMINATORS = new Set([..."\"'!*|\\^<>`", ..."、。｡､，．：；‘’〈〉「」『』〔〕（）［］｛｝｢｣｀～…【】"]);
+
+/** ASCII bracket pairs, counted per kind so a closer only belongs to the URL if it closes one. */
+const URL_OPENERS: Record<string, number> = { "(": 0, "[": 1, "{": 2 };
+const URL_CLOSERS: Record<string, number> = { ")": 0, "]": 1, "}": 2 };
+
+/** Sentence punctuation that is never the URL's last character. */
+const URL_TRAILING = new Set([".", ",", ";", ":", "!", "?", "~"]);
+
+export type UrlRange = { start: number; end: number; text: string };
+
+/**
+ * Every http(s) URL in `text`, as string offsets (`end` exclusive). A URL runs from its scheme to
+ * the first whitespace or terminator; an ASCII closing bracket ends it unless it closes a bracket
+ * opened inside the URL (`Foo_(bar)` keeps its parenthesis, `(https://…)` loses the outer one);
+ * trailing sentence punctuation is then dropped.
+ */
+export function findUrlRanges(text: string): UrlRange[] {
+  const ranges: UrlRange[] = [];
+  const scheme = new RegExp(URL_SCHEME);
+  let match: RegExpExecArray | null;
+  while ((match = scheme.exec(text))) {
+    const start = match.index;
+    const schemeEnd = start + match[0].length;
+    const depth = [0, 0, 0];
+    let end = schemeEnd;
+    for (; end < text.length; end++) {
+      const char = text[end];
+      if (/\s/.test(char) || URL_TERMINATORS.has(char)) break;
+      const opener = URL_OPENERS[char];
+      if (opener !== undefined) {
+        depth[opener]++;
+        continue;
+      }
+      const closer = URL_CLOSERS[char];
+      if (closer !== undefined) {
+        if (depth[closer] === 0) break;
+        depth[closer]--;
+      }
+    }
+    while (end > schemeEnd && URL_TRAILING.has(text[end - 1])) end--;
+    if (end > schemeEnd) ranges.push({ start, end, text: text.slice(start, end) });
+    scheme.lastIndex = Math.max(end, schemeEnd);
+  }
+  return ranges;
+}
 
 /** Lines are joined across soft wraps up to this many characters each way. */
 const WRAP_WINDOW = 2048;
@@ -105,10 +156,9 @@ export function findTerminalWebLinks(buffer: IBuffer, y: number): TerminalWebLin
   const [lines, top] = windowedLines(buffer, y - 1);
   const joined = lines.join("");
   const links: TerminalWebLink[] = [];
-  for (const match of joined.matchAll(STRICT_URL)) {
-    const text = match[0];
+  for (const { start, text } of findUrlRanges(joined)) {
     if (!isUrl(text)) continue;
-    const [startY, startX] = mapStringIndex(buffer, top, 0, match.index ?? 0);
+    const [startY, startX] = mapStringIndex(buffer, top, 0, start);
     if (startY === -1 || startX === -1) continue;
     const [endY, endX] = mapStringIndex(buffer, startY, startX, text.length);
     if (endY === -1 || endX === -1) continue;
