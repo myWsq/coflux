@@ -121,12 +121,10 @@ svg.i { width: 20px; height: 20px; stroke: #e6e6e3; fill: none; stroke-width: 2;
 .ra .dot.hollow { background: var(--card); box-shadow: 0 0 0 2px var(--card), inset 0 0 0 1.4px var(--fg2); }
 .dot.fast { background: var(--ok); } .dot.slow { background: var(--warn); }
 .ms-fast { color: var(--ok); } .ms-slow { color: var(--warn); }
-.sbf { flex: none; display: flex; align-items: center; gap: 10px; padding: 10px 12px 18px 16px; border-top: 1px solid var(--line); }
-.sbf .me { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; cursor: pointer; }
-.sbf .me i { width: 30px; height: 30px; border-radius: 50%; background: var(--raise); color: var(--fg); font-style: normal; font-weight: 700; font-size: 14px; display: grid; place-items: center; flex: none; }
-.sbf .me b { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sbf .circ { width: 40px; height: 40px; }
-.sbf .circ svg.i { width: 19px; height: 19px; }
+.sbh .me { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.sbh .me i { width: 30px; height: 30px; border-radius: 50%; background: var(--raise); color: var(--fg); font-style: normal; font-weight: 700; font-size: 14px; display: grid; place-items: center; flex: none; }
+.sbh .me b { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sbh .circ svg.i { width: 19px; height: 19px; }
 .edge { position: absolute; left: 0; top: 200px; bottom: 200px; width: 3px; border-radius: 0 3px 3px 0; background: rgba(201,162,39,.55); z-index: 9; }
 .edgelbl { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); z-index: 9; font-size: 12px; color: var(--warn); background: rgba(10,10,10,.85); padding: 4px 8px; border-radius: 8px; }
 </style>
@@ -135,7 +133,7 @@ svg.i { width: 20px; height: 20px; stroke: #e6e6e3; fill: none; stroke-width: 2;
   <header>
     <span class="spec">内屏竖开 669 × 951 pt · 不再有「首页 → 工作区」两级页面 · 工作区列表 = 浮在终端上方的侧栏</span>
     <h1>内屏竖开：浮动侧栏</h1>
-    <p>和内屏横放一样用分栏（<code>NavigationSplitView</code>，竖开时用 <code>.prominentDetail</code>），只是竖开时侧栏不占宽度：平时终端占满整屏，点左上角的侧栏按钮或从左边缘往右滑，侧栏浮出来盖在终端上；点一个工作区就切过去，侧栏自动收起。底部的「首页 / 设备」标签栏也不要了：设备像桌面端那样在侧栏里逐台列出，点一台就打开它的终端；侧栏底部是账号（头像 + 用户名）和设置按钮，没有单独的账号按钮，也没有搜索框。横放的左栏同样这么改。外屏不变。</p>
+    <p>和内屏横放一样用分栏（<code>NavigationSplitView</code>，竖开时用 <code>.prominentDetail</code>），只是竖开时侧栏不占宽度：平时终端占满整屏，点左上角的侧栏按钮或从左边缘往右滑，侧栏浮出来盖在终端上；点一个工作区就切过去，侧栏自动收起。底部的「首页 / 设备」标签栏也不要了：设备像桌面端那样在侧栏里逐台列出，点一台就打开它的终端；侧栏顶上就是账号：左边头像 + 登录名，右边设置按钮，不再显示「coflux」和在线设备数，也没有搜索框。横放的左栏同样这么改。外屏不变。</p>
     <p class="hint">每台机器都能点：左上角按钮拉出侧栏，点侧栏里的行切换工作区；在侧栏上往左滑、或者点终端区域，侧栏就收回去。侧栏自己没有开关按钮。</p>
   </header>
 </div>
@@ -237,10 +235,9 @@ function sidebar(width, sel) {
       <span class="txt"><b>${d.name}</b><small class="t-idle">${line}</small></span></div>`;
   }).join("");
   return `<aside class="sb" style="--sbw:${width}px">
-    <div class="sbh"><span class="ttl"><b>coflux</b><small>3 台设备在线</small></span></div>
+    <div class="sbh"><span class="me"><i>W</i><b>wsq@coflux.dev</b></span><span class="circ glass" title="设置">${svg("gear")}</span></div>
     <div class="sbl"><div class="lh"><b>待处理</b> <span>· ${WAITING.length}</span></div>${waiting}${projects}
-      <div class="lh"><b>设备</b> <span>· 3 台在线</span></div>${devices}</div>
-    <div class="sbf"><span class="me"><i>W</i><b>wsq@coflux.dev</b></span><span class="circ" style="background:var(--raise)" title="设置">${svg("gear")}</span></div><span class="grip"></span></aside>`;
+      <div class="lh"><b>设备</b> <span>· 3 台在线</span></div>${devices}</div><span class="grip"></span></aside>`;
 }
 
 const dock = `<div class="dock"><span class="k">esc</span><span class="k">tab</span><span class="k wide">🎤</span><span class="k">↑</span><span class="k">⌫</span><span class="k ent">⏎</span>
@@ -267,7 +264,7 @@ function device(dev) {
 
 const SECTIONS = [
   { n: "①", title: "侧栏：默认 320，可以拖宽拖窄", cols: 2,
-    text: "侧栏浮在终端上方，不推开终端，所以开关侧栏、拖动宽度都不会改变终端的列数。宽度范围和横放时的左栏一样，260–360 pt，默认 320；右边缘那条短竖线就是拖动的地方。工作区那几行，改动行数（+/−）放在第二行的右边，任何宽度都显示。往下是「设备」：和桌面端一样每台一行，点的颜色只表示延迟（绿 &lt; 200 ms、黄更慢），空心圈是离线；点一台设备打开它的终端。最底下固定一行账号：点头像和名字弹出「退出登录」，右边齿轮打开设置（目前只有语音识别）。",
+    text: "侧栏浮在终端上方，不推开终端，所以开关侧栏、拖动宽度都不会改变终端的列数。宽度范围和横放时的左栏一样，260–360 pt，默认 320；右边缘那条短竖线就是拖动的地方。工作区那几行，改动行数（+/−）放在第二行的右边，任何宽度都显示。往下是「设备」：和桌面端一样每台一行，点的颜色只表示延迟（绿 &lt; 200 ms、黄更慢），空心圈是离线；点一台设备打开它的终端。账号在侧栏顶栏：点头像和名字弹出「退出登录」，右边齿轮打开设置（目前只有语音识别）。",
     cells: [
       { key: "S1", title: "默认 320 pt", rec: true, body: "盖住屏幕一半，右半边还能看到终端在跑什么。第二行左边是状态（首页的颜色），右边是这个工作区的 +/− 行数。", cfg: { width: 320, open: true }, sel: "inner" },
       { key: "S1′", title: "拖到最宽 360 pt", body: "长分支名能多露一截；再往右拖就停在 360。拖到最窄是 260。", cfg: { width: 360, open: true }, sel: "inner" },

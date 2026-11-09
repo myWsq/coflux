@@ -3,9 +3,9 @@ import CofluxProtocol
 import SwiftUI
 
 /// Home compacted into the split layout's sidebar (plan D8, mockup W1/W2), laid out like the
-/// desktop's: "待处理" rows, the projects with their workspace rows, then every device, and the
-/// account with a settings button pinned at the bottom (no search, no separate account button —
-/// user's call, 2026-11-09). Tapping a row switches the detail column to that terminal — a
+/// desktop's: "待处理" rows, the projects with their workspace rows, then every device. Its top bar
+/// is the account — who is signed in on the left, settings on the right — in place of a title
+/// (no search, no separate account button — user's call, 2026-11-09). Tapping a row switches the detail column to that terminal — a
 /// device's row to the device's own terminal page — with no back navigation; the selected row is
 /// highlighted. Workspace rows end their state line with the diff. When the sidebar is wide (book pose, where it takes the leading half) the rows carry
 /// more: the time and the custom label. In the tall layout the same sidebar floats over the
@@ -15,6 +15,8 @@ struct HomeSidebar: View {
     @Environment(SceneNavigation.self) private var navigation
     @Environment(\.shellLayout) private var layout
     @State private var wide = false
+    /// The sidebar's width: the account in its top bar gets what the bar's buttons leave.
+    @State private var width: CGFloat = 0
     @State private var secretSheet: SecretSheetTarget?
     @State private var showingSettings = false
 
@@ -60,19 +62,31 @@ struct HomeSidebar: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             ConnectionBanner(client: client)
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            accountFooter
-        }
         // The device rows show each device's latency: measured only while the sidebar is up.
         .measuresDevices(client: client)
-        .onGeometryChange(for: Bool.self) { proxy in
-            proxy.size.width >= Self.wideWidth
-        } action: { isWide in
-            wide = isWide
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { newWidth in
+            width = newWidth
+            wide = newWidth >= Self.wideWidth
         }
         .navigationTitle("coflux")
-        .navigationSubtitle(onlineDevicesSubtitle(client))
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(removing: .title)
+        .toolbar {
+            // A fixed width: offered its ideal size, a leading item is squeezed to a sliver.
+            // Wide, the system's sidebar toggle sits before it; floating, there is none.
+            ToolbarItem(placement: .topBarLeading) {
+                accountMenu
+                    .frame(width: max(100, width - (layout == .tall ? 92 : 150)), alignment: .leading)
+            }
+            .sharedBackgroundVisibility(.hidden)
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("设置", systemImage: "gearshape") {
+                    showingSettings = true
+                }
+            }
+        }
         .sheet(isPresented: $showingSettings) {
             SpeechSettingsSheet(client: client)
         }
@@ -258,62 +272,39 @@ struct HomeSidebar: View {
         return line
     }
 
-    /// Pinned under the list (desktop plan 110): who is signed in — a tap offers 退出登录 — and the
-    /// settings button.
-    private var accountFooter: some View {
+    /// Who is signed in (`AuthOk.login_name`), in the sidebar's top bar: a tap offers 退出登录.
+    private var accountMenu: some View {
         let name = client.loginName
-        return HStack(spacing: 10) {
-            Menu {
-                Button("退出登录", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
-                    client.logout()
-                }
-            } label: {
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(Theme.accentSurface)
-                        .frame(width: 30, height: 30)
-                        .overlay {
-                            if let initial = name.first {
-                                Text(String(initial).uppercased())
-                                    .font(Theme.Fonts.label.weight(.bold))
-                                    .foregroundStyle(Theme.foreground)
-                            } else {
-                                Image(systemName: "person.fill")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(Theme.mutedForeground)
-                            }
+        return Menu {
+            Button("退出登录", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+                client.logout()
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(Theme.accentSurface)
+                    .frame(width: 30, height: 30)
+                    .overlay {
+                        if let initial = name.first {
+                            Text(String(initial).uppercased())
+                                .font(Theme.Fonts.label.weight(.bold))
+                                .foregroundStyle(Theme.foreground)
+                        } else {
+                            Image(systemName: "person.fill")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.mutedForeground)
                         }
-                    Text(name.isEmpty ? "已登录" : name)
-                        .font(Theme.Fonts.rowTitle)
-                        .foregroundStyle(name.isEmpty ? Theme.mutedForeground : Theme.foreground)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+                    }
+                Text(name.isEmpty ? "已登录" : name)
+                    .font(Theme.Fonts.rowTitle)
+                    .foregroundStyle(name.isEmpty ? Theme.mutedForeground : Theme.foreground)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("账号 \(name)")
-            Button {
-                showingSettings = true
-            } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(Theme.foreground)
-                    .frame(width: 40, height: 40)
-                    .background(Theme.accentSurface, in: Circle())
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("设置")
+            .contentShape(Rectangle())
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 12)
-        .padding(.vertical, 10)
-        .background(Theme.surface)
-        .overlay(alignment: .top) {
-            Rectangle().fill(Theme.border).frame(height: 1)
-        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("账号 \(name)")
     }
 
     private func rowBackground(_ selected: Bool) -> some View {
