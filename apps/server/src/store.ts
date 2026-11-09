@@ -62,6 +62,16 @@ export type SpeechProviderRecord = {
   ciphertext: string | null;
   updatedAt: number;
 };
+/** The account's dictation correction record as stored in `account_speech_refine` (plan
+ * 20261109-dictation-refine): the switch, base URL and model as typed and the key ciphertext, NULL
+ * when no key is stored. An account without a row reads as disabled and unconfigured, updatedAt 0. */
+export type SpeechRefineRecord = {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  ciphertext: string | null;
+  updatedAt: number;
+};
 /** What a slot write does with the stored key: keep it, replace it with a new ciphertext, or remove it. */
 export type SpeechKeyAction = { kind: "keep" } | { kind: "replace"; ciphertext: string } | { kind: "clear" };
 
@@ -613,10 +623,13 @@ export class Store {
   }
 
   /* -------------------- account speech providers -------------------- */
-  /** The account's dictation slots and provider in use (plan 20261109-speech-providers) as stored:
-   * ciphertext only — the store never encrypts or decrypts. Slots never written are absent; an
-   * account without a settings row uses 'doubao'. */
-  async getSpeechConfig(accountId: AccountId): Promise<{ active: SpeechProviderId; providers: SpeechProviderRecord[] }> {
+  /** The account's dictation slots and provider in use (plan 20261109-speech-providers) and its
+   * correction record (plan 20261109-dictation-refine) as stored: ciphertext only — the store never
+   * encrypts or decrypts. Slots never written are absent; an account without a settings row uses
+   * 'doubao'; an account without a correction row reads as disabled and unconfigured. */
+  async getSpeechConfig(
+    accountId: AccountId,
+  ): Promise<{ active: SpeechProviderId; providers: SpeechProviderRecord[]; refine: SpeechRefineRecord }> {
     const providers = await this.sql<SpeechProviderRecord[]>`
       SELECT provider, base_url, model, api_key_ciphertext AS ciphertext, updated_at FROM account_speech_providers
       WHERE account_id = ${accountId}
@@ -625,7 +638,15 @@ export class Store {
     const settings = await this.sql<{ activeProvider: SpeechProviderId }[]>`
       SELECT active_provider FROM account_speech_settings WHERE account_id = ${accountId}
     `;
-    return { active: settings[0]?.activeProvider ?? "doubao", providers: [...providers] };
+    const refine = await this.sql<SpeechRefineRecord[]>`
+      SELECT enabled, base_url, model, api_key_ciphertext AS ciphertext, updated_at FROM account_speech_refine
+      WHERE account_id = ${accountId}
+    `;
+    return {
+      active: settings[0]?.activeProvider ?? "doubao",
+      providers: [...providers],
+      refine: refine[0] ?? { enabled: false, baseUrl: "", model: "", ciphertext: null, updatedAt: 0 },
+    };
   }
   /** Replace one slot's base URL and model and apply `key` to its key, in one statement (last write
    * wins). A slot that does not exist yet is created; with `keep` it starts without a key. */
@@ -667,6 +688,41 @@ export class Store {
       INSERT INTO account_speech_providers (account_id, provider, base_url, model, api_key_ciphertext, updated_at)
       VALUES (${accountId}, ${provider}, '', '', ${ciphertext}, ${updatedAt})
       ON CONFLICT (account_id, provider) DO UPDATE SET
+        api_key_ciphertext = excluded.api_key_ciphertext,
+        updated_at = excluded.updated_at
+    `;
+  }
+  /** Replace the correction record's switch, base URL and model and apply `key` to its key, in one
+   * statement (last write wins). A record that does not exist yet is created; with `keep` it starts
+   * without a key. */
+  async setSpeechRefine(
+    accountId: AccountId,
+    enabled: boolean,
+    baseUrl: string,
+    model: string,
+    key: SpeechKeyAction,
+    updatedAt: number,
+  ): Promise<void> {
+    if (key.kind === "keep") {
+      await this.sql`
+        INSERT INTO account_speech_refine (account_id, enabled, base_url, model, api_key_ciphertext, updated_at)
+        VALUES (${accountId}, ${enabled}, ${baseUrl}, ${model}, NULL, ${updatedAt})
+        ON CONFLICT (account_id) DO UPDATE SET
+          enabled = excluded.enabled,
+          base_url = excluded.base_url,
+          model = excluded.model,
+          updated_at = excluded.updated_at
+      `;
+      return;
+    }
+    const ciphertext = key.kind === "replace" ? key.ciphertext : null;
+    await this.sql`
+      INSERT INTO account_speech_refine (account_id, enabled, base_url, model, api_key_ciphertext, updated_at)
+      VALUES (${accountId}, ${enabled}, ${baseUrl}, ${model}, ${ciphertext}, ${updatedAt})
+      ON CONFLICT (account_id) DO UPDATE SET
+        enabled = excluded.enabled,
+        base_url = excluded.base_url,
+        model = excluded.model,
         api_key_ciphertext = excluded.api_key_ciphertext,
         updated_at = excluded.updated_at
     `;
