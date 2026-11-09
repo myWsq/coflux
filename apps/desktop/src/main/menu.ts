@@ -86,6 +86,9 @@ export function buildAppMenu(actions: MenuActions): Menu {
         // Collapsible sidebar (plan 20260930-collapsible-sidebar): displayed, not registered — a
         // registered ⌘B would be taken from built-in browser pages, where it means bold.
         pageShortcut("显示/隐藏侧边栏", "CmdOrCtrl+B", "toggle-sidebar"),
+        // The sidebar's 「当前」 section (plan 20261109-sidebar-current-section): displayed, not
+        // registered — the page handles ⌘⇧A, and a focused browser page forwards it.
+        pageShortcut("下一个待处理", "Shift+CmdOrCtrl+A", "next-attention"),
         { type: "separator" },
         pageShortcut("上一个终端", "CmdOrCtrl+[", "previous-tab"),
         pageShortcut("下一个终端", "CmdOrCtrl+]", "next-tab"),

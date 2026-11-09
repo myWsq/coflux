@@ -27,6 +27,11 @@ type GlobalShortcutsOptions = {
    * suspended itself could not be closed with the same key that opened it.
    */
   onTogglePalette: () => void;
+  /**
+   * ⌘⇧A and 「视图 → 下一个待处理」 (plan 20261109-sidebar-current-section): select the next
+   * workspace in the sidebar's 「当前」 list that waits for the user. Suspended like the terminal keys.
+   */
+  onNextAttention: () => void;
   /** 挂起时键盘与原生菜单命令都不再作用于终端：设置页这类整页覆盖层盖住工作台时传 true，
    * 否则 ⌘T/⌘W/⌘1 会落到一个看不见也点不到的终端上。 */
   isSuspended?: boolean;
@@ -67,6 +72,7 @@ export function useGlobalShortcuts({
   onToggleHelp,
   onToggleSettings,
   onTogglePalette,
+  onNextAttention,
   isSuspended = false,
   screenFocusedRef,
   onToggleImmersive,
@@ -117,7 +123,14 @@ export function useGlobalShortcuts({
       const terminal = activeTerminalRef.current;
 
       if (withShift) {
-        // ⌘⇧\ splits downward. Nothing else with ⇧ belongs here: ⇧⌘W is the native close-window accelerator.
+        // ⌘⇧A jumps to the next 待处理 workspace; ⌘⇧\ splits downward. Nothing else with ⇧ belongs
+        // here: ⇧⌘W is the native close-window accelerator.
+        if (event.code === "KeyA") {
+          event.preventDefault();
+          event.stopPropagation();
+          onNextAttention();
+          return;
+        }
         if (!isBackslash) return;
         event.preventDefault();
         event.stopPropagation();
@@ -215,7 +228,7 @@ export function useGlobalShortcuts({
 
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleSidebar, onToggleHelp, onToggleSettings, onTogglePalette, isSuspended, screenFocusedRef, onToggleImmersive]);
+  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleSidebar, onToggleHelp, onToggleSettings, onTogglePalette, onNextAttention, isSuspended, screenFocusedRef, onToggleImmersive]);
 
   // 原生菜单命令：与上面的键位一一对应。
   useEffect(
@@ -275,6 +288,9 @@ export function useGlobalShortcuts({
           case "toggle-sidebar":
             onToggleSidebar();
             return;
+          case "next-attention":
+            onNextAttention();
+            return;
           case "toggle-help":
             onToggleHelp();
             return;
@@ -287,6 +303,6 @@ export function useGlobalShortcuts({
           else terminal?.selectTabByIndex(index);
         }
       }),
-    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleSidebar, onToggleHelp, onToggleSettings, onTogglePalette, isSuspended],
+    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleSidebar, onToggleHelp, onToggleSettings, onTogglePalette, onNextAttention, isSuspended],
   );
 }

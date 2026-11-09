@@ -1,4 +1,4 @@
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
@@ -7,11 +7,13 @@ import { SCREEN_CAPABILITY, type DaemonInfo, type Project, type Workspace } from
 
 import { AccountFooter, type SettingsTooltipControl } from "@/components/workbench/account-footer";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
+import { currentWorkspaces } from "@/components/workbench/current-workspaces";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { DeviceOsMark, deviceOsName } from "@/components/workbench/device-os";
 import { copyEntityHandle } from "@/components/workbench/entity-handle";
 import { executorTaskIds as executorTaskIdsOf } from "@/components/workbench/executor-run";
 import { ActivityDots } from "@/components/workbench/pending-dots";
+import { readExpandedProjects, summarizeProjectActivity, toggleExpandedProject, type ExpandedProjectsStore } from "@/components/workbench/project-rows";
 import { screenResolutionLabel } from "@/components/workbench/screen-resolution";
 import type { ScreenRuntime } from "@/components/workbench/screen-runtime";
 import { useScreenSessionState } from "@/components/workbench/screen-view";
@@ -19,12 +21,23 @@ import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifi
 import { SidebarToggleButton } from "@/components/workbench/sidebar-collapse";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
 import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-width";
-import { isProjectArchived, workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
+import { projectWorkspacesInOrder, visibleProjects } from "@/components/workbench/workspace-order";
+import type { WorkspaceVisits } from "@/components/workbench/workspace-visits";
+import { workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
+import { PROJECTS_EXPANDED_KEY } from "@/config";
 import { cn } from "@/lib/utils";
 
 /** 心跳往返低于此值算「快」（绿），否则「慢」（黄）。局域网直连通常个位数到几十 ms，
  * 跨洲 relay 常在 200ms 以上——阈值取在这两簇之间，而不是取某个整数好看。 */
 const RTT_GOOD_MS = 200;
+
+/** How often the 「当前」 section re-reads the clock, so a visit leaving the 24-hour window drops out unprompted. */
+const CURRENT_CLOCK_TICK_MS = 60_000;
+
+const IDLE: WorkspaceActivity = { status: "idle" };
+
+/** The expanded projects (plan 20261109-sidebar-current-section), injected into the pure store module. */
+const EXPANDED_PROJECTS_STORE: ExpandedProjectsStore = { storage: localStorage, key: PROJECTS_EXPANDED_KEY };
 
 function activityLabel(activity: WorkspaceActivity): string {
   if (activity.status === "idle") return "";
@@ -39,6 +52,189 @@ function activityLabel(activity: WorkspaceActivity): string {
 function ActivityIcon({ activity, labeled }: { activity: WorkspaceActivity; labeled?: boolean }) {
   if (activity.status === "idle") return null;
   return <ActivityDots status={activity.status} label={labeled ? activityLabel(activity) : undefined} />;
+}
+
+/**
+ * One workspace row (plan 20261109-sidebar-current-section): the tree's row, and the 「当前」
+ * section's, which reuses its icon slot, tooltip and context menu. `variant` decides the trailing
+ * content: the tree shows the custom name and the diff, with the hover × delete button for
+ * non-main workspaces; the section shows the project name and offers no × — deletion stays in
+ * the tree row and the context menu.
+ */
+function WorkspaceRow({
+  variant,
+  workspace,
+  project,
+  daemon,
+  activity,
+  executorBusy,
+  progress,
+  selected,
+  onSelect,
+  onRename,
+  onRemove,
+}: {
+  variant: "tree" | "current";
+  workspace: Workspace;
+  project: Project;
+  daemon: DaemonInfo | undefined;
+  activity: WorkspaceActivity;
+  executorBusy: boolean;
+  progress: string | undefined;
+  selected: boolean;
+  onSelect: () => void;
+  onRename: () => void;
+  onRemove: () => void;
+}) {
+  const label =
+    workspace.name && workspace.name !== workspace.branch
+      ? workspace.name
+      : workspace.isMain
+        ? "主工作区"
+        : null;
+  const hasDiff = workspace.additions > 0 || workspace.deletions > 0;
+  // worker 侧 diff_stat 的基准是 merge-base(defaultBranch, HEAD) 比到工作树：当前分支
+  // 就是默认分支（或默认分支缺失）时 base 即 HEAD 自身，数字实为本地未提交改动（含
+  // untracked），说成「相对 X 的变更」是同义反复且会被读成分支间历史 diff。
+  const diffAgainstSelf = !project.defaultBranch || workspace.branch === project.defaultBranch;
+  const activityText = activityLabel(activity);
+  // 工作区详情 tooltip（需求勘误：原 plan 048-task-tab-tooltip 做到了任务 Tab 上，
+  // 真正诉求是侧栏工作区行——版式照抄设备 tooltip：加粗标题行 + 图标条目列表）
+  const workspaceTooltip = (
+    <div className="flex flex-col gap-1">
+      <div className="font-medium">
+        {workspace.branch}
+        {label ? ` · ${label}` : ""}
+      </div>
+      <div className="flex flex-col gap-0.5">
+        {activity.status !== "idle" ? (
+          <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+            <ActivityIcon activity={activity} />
+            <span className="truncate">{activityText}</span>
+          </span>
+        ) : null}
+        {executorBusy ? (
+          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <ActivityDots status="active" />
+            <span className="truncate">executor 正在执行子任务</span>
+          </span>
+        ) : null}
+        {/* What the agent said about what it needs (a `coflux notify` message,
+            plan 074, or an OSC 7501 msg): the icon only says it is waiting or
+            stopped. Not truncated: the message is the content; the worker
+            already clamped it. */}
+        {(activity.status === "approval" || activity.status === "question" || activity.status === "error") &&
+        activity.message ? (
+          <span className="flex items-start gap-1.5 text-sm text-foreground">
+            <MessageSquare className="mt-0.5 size-3 shrink-0 opacity-70" />
+            <span className="whitespace-pre-wrap break-words">{activity.message}</span>
+          </span>
+        ) : null}
+        {/* 进度短评（plan 088）：agent 主动播报「干到哪了」，不 truncate 同 notify 理由。 */}
+        {progress ? (
+          <span className="flex items-start gap-1.5 text-sm text-muted-foreground">
+            <LoaderCircle className="mt-0.5 size-3 shrink-0 opacity-70" />
+            <span className="whitespace-pre-wrap break-words">{progress}</span>
+          </span>
+        ) : null}
+        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <Folder className="size-3 shrink-0 opacity-70" />
+          <span className="truncate">{workspace.path}</span>
+        </span>
+        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <DeviceOsMark platform={daemon?.platform} className="size-3 shrink-0 opacity-70" />
+          <span className="truncate">{daemon ? `${daemon.name}（${daemon.online ? "在线" : "离线"}）` : "设备记录缺失"}</span>
+        </span>
+        {hasDiff ? (
+          <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+            <FileDiff className="size-3 shrink-0 opacity-70" />
+            <span className="truncate">{diffAgainstSelf ? "未提交改动" : `相对 ${project.defaultBranch} 的变更`} +{workspace.additions} −{workspace.deletions}</span>
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+  return (
+    <ContextMenu
+      label={`工作区「${workspace.branch}」操作`}
+      size="sm"
+      items={[
+        { label: "重命名", onClick: onRename },
+        { label: "复制标识", onClick: () => copyEntityHandle("workspace", workspace.id) },
+        ...(!workspace.isMain
+          ? [{ type: "divider" } as const, { label: "删除工作区", onClick: onRemove }]
+          : []),
+      ]}
+    >
+      <Tooltip content={workspaceTooltip} placement="end" hasHoverIndication={false}>
+        <div
+          className={cn(
+            "group/workspace relative flex h-7 items-center rounded-md transition-colors",
+            selected
+              ? "bg-accent text-foreground"
+              : "text-secondary-foreground hover:bg-accent/70 hover:text-foreground",
+          )}
+        >
+          <button
+            className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left"
+            onClick={onSelect}
+          >
+            {/* 图标槽原位替换（与设备行「direct 时闪电取代圆点」同一手法）：
+                有活动状态时呈现点阵，中性态保留 GitBranch。 */}
+            {activity.status !== "idle" ? (
+              <ActivityIcon activity={activity} labeled />
+            ) : executorBusy ? (
+              <ActivityDots status="active" label="executor 正在执行子任务" />
+            ) : (
+              <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
+            )}
+            <span className="min-w-0 flex-1 truncate text-base">{workspace.branch}</span>
+            {variant === "current" ? (
+              // The section names the project the row belongs to; the custom name and the diff stay in the tree.
+              <span className="max-w-24 shrink-0 truncate text-sm text-muted-foreground">{project.name}</span>
+            ) : (
+              // 右端内容：自定义名称（name ≠ branch 时才有；主工作区未起名时默认叫「主工作区」）+ git diff 累计统计（plan 024，X=Y=0 时不渲染）。
+              // diff 固定在最末；两者作为整体 hover 渐变淡出给删除按钮让位
+              (() => {
+                if (!label && !hasDiff) return null;
+                return (
+                  <span
+                    className={cn(
+                      "flex shrink-0 items-center gap-2",
+                      !workspace.isMain &&
+                        "group-hover/workspace:[mask-image:linear-gradient(to_left,transparent_18px,black_44px)]",
+                    )}
+                  >
+                    {label ? (
+                      <span className="max-w-24 truncate text-sm text-muted-foreground">
+                        {label}
+                      </span>
+                    ) : null}
+                    {hasDiff ? (
+                      <span className="whitespace-nowrap font-mono text-xs tabular-nums">
+                        <span className="text-success">+{workspace.additions}</span>{" "}
+                        <span className="text-destructive">−{workspace.deletions}</span>
+                      </span>
+                    ) : null}
+                  </span>
+                );
+              })()
+            )}
+          </button>
+          {/* 主工作区不可删除：不渲染删除入口（服务端同样会拒绝，此处是入口层收敛） */}
+          {variant === "tree" && !workspace.isMain ? (
+            <button
+              className="absolute right-1 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/workspace:opacity-100 focus-visible:opacity-100"
+              onClick={onRemove}
+              title="删除工作区"
+            >
+              <X className="size-3" />
+            </button>
+          ) : null}
+        </div>
+      </Tooltip>
+    </ContextMenu>
+  );
 }
 
 /**
@@ -107,6 +303,8 @@ type SidebarProps = {
   client: CofluxClient;
   selectedWorkspaceId: string | null;
   onSelectWorkspace: (workspaceId: string) => void;
+  /** When each workspace was last on screen (plan 20261109-sidebar-current-section), for the 「当前」 section. */
+  workspaceVisits: WorkspaceVisits;
   /** 当前选中的设备（设备详情视图，plan 048）；与 selectedWorkspaceId 互斥 */
   selectedDeviceId: string | null;
   onSelectDevice: (daemonId: string) => void;
@@ -152,7 +350,8 @@ export function Sidebar(props: SidebarProps) {
   const client = props.client;
   // Archived projects (plan 20261030-project-archive) are not listed; their workspaces are only
   // ever listed under their project, so filtering projects hides them too.
-  const projects = useStore(client.store, (state) => state.projects).filter((project) => !isProjectArchived(project));
+  const allProjects = useStore(client.store, (state) => state.projects);
+  const projects = visibleProjects(allProjects);
   const workspaces = useStore(client.store, (state) => state.workspaces);
   const projectArchiveSupported = useStore(client.store, (state) => state.projectArchiveSupported);
   const daemons = useStore(client.store, (state) => state.daemons);
@@ -168,20 +367,44 @@ export function Sidebar(props: SidebarProps) {
   // 首快照未到之前 projects 是空数组：数据没到 ≠ 数据为空（plan 078 第③跳），
   // 「还没有项目」引导空态要等快照确认真空才渲染。
   const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
-  // 默认全部展开，只记折叠集合（新项目出现时自然是展开态）
-  const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
+  // Projects are collapsed by default and only the expanded set is remembered (plan
+  // 20261109-sidebar-current-section), so a newly imported project appears collapsed.
+  const [expandedIds, setExpandedIds] = useState(() => readExpandedProjects(EXPANDED_PROJECTS_STORE));
+  // The 「当前」 section's clock: a recent visit expires without user input within a tick.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), CURRENT_CLOCK_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
   const createMenuProjectId = props.createMenuProjectId;
   const setCreateMenuProjectId = props.onCreateMenuProjectIdChange;
   const modPrefix = SHORTCUT_MODIFIER_PREFIX;
 
   function toggleProject(projectId: string) {
-    setCollapsedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(projectId)) next.delete(projectId);
-      else next.add(projectId);
-      return next;
-    });
+    const known = new Set(client.store.getState().projects.map((project) => project.id));
+    setExpandedIds(toggleExpandedProject(EXPANDED_PROJECTS_STORE, expandedIds, projectId, known));
   }
+
+  // A live executor run on one of this workspace's terminals: shown in the icon slot when nothing
+  // else is, and always as a tooltip line.
+  const executorBusyOf = (workspaceId: string, daemon: DaemonInfo | undefined) =>
+    (daemon?.online ?? false) && tasks.some((task) => task.workspaceId === workspaceId && executorTaskIds.has(task.id));
+
+  // 「当前」 (plan 20261109-sidebar-current-section): nothing before the first snapshot — data not
+  // arrived yet is not "nothing current".
+  const currentRows =
+    snapshotRevision > 0
+      ? currentWorkspaces({
+          projects: allProjects,
+          workspaces,
+          daemons,
+          tasks,
+          sessionAgents,
+          visits: props.workspaceVisits,
+          selectedWorkspaceId: props.selectedWorkspaceId,
+          now,
+        })
+      : [];
 
   /** 在项目主工作区里列本地分支（exec 走该项目所在 daemon） */
   async function listProjectBranches(project: Project) {
@@ -204,10 +427,7 @@ export function Sidebar(props: SidebarProps) {
         ]),
     );
 
-  const workspacesOf = (projectId: string) =>
-    workspaces
-      .filter((workspace) => workspace.projectId === projectId)
-      .sort((left, right) => (left.isMain === right.isMain ? left.createdAt - right.createdAt : left.isMain ? -1 : 1));
+  const workspacesOf = (projectId: string) => projectWorkspacesInOrder(workspaces, projectId);
 
   return (
     // 高度跟随父容器而不是 h-screen：断线横幅出现时根容器加 pt-7，写死一屏高会把底部 28px
@@ -224,6 +444,37 @@ export function Sidebar(props: SidebarProps) {
       </div>
       <div className="flex min-h-0 flex-1 flex-col pt-1.5">
         <section className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+          {/* 「当前」 (plan 20261109-sidebar-current-section): in tree order, never re-sorted; the
+              same workspaces stay in the tree below as well. */}
+          {currentRows.length > 0 ? (
+            <div className="mb-3">
+              <div className="mb-1.5 flex h-7 items-center px-2">
+                <span className="text-sm text-muted-foreground">当前</span>
+              </div>
+              <div className="space-y-0.5">
+                {currentRows.map(({ workspace, project, activity }) => {
+                  const daemon = daemons.find((item) => item.daemonId === project.daemonId);
+                  return (
+                    <WorkspaceRow
+                      key={workspace.id}
+                      variant="current"
+                      workspace={workspace}
+                      project={project}
+                      daemon={daemon}
+                      activity={activity}
+                      executorBusy={executorBusyOf(workspace.id, daemon)}
+                      progress={workspaceProgress(workspace.id, tasks, sessionAgents)}
+                      selected={workspace.id === props.selectedWorkspaceId}
+                      onSelect={() => props.onSelectWorkspace(workspace.id)}
+                      onRename={() => props.onRenameWorkspace(workspace)}
+                      onRemove={() => props.onRemoveWorkspace(workspace)}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
           <div className="mb-1.5 flex h-7 items-center px-2">
             <span className="text-sm text-muted-foreground">项目</span>
             <Tooltip content="导入项目">
@@ -251,7 +502,34 @@ export function Sidebar(props: SidebarProps) {
               const projectWorkspaces = workspacesOf(project.id);
               const projectPending = props.pendingWorkspaces.filter((item) => item.projectId === project.id);
               const daemon = daemons.find((item) => item.daemonId === project.daemonId);
-              const expanded = !collapsedIds.has(project.id);
+              const expanded = expandedIds.has(project.id);
+              // 活动四态：执行中 / 待批准 / 待回答 / 本轮完成（同一套 SVG 点阵）。
+              // 状态来自 agent hook 上报（经 daemon 合并），聚合优先级收敛在
+              // workspaceActivity（packages/client），UI 只做呈现。
+              const activities = new Map(
+                projectWorkspaces.map((workspace) => [workspace.id, workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents)]),
+              );
+              // A collapsed row stands in for its rows: the highest activity among them, summarised.
+              const summary = expanded ? null : summarizeProjectActivity([...activities.values()]);
+              const summaryText = summary?.top
+                ? summary.attentionCount > 0
+                  ? `${summary.attentionCount} 个工作区待处理`
+                  : activityLabel(summary.top)
+                : null;
+              const projectTooltip = (
+                <div className="flex flex-col gap-0.5">
+                  {summary?.top && summaryText ? (
+                    <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                      <ActivityIcon activity={summary.top} />
+                      <span className="truncate">{summaryText}</span>
+                    </span>
+                  ) : null}
+                  <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                    <Folder className="size-3 shrink-0 opacity-70" />
+                    <span className="truncate">{project.repoPath}</span>
+                  </span>
+                </div>
+              );
 
               return (
                 <div className="group/project" key={project.id}>
@@ -271,10 +549,10 @@ export function Sidebar(props: SidebarProps) {
                     ]}
                   >
                     <div className="group/row flex h-8 items-center rounded-md text-secondary-foreground transition-colors hover:bg-accent/70 hover:text-foreground">
+                      <Tooltip content={projectTooltip} placement="end" hasHoverIndication={false}>
                       <button
                         className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left"
                         onClick={() => toggleProject(project.id)}
-                        title={project.repoPath}
                       >
                         {/* Cursor 式图标槽：默认按展开态显示 开/合 文件夹，hover 时原位换成箭头 */}
                         {expanded ? (
@@ -293,7 +571,15 @@ export function Sidebar(props: SidebarProps) {
                             title={daemon ? `设备「${daemon.name}」离线` : "设备记录缺失"}
                           />
                         ) : null}
+                        {/* Collapsed only (an expanded row's workspaces show their own). An offline
+                            device reports every workspace idle, so this never meets the grey dot. */}
+                        {summary?.top ? (
+                          <span className="ml-auto flex shrink-0 items-center">
+                            <ActivityIcon activity={summary.top} labeled />
+                          </span>
+                        ) : null}
                       </button>
+                      </Tooltip>
                       <div
                         className={cn(
                           "mr-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100",
@@ -322,163 +608,22 @@ export function Sidebar(props: SidebarProps) {
 
                   {expanded && (projectWorkspaces.length > 0 || projectPending.length > 0) ? (
                     <div className="ml-3 space-y-0.5 border-l border-border pl-1.5">
-                      {projectWorkspaces.map((workspace) => {
-                        const label =
-                          workspace.name && workspace.name !== workspace.branch
-                            ? workspace.name
-                            : workspace.isMain
-                              ? "主工作区"
-                              : null;
-                        const hasDiff = workspace.additions > 0 || workspace.deletions > 0;
-                        // worker 侧 diff_stat 的基准是 merge-base(defaultBranch, HEAD) 比到工作树：当前分支
-                        // 就是默认分支（或默认分支缺失）时 base 即 HEAD 自身，数字实为本地未提交改动（含
-                        // untracked），说成「相对 X 的变更」是同义反复且会被读成分支间历史 diff。
-                        const diffAgainstSelf = !project.defaultBranch || workspace.branch === project.defaultBranch;
-                        // 活动四态：执行中 / 待批准 / 待回答 / 本轮完成（同一套 SVG 点阵）。
-                        // 状态来自 agent hook 上报（经 daemon 合并），聚合优先级收敛在
-                        // workspaceActivity（packages/client），UI 只做呈现。
-                        const activity = workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents);
-                        const activityText = activityLabel(activity);
-                        // A live executor run on one of this workspace's terminals: shown in the icon
-                        // slot when nothing else is, and always as a tooltip line.
-                        const executorBusy = (daemon?.online ?? false) && tasks.some((task) => task.workspaceId === workspace.id && executorTaskIds.has(task.id));
-                        // agent 经 `coflux progress` 播报的进度短评（plan 088）：与活动状态是两个
-                        // 维度（状态 hooks 自动判定，短评 agent 主动播报），跨 hook 事件存活。
-                        const progress = workspaceProgress(workspace.id, tasks, sessionAgents);
-                        // 工作区详情 tooltip（需求勘误：原 plan 048-task-tab-tooltip 做到了任务 Tab 上，
-                        // 真正诉求是侧栏工作区行——版式照抄设备 tooltip：加粗标题行 + 图标条目列表）
-                        const workspaceTooltip = (
-                          <div className="flex flex-col gap-1">
-                            <div className="font-medium">
-                              {workspace.branch}
-                              {label ? ` · ${label}` : ""}
-                            </div>
-                            <div className="flex flex-col gap-0.5">
-                              {activity.status !== "idle" ? (
-                                <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                                  <ActivityIcon activity={activity} />
-                                  <span className="truncate">{activityText}</span>
-                                </span>
-                              ) : null}
-                              {executorBusy ? (
-                                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                                  <ActivityDots status="active" />
-                                  <span className="truncate">executor 正在执行子任务</span>
-                                </span>
-                              ) : null}
-                              {/* What the agent said about what it needs (a `coflux notify` message,
-                                  plan 074, or an OSC 7501 msg): the icon only says it is waiting or
-                                  stopped. Not truncated: the message is the content; the worker
-                                  already clamped it. */}
-                              {(activity.status === "approval" || activity.status === "question" || activity.status === "error") &&
-                              activity.message ? (
-                                <span className="flex items-start gap-1.5 text-sm text-foreground">
-                                  <MessageSquare className="mt-0.5 size-3 shrink-0 opacity-70" />
-                                  <span className="whitespace-pre-wrap break-words">{activity.message}</span>
-                                </span>
-                              ) : null}
-                              {/* 进度短评（plan 088）：agent 主动播报「干到哪了」，不 truncate 同 notify 理由。 */}
-                              {progress ? (
-                                <span className="flex items-start gap-1.5 text-sm text-muted-foreground">
-                                  <LoaderCircle className="mt-0.5 size-3 shrink-0 opacity-70" />
-                                  <span className="whitespace-pre-wrap break-words">{progress}</span>
-                                </span>
-                              ) : null}
-                              <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                                <Folder className="size-3 shrink-0 opacity-70" />
-                                <span className="truncate">{workspace.path}</span>
-                              </span>
-                              <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                                <DeviceOsMark platform={daemon?.platform} className="size-3 shrink-0 opacity-70" />
-                                <span className="truncate">{daemon ? `${daemon.name}（${daemon.online ? "在线" : "离线"}）` : "设备记录缺失"}</span>
-                              </span>
-                              {hasDiff ? (
-                                <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                                  <FileDiff className="size-3 shrink-0 opacity-70" />
-                                  <span className="truncate">{diffAgainstSelf ? "未提交改动" : `相对 ${project.defaultBranch} 的变更`} +{workspace.additions} −{workspace.deletions}</span>
-                                </span>
-                              ) : null}
-                            </div>
-                          </div>
-                        );
-                        return (
-                        <ContextMenu
+                      {projectWorkspaces.map((workspace) => (
+                        <WorkspaceRow
                           key={workspace.id}
-                          label={`工作区「${workspace.branch}」操作`}
-                          size="sm"
-                          items={[
-                            { label: "重命名", onClick: () => props.onRenameWorkspace(workspace) },
-                            { label: "复制标识", onClick: () => copyEntityHandle("workspace", workspace.id) },
-                            ...(!workspace.isMain
-                              ? [{ type: "divider" } as const, { label: "删除工作区", onClick: () => props.onRemoveWorkspace(workspace) }]
-                              : []),
-                          ]}
-                        >
-                          <Tooltip content={workspaceTooltip} placement="end" hasHoverIndication={false}>
-                          <div
-                            className={cn(
-                              "group/workspace relative flex h-7 items-center rounded-md transition-colors",
-                              workspace.id === props.selectedWorkspaceId
-                                ? "bg-accent text-foreground"
-                                : "text-secondary-foreground hover:bg-accent/70 hover:text-foreground",
-                            )}
-                          >
-                            <button
-                              className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left"
-                              onClick={() => props.onSelectWorkspace(workspace.id)}
-                            >
-                              {/* 图标槽原位替换（与设备行「direct 时闪电取代圆点」同一手法）：
-                                  有活动状态时呈现点阵，中性态保留 GitBranch。 */}
-                              {activity.status !== "idle" ? (
-                                <ActivityIcon activity={activity} labeled />
-                              ) : executorBusy ? (
-                                <ActivityDots status="active" label="executor 正在执行子任务" />
-                              ) : (
-                                <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
-                              )}
-                              <span className="min-w-0 flex-1 truncate text-base">{workspace.branch}</span>
-                              {/* 右端内容：自定义名称（name ≠ branch 时才有；主工作区未起名时默认叫「主工作区」）+ git diff 累计统计（plan 024，X=Y=0 时不渲染）。
-                                  diff 固定在最末；两者作为整体 hover 渐变淡出给删除按钮让位 */}
-                              {(() => {
-                                if (!label && !hasDiff) return null;
-                                return (
-                                  <span
-                                    className={cn(
-                                      "flex shrink-0 items-center gap-2",
-                                      !workspace.isMain &&
-                                        "group-hover/workspace:[mask-image:linear-gradient(to_left,transparent_18px,black_44px)]",
-                                    )}
-                                  >
-                                    {label ? (
-                                      <span className="max-w-24 truncate text-sm text-muted-foreground">
-                                        {label}
-                                      </span>
-                                    ) : null}
-                                    {hasDiff ? (
-                                      <span className="whitespace-nowrap font-mono text-xs tabular-nums">
-                                        <span className="text-success">+{workspace.additions}</span>{" "}
-                                        <span className="text-destructive">−{workspace.deletions}</span>
-                                      </span>
-                                    ) : null}
-                                  </span>
-                                );
-                              })()}
-                            </button>
-                            {/* 主工作区不可删除：不渲染删除入口（服务端同样会拒绝，此处是入口层收敛） */}
-                            {!workspace.isMain ? (
-                              <button
-                                className="absolute right-1 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/workspace:opacity-100 focus-visible:opacity-100"
-                                onClick={() => props.onRemoveWorkspace(workspace)}
-                                title="删除工作区"
-                              >
-                                <X className="size-3" />
-                              </button>
-                            ) : null}
-                          </div>
-                          </Tooltip>
-                        </ContextMenu>
-                        );
-                      })}
+                          variant="tree"
+                          workspace={workspace}
+                          project={project}
+                          daemon={daemon}
+                          activity={activities.get(workspace.id) ?? IDLE}
+                          executorBusy={executorBusyOf(workspace.id, daemon)}
+                          progress={workspaceProgress(workspace.id, tasks, sessionAgents)}
+                          selected={workspace.id === props.selectedWorkspaceId}
+                          onSelect={() => props.onSelectWorkspace(workspace.id)}
+                          onRename={() => props.onRenameWorkspace(workspace)}
+                          onRemove={() => props.onRemoveWorkspace(workspace)}
+                        />
+                      ))}
                       {/* 乐观创建中的工作区（plan 078）：无右键菜单/删除入口，不可点击——
                           点击选中已由创建动作完成，行本身只是进度占位。 */}
                       {projectPending.map((pending) => (
