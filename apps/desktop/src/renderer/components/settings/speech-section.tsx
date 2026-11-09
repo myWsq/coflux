@@ -4,15 +4,18 @@ import {
   SPEECH_PROVIDER_DEFAULTS,
   SPEECH_PROVIDER_IDS,
   speechConfigInputError,
+  speechRefineInputError,
   type CofluxClient,
   type SpeechProviderId,
   type SpeechProviderState,
+  type SpeechRefineState,
 } from "@coflux/client";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
 import { HStack, VStack } from "@astryxdesign/core/Layout";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { StatusDot } from "@astryxdesign/core/StatusDot";
+import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 
@@ -39,10 +42,15 @@ const PROVIDER_NOTES: Record<SpeechProviderId, { summary: string; keyPlaceholder
  * knows whether one is stored. Key inputs therefore always start empty, and clearing is its own
  * button. Base URL and model are prefilled with the stored values; empty means the default shown as
  * the placeholder.
+ *
+ * Below the engines, 「识别后整理」 (plan 20261109-dictation-refine) configures the optional chat model
+ * the iPhone sends the recogniser's text to for term correction. It is not an engine: it is never
+ * offered under 当前使用.
  */
 export function SpeechSection({ client }: { client: CofluxClient }) {
   const online = useStore(client.store, (state) => state.status === "connected");
   const supported = useStore(client.store, (state) => state.speechConfigSupported);
+  const refineSupported = useStore(client.store, (state) => state.speechRefineSupported);
   const config = useStore(client.store, (state) => state.speechConfig);
   const [pendingActive, setPendingActive] = useState<SpeechProviderId | null>(null);
   const [activeResult, setActiveResult] = useState<Feedback | null>(null);
@@ -121,6 +129,197 @@ export function SpeechSection({ client }: { client: CofluxClient }) {
           disabledReason={disabledReason}
         />
       ))}
+
+      <RefineGroup
+        client={client}
+        stored={config?.refine}
+        disabledReason={disabledReason}
+        unsupportedReason={!disabledReason && !refineSupported ? "服务器版本过旧，不支持识别后整理" : undefined}
+      />
+    </VStack>
+  );
+}
+
+/**
+ * 「识别后整理」: the switch writes at once with the stored base URL and model and keeps the key; 保存
+ * sends the base URL and model as typed (keeping the switch as stored) and the key only when one was
+ * typed; 清除 removes the key. The key is write-only, as for the engines.
+ */
+function RefineGroup({
+  client,
+  stored,
+  disabledReason,
+  unsupportedReason,
+}: {
+  client: CofluxClient;
+  stored: SpeechRefineState | undefined;
+  disabledReason: string | undefined;
+  unsupportedReason: string | undefined;
+}) {
+  // Null = show the stored values; set on the first edit and dropped after a successful save.
+  const [draft, setDraft] = useState<{ baseUrl: string; model: string } | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState<"switch" | "save" | "clear" | null>(null);
+  const [result, setResult] = useState<Feedback | null>(null);
+
+  const reason = disabledReason ?? unsupportedReason;
+  const storedBaseUrl = stored?.baseUrl ?? "";
+  const storedModel = stored?.model ?? "";
+  const enabled = stored?.enabled === true;
+  const baseUrl = draft?.baseUrl ?? storedBaseUrl;
+  const model = draft?.model ?? storedModel;
+  const keyConfigured = stored?.keyConfigured === true;
+  const editingDisabled = !!reason || busy !== null;
+  const changed = baseUrl.trim() !== storedBaseUrl || model.trim() !== storedModel || apiKey.trim() !== "";
+  const status: { variant: "success" | "warning" | "neutral"; text: string } = !enabled
+    ? { variant: "neutral", text: "未启用" }
+    : keyConfigured && storedBaseUrl !== "" && storedModel !== ""
+      ? { variant: "success", text: "已配置" }
+      : { variant: "warning", text: "未配置" };
+
+  function edit(field: "baseUrl" | "model", value: string) {
+    setDraft({ baseUrl, model, [field]: value });
+    setResult(null);
+  }
+
+  async function toggle(next: boolean) {
+    if (!stored || busy) return;
+    if (next && (storedBaseUrl === "" || storedModel === "")) {
+      setResult({ kind: "error", text: "开启识别后整理前请先填写并保存 Base URL 和模型" });
+      return;
+    }
+    setBusy("switch");
+    setResult(null);
+    try {
+      const answer = await client.setSpeechRefine({ enabled: next, baseUrl: storedBaseUrl, model: storedModel, key: { kind: "keep" } });
+      if (!answer.ok) setResult({ kind: "error", text: answer.error });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function save() {
+    const invalid = speechRefineInputError({ enabled, baseUrl, model, apiKey });
+    if (invalid) {
+      setResult({ kind: "error", text: invalid });
+      return;
+    }
+    setBusy("save");
+    setResult(null);
+    try {
+      const key = apiKey.trim() ? ({ kind: "replace", apiKey } as const) : ({ kind: "keep" } as const);
+      const answer = await client.setSpeechRefine({ enabled, baseUrl, model, key });
+      if (!answer.ok) {
+        setResult({ kind: "error", text: answer.error });
+        return;
+      }
+      setDraft(null);
+      setApiKey("");
+      setResult({ kind: "ok", text: "已保存" });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function clearKey() {
+    setBusy("clear");
+    setResult(null);
+    try {
+      const answer = await client.setSpeechRefine({ enabled, baseUrl: storedBaseUrl, model: storedModel, key: { kind: "clear" } });
+      if (!answer.ok) {
+        setResult({ kind: "error", text: answer.error });
+        return;
+      }
+      setApiKey("");
+      setResult({ kind: "ok", text: "已清除 API Key" });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <VStack gap={1.5} hAlign="stretch">
+      <Text type="label" color="secondary">识别后整理</Text>
+      <Card variant="muted" width="100%">
+        <VStack gap={3} hAlign="stretch">
+          <HStack gap={3} vAlign="center">
+            <Switch
+              label="识别后整理"
+              isLabelHidden
+              size="sm"
+              value={enabled}
+              onChange={(next) => void toggle(next)}
+              isLoading={busy === "switch"}
+              isDisabled={editingDisabled || !stored}
+              disabledMessage={reason}
+            />
+            {stored && !unsupportedReason ? (
+              <HStack gap={2} vAlign="center">
+                <StatusDot variant={status.variant} label={status.text} />
+                <Text type="supporting">
+                  {`${status.text}${stored.updatedAt > 0 ? ` · 最近一次保存：${new Date(stored.updatedAt).toLocaleString()}` : ""}`}
+                </Text>
+              </HStack>
+            ) : !stored ? (
+              <Text type="supporting">正在读取…</Text>
+            ) : null}
+          </HStack>
+          <Text type="supporting" color="secondary">用大模型按对话和仓库术语纠正识别结果。建议选不带深度思考的快速模型。</Text>
+          <TextInput
+            label="Base URL"
+            value={baseUrl}
+            onChange={(value) => edit("baseUrl", value)}
+            isDisabled={editingDisabled}
+            disabledMessage={reason}
+            placeholder="https://api.example.com/v1"
+            autoComplete="off"
+          />
+          <TextInput
+            label="模型"
+            value={model}
+            onChange={(value) => edit("model", value)}
+            isDisabled={editingDisabled}
+            disabledMessage={reason}
+            placeholder="model id"
+            autoComplete="off"
+          />
+          <TextInput
+            label="API Key"
+            type="password"
+            value={apiKey}
+            onChange={(value) => {
+              setApiKey(value);
+              setResult(null);
+            }}
+            isDisabled={editingDisabled}
+            disabledMessage={reason}
+            placeholder={keyConfigured ? "已保存（留空则不改）" : "粘贴该服务的 API Key"}
+            autoComplete="off"
+          />
+          <HStack gap={2} vAlign="center">
+            <Button
+              label="保存"
+              variant="primary"
+              size="sm"
+              isDisabled={editingDisabled || !changed}
+              tooltip={!editingDisabled && !changed ? "没有改动" : undefined}
+              isLoading={busy === "save"}
+              onClick={() => void save()}
+            />
+            <Button
+              label="清除"
+              variant="ghost"
+              size="sm"
+              isDisabled={editingDisabled || !keyConfigured}
+              tooltip={!editingDisabled && !keyConfigured ? "没有保存的 API Key" : undefined}
+              isLoading={busy === "clear"}
+              onClick={() => void clearKey()}
+            />
+          </HStack>
+          {unsupportedReason ? <FeedbackLine variant="warning" text={unsupportedReason} /> : null}
+          {result ? <FeedbackLine variant={result.kind === "ok" ? "success" : "error"} text={result.text} /> : null}
+        </VStack>
+      </Card>
     </VStack>
   );
 }
