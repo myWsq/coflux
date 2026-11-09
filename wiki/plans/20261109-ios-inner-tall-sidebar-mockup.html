@@ -84,7 +84,7 @@ svg.i { width: 20px; height: 20px; stroke: #e6e6e3; fill: none; stroke-width: 2;
   transform: translateX(calc(-100% - 24px)); transition: transform .34s cubic-bezier(.2,.85,.25,1); }
 .open .sb { transform: none; }
 @media (prefers-reduced-motion: reduce) { .sb, .scrim { transition: none; } }
-.sbh { flex: none; height: 48px; margin-top: 16px; padding: 0 10px 0 12px; display: flex; align-items: center; gap: 12px; }
+.sbh { flex: none; height: 48px; margin-top: 16px; padding: 0 10px 0 20px; display: flex; align-items: center; gap: 12px; }
 .sbh .ttl { flex: 1; min-width: 0; line-height: 1.25; }
 .sbh .ttl b { display: block; font-size: 15px; font-weight: 600; }
 .sbh .ttl small { display: block; font-size: 12px; color: var(--fg2); }
@@ -128,7 +128,7 @@ svg.i { width: 20px; height: 20px; stroke: #e6e6e3; fill: none; stroke-width: 2;
     <span class="spec">内屏竖开 669 × 951 pt · 不再有「首页 → 工作区」两级页面 · 工作区列表 = 浮在终端上方的侧栏</span>
     <h1>内屏竖开：浮动侧栏</h1>
     <p>和内屏横放一样用分栏（<code>NavigationSplitView</code>，竖开时用 <code>.prominentDetail</code>），只是竖开时侧栏不占宽度：平时终端占满整屏，点左上角的侧栏按钮或从左边缘往右滑，侧栏浮出来盖在终端上；点一个工作区就切过去，侧栏自动收起。底部的「首页 / 设备」标签栏也不要了，「设备」成为侧栏里的最后一行，和横放一样。外屏不变。</p>
-    <p class="hint">每台机器都能点：左上角按钮开关侧栏，点侧栏里的行切换工作区，点终端区域收起。</p>
+    <p class="hint">每台机器都能点：左上角按钮拉出侧栏，点侧栏里的行切换工作区；在侧栏上往左滑、或者点终端区域，侧栏就收回去。侧栏自己没有开关按钮。</p>
   </header>
 </div>
 
@@ -214,7 +214,7 @@ function sidebar(width, sel) {
     <div class="sr ${r.id === sel ? "on" : ""}" data-ws="${r.id}">${rowIcon(r)}
       <span class="txt"><b>${r.title}${wide && r.label ? `<em>${r.label}</em>` : ""}</b><span class="l2"><small class="t-${r.state}">${r.sub}</small>${r.add || r.del ? `<span class="diff"><span class="a">+${r.add}</span><span class="x">−${r.del}</span></span>` : ""}</span></span></div>`).join("")).join("");
   return `<aside class="sb" style="--sbw:${width}px">
-    <div class="sbh"><span class="circ glass" data-toggle>${svg("side")}</span><span class="ttl"><b>coflux</b><small>3 台设备在线</small></span><span class="circ glass acct">W</span></div>
+    <div class="sbh"><span class="ttl"><b>coflux</b><small>3 台设备在线</small></span><span class="circ glass acct">W</span></div>
     <div class="sbl"><div class="lh"><b>待处理</b> <span>· ${WAITING.length}</span></div>${waiting}${projects}
       <div class="sr devs">${svg("devices")}<span class="txt"><b>设备</b></span></div></div>
     <div class="sbs glass">${svg("search")}搜索终端</div><span class="grip"></span></aside>`;
@@ -266,7 +266,15 @@ document.querySelector(".page").insertAdjacentHTML("beforeend", SECTIONS.map((s)
 
 queueMicrotask(() => document.querySelectorAll(".dev").forEach((dev) => {
   device(dev);
+  // A swipe to the left over the floating sidebar puts it away.
+  let swipeX = null;
+  dev.addEventListener("pointerdown", (e) => { swipeX = e.target.closest(".sb") ? e.clientX : null; });
+  dev.addEventListener("pointerup", (e) => {
+    if (swipeX !== null && e.clientX - swipeX < -40 && dev.dataset.sel) { dev.dataset.open = "0"; dev.classList.remove("open"); dev.dataset.swiped = "1"; }
+    swipeX = null;
+  });
   dev.addEventListener("click", (e) => {
+    if (dev.dataset.swiped) { delete dev.dataset.swiped; return; }
     if (e.target.closest("[data-toggle]")) { dev.dataset.open = dev.dataset.open === "1" ? "0" : "1"; dev.classList.toggle("open", dev.dataset.open === "1"); return; }
     if (e.target.closest("[data-close]")) { if (!dev.dataset.sel) return; dev.dataset.open = "0"; dev.classList.remove("open"); return; }
     const row = e.target.closest("[data-ws]");

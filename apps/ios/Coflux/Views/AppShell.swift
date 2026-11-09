@@ -141,8 +141,10 @@ struct AppShell: View {
 
     /// The tall layout: the same split view with the detail prominent — the terminal fills the
     /// window and the sidebar floats over it, so bringing it out never resizes the terminal. A
-    /// selection puts it away (`SceneNavigation.show`). The system's sidebar toggle is replaced
-    /// by `SidebarToggleButton`, which carries the waiting count the 首页 tab used to.
+    /// selection puts it away (`SceneNavigation.show`), and so do a swipe back over it and a tap
+    /// on the dimmed terminal — the floating sidebar has no button of its own (user's call,
+    /// 2026-11-09). The system's sidebar toggle is replaced by `SidebarToggleButton`, which
+    /// carries the waiting count the 首页 tab used to.
     private var overlayLayout: some View {
         @Bindable var navigation = navigation
         return NavigationSplitView(columnVisibility: $navigation.overlayVisibility) {

@@ -63,15 +63,6 @@ struct HomeSidebar: View {
         .navigationSubtitle(onlineDevicesSubtitle(client))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            // Floating over the terminal (tall layout) the sidebar puts itself away from here;
-            // the system toggle is removed there because it cannot carry the waiting count.
-            if layout == .tall {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("隐藏边栏", systemImage: "sidebar.leading") {
-                        navigation.toggleOverlaySidebar()
-                    }
-                }
-            }
             ToolbarItem(placement: .topBarTrailing) {
                 AccountMenu(client: client)
             }
