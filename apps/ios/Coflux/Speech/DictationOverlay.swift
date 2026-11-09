@@ -1,3 +1,4 @@
+import CofluxClientCore
 import SwiftUI
 import UIKit
 
@@ -320,8 +321,8 @@ struct DictationOverlay: View {
     @ViewBuilder
     private var engineBadge: some View {
         switch session.phase {
-        case .active(let withContext):
-            badge(withContext ? "豆包 · 带语境" : "豆包", tint: Theme.success)
+        case .active(let provider, let withContext):
+            badge(withContext ? "\(provider.shortName) · 带语境" : provider.shortName, tint: Theme.success)
         case .connecting:
             badge("连接中…", tint: Theme.mutedForeground)
         case .unavailable:
@@ -345,9 +346,9 @@ struct DictationOverlay: View {
     @ViewBuilder
     private var restingFooter: some View {
         switch session.phase {
-        case .unavailable(.notConfigured):
+        case .unavailable(.notConfigured(let provider)):
             VStack(spacing: 8) {
-                Text("语音输入不可用：未配置豆包 API Key")
+                Text("语音输入不可用：未配置 \(provider.displayName) API Key")
                     .font(Theme.Fonts.label)
                     .foregroundStyle(Theme.foreground)
                     .multilineTextAlignment(.center)
@@ -356,7 +357,7 @@ struct DictationOverlay: View {
                     .foregroundStyle(Theme.primary)
             }
         case .unavailable(.outdatedServer):
-            Text("语音输入不可用：服务器版本过旧，不支持语音识别 Key")
+            Text("语音输入不可用：服务器版本过旧，不支持语音识别设置")
                 .font(Theme.Fonts.label)
                 .foregroundStyle(Theme.foreground)
                 .multilineTextAlignment(.center)

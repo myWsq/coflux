@@ -5,23 +5,25 @@ import UIKit
 
 private struct DictationTimeoutError: Error {}
 
-/// 一次长按对讲的会话状态机（plan 064 → plan 20261108-ios-seed-asr）：只有一个引擎——豆包
-/// Seed-ASR 2.0，用账号上存的 API Key，不重试、不降级（D1）。准入（取 Key + 等语境 + 建连）
-/// 整体限时约 3s；取 Key、读语境与开麦克风并行。
+/// 一次长按对讲的会话状态机（plan 064 → 20261108-ios-seed-asr → 20261109-speech-providers）：
+/// 用账号上「当前使用」的那一家（豆包 Seed-ASR 或 OpenAI Realtime）与它自己的 Base URL、模型和
+/// API Key，不重试、不降级、也不换另一家（D1）。准入（取凭据 + 等语境 + 建连）整体限时约 3s；
+/// 取凭据、读语境与开麦克风并行。
 @MainActor
 final class DictationSession: ObservableObject {
     /// Why dictation cannot start at all; the microphone is never opened.
     enum Unavailability: Equatable {
-        /// The account has no key.
-        case notConfigured
-        /// The centre does not store the key (older server).
+        /// The provider in use has no key.
+        case notConfigured(SpeechProviderID)
+        /// The centre does not store provider configurations (older server).
         case outdatedServer
     }
 
     enum Phase: Equatable {
         case connecting
-        /// Recognising; `withContext` = the agent conversation went into the recognition context.
-        case active(withContext: Bool)
+        /// Recognising with `provider`; `withContext` = the agent conversation went into the
+        /// recognition context.
+        case active(provider: SpeechProviderID, withContext: Bool)
         case unavailable(Unavailability)
         case permissionDenied
         case failed(String)
@@ -40,17 +42,17 @@ final class DictationSession: ObservableObject {
     private var provider: (any SpeechTranscribing)?
     private var listenTask: Task<Void, Never>?
     private var startTask: Task<Void, Never>?
-    private var keyTask: Task<Result<String, any Error>, Never>?
+    private var keyTask: Task<Result<SpeechCredentials, any Error>, Never>?
     private var contextTask: Task<DictationContext, Never>?
     /// 快速按下-松开可能在准入还没跑完时就要求收尾；每个 await 挂起点之后都要重新检查这个
     /// 标志，避免残留连接或重复初始化（真实场景，不是臆造的边界情况）。
     private var teardownRequested = false
-    /// 准入期（取 Key / 等语境 / 握手，最多约 3s）采到的音频先攒这里，provider 就绪后在
+    /// 准入期（取凭据 / 等语境 / 握手，最多约 3s）采到的音频先攒这里，provider 就绪后在
     /// feedProvider 里补喂——否则开口前几百 ms 全丢字。上限防异常场景无限膨胀
-    /// （16kHz mono Int16 下 300KB ≈ 9.4s，远超准入窗口）。
+    /// （约 9.4s 的音频，远超准入窗口；按采样率换算成字节，16kHz 下即 300KB）。
     private var pendingPCM: [Data] = []
     private var pendingPCMBytes = 0
-    private static let pendingPCMCapBytes = 300 * 1024
+    private var pendingPCMCapBytes = 300 * 1024
 
     /// The whole admission — key fetch, context wait and connect — is bounded: `finish()` awaits
     /// `startTask` first, so an unbounded admission would leave the overlay finalizing for the key
@@ -78,10 +80,19 @@ final class DictationSession: ObservableObject {
         AVAudioApplication.shared.recordPermission == .granted
     }
 
-    /// The account has a key on a centre that stores it: dictation can start. Prewarm is skipped
-    /// otherwise.
+    /// The provider in use has a key on a centre that stores provider configurations: dictation can
+    /// start. Prewarm is skipped otherwise.
     static func isAvailable(on client: CofluxClient) -> Bool {
-        client.speechKeySupported && client.speechKeyStatus?.configured == true
+        guard client.speechConfigSupported, let config = client.speechConfig else { return false }
+        return config[config.active].keyConfigured
+    }
+
+    /// The capture rate each provider expects (D10).
+    private static func sampleRate(for provider: SpeechProviderID) -> Double {
+        switch provider {
+        case .doubao: 16000
+        case .openai: 24000
+        }
     }
 
     /// 长按触发：包一层 Task 存进 startTask，finish() 靠它等 phase 落定
@@ -92,19 +103,21 @@ final class DictationSession: ObservableObject {
     }
 
     private func start() async {
-        guard client.speechKeySupported else {
+        guard client.speechConfigSupported else {
             phase = .unavailable(.outdatedServer)
             return
         }
-        guard client.speechKeyStatus?.configured == true else {
-            phase = .unavailable(.notConfigured)
+        // The provider in use is read once, at touch-down; it is never switched mid-session.
+        let speechProvider = client.speechConfig?.active ?? .doubao
+        guard client.speechConfig?[speechProvider].keyConfigured == true else {
+            phase = .unavailable(.notConfigured(speechProvider))
             return
         }
-        // Key and context run alongside the microphone, from touch-down (prewarm) on. Both are
-        // cancelled by cancel(); their late results are ignored behind teardownRequested.
+        // Credentials and context run alongside the microphone, from touch-down (prewarm) on. Both
+        // are cancelled by cancel(); their late results are ignored behind teardownRequested.
         let client = client
-        let keyTask = Task { () -> Result<String, any Error> in
-            do { return .success(try await client.speechKey()) } catch { return .failure(error) }
+        let keyTask = Task { () -> Result<SpeechCredentials, any Error> in
+            do { return .success(try await client.speechCredentials(for: speechProvider)) } catch { return .failure(error) }
         }
         let source = contextSource
         let contextTask = Task { await source.load(client: client) }
@@ -137,8 +150,10 @@ final class DictationSession: ObservableObject {
         // 头几百 ms 音频在采音开始前被丢的窗口。
         guard !teardownRequested else { return }
 
+        let sampleRate = Self.sampleRate(for: speechProvider)
+        pendingPCMCapBytes = 300 * 1024 * Int(sampleRate) / 16000
         do {
-            try capture.start()
+            try capture.start(sampleRate: sampleRate)
         } catch {
             phase = .failed("无法打开麦克风")
             return
@@ -160,15 +175,15 @@ final class DictationSession: ObservableObject {
             capture.stop()
             return
         }
-        let apiKey: String
+        let credentials: SpeechCredentials
         switch keyResult {
-        case .success(let key):
-            apiKey = key
+        case .success(let value):
+            credentials = value
         case .failure(let error):
-            return fail((error as? SpeechKeyError)?.message ?? Self.unreachableMessage)
+            return fail((error as? SpeechError)?.message ?? Self.unreachableMessage)
         }
-        guard !apiKey.isEmpty else {
-            phase = .unavailable(.notConfigured)
+        guard !credentials.apiKey.isEmpty else {
+            phase = .unavailable(.notConfigured(speechProvider))
             capture.stop()
             return
         }
@@ -180,37 +195,48 @@ final class DictationSession: ObservableObject {
             return
         }
 
-        let seed = SeedASRProvider(apiKey: apiKey, contextItems: context.items)
-        let connect = Task { () -> Result<Void, SeedASRStartError> in
+        let transcriber: any SpeechTranscribing = switch speechProvider {
+        case .doubao:
+            SeedASRProvider(
+                apiKey: credentials.apiKey, endpoint: credentials.baseURL,
+                resourceID: credentials.model, contextItems: context.items
+            )
+        case .openai:
+            OpenAIRealtimeTranscriber(
+                apiKey: credentials.apiKey, baseURL: credentials.baseURL,
+                model: credentials.model, contextItems: context.items
+            )
+        }
+        let connect = Task { () -> Result<Void, SpeechStartError> in
             do {
-                try await seed.start()
+                try await transcriber.start()
                 return .success(())
-            } catch let error as SeedASRStartError {
+            } catch let error as SpeechStartError {
                 return .failure(error)
             } catch {
                 return .failure(.unreachable)
             }
         }
         guard let outcome = await Self.value(of: connect, before: deadline) else {
-            await seed.cancel()
+            await transcriber.cancel()
             return fail(Self.unreachableMessage)
         }
         guard !teardownRequested else {
-            await seed.cancel()
+            await transcriber.cancel()
             capture.stop()
             return
         }
         switch outcome {
         case .failure(.invalidKey):
-            await seed.cancel()
+            await transcriber.cancel()
             return fail(Self.invalidKeyMessage)
         case .failure(.unreachable):
-            await seed.cancel()
+            await transcriber.cancel()
             return fail(Self.unreachableMessage)
         case .success:
-            provider = seed
-            phase = .active(withContext: context.includesConversation)
-            pump(seed)
+            provider = transcriber
+            phase = .active(provider: speechProvider, withContext: context.includesConversation)
+            pump(transcriber)
         }
     }
 
@@ -220,7 +246,7 @@ final class DictationSession: ObservableObject {
         capture.stop()
     }
 
-    /// 上滑取消 / 未达长按就松手：不等终稿，尽快断开；在飞的取 Key 与读语境一并取消。
+    /// 上滑取消 / 未达长按就松手：不等终稿，尽快断开；在飞的取凭据与读语境一并取消。
     func cancel() {
         guard !teardownRequested else { return }
         teardownRequested = true
