@@ -84,16 +84,7 @@ enum DictationRefiner {
 
         let response: (Data, URLResponse)
         do {
-            response = try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
-                group.addTask { try await session.data(for: request) }
-                group.addTask {
-                    try await Task.sleep(until: deadline, clock: .continuous)
-                    throw URLError(.timedOut)
-                }
-                guard let first = try await group.next() else { throw URLError(.unknown) }
-                group.cancelAll()
-                return first
-            }
+            response = try await send(request, on: session, before: deadline)
         } catch let error as URLError {
             log.notice("dictation refine failed: url error \(error.code.rawValue, privacy: .public)")
             return .notRefined
@@ -119,6 +110,26 @@ enum DictationRefiner {
             return .notRefined
         }
         return .refined(accepted)
+    }
+
+    /// One request raced against `deadline`: whichever ends first wins and the other is cancelled, so
+    /// the request never outlives the correction budget. The child tasks capture only immutable,
+    /// Sendable values.
+    private static func send(
+        _ request: URLRequest,
+        on session: URLSession,
+        before deadline: ContinuousClock.Instant
+    ) async throws -> (Data, URLResponse) {
+        try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
+            group.addTask { [session, request] in try await session.data(for: request) }
+            group.addTask {
+                try await Task.sleep(until: deadline, clock: .continuous)
+                throw URLError(.timedOut)
+            }
+            guard let first = try await group.next() else { throw URLError(.unknown) }
+            group.cancelAll()
+            return first
+        }
     }
 
     /// `{base URL without trailing slashes}/chat/completions`, https only.

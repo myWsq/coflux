@@ -24,7 +24,8 @@ struct DictationContext: Sendable, Equatable {
 
 /// Correction context for one dictation (plan 20261109-dictation-refine D12): what the correction
 /// pass sees besides the recogniser's text. Entries are chronological (oldest first) and include the
-/// short tool-call inputs; terms are the most relevant first. The refiner applies its own budget.
+/// short tool-call inputs; terms are the repository names only, in listing-derived order, so the
+/// request prefix stays stable across dictations. The refiner applies its own budget.
 struct DictationRefineContext: Sendable, Equatable {
     let workspaceSentence: String?
     let terms: [String]
@@ -118,12 +119,13 @@ struct DictationContextSource {
         )
     }
 
-    /// The correction context (D12): every entry the read produced, chronological, and the merged
-    /// term list.
+    /// The correction context (D12): every entry the read produced, chronological, and the
+    /// repository terms only — conversation terms change every turn and would break the request's
+    /// cacheable prefix; the conversation entries themselves are in the request anyway.
     func refineContext(reading: DictationTranscript.Reading?, repositoryTerms: [String]?) -> DictationRefineContext {
         DictationRefineContext(
             workspaceSentence: workspaceSentence,
-            terms: DictationTerms.merged(reading?.terms ?? [], repositoryTerms ?? []),
+            terms: repositoryTerms ?? [],
             entries: reading?.entries ?? []
         )
     }
