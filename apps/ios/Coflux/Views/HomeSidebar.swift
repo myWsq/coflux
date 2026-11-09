@@ -22,8 +22,8 @@ struct HomeSidebar: View {
 
     private static let wideWidth: CGFloat = 380
     /// A row's padding inside its highlight; the highlight sits 6 pt in from the sidebar's edges.
-    private static let rowInsets = EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 14)
-    private static let headerInsets = EdgeInsets(top: 12, leading: 16, bottom: 3, trailing: 14)
+    private static let rowInsets = EdgeInsets(top: 9, leading: 16, bottom: 9, trailing: 14)
+    private static let headerInsets = EdgeInsets(top: 16, leading: 16, bottom: 4, trailing: 14)
 
     var body: some View {
         let items = client.waitingItems
@@ -60,8 +60,8 @@ struct HomeSidebar: View {
             }
         }
         .listStyle(.plain)
-        // Dense like the rest of the page (user's call, 2026-11-10): rows as tall as their two
-        // lines plus the insets below, not the system's 44 pt minimum.
+        // Denser than the system's rows (user's call, 2026-11-10; 6 pt insets were too tight):
+        // rows as tall as their two lines plus `rowInsets`, not the 44 pt minimum.
         .environment(\.defaultMinListRowHeight, 1)
         .listSectionSpacing(0)
         .contentMargins(.top, 2, for: .scrollContent)
