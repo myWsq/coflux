@@ -26,6 +26,12 @@ export const DAEMON_ONBOARDING_DISMISSED_KEY = `coflux_daemon_onboarding_dismiss
  */
 export const COMMAND_PALETTE_RECENT_KEY = `coflux_recent_places:${SERVER_URL}`;
 /**
+ * When each workspace was last on screen (plan 20261109-sidebar-current-section): workspace id →
+ * the epoch ms the selection moved off it, read by the sidebar's 「当前」 section. Scoped by server
+ * address like the palette's recent places — workspace ids mean nothing on another server.
+ */
+export const WORKSPACE_VISITS_KEY = `coflux_workspace_visits:${SERVER_URL}`;
+/**
  * Terminal editor-group layouts per workspace (plan 20260923-terminal-split-groups): groups, tab
  * order, active tab per group, split ratios, focused group. Local to this machine and scoped by
  * server address like the palette's recent places — workspace and task ids mean nothing elsewhere.

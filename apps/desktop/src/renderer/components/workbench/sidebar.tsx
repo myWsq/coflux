@@ -19,7 +19,8 @@ import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifi
 import { SidebarToggleButton } from "@/components/workbench/sidebar-collapse";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
 import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-width";
-import { isProjectArchived, workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
+import { projectWorkspacesInOrder, visibleProjects } from "@/components/workbench/workspace-order";
+import { workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
 import { cn } from "@/lib/utils";
 
 /** 心跳往返低于此值算「快」（绿），否则「慢」（黄）。局域网直连通常个位数到几十 ms，
@@ -152,7 +153,8 @@ export function Sidebar(props: SidebarProps) {
   const client = props.client;
   // Archived projects (plan 20261030-project-archive) are not listed; their workspaces are only
   // ever listed under their project, so filtering projects hides them too.
-  const projects = useStore(client.store, (state) => state.projects).filter((project) => !isProjectArchived(project));
+  const allProjects = useStore(client.store, (state) => state.projects);
+  const projects = visibleProjects(allProjects);
   const workspaces = useStore(client.store, (state) => state.workspaces);
   const projectArchiveSupported = useStore(client.store, (state) => state.projectArchiveSupported);
   const daemons = useStore(client.store, (state) => state.daemons);
@@ -204,10 +206,7 @@ export function Sidebar(props: SidebarProps) {
         ]),
     );
 
-  const workspacesOf = (projectId: string) =>
-    workspaces
-      .filter((workspace) => workspace.projectId === projectId)
-      .sort((left, right) => (left.isMain === right.isMain ? left.createdAt - right.createdAt : left.isMain ? -1 : 1));
+  const workspacesOf = (projectId: string) => projectWorkspacesInOrder(workspaces, projectId);
 
   return (
     // 高度跟随父容器而不是 h-screen：断线横幅出现时根容器加 pt-7，写死一屏高会把底部 28px
