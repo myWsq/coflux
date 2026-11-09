@@ -247,3 +247,21 @@ Out of scope:
 - No server change and no migration in this plan. Correction needs the centre to carry migration 13 (#131); without it the desktop dictates without correction.
 - The packaged app gains a new entitlement (`com.apple.security.device.audio-input`) and `NSMicrophoneUsageDescription`; both go through the normal signed/notarized desktop release. Users see a microphone prompt on first use.
 - Rollback: revert the desktop release; nothing persists.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-10
+- Mode: subagent(opus), one work package (strictly serial milestones), one revision round
+- Commits: `659a7fb7..dab8400e` (`d928e715` main process, `672a7ab8` renderer controller, `12e6b094` UI, `bf1d60c2` credential-exchange error fix, `dab8400e` revision: hook declaration order for the React Compiler lint rule, Enter sent 80 ms after the paste)
+- Verification: desktop typecheck, lint, 583/583 tests and build green; key fields appear in no renderer, preload or shared file; no change outside `apps/desktop`. Engine probe on this Mac: synthesized speech through the main-process OpenAI Realtime transcriber gave 「帮我看一下 rebase到 main之后 Tailcat的连接测试有没有过，然后把 worktree清理一下。」 (~4.7 s from connect at ~4× feed speed), the gpt-4.1-mini correction returned in 2.0 s with only spacing changed; an invalid key surfaced as `invalid_key` (OpenAI accepts the socket and reports `invalid_api_key` as an event, which the port maps).
+- Deviations:
+  - A bridge method `openSettings()` was added: the settings page has no section target, so 「去设置」 opens settings.
+  - `src/main/ipc-sanitize.ts` and `src/main/renderer-reset.ts` were touched (inside `src/main/`): payload sanitizers for the new channels, and cancelling the session when the page is rebuilt.
+  - Seed's config JSON and OpenAI's `session.update` match the Swift payloads in content, not byte order (Swift dictionary encoding has no fixed key order); frame headers, sequences and audio payloads match exactly.
+  - The correction-context read starts at the stop (as the brief says), not at the start as on iOS.
+  - A connection that drops after text exists goes to confirm with the raw text, without the correction pass.
+- Follow-ups:
+  - The 豆包 path has not been exercised live (no key on this Mac); only reviewed line by line against the Swift port.
+  - The recogniser WebSockets (`ws`) do not use the macOS system proxy; the correction request does (`net.fetch`). From China without a system-wide proxy, OpenAI recognition may be slow or fail.
+  - iOS's dictation 「发送」 only types the text (no Enter); the desktop's 发送 sends Enter, as the user confirmed for the desktop.
+  - Desktop walkthrough pending the user; development builds prompt for the microphone as Electron.
