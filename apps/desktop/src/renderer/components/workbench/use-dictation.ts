@@ -163,6 +163,13 @@ export function useDictation(options: {
     press: null as { at: number; started: boolean } | null,
     noticeTimer: 0,
   });
+  // The subscription, the effects below and other panes reach this pane through the latest
+  // handlers (set in an effect once they are defined); the reset they run releases the microphone
+  // (an external system), never just state. `owner` is this pane's entry in the one-dictation-at-a-
+  // time registry (D9).
+  const latest = useRef<{ reset: () => void; onEvent: (event: DesktopDictationEvent) => void } | null>(null);
+  const [owner] = useState(() => ({ cancel: () => latest.current?.reset() }));
+
   const go = (next: DictationPhase) => {
     m.current.phase = next;
     setPhase(next);
@@ -434,13 +441,9 @@ export function useDictation(options: {
     }
   };
 
-  // The subscription, the effects below and other panes reach this pane through the latest
-  // handlers; the reset they run releases the microphone (an external system), never just state.
-  const latest = useRef<{ reset: () => void; onEvent: (event: DesktopDictationEvent) => void } | null>(null);
   useEffect(() => {
     latest.current = { reset, onEvent };
   });
-  const [owner] = useState(() => ({ cancel: () => latest.current?.reset() }));
 
   useEffect(() => {
     const handlers = latest;

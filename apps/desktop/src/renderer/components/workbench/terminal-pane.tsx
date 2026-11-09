@@ -133,6 +133,9 @@ const SEARCH_OPTIONS: ISearchOptions = {
 
 const NO_SEARCH_RESULTS = { index: -1, count: 0 };
 
+/** Gap between a dictated paste and the Enter that sends it (plan 20261110-desktop-dictation). */
+const DICTATION_ENTER_DELAY_MS = 80;
+
 /** The palette's blue: the theme's `blue` and the hovered link's colour (plan
  * 20261001-terminal-file-tab). Not the CSS `--accent` token — in this app that is the dark hover
  * surface and would make the link vanish on the paper — and decorations only take #RRGGBB. */
@@ -292,16 +295,23 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   // Dictation (plan 20261110-desktop-dictation D7): the text lands exactly as typed text would — a
   // paste through xterm (bracketed when the program asked for it), then Enter for 发送, both on the
-  // input path that is gated on control.
+  // input path that is gated on control. The Enter is a separate input a moment later: an agent TUI
+  // may take input arriving right on the heels of a paste as part of the paste and swallow it. It is
+  // dropped when, by then, the terminal is gone, the session changed or control was lost.
   const dictationPane = useRef<DictationPaneActions | null>(null);
   useEffect(() => {
     dictationPane.current = {
       deliver: (text, submit) => {
         const terminal = terminalRef.current;
-        const { controlState, sessionId, sendInput } = liveRef.current;
+        const { controlState, sessionId } = liveRef.current;
         if (!terminal || !sessionId || !canSendTerminalInput(controlState)) return;
         terminal.paste(text);
-        if (submit) sendInput(sessionId, "\r");
+        if (!submit) return;
+        window.setTimeout(() => {
+          const now = liveRef.current;
+          if (terminalRef.current !== terminal || now.sessionId !== sessionId || !canSendTerminalInput(now.controlState)) return;
+          now.sendInput(sessionId, "\r");
+        }, DICTATION_ENTER_DELAY_MS);
       },
       done: () => terminalRef.current?.focus(),
     };
