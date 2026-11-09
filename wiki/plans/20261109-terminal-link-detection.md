@@ -211,3 +211,12 @@ Out of scope:
 
 - Renderer-only; it ships with the next desktop release. No server, daemon, protocol, or migration change.
 - No automated gate drives a real xterm. The walkthrough row above is pending the user, and it is the only check of the OSC 8 half.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-09
+- Mode: subagent(opus), one work package (two independent milestones, too small to split)
+- Commits: `845f19b6..a867faa7` (`edf8b9da` URL boundaries + tests, `a867faa7` OSC 8 link handler)
+- Deviations: none. The executor reported finding `terminal-web-links.test.ts` already present, untracked, when it staged milestone 1; the file was reviewed line by line and holds exactly the 20 cases of T2, so it was accepted as is.
+- Verification: `pnpm --filter @coflux/desktop typecheck` / `lint` / `test` (568/568) green. The scanner was also run against a real `@xterm/headless` buffer (40 columns): CJK wide-character prefixes, a URL soft-wrapped over three rows, and `Foo_(bar)` all map back to exactly the link's cells.
+- Follow-ups: the OSC 8 half has no automated gate — the real-terminal walkthrough (click opens with no dialog, hover hint, right-click items, drag-select does not open) is pending the user. An unclosed ASCII opener at a URL's very end (`https://a.com/x(`) is now kept, as in VS Code; the old pattern trimmed it. Making Claude Code emit OSC 8 in Coflux terminals (`FORCE_HYPERLINK=1`) is a separate decision.
