@@ -279,6 +279,79 @@ struct DiffStat: View {
     }
 }
 
+/// A workspace row's content, shared by the sidebar and the outer display's home so they read the
+/// same: the icon, the name (with its custom label when there is room), and the state line closed
+/// on the right by the diff (user's call, 2026-11-09).
+struct WorkspaceRowContent: View {
+    let workspace: Coflux_V1_Workspace
+    let activity: WorkspaceActivity
+    var showsLabel = true
+
+    var body: some View {
+        HStack(spacing: 10) {
+            WorkspaceRowIcon(workspace: workspace, activity: activity)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(workspace.displayTitle)
+                        .font(Theme.Fonts.rowTitle)
+                        .foregroundStyle(Theme.foreground)
+                        .lineLimit(1)
+                    if showsLabel, let label = workspace.customLabel {
+                        Text(label)
+                            .font(Theme.Fonts.meta)
+                            .foregroundStyle(Theme.subtleForeground)
+                            .lineLimit(1)
+                    }
+                }
+                HStack(spacing: 6) {
+                    Text(activity.subtitle)
+                        .font(Theme.Fonts.meta)
+                        .foregroundStyle(activity.tone.color)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    DiffStat(additions: workspace.additions, deletions: workspace.deletions)
+                        .fixedSize()
+                }
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+/// The small section header of the sidebar and the home: "title · detail", muted, with an optional
+/// leading dot for a project's device (filled online, hollow offline).
+struct HomeSectionHeader: View {
+    let title: String
+    var detail = ""
+    var deviceOnline: Bool?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let online = deviceOnline {
+                Group {
+                    if online {
+                        Circle().fill(Theme.success)
+                    } else {
+                        Circle().strokeBorder(Theme.mutedForeground, lineWidth: 1.2)
+                    }
+                }
+                .frame(width: 6, height: 6)
+                .padding(.trailing, 2)
+            }
+            Text(title)
+                .font(Theme.Fonts.label.weight(.semibold))
+                .foregroundStyle(Theme.mutedForeground)
+            if !detail.isEmpty {
+                Text("· \(detail)")
+                    .font(Theme.Fonts.label)
+                    .foregroundStyle(Theme.subtleForeground)
+            }
+        }
+        .textCase(nil)
+        .lineLimit(1)
+    }
+}
+
 /// The leading icon of a workspace row: the agent's avatar with its state dot, or the branch.
 struct WorkspaceRowIcon: View {
     let workspace: Coflux_V1_Workspace

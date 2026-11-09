@@ -2,12 +2,13 @@ import CofluxClientCore
 import CofluxProtocol
 import SwiftUI
 
-/// 首页（compact and tall layouts, plan D4/D6/D7): what waits for the user first, then the
-/// projects. "需要你" is a horizontally paged row of cards — one per waiting item — and is hidden
-/// when nothing waits; "项目" keeps the desktop sidebar's hierarchy (project → workspaces) with the
-/// agent state on each row. 断线不清空内容：保留最后快照渲染，顶部横幅提示。
-/// The page lives in the 首页 tab's NavigationStack; its chrome is the system large title and
-/// toolbar. Opening a card or a row goes through `SceneNavigation.show`.
+/// 首页 of the compact layout (the outer display; plan D4/D6/D7, mockup B of
+/// `wiki/plans/20261110-ios-outer-home-rows-mockup.html`): what waits for the user first, then the
+/// projects. "待处理" is a horizontally paged row of cards — one per waiting item — and is hidden
+/// when nothing waits. The projects read exactly like the inner display's sidebar: a small header
+/// "project · device" per project and its workspace rows (`WorkspaceRowContent`), no cards and no
+/// page title — the outer display is short, so content starts at the top. 断线不清空内容：保留最后
+/// 快照渲染，顶部横幅提示。Opening a card or a row goes through `SceneNavigation.show`.
 struct WorkspaceListView: View {
     let client: CofluxClient
     @Environment(SceneNavigation.self) private var navigation
@@ -18,15 +19,12 @@ struct WorkspaceListView: View {
     var body: some View {
         let items = client.waitingItems
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 if !items.isEmpty {
                     waitingSection(items)
                 }
-                if !client.visibleProjects.isEmpty {
-                    projectsSection
-                }
+                projectsSection
             }
-            .padding(.top, 4)
             .padding(.bottom, 24)
         }
         .scrollIndicators(.hidden)
@@ -43,9 +41,10 @@ struct WorkspaceListView: View {
                 )
             }
         }
+        // Named for the back button and VoiceOver; not drawn.
         .navigationTitle("coflux")
-        .navigationSubtitle(onlineDevicesSubtitle(client))
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(removing: .title)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 AccountMenu(client: client)
@@ -69,18 +68,10 @@ struct WorkspaceListView: View {
     // MARK: - 需要你
 
     private func waitingSection(_ items: [WaitingItem]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text("待处理")
-                    .font(Theme.Fonts.sectionTitle)
-                Text("\(items.count)")
-                    .font(Theme.Fonts.meta.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(Theme.warning)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-                    .background(Theme.warning.opacity(0.16), in: Capsule())
-            }
-            .padding(.horizontal, 20)
+        VStack(alignment: .leading, spacing: 8) {
+            HomeSectionHeader(title: "待处理", detail: "\(items.count)")
+                .padding(.horizontal, Self.sideInset)
+                .padding(.top, Self.headerTop)
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: 12) {
                     ForEach(items) { item in
@@ -176,53 +167,25 @@ struct WorkspaceListView: View {
 
     // MARK: - 项目
 
-    private var projectsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("项目")
-                .font(Theme.Fonts.sectionTitle)
-                .padding(.horizontal, 20)
-                .padding(.top, 6)
-            ForEach(client.visibleProjects, id: \.id) { project in
-                projectCard(project)
-            }
-            .padding(.horizontal, 16)
-        }
-    }
+    /// The sidebar's metrics (`HomeSidebar.rowInsets` / `headerInsets`).
+    private static let sideInset: CGFloat = 16
+    private static let headerTop: CGFloat = 16
 
-    private func projectCard(_ project: Coflux_V1_Project) -> some View {
-        let members = client.workspaces.filter { $0.projectID == project.id }
-        let online = client.daemons.first { $0.daemonID == project.daemonID }?.online ?? false
-        return VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image("folder")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 15, height: 15)
-                    .foregroundStyle(Theme.mutedForeground)
-                Text(project.name)
-                    .font(Theme.Fonts.rowTitle)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                Circle()
-                    .fill(online ? Theme.success : Theme.subtleForeground)
-                    .frame(width: 7, height: 7)
-                Text(client.deviceName(project.daemonID))
-                    .font(Theme.Fonts.label)
-                    .foregroundStyle(Theme.mutedForeground)
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
+    private var projectsSection: some View {
+        ForEach(client.visibleProjects, id: \.id) { project in
+            let members = client.workspaces.filter { $0.projectID == project.id }
+            HomeSectionHeader(
+                title: project.name,
+                detail: client.deviceName(project.daemonID),
+                deviceOnline: client.daemons.first { $0.daemonID == project.daemonID }?.online ?? false
+            )
+            .padding(.horizontal, Self.sideInset)
+            .padding(.top, Self.headerTop)
+            .padding(.bottom, 4)
             ForEach(members, id: \.id) { workspace in
-                Rectangle()
-                    .fill(Theme.border)
-                    .frame(height: 1)
                 workspaceRow(workspace)
             }
         }
-        .padding(.vertical, 2)
-        .cardBackground()
     }
 
     private func workspaceRow(_ workspace: Coflux_V1_Workspace) -> some View {
@@ -230,33 +193,10 @@ struct WorkspaceListView: View {
         return Button {
             navigation.show(workspaceID: workspace.id, taskID: activity.taskID)
         } label: {
-            HStack(spacing: 12) {
-                WorkspaceRowIcon(workspace: workspace, activity: activity)
-                    .frame(width: 30)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(workspace.displayTitle)
-                            .font(Theme.Fonts.rowTitle)
-                            .foregroundStyle(Theme.foreground)
-                            .lineLimit(1)
-                        if let label = workspace.customLabel {
-                            Text(label)
-                                .font(Theme.Fonts.meta)
-                                .foregroundStyle(Theme.subtleForeground)
-                                .lineLimit(1)
-                        }
-                    }
-                    Text(activity.subtitle)
-                        .font(Theme.Fonts.label)
-                        .foregroundStyle(activity.tone.color)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 8)
-                DiffStat(additions: workspace.additions, deletions: workspace.deletions)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
-            .contentShape(Rectangle())
+            WorkspaceRowContent(workspace: workspace, activity: activity)
+                .padding(.leading, Self.sideInset)
+                .padding(.trailing, 14)
+                .padding(.vertical, 9)
         }
         .buttonStyle(.plain)
         // Long press: copy the handle (plan 20260914), delete a non-main workspace

@@ -45,7 +45,11 @@ struct HomeSidebar: View {
                             workspaceRow(workspace)
                         }
                     } header: {
-                        sectionHeader(project.name, detail: client.deviceName(project.daemonID))
+                        sectionHeader(
+                            project.name,
+                            detail: client.deviceName(project.daemonID),
+                            deviceOnline: client.daemons.first { $0.daemonID == project.daemonID }?.online ?? false
+                        )
                     }
                 }
             }
@@ -105,20 +109,9 @@ struct HomeSidebar: View {
 
     // MARK: - Rows
 
-    private func sectionHeader(_ title: String, detail: String) -> some View {
-        HStack(spacing: 4) {
-            Text(title)
-                .font(Theme.Fonts.label.weight(.semibold))
-                .foregroundStyle(Theme.mutedForeground)
-            if !detail.isEmpty {
-                Text("· \(detail)")
-                    .font(Theme.Fonts.label)
-                    .foregroundStyle(Theme.subtleForeground)
-            }
-        }
-        .textCase(nil)
-        .lineLimit(1)
-        .listRowInsets(Self.headerInsets)
+    private func sectionHeader(_ title: String, detail: String, deviceOnline: Bool? = nil) -> some View {
+        HomeSectionHeader(title: title, detail: detail, deviceOnline: deviceOnline)
+            .listRowInsets(Self.headerInsets)
     }
 
     private func waitingRow(_ item: WaitingItem) -> some View {
@@ -174,35 +167,7 @@ struct HomeSidebar: View {
         return Button {
             navigation.show(workspaceID: workspace.id, taskID: activity.taskID)
         } label: {
-            HStack(spacing: 10) {
-                WorkspaceRowIcon(workspace: workspace, activity: activity)
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(workspace.displayTitle)
-                            .font(Theme.Fonts.rowTitle)
-                            .foregroundStyle(Theme.foreground)
-                            .lineLimit(1)
-                        if wide, let label = workspace.customLabel {
-                            Text(label)
-                                .font(Theme.Fonts.meta)
-                                .foregroundStyle(Theme.subtleForeground)
-                                .lineLimit(1)
-                        }
-                    }
-                    // The diff closes the state line on the right (user's call, 2026-11-09),
-                    // at any width: it no longer needs the wide sidebar's trailing column.
-                    HStack(spacing: 6) {
-                        Text(activity.subtitle)
-                            .font(Theme.Fonts.meta)
-                            .foregroundStyle(activity.tone.color)
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                        DiffStat(additions: workspace.additions, deletions: workspace.deletions)
-                            .fixedSize()
-                    }
-                }
-            }
-            .contentShape(Rectangle())
+            WorkspaceRowContent(workspace: workspace, activity: activity, showsLabel: wide)
         }
         .buttonStyle(.plain)
         .workspaceContextMenu(client: client, workspace: workspace)
