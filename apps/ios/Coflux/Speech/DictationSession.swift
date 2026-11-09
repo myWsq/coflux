@@ -29,8 +29,9 @@ final class DictationSession: ObservableObject {
         case failed(String)
     }
 
-    static let invalidKeyMessage = "Key 无效，请在「语音识别」里重新填写"
-    static let unreachableMessage = "无法连接识别服务"
+    /// Shared with the transcribers, which report failures after start from their own actors.
+    nonisolated static let invalidKeyMessage = "Key 无效，请在「语音识别」里重新填写"
+    nonisolated static let unreachableMessage = "无法连接识别服务"
 
     @Published private(set) var phase: Phase = .connecting
     @Published private(set) var displayText = ""
@@ -260,7 +261,8 @@ final class DictationSession: ObservableObject {
     }
 
     /// 松手结束：等 start() 把 phase 落定（不可用/权限拒绝/连接失败也在此刻才能读到
-    /// 准确值），再请求引擎给出终稿，最多等 2s，返回已转写文字（不含首尾空白）。
+    /// 准确值），再请求引擎给出终稿（等多久由引擎自己限时：豆包 2s，OpenAI 10s），返回已转写
+    /// 文字（不含首尾空白）。
     /// 收尾强制调 provider.cancel() 关 ws/结束 listenTask：终包丢失或超时都不该让连接
     /// 悬挂到服务端自己断（cancel 内部幂等）。
     func finish() async -> String {

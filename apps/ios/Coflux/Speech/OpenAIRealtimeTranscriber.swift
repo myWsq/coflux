@@ -15,8 +15,10 @@ actor OpenAIRealtimeTranscriber: SpeechTranscribing {
 
     /// 150 ms of 24 kHz mono Int16 PCM per append event.
     private static let bytesPerChunk = 7200
-    /// Bounded wait for the completed transcript after the commit.
-    private static let finalResultTimeout: Duration = .milliseconds(2500)
+    /// Bounded wait for the completed transcript after the commit. Measured live (2026-11-09, from
+    /// China): the live model's last deltas and the completion arrive 3–13 s after the commit, so a
+    /// short bound cuts off the end of what was said. On timeout the draft so far is kept.
+    private static let finalResultTimeout: Duration = .seconds(10)
     private static let log = Logger(subsystem: "dev.coflux.ios", category: "speech")
 
     private let apiKey: String
@@ -29,6 +31,9 @@ actor OpenAIRealtimeTranscriber: SpeechTranscribing {
     /// The service's id for this session (`session.created`), for the failure log line only.
     private var sessionID = ""
     private var pcmBuffer = Data()
+    /// The service has applied our `session.update`. Audio is held until then: appended before it,
+    /// a live probe once got no deltas at all until the commit.
+    private var configured = false
     private var audioSent = false
     private var finishing = false
     private var torndown = false
@@ -93,9 +98,13 @@ actor OpenAIRealtimeTranscriber: SpeechTranscribing {
     func feed(pcm: Data) async {
         guard !finishing, !torndown, ws != nil else { return }
         pcmBuffer.append(pcm)
-        // Re-checked after every send: finish() may run while this one is suspended, and nothing
-        // may follow the commit.
-        while !finishing, !torndown, pcmBuffer.count >= Self.bytesPerChunk {
+        await sendBufferedChunks()
+    }
+
+    /// Send every whole chunk buffered so far, once the session is configured. Re-checked after
+    /// every send: finish() may run while this one is suspended, and nothing may follow the commit.
+    private func sendBufferedChunks() async {
+        while configured, !finishing, !torndown, pcmBuffer.count >= Self.bytesPerChunk {
             let chunk = Data(pcmBuffer.prefix(Self.bytesPerChunk))
             pcmBuffer.removeFirst(Self.bytesPerChunk)
             await sendAudio(chunk)
@@ -184,6 +193,10 @@ actor OpenAIRealtimeTranscriber: SpeechTranscribing {
                 if let session = event["session"] as? [String: Any], let id = session["id"] as? String {
                     sessionID = id
                 }
+                if type == "session.updated", !configured {
+                    configured = true
+                    await sendBufferedChunks()
+                }
             case "conversation.item.input_audio_transcription.delta":
                 guard let delta = event["delta"] as? String, !delta.isEmpty else { continue }
                 draft += delta
@@ -202,7 +215,9 @@ actor OpenAIRealtimeTranscriber: SpeechTranscribing {
                 let error = event["error"] as? [String: Any]
                 let kind = error?["type"] as? String ?? "?"
                 let code = error?["code"] as? String ?? "?"
-                fail("server error \(kind)/\(code)")
+                // A wrong key passes the handshake (HTTP 101) and is reported as this event right
+                // after it (measured 2026-11-09), never as a 401.
+                fail("server error \(kind)/\(code)", message: code == "invalid_api_key" ? DictationSession.invalidKeyMessage : nil)
                 return
             default:
                 continue
@@ -210,10 +225,10 @@ actor OpenAIRealtimeTranscriber: SpeechTranscribing {
         }
     }
 
-    private func fail(_ reason: String) {
+    private func fail(_ reason: String, message: String? = nil) {
         let id = sessionID
         Self.log.error("openai-realtime failed: \(reason, privacy: .public), session \(id, privacy: .public)")
-        eventContinuation.yield(.failed("无法连接识别服务"))
+        eventContinuation.yield(.failed(message ?? DictationSession.unreachableMessage))
         teardown(emitClosed: true)
     }
 

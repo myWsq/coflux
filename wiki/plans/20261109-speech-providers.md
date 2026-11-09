@@ -624,3 +624,14 @@ Out of scope:
 - Not verified: the OpenAI Realtime provider against the live service (no OpenAI key was available to the orchestrator). In particular, whether `gpt-live-transcribe` sends deltas before the commit with `turn_detection: null` comes only from the docs; if it does not, text appears on release instead of while speaking. The iPhone Duo walkthrough is pending the user.
 - Deviations: `packages/client/src/index.ts` (outside the listed scope) exports the new types, defaults and validation helper — without it the desktop cannot import them. `SpeechKey.swift` was renamed to `SpeechConfig.swift`, and `SpeechKeyError` to `SpeechError`. The old `speechKeyStatus` reports `updatedAt` 0 whenever the 豆包 slot has no key, keeping its pre-provider contract. When a write commits but reading the configuration back for the broadcast fails, the writer is told the save failed although it happened. `apps/ios/CofluxTests/DictationProbeTests.swift` was added to scope in round 2: the brief missed its `capture.start()` call sites.
 - Follow-ups: probe OpenAI live with a real key, both a bogus key → 「Key 无效」 and live deltas; retire the `SpeechKey*` messages once no client older than this plan is in use (Maintenance notes).
+
+### Live probe (follow-up, 2026-11-09)
+
+The orchestrator ran the OpenAI path against the live service with the machine's OpenAI key. It used a protocol probe (Node), and it compiled the branch's own `OpenAIRealtimeTranscriber.swift` + `SpeechTranscribing.swift` into a macOS harness. The test speech was mixed Chinese/English from OpenAI TTS (12 s, 24 kHz). macOS `say` was not usable: its zh_CN voices skip Chinese text.
+
+- Works: deltas stream while speaking (first text ~2–3 s in). The final text was accurate, including `Coflux`, `Tailcat`, `DERP` and `pnpm dev:desktop:prod`. 24 kHz `audio/pcm`, `turn_detection: null` and `languages: ["zh", "en"]` are accepted as sent.
+- Contradicted the plan, and fixed in the transcriber:
+  - A wrong key passes the handshake (HTTP 101) and arrives as an `error` event with `code: "invalid_api_key"`, never as a 401. It now maps to 「Key 无效…」.
+  - The final transcript arrived 1.2–13 s after the commit, so the 2.5 s bound cut off the end. The bound is now 10 s, and the draft is kept on timeout.
+  - Audio appended before `session.updated` once produced no deltas until the commit. Audio is now held until the session is configured.
+- Remaining: tail latency is bimodal on this network (Surge proxy, ~1.1–1.7 s first byte to api.openai.com). The final arrived at +1.2 s and +3.3 s on some runs and at +8–13 s or not within 10 s on others. On the slow runs the last words come late or, past 10 s, are lost from the final text. Sending audio faster than real time does not help: the live model paces itself.
