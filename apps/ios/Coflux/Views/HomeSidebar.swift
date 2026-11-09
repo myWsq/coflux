@@ -275,7 +275,9 @@ struct HomeSidebar: View {
         return line
     }
 
-    /// Who is signed in (`AuthOk.login_name`), in the sidebar's top bar: a tap offers 退出登录.
+    /// Who is signed in (`AuthOk.login_name`) and on which centre, in the sidebar's top bar: two
+    /// lines in the terminal page's title style, no avatar (user's call, 2026-11-10), centred on
+    /// the settings button beside it. A tap offers 退出登录.
     private var accountMenu: some View {
         let name = client.loginName
         return Menu {
@@ -283,27 +285,18 @@ struct HomeSidebar: View {
                 client.logout()
             }
         } label: {
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(Theme.accentSurface)
-                    .frame(width: 30, height: 30)
-                    .overlay {
-                        if let initial = name.first {
-                            Text(String(initial).uppercased())
-                                .font(Theme.Fonts.label.weight(.bold))
-                                .foregroundStyle(Theme.foreground)
-                        } else {
-                            Image(systemName: "person.fill")
-                                .font(.system(size: 13))
-                                .foregroundStyle(Theme.mutedForeground)
-                        }
-                    }
+            VStack(alignment: .leading, spacing: 1) {
                 Text(name.isEmpty ? "已登录" : name)
                     .font(Theme.Fonts.rowTitle)
                     .foregroundStyle(name.isEmpty ? Theme.mutedForeground : Theme.foreground)
-                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(Config.serverURL.host() ?? "")
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.mutedForeground)
                     .truncationMode(.middle)
             }
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
