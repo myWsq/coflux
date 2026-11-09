@@ -62,8 +62,13 @@ export function createDictationHost(deps: {
     session.transcriber?.cancel();
   }
 
+  /** Cancelled from main's side (window hidden, sign-out): the page is told, so it lets the
+   * microphone go. A page that cancelled the session itself is never told. */
   function cancelAll(): void {
-    if (current) drop(current);
+    const session = current;
+    if (!session) return;
+    drop(session);
+    deps.send({ sessionId: session.id, kind: "closed" });
   }
 
   function handle(session: Session, event: SpeechTranscriptEvent): void {
