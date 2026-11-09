@@ -46,6 +46,20 @@ export const DECK_MOTION = {
 
 /** Space between the deck and the pane's edges. */
 export const DECK_MARGIN = 16;
+
+/**
+ * Extra room the bottom-right resting place leaves above the pane's dictation button (plan
+ * 20261110-desktop-dictation D11), read from the `--dictation-clearance` custom property the pane
+ * sets (inherited by the card layer's root). After the pane changes it, `refreshDeckClearance()`
+ * moves every resting deck to its new place.
+ */
+export const DECK_CLEARANCE_PROPERTY = "--dictation-clearance";
+
+const liveDecks = new Set<DeckController>();
+
+export function refreshDeckClearance(): void {
+  for (const deck of liveDecks) deck.clearanceChanged();
+}
 /** Peeking layers per side; deeper cards hide behind the last one. */
 export const DECK_SIDE_DEPTH = 2;
 /** Pointer slack around the deck's box, for the tilted corners. */
@@ -256,6 +270,7 @@ export class DeckController {
     if (this.root) this.detachRoot();
     if (!el) return;
     this.root = el;
+    liveDecks.add(this);
     this.resize = new ResizeObserver(this.onResize);
     this.resize.observe(el);
     window.addEventListener("pointermove", this.onWindowPointerMove, { passive: true });
@@ -312,11 +327,20 @@ export class DeckController {
     window.removeEventListener("blur", this.onPointerGone);
     document.documentElement.removeEventListener("pointerleave", this.onPointerGone);
     this.root = null;
+    liveDecks.delete(this);
     this.pointer = null;
     this.pane = { w: 0, h: 0 };
     this.placed = false;
     this.endDrag();
     this.stopLoop();
+  }
+
+  /** The pane's dictation clearance changed: a deck resting bottom-right springs to its new place. */
+  clearanceChanged(): void {
+    if (!this.visible() || !this.placed || this.drag) return;
+    this.retarget();
+    this.render();
+    this.kick();
   }
 
   /* ---------------------------------------------------------------- React → deck */
@@ -409,10 +433,17 @@ export class DeckController {
 
   private cornerTarget(corner: ExecutorCorner): { x: number; y: number } {
     const deck = this.deckSize();
+    const clearance = corner === "bottom-right" ? this.clearance() : 0;
     return {
       x: corner.endsWith("left") ? DECK_MARGIN : this.pane.w - deck.w - DECK_MARGIN,
-      y: corner.startsWith("top") ? DECK_MARGIN : this.pane.h - deck.h - DECK_MARGIN,
+      y: corner.startsWith("top") ? DECK_MARGIN : this.pane.h - deck.h - DECK_MARGIN - clearance,
     };
+  }
+
+  private clearance(): number {
+    if (!this.root) return 0;
+    const value = Number.parseFloat(getComputedStyle(this.root).getPropertyValue(DECK_CLEARANCE_PROPERTY));
+    return Number.isFinite(value) && value > 0 ? value : 0;
   }
 
   private visible(): boolean {

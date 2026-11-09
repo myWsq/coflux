@@ -8,6 +8,8 @@ import type { TerminalAttach } from "@/components/workbench/terminal-attach";
 import { isUsableAgentSessionId, transcriptAgentOf } from "@/components/workbench/terminal-transcript";
 import { SecretRequestCards } from "@/components/workbench/secret-request-card";
 import { secretRequestsForTask } from "@/components/workbench/secret-request";
+import { workspaceSentence } from "@/components/workbench/dictation-context";
+import type { DictationSetup } from "@/components/workbench/use-dictation";
 
 /**
  * 终端面板层（plan 104）：面板挂在 Workbench 层、按 task id 建立稳定身份，与工作区容器平级。
@@ -63,6 +65,17 @@ export function TerminalPanes({
   const executorRuns = useStore(client.store, (state) => state.executorRuns);
   const daemons = useStore(client.store, (state) => state.daemons);
   const workspaces = useStore(client.store, (state) => state.workspaces);
+  // Dictation (plan 20261110-desktop-dictation): the button exists only when the centre stores the
+  // configuration and the provider in use has a key; the correction runs only when it is enabled,
+  // has a key and the centre supports it. Keys never reach this layer — only the slots' timestamps.
+  const projects = useStore(client.store, (state) => state.projects);
+  const speechConfigSupported = useStore(client.store, (state) => state.speechConfigSupported);
+  const speechRefineSupported = useStore(client.store, (state) => state.speechRefineSupported);
+  const speechConfig = useStore(client.store, (state) => state.speechConfig);
+  const speechProvider = speechConfig ? speechConfig.providers[speechConfig.active] : null;
+  const dictationUsable = speechConfigSupported && speechConfig !== null && speechProvider !== null && speechProvider.keyConfigured;
+  const refineUpdatedAt =
+    speechRefineSupported && speechConfig && speechConfig.refine.enabled && speechConfig.refine.keyConfigured ? speechConfig.refine.updatedAt : null;
 
   return (
     <div className="pointer-events-none absolute inset-0">
@@ -79,6 +92,17 @@ export function TerminalPanes({
           requests.length > 0 ? (
             <SecretRequestCards requests={requests} source={source} deviceName={deviceName} onAnswer={client.answerSecretRequest} />
           ) : null;
+        let dictation: DictationSetup | null = null;
+        if (dictationUsable && speechConfig && speechProvider) {
+          const taskWorkspace = workspaces.find((item) => item.id === task.workspaceId);
+          const project = taskWorkspace ? projects.find((item) => item.id === taskWorkspace.projectId) : undefined;
+          dictation = {
+            provider: speechConfig.active,
+            providerUpdatedAt: speechProvider.updatedAt,
+            refineUpdatedAt,
+            workspaceSentence: workspaceSentence(project?.name ?? "", taskWorkspace?.name ?? "", taskWorkspace?.branch ?? ""),
+          };
+        }
         return (
           <TerminalPane
             key={task.id}
@@ -110,6 +134,7 @@ export function TerminalPanes({
             secretCards={secretCards}
             executorRuns={executorRuns}
             executorClient={client}
+            dictation={dictation}
           />
         );
       })}

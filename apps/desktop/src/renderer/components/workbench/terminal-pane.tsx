@@ -23,7 +23,10 @@ import { TerminalPaper } from "@/components/workbench/terminal-paper";
 import type { TranscriptAgent, TranscriptExec } from "@/components/workbench/terminal-transcript";
 import { decideTerminalFit, TERMINAL_FIT_LIMITS, type TerminalFitProposal } from "@/components/workbench/terminal-fit";
 import { applyImeCommittedInputPatch, type XtermCoreInternals } from "@/components/workbench/terminal-ime-patch";
-import { decideTerminalKeyOwner } from "@/components/workbench/terminal-key-ownership";
+import { decideDictationKey, decideTerminalKeyOwner, type DictationKeyAction } from "@/components/workbench/terminal-key-ownership";
+import { DECK_CLEARANCE_PROPERTY, refreshDeckClearance } from "@/components/workbench/executor-deck";
+import { DICTATION_CLEARANCE_PX, DictationBubble, DictationButton } from "@/components/workbench/dictation-ui";
+import { useDictation, type DictationController, type DictationPaneActions, type DictationSetup } from "@/components/workbench/use-dictation";
 import { shouldOpenTerminalFileLink, shouldOpenTerminalWebLink } from "@/components/workbench/terminal-link-activation";
 import { rewriteUnspecifiedHost } from "@/components/workbench/browser-address";
 import { parseOsc52Payload } from "@/components/workbench/osc52-clipboard";
@@ -101,6 +104,9 @@ type TerminalPaneProps = {
    * ones bound to this terminal are shown) and the client operations the card needs. */
   executorRuns?: Readonly<Record<string, ExecutorRunState>>;
   executorClient?: ExecutorCardClient;
+  /** Dictation (plan 20261110-desktop-dictation): the account's configuration as this pane uses it;
+   * null or absent = no microphone button and ⌥Space stays the terminal's. */
+  dictation?: DictationSetup | null;
 };
 
 // 终端贴图（plan 014）的压缩目标独立于文件上传上限，保持 3.5MB 以节省截图传输带宽。
@@ -246,6 +252,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   // decides which items (the URL's three, or a file's 打开文件 / 复制路径).
   const hoveredLinkRef = useRef<HoveredLink | null>(null);
   const [menuLink, setMenuLink] = useState<HoveredLink | null>(null);
+  // The confirm state's editable text (plan 20261110-desktop-dictation): ⇧⏎ from the terminal adds
+  // a line break there.
+  const dictationEditorRef = useRef<HTMLDivElement | null>(null);
 
   // onData/onResize/粘贴/拖拽处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
@@ -280,6 +289,44 @@ export function TerminalPane(props: TerminalPaneProps) {
       showToast,
     };
   });
+
+  // Dictation (plan 20261110-desktop-dictation D7): the text lands exactly as typed text would — a
+  // paste through xterm (bracketed when the program asked for it), then Enter for 发送, both on the
+  // input path that is gated on control.
+  const dictationPane = useRef<DictationPaneActions | null>(null);
+  useEffect(() => {
+    dictationPane.current = {
+      deliver: (text, submit) => {
+        const terminal = terminalRef.current;
+        const { controlState, sessionId, sendInput } = liveRef.current;
+        if (!terminal || !sessionId || !canSendTerminalInput(controlState)) return;
+        terminal.paste(text);
+        if (submit) sendInput(sessionId, "\r");
+      },
+      done: () => terminalRef.current?.focus(),
+    };
+  });
+  const dictation = useDictation({
+    setup: props.dictation ?? null,
+    workspaceId: props.workspaceId,
+    agent: props.transcriptAgent,
+    agentSessionId: props.agentSessionId,
+    exec: props.execInWorkspace,
+    visible: props.visible,
+    canDeliver: canSendTerminalInput(props.controlState) && props.sessionId !== null,
+    pane: dictationPane,
+  });
+  // Read by the key handler registered once at mount.
+  const dictationLive = useRef<DictationController | null>(null);
+  useEffect(() => {
+    dictationLive.current = dictation;
+  });
+  const dictationShown = dictation.available;
+  // Secret cards and the executor deck keep the button's corner free (D11): the clearance is a
+  // custom property on the pane, and resting decks move when it changes.
+  useEffect(() => {
+    refreshDeckClearance();
+  }, [dictationShown]);
 
   // 挂载时创建 xterm 等命令式资源，只跑一次：TerminalPane 以 taskId 为 React key，
   // 同一实例生命周期内 taskId 不变。The setup is an effect event: it reads the props of the render it
@@ -350,7 +397,53 @@ export function TerminalPane(props: TerminalPaneProps) {
     // handler 里绝不能对事件做任何拦截动作，那等于把菜单重新饿死。返回值要严格是 false
     // （xterm 按 === false 判断），落成 undefined 就是「没让开」，bug 照旧。
     // terminal.reset() 会把 handler 带过内部重建，gap 恢复后不必也不该重挂。
+    //
+    // Dictation keys (plan 20261110-desktop-dictation D8) come first: ⌥Space, and Esc / ⏎ / ⌘⏎ / ⇧⏎
+    // while the bubble is up (terminal-key-ownership.ts). A key acted on is withheld on keydown and
+    // on its keyup alike (the kitty protocol must never see a release without a press), and its
+    // keydown default is cancelled so no keypress follows (⌥Space would type a no-break space, ⏎ a
+    // carriage return). With dictation not configured nothing here matches.
+    const withheldKeys = new Set<string>();
+    const runDictationKey = (action: DictationKeyAction) => {
+      const current = dictationLive.current;
+      if (!current) return;
+      if (action === "press") current.pressDown();
+      else if (action === "cancel") current.cancel();
+      else if (action === "send") current.send();
+      else if (action === "insert") current.insert();
+      else if (action === "newline") {
+        const editor = dictationEditorRef.current;
+        if (!editor) return;
+        editor.focus();
+        const selection = window.getSelection();
+        if (selection) {
+          const range = document.createRange();
+          range.selectNodeContents(editor);
+          range.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+        document.execCommand("insertLineBreak");
+      }
+    };
     terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type === "keyup" && withheldKeys.has(event.code)) {
+        withheldKeys.delete(event.code);
+        if (event.code === "Space") dictationLive.current?.pressUp();
+        return false;
+      }
+      if (event.type === "keydown") {
+        const current = dictationLive.current;
+        const action = current
+          ? decideDictationKey(event, { available: current.available, active: current.active, confirming: current.phase === "confirm" })
+          : null;
+        if (action) {
+          withheldKeys.add(event.code);
+          event.preventDefault();
+          runDictationKey(action);
+          return false;
+        }
+      }
       const owner = decideTerminalKeyOwner(event);
       if (owner === "terminal") return true;
       if (owner === "select-all") terminal.selectAll();
@@ -1214,10 +1307,10 @@ export function TerminalPane(props: TerminalPaneProps) {
     <div
       className={
         props.visible
-          ? `pointer-events-auto absolute grid grid-cols-1 grid-rows-1${props.frame ? "" : " inset-0"}`
+          ? `group/pane pointer-events-auto absolute grid grid-cols-1 grid-rows-1${props.frame ? "" : " inset-0"}`
           : "absolute inset-0 hidden"
       }
-      style={props.visible ? props.frame : undefined}
+      style={props.visible ? ({ ...props.frame, [DECK_CLEARANCE_PROPERTY]: dictationShown ? `${DICTATION_CLEARANCE_PX}px` : undefined } as CSSProperties) : undefined}
       aria-hidden={!props.visible}
       onPointerDownCapture={() => props.onPointerFocus?.(props.taskId)}
     >
@@ -1316,6 +1409,14 @@ export function TerminalPane(props: TerminalPaneProps) {
           onTopRightChange={setExecutorTopRight}
           onRestoreFocus={() => terminalRef.current?.focus()}
         />
+      ) : null}
+      {/* Dictation (plan 20261110-desktop-dictation): last in document order, above the cards and
+          the deck. Out of the way while the paper or an executor panel covers an idle pane. */}
+      {dictationShown && (dictation.active || (!paperOpen && !executorExpanded)) ? (
+        <>
+          <DictationBubble dictation={dictation} editorRef={dictationEditorRef} />
+          <DictationButton dictation={dictation} />
+        </>
       ) : null}
     </div>
   );

@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 
-import type { DesktopDictationEvent, DesktopDictationProvider } from "../../../shared/desktop-bridge";
+import type { DesktopDictationEvent, DesktopDictationProvider, DesktopDictationRefineContext } from "../../../shared/desktop-bridge";
 import { desktop } from "@/config";
 import { startDictationCapture, type DictationCapture } from "./dictation-capture";
 import { createDictationContextSource, type DictationContextSource, type DictationReading } from "./dictation-context";
@@ -37,6 +37,11 @@ export type DictationConfirm = { raw: string; refined: string | null; showingOri
 
 /** A level the button reads without re-rendering the pane at audio rate. */
 export type DictationLevel = { get: () => number; subscribe: (listener: (level: number) => void) => () => void };
+
+export type DictationPaneActions = {
+  deliver: (text: string, submit: boolean) => void;
+  done: () => void;
+};
 
 export type DictationController = {
   available: boolean;
@@ -123,10 +128,9 @@ export function useDictation(options: {
   exec: TranscriptExec;
   visible: boolean;
   canDeliver: boolean;
-  /** Paste the text into the terminal; `submit` follows it with Enter. */
-  deliver: (text: string, submit: boolean) => void;
-  /** The dictation ended (sent, inserted, cancelled): give the keyboard back to the terminal. */
-  onDone?: () => void;
+  /** The pane's side, set by the pane outside render: paste the text (`submit` follows it with
+   * Enter), and give the keyboard back to the terminal once a dictation ended. */
+  pane: RefObject<DictationPaneActions | null>;
 }): DictationController {
   const [phase, setPhase] = useState<DictationPhase>("idle");
   const [text, setText] = useState("");
@@ -134,7 +138,7 @@ export function useDictation(options: {
   const [confirm, setConfirm] = useState<DictationConfirm | null>(null);
   const [level] = useState(createLevel);
 
-  const live = useRef(options);
+  const live = useRef<typeof options | null>(null);
   useEffect(() => {
     live.current = options;
   });
@@ -159,8 +163,6 @@ export function useDictation(options: {
     press: null as { at: number; started: boolean } | null,
     noticeTimer: 0,
   });
-  const [owner] = useState(() => ({ cancel: () => {} }));
-
   const go = (next: DictationPhase) => {
     m.current.phase = next;
     setPhase(next);
@@ -248,8 +250,6 @@ export function useDictation(options: {
     go("confirm");
   };
 
-  owner.cancel = reset;
-
   const onChunk = (generation: number, pcm: ArrayBuffer) => {
     const state = m.current;
     if (state.generation !== generation || state.finishSent) return;
@@ -271,7 +271,7 @@ export function useDictation(options: {
     const waitEnd = performance.now() + REFINE_CONTEXT_WAIT_MS;
     await stopCapture(true);
     if (state.generation !== generation || !state.sessionId) return;
-    let refineContext = null;
+    let refineContext: DesktopDictationRefineContext | null = null;
     if (correction && source) {
       const reading = (await within(correction, waitEnd)) ?? null;
       if (state.generation !== generation || !state.sessionId) return;
@@ -283,9 +283,9 @@ export function useDictation(options: {
 
   const start = () => {
     const opts = live.current;
-    const setup = opts.setup;
+    const setup = opts?.setup;
     const state = m.current;
-    if (!setup || !opts.visible) return;
+    if (!opts || !setup || !opts.visible) return;
     if (state.phase === "connecting" || state.phase === "listening" || state.phase === "finishing" || state.phase === "correcting") return;
     if (activeOwner && activeOwner !== owner) activeOwner.cancel();
     activeOwner = owner;
@@ -386,54 +386,66 @@ export function useDictation(options: {
     void finishSession(state.generation);
   };
 
+  const done = () => live.current?.pane.current?.done();
+
   const deliver = (submit: boolean) => {
     const opts = live.current;
+    const pane = opts?.pane.current;
     const value = m.current.draft.trim();
-    if (m.current.phase !== "confirm" || !value || !opts.canDeliver) return;
-    opts.deliver(value, submit);
+    if (m.current.phase !== "confirm" || !value || !opts?.canDeliver || !pane) return;
+    pane.deliver(value, submit);
     reset();
-    opts.onDone?.();
+    pane.done();
   };
 
-  // Events from main for this pane's session.
-  useEffect(
-    () =>
-      desktop.onDictationEvent((event: DesktopDictationEvent) => {
-        const state = m.current;
-        if (!state.sessionId || event.sessionId !== state.sessionId) return;
-        switch (event.kind) {
-          case "text":
-            state.text = event.text;
-            setText(event.text);
-            if (event.final && state.finishSent && state.refineUsed && state.phase === "finishing") go("correcting");
-            return;
-          case "result":
-            if (!event.raw) {
-              reset();
-              live.current.onDone?.();
-            } else enterConfirm(event.raw, event.refined);
-            return;
-          case "failed": {
-            // A failure after text exists is a stop: the text is kept for the confirm state.
-            const recognised = event.text.trim() || state.text.trim();
-            if (recognised) enterConfirm(recognised, null);
-            else fail(event.error === "invalid_key" ? "invalid_key" : "unreachable");
-            return;
-          }
-          case "closed": {
-            // Closed without a result or a failure: keep what was recognised.
-            const recognised = state.text.trim();
-            if (recognised) enterConfirm(recognised, null);
-            else {
-              reset();
-              live.current.onDone?.();
-            }
-            return;
-          }
+  /** Events from main for this pane's session. */
+  const onEvent = (event: DesktopDictationEvent) => {
+    const state = m.current;
+    if (!state.sessionId || event.sessionId !== state.sessionId) return;
+    switch (event.kind) {
+      case "text":
+        state.text = event.text;
+        setText(event.text);
+        if (event.final && state.finishSent && state.refineUsed && state.phase === "finishing") go("correcting");
+        return;
+      case "result":
+        if (!event.raw) {
+          reset();
+          done();
+        } else enterConfirm(event.raw, event.refined);
+        return;
+      case "failed": {
+        // A failure after text exists is a stop: the text is kept for the confirm state.
+        const recognised = event.text.trim() || state.text.trim();
+        if (recognised) enterConfirm(recognised, null);
+        else fail(event.error === "invalid_key" ? "invalid_key" : "unreachable");
+        return;
+      }
+      case "closed": {
+        // Closed without a result or a failure (main cancelled it): keep what was recognised.
+        const recognised = state.text.trim();
+        if (recognised) enterConfirm(recognised, null);
+        else {
+          reset();
+          done();
         }
-      }),
-    [],
-  );
+        return;
+      }
+    }
+  };
+
+  // The subscription, the effects below and other panes reach this pane through the latest
+  // handlers; the reset they run releases the microphone (an external system), never just state.
+  const latest = useRef<{ reset: () => void; onEvent: (event: DesktopDictationEvent) => void } | null>(null);
+  useEffect(() => {
+    latest.current = { reset, onEvent };
+  });
+  const [owner] = useState(() => ({ cancel: () => latest.current?.reset() }));
+
+  useEffect(() => {
+    const handlers = latest;
+    return desktop.onDictationEvent((event) => handlers.current?.onEvent(event));
+  }, []);
 
   // Hidden (another tab) while recording, configuration gone, or unmounted: the microphone is
   // released. A confirm state or an error line survives a tab switch.
@@ -441,20 +453,22 @@ export function useDictation(options: {
   const available = options.setup !== null;
   useEffect(() => {
     const current = m.current.phase;
-    if (!available && current !== "idle") reset();
-    else if (!visible && current !== "idle" && current !== "confirm" && current !== "error") reset();
+    if (!available && current !== "idle") latest.current?.reset();
+    else if (!visible && current !== "idle" && current !== "confirm" && current !== "error") latest.current?.reset();
   }, [visible, available]);
-  useEffect(
-    () => () => {
-      if (m.current.phase !== "idle") reset();
-    },
-    [],
-  );
+  useEffect(() => {
+    const state = m.current;
+    const handlers = latest;
+    return () => {
+      if (state.phase !== "idle") handlers.current?.reset();
+    };
+  }, []);
 
   const toggle = () => {
     const current = m.current.phase;
     if (current === "connecting" || current === "listening") stop();
-    else if (current === "idle" || current === "error") start();
+    // A click on the button in the confirm state dictates again, replacing the unsent text.
+    else if (current === "idle" || current === "error" || current === "confirm") start();
   };
 
   return {
@@ -476,19 +490,17 @@ export function useDictation(options: {
     cancel: () => {
       if (m.current.phase === "idle") return;
       reset();
-      live.current.onDone?.();
+      done();
     },
     send: () => deliver(true),
     insert: () => deliver(false),
     toggleOriginal: () => {
       const state = m.current;
-      if (state.phase !== "confirm") return;
-      setConfirm((current) => {
-        if (!current || current.refined === null) return current;
-        const showingOriginal = !current.showingOriginal;
-        state.draft = showingOriginal ? current.raw : current.refined;
-        return { ...current, showingOriginal };
-      });
+      if (state.phase !== "confirm" || !confirm || confirm.refined === null) return;
+      // Switching shows that version afresh: edits made to the other one are dropped.
+      const showingOriginal = !confirm.showingOriginal;
+      state.draft = showingOriginal ? confirm.raw : confirm.refined;
+      setConfirm({ ...confirm, showingOriginal });
     },
     pressDown: () => {
       const state = m.current;
