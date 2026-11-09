@@ -86,7 +86,7 @@ struct HomeSidebar: View {
             // sidebar toggle (48 pt and a gap) sits before it as well.
             ToolbarItem(placement: .topBarLeading) {
                 accountMenu
-                    .frame(width: max(100, width - (layout.floatsSidebar ? 120 : 180)), alignment: .leading)
+                    .frame(width: max(100, width - (layout == .tall ? 120 : 180)), alignment: .leading)
             }
             .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .topBarTrailing) {
@@ -135,7 +135,7 @@ struct HomeSidebar: View {
                 }
                 // The sheet hangs off this sidebar: floating, it stays out until the sheet is
                 // done, or the sheet would lose the view it is presented from.
-                if layout.floatsSidebar { navigation.overlayVisibility = .all }
+                if layout == .tall { navigation.overlayVisibility = .all }
                 secretSheet = SecretSheetTarget(taskID: item.taskID)
             } else {
                 navigation.show(workspaceID: item.workspaceID, taskID: item.taskID)
